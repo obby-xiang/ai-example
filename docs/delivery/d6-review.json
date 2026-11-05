@@ -595,6 +595,13 @@
       "reason": "已同步历史条件表留空仅在覆盖当前全部UNDECIDED配置项时放行，新增配置单独收集的语义",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:c67d66d24a35f694e19da9c1f2d0bb12ecfd472225738b2752724cb1a818ffa6",
+      "status": "synced",
+      "reason": "已同步SSE单事件及未闭合缓冲区256KiB上限、超限真实失败与正常EOF尾帧语义，未新增解析依赖",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

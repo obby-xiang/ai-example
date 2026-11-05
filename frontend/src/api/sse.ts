@@ -307,6 +307,9 @@ function isSuspendRequestFrame(frame: SseFrame): boolean {
   return frame.type === 'confirm_request' || frame.type === 'frontend_tool_request'
 }
 
+/** 单个 SSE 事件最多保留 256 KiB 文本，防止未闭合事件无限占用内存。 */
+const SSE_EVENT_BUFFER_LIMIT = 256 * 1024
+
 /**
  * SSE 事件块切分器：把字节流切成一个个 data 载荷。
  *
@@ -320,6 +323,12 @@ export class SseChunkParser {
 
   /** 上一块以裸 `\r` 结尾：留到下一块再归一，避免 CRLF 被块边界劈成"空行"。 */
   private carryCr = false
+
+  private assertEventSize(size: number): void {
+    if (size > SSE_EVENT_BUFFER_LIMIT) {
+      throw new Error('SSE 协议错误：单个事件超过 256 KiB 上限，已中止当前流')
+    }
+  }
 
   /** 投喂一段文本，返回本次新产生的完整事件载荷。 */
   push(chunk: string): string[] {
@@ -346,6 +355,7 @@ export class SseChunkParser {
       this.buffer += '\n'
       this.carryCr = false
     }
+    this.assertEventSize(this.buffer.length)
     if (!this.buffer.trim()) {
       this.buffer = ''
       return []
@@ -359,6 +369,7 @@ export class SseChunkParser {
     const payloads: string[] = []
     let index = this.buffer.indexOf('\n\n')
     while (index >= 0) {
+      this.assertEventSize(index)
       const block = this.buffer.slice(0, index)
       this.buffer = this.buffer.slice(index + 2)
       const payload = extractData(block)
@@ -367,6 +378,7 @@ export class SseChunkParser {
       }
       index = this.buffer.indexOf('\n\n')
     }
+    this.assertEventSize(this.buffer.length)
     return payloads
   }
 }
