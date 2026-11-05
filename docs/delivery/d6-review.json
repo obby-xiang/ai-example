@@ -623,6 +623,13 @@
       "reason": "已同步幂等navigate_to在快照缺失、claimed及锁不可用时的安全重放例外，其它前端工具保持未知活性出口",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:e115df3a15015517d86a3953989857d7f2a3c5f7c2d7ad5e29eb9d357aff0db5",
+      "status": "synced",
+      "reason": "已同步create_task以通用scope在任意页面及无显式上下文披露，避免创建入口仅在任务中心可用",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
