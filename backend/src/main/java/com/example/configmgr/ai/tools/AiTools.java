@@ -338,7 +338,7 @@ public class AiTools {
 
     @Tool(name = AiToolNames.CHECK_JOB_STATUS, description = "查询作业状态和进度",
             resultConverter = PlainTextToolResultConverter.class)
-    @ToolScope("task:*")
+    @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String checkJobStatus(
@@ -875,7 +875,7 @@ public class AiTools {
             + "配置项已明确时直接用 select_definitions。字段类型统一为 text/number/boolean/date/enum/multi_select/attachment，"
             + "禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，不得预填。披露时保留完整当前 Schema 和联动能力。"
             + "表单只收集值，不推进向导步骤；结果读取统一信封的 message 字段")
-    @ToolScope({ "page:tasks", "task:*" })
+    @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.H)
     @ToolChannel(ToolMeta.Channel.FRONTEND)

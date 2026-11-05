@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.ai.kb.KbService;
 import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.ToolCallback;
@@ -47,6 +48,11 @@ public class ToolRegistry {
      */
     @Autowired(required = false)
     private SheetSwitches sheetSwitches = SheetSwitches.defaults();
+
+    @Autowired(required = false)
+    private KbService kbService;
+
+    private static final Set<String> KB_TOOLS = Set.of("kb_search", "kb_read_doc", "kb_lookup_term");
 
     // name -> (meta, callback)
     private final Map<String, ToolMeta> metaMap = new LinkedHashMap<>();
@@ -389,10 +395,8 @@ public class ToolRegistry {
     /**
      * Returns the list of ToolCallbacks visible in the given context.
      *
-     * <p>
-     * AI 表格工具治理批（2026-10-22 §2.3）：披露判定 = {@code scopeMatches AND sheetAllows} ——
-     * 表格开关并入<b>同一谓词</b>，而不是新增第四道防线。执行前的 {@link #matchesContext} 复用
-     * 完全相同的两项，故"披露面"与"执行面"在结构上无法分叉（S-02）。
+     * <p>披露与执行前的 {@link #matchesContext} 共用 scope、任务状态、表格开关、条件交棒和
+     * KB 开关判据。KB 关闭时三个 KB 工具不披露，直接伪造调用也会被拒绝。
      *
      * <p>工具级按需披露只过滤回调，不改写其 Schema；generative_form 实际披露时保留
      * visibleWhen、requiredWhen、disabledWhen、optionsFrom、defaultFrom 及其关联定义。
@@ -401,7 +405,7 @@ public class ToolRegistry {
         Set<String> tags = buildTags(ctx);
         return callbackMap.entrySet().stream()
                 .filter(e -> {
-                    if (!conditionStructuringAllows(e.getKey(), ctx)) return false;
+                    if (!conditionStructuringAllows(e.getKey(), ctx) || !kbAllows(e.getKey())) return false;
                     ToolMeta meta = metaMap.get(e.getKey());
                     if (meta == null) return true; // unscoped: always include
                     return scopeAllows(meta, tags) && stateAllows(e.getKey(), ctx)
@@ -426,6 +430,10 @@ public class ToolRegistry {
             return true;
         }
         return CONDITION_STRUCTURING_TOOLS.contains(name);
+    }
+
+    private boolean kbAllows(String name) {
+        return !KB_TOOLS.contains(name) || this.kbService == null || this.kbService.enabled();
     }
 
     public ToolCallback getCallback(String name) {
@@ -475,7 +483,7 @@ public class ToolRegistry {
         ToolMeta meta = metaMap.get(name);
         boolean scopeOk = meta == null || scopeAllows(meta, buildTags(effective));
         return scopeOk && stateAllows(name, effective) && !sheetDisabled(name)
-                && conditionStructuringAllows(name, effective);
+                && conditionStructuringAllows(name, effective) && kbAllows(name);
     }
 
     /**
