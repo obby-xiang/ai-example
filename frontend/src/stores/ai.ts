@@ -4827,7 +4827,8 @@ export const useAiStore = defineStore('ai', {
       // 批G · G3：历史 + **未被历史覆盖的镜像在途轮** —— 用户消息在开轮即写入 ChatMemory
       // （实测流式中 /history 已有 USER），若整体替换就会把镜像里还在途的助手消息（正文 +
       // 已执行卡）抹掉（实证 C：整轮卡与说明文字丢失）。
-      this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight)
+      this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight,
+        this.shouldPreserveStoppedRound(pageEntries, mirrorMessages))
       // errorCard/code 可由历史 errorCode/errorMessage 直接重建；镜像再补回同一轮的其它结局标记，
       // 避免刷新后一次失败被"历史整体替换"归一成一条完整回答（看起来像成功）。
       this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
@@ -5451,6 +5452,20 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
+    /** 同 run 的 history 尚无终局时，保留 last-good 停止现场；真实终局到达后仍由 history 接管。 */
+    shouldPreserveStoppedRound(entries: AiHistoryMessage[], mirrorMessages: ChatMessage[]): boolean {
+      const tail = mirrorMessages[mirrorMessages.length - 1]
+      if (!tail || tail.role !== 'assistant' || tail.stopped !== true) {
+        return false
+      }
+      const runId = tail.runId
+      if (!runId) {
+        return false
+      }
+      return !entries.some((item) => item.type.toUpperCase() === 'ASSISTANT' && item.runId === runId
+        && typeof item.outcome === 'string' && item.outcome.trim() !== '')
+    },
+
     /**
      * 批G · G3 / 刷新回归：把镜像里**仍在途**的那一轮对账进历史。
      *
@@ -5467,9 +5482,10 @@ export const useAiStore = defineStore('ai', {
     mergeMirrorInFlightRound(
       historical: ChatMessage[],
       mirrorMessages: ChatMessage[],
-      inFlight: boolean
+      inFlight: boolean,
+      preserveStoppedRound = false
     ): ChatMessage[] {
-      if (!inFlight || mirrorMessages.length === 0) {
+      if ((!inFlight && !preserveStoppedRound) || mirrorMessages.length === 0) {
         return historical
       }
       const tail = mirrorMessages[mirrorMessages.length - 1]
@@ -5539,6 +5555,9 @@ export const useAiStore = defineStore('ai', {
         }
         const completedByHistory = historyCoversMirrorRound(target, tail)
         mergeMirrorRoundParts(target, tail)
+        if (preserveStoppedRound) {
+          target.stopped = true
+        }
         // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
         if (merged[merged.length - 1] === target) {
           target.streaming = completedByHistory
@@ -5559,6 +5578,9 @@ export const useAiStore = defineStore('ai', {
         }
         const completedByHistory = historyCoversMirrorRound(existing, tail)
         mergeMirrorRoundParts(existing, tail)
+        if (preserveStoppedRound) {
+          existing.stopped = true
+        }
         if (merged[merged.length - 1] === existing) {
           existing.streaming = completedByHistory
             ? false
@@ -11720,7 +11742,9 @@ export const useAiStore = defineStore('ai', {
        * 已点过的确认门 / 已发出的表单提交），只允许收敛对应段；delta / 新工具 / 新请求帧继续丢弃，
        * 不恢复整轮、不新增正文或工具。
        */
-      if (this.stopped && !isTerminalFrame(frame) && !this.isSubmittedStopOutcomeFrame(frame)) {
+      const stoppedFrame = this.stopped || (typeof frame.runId === 'string' && frame.runId !== ''
+        && frame.runId === this.stoppedRunId)
+      if (stoppedFrame && !isTerminalFrame(frame) && !this.isSubmittedStopOutcomeFrame(frame)) {
         return
       }
       /**
@@ -11741,7 +11765,7 @@ export const useAiStore = defineStore('ai', {
         ?? null
       const foundHost = assistantId ? this.messages.find((item) => item.id === assistantId) : undefined
       const message = foundHost
-        ?? (this.stopped
+        ?? (stoppedFrame
           ? (ownedByActiveRound ? sealedRoundHost() : null)
           : (ownedByActiveRound ? this.currentAssistantMessage() : null))
       if (!message) {
@@ -11761,7 +11785,7 @@ export const useAiStore = defineStore('ai', {
        * 发布/作业同步等新动作，`confirm_decision` 还会改挂起态。允许的只有"把这一段写成
        * 它的真实结局"，其余轮次级/动作级副作用一律不发生。
        */
-      if (this.stopped && this.isSubmittedStopOutcomeFrame(frame)) {
+      if (stoppedFrame && this.isSubmittedStopOutcomeFrame(frame)) {
         if (seq !== null && alreadyApplied(message, seq)) {
           return
         }
