@@ -7,7 +7,8 @@ Hard rules (from AiSessionPurgeService / RunStore / SessionPurgeGuard):
     actually wrote (pending/claim/idem/req/decided exist only for runs with
     pending entries; lease only when lease_held); pending+guard and the
     discovery keys stay so a retry can enumerate them;
-  * aborted=true   => nothing in Redis was deleted (only when no round completed a deletion);
+  * aborted=true in pending/enumerate/guard/database => nothing in Redis was deleted
+    (only when no round completed a deletion); later delete-phase aborts use retained checks;
     an earlier aborted round followed by complete is verified as a successful deletion;
   * xack (120s) / xtrim / session lock are deliberate leftovers, never failures.
   * complete responses are followed by a bounded memory-verification wait; timeout/unreadable
@@ -790,7 +791,10 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
                     _check(checks, scenario, copy_name, "delete_http", "pass", "全部 DELETE 200")
                 successful_delete = any(isinstance(row.get("business"), dict)
                                         and row["business"].get("complete") is True for row in rows)
-                if merged["aborted"] and not successful_delete:
+                early_abort = str((merged.get("business") or {}).get("phase") or "") in {
+                    "pending", "enumerate", "guard", "database"
+                }
+                if merged["aborted"] and early_abort and not successful_delete:
                     _check_aborted(cfg, ops, checks, scenario, copy_name, plan, copy, merged, background_counts)
                 elif successful_delete:
                     verify_status = _wait_for_memory_verify(ops, str(D.copy_keys(cfg, scenario, plan, copy)["pending"]))
