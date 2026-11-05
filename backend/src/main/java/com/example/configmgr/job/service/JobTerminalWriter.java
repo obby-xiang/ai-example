@@ -102,6 +102,7 @@ public class JobTerminalWriter {
 
     private void apply(Job job, Job.JobStatus jobStatus, int errorCount, int warningCount,
                        int processed, int total, Map<String, Object> doneEvent, String successStep) {
+        final boolean[] terminalWritten = { false };
         try {
             // R-152：仅当 finish 实际落写终态（作业仍 PENDING/RUNNING）才联动任务态并推 JOB_DONE。
             // 迟到终态写被先到者胜守卫拦下时（作业已 CANCELLED/其它终态），不得 applyJobOutcome——
@@ -118,18 +119,9 @@ public class JobTerminalWriter {
                 // task → job 形成死锁；JobProgressServiceTerminalGuardTest 固化 REQUIRES_NEW 语义。
                 boolean wrote = progressService.finish(job.getId(), jobStatus, errorCount, warningCount,
                         processed, total);
+                terminalWritten[0] = wrote;
                 if (wrote) {
-                    // R1-13/I-3：job 终态已独立提交，此刻没有 job 行锁；锁 task 后再写任务态。
-                    // 任务已被删除时不再写（避免对已删 task 做联动），避免与删除的 task 锁互相等待。
-                    if (taskService.tryLockForUpdate(job.getTaskId()).isEmpty()) {
-                        log.info("Job terminal state written but task gone, task state sync skipped jobId={} taskId={}",
-                                job.getId(), job.getTaskId());
-                        return wrote;
-                    }
-                    if (jobStatus == Job.JobStatus.COMPLETED && successStep != null) {
-                        taskService.writeCompletionStep(job.getTaskId(), successStep);
-                    }
-                    taskService.applyJobOutcome(job.getTaskId(), jobStatus);
+                    syncTaskOutcome(job, jobStatus, successStep);
                 }
                 return wrote;
             }));
@@ -139,9 +131,34 @@ public class JobTerminalWriter {
                 log.info("Job terminal write dropped (already terminal, first writer wins), no task sync and no JOB_DONE jobId={} taskId={} expected={}",
                         job.getId(), job.getTaskId(), jobStatus);
             }
-        } catch (Exception e) {
-            // 终态补记失败不能让作业线程崩掉：日志留痕，快照下一次读取仍能修正
-            log.error("Job terminal write failed jobId={} error={}", job.getId(), e.getMessage(), e);
+        } catch (Exception failure) {
+            if (!terminalWritten[0]) {
+                throw new IllegalStateException("Job terminal write failed before terminal state was committed jobId="
+                        + job.getId(), failure);
+            }
+            try {
+                // 作业终态已提交时只补一次任务联动与通知；仍失败必须向上传播，不能留下静默分叉。
+                requiresNew.executeWithoutResult(status -> syncTaskOutcome(job, jobStatus, successStep));
+                taskSseService.publish(job.getTaskId(), "JOB_DONE", doneEvent);
+            } catch (Exception recoveryFailure) {
+                failure.addSuppressed(recoveryFailure);
+                throw new IllegalStateException("Job terminal state committed but task sync failed twice jobId="
+                        + job.getId(), failure);
+            }
         }
+    }
+
+    private void syncTaskOutcome(Job job, Job.JobStatus jobStatus, String successStep) {
+        // R1-13/I-3：job 终态已独立提交，此刻没有 job 行锁；锁 task 后再写任务态。
+        // 任务已被删除时不再写（避免对已删 task 做联动），避免与删除的 task 锁互相等待。
+        if (taskService.tryLockForUpdate(job.getTaskId()).isEmpty()) {
+            log.info("Job terminal state written but task gone, task state sync skipped jobId={} taskId={}",
+                    job.getId(), job.getTaskId());
+            return;
+        }
+        if (jobStatus == Job.JobStatus.COMPLETED && successStep != null) {
+            taskService.writeCompletionStep(job.getTaskId(), successStep);
+        }
+        taskService.applyJobOutcome(job.getTaskId(), jobStatus);
     }
 }

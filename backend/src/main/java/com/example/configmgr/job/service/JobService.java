@@ -16,6 +16,7 @@ import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSseService;
+import com.example.configmgr.task.service.TaskSteps;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -62,17 +63,10 @@ public class JobService {
     /**
      * R-137（T1/T2）任务终态守卫：任务已"真正结束"时拒绝新建作业（409 {@code TASK_FINALIZED}）。
      *
-     * <p><b>终态口径与前端 {@code isCurrentTaskReadOnly} 同构</b>（三方会审双向实证后裁决，
-     * 禁一刀切）：预检查 0 错误即置任务 COMPLETED 是既有态机行为（PrecheckJobRunner →
-     * JobTerminalWriter.applyJobOutcome），此时 start_import / start_precheck 仍是主路径，
-     * 单看任务状态会把"预检查后继续导入"误杀。故：
-     * <ul>
-     * <li>CANCELLED 恒拒（用户明确意志，重开走新任务）；</li>
-     * <li>COMPLETED 按任务类型核<b>最终作业</b> —— IMPORT 须存在 PUBLISH 成功作业、
-     *     EXPORT 须存在 EXPORT 成功作业，才算终态；</li>
-     * <li>FAILED 放行（僵尸恢复语义：到终态即可再发起；IMPORT/PUBLISH 另有
-     *     {@link #assertPrecheckPassed} 从严闸兜底）。</li>
-     * </ul>
+     * <p><b>终态判据与真实作业一致</b>：CANCELLED 恒拒；其余任务状态仅作展示，
+     * 最终作业按任务类型核对 —— IMPORT 须存在 PUBLISH 成功作业、EXPORT 须存在 EXPORT 成功作业。
+     * 预检查成功不构成最终作业，因此 start_import / start_precheck 仍可继续；
+     * 任务联动写失败导致 ACTIVE/FAILED 残留时，已有成功最终作业同样拒绝重复创建。
      *
      * <p>与 {@link #assertNoJobInFlight} 同在落库之前抛出（被拒请求不留 PENDING 行）。
      * 观察项 O-a：守卫检查与落库之间的 TOCTOU 窗口与既有两守卫同风险基线，登记不改。
@@ -99,10 +93,8 @@ public class JobService {
                     "任务 #" + taskId + " 已 CANCELLED，禁止新建作业（TASK_FINALIZED）。"
                             + "任务取消是用户明确意志，如需重新开始请创建新任务");
         }
-        if (task.getStatus() != Task.TaskStatus.COMPLETED) {
-            return null; // ACTIVE / FAILED：FAILED 放行（僵尸恢复语义，预检查守卫另行兜底）
-        }
-        // COMPLETED：按任务类型核最终作业（IMPORT→PUBLISH、EXPORT→EXPORT 的成功作业）
+        // 以真实成功作业为准，任务状态只作展示：联动写失败时即使仍为 ACTIVE/FAILED 也不得重复创建。
+        // IMPORT 的最终作业是 PUBLISH；预检查成功本身不构成终态，仍可继续导入/发布。
         Job.JobType finalJobType = task.getType() == Task.TaskType.IMPORT
                 ? Job.JobType.PUBLISH : Job.JobType.EXPORT;
         boolean hasFinalJob = jobRepository
@@ -110,9 +102,8 @@ public class JobService {
                 .isPresent();
         if (hasFinalJob) {
             return new ConflictException(ErrorCodes.TASK_FINALIZED,
-                    "任务 #" + taskId + " 已 COMPLETED（" + finalJobType + " 作业成功），禁止新建作业（TASK_FINALIZED）");
+                    "任务 #" + taskId + " 已有成功的 " + finalJobType + " 作业，禁止重复创建（TASK_FINALIZED）");
         }
-        // COMPLETED 但最终作业未成功（如预检查 0 错误即置 COMPLETED 的导入任务）：流程仍可继续，放行
         return null;
     }
 
@@ -173,6 +164,10 @@ public class JobService {
         job.setJobType(jobType);
         job.setStatus(Job.JobStatus.PENDING);
         job = jobRepository.save(job);
+        if (jobType == Job.JobType.EXPORT) {
+            // select-defs 会回落到首步；作业已真实创建后恢复权威 EXPORT 步，失败/取消也不再回首步。
+            taskService.goToStep(taskId, TaskSteps.EXPORT);
+        }
         cancellationRegistry.register(job.getId());
 
         // P1-2：runner 登记必须在创建事务内、commit 之前完成，task 行锁覆盖“提交→登记”全窗口。
