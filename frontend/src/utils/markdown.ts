@@ -1095,7 +1095,7 @@ export function markdownCodeRanges(text: string): MarkdownSourceRange[] {
       continue
     }
     const inlineRanges = inlineCodeSourceRanges(text.slice(start, end), token.children)
-    const absolute = inlineRanges?.ranges.map((range) => ({ start: start + range.start, end: start + range.end })) ?? null
+    const absolute = inlineRanges?.ranges.map((range) => ({ ...range, start: start + range.start, end: start + range.end })) ?? null
     const overlaps = absolute?.some((range) => ranges.some((existing) => (
       range.start < existing.end && existing.start < range.end
     ))) === true
