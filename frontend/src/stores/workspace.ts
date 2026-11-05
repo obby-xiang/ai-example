@@ -22,6 +22,7 @@
 import { defineStore } from 'pinia'
 import router, { ROUTE_NAMES } from '@/router'
 import { saveBlob } from '@/api/http'
+import { ElMessage } from 'element-plus'
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 import { tasksApi } from '@/api/tasks'
 import { jobsApi } from '@/api/jobs'
@@ -920,25 +921,25 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         return ok(`已打开导入向导，请执行：${event.action}`)
       }
       case 'download': {
-        // R-11：补上"无 signal、无上限"的缺口 —— 到点 abort ⇒ 走下方 catch 如实回 fail，
-        // 而不是永远等（该 await 在 `dispatchUiEvent` 链上，等下去连回灌都发不出去）。
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), DOWNLOAD_FETCH_TIMEOUT_MS)
-        try {
-          const response = await fetch(event.url, { signal: controller.signal })
-          if (!response.ok) {
-            return fail(`下载失败：HTTP ${response.status}`)
+        void (async () => {
+          try {
+            const response = await fetch(event.url, { signal: controller.signal })
+            if (!response.ok) {
+              throw new Error(`下载失败：HTTP ${response.status}`)
+            }
+            saveBlob(await response.blob(), event.filename ?? 'download')
+          } catch (error) {
+            const reason = controller.signal.aborted
+              ? `下载失败：${DOWNLOAD_FETCH_TIMEOUT_MS / 1000} 秒内未取回文件（已中止本次请求），未写入任何文件`
+              : error instanceof Error ? error.message : String(error)
+            ElMessage.error(reason)
+          } finally {
+            clearTimeout(timer)
           }
-          saveBlob(await response.blob(), event.filename ?? 'download')
-          return ok(`已触发下载 ${event.filename ?? event.url}`)
-        } catch (error) {
-          if (controller.signal.aborted) {
-            return fail(`下载失败：${DOWNLOAD_FETCH_TIMEOUT_MS / 1000} 秒内未取回文件（已中止本次请求），未写入任何文件`)
-          }
-          throw error
-        } finally {
-          clearTimeout(timer)
-        }
+        })()
+        return ok(`已发起下载 ${event.filename ?? event.url}`)
       }
       case 'refresh_defs': {
         // W-09（文案改实）：本动作只记工作区时间线，没有任何页面订阅它去重新拉取数据 ——
