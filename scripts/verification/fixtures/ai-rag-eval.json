@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "description": "DIRECT/KNOWLEDGE/ACTION/MIXED small-sample evaluation. Run only against an isolated backend, Redis and model fixture.",
+  "cases": [
+    {
+      "id": "direct-smalltalk",
+      "kind": "DIRECT",
+      "message": "你好，请用一句话介绍你自己。",
+      "expectRetrieval": false,
+      "requiredTools": [],
+      "forbiddenTools": ["kb_search", "kb_read_doc", "kb_lookup_term"]
+    },
+    {
+      "id": "knowledge-region-tariff",
+      "kind": "KNOWLEDGE",
+      "message": "请查询区域费率的正式管理口径，并给出引用。",
+      "expectRetrieval": true,
+      "expectedKbOutcome": "hit",
+      "requiredTools": ["kb_search"],
+      "forbiddenTools": []
+    },
+    {
+      "id": "action-create-export",
+      "kind": "ACTION",
+      "message": "创建导出任务。",
+      "expectRetrieval": false,
+      "requiredTools": ["create_task"],
+      "forbiddenTools": ["kb_search", "kb_read_doc", "kb_lookup_term"],
+      "autoApprove": true,
+      "stopAfter": "approval"
+    },
+    {
+      "id": "mixed-create-and-search",
+      "kind": "MIXED",
+      "message": "请先查询区域费率的正式口径，再创建导出任务；两件事分开做，不要省略任何一步。",
+      "expectRetrieval": true,
+      "expectedKbOutcome": "any",
+      "requiredTools": ["kb_search", "create_task"],
+      "forbiddenTools": [],
+      "autoApprove": true,
+      "stopAfter": "approval"
+    },
+    {
+      "id": "knowledge-no-match-rewrite",
+      "kind": "KNOWLEDGE",
+      "message": "先检索“绝对不存在的制度编号 ZXQ-404-UNKNOWN”；如果确实没有命中，请只换用一次同义词“未知费率规则”再查一次，仍无结果就如实说明。",
+      "expectRetrieval": true,
+      "expectedKbOutcome": "no_match",
+      "requiredTools": ["kb_search"],
+      "forbiddenTools": [],
+      "minKbSearchCalls": 2
+    },
+    {
+      "id": "knowledge-approximate-title",
+      "kind": "KNOWLEDGE",
+      "message": "查询“区域收费细则”这一不存在的叫法，不要把近似标题当成命中。",
+      "expectRetrieval": true,
+      "expectedKbOutcome": "no_match",
+      "expectApproximateTitle": true,
+      "requiredTools": ["kb_search"],
+      "forbiddenTools": []
+    },
+    {
+      "id": "query-cond-mixed",
+      "kind": "MIXED",
+      "message": "当前处于导出向导的查询条件阶段。请先查询区域费率，再将货币字典的筛选条件设置为 code EQ CNY。",
+      "expectRetrieval": true,
+      "expectedKbOutcome": "any",
+      "requiredTools": ["kb_search", "set_condition"],
+      "forbiddenTools": [],
+      "context": {
+        "page": "export",
+        "taskType": "EXPORT",
+        "step": "QUERY_COND"
+      }
+    },
+    {
+      "id": "query-cond-long-context",
+      "kind": "MIXED",
+      "message": "在长上下文中仍需先查询区域费率，再处理查询条件；不要因历史候选而省略检索。历史候选曾提到 code EQ CNY，但以当前任务为准。",
+      "repeat": 24,
+      "expectRetrieval": true,
+      "expectedKbOutcome": "any",
+      "requiredTools": ["kb_search"],
+      "forbiddenTools": [],
+      "context": {
+        "page": "export",
+        "taskType": "EXPORT",
+        "step": "QUERY_COND"
+      }
+    }
+  ]
+}
