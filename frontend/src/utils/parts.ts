@@ -27,6 +27,7 @@ import {
 import type { SseFrame } from '@/types/sse'
 import { parseToolArgs } from '@/utils/frontend-tools'
 import { translate } from '@/composables/useCopy'
+import { projectDisplayText } from '@/utils/display-text'
 
 /** 段序列的下一个 seg（单调递增：封口后另起的段不复用旧编号）。 */
 export function nextSeg(parts: MessagePart[]): number {
@@ -1201,10 +1202,10 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
  * **不碰** deriveProjections / 镜像 / delta 路径。
  */
 export function deriveCopyText(message: ChatMessage): string {
-  return message.parts
+  return projectDisplayText(message.parts
     .filter((part): part is TextPart => part.kind === 'text')
     .map((part) => part.text)
-    .join('\n\n')
+    .join('\n\n'))
 }
 
 /** 该帧是否已应用过（消息级幂等记账，R2-1：只去重、不做连续性判定）。 */

@@ -553,6 +553,13 @@
       "reason": "本批以owner token保护观测位释放，并用单键CAS补齐草案并发合并及读失败中止；D6迁移接口和既有工具事实结构不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:07133450b611eebdee4d15d5414ea908ed193c95207c6028b2a219bdc97a8b57",
+      "status": "not-affected",
+      "reason": "本批仅在C端实时、历史和复制层增加结构化展示投影，模型原文、KB防注入与D6历史恢复协议均不改写",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

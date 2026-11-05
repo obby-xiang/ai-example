@@ -1498,6 +1498,7 @@ import {
   type Block
 } from '@/utils/blocks'
 import { deriveCopyText, numericArgOf, partDiagnosticOf, partDiagnosticText, partResultIsInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
+import { projectDisplayText } from '@/utils/display-text'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
@@ -2750,7 +2751,7 @@ setStreamFlushHandler(() => {
 function markdownHtml(message: ChatMessage, block: Block): string {
   markdownHtmlCalls += 1
   const part = block.parts[0]
-  const text = part.kind === 'text' ? part.text : ''
+  const text = part.kind === 'text' ? projectDisplayText(part.text) : ''
   // aj14d ③：块级稳定 key = 消息 + 段（与文本长度/流式态解耦，作防抖记账与围栏身份的命名空间）
   const blockKey = `${message.id}:${part.seg}`
   // 渲染器注入的复制按钮文案随 UI 语言变化 —— 缓存键必须带 locale，否则切语言会命中旧 HTML。
@@ -4327,7 +4328,7 @@ function truncationTitle(part: TruncationCarrier): string {
 function toolResultText(part: ToolPart): string | null | undefined {
   const code = part.userTextCode?.trim()
   if (!code) {
-    return part.result
+    return projectDisplayText(part.result)
   }
   // 2026-10-30 结构化批：插值只认结构化 args（`userTextArgs` / `target`），**不再**从中文回执
   // （「本轮已创建任务 #12」）正则反解 id。后端尚未发该键 ⇒ 无插值渲染（同一词条的通用档）。
@@ -4337,7 +4338,7 @@ function toolResultText(part: ToolPart): string | null | undefined {
     ? 'ai.panel.toolResult.CREATE_TASK_TURN_LIMIT_WITH_ID'
     : code.startsWith('ai.') ? code : `ai.panel.toolResult.${code}`
   const translated = t(key, { ...args, id: createdTaskId ?? '' })
-  return translated === key ? part.result : translated
+  return projectDisplayText(translated === key ? part.result : translated)
 }
 
 function textPartOf(block: Block): TextPart | null {
