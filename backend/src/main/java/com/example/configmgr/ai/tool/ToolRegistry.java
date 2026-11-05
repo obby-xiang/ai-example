@@ -393,6 +393,9 @@ public class ToolRegistry {
      * AI 表格工具治理批（2026-10-22 §2.3）：披露判定 = {@code scopeMatches AND sheetAllows} ——
      * 表格开关并入<b>同一谓词</b>，而不是新增第四道防线。执行前的 {@link #matchesContext} 复用
      * 完全相同的两项，故"披露面"与"执行面"在结构上无法分叉（S-02）。
+     *
+     * <p>工具级按需披露只过滤回调，不改写其 Schema；generative_form 实际披露时保留
+     * visibleWhen、requiredWhen、disabledWhen、optionsFrom、defaultFrom 及其关联定义。
      */
     public List<ToolCallback> forContext(AiContext ctx) {
         Set<String> tags = buildTags(ctx);
@@ -409,13 +412,12 @@ public class ToolRegistry {
     }
 
     /**
-     * 条件结构化交棒（{@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}）只留四个工具：
-     * 查定义、设置条件、推进，以及定义列表。首次进入 {@code QUERY_COND} 时用户已给出的筛选值
-     * 由模型用既有 {@code set_condition} 结构化；不让它再创建任务/下发表单/启动作业。
+     * 条件结构化交棒保留当前动作与只读辅助能力，不开放创建任务、下发表单或启动作业。
      */
     private static final Set<String> CONDITION_STRUCTURING_TOOLS = Set.of(
             AiToolNames.GET_CONFIG_DEF, AiToolNames.LIST_CONFIG_DEFS,
-            AiToolNames.SET_CONDITION, AiToolNames.CONFIRM_STEP);
+            AiToolNames.SET_CONDITION, AiToolNames.CONFIRM_STEP,
+            "kb_search", "kb_read_doc", "kb_lookup_term", "read_tool_result");
 
     /** 交棒标记只在 {@code QUERY_COND} 生效（离开步骤 = 完整工具面恢复，判据与披露面同源）。 */
     private static boolean conditionStructuringAllows(String name, AiContext ctx) {

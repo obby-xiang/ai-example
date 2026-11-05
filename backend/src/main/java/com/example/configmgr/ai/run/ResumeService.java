@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.common.ErrorCodes;
 
@@ -1425,9 +1426,8 @@ public class ResumeService {
 				// 交棒前按任务权威值同步 type/step/status，并按最新页面事实重算槽位。
 				// 批内结算已全部完成 —— 这里只影响下一跳（批内 context 仍冻结，不扩权）。
 				nextHopContext = syncAuthorityForHandoff(runId, nextHopContext, history);
-				// 刷新后的权威工作区状态跟着交棒：历史里那条 SYSTEM 的工作区段是"模型以为的现场"，
-				// 留着旧页面/旧步骤等于让模型按过期地图继续走（只换段内文本，不动消息序列）。
-				history = rewriteWorkspaceState(history, nextHopContext, runId);
+				// 当前协议有效时只刷新 SYSTEM 动态段；缺失或结构无效才完整重建，非 SYSTEM 消息序列不动。
+				history = rewriteAuthoritativeSystem(history, nextHopContext, runId);
 				ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(responses).build();
 				history.add(toolMessage);
 				// 上下文专项批①：本次重建出来的工具响应是"上次真值之后"的真增量（续跑侧的 nextEst 一项）
@@ -1453,7 +1453,7 @@ public class ResumeService {
 				// 挂起期的手动改步骤不会产生任何"刷新类工具结算"，这里没有其它刷新点。
 				nextHopContext = syncAuthorityForHandoff(runId, nextHopContext, history);
 				List<Message> beforeRewrite = history;
-				history = rewriteWorkspaceState(history, nextHopContext, runId);
+				history = rewriteAuthoritativeSystem(history, nextHopContext, runId);
 				snapshot.setContext(nextHopContext.toMap());
 				if (history != beforeRewrite) {
 					snapshot.setMessageJson(this.codec.serializeAll(history));
@@ -2002,77 +2002,79 @@ public class ResumeService {
 	}
 
 	/**
-	 * 把<b>刷新后的权威工作区状态</b>换进交棒历史的系统段（工作区段的唯一重写口）。
+	 * 刷新交棒历史的唯一权威 SYSTEM，稳定核心与全部非 SYSTEM 对话事实保持原样。
 	 *
-	 * <h2>为什么换段，而不是新增一条消息</h2>
-	 * <ul>
-	 * <li><b>不新增消息</b>：多一条 SYSTEM 会被 {@link SystemMessages#reattach} 在下次续跑时移到最前，
-	 * 与首轮那条人设并列成"两条系统消息"，其中旧的一条还会被当成现役状态；多一条 USER 则会被
-	 * 记忆/历史当成用户又发了一句。两者都会污染后续轮次；</li>
-	 * <li><b>只换段内文本</b>：人设 / 知识库 / 回答语言这些<b>历史内容</b>一字不动（不拿当前配置覆盖
-	 * 历史），{@code tool_use}/{@code tool_result} 的配对与顺序也不动 —— 换的只是"模型以为的现场"。</li>
-	 * </ul>
-	 *
-	 * <p>渲染走 {@link ResilientChatService#workspaceStateText}（与首轮同一个 {@code ContextBuilder}），
-	 * 段头/闭标签的锚点也用同一份常量：两侧各写一份就会在"首轮怎么描述工作区"上静默分叉。
-	 *
-	 * <p>旧快照里没有工作区段（更早的格式）⇒ 追加到系统消息末尾（模型至少拿到一次权威状态）；
-	 * 渲染失败 ⇒ 只 WARN 并返回原历史 —— 交棒不能因为"状态说明"而失败。
+	 * <p>当前协议结构有效时，只按最新披露替换 {@code capability_rules} 与 workspace 动态段。
+	 * 当前协议结构无效时，才按最新上下文和快照模型的真实能力完整重建；不提供旧格式回退。
+	 * 重建异常或空文本直接失败，不得把无权威 SYSTEM 的历史交给模型。
 	 */
-	private List<Message> rewriteWorkspaceState(List<Message> history, AiContext context, String runId) {
-		int leading = SystemMessages.leadingCount(history);
-		if (leading == 0 || this.chatService == null || context == null) {
-			return history;
+	private List<Message> rewriteAuthoritativeSystem(List<Message> history, AiContext context, String runId) {
+		if (SystemMessages.leadingCount(history) == 0) {
+			throw new AiStateUnavailableException("续跑恢复后仍缺少权威 SYSTEM runId=" + runId);
 		}
-		String fresh;
-		try {
-			fresh = this.chatService.workspaceStateText(context);
+		boolean toolsAllowed = this.chatService.toolCallingAllowed(runId);
+		String capabilityRules = this.chatService.capabilityRulesText(context, toolsAllowed);
+		String workspace = this.chatService.workspaceStateText(context);
+		String rewritten = replaceDynamicSections(history.get(0).getText(), capabilityRules, workspace, toolsAllowed);
+		if (rewritten == null) {
+			rewritten = this.chatService.systemPromptText(context, toolsAllowed);
 		}
-		catch (RuntimeException ex) {
-			log.warn("resume workspace state text refresh failed (using historical copy) runId={}: {}", runId, ex.getMessage());
-			return history;
+		if (!StringUtils.hasText(rewritten)) {
+			throw new AiStateUnavailableException("续跑权威 SYSTEM 重建为空 runId=" + runId);
 		}
-		if (!StringUtils.hasText(fresh)) {
+		if (rewritten.equals(history.get(0).getText())) {
 			return history;
 		}
 		List<Message> out = new ArrayList<>(history);
-		boolean changed = false;
-		for (int index = 0; index < leading; index++) {
-			String text = history.get(index).getText();
-			String rewritten = replaceWorkspaceSection(text, fresh);
-			if (rewritten != null && !rewritten.equals(text)) {
-				out.set(index, new SystemMessage(rewritten));
-				changed = true;
-			}
-		}
-		if (changed) {
-			log.info("workspace state replaced with refreshed authority value before handoff runId={} page={} taskId={} step={}", runId,
-					context.getPage(), context.getTaskId(), context.getStep());
-		}
-		return changed ? out : history;
+		out.set(0, new SystemMessage(rewritten));
+		log.info("authoritative SYSTEM dynamic sections refreshed before handoff runId={} page={} taskId={} step={}", runId,
+				context.getPage(), context.getTaskId(), context.getStep());
+		return out;
 	}
 
 	/**
-	 * 段级替换：从 {@link ContextBuilder#WORKSPACE_SECTION_HEADING} 到 {@code </workspace_state>}
-	 * （含其后一个换行）整段换成新渲染的工作区段；没有段头时追加到末尾。
-	 *
-	 * <p>包内可见以便单点验证"只换这一段、别的文本一字不动"。
+	 * 只识别当前定界协议并替换动态段；返回 {@code null} 表示结构无效，调用方必须完整重建。
+	 * 不支持无工作区段、段不闭合、重复段或顺序错误的旧格式。
 	 */
-	static String replaceWorkspaceSection(String systemText, String freshSection) {
-		if (systemText == null || freshSection == null || freshSection.isBlank()) {
-			return systemText;
+	static String replaceDynamicSections(String systemText, String capabilityRules, String workspace,
+			boolean toolsAllowed) {
+		if (systemText == null || capabilityRules == null || !StringUtils.hasText(workspace)) {
+			return null;
 		}
-		String section = freshSection.endsWith("\n") ? freshSection : freshSection + "\n";
-		int start = systemText.indexOf(ContextBuilder.WORKSPACE_SECTION_HEADING);
-		if (start < 0) {
-			return systemText.endsWith("\n") ? systemText + section : systemText + "\n" + section;
+		int workspaceStart = systemText.indexOf(ContextBuilder.WORKSPACE_SECTION_HEADING);
+		int workspaceOpen = workspaceStart < 0 ? -1
+				: systemText.indexOf(ContextBuilder.WORKSPACE_STATE_OPEN, workspaceStart);
+		int workspaceClose = workspaceStart < 0 ? -1
+				: systemText.indexOf(ContextBuilder.WORKSPACE_STATE_CLOSE, workspaceStart);
+		if (workspaceStart < 0 || workspaceOpen < workspaceStart || workspaceClose < workspaceOpen
+				|| workspaceStart != systemText.lastIndexOf(ContextBuilder.WORKSPACE_SECTION_HEADING)
+				|| workspaceOpen != systemText.lastIndexOf(ContextBuilder.WORKSPACE_STATE_OPEN)
+				|| workspaceClose != systemText.lastIndexOf(ContextBuilder.WORKSPACE_STATE_CLOSE)) {
+			return null;
 		}
-		int close = systemText.indexOf(ContextBuilder.WORKSPACE_STATE_CLOSE, start);
-		int end = close < 0 ? systemText.length() : close + ContextBuilder.WORKSPACE_STATE_CLOSE.length();
-		if (end < systemText.length() && systemText.charAt(end) == '\n') {
-			end++;
+		int capabilityStart = systemText.indexOf(PromptRulePacks.SECTION_OPEN);
+		int capabilityClose = capabilityStart < 0 ? -1
+				: systemText.indexOf(PromptRulePacks.SECTION_CLOSE, capabilityStart);
+		if ((toolsAllowed && capabilityStart < 0)
+				|| (capabilityStart < 0 && systemText.contains(PromptRulePacks.SECTION_CLOSE))
+				|| (capabilityStart >= 0 && (capabilityClose < capabilityStart
+						|| capabilityStart != systemText.lastIndexOf(PromptRulePacks.SECTION_OPEN)
+						|| capabilityClose != systemText.lastIndexOf(PromptRulePacks.SECTION_CLOSE)
+						|| capabilityClose + PromptRulePacks.SECTION_CLOSE.length() > workspaceStart))) {
+			return null;
 		}
-		return systemText.substring(0, start) + section + systemText.substring(end);
+		int workspaceEnd = workspaceClose + ContextBuilder.WORKSPACE_STATE_CLOSE.length();
+		if (workspaceEnd < systemText.length() && systemText.charAt(workspaceEnd) == '\n') {
+			workspaceEnd++;
+		}
+		String workspaceSection = workspace.endsWith("\n") ? workspace : workspace + "\n";
+		String rewritten = systemText.substring(0, workspaceStart) + workspaceSection
+				+ systemText.substring(workspaceEnd);
+		if (capabilityStart >= 0) {
+			int capabilityEnd = capabilityClose + PromptRulePacks.SECTION_CLOSE.length();
+			rewritten = rewritten.substring(0, capabilityStart) + capabilityRules + rewritten.substring(capabilityEnd);
+		}
+		return rewritten;
 	}
 
 	/**
@@ -2188,11 +2190,11 @@ public class ResumeService {
 	 *
 	 * <h2>三条规则</h2>
 	 * <ol>
-	 * <li>历史里已有 SYSTEM ⇒ <b>原样保留</b>（不拿当前配置覆盖历史；模型当时看到的就是这份）；</li>
-	 * <li>SYSTEM 不在最前（例如旧数据把它夹在中间）⇒ 按原顺序移到最前，其余历史顺序不变；</li>
-	 * <li>历史里完全没有 ⇒ 用 {@link ResilientChatService#systemPromptText(AiContext)} 重建
-	 *     （与首轮同一个构造点）；重建不可用（未装配/异常）时如实 WARN 并放行 —— 续跑本身
-	 *     不该因为"没有提示词设施"而整条失败，但"没有 system"这件事必须留痕。</li>
+	 * <li>历史里已有 SYSTEM ⇒ <b>首条是唯一权威 SYSTEM</b>，完整保留其核心指令；其余 SYSTEM 不再挂回；</li>
+	 * <li>权威 SYSTEM 不在最前（例如旧数据把它夹在中间）⇒ 移到最前，其余非 SYSTEM 历史顺序不变；</li>
+	 * <li>历史里完全没有 ⇒ 用 {@link ResilientChatService#systemPromptText(AiContext, boolean)} 按快照模型能力重建
+	 *     （与首轮同一个构造点）；重建异常或空文本直接抛出 {@link AiStateUnavailableException}，
+	 *     不得返回无权威 SYSTEM 的历史或继续模型调用。</li>
 	 * </ol>
 	 *
 	 * @return 恢复后的历史；无需改动时返回入参本身（保持"未改动即同引用"）
@@ -2221,12 +2223,12 @@ public class ResumeService {
 				LocaleContextHolder.setLocale(replyLocale);
 			}
 			try {
-				rebuiltText = this.chatService == null ? null : this.chatService.systemPromptText(context);
+				rebuiltText = this.chatService == null ? null : this.chatService.systemPromptText(context,
+						this.chatService.toolCallingAllowed(runId));
 			}
 			catch (RuntimeException ex) {
-				log.warn("resume SYSTEM rebuild failed runId={} sessionId={} (continuing "
-						+ "with original history, not pretending recovered): {}", runId,
-						sessionId, ex.getMessage());
+				throw new AiStateUnavailableException(
+						"续跑缺少权威 SYSTEM 且重建失败 runId=" + runId + " sessionId=" + sessionId, ex);
 			}
 			finally {
 				if (replyLocale != null) {
@@ -2239,9 +2241,8 @@ public class ResumeService {
 				}
 			}
 			if (rebuiltText == null || rebuiltText.isBlank()) {
-				log.warn("resume snapshot missing SYSTEM and rebuild impossible runId={} "
-						+ "sessionId={} (no persona/workspace constraints; check snapshot write path)", runId, sessionId);
-				return loaded;
+				throw new AiStateUnavailableException(
+						"续跑缺少权威 SYSTEM 且重建结果为空 runId=" + runId + " sessionId=" + sessionId);
 			}
 			systems.add(new SystemMessage(rebuiltText));
 			rebuilt = true;
@@ -2249,10 +2250,10 @@ public class ResumeService {
 					+ "sessionId={} (old window/compaction may have dropped the system part)",
 					runId, sessionId);
 		}
-		if (wasLeading && !rebuilt) {
+		if (wasLeading && !rebuilt && systems.size() == 1) {
 			return loaded;
 		}
-		return SystemMessages.reattach(systems, rest);
+		return SystemMessages.reattach(List.of(systems.get(0)), rest);
 	}
 
 	/**

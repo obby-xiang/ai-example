@@ -268,7 +268,7 @@ public class ToolResultLimiter {
 		int originalChars = text.length();
 		String notice = "结构化结果（JSON）超限：原 " + originalChars + " 字符 > 上限 " + maxChars
 				+ " 字符，未做字符截断（截断会产生非法 JSON）；已整体标记并保留头部预览，"
-				+ "完整结果见本轮工具调用记录。如需更多细节，请缩小查询范围或分页获取。";
+				+ "完整结果见本轮工具调用记录；非 KB 结果可用 read_tool_result 按 toolCallId+offset 有界回读。如需更多细节，请缩小查询范围或分页获取。";
 		String marker = TruncationContract.jsonMarker("", originalChars, notice);
 		int previewBudget = maxChars - marker.length();
 		String preview = previewBudget > 0 ? cutChars(text, previewBudget) : "";
@@ -326,12 +326,12 @@ public class ToolResultLimiter {
 
 	/** 不带"返回 N 字符"的短说明（N2：结构化退让档用；避免与 returnedChars 打架）。 */
 	private static String lengthFreeNotice(int originalChars) {
-		return NOTICE_PREFIX + "原 " + originalChars + " 字符（完整结果见本轮工具调用记录）";
+		return NOTICE_PREFIX + "原 " + originalChars + " 字符（完整结果见本轮工具调用记录；非 KB 结果可用 read_tool_result 按 toolCallId+offset 有界回读）";
 	}
 
 	/** 短说明（完整说明装不下时的退让档；仍以 {@link #NOTICE_PREFIX} 开头，标记可被识别）。 */
 	private static String compactNotice(int originalChars, int returnedChars) {
-		return NOTICE_PREFIX + "原 " + originalChars + " 字符，返回 " + returnedChars + " 字符（完整结果见本轮工具调用记录）";
+		return NOTICE_PREFIX + "原 " + originalChars + " 字符，返回 " + returnedChars + " 字符（完整结果见本轮工具调用记录；非 KB 结果可用 read_tool_result 按 toolCallId+offset 有界回读）";
 	}
 
 	private static String marker(String notice) {
@@ -345,7 +345,7 @@ public class ToolResultLimiter {
 		return NOTICE_PREFIX + "原 " + totalRows + " 行 / " + originalChars + " 字符，" + keptDescription + "，返回 " + returnedChars
 				+ " 字符（上限：" + (maxRows > 0 ? maxRows + " 行" : "行数不限") + " / "
 				+ (maxChars > 0 ? maxChars + " 字符" : "字符不限") + "；strategy="
-				+ TruncationContract.STRATEGY_HEAD + "）。完整结果见本轮工具调用记录（台账为全文）；"
+				+ TruncationContract.STRATEGY_HEAD + "）。完整结果见本轮工具调用记录；非 KB 结果可用 read_tool_result 按 toolCallId+offset 有界回读（台账为全文）；"
 				+ "如需更多细节，请缩小查询范围或分页获取。";
 	}
 

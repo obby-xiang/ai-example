@@ -5,6 +5,7 @@ import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +42,7 @@ import java.util.regex.Pattern;
  * JSON 本身截坏。
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public record ToolResultEnvelope(boolean ok, String code, String outcome, boolean retryable,
 		Map<String, Object> target, Object evidence, String message, boolean truncated, String strategy,
 		int originalChars, int returnedChars, String notice) {
@@ -126,7 +128,7 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 		}
 	}
 
-	/** 信封 JSON（含 null 字段，供模型/台账读取固定键面）。 */
+	/** 信封 JSON（省略 null 字段；结局与截断事实字段保留）。 */
 	public String toJson() {
 		try {
 			return JSON.writeValueAsString(this);
@@ -207,10 +209,12 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 	 */
 	public String toModelJsonWith(ToolResultLimiter.Truncation truncation) {
 		// 先裁剪、再在字符串值上中和闭合标签，最后才序列化：JSON 文本不被二次转义/替换。
+		String notice = truncation.notice() != null && truncation.text() != null
+				&& truncation.text().contains(truncation.notice()) ? null : truncation.notice();
 		ToolResultEnvelope modelSide = new ToolResultEnvelope(this.ok, neutralize(this.code), neutralize(this.outcome),
 				this.retryable, neutralizeTarget(this.target), neutralizeValue(this.evidence),
 				neutralize(truncation.text()), truncation.truncated(), neutralize(truncation.strategy()),
-				truncation.originalChars(), truncation.returnedChars(), neutralize(truncation.notice()));
+				truncation.originalChars(), truncation.returnedChars(), neutralize(notice));
 		String json = modelSide.toJson();
 		return TOOL_RESULT_NOTICE + "\n" + TOOL_RESULT_OPEN + "\n" + json + "\n" + TOOL_RESULT_CLOSE;
 	}

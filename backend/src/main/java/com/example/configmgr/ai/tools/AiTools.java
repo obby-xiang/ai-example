@@ -14,6 +14,7 @@ import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ReplyLanguage;
+import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.service.ConditionOperators;
@@ -24,10 +25,10 @@ import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSteps;
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -108,7 +109,6 @@ import java.util.stream.Collectors;
  * （{@link #getConfigDef}）以"稳定码 + 入参编码"进统一信封的 {@code target}，不靠中文关键字表达。
  */
 @Component
-@RequiredArgsConstructor
 public class AiTools {
 
     private final DefinitionService definitionService;
@@ -116,6 +116,21 @@ public class AiTools {
     private final TaskService taskService;
 
     private final JobService jobService;
+
+    private final RunStore runStore;
+
+    @Autowired
+    public AiTools(DefinitionService definitionService, TaskService taskService, JobService jobService,
+            RunStore runStore) {
+        this.definitionService = definitionService;
+        this.taskService = taskService;
+        this.jobService = jobService;
+        this.runStore = runStore;
+    }
+
+    public AiTools(DefinitionService definitionService, TaskService taskService, JobService jobService) {
+        this(definitionService, taskService, jobService, null);
+    }
 
     // ==================== 只读：配置定义 ====================
 
@@ -332,6 +347,26 @@ public class AiTools {
         return String.format("作业 #%d [%s] 状态:%s 进度:%d/%d 错误:%d",
                 job.getId(), job.getJobType(), job.getStatus(),
                 job.getProgress(), job.getTotal(), job.getErrorCount());
+    }
+
+    @Tool(name = "read_tool_result", description = "按 toolCallId 分页读取本轮被截断的非 KB 工具结果。"
+            + "offset 从 0 开始，maxChars 默认 4000、范围 2..8000；返回 originalChars/returnedChars/nextOffset/content，"
+            + "nextOffset 非空时用它继续读。只能读取当前 run、当前身份下的既有台账，不支持 KB 结果（KB 用原生分页工具）",
+            resultConverter = PlainTextToolResultConverter.class)
+    @ToolScope("*")
+    @ToolRisk(ToolMeta.RiskLevel.READ)
+    @ToolCategory(ToolMeta.Category.R)
+    public String readToolResult(
+            @ToolParam(description = "本轮已执行工具调用的 toolCallId") String toolCallId,
+            @ToolParam(description = "字符偏移，从 0 开始；续读必须传上一页 nextOffset", required = false) Integer offset,
+            @ToolParam(description = "本页最大字符数，默认 4000，范围 2..8000", required = false) Integer maxChars,
+            ToolContext toolContext) {
+        if (this.runStore == null) {
+            throw new IllegalStateException("当前装配没有轮次台账，无法读取工具结果");
+        }
+        Map<String, Object> context = toolContext == null ? null : toolContext.getContext();
+        String runId = context == null ? null : stringOf(context.get("runId"));
+        return this.runStore.readToolResult(runId, toolCallId, offset, maxChars);
     }
 
     // ==================== 任务创建（S4.4e 裁决②：AI 可从零创建任务） ====================
@@ -833,34 +868,19 @@ public class AiTools {
      * 后端只挂起与回灌；schema 与回灌的校验在挂起机制里（{@code SpToolCallingManager}/
      * {@code ConfirmGate} + {@code FrontendToolGuard}），不在此处。
      */
-    @Tool(name = AiToolNames.GENERATIVE_FORM, description = "在对话内渲染一张结构化表单并等待用户填写/选择（用于向用户收集筛选条件、"
-            + "任务类型，或在信息不足时向用户澄清）。只用于真实信息缺口（缺失或歧义且需结构化补充），"
-            + "不用于已知信息、预填确认或取消后自动重问；表单用途必须显式给出 purpose="
-            + "SELECT_DEFINITIONS（收集配置项选择）/SET_CONDITIONS（收集筛选条件）/TASK_TYPE（收集任务类型 EXPORT/IMPORT）"
-            + "/GENERAL_CLARIFY（通用澄清，缺省）；"
-            + "宿主只按 purpose 判断用途，禁止靠标题猜。TASK_TYPE 只在任务类型未知时用，形状固定为单个 enum 单选"
-            + "（选项正好 EXPORT/IMPORT，不附其它字段）；类型已确定时会被零副作用拒绝并指回 create_task。"
-            + "SET_CONDITIONS 不由模型调用：条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次，"
-            + "模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition（只形成草案，不写业务库）；"
-            + "宿主条件表回灌了非空文本时，必须先按文本调用 set_condition 形成草案再 confirm_step（业务库由前端在下一步提交）；"
-            + "留空或空对象时直接 confirm_step，不逐项调用 set_condition；只有非空文本明确不筛选或"
-            + "需要清空已有条件时才使用 set_condition(defCode, {})，不要重发 SET_CONDITIONS；"
-            + "还没有草案时 confirm_step 同样被零副作用拒绝并指回 set_condition。系统工作区状态里的「任务槽位」是已知值："
-            + "槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），请直接调用对应工具；"
-            + "未知配置或歧义时表单仍可用。字段类型仅限白名单 text/number/boolean/date/enum/multi_select，"
-            + "禁止 HTML/脚本/自定义属性。工具结果是统一信封 JSON（outcome/code/retryable/target/message）："
-            + "用户提交后，字段 key→值的 JSON 原文在 message 字段里（读取它，不要把整个信封当表单数据）；"
-            + "用户关闭表单则 outcome=cancelled、无数据；schema 不合规则 outcome=rejected 且表单未下发。"
-            + "表单只收集值、不推进步骤：提交后向导仍停在原步骤，仍需按当前披露面继续"
-            + "（如当前是 SELECT_DEFS，下一批先 confirm_step 到 QUERY_COND，再 set_condition）；"
-            + "配置项已明确（编码、中文名称/别名，或已用 list_config_defs/get_config_def 确认的映射）时"
-            + "直接调用 select_definitions，不下发选择表单")
+    @Tool(name = AiToolNames.GENERATIVE_FORM, description = "在对话内渲染结构化表单并等待用户填写。"
+            + "只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问；purpose 必须是当前用途。"
+            + "TASK_TYPE 只在类型未知时使用单个 EXPORT/IMPORT 单选；SET_CONDITIONS 由宿主统一发放，模型不得自行调用。"
+            + "配置项已明确时直接用 select_definitions。字段类型统一为 text/number/boolean/date/enum/multi_select/attachment，"
+            + "禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，不得预填。默认 Schema 只披露基础字段，"
+            + "联动属性仅在当前 Schema 明确披露时使用。表单只收集值，不推进向导步骤；结果读取统一信封的 message 字段")
     @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.H)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String generativeForm(
-            @ToolParam(description = "表单 schema：{\"scenario\":\"FILTER|CLARIFY\",\"title\":\"标题(可选)\",\"fields\":[{\"key\":\"字段键\",\"label\":\"标签\",\"type\":\"text|number|boolean|date|enum|multi_select|attachment\",\"required\":true(可选),\"defaultValue\":默认值(可选),\"options\":[{\"value\":\"值\",\"label\":\"文本\"}](enum/multi_select 必填，或改用 optionsFrom),\"placeholder\":\"占位提示(仅 text/number/date,可选)\",\"variant\":\"longText(text 可选的 textarea 变体,上限2000)\",\"minLength/maxLength\":\"text 长度约束(可选,maxLength 硬顶200,longText 2000)\",\"format\":\"email|tel|url|idcard(仅 text,不接受正则)\",\"min/max/step/integer\":\"number 约束;date 只收 min/max(ISO)\",\"minItems/maxItems\":\"multi_select 选项数约束\",\"visibleWhen/requiredWhen/disabledWhen\":{\"key\":\"依赖字段\",\"op\":\"eq|in|notIn|empty|notEmpty|between\",\"value\":\"或 values 数组\"},\"optionsFrom\":{\"dependsOn\":\"父字段(必填)\",\"map\":{\"父值\":[{\"value\":\"值\"}]}} 或 {\"dependsOn\":\"父字段(必填)\",\"sourceId\":\"definition_fields|definitions\"}（sourceId 是后端闭集：definition_fields=父值(配置定义编码)→该定义的字段；definitions=父值(层级 GLOBAL/REGION/PROJECT)→该层级的配置定义，即「层级→定义」用法）,\"defaultFrom\":{\"dependsOn\":\"父字段\",\"map\":{\"父值\":默认值}}}]}（字段 ≤20，选项 ≤50；attachment 的值由用户上传产生，不要预填 defaultValue）") FormSpec form) {
+            @ToolParam(description = "通用表单对象：scenario/purpose/title/fields；字段与约束以当前 inputSchema 为准。"
+                    + "基础类型含 attachment；不得自行添加当前 Schema 未披露的联动属性") FormSpec form) {
         return FRONTEND_STUB;
     }
 

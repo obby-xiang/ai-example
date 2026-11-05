@@ -3,6 +3,7 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.RunKeyScope;
@@ -10,6 +11,8 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.common.AiStateUnavailableException;
+import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ResourceNotFoundException;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -4108,6 +4111,74 @@ public class RunStore {
 			}
 		}
 		return ledgerFor(runId, toolCallId);
+	}
+
+	public String readToolResult(String runId, String toolCallId, Integer offset, Integer maxChars) {
+		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT, "read_tool_result 需要当前 runId 与非空 toolCallId");
+		}
+		int from = offset == null ? 0 : offset;
+		int limit = maxChars == null ? 4000 : maxChars;
+		if (from < 0 || limit < 2 || limit > 8000) {
+			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
+					"read_tool_result 游标不合法：offset 必须 ≥0，maxChars 必须在 2..8000");
+		}
+		RequestContextUtils.require();
+		SnapshotOwner owner = snapshotOwner(runId);
+		if (owner.state() == SnapshotOwner.State.UNREADABLE) {
+			throw new AiStateUnavailableException("无法确认工具结果所属轮次 " + runId);
+		}
+		if (owner.state() != SnapshotOwner.State.ATTRIBUTED) {
+			throw new ResourceNotFoundException("当前身份下不存在该 run 或无权读取：" + runId);
+		}
+		Map<String, Object> record = idemFor(runId, toolCallId);
+		String name;
+		String text;
+		if (record != null) {
+			name = record.get("name") == null ? "" : String.valueOf(record.get("name"));
+			text = record.get("resultText") instanceof String value ? value : null;
+		}
+		else {
+			PendingToolCall pending = pending(runId, toolCallId);
+			if (pending == null || !pending.resolved()) {
+				throw new ResourceNotFoundException("当前 run 中不存在已结算的工具结果：" + toolCallId);
+			}
+			name = pending.getName() == null ? "" : pending.getName();
+			text = pending.getResultText();
+		}
+		if (Set.of("kb_search", "kb_read_doc", "kb_lookup_term").contains(name)) {
+			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
+					"KB 结果请使用 kb_read_doc 的原生 offset/next_offset 分页，不走通用结果回读");
+		}
+		if (text == null) {
+			throw new ResourceNotFoundException("该工具调用没有可回读的结果正文：" + toolCallId);
+		}
+		int originalChars = text.length();
+		if (from > originalChars || (from > 0 && from < originalChars
+				&& Character.isLowSurrogate(text.charAt(from)) && Character.isHighSurrogate(text.charAt(from - 1)))) {
+			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
+					"read_tool_result offset 超出结果长度或落在代理对中间：" + from);
+		}
+		int end = (int) Math.min(originalChars, (long) from + limit);
+		if (end < originalChars && end > from && Character.isHighSurrogate(text.charAt(end - 1))) {
+			end--;
+		}
+		String content = text.substring(from, end);
+		Map<String, Object> page = new LinkedHashMap<>();
+		page.put("toolCallId", toolCallId);
+		page.put("name", name);
+		page.put("offset", from);
+		page.put("maxChars", limit);
+		page.put("originalChars", originalChars);
+		page.put("returnedChars", content.length());
+		page.put("nextOffset", end < originalChars ? end : null);
+		page.put("content", content);
+		try {
+			return this.mapper.writeValueAsString(page);
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("无法序列化工具结果分页：" + toolCallId, ex);
+		}
 	}
 
 	/** 索引指向的记录是否<b>就是</b>请求的 {@code toolCallId}（错位/字段缺失一律 false ⇒ 回落扫描）。 */

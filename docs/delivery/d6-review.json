@@ -560,6 +560,13 @@
       "reason": "本批仅在C端实时、历史和复制层增加结构化展示投影，模型原文、KB防注入与D6历史恢复协议均不改写",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:51da9854f668252900abed072f9699ec67f13f5ddf008be64c12deba08264289",
+      "status": "synced",
+      "reason": "已同步稳定核心与能力规则包、当前对话续跑边界、QUERY_COND的KB披露、完整表单Schema及read_tool_result有界回读契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

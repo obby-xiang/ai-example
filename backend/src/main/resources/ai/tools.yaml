@@ -71,7 +71,9 @@
 # 2026-10-27.20 → 2026-10-27.21（2026-11-03 移除预估行数）：预估数据行数工具整体下线（AiTools 注解、
 # AiToolNames 注册表、本文件对应 toolKey 三处同批删除）；模型不再有"预估数据行数"这一读取能力。
 # 2026-10-27.22 → 2026-10-27.23：AI 精确行数工具下线；REST/UI 的独立计数能力不变。
-version: 2026-10-27.23
+# 2026-10-27.23 → 2026-10-27.24（2026-11-05 渐进式披露）：表单默认使用基础 Schema，联动按需披露；
+# 统一 attachment 白名单；新增当前 run 的非 KB 截断结果有界回读工具。
+version: 2026-10-27.24
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -183,30 +185,19 @@ tools:
   - toolKey: generative_form
     title: 生成式表单
     description: >-
-      在对话内渲染一张结构化表单并等待用户填写/选择（用于配置项选择、任务类型或通用澄清）；
-      只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问。
-      表单用途必须显式给出 purpose=SELECT_DEFINITIONS / TASK_TYPE / GENERAL_CLARIFY；宿主只按 purpose 判断用途。
-      SET_CONDITIONS 不由模型调用：条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次，
-      模型自行下发会被零副作用拒绝。已知条件直接传结构化 set_condition（只形成草案，不写业务库）；
-      宿主条件表回灌非空文本后，先解析并调用 set_condition 形成草案，再 confirm_step 由前端提交；
-      回灌明确表示不筛选（如"无"、"不筛选"、"全部"）时，对表单覆盖的每个 defCode 各调用一次
-      set_condition(defCode, {})（恰好空对象 = 明确不设），不要重发 SET_CONDITIONS；
-      留空（{} 或空文本）是明确不设筛选，直接 confirm_step 全量推进。
-      TASK_TYPE 只在任务类型未知时用：表单只有一个 enum 字段做单选项，选项正好 EXPORT/IMPORT，不附其它字段；
-      类型已确定时会被零副作用拒绝并指回 create_task。
-      系统工作区状态里的「任务槽位」是已知值：槽位已确定的收集表单会被拒绝（FORM_SLOTS_ALREADY_KNOWN），
-      请直接调用对应工具；未知配置或歧义时表单仍可用。配置项已明确（编码、中文名称/别名，或已用
-      list_config_defs / get_config_def 确认的映射）时直接调用 select_definitions，不下发选择表单。
-      字段类型仅限白名单 text/number/boolean/date/enum/multi_select/attachment，禁止 HTML/脚本/自定义属性。
-      选择题的选项有三种来源：options（写死）、optionsFrom.map（父值 → 选项，静态映射）、
-      optionsFrom.sourceId（后端注册数据源，闭集两个：definition_fields = 父值(配置定义编码) → 该定义的字段；
-      definitions = 父值(层级 GLOBAL/REGION/PROJECT) → 该层级的配置定义，即「层级→定义」用法）。
-      optionsFrom / defaultFrom 的 dependsOn 必填（没有父字段就没有级联），URL/脚本等自定义数据源一律被拒。
-      表单只收集值、不推进步骤：提交后向导仍停在原步骤，"用户无需手动跳步"不等于可以跳过 confirm_step
-      （如当前是 SELECT_DEFS，下一批先 confirm_step 到 QUERY_COND，再 set_condition；不要拿到值后直接启动作业）。
-      工具结果是统一信封 JSON（outcome/code/retryable/target/message）：用户提交后，字段 key→值的 JSON 原文
-      在 message 字段里（读取它，不要把整个信封当表单数据）；用户关闭表单则 outcome=cancelled、无数据；
-      schema 不合规则 outcome=rejected 且表单未下发。
+      在对话内渲染结构化表单并等待用户填写，只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问。
+      purpose 必须对应实际用途。TASK_TYPE 只在类型未知时使用单个 EXPORT/IMPORT 单选；SET_CONDITIONS 由宿主统一发放，
+      模型不得自行调用。配置项已明确时直接使用 select_definitions。字段类型统一为
+      text/number/boolean/date/enum/multi_select/attachment，禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，
+      不得预填。默认 Schema 只披露基础字段，visibleWhen/requiredWhen/disabledWhen/optionsFrom/defaultFrom
+      仅在当前 Schema 明确披露时使用；高级联动仍受后端白名单与闭集数据源校验。表单只收集值，不推进向导步骤；
+      用户提交后的字段值在统一信封 message 中，取消为 outcome=cancelled，schema 不合规则 rejected 且未下发。
+  - toolKey: read_tool_result
+    title: 读取截断工具结果
+    description: >-
+      按 toolCallId 分页读取本轮被截断的非 KB 工具结果。offset 从 0 开始，maxChars 默认 4000、范围 2..8000；
+      返回 originalChars/returnedChars/nextOffset/content，nextOffset 非空时用它续读。
+      只能读取当前 run、当前身份下的既有台账；KB 结果继续使用 kb_read_doc 原生分页。
   - toolKey: read_sheet_summary
     title: 读取表格摘要
   - toolKey: aggregate_sheet
