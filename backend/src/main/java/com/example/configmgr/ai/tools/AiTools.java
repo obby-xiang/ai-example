@@ -366,7 +366,8 @@ public class AiTools {
         }
         Map<String, Object> context = toolContext == null ? null : toolContext.getContext();
         String runId = context == null ? null : stringOf(context.get("runId"));
-        return this.runStore.readToolResult(runId, toolCallId, offset, maxChars);
+        String sessionId = context == null ? null : stringOf(context.get("sessionId"));
+        return this.runStore.readToolResult(runId, sessionId, toolCallId, offset, maxChars);
     }
 
     // ==================== 任务创建（S4.4e 裁决②：AI 可从零创建任务） ====================
@@ -779,7 +780,7 @@ public class AiTools {
     @Tool(name = AiToolNames.CONFIRM_STEP, description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
             + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
             + "推进成功后下一批按最新披露继续，推进失败即停"
-            + "（第 29 条窄例外除外：回执给出纠正指引且本次失败零副作用时，允许一次不同的纠正动作；"
+            + "（回执给出明确纠正指引且本次零副作用时，允许一次不同的纠正动作；"
             + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单："
             + "条件未决定时由宿主统一给一次非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
             + "禁止从 SELECT_DEFS 直接跳到 EXPORT；条件已知但还没有草案、或条件表回灌了非空文本却还没 set_condition 时，"
@@ -872,8 +873,8 @@ public class AiTools {
             + "只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问；purpose 必须是当前用途。"
             + "TASK_TYPE 只在类型未知时使用单个 EXPORT/IMPORT 单选；SET_CONDITIONS 由宿主统一发放，模型不得自行调用。"
             + "配置项已明确时直接用 select_definitions。字段类型统一为 text/number/boolean/date/enum/multi_select/attachment，"
-            + "禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，不得预填。默认 Schema 只披露基础字段，"
-            + "联动属性仅在当前 Schema 明确披露时使用。表单只收集值，不推进向导步骤；结果读取统一信封的 message 字段")
+            + "禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，不得预填。披露时保留完整当前 Schema 和联动能力。"
+            + "表单只收集值，不推进向导步骤；结果读取统一信封的 message 字段")
     @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.H)

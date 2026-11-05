@@ -6,6 +6,7 @@ import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
+import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -214,7 +215,7 @@ public class StartupResumeRunner {
 
 	/**
 	 * 轮转起点（按触发面分记：{@code MODE/system} 或 {@code MODE/tenant:user}）：
-	 * 上一拍<b>最后一个真正尝试过</b>的候选键。
+	 * 上一页最后一个候选的到期 score + member。
 	 *
 	 * <p>为什么需要它：候选按到期分数排序，产出/尝试预算又有界。若每拍都从第一个开始，
 	 * 排在前面的候选每拍都能把预算用光（哪怕每次都只是失败/被占），后面的轮次永久饿死。
@@ -223,7 +224,10 @@ public class StartupResumeRunner {
 	 * <p><b>有界</b>：键含身份，不能随"来过本实例的用户数"无限增长 —— 上限与淘汰规则见
 	 * {@link #MAX_SCAN_CURSORS} / {@link #rememberCursor}（系统面两条永不淘汰）。
 	 */
-	private final Map<String, String> scanCursors = new ConcurrentHashMap<>();
+	private final Map<String, RecoveryPageCursor> scanCursors = new ConcurrentHashMap<>();
+
+	private record RecoveryPageCursor(long dueAtMs, String member) {
+	}
 
 	private volatile Map<String, Object> lastScan = Map.of("scanned", false);
 
@@ -313,10 +317,16 @@ public class StartupResumeRunner {
 			return deferred;
 		}
 		try {
+			String cursorScope = cursorScope(Mode.STARTUP, RequestContextUtils.currentOrNull());
+			RecoveryPageCursor pageCursor = this.scanCursors.get(cursorScope);
 			List<Map<String, Object>> candidates;
 			try {
-				// 恢复扫描只取轻量投影：不读 ledgerCounts/心跳/逐条 pending 详情（安全判据一个不少）。
-				candidates = this.resumeService.listRunsForRecovery(recoveryCandidateLimit());
+				// 每拍只取一页；下一拍从 score + member 游标后继续，而不是重读前 256 条。
+				candidates = recoveryPage(pageCursor);
+				if (candidates.isEmpty() && pageCursor != null) {
+					this.scanCursors.remove(cursorScope);
+					candidates = recoveryPage(null);
+				}
 			}
 			catch (Exception ex) {
 				// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
@@ -333,6 +343,7 @@ public class StartupResumeRunner {
 				return failed;
 			}
 			PipelineResult result = runPipeline(candidates, Mode.STARTUP);
+			rememberCursor(cursorScope, cursorOfLast(candidates));
 			Map<String, Object> report = new LinkedHashMap<>();
 			report.put("scanned", true);
 			report.put("at", Instant.now().toString());
@@ -509,9 +520,15 @@ public class StartupResumeRunner {
 			return deferred;
 		}
 		try {
+			String cursorScope = cursorScope(Mode.RUNTIME, RequestContextUtils.currentOrNull());
+			RecoveryPageCursor pageCursor = this.scanCursors.get(cursorScope);
 			List<Map<String, Object>> candidates;
 			try {
-				candidates = this.resumeService.listRunsForRecovery(recoveryCandidateLimit());
+				candidates = recoveryPage(pageCursor);
+				if (candidates.isEmpty() && pageCursor != null) {
+					this.scanCursors.remove(cursorScope);
+					candidates = recoveryPage(null);
+				}
 			}
 			catch (Exception ex) {
 				// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
@@ -528,6 +545,7 @@ public class StartupResumeRunner {
 			}
 			long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
 			PipelineResult result = runPipeline(candidates, Mode.RUNTIME);
+			rememberCursor(cursorScope, cursorOfLast(candidates));
 			Map<String, Object> report = new LinkedHashMap<>();
 			report.put("swept", true);
 			report.put("at", Instant.now().toString());
@@ -597,15 +615,11 @@ public class StartupResumeRunner {
 		List<Map<String, Object>> expired = new ArrayList<>();
 		// 请求面（线程有身份）只处理自己的轮次；系统面（无身份线程）按每条记录的记录身份推进。
 		TenantUser caller = RequestContextUtils.currentOrNull();
-		// 轮转起点（公平性）：到期顺序 + 有界预算下，若每拍都从第一个开始，排在前面却永远失败/被占的
-		// 候选会把预算每拍用光，后面的轮次永久饿死。这里从"上一拍最后一个尝试过的候选之后"开始。
-		String cursorScope = cursorScope(mode, caller);
 		int attempts = 0;
 		// F2（到期收敛）单独计数：它的"无果尝试"不能吃掉续跑/取消收尾的尝试预算，
 		// 否则一堆活跃非终态轮次的 F2 探测会把真正该接管的轮次挤到下一拍。两本账各自有界 ⇒ 单拍仍有界。
 		int expireAttempts = 0;
-		String lastAttempted = null;
-		for (Map<String, Object> run : rotateFrom(candidates, this.scanCursors.get(cursorScope))) {
+		for (Map<String, Object> run : candidates) {
 			String runId = String.valueOf(run.get("runId"));
 			String status = run.get("status") == null ? null : String.valueOf(run.get("status"));
 			long recordTenantId = identityField(run, "tenantId");
@@ -641,7 +655,6 @@ public class StartupResumeRunner {
 						continue;
 					}
 					attempts++;
-					lastAttempted = cursorKeyOf(run);
 					ResumeService.CancelFinalize outcome;
 					try {
 						outcome = cancelWithRunIdentity(runId, recordTenantId, recordUserId);
@@ -674,7 +687,6 @@ public class StartupResumeRunner {
 				if (!RunSnapshot.isTerminal(status) && this.confirmGate != null
 						&& productive(resumed, finalized, expired) < limit && expireAttempts < attemptLimit) {
 					expireAttempts++;
-					lastAttempted = cursorKeyOf(run);
 					int converged = expireParkedWithRunIdentity(runId, recordTenantId, recordUserId);
 					if (converged > 0) {
 						Map<String, Object> item = new LinkedHashMap<>();
@@ -712,7 +724,7 @@ public class StartupResumeRunner {
 					continue;
 				}
 				attempts++;
-				lastAttempted = cursorKeyOf(run);
+
 				boolean takeover = RunSnapshot.RUNNING.equals(status);
 				AiTrace.bind(runId, null);
 				try {
@@ -759,7 +771,7 @@ public class StartupResumeRunner {
 				continue;
 			}
 			attempts++;
-			lastAttempted = cursorKeyOf(run);
+
 			boolean zombie = Boolean.TRUE.equals(run.get("zombieRunning"));
 			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装。
 			AiTrace.bind(runId, null);
@@ -789,11 +801,6 @@ public class StartupResumeRunner {
 				AiTrace.clear();
 			}
 		}
-		if (lastAttempted != null) {
-			// 只把"真正尝试过"的位置记成下一拍起点：纯安全跳过（终态/未决外部项/无身份）不推进游标，
-			// 它们本来就不占预算。
-			rememberCursor(cursorScope, lastAttempted);
-		}
 		return new PipelineResult(resumed, skipped, finalized, expired);
 	}
 
@@ -806,7 +813,29 @@ public class StartupResumeRunner {
 	 * 开始"，排队尾的轮次重新饿死 —— 那正是轮转要解决的问题。被淘汰的身份下一次扫描从固定顺序起点
 	 * 开始、之后照常轮转，只损失一次连续性，不产生永久饿死。
 	 */
-	private void rememberCursor(String scope, String cursor) {
+	private List<Map<String, Object>> recoveryPage(RecoveryPageCursor cursor) {
+		long afterDueAtMs = cursor == null ? 0L : cursor.dueAtMs();
+		String afterMember = cursor == null ? null : cursor.member();
+		return this.resumeService.listRunsForRecoveryAfter(recoveryCandidateLimit(), afterDueAtMs, afterMember);
+	}
+
+	private static RecoveryPageCursor cursorOfLast(List<Map<String, Object>> candidates) {
+		if (candidates.isEmpty()) {
+			return null;
+		}
+		Map<String, Object> last = candidates.get(candidates.size() - 1);
+		String runId = String.valueOf(last.get("runId"));
+		String member = RequestContextUtils.currentOrNull() == null
+				? RunKeyScope.indexMember(identityField(last, "tenantId"), identityField(last, "userId"), runId)
+				: runId;
+		return new RecoveryPageCursor(asLong(last.get("dueAtMs")), member);
+	}
+
+	private void rememberCursor(String scope, RecoveryPageCursor cursor) {
+		if (cursor == null) {
+			this.scanCursors.remove(scope);
+			return;
+		}
 		if (this.scanCursors.size() >= MAX_SCAN_CURSORS && !this.scanCursors.containsKey(scope)
 				&& !evictIdentityCursor()) {
 			// 理论上不可达（系统面至多 2 条 < 上限 ⇒ 达上限时必有请求面游标可淘汰）。
@@ -835,35 +864,6 @@ public class StartupResumeRunner {
 	/** 轮转游标的作用域：模式 + 触发面身份（系统面 / 某一身份）。 */
 	private static String cursorScope(Mode mode, TenantUser caller) {
 		return mode.name() + (caller == null ? "/system" : "/" + caller.tenantId() + ":" + caller.userId());
-	}
-
-	/** 候选的身份复合键（同一 runId 可属于不同身份，游标必须按复合键对位）。 */
-	private static String cursorKeyOf(Map<String, Object> run) {
-		return identityField(run, "tenantId") + "/" + identityField(run, "userId") + "/" + run.get("runId");
-	}
-
-	/**
-	 * 从 {@code afterKey} 的<b>下一条</b>开始轮转（环形）；找不到该键（候选变了）或只有一个候选时
-	 * 原样返回 —— 起点失效时回到到期顺序的第一条，不会漏扫。
-	 */
-	private static List<Map<String, Object>> rotateFrom(List<Map<String, Object>> candidates, String afterKey) {
-		if (afterKey == null || candidates.size() < 2) {
-			return candidates;
-		}
-		int start = 0;
-		for (int i = 0; i < candidates.size(); i++) {
-			if (afterKey.equals(cursorKeyOf(candidates.get(i)))) {
-				start = i + 1;
-				break;
-			}
-		}
-		if (start == 0 || start >= candidates.size()) {
-			return candidates;
-		}
-		List<Map<String, Object>> rotated = new ArrayList<>(candidates.size());
-		rotated.addAll(candidates.subList(start, candidates.size()));
-		rotated.addAll(candidates.subList(0, start));
-		return rotated;
 	}
 
 	/** 启动/手工扫描的"发现态跳过"报告项（带记录身份，GET 面据此切片）。 */

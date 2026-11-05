@@ -602,6 +602,13 @@
       "reason": "已同步SSE单事件及未闭合缓冲区256KiB上限、超限真实失败与正常EOF尾帧语义，未新增解析依赖",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:adee955bd607b154ae6579fd37c68aa5796ba1feade2c6e41006dc792a9d4306",
+      "status": "synced",
+      "reason": "已同步恢复候选score+member续页、当前会话归属校验、单次流式截断证据及公开异常脱敏契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

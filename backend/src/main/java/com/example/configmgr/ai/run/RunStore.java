@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.RunKeyScope;
@@ -3287,6 +3288,76 @@ public class RunStore {
 		return out;
 	}
 
+	/** 按到期 score + member 取下一页；同分成员按 ZSET 字典序续接，单次 Redis 读取最多 256 项。 */
+	public List<RecoveryCandidate> recoveryDueRecordsAfter(long nowMs, long afterDueAtMs, String afterMember, int limit) {
+		if (this.redis == null || limit <= 0) {
+			return List.of();
+		}
+		int pageLimit = Math.min(256, limit);
+		TenantUser current = RequestContextUtils.currentOrNull();
+		String key = current == null ? RECOVERY_DUE_INDEX : identityRecoveryDueKey(current.tenantId(), current.userId());
+		if (afterMember == null) {
+			Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeByScoreWithScores(key,
+					Double.NEGATIVE_INFINITY, nowMs, 0, pageLimit);
+			return recoveryCandidates(members, current, pageLimit);
+		}
+		List<RecoveryCandidate> out = new ArrayList<>(pageLimit);
+		long offset = 0L;
+		while (out.size() < pageLimit) {
+			Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeByScoreWithScores(key,
+					afterDueAtMs, afterDueAtMs, offset, 256);
+			if (members == null || members.isEmpty()) {
+				break;
+			}
+			offset += members.size();
+			for (ZSetOperations.TypedTuple<String> tuple : members) {
+				String member = tuple.getValue();
+				Double score = tuple.getScore();
+				if (member == null || score == null || member.compareTo(afterMember) <= 0) {
+					continue;
+				}
+				RunKeyScope.IndexRef ref = current == null ? RunKeyScope.parseIndexMember(member)
+						: new RunKeyScope.IndexRef(current.tenantId(), current.userId(), member);
+				if (ref != null) {
+					out.add(new RecoveryCandidate(ref, score.longValue()));
+					if (out.size() == pageLimit) {
+						return out;
+					}
+				}
+			}
+			if (members.size() < 256) {
+				break;
+			}
+		}
+		if (out.size() < pageLimit && afterDueAtMs < nowMs) {
+			Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeByScoreWithScores(key,
+					Math.nextUp((double) afterDueAtMs), nowMs, 0, pageLimit - out.size());
+			out.addAll(recoveryCandidates(members, current, pageLimit - out.size()));
+		}
+		return out;
+	}
+
+	private List<RecoveryCandidate> recoveryCandidates(Set<ZSetOperations.TypedTuple<String>> members,
+			TenantUser current, int limit) {
+		if (members == null || members.isEmpty() || limit <= 0) {
+			return List.of();
+		}
+		List<RecoveryCandidate> out = new ArrayList<>(Math.min(members.size(), limit));
+		for (ZSetOperations.TypedTuple<String> tuple : members) {
+			String member = tuple.getValue();
+			Double score = tuple.getScore();
+			RunKeyScope.IndexRef ref = current == null ? RunKeyScope.parseIndexMember(member)
+					: new RunKeyScope.IndexRef(current.tenantId(), current.userId(), member);
+			if (ref != null && score != null) {
+				out.add(new RecoveryCandidate(ref, score.longValue()));
+				if (out.size() == limit) {
+					break;
+				}
+			}
+		}
+		return out;
+	}
+
 	/** 每拍最多 64 项，并以 ZSET 偏移轮转；state 缺失必须回读快照确认。 */
 	public int pruneRunIndex() {
 		if (this.redis == null) {
@@ -4113,23 +4184,39 @@ public class RunStore {
 		return ledgerFor(runId, toolCallId);
 	}
 
-	public String readToolResult(String runId, String toolCallId, Integer offset, Integer maxChars) {
-		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
-			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT, "read_tool_result 需要当前 runId 与非空 toolCallId");
+	public String readToolResult(String runId, String sessionId, String toolCallId, Integer offset, Integer maxChars) {
+		if (runId == null || runId.isBlank() || sessionId == null || sessionId.isBlank()
+				|| toolCallId == null || toolCallId.isBlank()) {
+			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT, "缺少结果回读所需的轮次、会话或调用标识");
 		}
 		int from = offset == null ? 0 : offset;
 		int limit = maxChars == null ? 4000 : maxChars;
 		if (from < 0 || limit < 2 || limit > 8000) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-					"read_tool_result 游标不合法：offset 必须 ≥0，maxChars 必须在 2..8000");
+					"分页游标不合法：偏移量必须 ≥0，单页字符数必须在 2..8000");
 		}
 		RequestContextUtils.require();
-		SnapshotOwner owner = snapshotOwner(runId);
-		if (owner.state() == SnapshotOwner.State.UNREADABLE) {
-			throw new AiStateUnavailableException("无法确认工具结果所属轮次 " + runId);
+		try {
+			return readToolResultInContext(runId, sessionId, toolCallId, from, limit);
 		}
-		if (owner.state() != SnapshotOwner.State.ATTRIBUTED) {
-			throw new ResourceNotFoundException("当前身份下不存在该 run 或无权读取：" + runId);
+		catch (ConflictException | ResourceNotFoundException ex) {
+			throw ex;
+		}
+		catch (RuntimeException ex) {
+			log.warn("read_tool_result failed runId={} toolCallId={} (returning sanitized public error)",
+					runId, toolCallId, ex);
+			throw new AiStateUnavailableException("结果暂时无法读取，请稍后重试", ex);
+		}
+	}
+
+	private String readToolResultInContext(String runId, String sessionId, String toolCallId, int from, int limit) {
+		SnapshotEvidence evidence = readSnapshotEvidence(runId, toolCallId);
+		SnapshotOwner owner = evidence.owner();
+		if (owner.state() == SnapshotOwner.State.UNREADABLE) {
+			throw new AiStateUnavailableException("暂时无法确认工具结果归属，请稍后重试");
+		}
+		if (owner.state() != SnapshotOwner.State.ATTRIBUTED || !sessionId.equals(owner.sessionId())) {
+			throw new ResourceNotFoundException("当前身份下不存在该轮次或无权读取");
 		}
 		Map<String, Object> record = idemFor(runId, toolCallId);
 		String name;
@@ -4141,7 +4228,7 @@ public class RunStore {
 		else {
 			PendingToolCall pending = pending(runId, toolCallId);
 			if (pending == null || !pending.resolved()) {
-				throw new ResourceNotFoundException("当前 run 中不存在已结算的工具结果：" + toolCallId);
+				throw new ResourceNotFoundException("当前轮次中不存在已结算的工具结果");
 			}
 			name = pending.getName() == null ? "" : pending.getName();
 			text = pending.getResultText();
@@ -4151,13 +4238,16 @@ public class RunStore {
 					"KB 结果请使用 kb_read_doc 的原生 offset/next_offset 分页，不走通用结果回读");
 		}
 		if (text == null) {
-			throw new ResourceNotFoundException("该工具调用没有可回读的结果正文：" + toolCallId);
+			throw new ResourceNotFoundException("该工具调用没有可回读的结果正文");
+		}
+		if (!evidence.truncated()) {
+			throw new ResourceNotFoundException("该结果没有模型侧截断证据，不支持回读");
 		}
 		int originalChars = text.length();
 		if (from > originalChars || (from > 0 && from < originalChars
 				&& Character.isLowSurrogate(text.charAt(from)) && Character.isHighSurrogate(text.charAt(from - 1)))) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-					"read_tool_result offset 超出结果长度或落在代理对中间：" + from);
+					"分页偏移量超出结果长度或落在代理对中间：" + from);
 		}
 		int end = (int) Math.min(originalChars, (long) from + limit);
 		if (end < originalChars && end > from && Character.isHighSurrogate(text.charAt(end - 1))) {
@@ -4177,7 +4267,187 @@ public class RunStore {
 			return this.mapper.writeValueAsString(page);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法序列化工具结果分页：" + toolCallId, ex);
+			throw new IllegalStateException("无法序列化工具结果分页", ex);
+		}
+	}
+
+	private record SnapshotEvidence(SnapshotOwner owner, boolean truncated) {
+	}
+
+	private record ToolResponseEvidence(String responseData) {
+	}
+
+	/** 一次原始 JSON 读取同时完成归属与截断证据校验；不物化整份 RunSnapshot。 */
+	private SnapshotEvidence readSnapshotEvidence(String runId, String toolCallId) {
+		String raw;
+		try {
+			raw = this.redis.opsForValue().get(runKey(runId));
+		}
+		catch (RuntimeException ex) {
+			throw new AiStateUnavailableException("暂时无法确认工具结果归属，请稍后重试", ex);
+		}
+		if (raw == null) {
+			return new SnapshotEvidence(SnapshotOwner.missing(), false);
+		}
+		String sessionId = null;
+		boolean truncated = false;
+		try (JsonParser parser = this.mapper.getFactory().createParser(raw)) {
+			if (parser.nextToken() != JsonToken.START_OBJECT) {
+				return new SnapshotEvidence(SnapshotOwner.unreadable(), false);
+			}
+			while (parser.nextToken() == JsonToken.FIELD_NAME) {
+				String field = parser.currentName();
+				JsonToken value = parser.nextToken();
+				if ("sessionId".equals(field)) {
+					if (value == JsonToken.VALUE_STRING) {
+						sessionId = parser.getText();
+					}
+					else if (value != JsonToken.VALUE_NULL) {
+						return new SnapshotEvidence(SnapshotOwner.unreadable(), false);
+					}
+				}
+				else if ("messageJson".equals(field)) {
+					truncated = readTruncationEvidence(parser, toolCallId);
+				}
+				else {
+					parser.skipChildren();
+				}
+			}
+		}
+		catch (Exception ex) {
+			log.warn("read_tool_result snapshot evidence unreadable runId={} toolCallId={} (fail closed): {}",
+					runId, toolCallId, ex.getMessage());
+			throw new AiStateUnavailableException("无法确认工具结果归属", ex);
+		}
+		SnapshotOwner owner = sessionId == null ? SnapshotOwner.absent() : SnapshotOwner.attributed(sessionId);
+		return new SnapshotEvidence(owner, truncated);
+	}
+
+	/** 顺序流式扫描并保留最后一个目标 TOOL 响应的截断结论；任何损坏证据均失败关闭。 */
+	private boolean readTruncationEvidence(JsonParser parser, String toolCallId) throws Exception {
+		if (parser.currentToken() != JsonToken.START_ARRAY) {
+			throw new IllegalStateException("messageJson must be an array");
+		}
+		boolean truncated = false;
+		while (parser.nextToken() != JsonToken.END_ARRAY) {
+			if (parser.currentToken() != JsonToken.VALUE_STRING) {
+				throw new IllegalStateException("messageJson entry must be a string");
+			}
+			Boolean candidate = readMessageTruncationEvidence(parser.getText(), toolCallId);
+			if (candidate != null) {
+				truncated = candidate;
+			}
+		}
+		return truncated;
+	}
+
+	private Boolean readMessageTruncationEvidence(String rawMessage, String toolCallId) throws Exception {
+		try (JsonParser parser = this.mapper.getFactory().createParser(rawMessage)) {
+			if (parser.nextToken() != JsonToken.START_OBJECT) {
+				throw new IllegalStateException("messageJson entry must contain an object");
+			}
+			String type = null;
+			ToolResponseEvidence candidate = null;
+			while (parser.nextToken() == JsonToken.FIELD_NAME) {
+				String field = parser.currentName();
+				JsonToken value = parser.nextToken();
+				if ("type".equals(field)) {
+					if (value != JsonToken.VALUE_STRING) {
+						throw new IllegalStateException("message type must be a string");
+					}
+					type = parser.getText();
+				}
+				else if ("toolResponses".equals(field)) {
+					if (org.springframework.ai.chat.messages.MessageType.TOOL.name().equals(type)) {
+						candidate = readToolResponseEvidence(parser, toolCallId);
+					}
+					else {
+						parser.skipChildren();
+					}
+				}
+				else {
+					parser.skipChildren();
+				}
+			}
+			if (!org.springframework.ai.chat.messages.MessageType.TOOL.name().equals(type) || candidate == null) {
+				return null;
+			}
+			return readEnvelopeTruncated(candidate.responseData());
+		}
+	}
+
+	private ToolResponseEvidence readToolResponseEvidence(JsonParser parser, String toolCallId) throws Exception {
+		if (parser.currentToken() != JsonToken.START_ARRAY) {
+			throw new IllegalStateException("toolResponses must be an array");
+		}
+		ToolResponseEvidence candidate = null;
+		while (parser.nextToken() != JsonToken.END_ARRAY) {
+			if (parser.currentToken() != JsonToken.START_OBJECT) {
+				throw new IllegalStateException("tool response must be an object");
+			}
+			if (candidate != null) {
+				parser.skipChildren();
+				continue;
+			}
+			boolean matches = false;
+			String responseData = null;
+			while (parser.nextToken() == JsonToken.FIELD_NAME) {
+				String field = parser.currentName();
+				JsonToken value = parser.nextToken();
+				if ("id".equals(field)) {
+					if (value != JsonToken.VALUE_STRING) {
+						throw new IllegalStateException("tool response id must be a string");
+					}
+					matches = toolCallId.equals(parser.getText());
+				}
+				else if ("responseData".equals(field) && matches) {
+					if (value == JsonToken.VALUE_STRING) {
+						responseData = parser.getText();
+					}
+					else if (value != JsonToken.VALUE_NULL) {
+						throw new IllegalStateException("tool response data must be a string");
+					}
+				}
+				else {
+					parser.skipChildren();
+				}
+			}
+			if (matches) {
+				candidate = new ToolResponseEvidence(responseData);
+			}
+		}
+		return candidate;
+	}
+
+	private boolean readEnvelopeTruncated(String responseData) throws Exception {
+		String json = ToolResultEnvelope.unwrapModelJson(responseData);
+		if (json == null || json.isBlank()) {
+			return false;
+		}
+		try (JsonParser parser = this.mapper.getFactory().createParser(json)) {
+			if (parser.nextToken() != JsonToken.START_OBJECT) {
+				throw new IllegalStateException("tool result envelope must be an object");
+			}
+			boolean truncated = false;
+			while (parser.nextToken() == JsonToken.FIELD_NAME) {
+				String field = parser.currentName();
+				JsonToken value = parser.nextToken();
+				if ("truncated".equals(field)) {
+					if (value == JsonToken.VALUE_TRUE) {
+						truncated = true;
+					}
+					else if (value == JsonToken.VALUE_FALSE) {
+						truncated = false;
+					}
+					else {
+						return false;
+					}
+				}
+				else {
+					parser.skipChildren();
+				}
+			}
+			return truncated;
 		}
 	}
 

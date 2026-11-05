@@ -205,6 +205,8 @@ public class ResilientChatService {
 			9. 不输出密钥、口令、私钥块或连接串凭据；需要指代时写「（凭据已隐去）」。
 			10. 页面级或只读调用失败即停；仅当本次零副作用且回执给出明确纠正指引时，允许一次不同纠正动作，
 			    不得重试同参数/同目标，也不得借此绕过确认卡。
+			11. 面向用户的最终回答使用普通业务语言，不照搬 DANGER、run 状态、count 档、epoch 等内部协议术语；
+			    工具调用和引用所需的标识除外。
 			""";
 
 	/**
@@ -1369,11 +1371,14 @@ public class ResilientChatService {
 				// 纠正是否该触发，只看本轮<b>是否有正文</b>（工具卡承载了全部正文时同样要纠正）；
 				// 未落库余段只用于前缀/落库去重，不能拿它当"有没有答过"的判据。
 				String correctionText = accumulator.unpersistedText();
-				boolean correctable = firstFinish != UpstreamErrorClassifier.Finish.LENGTH
+				boolean createTaskCorrectable = firstFinish != UpstreamErrorClassifier.Finish.LENGTH
+						&& firstFinish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
+						&& (firstFinish == UpstreamErrorClassifier.Finish.TOOL_CALLS || StringUtils.hasText(accumulator.text()));
+				boolean exportCorrectable = firstFinish != UpstreamErrorClassifier.Finish.LENGTH
 						&& firstFinish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
 						&& firstFinish != UpstreamErrorClassifier.Finish.TOOL_CALLS
 						&& StringUtils.hasText(accumulator.text());
-				if (!createTaskCorrectionUsed && !correcting && correctable
+				if (!createTaskCorrectionUsed && !correcting && createTaskCorrectable
 						&& createTaskWrapUpCorrectionDue(runId, context)
 						&& markCorrectionUsed(runId, correctionText, CREATE_TASK_CORRECTION_MARKER,
 								CREATE_TASK_CORRECTION_PREFIX_KEY)) {
@@ -1390,7 +1395,7 @@ public class ResilientChatService {
 					}
 					continue;
 				}
-				if (!exportCorrectionUsed && !correcting && correctable
+				if (!exportCorrectionUsed && !correcting && exportCorrectable
 						&& exportWrapUpCorrectionDue(runId, context, lastUserText)
 						&& markExportCorrectionUsed(runId, correctionText)) {
 					exportCorrectionUsed = true;
@@ -1585,6 +1590,10 @@ public class ResilientChatService {
 				|| !disclosedTool(context, AiToolNames.CREATE_TASK)) {
 			return false;
 		}
+		if (creationTaskType(context) == null) {
+			log.debug("create-task correction skipped: no structured creation task type runId={}", runId);
+			return false;
+		}
 		try {
 			for (PendingToolCall pending : this.store.pendings(runId)) {
 				if (pending != null && AiToolNames.CREATE_TASK.equals(pending.getName())) {
@@ -1613,10 +1622,41 @@ public class ResilientChatService {
 		}
 	}
 
+	private static String creationTaskType(AiContext context) {
+		return context == null ? null : creationTaskType(context.getTaskType());
+	}
+
+	private static String creationTaskType(String taskType) {
+		if (taskType == null) {
+			return null;
+		}
+		String normalized = taskType.trim().toUpperCase(java.util.Locale.ROOT);
+		return "EXPORT".equals(normalized) || "IMPORT".equals(normalized) ? normalized : null;
+	}
+
 	static String createTaskWrapUpCorrection() {
 		return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
 				+ "如果用户本轮是在要求新建任务，请调用一次 create_task；不要只列配置或用文字反问。"
+				+ "按当前结构化创建上下文传 type=EXPORT 或 IMPORT；类型无法证明时不要猜测。"
+				+ "EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；"
+				+ "IMPORT 不得附加导出条件。defCodes 未知时省略，不得先查目录或追问。"
 				+ "如果用户只是查询配置而不要求新建，直接给出查询结果。不得重复已经执行的工具，也不得自动批准创建。";
+	}
+
+	private static String createTaskWrapUpCorrection(String taskType) {
+		if ("EXPORT".equals(creationTaskType(taskType))) {
+			return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+					+ "当前结构化创建类型为 EXPORT，请调用一次 create_task，传 type=EXPORT，并显式传 conditions："
+					+ "用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；"
+					+ "defCodes 未知时省略，不得先查目录或追问，也不得重复已经执行的工具或自动批准创建。";
+		}
+		if ("IMPORT".equals(creationTaskType(taskType))) {
+			return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+					+ "当前结构化创建类型为 IMPORT，请调用一次 create_task，传 type=IMPORT；"
+					+ "不得附加 EXPORT 的 conditions，defCodes 未知时省略，不得先查目录或追问，"
+					+ "也不得重复已经执行的工具或自动批准创建。";
+		}
+		return createTaskWrapUpCorrection();
 	}
 
 	/**
@@ -1951,7 +1991,7 @@ public class ResilientChatService {
 		// 类型由触发分支显式传入；再用持久化 marker 确认 create_task 纠正确实已登记。
 		// 不能看 prefix key：正文全部由工具卡承载时 prefix 为空、prefix key 本就不写。
 		boolean createTaskCorrection = createTaskCorrectionActive && createTaskCorrectionMarked(snapshot);
-		history.add(new UserMessage(createTaskCorrection ? createTaskWrapUpCorrection()
+		history.add(new UserMessage(createTaskCorrection ? createTaskWrapUpCorrection(latest.getTaskType())
 				: exportWrapUpCorrection(latest.getTaskId())));
 		Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
 				out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);

@@ -19,8 +19,11 @@ final class PromptRulePacks {
 			sb.append("""
 
 					创建任务：用户明确新建时直接 create_task，不先用列表摸底，也不复用旧任务参数。
-					创建仍走确认卡且每轮最多一次；已创建的任务不得重建或重复批准。create_task 只创建任务，
-					取得真实 taskId 后不得结束本轮，应按当前披露继续。
+					按当前结构化创建上下文传 type=EXPORT 或 IMPORT，类型无法证明时不要猜测。
+					EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；
+					IMPORT 不得附加导出条件。defCodes 未知时省略，保持宿主后续配置选择。
+					不得改为目录查询或文字追问。创建仍走确认卡且每轮最多一次；已创建的任务不得重建或重复批准。
+					create_task 只创建任务，取得真实 taskId 后不得结束本轮，应按当前披露继续。
 					""");
 			if (disclosedTools.contains(AiToolNames.NAVIGATE_TO)) {
 				sb.append("""
@@ -58,7 +61,8 @@ final class PromptRulePacks {
 		if (disclosedTools.contains(AiToolNames.GENERATIVE_FORM)) {
 			sb.append("""
 
-					generative_form 只收集真实缺口，不用于已知值、二次确认或取消后自动重问；purpose 必须明确。
+					generative_form 只收集真实缺口，不用于已知值、二次确认或取消后自动重问；用途必须可判定。
+					选择/条件/类型表单按各自要求显式给出 purpose，通用澄清允许缺省。
 					TASK_TYPE 仅在类型未知时使用单个 EXPORT/IMPORT 单选。表单提交不推进步骤，下一批仍按当前披露继续。
 					不得用 generative_form 代替宿主在 QUERY_COND 提供的条件文本框，两类表单不得混用。
 					""");
