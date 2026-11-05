@@ -716,6 +716,10 @@
       "summary": "Download export files",
       "withCount": "Download export files ({count} definitions)"
     },
+    "read_tool_result": {
+      "title": "Read truncated tool result",
+      "summary": "Read truncated tool result (page)"
+    },
     "navigate_to": {
       "title": "Navigate",
       "summary": "Navigate",

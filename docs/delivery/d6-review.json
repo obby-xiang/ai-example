@@ -567,6 +567,13 @@
       "reason": "已同步稳定核心与能力规则包、当前对话续跑边界、QUERY_COND的KB披露、完整表单Schema及read_tool_result有界回读契约",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:d571ee3176fcd1b7fcb0522ab3cbfb23a744a6cf274c49ab9cd3e724a061de14",
+      "status": "not-affected",
+      "reason": "本批仅修正下载重试文案、回执缺省段和read_tool_result用户展示摘要，D6工具协议、分页字段与下载语义不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

@@ -145,6 +145,8 @@ function summaryFor(name: string, args: ToolArgs): string | null {
       const filename = str(args, 'filename')
       return filename ? optional('tool.download.withName', { filename }) : optional('tool.download.summary')
     }
+    case 'read_tool_result':
+      return optional('tool.read_tool_result.summary')
     case 'generative_form':
       return optional('tool.generative_form.summary')
     case 'select_definitions':

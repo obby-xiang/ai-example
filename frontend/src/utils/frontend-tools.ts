@@ -589,7 +589,7 @@ function timeoutOutcome(call: FrontendToolCall, budgetMs: number, elapsedMs: num
     const result = formatUiReceipt({
       tool: label,
       conclusion: `导出准备超时（等待 ${waitedSeconds} 秒），本次未触发下载`,
-      next: '可重新发起导出'
+      next: '核对任务和导出文件就绪后可重试下载'
     })
     return makeExecution({ outcome: 'timeout', availability: 'degraded', code: 'UI_BUDGET_EXHAUSTED', result })
   }

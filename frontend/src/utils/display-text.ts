@@ -44,6 +44,18 @@ const ENVELOPE_FIELDS = new Set([
 ])
 
 const ENVELOPE_PREFIX_RE = /^\{\s*"(?:ok|outcome|retryable|originalChars|returnedChars)"\s*:/
+const READ_TOOL_RESULT_PREFIX_RE = /^\{\s*"toolCallId"\s*:/
+const READ_TOOL_RESULT_FIELDS = new Set([
+  'toolCallId',
+  'name',
+  'offset',
+  'maxChars',
+  'originalChars',
+  'returnedChars',
+  'nextOffset',
+  'content'
+])
+const READ_TOOL_RESULT_REQUIRED_FIELDS = [...READ_TOOL_RESULT_FIELDS]
 
 const TAG_PREFIXES = [
   '<knowledge>',
@@ -135,7 +147,76 @@ function isEnvelope(value: Record<string, unknown>): boolean {
   return !hasOwn(value, 'notice') || value.notice === null || typeof value.notice === 'string'
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0
+}
+
+function readToolResultPage(text: string): EnvelopeRead {
+  const start = text.search(/\S/)
+  if (start < 0 || text[start] !== '{') {
+    return { status: 'notProtocol', end: -1 }
+  }
+  const end = jsonEnd(text, start)
+  if (end < 0) {
+    return READ_TOOL_RESULT_PREFIX_RE.test(text.slice(start))
+      ? { status: 'incomplete', end: -1 }
+      : { status: 'notProtocol', end: -1 }
+  }
+  try {
+    const value = JSON.parse(text.slice(start, end)) as Record<string, unknown>
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return { status: 'notProtocol', end }
+    }
+    for (const key of Object.keys(value)) {
+      if (!READ_TOOL_RESULT_FIELDS.has(key)) {
+        return { status: 'notProtocol', end }
+      }
+    }
+    for (const key of READ_TOOL_RESULT_REQUIRED_FIELDS) {
+      if (!hasOwn(value, key)) {
+        return { status: 'notProtocol', end }
+      }
+    }
+    if (typeof value.toolCallId !== 'string' || value.toolCallId === '' || typeof value.name !== 'string'
+      || !isNonNegativeInteger(value.offset) || !Number.isInteger(value.maxChars)
+      || (value.maxChars as number) < 2 || (value.maxChars as number) > 8000
+      || !isNonNegativeInteger(value.originalChars) || !isNonNegativeInteger(value.returnedChars)
+      || typeof value.content !== 'string') {
+      return { status: 'notProtocol', end }
+    }
+    if (value.nextOffset !== null && !isNonNegativeInteger(value.nextOffset)) {
+      return { status: 'notProtocol', end }
+    }
+    const contentEnd = (value.offset as number) + (value.returnedChars as number)
+    if ((value.offset as number) > (value.originalChars as number)
+      || (value.returnedChars as number) > (value.maxChars as number)
+      || (value.returnedChars as number) !== value.content.length
+      || contentEnd > (value.originalChars as number)) {
+      return { status: 'notProtocol', end }
+    }
+    if (value.nextOffset === null) {
+      if (contentEnd !== value.originalChars) {
+        return { status: 'notProtocol', end }
+      }
+    } else if (contentEnd !== value.nextOffset || contentEnd >= (value.originalChars as number)) {
+      return { status: 'notProtocol', end }
+    }
+    const progress = value.nextOffset === null ? '已读完' : '未读完'
+    return {
+      status: 'valid',
+      display: `${value.content}\n\n已显示 ${contentEnd}/${value.originalChars} 字符，${progress}`,
+      end
+    }
+  } catch {
+    return { status: 'notProtocol', end }
+  }
+}
+
 function readEnvelope(text: string): EnvelopeRead {
+  const paged = readToolResultPage(text)
+  if (paged.status !== 'notProtocol') {
+    return paged
+  }
   const start = text.search(/\S/)
   if (start < 0 || text[start] !== '{') {
     return { status: 'notProtocol', end: -1 }

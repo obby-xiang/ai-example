@@ -57,15 +57,22 @@ export interface UiReceiptInput {
   tool: string
   /** 结论：发生了什么（可判定） */
   conclusion: string
-  /** 原因：为什么（没有原因时给 "-"） */
-  reason: string
-  /** 下一步：模型/用户该做什么（必须可行动） */
-  next: string
+  /** 原因：为什么（缺省时省略该段） */
+  reason?: string
+  /** 下一步：模型/用户该做什么（缺省时省略该段） */
+  next?: string
 }
 
-/** 成文：`<tool>：结论：…。原因：…。下一步：…。` */
+/** 成文：结论必填，原因与下一步仅在有内容时输出。 */
 export function formatUiReceipt(input: UiReceiptInput): string {
-  return `${input.tool}：结论：${input.conclusion}。原因：${input.reason}。下一步：${input.next}。`
+  const sections = [`${input.tool}：结论：${input.conclusion}`]
+  if (input.reason?.trim()) {
+    sections.push(`原因：${input.reason}`)
+  }
+  if (input.next?.trim()) {
+    sections.push(`下一步：${input.next}`)
+  }
+  return sections.join('。') + '。'
 }
 
 /**

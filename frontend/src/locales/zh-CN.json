@@ -716,6 +716,10 @@
       "summary": "下载导出文件",
       "withCount": "下载导出文件（{count} 个配置项）"
     },
+    "read_tool_result": {
+      "title": "读取截断工具结果",
+      "summary": "读取截断工具结果（分页内容）"
+    },
     "navigate_to": {
       "title": "跳转页面",
       "summary": "跳转页面",

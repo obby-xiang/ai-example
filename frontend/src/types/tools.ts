@@ -22,7 +22,7 @@
  * | download_export_files | `task:EXPORT/EXPORT` | READ | FRONTEND |
  * | navigate_to | `*` | READ | FRONTEND |
  * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（勾选即改任务项；不进确认门） | FRONTEND |
- * | set_condition | `page:tasks`, `task:EXPORT` | **WRITE**（条件 PUT 落库；不进确认门） | FRONTEND |
+ * | set_condition | `page:tasks`, `task:EXPORT` | **WRITE**（条件只形成前端草案，后续步骤或启动前提交；不进确认门） | FRONTEND |
  * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（自动执行，不进确认门） | FRONTEND |
  * | generative_form | `page:tasks`, `task:*` | READ | FRONTEND |
  * | read_sheet_summary / aggregate_sheet / inspect_columns / review_cells / find_rows | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | READ | FRONTEND |
@@ -36,7 +36,7 @@
  * 特判 + AiPanel 的 `FormRenderer` 渲染）。
  * ③ `confirm_step` 曾标 READ；R3-02 起按事实标 **WRITE**（导入向导离开第 1 步会整表写回服务端文件）。
  * `select_definitions` / `set_condition` 同理（工具安全边界批，2026-10-25 用户裁决）：前者改任务项勾选、
- * 后者把条件 PUT 落库 —— 都是"改变后续动作的工作选择"的写，不能再自称 READ。
+ * 后者把条件只形成前端草案，后续步骤或启动前提交 —— 都是"改变后续动作的工作选择"的写，不能再自称 READ。
  * 三者仍是 FRONTEND 通道，通道判定优先于风险等级 ⇒ 不会因此新增确认门；
  * 它们的人围栏就是下游 `start_*` 的 DANGER 确认卡（撤销例外：撤销走前端预览卡确认，
  * 见 `SHEET_PREVIEW_TOOLS`）。
