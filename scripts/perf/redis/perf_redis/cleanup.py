@@ -37,6 +37,18 @@ def _synthetic_copy(cfg: Config, scenario: str, plan: Dict[str, object], copy: D
     return filled
 
 
+def _dedupe_index_members(refs: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for ref in refs:
+        identity = (str(ref["key"]), str(ref["member"]))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        out.append(ref)
+    return out
+
+
 def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> Dict[str, object]:
     exact: List[str] = []
     due_members: List[str] = []
@@ -186,7 +198,7 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
     return {
         "exact": K.dedupe(exact),
         "due_members": K.dedupe(due_members),
-        "index_members": K.dedupe(index_members),
+        "index_members": _dedupe_index_members(index_members),
         "runs": K.dedupe(runs),
         "sessions": K.dedupe(sessions),
         "files": files,
