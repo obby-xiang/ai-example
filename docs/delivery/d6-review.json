@@ -539,6 +539,13 @@
       "reason": "本批仅隐藏未确认内部状态的用户提示、完善同run有界对账清理并复制可读工具摘要；D6历史协议、迁移接口和服务端恢复事实不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:f5236cfabd9c9cb5901a434b0617b1e2f9de4cfff5cb1618e2e34d3d808af02b",
+      "status": "not-affected",
+      "reason": "本批仅区分导出前置准备超时与下载即发即回，并清理通用下载不良文案；D6工具协议、迁移接口和结果回灌结构不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

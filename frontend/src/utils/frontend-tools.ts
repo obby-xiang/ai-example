@@ -55,8 +55,8 @@
  * 必须等 `executeFrontendTool` 返回才发 `POST /api/ai/frontend-tool-result`），故这里是
  * "回灌不被无限拖住"的唯一可加缝点。`executeFrontendTool` 因此对**所有**路由统一加一层
  * 预算（{@link FRONTEND_TOOL_TIMEOUT_BUDGET_MS}，默认 60s = 后端挂起上限 120s − 回灌 POST 上限 60s）：
- * 预算到期即产出"结局未知"的结构化失败结局，回灌 POST 随之发出（**异步挂起类**不再迟到 /
- * 丢失；**同步阻塞主线程类**的边界见 `runWithBudget` 的说明）。
+ * 预算到期按工具和所处阶段产出 `timeout`、`unknown` 或 `failed` 的真实结局，回灌 POST 随之发出
+ * （**异步挂起类**不再迟到 / 丢失；**同步阻塞主线程类**的边界见 `runWithBudget` 的说明）。
  */
 
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
@@ -549,8 +549,8 @@ async function runWithBudget(
 }
 
 /**
- * "下载类"前端工具名 —— 超时文案要按结局区分：下载是本包里唯一"副作用可能已发生、
- * 只是回执没回来"的动作，措辞必须与确定性失败分开（否则模型会去重复触发下载）。
+ * "下载类"前端工具名 —— 通用 workspace `download` 的回执未返回只描述它自身；
+ * `download_export_files` 的外层超时则是前置准备阶段结束，尚未触发下载，两者不得混用。
  *
  * 名单对应两条**实际可达**的路由命名面：登记工具 `download_export_files`（路由 1）与
  * ui_event 同名动作 `download`（路由 3）。
@@ -578,36 +578,30 @@ const DOWNLOAD_TOOL_NAMES: readonly string[] = ['download_export_files', 'downlo
 export const DOWNLOAD_PREFLIGHT_TIMEOUT_MS = 30_000
 
 /**
- * 超时结局文案（结局驱动，中文，**不谎报**）：说明"结局未知"，并按工具类型给出可行动指引。
- *
- * - 下载类：如实说"可能仍在后台继续 / 请到下载目录确认"（实测确有"拖了 30.6s 仍成功落盘"
- *   的轮次），并明确要求**不要重复触发下载**；
- * - 其余工具：如实说"结局未知"，请用户核对界面实际状态，不替用户判定成功或失败。
- *
- * 与"确定性失败"（执行器/ handler 抛错 → `执行失败：<原因>。请提示用户手动重试`）的差别在
- * 于：那条有明确原因、可判定未完成；本条只说明**没有拿到回执**。
- *
- * 注意（批 A 后的口径）：`downloadOne` 曾吞掉自身异常 ⇒ 该执行器**从不 reject**、"下载失败却
- * 回灌成功"（W-02）是同一处的另一个面。批 A 已改：前置校验失败即 reject（确定性失败、卡片
- * failed），浏览器侧结局不再回灌（`download_export_files` 即发即回）—— 故"谎报成功"这一面
- * 不再存在；本函数只负责"没拿到回执"这一种结局。
- * **已知过度保守（登记不修）**：即发即回后，该工具的超时只可能落在**前置校验**期间（尚未发起
- * 下载），故下方下载类文案的"文件也许已落盘、请勿重复触发"偏保守 —— 方向安全（不谎报、
- * 不诱导重复触发），是否收窄留待卡片态设计（R-84）时一并裁决。
+ * `download_export_files` 即发即回，外层兜底到点只表示前置准备超时且尚未触发下载。
+ * 通用 workspace download 保留原 outcome，只说明本次调用结束，不推断文件结果。
  */
 function timeoutOutcome(call: FrontendToolCall, budgetMs: number, elapsedMs: number): FrontendToolExecution {
   const label = toolDisplayName(call.name)
   const waitedSeconds = Math.round(elapsedMs / 1000)
   const budgetSeconds = Math.round(budgetMs / 1000)
+  if (call.name === 'download_export_files') {
+    const result = formatUiReceipt({
+      tool: label,
+      conclusion: `导出准备超时（等待 ${waitedSeconds} 秒），本次未触发下载`,
+      next: '可重新发起导出'
+    })
+    return makeExecution({ outcome: 'timeout', availability: 'degraded', code: 'UI_BUDGET_EXHAUSTED', result })
+  }
   if (DOWNLOAD_TOOL_NAMES.includes(call.name)) {
-    // 下载类（副作用可能已发生、只是回执没回来）：`unknown` 白名单的唯一保留者。
-    const result = `${label}（${call.name}）前端超时：等待 ${waitedSeconds} 秒仍未收到浏览器的完成回执（执行器预算 ${budgetSeconds} 秒）。`
-      + '该操作可能仍在后台继续，文件也许已经下载到浏览器的下载目录。'
-      + '请让用户先到下载目录确认文件是否已落盘，再决定是否需要重试；请勿重复触发下载。'
-      + '本次调用结局未知 —— 既未确认成功，也未确认失败。'
+    const result = formatUiReceipt({
+      tool: label,
+      conclusion: `操作未在等待时间内完成（等待 ${waitedSeconds} 秒），本次调用到此结束`,
+      next: ''
+    })
     return makeExecution({ outcome: 'unknown', availability: 'degraded', code: 'UI_BUDGET_EXHAUSTED', result })
   }
-  // 非下载类：预算到期 = 确定性收口（timeout），不再糊成「结局未知」。
+  // 其他工具继续走确定性 timeout。
   const result = formatUiReceipt({
     tool: `${label}（${call.name}）`,
     conclusion: `执行超时，本次未完成（等待 ${waitedSeconds} 秒，执行器预算 ${budgetSeconds} 秒）`,
