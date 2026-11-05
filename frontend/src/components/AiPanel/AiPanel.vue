@@ -3625,10 +3625,75 @@ function onTableScrollCapture(event: Event): void {
   }
 }
 
-/** 批4④ A5'：消息 → 渲染块序列（groupParts 纯函数；parts 为响应式数组，帧到达即重算）。
- *  收口修 F1：传 m.id 作消息命名空间前缀，防跨消息 blockId 碰撞（红队 M-1）。 */
+interface BlockPartSignature {
+  part: MessagePart
+  kind: MessagePart['kind']
+  seg: number
+  text: string | undefined
+  toolCallId: string | undefined
+  eventId: string | undefined
+  requiresAction: boolean | undefined
+}
+
+interface BlocksCacheEntry {
+  parts: MessagePart[]
+  signatures: BlockPartSignature[]
+  blocks: Block[]
+}
+
+const BLOCKS_CACHE_LIMIT = 64
+const blocksCache = new Map<ChatMessage, BlocksCacheEntry>()
+
+function blockPartSignature(part: MessagePart): BlockPartSignature {
+  return {
+    part,
+    kind: part.kind,
+    seg: part.seg,
+    text: part.kind === 'text' || part.kind === 'reasoning' ? part.text : undefined,
+    toolCallId: part.kind === 'tool' ? part.toolCallId : undefined,
+    eventId: part.kind === 'event' ? part.eventId : undefined,
+    requiresAction: part.kind === 'tool' ? part.requiresAction : undefined
+  }
+}
+
+function matchesBlockPartSignature(part: MessagePart, signature: BlockPartSignature): boolean {
+  return Object.is(part.kind, signature.kind)
+    && Object.is(part.seg, signature.seg)
+    && Object.is(part.kind === 'text' || part.kind === 'reasoning' ? part.text : undefined, signature.text)
+    && Object.is(part.kind === 'tool' ? part.toolCallId : undefined, signature.toolCallId)
+    && Object.is(part.kind === 'event' ? part.eventId : undefined, signature.eventId)
+    && Object.is(part.kind === 'tool' ? part.requiresAction : undefined, signature.requiresAction)
+    && (part.kind !== 'tool' || Object.is(signature.part, part))
+}
+
+/** blocksOf 与 messageMemo 共用有界 LRU；仅在 parts 引用或逐段签名变化时重新分块。 */
 function blocksOf(message: ChatMessage): Block[] {
-  return groupParts(message.parts, message.id)
+  const cached = blocksCache.get(message)
+  if (cached && cached.parts === message.parts
+    && cached.signatures.length === message.parts.length
+    && cached.signatures.every((signature, index) => {
+      const part = message.parts[index]
+      return part !== undefined && matchesBlockPartSignature(part, signature)
+    })) {
+    blocksCache.delete(message)
+    blocksCache.set(message, cached)
+    return cached.blocks
+  }
+
+  const entry: BlocksCacheEntry = {
+    parts: message.parts,
+    signatures: message.parts.map(blockPartSignature),
+    blocks: groupParts(message.parts, message.id)
+  }
+  blocksCache.delete(message)
+  blocksCache.set(message, entry)
+  if (blocksCache.size > BLOCKS_CACHE_LIMIT) {
+    const oldest = blocksCache.keys().next().value
+    if (oldest !== undefined) {
+      blocksCache.delete(oldest)
+    }
+  }
+  return entry.blocks
 }
 
 /**

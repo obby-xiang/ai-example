@@ -469,6 +469,13 @@
       "reason": "本批仅在SSE、本地写入和历史归并统一冻结停止现场普通工具的成功跃迁，真实历史恢复与D6契约不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:28352a1fe4e41ebadeaf5c22ab5f7e03b6517838efa1695a56ab2dca29938f45",
+      "status": "not-affected",
+      "reason": "本批以有界缓存共享Markdown分块，并统一停止后仅阻断新动作而保留真实工具结局；D6迁移接口与恢复协议不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

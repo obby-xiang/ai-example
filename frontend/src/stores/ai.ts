@@ -2667,11 +2667,6 @@ function isUnprovenLocalTerminal(part: ToolPart): boolean {
  */
 const applyFrameToPartsRaw = applyFrameToParts
 
-function shouldFreezeStoppedSuccess(stopped: boolean, part: ToolPart | null, nextStatus: ToolRunStatus | null): boolean {
-  return stopped && nextStatus === 'succeeded' && part?.kind2 === 'BACKEND'
-    && (part.status === 'pending' || part.status === 'running')
-}
-
 function applyFrameToPartsAndClearPlaceholder(message: ChatMessage, frame: SseFrame): void {
   if (!('toolCallId' in frame) || typeof frame.toolCallId !== 'string') {
     applyFrameToPartsRaw(message, frame)
@@ -2680,9 +2675,6 @@ function applyFrameToPartsAndClearPlaceholder(message: ChatMessage, frame: SseFr
   const toolCallId = frame.toolCallId
   // 写前快照（按值，不持对象引用：段可能被原地修改）。
   const before = findToolPart(message, toolCallId)
-  if (frame.type === 'tool_result' && shouldFreezeStoppedSuccess(this.stopped, before, outcomeStatus(frame.outcome))) {
-    return
-  }
   const beforeStatus = before?.status
   const beforeOutcome = before?.outcome
   const beforeDecision = before?.decision
@@ -2752,10 +2744,7 @@ function preferMergedValue<T>(
  * **状态胜者**取值，胜者缺值才回落到另一侧；`requiresAction` 只在 pending 段上保留
  * （running 是执行中，终态一律不挂起）。
  */
-function mergeToolPartState(target: ToolPart, source: ToolPart, freezeStoppedSuccess = false): void {
-  if (shouldFreezeStoppedSuccess(freezeStoppedSuccess, target, source.status)) {
-    return
-  }
+function mergeToolPartState(target: ToolPart, source: ToolPart): void {
   const targetPlaceholder = isHistoryPlaceholderStatus(target.toolCallId, target.status)
   const sourceInherited = looksLikeInheritedPlaceholder(source)
   // 继承的 unknown 占位、或本地未受理的 unknown/failed/cancelled（无结局证据）都不是权威终态：
@@ -2911,7 +2900,7 @@ function mergeMirrorTextSequence(
 }
 
 /** 镜像实时段序是骨架；历史状态与历史独有内容按 toolCallId/原段锚点并入。 */
-function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage, freezeStoppedSuccess = false): boolean {
+function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolean {
   if (target.parts.length === 0 && source.parts.length === 0) {
     return false
   }
@@ -2937,14 +2926,14 @@ function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage, freezeS
     }
     const alreadyMerged = mergedTools.get(sourcePart.toolCallId)
     if (alreadyMerged) {
-      mergeToolPartState(alreadyMerged, sourcePart, freezeStoppedSuccess)
+      mergeToolPartState(alreadyMerged, sourcePart)
       sourceToMerged.set(sourcePart, alreadyMerged)
       continue
     }
     const owner = targetTools.get(sourcePart.toolCallId)
     const tool = owner ?? { ...sourcePart }
     if (owner) {
-      mergeToolPartState(owner, sourcePart, freezeStoppedSuccess)
+      mergeToolPartState(owner, sourcePart)
       targetToMerged.set(owner, owner)
     } else if (tool.kind2 === 'UNKNOWN' && looksLikeInheritedPlaceholder(tool)) {
       historyPlaceholderStatusIds.add(tool.toolCallId)
@@ -5565,7 +5554,7 @@ export const useAiStore = defineStore('ai', {
           target.timestamp = tail.timestamp
         }
         const completedByHistory = historyCoversMirrorRound(target, tail)
-        mergeMirrorRoundParts(target, tail, this.stopped)
+        mergeMirrorRoundParts(target, tail)
         if (preserveStoppedRound) {
           target.stopped = true
         }
@@ -5588,7 +5577,7 @@ export const useAiStore = defineStore('ai', {
           existing.timestamp = tail.timestamp
         }
         const completedByHistory = historyCoversMirrorRound(existing, tail)
-        mergeMirrorRoundParts(existing, tail, this.stopped)
+        mergeMirrorRoundParts(existing, tail)
         if (preserveStoppedRound) {
           existing.stopped = true
         }
@@ -11749,13 +11738,15 @@ export const useAiStore = defineStore('ai', {
        * `stopped` 在每个新连接建立处（send / reattachActive / resumeSnapshotStream /
        * restoreInFlightRound / resetSession）复位 ⇒ 本闸门只作用于被停止的那一轮，不跨轮生效。
        *
-       * <p>问题5：停止后仍要放行**已提交段的真实结局帧**（{@link isSubmittedStopOutcomeFrame}：
-       * 已点过的确认门 / 已发出的表单提交），只允许收敛对应段；delta / 新工具 / 新请求帧继续丢弃，
-       * 不恢复整轮、不新增正文或工具。
+       * <p>问题5：停止后仍要放行**既有段的真实结局帧**（{@link isSubmittedStopOutcomeFrame}：
+       * 已点过的确认门 / 已发出的表单提交；普通 BACKEND 段凭既有段身份），只允许收敛对应段；
+       * delta / 新工具 / 新请求帧继续丢弃，不恢复整轮、不新增正文或工具。
        */
       const stoppedFrame = this.stopped || (typeof frame.runId === 'string' && frame.runId !== ''
         && frame.runId === this.stoppedRunId)
-      if (stoppedFrame && !isTerminalFrame(frame) && !this.isSubmittedStopOutcomeFrame(frame)) {
+      const backendStopOutcome = stoppedFrame && frame.type === 'tool_result'
+        && this.messages.some((message) => findToolPart(message, frame.toolCallId)?.kind2 === 'BACKEND')
+      if (stoppedFrame && !isTerminalFrame(frame) && !this.isSubmittedStopOutcomeFrame(frame) && !backendStopOutcome) {
         return
       }
       /**
@@ -11775,7 +11766,10 @@ export const useAiStore = defineStore('ai', {
         ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
         ?? null
       const foundHost = assistantId ? this.messages.find((item) => item.id === assistantId) : undefined
-      const message = foundHost
+      const backendOutcomeHost = backendStopOutcome && frame.type === 'tool_result'
+        ? this.messages.find((item) => findToolPart(item, frame.toolCallId)?.kind2 === 'BACKEND')
+        : undefined
+      const message = backendOutcomeHost ?? foundHost
         ?? (stoppedFrame
           ? (ownedByActiveRound ? sealedRoundHost() : null)
           : (ownedByActiveRound ? this.currentAssistantMessage() : null))
@@ -11788,6 +11782,23 @@ export const useAiStore = defineStore('ai', {
 
       // T6：按 runId 记录最大帧序号（reattach 时回传，服务端只补增量）
       const seq = frameSeq(frame)
+
+      if (backendStopOutcome && frame.type === 'tool_result') {
+        if (findToolPart(message, frame.toolCallId)?.kind2 !== 'BACKEND'
+          || (seq !== null && alreadyApplied(message, seq))) {
+          return
+        }
+        applyFrameToPartsAndClearPlaceholder(message, frame)
+        deriveProjections(message)
+        if (seq !== null) {
+          const frameRunId = frame.runId ?? this.activeRunId
+          if (frameRunId !== null) {
+            this.runSeq = recordRunSeq(this.runSeq, frameRunId, seq)
+          }
+          markApplied(message, seq)
+        }
+        return
+      }
 
       /**
        * 问题5：停止轮**已提交段的真实结局帧** —— 只收敛这一段，不进入正常帧分支。
@@ -12450,9 +12461,6 @@ export const useAiStore = defineStore('ai', {
     },
 
     upsertToolPart(message: ChatMessage, patch: ToolPartPatch, createIfMissing = true): void {
-      if (shouldFreezeStoppedSuccess(this.stopped, findToolPart(message, patch.toolCallId), patch.status)) {
-        return
-      }
       writeToolPart(message, patch, createIfMissing)
       if (patch.status !== undefined) {
         const written = findToolPart(message, patch.toolCallId)
