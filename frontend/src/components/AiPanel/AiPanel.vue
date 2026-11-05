@@ -504,22 +504,6 @@
                         :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']"
                       >›</span>
                     </button>
-                    <span
-                      v-if="copyState && copyState.id === toolCopyId(part) && !copyState.ok"
-                      class="flex-none text-xs text-[#c0392b]"
-                      :data-testid="'copy-tool-hint-' + part.toolCallId"
-                    >{{ t(copyState.empty ? 'ai.panel.copyEmpty' : 'ai.panel.copyFailed') }}</span>
-                    <button
-                      type="button"
-                      :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, 'mr-[6px] flex-none', isMsgCopied(toolCopyId(part)) ? 'is-copied' : '']"
-                      :data-testid="'copy-tool-' + part.toolCallId"
-                      :aria-label="t('ai.panel.copyConclusion')"
-                      @click="copyToolConclusion(part)"
-                    >
-                      <svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                      <svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                      <span :class="TIP_CLASS">{{ t('ai.panel.copyConclusion') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
-                    </button>
                     </div>
                     <!-- 只读体判据 = 已决只读态 ∪ GF「已提交、结局未到」（readOnlyLike）：
                          后者让提交后的这段时间**同一张表单原样锁定**，不闪普通工具卡 / 不闪 schema。 -->
@@ -2157,12 +2141,12 @@ function pruneUserMessageState(): void {
 /**
  * 逐条复制的反馈（苞 B 项 2）：**组件局部状态**，生命周期 2s。
  * 为什么不复用 `ai.notice`：它是单槽位（一次只承载一条提示），"已复制"会把并发的
- * 断流/取消等提示挤掉 —— 局部状态只作用于被点的消息或工具卡。
+ * 断流/取消等提示挤掉 —— 局部状态只作用于被点的消息。
  */
 const copyState = ref<{ id: string; ok: boolean; empty?: boolean } | null>(null)
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 
-/** R-165 S5a 项 7：该消息或工具卡此刻处于「复制成功」绿勾态（2s 窗口内）。 */
+/** R-165 S5a 项 7：该消息此刻处于「复制成功」绿勾态（2s 窗口内）。 */
 function isMsgCopied(id: string): boolean {
   return copyState.value !== null && copyState.value.id === id && copyState.value.ok
 }
@@ -3874,9 +3858,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     ai.uiUndoToolCallId,
     ai.uiUndoEntry,
     ai.sheetApplied,
-    ai.sessionId,
-    copyState.value?.id === toolCopyId(part) ? copyState.value.ok : null,
-    copyState.value?.id === toolCopyId(part) ? copyState.value.empty === true : null
+    ai.sessionId
   )
   if (part.name === GENERATIVE_FORM_TOOL) {
     // 队列面只入**标量**（本卡位次 + 队列总数）：整条 `queuedForms` 数组身份入 memo，
@@ -4947,10 +4929,6 @@ function legacyCopy(text: string): boolean {
   }
 }
 
-function toolCopyId(part: ToolPart): string {
-  return `tool:${part.toolCallId}`
-}
-
 function messageCopyText(message: ChatMessage): string {
   const body = deriveCopyText(message)
   if (body.trim() !== '') {
@@ -4995,10 +4973,6 @@ async function copyText(id: string, text: string): Promise<void> {
 
 async function copyMessage(message: ChatMessage): Promise<void> {
   await copyText(message.id, messageCopyText(message))
-}
-
-async function copyToolConclusion(part: ToolPart): Promise<void> {
-  await copyText(toolCopyId(part), toolSummary(part))
 }
 
 /**

@@ -517,7 +517,6 @@
       "returnToActiveRun": "Back to the ongoing answer",
       "returnToActiveRunHint": "This message was not sent because the previous turn is still running.",
       "copyMessage": "Copy this message body",
-      "copyConclusion": "Copy conclusion",
       "copyEmpty": "No message body or conclusion to copy",
       "backToBottom": "Back to bottom",
       "send": "Send",

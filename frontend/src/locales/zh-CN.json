@@ -517,7 +517,6 @@
       "returnToActiveRun": "回到进行中的回答",
       "returnToActiveRunHint": "这条消息没有发出：上一轮仍在进行中。",
       "copyMessage": "复制该条消息正文",
-      "copyConclusion": "复制结论",
       "copyEmpty": "暂无可复制的正文或结论",
       "backToBottom": "回到底部",
       "send": "发送",
