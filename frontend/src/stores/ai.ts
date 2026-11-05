@@ -12391,6 +12391,7 @@ export const useAiStore = defineStore('ai', {
             this.clearGateSubmissions()
             break
           }
+          message.unconfirmed = false
           const card = buildErrorCard(frame.code, frame.message)
           message.errorCard = card
           if (card !== null) {

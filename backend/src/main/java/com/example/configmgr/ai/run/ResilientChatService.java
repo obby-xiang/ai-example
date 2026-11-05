@@ -3618,7 +3618,7 @@ public class ResilientChatService {
 				target.setMessageJson(this.codec.serializeAll(failureHistory));
 				target.setInFlightToolCalls(new ArrayList<>());
 				target.setAssistantContent(null);
-				target.setFinalText(accumulator.text());
+				target.setFinalText(accumulator.unpersistedText());
 			})) {
 				cancelTerminal(runId, sessionId, accumulator, attempts, null, out, turn);
 				return;

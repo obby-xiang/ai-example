@@ -658,6 +658,13 @@
       "reason": "仅同步create_task和generative_form现行scope注释并删除list_tasks冗余标签，D6契约与实际披露行为均不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:75889803aca096311bd2ee940a3a34c530f7374a76ee3759b5ce07d86f1012b9",
+      "status": "synced",
+      "reason": "已同步失败finalText仅取未持久化正文、既有作业事实保留及已知错误清除unconfirmed的展示契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
