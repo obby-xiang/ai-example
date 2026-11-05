@@ -455,6 +455,13 @@
       "reason": "本批仅在前端按stoppedRunId丢弃旧非终态帧，并在历史无终局时保留当前tail的停止现场，D6迁移与终帧契约不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:ecea655015af8edfd2ef6e5a51577877eca11feb7e562d70443945fea77001db",
+      "status": "not-affected",
+      "reason": "本批仅阻止普通BACKEND工具结果误用停止后的HITL结局例外，真实CONFIRM/FRONTEND提交证据与D6契约不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

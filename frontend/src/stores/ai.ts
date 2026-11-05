@@ -9996,6 +9996,9 @@ export const useAiStore = defineStore('ai', {
         if (!part) {
           continue
         }
+        if (part.kind2 === 'BACKEND') {
+          return false
+        }
         // 表单提交窗口内（POST 已发出）：`stop()` 会把提交值写回段，保持"已提交"只读态。
         if (part.name === GENERATIVE_FORM_TOOL && part.kind2 === 'FRONTEND'
           && (part.status === 'pending' || part.status === 'running')
