@@ -75,7 +75,8 @@
 # 统一 attachment 白名单；新增当前 run 的非 KB 截断结果有界回读工具。
 # 2026-10-27.24 → 2026-10-27.25：披露时保留完整当前 Schema 和联动能力，修正旧描述。
 # 2026-10-27.25 → 2026-10-27.26：删除 confirm_step 的“第 29 条”编号引用，直接描述零副作用纠正例外。
-version: 2026-10-27.26
+# 2026-10-27.26 → 2026-10-27.27：create_task 新增 openWizard；create-only 显式传 false，禁止宿主自动续接。
+version: 2026-10-27.27
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -102,9 +103,10 @@ tools:
       非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用
       SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。
       旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。
-      只创建且不继续配置时，返回任务 id 后即可收尾。原始意图是完整导出/导入时，
-      批准后继续用 navigate_to(page=..., taskId=...) 打开向导，完成所需配置/条件和启动确认；
-      SUSPENDED 不得提前 DONE。
+      openWizard 省略或传 true 时宿主照旧自动续接；只创建且不继续配置时显式传 openWizard=false，
+      宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后明确打开/配置仍可继续。
+      原始意图是完整导出/导入时，批准后继续用 navigate_to(page=..., taskId=...) 打开向导，
+      完成所需配置/条件和启动确认；SUSPENDED 不得提前 DONE。
   - toolKey: start_export
     title: 启动导出作业
     description: >-

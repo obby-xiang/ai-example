@@ -23,7 +23,8 @@ final class PromptRulePacks {
 					EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；
 					IMPORT 不得附加导出条件。defCodes 未知时省略，保持宿主后续配置选择。
 					不得改为目录查询或文字追问。创建仍走确认卡且每轮最多一次；已创建的任务不得重建或重复批准。
-					create_task 只创建任务；只创建且不继续配置时，返回真实 taskId 后即可收尾。
+					openWizard 省略或传 true 时宿主照旧自动续接；只创建且不继续配置时必须显式传 openWizard=false，
+					宿主不得自动导航、代选或发配置表单，返回真实 taskId 后即可收尾；以后明确打开/配置仍可继续。
 					原始意图是完整导出/导入时，创建确认后必须继续完成所需配置/条件和启动确认，
 					SUSPENDED 不得提前 DONE。
 					""");

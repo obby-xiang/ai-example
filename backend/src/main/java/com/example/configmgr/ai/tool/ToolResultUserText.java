@@ -84,7 +84,10 @@ public final class ToolResultUserText {
 		if (code == null || code.isBlank()) {
 			Matcher created = CREATED_OR_REUSED_TASK_ID.matcher(modelText == null ? "" : modelText);
 			if (created.find()) {
-				return "任务 #" + created.group(1) + " 已创建，尚未启动作业，可继续配置";
+				boolean createOnly = modelText != null && modelText.contains("仅创建，不自动打开向导");
+				return "任务 #" + created.group(1) + (createOnly
+						? " 已创建，未自动打开向导，也未启动作业；以后可继续配置"
+						: " 已创建，尚未启动作业；后续由你决定是否配置");
 			}
 			return modelText;
 		}

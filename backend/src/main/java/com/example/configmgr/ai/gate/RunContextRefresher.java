@@ -204,7 +204,10 @@ public class RunContextRefresher {
 		applyPage(base, page);
 	}
 
-	/** 创建：任务号只读结构化 createdTaskId；字段仍以任务权威值为准，文本仅展示。 */
+	/**
+	 * 创建：任务号只读结构化 createdTaskId；字段仍以任务权威值为准，文本仅展示。
+	 * openWizard=false 时只绑定任务事实，不推断向导页；以后用户明确导航仍由 applyNavigate 打开。
+	 */
 	private void applyCreateTask(String runId, AiContext base, PendingToolCall settled) {
 		Long taskId = settled.getCreatedTaskId();
 		if (taskId == null) {
@@ -224,7 +227,7 @@ public class RunContextRefresher {
 		applyCreateTaskDefCodes(base, settled, sameTask);
 		applyCreateTaskConditions(base, settled);
 		persistCreateTaskDraft(runId, taskId, settled);
-		if (base.getPage() == null || base.getPage().isBlank()) {
+		if (openWizard(settled.getArguments()) && (base.getPage() == null || base.getPage().isBlank())) {
 			applyPage(base, pageOf(task.getType()));
 		}
 	}
@@ -469,6 +472,19 @@ public class RunContextRefresher {
 		catch (Exception ex) {
 			return null;
 		}
+	}
+
+	/**
+	 * 是否续接打开向导：省略 = true；只有模型按原始意图明确传 false 才关闭。
+	 * 非布尔值一律 false，避免把未知值误当成允许自动续接。
+	 */
+	public static boolean openWizard(String argumentsJson) {
+		JsonNode args = parse(argumentsJson);
+		JsonNode raw = args == null ? null : args.get("openWizard");
+		if (raw == null || raw.isNull()) {
+			return true;
+		}
+		return raw.isBoolean() && raw.asBoolean();
 	}
 
 	private static List<String> defCodesOf(JsonNode args) {

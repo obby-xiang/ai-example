@@ -164,6 +164,9 @@ public class DefinitionSelectionForm extends HostForm {
 	 *     再失败不再重发（第二次失败交回模型/UI），旧 run 恢复（本批没有这条失败条目）同样不触发。</li>
 	 * </ol>
 	 *
+	 * <p>{@code create_task(openWizard=false)} 表示只创建，禁止首发自动导航；以后用户明确打开或配置任务时，
+	 * 既有导航回执与配置链仍可正常使用。
+	 *
 	 * <p>两个触发点都要求 {@code createdTaskInRun} 与当前 {@code context.taskId} 绑定、任务类型
 	 * 可判定（首发优先取 {@code create_task} 入参 type，重试取上下文权威类型）；首发要求本批没有
 	 * 成功或仍未决的其它 {@code navigate_to}，重试要求本批除那条失败的首发外没有别的 {@code navigate_to}。
@@ -185,6 +188,9 @@ public class DefinitionSelectionForm extends HostForm {
 			String page;
 			PendingToolCall created = settledCreateTask(settledBatch);
 			if (created != null) {
+				if (!RunContextRefresher.openWizard(created.getArguments())) {
+					return false;
+				}
 				Long createdInBatch = created.getCreatedTaskId();
 				if (!createdTaskId.equals(createdInBatch)) {
 					return false;

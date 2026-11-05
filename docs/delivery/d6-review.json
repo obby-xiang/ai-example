@@ -686,6 +686,13 @@
       "reason": "已同步术语定义与制度流程检索选型边界，流程规范FAQ直接kb_search",
       "reviewedAt": "2026-11-06",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:79c8b9a4764917bf35606b236e47e9242f190b81ec1077433ed3f2acaddb0679",
+      "status": "synced",
+      "reason": "已同步create_task(openWizard)只创建与完整续接边界、严格归一化及确认指纹",
+      "reviewedAt": "2026-11-06",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

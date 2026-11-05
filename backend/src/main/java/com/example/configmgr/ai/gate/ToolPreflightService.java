@@ -382,6 +382,9 @@ public class ToolPreflightService {
 	 * </ul>
 	 * 执行前复核（{@code verifyApprovedReport}）会重跑本方法：批准与执行之间定义被删 ⇒ 指纹变化 ⇒
 	 * 要求重新确认，不会带着过期候选创建。
+	 *
+	 * <p>{@code openWizard} 以省略 = true 归一化后写入 target 与 reportHash，批准与执行看到的是同一份
+	 * 自动续接意图；非布尔值按 false 处理，不把未知值当成允许自动续接。
 	 */
 	private PreflightReport inspectCreate(String argumentsJson, AiContext context) {
 		boolean english = english();
@@ -393,6 +396,7 @@ public class ToolPreflightService {
 		String effectiveTitle = TaskService.effectiveCreateTitle(requestedType, title);
 		target.put("type", typeValid ? type.trim().toUpperCase(Locale.ROOT) : null);
 		target.put("title", title);
+		target.put("openWizard", RunContextRefresher.openWizard(argumentsJson));
 		Task continuationTask = continuationTask(argumentsJson, context, requestedType, effectiveTitle);
 		if (continuationTask != null) {
 			target.put("taskId", continuationTask.getId());
@@ -567,6 +571,10 @@ public class ToolPreflightService {
 					+ (title == null ? "" : title) + ":" + String.join(",", defCodes)
 					+ (requestedConditions.present() ? ":" + conditionsNode : "");
 			conditionFact = "create:none";
+		}
+		if (!RunContextRefresher.openWizard(argumentsJson)) {
+			impactText += english ? " (create only; do not open the wizard automatically)"
+					: "（仅创建，不自动打开向导）";
 		}
 		boolean pass = checks.stream().allMatch(PreflightReport.Check::pass);
 		String reportHash = reportHash(TOOL_CREATE_TASK, target, checks, impactFact, conditionFact, null);
