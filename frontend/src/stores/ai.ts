@@ -176,6 +176,7 @@ let currentAbort: AbortController | null = null
  * —— 它不参与连接判活（那仍由 `activeStreamRunId` + `currentAbort` 决定）。
  */
 let pendingAttachRunId: string | null = null
+const historyRequestGenerations = new Map<string, number>()
 /**
  * Task 4：会话发号引导门（模块级）。
  *
@@ -2828,14 +2829,6 @@ function mergeMirrorTextSequence(
   const targetText = mirrorText(targetParts)
   const sourceText = mirrorText(sourceParts)
   if (!targetText.startsWith(sourceText) && !sourceText.startsWith(targetText)) {
-    for (const sourcePart of sourceParts) {
-      const copy = sourceToMerged.get(sourcePart)
-      const index = copy ? merged.indexOf(copy) : -1
-      if (index >= 0) {
-        merged.splice(index, 1)
-      }
-      sourceToMerged.delete(sourcePart)
-    }
     return
   }
   if (sourceParts.length === 0) {
@@ -3060,24 +3053,23 @@ function historyCoversMirrorRound(target: ChatMessage, mirror: ChatMessage): boo
   return mirror.parts.every((part) => part.kind !== 'tool' || toolIds.has(part.toolCallId))
 }
 
-/** 刷新合并：同一轮的历史助手（按 runId 取最后一条，或按已定位的用户条目取其后最后一条）。 */
-function roundAssistantMessage(
+/** 刷新合并：同一 run 的全部历史助手，保持原消息与段落顺序。 */
+function sameRoundAssistant(message: ChatMessage, roundRunId: string | null): boolean {
+  return message?.role === 'assistant' && (message.runId ?? null) === roundRunId
+}
+
+function roundAssistantMessages(
   historical: ChatMessage[],
   historyUserIndex: number,
   roundRunId: string | null
-): ChatMessage | null {
+): ChatMessage[] {
   if (roundRunId !== null) {
-    for (let index = historical.length - 1; index >= 0; index -= 1) {
-      const message = historical[index]
-      if (message?.role === 'assistant' && message.runId === roundRunId) {
-        return message
-      }
-    }
+    return historical.filter((message) => sameRoundAssistant(message, roundRunId))
   }
   if (historyUserIndex < 0) {
-    return null
+    return []
   }
-  let found: ChatMessage | null = null
+  const found: ChatMessage[] = []
   for (let index = historyUserIndex + 1; index < historical.length; index += 1) {
     const message = historical[index]
     if (!message) {
@@ -3086,8 +3078,8 @@ function roundAssistantMessage(
     if (message.role === 'user') {
       break
     }
-    if (message.role === 'assistant') {
-      found = message
+    if (sameRoundAssistant(message, roundRunId)) {
+      found.push(message)
     }
   }
   return found
@@ -4424,8 +4416,10 @@ export const useAiStore = defineStore('ai', {
         // 断流是"这一轮还没有终态"的消息级事实：`send` 的收尾会先把 loading 复位、再落
         // interrupted，若只看 loading，镜像会把断流轮的半截回答标成"不在途"，刷新后被历史
         // 整体替换且不出现「继续」。只认**末条** assistant（新轮一开始就不再命中）。
-        inFlight: (this.loading || this.suspended || lastAssistantInterrupted(this.messages))
-          && !this.stopped,
+        // 表单填写/提交/已受理与续跑建连也是在途；已取消表单不算。
+        inFlight: (this.loading || this.suspended || lastAssistantInterrupted(this.messages)
+          || (this.activeForm !== null && this.activeForm.status !== 'cancelled')
+          || pendingAttachRunId !== null) && !this.stopped,
         runSeq: this.runSeq,
         // run 级停止墓碑：cancel 可能失败（后端不可达），刷新后靠它拒绝自动接回这一轮。
         stoppedRunId: this.stoppedRunId,
@@ -4607,12 +4601,14 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const sid = this.sessionId
+      const requestGeneration = (historyRequestGenerations.get(sid) ?? 0) + 1
+      historyRequestGenerations.set(sid, requestGeneration)
       this.restoringRecovery = true
       try {
-        await this.loadHistoryInner()
+        await this.loadHistoryInner(requestGeneration)
       } catch (error) {
-        if (this.sessionId !== sid) {
-          return // 会话已换：过期异常不落进新会话
+        if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
+          return // 会话已换或已有更新请求：过期异常不封口、不写旧错误
         }
         // 问题3：停止后的历史读取失败不写恢复失败现场（本轮已被放弃，不该再被恢复面收口）。
         if (this.stopped) {
@@ -4630,9 +4626,11 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    async loadHistoryInner(): Promise<void> {
+    async loadHistoryInner(requestedGeneration?: number): Promise<void> {
       await waitForPageVisible()
       const sid = this.sessionId
+      const requestGeneration = requestedGeneration ?? (historyRequestGenerations.get(sid) ?? 0) + 1
+      historyRequestGenerations.set(sid, requestGeneration)
       // M-17（2026-10-29）：取历史期间用户可能已发出新一轮。历史回来时会整体替换 `messages`
       // —— 在途轮的宿主与半截正文被顶掉，后续帧只能新建第二条助手气泡（同一轮两条气泡）。
       // 判据见下方"真轮是否占场"（R04 起不再用轮次纪元，理由在那里）。
@@ -4730,8 +4728,8 @@ export const useAiStore = defineStore('ai', {
       try {
         history = await aiApi.history(this.sessionId, { latest: HISTORY_PAGE_SIZE })
       } catch (error) {
-        if (this.sessionId !== sid) {
-          return // 会话已换：过期失败不落任何状态（新会话的 historyLoaded 由新会话自己落）
+        if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
+          return // 会话已换或已有更新请求：过期失败不落任何状态
         }
         this.historyLoaded = true
         // 问题3：停止后的历史读取失败不写恢复失败现场（已停止轮保持本地事实，不挂恢复缺口）。
@@ -4750,9 +4748,8 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
-      // 会话身份对账（红队 MAJOR-1）：不匹配则整体丢弃 —— 下面的 messages 写入与
-      // restoreSuspendedSnapshot（读 this.sessionId 拉 runs/current、就地重建挂起卡）都不得落进新会话
-      if (this.sessionId !== sid) {
+      // 会话身份与请求代次对账：旧响应不得覆盖更新请求已经恢复的 messages / last-good。
+      if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
         return
       }
       // M-17 / I4：取数窗口内**真轮占场**，或**入口时本端就在途** ⇒ 这份历史属于过期现场，
@@ -5190,8 +5187,9 @@ export const useAiStore = defineStore('ai', {
         deriveProjections(message)
         return [message]
       })
-      // ── R-150 后置 pass：同一用户轮内连续 ASSISTANT 合并（中间仅夹被跳过的 TOOL，遇 USER/SYSTEM 即断）──
-      // 位置在 R-149 按 id 配对完成之后。闸（结构性判据）：被并条目的每个 toolCall 在原始历史窗口内
+      // ── R-150 后置 pass：同一非空 runId 的连续 ASSISTANT 合并（中间仅夹被跳过的 TOOL）──
+      // 遇 USER/SYSTEM、runId 缺失或变化即断。位置在 R-149 按 id 配对完成之后。
+      // 闸（结构性判据）：被并条目的每个 toolCall 在原始历史窗口内
       // 存在可配对 TOOL 条目（id 相等；responseData=null 也算有回应）——与前端配对成败无关。
       // 悬空 A(T)（无任何可配对 TOOL）不并不吞、也不开窗（纵深防御）。drop：无 toolCalls、
       // text/思考为空且无失败事实的 ASSISTANT 直接丢弃，丢弃同时断窗。
@@ -5286,6 +5284,10 @@ export const useAiStore = defineStore('ai', {
           flushGroup() // 悬空 A(T)：不并、不吞、不开窗
           mergedMessages.push(message)
           continue
+        }
+        const previous = group[group.length - 1]
+        if (previous && (!previous.runId || !message.runId || previous.runId !== message.runId)) {
+          flushGroup()
         }
         group.push(message)
       }
@@ -5413,8 +5415,8 @@ export const useAiStore = defineStore('ai', {
     /**
      * 分页：把更早一页的消息前插到当前消息流头部。
      *
-     * <p>跨页边界若两侧都是 assistant（页边界落在一轮中间，中间没有 USER/SYSTEM），按 R-150
-     * 同口径合并成一条，避免同一轮被拆成两个气泡。保留**当前首条**的 id（屏上块的展开态不跳）。
+     * <p>跨页边界若两侧都是同一非空 runId 的 assistant（页边界落在一轮中间，中间没有 USER/SYSTEM），
+     * 按 R-150 同口径合并成一条，避免同一轮被拆成两个气泡。保留**当前首条**的 id（屏上块的展开态不跳）。
      */
     prependHistoryMessages(older: ChatMessage[]): void {
       if (older.length === 0) {
@@ -5422,12 +5424,10 @@ export const useAiStore = defineStore('ai', {
       }
       const head = this.messages[0]
       const tail = older[older.length - 1]
-      if (head && tail && head.role === 'assistant' && tail.role === 'assistant') {
+      if (head && tail && head.role === 'assistant' && tail.role === 'assistant'
+        && head.runId && tail.runId && head.runId === tail.runId) {
         head.parts = [...tail.parts, ...head.parts]
           .map((part, seg) => ({ ...part, seg })) as MessagePart[]
-        if (!head.runId && tail.runId) {
-          head.runId = tail.runId
-        }
         if (head.timestamp === undefined && tail.timestamp !== undefined) {
           head.timestamp = tail.timestamp
         }
@@ -5497,9 +5497,15 @@ export const useAiStore = defineStore('ai', {
         return historical
       }
       const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
+      const mirrorUserIndex = mirrorUser ? mirrorMessages.indexOf(mirrorUser) : -1
       const roundRunId = typeof tail.runId === 'string' && tail.runId !== ''
         ? tail.runId
         : (mirrorUser?.runId ?? null)
+      if (roundRunId === null) {
+        return historical
+      }
+      const mirrorAssistants = mirrorMessages.slice(mirrorUserIndex + 1)
+        .filter((message) => sameRoundAssistant(message, roundRunId))
       const historyUserIndex = mirrorUser
         ? findHistoryRoundUserIndex(historical, mirrorUser, roundRunId)
         : -1
@@ -5511,26 +5517,37 @@ export const useAiStore = defineStore('ai', {
         }
       }
       const seenIds = new Set(merged.map((message) => message.id))
-      let target = roundAssistantMessage(merged, historyUserIndex, roundRunId)
-      let targetByToolCallId = false
-      if (!target) {
-        target = assistantMessageByToolCallId(merged, tail)
-        targetByToolCallId = target !== null
+      const roundTargets = roundAssistantMessages(merged, historyUserIndex, roundRunId)
+      const occupiedTargets = new Set<ChatMessage>()
+      const firstTarget = roundTargets[0] ?? null
+      const findAvailableTarget = (
+        source: ChatMessage,
+        unavailable: Set<ChatMessage>
+      ): ChatMessage | null => {
+        const byId = roundTargets.find((message) => message.id === source.id
+          && sameRoundAssistant(message, roundRunId) && !unavailable.has(message))
+        if (byId) {
+          return byId
+        }
+        const byToolCallId = assistantMessageByToolCallId(roundTargets, source)
+        return byToolCallId && sameRoundAssistant(byToolCallId, roundRunId)
+          && !unavailable.has(byToolCallId) ? byToolCallId : null
       }
-
-      // 只有同轮 USER 也在历史里，才可用末条 assistant 证明该轮已被历史覆盖；
-      // 否则末条可能是上一轮，不能据此丢弃镜像里的在途正文。
-      if (!target && roundRunId === null && historyUserIndex >= 0
-        && merged[merged.length - 1]?.role === 'assistant'
-        && messageShowsProgress(tail)) {
-        return historical
+      const matchedTargets: (ChatMessage | null)[] = []
+      const reservedTargets = new Set<ChatMessage>()
+      for (const source of mirrorAssistants) {
+        const target = source ? findAvailableTarget(source, reservedTargets) : null
+        matchedTargets.push(target)
+        if (target) {
+          reservedTargets.add(target)
+        }
       }
 
       // 本轮用户：toolCallId 命中但 target 之前**没有**任何 USER ⇒ 插到 target 之前
       // （按 id 去重；只看位置，不做文本猜测）。只有历史完全没有同轮助手时才补到尾部。
       if (mirrorUser && historyUserIndex < 0 && !seenIds.has(mirrorUser.id)) {
-        if (targetByToolCallId && target) {
-          const targetIndex = merged.indexOf(target)
+        if (firstTarget) {
+          const targetIndex = merged.indexOf(firstTarget)
           let hasPrecedingUser = false
           for (let index = targetIndex - 1; index >= 0; index -= 1) {
             const message = merged[index]
@@ -5544,59 +5561,86 @@ export const useAiStore = defineStore('ai', {
             merged.splice(targetIndex < 0 ? merged.length : targetIndex, 0, cloneMessage(mirrorUser))
             seenIds.add(mirrorUser.id)
           }
-        } else if (!target) {
+        } else {
           merged.push(cloneMessage(mirrorUser))
           seenIds.add(mirrorUser.id)
         }
       }
 
-      if (target) {
-        if (roundRunId !== null && !target.runId) {
-          target.runId = roundRunId
+      let previousAnchor: ChatMessage | null = null
+      for (let index = 0; index < mirrorAssistants.length; index += 1) {
+        const source = mirrorAssistants[index]
+        if (!source) {
+          continue
         }
-        if (target.timestamp === undefined && tail.timestamp !== undefined) {
-          target.timestamp = tail.timestamp
+        const target = matchedTargets[index] ?? null
+        if (target) {
+          occupiedTargets.add(target)
+          previousAnchor = target
+          if (roundRunId !== null && !target.runId) {
+            target.runId = roundRunId
+          }
+          if (target.timestamp === undefined && source.timestamp !== undefined) {
+            target.timestamp = source.timestamp
+          }
+          const completedByHistory = historyCoversMirrorRound(target, source)
+          mergeMirrorRoundParts(target, source)
+          if (preserveStoppedRound && source === tail) {
+            target.stopped = true
+          }
+          // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
+          if (source === tail && merged[merged.length - 1] === target) {
+            target.streaming = completedByHistory
+              ? false
+              : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
+            target.done = completedByHistory
+              ? true
+              : (typeof tail.done === 'boolean' ? tail.done : false)
+          }
+          continue
         }
-        const completedByHistory = historyCoversMirrorRound(target, tail)
-        mergeMirrorRoundParts(target, tail)
-        if (preserveStoppedRound) {
-          target.stopped = true
-        }
-        // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
-        if (merged[merged.length - 1] === target) {
-          target.streaming = completedByHistory
-            ? false
-            : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
-          target.done = completedByHistory
-            ? true
-            : (typeof tail.done === 'boolean' ? tail.done : false)
-        }
-        return merged
-      }
 
-      // 历史没有本轮助手：补入镜像 tail（同 id 已存在则就地合并，不重复建段）。
-      const existing = merged.find((message) => message.id === tail.id)
-      if (existing && existing.role === 'assistant') {
-        if (existing.timestamp === undefined && tail.timestamp !== undefined) {
-          existing.timestamp = tail.timestamp
+        // 历史没有这条助手：同 id 已存在则就地合并，否则按镜像顺序插入，不重复建段。
+        const existing = merged.find((message) => message.id === source.id
+          && sameRoundAssistant(message, roundRunId) && !occupiedTargets.has(message))
+        if (existing && existing.role === 'assistant') {
+          occupiedTargets.add(existing)
+          previousAnchor = existing
+          if (existing.timestamp === undefined && source.timestamp !== undefined) {
+            existing.timestamp = source.timestamp
+          }
+          const completedByHistory = historyCoversMirrorRound(existing, source)
+          mergeMirrorRoundParts(existing, source)
+          if (preserveStoppedRound && source === tail) {
+            existing.stopped = true
+          }
+          if (source === tail && merged[merged.length - 1] === existing) {
+            existing.streaming = completedByHistory
+              ? false
+              : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
+            existing.done = completedByHistory
+              ? true
+              : (typeof tail.done === 'boolean' ? tail.done : false)
+          }
+          continue
         }
-        const completedByHistory = historyCoversMirrorRound(existing, tail)
-        mergeMirrorRoundParts(existing, tail)
-        if (preserveStoppedRound) {
-          existing.stopped = true
+        if (!seenIds.has(source.id)) {
+          const clone = cloneMessage(source)
+          const nextTarget = matchedTargets.slice(index + 1)
+            .find((candidate) => candidate !== null) ?? null
+          let insertionIndex = merged.length
+          if (nextTarget) {
+            insertionIndex = merged.indexOf(nextTarget)
+          } else if (previousAnchor) {
+            const previousIndex = merged.indexOf(previousAnchor)
+            if (previousIndex >= 0) {
+              insertionIndex = previousIndex + 1
+            }
+          }
+          merged.splice(insertionIndex >= 0 ? insertionIndex : merged.length, 0, clone)
+          previousAnchor = clone
+          seenIds.add(source.id)
         }
-        if (merged[merged.length - 1] === existing) {
-          existing.streaming = completedByHistory
-            ? false
-            : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
-          existing.done = completedByHistory
-            ? true
-            : (typeof tail.done === 'boolean' ? tail.done : false)
-        }
-        return merged
-      }
-      if (!seenIds.has(tail.id)) {
-        merged.push(cloneMessage(tail))
       }
       return merged
     },
@@ -12691,9 +12735,9 @@ export const useAiStore = defineStore('ai', {
         return null
       }
       return {
-        outcome: 'ok',
-        availability: 'available',
-        result: `目标步骤（${target}）已到达（当前 ${workspace.step ?? '—'}），本次未重复推进向导。`
+        outcome: 'failed',
+        availability: 'degraded',
+        result: `目标步骤（${target}）已到达（当前 ${workspace.step ?? '—'}），本次未推进向导，也未触发写回。`
       }
     },
 

@@ -581,6 +581,13 @@
       "reason": "本批仅移除工具卡头复制入口，消息级复制、历史协议与D6展示迁移面均不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:d51a0b51ff45e1e9a75ddfcce71ad1fe2d11b64a80a7d5d2a53edfc364c6d3ba",
+      "status": "synced",
+      "reason": "已同步同run一对一历史合并、镜像原序插入、history generation及表单续跑inFlight的恢复契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
