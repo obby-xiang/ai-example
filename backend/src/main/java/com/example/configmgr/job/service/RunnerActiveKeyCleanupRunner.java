@@ -15,11 +15,9 @@ import org.springframework.stereotype.Component;
  * 清理该键，使“重启后无活跃 runner”立即可删；其他主机/无法解析/仍存活的 PID 一律保留到 TTL，
  * 避免误删另一实例正在运行的 runner。Redis 不可用时只记日志，不阻断启动；删除侧仍 fail-closed。
  *
- * <h2>候选集 = 现存键，不是全库作业（线程修复-后端）</h2>
- * 旧实现遍历 {@code jobRepository.findAllIds()}，对<b>全库每个作业</b>做
- * "GET + 条件 DEL 脚本"两次 Redis 往返：候选数与历史作业量同阶（1 万作业 ≈ 1 万次串行 GET），
- * 而其中绝大多数键早已过 TTL。现在改为 {@link JobHeartbeatRegistry#cleanupDeadLocalRunners(int)}：
- * {@code SCAN job:runner-active:*}（Cluster 逐主节点）→ 按值安全清理，命令量∝现存键数。
+ * <h2>候选集 = 本机精确索引</h2>
+ * 不再遍历全库作业，也不扫描 Redis 全键空间。{@link JobHeartbeatRegistry} 在每个 runner
+ * 生命周期内维护每主机 HASH 索引，启动仅检视该索引中的少量成员，再按原主机/PID/当前值规则清理。
  * 保留 {@code @Order(-1)} 的时序语义不变：仍必须先于 {@code StaleJobRecoveryRunner(@Order(0))}，
  * 恢复才能读到真实的存活态。
  */
@@ -29,13 +27,8 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class RunnerActiveKeyCleanupRunner implements ApplicationRunner {
 
-    /**
-     * 单次启动最多<b>检视</b>的键数（跨 Cluster 节点合计；按游标取出的所有键计，含解析失败的键）。
-     *
-     * <p>存量键 = 在跑 runner + 尚未过 TTL 的历史键，正常量级是"个位数~几十"；
-     * 这个上限只用于把异常/失控键空间挡在启动路径之外（超出部分留给 TTL 收敛）。
-     */
-    private static final int MAX_SCANNED_KEYS = 512;
+    /** 单次启动最多检视的本机索引条目数；超出部分留给 TTL 与后续启动收敛。 */
+    private static final int MAX_INDEX_ENTRIES = 512;
 
     private final JobHeartbeatRegistry heartbeatRegistry;
 
@@ -45,7 +38,7 @@ public class RunnerActiveKeyCleanupRunner implements ApplicationRunner {
             return;
         }
         try {
-            int cleaned = heartbeatRegistry.cleanupDeadLocalRunners(MAX_SCANNED_KEYS);
+            int cleaned = heartbeatRegistry.cleanupDeadLocalRunners(MAX_INDEX_ENTRIES);
             if (cleaned > 0) {
                 log.info("Startup cleanup of dead local runner-active keys finished cleaned={}", cleaned);
             }

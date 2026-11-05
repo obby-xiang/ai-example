@@ -8,8 +8,6 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.redis.connection.RedisClusterConnection;
-import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.connection.ReturnType;
 import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisCallback;
@@ -25,6 +23,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -96,6 +95,8 @@ public class JobHeartbeatRegistry {
 
     /** Redis 共享 runner 活跃键（R1-13 / 多实例）：长 TTL 锚点 + 删除闸门。 */
     public static final String RUNNER_ACTIVE_PREFIX = "job:runner-active:";
+    /** 每主机 runner 精确索引：field=jobId，value=该代 runner 的完整值。 */
+    private static final String RUNNER_HOST_INDEX_PREFIX = "job:runner-active-host:";
     /** Redis 共享心跳键（多实例 job 接管）：短 TTL，只按"键是否存在"判活。 */
     public static final String BEAT_PREFIX = "job:beat:";
     /** Redis 判死单飞键（SET NX PX）：同一作业只允许一个实例判死。 */
@@ -125,6 +126,22 @@ public class JobHeartbeatRegistry {
             end
             redis.call('DEL', KEYS[1])
             return 1
+            """, Long.class);
+
+    private static final String WRITE_INDEX_LUA = """
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            redis.call('PEXPIRE', KEYS[1], ARGV[3])
+            return 1
+            """;
+
+    private static final RedisScript<Long> WRITE_INDEX_SCRIPT = new DefaultRedisScript<>(WRITE_INDEX_LUA, Long.class);
+
+    private static final RedisScript<Long> DELETE_INDEX_VALUE_SCRIPT = new DefaultRedisScript<>("""
+            local current = redis.call('HGET', KEYS[1], ARGV[1])
+            if current and string.sub(current, 1, string.len(ARGV[2])) ~= ARGV[2] then
+              return 0
+            end
+            return redis.call('HDEL', KEYS[1], ARGV[1])
             """, Long.class);
 
     private static final String WRITE_GENERATION_LUA = """
@@ -338,6 +355,7 @@ public class JobHeartbeatRegistry {
             this.runnerGenerations.remove(jobId, generation);
             return false;
         }
+        writeRunnerIndex(jobId, value);
         this.lastBeatAtMs.put(jobId, now);
         this.activeRunners.add(jobId);
         ensureTicker();
@@ -349,6 +367,7 @@ public class JobHeartbeatRegistry {
         this.activeRunners.remove(jobId);
         this.revokedJobIds.remove(jobId);
         clearSharedRunnerState(jobId);
+        removeRunnerIndex(jobId, generationPrefix(jobId));
         this.runnerGenerations.remove(jobId);
         invalidateAuthority(jobId);
         stopTickerIfIdle();
@@ -364,7 +383,11 @@ public class JobHeartbeatRegistry {
         this.localJudgements.remove(jobId);
         this.revokedJobIds.add(jobId);
         invalidateAuthority(jobId);
+        String previousValue = runnerIndexValueBeforeRevocation(jobId);
+        String previousIndexKey = hostIndexKeyForValue(previousValue);
+        String previousGeneration = generationPrefixOfValue(previousValue);
         writeRevocation(jobId, true);
+        removeRunnerIndex(previousIndexKey, jobId, previousGeneration);
         this.runnerGenerations.remove(jobId);
         stopTickerIfIdle();
     }
@@ -636,155 +659,78 @@ public class JobHeartbeatRegistry {
         return this.heldJobIds.contains(jobId);
     }
 
-    // ── 启动清理（扫描现存键，不按全库作业 id 逐条 GET）─────────────────────────
+    // ── 启动清理（每主机精确索引，不扫描全键空间）─────────────────────────────
 
-    /** SCAN 的单次 COUNT 提示（只是提示；迭代次数由游标决定，上限由调用方给）。 */
+    /** HSCAN 的单次 COUNT 提示；总检视条目数由调用方限制。 */
     private static final int CLEANUP_SCAN_COUNT = 256;
 
     /**
-     * 启动清理：扫描 Redis 中<b>现存的</b> runner-active 键，只处理"同一主机且 PID 已死"的键。
-     *
-     * <p>旧实现遍历 {@code jobRepository.findAllIds()} 逐个 GET + 条件 DEL：命令数 = 全库作业数，
-     * 而绝大多数历史作业的键早已过 TTL（{@code max-execution-time × 2 + 5m}），扫它们没有收益
-     * （1 万作业 × 1ms RTT ≈ 10s 启动阻塞，且每个实例各做一遍）。候选集应该是<b>键空间</b>：
-     * 没有键就没有可清的东西。
-     *
-     * <p>实现约束：
-     * <ul>
-     * <li><b>SCAN，不 KEYS</b>：KEYS 在大键空间上阻塞 Redis 单线程；</li>
-     * <li><b>Cluster 逐主节点</b>：SCAN 只作用于执行它的那一个节点，单连接扫不到其它主节点；
-     *     副本上的删除不会落到主，扫它只产生重复候选，故跳过；</li>
-     * <li><b>有界</b>：跨节点合计最多<b>检视</b> {@code maxKeys} 个键（含名字不合法、解析失败的键；
-     *     上限是扫描视野，不是"成功解析的 id 数"），异常大的键空间不会拖长启动；</li>
-     * <li><b>按值安全清理</b>：候选键仍交给 {@link #cleanupDeadLocalRunner(Long)}，走
-     *     "读值 → 解析主机/PID → 值未被改写才 DEL"的既有单键原子脚本。</li>
-     * </ul>
-     *
-     * @return 实际删除的键数（0 = 没有本机死 PID 的键，或 Redis 不可用）
+     * 启动只读每主机 HASH 索引，工作量与 Redis 总键数无关。索引成员仍需通过主机/PID
+     * 与 runner-active 当前值复核，存活实例不会被误删。
      */
     public int cleanupDeadLocalRunners(int maxKeys) {
         if (!redisMode || redis == null || maxKeys <= 0) {
             return 0;
         }
-        List<Long> candidates;
-        try {
-            candidates = scanRunnerActiveJobIds(maxKeys);
-        } catch (RuntimeException e) {
-            // 启动清理是尽力而为：扫不动就把键留给 TTL，不阻断启动
-            log.warn("Startup scan of runner-active keys failed, left to TTL error={}", e.getMessage());
-            return 0;
-        }
-        if (candidates == null || candidates.isEmpty()) {
-            return 0;
-        }
         int cleaned = 0;
-        for (Long jobId : candidates) {
-            if (cleanupDeadLocalRunner(jobId)) {
-                cleaned++;
+        int inspected = 0;
+        try (Cursor<Map.Entry<Object, Object>> cursor = redis.opsForHash().scan(hostIndexKey(),
+                ScanOptions.scanOptions().count(CLEANUP_SCAN_COUNT).build())) {
+            while (cursor.hasNext() && inspected < maxKeys) {
+                Map.Entry<Object, Object> entry = cursor.next();
+                inspected++;
+                Long jobId;
+                try {
+                    jobId = Long.valueOf(String.valueOf(entry.getKey()));
+                } catch (NumberFormatException ex) {
+                    log.debug("Runner host index contains a non-numeric job id field={}", entry.getKey());
+                    continue;
+                }
+                if (cleanupDeadLocalRunner(jobId, String.valueOf(entry.getValue()))) {
+                    cleaned++;
+                }
             }
+        } catch (RuntimeException ex) {
+            log.warn("Startup runner host index read failed, remaining keys left to TTL error={}", ex.getMessage());
+            return cleaned;
+        }
+        if (inspected >= maxKeys) {
+            log.warn("Startup runner host index inspection reached its bound maxKeys={}", maxKeys);
         }
         return cleaned;
     }
 
-    /** 扫描现存 runner-active 键并解析出 jobId（只读不删；单节点失败不影响其它节点）。 */
-    private List<Long> scanRunnerActiveJobIds(int maxKeys) {
-        ScanOptions options = ScanOptions.scanOptions()
-                .match(RUNNER_ACTIVE_PREFIX + "*")
-                .count(CLEANUP_SCAN_COUNT)
-                .build();
-        return redis.execute((RedisCallback<List<Long>>) connection -> {
-            if (connection == null) {
-                return List.of();
-            }
-            List<Long> ids = new ArrayList<>();
-            // 上限按"所有看到的键"计（不是 ids.size()）：键名解析失败/前缀不符时 ids 不增长，
-            // 若只看 ids 就会一直扫完整个键空间，上限形同虚设。
-            AtomicInteger scannedKeys = new AtomicInteger();
-            if (connection instanceof RedisClusterConnection cluster) {
-                for (RedisClusterNode node : cluster.clusterGetNodes()) {
-                    if (scannedKeys.get() >= maxKeys) {
-                        break;
-                    }
-                    if (!node.isMaster()) {
-                        continue; // 副本上的 DEL 不会落到主，扫它只是重复候选
-                    }
-                    try (Cursor<byte[]> cursor = cluster.scan(node, options)) {
-                        collectRunnerActiveIds(cursor, ids, maxKeys, scannedKeys);
-                    } catch (RuntimeException e) {
-                        log.warn("Runner-active key scan failed on cluster node, other nodes continue node={} error={}",
-                                node.getId(), e.getMessage());
-                    }
-                }
-            } else {
-                try (Cursor<byte[]> cursor = connection.keyCommands().scan(options)) {
-                    collectRunnerActiveIds(cursor, ids, maxKeys, scannedKeys);
-                }
-            }
-            return ids;
-        });
-    }
-
-    /**
-     * 取出游标里的 {@code job:runner-active:<jobId>} 键名并解析 id。
-     *
-     * <p>每从游标取出一个键就把 {@code scannedKeys} 加一并计入上限（无论是否解析成功），
-     * 保证单轮扫描的工作量有界。
-     */
-    private static void collectRunnerActiveIds(Cursor<byte[]> cursor, List<Long> ids, int maxKeys,
-                                               AtomicInteger scannedKeys) {
-        while (cursor.hasNext() && scannedKeys.get() < maxKeys) {
-            scannedKeys.incrementAndGet();
-            String key = new String(cursor.next(), StandardCharsets.UTF_8);
-            if (!key.startsWith(RUNNER_ACTIVE_PREFIX)) {
-                continue;
-            }
-            try {
-                ids.add(Long.parseLong(key.substring(RUNNER_ACTIVE_PREFIX.length())));
-            } catch (NumberFormatException e) {
-                log.debug("Runner-active key with unexpected name skipped key={}", key);
-            }
-        }
-    }
-
-    /**
-     * 单键启动清理（同一主机）：旧进程已死、但 Redis 键尚未过 TTL 时，删除该键。
-     * 其他主机/无法解析的键保留到 TTL，避免误删仍在运行的实例。
-     *
-     * <p>删除是<b>按值精确匹配</b>的原子步（{@link #DELETE_IF_VALUE_SCRIPT}）：读完值到删除之间
-     * 若本机新进程已重新登记同一 jobId，值已变，脚本不删 —— 不会误放行删除闸门。
-     *
-     * @return true = 本次真的删掉了一个死进程的键
-     */
+    /** 单键清理保留原语义：只处理同主机且 PID 已死的登记，并按当前值条件删除。 */
     public boolean cleanupDeadLocalRunner(Long jobId) {
+        return cleanupDeadLocalRunner(jobId, null);
+    }
+
+    private boolean cleanupDeadLocalRunner(Long jobId, String indexedValue) {
         if (!redisMode || redis == null) {
             return false;
         }
         try {
             String value = redis.opsForValue().get(key(jobId));
-            if (value == null) {
+            String ownerValue = value == null ? indexedValue : value;
+            if (ownerValue != null && ownerValue.startsWith(REVOKED_VALUE_PREFIX)) {
+                removeRunnerIndex(jobId, generationPrefixOfValue(indexedValue));
                 return false;
             }
-            String instance = instanceOf(value);
+            String instance = instanceOf(ownerValue);
             Matcher matcher = instance == null ? null : INSTANCE_ID_PATTERN.matcher(instance);
-            if (matcher == null) {
-                return false;
-            }
-            if (!matcher.matches()) {
-                return false;
-            }
-            if (!LOCAL_HOST.equals(matcher.group(1))) {
+            if (matcher == null || !matcher.matches() || !LOCAL_HOST.equals(matcher.group(1))) {
                 return false;
             }
             long pid = Long.parseLong(matcher.group(2));
             if (ProcessHandle.of(pid).isPresent()) {
                 return false;
             }
-            Long deleted = redis.execute(DELETE_IF_VALUE_SCRIPT, List.of(key(jobId)), value);
+            Long deleted = value == null ? 0L : redis.execute(DELETE_IF_VALUE_SCRIPT, List.of(key(jobId)), value);
+            removeRunnerIndex(jobId, generationPrefixOfValue(ownerValue));
             if (deleted != null && deleted > 0) {
                 log.info("Cleaned runner active key of dead local process jobId={} instance={}", jobId, value);
                 return true;
             }
-            log.debug("Runner active key re-registered, cleanup skipped jobId={} instance={}", jobId, value);
             return false;
         } catch (RuntimeException e) {
             log.warn("Runner active key cleanup failed, left to TTL jobId={} error={}", jobId, e.getMessage());
@@ -806,13 +752,72 @@ public class JobHeartbeatRegistry {
         return DEAD_JUDGE_PREFIX + jobId;
     }
 
+    private String hostIndexKey() {
+        return RUNNER_HOST_INDEX_PREFIX + LOCAL_HOST;
+    }
+
+    private String runnerIndexValueBeforeRevocation(Long jobId) {
+        String localValue = generationValue(jobId, this.clock.millis());
+        if (!redisMode || redis == null) {
+            return localValue;
+        }
+        try {
+            String activeValue = redis.opsForValue().get(key(jobId));
+            if (activeValue != null && !activeValue.startsWith(REVOKED_VALUE_PREFIX)) {
+                return activeValue;
+            }
+            Object indexedValue = redis.opsForHash().get(hostIndexKey(), jobId.toString());
+            return indexedValue == null ? localValue : String.valueOf(indexedValue);
+        } catch (RuntimeException ex) {
+            log.warn("Previous runner generation read failed; existing index preserved jobId={} error={}",
+                    jobId, ex.getMessage());
+            return localValue;
+        }
+    }
+
+    private String hostIndexKeyForValue(String value) {
+        String instance = instanceOf(value);
+        Matcher matcher = instance == null ? null : INSTANCE_ID_PATTERN.matcher(instance);
+        return matcher == null || !matcher.matches() ? hostIndexKey()
+                : RUNNER_HOST_INDEX_PREFIX + matcher.group(1);
+    }
+
+    private void writeRunnerIndex(Long jobId, String value) {
+        if (!redisMode || redis == null || value == null) {
+            return;
+        }
+        try {
+            redis.execute(WRITE_INDEX_SCRIPT, List.of(hostIndexKey()), jobId.toString(), value,
+                    Long.toString(runnerActiveTtl.toMillis()));
+        } catch (RuntimeException ex) {
+            log.warn("Runner host index write failed; active key TTL remains authoritative jobId={} error={}",
+                    jobId, ex.getMessage());
+        }
+    }
+
+    private void removeRunnerIndex(Long jobId, String value) {
+        removeRunnerIndex(hostIndexKey(), jobId, value);
+    }
+
+    private void removeRunnerIndex(String indexKey, Long jobId, String value) {
+        if (!redisMode || redis == null || indexKey == null || value == null) {
+            return;
+        }
+        try {
+            redis.execute(DELETE_INDEX_VALUE_SCRIPT, List.of(indexKey), jobId.toString(), value);
+        } catch (RuntimeException ex) {
+            log.warn("Runner host index cleanup failed jobId={} error={}", jobId, ex.getMessage());
+        }
+    }
+
     private String generationPrefix(Long jobId) {
         String generation = this.runnerGenerations.get(jobId);
         return generation == null ? null : INSTANCE_ID + "|" + generation + "|";
     }
 
     private String generationValue(Long jobId, long nowMs) {
-        return generationPrefix(jobId) + nowMs;
+        String prefix = generationPrefix(jobId);
+        return prefix == null ? null : prefix + nowMs;
     }
 
     private static String instanceOf(String raw) {
@@ -821,6 +826,14 @@ public class JobHeartbeatRegistry {
         }
         int sep = raw.indexOf('|');
         return sep <= 0 ? raw : raw.substring(0, sep);
+    }
+
+    private static String generationPrefixOfValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        int sep = value.lastIndexOf('|');
+        return sep < 0 ? value : value.substring(0, sep + 1);
     }
 
     private boolean databaseInFlight(Long jobId) {
@@ -870,7 +883,10 @@ public class JobHeartbeatRegistry {
         if (!redisMode || redis == null || !activeRunners.contains(jobId)) {
             return;
         }
-        writeGeneration(key(jobId), jobId, runnerActiveTtl);
+        String value = generationValue(jobId, this.clock.millis());
+        if (writeGeneration(key(jobId), jobId, runnerActiveTtl, value)) {
+            writeRunnerIndex(jobId, value);
+        }
     }
 
     private void writeSharedBeat(Long jobId) {
@@ -882,13 +898,17 @@ public class JobHeartbeatRegistry {
     }
 
     private boolean writeGeneration(String redisKey, Long jobId, Duration ttl) {
+        return writeGeneration(redisKey, jobId, ttl, generationValue(jobId, this.clock.millis()));
+    }
+
+    private boolean writeGeneration(String redisKey, Long jobId, Duration ttl, String value) {
         String prefix = generationPrefix(jobId);
         if (prefix == null) {
             return false;
         }
         try {
             Long written = redis.execute(WRITE_GENERATION_SCRIPT, List.of(redisKey), prefix,
-                    generationValue(jobId, this.clock.millis()), Long.toString(ttl.toMillis()));
+                    value, Long.toString(ttl.toMillis()));
             return written != null && written > 0L;
         } catch (RuntimeException ex) {
             log.debug("Generation-fenced runner write failed jobId={} error={}", jobId, ex.getMessage());
@@ -901,15 +921,24 @@ public class JobHeartbeatRegistry {
             return true;
         }
         long now = this.clock.millis();
+        List<Long> candidates = new ArrayList<>(jobIds.size());
+        List<String> values = new ArrayList<>(jobIds.size());
+        for (Long jobId : jobIds) {
+            String prefix = generationPrefix(jobId);
+            if (prefix != null && activeRunners.contains(jobId) && !revokedJobIds.contains(jobId)) {
+                candidates.add(jobId);
+                values.add(generationValue(jobId, now));
+            }
+        }
+        if (candidates.isEmpty()) {
+            return true;
+        }
         try {
-            redis.executePipelined((RedisCallback<Object>) connection -> {
-                for (Long jobId : jobIds) {
-                    String prefix = generationPrefix(jobId);
-                    if (prefix == null || !activeRunners.contains(jobId) || revokedJobIds.contains(jobId)) {
-                        continue;
-                    }
-                    byte[] value = bytes(generationValue(jobId, now));
-                    byte[] generation = bytes(prefix);
+            List<Object> activeResults = redis.executePipelined((RedisCallback<Object>) connection -> {
+                for (int i = 0; i < candidates.size(); i++) {
+                    Long jobId = candidates.get(i);
+                    byte[] value = bytes(values.get(i));
+                    byte[] generation = bytes(generationPrefix(jobId));
                     connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
                             bytes(key(jobId)), generation, value, bytes(Long.toString(runnerActiveTtl.toMillis())));
                     connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
@@ -917,9 +946,45 @@ public class JobHeartbeatRegistry {
                 }
                 return null;
             });
+            if (activeResults == null || activeResults.size() != candidates.size() * 2) {
+                log.warn("Generation-fenced heartbeat result shape mismatch; host index renewal skipped");
+                return false;
+            }
+            List<Long> indexJobIds = new ArrayList<>(candidates.size());
+            List<String> indexValues = new ArrayList<>(candidates.size());
+            for (int i = 0; i < candidates.size(); i++) {
+                Object activeResult = activeResults.get(i * 2);
+                if (activeResult instanceof Number number && number.longValue() > 0L) {
+                    indexJobIds.add(candidates.get(i));
+                    indexValues.add(values.get(i));
+                }
+            }
+            if (indexJobIds.isEmpty()) {
+                return true;
+            }
+            List<Object> indexResults = redis.executePipelined((RedisCallback<Object>) connection -> {
+                byte[] hostIndex = bytes(hostIndexKey());
+                for (int i = 0; i < indexJobIds.size(); i++) {
+                    connection.eval(bytes(WRITE_INDEX_LUA), ReturnType.INTEGER, 1, hostIndex,
+                            bytes(indexJobIds.get(i).toString()), bytes(indexValues.get(i)),
+                            bytes(Long.toString(runnerActiveTtl.toMillis())));
+                }
+                return null;
+            });
+            if (indexResults == null || indexResults.size() != indexJobIds.size()) {
+                log.warn("Runner host index renewal result shape mismatch; active key TTL remains authoritative");
+                return false;
+            }
+            for (Object result : indexResults) {
+                if (!(result instanceof Number number) || number.longValue() <= 0L) {
+                    log.warn("Runner host index renewal failed; active key TTL remains authoritative");
+                    return false;
+                }
+            }
             return true;
         } catch (RuntimeException ex) {
-            log.warn("Generation-fenced heartbeat pipeline failed, remainder of tick skipped error={}", ex.getMessage());
+            log.warn("Generation-fenced heartbeat or host index pipeline failed, remainder of tick skipped error={}",
+                    ex.getMessage());
             return false;
         }
     }
