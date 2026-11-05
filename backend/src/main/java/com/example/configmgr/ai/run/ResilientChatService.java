@@ -64,6 +64,8 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.MessageSource;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -2505,35 +2507,15 @@ public class ResilientChatService {
 			clearExportCorrectionPrefix(snapshot);
 			// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
 			// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
+			RunSnapshot persisted = null;
 			if (persistAllowed(runId, "terminal snapshot/memory")) {
-				try {
-					this.store.save(snapshot);
-				}
-				catch (RuntimeException ex) {
-					log.warn("success terminal snapshot save failed runId={}: {} (closing as unconfirmed)", runId, ex.getMessage());
-					emitUnconfirmedTerminal(runId, sessionId, null, accumulator, attempts, out, turn, snapshot, history);
-					return;
-				}
+				persisted = persistTerminalSnapshot(runId, snapshot);
 			}
 			else {
 				emitUnconfirmedTerminal(runId, sessionId, null, accumulator, attempts, out, turn, snapshot, history);
 				return;
 			}
-				// ===== 落库后复读（W-30 跨实例 / 复审 I-1）=====
-				// RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路），
-				// 所以这一笔可能根本没落库；也可能刚落库就被另一实例的取消收尾覆盖。出帧/记忆之前
-				// 再读一次权威快照，并<b>只按这次复读的可见状态</b>决定出哪种终帧 —— 不再用本地取消 flag
-				// 兜底"读不出来"（flag 只说明有人请求过取消，既不证明 DONE 没落库，也不证明快照已是
-				// CANCELLED；用它二选一会分别造出"DONE 零终帧"和"done{false} 与 CANCELLED 并存"）：
-				//  ① 复读成功、status=DONE 且 cancelled=false ⇒ 成功终局（继续 done{cancelled:false}）；
-				//     即使本地 flag 已置位也不改判 —— 终态先到者赢，取消侧会按终态保护拒绝改写。
-				//  ② CANCELLED 或 cancelled=true ⇒ 交给幂等的 cancelTerminal（归档已有终帧就什么都不做）。
-				//  ③ 复读失败 / 轮不存在 / 其它非 DONE 状态 ⇒ 终态暂不可确认（见 emitUnconfirmedTerminal）：
-				//     不改写快照（不写 DONE/FAILED），用既有 error 帧如实收尾。
-				// 边界：这是一个"快照状态不得从取消态翻案"的原子步，不是分布式事务；退出后到出终帧
-				// 之间仍可能有跨实例并发（历史说明：数据库完整历史写入机已于 2026-10-30 整条移除，
-				// 因此不再有"DB 已写、快照未写"的窗口需要保留说明）。
-				RunSnapshot persisted = readSnapshotQuietly(runId);
+				// 只按有界保存/复读后的权威状态决定终帧；取消优先语义不变。
 				if (isCancelledSnapshot(persisted)) {
 					// 只传 null：这条路径的 accumulator 是<b>成功正文</b>，若交给 cancelTerminal，
 					// 它会把它当作"停止半截"合成 stopped 消息写进 chat memory
@@ -2549,7 +2531,7 @@ public class ResilientChatService {
 					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
 					return;
 				}
-				if (!recordTranscript(runId, sessionId, history)) {
+				if (!recordTerminalTranscript(runId, sessionId, history)) {
 					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
 					return;
 				}
@@ -2767,6 +2749,83 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			log.debug("clientRequestId cancel recheck unreadable sessionId={} (continuing as not cancelled): {}", sessionId, ex.getMessage());
+			return false;
+		}
+	}
+
+	private RunSnapshot persistTerminalSnapshot(String runId, RunSnapshot snapshot) {
+		RunSnapshot persisted = null;
+		for (int attempt = 0; attempt < 3; attempt++) {
+			boolean retryableFailure = true;
+			try {
+				this.store.save(snapshot);
+			}
+			catch (RuntimeException ex) {
+				retryableFailure = isRetryableRedisFailure(ex);
+				log.debug("terminal snapshot save attempt failed runId={} attempt={} retryable={}: {}", runId, attempt + 1,
+						retryableFailure, ex.getMessage());
+			}
+			persisted = readSnapshotQuietly(runId);
+			if (isCancelledSnapshot(persisted)) {
+				return persisted;
+			}
+			if (persisted != null && RunSnapshot.isTerminal(persisted.getStatus())) {
+				return persisted;
+			}
+			if (!retryableFailure || attempt >= 2 || !pauseTerminalRetry(attempt)) {
+				break;
+			}
+		}
+		return persisted;
+	}
+
+	private boolean recordTerminalTranscript(String runId, String sessionId, List<Message> history) {
+		for (int attempt = 0; attempt < 3; attempt++) {
+			try {
+				if (recordTranscript(runId, sessionId, history, true, null, false, null, true)) {
+					return true;
+				}
+				return false;
+			}
+			catch (NonRetryableTranscriptException ex) {
+				return false;
+			}
+			catch (RuntimeException ex) {
+				if (!isRetryableRedisFailure(ex)) {
+					log.debug("terminal transcript failed permanently runId={}: {}", runId, ex.getMessage());
+					return false;
+				}
+				log.debug("terminal transcript attempt failed runId={} attempt={}: {}", runId, attempt + 1, ex.getMessage());
+			}
+			if (attempt >= 2 || !pauseTerminalRetry(attempt)) {
+				break;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isRetryableRedisFailure(Throwable error) {
+		for (Throwable current = error; current != null; current = current.getCause()) {
+			if (current instanceof DataAccessResourceFailureException || current instanceof QueryTimeoutException) {
+				return true;
+			}
+			if (current.getCause() == current) {
+				break;
+			}
+		}
+		return false;
+	}
+
+	private static final class NonRetryableTranscriptException extends RuntimeException {
+	}
+
+	private static boolean pauseTerminalRetry(int attempt) {
+		try {
+			Thread.sleep(25L * (attempt + 1));
+			return true;
+		}
+		catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
 			return false;
 		}
 	}
@@ -3777,15 +3836,22 @@ public class ResilientChatService {
 
 	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed, RunSnapshot snapshot) {
+		return recordTranscript(runId, sessionId, history, includeLastAssistant, outcomeOverride, unconfirmed, snapshot,
+				false);
+	}
+
+	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
+			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed, RunSnapshot snapshot,
+			boolean terminalAttempt) {
 		if (this.transcript == null || history == null || history.isEmpty()) {
-			return false;
+			return nonRetryableTranscriptFailure(terminalAttempt);
 		}
 		try {
 			if (snapshot == null) {
 				snapshot = this.store.get(runId);
 			}
 			if (snapshot == null || !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
-				return false;
+				return nonRetryableTranscriptFailure(terminalAttempt);
 			}
 			Map<String, PendingToolCall> pendings = transcriptPendings(runId);
 			List<Message> withStates = new ArrayList<>(history.size());
@@ -3827,7 +3893,7 @@ public class ResilientChatService {
 							entry.text(), entry.reasoning());
 					if (segments == null || segments.isEmpty()) {
 						if (entry.toolCalls() != null && !entry.toolCalls().isEmpty()) {
-							return false;
+							return nonRetryableTranscriptFailure(terminalAttempt);
 						}
 						continue;
 					}
@@ -3845,7 +3911,7 @@ public class ResilientChatService {
 					}
 					TranscriptEntry.SegmentView anchor = toolSegments.get(entry.toolCallId());
 					if (anchor == null) {
-						return false;
+						return nonRetryableTranscriptFailure(terminalAttempt);
 					}
 					entries.set(i, entry.withSegments(List.of(new TranscriptEntry.SegmentView("tool", entry.result(),
 							entry.toolCallId(), anchor.seq()))));
@@ -3867,13 +3933,29 @@ public class ResilientChatService {
 				entries.add(0, TranscriptEntries.user(runId, snapshot.transcriptUserTurnStartedAtMs(),
 						snapshot.getTurnStartedAtMs(), userText));
 			}
-			return !entries.isEmpty() && this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(),
-					entries, snapshot.getRunEpoch());
+			if (entries.isEmpty()) {
+				return nonRetryableTranscriptFailure(terminalAttempt);
+			}
+			if (!this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(), entries,
+					snapshot.getRunEpoch())) {
+				return nonRetryableTranscriptFailure(terminalAttempt);
+			}
+			return true;
 		}
 		catch (RuntimeException ex) {
+			if (terminalAttempt) {
+				throw ex;
+			}
 			log.warn("transcript terminal write failed runId={}: {}", runId, ex.getMessage());
 			return false;
 		}
+	}
+
+	private static boolean nonRetryableTranscriptFailure(boolean terminalAttempt) {
+		if (terminalAttempt) {
+			throw new NonRetryableTranscriptException();
+		}
+		return false;
 	}
 
 	/** 终态写点需要的快照历史（读不到 ⇒ 不写；不让展示面反噬本轮收尾）。 */

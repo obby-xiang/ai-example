@@ -8,6 +8,8 @@ import com.example.configmgr.ai.tenant.TenantUser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -293,10 +295,25 @@ public class ConversationTranscriptStore {
 			return appendWithBounds(sessionId, tenantId, userId, args);
 		}
 		catch (RuntimeException ex) {
+			if (isTransientResourceFailure(ex)) {
+				throw ex;
+			}
 			log.warn("transcript append failed sessionId={} error={} (display history does not affect this turn)",
 					sessionId, ex.getMessage());
 			return false;
 		}
+	}
+
+	private static boolean isTransientResourceFailure(Throwable error) {
+		for (Throwable current = error; current != null; current = current.getCause()) {
+			if (current instanceof DataAccessResourceFailureException || current instanceof QueryTimeoutException) {
+				return true;
+			}
+			if (current.getCause() == current) {
+				break;
+			}
+		}
+		return false;
 	}
 
 	public ReadPage readPage(String sessionId, Long before, Integer limit) {

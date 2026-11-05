@@ -518,6 +518,13 @@
       "reason": "本批仅按真实表单受理证据恢复提交状态，并为未确认终帧提供零副作用自动对账和最终手动出口，D6协议不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:bb211b7cfd4ec85c158aff1f5d4d2bc60ce8e44c3a3ce7abb37707c2fa5e9785",
+      "status": "not-affected",
+      "reason": "本批仅对暂时Redis异常执行有界幂等重试，接受所有权威终态并保留永久拒绝与UNCONFIRMED语义，D6协议不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
