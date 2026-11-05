@@ -266,6 +266,22 @@ public class ConditionsForm extends HostForm {
 	 * </ul>
 	 * 不改变 {@code start_export} 确认门，也不自动执行/下载。
 	 */
+	public boolean conditionFormCancelledInBatch(List<PendingToolCall> settledBatch, String runId, AiContext context) {
+		if (settledBatch == null || context == null || context.getTaskId() == null
+				|| !TaskSteps.QUERY_COND.equals(TaskSteps.normalize(context.getStep()))) {
+			return false;
+		}
+		long taskId = context.getTaskId();
+		for (PendingToolCall pending : settledBatch) {
+			if (pending != null && PendingToolCall.FRONTEND_CANCELLED.equals(pending.getStatus())
+					&& GenerativeFormRules.TOOL_NAME.equals(pending.getName())
+					&& isConditionForm(pending.getArguments()) && belongsToTask(pending.getToolCallId(), runId, taskId)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history) {
 		return parkIfDueAtQueryCond(runId, context, history, true);
 	}

@@ -665,6 +665,13 @@
       "reason": "已同步失败finalText仅取未持久化正文、既有作业事实保留及已知错误清除unconfirmed的展示契约",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:11f96915fa4eddf9a7cfed0a497edac1dacf498f76e2edef77f8c406eddee364",
+      "status": "synced",
+      "reason": "已同步宿主条件表取消时复用真实CANCELLED终局、禁止模型继续写条件和推进的契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

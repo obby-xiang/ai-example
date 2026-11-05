@@ -1509,6 +1509,18 @@ public class ResumeService {
 				body.put("taskId", nextHopContext.getTaskId());
 				return new ResumeResult(Outcome.ACCEPTED, body);
 			}
+			if (this.conditionsForm != null
+					&& this.conditionsForm.conditionFormCancelledInBatch(settledInBatch, runId, nextHopContext)) {
+				this.chatService.cancelParked(runId);
+				RunSnapshot latest = this.store.get(runId);
+				if (latest != null && RunSnapshot.CANCELLED.equals(latest.getStatus())) {
+					body.put("resumed", false);
+					body.put("reason", "ALREADY_CANCELLED");
+					body.put("taskId", nextHopContext.getTaskId());
+					return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
+				}
+				return resumeStatusWriteRefused(runId, body);
+			}
 			boolean enteredQueryCond = settledInBatch != null && settledInBatch.stream()
 					.anyMatch(pending -> pending != null && "confirm_step".equals(pending.getName())
 							&& com.example.configmgr.ai.tool.ToolOutcome.OK == pending.effectiveOutcome());
