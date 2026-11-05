@@ -471,6 +471,16 @@ def _check_deferred_runs(ops: RedisOps, checks: List[Dict[str, object]], scenari
                    % len(expected))
 
 
+def _all_generated_runs_absent(ops: RedisOps, keys: Dict[str, object]) -> bool:
+    expected: List[str] = []
+    for info in keys["runs"].values():
+        expected.extend((info.get("generated_keys") or {}).values())
+    if not expected:
+        return False
+    existence = ops.exists_many(expected)
+    return all(existence.get(key) is False for key in expected)
+
+
 def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[str, object]], scenario: str,
                     copy_name: str, plan: Dict[str, object], copy: Dict[str, object],
                     merged: Dict[str, object], background_counts: Dict[str, int]) -> None:
@@ -510,6 +520,9 @@ def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dic
         _check(checks, scenario, copy_name, "pending_retained", "pass", "durable pending 保留（无 TTL）")
     elif pending_ttl == -3:
         _check(checks, scenario, copy_name, "pending_retained", "unknown", "pending TTL 不可读")
+    elif pending_ttl == -2 and _all_generated_runs_absent(ops, keys):
+        _check(checks, scenario, copy_name, "pending_retained", "info",
+               "pending 已在后续记忆复核完成后移除（全部已生成 run 键已不存在）")
     else:
         _check(checks, scenario, copy_name, "pending_retained", "fail",
                "失败/延后时 pending 必须保留，ttl=%s" % pending_ttl)
@@ -835,6 +848,26 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
     for item in checks:
         status = str(item.get("status"))
         counts[status] = counts.get(status, 0) + 1
+    return {
+        "started_at": started_at,
+        "finished_at": M.utc_now_iso(),
+        "checks": checks,
+        "counts": counts,
+    }
+
+
+def verify_cleanup(cleanup: Dict[str, object]) -> Dict[str, object]:
+    """Verify an executed cleanup without reusing pre-cleanup retained assertions."""
+    started_at = M.utc_now_iso()
+    checks: List[Dict[str, object]] = []
+    complete = cleanup.get("complete") is True
+    remaining = cleanup.get("remaining") or {}
+    detail = "cleanup.complete=true；guard/pending/tombstone/背景键按清理契约删除" if complete else \
+        "cleanup 未完成，remaining=%s；按 cleanup 的实际残留与预算结果验收" % remaining
+    _check(checks, "cleanup", "-", "cleanup_complete", "pass" if complete else "fail", detail)
+    counts = {"pass": 0, "fail": 0, "unknown": 0, "info": 0, "skip": 0}
+    for item in checks:
+        counts[str(item.get("status"))] = counts.get(str(item.get("status")), 0) + 1
     return {
         "started_at": started_at,
         "finished_at": M.utc_now_iso(),

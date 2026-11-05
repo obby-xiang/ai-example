@@ -260,6 +260,15 @@ def _measure_from_results(cfg: Config) -> Optional[Dict[str, object]]:
     return measure if isinstance(measure, dict) else None
 
 
+def _cleanup_from_results(cfg: Config) -> Optional[Dict[str, object]]:
+    paths = M.workspace(cfg)
+    data = M.read_json(paths["results"])
+    if not isinstance(data, dict):
+        return None
+    cleanup = data.get("cleanup")
+    return cleanup if isinstance(cleanup, dict) else None
+
+
 def cmd_verify(cfg: Config, args) -> int:
     if cfg.errors:
         _print_config_errors(cfg)
@@ -276,9 +285,13 @@ def cmd_verify(cfg: Config, args) -> int:
     if measure_result is None:
         print("没有测量结果：先执行 measure（或检查 PERF_OUTPUT_DIR）", file=sys.stderr)
         return EXIT_CONFIG
-    result = verify_mod.verify(cfg, manifest, measure_result, selected)
+    cleanup_result = _cleanup_from_results(cfg)
+    if cleanup_result is not None and cleanup_result.get("executed") is True:
+        result = verify_mod.verify_cleanup(cleanup_result)
+    else:
+        result = verify_mod.verify(cfg, manifest, measure_result, selected)
     paths = M.workspace(cfg)
-    report.write_all(cfg, paths, measure_result, result, None, compare_git(preflight_mod._repo_root()))
+    report.write_all(cfg, paths, measure_result, result, cleanup_result, compare_git(preflight_mod._repo_root()))
     _print_verify(result)
     counts = result.get("counts", {})
     if counts.get("fail", 0) > 0:

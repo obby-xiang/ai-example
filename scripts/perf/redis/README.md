@@ -216,6 +216,8 @@ python -m perf_redis all --keep              # 保留数据
 python -m perf_redis all --cleanup-dry-run   # 只打印清理清单
 ```
 
+`verify` 在 cleanup 执行前按删除/延后语义检查键面；在 cleanup 已执行后改用 `cleanup.complete/remaining` 验收，不再重复 `guard_retained`、`memory_tombstones`、`pending_retained`、`background_preserved` 等清理前断言。cleanup 的精确删除清单本来就包含 guard、pending、记忆 tombstone 与背景键（`PERF_KEEP_GUARD=true` 时仅 guard/pending 例外），因此 cleanup 后这些键不存在是正确结果，不是误删。`cleanup.complete=false` 仍按实际残留和扫描预算失败，不能改成通过。
+
 建议顺序与产出：
 
 > `doctor` 对 Redis/应用只读；它会创建 `PERF_OUTPUT_DIR` 并在其中写 `.namespace`（工具状态文件，不是 Redis 数据）。`preflight` 会额外写一个带 TTL 的 `perf:doctor:<ns>:probe` 键并立即删除。
@@ -343,6 +345,8 @@ python -m perf_redis all
 - `503`：Redis 不可用；不等于删除完成。唯一例外是 `GET /api/ai/health` 的 503：它是“AI 不可用”的正常表达，记为 `allowed_http`/`accepted`，不计入失败。
 
 complete 后 verify 以最多 65 秒的有界条件轮询等待 pending/记忆复核完成；超时或 pending 不可读记 `unknown`，不把在飞写回直接判为删除失败。
+
+pending 在记忆复核完成后允许且应该被移除。若首次响应为 deferred/complete=false、随后全部已生成 run 键已不存在，verify 将 pending 缺失记为后续完成的 `info`，而不是 `pending_retained=fail`；只要仍有键存在或存在性不可读，仍按 deferred 保留义务核对，不能用 pending 消失掩盖提前删除。
 
 ### 7.3 失败口径（transport / http / allowed_http）
 
