@@ -1,0 +1,1690 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>配置助手 · 场景演示</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        ink: '#1f2328',
+        sub: '#57606a',
+        mute: '#8b949e',
+        line: '#e3e6ea',
+        soft: '#f6f7f9',
+        brand: '#2563eb',
+        tint: '#eff4ff',
+        danger: '#c0392b',
+        warn: '#b45309',
+        success: '#1a7f45'
+      }
+    }
+  }
+};
+</script>
+<style>
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: #eef0f3;
+  color: #1f2328;
+  -webkit-font-smoothing: antialiased;
+}
+button { font-family: inherit; }
+::selection { background: #dbe7ff; }
+.scroll-thin { scrollbar-width: thin; scrollbar-color: rgba(31,35,40,.22) transparent; }
+.scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: rgba(31,35,40,.22); border-radius: 99px; }
+.scroll-thin::-webkit-scrollbar-thumb:hover { background: rgba(31,35,40,.38); }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.assistant {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  bottom: 20px;
+  width: 420px;
+  transition: width .3s cubic-bezier(.4,0,.2,1);
+  z-index: 30;
+}
+.assistant.is-collapsed { width: 48px; }
+.assistant.is-collapsed .assistant-panel {
+  box-shadow: 0 18px 50px rgba(31,35,40,.14), 0 3px 12px rgba(31,35,40,.06);
+}
+.glow-target { transition: box-shadow .2s ease, color .2s ease, border-color .2s ease, background-color .2s ease; }
+@keyframes softGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(37,99,235,.06), 0 0 0 0 rgba(37,99,235,0); }
+  50% { box-shadow: 0 0 0 4px rgba(37,99,235,.10), 0 0 16px 3px rgba(37,99,235,.16); }
+}
+.is-running .glow-target {
+  animation: softGlow 2.4s ease-in-out infinite;
+  border-color: rgba(37,99,235,.32);
+  color: #2563eb;
+  background: #f8faff;
+}
+@media (prefers-reduced-motion: reduce) {
+  .is-running .glow-target { animation: none; box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 21px;
+  padding: 0 6px;
+  border: 1px solid #e3e6ea;
+  border-radius: 5px;
+  background: #f6f7f9;
+  color: #57606a;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.badge.blue { color: #2563eb; background: #eff4ff; border-color: #cddcff; }
+.badge.green { color: #1a7f45; background: #edf7f0; border-color: #bfe3cd; }
+.badge.amber { color: #b45309; background: #fffbeb; border-color: #fde68a; }
+.badge.red { color: #c0392b; background: #fdf1ef; border-color: #f0d5d0; }
+.badge.dark { color: #fff; background: #1f2328; border-color: #1f2328; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition: all .15s ease;
+  cursor: pointer;
+}
+.btn:disabled { cursor: not-allowed; }
+.btn-primary { background: #2563eb; color: #fff; font-weight: 600; }
+.btn-primary:hover:not(:disabled) { filter: brightness(1.06); }
+.btn-primary:disabled { background: #c7cdd6; color: #fff; }
+.btn-secondary { background: #fff; border-color: #e3e6ea; color: #57606a; }
+.btn-secondary:hover:not(:disabled) { border-color: #8b949e; color: #1f2328; }
+.btn-ghost { background: transparent; color: #57606a; }
+.btn-ghost:hover { color: #2563eb; background: #f6f7f9; }
+.btn-dark { background: #1f2328; color: #fff; }
+.btn-dark:hover { filter: brightness(1.15); }
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #8b949e;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.icon-btn:hover { background: #f1f3f6; color: #1f2328; }
+.field-label { display: block; margin-bottom: 4px; font-size: 11.5px; color: #57606a; }
+.field-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid #e3e6ea;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f2328;
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.field-input:focus { border-color: #9bbcff; box-shadow: 0 0 0 3px rgba(37,99,235,.10); }
+select.field-input { appearance: none; padding-right: 28px; cursor: pointer; }
+textarea.field-input { height: auto; padding: 7px 9px; line-height: 1.55; resize: none; }
+.card { border: 1px solid #e3e6ea; border-radius: 12px; background: #fff; overflow: hidden; }
+.card-head { display: flex; align-items: center; gap: 8px; padding: 9px 13px; border-bottom: 1px solid #eef0f3; background: #fbfbfc; }
+.card-body { padding: 12px 13px 13px; }
+.row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid #eef0f3; font-size: 12.5px; line-height: 1.55; }
+.row:last-child { border-bottom: 0; }
+.row-k { flex: 0 0 58px; color: #8b949e; font-size: 11.5px; }
+.row-v { flex: 1; min-width: 0; word-break: break-word; }
+@media (max-width: 900px) {
+  .assistant { top: 12px; right: 12px; bottom: 12px; width: calc(100% - 24px); }
+  .assistant.is-collapsed { width: 48px; }
+  .stage-content { padding-right: 24px !important; opacity: .25; pointer-events: none; }
+}
+</style>
+</head>
+<body class="min-h-screen">
+<header class="sticky top-0 z-40 border-b border-line bg-white/95 backdrop-blur">
+  <div class="mx-auto flex h-[62px] max-w-[1180px] items-center gap-3 px-5">
+    <div class="flex h-8 w-8 items-center justify-center rounded-[10px] bg-brand text-white shadow-[0_5px_14px_rgba(37,99,235,.24)]">
+      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.6 4.8 4.8 1.6-4.8 1.6L12 15.8l-1.6-4.8L5.6 9.4l4.8-1.6L12 3z"></path><path d="M19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2-2.2-.8 2.2-.8L19 15z"></path></svg>
+    </div>
+    <div class="min-w-0">
+      <div class="text-[14px] font-semibold leading-tight tracking-[-.01em]">配置助手 · 场景演示</div>
+      <div class="mt-0.5 text-[10.5px] leading-none text-mute">先确认，再动手</div>
+    </div>
+    <div class="ml-auto hidden items-center gap-2 sm:flex">
+      <span class="inline-flex items-center gap-1.5 rounded-full border border-line bg-soft px-2.5 py-1 text-[10.5px] text-mute">
+        <span class="h-1.5 w-1.5 rounded-full bg-brand"></span>演示数据均为虚构
+      </span>
+    </div>
+  </div>
+  <div class="border-t border-line/70 bg-[#f7f8fa]">
+    <div class="mx-auto flex max-w-[1180px] items-center gap-3 px-5 py-2.5">
+      <span class="shrink-0 text-[11px] font-medium tracking-[.04em] text-mute">演示场景</span>
+      <div id="sceneNav" class="scroll-thin flex gap-1.5 overflow-x-auto pb-0.5"></div>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-[1180px] px-5 pb-7 pt-4">
+  <div class="mb-2.5 flex items-center justify-between gap-4 px-0.5">
+    <div class="flex min-w-0 items-center gap-2 text-[11.5px] text-sub">
+      <span id="sceneTitle" class="shrink-0 font-semibold text-ink">新对话欢迎</span>
+      <span class="text-[#c7cdd6]">/</span>
+      <span id="sceneHint" class="truncate">点一条示例，只会填进输入框。</span>
+    </div>
+    <span class="hidden shrink-0 text-[10.5px] text-mute sm:inline">12 个独立场景 · 切换即重建</span>
+  </div>
+
+  <section class="relative h-[680px] overflow-hidden rounded-[20px] border border-[#d9dde3] bg-[#f3f4f6] shadow-[0_2px_10px_rgba(31,35,40,.05)] max-lg:h-[640px]">
+    <div class="flex h-full flex-col">
+      <div class="flex h-[54px] shrink-0 items-center gap-3 border-b border-line bg-white px-5">
+        <div class="flex h-7 w-7 items-center justify-center rounded-[8px] bg-ink text-[10px] font-semibold text-white">配</div>
+        <span class="text-[12.5px] font-semibold">配置工作台</span>
+        <span class="text-[11px] text-mute">/ 订单配置</span>
+        <div class="ml-auto hidden items-center gap-2 sm:flex">
+          <div class="flex h-8 w-[176px] items-center gap-2 rounded-[8px] border border-line bg-soft px-2.5 text-[11px] text-mute">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+            搜索配置
+          </div>
+          <div class="flex h-7 w-7 items-center justify-center rounded-full bg-[#e6eaf0] text-[10px] font-semibold text-sub">你</div>
+        </div>
+      </div>
+
+      <div class="stage-content flex-1 overflow-hidden px-6 py-5 pr-[472px]">
+        <div class="flex items-end justify-between gap-4">
+          <div>
+            <h1 class="text-[22px] font-semibold tracking-[-.02em] text-ink">订单配置</h1>
+            <p class="mt-1 text-[12px] text-sub">管理订单字段、导出与发布。</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="badge blue">生产环境</span>
+            <span class="badge">本月已导出 8 次</span>
+          </div>
+        </div>
+
+        <div class="mt-5 grid grid-cols-3 gap-3">
+          <div class="rounded-[12px] border border-line bg-white px-4 py-3.5">
+            <div class="text-[10.5px] text-mute">配置项</div>
+            <div class="mt-1 text-[20px] font-semibold tracking-[-.02em]">24<span class="ml-1 text-[11px] font-normal text-mute">个</span></div>
+          </div>
+          <div class="rounded-[12px] border border-line bg-white px-4 py-3.5">
+            <div class="text-[10.5px] text-mute">本月导出</div>
+            <div class="mt-1 text-[20px] font-semibold tracking-[-.02em]">8<span class="ml-1 text-[11px] font-normal text-mute">次</span></div>
+          </div>
+          <div class="rounded-[12px] border border-line bg-white px-4 py-3.5">
+            <div class="text-[10.5px] text-mute">待发布</div>
+            <div class="mt-1 text-[20px] font-semibold tracking-[-.02em]">2<span class="ml-1 text-[11px] font-normal text-mute">项</span></div>
+          </div>
+        </div>
+
+        <div class="mt-4 overflow-hidden rounded-[14px] border border-line bg-white">
+          <div class="flex items-center gap-3 border-b border-line px-4 py-3">
+            <span class="text-[12.5px] font-semibold">配置清单</span>
+            <span class="text-[10.5px] text-mute">全部 24</span>
+            <span class="text-[10.5px] text-mute">已发布 21</span>
+            <span class="text-[10.5px] text-mute">待发布 3</span>
+            <span class="ml-auto text-[10.5px] text-brand">查看全部</span>
+          </div>
+          <div class="px-4">
+            <div class="flex items-center gap-3 border-b border-line py-3">
+              <span class="flex h-7 w-7 items-center justify-center rounded-[8px] bg-tint text-[10px] font-semibold text-brand">字</span>
+              <div class="min-w-0 flex-1"><div class="text-[12px] font-medium">订单字段映射</div><div class="mt-0.5 text-[10.5px] text-mute">字段配置 · 2 分钟前更新</div></div>
+              <span class="badge green">已发布</span>
+            </div>
+            <div class="flex items-center gap-3 border-b border-line py-3">
+              <span class="flex h-7 w-7 items-center justify-center rounded-[8px] bg-tint text-[10px] font-semibold text-brand">流</span>
+              <div class="min-w-0 flex-1"><div class="text-[12px] font-medium">审批流规则</div><div class="mt-0.5 text-[10.5px] text-mute">流程配置 · 昨天更新</div></div>
+              <span class="badge green">已发布</span>
+            </div>
+            <div class="flex items-center gap-3 border-b border-line py-3">
+              <span class="flex h-7 w-7 items-center justify-center rounded-[8px] bg-[#fffbeb] text-[10px] font-semibold text-warn">知</span>
+              <div class="min-w-0 flex-1"><div class="text-[12px] font-medium">通知模板</div><div class="mt-0.5 text-[10.5px] text-mute">消息模板 · 昨天更新</div></div>
+              <span class="badge amber">待发布</span>
+            </div>
+            <div class="flex items-center gap-3 py-3">
+              <span class="flex h-7 w-7 items-center justify-center rounded-[8px] bg-tint text-[10px] font-semibold text-brand">出</span>
+              <div class="min-w-0 flex-1"><div class="text-[12px] font-medium">导出字段</div><div class="mt-0.5 text-[10.5px] text-mute">导出配置 · 3 天前更新</div></div>
+              <span class="badge green">已发布</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <aside id="assistantRoot" class="assistant"></aside>
+  </section>
+
+  <div class="mt-3 flex items-center justify-between px-0.5 text-[10.5px] text-mute">
+    <span>示例数据均为虚构，仅用于交互演示。</span>
+    <span>点击面板头部可收起为 48px</span>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var SCENES = [
+    { id: 'welcome', label: '新对话欢迎', hint: '点一条示例，只会填进输入框。', build: buildWelcome },
+    { id: 'running', label: '回复中 · 工具执行', hint: '停止按钮出现时，收起图标会轻轻发光。', build: buildRunning },
+    { id: 'create-export', label: '创建导出确认', hint: '这是一次只读导出，不会改动订单。', build: buildCreateExport },
+    { id: 'start-export', label: '启动导出确认', hint: '批准后开始跑，也可以随时停止。', build: buildStartExport },
+    { id: 'publish', label: '发布配置确认', hint: '勾选风险确认后，发布按钮才会亮起。', build: buildPublish },
+    { id: 'conditional-form', label: '条件表单', hint: '切换选项，会带出需要补充的字段。', build: buildConditionalForm },
+    { id: 'form-queue', label: '多表单排队', hint: '两个表单依次填写，也可以先切换。', build: buildFormQueue },
+    { id: 'handoff', label: '导入上传交接', hint: '文件可以由你上传，也可以从最近文件里选。', build: buildHandoff },
+    { id: 'job', label: '作业运行与下载', hint: '进度跑完后，下载按钮会变成可点。', build: buildJob },
+    { id: 'collapsed', label: '48px 收起光晕', hint: '面板收起后，执行中的光晕还在。', build: buildCollapsed },
+    { id: 'compare', label: '批准 · 拒绝 · 停止', hint: '三个动作放在一起，结果一眼能对照。', build: buildCompare },
+    { id: 'failure', label: '失败与恢复', hint: '失败不会丢进度，补上问题就能重试。', build: buildFailure }
+  ];
+
+  var state = {
+    scene: 'welcome',
+    collapsed: false,
+    running: false,
+    welcome: false,
+    input: '',
+    messages: [],
+    token: 0
+  };
+  var timers = [];
+  var replyTimer = null;
+  var idSeq = 0;
+  var root = document.getElementById('assistantRoot');
+  var nav = document.getElementById('sceneNav');
+
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+    });
+  }
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  function nid() { idSeq += 1; return 'dyn-' + idSeq; }
+  function fmtNum(n) { return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+  function icon(name, cls) {
+    var paths = {
+      sparkle: '<path d="M12 3l1.6 4.8 4.8 1.6-4.8 1.6L12 15.8l-1.6-4.8L5.6 9.4l4.8-1.6L12 3z"></path><path d="M19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2-2.2-.8 2.2-.8L19 15z"></path>',
+      check: '<path d="M20 6L9 17l-5-5"></path>',
+      x: '<path d="M18 6L6 18M6 6l12 12"></path>',
+      plus: '<path d="M12 5v14M5 12h14"></path>',
+      clock: '<circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>',
+      upload: '<path d="M12 16V4"></path><path d="M6 10l6-6 6 6"></path><path d="M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3"></path>',
+      shield: '<path d="M12 3l7 3v5c0 4.4-2.8 8.4-7 10-4.2-1.6-7-5.6-7-10V6l7-3z"></path><path d="M9 12l2 2 4-4"></path>',
+      file: '<path d="M14 3H7a1 1 0 00-1 1v16a1 1 0 001 1h10a1 1 0 001-1V7l-4-4z"></path><path d="M14 3v4h4"></path><path d="M9 13h6M9 17h4"></path>',
+      download: '<path d="M12 4v12"></path><path d="M6 10l6 6 6-6"></path><path d="M4 20h16"></path>',
+      warning: '<path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9L2.7 17a1.6 1.6 0 001.4 2.4h15.8a1.6 1.6 0 001.4-2.4L13.7 3.9a1.6 1.6 0 00-3.4 0z"></path>',
+      chevronRight: '<path d="M9 18l6-6-6-6"></path>',
+      chevronLeft: '<path d="M15 18l-6-6 6-6"></path>',
+      chevronDown: '<path d="M6 9l6 6 6-6"></path>',
+      send: '<path d="M12 19V5"></path><path d="M6 11l6-6 6 6"></path>'
+    };
+    return '<svg class="' + (cls || 'h-4 w-4') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths[name] + '</svg>';
+  }
+
+  function later(fn, ms) {
+    var t = setTimeout(fn, ms);
+    timers.push(t);
+    return t;
+  }
+  function repeat(fn, ms) {
+    var t = setInterval(fn, ms);
+    timers.push(t);
+    return t;
+  }
+  function clearTimers() {
+    for (var i = 0; i < timers.length; i += 1) {
+      clearTimeout(timers[i]);
+      clearInterval(timers[i]);
+    }
+    timers = [];
+    replyTimer = null;
+  }
+  function findScene(id) {
+    for (var i = 0; i < SCENES.length; i += 1) {
+      if (SCENES[i].id === id) return SCENES[i];
+    }
+    return SCENES[0];
+  }
+  function findMessage(id) {
+    for (var i = 0; i < state.messages.length; i += 1) {
+      if (state.messages[i].id === id) return state.messages[i];
+    }
+    return null;
+  }
+
+  /* ---------- 场景数据 ---------- */
+
+  function buildWelcome() {
+    return { welcome: true, messages: [], running: false };
+  }
+
+  function buildRunning() {
+    return {
+      running: true,
+      messages: [
+        { id: 'u1', role: 'user', text: '帮我跑一下订单导出，看看这周有多少条。' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '好，我先读取导出任务，再生成文件。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'tool',
+          card: {
+            title: '读取订单数据',
+            subtitle: '正在读取任务设置和字段',
+            status: 'running',
+            steps: [
+              { label: '读取任务设置', state: 'done' },
+              { label: '校验时间范围', state: 'done' },
+              { label: '统计数据量', state: 'active' }
+            ]
+          }
+        }
+      ]
+    };
+  }
+
+  function buildCreateExport() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '帮我新建一个订单导出。' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '可以。我先和你确认导出范围和保存位置，确认后才会创建。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'confirm',
+          card: {
+            badge: '需要确认',
+            title: '确认创建导出任务',
+            desc: '这是一次只读导出，不会修改任何订单数据。',
+            rows: [
+              ['导出范围', '本月订单，约 <b class="font-semibold">12,480</b> 条'],
+              ['文件格式', 'Excel 表格（.xlsx）'],
+              ['保存位置', '我的下载 / 订单导出']
+            ],
+            note: '创建后可以随时取消',
+            primary: '创建导出',
+            secondary: '取消',
+            status: 'pending',
+            approveTitle: '导出任务已创建',
+            approveText: '文件生成好后会出现在「我的下载」里，预计 1 分钟。',
+            rejectTitle: '已取消',
+            rejectText: '没有创建导出任务，也没有改动任何订单数据。'
+          }
+        }
+      ]
+    };
+  }
+
+  function buildStartExport() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '把上周的订单导出重新跑一遍。' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '可以。这次会重新生成文件，不会重复下单。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'confirm',
+          card: {
+            badge: '需要确认',
+            title: '确认启动导出',
+            desc: '这次会重新生成上周的订单文件，预计 2 分钟。',
+            rows: [
+              ['任务', '上周订单导出'],
+              ['时间范围', '10 月 28 日 – 11 月 3 日'],
+              ['预计耗时', '约 2 分钟'],
+              ['输出文件', '订单明细.xlsx']
+            ],
+            note: '启动后会占用一个导出名额',
+            primary: '启动导出',
+            secondary: '先不启动',
+            status: 'pending',
+            approveTitle: '导出已启动',
+            approveText: '正在生成上周的订单文件，完成后可以在「我的下载」里取。',
+            rejectTitle: '已取消启动',
+            rejectText: '任务保持原状，没有重新生成文件。'
+          }
+        }
+      ]
+    };
+  }
+
+  function buildPublish() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '把这 3 个配置发布到生产。' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '发布前需要你确认风险。先看清楚会影响哪些地方。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'confirm',
+          card: {
+            badge: '高风险操作',
+            title: '发布到生产前，请再确认一次',
+            desc: '这次发布会覆盖线上正在使用的配置，立即生效。',
+            rows: [
+              ['发布内容', '3 个配置：订单字段、审批流、通知模板'],
+              ['生效范围', '全部生产环境'],
+              ['影响数据', '约 <b class="font-semibold">12,480</b> 行订单'],
+              ['回滚', '24 小时内可整批恢复']
+            ],
+            note: '未勾选前不能发布',
+            primary: '确认发布',
+            secondary: '暂不发布',
+            requiresAck: true,
+            ack: false,
+            ackText: '我已核对发布内容，并了解发布会立即生效',
+            status: 'pending',
+            approveTitle: '已发布到生产',
+            approveText: '3 个配置正在生效。24 小时内可以整批回滚。',
+            rejectTitle: '已停止发布',
+            rejectText: '线上配置没有变化。'
+          }
+        }
+      ]
+    };
+  }
+
+  function buildConditionalForm() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '帮我设置自动导出。' },
+        {
+          id: 'a1',
+          role: 'assistant',
+          kind: 'form',
+          card: {
+            status: 'pending',
+            title: '设置自动导出',
+            desc: '告诉我什么时候导、导哪些数据，我会按你的选择生成规则。',
+            form: { frequency: 'daily', interval: '3', scope: 'all', warehouse: '', format: 'xlsx' },
+            error: '',
+            resultTitle: '',
+            resultText: ''
+          }
+        }
+      ]
+    };
+  }
+
+  function buildFormQueue() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '把导出和通知一起设置了吧。' },
+        {
+          id: 'a1',
+          role: 'assistant',
+          kind: 'queue',
+          card: {
+            activeId: 'f1',
+            error: '',
+            forms: [
+              { id: 'f1', name: '导出设置', status: 'pending', values: { time: '09:00', scope: 'all' } },
+              { id: 'f2', name: '通知设置', status: 'pending', values: { channel: 'email', email: '' } }
+            ]
+          }
+        }
+      ]
+    };
+  }
+
+  function buildHandoff() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '这份配置表要导入系统。' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '可以。把文件交接给我就行，我先检查表头和必填项。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'handoff',
+          card: {
+            mode: 'choose',
+            selected: '',
+            status: 'pending',
+            files: ['订单配置_11月.xlsx', '仓库映射表.csv']
+          }
+        }
+      ]
+    };
+  }
+
+  function buildJob() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '这周的订单导出跑完了吗？' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '还在生成，我看一下进度。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'job',
+          card: {
+            progress: 34,
+            total: 12480,
+            done: 4243,
+            status: 'running',
+            downloaded: false
+          }
+        }
+      ]
+    };
+  }
+
+  function buildCollapsed() {
+    return {
+      running: true,
+      collapsed: true,
+      messages: [
+        { id: 'u1', role: 'user', text: '帮我把这周的订单导出跑一下。' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '好，我开始生成。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'tool',
+          card: {
+            title: '正在生成导出文件',
+            subtitle: '已读取订单，正在写入表格',
+            status: 'running',
+            steps: [
+              { label: '读取订单', state: 'done' },
+              { label: '写入表格', state: 'active' },
+              { label: '打包文件', state: 'pending' }
+            ]
+          }
+        }
+      ]
+    };
+  }
+
+  function buildCompare() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '这几种操作分别会怎样？' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '放一起对照：批准会继续，拒绝会停下，执行中可以随时停止。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'compare',
+          card: { approve: 'pending', reject: 'pending', stop: 'running' }
+        }
+      ]
+    };
+  }
+
+  function buildFailure() {
+    return {
+      messages: [
+        { id: 'u1', role: 'user', text: '把这份配置表导入测试环境。' },
+        { id: 'a1', role: 'assistant', kind: 'text', text: '我先检查一下这份表。' },
+        {
+          id: 'a2',
+          role: 'assistant',
+          kind: 'failure',
+          card: { status: 'failed' }
+        }
+      ]
+    };
+  }
+
+  function welcomeReply(text) {
+    if (text.indexOf('导出') >= 0) {
+      return '可以。你想导出哪段时间的订单？我先把范围和文件格式确认好，再帮你创建。';
+    }
+    if (text.indexOf('导入') >= 0) {
+      return '可以。把文件给我，或者从最近上传里选一份。我会先检查表头和必填字段，确认没问题再导入。';
+    }
+    if (text.indexOf('发布') >= 0 || text.indexOf('风险') >= 0) {
+      return '发布前我会先把影响范围列给你，并等你勾选确认。线上配置不会在你确认前发生变化。';
+    }
+    return '收到。我会先帮你确认这件事的范围和影响，再开始操作。你也可以直接告诉我时间、对象或文件。';
+  }
+
+  /* ---------- 渲染 ---------- */
+
+  function renderNav() {
+    nav.innerHTML = SCENES.map(function (scene, index) {
+      var active = state.scene === scene.id;
+      return '<button type="button" data-scene="' + scene.id + '" class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] border px-2.5 text-[11.5px] whitespace-nowrap transition-colors ' +
+        (active
+          ? 'border-brand bg-brand text-white shadow-[0_2px_6px_rgba(37,99,235,.22)]'
+          : 'border-line bg-white text-sub hover:border-[#c7cdd6] hover:text-ink') +
+        '"><span class="text-[9.5px] tabular-nums ' + (active ? 'text-white/70' : 'text-mute') + '">' + pad(index + 1) + '</span>' + esc(scene.label) + '</button>';
+    }).join('');
+  }
+
+  function updateHint() {
+    var scene = findScene(state.scene);
+    document.getElementById('sceneTitle').textContent = scene.label;
+    document.getElementById('sceneHint').textContent = scene.hint;
+  }
+
+  function headerHtml() {
+    return '<div data-panel-header class="flex h-[58px] shrink-0 cursor-pointer select-none items-center gap-2.5 border-b border-line px-4">' +
+      '<div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-brand text-white shadow-[0_5px_14px_rgba(37,99,235,.24)]">' + icon('sparkle', 'h-4 w-4') + '</div>' +
+      '<div class="min-w-0">' +
+        '<div class="text-[13.5px] font-semibold leading-tight tracking-[-.01em]">配置助手</div>' +
+        '<div class="mt-0.5 text-[10.5px] leading-none text-mute">先确认，再动手</div>' +
+      '</div>' +
+      '<div class="ml-auto flex shrink-0 items-center gap-1">' +
+        '<button type="button" data-action="new-chat" class="icon-btn" title="新对话" aria-label="新对话">' + icon('plus', 'h-[15px] w-[15px]') + '</button>' +
+        '<button type="button" data-action="collapse" class="icon-btn glow-target" title="收起面板" aria-label="收起面板">' + icon('chevronRight', 'h-[15px] w-[15px]') + '</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function composerHtml() {
+    return '<div class="shrink-0 border-t border-line bg-white px-3 pb-3 pt-2.5">' +
+      '<div class="flex items-end gap-2 rounded-[12px] border border-line bg-white py-1.5 pl-3 pr-1.5 transition focus-within:border-[#b9cffb] focus-within:ring-2 focus-within:ring-brand/10">' +
+        '<textarea id="composerInput" rows="1" maxlength="500" placeholder="描述你想做的配置调整…" class="min-h-[32px] max-h-[96px] flex-1 resize-none border-0 bg-transparent py-1.5 text-[13px] leading-[1.55] text-ink outline-none placeholder:text-mute disabled:cursor-not-allowed disabled:text-mute"></textarea>' +
+        '<div id="composerAction" class="shrink-0"></div>' +
+      '</div>' +
+      '<div class="mt-1.5 flex items-center justify-between px-1 text-[10px] text-mute">' +
+        '<span>Enter 发送 · Shift + Enter 换行</span>' +
+        '<span class="hidden sm:inline">请核对后再操作</span>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function expandedHtml() {
+    return '<div class="assistant-panel flex h-full flex-col overflow-hidden rounded-[16px] border border-line bg-white shadow-[0_24px_70px_rgba(31,35,40,.16),0_4px_18px_rgba(31,35,40,.06)]">' +
+      headerHtml() +
+      '<div id="chat" class="scroll-thin flex-1 overflow-y-auto px-4 py-4"></div>' +
+      composerHtml() +
+    '</div>';
+  }
+
+  function collapsedHtml() {
+    return '<div class="assistant-panel flex h-full flex-col items-center rounded-[16px] border border-line bg-white py-3 shadow-[0_18px_50px_rgba(31,35,40,.14)]">' +
+      '<button type="button" data-action="expand" class="glow-target flex h-8 w-8 items-center justify-center rounded-[9px] border border-line bg-white text-sub" title="展开配置助手" aria-label="展开配置助手">' + icon('chevronLeft', 'h-[15px] w-[15px]') + '</button>' +
+      '<span class="mt-4 [writing-mode:vertical-rl] text-[11px] tracking-[2px] text-sub">配置助手</span>' +
+      '<div class="mt-auto flex h-8 w-8 items-center justify-center rounded-[9px] bg-tint text-brand">' + icon('sparkle', 'h-4 w-4') + '</div>' +
+    '</div>';
+  }
+
+  function renderPanel() {
+    root.className = 'assistant' + (state.collapsed ? ' is-collapsed' : '') + (state.running ? ' is-running' : '');
+    root.innerHTML = state.collapsed ? collapsedHtml() : expandedHtml();
+    if (!state.collapsed) {
+      var header = root.querySelector('[data-panel-header]');
+      if (header) {
+        header.addEventListener('click', function (event) {
+          if (event.target.closest('button')) return;
+          toggleCollapse(true);
+        });
+      }
+      var ta = document.getElementById('composerInput');
+      if (ta) {
+        ta.value = state.input;
+        autosize(ta);
+      }
+      updateComposer();
+      renderChat();
+    }
+  }
+
+  function renderChat() {
+    var chat = document.getElementById('chat');
+    if (!chat) return;
+    var html = '';
+    if (state.welcome) html += welcomeHtml();
+    for (var i = 0; i < state.messages.length; i += 1) {
+      html += renderMessage(state.messages[i]);
+    }
+    chat.innerHTML = html;
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function welcomeHtml() {
+    var suggestions = [
+      { text: '把订单导出改成每天早上 9 点', icon: 'clock' },
+      { text: '按仓库批量导入配置', icon: 'upload' },
+      { text: '发布前帮我检查一下风险', icon: 'shield' }
+    ];
+    return '<div class="pb-1">' +
+      '<div class="relative overflow-hidden rounded-[14px] border border-[#dbe6ff] bg-[#f8faff] p-4">' +
+        '<div class="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full border border-[#dbe6ff]"></div>' +
+        '<div class="pointer-events-none absolute -right-3 -top-3 h-14 w-14 rounded-full bg-[#edf3ff]"></div>' +
+        '<div class="relative">' +
+          '<div class="flex h-10 w-10 items-center justify-center rounded-[12px] bg-brand text-white shadow-[0_6px_18px_rgba(37,99,235,.25)]">' + icon('sparkle', 'h-[19px] w-[19px]') + '</div>' +
+          '<h2 class="mt-3 text-[17px] font-semibold tracking-[-.02em] text-ink">你好，我是配置助手</h2>' +
+          '<p class="mt-1.5 text-[12.5px] leading-[1.7] text-sub">告诉我你想改哪项配置。我会先和你确认影响范围，再开始操作。</p>' +
+          '<div class="mt-4 flex flex-col gap-2">' +
+            suggestions.map(function (item) {
+              return '<button type="button" data-action="suggest" data-text="' + esc(item.text) + '" class="group flex w-full items-center gap-2.5 rounded-[9px] border border-[#dbe6ff] bg-white px-3 py-2.5 text-left text-[12px] text-ink transition-all hover:border-[#b9cffb] hover:bg-[#fbfdff]">' +
+                '<span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-tint text-brand">' + icon(item.icon, 'h-3.5 w-3.5') + '</span>' +
+                '<span class="min-w-0 flex-1">' + esc(item.text) + '</span>' +
+                icon('chevronRight', 'h-3.5 w-3.5 shrink-0 text-[#c7cdd6] group-hover:text-brand') +
+              '</button>';
+            }).join('') +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt-3 flex items-center gap-2 px-1 text-[10.5px] text-mute">' +
+        '<span class="h-1.5 w-1.5 rounded-full bg-[#b9c2cf]"></span>点一下只会填入输入框，不会直接发送。' +
+      '</div>' +
+    '</div>';
+  }
+
+  function assistantFrame(content) {
+    return '<div class="mb-3 flex items-start gap-2.5">' +
+      '<div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[#cddcff] bg-tint text-[9.5px] font-semibold text-brand">AI</div>' +
+      '<div class="min-w-0 flex-1">' + content + '</div>' +
+    '</div>';
+  }
+
+  function renderMessage(message) {
+    if (message.role === 'user') {
+      return '<div class="mb-3 flex justify-end">' +
+        '<div class="max-w-[84%] rounded-[12px] rounded-br-[5px] border border-line bg-[#f1f3f6] px-3.5 py-2.5 text-[12.8px] leading-[1.7] text-ink">' + esc(message.text).replace(/\n/g, '<br>') + '</div>' +
+      '</div>';
+    }
+    if (message.kind === 'text') {
+      return assistantFrame('<div class="max-w-[92%] rounded-[12px] rounded-tl-[5px] border border-line bg-[#fbfbfc] px-3.5 py-2.5 text-[12.8px] leading-[1.7] text-ink">' + esc(message.text).replace(/\n/g, '<br>') + '</div>');
+    }
+    var content = '';
+    if (message.kind === 'confirm') content = renderConfirm(message);
+    if (message.kind === 'tool') content = renderTool(message);
+    if (message.kind === 'form') content = renderForm(message);
+    if (message.kind === 'queue') content = renderQueue(message);
+    if (message.kind === 'handoff') content = renderHandoff(message);
+    if (message.kind === 'job') content = renderJob(message);
+    if (message.kind === 'compare') content = renderCompare(message);
+    if (message.kind === 'failure') content = renderFailure(message);
+    return assistantFrame(content);
+  }
+
+  function rowsHtml(rows) {
+    return '<div class="mt-2.5 rounded-[9px] border border-line bg-white px-3 py-0.5">' +
+      rows.map(function (row) {
+        return '<div class="row"><span class="row-k">' + esc(row[0]) + '</span><span class="row-v">' + row[1] + '</span></div>';
+      }).join('') +
+    '</div>';
+  }
+
+  function receipt(tone, title, text) {
+    var cls = tone === 'green' ? 'border-[#d7eadf] bg-[#f6fbf8]' : tone === 'red' ? 'border-[#f0d5d0] bg-[#fdf8f7]' : 'border-line bg-[#fbfbfc]';
+    var markCls = tone === 'green' ? 'bg-[#edf7f0] text-success' : tone === 'red' ? 'bg-[#fdf1ef] text-danger' : 'bg-soft text-mute';
+    var mark = tone === 'red' ? icon('warning', 'h-3.5 w-3.5') : tone === 'gray' ? icon('x', 'h-3.5 w-3.5') : icon('check', 'h-3.5 w-3.5');
+    return '<div class="flex items-start gap-2.5 rounded-[11px] border px-3.5 py-3 ' + cls + '">' +
+      '<span class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full ' + markCls + '">' + mark + '</span>' +
+      '<div class="min-w-0">' +
+        '<div class="text-[12.3px] font-semibold leading-[1.45]">' + esc(title) + '</div>' +
+        '<div class="mt-0.5 text-[11.4px] leading-[1.55] text-sub">' + esc(text) + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderConfirm(message) {
+    var card = message.card;
+    if (card.status !== 'pending') {
+      var approved = card.status === 'approved';
+      return receipt(
+        approved ? 'green' : 'gray',
+        approved ? card.approveTitle : card.rejectTitle,
+        approved ? card.approveText : card.rejectText
+      );
+    }
+    var danger = !!card.requiresAck;
+    var ackHtml = '';
+    if (card.requiresAck) {
+      ackHtml = '<label class="mt-3 flex cursor-pointer items-start gap-2.5 rounded-[9px] border px-3 py-2.5 transition-colors ' +
+        (card.ack ? 'border-[#cddcff] bg-tint' : 'border-[#f0d5d0] bg-[#fdf8f7]') + '">' +
+        '<input type="checkbox" data-action="ack" data-msg="' + message.id + '" ' + (card.ack ? 'checked' : '') + ' class="mt-[2px] h-4 w-4 shrink-0 rounded-[4px] accent-[#2563eb]">' +
+        '<span class="text-[11.5px] leading-[1.55] ' + (card.ack ? 'text-ink' : 'text-sub') + '">' + esc(card.ackText) + '</span>' +
+      '</label>';
+    }
+    var disabled = card.requiresAck && !card.ack;
+    return '<div class="card" ' + (danger ? 'style="border-color:#f0d5d0"' : '') + '>' +
+      '<div class="card-head" ' + (danger ? 'style="background:#fdf8f7"' : '') + '>' +
+        '<span class="badge ' + (danger ? 'amber' : 'blue') + '">' + (danger ? icon('warning', 'h-3 w-3') : '') + esc(card.badge) + '</span>' +
+        '<span class="ml-auto text-[10.5px] text-mute">请核对</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<h4 class="text-[13.5px] font-semibold leading-[1.5] tracking-[-.01em]">' + esc(card.title) + '</h4>' +
+        '<p class="mt-1 text-[11.8px] leading-[1.65] text-sub">' + esc(card.desc) + '</p>' +
+        rowsHtml(card.rows) +
+        ackHtml +
+        '<div class="mt-3 flex items-center gap-2">' +
+          '<span class="flex-1 text-[10.5px] leading-[1.45] text-mute">' + esc(card.note || '') + '</span>' +
+          '<button type="button" data-action="confirm-reject" data-msg="' + message.id + '" class="btn btn-secondary">' + esc(card.secondary) + '</button>' +
+          '<button type="button" data-action="confirm-approve" data-msg="' + message.id + '" ' + (disabled ? 'disabled' : '') + ' class="btn btn-primary">' + esc(card.primary) + '</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderTool(message) {
+    var card = message.card;
+    var running = card.status === 'running';
+    var steps = card.steps.map(function (step) {
+      var mark = '';
+      var cls = 'border-line bg-white text-mute';
+      if (step.state === 'done') {
+        mark = icon('check', 'h-2.5 w-2.5');
+        cls = 'bg-[#edf7f0] text-success';
+      } else if (step.state === 'active' && running) {
+        mark = '<span class="h-3 w-3 animate-spin rounded-full border-2 border-[#dbe6ff] border-t-brand"></span>';
+        cls = 'border-[#dbe6ff] bg-white text-brand';
+      } else if (step.state === 'stopped') {
+        mark = icon('x', 'h-2.5 w-2.5');
+        cls = 'bg-soft text-mute';
+      } else {
+        mark = '<span class="h-1 w-1 rounded-full bg-current"></span>';
+      }
+      return '<div class="flex items-center gap-2 text-[11px] ' + (step.state === 'pending' ? 'text-mute' : 'text-sub') + '">' +
+        '<span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ' + cls + '">' + mark + '</span>' + esc(step.label) +
+      '</div>';
+    }).join('');
+    return '<div class="card">' +
+      '<div class="card-head">' +
+        '<span class="flex h-5 w-5 items-center justify-center rounded-[6px] ' + (running ? 'bg-tint text-brand' : 'bg-soft text-mute') + '">' + (running ? icon('sparkle', 'h-3 w-3') : icon('x', 'h-3 w-3')) + '</span>' +
+        '<span class="text-[11.8px] font-medium">' + esc(card.title) + '</span>' +
+        '<span class="badge ml-auto ' + (running ? 'blue' : 'gray') + '">' + (running ? '执行中' : '已停止') + '</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div class="flex items-center gap-2 text-[11px] leading-[1.5] text-sub">' +
+          (running ? '<span class="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-[#dbe6ff] border-t-brand"></span>' : icon('x', 'h-3.5 w-3.5 shrink-0 text-mute')) +
+          '<span>' + esc(running ? card.subtitle : '已停止，没有继续写入') + '</span>' +
+        '</div>' +
+        '<div class="mt-2.5 flex flex-col gap-1.5">' + steps + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function visibleFields(card) {
+    var fields = [
+      { id: 'frequency', label: '导出频率', type: 'select', options: [['daily', '每天'], ['weekly', '每周'], ['custom', '自定义间隔']] },
+      { id: 'interval', label: '间隔天数', type: 'number', min: 1, max: 30, placeholder: '3' },
+      { id: 'scope', label: '导出范围', type: 'select', options: [['all', '全部订单'], ['warehouse', '指定仓库']] },
+      { id: 'warehouse', label: '仓库编号', type: 'text', placeholder: '例如 WH-01' },
+      { id: 'format', label: '文件格式', type: 'radio', options: [['xlsx', 'Excel'], ['csv', 'CSV']] }
+    ];
+    return fields.filter(function (field) {
+      if (field.id === 'interval') return card.form.frequency === 'custom';
+      if (field.id === 'warehouse') return card.form.scope === 'warehouse';
+      return true;
+    });
+  }
+
+  function fieldHtml(message, card, field) {
+    var value = card.form[field.id] == null ? '' : card.form[field.id];
+    var attrs = 'data-msg="' + message.id + '" data-scope="form" data-field="' + field.id + '"';
+    if (field.type === 'select') {
+      return '<label class="block"><span class="field-label">' + esc(field.label) + '</span><span class="relative block"><select class="field-input" ' + attrs + '>' +
+        field.options.map(function (option) {
+          return '<option value="' + option[0] + '" ' + (String(value) === String(option[0]) ? 'selected' : '') + '>' + esc(option[1]) + '</option>';
+        }).join('') +
+      '</select>' + icon('chevronDown', 'pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mute') + '</span></label>';
+    }
+    if (field.type === 'number') {
+      return '<label class="block"><span class="field-label">' + esc(field.label) + '</span><input class="field-input" type="number" min="' + field.min + '" max="' + field.max + '" value="' + esc(value) + '" placeholder="' + esc(field.placeholder || '') + '" ' + attrs + '></label>';
+    }
+    if (field.type === 'radio') {
+      return '<div><span class="field-label">' + esc(field.label) + '</span><div class="grid grid-cols-2 gap-2">' +
+        field.options.map(function (option) {
+          var checked = String(value) === String(option[0]);
+          return '<label class="flex cursor-pointer items-center justify-center gap-1.5 rounded-[8px] border px-2 py-2 text-[11.5px] transition-colors ' + (checked ? 'border-brand bg-tint text-brand' : 'border-line bg-white text-sub') + '">' +
+            '<input type="radio" name="fmt-' + message.id + '" value="' + option[0] + '" ' + (checked ? 'checked' : '') + ' class="sr-only" ' + attrs + '>' +
+            '<span class="h-1.5 w-1.5 rounded-full ' + (checked ? 'bg-brand' : 'bg-[#c7cdd6]') + '"></span>' + esc(option[1]) +
+          '</label>';
+        }).join('') +
+      '</div></div>';
+    }
+    return '<label class="block"><span class="field-label">' + esc(field.label) + '</span><input class="field-input" type="text" value="' + esc(value) + '" placeholder="' + esc(field.placeholder || '') + '" ' + attrs + '></label>';
+  }
+
+  function renderForm(message) {
+    var card = message.card;
+    if (card.status !== 'pending') {
+      var tone = card.status === 'approved' ? 'green' : 'gray';
+      return receipt(tone, card.resultTitle, card.resultText);
+    }
+    var fields = visibleFields(card).map(function (field) {
+      return fieldHtml(message, card, field);
+    }).join('');
+    return '<div class="card">' +
+      '<div class="card-head">' +
+        '<span class="badge blue">待填写</span>' +
+        '<span class="ml-auto text-[10.5px] text-mute">只差几项</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<h4 class="text-[13.5px] font-semibold leading-[1.5]">' + esc(card.title) + '</h4>' +
+        '<p class="mt-1 text-[11.8px] leading-[1.65] text-sub">' + esc(card.desc) + '</p>' +
+        '<div class="mt-3 space-y-3">' + fields + '</div>' +
+        (card.error ? '<div class="mt-2.5 flex items-start gap-2 rounded-[8px] border border-[#f0d5d0] bg-[#fdf1ef] px-2.5 py-2 text-[11.5px] leading-[1.5] text-danger">' + icon('warning', 'mt-[1px] h-3.5 w-3.5 shrink-0') + '<span>' + esc(card.error) + '</span></div>' : '') +
+        '<div class="mt-3 flex items-center gap-2">' +
+          '<span class="flex-1 text-[10.5px] text-mute">保存后可以随时修改</span>' +
+          '<button type="button" data-action="form-cancel" data-msg="' + message.id + '" class="btn btn-secondary">取消</button>' +
+          '<button type="button" data-action="form-submit" data-msg="' + message.id + '" class="btn btn-primary">保存设置</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function getActiveForm(card) {
+    for (var i = 0; i < card.forms.length; i += 1) {
+      if (card.forms[i].id === card.activeId) return card.forms[i];
+    }
+    return null;
+  }
+
+  function queueFields(message, form) {
+    if (form.id === 'f1') {
+      return '<div class="space-y-3">' +
+        '<label class="block"><span class="field-label">执行时间</span><span class="relative block"><select class="field-input" data-msg="' + message.id + '" data-scope="queue" data-field="time">' +
+          '<option value="09:00" ' + (form.values.time === '09:00' ? 'selected' : '') + '>每天 09:00</option>' +
+          '<option value="18:00" ' + (form.values.time === '18:00' ? 'selected' : '') + '>每天 18:00</option>' +
+        '</select>' + icon('chevronDown', 'pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mute') + '</span></label>' +
+        '<label class="block"><span class="field-label">导出内容</span><span class="relative block"><select class="field-input" data-msg="' + message.id + '" data-scope="queue" data-field="scope">' +
+          '<option value="all" ' + (form.values.scope === 'all' ? 'selected' : '') + '>全部订单</option>' +
+          '<option value="changed" ' + (form.values.scope === 'changed' ? 'selected' : '') + '>仅变更订单</option>' +
+        '</select>' + icon('chevronDown', 'pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mute') + '</span></label>' +
+      '</div>';
+    }
+    return '<div class="space-y-3">' +
+      '<label class="block"><span class="field-label">通知方式</span><span class="relative block"><select class="field-input" data-msg="' + message.id + '" data-scope="queue" data-field="channel">' +
+        '<option value="email" ' + (form.values.channel === 'email' ? 'selected' : '') + '>邮件</option>' +
+        '<option value="inbox" ' + (form.values.channel === 'inbox' ? 'selected' : '') + '>站内信</option>' +
+      '</select>' + icon('chevronDown', 'pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mute') + '</span></label>' +
+      (form.values.channel === 'email' ? '<label class="block"><span class="field-label">接收邮箱</span><input class="field-input" type="email" value="' + esc(form.values.email) + '" placeholder="name@example.com" data-msg="' + message.id + '" data-scope="queue" data-field="email"></label>' : '') +
+    '</div>';
+  }
+
+  function renderQueue(message) {
+    var card = message.card;
+    var active = getActiveForm(card);
+    var pendingCount = 0;
+    for (var p = 0; p < card.forms.length; p += 1) {
+      if (card.forms[p].status === 'pending') pendingCount += 1;
+    }
+    var tabs = card.forms.map(function (form, index) {
+      var isActive = active && active.id === form.id;
+      var cls = 'border-line bg-white text-sub';
+      if (form.status === 'done') cls = 'border-[#d7eadf] bg-[#f6fbf8] text-success';
+      if (form.status === 'cancelled') cls = 'border-line bg-soft text-mute';
+      if (form.status === 'pending' && isActive) cls = 'border-brand bg-tint text-brand';
+      var mark = form.status === 'done' ? icon('check', 'h-3 w-3') : form.status === 'cancelled' ? icon('x', 'h-3 w-3') : '';
+      return '<button type="button" data-action="queue-tab" data-msg="' + message.id + '" data-form="' + form.id + '" ' + (form.status !== 'pending' ? 'disabled' : '') + ' class="inline-flex h-7 items-center gap-1.5 rounded-[7px] border px-2.5 text-[11px] transition-colors ' + cls + ' ' + (form.status !== 'pending' ? 'cursor-default' : '') + '"><span class="text-[9.5px] tabular-nums">' + pad(index + 1) + '</span>' + esc(form.name) + mark + '</button>';
+    }).join('');
+    var body = '';
+    if (!active) {
+      var doneCount = 0;
+      var skipCount = 0;
+      for (var d = 0; d < card.forms.length; d += 1) {
+        if (card.forms[d].status === 'done') doneCount += 1;
+        if (card.forms[d].status === 'cancelled') skipCount += 1;
+      }
+      var summary = skipCount === 0
+        ? '两份设置都提交了。导出会按你选的时间执行，完成后按通知方式提醒你。'
+        : doneCount > 0
+          ? '已提交 ' + doneCount + ' 份，跳过 ' + skipCount + ' 份。跳过的设置没有保存。'
+          : '两份设置都跳过了，没有保存任何内容。';
+      body = '<div class="px-3.5 py-4">' +
+        '<div class="flex items-center gap-2 text-[12.5px] font-semibold">' + icon('check', 'h-4 w-4 text-success') + '都处理好了</div>' +
+        '<p class="mt-1.5 text-[11.5px] leading-[1.6] text-sub">' + esc(summary) + '</p>' +
+      '</div>';
+    } else {
+      body = '<div class="px-3.5 pt-3">' + queueFields(message, active) +
+        (card.error ? '<div class="mt-2.5 flex items-start gap-2 rounded-[8px] border border-[#f0d5d0] bg-[#fdf1ef] px-2.5 py-2 text-[11.5px] leading-[1.5] text-danger">' + icon('warning', 'mt-[1px] h-3.5 w-3.5 shrink-0') + '<span>' + esc(card.error) + '</span></div>' : '') +
+      '</div>' +
+      '<div class="mt-3 flex items-center gap-2 border-t border-line px-3.5 pb-3 pt-3">' +
+        '<button type="button" data-action="queue-cancel" data-msg="' + message.id + '" class="btn btn-ghost">跳过这项</button>' +
+        '<button type="button" data-action="queue-submit" data-msg="' + message.id + '" class="btn btn-primary ml-auto">' + (pendingCount > 1 ? '提交并继续' : '提交并完成') + '</button>' +
+      '</div>';
+    }
+    return '<div class="card">' +
+      '<div class="card-head">' +
+        '<span class="badge ' + (pendingCount ? 'blue' : 'green') + '">' + (pendingCount ? '排队处理' : '已完成') + '</span>' +
+        '<span class="ml-auto text-[10.5px] text-mute">' + pendingCount + ' 个待填写</span>' +
+      '</div>' +
+      '<div class="px-3.5 pt-3">' +
+        '<h4 class="text-[13.5px] font-semibold leading-[1.5]">两个表单在排队</h4>' +
+        '<p class="mt-1 text-[11.8px] leading-[1.65] text-sub">一个一个来，填完会自动切到下一个。</p>' +
+      '</div>' +
+      '<div class="mt-3 flex gap-1.5 overflow-x-auto px-3.5">' + tabs + '</div>' +
+      body +
+    '</div>';
+  }
+
+  function renderHandoff(message) {
+    var card = message.card;
+    if (card.status === 'done') {
+      return receipt('green', '文件已收到', '正在检查「' + card.selected + '」的表头和必填字段，有问题会在这里告诉你。');
+    }
+    if (card.status === 'discarded') {
+      return receipt('gray', '已取消导入', '文件没有上传，也没有改动任何配置。');
+    }
+    var body = '';
+    if (card.mode === 'choose') {
+      body = '<p class="text-[11.8px] leading-[1.65] text-sub">这份配置表，你想自己上传，还是从最近用过的文件里选？</p>' +
+        '<div class="mt-3 grid gap-2">' +
+          '<button type="button" data-action="handoff-mode" data-msg="' + message.id + '" data-mode="upload" class="group flex w-full items-center gap-3 rounded-[9px] border border-line bg-white px-3 py-2.5 text-left transition-colors hover:border-[#b9cffb] hover:bg-[#fbfdff]">' +
+            '<span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] bg-tint text-brand">' + icon('upload', 'h-4 w-4') + '</span>' +
+            '<span class="min-w-0 flex-1"><span class="block text-[12px] font-medium">我自己上传</span><span class="mt-0.5 block text-[10.5px] text-mute">从电脑里选一个文件</span></span>' +
+            icon('chevronRight', 'h-4 w-4 shrink-0 text-[#c7cdd6] group-hover:text-brand') +
+          '</button>' +
+          '<button type="button" data-action="handoff-mode" data-msg="' + message.id + '" data-mode="recent" class="group flex w-full items-center gap-3 rounded-[9px] border border-line bg-white px-3 py-2.5 text-left transition-colors hover:border-[#b9cffb] hover:bg-[#fbfdff]">' +
+            '<span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] bg-tint text-brand">' + icon('file', 'h-4 w-4') + '</span>' +
+            '<span class="min-w-0 flex-1"><span class="block text-[12px] font-medium">从最近文件选择</span><span class="mt-0.5 block text-[10.5px] text-mute">刚刚用过：订单配置_11月.xlsx</span></span>' +
+            icon('chevronRight', 'h-4 w-4 shrink-0 text-[#c7cdd6] group-hover:text-brand') +
+          '</button>' +
+        '</div>';
+    } else if (card.mode === 'recent') {
+      body = '<p class="text-[11.8px] leading-[1.65] text-sub">选一份最近用过的文件，我会直接接着处理。</p>' +
+        '<div class="mt-3 space-y-1.5">' +
+          card.files.map(function (file) {
+            var selected = card.selected === file;
+            return '<button type="button" data-action="handoff-file" data-msg="' + message.id + '" data-file="' + esc(file) + '" class="flex w-full items-center gap-2.5 rounded-[8px] border px-2.5 py-2 text-left transition-colors ' + (selected ? 'border-brand bg-tint' : 'border-line bg-white hover:border-[#b9cffb]') + '">' +
+              '<span class="' + (selected ? 'text-brand' : 'text-mute') + '">' + icon('file', 'h-4 w-4') + '</span>' +
+              '<span class="min-w-0 flex-1 truncate text-[11.5px]">' + esc(file) + '</span>' +
+              (selected ? '<span class="badge blue">已选择</span>' : '') +
+            '</button>';
+          }).join('') +
+        '</div>';
+    } else {
+      body = '<div class="rounded-[9px] border border-dashed border-[#cdd3da] bg-[#fbfbfc] px-3 py-4 text-center">' +
+        '<div class="mx-auto flex h-9 w-9 items-center justify-center rounded-[10px] border border-line bg-white text-sub">' + icon('upload', 'h-4 w-4') + '</div>' +
+        '<div class="mt-2 text-[12px] font-medium">把文件放到这里</div>' +
+        '<div class="mt-0.5 text-[10.5px] text-mute">支持 Excel 或 CSV，单份不超过 20 MB</div>' +
+        '<button type="button" data-action="handoff-pick" data-msg="' + message.id + '" class="btn btn-secondary mt-2.5">选择本地文件</button>' +
+        '<input type="file" data-role="file-input" data-action="file-pick" data-msg="' + message.id + '" class="hidden" accept=".xlsx,.xls,.csv">' +
+        '<button type="button" data-action="handoff-sample" data-msg="' + message.id + '" class="mt-2 block w-full text-[10.5px] text-mute hover:text-brand">没有文件？用示例文件试试</button>' +
+      '</div>' +
+      (card.selected ? '<div class="mt-2.5 flex items-center gap-2 rounded-[8px] border border-[#d7eadf] bg-[#f6fbf8] px-2.5 py-2">' +
+        '<span class="text-success">' + icon('file', 'h-4 w-4') + '</span>' +
+        '<span class="min-w-0 flex-1 truncate text-[11.5px]">' + esc(card.selected) + '</span>' +
+        '<span class="badge green">已选择</span>' +
+      '</div>' : '');
+    }
+    var footer = '<div class="mt-3 flex items-center gap-2 border-t border-line pt-3">' +
+      '<button type="button" data-action="handoff-discard" data-msg="' + message.id + '" class="btn btn-ghost">先不导入</button>' +
+      '<div class="ml-auto flex gap-2">' +
+        (card.mode !== 'choose' ? '<button type="button" data-action="handoff-back" data-msg="' + message.id + '" class="btn btn-secondary">返回</button>' : '') +
+        (card.mode !== 'choose' ? '<button type="button" data-action="handoff-start" data-msg="' + message.id + '" ' + (card.selected ? '' : 'disabled') + ' class="btn btn-primary">开始导入</button>' : '') +
+      '</div>' +
+    '</div>';
+    return '<div class="card">' +
+      '<div class="card-head">' +
+        '<span class="badge blue">文件交接</span>' +
+        '<span class="ml-auto text-[10.5px] text-mute">' + (card.selected ? '已选择' : '等你选择') + '</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<h4 class="text-[13.5px] font-semibold leading-[1.5]">导入文件交接</h4>' +
+        '<p class="mt-1 text-[11.8px] leading-[1.65] text-sub">文件不会直接写入，我会先检查表头和必填字段。</p>' +
+        '<div class="mt-3">' + body + '</div>' +
+        footer +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderJob(message) {
+    var card = message.card;
+    var done = card.status === 'done';
+    var stopped = card.status === 'stopped';
+    var pct = Math.max(0, Math.min(100, Math.round(card.progress)));
+    var steps = [
+      { label: '读取订单', at: 15 },
+      { label: '生成表格', at: 55 },
+      { label: '打包文件', at: 90 }
+    ];
+    var stepHtml = steps.map(function (step) {
+      var ok = pct >= step.at;
+      return '<div class="flex items-center gap-2 text-[11px] ' + (ok ? 'text-sub' : 'text-mute') + '">' +
+        '<span class="flex h-4 w-4 items-center justify-center rounded-full border ' + (ok ? 'border-[#d7eadf] bg-[#edf7f0] text-success' : 'border-line bg-white text-mute') + '">' +
+          (ok ? icon('check', 'h-2.5 w-2.5') : '<span class="h-1 w-1 rounded-full bg-current"></span>') +
+        '</span>' + step.label +
+      '</div>';
+    }).join('');
+    return '<div class="card">' +
+      '<div class="card-head">' +
+        '<span class="flex h-6 w-6 items-center justify-center rounded-[7px] bg-tint text-brand">' + icon('file', 'h-3.5 w-3.5') + '</span>' +
+        '<span class="text-[12px] font-medium">订单导出</span>' +
+        '<span class="badge ml-auto ' + (done ? 'green' : stopped ? 'gray' : 'blue') + '">' + (done ? '已完成' : stopped ? '已停止' : '进行中') + '</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div class="flex items-end justify-between gap-3">' +
+          '<span class="text-[12px] text-sub">' + (done ? '文件已经生成' : stopped ? '已停止生成' : '正在生成订单表格') + '</span>' +
+          '<span class="text-[12px] font-semibold tabular-nums">' + pct + '%</span>' +
+        '</div>' +
+        '<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-[#e9edf3]"><div class="h-full rounded-full bg-brand transition-[width] duration-500" style="width:' + pct + '%"></div></div>' +
+        '<div class="mt-2.5 flex items-center justify-between text-[10.5px] text-mute">' +
+          '<span>' + fmtNum(card.done) + ' / ' + fmtNum(card.total) + ' 条订单</span>' +
+          '<span>' + (done ? '约 2.3 MB' : stopped ? '未生成文件' : '预计 1 分钟') + '</span>' +
+        '</div>' +
+        '<div class="mt-3 flex flex-col gap-1.5">' + stepHtml + '</div>' +
+      '</div>' +
+      '<div class="flex items-center gap-2 border-t border-line px-3.5 py-2.5">' +
+        '<span class="flex-1 text-[10.5px] text-mute">' + (done ? '可以下载到本地' : stopped ? '本次导出已停止' : '完成后这里会出现下载按钮') + '</span>' +
+        '<button type="button" data-action="job-download" data-msg="' + message.id + '" ' + (done ? '' : 'disabled') + ' class="btn btn-primary">' +
+          (done ? (card.downloaded ? '已下载' : icon('download', 'h-3.5 w-3.5') + '下载文件') : '下载文件') +
+        '</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderCompare(message) {
+    var card = message.card;
+    var rows = [
+      { key: 'approve', label: '批准', badge: 'blue', title: '发布 3 个配置到生产', desc: '确认后立即生效', action: 'compare-approve', button: '批准', done: '已批准 · 正在发布', doneCls: 'text-success', btnCls: 'btn btn-primary' },
+      { key: 'reject', label: '拒绝', badge: 'gray', title: '删除 1 个测试配置', desc: '拒绝后不会执行', action: 'compare-reject', button: '拒绝', done: '已拒绝 · 配置没变', doneCls: 'text-sub', btnCls: 'btn btn-secondary' },
+      { key: 'stop', label: '停止', badge: 'dark', title: '正在导出订单', desc: '执行中可以随时停下', action: 'compare-stop', button: '停止', done: '已停止 · 没有生成文件', doneCls: 'text-sub', btnCls: 'btn btn-dark' }
+    ];
+    var body = rows.map(function (row) {
+      var value = card[row.key];
+      var resolved = row.key === 'stop' ? value === 'stopped' : value === 'done';
+      return '<div class="flex items-center gap-2.5 border-b border-line px-3.5 py-2.5 last:border-0">' +
+        '<span class="badge ' + row.badge + '">' + row.label + '</span>' +
+        '<div class="min-w-0 flex-1">' +
+          '<div class="truncate text-[12px] font-medium">' + row.title + '</div>' +
+          '<div class="mt-0.5 text-[10.5px] text-mute">' + row.desc + '</div>' +
+        '</div>' +
+        (resolved
+          ? '<span class="shrink-0 text-[10.5px] ' + row.doneCls + '">' + row.done + '</span>'
+          : '<button type="button" data-action="' + row.action + '" data-msg="' + message.id + '" class="' + row.btnCls + ' shrink-0">' + row.button + '</button>') +
+      '</div>';
+    }).join('');
+    return '<div class="card">' +
+      '<div class="card-head">' +
+        '<span class="badge blue">对照演示</span>' +
+        '<span class="ml-auto text-[10.5px] text-mute">同一位置 · 三种结果</span>' +
+      '</div>' +
+      '<div class="px-3.5 pt-3">' +
+        '<h4 class="text-[13.5px] font-semibold leading-[1.5]">三种动作，结果各不同</h4>' +
+        '<p class="mt-1 text-[11.8px] leading-[1.65] text-sub">按钮只保留当下能做的动作，结果就地显示。</p>' +
+      '</div>' +
+      '<div class="mt-3 border-t border-line">' + body + '</div>' +
+    '</div>';
+  }
+
+  function renderFailure(message) {
+    var card = message.card;
+    if (card.status === 'done') {
+      return receipt('green', '导入完成', '已补上仓库编号 WH-01，12,480 行配置已导入测试环境。');
+    }
+    if (card.status === 'cancelled') {
+      return receipt('gray', '已放弃导入', '没有写入任何配置，文件仍保留在你的本机。');
+    }
+    var retrying = card.status === 'retrying';
+    return '<div class="card" style="' + (retrying ? 'border-color:#e3e6ea' : 'border-color:#f0d5d0') + '">' +
+      '<div class="card-head" style="' + (retrying ? 'background:#fbfbfc' : 'background:#fdf8f7') + '">' +
+        '<span class="badge ' + (retrying ? 'blue' : 'red') + '">' + (retrying ? '正在重试' : '没有完成') + '</span>' +
+        '<span class="ml-auto text-[10.5px] text-mute">不会写入一半</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<h4 class="text-[13.5px] font-semibold leading-[1.5]">' + (retrying ? '正在重新检查这份文件' : '导入没有完成') + '</h4>' +
+        '<p class="mt-1 text-[11.8px] leading-[1.65] text-sub">' + (retrying ? '我在补全缺失的仓库编号，再检查一遍表头和必填字段。' : '第 37 行缺少必填字段「仓库编号」，我先停在这里，没有写入任何配置。') + '</p>' +
+        '<div class="mt-2.5 flex items-center gap-2 rounded-[8px] border border-line bg-[#fbfbfc] px-3 py-2 text-[11px] leading-[1.55] text-sub">' +
+          '<span class="text-mute">问题</span><span class="text-[#c7cdd6]">·</span><span>第 37 行，仓库编号为空</span>' +
+        '</div>' +
+        (retrying
+          ? '<div class="mt-3 flex items-center gap-2 text-[11.5px] text-sub"><span class="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#dbe6ff] border-t-brand"></span>正在重试…</div>'
+          : '<div class="mt-3 flex items-center gap-2">' +
+              '<span class="flex-1 text-[10.5px] text-mute">补上后可以直接重试</span>' +
+              '<button type="button" data-action="failure-cancel" data-msg="' + message.id + '" class="btn btn-secondary">先不导入</button>' +
+              '<button type="button" data-action="failure-retry" data-msg="' + message.id + '" class="btn btn-primary">重试</button>' +
+            '</div>') +
+      '</div>' +
+    '</div>';
+  }
+
+  function autosize(textarea) {
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(96, Math.max(34, textarea.scrollHeight)) + 'px';
+  }
+
+  function sendButtonHtml(enabled) {
+    return '<button type="button" data-action="send" ' + (enabled ? '' : 'disabled') + ' class="flex h-8 w-8 items-center justify-center rounded-[9px] bg-brand text-white transition-all hover:brightness-105 disabled:cursor-not-allowed disabled:bg-[#c7cdd6]" aria-label="发送" title="发送">' + icon('send', 'h-4 w-4') + '</button>';
+  }
+
+  function stopButtonHtml() {
+    return '<button type="button" data-action="stop" class="flex h-8 w-8 items-center justify-center rounded-[9px] bg-ink text-white transition-all hover:brightness-110" aria-label="停止" title="停止"><span class="block h-[9px] w-[9px] rounded-[2px] bg-white"></span></button>';
+  }
+
+  function updateComposer() {
+    var ta = document.getElementById('composerInput');
+    var action = document.getElementById('composerAction');
+    if (!ta || !action) return;
+    if (ta.value !== state.input) ta.value = state.input;
+    autosize(ta);
+    action.innerHTML = state.running ? stopButtonHtml() : sendButtonHtml(state.input.trim().length > 0);
+  }
+
+  function setRunning(value) {
+    state.running = value;
+    root.classList.toggle('is-running', value);
+    updateComposer();
+  }
+
+  function syncPendingRunning() {
+    if (['create-export', 'start-export', 'publish', 'conditional-form', 'form-queue', 'handoff', 'job'].indexOf(state.scene) < 0) return;
+    var running = false;
+    for (var i = 0; i < state.messages.length; i += 1) {
+      var message = state.messages[i];
+      var card = message.card;
+      if (!card) continue;
+      if (['confirm', 'form', 'handoff'].indexOf(message.kind) >= 0 && card.status === 'pending') running = true;
+      if (message.kind === 'job' && card.status === 'running') running = true;
+      if (message.kind === 'queue') {
+        for (var f = 0; f < card.forms.length; f += 1) {
+          if (card.forms[f].status === 'pending') running = true;
+        }
+      }
+    }
+    setRunning(running);
+  }
+
+  function toggleCollapse(value) {
+    state.collapsed = typeof value === 'boolean' ? value : !state.collapsed;
+    renderPanel();
+  }
+
+  function stopRunning() {
+    if (!state.running) return;
+    if (replyTimer) {
+      clearTimeout(replyTimer);
+      replyTimer = null;
+    }
+    var hadCard = false;
+    for (var i = 0; i < state.messages.length; i += 1) {
+      var card = state.messages[i].card;
+      if (card && card.status === 'running') {
+        hadCard = true;
+        card.status = 'stopped';
+        if (card.steps) {
+          for (var s = 0; s < card.steps.length; s += 1) {
+            if (card.steps[s].state === 'active') card.steps[s].state = 'stopped';
+          }
+        }
+      }
+    }
+    setRunning(false);
+    state.messages.push({
+      id: nid(),
+      role: 'assistant',
+      kind: 'text',
+      text: hadCard ? '已停止。这次操作没有继续，也没有生成任何文件。' : '已停止这次回复。'
+    });
+    renderChat();
+  }
+
+  function sendMessage() {
+    var text = state.input.trim();
+    if (!text || state.running) return;
+    var wasWelcome = state.welcome;
+    var sceneId = state.scene;
+    state.welcome = false;
+    state.input = '';
+    state.messages.push({ id: nid(), role: 'user', text: text });
+    setRunning(true);
+    renderChat();
+    replyTimer = later(function () {
+      if (state.scene !== sceneId) return;
+      state.messages.push({
+        id: nid(),
+        role: 'assistant',
+        kind: 'text',
+        text: wasWelcome || sceneId === 'welcome' ? welcomeReply(text) : '收到，我记下了。当前这一步完成后，我会继续按你的补充处理。'
+      });
+      setRunning(false);
+      renderChat();
+      replyTimer = null;
+    }, 700);
+  }
+
+  /* ---------- 交互 ---------- */
+
+  function resolveConfirm(message, approved) {
+    var card = message.card;
+    if (card.status !== 'pending') return;
+    if (approved && card.requiresAck && !card.ack) return;
+    card.status = approved ? 'approved' : 'rejected';
+    renderChat();
+  }
+
+  function submitConditional(message) {
+    var card = message.card;
+    if (card.status !== 'pending') return;
+    var form = card.form;
+    var error = '';
+    if (form.frequency === 'custom' && (!form.interval || Number(form.interval) < 1 || Number(form.interval) > 30)) {
+      error = '自定义间隔请填 1–30 天。';
+    }
+    if (!error && form.scope === 'warehouse' && !String(form.warehouse).trim()) {
+      error = '填一下仓库编号，我才能继续。';
+    }
+    if (error) {
+      card.error = error;
+      renderChat();
+      return;
+    }
+    var freq = form.frequency === 'daily' ? '每天' : form.frequency === 'weekly' ? '每周' : '每 ' + Number(form.interval) + ' 天';
+    var scope = form.scope === 'warehouse' ? '仓库 ' + String(form.warehouse).trim() : '全部订单';
+    var fmt = form.format === 'csv' ? 'CSV' : 'Excel';
+    card.status = 'approved';
+    card.error = '';
+    card.resultTitle = '自动导出已设置';
+    card.resultText = '我会' + freq + '自动导出' + scope + '，生成 ' + fmt + ' 文件。设置可以随时修改。';
+    renderChat();
+  }
+
+  function cancelConditional(message) {
+    var card = message.card;
+    if (card.status !== 'pending') return;
+    card.status = 'cancelled';
+    card.resultTitle = '已取消设置';
+    card.resultText = '没有保存任何自动导出规则。';
+    renderChat();
+  }
+
+  function switchQueue(message, formId) {
+    var card = message.card;
+    for (var i = 0; i < card.forms.length; i += 1) {
+      if (card.forms[i].id === formId && card.forms[i].status === 'pending') {
+        card.activeId = formId;
+        card.error = '';
+        renderChat();
+        return;
+      }
+    }
+  }
+
+  function advanceQueue(card) {
+    for (var i = 0; i < card.forms.length; i += 1) {
+      if (card.forms[i].status === 'pending') {
+        card.activeId = card.forms[i].id;
+        return;
+      }
+    }
+    card.activeId = '';
+  }
+
+  function submitQueue(message) {
+    var card = message.card;
+    var form = getActiveForm(card);
+    if (!form) return;
+    if (form.id === 'f2' && form.values.channel === 'email' && !String(form.values.email || '').trim()) {
+      card.error = '填一下接收邮箱，通知才能发出去。';
+      renderChat();
+      return;
+    }
+    form.status = 'done';
+    card.error = '';
+    advanceQueue(card);
+    renderChat();
+  }
+
+  function cancelQueue(message) {
+    var card = message.card;
+    var form = getActiveForm(card);
+    if (!form) return;
+    form.status = 'cancelled';
+    card.error = '';
+    advanceQueue(card);
+    renderChat();
+  }
+
+  function setHandoffMode(message, mode) {
+    var card = message.card;
+    card.mode = mode;
+    card.selected = '';
+    card.status = 'pending';
+    renderChat();
+  }
+
+  function selectHandoffFile(message, file) {
+    var card = message.card;
+    card.selected = file;
+    card.status = 'pending';
+    renderChat();
+  }
+
+  function startHandoff(message) {
+    var card = message.card;
+    if (!card.selected) return;
+    card.status = 'done';
+    renderChat();
+  }
+
+  function discardHandoff(message) {
+    var card = message.card;
+    card.status = 'discarded';
+    renderChat();
+  }
+
+  function downloadJob(message) {
+    var card = message.card;
+    if (card.status !== 'done') return;
+    card.downloaded = true;
+    try {
+      var lines = [
+        '订单号,客户,金额,状态',
+        'SO-20261101-001,示例客户 A,1280.00,已支付',
+        'SO-20261101-002,示例客户 B,460.50,已支付',
+        'SO-20261101-003,示例客户 C,899.00,已完成'
+      ];
+      var blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = '订单导出_本周.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    } catch (error) {}
+    renderChat();
+  }
+
+  function retryFailure(message) {
+    var card = message.card;
+    if (card.status !== 'failed') return;
+    card.status = 'retrying';
+    renderChat();
+    later(function () {
+      if (state.scene !== 'failure') return;
+      if (card.status !== 'retrying') return;
+      card.status = 'done';
+      renderChat();
+    }, 1400);
+  }
+
+  function cancelFailure(message) {
+    var card = message.card;
+    if (card.status !== 'failed') return;
+    card.status = 'cancelled';
+    renderChat();
+  }
+
+  function compareAction(message, key) {
+    var card = message.card;
+    if (key === 'stop') {
+      if (card.stop === 'running') card.stop = 'stopped';
+    } else {
+      card[key] = 'done';
+    }
+    renderChat();
+  }
+
+  function handleAction(action, element) {
+    if (action === 'suggest') {
+      var text = element.getAttribute('data-text') || '';
+      state.input = text;
+      var ta = document.getElementById('composerInput');
+      if (ta) {
+        ta.value = text;
+        ta.focus();
+        ta.setSelectionRange(text.length, text.length);
+        updateComposer();
+      }
+      return;
+    }
+    if (action === 'send') { sendMessage(); return; }
+    if (action === 'stop') { stopRunning(); return; }
+    if (action === 'collapse') { toggleCollapse(true); return; }
+    if (action === 'expand') { toggleCollapse(false); return; }
+    if (action === 'new-chat') { loadScene('welcome'); return; }
+    var message = findMessage(element.getAttribute('data-msg'));
+    if (!message || !message.card) return;
+    if (action === 'confirm-approve') resolveConfirm(message, true);
+    if (action === 'confirm-reject') resolveConfirm(message, false);
+    if (action === 'form-submit') submitConditional(message);
+    if (action === 'form-cancel') cancelConditional(message);
+    if (action === 'queue-tab') switchQueue(message, element.getAttribute('data-form'));
+    if (action === 'queue-submit') submitQueue(message);
+    if (action === 'queue-cancel') cancelQueue(message);
+    if (action === 'handoff-mode') setHandoffMode(message, element.getAttribute('data-mode'));
+    if (action === 'handoff-pick') {
+      var fileInput = root.querySelector('[data-role="file-input"]');
+      if (fileInput) fileInput.click();
+    }
+    if (action === 'handoff-sample') selectHandoffFile(message, '订单配置_11月.xlsx');
+    if (action === 'handoff-file') selectHandoffFile(message, element.getAttribute('data-file'));
+    if (action === 'handoff-start') startHandoff(message);
+    if (action === 'handoff-back') setHandoffMode(message, 'choose');
+    if (action === 'handoff-discard') discardHandoff(message);
+    if (action === 'job-download') downloadJob(message);
+    if (action === 'failure-retry') retryFailure(message);
+    if (action === 'failure-cancel') cancelFailure(message);
+    if (action === 'compare-approve') compareAction(message, 'approve');
+    if (action === 'compare-reject') compareAction(message, 'reject');
+    if (action === 'compare-stop') compareAction(message, 'stop');
+    syncPendingRunning();
+  }
+
+  function updateField(element) {
+    var message = findMessage(element.getAttribute('data-msg'));
+    if (!message || !message.card) return;
+    var field = element.getAttribute('data-field');
+    var scope = element.getAttribute('data-scope');
+    if (scope === 'form' && message.card.form) {
+      message.card.form[field] = element.value;
+    }
+    if (scope === 'queue') {
+      var form = getActiveForm(message.card);
+      if (form) form.values[field] = element.value;
+    }
+  }
+
+  function startJob() {
+    var message = null;
+    for (var i = 0; i < state.messages.length; i += 1) {
+      if (state.messages[i].kind === 'job') {
+        message = state.messages[i];
+        break;
+      }
+    }
+    if (!message) return;
+    var token = state.token;
+    var timer = repeat(function () {
+      if (state.token !== token) return;
+      var card = message.card;
+      if (card.status !== 'running') return;
+      card.progress = Math.min(100, card.progress + 8);
+      card.done = Math.round(card.total * card.progress / 100);
+      if (card.progress >= 100) {
+        card.progress = 100;
+        card.done = card.total;
+        card.status = 'done';
+        state.messages.push({ id: nid(), role: 'assistant', kind: 'text', text: '文件生成好了，可以直接下载。' });
+        clearInterval(timer);
+        setRunning(false);
+      }
+      renderChat();
+    }, 750);
+  }
+
+  function loadScene(id) {
+    clearTimers();
+    state.token += 1;
+    var scene = findScene(id);
+    var built = scene.build();
+    state.scene = scene.id;
+    state.input = '';
+    state.messages = built.messages || [];
+    state.running = !!built.running || ['create-export', 'start-export', 'publish', 'conditional-form', 'form-queue', 'handoff', 'job'].indexOf(scene.id) >= 0;
+    state.collapsed = !!built.collapsed;
+    state.welcome = !!built.welcome;
+    renderNav();
+    renderPanel();
+    updateHint();
+    if (scene.id === 'job') startJob();
+  }
+
+  root.addEventListener('keydown', function (event) {
+    if (event.target.id !== 'composerInput' || event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    if (!state.running) sendMessage();
+  });
+
+  root.addEventListener('click', function (event) {
+    var element = event.target.closest('[data-action]');
+    if (!element) return;
+    handleAction(element.getAttribute('data-action'), element);
+  });
+
+  root.addEventListener('input', function (event) {
+    var target = event.target;
+    if (target.id === 'composerInput') {
+      state.input = target.value;
+      updateComposer();
+      return;
+    }
+    if (target.getAttribute('data-field')) updateField(target);
+  });
+
+  root.addEventListener('change', function (event) {
+    var target = event.target;
+    var action = target.getAttribute('data-action');
+    if (action === 'ack') {
+      var message = findMessage(target.getAttribute('data-msg'));
+      if (message && message.card) {
+        message.card.ack = target.checked;
+        renderChat();
+      }
+      return;
+    }
+    if (action === 'file-pick') {
+      var fileMessage = findMessage(target.getAttribute('data-msg'));
+      if (fileMessage && fileMessage.card && target.files && target.files.length) {
+        fileMessage.card.selected = target.files[0].name;
+        renderChat();
+      }
+      return;
+    }
+    if (target.getAttribute('data-field')) {
+      updateField(target);
+      if (target.tagName === 'SELECT' || target.type === 'radio') renderChat();
+    }
+  });
+
+  nav.addEventListener('click', function (event) {
+    var button = event.target.closest('[data-scene]');
+    if (!button) return;
+    loadScene(button.getAttribute('data-scene'));
+  });
+
+  loadScene('welcome');
+})();
+</script>
+</body>
+</html>
