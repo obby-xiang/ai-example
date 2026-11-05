@@ -679,6 +679,13 @@
       "reason": "已同步单目标与完整执行收尾、失败用户摘要脱敏、精确术语回退及表单约束，不引入文本意图硬门",
       "reviewedAt": "2026-11-06",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:6b8a0fc4c56dd24b8cbc86c4f8e02e4b0d2814b631123904019990b8a1e701f1",
+      "status": "synced",
+      "reason": "已同步术语定义与制度流程检索选型边界，流程规范FAQ直接kb_search",
+      "reviewedAt": "2026-11-06",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

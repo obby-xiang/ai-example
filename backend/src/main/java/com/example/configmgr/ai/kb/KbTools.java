@@ -101,7 +101,7 @@ public class KbTools {
 
     // ---------------------------------------------------------------- kb_search
 
-    @Tool(name = "kb_search", description = "检索业务知识库（制度/流程/口径类问题先用它；精确术语/简称/口头叫法先 kb_lookup_term，未命中再用它）。"
+    @Tool(name = "kb_search", description = "检索业务知识库（制度/流程/规范/口径/操作步骤/系统使用说明/FAQ 类问题直接用它；只查某个术语的含义/定义/别名时才先 kb_lookup_term，未命中再用它）。"
             + "每条返回 doc_id/title/section/snippet/updated_at/match（high/medium/low）；不返回检索分数。"
             + "空结果状态为 no_match（含检索词与近似标题；近似标题只用于换词重查，不是命中，"
             + "不得在答复中列举或引用）或 low_confidence（仅 1–2 条，全部标 low）；"
@@ -292,7 +292,8 @@ public class KbTools {
 
     // ---------------------------------------------------------------- kb_lookup_term
 
-    @Tool(name = "kb_lookup_term", description = "查询术语的预制解释（精确匹配 + 别名/口头叫法）。"
+    @Tool(name = "kb_lookup_term", description = "只用于查某个术语的含义、定义或别名（精确匹配正式术语/简称/口头叫法）。"
+            + "问流程、规范、制度、操作步骤或 FAQ 时不要先用它，直接 kb_search。"
             + "命中返回答案与 source_doc/section/updated_at；未命中返回 found=false 与 next=use kb_search，"
             + "不做模糊兜底 —— 不要把近似词当成命中，也不要自行补写解释",
             resultConverter = PlainTextToolResultConverter.class)

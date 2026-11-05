@@ -19,8 +19,8 @@ public class KbPromptSection {
 
     static final String RULES = """
             ### 知识库使用规则
-            1. 制度、流程、口径、系统使用说明、FAQ 类问题先调用 kb_search；无需检索的问题不强制调用。
-            2. 正式术语、简称或口头叫法的定义先调用 kb_lookup_term；未命中再调用 kb_search。
+            1. 只查某个术语的含义、定义或别名（正式术语、简称、口头叫法）时先调用 kb_lookup_term；未命中再调用 kb_search。
+            2. 制度、流程、规范、口径、操作步骤、系统使用说明、FAQ 类问题不得先调用 kb_lookup_term，应直接调用 kb_search；无需检索的问题不强制调用。
             3. snippet 不足时用 kb_read_doc 按 next_offset 连续翻页，不得仅凭片段推测。
             4. 引用格式为 [doc_id §章节]，只引用工具实际返回的命中内容；近似标题只用于换词重查，不是命中依据。
             5. 未命中时可改写一次；仍无结果就明确说明“知识库中未找到”并建议联系对应业务负责人，禁止编造。
