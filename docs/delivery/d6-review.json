@@ -490,6 +490,13 @@
       "reason": "已同步createdTaskId结构事实、人工拒绝停批、DONE保存复读确认与UNCONFIRMED回退，以及作业绑定和下载门禁",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:d8c4a769187679391f80f99ae55ddd51b2cfa25ac0635ed2b49af78e740cb20b",
+      "status": "not-affected",
+      "reason": "本批仅将无身份purge记录有界隔离并将退役异常纳入候选级失败计数，保留durable台账与D6现有重试契约",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

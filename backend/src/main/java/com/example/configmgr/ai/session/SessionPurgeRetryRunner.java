@@ -265,8 +265,16 @@ public class SessionPurgeRetryRunner {
 					// I4/C37：耗尽且不再自动执行 ⇒ 推到 24h + 抖动未来并<b>摘掉全局 due 成员</b>。
 					// durable 台账保留（守卫/人工入口都靠它），绝不在这里 complete 伪装成功。
 					skipped++;
-					retired++;
-					retireExhausted(pending, exhaustedRetireAt(nowMs, pending));
+					try {
+						if (retireExhausted(pending, exhaustedRetireAt(nowMs, pending))) {
+							retired++;
+						}
+					}
+					catch (RuntimeException ex) {
+						failed++;
+						log.warn("Session purge retry could not retire candidate sessionId={} "
+								+ "(durable pending kept; continuing with remaining candidates): {}", pending.sessionId(), ex.getMessage());
+					}
 					continue;
 				}
 				// 身份按<b>记录</b>恢复（台账里的 tenantId/userId）：本线程没有请求身份，
@@ -316,6 +324,12 @@ public class SessionPurgeRetryRunner {
 						log.warn("Session purge retry threw sessionId={} (durable pending kept): {}",
 								pending.sessionId(), ex.getMessage());
 					}
+				}
+				catch (RuntimeException ex) {
+					failed++;
+					log.warn("Session purge retry candidate failed sessionId={} "
+							+ "(identity/state not guessed; durable pending kept; continuing with remaining candidates): {}",
+							pending.sessionId(), ex.getMessage());
 				}
 			}
 			if (retired > 0) {
@@ -393,17 +407,12 @@ public class SessionPurgeRetryRunner {
 	}
 
 	/**
-	 * 把一条已耗尽的台账退役：推到长未来并摘掉全局 due 成员（owner-CAS；失败只 WARN，台账与
-	 * 到期项都保持原状 —— 下一轮还会取到并重试，绝不静默删除事实）。
+	 * 把一条已耗尽的台账退役：推到长未来并摘掉全局 due 成员；仅 owner-CAS 成功返回 true。
 	 */
-	private void retireExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
+	private boolean retireExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
 		// 改期写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份。
 		try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
-			this.pendingStore.retireExhausted(pending.sessionId(), pending.purgeId(), nextAtMs);
-		}
-		catch (RuntimeException ex) {
-			log.warn("Failed to retire exhausted session purge retry entry sessionId={} (pending/due left as-is): {}",
-					pending.sessionId(), ex.getMessage());
+			return this.pendingStore.retireExhausted(pending.sessionId(), pending.purgeId(), nextAtMs);
 		}
 	}
 

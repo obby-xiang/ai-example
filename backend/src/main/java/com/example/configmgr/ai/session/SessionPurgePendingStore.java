@@ -73,7 +73,7 @@ import java.util.Set;
  * 退役 CAS <b>同时校验 attempts 仍耗尽</b>（不覆盖并发手工 DELETE 的 attempts=0），失败/换主时按
  * 最新台账恢复：可重试的补回到期项，退役态不重新 ZADD。手工 DELETE 经 {@link #register} 重置为
  * now 时会重新写回到期项；</li>
- * <li>{@code listDue} 对坏 JSON 成员<b>不摘除</b>，只隔离到 1h + 抖动未来并 WARN，
+ * <li>{@code listDue} 对坏 JSON / 缺身份成员<b>不摘除</b>，只隔离到 1h + 抖动未来并 WARN，
  * 保留手工 DELETE 恢复入口；pending 键读取失败仍整轮 fail-closed。已耗尽的成员在这里
  * 自愈式摘除（兜住退役时 ZREM 失败的残留）。</li>
  * </ul>
@@ -557,9 +557,9 @@ public class SessionPurgePendingStore {
 	 * 记录里的 {@code nextAtMs} 比分数更晚（改期 CAS 成功但 ZADD 失败）时按记录纠正分数，
 	 * 不提前执行 —— 退避语义以台账事实为准。
 	 *
-	 * <p><b>单成员坏 JSON 隔离</b>：不摘除到期成员、不改 pending 键，只把它推到
+	 * <p><b>单成员坏 JSON / 缺身份隔离</b>：不摘除到期成员、不改 pending 键，只把它推到
 	 * <b>1h + 确定性抖动</b>的未来并 WARN。这样既不阻断其他租户，也保留可恢复入口
-	 * （手工 DELETE 可覆盖坏 JSON，见 {@link #register}）。
+	 * （手工 DELETE 覆盖坏 JSON、重开推进的入口均保留，见 {@link #register}）。
 	 * pending 键读取失败（Redis 不可用）仍然整轮抛出 —— "读不出来"不能当成"没有台账"。
 	 */
 	public List<Pending> listDue(long nowMs, int limit) {
@@ -599,6 +599,12 @@ public class SessionPurgePendingStore {
 			}
 			if (pending == null) {
 				removeDueMember(member);
+				continue;
+			}
+			if (!TenantKeyScope.hasIdentity(pending.tenantId(), pending.userId())) {
+				log.warn("Session purge pending has no usable identity member={} "
+						+ "(quarantined to the future; ledger and recovery entry kept)", member);
+				quarantineDueMember(member, nowMs);
 				continue;
 			}
 			if (pending.nextAtMs() > nowMs) {
@@ -962,7 +968,7 @@ public class SessionPurgePendingStore {
 	}
 
 	/**
-	 * 坏 JSON / 无法确认的到期成员：推到 <b>1h + 确定性抖动</b>的未来。
+	 * 坏 JSON / 缺身份 / 无法确认的到期成员：推到 <b>1h + 确定性抖动</b>的未来。
 	 *
 	 * <p>不摘除成员、不改 pending：既不阻断其他租户，也保留手工 DELETE 覆盖恢复的入口。
 	 * 同一键每次散列到同一刻度，测试/排障可复现。
