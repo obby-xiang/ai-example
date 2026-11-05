@@ -14,9 +14,10 @@ import org.springframework.data.redis.connection.RedisClusterConnection;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.RedisSentinelConnection;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 
 /** A transport proxy that fails selected real commands once; production classes and scripts stay unchanged. */
-final class FaultInjectingConnectionFactory implements RedisConnectionFactory {
+final class FaultInjectingConnectionFactory extends LettuceConnectionFactory {
 
 	private record Rule(String operation, String keyPart) {
 		boolean matches(String method, String commandText) {
