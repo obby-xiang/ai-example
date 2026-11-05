@@ -973,6 +973,7 @@ function lineOffset(text: string, line: number): number {
 export interface MarkdownSourceRange {
   start: number
   end: number
+  unclosed?: boolean
 }
 
 type MarkdownToken = ParsedSource['tokens'][number]
@@ -1062,7 +1063,7 @@ function inlineCodeSourceRanges(
   }
   const unclosed = runs.slice().reverse().find((run) => !used.has(run))
   if (unclosed !== undefined) {
-    ranges.push({ start: unclosed.start, end: source.length })
+    ranges.push({ start: unclosed.start, end: source.length, unclosed: true })
   }
   return { ranges }
 }
@@ -1107,6 +1108,19 @@ export function markdownCodeRanges(text: string): MarkdownSourceRange[] {
   return ranges
 }
 
+function escapeUnclosedInlineCode(source: string): string {
+  if (!source.includes('<')) {
+    return source
+  }
+  let escaped = source
+  const unclosed = markdownCodeRanges(source).filter((range) => range.unclosed)
+  for (const range of unclosed.reverse()) {
+    const tail = escaped.slice(range.start, range.end).replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    escaped = escaped.slice(0, range.start) + tail + escaped.slice(range.end)
+  }
+  return escaped
+}
+
 interface ChunkResult {
   html: string
   fences: number
@@ -1130,12 +1144,14 @@ function renderChunk(
   const nonce = activeFenceNonce
   let html: string
   let keys: string[] = []
+  const protectedSource = escapeUnclosedInlineCode(source)
+  const protectedParsed = protectedSource === source ? parsed : null
   try {
     // 已有整篇 token 时直接走 renderer（等价 instance.render，但省掉一次 parse）
     html =
-      parsed === undefined || parsed === null
-        ? instance.render(source)
-        : instance.renderer.render(parsed.tokens, instance.options, parsed.env)
+      protectedParsed === undefined || protectedParsed === null
+        ? instance.render(protectedSource)
+        : instance.renderer.render(protectedParsed.tokens, instance.options, protectedParsed.env)
     keys = fenceLedger.slice(ledgerStart)
   } finally {
     // 账本只服务本次 chunk；即使渲染抛错也不把残缺 key 留给下一块
