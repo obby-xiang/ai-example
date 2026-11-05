@@ -970,6 +970,143 @@ function lineOffset(text: string, line: number): number {
   return offset
 }
 
+export interface MarkdownSourceRange {
+  start: number
+  end: number
+}
+
+type MarkdownToken = ParsedSource['tokens'][number]
+
+function normalizedInlineCode(source: string): string {
+  const normalized = source.replace(/\r?\n/g, ' ')
+  return normalized.startsWith(' ') && normalized.endsWith(' ') && normalized.trim() !== ''
+    ? normalized.slice(1, -1)
+    : normalized
+}
+
+interface BacktickRun {
+  start: number
+  end: number
+}
+
+interface InlineCodeSourceRanges {
+  ranges: MarkdownSourceRange[]
+}
+
+function backtickRuns(source: string): BacktickRun[] {
+  const runs: BacktickRun[] = []
+  let cursor = 0
+  while (cursor < source.length) {
+    const start = source.indexOf('`', cursor)
+    if (start < 0) {
+      break
+    }
+    let end = start + 1
+    while (end < source.length && source[end] === '`') {
+      end += 1
+    }
+    let slashes = 0
+    for (let index = start - 1; index >= 0 && source[index] === '\\'; index -= 1) {
+      slashes += 1
+    }
+    if (slashes % 2 === 0) {
+      runs.push({ start, end })
+    }
+    cursor = end
+  }
+  return runs
+}
+
+function inlineCodeSourceRanges(
+  source: string,
+  children: NonNullable<MarkdownToken['children']>
+): InlineCodeSourceRanges | null {
+  const runs = backtickRuns(source)
+  const used = new Set<BacktickRun>()
+  const ranges: MarkdownSourceRange[] = []
+  let cursor = 0
+  for (const child of children) {
+    if (child.type !== 'code_inline') {
+      continue
+    }
+    const markup = child.markup
+    let matched = false
+    for (let openingIndex = cursor; openingIndex < runs.length && !matched; openingIndex += 1) {
+      const opening = runs[openingIndex]
+      if (source.slice(opening.start, opening.end) !== markup) {
+        continue
+      }
+      let closingIndex = openingIndex + 1
+      while (closingIndex < runs.length && source.slice(runs[closingIndex].start, runs[closingIndex].end) !== markup) {
+        closingIndex += 1
+      }
+      if (closingIndex >= runs.length) {
+        continue
+      }
+      const closing = runs[closingIndex]
+      if (normalizedInlineCode(source.slice(opening.end, closing.start)) !== child.content) {
+        continue
+      }
+      ranges.push({ start: opening.start, end: closing.end })
+      for (const run of runs) {
+        if (run.start >= opening.start && run.end <= closing.end) {
+          used.add(run)
+        }
+      }
+      cursor = closingIndex + 1
+      matched = true
+    }
+    if (!matched) {
+      return null
+    }
+  }
+  const unclosed = runs.slice().reverse().find((run) => !used.has(run))
+  if (unclosed !== undefined) {
+    ranges.push({ start: unclosed.start, end: source.length })
+  }
+  return { ranges }
+}
+
+/** 代码源码区间由现有 markdown-it token/map/children 给出；定位不完整时保护整个源块。 */
+export function markdownCodeRanges(text: string): MarkdownSourceRange[] {
+  let tokens: ParsedSource['tokens']
+  try {
+    tokens = md.parse(text, {})
+  } catch {
+    return [{ start: 0, end: text.length }]
+  }
+  const lineStarts = [0]
+  for (let newline = text.indexOf('\n'); newline >= 0; newline = text.indexOf('\n', newline + 1)) {
+    lineStarts.push(newline + 1)
+  }
+  const ranges: MarkdownSourceRange[] = []
+  for (const token of tokens) {
+    if (token.map === null) {
+      continue
+    }
+    const start = lineStarts[token.map[0]] ?? text.length
+    const end = lineStarts[token.map[1]] ?? text.length
+    if (token.type === 'fence' || token.type === 'code_block') {
+      ranges.push({ start, end })
+      continue
+    }
+    if (token.type !== 'inline' || token.children === null) {
+      continue
+    }
+    const inlineRanges = inlineCodeSourceRanges(text.slice(start, end), token.children)
+    const absolute = inlineRanges?.ranges.map((range) => ({ start: start + range.start, end: start + range.end })) ?? null
+    const overlaps = absolute?.some((range) => ranges.some((existing) => (
+      range.start < existing.end && existing.start < range.end
+    ))) === true
+    if (absolute === null || overlaps) {
+      ranges.push({ start, end })
+    } else {
+      ranges.push(...absolute)
+    }
+  }
+  return ranges
+}
+
 interface ChunkResult {
   html: string
   fences: number
@@ -1186,6 +1323,27 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
+const MERMAID_PROTOCOL_TAG_RE = /^<\s*\/?\s*(knowledge_catalog|knowledge|tool_result)\s*>$/i
+
+/** Render-only: encode protocol tags as text through Mermaid's sanitizer without parsing diagram nodes ourselves. */
+function encodeMermaidProtocolTags(source: string): string {
+  let tokens: ParsedSource['tokens']
+  try {
+    tokens = md.parseInline(source, {})
+  } catch {
+    return source
+  }
+  let encoded = source
+  for (const token of tokens) {
+    for (const child of token.children ?? []) {
+      if (child.type === 'html_inline' && MERMAID_PROTOCOL_TAG_RE.test(child.content)) {
+        encoded = encoded.split(child.content).join(escapeHtml(child.content))
+      }
+    }
+  }
+  return encoded
+}
+
 function unescapeHtml(s: string): string {
   return s
     .replace(/&lt;/g, '<')
@@ -1288,7 +1446,7 @@ async function renderMermaidSvgUncached(source: string): Promise<string | null> 
       timer = setTimeout(() => reject(new Error('mermaid timeout')), MERMAID_TIMEOUT_MS)
     })
     try {
-      const result = (await Promise.race([mod.default.render(id, source), timeout])) as { svg: string }
+      const result = (await Promise.race([mod.default.render(id, encodeMermaidProtocolTags(source)), timeout])) as { svg: string }
       const svg = sanitizeSvg(result.svg)
       if (mermaidCache.size >= MERMAID_CACHE_MAX) {
         const first = mermaidCache.keys().next().value
