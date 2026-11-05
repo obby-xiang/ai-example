@@ -3,6 +3,7 @@ package com.example.configmgr.seed;
 import com.example.configmgr.data.service.ConfigDataService;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
+import com.example.configmgr.definition.repo.ConfigDefinitionRepository;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.masterdata.entity.Project;
 import com.example.configmgr.masterdata.entity.Region;
@@ -27,6 +28,7 @@ public class DataSeedRunner implements ApplicationRunner {
 
     private final RegionRepository regionRepository;
     private final ProjectRepository projectRepository;
+    private final ConfigDefinitionRepository definitionRepository;
     private final DefinitionService definitionService;
     private final ConfigDataService dataService;
     private final ObjectMapper objectMapper;
@@ -34,12 +36,8 @@ public class DataSeedRunner implements ApplicationRunner {
     private final SeedStatus seedStatus;
 
     /**
-     * 基座种子播种（多实例单飞）。
-     *
-     * <p>判重从"进方法先 count"改为"<b>抢到 app_lock 行锁后</b>再 count"：三个实例同时启动时，
-     * 只有第一个进临界区播种，其余在锁上等待，拿到锁后看到已提交的 regions 直接跳过
-     * （原实现三者都读到 0，随后在 {@code regions.code} 唯一约束上互相冲突）。锁与本次播种事务同界，
-     * 提交即释放 —— 见 {@link SeedLock}。
+     * 基座种子播种（多实例单飞）。锁内逐业务 code 判重，只补缺失单元；
+     * 全部 regions/projects/definitions 均已存在才 SKIPPED，任何实际补播均为 DONE。
      *
      * <p>{@code markAfterCommit}：状态在**提交之后**才置终态，避免 /health/ready 在数据真正可见前
      * 报 ready（提交前的失败会落到 afterCompletion 的 FAILED 分支；那条路径下应用本来也会退出）。
@@ -49,17 +47,15 @@ public class DataSeedRunner implements ApplicationRunner {
     public void run(ApplicationArguments args) throws Exception {
         this.seedStatus.markRunning(SeedStatus.Seed.BASE);
         this.seedLock.lock(SeedLock.SEED_LOCK);
-        if (regionRepository.count() > 0) {
-            log.info("Base seed skipped, regions already populated");
-            markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.SKIPPED, "regions already populated (seeded by another instance)");
-            return;
-        }
-        log.info("Base seed started");
-        seedRegions();
-        seedProjects();
-        seedDefinitions();
-        markAfterCommit(SeedStatus.Seed.BASE, SeedStatus.State.DONE, "initial seed completed");
-        log.info("Base seed completed");
+        boolean regionsComplete = seedRegions();
+        boolean projectsComplete = seedProjects();
+        boolean definitionsComplete = seedDefinitions();
+        boolean complete = regionsComplete && projectsComplete && definitionsComplete;
+        SeedStatus.State outcome = complete ? SeedStatus.State.SKIPPED : SeedStatus.State.DONE;
+        markAfterCommit(SeedStatus.Seed.BASE, outcome,
+                complete ? "all base seed units already exist" : "base seed missing units filled");
+        log.info("Base seed finished outcome={} regionsComplete={} projectsComplete={} definitionsComplete={}",
+                outcome, regionsComplete, projectsComplete, definitionsComplete);
     }
 
     /** 把种子终态挂到当前事务的提交点（无事务时立即落）。 */
@@ -83,16 +79,17 @@ public class DataSeedRunner implements ApplicationRunner {
         });
     }
 
-    private void seedRegions() {
-        List<Region> regions = List.of(
+    private boolean seedRegions() {
+        List<Region> missing = List.of(
             region("HE", "华东区"), region("HS", "华南区"),
             region("HB", "华北区"), region("XN", "西南区")
-        );
-        regionRepository.saveAll(regions);
+        ).stream().filter(region -> !regionRepository.existsByCode(region.getCode())).toList();
+        regionRepository.saveAll(missing);
+        return missing.isEmpty();
     }
 
-    private void seedProjects() {
-        List<Project> projects = List.of(
+    private boolean seedProjects() {
+        List<Project> missing = List.of(
             project("HE-P001", "上海智慧园区", "HE"),
             project("HE-P002", "杭州数字工厂", "HE"),
             project("HS-P001", "广州南沙项目", "HS"),
@@ -100,12 +97,16 @@ public class DataSeedRunner implements ApplicationRunner {
             project("HB-P001", "北京朝阳总部", "HB"),
             project("XN-P001", "成都天府新区", "XN"),
             project("XN-P002", "重庆两江新区", "XN")
-        );
-        projectRepository.saveAll(projects);
+        ).stream().filter(project -> !projectRepository.existsByCode(project.getCode())).toList();
+        projectRepository.saveAll(missing);
+        return missing.isEmpty();
     }
 
-    private void seedDefinitions() throws Exception {
+    private boolean seedDefinitions() throws Exception {
+        boolean complete = true;
         // 1. CURRENCY (GLOBAL)
+        if (!definitionRepository.existsByCode("CURRENCY")) {
+            complete = false;
         ConfigDefinition currency = def("CURRENCY", "货币字典", ConfigDefinition.ConfigLevel.GLOBAL,
             "企业使用的货币种类配置", 0,
             List.of(
@@ -124,8 +125,11 @@ public class DataSeedRunner implements ApplicationRunner {
             Map.of("code","JPY","name","日元","exchangeRate",0.048,"decimalPlaces",0)
         );
         dataService.batchSave("CURRENCY","GLOBAL",null,currencyRows,List.of("code"));
+        }
 
         // 2. DOC_TYPE (GLOBAL)
+        if (!definitionRepository.existsByCode("DOC_TYPE")) {
+            complete = false;
         String docTypeOpts = objectMapper.writeValueAsString(List.of(
             Map.of("value","PURCHASE","label","采购单"),
             Map.of("value","SALES","label","销售单"),
@@ -148,8 +152,11 @@ public class DataSeedRunner implements ApplicationRunner {
             Map.of("code","PR","name","请购单","category","PURCHASE","enabled",true)
         );
         dataService.batchSave("DOC_TYPE","GLOBAL",null,docTypeRows,List.of("code"));
+        }
 
         // 3. APPROVE_ROLE (GLOBAL)
+        if (!definitionRepository.existsByCode("APPROVE_ROLE")) {
+            complete = false;
         ConfigDefinition approveRole = def("APPROVE_ROLE","审批角色",ConfigDefinition.ConfigLevel.GLOBAL,"审批流程角色定义",2,
             List.of(
                 field("code","角色编码",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -164,8 +171,11 @@ public class DataSeedRunner implements ApplicationRunner {
             Map.of("code","CEO","name","总裁","description","战略项目审批")
         );
         dataService.batchSave("APPROVE_ROLE","GLOBAL",null,roleRows,List.of("code"));
+        }
 
         // 4. TAX_RATE (REGION)
+        if (!definitionRepository.existsByCode("TAX_RATE")) {
+            complete = false;
         String taxTypeOpts = objectMapper.writeValueAsString(List.of(
             Map.of("value","VAT","label","增值税"),
             Map.of("value","CONSUMPTION","label","消费税"),
@@ -190,8 +200,11 @@ public class DataSeedRunner implements ApplicationRunner {
             );
             dataService.batchSave("TAX_RATE","REGION",regionCode,taxRows,List.of("taxCode","regionCode"));
         }
+        }
 
         // 5. PROJ_PARAM (PROJECT)
+        if (!definitionRepository.existsByCode("PROJ_PARAM")) {
+            complete = false;
         ConfigDefinition projParam = def("PROJ_PARAM","项目参数",ConfigDefinition.ConfigLevel.PROJECT,"项目运营参数配置",5,
             List.of(
                 field("paramKey","参数键",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -200,8 +213,11 @@ public class DataSeedRunner implements ApplicationRunner {
                 field("projectCode","项目编码",ConfigField.FieldType.STRING,true,true,3,null,null)
             ));
         definitionService.save(projParam);
+        }
 
         // 6. PROJ_APPROVE (PROJECT) — references APPROVE_ROLE
+        if (!definitionRepository.existsByCode("PROJ_APPROVE")) {
+            complete = false;
         ConfigDefinition projApprove = def("PROJ_APPROVE","项目审批流",ConfigDefinition.ConfigLevel.PROJECT,"项目审批流程配置",6,
             List.of(
                 field("stepCode","环节编码",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -212,8 +228,11 @@ public class DataSeedRunner implements ApplicationRunner {
                 field("projectCode","项目编码",ConfigField.FieldType.STRING,true,true,5,null,null)
             ));
         definitionService.save(projApprove);
+        }
 
         // 7. PROJ_PRICE (PROJECT) — large dataset for demo, references CURRENCY and TAX_RATE
+        if (!definitionRepository.existsByCode("PROJ_PRICE")) {
+            complete = false;
         ConfigDefinition projPrice = def("PROJ_PRICE","项目价格表",ConfigDefinition.ConfigLevel.PROJECT,"项目商品价格配置",8,
             List.of(
                 field("skuCode","商品编码",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -248,6 +267,8 @@ public class DataSeedRunner implements ApplicationRunner {
             }
             dataService.batchSave("PROJ_PRICE","PROJECT",projCode,priceRows,List.of("skuCode","projectCode"));
         }
+        }
+        return complete;
     }
 
     // Helper builders

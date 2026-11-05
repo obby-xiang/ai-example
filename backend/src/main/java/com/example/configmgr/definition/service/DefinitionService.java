@@ -61,8 +61,7 @@ public class DefinitionService {
      * <p>原先唯一约束命中会抛 {@code DataIntegrityViolationException} → 落到全局处理器的 500 分支，
      * 报文里带原始 JDBC/SQL 片段（S5.b §6.2 实测）。现改为显式前置校验：
      * 409 + 机器可读码 + 友好文案（与 {@link #delete} 的 409 口径一致），不泄漏 SQL。
-     * 种子播种路径均先做 {@code existsByCode} 过滤（{@code GlmSeedService}）或整库跳过
-     * （{@code DataSeedRunner}），不受影响。
+     * 种子播种路径均先按业务 code 判重（{@code GlmSeedService} / {@code DataSeedRunner}），不受影响。
      */
     @Transactional
     public ConfigDefinition save(ConfigDefinition definition) {
