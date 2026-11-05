@@ -1974,11 +1974,10 @@ public class ResumeService {
 	}
 
 	/**
-	 * 条件交棒挂了什么：候选草案（{@code set_condition} 页面草案）还是条件表
-	 * （{@code generative_form}）。两者语义不同，原因码不得混称。
+	 * 条件交棒的既有原因码：候选草案（{@code set_condition}）单独标识；条件表及其明确留空后的
+	 * 确定推进沿用 {@code CONDITIONS_FORM_PARKED}，不新增协议值。
 	 *
-	 * <p>事实源是刚挂起的待决条目（{@code park} 已写盘）：存在 PENDING 的 {@code set_condition}
-	 * 即候选草案；读失败按条件表返回（既有文案，不新增失败路径）。
+	 * <p>事实源是刚挂起的待决条目（{@code park} 已写盘）；读失败按条件表返回（既有文案，不新增失败路径）。
 	 */
 	private String conditionParkReason(String runId) {
 		try {

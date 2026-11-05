@@ -301,9 +301,12 @@ public class ConditionsForm extends HostForm {
 				return false;
 			}
 			ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
-			if (feedback.blank() || feedback.nonEmpty()) {
-				// 用户已经给出答案（留空 = 全量；非空 = 待模型解析）：不得用 create_task 候选覆盖，
-				// 也不自动重问。留空/非空都交给 confirm_step 与前端 persistStepData，后端零写。
+			if (feedback.blank()) {
+				// 明确留空已覆盖当前全部缺口：由宿主确定推进，仍由前端 persistStepData 落库。
+				return parkConditionAdvanceIfDue(runId, taskId, task, plan.undecided(), history);
+			}
+			if (feedback.nonEmpty()) {
+				// 非空答案待模型解析：不得用 create_task 候选覆盖，也不自动重问。
 				return false;
 			}
 			CandidateDispatch candidates = dispatchCreateTaskCandidates(runId, taskId, context, task, drafts);
@@ -1162,6 +1165,80 @@ public class ConditionsForm extends HostForm {
 
 		static ConditionFeedback none() {
 			return new ConditionFeedback(false, false, false, false);
+		}
+	}
+
+	private boolean parkConditionAdvanceIfDue(String runId, long taskId, Task task, List<String> undecidedDefCodes,
+			List<Message> history) {
+		long submittedAtMs = successfulBlankConditionFormResolvedAt(runId, taskId, task, undecidedDefCodes);
+		if (submittedAtMs < 0) {
+			return false;
+		}
+		String toolCallId = "host-cond-next-" + taskId;
+		if (alreadyIssued(runId, toolCallId) || conditionAdvanceHandled(runId, submittedAtMs)) {
+			return false;
+		}
+		PendingToolCall advance = withToolTimeout(frontendTool(toolCallId, TOOL_CONFIRM_STEP,
+				"{\"step\":\"" + TaskSteps.EXPORT + "\"}"));
+		log.info("blank conditions settled; host sends confirm_step to advance to EXPORT runId={} taskId={}", runId, taskId);
+		return park(runId, history, advance);
+	}
+
+	private long successfulBlankConditionFormResolvedAt(String runId, long taskId, Task task,
+			List<String> undecidedDefCodes) {
+		try {
+			PendingToolCall latest = latestConditionForm(runId, taskId);
+			if (latest == null || !PendingToolCall.FRONTEND_RESULT.equals(latest.getStatus())
+					|| latest.effectiveOutcome() != ToolOutcome.OK || task.getUpdatedAt() == null) {
+				return -1;
+			}
+			String text = conditionTextOf(latest.getArguments(), latest.getResultText());
+			Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
+			if (text == null || !text.isBlank() || asked.isEmpty() || undecidedDefCodes == null
+					|| !asked.containsAll(undecidedDefCodes)) {
+				return -1;
+			}
+			long taskUpdatedAtMs = task.getUpdatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+			return latest.getResolvedAtMs() > taskUpdatedAtMs ? latest.getResolvedAtMs() : -1;
+		}
+		catch (RuntimeException ex) {
+			log.warn("could not prove a current successful blank condition form; host skips advance runId={} taskId={} error={}",
+					runId, taskId, ex.getMessage());
+			return -1;
+		}
+	}
+
+	private PendingToolCall latestConditionForm(String runId, long taskId) {
+		PendingToolCall latest = null;
+		long latestRequestedAtMs = -1;
+		for (PendingToolCall form : this.store.pendingsLenient(runId)) {
+			if (form == null || !GenerativeFormRules.TOOL_NAME.equals(form.getName())
+					|| !isConditionForm(form.getArguments()) || !belongsToTask(form.getToolCallId(), runId, taskId)) {
+				continue;
+			}
+			long requestedAtMs = form.getRequestedAtMs() > 0 ? form.getRequestedAtMs() : form.getResolvedAtMs();
+			if (latest == null || requestedAtMs > latestRequestedAtMs
+					|| requestedAtMs == latestRequestedAtMs && form.getResolvedAtMs() >= latest.getResolvedAtMs()) {
+				latest = form;
+				latestRequestedAtMs = requestedAtMs;
+			}
+		}
+		return latest;
+	}
+
+	private boolean conditionAdvanceHandled(String runId, long submittedAtMs) {
+		try {
+			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+				if (pending != null && isConfirmStepForward(pending)
+						&& (pending.getResolvedAtMs() <= 0 || pending.getResolvedAtMs() >= submittedAtMs)) {
+					return true;
+				}
+			}
+			return false;
+		}
+		catch (RuntimeException ex) {
+			log.warn("could not check existing condition advance; host skips duplicate runId={} error={}", runId, ex.getMessage());
+			return true;
 		}
 	}
 

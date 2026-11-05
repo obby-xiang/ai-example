@@ -630,6 +630,13 @@
       "reason": "已同步create_task以通用scope在任意页面及无显式上下文披露，避免创建入口仅在任务中心可用",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:ee847a82ab03d4a6a11b45b74b0f2266265bb48e4409c09f46712eb389377cbb",
+      "status": "synced",
+      "reason": "已同步明确留空覆盖全部未决定项后的host-cond-next确定推进、时效核对与幂等边界",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }
