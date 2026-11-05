@@ -483,6 +483,13 @@
       "reason": "已同步完整manifest规范化散列cv3、同一发布字节与ETag，以及刷新等待预算和token续租的真实语义",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:213f0e3f440d62543378f640ab3b27c8562e1e34870bb6e6f6182c846cc07cd7",
+      "status": "synced",
+      "reason": "已同步createdTaskId结构事实、人工拒绝停批、DONE保存复读确认与UNCONFIRMED回退，以及作业绑定和下载门禁",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

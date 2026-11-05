@@ -1116,14 +1116,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 			}
 
 			List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(pendings.size());
-			// P1-10 批策略：W/J/P 条目结算后若确定性失败（outcome=failed 且 retryable=false），
+			// P1-10 批策略：W/J/P 条目被人工拒绝或确定性失败（outcome=failed 且 retryable=false）后，
 			// 本批剩余调用一律不再执行，逐个补结构化 SKIPPED（写库 + 发帧 + 模型 ToolResponse）。
 			PendingToolCall haltedBy = null;
 			for (PendingToolCall pending : pendings) {
 				if (haltedBy != null) {
+					boolean skippedNow = !pending.isExecuted() && (PendingToolCall.PENDING.equals(pending.getStatus())
+							|| PendingToolCall.APPROVED.equals(pending.getStatus()));
 					responses.add(skipAsUpstreamFailed(runId, pending, haltedBy));
-					// 日志：被批策略带过（未执行）的调用补一条结局行 —— 否则它只留下"没有 start"这种痕迹
-					traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_UPSTREAM_FAILED);
+					if (skippedNow) {
+						traceToolSkipped(runId, snapshot.getSessionId(), pending, ToolOutcome.CODE_UPSTREAM_FAILED);
+					}
 					continue;
 				}
 				// 事件边界上的取消检查（ADR-8 修正③：取消在"分片/事件边界"轮询）：
@@ -1414,9 +1417,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 	public static final String RECONCILIATION_NOTE = "该操作可能已产生部分副作用，需人工对账。";
 
 	/**
-	 * 批次首错即停的判据：类别 W/J/P，且结算后的结局是<b>确定性失败</b>
-	 * （{@code outcome=failed} 且 {@code retryable=false}）。{@code retryable=true} 或
-	 * {@code unknown} 一律不停 —— 前者还有改数据重试的空间，后者须先对账。
+	 * 批次首错即停的判据：类别 W/J/P，且结算后的结局是<b>人工拒绝或确定性失败</b>
+	 * （{@code status=REJECTED 且 outcome=rejected}，或 {@code outcome=failed} 且 {@code retryable=false}）。
+	 * {@code retryable=true} 或 {@code unknown} 一律不停 —— 前者还有改数据重试的空间，后者须先对账。
 	 */
 	public boolean haltsBatch(PendingToolCall pending) {
 		if (pending == null) {
@@ -1428,16 +1431,23 @@ public class SpToolCallingManager implements ToolCallingManager {
 			return false;
 		}
 		ToolOutcome outcome = pending.effectiveOutcome();
-		return outcome == ToolOutcome.FAILED && !outcome.retryable(pending.effectiveCode());
+		return PendingToolCall.REJECTED.equals(pending.getStatus()) && outcome == ToolOutcome.REJECTED
+				|| outcome == ToolOutcome.FAILED && !outcome.retryable(pending.effectiveCode());
 	}
 
 	/**
 	 * 为"已规划未执行"的调用补一条结构化 SKIPPED：写库、发 {@code tool_result} 帧、
 	 * 返回回填模型的统一信封（每个 {@code toolCallId} 都必须有对应 ToolResponse）。
-	 * 续跑路径与首轮共用本方法，因此重放同形。
+	 * 仅处理 PENDING/APPROVED 且未执行的条目；已终态条目保留原结局，只回填原结果，不重发覆盖帧。
 	 */
 	public ToolResponseMessage.ToolResponse skipAsUpstreamFailed(String runId, PendingToolCall pending,
 			PendingToolCall upstream) {
+		if (pending.isExecuted() || !PendingToolCall.PENDING.equals(pending.getStatus())
+				&& !PendingToolCall.APPROVED.equals(pending.getStatus())) {
+			String existing = frameText(pending.getResultText());
+			return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+					modelData(pending, existing));
+		}
 		String message = skippedMessage(upstream.getName(), upstream.effectiveCode());
 		pending.setStatus(PendingToolCall.SKIPPED);
 		pending.setOutcome(ToolOutcome.SKIPPED.wire());
@@ -1549,16 +1559,26 @@ public class SpToolCallingManager implements ToolCallingManager {
 		for (Map<String, Object> record : ledger) {
 			if (TOOL_CREATE_TASK.equals(record.get("name"))
 					&& ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
-				Long taskId = taskIdFromText(String.valueOf(record.get("resultText")));
+				Long taskId = createdTaskIdOf(record.get(PendingToolCall.CREATED_TASK_ID));
 				return taskId == null ? CreateTaskInRun.unknown() : new CreateTaskInRun(true, taskId, false);
 			}
 		}
 		return CreateTaskInRun.NONE;
 	}
 
-	/** 从创建回执里取 {@code #123}（取不到返回 null：调用方不得编造 ID）。实现与刷新器同一份。 */
-	private static Long taskIdFromText(String text) {
-		return RunContextRefresher.taskIdFromText(text);
+	private static Long createdTaskIdOf(Object raw) {
+		if (raw instanceof Number number) {
+			return number.longValue();
+		}
+		if (raw == null || String.valueOf(raw).isBlank()) {
+			return null;
+		}
+		try {
+			return Long.valueOf(String.valueOf(raw).trim());
+		}
+		catch (NumberFormatException ex) {
+			return null;
+		}
 	}
 
 	/**
@@ -1566,7 +1586,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	 *
 	 * @param created  本轮是否已有成功创建
 	 * @param taskId   已知任务号（未知/同批未结算时为 null）
-	 * @param idUnknown 已有创建但任务号不可确认（台账读失败/回执无 {@code #id}）；
+	 * @param idUnknown 已有创建但任务号不可确认（台账读失败/createdTaskId 缺失）；
 	 *                  文案必须走通用措辞，不得给伪 ID
 	 */
 	public record CreateTaskInRun(boolean created, Long taskId, boolean idUnknown) {
@@ -2942,6 +2962,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 		}
 		fresh.setOutcome(pending.getOutcome());
 		fresh.setCode(pending.getCode());
+		if (ok && TOOL_CREATE_TASK.equals(pending.getName())) {
+			fresh.setCreatedTaskId(createdTaskIdOf(((ToolCallingChatOptions) prompt.getOptions()).getToolContext()
+					.get(PendingToolCall.CREATED_TASK_ID)));
+		}
 		fresh.setResultText(text);
 		fresh.setExecuted(true);
 		fresh.setExecutedBy(this.store.instanceId());
@@ -3177,6 +3201,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 		pending.setExecuted(true);
 		Object executedBy = ledger.get("executedBy");
 		pending.setExecutedBy(executedBy == null ? this.store.instanceId() : String.valueOf(executedBy));
+		pending.setCreatedTaskId(createdTaskIdOf(ledger.get(PendingToolCall.CREATED_TASK_ID)));
 		pending.setResultText(reusedText);
 		this.store.putPending(runId, pending);
 		// 帧的 ok 必须是 outcome 的派生值（旧实现恒传 true，会把台账里的失败/未知结局写成成功帧）
@@ -3189,7 +3214,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 	/**
 	 * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：常规入口落库为终态、回填模型，然后
 	 * 正常返回 —— <b>不 appendLedger、不占认领、不抛异常、不动 suspended</b>，同批后续调用照常
-	 * （{@code haltsBatch} 只认 FAILED）。认领失败入口不回写调用方旧副本，避免覆盖并发认领或执行结果。
+	 * （{@code haltsBatch} 只认 REJECTED 与不可重试 FAILED）。认领失败入口不回写调用方旧副本，避免覆盖并发认领或执行结果。
 	 *
 	 * <p><b>帧面不保证</b>（RT-21 裁决）：这里只<b>请求</b>一条 {@code ok=false} 的结局帧，是否真的
 	 * 落档/扇出由 {@link com.example.configmgr.ai.run.SseChatEmitter} 的写门判定。写回权已转移的

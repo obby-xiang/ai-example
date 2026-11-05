@@ -2508,14 +2508,17 @@ public class ResilientChatService {
 			// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
 			// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
 			if (persistAllowed(runId, "terminal snapshot/memory")) {
-				if (!recordTranscript(runId, sessionId, history)) {
-					emitUnconfirmedTerminal(runId, sessionId, snapshot, accumulator, attempts, out, turn);
+				try {
+					this.store.save(snapshot);
+				}
+				catch (RuntimeException ex) {
+					log.warn("success terminal snapshot save failed runId={}: {} (closing as unconfirmed)", runId, ex.getMessage());
+					emitUnconfirmedTerminal(runId, sessionId, null, accumulator, attempts, out, turn, snapshot, history);
 					return;
 				}
-				this.store.save(snapshot);
 			}
 			else {
-				emitUnconfirmedTerminal(runId, sessionId, snapshot, accumulator, attempts, out, turn);
+				emitUnconfirmedTerminal(runId, sessionId, null, accumulator, attempts, out, turn, snapshot, history);
 				return;
 			}
 				// ===== 落库后复读（W-30 跨实例 / 复审 I-1）=====
@@ -2545,7 +2548,11 @@ public class ResilientChatService {
 					return;
 				}
 				if (persisted == null || !RunSnapshot.DONE.equals(persisted.getStatus())) {
-					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn);
+					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
+					return;
+				}
+				if (!recordTranscript(runId, sessionId, history)) {
+					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
 					return;
 				}
 				terminalSnapshot = persisted;
@@ -2799,7 +2806,8 @@ public class ResilientChatService {
 	 * 直接返回、finish 也返回）与"done{false} 与 CANCELLED 并存"。读不到就如实说读不到。
 	 */
 	private void emitUnconfirmedTerminal(String runId, String sessionId, RunSnapshot persisted,
-			Accumulator accumulator, int attempts, SseChatEmitter out, TurnContext turn) {
+			Accumulator accumulator, int attempts, SseChatEmitter out, TurnContext turn,
+			RunSnapshot localSnapshot, List<Message> localHistory) {
 		String code = ErrorCodes.AI_REDIS_UNAVAILABLE;
 		log.warn("cannot confirm authoritative state after success terminal write: closing "
 				+ "as unknown runId={} reread={} (no snapshot rewrite, no done frame)", runId,
@@ -2808,9 +2816,11 @@ public class ResilientChatService {
 		// additive 明确字段（批次2 / AR-05）：这条 error 的语义是"终态暂不可确认"，不是普通失败。
 		// code 仍是既有的 AI_REDIS_UNAVAILABLE（真实故障码不动）；前端只能凭本键（或 turn_end=unconfirmed）
 		// 进入中性视图，不得自行拿故障码猜"可能成功"。
-		if (persisted != null && persisted.getMessageJson() != null) {
-			recordTranscript(runId, sessionId, this.codec.deserializeAll(persisted.getMessageJson()), true,
-					"UNCONFIRMED", true);
+		RunSnapshot transcriptSnapshot = persisted == null ? localSnapshot : persisted;
+		List<Message> transcriptHistory = persisted != null && persisted.getMessageJson() != null
+				? this.codec.deserializeAll(persisted.getMessageJson()) : localHistory;
+		if (transcriptSnapshot != null && transcriptHistory != null) {
+			recordTranscript(runId, sessionId, transcriptHistory, true, "UNCONFIRMED", true, transcriptSnapshot);
 		}
 		// 本批：出口统一走 emitFailureTerminal（发帧前判归档终帧），"恰好一条终帧"由归档而不是本地标记保证。
 		emitFailureTerminal(runId, out, code, messageFor(code), Map.of("unconfirmed", true), partialChars);
@@ -3764,11 +3774,18 @@ public class ResilientChatService {
 
 	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed) {
+		return recordTranscript(runId, sessionId, history, includeLastAssistant, outcomeOverride, unconfirmed, null);
+	}
+
+	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
+			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed, RunSnapshot snapshot) {
 		if (this.transcript == null || history == null || history.isEmpty()) {
 			return false;
 		}
 		try {
-			RunSnapshot snapshot = this.store.get(runId);
+			if (snapshot == null) {
+				snapshot = this.store.get(runId);
+			}
 			if (snapshot == null || !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
 				return false;
 			}

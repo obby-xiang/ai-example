@@ -12,6 +12,7 @@ import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
+import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
@@ -399,6 +400,9 @@ public class AiTools {
                     ? taskService.createIdempotent(taskType, effectiveTitle, runId)
                     : taskService.createIdempotent(taskType, effectiveTitle, runId, continuationTaskId);
             Task task = outcome.task();
+            if (context != null) {
+                context.put(PendingToolCall.CREATED_TASK_ID, task.getId());
+            }
             if (outcome.reused()) {
                 return String.format(
                         "该任务已创建，本次复用任务 #%d（标题：%s，当前步骤：%s）。%s"

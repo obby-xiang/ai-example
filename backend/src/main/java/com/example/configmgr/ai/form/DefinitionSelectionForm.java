@@ -184,7 +184,7 @@ public class DefinitionSelectionForm extends HostForm {
 			String page;
 			PendingToolCall created = settledCreateTask(settledBatch);
 			if (created != null) {
-				Long createdInBatch = RunContextRefresher.taskIdFromText(created.getResultText());
+				Long createdInBatch = created.getCreatedTaskId();
 				if (!createdTaskId.equals(createdInBatch)) {
 					return false;
 				}
@@ -336,7 +336,7 @@ public class DefinitionSelectionForm extends HostForm {
 					|| !settled.resolved() || settled.effectiveOutcome() != ToolOutcome.OK) {
 				continue;
 			}
-			if (RunContextRefresher.taskIdFromText(settled.getResultText()) != null) {
+			if (settled.getCreatedTaskId() != null) {
 				return settled;
 			}
 		}

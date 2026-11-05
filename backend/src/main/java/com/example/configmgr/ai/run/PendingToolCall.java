@@ -18,6 +18,8 @@ import java.util.Map;
 @Data
 public class PendingToolCall {
 
+	public static final String CREATED_TASK_ID = "createdTaskId";
+
 	/** 等待外部输入（人工确认或前端回灌）。 */
 	public static final String PENDING = "PENDING";
 
@@ -137,6 +139,9 @@ public class PendingToolCall {
 	private String reason;
 
 	private String resultText;
+
+	/** create_task 已落库任务号（结构化控制流事实；不从 resultText 反解）。 */
+	private Long createdTaskId;
 
 	private boolean executed;
 
@@ -297,6 +302,7 @@ public class PendingToolCall {
 		out.put("code", effectiveCode());
 		out.put("reason", this.reason);
 		out.put("resultText", this.resultText);
+		out.put(CREATED_TASK_ID, this.createdTaskId);
 		out.put("executed", this.executed);
 		out.put("executedBy", this.executedBy);
 		out.put("claimedAtMs", this.claimedAtMs);

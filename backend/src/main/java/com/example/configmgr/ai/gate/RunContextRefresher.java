@@ -204,9 +204,9 @@ public class RunContextRefresher {
 		applyPage(base, page);
 	}
 
-	/** 创建：任务号只能从回执里取（真实任务号），字段仍以任务权威值为准。 */
+	/** 创建：任务号只读结构化 createdTaskId；字段仍以任务权威值为准，文本仅展示。 */
 	private void applyCreateTask(String runId, AiContext base, PendingToolCall settled) {
-		Long taskId = taskIdFromText(settled.getResultText());
+		Long taskId = settled.getCreatedTaskId();
 		if (taskId == null) {
 			// 回执里没有任务号：不编造 ID，也不动上下文
 			log.warn("create_task receipt has no task id; run context unchanged toolCallId={}",
@@ -457,32 +457,6 @@ public class RunContextRefresher {
 				: new LinkedHashMap<>(source.getExtra());
 		return AiContext.of(source.getPage(), source.getTaskType(), source.getStep(), source.getTaskId(),
 				source.getTaskStatus(), extra);
-	}
-
-	/**
-	 * 从创建回执里取 {@code #123}（取不到返回 null：调用方不得编造 ID）。
-	 *
-	 * <p>与 {@code SpToolCallingManager} 的"本轮是否已创建任务"同一解析口径（同一份回执、同一个号），
-	 * 因此放在这里作为共享的唯一实现（{@code DefinitionSelectionForm} 判定"新任务链"时读同一份回执，
-	 * 故为 {@code public}）。
-	 */
-	public static Long taskIdFromText(String text) {
-		if (text == null) {
-			return null;
-		}
-		int hash = text.indexOf('#');
-		if (hash < 0) {
-			return null;
-		}
-		int index = hash + 1;
-		long value = 0L;
-		boolean any = false;
-		while (index < text.length() && Character.isDigit(text.charAt(index))) {
-			value = value * 10 + (text.charAt(index) - '0');
-			any = true;
-			index++;
-		}
-		return any ? value : null;
 	}
 
 	private static JsonNode parse(String argumentsJson) {

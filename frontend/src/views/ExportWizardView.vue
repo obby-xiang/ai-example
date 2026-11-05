@@ -86,13 +86,13 @@
         </el-button>
         <template v-if="exportResults.length">
           <el-divider direction="vertical" />
-          <el-button size="small" :loading="isDownloadingDef(activeTab)" @click="downloadOne(activeTab)">
+          <el-button v-if="!jobRunning" size="small" :loading="isDownloadingDef(activeTab)" @click="downloadOne(activeTab)">
             {{ t('views.export.downloadCurrent') }}
           </el-button>
-          <el-button size="small" :disabled="!checkedDefs.length" :loading="isDownloadingPack('checked')" @click="downloadChecked">
+          <el-button v-if="!jobRunning" size="small" :disabled="!checkedDefs.length" :loading="isDownloadingPack('checked')" @click="downloadChecked">
             {{ t('views.export.downloadChecked', { count: checkedDefs.length }) }}
           </el-button>
-          <el-button size="small" :loading="isDownloadingPack('all')" @click="downloadAll">{{ t('views.export.downloadAll') }}</el-button>
+          <el-button v-if="!jobRunning" size="small" :loading="isDownloadingPack('all')" @click="downloadAll">{{ t('views.export.downloadAll') }}</el-button>
           <el-button v-if="!isReadOnly" size="small" :loading="savingFiles" @click="saveEdits">{{ t('views.export.saveEdits') }}</el-button>
         </template>
       </div>
@@ -780,20 +780,23 @@ async function resumeJobs(): Promise<void> {
     }
     return
   }
-  // 旧任务的作业列表晚到：不得挂到新任务的作业面板，更不得为新任务登记旧作业的 watcher
   if (generation !== taskGeneration) {
     return
   }
   jobsLoadError.value = null
   const job = jobs.filter((item) => item.jobType === 'EXPORT')[0]
-  if (!job) {
-    return
+  if (job) {
+    await attachJob(job, generation)
   }
-  exportJob.value = job
+}
+
+async function attachJob(job: Job, generation: number = taskGeneration): Promise<boolean> {
   const jobId = job.id
-  if (jobId === undefined) {
-    return
+  if (generation !== taskGeneration || taskId.value !== job.taskId || job.jobType !== 'EXPORT' || jobId === undefined) {
+    return false
   }
+  jobsLoadError.value = null
+  exportJob.value = job
   try {
     const issues = (await jobsApi.getIssues(jobId)).content ?? []
     if (generation === taskGeneration) {
@@ -802,15 +805,20 @@ async function resumeJobs(): Promise<void> {
   } catch {
     // 问题清单拉取失败不阻断主流程（同导入页 refreshIssues 的兜底口径）
   }
-  if (generation !== taskGeneration) {
-    return
+  if (generation !== taskGeneration || taskId.value !== job.taskId) {
+    return false
   }
   if (job.status === 'PENDING' || job.status === 'RUNNING') {
     // 恢复的是**在途**作业：服务端此刻仍是上一批文件（作业在终态才写文件）⇒ 推进批次号，
     // 让 `resultsStale` 成立。否则刷新/重进页面后，旧文件会被当成"本次结果"展示与下载。
     jobBatch.value = Math.max(jobBatch.value, resultsBatch.value + 1)
     beginWatchJob(jobId, generation)
+  } else {
+    stopWatchJob?.()
+    stopWatchJob = null
+    channelState.value = null
   }
+  return true
 }
 
 /**
@@ -1501,7 +1509,7 @@ function beginWatchJob(jobId: number, generation: number = taskGeneration): void
     taskId: forTask,
     jobId,
     onProgress: (payload) => {
-      if (generation !== taskGeneration) {
+      if (generation !== taskGeneration || exportJob.value?.id !== jobId) {
         return
       }
       if (exportJob.value) {
@@ -1509,36 +1517,39 @@ function beginWatchJob(jobId: number, generation: number = taskGeneration): void
       }
     },
     onSnapshot: (job) => {
-      if (generation !== taskGeneration) {
+      if (generation !== taskGeneration || exportJob.value?.id !== jobId) {
         return
       }
       exportJob.value = job
     },
     onChannel: (state) => {
-      if (generation !== taskGeneration) {
+      if (generation !== taskGeneration || exportJob.value?.id !== jobId) {
         return
       }
       channelState.value = state
     },
     onFinal: async (job) => {
-      if (generation !== taskGeneration) {
+      if (generation !== taskGeneration || exportJob.value?.id !== jobId) {
         return
       }
       exportJob.value = job
       try {
         const issues = (await jobsApi.getIssues(jobId)).content ?? []
-        if (generation === taskGeneration) {
+        if (generation === taskGeneration && exportJob.value?.id === jobId) {
           currentIssues.value = issues
         }
       } catch {
         // 问题清单失败不阻断结果文件与任务状态刷新
       }
-      if (generation !== taskGeneration) {
+      if (generation !== taskGeneration || exportJob.value?.id !== jobId) {
         return
       }
       if (job.status === 'COMPLETED') {
         ElMessage.success(t('views.export.msg.exportDone'))
         await refreshResults()
+        if (generation !== taskGeneration || exportJob.value?.id !== jobId) {
+          return
+        }
       } else if (job.status === 'FAILED') {
         ElMessage.error(t('views.export.msg.exportFailed'))
       } else {
@@ -2386,6 +2397,9 @@ async function preflightDownload(
   if (!gate.ok) {
     return { ok: false, message: `${gate.message}。${defCodes.join('、')} 的导出文件未下载` }
   }
+  if (jobRunning.value) {
+    return { ok: false, message: `导出作业 #${exportJob.value?.id ?? ''} 尚未完成，本次未触发下载；请等待完成后再试` }
+  }
   const available = exportResults.value.map((item) => item.defCode)
   if (available.length === 0 && filesLoadError.value) {
     // 清单读取失败 ⇒ "可用码为空"不是事实，禁止据此回"没有导出结果"（假阴性）
@@ -2481,17 +2495,23 @@ function registerHandlers(): void {
     if (taskId.value === null || taskId.value !== jobTaskId) {
       return { ok: false, reason: `未同步：该作业属于任务 #${jobTaskId}，当前导出向导绑定的是任务 #${taskId.value ?? '（无）'}` }
     }
-    await resumeJobs()
-    const bound = exportJob.value
-    if (bound?.id !== jobId) {
-      return { ok: false, reason: `已刷新导出作业列表（未在本任务的作业中找到 #${jobId}）` }
+    const generation = taskGeneration
+    let job: Job
+    try {
+      job = await jobsApi.getJob(jobId)
+    } catch (error) {
+      return { ok: false, reason: `未同步：读取作业 #${jobId} 失败（${error instanceof Error ? error.message : String(error)}）` }
     }
-    // 终态作业 resumeJobs 不建 watch（结果已由文件列表铺开）⇒ 这里把结果面刷一次，
-    // 否则 AI 触发后页面停在上一次的导出结果上。
-    if (bound.status === 'COMPLETED') {
+    if (job.taskId !== jobTaskId || job.jobType !== 'EXPORT') {
+      return { ok: false, reason: `未同步：作业 #${jobId} 不属于当前导出任务 #${jobTaskId}` }
+    }
+    if (!await attachJob(job, generation)) {
+      return { ok: false, reason: '未同步：任务已切换或作业未绑定到当前导出向导' }
+    }
+    if (job.status === 'COMPLETED') {
       await refreshResults()
     }
-    return `已同步导出作业 #${jobId}（${bound.status}）到导出向导`
+    return `已同步导出作业 #${jobId}（${job.status}）到导出向导`
   })
 
   // 补丁②：AI 工作区动作 confirm_step 的页面实现（推进到下一步；与用户点「下一步」同路径）

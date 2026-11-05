@@ -1341,7 +1341,7 @@ public class ResumeService {
 				List<Message> requestHistory = new ArrayList<>(history);
 				Prompt prompt = this.chatService.buildResumedPrompt(runId, sessionId, context, requestHistory);
 				List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
-				// P1-10：续跑与首轮同一批策略 —— W/J/P 确定性失败后，剩余未执行项补 SKIPPED。
+				// P1-10：续跑与首轮同一批策略 —— W/J/P 人工拒绝或确定性失败后，剩余未执行项补 SKIPPED。
 				PendingToolCall haltedBy = null;
 				try {
 					for (PendingToolCall item : snapshot.getInFlightToolCalls()) {

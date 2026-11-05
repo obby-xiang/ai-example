@@ -323,7 +323,8 @@ abstract class HostForm {
 			if (!ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
 				continue;
 			}
-			Long taskId = RunContextRefresher.taskIdFromText(String.valueOf(record.get("resultText")));
+			Object rawTaskId = record.get(PendingToolCall.CREATED_TASK_ID);
+		Long taskId = rawTaskId instanceof Number number ? number.longValue() : null;
 			if (taskId != null) {
 				return taskId;
 			}

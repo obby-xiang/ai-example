@@ -4009,6 +4009,9 @@ public class RunStore {
 		record.put("epoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : heldRunEpoch(runId));
 		record.put("idemKey", idemField);
 		record.put("resultText", resultText);
+		if (pending.getCreatedTaskId() != null) {
+			record.put(PendingToolCall.CREATED_TASK_ID, pending.getCreatedTaskId());
+		}
 		try {
 			String json = this.mapper.writeValueAsString(record);
 			Map<String, Object> meta = new LinkedHashMap<>();

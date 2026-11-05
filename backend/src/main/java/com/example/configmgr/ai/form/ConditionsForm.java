@@ -701,7 +701,7 @@ public class ConditionsForm extends HostForm {
 					|| pending.effectiveOutcome() != ToolOutcome.OK) {
 				continue;
 			}
-			Long created = RunContextRefresher.taskIdFromText(pending.getResultText());
+			Long created = pending.getCreatedTaskId();
 			if (created == null || !created.equals(taskId)) {
 				continue;
 			}
