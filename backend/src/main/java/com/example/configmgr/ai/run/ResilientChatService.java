@@ -3797,7 +3797,9 @@ public class ResilientChatService {
 				.anyMatch(entry -> "tool".equals(entry.kind()) || ("assistant".equals(entry.kind())
 						&& entry.toolCalls() != null && !entry.toolCalls().isEmpty()));
 			if (requiresTimeline && out == null) {
-				return false;
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
+					out = this.registry.of(runId);
+				}
 			}
 			if (out != null) {
 				Map<String, TranscriptEntry.SegmentView> toolSegments = new LinkedHashMap<>();

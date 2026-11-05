@@ -637,6 +637,34 @@ public class RunStore {
 			return {1, 'APPLIED'}
 			""", List.class);
 
+	private static final RedisScript<List> COMPLETE_EXECUTION_WITH_LEDGER_SCRIPT = new DefaultRedisScript<>("""
+			-- COMPLETE_EXECUTION_WITH_LEDGER: 取消条件、完成态、台账与幂等索引原子推进
+			-- KEYS: pending, claim, fence, ledger, idem, cancel
+			-- ARGV: field, expectedClaim, fullPendingJson, ttlMs, expectedEpoch,
+			--       ledgerJson, idemField, indexTail, metaPrefix, metaJson, respectCancel
+			local field = ARGV[1]
+			local epoch = tonumber(ARGV[5]) or 0
+			local fence = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
+			if epoch > 0 and fence > epoch then return {0, 'STALE_EPOCH'} end
+			if redis.call('HGET', KEYS[2], field) ~= ARGV[2] then return {0, 'CONFLICT_CLAIMED'} end
+			if ARGV[11] == '1' and redis.call('EXISTS', KEYS[6]) == 1 then return {0, 'CANCELLED'} end
+			local raw = redis.call('HGET', KEYS[1], field)
+			if not raw then return {0, 'MISSING'} end
+			local ok, obj = pcall(cjson.decode, raw)
+			if not ok or type(obj) ~= 'table' then return {0, 'BAD_PENDING'} end
+			local status = obj['status']
+			if status ~= 'APPROVED' and status ~= 'PENDING' and status ~= 'EXECUTED' then
+			  return {0, 'CONFLICT_STATUS'}
+			end
+			local index = redis.call('LLEN', KEYS[4])
+			redis.call('RPUSH', KEYS[4], ARGV[6])
+			redis.call('HSETNX', KEYS[5], ARGV[7], tostring(index) .. '|' .. ARGV[8])
+			redis.call('HSET', KEYS[5], ARGV[9] .. tostring(index), ARGV[10])
+			redis.call('HSET', KEYS[1], field, ARGV[3])
+			for i = 1, 5 do redis.call('PEXPIRE', KEYS[i], ARGV[4]) end
+			return {1, 'APPLIED'}
+			""", List.class);
+
 	/**
 	 * 台账落库 + 幂等索引<b>同一个原子步</b>（B23L1 批③a / 裁决 6）。
 	 *
@@ -3907,6 +3935,60 @@ public class RunStore {
 		if (!permittedToWrite(runId, "tool execution ledger append")) {
 			return;
 		}
+		LedgerWrite write = ledgerWrite(runId, pending, resultText);
+		try {
+			this.redis.execute(IDEM_PUSH_SCRIPT, List.of(ledgerKey(runId), idemKey(runId)), write.json(),
+					write.idemField(), write.indexTail(), String.valueOf(ttlFor(runId).toMillis()),
+					IDEM_META_FIELD_PREFIX, write.metaJson());
+			// 台账键的"整额续期"仍是可观测的一次 EXPIRE（批②的滑动 TTL 契约；脚本内已有 PEXPIRE，
+			// 这里只是把同一事实再落到模板面上，幂等、不在判据路径上）。
+			this.redis.expire(ledgerKey(runId), ttlFor(runId));
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException("无法写入执行台账 " + pending.getToolCallId(), ex);
+		}
+	}
+
+	/**
+	 * 成功结果的原子落账：取消条件、pending 完成态、台账与幂等索引在同一条 Lua 中推进。
+	 * 返回 false 仅表示只读工具在落账前已见取消；其它条件冲突按状态不可知抛出。
+	 */
+	public boolean completeExecutionWithLedger(String runId, PendingToolCall pending, String resultText,
+			long claimedEpoch, String claimedBy, boolean respectCancel) {
+		if (!permittedToWrite(runId, "tool execution completion with ledger")) {
+			throw new AiStateUnavailableException("无法确认续跑权，拒绝执行结果落账 " + pending.getToolCallId());
+		}
+		LedgerWrite write = ledgerWrite(runId, pending, resultText);
+		String expectedClaim = claimedEpoch + "|" + claimedBy;
+		try {
+			List<?> result = this.redis.execute(COMPLETE_EXECUTION_WITH_LEDGER_SCRIPT,
+					List.of(pendingKey(runId), claimKey(runId), fenceKey(runId), ledgerKey(runId), idemKey(runId),
+							CancellationRegistry.cancelKey(runId)),
+					pending.getToolCallId(), expectedClaim, this.mapper.writeValueAsString(pending),
+					String.valueOf(ttlFor(runId).toMillis()), String.valueOf(claimedEpoch), write.json(),
+					write.idemField(), write.indexTail(), IDEM_META_FIELD_PREFIX, write.metaJson(),
+					respectCancel ? "1" : "0");
+			if (result != null && result.size() >= 2 && "CANCELLED".equals(String.valueOf(result.get(1)))) {
+				return false;
+			}
+			if (result == null || result.size() < 2 || ((Number) result.get(0)).longValue() != 1L) {
+				String outcome = result == null || result.size() < 2 ? "UNKNOWN" : String.valueOf(result.get(1));
+				throw new AiStateUnavailableException("执行结果原子落账条件不匹配 " + pending.getToolCallId() + "：" + outcome);
+			}
+			return true;
+		}
+		catch (AiStateUnavailableException ex) {
+			throw ex;
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("无法原子写入执行结果 " + pending.getToolCallId(), ex);
+		}
+	}
+
+	private record LedgerWrite(String json, String idemField, String indexTail, String metaJson) {
+	}
+
+	private LedgerWrite ledgerWrite(String runId, PendingToolCall pending, String resultText) {
 		long atMs = System.currentTimeMillis();
 		String toolCallId = pending.getToolCallId();
 		String idemField = idemField(runId, toolCallId);
@@ -3922,39 +4004,23 @@ public class RunStore {
 		record.put("kind", pending.getKind());
 		record.put("outcome", outcome);
 		record.put("code", code);
-		// F5 批准绑定：批准时所见的那份预检指纹随执行台账留档（null = 未经预检/旧数据）
 		record.put("preflightHash", pending.getPreflight() == null ? null
 				: pending.getPreflight().get("reportHash"));
-		// I5：执行发生在哪一任续跑权之下（additive；旧记录没有本字段 ⇒ 读侧按缺失处理）。
-		// 取值顺序：认领时的 epoch（执行权的依据）→ 当前持租 epoch（旧条目/兼容路径）。
 		record.put("epoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : heldRunEpoch(runId));
-		// 批③a：本条记录的幂等索引 field（additive；与 ai:idem:<runId> 的 field 同形，便于对账）
 		record.put("idemKey", idemField);
 		record.put("resultText", resultText);
-		String json;
-		String metaJson;
 		try {
-			json = this.mapper.writeValueAsString(record);
+			String json = this.mapper.writeValueAsString(record);
 			Map<String, Object> meta = new LinkedHashMap<>();
 			meta.put("name", pending.getName());
 			meta.put("atMs", atMs);
 			meta.put("toolCallId", toolCallId);
-			metaJson = this.mapper.writeValueAsString(meta);
+			String metaJson = this.mapper.writeValueAsString(meta);
+			String indexTail = outcome + "|" + (code == null ? "" : code) + "|" + executedBy + "|" + atMs;
+			return new LedgerWrite(json, idemField, indexTail, metaJson);
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException("无法序列化执行台账 " + toolCallId, ex);
-		}
-		String indexTail = outcome + "|" + (code == null ? "" : code) + "|" + executedBy + "|" + atMs;
-		Duration ttl = ttlFor(runId);
-		try {
-			this.redis.execute(IDEM_PUSH_SCRIPT, List.of(ledgerKey(runId), idemKey(runId)), json, idemField,
-					indexTail, String.valueOf(ttl.toMillis()), IDEM_META_FIELD_PREFIX, metaJson);
-			// 台账键的"整额续期"仍是可观测的一次 EXPIRE（批②的滑动 TTL 契约；脚本内已有 PEXPIRE，
-			// 这里只是把同一事实再落到模板面上，幂等、不在判据路径上）。
-			this.redis.expire(ledgerKey(runId), ttl);
-		}
-		catch (Exception ex) {
-			throw new IllegalStateException("无法写入执行台账 " + toolCallId, ex);
 		}
 	}
 

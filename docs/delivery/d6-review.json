@@ -441,6 +441,13 @@
       "reason": "已同步取消键与claim/pending/fence共用run hash tag、取消检查与工具认领原子执行，以及只读结果成功落账前的取消围栏",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:324d8725e793f9bb9d0d4a7acf246be7313548b885c29f8369329ab119cf1ab0",
+      "status": "synced",
+      "reason": "已同步六键执行落账原子写、READ取消整笔不写与冲突不可知语义，并恢复取消终局的transcript物化",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

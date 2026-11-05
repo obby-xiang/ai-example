@@ -2928,12 +2928,6 @@ public class SpToolCallingManager implements ToolCallingManager {
 		if (settleAsUnexecuted) {
 			return settleToolTimeout(runId, pending, text, settleObservation, claimedEpoch, claimedBy);
 		}
-		if (this.toolRegistry.riskOf(pending.getName()) == ToolMeta.RiskLevel.READ) {
-			// 只读结果可在取消后放弃；副作用仍落账保留物理事实，并由批边界检查截停后续执行。
-			checkCancelled(runId);
-		}
-		this.store.appendLedger(runId, pending, text);
-
 		PendingToolCall fresh;
 		try {
 			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
@@ -2957,7 +2951,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 			fresh.setStatus(PendingToolCall.EXECUTED);
 			fresh.setResolvedAtMs(fresh.getExecutedAtMs());
 		}
-		this.store.completeExecution(runId, fresh, claimedEpoch, claimedBy);
+		boolean respectCancel = this.toolRegistry.riskOf(pending.getName()) == ToolMeta.RiskLevel.READ;
+		if (!this.store.completeExecutionWithLedger(runId, fresh, text, claimedEpoch, claimedBy, respectCancel)) {
+			checkCancelled(runId);
+			throw new StreamViolationException(StreamViolationException.CANCELLED,
+					"本轮对话已被取消，只读结果在原子落账前被丢弃（runId=" + runId + "）");
+		}
 		// 无视图时走**原四参调用**（帧调用面与既有用例逐字不变）；有视图才用 additive 五参重载
 		ResultView resultView = resultViewOf(fresh, text, ok);
 		if (resultView == null) {
