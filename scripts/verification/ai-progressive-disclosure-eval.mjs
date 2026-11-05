@@ -27,6 +27,8 @@ const definitions = Array.isArray(fixture.cases) ? fixture.cases : []
 const writesRequired = definitions.some((definition) => definition.kind === 'ACTION' || definition.kind === 'MIXED' || definition.autoApprove === true)
 const allowWrites = process.env.EVAL_ALLOW_WRITES === 'true'
 if (writesRequired && !allowWrites) throw new Error('EVAL_ALLOW_WRITES=true is required for ACTION/MIXED cases and confirm writes')
+const queryCondDefinitions = definitions.filter((definition) => definition.context?.step === 'QUERY_COND')
+const queryCondTaskId = process.env.QUERY_COND_TASK_ID?.trim() ?? ''
 
 function headers(json = false) {
   return {
@@ -63,22 +65,46 @@ const createdJobs = new Map()
 const trackingGaps = []
 const jobStartTools = new Set(['start_export', 'start_precheck', 'start_import', 'start_publish'])
 
+function positiveId(value) {
+  if (value === null || value === undefined || !/^\d+$/.test(String(value))) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+}
+
 function trackCreatedResources(frame, runId) {
   if (frame.outcome !== 'ok') return
   const result = String(frame.result ?? '')
   if (frame.name === 'create_task') {
-    const created = /已创建(?:导出|导入)任务\s*#(\d+)/.exec(result)
-    if (created) {
-      const taskId = Number(created[1])
-      if (!createdTasks.has(taskId)) createdTasks.set(taskId, { taskId, runId, toolCallId: frame.toolCallId })
-    } else if (!/本次复用任务\s*#\d+/.test(result)) {
+    if (/本次复用任务\s*#\d+/.test(result)) return
+    const structuredId = positiveId(frame.createdTaskId ?? frame.data?.createdTaskId)
+    const textMatch = structuredId === null ? /已创建(?:导出|导入)任务\s*#(\d+)/.exec(result) : null
+    const taskId = structuredId ?? (textMatch === null ? null : Number(textMatch[1]))
+    if (taskId !== null) {
+      if (!createdTasks.has(taskId)) {
+        createdTasks.set(taskId, {
+          taskId,
+          runId,
+          toolCallId: frame.toolCallId,
+          idSource: structuredId === null ? 'text-fallback' : 'structured-createdTaskId'
+        })
+      }
+    } else {
       trackingGaps.push({ kind: 'task', runId, toolCallId: frame.toolCallId, result: frame.result ?? null, reason: 'successful create_task result did not contain a new task id' })
     }
   } else if (jobStartTools.has(frame.name)) {
-    const created = /作业\s*#(\d+)/.exec(result)
-    if (created) {
-      const jobId = Number(created[1])
-      if (!createdJobs.has(jobId)) createdJobs.set(jobId, { jobId, runId, toolCallId: frame.toolCallId, toolName: frame.name })
+    const structuredId = positiveId(frame.createdJobId ?? frame.data?.createdJobId)
+    const textMatch = structuredId === null ? /作业\s*#(\d+)/.exec(result) : null
+    const jobId = structuredId ?? (textMatch === null ? null : Number(textMatch[1]))
+    if (jobId !== null) {
+      if (!createdJobs.has(jobId)) {
+        createdJobs.set(jobId, {
+          jobId,
+          runId,
+          toolCallId: frame.toolCallId,
+          toolName: frame.name,
+          idSource: structuredId === null ? 'text-fallback' : 'structured-createdJobId'
+        })
+      }
     } else {
       trackingGaps.push({ kind: 'job', runId, toolCallId: frame.toolCallId, toolName: frame.name, result: frame.result ?? null, reason: 'successful job-start result did not contain a job id' })
     }
@@ -92,6 +118,103 @@ async function confirm(runId, toolCallId) {
     json: true,
     body: JSON.stringify({ runId, toolCallId, approved: true, reason: 'progressive-disclosure-eval approval' })
   })
+}
+
+function errorInfo(stage, category, details = {}) {
+  return { stage, category, ...details }
+}
+
+function terminalCategory(frame) {
+  const code = String(frame.code ?? '').toUpperCase()
+  return /MODEL|UPSTREAM|PROVIDER|RATE_LIMIT|EMPTY_REPLY|INCOMPLETE/.test(code) ? 'model' : 'infra'
+}
+
+function notRunCase(definition, round, error) {
+  const result = {
+    id: definition.id,
+    kind: definition.kind,
+    round,
+    sessionId: null,
+    runId: null,
+    latencyMs: null,
+    answer: null,
+    notRun: true,
+    error,
+    terminal: null,
+    toolCalls: [],
+    usage: null,
+    eof: null,
+    disclosure: { status: 'unknown', reason: 'case was not run because its fixture or HITL precondition failed' }
+  }
+  return { ...result, mechanical: mechanical(result, definition), manual: manualTemplate() }
+}
+
+async function validateQueryCondTask() {
+  if (queryCondTaskId === '') {
+    return {
+      valid: false,
+      error: errorInfo('fixture_validation', 'fixture', {
+        code: 'QUERY_COND_TASK_ID_REQUIRED',
+        message: 'QUERY_COND_TASK_ID is required for QUERY_COND cases; no task id is hardcoded',
+        notRun: true
+      })
+    }
+  }
+  if (positiveId(queryCondTaskId) === null) {
+    return {
+      valid: false,
+      error: errorInfo('fixture_validation', 'fixture', {
+        code: 'QUERY_COND_TASK_ID_INVALID',
+        message: `QUERY_COND_TASK_ID must be a positive integer, received ${queryCondTaskId}`,
+        notRun: true
+      })
+    }
+  }
+  let response
+  try {
+    response = await request(`/api/tasks/${queryCondTaskId}`)
+  } catch (error) {
+    return {
+      valid: false,
+      error: errorInfo('fixture_validation', 'fixture', {
+        code: 'QUERY_COND_TASK_LOOKUP_FAILED',
+        message: String(error?.message ?? error),
+        notRun: true
+      })
+    }
+  }
+  const task = response.body?.data
+  const items = Array.isArray(task?.items) ? task.items : []
+  const problems = []
+  if (response.status !== 200 || response.body?.success !== true || !isRecord(task)) {
+    problems.push('GET /api/tasks/{id} did not return success=true with a task object')
+  } else {
+    if (task.type !== 'EXPORT') problems.push(`expected EXPORT, received ${task.type ?? 'missing type'}`)
+    if (task.currentStep !== 'QUERY_COND') problems.push(`expected currentStep=QUERY_COND, received ${task.currentStep ?? 'missing step'}`)
+    if (!items.some((item) => item?.defCode === 'CURRENCY')) problems.push('task has no CURRENCY item')
+  }
+  if (problems.length > 0) {
+    return {
+      valid: false,
+      error: errorInfo('fixture_validation', 'fixture', {
+        code: 'QUERY_COND_TASK_PRECONDITION_FAILED',
+        message: problems.join('; '),
+        httpStatus: response.status,
+        body: response.body ?? response.text,
+        notRun: true
+      })
+    }
+  }
+  return {
+    valid: true,
+    taskId: Number(queryCondTaskId),
+    evidence: {
+      id: Number(queryCondTaskId),
+      type: task.type,
+      currentStep: task.currentStep,
+      defCodes: items.map((item) => item?.defCode).filter(Boolean)
+    }
+  }
 }
 
 async function executeCase(definition, round) {
@@ -122,7 +245,7 @@ async function executeCase(definition, round) {
       runId: null,
       latencyMs: Date.now() - started,
       answer: null,
-      error: { httpStatus: response.status, body: payload },
+      error: errorInfo('chat_http', 'infra', { httpStatus: response.status, body: payload }),
       terminal: null,
       toolCalls: [],
       usage: null,
@@ -184,25 +307,43 @@ async function executeCase(definition, round) {
       previous.resultAtMs = atMs
       toolCalls.set(frame.toolCallId, previous)
       trackCreatedResources(frame, runId)
-      if (stopAfterApproval && approvedToolCalls.has(frame.toolCallId) && frame.outcome === 'ok') stopRequested = true
+      if (approvedToolCalls.has(frame.toolCallId)) {
+        if (frame.outcome !== 'ok') {
+          streamError = errorInfo('confirm', 'hitl', {
+            code: 'confirm_rejected',
+            message: 'the approved action did not return tool_result.outcome=ok',
+            frame,
+            notRun: true
+          })
+          stopRequested = true
+        } else if (stopAfterApproval) {
+          stopRequested = true
+        }
+      }
     } else if (frame.type === 'confirm_request') {
       if (definition.autoApprove === true) {
         const confirmation = await confirm(runId, frame.toolCallId)
-        if (confirmation.status === 200) {
+        if (confirmation.status === 200 && confirmation.body?.accepted === true) {
           approvedToolCalls.add(frame.toolCallId)
         } else {
-          streamError = { stage: 'confirm', status: confirmation.status, body: confirmation.body ?? confirmation.text }
+          streamError = errorInfo('confirm', 'hitl', {
+            code: 'confirm_rejected',
+            httpStatus: confirmation.status,
+            body: confirmation.body ?? confirmation.text,
+            notRun: true
+          })
           stopRequested = true
         }
       } else {
-        streamError = { stage: 'confirm', error: 'approval_required' }
+        streamError = errorInfo('confirm', 'hitl', { code: 'approval_required', notRun: true })
         stopRequested = true
       }
     } else if (frame.type === 'done') {
       terminal = frame
       usage = frame.usage ?? null
     } else if (frame.type === 'error') {
-      streamError = { stage: 'terminal', code: frame.code ?? null, message: frame.message ?? null }
+      streamError = errorInfo('terminal', terminalCategory(frame),
+        { code: frame.code ?? null, message: frame.message ?? null, frame })
       stopRequested = true
     }
   }
@@ -242,6 +383,21 @@ async function executeCase(definition, round) {
       if (frame !== null) await processFrame(frame)
     }
   }
+  if (streamError === null) {
+    for (const toolCallId of approvedToolCalls) {
+      const call = toolCalls.get(toolCallId)
+      if (call?.outcome !== 'ok') {
+        streamError = errorInfo('confirm', 'hitl', {
+          code: 'confirm_rejected',
+          message: 'the approved action ended without tool_result.outcome=ok; execution is unproven',
+          toolCallId,
+          observedOutcome: call?.outcome ?? null,
+          notRun: true
+        })
+        break
+      }
+    }
+  }
   return {
     id: definition.id,
     kind: definition.kind,
@@ -250,6 +406,7 @@ async function executeCase(definition, round) {
     runId,
     latencyMs: Date.now() - started,
     answer,
+    notRun: streamError?.notRun === true,
     error: streamError,
     terminal,
     toolCalls: [...toolCalls.values()],
@@ -266,6 +423,30 @@ function kbOutcome(result) {
 }
 
 function mechanical(caseResult, definition) {
+  if (caseResult.notRun === true) {
+    return {
+      toolChoice: { pass: null, missing: [], forbiddenHits: [] },
+      retrieval: {
+        expected: definition.expectRetrieval === true ? 'required' : 'forbidden',
+        pass: null,
+        falseTrigger: false
+      },
+      calls: { total: 0, kbSearch: 0, byTool: {} },
+      kb: {
+        outcomes: [],
+        expectedOutcome: definition.expectedKbOutcome ?? null,
+        outcomePass: null,
+        effectiveHit: 0,
+        noHit: 0,
+        unknown: 0,
+        approximateTitle: false,
+        expectedApproximateTitle: definition.expectApproximateTitle ?? null,
+        approximateTitlePass: null,
+        minCallsExpected: definition.minKbSearchCalls ?? null,
+        minCallsPass: null
+      }
+    }
+  }
   const calls = caseResult.toolCalls
   const names = calls.map((call) => call.name).filter(Boolean)
   const required = definition.requiredTools ?? []
@@ -313,6 +494,14 @@ function mechanical(caseResult, definition) {
       minCallsPass: definition.minKbSearchCalls === undefined ? null : kbCalls.length >= definition.minKbSearchCalls
     }
   }
+}
+
+function evaluatedCase(result, definition) {
+  const modelBehaviorFailure = result.notRun !== true && (result.error === null || result.error === undefined)
+    && (result.mechanical.toolChoice.pass === false || result.mechanical.retrieval.pass === false
+      || result.mechanical.kb.outcomePass === false || result.mechanical.kb.approximateTitlePass === false
+      || result.mechanical.kb.minCallsPass === false)
+  return { ...result, modelBehaviorFailure }
 }
 
 function manualTemplate() {
@@ -445,14 +634,25 @@ const cases = []
 let fatalError = null
 let disclosure = { status: 'unknown', reason: 'disclosure evidence was not collected' }
 let cleanup
+let queryCondValidation = { valid: true, evidence: null }
 try {
+  if (queryCondDefinitions.length > 0) queryCondValidation = await validateQueryCondTask()
   for (const definition of definitions) {
+    const queryCondCase = definition.context?.step === 'QUERY_COND'
     for (let round = 1; round <= rounds; round += 1) {
+      if (queryCondCase && !queryCondValidation.valid) {
+        cases.push(notRunCase(definition, round, queryCondValidation.error))
+        continue
+      }
+      const effectiveDefinition = queryCondCase
+        ? { ...definition, context: { ...definition.context, taskId: queryCondValidation.taskId } }
+        : definition
       try {
-        const result = await executeCase(definition, round)
-        cases.push({ ...result, mechanical: mechanical(result, definition), manual: manualTemplate() })
+        const result = await executeCase(effectiveDefinition, round)
+        cases.push(evaluatedCase({ ...result, mechanical: mechanical(result, effectiveDefinition), manual: manualTemplate() },
+          effectiveDefinition))
       } catch (error) {
-        cases.push({
+        const result = {
           id: definition.id,
           kind: definition.kind,
           round,
@@ -460,7 +660,7 @@ try {
           runId: null,
           latencyMs: null,
           answer: null,
-          error: { stage: 'execute', message: String(error?.message ?? error) },
+          error: errorInfo('execute', 'infra', { message: String(error?.message ?? error) }),
           terminal: null,
           toolCalls: [],
           usage: null,
@@ -473,7 +673,8 @@ try {
             kb: { outcomes: [], effectiveHit: 0, noHit: 0, unknown: 0, approximateTitle: false, minCallsExpected: null, minCallsPass: null }
           },
           manual: manualTemplate()
-        })
+        }
+        cases.push(evaluatedCase(result, effectiveDefinition))
       }
     }
   }
@@ -484,35 +685,64 @@ try {
   cleanup = await cleanupCreatedResources()
 }
 
-const retrievalRequiredCases = cases.filter((item) => item.mechanical.retrieval.expected === 'required')
-const retrievalForbiddenCases = cases.filter((item) => item.mechanical.retrieval.expected === 'forbidden')
-const correctRetrieval = cases.filter((item) => item.mechanical.retrieval.pass).length
-const falseTriggers = cases.filter((item) => item.mechanical.retrieval.falseTrigger).length
+function scopeMetrics(scope) {
+  const required = scope.filter((item) => item.mechanical.retrieval.expected === 'required')
+  const forbidden = scope.filter((item) => item.mechanical.retrieval.expected === 'forbidden')
+  const correctRetrieval = scope.filter((item) => item.mechanical.retrieval.pass === true).length
+  const toolPass = scope.filter((item) => item.mechanical.toolChoice.pass === true).length
+  return {
+    correctRetrieval,
+    retrievalChecks: scope.length,
+    retrievalAccuracy: scope.length === 0 ? null : correctRetrieval / scope.length,
+    retrievalRequiredPass: required.filter((item) => item.mechanical.retrieval.pass === true).length,
+    retrievalRequired: required.length,
+    retrievalRecall: required.length === 0
+      ? null
+      : required.filter((item) => item.mechanical.retrieval.pass === true).length / required.length,
+    falseTriggers: forbidden.filter((item) => item.mechanical.retrieval.falseTrigger === true).length,
+    retrievalForbidden: forbidden.length,
+    falseTriggerRate: forbidden.length === 0
+      ? null
+      : forbidden.filter((item) => item.mechanical.retrieval.falseTrigger === true).length / forbidden.length,
+    toolAccuracy: {
+      pass: toolPass,
+      total: scope.length,
+      ratio: scope.length === 0 ? null : toolPass / scope.length
+    }
+  }
+}
+
+const executable = cases.filter((item) => item.notRun !== true)
+const modelEvaluable = cases.filter((item) => item.notRun !== true && item.error?.category !== 'infra')
+const rawMetrics = scopeMetrics(cases)
+const executableMetrics = scopeMetrics(executable)
+const modelMetrics = scopeMetrics(modelEvaluable)
 const effectiveHits = cases.reduce((total, item) => total + item.mechanical.kb.effectiveHit, 0)
 const noHits = cases.reduce((total, item) => total + item.mechanical.kb.noHit, 0)
 const unknownKbOutcomes = cases.reduce((total, item) => total + item.mechanical.kb.unknown, 0)
 const kbOutcomeCount = effectiveHits + noHits + unknownKbOutcomes
 const summary = {
   cases: cases.length,
-  executionErrors: cases.filter((item) => item.error !== null && item.error !== undefined).length,
+  executionErrors: cases.filter((item) => item.notRun !== true && item.error !== null && item.error !== undefined).length,
+  executableCases: executable.length,
+  modelEvaluableCases: modelEvaluable.length,
+  notRun: cases.filter((item) => item.notRun === true).length,
+  notRunByCategory: {
+    fixture: cases.filter((item) => item.notRun === true && item.error?.category === 'fixture').length,
+    hitl: cases.filter((item) => item.notRun === true && item.error?.category === 'hitl').length
+  },
+  infrastructureErrors: cases.filter((item) => item.error?.category === 'infra').length,
+  modelTerminalErrors: cases.filter((item) => item.error?.category === 'model').length,
+  modelBehaviorErrors: cases.filter((item) => item.modelBehaviorFailure === true).length,
+  realModelErrors: cases.filter((item) => item.error?.category === 'model' || item.modelBehaviorFailure === true).length,
   fatalError: fatalError !== null,
   cleanupStatus: cleanup.status,
   cleanupFailures: cleanup.failures.length,
-  correctRetrieval,
-  retrievalChecks: cases.length,
-  retrievalAccuracy: cases.length === 0 ? null : correctRetrieval / cases.length,
-  retrievalRequiredPass: retrievalRequiredCases.filter((item) => item.mechanical.retrieval.pass).length,
-  retrievalRequired: retrievalRequiredCases.length,
-  retrievalRecall: retrievalRequiredCases.length === 0
-    ? null
-    : retrievalRequiredCases.filter((item) => item.mechanical.retrieval.pass).length / retrievalRequiredCases.length,
-  falseTriggers,
-  retrievalForbidden: retrievalForbiddenCases.length,
-  falseTriggerRate: retrievalForbiddenCases.length === 0 ? null : falseTriggers / retrievalForbiddenCases.length,
-  toolAccuracy: {
-    pass: cases.filter((item) => item.mechanical.toolChoice.pass).length,
-    total: cases.length,
-    ratio: cases.length === 0 ? null : cases.filter((item) => item.mechanical.toolChoice.pass).length / cases.length
+  ...rawMetrics,
+  metrics: {
+    raw: rawMetrics,
+    executable: executableMetrics,
+    modelEvaluable: modelMetrics
   },
   effectiveHits,
   noHits,
@@ -523,18 +753,25 @@ const summary = {
   approximateTitleCases: cases.filter((item) => item.mechanical.kb.approximateTitle).length,
   averageToolCalls: cases.length === 0 ? null : cases.reduce((total, item) => total + item.mechanical.calls.total, 0) / cases.length,
   averageKbSearchCalls: cases.length === 0 ? null : cases.reduce((total, item) => total + item.mechanical.calls.kbSearch, 0) / cases.length,
-  note: 'Mechanical tool/disclosure metrics only. Answer correctness and faithfulness require manual review; no semantic PASS is inferred.'
+  note: 'Raw metrics keep every case. Executable excludes NOT_RUN only. Model-evaluable also excludes infra errors, but keeps model terminal/behavior failures. NOT_RUN and real model errors are reported separately; no error is silently dropped.'
 }
 
 const report = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   generatedAt: new Date().toISOString(),
   base,
   tenantId,
   userId,
   rounds,
   fixture: fixturePath,
-  isolation: { asserted: true, remote, writesRequired, writesAllowed: allowWrites },
+  fixtureValidation: { queryCond: queryCondValidation },
+  isolation: {
+    asserted: true,
+    remote,
+    writesRequired,
+    writesAllowed: allowWrites,
+    queryCondTaskIdProvided: queryCondTaskId !== ''
+  },
   fatalError,
   disclosure,
   cleanup,
