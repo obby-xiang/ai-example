@@ -511,6 +511,13 @@
       "reason": "已同步每run原子载体传递createdTaskId及创建前通用槽位补齐约束，保留结构化宿主推进和禁止提示词硬门",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:c6161e37cfacafad137a7f847d054c5a08f70990d7fae3dac2d8a8e3006e943c",
+      "status": "not-affected",
+      "reason": "本批仅按真实表单受理证据恢复提交状态，并为未确认终帧提供零副作用自动对账和最终手动出口，D6协议不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

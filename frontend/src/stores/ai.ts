@@ -5070,7 +5070,7 @@ export const useAiStore = defineStore('ai', {
                 matched = hit
               }
             }
-            const partStatus = mappedStatus ?? 'unknown'
+            let partStatus = mappedStatus ?? 'unknown'
             const part: ToolPart = {
               kind: 'tool',
               seg: toolSegBase + toolIndex,
@@ -5110,6 +5110,10 @@ export const useAiStore = defineStore('ai', {
                 }
                 part.submittedValues = (submitted ?? undefined) as Record<string, unknown>
               }
+            }
+            if (mappedStatus === null && kind === 'FRONTEND' && name === GENERATIVE_FORM_TOOL
+              && state?.code === undefined && part.decidedAt !== undefined && part.submittedValues !== undefined) {
+              partStatus = 'succeeded'
             }
             if (matched) {
               part.result = matched.responseData ?? null
@@ -6310,6 +6314,37 @@ export const useAiStore = defineStore('ai', {
       // 2026-10-29 收口：手动出口接管 ⇒ 本类自动恢复的排期与预算作废（重复劳动没有意义）
       this.resetAutoRecovery('history')
       await this.loadHistory()
+    },
+
+    recoverUnconfirmedTerminal(message: ChatMessage): void {
+      const sessionId = this.sessionId
+      const runId = message.runId
+      const showManualRecovery = (): void => {
+        if (this.sessionId !== sessionId || message.runId !== runId) {
+          return
+        }
+        const current = this.messages.find((item) => item.id === message.id) ?? message
+        current.unconfirmed = true
+        this.lastRoundOutcome = 'unconfirmed'
+        this.followupReady = false
+      }
+      const scheduled = this.startAutoRecovery('history', async () => {
+        await this.loadHistory()
+        if (this.sessionId !== sessionId || message.runId !== runId) {
+          return true
+        }
+        const confirmed = runId !== null && runId !== undefined && this.historyWindowEntries.some((entry) =>
+          entry.type.toUpperCase() === 'ASSISTANT' && entry.runId === runId && entry.outcome === 'DONE')
+        if (confirmed) {
+          message.unconfirmed = false
+          this.lastRoundOutcome = 'ok'
+          return true
+        }
+        return false
+      }, showManualRecovery)
+      if (!scheduled) {
+        showManualRecovery()
+      }
     },
 
     /** 批次2：恢复快照失败后的重试（只重跑 runs/current 那一步，不重新拉历史）。 */
@@ -12291,12 +12326,9 @@ export const useAiStore = defineStore('ai', {
           // 批次2：机器码入消息（随镜像持久化）—— 刷新后仍能区分"哪种失败"。
           message.code = frame.code ?? null
           if (isUnconfirmedTerminal(frame)) {
-            // 批次2 / AR-05：**中性「状态未确认」** —— 不是失败（不挂错误卡、不发错误通知），
-            // 也不是完整答案。只落视图态，由面板给"重新载入 / 新开一轮"这类手动入口。
-            message.unconfirmed = true
             message.errorCard = null
-            this.lastRoundOutcome = 'unconfirmed'
             this.followupReady = false
+            this.recoverUnconfirmedTerminal(message)
             this.clearGateSubmissions()
             break
           }
