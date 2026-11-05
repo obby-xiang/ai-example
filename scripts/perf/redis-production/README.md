@@ -1,4 +1,4 @@
-# Redis 生产类直驱压测（P0）
+# Redis 生产类直驱压测（P0–P2）
 
 本入口直接实例化并调用生产类/生产 runner，不使用 `redis-protocol` 的候选 Lua 或状态机。Java 代码位于：
 
@@ -6,42 +6,103 @@
 backend/src/test/java/com/example/configmgr/perf/production/
 ```
 
-复用现有 `HarnessConfig / RedisHarness / Manifest / HarnessMetrics / OutputWriter`，输出同名的 `manifest.json`、`results.json`、`protocols.json`、`verify.json`、`cleanup.json`。只连接显式隔离的 Redis；不启动 HTTP 服务、不执行项目测试、不驱动模型。DB 候选、事务、附件和文件依赖使用 Mockito 隔离，Redis 命令、Lua、runner 和业务断言均由真实生产实现执行。
+复用现有 `HarnessConfig / RedisHarness / Manifest / HarnessMetrics / OutputWriter`，输出同名的 `manifest.json`、`results.json`、`protocols.json`、`verify.json`、`cleanup.json`。只连接显式隔离的 Redis；不启动 HTTP 服务、不执行项目测试、不驱动模型。DB 候选、事务、附件和文件依赖使用 Mockito 或场景独立目录隔离，Redis 命令、Lua、runner 和业务断言均由真实生产实现执行。
 
-## P0 场景
+**当前只完成代码集成与 `test-compile`。真实 standalone/Cluster 结果必须由下述隔离设备执行产生，不能用静态编译代替实测 PASS。**
 
-| 场景 | 生产入口与主要证据 |
-| --- | --- |
-| `startup_runner_active_scan_1m` | `beginRunner/beat/tickOnce` 证明主机索引写入、PTTL 续期和批量两阶段续期；依次运行 `RunnerActiveKeyCleanupRunner`、`StaleJobRecoveryRunner`；本机/他机/存活/非法 PID、不同 generation、SCAN=0；自建 active/beat 键精确 DEL、自建索引 field 精确 HDEL，外部控制样本单独保留 |
-| `run_hitl_decision_claim_complete` | 真实 `RunStore` 并发批准/认领、READ 取消整笔不写、非 READ 真实结果、取消完成竞态、六键同槽及旧 epoch 拒绝 |
-| `memory_concurrent_cas_and_staging` | 真实 `RedisChatMemoryRepository` 多 run 大消息 CAS；staging/final/index 同槽；RPUSH/SADD/RENAME/CAS/DEL 故障后的旧历史与精确清理 |
-| `kb_generation_prune_recovery` | 真实 `KbCache/RedisKbCacheStore` 代次、下线、并发刷新、DEL/HDEL 中断；旧实例不得删新正文，残留下轮收敛；DOC_IDS 只清本场景 field，manifest 由单键 Lua 原子比对发布值并恢复/删除，generation/lock 按归属条件清理 |
-| `purge_retry_due_full_lifecycle` | 真实 pending store、purge service 与 retry runner：deferred→due→retry→verify→complete，owner/epoch、旧执行体、guard/pending/due 证据；先证明 memory 写入再 arm guard，最终 data/staging 均清净 |
-| `lease_fenced_takeover_cluster` | 真实 `LeaseService` 并发 acquire、计数器/fence 缺失和过期、旧 owner 续租释放、created=false 释放权、epoch 单调与同槽 |
-| `purge_active_cancel_deferred` | 真实活跃 run 延期，终态后 retry 续清，不得半删 |
-| `purge_retry_failure_and_fairness` | 缺身份记录与后续合法候选同场；合法候选必须继续推进，不能被前一条阻塞 |
+## 场景清单（43）
 
-standalone 与 Cluster 使用完全相同的场景和断言。每个场景有独立 namespace/copy；run 恢复/列表索引与 purge due 只摘本工具 member。清理不使用 FLUSH、KEYS 或全键 SCAN。
+### P0：删除主事故面与核心写协议（6）
+
+- `startup_runner_active_scan_1m`
+- `run_hitl_decision_claim_complete`
+- `memory_concurrent_cas_and_staging`
+- `kb_generation_prune_recovery`
+- `purge_retry_due_full_lifecycle`
+- `lease_fenced_takeover_cluster`
+
+### P1：高放大接口、跨实例一致性与资源治理（29）
+
+- `purge_retry_failure_and_fairness`
+- `purge_active_cancel_deferred`
+- `startup_resume_candidate_storm`
+- `startup_dependency_failure_matrix`
+- `job_heartbeat_ticker_hot`
+- `job_cancel_version_and_db_fallback`
+- `job_watchdog_singleflight`
+- `task_delete_slow_redis_lock_hold`
+- `task_event_pubsub_fanout`
+- `task_event_slow_emitter_saturation`
+- `frame_append_hot_large`
+- `frame_replay_gap_and_trim`
+- `wake_coalesce_and_reconnect`
+- `transcript_large_pagination`
+- `context_compaction_commit_hot`
+- `ledger_idem_large_projection`
+- `attachment_full_lifecycle`
+- `attachment_failure_rollback`
+- `session_registration_and_gate_token`
+- `run_snapshot_hot_save`
+- `run_recovery_index_large`
+- `client_request_sweep_large`
+- `memory_purge_generation`
+- `purge_memory_writeback_crash`
+- `purge_cluster_slot_and_error_cleanup`
+- `resource_lock_two_phase_release`
+- `scan_lease_long_and_stalled`
+- `kb_refresh_large_corpus`
+- `redis_availability_down_recovery`
+
+### P2：固定配置、健康、缓存与降级（8）
+
+- `task_event_redis_down_lazy_start`
+- `cancel_and_observation_lifecycle`
+- `memory_find_ids_scan`
+- `kb_cache_outage_fallback`
+- `ai_model_catalog_cache`
+- `create_task_draft_merge_large`
+- `startup_topology_contract`
+- `health_degradation_observability`
+
+不注册 P3，不重复场景 ID。standalone 与 Cluster 使用完全相同的生产类和业务断言；每场景有独立 namespace/copy，背景键、共享 HASH field、run/purge 索引 member 只处理本工具登记项。
+
+## 证据与清理
+
+- `results.json`：完整输入、manifest 属性、逐阶段耗时、真实 Lettuce 命令数、失败命令数、SCAN/HSCAN 页数、请求字节、协议断言、覆盖状态及清理结果。
+- `verify.json`：生产断言与 retained 控制样本。
+- `cleanup.json`：自有键、共享 HASH 自有 field、背景键、run/purge 索引 member 和外部控制样本。
+- KB 共享 manifest 仅按本场景发布值条件恢复；generation 仅在当前值仍为本场景最新值时条件恢复/删除，不覆盖其他场景新代次；lease 仅按 token 条件删除。
+- 清理不使用 FLUSH、KEYS 或全键 SCAN。单调 generation 不回退到覆盖其他场景的新值，外部 member/新值不回删。
+- 所选场景缺 dataset 时 cleanup 返回 `unknown/not generated` 且 `complete=false`。
+
+## 覆盖与故障
+
+默认 `PERF_FAULT_INJECTION=true`、`PERF_FAULT_OPERATIONS=all`。完整 P0–P2 覆盖要求全部 43 场景及以下故障操作启用：
+
+```text
+rpush,sadd,rename,cas,staging_discard,hdel,eval,hgetall,set,get,
+index_eval,registration_delete,tombstone_set,del,srem,lpush,hget,
+ping,subscribe,zrem,AI_FRAME_APPEND,scan,MEMORY_CLEAR,zrangebyscore,pexpire
+```
+
+场景子集、关闭故障或故障子集均为显式缩减实验：`coverageStatus=PARTIAL`，最终 verify/exit 为非 PASS，并记录 `coverageReason`。`single_master_targeted` 目前明确属于 `coverageLimit`，不是 COMPLETE 的必需 PASS 项：现有故障代理不能按 slot/master 定向，standalone 也没有 master-slot 语义，不能用普通一次 PING 冒充单 master 故障。场景级 `coverageLimit` 会写入 manifest，并在 generate/measure/verify/all 分阶段命令间保留；只有无限制、43 场景且全部必需 fault 启用时才为 COMPLETE。
+
+`task_event_slow_emitter_saturation` 的前端 `getJob → onSnapshot` 快照轮询补偿需要真实浏览器验证，Java 场景只记录 `snapshotPollingCoverage=PARTIAL`、`coverageLimit=EXTERNAL_BROWSER_REQUIRED`，不生成该路径的 PASS；后续由 DeepSeek 浏览器复核。
 
 ## 配置
 
 模板见 `.env.example`。安全默认值不变：`PERF_ISOLATED_ENV=false`、全局写门禁关闭、非默认 DB/远程需显式确认、cleanup 默认 dry-run。`PERF_NAMESPACE` 必须显式指定。
 
-规模：
+规模与专项输入：
 
-- `PERF_STARTUP_BACKGROUND_KEYS`：默认 smoke=2000、full=100000、stress=1000000。
-- 超过 10000 需 `PERF_ALLOW_LARGE_SCALE=true`；超过 100000 还需 `PERF_ALLOW_BACKGROUND_MILLION=true`。
+- `PERF_STARTUP_BACKGROUND_KEYS`：默认 smoke=2000、full=100000、stress=1000000；超过 10000 需 `PERF_ALLOW_LARGE_SCALE=true`，超过 100000 还需 `PERF_ALLOW_BACKGROUND_MILLION=true`。
+- `PERF_STARTUP_EXTERNAL_ACTIVE_KEY` / `PERF_STARTUP_EXTERNAL_REMOTE_KEY` / `PERF_STARTUP_EXTERNAL_INVALID_KEY`：仅登记已存在的外部控制键，不创建、不删除。
 - `PERF_MEMORY_MESSAGE_BYTES` 默认 16384；`PERF_MEMORY_CONCURRENT_RUNS` 默认 4；`PERF_LEASE_CONCURRENT_OWNERS` 默认 8（2..64）。
-- `PERF_STARTUP_EXTERNAL_ACTIVE_KEY` / `PERF_STARTUP_EXTERNAL_REMOTE_KEY` / `PERF_STARTUP_EXTERNAL_INVALID_KEY` 仅用于登记已存在的外部控制键；本场景不创建、不删除这些键。活/他机/非法自建夹具只在场景期间保留，最终全部清理。
+- `PERF_KB_CORPUS_DOCS` 默认 130（65..256，小样本，不生成一万文档）；`PERF_KB_CORPUS_BODY_BYTES` 默认 256（64..2048）。
+- `PERF_TASK_EVENT_SATURATION_FRAMES` 默认 32（8..256）。
+- `PERF_TASK_REDIS_DELAY_MS` 默认 80（1..2000），用于任务删除边界延迟/失败与恢复验证。
 
-故障注入：
-
-- 默认 `PERF_FAULT_INJECTION=true`、`PERF_FAULT_OPERATIONS=all`，执行全部必需故障点。
-- 可选 `rpush,sadd,rename,cas,staging_discard,hdel` 子集；关闭或选择子集时，manifest 的 `faultsSkipped` 明确列出未执行项，不生成这些故障点的通过断言。
-- 注入发生在真实 Redis 命令/生产 Lua 调用边界，不复制或替换脚本。
-- 只有全部 8 个场景和全部必需故障点都执行，`coverageStatus=COMPLETE` 才允许完整 P0 PASS。场景子集、关闭故障或故障子集均为显式缩减实验：`coverageStatus=PARTIAL`，最终 verify/exit 为非 PASS，并记录 `coverageReason`。
-
-证据：`results.json` 包含完整输入、manifest 属性、逐阶段耗时、真实 Lettuce 命令数、失败命令数、SCAN/HSCAN 页数、协议断言、覆盖状态及清理结果；`verify.json` 检查生产断言与外部控制样本；`cleanup.json` 检查自有键、共享 HASH 自有 field、背景键、run/purge 索引 member 和外部控制样本。manifest 在任何场景写操作前先保存占位，失败时保存同一对象的部分键面；Startup ticker 在 `finally` 停止，cleanup 不因场景失败跳过。KB 外部 member/新值不回删，单调 generation 不回退；所选场景缺 dataset 时 cleanup 返回 `unknown/not generated` 且 `complete=false`。
+故障注入发生在真实 Redis 命令/生产 Lua 调用边界，不复制或替换脚本。manifest 在任何场景写操作前先保存占位，失败时保存同一对象的部分键面；后台 ticker 在 `finally` 停止，cleanup 不因场景失败跳过。
 
 ## Cluster 设备执行命令
 
@@ -57,7 +118,7 @@ export PERF_CONFIRM_REMOTE=true
 export PERF_NAMESPACE=prod-cl-smoke-001
 export PERF_OUTPUT_DIR=./out-cl-smoke-001
 export PERF_PROFILE=smoke
-export PERF_SCENARIOS=startup_runner_active_scan_1m,run_hitl_decision_claim_complete,memory_concurrent_cas_and_staging,kb_generation_prune_recovery,purge_retry_due_full_lifecycle,purge_active_cancel_deferred,purge_retry_failure_and_fairness,lease_fenced_takeover_cluster
+export PERF_SCENARIOS=                    # 空 = 全部 43 场景
 
 ./run.sh doctor
 ./run.sh all --execute
@@ -71,7 +132,7 @@ export PERF_SCENARIOS=startup_runner_active_scan_1m,run_hitl_decision_claim_comp
 ./run.sh verify
 ```
 
-百万启动背景（专用设备）：
+百万启动背景（专用设备、单场景，结果仍为 PARTIAL）：
 
 ```bash
 export PERF_NAMESPACE=prod-cl-startup-1m-001
@@ -84,12 +145,4 @@ export PERF_SCENARIOS=startup_runner_active_scan_1m
 ./run.sh all --execute
 ```
 
-该单场景命令用于专项性能取样，`coverageStatus=PARTIAL`，不会作为完整 P0 PASS；完整验收须使用上面的全场景、全故障配置。
-
-Windows CMD 使用相同环境变量并执行 `run.cmd`。
-
-## 后续 P1/P2
-
-- P1：作业 ticker/取消版本/看门狗、任务与 AI pub/sub、frame 热写与重放、run recovery 大候选、session gate、KB 大语料、memory purge 代次、context/ledger、purge 更多故障公平性及 Cluster 部分失败。
-- P2：KB/模型缓存降级、memory SPI 扫描、启动拓扑、健康降级、create_task 草案与诊断面。
-- 当前只完成代码与静态编译；真实 standalone/Cluster 结果必须由上述隔离设备执行产生，不能用静态编译代替实测 PASS。
+Windows CMD 使用相同环境变量并执行 `run.cmd`。只有全部 43 场景和全部必需故障点都执行，`coverageStatus=COMPLETE` 才允许完整 P0–P2 PASS；未实测前不得宣称性能或覆盖达标。

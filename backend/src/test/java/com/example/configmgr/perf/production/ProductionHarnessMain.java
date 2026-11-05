@@ -76,7 +76,7 @@ public final class ProductionHarnessMain {
 			return 0;
 		}
 		try (ProductionSupport support = new ProductionSupport(cfg, metrics)) {
-			evaluateCoverage(support, selected);
+			evaluateCoverage(support, selected, manifest);
 			int exit = switch (command) {
 				case "doctor" -> doctor(support, writer);
 				case "generate" -> generate(support, selected, manifest, manifestPath, writer, metrics);
@@ -305,6 +305,12 @@ public final class ProductionHarnessMain {
 		if ("kb_generation_prune_recovery".equals(dataset.scenario)) {
 			deleted += KbGenerationPruneScenario.cleanupSharedState(support, dataset);
 		}
+		else if ("kb_refresh_large_corpus".equals(dataset.scenario)) {
+			deleted += KbCorpusScenario.cleanupSharedState(support, dataset);
+		}
+		else if ("kb_cache_outage_fallback".equals(dataset.scenario)) {
+			deleted += KbCacheOutageScenario.cleanupSharedState(support, dataset);
+		}
 		for (Map.Entry<String, List<String>> index : dataset.ownedHashFields.entrySet()) {
 			for (String field : index.getValue()) {
 				deleted += support.redis.opsForHash().delete(index.getKey(), field);
@@ -341,6 +347,12 @@ public final class ProductionHarnessMain {
 		List<String> present = new ArrayList<>();
 		if ("kb_generation_prune_recovery".equals(dataset.scenario)) {
 			present.addAll(KbGenerationPruneScenario.sharedStateResidue(support, dataset));
+		}
+		else if ("kb_refresh_large_corpus".equals(dataset.scenario)) {
+			present.addAll(KbCorpusScenario.sharedStateResidue(support, dataset));
+		}
+		else if ("kb_cache_outage_fallback".equals(dataset.scenario)) {
+			present.addAll(KbCacheOutageScenario.sharedStateResidue(support, dataset));
 		}
 		for (Map.Entry<String, List<String>> index : dataset.ownedHashFields.entrySet()) {
 			for (String field : index.getValue()) {
@@ -396,7 +408,17 @@ public final class ProductionHarnessMain {
 		return !current.isEmpty() && current.stream().allMatch(HarnessMetrics.ProtocolRecord::pass);
 	}
 
-	private static void evaluateCoverage(ProductionSupport support, List<ProductionScenario> selected) {
+	private static void evaluateCoverage(ProductionSupport support, List<ProductionScenario> selected,
+			Manifest manifest) {
+		for (ProductionScenario scenario : selected) {
+			Manifest.Dataset previous = manifest.find(scenario.id(), 0);
+			Object limit = previous == null ? null : previous.attributes.get("coverageLimit");
+			if (limit != null && !String.valueOf(limit).isBlank()) {
+				support.coverageStatus = "PARTIAL";
+				support.coverageReason = scenario.id() + ": " + limit;
+				return;
+			}
+		}
 		java.util.Set<String> actual = selected.stream().map(ProductionScenario::id)
 				.collect(java.util.stream.Collectors.toSet());
 		java.util.Set<String> required = ProductionScenarioCatalog.selected(null).stream().map(ProductionScenario::id)
@@ -406,7 +428,13 @@ public final class ProductionHarnessMain {
 			support.coverageReason = "scenario subset: " + actual;
 			return;
 		}
-		for (String operation : List.of("rpush", "sadd", "rename", "cas", "staging_discard", "hdel")) {
+		for (String operation : List.of(
+				"rpush", "sadd", "rename", "cas", "staging_discard", "hdel",
+				"eval", "hgetall", "set", "get",
+				"index_eval", "registration_delete", "tombstone_set", "del", "srem",
+				"lpush", "hget", "ping", "subscribe",
+				"zrem", "AI_FRAME_APPEND", "scan", "MEMORY_CLEAR",
+				"zrangebyscore", "pexpire")) {
 			if (!support.faultEnabled(operation)) {
 				support.coverageStatus = "PARTIAL";
 				support.coverageReason = "required fault not enabled: " + operation;
@@ -414,7 +442,7 @@ public final class ProductionHarnessMain {
 			}
 		}
 		support.coverageStatus = "COMPLETE";
-		support.coverageReason = "all P0 scenarios and required fault points enabled";
+		support.coverageReason = "all P0-P2 scenarios and required fault points enabled";
 	}
 
 	private static Manifest.Dataset datasetFor(ProductionSupport support, ProductionScenario scenario,
