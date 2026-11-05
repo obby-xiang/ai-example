@@ -532,6 +532,13 @@
       "reason": "本批仅按真实表单受理事实补齐缺省OK，并按当前run保留多段assistant正文及独立entryId；D6迁移接口、帧协议与恢复契约不变",
       "reviewedAt": "2026-11-05",
       "reviewer": "K3.1 Pro复核，Kimi主控合入"
+    },
+    {
+      "fingerprint": "sha256:0586e5fab6df097061f0f2686001770f6c8b47b83bcfb05c5d94eaab1850d8f1",
+      "status": "not-affected",
+      "reason": "本批仅隐藏未确认内部状态的用户提示、完善同run有界对账清理并复制可读工具摘要；D6历史协议、迁移接口和服务端恢复事实不变",
+      "reviewedAt": "2026-11-05",
+      "reviewer": "K3.1 Pro复核，Kimi主控合入"
     }
   ]
 }

@@ -41,7 +41,7 @@ export const TOOL_STATUSES: readonly ToolRunStatus[] = [
 
 /** 当前语言下的状态词。 */
 export function toolStatusWord(status: ToolRunStatus): string {
-  return translate(`tool.status.${status}`)
+  return status === 'unknown' ? '' : translate(`tool.status.${status}`)
 }
 
 /** 当前语言下的状态词集合（摘要位去重判据用；随语言变化 ⇒ 调用点须实时取）。 */

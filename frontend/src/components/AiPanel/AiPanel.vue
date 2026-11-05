@@ -463,6 +463,7 @@
                     :class="cardShellClass(part)"
                     :data-testid="cardTestId(part)"
                   >
+                    <div class="flex items-center">
                     <button
                       type="button"
                       :class="cardHeadClass(part)"
@@ -492,6 +493,7 @@
                         >{{ cardSummary(part) }}</span>
                       </span>
                       <span
+                        v-if="cardStatusLabel(part)"
                         :class="cardStatusClass(part)"
                         :data-testid="cardStatusTestId(part)"
                         :data-state="cardStatusOf(part).key"
@@ -502,6 +504,23 @@
                         :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']"
                       >›</span>
                     </button>
+                    <span
+                      v-if="copyState && copyState.id === toolCopyId(part) && !copyState.ok"
+                      class="flex-none text-xs text-[#c0392b]"
+                      :data-testid="'copy-tool-hint-' + part.toolCallId"
+                    >{{ t(copyState.empty ? 'ai.panel.copyEmpty' : 'ai.panel.copyFailed') }}</span>
+                    <button
+                      type="button"
+                      :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, 'mr-[6px] flex-none', isMsgCopied(toolCopyId(part)) ? 'is-copied' : '']"
+                      :data-testid="'copy-tool-' + part.toolCallId"
+                      :aria-label="t('ai.panel.copyConclusion')"
+                      @click="copyToolConclusion(part)"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" class="i-copy"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                      <svg viewBox="0 0 24 24" aria-hidden="true" class="i-check"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                      <span :class="TIP_CLASS">{{ t('ai.panel.copyConclusion') }}<span :class="TIP_ARROW_CLASS" aria-hidden="true"></span></span>
+                    </button>
+                    </div>
                     <!-- 只读体判据 = 已决只读态 ∪ GF「已提交、结局未到」（readOnlyLike）：
                          后者让提交后的这段时间**同一张表单原样锁定**，不闪普通工具卡 / 不闪 schema。 -->
                     <div v-if="readOnlyLike(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
@@ -594,7 +613,7 @@
                         </div>
                       </div>
                       <!-- S6 批2 迁移步④（设计稿 §7.1-④）：视图可渲时「输出」区整块让位 —— 同一份真值
-                           不在卡面报两次（原文仍是 part.result，模型侧 / 复制路径不受影响）；
+                           不在卡面报两次（原文仍是 part.result，模型侧 / 技术详情展示不受影响）；
                            视图渲不出或段上没有视图 ⇒ 本盒照旧（回退路径不删）。 -->
                       <!-- 批次6A（N9）：skipped 的原文在旧帧/旧镜像里仍是模型向（预算、步数上限、配置键）
                            —— 不占「输出」位，收进下方「诊断详情」；卡面只留一句人话。 -->
@@ -956,7 +975,7 @@
               :data-testid="'copy-hint-' + m.id"
               class="text-xs text-[#c0392b]"
             >
-              {{ t('ai.panel.copyFailed') }}
+              {{ t(copyState.empty ? 'ai.panel.copyEmpty' : 'ai.panel.copyFailed') }}
             </span>
             <!-- 批G · S3：停止可见 —— 消息尾「已停止」标识（与「继续」入口互斥：停掉的轮不出继续） -->
             <span
@@ -1094,26 +1113,6 @@
             :data-testid="'error-card-action-' + m.id"
             @click="runErrorCardAction(m)"
           ><span class="border-b border-[#e3e6ea]">{{ errorCardActionLabel(m) }}</span></button>
-        </div>
-        <!-- 批次2（AR-05）：中性「状态未确认」视图 —— 只展示、不写乐观 done，也不冒充错误卡。
-             消费 store/消息侧已有的 unconfirmed 状态（字段约定见顶部 recoveryBridge 注释）；
-             出口 = 重新载入（同步服务端状态），不提供自动重跑/半截替换。 -->
-        <div
-          v-if="unconfirmedOf(m)"
-          class="w-full flex items-start gap-[8px] border border-solid border-[#e3e6ea] bg-[#f6f7f9] rounded-[10px] px-[10px] py-[8px] mb-2.5"
-          :data-testid="'turn-unconfirmed-' + m.id"
-        >
-          <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.3px] border-[#8b949e] text-[#57606a] text-[9px] mt-[2px] flex items-center justify-center" aria-hidden="true">?</span>
-          <div class="flex-1 min-w-0">
-            <b class="block text-[12.2px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.turnUnconfirmed') }}</b>
-            <span class="block mt-[2px] text-[11.6px] text-[#57606a] leading-[1.55] break-words">{{ t('ai.panel.turnUnconfirmedHint') }}</span>
-          </div>
-          <button
-            type="button"
-            class="flex-none whitespace-nowrap border-0 bg-transparent p-0 text-[11.5px] text-[#2563eb]"
-            :data-testid="'reload-turn-' + m.id"
-            @click="reloadTurnState()"
-          ><span class="border-b border-[#e3e6ea]">{{ t('ai.panel.reloadTurn') }}</span></button>
         </div>
         <!-- 批次2：这条消息来自镜像/差量回放但不能确认完整 —— 中性局部标记（全局提示条另有重载出口）。
              2026-10-29 返修：全局条已在说同一件事时消息级不再叠一遍（同一事实只留一个提示面）。 -->
@@ -1736,17 +1735,6 @@ function returnToActiveRun(): void {
   void ai.reattachBusyRun()
 }
 
-function unconfirmedOf(message: ChatMessage): boolean {
-  if (message.role !== 'assistant') {
-    return false
-  }
-  if (message.unconfirmed === true) {
-    return true
-  }
-  return ai.lastRoundOutcome === 'unconfirmed'
-    && ai.messages[ai.messages.length - 1] === message
-}
-
 function reloadTurnState(): void {
   void ai.retryLoadHistory()
 }
@@ -2168,14 +2156,14 @@ function pruneUserMessageState(): void {
 /**
  * 逐条复制的反馈（苞 B 项 2）：**组件局部状态**，生命周期 2s。
  * 为什么不复用 `ai.notice`：它是单槽位（一次只承载一条提示），"已复制"会把并发的
- * 断流/取消等提示挤掉 —— 局部状态只作用于被点的那条消息。
+ * 断流/取消等提示挤掉 —— 局部状态只作用于被点的消息或工具卡。
  */
-const copyState = ref<{ id: string; ok: boolean } | null>(null)
+const copyState = ref<{ id: string; ok: boolean; empty?: boolean } | null>(null)
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 
-/** R-165 S5a 项 7：该消息此刻处于「复制成功」绿勾态（2s 窗口内）。 */
-function isMsgCopied(messageId: string): boolean {
-  return copyState.value !== null && copyState.value.id === messageId && copyState.value.ok
+/** R-165 S5a 项 7：该消息或工具卡此刻处于「复制成功」绿勾态（2s 窗口内）。 */
+function isMsgCopied(id: string): boolean {
+  return copyState.value !== null && copyState.value.id === id && copyState.value.ok
 }
 
 /**
@@ -2437,7 +2425,7 @@ function isLastAssistantMessage(message: ChatMessage): boolean {
  * 一件做不了的事 —— 该窗口归**既有的工作中语义**（呼吸点），不新增任何新状态。
  */
 function waitingForAction(message: ChatMessage): boolean {
-  if (message.role !== 'assistant' || message.done || ai.runPhase !== 'parked' || unconfirmedOf(message)) {
+  if (message.role !== 'assistant' || message.done || ai.runPhase !== 'parked' || false) {
     return false
   }
   return message.parts.some((part) => part.kind === 'tool'
@@ -2457,7 +2445,7 @@ function isCompacting(message: ChatMessage): boolean {
     && !message.done
     && message.compactingStartedAtMs !== undefined
     && !waitingForAction(message)
-    && !unconfirmedOf(message)
+    && !false
 }
 
 function isBreathing(message: ChatMessage): boolean {
@@ -2467,7 +2455,7 @@ function isBreathing(message: ChatMessage): boolean {
     && !message.done
     && !waitingForAction(message)
     && !isCompacting(message)
-    && !unconfirmedOf(message)
+    && !false
 }
 
 function showTimestamp(message: ChatMessage): boolean {
@@ -2493,7 +2481,7 @@ function showMetaRow(message: ChatMessage): boolean {
     || isBreathing(message)
     || isCompacting(message)
     || waitingForAction(message)
-    || unconfirmedOf(message)
+    || false
     || showContinue(message)
     || errorCardContinueVisible(message)
     || message.stopped === true
@@ -3885,7 +3873,9 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     ai.uiUndoToolCallId,
     ai.uiUndoEntry,
     ai.sheetApplied,
-    ai.sessionId
+    ai.sessionId,
+    copyState.value?.id === toolCopyId(part) ? copyState.value.ok : null,
+    copyState.value?.id === toolCopyId(part) ? copyState.value.empty === true : null
   )
   if (part.name === GENERATIVE_FORM_TOOL) {
     // 队列面只入**标量**（本卡位次 + 队列总数）：整条 `queuedForms` 数组身份入 memo，
@@ -3955,7 +3945,7 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     index,
     msgGapClass(index),
     locale.value,
-    unconfirmedOf(message),
+    false,
     // 元信息行 / 恢复入口的**判定结果**（各自已经把 loading / runPhase / 末条身份算进去了）。
     // 全局现场本身不入 memo：否则历史行跟着每一次收流翻转一起失效（整屏闪根因）。
     showMetaRow(message),
@@ -3970,6 +3960,7 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     feedbackOf(message.id),
     isMsgCopied(message.id),
     copyState.value?.id === message.id ? copyState.value?.ok ?? null : null,
+    copyState.value?.id === message.id ? copyState.value?.empty === true : null,
     userMsgOverflowed.value.has(message.id),
     userMsgExpanded.value.has(message.id),
     degradeNotices.value[degradeNoticeKey(message.id)] ?? null
@@ -4269,7 +4260,7 @@ function cardStatusClass(part: ToolPart): string {
 }
 
 function cardStatusLabel(part: ToolPart): string {
-  return cardStatusView(part).label
+  return part.status === 'unknown' ? '' : cardStatusView(part).label
 }
 
 /**
@@ -4297,7 +4288,7 @@ function conflictRows(part: ToolPart): ConflictRow[] {
  * 「输出」区是否由视图通道接管（S6 批2 **迁移步④**，设计稿 §7.1-④）。
  *
  * 判据 = {@link isRenderableView}：同一份真值在卡面上只报一次 —— 视图可渲则原文盒让位
- * （原文仍是 `part.result`，模型侧与复制路径不受影响）；视图渲不出 / 段上没有视图 ⇒ 原文盒照旧。
+ * （原文仍是 `part.result`，模型侧与技术详情展示不受影响）；视图渲不出 / 段上没有视图 ⇒ 原文盒照旧。
  * `data.ref` 的求值域是 `part.result` 原文（与渲染器同源），所以两处传同一份文本。
  */
 function outputByView(part: ToolPart): boolean {
@@ -4735,7 +4726,8 @@ function isFailedLastAssistant(message: ChatMessage): boolean {
     && message.done === true
     && message.streaming !== true
     && message.stopped !== true
-    && !unconfirmedOf(message)
+    && message.unconfirmed !== true
+    && ai.lastRoundOutcome !== 'unconfirmed'
     && (message.errorCard != null
       || message.code != null
       || message.interrupted === true
@@ -4954,19 +4946,36 @@ function legacyCopy(text: string): boolean {
   }
 }
 
-/**
- * 复制一条消息的正文（苞 B 项 2 → R-158 #11 改口径）。
- *
- * 内容口径 = `deriveCopyText`（parts 的 text 段 `join('\n\n')`，段间空行）——与渲染同源
- * （parts 是唯一真值），段间换行对齐业界惯例（R-150 合并轮的两段正文复制后仍分段）；
- * 不含思考链 / 工具卡 / 挂起卡，**不做 trim**。
- *
- * 路径：优先 `navigator.clipboard.writeText`；不可用或**被拒**（权限/非聚焦/非安全上下文）
- * 时落 `legacyCopy`。反馈写在组件局部 `copyState`，2s 后自清。
- */
-async function copyMessage(m: ChatMessage): Promise<void> {
-  const text = deriveCopyText(m)
-  if (!text) {
+function toolCopyId(part: ToolPart): string {
+  return `tool:${part.toolCallId}`
+}
+
+function messageCopyText(message: ChatMessage): string {
+  const body = deriveCopyText(message)
+  if (body.trim() !== '') {
+    return body
+  }
+  return message.parts
+    .filter((part): part is ToolPart => part.kind === 'tool')
+    .map((part) => toolSummary(part))
+    .join('\n\n')
+}
+
+function setCopyFeedback(id: string, ok: boolean, empty = false): void {
+  copyState.value = { id, ok, empty }
+  if (copyTimer !== null) {
+    clearTimeout(copyTimer)
+  }
+  copyTimer = setTimeout(() => {
+    copyState.value = null
+    copyTimer = null
+  }, 2000)
+}
+
+/** 普通复制只接收正文或工具摘要，不读取工具原始参数、结果与诊断详情。 */
+async function copyText(id: string, text: string): Promise<void> {
+  if (text.trim() === '') {
+    setCopyFeedback(id, false, true)
     return
   }
   let ok: boolean
@@ -4980,14 +4989,15 @@ async function copyMessage(m: ChatMessage): Promise<void> {
   } else {
     ok = legacyCopy(text)
   }
-  copyState.value = { id: m.id, ok }
-  if (copyTimer !== null) {
-    clearTimeout(copyTimer)
-  }
-  copyTimer = setTimeout(() => {
-    copyState.value = null
-    copyTimer = null
-  }, 2000)
+  setCopyFeedback(id, ok)
+}
+
+async function copyMessage(message: ChatMessage): Promise<void> {
+  await copyText(message.id, messageCopyText(message))
+}
+
+async function copyToolConclusion(part: ToolPart): Promise<void> {
+  await copyText(toolCopyId(part), toolSummary(part))
 }
 
 /**

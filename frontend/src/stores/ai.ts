@@ -6328,6 +6328,7 @@ export const useAiStore = defineStore('ai', {
         this.lastRoundOutcome = 'unconfirmed'
         this.followupReady = false
       }
+      showManualRecovery()
       const scheduled = this.startAutoRecovery('history', async () => {
         await this.loadHistory()
         if (this.sessionId !== sessionId || message.runId !== runId) {
@@ -6337,6 +6338,17 @@ export const useAiStore = defineStore('ai', {
           entry.type.toUpperCase() === 'ASSISTANT' && entry.runId === runId && entry.outcome === 'DONE')
         if (confirmed) {
           message.unconfirmed = false
+          if (message.code === 'AI_REDIS_UNAVAILABLE') {
+            message.code = null
+          }
+          const current = [...this.messages].reverse().find((item) =>
+            item.role === 'assistant' && item.runId === runId)
+          if (current) {
+            current.unconfirmed = false
+            if (current.code === 'AI_REDIS_UNAVAILABLE') {
+              current.code = null
+            }
+          }
           this.lastRoundOutcome = 'ok'
           return true
         }
@@ -9773,7 +9785,7 @@ export const useAiStore = defineStore('ai', {
       form.status = 'submitting'
       form.error = null
       form.fieldErrors = []
-      const outcome = await this.submitFrontendToolResult(form.toolCallId, resultText, 'http-post', false, form.runId)
+      const outcome = await this.submitFrontendToolResult(form.toolCallId, resultText, 'http-post', false, form.runId, 'ok')
       /**
        * 问题1（返修）：等待回包期间本轮被停止 ⇒ `stillSameRound` 会让结果表现为 `ok=false`。
        * 停止轮**不得**因此回退到可编辑（`filling`）、不得新增错误提示，也不得抹掉

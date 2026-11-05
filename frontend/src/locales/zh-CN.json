@@ -23,7 +23,6 @@
         "blocked": "超出当前范围",
         "expired": "已失效",
         "cancelled": "已取消",
-        "unknown": "结局未知",
         "skipped": "已跳过"
       },
       "readonly": {
@@ -518,6 +517,8 @@
       "returnToActiveRun": "回到进行中的回答",
       "returnToActiveRunHint": "这条消息没有发出：上一轮仍在进行中。",
       "copyMessage": "复制该条消息正文",
+      "copyConclusion": "复制结论",
+      "copyEmpty": "暂无可复制的正文或结论",
       "backToBottom": "回到底部",
       "send": "发送",
       "mermaidViewer": "mermaid 全屏查看器",
@@ -887,7 +888,6 @@
       "blocked": "超出范围",
       "expired": "已失效",
       "cancelled": "已取消",
-      "unknown": "结局未知",
       "skipped": "已跳过"
     },
     "fallback": "{name} · {status}",
