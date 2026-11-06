@@ -5,8 +5,17 @@
     class="h-full flex flex-col items-center pt-4 gap-2 cursor-pointer text-[#57606a]"
     @click="ai.toggleExpand()"
   >
-    <span class="grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px] bg-[#eff4ff] text-[#2563eb]" aria-hidden="true">
-      <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+    <span
+      class="relative grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px]"
+      :class="[collapsedActivityStyle.shell, collapsedActivityStyle.motion]"
+      aria-hidden="true"
+    >
+      <span
+        v-if="collapsedActivityState !== 'idle'"
+        class="pointer-events-none absolute left-1/2 top-1/2 h-[40px] w-[40px] -translate-x-1/2 -translate-y-1/2 rounded-full"
+        :class="collapsedActivityStyle.glow"
+      ></span>
+      <svg class="relative h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
     </span>
     <span class="writing-vertical text-[13px]">{{ t('ai.panel.assistant') }}</span>
   </div>
@@ -20,25 +29,24 @@
         <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
       </span>
       <div class="flex-1 min-w-0 text-sm font-semibold text-[#303133]">{{ t('ai.panel.implementer') }}</div>
-      <el-button
-        size="small"
-        text
-        class="[&:focus:not(:focus-visible)]:outline-none [&:focus:not(:focus-visible)]:shadow-none"
+      <button
+        type="button"
+        class="inline-flex h-6 items-center justify-center whitespace-nowrap rounded-[3px] border-0 bg-transparent px-[11px] py-[5px] text-xs font-medium leading-none text-[#606266] shadow-none transition-colors duration-100 hover:text-[#2563eb] active:text-[#1d4ed8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb]/40"
         data-testid="new-chat"
         :title="t('ai.panel.newChat')"
         @click="newChat"
       >
         {{ t('ai.panel.newChat') }}
-      </el-button>
-      <el-button
-        size="small"
-        text
-        class="[&:focus:not(:focus-visible)]:outline-none [&:focus:not(:focus-visible)]:shadow-none"
+      </button>
+      <button
+        type="button"
+        class="ml-3 inline-flex h-6 items-center justify-center rounded-[3px] border-0 bg-transparent px-[11px] py-[5px] text-xs font-medium leading-none text-[#606266] shadow-none transition-colors duration-100 hover:text-[#2563eb] active:text-[#1d4ed8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb]/40"
         :title="t('ai.panel.collapse')"
+        :aria-label="t('ai.panel.collapse')"
         @click="ai.toggleExpand()"
       >
-        <el-icon><ArrowRight /></el-icon>
-      </el-button>
+        <ArrowRight class="h-3 w-3" aria-hidden="true" />
+      </button>
     </div>
 
     <!-- 降级与冲突提示（R-165 S2：EP Alert 全退场 → 自绘 demo v7 `.alert` 结构 = 描边圆图标 + 标题 + 说明 + ghost 动作钮；
@@ -940,7 +948,7 @@
         >
           <span class="flex items-center gap-1 min-h-[18px]">
             <span
-              v-if="waitingForAction(m)"
+              v-if="activityStateOf(m) === 'waiting'"
               data-testid="park-waiting"
               class="inline-flex items-center gap-[5px] text-[12.2px] text-[#b45309] tracking-[.3px]"
             >
@@ -948,7 +956,7 @@
               <span class="animate-breathe-text">{{ t('ai.panel.waiting') }}</span>
             </span>
             <span
-              v-else-if="isCompacting(m)"
+              v-else-if="activityStateOf(m) === 'compacting'"
               data-testid="compaction-message"
               class="inline-flex items-center gap-[5px] text-[12.2px] text-[#7c3aed] tracking-[.3px]"
             >
@@ -956,7 +964,7 @@
               <span class="animate-breathe-text">{{ compactingLabel(m) }}</span>
             </span>
             <span
-              v-else-if="isBreathing(m) || isFading(m)"
+              v-else-if="activityStateOf(m) === 'working' || isFading(m)"
               :class="[BREATH_CLASS, isFading(m) ? FADE_OUT_CLASS : '']"
               data-testid="loading-breath"
             >
@@ -2394,6 +2402,57 @@ function isBreathing(message: ChatMessage): boolean {
     && !false
 }
 
+type MessageActivityState = 'working' | 'waiting' | 'compacting' | 'idle'
+
+function activityStateOf(message: ChatMessage): MessageActivityState {
+  if (waitingForAction(message)) {
+    return 'waiting'
+  }
+  if (isCompacting(message)) {
+    return 'compacting'
+  }
+  return isBreathing(message) ? 'working' : 'idle'
+}
+
+const collapsedActivityState = computed<MessageActivityState>(() => {
+  for (let i = ai.messages.length - 1; i >= 0; i -= 1) {
+    const message = ai.messages[i]
+    if (message === undefined || message.role !== 'assistant') {
+      continue
+    }
+    const state = activityStateOf(message)
+    if (state !== 'idle') {
+      return state
+    }
+  }
+  return 'idle'
+})
+
+const COLLAPSED_ACTIVITY_STYLES = {
+  idle: {
+    shell: 'bg-[#eff4ff] text-[#2563eb]',
+    glow: '',
+    motion: ''
+  },
+  working: {
+    shell: 'bg-[#eff4ff] text-[#2563eb]',
+    glow: 'bg-[#2563eb]/20 blur-[2px]',
+    motion: 'animate-breathe-text motion-reduce:animate-none'
+  },
+  waiting: {
+    shell: 'bg-[#fffbeb] text-[#b45309]',
+    glow: 'bg-[#b45309]/20 blur-[2px]',
+    motion: 'animate-breathe-text motion-reduce:animate-none'
+  },
+  compacting: {
+    shell: 'bg-[#f5f3ff] text-[#7c3aed]',
+    glow: 'bg-[#7c3aed]/20 blur-[2px]',
+    motion: 'animate-breathe-text motion-reduce:animate-none'
+  }
+} as const
+
+const collapsedActivityStyle = computed(() => COLLAPSED_ACTIVITY_STYLES[collapsedActivityState.value])
+
 function showTimestamp(message: ChatMessage): boolean {
   if (formatProgressiveTs(message.timestamp) === '') {
     return false
@@ -2414,9 +2473,7 @@ function showTimestamp(message: ChatMessage): boolean {
  */
 function showMetaRow(message: ChatMessage): boolean {
   return message.parts.some((part) => part.kind === 'text' && part.text)
-    || isBreathing(message)
-    || isCompacting(message)
-    || waitingForAction(message)
+    || activityStateOf(message) !== 'idle'
     || false
     || showContinue(message)
     || errorCardContinueVisible(message)
@@ -3736,8 +3793,8 @@ function toggleBlock(block: Block): void {
  * 挂起、恢复或换轮都会让**整列**消息行一起失效（长会话 = 全量重渲正文 + 卡片派生重算），
  * 在单轮密集出帧的场景表现为整屏闪一下。
  *
- * 现行口径：全局现场只以**本消息的判定结果**入场（`isBreathing` / `waitingForAction` /
- * `isBlockExpanded` 等）—— 结果没变 ⇒ 本行不失效（历史消息一格不动）；结果变了 ⇒ 本行照常
+ * 现行口径：全局现场只以**本消息的判定结果**入场（`activityStateOf` / `isBlockExpanded`
+ * 等）—— 结果没变 ⇒ 本行不失效（历史消息一格不动）；结果变了 ⇒ 本行照常
  * 更新（末条消息的呼吸点、挂起等待、卡展开态、继续入口都在）。
  * 输入框 `inputText` 是组件本地态，不在这些依赖里 —— 打字只重渲 composer，不重渲消息列表。
  */
@@ -3884,10 +3941,8 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     // 全局现场本身不入 memo：否则历史行跟着每一次收流翻转一起失效（整屏闪根因）。
     showMetaRow(message),
     showTimestamp(message),
-    waitingForAction(message),
-    isBreathing(message),
-    isCompacting(message),
-    isCompacting(message) ? compactingLabel(message) : '',
+    activityStateOf(message),
+    activityStateOf(message) === 'compacting' ? compactingLabel(message) : '',
     isFading(message),
     showContinue(message),
     errorCardContinueVisible(message),

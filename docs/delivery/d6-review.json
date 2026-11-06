@@ -721,6 +721,13 @@
       "reason": "仅调整AI新对话欢迎入口与中英文文案，并优化两个头部按钮的鼠标焦点样式，不改变迁移数据、协议或工作流契约，D6无需更新。",
       "reviewedAt": "2026-11-06",
       "reviewer": "K3.1 Pro施工并复核"
+    },
+    {
+      "fingerprint": "sha256:04e29646c41ec63c3668d888f27cd0015a695ddf067f8e6ec796dba1bdb1ad33",
+      "status": "not-affected",
+      "reason": "仅将AI面板两个头部按钮改为原生Tailwind，并复用面板共享状态为收起侧条增加四态颜色与呼吸展示，不改变迁移数据、协议或工作流契约，D6无需更新。",
+      "reviewedAt": "2026-11-06",
+      "reviewer": "K3.1 Pro施工并复核"
     }
   ]
 }
