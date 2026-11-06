@@ -1587,12 +1587,7 @@ public class ResilientChatService {
 
 	private boolean createTaskWrapUpCorrectionDue(String runId, AiContext fallback) {
 		AiContext context = latestContext(runId, fallback);
-		if (context == null || context.getTaskId() != null || !"tasks".equals(context.getPage())
-				|| !disclosedTool(context, AiToolNames.CREATE_TASK)) {
-			return false;
-		}
-		if (creationTaskType(context) == null) {
-			log.debug("create-task correction skipped: no structured creation task type runId={}", runId);
+		if (context == null || context.getTaskId() != null || !disclosedTool(context, AiToolNames.CREATE_TASK)) {
 			return false;
 		}
 		try {
@@ -1601,21 +1596,12 @@ public class ResilientChatService {
 					return false;
 				}
 			}
-			boolean definitionsRead = false;
 			for (Map<String, Object> record : this.store.ledger(runId)) {
-				if (record == null) {
-					continue;
-				}
-				String name = String.valueOf(record.get("name"));
-				if (AiToolNames.CREATE_TASK.equals(name)) {
+				if (record != null && AiToolNames.CREATE_TASK.equals(String.valueOf(record.get("name")))) {
 					return false;
 				}
-				if ((AiToolNames.LIST_CONFIG_DEFS.equals(name) || AiToolNames.GET_CONFIG_DEF.equals(name))
-						&& ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
-					definitionsRead = true;
-				}
 			}
-			return definitionsRead;
+			return true;
 		}
 		catch (RuntimeException ex) {
 			log.warn("read create-tool close facts failed, skipping correction runId={}: {}", runId, ex.getMessage());
@@ -1641,7 +1627,7 @@ public class ResilientChatService {
 				+ "按当前结构化创建上下文传 type=EXPORT 或 IMPORT；类型无法证明时不要猜测。"
 				+ "EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；"
 				+ "IMPORT 不得附加导出条件。defCodes 未知时省略，不得先查目录或追问。"
-				+ "如果用户只是查询配置而不要求新建，直接给出查询结果。不得重复已经执行的工具，也不得自动批准创建。";
+				+ "如果用户只是查询、普通问答或闲聊而不要求新建，直接回答，不得重复已经执行的工具，也不得自动批准创建。";
 	}
 
 	private static String createTaskWrapUpCorrection(String taskType) {
