@@ -23,13 +23,20 @@
       <el-button
         size="small"
         text
+        class="[&:focus:not(:focus-visible)]:outline-none [&:focus:not(:focus-visible)]:shadow-none"
         data-testid="new-chat"
         :title="t('ai.panel.newChat')"
         @click="newChat"
       >
         {{ t('ai.panel.newChat') }}
       </el-button>
-      <el-button size="small" text :title="t('ai.panel.collapse')" @click="ai.toggleExpand()">
+      <el-button
+        size="small"
+        text
+        class="[&:focus:not(:focus-visible)]:outline-none [&:focus:not(:focus-visible)]:shadow-none"
+        :title="t('ai.panel.collapse')"
+        @click="ai.toggleExpand()"
+      >
         <el-icon><ArrowRight /></el-icon>
       </el-button>
     </div>
@@ -2172,9 +2179,9 @@ const chipsAvailable = computed(
   () => !healthBlocksSend.value && !identityBlocked.value && ai.canSend && !ai.suspended && ai.pendingToolCall === null
 )
 const visibleEmptyStateChips = [
+  { id: 'listDefs', title: 'listDefsTitle', hint: 'listDefsHint', icon: '≡' },
   { id: 'createTask', title: 'createTaskTitle', hint: 'createTaskHint', icon: '+' },
-  { id: 'exportCny', title: 'exportCnyTitle', hint: 'exportCnyHint', icon: '↓' },
-  { id: 'listDefs', title: 'listDefsTitle', hint: 'listDefsHint', icon: '≡' }
+  { id: 'knowledgeQa', title: 'knowledgeQaTitle', hint: 'knowledgeQaHint', icon: '?' }
 ] as const
 
 function fillPreset(text: string): void {
@@ -3727,7 +3734,7 @@ function toggleBlock(block: Block): void {
  * `v-memo` 的依赖必须**只覆盖本消息模板真实读取的值**。旧实现把 `ai.loading` / `ai.runPhase` /
  * `ai.activeRunId` / 末条消息 id 这些**全局**现场并进了每一条消息行：任何一次收流开始/结束、
  * 挂起、恢复或换轮都会让**整列**消息行一起失效（长会话 = 全量重渲正文 + 卡片派生重算），
- * 在「导出CNY货币字典」这类一轮里密集出帧的场景表现为整屏闪一下。
+ * 在单轮密集出帧的场景表现为整屏闪一下。
  *
  * 现行口径：全局现场只以**本消息的判定结果**入场（`isBreathing` / `waitingForAction` /
  * `isBlockExpanded` 等）—— 结果没变 ⇒ 本行不失效（历史消息一格不动）；结果变了 ⇒ 本行照常

@@ -714,6 +714,13 @@
       "reason": "仅调整AI面板收起入口位置、新对话欢迎区与建议展示交互，不改变迁移数据、协议或工作流契约，D6无需更新。",
       "reviewedAt": "2026-11-06",
       "reviewer": "K3.1 Pro施工并复核"
+    },
+    {
+      "fingerprint": "sha256:76145c3a0e96137895868fffbc0bf3c6573dd5eaedfb412a9310347633b4f0d4",
+      "status": "not-affected",
+      "reason": "仅调整AI新对话欢迎入口与中英文文案，并优化两个头部按钮的鼠标焦点样式，不改变迁移数据、协议或工作流契约，D6无需更新。",
+      "reviewedAt": "2026-11-06",
+      "reviewer": "K3.1 Pro施工并复核"
     }
   ]
 }
