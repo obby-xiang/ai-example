@@ -192,8 +192,12 @@ SSE 异常先熔断，再尝试取消 run 并确认 cancelled 终帧。只有确
 - KB：真实对话要求检索正式口径，并断言出现 `kb_search`；模型名额持续持有到正常 done 终帧，不能收到 tool_start 就提前释放。SSE 异常按上述 fail-stop 语义处理，没有 runId 时按清理未知失败并保留未安全释放名额。
 - 附件：真实 `generative_form` 必须包含 attachment 字段，再上传小型文本文件并回灌合法 fileId；POST 与 done 处于同一个 modelCall 名额窗口，未达终态不删除 activeRuns。pending 与 done 分别记录，不在 pending 时提前写 done 断言。负载阶段改用独立 workflow，每个请求独占一张表单。
 - 取消与恢复：取消真实 run 后核对取消旗标和 cancelled 终帧；原核心单次 `resume` 沿用 `modelCall` 和终态 `ALREADY_CANCELLED` 幂等语义；新增负载的终态 `resume` 不调用模型、不占模型名额，也不把 409 当恢复成功。
-- SSE：fetch、HTTP 状态、content-type、getReader、帧处理与等待超时全部进入统一异常入口；恢复读取使用 `recoverOnError=false`，禁止递归取消。正式 events 统一经 `callSse` 记录 attempts，只有初始 `readSseChat` 错误记入 POST chat，后续 events 错误直接透传且保留历史 attempts。另以 `probe=1` 验证 JSON ready，以无 probe 的 `Accept: application/json` 验证 406，三者不可互相替代。负载 SSE replay 复用 `readSseRaw`，只关闭覆盖记录与错误恢复，不复制解析器；`readSseRaw` 记录实际 HTTP status 并在失败时附加到错误对象（不重复消费 body），负载条目的 `httpStatuses` 因此能保留“收到 200 后流失败”的事实，核心 `callSse` 的记录语义不变。
+- SSE：fetch、HTTP 状态、content-type、getReader、帧处理与等待超时全部进入统一异常入口；恢复读取使用 `recoverOnError=false`，禁止递归取消。正式 events 统一经 `callSse` 记录 attempts，只有初始 `readSseChat` 错误记入 POST chat，后续 events 错误直接透传且保留历史 attempts。另以 `probe=1` 验证 JSON ready，以无 probe 的 `Accept: application/json` 验证 406，三者不可互相替代。负载 SSE replay 复用 `readSseRaw`，只关闭覆盖记录与错误恢复，不复制解析器；`readSseRaw` 记录实际 HTTP status 并在失败时附加到错误对象（不重复消费 body），负载条目的 `httpStatuses` 因此能保留“收到 200 后流失败”的事实。核心 `callSse` 的成功断言语义不变；失败记录新增 `httpStatus` 与 `stage`，`attempts` 保留 `stage`。
 - 清理：finally 中取消活跃 run，删除创建的任务和会话，反馈 rating 置 0并检查 `cancelled=true`；附件由表单/会话清理链回收。会话删除必须同时满足 `complete=true`、无 deferred、无 errors。按来源分 scope：原始 27 项资源错误进 `coreCleanupErrors`，负载新增的任务/活跃 run/会话/反馈错误进 `load.cleanupErrors`；顶层 `cleanupErrors` 合并两者。27 个 coverage 条目的 `cleanup.done` 只看 core，`load.complete` 包含所有 load 清理错误。无真实下载、发布或正式数据导入。
+
+**挂起 EOF 有界重挂**：仅当服务端正常 EOF、predicate 未达且未收到 `done`/`error` 时，`callSse` 才以当前 `recoverySeq` 作为 `lastSeq` 重连，最多 8 次、每次间隔 200ms；每次先取消旧 reader，累计 frames 并保持 seq 严格递增。预算用尽后 predicate 未达断言失败，才进入既有 model circuit 与 `settleRunAfterSseError`；已收到 `done`/`error` 但 predicate 不匹配时不再重连。`recoverOnError=false`（settle 恢复与 load replay）一律不重试，即使传入了 `eofRetry`。fetch 失败、非 200、content-type 不符、seq 非递增或 predicate 抛错会立即进入熔断/结算，不等待预算。失败文本中的 `lastSeq` 与 `type:name:seq` 帧列表来自最终 predicate 未达断言；其它错误保留原错误文本。`readSseRaw` 跨重连保留最近一次实际收到的 HTTP status：若最后一次 fetch 在响应前失败，错误上的 `httpStatus` 可能来自此前连接（例如 200），不一定属于最后失败连接。阶段标签（如 `after-frontend-result-suspended`）写入 coverage attempts，收到 200 后流失败仍保留该 200 事实。
+
+**create_task fixture**：主 chat 使用“请调用 create_task 工具创建导出任务，不要调用 ui_snapshot 或其他工具。”作为明确的 HITL fixture 输入；这不改变 predicate，也不增加重试或纠正对话。自然语言稳定性仍由 D 套件负责。
 
 ## 与 B / D 套件的关系
 
@@ -207,7 +211,7 @@ D 套件如用于非模型读取/状态接口的辅助负载，可采用独立�
 
 ## 验证边界
 
-`load-support.mjs` 的配置解析、并发池、延迟统计和配对 DELETE 计划（`planPairedDeletes`：全成功/部分成功/零目标）由 `load-support.test.mjs` 以 `node:test` 覆盖；本次只实际运行该单测文件与 `node --check`，未执行批量测试或真实压测，未启停服务。
+`load-support.mjs` 的配置解析、并发池、延迟统计、配对 DELETE 计划和 EOF 重试策略由 `load-support.test.mjs` 以 `node:test` 覆盖；本次只实际运行该单测文件与 `node --check`，未执行批量测试或真实压测，未启停服务。EOF 有界重挂、阶段标签与 create_task fixture 均未在真实环境执行验证，不宣称真实环境已通过。
 
 静态检查与单测只能证明纯函数、语法和变更范围，不构成运行时 PASS。实际执行时应同时核对：
 

@@ -1,7 +1,14 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { createLoadRunner, parseApiLoadConfig, planPairedDeletes, summarizeLatencies } from './load-support.mjs'
+import {
+  createLoadRunner,
+  formatSseFrames,
+  parseApiLoadConfig,
+  planPairedDeletes,
+  shouldRetrySseEof,
+  summarizeLatencies
+} from './load-support.mjs'
 
 const baseInput = process.env.BASE_URL?.trim()
 if (!baseInput) throw new Error('BASE_URL is required')
@@ -23,6 +30,8 @@ if (!Number.isInteger(modelConcurrencyConfigured) || modelConcurrencyConfigured 
   throw new Error('EVAL_MODEL_CONCURRENCY must be an integer between 1 and 10')
 }
 const timeoutMs = Number.parseInt(process.env.TIMEOUT_MS ?? '120000', 10)
+const SSE_EOF_RETRY_ATTEMPTS = 8
+const SSE_EOF_RETRY_DELAY_MS = 200
 const outDir = path.resolve(process.env.OUT_DIR ?? 'verification-results/ai-core-coverage')
 const runPrefix = process.env.COVERAGE_PREFIX?.trim() || `core-${randomUUID()}`
 const apiLoadConfig = parseApiLoadConfig(process.env)
@@ -196,7 +205,7 @@ const coverage = Object.fromEntries([
   attempts: []
 }]))
 
-function record(key, { httpStatus, latencyMs, assertions = [], error = null }) {
+function record(key, { httpStatus, latencyMs, assertions = [], error = null, stage = null }) {
   const entry = coverage[key]
   assert(entry, `unregistered endpoint ${key}`)
   if (error !== null) entry.covered = false
@@ -205,7 +214,7 @@ function record(key, { httpStatus, latencyMs, assertions = [], error = null }) {
   entry.httpStatus = httpStatus
   entry.assertions.push(...assertions)
   if (entry.error === null) entry.error = error
-  entry.attempts.push({ httpStatus, latencyMs, assertions, error })
+  entry.attempts.push({ httpStatus, latencyMs, assertions, error, stage })
 }
 
 async function request(url, options = {}) {
@@ -317,55 +326,76 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
   }
 }
 
-async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scopeErrors = coreCleanupErrors) {
+async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scopeErrors = coreCleanupErrors,
+    eofRetry = 0) {
   const started = Date.now()
   let reader = null
-  let buffer = ''
   let previousSeq = lastSeq ?? 0
   let recoverySeq = previousSeq
   let matched = null
+  let terminalSeen = false
   let httpStatus = null
+  let cursor = lastSeq
+  let remainingEofRetries = recoverOnError && Number.isInteger(eofRetry) && eofRetry > 0 ? eofRetry : 0
   const frames = []
   try {
-    const response = await fetch(`${base.toString().replace(/\/$/, '')}/api/ai/events/${runId}${lastSeq == null ? '' : `?lastSeq=${lastSeq}`}`, {
-      headers: { ...headers(), Accept: 'text/event-stream' },
-      signal: AbortSignal.timeout(timeoutMs)
-    })
-    httpStatus = response.status
-    const contentType = response.headers.get('content-type') ?? ''
-    assert(response.status === 200 && contentType.includes('text/event-stream'),
-      `SSE expected 200 text/event-stream, got ${response.status} ${contentType}`)
-    reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    const processFrame = (frame) => {
-      runId = frame.runId ?? runId
-      if (runId !== null) activeRuns.add(runId)
-      if (typeof frame.seq === 'number') {
-        assert(frame.seq > previousSeq, `SSE seq must increase: ${frame.seq} <= ${previousSeq}`)
-        previousSeq = frame.seq
-      }
-      if (recoverOnError) trackCreatedTaskFrame(frame)
-      frames.push(frame)
-      if (predicate(frame)) matched = frame
-      recoverySeq = previousSeq
-    }
     while (matched === null) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      let boundary
-      while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0 && matched === null) {
-        const block = buffer.slice(0, boundary)
-        buffer = buffer.slice(boundary).replace(/^\r?\n/, '')
-        const frame = parseSseBlock(block)
+      let buffer = ''
+      const response = await fetch(`${base.toString().replace(/\/$/, '')}/api/ai/events/${runId}${cursor == null ? '' : `?lastSeq=${cursor}`}`, {
+        headers: { ...headers(), Accept: 'text/event-stream' },
+        signal: AbortSignal.timeout(timeoutMs)
+      })
+      httpStatus = response.status
+      const contentType = response.headers.get('content-type') ?? ''
+      assert(response.status === 200 && contentType.includes('text/event-stream'),
+        `SSE expected 200 text/event-stream, got ${response.status} ${contentType}`)
+      reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      const processFrame = (frame) => {
+        runId = frame.runId ?? runId
+        if (runId !== null) activeRuns.add(runId)
+        if (frame.type === 'done' || frame.type === 'error') terminalSeen = true
+        if (typeof frame.seq === 'number') {
+          assert(frame.seq > previousSeq, `SSE seq must increase: ${frame.seq} <= ${previousSeq}`)
+          previousSeq = frame.seq
+        }
+        if (recoverOnError) trackCreatedTaskFrame(frame)
+        frames.push(frame)
+        if (predicate(frame)) matched = frame
+        recoverySeq = previousSeq
+      }
+      const processBufferedFrames = () => {
+        let boundary
+        while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0 && matched === null) {
+          const block = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary).replace(/^\r?\n/, '')
+          const frame = parseSseBlock(block)
+          if (frame !== null) processFrame(frame)
+        }
+      }
+      while (matched === null) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        processBufferedFrames()
+      }
+      buffer += decoder.decode()
+      processBufferedFrames()
+      if (matched === null && buffer.trim() !== '') {
+        const frame = parseSseBlock(buffer)
+        buffer = ''
         if (frame !== null) processFrame(frame)
       }
+      await reader.cancel().catch(() => {})
+      reader = null
+      if (matched !== null) break
+      if (!shouldRetrySseEof(matched, remainingEofRetries, terminalSeen)) break
+      remainingEofRetries -= 1
+      cursor = recoverySeq
+      await sleep(SSE_EOF_RETRY_DELAY_MS)
     }
-    if (matched === null && buffer.trim() !== '') {
-      const frame = parseSseBlock(buffer)
-      if (frame !== null) processFrame(frame)
-    }
-    assert(matched !== null, `SSE predicate not reached; frames=${frames.map((frame) => frame.type).join(',')}`)
+    assert(matched !== null,
+      `SSE predicate not reached; lastSeq=${recoverySeq}; frames=${formatSseFrames(frames)}`)
     return { frames, matched, lastSeq: previousSeq, latencyMs: Date.now() - started }
   }
   catch (error) {
@@ -409,7 +439,7 @@ async function startChat(sessionId, message, context, predicate, awaitTerminal =
       assert(frame.type === 'done' && frame.cancelled !== true,
         `model scenario did not complete normally: ${frame.type}`)
       return true
-    }, true, scopeErrors)
+    }, true, scopeErrors, 'model-terminal')
     return { ...chat, terminal: terminal.matched, terminalLatencyMs: terminal.latencyMs }
   })
 }
@@ -479,15 +509,17 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
   }
 }
 
-async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErrors = coreCleanupErrors) {
+async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErrors = coreCleanupErrors,
+    stage = 'unspecified') {
   const started = Date.now()
   try {
-    const result = await readSseRaw(runId, lastSeq, predicate, true, scopeErrors)
+    const result = await readSseRaw(runId, lastSeq, predicate, true, scopeErrors, SSE_EOF_RETRY_ATTEMPTS)
     if (recordResult) {
       record('GET /api/ai/events/{runId}', {
         httpStatus: 200,
         latencyMs: result.latencyMs,
-        assertions: [`SSE ${result.matched.type}`]
+        assertions: [`SSE ${result.matched.type}`],
+        stage
       })
     }
     return result
@@ -495,10 +527,11 @@ async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErro
   catch (error) {
     if (recordResult) {
       record('GET /api/ai/events/{runId}', {
-        httpStatus: null,
+        httpStatus: error?.httpStatus ?? null,
         latencyMs: Date.now() - started,
         assertions: [],
-        error: error instanceof Error ? error.message : String(error)
+        error: `${stage}: ${error instanceof Error ? error.message : String(error)}`,
+        stage
       })
     }
     throw error
@@ -580,6 +613,10 @@ function attachHttpStatus(error, status) {
 function limitedMessage(message) {
   const text = String(message)
   return text.length > 500 ? `${text.slice(0, 500)}...` : text
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function httpUnit(url, options, assertion) {
@@ -1005,7 +1042,7 @@ async function attachmentWorkflow(options = {}) {
       if (frame.type !== 'done' && frame.type !== 'error') return false
       assert(frame.type === 'done' && frame.cancelled !== true, 'attachment scenario did not complete normally')
       return true
-    }, recordCoverage, cleanupScopeErrors)
+    }, recordCoverage, cleanupScopeErrors, 'attachment-terminal')
     if (recordCoverage) {
       record('POST /api/ai/chat', {
         httpStatus: 200,
@@ -1094,7 +1131,9 @@ async function main() {
   })
 
   createdSessions.add(mainSession)
-  const mainChat = await startChat(mainSession, '创建导出任务。', null,
+  const mainChat = await startChat(mainSession,
+    '请调用 create_task 工具创建导出任务，不要调用 ui_snapshot 或其他工具。',
+    null,
     (frame) => frame.type === 'confirm_request' && frame.name === 'create_task')
   const mainRun = mainChat.runId
   const createCallId = mainChat.matched.toolCallId
@@ -1142,7 +1181,8 @@ async function main() {
     return `context turnNo=${data.turnNo ?? 'unknown'}`
   })
 
-  const replay = await callSse(mainRun, 0, (frame) => frame.type === 'confirm_request' && frame.name === 'create_task')
+  const replay = await callSse(mainRun, 0, (frame) => frame.type === 'confirm_request' && frame.name === 'create_task',
+    true, coreCleanupErrors, 'replay-confirm')
   record('GET /api/ai/events/{runId}', {
     httpStatus: 200,
     latencyMs: replay.latencyMs,
@@ -1174,7 +1214,9 @@ async function main() {
       assert(data.accepted === true && data.approved === true, 'create_task approval not accepted')
       return 'real create_task approved'
     })
-    return callSse(mainRun, mainChat.lastSeq, (frame) => frame.type === 'frontend_tool_request' && frame.name === 'navigate_to')
+    return callSse(mainRun, mainChat.lastSeq,
+      (frame) => frame.type === 'frontend_tool_request' && frame.name === 'navigate_to',
+      true, coreCleanupErrors, 'post-confirm-navigate')
   })
   const taskId = taskIdFrom(confirmed.frames)
   assert(Number.isSafeInteger(taskId) && taskId > 0, 'create_task result has no task id after approval')
@@ -1202,7 +1244,8 @@ async function main() {
       assert(data.accepted === true && data.status === 'FRONTEND_RESULT', 'navigate_to result not accepted')
       return 'real navigate_to frontend result accepted'
     })
-    return callSse(mainRun, confirmed.lastSeq, (frame) => frame.type === 'suspended')
+    return callSse(mainRun, confirmed.lastSeq, (frame) => frame.type === 'suspended',
+      true, coreCleanupErrors, 'after-frontend-result-suspended')
   })
 
   await call('POST /api/ai/cancel/{runId}', `/api/ai/cancel/${mainRun}`, { method: 'POST' }, async (response) => {
@@ -1214,7 +1257,7 @@ async function main() {
       assert(frame.type === 'done' && frame.cancelled === true,
         'cancel accepted but terminal frame was not confirmed cancelled')
       return true
-    })
+    }, true, coreCleanupErrors, 'after-cancel-terminal')
     activeRuns.delete(mainRun)
     return `cancelled ${mainRun}`
   })

@@ -1,6 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createLoadRunner, parseApiLoadConfig, planPairedDeletes, summarizeLatencies } from './load-support.mjs'
+import {
+  createLoadRunner,
+  formatSseFrame,
+  formatSseFrames,
+  parseApiLoadConfig,
+  planPairedDeletes,
+  shouldRetrySseEof,
+  summarizeLatencies
+} from './load-support.mjs'
 
 test('parseApiLoadConfig defaults to disabled with concurrency 4 and 8 requests per endpoint', () => {
   assert.deepEqual(parseApiLoadConfig({}), {
@@ -168,4 +176,39 @@ test('planPairedDeletes rejects an invalid requested count', () => {
   for (const value of [-1, 1.5, Number.NaN]) {
     assert.throws(() => planPairedDeletes([], value), /requested count must be a non-negative integer/)
   }
+})
+
+test('shouldRetrySseEof does not retry once the predicate matched', () => {
+  assert.equal(shouldRetrySseEof({ type: 'done', seq: 9 }, 8), false)
+  assert.equal(shouldRetrySseEof({ type: 'suspended', seq: 4 }, 0), false)
+})
+
+test('shouldRetrySseEof retries an unmatched EOF while budget remains', () => {
+  assert.equal(shouldRetrySseEof(null, 8), true)
+  assert.equal(shouldRetrySseEof(null, 1), true)
+})
+
+test('shouldRetrySseEof stops when the budget is exhausted', () => {
+  assert.equal(shouldRetrySseEof(null, 0), false)
+  assert.equal(shouldRetrySseEof(null, -1), false)
+})
+
+test('shouldRetrySseEof does not retry after a terminal frame was seen', () => {
+  assert.equal(shouldRetrySseEof(null, 8, true), false)
+  assert.equal(shouldRetrySseEof(null, 8, false), true)
+})
+
+test('formatSseFrame includes type, name and seq', () => {
+  assert.equal(formatSseFrame({ type: 'frontend_tool_request', name: 'navigate_to', seq: 7 }),
+    'frontend_tool_request:navigate_to:7')
+  assert.equal(formatSseFrame({ type: 'done', seq: 12 }), 'done:-:12')
+  assert.equal(formatSseFrame({ type: 'start' }), 'start:-:-')
+})
+
+test('formatSseFrames joins the accumulated history in order', () => {
+  assert.equal(formatSseFrames([]), '')
+  assert.equal(formatSseFrames([
+    { type: 'start', seq: 1 },
+    { type: 'suspended', name: 'navigate_to', seq: 2 }
+  ]), 'start:-:1,suspended:navigate_to:2')
 })

@@ -76,6 +76,28 @@ export function createLoadRunner({ concurrency }) {
   }
 }
 
+/**
+ * 服务端正常 EOF 且 predicate 仍未命中时，是否还有预算做一次有界重挂。
+ * matched 非空表示已命中，永不重试；余额 <= 0 表示用完，永不重试。
+ */
+export function shouldRetrySseEof(matched, eofRetryRemaining, terminalSeen = false) {
+  return matched === null && terminalSeen !== true
+    && Number.isInteger(eofRetryRemaining) && eofRetryRemaining > 0
+}
+
+/** 帧的稳定文本形态：type:name:seq，缺失字段用 - 占位。 */
+export function formatSseFrame(frame) {
+  const type = frame?.type ?? 'unknown'
+  const name = frame?.name ?? '-'
+  const seq = frame?.seq ?? '-'
+  return `${type}:${name}:${seq}`
+}
+
+/** 依次格式化累计帧，供 EOF/重挂失败文本取证。 */
+export function formatSseFrames(frames) {
+  return (Array.isArray(frames) ? frames : []).map(formatSseFrame).join(',')
+}
+
 function roundToTwo(value) {
   return Math.round(value * 100) / 100
 }
