@@ -385,6 +385,28 @@ public final class ProductionHarnessMain {
 		return new KeyCleanup(deleted, failures);
 	}
 
+	private static List<String> presentKeysPipelined(ProductionSupport support, List<String> keys) {
+		List<String> present = new ArrayList<>();
+		CountingRedis redis = new CountingRedis(support.redis, support.cfg.commandTimeout);
+		for (List<String> batch : CountingRedis.batch(keys, BackgroundBatchWriter.BATCH_SIZE)) {
+			List<String[]> commands = new ArrayList<>(batch.size());
+			for (String key : batch) {
+				commands.add(new String[] { "EXISTS", key });
+			}
+			List<Object> replies = redis.pipelineRaw(commands);
+			for (int i = 0; i < batch.size(); i++) {
+				Object reply = i < replies.size() ? replies.get(i) : null;
+				if (!(reply instanceof Number number)) {
+					throw new IllegalStateException("EXISTS pipeline 返回缺失或非法，key=" + batch.get(i));
+				}
+				if (number.longValue() > 0L) {
+					present.add(batch.get(i));
+				}
+			}
+		}
+		return present;
+	}
+
 	private static boolean ownedAbsent(ProductionSupport support, Manifest.Dataset dataset) {
 		return ownedPresent(support, dataset).isEmpty();
 	}
@@ -407,18 +429,13 @@ public final class ProductionHarnessMain {
 				}
 			}
 		}
-		for (String key : dataset.keys) {
-			if (support.redis.hasKey(key)) {
-				present.add(key);
-			}
-		}
+		present.addAll(presentKeysPipelined(support, dataset.keys));
 		if (!dataset.externalBackground) {
+			List<String> backgroundKeys = new ArrayList<>(dataset.background);
 			for (int i = 0; i < dataset.background; i++) {
-				String key = KeyShapes.backgroundKey(support.cfg.namespace, dataset.backgroundBucket, i);
-				if (support.redis.hasKey(key)) {
-					present.add(key);
-				}
+				backgroundKeys.add(KeyShapes.backgroundKey(support.cfg.namespace, dataset.backgroundBucket, i));
 			}
+			present.addAll(presentKeysPipelined(support, backgroundKeys));
 		}
 		for (String key : dataset.keys) {
 			if (key.startsWith(SessionPurgePendingStore.PENDING_PREFIX)
