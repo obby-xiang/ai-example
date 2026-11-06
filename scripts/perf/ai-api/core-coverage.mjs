@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { createLoadRunner, parseApiLoadConfig, planPairedDeletes, summarizeLatencies } from './load-support.mjs'
 
 const baseInput = process.env.BASE_URL?.trim()
 if (!baseInput) throw new Error('BASE_URL is required')
@@ -24,16 +25,72 @@ if (!Number.isInteger(modelConcurrencyConfigured) || modelConcurrencyConfigured 
 const timeoutMs = Number.parseInt(process.env.TIMEOUT_MS ?? '120000', 10)
 const outDir = path.resolve(process.env.OUT_DIR ?? 'verification-results/ai-core-coverage')
 const runPrefix = process.env.COVERAGE_PREFIX?.trim() || `core-${randomUUID()}`
+const apiLoadConfig = parseApiLoadConfig(process.env)
 const createdTasks = new Set()
 const createdSessions = new Set()
+const loadCreatedSessions = new Set()
+const loadCreatedTasks = new Set()
+const loadActiveRuns = new Set()
+const loadFeedbackMessageIds = new Set()
+const loadSessionIds = []
+const loadBaselines = { captured: false, tasks: new Set(), runs: new Set() }
 const activeRuns = new Set()
 const cleanupLog = []
 const cleanupErrors = []
+const coreCleanupErrors = []
 let modelInFlight = 0
 let maxObservedInFlight = 0
 let modelFailure = null
 const modelWaiters = []
 const safelyRecoveredModelErrors = new WeakSet()
+
+const API_LOAD_PLAN = [
+  { key: 'GET /api/ai/health', route: 'GET /api/ai/health', variant: 'shared-readonly', scenario: 'shared-readonly', note: '200 or 503 with a code is accepted by the existing health semantics' },
+  { key: 'GET /api/ai/tools', route: 'GET /api/ai/tools', variant: 'shared-readonly', scenario: 'shared-readonly', note: 'toolNames must still disclose create_task' },
+  { key: 'GET /api/ai/tenants', route: 'GET /api/ai/tenants', variant: 'shared-readonly', scenario: 'shared-readonly', note: 'current identity must remain in the directory' },
+  { key: 'GET /api/ai/kb/status', route: 'GET /api/ai/kb/status', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/kb/docs', route: 'GET /api/ai/kb/docs', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/form/option-sources/{sourceId}', route: 'GET /api/ai/form/option-sources/{sourceId}', variant: 'shared-readonly', scenario: 'shared-readonly', note: 'loads the registered definitions source; unregistered sourceId 400 stays in core coverage' },
+  { key: 'GET /api/ai/runs', route: 'GET /api/ai/runs', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/runs/{runId}', route: 'GET /api/ai/runs/{runId}', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/runs/current', route: 'GET /api/ai/runs/current', variant: 'shared-readonly', scenario: 'shared-readonly', note: 'terminal cancel clears the session current index; found=false is the expected terminal state' },
+  { key: 'GET /api/ai/history/{sessionId}', route: 'GET /api/ai/history/{sessionId}', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/context/{sessionId}', route: 'GET /api/ai/context/{sessionId}', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/pending/{runId}', route: 'GET /api/ai/pending/{runId}', variant: 'shared-readonly', scenario: 'shared-readonly', note: 'after cancellation pending entries may be CANCELLED; shape is asserted, not PENDING' },
+  { key: 'GET /api/ai/feedback', route: 'GET /api/ai/feedback', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/cancel/{runId}', route: 'GET /api/ai/cancel/{runId}', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/startup-resume', route: 'GET /api/ai/startup-resume', variant: 'shared-readonly', scenario: 'shared-readonly' },
+  { key: 'GET /api/ai/events/{runId} [probe=1]', route: 'GET /api/ai/events/{runId}', variant: 'probe=1', scenario: 'shared-readonly', note: 'JSON readiness probe only; it is not evidence of SSE concurrency' },
+  { key: 'GET /api/ai/events/{runId} [sse-replay]', route: 'GET /api/ai/events/{runId}', variant: 'sse-replay', scenario: 'shared-readonly', note: 'real SSE replay of the cancelled run until its terminal frame' },
+  { key: 'POST /api/ai/cancel/{runId} [terminal-idempotent]', route: 'POST /api/ai/cancel/{runId}', variant: 'terminal-idempotent', scenario: 'terminal-idempotent', note: 'run is already CANCELLED; this is not a first cancel of a running run' },
+  { key: 'POST /api/ai/runs/{runId}/resume [terminal-already-cancelled]', route: 'POST /api/ai/runs/{runId}/resume', variant: 'terminal-already-cancelled', scenario: 'terminal-resume', modelGate: false, serial: true, note: 'terminal ALREADY_CANCELLED does not call the model, so no model slot is taken; serialized because the process-local resuming mutex answers 409 RESUME_IN_PROGRESS to overlapping calls' },
+  { key: 'POST /api/ai/cancel/client-request', route: 'POST /api/ai/cancel/client-request', variant: 'independent-session-tombstone', scenario: 'independent-resource', note: 'each request uses a unique session and clientRequestId; tombstone session purged in finally' },
+  { key: 'POST /api/ai/feedback', route: 'POST /api/ai/feedback', variant: 'independent-message-id', scenario: 'independent-resource', note: 'each request uses a unique messageId and is removed with rating=0 in finally' },
+  { key: 'POST /api/ai/form/attachments', route: 'POST /api/ai/form/attachments', variant: 'independent-form', scenario: 'independent-model-workflow', modelGate: true, note: 'each request owns a separate real pending form; single-field supersede is never raced' },
+  { key: 'POST /api/ai/session', route: 'POST /api/ai/session', variant: 'independent-resource', scenario: 'independent-resource', serial: true, note: 'serial on purpose: the millisecond id generator can legitimately answer 503 on same-millisecond collisions; serial measurement avoids manufactured collisions and does not retry them away' },
+  { key: 'DELETE /api/ai/session/{sessionId}', route: 'DELETE /api/ai/session/{sessionId}', variant: 'paired-delete', scenario: 'paired-delete', pairedDeletes: true, note: 'deletes only sessions created successfully by the previous entry; configured=created count, skipped=remaining planned slots, zero targets are SKIPPED' }
+]
+
+const apiLoad = {
+  enabled: apiLoadConfig.enabled,
+  ran: false,
+  status: 'NOT_RUN',
+  config: {
+    concurrency: apiLoadConfig.concurrency,
+    requestsPerEndpoint: apiLoadConfig.requestsPerEndpoint
+  },
+  maxObservedApiInFlight: 0,
+  skipped: 0,
+  complete: null,
+  planned: API_LOAD_PLAN.map((plan) => plan.key),
+  endpoints: {},
+  cleanup: { done: true, detail: 'no load-created resources' },
+  cleanupErrors: [],
+  fatalError: null,
+  notes: apiLoadConfig.enabled
+    ? []
+    : ['EVAL_ENABLE_API_LOAD is not true: API load stage NOT_RUN; NOT_RUN is not PASS']
+}
 
 class CoverageError extends Error {}
 
@@ -170,26 +227,34 @@ async function request(url, options = {}) {
   }
 }
 
-async function call(key, url, options, assertion) {
+async function call(key, url, options, assertion, recordResult = true) {
   const started = Date.now()
   let response = null
   try {
     response = await request(url, options)
     const assertions = await assertion(response)
-    record(key, {
-      httpStatus: response.status,
-      latencyMs: response.latencyMs,
-      assertions: Array.isArray(assertions) ? assertions : [assertions]
-    })
+    if (recordResult) {
+      record(key, {
+        httpStatus: response.status,
+        latencyMs: response.latencyMs,
+        assertions: Array.isArray(assertions) ? assertions : [assertions]
+      })
+    }
     return response
   }
   catch (error) {
-    record(key, {
-      httpStatus: response?.status ?? null,
-      latencyMs: response?.latencyMs ?? Date.now() - started,
-      assertions: [],
-      error: error instanceof Error ? error.message : String(error)
-    })
+    const httpStatus = response?.status ?? null
+    if (recordResult) {
+      record(key, {
+        httpStatus,
+        latencyMs: response?.latencyMs ?? Date.now() - started,
+        assertions: [],
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+    if (httpStatus !== null && error !== null && typeof error === 'object' && error.httpStatus === undefined) {
+      error.httpStatus = httpStatus
+    }
     throw error
   }
 }
@@ -220,11 +285,12 @@ function parseSseBlock(block) {
   try { return JSON.parse(data) } catch { return null }
 }
 
-async function settleRunAfterSseError(runId, lastSeq, error) {
+async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreCleanupErrors) {
   if (!runId) {
     const detail = 'runId=unknown:SSE cleanup ownership unknown'
     cleanupLog.push(detail)
     cleanupErrors.push(detail)
+    scopeErrors.push(detail)
     return false
   }
   activeRuns.add(runId)
@@ -232,7 +298,7 @@ async function settleRunAfterSseError(runId, lastSeq, error) {
     const response = await request(`/api/ai/cancel/${runId}`, { method: 'POST' })
     assert(response.status >= 200 && response.status < 300, `SSE error cancel ${response.status}`)
     assert(dataObject(response).cancelled === true, `SSE error cancel not accepted: ${response.text}`)
-    const terminal = await readSseRaw(runId, lastSeq, (frame) => frame.type === 'done' || frame.type === 'error', false)
+    const terminal = await readSseRaw(runId, lastSeq, (frame) => frame.type === 'done' || frame.type === 'error', false, scopeErrors)
     assert(terminal.matched.type === 'done' && terminal.matched.cancelled === true,
       'SSE error cancel accepted but no cancelled terminal frame')
     activeRuns.delete(runId)
@@ -246,23 +312,26 @@ async function settleRunAfterSseError(runId, lastSeq, error) {
     const detail = `sse-error-cancel:${runId}=${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
     cleanupLog.push(detail)
     cleanupErrors.push(detail)
+    scopeErrors.push(detail)
     return false
   }
 }
 
-async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true) {
+async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scopeErrors = coreCleanupErrors) {
   const started = Date.now()
   let reader = null
   let buffer = ''
   let previousSeq = lastSeq ?? 0
   let recoverySeq = previousSeq
   let matched = null
+  let httpStatus = null
   const frames = []
   try {
     const response = await fetch(`${base.toString().replace(/\/$/, '')}/api/ai/events/${runId}${lastSeq == null ? '' : `?lastSeq=${lastSeq}`}`, {
       headers: { ...headers(), Accept: 'text/event-stream' },
       signal: AbortSignal.timeout(timeoutMs)
     })
+    httpStatus = response.status
     const contentType = response.headers.get('content-type') ?? ''
     assert(response.status === 200 && contentType.includes('text/event-stream'),
       `SSE expected 200 text/event-stream, got ${response.status} ${contentType}`)
@@ -300,9 +369,13 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true) {
     return { frames, matched, lastSeq: previousSeq, latencyMs: Date.now() - started }
   }
   catch (error) {
+    if (httpStatus !== null && error !== null && (typeof error === 'object' || typeof error === 'function')
+      && error.httpStatus === undefined) {
+      error.httpStatus = httpStatus
+    }
     if (recoverOnError) {
       tripModelCircuit(error, runId ? 'sse-failed' : 'sse-unknown')
-      await settleRunAfterSseError(runId, recoverySeq, error)
+      await settleRunAfterSseError(runId, recoverySeq, error, scopeErrors)
     }
     throw error
   }
@@ -311,20 +384,23 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true) {
   }
 }
 
-async function startChat(sessionId, message, context, predicate, awaitTerminal = false) {
+async function startChat(sessionId, message, context, predicate, awaitTerminal = false, recordCoverage = true,
+    scopeErrors = coreCleanupErrors) {
   const started = Date.now()
   return modelCall(async () => {
     let chat
     try {
-      chat = await readSseChat(sessionId, message, context, predicate)
+      chat = await readSseChat(sessionId, message, context, predicate, true, scopeErrors)
     }
     catch (error) {
-      record('POST /api/ai/chat', {
-        httpStatus: null,
-        latencyMs: Date.now() - started,
-        assertions: [],
-        error: error instanceof Error ? error.message : String(error)
-      })
+      if (recordCoverage) {
+        record('POST /api/ai/chat', {
+          httpStatus: null,
+          latencyMs: Date.now() - started,
+          assertions: [],
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
       throw error
     }
     if (!awaitTerminal) return chat
@@ -333,12 +409,13 @@ async function startChat(sessionId, message, context, predicate, awaitTerminal =
       assert(frame.type === 'done' && frame.cancelled !== true,
         `model scenario did not complete normally: ${frame.type}`)
       return true
-    })
+    }, true, scopeErrors)
     return { ...chat, terminal: terminal.matched, terminalLatencyMs: terminal.latencyMs }
   })
 }
 
-async function readSseChat(sessionId, message, context, predicate, recoverOnError = true) {
+async function readSseChat(sessionId, message, context, predicate, recoverOnError = true,
+    scopeErrors = coreCleanupErrors) {
   const started = Date.now()
   const body = { sessionId, message, context, clientRequestId: `${runPrefix}-${randomUUID()}` }
   let reader = null
@@ -393,7 +470,7 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
   catch (error) {
     if (recoverOnError) {
       tripModelCircuit(error, runId ? 'sse-failed' : 'sse-unknown')
-      await settleRunAfterSseError(runId, recoverySeq, error)
+      await settleRunAfterSseError(runId, recoverySeq, error, scopeErrors)
     }
     throw error
   }
@@ -402,24 +479,28 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
   }
 }
 
-async function callSse(runId, lastSeq, predicate) {
+async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErrors = coreCleanupErrors) {
   const started = Date.now()
   try {
-    const result = await readSseRaw(runId, lastSeq, predicate)
-    record('GET /api/ai/events/{runId}', {
-      httpStatus: 200,
-      latencyMs: result.latencyMs,
-      assertions: [`SSE ${result.matched.type}`]
-    })
+    const result = await readSseRaw(runId, lastSeq, predicate, true, scopeErrors)
+    if (recordResult) {
+      record('GET /api/ai/events/{runId}', {
+        httpStatus: 200,
+        latencyMs: result.latencyMs,
+        assertions: [`SSE ${result.matched.type}`]
+      })
+    }
     return result
   }
   catch (error) {
-    record('GET /api/ai/events/{runId}', {
-      httpStatus: null,
-      latencyMs: Date.now() - started,
-      assertions: [],
-      error: error instanceof Error ? error.message : String(error)
-    })
+    if (recordResult) {
+      record('GET /api/ai/events/{runId}', {
+        httpStatus: null,
+        latencyMs: Date.now() - started,
+        assertions: [],
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
     throw error
   }
 }
@@ -450,7 +531,7 @@ function taskIdFrom(frames) {
   return null
 }
 
-async function cleanupOne(kind, id, fn) {
+async function cleanupOne(kind, id, fn, scopeErrors = coreCleanupErrors) {
   try {
     await fn()
     cleanupLog.push(`${kind}=${id}:ok`)
@@ -459,6 +540,389 @@ async function cleanupOne(kind, id, fn) {
     const detail = `${kind}=${id}:${error instanceof Error ? error.message : String(error)}`
     cleanupLog.push(detail)
     cleanupErrors.push(detail)
+    scopeErrors.push(detail)
+  }
+}
+
+function ensureLoadEntry(plan) {
+  const existing = apiLoad.endpoints[plan.key]
+  if (existing !== undefined) return existing
+  const entry = {
+    route: plan.route,
+    variant: plan.variant,
+    scenario: plan.scenario,
+    modelGate: plan.modelGate === true,
+    serial: plan.serial === true,
+    configured: apiLoadConfig.requestsPerEndpoint,
+    requested: 0,
+    completed: 0,
+    failed: 0,
+    skipped: 0,
+    status: 'PENDING',
+    latencyMs: null,
+    httpStatuses: {},
+    errors: [],
+    durationMs: null,
+    notes: plan.note ? [plan.note] : []
+  }
+  apiLoad.endpoints[plan.key] = entry
+  return entry
+}
+
+function attachHttpStatus(error, status) {
+  if (status !== null && error !== null && (typeof error === 'object' || typeof error === 'function')
+    && error.httpStatus === undefined) {
+    error.httpStatus = status
+  }
+  return error
+}
+
+function limitedMessage(message) {
+  const text = String(message)
+  return text.length > 500 ? `${text.slice(0, 500)}...` : text
+}
+
+function httpUnit(url, options, assertion) {
+  return async () => {
+    const response = await request(url, options)
+    try {
+      await assertion(response)
+    }
+    catch (error) {
+      throw attachHttpStatus(error, response.status)
+    }
+    return { status: response.status, latencyMs: response.latencyMs }
+  }
+}
+
+async function runLoadScenario(runner, plan, unit, overrides = {}) {
+  const entry = ensureLoadEntry(plan)
+  const startedAt = Date.now()
+  const configured = overrides.configured ?? entry.configured
+  entry.configured = configured
+  entry.skipped = overrides.skipped ?? 0
+  entry.requested = 0
+  entry.completed = 0
+  entry.failed = 0
+  entry.latencyMs = summarizeLatencies([])
+  entry.httpStatuses = {}
+  entry.errors = []
+  if (configured === 0) {
+    entry.durationMs = 0
+    entry.status = 'SKIPPED'
+    return entry
+  }
+  const attempt = (index) => runner.run(async () => {
+    entry.requested += 1
+    try {
+      const result = await unit(index)
+      return {
+        ok: true,
+        status: result?.status ?? null,
+        latencyMs: Number.isFinite(result?.latencyMs) ? result.latencyMs : null
+      }
+    }
+    catch (error) {
+      return {
+        ok: false,
+        status: error?.httpStatus ?? null,
+        latencyMs: null,
+        message: limitedMessage(error instanceof Error ? error.message : String(error))
+      }
+    }
+  })
+  let attempts
+  if (entry.serial) {
+    attempts = []
+    for (let index = 0; index < configured; index += 1) {
+      try {
+        attempts.push({ status: 'fulfilled', value: await attempt(index) })
+      }
+      catch (reason) {
+        attempts.push({ status: 'rejected', reason })
+      }
+    }
+  }
+  else {
+    attempts = await Promise.allSettled(Array.from({ length: configured }, (_, index) => attempt(index)))
+  }
+  const samples = []
+  attempts.forEach((settled, index) => {
+    if (settled.status === 'rejected') {
+      entry.failed += 1
+      entry.errors.push({
+        index,
+        httpStatus: null,
+        message: limitedMessage(settled.reason instanceof Error ? settled.reason.message : String(settled.reason))
+      })
+      return
+    }
+    const attempt = settled.value
+    if (attempt.status !== null) {
+      const code = String(attempt.status)
+      entry.httpStatuses[code] = (entry.httpStatuses[code] ?? 0) + 1
+    }
+    if (attempt.ok) {
+      entry.completed += 1
+      if (attempt.latencyMs !== null) samples.push(attempt.latencyMs)
+    }
+    else {
+      entry.failed += 1
+      entry.errors.push({ index, httpStatus: attempt.status, message: attempt.message })
+    }
+  })
+  entry.latencyMs = summarizeLatencies(samples)
+  entry.durationMs = Date.now() - startedAt
+  entry.status = entry.requested === entry.configured
+    && entry.completed === entry.configured
+    && entry.failed === 0
+    ? 'PASS'
+    : 'FAIL'
+  return entry
+}
+
+function buildLoadUnits({ sessionId, runId }) {
+  const units = new Map()
+
+  units.set('GET /api/ai/health', httpUnit('/api/ai/health', {}, (response) => {
+    const data = dataObject(response)
+    assert([200, 503].includes(response.status), `health unexpected ${response.status}`)
+    assert(typeof data.code === 'string' && data.code.length > 0, 'health code missing')
+  }))
+  units.set('GET /api/ai/tools', httpUnit('/api/ai/tools', {}, (response) => {
+    ok(response)
+    const data = dataObject(response)
+    assert(Array.isArray(data.toolNames) && data.toolNames.includes('create_task'), 'create_task not disclosed')
+  }))
+  units.set('GET /api/ai/tenants', httpUnit('/api/ai/tenants', {}, (response) => {
+    ok(response)
+    const data = dataArray(response)
+    assert(data.some((tenant) => String(tenant.tenantId ?? tenant.id) === tenantId), 'current tenant not in directory')
+  }))
+  units.set('GET /api/ai/kb/status', httpUnit('/api/ai/kb/status', {}, (response) => {
+    ok(response)
+    const data = dataObject(response)
+    assert(typeof data.enabled === 'boolean' && typeof data.ready === 'boolean', 'KB enabled/ready missing')
+  }))
+  units.set('GET /api/ai/kb/docs', httpUnit('/api/ai/kb/docs', {}, (response) => {
+    ok(response)
+    const data = dataArray(response)
+    assert(data.every((doc) => typeof doc.id === 'string' && typeof doc.title === 'string'), 'KB doc shape invalid')
+  }))
+  units.set('GET /api/ai/form/option-sources/{sourceId}',
+    httpUnit('/api/ai/form/option-sources/definitions?value=GLOBAL', {}, (response) => {
+      ok(response)
+      const data = dataObject(response)
+      assert(data.sourceId === 'definitions' && Array.isArray(data.options) && data.options.length > 0,
+        'definition option source is empty')
+    }))
+  units.set('GET /api/ai/runs', httpUnit('/api/ai/runs', {}, (response) => {
+    ok(response)
+    const data = dataArray(response)
+    assert(data.some((run) => run.runId === runId), 'run list lacks the shared terminal run')
+  }))
+  units.set('GET /api/ai/runs/{runId}', httpUnit(`/api/ai/runs/${runId}`, {}, (response) => {
+    ok(response)
+    const data = dataObject(response)
+    assert(data.exists === true && data.snapshot?.runId === runId, 'run detail missing for the shared terminal run')
+  }))
+  units.set('GET /api/ai/runs/current',
+    httpUnit(`/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`, {}, (response) => {
+      ok(response)
+      const data = dataObject(response)
+      assert(data.found === false, 'terminal cancel should clear the session current index')
+    }))
+  units.set('GET /api/ai/history/{sessionId}',
+    httpUnit(`/api/ai/history/${sessionId}?latest=20`, {}, (response) => {
+      ok(response)
+      const data = dataObject(response)
+      assert(Array.isArray(data.messages) && data.messages.length > 0, 'history is empty for the shared session')
+    }))
+  units.set('GET /api/ai/context/{sessionId}', httpUnit(`/api/ai/context/${sessionId}`, {}, (response) => {
+    ok(response)
+    const data = dataObject(response)
+    assert(data.sessionId === sessionId, 'context sessionId mismatch')
+  }))
+  units.set('GET /api/ai/pending/{runId}', httpUnit(`/api/ai/pending/${runId}`, {}, (response) => {
+    ok(response)
+    const data = dataArray(response)
+    assert(data.every((pending) => typeof pending.toolCallId === 'string'), 'pending entry shape invalid')
+  }))
+  units.set('GET /api/ai/feedback', httpUnit('/api/ai/feedback', {}, (response) => {
+    ok(response)
+    dataArray(response)
+  }))
+  units.set('GET /api/ai/cancel/{runId}', httpUnit(`/api/ai/cancel/${runId}`, {}, (response) => {
+    ok(response)
+    const data = dataObject(response)
+    assert(data.redisFlag === true || data.localFlag === true, 'cancel flag missing on the terminal run')
+  }))
+  units.set('GET /api/ai/startup-resume', httpUnit('/api/ai/startup-resume', {}, (response) => {
+    ok(response)
+    const data = dataObject(response)
+    assert(typeof data.scanned === 'boolean' || typeof data.reason === 'string', 'startup scan status missing')
+  }))
+  units.set('GET /api/ai/events/{runId} [probe=1]',
+    httpUnit(`/api/ai/events/${runId}?probe=1`, { headers: { Accept: 'application/json' } }, (response) => {
+      ok(response)
+      const data = dataObject(response)
+      assert(data.ready === true && !response.contentType.includes('text/event-stream'),
+        'events probe did not return ready JSON')
+    }))
+  units.set('GET /api/ai/events/{runId} [sse-replay]', async () => {
+    try {
+      const result = await readSseRaw(runId, 0, (frame) => {
+        if (frame.type !== 'done' && frame.type !== 'error') return false
+        assert(frame.type === 'done' && frame.cancelled === true,
+          `SSE replay terminal was not a cancelled done frame: ${frame.type}`)
+        return true
+      }, false)
+      return { status: 200, latencyMs: result.latencyMs }
+    }
+    finally {
+      activeRuns.delete(runId)
+    }
+  })
+  units.set('POST /api/ai/cancel/{runId} [terminal-idempotent]',
+    httpUnit(`/api/ai/cancel/${runId}`, { method: 'POST' }, (response) => {
+      ok(response)
+      const data = dataObject(response)
+      assert(data.cancelled === true, 'terminal cancel did not report cancelled=true')
+      assert(data.alreadyCancelled === true, 'terminal cancel did not report alreadyCancelled=true')
+    }))
+  units.set('POST /api/ai/runs/{runId}/resume [terminal-already-cancelled]',
+    httpUnit(`/api/ai/runs/${runId}/resume`, { method: 'POST' }, (response) => {
+      ok(response)
+      const data = dataObject(response)
+      assert(data.resumed === false, 'terminal resume unexpectedly resumed a cancelled run')
+      assert(data.reason === 'ALREADY_CANCELLED', `terminal resume reason was ${data.reason}`)
+    }))
+  units.set('POST /api/ai/cancel/client-request', async (index) => {
+    const loadSession = `${runPrefix}-load-client-cancel-${index}-${randomUUID()}`
+    createdSessions.add(loadSession)
+    loadCreatedSessions.add(loadSession)
+    const clientRequestId = `${runPrefix}-load-client-request-${index}-${randomUUID()}`
+    const response = await request('/api/ai/cancel/client-request', {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify({ sessionId: loadSession, clientRequestId })
+    })
+    try {
+      ok(response)
+      const data = dataObject(response)
+      assert(data.cancelled === true && data.pendingRun === true, 'clientRequestId pre-cancel tombstone missing')
+      assert(data.clientRequestId === clientRequestId, 'clientRequestId echo mismatch')
+    }
+    catch (error) {
+      throw attachHttpStatus(error, response.status)
+    }
+    return { status: response.status, latencyMs: response.latencyMs }
+  })
+  units.set('POST /api/ai/feedback', async (index) => {
+    const messageId = `${runPrefix}-load-feedback-${index}-${randomUUID()}`
+    const response = await request('/api/ai/feedback', {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify({ messageId, sessionId, rating: 1, reason: 'api load' })
+    })
+    try {
+      ok(response)
+      assert(dataObject(response).saved === true, 'feedback was not saved')
+      loadFeedbackMessageIds.add(messageId)
+    }
+    catch (error) {
+      throw attachHttpStatus(error, response.status)
+    }
+    return { status: response.status, latencyMs: response.latencyMs }
+  })
+  units.set('POST /api/ai/form/attachments', async () => {
+    let upload = null
+    try {
+      await attachmentWorkflow({
+        recordCoverage: false,
+        onSession: (loadSession) => loadCreatedSessions.add(loadSession),
+        onUpload: (info) => { upload = info }
+      })
+    }
+    catch (error) {
+      throw attachHttpStatus(error, upload?.status ?? null)
+    }
+    assert(upload !== null && upload.ok === true, 'independent attachment workflow produced no upload evidence')
+    return { status: upload.status, latencyMs: upload.latencyMs }
+  })
+  units.set('POST /api/ai/session', async () => {
+    const response = await request('/api/ai/session', { method: 'POST', json: true })
+    try {
+      ok(response)
+      const data = dataObject(response)
+      assert(typeof data.sessionIdText === 'string' && data.sessionIdText.length > 0, 'sessionIdText missing')
+      loadSessionIds.push(data.sessionIdText)
+      createdSessions.add(data.sessionIdText)
+      loadCreatedSessions.add(data.sessionIdText)
+    }
+    catch (error) {
+      throw attachHttpStatus(error, response.status)
+    }
+    return { status: response.status, latencyMs: response.latencyMs }
+  })
+  units.set('DELETE /api/ai/session/{sessionId}', async (index) => {
+    const loadSession = loadSessionIds[index]
+    assert(typeof loadSession === 'string' && loadSession.length > 0,
+      'no successfully created session is available for the paired DELETE load')
+    const response = await request(`/api/ai/session/${loadSession}`, { method: 'DELETE' })
+    try {
+      ok(response)
+      const data = dataObject(response)
+      const deferred = Array.isArray(data.deferred) ? data.deferred : []
+      const errors = Array.isArray(data.errors) ? data.errors : []
+      assert(data.complete === true && deferred.length === 0 && errors.length === 0,
+        `session purge incomplete: ${response.text}`)
+      createdSessions.delete(loadSession)
+      loadCreatedSessions.delete(loadSession)
+    }
+    catch (error) {
+      throw attachHttpStatus(error, response.status)
+    }
+    return { status: response.status, latencyMs: response.latencyMs }
+  })
+
+  return units
+}
+
+async function runApiLoadStage({ sessionId, runId }) {
+  if (!apiLoad.enabled) return
+  apiLoad.ran = true
+  apiLoad.status = 'RUNNING'
+  loadBaselines.captured = true
+  loadBaselines.tasks = new Set(createdTasks)
+  loadBaselines.runs = new Set(activeRuns)
+  const runner = createLoadRunner({ concurrency: apiLoadConfig.concurrency })
+  try {
+    const units = buildLoadUnits({ sessionId, runId })
+    for (const plan of API_LOAD_PLAN) {
+      const entry = ensureLoadEntry(plan)
+      const unit = units.get(plan.key)
+      if (unit === undefined) {
+        entry.status = 'FAIL'
+        entry.failed = entry.configured
+        entry.errors.push({ index: null, httpStatus: null, message: 'no load unit registered for plan entry' })
+        continue
+      }
+      const overrides = plan.pairedDeletes === true
+        ? (() => {
+            const planned = planPairedDeletes(loadSessionIds, apiLoadConfig.requestsPerEndpoint)
+            return { configured: planned.configured, skipped: planned.skipped }
+          })()
+        : undefined
+      await runLoadScenario(runner, plan, unit, overrides)
+    }
+  }
+  catch (error) {
+    apiLoad.fatalError = limitedMessage(error instanceof Error ? error.message : String(error))
+    apiLoad.notes.push('load stage aborted before every planned entry finished')
+  }
+  finally {
+    apiLoad.maxObservedApiInFlight = runner.snapshot().maxObserved
   }
 }
 
@@ -475,36 +939,52 @@ async function knowledgeWorkflow() {
   activeRuns.delete(knowledge.runId)
 }
 
-async function attachmentWorkflow() {
+async function attachmentWorkflow(options = {}) {
+  const { recordCoverage = true, onSession = null, onUpload = null } = options
+  const cleanupScopeErrors = recordCoverage ? coreCleanupErrors : apiLoad.cleanupErrors
   const attachmentSession = `${runPrefix}-attachment-${randomUUID()}`
   createdSessions.add(attachmentSession)
+  onSession?.(attachmentSession)
   const attachmentChat = await startChat(attachmentSession,
     '请调用 generative_form，purpose=GENERAL_CLARIFY，只生成一个名为 evidence 的 attachment 字段用于收集一个文本附件，不要调用其它工具。',
     null,
     (frame) => {
       const form = formOf(frame)
       return form !== null && Array.isArray(form.fields) && form.fields.some((field) => field.type === 'attachment')
-    })
+    },
+    false,
+    recordCoverage,
+    cleanupScopeErrors)
   const form = formOf(attachmentChat.matched)
   const attachmentField = form.fields.find((field) => field.type === 'attachment')
   assert(attachmentField?.key, 'attachment field key missing')
-  record('POST /api/ai/chat', {
-    httpStatus: 200,
-    latencyMs: attachmentChat.latencyMs,
-    assertions: ['real generative_form with attachment field pending']
-  })
+  if (recordCoverage) {
+    record('POST /api/ai/chat', {
+      httpStatus: 200,
+      latencyMs: attachmentChat.latencyMs,
+      assertions: ['real generative_form with attachment field pending']
+    })
+  }
   const formData = new FormData()
   formData.append('file', new Blob([`core coverage ${attachmentSession}\n`], { type: 'text/plain' }), 'core-evidence.txt')
   formData.append('runId', attachmentChat.runId)
   formData.append('toolCallId', attachmentChat.matched.toolCallId)
   formData.append('sessionId', attachmentSession)
   formData.append('fieldKey', attachmentField.key)
-  const uploaded = await call('POST /api/ai/form/attachments', '/api/ai/form/attachments', { method: 'POST', body: formData }, async (response) => {
-    ok(response)
-    const data = dataObject(response)
-    assert(typeof data.fileId === 'string' && data.fileId.length > 0, 'attachment fileId missing')
-    return `uploaded ${data.fileId}`
-  })
+  let uploaded
+  try {
+    uploaded = await call('POST /api/ai/form/attachments', '/api/ai/form/attachments', { method: 'POST', body: formData }, async (response) => {
+      ok(response)
+      const data = dataObject(response)
+      assert(typeof data.fileId === 'string' && data.fileId.length > 0, 'attachment fileId missing')
+      return `uploaded ${data.fileId}`
+    }, recordCoverage)
+  }
+  catch (error) {
+    onUpload?.({ ok: false, status: error?.httpStatus ?? null, latencyMs: null })
+    throw error
+  }
+  onUpload?.({ ok: true, status: uploaded.status, latencyMs: uploaded.latencyMs })
   const fileId = dataObject(uploaded).fileId
   const { terminal } = await modelCall(async () => {
     const submitted = await call('POST /api/ai/frontend-tool-result', '/api/ai/frontend-tool-result', {
@@ -520,17 +1000,19 @@ async function attachmentWorkflow() {
       ok(response)
       assert(dataObject(response).accepted === true, 'attachment form result not accepted')
       return 'real attachment form result accepted'
-    })
+    }, recordCoverage)
     const terminal = await callSse(attachmentChat.runId, attachmentChat.lastSeq, (frame) => {
       if (frame.type !== 'done' && frame.type !== 'error') return false
       assert(frame.type === 'done' && frame.cancelled !== true, 'attachment scenario did not complete normally')
       return true
-    })
-    record('POST /api/ai/chat', {
-      httpStatus: 200,
-      latencyMs: terminal.latencyMs,
-      assertions: ['attachment scenario done terminal confirmed']
-    })
+    }, recordCoverage, cleanupScopeErrors)
+    if (recordCoverage) {
+      record('POST /api/ai/chat', {
+        httpStatus: 200,
+        latencyMs: terminal.latencyMs,
+        assertions: ['attachment scenario done terminal confirmed']
+      })
+    }
     return { submitted, terminal }
   })
   activeRuns.delete(attachmentChat.runId)
@@ -632,7 +1114,7 @@ async function main() {
   await call('GET /api/ai/runs/{runId}', `/api/ai/runs/${mainRun}`, {}, async (response) => {
     ok(response)
     const data = dataObject(response)
-    assert(data.exists === true && data.runId === mainRun, 'run detail missing')
+    assert(data.exists === true && data.snapshot?.runId === mainRun, 'run detail missing')
     return `run exists ${mainRun}`
   })
   await call('GET /api/ai/runs/current', `/api/ai/runs/current?sessionId=${encodeURIComponent(mainSession)}`, {}, async (response) => {
@@ -794,6 +1276,7 @@ async function main() {
     return `session purge complete ${lifecycleSession}`
   })
   createdSessions.delete(lifecycleSession)
+  await runApiLoadStage({ sessionId: mainSession, runId: mainRun })
 }
 
 let fatalError = null
@@ -804,6 +1287,14 @@ catch (error) {
   fatalError = error instanceof Error ? error.message : String(error)
 }
 finally {
+  if (loadBaselines.captured) {
+    for (const taskId of createdTasks) {
+      if (!loadBaselines.tasks.has(taskId)) loadCreatedTasks.add(taskId)
+    }
+    for (const runId of activeRuns) {
+      if (!loadBaselines.runs.has(runId)) loadActiveRuns.add(runId)
+    }
+  }
   if (feedbackCreated) {
     await cleanupOne('feedback-rating-zero', feedbackMessageId, async () => {
       const response = await request('/api/ai/feedback', {
@@ -814,17 +1305,29 @@ finally {
       assert(dataObject(response).cancelled === true, `feedback cleanup not cancelled: ${response.text}`)
     })
   }
+  for (const messageId of loadFeedbackMessageIds) {
+    await cleanupOne('load-feedback-rating-zero', messageId, async () => {
+      const response = await request('/api/ai/feedback', {
+        method: 'POST', json: true,
+        body: JSON.stringify({ messageId, sessionId: mainSession, rating: 0 })
+      })
+      assert(response.status >= 200 && response.status < 300, `load feedback cleanup ${response.status}`)
+      const data = dataObject(response)
+      assert(data.saved === false, `load feedback cleanup unexpectedly saved: ${response.text}`)
+      assert(data.cancelled === true, `load feedback cleanup not cancelled: ${response.text}`)
+    }, apiLoad.cleanupErrors)
+  }
   for (const runId of activeRuns) {
     await cleanupOne(`cancel-run:${runId}`, runId, async () => {
       const response = await request(`/api/ai/cancel/${runId}`, { method: 'POST' })
       assert(response.status >= 200 && response.status < 300, `cancel cleanup ${response.status}`)
-    })
+    }, loadActiveRuns.has(runId) ? apiLoad.cleanupErrors : coreCleanupErrors)
   }
   for (const taskId of createdTasks) {
     await cleanupOne(`delete-task:${taskId}`, taskId, async () => {
       const response = await request(`/api/tasks/${taskId}`, { method: 'DELETE' })
       assert([200, 404].includes(response.status), `task cleanup ${response.status}`)
-    })
+    }, loadCreatedTasks.has(taskId) ? apiLoad.cleanupErrors : coreCleanupErrors)
   }
   for (const sessionId of createdSessions) {
     await cleanupOne(`delete-session:${sessionId}`, sessionId, async () => {
@@ -835,14 +1338,49 @@ finally {
       const errors = Array.isArray(data.errors) ? data.errors : []
       assert(data.complete === true && deferred.length === 0 && errors.length === 0,
         `session cleanup incomplete: ${response.text}`)
+    }, loadCreatedSessions.has(sessionId) ? apiLoad.cleanupErrors : coreCleanupErrors)
+  }
+  const loadEntries = Object.values(apiLoad.endpoints)
+  if (!apiLoad.enabled) {
+    apiLoad.complete = null
+    apiLoad.status = 'NOT_RUN'
+  }
+  else if (!apiLoad.ran) {
+    apiLoad.complete = false
+    apiLoad.status = 'NOT_RUN'
+    apiLoad.notes.push('EVAL_ENABLE_API_LOAD=true but the load stage was not reached; NOT_RUN is not PASS')
+  }
+  else {
+    const everyPlannedRan = API_LOAD_PLAN.every((plan) => apiLoad.endpoints[plan.key] !== undefined)
+    const everyEntryPassed = everyPlannedRan && loadEntries.every((entry) => {
+      if (entry.status === 'SKIPPED') {
+        return entry.configured === 0 && entry.requested === 0 && entry.completed === 0 && entry.failed === 0
+      }
+      return entry.status === 'PASS'
+        && entry.requested === entry.configured
+        && entry.completed === entry.configured
+        && entry.failed === 0
     })
+    apiLoad.complete = everyEntryPassed && apiLoad.fatalError === null && apiLoad.cleanupErrors.length === 0
+    apiLoad.status = apiLoad.complete ? 'PASS' : 'FAIL'
+  }
+  apiLoad.skipped = loadEntries.reduce((total, entry) => total + (entry.skipped ?? 0), 0)
+  apiLoad.cleanup = {
+    done: apiLoad.cleanupErrors.length === 0,
+    detail: !apiLoad.enabled || !apiLoad.ran
+      ? 'no load-created resources'
+      : apiLoad.cleanupErrors.length === 0
+        ? 'load-created resources cleaned'
+        : apiLoad.cleanupErrors.join('; ')
   }
   const missing = Object.values(coverage).filter((entry) => !entry.covered || entry.assertions.length === 0)
-  const complete = missing.length === 0 && cleanupErrors.length === 0 && fatalError === null && modelFailure === null
+  const loadComplete = apiLoad.enabled ? apiLoad.complete === true : true
+  const complete = missing.length === 0 && cleanupErrors.length === 0 && fatalError === null
+    && modelFailure === null && loadComplete
   for (const entry of Object.values(coverage)) {
     entry.cleanup = {
-      done: cleanupErrors.length === 0,
-      detail: cleanupErrors.length === 0 ? 'created resources cleaned' : cleanupErrors.join('; ')
+      done: coreCleanupErrors.length === 0,
+      detail: coreCleanupErrors.length === 0 ? 'core-created resources cleaned' : coreCleanupErrors.join('; ')
     }
   }
   const report = {
@@ -868,8 +1406,10 @@ finally {
       notRun: missing.map((entry) => `${entry.method} ${entry.path}`)
     },
     endpoints: coverage,
+    load: apiLoad,
     cleanup: cleanupLog,
     cleanupErrors,
+    coreCleanupErrors,
     fatalError,
     deleteEvidenceDependencies: [
       'scripts/perf/redis/perf_redis/scenarios.py:226-233 (repeat_delete and concurrent_delete)',
@@ -886,6 +1426,12 @@ finally {
     notRun: report.coverage.notRun,
     modelConcurrencyConfigured,
     maxObservedInFlight,
+    load: {
+      enabled: apiLoad.enabled,
+      status: apiLoad.status,
+      complete: apiLoad.complete,
+      maxObservedApiInFlight: apiLoad.maxObservedApiInFlight
+    },
     fatalError,
     output: path.join(outDir, 'coverage-results.json')
   }, null, 2))
