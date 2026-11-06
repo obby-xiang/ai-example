@@ -294,7 +294,7 @@
             data-testid="suggestion-chip"
             :data-suggestion-id="chip.id"
             :aria-label="t('ai.suggestions.fillAria', { text: t(`ai.suggestions.${chip.title}`) })"
-            @click="fillPreset(t(`ai.suggestions.${chip.title}`))"
+            @click="fillPreset(t(`ai.suggestions.${chip.prompt}`))"
           >
             <span class="grid h-[26px] w-[26px] flex-none place-items-center rounded-[7px] bg-[#eff4ff] text-[13px] font-semibold text-[#2563eb]" aria-hidden="true">{{ chip.icon }}</span>
             <span class="min-w-0 flex-1">
@@ -2182,9 +2182,9 @@ const chipsAvailable = computed(
   () => !healthBlocksSend.value && !identityBlocked.value && ai.canSend && !ai.suspended && ai.pendingToolCall === null
 )
 const visibleEmptyStateChips = [
-  { id: 'listDefs', title: 'listDefsTitle', hint: 'listDefsHint', icon: '≡' },
-  { id: 'createTask', title: 'createTaskTitle', hint: 'createTaskHint', icon: '+' },
-  { id: 'knowledgeQa', title: 'knowledgeQaTitle', hint: 'knowledgeQaHint', icon: '?' }
+  { id: 'listDefs', title: 'listDefsTitle', prompt: 'listDefsPrompt', hint: 'listDefsHint', icon: '≡' },
+  { id: 'createTask', title: 'createTaskTitle', prompt: 'createTaskPrompt', hint: 'createTaskHint', icon: '+' },
+  { id: 'knowledgeQa', title: 'knowledgeQaTitle', prompt: 'knowledgeQaPrompt', hint: 'knowledgeQaHint', icon: '?' }
 ] as const
 
 function fillPreset(text: string): void {
