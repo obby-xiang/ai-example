@@ -22,9 +22,6 @@
           <el-button link data-test="locale-toggle" @click="localeStore.toggle()">
             {{ localeStore.isEnglish ? t('nav.langZh') : t('nav.langEn') }}
           </el-button>
-          <el-button link @click="ai.toggleExpand()">
-            {{ ai.expanded ? t('nav.hideAiPanel') : t('nav.showAiPanel') }}
-          </el-button>
         </div>
       </header>
 

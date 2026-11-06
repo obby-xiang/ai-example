@@ -259,38 +259,45 @@
       <div v-if="!ai.messages.length && !ai.historyLoaded" data-testid="history-skeleton" class="p-2" aria-hidden="true">
         <div v-for="(bar, i) in SKELETON_BARS" :key="i" :class="bar"></div>
       </div>
-      <!-- 空态（R-165 S2：el-empty + el-icon 退场 → 自绘 demo v7 `.mini`：标题 600 + 副文 + 胶囊建议词行） -->
-      <div
+      <article
         v-else-if="!ai.messages.length"
-        class="m-3 rounded-[10px] border border-solid border-[#e3e6ea] bg-white px-[14px] py-[16px]"
+        class="m-3 rounded-[14px] border border-solid border-[#dbe6ff] bg-[#f8faff] p-[16px]"
         data-testid="empty-state"
       >
-        <div class="[font-weight:650] text-[13.2px] mb-[3px]">{{ t('ai.panel.greeting') }}</div>
-        <div class="text-[12.4px] leading-[1.8] text-[#57606a]">
-          {{ t('ai.panel.welcome1') }}<br />
-          {{ t('ai.panel.welcome2') }}<br />{{ t('ai.panel.welcome3') }}
+        <div class="flex items-start gap-[11px]">
+          <span class="grid h-[36px] w-[36px] flex-none place-items-center rounded-[11px] bg-[#2563eb] text-white shadow-[0_4px_12px_rgba(37,99,235,0.18)]" aria-hidden="true">
+            <svg class="h-[19px] w-[19px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+          </span>
+          <div class="min-w-0">
+            <h2 class="text-[15px] font-semibold leading-[1.45] tracking-[-0.01em] text-[#1f2328]">{{ t('ai.panel.greeting') }}</h2>
+            <p class="mt-[3px] text-[12.2px] leading-[1.6] text-[#57606a]">{{ t('ai.panel.welcomeTagline') }}</p>
+          </div>
         </div>
-        <!-- 空态只留一句存储口径（C 端减负）：本页签镜像可刷新恢复 + 服务端 24h 滑动记忆窗口，
-             没有长期归档。三段技术说明（镜像 / 运行态 / 历史）压成一句。 -->
-        <div class="mt-[6px] text-[11.8px] leading-[1.7] text-[#8b949e]" data-testid="storage-notice">
-          {{ t('ai.panel.storage.note') }}
-        </div>
-        <!-- 批 E · E2（用户裁决 2026-10-22）：空态快捷 chips 点击**直接发送**（不再回填输入框）。
-             写操作靠既有 HITL 确认卡兜底；文案与"每轮建议"共用一份词表（ai.suggestions.*，双语）。 -->
-        <div v-if="chipsAvailable && visibleEmptyStateChips.length" class="mt-[11px] flex flex-wrap gap-[6px]">
+        <p class="mt-[15px] text-[11.8px] font-medium text-[#57606a]">{{ t('ai.panel.welcomePrompt') }}</p>
+        <div class="mt-[8px] flex flex-col gap-[8px]">
           <button
             v-for="chip in visibleEmptyStateChips"
-            :key="chip"
+            :key="chip.id"
             type="button"
-            :class="SUGGESTION_CHIP"
+            class="group flex w-full items-center gap-[10px] rounded-[10px] border border-solid border-[#dbe6ff] bg-white px-[11px] py-[9px] text-left transition-colors duration-[150ms] motion-reduce:transition-none hover:border-[#9bbcff] hover:bg-[#fbfdff] disabled:cursor-not-allowed disabled:opacity-60"
+            :disabled="!chipsAvailable"
             data-testid="suggestion-chip"
-            :aria-label="t('ai.suggestions.sendAria', { text: t(`ai.suggestions.${chip}`) })"
-            @click="sendPreset(t(`ai.suggestions.${chip}`))"
+            :data-suggestion-id="chip.id"
+            :aria-label="t('ai.suggestions.fillAria', { text: t(`ai.suggestions.${chip.title}`) })"
+            @click="fillPreset(t(`ai.suggestions.${chip.title}`))"
           >
-            {{ t(`ai.suggestions.${chip}`) }}
+            <span class="grid h-[26px] w-[26px] flex-none place-items-center rounded-[7px] bg-[#eff4ff] text-[13px] font-semibold text-[#2563eb]" aria-hidden="true">{{ chip.icon }}</span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-[12.4px] font-medium leading-[1.45] text-[#1f2328]">{{ t(`ai.suggestions.${chip.title}`) }}</span>
+              <span class="mt-[1px] block text-[11px] leading-[1.45] text-[#8b949e]">{{ t(`ai.suggestions.${chip.hint}`) }}</span>
+            </span>
+            <span class="flex-none text-[16px] leading-none text-[#c7cdd6] transition-colors motion-reduce:transition-none group-hover:text-[#2563eb]" aria-hidden="true">›</span>
           </button>
         </div>
-      </div>
+        <div class="mt-[11px] text-[11px] leading-[1.6] text-[#8b949e]" data-testid="storage-notice">
+          {{ t('ai.suggestions.fillNote') }}
+        </div>
+      </article>
 
       <!-- 分页（R-154 #16）：本机还留着更早的展示历史 ⇒ 消息流内**单个**「加载更早」入口。
            与下方 truncated 标记语义分开：本入口 = 还能向前取；标记 = 更早已被容量裁掉。 -->
@@ -1111,29 +1118,6 @@
         </div>
       </div>
 
-      <!-- 批 E · E2：每轮正常完成后的上下文建议（规则模板 + 页面/任务槽位）。
-           挂起 / 出错 / 有确认卡或表单挂着时整块不出（判据见 followups computed）；
-           新一轮触发（发送 / 点 chip / 点建议）即移除。位置 = 内容层最后一轮回复之下，随流滚动。 -->
-      <div
-        v-if="followups.length > 0"
-        class="mt-1 flex flex-col items-start gap-[6px] pl-2.5"
-        data-testid="followup-suggestions"
-        role="group"
-        :aria-label="t('ai.suggestions.ariaLabel')"
-      >
-        <button
-          v-for="item in followups"
-          :key="item.id"
-          type="button"
-          data-testid="followup-suggestion"
-          :data-suggestion-id="item.id"
-          :class="SUGGESTION_CHIP"
-          :aria-label="t('ai.suggestions.sendAria', { text: suggestionText(item) })"
-          @click="sendPreset(suggestionText(item))"
-        >
-          {{ suggestionText(item) }}
-        </button>
-      </div>
       </div>
       </div>
 
@@ -1456,7 +1440,6 @@ import {
   setStreamFlushHandler
 } from '@/utils/markdown'
 import { toolSummary, toolStatusWords } from '@/utils/tool-summaries'
-import { buildFollowups, type FollowupSuggestion } from '@/utils/ai-suggestions'
 import {
   argRows,
   cardStatusOf,
@@ -2152,12 +2135,6 @@ function isMsgCopied(id: string): boolean {
 }
 
 /**
- * 批 E · E2：空态快捷 chips（模板 id 与「每轮建议」同一份词表 `ai.suggestions.*`）。
- * 顺序 = 用户最常用的三件事：看定义 / 看工作区 / 启动作业。
- */
-const EMPTY_STATE_CHIPS = ['listDefs', 'workspaceState', 'startExport'] as const
-const TERMINAL_TASK_SUGGESTIONS = new Set(['startExport', 'startImport', 'precheckImport'])
-/**
  * M-15（2026-10-29）：**探针失败**不等于"服务不可用"。
  *
  * <p>`available` 来自健康探针：一次网络抖动 / 代理 502 / 体形态不符就会把它打成 false，而旧实现
@@ -2194,54 +2171,21 @@ const identityRetryDetail = computed(
 const chipsAvailable = computed(
   () => !healthBlocksSend.value && !identityBlocked.value && ai.canSend && !ai.suspended && ai.pendingToolCall === null
 )
-const visibleEmptyStateChips = computed(() => EMPTY_STATE_CHIPS.filter((chip) => suggestionAllowedForTask(chip)))
+const visibleEmptyStateChips = [
+  { id: 'createTask', title: 'createTaskTitle', hint: 'createTaskHint', icon: '+' },
+  { id: 'exportCny', title: 'exportCnyTitle', hint: 'exportCnyHint', icon: '↓' },
+  { id: 'listDefs', title: 'listDefsTitle', hint: 'listDefsHint', icon: '≡' }
+] as const
 
-function suggestionAllowedForTask(id: string): boolean {
-  if (!TERMINAL_TASK_SUGGESTIONS.has(id)) {
-    return true
-  }
-  if (workspace.taskStatus === 'CANCELLED') {
-    return false
-  }
-  return !(workspace.taskStatus === 'COMPLETED' && workspace.taskType === 'EXPORT' && id === 'startExport')
-}
-
-/** 建议/胶囊的当前语言文案（模板 id + 插值参数 → 文案；缺键时 vue-i18n 回落 key 原文）。 */
-function suggestionText(item: FollowupSuggestion): string {
-  return t(`ai.suggestions.${item.key}`, item.params ?? {})
-}
-
-function sendPreset(text: string): void {
+function fillPreset(text: string): void {
   if (!chipsAvailable.value) {
     return
   }
-  void ai.send(text)
+  inputText.value = text
+  const composer = composerRef.value
+  composer?.focus({ preventScroll: true })
+  composer?.setSelectionRange(text.length, text.length)
 }
-
-const followups = computed<FollowupSuggestion[]>(() => {
-  if (!chipsAvailable.value || !ai.followupReady || ai.loading || ai.suspended || ai.streamInterrupted) {
-    return []
-  }
-  if (ai.lastRoundOutcome !== 'ok') {
-    return []
-  }
-  if (ai.pendingConfirms.length > 0 || ai.pendingToolCall !== null) {
-    return []
-  }
-  if (ai.activeForm !== null || ai.activePreview !== null || ai.activeUploadHandoff !== null) {
-    return []
-  }
-  const last = ai.messages[ai.messages.length - 1]
-  if (!last || last.role !== 'assistant' || last.streaming || !last.done) {
-    return []
-  }
-  return buildFollowups({
-    page: workspace.page,
-    taskType: workspace.taskType,
-    step: workspace.step,
-    taskId: workspace.taskId
-  }).filter((item) => suggestionAllowedForTask(item.id))
-})
 
 /**
  * I8（R1）/ N1（R2）→ C 端减负：常驻健康胶囊与手动「重新检测」已退场。
@@ -4572,7 +4516,7 @@ function labelWord(labels: Partial<Record<string, string>>, value: string): stri
  * （渲染层注入 HTML 里的代码块复制钮同用一套），本组件顶部 import 直接引入。
  */
 
-/** R-165 S2：空态建议词胶囊（v7 `.mini` chips：999px 胶囊 + 细描边 + 悬停蓝）。 */
+/** R-165 S2：历史分页入口胶囊（v7 `.mini` chips：999px 胶囊 + 细描边 + 悬停蓝）。 */
 const SUGGESTION_CHIP = 'rounded-[999px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#cddcff] hover:text-[#2563eb] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-[#e3e6ea] disabled:hover:text-[#57606a]'
 
 /**

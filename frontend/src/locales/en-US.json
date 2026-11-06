@@ -319,6 +319,14 @@
     "suggestions": {
       "ariaLabel": "Suggested follow-ups",
       "sendAria": "Send: {text}",
+      "fillAria": "Fill: {text}",
+      "fillNote": "Examples only fill the composer. Edit before sending.",
+      "createTaskTitle": "Create an export task",
+      "createTaskHint": "Confirm first, then choose definitions and filters",
+      "exportCnyTitle": "Export the CNY currency dictionary",
+      "exportCnyHint": "Export by condition with verifiable results",
+      "listDefsTitle": "Browse config definitions",
+      "listDefsHint": "Explore available definitions and fields",
       "listDefs": "List all definitions",
       "workspaceState": "Show workspace state",
       "taskProgress": "View task #{id} progress",
@@ -445,6 +453,8 @@
       "interrupted": "Connection interrupted; the result may be incomplete",
       "noDoneFrame": "Generated content is kept above; resend or refresh the page to keep receiving.",
       "greeting": "Hello, I am the Configuration Assistant",
+      "welcomeTagline": "I can look up configuration, create export tasks, and export data with filters. Choose an entry to get started.",
+      "welcomePrompt": "You can also type your request directly and edit it before sending.",
       "logAria": "Conversation messages",
       "storage": {
         "note": "Conversations live only in this tab's browser mirror plus the server's 24-hour sliding memory window: refresh restores the tab, and there is no long-term archive."

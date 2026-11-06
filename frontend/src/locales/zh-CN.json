@@ -319,6 +319,14 @@
     "suggestions": {
       "ariaLabel": "后续建议",
       "sendAria": "发送：{text}",
+      "fillAria": "回填：{text}",
+      "fillNote": "示例只会填入输入框，发送前可修改。",
+      "createTaskTitle": "创建导出任务",
+      "createTaskHint": "先确认，再选择配置和筛选条件",
+      "exportCnyTitle": "导出 CNY 货币字典",
+      "exportCnyHint": "按条件导出，结果准确可查",
+      "listDefsTitle": "查看配置定义",
+      "listDefsHint": "了解现有配置项和字段",
       "listDefs": "列出全部配置定义",
       "workspaceState": "查看当前工作区状态",
       "taskProgress": "查看任务 #{id} 进度",
@@ -445,6 +453,8 @@
       "interrupted": "连接中断，结果可能不完整",
       "noDoneFrame": "已生成的内容保留在上方，可重新发送或刷新页面继续接收。",
       "greeting": "您好，我是配置助手",
+      "welcomeTagline": "我可以查询配置、创建导出任务，也能按条件导出数据。选择一个入口开始。",
+      "welcomePrompt": "也可以直接输入你的需求，发送前都可以修改。",
       "logAria": "对话消息",
       "storage": {
         "note": "对话只留本页签浏览器镜像与服务端 24 小时滑动记忆窗口，刷新可恢复、没有长期归档。"
