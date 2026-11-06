@@ -742,6 +742,13 @@
       "reason": "仅调整AI新对话入口标题、实际填入示例及中英文文案，不改变迁移数据、协议或工作流契约，D6无需更新。",
       "reviewedAt": "2026-11-06",
       "reviewer": "K3.1 Pro施工并复核"
+    },
+    {
+      "fingerprint": "sha256:66a6824edb22e904ea194a528f6b17d70b980145d11dea8ea0bc8a6f07d1ed04",
+      "status": "not-affected",
+      "reason": "仅修复取消驱动补偿并减少会话销毁Redis往返，保持迁移数据、协议、状态机与键面契约不变，D6无需更新。",
+      "reviewedAt": "2026-11-07",
+      "reviewer": "K3.1 Pro施工并复核"
     }
   ]
 }

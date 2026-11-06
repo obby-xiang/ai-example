@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
+  classifyCancelProbe,
   createLoadRunner,
   formatSseFrames,
   parseApiLoadConfig,
@@ -32,6 +33,8 @@ if (!Number.isInteger(modelConcurrencyConfigured) || modelConcurrencyConfigured 
 const timeoutMs = Number.parseInt(process.env.TIMEOUT_MS ?? '120000', 10)
 const SSE_EOF_RETRY_ATTEMPTS = 8
 const SSE_EOF_RETRY_DELAY_MS = 200
+const CANCEL_STATUS_POLL_ATTEMPTS = 180
+const CANCEL_STATUS_POLL_INTERVAL_MS = 250
 const outDir = path.resolve(process.env.OUT_DIR ?? 'verification-results/ai-core-coverage')
 const runPrefix = process.env.COVERAGE_PREFIX?.trim() || `core-${randomUUID()}`
 const apiLoadConfig = parseApiLoadConfig(process.env)
@@ -327,7 +330,7 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
 }
 
 async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scopeErrors = coreCleanupErrors,
-    eofRetry = 0) {
+    eofRetry = 0, drainToEof = false) {
   const started = Date.now()
   let reader = null
   let previousSeq = lastSeq ?? 0
@@ -336,10 +339,11 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
   let terminalSeen = false
   let httpStatus = null
   let cursor = lastSeq
-  let remainingEofRetries = recoverOnError && Number.isInteger(eofRetry) && eofRetry > 0 ? eofRetry : 0
+  let remainingEofRetries = Number.isInteger(eofRetry) && eofRetry > 0 ? eofRetry : 0
   const frames = []
+  const shouldRead = () => matched === null || drainToEof
   try {
-    while (matched === null) {
+    while (shouldRead()) {
       let buffer = ''
       const response = await fetch(`${base.toString().replace(/\/$/, '')}/api/ai/events/${runId}${cursor == null ? '' : `?lastSeq=${cursor}`}`, {
         headers: { ...headers(), Accept: 'text/event-stream' },
@@ -361,19 +365,19 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
         }
         if (recoverOnError) trackCreatedTaskFrame(frame)
         frames.push(frame)
-        if (predicate(frame)) matched = frame
+        if (matched === null && predicate(frame)) matched = frame
         recoverySeq = previousSeq
       }
       const processBufferedFrames = () => {
         let boundary
-        while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0 && matched === null) {
+        while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0 && shouldRead()) {
           const block = buffer.slice(0, boundary)
           buffer = buffer.slice(boundary).replace(/^\r?\n/, '')
           const frame = parseSseBlock(block)
           if (frame !== null) processFrame(frame)
         }
       }
-      while (matched === null) {
+      while (shouldRead()) {
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
@@ -381,7 +385,7 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
       }
       buffer += decoder.decode()
       processBufferedFrames()
-      if (matched === null && buffer.trim() !== '') {
+      if (shouldRead() && buffer.trim() !== '') {
         const frame = parseSseBlock(buffer)
         buffer = ''
         if (frame !== null) processFrame(frame)
@@ -396,7 +400,7 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
     }
     assert(matched !== null,
       `SSE predicate not reached; lastSeq=${recoverySeq}; frames=${formatSseFrames(frames)}`)
-    return { frames, matched, lastSeq: previousSeq, latencyMs: Date.now() - started }
+    return { frames, matched, lastSeq: previousSeq, latencyMs: Date.now() - started, drainedToEof: drainToEof }
   }
   catch (error) {
     if (httpStatus !== null && error !== null && (typeof error === 'object' || typeof error === 'function')
@@ -510,15 +514,16 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
 }
 
 async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErrors = coreCleanupErrors,
-    stage = 'unspecified') {
+    stage = 'unspecified', drainToEof = false, recoverOnError = true) {
   const started = Date.now()
   try {
-    const result = await readSseRaw(runId, lastSeq, predicate, true, scopeErrors, SSE_EOF_RETRY_ATTEMPTS)
+    const result = await readSseRaw(runId, lastSeq, predicate, recoverOnError, scopeErrors,
+      SSE_EOF_RETRY_ATTEMPTS, drainToEof)
     if (recordResult) {
       record('GET /api/ai/events/{runId}', {
         httpStatus: 200,
         latencyMs: result.latencyMs,
-        assertions: [`SSE ${result.matched.type}`],
+        assertions: [`SSE ${result.matched.type}`, ...(drainToEof ? [`batch drained to EOF at seq=${result.lastSeq}`] : [])],
         stage
       })
     }
@@ -536,6 +541,74 @@ async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErro
     }
     throw error
   }
+}
+
+async function waitForCancelStatus(runId, evidence) {
+  const probe = evidence.statusProbe
+  let lastObservation = null
+  for (let attempt = 1; attempt <= CANCEL_STATUS_POLL_ATTEMPTS; attempt += 1) {
+    const started = Date.now()
+    let response = null
+    try {
+      response = await request(`/api/ai/events/${runId}?probe=1`, { headers: { Accept: 'application/json' } })
+      const data = dataObject(response)
+      assert([200, 202, 503].includes(response.status), `cancel status probe unexpected HTTP ${response.status}: ${response.text}`)
+      if (response.status === 200) {
+        assert(data.ready === true && !response.contentType.includes('text/event-stream'),
+          'cancel status probe did not return ready JSON')
+      }
+      if (response.status === 202) assert(data.preparing === true, 'cancel status probe 202 was not preparing')
+      if (response.status === 503) assert(data.degraded === true, 'cancel status probe 503 was not marked degraded')
+      const degraded = response.status === 503 || data.degraded === true
+      const observation = {
+        attempt,
+        httpStatus: response.status,
+        latencyMs: response.latencyMs,
+        status: data.status ?? null,
+        ready: data.ready ?? null,
+        preparing: data.preparing ?? null,
+        degraded
+      }
+      lastObservation = observation
+      probe.trajectory.push(observation)
+      probe.degraded = probe.degraded || degraded
+      const outcome = classifyCancelProbe(observation)
+      probe.outcome = outcome
+      record('GET /api/ai/events/{runId}', {
+        httpStatus: response.status,
+        latencyMs: response.latencyMs,
+        assertions: [`cancel probe ${attempt}: ${outcome}; status=${observation.status ?? 'unknown'}; degraded=${degraded}`],
+        stage: 'after-cancel-status-probe'
+      })
+      if (outcome === 'CANCELLED' || outcome === 'OTHER_TERMINAL') {
+        probe.finalStatus = observation.status
+        evidence.runStatus = observation.status
+        return observation
+      }
+    }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      probe.error = message
+      record('GET /api/ai/events/{runId}', {
+        httpStatus: response?.status ?? null,
+        latencyMs: response?.latencyMs ?? Date.now() - started,
+        assertions: [],
+        error: `after-cancel-status-probe: ${message}`,
+        stage: 'after-cancel-status-probe'
+      })
+      throw error
+    }
+    if (attempt < CANCEL_STATUS_POLL_ATTEMPTS) await sleep(CANCEL_STATUS_POLL_INTERVAL_MS)
+  }
+  probe.timedOut = true
+  probe.outcome = classifyCancelProbe({ ...lastObservation, attemptsExhausted: true })
+  if (lastObservation?.status === 'SUSPENDED' && evidence.redisFlagWritten === true) {
+    throw new CoverageError(`取消已受理但未驱动：${CANCEL_STATUS_POLL_ATTEMPTS} 次 events probe 后仍为 SUSPENDED，redisFlagWritten=true，未读取到 done{cancelled:true}`)
+  }
+  if (probe.outcome === 'DEGRADED') {
+    throw new CoverageError(`cancel status probe degraded after ${CANCEL_STATUS_POLL_ATTEMPTS} attempts; no terminal status confirmed`)
+  }
+  throw new CoverageError(`cancel status probe timed out after ${CANCEL_STATUS_POLL_ATTEMPTS} attempts; last status=${lastObservation?.status ?? 'unknown'}`)
 }
 
 function formOf(frame) {
@@ -805,6 +878,7 @@ function buildLoadUnits({ sessionId, runId }) {
       const data = dataObject(response)
       assert(data.ready === true && !response.contentType.includes('text/event-stream'),
         'events probe did not return ready JSON')
+      assert(data.status === 'CANCELLED', `shared terminal run status was ${data.status ?? 'unknown'}`)
     }))
   units.set('GET /api/ai/events/{runId} [sse-replay]', async () => {
     try {
@@ -1076,6 +1150,31 @@ async function runIndependentModelScenarios() {
 
 const mainSession = `${runPrefix}-main-${randomUUID()}`
 const feedbackMessageId = `${runPrefix}-feedback-${randomUUID()}`
+const cancelEvidence = {
+  runId: null,
+  httpStatus: null,
+  statusBeforeCancel: null,
+  parkedResume: null,
+  cancelFinalize: null,
+  redisFlagWritten: null,
+  alreadyCancelled: null,
+  degraded: null,
+  suspendedBatch: { matched: null, frames: [], lastSeq: null, drainedToEof: false },
+  statusProbe: {
+    maxAttempts: CANCEL_STATUS_POLL_ATTEMPTS,
+    intervalMs: CANCEL_STATUS_POLL_INTERVAL_MS,
+    trajectory: [],
+    outcome: 'NOT_RUN',
+    finalStatus: null,
+    degraded: false,
+    timedOut: false,
+    error: null
+  },
+  runStatus: null,
+  terminalFrame: null,
+  terminalFrames: [],
+  cancelFlag: null
+}
 let feedbackCreated = false
 
 async function main() {
@@ -1245,25 +1344,51 @@ async function main() {
       return 'real navigate_to frontend result accepted'
     })
     return callSse(mainRun, confirmed.lastSeq, (frame) => frame.type === 'suspended',
-      true, coreCleanupErrors, 'after-frontend-result-suspended')
+      true, coreCleanupErrors, 'after-frontend-result-suspended', true)
   })
+  cancelEvidence.runId = mainRun
+  cancelEvidence.suspendedBatch = {
+    matched: navigationResponse.matched,
+    frames: navigationResponse.frames,
+    lastSeq: navigationResponse.lastSeq,
+    drainedToEof: navigationResponse.drainedToEof
+  }
 
   await call('POST /api/ai/cancel/{runId}', `/api/ai/cancel/${mainRun}`, { method: 'POST' }, async (response) => {
     ok(response)
     const data = dataObject(response)
+    Object.assign(cancelEvidence, {
+      httpStatus: response.status,
+      statusBeforeCancel: data.statusBeforeCancel ?? null,
+      parkedResume: data.parkedResume ?? null,
+      cancelFinalize: data.cancelFinalize ?? null,
+      redisFlagWritten: data.redisFlagWritten ?? null,
+      alreadyCancelled: data.alreadyCancelled ?? null,
+      degraded: data.degraded ?? null
+    })
     assert(data.cancelled === true, 'run cancellation not accepted')
-    await callSse(mainRun, navigationResponse.lastSeq, (frame) => {
+    assert(data.alreadyCancelled === false, 'first cancellation unexpectedly reported alreadyCancelled=true')
+    await waitForCancelStatus(mainRun, cancelEvidence)
+    const terminal = await callSse(mainRun, navigationResponse.lastSeq, (frame) => {
       if (frame.type !== 'done' && frame.type !== 'error') return false
       assert(frame.type === 'done' && frame.cancelled === true,
         'cancel accepted but terminal frame was not confirmed cancelled')
       return true
-    }, true, coreCleanupErrors, 'after-cancel-terminal')
+    }, true, coreCleanupErrors, 'after-cancel-terminal', false, false)
+    cancelEvidence.terminalFrame = terminal.matched
+    cancelEvidence.terminalFrames = terminal.frames
     activeRuns.delete(mainRun)
-    return `cancelled ${mainRun}`
+    return `cancelled ${mainRun}; runStatus=${cancelEvidence.runStatus}; done.cancelled=true`
   })
   await call('GET /api/ai/cancel/{runId}', `/api/ai/cancel/${mainRun}`, {}, async (response) => {
     ok(response)
     const data = dataObject(response)
+    cancelEvidence.cancelFlag = {
+      redisFlag: data.redisFlag ?? null,
+      localFlag: data.localFlag ?? null,
+      cancelState: data.cancelState ?? null,
+      degraded: data.degraded ?? null
+    }
     assert(data.redisFlag === true || data.localFlag === true, 'cancel flag missing')
     return `cancel status ${mainRun}`
   })
@@ -1454,6 +1579,19 @@ finally {
     cleanupErrors,
     coreCleanupErrors,
     fatalError,
+    cancelEvidence,
+    redisVerification: {
+      directlyVerifiedByCoreCoverage: false,
+      owner: 'B 套件（scripts/perf/redis）',
+      note: 'core-coverage 仅保留 HTTP 业务断言、Run 状态和真实终帧，不直连 Redis，也不伪称自身完成 Redis 直验；以下键面与清理语义由 B 套件负责。',
+      scope: [
+        '13 个 run 键',
+        'session current/runs/active 索引',
+        'transcript/memory/context/guard/pending',
+        '跨身份不误删',
+        'post-cleanup 残留'
+      ]
+    },
     deleteEvidenceDependencies: [
       'scripts/perf/redis/perf_redis/scenarios.py:226-233 (repeat_delete and concurrent_delete)',
       'scripts/perf/redis/perf_redis/verify.py:248-337 (owned keys, guard/pending and gen/ver final state)',

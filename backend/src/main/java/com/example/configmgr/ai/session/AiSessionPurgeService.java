@@ -671,29 +671,48 @@ public class AiSessionPurgeService {
 		String transcriptKey = com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId);
 		String transcriptOrderKey = com.example.configmgr.ai.history.ConversationTranscriptStore.orderKey(sessionId);
 		String transcriptMetaKey = com.example.configmgr.ai.history.ConversationTranscriptStore.metaKey(sessionId);
-		boolean transcriptDataExisted = Boolean.TRUE.equals(this.redis.hasKey(transcriptKey));
-		boolean transcriptExisted = transcriptDataExisted || Boolean.TRUE.equals(this.redis.hasKey(transcriptOrderKey))
-				|| Boolean.TRUE.equals(this.redis.hasKey(transcriptMetaKey))
-				|| Boolean.TRUE.equals(this.redis.hasKey(
-						com.example.configmgr.ai.history.ConversationTranscriptStore.truncatedKey(sessionId)));
+		String transcriptTruncatedKey = com.example.configmgr.ai.history.ConversationTranscriptStore
+				.truncatedKey(sessionId);
+		List<String> existenceKeys = List.of(transcriptKey, transcriptOrderKey, transcriptMetaKey, transcriptTruncatedKey,
+				this.runStore.contextKey(sessionId), this.runStore.contextLedgerKey(sessionId),
+				TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId), this.runStore.contextEventsKey(sessionId),
+				this.runStore.sessionCurrentKey(sessionId), AiSessionService.keyFor(sessionId),
+				CreateTaskDraftStore.sessionKey(sessionId));
+		List<Boolean> existence = pipelineHasKeys(existenceKeys);
+		boolean transcriptDataExisted;
+		boolean transcriptExisted;
+		ContextTargets context;
+		boolean sessionCurrentExisted;
+		boolean sessionRecordExisted;
+		boolean draftExisted;
+		if (existence == null) {
+			transcriptDataExisted = Boolean.TRUE.equals(this.redis.hasKey(transcriptKey));
+			transcriptExisted = transcriptDataExisted || Boolean.TRUE.equals(this.redis.hasKey(transcriptOrderKey))
+					|| Boolean.TRUE.equals(this.redis.hasKey(transcriptMetaKey))
+					|| Boolean.TRUE.equals(this.redis.hasKey(transcriptTruncatedKey));
+			context = new ContextTargets(
+					Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextKey(sessionId))),
+					Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))),
+					Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))),
+					Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextEventsKey(sessionId))));
+			sessionCurrentExisted = Boolean.TRUE.equals(
+					this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId)));
+			sessionRecordExisted = Boolean.TRUE.equals(this.redis.hasKey(AiSessionService.keyFor(sessionId)));
+			draftExisted = Boolean.TRUE.equals(this.redis.hasKey(CreateTaskDraftStore.sessionKey(sessionId)));
+		}
+		else {
+			transcriptDataExisted = existence.get(0);
+			transcriptExisted = existence.subList(0, 4).stream().anyMatch(Boolean::booleanValue);
+			context = new ContextTargets(existence.get(4), existence.get(5), existence.get(6), existence.get(7));
+			sessionCurrentExisted = existence.get(8);
+			sessionRecordExisted = existence.get(9);
+			draftExisted = existence.get(10);
+		}
 		long transcriptEntries = 0L;
 		if (transcriptDataExisted) {
 			Long size = this.redis.opsForZSet().zCard(transcriptOrderKey);
 			transcriptEntries = size == null ? 0L : size;
 		}
-
-		ContextTargets context = new ContextTargets(
-				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextKey(sessionId))),
-				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))),
-				Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))),
-				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextEventsKey(sessionId))));
-
-		boolean sessionCurrentExisted = Boolean.TRUE.equals(
-				this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId)));
-		boolean sessionRecordExisted = Boolean.TRUE.equals(
-				this.redis.hasKey(AiSessionService.keyFor(sessionId)));
-		// 会话级 create_task 候选草案（ai:ctdraft，字段 = taskId）：没有独立索引，存在即计入 found
-		boolean draftExisted = Boolean.TRUE.equals(this.redis.hasKey(CreateTaskDraftStore.sessionKey(sessionId)));
 
 		List<FormAttachmentStore.Attachment> attachmentList = this.attachments.findBySessionId(sessionId);
 		SessionPurgeDatabase.Snapshot db = snapshotFeedback(sessionId);
@@ -754,6 +773,29 @@ public class AiSessionPurgeService {
 			return redisRepository.stagingKeys(sessionId);
 		}
 		return List.of();
+	}
+
+	private List<Boolean> pipelineHasKeys(List<String> keys) {
+		try {
+			List<Object> results = this.redis.executePipelined((RedisCallback<Object>) connection -> {
+				for (String key : keys) {
+					connection.exists(key.getBytes(StandardCharsets.UTF_8));
+				}
+				return null;
+			});
+			if (results == null || results.size() < keys.size()) {
+				return null;
+			}
+			List<Boolean> out = new ArrayList<>(keys.size());
+			for (int index = 0; index < keys.size(); index++) {
+				out.add(Boolean.TRUE.equals(results.get(index)));
+			}
+			return out;
+		}
+		catch (RuntimeException ex) {
+			log.debug("Session purge existence pipeline failed; using ordered reads: {}", rootMessage(ex));
+			return null;
+		}
 	}
 
 	// ── 活跃 run：取消 + 等终态 ──────────────────────────────────────────────

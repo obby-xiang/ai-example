@@ -229,6 +229,21 @@ public class SessionPurgePendingStore {
 			return 1
 			""", Long.class);
 
+	private static final RedisScript<Long> EXECUTION_RENEW = new DefaultRedisScript<>("""
+			-- PURGE_EXECUTION_RENEW
+			local raw = redis.call('GET', KEYS[1])
+			if not raw then return 0 end
+			local ok, rec = pcall(cjson.decode, raw)
+			if not ok or type(rec) ~= 'table' then return 0 end
+			if rec['purgeId'] ~= ARGV[3] or rec['executionOwner'] ~= ARGV[1]
+			  or tonumber(rec['executionEpoch']) ~= tonumber(ARGV[2]) then return 0 end
+			if (tonumber(rec['leaseExpiresAtMs']) or 0) <= tonumber(ARGV[4]) then return 0 end
+			rec['leaseExpiresAtMs'] = tonumber(ARGV[4]) + tonumber(ARGV[5])
+			if ARGV[6] == '1' then rec['phase'] = ARGV[7] else rec['phase'] = nil end
+			redis.call('SET', KEYS[1], cjson.encode(rec))
+			return 1
+			""", Long.class);
+
 	private static final RedisScript<Long> EXECUTION_DEL = new DefaultRedisScript<>("""
 			-- PURGE_EXECUTION_DEL
 			local raw = redis.call('GET', KEYS[1])
@@ -322,14 +337,10 @@ public class SessionPurgePendingStore {
 	}
 
 	public boolean renew(Execution execution, String phase, long nowMs, long leaseTtlMs) {
-		Pending pending = ownedPending(execution);
-		if (pending == null) {
-			return false;
-		}
-		Pending next = new Pending(pending.sessionId(), pending.purgeId(), pending.requestedBy(), pending.attempts(),
-				pending.nextAtMs(), pending.createdAtMs(), pending.lastError(), pending.verifyAtMs(), pending.tenantId(),
-				pending.userId(), pending.executionOwner(), pending.executionEpoch(), nowMs + leaseTtlMs, phase);
-		return writeExecution(execution, next, nowMs, true);
+		Long renewed = this.redis.execute(EXECUTION_RENEW, List.of(pendingKey(execution.sessionId())), execution.owner(),
+				Long.toString(execution.epoch()), execution.purgeId(), Long.toString(nowMs), Long.toString(leaseTtlMs),
+				phase == null ? "0" : "1", phase == null ? "" : phase);
+		return renewed != null && renewed > 0L;
 	}
 
 	public boolean recordFailure(Execution execution, String error) {

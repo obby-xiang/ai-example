@@ -85,6 +85,20 @@ export function shouldRetrySseEof(matched, eofRetryRemaining, terminalSeen = fal
     && Number.isInteger(eofRetryRemaining) && eofRetryRemaining > 0
 }
 
+const TERMINAL_RUN_STATUSES = new Set(['DONE', 'FAILED', 'CANCELLED'])
+
+/**
+ * 取消后的 events probe 分类。degraded 优先于状态字段，避免把不可信快照当成终态；
+ * 非终态在预算耗尽时明确归为 TIMEOUT，由调用方保留完整轨迹并决定失败文案。
+ */
+export function classifyCancelProbe({ status = null, degraded = false, attemptsExhausted = false } = {}) {
+  if (degraded === true) return 'DEGRADED'
+  const normalized = typeof status === 'string' ? status.trim().toUpperCase() : ''
+  if (normalized === 'CANCELLED') return 'CANCELLED'
+  if (TERMINAL_RUN_STATUSES.has(normalized)) return 'OTHER_TERMINAL'
+  return attemptsExhausted === true ? 'TIMEOUT' : 'NON_TERMINAL'
+}
+
 /** 帧的稳定文本形态：type:name:seq，缺失字段用 - 占位。 */
 export function formatSseFrame(frame) {
   const type = frame?.type ?? 'unknown'

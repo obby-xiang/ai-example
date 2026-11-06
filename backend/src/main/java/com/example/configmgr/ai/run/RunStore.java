@@ -3039,6 +3039,51 @@ public class RunStore {
 		// 同 runId 的其它租户/用户成员原样保留。
 		// 13 键已经删成功时，索引清理失败<b>不得</b>把整次删除报成失败（会误报"13 键删除失败"并
 		// 把已删净的轮次重新 deferred）。stale 成员由 prune / 恢复面按快照缺失跳过，best-effort 即可。
+		if (!cleanupRunIndexesPipelined(runId, snapshot, identity)) {
+			cleanupRunIndexesSeparately(runId, snapshot, identity);
+		}
+	}
+
+	private boolean cleanupRunIndexesPipelined(String runId, RunSnapshot snapshot, TenantUser identity) {
+		List<IndexRemoval> zsetRemovals = new ArrayList<>(4);
+		if (identity != null) {
+			zsetRemovals.add(new IndexRemoval(RECOVERY_DUE_INDEX, RunKeyScope.indexMember(identity, runId)));
+			zsetRemovals.add(new IndexRemoval(identityRecoveryDueKey(identity.tenantId(), identity.userId()), runId));
+			zsetRemovals.add(new IndexRemoval(runListIndexKey(identity.tenantId(), identity.userId()), runId));
+		}
+		String sessionId = snapshot == null ? null : snapshot.getSessionId();
+		String sessionRunsKey = null;
+		if (sessionId != null && !sessionId.isBlank()) {
+			zsetRemovals.add(new IndexRemoval(sessionActiveKey(sessionId), runId));
+			long tenantId = identity == null ? snapshot.getTenantId() : identity.tenantId();
+			long userId = identity == null ? snapshot.getUserId() : identity.userId();
+			sessionRunsKey = sessionRunsKey(sessionId, tenantId, userId);
+		}
+		if (zsetRemovals.isEmpty() && sessionRunsKey == null) {
+			return true;
+		}
+		int operationCount = zsetRemovals.size() + (sessionRunsKey == null ? 0 : 1);
+		try {
+			String runsKey = sessionRunsKey;
+			List<Object> results = this.redis.executePipelined((RedisCallback<Object>) connection -> {
+				for (IndexRemoval removal : zsetRemovals) {
+					connection.zRem(removal.key().getBytes(StandardCharsets.UTF_8),
+							removal.member().getBytes(StandardCharsets.UTF_8));
+				}
+				if (runsKey != null) {
+					connection.sRem(runsKey.getBytes(StandardCharsets.UTF_8), runId.getBytes(StandardCharsets.UTF_8));
+				}
+				return null;
+			});
+			return results != null && results.size() >= operationCount;
+		}
+		catch (RuntimeException ex) {
+			log.debug("pipelined run index cleanup failed runId={} (using separate cleanup): {}", runId, ex.getMessage());
+			return false;
+		}
+	}
+
+	private void cleanupRunIndexesSeparately(String runId, RunSnapshot snapshot, TenantUser identity) {
 		if (identity != null) {
 			try {
 				this.redis.opsForZSet().remove(RECOVERY_DUE_INDEX, RunKeyScope.indexMember(identity, runId));
@@ -3051,7 +3096,6 @@ public class RunStore {
 			}
 		}
 		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
-			// N1：活跃有序索引同样摘成员（终态清理失败时它也只会成为下一轮被摘掉的 stale 候选）。
 			forgetActiveRun(snapshot.getSessionId(), runId);
 			long tenantId = identity == null ? snapshot.getTenantId() : identity.tenantId();
 			long userId = identity == null ? snapshot.getUserId() : identity.userId();
@@ -3059,11 +3103,13 @@ public class RunStore {
 				this.redis.opsForSet().remove(sessionRunsKey(snapshot.getSessionId(), tenantId, userId), runId);
 			}
 			catch (Exception ex) {
-				// 只留 stale 成员：会话销毁枚举时会按快照归属过滤，不会误删他会话。
 				log.warn("session->run index member cleanup failed sessionId={} runId={} (stale member left to TTL/reconcile): {}",
 						snapshot.getSessionId(), runId, ex.getMessage());
 			}
 		}
+	}
+
+	private record IndexRemoval(String key, String member) {
 	}
 
 	// ── 续跑权租约（B23L1 批②a；ResumeService 接线归批②b） ──────────────────
@@ -3531,6 +3577,14 @@ public class RunStore {
 	}
 
 	private List<PendingToolCall> readPendings(String runId, boolean lenient) {
+		List<Map<Object, Object>> batch = readPendingHashes(runId);
+		if (batch != null) {
+			return decodePendings(batch.get(0), batch.get(1), batch.get(2));
+		}
+		return readPendingsSeparately(runId, lenient);
+	}
+
+	private List<PendingToolCall> readPendingsSeparately(String runId, boolean lenient) {
 		Map<Object, Object> all;
 		try {
 			all = this.redis.opsForHash().entries(pendingKey(runId));
@@ -3546,6 +3600,42 @@ public class RunStore {
 		}
 		Map<Object, Object> markers = requestMarkers(runId);
 		Map<Object, Object> decisions = lenient ? decisionMarkersLenient(runId) : decisionMarkers(runId);
+		return decodePendings(all, markers, decisions);
+	}
+
+	private List<Map<Object, Object>> readPendingHashes(String runId) {
+		List<String> keys = List.of(pendingKey(runId), reqKey(runId), decidedKey(runId));
+		try {
+			List<Object> results = this.redis.executePipelined((RedisCallback<Object>) connection -> {
+				for (String key : keys) {
+					connection.hGetAll(key.getBytes(StandardCharsets.UTF_8));
+				}
+				return null;
+			});
+			if (results == null || results.size() < keys.size()) {
+				return null;
+			}
+			List<Map<Object, Object>> out = new ArrayList<>(keys.size());
+			for (int index = 0; index < keys.size(); index++) {
+				if (!(results.get(index) instanceof Map<?, ?> entries)) {
+					return null;
+				}
+				Map<Object, Object> normalized = new LinkedHashMap<>();
+				for (Map.Entry<?, ?> entry : entries.entrySet()) {
+					normalized.put(asString(entry.getKey()), asString(entry.getValue()));
+				}
+				out.add(normalized);
+			}
+			return out;
+		}
+		catch (RuntimeException ex) {
+			log.debug("pipelined pending/marker read failed runId={} (using separate reads): {}", runId, ex.getMessage());
+			return null;
+		}
+	}
+
+	private List<PendingToolCall> decodePendings(Map<Object, Object> all, Map<Object, Object> markers,
+			Map<Object, Object> decisions) {
 		List<PendingToolCall> out = new ArrayList<>();
 		for (Map.Entry<Object, Object> entry : all.entrySet()) {
 			try {

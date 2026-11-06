@@ -1140,19 +1140,38 @@ public class AiController {
 		// 这条竞态就是 GF4 / W-01..W-22 / H-10 / S-11 / T-13 的"done 缺失"。
 		if (snapshot != null && this.properties.getPark().isEnabled()
 				&& RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+			// 已确认取消且仍有 PENDING：重挂只负责把收尾交棒给既有取消执行体，不走普通到期/续跑，
+			// 也不在这里另写 done。finalizer 会重取租约并经 ResumeService.cancelConfirmed 幂等收尾。
+			// cancelledPending 一经确立就直接收流，不再复读 PENDING：同步 finalizer 可能已把它结算，
+			// 后续读取不得把这条取消分支导向普通 triggerResumeForParked。
+			boolean cancelledPending = isCancelledFlag(runId) && stillWaitingForInput(runId);
+			if (cancelledPending && this.cancelFinalizer != null) {
+				try {
+					boolean handedOff = this.cancelFinalizer.handOff(runId, "CANCEL_REATTACH_PENDING");
+					log.info("reattach handed off cancelled pending run runId={} handedOff={}", runId, handedOff);
+				}
+				catch (RuntimeException ex) {
+					log.warn("reattach cancel finalizer hand-off failed runId={} error={}", runId, ex.getMessage());
+				}
+			}
 			// ===== F2：重挂也是"任实例可消费 expiresAt"的入口 =====
 			// park 后的到期收敛原来只有原实例进程内定时器；实例被杀后重挂方只看到 PENDING 就
 			// 收流/等待，条目永远不收敛。这里在"是否还在等人"之前先用持久化 expiresAt 收一次
 			// （既有 expireFrontend + 决策 guard；确认门/表单无上限，不会被消费）。
 			int expired = 0;
-			try {
-				expired = this.confirmGate.convergeExpiredParkedFrontend(runId);
+			if (!cancelledPending) {
+				try {
+					expired = this.confirmGate.convergeExpiredParkedFrontend(runId);
+				}
+				catch (RuntimeException ex) {
+					log.warn("reattach failed to consume expired park entries runId={} (treating as still waiting, subscription kept) error={}", runId,
+							ex.getMessage());
+				}
 			}
-			catch (RuntimeException ex) {
-				log.warn("reattach failed to consume expired park entries runId={} (treating as still waiting, subscription kept) error={}", runId,
-						ex.getMessage());
+			if (cancelledPending) {
+				out.completeSubscriptions();
 			}
-			if (expired > 0 && !stillWaitingForInput(runId)) {
+			else if (expired > 0 && !stillWaitingForInput(runId)) {
 				// 到期收敛已派发一次续跑：保留订阅，让随后产出的 done/error 能从这条连接到达。
 				log.info("reattach consumed {} expired frontend entries runId={} (resume dispatched, keeping connection for terminal frame)", expired,
 						runId);
@@ -1352,13 +1371,13 @@ public class AiController {
 				: "这一轮正在准备中（压缩上下文），请稍后重试。";
 	}
 
-	/** 取消旗标（只用于"准备中"响应体的 additive 键；读不出来按未取消处理，不阻断重挂）。 */
+	/** 取消旗标是否明确为 CANCELLED；读不出来按未取消处理，不阻断调用方原有路径。 */
 	private boolean isCancelledFlag(String runId) {
 		try {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading cancel flag failed runId={} (continuing as not cancelled, returning preparing) error={}", runId, ex.getMessage());
+			log.debug("reading cancel flag failed runId={} (continuing as not cancelled) error={}", runId, ex.getMessage());
 			return false;
 		}
 	}

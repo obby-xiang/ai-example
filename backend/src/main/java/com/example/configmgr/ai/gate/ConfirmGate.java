@@ -2582,7 +2582,7 @@ public class ConfirmGate {
 
 	/**
 	 * 派发失败的一次<b>有界</b>重试（{@link #isRetriableDispatchOutcome}：池满 / 会话占用 /
-	 * 取消状态不可确认），间隔按<b>指数退避</b>（I3）。
+	 * 取消状态不可确认；以及已确认取消时的 {@code IN_PROGRESS}），间隔按<b>指数退避</b>（I3）。
 	 *
 	 * <p>与 {@link #scheduleLeaseRetry} 的区别：那条救的是"holder 死了但没释放租约"（等 TTL），
 	 * 本条救的是"决策已落库、驱动权暂时拿不到"（池满 / 同会话另一轮在跑）—— 两者都用同一个
@@ -2608,6 +2608,10 @@ public class ConfirmGate {
 	 * {@code CANCEL_STATE_UNKNOWN} 的预算链提前终结。
 	 */
 	private void retryDispatch(String runId) {
+		retryDispatch(runId, false);
+	}
+
+	private void retryDispatch(String runId, boolean cancelFinalizeInProgress) {
 		int max = this.properties.getPark().getMaxDispatchRetries();
 		if (max <= 0) {
 			return;
@@ -2622,7 +2626,7 @@ public class ConfirmGate {
 			if (attempt == max + 1) {
 				log.error("resume dispatch still failed after {} bounded retries in this trigger cycle (decision persisted; card stays SUSPENDED and the next explicit interaction/reattach resets the count; startup scan calls ResumeService directly and does not reset this budget) runId={}",
 						max, runId);
-				endUnresolvedStream(runId, max);
+				endUnresolvedStream(runId, max, cancelFinalizeInProgress);
 			}
 			return;
 		}
@@ -2647,7 +2651,7 @@ public class ConfirmGate {
 					// 预算链提前终结，轮次永久停在 SUSPENDED（W-21 的收尾形态）。
 					// 只认这一个类型：值损坏等永久故障仍是 IllegalStateException，落到下面的分支不重试。
 					log.warn("resume re-dispatch hit a transient state read failure; continuing with the next tick of this cycle runId={} error={}", runId, ex.getMessage());
-					retryDispatch(runId);
+					retryDispatch(runId, cancelFinalizeInProgress);
 				}
 				catch (Exception ex) {
 					log.warn("resume re-dispatch threw runId={} error={}", runId, ex.getMessage());
@@ -2666,8 +2670,9 @@ public class ConfirmGate {
 	 *
 	 * <h2>为什么要发（而不是只收流）</h2>
 	 * 走到这里的事实是：决策/回灌<b>已落库</b>，但这一轮没有任何可确认的驱动方（取消状态读不出来
-	 * ⇒ 续跑 fail-closed），有界重派发已经用尽。连接若只是静静挂着，客户端既拿不到终帧，也拿不到
-	 * "这一轮为什么停在这里"的任何信号 —— 只能等自己的超时（服务端 emitter 无传输超时）。
+	 * ⇒ 续跑 fail-closed，或已确认取消却持续 {@code IN_PROGRESS}），有界重派发已经用尽。
+	 * 连接若只是静静挂着，客户端既拿不到终帧，也拿不到"这一轮为什么停在这里"的任何信号 ——
+	 * 只能等自己的超时（服务端 emitter 无传输超时）。
 	 *
 	 * <h2>为什么不是 done / 不是新的错误体系</h2>
 	 * <ul>
@@ -2677,9 +2682,10 @@ public class ConfirmGate {
 	 * <li><b>不入归档</b>：只投递给当下挂着的连接（{@link SseChatEmitter#unresolvedEnding}）。
 	 *     归档里写终帧会把这一轮的帧流判死（回放即收尾、取消收尾跳过 {@code done{cancelled:true}}），
 	 *     而这一轮其实仍可被显式恢复；</li>
-	 * <li><b>复用既有词汇</b>：帧语义 = 中性的"未确认"（{@code unconfirmed=true}），机器码复用
-	 *     {@code AI_REDIS_UNAVAILABLE} + {@code reason=CANCEL_STATE_UNKNOWN}（与
-	 *     {@code ResumeService} 的取消状态不可确认结局同一口径）。</li>
+	 * <li><b>复用既有词汇</b>：帧语义 = 中性的"未确认"（{@code unconfirmed=true}）。普通耗尽仍用
+	 *     {@code AI_REDIS_UNAVAILABLE} + {@code reason=CANCEL_STATE_UNKNOWN}；已确认取消的持续
+	 *     {@code IN_PROGRESS} 耗尽改用 {@code AI_RESUME_FAILED} +
+	 *     {@code reason=CANCEL_FINALIZE_IN_PROGRESS}，不再把明确取消误报成取消状态未知。</li>
 	 * </ul>
 	 *
 	 * <p><b>一次</b>由调用方的 {@code attempt == max+1} 保证：同一周期的其它链、以及已排期任务的
@@ -2688,7 +2694,7 @@ public class ConfirmGate {
 	 * <p>没有连接时什么都不做（没有要解开的等待，也不留归档痕迹）；下一次重挂/显式恢复会重新拥有
 	 * 完整预算并重新派发。
 	 */
-	private void endUnresolvedStream(String runId, int attempts) {
+	private void endUnresolvedStream(String runId, int attempts, boolean cancelFinalizeInProgress) {
 		SseChatEmitter out = this.registry.find(runId);
 		if (out == null || out.subscriberCount() == 0) {
 			return;
@@ -2699,17 +2705,19 @@ public class ConfirmGate {
 				out.completeSubscriptions();
 				return;
 			}
+			String code = cancelFinalizeInProgress ? ErrorCodes.AI_RESUME_FAILED : ErrorCodes.AI_REDIS_UNAVAILABLE;
+			String reason = cancelFinalizeInProgress ? "CANCEL_FINALIZE_IN_PROGRESS" : "CANCEL_STATE_UNKNOWN";
 			Map<String, Object> extra = new LinkedHashMap<>();
-			extra.put("reason", "CANCEL_STATE_UNKNOWN");
+			extra.put("reason", reason);
 			extra.put("unconfirmed", true);
 			extra.put("retryable", true);
 			extra.put("degraded", true);
 			extra.put("recoverable", true);
 			extra.put("status", RunSnapshot.SUSPENDED);
 			extra.put("attempts", attempts);
-			int delivered = out.unresolvedEnding(ErrorCodes.AI_REDIS_UNAVAILABLE, resumeUnresolvedMessage(), extra);
-			log.info("resume dispatch budget exhausted: neutral degraded outcome sent to {} connections and streams closed runId={} (snapshot stays {}; explicit resume still possible)",
-					delivered, runId, RunSnapshot.SUSPENDED);
+			int delivered = out.unresolvedEnding(code, resumeUnresolvedMessage(), extra);
+			log.info("resume dispatch budget exhausted: neutral degraded outcome sent to {} connections and streams closed runId={} reason={} (snapshot stays {}; explicit resume still possible)",
+					delivered, runId, reason, RunSnapshot.SUSPENDED);
 		}
 		catch (RuntimeException ex) {
 			log.warn("failed to deliver degraded outcome after resume budget exhaustion (stream still closed; no dangling connection) runId={} error={}", runId, ex.getMessage());
@@ -2837,6 +2845,17 @@ public class ConfirmGate {
 				// L-19 同族：这里<b>不还租</b>。排队窗口里出现的等待方（帧已发、await 刚登记）
 				// 刚刚以可重入方式拿到了同一任租约 —— 它才是现在管这一轮的人。还了就等于在
 				// "等待方持租"的时刻把它的租约删掉（它随后交棒时 fencing 写会退化成 plain SET）。
+				// 已确认取消不能再按"等待方会收尾"放弃：交棒给既有取消执行体，由它有界重试并复用
+				// ResumeService.cancelConfirmed 的租约、写门与终帧幂等；普通续跑仍直接放弃。
+				if (this.cancelFinalizer != null && isCancelConfirmed(runId)) {
+					try {
+						boolean handedOff = this.cancelFinalizer.handOff(runId, "CANCEL_RESUME_ACTIVE_LATCH");
+						log.info("cancel resume handed off after active-latch recheck runId={} handedOff={}", runId, handedOff);
+					}
+					catch (RuntimeException ex) {
+						log.warn("cancel resume hand-off failed after active-latch recheck runId={} error={}", runId, ex.getMessage());
+					}
+				}
 				log.info("dead-card resume abandoned runId={} outcome=ACTIVE_LATCH_IN_PROCESS (recheck found an active wait in this process; lease left to the waiter, not returned)", runId);
 				return;
 			}
@@ -2855,10 +2874,14 @@ public class ConfirmGate {
 			// W-21：取消状态"此刻不可确认"同属这一类（不是终态、也不是有人接管）——
 			// 一次失败就永久搁置会让已结算的前端工具没有物化路径（STATE_UNKNOWN 不在其列：可能是
 			// 永久性条目损坏，见 isRetriableDispatchOutcome）。
+			// 已确认取消的 IN_PROGRESS 也只表示这一拍互斥未抢到，进入同一份有界预算；普通批准不变。
+			// 该标记随重试链传递，耗尽时选择取消收尾未获驱动出口，而非 CANCEL_STATE_UNKNOWN。
 			// 注意：这里<b>不清零</b>计数（成功/终态也不清）—— 清零点只有外部触发入口，
 			// 否则耗尽的链会被"某个结局"悄悄续命（见 dispatchRetries 字段注释）。
-			if (result != null && isRetriableDispatchOutcome(result.outcome())) {
-				retryDispatch(runId);
+			boolean cancelledInProgress = result != null && result.outcome() == ResumeService.Outcome.IN_PROGRESS
+					&& isCancelConfirmed(runId);
+			if (result != null && (isRetriableDispatchOutcome(result.outcome()) || cancelledInProgress)) {
+				retryDispatch(runId, cancelledInProgress);
 			}
 			if (lease == null) {
 				return;
@@ -2891,6 +2914,17 @@ public class ConfirmGate {
 		catch (Exception ex) {
 			log.error("dead-card resume threw runId={}", runId, ex);
 			releaseLeaseQuietly(lease, runId, fresh);
+		}
+	}
+
+	/** 只有权威旗标明确为 CANCELLED 才启用取消补偿；UNKNOWN/读失败均保持普通续跑语义。 */
+	private boolean isCancelConfirmed(String runId) {
+		try {
+			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
+		}
+		catch (RuntimeException ex) {
+			log.debug("cancel state unreadable during resume compensation runId={} error={}", runId, ex.getMessage());
+			return false;
 		}
 	}
 
