@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卡片样式方案 · 4 选对比</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        ink: '#1f2328',
+        sub: '#57606a',
+        mute: '#8b949e',
+        line: '#e3e6ea',
+        soft: '#f6f7f9'
+      },
+      fontFamily: {
+        sans: ['-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'sans-serif']
+      }
+    }
+  }
+};
+</script>
+</head>
+<body class="m-0 bg-[#f3f4f6] font-sans text-[#1f2328] antialiased">
+
+<header class="border-b border-[#e3e6ea] bg-white">
+  <div class="mx-auto flex max-w-[1640px] flex-wrap items-center gap-x-3 gap-y-2 px-5 py-3">
+    <h1 class="m-0 text-[13.5px] font-semibold leading-[1.4]">卡片样式方案</h1>
+    <span class="text-[11.5px] leading-[1.4] text-[#8b949e]">同一内容 · 4 种外壳</span>
+    <div class="ml-auto flex items-center gap-2">
+      <span class="text-[11px] text-[#8b949e]">面板</span>
+      <div class="flex items-center rounded-lg border border-[#e3e6ea] bg-[#f6f7f9] p-[3px]" role="group" aria-label="面板宽度">
+        <button type="button" data-width="wide" aria-pressed="true" class="rounded-md px-2.5 py-1 text-[11px] font-medium text-[#667085] transition-colors duration-150 aria-pressed:bg-white aria-pressed:text-[#1f2328] aria-pressed:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">宽</button>
+        <button type="button" data-width="narrow" aria-pressed="false" class="rounded-md px-2.5 py-1 text-[11px] font-medium text-[#667085] transition-colors duration-150 aria-pressed:bg-white aria-pressed:text-[#1f2328] aria-pressed:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">窄</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-[1640px] px-5 py-5">
+  <div id="board" data-panel="wide" class="group grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
+
+    <!-- ============ A 项目原味 ============ -->
+    <section aria-label="方案 A 项目原味">
+      <div class="mb-2.5">
+        <div class="flex items-baseline gap-2">
+          <span class="text-[11px] font-semibold text-[#2563eb]">A</span>
+          <h2 class="m-0 text-[12.5px] font-semibold leading-[1.4]">项目原味</h2>
+          <span class="rounded-full border border-[#cddcff] bg-[#eff4ff] px-1.5 py-[1px] text-[9.5px] text-[#2563eb]">推荐</span>
+        </div>
+        <p class="m-0 mt-1 text-[11px] leading-[1.5] text-[#8b949e]">白底 · 10px 外框 · 透明卡头 · 轻 hover</p>
+      </div>
+
+      <div class="space-y-3">
+        <!-- HITL -->
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="a-hitl" class="flex w-full items-center gap-[6px] px-[10px] py-[8px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">暂停同步任务『华东库存缓存』</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">同步作业 #8842 · 影响 3 个仓库</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[5px] text-[9.5px] leading-[1.7] text-[#b45309]">待确认</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="a-hitl" class="px-[10px] pb-[10px] pt-[2px]">
+            <div class="divide-y divide-[#eef0f3]">
+              <div class="grid grid-cols-[64px_minmax(0,1fr)] gap-2 py-[6px] text-[12px] leading-[1.55]"><span class="text-[#8b949e]">任务</span><span class="text-[#1f2328]">暂停同步任务</span></div>
+              <div class="grid grid-cols-[64px_minmax(0,1fr)] gap-2 py-[6px] text-[12px] leading-[1.55]"><span class="text-[#8b949e]">影响范围</span><span class="text-[#1f2328]">3 个仓库 · 约 12 分钟</span></div>
+            </div>
+            <div class="mt-2 flex justify-end gap-2">
+              <button type="button" class="rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+              <button type="button" class="rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-3 py-[5px] text-[12px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">批准</button>
+            </div>
+          </div>
+        </article>
+
+        <!-- tool -->
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="false" aria-controls="a-tool" class="flex w-full items-center gap-[6px] px-[10px] py-[8px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">读取配置定义</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">COUNTRY_2026_Q4 · 用时 0.8s</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#bfe3cd] bg-[#edf7f0] px-[5px] text-[9.5px] leading-[1.7] text-[#1a7f45]">成功</span>
+            <span data-chev class="ml-[2px] flex-none text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="a-tool" class="hidden px-[10px] pb-[10px] pt-[2px]">
+            <p class="m-0 text-[12.4px] leading-[1.65] text-[#1f2328]">已读取 128 条配置行；本次未做任何写入。</p>
+          </div>
+        </article>
+
+        <!-- form -->
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="a-form" class="flex w-full items-center gap-[6px] px-[10px] py-[8px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">新建导入任务</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">1 个文件 · 必填 2 项</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#cddcff] bg-[#eff4ff] px-[5px] text-[9.5px] leading-[1.7] text-[#2563eb]">待填写</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="a-form" class="px-[10px] pb-[10px] pt-[2px]">
+            <label for="a-task" class="mt-1 block text-[11.5px] leading-[1.4] text-[#57606a]">任务名</label>
+            <input id="a-task" type="text" value="2026-10 价格发布" class="mt-1 h-8 w-full rounded-[7px] border border-solid border-[#e3e6ea] bg-white px-2 text-[12.5px] text-[#1f2328] focus:border-[#2563eb] focus:outline-none">
+            <div class="mt-2 flex items-center gap-2 rounded-[8px] border border-solid border-[#eef0f3] bg-[#fbfcfd] px-2.5 py-[6px]">
+              <span class="min-w-0 flex-1 truncate text-[12px] text-[#1f2328]">COUNTRY_2026_Q4.xlsx</span>
+              <span class="flex-none text-[10.5px] text-[#8b949e]">2.4 MB</span>
+              <button type="button" class="flex-none text-[11px] text-[#57606a] hover:text-[#1f2328]">移除</button>
+            </div>
+            <div class="mt-2 flex justify-end gap-2">
+              <button type="button" class="rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">取消</button>
+              <button type="button" class="rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-3 py-[5px] text-[12px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">提交</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============ B 浅灰卡头 ============ -->
+    <section aria-label="方案 B 浅灰卡头">
+      <div class="mb-2.5">
+        <div class="flex items-baseline gap-2">
+          <span class="text-[11px] font-semibold text-[#2563eb]">B</span>
+          <h2 class="m-0 text-[12.5px] font-semibold leading-[1.4]">浅灰卡头</h2>
+        </div>
+        <p class="m-0 mt-1 text-[11px] leading-[1.5] text-[#8b949e]">卡头 #f6f7f9 · 卡体白底 · 无分隔线</p>
+      </div>
+
+      <div class="space-y-3">
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="b-hitl" class="flex w-full items-center gap-[6px] bg-[#f6f7f9] px-[10px] py-[8px] text-left transition-colors duration-150 hover:bg-[#eef0f3] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">暂停同步任务『华东库存缓存』</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">同步作业 #8842 · 影响 3 个仓库</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[5px] text-[9.5px] leading-[1.7] text-[#b45309]">待确认</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="b-hitl" class="bg-white px-[10px] pb-[10px] pt-[8px]">
+            <div class="divide-y divide-[#eef0f3]">
+              <div class="grid grid-cols-[64px_minmax(0,1fr)] gap-2 py-[6px] text-[12px] leading-[1.55]"><span class="text-[#8b949e]">任务</span><span class="text-[#1f2328]">暂停同步任务</span></div>
+              <div class="grid grid-cols-[64px_minmax(0,1fr)] gap-2 py-[6px] text-[12px] leading-[1.55]"><span class="text-[#8b949e]">影响范围</span><span class="text-[#1f2328]">3 个仓库 · 约 12 分钟</span></div>
+            </div>
+            <div class="mt-2 flex justify-end gap-2">
+              <button type="button" class="rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+              <button type="button" class="rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-3 py-[5px] text-[12px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">批准</button>
+            </div>
+          </div>
+        </article>
+
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="false" aria-controls="b-tool" class="flex w-full items-center gap-[6px] bg-[#f6f7f9] px-[10px] py-[8px] text-left transition-colors duration-150 hover:bg-[#eef0f3] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">读取配置定义</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">COUNTRY_2026_Q4 · 用时 0.8s</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#bfe3cd] bg-[#edf7f0] px-[5px] text-[9.5px] leading-[1.7] text-[#1a7f45]">成功</span>
+            <span data-chev class="ml-[2px] flex-none text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="b-tool" class="hidden bg-white px-[10px] pb-[10px] pt-[8px]">
+            <p class="m-0 text-[12.4px] leading-[1.65] text-[#1f2328]">已读取 128 条配置行；本次未做任何写入。</p>
+          </div>
+        </article>
+
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="b-form" class="flex w-full items-center gap-[6px] bg-[#f6f7f9] px-[10px] py-[8px] text-left transition-colors duration-150 hover:bg-[#eef0f3] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">新建导入任务</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">1 个文件 · 必填 2 项</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#cddcff] bg-[#eff4ff] px-[5px] text-[9.5px] leading-[1.7] text-[#2563eb]">待填写</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="b-form" class="bg-white px-[10px] pb-[10px] pt-[8px]">
+            <label for="b-task" class="block text-[11.5px] leading-[1.4] text-[#57606a]">任务名</label>
+            <input id="b-task" type="text" value="2026-10 价格发布" class="mt-1 h-8 w-full rounded-[7px] border border-solid border-[#e3e6ea] bg-white px-2 text-[12.5px] text-[#1f2328] focus:border-[#2563eb] focus:outline-none">
+            <div class="mt-2 flex items-center gap-2 rounded-[8px] border border-solid border-[#eef0f3] bg-[#fbfcfd] px-2.5 py-[6px]">
+              <span class="min-w-0 flex-1 truncate text-[12px] text-[#1f2328]">COUNTRY_2026_Q4.xlsx</span>
+              <span class="flex-none text-[10.5px] text-[#8b949e]">2.4 MB</span>
+              <button type="button" class="flex-none text-[11px] text-[#57606a] hover:text-[#1f2328]">移除</button>
+            </div>
+            <div class="mt-2 flex justify-end gap-2">
+              <button type="button" class="rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">取消</button>
+              <button type="button" class="rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-3 py-[5px] text-[12px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">提交</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============ C 轻量无边框 ============ -->
+    <section aria-label="方案 C 轻量无边框">
+      <div class="mb-2.5">
+        <div class="flex items-baseline gap-2">
+          <span class="text-[11px] font-semibold text-[#2563eb]">C</span>
+          <h2 class="m-0 text-[12.5px] font-semibold leading-[1.4]">轻量无边框</h2>
+        </div>
+        <p class="m-0 mt-1 text-[11px] leading-[1.5] text-[#8b949e]">无外描边 · 白卡靠留白分组 · 细分隔线</p>
+      </div>
+
+      <div class="space-y-4">
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="c-hitl" class="flex w-full items-center gap-[6px] px-[10px] py-[9px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">暂停同步任务『华东库存缓存』</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">同步作业 #8842 · 影响 3 个仓库</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[5px] text-[9.5px] leading-[1.7] text-[#b45309]">待确认</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="c-hitl" class="border-t border-solid border-[#eef0f3] px-[10px] pb-[10px] pt-[8px]">
+            <div class="divide-y divide-[#eef0f3]">
+              <div class="grid grid-cols-[64px_minmax(0,1fr)] gap-2 py-[6px] text-[12px] leading-[1.55]"><span class="text-[#8b949e]">任务</span><span class="text-[#1f2328]">暂停同步任务</span></div>
+              <div class="grid grid-cols-[64px_minmax(0,1fr)] gap-2 py-[6px] text-[12px] leading-[1.55]"><span class="text-[#8b949e]">影响范围</span><span class="text-[#1f2328]">3 个仓库 · 约 12 分钟</span></div>
+            </div>
+            <div class="mt-2 flex justify-end gap-2">
+              <button type="button" class="rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+              <button type="button" class="rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-3 py-[5px] text-[12px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">批准</button>
+            </div>
+          </div>
+        </article>
+
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="false" aria-controls="c-tool" class="flex w-full items-center gap-[6px] px-[10px] py-[9px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">读取配置定义</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">COUNTRY_2026_Q4 · 用时 0.8s</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#bfe3cd] bg-[#edf7f0] px-[5px] text-[9.5px] leading-[1.7] text-[#1a7f45]">成功</span>
+            <span data-chev class="ml-[2px] flex-none text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="c-tool" class="hidden border-t border-solid border-[#eef0f3] px-[10px] pb-[10px] pt-[8px]">
+            <p class="m-0 text-[12.4px] leading-[1.65] text-[#1f2328]">已读取 128 条配置行；本次未做任何写入。</p>
+          </div>
+        </article>
+
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="c-form" class="flex w-full items-center gap-[6px] px-[10px] py-[9px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[6px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">新建导入任务</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">1 个文件 · 必填 2 项</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#cddcff] bg-[#eff4ff] px-[5px] text-[9.5px] leading-[1.7] text-[#2563eb]">待填写</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="c-form" class="border-t border-solid border-[#eef0f3] px-[10px] pb-[10px] pt-[8px]">
+            <label for="c-task" class="block text-[11.5px] leading-[1.4] text-[#57606a]">任务名</label>
+            <input id="c-task" type="text" value="2026-10 价格发布" class="mt-1 h-8 w-full rounded-[7px] border border-solid border-[#e3e6ea] bg-white px-2 text-[12.5px] text-[#1f2328] focus:border-[#2563eb] focus:outline-none">
+            <div class="mt-2 flex items-center gap-2 rounded-[8px] border border-solid border-[#eef0f3] bg-[#fbfcfd] px-2.5 py-[6px]">
+              <span class="min-w-0 flex-1 truncate text-[12px] text-[#1f2328]">COUNTRY_2026_Q4.xlsx</span>
+              <span class="flex-none text-[10.5px] text-[#8b949e]">2.4 MB</span>
+              <button type="button" class="flex-none text-[11px] text-[#57606a] hover:text-[#1f2328]">移除</button>
+            </div>
+            <div class="mt-2 flex justify-end gap-2">
+              <button type="button" class="rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">取消</button>
+              <button type="button" class="rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-3 py-[5px] text-[12px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">提交</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============ D 紧凑高密度 ============ -->
+    <section aria-label="方案 D 紧凑高密度">
+      <div class="mb-2.5">
+        <div class="flex items-baseline gap-2">
+          <span class="text-[11px] font-semibold text-[#2563eb]">D</span>
+          <h2 class="m-0 text-[12.5px] font-semibold leading-[1.4]">紧凑高密度</h2>
+        </div>
+        <p class="m-0 mt-1 text-[11px] leading-[1.5] text-[#8b949e]">外框同 A · 内边距收紧 · 适合连续多卡</p>
+      </div>
+
+      <div class="space-y-2">
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="d-hitl" class="flex w-full items-center gap-[4px] px-[8px] py-[6px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[5px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">暂停同步任务『华东库存缓存』</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">同步作业 #8842 · 影响 3 个仓库</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[5px] text-[9.5px] leading-[1.7] text-[#b45309]">待确认</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="d-hitl" class="px-[8px] pb-[8px] pt-[1px]">
+            <div class="divide-y divide-[#eef0f3]">
+              <div class="grid grid-cols-[56px_minmax(0,1fr)] gap-2 py-[4px] text-[11.5px] leading-[1.5]"><span class="text-[#8b949e]">任务</span><span class="text-[#1f2328]">暂停同步任务</span></div>
+              <div class="grid grid-cols-[56px_minmax(0,1fr)] gap-2 py-[4px] text-[11.5px] leading-[1.5]"><span class="text-[#8b949e]">影响范围</span><span class="text-[#1f2328]">3 个仓库 · 约 12 分钟</span></div>
+            </div>
+            <div class="mt-1.5 flex justify-end gap-1.5">
+              <button type="button" class="rounded-[7px] border border-solid border-[#e3e6ea] bg-white px-2.5 py-[4px] text-[11.5px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">拒绝</button>
+              <button type="button" class="rounded-[7px] border border-solid border-transparent bg-[#2563eb] px-2.5 py-[4px] text-[11.5px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">批准</button>
+            </div>
+          </div>
+        </article>
+
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="false" aria-controls="d-tool" class="flex w-full items-center gap-[4px] px-[8px] py-[6px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[5px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">读取配置定义</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">COUNTRY_2026_Q4 · 用时 0.8s</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#bfe3cd] bg-[#edf7f0] px-[5px] text-[9.5px] leading-[1.7] text-[#1a7f45]">成功</span>
+            <span data-chev class="ml-[2px] flex-none text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="d-tool" class="hidden px-[8px] pb-[8px] pt-[1px]">
+            <p class="m-0 text-[11.8px] leading-[1.6] text-[#1f2328]">已读取 128 条配置行；本次未做任何写入。</p>
+          </div>
+        </article>
+
+        <article data-card class="max-w-full overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white group-data-[panel=narrow]:max-w-xs">
+          <button type="button" data-toggle aria-expanded="true" aria-controls="d-form" class="flex w-full items-center gap-[4px] px-[8px] py-[6px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">
+            <span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
+            </span>
+            <span class="flex min-w-0 flex-1 items-center gap-[5px]">
+              <span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">新建导入任务</span>
+              <span data-sub class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e] group-data-[panel=narrow]:hidden">1 个文件 · 必填 2 项</span>
+            </span>
+            <span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid border-[#cddcff] bg-[#eff4ff] px-[5px] text-[9.5px] leading-[1.7] text-[#2563eb]">待填写</span>
+            <span data-chev class="ml-[2px] flex-none rotate-90 text-[12px] leading-none text-[#8b949e] transition-transform duration-150" aria-hidden="true">›</span>
+          </button>
+          <div id="d-form" class="px-[8px] pb-[8px] pt-[1px]">
+            <label for="d-task" class="block text-[11px] leading-[1.4] text-[#57606a]">任务名</label>
+            <input id="d-task" type="text" value="2026-10 价格发布" class="mt-1 h-7 w-full rounded-[7px] border border-solid border-[#e3e6ea] bg-white px-2 text-[12px] text-[#1f2328] focus:border-[#2563eb] focus:outline-none">
+            <div class="mt-1.5 flex items-center gap-2 rounded-[7px] border border-solid border-[#eef0f3] bg-[#fbfcfd] px-2 py-[4px]">
+              <span class="min-w-0 flex-1 truncate text-[11.5px] text-[#1f2328]">COUNTRY_2026_Q4.xlsx</span>
+              <span class="flex-none text-[10px] text-[#8b949e]">2.4 MB</span>
+              <button type="button" class="flex-none text-[10.5px] text-[#57606a] hover:text-[#1f2328]">移除</button>
+            </div>
+            <div class="mt-1.5 flex justify-end gap-1.5">
+              <button type="button" class="rounded-[7px] border border-solid border-[#e3e6ea] bg-white px-2.5 py-[4px] text-[11.5px] text-[#57606a] transition-colors duration-150 hover:border-[#8b949e] hover:text-[#1f2328]">取消</button>
+              <button type="button" class="rounded-[7px] border border-solid border-transparent bg-[#2563eb] px-2.5 py-[4px] text-[11.5px] font-semibold text-white transition-colors duration-150 hover:bg-[#1d4ed8]">提交</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+  </div>
+
+  <p class="m-0 mt-5 max-w-[880px] text-[11.5px] leading-[1.7] text-[#57606a]">
+    A 最贴近现有面板：白底、#e3e6ea 外框、透明卡头，状态色是唯一强调色。B 只把卡头换成 #f6f7f9，分组更明显，但仍是同一种轻量外壳。C 去掉外描边，靠白卡与页面底色、细分隔线区分，视觉最轻，连续多卡时边界依赖留白。D 外框同 A，但卡头与卡体 padding 收紧、行距压缩，一屏能看更多卡，代价是触屏点按区域略小。
+  </p>
+</main>
+
+<script>
+(function () {
+  var board = document.getElementById('board');
+  var widthButtons = document.querySelectorAll('[data-width]');
+
+  widthButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var mode = button.getAttribute('data-width');
+      board.setAttribute('data-panel', mode);
+      widthButtons.forEach(function (item) {
+        item.setAttribute('aria-pressed', String(item.getAttribute('data-width') === mode));
+      });
+    });
+  });
+
+  document.addEventListener('click', function (event) {
+    var toggle = event.target.closest('[data-toggle]');
+    if (!toggle) return;
+    var bodyId = toggle.getAttribute('aria-controls');
+    var body = bodyId ? document.getElementById(bodyId) : null;
+    var open = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', String(!open));
+    if (body) body.classList.toggle('hidden', open);
+    var chev = toggle.querySelector('[data-chev]');
+    if (chev) chev.classList.toggle('rotate-90', !open);
+  });
+})();
+</script>
+</body>
+</html>

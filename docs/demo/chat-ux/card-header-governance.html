@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>卡头治理 · 当前版 / 目标版</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'sans-serif']
+      },
+      keyframes: {
+        breathe: {
+          '0%, 100%': { opacity: '.45', transform: 'scale(.88)' },
+          '50%': { opacity: '1', transform: 'scale(1)' }
+        }
+      },
+      animation: {
+        breathe: 'breathe 1.8s ease-in-out infinite'
+      }
+    }
+  }
+};
+</script>
+</head>
+<body class="m-0 bg-[#f3f4f6] font-sans text-[#1f2328] antialiased">
+
+<header class="border-b border-[#e3e6ea] bg-white">
+  <div class="mx-auto flex max-w-[1560px] flex-wrap items-center gap-x-4 gap-y-2 px-5 py-3">
+    <div class="min-w-0">
+      <h1 class="m-0 text-[13.5px] font-semibold leading-[1.4]">卡头治理 · 当前版 / 目标版</h1>
+      <p class="m-0 mt-0.5 text-[11px] leading-[1.4] text-[#8b949e]">共 50 个场景 · 不含 Mermaid 与纯 Markdown 结果表格</p>
+    </div>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <div class="flex items-center rounded-lg border border-[#e3e6ea] bg-[#f6f7f9] p-[3px]" role="group" aria-label="对比方式">
+        <button type="button" data-compare="both" aria-pressed="true" class="rounded-md px-2.5 py-1 text-[11px] font-medium text-[#667085] transition-colors duration-150 aria-pressed:bg-white aria-pressed:text-[#1f2328] aria-pressed:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">并排</button>
+        <button type="button" data-compare="current" aria-pressed="false" class="rounded-md px-2.5 py-1 text-[11px] font-medium text-[#667085] transition-colors duration-150 aria-pressed:bg-white aria-pressed:text-[#1f2328] aria-pressed:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">仅当前</button>
+        <button type="button" data-compare="next" aria-pressed="false" class="rounded-md px-2.5 py-1 text-[11px] font-medium text-[#667085] transition-colors duration-150 aria-pressed:bg-white aria-pressed:text-[#1f2328] aria-pressed:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">仅目标</button>
+      </div>
+      <div class="flex items-center rounded-lg border border-[#e3e6ea] bg-[#f6f7f9] p-[3px]" role="group" aria-label="面板宽度">
+        <button type="button" data-panel="wide" aria-pressed="true" class="rounded-md px-2.5 py-1 text-[11px] font-medium text-[#667085] transition-colors duration-150 aria-pressed:bg-white aria-pressed:text-[#1f2328] aria-pressed:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">宽</button>
+        <button type="button" data-panel="narrow" aria-pressed="false" class="rounded-md px-2.5 py-1 text-[11px] font-medium text-[#667085] transition-colors duration-150 aria-pressed:bg-white aria-pressed:text-[#1f2328] aria-pressed:shadow-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">窄</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="mx-auto grid max-w-[1560px] gap-5 px-5 py-5 lg:grid-cols-[232px_minmax(0,1fr)]">
+  <aside class="lg:sticky lg:top-4 lg:self-start" aria-label="场景分组">
+    <nav id="group-nav" class="flex flex-wrap gap-1.5 lg:block lg:space-y-1" aria-label="分组导航"></nav>
+    <p id="group-total" class="m-0 mt-3 hidden text-[11px] text-[#8b949e] lg:block"></p>
+  </aside>
+  <main id="workspace" class="min-w-0" aria-live="polite"></main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var TONE = {
+    blue: 'text-[#2563eb] bg-[#eff4ff] border-[#cddcff]',
+    green: 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]',
+    red: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]',
+    amber: 'text-[#b45309] bg-[#fffbeb] border-[#fde68a]',
+    gray: 'text-[#57606a] bg-[#f6f7f9] border-[#e3e6ea]'
+  };
+
+  var ICONS = {
+    tool: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>',
+    hitl: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    form: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>',
+    upload: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/></svg>',
+    sheet: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>',
+    notice: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>'
+  };
+
+  var GROUPS = [
+    {
+      id: 'tool', name: '普通工具', cases: [
+        { id: 'tool-pending', kind: 'tool', title: '创建导入任务', sub: 'create_task · 尚未开始', status: ['待执行', 'blue'], open: false, body: { note: '尚未开始执行。' } },
+        { id: 'tool-queued', kind: 'tool', title: '创建导入任务', sub: 'create_task · 队列第 2 位', status: ['排队', 'blue'], open: false, body: { note: '前面还有 1 个任务。' } },
+        { id: 'tool-running', kind: 'tool', title: '读取配置定义', sub: 'COUNTRY_2026_Q4 · 调用中', status: ['执行中', 'blue'], open: true, body: { note: '正在读取 128 条配置行…' } },
+        { id: 'tool-success', kind: 'tool', title: '读取配置定义', sub: 'COUNTRY_2026_Q4 · 0.8s', status: ['成功', 'green'], open: false, body: { result: '已读取 128 条配置行；本次未做任何写入。' } },
+        { id: 'tool-failed', kind: 'tool', title: '启动发布作业', sub: '任务 #512 · 校验失败', status: ['失败', 'red'], open: true, body: { result: '3 个配置项校验失败，未写入任何数据。' } },
+        { id: 'tool-skipped', kind: 'tool', title: '启动导入作业', sub: '上游失败 · 未执行', status: ['跳过', 'gray'], open: false, body: { note: '上游预检查未通过，本步没有执行。' } },
+        { id: 'tool-check', kind: 'tool', title: '更新配置行', sub: '可能已写入 · 结果未确认', status: ['待核对', 'amber'], currentStatus: '结果未知（待核对）', open: true, body: { warning: '执行结果暂未确认，请勿重复操作。' } },
+        { id: 'tool-long', kind: 'tool', title: '创建导出任务『2026 年第四季度华东大区渠道库存与价目一致性复核（含历史差异回溯与异常升级路径）』', sub: 'Q4-2026-APAC-Inventory-Reconciliation-and-Price-Consistency-Review-with-Historical-Variance-Traceback', status: ['成功', 'green'], open: true, body: { result: '任务已创建，编号 #518。' } }
+      ]
+    },
+    {
+      id: 'hitl', name: 'HITL 确认', cases: [
+        { id: 'hitl-pending', kind: 'hitl', title: '暂停同步任务『华东库存缓存』', sub: '同步作业 #8842 · 影响 3 个仓库', status: ['待确认', 'amber'], open: true, body: { rows: [['任务', '暂停同步任务'], ['影响范围', '3 个仓库 · 约 12 分钟']], buttons: true } },
+        { id: 'hitl-danger', kind: 'hitl', title: '删除配置行', sub: '删除 384 行 · 不可恢复', status: ['待确认', 'amber'], open: true, body: { danger: '将删除 384 行配置数据，执行后无法恢复。', ack: true, rows: [['范围', 'COUNTRY_2026_Q4'], ['行数', '384 行']], buttons: true } },
+        { id: 'hitl-running', kind: 'hitl', title: '启动发布作业', sub: '任务 #512 · 作业执行中', status: ['执行中', 'blue'], currentStatus: '已批准 → 执行中', open: true, body: { note: '作业已启动，正在执行。' } },
+        { id: 'hitl-success', kind: 'hitl', title: '同步库存缓存', sub: '作业 #9001 · 已完成', status: ['成功', 'green'], open: false, body: { note: '操作已完成。' } },
+        { id: 'hitl-rejected', kind: 'hitl', title: '删除配置行', sub: '用户拒绝', status: ['拒绝', 'red'], open: false, body: { note: '未执行，没有产生任何副作用。' } },
+        { id: 'hitl-cancelled', kind: 'hitl', title: '暂停同步任务', sub: '用户取消', status: ['取消', 'red'], open: false, body: { note: '未执行，没有产生任何副作用。' } },
+        { id: 'hitl-failed', kind: 'hitl', title: '启动发布作业', sub: '执行失败', status: ['失败', 'red'], open: true, body: { result: '发布失败：行键冲突，未写入任何数据。' } },
+        { id: 'hitl-expired', kind: 'hitl', title: '暂停同步任务', sub: '超过 24 小时未处理', status: ['失效', 'gray'], open: true, body: { note: '该确认已失效，请重新发起操作。' } },
+        { id: 'hitl-long', kind: 'hitl', title: '创建导出任务『2026 年第四季度华东大区渠道库存与价目一致性复核（含历史差异回溯与异常升级路径）』', sub: '导出范围 指定配置项 · 数据格式 xlsx · 预计 128 万行', status: ['待确认', 'amber'], open: true, body: { rows: [['导出范围', '指定配置项'], ['格式', 'xlsx']], buttons: true } }
+      ]
+    },
+    {
+      id: 'form', name: '生成式表单', cases: [
+        { id: 'form-fill', kind: 'form', title: '新建导入任务', sub: '3 项必填', status: ['待填写', 'blue'], open: true, body: { rows: [['任务名', '2026-10 价格发布'], ['配置项', 'COUNTRY_2026_Q4']], buttons: true } },
+        { id: 'form-submitting', kind: 'form', title: '新建导入任务', sub: '正在提交', status: ['提交中', 'blue'], open: true, body: { note: '正在提交，按钮已锁定。', submitting: true } },
+        { id: 'form-submitted', kind: 'form', title: '新建导入任务', sub: '值已记录', status: ['已提交', 'green'], open: false, body: { note: '提交值已记录。' } },
+        { id: 'form-rejected', kind: 'form', title: '新建导出任务', sub: '2 项校验失败', status: ['提交未通过', 'red'], open: true, body: { result: '配置项编码为空，提交未通过。' } },
+        { id: 'form-cancelled', kind: 'form', title: '新建导入任务', sub: '未提交任何内容', status: ['取消', 'red'], open: false, body: { note: '未提交任何内容。' } },
+        { id: 'form-queued', kind: 'form', title: '新建导入任务', sub: '队列第 1 位', status: ['排队', 'blue'], open: false, body: { note: '前面没有其他任务。' } },
+        { id: 'form-unrecoverable', kind: 'form', title: '新建导出任务', sub: '提交值缺失', status: ['不可恢复', 'amber'], open: true, body: { warning: '提交值已不可恢复，请重新填写。' } },
+        { id: 'form-attachment', kind: 'form', title: '新建导入任务', sub: '1 个文件 · 必填 2 项', status: ['待填写', 'blue'], open: true, body: { rows: [['任务名', '2026-10 价格发布']], file: 'COUNTRY_2026_Q4.xlsx', size: '2.4 MB', buttons: true } }
+      ]
+    },
+    {
+      id: 'upload', name: '独立上传', cases: [
+        { id: 'upload-wait', kind: 'upload', title: '选择导入文件', sub: 'ui_request_upload · 待选择', status: ['待选择', 'amber'], open: true, body: { note: '只接受 .xlsx / .zip；文件名需包含配置项编码。', action: '选择文件' } },
+        { id: 'upload-ing', kind: 'upload', title: '上传数据文件', sub: 'COUNTRY_2026_Q4.xlsx · 2.4 MB', status: ['上传中', 'blue'], open: true, body: { file: 'COUNTRY_2026_Q4.xlsx', size: '2.4 MB', note: '上传中…' } },
+        { id: 'upload-done', kind: 'upload', title: '上传数据文件', sub: 'COUNTRY_2026_Q4.xlsx', status: ['已上传', 'green'], open: false, body: { file: 'COUNTRY_2026_Q4.xlsx', size: '2.4 MB', action: '移除' } },
+        { id: 'upload-failed', kind: 'upload', title: '上传数据文件', sub: '网络中断', status: ['上传失败', 'red'], open: true, body: { file: 'COUNTRY_2026_Q4.xlsx', size: '2.4 MB', result: '网络中断，文件未上传。', action: '重试' } },
+        { id: 'upload-unavailable', kind: 'upload', title: '选择导入文件', sub: '当前页面不可用', status: ['不可选择', 'gray'], open: true, body: { note: '当前页面不支持选择文件。', action: '选择文件', disabled: true } },
+        { id: 'upload-entry', kind: 'upload', title: '上传数据文件', sub: '入口已关闭', status: ['入口失效', 'gray'], open: true, body: { note: '上传入口已失效，请刷新页面后重试。' } },
+        { id: 'upload-cancelled', kind: 'upload', title: '上传数据文件', sub: '用户取消上传', status: ['已取消', 'red'], open: false, body: { note: '已取消上传。' } }
+      ]
+    },
+    {
+      id: 'sheet', name: '写表预览', note: '交互式写表预览，不是 Markdown 表格', cases: [
+        { id: 'sheet-count', kind: 'sheet', title: '更新配置行', sub: '128 行 / 384 格', status: ['待确认', 'amber'], open: true, body: { meta: '影响 128 行 · 384 格', level: '计数' } },
+        { id: 'sheet-sample', kind: 'sheet', title: '更新配置行', sub: '样例 5 行', status: ['待确认', 'amber'], open: true, body: { meta: '将写入 128 行 · 384 格', diff: [['COUNTRY_2026_Q4', 'CN-SH-001', '空 → 128'], ['PRICE_2026_Q4', 'SKU-8842', '96 → 88']] } },
+        { id: 'sheet-full', kind: 'sheet', title: '更新配置行', sub: '全量 diff', status: ['待确认', 'amber'], open: true, body: { meta: '全部 128 行差异', diff: [['COUNTRY_2026_Q4', 'CN-SH-001', '空 → 128'], ['PRICE_2026_Q4', 'SKU-8842', '96 → 88'], ['TAX_2026_Q4', 'CN-VAT-13', '13 → 9']] } },
+        { id: 'sheet-bulk', kind: 'sheet', title: '更新配置行', sub: '128 行 · 大批量', status: ['待确认', 'amber'], open: true, applyDisabled: true, body: { meta: '影响 128 行 · 384 格', ack: '我已确认本次将写入 128 行', hint: '勾选后才能应用', buttons: true } },
+        { id: 'sheet-applied', kind: 'sheet', title: '更新配置行', sub: '已应用', status: ['已应用', 'green'], open: false, body: { note: '已写入 128 行。' } },
+        { id: 'sheet-cancelled', kind: 'sheet', title: '更新配置行', sub: '预览已取消', status: ['已取消', 'red'], open: false, body: { note: '本次预览已取消，未写入任何数据。' } }
+      ]
+    },
+    {
+      id: 'think', name: '思考', note: '浅灰底 · 裸星标 · 左侧展开竖线', cases: [
+        { id: 'think-live', kind: 'reasoning', title: '思考中', sub: '', status: null, open: true, seconds: 12, body: { text: '正在梳理发布前置条件：先核对配置项版本，再比较行键冲突。' } },
+        { id: 'think-done', kind: 'reasoning', title: '思考过程', sub: '', status: null, open: false, seconds: 18, body: { text: '已核对 3 个配置项的版本与行键，确认存在 2 处冲突，需要在发布前处理。' } },
+        { id: 'think-long', kind: 'reasoning', title: '思考过程', sub: '', status: null, open: false, seconds: 46, body: { text: '第一步核对配置项版本；第二步比较行键；第三步检查价目生效日期。\n发现 PRICE_2026_Q4 的 12 个行键与线上版本重复，REPLACE 模式会覆盖较新的价格。\n建议改为 MERGE 模式，或先下线冲突行再发布。' } }
+      ]
+    },
+    {
+      id: 'notice', name: '错误 / 通知', cases: [
+        { id: 'err-failed', kind: 'notice', title: '执行失败', sub: 'start_publish · 未写入', status: ['失败', 'red'], open: true, body: { danger: '发布失败：3 个配置项校验失败，未写入任何数据。' } },
+        { id: 'err-partial', kind: 'notice', title: '部分结果', sub: '工具已执行 · 结果不完整', status: ['部分结果', 'amber'], currentStatus: '部分执行（结果不完整）', open: true, body: { warning: '已有工具执行，可能产生实际改动；请核对后再继续。' } },
+        { id: 'err-recovery', kind: 'notice', title: '会话恢复失败', sub: '网络不可达', status: ['恢复失败', 'red'], open: true, body: { note: '网络不可达或服务端暂不可用；已恢复的内容可能不完整。' } },
+        { id: 'err-check', kind: 'notice', title: '结果待核对', sub: '执行结果未确认', status: ['待核对', 'amber'], open: true, body: { warning: '执行结果暂未确认，请勿重复操作。' } },
+        { id: 'err-manual', kind: 'notice', title: '需人工核对', sub: '不可逆操作', status: ['需人工核对', 'amber'], open: true, body: { warning: '该操作可能已写入，需人工核对，不会自动重放。' } },
+        { id: 'err-entry', kind: 'notice', title: '入口失效', sub: '页面入口已关闭', status: ['入口失效', 'gray'], open: true, body: { note: '当前页面入口已失效，请返回后重新进入。' } }
+      ]
+    },
+    {
+      id: 'stage', name: '阶段提示', note: '非正式卡片，不加卡头', cases: [
+        { id: 'stage-preparing', kind: 'stage', variant: 'preparing', title: '正在准备回答', sub: '', status: null, open: true },
+        { id: 'stage-compacting', kind: 'stage', variant: 'compacting', title: '正在整理上下文', sub: '', status: null, open: true },
+        { id: 'stage-compacted', kind: 'stage', variant: 'compacted', title: '上下文已整理', sub: '', status: null, open: true }
+      ]
+    }
+  ];
+
+  var state = { group: 0, compare: 'both', panel: 'wide', expanded: {} };
+  var stageState = { start: Date.now() - 12000, base: 12 };
+
+  function esc(value) {
+    return String(value === null || value === undefined ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function statusChip(c, side) {
+    if (!c.status) return '';
+    var text = side === 'current' && c.currentStatus ? c.currentStatus : c.status[0];
+    return '<span class="max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid px-[5px] text-[9.5px] leading-[1.7] ' + TONE[c.status[1]] + '">' + esc(text) + '</span>';
+  }
+
+  function rowsHtml(rows) {
+    if (!rows || !rows.length) return '';
+    return '<div class="divide-y divide-[#eef0f3]">' + rows.map(function (row) {
+      return '<div class="grid grid-cols-[64px_minmax(0,1fr)] gap-2 py-[6px] text-[12px] leading-[1.55]"><span class="text-[#8b949e]">' + esc(row[0]) + '</span><span class="text-[#1f2328]">' + esc(row[1]) + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  function fileRow(b) {
+    return '<div class="flex items-center gap-2 rounded-[8px] border border-solid border-[#eef0f3] bg-[#fbfcfd] px-2.5 py-[6px]">' +
+      '<span class="min-w-0 flex-1 truncate text-[12px] text-[#1f2328]">' + esc(b.file) + '</span>' +
+      '<span class="flex-none text-[10.5px] text-[#8b949e]">' + esc(b.size || '') + '</span>' +
+      '</div>';
+  }
+
+  function buttonsHtml(c) {
+    var secondary = 'rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a]';
+    var primary = 'rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-3 py-[5px] text-[12px] font-semibold text-white';
+    var primaryDisabled = 'rounded-[8px] border border-solid border-transparent bg-[#98a2b3] px-3 py-[5px] text-[12px] font-semibold text-white disabled:cursor-default';
+    if (c.kind === 'hitl') {
+      return '<div class="mt-2 flex justify-end gap-2"><button type="button" class="' + secondary + '">拒绝</button><button type="button" class="' + primary + '">批准</button></div>';
+    }
+    if (c.kind === 'form') {
+      return '<div class="mt-2 flex justify-end gap-2"><button type="button" class="' + secondary + '">取消</button><button type="button" class="' + primary + '">提交</button></div>';
+    }
+    if (c.kind === 'sheet') {
+      var apply = c.applyDisabled
+        ? '<button type="button" class="' + primaryDisabled + '" disabled>应用</button>'
+        : '<button type="button" class="' + primary + '">应用</button>';
+      return '<div class="mt-2 flex justify-end gap-2"><button type="button" class="' + secondary + '">取消</button>' + apply + '</div>';
+    }
+    return '';
+  }
+
+  function diffHtml(rows) {
+    return '<div class="mt-2 overflow-hidden rounded-[8px] border border-solid border-[#eef0f3]"><table class="w-full table-fixed text-[11.5px] leading-[1.5]">' +
+      '<thead><tr class="bg-[#f6f7f9] text-[10.5px] text-[#667085]"><th class="px-2 py-1 text-left font-semibold">配置项</th><th class="px-2 py-1 text-left font-semibold">行键</th><th class="px-2 py-1 text-left font-semibold">变更</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        return '<tr class="border-t border-[#eef0f3]"><td class="truncate px-2 py-1 text-[#1f2328]">' + esc(r[0]) + '</td><td class="truncate px-2 py-1 text-[#57606a]">' + esc(r[1]) + '</td><td class="px-2 py-1 text-[#57606a]">' + esc(r[2]) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  function bodyHtml(c, side) {
+    var b = c.body || {};
+    var parts = [];
+    if (b.danger) parts.push('<div class="rounded-[9px] border border-solid border-[#f0d5d0] bg-[#fff8f6] px-[11px] py-[9px] text-[12.3px] leading-[1.6] text-[#9f2f22]">' + esc(b.danger) + '</div>');
+    if (b.warning) parts.push('<div class="rounded-[9px] border border-solid border-[#fde68a] bg-[#fffbeb] px-[11px] py-[9px] text-[12.3px] leading-[1.6] text-[#8a5809]">' + esc(b.warning) + '</div>');
+    if (b.rows) parts.push(rowsHtml(b.rows));
+    if (b.file) parts.push(fileRow(b));
+    if (b.meta) parts.push('<div class="text-[12px] leading-[1.55] text-[#57606a]">' + esc(b.meta) + '</div>');
+    if (b.diff) parts.push(diffHtml(b.diff));
+    if (b.ack) parts.push('<label class="mt-2 flex items-start gap-2 text-[12px] leading-[1.55] text-[#1f2328]"><input type="checkbox" class="mt-[3px] h-[13px] w-[13px] flex-none accent-[#2563eb]"><span>' + esc(b.ack) + '</span></label>');
+    if (b.hint) parts.push('<div class="mt-1 text-[11px] leading-[1.5] text-[#8a5809]">' + esc(b.hint) + '</div>');
+    if (b.note) parts.push('<div class="' + (parts.length ? 'mt-2 ' : '') + 'text-[12.2px] leading-[1.65] text-[#57606a]">' + esc(b.note) + '</div>');
+    if (b.result) parts.push('<div class="' + (parts.length ? 'mt-2 ' : '') + 'rounded-[8px] border border-solid border-[#f0d5d0] bg-[#fdf1ef] px-[10px] py-[7px] text-[12.2px] leading-[1.6] text-[#a93226]">' + esc(b.result) + '</div>');
+    if (b.text) parts.push('<div class="whitespace-pre-wrap text-[12.6px] leading-[1.7] text-[#57606a]">' + esc(b.text) + '</div>');
+    if (b.action) {
+      var cls = b.disabled
+        ? 'rounded-[8px] border border-solid border-transparent bg-[#98a2b3] px-3 py-[5px] text-[12px] font-medium text-white'
+        : 'rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-3 py-[5px] text-[12px] text-[#57606a]';
+      parts.push('<div class="mt-2 flex justify-end"><button type="button" class="' + cls + '"' + (b.disabled ? ' disabled' : '') + '>' + esc(b.action) + '</button></div>');
+    }
+    if (b.submitting) parts.push('<div class="mt-2 flex justify-end"><button type="button" disabled class="rounded-[8px] border border-solid border-transparent bg-[#98a2b3] px-3 py-[5px] text-[12px] font-medium text-white">提交中…</button></div>');
+    if (b.buttons) parts.push(buttonsHtml(c));
+    return parts.join('');
+  }
+
+  function fullTitle(c, side, expanded) {
+    if (side !== 'next' || !expanded) return '';
+    if (!c.title || c.title.length <= 34) return '';
+    return '<div class="mb-2 text-[11.5px] leading-[1.55] text-[#57606a] [overflow-wrap:anywhere]">' + esc(c.title) + '</div>';
+  }
+
+  function cardShellClass() {
+    return state.panel === 'narrow' ? 'w-full max-w-[340px]' : 'w-full';
+  }
+
+  function renderStandardCard(c, side, expanded) {
+    var isNext = side === 'next';
+    var bodyId = (isNext ? 't-' : 'c-') + c.id;
+    var sub = c.sub ? '<span class="min-w-0 shrink-[3] truncate text-[11px] leading-[1.4] text-[#8b949e]' + (isNext && state.panel === 'narrow' ? ' hidden' : '') + '">' + esc(c.sub) + '</span>' : '';
+    var headerInner = '<span class="flex w-[24px] flex-none items-center justify-center text-[#57606a]">' + ICONS[c.kind] + '</span>' +
+      '<span class="flex min-w-0 flex-1 items-center gap-[6px]"><span class="min-w-0 truncate text-[12px] leading-[1.5] [font-weight:650] text-[#1f2328]">' + esc(c.title) + '</span>' + sub + '</span>' +
+      statusChip(c, side) +
+      (isNext ? '<span data-chev class="ml-[1px] flex-none text-[12px] leading-none text-[#8b949e] transition-transform duration-150' + (expanded ? ' rotate-90' : '') + '" aria-hidden="true">›</span>' : '');
+    var head = isNext
+      ? '<button type="button" data-toggle aria-expanded="' + expanded + '" aria-controls="' + bodyId + '" class="flex w-full items-center gap-[6px] px-[10px] py-[8px] text-left transition-colors duration-150 hover:bg-[#f6f7f9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">' + headerInner + '</button>'
+      : '<div class="flex w-full items-center gap-[6px] px-[10px] py-[8px] text-left">' + headerInner + '</div>';
+    var bodyContent = fullTitle(c, side, expanded) + bodyHtml(c, side);
+    var bodyClass = 'px-[10px] pb-[10px] pt-[2px]' + (isNext && !expanded ? ' hidden' : '');
+    return '<article class="' + cardShellClass() + ' overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white">' + head + '<div id="' + bodyId + '" class="' + bodyClass + '">' + bodyContent + '</div></article>';
+  }
+
+  function renderReasoning(c, side, expanded) {
+    var isNext = side === 'next';
+    var bodyId = (isNext ? 't-' : 'c-') + c.id;
+    var timer = '<span class="flex-none text-[11.5px] leading-[1.45] text-[#8b949e]">' + c.seconds + ' 秒</span>';
+    var chev = isNext ? '<span data-chev class="ml-[1px] flex-none text-[12px] leading-none text-[#8b949e] transition-transform duration-150' + (expanded ? ' rotate-90' : '') + '" aria-hidden="true">›</span>' : '';
+    var inner = '<span class="flex h-[15px] w-[15px] flex-none items-center justify-center rounded-full border border-solid border-[#e3e6ea] text-[9px] text-[#8b949e]" aria-hidden="true">⋆</span>' +
+      '<span class="min-w-0 flex-1 truncate text-[12.4px] leading-[1.45] text-[#57606a]">' + esc(c.title) + '</span>' + timer + chev;
+    var head = isNext
+      ? '<button type="button" data-toggle aria-expanded="' + expanded + '" aria-controls="' + bodyId + '" class="flex w-full items-center gap-[8px] px-[10px] py-[7px] text-left transition-colors duration-150 hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]">' + inner + '</button>'
+      : '<div class="flex w-full items-center gap-[8px] px-[10px] py-[7px] text-left">' + inner + '</div>';
+    var body = '<div class="border-l-2 border-solid border-[#e3e6ea] pl-[10px] pr-[11px] pb-[10px]"><div class="whitespace-pre-wrap text-[12.6px] leading-[1.7] text-[#57606a]">' + esc(c.body.text) + '</div></div>';
+    var bodyAttr = isNext && !expanded ? ' class="hidden"' : '';
+    return '<article class="' + cardShellClass() + ' overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-[#f6f7f9]">' + head + '<div id="' + bodyId + '"' + bodyAttr + '>' + body + '</div></article>';
+  }
+
+  function renderStage(c, side) {
+    var seconds = Math.max(stageState.base, Math.floor((Date.now() - stageState.start) / 1000));
+    if (c.variant === 'compacting') {
+      if (side === 'current') {
+        return '<div class="' + cardShellClass() + ' flex items-center gap-2 rounded-[10px] border border-solid border-[#e3e6ea] bg-white px-2.5 py-2 text-[11.5px] leading-[1.5] text-[#7c3aed]"><span class="h-1.5 w-1.5 rounded-full bg-[#7c3aed]"></span><span>压缩中…</span></div>';
+      }
+      return '<div class="' + cardShellClass() + ' flex items-center gap-2 rounded-[10px] border border-solid border-[#ddd6fe] bg-[#faf8ff] px-2.5 py-2 text-[11.5px] leading-[1.5] text-[#6d28d9]"><span class="h-1.5 w-1.5 rounded-full bg-[#7c3aed] animate-breathe"></span><span>正在整理上下文</span></div>';
+    }
+    if (c.variant === 'compacted') {
+      var label = side === 'current' ? '已压缩上下文' : '上下文已整理';
+      return '<div class="' + cardShellClass() + ' flex items-center gap-2 rounded-[10px] border border-solid border-[#e3e6ea] bg-white px-2.5 py-2 text-[11.5px] leading-[1.5] text-[#8b949e]"><span class="h-px flex-1 bg-[#e3e6ea]"></span><span>' + label + '</span><span class="h-px flex-1 bg-[#e3e6ea]"></span></div>';
+    }
+    return '<div class="' + cardShellClass() + ' flex items-start gap-2 rounded-[10px] border border-solid border-[#dbeafe] bg-[#eff6ff] px-[11px] py-[7px]">' +
+      '<span class="mt-1 h-[7px] w-[7px] flex-none rounded-full bg-[#2563eb] animate-breathe"></span>' +
+      '<div class="min-w-0 flex-1"><div class="text-[12.4px] leading-[1.5] text-[#1f2328]"><span data-live>' + seconds + '</span> 秒 · 正在准备本轮回答</div><div class="mt-0.5 text-[11.2px] leading-[1.5] text-[#57606a]">可以等待，或立即重试。</div></div>' +
+      '<button type="button" data-retry class="flex-none rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12px] text-[#57606a]">立即重试</button></div>';
+  }
+
+  function renderCard(c, side, expanded) {
+    if (c.kind === 'stage') return renderStage(c, side);
+    if (c.kind === 'reasoning') return renderReasoning(c, side, expanded);
+    return renderStandardCard(c, side, expanded);
+  }
+
+  function isOpen(c) {
+    if (state.expanded[c.id] === undefined) return !!c.open;
+    return state.expanded[c.id];
+  }
+
+  function gridClass() {
+    if (state.compare !== 'both' || state.panel === 'narrow') return 'mt-2 grid grid-cols-1 items-start gap-3';
+    return 'mt-2 grid grid-cols-1 items-start gap-3 xl:grid-cols-2';
+  }
+
+  function pane(side, c) {
+    var label = side === 'current' ? '当前版' : '目标版';
+    var expanded = side === 'next' ? isOpen(c) : true;
+    var tag = side === 'next' && c.kind !== 'stage'
+      ? '<span class="rounded border border-[#e3e6ea] bg-white px-1.5 py-[1px] text-[9.5px] text-[#8b949e]">' + (expanded ? '默认展开' : '默认折叠') + '</span>'
+      : '';
+    return '<div class="min-w-0"><div class="mb-[6px] flex items-center gap-1.5"><span class="text-[10px] font-semibold uppercase tracking-[.08em] ' + (side === 'next' ? 'text-[#2563eb]' : 'text-[#667085]') + '">' + label + '</span>' + tag + '</div>' + renderCard(c, side, expanded) + '</div>';
+  }
+
+  function renderScenario(c) {
+    var panes = '';
+    if (state.compare !== 'next') panes += pane('current', c);
+    if (state.compare !== 'current') panes += pane('next', c);
+    return '<section class="border-t border-[#eef0f3] pt-4 first:border-t-0 first:pt-0">' +
+      '<div class="flex flex-wrap items-baseline gap-2"><h3 class="m-0 text-[12.5px] font-semibold leading-[1.45] text-[#1f2328]">' + esc(c.title.length > 34 ? c.title.slice(0, 32) + '…' : c.title) + '</h3>' +
+      (c.status ? '<span class="text-[10.5px] text-[#8b949e]">' + esc(c.status[0]) + '</span>' : '') +
+      (c.kind === 'reasoning' ? '<span class="text-[10.5px] text-[#8b949e]">思考卡 · 无状态标签</span>' : '') +
+      (c.kind === 'stage' ? '<span class="text-[10.5px] text-[#8b949e]">阶段提示 · 无卡头</span>' : '') + '</div>' +
+      '<div class="' + gridClass() + '">' + panes + '</div></section>';
+  }
+
+  function renderNav() {
+    var nav = document.getElementById('group-nav');
+    nav.innerHTML = GROUPS.map(function (g, index) {
+      var active = index === state.group;
+      return '<button type="button" data-group="' + index + '" aria-current="' + (active ? 'true' : 'false') + '" class="flex w-full items-center justify-between gap-2 rounded-lg border border-transparent px-2.5 py-1.5 text-left text-[11.5px] leading-[1.45] ' + (active ? 'border-[#cddcff] bg-[#eff4ff] text-[#1f2328]' : 'text-[#57606a] hover:bg-white') + '"><span class="min-w-0 truncate">' + esc(g.name) + '</span><span class="flex-none font-mono text-[10.5px] text-[#8b949e]">' + g.cases.length + '</span></button>';
+    }).join('');
+    document.getElementById('group-total').textContent = '共 ' + GROUPS.reduce(function (n, g) { return n + g.cases.length; }, 0) + ' 个场景';
+  }
+
+  function render() {
+    var group = GROUPS[state.group];
+    var total = GROUPS.reduce(function (n, g) { return n + g.cases.length; }, 0);
+    document.getElementById('workspace').innerHTML = '<div class="rounded-xl border border-[#e3e6ea] bg-white p-4">' +
+      '<div class="flex flex-wrap items-baseline gap-2"><h2 class="m-0 text-[13px] font-semibold leading-[1.45]">' + esc(group.name) + '</h2><span class="text-[10.5px] text-[#8b949e]">' + group.cases.length + ' 个场景 · 全页 ' + total + '</span>' +
+      (group.note ? '<span class="text-[10.5px] text-[#8b949e]">' + esc(group.note) + '</span>' : '') + '</div>' +
+      '<div class="mt-4 space-y-4">' + group.cases.map(renderScenario).join('') + '</div></div>';
+  }
+
+  function applyPanel() {
+    document.querySelectorAll('[data-panel]').forEach(function (button) {
+      button.setAttribute('aria-pressed', String(button.getAttribute('data-panel') === state.panel));
+    });
+  }
+
+  function applyCompare() {
+    document.querySelectorAll('[data-compare]').forEach(function (button) {
+      button.setAttribute('aria-pressed', String(button.getAttribute('data-compare') === state.compare));
+    });
+  }
+
+  document.addEventListener('click', function (event) {
+    var groupButton = event.target.closest('[data-group]');
+    if (groupButton) {
+      state.group = Number(groupButton.getAttribute('data-group'));
+      renderNav();
+      render();
+      return;
+    }
+    var compareButton = event.target.closest('[data-compare]');
+    if (compareButton) {
+      state.compare = compareButton.getAttribute('data-compare');
+      applyCompare();
+      render();
+      return;
+    }
+    var panelButton = event.target.closest('[data-panel]');
+    if (panelButton) {
+      state.panel = panelButton.getAttribute('data-panel');
+      applyPanel();
+      render();
+      return;
+    }
+    var retry = event.target.closest('[data-retry]');
+    if (retry) {
+      stageState.start = Date.now();
+      stageState.base = 0;
+      tick();
+      return;
+    }
+    var toggle = event.target.closest('[data-toggle]');
+    if (!toggle) return;
+    var bodyId = toggle.getAttribute('aria-controls');
+    var body = bodyId ? document.getElementById(bodyId) : null;
+    var open = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', String(!open));
+    if (body) body.classList.toggle('hidden', open);
+    var chev = toggle.querySelector('[data-chev]');
+    if (chev) chev.classList.toggle('rotate-90', !open);
+  });
+
+  function tick() {
+    var seconds = Math.max(stageState.base, Math.floor((Date.now() - stageState.start) / 1000));
+    document.querySelectorAll('[data-live]').forEach(function (el) { el.textContent = String(seconds); });
+  }
+
+  setInterval(tick, 1000);
+  renderNav();
+  render();
+})();
+</script>
+</body>
+</html>
