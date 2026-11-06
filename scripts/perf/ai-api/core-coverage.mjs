@@ -356,8 +356,9 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
       signal: AbortSignal.timeout(timeoutMs)
     })
     const contentType = response.headers.get('content-type') ?? ''
-    assert(response.status === 200 && contentType.includes('text/event-stream'),
-      `chat expected SSE, got ${response.status} ${contentType}: ${await response.text()}`)
+    if (response.status !== 200 || !contentType.includes('text/event-stream')) {
+      throw new CoverageError(`chat expected SSE, got ${response.status} ${contentType}: ${await response.text()}`)
+    }
     reader = response.body.getReader()
     const decoder = new TextDecoder()
     const processFrame = (frame) => {
