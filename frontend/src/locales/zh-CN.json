@@ -14,26 +14,29 @@
           "hitl": "待确认",
           "form": "待填写"
         },
-        "submitting": "提交中…",
-        "queued": "排队中",
-        "running": "调用中…",
-        "succeeded": "已成功",
-        "failed": "执行失败",
-        "rejected": "已拒绝",
-        "blocked": "超出当前范围",
-        "expired": "已失效",
-        "cancelled": "已取消",
-        "skipped": "已跳过"
+        "submitting": "提交中",
+        "queued": "排队",
+        "running": "执行中",
+        "succeeded": "成功",
+        "failed": "失败",
+        "rejected": "拒绝",
+        "blocked": "未执行",
+        "expired": "失效",
+        "cancelled": "取消",
+        "skipped": "跳过",
+        "unknown": "需人工核对",
+        "unrecoverable": "不可恢复",
+        "submissionRejected": "提交未通过"
       },
       "readonly": {
-        "approved": "✓ 已批准",
-        "rejected": "✗ 已拒绝",
-        "expired": "已失效",
-        "failed": "! 已批准 · 执行失败",
-        "submitted": "✓ 已提交",
-        "cancelled": "✗ 已取消",
-        "notApproved": "! 未批准 · 未执行",
-        "notExecuted": "! 已批准 · 未执行",
+        "approved": "成功",
+        "rejected": "拒绝",
+        "expired": "失效",
+        "failed": "失败",
+        "submitted": "已提交",
+        "cancelled": "取消",
+        "notApproved": "未执行",
+        "notExecuted": "未执行",
         "formFailed": "执行失败"
       },
       "error": {
@@ -356,6 +359,17 @@
     },
     "gf": {
       "title": "请填写以下信息",
+      "status": {
+        "pending": "待填写",
+        "submitting": "提交中",
+        "submitted": "已提交",
+        "rejected": "提交未通过",
+        "failed": "执行失败",
+        "cancelled": "取消",
+        "queued": "排队",
+        "expired": "失效",
+        "unrecoverable": "不可恢复"
+      },
       "scenario": {
         "filter": "筛选条件",
         "clarify": "信息确认"
@@ -487,9 +501,9 @@
       "sheetInputHuman": "表格参数不完整或超出允许范围，请调整后重试。",
       "gateExpiredHuman": "已失效，本轮已结束，未执行。",
       "toolKindMismatch": "这一步没有执行，请重新发起这项操作。",
-      "formUnavailable": "表单定义不可用，无法还原原卡",
+      "formUnavailable": "表单内容不可用",
       "args": "参数",
-      "output": "输出",
+      "output": "结果",
       "truncated": "已截断",
       "truncatedFrame": "本次结果内容过大，已压缩显示（返回 {returned} 字符，原 {original} 字符）。如需更多细节，请缩小查询范围或分页获取。",
       "truncatedModelView": "结果较长，模型侧仅收到 {returned}/{original} 字符。",
@@ -498,7 +512,7 @@
       "definition": "配置",
       "rowKey": "行键",
       "reason": "原因",
-      "submitting": "已提交，同步中…",
+      "submitting": "同步中…",
       "reject": "拒绝",
       "approve": "批准",
       "resumeChat": "继续本轮对话",
@@ -586,6 +600,7 @@
       "yearMonthDay": "{year}年{month}月{day}日 {time}"
     },
     "sheetCard": {
+      "title": "写表预览",
       "discard": "放弃",
       "levelCount": "计数",
       "levelSample": "看样例",
@@ -596,7 +611,22 @@
       "nextPage": "下一页",
       "cancel": "取消",
       "apply": "应用",
-      "expired": "预览已失效（页面刷新导致），本次未改动任何单元格。请让 AI 重新发起。",
+      "applying": "应用中…",
+      "status": {
+        "pending": "待确认",
+        "applying": "应用中",
+        "applied": "已应用",
+        "failed": "应用失败",
+        "cancelled": "已取消",
+        "stale": "已失效"
+      },
+      "statusHint": {
+        "applying": "正在应用改动…",
+        "applied": "改动已应用。",
+        "failed": "应用未完成，请核对当前表格后再继续。",
+        "cancelled": "本次预览已取消，未应用改动。"
+      },
+      "expired": "预览已失效，本次未改动任何单元格。请重新发起写表操作。",
       "impact": "将影响 {rows} 行 / {cells} 格",
       "scope": "范围：{scope}",
       "rules": "规则：{rules}",
@@ -609,14 +639,28 @@
       "ackLarge": "我了解影响范围（本次将修改 {rows} 行 / {cells} 格，超过 200 行）"
     },
     "uploadHandoff": {
-      "pickFile": "需要你在左侧选择一个文件",
-      "acceptHint": "只接受 {accept}；文件名需包含配置项编码（如 COUNTRY.xlsx）。文件由你在浏览器里选择，AI 不会读取文件内容，也不会经手任何路径。",
-      "orClick": "也可以点左侧高亮按钮「{label}」，或把文件拖到高亮区域。",
+      "title": "文件上传",
+      "status": {
+        "waiting": "待选择",
+        "uploading": "上传中",
+        "uploaded": "已上传",
+        "failed": "上传失败",
+        "unsupported": "不可选择",
+        "missing": "入口失效",
+        "cancelled": "已取消"
+      },
+      "acceptHint": "支持 {accept}；文件名需包含配置项编码（如 COUNTRY.xlsx）。",
+      "orClick": "也可使用页面中的「{label}」入口，或拖放文件。",
       "choose": "选择文件",
+      "retry": "重试",
       "discard": "放弃",
       "fallbackEntry": "上传入口",
-      "hintDegraded": "当前浏览器不支持在对话内直接选择文件，请用左侧的上传入口。",
-      "hintMissing": "请先打开导入向导第 1 步（上传入口已不在当前页面）。"
+      "uploadingHint": "正在上传所选文件，请稍候。",
+      "hintDegraded": "当前浏览器不支持在对话内直接选择文件，请使用页面中的上传入口。",
+      "hintMissing": "上传入口已失效，请重新打开导入向导第 1 步。",
+      "hintFailed": "上传失败，请重试。",
+      "hintCancelled": "本次上传已取消。",
+      "hintUploaded": "文件已上传。"
     }
   },
   "common": {

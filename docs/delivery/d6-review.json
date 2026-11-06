@@ -749,6 +749,13 @@
       "reason": "仅修复取消驱动补偿并减少会话销毁Redis往返，保持迁移数据、协议、状态机与键面契约不变，D6无需更新。",
       "reviewedAt": "2026-11-07",
       "reviewer": "K3.1 Pro施工并复核"
+    },
+    {
+      "fingerprint": "sha256:acda984e84840b704fd7a44883561755b67385b2760f1ebace3ec9fe4d2579da",
+      "status": "not-affected",
+      "reason": "仅统一AI卡片卡头、图标、状态、限高、边距和真实交互状态展示，保持迁移数据、协议及工作流契约不变，D6无需更新。",
+      "reviewedAt": "2026-11-07",
+      "reviewer": "K3.1 Pro施工，K3.1 Pro独立静态审查"
     }
   ]
 }

@@ -157,8 +157,8 @@ export function isBlankText(text: string | undefined | null): boolean {
   return text === undefined || text === null || text.trim() === ''
 }
 
-/** 敏感键名（门卡参数掩码）：password / passwd / secret / token / apiKey / api_key 等。 */
-const SENSITIVE_KEY_RE = /pass(word)?|secret|token|api_?key/i
+/** 敏感键名：口令、密钥、令牌及身份证件号在所有人读字段中统一掩码。 */
+const SENSITIVE_KEY_RE = /pass(word)?|secret|token|api_?key|id_?card/i
 
 /** 敏感值掩码字形（不做长度泄露 —— 定长 6 个圆点）。 */
 export const MASKED_VALUE = '••••••'
@@ -401,6 +401,7 @@ export interface FormFieldLite {
   key: string
   label: string
   type?: string
+  format?: string
   options?: Array<{ value: string; label?: string }>
 }
 
@@ -454,6 +455,10 @@ function buildFormFields(parsed: Record<string, unknown>): FormFieldLite[] {
     if (typeof type === 'string') {
       field.type = type
     }
+    const format = (item as { format?: unknown }).format
+    if (typeof format === 'string') {
+      field.format = format
+    }
     const options = (item as { options?: unknown }).options
     if (Array.isArray(options)) {
       const parsedOptions: Array<{ value: string; label?: string }> = []
@@ -480,7 +485,13 @@ interface SubmitRowsEntry {
 /** 段 → 提交摘要（guard = args 原串 + submittedValues 对象身份；值对象由写点整体替换）。 */
 const submitRowsCache = new WeakMap<ToolPart, SubmitRowsEntry>()
 
-/** GF 已提交值的行（label 取 `args.form.fields[].label`，值可读化；枚举走 options 的中文标签）。 */
+function submitValueText(field: FormFieldLite, value: unknown): string {
+  return SENSITIVE_KEY_RE.test(field.key) || field.format === 'idcard'
+    ? MASKED_VALUE
+    : optionLabel(field, value)
+}
+
+/** GF 摘要的唯一人读值出口；敏感键与 idcard 格式在卡头、title 和卡体前统一掩码。 */
 export function submitRows(part: ToolPart): FieldRow[] {
   const values = part.submittedValues
   if (!values || Object.keys(values).length === 0) {
@@ -496,13 +507,17 @@ export function submitRows(part: ToolPart): FieldRow[] {
   const seen = new Set<string>()
   for (const field of fields) {
     if (Object.prototype.hasOwnProperty.call(values, field.key)) {
-      rows.push({ key: field.label, value: optionLabel(field, values[field.key]) })
+      rows.push({ key: field.label, value: submitValueText(field, values[field.key]) })
       seen.add(field.key)
     }
   }
   for (const [key, value] of Object.entries(values)) {
     if (!seen.has(key)) {
-      rows.push({ key: byKey.get(key)?.label ?? key, value: readableValue(value) })
+      const field = byKey.get(key)
+      rows.push({
+        key: field?.label ?? key,
+        value: SENSITIVE_KEY_RE.test(key) || field?.format === 'idcard' ? MASKED_VALUE : readableValue(value)
+      })
     }
   }
   submitRowsCache.set(part, { raw: part.args, values, rows })

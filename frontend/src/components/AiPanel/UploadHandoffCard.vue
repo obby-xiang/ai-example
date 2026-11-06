@@ -1,38 +1,72 @@
 <script setup lang="ts">
+import { computed, ref, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
-/**
- * 上传交接卡（设计稿 §3.3.7）—— 本专项**唯一**新增的"人围栏"外观。
- *
- * 不新造卡片壳：外层容器由 `AiPanel` 的统一工具卡承担（与本文件的 `flat` 同族口径），
- * 这里只有内容与两个动作。动作语义不是"批准/拒绝"：
- * - 「选择文件」= 用户手势（浏览器只认它给的文件句柄）；
- * - 「放弃」= `cancelled=true` 收口（走既有 FRONTEND_CANCELLED，不产生新码）。
- *
- * 三态（waiting / unsupported / missing）共用一套外观，差别只在
- * **主按钮是否可点**与一句可行动说明 —— 仅 unsupported 永久禁用。
- */
-import { computed } from 'vue'
+import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
 
-const { t } = useI18n()
+type UploadHandoffStatus = 'waiting' | 'uploading' | 'uploaded' | 'failed' | 'unsupported' | 'missing' | 'cancelled'
+type HeaderTone = 'neutral' | 'blue' | 'green' | 'amber' | 'red' | 'purple' | 'gray'
 
-const props = defineProps<{
-  status: 'waiting' | 'unsupported' | 'missing'
-  /** 页面允许的扩展名（提示文案用；数组或 `".xlsx,.zip"` 形态都接受） */
+const props = withDefaults(defineProps<{
+  status: UploadHandoffStatus
   accept?: string[] | string | null
-  /** 上传入口的标签（"请点左侧的「…」"） */
   label?: string | null
-  /** 状态原因（unsupported / missing 时展示） */
   reason?: string | null
-}>()
+  fileName?: string | null
+  title?: string | null
+  interactive?: boolean
+}>(), {
+  accept: null,
+  label: null,
+  reason: null,
+  fileName: null,
+  title: null,
+  interactive: true
+})
 
 const emit = defineEmits<{
   (event: 'choose'): void
   (event: 'cancel'): void
 }>()
 
-const entryLabel = computed(() => props.label ?? t('ai.uploadHandoff.fallbackEntry'))
+const { t } = useI18n()
+const bodyId = `upload-handoff-body-${useId()}`
+const expandedOverride = ref<boolean | null>(null)
 
-const chooseDisabled = computed(() => props.status === 'unsupported' || props.status === 'missing')
+const headerTitle = computed(() => props.title?.trim() || t('ai.uploadHandoff.title'))
+const hasLongTitle = computed(() => headerTitle.value.length > 32)
+const expanded = computed({
+  get: () => expandedOverride.value ?? (hasLongTitle.value || (props.status !== 'uploaded' && props.status !== 'cancelled')),
+  set: (value: boolean) => {
+    expandedOverride.value = value
+  }
+})
+
+const statusLabel = computed(() => t(`ai.uploadHandoff.status.${props.status}`))
+const statusTone = computed<HeaderTone>(() => {
+  switch (props.status) {
+    case 'uploaded':
+      return 'green'
+    case 'failed':
+    case 'missing':
+      return 'red'
+    case 'unsupported':
+      return 'amber'
+    case 'cancelled':
+      return 'gray'
+    default:
+      return 'blue'
+  }
+})
+
+const entryLabel = computed(() => props.label ?? t('ai.uploadHandoff.fallbackEntry'))
+const displayFileName = computed(() => {
+  const raw = props.fileName?.trim()
+  if (!raw) {
+    return ''
+  }
+  return raw.split(/[\\/]/).pop() ?? ''
+})
+const subtitle = computed(() => displayFileName.value || undefined)
 
 const acceptText = computed(() => {
   const raw = props.accept
@@ -45,67 +79,108 @@ const acceptText = computed(() => {
   return effective.map((item) => `.${item.replace(/^\./, '')}`).join(' / ')
 })
 
-function onChoose(): void {
-  if (chooseDisabled.value) {
-    return
-  }
-  // 同步 emit：把"用户手势"原样交给上层（picker 必须在这一栈里被调用）
-  emit('choose')
-}
+const hasReason = computed(() => Boolean(props.reason?.trim()))
+const isRetry = computed(() => props.status === 'failed' || (props.status === 'waiting' && hasReason.value))
+const chooseDisabled = computed(() => props.status === 'unsupported' || props.status === 'missing')
+const showChoose = computed(() => props.interactive && ['waiting', 'failed', 'unsupported', 'missing'].includes(props.status))
+const showCancel = computed(() => props.interactive && props.status !== 'uploaded' && props.status !== 'cancelled')
+const showEntryHint = computed(() => props.interactive && ['waiting', 'failed', 'unsupported'].includes(props.status))
 
-/**
- * 三态说明（2026-10-29 ToC 呈现减负批：硬编码中文全部走 locale —— 英文界面不再夹中文）。
- * `reason` 是后端给的具体原因（数据不是文案），有就用它，没有才回落本地人话。
- */
 const hint = computed(() => {
   if (props.status === 'unsupported') {
-    return props.reason ?? t('ai.uploadHandoff.hintDegraded')
+    return hasReason.value ? props.reason : t('ai.uploadHandoff.hintDegraded')
   }
   if (props.status === 'missing') {
     return t('ai.uploadHandoff.hintMissing')
   }
+  if (props.status === 'failed' || (props.status === 'waiting' && hasReason.value)) {
+    return hasReason.value ? props.reason : t('ai.uploadHandoff.hintFailed')
+  }
+  if (props.status === 'cancelled') {
+    return t('ai.uploadHandoff.hintCancelled')
+  }
+  if (props.status === 'uploaded' && displayFileName.value === '') {
+    return t('ai.uploadHandoff.hintUploaded')
+  }
   return null
 })
+
+function onChoose(): void {
+  if (!showChoose.value || chooseDisabled.value) {
+    return
+  }
+  emit('choose')
+}
+
+const PRIMARY_BUTTON = 'min-w-[84px] flex-none whitespace-nowrap rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-[13px] py-[5px] text-[12.6px] font-semibold text-white transition-all duration-[150ms] hover:brightness-[1.08] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb] disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal disabled:opacity-50 motion-reduce:transition-none'
+const SECONDARY_BUTTON = 'min-w-[56px] flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[13px] py-[5px] text-[12.6px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb] motion-reduce:transition-none'
 </script>
 
 <template>
-  <div class="flex flex-col gap-2" data-testid="upload-handoff">
-    <div class="flex items-center gap-2 text-[12.6px] text-[#1f2328]">
-      <span class="inline-flex items-center text-[#2563eb]" aria-hidden="true">
-        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
-          <path d="M8 1.5l1.2 3.2 3.2 1.2-3.2 1.2L8 10.3 6.8 7.1 3.6 5.9l3.2-1.2z" />
-          <path d="M12.4 10l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z" opacity="0.75" />
-        </svg>
-      </span>
-      <span class="font-semibold">{{ t('ai.uploadHandoff.pickFile') }}</span>
-    </div>
-    <p class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
-      {{ t('ai.uploadHandoff.acceptHint', { accept: acceptText }) }}
-    </p>
-    <p v-if="hint" class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]" data-testid="upload-handoff-hint">
-      {{ hint }}
-    </p>
-    <p class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
-      {{ t('ai.uploadHandoff.orClick', { label: entryLabel }) }}
-    </p>
-    <div class="flex items-center gap-[9px] pt-1">
-      <button
-        type="button"
-        class="flex-none whitespace-nowrap min-w-[84px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-        data-testid="upload-handoff-choose"
-        :disabled="chooseDisabled"
-        @click="onChoose"
-      >
-        {{ t('ai.uploadHandoff.choose') }}
-      </button>
-      <button
-        type="button"
-        class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328]"
-        data-testid="upload-handoff-cancel"
-        @click="emit('cancel')"
-      >
-        {{ t('ai.uploadHandoff.discard') }}
-      </button>
+  <div class="min-w-0" data-testid="upload-handoff">
+    <BusinessCardHeader
+      icon="upload"
+      :title="headerTitle"
+      :subtitle="subtitle"
+      :status="statusLabel"
+      :tone="statusTone"
+      :expanded="expanded"
+      :controls="bodyId"
+      @toggle="expanded = !expanded"
+    />
+    <span class="sr-only" role="status" aria-live="polite">{{ statusLabel }}</span>
+
+    <div :id="bodyId" v-show="expanded" class="px-[10px] pb-[10px]">
+      <div class="flex flex-col gap-[8px]">
+        <p v-if="hasLongTitle" class="m-0 break-words text-[12.6px] font-semibold leading-[1.55] text-[#1f2328] [overflow-wrap:anywhere]">
+          {{ headerTitle }}
+        </p>
+
+        <div v-if="displayFileName" class="flex min-w-0 items-center gap-[8px] text-[12.2px] leading-[1.55] text-[#57606a]" data-testid="upload-handoff-file">
+          <span class="min-w-0 break-all">{{ displayFileName }}</span>
+          <span v-if="status === 'uploading'" class="shrink-0 text-[#8b949e]">{{ t('ai.uploadHandoff.status.uploading') }}</span>
+        </div>
+
+        <p v-if="status === 'uploading'" class="m-0 flex items-center gap-[6px] text-[12.2px] leading-[1.55] text-[#57606a]">
+          <span class="inline-block h-[11px] w-[11px] animate-spin rounded-[50%] border-[1.5px] border-solid border-[#cddcff] border-t-[#2563eb] motion-reduce:animate-none" aria-hidden="true"></span>
+          {{ t('ai.uploadHandoff.uploadingHint') }}
+        </p>
+
+        <template v-if="status !== 'uploading' && status !== 'uploaded' && status !== 'cancelled'">
+          <p class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
+            {{ t('ai.uploadHandoff.acceptHint', { accept: acceptText }) }}
+          </p>
+          <p v-if="showEntryHint" class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
+            {{ t('ai.uploadHandoff.orClick', { label: entryLabel }) }}
+          </p>
+        </template>
+
+        <p v-if="hint" class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]" data-testid="upload-handoff-hint">
+          {{ hint }}
+        </p>
+
+        <div v-if="showChoose || showCancel" class="flex flex-wrap items-center gap-[8px] pt-[2px]">
+          <button
+            v-if="showChoose"
+            type="button"
+            :class="PRIMARY_BUTTON"
+            data-testid="upload-handoff-choose"
+            :disabled="chooseDisabled"
+            @click="onChoose"
+          >
+            {{ isRetry ? t('ai.uploadHandoff.retry') : t('ai.uploadHandoff.choose') }}
+          </button>
+          <button
+            v-if="showCancel"
+            type="button"
+            :class="SECONDARY_BUTTON"
+            data-testid="upload-handoff-cancel"
+            @click="emit('cancel')"
+          >
+            {{ t('ai.uploadHandoff.discard') }}
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>

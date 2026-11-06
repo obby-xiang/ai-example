@@ -5,7 +5,7 @@
  * 用**原生 `<table>`** 而不是 div 网格：`caption` + `th scope="col"` 是 a11y 的硬要求（§4-规则 6），
  * 原生语义直接满足，屏幕阅读器与键盘导航都不需要额外 ARIA。
  *
- * 视觉语汇沿用仓内既有表格卡（底色 `#f6f7f9` / 分隔线 `#eef0f3` / 表体长表格族 `min(480px,60vh)` 限高内滚），
+ * 视觉语汇沿用仓内既有表格卡；横向溢出在本组件处理，纵向限高统一归属工具卡主滚动区。
  * 全部 Tailwind 类，无手写 style。
  */
 import { computed } from 'vue'
@@ -62,7 +62,7 @@ function cellText(row: Record<string, unknown>, column: ResultViewColumn): strin
 
 <template>
   <div class="border border-solid border-[#eef0f3] rounded-[8px] overflow-hidden">
-    <div :class="['max-h-[min(480px,60vh)] overflow-auto', SCROLLBAR_CLASS]">
+    <div :class="['overflow-x-auto', SCROLLBAR_CLASS]">
       <table
         class="w-full border-separate border-spacing-0 text-[12.2px] leading-[1.5] text-[#1f2328]"
         data-testid="resultview-table"

@@ -2,276 +2,250 @@
   <div
     ref="rootRef"
     :data-testid="`gf-form-${scope}`"
-    :class="readonly || flat ? 'min-w-0' : 'border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2.5'"
+    class="min-w-0"
   >
-    <!-- R-165 S3a：GF 表单卡 = demo v7 `.gf` 结构（v7.html:255-272）
-         容器细描边 + 圆角 10 + overflow-hidden ｜ 卡头 ▤+标题+胶囊（9px 11px / 底细线 / #f6f7f9 / 12.8px/650）
-         ｜ 字段体 p-[11px]。2026-10-20 去超时裁决：时限脚注整块退役（表单一直可填）；
-         嵌入态（flat）单框 —— 描边/底色/外边距/内边距交给宿主卡容器。
-         EP 控件全退（原生 input / select / checkbox / button + Tailwind 工具类）。
-         GF 优化批（G-G）：全部 chrome 文案走 locales（zh-CN / en-US），控件与错误位带 a11y 关联。 -->
-    <div
-      v-if="!readonly && showHeader"
-      class="flex items-center gap-[7px] px-[11px] py-[9px] border-0 border-b border-solid border-[#eef0f3] bg-[#f6f7f9] text-[12.8px] [font-weight:650]"
-    >
-      <span class="flex-none text-[#8b949e] text-[11px]" aria-hidden="true">▤</span>
-      <span class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{{ schema.title ?? t('ai.gf.title') }}</span>
-      <span class="flex-none ml-auto text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] whitespace-nowrap font-normal text-[#2563eb] bg-[#eff4ff]">{{ scenarioLabel }}</span>
+    <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto', readonly ? '' : 'pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
+      <div class="flex flex-col gap-[8px]">
+        <p v-if="fullTitle" class="m-0 break-words text-[12.6px] font-semibold leading-[1.55] text-[#1f2328] [overflow-wrap:anywhere]" data-testid="gf-full-title">{{ fullTitle }}</p>
+        <div v-for="field in visibleFields" :key="field.key">
+          <div v-if="!readonly && isAdvancedGroupStart(field)">
+            <button
+              type="button"
+              data-testid="gf-advanced-toggle"
+              :aria-expanded="advancedOpen"
+              class="rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[9px] py-[3px] text-[12px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]"
+              @click="toggleAdvanced"
+            >{{ advancedOpen ? t('ai.gf.advancedCollapse') : t('ai.gf.advancedExpand', { count: advancedCount }) }}</button>
+          </div>
+          <template v-if="isFieldOpen(field)">
+            <label
+              :for="controlId(field)"
+              class="mb-[4px] block break-words text-[12.2px] [overflow-wrap:anywhere]"
+              :class="fieldIssues(field).length > 0 ? 'text-[#c0392b]' : 'text-[#57606a]'"
+            >
+              {{ field.label }}<span v-if="isRequired(field)" class="text-[#c0392b]" aria-hidden="true"> *</span>
+            </label>
+            <span :id="hintId(field)" class="sr-only">{{ hintOf(field) }}</span>
+
+            <span v-if="readonly && isSensitiveField(field)" class="block text-[13px] leading-[normal] text-[#57606a]">{{ MASKED_VALUE }}</span>
+            <textarea
+              v-else-if="field.type === 'text' && field.variant === 'longText'"
+              :id="controlId(field)"
+              :data-testid="controlTestId(field)"
+              :data-long-text="field.key"
+              :class="[fieldClass(field), 'resize-none overflow-y-hidden']"
+              :value="textValue(field.key)"
+              :placeholder="field.placeholder"
+              :maxlength="MAX_LONGTEXT_VALUE_CHARS"
+              :disabled="isDisabled(field)"
+              :aria-invalid="fieldIssues(field).length > 0"
+              :aria-required="isRequired(field)"
+              :aria-describedby="describedBy(field)"
+              rows="4"
+              @input="onLongTextInput(field.key, $event)"
+            ></textarea>
+            <input
+              v-else-if="field.type === 'text'"
+              :id="controlId(field)"
+              :data-testid="controlTestId(field)"
+              :type="inputTypeOf(field)"
+              :class="fieldClass(field)"
+              :value="textValue(field.key)"
+              :placeholder="field.placeholder"
+              :maxlength="MAX_TEXT_VALUE_CHARS"
+              :disabled="isDisabled(field)"
+              :aria-invalid="fieldIssues(field).length > 0"
+              :aria-required="isRequired(field)"
+              :aria-describedby="describedBy(field)"
+              @input="setValue(field.key, ($event.target as HTMLInputElement).value)"
+            />
+            <input
+              v-else-if="field.type === 'number'"
+              :id="controlId(field)"
+              :data-testid="controlTestId(field)"
+              type="number"
+              :class="fieldClass(field)"
+              :value="numberValue(field.key)"
+              :placeholder="field.placeholder"
+              :min="numberBound(field.min)"
+              :max="numberBound(field.max)"
+              :step="field.step"
+              :disabled="isDisabled(field)"
+              :aria-invalid="fieldIssues(field).length > 0"
+              :aria-required="isRequired(field)"
+              :aria-describedby="describedBy(field)"
+              @input="onNumberInput(field.key, $event)"
+            />
+            <label v-else-if="field.type === 'boolean'" class="relative inline-flex h-[18px] w-[34px] align-middle">
+              <input
+                :id="controlId(field)"
+                :data-testid="controlTestId(field)"
+                type="checkbox"
+                class="absolute inset-0 m-0 h-full w-full cursor-pointer appearance-none rounded-[999px] [outline:none] focus-visible:ring-2 focus-visible:ring-[#2563eb] focus-visible:ring-offset-2 disabled:cursor-default"
+                :checked="model[field.key] === true"
+                :disabled="isDisabled(field)"
+                :aria-invalid="fieldIssues(field).length > 0"
+                :aria-describedby="describedBy(field)"
+                @change="setValue(field.key, ($event.target as HTMLInputElement).checked)"
+              />
+              <span
+                class="pointer-events-none absolute inset-0 rounded-[999px] transition-colors duration-[150ms]"
+                :class="model[field.key] === true ? 'bg-[#2563eb]' : 'bg-[#e3e6ea]'"
+                aria-hidden="true"
+              ></span>
+              <span
+                class="pointer-events-none absolute left-[2px] top-[2px] h-[14px] w-[14px] rounded-[50%] bg-white transition-transform duration-[150ms] motion-reduce:transition-none"
+                :class="model[field.key] === true ? 'translate-x-[16px]' : ''"
+                aria-hidden="true"
+              ></span>
+            </label>
+            <input
+              v-else-if="field.type === 'date'"
+              :id="controlId(field)"
+              :data-testid="controlTestId(field)"
+              type="date"
+              :class="fieldClass(field)"
+              :value="textValue(field.key)"
+              :min="dateBound(field.min)"
+              :max="dateBound(field.max)"
+              :disabled="isDisabled(field)"
+              :aria-invalid="fieldIssues(field).length > 0"
+              :aria-required="isRequired(field)"
+              :aria-describedby="describedBy(field)"
+              @input="setValue(field.key, ($event.target as HTMLInputElement).value)"
+            />
+            <select
+              v-else-if="field.type === 'enum'"
+              :id="controlId(field)"
+              :data-testid="controlTestId(field)"
+              :class="fieldClass(field)"
+              :value="textValue(field.key)"
+              :disabled="isDisabled(field)"
+              :aria-invalid="fieldIssues(field).length > 0"
+              :aria-required="isRequired(field)"
+              :aria-describedby="describedBy(field)"
+              @change="setValue(field.key, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">{{ t('ai.gf.selectPlaceholder', { label: field.label }) }}</option>
+              <option v-for="option in optionsOf(field)" :key="option.value" :value="option.value">
+                {{ option.label ?? option.value }}
+              </option>
+            </select>
+            <span v-else-if="field.type === 'multi_select'" class="flex flex-wrap gap-[6px]">
+              <label
+                v-for="option in optionsOf(field)"
+                :key="option.value"
+                :for="`${controlId(field)}-${option.value}`"
+                class="inline-flex items-center gap-[5px] rounded-[999px] border border-solid px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms]"
+                :class="[
+                  multiChecked(field, option.value)
+                    ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
+                    : 'border-[#e3e6ea] bg-white text-[#57606a]',
+                  readonly ? 'cursor-default' : 'cursor-pointer'
+                ]"
+              >
+                <input
+                  :id="`${controlId(field)}-${option.value}`"
+                  :data-testid="`${controlTestId(field)}-${option.value}`"
+                  type="checkbox"
+                  class="m-0"
+                  :checked="multiChecked(field, option.value)"
+                  :disabled="isDisabled(field)"
+                  @change="onMultiToggle(field.key, option.value, ($event.target as HTMLInputElement).checked)"
+                />
+                {{ option.label ?? option.value }}
+              </label>
+            </span>
+            <div v-else-if="field.type === 'attachment'" class="min-w-0">
+              <input
+                :id="controlId(field)"
+                :data-testid="controlTestId(field)"
+                type="file"
+                :accept="ATTACHMENT_ACCEPT"
+                :class="['block w-full text-[12.2px] text-[#57606a] file:mr-[8px] file:rounded-[6px] file:border file:border-solid file:border-[#e3e6ea] file:bg-white file:px-[9px] file:py-[3px] file:text-[12px] file:text-[#57606a] disabled:cursor-default', fieldIssues(field).length > 0 ? 'rounded-[6px] border border-solid border-[#c0392b] p-[4px]' : '']"
+                :disabled="isDisabled(field) || !uploadContext || uploading[field.key] === true"
+                :aria-invalid="fieldIssues(field).length > 0"
+                :aria-required="isRequired(field)"
+                :aria-describedby="describedBy(field)"
+                @change="onAttachmentChange(field, $event)"
+              />
+              <span v-if="uploading[field.key]" class="mt-[4px] block text-[11.8px] text-[#8b949e]">{{ t('ai.gf.attachment.uploading') }}</span>
+              <span v-else-if="attachmentOf(field)" class="mt-[5px] flex flex-wrap items-center gap-[8px] text-[11.8px] text-[#57606a]">
+                <span class="break-all">{{ attachmentOf(field)?.fileName }}</span>
+                <span class="text-[#8b949e]">{{ formatBytes(attachmentOf(field)?.size) }}</span>
+                <button
+                  v-if="!readonly"
+                  type="button"
+                  :data-testid="`gf-attach-remove-${field.key}`"
+                  class="rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[7px] py-[2px] text-[11.8px] text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]"
+                  @click="removeAttachment(field.key)"
+                >{{ t('ai.gf.attachment.remove') }}</button>
+              </span>
+              <span v-else-if="!readonly" class="mt-[4px] block text-[11.4px] text-[#8b949e]">
+                {{ t('ai.gf.attachment.choose') }} · {{ t('ai.gf.attachment.hint') }}
+              </span>
+            </div>
+            <span v-else :class="FMSG">
+              {{ t('ai.gf.unsupportedType', { label: field.label, type: String(field.type) }) }}
+            </span>
+
+            <span v-if="fieldIssues(field).length > 0" :id="errorId(field)" :class="[FMSG, 'mt-[5px]']">
+              {{ fieldIssues(field).map((issue) => issueText(field, issue)).join('；') }}
+            </span>
+          </template>
+        </div>
+        <div
+          v-if="readonly && readOnlyReason"
+          class="whitespace-pre-wrap break-words rounded-[8px] border border-solid px-[10px] py-[7px] text-[11.9px] leading-[1.6]"
+          :class="readOnlyReasonTone === 'neutral'
+            ? 'border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]'
+            : 'border-[#f0d5d0] bg-[#fdf1ef] text-[#c0392b]'"
+          data-testid="gf-readonly-reason"
+        >{{ readOnlyReason }}</div>
+        <span v-if="!readonly && cardError" :class="FMSG" data-testid="gf-error">{{ cardError }}</span>
+      </div>
     </div>
 
-    <div :class="readonly || flat ? '' : 'p-[11px]'">
-      <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto', readonly ? '' : 'pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
-      <div v-for="field in visibleFields" :key="field.key" :class="isFieldOpen(field) ? 'mb-[11px]' : 'mb-0'">
-        <!-- 高级条件渐进披露（AR-07）：长尾可选条件折叠，按钮只出现一次（高级区第一张之前） -->
-        <div v-if="!readonly && isAdvancedGroupStart(field)" class="mb-[11px]">
-          <button
-            type="button"
-            data-testid="gf-advanced-toggle"
-            :aria-expanded="advancedOpen"
-            class="rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[9px] py-[3px] text-[12px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
-            @click="advancedOpen = !advancedOpen"
-          >{{ advancedOpen ? t('ai.gf.advancedCollapse') : t('ai.gf.advancedExpand', { count: advancedCount }) }}</button>
-        </div>
-        <template v-if="isFieldOpen(field)">
-        <label
-          :for="controlId(field)"
-          class="block text-[12.2px] mb-[4px] break-words [overflow-wrap:anywhere]"
-          :class="fieldIssues(field).length > 0 ? 'text-[#c0392b]' : 'text-[#57606a]'"
-        >
-          {{ field.label }}<span v-if="isRequired(field)" class="text-[#c0392b]" aria-hidden="true"> *</span>
-        </label>
-        <span :id="hintId(field)" class="sr-only">{{ hintOf(field) }}</span>
+    <span class="sr-only" role="alert" aria-live="polite" data-testid="gf-live-region">{{ liveSummary }}</span>
 
-        <!-- text：format 决定 input type；longText 走 textarea（上限 2000） -->
-        <textarea
-          v-if="field.type === 'text' && field.variant === 'longText'"
-          :id="controlId(field)"
-          :data-testid="controlTestId(field)"
-          :class="fieldClass(field)"
-          :value="textValue(field.key)"
-          :placeholder="field.placeholder"
-          :maxlength="MAX_LONGTEXT_VALUE_CHARS"
-          :disabled="isDisabled(field)"
-          :aria-invalid="fieldIssues(field).length > 0"
-          :aria-required="isRequired(field)"
-          :aria-describedby="describedBy(field)"
-          rows="4"
-          @input="setValue(field.key, ($event.target as HTMLTextAreaElement).value)"
-        ></textarea>
-        <input
-          v-else-if="field.type === 'text'"
-          :id="controlId(field)"
-          :data-testid="controlTestId(field)"
-          :type="inputTypeOf(field)"
-          :class="fieldClass(field)"
-          :value="textValue(field.key)"
-          :placeholder="field.placeholder"
-          :maxlength="MAX_TEXT_VALUE_CHARS"
-          :disabled="isDisabled(field)"
-          :aria-invalid="fieldIssues(field).length > 0"
-          :aria-required="isRequired(field)"
-          :aria-describedby="describedBy(field)"
-          @input="setValue(field.key, ($event.target as HTMLInputElement).value)"
-        />
-        <input
-          v-else-if="field.type === 'number'"
-          :id="controlId(field)"
-          :data-testid="controlTestId(field)"
-          type="number"
-          :class="fieldClass(field)"
-          :value="numberValue(field.key)"
-          :placeholder="field.placeholder"
-          :min="numberBound(field.min)"
-          :max="numberBound(field.max)"
-          :step="field.step"
-          :disabled="isDisabled(field)"
-          :aria-invalid="fieldIssues(field).length > 0"
-          :aria-required="isRequired(field)"
-          :aria-describedby="describedBy(field)"
-          @input="onNumberInput(field.key, $event)"
-        />
-        <!-- boolean：原生 checkbox 自绘双态滑块（28×28 门卡同口径：不引第三方控件、不用 peer 变体）。
-             批G · G7：外层用 <label> 包裹 —— 装饰层（轨道 + 圆点）绝对定位盖在 input 上，
-             `pointer-events-none` 保证真实点击落到 input；即便装饰层将来改样式，label 的
-             原生激活行为也能把点击转发给控件（实测缺陷：真实鼠标点不动、只有 DOM .click() 生效）。 -->
-        <label v-else-if="field.type === 'boolean'" class="relative inline-flex w-[34px] h-[18px] align-middle">
-          <input
-            :id="controlId(field)"
-            :data-testid="controlTestId(field)"
-            type="checkbox"
-            class="absolute inset-0 m-0 w-full h-full appearance-none rounded-[999px] cursor-pointer disabled:cursor-default [outline:none]"
-            :checked="model[field.key] === true"
-            :disabled="isDisabled(field)"
-            :aria-invalid="fieldIssues(field).length > 0"
-            :aria-describedby="describedBy(field)"
-            @change="setValue(field.key, ($event.target as HTMLInputElement).checked)"
-          />
-          <span
-            class="pointer-events-none absolute inset-0 rounded-[999px] transition-colors duration-[150ms]"
-            :class="model[field.key] === true ? 'bg-[#2563eb]' : 'bg-[#e3e6ea]'"
-            aria-hidden="true"
-          ></span>
-          <span
-            class="pointer-events-none absolute top-[2px] left-[2px] w-[14px] h-[14px] rounded-[50%] bg-white transition-transform duration-[150ms]"
-            :class="model[field.key] === true ? 'translate-x-[16px]' : ''"
-            aria-hidden="true"
-          ></span>
-        </label>
-        <input
-          v-else-if="field.type === 'date'"
-          :id="controlId(field)"
-          :data-testid="controlTestId(field)"
-          type="date"
-          :class="fieldClass(field)"
-          :value="textValue(field.key)"
-          :min="dateBound(field.min)"
-          :max="dateBound(field.max)"
-          :disabled="isDisabled(field)"
-          :aria-invalid="fieldIssues(field).length > 0"
-          :aria-required="isRequired(field)"
-          :aria-describedby="describedBy(field)"
-          @input="setValue(field.key, ($event.target as HTMLInputElement).value)"
-        />
-        <select
-          v-else-if="field.type === 'enum'"
-          :id="controlId(field)"
-          :data-testid="controlTestId(field)"
-          :class="fieldClass(field)"
-          :value="textValue(field.key)"
-          :disabled="isDisabled(field)"
-          :aria-invalid="fieldIssues(field).length > 0"
-          :aria-required="isRequired(field)"
-          :aria-describedby="describedBy(field)"
-          @change="setValue(field.key, ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">{{ t('ai.gf.selectPlaceholder', { label: field.label }) }}</option>
-          <option v-for="option in optionsOf(field)" :key="option.value" :value="option.value">
-            {{ option.label ?? option.value }}
-          </option>
-        </select>
-        <!-- multi_select：原生 checkbox 胶囊组（同 el-select multiple 的多值语义，可点可取消） -->
-        <span v-else-if="field.type === 'multi_select'" class="flex flex-wrap gap-[6px]">
-          <label
-            v-for="option in optionsOf(field)"
-            :key="option.value"
-            :for="`${controlId(field)}-${option.value}`"
-            class="inline-flex items-center gap-[5px] rounded-[999px] border border-solid px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms]"
-            :class="[
-              multiChecked(field, option.value)
-                ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
-                : 'border-[#e3e6ea] bg-white text-[#57606a]',
-              readonly ? 'cursor-default' : 'cursor-pointer'
-            ]"
-          >
-            <input
-              :id="`${controlId(field)}-${option.value}`"
-              :data-testid="`${controlTestId(field)}-${option.value}`"
-              type="checkbox"
-              class="m-0"
-              :checked="multiChecked(field, option.value)"
-              :disabled="isDisabled(field)"
-              @change="onMultiToggle(field.key, option.value, ($event.target as HTMLInputElement).checked)"
-            />
-            {{ option.label ?? option.value }}
-          </label>
-        </span>
-        <!-- attachment（G-E）：固定上传口直传，表单值 = fileId；文件内容永不进模型上下文 -->
-        <div v-else-if="field.type === 'attachment'" class="min-w-0">
-          <input
-            :id="controlId(field)"
-            :data-testid="controlTestId(field)"
-            type="file"
-            :accept="ATTACHMENT_ACCEPT"
-            :class="['block w-full text-[12.2px] text-[#57606a] file:mr-[8px] file:rounded-[6px] file:border file:border-solid file:border-[#e3e6ea] file:bg-white file:px-[9px] file:py-[3px] file:text-[12px] file:text-[#57606a] disabled:cursor-default', fieldIssues(field).length > 0 ? 'rounded-[6px] border border-solid border-[#c0392b] p-[4px]' : '']"
-            :disabled="isDisabled(field) || !uploadContext || uploading[field.key] === true"
-            :aria-invalid="fieldIssues(field).length > 0"
-            :aria-required="isRequired(field)"
-            :aria-describedby="describedBy(field)"
-            @change="onAttachmentChange(field, $event)"
-          />
-          <span v-if="uploading[field.key]" class="mt-[4px] block text-[11.8px] text-[#8b949e]">{{ t('ai.gf.attachment.uploading') }}</span>
-          <span v-else-if="attachmentOf(field)" class="mt-[5px] flex flex-wrap items-center gap-[8px] text-[11.8px] text-[#57606a]">
-            <span class="break-all">{{ attachmentOf(field)?.fileName }}</span>
-            <span class="text-[#8b949e]">{{ formatBytes(attachmentOf(field)?.size) }}</span>
-            <button
-              v-if="!readonly"
-              type="button"
-              :data-testid="`gf-attach-remove-${field.key}`"
-              class="rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[7px] py-[2px] text-[11.8px] text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328]"
-              @click="removeAttachment(field.key)"
-            >{{ t('ai.gf.attachment.remove') }}</button>
-          </span>
-          <span v-else-if="!readonly" class="mt-[4px] block text-[11.4px] text-[#8b949e]">
-            {{ t('ai.gf.attachment.choose') }} · {{ t('ai.gf.attachment.hint') }}
-          </span>
-        </div>
-        <!-- 防御兜底：parseFormSchema 已保证七型，走到这里说明 schema 异常，拒渲染该字段 -->
-        <span v-else :class="FMSG">
-          {{ t('ai.gf.unsupportedType', { label: field.label, type: String(field.type) }) }}
-        </span>
+    <span
+      v-if="!readonly && cascadeNotice"
+      class="mt-[8px] block rounded-[6px] border border-solid border-[#e3e6ea] bg-[#f6f7f9] px-[8px] py-[5px] text-[11.8px] leading-[1.5] text-[#57606a]"
+      data-testid="gf-cascade-notice"
+    >{{ cascadeNotice }}</span>
 
-        <span v-if="fieldIssues(field).length > 0" :id="errorId(field)" :class="[FMSG, 'mt-[5px]']">
-          {{ fieldIssues(field).map((issue) => issueText(field, issue)).join('；') }}
-        </span>
-        </template>
-      </div>
-      </div>
-
-      <!-- 错误 live region（G-G）：新增错误时读屏播报；视觉上由各字段错误条承担 -->
-      <span class="sr-only" role="alert" aria-live="polite" data-testid="gf-live-region">{{ liveSummary }}</span>
-
-      <!-- AR-07：级联清值的一次性告知（父值变了 ⇒ 哪些子值被清掉），常驻在字段区下方 -->
-      <span
-        v-if="!readonly && cascadeNotice"
-        class="mt-[11px] block text-[11.8px] leading-[1.5] text-[#57606a] bg-[#f6f7f9] border border-solid border-[#e3e6ea] rounded-[6px] px-[8px] py-[5px]"
-        data-testid="gf-cascade-notice"
-      >{{ cascadeNotice }}</span>
-
-      <span v-if="!readonly && cardError" :class="[FMSG, 'mt-[11px]']" data-testid="gf-error">{{ cardError }}</span>
-
-      <div v-if="!readonly" class="flex flex-wrap items-center justify-end gap-2 mt-[10px] pt-[10px] border-0 border-t border-solid border-[#eef0f3]">
-        <span v-if="!canRetry" class="mr-auto text-[11.8px] text-[#57606a]">{{ t('ai.gf.notRetryable') }}</span>
-        <button
-          type="button"
-          data-testid="gf-cancel"
-          :class="GF_CANCEL"
-          :disabled="submitting"
-          @click="emit('cancel')"
-        >{{ t('ai.gf.cancel') }}</button>
-        <button
-          v-if="canRetry"
-          type="button"
-          data-testid="gf-submit"
-          :class="GF_SUBMIT"
-          :disabled="disabled"
-          @click="onSubmit"
-        >
-          <span
-            v-if="submitting"
-            class="w-[11px] h-[11px] border-solid border-[1.5px] border-[rgba(255,255,255,.4)] border-t-white rounded-[50%] inline-block animate-spin mr-[6px] align-[-1px] motion-reduce:animate-none"
-            aria-hidden="true"
-          ></span>{{ submitting ? t('ai.gf.submitting') : t('ai.gf.submit') }}
-        </button>
-      </div>
+    <div v-if="!readonly" class="mt-[8px] flex flex-wrap items-center justify-end gap-2">
+      <span v-if="!canRetry" class="mr-auto text-[11.8px] text-[#57606a]">{{ t('ai.gf.notRetryable') }}</span>
+      <button
+        type="button"
+        data-testid="gf-cancel"
+        :class="GF_CANCEL"
+        :disabled="submitting"
+        @click="emit('cancel')"
+      >{{ t('ai.gf.cancel') }}</button>
+      <button
+        v-if="canRetry"
+        type="button"
+        data-testid="gf-submit"
+        :class="GF_SUBMIT"
+        :disabled="disabled"
+        @click="onSubmit"
+      >
+        <span
+          v-if="submitting"
+          class="mr-[6px] inline-block h-[11px] w-[11px] rounded-[50%] border-[1.5px] border-solid border-[rgba(255,255,255,.4)] border-t-white align-[-1px] animate-spin motion-reduce:animate-none"
+          aria-hidden="true"
+        ></span>{{ submitting ? t('ai.gf.submitting') : t('ai.gf.submit') }}
+      </button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * 生成式表单渲染器（GF-B / DC-15 + GF 优化批）。
- *
- * 组件纪律（S4.4 §1.1）：
- * - 取值与提交前复核只走 `types/form-schema.ts` 的 buildInitialValues / checkFormIssues /
- *   isFieldVisible / resolveFieldOptions（schema 已由 store 层的 parseFormSchema 防御性解析，
- *   非法即取消收敛，不到这里）；文案一律文本插值，永不 v-html；
- * - **零 EP 承载** —— 原生 input / select / textarea / checkbox / button + Tailwind 工具类；
- *   无 scoped 样式块、无行内 style；
- * - GF 优化批（G-A/G-D/G-E/G-F/G-G）：结构化错误按 key 点亮、联动五原语、附件上传、长文本域、
- *   `<label for>`/`aria-invalid`/`aria-describedby`/live region/首错聚焦，chrome 文案全走 locales。
- * - AR-07（批次4 前端C）：① 常用筛选条件**一屏**（不拆成一屏一问），长尾可选条件走「更多条件」
- *   渐进披露 —— 必填 / 已填值 / 有错误的字段永不折叠；② 父值变化清掉子值时给**一句**聚合提示
- *   （`gf-cascade-notice`），不逐字段弹条。
+ * 生成式表单卡体。宿主统一提供业务卡头与卡片外壳。
+ * 取值、校验、级联、草稿和附件提交沿用 form-schema 与 store 契约；
+ * 控件使用原生元素，字段区是唯一纵向滚动区。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -295,6 +269,7 @@ import {
   type FormValueIssue
 } from '@/types/form-schema'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
+import { MASKED_VALUE } from '@/utils/blocks'
 import { nextReadonlyFormScope } from '@/utils/form-scope'
 import { flushFormDraft } from '@/utils/form-draft'
 import { uploadFormAttachment, formOptionSource } from '@/api/ai'
@@ -333,25 +308,32 @@ const props = withDefaults(defineProps<{
   submitting: boolean
   /** 卡级错误（后端 FORM_RESULT_REJECTED 的人读说明；字段级见 fieldErrors） */
   error: string | null
-  /**
-   * 已决只读态 —— 同一张表单原样锁定：控件全部原生 `disabled`、值回填、
-   * 操作按钮行整块不渲染、卡级错误条不渲染。
-   */
+  /** 已决只读态：控件原生禁用并回填真实值，不渲染操作区或卡级错误。 */
   readonly?: boolean
   /** 只读态回填值 / 待填态草稿值（形状不符的键回落初始态，不把脏数据塞进受控控件）。 */
   initialValues?: Record<string, unknown> | null
-  /** 卡头开关（默认 true）。 */
+  /** 兼容旧调用；业务卡头始终由宿主承担。 */
   showHeader?: boolean
-  /** 嵌入态（默认 false）：单框，外框由宿主卡容器承担。 */
+  /** 兼容旧调用；卡片外壳始终由宿主承担。 */
   flat?: boolean
-  /**
-   * 后端结构化错误（G-A）：`{key, code, message}` 列表 —— 前端按 key 点亮对应字段。
-   * 与本地复核结果合并渲染（本地在前，后端在后）。
-   */
+  /** 长标题在字段主滚动区内完整显示。 */
+  fullTitle?: string
+  /** 只读结局原因与字段共用主滚动区。 */
+  readOnlyReason?: string | null
+  readOnlyReasonTone?: 'neutral' | 'error'
+  /** 后端结构化错误按字段归属，与本地复核结果合并渲染。 */
   fieldErrors?: FormValueIssue[] | null
-  /** 附件上传归属（G-E）：runId + toolCallId 绑定"本次挂起的这张表单"；缺省时上传控件禁用。 */
+  /** 附件上传归属；缺省时上传控件禁用。 */
   uploadContext?: UploadContext | null
-}>(), { showHeader: true, initialValues: null, fieldErrors: null, uploadContext: null })
+}>(), {
+  showHeader: false,
+  initialValues: null,
+  fullTitle: '',
+  readOnlyReason: null,
+  readOnlyReasonTone: 'error',
+  fieldErrors: null,
+  uploadContext: null
+})
 
 const emit = defineEmits<{
   (event: 'submit', values: Record<string, unknown>): void
@@ -377,30 +359,22 @@ const scope = props.uploadContext?.toolCallId ?? nextReadonlyFormScope()
 const draftToolCallId = props.uploadContext?.toolCallId
 const interactive = props.readonly !== true
 
-/**
- * v7 控件配方 `.fi`（w-full + 细描边 + 圆角 8 + padding 6px 9px + 13px）。
- * preflight 关闭（tailwind.config.js corePlugins.preflight=false）⇒ 描边样式一律显式 `border-solid`。
- * focus 态走 `focus:` 变体（伪类抬升特异度，稳定压过静/错两态的底色）。
- */
-const FI_BASE = 'w-full border rounded-[8px] px-[9px] py-[6px] font-[inherit] text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] focus:border-[#2563eb] disabled:cursor-default'
+const FI_BASE = 'w-full border rounded-[8px] px-[9px] py-[6px] font-[inherit] text-[13px] leading-[normal] text-[#1f2328] [outline:none] transition-colors duration-[150ms] motion-reduce:transition-none focus:border-[#2563eb] focus-visible:ring-2 focus-visible:ring-[#2563eb] focus-visible:ring-offset-1 disabled:cursor-default'
 const FI_DISABLED = 'disabled:bg-[#f6f7f9] disabled:text-[#8b949e]'
 const FI_READONLY = 'disabled:bg-white disabled:text-[#57606a]'
 const FI_IDLE = 'border-solid border-[#e3e6ea] bg-white'
 const FI_BAD = 'border-solid border-[#c0392b] bg-[#fdf1ef]'
-/** v7 校验错误条 `.fmsg`（11.8px 红字 + 红底 + 浅红描边 + 圆角 6 + padding 5px 8px）。 */
 const FMSG = 'block text-[11.8px] leading-[1.5] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[6px] px-[8px] py-[5px]'
-const GF_CANCEL = 'flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default'
-const GF_SUBMIT = 'flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal'
+const GF_FOCUS = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb] motion-reduce:transition-none'
+const GF_CANCEL = `flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default ${GF_FOCUS}`
+const GF_SUBMIT = `flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal ${GF_FOCUS}`
 
 /** schema 默认值（枚举初值合法默认）：不含任何用户数据，是"用户是否填过"的对照基线。 */
 function schemaDefaults(): Record<string, FormModelValue> {
   return buildInitialValues(props.schema) as Record<string, FormModelValue>
 }
 
-/**
- * 初始模型：`schemaDefaults` 之上叠加 `initialValues`（草稿恢复 / 只读回填）——
- * 只接受与字段类型形状相符的值。
- */
+/** 草稿和只读回填只接受与字段类型相符的值。 */
 function initialModel(): Record<string, FormModelValue> {
   const base = schemaDefaults()
   const values = props.initialValues
@@ -439,45 +413,42 @@ function initialModel(): Record<string, FormModelValue> {
 }
 
 const model = ref<Record<string, FormModelValue>>(initialModel())
-/**
- * 判断"用户是不是真的填过这一格"的对照基线（与它相同 = 还是默认态）。
- * **只含 schema 默认值**，不合并 `initialValues`：草稿/回填是用户数据，算"已填"；
- * 而枚举初值恒有值（首个合法选项），把它当"已填"会让高级条件永远摊开。
- */
 const defaultModel = schemaDefaults()
-/** 本卡根元素（首错聚焦只在本子树里找，同页多卡不串）。 */
 const rootRef = ref<HTMLElement | null>(null)
-/** 本次提交前复核的问题（结构化：按 key 归属字段）。 */
 const localIssues = ref<FormValueIssue[]>([])
-/** 草稿默认值联动的"用户已碰过"集合：被碰过的字段不再被 defaultFrom 覆盖。 */
 const touched = reactive(new Set<string>())
-/** 附件元数据（文件名/大小只在浏览器里用于展示；值仍是 fileId）。 */
 const attachments = ref<Record<string, AttachmentMeta>>({})
 const uploading = reactive<Record<string, boolean>>({})
 const uploadErrors = reactive<Record<string, string>>({})
 const attachmentOperationSeq = new Map<string, number>()
 const attachmentControllers = new Map<string, AbortController>()
 let attachmentsDisposed = false
-/** 浏览器侧超限/类型拒绝（与后端同口径；不发请求，只点亮字段错误）。 */
 const attachmentRejections = reactive<Record<string, AttachmentRejection>>({})
-/** 数据源级联的结果（optionsFrom.sourceId）：按字段 key 缓存，父值一变就重取。 */
 const externalOptions = ref<Record<string, FormFieldOption[]>>({})
-/**
- * 数据源请求序号（E：last-wins）。父值每变一次（含清空）就推进一格；
- * 响应回来时序号或父值不再是当前值 ⇒ 丢弃，防止慢请求覆盖新选项。
- */
 const sourceRequestSeq = new Map<string, number>()
 
-/**
- * 只读态值回填必须跟随 `initialValues` 后到（结局帧先切只读时卡已挂载）。
- * 编辑态不重灌（不覆盖本地输入）。
- */
+function resizeLongTextarea(textarea: HTMLTextAreaElement): void {
+  textarea.style.height = 'auto'
+  textarea.style.height = `${textarea.scrollHeight}px`
+}
+
+function resizeLongTextareas(): void {
+  rootRef.value?.querySelectorAll<HTMLTextAreaElement>('textarea[data-long-text]').forEach(resizeLongTextarea)
+}
+
+function onLongTextInput(key: string, event: Event): void {
+  const textarea = event.target as HTMLTextAreaElement
+  setValue(key, textarea.value)
+  resizeLongTextarea(textarea)
+}
+
 function rehydrateReadonlyModel(): void {
   if (props.readonly !== true) {
     return
   }
   model.value = initialModel()
   localIssues.value = []
+  void nextTick(resizeLongTextareas)
 }
 
 watch(
@@ -486,7 +457,6 @@ watch(
   { deep: true, immediate: true }
 )
 
-/** 草稿来源的附件：只有 fileId（无元数据时展示 id 尾部，避免空白）。 */
 watch(
   () => model.value,
   (values) => {
@@ -499,18 +469,12 @@ watch(
         attachments.value[field.key] = { fileId: value, fileName: t('ai.gf.attachment.unknownName'), size: 0 }
       }
     }
+    void nextTick(resizeLongTextareas)
   },
   { immediate: true }
 )
 
-/** 禁用判据：提交中 / 已决只读（联动禁用按字段另判）。 */
 const disabled = computed(() => props.readonly === true || props.submitting)
-
-const scenarioLabel = computed(() =>
-  props.schema.scenario === 'FILTER' ? t('ai.gf.scenario.filter') : t('ai.gf.scenario.clarify')
-)
-
-/** 联动显隐：隐藏字段不渲染、不参与校验、不提交。 */
 const visibleFields = computed(() => props.schema.fields.filter((field) => isFieldVisible(field, model.value)))
 
 /**
@@ -522,6 +486,11 @@ const FILTER_COMMON_FIELD_COUNT = 6
 
 /** 高级条件展开态（纯呈现层；不影响取值、校验与提交）。 */
 const advancedOpen = ref(false)
+
+function toggleAdvanced(): void {
+  advancedOpen.value = !advancedOpen.value
+  void nextTick(resizeLongTextareas)
+}
 
 function hasUserValue(field: FormFieldSpec): boolean {
   const value = model.value[field.key]
@@ -630,6 +599,12 @@ function isDisabled(field: FormFieldSpec): boolean {
   return disabled.value || isFieldDisabled(field, model.value)
 }
 
+const SENSITIVE_FIELD_KEY_RE = /pass(word)?|secret|token|api_?key|id_?card/i
+
+function isSensitiveField(field: FormFieldSpec): boolean {
+  return field.format === 'idcard' || SENSITIVE_FIELD_KEY_RE.test(field.key)
+}
+
 function inputTypeOf(field: FormFieldSpec): string {
   if (field.type !== 'text') {
     return 'text'
@@ -654,13 +629,20 @@ function dateBound(value: number | string | undefined): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-/** 单字段取值投影（原生控件的 value 只吃 string/number）。 */
 function textValue(key: string): string {
+  const field = props.schema.fields.find((candidate) => candidate.key === key)
+  if (props.readonly === true && field && isSensitiveField(field)) {
+    return MASKED_VALUE
+  }
   const value = model.value[key]
   return typeof value === 'string' ? value : ''
 }
 
 function numberValue(key: string): number | string {
+  const field = props.schema.fields.find((candidate) => candidate.key === key)
+  if (props.readonly === true && field && isSensitiveField(field)) {
+    return MASKED_VALUE
+  }
   const value = model.value[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : ''
 }
@@ -705,6 +687,9 @@ function onNumberInput(key: string, event: Event): void {
 }
 
 function multiChecked(field: FormFieldSpec, value: string): boolean {
+  if (props.readonly === true && isSensitiveField(field)) {
+    return false
+  }
   const current = model.value[field.key]
   return Array.isArray(current) && current.includes(value)
 }
@@ -760,6 +745,7 @@ onMounted(() => {
       void refreshSourceOptions(field)
     }
   }
+  void nextTick(resizeLongTextareas)
 })
 
 /**
@@ -889,10 +875,9 @@ async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<v
     attachments.value = { ...attachments.value, [field.key]: uploaded }
     setValue(field.key, uploaded.fileId)
     localIssues.value = localIssues.value.filter((issue) => issue.key !== field.key)
-  } catch (error) {
+  } catch {
     if (isCurrent()) {
-      uploadErrors[field.key] =
-        error instanceof Error ? error.message : t('ai.gf.attachment.failed')
+      uploadErrors[field.key] = t('ai.gf.attachment.failed')
     }
   } finally {
     externalSignal?.removeEventListener('abort', onExternalAbort)

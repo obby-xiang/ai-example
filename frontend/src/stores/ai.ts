@@ -13,7 +13,7 @@
  */
 
 import { defineStore, getActivePinia } from 'pinia'
-import { markRaw, watch } from 'vue'
+import { markRaw, ref, watch } from 'vue'
 import { ApiError, FRONTEND_ERROR_CODES } from '@/api/http'
 import { aiApi, type AiHistoryPage } from '@/api/ai'
 import {
@@ -216,24 +216,31 @@ let previewSheetCtx: SheetContext | null = null
  * 同一页签内多个 store 实例（跨实例重复确认）也共用这一次消费。
  */
 let previewDecisionInFlight: string | null = null
+const previewApplyingToolCallId = ref<string | null>(null)
 
 function previewDecisionKey(plan: SheetWritePlan): string {
   return plan.previewId ?? `${plan.toolCallId}:${plan.planId}`
 }
 
 /** 尝试占用决策权（false = 同一张卡已有决策在途）。 */
-function beginPreviewDecision(plan: SheetWritePlan): boolean {
+function beginPreviewDecision(plan: SheetWritePlan, applying = false): boolean {
   const key = previewDecisionKey(plan)
   if (previewDecisionInFlight === key) {
     return false
   }
   previewDecisionInFlight = key
+  if (applying) {
+    previewApplyingToolCallId.value = plan.toolCallId
+  }
   return true
 }
 
 function endPreviewDecision(plan: SheetWritePlan): void {
   if (previewDecisionInFlight === previewDecisionKey(plan)) {
     previewDecisionInFlight = null
+  }
+  if (previewApplyingToolCallId.value === plan.toolCallId) {
+    previewApplyingToolCallId.value = null
   }
 }
 
@@ -3962,6 +3969,9 @@ export const useAiStore = defineStore('ai', {
   }),
 
   getters: {
+    previewApplyingToolCallId(): string | null {
+      return previewApplyingToolCallId.value
+    },
     /**
      * Task 4：会话就绪（后端已发号）。`false` 时**任何** AI 请求都不得发出 ——
      * 这是"不发空 id"的引导门只读标志（真正的闸在 `ensureSession()`）。
@@ -9062,7 +9072,7 @@ export const useAiStore = defineStore('ai', {
      */
     async chooseUploadFile(): Promise<void> {
       const handoff = this.activeUploadHandoff
-      if (!handoff) {
+      if (!handoff || handoff.status === 'uploading') {
         return
       }
       // 问题7：入队即捕获本轮现场 —— picker / 页面交接都是 await，回来后必须仍是同一轮。
@@ -9088,6 +9098,13 @@ export const useAiStore = defineStore('ai', {
         this.uiAnnouncement = pickUiAnnouncement()
         return
       }
+      const pickingHandoff: ActiveUploadHandoff = {
+        ...handoff,
+        status: 'uploading',
+        reason: null,
+        filename: null
+      }
+      this.activeUploadHandoff = pickingHandoff
       let files: File[]
       try {
         files = await picked
@@ -9098,7 +9115,7 @@ export const useAiStore = defineStore('ai', {
         }
         const aborted = error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))
         this.activeUploadHandoff = {
-          ...handoff,
+          ...pickingHandoff,
           status: 'waiting',
           reason: aborted
             ? translate('ai.notice.uploadPickerCancelled')
@@ -9112,16 +9129,18 @@ export const useAiStore = defineStore('ai', {
       }
       const file = files[0]
       if (!file) {
-        this.activeUploadHandoff = { ...handoff, status: 'waiting', reason: translate('ai.notice.uploadNoFile') }
+        this.activeUploadHandoff = { ...pickingHandoff, status: 'waiting', reason: translate('ai.notice.uploadNoFile') }
         return
       }
       const name = uploadFileNameOf(file)
+      const receivingHandoff: ActiveUploadHandoff = { ...pickingHandoff, filename: name }
+      this.activeUploadHandoff = receivingHandoff
       // 选文件期间区域可能消失（用户切页 / 页面卸载）—— 同一条判据，不得谎报成功。
       // A09：ref 缺省的交接同样要按区域声明的 uploadEntry 回落 —— 否则卡面刚转 waiting，
       // 用户点下去却在这里被判成"没有入口"（同一缺陷的第二道否决）。
-      const region = resolveUploadRegion(handoff.ref)?.region ?? null
+      const region = resolveUploadRegion(receivingHandoff.ref)?.region ?? null
       if (region === null || region.root.isConnected !== true) {
-        await this.finishUploadHandoff(handoff, 'failed', UPLOAD_NO_REGION_TEXT(), false)
+        await this.finishUploadHandoff(receivingHandoff, 'failed', UPLOAD_NO_REGION_TEXT(), false)
         return
       }
       let summary = ''
@@ -9133,7 +9152,7 @@ export const useAiStore = defineStore('ai', {
             return // 交接窗口内已停止：失败也不往旧卡上写
           }
           this.activeUploadHandoff = {
-            ...handoff,
+            ...receivingHandoff,
             status: 'waiting',
             reason: translate('ai.notice.uploadReceiveFailed', { message: errorText(error) })
           }
@@ -9146,7 +9165,7 @@ export const useAiStore = defineStore('ai', {
       }
       const tail = summary ? `；${summary}` : ''
       await this.finishUploadHandoff(
-        handoff,
+        receivingHandoff,
         'succeeded',
         `用户已选择文件「${name}」并交给导入向导${tail}`,
         false
@@ -9454,7 +9473,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // 恰好一次：双击/跨实例重复确认在首个 await 之前就被这里挡住（第二次是空操作）
-      if (!beginPreviewDecision(plan)) {
+      if (!beginPreviewDecision(plan, true)) {
         return
       }
       /**

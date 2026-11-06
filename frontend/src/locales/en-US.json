@@ -14,26 +14,29 @@
           "hitl": "Awaiting confirmation",
           "form": "Awaiting input"
         },
-        "submitting": "Submitting…",
+        "submitting": "Submitting",
         "queued": "Queued",
-        "running": "Running…",
-        "succeeded": "Succeeded",
+        "running": "Running",
+        "succeeded": "Success",
         "failed": "Failed",
         "rejected": "Rejected",
-        "blocked": "Out of presentable scope",
+        "blocked": "Not executed",
         "expired": "Expired",
         "cancelled": "Cancelled",
-        "skipped": "Skipped"
+        "skipped": "Skipped",
+        "unknown": "Manual review",
+        "unrecoverable": "Unrecoverable",
+        "submissionRejected": "Submission rejected"
       },
       "readonly": {
-        "approved": "✓ Approved",
-        "rejected": "✗ Rejected",
+        "approved": "Success",
+        "rejected": "Rejected",
         "expired": "Expired",
-        "failed": "! Approved · Execution failed",
-        "submitted": "✓ Submitted",
-        "cancelled": "✗ Cancelled",
-        "notApproved": "! Not approved · Not executed",
-        "notExecuted": "! Approved · Not executed",
+        "failed": "Failed",
+        "submitted": "Submitted",
+        "cancelled": "Cancelled",
+        "notApproved": "Not executed",
+        "notExecuted": "Not executed",
         "formFailed": "Execution failed"
       },
       "error": {
@@ -356,6 +359,17 @@
     },
     "gf": {
       "title": "Please fill in the following",
+      "status": {
+        "pending": "Awaiting input",
+        "submitting": "Submitting",
+        "submitted": "Submitted",
+        "rejected": "Submission not accepted",
+        "failed": "Execution failed",
+        "cancelled": "Cancelled",
+        "queued": "Queued",
+        "expired": "Expired",
+        "unrecoverable": "Unrecoverable"
+      },
       "scenario": {
         "filter": "Filter criteria",
         "clarify": "Confirm details"
@@ -487,9 +501,9 @@
       "sheetInputHuman": "The spreadsheet parameters are incomplete or outside the allowed range. Adjust them and retry.",
       "gateExpiredHuman": "Expired. This turn has ended and the action was not executed.",
       "toolKindMismatch": "This step was not executed. Please start the action again.",
-      "formUnavailable": "The form definition is unavailable; the original card cannot be restored",
+      "formUnavailable": "Form content is unavailable",
       "args": "Arguments",
-      "output": "Output",
+      "output": "Result",
       "truncated": "Truncated",
       "truncatedFrame": "The result is too large and has been truncated ({returned} of {original} characters shown). Narrow the query or paginate for more detail.",
       "truncatedModelView": "The result is long: the model received only {returned} of {original} characters.",
@@ -498,7 +512,7 @@
       "definition": "Definition",
       "rowKey": "Row key",
       "reason": "Reason",
-      "submitting": "Submitted, syncing…",
+      "submitting": "Syncing…",
       "reject": "Reject",
       "approve": "Approve",
       "resumeChat": "Continue this turn",
@@ -586,6 +600,7 @@
       "yearMonthDay": "{year}/{month}/{day} {time}"
     },
     "sheetCard": {
+      "title": "Spreadsheet write preview",
       "discard": "Discard",
       "levelCount": "Count",
       "levelSample": "View samples",
@@ -596,7 +611,22 @@
       "nextPage": "Next",
       "cancel": "Cancel",
       "apply": "Apply",
-      "expired": "This preview expired because the page was refreshed; no cell was changed. Ask the AI to start over.",
+      "applying": "Applying…",
+      "status": {
+        "pending": "Awaiting confirmation",
+        "applying": "Applying",
+        "applied": "Applied",
+        "failed": "Application failed",
+        "cancelled": "Cancelled",
+        "stale": "Expired"
+      },
+      "statusHint": {
+        "applying": "Applying changes…",
+        "applied": "Changes applied.",
+        "failed": "The changes were not fully applied. Check the current sheet before continuing.",
+        "cancelled": "Preview cancelled; no changes were applied."
+      },
+      "expired": "This preview has expired and no cells were changed. Start the write operation again.",
       "impact": "Affects {rows} rows / {cells} cells",
       "scope": "Scope: {scope}",
       "rules": "Rules: {rules}",
@@ -609,14 +639,28 @@
       "ackLarge": "I understand the impact (this changes {rows} rows / {cells} cells, more than 200 rows)"
     },
     "uploadHandoff": {
-      "pickFile": "Select a file on the left to continue",
-      "acceptHint": "Only {accept} is accepted; the file name must contain the definition code (e.g. COUNTRY.xlsx). You pick the file in the browser; the AI never reads it or handles any path.",
-      "orClick": "You can also click the highlighted \"{label}\" button on the left, or drop the file onto the highlighted area.",
+      "title": "File upload",
+      "status": {
+        "waiting": "Awaiting file",
+        "uploading": "Uploading",
+        "uploaded": "Uploaded",
+        "failed": "Upload failed",
+        "unsupported": "Selection unavailable",
+        "missing": "Entry unavailable",
+        "cancelled": "Cancelled"
+      },
+      "acceptHint": "Supported: {accept}. The file name must contain the definition code (e.g. COUNTRY.xlsx).",
+      "orClick": "You can also use the \"{label}\" entry on the page or drop a file onto it.",
       "choose": "Choose file",
+      "retry": "Retry",
       "discard": "Discard",
       "fallbackEntry": "upload entry",
-      "hintDegraded": "This browser cannot pick files inside the conversation. Use the upload entry on the left.",
-      "hintMissing": "Open step 1 of the import wizard first (the upload entry is no longer on this page)."
+      "uploadingHint": "Uploading the selected file. Please wait.",
+      "hintDegraded": "This browser cannot pick files inside the conversation. Use the upload entry on the page.",
+      "hintMissing": "The upload entry is unavailable. Reopen step 1 of the import wizard.",
+      "hintFailed": "Upload failed. Please retry.",
+      "hintCancelled": "Upload cancelled.",
+      "hintUploaded": "File uploaded."
     }
   },
   "common": {

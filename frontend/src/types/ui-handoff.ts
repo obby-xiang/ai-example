@@ -24,10 +24,11 @@ export interface ActiveUploadHandoff {
   accept: string[] | null
   /**
    * - waiting：主按钮可点（含取消或失败后的真实重试）
+   * - uploading：picker 已同步打开，选择或文件交接仍在途
    * - unsupported：浏览器不支持 picker（主按钮禁用）
    * - missing：刷新后区域已不在该页（主按钮禁用，只能放弃）
    */
-  status: 'waiting' | 'unsupported' | 'missing'
+  status: 'waiting' | 'uploading' | 'unsupported' | 'missing'
   /** 状态原因（展示给用户的一句话） */
   reason: string | null
   /** 已选文件名（只回 basename，≤64 字符） */

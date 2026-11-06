@@ -334,10 +334,7 @@
         {{ t('ai.panel.historyTruncated') }}
       </div>
 
-      <!-- R-165 S3a（R6 指挥官裁决）：消息行原 `mb-3.5`(=14px) 与末行元信息行 `mb-[18px]` 叠加成实测 32px，
-           与 v7 turn 间距（`.afoot` 单值 18px）不符 ⇒ 撤消息行下外边距，间距回归元信息行单值 18px。
-           （无元信息行的消息——仅工具卡无正文——仍由卡片自身下外边距兜底，不会贴死；
-           R-165 S5a 项 1：卡片下外边距体系 = 工具卡 mb-2 / 门卡·GF mb-2.5 / 回执·思考·流程图 mb-3.5。） -->
+      <!-- 消息间距由元信息行承担；消息内部块间距由 blockSpacingClass 统一计算。 -->
       <div
         v-for="(m, mi) in ai.messages"
         :key="m.id"
@@ -373,7 +370,7 @@
                R-154 #13+14 起 activity 恒为单段卡（组壳已拆），展开态读 store 三态
                （expandedBlocks ?? defaultExpanded，D4/D6/D-C6）；key 用块稳定 id
                （成员 toolCallId / kind-seg，加消息命名空间前缀，收口修 F1/红队 M-1），禁用数组下标（§7 R4-3 / D5）。 -->
-          <template v-for="block in blocksOf(m)" :key="block.id">
+          <template v-for="(block, bi) in blocksOf(m)" :key="block.id">
             <!-- R-163 T1 正文块：markdown-it → DOMPurify 白名单 → v-html 唯一链路。 -->
             <!-- R-163B G4 → R-165 S5b：v-html 内交互（代码块复制 / mermaid 卡四钮：复制源码 · tab 切换 ·
                  复位 · 全屏）走事件委托（onMdBodyClick），不在注入 HTML 内联任何脚本。 -->
@@ -394,6 +391,7 @@
               :class="[
                 'md-body',
                 MD_BODY_ROOT_CLASS,
+                blockSpacingClass(blocksOf(m), bi),
                 m.role === 'user' ? MD_BODY_USER_CLASS : MD_BODY_AI_CLASS,
                 m.role === 'user' && isUserMsgCollapsed(m.id) ? USER_MSG_COLLAPSE_CLASS : ''
               ]"
@@ -402,15 +400,13 @@
             ></div>
             <span
               v-if="block.kind === 'text' && textPartOf(block)?.truncated"
-              class="inline-block ml-1 h-[7px] w-[7px] rounded-full bg-[#8b949e] align-middle"
+              class="ml-1 inline-block h-[7px] w-[7px] rounded-full bg-[#8b949e] align-middle"
               role="img"
               :aria-label="t('ai.panel.truncated')"
               :title="textTruncationTitle(block)"
               data-testid="text-truncated-badge"
             ></span>
 
-            <!-- B3：压缩事件节点（全宽细线 + 居中灰字；role=separator，无按钮/摘要/token/级别）。
-                 可见文字 aria-hidden，可访问名称走 aria-label；不参与复制与任何交互。 -->
             <div
               v-else-if="block.kind === 'event'"
               v-memo="blockMemo(block, m)"
@@ -424,29 +420,14 @@
               <span class="h-px flex-1 bg-[#e3e6ea]" aria-hidden="true"></span>
             </div>
 
-            <!-- S6 批1（裁决 2026-10-15 第 3 条）：HITL **独立回执块退役** —— 原 `block.kind === 'receipt'`
-                 分支（徽标行 + 「查看详情 ⇄ 收起详情」钮 + 单层 mono JSON 盒）整段删除；
-                 已决确认门 / GF 段改由其**自己的工具卡**原地切只读态（见下方 isReadOnlyCard 分支）。 -->
-
             <template v-else>
-              <!-- R-154 #13+14（用户直裁「彻底拆除」）：组壳退役 —— 每段恒一张卡。
-                   卡头折叠单行 = 左类型裸 SVG + 标题/摘要 + 右状态标签 + chevron（可折叠时）；
-                   点击卡头展开/收起 args/result/错误位（v-show：DOM 恒在，testid/可见性稳定）；
-                   requiresAction 待决 HITL/GF 强制展开且无 chevron（卡头禁点，resolveBlockExpanded 兜底）。 -->
               <template v-for="part in block.parts" :key="part.kind === 'tool' ? part.toolCallId : part.kind + '-' + part.seg">
-                <!-- 思考链（A6'）：受控折叠块，口径不变（默认折叠；展开态存 store，DOM 重建不丢）
-                     R-165 S2：思考卡按 demo v7 `.reason` 结构重写 —— 卡容器 bg-#f6f7f9 / 1px #e3e6ea /
-                     圆角 10；卡头只保留思考中/思考过程与计时，折叠仍由 chevron 承担；
-                     R-166 口径⑦：图标字形由 demo 的 U+2726（四角星）改 U+22C6 —— demo 实字落在
-                     U+2600-27BF（本批 emoji 复扫的判废区间）内，改取同形的数学星号保住视觉且扫描 0 命中。
-                     展开体 = 左竖线（border-l-2 #e3e6ea）+ pl-10px/pr-11px/pb-10px 的 12.6px#57606a 正文。 -->
-                <div
+                <!-- 思考卡保留轻量灰底、真实计时与单一正文滚动区。 -->
+                <article
                   v-if="part.kind === 'reasoning' && part.text"
                   v-memo="partMemo(part, block)"
-                  class="border border-solid border-[#e3e6ea] rounded-[10px] bg-[#f6f7f9] overflow-hidden mb-3.5"
+                  :class="['overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-[#f6f7f9]', blockSpacingClass(blocksOf(m), bi)]"
                 >
-                  <!-- 批次6A：卡头独立成组件（局部秒表；aria-expanded/controls 与展开体同源）。
-                       多段一卡一段 —— 每个思考段各有自己的卡头与计时，不合并、不互相影响。 -->
                   <ReasoningHeader
                     :part="part"
                     :block-id="block.id"
@@ -457,196 +438,172 @@
                   <div
                     :id="'reasoning-body-' + block.id"
                     v-show="isBlockExpanded(block)"
-                    class="pl-[10px] pr-[11px] pb-[10px] border-0 border-l-2 border-solid border-[#e3e6ea]"
+                    class="border-0 border-l-2 border-solid border-[#e3e6ea] px-[10px] pb-[10px]"
                     :data-testid="'reasoning-body-' + block.id"
                   >
-                    <!-- S6 批1（demo v7.9 裁决点 21 · 2026-10-16 用户直裁通过）：思考过程展开体改
-                         **纯限高内滚**（2A 批裁决 §14.4 字段 / 文本块族：双约束 `min(280px,35vh)`）——
-                         CollapsibleText 的「渐隐 + 显示更多」钮退役；卡头折叠机制（.is-open）逐字不动。
-                         短思考（≤ 视口收紧后的上限）零副作用，不出现滚动条。 -->
                     <div :class="['max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-words text-[12.6px] leading-[1.7] text-[#57606a]', SCROLLBAR_CLASS]" :data-testid="'reasoning-scroll-' + block.id">{{ part.text }}</div>
                   </div>
-                </div>
+                </article>
                 <template v-else-if="part.kind === 'tool'">
-                  <!-- 卡片三类型统一卡头（tool / hitl / form 同一结构）：
-                       左 = 固定类型裸 SVG（扳手 / 圆圈问号 / 清单，`#57606a` 中性色，整生命周期不变）；
-                       中 = 标题 + 摘要（中性色，不随状态变色）；右 = 状态文字标签（唯一状态色承载）；
-                       末尾 = chevron（可折叠时；待决 HITL/GF 强制展开且无 chevron）。
-                       已决 HITL / GF 的卡体仍为原样 UI 只读态（2A 批 K1 / F9 / M1：门卡字段表原样、
-                       GF 同一张表单 readonly、零操作按钮、卡面不渲染 decidedAt）；已决多态回合结束后
-                       一律默认折叠，由 turnStillOpen 承担「回合未结束仍展开」。 -->
-                  <div
+                  <!-- 普通工具、HITL 与主面板 GF 共用卡头；卡体沿用各自真实业务状态。 -->
+                  <article
                     v-memo="partMemo(part, block)"
-                    :class="cardShellClass(part)"
+                    :class="[cardShellClass(part), blockSpacingClass(blocksOf(m), bi)]"
                     :data-testid="cardTestId(part)"
                   >
-                    <div class="flex items-center">
-                    <button
-                      type="button"
-                      :class="cardHeadClass(part)"
-                      :aria-expanded="isBlockExpanded(block)"
+                    <BusinessCardHeader
+                      v-if="!hasIndependentCardHeader(part)"
+                      :icon="cardIconName(part)"
+                      :title="cardTitle(part)"
+                      :subtitle="cardSummary(part)"
+                      :status="cardStatusLabel(part)"
+                      :tone="cardStatusTone(part)"
+                      :expanded="isBlockExpanded(block)"
+                      :controls="'business-card-body-' + block.id"
+                      :class="readOnlyLike(part) ? 'ro-hd' : ''"
                       :data-testid="cardToggleTestId(part, block)"
-                      :disabled="cardHeadDisabled(part)"
-                      @click="onCardHeadClick(block, part)"
+                      :data-icon-type="cardTypeOf(part)"
+                      :data-card-icon-testid="'card-icon-' + part.toolCallId"
+                      :data-card-title-testid="'card-title-' + part.toolCallId"
+                      :data-card-subtitle-testid="cardSummaryTestId(part)"
+                      :data-card-status-testid="cardStatusTestId(part)"
+                      :data-card-state="cardPresentationStatusKey(part)"
+                      @toggle="onCardHeadClick(block, part)"
+                    />
+                    <!-- 已决 HITL / GF 保持原字段或表单只读，不另建回执卡。 -->
+                    <div
+                      v-if="readOnlyLike(part)"
+                      :id="'business-card-body-' + block.id"
+                      v-show="isBlockExpanded(block)"
+                      class="px-[10px] pb-[10px]"
+                      :data-testid="'ro-body-' + part.toolCallId"
                     >
-                      <span
-                        class="flex-none flex items-center justify-center w-[24px] text-[#57606a]"
-                        :data-icon-type="cardTypeOf(part)"
-                        :data-testid="'card-icon-' + part.toolCallId"
-                        aria-hidden="true"
-                      >
-                        <svg v-if="cardTypeOf(part) === 'tool'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                        <svg v-else-if="cardTypeOf(part) === 'hitl'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                        <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 11h8"/><path d="M8 15h5"/></svg>
-                      </span>
-                      <span class="flex min-w-0 flex-1 items-center gap-[6px]">
-                        <span
-                          :class="['min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]', cardTypeOf(part) === 'tool' ? 'font-mono' : '']"
-                          :data-testid="'card-title-' + part.toolCallId"
-                        >{{ cardTitle(part) }}</span>
-                        <span
-                          class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] leading-[1.6] text-[#57606a]"
-                          :data-testid="cardSummaryTestId(part)"
-                        >{{ cardSummary(part) }}</span>
-                      </span>
-                      <span
-                        v-if="cardStatusLabel(part)"
-                        :class="cardStatusClass(part)"
-                        :data-testid="cardStatusTestId(part)"
-                        :data-state="cardStatusOf(part).key"
-                        :title="cardStatusLabel(part)"
-                      >{{ cardStatusLabel(part) }}</span>
-                      <span
-                        v-if="cardChevronShown(part)"
-                        :class="[TCHEV_CLASS, 'ml-auto leading-[1.7]', isBlockExpanded(block) ? 'is-open' : '']"
-                      >›</span>
-                    </button>
-                    </div>
-                    <!-- 只读体判据 = 已决只读态 ∪ GF「已提交、结局未到」（readOnlyLike）：
-                         后者让提交后的这段时间**同一张表单原样锁定**，不闪普通工具卡 / 不闪 schema。 -->
-                    <div v-if="readOnlyLike(part)" v-show="isBlockExpanded(block)" class="pb-[11px]" :data-testid="'ro-body-' + part.toolCallId">
-                      <!-- 门卡：参数区字段表原样（与待决态同一份 gateRows：操作 + args 全键 + 敏感掩码）；
-                           字段区限高 = 字段族双约束 min(280px,35vh)（裁决 §14.4）。
-                           2026-10-20 卡面一致性裁决：**删重复标题行**（标题已在统一卡头业务化），
-                           卡体直接字段表（demo 场景二/三 1:1）。 -->
                       <template v-if="part.name !== GENERATIVE_FORM_TOOL">
-                        <div
-                          :class="['mx-[11px] mt-[9px] bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto', SCROLLBAR_CLASS]"
-                          :data-testid="'ro-rows-' + part.toolCallId"
-                        >
+                        <div :class="['flex max-h-[min(280px,35vh)] flex-col gap-[8px] overflow-y-auto', SCROLLBAR_CLASS]">
+                          <div v-if="hasLongCardTitle(part)" class="break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
                           <div
-                            v-for="row in gateRows(part)"
-                            :key="row.key"
-                            class="flex gap-[10px] py-[7px] border-0 border-b border-solid border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"
+                            class="rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
+                            :data-testid="'ro-rows-' + part.toolCallId"
                           >
-                            <!-- 键列口径同待决门卡（自适应内容宽 + 上限 40% + truncate + title 看全） -->
-                            <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
-                            <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                            <div
+                              v-for="row in gateRows(part)"
+                              :key="row.key"
+                              class="flex gap-[10px] border-0 border-b border-solid border-[#eef0f3] py-[7px] text-[13px] leading-[1.5] last:border-b-0"
+                            >
+                              <span class="min-w-0 max-w-[40%] flex-[0_1_auto] truncate text-[12.4px] text-[#8b949e]" :title="row.key">{{ row.key }}</span>
+                              <span class="min-w-0 flex-1 break-words">{{ row.value }}</span>
+                            </div>
                           </div>
+                          <div
+                            v-if="readOnlyReasonText(part)"
+                            class="rounded-[8px] border border-solid px-[10px] py-[7px] text-[11.9px] leading-[1.6] whitespace-pre-wrap break-words"
+                            :class="diagnosticOf(part) === 'staleGate'
+                              ? 'border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]'
+                              : 'border-[#f0d5d0] bg-[#fdf1ef] text-[#c0392b]'"
+                            :data-testid="'ro-reason-' + part.toolCallId"
+                            :data-diagnostic="diagnosticOf(part) ?? 'none'"
+                          >{{ readOnlyReasonText(part) }}</div>
                         </div>
                       </template>
-                      <!-- GF：同一张表单原样锁定（readonly 模式复用 FormRenderer，零操作按钮）。
-                           卡体留白与门卡只读态同构：mx-[11px] mt-[9px] 包裹（demo
-                           card-consistency-fix.html 场景五 data-form-fields 11px/9px 口径）。 -->
                       <template v-else>
-                        <div
-                          v-if="cardFormSpec(part)"
-                          class="mx-[11px] mt-[9px]"
-                          :data-testid="'ro-form-' + part.toolCallId"
-                        >
+                        <div v-if="cardFormSpec(part)" :data-testid="'ro-form-' + part.toolCallId">
                           <FormRenderer
                             :schema="(cardFormSpec(part) as FormSpec)"
                             readonly
                             :submitting="false"
                             :error="null"
                             :initial-values="readOnlyFormValues(part)"
+                            :full-title="hasLongCardTitle(part) ? cardTitle(part) : ''"
+                            :read-only-reason="readOnlyReasonText(part) || null"
+                            :read-only-reason-tone="diagnosticOf(part) === 'staleGate' ? 'neutral' : 'error'"
                           />
                         </div>
-                        <div v-else class="px-[11px] pt-[10px] text-[12.6px] text-[#57606a]">{{ t('ai.panel.formUnavailable') }}</div>
-                      </template>
-                      <!-- 失败 / 拒绝 / 取消收尾的原因单独一行常驻卡面（K3：执行失败原因常驻；F9 同源）。
-                           批次6A（N8/N9）：诊断分层命中时本行只放**人话**；机器原文（runId/toolCallId、
-                           内部码、配置键、回灌端点）收进下方「诊断详情」，不再当用户第一眼读到的原因。 -->
-                      <div
-                        v-if="readOnlyReasonText(part)"
-                        class="mx-[11px] mt-[9px] rounded-[8px] border border-solid px-[10px] py-[7px] text-[11.9px] leading-[1.6] whitespace-pre-wrap break-words"
-                        :class="diagnosticOf(part) === 'staleGate'
-                          ? 'border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]'
-                          : 'border-[#f0d5d0] bg-[#fdf1ef] text-[#c0392b]'"
-                        :data-testid="'ro-reason-' + part.toolCallId"
-                        :data-diagnostic="diagnosticOf(part) ?? 'none'"
-                      >{{ readOnlyReasonText(part) }}</div>
-                      <details
-                        v-if="diagnosticTextOf(part)"
-                        class="mx-[11px] mt-[6px]"
-                        :data-testid="'ro-diagnostics-' + part.toolCallId"
-                      >
-                        <summary class="cursor-pointer select-none text-[11.2px] text-[#8b949e]">{{ t('ai.card.error.diagnostic.label') }}</summary>
-                        <div
-                          :class="['mt-[3px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-words text-[11.2px] leading-[1.55] text-[#57606a]', SCROLLBAR_CLASS]"
-                          :data-testid="'ro-diagnostics-text-' + part.toolCallId"
-                        >{{ diagnosticTextOf(part) }}</div>
-                      </details>
-                    </div>
-                    <!-- 卡体分支保留（统一卡头之下）：已决只读态 → ro-body；普通工具 → 折叠展开体。
-                         展开体渲染后 0 行 ⇒ 不渲展开体 / 不渲 chevron / 卡头 disabled（v7.10 ajv11）。 -->
-                    <template v-else-if="cardBodyShown(part)">
-                      <!-- 待动作卡（确认门 / GF）的卡体留白由子块自带（门卡 pb-[11px] + rows/操作行
-                           mx-[11px]，demo 场景一/四 1:1）；通用工具展开体才是 px-2 pb-2 的内缩盒。 -->
-                      <div v-show="isBlockExpanded(block)" :class="part.requiresAction ? 'flex flex-col' : 'px-2 pb-2 pt-0 flex flex-col gap-1.5'" :data-testid="'block-body-' + block.id">
-                      <!-- S6 批1（裁决 2026-10-16 第 2 条：面板 JSON 展示全面清零 / v7.9 场景 16 口径）：
-                           工具卡**参数**由 mono JSON 盒改**折叠区 label-value 字段表**（解析 args JSON → 键值行，
-                           值可读化：布尔 是/否、数组 顿号、文件路径 文件名）。
-                           无参（`'{}'` / 空串 / 非 JSON 脏数据）⇒ 整个参数区不渲染（不渲空盒、不露 raw 文本）。
-                           requiresAction 待动作卡不渲参数区 —— 门卡字段表 / GF 表单本身就是待填内容（消双份）。 -->
-                      <!-- 2A 批（裁决 §14.4 字段族）：参数字段表限高改双约束 `min(280px,35vh)`。 -->
-                      <div v-if="!part.requiresAction && paramRows(part).length">
-                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">{{ t('ai.panel.args') }}</div>
-                        <div :class="['bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto', SCROLLBAR_CLASS]" :data-testid="'args-rows-' + part.toolCallId">
+                        <div v-else :class="['flex max-h-[min(320px,45vh)] flex-col gap-[8px] overflow-y-auto', SCROLLBAR_CLASS]">
+                          <div v-if="hasLongCardTitle(part)" class="break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
+                          <div class="text-[12.6px] text-[#57606a]">{{ t('ai.panel.formUnavailable') }}</div>
                           <div
-                            v-for="row in paramRows(part)"
-                            :key="row.key"
-                            class="flex gap-[10px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.6px] leading-[1.5] last:border-b-0"
-                          >
-                            <span class="flex-[0_0_72px] break-words text-[#8b949e] text-[12px]">{{ row.key }}</span>
-                            <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                            v-if="readOnlyReasonText(part)"
+                            class="whitespace-pre-wrap break-words rounded-[8px] border border-solid px-[10px] py-[7px] text-[11.9px] leading-[1.6]"
+                            :class="diagnosticOf(part) === 'staleGate'
+                              ? 'border-[#e3e6ea] bg-[#f6f7f9] text-[#57606a]'
+                              : 'border-[#f0d5d0] bg-[#fdf1ef] text-[#c0392b]'"
+                            :data-testid="'ro-reason-' + part.toolCallId"
+                            :data-diagnostic="diagnosticOf(part) ?? 'none'"
+                          >{{ readOnlyReasonText(part) }}</div>
+                        </div>
+                      </template>
+                    </div>
+                    <template v-else-if="cardBodyShown(part)">
+                      <div
+                        :id="'business-card-body-' + block.id"
+                        v-show="hasIndependentCardHeader(part) || isBlockExpanded(block)"
+                        :class="hasIndependentCardHeader(part) ? 'flex flex-col' : 'flex flex-col px-[10px] pb-[10px]'"
+                        :data-testid="'block-body-' + block.id"
+                      >
+                      <div
+                        v-if="!part.requiresAction && !hasIndependentCardHeader(part)"
+                        :class="['flex flex-col gap-[8px] overflow-y-auto', toolContentLimitClass(part), SCROLLBAR_CLASS]"
+                      >
+                        <div v-if="hasLongCardTitle(part)" class="break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
+                        <div v-if="paramRows(part).length">
+                          <div class="mb-[4px] block text-[11px] uppercase tracking-[.5px] text-[#8b949e]">{{ t('ai.panel.args') }}</div>
+                          <div class="rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[2px]" :data-testid="'args-rows-' + part.toolCallId">
+                            <div
+                              v-for="row in paramRows(part)"
+                              :key="row.key"
+                              class="flex gap-[10px] border-0 border-b border-solid border-[#eef0f3] py-[6px] text-[12.6px] leading-[1.5] last:border-b-0"
+                            >
+                              <span class="flex-[0_0_72px] break-words text-[12px] text-[#8b949e]">{{ row.key }}</span>
+                              <span class="min-w-0 flex-1 break-words">{{ row.value }}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div
+                          v-if="diagnosticOf(part) === 'skipped'"
+                          class="flex items-start gap-[7px] rounded-[9px] border border-solid border-[#e3e6ea] bg-[#f6f7f9] px-[10px] py-[7px] text-[12.4px] text-[#57606a]"
+                          data-testid="tool-skipped-human"
+                        >
+                          <span class="min-w-0 flex-1 break-words">{{ t('ai.panel.skippedHuman') }}</span>
+                        </div>
+                        <div v-if="!isBlankText(toolResultText(part)) && !outputByView(part) && !outputSupersededByDiagnostics(part)">
+                          <div class="mb-[4px] block text-[11px] uppercase tracking-[.5px] text-[#8b949e]">{{ t('ai.panel.output') }}</div>
+                          <div data-testid="tool-output-text" class="whitespace-pre-wrap break-words rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[8px] text-[12.1px] leading-[1.6] text-[#606266] [overflow-wrap:anywhere]">
+                            {{ toolResultText(part) }}<span
+                              v-if="part.truncated"
+                              class="ml-1 inline-block rounded bg-[#8b949e] px-1 align-middle text-[10px] leading-4 text-white"
+                              :title="truncationTitle(part)"
+                              data-testid="truncated-badge"
+                            >{{ t('ai.panel.truncated') }}</span>
+                          </div>
+                        </div>
+                        <div v-if="faceReasonText(part)" class="rounded-[9px] border border-solid border-[#f0d5d0] bg-[#fdf1ef] px-[10px] py-[7px] text-[12.4px] text-[#c0392b]" data-testid="tool-error" :data-diagnostic="diagnosticOf(part) ?? 'none'">
+                          <span class="block whitespace-pre-wrap break-words">{{ t('ai.panel.reasonPrefix', { text: faceReasonText(part) }) }}</span>
+                        </div>
+                        <ResultViewRenderer
+                          v-if="part.resultView"
+                          :view="part.resultView"
+                          :document-text="part.result ?? null"
+                        />
+                        <div v-else-if="conflictRows(part).length" class="overflow-hidden rounded-[8px] border border-solid border-[#eef0f3]" data-testid="conflict-table">
+                          <div class="border-0 border-b border-solid border-[#e3e6ea] bg-[#f6f7f9] px-[9px] py-[5px] text-[11.4px] [font-weight:650] text-[#57606a]">
+                            <span class="inline-block w-[34%]">{{ t('ai.panel.definition') }}</span><span class="inline-block w-[26%]">{{ t('ai.panel.rowKey') }}</span><span class="inline-block w-[40%]">{{ t('ai.panel.reason') }}</span>
+                          </div>
+                          <div>
+                            <div
+                              v-for="row in conflictRows(part)"
+                              :key="row.defCode + '#' + row.rowKey"
+                              class="border-0 border-b border-solid border-[#eef0f3] px-[9px] py-[6px] text-[12.2px] text-[#1f2328] last:border-b-0"
+                            >
+                              <span class="inline-block w-[34%] align-top font-mono text-[11.6px] break-words">{{ row.defCode }}</span>
+                              <span class="inline-block w-[26%] align-top font-mono text-[11.6px] break-words">{{ row.rowKey }}</span>
+                              <span class="inline-block w-[40%] align-top break-words">{{ row.message }}</span>
+                            </div>
                           </div>
                         </div>
                       </div>
-                      <!-- S6 批2 迁移步④（设计稿 §7.1-④）：视图可渲时「输出」区整块让位 —— 同一份真值
-                           不在卡面报两次（原文仍是 part.result，模型侧 / 技术详情展示不受影响）；
-                           视图渲不出或段上没有视图 ⇒ 本盒照旧（回退路径不删）。 -->
-                      <!-- 批次6A（N9）：skipped 的原文在旧帧/旧镜像里仍是模型向（预算、步数上限、配置键）
-                           —— 不占「输出」位，收进下方「诊断详情」；卡面只留一句人话。 -->
-                      <div
-                        v-if="diagnosticOf(part) === 'skipped'"
-                        class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#57606a] bg-[#f6f7f9] border border-solid border-[#e3e6ea] rounded-[9px]"
-                        data-testid="tool-skipped-human"
-                      >
-                        <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.2px] border-[#8b949e] text-[#8b949e] text-[9px]" aria-hidden="true">—</span>
-                        <span class="flex-1 min-w-0 break-words">{{ t('ai.panel.skippedHuman') }}</span>
-                      </div>
-                      <div v-if="!isBlankText(part.result) && !outputByView(part) && !outputSupersededByDiagnostics(part)">
-                        <div class="block text-[11px] tracking-[.5px] uppercase text-[#8b949e] mb-[4px]">{{ t('ai.panel.output') }}</div>
-                        <!-- R-165 S5a 项 4：工具卡输出 = **纯限高内滚**，原 CollapsibleText 的渐隐 +
-                             「显示更多」钮退役（无展开钮）；截断徽标保留。
-                             滚动条同走 6px 圆角半透明任意变体类（项 8）。
-                             S6 批1 长内容审计清零项：补 break-all + overflow-wrap:anywhere（长串不越界）。
-                             2A 批（裁决 §14.4 代码 / 详情族）：限高改双约束 `min(280px,35vh)`。 -->
-                        <div data-testid="tool-output-text" :class="['text-[12.1px] leading-[1.6] font-mono text-[#606266] bg-[#f6f7f9] border border-solid border-[#eef0f3] rounded-[8px] px-[9px] py-[8px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all [overflow-wrap:anywhere]', SCROLLBAR_CLASS]">
-                          {{ toolResultText(part) }}<span
-                            v-if="part.truncated"
-                            class="inline-block ml-1 px-1 rounded text-[10px] leading-4 bg-[#8b949e] text-white align-middle"
-                            :title="truncationTitle(part)"
-                            data-testid="truncated-badge"
-                          >{{ t('ai.panel.truncated') }}</span>
-                        </div>
-                      </div>
-                      <!-- AI 可视可操作专项（§3.8 / 裁 6）：操作摘要行的「撤销」按钮。
-                           只有用户能撤销（**不提供** ui_undo 工具）；深度 1 —— 撤销后按钮消失。 -->
                       <div
                         v-if="part.toolCallId === ai.uiUndoToolCallId && ai.uiUndoEntry"
-                        class="flex items-center gap-[8px]"
+                        class="mt-[8px] flex items-center gap-[8px]"
                         data-testid="ui-undo-row"
                       >
                         <span class="text-[12.2px] text-[#57606a]">{{ t('ai.panel.undoHint') }}</span>
@@ -660,57 +617,7 @@
                         </button>
                       </div>
 
-                      <!-- R-158 #6：卡内错误位（自绘圆环 ! + 红底 + 文案）——错误就地呈现，不再全堆顶部 Alert；
-                           R-165 S1：el-icon 退场，圆环 ! 照搬 demo v7 行内错误通知形制。
-                           S6 批1（v7.10 N8）：发布冲突明细收敛 —— 红底行只留一句人话摘要（reason 首行），
-                           两种形态不同屏重复报同一份明细。
-                           S6 批2：明细表的**来源**改为 `part.resultView`（通用渲染器），红底行仍只取首行；
-                           无视图的旧段才回退到反解表（回退路径按设计稿 §7.1-⑤ 最后删）。
-                           2A 批（裁决 §14.4 回执 / 文本族）：原因行限高改 `min(280px,35vh)`。 -->
-                      <div v-if="faceReasonText(part)" class="flex items-start gap-[7px] px-[10px] py-[7px] text-[12.4px] text-[#c0392b] bg-[#fdf1ef] border border-solid border-[#f0d5d0] rounded-[9px]" data-testid="tool-error" :data-diagnostic="diagnosticOf(part) ?? 'none'">
-                        <span class="mt-px shrink-0 flex-[0_0_14px] w-[14px] h-[14px] flex items-center justify-center rounded-[50%] border-[1.3px] border-[#c0392b] text-[#c0392b] text-[9px] font-bold" aria-hidden="true">!</span>
-                        <span class="flex-1 min-w-0 whitespace-pre-wrap break-words max-h-[min(280px,35vh)] overflow-y-auto">{{ t('ai.panel.reasonPrefix', { text: faceReasonText(part) }) }}</span>
-                      </div>
-                      <!-- 批次6A（N8/N9）：机器原文只在「诊断详情」里出现（折叠、限高内滚）；
-                           用户向与诊断分层，卡面首屏不再出现内部码 / 回灌路径 / 轮次标识。 -->
-                      <details v-if="diagnosticTextOf(part)" class="mt-1" :data-testid="'card-diagnostics-' + part.toolCallId">
-                        <summary class="cursor-pointer select-none text-[11.2px] text-[#8b949e]">{{ t('ai.card.error.diagnostic.label') }}</summary>
-                        <div
-                          :class="['mt-[3px] max-h-[min(280px,35vh)] overflow-y-auto whitespace-pre-wrap break-all text-[11.2px] leading-[1.55] text-[#57606a]', SCROLLBAR_CLASS]"
-                          :data-testid="'card-diagnostics-text-' + part.toolCallId"
-                        >{{ diagnosticTextOf(part) }}</div>
-                      </details>
-                      <!-- S6 批2（§5.3 / §7.1-③）：视图通道接管明细表 —— 有 `resultView` 时由通用渲染器渲，
-                           旧反解表（`conflict-table`）在本分支下**零出现**（不同屏双份报同一份明细 = 违规）。
-                           旧表保留为 `v-else-if` 回退：旧镜像 / 旧归档的段没有视图，按 §7.1-⑤ 最后才删。 -->
-                      <ResultViewRenderer
-                        v-if="part.resultView"
-                        :view="part.resultView"
-                        :document-text="part.result ?? null"
-                      />
-                      <div v-else-if="conflictRows(part).length" class="border border-solid border-[#eef0f3] rounded-[8px] overflow-hidden" data-testid="conflict-table">
-                        <div class="px-[9px] py-[5px] bg-[#f6f7f9] border-0 border-b border-solid border-[#e3e6ea] text-[11.4px] [font-weight:650] text-[#57606a]">
-                          <span class="inline-block w-[34%]">{{ t('ai.panel.definition') }}</span><span class="inline-block w-[26%]">{{ t('ai.panel.rowKey') }}</span><span class="inline-block w-[40%]">{{ t('ai.panel.reason') }}</span>
-                        </div>
-                        <div :class="['max-h-[min(480px,60vh)] overflow-y-auto', SCROLLBAR_CLASS]">
-                          <div
-                            v-for="row in conflictRows(part)"
-                            :key="row.defCode + '#' + row.rowKey"
-                            class="px-[9px] py-[6px] border-0 border-b border-solid border-[#eef0f3] text-[12.2px] text-[#1f2328] last:border-b-0"
-                          >
-                            <span class="inline-block w-[34%] align-top font-mono text-[11.6px] break-words">{{ row.defCode }}</span>
-                            <span class="inline-block w-[26%] align-top font-mono text-[11.6px] break-words">{{ row.rowKey }}</span>
-                            <span class="inline-block w-[40%] align-top break-words">{{ row.message }}</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <!-- 挂起子块（段判据，A1'③）：CONFIRM 待决 → 确认块；GF → FormRenderer（宿主条件
-                           逐字保留，D10）；其余通用 FRONTEND 待执行/已决态 → 无子块（消 A9'⑤ 空壳卡）。
-                           D-C7：旧投影挂起卡的「会话已失效」tag（原 :206）与 GF 非宿主 v-else 三 tag
-                           （原 :251-253）/ activeForm 错误位（原 :254-257）随合并整列删除——语义由段状态
-                           右状态标签（cardStatusOf，expired→「会话已失效」）与段 reason 位（A4'，D11）承接。 -->
-                      <template v-if="part.requiresAction">
+                      <template v-if="part.requiresAction || hasIndependentCardHeader(part)">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
                           <!-- 2026-10-20 卡面一致性裁决（demo chat-ux/card-consistency-fix.html 场景一
                                1:1 移植）：确认卡**单层** —— 内层蓝框与内层卡头（「需要你确认后才能
@@ -719,30 +626,24 @@
                                倒计时环 / 剩余秒 / 「等待人工确认」静态兜底随去超时裁决一并退役
                                （历史 TIMEOUT 卡只读展示保留）。普通确认不展示额外摘要；
                                仅不可逆操作保留后果说明与勾选批准门；409 幂等拒绝后的「已提交，同步中…」瞬态保留。 -->
-                          <div class="pb-[11px]" data-testid="hitl-gate">
-                            <!-- 字段区 = 纯限高内滚（字段族双约束 min(280px,35vh)，裁决 §14.4）；
-                                 按钮行在滚动区之外常驻。 -->
+                          <div data-testid="hitl-gate">
+                            <!-- 字段与影响说明共用一个滚动区；复选框和操作按钮始终在外。 -->
                             <div
-                              class="mx-[11px] mt-[9px] bg-white border border-solid border-[#eef0f3] rounded-[8px] px-[10px] py-[2px] max-h-[min(280px,35vh)] overflow-y-auto"
+                              class="max-h-[min(280px,35vh)] overflow-y-auto rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
                               :class="SCROLLBAR_CLASS"
                               data-testid="gate-rows"
                             >
+                              <div v-if="hasLongCardTitle(part)" class="mb-[8px] break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
                               <div
                                 v-for="row in gateRows(part)"
                                 :key="row.key"
-                                class="flex gap-[10px] py-[7px] border-0 border-b border-solid border-[#eef0f3] text-[13px] leading-[1.5] last:border-b-0"
+                                class="flex gap-[10px] border-0 border-b border-solid border-[#eef0f3] py-[7px] text-[13px] leading-[1.5] last:border-b-0"
                               >
-                                <!-- 问题1 偏差修正批（同族：门卡字段表键列）：原 58px 定宽 + break-words 装不下
-                                     长英文键（notifyOnFail ≈80px）⇒ 折行、值贴首行。改自适应内容宽
-                                     （min-w-0 + 上限 40%）+ truncate + title 看全，与只读卡键列同口径。 -->
-                                <span class="flex-[0_1_auto] min-w-0 max-w-[40%] truncate text-[#8b949e] text-[12.4px]" :title="row.key">{{ row.key }}</span>
-                                <span class="flex-1 min-w-0 break-words">{{ row.value }}</span>
+                                <span class="min-w-0 max-w-[40%] flex-[0_1_auto] truncate text-[12.4px] text-[#8b949e]" :title="row.key">{{ row.key }}</span>
+                                <span class="min-w-0 flex-1 break-words">{{ row.value }}</span>
                               </div>
                             </div>
-                            <!-- 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框。
-                                 位置 = 字段内滚区**之外**（恒可见，不跟着参数一起滚走），
-                                 默认不勾；文案动态带动作名。普通后果确认卡不渲染本区（一字不动）。 -->
-                            <div v-if="part.irreversible" class="mx-[11px] flex pt-[10px]" data-testid="gate-ack-row">
+                            <div v-if="part.irreversible" class="flex pt-[10px]" data-testid="gate-ack-row">
                               <label
                                 class="flex cursor-pointer items-start gap-[6px] text-[12.2px] leading-[1.5] text-[#1f2328]"
                                 data-testid="gate-ack"
@@ -758,11 +659,7 @@
                                 <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
                               </label>
                             </div>
-                            <!-- 2A 批（裁决 §3 缺陷③）：按钮防折行 —— 行 flex-wrap（空间不足时按钮组整行
-                                 下移）、按钮组 flex-none、按钮 whitespace-nowrap + min-w；组内不再换行。
-                                 HITL 保留期倒计时已退场：提交时若该轮已过期，由后端陈旧条目兜底落
-                                 「已失效」终态并提示，不在卡面预置计时或禁用入口。 -->
-                            <div class="mx-[11px] flex flex-wrap items-center gap-[9px] pt-[11px]" data-testid="gate-actions">
+                            <div class="flex flex-wrap items-center gap-[8px] pt-[10px]" data-testid="gate-actions">
                               <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用。 -->
                               <span
                                 v-if="gateNeedsAck(part)"
@@ -793,7 +690,7 @@
                           </div>
                         </template>
 
-                        <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="p-[11px]">
+                        <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="min-w-0">
                           <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
                           <!-- T2a-D#3（D10 不扩判据）：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主
                                消息（最后一条持该挂起调用的消息）上；非宿主消息不再出独立 tag 列（D-C7 已删） -->
@@ -808,6 +705,7 @@
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
+                            :full-title="hasLongCardTitle(part) ? cardTitle(part) : ''"
                             :upload-context="{ runId: liveForm.runId, toolCallId: liveForm.toolCallId, sessionId: ai.sessionId, signal: formAttachmentAbort.signal }"
                             :show-header="false"
                             flat
@@ -834,7 +732,7 @@
                               <span class="flex-none font-semibold" data-testid="gf-queue-position">{{ t('ai.panel.gfQueue.position', { position: formQueuePosition(part.toolCallId), total: formQueueTotal() }) }}</span>
                               <span class="min-w-0 flex-1 break-words text-[#57606a]" data-testid="gf-queue-hint">{{ t('ai.panel.gfQueue.hint') }}</span>
                             </div>
-                            <div class="mt-[6px] flex justify-end">
+                            <div class="mt-[8px] flex justify-end">
                               <button
                                 type="button"
                                 class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
@@ -847,9 +745,11 @@
 
                         <!-- AI 表格操作专项 §3.3bis：写预览卡（计数 / 采样 diff / 全量 diff 三档）。
                              数据只在浏览器渲染，不上送；大批量须勾选“我了解影响范围”。 -->
-                        <div v-else-if="isSheetPreviewPart(part)" class="p-[11px]">
+                        <div v-else-if="isSheetPreviewPart(part)" class="min-w-0">
                           <SheetPreviewCard
                             :plan="sheetPreviewFor(part)"
+                            :applying="sheetPreviewApplying(part)"
+                            :applied-summary="appliedSummaryFor(part)"
                             @apply="onSheetPreviewApply"
                             @cancel="onSheetPreviewCancel"
                             @abandon="onSheetPreviewAbandon(part.toolCallId)"
@@ -860,37 +760,23 @@
                         <!-- AI 可视可操作专项 §3.3.7：上传交接卡（唯一新增的人围栏外观）。
                              「选择文件」= 用户手势（picker 必须在同步栈里被调）；「放弃」= cancelled=true。
                              刷新后区域仍注册 ⇒ 可继续；区域不在该页 ⇒ 主按钮禁用 + 只能放弃。 -->
-                        <div v-else-if="isUploadHandoffPart(part)" class="p-[11px]">
+                        <div v-else-if="isUploadHandoffPart(part)" class="min-w-0">
                           <UploadHandoffCard
                             :status="uploadHandoffStatus(part)"
                             :accept="uploadHandoffAccept(part)"
                             :label="uploadHandoffLabel(part)"
                             :reason="uploadHandoffReason(part)"
+                            :file-name="uploadHandoffFileName(part)"
+                            :interactive="part.requiresAction"
                             @choose="ai.chooseUploadFile()"
                             @cancel="ai.cancelUploadHandoff(part.toolCallId)"
                           />
                         </div>
                       </template>
 
-                      <!-- AI 表格工具治理 §5.4：已应用改动的一行标识（不新增工具、不新增帧字段）。
-                           数据源 = store 的 sheetApplied（现算），`其后人工改动 N 格` 在手改后由
-                           refreshSheetApplied 重算 —— 不显示"应用瞬间的 0"当作现状。
-                           L-74：本块**不在**上面那条待动作分支链里 —— 它标的是已 `succeeded` 的段
-                           （`requiresAction` 此时已落回 false），挂在 `v-if="part.requiresAction"`
-                           子树内等于恒不渲染。 -->
-                      <div
-                        v-if="appliedSummaryFor(part)"
-                        class="p-[11px] text-[11.9px] leading-[1.6] text-[#57606a]"
-                        data-testid="sheet-applied-summary"
-                      >
-                        <div>{{ appliedLine(appliedSummaryFor(part)!) }}</div>
-                        <div v-if="(appliedSummaryFor(part)!.manualChanges ?? 0) > 0" class="mt-[2px] text-[#8b949e]">
-                          {{ t('sheet.preview.manualChanges', { count: appliedSummaryFor(part)!.manualChanges }) }}
-                        </div>
-                      </div>
                     </div>
                     </template>
-                  </div>
+                  </article>
                 </template>
               </template>
             </template>
@@ -1088,23 +974,11 @@
           >{{ ERROR_CARD_TONE[m.errorCard.variant].glyph }}</span>
           <div class="flex-1 min-w-0">
             <b class="block text-[12.2px] [font-weight:650] text-[#1f2328]">{{ m.errorCard.title }}</b>
-            <!-- 批次2：首屏只读**用户向摘要**；后端原文与机器码收进下面的「诊断详情」（折叠）。
-                 用户向与诊断分层，长错误文案不再顶开会话。 -->
             <span
-              class="block mt-[2px] text-[11.6px] text-[#57606a] leading-[1.55] break-words"
+              class="mt-[2px] block break-words text-[11.6px] leading-[1.55] text-[#57606a]"
               :data-testid="'error-card-summary-' + m.id"
             >{{ m.errorCard.summary || t('ai.card.error.summary.generic') }}</span>
-            <span v-if="errorCardGuide(m)" class="block mt-[3px] text-[11.4px] text-[#57606a] leading-[1.55]">{{ errorCardGuide(m) }}</span>
-            <details class="mt-[4px]" :data-testid="'error-card-diagnostic-' + m.id">
-              <summary class="cursor-pointer text-[11.2px] text-[#8b949e] select-none">{{ t('ai.card.error.diagnostic.label') }}</summary>
-              <div class="mt-[3px] text-[11.2px] text-[#57606a] break-all">
-                <span>{{ t('ai.card.error.diagnostic.code') }}: </span>
-                <code :data-testid="'error-card-code-' + m.id">{{ m.errorCard.code }}</code>
-              </div>
-              <!-- S6 批1（长内容审计清零项：错误卡 detail 无 cap）：detail 加限高内滚。
-                   2A 批（裁决 §14.4 文本块族）：限高改双约束 `min(280px,35vh)` —— 长错误文案不再把会话顶开。 -->
-              <span :class="['mt-[2px] block max-h-[min(280px,35vh)] overflow-y-auto text-[11.2px] text-[#57606a] leading-[1.55] whitespace-pre-wrap break-words', SCROLLBAR_CLASS]" :data-testid="'error-card-detail-' + m.id">{{ m.errorCard.detail }}</span>
-            </details>
+            <span v-if="errorCardGuide(m)" class="mt-[3px] block text-[11.4px] leading-[1.55] text-[#57606a]">{{ errorCardGuide(m) }}</span>
           </div>
           <button
             v-if="m.errorCard.action && errorCardActionVisible(m)"
@@ -1399,35 +1273,12 @@
  * （scrim + 白容器 · 指针锚定缩放 · transform 平移 · 6 钮工具条 · Esc/点 scrim 关闭 · role=dialog）。
  * 结构类名换 `mmdc` 前缀（旧 `.mmd*` CSS 规则零引用但本批禁删禁改，S5c 统一拆）。
  *
- * S6 应用批·批1（用户已裁决项，纯前端；蓝本 = demo v7.9 定稿 + v7.10 规则表）：
- * ① **回执卡独立块退役**（`utils/blocks.ts` 的 receipt 块 + 本组件回执渲染段整体删除）——已决
- *    确认门 / GF 段由**自己的卡**原地切只读态；「查看详情 / 收起详情」文字钮全稿删除；
- * ② **JSON 展示全面清零**：门卡删 args JSON 盒（字段表改全键 + 敏感值掩码）、普通工具卡参数改
- *    折叠区字段表、发布冲突明细收敛（reason 只留一句摘要 + 明细渲表格卡）；
- * ③ **空内容工具卡不给展开入口**（v7.10 ajv11 / 场景 19-e）：展开体渲染后 0 行 ⇒ 不渲 chevron、
- *    卡头 disabled 无 hover、点击 no-op；
- * ④ 思考过程展开体改纯限高内滚（裁决点 21），`CollapsibleText` 组件整体退役
- *    （思考 / 参数 / 输出 / 回执详情四处全部「纯限高内滚、无展开钮」）；
- * ⑤ 长内容审计清零项：错误卡 detail 限高、行内 code 撤 nowrap 改 anytime 折行（markdown.ts）、
- *    工具输出盒补 break-all、门卡英文字段 key 可换行、degraded 期代码块同挂限高。
- *
- * 2A 批（2026-10-17 用户裁决 §9 K1 / §10 F9 / §12 H2 / §14.4 / §15 K12 / §16 M1 / §20）：
- * ① **已决只读 = 原样 UI 锁定渲染**（纠偏 label-value 摘要式）：门卡参数区字段表原样、
- *    GF 复用同一张表单（FormRenderer readonly：原生 disabled + 值回填）、操作按钮整块不渲染；
- * ② 卡头 = 三类型统一结构（左固定类型裸 SVG + 中性标题/摘要 + 右状态文字标签 + chevron；
- *    36.4px、chevron ml-auto 靠右）；decidedAt 数据层照记、**卡面不渲染**；
- * ③ 已决多态（已批准 / 已拒绝 / 已超时 / 已批准·执行失败 / 已批准·未执行 / 未批准·未执行 /
- *    已提交 / 已取消）回合结束后一律默认折叠，卡头单行（标题/摘要/右状态标签）保留可辨识信息；
- *    决策当下不折叠（turnStillOpen）；
- * ④ 状态全集：门卡 = 已批准 / 已拒绝 / 已超时 / 已批准·执行失败（批G · S13 起增「已取消」：
- *    用户停止是一次决策；批4 增「已批准·未执行」「未批准·未执行」）；表单系按真实结局分列
- *    （已提交 / 已取消 / 已拒绝 / 已超时 / 已批准·执行失败 / 未批准·未执行 —— 只有真实用户
- *    取消才是「已取消」，2026-10-29 批改正旧口径的"非成功即已取消"）；
- *    审批卡旧字样（含被 R5 / §10 F6 废止的两枚）零残留；
- * ⑤ 未提交不记录：取消 / 超时收尾回初始空态再锁定（F9）；
- * ⑥ **限高新尺度（§14.4）**：字段族 `min(280px,35vh)` / 表单·组合族 `min(320px,45vh)` /
- *    长表格族 `min(480px,60vh)` / 代码·详情族 `min(280px,35vh)` / 用户长消息 184px 不动 /
- *    mermaid 预览 `min(320px,45vh)` / 源码盒 `min(280px,35vh)`；纯限高内滚、无展开钮不变。
+ * AI 卡片治理现行口径：普通工具、HITL 与主面板 GF 共用 BusinessCardHeader；
+ * 卡头只显示当前单一状态，所有正式卡片均可手动折叠，未触碰时按状态矩阵取默认展开。
+ * 普通工具与 HITL 主内容限高 min(280px,35vh)，GF 字段限高 min(320px,45vh)；
+ * 每张卡最多一个纵向滚动区，操作按钮与高风险复选框固定在滚动区外。
+ * 块间距统一为 Markdown→卡 16px、卡→卡 10px、卡→Markdown 12px；
+ * 原始 JSON、轮次标识与机器诊断原文不上用户卡面。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowRight } from '@element-plus/icons-vue'
@@ -1456,7 +1307,6 @@ import {
   cardTypeOf,
   conditionArgText,
   formSpecOf,
-  hasBodyRows,
   hasConditionContent,
   isBlankText,
   isConditionShape,
@@ -1467,14 +1317,14 @@ import {
   reasonHeadline,
   submitRows,
   toolArgsOf,
-  type CardTone,
+  MASKED_VALUE,
+  readableValue,
   type ConflictRow,
   type FieldRow,
   groupParts,
-  resolveBlockExpanded,
   type Block
 } from '@/utils/blocks'
-import { deriveCopyText, numericArgOf, partDiagnosticOf, partDiagnosticText, partResultIsInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
+import { deriveCopyText, numericArgOf, partDiagnosticOf, partResultIsInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
 import { projectDisplayText } from '@/utils/display-text'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
@@ -1484,7 +1334,18 @@ import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
 import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import ReasoningHeader from '@/components/AiPanel/ReasoningHeader.vue'
-import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type TextPart, type ToolPart } from '@/types/ai'
+import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
+import {
+  businessCardDefaultExpanded,
+  businessCardStatusLabelKey,
+  businessCardStatusTone,
+  unknownNeedsReview,
+  unknownUnrecoverable,
+  type BusinessCardFamily,
+  type BusinessCardTone
+} from '@/components/AiPanel/cardPresentation'
+import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type SheetWritePlan, type TextPart, type ToolPart } from '@/types/ai'
+import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import type { ToolPreflight } from '@/types/sse'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
@@ -1496,6 +1357,53 @@ const { t, locale } = useI18n()
 const ai = useAiStore()
 const workspace = useWorkspaceStore()
 const formAttachmentAbort = ref(new AbortController())
+const sheetPreviewSnapshots = ref<Record<string, SheetWritePlan>>({})
+const uploadHandoffSnapshots = ref<Record<string, ActiveUploadHandoff>>({})
+
+watch(() => ai.sessionId, () => {
+  sheetPreviewSnapshots.value = {}
+  uploadHandoffSnapshots.value = {}
+})
+
+function currentMessageToolCallIds(): Set<string> {
+  const ids = new Set<string>()
+  for (const message of ai.messages) {
+    for (const part of message.parts) {
+      if (part.kind === 'tool') {
+        ids.add(part.toolCallId)
+      }
+    }
+  }
+  return ids
+}
+
+const messageToolCallIdSignature = computed(() => JSON.stringify([...currentMessageToolCallIds()].sort()))
+
+watch(messageToolCallIdSignature, () => {
+  const retained = currentMessageToolCallIds()
+  for (const toolCallId of Object.keys(sheetPreviewSnapshots.value)) {
+    if (!retained.has(toolCallId)) {
+      delete sheetPreviewSnapshots.value[toolCallId]
+    }
+  }
+  for (const toolCallId of Object.keys(uploadHandoffSnapshots.value)) {
+    if (!retained.has(toolCallId)) {
+      delete uploadHandoffSnapshots.value[toolCallId]
+    }
+  }
+})
+
+watch(() => ai.activePreview, (plan) => {
+  if (plan) {
+    sheetPreviewSnapshots.value[plan.toolCallId] = { ...plan }
+  }
+}, { immediate: true })
+
+watch(() => ai.activeUploadHandoff, (handoff) => {
+  if (handoff) {
+    uploadHandoffSnapshots.value[handoff.toolCallId] = { ...handoff }
+  }
+}, { immediate: true })
 
 function resetFormAttachmentAbort(): void {
   formAttachmentAbort.value.abort()
@@ -1898,16 +1806,9 @@ const CODE_PRE_LIMIT_CLASS = '[&_figure.code>pre]:max-h-[min(280px,35vh)] [&_fig
 const MD_BODY_USER_CLASS = `[&>*:last-child]:!mb-0 [&_p]:text-[13.5px] [&_li]:text-[13.5px] ${CODE_PRE_LIMIT_CLASS}`
 const MD_BODY_AI_CLASS = `[&>*:last-child]:!mb-0 ${CODE_PRE_LIMIT_CLASS}`
 
-/**
- * 活动中提示、淡出与 chevron 共用模板工具类；等待中保留原琥珀样式，圆点同样使用呼吸动画。
- * 文字只呼吸透明度（animate-breathe-text / aiBreatheText，无 scale）；圆点仍用 animate-breathe。
- * keyframes 本体见 tailwind.config.js（aiBreathe / aiBreatheText / aiFadeOut）。
- */
+/** 活动中提示只使用真实状态；文字与圆点的呼吸动画支持减少动效。 */
 const BREATH_CLASS = 'loading-breath inline-flex items-center gap-[6px] m-0 pl-[2px] text-[12.2px] text-[#57606a]'
-/** 完成淡出：`fade-out` 为标记类（既有两态断言锚），`animate-fade-out` 承载 0.3s forwards。 */
 const FADE_OUT_CLASS = 'fade-out animate-fade-out'
-const TCHEV_CLASS =
-  'tchev flex-none inline-block text-[#8b949e] text-[12px] transition-transform duration-[180ms] [&.is-open]:rotate-90'
 
 /**
  * R-165 S5c：错误卡三变体 + 通用红卡的配色/图标（demo v7.7 裁决区 08 改后 v7.4 定稿逐条照搬）：
@@ -2359,9 +2260,8 @@ function isLastAssistantMessage(message: ChatMessage): boolean {
 /**
  * 只有当前消息里真实存在**等人**的可操作卡时才显示「等待你操作」；自动前端工具与其余运行阶段都算工作。
  *
- * <p>2026-10-29 复审 M-4：生成式表单「已提交、结局未到」这一段，人这一侧已经没有待办
- * （卡头是「✓ 已提交」、卡体是只读表单、连 chevron 都没有），再报「等待你操作」就是指着用户去做
- * 一件做不了的事 —— 该窗口归**既有的工作中语义**（呼吸点），不新增任何新状态。
+ * <p>生成式表单「已提交、结局未到」这一段，人这一侧已经没有待办
+ * （卡头是「已提交」、卡体是只读表单），该窗口归**既有的工作中语义**（呼吸点），不新增状态。
  */
 function waitingForAction(message: ChatMessage): boolean {
   if (message.role !== 'assistant' || message.done || ai.runPhase !== 'parked' || false) {
@@ -2833,18 +2733,15 @@ interface LocaleCacheEntry<T> {
 const parameterRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
 const gateRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
 const conflictRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<ConflictRow[]>>()
-const bodyRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<boolean>>()
 const outputByViewCache = new WeakMap<ToolPart, LocaleCacheEntry<boolean>>()
 const toolSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string | null>>()
 const cardTitleCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
 const cardSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
 const cardStatusCache = new WeakMap<ToolPart, LocaleCacheEntry<ReturnType<typeof cardStatusOf>>>()
 const diagnosticCache = new WeakMap<ToolPart, LocaleCacheEntry<PartDiagnostic | null>>()
-const diagnosticTextCache = new WeakMap<ToolPart, LocaleCacheEntry<string | null>>()
 const toolDeriveMisses: Record<string, number> = {
   paramRows: 0,
   gateRows: 0,
-  bodyRows: 0,
   cardSummary: 0,
   conflictRows: 0,
   outputByView: 0,
@@ -3668,110 +3565,45 @@ function blocksOf(message: ChatMessage): Block[] {
   return entry.blocks
 }
 
-/**
- * 块展开态三态判定（D4/D6/D-C6）：requiresAction 组强制展开（手动收起不生效）；
- * 否则 expandedBlocks[id] 显式值优先（用户手动展开永不自动收起 / 手动收起不被自动打开）；
- * 未触碰（键缺省）回落 defaultExpanded。
- *
- * 2A 批（裁决 2026-10-17 §15 K12：「回合结束才收」）：已决只读卡（多态全集）的折叠是
- * **回合级时序** —— 决策瞬间不折叠，等本轮结束（新建消息 / 回合文本收尾）后才收成卡头行。
- * 判据 = `turnStillOpen`（**本轮未终态**，见下）；不满足才走 defaultExpanded
- * （r15：多态 → 折叠）。用户手动触碰过的卡（expandedBlocks 有显式值）永远优先，不受时序影响。
- */
+/** 手动展开选择优先；未触碰的卡按当前真实状态应用默认展开矩阵。 */
 function isBlockExpanded(block: Block): boolean {
   const manual = ai.expandedBlocks[block.id]
-  if (manual === undefined && turnStillOpen(block) && readOnlyTerminalCard(block)) {
-    return true
+  if (manual !== undefined) {
+    return manual
   }
-  return resolveBlockExpanded(block, manual)
-}
-
-/**
- * 恢复期起点的「本轮是否仍在收流」采样（2026-10-29 返修 I-1′）。
- *
- * <p>`restoringRecovery` 只说"恢复在途"，不说**恢复从哪里开始**：
- * <ul>
- * <li>刷新首屏：镜像正在落屏，进入时 `loading=false` ⇒ 恢复期必须不展开（对过去的现场做实时渲染）；</li>
- * <li>流中手动重载 / 自动恢复重试：这一轮本来就在收流，进入时 `loading=true` ⇒ 恢复期必须保持展开，
- *     否则卡会"折一次→展开"，两条自动恢复 attempt 之间（标志复位、`loading` 仍真）再折一次，
- *     1~1.5s 的失败恢复窗口里翻两轮（BASE 是保持展开）。</li>
- * </ul>
- *
- * <p>口径 = 只在 `restoringRecovery` **由假变真那一刻**采样 `ai.loading`。用 `flush:'sync'` 与
- * store 的置位同 tick，避免被后续渲染/批处理挪到别的现场；挂载时已处于恢复期 ⇒ 不触发采样，
- * 采样保持 `false`（沿用"恢复期不展开"）。恢复结束即清采样，下一次恢复重新取现场。
- */
-const recoveryStartedWhileStreaming = ref(false)
-
-watch(
-  () => ai.restoringRecovery,
-  (active, wasActive) => {
-    if (active && !wasActive) {
-      recoveryStartedWhileStreaming.value = ai.loading
-    } else if (!active) {
-      recoveryStartedWhileStreaming.value = false
-    }
-  },
-  { flush: 'sync' }
-)
-
-/**
- * 本轮是否仍未终态（2026-10-29 ToC 呈现减负批：判据由「只认 `loading`」放宽到「本轮未终态」；
- * 同日「导出整屏闪」返修：恢复期按**进入时刻**这一轮是否还在收流来判）。
- *
- * <p>为什么不能只看 `loading`：B1「挂起即断」之后，等人决策的一轮是 `loading=false && suspended=true`
- * （`runPhase='parked'`）；点批准的那一刻段立刻切只读，而此时连接可能还没建起来 ——
- * 只看 `loading` 就会「批准瞬间折叠 → 重连后展开」闪一下。
- *
- * <p><b>为什么不直接写 `runPhase ≠ 'idle'`</b>：那个条件把 `recovering` 也算进来，而
- * `loadHistory` / `retryRestoreSnapshot` / `reattachBusyRun` 在 `restoringRecovery` 期间
- * 就**同步**把镜像消息落屏 —— 刷新/重新载入时，末条消息里的已决只读卡会先被强制展开、
- * HTTP 回来再折叠，正是本批要消掉的那类闪动。批准瞬间的闪动另有**决策在途 / GF 提交在途**
- * 两条证据覆盖，不依赖 `recovering`。
- *
- * <p><b>恢复期为什么要看采样</b>：只写 `loading && !restoringRecovery` 会在"流中手动重载"和
- * "自动恢复两次 attempt 之间"把卡折一次再展开（见 {@link recoveryStartedWhileStreaming}）。
- * 采样为真（进入时确实在收流）⇒ 整个恢复窗口按"仍在收流"处理；采样为假（刷新首屏）⇒ 恢复期不展开。
- *
- * 终态判据 = 仍在收流 ∨ 挂起等人，再加两条在途证据：
- * <ol>
- * <li>`ai.suspended || (ai.loading && (!ai.restoringRecovery || 恢复期采样为真))`；</li>
- * <li>该卡已有**决策在途**（`gateSubmissions` 有值：点过批准/拒绝、结局帧还没到）；</li>
- * <li>该卡是生成式表单且**提交在途**（结局帧未到的只读锁定态，见 `readOnlyLike`）。</li>
- * </ol>
- * 仍要求该卡属于**末条消息**：历史卡不因"新轮还在跑"被展开。
- */
-function turnStillOpen(block: Block): boolean {
-  const last = ai.messages[ai.messages.length - 1]
-  if (last === undefined || last.id !== block.messageId) {
+  const part = block.parts[0]
+  if (part?.kind !== 'tool') {
     return false
   }
-  const streamingNow = ai.loading
-    && (!ai.restoringRecovery || recoveryStartedWhileStreaming.value)
-  if (ai.suspended || streamingNow) {
-    return true
+  const needsReview = unknownNeedsReview(part)
+  if (part.status === 'unknown') {
+    return needsReview
   }
-  return block.parts.some((part) => part.kind === 'tool'
-    && (ai.gateSubmissionOf(part.toolCallId) !== null || isFormAwaitingOutcome(part)))
+  return hasLongCardTitle(part)
+    || businessCardDefaultExpanded(cardPresentationStatusKey(part), cardTypeOf(part), needsReview)
 }
 
-/**
- * 呈现层的「只读卡」判据 = 已决只读态 ∪ GF 提交后在途。
- *
- * <p>为什么单起一层、不改 `isReadOnlyCard`：后者同时被 store 侧派生与纯函数状态机复用，
- * 而「已提交、结局未到」只是**呈现层**要固定的形态（同一张表单锁定 + 卡头「✓ 已提交」），
- * 不是新的数据终态。本判据只在本组件内使用，范围最小。
- */
+/** 块级间距只由相邻块关系决定，卡片自身不再叠加上下外边距。 */
+function blockSpacingClass(blocks: Block[], index: number): string {
+  const current = blocks[index]
+  const previous = blocks[index - 1]
+  if (!current || !previous) {
+    return ''
+  }
+  if (current.kind === 'activity') {
+    return previous.kind === 'text' ? 'mt-[16px]' : 'mt-[10px]'
+  }
+  if (current.kind === 'text' && previous.kind === 'activity') {
+    return 'mt-[12px]'
+  }
+  return ''
+}
+
+/** 已决只读与 GF 提交在途共用原卡锁定形态，不产生新的数据状态。 */
 function readOnlyLike(part: ToolPart): boolean {
-  return isReadOnlyCard(part) || isFormAwaitingOutcome(part)
+  return !hasIndependentCardHeader(part) && (isReadOnlyCard(part) || isFormAwaitingOutcome(part))
 }
 
-/** 已决只读卡（多态全集）—— 唯一受「回合结束才收」时序影响的卡型。 */
-function readOnlyTerminalCard(block: Block): boolean {
-  return block.parts.some((part) => part.kind === 'tool' && readOnlyLike(part))
-}
-
-/** 组头/思考链头点击：写 store 显式态（三态记录；requiresAction 组的强制展开由 resolveBlockExpanded 兜底）。 */
 function toggleBlock(block: Block): void {
   ai.setBlockExpanded(block.id, !isBlockExpanded(block))
 }
@@ -3873,10 +3705,10 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     }
   }
   if (isUploadHandoffPart(part)) {
-    deps.push(ai.activeUploadHandoff, uploadHandoffStatus(part), uploadHandoffAccept(part), uploadHandoffLabel(part), uploadHandoffReason(part))
+    deps.push(ai.activeUploadHandoff, uploadHandoffStatus(part), uploadHandoffAccept(part), uploadHandoffLabel(part), uploadHandoffReason(part), uploadHandoffFileName(part))
   }
   if (isSheetPreviewPart(part)) {
-    deps.push(sheetPreviewFor(part))
+    deps.push(sheetPreviewFor(part), sheetPreviewApplying(part))
   }
   if (appliedSummaryFor(part) !== null) {
     deps.push(appliedSummaryFor(part))
@@ -3955,78 +3787,104 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
   return deps
 }
 
-/**
- * S6 批1（v7.10 ajv11 / 场景 19-e）→ 卡片三类型统一：
- * - 已决 HITL / GF 卡体恒在（门卡字段表 / GF 同一张表单），卡头恒可折叠；
- * - 普通工具卡：展开体渲染后 ≥ 1 行才可点；0 行 ⇒ disabled、无 chevron、无 hover、点击 no-op；
- * - requiresAction 待决 HITL/GF：强制展开、无 chevron，卡头**仍禁点**（放行/拒绝走门内双钮）。
- */
-function bodyRowsOf(part: ToolPart): boolean {
-  return cachedForLocale(bodyRowsCache, part, 'bodyRows', [part.args, part.result, part.reason, part.resultView, part.requiresAction], () => hasBodyRows(part))
+/** 所有正式卡片都保留可访问的折叠控件和受控卡体。 */
+function cardBodyShown(_part: ToolPart): boolean {
+  return true
 }
 
-function cardHeadEnabled(part: ToolPart): boolean {
-  if (readOnlyLike(part)) {
-    return true
+type SheetPreviewTerminalStatus = 'applied' | 'failed' | 'cancelled'
+type UploadHandoffCardStatus = 'waiting' | 'uploading' | 'uploaded' | 'failed' | 'unsupported' | 'missing' | 'cancelled'
+
+function isSheetPreviewTool(part: ToolPart): boolean {
+  return part.kind2 === 'FRONTEND' && SHEET_PREVIEW_TOOLS.has(part.name)
+}
+
+function sheetPreviewTerminalStatus(part: ToolPart): SheetPreviewTerminalStatus | null {
+  if (part.requiresAction) {
+    return null
   }
-  return !part.requiresAction && bodyRowsOf(part)
+  if (part.status === 'succeeded') {
+    return 'applied'
+  }
+  if (part.status === 'cancelled') {
+    return 'cancelled'
+  }
+  return part.status === 'failed' || part.status === 'rejected' ? 'failed' : null
 }
 
-/** 卡头 disabled 判据（与 enabled 互为反面，模板 `:disabled` / cursor / hover 三处同源）。 */
-function cardHeadDisabled(part: ToolPart): boolean {
-  return !cardHeadEnabled(part)
-}
-
-/** 展开体是否渲染：普通工具卡有内容（或待动作卡强制展开）才渲；已决只读态卡体恒在。 */
-function cardBodyShown(part: ToolPart): boolean {
-  return bodyRowsOf(part)
-}
-
-/** AI 表格操作专项：待用户确认的写预览段（replace_values / update_rows / normalize commit=true）。 */
 function isSheetPreviewPart(part: ToolPart): boolean {
-  return part.kind2 === 'FRONTEND' && part.requiresAction && SHEET_PREVIEW_TOOLS.has(part.name)
+  return isSheetPreviewTool(part)
+    && (part.requiresAction || sheetPreviewFor(part) !== null || appliedSummaryFor(part) !== null)
 }
 
-// ── AI 可视可操作专项：上传交接卡 + 操作条 + 撤销 ─────────────────────────────
+function isUploadHandoffTool(part: ToolPart): boolean {
+  return part.kind2 === 'FRONTEND' && UI_HANDOFF_TOOLS.has(part.name)
+}
 
-/** 上传交接段（唯一的人围栏工具；`ui_request_upload`）。 */
+function uploadHandoffTerminalStatus(part: ToolPart): 'uploaded' | 'failed' | 'cancelled' | null {
+  if (part.requiresAction) {
+    return null
+  }
+  if (part.status === 'succeeded') {
+    return 'uploaded'
+  }
+  if (part.status === 'cancelled') {
+    return 'cancelled'
+  }
+  return part.status === 'failed' || part.status === 'rejected' ? 'failed' : null
+}
+
+function uploadHandoffSnapshot(part: ToolPart): ActiveUploadHandoff | null {
+  const active = ai.activeUploadHandoff
+  if (active?.toolCallId === part.toolCallId) {
+    return active
+  }
+  return uploadHandoffSnapshots.value[part.toolCallId] ?? null
+}
+
 function isUploadHandoffPart(part: ToolPart): boolean {
-  return part.kind2 === 'FRONTEND' && part.requiresAction && UI_HANDOFF_TOOLS.has(part.name)
+  return isUploadHandoffTool(part) && (part.requiresAction
+    || (uploadHandoffTerminalStatus(part) !== null && uploadHandoffSnapshot(part) !== null))
 }
 
-/**
- * 交接卡状态：**与「可操作性」同源** —— 一律取 store 的 `uploadHandoffAvailability()`
- * （活动交接存在 ⇒ 其档；无活动交接 / 交接不属于本卡 ⇒ missing）。
- *
- * <p>
- * L-85：旧实现活动交接存在时直接回 `handoff.status`，从不看区域是否还在，
- * 于是用户离开导入向导页后卡面仍是 `waiting`、主按钮仍可点（点下去旧实现还谎报成功）。
- * `handoff.status` 只在**建卡 / 刷新重建**那一刻算一次，是"当时"的分流；区域存活是随页面
- * 变化的，必须在渲染时重算。`uploadHandoffAvailability()` 同时覆盖 unsupported（浏览器不支持
- * picker）与 missing（区域已不在本页 / 只读页），与本卡三态一一对应。
- */
-function uploadHandoffStatus(part: ToolPart): 'waiting' | 'unsupported' | 'missing' {
+function hasIndependentCardHeader(part: ToolPart): boolean {
+  return isSheetPreviewPart(part) || isUploadHandoffPart(part)
+}
+
+function uploadHandoffStatus(part: ToolPart): UploadHandoffCardStatus {
+  const terminal = uploadHandoffTerminalStatus(part)
+  if (terminal) {
+    return terminal
+  }
   const handoff = ai.activeUploadHandoff
   if (!handoff || handoff.toolCallId !== part.toolCallId) {
     return 'missing'
+  }
+  if (handoff.status === 'uploading') {
+    return 'uploading'
   }
   return ai.uploadHandoffAvailability() ?? 'missing'
 }
 
 function uploadHandoffAccept(part: ToolPart): string[] | null {
-  const handoff = ai.activeUploadHandoff
-  return handoff && handoff.toolCallId === part.toolCallId ? handoff.accept : null
+  return uploadHandoffSnapshot(part)?.accept ?? null
 }
 
 function uploadHandoffReason(part: ToolPart): string | null {
-  const handoff = ai.activeUploadHandoff
-  return handoff && handoff.toolCallId === part.toolCallId ? handoff.reason : null
+  if (uploadHandoffTerminalStatus(part) !== null) {
+    return part.reason || part.result || uploadHandoffSnapshot(part)?.reason || null
+  }
+  return uploadHandoffSnapshot(part)?.reason ?? null
+}
+
+function uploadHandoffFileName(part: ToolPart): string | null {
+  return uploadHandoffSnapshot(part)?.filename ?? null
 }
 
 /** 入口的可读标签（取注册区域里该 ref 的 aria-label / 文案；取不到用兜底文案）。 */
 function uploadHandoffLabel(part: ToolPart): string {
-  const handoff = ai.activeUploadHandoff
-  if (!handoff || handoff.toolCallId !== part.toolCallId || !handoff.ref) {
+  const handoff = uploadHandoffSnapshot(part)
+  if (!handoff?.ref) {
     return t('ai.panel.uploadFallbackLabel')
   }
   const hit = resolveAiRef(handoff.ref)
@@ -4062,13 +3920,19 @@ function appliedSummaryFor(part: ToolPart): SheetAppliedSummary | null {
   return part.status === 'succeeded' ? summary : null
 }
 
-function appliedLine(summary: SheetAppliedSummary): string {
-  return t('sheet.applied.line', { cells: summary.cells, layer: summary.layer, depth: summary.undoDepth })
+/** 待决卡使用活动计划；终态卡只复用本卡已有快照，不从结果文本反造计划。 */
+function sheetPreviewFor(part: ToolPart): SheetWritePlan | null {
+  const terminal = sheetPreviewTerminalStatus(part)
+  if (terminal) {
+    const snapshot = sheetPreviewSnapshots.value[part.toolCallId]
+      ?? (ai.activePreview?.toolCallId === part.toolCallId ? ai.activePreview : null)
+    return snapshot ? { ...snapshot, status: terminal } : null
+  }
+  return ai.activePreview?.toolCallId === part.toolCallId ? ai.activePreview : null
 }
 
-/** 该段对应的本地预览计划（无 ⇒ 面板渲染“预览已失效 + 放弃”）。 */
-function sheetPreviewFor(part: ToolPart) {
-  return ai.activePreview && ai.activePreview.toolCallId === part.toolCallId ? ai.activePreview : null
+function sheetPreviewApplying(part: ToolPart): boolean {
+  return ai.previewApplyingToolCallId === part.toolCallId
 }
 
 function onSheetPreviewApply(acknowledged: boolean): void {
@@ -4083,22 +3947,10 @@ function onSheetPreviewAbandon(toolCallId: string): void {
   void ai.abandonStalePreview(toolCallId)
 }
 
-/** chevron 是否渲染：待决 HITL/GF 强制展开 ⇒ 无；只读卡（含 GF 提交在途）恒有；普通工具卡有卡体才有。 */
-function cardChevronShown(part: ToolPart): boolean {
-  if (part.requiresAction) {
-    return false
-  }
-  return readOnlyLike(part) || cardBodyShown(part)
-}
-
-/** 卡片外壳：只读卡保留 rocard 容器锚，普通卡保留原间距。 */
 function cardShellClass(part: ToolPart): string {
-  return readOnlyLike(part)
-    ? 'rocard block border border-solid border-[#e3e6ea] bg-white rounded-[10px] overflow-hidden mb-3.5'
-    : 'mt-1.5 border border-solid border-[#e3e6ea] rounded-[10px] bg-white overflow-hidden mb-2'
+  return `${readOnlyLike(part) ? 'rocard ' : ''}block overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white`
 }
 
-/** 卡容器 testid（既有锚：hitl-receipt / pending-card-* / tool-card-*）。 */
 function cardTestId(part: ToolPart): string {
   if (readOnlyLike(part)) {
     return 'hitl-receipt'
@@ -4106,28 +3958,16 @@ function cardTestId(part: ToolPart): string {
   return part.requiresAction ? `pending-card-${part.toolCallId}` : `tool-card-${part.toolCallId}`
 }
 
-/** 卡头 testid（既有锚：ro-toggle-* / block-toggle-*）。 */
 function cardToggleTestId(part: ToolPart, block: Block): string {
   return readOnlyLike(part) ? `ro-toggle-${part.toolCallId}` : `block-toggle-${block.id}`
 }
 
-/** 右状态标签 testid（只读卡保留 ro-badge-*；其余 card-status-*）。 */
 function cardStatusTestId(part: ToolPart): string {
   return readOnlyLike(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
 }
 
-/** 摘要 testid（只读卡保留 ro-summary-*；普通卡保留 tool-summary-*）。 */
 function cardSummaryTestId(part: ToolPart): string {
   return readOnlyLike(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
-}
-
-/** 统一卡头 class：三类型同结构（36.4px = py 8+8 + 12px×1.7 标题行）。 */
-function cardHeadClass(part: ToolPart): string {
-  return [
-    'flex w-full items-center gap-[6px] px-[10px] py-[8px] border-0 bg-transparent text-left font-[inherit] whitespace-nowrap transition-colors duration-[150ms]',
-    readOnlyLike(part) ? 'ro-hd' : '',
-    cardHeadDisabled(part) ? 'cursor-default' : 'cursor-pointer hover:bg-[#f6f7f9]'
-  ].filter(Boolean).join(' ')
 }
 
 /**
@@ -4142,6 +3982,12 @@ function cardHeadClass(part: ToolPart): string {
  */
 function cardTitle(part: ToolPart): string {
   return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.preflight, part.preflight?.target, part.args], () => {
+    if (isSheetPreviewTool(part)) {
+      return t('ai.sheetCard.title')
+    }
+    if (isUploadHandoffTool(part)) {
+      return t('ai.uploadHandoff.title')
+    }
     if (cardTypeOf(part) === 'form') {
       return cardFormSpec(part)?.title?.trim() || t('ai.gf.title')
     }
@@ -4156,6 +4002,10 @@ function cardTitle(part: ToolPart): string {
     }
     return toolLabel(part.name)
   })
+}
+
+function hasLongCardTitle(part: ToolPart): boolean {
+  return Array.from(cardTitle(part)).length > 32
 }
 
 /**
@@ -4212,16 +4062,6 @@ function cardSummary(part: ToolPart): string {
   })
 }
 
-/** 右状态标签底座（demo r13/r14：9.5px / leading 1.7 / px-5 / 圆角 5 / 描边）。 */
-const CARD_STATUS_BASE = 'flex-none text-[9.5px] leading-[1.7] px-[5px] rounded-[5px] border border-solid whitespace-nowrap max-w-[104px] truncate'
-const CARD_STATUS_TONE: Record<CardTone, string> = {
-  primary: 'text-[#2563eb] bg-[#eff4ff] border-[#cddcff]',
-  success: 'text-[#1a7f45] bg-[#edf7f0] border-[#bfe3cd]',
-  danger: 'text-[#c0392b] bg-[#fdf1ef] border-[#e3e6ea]',
-  warning: 'text-[#b45309] bg-[#fffbeb] border-[#fde68a]',
-  neutral: 'text-[#57606a] bg-[#f6f7f9] border-[#e3e6ea]'
-}
-
 function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {
   const submitting = liveForm.value?.toolCallId === part.toolCallId && liveForm.value.status === 'submitting'
   const queued = formQueuePosition(part.toolCallId) > 0
@@ -4235,33 +4075,67 @@ function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {
   )
 }
 
-function cardStatusClass(part: ToolPart): string {
-  return `${CARD_STATUS_BASE} ${CARD_STATUS_TONE[cardStatusView(part).tone]}`
+function cardIconName(part: ToolPart): string {
+  if (isSheetPreviewTool(part)) {
+    return 'sheet'
+  }
+  if (isUploadHandoffTool(part)) {
+    return 'upload'
+  }
+  return cardTypeOf(part) === 'tool' ? part.name : cardTypeOf(part)
+}
+
+function cardFamilyOf(part: ToolPart): BusinessCardFamily {
+  return cardTypeOf(part)
+}
+
+function cardPresentationStatusKey(part: ToolPart): string {
+  const key = cardStatusView(part).key
+  return key === 'approved' && part.status === 'running' ? 'running' : key
 }
 
 function cardStatusLabel(part: ToolPart): string {
-  return part.status === 'unknown' ? '' : cardStatusView(part).label
+  const sheetStatus = isSheetPreviewTool(part) ? sheetPreviewTerminalStatus(part) : null
+  if (sheetStatus) {
+    return t(`ai.sheetCard.status.${sheetStatus}`)
+  }
+  const uploadStatus = isUploadHandoffTool(part) ? uploadHandoffTerminalStatus(part) : null
+  if (uploadStatus) {
+    return t(`ai.uploadHandoff.status.${uploadStatus}`)
+  }
+  if (part.status === 'unknown' && !unknownNeedsReview(part)) {
+    return ''
+  }
+  const key = cardPresentationStatusKey(part)
+  return t(businessCardStatusLabelKey(key, cardFamilyOf(part), unknownUnrecoverable(part)))
 }
 
-/**
- * 卡头点击唯一入口：不可点卡（待动作卡 / 展开体 0 行）走 no-op —— token 上 `disabled` 已拦原生点击，
- * 此处对程序化触发（测试 `.trigger('click')` 不受 disabled 影响）再做一次守卫。
- */
-function onCardHeadClick(block: Block, part: ToolPart): void {
-  if (!cardHeadEnabled(part)) {
-    return
+function cardStatusTone(part: ToolPart): BusinessCardTone {
+  const terminal = isSheetPreviewTool(part)
+    ? sheetPreviewTerminalStatus(part)
+    : isUploadHandoffTool(part) ? uploadHandoffTerminalStatus(part) : null
+  if (terminal) {
+    return terminal === 'failed' ? 'red' : terminal === 'cancelled' ? 'gray' : 'green'
   }
+  return businessCardStatusTone(cardPresentationStatusKey(part), cardFamilyOf(part))
+}
+
+function onCardHeadClick(block: Block, _part: ToolPart): void {
   toggleBlock(block)
 }
 
-/** 普通工具卡参数行（字段表）：S6 起 args JSON 盒由 label-value 行替代（值可读化，敏感不掩码）。 */
+/** 普通工具卡参数行与门卡共用敏感键掩码。 */
 function paramRows(part: ToolPart): FieldRow[] {
-  return cachedForLocale(parameterRowsCache, part, 'paramRows', [part.args], () => argRows(part))
+  return cachedForLocale(parameterRowsCache, part, 'paramRows', [part.args], () => argRows(part, true))
 }
 
 /** 发布冲突明细行（N8）：从段 reason 解析出 `defCode#rowKey：message` 明细 → 表格数据。 */
 function conflictRows(part: ToolPart): ConflictRow[] {
   return cachedForLocale(conflictRowsCache, part, 'conflictRows', [part.reason], () => parsePublishConflicts(part.reason))
+}
+
+function toolContentLimitClass(part: ToolPart): string {
+  return conflictRows(part).length > 0 ? 'max-h-[min(480px,60vh)]' : 'max-h-[min(280px,35vh)]'
 }
 
 /**
@@ -4304,20 +4178,97 @@ function truncationTitle(part: TruncationCarrier): string {
   return t('ai.panel.truncatedFallback')
 }
 
-function toolResultText(part: ToolPart): string | null | undefined {
+const JSON_SENSITIVE_KEY_RE = /pass(word)?|secret|token|api_?key|id_?card/i
+const JSON_TECHNICAL_KEYS = new Set([
+  'runid', 'toolcallid', 'fileid', 'sessionid', 'messageid', 'code', 'ok', 'outcome',
+  'retryable', 'truncated', 'originalchars', 'returnedchars', 'strategy', 'target'
+])
+
+function jsonRecordText(record: Record<string, unknown>, depth: number): string {
+  if (depth > 6) {
+    return ''
+  }
+  const rows: string[] = []
+  if (record.message !== null && record.message !== undefined && record.message !== '') {
+    const message = jsonValueText(record.message, depth + 1, false).trim()
+    if (message) {
+      rows.push(message)
+    }
+  }
+  for (const [key, value] of Object.entries(record)) {
+    const normalizedKey = key.replace(/[_-]/g, '').toLowerCase()
+    if (key === 'message' || JSON_TECHNICAL_KEYS.has(normalizedKey)) {
+      continue
+    }
+    const sensitive = JSON_SENSITIVE_KEY_RE.test(key) || (record.format === 'idcard' && key === 'value')
+    const text = jsonValueText(value, depth + 1, sensitive)
+    if (text) {
+      rows.push(`${key}: ${text}`)
+    }
+  }
+  return rows.join('\n')
+}
+
+function jsonValueText(value: unknown, depth: number, sensitive: boolean): string {
+  if (sensitive) {
+    return MASKED_VALUE
+  }
+  if (value === null || value === undefined || value === '') {
+    return t('ai.value.empty')
+  }
+  if (typeof value === 'boolean') {
+    return t(value ? 'ai.value.yes' : 'ai.value.no')
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : ''
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      if (depth >= 6) {
+        return ''
+      }
+      try {
+        return jsonValueText(JSON.parse(trimmed) as unknown, depth + 1, false)
+      } catch {
+        return projectDisplayText(readableValue(value))
+      }
+    }
+    return projectDisplayText(readableValue(value))
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => jsonValueText(item, depth + 1, false)).filter(Boolean).join('\n')
+  }
+  if (typeof value === 'object') {
+    return jsonRecordText(value as Record<string, unknown>, depth)
+  }
+  return ''
+}
+
+function displayToolResult(text: string | null | undefined): string {
+  const raw = (text ?? '').trim()
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try {
+      return jsonValueText(JSON.parse(raw) as unknown, 0, false)
+    } catch {
+      // 非完整 JSON 继续走既有文本清理。
+    }
+  }
+  return projectDisplayText(text) ?? ''
+}
+
+function toolResultText(part: ToolPart): string {
   const code = part.userTextCode?.trim()
   if (!code) {
-    return projectDisplayText(part.result)
+    return displayToolResult(part.result)
   }
-  // 2026-10-30 结构化批：插值只认结构化 args（`userTextArgs` / `target`），**不再**从中文回执
-  // （「本轮已创建任务 #12」）正则反解 id。后端尚未发该键 ⇒ 无插值渲染（同一词条的通用档）。
   const args = userTextArgsOf(part) ?? {}
   const createdTaskId = code === 'CREATE_TASK_TURN_LIMIT' ? numericArgOf(args, 'taskId') : null
   const key = createdTaskId !== null
     ? 'ai.panel.toolResult.CREATE_TASK_TURN_LIMIT_WITH_ID'
     : code.startsWith('ai.') ? code : `ai.panel.toolResult.${code}`
   const translated = t(key, { ...args, id: createdTaskId ?? '' })
-  return projectDisplayText(translated === key ? part.result : translated)
+  return displayToolResult(translated === key ? part.result : translated)
 }
 
 function textPartOf(block: Block): TextPart | null {
@@ -4364,28 +4315,20 @@ function diagnosticHumanOf(part: ToolPart): string | null {
   return kind === null ? null : t(DIAGNOSTIC_HUMAN_KEY[kind])
 }
 
-function diagnosticTextOf(part: ToolPart): string | null {
-  return cachedForLocale(diagnosticTextCache, part, 'diagnosis', [part.status, part.decision, part.kind2, part.reason, part.result], () => partDiagnosticText(part))
-}
-
-/** 「输出」位让位判据：分层命中的段若 result 自身就是机器向文本，就只留诊断详情（不双显）。 */
+/** 机器向原文不上用户卡面；分层命中时只保留对应的人话说明。 */
 function outputSupersededByDiagnostics(part: ToolPart): boolean {
   return diagnosticOf(part) !== null && partResultIsInternal(part)
 }
 
-/**
- * 已决只读卡的原因行文本：分层命中时用**人话**（陈旧卡 = 「这轮对话已失效」；skipped/
- * internal = 「这一步没有执行 / 没有正常完成」），没有分层时逐字沿用原 reason。
- */
+/** 只读卡原因保留业务说明；机器标记与整段 JSON 不上用户面。 */
 function readOnlyReasonText(part: ToolPart): string {
   const human = diagnosticHumanOf(part)
   if (human !== null) {
     return human
   }
-  return isBlankText(part.reason) ? '' : (part.reason as string)
+  return isBlankText(part.reason) ? '' : displayToolResult(part.reason)
 }
 
-/** 普通工具卡红色原因行文本：skipped 走独立人话行、staleGate 是只读卡形态，两者都不进本行。 */
 function faceReasonText(part: ToolPart): string {
   const kind = diagnosticOf(part)
   if (kind === 'skipped' || kind === 'staleGate') {
@@ -4397,7 +4340,7 @@ function faceReasonText(part: ToolPart): string {
   if (kind === 'sheetInput') {
     return t('ai.panel.sheetInputHuman')
   }
-  return isBlankText(part.reason) ? '' : reasonText(part)
+  return isBlankText(part.reason) ? '' : displayToolResult(reasonText(part))
 }
 
 /**
@@ -4777,7 +4720,7 @@ async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
 /**
  * 生成式表单已提交摘要（RC-1 → 2A）：**只读 `submittedValues`**（用户这次实际提交的值），
  * 字段名走 schema 的 `label`；无本地提交值（他端提交）⇒ 空串
- * （状态由统一卡头右标签「✓ 已提交」唯一承担，摘要位不重复）。
+ * （状态由统一卡头右标签「已提交」唯一承担，摘要位不重复）。
  */
 function generativeFormSummary(part: ToolPart): string {
   const rows = submitRows(part)
