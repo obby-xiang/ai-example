@@ -728,6 +728,13 @@
       "reason": "仅将AI面板两个头部按钮改为原生Tailwind，并复用面板共享状态为收起侧条增加四态颜色与呼吸展示，不改变迁移数据、协议或工作流契约，D6无需更新。",
       "reviewedAt": "2026-11-06",
       "reviewer": "K3.1 Pro施工并复核"
+    },
+    {
+      "fingerprint": "sha256:2d1e1b7d1140aa98dd850667410a1dbd935f826688e38b9317b4a6c2db901a5e",
+      "status": "not-affected",
+      "reason": "仅移除AI收起侧条光晕装饰，保留共享四态颜色与图标背景呼吸，不改变迁移数据、协议或工作流契约，D6无需更新。",
+      "reviewedAt": "2026-11-06",
+      "reviewer": "K3.1 Pro施工并复核"
     }
   ]
 }

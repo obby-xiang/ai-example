@@ -6,16 +6,11 @@
     @click="ai.toggleExpand()"
   >
     <span
-      class="relative grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px]"
+      class="grid h-[30px] w-[30px] flex-none place-items-center rounded-[8px]"
       :class="[collapsedActivityStyle.shell, collapsedActivityStyle.motion]"
       aria-hidden="true"
     >
-      <span
-        v-if="collapsedActivityState !== 'idle'"
-        class="pointer-events-none absolute left-1/2 top-1/2 h-[40px] w-[40px] -translate-x-1/2 -translate-y-1/2 rounded-full"
-        :class="collapsedActivityStyle.glow"
-      ></span>
-      <svg class="relative h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+      <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
     </span>
     <span class="writing-vertical text-[13px]">{{ t('ai.panel.assistant') }}</span>
   </div>
@@ -2431,22 +2426,18 @@ const collapsedActivityState = computed<MessageActivityState>(() => {
 const COLLAPSED_ACTIVITY_STYLES = {
   idle: {
     shell: 'bg-[#eff4ff] text-[#2563eb]',
-    glow: '',
     motion: ''
   },
   working: {
     shell: 'bg-[#eff4ff] text-[#2563eb]',
-    glow: 'bg-[#2563eb]/20 blur-[2px]',
     motion: 'animate-breathe-text motion-reduce:animate-none'
   },
   waiting: {
     shell: 'bg-[#fffbeb] text-[#b45309]',
-    glow: 'bg-[#b45309]/20 blur-[2px]',
     motion: 'animate-breathe-text motion-reduce:animate-none'
   },
   compacting: {
     shell: 'bg-[#f5f3ff] text-[#7c3aed]',
-    glow: 'bg-[#7c3aed]/20 blur-[2px]',
     motion: 'animate-breathe-text motion-reduce:animate-none'
   }
 } as const
