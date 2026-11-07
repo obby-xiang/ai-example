@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * check-d6-sync.mjs —— D6（AI 对话复用指南）同步复核门禁
+ * check-d6-sync.mjs —— D6 同步复核 + 统一开发规范审查门禁
+ *
+ * 默认模式的 D6 规则保持不变；--standards 模式覆盖全部暂存变更，并要求逐文件、七规范域、
+ * 规格变化和真实证据边界的当次记录。--standards --base <sha> --head <sha> 用于 CI 逐提交复核。
+ * 统一规范模式在 pre-commit 中缺少 Node 或脚本时失败关闭，不沿用 D6 的告警跳过。
  *
  * 目标（轻量，只证明"有人工确认"，不证明语义正确）：
  *   本次暂存区出现 **AI 对话生产代码与核心契约**（block 面）时，要求同一笔提交里
@@ -40,13 +44,48 @@ export const RULE_VERSION = 'd6-sync/v1'
 export const REVIEW_VERSION = 1
 export const REVIEW_PATH = 'docs/delivery/d6-review.json'
 export const D6_DOC_PATH = 'docs/delivery/06-新项目复用与落地指南.md'
+export const STANDARDS_RULE_VERSION = 'development-standards/v2'
+export const STANDARDS_REVIEW_VERSION = 1
+export const STANDARDS_REVIEW_PATH = 'docs/delivery/development-standards-review.json'
+export const STANDARDS_DOC_PATH = 'docs/delivery/development-standards.md'
+export const STANDARDS_DOMAINS = Object.freeze([
+  'dependency-reuse',
+  'java-api-style',
+  'logging-exception-safety',
+  'toc-interaction',
+  'protocol-redis-concurrency',
+  'unicode-stream-parsing',
+  'verification-review',
+])
 
 const ZERO_SHA = '0'.repeat(40)
+const ZERO_MODE = '000000'
 const MIN_REASON_CHARS = 8
 const GENERIC_REASONS = new Set([
   'n/a', 'na', 'none', 'nil', 'null', 'no', '-', '--', 'ok', 'okay',
   'todo', 'tbd', '待补', '待定', '待确认', '未确认', '无', '暂无', '无影响', '不影响', '同上', '见上'
 ])
+const STANDARDS_GENERIC_REASONS = new Set([
+  ...GENERIC_REASONS,
+  'checked', 'not-affected', 'not applicable', 'no impact', 'same as above',
+  '已审查', '已检查', '符合规范', '无异常', '不涉及', '无需修改', '按规范执行',
+  'describe the per-file, per-hunk review and its actual evidence boundary',
+  'describe every hunk reviewed in this file',
+  'give a concrete applicability reason; n/a is not accepted',
+  'describe the standards change',
+])
+const STANDARDS_GENERIC_CLAUSES = new Set([
+  '本批已全面审查', '本次已全面审查', '已全面审查', '全面审查',
+  '符合规范要求', '符合规范', '按规范执行', '按规范要求执行',
+  '本次已检查无异常按规范执行', '本次已检查无异常', '已检查无异常', '无异常',
+  '全部变更均不涉及其他规范领域', '全部变更不涉及其他规范领域', '不涉及其他规范领域',
+  '本批已审查', '本次已审查', '已审查', '已检查', '本批已检查', '本次已检查',
+  '本批已核查', '本次已核查', '已核查', '本批已完成审查', '本次已完成审查', '已完成审查',
+  '本批已全面检查', '本次已全面检查', '已全面检查', '全部已审查', '全部已检查',
+  '无影响', '不影响', '不涉及',
+])
+const STANDARDS_SPECIFIC_REASON = /(?:hunk|文件|指纹|fingerprint|merge|tree|ledger|reviews?\b|base|head|mode|fromPath|blob|sha(?:256)?|json|node|ci|api|sse|redis|unicode|utf-?8|specChanges|scripts?[\\/]|[\w-]+\.(?:mjs|java|ts|tsx|vue|json|ya?ml|md|sh)\b|状态机|并发|集合|数组|方法|依赖|序列化|日志|异常|模型|卡片|滚动|边距|白名单|父提交|暂存区|路径|规格变化|代理对|字素簇)/i
+const STANDARDS_DOC_EXTENSIONS = new Set(['.md', '.markdown', '.rst', '.adoc', '.asciidoc'])
 
 // ── 路径分类 ────────────────────────────────────────────────────────────────
 // 顺序：先判"测试 / 模拟设施 / 多语言共享面"（warn，永不阻断），再判 block。
@@ -220,14 +259,35 @@ export function classifyChanges(changes = []) {
 
 // ── 指纹与确认记录 ──────────────────────────────────────────────────────────
 
-/** 指纹只取 block 文件：状态 + blob + 路径（排序后）与规则版本；d6-review.json 不在其中。 */
-export function computeFingerprint(blockChanges = []) {
-  const lines = blockChanges
+export function computeChangeFingerprint(changes = [], ruleVersion) {
+  const lines = changes
     .map((c) => `${c.status || 'M'} ${c.blob || ZERO_SHA} ${normalizePath(c.path)}`)
     .sort()
   const hash = createHash('sha256')
-  hash.update(`${RULE_VERSION}\n`)
+  hash.update(`${ruleVersion}\n`)
   for (const line of lines) hash.update(`${line}\n`)
+  return `sha256:${hash.digest('hex')}`
+}
+
+/** 指纹只取 block 文件：状态 + blob + 路径（排序后）与规则版本；d6-review.json 不在其中。 */
+export function computeFingerprint(blockChanges = []) {
+  return computeChangeFingerprint(blockChanges, RULE_VERSION)
+}
+
+export function computeStandardsFingerprint(changes = []) {
+  const tuples = changes
+    .filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH)
+    .map((c) => JSON.stringify([
+      c.status || 'M',
+      c.mode || ZERO_MODE,
+      c.fromPath ? String(c.fromPath) : '',
+      String(c.path),
+      c.blob || ZERO_SHA,
+    ]))
+    .sort()
+  const hash = createHash('sha256')
+  hash.update(`${STANDARDS_RULE_VERSION}\n`)
+  for (const tuple of tuples) hash.update(`${tuple}\n`)
   return `sha256:${hash.digest('hex')}`
 }
 
@@ -259,13 +319,45 @@ export function isConcreteReason(reason) {
   return !GENERIC_REASONS.has(value.toLowerCase())
 }
 
+function isGenericReasonCombination(value) {
+  if (STANDARDS_SPECIFIC_REASON.test(value)) return false
+  const clauses = value.split(/(?:，|,|。|；|;|、|以及|并且|而且|同时|然后|且|并|和|与|\s+)/).map((item) => item.trim()).filter(Boolean)
+  return clauses.length > 0 && clauses.every((item) => STANDARDS_GENERIC_CLAUSES.has(item))
+}
+
+function isStandardsPlaceholder(value) {
+  if (typeof value !== 'string') return true
+  const trimmed = value.trim()
+  if (!trimmed || /^<[^>]*>$/.test(trimmed)) return true
+  const normalized = trimmed.replace(/\s+/g, ' ').toLowerCase()
+  return STANDARDS_GENERIC_REASONS.has(normalized) || isGenericReasonCombination(normalized)
+}
+
+export function isConcreteStandardsReason(reason) {
+  return isConcreteReason(reason) && !isStandardsPlaceholder(reason)
+}
+
+export function isStandardsDocumentation(filePath) {
+  const p = String(filePath)
+  const extension = path.extname(p).toLowerCase()
+  if (p.startsWith('docs/')) return STANDARDS_DOC_EXTENSIONS.has(extension) || extension === '.txt'
+  if (STANDARDS_DOC_EXTENSIONS.has(extension)) return true
+  const base = p.slice(p.lastIndexOf('/') + 1)
+  return /^README(?:\.[^/]*)?$/i.test(base) && (extension === '' || extension === '.txt')
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue)
+  if (!isPlainObject(value)) return value
+  return Object.keys(value).sort().map((key) => [key, stableValue(value[key])])
+}
+
 function stableEntry(entry) {
-  const keys = Object.keys(entry).sort()
-  return JSON.stringify(keys.map((key) => [key, entry[key]]))
+  return JSON.stringify(stableValue(entry))
 }
 
 function validateEntry(entry, { d6Updated }) {
@@ -383,6 +475,216 @@ export function evaluate({ changes = [], reviewText = '', headReviewText = '' } 
   return result
 }
 
+// ── 统一开发规范审查：全变更指纹、逐文件与七域确认 ─────────────────────────
+
+export function parseStandardsReview(text) {
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch (e) {
+    throw new GateInputError(`${STANDARDS_REVIEW_PATH} is not valid JSON (${e.message})`)
+  }
+  if (!isPlainObject(data)) {
+    throw new GateInputError(`${STANDARDS_REVIEW_PATH} must be a JSON object at the top level`)
+  }
+  if (data.version !== STANDARDS_REVIEW_VERSION) {
+    throw new GateInputError(`version must be ${STANDARDS_REVIEW_VERSION} (current: ${JSON.stringify(data.version)})`)
+  }
+  if (!Array.isArray(data.reviews)) throw new GateInputError('reviews must be present and must be an array')
+  return { reviews: data.reviews }
+}
+
+function validateStandardsBase(entry, covered) {
+  const problems = []
+  if (entry.status !== 'reviewed' && entry.status !== 'not-affected') {
+    problems.push('status must be reviewed or not-affected')
+  }
+  if (!isConcreteStandardsReason(entry.reason)) problems.push('reason must give a concrete, non-template per-hunk explanation')
+  if (isStandardsPlaceholder(entry.reviewer)) {
+    problems.push('reviewer must identify the actual reviewer or independent review context')
+  }
+  const timestamp = typeof entry.reviewedAt === 'string' ? entry.reviewedAt : ''
+  const isoWithZone = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+  if (!isoWithZone.test(timestamp) || Number.isNaN(Date.parse(timestamp))) {
+    problems.push('reviewedAt must be an ISO 8601 date-time with an explicit timezone')
+  }
+  if (entry.status === 'not-affected' && covered.some((c) => !isStandardsDocumentation(c.path))) {
+    problems.push('status=not-affected is allowed only when every covered change is whitelist documentation')
+  }
+  return problems
+}
+
+function validateSpecChanges(entry, covered) {
+  if (!Array.isArray(entry.specChanges)) return ['specChanges must be an array (use [] when no specification changed)']
+  const problems = []
+  for (const [index, item] of entry.specChanges.entries()) {
+    if (!isPlainObject(item)) {
+      problems.push(`specChanges[${index}] must be an object with change, reason and impact`)
+      continue
+    }
+    for (const field of ['change', 'reason', 'impact']) {
+      if (!isConcreteStandardsReason(item[field])) {
+        problems.push(`specChanges[${index}].${field} must be concrete and non-template`)
+      }
+    }
+  }
+  if (covered.some((c) => String(c.path) === STANDARDS_DOC_PATH) && entry.specChanges.length === 0) {
+    problems.push(`changing ${STANDARDS_DOC_PATH} requires at least one specChanges item`)
+  }
+  return problems
+}
+
+function validateStandardsFiles(entry, covered) {
+  const problems = []
+  if (!Array.isArray(entry.files)) return ['files must be an array covering every changed file except the review ledger']
+  const expected = new Map(covered.map((c) => [String(c.path), c]))
+  const seen = new Set()
+  for (const file of entry.files) {
+    if (!isPlainObject(file) || typeof file.path !== 'string') {
+      problems.push('every files item must be an object with a path')
+      continue
+    }
+    const filePath = file.path
+    if (!expected.has(filePath)) problems.push(`files contains an unchanged or duplicate path: ${filePath}`)
+    if (seen.has(filePath)) problems.push(`files contains a duplicate path: ${filePath}`)
+    seen.add(filePath)
+    if (file.status !== 'checked' && file.status !== 'not-affected') {
+      problems.push(`files[${filePath}].status must be checked or not-affected`)
+    }
+    if (file.status === 'not-affected' && !isStandardsDocumentation(filePath)) {
+      problems.push(`files[${filePath}] uses not-affected for a non-whitelist-documentation change`)
+    }
+    if (!isConcreteStandardsReason(file.reason)) problems.push(`files[${filePath}] needs a concrete, non-template per-hunk reason`)
+  }
+  for (const filePath of expected.keys()) {
+    if (!seen.has(filePath)) problems.push(`files is missing the changed path: ${filePath}`)
+  }
+  return problems
+}
+
+function validateStandardsDomains(entry) {
+  const problems = []
+  if (!isPlainObject(entry.domains)) return ['domains must be an object containing all seven standards domains']
+  for (const key of Object.keys(entry.domains)) {
+    if (!STANDARDS_DOMAINS.includes(key)) problems.push(`unknown standards domain: ${key}`)
+  }
+  for (const domain of STANDARDS_DOMAINS) {
+    const check = entry.domains[domain]
+    if (!isPlainObject(check)) {
+      problems.push(`domains.${domain} must be an object`)
+      continue
+    }
+    if (check.status !== 'checked' && check.status !== 'not-affected') {
+      problems.push(`domains.${domain}.status must be checked or not-affected`)
+    }
+    if (!isConcreteStandardsReason(check.reason)) problems.push(`domains.${domain} needs a concrete applicability reason, not a template or generic phrase`)
+  }
+  if (entry.status === 'reviewed' && !STANDARDS_DOMAINS.some((domain) => entry.domains[domain]?.status === 'checked')) {
+    problems.push('status=reviewed requires at least one domain with status=checked')
+  }
+  return problems
+}
+
+export function validateStandardsEntry(entry, changes = []) {
+  const covered = changes.filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH)
+  return [
+    ...validateStandardsBase(entry, covered),
+    ...validateSpecChanges(entry, covered),
+    ...validateStandardsFiles(entry, covered),
+    ...validateStandardsDomains(entry),
+  ]
+}
+
+function parseStandardsGateInput(result, text, source, kind) {
+  try {
+    return parseStandardsReview(text).reviews
+  } catch (e) {
+    if (!(e instanceof GateInputError)) throw e
+    result.exitCode = 2
+    result.kind = kind
+    result.problems.push(`${source}: ${e.message}`)
+    return null
+  }
+}
+
+function validateStandardsAppend(result, current, parent) {
+  if (!parent) return true
+  if (current.length <= parent.length) {
+    result.problems.push('the current ledger must strictly append at least one record after the parent ledger')
+  } else {
+    for (let i = 0; i < parent.length; i += 1) {
+      if (stableEntry(current[i]) !== stableEntry(parent[i])) {
+        result.problems.push(`parent ledger history was edited or reordered at reviews[${i}]; append-only is required`)
+        break
+      }
+    }
+  }
+  if (result.problems.length === 0) return true
+  result.exitCode = 1
+  result.kind = 'history-not-append'
+  return false
+}
+
+function freshStandardsEntries(result, reviewText, parentReviewText) {
+  const current = parseStandardsGateInput(result, reviewText, 'current ledger', 'bad-json')
+  if (!current) return []
+  const parent = parentReviewText === null
+    ? null
+    : parseStandardsGateInput(result, parentReviewText, 'parent ledger', 'bad-parent-json')
+  if (result.exitCode !== 0 || !validateStandardsAppend(result, current, parent)) return []
+  const parentEntries = parent || []
+  const parentFingerprints = new Set(parentEntries.filter(isPlainObject).map((entry) => entry.fingerprint))
+  const matching = current.filter((entry) => isPlainObject(entry) && entry.fingerprint === result.fingerprint)
+  if (matching.length === 0) {
+    result.exitCode = 1
+    result.kind = 'no-confirmation'
+    result.problems.push('no standards review record matches the current all-change fingerprint')
+    return []
+  }
+  const fresh = current.slice(parentEntries.length).filter((entry) =>
+    isPlainObject(entry) && entry.fingerprint === result.fingerprint && !parentFingerprints.has(entry.fingerprint))
+  if (fresh.length === 0) {
+    result.exitCode = 1
+    result.kind = 'reused-confirmation'
+    result.problems.push('the current fingerprint already exists in the parent ledger; changing other fields does not make it reusable')
+  }
+  return fresh
+}
+
+export function evaluateStandards({ changes = [], reviewText = '', parentReviewText = null } = {}) {
+  const result = {
+    exitCode: 0,
+    kind: 'no-changes',
+    fingerprint: computeStandardsFingerprint(changes),
+    changes,
+    reviewStaged: false,
+    problems: [],
+    entry: null,
+  }
+  if (changes.length === 0) return result
+  result.reviewStaged = changes.some((c) => String(c.path) === STANDARDS_REVIEW_PATH && (c.status || 'M') !== 'D')
+  if (!result.reviewStaged) {
+    result.exitCode = 1
+    result.kind = 'review-not-staged'
+    result.problems.push(`${STANDARDS_REVIEW_PATH} must be updated in the same commit`)
+    return result
+  }
+  const fresh = freshStandardsEntries(result, reviewText, parentReviewText)
+  if (result.exitCode !== 0) return result
+  for (const entry of fresh) {
+    const problems = validateStandardsEntry(entry, changes)
+    if (problems.length === 0) {
+      result.kind = 'ok'
+      result.entry = entry
+      return result
+    }
+    result.problems.push(...problems)
+  }
+  result.exitCode = 1
+  result.kind = 'invalid-confirmation'
+  return result
+}
+
 // ── git 读取（CLI 用；测试直接调纯函数，不依赖仓库） ────────────────────────
 
 function git(args, cwd, options = {}) {
@@ -395,8 +697,7 @@ function git(args, cwd, options = {}) {
   })
 }
 
-export function readStagedChanges(repo) {
-  const raw = git(['diff', '--cached', '--name-status', '-z', '--diff-filter=ACDMRTU', '--no-color', '--no-ext-diff'], repo)
+function parseNameStatus(raw, mapPath = normalizePath) {
   const fields = raw.split('\0')
   const changes = []
   let i = 0
@@ -408,29 +709,153 @@ export function readStagedChanges(repo) {
     }
     const letter = status.charAt(0)
     if (letter === 'R' || letter === 'C') {
-      changes.push({ status: letter, path: fields[i + 2], fromPath: fields[i + 1] })
+      changes.push({ status: letter, path: mapPath(fields[i + 2]), fromPath: mapPath(fields[i + 1]) })
       i += 3
     } else {
-      changes.push({ status: letter, path: fields[i + 1] })
+      changes.push({ status: letter, path: mapPath(fields[i + 1]) })
       i += 2
     }
   }
+  return changes
+}
 
-  const blobByPath = new Map()
-  const indexListing = git(['ls-files', '-s', '-z'], repo).split('\0')
-  for (const record of indexListing) {
-    if (!record) continue
+function attachBlobs(changes, blobByPath) {
+  for (const change of changes) change.blob = blobByPath.get(change.path) || ZERO_SHA
+  return changes
+}
+
+function treeEntries(raw, mapPath, indexFormat) {
+  const entries = new Map()
+  for (const record of raw.split('\0')) {
+    if (!record || record.indexOf('\t') < 0) continue
     const tab = record.indexOf('\t')
-    if (tab < 0) continue
-    const [mode, sha, stage] = record.slice(0, tab).split(' ')
-    if (!sha || stage !== '0') continue
-    blobByPath.set(normalizePath(record.slice(tab + 1)), sha)
+    const fields = record.slice(0, tab).split(' ')
+    const stage = indexFormat ? fields[2] : '0'
+    const sha = indexFormat ? fields[1] : fields[2]
+    if (sha && stage === '0') entries.set(mapPath(record.slice(tab + 1)), { mode: fields[0], sha })
   }
+  return entries
+}
+
+function stagedEntries(repo, mapPath) {
+  return treeEntries(git(['ls-files', '-s', '-z'], repo), mapPath, true)
+}
+
+function commitEntries(repo, commit, mapPath) {
+  return treeEntries(git(['ls-tree', '-r', '-z', commit], repo), mapPath, false)
+}
+
+function stagedBlobs(repo) {
+  const blobs = new Map()
+  for (const [filePath, entry] of stagedEntries(repo, normalizePath)) blobs.set(filePath, entry.sha)
+  return blobs
+}
+
+function attachMetadata(changes, entries) {
   for (const change of changes) {
-    change.blob = blobByPath.get(normalizePath(change.path)) || ZERO_SHA
-    change.path = normalizePath(change.path)
+    const entry = entries.get(change.path)
+    change.blob = entry?.sha || ZERO_SHA
+    change.mode = entry?.mode || ZERO_MODE
+    change.fromPath ||= ''
   }
   return changes
+}
+
+export function readStagedChanges(repo) {
+  const raw = git(['diff', '--cached', '--name-status', '-z', '--diff-filter=ACDMRTU', '--no-color', '--no-ext-diff'], repo)
+  return attachBlobs(parseNameStatus(raw), stagedBlobs(repo))
+}
+
+export function readStandardsStagedChanges(repo) {
+  const raw = git(['diff', '--cached', '--name-status', '-z', '--no-renames', '--diff-filter=ACDMRTU', '--no-color', '--no-ext-diff'], repo)
+  return attachMetadata(parseNameStatus(raw, String), stagedEntries(repo, String))
+}
+
+function readCommitChanges(repo, commit, parent) {
+  const common = ['--name-status', '-z', '--no-renames', '--diff-filter=ACDMRTU', '--no-color', '--no-ext-diff']
+  const args = parent
+    ? ['diff', ...common, parent, commit]
+    : ['diff-tree', '--root', '--no-commit-id', '-r', ...common, commit]
+  return attachMetadata(parseNameStatus(git(args, repo), String), commitEntries(repo, commit, String))
+}
+
+function showFromCommit(repo, commit, relPath) {
+  if (!commit) return null
+  const listing = git(['ls-tree', '-z', commit, '--', relPath], repo)
+  return listing ? git(['show', `${commit}:${relPath}`], repo) : null
+}
+
+function isUnbornHead(repo) {
+  const branch = git(['symbolic-ref', '-q', 'HEAD'], repo).trim()
+  const existing = git(['for-each-ref', '--format=%(refname)', branch], repo).trim()
+  return existing === ''
+}
+
+function readStagedParentReview(repo) {
+  try {
+    git(['rev-parse', '--verify', 'HEAD^{commit}'], repo)
+  } catch (e) {
+    if (isUnbornHead(repo)) return null
+    throw e
+  }
+  return showFromCommit(repo, 'HEAD', STANDARDS_REVIEW_PATH)
+}
+
+function readCommitReview(repo, commit) {
+  const parents = git(['rev-list', '--parents', '-n', '1', commit], repo).trim().split(' ').slice(1)
+  const parent = parents[0] || ''
+  return {
+    parents,
+    changes: readCommitChanges(repo, commit, parent),
+    reviewText: showFromCommit(repo, commit, STANDARDS_REVIEW_PATH),
+    parentReviewText: showFromCommit(repo, parent, STANDARDS_REVIEW_PATH),
+  }
+}
+
+function assertValidRevision(repo, revision, label) {
+  if (!revision || /^0{40}$/.test(revision)) throw new GateInputError(`${label} must be a non-zero commit revision`)
+  return git(['rev-parse', '--verify', `${revision}^{commit}`], repo).trim()
+}
+
+function readRangeCommits(repo, base, head) {
+  if (!base) return [assertValidRevision(repo, head, 'head')]
+  const baseCommit = assertValidRevision(repo, base, 'base')
+  const headCommit = assertValidRevision(repo, head, 'head')
+  if (baseCommit === headCommit) return []
+  try {
+    git(['merge-base', '--is-ancestor', baseCommit, headCommit], repo)
+  } catch {
+    throw new GateInputError(`base ${baseCommit} is not an ancestor of head ${headCommit}`)
+  }
+  const commits = git(['rev-list', '--reverse', `${baseCommit}..${headCommit}`], repo).trim().split('\n').filter(Boolean)
+  if (commits.length === 0) throw new GateInputError(`empty commit range ${baseCommit}..${headCommit}; only equal commits may be empty`)
+  return commits
+}
+
+function automaticMergeTree(repo, parents) {
+  let raw
+  let conflicted = false
+  try {
+    raw = git(['merge-tree', '--write-tree', parents[0], parents[1]], repo)
+  } catch (e) {
+    if (e.status !== 1) throw e
+    conflicted = true
+    raw = String(e.stdout || '')
+  }
+  const tree = raw.trim().split('\n')[0]
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) {
+    throw new GateInputError('git merge-tree did not produce a valid expected tree; failing closed')
+  }
+  return { tree, conflicted }
+}
+
+function isCleanMerge(repo, commit, parents) {
+  if (parents.length < 2) return false
+  if (parents.length > 2) throw new GateInputError(`octopus merge ${commit} is not supported; failing closed`)
+  const tree = git(['rev-parse', `${commit}^{tree}`], repo).trim()
+  if (parents.some((parent) => git(['rev-parse', `${parent}^{tree}`], repo).trim() === tree)) return true
+  const expected = automaticMergeTree(repo, parents)
+  return !expected.conflicted && tree === expected.tree
 }
 
 function showFromIndex(repo, relPath) {
@@ -535,28 +960,83 @@ export function describe(result) {
   return lines
 }
 
+function standardsConfirmationTemplate(result) {
+  const covered = result.changes.filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH)
+  return {
+    fingerprint: result.fingerprint,
+    status: 'reviewed',
+    reason: '',
+    reviewedAt: new Date().toISOString(),
+    reviewer: '',
+    specChanges: covered.some((c) => c.path === STANDARDS_DOC_PATH) ? [{ change: '', reason: '', impact: '' }] : [],
+    files: covered.map((c) => ({
+      path: c.path,
+      status: 'checked',
+      reason: '',
+    })),
+    domains: Object.fromEntries(STANDARDS_DOMAINS.map((domain) => [domain, {
+      status: domain === 'verification-review' ? 'checked' : 'not-affected',
+      reason: '',
+    }])),
+  }
+}
+
+export function describeStandards(result) {
+  const lines = [`Development standards review gate (rule version ${STANDARDS_RULE_VERSION})`, '']
+  if (result.kind === 'no-changes') {
+    lines.push('OK no staged changes; no standards review confirmation needed')
+    return lines
+  }
+  const coveredCount = result.changes.filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH).length
+  lines.push(`Covered changes: ${coveredCount} (production, test/stress, scripts, CI and docs all included)`)
+  lines.push(`fingerprint: ${result.fingerprint}`)
+  lines.push(`      = all changes except ${STANDARDS_REVIEW_PATH} itself`, '')
+  if (result.kind === 'ok') {
+    lines.push(`OK new standards review is valid: status=${result.entry.status}, reviewer=${result.entry.reviewer}`)
+    lines.push('Note: checked means human review only; it is not a test, real-interface or Redis PASS.')
+    return lines
+  }
+  const headlines = {
+    'review-not-staged': `FAIL ${STANDARDS_REVIEW_PATH} was not updated in this commit`,
+    'bad-json': `FAIL ${STANDARDS_REVIEW_PATH} is structurally unusable`,
+    'bad-parent-json': 'FAIL the parent ledger could not be read or is structurally invalid',
+    'history-not-append': 'FAIL the current ledger is not a strict append-only extension of the parent ledger',
+    'no-confirmation': 'FAIL no standards review matches the current fingerprint',
+    'reused-confirmation': 'FAIL the current fingerprint already exists in the parent ledger',
+    'invalid-confirmation': 'FAIL the standards review record does not meet the requirements',
+  }
+  lines.push(headlines[result.kind] || 'FAIL standards review did not pass')
+  for (const problem of result.problems) lines.push(`    - ${problem}`)
+  lines.push('', `How to fix: ADD and complete the record below in ${STANDARDS_REVIEW_PATH}, then stage it:`)
+  for (const line of JSON.stringify(standardsConfirmationTemplate(result), null, 2).split('\n')) {
+    lines.push(`  ${line}`)
+  }
+  lines.push('', 'Every changed file and all seven domains need concrete reasons. Any change to the covered staged state needs a new review.')
+  return lines
+}
+
 function printHelp() {
-  console.log(`D6 sync review gate (check-d6-sync, rule version ${RULE_VERSION})
+  console.log(`D6 sync + development standards gates
 
 usage:
   node scripts/ci/check-d6-sync.mjs [--root <repo root>] [--staged]
+  node scripts/ci/check-d6-sync.mjs --standards [--root <repo root>] [--staged]
+  node scripts/ci/check-d6-sync.mjs --standards [--root <repo root>] [--base <sha>] --head <sha>
   node scripts/ci/check-d6-sync.mjs --help
 
-verdict (staged index only):
-  block  backend ai/**, common/id, common/sse, resources/ai/**,
-         frontend AiPanel / stores/ai.ts / api(ai|aiConfig|sse|http) / types(ai|sse|tools) /
-         utils(ai-*|frontend-tools|context-usage|parts) / locales
-         -- needs a confirmation with the matching fingerprint added in this commit:
-            synced (D6 updated in the same commit) or not-affected (concrete reason)
-  warn   tests / E2E / stubs / harness / backend messages_*.properties / stores/locale.ts -- warn only
-  doc    docs/** and *.md; infra scripts/**, .github/**, build config; all other files are ignored
+D6 default mode: staged AI block files need a fresh matching ${REVIEW_PATH} record.
+standards mode: every staged change needs an appended matching ${STANDARDS_REVIEW_PATH} record,
+  including production, test/stress, scripts, CI and docs. All seven domains and every file need reasons.
+  Parent reviews must be a strict prefix; a parent fingerprint cannot be reused.
+  --base/--head validates ancestry and checks every introduced commit; only equal commits allow an empty range.
+  A two-parent merge reusing a parent tree or the automatic merge-tree result needs no merge-specific record;
+  octopus merges fail closed; all other merges need their own appended record.
 
-fingerprint: sha256(rule version + sorted "status blob path"), staged block files only; d6-review.json itself excluded.
-exit code: 0 pass (including "no confirmation needed") / 1 confirmation needed but missing / 2 input or environment error
-           (bad JSON, missing version or version != 1, not a git repo, ...).
-
-limits: a confirmation is a written human commitment; the gate does not verify its truth, nor that the D6 content is correct;
-        git commit --no-verify and machines without Node skip this check (a warning is printed when skipped).`)
+standards fingerprint: sha256(v2 + sorted JSON [status,mode,fromPath,path,blob]); D6 v1 is unchanged.
+The corresponding review ledger is excluded.
+exit code: 0 pass / 1 required confirmation missing or invalid / 2 input or environment error.
+D6 keeps its existing pre-commit skip behavior without Node; the standards hook fails closed without Node.
+A confirmation proves written review only, not semantic correctness or real test/interface/Redis execution.`)
 }
 
 // ── 入口 ────────────────────────────────────────────────────────────────────
@@ -566,40 +1046,77 @@ function resolveRepoRoot(explicitRoot) {
   return git(['rev-parse', '--show-toplevel'], process.cwd()).trim()
 }
 
+function runD6(repo) {
+  const changes = readStagedChanges(repo)
+  const reviewStaged = changes.some((c) => c.path === REVIEW_PATH && c.status !== 'D')
+  const reviewText = reviewStaged ? showFromIndex(repo, REVIEW_PATH) : ''
+  const result = evaluate({ changes, reviewText, headReviewText: showFromHead(repo, REVIEW_PATH) })
+  for (const line of describe(result)) console.log(line)
+  return result.exitCode
+}
+
+function runStandardsStaged(repo) {
+  const changes = readStandardsStagedChanges(repo)
+  const reviewStaged = changes.some((c) => c.path === STANDARDS_REVIEW_PATH && c.status !== 'D')
+  const reviewText = reviewStaged ? showFromIndex(repo, STANDARDS_REVIEW_PATH) : ''
+  const parentReviewText = readStagedParentReview(repo)
+  const result = evaluateStandards({ changes, reviewText, parentReviewText })
+  for (const line of describeStandards(result)) console.log(line)
+  return result.exitCode
+}
+
+function runStandardsCommits(repo, base, head) {
+  const commits = readRangeCommits(repo, base, head)
+  for (const commit of commits) {
+    console.log(`\nStandards review for commit ${commit}`)
+    const input = readCommitReview(repo, commit)
+    if (isCleanMerge(repo, commit, input.parents)) {
+      console.log('OK merge tree reuses a parent tree or the automatic merge-tree result; no merge-specific record required, all introduced commits are still checked')
+      continue
+    }
+    const result = evaluateStandards(input)
+    for (const line of describeStandards(result)) console.log(line)
+    if (result.exitCode !== 0) return result.exitCode
+  }
+  console.log(`OK standards review passed for ${commits.length} introduced commit(s)`)
+  return 0
+}
+
+function parseArguments(argv) {
+  const options = { root: '', standards: false, base: '', head: '', unknown: [], missingValue: '' }
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]
+    if (arg === '--standards') options.standards = true
+    else if (arg === '--staged') continue
+    else if (arg === '--root' || arg === '--base' || arg === '--head') {
+      const value = argv[i + 1] || ''
+      if (!value) options.missingValue = arg
+      options[arg.slice(2)] = value
+      i += 1
+    } else options.unknown.push(arg)
+  }
+  return options
+}
+
 function main(argv) {
   if (argv.includes('--help') || argv.includes('-h')) {
     printHelp()
     return 0
   }
-
-  let root = ''
-  const unknown = []
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]
-    if (arg === '--root') {
-      root = argv[i + 1] || ''
-      i += 1
-    } else if (arg !== '--staged') {
-      unknown.push(arg)
-    }
-  }
-  if (unknown.length > 0 || (argv.includes('--root') && !root)) {
-    console.error(`[d6-sync] FAIL unrecognised argument: ${unknown.join(' ') || '--root is missing its value'} (see --help)`)
+  const options = parseArguments(argv)
+  const invalidRange = (!options.standards && (options.base || options.head)) || (options.base && !options.head)
+  if (options.unknown.length || options.missingValue || invalidRange) {
+    const detail = options.unknown.join(' ') || options.missingValue || '--base/--head require --standards and --head'
+    console.error(`[check-d6-sync] FAIL unrecognised or incomplete arguments: ${detail} (see --help)`)
     return 2
   }
-
   try {
-    const repo = resolveRepoRoot(root)
-    const changes = readStagedChanges(repo)
-    const reviewStaged = changes.some((c) => c.path === REVIEW_PATH && c.status !== 'D')
-    const reviewText = reviewStaged ? showFromIndex(repo, REVIEW_PATH) : ''
-    const headReviewText = showFromHead(repo, REVIEW_PATH)
-    const result = evaluate({ changes, reviewText, headReviewText })
-    for (const line of describe(result)) console.log(line)
-    return result.exitCode
+    const repo = resolveRepoRoot(options.root)
+    if (!options.standards) return runD6(repo)
+    return options.head ? runStandardsCommits(repo, options.base, options.head) : runStandardsStaged(repo)
   } catch (e) {
-    console.error(`[d6-sync] FAIL check could not complete (treated as an error, rc=2): ${e.message}`)
-    console.error('    Make sure the current directory (or --root) is a git repository, git is available, and the index is readable.')
+    console.error(`[check-d6-sync] FAIL check could not complete (treated as an error, rc=2): ${e.message}`)
+    console.error('    Ensure the repository, git, index and requested commits are readable; failures are never a pass.')
     return 2
   }
 }

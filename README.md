@@ -5,6 +5,7 @@
 - 需求基线：`docs/02-需求设计文档-v2.2-冻结版.md`
 - 技术方案：`docs/03-技术方案文档-v2.1.md`
 - 决策登记：`docs/adr/DECISION-REGISTER.md`（DC-01~21）
+- 统一开发规范与提交审查：`docs/delivery/development-standards.md`
 - 全部文档导航：`docs/README.md`
 
 ---
@@ -212,22 +213,23 @@ E2E 脚本的参数、退出码口径、桩模式（`E2E_STUB_MODE=1` 零容忍�
 | `backend` | JDK 21 + `mvn -B test`（全量单测）；JaCoCo 覆盖率报告作为 artifact `backend-jacoco-coverage` 上传（**只观测，无阈值**） | — |
 | `frontend` | Node 22 + `yarn install --frozen-lockfile` + `yarn typecheck` + `yarn test` + `yarn build` | — |
 | `e2e` | Redis service 容器 + 桩上游（`scripts/ci/stub-upstream.mjs --violate-form-type`）+ `scripts/verify-e2e.ps1` 29 用例（`-EnableGf6`） | `backend` |
-| `docs` | 文档一致性门禁（`node scripts/ci/check-docs.mjs`，6 条断言）｜**阻断** | — |
+| `docs` | 文档一致性门禁（`check-docs.mjs`）+ 统一开发规范逐提交审查记录门禁（`check-d6-sync.mjs --standards --base … --head …`）｜**阻断** | — |
 | `scan-history` | 全历史脱敏扫描（`scripts/githooks/scan-history.sh --files-only`，独立 job、10 分钟上限）｜**报告制不计门禁** | — |
 
 触发条件为 `push` / `pull_request` 到 `main`。门禁属性（裁决①，2026-10-09 口径调整）：`backend` / `frontend` / `e2e` / `docs` 为**阻塞门禁**；`scan-history` 为**报告制非阻断** —— 它的命中全部落在**历史 blob**（当前工作树 / 暂存区口径 0 命中；当前 HEAD 全量实跑 302 处 / 40 个历史路径，其中 **10 个**路径仅存于历史、不在工作树。口径换算：278 = CI 模拟时点实测（施工报告 §14#1，其 USER 规则未生效，含仅存于历史的 9 个路径），302 = 当前 HEAD 全量实跑（红队复核 §d），两数勿混读），删工作树文件消除不了，唯一手段是历史改写（需用户专项授权，本周期不动），故不以「失败即红」接线：命中照常全量输出 + 上传 artifact + job summary 标注，但不使 CI 红（"扫描器未完成"这类环境/参数错误仍为红）。**工作树口径的阻断面不在该 job**：由 `docs` job（断言 ⑤ 命名纪律按 `git ls-files` 全量扫描；断言 ① 盘符路径只覆盖 4 个导航/口径入口文档）与 `pre-commit` 钩子（本机暂存区）承担，二者保持阻断。`scan-history` 仍不设 `needs`、不阻塞主路径。
 
 > **桩的口径（不得扩大解释）**：CI 的 E2E 跑在**上游替身**上，它只证明"桩给出的表单/工具调用被产品链路正确消费"，**不证明模型服从率**；真模型的 E2E 维持本地手动跑。
 
-### 提交前敏感信息防护
+### 提交前门禁
 
-仓库内置 pre-commit 钩子，提交前扫描暂存区新增行，命中疑似密钥、本机绝对路径或个人用户名即阻断：
+仓库内置 pre-commit 钩子依次执行敏感信息扫描、D6 同步复核和统一开发规范审查，任一失败即阻断。统一规范审查覆盖全部暂存变更，必须在 `docs/delivery/development-standards-review.json` 仅追加与最终指纹匹配的记录，且父 ledger 为当前 ledger 的严格前缀；缺少 Node 时该强制检查同样阻断。
 
 ```sh
 git config core.hooksPath scripts/githooks   # 仓库根执行一次
+node scripts/ci/check-d6-sync.mjs --standards
 ```
 
-规则、豁免清单、逃生口与全历史扫描见 `scripts/githooks/README.md`。
+规范与逐 hunk 记录格式见 `docs/delivery/development-standards.md`；敏感信息规则、D6 口径与全历史扫描见 `scripts/githooks/README.md`。不得绕过提交门禁。
 
 ---
 

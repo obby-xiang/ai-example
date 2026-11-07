@@ -418,8 +418,9 @@ jobs:
           done
 
   # ============================================================
-  # 文档一致性门禁（DOC#5 / M2 排期条目 18；M2-T4 T4-7a-2 接线）
+  # 文档一致性 + 统一开发规范审查记录门禁（DOC#5 / M2 排期条目 18；M2-T4 T4-7a-2 接线）
   #   **本 job = 阻断门禁**（含工作树口径的阻断面：断言 ⑤ 命名纪律按 `git ls-files` 全量逐文件；
+  #   统一规范按 base..head 逐提交核对全变更指纹和新增审查记录，不把历史确认或未执行检查当成通过。
   #   断言 ① 盘符路径只覆盖 4 个导航/口径入口文档 —— 与"历史 blob 扫描"的报告制口径相区分，见 scan-history job）。
   #   scripts/ci/check-docs.mjs 的 6 条断言：① 导航文档无盘符路径 ② 技术栈版本与
   #   pom.xml/package.json 一致 ③ README 引用文件存在 ④ 端口表与 application.yml/
@@ -428,11 +429,14 @@ jobs:
   #   断言 ①②③④ 只扫导航/口径文档（4 个，见脚本内 NAV_DOCS 清单），明确排除 docs/evidence/ 历史证据文档（裁决 7）。
   # ============================================================
   docs:
-    name: 文档一致性门禁（check-docs）｜阻断
+    name: 文档与统一开发规范门禁｜阻断
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          # 统一规范门禁要逐提交读取 base..head 及其父提交记录。
+          fetch-depth: 0
 
       - name: 安装 Node 22
         uses: actions/setup-node@v5
@@ -441,6 +445,30 @@ jobs:
 
       - name: 文档一致性门禁（6 条断言）
         run: node scripts/ci/check-docs.mjs
+
+      - name: 统一开发规范逐提交审查记录门禁
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # PR base.sha 可能只是目标分支最新提交，必须先求实际分叉点。
+            base=$(git merge-base "$PR_BASE_SHA" "$PR_HEAD_SHA")
+            head="$PR_HEAD_SHA"
+          else
+            base="$PUSH_BEFORE_SHA"
+            head="$HEAD_SHA"
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            echo "::error::统一规范门禁缺少可靠 base（空或全零 before），按失败关闭；请提供可验证的新历史基准。"
+            exit 2
+          fi
+          # PR 必须检查真实 head，不检查无审查记录的自动 merge 提交。
+          node scripts/ci/check-d6-sync.mjs --standards --base "$base" --head "$head"
 
       # i18n S7-③（批3二）：残留中文扫描。**报告制**（脚本默认不阻断）——
       # 现网仍有上千行（语言包未覆盖的业务/模型侧文案）⇒ 按 L-49 口径「只能最后一个开闸」。
@@ -600,7 +628,7 @@ jobs:
           judge backend "$BACKEND_RESULT" "${BACKEND_NEEDED:-}" "变更集命中后端面，后端全量单测"
           judge frontend "$FRONTEND_RESULT" "${FRONTEND_NEEDED:-}" "变更集命中前端面，前端全量门禁"
           judge e2e "$E2E_RESULT" "${E2E_NEEDED:-}" "变更集命中 e2e 面，E2E 全流程"
-          judge docs "$DOCS_RESULT" "always" "无条件执行：文档一致性门禁（阻断）"
+          judge docs "$DOCS_RESULT" "always" "无条件执行：文档一致性 + 统一开发规范逐提交审查记录门禁（阻断）"
           judge scan-history "$SCAN_RESULT" "always" "无条件执行：全历史脱敏扫描（报告制，历史命中不使 job 红）"
           judge redis-guard "$REDIS_GUARD_RESULT" "always" "无条件执行：Redis Cluster 安全守卫（规则自证 + backend/src/main 扫描）"
 

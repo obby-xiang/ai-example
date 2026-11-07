@@ -1,10 +1,10 @@
-# Git 钩子：敏感信息扫描 + D6 同步复核
+# Git 钩子：敏感信息扫描 + D6 同步复核 + 统一开发规范审查
 
-本目录提供三条检查，敏感信息的两条共用 `scan-lib.sh`，避免规则漂移：
+`pre-commit` 提供三道阻断检查，另以 `scan-history.sh` 复查历史；敏感信息的两个入口共用 `scan-lib.sh`，D6 与统一规范共用 `check-d6-sync.mjs` 的读取、指纹和判定基础函数，避免规则漂移：
 
 | 脚本 | 作用 | 退出码 |
 | --- | --- | --- |
-| `pre-commit` | 提交时先扫**暂存区新增/修改的行**（敏感信息），再跑 **D6 同步复核**（`scripts/ci/check-d6-sync.mjs`）；任一不过即阻断 | 0 通过 / 1 有命中或确认缺失 |
+| `pre-commit` | 依次扫描**暂存区新增/修改的行**（敏感信息）、跑 **D6 同步复核**和**统一开发规范审查**；任一不过即阻断 | 0 通过 / 1 有命中、确认缺失或环境失败 |
 | `scan-history.sh` | 用 `git rev-list --objects --all` 遍历**全部历史 blob** 复查 | 0 无命中 / 1 有命中 / 2 参数或环境错误 |
 
 ## 1. 启用
@@ -59,8 +59,8 @@ git commit --allow-secrets -m "..."
 ```
 
 - 放行只对本次提交生效，不会修改仓库配置；
-- `AI_SECRETS_ALLOW=1` 与 `--allow-secrets` **只对敏感信息扫描生效**，不影响下面的 D6 同步复核；
-- `git commit --no-verify` 会跳过本仓库全部钩子（两道检查同时失效），慎用；若用了，建议随后补跑 `scan-history.sh`，并自行核对 D6 是否需更新。
+- `AI_SECRETS_ALLOW=1` 与 `--allow-secrets` **只对敏感信息扫描生效**，不影响下面的 D6 同步复核和统一开发规范审查；
+- 不得绕过本仓库钩子；三道检查缺一即不能形成合规提交。
 
 ## 4.1 D6 同步复核（pre-commit 第二道）
 
@@ -127,10 +127,44 @@ node --test --test-name-pattern="d6-review.json 非法 JSON 返回 rc2" scripts/
 
 ### 4.1.4 跳过与局限（必须知道）
 
-- **没装 Node.js**：pre-commit **明确告警并跳过**第二道（输出 `WARN [pre-commit] done: secret scan=passed, D6 sync review=skipped (...)`），提交不会被拦——此时靠人工复核 / CI；
-- **`git commit --no-verify`**：两道检查一起失效，且不留任何留痕。不要把它当作常规手段；
-- **没有 CI 兜底门禁**：本批只落了 pre-commit（CI 侧未新增 job），因此在未启用 `core.hooksPath` 的克隆或图形客户端里，第二道不会执行；
+- **没装 Node.js**：单看第二道，pre-commit 会明确告警并跳过 D6；但第三道统一规范检查会失败关闭，因此整个提交仍被阻断。
+- **CI 范围**：本次接入的 CI 逐提交门禁用于统一开发规范，不改变 D6 原有的 block/warn 分类和本地复核口径。
 - **不判断正确性**：门禁无法验证 `reason` 真实、也无法验证 D6 写对了。它是"提醒 + 留痕"，不是语义证明。
+
+## 4.2 统一开发规范审查（pre-commit 第三道，强制）
+
+规范正文见 `docs/delivery/development-standards.md`，记录见 `docs/delivery/development-standards-review.json`。它覆盖当前暂存区的**全部**生产、测试、压测、脚本、CI 和文档变更，不复用 D6 的 block-only 范围或文档分类。
+
+- 每条记录必须有 `fingerprint`、`status`、具体 `reason`、带时区的 `reviewedAt`、`reviewer`、`specChanges`、逐文件 `files` 和七域 `domains`。`specChanges` 每项为 `{change, reason, impact}`，三个字段都必填且具体。
+- standards 指纹版本为 `development-standards/v2`：排序后的 JSON 元组 `[status, mode, fromPath, path, blob]`，Git `-z` 原始路径，禁用 rename detection；D6 v1 算法不变。ledger 排除全链路使用原始 `String` 严格相等，文档白名单不把反斜杠当目录分隔。
+- 父 ledger 的 `reviews` 必须是当前 ledger 的严格前缀，历史不得删改或重排。父 ledger 中已有 fingerprint 不得再次追加，修改其他字段也不能复用。
+- 当前和父 ledger 的 `reviews` 缺失或非数组均返回 `rc=2`。父 ledger 只有经 Git 树确认不存在才视为空历史；pre-commit 的 unborn HEAD 单独视为空父历史，其他 Git/JSON/版本错误失败关闭。
+- `status=reviewed` 适用于代码或混合变更；符合独立白名单的纯文档可用 `not-affected`。docs 下 JS/JSON/HTML 不自动算文档，AI block 内纯文本文档可按白名单处理。
+- 所有理由拒绝空值、整体尖括号占位、已知模板原文、泛化子句及其连接组合；包含文件、hunk 或具体技术对象的说明不按组合规则误伤。`checked` 只表示人工逐 hunk 审查，不表示测试、真实接口或真实 Redis 已通过；结构校验不证明语义真实。
+
+```sh
+# 当前暂存区；pre-commit 自动执行同一命令
+node scripts/ci/check-d6-sync.mjs --standards
+
+# CI/本地范围复核：验证所有引入提交及其父记录
+node scripts/ci/check-d6-sync.mjs --standards --base <base> --head <head>
+# 只复核一个提交
+node scripts/ci/check-d6-sync.mjs --standards --head <head>
+```
+
+CI 在 `.github/workflows/ci.yml` 的 `docs` job 中执行范围模式：push 使用 `before..head` 并严格要求 before 是 head 祖先；PR 先执行 `git merge-base PR_BASE_SHA PR_HEAD_SHA` 求实际分叉点再检查，checkout 必须 `fetch-depth: 0`。全零 before 和异常空范围失败关闭，仅同一 commit 允许空范围。
+
+两父 merge 使用 `git merge-tree --write-tree parent1 parent2` 计算自动合并预期 tree；merge tree 等于任一父 tree 仍可豁免，仅 merge-tree 状态 0 且 merge tree 等于预期 tree 时才也可豁免，状态 1 必须追加 merge 自身记录。非法 tree 输出、其他退出状态和 octopus 继续失败关闭，所有引入提交仍逐笔验证。需要 merge 记录时以第一父 diff 和 ledger 为基线，不要求修改分支保护。
+
+| 退出码 | 含义 | 处理 |
+| --- | --- | --- |
+| 0 | 无变更、合法空范围，或所有需记录的提交均有有效追加记录 | 继续提交/CI |
+| 1 | 记录未同批暂存、指纹过期、复用历史、非 append-only、字段/文件/规范域缺失或理由不具体 | 逐 hunk 复审并追加完整记录 |
+| 2 | 当前或父 JSON、版本、参数、祖先关系、仓库或提交读取错误 | 失败关闭，先修输入或环境 |
+
+第三道没有敏感信息逃生口；缺少 Node 或检查脚本同样阻断，不得绕过。门禁只保证书面记录的结构、指纹、新鲜度和 append-only，不替代独立语义审查和真实运行验证。
+
+本轮新增的 merge-tree、octopus、PR merge-base、append、组合套话、原始路径、白名单、父读取、reviews 结构和 unborn HEAD 场景只做了独立静态复核，全部 `NOT_RUN`；未修改测试代码，未执行测试、构建、git、pre-commit 或 CI。
 
 ## 5. 全历史扫描
 
@@ -161,7 +195,7 @@ scripts/githooks/scan-history.sh --max-size 512   # 跳过 >512KB 的 blob（默
 - 环境变量写法：Git Bash 用 `AI_SECRETS_ALLOW=1 git commit ...`；PowerShell 用 `$env:AI_SECRETS_ALLOW=1; git commit ...`（仅当前会话有效）；
 - `user.name` 取的是本地配置；一台机器上有多个身份时，确认取到的是需要保护的那个用户名（可用 `git config --show-origin user.name` 核对）；
 - 路径规则同时覆盖盘符写法与 Git Bash 挂载写法，因此同一台机器上两种写法都拦得住；
-- IDE/图形客户端可能自动附加 `--no-verify`，不要依赖钩子作为唯一防线；CI 侧再跑一次 `scan-history.sh` 兜底——**已落地**：`.github/workflows/ci.yml` 的 `scan-history` job（`--files-only`、10 分钟上限、`fetch-depth: 0`）。**口径（裁决①，2026-10-09）：该 job 为报告制非阻断** —— 历史 blob 命中（退出码 1）照常全量输出 + 上传 artifact + job summary 标注，但不使 CI 红（唯一手段是历史改写，需用户专项授权）；仅"扫描器未完成"（退出码 2，环境/参数错误）为红。**工作树口径的阻断面不在该 job**：`pre-commit`（本机暂存区）与 CI 的 `docs` job（`check-docs.mjs` 断言 ⑤ 按 `git ls-files` 全量；断言 ① 只覆盖 4 个导航/口径入口文档）继续阻断。
+- IDE/图形客户端可能绕过本地钩子，不要依赖钩子作为唯一防线；CI 侧再跑一次 `scan-history.sh` 兜底——**已落地**：`.github/workflows/ci.yml` 的 `scan-history` job（`--files-only`、10 分钟上限、`fetch-depth: 0`）。**口径（裁决①，2026-10-09）：该 job 为报告制非阻断** —— 历史 blob 命中（退出码 1）照常全量输出 + 上传 artifact + job summary 标注，但不使 CI 红（唯一手段是历史改写，需用户专项授权）；仅"扫描器未完成"（退出码 2，环境/参数错误）为红。**工作树口径的阻断面不在该 job**：`pre-commit`（本机暂存区）与 CI 的 `docs` job（`check-docs.mjs` 断言 ⑤ 按 `git ls-files` 全量；断言 ① 只覆盖 4 个导航/口径入口文档）继续阻断。
 
 ## 7. 维护与自测
 
@@ -189,4 +223,5 @@ GIT_INDEX_FILE=$IDX node scripts/ci/check-d6-sync.mjs   # expected: FAIL (record
 
   按输出模板把记录写进 `docs/delivery/d6-review.json` 并用 `git update-index --add --cacheinfo` 放进同一临时索引，再跑一次期望 rc 0；把该 JSON 破坏成非法 JSON 期望 rc 2；
 - 改 D6 门禁的分类表（`BLOCK_RULES` / `WARN_RULES`）或指纹算法：**必须同时升 `scripts/ci/check-d6-sync.mjs` 的 `RULE_VERSION`**（否则旧确认不会失效），并**逐条**跑 `scripts/ci/check-d6-sync.test.mjs` 的用例；
+- 改统一规范域、记录结构或全变更指纹算法：同步规范文档并升 `STANDARDS_RULE_VERSION`，不得修改或删除既有审查记录来制造通过；按项目授权执行相应验证，未执行项保持 `NOT_RUN`；
 - 清理：删除临时索引与测试文件即可，仓库索引与工作树不受影响。

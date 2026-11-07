@@ -11,9 +11,10 @@
 | `scripts/ci/forbid-redis-cluster-unsafe.mjs` | **Cluster / 5.0 兼容面 grep 守卫**：禁多库、禁 `KEYS`/`FLUSHDB`/跨键 `SCAN`、禁 6.2+ 的排他流 ID。`--self-check` 自证规则（命中/不命中/命中数），CI 两步均跑 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单）+ `usageShapes` + `faults.switches`（§4.6 桩开关清单的唯一取数点），与 `GenerativeFormRules` 白名单**事实源逐值对账** |
-| `scripts/githooks/` | 提交前两道检查：敏感信息扫描（DC-08）+ **D6 同步复核**，详见 `scripts/githooks/README.md` |
-| `scripts/ci/check-d6-sync.mjs` | **D6 同步复核门禁**：暂存 AI 对话核心文件（block 面）时要求同批新增 `docs/delivery/d6-review.json` 有效确认；测试/模拟设施只告警，docs/infra/业务文件不阻断。指纹 = 规则版本 + 暂存 block 文件的状态/blob/路径 |
+| `scripts/githooks/` | 提交前三道检查：敏感信息扫描（DC-08）+ **D6 同步复核** + **统一开发规范审查**，详见 `scripts/githooks/README.md` |
+| `scripts/ci/check-d6-sync.mjs` | **D6 与统一开发规范门禁**：默认模式复核 AI block 面并要求 `d6-review.json`；`--standards` 覆盖全部暂存变更并要求 `development-standards-review.json`，CI 可逐提交检查 |
 | `docs/delivery/d6-review.json` | D6 复核确认记录（`synced` / `not-affected`，每条带指纹）。门禁阻断时会打印可直接粘贴的模板；该文件自身不计入指纹 |
+| `docs/delivery/development-standards-review.json` | 统一开发规范逐 hunk 审查记录，含全变更 v2 指纹、逐文件与七域理由、三字段 `specChanges`；父 ledger 必须严格 append-only |
 
 ---
 
@@ -347,4 +348,14 @@ node --test --test-name-pattern="synced 确认且同批含 D6 时通过" scripts
 node --test --test-name-pattern="指纹变化使旧确认失效" scripts/ci/check-d6-sync.test.mjs
 ```
 
-**局限（如实）**：① 未安装 Node.js 时 pre-commit **明确告警并跳过**这一道（提交不被拦）；② 本批**没有**新增 CI job，未启用 `core.hooksPath` 的克隆、图形客户端与 `--no-verify` 都不会执行；③ 门禁只证明"有人留了确认"，不证明"确认是对的"。改分类表或指纹算法必须升 `RULE_VERSION`（`scripts/ci/check-d6-sync.mjs`），否则旧确认不会失效。
+**局限（如实）**：① 单看 D6，未安装 Node.js 时 pre-commit 会明确告警并跳过；但第三道统一规范检查会失败关闭，整个提交仍被阻断；② D6 没有专属 CI job，未启用 `core.hooksPath` 的克隆或绕过本地钩子的客户端不会执行它，不得以此规避；③ 门禁只证明"有人留了确认"，不证明"确认是对的"。改 D6 分类表或指纹算法必须升 `RULE_VERSION`（`scripts/ci/check-d6-sync.mjs`），否则旧确认不会失效。
+
+
+### 6.1 统一开发规范审查入口
+
+```sh
+node scripts/ci/check-d6-sync.mjs --standards
+node scripts/ci/check-d6-sync.mjs --standards --base <base> --head <head>
+```
+
+规范、七域记录格式、merge/PR 范围和 append-only 约束见 `docs/delivery/development-standards.md` 与 `scripts/githooks/README.md` §4.2。结构校验不证明语义真实；本轮新增场景均为静态复核 `NOT_RUN`。

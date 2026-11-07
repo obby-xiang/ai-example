@@ -1,6 +1,6 @@
 #!/bin/sh
 # =====================================================================
-# pre-commit 提交前门禁（两道，任一不过即阻止提交）
+# pre-commit 提交前门禁（三道，任一不过即阻止提交）
 #
 #   ① 敏感信息扫描（阻断式，规则在 scan-lib.sh）
 #      覆盖范围：本次暂存区（git diff --cached）新增/修改的行，三条规则：
@@ -8,7 +8,7 @@
 #        PATH    本机绝对路径（盘符路径、Git Bash 挂载路径）
 #        USER    个人用户名（动态取 git config user.name，不写死）
 #      误报放行：AI_SECRETS_ALLOW=1 git commit ...  —— 降级为警告并在输出中明示
-#      （该逃生口**只**对敏感信息扫描生效，不影响下一条）
+#      （该逃生口**只**对敏感信息扫描生效，不影响后两道）
 #
 #   ② D6 同步复核（scripts/ci/check-d6-sync.mjs）
 #      本次暂存 AI 对话核心文件（block 面：backend ai/**、common/id、common/sse、
@@ -20,8 +20,13 @@
 #      未安装 node 时**明确告警并跳过**（不静默）；本门禁只证明人工确认存在，
 #      不证明 D6 内容正确，CI / 人工复核仍是必要补充。
 #
+#   ③ 统一开发规范审查（同一脚本的 --standards 模式）
+#      全部暂存变更都必须在 docs/delivery/development-standards-review.json
+#      仅追加有效记录；覆盖每个文件、七个规范域、具体理由、规格变化与证据边界。
+#      缺记录、指纹过期、缺 Node/脚本或执行异常一律阻断，不允许逃生口。
+#
 #   启用方式（仓库根执行一次）：git config core.hooksPath scripts/githooks
-#   完全跳过：git commit --no-verify —— 慎用：①② 同时失效且不留痕
+#   不得绕过本钩子：三道检查缺一即不能形成合规提交
 #
 #   所有扫描规则字面量均在 scan-lib.sh 中拼接构造，避免扫描器自我误报（DC-08）。
 # =====================================================================
@@ -85,8 +90,7 @@ secret_scan() {
   echo "  1) reference keys/tokens through environment variables or untracked local config; never commit them;" >&2
   echo "  2) replace local absolute paths in docs/evidence with placeholders (DC-08; angle-bracket placeholders are never flagged);" >&2
   echo "  3) keep personal user names out of committed content;" >&2
-  echo "  4) for a confirmed false positive, allow this commit temporarily: AI_SECRETS_ALLOW=1 git commit ... (the waiver is printed);" >&2
-  echo "  5) to skip entirely: git commit --no-verify (use with care)." >&2
+  echo "  4) for a confirmed false positive, allow this commit temporarily: AI_SECRETS_ALLOW=1 git commit ... (the waiver is printed)." >&2
   return 1
 }
 
@@ -138,7 +142,51 @@ d6_sync_check() {
       echo "" >&2
       echo "FAIL [pre-commit] D6 sync review script exited abnormally (rc=$rc), treated as a failure" >&2
       echo "   First make sure docs/delivery/d6-review.json is valid JSON (version: 1, reviews array), then retry." >&2
-      echo "   Do not bypass with --no-verify: that also skips the secret scan." >&2
+      echo "   Do not bypass the hook: that would also skip the secret scan and standards review." >&2
+      return 1
+      ;;
+  esac
+}
+
+# ── ③ 统一开发规范逐 hunk 审查（强制，缺少 Node/脚本也阻断）────────────────
+standards_review_check() {
+  ci_script=""
+  if [ -n "$top" ] && [ -f "$top/scripts/ci/check-d6-sync.mjs" ]; then
+    ci_script="$top/scripts/ci/check-d6-sync.mjs"
+  elif [ -n "$hook_dir" ] && [ -f "$hook_dir/../ci/check-d6-sync.mjs" ]; then
+    ci_script="$hook_dir/../ci/check-d6-sync.mjs"
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "" >&2
+    echo "FAIL [pre-commit] node not found; the mandatory development standards review cannot run" >&2
+    echo "   Install Node.js, add a fresh docs/delivery/development-standards-review.json record, and retry." >&2
+    return 1
+  fi
+  if [ -z "$ci_script" ]; then
+    echo "" >&2
+    echo "FAIL [pre-commit] scripts/ci/check-d6-sync.mjs not found; the mandatory standards review cannot run" >&2
+    return 1
+  fi
+
+  if [ -n "$top" ]; then
+    node "$ci_script" --standards --root "$top"
+  else
+    node "$ci_script" --standards
+  fi
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1)
+      echo "" >&2
+      echo "FAIL [pre-commit] development standards review did not pass, commit blocked" >&2
+      echo "   Review every staged hunk and add a fresh fingerprint-matched record with all files and seven domains." >&2
+      return 1
+      ;;
+    *)
+      echo "" >&2
+      echo "FAIL [pre-commit] development standards review exited abnormally (rc=$rc), treated as a failure" >&2
+      echo "   Fix docs/delivery/development-standards-review.json and the environment; do not bypass the hook." >&2
       return 1
       ;;
   esac
@@ -148,11 +196,13 @@ secret_status=0
 secret_skipped=0
 d6_status=0
 d6_skipped=0
+standards_status=0
 
 secret_scan || secret_status=$?
 d6_sync_check || d6_status=$?
+standards_review_check || standards_status=$?
 
-if [ "$secret_status" -ne 0 ] || [ "$d6_status" -ne 0 ]; then
+if [ "$secret_status" -ne 0 ] || [ "$d6_status" -ne 0 ] || [ "$standards_status" -ne 0 ]; then
   exit 1
 fi
 
@@ -160,9 +210,9 @@ echo ""
 if [ "$secret_skipped" -eq 1 ] || [ "$d6_skipped" -eq 1 ]; then
   if [ "$secret_skipped" -eq 1 ]; then secret_text="skipped"; else secret_text="passed"; fi
   if [ "$d6_skipped" -eq 1 ]; then d6_text="skipped"; else d6_text="passed"; fi
-  echo "WARN [pre-commit] done: secret scan=$secret_text, D6 sync review=$d6_text (skipped checks are not passes; cover them by hand or in CI)"
+  echo "WARN [pre-commit] done: secret scan=$secret_text, D6 sync review=$d6_text, standards review=passed (skips are not passes)"
 else
-  echo "OK [pre-commit] both checks passed (secret scan + D6 sync review)"
+  echo "OK [pre-commit] all three checks passed (secret scan + D6 sync review + development standards review)"
 fi
 
 if [ -f "$hook_dir/scan-lib.sh" ]; then
