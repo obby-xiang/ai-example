@@ -83,7 +83,7 @@ public class GlmSeedService {
     }
 
     private void seedData(DefSpec spec) throws Exception {
-        List<String> keyFields = spec.fields().stream().filter(FieldSpec::key).map(FieldSpec::code).toList();
+        List<String> keyFields = spec.fields().stream().filter(FieldSpec::isKey).map(FieldSpec::code).toList();
         List<String> scopeCodes = scopeCodes(spec.level());
         int written = 0;
         if (scopeCodes.isEmpty()) {
@@ -196,7 +196,9 @@ public class GlmSeedService {
         return def;
     }
 
-    /** glm 字段类型 → 基座 FieldType（基座无 SCOPE 类型，SCOPE 落为范围载体字符串字段）。 */
+    /**
+     * glm 字段类型 → 基座 FieldType（基座无 SCOPE 类型，SCOPE 落为范围载体字符串字段）。
+     */
     private ConfigField.FieldType baseType(GlmType type) {
         return switch (type) {
             case TEXT, SCOPE -> ConfigField.FieldType.STRING;
@@ -211,52 +213,52 @@ public class GlmSeedService {
 
     private List<DefSpec> specs() {
         return List.of(
-            new DefSpec("SYS_PARAM", "系统参数配置", ConfigDefinition.ConfigLevel.GLOBAL, "平台级全局参数", 100, 40, List.of(
-                f("paramKey", "参数名", GlmType.TEXT, true, true, null, null, null),
-                f("paramValue", "参数值", GlmType.TEXT, true, false, null, null, null),
-                f("paramType", "参数类型", GlmType.ENUM, true, false, List.of("STRING", "NUMBER", "BOOLEAN"), null, null),
-                f("description", "参数说明", GlmType.TEXT, false, false, null, null, null),
-                f("editable", "是否可在线修改", GlmType.BOOL, true, false, null, null, null))),
-            new DefSpec("METRIC_DICT", "指标字典", ConfigDefinition.ConfigLevel.GLOBAL, "监控指标定义", 101, 30, List.of(
-                f("metricCode", "指标编码", GlmType.TEXT, true, true, null, null, null),
-                f("metricName", "指标名称", GlmType.TEXT, true, false, null, null, null),
-                f("metricUnit", "计量单位", GlmType.ENUM, true, false, List.of("百分比", "毫秒", "MB", "次"), null, null),
-                f("alarmEnabled", "是否启用告警", GlmType.BOOL, true, false, null, null, null))),
-            new DefSpec("ALARM_THRESHOLD", "告警阈值配置", ConfigDefinition.ConfigLevel.GLOBAL,
-                "按指标配置告警阈值（依赖指标字典）", 102, 120, List.of(
-                f("thresholdName", "阈值名称", GlmType.TEXT, true, true, null, null, null),
-                f("metricCode", "指标编码", GlmType.TEXT, true, false, null, "METRIC_DICT", "metricCode"),
-                f("warnThreshold", "预警阈值", GlmType.DECIMAL, true, false, null, null, null),
-                f("criticalThreshold", "严重阈值", GlmType.DECIMAL, true, false, null, null, null),
-                f("effectiveDate", "生效日期", GlmType.DATE, true, false, null, null, null))),
-            new DefSpec("ROLE_DICT", "成员角色字典", ConfigDefinition.ConfigLevel.GLOBAL, "项目成员可分配的角色", 103, 8, List.of(
-                f("roleCode", "角色编码", GlmType.TEXT, true, true, null, null, null),
-                f("roleName", "角色名称", GlmType.TEXT, true, false, null, null, null),
-                f("permissionLevel", "权限级别", GlmType.INT, true, false, null, null, null),
-                f("builtin", "是否内置角色", GlmType.BOOL, true, false, null, null, null))),
-            new DefSpec("REGION_NETWORK", "地区网络配置", ConfigDefinition.ConfigLevel.REGION, "各地区网络带宽与出口", 104, 3, List.of(
-                f("regionCode", "适用地区", GlmType.SCOPE, true, true, null, null, null),
-                f("bandwidthMbps", "带宽(Mbps)", GlmType.INT, true, true, null, null, null),
-                f("gateway", "出口网关", GlmType.TEXT, true, false, null, null, null),
-                f("redundancy", "是否双链路", GlmType.BOOL, true, false, null, null, null))),
-            new DefSpec("REGION_TARIFF", "地区资费配置", ConfigDefinition.ConfigLevel.REGION, "各地区资费标准", 105, 5, List.of(
-                f("regionCode", "适用地区", GlmType.SCOPE, true, true, null, null, null),
-                f("tariffName", "资费名称", GlmType.TEXT, true, true, null, null, null),
-                f("monthlyFee", "月费(元)", GlmType.DECIMAL, true, false, null, null, null),
-                f("billingCycle", "计费周期", GlmType.ENUM, true, false, List.of("月付", "季付", "年付"), null, null))),
-            new DefSpec("PROJECT_MEMBER", "项目成员配置", ConfigDefinition.ConfigLevel.PROJECT,
-                "项目成员及角色（依赖成员角色字典）", 106, 16, List.of(
-                f("projectCode", "适用项目", GlmType.SCOPE, true, true, null, null, null),
-                f("memberName", "成员姓名", GlmType.TEXT, true, true, null, null, null),
-                f("memberEmail", "成员邮箱", GlmType.TEXT, true, false, null, null, null),
-                f("roleCode", "角色编码", GlmType.TEXT, true, false, null, "ROLE_DICT", "roleCode"),
-                f("joinDate", "加入日期", GlmType.DATE, true, false, null, null, null))),
-            new DefSpec("PROJECT_ENV", "项目环境配置", ConfigDefinition.ConfigLevel.PROJECT, "项目各环境资源规格", 107, 4, List.of(
-                f("projectCode", "适用项目", GlmType.SCOPE, true, true, null, null, null),
-                f("envName", "环境名称", GlmType.ENUM, true, true, List.of("开发", "测试", "预发", "生产"), null, null),
-                f("cpuCores", "CPU核数", GlmType.INT, true, false, null, null, null),
-                f("memoryGb", "内存(GB)", GlmType.INT, true, false, null, null, null),
-                f("enabled", "是否启用", GlmType.BOOL, true, false, null, null, null)))
+                new DefSpec("SYS_PARAM", "系统参数配置", ConfigDefinition.ConfigLevel.GLOBAL, "平台级全局参数", 100, 40, List.of(
+                        f("paramKey", "参数名", GlmType.TEXT, true, true, null, null, null),
+                        f("paramValue", "参数值", GlmType.TEXT, true, false, null, null, null),
+                        f("paramType", "参数类型", GlmType.ENUM, true, false, List.of("STRING", "NUMBER", "BOOLEAN"), null, null),
+                        f("description", "参数说明", GlmType.TEXT, false, false, null, null, null),
+                        f("editable", "是否可在线修改", GlmType.BOOL, true, false, null, null, null))),
+                new DefSpec("METRIC_DICT", "指标字典", ConfigDefinition.ConfigLevel.GLOBAL, "监控指标定义", 101, 30, List.of(
+                        f("metricCode", "指标编码", GlmType.TEXT, true, true, null, null, null),
+                        f("metricName", "指标名称", GlmType.TEXT, true, false, null, null, null),
+                        f("metricUnit", "计量单位", GlmType.ENUM, true, false, List.of("百分比", "毫秒", "MB", "次"), null, null),
+                        f("alarmEnabled", "是否启用告警", GlmType.BOOL, true, false, null, null, null))),
+                new DefSpec("ALARM_THRESHOLD", "告警阈值配置", ConfigDefinition.ConfigLevel.GLOBAL,
+                        "按指标配置告警阈值（依赖指标字典）", 102, 120, List.of(
+                        f("thresholdName", "阈值名称", GlmType.TEXT, true, true, null, null, null),
+                        f("metricCode", "指标编码", GlmType.TEXT, true, false, null, "METRIC_DICT", "metricCode"),
+                        f("warnThreshold", "预警阈值", GlmType.DECIMAL, true, false, null, null, null),
+                        f("criticalThreshold", "严重阈值", GlmType.DECIMAL, true, false, null, null, null),
+                        f("effectiveDate", "生效日期", GlmType.DATE, true, false, null, null, null))),
+                new DefSpec("ROLE_DICT", "成员角色字典", ConfigDefinition.ConfigLevel.GLOBAL, "项目成员可分配的角色", 103, 8, List.of(
+                        f("roleCode", "角色编码", GlmType.TEXT, true, true, null, null, null),
+                        f("roleName", "角色名称", GlmType.TEXT, true, false, null, null, null),
+                        f("permissionLevel", "权限级别", GlmType.INT, true, false, null, null, null),
+                        f("builtin", "是否内置角色", GlmType.BOOL, true, false, null, null, null))),
+                new DefSpec("REGION_NETWORK", "地区网络配置", ConfigDefinition.ConfigLevel.REGION, "各地区网络带宽与出口", 104, 3, List.of(
+                        f("regionCode", "适用地区", GlmType.SCOPE, true, true, null, null, null),
+                        f("bandwidthMbps", "带宽(Mbps)", GlmType.INT, true, true, null, null, null),
+                        f("gateway", "出口网关", GlmType.TEXT, true, false, null, null, null),
+                        f("redundancy", "是否双链路", GlmType.BOOL, true, false, null, null, null))),
+                new DefSpec("REGION_TARIFF", "地区资费配置", ConfigDefinition.ConfigLevel.REGION, "各地区资费标准", 105, 5, List.of(
+                        f("regionCode", "适用地区", GlmType.SCOPE, true, true, null, null, null),
+                        f("tariffName", "资费名称", GlmType.TEXT, true, true, null, null, null),
+                        f("monthlyFee", "月费(元)", GlmType.DECIMAL, true, false, null, null, null),
+                        f("billingCycle", "计费周期", GlmType.ENUM, true, false, List.of("月付", "季付", "年付"), null, null))),
+                new DefSpec("PROJECT_MEMBER", "项目成员配置", ConfigDefinition.ConfigLevel.PROJECT,
+                        "项目成员及角色（依赖成员角色字典）", 106, 16, List.of(
+                        f("projectCode", "适用项目", GlmType.SCOPE, true, true, null, null, null),
+                        f("memberName", "成员姓名", GlmType.TEXT, true, true, null, null, null),
+                        f("memberEmail", "成员邮箱", GlmType.TEXT, true, false, null, null, null),
+                        f("roleCode", "角色编码", GlmType.TEXT, true, false, null, "ROLE_DICT", "roleCode"),
+                        f("joinDate", "加入日期", GlmType.DATE, true, false, null, null, null))),
+                new DefSpec("PROJECT_ENV", "项目环境配置", ConfigDefinition.ConfigLevel.PROJECT, "项目各环境资源规格", 107, 4, List.of(
+                        f("projectCode", "适用项目", GlmType.SCOPE, true, true, null, null, null),
+                        f("envName", "环境名称", GlmType.ENUM, true, true, List.of("开发", "测试", "预发", "生产"), null, null),
+                        f("cpuCores", "CPU核数", GlmType.INT, true, false, null, null, null),
+                        f("memoryGb", "内存(GB)", GlmType.INT, true, false, null, null, null),
+                        f("enabled", "是否启用", GlmType.BOOL, true, false, null, null, null)))
         );
     }
 
@@ -265,14 +267,18 @@ public class GlmSeedService {
         return new FieldSpec(code, label, type, required, key, enumOptions, refDefCode, refFieldCode);
     }
 
-    /** glm ConfigField.dataType 的 7 种取值（glm 实体注释：TEXT/INT/DECIMAL/DATE/BOOL/ENUM/SCOPE）。 */
-    private enum GlmType { TEXT, INT, DECIMAL, BOOL, DATE, ENUM, SCOPE }
+    /**
+     * glm ConfigField.dataType 的 7 种取值（glm 实体注释：TEXT/INT/DECIMAL/DATE/BOOL/ENUM/SCOPE）。
+     */
+    private enum GlmType {TEXT, INT, DECIMAL, BOOL, DATE, ENUM, SCOPE}
 
     private record FieldSpec(String code, String label, GlmType type, boolean isRequired, boolean isKey,
                              List<String> enumOptions, String refDefCode, String refFieldCode) {
     }
 
-    /** rowsPerScope：GLOBAL 定义即总行数；REGION/PROJECT 定义为每范围行数（glm 的每范围行密度）。 */
+    /**
+     * rowsPerScope：GLOBAL 定义即总行数；REGION/PROJECT 定义为每范围行数（glm 的每范围行密度）。
+     */
     private record DefSpec(String code, String name, ConfigDefinition.ConfigLevel level, String description,
                            int sortOrder, int rowsPerScope, List<FieldSpec> fields) {
     }

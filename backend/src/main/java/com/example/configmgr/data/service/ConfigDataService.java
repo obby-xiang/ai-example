@@ -2,6 +2,7 @@ package com.example.configmgr.data.service;
 
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
+import com.example.configmgr.common.LogThrottler;
 
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.entity.ConfigDataRow;
@@ -25,7 +26,15 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -52,12 +61,16 @@ public class ConfigDataService {
                 PageRequest.of(page, size));
     }
 
-    /** 与无条件导出一致：统计该定义的全部已发布行，不按独立范围参数收窄。 */
+    /**
+     * 与无条件导出一致：统计该定义的全部已发布行，不按独立范围参数收窄。
+     */
     public long count(String defCode, String scopeType, String scopeKey) {
         return dataRowRepository.countByDefCode(defCode);
     }
 
-    /** 条件命中的真实行数；与条件列表、导出作业共用 {@link ConditionEvaluator}。 */
+    /**
+     * 条件命中的真实行数；与条件列表、导出作业共用 {@link ConditionEvaluator}。
+     */
     public long countFiltered(String defCode, String scopeKey, QueryCondition condition) {
         return filterRows(defCode, scopeKey, condition).size();
     }
@@ -72,7 +85,7 @@ public class ConfigDataService {
      * 不再按 scopeType 收窄）；无条件时仍走 DB 分页并按 scopeType + scopeKey 收窄。
      */
     public Page<ConfigDataRow> findPagedFiltered(String defCode, String scopeKey, QueryCondition condition,
-                                                  int page, int size) {
+                                                 int page, int size) {
         List<ConfigDataRow> matched = filterRows(defCode, scopeKey, condition);
         PageRequest pageable = PageRequest.of(page, size);
         int from = (int) Math.min(pageable.getOffset(), matched.size());
@@ -95,21 +108,26 @@ public class ConfigDataService {
         try {
             cond = objectMapper.readValue(conditions, QueryCondition.class);
         } catch (Exception e) {
+            LogThrottler.warn(log, "ConfigDataService.invalidCondition", "Invalid condition JSON", e);
             throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "Invalid condition JSON", e);
         }
         ConditionEvaluator.validate(cond);
         return cond;
     }
 
-    /** 逐行求值：范围键收窄 + {@link ConditionEvaluator} 字段级条件（AND）。 */
+    /**
+     * 逐行求值：范围键收窄 + {@link ConditionEvaluator} 字段级条件（AND）。
+     */
     private List<ConfigDataRow> filterRows(String defCode, String scopeKey, QueryCondition cond) {
         return dataRowRepository.findByDefCodeOrderByRowKey(defCode).stream()
                 .filter(r -> StringUtils.isBlank(scopeKey) || scopeKey.equals(r.getScopeKey()))
                 .filter(r -> {
                     Map<String, Object> data;
                     try {
-                        data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
+                        data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {
+                        });
                     } catch (Exception e) {
+                        LogThrottler.warn(log, "ConfigDataService.invalidRow", "Stored row JSON is invalid; excluding row", e);
                         return false;
                     }
                     // 求值异常（如未登记的操作符）必须冒泡 → 400，不能被"行级兜底"吞成 0 行
@@ -120,7 +138,7 @@ public class ConfigDataService {
 
     @Transactional
     public ConfigDataRow save(String defCode, String scopeType, String scopeKey,
-                               String rowKey, Map<String, Object> data) throws Exception {
+                              String rowKey, Map<String, Object> data) throws Exception {
         String dataJson = objectMapper.writeValueAsString(data);
         Optional<ConfigDataRow> existing = dataRowRepository
                 .findRow(defCode, ObjectUtils.defaultIfNull(scopeType, "GLOBAL"), scopeKey, rowKey);
@@ -136,7 +154,7 @@ public class ConfigDataService {
 
     @Transactional
     public int batchSave(String defCode, String scopeType, String scopeKey,
-                          List<Map<String, Object>> rows, List<String> keyFields) throws Exception {
+                         List<Map<String, Object>> rows, List<String> keyFields) throws Exception {
         int count = 0;
         for (Map<String, Object> data : rows) {
             String rowKey = buildRowKey(data, keyFields);
@@ -147,13 +165,14 @@ public class ConfigDataService {
     }
 
     public Map<String, Object> parseRow(ConfigDataRow row) throws Exception {
-        return objectMapper.readValue(row.getDataJson(), new TypeReference<>() {});
+        return objectMapper.readValue(row.getDataJson(), new TypeReference<>() {
+        });
     }
 
     public static String buildRowKey(Map<String, Object> data, List<String> keyFields) {
         return keyFields.stream()
                 .map(k -> Objects.toString(data.get(k), ""))
-                .collect(java.util.stream.Collectors.joining("|"));
+                .collect(Collectors.joining("|"));
     }
 
     // ────────────── 发布路径（ADR-7 / Q14：行级 upsert + 范围差集删除）──────────────
@@ -219,6 +238,6 @@ public class ConfigDataService {
                 dataRowRepository.delete(row);
             }
         }
-        return protectedRows;
+        return protectedRows.isEmpty() ? List.of() : protectedRows;
     }
 }

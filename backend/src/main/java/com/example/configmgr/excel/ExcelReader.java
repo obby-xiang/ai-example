@@ -12,12 +12,20 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.DataFormatter;
+import org.apache.poi.ss.usermodel.FormulaEvaluator;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayInputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -76,7 +84,7 @@ public class ExcelReader {
                 }
             }
         }
-        return result;
+        return result.isEmpty() ? List.of() : result;
     }
 
     /**
@@ -118,15 +126,17 @@ public class ExcelReader {
         }
     }
 
-    /** {@code _meta} 的读取结果：def_code（可能缺失）+ 数据列映射。 */
+    /**
+     * {@code _meta} 的读取结果：def_code（可能缺失）+ 数据列映射。
+     */
     private record MetaSheet(List<String> fieldCodes, String defCode) {
     }
 
     private List<String> readHeaderRow(XSSFWorkbook wb, ConfigDefinition def) {
         Sheet dataSheet = findDataSheet(wb);
-        if (dataSheet == null) return null;
+        if (dataSheet == null) return List.of();
         Row header = dataSheet.getRow(0);
-        if (header == null) return null;
+        if (header == null) return List.of();
 
         // Build label -> code map
         Map<String, String> labelToCode = new HashMap<>();
@@ -141,7 +151,7 @@ public class ExcelReader {
             String label = fmt.formatCellValue(header.getCell(c)).replace("*", "").trim();
             codes.add(labelToCode.getOrDefault(label, "_unknown_" + c));
         }
-        return codes;
+        return codes.isEmpty() ? List.of() : codes;
     }
 
     private Sheet findDataSheet(XSSFWorkbook wb) {

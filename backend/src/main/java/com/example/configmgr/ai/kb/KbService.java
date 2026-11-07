@@ -42,6 +42,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -105,15 +106,21 @@ public class KbService {
 
     private static final String F_BODY = "body";
 
-    /** 字段权重（标题/章节/别名高于正文：定稿要求标题域加权）。 */
+    /**
+     * 字段权重（标题/章节/别名高于正文：定稿要求标题域加权）。
+     */
     private static final Map<String, Float> BOOSTS = Map.of(
             F_TITLE, 3.0f, F_SECTION, 2.0f, F_ALIASES, 4.0f, F_ALIASES_EN, 4.0f,
             F_TAGS, 1.0f, F_BODY, 1.0f);
 
-    /** 首屏正文长度（定稿：省略 section 时"目录 + 前 1200 字"）。 */
+    /**
+     * 首屏正文长度（定稿：省略 section 时"目录 + 前 1200 字"）。
+     */
     static final int FIRST_SCREEN_CHARS = 1200;
 
-    /** 一次检索内部多取的候选数（去重到文档级后仍够 top_k）。 */
+    /**
+     * 一次检索内部多取的候选数（去重到文档级后仍够 top_k）。
+     */
     private static final int SEARCH_OVERFETCH = 4;
 
     private final AiProperties properties;
@@ -137,7 +144,9 @@ public class KbService {
 
     private volatile Instant lastRefreshAt;
 
-    /** 最近一次成功构建的内容寻址语料版本（null = 尚未同步）。 */
+    /**
+     * 最近一次成功构建的内容寻址语料版本（null = 尚未同步）。
+     */
     private volatile String lastObservedVersion;
 
     /**
@@ -146,22 +155,32 @@ public class KbService {
      */
     static final int MAX_VERSION_REBUILD_ATTEMPTS = 3;
 
-    /** 连续失败满几次再打一条 WARN，其余失败不重复记录。 */
+    /**
+     * 连续失败满几次再打一条 WARN，其余失败不重复记录。
+     */
     private static final int FAILURE_WARN_EVERY = 4;
 
     // 下面三个字段只在 kb-refresh 单线程（pollVersionQuietly）里读写，故不加同步；
     // 与 refreshNow（管理端点线程也会调）共享的只有 lastError / consecutiveFailures。
 
-    /** 正在退避重试的缓存版本（null = 没有在重试）。 */
+    /**
+     * 正在退避重试的缓存版本（null = 没有在重试）。
+     */
     private String retryVersion;
 
-    /** 该版本已被自动重试失败了几次（0 = 尚未失败）。 */
+    /**
+     * 该版本已被自动重试失败了几次（0 = 尚未失败）。
+     */
     private int retryAttempts;
 
-    /** 下一次允许重试该版本的时刻（{@link System#nanoTime()} 基准：单调时钟，不受墙钟跳变影响）。 */
+    /**
+     * 下一次允许重试该版本的时刻（{@link System#nanoTime()} 基准：单调时钟，不受墙钟跳变影响）。
+     */
     private long retryNotBeforeNanos;
 
-    /** 连续刷新失败次数（WARN 节流用；任一成功路径清零）。管理端点线程也会调 refreshNow，故 volatile。 */
+    /**
+     * 连续刷新失败次数（WARN 节流用；任一成功路径清零）。管理端点线程也会调 refreshNow，故 volatile。
+     */
     private volatile int consecutiveFailures;
 
     private final ScheduledExecutorService scheduler = new BoundedScheduledExecutor(8, runnable -> {
@@ -218,8 +237,7 @@ public class KbService {
         }
         try {
             this.analyzer.close();
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             // 停机阶段继续释放其余资源。
         }
     }
@@ -227,14 +245,15 @@ public class KbService {
     private void refreshQuietly() {
         try {
             refreshNow();
-        }
-        catch (Throwable e) {
+        } catch (Throwable e) {
             // doRefresh 已兜住业务失败；这里只兜"兜底逻辑自身"（绝不让定时线程死亡）
             log.warn("KB scheduled refresh threw unexpectedly (old index kept)", e);
         }
     }
 
-    /** 其它实例发布新 corpus version 后，从同一缓存清单重建；只把成功构建的版本记为已见。 */
+    /**
+     * 其它实例发布新 corpus version 后，从同一缓存清单重建；只把成功构建的版本记为已见。
+     */
     private void pollVersionQuietly() {
         if (!(this.source instanceof CachedKbSource cached)) {
             return;
@@ -265,12 +284,14 @@ public class KbService {
         this.retryNotBeforeNanos = System.nanoTime() + backoffMillis(this.retryAttempts) * 1_000_000L;
         if (this.retryAttempts >= MAX_VERSION_REBUILD_ATTEMPTS) {
             log.warn("KB version {} failed to rebuild {} times in a row; auto-retry paused "
-                    + "(old index kept, next attempt via scheduled refresh every {} or a new version)",
+                            + "(old index kept, next attempt via scheduled refresh every {} or a new version)",
                     version, this.retryAttempts, this.properties.getKb().getRefreshInterval());
         }
     }
 
-    /** 第 {@code attempt} 次失败后的退避：{@code poll × attempt}，封顶定时刷新间隔（都用既有配置口径）。 */
+    /**
+     * 第 {@code attempt} 次失败后的退避：{@code poll × attempt}，封顶定时刷新间隔（都用既有配置口径）。
+     */
     private long backoffMillis(int attempt) {
         long poll = Math.max(1L, this.properties.getKb().getCache().getVersionPollInterval().toMillis());
         long cap = Math.max(poll, this.properties.getKb().getRefreshInterval().toMillis());
@@ -309,8 +330,7 @@ public class KbService {
         final Future<Boolean> task;
         try {
             task = this.scheduler.submit(() -> isRefreshPerformed(force, budget));
-        }
-        catch (RejectedExecutionException e) {
+        } catch (RejectedExecutionException e) {
             this.reloadRunning.set(false);
             this.lastError = "KB refresh executor is stopped";
             return false;
@@ -319,32 +339,28 @@ public class KbService {
     }
 
     private boolean isRefreshAwaited(Future<Boolean> task, Duration refreshWaitBudget,
-            KbSource.RefreshBudget budget) {
+                                     KbSource.RefreshBudget budget) {
         try {
             return task.get(budget.remaining().toNanos(), TimeUnit.NANOSECONDS);
-        }
-        catch (TimeoutException e) {
+        } catch (TimeoutException e) {
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
             this.lastError = "KB reload wait exceeded budget " + refreshWaitBudget.toMillis()
                     + "ms; running I/O was not forcibly interrupted";
             return false;
-        }
-        catch (InterruptedException e) {
+        } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
             this.lastError = "KB reload wait was interrupted";
             return false;
-        }
-        catch (ExecutionException | CancellationException e) {
+        } catch (ExecutionException | CancellationException e) {
             this.lastError = "KB refresh failed; retry later";
             log.warn("KB refresh execution failed", ObjectUtils.defaultIfNull(e.getCause(), e));
             return false;
-        }
-        catch (KbSourceException e) {
+        } catch (KbSourceException e) {
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
@@ -387,18 +403,16 @@ public class KbService {
             budget.check();
             buildDir = newBuildDir(budget);
             return isSnapshotPublished(manifest, nextDocs, buildDir, fetched, budget);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             handleRefreshFailure(e, buildDir, budget);
             return false;
-        }
-        finally {
+        } finally {
             this.reloadRunning.set(false);
         }
     }
 
     private Map<String, KbDoc> collectDocs(KbManifest manifest, KbSource.ManifestFetch fetched, Snapshot old,
-            KbSource.RefreshBudget budget) throws Exception {
+                                           KbSource.RefreshBudget budget) throws Exception {
         Map<String, KbDoc> nextDocs = new LinkedHashMap<>();
         for (KbDocMeta meta : manifest.docs()) {
             budget.check();
@@ -427,7 +441,7 @@ public class KbService {
     }
 
     private boolean isSnapshotPublished(KbManifest manifest, Map<String, KbDoc> nextDocs, Path buildDir,
-            KbSource.ManifestFetch fetched, KbSource.RefreshBudget budget) throws Exception {
+                                        KbSource.ManifestFetch fetched, KbSource.RefreshBudget budget) throws Exception {
         Snapshot built = buildSnapshot(manifest, nextDocs, buildDir, budget);
         if (this.stopped) {
             built.retire();
@@ -457,8 +471,7 @@ public class KbService {
         if (buildDir != null) {
             try {
                 deleteRecursively(buildDir, budget);
-            }
-            catch (KbSourceException cleanupError) {
+            } catch (KbSourceException cleanupError) {
                 this.lastError = "KB refresh failed; retry later";
                 log.warn("KB build cleanup failed", cleanupError);
             }
@@ -492,14 +505,13 @@ public class KbService {
                 }
             }
             budget.check();
-        }
-        catch (IOException e) {
+        } catch (IOException e) {
             // 陈旧目录清理失败不影响当前索引，后续刷新会重试。
         }
     }
 
     private Snapshot buildSnapshot(KbManifest manifest, Map<String, KbDoc> docs, Path buildDir,
-            KbSource.RefreshBudget budget) throws Exception {
+                                   KbSource.RefreshBudget budget) throws Exception {
         budget.check();
         Directory directory = FSDirectory.open(buildDir);
         DirectoryReader reader = null;
@@ -510,20 +522,17 @@ public class KbService {
             Map<String, KbTermEntry> terms = buildTermIndex(manifest, docs, budget);
             budget.check();
             return new Snapshot(manifest, docs, reader, directory, buildDir, terms);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             if (reader != null) {
                 try {
                     reader.close();
-                }
-                catch (IOException ignored) {
+                } catch (IOException ignored) {
                     // 构建失败路径：清理优先
                 }
             }
             try {
                 directory.close();
-            }
-            catch (IOException ignored) {
+            } catch (IOException ignored) {
                 // 同上
             }
             throw e;
@@ -565,7 +574,7 @@ public class KbService {
     }
 
     private Map<String, KbTermEntry> buildTermIndex(KbManifest manifest, Map<String, KbDoc> docs,
-            KbSource.RefreshBudget budget) throws KbSourceException {
+                                                    KbSource.RefreshBudget budget) throws KbSourceException {
         Map<String, KbTermEntry> index = new LinkedHashMap<>();
         for (KbDocMeta meta : manifest.docs()) {
             budget.check();
@@ -625,12 +634,10 @@ public class KbService {
                 return KbSearchResult.noMatch(terms, suggestTitles(trimmed));
             }
             return toSearchResult(ranked, limit, terms);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             log.error("KB search failed", e);
             return KbSearchResult.error("Knowledge base search failed; retry later");
-        }
-        finally {
+        } finally {
             acquired.release();
         }
     }
@@ -749,7 +756,9 @@ public class KbService {
         return count == 0 ? List.of() : new ArrayList<>(ranked.subList(0, count));
     }
 
-    /** 字面二元组重合度（0–1）；只对标题计算，用于"近似标题"排序，不参与命中判定。 */
+    /**
+     * 字面二元组重合度（0–1）；只对标题计算，用于"近似标题"排序，不参与命中判定。
+     */
     static double overlap(String query, String title) {
         Set<String> queryGrams = bigrams(KbText.normalizeTerm(query));
         Set<String> titleGrams = bigrams(KbText.normalizeTerm(title));
@@ -814,12 +823,10 @@ public class KbService {
                 target = match.section;
             }
             return readPage(doc, target, from, limit, maxRows);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             log.error("KB document read failed", e);
             return KbReadResult.error("Knowledge base read failed; retry later");
-        }
-        finally {
+        } finally {
             acquired.release();
         }
     }
@@ -933,12 +940,10 @@ public class KbService {
             }
             return KbLookupResult.hit(nullSafe(term), normalized, entry.answer, entry.docId,
                     entry.title, entry.section, entry.updatedAt);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             log.error("KB term lookup failed", e);
             return KbLookupResult.error(nullSafe(term), normalized, "Knowledge base term lookup failed; retry later");
-        }
-        finally {
+        } finally {
             acquired.release();
         }
     }
@@ -976,7 +981,9 @@ public class KbService {
         return current == null ? List.of() : current.manifest.docs();
     }
 
-    /** 单篇已解析文档（诊断/增量用例用）。 */
+    /**
+     * 单篇已解析文档（诊断/增量用例用）。
+     */
     public KbDoc document(String docId) {
         Snapshot current = this.snapshot;
         return current == null || docId == null ? null : current.docs.get(docId);
@@ -1055,13 +1062,11 @@ public class KbService {
             walk.sorted(Comparator.reverseOrder()).forEach(item -> {
                 try {
                     Files.deleteIfExists(item);
-                }
-                catch (IOException ignored) {
+                } catch (IOException ignored) {
                     // 关闭失败/占用时保留目录，下次刷新再清（不影响检索面）
                 }
             });
-        }
-        catch (IOException ignored) {
+        } catch (IOException ignored) {
             // 同上
         }
     }
@@ -1080,14 +1085,12 @@ public class KbService {
                 budget.check();
                 try {
                     Files.deleteIfExists(item);
-                }
-                catch (IOException ignored) {
+                } catch (IOException ignored) {
                     // 单个文件系统调用不可硬中断；下一可控点再检查预算。
                 }
             }
             budget.check();
-        }
-        catch (IOException ignored) {
+        } catch (IOException ignored) {
             // 与无预算的快照清理一致：占用或删除失败留待后续收口。
         }
     }
@@ -1099,10 +1102,12 @@ public class KbService {
     }
 
     private record KbTermEntry(String answer, String docId, String title, String section,
-            String updatedAt) {
+                               String updatedAt) {
     }
 
-    /** 术语表（归一化键 → 预制答案）。 */
+    /**
+     * 术语表（归一化键 → 预制答案）。
+     */
     private static final class Snapshot {
 
         private final KbManifest manifest;
@@ -1130,7 +1135,7 @@ public class KbService {
         private final AtomicBoolean closed = new AtomicBoolean();
 
         private Snapshot(KbManifest manifest, Map<String, KbDoc> docs, DirectoryReader reader,
-                Directory directory, Path dir, Map<String, KbTermEntry> terms) {
+                         Directory directory, Path dir, Map<String, KbTermEntry> terms) {
             this.manifest = manifest;
             this.docs = docs;
             this.reader = reader;
@@ -1170,14 +1175,12 @@ public class KbService {
             }
             try {
                 this.reader.close();
-            }
-            catch (IOException e) {
+            } catch (IOException e) {
                 // 关闭失败不掩盖检索面；目录清理仍继续
             }
             try {
                 this.directory.close();
-            }
-            catch (IOException e) {
+            } catch (IOException e) {
                 // 同上
             }
             deleteRecursively(this.dir);
@@ -1202,8 +1205,7 @@ public class KbService {
             return track(reservation -> this.delegate.schedule(() -> {
                 try {
                     return task.call();
-                }
-                finally {
+                } finally {
                     reservation.release();
                 }
             }, 0L, TimeUnit.NANOSECONDS));
@@ -1214,8 +1216,7 @@ public class KbService {
             return track(reservation -> this.delegate.schedule(() -> {
                 try {
                     task.run();
-                }
-                finally {
+                } finally {
                     reservation.release();
                 }
             }, 0L, TimeUnit.NANOSECONDS));
@@ -1231,8 +1232,7 @@ public class KbService {
             return track(reservation -> this.delegate.schedule(() -> {
                 try {
                     command.run();
-                }
-                finally {
+                } finally {
                     reservation.release();
                 }
             }, delay, unit));
@@ -1243,8 +1243,7 @@ public class KbService {
             return track(reservation -> this.delegate.schedule(() -> {
                 try {
                     return callable.call();
-                }
-                finally {
+                } finally {
                     reservation.release();
                 }
             }, delay, unit));
@@ -1252,12 +1251,11 @@ public class KbService {
 
         @Override
         public ScheduledFuture<?> scheduleAtFixedRate(Runnable command, long initialDelay, long period,
-                TimeUnit unit) {
+                                                      TimeUnit unit) {
             return track(reservation -> this.delegate.scheduleAtFixedRate(() -> {
                 try {
                     command.run();
-                }
-                catch (RuntimeException | Error ex) {
+                } catch (RuntimeException | Error ex) {
                     reservation.release();
                     throw ex;
                 }
@@ -1266,16 +1264,104 @@ public class KbService {
 
         @Override
         public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay,
-                TimeUnit unit) {
+                                                         TimeUnit unit) {
             return track(reservation -> this.delegate.scheduleWithFixedDelay(() -> {
                 try {
                     command.run();
-                }
-                catch (RuntimeException | Error ex) {
+                } catch (RuntimeException | Error ex) {
                     reservation.release();
                     throw ex;
                 }
             }, initialDelay, delay, unit));
+        }
+
+        @Override
+        public <T> Future<T> submit(Runnable task, T result) {
+            return submit(Executors.callable(task, result));
+        }
+
+        @Override
+        public <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks) throws InterruptedException {
+            List<Reservation> reservations = new ArrayList<>();
+            try {
+                return this.delegate.invokeAll(bindTasks(tasks, reservations));
+            } finally {
+                releaseAll(reservations);
+            }
+        }
+
+        @Override
+        public <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks, long timeout, TimeUnit unit)
+                throws InterruptedException {
+            Objects.requireNonNull(unit);
+            List<Reservation> reservations = new ArrayList<>();
+            try {
+                return this.delegate.invokeAll(bindTasks(tasks, reservations), timeout, unit);
+            } finally {
+                releaseAll(reservations);
+            }
+        }
+
+        @Override
+        public <T> T invokeAny(Collection<? extends Callable<T>> tasks)
+                throws InterruptedException, ExecutionException {
+            List<Reservation> reservations = new ArrayList<>();
+            try {
+                return this.delegate.invokeAny(bindTasks(tasks, reservations));
+            } finally {
+                releaseAll(reservations);
+            }
+        }
+
+        @Override
+        public <T> T invokeAny(Collection<? extends Callable<T>> tasks, long timeout, TimeUnit unit)
+                throws InterruptedException, ExecutionException, TimeoutException {
+            Objects.requireNonNull(unit);
+            List<Reservation> reservations = new ArrayList<>();
+            try {
+                return this.delegate.invokeAny(bindTasks(tasks, reservations), timeout, unit);
+            } finally {
+                releaseAll(reservations);
+            }
+        }
+
+        private <T> List<Callable<T>> bindTasks(Collection<? extends Callable<T>> tasks,
+                                                List<Reservation> reservations) {
+            Objects.requireNonNull(tasks);
+            List<Callable<T>> copy = new ArrayList<>(tasks.size());
+            for (Callable<T> task : tasks) {
+                copy.add(Objects.requireNonNull(task));
+            }
+            synchronized (this.pending) {
+                if (copy.size() > this.maxPending - this.pending.size()) {
+                    throw new RejectedExecutionException("KB scheduled task limit exceeded: " + this.maxPending);
+                }
+                try {
+                    List<Callable<T>> bound = new ArrayList<>(copy.size());
+                    for (Callable<T> task : copy) {
+                        Reservation reservation = new Reservation();
+                        this.pending.add(reservation);
+                        reservations.add(reservation);
+                        bound.add(() -> {
+                            try {
+                                return task.call();
+                            } finally {
+                                reservation.release();
+                            }
+                        });
+                    }
+                    return bound;
+                } catch (RuntimeException | Error ex) {
+                    releaseAll(reservations);
+                    throw ex;
+                }
+            }
+        }
+
+        private void releaseAll(List<Reservation> reservations) {
+            for (Reservation reservation : reservations) {
+                reservation.release();
+            }
         }
 
         private <T> ScheduledFuture<T> track(ScheduledTaskFactory<T> factory) {
@@ -1289,8 +1375,7 @@ public class KbService {
                 try {
                     future = factory.schedule(reservation);
                     return new BoundedScheduledFuture<>(future, reservation::release);
-                }
-                catch (RuntimeException | Error ex) {
+                } catch (RuntimeException | Error ex) {
                     if (future != null) {
                         future.cancel(false);
                     }
@@ -1352,7 +1437,7 @@ public class KbService {
 
     @FunctionalInterface
     private interface ScheduledTaskFactory<T> {
-        ScheduledFuture<T> schedule(Reservation reservation);
+        ScheduledFuture<T> schedule(BoundedScheduledExecutor.Reservation reservation);
     }
 
     private static final class BoundedScheduledFuture<T> implements ScheduledFuture<T> {

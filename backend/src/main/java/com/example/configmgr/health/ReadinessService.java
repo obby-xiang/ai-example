@@ -2,6 +2,7 @@ package com.example.configmgr.health;
 
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.common.ErrorCodes;
+import com.example.configmgr.common.LogThrottler;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.beans.factory.ObjectProvider;
@@ -72,159 +73,168 @@ import java.util.Set;
 @Component
 public class ReadinessService {
 
-	private final List<ReadinessProbe> probes;
+    private final List<ReadinessProbe> probes;
 
-	private final ReadinessProbeRunner runner;
+    private final ReadinessProbeRunner runner;
 
-	private final AiConfigService aiConfigService;
+    private final AiConfigService aiConfigService;
 
-	/** draining 起始时刻 = "是否 draining"的唯一真源（null = 未进入 draining；置位后永不清除）。 */
-	private volatile Instant drainingSince;
+    /**
+     * draining 起始时刻 = "是否 draining"的唯一真源（null = 未进入 draining；置位后永不清除）。
+     */
+    private volatile Instant drainingSince;
 
-	@Autowired
-	public ReadinessService(List<ReadinessProbe> probes, ObjectProvider<AiConfigService> aiConfigService,
-			ReadinessProbeRunner runner) {
-		this.probes = List.copyOf(probes);
-		this.aiConfigService = aiConfigService == null ? null : aiConfigService.getIfAvailable();
-		this.runner = runner;
-	}
+    @Autowired
+    public ReadinessService(List<ReadinessProbe> probes, ObjectProvider<AiConfigService> aiConfigService,
+                            ReadinessProbeRunner runner) {
+        this.probes = List.copyOf(probes);
+        this.aiConfigService = aiConfigService == null ? null : aiConfigService.getIfAvailable();
+        this.runner = runner;
+    }
 
-	/** 测试/极简装配用：无 AI 能力段，用缺省探测执行器（2s / 4 线程 / 队列 8）。 */
-	public ReadinessService(List<ReadinessProbe> probes) {
-		this(probes, null, ReadinessProbeRunner.defaults());
-	}
+    /**
+     * 测试/极简装配用：无 AI 能力段，用缺省探测执行器（2s / 4 线程 / 队列 8）。
+     */
+    public ReadinessService(List<ReadinessProbe> probes) {
+        this(probes, null, ReadinessProbeRunner.defaults());
+    }
 
-	/** 测试用：无 AI 能力段 + 指定执行器（超时/饱和用例）。 */
-	public ReadinessService(List<ReadinessProbe> probes, ReadinessProbeRunner runner) {
-		this(probes, null, runner);
-	}
+    /**
+     * 测试用：无 AI 能力段 + 指定执行器（超时/饱和用例）。
+     */
+    public ReadinessService(List<ReadinessProbe> probes, ReadinessProbeRunner runner) {
+        this(probes, null, runner);
+    }
 
-	/** 关闭开始：后续 ready 一律 503（幂等、终态）。先写 {@code drainingSince} 再对读方可见。 */
-	public void markDraining() {
-		if (this.drainingSince != null) {
-			return;
-		}
-		synchronized (this) {
-			if (this.drainingSince != null) {
-				return;
-			}
-			this.drainingSince = Instant.now();
-		}
-		log.info("Instance entering draining, /health/ready returns 503 while LB drains drainingSince={}",
-		        this.drainingSince);
-	}
+    /**
+     * 关闭开始：后续 ready 一律 503（幂等、终态）。先写 {@code drainingSince} 再对读方可见。
+     */
+    public void markDraining() {
+        if (this.drainingSince != null) {
+            return;
+        }
+        synchronized (this) {
+            if (this.drainingSince != null) {
+                return;
+            }
+            this.drainingSince = Instant.now();
+        }
+        log.info("Instance entering draining, /health/ready returns 503 while LB drains drainingSince={}",
+                this.drainingSince);
+    }
 
-	/**
-	 * 关闭事件的<b>兜底</b>监听（与 {@link ShutdownDrainGate} 同序，二者都只做幂等的置位）：
-	 * 真正负责"窗口"的是 drain gate —— 它保证本方法所置的状态在连接器停接之前可见。
-	 */
-	@EventListener(ContextClosedEvent.class)
-	@Order(Ordered.HIGHEST_PRECEDENCE)
-	public void onContextClosed(ContextClosedEvent event) {
-		markDraining();
-	}
+    /**
+     * 关闭事件的<b>兜底</b>监听（与 {@link ShutdownDrainGate} 同序，二者都只做幂等的置位）：
+     * 真正负责"窗口"的是 drain gate —— 它保证本方法所置的状态在连接器停接之前可见。
+     */
+    @EventListener(ContextClosedEvent.class)
+    @Order(Ordered.HIGHEST_PRECEDENCE)
+    public void onContextClosed(ContextClosedEvent event) {
+        markDraining();
+    }
 
-	public boolean isDraining() {
-		return this.drainingSince != null;
-	}
+    public boolean isDraining() {
+        return this.drainingSince != null;
+    }
 
-	/**
-	 * 现算一次就绪快照（不缓存：LB 需要的正是"此刻能不能接流量"）。
-	 *
-	 * @return 快照；{@link Snapshot#ready()} 为 false 时端点回 503
-	 */
-	public Snapshot check() {
-		Instant since = this.drainingSince;
-		boolean isDraining = since != null;
-		Map<String, Object> checks = new LinkedHashMap<>();
-		List<String> down = new ArrayList<>();
-		List<String> degraded = new ArrayList<>();
-		Set<String> degradedCapabilities = new HashSet<>();
+    /**
+     * 现算一次就绪快照（不缓存：LB 需要的正是"此刻能不能接流量"）。
+     *
+     * @return 快照；{@link Snapshot#ready()} 为 false 时端点回 503
+     */
+    public Snapshot check() {
+        Instant since = this.drainingSince;
+        boolean isDraining = since != null;
+        Map<String, Object> checks = new LinkedHashMap<>();
+        List<String> down = new ArrayList<>();
+        List<String> degraded = new ArrayList<>();
+        Set<String> degradedCapabilities = new HashSet<>();
 
-		if (!isDraining) {
-			for (ReadinessProbeRunner.Outcome outcome : this.runner.probe(this.probes)) {
-				ReadinessProbe probe = outcome.probe();
-				ProbeResult result = outcome.result();
-				String name = probe == null ? "unknown" : probe.name();
-				Map<String, Object> entry = new LinkedHashMap<>();
-				entry.put("status", result.up() ? "UP" : "DOWN");
-				if (result.detail() != null) {
-					entry.put("detail", result.detail());
-				}
-				entry.put("required", probe == null || probe.required());
-				checks.put(name, entry);
-				if (!result.up()) {
-					if (probe != null && !probe.required()) {
-						degraded.add(name);
-						// 能力面由探针自己声明（不是"任意降级维度都算 AI 降级"）
-						if (probe.capability() != null) {
-							degradedCapabilities.add(probe.capability());
-						}
-					}
-					else {
-						down.add(name);
-					}
-				}
-			}
-		}
-		boolean ready = !isDraining && CollectionUtils.isEmpty(down);
+        if (!isDraining) {
+            for (ReadinessProbeRunner.Outcome outcome : this.runner.probe(this.probes)) {
+                ReadinessProbe probe = outcome.probe();
+                ProbeResult result = outcome.result();
+                String name = probe == null ? "unknown" : probe.name();
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("status", result.up() ? "UP" : "DOWN");
+                if (result.detail() != null) {
+                    entry.put("detail", result.detail());
+                }
+                entry.put("required", probe == null || probe.required());
+                checks.put(name, entry);
+                if (!result.up()) {
+                    if (probe != null && !probe.required()) {
+                        degraded.add(name);
+                        // 能力面由探针自己声明（不是"任意降级维度都算 AI 降级"）
+                        if (probe.capability() != null) {
+                            degradedCapabilities.add(probe.capability());
+                        }
+                    } else {
+                        down.add(name);
+                    }
+                }
+            }
+        }
+        boolean ready = !isDraining && CollectionUtils.isEmpty(down);
 
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("status", ready ? "UP" : "DOWN");
-		body.put("draining", isDraining);
-		if (since != null) {
-			body.put("drainingSince", since.toString());
-		}
-		body.put("ready", ready);
-		body.put("down", down);
-		body.put("degraded", degraded);
-		body.put("checks", checks);
-		body.put("capabilities", Map.of("ai",
-				aiCapability(degradedCapabilities.contains(ReadinessProbe.CAPABILITY_AI))));
-		body.put("checkedAt", Instant.now().toString());
-		return new Snapshot(ready, body);
-	}
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", ready ? "UP" : "DOWN");
+        body.put("draining", isDraining);
+        if (since != null) {
+            body.put("drainingSince", since.toString());
+        }
+        body.put("ready", ready);
+        body.put("down", down);
+        body.put("degraded", degraded);
+        body.put("checks", checks);
+        body.put("capabilities", Map.of("ai",
+                aiCapability(degradedCapabilities.contains(ReadinessProbe.CAPABILITY_AI))));
+        body.put("checkedAt", Instant.now().toString());
+        return new Snapshot(ready, body);
+    }
 
-	/**
-	 * AI 能力段（**只作 capability**，不参与 ready）。
-	 *
-	 * <p>值来自内存快照（{@link AiConfigService#availability()}），不打上游、不读密钥；
-	 * 只回 {@code configured/code/degraded}，永不回 key 本身或 key 片段。
-	 *
-	 * @param transportDegraded 承载 AI 能力面的探针（Redis，声明 {@code capability()="ai"}）已 DOWN
-	 * ⇒ AI 传输面不可用。与 {@code configured} 是两件事：配置齐全但 Redis 掉了，AI 同样不可用，
-	 * 运维要在一个字段上看得出来。**只有声明了 AI 能力面的维度**才会点亮它，其它 required=false
-	 * 维度 DOWN 不影响本字段（见 {@link ReadinessProbe#capability()}）。
-	 */
-	private Map<String, Object> aiCapability(boolean transportDegraded) {
-		if (this.aiConfigService == null) {
-			Map<String, Object> out = new LinkedHashMap<>();
-			out.put("configured", false);
-			out.put("code", ErrorCodes.AI_UNAVAILABLE);
-			out.put("reason", "not-wired");
-			out.put("degraded", transportDegraded);
-			return out;
-		}
-		try {
-			AiConfigService.Availability availability = this.aiConfigService.availability();
-			Map<String, Object> out = new LinkedHashMap<>();
-			out.put("configured", availability.available());
-			out.put("code", availability.code());
-			out.put("degraded", transportDegraded);
-			return out;
-		}
-		catch (RuntimeException ex) {
-			Map<String, Object> out = new LinkedHashMap<>();
-			out.put("configured", false);
-			out.put("code", ErrorCodes.AI_UNAVAILABLE);
-			out.put("reason", ex.getClass().getSimpleName());
-			out.put("degraded", transportDegraded);
-			return out;
-		}
-	}
+    /**
+     * AI 能力段（**只作 capability**，不参与 ready）。
+     *
+     * <p>值来自内存快照（{@link AiConfigService#availability()}），不打上游、不读密钥；
+     * 只回 {@code configured/code/degraded}，永不回 key 本身或 key 片段。
+     *
+     * @param transportDegraded 承载 AI 能力面的探针（Redis，声明 {@code capability()="ai"}）已 DOWN
+     *                          ⇒ AI 传输面不可用。与 {@code configured} 是两件事：配置齐全但 Redis 掉了，AI 同样不可用，
+     *                          运维要在一个字段上看得出来。**只有声明了 AI 能力面的维度**才会点亮它，其它 required=false
+     *                          维度 DOWN 不影响本字段（见 {@link ReadinessProbe#capability()}）。
+     */
+    private Map<String, Object> aiCapability(boolean transportDegraded) {
+        if (this.aiConfigService == null) {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("configured", false);
+            out.put("code", ErrorCodes.AI_UNAVAILABLE);
+            out.put("reason", "not-wired");
+            out.put("degraded", transportDegraded);
+            return out;
+        }
+        try {
+            AiConfigService.Availability availability = this.aiConfigService.availability();
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("configured", availability.available());
+            out.put("code", availability.code());
+            out.put("degraded", transportDegraded);
+            return out;
+        } catch (RuntimeException ex) {
+            LogThrottler.warn(log, "ReadinessService.aiCapability", "AI capability lookup failed", ex);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("configured", false);
+            out.put("code", ErrorCodes.AI_UNAVAILABLE);
+            out.put("reason", ex.getClass().getSimpleName());
+            out.put("degraded", transportDegraded);
+            return out;
+        }
+    }
 
-	/** 一次就绪判定的结果（{@code body} 直接作为响应体）。 */
-	public record Snapshot(boolean ready, Map<String, Object> body) {
-	}
+    /**
+     * 一次就绪判定的结果（{@code body} 直接作为响应体）。
+     */
+    public record Snapshot(boolean ready, Map<String, Object> body) {
+    }
 
 }

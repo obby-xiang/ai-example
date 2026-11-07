@@ -12,7 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.web.context.support.RequestHandledEvent;
+import org.springframework.web.context.support.ServletRequestHandledEvent;
 import org.springframework.web.util.UriUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -63,222 +63,227 @@ import java.util.Map;
 @Component
 public class AiSessionService {
 
-	public static final String KEY_PREFIX = "ai:session:";
+    public static final String KEY_PREFIX = "ai:session:";
 
-	static final Duration DEFAULT_SESSION_DATA_TTL = Duration.ofHours(24);
+    static final Duration DEFAULT_SESSION_DATA_TTL = Duration.ofHours(24);
 
-	private final StringRedisTemplate redis;
+    private final StringRedisTemplate redis;
 
-	private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper;
 
-	private final AiProperties properties;
+    private final AiProperties properties;
 
-	@Autowired(required = false)
-	private SessionActivityRenewal activityRenewal;
+    @Autowired(required = false)
+    private SessionActivityRenewal activityRenewal;
 
-	public AiSessionService(StringRedisTemplate redis, ObjectMapper objectMapper, AiProperties properties) {
-		this.redis = redis;
-		this.objectMapper = objectMapper;
-		this.properties = properties;
-	}
+    public AiSessionService(StringRedisTemplate redis, ObjectMapper objectMapper, AiProperties properties) {
+        this.redis = redis;
+        this.objectMapper = objectMapper;
+        this.properties = properties;
+    }
 
-	/**
-	 * 会话记录键（<b>带当前身份</b>）：{@code ai:session:<t>:<u>:<sessionId>}。
-	 *
-	 * <p>无身份上下文 = 失败（不生成无身份键）。
-	 */
-	public static String keyFor(String sessionId) {
-		return TenantKeyScope.scoped(KEY_PREFIX, sessionId);
-	}
+    /**
+     * 会话记录键（<b>带当前身份</b>）：{@code ai:session:<t>:<u>:<sessionId>}。
+     *
+     * <p>无身份上下文 = 失败（不生成无身份键）。
+     */
+    public static String keyFor(String sessionId) {
+        return TenantKeyScope.scoped(KEY_PREFIX, sessionId);
+    }
 
-	/** 会话记录键（<b>显式身份</b>；身份来自记录/调用方，不读线程上下文）。 */
-	public static String keyFor(String sessionId, long tenantId, long userId) {
-		return TenantKeyScope.scoped(KEY_PREFIX, tenantId, userId, sessionId);
-	}
+    /**
+     * 会话记录键（<b>显式身份</b>；身份来自记录/调用方，不读线程上下文）。
+     */
+    public static String keyFor(String sessionId, long tenantId, long userId) {
+        return TenantKeyScope.scoped(KEY_PREFIX, tenantId, userId, sessionId);
+    }
 
-	/** 会话记录键（显式身份；{@code null}/非法身份 = 失败）。 */
-	public static String keyFor(String sessionId, TenantUser identity) {
-		return KEY_PREFIX + TenantKeyScope.segmentOf(identity) + sessionId;
-	}
+    /**
+     * 会话记录键（显式身份；{@code null}/非法身份 = 失败）。
+     */
+    public static String keyFor(String sessionId, TenantUser identity) {
+        return KEY_PREFIX + TenantKeyScope.segmentOf(identity) + sessionId;
+    }
 
-	/**
-	 * 校验并续期会话（滑动 TTL），身份取当前 {@link RequestContextUtils} 上下文。
-	 *
-	 * <p>没有上下文 = 失败：不生成无身份会话记录。
-	 *
-	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
-	 */
-	public boolean ensure(String sessionId) {
-		return isEnsureInternal(sessionId, RequestContextUtils.require());
-	}
+    /**
+     * 校验并续期会话（滑动 TTL），身份取当前 {@link RequestContextUtils} 上下文。
+     *
+     * <p>没有上下文 = 失败：不生成无身份会话记录。
+     *
+     * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
+     */
+    public boolean ensure(String sessionId) {
+        return isEnsureInternal(sessionId, RequestContextUtils.require());
+    }
 
-	/**
-	 * 校验并续期会话，并<b>显式登记</b>这次操作的身份归属。
-	 *
-	 * <p>归属只认服务端传入的 {@code tenantId/userId}（HTTP 边界从请求头校验后取得），
-	 * 不读客户端请求体 —— 否则前端可以自报另一个租户。
-	 *
-	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
-	 */
-	public boolean ensure(String sessionId, long tenantId, long userId) {
-		return isEnsureInternal(sessionId, new TenantUser(tenantId, userId));
-	}
+    /**
+     * 校验并续期会话，并<b>显式登记</b>这次操作的身份归属。
+     *
+     * <p>归属只认服务端传入的 {@code tenantId/userId}（HTTP 边界从请求头校验后取得），
+     * 不读客户端请求体 —— 否则前端可以自报另一个租户。
+     *
+     * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
+     */
+    public boolean ensure(String sessionId, long tenantId, long userId) {
+        return isEnsureInternal(sessionId, new TenantUser(tenantId, userId));
+    }
 
-	/**
-	 * 会话登记结局（发号入口据此决定换号重取还是报不可用）。
-	 */
-	public enum Registration {
+    /**
+     * 会话登记结局（发号入口据此决定换号重取还是报不可用）。
+     */
+    public enum Registration {
 
-		/** 本次真正写入了新记录。 */
-		CREATED,
+        /**
+         * 本次真正写入了新记录。
+         */
+        CREATED,
 
-		/** 号已存在（同身份撞号）：旧记录未被覆盖，调用方应换号重取。 */
-		EXISTED,
+        /**
+         * 号已存在（同身份撞号）：旧记录未被覆盖，调用方应换号重取。
+         */
+        EXISTED,
 
-		/**
-		 * 登记无法确认（Redis 异常/不可用）：记录<b>没有</b>写成。
-		 *
-		 * <p>必须与 {@link #CREATED} 分开：把"没登记"报成"已创建"会让发号入口 200 返回一个
-		 * 本实例之外并不存在的会话号（会话归属、记忆窗口、会话门全部落在空处）。
-		 */
-		UNAVAILABLE
+        /**
+         * 登记无法确认（Redis 异常/不可用）：记录<b>没有</b>写成。
+         *
+         * <p>必须与 {@link #CREATED} 分开：把"没登记"报成"已创建"会让发号入口 200 返回一个
+         * 本实例之外并不存在的会话号（会话归属、记忆窗口、会话门全部落在空处）。
+         */
+        UNAVAILABLE
 
-	}
+    }
 
-	/**
-	 * 登记会话并报告<b>结局</b>（发号入口 {@code POST /api/ai/session} 的唯一登记口）。
-	 *
-	 * <p>归属只认服务端传入的 {@code tenantId/userId}，不读客户端请求体 ——
-	 * 否则前端可以自报另一个租户。写路径与 {@link #ensure} 完全相同（{@code SET NX EX} +
-	 * 已存在只续期），区别只在异常：这里如实回 {@link Registration#UNAVAILABLE}，
-	 * 而不是压成与"首次登记"同义的 {@code false}。
-	 */
-	public Registration register(String sessionId, long tenantId, long userId) {
-		return registerInternal(sessionId, new TenantUser(tenantId, userId));
-	}
+    /**
+     * 登记会话并报告<b>结局</b>（发号入口 {@code POST /api/ai/session} 的唯一登记口）。
+     *
+     * <p>归属只认服务端传入的 {@code tenantId/userId}，不读客户端请求体 ——
+     * 否则前端可以自报另一个租户。写路径与 {@link #ensure} 完全相同（{@code SET NX EX} +
+     * 已存在只续期），区别只在异常：这里如实回 {@link Registration#UNAVAILABLE}，
+     * 而不是压成与"首次登记"同义的 {@code false}。
+     */
+    public Registration register(String sessionId, long tenantId, long userId) {
+        return registerInternal(sessionId, new TenantUser(tenantId, userId));
+    }
 
-	private Registration registerInternal(String sessionId, TenantUser identity) {
-		String key = keyFor(sessionId, identity);
-		Duration ttl = sessionDataTtl(this.properties);
-		try {
-			if (isPurgeGuarded(sessionId, identity)) {
-				return Registration.EXISTED;
-			}
-			// 原子"不存在才创建"（SET NX EX）：两个实例拿到同一个号时，只有先到者写入。
-			if (Boolean.TRUE.equals(this.redis.opsForValue().setIfAbsent(key, valueOf(sessionId, identity), ttl))) {
-				return Registration.CREATED;
-			}
-			refreshUserActivity(sessionId, identity);
-			return Registration.EXISTED;
-		}
-		catch (Exception ex) {
-			// 会话登记失败不应阻断本轮对话：记忆与挂起态各自有键，AI 能力不因此降级。
-			// 但"没登记"是事实，必须能传给发号入口（不得当创建成功）。
-			log.warn("Session registration failed sessionId={}", sessionId, ex);
-			return Registration.UNAVAILABLE;
-		}
-	}
+    private Registration registerInternal(String sessionId, TenantUser identity) {
+        String key = keyFor(sessionId, identity);
+        Duration ttl = sessionDataTtl(this.properties);
+        try {
+            if (isPurgeGuarded(sessionId, identity)) {
+                return Registration.EXISTED;
+            }
+            // 原子"不存在才创建"（SET NX EX）：两个实例拿到同一个号时，只有先到者写入。
+            if (Boolean.TRUE.equals(this.redis.opsForValue().setIfAbsent(key, valueOf(sessionId, identity), ttl))) {
+                return Registration.CREATED;
+            }
+            refreshUserActivity(sessionId, identity);
+            return Registration.EXISTED;
+        } catch (Exception ex) {
+            // 会话登记失败不应阻断本轮对话：记忆与挂起态各自有键，AI 能力不因此降级。
+            // 但"没登记"是事实，必须能传给发号入口（不得当创建成功）。
+            log.warn("Session registration failed sessionId={}", sessionId, ex);
+            return Registration.UNAVAILABLE;
+        }
+    }
 
-	private boolean isEnsureInternal(String sessionId, TenantUser identity) {
-		// 布尔口径保持原语义：只有"已存在"才是 true；登记失败仍按"首次登记"处理（只影响日志取证）。
-		return registerInternal(sessionId, identity) == Registration.EXISTED;
-	}
+    private boolean isEnsureInternal(String sessionId, TenantUser identity) {
+        // 布尔口径保持原语义：只有"已存在"才是 true；登记失败仍按"首次登记"处理（只影响日志取证）。
+        return registerInternal(sessionId, identity) == Registration.EXISTED;
+    }
 
-	static Duration sessionDataTtl(AiProperties properties) {
-		Duration configured = properties == null ? null : properties.getSessionTtl();
-		return boundedSessionDataTtl(configured);
-	}
+    static Duration sessionDataTtl(AiProperties properties) {
+        Duration configured = properties == null ? null : properties.getSessionTtl();
+        return boundedSessionDataTtl(configured);
+    }
 
-	static Duration boundedSessionDataTtl(Duration configured) {
-		Duration effective = configured == null || configured.isZero() || configured.isNegative()
-				? DEFAULT_SESSION_DATA_TTL : configured;
-		return effective.compareTo(DEFAULT_SESSION_DATA_TTL) > 0 ? DEFAULT_SESSION_DATA_TTL : effective;
-	}
+    static Duration boundedSessionDataTtl(Duration configured) {
+        Duration effective = configured == null || configured.isZero() || configured.isNegative()
+                ? DEFAULT_SESSION_DATA_TTL : configured;
+        return effective.compareTo(DEFAULT_SESSION_DATA_TTL) > 0 ? DEFAULT_SESSION_DATA_TTL : effective;
+    }
 
-	private String valueOf(String sessionId, TenantUser identity) throws Exception {
-		Map<String, Object> value = new LinkedHashMap<>();
-		value.put("sessionId", sessionId);
-		// 首次登记时刻（记录写一次后不再改写，见 registerInternal）。
-		value.put("lastActivity", Instant.now().toString());
-		// 归属随会话记录落 Redis：取证面；隔离本身由键形（身份段）保证。
-		value.put("tenantId", identity.tenantId());
-		value.put("userId", identity.userId());
-		return this.objectMapper.writeValueAsString(value);
-	}
+    private String valueOf(String sessionId, TenantUser identity) throws Exception {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("sessionId", sessionId);
+        // 首次登记时刻（记录写一次后不再改写，见 registerInternal）。
+        value.put("lastActivity", Instant.now().toString());
+        // 归属随会话记录落 Redis：取证面；隔离本身由键形（身份段）保证。
+        value.put("tenantId", identity.tenantId());
+        value.put("userId", identity.userId());
+        return this.objectMapper.writeValueAsString(value);
+    }
 
-	public boolean exists(String sessionId) {
-		try {
-			TenantUser identity = RequestContextUtils.require();
-			refreshUserActivity(sessionId, identity);
-			return Boolean.TRUE.equals(this.redis.hasKey(keyFor(sessionId, identity)));
-		}
-		catch (Exception ex) {
-			return false;
-		}
-	}
+    public boolean exists(String sessionId) {
+        try {
+            TenantUser identity = RequestContextUtils.require();
+            refreshUserActivity(sessionId, identity);
+            return Boolean.TRUE.equals(this.redis.hasKey(keyFor(sessionId, identity)));
+        } catch (Exception ex) {
+            return false;
+        }
+    }
 
-	private void refreshUserActivity(String sessionId, TenantUser identity) {
-		if (isRetainedPurge(sessionId, identity)) {
-			return;
-		}
-		if (this.activityRenewal != null) {
-			this.activityRenewal.isActivityRenewed(identity.tenantId(), identity.userId(), sessionId, null,
-					keyFor(sessionId, identity));
-			return;
-		}
-		this.redis.expire(keyFor(sessionId, identity), sessionDataTtl(this.properties));
-	}
+    private void refreshUserActivity(String sessionId, TenantUser identity) {
+        if (isRetainedPurge(sessionId, identity)) {
+            return;
+        }
+        if (this.activityRenewal != null) {
+            this.activityRenewal.isActivityRenewed(identity.tenantId(), identity.userId(), sessionId, null,
+                    keyFor(sessionId, identity));
+            return;
+        }
+        this.redis.expire(keyFor(sessionId, identity), sessionDataTtl(this.properties));
+    }
 
-	@EventListener
-	public void onUserSessionRead(RequestHandledEvent event) {
-		if (!(event.getRequest() instanceof HttpServletRequest request)
-				|| !(event.getResponse() instanceof jakarta.servlet.http.HttpServletResponse response)
-				|| !"GET".equals(request.getMethod()) || event.getFailureCause() != null
-				|| response.getStatus() < 200 || response.getStatus() >= 300) {
-			return;
-		}
-		String sessionId = userReadSessionId(request);
-		if (sessionId == null) {
-			return;
-		}
-		try {
-			refreshUserActivity(sessionId, RequestContextUtils.require());
-		}
-		catch (RuntimeException ex) {
-			log.warn("Session user-activity refresh after history read failed sessionId={}", sessionId, ex);
-		}
-	}
+    @EventListener
+    public void onUserSessionRead(ServletRequestHandledEvent event) {
+        if (!"GET".equals(event.getMethod()) || event.getFailureCause() != null
+                || event.getStatusCode() < 200 || event.getStatusCode() >= 300) {
+            return;
+        }
+        String uri = event.getRequestUrl();
+        if (uri != null && event.getSource() instanceof HttpServletRequest request) {
+            String contextPath = request.getContextPath();
+            if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
+                uri = uri.substring(contextPath.length());
+            }
+        }
+        String sessionId = userReadSessionId(uri);
+        if (sessionId == null) {
+            return;
+        }
+        try {
+            refreshUserActivity(sessionId, RequestContextUtils.require());
+        } catch (RuntimeException ex) {
+            log.warn("Session user-activity refresh after history read failed sessionId={}", sessionId, ex);
+        }
+    }
 
-	private static String userReadSessionId(HttpServletRequest request) {
-		String uri = request.getRequestURI();
-		String contextPath = request.getContextPath();
-		if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
-			uri = uri.substring(contextPath.length());
-		}
-		String sessionId = sessionIdAfterPrefix(uri, "/api/ai/history/");
-		return sessionId != null ? sessionId : sessionIdAfterPrefix(uri, "/api/ai/context/");
-	}
+    private static String userReadSessionId(String uri) {
+        String sessionId = sessionIdAfterPrefix(uri, "/api/ai/history/");
+        return sessionId != null ? sessionId : sessionIdAfterPrefix(uri, "/api/ai/context/");
+    }
 
-	private static String sessionIdAfterPrefix(String uri, String prefix) {
-		if (uri == null || !uri.startsWith(prefix)) {
-			return null;
-		}
-		String raw = uri.substring(prefix.length());
-		return raw.isEmpty() || raw.indexOf('/') >= 0 ? null : UriUtils.decode(raw, StandardCharsets.UTF_8);
-	}
+    private static String sessionIdAfterPrefix(String uri, String prefix) {
+        if (uri == null || !uri.startsWith(prefix)) {
+            return null;
+        }
+        String raw = uri.substring(prefix.length());
+        return raw.isEmpty() || raw.indexOf('/') >= 0 ? null : UriUtils.decode(raw, StandardCharsets.UTF_8);
+    }
 
-	private boolean isPurgeGuarded(String sessionId, TenantUser identity) {
-		return Boolean.TRUE.equals(this.redis.hasKey(SessionPurgeGuard.keyFor(sessionId, identity.tenantId(), identity.userId())))
-				|| Boolean.TRUE.equals(this.redis.hasKey(
-						SessionPurgePendingStore.pendingKey(sessionId, identity.tenantId(), identity.userId())));
-	}
+    private boolean isPurgeGuarded(String sessionId, TenantUser identity) {
+        return Boolean.TRUE.equals(this.redis.hasKey(SessionPurgeGuard.keyFor(sessionId, identity.tenantId(), identity.userId())))
+                || Boolean.TRUE.equals(this.redis.hasKey(
+                SessionPurgePendingStore.pendingKey(sessionId, identity.tenantId(), identity.userId())));
+    }
 
-	private boolean isRetainedPurge(String sessionId, TenantUser identity) {
-		boolean guarded = Boolean.TRUE.equals(this.redis.hasKey(
-				SessionPurgeGuard.keyFor(sessionId, identity.tenantId(), identity.userId())));
-		boolean pending = Boolean.TRUE.equals(this.redis.hasKey(
-				SessionPurgePendingStore.pendingKey(sessionId, identity.tenantId(), identity.userId())));
-		return guarded && !pending;
-	}
+    private boolean isRetainedPurge(String sessionId, TenantUser identity) {
+        boolean guarded = Boolean.TRUE.equals(this.redis.hasKey(
+                SessionPurgeGuard.keyFor(sessionId, identity.tenantId(), identity.userId())));
+        boolean pending = Boolean.TRUE.equals(this.redis.hasKey(
+                SessionPurgePendingStore.pendingKey(sessionId, identity.tenantId(), identity.userId())));
+        return guarded && !pending;
+    }
 
 }

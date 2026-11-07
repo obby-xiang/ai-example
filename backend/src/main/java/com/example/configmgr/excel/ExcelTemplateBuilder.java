@@ -5,15 +5,30 @@ import com.example.configmgr.definition.entity.ConfigField;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.ss.usermodel.CellStyle;
+import org.apache.poi.ss.usermodel.FillPatternType;
+import org.apache.poi.ss.usermodel.Font;
+import org.apache.poi.ss.usermodel.IndexedColors;
 import org.apache.poi.ss.util.CellRangeAddressList;
 import org.apache.poi.ss.util.CellReference;
-import org.apache.poi.xssf.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFCell;
+import org.apache.poi.xssf.usermodel.XSSFClientAnchor;
+import org.apache.poi.xssf.usermodel.XSSFComment;
+import org.apache.poi.xssf.usermodel.XSSFDataValidation;
+import org.apache.poi.xssf.usermodel.XSSFDataValidationConstraint;
+import org.apache.poi.xssf.usermodel.XSSFDataValidationHelper;
+import org.apache.poi.xssf.usermodel.XSSFDrawing;
+import org.apache.poi.xssf.usermodel.XSSFRow;
+import org.apache.poi.xssf.usermodel.XSSFSheet;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 @Slf4j
 @Service
@@ -75,17 +90,17 @@ public class ExcelTemplateBuilder {
         for (ConfigField f : fields) {
             if (f.getFieldType() == ConfigField.FieldType.ENUM && f.getOptionsJson() != null) {
                 @SuppressWarnings("unchecked")
-                List<java.util.Map<String, String>> opts = objectMapper.readValue(f.getOptionsJson(), List.class);
+                List<Map<String, String>> opts = objectMapper.readValue(f.getOptionsJson(), List.class);
                 XSSFRow labelRow = dict.getRow(0);
                 if (labelRow == null) labelRow = dict.createRow(0);
                 labelRow.createCell(col).setCellValue(f.getCode());
                 for (int i = 0; i < opts.size(); i++) {
                     XSSFRow row = dict.getRow(i + 1);
                     if (row == null) row = dict.createRow(i + 1);
-                    java.util.Map<String, String> option = opts.get(i);
-                    Object val = org.apache.commons.lang3.ObjectUtils.getIfNull(
+                    Map<String, String> option = opts.get(i);
+                    Object val = ObjectUtils.getIfNull(
                             option.get("label"), () -> option.get("value"));
-                    row.createCell(col).setCellValue(java.util.Objects.toString(val, ""));
+                    row.createCell(col).setCellValue(Objects.toString(val, ""));
                 }
                 col++;
             }
@@ -102,7 +117,7 @@ public class ExcelTemplateBuilder {
             ConfigField f = fields.get(c);
             if (f.getFieldType() == ConfigField.FieldType.ENUM && f.getOptionsJson() != null) {
                 @SuppressWarnings("unchecked")
-                List<java.util.Map<String, String>> opts = objectMapper.readValue(f.getOptionsJson(), List.class);
+                List<Map<String, String>> opts = objectMapper.readValue(f.getOptionsJson(), List.class);
                 int optCount = opts.size();
                 String dictSheetName = "_dict";
                 String formula = "'" + dictSheetName + "'!$" + CellReference.convertNumToColString(dictCol)
@@ -149,7 +164,8 @@ public class ExcelTemplateBuilder {
         sb.append("类型: ").append(f.getFieldType().name());
         if (f.isRequired()) sb.append("\n必填: 是");
         if (f.isKey()) sb.append("\n主键: 是");
-        if (f.getRefDefCode() != null) sb.append("\n引用: ").append(f.getRefDefCode()).append(".").append(f.getRefFieldCode());
+        if (f.getRefDefCode() != null)
+            sb.append("\n引用: ").append(f.getRefDefCode()).append(".").append(f.getRefFieldCode());
         return sb.toString();
     }
 

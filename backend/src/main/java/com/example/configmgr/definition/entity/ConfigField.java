@@ -1,12 +1,20 @@
 package com.example.configmgr.definition.entity;
 
-import jakarta.persistence.*;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import lombok.Data;
 
 @Data
 @Entity
 @Table(name = "config_fields",
-       uniqueConstraints = @UniqueConstraint(columnNames = {"def_code", "code"}))
+        uniqueConstraints = @UniqueConstraint(columnNames = {"def_code", "code"}))
 public class ConfigField {
 
     @Id

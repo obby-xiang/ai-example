@@ -1,8 +1,15 @@
 package com.example.configmgr.data.entity;
 
-import jakarta.persistence.*;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import lombok.Data;
 import org.hibernate.annotations.CreationTimestamp;
+
 import java.time.LocalDateTime;
 
 @Data
@@ -38,7 +45,9 @@ public class ConfigStagingRow {
     @Column(nullable = false, length = 16)
     private String status = "STAGED"; // STAGED/PUBLISHED/FAILED
 
-    /** 导入时刻对应已发布行的版本号；null 表示当时为新增行。用于发布时并发冲突检测 */
+    /**
+     * 导入时刻对应已发布行的版本号；null 表示当时为新增行。用于发布时并发冲突检测
+     */
     @Column(name = "base_version")
     private Long baseVersion;
 

@@ -1,5 +1,6 @@
 package com.example.configmgr.health;
 
+import com.example.configmgr.common.LogThrottler;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
 
@@ -49,188 +50,197 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Slf4j
 public final class ReadinessProbeRunner implements AutoCloseable {
 
-	/** 共享总时限缺省值（LB 探测超时通常 1–5s，取 2s 留出代理侧余量）。 */
-	public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(2);
+    /**
+     * 共享总时限缺省值（LB 探测超时通常 1–5s，取 2s 留出代理侧余量）。
+     */
+    public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(2);
 
-	public static final int DEFAULT_THREADS = 4;
+    public static final int DEFAULT_THREADS = 4;
 
-	public static final int DEFAULT_QUEUE_CAPACITY = 8;
+    public static final int DEFAULT_QUEUE_CAPACITY = 8;
 
-	private final Duration timeout;
+    private final Duration timeout;
 
-	private final int threads;
+    private final int threads;
 
-	private final int queueCapacity;
+    private final int queueCapacity;
 
-	private final ThreadPoolExecutor executor;
+    private final ThreadPoolExecutor executor;
 
-	public ReadinessProbeRunner(int threads, int queueCapacity, Duration timeout) {
-		if (threads <= 0) {
-			throw new IllegalStateException("app.health.readiness.probe-threads must be > 0 (current = " + threads + ")");
-		}
-		if (queueCapacity <= 0) {
-			throw new IllegalStateException(
-					"app.health.readiness.probe-queue-capacity must be > 0 (current = " + queueCapacity
-							+ "); a bounded queue cannot have zero capacity; use 1 for no waiting queue"
-							+ " (saturation still means rejection and DOWN)");
-		}
-		if (timeout == null || timeout.isZero() || timeout.isNegative()) {
-			throw new IllegalStateException(
-					"app.health.readiness.probe-timeout must be > 0 (current = " + timeout
-							+ "); zero or a negative value disables the readiness probe deadline");
-		}
-		this.timeout = timeout;
-		this.threads = threads;
-		this.queueCapacity = queueCapacity;
-		this.executor = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
-				new ArrayBlockingQueue<>(queueCapacity), new DaemonThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
-		// 空闲线程可回收：就绪探测是低频动作，不必常驻 N 条线程（剩余容量仍受 threads 上界约束）
-		this.executor.allowCoreThreadTimeOut(true);
-	}
+    public ReadinessProbeRunner(int threads, int queueCapacity, Duration timeout) {
+        if (threads <= 0) {
+            throw new IllegalStateException("app.health.readiness.probe-threads must be > 0 (current = " + threads + ")");
+        }
+        if (queueCapacity <= 0) {
+            throw new IllegalStateException(
+                    "app.health.readiness.probe-queue-capacity must be > 0 (current = " + queueCapacity
+                            + "); a bounded queue cannot have zero capacity; use 1 for no waiting queue"
+                            + " (saturation still means rejection and DOWN)");
+        }
+        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalStateException(
+                    "app.health.readiness.probe-timeout must be > 0 (current = " + timeout
+                            + "); zero or a negative value disables the readiness probe deadline");
+        }
+        this.timeout = timeout;
+        this.threads = threads;
+        this.queueCapacity = queueCapacity;
+        this.executor = new ThreadPoolExecutor(threads, threads, 30, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(queueCapacity), new DaemonThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
+        // 空闲线程可回收：就绪探测是低频动作，不必常驻 N 条线程（剩余容量仍受 threads 上界约束）
+        this.executor.allowCoreThreadTimeOut(true);
+    }
 
-	/** 缺省装配（2s / 4 线程 / 队列 8）：测试与无配置场景用。 */
-	public static ReadinessProbeRunner defaults() {
-		return new ReadinessProbeRunner(DEFAULT_THREADS, DEFAULT_QUEUE_CAPACITY, DEFAULT_TIMEOUT);
-	}
+    /**
+     * 缺省装配（2s / 4 线程 / 队列 8）：测试与无配置场景用。
+     */
+    public static ReadinessProbeRunner defaults() {
+        return new ReadinessProbeRunner(DEFAULT_THREADS, DEFAULT_QUEUE_CAPACITY, DEFAULT_TIMEOUT);
+    }
 
-	public Duration timeout() {
-		return this.timeout;
-	}
+    public Duration timeout() {
+        return this.timeout;
+    }
 
-	/**
-	 * 并发跑一遍全部探针，共享一个截止时刻。
-	 *
-	 * @return 与入参同序的结果（每个探针一条）；探针为 {@code null} 时按 DOWN 处理
-	 */
-	public List<Outcome> probe(List<ReadinessProbe> probes) {
-		if (probes.isEmpty()) {
-			return List.of();
-		}
-		List<Future<ProbeResult>> futures = new ArrayList<>(probes.size());
-		List<ProbeResult> immediate = new ArrayList<>(probes.size());
-		boolean shutDown = this.executor.isShutdown();
-		long deadlineNanos = System.nanoTime() + this.timeout.toNanos();
+    /**
+     * 并发跑一遍全部探针，共享一个截止时刻。
+     *
+     * @return 与入参同序的结果（每个探针一条）；探针为 {@code null} 时按 DOWN 处理
+     */
+    public List<Outcome> probe(List<ReadinessProbe> probes) {
+        if (probes.isEmpty()) {
+            return List.of();
+        }
+        List<Future<ProbeResult>> futures = new ArrayList<>(probes.size());
+        List<ProbeResult> immediate = new ArrayList<>(probes.size());
+        boolean shutDown = this.executor.isShutdown();
+        long deadlineNanos = System.nanoTime() + this.timeout.toNanos();
 
-		for (ReadinessProbe probe : probes) {
-			if (probe == null) {
-				futures.add(null);
-				immediate.add(ProbeResult.down("探针为 null"));
-				continue;
-			}
-			if (shutDown) {
-				futures.add(null);
-				immediate.add(ProbeResult.down("探测执行器已关闭"));
-				continue;
-			}
-			try {
-				futures.add(this.executor.submit(probe::check));
-				immediate.add(null);
-			}
-			catch (RejectedExecutionException ex) {
-				futures.add(null);
-				immediate.add(ProbeResult.down("探测线程池饱和（threads=" + this.threads
-						+ ", queue=" + this.queueCapacity + "）：本维度按 DOWN 处理，不阻塞就绪端点"));
-			}
-		}
+        for (ReadinessProbe probe : probes) {
+            if (probe == null) {
+                futures.add(null);
+                immediate.add(ProbeResult.down("探针为 null"));
+                continue;
+            }
+            if (shutDown) {
+                futures.add(null);
+                immediate.add(ProbeResult.down("探测执行器已关闭"));
+                continue;
+            }
+            try {
+                futures.add(this.executor.submit(probe::check));
+                immediate.add(null);
+            } catch (RejectedExecutionException ex) {
+                LogThrottler.warn(log, "ReadinessProbeRunner.saturated", "Readiness probe executor is saturated", ex);
+                futures.add(null);
+                immediate.add(ProbeResult.down("探测线程池饱和（threads=" + this.threads
+                        + ", queue=" + this.queueCapacity + "）：本维度按 DOWN 处理，不阻塞就绪端点"));
+            }
+        }
 
-		List<Outcome> outcomes = new ArrayList<>(probes.size());
-		for (int i = 0; i < probes.size(); i++) {
-			ReadinessProbe probe = probes.get(i);
-			ProbeResult result = immediate.get(i);
-			if (result == null) {
-				result = await(futures.get(i), deadlineNanos);
-			}
-			outcomes.add(new Outcome(probe, result));
-		}
-		return outcomes;
-	}
+        List<Outcome> outcomes = new ArrayList<>(probes.size());
+        for (int i = 0; i < probes.size(); i++) {
+            ReadinessProbe probe = probes.get(i);
+            ProbeResult result = immediate.get(i);
+            if (result == null) {
+                result = await(futures.get(i), deadlineNanos);
+            }
+            outcomes.add(new Outcome(probe, result));
+        }
+        return outcomes;
+    }
 
-	private ProbeResult await(Future<ProbeResult> future, long deadlineNanos) {
-		long remainingNanos = deadlineNanos - System.nanoTime();
-		if (remainingNanos <= 0) {
-			// 共享时限已到：已完成的任务结果仍要如实上报（不能把"早就跑完"的维度也判超时）
-			if (future.isDone()) {
-				return completed(future);
-			}
-			future.cancel(true);
-			return timeoutResult();
-		}
-		try {
-			ProbeResult result = future.get(remainingNanos, TimeUnit.NANOSECONDS);
-			return ObjectUtils.getIfNull(result, () -> ProbeResult.down("probe 返回空结果"));
-		}
-		catch (TimeoutException ex) {
-			future.cancel(true);
-			return timeoutResult();
-		}
-		catch (CancellationException ex) {
-			return ProbeResult.down("探测被取消");
-		}
-		catch (ExecutionException ex) {
-			return failed(ex);
-		}
-		catch (InterruptedException ex) {
-			Thread.currentThread().interrupt();
-			future.cancel(true);
-			return ProbeResult.down("探测等待被中断");
-		}
-	}
+    private ProbeResult await(Future<ProbeResult> future, long deadlineNanos) {
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0) {
+            // 共享时限已到：已完成的任务结果仍要如实上报（不能把"早就跑完"的维度也判超时）
+            if (future.isDone()) {
+                return completed(future);
+            }
+            future.cancel(true);
+            return timeoutResult();
+        }
+        try {
+            ProbeResult result = future.get(remainingNanos, TimeUnit.NANOSECONDS);
+            return ObjectUtils.getIfNull(result, () -> ProbeResult.down("probe 返回空结果"));
+        } catch (TimeoutException ex) {
+            LogThrottler.warn(log, "ReadinessProbeRunner.timeout", "Readiness probe timed out", ex);
+            future.cancel(true);
+            return timeoutResult();
+        } catch (CancellationException ex) {
+            LogThrottler.warn(log, "ReadinessProbeRunner.cancelled", "Readiness probe was cancelled", ex);
+            return ProbeResult.down("探测被取消");
+        } catch (ExecutionException ex) {
+            return failed(ex);
+        } catch (InterruptedException ex) {
+            LogThrottler.warn(log, "ReadinessProbeRunner.interrupted", "Readiness probe wait was interrupted", ex);
+            Thread.currentThread().interrupt();
+            future.cancel(true);
+            return ProbeResult.down("探测等待被中断");
+        }
+    }
 
-	/** 已完成任务的结果（不阻塞）。 */
-	private ProbeResult completed(Future<ProbeResult> future) {
-		try {
-			ProbeResult result = future.get();
-			return ObjectUtils.getIfNull(result, () -> ProbeResult.down("probe 返回空结果"));
-		}
-		catch (CancellationException ex) {
-			return ProbeResult.down("探测被取消");
-		}
-		catch (ExecutionException ex) {
-			return failed(ex);
-		}
-		catch (InterruptedException ex) {
-			Thread.currentThread().interrupt();
-			return ProbeResult.down("探测等待被中断");
-		}
-	}
+    /**
+     * 已完成任务的结果（不阻塞）。
+     */
+    private ProbeResult completed(Future<ProbeResult> future) {
+        try {
+            ProbeResult result = future.get();
+            return ObjectUtils.getIfNull(result, () -> ProbeResult.down("probe 返回空结果"));
+        } catch (CancellationException ex) {
+            LogThrottler.warn(log, "ReadinessProbeRunner.cancelled", "Readiness probe was cancelled", ex);
+            return ProbeResult.down("探测被取消");
+        } catch (ExecutionException ex) {
+            return failed(ex);
+        } catch (InterruptedException ex) {
+            LogThrottler.warn(log, "ReadinessProbeRunner.interrupted", "Readiness probe wait was interrupted", ex);
+            Thread.currentThread().interrupt();
+            return ProbeResult.down("探测等待被中断");
+        }
+    }
 
-	private static ProbeResult failed(ExecutionException ex) {
-		Throwable cause = ObjectUtils.getIfNull(ex.getCause(), () -> ex);
-		return ProbeResult.down(cause.getClass().getSimpleName());
-	}
+    private static ProbeResult failed(ExecutionException ex) {
+        LogThrottler.warn(log, "ReadinessProbeRunner.failed", "Readiness probe execution failed", ex);
+        Throwable cause = ObjectUtils.getIfNull(ex.getCause(), () -> ex);
+        return ProbeResult.down(cause.getClass().getSimpleName());
+    }
 
-	private ProbeResult timeoutResult() {
-		return ProbeResult.down("探测超时（共享时限 " + this.timeout.toMillis()
-				+ "ms）：就绪端点已按期返回；底层调用可能仍在进行（Java 无法杀死不可中断 I/O）");
-	}
+    private ProbeResult timeoutResult() {
+        return ProbeResult.down("探测超时（共享时限 " + this.timeout.toMillis()
+                + "ms）：就绪端点已按期返回；底层调用可能仍在进行（Java 无法杀死不可中断 I/O）");
+    }
 
-	@Override
-	public void close() {
-		this.executor.shutdownNow();
-		log.debug("Readiness probe runner closed threads={} queue={}", this.threads, this.queueCapacity);
-	}
+    @Override
+    public void close() {
+        this.executor.shutdownNow();
+        if (log.isDebugEnabled()) {
+            log.debug("Readiness probe runner closed threads={} queue={}", this.threads, this.queueCapacity);
+        }
+    }
 
-	/**
-	 * 单个维度的探测结果。
-	 *
-	 * @param probe 该维度（required 判定在调用方，见 {@link ReadinessProbe#required()}）
-	 * @param result 结果（超时/饱和/异常都收敛成 DOWN）
-	 */
-	public record Outcome(ReadinessProbe probe, ProbeResult result) {
-	}
+    /**
+     * 单个维度的探测结果。
+     *
+     * @param probe  该维度（required 判定在调用方，见 {@link ReadinessProbe#required()}）
+     * @param result 结果（超时/饱和/异常都收敛成 DOWN）
+     */
+    public record Outcome(ReadinessProbe probe, ProbeResult result) {
+    }
 
-	/** daemon 线程：探针卡住时不得阻止 JVM 退出。 */
-	private static final class DaemonThreadFactory implements ThreadFactory {
+    /**
+     * daemon 线程：探针卡住时不得阻止 JVM 退出。
+     */
+    private static final class DaemonThreadFactory implements ThreadFactory {
 
-		private final AtomicInteger counter = new AtomicInteger();
+        private final AtomicInteger counter = new AtomicInteger();
 
-		@Override
-		public Thread newThread(Runnable runnable) {
-			Thread thread = new Thread(runnable, "readiness-probe-" + this.counter.incrementAndGet());
-			thread.setDaemon(true);
-			return thread;
-		}
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "readiness-probe-" + this.counter.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        }
 
-	}
+    }
 
 }

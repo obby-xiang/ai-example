@@ -6,7 +6,7 @@ import org.slf4j.MDC;
 
 import com.example.configmgr.ai.run.InstanceId;
 import org.apache.commons.collections4.MapUtils;
-import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.math.NumberUtils;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.Map;
@@ -38,246 +38,266 @@ import java.util.concurrent.Callable;
  */
 public final class AiTrace {
 
-	/** MDC 键：本轮 id（= {@code AiController#chat} 生成的 runId，也是帧/键族的主键）。 */
-	public static final String RUN_ID = "runId";
+    /**
+     * MDC 键：本轮 id（= {@code AiController#chat} 生成的 runId，也是帧/键族的主键）。
+     */
+    public static final String RUN_ID = "runId";
 
-	/** MDC 键：会话 id。 */
-	public static final String SESSION_ID = "sessionId";
+    /**
+     * MDC 键：会话 id。
+     */
+    public static final String SESSION_ID = "sessionId";
 
-	/** MDC 键：本进程实例标识（多实例排障的"哪一半是我"）。 */
-	public static final String INSTANCE_ID = "instanceId";
+    /**
+     * MDC 键：本进程实例标识（多实例排障的"哪一半是我"）。
+     */
+    public static final String INSTANCE_ID = "instanceId";
 
-	/** MDC 键：本轮被受理的时刻（{@code turn_accepted} 那一刻；{@code queueMs} 的减数）。 */
-	public static final String ACCEPTED_AT_MS = "acceptedAtMs";
+    /**
+     * MDC 键：本轮被受理的时刻（{@code turn_accepted} 那一刻；{@code queueMs} 的减数）。
+     */
+    public static final String ACCEPTED_AT_MS = "acceptedAtMs";
 
-	/** MDC 键：续跑原因（{@code startup}/{@code manual}/{@code deadcard}/{@code reattach}）。 */
-	public static final String RESUME_REASON = "resumeReason";
+    /**
+     * MDC 键：续跑原因（{@code startup}/{@code manual}/{@code deadcard}/{@code reattach}）。
+     */
+    public static final String RESUME_REASON = "resumeReason";
 
-	/** 单值最大字符数（超出截断）：一条事件必须能一行读完。 */
-	private static final int MAX_VALUE_CHARS = 160;
+    /**
+     * 单值最大字符数（超出截断）：一条事件必须能一行读完。
+     */
+    private static final int MAX_VALUE_CHARS = 160;
 
-	private static final Logger log = LoggerFactory.getLogger(AiTrace.class);
+    private static final Logger log = LoggerFactory.getLogger(AiTrace.class);
 
-	private AiTrace() {
-	}
+    private AiTrace() {
+    }
 
-	// ── MDC ────────────────────────────────────────────────────────────────
+    // ── MDC ────────────────────────────────────────────────────────────────
 
-	/**
-	 * 绑定本轮锚点（幂等）。{@code runId} 变化时先摘掉旧的 {@code sessionId}，避免"上一轮的会话
-	 * 落在这一轮的行首"——那种行比没有行首更坏。
-	 *
-	 * @param runId     本轮 id；空 = 不动作（不把空串写进 MDC）
-	 * @param sessionId 会话 id；空 = 只绑 runId（跨实例唤醒线程只认 runId）
-	 */
-	public static void bind(String runId, String sessionId) {
-		if (StringUtils.isBlank(runId)) {
-			return;
-		}
-		if (!runId.equals(MDC.get(RUN_ID))) {
-			MDC.remove(SESSION_ID);
-			MDC.put(RUN_ID, runId);
-		}
-		// 实例标识是"本进程常量"，随锚点一起进 MDC：多实例下两份 app.log 合并后仍能分清来源
-		MDC.put(INSTANCE_ID, InstanceId.get());
-		if (StringUtils.isNotBlank(sessionId)) {
-			MDC.put(SESSION_ID, sessionId);
-		}
-	}
+    /**
+     * 绑定本轮锚点（幂等）。{@code runId} 变化时先摘掉旧的 {@code sessionId}，避免"上一轮的会话
+     * 落在这一轮的行首"——那种行比没有行首更坏。
+     *
+     * @param runId     本轮 id；空 = 不动作（不把空串写进 MDC）
+     * @param sessionId 会话 id；空 = 只绑 runId（跨实例唤醒线程只认 runId）
+     */
+    public static void bind(String runId, String sessionId) {
+        if (StringUtils.isBlank(runId)) {
+            return;
+        }
+        if (!runId.equals(MDC.get(RUN_ID))) {
+            MDC.remove(SESSION_ID);
+            MDC.put(RUN_ID, runId);
+        }
+        // 实例标识是"本进程常量"，随锚点一起进 MDC：多实例下两份 app.log 合并后仍能分清来源
+        MDC.put(INSTANCE_ID, InstanceId.get());
+        if (StringUtils.isNotBlank(sessionId)) {
+            MDC.put(SESSION_ID, sessionId);
+        }
+    }
 
-	/** 摘除本轮锚点（线程归还池/协程结束前必须调用）。 */
-	public static void clear() {
-		MDC.remove(RUN_ID);
-		MDC.remove(SESSION_ID);
-		MDC.remove(INSTANCE_ID);
-		MDC.remove(ACCEPTED_AT_MS);
-		MDC.remove(RESUME_REASON);
-	}
+    /**
+     * 摘除本轮锚点（线程归还池/协程结束前必须调用）。
+     */
+    public static void clear() {
+        MDC.remove(RUN_ID);
+        MDC.remove(SESSION_ID);
+        MDC.remove(INSTANCE_ID);
+        MDC.remove(ACCEPTED_AT_MS);
+        MDC.remove(RESUME_REASON);
+    }
 
-	/**
-	 * 记下"本轮被受理"的时刻（HTTP 线程，{@code turn_accepted} 之前）。
-	 *
-	 * <p>为什么放在 MDC 而不是静态表：受理与开始本来就在<b>同一条线程链</b>上（提交时
-	 * {@link AiMdcTaskDecorator} 抓快照），MDC 天然跟过去；静态表要自己管容量与清理，反而多一处泄漏面。
-	 * 取不到（直接驱动/续跑）时 {@code queueMs} 渲染 {@code -1} —— "没测到"与"排队 0ms"必须可区分。
-	 */
-	public static void markAccepted() {
-		MDC.put(ACCEPTED_AT_MS, String.valueOf(System.currentTimeMillis()));
-	}
+    /**
+     * 记下"本轮被受理"的时刻（HTTP 线程，{@code turn_accepted} 之前）。
+     *
+     * <p>为什么放在 MDC 而不是静态表：受理与开始本来就在<b>同一条线程链</b>上（提交时
+     * {@link AiMdcTaskDecorator} 抓快照），MDC 天然跟过去；静态表要自己管容量与清理，反而多一处泄漏面。
+     * 取不到（直接驱动/续跑）时 {@code queueMs} 渲染 {@code -1} —— "没测到"与"排队 0ms"必须可区分。
+     */
+    public static void markAccepted() {
+        MDC.put(ACCEPTED_AT_MS, String.valueOf(System.currentTimeMillis()));
+    }
 
-	/** 受理时刻（毫秒）；未标记返回 {@code -1}。 */
-	public static long acceptedAtMs() {
-		return parseLong(MDC.get(ACCEPTED_AT_MS));
-	}
+    /**
+     * 受理时刻（毫秒）；未标记返回 {@code -1}。
+     */
+    public static long acceptedAtMs() {
+        return parseLong(MDC.get(ACCEPTED_AT_MS));
+    }
 
-	/**
-	 * 记下续跑原因（{@code startup}/{@code manual}/{@code deadcard}/{@code reattach}）。
-	 *
-	 * <p>同样借 MDC 过线程边界：{@code ResumeService.resume} 在提交驱动任务<b>之前</b>置位，
-	 * 驱动线程的 {@code turn_start} 读到它 —— 于是"这一轮为什么又跑起来了"不必靠时间戳推断。
-	 */
-	public static void markResumeReason(String reason) {
-		if (StringUtils.isBlank(reason)) {
-			MDC.remove(RESUME_REASON);
-			return;
-		}
-		MDC.put(RESUME_REASON, reason);
-	}
+    /**
+     * 记下续跑原因（{@code startup}/{@code manual}/{@code deadcard}/{@code reattach}）。
+     *
+     * <p>同样借 MDC 过线程边界：{@code ResumeService.resume} 在提交驱动任务<b>之前</b>置位，
+     * 驱动线程的 {@code turn_start} 读到它 —— 于是"这一轮为什么又跑起来了"不必靠时间戳推断。
+     */
+    public static void markResumeReason(String reason) {
+        if (StringUtils.isBlank(reason)) {
+            MDC.remove(RESUME_REASON);
+            return;
+        }
+        MDC.put(RESUME_REASON, reason);
+    }
 
-	/** 续跑原因；未标注返回 {@code null}（调用方决定回落口径）。 */
-	public static String currentResumeReason() {
-		return MDC.get(RESUME_REASON);
-	}
+    /**
+     * 续跑原因；未标注返回 {@code null}（调用方决定回落口径）。
+     */
+    public static String currentResumeReason() {
+        return MDC.get(RESUME_REASON);
+    }
 
-	/** 只摘续跑原因（不动 runId/sessionId）：临时标注后必须还原，避免"上一个入口的原因"黏在池线程上。 */
-	public static void clearResumeReason() {
-		MDC.remove(RESUME_REASON);
-	}
+    /**
+     * 只摘续跑原因（不动 runId/sessionId）：临时标注后必须还原，避免"上一个入口的原因"黏在池线程上。
+     */
+    public static void clearResumeReason() {
+        MDC.remove(RESUME_REASON);
+    }
 
-	private static long parseLong(String text) {
-		return NumberUtils.toLong(StringUtils.trim(text), -1L);
-	}
+    private static long parseLong(String text) {
+        return NumberUtils.toLong(StringUtils.trim(text), -1L);
+    }
 
-	/** 当前 MDC 里的 runId（无则 null）。 */
-	public static String currentRunId() {
-		return MDC.get(RUN_ID);
-	}
+    /**
+     * 当前 MDC 里的 runId（无则 null）。
+     */
+    public static String currentRunId() {
+        return MDC.get(RUN_ID);
+    }
 
-	/** 当前 MDC 里的 sessionId（无则 null）。 */
-	public static String currentSessionId() {
-		return MDC.get(SESSION_ID);
-	}
+    /**
+     * 当前 MDC 里的 sessionId（无则 null）。
+     */
+    public static String currentSessionId() {
+        return MDC.get(SESSION_ID);
+    }
 
-	/**
-	 * 把 <b>调用时刻</b>的 MDC 快照带进异步任务，任务结束后恢复该线程原状。
-	 *
-	 * @param runnable 实际任务
-	 * @return 可直接提交给任意 {@code Executor} 的包装体
-	 */
-	public static Runnable wrap(Runnable runnable) {
-		Map<String, String> captured = MDC.getCopyOfContextMap();
-		return () -> {
-			Map<String, String> previous = MDC.getCopyOfContextMap();
-			apply(captured);
-			try {
-				runnable.run();
-			}
-			finally {
-				apply(previous);
-			}
-		};
-	}
+    /**
+     * 把 <b>调用时刻</b>的 MDC 快照带进异步任务，任务结束后恢复该线程原状。
+     *
+     * @param runnable 实际任务
+     * @return 可直接提交给任意 {@code Executor} 的包装体
+     */
+    public static Runnable wrap(Runnable runnable) {
+        Map<String, String> captured = MDC.getCopyOfContextMap();
+        return () -> {
+            Map<String, String> previous = MDC.getCopyOfContextMap();
+            apply(captured);
+            try {
+                runnable.run();
+            } finally {
+                apply(previous);
+            }
+        };
+    }
 
-	/**
-	 * {@link #wrap(Runnable)} 的取返回值版本（{@code ExecutorService.submit(Callable)} 用）。
-	 *
-	 * <p>刻意换个名字而不做重载：一个"返回值的 lambda"同时也是合法的 {@code Runnable}，
-	 * 重载会在调用点产生歧义。
-	 */
-	public static <T> Callable<T> wrapCallable(Callable<T> callable) {
-		Map<String, String> captured = MDC.getCopyOfContextMap();
-		return () -> {
-			Map<String, String> previous = MDC.getCopyOfContextMap();
-			apply(captured);
-			try {
-				return callable.call();
-			}
-			finally {
-				apply(previous);
-			}
-		};
-	}
+    /**
+     * {@link #wrap(Runnable)} 的取返回值版本（{@code ExecutorService.submit(Callable)} 用）。
+     *
+     * <p>刻意换个名字而不做重载：一个"返回值的 lambda"同时也是合法的 {@code Runnable}，
+     * 重载会在调用点产生歧义。
+     */
+    public static <T> Callable<T> wrapCallable(Callable<T> callable) {
+        Map<String, String> captured = MDC.getCopyOfContextMap();
+        return () -> {
+            Map<String, String> previous = MDC.getCopyOfContextMap();
+            apply(captured);
+            try {
+                return callable.call();
+            } finally {
+                apply(previous);
+            }
+        };
+    }
 
-	private static void apply(Map<String, String> from) {
-		if (MapUtils.isEmpty(from)) {
-			MDC.clear();
-			return;
-		}
-		MDC.setContextMap(from);
-	}
+    private static void apply(Map<String, String> from) {
+        if (MapUtils.isEmpty(from)) {
+            MDC.clear();
+            return;
+        }
+        MDC.setContextMap(from);
+    }
 
-	// ── 结构化事件 ──────────────────────────────────────────────────────────
+    // ── 结构化事件 ──────────────────────────────────────────────────────────
 
-	/**
-	 * 产出一条结构化单行事件：{@code event=<name> runId=<..> sessionId=<..> <k>=<v> ...}。
-	 *
-	 * <p>{@code runId}/{@code sessionId} 取自 MDC（缺省渲染 {@code -}，便于"这条事件没挂上锚点"
-	 * 一眼可见 —— 静默补空值会让 MDC 漏绑变成看不见的缺陷）。
-	 *
-	 * @param name 事件名（{@code turn_start} / {@code tool_call_end} …）
-	 * @param kv   成对的键值（奇数个时最后一个以 {@code -} 补齐，不抛异常：日志不许影响主流程）
-	 */
-	public static void event(String name, Object... kv) {
-		eventOn(null, null, name, kv);
-	}
+    /**
+     * 产出一条结构化单行事件：{@code event=<name> runId=<..> sessionId=<..> <k>=<v> ...}。
+     *
+     * <p>{@code runId}/{@code sessionId} 取自 MDC（缺省渲染 {@code -}，便于"这条事件没挂上锚点"
+     * 一眼可见 —— 静默补空值会让 MDC 漏绑变成看不见的缺陷）。
+     *
+     * @param name 事件名（{@code turn_start} / {@code tool_call_end} …）
+     * @param kv   成对的键值（奇数个时最后一个以 {@code -} 补齐，不抛异常：日志不许影响主流程）
+     */
+    public static void event(String name, Object... kv) {
+        eventOn(null, null, name, kv);
+    }
 
-	/**
-	 * 显式锚点版：调用方<b>已经知道</b>本行属于哪一轮，而当前线程的 MDC 未必装着它
-	 * （HTTP 提交线程、跨实例唤醒线程）。显式值优先，缺省回落 MDC ——
-	 * 于是"事件行的 runId 一定对"不依赖调用线程的运气。
-	 */
-	public static void eventOn(String runId, String sessionId, String name, Object... kv) {
-		if (!log.isInfoEnabled()) {
-			return;
-		}
-		// 行首锚点补绑（AI 日志最小补齐批）：eventOn 的显式锚点此前只进事件体，行首仍可能是空的
-		// （压缩/决策这类"由旁路线程发射"的事件就是这样丢了行首）。这里临时补绑、发射后还原 ——
-		// "显式给了 runId 就一定能在行首看到它"不依赖调用线程的 MDC 运气。
-		Map<String, String> previous = MDC.getCopyOfContextMap();
-		if (currentRunId() == null && StringUtils.isNotBlank(runId)) {
-			bind(runId, sessionId);
-		}
-		else if (currentSessionId() == null && StringUtils.isNotBlank(sessionId) && currentRunId() != null) {
-			MDC.put(SESSION_ID, sessionId);
-		}
-		try {
-			writeEvent(runId, sessionId, name, kv);
-		}
-		finally {
-			apply(previous);
-		}
-	}
+    /**
+     * 显式锚点版：调用方<b>已经知道</b>本行属于哪一轮，而当前线程的 MDC 未必装着它
+     * （HTTP 提交线程、跨实例唤醒线程）。显式值优先，缺省回落 MDC ——
+     * 于是"事件行的 runId 一定对"不依赖调用线程的运气。
+     */
+    public static void eventOn(String runId, String sessionId, String name, Object... kv) {
+        if (!log.isInfoEnabled()) {
+            return;
+        }
+        // 行首锚点补绑（AI 日志最小补齐批）：eventOn 的显式锚点此前只进事件体，行首仍可能是空的
+        // （压缩/决策这类"由旁路线程发射"的事件就是这样丢了行首）。这里临时补绑、发射后还原 ——
+        // "显式给了 runId 就一定能在行首看到它"不依赖调用线程的 MDC 运气。
+        Map<String, String> previous = MDC.getCopyOfContextMap();
+        if (currentRunId() == null && StringUtils.isNotBlank(runId)) {
+            bind(runId, sessionId);
+        } else if (currentSessionId() == null && StringUtils.isNotBlank(sessionId) && currentRunId() != null) {
+            MDC.put(SESSION_ID, sessionId);
+        }
+        try {
+            writeEvent(runId, sessionId, name, kv);
+        } finally {
+            apply(previous);
+        }
+    }
 
-	private static void writeEvent(String runId, String sessionId, String name, Object... kv) {
-		StringBuilder line = new StringBuilder(96);
-		line.append("event=").append(clean(name)).append(' ');
-		appendField(line, RUN_ID, StringUtils.getIfBlank(runId, AiTrace::currentRunId));
-		line.append(' ');
-		appendField(line, SESSION_ID, StringUtils.getIfBlank(sessionId, AiTrace::currentSessionId));
-		for (int i = 0; i + 1 < kv.length; i += 2) {
-			line.append(' ');
-			appendField(line, String.valueOf(kv[i]), kv[i + 1]);
-		}
-		if (kv.length % 2 == 1) {
-			line.append(' ').append(clean(kv[kv.length - 1])).append("=-");
-		}
-		log.info(line.toString());
-	}
+    private static void writeEvent(String runId, String sessionId, String name, Object... kv) {
+        StringBuilder line = new StringBuilder(96);
+        line.append("event=").append(clean(name)).append(' ');
+        appendField(line, RUN_ID, StringUtils.getIfBlank(runId, AiTrace::currentRunId));
+        line.append(' ');
+        appendField(line, SESSION_ID, StringUtils.getIfBlank(sessionId, AiTrace::currentSessionId));
+        for (int i = 0; i + 1 < kv.length; i += 2) {
+            line.append(' ');
+            appendField(line, String.valueOf(kv[i]), kv[i + 1]);
+        }
+        if (kv.length % 2 == 1) {
+            line.append(' ').append(clean(kv[kv.length - 1])).append("=-");
+        }
+        log.info(line.toString());
+    }
 
-	private static void appendField(StringBuilder line, String key, Object value) {
-		line.append(clean(key)).append('=').append(clean(value));
-	}
+    private static void appendField(StringBuilder line, String key, Object value) {
+        line.append(clean(key)).append('=').append(clean(value));
+    }
 
-	/**
-	 * 单行化 + 截断。换行/制表符折成空格：一条事件必须只占一行，否则 grep 与日志聚合都会错位。
-	 */
-	static String clean(Object value) {
-		if (value == null) {
-			return "-";
-		}
-		String text = String.valueOf(value);
-		StringBuilder out = new StringBuilder(Math.min(text.length(), MAX_VALUE_CHARS));
-		for (int i = 0; i < text.length() && out.length() < MAX_VALUE_CHARS; i++) {
-			char ch = text.charAt(i);
-			out.append(ch == '\r' || ch == '\n' || ch == '\t' ? ' ' : ch);
-		}
-		if (out.length() == 0) {
-			return "-";
-		}
-		if (text.length() > MAX_VALUE_CHARS) {
-			out.append("…");
-		}
-		return out.toString();
-	}
+    /**
+     * 单行化 + 截断。换行/制表符折成空格：一条事件必须只占一行，否则 grep 与日志聚合都会错位。
+     */
+    static String clean(Object value) {
+        if (value == null) {
+            return "-";
+        }
+        String text = String.valueOf(value);
+        StringBuilder out = new StringBuilder(Math.min(text.length(), MAX_VALUE_CHARS));
+        for (int i = 0; i < text.length() && out.length() < MAX_VALUE_CHARS; i++) {
+            char ch = text.charAt(i);
+            out.append(ch == '\r' || ch == '\n' || ch == '\t' ? ' ' : ch);
+        }
+        if (out.length() == 0) {
+            return "-";
+        }
+        if (text.length() > MAX_VALUE_CHARS) {
+            out.append("…");
+        }
+        return out.toString();
+    }
 
 }

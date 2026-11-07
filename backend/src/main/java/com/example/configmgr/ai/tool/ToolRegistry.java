@@ -6,7 +6,7 @@ import com.example.configmgr.ai.observe.LogSampling;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.ArrayUtils;
-import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.math.NumberUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
@@ -21,6 +21,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.ClassUtils;
 
 import jakarta.annotation.PostConstruct;
+
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -48,7 +49,9 @@ public class ToolRegistry {
     @Autowired
     private ApplicationContext applicationContext;
 
-    /** 工具定义覆盖源（YAML 阶段；缺失 ⇒ 空快照 ⇒ 全部回落注解）。 */
+    /**
+     * 工具定义覆盖源（YAML 阶段；缺失 ⇒ 空快照 ⇒ 全部回落注解）。
+     */
     @Autowired(required = false)
     private ToolDefinitionSource toolDefinitionSource;
 
@@ -69,13 +72,19 @@ public class ToolRegistry {
     private final Map<String, ToolMeta> metaMap = new LinkedHashMap<>();
     private final Map<String, ToolCallback> callbackMap = new LinkedHashMap<>();
 
-    /** 已应用的快照版本（诊断面 / 日志用；空快照 = "annotations"）。 */
+    /**
+     * 已应用的快照版本（诊断面 / 日志用；空快照 = "annotations"）。
+     */
     private String snapshotVersion = "annotations";
 
-    /** 任务终态：披露面据此收窄"已完成导出任务"的再导出入口。 */
+    /**
+     * 任务终态：披露面据此收窄"已完成导出任务"的再导出入口。
+     */
     public static final String TASK_STATUS_COMPLETED = "COMPLETED";
 
-    /** 被终态收窄的工具（只收这一支：COMPLETED 不改变导入/发布链的披露）。 */
+    /**
+     * 被终态收窄的工具（只收这一支：COMPLETED 不改变导入/发布链的披露）。
+     */
     private static final String TOOL_START_EXPORT = AiToolNames.START_EXPORT;
 
     @PostConstruct
@@ -86,8 +95,7 @@ public class ToolRegistry {
             Object bean;
             try {
                 bean = applicationContext.getBean(beanName);
-            }
-            catch (RuntimeException e) {
+            } catch (RuntimeException e) {
                 handleBeanFailure(beanName, e, failedToolBeans, failures);
                 continue;
             }
@@ -105,13 +113,12 @@ public class ToolRegistry {
     }
 
     private void handleBeanFailure(String beanName, RuntimeException error, List<String> failedToolBeans,
-            List<RuntimeException> failures) {
+                                   List<RuntimeException> failures) {
         if (isDeclaredToolBean(beanName)) {
             failedToolBeans.add(beanName);
             failures.add(error);
             log.error("tool bean creation failed (startup aborts after scanning) bean={}", beanName, error);
-        }
-        else if (LogSampling.canAcquire("tool-bean-scan-skip")) {
+        } else if (LogSampling.canAcquire("tool-bean-scan-skip")) {
             log.warn("skipped bean that failed to create during scan (not a tool bean) bean={}", beanName, error);
         }
     }
@@ -131,8 +138,7 @@ public class ToolRegistry {
             for (ToolCallback tc : provider.getToolCallbacks()) {
                 callbackMap.put(tc.getToolDefinition().name(), normalizeSchema(tc));
             }
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             if (!hasToolAnnotation) {
                 return;
             }
@@ -239,11 +245,11 @@ public class ToolRegistry {
         StringBuilder message = new StringBuilder("Tool risk/channel invariant violated (DANGER => BACKEND; BACKEND => READ/DANGER)");
         if (!dangerousFrontend.isEmpty()) {
             message.append(": DANGER+FRONTEND tools would deadlock ")
-                .append(dangerousFrontend.stream().sorted().toList());
+                    .append(dangerousFrontend.stream().sorted().toList());
         }
         if (!backendWrite.isEmpty()) {
             message.append(": backend write tools would bypass confirmation ")
-                .append(backendWrite.stream().sorted().toList());
+                    .append(backendWrite.stream().sorted().toList());
         }
         throw new IllegalStateException(message + "; startup aborted because runtime behavior would deadlock or bypass confirmation");
     }
@@ -262,8 +268,7 @@ public class ToolRegistry {
             ConfigurableListableBeanFactory beanFactory =
                     (ConfigurableListableBeanFactory) applicationContext.getAutowireCapableBeanFactory();
             return hasToolMethod(declaredType(beanFactory.getBeanDefinition(beanName), beanFactory));
-        }
-        catch (RuntimeException e) {
+        } catch (RuntimeException e) {
             // 手工注册的单例没有 BeanDefinition 等：无法判定 ⇒ 按非工具 bean 处理
             if (LogSampling.canAcquire("tool-bean-declared-type")) {
                 log.warn("could not resolve bean declared type bean={}", beanName, e);
@@ -272,7 +277,9 @@ public class ToolRegistry {
         }
     }
 
-    /** BeanDefinition → 声明类型（{@code null} = 解析不出，调用方按"非工具 bean"处理）。 */
+    /**
+     * BeanDefinition → 声明类型（{@code null} = 解析不出，调用方按"非工具 bean"处理）。
+     */
     private static Class<?> declaredType(BeanDefinition definition, ConfigurableListableBeanFactory beanFactory) {
         if (definition.getBeanClassName() != null) {
             return resolveClass(definition.getBeanClassName());
@@ -290,7 +297,7 @@ public class ToolRegistry {
         }
         // 工厂方法可能是包级私有（测试替身常见），故走 getDeclaredMethods 并沿继承链找
         for (Class<?> current = ClassUtils.getUserClass(factoryType); current != null && current != Object.class;
-                current = current.getSuperclass()) {
+             current = current.getSuperclass()) {
             for (Method method : current.getDeclaredMethods()) {
                 if (method.getName().equals(factoryMethodName)) {
                     return method.getReturnType();
@@ -303,19 +310,20 @@ public class ToolRegistry {
     private static Class<?> resolveClass(String className) {
         try {
             return ClassUtils.forName(className, ToolRegistry.class.getClassLoader());
-        }
-        catch (ClassNotFoundException | LinkageError e) {
+        } catch (ClassNotFoundException | LinkageError e) {
             return null;
         }
     }
 
-    /** 沿继承链找 {@code @Tool}（{@link ClassUtils#getUserClass} 先剥掉 CGLIB 代理子类）。 */
+    /**
+     * 沿继承链找 {@code @Tool}（{@link ClassUtils#getUserClass} 先剥掉 CGLIB 代理子类）。
+     */
     private static boolean hasToolMethod(Class<?> type) {
         if (type == null) {
             return false;
         }
         for (Class<?> current = ClassUtils.getUserClass(type); current != null && current != Object.class;
-                current = current.getSuperclass()) {
+             current = current.getSuperclass()) {
             for (Method method : current.getDeclaredMethods()) {
                 if (method.getAnnotation(Tool.class) != null) {
                     return true;
@@ -415,7 +423,9 @@ public class ToolRegistry {
         }
     }
 
-    /** 快照版本（诊断面 `GET /api/ai/tools` 可观测；改描述会击穿 prompt 缓存）。 */
+    /**
+     * 快照版本（诊断面 `GET /api/ai/tools` 可观测；改描述会击穿 prompt 缓存）。
+     */
     public String snapshotVersion() {
         return snapshotVersion;
     }
@@ -452,7 +462,9 @@ public class ToolRegistry {
             AiToolNames.SET_CONDITION, AiToolNames.CONFIRM_STEP,
             "kb_search", "kb_read_doc", "kb_lookup_term", "read_tool_result");
 
-    /** 交棒标记只在 {@code QUERY_COND} 生效（离开步骤 = 完整工具面恢复，判据与披露面同源）。 */
+    /**
+     * 交棒标记只在 {@code QUERY_COND} 生效（离开步骤 = 完整工具面恢复，判据与披露面同源）。
+     */
     private static boolean isConditionStructuringAllowed(String name, AiContext ctx) {
         if (ctx == null || !"QUERY_COND".equals(ctx.getStep()) || ctx.getExtra() == null
                 || !Boolean.TRUE.equals(ctx.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF))) {
@@ -482,7 +494,9 @@ public class ToolRegistry {
         return List.copyOf(callbackMap.values());
     }
 
-    /** 已登记工具总数（只读诊断面 {@code GET /api/ai/tools} 的对照值）。 */
+    /**
+     * 已登记工具总数（只读诊断面 {@code GET /api/ai/tools} 的对照值）。
+     */
     public int registeredCount() {
         return callbackMap.size();
     }
@@ -574,7 +588,9 @@ public class ToolRegistry {
         return this.sheetSwitches.disabledGate(name);
     }
 
-    /** 未披露的原因码（{@code SHEET_DISABLED} / {@code SCOPE_NOT_DISCLOSED}）。 */
+    /**
+     * 未披露的原因码（{@code SHEET_DISABLED} / {@code SCOPE_NOT_DISCLOSED}）。
+     */
     public String undisclosedCode(String name) {
         return isSheetDisabled(name) ? ErrorCodes.SHEET_DISABLED : ErrorCodes.SCOPE_NOT_DISCLOSED;
     }

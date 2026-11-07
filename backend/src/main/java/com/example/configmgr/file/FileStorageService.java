@@ -3,11 +3,13 @@ package com.example.configmgr.file;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
+import com.example.configmgr.common.LogThrottler;
 
 import com.example.configmgr.config.AppProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -15,7 +17,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -53,10 +59,14 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class FileStorageService {
 
-    /** 流式摘要的读缓冲（顺序读，不整文件进内存）。 */
+    /**
+     * 流式摘要的读缓冲（顺序读，不整文件进内存）。
+     */
     private static final int DIGEST_BUFFER_BYTES = 8192;
 
-    /** 新键扩展名的形状：一个点 + 1~10 个 ASCII 字母数字（挡掉 `./../` 这类拼接）。 */
+    /**
+     * 新键扩展名的形状：一个点 + 1~10 个 ASCII 字母数字（挡掉 `./../` 这类拼接）。
+     */
     private static final Pattern SAFE_EXTENSION = Pattern.compile("\\.[A-Za-z0-9]{1,10}");
 
     private final AppProperties appProperties;
@@ -71,12 +81,15 @@ public class FileStorageService {
         try {
             Files.createDirectories(dir);
         } catch (IOException e) {
+            LogThrottler.warn(log, "FileStorageService.baseDir", "Unable to create file storage directory", e);
             throw new RuntimeException("Unable to create file storage directory: " + dir, e);
         }
         return dir;
     }
 
-    /** 分配一个新键（不建文件）：调用方拿 {@link StoredFile#path()} 写盘，把 key 落库。 */
+    /**
+     * 分配一个新键（不建文件）：调用方拿 {@link StoredFile#path()} 写盘，把 key 落库。
+     */
     public StoredFile allocate(String ext) {
         String key = UUID.randomUUID() + safeExtension(ext);
         return new StoredFile(key, keyPath(key));
@@ -91,12 +104,14 @@ public class FileStorageService {
         StoredFile stored = allocate(extensionOf(filename));
         try {
             Files.copy(in, stored.path(), StandardCopyOption.REPLACE_EXISTING);
-        }
-        catch (IOException | RuntimeException e) {
+        } catch (IOException | RuntimeException e) {
+            LogThrottler.warn(log, "FileStorageService.store", "File store failed; cleaning partial file", e);
             deleteQuietly(stored.path());
             throw e;
         }
-        log.debug("Stored file key={} path={}", stored.key(), stored.path());
+        if (log.isDebugEnabled()) {
+            log.debug("Stored file key={} path={}", stored.key(), stored.path());
+        }
         return stored;
     }
 
@@ -113,8 +128,8 @@ public class FileStorageService {
         Path raw;
         try {
             raw = Path.of(key);
-        }
-        catch (InvalidPathException e) {
+        } catch (InvalidPathException e) {
+            LogThrottler.warn(log, "FileStorageService.invalidKey", "Invalid file storage key", e);
             throw new IllegalArgumentException("Invalid file storage key: " + key, e);
         }
         if (raw.isAbsolute()) {
@@ -132,7 +147,8 @@ public class FileStorageService {
     }
 
     public byte[] read(String key) throws IOException {
-        return Files.readAllBytes(resolve(key));
+        byte[] bytes = Files.readAllBytes(resolve(key));
+        return bytes.length == 0 ? ArrayUtils.EMPTY_BYTE_ARRAY : bytes;
     }
 
     /**
@@ -149,15 +165,15 @@ public class FileStorageService {
         MessageDigest md;
         try {
             md = MessageDigest.getInstance("SHA-256");
-        }
-        catch (NoSuchAlgorithmException ex) {
+        } catch (NoSuchAlgorithmException ex) {
+            LogThrottler.warn(log, "FileStorageService.sha256", "SHA-256 is unavailable", ex);
             throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE,
                     "The runtime does not provide a SHA-256 implementation", ex);
         }
         long size = 0L;
         byte[] buffer = new byte[DIGEST_BUFFER_BYTES];
         try (InputStream raw = Files.newInputStream(resolve(key));
-                DigestInputStream in = new DigestInputStream(raw, md)) {
+             DigestInputStream in = new DigestInputStream(raw, md)) {
             int read;
             while ((read = in.read(buffer)) != -1) {
                 size += read;
@@ -166,7 +182,9 @@ public class FileStorageService {
         return new FileDigest(Hex.encodeHexString(md.digest()), size);
     }
 
-    /** 文件摘要值对象（sha256 小写十六进制 + 字节数）。 */
+    /**
+     * 文件摘要值对象（sha256 小写十六进制 + 字节数）。
+     */
     public record FileDigest(String sha256, long size) {
     }
 
@@ -184,9 +202,8 @@ public class FileStorageService {
     public void delete(String key) {
         try {
             Files.deleteIfExists(resolve(key));
-        }
-        catch (IOException e) {
-            log.warn("Failed to delete file key={}", key, e);
+        } catch (IOException e) {
+            LogThrottler.warn(log, "FileStorageService.delete", "Failed to delete file key={}", key, e);
         }
     }
 
@@ -242,7 +259,9 @@ public class FileStorageService {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            log.debug("No active transaction sync, rollback cleanup registration skipped: {}", key);
+            if (log.isDebugEnabled()) {
+                log.debug("No active transaction sync, rollback cleanup registration skipped: {}", key);
+            }
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -266,10 +285,9 @@ public class FileStorageService {
     private void deleteInCallback(String key) {
         try {
             delete(key);
-        }
-        catch (RuntimeException e) {
-            log.warn("Transaction callback file delete failed (ignored, does not block later synchronizers) key={}",
-                    key, e);
+        } catch (RuntimeException e) {
+            LogThrottler.warn(log, "FileStorageService.deleteCallback",
+                    "Transaction callback file delete failed (ignored, does not block later synchronizers) key={}", key, e);
         }
     }
 
@@ -297,13 +315,15 @@ public class FileStorageService {
     private void deleteQuietly(Path path) {
         try {
             Files.deleteIfExists(path);
-        }
-        catch (IOException | RuntimeException e) {
-            log.warn("Failed to clean up partial file after write failure path={}", path, e);
+        } catch (IOException | RuntimeException e) {
+            LogThrottler.warn(log, "FileStorageService.partialCleanup",
+                    "Failed to clean up partial file after write failure path={}", path, e);
         }
     }
 
-    /** 相对键里出现 {@code ..} 段即拒绝（先于 normalize：{@code a/../b} 正常，但仍是不可接受的键形状）。 */
+    /**
+     * 相对键里出现 {@code ..} 段即拒绝（先于 normalize：{@code a/../b} 正常，但仍是不可接受的键形状）。
+     */
     private static boolean hasParentSegment(Path path) {
         for (Path segment : path) {
             if ("..".equals(segment.toString())) {
@@ -321,7 +341,9 @@ public class FileStorageService {
         return dot < 0 ? "" : filename.substring(dot);
     }
 
-    /** 只接受 ASCII 字母数字扩展名；挡掉客户端文件名里夹带的路径片段。 */
+    /**
+     * 只接受 ASCII 字母数字扩展名；挡掉客户端文件名里夹带的路径片段。
+     */
     private static String safeExtension(String ext) {
         if (StringUtils.isEmpty(ext)) {
             return "";

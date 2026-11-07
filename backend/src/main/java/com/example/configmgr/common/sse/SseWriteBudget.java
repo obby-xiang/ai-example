@@ -1,5 +1,6 @@
 package com.example.configmgr.common.sse;
 
+import com.example.configmgr.common.LogThrottler;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.ExecutionException;
@@ -122,7 +123,9 @@ public final class SseWriteBudget {
      */
     public static final long DEFAULT_TIMEOUT_MILLIS = 15_000L;
 
-    /** 累计写超时次数（进程级，供 {@code GET /api/ai/health} 的 sseDelivery 段）。 */
+    /**
+     * 累计写超时次数（进程级，供 {@code GET /api/ai/health} 的 sseDelivery 段）。
+     */
     private static final AtomicLong WRITE_TIMEOUTS = new AtomicLong();
 
     /**
@@ -160,7 +163,9 @@ public final class SseWriteBudget {
      */
     public static final int DEFAULT_MAX_WRITER_THREADS = 64;
 
-    /** 写出线程编号（{@code sse-write-N}）。 */
+    /**
+     * 写出线程编号（{@code sse-write-N}）。
+     */
     private static final AtomicLong WRITER_NO = new AtomicLong();
 
     /**
@@ -212,7 +217,9 @@ public final class SseWriteBudget {
         }
     }
 
-    /** 写出执行器；{@code null} = 直执（调用线程内写出，无预算 —— 单测/非 Spring 路径）。 */
+    /**
+     * 写出执行器；{@code null} = 直执（调用线程内写出，无预算 —— 单测/非 Spring 路径）。
+     */
     private final ExecutorService executor;
 
     private final long timeoutMillis;
@@ -230,7 +237,9 @@ public final class SseWriteBudget {
         return new SseWriteBudget(null, 0L);
     }
 
-    /** 带预算的写出（{@code executor} 非空；{@code timeoutMillis} 必须为正）。 */
+    /**
+     * 带预算的写出（{@code executor} 非空；{@code timeoutMillis} 必须为正）。
+     */
     public static SseWriteBudget on(ExecutorService executor, long timeoutMillis) {
         if (executor == null) {
             return direct();
@@ -238,7 +247,9 @@ public final class SseWriteBudget {
         return new SseWriteBudget(executor, timeoutMillis > 0 ? timeoutMillis : DEFAULT_TIMEOUT_MILLIS);
     }
 
-    /** 进程级弹性写出池（幂等；装配一次后全进程复用）。 */
+    /**
+     * 进程级弹性写出池（幂等；装配一次后全进程复用）。
+     */
     public static synchronized ExecutorService sharedElasticWriterPool() {
         return sharedWriterPool(DEFAULT_MAX_WRITER_THREADS);
     }
@@ -253,17 +264,19 @@ public final class SseWriteBudget {
         if (sharedWriterPool == null) {
             ThreadPoolExecutor pool = new ThreadPoolExecutor(0, cap, 60L, TimeUnit.SECONDS,
                     new SynchronousQueue<>(), runnable -> {
-                        Thread thread = new Thread(runnable, "sse-write-" + WRITER_NO.incrementAndGet());
-                        thread.setDaemon(true);
-                        return thread;
-                    }, new ThreadPoolExecutor.AbortPolicy());
+                Thread thread = new Thread(runnable, "sse-write-" + WRITER_NO.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
             pool.allowCoreThreadTimeOut(true);
             sharedWriterPool = pool;
         }
         return sharedWriterPool;
     }
 
-    /** 共享写出池的线程硬上限（未装配 ⇒ 缺省值；供 {@code /api/ai/health} 与断言）。 */
+    /**
+     * 共享写出池的线程硬上限（未装配 ⇒ 缺省值；供 {@code /api/ai/health} 与断言）。
+     */
     public static int sharedWriterPoolMaxThreads() {
         ThreadPoolExecutor pool = sharedWriterPool;
         return pool == null ? DEFAULT_MAX_WRITER_THREADS : pool.getMaximumPoolSize();
@@ -289,8 +302,8 @@ public final class SseWriteBudget {
             if (!pool.awaitTermination(2L, TimeUnit.SECONDS)) {
                 pool.shutdownNow();
             }
-        }
-        catch (InterruptedException ex) {
+        } catch (InterruptedException ex) {
+            LogThrottler.warn(log, "SseWriteBudget.interrupted", "SSE writer was interrupted", ex);
             pool.shutdownNow();
             Thread.currentThread().interrupt();
         }
@@ -298,22 +311,30 @@ public final class SseWriteBudget {
         shutdownTimeoutScheduler();
     }
 
-    /** 累计写超时次数（进程级）。 */
+    /**
+     * 累计写超时次数（进程级）。
+     */
     public static long writeTimeouts() {
         return WRITE_TIMEOUTS.get();
     }
 
-    /** 累计写池饱和次数（进程级）。 */
+    /**
+     * 累计写池饱和次数（进程级）。
+     */
     public static long saturations() {
         return WRITE_SATURATIONS.get();
     }
 
-    /** 本预算是否真的约束写出（false = 直执）。 */
+    /**
+     * 本预算是否真的约束写出（false = 直执）。
+     */
     public boolean budgeted() {
         return this.executor != null;
     }
 
-    /** 单帧写出的预算（毫秒）。 */
+    /**
+     * 单帧写出的预算（毫秒）。
+     */
     public long timeoutMillis() {
         return this.timeoutMillis;
     }
@@ -328,7 +349,7 @@ public final class SseWriteBudget {
      * <li>{@link Outcome#SENT}：写出成功；</li>
      * <li>{@link Outcome#FAILED}：写出抛异常（客户端断开 / 已完成的 emitter），异常交回调用方判处置；</li>
      * <li>{@link Outcome#TIMED_OUT}：超出预算 —— <b>本类不碰 emitter</b>（写线程仍持有其监视器），
-     * 计数 + DEBUG（调用方按上下文记 WARN），由调用方摘除维度处置（不再投递该订阅者；写出线程返回时自行收尾）；</li>
+     * 计数 + 去重 WARN，由调用方摘除维度处置（不再投递该订阅者；写出线程返回时自行收尾）；</li>
      * <li>{@link Outcome#SATURATED}：写出池已达硬上限（{@link #DEFAULT_MAX_WRITER_THREADS}）且无处排队 ——
      * 本次写出<b>没有发生、也不会发生</b>，调用方据此摘除触发本次写出的订阅者（慢订阅者摘除）；</li>
      * <li>{@link Outcome#INTERRUPTED}：调用线程被中断（已复位中断位并 {@code cancel(true)}）。</li>
@@ -336,59 +357,62 @@ public final class SseWriteBudget {
      */
     public Result write(SendTask task) {
         if (this.executor == null) {
-            try {
-                task.send();
-                return Result.sent();
-            }
-            catch (Exception ex) {
-                return Result.failed(ex);
-            }
+            return writeDirect(task);
         }
         Future<?> future;
         try {
             future = this.executor.submit(() -> {
                 try {
                     task.send();
-                }
-                catch (Exception ex) {
+                } catch (Exception ex) {
+                    LogThrottler.warn(log, "SseWriteBudget.writeFailure", "SSE write task failed", ex);
                     throw new WriteFailure(ex);
                 }
             });
-        }
-        catch (RejectedExecutionException ex) {
+        } catch (RejectedExecutionException ex) {
             // 硬上限 + SynchronousQueue + AbortPolicy ⇒ 池满即拒。这**不是**"客户端断开"
             // （旧实现把它折成 FAILED，语义与日志都会指向错误方向），而是"这条写挤不进来"：
-            // 计数 + DEBUG，交回调用方摘除触发本次写出的那个订阅者。
+            // 计数 + 去重 WARN，交回调用方摘除触发本次写出的那个订阅者。
             // 被摘者可能是<b>健康</b>连接、也可能来自<b>另一条通道</b>（池两通道共用）——
             // 策略是"最后无法获得写线程者"，不是"只摘慢订阅者"（见类注"跨通道"段）。
             WRITE_SATURATIONS.incrementAndGet();
-            log.debug("SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
+            LogThrottler.warn(log, "SseWriteBudget.saturated",
+                    "SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
                     sharedWriterPoolMaxThreads(), ex);
             return Result.saturated();
         }
         try {
             future.get(this.timeoutMillis, TimeUnit.MILLISECONDS);
             return Result.sent();
-        }
-        catch (TimeoutException ex) {
+        } catch (TimeoutException ex) {
             boolean cancelled = future.cancel(true);
             WRITE_TIMEOUTS.incrementAndGet();
-            log.debug("SSE write timed out (>{}ms) cancelled={}, caller released by budget",
+            LogThrottler.warn(log, "SseWriteBudget.timeout", "SSE write timed out (>{}ms) cancelled={}, caller released by budget",
                     this.timeoutMillis, cancelled, ex);
             return Result.timedOut();
-        }
-        catch (ExecutionException ex) {
+        } catch (ExecutionException ex) {
+            LogThrottler.warn(log, "SseWriteBudget.execution", "SSE write execution failed", ex);
             Throwable cause = ex.getCause();
             if (cause instanceof WriteFailure failure) {
                 return Result.failed(failure.failure);
             }
             return Result.failed(cause instanceof Exception exception ? exception
                     : new IllegalStateException("SSE write failed", cause));
-        }
-        catch (InterruptedException ex) {
+        } catch (InterruptedException ex) {
+            LogThrottler.warn(log, "SseWriteBudget.interrupted", "SSE writer was interrupted", ex);
             Thread.currentThread().interrupt();
             future.cancel(true);
             return Result.interrupted();
+        }
+    }
+
+    private static Result writeDirect(SendTask task) {
+        try {
+            task.send();
+            return Result.sent();
+        } catch (Exception ex) {
+            LogThrottler.warn(log, "SseWriteBudget.writeFailure", "SSE write task failed", ex);
+            return Result.failed(ex);
         }
     }
 
@@ -405,66 +429,65 @@ public final class SseWriteBudget {
             return;
         }
         if (this.executor == null) {
-            Result result;
-            try {
-                task.send();
-                result = Result.sent();
-            }
-            catch (Exception ex) {
-                result = Result.failed(ex);
-            }
-            notifyDone(onDone, result);
+            notifyDone(onDone, writeDirect(task));
             return;
         }
         AtomicBoolean settled = new AtomicBoolean();
         AtomicReference<ScheduledFuture<?>> timeout = new AtomicReference<>();
         Future<?> future;
         try {
-            future = this.executor.submit(() -> {
-                Exception failure = null;
-                try {
-                    task.send();
-                }
-                catch (Exception ex) {
-                    failure = ex;
-                }
-                catch (Throwable error) {
-                    // Error 也必须回调（否则 drain 链永不继续）：折成可上报的异常。
-                    failure = new IllegalStateException("SSE write failed", error);
-                }
-                ScheduledFuture<?> timer = timeout.get();
-                if (timer != null) {
-                    timer.cancel(false);
-                }
-                if (settled.compareAndSet(false, true)) {
-                    notifyDone(onDone, failure == null ? Result.sent() : Result.failed(failure));
-                }
-            });
-        }
-        catch (RejectedExecutionException ex) {
+            future = this.executor.submit(() -> finishAsyncWrite(task, onDone, settled, timeout));
+        } catch (RejectedExecutionException ex) {
             WRITE_SATURATIONS.incrementAndGet();
-            log.debug("SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
+            LogThrottler.warn(log, "SseWriteBudget.saturated",
+                    "SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
                     sharedWriterPoolMaxThreads(), ex);
             if (settled.compareAndSet(false, true)) {
                 notifyDone(onDone, Result.saturated());
             }
             return;
         }
+        scheduleAsyncTimeout(future, onDone, settled, timeout);
+    }
+
+    private static void finishAsyncWrite(SendTask task, Consumer<Result> onDone, AtomicBoolean settled,
+                                         AtomicReference<ScheduledFuture<?>> timeout) {
+        Exception failure = null;
+        try {
+            task.send();
+        } catch (Exception ex) {
+            LogThrottler.warn(log, "SseWriteBudget.writeFailure", "SSE write task failed", ex);
+            failure = ex;
+        } catch (Throwable error) {
+            // Error 也必须回调（否则 drain 链永不继续）：折成可上报的异常。
+            LogThrottler.warn(log, "SseWriteBudget.fatalWrite", "SSE write task failed fatally", error);
+            failure = new IllegalStateException("SSE write failed", error);
+        }
+        ScheduledFuture<?> timer = timeout.get();
+        if (timer != null) {
+            timer.cancel(false);
+        }
+        if (settled.compareAndSet(false, true)) {
+            notifyDone(onDone, failure == null ? Result.sent() : Result.failed(failure));
+        }
+    }
+
+    private void scheduleAsyncTimeout(Future<?> future, Consumer<Result> onDone, AtomicBoolean settled,
+                                      AtomicReference<ScheduledFuture<?>> timeout) {
         ScheduledFuture<?> timer = null;
         try {
             timer = timeoutScheduler().schedule(() -> {
                 if (settled.compareAndSet(false, true)) {
                     boolean cancelled = future.cancel(true);
                     WRITE_TIMEOUTS.incrementAndGet();
-                    log.debug("SSE write timed out (>{}ms) cancelled={}, delivery thread released by callback",
+                    LogThrottler.warn(log, "SseWriteBudget.timeout", "SSE write timed out (>{}ms) cancelled={}, delivery thread released by callback",
                             this.timeoutMillis, cancelled);
                     notifyDone(onDone, Result.timedOut());
                 }
             }, this.timeoutMillis, TimeUnit.MILLISECONDS);
-        }
-        catch (RejectedExecutionException ex) {
+        } catch (RejectedExecutionException ex) {
             // 定时器已关闭（停机）：不再施加写预算，写出线程返回时仍会回调（恰一次）。
-            log.debug("SSE write timeout scheduler closed, write runs without budget", ex);
+            LogThrottler.warn(log, "SseWriteBudget.schedulerClosed", "SSE write timeout scheduler closed", ex);
         }
         timeout.set(timer);
         if (settled.get() && timer != null) {
@@ -472,17 +495,21 @@ public final class SseWriteBudget {
         }
     }
 
-    /** 完成回调的隔离层：回调异常不得杀死写出池/定时器线程（否则 drain 链会悬挂）。 */
+    /**
+     * 完成回调的隔离层：回调异常不得杀死写出池/定时器线程（否则 drain 链会悬挂）。
+     */
     private static void notifyDone(Consumer<Result> onDone, Result result) {
         try {
             onDone.accept(result);
-        }
-        catch (RuntimeException ex) {
-            log.error("SSE write completion callback failed, further delivery on this connection may stall", ex);
+        } catch (RuntimeException ex) {
+            LogThrottler.error(log, "SseWriteBudget.callback",
+                    "SSE write completion callback failed, further delivery on this connection may stall", ex);
         }
     }
 
-    /** 写出结果：成功 / 失败（带原因）/ 超时 / 池饱和 / 调用线程被中断。 */
+    /**
+     * 写出结果：成功 / 失败（带原因）/ 超时 / 池饱和 / 调用线程被中断。
+     */
     public enum Outcome {
         SENT, FAILED, TIMED_OUT, SATURATED, INTERRUPTED
     }
@@ -518,14 +545,18 @@ public final class SseWriteBudget {
         }
     }
 
-    /** 一次写出任务（可抛受检异常的 {@code Runnable}）。 */
+    /**
+     * 一次写出任务（可抛受检异常的 {@code Runnable}）。
+     */
     @FunctionalInterface
     public interface SendTask {
 
         void send() throws Exception;
     }
 
-    /** 把写出异常从 {@code ExecutionException} 里原样带回调用方（不包成其它类型）。 */
+    /**
+     * 把写出异常从 {@code ExecutionException} 里原样带回调用方（不包成其它类型）。
+     */
     private static final class WriteFailure extends RuntimeException {
 
         private final transient Exception failure;

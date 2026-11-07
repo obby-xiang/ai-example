@@ -195,4133 +195,4193 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Component
 public class SpToolCallingManager implements ToolCallingManager {
 
-	/** 防线③拦截时回填模型的结果文本前缀（结构化错误码，测试与排障据此断言/检索）。 */
-	public static final String SCOPE_VIOLATION_CODE = ErrorCodes.SCOPE_NOT_DISCLOSED;
-
-	/**
-	 * 工具执行段抛错时 {@code tool_call_end.code} 的取值（AI 日志最小补齐批）。
-	 *
-	 * <p>只出现在日志面（事件行），不进帧、不进台账 —— 它是"这一行 end 为什么没有真的结局"的解释，
-	 * 而不是一个新的对外结局码（帧/台账的结局真值仍由条目自身的 outcome/code 承担）。
-	 */
-	public static final String CODE_TOOL_EXECUTION_THREW = "TOOL_EXECUTION_THREW";
-
-	/**
-	 * 步数到顶时的收尾指令（超时面治理批② 第 2 项；决策看板 {@code :14}）。
-	 *
-	 * <p>到顶<b>不判整轮失败</b>：把指令追加到历史末尾，让模型用已有信息收尾（部分完成也要说清缺什么）。
-	 */
-	public static final String STEP_LIMIT_WRAP_UP = "已达到本轮工具调用步数上限（app.ai.resilience.max-tool-steps）。"
-			+ "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
-
-	/**
-	 * 轮内上下文预算达收尾线时的指令（工具轮内上下文预算批）。
-	 *
-	 * <p>与 {@link #STEP_LIMIT_WRAP_UP} 同形（不判整轮失败：让模型用已有信息作答并说明缺什么），
-	 * 但触发条件不同 —— 步数是"调用次数"，本指令是"下一发请求会越窗"。措辞里的
-	 * "不要再次调用工具"同时是给模型的软约束；硬约束由 {@code ToolActivityBeacon#budgetArmed}
-	 * 承担（armed 后工具一律不执行）。
-	 */
-	public static final String TURN_BUDGET_WRAP_UP = "本轮上下文预算已接近上限。"
-			+ "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
-
-	/**
-	 * 工具执行超时监视线程池（超时面治理批② 第 3 项）。
-	 *
-	 * <p>为什么需要一条独立线程：{@code Future#get(timeout)} 要在<b>调用线程</b>上等到点，
-	 * 而桩体必须跑在<b>另一条线程</b>上才能被 {@code cancel(true)} 打断。容量取挂起池配置
-	 * {@code app.ai.suspend.pool-size}（缺省 20）：一轮至多一个工具在跑，容量即并发上限。
-	 * 队列为 {@link SynchronousQueue}（不排队）+ {@code AbortPolicy}：容量由
-	 * {@code app.ai.suspend.pool-size} 派生（缺省 {@value #TOOL_TIMEOUT_THREADS_DEFAULT}），
-	 * 饱和时<b>不执行、也不降级成无超时同步执行</b> —— 明确结算成"本次未执行"
-	 * （{@code TOOL_TIMEOUT} 口径，见 {@link #executeWithTimeout}）。宁可让模型知道这一拍没跑，
-	 * 也不能让一次调用脱离超时笼（N3）。
-	 */
-	private static final int TOOL_TIMEOUT_THREADS_DEFAULT = 20;
-
-	private static final RunIdentityScope.Scope NO_RECORD_SCOPE = () -> {
-	};
-
-	private static int toolTimeoutThreads(AiProperties properties) {
-		int configured = properties == null ? 0 : properties.getSuspend().getPoolSize();
-		return configured > 0 ? configured : TOOL_TIMEOUT_THREADS_DEFAULT;
-	}
-
-	/** 本实例的超时执行器：生产注入共享 Bean，轻量装配使用实例自管回退池。 */
-	private final ExecutorService toolTimeoutExecutor;
-
-	private final boolean ownsToolTimeout;
-
-	@PreDestroy
-	void shutdown() {
-		if (!this.ownsToolTimeout) {
-			return;
-		}
-		this.toolTimeoutExecutor.shutdown();
-		try {
-			if (!this.toolTimeoutExecutor.awaitTermination(2L, TimeUnit.SECONDS)) {
-				this.toolTimeoutExecutor.shutdownNow();
-			}
-		}
-		catch (InterruptedException ex) {
-			this.toolTimeoutExecutor.shutdownNow();
-			Thread.currentThread().interrupt();
-		}
-	}
-
-	/** 本实例的执行器容量（日志与饱和结算文案用）。 */
-	private final int toolTimeoutThreads;
-
-	private final ToolCallingManager delegate;
-
-	private final RunStore store;
-
-	private final RunRegistry registry;
-
-	private final ConfirmGate gate;
-
-	private final ToolRegistry toolRegistry;
-
-	private final MessageJsonCodec codec;
-
-	private final ToolActivityBeacon beacon;
-
-	private final CancellationRegistry cancellations;
-
-	/** T2：工具结果回填模型前的行数/字符上限（前端帧与台账不受其影响）。 */
-	private final ToolResultLimiter limiter;
-
-	/**
-	 * 前端工具的入参/回灌复核器（DC-15 安全闸）。<b>按工具名自认领</b>（{@link FrontendToolGuard#supports}），
-	 * 因此本类对"哪个工具需要复核"零知识 —— 没声明复核器的前端工具行为一字不变。
-	 */
-	private final List<FrontendToolGuard> frontendGuards;
-
-	/**
-	 * F5 只读预检器（确认门<b>之前</b>问"能不能做"）。null = 不预检 —— 只有单元测试的轻装配面
-	 * 会传 null（生产由容器注入唯一实例）；预检只对 {@link ToolPreflightService#supports(String)} 的工具生效。
-	 */
-	private final ToolPreflightService preflight;
-
-	/**
-	 * L1 资源互斥（B23L1 批③b）：执行前的任务级/作业级锁。null = 不取锁 —— 只有单元测试的
-	 * 轻装配面会传 null（生产由容器注入唯一实例）。
-	 */
-	private final ToolResourceLocks resourceLocks;
-
-	/** F2 目标资源硬校验（B23L1 批③b）。null = 不校验（轻装配面）。 */
-	private final ToolTargetResolver targetResolver;
-
-	/** UNKNOWN 对账器（B23L1 批③b）：续跑结算前把"未知"尽量收敛成台账里的确定结局。 */
-	private final ToolUnknownReconciler unknownReconciler;
-
-	/**
-	 * 配置面（超时面治理批②）：{@code app.ai.resilience.max-tool-steps}（步数笼）与
-	 * {@code app.ai.tool.exec-timeout}（工具独立超时）。
-	 */
-	private final AiProperties properties;
-
-	/**
-	 * 轮内上下文预算的分母取数点（工具轮内上下文预算批）。null = 不判轮内预算（轻装配面 / 单测）。
-	 *
-	 * <p>与轮首压缩<b>同一个</b> {@link ContextLimitResolver}（唯一取数点），因此"显示的上限"
-	 * 与"轮内判定的上限"不会各用一套分母（L-89 的教训）。生产由容器注入唯一实例。
-	 */
-	private ContextLimitResolver contextLimitResolver;
-
-	/** 可选注入：轮内预算的分母。缺失 = 轮内不判（既有单测/轻装配面行为一字不变）。 */
-	@Autowired(required = false)
-	public void setContextLimitResolver(ContextLimitResolver resolver) {
-		this.contextLimitResolver = resolver;
-	}
-
-	/**
-	 * 轮内 L1 的记账面（压缩台账 / 会话状态），生产由容器注入唯一
-	 * {@code RedisContextStateStore}。轻装配面未注入时只清结果、不记账。
-	 */
-	private ContextStateStore contextStateStore;
-
-	/** 可选注入：轮内 L1 的台账/状态。缺失 = 只清结果、不记账（轻装配面）。 */
-	@Autowired(required = false)
-	public void setContextStateStore(ContextStateStore store) {
-		this.contextStateStore = store;
-	}
-
-	/** 用户展示历史（B2）：挂起时补 pending 工具卡条目，终态由收尾写点覆盖。 */
-	private ConversationTranscriptStore transcript;
-
-	@Autowired(required = false)
-	public void setConversationTranscriptStore(ConversationTranscriptStore transcript) {
-		this.transcript = transcript;
-	}
-
-	/**
-	 * 表格采样/改动审计面（AI 表格工具治理批）。null = 未注入（轻装配面 / 单元测试）——
-	 * 此时只是少了计数与台账，日志字段照常发射（字段来自条目自身的 {@code sheetMeta}）。
-	 */
-	private SheetAudit sheetAudit;
-
-	/**
-	 * 结果视图投影器（S6 批 2）：{@code tool_result} 帧的 {@code resultView} 由它们按工具名自认领。
-	 *
-	 * <p>与 {@code FrontendToolGuard} 同体例：本类对"哪个工具有视图"零知识；空列表 = 一律不出视图
-	 * （帧上连 {@code resultView} 键都不出现，旧卡面零变化）。
-	 */
-	private List<ToolResultViewProvider> resultViewProviders = List.of();
-
-	/** 可选注入（{@code SheetAudit} 是观测面，不是判定面；缺失不影响任何工具的执行语义）。 */
-	@Autowired(required = false)
-	public void setSheetAudit(SheetAudit audit) {
-		this.sheetAudit = audit;
-	}
-
-	/**
-	 * 结算观测位（跨实例恰好一次的仲裁面）。null = 未注入（轻装配/单测）——
-	 * 此时每个发点各自发一行，与引入仲裁之前同形（单实例恒等价）。
-	 */
-	private SettlementObservationStore settlementObservations;
-
-	/** 可选注入（观测面，不是判定面；缺失不影响任何工具的执行语义）。 */
-	@Autowired(required = false)
-	public void setSettlementObservationStore(SettlementObservationStore observations) {
-		this.settlementObservations = observations;
-	}
-
-	/** 可选注入（视图投影是展示增强，不是判定面；缺失 = 所有工具走旧卡面）。 */
-	@Autowired(required = false)
-	public void setResultViewProviders(List<ToolResultViewProvider> providers) {
-		this.resultViewProviders = providers == null ? List.of() : List.copyOf(providers);
-	}
-
-	/**
-	 * 工具批后刷新运行上下文的入口（动态披露批）。null = 不刷新（轻装配面 / 单测）。
-	 */
-	private RunContextRefresher contextRefresher;
-
-	/** 可选注入：批间上下文刷新。缺失 = 快照上下文不随工具结果推进（既有单测行为一字不变）。 */
-	@Autowired(required = false)
-	public void setContextRefresher(RunContextRefresher refresher) {
-		this.contextRefresher = refresher;
-	}
-
-	private TaskSlotResolver taskSlotResolver;
-
-	@Autowired(required = false)
-	public void setTaskSlotResolver(TaskSlotResolver resolver) {
-		this.taskSlotResolver = resolver;
-	}
-
-	/**
-	 * confirm_step 的后置条件兜底（数据正确性）：缺失 = 不兜底（轻装配面 / 既有单测行为不变）。
-	 *
-	 * <p>只在单条 {@code confirm_step} 批次、且任务真实状态满足"QUERY_COND + 无条件 + 本轮未收集"
-	 * 时挂起可选条件表单；条件已知 / 已到 EXPORT / 已收集过一律不拦。
-	 */
-	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
-
-	/** 可选注入（缺失 = 不做 confirm_step 条件兜底）。 */
-	@Autowired(required = false)
-	public void setConditionsForm(com.example.configmgr.ai.form.ConditionsForm form) {
-		this.conditionsForm = form;
-	}
-
-	/** 宿主类型表单（结构化 create_task 缺 type 时挂起；缺失 = 不挂，交给既有预检）。 */
-	private com.example.configmgr.ai.form.TaskTypeForm taskTypeForm;
-
-	@Autowired(required = false)
-	public void setTaskTypeForm(com.example.configmgr.ai.form.TaskTypeForm form) {
-		this.taskTypeForm = form;
-	}
-
-	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
-			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
-			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
-		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, null);
-	}
-
-	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
-			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
-			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight) {
-		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
-				null, null, null);
-	}
-
-	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
-			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
-			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
-			ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
-			ToolUnknownReconciler unknownReconciler) {
-		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
-				resourceLocks, targetResolver, unknownReconciler, new AiProperties());
-	}
-
-	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
-			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
-			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
-			ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
-			ToolUnknownReconciler unknownReconciler, AiProperties properties) {
-		this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
-				resourceLocks, targetResolver, unknownReconciler, properties, null);
-	}
-
-	@Autowired
-	public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
-			MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
-			ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
-			ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
-			ToolUnknownReconciler unknownReconciler, AiProperties properties,
-			@Qualifier("aiToolTimeoutExecutor") ExecutorService toolTimeoutExecutor) {
-		this.delegate = ToolCallingManager.builder()
-			// P0-1：让工具异常浮出到 executeOnce 的 catch（默认 alwaysThrow=false 会把失败吞成
-			// "ok=true 的文本"——start_* 的 ConflictException 因此不可见）。包内 ToolExecutionException
-			// 保留 cause，catch 侧按 cause 链取 ConflictException/ResourceNotFoundException 的码。
-			.toolExecutionExceptionProcessor(DefaultToolExecutionExceptionProcessor.builder().alwaysThrow(true).build())
-			.build();
-		this.store = store;
-		this.registry = registry;
-		this.gate = gate;
-		this.toolRegistry = toolRegistry;
-		this.codec = codec;
-		this.beacon = beacon;
-		this.cancellations = cancellations;
-		this.limiter = limiter;
-		this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
-		this.preflight = preflight;
-		this.resourceLocks = resourceLocks;
-		this.targetResolver = targetResolver;
-		this.unknownReconciler = unknownReconciler;
-		this.properties = ObjectUtils.getIfNull(properties, AiProperties::new);
-		this.toolTimeoutThreads = toolTimeoutThreads(this.properties);
-		if (toolTimeoutExecutor == null) {
-			this.toolTimeoutExecutor = new ThreadPoolExecutor(0, this.toolTimeoutThreads, 30L, TimeUnit.SECONDS,
-					new SynchronousQueue<>(), Executors.defaultThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
-			this.ownsToolTimeout = true;
-		}
-		else {
-			this.toolTimeoutExecutor = toolTimeoutExecutor;
-			this.ownsToolTimeout = false;
-		}
-	}
-
-	/**
-	 * 每跳按<b>当前快照</b>重算披露面（动态披露批的唯一接缝）。
-	 *
-	 * <p>官方模型循环（{@code ReasoningAwareOpenAiChatModel#createRequest}）在<b>每一发请求</b>前都调
-	 * 本方法，而它所带的 {@code chatOptions} 是请求边界那一份（callbacks 冻结）。于是"同一轮里
-	 * 导航成功后下一跳能看到向导工具"就取决于这里：读本轮快照的 {@code context}，用
-	 * {@code ToolRegistry#forContext} 重算一次，再与冻结集合按<b>名字</b>合并 ——
-	 * <ul>
-	 * <li>冻结集合的顺序优先（上下文没变时结果与旧口径逐字一致，不击穿 prompt 缓存）；</li>
-	 * <li>已不在当前披露面的冻结工具被裁掉；新增披露的追加在后面；</li>
-	 * <li>执行侧的 callback 解析另由 {@link #executionPrompt} 兜住（否则新增工具会"看得见、点不动"）。</li>
-	 * </ul>
-	 *
-	 * <h2>回落口径（不能让工具凭空变空/变多）</h2>
-	 * 无 options / callbacks 为空 / 无 {@code runId} / 无快照 / 重算结果为空 / 任何异常 ⇒
-	 * <b>原样返回委托结果</b>。尤其是"callbacks 为空"：那可能是"本轮不下发任何工具"（模型不支持
-	 * 工具调用），把它换成 registry 的全集就是<b>静默扩大授权面</b>。
-	 */
-	@Override
-	public List<ToolDefinition> resolveToolDefinitions(ToolCallingChatOptions chatOptions) {
-		List<ToolDefinition> delegated = this.delegate.resolveToolDefinitions(chatOptions);
-		try {
-			if (chatOptions == null) {
-				return delegated;
-			}
-			List<ToolCallback> frozen = chatOptions.getToolCallbacks();
-			if (CollectionUtils.isEmpty(frozen)) {
-				return delegated;
-			}
-			// toolNames 的解析面在本类之外（委托的 resolver），重算不了 ⇒ 原样委托
-			if (CollectionUtils.isNotEmpty(chatOptions.getToolNames())) {
-				return delegated;
-			}
-			String runId = runIdOf(chatOptions.getToolContext());
-			if (runId == null) {
-				return delegated;
-			}
-			// 与执行点同一顺序红线：这次重算跑在官方上游线程（boundedElastic）上 —— 那里没有请求身份，
-			// 池化线程上还可能残留别人的身份。先按本轮可信执行信封的<b>记录身份</b>开作用域再读快照：
-			// 否则无身份线程只读 legacy 键、拿不到快照 ⇒ 回落冻结集合（navigate_to 之后新披露的工具在
-			// 下一跳永不出现）；残留身份则会读到别人的同名 runId 快照，把披露面换成别人的上下文。
-			RunSnapshot snapshot;
-			try (RunIdentityScope.Scope ignored = recordIdentityScope(
-					ToolExecutionEnvelope.fromToolContext(chatOptions.getToolContext()), runId)) {
-				snapshot = this.store.get(runId);
-			}
-			if (snapshot == null) {
-				return delegated;
-			}
-			List<ToolCallback> current = this.toolRegistry.forContext(AiContext.fromMap(snapshot.getContext()));
-			if (CollectionUtils.isEmpty(current)) {
-				return delegated;
-			}
-			List<ToolCallback> merged = mergeDisclosed(frozen, current);
-			if (merged.isEmpty()) {
-				return delegated;
-			}
-			return merged.stream().map(ToolCallback::getToolDefinition).toList();
-		}
-		catch (RuntimeException ex) {
-			// 披露重算是增强：算不出来就按请求边界那一份继续（执行侧防线③仍按快照上下文复查）
-			log.warn("failed to recompute tool definitions from the current snapshot; falling back to the original delegate", ex);
-			return delegated;
-		}
-	}
-
-	/**
-	 * 冻结集合（名字与顺序）∩ 当前披露面 + 新披露的那些（追加在后）。
-	 *
-	 * <p>用<b>名字</b>对齐而不是对象身份：请求边界与本次重算拿到的都是 registry 里同一个回调实例，
-	 * 但"同一性"不该成为披露口径的隐含前提。
-	 */
-	private static List<ToolCallback> mergeDisclosed(List<ToolCallback> frozen, List<ToolCallback> current) {
-		Map<String, ToolCallback> disclosed = new LinkedHashMap<>();
-		for (ToolCallback callback : current) {
-			if (callback != null) {
-				disclosed.putIfAbsent(toolNameOf(callback), callback);
-			}
-		}
-		List<ToolCallback> merged = new ArrayList<>(frozen.size() + disclosed.size());
-		Set<String> kept = new HashSet<>();
-		for (ToolCallback callback : frozen) {
-			if (callback == null) {
-				continue;
-			}
-			String name = toolNameOf(callback);
-			if (disclosed.containsKey(name)) {
-				merged.add(callback);
-				kept.add(name);
-			}
-		}
-		for (Map.Entry<String, ToolCallback> entry : disclosed.entrySet()) {
-			if (kept.add(entry.getKey())) {
-				merged.add(entry.getValue());
-			}
-		}
-		return merged;
-	}
-
-	private static String toolNameOf(ToolCallback callback) {
-		return callback.getToolDefinition().name();
-	}
-
-	/** 回调集合的名字序列（顺序敏感的比较用：披露面没变时不得复制 options、不得改序）。 */
-	private static List<String> names(List<ToolCallback> callbacks) {
-		List<String> names = new ArrayList<>(callbacks.size());
-		for (ToolCallback callback : callbacks) {
-			names.add(callback == null ? null : toolNameOf(callback));
-		}
-		return names;
-	}
-
-	/**
-	 * 执行侧：本次调用的官方委托要能解析到它的 callback。
-	 *
-	 * <p>官方 {@code DefaultToolCallingManager} 执行单个调用时只从 {@code prompt.getOptions()}
-	 * 的 callbacks 里按名字找（找不到才问 resolver，而本类的 delegate 用的是空 resolver）。
-	 * 下一跳重算把 {@code check_job_status} 之类的新工具给了模型，但旧 options 里没有它 ——
-	 * 不补这一份副本就会"模型看得见、执行时 No ToolCallback found"。
-	 *
-	 * <p><b>真实语义</b>：这里为当前这次调用合并出一份"可解析回调"副本（与
-	 * {@link #mergeDisclosed} 同一口径 —— 随当前披露面变化，旧集合里已不在披露面的回调会被裁掉、
-	 * 新披露的会追加），集合本身<b>不是授权</b>：能否执行仍由防线③（{@code matchesContext} 按快照
-	 * 上下文复查）与各工具的确认门/HITL 决定。拿不到上下文/异常一律按原 options 执行。
-	 */
-	private Prompt executionPrompt(Prompt prompt, String toolName) {
-		try {
-			if (prompt == null || !(prompt.getOptions() instanceof ToolCallingChatOptions options)) {
-				return prompt;
-			}
-			List<ToolCallback> frozen = ObjectUtils.defaultIfNull(options.getToolCallbacks(), List.of());
-			if (frozen.stream().anyMatch(callback -> callback != null && toolName != null
-					&& toolName.equals(toolNameOf(callback)))) {
-				return prompt;
-			}
-			String runId = runIdOf(prompt);
-			if (runId == null) {
-				return prompt;
-			}
-			RunSnapshot snapshot = this.store.get(runId);
-			if (snapshot == null) {
-				return prompt;
-			}
-			List<ToolCallback> current = this.toolRegistry.forContext(AiContext.fromMap(snapshot.getContext()));
-			if (CollectionUtils.isEmpty(current)) {
-				return prompt;
-			}
-			List<ToolCallback> merged = mergeDisclosed(frozen, current);
-			// 仍解析不到（该工具现在本来就不该被披露）⇒ 保留原 options，让既有失败口径如实回填，
-			// 不在这里伪造"可解析"；集合没变化 ⇒ 也不必复制 options
-			if (merged.stream().noneMatch(callback -> callback != null && toolName != null
-					&& toolName.equals(toolNameOf(callback)))) {
-				return prompt;
-			}
-			if (names(merged).equals(names(frozen))) {
-				return prompt;
-			}
-			ToolCallingChatOptions copy = options.copy();
-			if (copy == null) {
-				return prompt;
-			}
-			copy.setToolCallbacks(merged);
-			if (log.isDebugEnabled()) log.debug("filled in callbacks for currently disclosed tools at execution time (disclosed after this batch's request boundary) runId={} tool={} callbacks={}", runId, toolName, merged.size());
-			return new Prompt(prompt.getInstructions(), copy);
-		}
-		catch (RuntimeException ex) {
-			log.warn("failed to fill in tool callbacks at execution time; executing with original options tool={}", toolName, ex);
-			return prompt;
-		}
-	}
-
-	/**
-	 * 本轮回答语言的显式传播键（与 {@code ConfirmGate#dispatchResume} 同口径：在请求/提交线程
-	 * 取好 locale，再在工作线程显式设置）。工具线程不继承请求上下文，靠 ThreadLocal 残留会退回 zh。
-	 */
-	public static final String TOOL_CONTEXT_REPLY_LOCALE = "replyLocale";
-
-	/**
-	 * 本轮<b>当前 attempt 已聚合正文</b>的传播键：{@code ResilientChatService} 的累加器每消费一个
-	 * 正文分片就追加到同一个 {@link TurnTextCapture}，本类在工具执行点读取，补全流式工具调用跳那条
-	 * {@code ChatResponse} 里缺失的正文。
-	 *
-	 * <p>不用 ThreadLocal：工具执行跑在 Reactor 的工具线程上，而正文分片由消费线程写入；
-	 * {@code toolContext} 本来就是跨线程携带本轮事实的既有通道（runId/sessionId/信封同路）。
-	 */
-	public static final String TOOL_CONTEXT_TURN_TEXT = "turnText";
-
-	/**
-	 * 本轮正文的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
-	 *
-	 * <p>每个工具跳只取走当前这一段，并在该跳聚合消息持久化后清空。终态、取消与失败也只写
-	 * 当前段；已经落库的正文由各自的 assistant(tool_calls) 消息承载，不再用字符偏移推算。
-	 *
-	 * <p>本类方法均同步：写方在消费线程，读/清在工具执行线程（{@link StringBuilder} 自身不保证并发）。
-	 */
-	public static final class TurnTextCapture {
-
-		private final StringBuilder segment = new StringBuilder();
-
-		/** 每次 attempt 重置，并种入尚未落库的纠正前缀段。 */
-		public synchronized void reset(String segment) {
-			this.segment.setLength(0);
-			if (StringUtils.isNotEmpty(segment)) {
-				this.segment.append(segment);
-			}
-		}
-
-		/** 消费一个正文分片（与 Accumulator 同源同序）。 */
-		public synchronized void append(String text) {
-			if (StringUtils.isNotEmpty(text)) {
-				this.segment.append(text);
-			}
-		}
-
-		/** 当前事件段：上一次已持久化工具跳之后的全部正文。 */
-		public synchronized String segmentText() {
-			return this.segment.toString();
-		}
-
-		/** 当前段已随本跳聚合消息持久化；重复提交只是幂等清空。 */
-		public synchronized void commitSegment() {
-			this.segment.setLength(0);
-		}
-
-	}
-
-	@Override
-	public ToolExecutionResult executeToolCalls(Prompt prompt, ChatResponse chatResponse) {
-		Locale replyLocale = replyLocaleOf(prompt);
-		LocaleContext previous = LocaleContextHolder.getLocaleContext();
-		if (replyLocale != null) {
-			LocaleContextHolder.setLocale(replyLocale);
-		}
-		try {
-			return executeToolCallsInLocale(prompt, chatResponse);
-		}
-		finally {
-			LocaleContextHolder.setLocaleContext(previous);
-		}
-	}
-
-	private Locale replyLocaleOf(Prompt prompt) {
-		Object raw = toolContextOf(prompt).get(TOOL_CONTEXT_REPLY_LOCALE);
-		if (StringUtils.isBlank(ObjectUtils.toString(raw, (String) null))) {
-			return null;
-		}
-		try {
-			return Locale.forLanguageTag(String.valueOf(raw));
-		}
-		catch (RuntimeException ex) {
-			return null;
-		}
-	}
-
-	private ToolExecutionResult executeToolCallsInLocale(Prompt prompt, ChatResponse chatResponse) {
-		AssistantMessage assistant = chatResponse.getResult() == null ? null : chatResponse.getResult().getOutput();
-		if (assistant == null || !assistant.hasToolCalls()) {
-			return this.delegate.executeToolCalls(prompt, chatResponse);
-		}
-		// 流式工具调用跳：正文分片早已作为 SSE delta 发出，这个 ChatResponse 只带 tool_calls。
-		// 用本轮累加器经 toolContext 同步过来的正文补全 assistant，后续 saveSuspended / transcript /
-		// 落定历史拿到的就是用户真正看到的正文（不解析帧、不另建第二份聚合）。
-		TurnTextCapture turnText = turnTextOf(prompt);
-		assistant = assistantWithTurnText(assistant, turnText == null ? "" : turnText.segmentText());
-
-		String runId = runIdOf(prompt);
-		// 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
-		ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(toolContextOf(prompt));
-		// ===== 记录身份必须先于首次读 =====
-		// 官方工具线程（Reactor 上游线程）没有请求身份，而快照/待决/帧的键都由<b>记录身份</b>拼出。
-		// 旧顺序（先 store.get 再开作用域）在这种线程上只会命中 legacy 键：已存在的身份快照被当成
-		// "缺失"，恢复的写后复核同样读 legacy 键 ⇒ 判成"未落库" ⇒ 前端工具被当成不可恢复而拒绝。
-		// 快照存在时也必须在记录身份下读 —— 池化线程上残留的他人身份会让首次读命中<b>别人的</b>
-		// 同名轮次（串轮）。
-		RunSnapshot snapshot;
-		try (RunIdentityScope.Scope ignored = recordIdentityScope(envelope, runId)) {
-			snapshot = runId == null ? null : this.store.get(runId);
-			if (runId == null || snapshot == null) {
-				// ① 先凭本轮权威执行信封恢复（只认本实例创建的信封；不伪造审批/台账/认领，不重置序号）。
-				snapshot = recoverSnapshot(envelope, runId);
-				if (snapshot != null) {
-					runId = snapshot.getRunId();
-				}
-			}
-		}
-		// 官方工具线程（Reactor 上游线程）没有请求身份：按记录（快照 → 信封）恢复。
-		// 两者都没有身份（旧快照/旧信封）⇒ 空作用域，不伪造默认租户；下游按 fail-closed 处理。
-		long tenantId = snapshot != null ? snapshot.getTenantId() : envelope == null ? 0L : envelope.tenantId();
-		long userId = snapshot != null ? snapshot.getUserId() : envelope == null ? 0L : envelope.userId();
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
-			return executeToolCallsResolved(prompt, chatResponse, runId, snapshot, assistant);
-		}
-	}
-
-	/**
-	 * 工具执行主体（已在<b>本轮身份作用域</b>内；身份只来自快照/执行信封）。
-	 */
-	private ToolExecutionResult executeToolCallsResolved(Prompt prompt, ChatResponse chatResponse, String runId,
-			RunSnapshot snapshot, AssistantMessage assistant) {
-		if (runId == null || snapshot == null) {
-			return executeWithoutSnapshot(prompt, chatResponse, runId, assistant);
-		}
-		SseChatEmitter out = this.registry.of(runId);
-		assistant = ReasoningOrigin.stamp(assistant, snapshot.getProviderId(), snapshot.getModelId());
-		List<PendingToolCall> pendings = newPendings(assistant);
-		AiContext context = AiContext.fromMap(snapshot.getContext());
-		bindPendingArguments(runId, context, prompt, assistant, pendings);
-		ModelWriteBudget modelBudget = modelWriteBudget(snapshot, prompt, assistant, pendings.size());
-		boolean budgetArmed = this.beacon.isBudgetArmed(runId);
-		if (budgetArmed) {
-			int skipped = this.beacon.markBudgetSkippedBatch(runId);
-			this.store.markTurnBudget(runId, 0L, skipped);
-		}
-		ToolBatchState state = new ToolBatchState(runId, snapshot, prompt, assistant, context, out, modelBudget,
-				budgetArmed);
-		state.pendings = pendings;
-		state.responses.ensureCapacity(pendings.size());
-		state.suspended.ensureCapacity(pendings.size());
-		prepareBatch(state, pendings);
-		prepareSuspension(state, pendings);
-		List<String> gateWaitIds = budgetArmed ? List.of() : gateWaitToolCallIds(state.suspended);
-		this.gate.arm(runId, gateWaitIds);
-		try {
-			executeBatch(state, pendings);
-			recordSettledBatchTranscript(runId, snapshot, assistant, pendings);
-			return settleBatch(state, chatResponse, pendings);
-		}
-		finally {
-			this.gate.disarm(runId, gateWaitIds);
-		}
-	}
-
-	private void bindPendingArguments(String runId, AiContext context, Prompt prompt, AssistantMessage assistant,
-			List<PendingToolCall> pendings) {
-		String userText = com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(prompt.getInstructions());
-		for (PendingToolCall pending : pendings) {
-			if (this.taskSlotResolver != null && TOOL_CREATE_TASK.equals(pending.getName())) {
-				pending.setArguments(this.taskSlotResolver.completeCreateTaskArguments(pending.getArguments(), userText));
-			}
-			com.example.configmgr.ai.form.ConditionsForm.bindDraft(pending, runId, context);
-		}
-	}
-
-	private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings) {
-		for (PendingToolCall pending : pendings) {
-			preparePending(state, pending, pendings.size());
-		}
-	}
-
-	private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
-		parkTaskTypeIfDue(state, pending, batchSize);
-		if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
-				|| isCreateTaskBlocked(state, pending) || isFrontendSkipped(state, pending)) {
-			return;
-		}
-		state.suspended.add(pending);
-	}
-
-	private void parkTaskTypeIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
-		if (state.budgetArmed || this.taskTypeForm == null || batchSize != 1
-				|| !TOOL_CREATE_TASK.equals(pending.getName()) || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
-				|| !com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
-			return;
-		}
-		List<Message> typeHistory = new ArrayList<>(state.prompt.getInstructions());
-		typeHistory.add(assistantWithoutText(state.assistant));
-		typeHistory.add(ToolResponseMessage.builder()
-			.responses(List.of(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-					"create_task 缺少合法 type（EXPORT/IMPORT），已改为类型表单收集")))
-			.build());
-		String assistantBody = StringUtils.defaultString(state.assistant.getText());
-		if (this.taskTypeForm.parkIfCreateTaskMissingType(state.runId, state.context, pending.getArguments(),
-				typeHistory, assistantBody, state.assistant.getMetadata())) {
-			commitTurnText(state.prompt);
-			recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
-			throw new RunParkedException(state.runId, pending.getToolCallId(), PendingToolCall.KIND_FRONTEND);
-		}
-	}
-
-	private boolean isConditionRejected(ToolBatchState state, PendingToolCall pending, int batchSize) {
-		if (state.budgetArmed || state.stepsUsed >= state.maxToolSteps || this.conditionsForm == null
-				|| !AiToolNames.CONFIRM_STEP.equals(pending.getName())
-				|| !this.toolRegistry.isContextMatched(pending.getName(), state.context)) {
-			return false;
-		}
-		checkCancelled(state.runId);
-		String assistantBody = StringUtils.defaultString(state.assistant.getText());
-		ConditionsForm.ConfirmStepDecision decision = this.conditionsForm.inspectConfirmStep(state.runId,
-				state.context, pending, state.prompt.getInstructions(), assistantBody, state.assistant.getMetadata(),
-				batchSize == 1);
-		if (decision.parked()) {
-			commitTurnText(state.prompt);
-			recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
-			throw new RunParkedException(state.runId, pending.getToolCallId(), PendingToolCall.KIND_FRONTEND);
-		}
-		if (!decision.rejected()) {
-			return false;
-		}
-		settleFrontendRejected(state.runId, pending, decision.code(), decision.message(), decision.reasons());
-		state.frontendRejected.add(pending.getToolCallId());
-		return true;
-	}
-
-	private boolean isPreflightBlocked(ToolBatchState state, PendingToolCall pending) {
-		if (state.budgetArmed || this.preflight == null || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
-				|| !ToolPreflightService.isSupported(pending.getName())
-				|| !this.toolRegistry.isContextMatched(pending.getName(), state.context)) {
-			return false;
-		}
-		this.beacon.markPassiveActivity(state.runId);
-		ToolPreflightService.PreflightReport report;
-		try {
-			report = this.preflight.inspect(pending.getName(), pending.getArguments(), state.context);
-		}
-		catch (RuntimeException ex) {
-			blockPreflightUnavailable(state.runId, pending, ex);
-			state.preflightBlocked.add(pending.getToolCallId());
-			return true;
-		}
-		finally {
-			this.beacon.markPassiveActivity(state.runId);
-		}
-		if (!report.pass()) {
-			blockPreflight(state.runId, pending, report);
-			state.preflightBlocked.add(pending.getToolCallId());
-			return true;
-		}
-		pending.setPreflight(report.asMap());
-		return false;
-	}
-
-	private boolean isCreateTaskBlocked(ToolBatchState state, PendingToolCall pending) {
-		if (state.budgetArmed || !TOOL_CREATE_TASK.equals(pending.getName())
-				|| !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())) {
-			return false;
-		}
-		if (!state.createTaskChecked) {
-			state.createTaskChecked = true;
-			state.createTaskPrior = createTaskAlreadyInRun(state.runId);
-		}
-		if (state.createTaskSeenInBatch || state.createTaskPrior.created()) {
-			markCreateTaskLimit(state.runId, pending, state.createTaskPrior);
-			state.createTaskBlocked.add(pending.getToolCallId());
-			return true;
-		}
-		state.createTaskSeenInBatch = true;
-		return false;
-	}
-
-	private boolean isFrontendSkipped(ToolBatchState state, PendingToolCall pending) {
-		if (state.budgetArmed || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-			return false;
-		}
-		FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, state.context);
-		if (verdict != null && !verdict.accepted()) {
-			settleFrontendRejected(state.runId, pending, verdict);
-			state.frontendRejected.add(pending.getToolCallId());
-			return true;
-		}
-		if (this.conditionsForm == null || !AiToolNames.SET_CONDITION.equals(pending.getName())) {
-			return false;
-		}
-		String replay = this.conditionsForm.settledSetConditionReplay(state.runId, state.context,
-				pending.getArguments());
-		if (replay != null) {
-			settleIdempotentReplay(state.runId, pending, replay);
-			state.idempotentReplay.put(pending.getToolCallId(), replay);
-			return true;
-		}
-		String signature = ConditionsForm.setConditionSignature(pending.getArguments());
-		if (signature != null) {
-			String firstCallId = state.batchSetConditionSeen.get(signature);
-			if (firstCallId != null) {
-				state.batchDuplicateOf.put(pending.getToolCallId(), firstCallId);
-				return true;
-			}
-			state.batchSetConditionSeen.put(signature, pending.getToolCallId());
-		}
-		return false;
-	}
-
-	private void prepareSuspension(ToolBatchState state, List<PendingToolCall> pendings) {
-		if (state.budgetArmed) {
-			return;
-		}
-		long suspendedAtMs = System.currentTimeMillis();
-		for (PendingToolCall pending : state.suspended) {
-			Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
-			if (waitSeconds != null && waitSeconds > 0) {
-				pending.setAtMs(suspendedAtMs);
-				pending.setExpiresAt(suspendedAtMs + waitSeconds * 1000L);
-			}
-		}
-		if (!state.suspended.isEmpty()) {
-			persistSuspendedBatch(state, pendings);
-		}
-	}
-
-	private void persistSuspendedBatch(ToolBatchState state, List<PendingToolCall> pendings) {
-		persistToolSteps(state.runId, state.stepsUsed);
-		List<Message> suspendedHistory = SyntheticMessages.withoutCorrectionInstruction(state.prompt.getInstructions());
-		this.store.saveSuspended(state.runId, state.assistant.getText(), pendings, suspendedHistory, this.codec,
-				state.assistant.getMetadata());
-		if (isSuspendedHopPersisted(state.runId, state.assistant)) {
-			commitTurnText(state.prompt);
-		}
-		recordPendingTranscript(state.runId, state.snapshot, state.prompt, state.assistant, pendings);
-		state.out.suspended(state.suspended, this.store.runKey(state.runId), this.store.pendingKey(state.runId),
-				this.store.instanceId());
-		if (this.gate.canPublishRequestsAheadOfLoop()) {
-			for (PendingToolCall pending : state.suspended) {
-				emitToolStartOnce(state.runId, state.toolStarted, pending);
-			}
-		}
-		this.gate.publishRequestsForParkedBatch(state.runId, state.suspended);
-	}
-
-	private void executeBatch(ToolBatchState state, List<PendingToolCall> pendings) {
-		for (PendingToolCall pending : pendings) {
-			executePending(state, pending, pendings.size());
-		}
-	}
-
-	private void executePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
-		if (state.haltedBy != null) {
-			skipHaltedPending(state, pending);
-			return;
-		}
-		checkCancelled(state.runId);
-		if (state.budgetArmed) {
-			skipBudgetPending(state, pending);
-			return;
-		}
-		if (state.frontendRejected.contains(pending.getToolCallId())) {
-			addFrontendRejectedResponse(state, pending);
-			return;
-		}
-		if (state.idempotentReplay.containsKey(pending.getToolCallId())) {
-			addIdempotentResponse(state, pending);
-			return;
-		}
-		if (state.batchDuplicateOf.containsKey(pending.getToolCallId())) {
-			addDuplicateResponse(state, pending);
-			return;
-		}
-		if (state.preflightBlocked.contains(pending.getToolCallId())) {
-			addPreflightBlockedResponse(state, pending);
-			return;
-		}
-		if (state.createTaskBlocked.contains(pending.getToolCallId())) {
-			addCreateTaskBlockedResponse(state, pending);
-			return;
-		}
-		if (state.stepsUsed >= state.maxToolSteps) {
-			skipStepLimitedPending(state, pending);
-			return;
-		}
-		executeLivePending(state, pending, batchSize);
-	}
-
-	private void skipHaltedPending(ToolBatchState state, PendingToolCall pending) {
-		boolean skippedNow = !pending.isExecuted() && (PendingToolCall.PENDING.equals(pending.getStatus())
-				|| PendingToolCall.APPROVED.equals(pending.getStatus()));
-		state.responses.add(skipAsUpstreamFailed(state.runId, pending, state.haltedBy));
-		if (skippedNow) {
-			traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_UPSTREAM_FAILED);
-		}
-	}
-
-	private void skipBudgetPending(ToolBatchState state, PendingToolCall pending) {
-		emitToolStartOnce(state.runId, state.toolStarted, pending);
-		state.responses.add(skipAsBudgetExhausted(state.runId, pending));
-		traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
-		log.warn("in-turn context budget exhausted; call not executed runId={} tool={} toolCallId={}", state.runId,
-				pending.getName(), pending.getToolCallId());
-	}
-
-	private void addFrontendRejectedResponse(ToolBatchState state, PendingToolCall pending) {
-		String text = frameText(pending.getResultText());
-		if (!isSystemRejectedWithoutUserFrames(pending)) {
-			emitToolStartOnce(state.runId, state.toolStarted, pending);
-			state.out.frontendToolResult(pending, false, text);
-		}
-		state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, text, state.modelBudget)));
-		traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
-	}
-
-	private void addIdempotentResponse(ToolBatchState state, PendingToolCall pending) {
-		String text = state.idempotentReplay.get(pending.getToolCallId());
-		emitToolStartOnce(state.runId, state.toolStarted, pending);
-		state.out.frontendToolResult(pending, true, text);
-		ToolCallEndTrace.emitOnce(this.settlementObservations, state.runId, state.snapshot.getSessionId(), pending,
-				pending.getToolCallId(), pending.getName(), pending.getKind(), 0L, 0L, text, this.sheetAudit);
-		state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, text, state.modelBudget)));
-	}
-
-	private void addDuplicateResponse(ToolBatchState state, PendingToolCall pending) {
-		PendingToolCall first = this.store.pendingLenient(state.runId,
-				state.batchDuplicateOf.get(pending.getToolCallId()));
-		emitToolStartOnce(state.runId, state.toolStarted, pending);
-		if (first != null && first.effectiveOutcome() == ToolOutcome.OK) {
-			String text = StringUtils.defaultString(first.getResultText());
-			settleIdempotentReplay(state.runId, pending, text);
-			state.out.frontendToolResult(pending, true, text);
-			ToolCallEndTrace.emitOnce(this.settlementObservations, state.runId, state.snapshot.getSessionId(), pending,
-					pending.getToolCallId(), pending.getName(), pending.getKind(), 0L, 0L, text, this.sheetAudit);
-			state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-					modelData(pending, text, state.modelBudget)));
-			return;
-		}
-		String code = first == null ? ToolOutcome.CODE_TOOL_EXECUTION_FAILED : first.effectiveCode();
-		settleFrontendRejected(state.runId, pending, code, "同批重复的 set_condition 未重复执行（首次未成功）",
-				List.of("同一批里出现了两条完全相同的 set_condition：只执行第一条，本条未下发前端",
-						"首次调用的结局：" + (first == null ? "未结算" : first.effectiveOutcome().wire())));
-		String text = frameText(pending.getResultText());
-		state.out.frontendToolResult(pending, false, text);
-		state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, text, state.modelBudget)));
-	}
-
-	private void addPreflightBlockedResponse(ToolBatchState state, PendingToolCall pending) {
-		String text = frameText(pending.getResultText());
-		emitToolStartOnce(state.runId, state.toolStarted, pending);
-		state.out.toolResult(pending, false, false, text);
-		state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, text, state.modelBudget)));
-		traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
-	}
-
-	private void addCreateTaskBlockedResponse(ToolBatchState state, PendingToolCall pending) {
-		emitToolStartOnce(state.runId, state.toolStarted, pending);
-		state.responses.add(skipAsCreateTaskLimit(state.runId, pending, state.createTaskPrior));
-		traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
-	}
-
-	private void skipStepLimitedPending(ToolBatchState state, PendingToolCall pending) {
-		emitToolStartOnce(state.runId, state.toolStarted, pending);
-		state.responses.add(skipAsStepLimit(state.runId, pending, state.maxToolSteps));
-		traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_STEP_LIMIT);
-		log.warn("tool step limit reached; call not executed runId={} tool={} toolCallId={} steps={}/{}", state.runId,
-				pending.getName(), pending.getToolCallId(), state.stepsUsed, state.maxToolSteps);
-	}
-
-	private void executeLivePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
-		state.stepsUsed++;
-		emitToolStartOnce(state.runId, state.toolStarted, pending);
-		this.beacon.enter(state.runId, pending.getName(), pending.getKind());
-		AiTrace.eventOn(state.runId, state.snapshot.getSessionId(), "tool_call_start", "toolCallId",
-				pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "approval",
-				PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
-						|| PendingToolCall.KIND_FRONTEND.equals(pending.getKind()), "index", state.responses.size());
-		long startedAt = System.currentTimeMillis();
-		String text = invokeLiveTool(state, pending, startedAt);
-		settleLiveResponse(state, pending, text, startedAt, batchSize);
-	}
-
-	private String invokeLiveTool(ToolBatchState state, PendingToolCall pending, long startedAt) {
-		String text;
-		try {
-			text = dispatchLiveTool(state, pending);
-		}
-		catch (RuntimeException ex) {
-			if (ex instanceof RunParkedException parked) {
-				AiTrace.eventOn(state.runId, state.snapshot.getSessionId(), "tool_call_park", "toolCallId",
-						pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "parkKind",
-						parked.kind());
-				recordSettledBatchTranscript(state.runId, state.snapshot, state.assistant, state.pendings);
-				throw ex;
-			}
-			traceToolAborted(state.runId, state.snapshot.getSessionId(), pending, startedAt, ex);
-			throw ex;
-		}
-		finally {
-			this.beacon.exit(state.runId, "done");
-		}
-		try {
-			checkCancelled(state.runId);
-		}
-		catch (RuntimeException ex) {
-			traceToolAborted(state.runId, state.snapshot.getSessionId(), pending, startedAt, ex);
-			throw ex;
-		}
-		return text;
-	}
-
-	private String dispatchLiveTool(ToolBatchState state, PendingToolCall pending) {
-		if (!this.toolRegistry.isContextMatched(pending.getName(), state.context)) {
-			return this.toolRegistry.isSheetDisabled(pending.getName())
-					? blockSheetDisabled(state.runId, state.context, pending)
-					: blockOutOfScope(state.runId, state.context, pending);
-		}
-		return switch (pending.getKind()) {
-			case PendingToolCall.KIND_FRONTEND -> awaitFrontend(state.runId, pending, state.context);
-			case PendingToolCall.KIND_CONFIRM -> awaitConfirm(state.runId, state.prompt, pending, state.context);
-			default -> executeOnce(state.runId, state.prompt, pending, state.context);
-		};
-	}
-
-	private void settleLiveResponse(ToolBatchState state, PendingToolCall pending, String text, long startedAt,
-			int batchSize) {
-		PendingToolCall source = settledSource(state.runId, pending);
-		long totalToolMs = System.currentTimeMillis() - startedAt;
-		ToolCallEndTrace.emitOnce(this.settlementObservations, state.runId, state.snapshot.getSessionId(), source,
-				pending.getToolCallId(), pending.getName(), pending.getKind(), totalToolMs,
-				execMsOf(source, totalToolMs), text, this.sheetAudit);
-		refreshRunContext(state.runId, source);
-		state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(source, text, state.modelBudget)));
-		if (isBatchHalted(source)) {
-			state.haltedBy = source;
-			log.warn("batch policy fail-fast (stop on first error) runId={} upstreamTool={} outcome={} code={} remainingSkipped={}",
-					state.runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode(),
-					Math.max(0, batchSize - state.responses.size()));
-		}
-	}
-
-	private PendingToolCall settledSource(String runId, PendingToolCall pending) {
-		PendingToolCall settled;
-		try {
-			settled = this.store.pendingLenient(runId, pending.getToolCallId());
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("settled-source-read")) {
-				log.warn("could not read pending entry after execution; falling back to arguments runId={} toolCallId={}", runId,
-						pending.getToolCallId(), ex);
-			}
-			settled = pending;
-		}
-		return ObjectUtils.defaultIfNull(settled, pending);
-	}
-
-	private ToolExecutionResult settleBatch(ToolBatchState state, ChatResponse chatResponse,
-			List<PendingToolCall> pendings) {
-		ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(state.responses).build();
-		List<Message> history = new ArrayList<>(state.prompt.getInstructions());
-		history.add(state.assistant);
-		history.add(toolMessage);
-		boolean stepWrapped = state.stepsUsed >= state.maxToolSteps;
-		if (stepWrapped) {
-			history.add(new UserMessage(STEP_LIMIT_WRAP_UP));
-		}
-		TurnBudgetOutcome budget = applyTurnBudget(state.runId, state.snapshot, state.prompt, chatResponse,
-				state.assistant, history, state.budgetArmed, stepWrapped);
-		history = budget.history();
-		persistToolSteps(state.runId, state.stepsUsed);
-		boolean settled = isSettle(state.runId, history);
-		if (settled) {
-			commitTurnText(state.prompt);
-		}
-		checkCancelled(state.runId);
-		if (!settled) {
-			throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
-					"Tool executed, but snapshot sequence advancement/run state is unconfirmed; stopping before the next hop (runId=" + state.runId + ")");
-		}
-		if (budget.overflow()) {
-			throw new StreamViolationException(budget.decision().failureCode(),
-					"In-turn context budget: the next request would exceed the context window (nextEst="
-							+ budget.decision().nextEst() + " >= limit=" + budget.decision().limitTokens() + ", reason="
-							+ budget.decision().reason() + "): executed records were settled before terminating the run");
-		}
-		return ToolExecutionResult.builder().conversationHistory(history).build();
-	}
-
-	private final class ToolBatchState {
-
-		private final String runId;
-		private final RunSnapshot snapshot;
-		private final Prompt prompt;
-		private final AssistantMessage assistant;
-		private final AiContext context;
-		private final SseChatEmitter out;
-		private final ModelWriteBudget modelBudget;
-		private final boolean budgetArmed;
-		private final int maxToolSteps;
-		private int stepsUsed;
-		private final List<PendingToolCall> suspended = new ArrayList<>();
-		private final Set<String> preflightBlocked = new HashSet<>();
-		private final Set<String> createTaskBlocked = new HashSet<>();
-		private final Set<String> frontendRejected = new HashSet<>();
-		private final Map<String, String> idempotentReplay = new HashMap<>();
-		private final Map<String, String> batchSetConditionSeen = new HashMap<>();
-		private final Map<String, String> batchDuplicateOf = new HashMap<>();
-		private boolean createTaskSeenInBatch;
-		private boolean createTaskChecked;
-		private CreateTaskInRun createTaskPrior = CreateTaskInRun.NONE;
-		private final Set<String> toolStarted = new HashSet<>();
-		private final List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
-		private PendingToolCall haltedBy;
-		private List<PendingToolCall> pendings;
-
-		private ToolBatchState(String runId, RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
-				AiContext context, SseChatEmitter out, ModelWriteBudget modelBudget, boolean budgetArmed) {
-			this.runId = runId;
-			this.snapshot = snapshot;
-			this.prompt = prompt;
-			this.assistant = assistant;
-			this.context = context;
-			this.out = out;
-			this.modelBudget = modelBudget;
-			this.budgetArmed = budgetArmed;
-			this.maxToolSteps = Math.max(1, SpToolCallingManager.this.properties.getResilience().getMaxToolSteps());
-			this.stepsUsed = snapshot.getToolSteps();
-		}
-
-	}
-
-	/**
-	 * {@code tool_start} 的<b>唯一发射口</b>（每张卡恰一条）。
-	 *
-	 * <p>park 开启时本批的 tool_start 与请求帧都前移到执行循环之前公布（帧序契约：tool_start 先于
-	 * request）。执行循环随后还会走到同一条卡（预算/预检/步数/主路径四个分支），必须靠本集合去重 ——
-	 * 否则同一张卡会出现两条 tool_start（前端会重复建段/重复动画）。非 park 路径集合恒空，
-	 * 行为与改造前逐字一致。
-	 */
-	private void emitToolStartOnce(String runId, Set<String> toolStarted, PendingToolCall pending) {
-		if (toolStarted.add(pending.getToolCallId())) {
-			this.registry.of(runId).toolStart(pending);
-		}
-	}
-
-	/**
-	 * 本批会进入 {@link ConfirmGate} 等待的 toolCallId（{@code CONFIRM} 与 {@code FRONTEND} 都经
-	 * {@code ConfirmGate.await} 登记闸门，故两者都要预登记 —— F8）。
-	 */
-	private static List<String> gateWaitToolCallIds(List<PendingToolCall> pendings) {
-		List<String> ids = new ArrayList<>(pendings.size());
-		for (PendingToolCall pending : pendings) {
-			String kind = pending.getKind();
-			if ((PendingToolCall.KIND_CONFIRM.equals(kind) || PendingToolCall.KIND_FRONTEND.equals(kind))
-					&& pending.getToolCallId() != null) {
-				ids.add(pending.getToolCallId());
-			}
-		}
-		return ids;
-	}
-
-	// ── 批策略（P1-10） ─────────────────────────────────────────────────────
-
-	/** 执行后失败的 message 追加语（副作用可能已发生，必须人工对账）。 */
-	public static final String RECONCILIATION_NOTE = "该操作可能已产生部分副作用，需人工对账。";
-
-	/**
-	 * 批次首错即停的判据：类别 W/J/P，且结算后的结局是<b>人工拒绝或确定性失败</b>
-	 * （{@code status=REJECTED 且 outcome=rejected}，或 {@code outcome=failed} 且 {@code retryable=false}）。
-	 * {@code retryable=true} 或 {@code unknown} 一律不停 —— 前者还有改数据重试的空间，后者须先对账。
-	 */
-	public boolean isBatchHalted(PendingToolCall pending) {
-		if (pending == null) {
-			return false;
-		}
-		ToolMeta.Category category = this.toolRegistry.categoryOf(pending.getName());
-		if (category != ToolMeta.Category.W && category != ToolMeta.Category.J
-				&& category != ToolMeta.Category.P) {
-			return false;
-		}
-		ToolOutcome outcome = pending.effectiveOutcome();
-		return PendingToolCall.REJECTED.equals(pending.getStatus()) && outcome == ToolOutcome.REJECTED
-				|| outcome == ToolOutcome.FAILED && !outcome.retryable(pending.effectiveCode());
-	}
-
-	public boolean haltsBatch(PendingToolCall pending) {
-		return isBatchHalted(pending);
-	}
-
-	/**
-	 * 为"已规划未执行"的调用补一条结构化 SKIPPED：写库、发 {@code tool_result} 帧、
-	 * 返回回填模型的统一信封（每个 {@code toolCallId} 都必须有对应 ToolResponse）。
-	 * 仅处理 PENDING/APPROVED 且未执行的条目；已终态条目保留原结局，只回填原结果，不重发覆盖帧。
-	 */
-	public ToolResponseMessage.ToolResponse skipAsUpstreamFailed(String runId, PendingToolCall pending,
-			PendingToolCall upstream) {
-		if (pending.isExecuted() || !PendingToolCall.PENDING.equals(pending.getStatus())
-				&& !PendingToolCall.APPROVED.equals(pending.getStatus())) {
-			String existing = frameText(pending.getResultText());
-			return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-					modelData(pending, existing));
-		}
-		String message = skippedMessage(upstream.getName(), upstream.effectiveCode());
-		pending.setStatus(PendingToolCall.SKIPPED);
-		pending.setOutcome(ToolOutcome.SKIPPED.wire());
-		pending.setCode(ToolOutcome.CODE_UPSTREAM_FAILED);
-		pending.setReason(ToolOutcome.CODE_UPSTREAM_FAILED);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(message);
-		this.store.putPending(runId, pending);
-		this.registry.of(runId).toolResult(pending, false, false, message);
-		log.warn("batch policy skipped call runId={} tool={} toolCallId={} upstream={} upstreamCode={}", runId, pending.getName(),
-				pending.getToolCallId(), upstream.getName(), upstream.effectiveCode());
-		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, message));
-	}
-
-	/**
-	 * 步数到顶的调用：结算成 {@code skipped/TOOL_STEP_LIMIT}（未执行、不占认领、不记台账），
-	 * 帧照发（前端能看到"这步为什么没跑"），回填模型的是统一信封 + 收尾提示。
-	 *
-	 * <p>为什么是 {@link ToolOutcome#SKIPPED} 而不是 {@code FAILED}：这不是"执行出错"，
-	 * 而是"预算用完了"—— 用 failed 会触发批次首错即停（{@link #haltsBatch}），
-	 * 把"部分完成"变成"整批作废"，与"降级收尾"的裁决相反。
-	 */
-	public ToolResponseMessage.ToolResponse skipAsStepLimit(String runId, PendingToolCall pending, int maxSteps) {
-		String message = "未执行：本轮工具调用步数已达上限（app.ai.resilience.max-tool-steps = " + maxSteps
-				+ "）。请用已经获得的信息给出结论，并说明哪些部分未完成。";
-		pending.setStatus(PendingToolCall.SKIPPED);
-		pending.setOutcome(ToolOutcome.SKIPPED.wire());
-		pending.setCode(ToolOutcome.CODE_TOOL_STEP_LIMIT);
-		pending.setReason(ToolOutcome.CODE_TOOL_STEP_LIMIT);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(message);
-		this.store.putPending(runId, pending);
-		this.registry.of(runId).toolResult(pending, false, false, message);
-		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, message));
-	}
-
-	/**
-	 * AR-03 单轮第二次 {@code create_task}：结算成 {@code skipped/CREATE_TASK_TURN_LIMIT}
-	 * （<b>未创建</b>、不弹第二张卡、不写执行台账），并给模型可读出口。
-	 *
-	 * @param prior 本轮已创建任务的已知程度（有 id / 任务号不可确认 / 同批尚未结算），
-	 *              见 {@link CreateTaskInRun} —— <b>任务号不可确认时绝不编造 {@code #-1}</b>
-	 */
-	public ToolResponseMessage.ToolResponse skipAsCreateTaskLimit(String runId, PendingToolCall pending,
-			CreateTaskInRun prior) {
-		String message = markCreateTaskLimit(runId, pending, prior);
-		// 前端插值契约（additive）：单轮上限命中时把"本轮已创建的任务号"以结构化形式带上，
-		// 与 userTextCode 同一帧；没有 taskId（idUnknown/同批未结算）时不发该键。
-		java.util.Map<String, Object> userTextArgs = prior.taskId() == null ? null
-				: java.util.Map.of("taskId", String.valueOf(prior.taskId()));
-		this.registry.of(runId).toolResult(pending, false, false, message, null, userTextArgs);
-		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, message));
-	}
-
-	/** 只落"单轮上限"终态（不发帧）：供 park 前检测使用，保证第二笔不会以 PENDING 留在快照里。 */
-	private String markCreateTaskLimit(String runId, PendingToolCall pending, CreateTaskInRun prior) {
-		String detail;
-		if (prior.idUnknown()) {
-			detail = "无法确认本轮是否已创建任务；为避免重复创建，本次未创建。"
-					+ "请先用 list_tasks 查看已有任务（如有，用 navigate_to 打开）；需要再建请在新一轮发起。";
-		}
-		else if (prior.taskId() != null) {
-			detail = "本轮已创建任务 #" + prior.taskId() + "，本次未创建。请用 navigate_to(page=..., taskId="
-					+ prior.taskId() + ") 打开该任务；需要再建请在新一轮发起。";
-		}
-		else {
-			detail = "本次调用未创建。请先完成本轮已发起的那一次创建（确认卡）；需要再建请在新一轮发起。";
-		}
-		String message = "未创建（" + ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT + "）：同一轮只允许创建一次任务。" + detail;
-		pending.setStatus(PendingToolCall.SKIPPED);
-		pending.setOutcome(ToolOutcome.SKIPPED.wire());
-		pending.setCode(ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
-		pending.setReason(ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(message);
-		this.store.putPending(runId, pending);
-		log.warn("per-turn create_task limit reached; creation refused runId={} toolCallId={} priorTaskId={} idUnknown={}", runId,
-				pending.getToolCallId(), prior.taskId(), prior.idUnknown());
-		return message;
-	}
-
-	/**
-	 * 本轮是否已经创建过任务（跨批 / 续跑口径 = 执行台账）。
-	 *
-	 * <p><b>不编造任务号</b>：台账读不到 / 回执里解析不出 {@code #id} 时返回
-	 * {@link CreateTaskInRun#unknown()}，文案只说"无法确认本轮是否已创建任务"，绝不输出
-	 * {@code #-1} 这类伪 ID 让用户去导航，也不断言"一定已创建"。
-	 */
-	private CreateTaskInRun createTaskAlreadyInRun(String runId) {
-		List<Map<String, Object>> ledger;
-		try {
-			ledger = this.store.ledger(runId);
-		}
-		catch (RuntimeException ex) {
-			// fail-closed：查不到台账时宁可拒绝第二次创建，也不能冒"重复建库"的险。
-			log.warn("could not read per-turn create_task ledger; treated as created (task id unconfirmed) runId={}", runId, ex);
-			return CreateTaskInRun.unknown();
-		}
-		for (Map<String, Object> record : ledger) {
-			if (TOOL_CREATE_TASK.equals(record.get("name"))
-					&& ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
-				Long taskId = createdTaskIdOf(record.get(PendingToolCall.CREATED_TASK_ID));
-				return taskId == null ? CreateTaskInRun.unknown() : new CreateTaskInRun(true, taskId, false);
-			}
-		}
-		return CreateTaskInRun.NONE;
-	}
-
-	private static Long createdTaskIdOf(Object raw) {
-		if (raw instanceof java.util.concurrent.atomic.AtomicReference<?> holder) {
-			raw = holder.get();
-		}
-		if (raw instanceof Number number) {
-			return number.longValue();
-		}
-		if (StringUtils.isBlank(ObjectUtils.toString(raw, (String) null))) {
-			return null;
-		}
-		try {
-			return Long.valueOf(String.valueOf(raw).trim());
-		}
-		catch (NumberFormatException ex) {
-			return null;
-		}
-	}
-
-	/**
-	 * "本轮是否已创建任务"的三态结果（AR-03 单轮上限）。
-	 *
-	 * @param created  本轮是否已有成功创建
-	 * @param taskId   已知任务号（未知/同批未结算时为 null）
-	 * @param idUnknown 已有创建但任务号不可确认（台账读失败/createdTaskId 缺失）；
-	 *                  文案必须走通用措辞，不得给伪 ID
-	 */
-	public record CreateTaskInRun(boolean created, Long taskId, boolean idUnknown) {
-
-		/** 未创建（同批第一笔尚未结算也归此态）。 */
-		public static final CreateTaskInRun NONE = new CreateTaskInRun(false, null, false);
-
-		/** 已有创建但任务号不可确认。 */
-		public static CreateTaskInRun unknown() {
-			return new CreateTaskInRun(true, null, true);
-		}
-	}
-
-	/**
-	 * 轮内上下文预算 armed 之后的调用：结算成 {@code skipped/TOOL_BUDGET_EXHAUSTED}
-	 * （未执行、不占认领、不记台账），帧照发。
-	 *
-	 * <p>为什么是 {@link ToolOutcome#SKIPPED} 而不是 {@code FAILED}：与步数笼同一条理由 ——
-	 * 这不是"执行出错"，而是"上下文放不下了"。用 failed 会触发批次首错即停，把
-	 * "部分完成收尾"变成"整批作废"。
-	 */
-	public ToolResponseMessage.ToolResponse skipAsBudgetExhausted(String runId, PendingToolCall pending) {
-		String message = "未执行：本轮上下文预算已耗尽（工具轮内上下文预算）。"
-				+ "请直接用已经获得的信息给出结论，并说明哪些部分未完成。";
-		pending.setStatus(PendingToolCall.SKIPPED);
-		pending.setOutcome(ToolOutcome.SKIPPED.wire());
-		pending.setCode(ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
-		pending.setReason(ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(message);
-		this.store.putPending(runId, pending);
-		this.registry.of(runId).toolResult(pending, false, false, message);
-		return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-				modelData(pending, message));
-	}
-
-	// ── 轮内上下文预算（工具轮内上下文预算批） ───────────────────────────────
-
-	/**
-	 * 轮内预算的执行面：判一次 → 按动作执行本地 L1 / 收尾 → 变更后<b>重新估算</b>再判。
-	 *
-	 * <p><b>为什么变更后要重新估算</b>：真值 {@code usage} 描述的是"上一发请求"，
-	 * 清掉工具结果或追加指令之后，上一发的 usage 已不再代表下一发。故每次本地变更都按
-	 * <b>省下/新增的估算量</b>递推判据值（而不是丢掉真值重算整包）：清掉 3000 token 的旧结果，
-	 * 下一发就少 3000 —— 真值仍是同一个基线的真值。
-	 *
-	 * <p>至多两轮变更（清一次 + 收尾一次），构造上不会死循环。
-	 */
-	private TurnBudgetOutcome applyTurnBudget(String runId, RunSnapshot snapshot, Prompt prompt,
-			ChatResponse chatResponse, AssistantMessage assistant, List<Message> history, boolean armed,
-			boolean stepWrapped) {
-		int limit = turnBudgetLimit(snapshot);
-		if (limit <= 0) {
-			return new TurnBudgetOutcome(history, false, null);
-		}
-		AiProperties.Context config = this.properties.getContext();
-		ContextMeter meter = new ContextMeter();
-		meter.accept(chatResponse);
-		int before = estimateRequestTokens(prompt, history);
-		int delta = Math.max(0, ContextEstimator.estimateMessages(history)
-				- ContextEstimator.estimateMessages(prompt.getInstructions())
-				- ContextEstimator.estimateMessage(assistant));
-		Set<String> protectedIds = pendingToolCallIds(runId).orElse(null);
-		Set<String> activeRunIds = activeRunIds(runId, snapshot);
-		Set<String> otherActiveRuns = new HashSet<>(activeRunIds);
-		otherActiveRuns.remove(runId);
-		TurnBudgetState state = new TurnBudgetState(snapshot, config, history, protectedIds, activeRunIds,
-				otherActiveRuns, systemTokensOf(prompt), toolsTokensOf(prompt), armed);
-		state.decision = TurnBudgetPlan.plan(turnBudgetRequest(limit, config, meter, prompt, history, delta,
-				state.armedNow, runId, state.maxOutput));
-		state.nextEst = state.decision.nextEst();
-		applyTurnBudgetPasses(runId, limit, stepWrapped, state);
-		if (state.needRejudge) {
-			rejudgeTurnBudget(runId, limit, state);
-		}
-		traceTurnBudget(runId, snapshot, prompt, limit, meter, before, state);
-		return new TurnBudgetOutcome(state.current, state.decision.action() == TurnBudgetPlan.Action.OVERFLOW,
-				state.decision);
-	}
-
-	private void applyTurnBudgetPasses(String runId, int limit, boolean stepWrapped, TurnBudgetState state) {
-		for (int pass = 0; pass < 6; pass++) {
-			if (pass > 0) {
-				rejudgeTurnBudget(runId, limit, state);
-			}
-			state.needRejudge = false;
-			boolean overflow = state.decision.action() == TurnBudgetPlan.Action.OVERFLOW
-					&& TurnBudgetPlan.REASON_OVERFLOW.equals(state.decision.reason());
-			if ((state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS || overflow)
-					&& state.cleared == 0 && !state.clearAttempted && state.protectedIds != null
-					&& applyTurnClear(runId, state)) {
-				continue;
-			}
-			if (state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS) {
-				break;
-			}
-			if (overflow) {
-				if (state.shrinkRounds < 2 && state.protectedIds != null && applyTurnShrink(limit, state)) {
-					continue;
-				}
-				if (state.trimmedTurns == 0 && applyTurnTrim(runId, limit, state)) {
-					continue;
-				}
-				break;
-			}
-			if (state.decision.action() == TurnBudgetPlan.Action.WRAP_UP && !state.armedNow && !stepWrapped) {
-				applyTurnWrapUp(runId, state);
-				continue;
-			}
-			break;
-		}
-	}
-
-	private boolean applyTurnClear(String runId, TurnBudgetState state) {
-		List<Message> beforeClear = state.current;
-		ToolResultClearing.Plan plan = ToolResultClearing.plan(state.current, state.config.getKeepToolPairs(),
-				state.protectedIds, state.otherActiveRuns);
-		if (plan.changed()) {
-			state.clearAttempted = true;
-		}
-		if (!plan.changed() || !isRecordTurnClear(runId, state.snapshot, beforeClear, plan, state.systemTokens,
-				state.toolsTokens)) {
-			return false;
-		}
-		state.current = plan.messages();
-		state.cleared += plan.cleared().size();
-		state.nextEst = Math.max(0, state.nextEst - plan.savedTokens());
-		state.needRejudge = true;
-		return true;
-	}
-
-	private boolean applyTurnShrink(int limit, TurnBudgetState state) {
-		ToolResultShrink.Plan shrink = ToolResultShrink.plan(state.current, state.nextEst, limit, state.protectedIds,
-				this.limiter);
-		if (!shrink.changed()) {
-			return false;
-		}
-		state.current = shrink.messages();
-		state.shrunkResults += shrink.shrunk().size();
-		state.shrinkRounds++;
-		state.nextEst = Math.max(0, state.nextEst - shrink.savedTokens());
-		state.needRejudge = true;
-		return true;
-	}
-
-	private boolean applyTurnTrim(String runId, int limit, TurnBudgetState state) {
-		HardTrim.Plan trim = HardTrim.plan(state.current, state.config.getKeepRecentTurns(), state.protectedIds,
-				state.activeRunIds);
-		if (trim.changed() && state.nextEst - trim.lostTokens()
-				+ ContextTrigger.effectiveReserve(limit, state.config.getReserveTokens(), state.maxOutput) > limit) {
-			return false;
-		}
-		if (!trim.changed() || !isRecordTurnTrim(runId, state.snapshot, state.current, trim, state.systemTokens,
-				state.toolsTokens)) {
-			return false;
-		}
-		state.current = trim.messages();
-		state.trimmedTurns = trim.droppedTurns();
-		state.nextEst = Math.max(0, state.nextEst - trim.lostTokens());
-		state.needRejudge = true;
-		return true;
-	}
-
-	private void applyTurnWrapUp(String runId, TurnBudgetState state) {
-		List<Message> wrapped = new ArrayList<>(state.current);
-		wrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
-		state.current = wrapped;
-		this.beacon.armBudget(runId);
-		this.store.markTurnBudget(runId, System.currentTimeMillis(), this.beacon.budgetSkippedBatches(runId));
-		state.armedNow = true;
-		state.nextEst += ContextEstimator.estimate(TURN_BUDGET_WRAP_UP);
-		state.needRejudge = true;
-	}
-
-	private void rejudgeTurnBudget(String runId, int limit, TurnBudgetState state) {
-		state.decision = TurnBudgetPlan.plan(new TurnBudgetPlan.Request(limit, state.config.getReserveTokens(),
-				state.config.getL1Percent(), state.config.getL3Percent(), false, 0, 0, state.nextEst, 0,
-				state.armedNow, this.beacon.budgetSkippedBatches(runId), state.maxOutput));
-	}
-
-	private void traceTurnBudget(String runId, RunSnapshot snapshot, Prompt prompt, int limit, ContextMeter meter,
-			int before, TurnBudgetState state) {
-		int after = estimateRequestTokens(prompt, state.current);
-		if ((!state.decision.triggered() || state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS
-				&& state.cleared == 0) && state.cleared == 0 && state.shrunkResults == 0 && state.trimmedTurns == 0) {
-			return;
-		}
-		AiTrace.eventOn(runId, snapshot.getSessionId(), "turn_budget", "action", state.decision.action().name(),
-				"reason", state.decision.reason(), "ratio", String.format(Locale.ROOT, "%.3f", state.decision.ratio()),
-				"nextEst", state.decision.nextEst(), "limit", state.decision.limitTokens(), "reserve",
-				state.decision.reserveTokens(), "before", before, "after", after, "clearedPairs", state.cleared,
-				"shrunkResults", state.shrunkResults, "trimmedTurns", state.trimmedTurns, "armed", state.armedNow,
-				"usage", meter.measured());
-		log.info("in-turn context budget runId={} action={} reason={} ratio={} nextEst={} limit={} clearedPairs={} shrunkResults={} trimmedTurns={} armed={}", runId, state.decision.action(), state.decision.reason(),
-				String.format(Locale.ROOT, "%.3f", state.decision.ratio()), state.decision.nextEst(), limit,
-				state.cleared, state.shrunkResults, state.trimmedTurns, state.armedNow);
-	}
-
-	private static final class TurnBudgetState {
-
-		private final RunSnapshot snapshot;
-		private final AiProperties.Context config;
-		private final Set<String> protectedIds;
-		private final Set<String> activeRunIds;
-		private final Set<String> otherActiveRuns;
-		private final int systemTokens;
-		private final int toolsTokens;
-		private final int maxOutput;
-		private List<Message> current;
-		private int cleared;
-		private boolean armedNow;
-		private TurnBudgetPlan.Decision decision;
-		private int nextEst;
-		private boolean needRejudge;
-		private boolean clearAttempted;
-		private int shrunkResults;
-		private int shrinkRounds;
-		private int trimmedTurns;
-
-		private TurnBudgetState(RunSnapshot snapshot, AiProperties.Context config,
-				List<Message> current, Set<String> protectedIds, Set<String> activeRunIds,
-				Set<String> otherActiveRuns, int systemTokens, int toolsTokens, boolean armed) {
-			this.snapshot = snapshot;
-			this.config = config;
-			this.current = current;
-			this.protectedIds = protectedIds;
-			this.activeRunIds = activeRunIds;
-			this.otherActiveRuns = otherActiveRuns;
-			this.systemTokens = systemTokens;
-			this.toolsTokens = toolsTokens;
-			this.armedNow = armed;
-			this.maxOutput = snapshot == null || snapshot.getMaxTokens() == null ? 0
-					: Math.max(0, snapshot.getMaxTokens());
-		}
-
-	}
-
-	/**
-	 * B3：轮内 L1/L3 真实提交后的压缩事实 + {@code context} 帧。
-	 *
-	 * <p>只有状态/台账已经写成功才调用；写事实失败只 WARN，不出帧 ——
-	 * 宁可少一条可见节点，也不伪造"已压缩"。事件与帧同一份 eventId/atMs/anchor，刷新后由
-	 * {@code /history.events} 恢复同一节点。
-	 *
-	 * <p>帧键集与 {@code ContextCompactor#framePayload} 同口径：{@code savedTokens}/{@code clearedPairs}
-	 * 无前端消费者，轮内帧也不写（台账/日志仍保留这两项）。{@code est} 取写回的 {@link ContextState#est()}
-	 * （轮内 L1/L3 的基线本就是估算），不在这里硬编码。
-	 */
-	private void emitTurnCompactionEvent(String runId, RunSnapshot snapshot, ContextTrigger.Level level, int before,
-			int after, int turns, int lostTokens, String reason, List<Message> beforeMessages, ContextState state) {
-		if (this.contextStateStore == null || this.registry == null || snapshot == null || runId == null
-				|| snapshot.getSessionId() == null) {
-			return;
-		}
-		String sessionId = snapshot.getSessionId();
-		long atMs = System.currentTimeMillis();
-		try {
-			String eventId = runId + ":turn:" + atMs + ":" + level.wire();
-			String anchor = ContextCompactor.lastToolCallId(beforeMessages);
-			Map<String, Object> event = new LinkedHashMap<>();
-			event.put("eventId", eventId);
-			event.put("runId", runId);
-			event.put("atMs", String.valueOf(atMs));
-			event.put("cause", "turn_loop");
-			event.put("level", level.wire());
-			event.put("anchorToolCallId", anchor);
-			event.put("turns", turns);
-			event.put("lostTokens", lostTokens);
-			this.contextStateStore.appendEvent(sessionId, event);
-			Map<String, Object> payload = new LinkedHashMap<>();
-			payload.put("level", level.wire());
-			payload.put("before", before);
-			payload.put("after", after);
-			payload.put("turns", turns);
-			payload.put("lostTokens", lostTokens);
-			payload.put("reason", reason);
-			// P3-1：与写回状态同源（轮内 L1/L3 的基线是估算，不能声明 est=false）。
-			payload.put("est", state != null && state.est());
-			// B5：savedTokens/clearedPairs 无前端消费者，与 ContextCompactor#framePayload 同口径不写帧。
-			payload.put("eventId", eventId);
-			payload.put("committed", true);
-			payload.put("cause", "turn_loop");
-			payload.put("anchorToolCallId", anchor);
-			payload.put("runId", runId);
-			payload.put("atMs", String.valueOf(atMs));
-			try {
-				this.registry.of(runId).context(payload);
-			}
-			catch (RuntimeException ex) {
-				log.warn("failed to send in-turn compaction context frame (ignored; turn unaffected) runId={}", runId, ex);
-			}
-		}
-		catch (RuntimeException ex) {
-			log.warn("failed to write in-turn compaction fact (no context frame this time) runId={} sessionId={}", runId, sessionId, ex);
-		}
-	}
-
-	/**
-	 * 轮内 L1 的记账（与轮首压缩 {@code ContextCompactor#compact} 的 L1 收尾<b>同账</b>）。
-	 *
-	 * <h2>为什么必须记</h2>
-	 * 轮内预算先于轮首压缩命中 L1 是常态（{@code keep-tool-pairs} 把最近 N 对都 pin 住，可清的那一对
-	 * 往往正好是"本批工具结果"落到历史之后才离开 pin 窗口）。只清不记账的结果是：<b>模型看到的上下文
-	 * 真的变了，运维面 {@code ?ledger=1} 与快照 {@code compaction.level} 却仍说"从未压缩"</b> ——
-	 * 同一件事两套口径。
-	 *
-	 * <h2>与轮首的逐项对齐（唯一的差异：谱系已高于 L1 时只记台账、不改状态）</h2>
-	 * <ul>
-	 * <li>顺序同轮首：<b>先写真值 → 再写台账</b>；任一步失败 ⇒ 本批<b>不清</b>（history 原样）。</li>
-	 * <li><b>不宣称原子</b>：两步是独立的 Redis 写，没有事务、也没有回滚 —— 状态成功而台账失败时
-	 * {@code ai:ctx:<sid>} 已落 {@code level=L1/atMs} 而台账缺这一条（{@code /context} 说"压过"、
-	 * {@code ?ledger=1} 说"没压过"）。这是已知的部分失败窗口，靠下一次清除/轮首压缩收敛；不为此新增
-	 * 锁、回滚或新的键协议；</li>
-	 * <li>{@code before/after} 用<b>消息估算</b>（{@code ContextEstimator.estimateMessages}），不是含
-	 * system/tools 的整包估算 —— 与轮首 {@code ledgerEvent} 同一口径；</li>
-	 * <li>{@code level=L1}、{@code turns=0}、{@code lostTokens=0}：L1 只清结果、不折叠轮次（"省了多少"
-	 * 看 before−after，不记在 lostTokens 里）；</li>
-		 * <li><b>只升不降</b>：{@code level} 同时是谱系当前位置（{@code ContextTrigger#advanceTo} 从这里
-	 * 往上推一格）。已到 L2/L3 的会话不因一次轮内 L1 回退成 L1（否则下一轮会重爬 L1→L2、摘要重做），
-	 * 此时只写台账、不改状态；</li>
-	 * <li><b>usage 基线同轮首</b>：写完 {@code level} 立刻把基线置为"清除后规模估算"
-	 * （{@code withUsage(after, …, est=true)}，同 {@code ContextCompactor} 的成功路径）。这不是伪造真值：
-	 * 它是有 {@code est=true} 标记的临时估算，轮末 {@code recordTurn} 仍用上游真值整份覆盖。
-	 * <b>必须写</b>：{@code level} 是 {@code everCompacted()} 的唯一来源，若留着清除前的大的 used，
-	 * 下一轮的轮首压缩会被滞回锁（可压缩历史 / (窗口 − 有效预留) ≥ 60%）整轮挡掉 ——
-	 * 连只有轮首能做的 L2/L3 也停摆。</li>
-	 * </ul>
-	 *
-	 * <h2>幂等与无法保证的窗口（如实登记）</h2>
-	 * 同一批重复调用不会重复记账：清除后的历史里已是占位符，{@link ToolResultClearing#plan} 不再产出
-	 * 可清条目（{@code plan.changed()=false}）⇒ 根本进不到本方法（前提是调用方喂的是清除后的历史）。
-	 * 同一 run 的并发驱动通常被 run 租约挡住；但上下文台账（{@code appendLedger(sessionId,…)}）没有
-	 * run 围栏，已失去租约的僵尸实例仍可能补写一条。同轮<b>多次</b> L1 清除（后续批次又清掉别的对）
-	 * 会各记一条事件，这是两件真事；B5 起不再写 archive，原文由台账/transcript 承担。
-	 * 本方法不引入任何新锁，也不承诺跨进程 exactly-once。
-	 *
-	 * @return 是否允许把清除结果落到历史（{@code false} = 记账失败，本批不清）
-	 */
-	private boolean isRecordTurnClear(String runId, RunSnapshot snapshot, List<Message> beforeClear,
-			ToolResultClearing.Plan plan, int systemTokens, int toolsTokens) {
-		for (int attempt = 0; attempt < 3; attempt++) {
-			if (isRecordTurnClearAttempt(runId, snapshot, beforeClear, plan, systemTokens, toolsTokens)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private boolean isRecordTurnClearAttempt(String runId, RunSnapshot snapshot, List<Message> beforeClear,
-			ToolResultClearing.Plan plan, int systemTokens, int toolsTokens) {
-		ContextStateStore store = this.contextStateStore;
-		if (store == null || snapshot == null || snapshot.getSessionId() == null) {
-			// 轻装配面（单测直接 new）：保持"只清结果"的旧口径；生产由容器注入 RunStore
-			return true;
-		}
-		String sessionId = snapshot.getSessionId();
-		long now = System.currentTimeMillis();
-		try {
-			ContextState state = store.read(sessionId);
-			if (state == null) {
-				state = ContextState.EMPTY;
-			}
-			int before = ContextEstimator.estimateMessages(beforeClear);
-			int after = ContextEstimator.estimateMessages(plan.messages());
-			int turnNo = state.turnNo() + 1;
-			// B5：不再写 ai:ctx:archive（只写不读、turnNo 会复用）；原文在台账/transcript。
-			// ① 真值：level 必须被快照看到（否则"清了但显示没压过"）；turns/lostTokens 与轮首 L1 同口径。
-			// 只升不降：`level` 同时是谱系的"当前位置"（ContextTrigger#advanceTo 从这里往上推一格），
-			// 已经到 L2/L3 的会话不能被一次轮内 L1 回退成 L1 —— 那会让下一轮重新爬 L1→L2（摘要重做、
-			// 档位看起来"降级"）。故仅在当前级 ≤ L1 时改写状态；更高的谱系保持原样（台账照记这次 L1 事件）。
-			ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
-			ContextState clearedState = state;
-			if (lineage.ordinal() <= ContextTrigger.Level.L1.ordinal()) {
-				// 与轮首 ContextCompactor 的成功路径同一口径：level + "清除后规模估算"基线一起写。
-				// est=true 明确这是估算；轮末 recordTurn 会用真值覆盖。缺了这一步，下一次轮首压缩会因为
-				// 沿用的旧 used 撞上滞回线（hysteresis_locked）而整轮不做（含 L2/L3）。
-				// C13 / I3：与轮首压缩的新基线同口径 —— 含 system + tools（上游真值本就含这两项）。
-				// 相加的必须是<b>本轮请求</b>的 prefix（附录入参），不是 state 里上一轮的锚点：
-				// 工具集/工作区快照变了之后，旧锚点会让基线算错，而锚点自己也一直不刷新。
-				int baseline = after + Math.max(0, systemTokens) + Math.max(0, toolsTokens);
-				clearedState = state.withCompaction(ContextTrigger.Level.L1, 0, 0, TurnBudgetPlan.REASON_L1, now)
-					.withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
-							snapshot.getProviderId(), Math.max(0, systemTokens), Math.max(0, toolsTokens),
-							state.inputTokens());
-				store.write(sessionId, clearedState);
-			}
-			// ③ 台账：键集与 ContextCompactor#ledgerEvent 逐键一致
-			store.appendLedger(sessionId, turnClearLedgerEvent(before, after, plan, snapshot, now,
-					clearedState.circuit()));
-			log.info("in-turn L1 clearing recorded runId={} sessionId={} turnNo={} before={} after={} clearedPairs={}",
-					runId, sessionId, turnNo, before, after, plan.cleared().size());
-			emitTurnCompactionEvent(runId, snapshot, ContextTrigger.Level.L1, before, after, 0, 0,
-					TurnBudgetPlan.REASON_L1, beforeClear, clearedState);
-			return true;
-		}
-		catch (RuntimeException ex) {
-			// 两步各自独立写、无事务：此刻 ai:ctx:<sid>（level=L1/atMs）可能已落盘，而台账缺一条。
-			// 本批不清（history 原样）；残留靠下一次清除/轮首压缩收敛 —— 不在这里做回滚。
-			log.warn("in-turn L1 clearing not recorded (batch not cleared; state may be written without a ledger row: two steps, no transaction) runId={}",
-					runId, ex);
-			return false;
-		}
-	}
-
-	/**
-	 * 轮内<b>硬截断</b>的记账（C13 / I5；与轮首 {@code ContextCompactor} 的 L3 同账）。
-	 *
-	 * <h2>为什么必须记</h2>
-	 * 越窗恢复会真的丢最旧几轮（模型看到的上下文变了）。只发一条 trace 的结果是：{@code ?ledger=1}
-	 * 说"从未压缩"，{@code /context} 的 {@code compaction.level/turns/lostTokens} 也不动，
-	 * 台账/事件里没有记录 —— 同一件事多套口径，且用户/运维无法追溯"哪些轮没了"。
-	 *
-	 * <h2>顺序与失败语义（与轮内 L1 逐项对齐）</h2>
-	 * <b>先写真值/档位 → 再写台账</b>；任一步抛错 ⇒ 本批<b>不应用</b>这次截断
-	 * （{@code false}）。与 L1 一样<b>不宣称原子</b>：两步是独立的 Redis 写，状态成功而台账失败时
-	 * {@code ai:ctx:<sid>} 已是 {@code level=L3} 而台账缺这一条（已知的部分失败窗口，靠下一次
-	 * 轮首压缩收敛）；不为此新增锁或回滚协议。
-	 *
-	 * @return 是否允许把截断结果落到历史（{@code false} = 记账失败，历史原样）
-	 */
-	private boolean isRecordTurnTrim(String runId, RunSnapshot snapshot, List<Message> beforeTrim, HardTrim.Plan plan,
-			int systemTokens, int toolsTokens) {
-		for (int attempt = 0; attempt < 3; attempt++) {
-			if (isRecordTurnTrimAttempt(runId, snapshot, beforeTrim, plan, systemTokens, toolsTokens)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private boolean isRecordTurnTrimAttempt(String runId, RunSnapshot snapshot, List<Message> beforeTrim,
-			HardTrim.Plan plan, int systemTokens, int toolsTokens) {
-		ContextStateStore store = this.contextStateStore;
-		if (store == null || snapshot == null || snapshot.getSessionId() == null) {
-			// 轻装配面（单测直接 new）：保持"只丢轮"的旧口径；生产由容器注入 RunStore
-			return true;
-		}
-		String sessionId = snapshot.getSessionId();
-		long now = System.currentTimeMillis();
-		// 原状态留一份引用：失败时 best-effort 回写（N1：失败不得留档位）
-		ContextState previous = null;
-		try {
-			ContextState state = store.read(sessionId);
-			if (state == null) {
-				state = ContextState.EMPTY;
-			}
-			previous = state;
-			int before = ContextEstimator.estimateMessages(beforeTrim);
-			int after = ContextEstimator.estimateMessages(plan.messages());
-			int turnNo = state.turnNo() + 1;
-			// B5：不再写 ai:ctx:archive（只写不读、turnNo 会复用）；原文在台账/transcript。
-			// ① 真值/档位：基线同轮首（含本轮 system + tools）。
-			// N1：<b>至多升一级</b> —— 当前 NONE/L1 ⇒ 最多写 L2，已到 L2/L3 保持原级。
-			// 为什么不是无条件 L3：`level` 同时是谱系当前位置（advanceTo 从这里往上推一格、只升不降），
-			// 写死 L3 之后每轮目标都被钳在 L3（L2 摘要再也不会被选中，摘要能力等于永久关掉）；
-			// ② 一次"临时救场"的轮内截断被永久记成"这个会话已经硬截断过"。台账仍如实记本次 L3。
-			int baseline = after + Math.max(0, systemTokens) + Math.max(0, toolsTokens);
-			ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
-			ContextTrigger.Level written = lineage.ordinal() <= ContextTrigger.Level.L1.ordinal()
-					? ContextTrigger.Level.L2 : lineage;
-			ContextState trimmed = state
-				.withCompaction(written, plan.droppedTurns(), plan.lostTokens(), TurnBudgetPlan.REASON_TRIM, now)
-				.withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
-						snapshot.getProviderId(), Math.max(0, systemTokens), Math.max(0, toolsTokens),
-						state.inputTokens());
-			store.write(sessionId, trimmed);
-			// ③ 台账：键集与 ContextCompactor#ledgerEvent 逐键一致（L3 带 turns/lostTokens）
-			store.appendLedger(sessionId,
-					turnTrimLedgerEvent(before, after, plan, snapshot, now, trimmed.circuit()));
-			log.info("in-turn L3 hard truncation recorded runId={} sessionId={} turnNo={} before={} after={} turns={} lostTokens={}",
-					runId, sessionId, turnNo, before, after, plan.droppedTurns(), plan.lostTokens());
-			emitTurnCompactionEvent(runId, snapshot, ContextTrigger.Level.L3, before, after, plan.droppedTurns(),
-					plan.lostTokens(), TurnBudgetPlan.REASON_TRIM, beforeTrim, trimmed);
-			return true;
-		}
-		catch (RuntimeException ex) {
-			// N1：失败不得把"压过"留在状态里 —— 否则这个会话被永久记成"已截断/已到 L2-L3"（且基线被改小），
-			// 而历史其实没动。这里 best-effort 把状态写回原值；写回也失败才退化成已知的部分失败窗口。
-			try {
-				if (previous != null) {
-					store.write(sessionId, previous);
-				}
-			}
-			catch (RuntimeException rollback) {
-				log.warn("in-turn L3 hard truncation failed and the state write-back also failed (level may linger; next turn-start compaction converges) runId={}",
-						runId, rollback);
-			}
-			log.warn("in-turn L3 hard truncation not recorded (no truncation this time; state write-back attempted) runId={}", runId, ex);
-			return false;
-		}
-	}
-
-	/** 轮内 L3 的台账事件（字段与 {@code ContextCompactor#ledgerEvent} 同键同义）。 */
-	private static Map<String, Object> turnTrimLedgerEvent(int before, int after, HardTrim.Plan plan,
-			RunSnapshot snapshot, long now, String circuit) {
-		Map<String, Object> event = new LinkedHashMap<>();
-		event.put("level", ContextTrigger.Level.L3.wire());
-		event.put("before", before);
-		event.put("after", after);
-		event.put("turns", plan.droppedTurns());
-		event.put("lostTokens", plan.lostTokens());
-		event.put("summaryChars", 0);
-		event.put("model", snapshot.getModelId());
-		event.put("est", false);
-		event.put("atMs", String.valueOf(now));
-		event.put("reason", TurnBudgetPlan.REASON_TRIM);
-		event.put("clearedPairs", 0);
-		event.put("clearedToolCallIds", List.of());
-		event.put("circuit", ObjectUtils.defaultIfNull(circuit, CompactionFuse.CLOSED));
-		return event;
-	}
-
-	/** 轮内 L1 的台账事件（字段与 {@code ContextCompactor#ledgerEvent} 同键同义）。 */
-	private static Map<String, Object> turnClearLedgerEvent(int before, int after, ToolResultClearing.Plan plan,
-			RunSnapshot snapshot, long now, String circuit) {
-		Map<String, Object> event = new LinkedHashMap<>();
-		event.put("level", ContextTrigger.Level.L1.wire());
-		event.put("before", before);
-		event.put("after", after);
-		event.put("turns", 0);
-		event.put("lostTokens", 0);
-		event.put("summaryChars", 0);
-		event.put("model", snapshot.getModelId());
-		event.put("est", false);
-		event.put("atMs", String.valueOf(now));
-		event.put("reason", TurnBudgetPlan.REASON_L1);
-		event.put("clearedPairs", plan.cleared().size());
-		event.put("clearedToolCallIds", plan.clearedIds());
-		event.put("circuit", ObjectUtils.defaultIfNull(circuit, CompactionFuse.CLOSED));
-		return event;
-	}
-
-	/**
-	 * 首轮判定输入：真值 {@code usage}（若本跳有）与整包估算一起交给 {@link TurnBudgetPlan}，
-	 * 由它按"真值优先"选判据值。
-	 */
-	private TurnBudgetPlan.Request turnBudgetRequest(int limit, AiProperties.Context config, ContextMeter meter,
-			Prompt prompt, List<Message> history, int delta, boolean armed, String runId, int maxOutputTokens) {
-		return new TurnBudgetPlan.Request(limit, config.getReserveTokens(), config.getL1Percent(),
-				config.getL3Percent(), meter.measured(), meter.promptTokens(), meter.completionTokens(),
-				estimateRequestTokens(prompt, history), delta, armed, this.beacon.budgetSkippedBatches(runId),
-				maxOutputTokens);
-	}
-
-	/**
-	 * 本轮分母（唯一取数点：与轮首压缩、{@code /context}、健康检查同一个 resolver）。
-	 *
-	 * <p>未注入 resolver ⇒ 返回 0（降级态，不判轮内预算）：既有单测/轻装配面因此行为一字不变；
-	 * 生产由容器注入，不存在"漏装配就不判"的静默降级（bean 恒存在）。
-	 */
-	private int turnBudgetLimit(RunSnapshot snapshot) {
-		if (this.contextLimitResolver == null || snapshot == null) {
-			return 0;
-		}
-		try {
-			return this.contextLimitResolver.resolve(snapshot.getProviderId(), snapshot.getModelId());
-		}
-		catch (RuntimeException ex) {
-			log.warn("failed to resolve the in-turn context budget limit (batch not judged) runId={}", snapshot.getRunId(), ex);
-			return 0;
-		}
-	}
-
-	/** 下一发请求的整包估算：system + tools schema + 历史含本批。 */
-	private static int estimateRequestTokens(Prompt prompt, List<Message> history) {
-		return systemTokensOf(prompt) + toolsTokensOf(prompt) + ContextEstimator.estimateMessages(history);
-	}
-
-	/** 本轮 system（人设 + 工作区快照）估算 —— 取自 instructions 里的 {@link SystemMessage}。 */
-	private static int systemTokensOf(Prompt prompt) {
-		int system = 0;
-		for (Message message : prompt.getInstructions()) {
-			if (message instanceof SystemMessage systemMessage) {
-				system += ContextEstimator.estimate(systemMessage.getText());
-			}
-		}
-		return system;
-	}
-
-	/** 本轮披露工具 schema 估算（与 {@link #estimateRequestTokens} 同一份判定）。 */
-	private static int toolsTokensOf(Prompt prompt) {
-		return prompt.getOptions() instanceof ToolCallingChatOptions options
-				? ContextEstimator.estimateToolSchemas(options.getToolCallbacks()) : 0;
-	}
-
-	/**
-	 * 本会话的活跃 run（含本轮；B1：L1 不清、L3 不裁其他活跃 run 的上下文）。
-	 *
-	 * <p>读失败按"只有本轮是活跃的"处理：宁可不裁/不清，也不把别的活跃轮当成已结束。
-	 */
-	private Set<String> activeRunIds(String runId, RunSnapshot snapshot) {
-		Set<String> ids = new HashSet<>();
-		if (snapshot != null && snapshot.getSessionId() != null) {
-			try {
-				ids.addAll(this.store.activeRunIds(snapshot.getSessionId()));
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("active-run-ids-read")) {
-					log.warn("could not read active runs (protecting this turn only) runId={}", runId, ex);
-				}
-			}
-		}
-		if (StringUtils.isNotBlank(runId)) {
-			ids.add(runId);
-		}
-		return ids;
-	}
-
-	/** 未决 HITL 条目的 toolCallId（工具结果永不清除：用户还要在卡片上复核"批的是什么"）。 */
-	private java.util.Optional<Set<String>> pendingToolCallIds(String runId) {
-		try {
-			Set<String> ids = new HashSet<>();
-			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
-				// 与轮首同一"未决"口径：待处理，或已批准但尚未执行（用户可能正在复核）
-				boolean unresolved = PendingToolCall.PENDING.equals(pending.getStatus())
-						|| (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted());
-				if (unresolved && pending.getToolCallId() != null) {
-					ids.add(pending.getToolCallId());
-				}
-			}
-			return java.util.Optional.of(ids);
-		}
-		catch (RuntimeException ex) {
-			// 读不出来 ⇒ 本次不清（宁可不省 token，也不清掉用户可能正在复核的那一条）
-			if (LogSampling.canAcquire("pending-tool-call-ids-read")) {
-				log.warn("could not read pending entries (skipping L1 clearing this time) runId={}", runId, ex);
-			}
-			return java.util.Optional.empty();
-		}
-	}
-
-	/** 一次轮内预算的结局（历史 + 是否越窗 + 判定）。 */
-	private record TurnBudgetOutcome(List<Message> history, boolean overflow, TurnBudgetPlan.Decision decision) {
-	}
-
-	/**
-	 * 把累计步数写回外置快照（唯一真值）。
-	 *
-	 * <p>为什么单独写一次而不是只改 {@code isSettle()}：挂起路径（{@code saveSuspended}）自己会
-	 * {@code get} 一份新快照再保存 —— 只在内存对象上自增，跨进程续跑读到的仍是旧值。
-	 */
-	private void persistToolSteps(String runId, int steps) {
-		RunSnapshot fresh = this.store.get(runId);
-		if (fresh == null || fresh.getToolSteps() == steps) {
-			return;
-		}
-		fresh.setToolSteps(steps);
-		this.store.save(fresh);
-	}
-
-	/** SKIPPED 的人读 message（模型信封/帧 result/续跑重放共用一份措辞）。 */
-	private static String skippedMessage(String upstreamName, String upstreamCode) {
-		String code = StringUtils.defaultIfBlank(upstreamCode, ToolOutcome.CODE_TOOL_EXECUTION_FAILED);
-		return "未执行：上游 " + upstreamName + " 失败（" + code + "），本调用已跳过";
-	}
-
-	// ── 三通道 ──────────────────────────────────────────────────────────────
-
-	/**
-	 * 工具执行耗时 = 总耗时 − 审批等待（AI 日志最小补齐批）。
-	 *
-	 * <p>只有"等人"的两类（{@code CONFIRM}/{@code FRONTEND}）才扣等待：扣的是
-	 * {@code reqAtMs（请求帧送达）→ resolvedAtMs（决策落地）} 这一段。缺任一端（旧数据 / 未送达的卡）
-	 * 就不扣 —— 宁可少扣也不要凭猜造一个数出来。
-	 */
-	private static long execMsOf(PendingToolCall source, long totalToolMs) {
-		long total = Math.max(0L, totalToolMs);
-		if (source == null) {
-			return total;
-		}
-		boolean humanWait = PendingToolCall.KIND_CONFIRM.equals(source.getKind())
-				|| PendingToolCall.KIND_FRONTEND.equals(source.getKind());
-		if (!humanWait) {
-			return total;
-		}
-		long requested = source.getReqAtMs();
-		long resolved = source.getResolvedAtMs();
-		if (requested <= 0L || resolved <= requested) {
-			return total;
-		}
-		return Math.max(0L, total - (resolved - requested));
-	}
-
-	/**
-	 * "没有执行"的三条路径（预检拦截 / 步数到顶 / 首错即停的连带跳过）的结局行。
-	 *
-	 * <p>它们<b>不发 start</b>：成对性只对真实执行成立。若也补 start，"start 没有 end"这个判据就会被
-	 * 稀释成永远成对 —— 那正是本批要堵的洞。字段里 {@code skipped=true} 是机器可判的"没跑"。
-	 */
-	private static void traceToolSkipped(String runId, String sessionId, PendingToolCall pending, String code) {
-		AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId", pending.getToolCallId(), "tool",
-				pending.getName(), "kind", pending.getKind(), "ms", 0, "execMs", 0, "skipped", true, "ok", false,
-				"outcome", pending.effectiveOutcome().wire(), "code", code == null ? "-" : code, "executed", false,
-				"chars", 0);
-	}
-
-	/**
-	 * "已经开始但没走到结算"的结局行：取消（事件边界轮询命中）与执行段异常。
-	 *
-	 * <p>此前这两条路径只抛异常、不写 end 行 ⇒ 日志里留下一条<b>只有 start 的孤儿调用</b>，
-	 * 排查时无从判断"是卡住了还是被取消了"。
-	 *
-	 * <p><b>条目已终态时它也是结算发点，故必须参与同一套仲裁</b>（M-2′ 残余）：取消若是在
-	 * {@code await} 里被看到的，条目此刻已经是 {@code CANCELLED}，取消收尾
-	 * （{@code ConfirmGate#settleCancelledToolCalls}）还会再结同一条 —— 两侧各发一行就成了
-	 * "同一 toolCallId 两条 end"。判据复用 {@code ToolCallEndTrace#emitCustomOnce}
-	 * （{@code CONFIRM/FRONTEND} 抢 {@code ai:observed} 首写者，{@code BACKEND} 照旧直发、不占位），
-	 * <b>载荷与业务语义逐字不变</b>。
-	 *
-	 * <p><b>条目仍 {@code PENDING} 时不占位</b>：这时 abort 行只是"本次尝试没走完"的诊断，
-	 * 没有结算任何结论；占位会把该条之后真正执行成功的结算行挡掉（从"多一行"变成"少一行"）。
-	 * 未决条目的取消收尾在别处也不存在（取消会先把它转成 CANCELLED，届时走的是已终态分支）。
-	 */
-	private void traceToolAborted(String runId, String sessionId, PendingToolCall pending, long startedAtMs,
-			RuntimeException error) {
-		long ms = Math.max(0L, System.currentTimeMillis() - startedAtMs);
-		boolean cancelled = error instanceof StreamViolationException violation
-				&& StreamViolationException.CANCELLED.equals(violation.getCode());
-		PendingToolCall settled;
-		try {
-			settled = this.store.pendingLenient(runId, pending.getToolCallId());
-		}
-		catch (RuntimeException readFailure) {
-			// C1：诊断路径不得二次抛（否则原始异常被替换，连 tool_call_end 都写不出）。
-			if (LogSampling.canAcquire("aborted-tool-pending-read")) {
-				log.warn("traceToolAborted could not read pending entry; using arguments runId={} toolCallId={}", runId,
-						pending.getToolCallId(), readFailure);
-			}
-			settled = pending;
-		}
-		if (settled == null) {
-			settled = pending;
-		}
-		PendingToolCall source = settled;
-		Runnable line = () -> AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId",
-				pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "ms", ms, "execMs", ms,
-				"skipped", false, "ok", false, "outcome",
-				cancelled ? ToolOutcome.CANCELLED.wire() : ToolOutcome.FAILED.wire(), "code",
-				cancelled ? ToolOutcome.CODE_RUN_CANCELLED : CODE_TOOL_EXECUTION_THREW, "executed", source.isExecuted(),
-				"chars", 0, "cancelled", cancelled);
-		if (PendingToolCall.PENDING.equals(source.getStatus())) {
-			line.run();
-		}
-		else {
-			ToolCallEndTrace.emitCustomOnce(this.settlementObservations, runId, pending.getToolCallId(),
-					pending.getKind(), line);
-		}
-	}
-
-	/** 事件边界上的取消检查：命中即抛出，交由 {@code ResilientChatService} 以取消收尾。 */
-	private void checkCancelled(String runId) {
-		CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
-		if (state == CancellationRegistry.CancelState.CANCELLED) {
-			throw new StreamViolationException(StreamViolationException.CANCELLED,
-					"Run cancelled; tool execution stopped at an event boundary (runId=" + runId + ")");
-		}
-		if (state == CancellationRegistry.CancelState.UNKNOWN) {
-			// N-1：这是"执行副作用前的最后一道门"，UNKNOWN 必须拒绝执行；但它不是用户取消，
-			// 不能用 CANCELLED（否则会被 cancelTerminal 记成“已停止/ALREADY_CANCELLED”）。
-			// 用基础设施不可用码走普通失败/可重试路径。
-			throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
-					"Cancellation state unknown (Redis read failed); tool execution stopped at an event boundary (runId=" + runId + ")");
-		}
-	}
-
-	/**
-	 * F5 预检未通过：就地结算成"未进确认门、未执行"的终态条目（code={@code PRECHECK_FAILED}、
-	 * retryable=true），只留一条失败结局帧 —— 确认卡与闸门一概不存在。
-	 *
-	 * <p><b>为什么状态用 {@link PendingToolCall#PRECHECK_FAILED} 而不是 BLOCKED</b>：BLOCKED 的卡面文案
-	 * 是前端写死的"不在披露范围内"（{@code parts.ts} 的 tool_result 分支按 {@code status==='BLOCKED'}
-	 * 落阻断口径），预检失败挂上去会显示错误原因；而本状态在 tool_result 帧上落到既有的
-	 * {@code outcome=failed} 分支，前端零改动即可显示"失败 + 完整原因"。续跑口径两者一致
-	 * （{@link #resolvePending} 对非 PENDING/APPROVED 一律复用 resultText、不执行）。
-	 */
-	private void blockPreflight(String runId, PendingToolCall pending, ToolPreflightService.PreflightReport report) {
-		long now = System.currentTimeMillis();
-		String text = report.failureMessage();
-		pending.setPreflight(report.asMap());
-		pending.setStatus(PendingToolCall.PRECHECK_FAILED);
-		pending.setOutcome(ToolOutcome.FAILED.wire());
-		pending.setCode(ToolOutcome.CODE_PRECHECK_FAILED);
-		pending.setReason(ToolOutcome.CODE_PRECHECK_FAILED);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setRequestedAtMs(now);
-		pending.setResolvedAtMs(now);
-		pending.setResultText(text);
-		this.store.putPending(runId, pending);
-		log.warn("preflight failed; not entering confirm gate runId={} tool={} failures={} (not parked, no confirm request, not executed)", runId,
-				pending.getName(),
-				report.failures().stream().map(ToolPreflightService.PreflightReport.Check::name).toList());
-	}
-
-	/**
-	 * 预检基础设施不可用（MINOR-4 的<b>安全侧兜底</b>）：{@code preflight.inspect} 自身抛错时，
-	 * 既不放行、也不冒充"预检未通过"—— 结算成 {@code code=PRECHECK_UNAVAILABLE} 的可重试失败，
-	 * <b>同样不进确认门、不弹卡、不执行</b>。宁可让模型如实说"暂时查不了、请稍后再试"，
-	 * 也不能把数据库/文件系统抖动变成一次未经检查的放行。
-	 */
-	private void blockPreflightUnavailable(String runId, PendingToolCall pending, RuntimeException error) {
-		long now = System.currentTimeMillis();
-		String text = ToolPreflightService.NOT_APPROVED_NOT_EXECUTED + "（" + ToolOutcome.CODE_PRECHECK_UNAVAILABLE
-				+ "）：预检暂不可用，预检过程发生内部错误，本次未进入确认门、未执行 —— 这不代表条件已满足。"
-				+ "请稍后重试；若持续出现请联系维护人员。";
-		pending.setStatus(PendingToolCall.PRECHECK_FAILED);
-		pending.setOutcome(ToolOutcome.FAILED.wire());
-		pending.setCode(ToolOutcome.CODE_PRECHECK_UNAVAILABLE);
-		pending.setReason(ToolOutcome.CODE_PRECHECK_UNAVAILABLE);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setRequestedAtMs(now);
-		pending.setResolvedAtMs(now);
-		pending.setResultText(text);
-		this.store.putPending(runId, pending);
-		log.error("preflight infrastructure error; not entering confirm gate runId={} tool={} (not parked, no confirm request, not executed)", runId,
-				pending.getName(), error);
-	}
-
-	/**
-	 * 防线③拦截（T1）：工具在当前上下文里未披露（越 scope）——<b>不产生任何副作用</b>
-	 * （不认领、不执行、不记台账），只把结构化错误结果回填给模型，让人机都能看见"这次没执行"。
-	 *
-	 * <p>
-	 * 为什么必须回填而不是静默丢弃/抛异常：
-	 * <ul>
-	 * <li>抛异常 → 整轮以 {@code error} 收尾，一次越权调用会把用户已看到的正文一并废掉（代价过大）；</li>
-	 * <li>静默不回填 → 模型看不到任何反馈，可能反复重试同一个越权调用；</li>
-	 * <li>回填结构化错误 → 模型读到"未执行 + 原因 + 当前上下文 + 该怎么办"，
-	 * 官方循环继续（模型如实解释并改走已披露的工具或提示用户切页面）。</li>
-	 * </ul>
-	 */
-	private String blockOutOfScope(String runId, AiContext context, PendingToolCall pending) {
-		String text = SCOPE_VIOLATION_CODE + "：工具 " + pending.getName() + " 未执行 —— 它不在当前工作区上下文"
-				+ "（" + describeContext(context) + "）的披露范围内（FR-5.2 三道防线的执行兜底）。"
-				+ "请改用系统当前披露给你的工具；若用户确实要做这件事，请提示其先切换到对应的页面/步骤或任务，再重新发起。";
-		pending.setStatus(PendingToolCall.BLOCKED);
-		pending.setOutcome(ToolOutcome.BLOCKED.wire());
-		pending.setCode(SCOPE_VIOLATION_CODE);
-		pending.setReason(SCOPE_VIOLATION_CODE);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(text);
-		this.store.putPending(runId, pending);
-		this.registry.of(runId).toolResult(pending, false, false, text);
-		log.warn("guard 3 blocked out-of-scope tool call runId={} tool={} context={} (not executed, not claimed, not recorded in ledger)",
-				runId, pending.getName(), describeContext(context));
-		return text;
-	}
-
-	/**
-	 * 表格开关拦截（AI 表格工具治理方案 §2.4）：该工具被管理员关闸 ——<b>不执行、不认领、不记台账</b>，
-	 * 回填结构化失败（{@code outcome=failed}、{@code code=SHEET_DISABLED}）。
-	 *
-	 * <p>
-	 * 与 {@link #blockOutOfScope} 的三点差异都是刻意的：
-	 * <ol>
-	 * <li><b>码不同</b>：{@code SHEET_DISABLED} 不复用 {@code SCOPE_NOT_DISCLOSED} —— 后者在前端卡面
-	 * 渲染成「不在披露范围内」，会把"功能被关了"误导成"用户点错了页面"；</li>
-	 * <li><b>文案不同</b>：读闸关说"未读任何数据"（防模型编造行数），写闸关说"未做任何修改"
-	 * （与既有写侧失败文案同句式）；</li>
-	 * <li><b>模型侧多一句可行动提示</b>："不要重试；请让用户联系管理员…" —— 开关是进程内一次绑定，
-	 * 换参数重试必然同样失败，与"首错即停"同姿态。</li>
-	 * </ol>
-	 * 状态用 {@link PendingToolCall#SHEET_DISABLED}（单列）而不是 {@code BLOCKED}：前者在
-	 * {@code tool_result} 帧上落 {@code outcome=failed} 分支，前端零改动即可显示完整原因。
-	 */
-	private String blockSheetDisabled(String runId, AiContext context, PendingToolCall pending) {
-		String name = pending.getName();
-		// 「哪侧被关」以开关的真实状态为准；拿不到（未装配 / 未受治理）才回落按工具分类二分。
-		String gate = this.toolRegistry.sheetDisabledGate(name);
-		boolean readSide = gate == null
-				? SheetSwitches.READ_TOOLS.contains(name)
-				: "read-enabled".equals(gate);
-		String human = readSide ? SheetSwitches.readDisabledText() : SheetSwitches.writeDisabledText();
-		String text = ToolOutcome.CODE_SHEET_DISABLED + "：工具 " + name + " 未执行 —— " + human
-				+ "（管理员关闭了 app.ai.sheet." + (readSide ? "read-enabled" : "write-enabled")
-				+ "；当前上下文 " + describeContext(context) + "）。"
-				+ "不要重试；请让用户联系管理员开启表格" + (readSide ? "读取" : "写入")
-				+ (readSide ? "，或改用导出后自行查看。" : "，或改用导出后自行编辑。");
-		pending.setStatus(PendingToolCall.SHEET_DISABLED);
-		pending.setOutcome(ToolOutcome.FAILED.wire());
-		pending.setCode(ToolOutcome.CODE_SHEET_DISABLED);
-		pending.setReason(ToolOutcome.CODE_SHEET_DISABLED);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(text);
-		this.store.putPending(runId, pending);
-		this.registry.of(runId).toolResult(pending, false, false, text);
-		if (this.sheetAudit != null) {
-			// 应恒 0；非 0 = 有旧缓存调用或在途残留（方案 §4.4 的告警口径）
-			this.sheetAudit.disabledReject();
-		}
-		log.warn("sheet tool blocked by switch runId={} tool={} context={} (not executed, not claimed, not recorded in ledger)",
-				runId, name, describeContext(context));
-		return text;
-	}
-
-	/** 上下文的人读形态（错误文本与日志共用）。 */
-	private static String describeContext(AiContext context) {
-		StringBuilder sb = new StringBuilder();
-		sb.append("page=").append(StringUtils.defaultIfBlank(context.getPage(), "未指定"));
-		sb.append(", taskType=").append(context.getTaskType() == null ? "无" : context.getTaskType());
-		sb.append(", step=").append(context.getStep() == null ? "无" : context.getStep());
-		if (context.getTaskId() != null) {
-			sb.append(", taskId=").append(context.getTaskId());
-		}
-		return sb.toString();
-	}
-
-	/**
-	 * 前端工具：挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。
-	 *
-	 * <p>入参安全闸（DC-15）在<b>挂起前</b>已经跑过（{@code executeToolCallsResolved} 的
-	 * {@code inspectFrontendArguments}），走到这里的条目都过了闸；本方法里的那次复查是兜底
-	 * （预检后入参不会变，确定性复核器下不可达）：一旦兜底才判不通过，仍<b>不挂起</b>、不发
-	 * {@code frontend_tool_request}、不占等待上限，只把结构化错误结果回填模型 —— 模型读到
-	 * "哪一处不合规"后可以改一版再试（而不是白等 120s 超时）。
-	 */
-	private String awaitFrontend(String runId, PendingToolCall pending, AiContext context) {
-		FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, context);
-		if (verdict != null && !verdict.accepted()) {
-			return rejectFrontendArguments(runId, pending, verdict);
-		}
-		PendingToolCall resolved = this.gate.awaitFrontendResult(runId, pending);
-		return StringUtils.defaultString(resolved.getResultText());
-	}
-
-	/**
-	 * 第一个认领该工具名的复核器的入参判定；没有复核器返回 null（= 该工具不受闸门约束）。
-	 *
-	 * <p>上下文与入参一起传给复核器（槽位放行批）：生成式表单要按 {@code purpose} 与
-	 * {@code AiContext.extra[taskSlots]} 判断"这张表还有没有真实缺口"；其它复核器走
-	 * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 的默认实现，行为不变。
-	 */
-	private FrontendToolGuard.Verdict inspectFrontendArguments(PendingToolCall pending, AiContext context) {
-		for (FrontendToolGuard guard : this.frontendGuards) {
-			if (guard.isSupported(pending.getName())) {
-				// 工具安全边界批：按**真名**复核 —— 只传 json 会让复核器靠"入参形状"猜工具名，
-				// 少一个必填键就会落到别的分支被放行（update_rows 漏 set ⇒ 被当成撤销）。
-				return guard.inspectArguments(pending.getName(), pending.getArguments(), context);
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * 入参被安全闸拒绝（DC-15）：与防线③（{@link #blockOutOfScope}）同一手法 ——
-	 * <b>不产生任何副作用</b>（不挂起、不下发前端、不认领、不记台账），只把结构化错误结果
-	 * 回填模型并收敛成终态（不留在 {@code PENDING}，否则续跑会把它当成"等人/等前端"）。
-	 *
-	 * <p>帧面分两种：一般入参拒绝给一条 {@code frontend_tool_result}（ok=false，与
-	 * "前端超时"同帧型，让用户看见"这次没执行、为什么"）；生成式表单的<b>系统拒绝</b>
-	 * （{@link #systemRejectedWithoutUserFrames}）一条都不发 —— 被判的是模型给的 schema，
-	 * 用户没有动作可看，发帧只会落一张"已拒绝"的空卡。
-	 *
-	 * <p>正常路径（挂起前的预检）只做 {@link #settleFrontendRejected}（写条目 + 日志），帧由
-	 * 执行循环按既有帧序发；本方法保留给 {@link #awaitFrontend} 的兜底复查（预检后入参不会变，
-	 * 走到这里说明装配被人为改动，仍要收敛成同一结局）。
-	 */
-	private String rejectFrontendArguments(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
-		String text = settleFrontendRejected(runId, pending, verdict);
-		if (isSystemRejectedWithoutUserFrames(pending)) {
-			// 兜底复查才发现系统拒绝：此时 tool_start 已随执行循环发出（确定性复核器下不可达），
-			// 但表单本身仍不能下发 —— 不给用户再补一张"已拒绝"的结局卡。
-			log.warn("generative form rejected only at post-park recheck (expected unreachable) runId={} toolCallId={} code={} (no outcome frame sent)",
-					runId, pending.getToolCallId(), pending.effectiveCode());
-			return text;
-		}
-		this.registry.of(runId).frontendToolResult(pending, false, text);
-		return text;
-	}
-
-	/**
-	 * 入参拒绝的<b>结算</b>（状态/码/原因/结果文本 + 落库 + WARN）；不发帧、不认领、不记台账。
-	 *
-	 * <p>复核结论<b>整份</b>带下去（含 {@code issues}）：拆成 code/message/reasons 再重建会把
-	 * 结构化清单丢掉，结算文本里就再也找不到 {@code LINKAGE_*} 这类按码定位的机器事实。
-	 */
-	private String settleFrontendRejected(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
-		return settleFrontendRejected(runId, pending, verdict.code(), verdict.message(), verdict.reasons(),
-				verdict.issues());
-	}
-
-	/**
-	 * F11：完全相同入参的 {@code set_condition} 幂等重放的结算 —— 条目落成 {@code FRONTEND_RESULT/OK}
-	 * （模型看到与首次一致的成功回执），但<b>本次没有下发前端、没有重复写</b>：
-	 * {@code executed=false}（副作用属于首次调用），也不发会触发前端动作的请求帧。
-	 */
-	private String settleIdempotentReplay(String runId, PendingToolCall pending, String resultText) {
-		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
-		pending.setOutcome(ToolOutcome.OK.wire());
-		pending.setCode(null);
-		pending.setReason(null);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(resultText);
-		this.store.putPending(runId, pending);
-		if (log.isDebugEnabled()) log.debug("set_condition called again with identical arguments; idempotent replay (not re-sent to frontend) runId={} toolCallId={}", runId, pending.getToolCallId());
-		return resultText;
-	}
-
-	/**
-	 * 入参拒绝的结算（已有码/说明/原因的形态）：条件闭环的零副作用拒绝走这一条 ——
-	 * 不挂起、不下发、不执行，结论落成 {@code REJECTED_ARGUMENTS} 并把明确出口回给模型。
-	 */
-	private String settleFrontendRejected(String runId, PendingToolCall pending, String code, String message,
-			List<String> reasons) {
-		return settleFrontendRejected(runId, pending, code, message, reasons, List.of());
-	}
-
-	/** 入参拒绝的结算（带结构化清单）：{@code issues} 原样进 render，机器可读段不丢。 */
-	private String settleFrontendRejected(String runId, PendingToolCall pending, String code, String message,
-			List<String> reasons, List<FormIssue> issues) {
-		String text = new FrontendToolGuard.Verdict(false, code, message, reasons, issues, null).render();
-		pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
-		pending.setOutcome(ToolOutcome.REJECTED.wire());
-		pending.setCode(code);
-		pending.setReason(code);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(text);
-		this.store.putPending(runId, pending);
-		log.warn("frontend tool arguments rejected by the condition loop [contract=frontend tool arguments rejected by condition loop] runId={} tool={} code={} reasonCount={} (not parked, not sent, not executed)", runId, pending.getName(), code, reasons.size());
-		return text;
-	}
-
-	/** 确认门：放行则执行（经资源锁、认领与台账，恰好一次），拒绝（或历史遗留的 TIMEOUT 记录）以"未执行"语义回填并继续循环。 */
-	private String awaitConfirm(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
-		PendingToolCall resolved = this.gate.awaitDecision(runId, pending);
-		if (PendingToolCall.APPROVED.equals(resolved.getStatus())) {
-			return executeOnce(runId, prompt, resolved, context);
-		}
-		String text = ObjectUtils.defaultIfNull(resolved.getResultText(), "该操作未执行。");
-		this.registry.of(runId).toolResult(resolved, false, false, text);
-		return text;
-	}
-
-	/** 创建任务工具名（AR-03：DANGER 确认门 + 宿主幂等 + 单轮上限 1）。 */
-	public static final String TOOL_CREATE_TASK = AiToolNames.CREATE_TASK;
-
-	/** 工具被"别人正在做同类动作"挡下时的固定口径（模型/帧/台账三面同文；禁 emoji）。 */
-	public static final String RESOURCE_LOCKED_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
-			+ ToolOutcome.CODE_RESOURCE_LOCKED + "）：该任务已有作业在执行，本次未执行。"
-			+ "请等待该作业收尾后重新发起（资源锁会随对方收尾释放）。";
-
-	/**
-	 * 错入口批准（{@code APPROVED + FRONTEND}）的固定口径：显式 blocked、未执行。
-	 *
-	 * <p>措辞必须同时说清三件事：<b>哪个码</b>（模型/排障可检索）、<b>没执行</b>（不能说成失败或成功）、
-	 * <b>正确出口</b>（前端结果只能经回灌端点回来）。
-	 */
-	public static final String KIND_MISMATCH_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
-			+ "：该调用是前端通道工具（kind=FRONTEND），后端不执行它的桩体、也不写执行台账；"
-			+ "本次未执行（blocked）。前端结果只能经 /api/ai/frontend-tool-result 回灌。";
-
-	/**
-	 * {@code kind=null} 的固定口径：<b>既不批准也不执行</b>。
-	 *
-	 * <p>{@code kind} 是服务端写入的通道事实（CONFIRM / FRONTEND / BACKEND）。它缺失 = 无法证明
-	 * 这个调用该走确认门还是前端回灌；按"缺证据不授权"处理，显式归为
-	 * {@code blocked}/{@code TOOL_KIND_MISMATCH}，条目<b>不进入</b> APPROVED，也不跑后端桩体。
-	 */
-	public static final String KIND_UNKNOWN_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
-			+ "：该调用的挂起种类缺失（kind=null），无法确认它该走确认门还是前端通道；"
-			+ "本次既不批准也不执行（blocked），未认领、未写台账。请让用户重新发起该操作。";
-
-	/**
-	 * 批准后执行前复核 {@code reportHash} 不一致的固定口径：<b>不执行、要求重新确认</b>。
-	 *
-	 * <p>确认卡上那份预检报告是批准的依据；执行时状态已变（文件被替换、有在途作业、任务改了步骤……）
-	 * 就必须让用户看新的报告再决定，不能拿旧报告当授权去执行。
-	 */
-	public static final String PRECHECK_STALE_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
-			+ ErrorCodes.PRECHECK_STALE + "）：确认卡上的预检报告与执行时的状态不一致，本次未执行。"
-			+ "请重新发起该操作并要求用户重新确认（新的确认卡会带上最新预检报告）。";
-
-	/** 执行前复核预检报告时基础设施不可用：同样不执行（失败关闭），要求重新发起并确认。 */
-	public static final String PRECHECK_REVERIFY_UNAVAILABLE_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
-			+ ToolOutcome.CODE_PRECHECK_UNAVAILABLE + "）：执行前无法复核预检报告（预检基础设施异常），"
-			+ "本次未执行。请稍后重新发起该操作并重新确认。";
-
-	/**
-	 * 快照/runId 缺失且无可信执行信封时的拒绝口径：危险/前端工具<b>不得直执行</b>。
-	 *
-	 * <p>机器码沿用 {@code TOOL_KIND_MISMATCH}（"这个调用不能在后端直执行通道上跑"），
-	 * 措辞说清"没弹卡、没执行"，让模型如实告知用户重新发起，而不是宣称已执行。
-	 */
-	public static final String UNRECOVERABLE_EXECUTION_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
-			+ "：本轮执行上下文不可恢复（runId/轮次快照缺失，且没有本实例创建的权威执行信封），"
-			+ "该危险/前端工具未执行（未弹确认卡、未认领、未写台账）。请如实告知用户这一步没有执行，"
-			+ "并请用户重新发起该操作；不要重复调用同一工具。";
-
-	/**
-	 * 认领前复核命中取消时的统一文本（与 {@code cancelPendings} / {@code ConfirmGate#cancel} 逐字同源）：
-	 * 模型与前端都据此知道"没执行"，而不是"失败"或"未知"。
-	 */
-	static final String CANCELLED_BEFORE_CLAIM_TEXT = "本轮对话已被用户取消，该工具未执行。";
-
-	/** 工具被"目标资源不成立"挡下时的固定口径（细节由 {@link ToolTargetResolver} 给出）。 */
-	public static String targetInvalidText(ToolTargetResolver.Verdict verdict) {
-		String detail = verdict == null || StringUtils.isBlank(verdict.detail()) ? "目标资源不成立"
-				: verdict.detail();
-		return ToolPreflightService.APPROVED_NOT_EXECUTED + "（" + ToolOutcome.CODE_TARGET_INVALID
-				+ "）：目标资源不存在或不在当前任务内，本次未执行（" + detail
-				+ "）。请核对任务 ID 与当前页面/步骤后重新发起。";
-	}
-
-	/**
-	 * 后端执行（含放行后的敏感工具）：<b>对账/重放 → 目标校验 → 资源锁 → 认领 → 执行 → 台账</b>。
-	 *
-	 * <ol>
-	 * <li><b>入口 kind 硬闸</b>（入口 kind 校验批）：{@code kind=FRONTEND} 一律不执行（前端通道工具的
-	 * 桩体永不由后端跑）⇒ {@code blocked}/{@code TOOL_KIND_MISMATCH}，<b>在台账重放与认领之前</b>；</li>
-	 * <li><b>对账/重放</b>：{@code ai:idem:<runId>} 命中即回台账原结果（不取锁、不认领、不执行、无副作用）；
-	 * 命中的结局是 {@code unknown} 就<b>保持 unknown</b>（B23L1 批③b U4：旧实现把它当成功重放）；</li>
-	 * <li><b>目标资源硬校验</b>（F2）：不成立 → {@code blocked/TARGET_INVALID}，<b>不占认领</b>；</li>
-	 * <li><b>资源互斥</b>（L1）：任务级 → 作业级；被别人持有 → {@code blocked/RESOURCE_LOCKED}
-	 * （不占认领、不抛、不断流）；设施不可用 → 放行 + WARN；</li>
-	 * <li><b>原子认领</b>三态：{@code WON} 执行；{@code LOST} 二次对账（命中按重放回原结果，未命中按既有
-	 * "已认领"文案）；{@code STALE_FENCE} 独立结论（"写回权已转移"，不再写"由实例 null 认领"）；</li>
-	 * <li><b>执行 → appendLedger（带 idemKey）</b>，资源锁在 {@code finally} 归还（只还本次创建的那一任）。</li>
-	 * </ol>
-	 */
-	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending) {
-		return executeOnce(runId, prompt, pending, contextOf(runId));
-	}
-
-	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
-		return executeOnce(runId, prompt, pending, context, false);
-	}
-
-	/**
-	 * @param settleObservation 本次调用的结算行是否由<b>本方法</b>发（续跑路径 = {@code true}）。
-	 * 内联批循环传 {@code false}：它在该条目结算之后统一发一行（并记台账）—— 两处都发会让同一个
-	 * {@code toolCallId} 出现两条 {@code tool_call_end}、{@code readCalls} 被记两次。
-	 * <b>发点仍然只有一个</b>：{@code tryClaimExecution} 的胜者那一支（见 {@link #claimAndExecute}）。
-	 */
-	private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context,
-			boolean settleObservation) {
-		// ⓪-a kind 缺失硬闸：无法证明该走确认门/前端通道，既不批准也不执行（不认领、不写台账）。
-		if (!pending.hasKind()) {
-			log.warn("refused backend execution for entry without kind (explicitly blocked, no ledger row) runId={} toolCallId={} name={} status={}",
-					runId, pending.getToolCallId(), pending.getName(), pending.getStatus());
-			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_UNKNOWN_TEXT);
-		}
-		// ⓪ 入口 kind 硬闸（入口 kind 校验批）：前端通道工具的桩体永不由后端执行。
-		// 位置在台账重放与认领<b>之前</b>：既不能"重放"一条历史成功台账把假执行说成成功，
-		// 也不能占认领、写新台账。正常路径走不到这里（FRONTEND 走 awaitFrontend），本闸是兜底。
-		if (PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-			log.warn("refused backend execution for frontend-channel tool (explicitly blocked, no ledger row) runId={} toolCallId={} name={} status={}",
-					runId, pending.getToolCallId(), pending.getName(), pending.getStatus());
-			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_MISMATCH_TEXT);
-		}
-
-		// ① 对账/重放：命中台账 ⇒ 原结果复用（三面同源），任何副作用都不发生
-		Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
-		if (ledger != null) {
-			return replayLedger(runId, pending, ledger);
-		}
-
-		// ①.5 确认门执行前复核：批准时看到的预检报告必须仍是当前那份（reportHash 一致），
-		// 不一致 ⇒ 不执行并要求重新确认（旧报告不是执行授权）。
-		String staleReport = verifyApprovedReport(runId, pending, context);
-		if (staleReport != null) {
-			return staleReport;
-		}
-
-		// ② F2：目标资源硬校验（参数指向的任务必须存在、类型对得上、且在同一个工作区任务内）
-		if (this.targetResolver != null) {
-			ToolTargetResolver.Verdict verdict = this.targetResolver.check(pending.getName(),
-					pending.getArguments(), context);
-			if (!verdict.valid()) {
-				return settleBlocked(runId, pending, ToolOutcome.CODE_TARGET_INVALID, targetInvalidText(verdict));
-			}
-		}
-
-		// ③ L1：资源互斥（固定顺序：先任务级、后作业级）
-		ToolResourceLocks.LockHandle locks = acquireResourceLocks(runId, pending);
-		if (locks.isHeldElsewhere()) {
-			return settleBlocked(runId, pending, ToolOutcome.CODE_RESOURCE_LOCKED, RESOURCE_LOCKED_TEXT);
-		}
-		try {
-			return claimAndExecute(runId, prompt, pending, settleObservation);
-		}
-		finally {
-			// 终态与异常路径都必须归还（只放本次创建的那一任；重入没有释放权）
-			locks.close();
-		}
-	}
-
-	/**
-	 * <b>认领前的取消复核</b>（R1）：取消标志已在 ⇒ 放弃执行，并在"可证明未认领未执行"时把条目
-	 * 如实收敛为 {@code CANCELLED}。
-	 *
-	 * <p>为什么放在这里：批准只写决策、执行在续跑；上游的执行前检查（{@code ResumeService} 的
-	 * {@code cancelStateOutcome}）与真正的 {@code HSETNX} 之间还隔着台账重放、目标校验、资源锁。
-	 * 只修上游检查会留下这个窗口 —— 用户在"已批准、还没跑"时按停止，不可逆工具照样执行。
-	 *
-	 * <p><b>不碰已认领/已执行</b>：判据交 {@link RunStore#cancellableBeforeExecution}（含跨实例的
-	 * 认领表），有认领证据时返回 {@code null} 走既有 claim 失败口径 —— 绝不把真实发生的副作用
-	 * 说成"没执行"。
-	 *
-	 * <p><b>不发结算行</b>：本方法只收敛条目。结算的所有权仍在取消侧（{@code cancelTerminal} 的
-	 * {@code settleCancelledToolCalls}）或内联批循环的 abort 行，两侧都经 {@code ai:observed} 仲裁；
-	 * 这里补一条会变成第三个来源（同一 toolCallId 两条 end）。
-	 *
-	 * @return 放弃执行时的工具结果文本；{@code null} = 未命中取消（正常走认领）
-	 */
-	private String settleIfCancelledBeforeClaim(String runId, PendingToolCall pending) {
-		CancellationRegistry.CancelState state = cancelStateBeforeClaim(runId, pending);
-		if (state == CancellationRegistry.CancelState.UNKNOWN) {
-			// 与相邻的 checkCancelled 同一口径（fail-closed）：读不出来 = 证明不了"未取消" ⇒ 不执行。
-			// 条目状态与终帧一概不动 —— 基础设施不可知不是"已取消"，写成 CANCELLED 会发一张假终帧。
-			throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
-					"Cancellation state unknown (Redis read failed); tool execution stopped before claim (runId=" + runId + ")");
-		}
-		if (state != CancellationRegistry.CancelState.CANCELLED) {
-			return null;
-		}
-		PendingToolCall fresh;
-		try {
-			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
-		}
-		catch (RuntimeException ex) {
-			fresh = null;
-		}
-		if (fresh == null) {
-			fresh = pending;
-		}
-		if (this.store.hasExecutionEvidence(runId, fresh)) {
-			// 已认领/已执行/认领表已有 → 绝不伪装未执行；交给既有 claim 失败与对账口径。
-			return null;
-		}
-		if (PendingToolCall.CANCELLED.equals(fresh.getStatus())) {
-			// 存储里已经是取消终态、且没有任何执行证据（调用方手里是旧的 APPROVED/PENDING 副本）：
-			// 不认领、不执行，直接返回既有取消文本。旧口径在这里返回 null ⇒ 掉回 tryClaimExecution，
-			// 会把一条已取消的调用真正执行掉。
-			String text = fresh.getResultText();
-			log.info("entry already cancelled before claim (no execution evidence); skipping execution runId={} tool={} toolCallId={}", runId,
-					pending.getName(), pending.getToolCallId());
-			return StringUtils.defaultIfBlank(text, CANCELLED_BEFORE_CLAIM_TEXT);
-		}
-		if (!PendingToolCall.PENDING.equals(fresh.getStatus())
-				&& !PendingToolCall.APPROVED.equals(fresh.getStatus())) {
-			return null;
-		}
-		fresh.setStatus(PendingToolCall.CANCELLED);
-		fresh.setOutcome(ToolOutcome.CANCELLED.wire());
-		fresh.setCode(ToolOutcome.CODE_RUN_CANCELLED);
-		fresh.setReason("RUN_CANCELLED");
-		fresh.setExecuted(false);
-		fresh.setResolvedAtMs(System.currentTimeMillis());
-		fresh.setResultText(CANCELLED_BEFORE_CLAIM_TEXT);
-		if (!this.store.cancelPending(runId, fresh)) {
-			return null;
-		}
-		log.info("cancel observed on recheck before claim; skipping execution runId={} tool={} toolCallId={}", runId, pending.getName(),
-				pending.getToolCallId());
-		return CANCELLED_BEFORE_CLAIM_TEXT;
-	}
-
-	private CancellationRegistry.CancelState cancelStateBeforeClaim(String runId, PendingToolCall pending) {
-		try {
-			return this.cancellations.cancelState(runId);
-		}
-		catch (RuntimeException ex) {
-			log.warn("could not read cancel state before claim; treating as UNKNOWN (irreversible tool not executed) runId={} toolCallId={}", runId,
-					pending.getToolCallId(), ex);
-			return CancellationRegistry.CancelState.UNKNOWN;
-		}
-	}
-
-	/**
-	 * 认领（三态）通过后的执行段。
-	 *
-	 * <p>认领<b>首次即走三态口</b> {@link RunStore#tryClaimExecution}（B23L1 批③b 复审 M-4）：
-	 * 一次调用同时拿到结论、epoch 与 fence，不再"先布尔口、失败后再补一次三态口"（那会把
-	 * {@code HSETNX} 与 fence 的 {@code GET} 各做两遍）。布尔口 {@link RunStore#claimExecution}
-	 * 仍保留给既有装配面/用例，但本路径不再依赖它。
-	 *
-	 * <p>轻装配面（Mockito 底座只桩了布尔口）从三态口读回 null —— 这不是生产形态（两个实现都返回非 null），
-	 * 回落到布尔口只是为了不改动既有的 mock 用例。
-	 *
-	 * <p><b>观测面的 exactly-once 就是这里</b>：只有认领胜者真正执行了工具，故只有它发
-	 * {@code tool_call_end}（{@code settleObservation=true} 时）。重挂/重试走到认领失败——
-	 * 那时不补，否则"重挂一次"就等于"多记一次工具调用"。
-	 */
-	private String claimAndExecute(String runId, Prompt prompt, PendingToolCall pending, boolean settleObservation) {
-		ClaimStep step = claimExecution(runId, pending);
-		if (step.finished()) {
-			return step.result();
-		}
-		RunStore.ClaimResult claim = step.claim();
-		long claimedEpoch = claim.epoch();
-		String claimedBy = this.store.instanceId();
-		ToolExecutionResult execution = executeClaimedTool(runId, prompt, pending);
-		if (execution.settleAsUnexecuted()) {
-			return settleToolTimeout(runId, pending, execution.text(), settleObservation, claimedEpoch, claimedBy);
-		}
-		PendingToolCall fresh = freshForSettlement(runId, prompt, pending, execution);
-		boolean respectCancel = this.toolRegistry.riskOf(pending.getName()) == ToolMeta.RiskLevel.READ;
-		if (!this.store.isExecutionCompletedWithLedger(runId, fresh, execution.text(), claimedEpoch, claimedBy,
-				respectCancel)) {
-			checkCancelled(runId);
-			throw new StreamViolationException(StreamViolationException.CANCELLED,
-					"Run cancelled; read-only result was discarded before atomic settlement (runId=" + runId + ")");
-		}
-		emitClaimedResult(runId, pending, fresh, execution, settleObservation);
-		return execution.text();
-	}
-
-	private ClaimStep claimExecution(String runId, PendingToolCall pending) {
-		String cancelledBeforeClaim = settleIfCancelledBeforeClaim(runId, pending);
-		if (cancelledBeforeClaim != null) {
-			return ClaimStep.finished(cancelledBeforeClaim);
-		}
-		RunStore.ClaimResult claim = this.store.tryClaimExecution(runId, pending.getToolCallId(),
-				this.store.instanceId());
-		if (claim == null) {
-			claim = this.store.isExecutionClaimed(runId, pending.getToolCallId(), this.store.instanceId())
-					? new RunStore.ClaimResult(RunStore.ClaimOutcome.WON, 0L, 0L)
-					: new RunStore.ClaimResult(RunStore.ClaimOutcome.LOST, 0L, 0L);
-		}
-		if (claim.outcome() == RunStore.ClaimOutcome.CANCELLED) {
-			String cancelled = settleIfCancelledBeforeClaim(runId, pending);
-			if (cancelled != null) {
-				return ClaimStep.finished(cancelled);
-			}
-			throw new StreamViolationException(StreamViolationException.CANCELLED,
-					"Run cancelled; tool claim was rejected by the atomic check (runId=" + runId + ")");
-		}
-		if (!claim.isWon()) {
-			return ClaimStep.finished(settleLostClaim(runId, pending, claim));
-		}
-		return new ClaimStep(false, null, claim);
-	}
-
-	private String settleLostClaim(String runId, PendingToolCall pending, RunStore.ClaimResult claim) {
-		Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
-		if (ledger != null) {
-			return replayLedger(runId, pending, ledger);
-		}
-		if (claim.outcome() == RunStore.ClaimOutcome.STALE_FENCE) {
-			long epoch = claim.epoch();
-			long fence = claim.fence();
-			return settleBlocked(runId, pending, ToolOutcome.CODE_ALREADY_CLAIMED,
-					"本轮写回权已转移，本次未执行（本实例持 epoch " + epoch + "，fence 已推进到 " + fence
-							+ "，续跑权已被接管）。如需重做，请让用户在接管方完成后重新发起。", false);
-		}
-		String claimedBy = this.store.claimedBy(runId, pending.getToolCallId());
-		String text = "该操作已由实例 " + claimedBy + " 认领执行（进程在其完成前退出）。"
-				+ "为避免重复副作用，本次不再执行；如需重做，请让用户重新发起。";
-		pending.setOutcome(ToolOutcome.BLOCKED.wire());
-		pending.setCode(ToolOutcome.CODE_ALREADY_CLAIMED);
-		pending.setExecuted(true);
-		pending.setExecutedBy(claimedBy);
-		pending.setResultText(text);
-		this.registry.of(runId).toolResult(pending, false, true, frameText(text));
-		return text;
-	}
-
-	private ToolExecutionResult executeClaimedTool(String runId, Prompt prompt, PendingToolCall pending) {
-		try {
-			String text = executeWithTimeout(prompt, pending);
-			if (text == null) {
-				pending.setOutcome(ToolOutcome.FAILED.wire());
-				pending.setCode(ToolOutcome.CODE_TOOL_RESULT_MISSING);
-				return new ToolExecutionResult("", false, false);
-			}
-			pending.setOutcome(ToolOutcome.OK.wire());
-			pending.setCode(null);
-			return new ToolExecutionResult(text, true, false);
-		}
-		catch (ToolExecutionTimeoutException ex) {
-			return toolTimeoutResult(runId, pending, ex);
-		}
-		catch (ToolExecutorSaturatedException ex) {
-			return toolSaturatedResult(runId, pending, ex);
-		}
-		catch (Exception ex) {
-			return toolFailureResult(runId, pending, ex);
-		}
-	}
-
-	private ToolExecutionResult toolTimeoutResult(String runId, PendingToolCall pending,
-			ToolExecutionTimeoutException ex) {
-		log.warn("tool execution timed out runId={} tool={} toolCallId={} timeout={}", runId, pending.getName(),
-				pending.getToolCallId(), ex.getTimeout(), ex);
-		pending.setOutcome(ToolOutcome.TIMEOUT.wire());
-		pending.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
-		return new ToolExecutionResult("工具执行超时（TOOL_TIMEOUT），本次结果未确认。\n" + RECONCILIATION_NOTE, false, true);
-	}
-
-	private ToolExecutionResult toolSaturatedResult(String runId, PendingToolCall pending,
-			ToolExecutorSaturatedException ex) {
-		log.warn("tool executor saturated; call not executed runId={} tool={} toolCallId={} capacity={}", runId,
-				pending.getName(), pending.getToolCallId(), ex.getCapacity(), ex);
-		pending.setOutcome(ToolOutcome.TIMEOUT.wire());
-		pending.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
-		return new ToolExecutionResult("未执行（EXECUTOR_SATURATED / TOOL_TIMEOUT）：工具执行器已饱和，请稍后重试。", false, true);
-	}
-
-	private ToolExecutionResult toolFailureResult(String runId, PendingToolCall pending, Exception ex) {
-		log.warn("tool execution failed runId={} tool={}", runId, pending.getName(), ex);
-		String code = failureCode(ex);
-		pending.setOutcome(ToolOutcome.FAILED.wire());
-		pending.setCode(code);
-		return new ToolExecutionResult("工具执行失败（" + code + "）。\n" + RECONCILIATION_NOTE, false, false);
-	}
-
-	private PendingToolCall freshForSettlement(String runId, Prompt prompt, PendingToolCall pending,
-			ToolExecutionResult execution) {
-		PendingToolCall fresh;
-		try {
-			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("settlement-pending-read")) {
-				log.warn("settlement could not read pending entry; falling back to arguments runId={} toolCallId={}", runId,
-						pending.getToolCallId(), ex);
-			}
-			fresh = pending;
-		}
-		if (fresh == null) {
-			fresh = pending;
-		}
-		fresh.setOutcome(pending.getOutcome());
-		fresh.setCode(pending.getCode());
-		if (execution.ok() && TOOL_CREATE_TASK.equals(pending.getName())) {
-			fresh.setCreatedTaskId(createdTaskIdOf(((ToolCallingChatOptions) prompt.getOptions()).getToolContext()
-					.get(PendingToolCall.CREATED_TASK_ID)));
-		}
-		fresh.setResultText(execution.text());
-		fresh.setExecuted(true);
-		fresh.setExecutedBy(this.store.instanceId());
-		fresh.setExecutedAtMs(System.currentTimeMillis());
-		fresh.setReason(PendingToolCall.KIND_BACKEND.equals(fresh.getKind()) ? "IN_PROCESS_EXECUTION" : fresh.getReason());
-		if (PendingToolCall.KIND_BACKEND.equals(fresh.getKind())) {
-			fresh.setStatus(PendingToolCall.EXECUTED);
-			fresh.setResolvedAtMs(fresh.getExecutedAtMs());
-		}
-		return fresh;
-	}
-
-	private void emitClaimedResult(String runId, PendingToolCall pending, PendingToolCall fresh,
-			ToolExecutionResult execution, boolean settleObservation) {
-		ResultView resultView = resultViewOf(fresh, execution.text(), execution.ok());
-		if (resultView == null) {
-			this.registry.of(runId).toolResult(fresh, execution.ok(), false, frameText(execution.text()));
-		}
-		else {
-			this.registry.of(runId).toolResult(fresh, execution.ok(), false, frameText(execution.text()), resultView);
-		}
-		if (settleObservation) {
-			ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh,
-					execution.text(), this.sheetAudit);
-		}
-	}
-
-	private record ClaimStep(boolean finished, String result, RunStore.ClaimResult claim) {
-
-		private static ClaimStep finished(String result) {
-			return new ClaimStep(true, result, null);
-		}
-
-	}
-
-	private record ToolExecutionResult(String text, boolean ok, boolean settleAsUnexecuted) {
-	}
-
-	/**
-	 * 视图投影（S6 批 2）：按工具名自认领，只对<b>成功</b>结局出视图。
-	 *
-	 * <p>三条硬口径：① 视图是 UI 通道，模型侧读的仍是 {@code resultText}（本方法不参与任何裁剪）；
-	 * ② 投影器异常一律吞掉并 WARN —— 展示增强不得让工具结果帧发不出去；③ 未认领 ⇒ null
-	 * （帧上不多键，旧卡面逐字不变）。
-	 */
-	private ResultView resultViewOf(PendingToolCall pending, String text, boolean ok) {
-		if (!ok || this.resultViewProviders.isEmpty()) {
-			return null;
-		}
-		for (ToolResultViewProvider provider : this.resultViewProviders) {
-			if (!provider.supports(pending.getName())) {
-				continue;
-			}
-			try {
-				ResultView view = provider.build(pending.getToolCallId(), pending.getName(), text);
-				if (view != null) {
-					return view;
-				}
-			}
-			catch (RuntimeException ex) {
-				log.warn("resultView build failed (no view this time; card falls back to legacy shape) tool={} toolCallId={}",
-						pending.getName(), pending.getToolCallId(), ex);
-			}
-		}
-		return null;
-	}
-
-	/**
-	 * 带独立超时执行一次工具（超时面治理批② 第 3 项；{@code app.ai.tool.exec-timeout}）。
-	 *
-	 * <p>形态 = 提交到独立平台线程 + {@code Future#get(timeout)}；到点 {@code cancel(true)} 并抛
-	 * {@link ToolExecutionTimeoutException}（由调用方结算成 {@code timeout/TOOL_TIMEOUT}）。
-	 * <b>诚实边界</b>：{@code cancel(true)} 只能"请求中断"—— 不响应中断的桩体（纯 CPU 循环、
-	 * 不可中断的 IO）会继续在池线程上跑完，只是结果被丢弃；这正是"到点必须收口"的代价，
-	 * 也是把超时做成 opt-out（长任务免超时）之前必须先登记的理由。
-	 *
-	 * <p>线程池饱和（{@code AbortPolicy}）时<b>禁止退化成无超时同步执行</b>（N3）：那会让"到点收口"
-	 * 恰好在最忙的时候失效，且工具会脱离超时笼在调用线程上跑完。饱和直接抛
-	 * {@link ToolExecutorSaturatedException}，由调用方按 {@code TOOL_TIMEOUT} 口径结算成
-	 * <b>未执行</b>（{@code executed=false}、不写台账、轮继续）。
-	 */
-	private String executeWithTimeout(Prompt prompt, PendingToolCall pending) {
-		Duration timeout = this.properties.getTool().getExecTimeout();
-		if (timeout == null || timeout.isZero() || timeout.isNegative()) {
-			return delegateSingle(prompt, pending);
-		}
-		Future<String> future;
-		// 身份不随线程池继承：在提交线程抓本轮身份，执行线程重新建立作用域（不把句柄跨线程关闭）
-		TenantUser identity = RequestContextUtils.currentOrNull();
-		try {
-			// MDC 不随线程池继承：锚点（runId/sessionId）随任务进池，工具日志才不会变成孤儿行
-			future = this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> {
-				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-					return delegateSingle(prompt, pending);
-				}
-			}));
-		}
-		catch (RejectedExecutionException ex) {
-			log.warn("tool timeout executor saturated (capacity {}); call not executed tool={} toolCallId={}", this.toolTimeoutThreads,
-					pending.getName(), pending.getToolCallId(), ex);
-			throw new ToolExecutorSaturatedException(pending.getName(), this.toolTimeoutThreads);
-		}
-		try {
-			return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-		}
-		catch (TimeoutException ex) {
-			future.cancel(true);
-			throw new ToolExecutionTimeoutException(timeout, pending.getName());
-		}
-		catch (InterruptedException ex) {
-			Thread.currentThread().interrupt();
-			throw new StreamViolationException(StreamViolationException.CANCELLED,
-					"Tool execution wait interrupted; finishing the run as cancelled (tool=" + pending.getName() + ")");
-		}
-		catch (ExecutionException ex) {
-			Throwable cause = ex.getCause() == null ? ex : ex.getCause();
-			if (cause instanceof RuntimeException runtime) {
-				throw runtime;
-			}
-			throw new IllegalStateException(cause);
-		}
-	}
-
-	/**
-	 * <b>未执行</b>的结算（超时 / 执行器饱和共用；{@code executed=false} + 结局帧 + 回填模型）：
-	 * <b>不写台账</b>、不占重放索引 —— 台账记的是"执行过且知道结局"的事实；超时的结局是
-	 * "不知道有没有副作用"，由 {@link #RECONCILIATION_NOTE} 提醒人工对账；执行器饱和则是确定的
-	 * "没有开始执行"。两者都按既有 {@code timeout/TOOL_TIMEOUT} 口径收敛（不判整轮失败、轮继续）。
-	 *
-	 * <p>它也是认领胜者的结算（只有认领成功才会走到这里），故续跑侧同样由这里发
-	 * {@code tool_call_end}（{@code settleObservation=true}）。
-	 */
-	private String settleToolTimeout(String runId, PendingToolCall pending, String text, boolean settleObservation,
-			long claimedEpoch, String claimedBy) {
-		PendingToolCall fresh;
-		try {
-			fresh = this.store.pendingLenient(runId, pending.getToolCallId());
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("timeout-settlement-pending-read")) {
-				log.warn("settlement (timeout path) could not read pending entry; falling back to arguments runId={} toolCallId={}", runId,
-						pending.getToolCallId(), ex);
-			}
-			fresh = pending;
-		}
-		if (fresh == null) {
-			fresh = pending;
-		}
-		fresh.setOutcome(ToolOutcome.TIMEOUT.wire());
-		fresh.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
-		fresh.setReason(ToolOutcome.CODE_TOOL_TIMEOUT);
-		fresh.setResultText(text);
-		fresh.setExecuted(false);
-		fresh.setExecutedBy(null);
-		fresh.setResolvedAtMs(System.currentTimeMillis());
-		fresh.setStatus(PendingToolCall.TIMEOUT);
-		this.store.completeExecution(runId, fresh, claimedEpoch, claimedBy);
-		this.registry.of(runId).toolResult(fresh, false, false, frameText(text));
-		if (settleObservation) {
-			ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh, text,
-					this.sheetAudit);
-		}
-		log.warn("tool not-executed outcome settled (executed=false; turn continues) runId={} tool={} toolCallId={} code={}", runId,
-				pending.getName(), pending.getToolCallId(), fresh.getCode());
-		return text;
-	}
-
-	/** 工具执行超时的内部信号（不穿出本类：调用方一律结算成 {@code timeout/TOOL_TIMEOUT}）。 */
-	private static final class ToolExecutionTimeoutException extends RuntimeException {
-
-		private final Duration timeout;
-
-		ToolExecutionTimeoutException(Duration timeout, String toolName) {
-			super("Tool execution timed out (app.ai.tool.exec-timeout = " + timeout + "): " + toolName
-					+ " did not return before the deadline; the call was aborted and is not considered successful");
-			this.timeout = timeout;
-		}
-
-		Duration getTimeout() {
-			return this.timeout;
-		}
-
-	}
-
-	/**
-	 * 工具超时执行器饱和的内部信号（N3）：<b>本次调用没有开始执行</b>。
-	 *
-	 * <p>为什么单独一个类型而不是直接返回文本：饱和是"未执行"的确定性事实，必须走与超时同一套
-	 * 结算（{@code executed=false}、不写台账、轮继续），文案里保留 {@code EXECUTOR_SATURATED}
-	 * 这个机器可检索词，便于把"这一拍没跑"与"跑超时了"分开排障。
-	 */
-	private static final class ToolExecutorSaturatedException extends RuntimeException {
-
-		private final int capacity;
-
-		ToolExecutorSaturatedException(String toolName, int capacity) {
-			super("Not executed (EXECUTOR_SATURATED / " + ToolOutcome.CODE_TOOL_TIMEOUT + "): tool executor saturated (capacity "
-					+ capacity + "), " + toolName + " did not start and produced no side effects; retry later.");
-			this.capacity = capacity;
-		}
-
-		int getCapacity() {
-			return this.capacity;
-		}
-
-	}
-
-	/**
-	 * 台账读口：{@code idemFor}（O(1) 索引）优先，未命中回落 {@code ledgerFor}（全表扫描 / 旧数据）。
-	 *
-	 * <p>为什么两跳都要：真实实现的 {@code idemFor} 内部已经回落过一次，这里的第二跳只保护
-	 * <b>轻装配面</b>（只桩了旧读口的单元底座），语义上"台账才是判据"也因此只有一个出口。
-	 * 空表按未命中处理 —— 一条台账记录至少带 {@code atMs/toolCallId/name/outcome} 四键。
-	 */
-	private Map<String, Object> ledgerOf(String runId, String toolCallId) {
-		Map<String, Object> indexed = this.store.idemFor(runId, toolCallId);
-		if (MapUtils.isNotEmpty(indexed)) {
-			return indexed;
-		}
-		Map<String, Object> scanned = this.store.ledgerFor(runId, toolCallId);
-		return MapUtils.isEmpty(scanned) ? null : scanned;
-	}
-
-	/**
-	 * 台账重放（首轮对账命中 / 认领失败后二次对账命中 / 续跑复跑同一 {@code toolCallId}）：三面同源，
-	 * <b>不执行任何副作用</b>。
-	 *
-	 * <p>结局口径：台账里的 {@code outcome} 原样重放；<b>缺该键 = 未知</b>，不得推断成成功
-	 * （{@code outcome=unknown} 是<b>确定的"未判定"</b> —— 把它写成成功会让"执行了但不知道结果"
-	 * 变成"执行成功"，前端的失败/对账提示随之消失）。
-	 */
-	private String replayLedger(String runId, PendingToolCall pending, Map<String, Object> ledger) {
-		String reusedText = String.valueOf(ledger.getOrDefault("resultText", ""));
-		Object rawOutcome = ledger.get("outcome");
-		ToolOutcome replayed = ToolOutcome.fromWire(ObjectUtils.toString(rawOutcome, (String) null));
-		if (replayed == null) {
-			// 缺 outcome = 未判定，绝不推断成成功。
-			replayed = ToolOutcome.UNKNOWN;
-		}
-		pending.setOutcome(replayed.wire());
-		pending.setCode(ObjectUtils.toString(ledger.get("code"), (String) null));
-		pending.setExecuted(true);
-		Object executedBy = ledger.get("executedBy");
-		pending.setExecutedBy(ObjectUtils.toString(ObjectUtils.getIfNull(executedBy, this.store::instanceId), (String) null));
-		pending.setCreatedTaskId(createdTaskIdOf(ledger.get(PendingToolCall.CREATED_TASK_ID)));
-		pending.setResultText(reusedText);
-		this.store.putPending(runId, pending);
-		// 帧的 ok 必须是 outcome 的派生值（旧实现恒传 true，会把台账里的失败/未知结局写成成功帧）
-		this.registry.of(runId).toolResult(pending, replayed.ok(), true, frameText(reusedText));
-		log.info("tool call hit the ledger; replaying the recorded result (no lock, no claim, no execution) runId={} tool={} toolCallId={} outcome={}",
-				runId, pending.getName(), pending.getToolCallId(), replayed.wire());
-		return reusedText;
-	}
-
-	/**
-	 * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：常规入口落库为终态、回填模型，然后
-	 * 正常返回 —— <b>不 appendLedger、不占认领、不抛异常、不动 suspended</b>，同批后续调用照常
-	 * （{@code haltsBatch} 只认 REJECTED 与不可重试 FAILED）。认领失败入口不回写调用方旧副本，避免覆盖并发认领或执行结果。
-	 *
-	 * <p><b>帧面不保证</b>（RT-21 裁决）：这里只<b>请求</b>一条 {@code ok=false} 的结局帧，是否真的
-	 * 落档/扇出由 {@link com.example.configmgr.ai.run.SseChatEmitter} 的写门判定。写回权已转移的
-	 * 旧驱动（{@code fence > 本进程 epoch}）会被写门丢弃该帧：它没有续跑权，不得再写共享事件/帧，
-	 * <b>不给这份旧驱动任何帧豁免</b>。但"没有共享帧"不等于"结果可以被吞"：{@code blocked} 文本与
-	 * 机器可读结局（{@code outcome}/{@code code}）仍由本方法返回，沿原工具调用链进入模型的
-	 * {@code ToolResponseMessage}（"本次未执行、需由接管方完成"），不得伪装成成功。
-	 */
-	private String settleBlocked(String runId, PendingToolCall pending, String code, String text) {
-		return settleBlocked(runId, pending, code, text, true);
-	}
-
-	private String settleBlocked(String runId, PendingToolCall pending, String code, String text, boolean writePending) {
-		pending.setStatus(PendingToolCall.BLOCKED);
-		pending.setOutcome(ToolOutcome.BLOCKED.wire());
-		pending.setCode(code);
-		pending.setExecuted(false);
-		pending.setExecutedBy(null);
-		pending.setResolvedAtMs(System.currentTimeMillis());
-		pending.setResultText(text);
-		if (writePending) {
-			this.store.putPending(runId, pending);
-		}
-		this.registry.of(runId).toolResult(pending, false, false, frameText(text));
-		log.warn("tool call blocked (not executed, no claim, no ledger row) runId={} tool={} toolCallId={} code={}", runId,
-				pending.getName(), pending.getToolCallId(), code);
-		return text;
-	}
-
-	/** 抢本次调用所需的资源锁（不可锁的工具/无 taskId ⇒ 空句柄，零往返）。 */
-	private ToolResourceLocks.LockHandle acquireResourceLocks(String runId, PendingToolCall pending) {
-		if (this.resourceLocks == null || !ToolResourceLocks.isSupported(pending.getName())) {
-			return ToolResourceLocks.LockHandle.none(ToolResourceLocks.LockOutcome.DISABLED);
-		}
-		Long taskId = ToolTargetResolver.taskIdOf(pending.getArguments());
-		if (taskId == null || taskId <= 0L) {
-			return ToolResourceLocks.LockHandle.none(ToolResourceLocks.LockOutcome.DISABLED);
-		}
-		String owner = this.store.instanceId() + ":" + runId + ":" + pending.getToolCallId();
-		return this.resourceLocks.acquire(taskId, ToolTargetResolver.jobTypeOf(pending.getName()).name(), owner);
-	}
-
-	/** 本轮冻结的工作区上下文（与执行路径用的是同一份快照，见 {@link RunSnapshot#getContext()}）。 */
-	private AiContext contextOf(String runId) {
-		RunSnapshot snapshot = this.store.get(runId);
-		return snapshot == null ? AiContext.empty() : AiContext.fromMap(snapshot.getContext());
-	}
-
-	/**
-	 * 从异常（可能被官方 {@code ToolExecutionException} 包裹）提取机器可读码：
-	 * {@code ConflictException} / {@code ResourceNotFoundException} 的码优先，否则
-	 * {@link ToolOutcome#CODE_TOOL_EXECUTION_FAILED}。
-	 */
-	private static String failureCode(Throwable error) {
-		Throwable current = error;
-		for (int depth = 0; current != null && depth < 8; depth++) {
-			if (current instanceof ConflictException conflict
-					&& StringUtils.isNotBlank(conflict.getCode())) {
-				return conflict.getCode();
-			}
-			if (current instanceof ResourceNotFoundException notFound
-					&& StringUtils.isNotBlank(notFound.getCode())) {
-				return notFound.getCode();
-			}
-			if (current.getCause() == current) {
-				break;
-			}
-			current = current.getCause();
-		}
-		return ToolOutcome.CODE_TOOL_EXECUTION_FAILED;
-	}
-
-	/** 用官方 DefaultToolCallingManager 执行单个工具调用（只借官方执行，不接管协议）。 */
-	String delegateSingle(Prompt prompt, PendingToolCall pending) {
-		AssistantMessage.ToolCall call = new AssistantMessage.ToolCall(pending.getToolCallId(),
-				ObjectUtils.defaultIfNull(pending.getType(), "function"), pending.getName(), pending.getArguments());
-		AssistantMessage single = AssistantMessage.builder().toolCalls(List.of(call)).build();
-		// 动态披露：本批请求边界之外的"新披露工具"不在旧 options 的 callbacks 里，官方委托按名字
-		// 找不到就会抛 No ToolCallback found —— 用当前披露面的 callbacks 副本保证可解析（集合可随披露面
-		// 变化，但不是授权：能否执行仍由防线③与确认门/HITL 决定）。
-		ToolExecutionResult result = this.delegate.executeToolCalls(executionPrompt(prompt, pending.getName()),
-				new ChatResponse(List.of(new Generation(single))));
-		return result.conversationHistory()
-			.stream()
-			.filter(ToolResponseMessage.class::isInstance)
-			.map(ToolResponseMessage.class::cast)
-			.flatMap(message -> message.getResponses().stream())
-			.filter(response -> pending.getToolCallId() != null && pending.getToolCallId().equals(response.id()))
-			.map(ToolResponseMessage.ToolResponse::responseData)
-			.findFirst()
-			.orElse(null);
-	}
-
-	/**
-	 * 模型侧的统一信封 JSON（C13 窗口版）：在配置档之外再按<b>剩余窗口</b>收缩。
-	 *
-	 * <p>截断判定仍是同一个 {@link ToolResultLimiter}（窗口额度作为第二个上限传入
-	 * {@link ToolResultLimiter#forModel(String, String, int)}）：于是 {@code truncated/strategy/
-	 * originalChars/returnedChars/notice} 五个字段照旧写进信封，模型仍能看见"这份结果不是全部"；
-	 * SSE 帧与执行台账里的 {@code resultText} 仍是全文（双通道口径不动）。
-	 *
-	 * @param budget 本批剩余窗口（{@code unlimited()} = 不按窗口收缩，与改造前逐字一致）
-	 */
-	private String modelData(PendingToolCall pending, String text, ModelWriteBudget budget) {
-		String modelJson = ToolResultEnvelope
-			.of(pending.effectiveOutcome(), pending.effectiveCode(), text, pending.getArguments())
-			.toModelJson(this.limiter, pending.getName(), budget.nextCapChars());
-		budget.consume(modelJson);
-		return modelJson;
-	}
-
-	/**
-	 * 本批模型侧写入的剩余窗口（C13）。
-	 *
-	 * <p>算式：{@code 实际窗口 − 有效预留 − system/tools − 已固定的历史 − 本批 assistant(tool_calls)}。
-	 * 上限未知（轻装配面/未注入 resolver）⇒ {@link ModelWriteBudget#unlimited()}（行为一字不变）。
-	 */
-	private ModelWriteBudget modelWriteBudget(RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
-			int calls) {
-		int limit = turnBudgetLimit(snapshot);
-		if (limit <= 0 || calls <= 0) {
-			return ModelWriteBudget.unlimited();
-		}
-		int reserve = ContextTrigger.effectiveReserve(limit, this.properties.getContext().getReserveTokens());
-		int fixedPrefix = estimateRequestTokens(prompt, prompt.getInstructions())
-				+ ContextEstimator.estimateMessage(assistant);
-		int remaining = limit - reserve - fixedPrefix;
-		if (remaining <= 0) {
-			// 窗口已经被固定历史吃满：收缩单份结果救不回来（交给轮内收缩/恢复路径），此处不裁
-			return ModelWriteBudget.unlimited();
-		}
-		return ModelWriteBudget.of(remaining, calls);
-	}
-
-	/**
-	 * 一批工具结果写进模型侧时的剩余窗口（C13）。
-	 *
-	 * <p>每份结果按 {@code 剩余 / 本批剩余调用数} 均分：一份结果独占整窗就等于"下一跳必然越窗"，
-	 * 而 {@code keep-tool-pairs} 又让轮内 L1 清不掉最近的几对。写入后按实际写出的文本扣减，
-	 * 于是同一批里靠后的结果自动拿到更小的额度（顺序确定 ⇒ 可重放）。
-	 */
-	private static final class ModelWriteBudget {
-
-		private static final ModelWriteBudget UNLIMITED = new ModelWriteBudget(0, 0);
-
-		private int remainingTokens;
-
-		private int callsLeft;
-
-		private ModelWriteBudget(int remainingTokens, int callsLeft) {
-			this.remainingTokens = remainingTokens;
-			this.callsLeft = callsLeft;
-		}
-
-		/** 无窗口信息（不收缩）。 */
-		static ModelWriteBudget unlimited() {
-			return UNLIMITED;
-		}
-
-		static ModelWriteBudget of(int remainingTokens, int calls) {
-			return remainingTokens <= 0 || calls <= 0 ? UNLIMITED
-					: new ModelWriteBudget(remainingTokens, calls);
-		}
-
-		/** 本次写入的字符额度（{@code 0} = 不按窗口收缩）。 */
-		int nextCapChars() {
-			if (this.callsLeft <= 0) {
-				return 0;
-			}
-			int share = Math.max(1, this.remainingTokens / this.callsLeft);
-			return ToolResultLimiter.charsForRemainingTokens(share);
-		}
-
-		/** 扣减已写出的模型侧文本（token 估算，与判据同一把尺子）。 */
-		void consume(String modelJson) {
-			if (this.callsLeft <= 0) {
-				return;
-			}
-			this.remainingTokens = Math.max(0, this.remainingTokens - ContextEstimator.estimate(modelJson));
-			this.callsLeft--;
-		}
-
-	}
-
-	private String modelData(PendingToolCall pending, String text) {
-		return ToolResultEnvelope.of(pending.effectiveOutcome(), pending.effectiveCode(), text,
-				pending.getArguments()).toModelJson(this.limiter, pending.getName());
-	}
-
-	// ── 辅助 ────────────────────────────────────────────────────────────────
-
-	/**
-	 * 续跑阶段结算一个挂起条目（{@code ResumeService} 的重建路径专用，SP-02 §5.5）。
-	 *
-	 * <ul>
-	 * <li>{@code PENDING} + {@code BACKEND}：后端工具不需要外部输入，直接补执行（进程死在
-	 * "已写条目、未执行"之间时的正常路径）；</li>
-	 * <li>{@code APPROVED}：补执行恰好一次（E2 窗口）；<b>但 {@code APPROVED + FRONTEND} 例外</b>
-	 * —— 那是历史假批准（人没点过、前端也没执行过），显式结算成 {@code blocked}/
-	 * {@code TOOL_KIND_MISMATCH}，<b>不执行后端桩、不写台账</b>（见 {@link #KIND_MISMATCH_TEXT}）；</li>
-	 * <li>其余（{@code EXECUTED}/{@code REJECTED}/{@code TIMEOUT}/{@code FRONTEND_RESULT}/
-	 * {@code FRONTEND_CANCELLED}/{@code REJECTED_ARGUMENTS}/{@code BLOCKED}/{@code PRECHECK_FAILED}）：
-	 * 一律复用 {@code resultText}，<b>不执行</b>。</li>
-	 * </ul>
-	 *
-	 * <h2>观测面：本方法<b>不是</b> {@code tool_call_end} 的发点</h2>
-	 * 前端结果/放弃的结算行由写入方（{@code ConfirmGate} 的决策/放弃胜者）发，后端执行的结算行由
-	 * {@link #executeOnce} 在<b>认领胜者</b>那一支发 —— 于是"挂起一次 ⇒ 一条 end"与所有权一一对应。
-	 * 上面那个"复用 {@code resultText}"的兜底分支刻意不补：重挂/重试会反复经过它，
-	 * 在那里记账会把 {@code SheetAudit} 计数放大成"重挂次数"（park 缺陷的反向坑）。
-	 *
-	 * @return 该条目对应的工具结果文本（用于重建 {@code role:tool} 消息）
-	 */
-	public String resolvePending(String runId, Prompt prompt, PendingToolCall pending) {
-		String status = pending.getStatus();
-		// kind 缺失硬闸：无法证明该走哪条通道 ⇒ 不执行（也不说成"失败"或"成功"）。
-		// 只拦"本来会执行"的三种态（APPROVED / PENDING / EXECUTED 但 executed=false）；
-		// 已结算的历史条目仍复用 resultText，绝不改写既有结局。
-		boolean wouldExecute = PendingToolCall.APPROVED.equals(status) || PendingToolCall.PENDING.equals(status)
-				|| (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());
-		if (!pending.hasKind() && wouldExecute) {
-			log.warn("resume found a pending entry without kind: explicitly blocked, not approved, not executed, no ledger row runId={} toolCallId={} name={} status={}", runId, pending.getToolCallId(), pending.getName(), status);
-			ensureToolStartBeforeSettlement(runId, pending);
-			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_UNKNOWN_TEXT);
-		}
-		// 入口 kind 校验（续跑假批准）：APPROVED + FRONTEND 是"人根本没点过、前端也没执行过"的
-		// 假批准（旧代码/错入口留下的数据）。它<b>绝不能</b>进 executeOnce —— 那会把前端工具的
-		// 后端哨兵桩跑一遍并写成功台账。这里显式结算成 blocked（不认领、不写台账、executed=false）。
-		if (PendingToolCall.APPROVED.equals(status) && PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-			log.warn("resume found APPROVED+FRONTEND (legacy false approval / wrong-endpoint decision): explicitly blocked, backend stub not executed, no ledger row runId={} toolCallId={} name={}", runId, pending.getToolCallId(), pending.getName());
-			ensureToolStartBeforeSettlement(runId, pending);
-			return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_MISMATCH_TEXT);
-		}
-		boolean shouldExecute = PendingToolCall.APPROVED.equals(status)
-				|| (PendingToolCall.PENDING.equals(status) && PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-				|| (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());
-		if (shouldExecute) {
-			// 结算侧帧册不变量：本分支的所有出口（台账重放 / 目标校验 / 资源锁 / 认领 / 执行 / 超时）
-			// 都会<b>请求</b>发 tool_result（失去续跑权的旧驱动那条会被写门丢弃，见 {@link #settleBlocked}），
-			// 而原实例可能死在 tool_start 落档之前（suspend-kill-a）—— 结算之前按归档幂等补一次，
-			// 已有则不补；写门同样会拦住旧驱动的补帧。
-			ensureToolStartBeforeSettlement(runId, pending);
-			return executeOnce(runId, prompt, pending, contextOf(runId), true);
-		}
-		// B23L1 批③b：已终态但结局是 unknown 的条目，先经三跳对账（台账 → 认领 → 资源锁）再回填 ——
-		// 台账里有确定结局就采用它（含原文与执行者），否则如实保持 UNKNOWN 并给出"为什么"。
-		if (this.unknownReconciler != null && pending.resolved()
-				&& pending.effectiveOutcome() == ToolOutcome.UNKNOWN
-				&& !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-			return applyReconciliation(runId, pending);
-		}
-		String text = StringUtils.defaultString(pending.getResultText());
-		if (log.isDebugEnabled()) log.debug("resume settlement reuses result runId={} toolCallId={} status={} executedBy={}", runId, pending.getToolCallId(),
-				status, pending.getExecutedBy());
-		return text;
-	}
-
-	/**
-	 * 续跑结算前<b>幂等补发</b>缺失的 {@code tool_start}（帧册不变量：每个被执行工具恰一条 start）。
-	 *
-	 * <p>缺陷形态（真实集群 {@code suspend-kill-a}）：首轮"状态先落、帧后发"，原实例死在
-	 * {@code tool_start} 落档之前，归档里就永远没有这一帧；续跑（本方法只被
-	 * {@link com.example.configmgr.ai.run.ResumeService} 调用）只发结局帧 ⇒ 永久"有 result、没有 start"。
-	 *
-	 * <p>为什么挂在这里而不是 {@link #executeOnce}：后者也是<b>首轮</b>执行路径的出口，而首轮
-	 * 发帧顺序（{@code suspended → tool_start → 请求帧 → 执行}）由 {@code emitToolStartOnce} 保证、
-	 * 不允许被一次归档读改写；本方法是续跑结算的唯一入口，覆盖面相同而工作面最小。
-	 *
-	 * <p>判据在事件日志（跨实例同一份）——已有该 {@code toolCallId} 的 {@code tool_start} 就一条不补。
-	 * 发帧是观测面：失败只 WARN，绝不阻断结算。
-	 */
-	private void ensureToolStartBeforeSettlement(String runId, PendingToolCall pending) {
-		try {
-			if (this.registry.of(runId).isToolStartEmitted(pending)) {
-				log.info("resume re-sent missing tool_start runId={} toolCallId={} name={}", runId,
-						pending.getToolCallId(), pending.getName());
-			}
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("resume-tool-start-replay")) {
-				log.warn("resume failed to re-send tool_start (settlement not blocked) runId={} toolCallId={}", runId,
-						pending.getToolCallId(), ex);
-			}
-		}
-	}
-
-	/**
-	 * 把一次 UNKNOWN 对账的结论写回条目并返回回填文本。
-	 *
-	 * <p>只有 {@link ToolUnknownReconciler.Reconciliation#adopted()}（台账命中且结局非 unknown）才覆盖
-	 * {@code outcome/code/executedBy}；其余情况保持 UNKNOWN，只更新人读文案 —— 不确定性不能被对账器
-	 * "猜"成成功。
-	 */
-	private String applyReconciliation(String runId, PendingToolCall pending) {
-		ToolUnknownReconciler.Reconciliation reconciliation = this.unknownReconciler.reconcile(runId, pending);
-		if (reconciliation == null) {
-			return StringUtils.defaultString(pending.getResultText());
-		}
-		String text = StringUtils.defaultString(reconciliation.text());
-		if (reconciliation.isAdopted()) {
-			pending.setOutcome(reconciliation.outcome().wire());
-			pending.setCode(reconciliation.code());
-			pending.setExecuted(true);
-			if (reconciliation.executedBy() != null) {
-				pending.setExecutedBy(reconciliation.executedBy());
-			}
-		}
-		pending.setResultText(text);
-		this.store.putPending(runId, pending);
-		log.info("resume settlement went through UNKNOWN reconciliation runId={} toolCallId={} adopted={} outcome={}", runId,
-				pending.getToolCallId(), reconciliation.isAdopted(), pending.effectiveOutcome().wire());
-		return text;
-	}
-
-	/**
-	 * 续跑结算行的事件锚点：{@code sessionId} 必须显式读一次快照 —— 续跑线程（跨实例唤醒 /
-	 * 续跑池）的 MDC 未必装着会话，而 {@code ai:safety:<sessionId>} 台账就挂在这个键上。
-	 * 读失败/快照缺失返回 {@code null}，由 {@code AiTrace#eventOn} 回落 MDC。
-	 */
-	private String sessionIdOf(String runId) {
-		try {
-			RunSnapshot snapshot = this.store.get(runId);
-			return snapshot == null ? null : snapshot.getSessionId();
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("settlement-session-id-read")) {
-				log.warn("settlement row could not read sessionId runId={}", runId, ex);
-			}
-			return null;
-		}
-	}
-
-	/** 挂起种类由基座元数据决定：通道优先（前端工具不可被后端执行），其次风险等级。 */
-	private List<PendingToolCall> newPendings(AssistantMessage assistant) {
-		List<PendingToolCall> out = new ArrayList<>();
-		for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
-			PendingToolCall pending = new PendingToolCall();
-			pending.setToolCallId(call.id());
-			pending.setName(call.name());
-			pending.setType(ObjectUtils.defaultIfNull(call.type(), "function"));
-			pending.setArguments(call.arguments());
-			pending.setKind(kindOf(call.name()));
-			// 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框。判据是执行类别
-			// （Category.P = 不可逆写/发布），不是风险等级 —— DANGER 的 W/J 类工具照旧只弹确认卡。
-			pending.setIrreversible(this.toolRegistry.categoryOf(call.name()) == ToolMeta.Category.P);
-			out.add(pending);
-		}
-		return out;
-	}
-
-	private String kindOf(String toolName) {
-		if (this.toolRegistry.channelOf(toolName) == ToolMeta.Channel.FRONTEND) {
-			return PendingToolCall.KIND_FRONTEND;
-		}
-		if (this.toolRegistry.riskOf(toolName) == ToolMeta.RiskLevel.DANGER) {
-			return PendingToolCall.KIND_CONFIRM;
-		}
-		return PendingToolCall.KIND_BACKEND;
-	}
-
-	/**
-	 * 宿主表单提前 park 的展示历史写点：挂起快照成功后，把"本段正文 + 实际挂起的表单调用"
-	 * 写进 transcript，刷新时仍能看到这段正文与卡（不是只等续跑/取消）。
-	 *
-	 * <p>失败只 DEBUG：展示面不得反噬已成功的 park；正文已在快照 {@code assistantContent} 里。
-	 */
-	private void recordParkedHostFormTranscript(String runId, Prompt prompt, AssistantMessage assistant) {
-		if (this.transcript == null) {
-			return;
-		}
-		try {
-			// 用快照里的 inFlightToolCalls 顺序（saveSuspended 原样保存的列表），不要读 Redis hash：
-			// hash 迭代顺序不保证，会让 assistant entryId（取首个 toolCallId）在续跑/终态写点分叉。
-			RunSnapshot latest = this.store.get(runId);
-			if (latest == null) {
-				return;
-			}
-			recordPendingTranscript(runId, latest, prompt, assistant, latest.getInFlightToolCalls());
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("parked-host-form-transcript")) {
-				log.warn("parked host form transcript write failed runId={} (park unaffected)", runId, ex);
-			}
-		}
-	}
-
-	/**
-	 * B2：挂起时把本批工具卡写进 transcript（status=pending 的进展示历史）。
-	 *
-	 * <p>只写用户面原文：assistant 的工具调用（id/name/arguments）+ 每条 pending 的
-	 * {@code resultText}（已执行的那些就是原文）。后续终态写点用同一 {@code entryId} 覆盖，
-	 * 因此 pending → 已决/失败/取消不会留下两张卡。
-	 */
-	private void recordPendingTranscript(String runId, RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
-			List<PendingToolCall> pendings) {
-		if (this.transcript == null || snapshot == null || CollectionUtils.isEmpty(pendings)
-				|| !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
-			return;
-		}
-		// R4：toolCallId 缺失 ⇒ 整批不写（与结算写点同一口径）：不产出无归属卡。
-		if (pendings.stream().anyMatch(pending -> pending == null || pending.getToolCallId() == null)) {
-			if (log.isDebugEnabled()) log.debug("transcript park entry skipped: batch has an entry without toolCallId runId={}", runId);
-			return;
-		}
-		// 轮次已终态（取消/完成/失败）⇒ 不写：挂起写点若在取消终态之后执行，会把 CANCELLED 覆盖回
-		// PENDING/APPROVED。终态写点负责最终展示历史。
-		if (RunSnapshot.isTerminal(snapshot.getStatus())) {
-			if (log.isDebugEnabled()) log.debug("transcript park entry skipped: turn already terminal runId={} status={} (terminal write owns it)", runId,
-					snapshot.getStatus());
-			return;
-		}
-		try {
-			if (!this.store.isWritePermitted(runId, "transcript")) {
-				return;
-			}
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("transcript-park-write-ownership")) {
-				log.warn("transcript write-ownership check failed (not written) runId={}", runId, ex);
-			}
-			return;
-		}
-		try {
-			List<TranscriptEntry.ToolCallView> calls = toolCallViews(pendings);
-			long turnStartedAtMs = snapshot.transcriptToolTurnStartedAtMs();
-			// 与结算写点同一口径：assistant 的 toolCallStates 与 tool 条目的 status 同源（每卡只解析一次）。
-			Map<String, String> statuses = TranscriptEntries.settledStatuses(pendings, null);
-			List<TranscriptEntry> entries = new ArrayList<>(pendings.size() + 1);
-			entries.add(assistantTranscript(runId, snapshot, turnStartedAtMs, System.currentTimeMillis(), assistant, calls,
-					TranscriptEntries.statesFrom(pendings, statuses)));
-			for (PendingToolCall pending : pendings) {
-				entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, System.currentTimeMillis(),
-						pending.getToolCallId(), pending.getName(), pending.getKind(),
-						statuses.get(pending.getToolCallId()), pending.getResultText()));
-			}
-			this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries,
-					snapshot.getRunEpoch());
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("transcript-park-append")) {
-				log.warn("failed to write transcript park entry (park/wait unaffected) runId={}", runId, ex);
-			}
-		}
-	}
-
-	/**
-	 * 续跑侧入口：整批挂起条目结算后重写本批工具卡（与执行循环同一个实现，快照自取）。
-	 *
-	 * <p>续跑由 {@link RunStore} 的在飞条目驱动、不走 {@code executeToolCalls}，因此执行循环尾部的
-	 * 写点覆盖不到它；这里补同一个口径（失败只 WARN，展示面不影响续跑）。
-	 */
-	public void refreshSettledBatchTranscript(String runId, AssistantMessage assistant, List<PendingToolCall> batch) {
-		if (this.transcript == null || runId == null || CollectionUtils.isEmpty(batch)) {
-			return;
-		}
-		RunSnapshot snapshot;
-		try {
-			snapshot = this.store.get(runId);
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("transcript-batch-snapshot-read")) {
-				log.warn("transcript batch rewrite could not read snapshot (not written) runId={}", runId, ex);
-			}
-			return;
-		}
-		recordSettledBatchTranscript(runId, snapshot, assistant, batch);
-	}
-
-	/**
-	 * B2：本批工具<b>结算之后</b>重写本批的 assistant/tool 条目（同一 {@code entryId}/{@code toolCallId}，
-	 * 读取时 last-wins，不会产生第二张卡）。
-	 *
-	 * <p>为什么必须有这个写点：挂起写点记的是"等待那一刻"的状态，终态写点要等整轮收尾。中间这段
-	 * （多跳工具轮、长批次、用户刷新）如果只有挂起快照，用户看到的就是一张永远"待确认"的卡 ——
-	 * 即使工具早已执行完。这里按<b>结算后的条目真值</b>重写：
-	 * <ul>
-	 * <li>状态 = {@link TranscriptEntries#settledStatuses}（每张卡只解析一次：已执行但条目态停在
-	 *     APPROVED/PENDING 的投影成 EXECUTED，台账命中同样算已执行证据）；</li>
-	 * <li>状态映射 = {@link TranscriptEntries#statesFrom}（与记忆收敛同一份投影，保留
-	 *     outcome/code/decision/decidedAt/submittedValues，未决条目不写 outcome）——
-	 *     assistant 的 toolCallStates 与 tool 条目的 status <b>同源</b>；</li>
-	 * <li>待决条目<b>读不全就整批不写</b>：缺失 toolCallId 若只出现在 assistant 的 toolCalls 里，
-	 *     前端会把它占位成 succeeded；等终态写点补比写一张假卡安全；</li>
-	 * <li>只写本批的 toolCallId，不写用户条目 —— 用户原文的唯一权威是轮首写点，这里不参与。</li>
-	 * </ul>
-	 *
-	 * <p>失败只 WARN：展示历史是观测面，不能反噬工具执行/续跑。挂起写点与终态写点保持原样（幂等）。
-	 */
-	private SettledBatchRead readSettledBatch(String runId, List<PendingToolCall> batch) {
-		// 只写存储里的真值：确认门/前端通道结算的是外置存储的新副本，循环里那份可能仍是旧的。
-		// 读不到/读不全就<b>不写</b> —— 拿旧副本重写会把已执行的卡写回 PENDING（宁可等终态写点补）。
-		Map<String, PendingToolCall> fresh = new LinkedHashMap<>();
-		try {
-			for (PendingToolCall settled : this.store.pendingsLenient(runId)) {
-				if (settled != null && settled.getToolCallId() != null) {
-					fresh.put(settled.getToolCallId(), settled);
-				}
-			}
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("transcript-batch-pending-read")) {
-				log.warn("transcript batch rewrite could not read pending entries (not written) runId={}", runId, ex);
-			}
-			return SettledBatchRead.incomplete();
-		}
-		List<PendingToolCall> settledBatch = new ArrayList<>(batch.size());
-		for (PendingToolCall pending : batch) {
-			PendingToolCall latest = pending == null || pending.getToolCallId() == null ? null
-					: fresh.get(pending.getToolCallId());
-			if (latest == null) {
-				// 读不全（Redis 降级/条目被清）⇒ <b>整批不写</b>：缺状态的 toolCallId 留在 assistant 的
-				// toolCalls 里会被前端占位成 succeeded，比"暂缺一次更新"更假。等终态写点补。
-				if (log.isDebugEnabled()) log.debug("transcript batch rewrite skipped: pending entries read incomplete runId={} batch={} fresh={}", runId,
-						batch.size(), fresh.size());
-				return SettledBatchRead.incomplete();
-			}
-			settledBatch.add(latest);
-		}
-		return new SettledBatchRead(true, settledBatch);
-	}
-
-	private record SettledBatchRead(boolean isComplete, List<PendingToolCall> entries) {
-		private SettledBatchRead {
-			entries = entries == null ? List.of() : List.copyOf(entries);
-		}
-
-		private static SettledBatchRead incomplete() {
-			return new SettledBatchRead(false, List.of());
-		}
-	}
-
-	private void appendSettledTranscript(String runId, RunSnapshot snapshot, AssistantMessage assistant,
-			List<PendingToolCall> settledBatch) {
-		long atMs = System.currentTimeMillis();
-		// 每张卡只解析一次状态（台账只查一遍）：assistant 的 toolCallStates 与 tool 条目的 status 同源，
-		// 不会出现 assistant=EXECUTED 而 tool=APPROVED。
-		Map<String, String> statuses = TranscriptEntries.settledStatuses(settledBatch,
-				toolCallId -> ledgerOf(runId, toolCallId) != null);
-		List<TranscriptEntry> entries = new ArrayList<>(settledBatch.size() + 1);
-		long turnStartedAtMs = snapshot.transcriptToolTurnStartedAtMs();
-		entries.add(assistantTranscript(runId, snapshot, turnStartedAtMs, atMs, assistant, toolCallViews(settledBatch),
-				TranscriptEntries.statesFrom(settledBatch, statuses)));
-		for (PendingToolCall pending : settledBatch) {
-			entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, atMs, pending.getToolCallId(),
-					pending.getName(), pending.getKind(), statuses.get(pending.getToolCallId()),
-					pending.getResultText()));
-		}
-		this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries,
-				snapshot.getRunEpoch());
-	}
-
-	private void recordSettledBatchTranscript(String runId, RunSnapshot snapshot, AssistantMessage assistant,
-			List<PendingToolCall> batch) {
-		if (this.transcript == null || snapshot == null || assistant == null || CollectionUtils.isEmpty(batch)
-				|| !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
-			return;
-		}
-		// R1：轮次已终态（取消/完成/失败）⇒ 不写。终态写点（finish/cancel/fail）负责最终展示历史，
-		// 这里若在取消终态之后补写，会把已经写好的 CANCELLED 覆盖回 APPROVED/PENDING。
-		if (RunSnapshot.isTerminal(snapshot.getStatus())) {
-			if (log.isDebugEnabled()) log.debug("transcript batch rewrite skipped: turn already terminal runId={} status={} (terminal write owns it)", runId,
-					snapshot.getStatus());
-			return;
-		}
-		// R4：toolCallId 缺失的条目无法形成有归属的卡（statuses/states 都以 id 为键）⇒ 整批不写，
-		// 不产出无归属卡（否则 assistant 里会留一个没有状态的调用，前端占位成 succeeded）。
-		if (batch.stream().anyMatch(pending -> pending == null || pending.getToolCallId() == null)) {
-			if (log.isDebugEnabled()) log.debug("transcript batch rewrite skipped: batch has an entry without toolCallId runId={}", runId);
-			return;
-		}
-		try {
-			if (!this.store.isWritePermitted(runId, "transcript")) {
-				return;
-			}
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("transcript-batch-write-ownership")) {
-				log.warn("transcript write-ownership check failed (batch settlement does not rewrite tool cards) runId={}", runId, ex);
-			}
-			return;
-		}
-		try {
-			SettledBatchRead read = readSettledBatch(runId, batch);
-			if (!read.isComplete()) {
-				return;
-			}
-			List<PendingToolCall> settledBatch = read.entries();
-			// 本批一张都还没结算（park 在首张卡就穿出）⇒ 挂起写点那份就是真值，不重复追加同内容。
-			boolean anySettled = settledBatch.stream()
-				.anyMatch(pending -> !PendingToolCall.PENDING.equals(pending.getStatus()));
-			if (!anySettled) {
-				return;
-			}
-			appendSettledTranscript(runId, snapshot, assistant, settledBatch);
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("transcript-batch-settlement-append")) {
-				log.warn("transcript batch settlement rewrite failed (tool execution/resume unaffected) runId={}", runId, ex);
-			}
-		}
-	}
-
-	private TranscriptEntry assistantTranscript(String runId, RunSnapshot snapshot, long turnStartedAtMs, long atMs,
-			AssistantMessage assistant, List<TranscriptEntry.ToolCallView> calls, Map<String, Object> states) {
-		TranscriptEntry entry = TranscriptEntries.assistant(runId, turnStartedAtMs, atMs, assistant.getText(), calls,
-				states);
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
-			SseChatEmitter out = this.registry.find(runId);
-			return out == null ? entry : entry.withSegments(out.transcriptSegments(entry.entryId(), calls, entry.text(),
-					entry.reasoning()));
-		}
-	}
-
-	/** 待决条目 → assistant 条目的工具调用视图（挂起写点与批次结算写点同一份构造）。 */
-	private static List<TranscriptEntry.ToolCallView> toolCallViews(List<PendingToolCall> pendings) {
-		List<TranscriptEntry.ToolCallView> calls = new ArrayList<>(pendings.size());
-		for (PendingToolCall pending : pendings) {
-			if (pending == null) {
-				continue;
-			}
-			calls.add(new TranscriptEntry.ToolCallView(pending.getToolCallId(),
-					ObjectUtils.defaultIfNull(pending.getType(), "function"), pending.getName(),
-					pending.getArguments()));
-		}
-		return calls;
-	}
-
-	/**
-	 * 落定本跳聚合消息。写口抛错时不提交正文段；不做 messageJson 读回对账，
-	 * 持久化身份由本跳 assistant(tool_calls) 自身承担。
-	 */
-	private boolean isSettle(String runId, List<Message> history) {
-		history = SyntheticMessages.withoutCorrectionInstruction(history);
-		RunSnapshot snapshot = this.store.get(runId);
-		if (snapshot == null) {
-			return false;
-		}
-		snapshot.setMessageJson(this.codec.serializeAll(history));
-		snapshot.setInFlightToolCalls(new ArrayList<>());
-		snapshot.setAssistantContent(null);
-		snapshot.setStatus(RunSnapshot.RUNNING);
-		snapshot.setRound(snapshot.getRound() + 1);
-		this.store.save(snapshot);
-		try {
-			RunSnapshot latest = this.store.get(runId);
-			// 只核对本跳序号与运行态，不比较整份 messageJson。
-			return latest != null && latest.getRound() == snapshot.getRound()
-					&& RunSnapshot.RUNNING.equals(latest.getStatus())
-					&& (CollectionUtils.isEmpty(latest.getInFlightToolCalls()));
-		}
-		catch (RuntimeException ex) {
-			return false;
-		}
-	}
-
-	/**
-	 * 该条目的拒绝是否应<b>静默用户可见的工具帧</b>（生成式表单的系统拒绝：schema 白名单 / 槽位放行）。
-	 *
-	 * <p>两类拒绝的共同点：<b>被判的是模型给的 schema，不是用户的动作</b>，而且都零副作用、都有明确
-	 * 纠正出口。浏览器实测的缺陷正是"先落一张'已拒绝'的表单卡，模型改对后再落一张可用卡"——
-	 * 用户看到两张卡，实际只有一次收集意图。
-	 *
-	 * <ul>
-	 * <li>{@code FORM_SCHEMA_REJECTED}：schema 未过白名单（顶层 purpose/scenario/title、字段、联动……）；</li>
-	 * <li>{@code FORM_SLOTS_ALREADY_KNOWN}：这张表想收集的槽位已由任务/工作区或用户明确值确定
-	 * （"没有缺口"而不是"输错了"）。</li>
-	 * </ul>
-	 *
-	 * <p>静默的是<b>用户面</b>，其余三面一字不改：
-	 * <ul>
-	 * <li>条目：仍是 {@code REJECTED_ARGUMENTS} + 同名 code（审计/幂等/排障）；</li>
-	 * <li>日志：{@code settleFrontendRejected} 的 WARN 照旧；</li>
-	 * <li>模型：统一信封回执照旧（含码与逐条"改哪一处"）；</li>
-	 * <li>用户：{@code tool_start} / {@code frontend_tool_request} / {@code frontend_tool_result}
-	 * <b>一条都不发</b> —— 前端不建段，就不会有卡，也不会更新任何既有的表单状态。</li>
-	 * </ul>
-	 *
-	 * <p>只认<b>生成式表单 + 这两个码</b>：别的工具即便带同名码也不静默（不借码绕过可见性），
-	 * 生成式表单的其它拒绝（例如回灌值不合法）走的是回灌闸门、不是这里 —— 那里用户已经填过表，
-	 * 必须看见"哪一格要改"。
-	 */
-	private static boolean isSystemRejectedWithoutUserFrames(PendingToolCall pending) {
-		String code = pending.effectiveCode();
-		if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
-			return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code)
-					|| ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
-		}
-		// confirm_step 的"文本推断未验证"是系统拒绝（模型需改用 set_condition 结构化算子）：
-		// 用户面零卡（实时/历史同口径），模型回执照旧，保留纠正与后续 set_condition 通道。
-		return AiToolNames.CONFIRM_STEP.equals(pending.getName())
-				&& ErrorCodes.CONDITION_OPERATOR_UNKNOWN.equals(code);
-	}
-
-	/**
-	 * 工具批后把<b>运行上下文</b>推进到真实结果（多步工作流批）。
-	 *
-	 * <p>三层口径：
-	 * <ol>
-	 * <li><b>只由成功结算触发</b>：判据（工具名 + {@code outcome=OK}）在
-	 * {@link RunContextRefresher#next} 里，本方法只负责"读快照 → 算 → 写回"；</li>
-	 * <li><b>批内冻结</b>：这里只改<b>外置快照</b>，执行循环里那份 {@code context} 变量一字不动 ——
-	 * 同一批里"导航 + 选配置"仍按批首 scope 被拒（{@code SCOPE_NOT_DISCLOSED}），下一批才放行；</li>
-	 * <li><b>失败不打断</b>：任何异常（读快照/任务服务/写快照）只 WARN，保留旧上下文，
-	 * 工具轮照常返回 —— 刷新是"让下一步更准"的增强，不是本批的判定面。</li>
-	 * </ol>
-	 */
-	private void refreshRunContext(String runId, PendingToolCall settled) {
-		RunContextRefresher refresher = this.contextRefresher;
-		if (settled == null || !RunContextRefresher.isSupported(settled.getName())) {
-			return;
-		}
-		if (refresher == null) {
-			// 可观测性：本批确有"能推进上下文"的结果，但装配里没有刷新器 —— 下一跳会沿用请求边界的
-			// 旧上下文（步骤工具不披露）。这不是"已证根因"，但必须是可检索的一条痕。
-			log.warn("cannot refresh run context after tool batch: RunContextRefresher not injected (next hop uses stale context; step tools may not be disclosed) runId={} tool={}", runId, settled.getName());
-			return;
-		}
-		try {
-			RunSnapshot fresh = this.store.get(runId);
-			if (fresh == null) {
-				return;
-			}
-			AiContext before = AiContext.fromMap(fresh.getContext());
-			Optional<AiContext> next = refresher.next(runId, before, settled);
-			if (next == null || next.isEmpty()) {
-				return;
-			}
-			AiContext after = next.get();
-			if (after.equals(before)) {
-				return;
-			}
-			fresh.setContext(after.toMap());
-			this.store.save(fresh);
-			if (log.isDebugEnabled()) log.debug("run context refreshed after tool batch runId={} tool={} page={} taskId={} taskType={} step={} status={}", runId, settled.getName(), after.getPage(), after.getTaskId(), after.getTaskType(), after.getStep(), after.getTaskStatus());
-		}
-		catch (RuntimeException ex) {
-			log.warn("failed to refresh run context after tool batch; keeping the old context (tool turn not blocked) runId={} tool={}", runId,
-					settled.getName(), ex);
-		}
-	}
-
-	private String runIdOf(Prompt prompt) {
-		if (prompt.getOptions() instanceof ToolCallingChatOptions options) {
-			return runIdOf(options.getToolContext());
-		}
-		return null;
-	}
-
-	/** 从 {@code toolContext} 取本轮 runId（无则 null：披露重算/执行补全都按"不可判定"回落）。 */
-	private static String runIdOf(Map<String, Object> toolContext) {
-		if (toolContext == null) {
-			return null;
-		}
-		Object runId = toolContext.get("runId");
-		return ObjectUtils.toString(runId, (String) null);
-	}
-
-	private Map<String, Object> toolContextOf(Prompt prompt) {
-		if (prompt.getOptions() instanceof ToolCallingChatOptions options) {
-			return options.getToolContext();
-		}
-		return null;
-	}
-
-	/** 本轮当前 attempt 的正文捕获器（无捕获链 ⇒ null）。 */
-	private TurnTextCapture turnTextOf(Prompt prompt) {
-		Map<String, Object> context = toolContextOf(prompt);
-		if (context == null) {
-			return null;
-		}
-		Object raw = context.get(TOOL_CONTEXT_TURN_TEXT);
-		return raw instanceof TurnTextCapture capture ? capture : null;
-	}
-
-	/** 当前正文段已随本跳聚合消息落库，清空后开始下一段。 */
-	private void commitTurnText(Prompt prompt) {
-		TurnTextCapture capture = turnTextOf(prompt);
-		if (capture != null) {
-			capture.commitSegment();
-		}
-	}
-
-	private boolean isSuspendedHopPersisted(String runId, AssistantMessage assistant) {
-		try {
-			RunSnapshot latest = this.store.get(runId);
-			if (latest == null || !RunSnapshot.SUSPENDED.equals(latest.getStatus())
-					|| latest.getInFlightToolCalls() == null) {
-				return false;
-			}
-			List<String> expected = assistant.getToolCalls().stream().map(AssistantMessage.ToolCall::id).toList();
-			List<String> persisted = latest.getInFlightToolCalls().stream().map(PendingToolCall::getToolCallId).toList();
-			return !expected.isEmpty() && expected.equals(persisted);
-		}
-		catch (RuntimeException ex) {
-			return false;
-		}
-	}
-
-	/** 只保留 tool_calls/metadata/media、正文置空的 assistant（宿主表单挂起历史用）。 */
-	private static AssistantMessage assistantWithoutText(AssistantMessage assistant) {
-		AssistantMessage.Builder builder = AssistantMessage.builder()
-			.content("")
-			.properties(ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()));
-		if (assistant.hasToolCalls()) {
-			builder.toolCalls(assistant.getToolCalls());
-		}
-		if (CollectionUtils.isNotEmpty(assistant.getMedia())) {
-			builder.media(assistant.getMedia());
-		}
-		return builder.build();
-	}
-
-	/**
-	 * 用已聚合正文补全流式工具调用的 assistant。
-	 *
-	 * <p><b>单一来源</b>：当前事件段非空时只使用它，<b>不再拼接</b>当前分片自带的 {@code direct}
-	 * （两种来源拼接会让同一跳的正文越过明确段边界）；
-	 * 聚合正文为空时保持 assistant 原样（direct 就是它的正文）。
-	 * tool_calls / metadata / media 原样保留。
-	 */
-	private static AssistantMessage assistantWithTurnText(AssistantMessage assistant, String turnText) {
-		if (StringUtils.isEmpty(turnText) || turnText.equals(assistant.getText())) {
-			return assistant;
-		}
-		AssistantMessage.Builder builder = AssistantMessage.builder()
-			.content(turnText)
-			.properties(ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()));
-		if (assistant.hasToolCalls()) {
-			builder.toolCalls(assistant.getToolCalls());
-		}
-		if (CollectionUtils.isNotEmpty(assistant.getMedia())) {
-			builder.media(assistant.getMedia());
-		}
-		return builder.build();
-	}
-
-	/**
-	 * 凭本轮权威执行信封恢复轮次快照（快照缺失时的第一选择）。
-	 *
-	 * <p>三条硬口径（见 {@link ToolExecutionEnvelope}）：
-	 * <ul>
-	 * <li><b>只认本实例创建者</b>：{@code createdBy} 必须等于本实例 id，runId 也必须对得上 ——
-	 * 别的实例的信封不构成"这一轮归我驱动"的证据；</li>
-	 * <li><b>只恢复运行事实</b>：不写任何审批/认领/台账；恢复出的快照没有已批准条目；</li>
-	 * <li><b>不重置序号/预算/步数/创建时刻</b>：步数、轮次、创建时刻原值入快照；armed/已跳过批次数
-	 * 同时回填进程内信标；{@code ai:seq} 只抬到信封的 {@code seqFloor}（只升不降，绝不回拨并发新号）。
-	 * 抬号是必须的：快照与序号键可能同时丢失，不抬号会让恢复后的 {@code suspended}/{@code confirm_request}
-	 * 从 1 重发，前端带 {@code lastSeq} 重挂时把这些帧当孤儿丢掉（确认卡消失）。</li>
-	 * </ul>
-	 *
-	 * <p>恢复即落库（挂起与续跑都读 {@code ai:run:<runId>}）；落库前再读一次，若并发中已出现快照则直接
-	 * 用那一份，避免用较旧的信封覆盖更新的状态。重建写入走<b>条件创建</b>
-	 * （{@link RunStore#createIfAbsent}：存在性判定与写在同一原子步），于是"读无 → 写"之间冒出来的
-	 * 并发创建者不会被覆盖 —— 条件创建返回 {@code false} 时改读并发那一份。落库复读成功后、任何后续帧
-	 * 之前抬号并复读校验（抬不上去 ⇒ {@code null}，不发出会重号的帧）。任一环节失败 ⇒ {@code null}
-	 * （调用方失败关闭）。
-	 *
-	 * <h2>身份锚点 = 记录身份（不读线程身份）</h2>
-	 * 本方法可能跑在<b>没有请求身份</b>的官方上游线程上（也可能跑在残留了他人身份的池化线程上），
-	 * 而快照/序号键由记录身份拼出。因此这里先按信封身份开作用域，再把并发读、落库、写后复核、
-	 * 抬号统统放在它里面；并发读与写后复核另用<b>显式身份读口</b>（{@link #readRecordSnapshot}），
-	 * 使"有没有活快照"的判据不依赖当前线程恰巧是谁。旧实现用线程身份读：无身份线程只命中 legacy
-	 * 键 ⇒ 活快照被当成缺失 ⇒ 信封快照<b>覆盖</b>活快照（{@code messageJson} 丢失、
-	 * {@code round}/{@code toolSteps} 回拨），写后复核又读不回来 ⇒ 整轮按不可恢复失败关闭。
-	 *
-	 * @return 可用于本轮执行的快照；{@code null} = 信封缺失/不可信/恢复失败
-	 */
-	private RunSnapshot recoverSnapshot(ToolExecutionEnvelope envelope, String runId) {
-		if (envelope == null) {
-			return null;
-		}
-		if (!envelope.isRestorableBy(runId, this.store.instanceId())) {
-			log.warn("execution envelope unusable for recovery (turn runId={} envelope runId={} createdBy={} thisInstance={}): not recovering, failing closed",
-					runId, envelope.runId(), envelope.createdBy(), this.store.instanceId());
-			return null;
-		}
-		RunSnapshot restored = envelope.toSnapshot();
-		// 0/0 旧信封 ⇒ 显式无身份作用域：只认 legacy 键，不伪造默认租户，也不沿用调用者身份。
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(restored.getTenantId(), restored.getUserId())) {
-			restored = recoverSnapshotRecord(restored);
-			if (restored == null) {
-				return null;
-			}
-			// 序号下界：ai:run 与 ai:seq/归档可能同时丢失；抬到信封的 seqFloor（只升不降）后，
-			// 下一帧由 max(归档末帧, ai:seq)+1 / INCR ai:seq 得出，必然 > seqFloor，重挂不会丢卡。
-			// 位置在落库复读之后、任何后续帧之前（本方法只在 emit 之前被调用）；键按记录身份拼。
-			this.store.ensureIssuedSeqAtLeast(restored.getRunId(), envelope.seqFloor());
-			if (envelope.seqFloor() > 0L && this.store.lastIssuedSeq(restored.getRunId()) < envelope.seqFloor()) {
-				log.warn("business sequence floor not applied after recovery (failing closed: no duplicate-numbered frames) runId={} seqFloor={} current={}",
-						restored.getRunId(), envelope.seqFloor(), this.store.lastIssuedSeq(restored.getRunId()));
-				return null;
-			}
-			// 预算口径跨 park/恢复不重置：进程内信标按信封原值重新点亮（armed 与已跳过批次数）。
-			this.beacon.restoreBudgetArmed(restored.getRunId(), envelope.budgetArmedAtMs());
-			this.beacon.restoreBudgetSkippedBatches(restored.getRunId(), envelope.budgetSkippedBatches());
-			log.warn("turn snapshot missing; recovered from this instance's authoritative execution envelope runId={} createdAtMs={} round={} steps={} budgetArmedAtMs={} skipped={} seqFloor={} (seq raised to the floor; no approval/ledger/claim fabricated)",
-					restored.getRunId(), restored.getCreatedAtMs(), envelope.round(), envelope.toolSteps(),
-					envelope.budgetArmedAtMs(), envelope.budgetSkippedBatches(), envelope.seqFloor());
-			return restored;
-		}
-	}
-
-	private RunSnapshot recoverSnapshotRecord(RunSnapshot restored) {
-		try {
-			RunSnapshot concurrent = readRecordSnapshot(restored);
-			if (concurrent != null) {
-				return concurrent;
-			}
-			// 条件创建（原子）：读与写之间若有并发创建者，这里<b>不会</b>覆盖它 —— 返回 false 后改读
-			// 并发那一份。之前的无条件 save 会把对方刚写下的 messageJson/round/toolSteps 抹成信封旧值。
-			if (!this.store.isCreatedIfAbsent(restored)) {
-				RunSnapshot winner = readRecordSnapshot(restored);
-				if (winner == null) {
-					log.warn("recovery from execution envelope was not persisted (no write access / lost lease / conditional create rejected): failing closed, dangerous/frontend tools must not run directly runId={}", restored.getRunId());
-					return null;
-				}
-				log.warn("a concurrent snapshot already exists during envelope recovery (adopted the concurrent one, not overwritten) runId={}",
-						restored.getRunId());
-				return winner;
-			}
-			// 写后复核（刚创建成功理应可读；身份/设施异常时仍按失败关闭）。
-			if (readRecordSnapshot(restored) == null) {
-				log.warn("recovery from execution envelope was not persisted (no write access / lost lease): failing closed, dangerous/frontend tools must not run directly runId={}",
-						restored.getRunId());
-				return null;
-			}
-		}
-		catch (RuntimeException ex) {
-			log.warn("failed to recover turn snapshot from execution envelope (failing closed: dangerous/frontend tools must not run directly) runId={}",
-					restored.getRunId(), ex);
-			return null;
-		}
-		return restored;
-	}
-
-	/**
-	 * <b>按记录身份</b>读轮次快照（身份是入参，不是"当前线程碰巧是谁"）。
-	 *
-	 * <p>为什么不能用 {@code store.get(runId)}：那个读口的键由<b>当前线程</b>身份拼出 —— 官方上游线程
-	 * 没有身份时只会命中 legacy 键，于是已存在的身份快照被当成"缺失"（随后恢复写覆盖活快照），
-	 * 写后复核也读不回来（把恢复判成"未落库"）。
-	 *
-	 * <p>记录身份 0/0（本字段引入前的旧信封）⇒ 显式无身份作用域下读 legacy 键：不伪造默认租户，
-	 * 也不沿用池化线程上可能残留的身份。
-	 */
-	private RunSnapshot readRecordSnapshot(RunSnapshot record) {
-		long tenantId = record.getTenantId();
-		long userId = record.getUserId();
-		if (RunIdentityScope.usable(tenantId, userId)) {
-			return this.store.get(record.getRunId(), tenantId, userId);
-		}
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
-			return this.store.get(record.getRunId());
-		}
-	}
-
-	/**
-	 * 本轮<b>记录身份</b>的作用域（首次读与恢复都必须在它里面）。
-	 *
-	 * <p>身份只认本实例创建、且 runId 对得上的执行信封（与 {@link #recoverSnapshot} 同一信任边界）。
-	 * 没有可用信封 ⇒ 不建立作用域（{@link #NO_RECORD_SCOPE}）：沿用调用线程身份 —— 正常请求路径
-	 * 就发生在带身份的请求线程上，行为不变。
-	 */
-	private RunIdentityScope.Scope recordIdentityScope(ToolExecutionEnvelope envelope, String runId) {
-		if (envelope == null || !envelope.isRestorableBy(runId, this.store.instanceId())) {
-			return NO_RECORD_SCOPE;
-		}
-		return RunIdentityScope.open(envelope.tenantId(), envelope.userId());
-	}
-
-	/**
-	 * 快照/runId 缺失且无可信执行信封时的执行路径：<b>READ + BACKEND 放行，危险/前端工具拒绝</b>。
-	 *
-	 * <p>放行部分仍走官方执行器（纯只读、无副作用）；被拒部分在模型侧留下结构化的
-	 * {@code blocked}/{@code TOOL_KIND_MISMATCH} 结果，历史保持"完整 assistant(tool_calls) + 全量
-	 * tool 响应"的形状（官方循环下一跳不会丢消息）。本路径<b>不</b>发帧：没有可外置的挂起态，
-	 * 也不该让前端出现一张"看似可点"的确认卡。
-	 */
-	private Map<String, String> executeAllowedWithoutSnapshot(Prompt prompt, AssistantMessage assistant,
-			List<AssistantMessage.ToolCall> allowed) {
-		Map<String, String> allowedData = new LinkedHashMap<>();
-		if (allowed.isEmpty()) {
-			return allowedData;
-		}
-		AssistantMessage subset = AssistantMessage.builder()
-			.content(assistant.getText())
-			.properties(ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()))
-			.toolCalls(allowed)
-			.build();
-		ToolExecutionResult partial = this.delegate.executeToolCalls(prompt,
-				new ChatResponse(List.of(new Generation(subset))));
-		for (Message message : partial.conversationHistory()) {
-			if (message instanceof ToolResponseMessage toolMessage) {
-				for (ToolResponseMessage.ToolResponse response : toolMessage.getResponses()) {
-					allowedData.putIfAbsent(response.id(), response.responseData());
-				}
-			}
-		}
-		return allowedData;
-	}
-
-	private ToolExecutionResult executeWithoutSnapshot(Prompt prompt, ChatResponse chatResponse, String runId,
-			AssistantMessage assistant) {
-		List<AssistantMessage.ToolCall> calls = assistant.getToolCalls();
-		List<AssistantMessage.ToolCall> allowed = new ArrayList<>(calls.size());
-		List<AssistantMessage.ToolCall> refused = new ArrayList<>(calls.size());
-		for (AssistantMessage.ToolCall call : calls) {
-			boolean readBackend = this.toolRegistry.channelOf(call.name()) == ToolMeta.Channel.BACKEND
-					&& this.toolRegistry.riskOf(call.name()) == ToolMeta.RiskLevel.READ;
-			(readBackend ? allowed : refused).add(call);
-		}
-		if (refused.isEmpty()) {
-			log.warn("tool execution has no turn runId/snapshot (runId={}) and no usable execution envelope; batch is all READ+BACKEND, falling back to default execution: {}", runId, calls.stream().map(AssistantMessage.ToolCall::name).toList());
-			// 传补全正文后的 assistant：原 chatResponse 是流式工具调用跳（正文为空）。
-			ToolExecutionResult result = this.delegate.executeToolCalls(prompt,
-					new ChatResponse(List.of(new Generation(assistant))));
-			// 无快照/无持久化写点：不推进正文分段；终态正文仍由调用方按完整 accumulator 写入。
-			return result;
-		}
-		log.warn("tool execution has no turn runId/snapshot (runId={}) and no usable execution envelope: refusing dangerous/frontend tools {}, allowing READ+BACKEND {} (no card, no claim, no ledger row)", runId,
-				refused.stream().map(AssistantMessage.ToolCall::name).toList(),
-				allowed.stream().map(AssistantMessage.ToolCall::name).toList());
-
-		Map<String, String> allowedData = executeAllowedWithoutSnapshot(prompt, assistant, allowed);
-
-		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(calls.size());
-		for (AssistantMessage.ToolCall call : calls) {
-			String data = allowedData.get(call.id());
-			if (data != null) {
-				responses.add(new ToolResponseMessage.ToolResponse(call.id(), call.name(), data));
-				continue;
-			}
-			responses.add(new ToolResponseMessage.ToolResponse(call.id(), call.name(),
-					ToolResultEnvelope
-						.of(ToolOutcome.BLOCKED, ToolOutcome.CODE_TOOL_KIND_MISMATCH, UNRECOVERABLE_EXECUTION_TEXT,
-								call.arguments())
-						.toModelJson(this.limiter, call.name())));
-		}
-		List<Message> history = new ArrayList<>(prompt.getInstructions());
-		history.add(assistant);
-		history.add(ToolResponseMessage.builder().responses(responses).build());
-		// 无快照/无持久化写点：不推进正文分段；终态正文仍由调用方按完整 accumulator 写入。
-		return ToolExecutionResult.builder().conversationHistory(history).build();
-	}
-
-	/**
-	 * 确认门执行前的 {@code reportHash} 复核。
-	 *
-	 * <p>只对"确认门条目 + 预检支持的工具 + 卡上确实带过 reportHash"生效：
-	 * 重跑一次只读预检，指纹一致才允许执行；不一致 ⇒ {@code blocked}/{@code PRECHECK_STALE}，
-	 * 要求用户重新确认（旧报告不是执行授权）。重跑预检自身失败 ⇒ 同样不执行（{@code PRECHECK_UNAVAILABLE}）。
-	 * 旧数据（没有预检报告）没有可比对的指纹，保持既有行为。
-	 *
-	 * @return 阻断文本；{@code null} = 可继续执行
-	 */
-	private String verifyApprovedReport(String runId, PendingToolCall pending, AiContext context) {
-		if (this.preflight == null || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
-				|| !ToolPreflightService.isSupported(pending.getName())) {
-			return null;
-		}
-		Map<String, Object> stored = pending.getPreflight();
-		Object storedHash = stored == null ? null : stored.get("reportHash");
-		if (StringUtils.isBlank(ObjectUtils.toString(storedHash, (String) null))) {
-			return null;
-		}
-		ToolPreflightService.PreflightReport fresh;
-		try {
-			fresh = this.preflight.inspect(pending.getName(), pending.getArguments(), context);
-		}
-		catch (RuntimeException ex) {
-			log.error("failed to recheck preflight report before execution (not executed; reconfirmation required) runId={} tool={} toolCallId={}", runId,
-					pending.getName(), pending.getToolCallId(), ex);
-			return settleBlocked(runId, pending, ToolOutcome.CODE_PRECHECK_UNAVAILABLE,
-					PRECHECK_REVERIFY_UNAVAILABLE_TEXT);
-		}
-		if (fresh == null) {
-			return settleBlocked(runId, pending, ToolOutcome.CODE_PRECHECK_UNAVAILABLE,
-					PRECHECK_REVERIFY_UNAVAILABLE_TEXT);
-		}
-		if (String.valueOf(storedHash).equals(fresh.reportHash())) {
-			return null;
-		}
-		log.warn("preflight report changed between confirm card and execution (not executed; reconfirmation required) runId={} tool={} toolCallId={} cardHash={} currentHash={}",
-				runId, pending.getName(), pending.getToolCallId(), storedHash, fresh.reportHash());
-		return settleBlocked(runId, pending, ErrorCodes.PRECHECK_STALE, PRECHECK_STALE_TEXT);
-	}
-
-	/**
-	 * 帧里的结果文本（T2 后<b>不再截断</b>）。
-	 *
-	 * <p>
-	 * S4.2 时期这里是 800 字符截断 —— 与 T2 的"两条通道分离"口径相反（截断属于<b>模型侧</b>的
-	 * 上下文成本控制，前端与台账要的是完整结果）。因此本方法现在只做 null 归一；
-	 * 模型侧的上限统一由 {@link ToolResultLimiter} 在回填 {@code role:tool} 时施加。
-	 */
-	private String frameText(String text) {
-		return StringUtils.defaultString(text);
-	}
-
-	/** 供诊断端点/日志：本管理器确实被装配。 */
-	public String describe() {
-		return "delegate=" + this.delegate.getClass().getName() + ", instanceId=" + this.store.instanceId();
-	}
+    /**
+     * 防线③拦截时回填模型的结果文本前缀（结构化错误码，测试与排障据此断言/检索）。
+     */
+    public static final String SCOPE_VIOLATION_CODE = ErrorCodes.SCOPE_NOT_DISCLOSED;
+
+    /**
+     * 工具执行段抛错时 {@code tool_call_end.code} 的取值（AI 日志最小补齐批）。
+     *
+     * <p>只出现在日志面（事件行），不进帧、不进台账 —— 它是"这一行 end 为什么没有真的结局"的解释，
+     * 而不是一个新的对外结局码（帧/台账的结局真值仍由条目自身的 outcome/code 承担）。
+     */
+    public static final String CODE_TOOL_EXECUTION_THREW = "TOOL_EXECUTION_THREW";
+
+    /**
+     * 步数到顶时的收尾指令（超时面治理批② 第 2 项；决策看板 {@code :14}）。
+     *
+     * <p>到顶<b>不判整轮失败</b>：把指令追加到历史末尾，让模型用已有信息收尾（部分完成也要说清缺什么）。
+     */
+    public static final String STEP_LIMIT_WRAP_UP = "已达到本轮工具调用步数上限（app.ai.resilience.max-tool-steps）。"
+            + "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
+
+    /**
+     * 轮内上下文预算达收尾线时的指令（工具轮内上下文预算批）。
+     *
+     * <p>与 {@link #STEP_LIMIT_WRAP_UP} 同形（不判整轮失败：让模型用已有信息作答并说明缺什么），
+     * 但触发条件不同 —— 步数是"调用次数"，本指令是"下一发请求会越窗"。措辞里的
+     * "不要再次调用工具"同时是给模型的软约束；硬约束由 {@code ToolActivityBeacon#budgetArmed}
+     * 承担（armed 后工具一律不执行）。
+     */
+    public static final String TURN_BUDGET_WRAP_UP = "本轮上下文预算已接近上限。"
+            + "请不要再次调用工具，直接用已经获得的信息给出结论；如有未完成的部分，如实说明哪些未完成以及原因。";
+
+    /**
+     * 工具执行超时监视线程池（超时面治理批② 第 3 项）。
+     *
+     * <p>为什么需要一条独立线程：{@code Future#get(timeout)} 要在<b>调用线程</b>上等到点，
+     * 而桩体必须跑在<b>另一条线程</b>上才能被 {@code cancel(true)} 打断。容量取挂起池配置
+     * {@code app.ai.suspend.pool-size}（缺省 20）：一轮至多一个工具在跑，容量即并发上限。
+     * 队列为 {@link SynchronousQueue}（不排队）+ {@code AbortPolicy}：容量由
+     * {@code app.ai.suspend.pool-size} 派生（缺省 {@value #TOOL_TIMEOUT_THREADS_DEFAULT}），
+     * 饱和时<b>不执行、也不降级成无超时同步执行</b> —— 明确结算成"本次未执行"
+     * （{@code TOOL_TIMEOUT} 口径，见 {@link #executeWithTimeout}）。宁可让模型知道这一拍没跑，
+     * 也不能让一次调用脱离超时笼（N3）。
+     */
+    private static final int TOOL_TIMEOUT_THREADS_DEFAULT = 20;
+
+    private static final RunIdentityScope.Scope NO_RECORD_SCOPE = () -> {
+    };
+
+    private static int toolTimeoutThreads(AiProperties properties) {
+        int configured = properties == null ? 0 : properties.getSuspend().getPoolSize();
+        return configured > 0 ? configured : TOOL_TIMEOUT_THREADS_DEFAULT;
+    }
+
+    /**
+     * 本实例的超时执行器：生产注入共享 Bean，轻量装配使用实例自管回退池。
+     */
+    private final ExecutorService toolTimeoutExecutor;
+
+    private final boolean ownsToolTimeout;
+
+    @PreDestroy
+    void shutdown() {
+        if (!this.ownsToolTimeout) {
+            return;
+        }
+        this.toolTimeoutExecutor.shutdown();
+        try {
+            if (!this.toolTimeoutExecutor.awaitTermination(2L, TimeUnit.SECONDS)) {
+                this.toolTimeoutExecutor.shutdownNow();
+            }
+        } catch (InterruptedException ex) {
+            this.toolTimeoutExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * 本实例的执行器容量（日志与饱和结算文案用）。
+     */
+    private final int toolTimeoutThreads;
+
+    private final ToolCallingManager delegate;
+
+    private final RunStore store;
+
+    private final RunRegistry registry;
+
+    private final ConfirmGate gate;
+
+    private final ToolRegistry toolRegistry;
+
+    private final MessageJsonCodec codec;
+
+    private final ToolActivityBeacon beacon;
+
+    private final CancellationRegistry cancellations;
+
+    /**
+     * T2：工具结果回填模型前的行数/字符上限（前端帧与台账不受其影响）。
+     */
+    private final ToolResultLimiter limiter;
+
+    /**
+     * 前端工具的入参/回灌复核器（DC-15 安全闸）。<b>按工具名自认领</b>（{@link FrontendToolGuard#supports}），
+     * 因此本类对"哪个工具需要复核"零知识 —— 没声明复核器的前端工具行为一字不变。
+     */
+    private final List<FrontendToolGuard> frontendGuards;
+
+    /**
+     * F5 只读预检器（确认门<b>之前</b>问"能不能做"）。null = 不预检 —— 只有单元测试的轻装配面
+     * 会传 null（生产由容器注入唯一实例）；预检只对 {@link ToolPreflightService#supports(String)} 的工具生效。
+     */
+    private final ToolPreflightService preflight;
+
+    /**
+     * L1 资源互斥（B23L1 批③b）：执行前的任务级/作业级锁。null = 不取锁 —— 只有单元测试的
+     * 轻装配面会传 null（生产由容器注入唯一实例）。
+     */
+    private final ToolResourceLocks resourceLocks;
+
+    /**
+     * F2 目标资源硬校验（B23L1 批③b）。null = 不校验（轻装配面）。
+     */
+    private final ToolTargetResolver targetResolver;
+
+    /**
+     * UNKNOWN 对账器（B23L1 批③b）：续跑结算前把"未知"尽量收敛成台账里的确定结局。
+     */
+    private final ToolUnknownReconciler unknownReconciler;
+
+    /**
+     * 配置面（超时面治理批②）：{@code app.ai.resilience.max-tool-steps}（步数笼）与
+     * {@code app.ai.tool.exec-timeout}（工具独立超时）。
+     */
+    private final AiProperties properties;
+
+    /**
+     * 轮内上下文预算的分母取数点（工具轮内上下文预算批）。null = 不判轮内预算（轻装配面 / 单测）。
+     *
+     * <p>与轮首压缩<b>同一个</b> {@link ContextLimitResolver}（唯一取数点），因此"显示的上限"
+     * 与"轮内判定的上限"不会各用一套分母（L-89 的教训）。生产由容器注入唯一实例。
+     */
+    private ContextLimitResolver contextLimitResolver;
+
+    /**
+     * 可选注入：轮内预算的分母。缺失 = 轮内不判（既有单测/轻装配面行为一字不变）。
+     */
+    @Autowired(required = false)
+    public void setContextLimitResolver(ContextLimitResolver resolver) {
+        this.contextLimitResolver = resolver;
+    }
+
+    /**
+     * 轮内 L1 的记账面（压缩台账 / 会话状态），生产由容器注入唯一
+     * {@code RedisContextStateStore}。轻装配面未注入时只清结果、不记账。
+     */
+    private ContextStateStore contextStateStore;
+
+    /**
+     * 可选注入：轮内 L1 的台账/状态。缺失 = 只清结果、不记账（轻装配面）。
+     */
+    @Autowired(required = false)
+    public void setContextStateStore(ContextStateStore store) {
+        this.contextStateStore = store;
+    }
+
+    /**
+     * 用户展示历史（B2）：挂起时补 pending 工具卡条目，终态由收尾写点覆盖。
+     */
+    private ConversationTranscriptStore transcript;
+
+    @Autowired(required = false)
+    public void setConversationTranscriptStore(ConversationTranscriptStore transcript) {
+        this.transcript = transcript;
+    }
+
+    /**
+     * 表格采样/改动审计面（AI 表格工具治理批）。null = 未注入（轻装配面 / 单元测试）——
+     * 此时只是少了计数与台账，日志字段照常发射（字段来自条目自身的 {@code sheetMeta}）。
+     */
+    private SheetAudit sheetAudit;
+
+    /**
+     * 结果视图投影器（S6 批 2）：{@code tool_result} 帧的 {@code resultView} 由它们按工具名自认领。
+     *
+     * <p>与 {@code FrontendToolGuard} 同体例：本类对"哪个工具有视图"零知识；空列表 = 一律不出视图
+     * （帧上连 {@code resultView} 键都不出现，旧卡面零变化）。
+     */
+    private List<ToolResultViewProvider> resultViewProviders = List.of();
+
+    /**
+     * 可选注入（{@code SheetAudit} 是观测面，不是判定面；缺失不影响任何工具的执行语义）。
+     */
+    @Autowired(required = false)
+    public void setSheetAudit(SheetAudit audit) {
+        this.sheetAudit = audit;
+    }
+
+    /**
+     * 结算观测位（跨实例恰好一次的仲裁面）。null = 未注入（轻装配/单测）——
+     * 此时每个发点各自发一行，与引入仲裁之前同形（单实例恒等价）。
+     */
+    private SettlementObservationStore settlementObservations;
+
+    /**
+     * 可选注入（观测面，不是判定面；缺失不影响任何工具的执行语义）。
+     */
+    @Autowired(required = false)
+    public void setSettlementObservationStore(SettlementObservationStore observations) {
+        this.settlementObservations = observations;
+    }
+
+    /**
+     * 可选注入（视图投影是展示增强，不是判定面；缺失 = 所有工具走旧卡面）。
+     */
+    @Autowired(required = false)
+    public void setResultViewProviders(List<ToolResultViewProvider> providers) {
+        this.resultViewProviders = providers == null ? List.of() : List.copyOf(providers);
+    }
+
+    /**
+     * 工具批后刷新运行上下文的入口（动态披露批）。null = 不刷新（轻装配面 / 单测）。
+     */
+    private RunContextRefresher contextRefresher;
+
+    /**
+     * 可选注入：批间上下文刷新。缺失 = 快照上下文不随工具结果推进（既有单测行为一字不变）。
+     */
+    @Autowired(required = false)
+    public void setContextRefresher(RunContextRefresher refresher) {
+        this.contextRefresher = refresher;
+    }
+
+    private TaskSlotResolver taskSlotResolver;
+
+    @Autowired(required = false)
+    public void setTaskSlotResolver(TaskSlotResolver resolver) {
+        this.taskSlotResolver = resolver;
+    }
+
+    /**
+     * confirm_step 的后置条件兜底（数据正确性）：缺失 = 不兜底（轻装配面 / 既有单测行为不变）。
+     *
+     * <p>只在单条 {@code confirm_step} 批次、且任务真实状态满足"QUERY_COND + 无条件 + 本轮未收集"
+     * 时挂起可选条件表单；条件已知 / 已到 EXPORT / 已收集过一律不拦。
+     */
+    private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
+
+    /**
+     * 可选注入（缺失 = 不做 confirm_step 条件兜底）。
+     */
+    @Autowired(required = false)
+    public void setConditionsForm(com.example.configmgr.ai.form.ConditionsForm form) {
+        this.conditionsForm = form;
+    }
+
+    /**
+     * 宿主类型表单（结构化 create_task 缺 type 时挂起；缺失 = 不挂，交给既有预检）。
+     */
+    private com.example.configmgr.ai.form.TaskTypeForm taskTypeForm;
+
+    @Autowired(required = false)
+    public void setTaskTypeForm(com.example.configmgr.ai.form.TaskTypeForm form) {
+        this.taskTypeForm = form;
+    }
+
+    public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+                                MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+                                ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
+        this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, null);
+    }
+
+    public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+                                MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+                                ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight) {
+        this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
+                null, null, null);
+    }
+
+    public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+                                MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+                                ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
+                                ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
+                                ToolUnknownReconciler unknownReconciler) {
+        this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
+                resourceLocks, targetResolver, unknownReconciler, new AiProperties());
+    }
+
+    public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+                                MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+                                ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
+                                ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
+                                ToolUnknownReconciler unknownReconciler, AiProperties properties) {
+        this(store, registry, gate, toolRegistry, codec, beacon, cancellations, limiter, frontendGuards, preflight,
+                resourceLocks, targetResolver, unknownReconciler, properties, null);
+    }
+
+    @Autowired
+    public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
+                                MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+                                ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards, ToolPreflightService preflight,
+                                ToolResourceLocks resourceLocks, ToolTargetResolver targetResolver,
+                                ToolUnknownReconciler unknownReconciler, AiProperties properties,
+                                @Qualifier("aiToolTimeoutExecutor") ExecutorService toolTimeoutExecutor) {
+        this.delegate = ToolCallingManager.builder()
+                // P0-1：让工具异常浮出到 executeOnce 的 catch（默认 alwaysThrow=false 会把失败吞成
+                // "ok=true 的文本"——start_* 的 ConflictException 因此不可见）。包内 ToolExecutionException
+                // 保留 cause，catch 侧按 cause 链取 ConflictException/ResourceNotFoundException 的码。
+                .toolExecutionExceptionProcessor(DefaultToolExecutionExceptionProcessor.builder().alwaysThrow(true).build())
+                .build();
+        this.store = store;
+        this.registry = registry;
+        this.gate = gate;
+        this.toolRegistry = toolRegistry;
+        this.codec = codec;
+        this.beacon = beacon;
+        this.cancellations = cancellations;
+        this.limiter = limiter;
+        this.frontendGuards = frontendGuards == null ? List.of() : List.copyOf(frontendGuards);
+        this.preflight = preflight;
+        this.resourceLocks = resourceLocks;
+        this.targetResolver = targetResolver;
+        this.unknownReconciler = unknownReconciler;
+        this.properties = ObjectUtils.getIfNull(properties, AiProperties::new);
+        this.toolTimeoutThreads = toolTimeoutThreads(this.properties);
+        if (toolTimeoutExecutor == null) {
+            this.toolTimeoutExecutor = new ThreadPoolExecutor(0, this.toolTimeoutThreads, 30L, TimeUnit.SECONDS,
+                    new SynchronousQueue<>(), Executors.defaultThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
+            this.ownsToolTimeout = true;
+        } else {
+            this.toolTimeoutExecutor = toolTimeoutExecutor;
+            this.ownsToolTimeout = false;
+        }
+    }
+
+    /**
+     * 每跳按<b>当前快照</b>重算披露面（动态披露批的唯一接缝）。
+     *
+     * <p>官方模型循环（{@code ReasoningAwareOpenAiChatModel#createRequest}）在<b>每一发请求</b>前都调
+     * 本方法，而它所带的 {@code chatOptions} 是请求边界那一份（callbacks 冻结）。于是"同一轮里
+     * 导航成功后下一跳能看到向导工具"就取决于这里：读本轮快照的 {@code context}，用
+     * {@code ToolRegistry#forContext} 重算一次，再与冻结集合按<b>名字</b>合并 ——
+     * <ul>
+     * <li>冻结集合的顺序优先（上下文没变时结果与旧口径逐字一致，不击穿 prompt 缓存）；</li>
+     * <li>已不在当前披露面的冻结工具被裁掉；新增披露的追加在后面；</li>
+     * <li>执行侧的 callback 解析另由 {@link #executionPrompt} 兜住（否则新增工具会"看得见、点不动"）。</li>
+     * </ul>
+     *
+     * <h2>回落口径（不能让工具凭空变空/变多）</h2>
+     * 无 options / callbacks 为空 / 无 {@code runId} / 无快照 / 重算结果为空 / 任何异常 ⇒
+     * <b>原样返回委托结果</b>。尤其是"callbacks 为空"：那可能是"本轮不下发任何工具"（模型不支持
+     * 工具调用），把它换成 registry 的全集就是<b>静默扩大授权面</b>。
+     */
+    @Override
+    public List<ToolDefinition> resolveToolDefinitions(ToolCallingChatOptions chatOptions) {
+        List<ToolDefinition> delegated = this.delegate.resolveToolDefinitions(chatOptions);
+        try {
+            if (chatOptions == null) {
+                return delegated;
+            }
+            List<ToolCallback> frozen = chatOptions.getToolCallbacks();
+            if (CollectionUtils.isEmpty(frozen)) {
+                return delegated;
+            }
+            // toolNames 的解析面在本类之外（委托的 resolver），重算不了 ⇒ 原样委托
+            if (CollectionUtils.isNotEmpty(chatOptions.getToolNames())) {
+                return delegated;
+            }
+            String runId = runIdOf(chatOptions.getToolContext());
+            if (runId == null) {
+                return delegated;
+            }
+            // 与执行点同一顺序红线：这次重算跑在官方上游线程（boundedElastic）上 —— 那里没有请求身份，
+            // 池化线程上还可能残留别人的身份。先按本轮可信执行信封的<b>记录身份</b>开作用域再读快照：
+            // 否则无身份线程只读 legacy 键、拿不到快照 ⇒ 回落冻结集合（navigate_to 之后新披露的工具在
+            // 下一跳永不出现）；残留身份则会读到别人的同名 runId 快照，把披露面换成别人的上下文。
+            RunSnapshot snapshot;
+            try (RunIdentityScope.Scope ignored = recordIdentityScope(
+                    ToolExecutionEnvelope.fromToolContext(chatOptions.getToolContext()), runId)) {
+                snapshot = this.store.get(runId);
+            }
+            if (snapshot == null) {
+                return delegated;
+            }
+            List<ToolCallback> current = this.toolRegistry.forContext(AiContext.fromMap(snapshot.getContext()));
+            if (CollectionUtils.isEmpty(current)) {
+                return delegated;
+            }
+            List<ToolCallback> merged = mergeDisclosed(frozen, current);
+            if (merged.isEmpty()) {
+                return delegated;
+            }
+            return merged.stream().map(ToolCallback::getToolDefinition).toList();
+        } catch (RuntimeException ex) {
+            // 披露重算是增强：算不出来就按请求边界那一份继续（执行侧防线③仍按快照上下文复查）
+            log.warn("failed to recompute tool definitions from the current snapshot; falling back to the original delegate", ex);
+            return delegated;
+        }
+    }
+
+    /**
+     * 冻结集合（名字与顺序）∩ 当前披露面 + 新披露的那些（追加在后）。
+     *
+     * <p>用<b>名字</b>对齐而不是对象身份：请求边界与本次重算拿到的都是 registry 里同一个回调实例，
+     * 但"同一性"不该成为披露口径的隐含前提。
+     */
+    private static List<ToolCallback> mergeDisclosed(List<ToolCallback> frozen, List<ToolCallback> current) {
+        Map<String, ToolCallback> disclosed = new LinkedHashMap<>();
+        for (ToolCallback callback : current) {
+            if (callback != null) {
+                disclosed.putIfAbsent(toolNameOf(callback), callback);
+            }
+        }
+        List<ToolCallback> merged = new ArrayList<>(frozen.size() + disclosed.size());
+        Set<String> kept = new HashSet<>();
+        for (ToolCallback callback : frozen) {
+            if (callback == null) {
+                continue;
+            }
+            String name = toolNameOf(callback);
+            if (disclosed.containsKey(name)) {
+                merged.add(callback);
+                kept.add(name);
+            }
+        }
+        for (Map.Entry<String, ToolCallback> entry : disclosed.entrySet()) {
+            if (kept.add(entry.getKey())) {
+                merged.add(entry.getValue());
+            }
+        }
+        return merged;
+    }
+
+    private static String toolNameOf(ToolCallback callback) {
+        return callback.getToolDefinition().name();
+    }
+
+    /**
+     * 回调集合的名字序列（顺序敏感的比较用：披露面没变时不得复制 options、不得改序）。
+     */
+    private static List<String> names(List<ToolCallback> callbacks) {
+        List<String> names = new ArrayList<>(callbacks.size());
+        for (ToolCallback callback : callbacks) {
+            names.add(callback == null ? null : toolNameOf(callback));
+        }
+        return names;
+    }
+
+    /**
+     * 执行侧：本次调用的官方委托要能解析到它的 callback。
+     *
+     * <p>官方 {@code DefaultToolCallingManager} 执行单个调用时只从 {@code prompt.getOptions()}
+     * 的 callbacks 里按名字找（找不到才问 resolver，而本类的 delegate 用的是空 resolver）。
+     * 下一跳重算把 {@code check_job_status} 之类的新工具给了模型，但旧 options 里没有它 ——
+     * 不补这一份副本就会"模型看得见、执行时 No ToolCallback found"。
+     *
+     * <p><b>真实语义</b>：这里为当前这次调用合并出一份"可解析回调"副本（与
+     * {@link #mergeDisclosed} 同一口径 —— 随当前披露面变化，旧集合里已不在披露面的回调会被裁掉、
+     * 新披露的会追加），集合本身<b>不是授权</b>：能否执行仍由防线③（{@code matchesContext} 按快照
+     * 上下文复查）与各工具的确认门/HITL 决定。拿不到上下文/异常一律按原 options 执行。
+     */
+    private Prompt executionPrompt(Prompt prompt, String toolName) {
+        try {
+            if (prompt == null || !(prompt.getOptions() instanceof ToolCallingChatOptions options)) {
+                return prompt;
+            }
+            List<ToolCallback> frozen = ObjectUtils.defaultIfNull(options.getToolCallbacks(), List.of());
+            if (frozen.stream().anyMatch(callback -> callback != null && toolName != null
+                    && toolName.equals(toolNameOf(callback)))) {
+                return prompt;
+            }
+            String runId = runIdOf(prompt);
+            if (runId == null) {
+                return prompt;
+            }
+            RunSnapshot snapshot = this.store.get(runId);
+            if (snapshot == null) {
+                return prompt;
+            }
+            List<ToolCallback> current = this.toolRegistry.forContext(AiContext.fromMap(snapshot.getContext()));
+            if (CollectionUtils.isEmpty(current)) {
+                return prompt;
+            }
+            List<ToolCallback> merged = mergeDisclosed(frozen, current);
+            // 仍解析不到（该工具现在本来就不该被披露）⇒ 保留原 options，让既有失败口径如实回填，
+            // 不在这里伪造"可解析"；集合没变化 ⇒ 也不必复制 options
+            if (merged.stream().noneMatch(callback -> callback != null && toolName != null
+                    && toolName.equals(toolNameOf(callback)))) {
+                return prompt;
+            }
+            if (names(merged).equals(names(frozen))) {
+                return prompt;
+            }
+            ToolCallingChatOptions copy = options.copy();
+            if (copy == null) {
+                return prompt;
+            }
+            copy.setToolCallbacks(merged);
+            if (log.isDebugEnabled())
+                log.debug("filled in callbacks for currently disclosed tools at execution time (disclosed after this batch's request boundary) runId={} tool={} callbacks={}", runId, toolName, merged.size());
+            return new Prompt(prompt.getInstructions(), copy);
+        } catch (RuntimeException ex) {
+            log.warn("failed to fill in tool callbacks at execution time; executing with original options tool={}", toolName, ex);
+            return prompt;
+        }
+    }
+
+    /**
+     * 本轮回答语言的显式传播键（与 {@code ConfirmGate#dispatchResume} 同口径：在请求/提交线程
+     * 取好 locale，再在工作线程显式设置）。工具线程不继承请求上下文，靠 ThreadLocal 残留会退回 zh。
+     */
+    public static final String TOOL_CONTEXT_REPLY_LOCALE = "replyLocale";
+
+    /**
+     * 本轮<b>当前 attempt 已聚合正文</b>的传播键：{@code ResilientChatService} 的累加器每消费一个
+     * 正文分片就追加到同一个 {@link TurnTextCapture}，本类在工具执行点读取，补全流式工具调用跳那条
+     * {@code ChatResponse} 里缺失的正文。
+     *
+     * <p>不用 ThreadLocal：工具执行跑在 Reactor 的工具线程上，而正文分片由消费线程写入；
+     * {@code toolContext} 本来就是跨线程携带本轮事实的既有通道（runId/sessionId/信封同路）。
+     */
+    public static final String TOOL_CONTEXT_TURN_TEXT = "turnText";
+
+    /**
+     * 本轮正文的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
+     *
+     * <p>每个工具跳只取走当前这一段，并在该跳聚合消息持久化后清空。终态、取消与失败也只写
+     * 当前段；已经落库的正文由各自的 assistant(tool_calls) 消息承载，不再用字符偏移推算。
+     *
+     * <p>本类方法均同步：写方在消费线程，读/清在工具执行线程（{@link StringBuilder} 自身不保证并发）。
+     */
+    public static final class TurnTextCapture {
+
+        private final StringBuilder segment = new StringBuilder();
+
+        /**
+         * 每次 attempt 重置，并种入尚未落库的纠正前缀段。
+         */
+        public synchronized void reset(String segment) {
+            this.segment.setLength(0);
+            if (StringUtils.isNotEmpty(segment)) {
+                this.segment.append(segment);
+            }
+        }
+
+        /**
+         * 消费一个正文分片（与 Accumulator 同源同序）。
+         */
+        public synchronized void append(String text) {
+            if (StringUtils.isNotEmpty(text)) {
+                this.segment.append(text);
+            }
+        }
+
+        /**
+         * 当前事件段：上一次已持久化工具跳之后的全部正文。
+         */
+        public synchronized String segmentText() {
+            return this.segment.toString();
+        }
+
+        /**
+         * 当前段已随本跳聚合消息持久化；重复提交只是幂等清空。
+         */
+        public synchronized void commitSegment() {
+            this.segment.setLength(0);
+        }
+
+    }
+
+    @Override
+    public ToolExecutionResult executeToolCalls(Prompt prompt, ChatResponse chatResponse) {
+        Locale replyLocale = replyLocaleOf(prompt);
+        LocaleContext previous = LocaleContextHolder.getLocaleContext();
+        if (replyLocale != null) {
+            LocaleContextHolder.setLocale(replyLocale);
+        }
+        try {
+            return executeToolCallsInLocale(prompt, chatResponse);
+        } finally {
+            LocaleContextHolder.setLocaleContext(previous);
+        }
+    }
+
+    private Locale replyLocaleOf(Prompt prompt) {
+        Object raw = toolContextOf(prompt).get(TOOL_CONTEXT_REPLY_LOCALE);
+        if (StringUtils.isBlank(ObjectUtils.toString(raw, (String) null))) {
+            return null;
+        }
+        try {
+            return Locale.forLanguageTag(String.valueOf(raw));
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    private ToolExecutionResult executeToolCallsInLocale(Prompt prompt, ChatResponse chatResponse) {
+        AssistantMessage assistant = chatResponse.getResult() == null ? null : chatResponse.getResult().getOutput();
+        if (assistant == null || !assistant.hasToolCalls()) {
+            return this.delegate.executeToolCalls(prompt, chatResponse);
+        }
+        // 流式工具调用跳：正文分片早已作为 SSE delta 发出，这个 ChatResponse 只带 tool_calls。
+        // 用本轮累加器经 toolContext 同步过来的正文补全 assistant，后续 saveSuspended / transcript /
+        // 落定历史拿到的就是用户真正看到的正文（不解析帧、不另建第二份聚合）。
+        TurnTextCapture turnText = turnTextOf(prompt);
+        assistant = assistantWithTurnText(assistant, turnText == null ? "" : turnText.segmentText());
+
+        String runId = runIdOf(prompt);
+        // 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
+        ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(toolContextOf(prompt));
+        // ===== 记录身份必须先于首次读 =====
+        // 官方工具线程（Reactor 上游线程）没有请求身份，而快照/待决/帧的键都由<b>记录身份</b>拼出。
+        // 旧顺序（先 store.get 再开作用域）在这种线程上只会命中 legacy 键：已存在的身份快照被当成
+        // "缺失"，恢复的写后复核同样读 legacy 键 ⇒ 判成"未落库" ⇒ 前端工具被当成不可恢复而拒绝。
+        // 快照存在时也必须在记录身份下读 —— 池化线程上残留的他人身份会让首次读命中<b>别人的</b>
+        // 同名轮次（串轮）。
+        RunSnapshot snapshot;
+        try (RunIdentityScope.Scope ignored = recordIdentityScope(envelope, runId)) {
+            snapshot = runId == null ? null : this.store.get(runId);
+            if (runId == null || snapshot == null) {
+                // ① 先凭本轮权威执行信封恢复（只认本实例创建的信封；不伪造审批/台账/认领，不重置序号）。
+                snapshot = recoverSnapshot(envelope, runId);
+                if (snapshot != null) {
+                    runId = snapshot.getRunId();
+                }
+            }
+        }
+        // 官方工具线程（Reactor 上游线程）没有请求身份：按记录（快照 → 信封）恢复。
+        // 两者都没有身份（旧快照/旧信封）⇒ 空作用域，不伪造默认租户；下游按 fail-closed 处理。
+        long tenantId = snapshot != null ? snapshot.getTenantId() : envelope == null ? 0L : envelope.tenantId();
+        long userId = snapshot != null ? snapshot.getUserId() : envelope == null ? 0L : envelope.userId();
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+            return executeToolCallsResolved(prompt, chatResponse, runId, snapshot, assistant);
+        }
+    }
+
+    /**
+     * 工具执行主体（已在<b>本轮身份作用域</b>内；身份只来自快照/执行信封）。
+     */
+    private ToolExecutionResult executeToolCallsResolved(Prompt prompt, ChatResponse chatResponse, String runId,
+                                                         RunSnapshot snapshot, AssistantMessage assistant) {
+        if (runId == null || snapshot == null) {
+            return executeWithoutSnapshot(prompt, chatResponse, runId, assistant);
+        }
+        SseChatEmitter out = this.registry.of(runId);
+        assistant = ReasoningOrigin.stamp(assistant, snapshot.getProviderId(), snapshot.getModelId());
+        List<PendingToolCall> pendings = newPendings(assistant);
+        AiContext context = AiContext.fromMap(snapshot.getContext());
+        bindPendingArguments(runId, context, prompt, assistant, pendings);
+        ModelWriteBudget modelBudget = modelWriteBudget(snapshot, prompt, assistant, pendings.size());
+        boolean budgetArmed = this.beacon.isBudgetArmed(runId);
+        if (budgetArmed) {
+            int skipped = this.beacon.markBudgetSkippedBatch(runId);
+            this.store.markTurnBudget(runId, 0L, skipped);
+        }
+        ToolBatchState state = new ToolBatchState(runId, snapshot, prompt, assistant, context, out, modelBudget,
+                budgetArmed);
+        state.pendings = pendings;
+        prepareBatch(state, pendings);
+        prepareSuspension(state, pendings);
+        List<String> gateWaitIds = budgetArmed ? List.of() : gateWaitToolCallIds(state.suspended);
+        this.gate.arm(runId, gateWaitIds);
+        try {
+            executeBatch(state, pendings);
+            recordSettledBatchTranscript(runId, snapshot, assistant, pendings);
+            return settleBatch(state, chatResponse, pendings);
+        } finally {
+            this.gate.disarm(runId, gateWaitIds);
+        }
+    }
+
+    private void bindPendingArguments(String runId, AiContext context, Prompt prompt, AssistantMessage assistant,
+                                      List<PendingToolCall> pendings) {
+        String userText = com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(prompt.getInstructions());
+        for (PendingToolCall pending : pendings) {
+            if (this.taskSlotResolver != null && TOOL_CREATE_TASK.equals(pending.getName())) {
+                pending.setArguments(this.taskSlotResolver.completeCreateTaskArguments(pending.getArguments(), userText));
+            }
+            com.example.configmgr.ai.form.ConditionsForm.bindDraft(pending, runId, context);
+        }
+    }
+
+    private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings) {
+        for (PendingToolCall pending : pendings) {
+            preparePending(state, pending, pendings.size());
+        }
+    }
+
+    private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        parkTaskTypeIfDue(state, pending, batchSize);
+        if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
+                || isCreateTaskBlocked(state, pending) || isFrontendSkipped(state, pending)) {
+            return;
+        }
+        state.suspended.add(pending);
+    }
+
+    private void parkTaskTypeIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        if (state.budgetArmed || this.taskTypeForm == null || batchSize != 1
+                || !TOOL_CREATE_TASK.equals(pending.getName()) || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+                || !com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
+            return;
+        }
+        List<Message> typeHistory = new ArrayList<>(state.prompt.getInstructions());
+        typeHistory.add(assistantWithoutText(state.assistant));
+        typeHistory.add(ToolResponseMessage.builder()
+                .responses(List.of(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                        "create_task 缺少合法 type（EXPORT/IMPORT），已改为类型表单收集")))
+                .build());
+        String assistantBody = StringUtils.defaultString(state.assistant.getText());
+        if (this.taskTypeForm.parkIfCreateTaskMissingType(state.runId, state.context, pending.getArguments(),
+                typeHistory, assistantBody, state.assistant.getMetadata())) {
+            commitTurnText(state.prompt);
+            recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
+            throw new RunParkedException(state.runId, pending.getToolCallId(), PendingToolCall.KIND_FRONTEND);
+        }
+    }
+
+    private boolean isConditionRejected(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        if (state.budgetArmed || state.stepsUsed >= state.maxToolSteps || this.conditionsForm == null
+                || !AiToolNames.CONFIRM_STEP.equals(pending.getName())
+                || !this.toolRegistry.isContextMatched(pending.getName(), state.context)) {
+            return false;
+        }
+        checkCancelled(state.runId);
+        String assistantBody = StringUtils.defaultString(state.assistant.getText());
+        ConditionsForm.ConfirmStepDecision decision = this.conditionsForm.inspectConfirmStep(state.runId,
+                state.context, pending, state.prompt.getInstructions(), assistantBody, state.assistant.getMetadata(),
+                batchSize == 1);
+        if (decision.parked()) {
+            commitTurnText(state.prompt);
+            recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
+            throw new RunParkedException(state.runId, pending.getToolCallId(), PendingToolCall.KIND_FRONTEND);
+        }
+        if (!decision.rejected()) {
+            return false;
+        }
+        settleFrontendRejected(state.runId, pending, decision.code(), decision.message(), decision.reasons());
+        state.frontendRejected.add(pending.getToolCallId());
+        return true;
+    }
+
+    private boolean isPreflightBlocked(ToolBatchState state, PendingToolCall pending) {
+        if (state.budgetArmed || this.preflight == null || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+                || !ToolPreflightService.isSupported(pending.getName())
+                || !this.toolRegistry.isContextMatched(pending.getName(), state.context)) {
+            return false;
+        }
+        this.beacon.markPassiveActivity(state.runId);
+        ToolPreflightService.PreflightReport report;
+        try {
+            report = this.preflight.inspect(pending.getName(), pending.getArguments(), state.context);
+        } catch (RuntimeException ex) {
+            blockPreflightUnavailable(state.runId, pending, ex);
+            state.preflightBlocked.add(pending.getToolCallId());
+            return true;
+        } finally {
+            this.beacon.markPassiveActivity(state.runId);
+        }
+        if (!report.pass()) {
+            blockPreflight(state.runId, pending, report);
+            state.preflightBlocked.add(pending.getToolCallId());
+            return true;
+        }
+        pending.setPreflight(report.asMap());
+        return false;
+    }
+
+    private boolean isCreateTaskBlocked(ToolBatchState state, PendingToolCall pending) {
+        if (state.budgetArmed || !TOOL_CREATE_TASK.equals(pending.getName())
+                || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())) {
+            return false;
+        }
+        if (!state.createTaskChecked) {
+            state.createTaskChecked = true;
+            state.createTaskPrior = createTaskAlreadyInRun(state.runId);
+        }
+        if (state.createTaskSeenInBatch || state.createTaskPrior.created()) {
+            markCreateTaskLimit(state.runId, pending, state.createTaskPrior);
+            state.createTaskBlocked.add(pending.getToolCallId());
+            return true;
+        }
+        state.createTaskSeenInBatch = true;
+        return false;
+    }
+
+    private boolean isFrontendSkipped(ToolBatchState state, PendingToolCall pending) {
+        if (state.budgetArmed || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+            return false;
+        }
+        FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, state.context);
+        if (verdict != null && !verdict.accepted()) {
+            settleFrontendRejected(state.runId, pending, verdict);
+            state.frontendRejected.add(pending.getToolCallId());
+            return true;
+        }
+        if (this.conditionsForm == null || !AiToolNames.SET_CONDITION.equals(pending.getName())) {
+            return false;
+        }
+        String replay = this.conditionsForm.settledSetConditionReplay(state.runId, state.context,
+                pending.getArguments());
+        if (replay != null) {
+            settleIdempotentReplay(state.runId, pending, replay);
+            state.idempotentReplay.put(pending.getToolCallId(), replay);
+            return true;
+        }
+        String signature = ConditionsForm.setConditionSignature(pending.getArguments());
+        if (signature != null) {
+            String firstCallId = state.batchSetConditionSeen.get(signature);
+            if (firstCallId != null) {
+                state.batchDuplicateOf.put(pending.getToolCallId(), firstCallId);
+                return true;
+            }
+            state.batchSetConditionSeen.put(signature, pending.getToolCallId());
+        }
+        return false;
+    }
+
+    private void prepareSuspension(ToolBatchState state, List<PendingToolCall> pendings) {
+        if (state.budgetArmed) {
+            return;
+        }
+        long suspendedAtMs = System.currentTimeMillis();
+        for (PendingToolCall pending : state.suspended) {
+            Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
+            if (waitSeconds != null && waitSeconds > 0) {
+                pending.setAtMs(suspendedAtMs);
+                pending.setExpiresAt(suspendedAtMs + waitSeconds * 1000L);
+            }
+        }
+        if (!state.suspended.isEmpty()) {
+            persistSuspendedBatch(state, pendings);
+        }
+    }
+
+    private void persistSuspendedBatch(ToolBatchState state, List<PendingToolCall> pendings) {
+        persistToolSteps(state.runId, state.stepsUsed);
+        List<Message> suspendedHistory = SyntheticMessages.withoutCorrectionInstruction(state.prompt.getInstructions());
+        this.store.saveSuspended(state.runId, state.assistant.getText(), pendings, suspendedHistory, this.codec,
+                state.assistant.getMetadata());
+        if (isSuspendedHopPersisted(state.runId, state.assistant)) {
+            commitTurnText(state.prompt);
+        }
+        recordPendingTranscript(state.runId, state.snapshot, state.prompt, state.assistant, pendings);
+        state.out.suspended(state.suspended, this.store.runKey(state.runId), this.store.pendingKey(state.runId),
+                this.store.instanceId());
+        if (this.gate.canPublishRequestsAheadOfLoop()) {
+            for (PendingToolCall pending : state.suspended) {
+                emitToolStartOnce(state.runId, state.toolStarted, pending);
+            }
+        }
+        this.gate.publishRequestsForParkedBatch(state.runId, state.suspended);
+    }
+
+    private void executeBatch(ToolBatchState state, List<PendingToolCall> pendings) {
+        for (PendingToolCall pending : pendings) {
+            executePending(state, pending, pendings.size());
+        }
+    }
+
+    private void executePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        if (state.haltedBy != null) {
+            skipHaltedPending(state, pending);
+            return;
+        }
+        checkCancelled(state.runId);
+        if (state.budgetArmed) {
+            skipBudgetPending(state, pending);
+            return;
+        }
+        if (state.frontendRejected.contains(pending.getToolCallId())) {
+            addFrontendRejectedResponse(state, pending);
+            return;
+        }
+        if (state.idempotentReplay.containsKey(pending.getToolCallId())) {
+            addIdempotentResponse(state, pending);
+            return;
+        }
+        if (state.batchDuplicateOf.containsKey(pending.getToolCallId())) {
+            addDuplicateResponse(state, pending);
+            return;
+        }
+        if (state.preflightBlocked.contains(pending.getToolCallId())) {
+            addPreflightBlockedResponse(state, pending);
+            return;
+        }
+        if (state.createTaskBlocked.contains(pending.getToolCallId())) {
+            addCreateTaskBlockedResponse(state, pending);
+            return;
+        }
+        if (state.stepsUsed >= state.maxToolSteps) {
+            skipStepLimitedPending(state, pending);
+            return;
+        }
+        executeLivePending(state, pending, batchSize);
+    }
+
+    private void skipHaltedPending(ToolBatchState state, PendingToolCall pending) {
+        boolean skippedNow = !pending.isExecuted() && (PendingToolCall.PENDING.equals(pending.getStatus())
+                || PendingToolCall.APPROVED.equals(pending.getStatus()));
+        state.responses.add(skipAsUpstreamFailed(state.runId, pending, state.haltedBy));
+        if (skippedNow) {
+            traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_UPSTREAM_FAILED);
+        }
+    }
+
+    private void skipBudgetPending(ToolBatchState state, PendingToolCall pending) {
+        emitToolStartOnce(state.runId, state.toolStarted, pending);
+        state.responses.add(skipAsBudgetExhausted(state.runId, pending));
+        traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
+        log.warn("in-turn context budget exhausted; call not executed runId={} tool={} toolCallId={}", state.runId,
+                pending.getName(), pending.getToolCallId());
+    }
+
+    private void addFrontendRejectedResponse(ToolBatchState state, PendingToolCall pending) {
+        String text = frameText(pending.getResultText());
+        if (!isSystemRejectedWithoutUserFrames(pending)) {
+            emitToolStartOnce(state.runId, state.toolStarted, pending);
+            state.out.frontendToolResult(pending, false, text);
+        }
+        state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, text, state.modelBudget)));
+        traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
+    }
+
+    private void addIdempotentResponse(ToolBatchState state, PendingToolCall pending) {
+        String text = state.idempotentReplay.get(pending.getToolCallId());
+        emitToolStartOnce(state.runId, state.toolStarted, pending);
+        state.out.frontendToolResult(pending, true, text);
+        ToolCallEndTrace.emitOnce(this.settlementObservations, state.runId, state.snapshot.getSessionId(), pending,
+                pending.getToolCallId(), pending.getName(), pending.getKind(), 0L, 0L, text, this.sheetAudit);
+        state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, text, state.modelBudget)));
+    }
+
+    private void addDuplicateResponse(ToolBatchState state, PendingToolCall pending) {
+        PendingToolCall first = this.store.pendingLenient(state.runId,
+                state.batchDuplicateOf.get(pending.getToolCallId()));
+        emitToolStartOnce(state.runId, state.toolStarted, pending);
+        if (first != null && first.effectiveOutcome() == ToolOutcome.OK) {
+            String text = StringUtils.defaultString(first.getResultText());
+            settleIdempotentReplay(state.runId, pending, text);
+            state.out.frontendToolResult(pending, true, text);
+            ToolCallEndTrace.emitOnce(this.settlementObservations, state.runId, state.snapshot.getSessionId(), pending,
+                    pending.getToolCallId(), pending.getName(), pending.getKind(), 0L, 0L, text, this.sheetAudit);
+            state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                    modelData(pending, text, state.modelBudget)));
+            return;
+        }
+        String code = first == null ? ToolOutcome.CODE_TOOL_EXECUTION_FAILED : first.effectiveCode();
+        settleFrontendRejected(state.runId, pending, code, "同批重复的 set_condition 未重复执行（首次未成功）",
+                List.of("同一批里出现了两条完全相同的 set_condition：只执行第一条，本条未下发前端",
+                        "首次调用的结局：" + (first == null ? "未结算" : first.effectiveOutcome().wire())));
+        String text = frameText(pending.getResultText());
+        state.out.frontendToolResult(pending, false, text);
+        state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, text, state.modelBudget)));
+    }
+
+    private void addPreflightBlockedResponse(ToolBatchState state, PendingToolCall pending) {
+        String text = frameText(pending.getResultText());
+        emitToolStartOnce(state.runId, state.toolStarted, pending);
+        state.out.toolResult(pending, false, false, text);
+        state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, text, state.modelBudget)));
+        traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
+    }
+
+    private void addCreateTaskBlockedResponse(ToolBatchState state, PendingToolCall pending) {
+        emitToolStartOnce(state.runId, state.toolStarted, pending);
+        state.responses.add(skipAsCreateTaskLimit(state.runId, pending, state.createTaskPrior));
+        traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
+    }
+
+    private void skipStepLimitedPending(ToolBatchState state, PendingToolCall pending) {
+        emitToolStartOnce(state.runId, state.toolStarted, pending);
+        state.responses.add(skipAsStepLimit(state.runId, pending, state.maxToolSteps));
+        traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, ToolOutcome.CODE_TOOL_STEP_LIMIT);
+        log.warn("tool step limit reached; call not executed runId={} tool={} toolCallId={} steps={}/{}", state.runId,
+                pending.getName(), pending.getToolCallId(), state.stepsUsed, state.maxToolSteps);
+    }
+
+    private void executeLivePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        state.stepsUsed++;
+        emitToolStartOnce(state.runId, state.toolStarted, pending);
+        this.beacon.enter(state.runId, pending.getName(), pending.getKind());
+        AiTrace.eventOn(state.runId, state.snapshot.getSessionId(), "tool_call_start", "toolCallId",
+                pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "approval",
+                PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+                        || PendingToolCall.KIND_FRONTEND.equals(pending.getKind()), "index", state.responses.size());
+        long startedAt = System.currentTimeMillis();
+        String text = invokeLiveTool(state, pending, startedAt);
+        settleLiveResponse(state, pending, text, startedAt, batchSize);
+    }
+
+    private String invokeLiveTool(ToolBatchState state, PendingToolCall pending, long startedAt) {
+        String text;
+        try {
+            text = dispatchLiveTool(state, pending);
+        } catch (RuntimeException ex) {
+            if (ex instanceof RunParkedException parked) {
+                AiTrace.eventOn(state.runId, state.snapshot.getSessionId(), "tool_call_park", "toolCallId",
+                        pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "parkKind",
+                        parked.kind());
+                recordSettledBatchTranscript(state.runId, state.snapshot, state.assistant, state.pendings);
+                throw ex;
+            }
+            traceToolAborted(state.runId, state.snapshot.getSessionId(), pending, startedAt, ex);
+            throw ex;
+        } finally {
+            this.beacon.exit(state.runId, "done");
+        }
+        try {
+            checkCancelled(state.runId);
+        } catch (RuntimeException ex) {
+            traceToolAborted(state.runId, state.snapshot.getSessionId(), pending, startedAt, ex);
+            throw ex;
+        }
+        return text;
+    }
+
+    private String dispatchLiveTool(ToolBatchState state, PendingToolCall pending) {
+        if (!this.toolRegistry.isContextMatched(pending.getName(), state.context)) {
+            return this.toolRegistry.isSheetDisabled(pending.getName())
+                    ? blockSheetDisabled(state.runId, state.context, pending)
+                    : blockOutOfScope(state.runId, state.context, pending);
+        }
+        return switch (pending.getKind()) {
+            case PendingToolCall.KIND_FRONTEND -> awaitFrontend(state.runId, pending, state.context);
+            case PendingToolCall.KIND_CONFIRM -> awaitConfirm(state.runId, state.prompt, pending, state.context);
+            default -> executeOnce(state.runId, state.prompt, pending, state.context);
+        };
+    }
+
+    private void settleLiveResponse(ToolBatchState state, PendingToolCall pending, String text, long startedAt,
+                                    int batchSize) {
+        PendingToolCall source = settledSource(state.runId, pending);
+        long totalToolMs = System.currentTimeMillis() - startedAt;
+        ToolCallEndTrace.emitOnce(this.settlementObservations, state.runId, state.snapshot.getSessionId(), source,
+                pending.getToolCallId(), pending.getName(), pending.getKind(), totalToolMs,
+                execMsOf(source, totalToolMs), text, this.sheetAudit);
+        refreshRunContext(state.runId, source);
+        state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(source, text, state.modelBudget)));
+        if (isBatchHalted(source)) {
+            state.haltedBy = source;
+            log.warn("batch policy fail-fast (stop on first error) runId={} upstreamTool={} outcome={} code={} remainingSkipped={}",
+                    state.runId, source.getName(), source.effectiveOutcome().wire(), source.effectiveCode(),
+                    Math.max(0, batchSize - state.responses.size()));
+        }
+    }
+
+    private PendingToolCall settledSource(String runId, PendingToolCall pending) {
+        PendingToolCall settled;
+        try {
+            settled = this.store.pendingLenient(runId, pending.getToolCallId());
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("settled-source-read")) {
+                log.warn("could not read pending entry after execution; falling back to arguments runId={} toolCallId={}", runId,
+                        pending.getToolCallId(), ex);
+            }
+            settled = pending;
+        }
+        return ObjectUtils.defaultIfNull(settled, pending);
+    }
+
+    private ToolExecutionResult settleBatch(ToolBatchState state, ChatResponse chatResponse,
+                                            List<PendingToolCall> pendings) {
+        ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(state.responses).build();
+        List<Message> history = new ArrayList<>(state.prompt.getInstructions());
+        history.add(state.assistant);
+        history.add(toolMessage);
+        boolean stepWrapped = state.stepsUsed >= state.maxToolSteps;
+        if (stepWrapped) {
+            history.add(new UserMessage(STEP_LIMIT_WRAP_UP));
+        }
+        TurnBudgetOutcome budget = applyTurnBudget(state.runId, state.snapshot, state.prompt, chatResponse,
+                state.assistant, history, state.budgetArmed, stepWrapped);
+        history = budget.history();
+        persistToolSteps(state.runId, state.stepsUsed);
+        boolean settled = isSettle(state.runId, history);
+        if (settled) {
+            commitTurnText(state.prompt);
+        }
+        checkCancelled(state.runId);
+        if (!settled) {
+            throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+                    "Tool executed, but snapshot sequence advancement/run state is unconfirmed; stopping before the next hop (runId=" + state.runId + ")");
+        }
+        if (budget.overflow()) {
+            throw new StreamViolationException(budget.decision().failureCode(),
+                    "In-turn context budget: the next request would exceed the context window (nextEst="
+                            + budget.decision().nextEst() + " >= limit=" + budget.decision().limitTokens() + ", reason="
+                            + budget.decision().reason() + "): executed records were settled before terminating the run");
+        }
+        return ToolExecutionResult.builder().conversationHistory(history).build();
+    }
+
+    private final class ToolBatchState {
+
+        private final String runId;
+        private final RunSnapshot snapshot;
+        private final Prompt prompt;
+        private final AssistantMessage assistant;
+        private final AiContext context;
+        private final SseChatEmitter out;
+        private final ModelWriteBudget modelBudget;
+        private final boolean budgetArmed;
+        private final int maxToolSteps;
+        private int stepsUsed;
+        private final List<PendingToolCall> suspended = new ArrayList<>();
+        private final Set<String> preflightBlocked = new HashSet<>();
+        private final Set<String> createTaskBlocked = new HashSet<>();
+        private final Set<String> frontendRejected = new HashSet<>();
+        private final Map<String, String> idempotentReplay = new HashMap<>();
+        private final Map<String, String> batchSetConditionSeen = new HashMap<>();
+        private final Map<String, String> batchDuplicateOf = new HashMap<>();
+        private boolean createTaskSeenInBatch;
+        private boolean createTaskChecked;
+        private CreateTaskInRun createTaskPrior = CreateTaskInRun.NONE;
+        private final Set<String> toolStarted = new HashSet<>();
+        private final List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+        private PendingToolCall haltedBy;
+        private List<PendingToolCall> pendings;
+
+        private ToolBatchState(String runId, RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
+                               AiContext context, SseChatEmitter out, ModelWriteBudget modelBudget, boolean budgetArmed) {
+            this.runId = runId;
+            this.snapshot = snapshot;
+            this.prompt = prompt;
+            this.assistant = assistant;
+            this.context = context;
+            this.out = out;
+            this.modelBudget = modelBudget;
+            this.budgetArmed = budgetArmed;
+            this.maxToolSteps = Math.max(1, SpToolCallingManager.this.properties.getResilience().getMaxToolSteps());
+            this.stepsUsed = snapshot.getToolSteps();
+        }
+
+    }
+
+    /**
+     * {@code tool_start} 的<b>唯一发射口</b>（每张卡恰一条）。
+     *
+     * <p>park 开启时本批的 tool_start 与请求帧都前移到执行循环之前公布（帧序契约：tool_start 先于
+     * request）。执行循环随后还会走到同一条卡（预算/预检/步数/主路径四个分支），必须靠本集合去重 ——
+     * 否则同一张卡会出现两条 tool_start（前端会重复建段/重复动画）。非 park 路径集合恒空，
+     * 行为与改造前逐字一致。
+     */
+    private void emitToolStartOnce(String runId, Set<String> toolStarted, PendingToolCall pending) {
+        if (toolStarted.add(pending.getToolCallId())) {
+            this.registry.of(runId).toolStart(pending);
+        }
+    }
+
+    /**
+     * 本批会进入 {@link ConfirmGate} 等待的 toolCallId（{@code CONFIRM} 与 {@code FRONTEND} 都经
+     * {@code ConfirmGate.await} 登记闸门，故两者都要预登记 —— F8）。
+     */
+    private static List<String> gateWaitToolCallIds(List<PendingToolCall> pendings) {
+        List<String> ids = new ArrayList<>(pendings.size());
+        for (PendingToolCall pending : pendings) {
+            String kind = pending.getKind();
+            if ((PendingToolCall.KIND_CONFIRM.equals(kind) || PendingToolCall.KIND_FRONTEND.equals(kind))
+                    && pending.getToolCallId() != null) {
+                ids.add(pending.getToolCallId());
+            }
+        }
+        return ids;
+    }
+
+    // ── 批策略（P1-10） ─────────────────────────────────────────────────────
+
+    /**
+     * 执行后失败的 message 追加语（副作用可能已发生，必须人工对账）。
+     */
+    public static final String RECONCILIATION_NOTE = "该操作可能已产生部分副作用，需人工对账。";
+
+    /**
+     * 批次首错即停的判据：类别 W/J/P，且结算后的结局是<b>人工拒绝或确定性失败</b>
+     * （{@code status=REJECTED 且 outcome=rejected}，或 {@code outcome=failed} 且 {@code retryable=false}）。
+     * {@code retryable=true} 或 {@code unknown} 一律不停 —— 前者还有改数据重试的空间，后者须先对账。
+     */
+    public boolean isBatchHalted(PendingToolCall pending) {
+        if (pending == null) {
+            return false;
+        }
+        ToolMeta.Category category = this.toolRegistry.categoryOf(pending.getName());
+        if (category != ToolMeta.Category.W && category != ToolMeta.Category.J
+                && category != ToolMeta.Category.P) {
+            return false;
+        }
+        ToolOutcome outcome = pending.effectiveOutcome();
+        return PendingToolCall.REJECTED.equals(pending.getStatus()) && outcome == ToolOutcome.REJECTED
+                || outcome == ToolOutcome.FAILED && !outcome.retryable(pending.effectiveCode());
+    }
+
+    public boolean haltsBatch(PendingToolCall pending) {
+        return isBatchHalted(pending);
+    }
+
+    /**
+     * 为"已规划未执行"的调用补一条结构化 SKIPPED：写库、发 {@code tool_result} 帧、
+     * 返回回填模型的统一信封（每个 {@code toolCallId} 都必须有对应 ToolResponse）。
+     * 仅处理 PENDING/APPROVED 且未执行的条目；已终态条目保留原结局，只回填原结果，不重发覆盖帧。
+     */
+    public ToolResponseMessage.ToolResponse skipAsUpstreamFailed(String runId, PendingToolCall pending,
+                                                                 PendingToolCall upstream) {
+        if (pending.isExecuted() || !PendingToolCall.PENDING.equals(pending.getStatus())
+                && !PendingToolCall.APPROVED.equals(pending.getStatus())) {
+            String existing = frameText(pending.getResultText());
+            return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                    modelData(pending, existing));
+        }
+        String message = skippedMessage(upstream.getName(), upstream.effectiveCode());
+        pending.setStatus(PendingToolCall.SKIPPED);
+        pending.setOutcome(ToolOutcome.SKIPPED.wire());
+        pending.setCode(ToolOutcome.CODE_UPSTREAM_FAILED);
+        pending.setReason(ToolOutcome.CODE_UPSTREAM_FAILED);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(message);
+        this.store.putPending(runId, pending);
+        this.registry.of(runId).toolResult(pending, false, false, message);
+        log.warn("batch policy skipped call runId={} tool={} toolCallId={} upstream={} upstreamCode={}", runId, pending.getName(),
+                pending.getToolCallId(), upstream.getName(), upstream.effectiveCode());
+        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, message));
+    }
+
+    /**
+     * 步数到顶的调用：结算成 {@code skipped/TOOL_STEP_LIMIT}（未执行、不占认领、不记台账），
+     * 帧照发（前端能看到"这步为什么没跑"），回填模型的是统一信封 + 收尾提示。
+     *
+     * <p>为什么是 {@link ToolOutcome#SKIPPED} 而不是 {@code FAILED}：这不是"执行出错"，
+     * 而是"预算用完了"—— 用 failed 会触发批次首错即停（{@link #haltsBatch}），
+     * 把"部分完成"变成"整批作废"，与"降级收尾"的裁决相反。
+     */
+    public ToolResponseMessage.ToolResponse skipAsStepLimit(String runId, PendingToolCall pending, int maxSteps) {
+        String message = "未执行：本轮工具调用步数已达上限（app.ai.resilience.max-tool-steps = " + maxSteps
+                + "）。请用已经获得的信息给出结论，并说明哪些部分未完成。";
+        pending.setStatus(PendingToolCall.SKIPPED);
+        pending.setOutcome(ToolOutcome.SKIPPED.wire());
+        pending.setCode(ToolOutcome.CODE_TOOL_STEP_LIMIT);
+        pending.setReason(ToolOutcome.CODE_TOOL_STEP_LIMIT);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(message);
+        this.store.putPending(runId, pending);
+        this.registry.of(runId).toolResult(pending, false, false, message);
+        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, message));
+    }
+
+    /**
+     * AR-03 单轮第二次 {@code create_task}：结算成 {@code skipped/CREATE_TASK_TURN_LIMIT}
+     * （<b>未创建</b>、不弹第二张卡、不写执行台账），并给模型可读出口。
+     *
+     * @param prior 本轮已创建任务的已知程度（有 id / 任务号不可确认 / 同批尚未结算），
+     *              见 {@link CreateTaskInRun} —— <b>任务号不可确认时绝不编造 {@code #-1}</b>
+     */
+    public ToolResponseMessage.ToolResponse skipAsCreateTaskLimit(String runId, PendingToolCall pending,
+                                                                  CreateTaskInRun prior) {
+        String message = markCreateTaskLimit(runId, pending, prior);
+        // 前端插值契约（additive）：单轮上限命中时把"本轮已创建的任务号"以结构化形式带上，
+        // 与 userTextCode 同一帧；没有 taskId（idUnknown/同批未结算）时不发该键。
+        java.util.Map<String, Object> userTextArgs = prior.taskId() == null ? null
+                : java.util.Map.of("taskId", String.valueOf(prior.taskId()));
+        this.registry.of(runId).toolResult(pending, false, false, message, null, userTextArgs);
+        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, message));
+    }
+
+    /**
+     * 只落"单轮上限"终态（不发帧）：供 park 前检测使用，保证第二笔不会以 PENDING 留在快照里。
+     */
+    private String markCreateTaskLimit(String runId, PendingToolCall pending, CreateTaskInRun prior) {
+        String detail;
+        if (prior.idUnknown()) {
+            detail = "无法确认本轮是否已创建任务；为避免重复创建，本次未创建。"
+                    + "请先用 list_tasks 查看已有任务（如有，用 navigate_to 打开）；需要再建请在新一轮发起。";
+        } else if (prior.taskId() != null) {
+            detail = "本轮已创建任务 #" + prior.taskId() + "，本次未创建。请用 navigate_to(page=..., taskId="
+                    + prior.taskId() + ") 打开该任务；需要再建请在新一轮发起。";
+        } else {
+            detail = "本次调用未创建。请先完成本轮已发起的那一次创建（确认卡）；需要再建请在新一轮发起。";
+        }
+        String message = "未创建（" + ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT + "）：同一轮只允许创建一次任务。" + detail;
+        pending.setStatus(PendingToolCall.SKIPPED);
+        pending.setOutcome(ToolOutcome.SKIPPED.wire());
+        pending.setCode(ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
+        pending.setReason(ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(message);
+        this.store.putPending(runId, pending);
+        log.warn("per-turn create_task limit reached; creation refused runId={} toolCallId={} priorTaskId={} idUnknown={}", runId,
+                pending.getToolCallId(), prior.taskId(), prior.idUnknown());
+        return message;
+    }
+
+    /**
+     * 本轮是否已经创建过任务（跨批 / 续跑口径 = 执行台账）。
+     *
+     * <p><b>不编造任务号</b>：台账读不到 / 回执里解析不出 {@code #id} 时返回
+     * {@link CreateTaskInRun#unknown()}，文案只说"无法确认本轮是否已创建任务"，绝不输出
+     * {@code #-1} 这类伪 ID 让用户去导航，也不断言"一定已创建"。
+     */
+    private CreateTaskInRun createTaskAlreadyInRun(String runId) {
+        List<Map<String, Object>> ledger;
+        try {
+            ledger = this.store.ledger(runId);
+        } catch (RuntimeException ex) {
+            // fail-closed：查不到台账时宁可拒绝第二次创建，也不能冒"重复建库"的险。
+            log.warn("could not read per-turn create_task ledger; treated as created (task id unconfirmed) runId={}", runId, ex);
+            return CreateTaskInRun.unknown();
+        }
+        for (Map<String, Object> record : ledger) {
+            if (TOOL_CREATE_TASK.equals(record.get("name"))
+                    && ToolOutcome.OK.wire().equals(String.valueOf(record.get("outcome")))) {
+                Long taskId = createdTaskIdOf(record.get(PendingToolCall.CREATED_TASK_ID));
+                return taskId == null ? CreateTaskInRun.unknown() : new CreateTaskInRun(true, taskId, false);
+            }
+        }
+        return CreateTaskInRun.NONE;
+    }
+
+    private static Long createdTaskIdOf(Object raw) {
+        if (raw instanceof java.util.concurrent.atomic.AtomicReference<?> holder) {
+            raw = holder.get();
+        }
+        if (raw instanceof Number number) {
+            return number.longValue();
+        }
+        if (StringUtils.isBlank(ObjectUtils.toString(raw, (String) null))) {
+            return null;
+        }
+        try {
+            return Long.valueOf(String.valueOf(raw).trim());
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * "本轮是否已创建任务"的三态结果（AR-03 单轮上限）。
+     *
+     * @param created   本轮是否已有成功创建
+     * @param taskId    已知任务号（未知/同批未结算时为 null）
+     * @param idUnknown 已有创建但任务号不可确认（台账读失败/createdTaskId 缺失）；
+     *                  文案必须走通用措辞，不得给伪 ID
+     */
+    public record CreateTaskInRun(boolean created, Long taskId, boolean idUnknown) {
+
+        /**
+         * 未创建（同批第一笔尚未结算也归此态）。
+         */
+        public static final CreateTaskInRun NONE = new CreateTaskInRun(false, null, false);
+
+        /**
+         * 已有创建但任务号不可确认。
+         */
+        public static CreateTaskInRun unknown() {
+            return new CreateTaskInRun(true, null, true);
+        }
+    }
+
+    /**
+     * 轮内上下文预算 armed 之后的调用：结算成 {@code skipped/TOOL_BUDGET_EXHAUSTED}
+     * （未执行、不占认领、不记台账），帧照发。
+     *
+     * <p>为什么是 {@link ToolOutcome#SKIPPED} 而不是 {@code FAILED}：与步数笼同一条理由 ——
+     * 这不是"执行出错"，而是"上下文放不下了"。用 failed 会触发批次首错即停，把
+     * "部分完成收尾"变成"整批作废"。
+     */
+    public ToolResponseMessage.ToolResponse skipAsBudgetExhausted(String runId, PendingToolCall pending) {
+        String message = "未执行：本轮上下文预算已耗尽（工具轮内上下文预算）。"
+                + "请直接用已经获得的信息给出结论，并说明哪些部分未完成。";
+        pending.setStatus(PendingToolCall.SKIPPED);
+        pending.setOutcome(ToolOutcome.SKIPPED.wire());
+        pending.setCode(ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
+        pending.setReason(ToolOutcome.CODE_TOOL_BUDGET_EXHAUSTED);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(message);
+        this.store.putPending(runId, pending);
+        this.registry.of(runId).toolResult(pending, false, false, message);
+        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, message));
+    }
+
+    // ── 轮内上下文预算（工具轮内上下文预算批） ───────────────────────────────
+
+    /**
+     * 轮内预算的执行面：判一次 → 按动作执行本地 L1 / 收尾 → 变更后<b>重新估算</b>再判。
+     *
+     * <p><b>为什么变更后要重新估算</b>：真值 {@code usage} 描述的是"上一发请求"，
+     * 清掉工具结果或追加指令之后，上一发的 usage 已不再代表下一发。故每次本地变更都按
+     * <b>省下/新增的估算量</b>递推判据值（而不是丢掉真值重算整包）：清掉 3000 token 的旧结果，
+     * 下一发就少 3000 —— 真值仍是同一个基线的真值。
+     *
+     * <p>至多两轮变更（清一次 + 收尾一次），构造上不会死循环。
+     */
+    private TurnBudgetOutcome applyTurnBudget(String runId, RunSnapshot snapshot, Prompt prompt,
+                                              ChatResponse chatResponse, AssistantMessage assistant, List<Message> history, boolean armed,
+                                              boolean stepWrapped) {
+        int limit = turnBudgetLimit(snapshot);
+        if (limit <= 0) {
+            return new TurnBudgetOutcome(history, false, null);
+        }
+        AiProperties.Context config = this.properties.getContext();
+        ContextMeter meter = new ContextMeter();
+        meter.accept(chatResponse);
+        int before = estimateRequestTokens(prompt, history);
+        int delta = Math.max(0, ContextEstimator.estimateMessages(history)
+                - ContextEstimator.estimateMessages(prompt.getInstructions())
+                - ContextEstimator.estimateMessage(assistant));
+        Set<String> protectedIds = pendingToolCallIds(runId).orElse(null);
+        Set<String> activeRunIds = activeRunIds(runId, snapshot);
+        Set<String> otherActiveRuns = new HashSet<>(activeRunIds);
+        otherActiveRuns.remove(runId);
+        TurnBudgetState state = new TurnBudgetState(snapshot, config, history, protectedIds, activeRunIds,
+                otherActiveRuns, systemTokensOf(prompt), toolsTokensOf(prompt), armed);
+        state.decision = TurnBudgetPlan.plan(turnBudgetRequest(limit, config, meter, prompt, history, delta,
+                state.armedNow, runId, state.maxOutput));
+        state.nextEst = state.decision.nextEst();
+        applyTurnBudgetPasses(runId, limit, stepWrapped, state);
+        if (state.needRejudge) {
+            rejudgeTurnBudget(runId, limit, state);
+        }
+        traceTurnBudget(runId, snapshot, prompt, limit, meter, before, state);
+        return new TurnBudgetOutcome(state.current, state.decision.action() == TurnBudgetPlan.Action.OVERFLOW,
+                state.decision);
+    }
+
+    private void applyTurnBudgetPasses(String runId, int limit, boolean stepWrapped, TurnBudgetState state) {
+        for (int pass = 0; pass < 6; pass++) {
+            if (pass > 0) {
+                rejudgeTurnBudget(runId, limit, state);
+            }
+            state.needRejudge = false;
+            boolean overflow = state.decision.action() == TurnBudgetPlan.Action.OVERFLOW
+                    && TurnBudgetPlan.REASON_OVERFLOW.equals(state.decision.reason());
+            if ((state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS || overflow)
+                    && state.cleared == 0 && !state.clearAttempted && state.protectedIds != null
+                    && applyTurnClear(runId, state)) {
+                continue;
+            }
+            if (state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS) {
+                break;
+            }
+            if (overflow) {
+                if (state.shrinkRounds < 2 && state.protectedIds != null && applyTurnShrink(limit, state)) {
+                    continue;
+                }
+                if (state.trimmedTurns == 0 && applyTurnTrim(runId, limit, state)) {
+                    continue;
+                }
+                break;
+            }
+            if (state.decision.action() == TurnBudgetPlan.Action.WRAP_UP && !state.armedNow && !stepWrapped) {
+                applyTurnWrapUp(runId, state);
+                continue;
+            }
+            break;
+        }
+    }
+
+    private boolean applyTurnClear(String runId, TurnBudgetState state) {
+        List<Message> beforeClear = state.current;
+        ToolResultClearing.Plan plan = ToolResultClearing.plan(state.current, state.config.getKeepToolPairs(),
+                state.protectedIds, state.otherActiveRuns);
+        if (plan.changed()) {
+            state.clearAttempted = true;
+        }
+        if (!plan.changed() || !isRecordTurnClear(runId, state.snapshot, beforeClear, plan, state.systemTokens,
+                state.toolsTokens)) {
+            return false;
+        }
+        state.current = plan.messages();
+        state.cleared += plan.cleared().size();
+        state.nextEst = Math.max(0, state.nextEst - plan.savedTokens());
+        state.needRejudge = true;
+        return true;
+    }
+
+    private boolean applyTurnShrink(int limit, TurnBudgetState state) {
+        ToolResultShrink.Plan shrink = ToolResultShrink.plan(state.current, state.nextEst, limit, state.protectedIds,
+                this.limiter);
+        if (!shrink.changed()) {
+            return false;
+        }
+        state.current = shrink.messages();
+        state.shrunkResults += shrink.shrunk().size();
+        state.shrinkRounds++;
+        state.nextEst = Math.max(0, state.nextEst - shrink.savedTokens());
+        state.needRejudge = true;
+        return true;
+    }
+
+    private boolean applyTurnTrim(String runId, int limit, TurnBudgetState state) {
+        HardTrim.Plan trim = HardTrim.plan(state.current, state.config.getKeepRecentTurns(), state.protectedIds,
+                state.activeRunIds);
+        if (trim.changed() && state.nextEst - trim.lostTokens()
+                + ContextTrigger.effectiveReserve(limit, state.config.getReserveTokens(), state.maxOutput) > limit) {
+            return false;
+        }
+        if (!trim.changed() || !isRecordTurnTrim(runId, state.snapshot, state.current, trim, state.systemTokens,
+                state.toolsTokens)) {
+            return false;
+        }
+        state.current = trim.messages();
+        state.trimmedTurns = trim.droppedTurns();
+        state.nextEst = Math.max(0, state.nextEst - trim.lostTokens());
+        state.needRejudge = true;
+        return true;
+    }
+
+    private void applyTurnWrapUp(String runId, TurnBudgetState state) {
+        List<Message> wrapped = new ArrayList<>(state.current);
+        wrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
+        state.current = wrapped;
+        this.beacon.armBudget(runId);
+        this.store.markTurnBudget(runId, System.currentTimeMillis(), this.beacon.budgetSkippedBatches(runId));
+        state.armedNow = true;
+        state.nextEst += ContextEstimator.estimate(TURN_BUDGET_WRAP_UP);
+        state.needRejudge = true;
+    }
+
+    private void rejudgeTurnBudget(String runId, int limit, TurnBudgetState state) {
+        state.decision = TurnBudgetPlan.plan(new TurnBudgetPlan.Request(limit, state.config.getReserveTokens(),
+                state.config.getL1Percent(), state.config.getL3Percent(), false, 0, 0, state.nextEst, 0,
+                state.armedNow, this.beacon.budgetSkippedBatches(runId), state.maxOutput));
+    }
+
+    private void traceTurnBudget(String runId, RunSnapshot snapshot, Prompt prompt, int limit, ContextMeter meter,
+                                 int before, TurnBudgetState state) {
+        int after = estimateRequestTokens(prompt, state.current);
+        if ((!state.decision.triggered() || state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS
+                && state.cleared == 0) && state.cleared == 0 && state.shrunkResults == 0 && state.trimmedTurns == 0) {
+            return;
+        }
+        AiTrace.eventOn(runId, snapshot.getSessionId(), "turn_budget", "action", state.decision.action().name(),
+                "reason", state.decision.reason(), "ratio", String.format(Locale.ROOT, "%.3f", state.decision.ratio()),
+                "nextEst", state.decision.nextEst(), "limit", state.decision.limitTokens(), "reserve",
+                state.decision.reserveTokens(), "before", before, "after", after, "clearedPairs", state.cleared,
+                "shrunkResults", state.shrunkResults, "trimmedTurns", state.trimmedTurns, "armed", state.armedNow,
+                "usage", meter.measured());
+        log.info("in-turn context budget runId={} action={} reason={} ratio={} nextEst={} limit={} clearedPairs={} shrunkResults={} trimmedTurns={} armed={}", runId, state.decision.action(), state.decision.reason(),
+                String.format(Locale.ROOT, "%.3f", state.decision.ratio()), state.decision.nextEst(), limit,
+                state.cleared, state.shrunkResults, state.trimmedTurns, state.armedNow);
+    }
+
+    private static final class TurnBudgetState {
+
+        private final RunSnapshot snapshot;
+        private final AiProperties.Context config;
+        private final Set<String> protectedIds;
+        private final Set<String> activeRunIds;
+        private final Set<String> otherActiveRuns;
+        private final int systemTokens;
+        private final int toolsTokens;
+        private final int maxOutput;
+        private List<Message> current;
+        private int cleared;
+        private boolean armedNow;
+        private TurnBudgetPlan.Decision decision;
+        private int nextEst;
+        private boolean needRejudge;
+        private boolean clearAttempted;
+        private int shrunkResults;
+        private int shrinkRounds;
+        private int trimmedTurns;
+
+        private TurnBudgetState(RunSnapshot snapshot, AiProperties.Context config,
+                                List<Message> current, Set<String> protectedIds, Set<String> activeRunIds,
+                                Set<String> otherActiveRuns, int systemTokens, int toolsTokens, boolean armed) {
+            this.snapshot = snapshot;
+            this.config = config;
+            this.current = current;
+            this.protectedIds = protectedIds;
+            this.activeRunIds = activeRunIds;
+            this.otherActiveRuns = otherActiveRuns;
+            this.systemTokens = systemTokens;
+            this.toolsTokens = toolsTokens;
+            this.armedNow = armed;
+            this.maxOutput = snapshot == null || snapshot.getMaxTokens() == null ? 0
+                    : Math.max(0, snapshot.getMaxTokens());
+        }
+
+    }
+
+    /**
+     * B3：轮内 L1/L3 真实提交后的压缩事实 + {@code context} 帧。
+     *
+     * <p>只有状态/台账已经写成功才调用；写事实失败只 WARN，不出帧 ——
+     * 宁可少一条可见节点，也不伪造"已压缩"。事件与帧同一份 eventId/atMs/anchor，刷新后由
+     * {@code /history.events} 恢复同一节点。
+     *
+     * <p>帧键集与 {@code ContextCompactor#framePayload} 同口径：{@code savedTokens}/{@code clearedPairs}
+     * 无前端消费者，轮内帧也不写（台账/日志仍保留这两项）。{@code est} 取写回的 {@link ContextState#est()}
+     * （轮内 L1/L3 的基线本就是估算），不在这里硬编码。
+     */
+    private void emitTurnCompactionEvent(String runId, RunSnapshot snapshot, ContextTrigger.Level level, int before,
+                                         int after, int turns, int lostTokens, String reason, List<Message> beforeMessages, ContextState state) {
+        if (this.contextStateStore == null || this.registry == null || snapshot == null || runId == null
+                || snapshot.getSessionId() == null) {
+            return;
+        }
+        String sessionId = snapshot.getSessionId();
+        long atMs = System.currentTimeMillis();
+        try {
+            String eventId = runId + ":turn:" + atMs + ":" + level.wire();
+            String anchor = ContextCompactor.lastToolCallId(beforeMessages);
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("eventId", eventId);
+            event.put("runId", runId);
+            event.put("atMs", String.valueOf(atMs));
+            event.put("cause", "turn_loop");
+            event.put("level", level.wire());
+            event.put("anchorToolCallId", anchor);
+            event.put("turns", turns);
+            event.put("lostTokens", lostTokens);
+            this.contextStateStore.appendEvent(sessionId, event);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("level", level.wire());
+            payload.put("before", before);
+            payload.put("after", after);
+            payload.put("turns", turns);
+            payload.put("lostTokens", lostTokens);
+            payload.put("reason", reason);
+            // P3-1：与写回状态同源（轮内 L1/L3 的基线是估算，不能声明 est=false）。
+            payload.put("est", state != null && state.est());
+            // B5：savedTokens/clearedPairs 无前端消费者，与 ContextCompactor#framePayload 同口径不写帧。
+            payload.put("eventId", eventId);
+            payload.put("committed", true);
+            payload.put("cause", "turn_loop");
+            payload.put("anchorToolCallId", anchor);
+            payload.put("runId", runId);
+            payload.put("atMs", String.valueOf(atMs));
+            try {
+                this.registry.of(runId).context(payload);
+            } catch (RuntimeException ex) {
+                log.warn("failed to send in-turn compaction context frame (ignored; turn unaffected) runId={}", runId, ex);
+            }
+        } catch (RuntimeException ex) {
+            log.warn("failed to write in-turn compaction fact (no context frame this time) runId={} sessionId={}", runId, sessionId, ex);
+        }
+    }
+
+    /**
+     * 轮内 L1 的记账（与轮首压缩 {@code ContextCompactor#compact} 的 L1 收尾<b>同账</b>）。
+     *
+     * <h2>为什么必须记</h2>
+     * 轮内预算先于轮首压缩命中 L1 是常态（{@code keep-tool-pairs} 把最近 N 对都 pin 住，可清的那一对
+     * 往往正好是"本批工具结果"落到历史之后才离开 pin 窗口）。只清不记账的结果是：<b>模型看到的上下文
+     * 真的变了，运维面 {@code ?ledger=1} 与快照 {@code compaction.level} 却仍说"从未压缩"</b> ——
+     * 同一件事两套口径。
+     *
+     * <h2>与轮首的逐项对齐（唯一的差异：谱系已高于 L1 时只记台账、不改状态）</h2>
+     * <ul>
+     * <li>顺序同轮首：<b>先写真值 → 再写台账</b>；任一步失败 ⇒ 本批<b>不清</b>（history 原样）。</li>
+     * <li><b>不宣称原子</b>：两步是独立的 Redis 写，没有事务、也没有回滚 —— 状态成功而台账失败时
+     * {@code ai:ctx:<sid>} 已落 {@code level=L1/atMs} 而台账缺这一条（{@code /context} 说"压过"、
+     * {@code ?ledger=1} 说"没压过"）。这是已知的部分失败窗口，靠下一次清除/轮首压缩收敛；不为此新增
+     * 锁、回滚或新的键协议；</li>
+     * <li>{@code before/after} 用<b>消息估算</b>（{@code ContextEstimator.estimateMessages}），不是含
+     * system/tools 的整包估算 —— 与轮首 {@code ledgerEvent} 同一口径；</li>
+     * <li>{@code level=L1}、{@code turns=0}、{@code lostTokens=0}：L1 只清结果、不折叠轮次（"省了多少"
+     * 看 before−after，不记在 lostTokens 里）；</li>
+     * <li><b>只升不降</b>：{@code level} 同时是谱系当前位置（{@code ContextTrigger#advanceTo} 从这里
+     * 往上推一格）。已到 L2/L3 的会话不因一次轮内 L1 回退成 L1（否则下一轮会重爬 L1→L2、摘要重做），
+     * 此时只写台账、不改状态；</li>
+     * <li><b>usage 基线同轮首</b>：写完 {@code level} 立刻把基线置为"清除后规模估算"
+     * （{@code withUsage(after, …, est=true)}，同 {@code ContextCompactor} 的成功路径）。这不是伪造真值：
+     * 它是有 {@code est=true} 标记的临时估算，轮末 {@code recordTurn} 仍用上游真值整份覆盖。
+     * <b>必须写</b>：{@code level} 是 {@code everCompacted()} 的唯一来源，若留着清除前的大的 used，
+     * 下一轮的轮首压缩会被滞回锁（可压缩历史 / (窗口 − 有效预留) ≥ 60%）整轮挡掉 ——
+     * 连只有轮首能做的 L2/L3 也停摆。</li>
+     * </ul>
+     *
+     * <h2>幂等与无法保证的窗口（如实登记）</h2>
+     * 同一批重复调用不会重复记账：清除后的历史里已是占位符，{@link ToolResultClearing#plan} 不再产出
+     * 可清条目（{@code plan.changed()=false}）⇒ 根本进不到本方法（前提是调用方喂的是清除后的历史）。
+     * 同一 run 的并发驱动通常被 run 租约挡住；但上下文台账（{@code appendLedger(sessionId,…)}）没有
+     * run 围栏，已失去租约的僵尸实例仍可能补写一条。同轮<b>多次</b> L1 清除（后续批次又清掉别的对）
+     * 会各记一条事件，这是两件真事；B5 起不再写 archive，原文由台账/transcript 承担。
+     * 本方法不引入任何新锁，也不承诺跨进程 exactly-once。
+     *
+     * @return 是否允许把清除结果落到历史（{@code false} = 记账失败，本批不清）
+     */
+    private boolean isRecordTurnClear(String runId, RunSnapshot snapshot, List<Message> beforeClear,
+                                      ToolResultClearing.Plan plan, int systemTokens, int toolsTokens) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (isRecordTurnClearAttempt(runId, snapshot, beforeClear, plan, systemTokens, toolsTokens)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isRecordTurnClearAttempt(String runId, RunSnapshot snapshot, List<Message> beforeClear,
+                                             ToolResultClearing.Plan plan, int systemTokens, int toolsTokens) {
+        ContextStateStore store = this.contextStateStore;
+        if (store == null || snapshot == null || snapshot.getSessionId() == null) {
+            // 轻装配面（单测直接 new）：保持"只清结果"的旧口径；生产由容器注入 RunStore
+            return true;
+        }
+        String sessionId = snapshot.getSessionId();
+        long now = System.currentTimeMillis();
+        try {
+            ContextState state = store.read(sessionId);
+            if (state == null) {
+                state = ContextState.EMPTY;
+            }
+            int before = ContextEstimator.estimateMessages(beforeClear);
+            int after = ContextEstimator.estimateMessages(plan.messages());
+            int turnNo = state.turnNo() + 1;
+            // B5：不再写 ai:ctx:archive（只写不读、turnNo 会复用）；原文在台账/transcript。
+            // ① 真值：level 必须被快照看到（否则"清了但显示没压过"）；turns/lostTokens 与轮首 L1 同口径。
+            // 只升不降：`level` 同时是谱系的"当前位置"（ContextTrigger#advanceTo 从这里往上推一格），
+            // 已经到 L2/L3 的会话不能被一次轮内 L1 回退成 L1 —— 那会让下一轮重新爬 L1→L2（摘要重做、
+            // 档位看起来"降级"）。故仅在当前级 ≤ L1 时改写状态；更高的谱系保持原样（台账照记这次 L1 事件）。
+            ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
+            ContextState clearedState = state;
+            if (lineage.ordinal() <= ContextTrigger.Level.L1.ordinal()) {
+                // 与轮首 ContextCompactor 的成功路径同一口径：level + "清除后规模估算"基线一起写。
+                // est=true 明确这是估算；轮末 recordTurn 会用真值覆盖。缺了这一步，下一次轮首压缩会因为
+                // 沿用的旧 used 撞上滞回线（hysteresis_locked）而整轮不做（含 L2/L3）。
+                // C13 / I3：与轮首压缩的新基线同口径 —— 含 system + tools（上游真值本就含这两项）。
+                // 相加的必须是<b>本轮请求</b>的 prefix（附录入参），不是 state 里上一轮的锚点：
+                // 工具集/工作区快照变了之后，旧锚点会让基线算错，而锚点自己也一直不刷新。
+                int baseline = after + Math.max(0, systemTokens) + Math.max(0, toolsTokens);
+                clearedState = state.withCompaction(ContextTrigger.Level.L1, 0, 0, TurnBudgetPlan.REASON_L1, now)
+                        .withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
+                                snapshot.getProviderId(), Math.max(0, systemTokens), Math.max(0, toolsTokens),
+                                state.inputTokens());
+                store.write(sessionId, clearedState);
+            }
+            // ③ 台账：键集与 ContextCompactor#ledgerEvent 逐键一致
+            store.appendLedger(sessionId, turnClearLedgerEvent(before, after, plan, snapshot, now,
+                    clearedState.circuit()));
+            log.info("in-turn L1 clearing recorded runId={} sessionId={} turnNo={} before={} after={} clearedPairs={}",
+                    runId, sessionId, turnNo, before, after, plan.cleared().size());
+            emitTurnCompactionEvent(runId, snapshot, ContextTrigger.Level.L1, before, after, 0, 0,
+                    TurnBudgetPlan.REASON_L1, beforeClear, clearedState);
+            return true;
+        } catch (RuntimeException ex) {
+            // 两步各自独立写、无事务：此刻 ai:ctx:<sid>（level=L1/atMs）可能已落盘，而台账缺一条。
+            // 本批不清（history 原样）；残留靠下一次清除/轮首压缩收敛 —— 不在这里做回滚。
+            log.warn("in-turn L1 clearing not recorded (batch not cleared; state may be written without a ledger row: two steps, no transaction) runId={}",
+                    runId, ex);
+            return false;
+        }
+    }
+
+    /**
+     * 轮内<b>硬截断</b>的记账（C13 / I5；与轮首 {@code ContextCompactor} 的 L3 同账）。
+     *
+     * <h2>为什么必须记</h2>
+     * 越窗恢复会真的丢最旧几轮（模型看到的上下文变了）。只发一条 trace 的结果是：{@code ?ledger=1}
+     * 说"从未压缩"，{@code /context} 的 {@code compaction.level/turns/lostTokens} 也不动，
+     * 台账/事件里没有记录 —— 同一件事多套口径，且用户/运维无法追溯"哪些轮没了"。
+     *
+     * <h2>顺序与失败语义（与轮内 L1 逐项对齐）</h2>
+     * <b>先写真值/档位 → 再写台账</b>；任一步抛错 ⇒ 本批<b>不应用</b>这次截断
+     * （{@code false}）。与 L1 一样<b>不宣称原子</b>：两步是独立的 Redis 写，状态成功而台账失败时
+     * {@code ai:ctx:<sid>} 已是 {@code level=L3} 而台账缺这一条（已知的部分失败窗口，靠下一次
+     * 轮首压缩收敛）；不为此新增锁或回滚协议。
+     *
+     * @return 是否允许把截断结果落到历史（{@code false} = 记账失败，历史原样）
+     */
+    private boolean isRecordTurnTrim(String runId, RunSnapshot snapshot, List<Message> beforeTrim, HardTrim.Plan plan,
+                                     int systemTokens, int toolsTokens) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (isRecordTurnTrimAttempt(runId, snapshot, beforeTrim, plan, systemTokens, toolsTokens)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isRecordTurnTrimAttempt(String runId, RunSnapshot snapshot, List<Message> beforeTrim,
+                                            HardTrim.Plan plan, int systemTokens, int toolsTokens) {
+        ContextStateStore store = this.contextStateStore;
+        if (store == null || snapshot == null || snapshot.getSessionId() == null) {
+            // 轻装配面（单测直接 new）：保持"只丢轮"的旧口径；生产由容器注入 RunStore
+            return true;
+        }
+        String sessionId = snapshot.getSessionId();
+        long now = System.currentTimeMillis();
+        // 原状态留一份引用：失败时 best-effort 回写（N1：失败不得留档位）
+        ContextState previous = null;
+        try {
+            ContextState state = store.read(sessionId);
+            if (state == null) {
+                state = ContextState.EMPTY;
+            }
+            previous = state;
+            int before = ContextEstimator.estimateMessages(beforeTrim);
+            int after = ContextEstimator.estimateMessages(plan.messages());
+            int turnNo = state.turnNo() + 1;
+            // B5：不再写 ai:ctx:archive（只写不读、turnNo 会复用）；原文在台账/transcript。
+            // ① 真值/档位：基线同轮首（含本轮 system + tools）。
+            // N1：<b>至多升一级</b> —— 当前 NONE/L1 ⇒ 最多写 L2，已到 L2/L3 保持原级。
+            // 为什么不是无条件 L3：`level` 同时是谱系当前位置（advanceTo 从这里往上推一格、只升不降），
+            // 写死 L3 之后每轮目标都被钳在 L3（L2 摘要再也不会被选中，摘要能力等于永久关掉）；
+            // ② 一次"临时救场"的轮内截断被永久记成"这个会话已经硬截断过"。台账仍如实记本次 L3。
+            int baseline = after + Math.max(0, systemTokens) + Math.max(0, toolsTokens);
+            ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
+            ContextTrigger.Level written = lineage.ordinal() <= ContextTrigger.Level.L1.ordinal()
+                    ? ContextTrigger.Level.L2 : lineage;
+            ContextState trimmed = state
+                    .withCompaction(written, plan.droppedTurns(), plan.lostTokens(), TurnBudgetPlan.REASON_TRIM, now)
+                    .withUsage(baseline, state.completionTokens(), state.turnNo(), true, now, snapshot.getModelId(),
+                            snapshot.getProviderId(), Math.max(0, systemTokens), Math.max(0, toolsTokens),
+                            state.inputTokens());
+            store.write(sessionId, trimmed);
+            // ③ 台账：键集与 ContextCompactor#ledgerEvent 逐键一致（L3 带 turns/lostTokens）
+            store.appendLedger(sessionId,
+                    turnTrimLedgerEvent(before, after, plan, snapshot, now, trimmed.circuit()));
+            log.info("in-turn L3 hard truncation recorded runId={} sessionId={} turnNo={} before={} after={} turns={} lostTokens={}",
+                    runId, sessionId, turnNo, before, after, plan.droppedTurns(), plan.lostTokens());
+            emitTurnCompactionEvent(runId, snapshot, ContextTrigger.Level.L3, before, after, plan.droppedTurns(),
+                    plan.lostTokens(), TurnBudgetPlan.REASON_TRIM, beforeTrim, trimmed);
+            return true;
+        } catch (RuntimeException ex) {
+            // N1：失败不得把"压过"留在状态里 —— 否则这个会话被永久记成"已截断/已到 L2-L3"（且基线被改小），
+            // 而历史其实没动。这里 best-effort 把状态写回原值；写回也失败才退化成已知的部分失败窗口。
+            try {
+                if (previous != null) {
+                    store.write(sessionId, previous);
+                }
+            } catch (RuntimeException rollback) {
+                log.warn("in-turn L3 hard truncation failed and the state write-back also failed (level may linger; next turn-start compaction converges) runId={}",
+                        runId, rollback);
+            }
+            log.warn("in-turn L3 hard truncation not recorded (no truncation this time; state write-back attempted) runId={}", runId, ex);
+            return false;
+        }
+    }
+
+    /**
+     * 轮内 L3 的台账事件（字段与 {@code ContextCompactor#ledgerEvent} 同键同义）。
+     */
+    private static Map<String, Object> turnTrimLedgerEvent(int before, int after, HardTrim.Plan plan,
+                                                           RunSnapshot snapshot, long now, String circuit) {
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("level", ContextTrigger.Level.L3.wire());
+        event.put("before", before);
+        event.put("after", after);
+        event.put("turns", plan.droppedTurns());
+        event.put("lostTokens", plan.lostTokens());
+        event.put("summaryChars", 0);
+        event.put("model", snapshot.getModelId());
+        event.put("est", false);
+        event.put("atMs", String.valueOf(now));
+        event.put("reason", TurnBudgetPlan.REASON_TRIM);
+        event.put("clearedPairs", 0);
+        event.put("clearedToolCallIds", List.of());
+        event.put("circuit", ObjectUtils.defaultIfNull(circuit, CompactionFuse.CLOSED));
+        return event;
+    }
+
+    /**
+     * 轮内 L1 的台账事件（字段与 {@code ContextCompactor#ledgerEvent} 同键同义）。
+     */
+    private static Map<String, Object> turnClearLedgerEvent(int before, int after, ToolResultClearing.Plan plan,
+                                                            RunSnapshot snapshot, long now, String circuit) {
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("level", ContextTrigger.Level.L1.wire());
+        event.put("before", before);
+        event.put("after", after);
+        event.put("turns", 0);
+        event.put("lostTokens", 0);
+        event.put("summaryChars", 0);
+        event.put("model", snapshot.getModelId());
+        event.put("est", false);
+        event.put("atMs", String.valueOf(now));
+        event.put("reason", TurnBudgetPlan.REASON_L1);
+        event.put("clearedPairs", plan.cleared().size());
+        event.put("clearedToolCallIds", plan.clearedIds());
+        event.put("circuit", ObjectUtils.defaultIfNull(circuit, CompactionFuse.CLOSED));
+        return event;
+    }
+
+    /**
+     * 首轮判定输入：真值 {@code usage}（若本跳有）与整包估算一起交给 {@link TurnBudgetPlan}，
+     * 由它按"真值优先"选判据值。
+     */
+    private TurnBudgetPlan.Request turnBudgetRequest(int limit, AiProperties.Context config, ContextMeter meter,
+                                                     Prompt prompt, List<Message> history, int delta, boolean armed, String runId, int maxOutputTokens) {
+        return new TurnBudgetPlan.Request(limit, config.getReserveTokens(), config.getL1Percent(),
+                config.getL3Percent(), meter.measured(), meter.promptTokens(), meter.completionTokens(),
+                estimateRequestTokens(prompt, history), delta, armed, this.beacon.budgetSkippedBatches(runId),
+                maxOutputTokens);
+    }
+
+    /**
+     * 本轮分母（唯一取数点：与轮首压缩、{@code /context}、健康检查同一个 resolver）。
+     *
+     * <p>未注入 resolver ⇒ 返回 0（降级态，不判轮内预算）：既有单测/轻装配面因此行为一字不变；
+     * 生产由容器注入，不存在"漏装配就不判"的静默降级（bean 恒存在）。
+     */
+    private int turnBudgetLimit(RunSnapshot snapshot) {
+        if (this.contextLimitResolver == null || snapshot == null) {
+            return 0;
+        }
+        try {
+            return this.contextLimitResolver.resolve(snapshot.getProviderId(), snapshot.getModelId());
+        } catch (RuntimeException ex) {
+            log.warn("failed to resolve the in-turn context budget limit (batch not judged) runId={}", snapshot.getRunId(), ex);
+            return 0;
+        }
+    }
+
+    /**
+     * 下一发请求的整包估算：system + tools schema + 历史含本批。
+     */
+    private static int estimateRequestTokens(Prompt prompt, List<Message> history) {
+        return systemTokensOf(prompt) + toolsTokensOf(prompt) + ContextEstimator.estimateMessages(history);
+    }
+
+    /**
+     * 本轮 system（人设 + 工作区快照）估算 —— 取自 instructions 里的 {@link SystemMessage}。
+     */
+    private static int systemTokensOf(Prompt prompt) {
+        int system = 0;
+        for (Message message : prompt.getInstructions()) {
+            if (message instanceof SystemMessage systemMessage) {
+                system += ContextEstimator.estimate(systemMessage.getText());
+            }
+        }
+        return system;
+    }
+
+    /**
+     * 本轮披露工具 schema 估算（与 {@link #estimateRequestTokens} 同一份判定）。
+     */
+    private static int toolsTokensOf(Prompt prompt) {
+        return prompt.getOptions() instanceof ToolCallingChatOptions options
+                ? ContextEstimator.estimateToolSchemas(options.getToolCallbacks()) : 0;
+    }
+
+    /**
+     * 本会话的活跃 run（含本轮；B1：L1 不清、L3 不裁其他活跃 run 的上下文）。
+     *
+     * <p>读失败按"只有本轮是活跃的"处理：宁可不裁/不清，也不把别的活跃轮当成已结束。
+     */
+    private Set<String> activeRunIds(String runId, RunSnapshot snapshot) {
+        Set<String> ids = new HashSet<>();
+        if (snapshot != null && snapshot.getSessionId() != null) {
+            try {
+                ids.addAll(this.store.activeRunIds(snapshot.getSessionId()));
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("active-run-ids-read")) {
+                    log.warn("could not read active runs (protecting this turn only) runId={}", runId, ex);
+                }
+            }
+        }
+        if (StringUtils.isNotBlank(runId)) {
+            ids.add(runId);
+        }
+        return ids;
+    }
+
+    /**
+     * 未决 HITL 条目的 toolCallId（工具结果永不清除：用户还要在卡片上复核"批的是什么"）。
+     */
+    private java.util.Optional<Set<String>> pendingToolCallIds(String runId) {
+        try {
+            Set<String> ids = new HashSet<>();
+            for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+                // 与轮首同一"未决"口径：待处理，或已批准但尚未执行（用户可能正在复核）
+                boolean unresolved = PendingToolCall.PENDING.equals(pending.getStatus())
+                        || (PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted());
+                if (unresolved && pending.getToolCallId() != null) {
+                    ids.add(pending.getToolCallId());
+                }
+            }
+            return java.util.Optional.of(ids);
+        } catch (RuntimeException ex) {
+            // 读不出来 ⇒ 本次不清（宁可不省 token，也不清掉用户可能正在复核的那一条）
+            if (LogSampling.canAcquire("pending-tool-call-ids-read")) {
+                log.warn("could not read pending entries (skipping L1 clearing this time) runId={}", runId, ex);
+            }
+            return java.util.Optional.empty();
+        }
+    }
+
+    /**
+     * 一次轮内预算的结局（历史 + 是否越窗 + 判定）。
+     */
+    private record TurnBudgetOutcome(List<Message> history, boolean overflow, TurnBudgetPlan.Decision decision) {
+    }
+
+    /**
+     * 把累计步数写回外置快照（唯一真值）。
+     *
+     * <p>为什么单独写一次而不是只改 {@code isSettle()}：挂起路径（{@code saveSuspended}）自己会
+     * {@code get} 一份新快照再保存 —— 只在内存对象上自增，跨进程续跑读到的仍是旧值。
+     */
+    private void persistToolSteps(String runId, int steps) {
+        RunSnapshot fresh = this.store.get(runId);
+        if (fresh == null || fresh.getToolSteps() == steps) {
+            return;
+        }
+        fresh.setToolSteps(steps);
+        this.store.save(fresh);
+    }
+
+    /**
+     * SKIPPED 的人读 message（模型信封/帧 result/续跑重放共用一份措辞）。
+     */
+    private static String skippedMessage(String upstreamName, String upstreamCode) {
+        String code = StringUtils.defaultIfBlank(upstreamCode, ToolOutcome.CODE_TOOL_EXECUTION_FAILED);
+        return "未执行：上游 " + upstreamName + " 失败（" + code + "），本调用已跳过";
+    }
+
+    // ── 三通道 ──────────────────────────────────────────────────────────────
+
+    /**
+     * 工具执行耗时 = 总耗时 − 审批等待（AI 日志最小补齐批）。
+     *
+     * <p>只有"等人"的两类（{@code CONFIRM}/{@code FRONTEND}）才扣等待：扣的是
+     * {@code reqAtMs（请求帧送达）→ resolvedAtMs（决策落地）} 这一段。缺任一端（旧数据 / 未送达的卡）
+     * 就不扣 —— 宁可少扣也不要凭猜造一个数出来。
+     */
+    private static long execMsOf(PendingToolCall source, long totalToolMs) {
+        long total = Math.max(0L, totalToolMs);
+        if (source == null) {
+            return total;
+        }
+        boolean humanWait = PendingToolCall.KIND_CONFIRM.equals(source.getKind())
+                || PendingToolCall.KIND_FRONTEND.equals(source.getKind());
+        if (!humanWait) {
+            return total;
+        }
+        long requested = source.getReqAtMs();
+        long resolved = source.getResolvedAtMs();
+        if (requested <= 0L || resolved <= requested) {
+            return total;
+        }
+        return Math.max(0L, total - (resolved - requested));
+    }
+
+    /**
+     * "没有执行"的三条路径（预检拦截 / 步数到顶 / 首错即停的连带跳过）的结局行。
+     *
+     * <p>它们<b>不发 start</b>：成对性只对真实执行成立。若也补 start，"start 没有 end"这个判据就会被
+     * 稀释成永远成对 —— 那正是本批要堵的洞。字段里 {@code skipped=true} 是机器可判的"没跑"。
+     */
+    private static void traceToolSkipped(String runId, String sessionId, PendingToolCall pending, String code) {
+        AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId", pending.getToolCallId(), "tool",
+                pending.getName(), "kind", pending.getKind(), "ms", 0, "execMs", 0, "skipped", true, "ok", false,
+                "outcome", pending.effectiveOutcome().wire(), "code", code == null ? "-" : code, "executed", false,
+                "chars", 0);
+    }
+
+    /**
+     * "已经开始但没走到结算"的结局行：取消（事件边界轮询命中）与执行段异常。
+     *
+     * <p>此前这两条路径只抛异常、不写 end 行 ⇒ 日志里留下一条<b>只有 start 的孤儿调用</b>，
+     * 排查时无从判断"是卡住了还是被取消了"。
+     *
+     * <p><b>条目已终态时它也是结算发点，故必须参与同一套仲裁</b>（M-2′ 残余）：取消若是在
+     * {@code await} 里被看到的，条目此刻已经是 {@code CANCELLED}，取消收尾
+     * （{@code ConfirmGate#settleCancelledToolCalls}）还会再结同一条 —— 两侧各发一行就成了
+     * "同一 toolCallId 两条 end"。判据复用 {@code ToolCallEndTrace#emitCustomOnce}
+     * （{@code CONFIRM/FRONTEND} 抢 {@code ai:observed} 首写者，{@code BACKEND} 照旧直发、不占位），
+     * <b>载荷与业务语义逐字不变</b>。
+     *
+     * <p><b>条目仍 {@code PENDING} 时不占位</b>：这时 abort 行只是"本次尝试没走完"的诊断，
+     * 没有结算任何结论；占位会把该条之后真正执行成功的结算行挡掉（从"多一行"变成"少一行"）。
+     * 未决条目的取消收尾在别处也不存在（取消会先把它转成 CANCELLED，届时走的是已终态分支）。
+     */
+    private void traceToolAborted(String runId, String sessionId, PendingToolCall pending, long startedAtMs,
+                                  RuntimeException error) {
+        long ms = Math.max(0L, System.currentTimeMillis() - startedAtMs);
+        boolean cancelled = error instanceof StreamViolationException violation
+                && StreamViolationException.CANCELLED.equals(violation.getCode());
+        PendingToolCall settled;
+        try {
+            settled = this.store.pendingLenient(runId, pending.getToolCallId());
+        } catch (RuntimeException readFailure) {
+            // C1：诊断路径不得二次抛（否则原始异常被替换，连 tool_call_end 都写不出）。
+            if (LogSampling.canAcquire("aborted-tool-pending-read")) {
+                log.warn("traceToolAborted could not read pending entry; using arguments runId={} toolCallId={}", runId,
+                        pending.getToolCallId(), readFailure);
+            }
+            settled = pending;
+        }
+        if (settled == null) {
+            settled = pending;
+        }
+        PendingToolCall source = settled;
+        Runnable line = () -> AiTrace.eventOn(runId, sessionId, "tool_call_end", "toolCallId",
+                pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "ms", ms, "execMs", ms,
+                "skipped", false, "ok", false, "outcome",
+                cancelled ? ToolOutcome.CANCELLED.wire() : ToolOutcome.FAILED.wire(), "code",
+                cancelled ? ToolOutcome.CODE_RUN_CANCELLED : CODE_TOOL_EXECUTION_THREW, "executed", source.isExecuted(),
+                "chars", 0, "cancelled", cancelled);
+        if (PendingToolCall.PENDING.equals(source.getStatus())) {
+            line.run();
+        } else {
+            ToolCallEndTrace.emitCustomOnce(this.settlementObservations, runId, pending.getToolCallId(),
+                    pending.getKind(), line);
+        }
+    }
+
+    /**
+     * 事件边界上的取消检查：命中即抛出，交由 {@code ResilientChatService} 以取消收尾。
+     */
+    private void checkCancelled(String runId) {
+        CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
+        if (state == CancellationRegistry.CancelState.CANCELLED) {
+            throw new StreamViolationException(StreamViolationException.CANCELLED,
+                    "Run cancelled; tool execution stopped at an event boundary (runId=" + runId + ")");
+        }
+        if (state == CancellationRegistry.CancelState.UNKNOWN) {
+            // N-1：这是"执行副作用前的最后一道门"，UNKNOWN 必须拒绝执行；但它不是用户取消，
+            // 不能用 CANCELLED（否则会被 cancelTerminal 记成“已停止/ALREADY_CANCELLED”）。
+            // 用基础设施不可用码走普通失败/可重试路径。
+            throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+                    "Cancellation state unknown (Redis read failed); tool execution stopped at an event boundary (runId=" + runId + ")");
+        }
+    }
+
+    /**
+     * F5 预检未通过：就地结算成"未进确认门、未执行"的终态条目（code={@code PRECHECK_FAILED}、
+     * retryable=true），只留一条失败结局帧 —— 确认卡与闸门一概不存在。
+     *
+     * <p><b>为什么状态用 {@link PendingToolCall#PRECHECK_FAILED} 而不是 BLOCKED</b>：BLOCKED 的卡面文案
+     * 是前端写死的"不在披露范围内"（{@code parts.ts} 的 tool_result 分支按 {@code status==='BLOCKED'}
+     * 落阻断口径），预检失败挂上去会显示错误原因；而本状态在 tool_result 帧上落到既有的
+     * {@code outcome=failed} 分支，前端零改动即可显示"失败 + 完整原因"。续跑口径两者一致
+     * （{@link #resolvePending} 对非 PENDING/APPROVED 一律复用 resultText、不执行）。
+     */
+    private void blockPreflight(String runId, PendingToolCall pending, ToolPreflightService.PreflightReport report) {
+        long now = System.currentTimeMillis();
+        String text = report.failureMessage();
+        pending.setPreflight(report.asMap());
+        pending.setStatus(PendingToolCall.PRECHECK_FAILED);
+        pending.setOutcome(ToolOutcome.FAILED.wire());
+        pending.setCode(ToolOutcome.CODE_PRECHECK_FAILED);
+        pending.setReason(ToolOutcome.CODE_PRECHECK_FAILED);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setRequestedAtMs(now);
+        pending.setResolvedAtMs(now);
+        pending.setResultText(text);
+        this.store.putPending(runId, pending);
+        log.warn("preflight failed; not entering confirm gate runId={} tool={} failures={} (not parked, no confirm request, not executed)", runId,
+                pending.getName(),
+                report.failures().stream().map(ToolPreflightService.PreflightReport.Check::name).toList());
+    }
+
+    /**
+     * 预检基础设施不可用（MINOR-4 的<b>安全侧兜底</b>）：{@code preflight.inspect} 自身抛错时，
+     * 既不放行、也不冒充"预检未通过"—— 结算成 {@code code=PRECHECK_UNAVAILABLE} 的可重试失败，
+     * <b>同样不进确认门、不弹卡、不执行</b>。宁可让模型如实说"暂时查不了、请稍后再试"，
+     * 也不能把数据库/文件系统抖动变成一次未经检查的放行。
+     */
+    private void blockPreflightUnavailable(String runId, PendingToolCall pending, RuntimeException error) {
+        long now = System.currentTimeMillis();
+        String text = ToolPreflightService.NOT_APPROVED_NOT_EXECUTED + "（" + ToolOutcome.CODE_PRECHECK_UNAVAILABLE
+                + "）：预检暂不可用，预检过程发生内部错误，本次未进入确认门、未执行 —— 这不代表条件已满足。"
+                + "请稍后重试；若持续出现请联系维护人员。";
+        pending.setStatus(PendingToolCall.PRECHECK_FAILED);
+        pending.setOutcome(ToolOutcome.FAILED.wire());
+        pending.setCode(ToolOutcome.CODE_PRECHECK_UNAVAILABLE);
+        pending.setReason(ToolOutcome.CODE_PRECHECK_UNAVAILABLE);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setRequestedAtMs(now);
+        pending.setResolvedAtMs(now);
+        pending.setResultText(text);
+        this.store.putPending(runId, pending);
+        log.error("preflight infrastructure error; not entering confirm gate runId={} tool={} (not parked, no confirm request, not executed)", runId,
+                pending.getName(), error);
+    }
+
+    /**
+     * 防线③拦截（T1）：工具在当前上下文里未披露（越 scope）——<b>不产生任何副作用</b>
+     * （不认领、不执行、不记台账），只把结构化错误结果回填给模型，让人机都能看见"这次没执行"。
+     *
+     * <p>
+     * 为什么必须回填而不是静默丢弃/抛异常：
+     * <ul>
+     * <li>抛异常 → 整轮以 {@code error} 收尾，一次越权调用会把用户已看到的正文一并废掉（代价过大）；</li>
+     * <li>静默不回填 → 模型看不到任何反馈，可能反复重试同一个越权调用；</li>
+     * <li>回填结构化错误 → 模型读到"未执行 + 原因 + 当前上下文 + 该怎么办"，
+     * 官方循环继续（模型如实解释并改走已披露的工具或提示用户切页面）。</li>
+     * </ul>
+     */
+    private String blockOutOfScope(String runId, AiContext context, PendingToolCall pending) {
+        String text = SCOPE_VIOLATION_CODE + "：工具 " + pending.getName() + " 未执行 —— 它不在当前工作区上下文"
+                + "（" + describeContext(context) + "）的披露范围内（FR-5.2 三道防线的执行兜底）。"
+                + "请改用系统当前披露给你的工具；若用户确实要做这件事，请提示其先切换到对应的页面/步骤或任务，再重新发起。";
+        pending.setStatus(PendingToolCall.BLOCKED);
+        pending.setOutcome(ToolOutcome.BLOCKED.wire());
+        pending.setCode(SCOPE_VIOLATION_CODE);
+        pending.setReason(SCOPE_VIOLATION_CODE);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(text);
+        this.store.putPending(runId, pending);
+        this.registry.of(runId).toolResult(pending, false, false, text);
+        log.warn("guard 3 blocked out-of-scope tool call runId={} tool={} context={} (not executed, not claimed, not recorded in ledger)",
+                runId, pending.getName(), describeContext(context));
+        return text;
+    }
+
+    /**
+     * 表格开关拦截（AI 表格工具治理方案 §2.4）：该工具被管理员关闸 ——<b>不执行、不认领、不记台账</b>，
+     * 回填结构化失败（{@code outcome=failed}、{@code code=SHEET_DISABLED}）。
+     *
+     * <p>
+     * 与 {@link #blockOutOfScope} 的三点差异都是刻意的：
+     * <ol>
+     * <li><b>码不同</b>：{@code SHEET_DISABLED} 不复用 {@code SCOPE_NOT_DISCLOSED} —— 后者在前端卡面
+     * 渲染成「不在披露范围内」，会把"功能被关了"误导成"用户点错了页面"；</li>
+     * <li><b>文案不同</b>：读闸关说"未读任何数据"（防模型编造行数），写闸关说"未做任何修改"
+     * （与既有写侧失败文案同句式）；</li>
+     * <li><b>模型侧多一句可行动提示</b>："不要重试；请让用户联系管理员…" —— 开关是进程内一次绑定，
+     * 换参数重试必然同样失败，与"首错即停"同姿态。</li>
+     * </ol>
+     * 状态用 {@link PendingToolCall#SHEET_DISABLED}（单列）而不是 {@code BLOCKED}：前者在
+     * {@code tool_result} 帧上落 {@code outcome=failed} 分支，前端零改动即可显示完整原因。
+     */
+    private String blockSheetDisabled(String runId, AiContext context, PendingToolCall pending) {
+        String name = pending.getName();
+        // 「哪侧被关」以开关的真实状态为准；拿不到（未装配 / 未受治理）才回落按工具分类二分。
+        String gate = this.toolRegistry.sheetDisabledGate(name);
+        boolean readSide = gate == null
+                ? SheetSwitches.READ_TOOLS.contains(name)
+                : "read-enabled".equals(gate);
+        String human = readSide ? SheetSwitches.readDisabledText() : SheetSwitches.writeDisabledText();
+        String text = ToolOutcome.CODE_SHEET_DISABLED + "：工具 " + name + " 未执行 —— " + human
+                + "（管理员关闭了 app.ai.sheet." + (readSide ? "read-enabled" : "write-enabled")
+                + "；当前上下文 " + describeContext(context) + "）。"
+                + "不要重试；请让用户联系管理员开启表格" + (readSide ? "读取" : "写入")
+                + (readSide ? "，或改用导出后自行查看。" : "，或改用导出后自行编辑。");
+        pending.setStatus(PendingToolCall.SHEET_DISABLED);
+        pending.setOutcome(ToolOutcome.FAILED.wire());
+        pending.setCode(ToolOutcome.CODE_SHEET_DISABLED);
+        pending.setReason(ToolOutcome.CODE_SHEET_DISABLED);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(text);
+        this.store.putPending(runId, pending);
+        this.registry.of(runId).toolResult(pending, false, false, text);
+        if (this.sheetAudit != null) {
+            // 应恒 0；非 0 = 有旧缓存调用或在途残留（方案 §4.4 的告警口径）
+            this.sheetAudit.disabledReject();
+        }
+        log.warn("sheet tool blocked by switch runId={} tool={} context={} (not executed, not claimed, not recorded in ledger)",
+                runId, name, describeContext(context));
+        return text;
+    }
+
+    /**
+     * 上下文的人读形态（错误文本与日志共用）。
+     */
+    private static String describeContext(AiContext context) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("page=").append(StringUtils.defaultIfBlank(context.getPage(), "未指定"));
+        sb.append(", taskType=").append(context.getTaskType() == null ? "无" : context.getTaskType());
+        sb.append(", step=").append(context.getStep() == null ? "无" : context.getStep());
+        if (context.getTaskId() != null) {
+            sb.append(", taskId=").append(context.getTaskId());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 前端工具：挂起等前端回灌（结局帧由 ConfirmGate 侧发出）。
+     *
+     * <p>入参安全闸（DC-15）在<b>挂起前</b>已经跑过（{@code executeToolCallsResolved} 的
+     * {@code inspectFrontendArguments}），走到这里的条目都过了闸；本方法里的那次复查是兜底
+     * （预检后入参不会变，确定性复核器下不可达）：一旦兜底才判不通过，仍<b>不挂起</b>、不发
+     * {@code frontend_tool_request}、不占等待上限，只把结构化错误结果回填模型 —— 模型读到
+     * "哪一处不合规"后可以改一版再试（而不是白等 120s 超时）。
+     */
+    private String awaitFrontend(String runId, PendingToolCall pending, AiContext context) {
+        FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, context);
+        if (verdict != null && !verdict.accepted()) {
+            return rejectFrontendArguments(runId, pending, verdict);
+        }
+        PendingToolCall resolved = this.gate.awaitFrontendResult(runId, pending);
+        return StringUtils.defaultString(resolved.getResultText());
+    }
+
+    /**
+     * 第一个认领该工具名的复核器的入参判定；没有复核器返回 null（= 该工具不受闸门约束）。
+     *
+     * <p>上下文与入参一起传给复核器（槽位放行批）：生成式表单要按 {@code purpose} 与
+     * {@code AiContext.extra[taskSlots]} 判断"这张表还有没有真实缺口"；其它复核器走
+     * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 的默认实现，行为不变。
+     */
+    private FrontendToolGuard.Verdict inspectFrontendArguments(PendingToolCall pending, AiContext context) {
+        for (FrontendToolGuard guard : this.frontendGuards) {
+            if (guard.isSupported(pending.getName())) {
+                // 工具安全边界批：按**真名**复核 —— 只传 json 会让复核器靠"入参形状"猜工具名，
+                // 少一个必填键就会落到别的分支被放行（update_rows 漏 set ⇒ 被当成撤销）。
+                return guard.inspectArguments(pending.getName(), pending.getArguments(), context);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 入参被安全闸拒绝（DC-15）：与防线③（{@link #blockOutOfScope}）同一手法 ——
+     * <b>不产生任何副作用</b>（不挂起、不下发前端、不认领、不记台账），只把结构化错误结果
+     * 回填模型并收敛成终态（不留在 {@code PENDING}，否则续跑会把它当成"等人/等前端"）。
+     *
+     * <p>帧面分两种：一般入参拒绝给一条 {@code frontend_tool_result}（ok=false，与
+     * "前端超时"同帧型，让用户看见"这次没执行、为什么"）；生成式表单的<b>系统拒绝</b>
+     * （{@link #systemRejectedWithoutUserFrames}）一条都不发 —— 被判的是模型给的 schema，
+     * 用户没有动作可看，发帧只会落一张"已拒绝"的空卡。
+     *
+     * <p>正常路径（挂起前的预检）只做 {@link #settleFrontendRejected}（写条目 + 日志），帧由
+     * 执行循环按既有帧序发；本方法保留给 {@link #awaitFrontend} 的兜底复查（预检后入参不会变，
+     * 走到这里说明装配被人为改动，仍要收敛成同一结局）。
+     */
+    private String rejectFrontendArguments(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
+        String text = settleFrontendRejected(runId, pending, verdict);
+        if (isSystemRejectedWithoutUserFrames(pending)) {
+            // 兜底复查才发现系统拒绝：此时 tool_start 已随执行循环发出（确定性复核器下不可达），
+            // 但表单本身仍不能下发 —— 不给用户再补一张"已拒绝"的结局卡。
+            log.warn("generative form rejected only at post-park recheck (expected unreachable) runId={} toolCallId={} code={} (no outcome frame sent)",
+                    runId, pending.getToolCallId(), pending.effectiveCode());
+            return text;
+        }
+        this.registry.of(runId).frontendToolResult(pending, false, text);
+        return text;
+    }
+
+    /**
+     * 入参拒绝的<b>结算</b>（状态/码/原因/结果文本 + 落库 + WARN）；不发帧、不认领、不记台账。
+     *
+     * <p>复核结论<b>整份</b>带下去（含 {@code issues}）：拆成 code/message/reasons 再重建会把
+     * 结构化清单丢掉，结算文本里就再也找不到 {@code LINKAGE_*} 这类按码定位的机器事实。
+     */
+    private String settleFrontendRejected(String runId, PendingToolCall pending, FrontendToolGuard.Verdict verdict) {
+        return settleFrontendRejected(runId, pending, verdict.code(), verdict.message(), verdict.reasons(),
+                verdict.issues());
+    }
+
+    /**
+     * F11：完全相同入参的 {@code set_condition} 幂等重放的结算 —— 条目落成 {@code FRONTEND_RESULT/OK}
+     * （模型看到与首次一致的成功回执），但<b>本次没有下发前端、没有重复写</b>：
+     * {@code executed=false}（副作用属于首次调用），也不发会触发前端动作的请求帧。
+     */
+    private String settleIdempotentReplay(String runId, PendingToolCall pending, String resultText) {
+        pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+        pending.setOutcome(ToolOutcome.OK.wire());
+        pending.setCode(null);
+        pending.setReason(null);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(resultText);
+        this.store.putPending(runId, pending);
+        if (log.isDebugEnabled())
+            log.debug("set_condition called again with identical arguments; idempotent replay (not re-sent to frontend) runId={} toolCallId={}", runId, pending.getToolCallId());
+        return resultText;
+    }
+
+    /**
+     * 入参拒绝的结算（已有码/说明/原因的形态）：条件闭环的零副作用拒绝走这一条 ——
+     * 不挂起、不下发、不执行，结论落成 {@code REJECTED_ARGUMENTS} 并把明确出口回给模型。
+     */
+    private String settleFrontendRejected(String runId, PendingToolCall pending, String code, String message,
+                                          List<String> reasons) {
+        return settleFrontendRejected(runId, pending, code, message, reasons, List.of());
+    }
+
+    /**
+     * 入参拒绝的结算（带结构化清单）：{@code issues} 原样进 render，机器可读段不丢。
+     */
+    private String settleFrontendRejected(String runId, PendingToolCall pending, String code, String message,
+                                          List<String> reasons, List<FormIssue> issues) {
+        String text = new FrontendToolGuard.Verdict(false, code, message, reasons, issues, null).render();
+        pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
+        pending.setOutcome(ToolOutcome.REJECTED.wire());
+        pending.setCode(code);
+        pending.setReason(code);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(text);
+        this.store.putPending(runId, pending);
+        log.warn("frontend tool arguments rejected by the condition loop [contract=frontend tool arguments rejected by condition loop] runId={} tool={} code={} reasonCount={} (not parked, not sent, not executed)", runId, pending.getName(), code, reasons.size());
+        return text;
+    }
+
+    /**
+     * 确认门：放行则执行（经资源锁、认领与台账，恰好一次），拒绝（或历史遗留的 TIMEOUT 记录）以"未执行"语义回填并继续循环。
+     */
+    private String awaitConfirm(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
+        PendingToolCall resolved = this.gate.awaitDecision(runId, pending);
+        if (PendingToolCall.APPROVED.equals(resolved.getStatus())) {
+            return executeOnce(runId, prompt, resolved, context);
+        }
+        String text = ObjectUtils.defaultIfNull(resolved.getResultText(), "该操作未执行。");
+        this.registry.of(runId).toolResult(resolved, false, false, text);
+        return text;
+    }
+
+    /**
+     * 创建任务工具名（AR-03：DANGER 确认门 + 宿主幂等 + 单轮上限 1）。
+     */
+    public static final String TOOL_CREATE_TASK = AiToolNames.CREATE_TASK;
+
+    /**
+     * 工具被"别人正在做同类动作"挡下时的固定口径（模型/帧/台账三面同文；禁 emoji）。
+     */
+    public static final String RESOURCE_LOCKED_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
+            + ToolOutcome.CODE_RESOURCE_LOCKED + "）：该任务已有作业在执行，本次未执行。"
+            + "请等待该作业收尾后重新发起（资源锁会随对方收尾释放）。";
+
+    /**
+     * 错入口批准（{@code APPROVED + FRONTEND}）的固定口径：显式 blocked、未执行。
+     *
+     * <p>措辞必须同时说清三件事：<b>哪个码</b>（模型/排障可检索）、<b>没执行</b>（不能说成失败或成功）、
+     * <b>正确出口</b>（前端结果只能经回灌端点回来）。
+     */
+    public static final String KIND_MISMATCH_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
+            + "：该调用是前端通道工具（kind=FRONTEND），后端不执行它的桩体、也不写执行台账；"
+            + "本次未执行（blocked）。前端结果只能经 /api/ai/frontend-tool-result 回灌。";
+
+    /**
+     * {@code kind=null} 的固定口径：<b>既不批准也不执行</b>。
+     *
+     * <p>{@code kind} 是服务端写入的通道事实（CONFIRM / FRONTEND / BACKEND）。它缺失 = 无法证明
+     * 这个调用该走确认门还是前端回灌；按"缺证据不授权"处理，显式归为
+     * {@code blocked}/{@code TOOL_KIND_MISMATCH}，条目<b>不进入</b> APPROVED，也不跑后端桩体。
+     */
+    public static final String KIND_UNKNOWN_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
+            + "：该调用的挂起种类缺失（kind=null），无法确认它该走确认门还是前端通道；"
+            + "本次既不批准也不执行（blocked），未认领、未写台账。请让用户重新发起该操作。";
+
+    /**
+     * 批准后执行前复核 {@code reportHash} 不一致的固定口径：<b>不执行、要求重新确认</b>。
+     *
+     * <p>确认卡上那份预检报告是批准的依据；执行时状态已变（文件被替换、有在途作业、任务改了步骤……）
+     * 就必须让用户看新的报告再决定，不能拿旧报告当授权去执行。
+     */
+    public static final String PRECHECK_STALE_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
+            + ErrorCodes.PRECHECK_STALE + "）：确认卡上的预检报告与执行时的状态不一致，本次未执行。"
+            + "请重新发起该操作并要求用户重新确认（新的确认卡会带上最新预检报告）。";
+
+    /**
+     * 执行前复核预检报告时基础设施不可用：同样不执行（失败关闭），要求重新发起并确认。
+     */
+    public static final String PRECHECK_REVERIFY_UNAVAILABLE_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
+            + ToolOutcome.CODE_PRECHECK_UNAVAILABLE + "）：执行前无法复核预检报告（预检基础设施异常），"
+            + "本次未执行。请稍后重新发起该操作并重新确认。";
+
+    /**
+     * 快照/runId 缺失且无可信执行信封时的拒绝口径：危险/前端工具<b>不得直执行</b>。
+     *
+     * <p>机器码沿用 {@code TOOL_KIND_MISMATCH}（"这个调用不能在后端直执行通道上跑"），
+     * 措辞说清"没弹卡、没执行"，让模型如实告知用户重新发起，而不是宣称已执行。
+     */
+    public static final String UNRECOVERABLE_EXECUTION_TEXT = ToolOutcome.CODE_TOOL_KIND_MISMATCH
+            + "：本轮执行上下文不可恢复（runId/轮次快照缺失，且没有本实例创建的权威执行信封），"
+            + "该危险/前端工具未执行（未弹确认卡、未认领、未写台账）。请如实告知用户这一步没有执行，"
+            + "并请用户重新发起该操作；不要重复调用同一工具。";
+
+    /**
+     * 认领前复核命中取消时的统一文本（与 {@code cancelPendings} / {@code ConfirmGate#cancel} 逐字同源）：
+     * 模型与前端都据此知道"没执行"，而不是"失败"或"未知"。
+     */
+    static final String CANCELLED_BEFORE_CLAIM_TEXT = "本轮对话已被用户取消，该工具未执行。";
+
+    /**
+     * 工具被"目标资源不成立"挡下时的固定口径（细节由 {@link ToolTargetResolver} 给出）。
+     */
+    public static String targetInvalidText(ToolTargetResolver.Verdict verdict) {
+        String detail = verdict == null || StringUtils.isBlank(verdict.detail()) ? "目标资源不成立"
+                : verdict.detail();
+        return ToolPreflightService.APPROVED_NOT_EXECUTED + "（" + ToolOutcome.CODE_TARGET_INVALID
+                + "）：目标资源不存在或不在当前任务内，本次未执行（" + detail
+                + "）。请核对任务 ID 与当前页面/步骤后重新发起。";
+    }
+
+    /**
+     * 后端执行（含放行后的敏感工具）：<b>对账/重放 → 目标校验 → 资源锁 → 认领 → 执行 → 台账</b>。
+     *
+     * <ol>
+     * <li><b>入口 kind 硬闸</b>（入口 kind 校验批）：{@code kind=FRONTEND} 一律不执行（前端通道工具的
+     * 桩体永不由后端跑）⇒ {@code blocked}/{@code TOOL_KIND_MISMATCH}，<b>在台账重放与认领之前</b>；</li>
+     * <li><b>对账/重放</b>：{@code ai:idem:<runId>} 命中即回台账原结果（不取锁、不认领、不执行、无副作用）；
+     * 命中的结局是 {@code unknown} 就<b>保持 unknown</b>（B23L1 批③b U4：旧实现把它当成功重放）；</li>
+     * <li><b>目标资源硬校验</b>（F2）：不成立 → {@code blocked/TARGET_INVALID}，<b>不占认领</b>；</li>
+     * <li><b>资源互斥</b>（L1）：任务级 → 作业级；被别人持有 → {@code blocked/RESOURCE_LOCKED}
+     * （不占认领、不抛、不断流）；设施不可用 → 放行 + WARN；</li>
+     * <li><b>原子认领</b>三态：{@code WON} 执行；{@code LOST} 二次对账（命中按重放回原结果，未命中按既有
+     * "已认领"文案）；{@code STALE_FENCE} 独立结论（"写回权已转移"，不再写"由实例 null 认领"）；</li>
+     * <li><b>执行 → appendLedger（带 idemKey）</b>，资源锁在 {@code finally} 归还（只还本次创建的那一任）。</li>
+     * </ol>
+     */
+    private String executeOnce(String runId, Prompt prompt, PendingToolCall pending) {
+        return executeOnce(runId, prompt, pending, contextOf(runId));
+    }
+
+    private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
+        return executeOnce(runId, prompt, pending, context, false);
+    }
+
+    /**
+     * @param settleObservation 本次调用的结算行是否由<b>本方法</b>发（续跑路径 = {@code true}）。
+     *                          内联批循环传 {@code false}：它在该条目结算之后统一发一行（并记台账）—— 两处都发会让同一个
+     *                          {@code toolCallId} 出现两条 {@code tool_call_end}、{@code readCalls} 被记两次。
+     *                          <b>发点仍然只有一个</b>：{@code tryClaimExecution} 的胜者那一支（见 {@link #claimAndExecute}）。
+     */
+    private String executeOnce(String runId, Prompt prompt, PendingToolCall pending, AiContext context,
+                               boolean settleObservation) {
+        // ⓪-a kind 缺失硬闸：无法证明该走确认门/前端通道，既不批准也不执行（不认领、不写台账）。
+        if (!pending.hasKind()) {
+            log.warn("refused backend execution for entry without kind (explicitly blocked, no ledger row) runId={} toolCallId={} name={} status={}",
+                    runId, pending.getToolCallId(), pending.getName(), pending.getStatus());
+            return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_UNKNOWN_TEXT);
+        }
+        // ⓪ 入口 kind 硬闸（入口 kind 校验批）：前端通道工具的桩体永不由后端执行。
+        // 位置在台账重放与认领<b>之前</b>：既不能"重放"一条历史成功台账把假执行说成成功，
+        // 也不能占认领、写新台账。正常路径走不到这里（FRONTEND 走 awaitFrontend），本闸是兜底。
+        if (PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+            log.warn("refused backend execution for frontend-channel tool (explicitly blocked, no ledger row) runId={} toolCallId={} name={} status={}",
+                    runId, pending.getToolCallId(), pending.getName(), pending.getStatus());
+            return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_MISMATCH_TEXT);
+        }
+
+        // ① 对账/重放：命中台账 ⇒ 原结果复用（三面同源），任何副作用都不发生
+        Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
+        if (ledger != null) {
+            return replayLedger(runId, pending, ledger);
+        }
+
+        // ①.5 确认门执行前复核：批准时看到的预检报告必须仍是当前那份（reportHash 一致），
+        // 不一致 ⇒ 不执行并要求重新确认（旧报告不是执行授权）。
+        String staleReport = verifyApprovedReport(runId, pending, context);
+        if (staleReport != null) {
+            return staleReport;
+        }
+
+        // ② F2：目标资源硬校验（参数指向的任务必须存在、类型对得上、且在同一个工作区任务内）
+        if (this.targetResolver != null) {
+            ToolTargetResolver.Verdict verdict = this.targetResolver.check(pending.getName(),
+                    pending.getArguments(), context);
+            if (!verdict.valid()) {
+                return settleBlocked(runId, pending, ToolOutcome.CODE_TARGET_INVALID, targetInvalidText(verdict));
+            }
+        }
+
+        // ③ L1：资源互斥（固定顺序：先任务级、后作业级）
+        ToolResourceLocks.LockHandle locks = acquireResourceLocks(runId, pending);
+        if (locks.isHeldElsewhere()) {
+            return settleBlocked(runId, pending, ToolOutcome.CODE_RESOURCE_LOCKED, RESOURCE_LOCKED_TEXT);
+        }
+        try {
+            return claimAndExecute(runId, prompt, pending, settleObservation);
+        } finally {
+            // 终态与异常路径都必须归还（只放本次创建的那一任；重入没有释放权）
+            locks.close();
+        }
+    }
+
+    /**
+     * <b>认领前的取消复核</b>（R1）：取消标志已在 ⇒ 放弃执行，并在"可证明未认领未执行"时把条目
+     * 如实收敛为 {@code CANCELLED}。
+     *
+     * <p>为什么放在这里：批准只写决策、执行在续跑；上游的执行前检查（{@code ResumeService} 的
+     * {@code cancelStateOutcome}）与真正的 {@code HSETNX} 之间还隔着台账重放、目标校验、资源锁。
+     * 只修上游检查会留下这个窗口 —— 用户在"已批准、还没跑"时按停止，不可逆工具照样执行。
+     *
+     * <p><b>不碰已认领/已执行</b>：判据交 {@link RunStore#cancellableBeforeExecution}（含跨实例的
+     * 认领表），有认领证据时返回 {@code null} 走既有 claim 失败口径 —— 绝不把真实发生的副作用
+     * 说成"没执行"。
+     *
+     * <p><b>不发结算行</b>：本方法只收敛条目。结算的所有权仍在取消侧（{@code cancelTerminal} 的
+     * {@code settleCancelledToolCalls}）或内联批循环的 abort 行，两侧都经 {@code ai:observed} 仲裁；
+     * 这里补一条会变成第三个来源（同一 toolCallId 两条 end）。
+     *
+     * @return 放弃执行时的工具结果文本；{@code null} = 未命中取消（正常走认领）
+     */
+    private String settleIfCancelledBeforeClaim(String runId, PendingToolCall pending) {
+        CancellationRegistry.CancelState state = cancelStateBeforeClaim(runId, pending);
+        if (state == CancellationRegistry.CancelState.UNKNOWN) {
+            // 与相邻的 checkCancelled 同一口径（fail-closed）：读不出来 = 证明不了"未取消" ⇒ 不执行。
+            // 条目状态与终帧一概不动 —— 基础设施不可知不是"已取消"，写成 CANCELLED 会发一张假终帧。
+            throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+                    "Cancellation state unknown (Redis read failed); tool execution stopped before claim (runId=" + runId + ")");
+        }
+        if (state != CancellationRegistry.CancelState.CANCELLED) {
+            return null;
+        }
+        PendingToolCall fresh;
+        try {
+            fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+        } catch (RuntimeException ex) {
+            fresh = null;
+        }
+        if (fresh == null) {
+            fresh = pending;
+        }
+        if (this.store.hasExecutionEvidence(runId, fresh)) {
+            // 已认领/已执行/认领表已有 → 绝不伪装未执行；交给既有 claim 失败与对账口径。
+            return null;
+        }
+        if (PendingToolCall.CANCELLED.equals(fresh.getStatus())) {
+            // 存储里已经是取消终态、且没有任何执行证据（调用方手里是旧的 APPROVED/PENDING 副本）：
+            // 不认领、不执行，直接返回既有取消文本。旧口径在这里返回 null ⇒ 掉回 tryClaimExecution，
+            // 会把一条已取消的调用真正执行掉。
+            String text = fresh.getResultText();
+            log.info("entry already cancelled before claim (no execution evidence); skipping execution runId={} tool={} toolCallId={}", runId,
+                    pending.getName(), pending.getToolCallId());
+            return StringUtils.defaultIfBlank(text, CANCELLED_BEFORE_CLAIM_TEXT);
+        }
+        if (!PendingToolCall.PENDING.equals(fresh.getStatus())
+                && !PendingToolCall.APPROVED.equals(fresh.getStatus())) {
+            return null;
+        }
+        fresh.setStatus(PendingToolCall.CANCELLED);
+        fresh.setOutcome(ToolOutcome.CANCELLED.wire());
+        fresh.setCode(ToolOutcome.CODE_RUN_CANCELLED);
+        fresh.setReason("RUN_CANCELLED");
+        fresh.setExecuted(false);
+        fresh.setResolvedAtMs(System.currentTimeMillis());
+        fresh.setResultText(CANCELLED_BEFORE_CLAIM_TEXT);
+        if (!this.store.cancelPending(runId, fresh)) {
+            return null;
+        }
+        log.info("cancel observed on recheck before claim; skipping execution runId={} tool={} toolCallId={}", runId, pending.getName(),
+                pending.getToolCallId());
+        return CANCELLED_BEFORE_CLAIM_TEXT;
+    }
+
+    private CancellationRegistry.CancelState cancelStateBeforeClaim(String runId, PendingToolCall pending) {
+        try {
+            return this.cancellations.cancelState(runId);
+        } catch (RuntimeException ex) {
+            log.warn("could not read cancel state before claim; treating as UNKNOWN (irreversible tool not executed) runId={} toolCallId={}", runId,
+                    pending.getToolCallId(), ex);
+            return CancellationRegistry.CancelState.UNKNOWN;
+        }
+    }
+
+    /**
+     * 认领（三态）通过后的执行段。
+     *
+     * <p>认领<b>首次即走三态口</b> {@link RunStore#tryClaimExecution}（B23L1 批③b 复审 M-4）：
+     * 一次调用同时拿到结论、epoch 与 fence，不再"先布尔口、失败后再补一次三态口"（那会把
+     * {@code HSETNX} 与 fence 的 {@code GET} 各做两遍）。布尔口 {@link RunStore#claimExecution}
+     * 仍保留给既有装配面/用例，但本路径不再依赖它。
+     *
+     * <p>轻装配面（Mockito 底座只桩了布尔口）从三态口读回 null —— 这不是生产形态（两个实现都返回非 null），
+     * 回落到布尔口只是为了不改动既有的 mock 用例。
+     *
+     * <p><b>观测面的 exactly-once 就是这里</b>：只有认领胜者真正执行了工具，故只有它发
+     * {@code tool_call_end}（{@code settleObservation=true} 时）。重挂/重试走到认领失败——
+     * 那时不补，否则"重挂一次"就等于"多记一次工具调用"。
+     */
+    private String claimAndExecute(String runId, Prompt prompt, PendingToolCall pending, boolean settleObservation) {
+        ClaimStep step = claimExecution(runId, pending);
+        if (step.finished()) {
+            return step.result();
+        }
+        RunStore.ClaimResult claim = step.claim();
+        long claimedEpoch = claim.epoch();
+        String claimedBy = this.store.instanceId();
+        ToolExecution execution = executeClaimedTool(runId, prompt, pending);
+        if (execution.settleAsUnexecuted()) {
+            return settleToolTimeout(runId, pending, execution.text(), settleObservation, claimedEpoch, claimedBy);
+        }
+        PendingToolCall fresh = freshForSettlement(runId, prompt, pending, execution);
+        boolean respectCancel = this.toolRegistry.riskOf(pending.getName()) == ToolMeta.RiskLevel.READ;
+        if (!this.store.isExecutionCompletedWithLedger(runId, fresh, execution.text(), claimedEpoch, claimedBy,
+                respectCancel)) {
+            checkCancelled(runId);
+            throw new StreamViolationException(StreamViolationException.CANCELLED,
+                    "Run cancelled; read-only result was discarded before atomic settlement (runId=" + runId + ")");
+        }
+        emitClaimedResult(runId, pending, fresh, execution, settleObservation);
+        return execution.text();
+    }
+
+    private ClaimStep claimExecution(String runId, PendingToolCall pending) {
+        String cancelledBeforeClaim = settleIfCancelledBeforeClaim(runId, pending);
+        if (cancelledBeforeClaim != null) {
+            return ClaimStep.finished(cancelledBeforeClaim);
+        }
+        RunStore.ClaimResult claim = this.store.tryClaimExecution(runId, pending.getToolCallId(),
+                this.store.instanceId());
+        if (claim == null) {
+            claim = this.store.isExecutionClaimed(runId, pending.getToolCallId(), this.store.instanceId())
+                    ? new RunStore.ClaimResult(RunStore.ClaimOutcome.WON, 0L, 0L)
+                    : new RunStore.ClaimResult(RunStore.ClaimOutcome.LOST, 0L, 0L);
+        }
+        if (claim.outcome() == RunStore.ClaimOutcome.CANCELLED) {
+            String cancelled = settleIfCancelledBeforeClaim(runId, pending);
+            if (cancelled != null) {
+                return ClaimStep.finished(cancelled);
+            }
+            throw new StreamViolationException(StreamViolationException.CANCELLED,
+                    "Run cancelled; tool claim was rejected by the atomic check (runId=" + runId + ")");
+        }
+        if (!claim.isWon()) {
+            return ClaimStep.finished(settleLostClaim(runId, pending, claim));
+        }
+        return new ClaimStep(false, null, claim);
+    }
+
+    private String settleLostClaim(String runId, PendingToolCall pending, RunStore.ClaimResult claim) {
+        Map<String, Object> ledger = ledgerOf(runId, pending.getToolCallId());
+        if (ledger != null) {
+            return replayLedger(runId, pending, ledger);
+        }
+        if (claim.outcome() == RunStore.ClaimOutcome.STALE_FENCE) {
+            long epoch = claim.epoch();
+            long fence = claim.fence();
+            return settleBlocked(runId, pending, ToolOutcome.CODE_ALREADY_CLAIMED,
+                    "本轮写回权已转移，本次未执行（本实例持 epoch " + epoch + "，fence 已推进到 " + fence
+                            + "，续跑权已被接管）。如需重做，请让用户在接管方完成后重新发起。", false);
+        }
+        String claimedBy = this.store.claimedBy(runId, pending.getToolCallId());
+        String text = "该操作已由实例 " + claimedBy + " 认领执行（进程在其完成前退出）。"
+                + "为避免重复副作用，本次不再执行；如需重做，请让用户重新发起。";
+        pending.setOutcome(ToolOutcome.BLOCKED.wire());
+        pending.setCode(ToolOutcome.CODE_ALREADY_CLAIMED);
+        pending.setExecuted(true);
+        pending.setExecutedBy(claimedBy);
+        pending.setResultText(text);
+        this.registry.of(runId).toolResult(pending, false, true, frameText(text));
+        return text;
+    }
+
+    private ToolExecution executeClaimedTool(String runId, Prompt prompt, PendingToolCall pending) {
+        try {
+            String text = executeWithTimeout(prompt, pending);
+            if (text == null) {
+                pending.setOutcome(ToolOutcome.FAILED.wire());
+                pending.setCode(ToolOutcome.CODE_TOOL_RESULT_MISSING);
+                return new ToolExecution("", false, false);
+            }
+            pending.setOutcome(ToolOutcome.OK.wire());
+            pending.setCode(null);
+            return new ToolExecution(text, true, false);
+        } catch (ToolExecutionTimeoutException ex) {
+            return toolTimeoutResult(runId, pending, ex);
+        } catch (ToolExecutorSaturatedException ex) {
+            return toolSaturatedResult(runId, pending, ex);
+        } catch (Exception ex) {
+            return toolFailureResult(runId, pending, ex);
+        }
+    }
+
+    private ToolExecution toolTimeoutResult(String runId, PendingToolCall pending,
+                                            ToolExecutionTimeoutException ex) {
+        log.warn("tool execution timed out runId={} tool={} toolCallId={} timeout={}", runId, pending.getName(),
+                pending.getToolCallId(), ex.getTimeout(), ex);
+        pending.setOutcome(ToolOutcome.TIMEOUT.wire());
+        pending.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
+        return new ToolExecution("工具执行超时（TOOL_TIMEOUT），本次结果未确认。\n" + RECONCILIATION_NOTE, false, true);
+    }
+
+    private ToolExecution toolSaturatedResult(String runId, PendingToolCall pending,
+                                              ToolExecutorSaturatedException ex) {
+        log.warn("tool executor saturated; call not executed runId={} tool={} toolCallId={} capacity={}", runId,
+                pending.getName(), pending.getToolCallId(), ex.getCapacity(), ex);
+        pending.setOutcome(ToolOutcome.TIMEOUT.wire());
+        pending.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
+        return new ToolExecution("未执行（EXECUTOR_SATURATED / TOOL_TIMEOUT）：工具执行器已饱和，请稍后重试。", false, true);
+    }
+
+    private ToolExecution toolFailureResult(String runId, PendingToolCall pending, Exception ex) {
+        log.warn("tool execution failed runId={} tool={}", runId, pending.getName(), ex);
+        String code = failureCode(ex);
+        pending.setOutcome(ToolOutcome.FAILED.wire());
+        pending.setCode(code);
+        return new ToolExecution("工具执行失败（" + code + "）。\n" + RECONCILIATION_NOTE, false, false);
+    }
+
+    private PendingToolCall freshForSettlement(String runId, Prompt prompt, PendingToolCall pending,
+                                               ToolExecution execution) {
+        PendingToolCall fresh;
+        try {
+            fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("settlement-pending-read")) {
+                log.warn("settlement could not read pending entry; falling back to arguments runId={} toolCallId={}", runId,
+                        pending.getToolCallId(), ex);
+            }
+            fresh = pending;
+        }
+        if (fresh == null) {
+            fresh = pending;
+        }
+        fresh.setOutcome(pending.getOutcome());
+        fresh.setCode(pending.getCode());
+        if (execution.ok() && TOOL_CREATE_TASK.equals(pending.getName())) {
+            fresh.setCreatedTaskId(createdTaskIdOf(((ToolCallingChatOptions) prompt.getOptions()).getToolContext()
+                    .get(PendingToolCall.CREATED_TASK_ID)));
+        }
+        fresh.setResultText(execution.text());
+        fresh.setExecuted(true);
+        fresh.setExecutedBy(this.store.instanceId());
+        fresh.setExecutedAtMs(System.currentTimeMillis());
+        fresh.setReason(PendingToolCall.KIND_BACKEND.equals(fresh.getKind()) ? "IN_PROCESS_EXECUTION" : fresh.getReason());
+        if (PendingToolCall.KIND_BACKEND.equals(fresh.getKind())) {
+            fresh.setStatus(PendingToolCall.EXECUTED);
+            fresh.setResolvedAtMs(fresh.getExecutedAtMs());
+        }
+        return fresh;
+    }
+
+    private void emitClaimedResult(String runId, PendingToolCall pending, PendingToolCall fresh,
+                                   ToolExecution execution, boolean settleObservation) {
+        ResultView resultView = resultViewOf(fresh, execution.text(), execution.ok());
+        if (resultView == null) {
+            this.registry.of(runId).toolResult(fresh, execution.ok(), false, frameText(execution.text()));
+        } else {
+            this.registry.of(runId).toolResult(fresh, execution.ok(), false, frameText(execution.text()), resultView);
+        }
+        if (settleObservation) {
+            ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh,
+                    execution.text(), this.sheetAudit);
+        }
+    }
+
+    private record ClaimStep(boolean finished, String result, RunStore.ClaimResult claim) {
+
+        private static ClaimStep finished(String result) {
+            return new ClaimStep(true, result, null);
+        }
+
+    }
+
+    private record ToolExecution(String text, boolean ok, boolean settleAsUnexecuted) {
+    }
+
+    /**
+     * 视图投影（S6 批 2）：按工具名自认领，只对<b>成功</b>结局出视图。
+     *
+     * <p>三条硬口径：① 视图是 UI 通道，模型侧读的仍是 {@code resultText}（本方法不参与任何裁剪）；
+     * ② 投影器异常一律吞掉并 WARN —— 展示增强不得让工具结果帧发不出去；③ 未认领 ⇒ null
+     * （帧上不多键，旧卡面逐字不变）。
+     */
+    private ResultView resultViewOf(PendingToolCall pending, String text, boolean ok) {
+        if (!ok || this.resultViewProviders.isEmpty()) {
+            return null;
+        }
+        for (ToolResultViewProvider provider : this.resultViewProviders) {
+            if (!provider.supports(pending.getName())) {
+                continue;
+            }
+            try {
+                ResultView view = provider.build(pending.getToolCallId(), pending.getName(), text);
+                if (view != null) {
+                    return view;
+                }
+            } catch (RuntimeException ex) {
+                log.warn("resultView build failed (no view this time; card falls back to legacy shape) tool={} toolCallId={}",
+                        pending.getName(), pending.getToolCallId(), ex);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 带独立超时执行一次工具（超时面治理批② 第 3 项；{@code app.ai.tool.exec-timeout}）。
+     *
+     * <p>形态 = 提交到独立平台线程 + {@code Future#get(timeout)}；到点 {@code cancel(true)} 并抛
+     * {@link ToolExecutionTimeoutException}（由调用方结算成 {@code timeout/TOOL_TIMEOUT}）。
+     * <b>诚实边界</b>：{@code cancel(true)} 只能"请求中断"—— 不响应中断的桩体（纯 CPU 循环、
+     * 不可中断的 IO）会继续在池线程上跑完，只是结果被丢弃；这正是"到点必须收口"的代价，
+     * 也是把超时做成 opt-out（长任务免超时）之前必须先登记的理由。
+     *
+     * <p>线程池饱和（{@code AbortPolicy}）时<b>禁止退化成无超时同步执行</b>（N3）：那会让"到点收口"
+     * 恰好在最忙的时候失效，且工具会脱离超时笼在调用线程上跑完。饱和直接抛
+     * {@link ToolExecutorSaturatedException}，由调用方按 {@code TOOL_TIMEOUT} 口径结算成
+     * <b>未执行</b>（{@code executed=false}、不写台账、轮继续）。
+     */
+    private String executeWithTimeout(Prompt prompt, PendingToolCall pending) {
+        Duration timeout = this.properties.getTool().getExecTimeout();
+        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+            return delegateSingle(prompt, pending);
+        }
+        Future<String> future;
+        // 身份不随线程池继承：在提交线程抓本轮身份，执行线程重新建立作用域（不把句柄跨线程关闭）
+        TenantUser identity = RequestContextUtils.currentOrNull();
+        try {
+            // MDC 不随线程池继承：锚点（runId/sessionId）随任务进池，工具日志才不会变成孤儿行
+            future = this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> {
+                try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+                    return delegateSingle(prompt, pending);
+                }
+            }));
+        } catch (RejectedExecutionException ex) {
+            log.warn("tool timeout executor saturated (capacity {}); call not executed tool={} toolCallId={}", this.toolTimeoutThreads,
+                    pending.getName(), pending.getToolCallId(), ex);
+            throw new ToolExecutorSaturatedException(pending.getName(), this.toolTimeoutThreads);
+        }
+        try {
+            return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException ex) {
+            future.cancel(true);
+            throw new ToolExecutionTimeoutException(timeout, pending.getName());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new StreamViolationException(StreamViolationException.CANCELLED,
+                    "Tool execution wait interrupted; finishing the run as cancelled (tool=" + pending.getName() + ")");
+        } catch (ExecutionException ex) {
+            Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException(cause);
+        }
+    }
+
+    /**
+     * <b>未执行</b>的结算（超时 / 执行器饱和共用；{@code executed=false} + 结局帧 + 回填模型）：
+     * <b>不写台账</b>、不占重放索引 —— 台账记的是"执行过且知道结局"的事实；超时的结局是
+     * "不知道有没有副作用"，由 {@link #RECONCILIATION_NOTE} 提醒人工对账；执行器饱和则是确定的
+     * "没有开始执行"。两者都按既有 {@code timeout/TOOL_TIMEOUT} 口径收敛（不判整轮失败、轮继续）。
+     *
+     * <p>它也是认领胜者的结算（只有认领成功才会走到这里），故续跑侧同样由这里发
+     * {@code tool_call_end}（{@code settleObservation=true}）。
+     */
+    private String settleToolTimeout(String runId, PendingToolCall pending, String text, boolean settleObservation,
+                                     long claimedEpoch, String claimedBy) {
+        PendingToolCall fresh;
+        try {
+            fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("timeout-settlement-pending-read")) {
+                log.warn("settlement (timeout path) could not read pending entry; falling back to arguments runId={} toolCallId={}", runId,
+                        pending.getToolCallId(), ex);
+            }
+            fresh = pending;
+        }
+        if (fresh == null) {
+            fresh = pending;
+        }
+        fresh.setOutcome(ToolOutcome.TIMEOUT.wire());
+        fresh.setCode(ToolOutcome.CODE_TOOL_TIMEOUT);
+        fresh.setReason(ToolOutcome.CODE_TOOL_TIMEOUT);
+        fresh.setResultText(text);
+        fresh.setExecuted(false);
+        fresh.setExecutedBy(null);
+        fresh.setResolvedAtMs(System.currentTimeMillis());
+        fresh.setStatus(PendingToolCall.TIMEOUT);
+        this.store.completeExecution(runId, fresh, claimedEpoch, claimedBy);
+        this.registry.of(runId).toolResult(fresh, false, false, frameText(text));
+        if (settleObservation) {
+            ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh, text,
+                    this.sheetAudit);
+        }
+        log.warn("tool not-executed outcome settled (executed=false; turn continues) runId={} tool={} toolCallId={} code={}", runId,
+                pending.getName(), pending.getToolCallId(), fresh.getCode());
+        return text;
+    }
+
+    /**
+     * 工具执行超时的内部信号（不穿出本类：调用方一律结算成 {@code timeout/TOOL_TIMEOUT}）。
+     */
+    private static final class ToolExecutionTimeoutException extends RuntimeException {
+
+        private final Duration timeout;
+
+        ToolExecutionTimeoutException(Duration timeout, String toolName) {
+            super("Tool execution timed out (app.ai.tool.exec-timeout = " + timeout + "): " + toolName
+                    + " did not return before the deadline; the call was aborted and is not considered successful");
+            this.timeout = timeout;
+        }
+
+        Duration getTimeout() {
+            return this.timeout;
+        }
+
+    }
+
+    /**
+     * 工具超时执行器饱和的内部信号（N3）：<b>本次调用没有开始执行</b>。
+     *
+     * <p>为什么单独一个类型而不是直接返回文本：饱和是"未执行"的确定性事实，必须走与超时同一套
+     * 结算（{@code executed=false}、不写台账、轮继续），文案里保留 {@code EXECUTOR_SATURATED}
+     * 这个机器可检索词，便于把"这一拍没跑"与"跑超时了"分开排障。
+     */
+    private static final class ToolExecutorSaturatedException extends RuntimeException {
+
+        private final int capacity;
+
+        ToolExecutorSaturatedException(String toolName, int capacity) {
+            super("Not executed (EXECUTOR_SATURATED / " + ToolOutcome.CODE_TOOL_TIMEOUT + "): tool executor saturated (capacity "
+                    + capacity + "), " + toolName + " did not start and produced no side effects; retry later.");
+            this.capacity = capacity;
+        }
+
+        int getCapacity() {
+            return this.capacity;
+        }
+
+    }
+
+    /**
+     * 台账读口：{@code idemFor}（O(1) 索引）优先，未命中回落 {@code ledgerFor}（全表扫描 / 旧数据）。
+     *
+     * <p>为什么两跳都要：真实实现的 {@code idemFor} 内部已经回落过一次，这里的第二跳只保护
+     * <b>轻装配面</b>（只桩了旧读口的单元底座），语义上"台账才是判据"也因此只有一个出口。
+     * 空表按未命中处理 —— 一条台账记录至少带 {@code atMs/toolCallId/name/outcome} 四键。
+     */
+    private Map<String, Object> ledgerOf(String runId, String toolCallId) {
+        Map<String, Object> indexed = this.store.idemFor(runId, toolCallId);
+        if (MapUtils.isNotEmpty(indexed)) {
+            return indexed;
+        }
+        Map<String, Object> scanned = this.store.ledgerFor(runId, toolCallId);
+        return MapUtils.isEmpty(scanned) ? null : scanned;
+    }
+
+    /**
+     * 台账重放（首轮对账命中 / 认领失败后二次对账命中 / 续跑复跑同一 {@code toolCallId}）：三面同源，
+     * <b>不执行任何副作用</b>。
+     *
+     * <p>结局口径：台账里的 {@code outcome} 原样重放；<b>缺该键 = 未知</b>，不得推断成成功
+     * （{@code outcome=unknown} 是<b>确定的"未判定"</b> —— 把它写成成功会让"执行了但不知道结果"
+     * 变成"执行成功"，前端的失败/对账提示随之消失）。
+     */
+    private String replayLedger(String runId, PendingToolCall pending, Map<String, Object> ledger) {
+        String reusedText = String.valueOf(ledger.getOrDefault("resultText", ""));
+        Object rawOutcome = ledger.get("outcome");
+        ToolOutcome replayed = ToolOutcome.fromWire(ObjectUtils.toString(rawOutcome, (String) null));
+        if (replayed == null) {
+            // 缺 outcome = 未判定，绝不推断成成功。
+            replayed = ToolOutcome.UNKNOWN;
+        }
+        pending.setOutcome(replayed.wire());
+        pending.setCode(ObjectUtils.toString(ledger.get("code"), (String) null));
+        pending.setExecuted(true);
+        Object executedBy = ledger.get("executedBy");
+        pending.setExecutedBy(ObjectUtils.toString(ObjectUtils.getIfNull(executedBy, this.store::instanceId), (String) null));
+        pending.setCreatedTaskId(createdTaskIdOf(ledger.get(PendingToolCall.CREATED_TASK_ID)));
+        pending.setResultText(reusedText);
+        this.store.putPending(runId, pending);
+        // 帧的 ok 必须是 outcome 的派生值（旧实现恒传 true，会把台账里的失败/未知结局写成成功帧）
+        this.registry.of(runId).toolResult(pending, replayed.ok(), true, frameText(reusedText));
+        log.info("tool call hit the ledger; replaying the recorded result (no lock, no claim, no execution) runId={} tool={} toolCallId={} outcome={}",
+                runId, pending.getName(), pending.getToolCallId(), replayed.wire());
+        return reusedText;
+    }
+
+    /**
+     * 阻断的<b>统一出口</b>（资源锁冲突 / 目标不成立 / 写回权转移）：常规入口落库为终态、回填模型，然后
+     * 正常返回 —— <b>不 appendLedger、不占认领、不抛异常、不动 suspended</b>，同批后续调用照常
+     * （{@code haltsBatch} 只认 REJECTED 与不可重试 FAILED）。认领失败入口不回写调用方旧副本，避免覆盖并发认领或执行结果。
+     *
+     * <p><b>帧面不保证</b>（RT-21 裁决）：这里只<b>请求</b>一条 {@code ok=false} 的结局帧，是否真的
+     * 落档/扇出由 {@link com.example.configmgr.ai.run.SseChatEmitter} 的写门判定。写回权已转移的
+     * 旧驱动（{@code fence > 本进程 epoch}）会被写门丢弃该帧：它没有续跑权，不得再写共享事件/帧，
+     * <b>不给这份旧驱动任何帧豁免</b>。但"没有共享帧"不等于"结果可以被吞"：{@code blocked} 文本与
+     * 机器可读结局（{@code outcome}/{@code code}）仍由本方法返回，沿原工具调用链进入模型的
+     * {@code ToolResponseMessage}（"本次未执行、需由接管方完成"），不得伪装成成功。
+     */
+    private String settleBlocked(String runId, PendingToolCall pending, String code, String text) {
+        return settleBlocked(runId, pending, code, text, true);
+    }
+
+    private String settleBlocked(String runId, PendingToolCall pending, String code, String text, boolean writePending) {
+        pending.setStatus(PendingToolCall.BLOCKED);
+        pending.setOutcome(ToolOutcome.BLOCKED.wire());
+        pending.setCode(code);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(text);
+        if (writePending) {
+            this.store.putPending(runId, pending);
+        }
+        this.registry.of(runId).toolResult(pending, false, false, frameText(text));
+        log.warn("tool call blocked (not executed, no claim, no ledger row) runId={} tool={} toolCallId={} code={}", runId,
+                pending.getName(), pending.getToolCallId(), code);
+        return text;
+    }
+
+    /**
+     * 抢本次调用所需的资源锁（不可锁的工具/无 taskId ⇒ 空句柄，零往返）。
+     */
+    private ToolResourceLocks.LockHandle acquireResourceLocks(String runId, PendingToolCall pending) {
+        if (this.resourceLocks == null || !ToolResourceLocks.isSupported(pending.getName())) {
+            return ToolResourceLocks.LockHandle.none(ToolResourceLocks.LockOutcome.DISABLED);
+        }
+        Long taskId = ToolTargetResolver.taskIdOf(pending.getArguments());
+        if (taskId == null || taskId <= 0L) {
+            return ToolResourceLocks.LockHandle.none(ToolResourceLocks.LockOutcome.DISABLED);
+        }
+        String owner = this.store.instanceId() + ":" + runId + ":" + pending.getToolCallId();
+        return this.resourceLocks.acquire(taskId, ToolTargetResolver.jobTypeOf(pending.getName()).name(), owner);
+    }
+
+    /**
+     * 本轮冻结的工作区上下文（与执行路径用的是同一份快照，见 {@link RunSnapshot#getContext()}）。
+     */
+    private AiContext contextOf(String runId) {
+        RunSnapshot snapshot = this.store.get(runId);
+        return snapshot == null ? AiContext.empty() : AiContext.fromMap(snapshot.getContext());
+    }
+
+    /**
+     * 从异常（可能被官方 {@code ToolExecutionException} 包裹）提取机器可读码：
+     * {@code ConflictException} / {@code ResourceNotFoundException} 的码优先，否则
+     * {@link ToolOutcome#CODE_TOOL_EXECUTION_FAILED}。
+     */
+    private static String failureCode(Throwable error) {
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            if (current instanceof ConflictException conflict
+                    && StringUtils.isNotBlank(conflict.getCode())) {
+                return conflict.getCode();
+            }
+            if (current instanceof ResourceNotFoundException notFound
+                    && StringUtils.isNotBlank(notFound.getCode())) {
+                return notFound.getCode();
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+            current = current.getCause();
+        }
+        return ToolOutcome.CODE_TOOL_EXECUTION_FAILED;
+    }
+
+    /**
+     * 用官方 DefaultToolCallingManager 执行单个工具调用（只借官方执行，不接管协议）。
+     */
+    String delegateSingle(Prompt prompt, PendingToolCall pending) {
+        AssistantMessage.ToolCall call = new AssistantMessage.ToolCall(pending.getToolCallId(),
+                ObjectUtils.defaultIfNull(pending.getType(), "function"), pending.getName(), pending.getArguments());
+        AssistantMessage single = AssistantMessage.builder().toolCalls(List.of(call)).build();
+        // 动态披露：本批请求边界之外的"新披露工具"不在旧 options 的 callbacks 里，官方委托按名字
+        // 找不到就会抛 No ToolCallback found —— 用当前披露面的 callbacks 副本保证可解析（集合可随披露面
+        // 变化，但不是授权：能否执行仍由防线③与确认门/HITL 决定）。
+        ToolExecutionResult result = this.delegate.executeToolCalls(executionPrompt(prompt, pending.getName()),
+                new ChatResponse(List.of(new Generation(single))));
+        return result.conversationHistory()
+                .stream()
+                .filter(ToolResponseMessage.class::isInstance)
+                .map(ToolResponseMessage.class::cast)
+                .flatMap(message -> message.getResponses().stream())
+                .filter(response -> pending.getToolCallId() != null && pending.getToolCallId().equals(response.id()))
+                .map(ToolResponseMessage.ToolResponse::responseData)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /**
+     * 模型侧的统一信封 JSON（C13 窗口版）：在配置档之外再按<b>剩余窗口</b>收缩。
+     *
+     * <p>截断判定仍是同一个 {@link ToolResultLimiter}（窗口额度作为第二个上限传入
+     * {@link ToolResultLimiter#forModel(String, String, int)}）：于是 {@code truncated/strategy/
+     * originalChars/returnedChars/notice} 五个字段照旧写进信封，模型仍能看见"这份结果不是全部"；
+     * SSE 帧与执行台账里的 {@code resultText} 仍是全文（双通道口径不动）。
+     *
+     * @param budget 本批剩余窗口（{@code unlimited()} = 不按窗口收缩，与改造前逐字一致）
+     */
+    private String modelData(PendingToolCall pending, String text, ModelWriteBudget budget) {
+        String modelJson = ToolResultEnvelope
+                .of(pending.effectiveOutcome(), pending.effectiveCode(), text, pending.getArguments())
+                .toModelJson(this.limiter, pending.getName(), budget.nextCapChars());
+        budget.consume(modelJson);
+        return modelJson;
+    }
+
+    /**
+     * 本批模型侧写入的剩余窗口（C13）。
+     *
+     * <p>算式：{@code 实际窗口 − 有效预留 − system/tools − 已固定的历史 − 本批 assistant(tool_calls)}。
+     * 上限未知（轻装配面/未注入 resolver）⇒ {@link ModelWriteBudget#unlimited()}（行为一字不变）。
+     */
+    private ModelWriteBudget modelWriteBudget(RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
+                                              int calls) {
+        int limit = turnBudgetLimit(snapshot);
+        if (limit <= 0 || calls <= 0) {
+            return ModelWriteBudget.unlimited();
+        }
+        int reserve = ContextTrigger.effectiveReserve(limit, this.properties.getContext().getReserveTokens());
+        int fixedPrefix = estimateRequestTokens(prompt, prompt.getInstructions())
+                + ContextEstimator.estimateMessage(assistant);
+        int remaining = limit - reserve - fixedPrefix;
+        if (remaining <= 0) {
+            // 窗口已经被固定历史吃满：收缩单份结果救不回来（交给轮内收缩/恢复路径），此处不裁
+            return ModelWriteBudget.unlimited();
+        }
+        return ModelWriteBudget.of(remaining, calls);
+    }
+
+    /**
+     * 一批工具结果写进模型侧时的剩余窗口（C13）。
+     *
+     * <p>每份结果按 {@code 剩余 / 本批剩余调用数} 均分：一份结果独占整窗就等于"下一跳必然越窗"，
+     * 而 {@code keep-tool-pairs} 又让轮内 L1 清不掉最近的几对。写入后按实际写出的文本扣减，
+     * 于是同一批里靠后的结果自动拿到更小的额度（顺序确定 ⇒ 可重放）。
+     */
+    private static final class ModelWriteBudget {
+
+        private static final ModelWriteBudget UNLIMITED = new ModelWriteBudget(0, 0);
+
+        private int remainingTokens;
+
+        private int callsLeft;
+
+        private ModelWriteBudget(int remainingTokens, int callsLeft) {
+            this.remainingTokens = remainingTokens;
+            this.callsLeft = callsLeft;
+        }
+
+        /**
+         * 无窗口信息（不收缩）。
+         */
+        static ModelWriteBudget unlimited() {
+            return UNLIMITED;
+        }
+
+        static ModelWriteBudget of(int remainingTokens, int calls) {
+            return remainingTokens <= 0 || calls <= 0 ? UNLIMITED
+                    : new ModelWriteBudget(remainingTokens, calls);
+        }
+
+        /**
+         * 本次写入的字符额度（{@code 0} = 不按窗口收缩）。
+         */
+        int nextCapChars() {
+            if (this.callsLeft <= 0) {
+                return 0;
+            }
+            int share = Math.max(1, this.remainingTokens / this.callsLeft);
+            return ToolResultLimiter.charsForRemainingTokens(share);
+        }
+
+        /**
+         * 扣减已写出的模型侧文本（token 估算，与判据同一把尺子）。
+         */
+        void consume(String modelJson) {
+            if (this.callsLeft <= 0) {
+                return;
+            }
+            this.remainingTokens = Math.max(0, this.remainingTokens - ContextEstimator.estimate(modelJson));
+            this.callsLeft--;
+        }
+
+    }
+
+    private String modelData(PendingToolCall pending, String text) {
+        return ToolResultEnvelope.of(pending.effectiveOutcome(), pending.effectiveCode(), text,
+                pending.getArguments()).toModelJson(this.limiter, pending.getName());
+    }
+
+    // ── 辅助 ────────────────────────────────────────────────────────────────
+
+    /**
+     * 续跑阶段结算一个挂起条目（{@code ResumeService} 的重建路径专用，SP-02 §5.5）。
+     *
+     * <ul>
+     * <li>{@code PENDING} + {@code BACKEND}：后端工具不需要外部输入，直接补执行（进程死在
+     * "已写条目、未执行"之间时的正常路径）；</li>
+     * <li>{@code APPROVED}：补执行恰好一次（E2 窗口）；<b>但 {@code APPROVED + FRONTEND} 例外</b>
+     * —— 那是历史假批准（人没点过、前端也没执行过），显式结算成 {@code blocked}/
+     * {@code TOOL_KIND_MISMATCH}，<b>不执行后端桩、不写台账</b>（见 {@link #KIND_MISMATCH_TEXT}）；</li>
+     * <li>其余（{@code EXECUTED}/{@code REJECTED}/{@code TIMEOUT}/{@code FRONTEND_RESULT}/
+     * {@code FRONTEND_CANCELLED}/{@code REJECTED_ARGUMENTS}/{@code BLOCKED}/{@code PRECHECK_FAILED}）：
+     * 一律复用 {@code resultText}，<b>不执行</b>。</li>
+     * </ul>
+     *
+     * <h2>观测面：本方法<b>不是</b> {@code tool_call_end} 的发点</h2>
+     * 前端结果/放弃的结算行由写入方（{@code ConfirmGate} 的决策/放弃胜者）发，后端执行的结算行由
+     * {@link #executeOnce} 在<b>认领胜者</b>那一支发 —— 于是"挂起一次 ⇒ 一条 end"与所有权一一对应。
+     * 上面那个"复用 {@code resultText}"的兜底分支刻意不补：重挂/重试会反复经过它，
+     * 在那里记账会把 {@code SheetAudit} 计数放大成"重挂次数"（park 缺陷的反向坑）。
+     *
+     * @return 该条目对应的工具结果文本（用于重建 {@code role:tool} 消息）
+     */
+    public String resolvePending(String runId, Prompt prompt, PendingToolCall pending) {
+        String status = pending.getStatus();
+        // kind 缺失硬闸：无法证明该走哪条通道 ⇒ 不执行（也不说成"失败"或"成功"）。
+        // 只拦"本来会执行"的三种态（APPROVED / PENDING / EXECUTED 但 executed=false）；
+        // 已结算的历史条目仍复用 resultText，绝不改写既有结局。
+        boolean wouldExecute = PendingToolCall.APPROVED.equals(status) || PendingToolCall.PENDING.equals(status)
+                || (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());
+        if (!pending.hasKind() && wouldExecute) {
+            log.warn("resume found a pending entry without kind: explicitly blocked, not approved, not executed, no ledger row runId={} toolCallId={} name={} status={}", runId, pending.getToolCallId(), pending.getName(), status);
+            ensureToolStartBeforeSettlement(runId, pending);
+            return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_UNKNOWN_TEXT);
+        }
+        // 入口 kind 校验（续跑假批准）：APPROVED + FRONTEND 是"人根本没点过、前端也没执行过"的
+        // 假批准（旧代码/错入口留下的数据）。它<b>绝不能</b>进 executeOnce —— 那会把前端工具的
+        // 后端哨兵桩跑一遍并写成功台账。这里显式结算成 blocked（不认领、不写台账、executed=false）。
+        if (PendingToolCall.APPROVED.equals(status) && PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+            log.warn("resume found APPROVED+FRONTEND (legacy false approval / wrong-endpoint decision): explicitly blocked, backend stub not executed, no ledger row runId={} toolCallId={} name={}", runId, pending.getToolCallId(), pending.getName());
+            ensureToolStartBeforeSettlement(runId, pending);
+            return settleBlocked(runId, pending, ToolOutcome.CODE_TOOL_KIND_MISMATCH, KIND_MISMATCH_TEXT);
+        }
+        boolean shouldExecute = PendingToolCall.APPROVED.equals(status)
+                || (PendingToolCall.PENDING.equals(status) && PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
+                || (PendingToolCall.EXECUTED.equals(status) && !pending.isExecuted());
+        if (shouldExecute) {
+            // 结算侧帧册不变量：本分支的所有出口（台账重放 / 目标校验 / 资源锁 / 认领 / 执行 / 超时）
+            // 都会<b>请求</b>发 tool_result（失去续跑权的旧驱动那条会被写门丢弃，见 {@link #settleBlocked}），
+            // 而原实例可能死在 tool_start 落档之前（suspend-kill-a）—— 结算之前按归档幂等补一次，
+            // 已有则不补；写门同样会拦住旧驱动的补帧。
+            ensureToolStartBeforeSettlement(runId, pending);
+            return executeOnce(runId, prompt, pending, contextOf(runId), true);
+        }
+        // B23L1 批③b：已终态但结局是 unknown 的条目，先经三跳对账（台账 → 认领 → 资源锁）再回填 ——
+        // 台账里有确定结局就采用它（含原文与执行者），否则如实保持 UNKNOWN 并给出"为什么"。
+        if (this.unknownReconciler != null && pending.resolved()
+                && pending.effectiveOutcome() == ToolOutcome.UNKNOWN
+                && !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+            return applyReconciliation(runId, pending);
+        }
+        String text = StringUtils.defaultString(pending.getResultText());
+        if (log.isDebugEnabled())
+            log.debug("resume settlement reuses result runId={} toolCallId={} status={} executedBy={}", runId, pending.getToolCallId(),
+                    status, pending.getExecutedBy());
+        return text;
+    }
+
+    /**
+     * 续跑结算前<b>幂等补发</b>缺失的 {@code tool_start}（帧册不变量：每个被执行工具恰一条 start）。
+     *
+     * <p>缺陷形态（真实集群 {@code suspend-kill-a}）：首轮"状态先落、帧后发"，原实例死在
+     * {@code tool_start} 落档之前，归档里就永远没有这一帧；续跑（本方法只被
+     * {@link com.example.configmgr.ai.run.ResumeService} 调用）只发结局帧 ⇒ 永久"有 result、没有 start"。
+     *
+     * <p>为什么挂在这里而不是 {@link #executeOnce}：后者也是<b>首轮</b>执行路径的出口，而首轮
+     * 发帧顺序（{@code suspended → tool_start → 请求帧 → 执行}）由 {@code emitToolStartOnce} 保证、
+     * 不允许被一次归档读改写；本方法是续跑结算的唯一入口，覆盖面相同而工作面最小。
+     *
+     * <p>判据在事件日志（跨实例同一份）——已有该 {@code toolCallId} 的 {@code tool_start} 就一条不补。
+     * 发帧是观测面：失败只 WARN，绝不阻断结算。
+     */
+    private void ensureToolStartBeforeSettlement(String runId, PendingToolCall pending) {
+        try {
+            if (this.registry.of(runId).isToolStartEmitted(pending)) {
+                log.info("resume re-sent missing tool_start runId={} toolCallId={} name={}", runId,
+                        pending.getToolCallId(), pending.getName());
+            }
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("resume-tool-start-replay")) {
+                log.warn("resume failed to re-send tool_start (settlement not blocked) runId={} toolCallId={}", runId,
+                        pending.getToolCallId(), ex);
+            }
+        }
+    }
+
+    /**
+     * 把一次 UNKNOWN 对账的结论写回条目并返回回填文本。
+     *
+     * <p>只有 {@link ToolUnknownReconciler.Reconciliation#adopted()}（台账命中且结局非 unknown）才覆盖
+     * {@code outcome/code/executedBy}；其余情况保持 UNKNOWN，只更新人读文案 —— 不确定性不能被对账器
+     * "猜"成成功。
+     */
+    private String applyReconciliation(String runId, PendingToolCall pending) {
+        ToolUnknownReconciler.Reconciliation reconciliation = this.unknownReconciler.reconcile(runId, pending);
+        if (reconciliation == null) {
+            return StringUtils.defaultString(pending.getResultText());
+        }
+        String text = StringUtils.defaultString(reconciliation.text());
+        if (reconciliation.isAdopted()) {
+            pending.setOutcome(reconciliation.outcome().wire());
+            pending.setCode(reconciliation.code());
+            pending.setExecuted(true);
+            if (reconciliation.executedBy() != null) {
+                pending.setExecutedBy(reconciliation.executedBy());
+            }
+        }
+        pending.setResultText(text);
+        this.store.putPending(runId, pending);
+        log.info("resume settlement went through UNKNOWN reconciliation runId={} toolCallId={} adopted={} outcome={}", runId,
+                pending.getToolCallId(), reconciliation.isAdopted(), pending.effectiveOutcome().wire());
+        return text;
+    }
+
+    /**
+     * 续跑结算行的事件锚点：{@code sessionId} 必须显式读一次快照 —— 续跑线程（跨实例唤醒 /
+     * 续跑池）的 MDC 未必装着会话，而 {@code ai:safety:<sessionId>} 台账就挂在这个键上。
+     * 读失败/快照缺失返回 {@code null}，由 {@code AiTrace#eventOn} 回落 MDC。
+     */
+    private String sessionIdOf(String runId) {
+        try {
+            RunSnapshot snapshot = this.store.get(runId);
+            return snapshot == null ? null : snapshot.getSessionId();
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("settlement-session-id-read")) {
+                log.warn("settlement row could not read sessionId runId={}", runId, ex);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * 挂起种类由基座元数据决定：通道优先（前端工具不可被后端执行），其次风险等级。
+     */
+    private List<PendingToolCall> newPendings(AssistantMessage assistant) {
+        List<PendingToolCall> out = new ArrayList<>();
+        for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
+            PendingToolCall pending = new PendingToolCall();
+            pending.setToolCallId(call.id());
+            pending.setName(call.name());
+            pending.setType(ObjectUtils.defaultIfNull(call.type(), "function"));
+            pending.setArguments(call.arguments());
+            pending.setKind(kindOf(call.name()));
+            // 批4-D（用户 2026-10-23 裁决）：不可撤销 = 确认卡 + 复选框。判据是执行类别
+            // （Category.P = 不可逆写/发布），不是风险等级 —— DANGER 的 W/J 类工具照旧只弹确认卡。
+            pending.setIrreversible(this.toolRegistry.categoryOf(call.name()) == ToolMeta.Category.P);
+            out.add(pending);
+        }
+        return out;
+    }
+
+    private String kindOf(String toolName) {
+        if (this.toolRegistry.channelOf(toolName) == ToolMeta.Channel.FRONTEND) {
+            return PendingToolCall.KIND_FRONTEND;
+        }
+        if (this.toolRegistry.riskOf(toolName) == ToolMeta.RiskLevel.DANGER) {
+            return PendingToolCall.KIND_CONFIRM;
+        }
+        return PendingToolCall.KIND_BACKEND;
+    }
+
+    /**
+     * 宿主表单提前 park 的展示历史写点：挂起快照成功后，把"本段正文 + 实际挂起的表单调用"
+     * 写进 transcript，刷新时仍能看到这段正文与卡（不是只等续跑/取消）。
+     *
+     * <p>失败只 DEBUG：展示面不得反噬已成功的 park；正文已在快照 {@code assistantContent} 里。
+     */
+    private void recordParkedHostFormTranscript(String runId, Prompt prompt, AssistantMessage assistant) {
+        if (this.transcript == null) {
+            return;
+        }
+        try {
+            // 用快照里的 inFlightToolCalls 顺序（saveSuspended 原样保存的列表），不要读 Redis hash：
+            // hash 迭代顺序不保证，会让 assistant entryId（取首个 toolCallId）在续跑/终态写点分叉。
+            RunSnapshot latest = this.store.get(runId);
+            if (latest == null) {
+                return;
+            }
+            recordPendingTranscript(runId, latest, prompt, assistant, latest.getInFlightToolCalls());
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("parked-host-form-transcript")) {
+                log.warn("parked host form transcript write failed runId={} (park unaffected)", runId, ex);
+            }
+        }
+    }
+
+    /**
+     * B2：挂起时把本批工具卡写进 transcript（status=pending 的进展示历史）。
+     *
+     * <p>只写用户面原文：assistant 的工具调用（id/name/arguments）+ 每条 pending 的
+     * {@code resultText}（已执行的那些就是原文）。后续终态写点用同一 {@code entryId} 覆盖，
+     * 因此 pending → 已决/失败/取消不会留下两张卡。
+     */
+    private void recordPendingTranscript(String runId, RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
+                                         List<PendingToolCall> pendings) {
+        if (this.transcript == null || snapshot == null || CollectionUtils.isEmpty(pendings)
+                || !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
+            return;
+        }
+        // R4：toolCallId 缺失 ⇒ 整批不写（与结算写点同一口径）：不产出无归属卡。
+        if (pendings.stream().anyMatch(pending -> pending == null || pending.getToolCallId() == null)) {
+            if (log.isDebugEnabled())
+                log.debug("transcript park entry skipped: batch has an entry without toolCallId runId={}", runId);
+            return;
+        }
+        // 轮次已终态（取消/完成/失败）⇒ 不写：挂起写点若在取消终态之后执行，会把 CANCELLED 覆盖回
+        // PENDING/APPROVED。终态写点负责最终展示历史。
+        if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+            if (log.isDebugEnabled())
+                log.debug("transcript park entry skipped: turn already terminal runId={} status={} (terminal write owns it)", runId,
+                        snapshot.getStatus());
+            return;
+        }
+        try {
+            if (!this.store.isWritePermitted(runId, "transcript")) {
+                return;
+            }
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("transcript-park-write-ownership")) {
+                log.warn("transcript write-ownership check failed (not written) runId={}", runId, ex);
+            }
+            return;
+        }
+        try {
+            List<TranscriptEntry.ToolCallView> calls = toolCallViews(pendings);
+            long turnStartedAtMs = snapshot.transcriptToolTurnStartedAtMs();
+            // 与结算写点同一口径：assistant 的 toolCallStates 与 tool 条目的 status 同源（每卡只解析一次）。
+            Map<String, String> statuses = TranscriptEntries.settledStatuses(pendings, null);
+            List<TranscriptEntry> entries = new ArrayList<>(pendings.size() + 1);
+            entries.add(assistantTranscript(runId, snapshot, turnStartedAtMs, System.currentTimeMillis(), assistant, calls,
+                    TranscriptEntries.statesFrom(pendings, statuses)));
+            for (PendingToolCall pending : pendings) {
+                entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, System.currentTimeMillis(),
+                        pending.getToolCallId(), pending.getName(), pending.getKind(),
+                        statuses.get(pending.getToolCallId()), pending.getResultText()));
+            }
+            this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries,
+                    snapshot.getRunEpoch());
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("transcript-park-append")) {
+                log.warn("failed to write transcript park entry (park/wait unaffected) runId={}", runId, ex);
+            }
+        }
+    }
+
+    /**
+     * 续跑侧入口：整批挂起条目结算后重写本批工具卡（与执行循环同一个实现，快照自取）。
+     *
+     * <p>续跑由 {@link RunStore} 的在飞条目驱动、不走 {@code executeToolCalls}，因此执行循环尾部的
+     * 写点覆盖不到它；这里补同一个口径（失败只 WARN，展示面不影响续跑）。
+     */
+    public void refreshSettledBatchTranscript(String runId, AssistantMessage assistant, List<PendingToolCall> batch) {
+        if (this.transcript == null || runId == null || CollectionUtils.isEmpty(batch)) {
+            return;
+        }
+        RunSnapshot snapshot;
+        try {
+            snapshot = this.store.get(runId);
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("transcript-batch-snapshot-read")) {
+                log.warn("transcript batch rewrite could not read snapshot (not written) runId={}", runId, ex);
+            }
+            return;
+        }
+        recordSettledBatchTranscript(runId, snapshot, assistant, batch);
+    }
+
+    /**
+     * B2：本批工具<b>结算之后</b>重写本批的 assistant/tool 条目（同一 {@code entryId}/{@code toolCallId}，
+     * 读取时 last-wins，不会产生第二张卡）。
+     *
+     * <p>为什么必须有这个写点：挂起写点记的是"等待那一刻"的状态，终态写点要等整轮收尾。中间这段
+     * （多跳工具轮、长批次、用户刷新）如果只有挂起快照，用户看到的就是一张永远"待确认"的卡 ——
+     * 即使工具早已执行完。这里按<b>结算后的条目真值</b>重写：
+     * <ul>
+     * <li>状态 = {@link TranscriptEntries#settledStatuses}（每张卡只解析一次：已执行但条目态停在
+     *     APPROVED/PENDING 的投影成 EXECUTED，台账命中同样算已执行证据）；</li>
+     * <li>状态映射 = {@link TranscriptEntries#statesFrom}（与记忆收敛同一份投影，保留
+     *     outcome/code/decision/decidedAt/submittedValues，未决条目不写 outcome）——
+     *     assistant 的 toolCallStates 与 tool 条目的 status <b>同源</b>；</li>
+     * <li>待决条目<b>读不全就整批不写</b>：缺失 toolCallId 若只出现在 assistant 的 toolCalls 里，
+     *     前端会把它占位成 succeeded；等终态写点补比写一张假卡安全；</li>
+     * <li>只写本批的 toolCallId，不写用户条目 —— 用户原文的唯一权威是轮首写点，这里不参与。</li>
+     * </ul>
+     *
+     * <p>失败只 WARN：展示历史是观测面，不能反噬工具执行/续跑。挂起写点与终态写点保持原样（幂等）。
+     */
+    private SettledBatchRead readSettledBatch(String runId, List<PendingToolCall> batch) {
+        // 只写存储里的真值：确认门/前端通道结算的是外置存储的新副本，循环里那份可能仍是旧的。
+        // 读不到/读不全就<b>不写</b> —— 拿旧副本重写会把已执行的卡写回 PENDING（宁可等终态写点补）。
+        Map<String, PendingToolCall> fresh = new LinkedHashMap<>();
+        try {
+            for (PendingToolCall settled : this.store.pendingsLenient(runId)) {
+                if (settled != null && settled.getToolCallId() != null) {
+                    fresh.put(settled.getToolCallId(), settled);
+                }
+            }
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("transcript-batch-pending-read")) {
+                log.warn("transcript batch rewrite could not read pending entries (not written) runId={}", runId, ex);
+            }
+            return SettledBatchRead.incomplete();
+        }
+        List<PendingToolCall> settledBatch = new ArrayList<>(batch.size());
+        for (PendingToolCall pending : batch) {
+            PendingToolCall latest = pending == null || pending.getToolCallId() == null ? null
+                    : fresh.get(pending.getToolCallId());
+            if (latest == null) {
+                // 读不全（Redis 降级/条目被清）⇒ <b>整批不写</b>：缺状态的 toolCallId 留在 assistant 的
+                // toolCalls 里会被前端占位成 succeeded，比"暂缺一次更新"更假。等终态写点补。
+                if (log.isDebugEnabled())
+                    log.debug("transcript batch rewrite skipped: pending entries read incomplete runId={} batch={} fresh={}", runId,
+                            batch.size(), fresh.size());
+                return SettledBatchRead.incomplete();
+            }
+            settledBatch.add(latest);
+        }
+        return new SettledBatchRead(true, settledBatch);
+    }
+
+    private record SettledBatchRead(boolean isComplete, List<PendingToolCall> entries) {
+        private SettledBatchRead {
+            entries = entries == null ? List.of() : List.copyOf(entries);
+        }
+
+        private static SettledBatchRead incomplete() {
+            return new SettledBatchRead(false, List.of());
+        }
+    }
+
+    private void appendSettledTranscript(String runId, RunSnapshot snapshot, AssistantMessage assistant,
+                                         List<PendingToolCall> settledBatch) {
+        long atMs = System.currentTimeMillis();
+        // 每张卡只解析一次状态（台账只查一遍）：assistant 的 toolCallStates 与 tool 条目的 status 同源，
+        // 不会出现 assistant=EXECUTED 而 tool=APPROVED。
+        Map<String, String> statuses = TranscriptEntries.settledStatuses(settledBatch,
+                toolCallId -> ledgerOf(runId, toolCallId) != null);
+        List<TranscriptEntry> entries = new ArrayList<>(settledBatch.size() + 1);
+        long turnStartedAtMs = snapshot.transcriptToolTurnStartedAtMs();
+        entries.add(assistantTranscript(runId, snapshot, turnStartedAtMs, atMs, assistant, toolCallViews(settledBatch),
+                TranscriptEntries.statesFrom(settledBatch, statuses)));
+        for (PendingToolCall pending : settledBatch) {
+            entries.add(TranscriptEntries.tool(runId, turnStartedAtMs, atMs, pending.getToolCallId(),
+                    pending.getName(), pending.getKind(), statuses.get(pending.getToolCallId()),
+                    pending.getResultText()));
+        }
+        this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries,
+                snapshot.getRunEpoch());
+    }
+
+    private void recordSettledBatchTranscript(String runId, RunSnapshot snapshot, AssistantMessage assistant,
+                                              List<PendingToolCall> batch) {
+        if (this.transcript == null || snapshot == null || assistant == null || CollectionUtils.isEmpty(batch)
+                || !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
+            return;
+        }
+        // R1：轮次已终态（取消/完成/失败）⇒ 不写。终态写点（finish/cancel/fail）负责最终展示历史，
+        // 这里若在取消终态之后补写，会把已经写好的 CANCELLED 覆盖回 APPROVED/PENDING。
+        if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+            if (log.isDebugEnabled())
+                log.debug("transcript batch rewrite skipped: turn already terminal runId={} status={} (terminal write owns it)", runId,
+                        snapshot.getStatus());
+            return;
+        }
+        // R4：toolCallId 缺失的条目无法形成有归属的卡（statuses/states 都以 id 为键）⇒ 整批不写，
+        // 不产出无归属卡（否则 assistant 里会留一个没有状态的调用，前端占位成 succeeded）。
+        if (batch.stream().anyMatch(pending -> pending == null || pending.getToolCallId() == null)) {
+            if (log.isDebugEnabled())
+                log.debug("transcript batch rewrite skipped: batch has an entry without toolCallId runId={}", runId);
+            return;
+        }
+        try {
+            if (!this.store.isWritePermitted(runId, "transcript")) {
+                return;
+            }
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("transcript-batch-write-ownership")) {
+                log.warn("transcript write-ownership check failed (batch settlement does not rewrite tool cards) runId={}", runId, ex);
+            }
+            return;
+        }
+        try {
+            SettledBatchRead read = readSettledBatch(runId, batch);
+            if (!read.isComplete()) {
+                return;
+            }
+            List<PendingToolCall> settledBatch = read.entries();
+            // 本批一张都还没结算（park 在首张卡就穿出）⇒ 挂起写点那份就是真值，不重复追加同内容。
+            boolean anySettled = settledBatch.stream()
+                    .anyMatch(pending -> !PendingToolCall.PENDING.equals(pending.getStatus()));
+            if (!anySettled) {
+                return;
+            }
+            appendSettledTranscript(runId, snapshot, assistant, settledBatch);
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("transcript-batch-settlement-append")) {
+                log.warn("transcript batch settlement rewrite failed (tool execution/resume unaffected) runId={}", runId, ex);
+            }
+        }
+    }
+
+    private TranscriptEntry assistantTranscript(String runId, RunSnapshot snapshot, long turnStartedAtMs, long atMs,
+                                                AssistantMessage assistant, List<TranscriptEntry.ToolCallView> calls, Map<String, Object> states) {
+        TranscriptEntry entry = TranscriptEntries.assistant(runId, turnStartedAtMs, atMs, assistant.getText(), calls,
+                states);
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
+            SseChatEmitter out = this.registry.find(runId);
+            return out == null ? entry : entry.withSegments(out.transcriptSegments(entry.entryId(), calls, entry.text(),
+                    entry.reasoning()));
+        }
+    }
+
+    /**
+     * 待决条目 → assistant 条目的工具调用视图（挂起写点与批次结算写点同一份构造）。
+     */
+    private static List<TranscriptEntry.ToolCallView> toolCallViews(List<PendingToolCall> pendings) {
+        List<TranscriptEntry.ToolCallView> calls = new ArrayList<>(pendings.size());
+        for (PendingToolCall pending : pendings) {
+            if (pending == null) {
+                continue;
+            }
+            calls.add(new TranscriptEntry.ToolCallView(pending.getToolCallId(),
+                    ObjectUtils.defaultIfNull(pending.getType(), "function"), pending.getName(),
+                    pending.getArguments()));
+        }
+        return calls;
+    }
+
+    /**
+     * 落定本跳聚合消息。写口抛错时不提交正文段；不做 messageJson 读回对账，
+     * 持久化身份由本跳 assistant(tool_calls) 自身承担。
+     */
+    private boolean isSettle(String runId, List<Message> history) {
+        history = SyntheticMessages.withoutCorrectionInstruction(history);
+        RunSnapshot snapshot = this.store.get(runId);
+        if (snapshot == null) {
+            return false;
+        }
+        snapshot.setMessageJson(this.codec.serializeAll(history));
+        snapshot.setInFlightToolCalls(new ArrayList<>());
+        snapshot.setAssistantContent(null);
+        snapshot.setStatus(RunSnapshot.RUNNING);
+        snapshot.setRound(snapshot.getRound() + 1);
+        this.store.save(snapshot);
+        try {
+            RunSnapshot latest = this.store.get(runId);
+            // 只核对本跳序号与运行态，不比较整份 messageJson。
+            return latest != null && latest.getRound() == snapshot.getRound()
+                    && RunSnapshot.RUNNING.equals(latest.getStatus())
+                    && (CollectionUtils.isEmpty(latest.getInFlightToolCalls()));
+        } catch (RuntimeException ex) {
+            return false;
+        }
+    }
+
+    /**
+     * 该条目的拒绝是否应<b>静默用户可见的工具帧</b>（生成式表单的系统拒绝：schema 白名单 / 槽位放行）。
+     *
+     * <p>两类拒绝的共同点：<b>被判的是模型给的 schema，不是用户的动作</b>，而且都零副作用、都有明确
+     * 纠正出口。浏览器实测的缺陷正是"先落一张'已拒绝'的表单卡，模型改对后再落一张可用卡"——
+     * 用户看到两张卡，实际只有一次收集意图。
+     *
+     * <ul>
+     * <li>{@code FORM_SCHEMA_REJECTED}：schema 未过白名单（顶层 purpose/scenario/title、字段、联动……）；</li>
+     * <li>{@code FORM_SLOTS_ALREADY_KNOWN}：这张表想收集的槽位已由任务/工作区或用户明确值确定
+     * （"没有缺口"而不是"输错了"）。</li>
+     * </ul>
+     *
+     * <p>静默的是<b>用户面</b>，其余三面一字不改：
+     * <ul>
+     * <li>条目：仍是 {@code REJECTED_ARGUMENTS} + 同名 code（审计/幂等/排障）；</li>
+     * <li>日志：{@code settleFrontendRejected} 的 WARN 照旧；</li>
+     * <li>模型：统一信封回执照旧（含码与逐条"改哪一处"）；</li>
+     * <li>用户：{@code tool_start} / {@code frontend_tool_request} / {@code frontend_tool_result}
+     * <b>一条都不发</b> —— 前端不建段，就不会有卡，也不会更新任何既有的表单状态。</li>
+     * </ul>
+     *
+     * <p>只认<b>生成式表单 + 这两个码</b>：别的工具即便带同名码也不静默（不借码绕过可见性），
+     * 生成式表单的其它拒绝（例如回灌值不合法）走的是回灌闸门、不是这里 —— 那里用户已经填过表，
+     * 必须看见"哪一格要改"。
+     */
+    private static boolean isSystemRejectedWithoutUserFrames(PendingToolCall pending) {
+        String code = pending.effectiveCode();
+        if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
+            return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code)
+                    || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
+        }
+        // confirm_step 的"文本推断未验证"是系统拒绝（模型需改用 set_condition 结构化算子）：
+        // 用户面零卡（实时/历史同口径），模型回执照旧，保留纠正与后续 set_condition 通道。
+        return AiToolNames.CONFIRM_STEP.equals(pending.getName())
+                && ErrorCodes.CONDITION_OPERATOR_UNKNOWN.equals(code);
+    }
+
+    /**
+     * 工具批后把<b>运行上下文</b>推进到真实结果（多步工作流批）。
+     *
+     * <p>三层口径：
+     * <ol>
+     * <li><b>只由成功结算触发</b>：判据（工具名 + {@code outcome=OK}）在
+     * {@link RunContextRefresher#next} 里，本方法只负责"读快照 → 算 → 写回"；</li>
+     * <li><b>批内冻结</b>：这里只改<b>外置快照</b>，执行循环里那份 {@code context} 变量一字不动 ——
+     * 同一批里"导航 + 选配置"仍按批首 scope 被拒（{@code SCOPE_NOT_DISCLOSED}），下一批才放行；</li>
+     * <li><b>失败不打断</b>：任何异常（读快照/任务服务/写快照）只 WARN，保留旧上下文，
+     * 工具轮照常返回 —— 刷新是"让下一步更准"的增强，不是本批的判定面。</li>
+     * </ol>
+     */
+    private void refreshRunContext(String runId, PendingToolCall settled) {
+        RunContextRefresher refresher = this.contextRefresher;
+        if (settled == null || !RunContextRefresher.isSupported(settled.getName())) {
+            return;
+        }
+        if (refresher == null) {
+            // 可观测性：本批确有"能推进上下文"的结果，但装配里没有刷新器 —— 下一跳会沿用请求边界的
+            // 旧上下文（步骤工具不披露）。这不是"已证根因"，但必须是可检索的一条痕。
+            log.warn("cannot refresh run context after tool batch: RunContextRefresher not injected (next hop uses stale context; step tools may not be disclosed) runId={} tool={}", runId, settled.getName());
+            return;
+        }
+        try {
+            RunSnapshot fresh = this.store.get(runId);
+            if (fresh == null) {
+                return;
+            }
+            AiContext before = AiContext.fromMap(fresh.getContext());
+            Optional<AiContext> next = refresher.next(runId, before, settled);
+            if (next == null || next.isEmpty()) {
+                return;
+            }
+            AiContext after = next.get();
+            if (after.equals(before)) {
+                return;
+            }
+            fresh.setContext(after.toMap());
+            this.store.save(fresh);
+            if (log.isDebugEnabled())
+                log.debug("run context refreshed after tool batch runId={} tool={} page={} taskId={} taskType={} step={} status={}", runId, settled.getName(), after.getPage(), after.getTaskId(), after.getTaskType(), after.getStep(), after.getTaskStatus());
+        } catch (RuntimeException ex) {
+            log.warn("failed to refresh run context after tool batch; keeping the old context (tool turn not blocked) runId={} tool={}", runId,
+                    settled.getName(), ex);
+        }
+    }
+
+    private String runIdOf(Prompt prompt) {
+        if (prompt.getOptions() instanceof ToolCallingChatOptions options) {
+            return runIdOf(options.getToolContext());
+        }
+        return null;
+    }
+
+    /**
+     * 从 {@code toolContext} 取本轮 runId（无则 null：披露重算/执行补全都按"不可判定"回落）。
+     */
+    private static String runIdOf(Map<String, Object> toolContext) {
+        if (toolContext == null) {
+            return null;
+        }
+        Object runId = toolContext.get("runId");
+        return ObjectUtils.toString(runId, (String) null);
+    }
+
+    private Map<String, Object> toolContextOf(Prompt prompt) {
+        if (prompt.getOptions() instanceof ToolCallingChatOptions options) {
+            return options.getToolContext();
+        }
+        return null;
+    }
+
+    /**
+     * 本轮当前 attempt 的正文捕获器（无捕获链 ⇒ null）。
+     */
+    private TurnTextCapture turnTextOf(Prompt prompt) {
+        Map<String, Object> context = toolContextOf(prompt);
+        if (context == null) {
+            return null;
+        }
+        Object raw = context.get(TOOL_CONTEXT_TURN_TEXT);
+        return raw instanceof TurnTextCapture capture ? capture : null;
+    }
+
+    /**
+     * 当前正文段已随本跳聚合消息落库，清空后开始下一段。
+     */
+    private void commitTurnText(Prompt prompt) {
+        TurnTextCapture capture = turnTextOf(prompt);
+        if (capture != null) {
+            capture.commitSegment();
+        }
+    }
+
+    private boolean isSuspendedHopPersisted(String runId, AssistantMessage assistant) {
+        try {
+            RunSnapshot latest = this.store.get(runId);
+            if (latest == null || !RunSnapshot.SUSPENDED.equals(latest.getStatus())
+                    || latest.getInFlightToolCalls() == null) {
+                return false;
+            }
+            List<String> expected = assistant.getToolCalls().stream().map(AssistantMessage.ToolCall::id).toList();
+            List<String> persisted = latest.getInFlightToolCalls().stream().map(PendingToolCall::getToolCallId).toList();
+            return !expected.isEmpty() && expected.equals(persisted);
+        } catch (RuntimeException ex) {
+            return false;
+        }
+    }
+
+    /**
+     * 只保留 tool_calls/metadata/media、正文置空的 assistant（宿主表单挂起历史用）。
+     */
+    private static AssistantMessage assistantWithoutText(AssistantMessage assistant) {
+        AssistantMessage.Builder builder = AssistantMessage.builder()
+                .content("")
+                .properties(ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()));
+        if (assistant.hasToolCalls()) {
+            builder.toolCalls(assistant.getToolCalls());
+        }
+        if (CollectionUtils.isNotEmpty(assistant.getMedia())) {
+            builder.media(assistant.getMedia());
+        }
+        return builder.build();
+    }
+
+    /**
+     * 用已聚合正文补全流式工具调用的 assistant。
+     *
+     * <p><b>单一来源</b>：当前事件段非空时只使用它，<b>不再拼接</b>当前分片自带的 {@code direct}
+     * （两种来源拼接会让同一跳的正文越过明确段边界）；
+     * 聚合正文为空时保持 assistant 原样（direct 就是它的正文）。
+     * tool_calls / metadata / media 原样保留。
+     */
+    private static AssistantMessage assistantWithTurnText(AssistantMessage assistant, String turnText) {
+        if (StringUtils.isEmpty(turnText) || turnText.equals(assistant.getText())) {
+            return assistant;
+        }
+        AssistantMessage.Builder builder = AssistantMessage.builder()
+                .content(turnText)
+                .properties(ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()));
+        if (assistant.hasToolCalls()) {
+            builder.toolCalls(assistant.getToolCalls());
+        }
+        if (CollectionUtils.isNotEmpty(assistant.getMedia())) {
+            builder.media(assistant.getMedia());
+        }
+        return builder.build();
+    }
+
+    /**
+     * 凭本轮权威执行信封恢复轮次快照（快照缺失时的第一选择）。
+     *
+     * <p>三条硬口径（见 {@link ToolExecutionEnvelope}）：
+     * <ul>
+     * <li><b>只认本实例创建者</b>：{@code createdBy} 必须等于本实例 id，runId 也必须对得上 ——
+     * 别的实例的信封不构成"这一轮归我驱动"的证据；</li>
+     * <li><b>只恢复运行事实</b>：不写任何审批/认领/台账；恢复出的快照没有已批准条目；</li>
+     * <li><b>不重置序号/预算/步数/创建时刻</b>：步数、轮次、创建时刻原值入快照；armed/已跳过批次数
+     * 同时回填进程内信标；{@code ai:seq} 只抬到信封的 {@code seqFloor}（只升不降，绝不回拨并发新号）。
+     * 抬号是必须的：快照与序号键可能同时丢失，不抬号会让恢复后的 {@code suspended}/{@code confirm_request}
+     * 从 1 重发，前端带 {@code lastSeq} 重挂时把这些帧当孤儿丢掉（确认卡消失）。</li>
+     * </ul>
+     *
+     * <p>恢复即落库（挂起与续跑都读 {@code ai:run:<runId>}）；落库前再读一次，若并发中已出现快照则直接
+     * 用那一份，避免用较旧的信封覆盖更新的状态。重建写入走<b>条件创建</b>
+     * （{@link RunStore#createIfAbsent}：存在性判定与写在同一原子步），于是"读无 → 写"之间冒出来的
+     * 并发创建者不会被覆盖 —— 条件创建返回 {@code false} 时改读并发那一份。落库复读成功后、任何后续帧
+     * 之前抬号并复读校验（抬不上去 ⇒ {@code null}，不发出会重号的帧）。任一环节失败 ⇒ {@code null}
+     * （调用方失败关闭）。
+     *
+     * <h2>身份锚点 = 记录身份（不读线程身份）</h2>
+     * 本方法可能跑在<b>没有请求身份</b>的官方上游线程上（也可能跑在残留了他人身份的池化线程上），
+     * 而快照/序号键由记录身份拼出。因此这里先按信封身份开作用域，再把并发读、落库、写后复核、
+     * 抬号统统放在它里面；并发读与写后复核另用<b>显式身份读口</b>（{@link #readRecordSnapshot}），
+     * 使"有没有活快照"的判据不依赖当前线程恰巧是谁。旧实现用线程身份读：无身份线程只命中 legacy
+     * 键 ⇒ 活快照被当成缺失 ⇒ 信封快照<b>覆盖</b>活快照（{@code messageJson} 丢失、
+     * {@code round}/{@code toolSteps} 回拨），写后复核又读不回来 ⇒ 整轮按不可恢复失败关闭。
+     *
+     * @return 可用于本轮执行的快照；{@code null} = 信封缺失/不可信/恢复失败
+     */
+    private RunSnapshot recoverSnapshot(ToolExecutionEnvelope envelope, String runId) {
+        if (envelope == null) {
+            return null;
+        }
+        if (!envelope.isRestorableBy(runId, this.store.instanceId())) {
+            log.warn("execution envelope unusable for recovery (turn runId={} envelope runId={} createdBy={} thisInstance={}): not recovering, failing closed",
+                    runId, envelope.runId(), envelope.createdBy(), this.store.instanceId());
+            return null;
+        }
+        RunSnapshot restored = envelope.toSnapshot();
+        // 0/0 旧信封 ⇒ 显式无身份作用域：只认 legacy 键，不伪造默认租户，也不沿用调用者身份。
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(restored.getTenantId(), restored.getUserId())) {
+            restored = recoverSnapshotRecord(restored);
+            if (restored == null) {
+                return null;
+            }
+            // 序号下界：ai:run 与 ai:seq/归档可能同时丢失；抬到信封的 seqFloor（只升不降）后，
+            // 下一帧由 max(归档末帧, ai:seq)+1 / INCR ai:seq 得出，必然 > seqFloor，重挂不会丢卡。
+            // 位置在落库复读之后、任何后续帧之前（本方法只在 emit 之前被调用）；键按记录身份拼。
+            this.store.ensureIssuedSeqAtLeast(restored.getRunId(), envelope.seqFloor());
+            if (envelope.seqFloor() > 0L && this.store.lastIssuedSeq(restored.getRunId()) < envelope.seqFloor()) {
+                log.warn("business sequence floor not applied after recovery (failing closed: no duplicate-numbered frames) runId={} seqFloor={} current={}",
+                        restored.getRunId(), envelope.seqFloor(), this.store.lastIssuedSeq(restored.getRunId()));
+                return null;
+            }
+            // 预算口径跨 park/恢复不重置：进程内信标按信封原值重新点亮（armed 与已跳过批次数）。
+            this.beacon.restoreBudgetArmed(restored.getRunId(), envelope.budgetArmedAtMs());
+            this.beacon.restoreBudgetSkippedBatches(restored.getRunId(), envelope.budgetSkippedBatches());
+            log.warn("turn snapshot missing; recovered from this instance's authoritative execution envelope runId={} createdAtMs={} round={} steps={} budgetArmedAtMs={} skipped={} seqFloor={} (seq raised to the floor; no approval/ledger/claim fabricated)",
+                    restored.getRunId(), restored.getCreatedAtMs(), envelope.round(), envelope.toolSteps(),
+                    envelope.budgetArmedAtMs(), envelope.budgetSkippedBatches(), envelope.seqFloor());
+            return restored;
+        }
+    }
+
+    private RunSnapshot recoverSnapshotRecord(RunSnapshot restored) {
+        try {
+            RunSnapshot concurrent = readRecordSnapshot(restored);
+            if (concurrent != null) {
+                return concurrent;
+            }
+            // 条件创建（原子）：读与写之间若有并发创建者，这里<b>不会</b>覆盖它 —— 返回 false 后改读
+            // 并发那一份。之前的无条件 save 会把对方刚写下的 messageJson/round/toolSteps 抹成信封旧值。
+            if (!this.store.isCreatedIfAbsent(restored)) {
+                RunSnapshot winner = readRecordSnapshot(restored);
+                if (winner == null) {
+                    log.warn("recovery from execution envelope was not persisted (no write access / lost lease / conditional create rejected): failing closed, dangerous/frontend tools must not run directly runId={}", restored.getRunId());
+                    return null;
+                }
+                log.warn("a concurrent snapshot already exists during envelope recovery (adopted the concurrent one, not overwritten) runId={}",
+                        restored.getRunId());
+                return winner;
+            }
+            // 写后复核（刚创建成功理应可读；身份/设施异常时仍按失败关闭）。
+            if (readRecordSnapshot(restored) == null) {
+                log.warn("recovery from execution envelope was not persisted (no write access / lost lease): failing closed, dangerous/frontend tools must not run directly runId={}",
+                        restored.getRunId());
+                return null;
+            }
+        } catch (RuntimeException ex) {
+            log.warn("failed to recover turn snapshot from execution envelope (failing closed: dangerous/frontend tools must not run directly) runId={}",
+                    restored.getRunId(), ex);
+            return null;
+        }
+        return restored;
+    }
+
+    /**
+     * <b>按记录身份</b>读轮次快照（身份是入参，不是"当前线程碰巧是谁"）。
+     *
+     * <p>为什么不能用 {@code store.get(runId)}：那个读口的键由<b>当前线程</b>身份拼出 —— 官方上游线程
+     * 没有身份时只会命中 legacy 键，于是已存在的身份快照被当成"缺失"（随后恢复写覆盖活快照），
+     * 写后复核也读不回来（把恢复判成"未落库"）。
+     *
+     * <p>记录身份 0/0（本字段引入前的旧信封）⇒ 显式无身份作用域下读 legacy 键：不伪造默认租户，
+     * 也不沿用池化线程上可能残留的身份。
+     */
+    private RunSnapshot readRecordSnapshot(RunSnapshot record) {
+        long tenantId = record.getTenantId();
+        long userId = record.getUserId();
+        if (RunIdentityScope.usable(tenantId, userId)) {
+            return this.store.get(record.getRunId(), tenantId, userId);
+        }
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+            return this.store.get(record.getRunId());
+        }
+    }
+
+    /**
+     * 本轮<b>记录身份</b>的作用域（首次读与恢复都必须在它里面）。
+     *
+     * <p>身份只认本实例创建、且 runId 对得上的执行信封（与 {@link #recoverSnapshot} 同一信任边界）。
+     * 没有可用信封 ⇒ 不建立作用域（{@link #NO_RECORD_SCOPE}）：沿用调用线程身份 —— 正常请求路径
+     * 就发生在带身份的请求线程上，行为不变。
+     */
+    private RunIdentityScope.Scope recordIdentityScope(ToolExecutionEnvelope envelope, String runId) {
+        if (envelope == null || !envelope.isRestorableBy(runId, this.store.instanceId())) {
+            return NO_RECORD_SCOPE;
+        }
+        return RunIdentityScope.open(envelope.tenantId(), envelope.userId());
+    }
+
+    /**
+     * 快照/runId 缺失且无可信执行信封时的执行路径：<b>READ + BACKEND 放行，危险/前端工具拒绝</b>。
+     *
+     * <p>放行部分仍走官方执行器（纯只读、无副作用）；被拒部分在模型侧留下结构化的
+     * {@code blocked}/{@code TOOL_KIND_MISMATCH} 结果，历史保持"完整 assistant(tool_calls) + 全量
+     * tool 响应"的形状（官方循环下一跳不会丢消息）。本路径<b>不</b>发帧：没有可外置的挂起态，
+     * 也不该让前端出现一张"看似可点"的确认卡。
+     */
+    private Map<String, String> executeAllowedWithoutSnapshot(Prompt prompt, AssistantMessage assistant,
+                                                              List<AssistantMessage.ToolCall> allowed) {
+        Map<String, String> allowedData = new LinkedHashMap<>();
+        if (allowed.isEmpty()) {
+            return allowedData;
+        }
+        AssistantMessage subset = AssistantMessage.builder()
+                .content(assistant.getText())
+                .properties(ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()))
+                .toolCalls(allowed)
+                .build();
+        ToolExecutionResult partial = this.delegate.executeToolCalls(prompt,
+                new ChatResponse(List.of(new Generation(subset))));
+        for (Message message : partial.conversationHistory()) {
+            if (message instanceof ToolResponseMessage toolMessage) {
+                for (ToolResponseMessage.ToolResponse response : toolMessage.getResponses()) {
+                    allowedData.putIfAbsent(response.id(), response.responseData());
+                }
+            }
+        }
+        return allowedData;
+    }
+
+    private ToolExecutionResult executeWithoutSnapshot(Prompt prompt, ChatResponse chatResponse, String runId,
+                                                       AssistantMessage assistant) {
+        List<AssistantMessage.ToolCall> calls = assistant.getToolCalls();
+        List<AssistantMessage.ToolCall> allowed = new ArrayList<>(calls.size());
+        List<AssistantMessage.ToolCall> refused = new ArrayList<>(calls.size());
+        for (AssistantMessage.ToolCall call : calls) {
+            boolean readBackend = this.toolRegistry.channelOf(call.name()) == ToolMeta.Channel.BACKEND
+                    && this.toolRegistry.riskOf(call.name()) == ToolMeta.RiskLevel.READ;
+            (readBackend ? allowed : refused).add(call);
+        }
+        if (refused.isEmpty()) {
+            log.warn("tool execution has no turn runId/snapshot (runId={}) and no usable execution envelope; batch is all READ+BACKEND, falling back to default execution: {}", runId, calls.stream().map(AssistantMessage.ToolCall::name).toList());
+            // 传补全正文后的 assistant：原 chatResponse 是流式工具调用跳（正文为空）。
+            ToolExecutionResult result = this.delegate.executeToolCalls(prompt,
+                    new ChatResponse(List.of(new Generation(assistant))));
+            // 无快照/无持久化写点：不推进正文分段；终态正文仍由调用方按完整 accumulator 写入。
+            return result;
+        }
+        log.warn("tool execution has no turn runId/snapshot (runId={}) and no usable execution envelope: refusing dangerous/frontend tools {}, allowing READ+BACKEND {} (no card, no claim, no ledger row)", runId,
+                refused.stream().map(AssistantMessage.ToolCall::name).toList(),
+                allowed.stream().map(AssistantMessage.ToolCall::name).toList());
+
+        Map<String, String> allowedData = executeAllowedWithoutSnapshot(prompt, assistant, allowed);
+
+        List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(calls.size());
+        for (AssistantMessage.ToolCall call : calls) {
+            String data = allowedData.get(call.id());
+            if (data != null) {
+                responses.add(new ToolResponseMessage.ToolResponse(call.id(), call.name(), data));
+                continue;
+            }
+            responses.add(new ToolResponseMessage.ToolResponse(call.id(), call.name(),
+                    ToolResultEnvelope
+                            .of(ToolOutcome.BLOCKED, ToolOutcome.CODE_TOOL_KIND_MISMATCH, UNRECOVERABLE_EXECUTION_TEXT,
+                                    call.arguments())
+                            .toModelJson(this.limiter, call.name())));
+        }
+        List<Message> history = new ArrayList<>(prompt.getInstructions());
+        history.add(assistant);
+        history.add(ToolResponseMessage.builder().responses(responses).build());
+        // 无快照/无持久化写点：不推进正文分段；终态正文仍由调用方按完整 accumulator 写入。
+        return ToolExecutionResult.builder().conversationHistory(history).build();
+    }
+
+    /**
+     * 确认门执行前的 {@code reportHash} 复核。
+     *
+     * <p>只对"确认门条目 + 预检支持的工具 + 卡上确实带过 reportHash"生效：
+     * 重跑一次只读预检，指纹一致才允许执行；不一致 ⇒ {@code blocked}/{@code PRECHECK_STALE}，
+     * 要求用户重新确认（旧报告不是执行授权）。重跑预检自身失败 ⇒ 同样不执行（{@code PRECHECK_UNAVAILABLE}）。
+     * 旧数据（没有预检报告）没有可比对的指纹，保持既有行为。
+     *
+     * @return 阻断文本；{@code null} = 可继续执行
+     */
+    private String verifyApprovedReport(String runId, PendingToolCall pending, AiContext context) {
+        if (this.preflight == null || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+                || !ToolPreflightService.isSupported(pending.getName())) {
+            return null;
+        }
+        Map<String, Object> stored = pending.getPreflight();
+        Object storedHash = stored == null ? null : stored.get("reportHash");
+        if (StringUtils.isBlank(ObjectUtils.toString(storedHash, (String) null))) {
+            return null;
+        }
+        ToolPreflightService.PreflightReport fresh;
+        try {
+            fresh = this.preflight.inspect(pending.getName(), pending.getArguments(), context);
+        } catch (RuntimeException ex) {
+            log.error("failed to recheck preflight report before execution (not executed; reconfirmation required) runId={} tool={} toolCallId={}", runId,
+                    pending.getName(), pending.getToolCallId(), ex);
+            return settleBlocked(runId, pending, ToolOutcome.CODE_PRECHECK_UNAVAILABLE,
+                    PRECHECK_REVERIFY_UNAVAILABLE_TEXT);
+        }
+        if (fresh == null) {
+            return settleBlocked(runId, pending, ToolOutcome.CODE_PRECHECK_UNAVAILABLE,
+                    PRECHECK_REVERIFY_UNAVAILABLE_TEXT);
+        }
+        if (String.valueOf(storedHash).equals(fresh.reportHash())) {
+            return null;
+        }
+        log.warn("preflight report changed between confirm card and execution (not executed; reconfirmation required) runId={} tool={} toolCallId={} cardHash={} currentHash={}",
+                runId, pending.getName(), pending.getToolCallId(), storedHash, fresh.reportHash());
+        return settleBlocked(runId, pending, ErrorCodes.PRECHECK_STALE, PRECHECK_STALE_TEXT);
+    }
+
+    /**
+     * 帧里的结果文本（T2 后<b>不再截断</b>）。
+     *
+     * <p>
+     * S4.2 时期这里是 800 字符截断 —— 与 T2 的"两条通道分离"口径相反（截断属于<b>模型侧</b>的
+     * 上下文成本控制，前端与台账要的是完整结果）。因此本方法现在只做 null 归一；
+     * 模型侧的上限统一由 {@link ToolResultLimiter} 在回填 {@code role:tool} 时施加。
+     */
+    private String frameText(String text) {
+        return StringUtils.defaultString(text);
+    }
+
+    /**
+     * 供诊断端点/日志：本管理器确实被装配。
+     */
+    public String describe() {
+        return "delegate=" + this.delegate.getClass().getName() + ", instanceId=" + this.store.instanceId();
+    }
 
 }

@@ -123,12 +123,16 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<?> handleUnreadableBody(HttpMessageNotReadableException e, HttpServletRequest request) {
-        log.debug("Unreadable request body (malformed JSON, type mismatch, or empty) uri={}",
-                request == null ? null : request.getRequestURI(), e);
+        if (log.isDebugEnabled()) {
+            log.debug("Unreadable request body (malformed JSON, type mismatch, or empty) uri={}",
+                    request == null ? null : request.getRequestURI(), e);
+        }
         return respond(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, "请求体格式不合法", null, request);
     }
 
-    /** 异常族的一条映射：HTTP 状态 + 稳定码 + 中文安全原文（en 由 {@code messages_en} 按码兜底）。 */
+    /**
+     * 异常族的一条映射：HTTP 状态 + 稳定码 + 中文安全原文（en 由 {@code messages_en} 按码兜底）。
+     */
     private record WebFamily(HttpStatus status, String code, String zhMessage) {
     }
 
@@ -143,7 +147,9 @@ public class GlobalExceptionHandler {
      */
     private static final Map<Class<? extends Throwable>, WebFamily> WEB_FAMILIES = webFamilies();
 
-    /** {@link ResponseStatusException} 的独立 HTTP 状态文案，不被业务错误码覆盖，也不透出原始 reason。 */
+    /**
+     * {@link ResponseStatusException} 的独立 HTTP 状态文案，不被业务错误码覆盖，也不透出原始 reason。
+     */
     private record StatusMessage(String zh, String en) {
     }
 
@@ -152,9 +158,9 @@ public class GlobalExceptionHandler {
             HttpStatus.NOT_FOUND, new StatusMessage("请求的资源不存在", "The requested resource was not found"),
             HttpStatus.CONFLICT, new StatusMessage("请求与当前状态冲突", "The request conflicts with the current state"),
             HttpStatus.TOO_MANY_REQUESTS,
-                    new StatusMessage("请求过于频繁，请稍后再试", "Too many requests; please retry later"),
+            new StatusMessage("请求过于频繁，请稍后再试", "Too many requests; please retry later"),
             HttpStatus.SERVICE_UNAVAILABLE,
-                    new StatusMessage("服务暂不可用，请稍后重试", "Service is temporarily unavailable; please retry later"));
+            new StatusMessage("服务暂不可用，请稍后重试", "Service is temporarily unavailable; please retry later"));
 
     private static String statusMessage(HttpStatus status, Locale locale) {
         StatusMessage message = STATUS_MESSAGES.get(status);
@@ -251,9 +257,11 @@ public class GlobalExceptionHandler {
             localizeByCode = false;
         }
         HttpHeaders headers = headersOf(e);
-        log.debug("Web exception mapped uri={} type={} status={} code={}",
-                request == null ? null : request.getRequestURI(), e.getClass().getSimpleName(),
-                status.value(), code, e);
+        if (log.isDebugEnabled()) {
+            log.debug("Web exception mapped uri={} type={} status={} code={}",
+                    request == null ? null : request.getRequestURI(), e.getClass().getSimpleName(),
+                    status.value(), code, e);
+        }
         if (status == HttpStatus.NOT_ACCEPTABLE) {
             // 不能再写 JSON 体（客户端不接受），否则二次协商失败
             return ResponseEntity.status(status).headers(headers).build();
@@ -261,10 +269,12 @@ public class GlobalExceptionHandler {
         return respond(status, code, message, null, request, headers, localizeByCode);
     }
 
-    /** 按运行时类型向上找最近的族；表外异常返回 {@code null}（交回兜底 500）。 */
+    /**
+     * 按运行时类型向上找最近的族；表外异常返回 {@code null}（交回兜底 500）。
+     */
     private static WebFamily familyOf(Throwable error) {
         for (Class<?> type = error.getClass(); type != null && Throwable.class.isAssignableFrom(type);
-                type = type.getSuperclass()) {
+             type = type.getSuperclass()) {
             WebFamily family = WEB_FAMILIES.get(type);
             if (family != null) {
                 return family;
@@ -273,7 +283,9 @@ public class GlobalExceptionHandler {
         return null;
     }
 
-    /** {@link ResponseStatusException} 的状态 → 稳定码（只认已登记的码，不新增）。 */
+    /**
+     * {@link ResponseStatusException} 的状态 → 稳定码（只认已登记的码，不新增）。
+     */
     private static String codeOfStatus(HttpStatus status) {
         if (status == HttpStatus.NOT_FOUND) {
             return ErrorCodes.RESOURCE_NOT_FOUND;
@@ -284,7 +296,9 @@ public class GlobalExceptionHandler {
         return status.is4xxClientError() ? ErrorCodes.BAD_REQUEST : ErrorCodes.INTERNAL_ERROR;
     }
 
-    /** Spring 的 {@link ErrorResponse} 自带响应头（405 的 {@code Allow}、415 的 {@code Accept}），照搬。 */
+    /**
+     * Spring 的 {@link ErrorResponse} 自带响应头（405 的 {@code Allow}、415 的 {@code Accept}），照搬。
+     */
     private static HttpHeaders headersOf(Exception error) {
         if (error instanceof ErrorResponse response && response.getHeaders() != null) {
             return response.getHeaders();
@@ -297,7 +311,9 @@ public class GlobalExceptionHandler {
         return respond(HttpStatus.NOT_FOUND, e.getCode(), e.getMessage(), null, request);
     }
 
-    /** 业务冲突 → 409 + 机器可读错误码（ADR-8 W1 边界：取消已终态作业返回 409 JOB_ALREADY_FINAL）。 */
+    /**
+     * 业务冲突 → 409 + 机器可读错误码（ADR-8 W1 边界：取消已终态作业返回 409 JOB_ALREADY_FINAL）。
+     */
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<?> handleConflict(ConflictException e, HttpServletRequest request) {
         return respond(HttpStatus.CONFLICT, e.getCode(), e.getMessage(), null, request);
@@ -339,7 +355,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<?> handleGeneral(Exception e, HttpServletRequest request,
-            HttpServletResponse response) {
+                                           HttpServletResponse response) {
         // Q8②：SSE 响应的内容类型在开流时已被固定为 text/event-stream（帧正在写）。这类请求上
         // 冒出来的异常（典型：客户端断开后写帧）若再以 ApiResponse(JSON) 写回，必然会抛
         // HttpMessageNotWritableException: No converter for [... ApiResponse] with preset
@@ -361,22 +377,26 @@ public class GlobalExceptionHandler {
      * traceId（沿用 servlet 容器已分配的请求 id，无则不塞键）。
      */
     private ResponseEntity<?> respond(HttpStatus status, String code, String message,
-            Map<String, Object> args, HttpServletRequest request) {
+                                      Map<String, Object> args, HttpServletRequest request) {
         return respond(status, code, message, args, request, HttpHeaders.EMPTY);
     }
 
-    /** 同上，额外带上响应头（L-111：405 的 {@code Allow}、415 的 {@code Accept} 等协议头照搬）。 */
+    /**
+     * 同上，额外带上响应头（L-111：405 的 {@code Allow}、415 的 {@code Accept} 等协议头照搬）。
+     */
     private ResponseEntity<?> respond(HttpStatus status, String code, String message,
-            Map<String, Object> args, HttpServletRequest request, HttpHeaders headers) {
+                                      Map<String, Object> args, HttpServletRequest request, HttpHeaders headers) {
         return respond(status, code, message, args, request, headers, true);
     }
 
-    /** 同上；独立状态文案可绕过码级本地化，但状态、错误码、响应头和响应形状保持原路径。 */
+    /**
+     * 同上；独立状态文案可绕过码级本地化，但状态、错误码、响应头和响应形状保持原路径。
+     */
     private ResponseEntity<?> respond(HttpStatus status, String code, String message,
-            Map<String, Object> args, HttpServletRequest request, HttpHeaders headers, boolean localizeByCode) {
+                                      Map<String, Object> args, HttpServletRequest request, HttpHeaders headers, boolean localizeByCode) {
         Locale locale = requestLocale();
         String traceId = request == null ? null : traceIdOf(request);
-        if (wantsProblemJson(request)) {
+        if (isProblemJsonWanted(request)) {
             ProblemDetail problem = bodyFactory.problem(code, status, message, args,
                     request == null ? null : request.getRequestURI(), traceId, locale, localizeByCode);
             return ResponseEntity.status(status)
@@ -405,8 +425,10 @@ public class GlobalExceptionHandler {
         return ObjectUtils.defaultIfNull(locale, Locale.SIMPLIFIED_CHINESE);
     }
 
-    /** `Accept` 含 `application/problem+json` 才切 RFC 9457 形态（默认形态零变化）。 */
-    private static boolean wantsProblemJson(HttpServletRequest request) {
+    /**
+     * `Accept` 含 `application/problem+json` 才切 RFC 9457 形态（默认形态零变化）。
+     */
+    private static boolean isProblemJsonWanted(HttpServletRequest request) {
         if (request == null) {
             return false;
         }
@@ -420,7 +442,9 @@ public class GlobalExceptionHandler {
         return trace instanceof String value && StringUtils.isNotBlank(value) ? value : null;
     }
 
-    /** 该响应是否已经"只能写流、不能再写 JSON 体"（内容类型已固定为 text/event-stream 或已提交）。 */
+    /**
+     * 该响应是否已经"只能写流、不能再写 JSON 体"（内容类型已固定为 text/event-stream 或已提交）。
+     */
     private static boolean isStreamingResponse(HttpServletResponse response) {
         if (response == null) {
             return false;

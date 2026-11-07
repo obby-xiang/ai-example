@@ -1,6 +1,7 @@
 package com.example.configmgr.data.controller;
 
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.common.LogThrottler;
 import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.data.service.ConfigDataService;
@@ -8,12 +9,19 @@ import com.example.configmgr.data.service.QueryCondition;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.domain.Page;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/data")
 @RequiredArgsConstructor
@@ -23,7 +31,9 @@ public class DataController {
     private final DefinitionService definitionService;
     private final ConfigDataService configDataService;
 
-    /** scopeType 未传时按配置定义的层级推导（而非写死 GLOBAL） */
+    /**
+     * scopeType 未传时按配置定义的层级推导（而非写死 GLOBAL）
+     */
     private String effectiveScopeType(String defCode, String scopeType) {
         if (StringUtils.isNotBlank(scopeType)) {
             return scopeType;
@@ -31,6 +41,7 @@ public class DataController {
         try {
             return definitionService.findByCode(defCode).getLevel().name();
         } catch (Exception e) {
+            LogThrottler.warn(log, "DataController.scopeFallback", "Definition scope lookup failed; using GLOBAL", e);
             return "GLOBAL";
         }
     }
@@ -71,21 +82,23 @@ public class DataController {
      */
     @GetMapping("/{defCode}")
     public ApiResponse<Page<ConfigDataRow>> list(@PathVariable String defCode,
-                                                   @RequestParam(required = false) String scopeType,
-                                                   @RequestParam(required = false) String scopeKey,
-                                                   @RequestParam(required = false) String conditions,
-                                                   @RequestParam(defaultValue = "0") int page,
-                                                   @RequestParam(defaultValue = "20") int size) {
+                                                 @RequestParam(required = false) String scopeType,
+                                                 @RequestParam(required = false) String scopeKey,
+                                                 @RequestParam(required = false) String conditions,
+                                                 @RequestParam(defaultValue = "0") int page,
+                                                 @RequestParam(defaultValue = "20") int size) {
         QueryCondition cond = configDataService.parseCondition(conditions);
         if (cond != null) {
             return ApiResponse.ok(configDataService.findPagedFiltered(defCode, scopeKey, cond, page, size));
         }
         return ApiResponse.ok(dataRowRepository.findRowsInScopePaged(
                 defCode, effectiveScopeType(defCode, scopeType), scopeKey,
-                org.springframework.data.domain.PageRequest.of(page, size)));
+                PageRequest.of(page, size)));
     }
 
-    /** 与导出作业一致的真实行数：定义的全部已发布行，再应用同一查询条件。 */
+    /**
+     * 与导出作业一致的真实行数：定义的全部已发布行，再应用同一查询条件。
+     */
     @GetMapping("/{defCode}/count")
     public ApiResponse<Map<String, Long>> count(@PathVariable String defCode,
                                                 @RequestParam(required = false) String scopeType,

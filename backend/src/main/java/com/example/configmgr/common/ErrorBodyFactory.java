@@ -27,7 +27,9 @@ import java.util.Map;
 @Component
 public class ErrorBodyFactory {
 
-    /** messages 键前缀（{@code error.TASK_FINALIZED}）。 */
+    /**
+     * messages 键前缀（{@code error.TASK_FINALIZED}）。
+     */
     public static final String KEY_PREFIX = "error.";
 
     private final ObjectProvider<org.springframework.context.MessageSource> messageSource;
@@ -36,14 +38,18 @@ public class ErrorBodyFactory {
         this.messageSource = messageSource;
     }
 
-    /** 业务信封形态（默认形态，字段形状不变）。 */
+    /**
+     * 业务信封形态（默认形态，字段形状不变）。
+     */
     public ApiResponse<Object> envelope(String code, String fallbackMessage, Map<String, Object> args, Locale locale) {
         return envelope(code, fallbackMessage, args, locale, true);
     }
 
-    /** 同上；{@code localizeByCode=false} 时保留调用方已本地化的独立文案。 */
+    /**
+     * 同上；{@code localizeByCode=false} 时保留调用方已本地化的独立文案。
+     */
     public ApiResponse<Object> envelope(String code, String fallbackMessage, Map<String, Object> args, Locale locale,
-            boolean localizeByCode) {
+                                        boolean localizeByCode) {
         ApiResponse<Object> body = ApiResponse.error(code,
                 message(code, fallbackMessage, args, locale, localizeByCode));
         if (MapUtils.isNotEmpty(args)) {
@@ -52,7 +58,9 @@ public class ErrorBodyFactory {
         return body;
     }
 
-    /** 无码异常的类型缺省码：{@code IllegalArgumentException} → ILLEGAL_ARGUMENT 等。 */
+    /**
+     * 无码异常的类型缺省码：{@code IllegalArgumentException} → ILLEGAL_ARGUMENT 等。
+     */
     public static String codeOf(Throwable error, String fallbackCode) {
         if (error instanceof CodedException coded && StringUtils.isNotBlank(coded.getCode())) {
             return coded.getCode();
@@ -70,9 +78,11 @@ public class ErrorBodyFactory {
         return message(code, fallbackMessage, args, locale, true);
     }
 
-    /** 同上；{@code localizeByCode=false} 用于按 HTTP 状态等独立语义选择的本地化文案。 */
+    /**
+     * 同上；{@code localizeByCode=false} 用于按 HTTP 状态等独立语义选择的本地化文案。
+     */
     public String message(String code, String fallbackMessage, Map<String, Object> args, Locale locale,
-            boolean localizeByCode) {
+                          boolean localizeByCode) {
         if (isChinese(locale) || !localizeByCode) {
             return StringUtils.defaultString(fallbackMessage);
         }
@@ -94,13 +104,15 @@ public class ErrorBodyFactory {
      * 响应体仍是信封（开了会把 404/405 整体换形，直接打红 E2E 的形态断言）。
      */
     public ProblemDetail problem(String code, HttpStatus status, String fallbackMessage,
-            Map<String, Object> args, String instance, String traceId, Locale locale) {
+                                 Map<String, Object> args, String instance, String traceId, Locale locale) {
         return problem(code, status, fallbackMessage, args, instance, traceId, locale, true);
     }
 
-    /** 同上；{@code localizeByCode=false} 时保留调用方已本地化的独立文案。 */
+    /**
+     * 同上；{@code localizeByCode=false} 时保留调用方已本地化的独立文案。
+     */
     public ProblemDetail problem(String code, HttpStatus status, String fallbackMessage,
-            Map<String, Object> args, String instance, String traceId, Locale locale, boolean localizeByCode) {
+                                 Map<String, Object> args, String instance, String traceId, Locale locale, boolean localizeByCode) {
         ProblemDetail detail = ProblemDetail.forStatusAndDetail(status,
                 message(code, fallbackMessage, args, locale, localizeByCode));
         detail.setType(URI.create("urn:cfg:error:" + code));
@@ -124,11 +136,7 @@ public class ErrorBodyFactory {
         if (source == null || key == null) {
             return null;
         }
-        try {
-            return source.getMessage(key, null, locale);
-        } catch (org.springframework.context.NoSuchMessageException e) {
-            return null;
-        }
+        return source.getMessage(key, null, null, locale);
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.example.configmgr.config;
 
+import com.example.configmgr.common.LogThrottler;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.FlywayException;
@@ -43,15 +45,22 @@ import java.util.UUID;
  *
  * <p>默认 profile 不装配本类（见 {@link FlywayStartupLockConfig}），单实例 H2 文件库行为不变。
  */
+@Slf4j
 public class FlywayStartupLock {
 
-    /** 单飞等待上限（两库同一口径；覆盖一轮冷启动迁移）。 */
+    /**
+     * 单飞等待上限（两库同一口径；覆盖一轮冷启动迁移）。
+     */
     static final Duration WAIT_TIMEOUT = Duration.ofSeconds(60);
 
-    /** PG advisory lock 的应用级键（本应用全局固定）。 */
+    /**
+     * PG advisory lock 的应用级键（本应用全局固定）。
+     */
     static final long PG_LOCK_KEY = 20261025L;
 
-    /** H2 锁表放在业务库的独立 schema，避免污染 PUBLIC 的 baseline 判定。 */
+    /**
+     * H2 锁表放在业务库的独立 schema，避免污染 PUBLIC 的 baseline 判定。
+     */
     static final String H2_LOCK_SCHEMA = "FLYWAY_LOCK";
 
     static final String H2_LOCK_TABLE = H2_LOCK_SCHEMA + ".flyway_startup_lock";
@@ -93,98 +102,79 @@ public class FlywayStartupLock {
                 acquired = true;
                 flyway.migrate();
                 verifyH2LockStillHeld(lockConnection, token);
-            }
-            else {
+            } else {
                 acquirePostgres(lockConnection, this.waitTimeout);
                 acquired = true;
                 try (AutoCloseable pinned = this.pin.pin(lockConnection)) {
                     flyway.migrate();
                 }
             }
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             failure = e;
+            LogThrottler.warn(log, "FlywayStartupLock.migrate", "Flyway startup lock migration failed", e);
             if (e instanceof RuntimeException runtime) {
                 throw runtime;
             }
             throw new FlywayException("Flyway startup lock failed", e);
-        }
-        catch (Error e) {
+        } catch (Error e) {
             failure = e;
+            LogThrottler.warn(log, "FlywayStartupLock.error", "Flyway startup lock migration failed fatally", e);
             throw e;
+        } finally {
+            releaseConnection(lockConnection, dialect, acquired, failure);
         }
-        finally {
-            Exception releaseFailure = null;
-            if (lockConnection != null && acquired) {
-                try {
-                    if ("h2".equals(dialect)) {
-                        releaseH2(lockConnection);
-                    }
-                    else {
-                        releasePostgres(lockConnection);
-                    }
+    }
+
+    private static void releaseConnection(Connection lockConnection, String dialect, boolean acquired,
+                                          Throwable failure) {
+        Exception releaseFailure = null;
+        if (lockConnection != null && acquired) {
+            try {
+                if ("h2".equals(dialect)) {
+                    releaseH2(lockConnection);
+                } else {
+                    releasePostgres(lockConnection);
                 }
-                catch (Exception e) {
-                    releaseFailure = e;
-                    abortQuietly(lockConnection);
+            } catch (Exception e) {
+                releaseFailure = e;
+                LogThrottler.warn(log, "FlywayStartupLock.release", "Flyway startup lock release failed", e);
+                abortQuietly(lockConnection);
+            }
+        }
+        if (lockConnection != null) {
+            try {
+                lockConnection.close();
+            } catch (SQLException closeFailure) {
+                LogThrottler.warn(log, "FlywayStartupLock.close", "Flyway lock connection close failed", closeFailure);
+                if (releaseFailure == null) {
+                    releaseFailure = closeFailure;
+                } else {
+                    releaseFailure.addSuppressed(closeFailure);
                 }
             }
-            if (lockConnection != null) {
-                try {
-                    lockConnection.close();
-                }
-                catch (SQLException closeFailure) {
-                    if (releaseFailure == null) {
-                        releaseFailure = closeFailure;
-                    }
-                    else {
-                        releaseFailure.addSuppressed(closeFailure);
-                    }
-                }
-            }
-            if (releaseFailure != null) {
-                if (failure != null) {
-                    failure.addSuppressed(releaseFailure);
-                }
-                else {
-                    throw new FlywayException("Failed to release Flyway startup lock; physical connection aborted",
-                            releaseFailure);
-                }
+        }
+        if (releaseFailure != null) {
+            if (failure != null) {
+                failure.addSuppressed(releaseFailure);
+            } else {
+                throw new FlywayException("Failed to release Flyway startup lock; physical connection aborted",
+                        releaseFailure);
             }
         }
     }
 
-    /** H2：业务库独立 schema 的行锁；有界等待，holder token 用于迁移后复核。 */
+    /**
+     * H2：业务库独立 schema 的行锁；有界等待，holder token 用于迁移后复核。
+     */
     private void acquireH2RowLock(Connection connection, String token) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("SET LOCK_TIMEOUT " + this.waitTimeout.toMillis());
-            try {
-                statement.execute("CREATE SCHEMA IF NOT EXISTS " + H2_LOCK_SCHEMA);
-            }
-            catch (SQLException e) {
-                if (!isAlreadyExists(e)) {
-                    throw e;
-                }
-            }
-            try {
-                statement.execute("CREATE TABLE IF NOT EXISTS " + H2_LOCK_TABLE
-                        + " (lock_name VARCHAR(64) PRIMARY KEY, holder VARCHAR(128))");
-            }
-            catch (SQLException e) {
-                if (!isAlreadyExists(e)) {
-                    throw e;
-                }
-            }
-            try {
-                statement.execute("INSERT INTO " + H2_LOCK_TABLE + " (lock_name) SELECT '" + H2_LOCK_ROW
-                        + "' WHERE NOT EXISTS (SELECT 1 FROM " + H2_LOCK_TABLE + " WHERE lock_name = '"
-                        + H2_LOCK_ROW + "')");
-            }
-            catch (SQLException e) {
-                if (!isAlreadyExists(e)) {
-                    throw e;
-                }
-            }
+            executeIgnoringAlreadyExists(statement, "CREATE SCHEMA IF NOT EXISTS " + H2_LOCK_SCHEMA);
+            executeIgnoringAlreadyExists(statement, "CREATE TABLE IF NOT EXISTS " + H2_LOCK_TABLE
+                    + " (lock_name VARCHAR(64) PRIMARY KEY, holder VARCHAR(128))");
+            executeIgnoringAlreadyExists(statement, "INSERT INTO " + H2_LOCK_TABLE + " (lock_name) SELECT '"
+                    + H2_LOCK_ROW + "' WHERE NOT EXISTS (SELECT 1 FROM " + H2_LOCK_TABLE + " WHERE lock_name = '"
+                    + H2_LOCK_ROW + "')");
         }
         connection.setAutoCommit(false);
         try (PreparedStatement statement = connection.prepareStatement(
@@ -204,7 +194,9 @@ public class FlywayStartupLock {
         }
     }
 
-    /** 迁移完成后复核：锁连接仍存活，且 holder 仍是本次 token；否则 fail-closed。 */
+    /**
+     * 迁移完成后复核：锁连接仍存活，且 holder 仍是本次 token；否则 fail-closed。
+     */
     static void verifyH2LockStillHeld(Connection connection, String token) throws SQLException {
         if (!connection.isValid(2)) {
             throw new SQLException("H2 Flyway startup lock connection became invalid during migration");
@@ -232,10 +224,12 @@ public class FlywayStartupLock {
         }
     }
 
-    /** 解锁必须成功；返回 false / SQL 异常一律上抛（由调用方 abort 物理连接）。 */
+    /**
+     * 解锁必须成功；返回 false / SQL 异常一律上抛（由调用方 abort 物理连接）。
+     */
     private static void releasePostgres(Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement();
-                ResultSet rs = statement.executeQuery("SELECT pg_advisory_unlock(" + PG_LOCK_KEY + ")")) {
+             ResultSet rs = statement.executeQuery("SELECT pg_advisory_unlock(" + PG_LOCK_KEY + ")")) {
             if (!rs.next() || !rs.getBoolean(1)) {
                 throw new SQLException("pg_advisory_unlock returned false; the session lock was not released");
             }
@@ -245,9 +239,20 @@ public class FlywayStartupLock {
     private static void abortQuietly(Connection connection) {
         try {
             connection.abort(Runnable::run);
-        }
-        catch (Exception ignored) {
+        } catch (Exception ignored) {
             // abort 失败仍有 close/socket 断开兜底；原始释放异常已上抛。
+            LogThrottler.warn(log, "FlywayStartupLock.abort", "Flyway lock connection abort failed", ignored);
+        }
+    }
+
+    private static void executeIgnoringAlreadyExists(Statement statement, String sql) throws SQLException {
+        try {
+            statement.execute(sql);
+        } catch (SQLException e) {
+            LogThrottler.warn(log, "FlywayStartupLock.schemaRace", "Flyway lock schema initialization hit SQL exception", e);
+            if (!isAlreadyExists(e)) {
+                throw e;
+            }
         }
     }
 

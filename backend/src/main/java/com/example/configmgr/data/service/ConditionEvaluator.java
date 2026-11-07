@@ -3,12 +3,14 @@ package com.example.configmgr.data.service;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -26,7 +28,9 @@ import java.util.Set;
  */
 public final class ConditionEvaluator {
 
-    /** 已登记的操作符（唯一注册定义在 {@link ConditionOperators}；{@link #validate} 与 {@link #matchesOp} 同源）。 */
+    /**
+     * 已登记的操作符（唯一注册定义在 {@link ConditionOperators}；{@link #validate} 与 {@link #isOperatorMatch} 同源）。
+     */
     private static final Set<String> OPERATORS = Set.copyOf(ConditionOperators.NAMES);
 
     private ConditionEvaluator() {
@@ -65,7 +69,7 @@ public final class ConditionEvaluator {
 
         // 1. 范围过滤（地区/项目）
         if (CollectionUtils.isNotEmpty(cond.getScopeKeys())) {
-            Object scopeVal = org.apache.commons.lang3.ObjectUtils.getIfNull(
+            Object scopeVal = ObjectUtils.getIfNull(
                     row.get("regionCode"), () -> row.get("projectCode"));
             if (scopeVal == null || !cond.getScopeKeys().contains(scopeVal.toString())) {
                 return false;
@@ -79,7 +83,7 @@ public final class ConditionEvaluator {
                     continue;
                 }
                 Object val = row.get(fc.getFieldCode());
-                if (!matchesOp(val, fc)) {
+                if (!isOperatorMatch(val, fc)) {
                     return false;
                 }
             }
@@ -87,56 +91,50 @@ public final class ConditionEvaluator {
         return true;
     }
 
-    private static boolean matchesOp(Object val, QueryCondition.FieldCondition fc) {
+    private static boolean isOperatorMatch(Object val, QueryCondition.FieldCondition fc) {
         String op = fc.getOperator().toUpperCase();
-        String s = java.util.Objects.toString(val, null);
-        String expect = java.util.Objects.toString(fc.getValue(), null);
+        String s = Objects.toString(val, null);
+        String expect = Objects.toString(fc.getValue(), null);
 
-        switch (op) {
-            case "EMPTY":
-                return StringUtils.isBlank(s);
-            case "NOT_EMPTY":
-                return StringUtils.isNotBlank(s);
-            case "EQ":
-                return s != null && s.equals(expect);
-            case "NE":
-                return s == null || !s.equals(expect);
-            case "CONTAINS":
-            case "LIKE": // 文本包含（S4.4b P2：以 LIKE 之名的文本模糊口径，与 CONTAINS 等价）
-                return StringUtils.contains(s, expect);
-            case "STARTS_WITH":
-                return StringUtils.startsWith(s, expect);
-            case "IN": {
-                if (s == null || fc.getValue() == null) {
-                    return false;
-                }
-                if (fc.getValue() instanceof List<?> list) {
-                    return list.stream().anyMatch(x -> x != null && x.toString().equals(s));
-                }
-                return s.equals(expect);
-            }
-            case "GT":
-            case "GTE":
-            case "LT":
-            case "LTE": {
-                if (s == null || expect == null) {
-                    return false;
-                }
-                int cmp = compareValues(s, expect);
-                return switch (op) {
-                    case "GT" -> cmp > 0;
-                    case "GTE" -> cmp >= 0;
-                    case "LT" -> cmp < 0;
-                    default -> cmp <= 0;
-                };
-            }
-            default:
-                // M1 收尾守卫③：未知操作符抛异常（原为 return true = 静默放宽，属数据面风险）
-                throw unknownOperator(op, fc.getFieldCode());
-        }
+        return switch (op) {
+            case "EMPTY" -> StringUtils.isBlank(s);
+            case "NOT_EMPTY" -> StringUtils.isNotBlank(s);
+            case "EQ" -> s != null && s.equals(expect);
+            case "NE" -> s == null || !s.equals(expect);
+            case "CONTAINS", "LIKE" -> StringUtils.contains(s, expect);
+            case "STARTS_WITH" -> StringUtils.startsWith(s, expect);
+            case "IN" -> isInMatch(s, expect, fc.getValue());
+            case "GT", "GTE", "LT", "LTE" -> isComparisonMatch(s, expect, op);
+            default -> throw unknownOperator(op, fc.getFieldCode());
+        };
     }
 
-    /** 日期优先、数值次之、字符串兜底的比较 */
+    private static boolean isInMatch(String actual, String expect, Object expectedValue) {
+        if (actual == null || expectedValue == null) {
+            return false;
+        }
+        if (expectedValue instanceof List<?> list) {
+            return list.stream().anyMatch(x -> x != null && x.toString().equals(actual));
+        }
+        return actual.equals(expect);
+    }
+
+    private static boolean isComparisonMatch(String actual, String expect, String op) {
+        if (actual == null || expect == null) {
+            return false;
+        }
+        int cmp = compareValues(actual, expect);
+        return switch (op) {
+            case "GT" -> cmp > 0;
+            case "GTE" -> cmp >= 0;
+            case "LT" -> cmp < 0;
+            default -> cmp <= 0;
+        };
+    }
+
+    /**
+     * 日期优先、数值次之、字符串兜底的比较
+     */
     private static int compareValues(String a, String b) {
         try {
             return LocalDate.parse(a).compareTo(LocalDate.parse(b));

@@ -1,6 +1,8 @@
 package com.example.configmgr.health;
 
+import com.example.configmgr.common.LogThrottler;
 import com.example.configmgr.config.AppProperties;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
@@ -28,44 +30,45 @@ import java.nio.file.Path;
  * <p>多实例前提：三个实例必须挂**同一份**存储（共享卷/对象存储网关）；各挂各的本地盘时，
  * 上传到 A 的文件在 B 上读不到 —— 本探针只能证明"本实例的这一份可写"。
  */
+@Slf4j
 @Component
 class StorageReadinessProbe implements ReadinessProbe {
 
-	static final String NAME = "storage";
+    static final String NAME = "storage";
 
-	private final AppProperties appProperties;
+    private final AppProperties appProperties;
 
-	StorageReadinessProbe(AppProperties appProperties) {
-		this.appProperties = appProperties;
-	}
+    StorageReadinessProbe(AppProperties appProperties) {
+        this.appProperties = appProperties;
+    }
 
-	@Override
-	public String name() {
-		return NAME;
-	}
+    @Override
+    public String name() {
+        return NAME;
+    }
 
-	@Override
-	public ProbeResult check() {
-		String configured = this.appProperties.getFile().getStoragePath();
-		if (StringUtils.isBlank(configured)) {
-			return ProbeResult.down("app.file.storage-path 未配置");
-		}
-		Path dir = Path.of(configured);
-		try {
-			if (!Files.isDirectory(dir)) {
-				Files.createDirectories(dir);
-			}
-			if (!Files.isDirectory(dir)) {
-				return ProbeResult.down(dir.toAbsolutePath() + " 不是目录");
-			}
-			if (!Files.isWritable(dir)) {
-				return ProbeResult.down(dir.toAbsolutePath() + " 不可写");
-			}
-			return ProbeResult.up(dir.toAbsolutePath().toString());
-		}
-		catch (IOException | RuntimeException ex) {
-			return ProbeResult.down(ex.getClass().getSimpleName());
-		}
-	}
+    @Override
+    public ProbeResult check() {
+        String configured = this.appProperties.getFile().getStoragePath();
+        if (StringUtils.isBlank(configured)) {
+            return ProbeResult.down("app.file.storage-path 未配置");
+        }
+        Path dir = Path.of(configured);
+        try {
+            if (!Files.isDirectory(dir)) {
+                Files.createDirectories(dir);
+            }
+            if (!Files.isDirectory(dir)) {
+                return ProbeResult.down(dir.toAbsolutePath() + " 不是目录");
+            }
+            if (!Files.isWritable(dir)) {
+                return ProbeResult.down(dir.toAbsolutePath() + " 不可写");
+            }
+            return ProbeResult.up(dir.toAbsolutePath().toString());
+        } catch (IOException | RuntimeException ex) {
+            LogThrottler.warn(log, "StorageReadinessProbe.failed", "Storage readiness probe failed", ex);
+            return ProbeResult.down(ex.getClass().getSimpleName());
+        }
+    }
 
 }

@@ -1,7 +1,9 @@
 package com.example.configmgr.config;
 
+import com.example.configmgr.common.LogThrottler;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.convert.DurationUnit;
 import org.springframework.stereotype.Component;
@@ -19,6 +21,7 @@ import java.time.temporal.ChronoUnit;
  * 带 max-iterations/session-ttl-minutes/hitl-timeout-minutes/thinking-disabled 四个键，
  * 与规格 §4 的键表重复或已失效，本棒一并删除）。
  */
+@Slf4j
 @Data
 @Component
 @ConfigurationProperties(prefix = "app")
@@ -122,6 +125,7 @@ public class AppProperties {
         } catch (ArithmeticException ex) {
             // 溢出守卫（收口修，红队 m6）：极大家 × dead-multiplier 溢出时统一 fail-fast 面
             // （IllegalStateException 含当前值回显），不让裸 ArithmeticException 逃出启动校验
+            LogThrottler.warn(log, "AppProperties.watchdogOverflow", "Job watchdog Duration multiplication overflowed", ex);
             throw new IllegalStateException("app.job watchdog configuration overflows Duration: heartbeat-interval("
                     + heartbeatInterval + ") × dead-multiplier(" + deadMultiplier + "); reduce"
                     + " app.job.heartbeat-interval or app.job.watchdog.dead-multiplier", ex);
@@ -152,7 +156,9 @@ public class AppProperties {
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration heartbeatInterval = Duration.ofSeconds(30);
 
-        /** 看门狗配置（{@code app.job.watchdog.*}）；判死最坏发现延迟 = 阈值 + 一个扫描周期。 */
+        /**
+         * 看门狗配置（{@code app.job.watchdog.*}）；判死最坏发现延迟 = 阈值 + 一个扫描周期。
+         */
         private Watchdog watchdog = new Watchdog();
 
         /**
@@ -205,7 +211,9 @@ public class AppProperties {
         private boolean multiInstance = false;
     }
 
-    /** 任务域配置（{@code app.task.*}）。 */
+    /**
+     * 任务域配置（{@code app.task.*}）。
+     */
     @Data
     public static class Task {
 

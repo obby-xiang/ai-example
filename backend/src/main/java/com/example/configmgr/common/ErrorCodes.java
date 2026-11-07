@@ -1,5 +1,7 @@
 package com.example.configmgr.common;
 
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -28,6 +30,7 @@ import java.util.Set;
  * 纪律：**新增码只在本文件加一行**，再由 {@code ErrorCodesContractTest} 逼出前端镜像与 messages 键；
  * 其它文件只允许引用常量（{@code CODE_*} 别名或直接引用），不得再写字面量。
  */
+@Slf4j
 public final class ErrorCodes {
 
     private ErrorCodes() {
@@ -35,15 +38,25 @@ public final class ErrorCodes {
 
     // ---------------------------------------------------------------- HTTP 面
 
-    /** 400：参数校验失败（请求体/字段级）。 */
+    /**
+     * 400：参数校验失败（请求体/字段级）。
+     */
     public static final String BAD_REQUEST = "BAD_REQUEST";
-    /** 400：参数值非法（类型/取值不合法；无更具体码时的缺省）。 */
+    /**
+     * 400：参数值非法（类型/取值不合法；无更具体码时的缺省）。
+     */
     public static final String ILLEGAL_ARGUMENT = "ILLEGAL_ARGUMENT";
-    /** 400：状态不允许该操作（无更具体码时的缺省）。 */
+    /**
+     * 400：状态不允许该操作（无更具体码时的缺省）。
+     */
     public static final String ILLEGAL_STATE = "ILLEGAL_STATE";
-    /** 404：资源不存在（跨域缺省码；{@code ResourceNotFoundException#DEFAULT_CODE}）。 */
+    /**
+     * 404：资源不存在（跨域缺省码；{@code ResourceNotFoundException#DEFAULT_CODE}）。
+     */
     public static final String RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND";
-    /** 409：同 sessionId 已有一轮在进行中。 */
+    /**
+     * 409：同 sessionId 已有一轮在进行中。
+     */
     public static final String SESSION_BUSY = "SESSION_BUSY";
     /**
      * 410：该 sessionId 已被会话销毁，不能继续以同 id 开新轮。
@@ -52,11 +65,17 @@ public final class ErrorCodes {
      * 判定在创建 runId / 占会话门之前，命中时不写任何运行态。
      */
     public static final String SESSION_PURGED = "SESSION_PURGED";
-    /** 409：未知或已过期的 runId。 */
+    /**
+     * 409：未知或已过期的 runId。
+     */
     public static final String UNKNOWN_RUN = "UNKNOWN_RUN";
-    /** 409：未知或已过期的 toolCallId。 */
+    /**
+     * 409：未知或已过期的 toolCallId。
+     */
     public static final String UNKNOWN_TOOL_CALL = "UNKNOWN_TOOL_CALL";
-    /** 409：同一 toolCallId 重复决策/回灌（幂等拒绝）。 */
+    /**
+     * 409：同一 toolCallId 重复决策/回灌（幂等拒绝）。
+     */
     public static final String DUPLICATE_TOOL_CALL_ID = "DUPLICATE_TOOL_CALL_ID";
     /**
      * 409：外部输入走错了入口（入口 kind 校验批）。
@@ -71,19 +90,33 @@ public final class ErrorCodes {
      * 本码是"id 存在但不属于这条入口" —— 状态与条目一个字节都没变。
      */
     public static final String TOOL_KIND_MISMATCH = "TOOL_KIND_MISMATCH";
-    /** 503：挂起专用线程池饱和。 */
+    /**
+     * 503：挂起专用线程池饱和。
+     */
     public static final String SUSPEND_POOL_SATURATED = "SUSPEND_POOL_SATURATED";
-    /** 503：无 AI key，模型侧未装配。 */
+    /**
+     * 503：无 AI key，模型侧未装配。
+     */
     public static final String AI_UNAVAILABLE = "AI_UNAVAILABLE";
-    /** 503：AI 运行时依赖的 Redis 不可用。 */
+    /**
+     * 503：AI 运行时依赖的 Redis 不可用。
+     */
     public static final String AI_REDIS_UNAVAILABLE = "AI_REDIS_UNAVAILABLE";
-    /** 200/健康面：AI 可用（不是错误码，但同一健康体用它表达"可用"）。 */
+    /**
+     * 200/健康面：AI 可用（不是错误码，但同一健康体用它表达"可用"）。
+     */
     public static final String AI_AVAILABLE = "AI_AVAILABLE";
-    /** 429：限流。 */
+    /**
+     * 429：限流。
+     */
     public static final String RATE_LIMITED = "RATE_LIMITED";
-    /** 400：消息超长。 */
+    /**
+     * 400：消息超长。
+     */
     public static final String MESSAGE_TOO_LONG = "MESSAGE_TOO_LONG";
-    /** 400：拒绝原因超长（决策回灌；只回数字，不回显原因原文）。 */
+    /**
+     * 400：拒绝原因超长（决策回灌；只回数字，不回显原因原文）。
+     */
     public static final String REASON_TOO_LONG = "REASON_TOO_LONG";
     /**
      * 400：前端工具回灌的<b>结构化结果</b>超过单条字符上限
@@ -95,26 +128,44 @@ public final class ErrorCodes {
      * 半截结果落库比"让客户端改小重试"危险得多。挂起保持 {@code PENDING}、不落任何条目。
      */
     public static final String FRONTEND_RESULT_TOO_LARGE = "FRONTEND_RESULT_TOO_LARGE";
-    /** 503：上下文计量不可用。 */
+    /**
+     * 503：上下文计量不可用。
+     */
     public static final String AI_CONTEXT_UNAVAILABLE = "AI_CONTEXT_UNAVAILABLE";
-    /** 400：AI 对话入口缺少租户/用户身份头（或格式非法/系统账号走 HTTP）——fail-closed。 */
+    /**
+     * 400：AI 对话入口缺少租户/用户身份头（或格式非法/系统账号走 HTTP）——fail-closed。
+     */
     public static final String TENANT_IDENTITY_REQUIRED = "TENANT_IDENTITY_REQUIRED";
-    /** 400：身份头齐全但该 (tenantId,userId) 组合不在预置目录内（含跨租户拼装）。 */
+    /**
+     * 400：身份头齐全但该 (tenantId,userId) 组合不在预置目录内（含跨租户拼装）。
+     */
     public static final String TENANT_IDENTITY_UNKNOWN = "TENANT_IDENTITY_UNKNOWN";
-    /** 500：未捕获异常。 */
+    /**
+     * 500：未捕获异常。
+     */
     public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
-    /** 400：{@code @Valid} 校验失败（字段级，message 里带字段名）。 */
+    /**
+     * 400：{@code @Valid} 校验失败（字段级，message 里带字段名）。
+     */
     public static final String VALIDATION_FAILED = "VALIDATION_FAILED";
 
     // ---------------------------------------------------------------- 工具结局
 
-    /** 工具抛异常且异常不携带机器可读码时的兜底码。 */
+    /**
+     * 工具抛异常且异常不携带机器可读码时的兜底码。
+     */
     public static final String TOOL_EXECUTION_FAILED = "TOOL_EXECUTION_FAILED";
-    /** 官方执行器没有回填该 toolCallId 的结果。 */
+    /**
+     * 官方执行器没有回填该 toolCallId 的结果。
+     */
     public static final String TOOL_RESULT_MISSING = "TOOL_RESULT_MISSING";
-    /** 他实例已认领该调用，本实例不再执行。 */
+    /**
+     * 他实例已认领该调用，本实例不再执行。
+     */
     public static final String TOOL_ALREADY_CLAIMED = "TOOL_ALREADY_CLAIMED";
-    /** 越 scope（防线③）。 */
+    /**
+     * 越 scope（防线③）。
+     */
     public static final String SCOPE_NOT_DISCLOSED = "SCOPE_NOT_DISCLOSED";
     /**
      * 表格工具被管理员关闸（{@code app.ai.sheet.read-enabled|write-enabled}；AI 表格工具治理批）。
@@ -124,9 +175,13 @@ public final class ErrorCodes {
      * 复用越权码会让卡面显示「不在披露范围内」，把"功能被关"误导成"用户点错了"。
      */
     public static final String SHEET_DISABLED = "SHEET_DISABLED";
-    /** 确认门超时。 */
+    /**
+     * 确认门超时。
+     */
     public static final String CONFIRM_TIMEOUT = "CONFIRM_TIMEOUT";
-    /** 前端工具回灌超时。 */
+    /**
+     * 前端工具回灌超时。
+     */
     public static final String FRONTEND_TIMEOUT = "FRONTEND_TIMEOUT";
     /**
      * 后端工具**执行**超时（超时面治理批② 第 3 项；{@code app.ai.tool.exec-timeout}）。
@@ -148,81 +203,151 @@ public final class ErrorCodes {
      * <p>与 {@link #TOOL_STEP_LIMIT} 区分：一个是步数耗尽，一个是上下文放不下了。
      */
     public static final String TOOL_BUDGET_EXHAUSTED = "TOOL_BUDGET_EXHAUSTED";
-    /** 轮次被取消。 */
+    /**
+     * 轮次被取消。
+     */
     public static final String RUN_CANCELLED = "RUN_CANCELLED";
-    /** 前端工具被用户取消。 */
+    /**
+     * 前端工具被用户取消。
+     */
     public static final String FRONTEND_CANCELLED = "FRONTEND_CANCELLED";
-    /** 上游批次确定性失败导致本调用未执行。 */
+    /**
+     * 上游批次确定性失败导致本调用未执行。
+     */
     public static final String UPSTREAM_FAILED = "UPSTREAM_FAILED";
-    /** 只读预检未通过。 */
+    /**
+     * 只读预检未通过。
+     */
     public static final String PRECHECK_FAILED = "PRECHECK_FAILED";
-    /** 预检基础设施不可用。 */
+    /**
+     * 预检基础设施不可用。
+     */
     public static final String PRECHECK_UNAVAILABLE = "PRECHECK_UNAVAILABLE";
-    /** 目标资源正被同类动作占用。 */
+    /**
+     * 目标资源正被同类动作占用。
+     */
     public static final String RESOURCE_LOCKED = "RESOURCE_LOCKED";
-    /** 工具参数里的目标资源不成立。 */
+    /**
+     * 工具参数里的目标资源不成立。
+     */
     public static final String TARGET_INVALID = "TARGET_INVALID";
-    /** 同一轮第二次 create_task：直接拒绝创建（未执行），下一轮可再创建。 */
+    /**
+     * 同一轮第二次 create_task：直接拒绝创建（未执行），下一轮可再创建。
+     */
     public static final String CREATE_TASK_TURN_LIMIT = "CREATE_TASK_TURN_LIMIT";
-    /** 同一轮的创建幂等键冲突（本轮已创建过任务）。 */
+    /**
+     * 同一轮的创建幂等键冲突（本轮已创建过任务）。
+     */
     public static final String CREATE_TASK_CONFLICT = "CREATE_TASK_CONFLICT";
-    /** 工具不在预检范围内。 */
+    /**
+     * 工具不在预检范围内。
+     */
     public static final String TOOL_NOT_PREFLIGHTABLE = "TOOL_NOT_PREFLIGHTABLE";
-    /** 工具结果信封序列化失败。 */
+    /**
+     * 工具结果信封序列化失败。
+     */
     public static final String TOOL_ENVELOPE_SERIALIZE_FAILED = "TOOL_ENVELOPE_SERIALIZE_FAILED";
-    /** 工具结果信封解析失败。 */
+    /**
+     * 工具结果信封解析失败。
+     */
     public static final String TOOL_ENVELOPE_PARSE_FAILED = "TOOL_ENVELOPE_PARSE_FAILED";
-    /** 工具结果帧的 ok/outcome 自相矛盾（编程/契约错误）。 */
+    /**
+     * 工具结果帧的 ok/outcome 自相矛盾（编程/契约错误）。
+     */
     public static final String TOOL_RESULT_OUTCOME_MISMATCH = "TOOL_RESULT_OUTCOME_MISMATCH";
 
     // ---------------------------------------------------------------- 数据面
 
-    /** 400：生成式表单回灌值不符 schema（挂起仍在等待，可改值重试）。 */
+    /**
+     * 400：生成式表单回灌值不符 schema（挂起仍在等待，可改值重试）。
+     */
     public static final String FORM_RESULT_REJECTED = "FORM_RESULT_REJECTED";
-    /** 400：生成式表单 schema 越白名单。 */
+    /**
+     * 400：生成式表单 schema 越白名单。
+     */
     public static final String FORM_SCHEMA_REJECTED = "FORM_SCHEMA_REJECTED";
-    /** 生成式表单的槽位已由任务/工作区或用户明确值确定：冗余收集表单不下发（零副作用）。 */
+    /**
+     * 生成式表单的槽位已由任务/工作区或用户明确值确定：冗余收集表单不下发（零副作用）。
+     */
     public static final String FORM_SLOTS_ALREADY_KNOWN = "FORM_SLOTS_ALREADY_KNOWN";
-    /** 400：预检查未通过。 */
+    /**
+     * 400：预检查未通过。
+     */
     public static final String PRECHECK_NOT_PASSED = "PRECHECK_NOT_PASSED";
-    /** 400：预检结果已过期。 */
+    /**
+     * 400：预检结果已过期。
+     */
     public static final String PRECHECK_STALE = "PRECHECK_STALE";
-    /** 400：查询条件操作符未知。 */
+    /**
+     * 400：查询条件操作符未知。
+     */
     public static final String CONDITION_OPERATOR_UNKNOWN = "CONDITION_OPERATOR_UNKNOWN";
-    /** 400：查询条件 JSON 非法。 */
+    /**
+     * 400：查询条件 JSON 非法。
+     */
     public static final String CONDITION_JSON_INVALID = "CONDITION_JSON_INVALID";
-    /** 400：Excel 列映射无法解析。 */
+    /**
+     * 400：Excel 列映射无法解析。
+     */
     public static final String EXCEL_COLUMN_MAPPING_INVALID = "EXCEL_COLUMN_MAPPING_INVALID";
-    /** 400：Excel 无数据工作表。 */
+    /**
+     * 400：Excel 无数据工作表。
+     */
     public static final String EXCEL_SHEET_NOT_FOUND = "EXCEL_SHEET_NOT_FOUND";
-    /** 400：仅支持 .xlsx / .zip。 */
+    /**
+     * 400：仅支持 .xlsx / .zip。
+     */
     public static final String FILE_TYPE_UNSUPPORTED = "FILE_TYPE_UNSUPPORTED";
-    /** 400：目标步骤为空。 */
+    /**
+     * 400：目标步骤为空。
+     */
     public static final String STEP_REQUIRED = "STEP_REQUIRED";
-    /** 400：目标步骤格式非法。 */
+    /**
+     * 400：目标步骤格式非法。
+     */
     public static final String STEP_INVALID = "STEP_INVALID";
-    /** 400：目标步骤不在该任务类型的步骤序列内。 */
+    /**
+     * 400：目标步骤不在该任务类型的步骤序列内。
+     */
     public static final String STEP_NOT_IN_SEQUENCE = "STEP_NOT_IN_SEQUENCE";
-    /** 400：租约键参数非法（taskId/jobType 不成立）。 */
+    /**
+     * 400：租约键参数非法（taskId/jobType 不成立）。
+     */
     public static final String LEASE_KEY_INVALID = "LEASE_KEY_INVALID";
-    /** 400：导入模式只支持 MERGE / REPLACE。 */
+    /**
+     * 400：导入模式只支持 MERGE / REPLACE。
+     */
     public static final String IMPORT_MODE_INVALID = "IMPORT_MODE_INVALID";
 
     // ---------------------------------------------------------------- 业务冲突（409）
 
-    /** 409：作业已是终态。 */
+    /**
+     * 409：作业已是终态。
+     */
     public static final String JOB_ALREADY_FINAL = "JOB_ALREADY_FINAL";
-    /** 409：作业已在运行。 */
+    /**
+     * 409：作业已在运行。
+     */
     public static final String JOB_ALREADY_RUNNING = "JOB_ALREADY_RUNNING";
-    /** 409：任务已终态（不可再改）。 */
+    /**
+     * 409：任务已终态（不可再改）。
+     */
     public static final String TASK_FINALIZED = "TASK_FINALIZED";
-    /** 409：配置定义编码重复。 */
+    /**
+     * 409：配置定义编码重复。
+     */
     public static final String DEFINITION_CODE_DUPLICATE = "DEFINITION_CODE_DUPLICATE";
-    /** 409：配置定义已有数据。 */
+    /**
+     * 409：配置定义已有数据。
+     */
     public static final String DEFINITION_HAS_DATA = "DEFINITION_HAS_DATA";
-    /** 409：配置定义被在途任务引用。 */
+    /**
+     * 409：配置定义被在途任务引用。
+     */
     public static final String DEFINITION_IN_ACTIVE_TASK = "DEFINITION_IN_ACTIVE_TASK";
-    /** 409：配置定义被引用。 */
+    /**
+     * 409：配置定义被引用。
+     */
     public static final String DEFINITION_REFERENCED = "DEFINITION_REFERENCED";
 
     // ---------------------------------------------------------------- 定义校验（400）
@@ -232,7 +357,9 @@ public final class ErrorCodes {
     public static final String DEFINITION_FIELD_CODE_DUPLICATE = "DEFINITION_FIELD_CODE_DUPLICATE";
     public static final String DEFINITION_FIELD_REFERENCE_INCOMPLETE = "DEFINITION_FIELD_REFERENCE_INCOMPLETE";
     public static final String DEFINITION_PRIMARY_KEY_REQUIRED = "DEFINITION_PRIMARY_KEY_REQUIRED";
-    /** 409/400：配置定义间循环依赖。 */
+    /**
+     * 409/400：配置定义间循环依赖。
+     */
     public static final String DEFINITION_DEPENDENCY_CYCLE = "DEFINITION_DEPENDENCY_CYCLE";
 
     // ---------------------------------------------------------------- AI 配置（模型配置批①②）
@@ -273,7 +400,9 @@ public final class ErrorCodes {
     public static final String UNREACHABLE = "UNREACHABLE";
     public static final String CODE_IMMUTABLE = "CODE_IMMUTABLE";
     public static final String AI_SECRET_KEK_MISSING = "AI_SECRET_KEK_MISSING";
-    /** 503：已配置的 provider 都没有可用 key（用户可到设置页录入）。 */
+    /**
+     * 503：已配置的 provider 都没有可用 key（用户可到设置页录入）。
+     */
     public static final String AI_KEY_MISSING = "AI_KEY_MISSING";
     /**
      * 503：可用性判定时 DB 托管 key 解不开（KEK 缺失/变更或密文损坏）。
@@ -288,23 +417,41 @@ public final class ErrorCodes {
 
     // ---------------------------------------------------------------- 作业/SSE
 
-    /** SSE error 帧：上游流异常。 */
+    /**
+     * SSE error 帧：上游流异常。
+     */
     public static final String UPSTREAM_STREAM_ERROR = "UPSTREAM_STREAM_ERROR";
-    /** SSE error 帧：空回复（去空白后为空，轮次终态 FAILED）。 */
+    /**
+     * SSE error 帧：空回复（去空白后为空，轮次终态 FAILED）。
+     */
     public static final String EMPTY_REPLY = "EMPTY_REPLY";
-    /** 轮次终态：cancelled（{@code done{cancelled:true}}），不是 error 帧；永不重试。 */
+    /**
+     * 轮次终态：cancelled（{@code done{cancelled:true}}），不是 error 帧；永不重试。
+     */
     public static final String AI_RUN_CANCELLED = "AI_RUN_CANCELLED";
-    /** SSE error 帧：上游首包超时。 */
+    /**
+     * SSE error 帧：上游首包超时。
+     */
     public static final String UPSTREAM_FIRST_BYTE_TIMEOUT = "UPSTREAM_FIRST_BYTE_TIMEOUT";
-    /** SSE error 帧：上游事件间静默超时。 */
+    /**
+     * SSE error 帧：上游事件间静默超时。
+     */
     public static final String UPSTREAM_SILENT_TIMEOUT = "UPSTREAM_SILENT_TIMEOUT";
-    /** SSE error 帧：单轮总预算耗尽。 */
+    /**
+     * SSE error 帧：单轮总预算耗尽。
+     */
     public static final String TOTAL_BUDGET_EXCEEDED = "TOTAL_BUDGET_EXCEEDED";
-    /** SSE error 帧：上游流提前结束（缺终帧）。 */
+    /**
+     * SSE error 帧：上游流提前结束（缺终帧）。
+     */
     public static final String UPSTREAM_STREAM_INCOMPLETE = "UPSTREAM_STREAM_INCOMPLETE";
-    /** SSE error 帧：上游连接中断（reset / EOF / premature close）。 */
+    /**
+     * SSE error 帧：上游连接中断（reset / EOF / premature close）。
+     */
     public static final String UPSTREAM_CONNECTION_BROKEN = "UPSTREAM_CONNECTION_BROKEN";
-    /** SSE error 帧：上下文超出模型窗口（重试无效，需压缩或新会话）。 */
+    /**
+     * SSE error 帧：上下文超出模型窗口（重试无效，需压缩或新会话）。
+     */
     public static final String CONTEXT_OVERFLOW = "CONTEXT_OVERFLOW";
     /**
      * SSE error 帧：上游按"请求本身不成立"拒绝（400/404/409/422 及其它未列 4xx）。
@@ -313,7 +460,9 @@ public final class ErrorCodes {
      * 只会再被拒"的其余 4xx —— 不重试，用户需要改参数/配置。
      */
     public static final String UPSTREAM_REJECTED = "UPSTREAM_REJECTED";
-    /** SSE error 帧：上游鉴权失败（401/403）；不重试，用户需要检查/更新 API Key。 */
+    /**
+     * SSE error 帧：上游鉴权失败（401/403）；不重试，用户需要检查/更新 API Key。
+     */
     public static final String UPSTREAM_AUTH_FAILED = "UPSTREAM_AUTH_FAILED";
     /**
      * SSE error 帧：上游限流（429）。
@@ -380,9 +529,13 @@ public final class ErrorCodes {
      */
     public static final String TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT =
             "TOOL_BUDGET_EXHAUSTED_AFTER_TOOL_SIDE_EFFECT";
-    /** SSE error 帧：轮次未捕获异常。 */
+    /**
+     * SSE error 帧：轮次未捕获异常。
+     */
     public static final String AI_RUN_FAILED = "AI_RUN_FAILED";
-    /** SSE error 帧：续跑失败。 */
+    /**
+     * SSE error 帧：续跑失败。
+     */
     public static final String AI_RESUME_FAILED = "AI_RESUME_FAILED";
     /**
      * SSE error 帧：续跑被<b>确定</b>拒绝 —— 快照绑定的 provider/模型此刻已不可用（删除/停用/模型下架）。
@@ -402,7 +555,9 @@ public final class ErrorCodes {
     public static final String STORE_IO_FAILED = "STORE_IO_FAILED";
     public static final String TASK_SETTINGS_UNREADABLE = "TASK_SETTINGS_UNREADABLE";
 
-    /** 全部已登记码（测试与诊断面用；顺序 = 声明顺序，便于 diff）。 */
+    /**
+     * 全部已登记码（测试与诊断面用；顺序 = 声明顺序，便于 diff）。
+     */
     public static final Set<String> ALL;
 
     static {
@@ -415,6 +570,7 @@ public final class ErrorCodes {
             try {
                 all.add((String) field.get(null));
             } catch (IllegalAccessException e) {
+                LogThrottler.warn(log, "ErrorCodes.constant.unreadable", "ErrorCodes constant is unreadable", e);
                 throw new IllegalStateException("ErrorCodes constant is unreadable: " + field.getName(), e);
             }
         }

@@ -78,11 +78,15 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class JobWatchdog {
 
-    /** 在途状态（扫描范围）：与 {@link StaleJobRecoveryRunner} 的筛选口径一致。 */
+    /**
+     * 在途状态（扫描范围）：与 {@link StaleJobRecoveryRunner} 的筛选口径一致。
+     */
     private static final List<Job.JobStatus> IN_FLIGHT =
             List.of(Job.JobStatus.PENDING, Job.JobStatus.RUNNING);
 
-    /** 作业级 issue 的 def_code 哨兵（与 ExportJobRunner#JOB_LEVEL_DEF_CODE 同口径）。 */
+    /**
+     * 作业级 issue 的 def_code 哨兵（与 ExportJobRunner#JOB_LEVEL_DEF_CODE 同口径）。
+     */
     private static final String JOB_LEVEL_DEF_CODE = "-";
 
     private final JobRepository jobRepository;
@@ -116,10 +120,14 @@ public class JobWatchdog {
      */
     private final Set<Long> failClosedLogged = ConcurrentHashMap.newKeySet();
 
-    /** 最近一次扫描看到的在途作业数（{@code /health} 观测面）。 */
+    /**
+     * 最近一次扫描看到的在途作业数（{@code /health} 观测面）。
+     */
     private volatile int trackedLastScan = 0;
 
-    /** 最近一次扫描完成时刻（{@code /health} 观测面）。 */
+    /**
+     * 最近一次扫描完成时刻（{@code /health} 观测面）。
+     */
     private volatile Instant lastScanAt;
 
     private volatile ScheduledExecutorService scheduler;
@@ -155,7 +163,7 @@ public class JobWatchdog {
         this.scheduler = svc;
         svc.scheduleWithFixedDelay(this::scanSafely, scanPeriodMs, scanPeriodMs, TimeUnit.MILLISECONDS);
         log.info("Job watchdog started scanPeriod={} heartbeatInterval={} deadMultiplier={} maxExecutionTime={}"
-                + " beatTtl={} runnerActiveStore={}",
+                        + " beatTtl={} runnerActiveStore={}",
                 scanPeriod(), heartbeatInterval(), deadMultiplier(), maxExecutionTime(),
                 this.heartbeatRegistry.beatTtl(), this.heartbeatRegistry.isRedisMode() ? "redis" : "memory");
     }
@@ -171,7 +179,9 @@ public class JobWatchdog {
         this.failClosedLogged.clear();
     }
 
-    /** {@code /health} 观测面：tracked / judged / skipped（fail-closed、单飞落选）/ lastScanAt。 */
+    /**
+     * {@code /health} 观测面：tracked / judged / skipped（fail-closed、单飞落选）/ lastScanAt。
+     */
     public Map<String, Object> metrics() {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("tracked", this.trackedLastScan);
@@ -182,13 +192,15 @@ public class JobWatchdog {
         body.put("issueSuppressedTotal", this.issueSuppressedTotal.get());
         body.put("judgedTracked", this.judgedJobIds.size());
         body.put("failClosedTracked", this.failClosedLogged.size());
-        body.put("lastScanAt", ObjectUtils.toString(this.lastScanAt, null));
+        body.put("lastScanAt", ObjectUtils.toString(this.lastScanAt, (String) null));
         return body;
     }
 
     // ── 内部 ────────────────────────────────────────────────────────────────
 
-    /** 兜住一切 Throwable（包级可见，供单测直接驱动；生产由调度周期调用）。 */
+    /**
+     * 兜住一切 Throwable（包级可见，供单测直接驱动；生产由调度周期调用）。
+     */
     void scanSafely() {
         try {
             scan();
@@ -199,7 +211,9 @@ public class JobWatchdog {
         }
     }
 
-    /** 扫一遍在途作业并判定（包级可见，供单测直接驱动；生产由调度周期调用）。 */
+    /**
+     * 扫一遍在途作业并判定（包级可见，供单测直接驱动；生产由调度周期调用）。
+     */
     void scan() {
         // 【约束】findByStatusIn 必须保持"全量、无上限"的派生查询：retainTracked 用
         // "不在本拍结果里 ⇒ 永不回场"证明回收安全。一旦改成 Pageable/Page、Top/First、@Query 的
@@ -253,7 +267,9 @@ public class JobWatchdog {
         this.failClosedLogged.retainAll(trackedIds);
     }
 
-    /** 已运行时长（ms）：RUNNING 用 startedAt，PENDING 用 createdAt（Q3 口径）。 */
+    /**
+     * 已运行时长（ms）：RUNNING 用 startedAt，PENDING 用 createdAt（Q3 口径）。
+     */
     private long ageMs(Job job, long nowMs) {
         LocalDateTime baseline = job.getStatus() == Job.JobStatus.RUNNING && job.getStartedAt() != null
                 ? job.getStartedAt()
@@ -338,10 +354,10 @@ public class JobWatchdog {
         }
         String reason = timeout
                 ? "作业看门狗判超时：已运行时长超过上限 " + maxExecutionTime()
-                        + "（app.job.max-execution-time），作业标记 FAILED；重跑请由用户显式发起"
+                + "（app.job.max-execution-time），作业标记 FAILED；重跑请由用户显式发起"
                 : "作业看门狗判死：作业心跳失联超过 " + heartbeatInterval().multipliedBy(deadMultiplier())
-                        + "（app.job.heartbeat-interval × dead-multiplier），作业标记 FAILED；"
-                        + "执行线程将在下一个分片边界自行止步，不自动重排队";
+                + "（app.job.heartbeat-interval × dead-multiplier），作业标记 FAILED；"
+                + "执行线程将在下一个分片边界自行止步，不自动重排队";
         if (writeIssue) {
             writeJudgementIssue(job, reason);
         }

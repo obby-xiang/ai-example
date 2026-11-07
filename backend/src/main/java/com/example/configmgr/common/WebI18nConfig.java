@@ -1,6 +1,7 @@
 package com.example.configmgr.common;
 
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -30,6 +31,7 @@ import java.util.Locale;
  * （`en`→en-US、`zh`→zh-CN），保证这一条解析链仍是**唯一取值点**：`ErrorBodyFactory.requestLocale()`
  * 与 `ReplyLanguage.current()` 都从它写入的 `LocaleContextHolder` 读，不另造第二源。
  */
+@Slf4j
 @Configuration
 public class WebI18nConfig {
 
@@ -38,7 +40,9 @@ public class WebI18nConfig {
         return new ZhDefaultAcceptHeaderLocaleResolver();
     }
 
-    /** 显式解析 `Accept-Language`；任何"解析不出结果"的情形都回落 zh-CN（不看 JVM 默认 locale）。 */
+    /**
+     * 显式解析 `Accept-Language`；任何"解析不出结果"的情形都回落 zh-CN（不看 JVM 默认 locale）。
+     */
     static final class ZhDefaultAcceptHeaderLocaleResolver extends AcceptHeaderLocaleResolver {
 
         static final Locale DEFAULT_LOCALE = Locale.SIMPLIFIED_CHINESE;
@@ -60,6 +64,8 @@ public class WebI18nConfig {
             try {
                 ranges = Locale.LanguageRange.parse(header);
             } catch (IllegalArgumentException malformed) {
+                LogThrottler.warn(log, "WebI18nConfig.malformedAcceptLanguage",
+                        "Malformed Accept-Language header; using zh-CN", malformed);
                 return DEFAULT_LOCALE;
             }
             Locale matched = Locale.lookup(ranges, SUPPORTED_LOCALES);
@@ -81,7 +87,9 @@ public class WebI18nConfig {
             return DEFAULT_LOCALE;
         }
 
-        /** 语言级匹配（忽略区变体/脚本）：`en-GB` → en-US，`zh-TW` → zh-CN，`de-DE` → null。 */
+        /**
+         * 语言级匹配（忽略区变体/脚本）：`en-GB` → en-US，`zh-TW` → zh-CN，`de-DE` → null。
+         */
         private static Locale byLanguage(String range) {
             if (StringUtils.isBlank(range) || "*".equals(range)) {
                 return null;
@@ -91,6 +99,7 @@ public class WebI18nConfig {
             try {
                 declared = Locale.forLanguageTag(tag);
             } catch (RuntimeException malformed) {
+                LogThrottler.warn(log, "WebI18nConfig.invalidLanguageTag", "Invalid locale language tag", malformed);
                 return null;
             }
             String language = declared.getLanguage();

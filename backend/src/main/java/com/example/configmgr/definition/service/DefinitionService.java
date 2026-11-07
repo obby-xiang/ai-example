@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -47,7 +48,9 @@ public class DefinitionService {
         return definitionRepository.findAllOrdered();
     }
 
-    /** 按层级筛选（<b>同一稳定顺序</b>：{@code sortOrder, code}；不再依赖数据库返回顺序）。 */
+    /**
+     * 按层级筛选（<b>同一稳定顺序</b>：{@code sortOrder, code}；不再依赖数据库返回顺序）。
+     */
     public List<ConfigDefinition> findByLevel(ConfigDefinition.ConfigLevel level) {
         return definitionRepository.findByLevelOrdered(level);
     }
@@ -128,7 +131,7 @@ public class DefinitionService {
         if (CollectionUtils.isNotEmpty(referencing)) {
             String refs = referencing.stream()
                     .map(f -> f.getDefCode() + "." + f.getCode())
-                    .distinct().sorted().collect(java.util.stream.Collectors.joining(", "));
+                    .distinct().sorted().collect(Collectors.joining(", "));
             throw new ConflictException(ErrorCodes.DEFINITION_REFERENCED,
                     "Configuration definition " + code + " is referenced by " + refs + "; remove those references first");
         }
@@ -157,7 +160,9 @@ public class DefinitionService {
         return new DeleteResult(code, cascadedFields, cascadedStagingRows);
     }
 
-    /** 删除结果：级联清理计数（回显给调用方，同时作为操作流水的落点摘要）。 */
+    /**
+     * 删除结果：级联清理计数（回显给调用方，同时作为操作流水的落点摘要）。
+     */
     public record DeleteResult(String code, long cascadedFields, long cascadedStagingRows) {
     }
 

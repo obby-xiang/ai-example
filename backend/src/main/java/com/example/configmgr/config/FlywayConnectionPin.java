@@ -1,5 +1,7 @@
 package com.example.configmgr.config;
 
+import com.example.configmgr.common.LogThrottler;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
 
 import javax.sql.DataSource;
@@ -16,6 +18,7 @@ import java.util.logging.Logger;
  * <p>Flyway 只接受 {@link DataSource}（11.x 已移除 Connection 入口），所以用一个只在本线程内
  * 转发到 pinned Connection 的 DataSource 包装；{@link #pin(Connection)} 返回的句柄关闭后恢复原行为。
  */
+@Slf4j
 final class FlywayConnectionPin {
 
     private final ThreadLocal<Connection> pinned = new ThreadLocal<>();
@@ -27,8 +30,7 @@ final class FlywayConnectionPin {
         return () -> {
             if (previous == null) {
                 this.pinned.remove();
-            }
-            else {
+            } else {
                 this.pinned.set(previous);
             }
         };
@@ -102,12 +104,14 @@ final class FlywayConnectionPin {
         }
     }
 
-    /** 不真正关闭底层连接的 Connection 代理（Flyway 自己会关它借到的连接）。 */
+    /**
+     * 不真正关闭底层连接的 Connection 代理（Flyway 自己会关它借到的连接）。
+     */
     interface NonClosingConnection {
 
         static Connection wrap(Connection target) {
             return (Connection) java.lang.reflect.Proxy.newProxyInstance(
-                    NonClosingConnection.class.getClassLoader(), new Class<?>[] { Connection.class },
+                    NonClosingConnection.class.getClassLoader(), new Class<?>[]{Connection.class},
                     (proxy, method, args) -> {
                         String name = method.getName();
                         if ("close".equals(name)) {
@@ -122,8 +126,8 @@ final class FlywayConnectionPin {
                         }
                         try {
                             return method.invoke(target, args);
-                        }
-                        catch (java.lang.reflect.InvocationTargetException e) {
+                        } catch (java.lang.reflect.InvocationTargetException e) {
+                            LogThrottler.warn(log, "FlywayConnectionPin.invocation", "Pinned JDBC method invocation failed", e);
                             throw e.getCause();
                         }
                     });

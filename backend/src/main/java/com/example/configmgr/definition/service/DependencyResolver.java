@@ -9,7 +9,15 @@ import lombok.RequiredArgsConstructor;
 import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.stereotype.Service;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
 
 /**
  * 解析配置定义间的依赖关系，对给定的 defCode 列表做拓扑排序（依赖先处理）。
@@ -26,14 +34,15 @@ public class DependencyResolver {
      */
     public List<String> sort(List<String> defCodes) {
         if (CollectionUtils.isEmpty(defCodes)) return Collections.emptyList();
+        return topologicalSort(defCodes, buildDependencies(defCodes));
+    }
 
-        // 构建局部依赖图（仅在 defCodes 范围内的依赖）
+    private Map<String, Set<String>> buildDependencies(List<String> defCodes) {
         Map<String, Set<String>> deps = new HashMap<>();
         for (String code : defCodes) {
             deps.put(code, new HashSet<>());
         }
 
-        // 加载所有定义的字段，找出 REFERENCE 类型字段指向 defCodes 内其他定义的情况
         List<ConfigDefinition> defs = definitionRepository.findAllOrdered();
         Map<String, ConfigDefinition> defMap = new HashMap<>();
         for (ConfigDefinition d : defs) {
@@ -49,32 +58,14 @@ public class DependencyResolver {
                 }
             });
         }
+        return deps;
+    }
 
-        // Kahn 算法拓扑排序
-        Map<String, Integer> inDegree = new HashMap<>();
-        for (String code : defCodes) inDegree.put(code, 0);
-        for (Map.Entry<String, Set<String>> e : deps.entrySet()) {
-            for (String dep : e.getValue()) {
-                inDegree.merge(dep, 0, Integer::sum); // ensure key exists
-            }
-            // e.key depends on e.value → e.key has in-degree from e.value
-        }
-        // Rebuild: for a → b (a depends on b), b should come before a
-        // in-degree for each node = number of nodes that depend ON it
-        Map<String, Integer> inDeg = new HashMap<>();
-        for (String code : defCodes) inDeg.put(code, 0);
-        for (Map.Entry<String, Set<String>> e : deps.entrySet()) {
-            // e.key depends on e.value set
-            // so in the output graph, we need all e.value before e.key
-            // meaning e.key has in-degree = e.value.size() in sorted order
-        }
-
-        // Rebuild properly with reverse dep map
+    private List<String> topologicalSort(List<String> defCodes, Map<String, Set<String>> deps) {
         Map<String, Set<String>> revDeps = new HashMap<>();
         for (String code : defCodes) revDeps.put(code, new HashSet<>());
         for (Map.Entry<String, Set<String>> e : deps.entrySet()) {
             for (String dep : e.getValue()) {
-                // dep must come before code → dep -> code in topo
                 revDeps.computeIfAbsent(dep, k -> new HashSet<>()).add(e.getKey());
             }
         }

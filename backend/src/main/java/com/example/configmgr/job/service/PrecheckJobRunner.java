@@ -50,7 +50,9 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class PrecheckJobRunner {
 
-    /** 指纹摘要只允许写到仍在途的作业行；终态（含取消）后定向 UPDATE 影响 0 行。 */
+    /**
+     * 指纹摘要只允许写到仍在途的作业行；终态（含取消）后定向 UPDATE 影响 0 行。
+     */
     private static final List<Job.JobStatus> IN_FLIGHT =
             List.of(Job.JobStatus.PENDING, Job.JobStatus.RUNNING);
 
@@ -216,7 +218,7 @@ public class PrecheckJobRunner {
         for (ConfigField f : def.getFields()) {
             if (f.isRequired()) {
                 Object val = row.get(f.getCode());
-                if (StringUtils.isBlank(ObjectUtils.toString(val, null))) {
+                if (StringUtils.isBlank(ObjectUtils.toString(val, (String) null))) {
                     saveRowIssue(job, defCode, f.getCode(), null, rowIndex + 2,
                             "必填字段 [" + f.getLabel() + "] 不能为空");
                     errors++;
@@ -255,7 +257,7 @@ public class PrecheckJobRunner {
         int errors = 0;
         for (int i = 0; i < rows.size(); i++) {
             Object v = rows.get(i).get(field.getCode());
-            if (StringUtils.isBlank(ObjectUtils.toString(v, null))) {
+            if (StringUtils.isBlank(ObjectUtils.toString(v, (String) null))) {
                 continue;
             }
             if (!validValues.contains(v.toString())) {
@@ -313,7 +315,9 @@ public class PrecheckJobRunner {
         private int rowWarnings;
     }
 
-    /** 单个文件类型的指纹（sha256 + size）。读盘失败记 WARN 并跳过 —— 该项随后走"摘要缺指纹"的从严分支。 */
+    /**
+     * 单个文件类型的指纹（sha256 + size）。读盘失败记 WARN 并跳过 —— 该项随后走"摘要缺指纹"的从严分支。
+     */
     private Map<String, Object> digestOf(String storagePath) {
         try {
             var digest = fileStorage.digest(storagePath);
@@ -321,8 +325,7 @@ public class PrecheckJobRunner {
             entry.put("sha256", digest.sha256());
             entry.put("size", digest.size());
             return entry;
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             log.warn("Failed to compute precheck file digest path={}", storagePath, e);
             Map<String, Object> entry = new LinkedHashMap<>();
             entry.put("sha256", null);
@@ -345,15 +348,15 @@ public class PrecheckJobRunner {
         final String json;
         try {
             json = objectMapper.writeValueAsString(summary);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             // 摘要写失败不升级为作业失败：从严口径下"摘要缺失"在 IMPORT 侧就是 409 PRECHECK_STALE
             log.warn("Failed to serialize precheck fingerprint summary jobId={}", jobId, e);
             return;
         }
         int updated = jobRepository.writeResultJsonIfInFlight(jobId, json, IN_FLIGHT);
         if (updated == 0) {
-            if (log.isDebugEnabled()) log.debug("Job already terminal, fingerprint summary not written jobId={}", jobId);
+            if (log.isDebugEnabled())
+                log.debug("Job already terminal, fingerprint summary not written jobId={}", jobId);
         }
     }
 
@@ -362,7 +365,9 @@ public class PrecheckJobRunner {
                 "status", status, "errors", errors);
     }
 
-    /** 作业级 issue 的 {@code def_code} 哨兵（{@code validation_issues.def_code} 为 NOT NULL；同 ExportJobRunner 口径）。 */
+    /**
+     * 作业级 issue 的 {@code def_code} 哨兵（{@code validation_issues.def_code} 为 NOT NULL；同 ExportJobRunner 口径）。
+     */
     private ValidationIssue jobLevelIssue(Long jobId, Long taskId) {
         ValidationIssue issue = new ValidationIssue();
         issue.setJobId(jobId);
@@ -415,16 +420,18 @@ public class PrecheckJobRunner {
         Set<String> values = new HashSet<>();
         try {
             for (ConfigDataRow r : dataRowRepository.findByDefCodeOrderByRowKey(refDefCode)) {
-                Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
+                Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {
+                });
                 Object v = data.get(refFieldCode);
-                if (StringUtils.isNotBlank(ObjectUtils.toString(v, null))) {
+                if (StringUtils.isNotBlank(ObjectUtils.toString(v, (String) null))) {
                     values.add(v.toString());
                 }
             }
             for (ConfigStagingRow s : stagingRowRepository.findByTaskIdAndDefCode(taskId, refDefCode)) {
-                Map<String, Object> data = objectMapper.readValue(s.getDataJson(), new TypeReference<>() {});
+                Map<String, Object> data = objectMapper.readValue(s.getDataJson(), new TypeReference<>() {
+                });
                 Object v = data.get(refFieldCode);
-                if (StringUtils.isNotBlank(ObjectUtils.toString(v, null))) {
+                if (StringUtils.isNotBlank(ObjectUtils.toString(v, (String) null))) {
                     values.add(v.toString());
                 }
             }
@@ -434,7 +441,9 @@ public class PrecheckJobRunner {
         return values;
     }
 
-    /** 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。 */
+    /**
+     * 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。
+     */
     private void publishProgress(Job job, ConfigDefinition def, int processed, int total) {
         int pct = total > 0 ? (processed * 100 / total) : 0;
         taskSseService.publish(job.getTaskId(), "JOB_PROGRESS", Map.of(

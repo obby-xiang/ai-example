@@ -72,18 +72,26 @@ public class AiConfigWriter {
 
     public static final String CODE_PROVIDER_IN_USE = ErrorCodes.PROVIDER_IN_USE;
 
-    /** 本批新增：{@code code} 唯一（设计稿表里没有，但重名必须有可判定的码，否则只能落 500）。 */
+    /**
+     * 本批新增：{@code code} 唯一（设计稿表里没有，但重名必须有可判定的码，否则只能落 500）。
+     */
     public static final String CODE_PROVIDER_EXISTS = ErrorCodes.PROVIDER_EXISTS;
 
     public static final String CODE_MODEL_NOT_FOUND = ErrorCodes.MODEL_NOT_FOUND;
 
-    /** 本批新增：{@code (provider_id, model_id)} 唯一。 */
+    /**
+     * 本批新增：{@code (provider_id, model_id)} 唯一。
+     */
     public static final String CODE_MODEL_EXISTS = ErrorCodes.MODEL_EXISTS;
 
-    /** 本批新增：{@code code} 是密文 AAD 的一段，不可原地改（改了旧密文就解不开）。 */
+    /**
+     * 本批新增：{@code code} 是密文 AAD 的一段，不可原地改（改了旧密文就解不开）。
+     */
     public static final String CODE_CODE_IMMUTABLE = ErrorCodes.CODE_IMMUTABLE;
 
-    /** 本批新增：数值/长度/格式类校验（temperature 越界、key 过短等统一落这里）。 */
+    /**
+     * 本批新增：数值/长度/格式类校验（temperature 越界、key 过短等统一落这里）。
+     */
     public static final String CODE_INVALID_PARAM = ErrorCodes.INVALID_PARAM;
 
     /**
@@ -95,7 +103,9 @@ public class AiConfigWriter {
      */
     public static final String CODE_KEY_BOUND_TO_HOST = ErrorCodes.KEY_BOUND_TO_HOST;
 
-    /** 本批新增：模型名不合法（空白/超长/含空白符）。 */
+    /**
+     * 本批新增：模型名不合法（空白/超长/含空白符）。
+     */
     public static final String CODE_INVALID_MODEL = ErrorCodes.INVALID_MODEL;
 
     // ── 审计动作 ────────────────────────────────────────────────────────────
@@ -104,7 +114,9 @@ public class AiConfigWriter {
 
     public static final String ACTION_PROVIDER_UPDATE = "PROVIDER_UPDATE";
 
-    /** 软删（停用）与硬删共用：{@code diff.hard} 区分。 */
+    /**
+     * 软删（停用）与硬删共用：{@code diff.hard} 区分。
+     */
     public static final String ACTION_PROVIDER_DELETE = "PROVIDER_DELETE";
 
     public static final String ACTION_MODEL_ADD = "MODEL_ADD";
@@ -117,7 +129,9 @@ public class AiConfigWriter {
 
     // ── 校验常量 ────────────────────────────────────────────────────────────
 
-    /** provider 机读名：小写字母/数字开头，允许 {@code _-}（与 {@code deepseek}、{@code custom-1} 同形）。 */
+    /**
+     * provider 机读名：小写字母/数字开头，允许 {@code _-}（与 {@code deepseek}、{@code custom-1} 同形）。
+     */
     private static final Pattern CODE_PATTERN = Pattern.compile("[a-z0-9][a-z0-9_-]{0,63}");
 
     private static final int MAX_KEY_LENGTH = 512;
@@ -163,13 +177,15 @@ public class AiConfigWriter {
 
     private final ObjectMapper objectMapper;
 
-    /** 数据行与 {@code config.version} 同一事务，提交后 reload 并淘汰运行态缓存。 */
+    /**
+     * 数据行与 {@code config.version} 同一事务，提交后 reload 并淘汰运行态缓存。
+     */
     private final AiConfigVersionPublisher versions;
 
     public AiConfigWriter(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
-            AiSettingRepository settingRepository, AiConfigAuditRepository auditRepository, AiKeyCipher cipher,
-            AiEndpointGuard guard, PlatformTransactionManager transactionManager,
-            AiConfigService configService, ObjectMapper objectMapper, AiProviderRegistry runtimeRegistry) {
+                          AiSettingRepository settingRepository, AiConfigAuditRepository auditRepository, AiKeyCipher cipher,
+                          AiEndpointGuard guard, PlatformTransactionManager transactionManager,
+                          AiConfigService configService, ObjectMapper objectMapper, AiProviderRegistry runtimeRegistry) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
         this.settingRepository = settingRepository;
@@ -194,15 +210,17 @@ public class AiConfigWriter {
      * 更新时除 {@code code} 外全部"传了才改"（null = 不动）。{@code code} 传了就必须与原值相同
      * （它是密文 AAD 的一段，见 {@link #CODE_CODE_IMMUTABLE}）。
      *
-     * @param apiKey 明文 key；省略/空白 = 不修改（新建时 = 不配置 key）
+     * @param apiKey   明文 key；省略/空白 = 不修改（新建时 = 不配置 key）
      * @param clearKey true = 清空 key（优先于 apiKey）
      */
     public record ProviderCommand(@JsonProperty("code") String code, @JsonProperty("displayName") String displayName,
-            @JsonProperty("protocol") String protocol, @JsonProperty("baseUrl") String baseUrl,
-            @JsonProperty("completionsPath") String completionsPath, @JsonProperty("modelsPath") String modelsPath,
-            @JsonProperty(value = "apiKey", access = JsonProperty.Access.WRITE_ONLY) String apiKey,
-            @JsonProperty("clearKey") Boolean clearKey,
-            @JsonProperty("enabled") Boolean enabled, @JsonProperty("sortOrder") Integer sortOrder) {
+                                  @JsonProperty("protocol") String protocol, @JsonProperty("baseUrl") String baseUrl,
+                                  @JsonProperty("completionsPath") String completionsPath,
+                                  @JsonProperty("modelsPath") String modelsPath,
+                                  @JsonProperty(value = "apiKey", access = JsonProperty.Access.WRITE_ONLY) String apiKey,
+                                  @JsonProperty("clearKey") Boolean clearKey,
+                                  @JsonProperty("enabled") Boolean enabled,
+                                  @JsonProperty("sortOrder") Integer sortOrder) {
 
         @Override
         public String toString() {
@@ -219,12 +237,15 @@ public class AiConfigWriter {
      * {@code maxOutput} 1..maxContext。
      */
     public record ModelCommand(@JsonProperty("modelId") String modelId,
-            @JsonProperty("displayName") String displayName, @JsonProperty("maxContext") Integer maxContext,
-            @JsonProperty("maxOutput") Integer maxOutput,
-            @JsonProperty("supportsToolCalling") Boolean supportsToolCalling,
-            @JsonProperty("supportsVision") Boolean supportsVision,
-            @JsonProperty("supportsReasoning") Boolean supportsReasoning, @JsonProperty("enabled") Boolean enabled,
-            @JsonProperty("isDefault") Boolean isDefault, @JsonProperty("sortOrder") Integer sortOrder) {
+                               @JsonProperty("displayName") String displayName,
+                               @JsonProperty("maxContext") Integer maxContext,
+                               @JsonProperty("maxOutput") Integer maxOutput,
+                               @JsonProperty("supportsToolCalling") Boolean supportsToolCalling,
+                               @JsonProperty("supportsVision") Boolean supportsVision,
+                               @JsonProperty("supportsReasoning") Boolean supportsReasoning,
+                               @JsonProperty("enabled") Boolean enabled,
+                               @JsonProperty("isDefault") Boolean isDefault,
+                               @JsonProperty("sortOrder") Integer sortOrder) {
     }
 
     /**
@@ -235,12 +256,13 @@ public class AiConfigWriter {
      * top_p [0,1]、max_tokens [1,200000] 且不超过所选模型的 {@code maxOutput}。
      *
      * @param providerId 默认目标所属 provider（与 {@code modelId} 成对；给出 {@code modelId} 时必填，
-     * 该 provider 必须已启用且模型在其 enabled allowlist 中；两者同为 {@code null} = 清空默认目标）
+     *                   该 provider 必须已启用且模型在其 enabled allowlist 中；两者同为 {@code null} = 清空默认目标）
      */
     public record DefaultsCommand(@JsonProperty("modelId") String modelId,
-            @JsonProperty("temperature") Double temperature, @JsonProperty("topP") Double topP,
-            @JsonProperty("maxTokens") Integer maxTokens, @JsonProperty("allowUserParams") Boolean allowUserParams,
-            @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId) {
+                                  @JsonProperty("temperature") Double temperature, @JsonProperty("topP") Double topP,
+                                  @JsonProperty("maxTokens") Integer maxTokens,
+                                  @JsonProperty("allowUserParams") Boolean allowUserParams,
+                                  @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId) {
     }
 
     // ── provider ────────────────────────────────────────────────────────────
@@ -323,7 +345,7 @@ public class AiConfigWriter {
                 command.enabled(), command.sortOrder());
     }
 
-    private static KeyMaterial providerKey(ProviderCommand command, AiProvider existing) {
+    private KeyMaterial providerKey(ProviderCommand command, AiProvider existing) {
         if (Boolean.TRUE.equals(command.clearKey())) {
             return KeyMaterial.cleared();
         }
@@ -366,7 +388,8 @@ public class AiConfigWriter {
     }
 
     private record ProviderUpdate(AiProvider provider, String baseUrl, String displayName, String protocol,
-            String completionsPath, String modelsPath, KeyMaterial key, Boolean enabled, Integer sortOrder) {
+                                  String completionsPath, String modelsPath, KeyMaterial key, Boolean enabled,
+                                  Integer sortOrder) {
 
         @Override
         public String toString() {
@@ -390,8 +413,7 @@ public class AiConfigWriter {
                             "Provider still has " + modelCount + " model references and cannot be hard-deleted; delete the models first or use soft delete");
                 }
                 this.providerRepository.deleteById(providerId);
-            }
-            else {
+            } else {
                 existing.setEnabled(false);
                 this.providerRepository.saveAndFlush(existing);
             }
@@ -449,8 +471,8 @@ public class AiConfigWriter {
         AiProviderModel updated = executeInTransaction(() -> {
             requireProvider(providerId);
             AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
-                .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
-                        "Model not found: " + providerId + "/" + modelId));
+                    .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
+                            "Model not found: " + providerId + "/" + modelId));
             if (StringUtils.isNotBlank(command.modelId()) && !command.modelId().trim().equals(modelId)) {
                 throw new AiConfigException(CODE_INVALID_MODEL,
                         "modelId is immutable because provider_id + model_id is the unique key; delete it and create a new entry");
@@ -508,8 +530,8 @@ public class AiConfigWriter {
         AiProviderModel result = executeInTransaction(() -> {
             requireProvider(providerId);
             AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
-                .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
-                        "Model not found: " + providerId + "/" + modelId));
+                    .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
+                            "Model not found: " + providerId + "/" + modelId));
             this.modelRepository.delete(existing);
             audit(ACTION_MODEL_DELETE, "model", providerId + ":" + modelId,
                     diffOf("providerId", providerId, "modelId", modelId));
@@ -604,8 +626,8 @@ public class AiConfigWriter {
 
     private boolean hasEnabledModel(Long providerId, String modelId) {
         return this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
-            .filter(AiProviderModel::isEnabled)
-            .isPresent();
+                .filter(AiProviderModel::isEnabled)
+                .isPresent();
     }
 
     /**
@@ -619,8 +641,8 @@ public class AiConfigWriter {
             return null;
         }
         return this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
-            .map(AiProviderModel::getMaxOutput)
-            .orElse(null);
+                .map(AiProviderModel::getMaxOutput)
+                .orElse(null);
     }
 
     // ── 内部：事务/版本/审计 ──────────────────────────────────────────────────
@@ -633,7 +655,9 @@ public class AiConfigWriter {
         });
     }
 
-    /** 提交之后：跨实例失效信号 + 本实例快照重载 + 运行态缓存淘汰（{@link AiConfigVersionPublisher}）。 */
+    /**
+     * 提交之后：跨实例失效信号 + 本实例快照重载 + 运行态缓存淘汰（{@link AiConfigVersionPublisher}）。
+     */
     private void afterCommit() {
         this.versions.publishAfterCommit();
     }
@@ -661,8 +685,7 @@ public class AiConfigWriter {
     private String toJson(Map<String, Object> diff) {
         try {
             return this.objectMapper.writeValueAsString(diff);
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
             // 审计不能因为序列化失败而阻断写路径；但也不能静默：落一个可辨认的空壳
             log.warn("audit diff serialization failed (action already applied)", ex);
             return "{}";
@@ -685,13 +708,13 @@ public class AiConfigWriter {
 
     private void clearDefaultFlag(Long providerId, Long exceptId) {
         this.modelRepository.findByProviderId(providerId)
-            .stream()
-            .filter(AiProviderModel::isDefault)
-            .filter(model -> exceptId == null || !exceptId.equals(model.getId()))
-            .forEach(model -> {
-                model.setDefault(false);
-                this.modelRepository.saveAndFlush(model);
-            });
+                .stream()
+                .filter(AiProviderModel::isDefault)
+                .filter(model -> exceptId == null || !exceptId.equals(model.getId()))
+                .forEach(model -> {
+                    model.setDefault(false);
+                    this.modelRepository.saveAndFlush(model);
+                });
     }
 
     // ── 内部：校验与 key 封装 ────────────────────────────────────────────────
@@ -701,7 +724,7 @@ public class AiConfigWriter {
             throw new AiConfigException(CODE_PROVIDER_NOT_FOUND, "provider id is required");
         }
         return this.providerRepository.findById(providerId)
-            .orElseThrow(() -> new AiConfigException(CODE_PROVIDER_NOT_FOUND, "Provider not found: " + providerId));
+                .orElseThrow(() -> new AiConfigException(CODE_PROVIDER_NOT_FOUND, "Provider not found: " + providerId));
     }
 
     private static String requireCode(String code) {
@@ -800,12 +823,13 @@ public class AiConfigWriter {
         return new AiConfigException(CODE_INVALID_PARAM, message);
     }
 
-    /** URL 闸 → 写路径的异常族（控制器只认 {@link AiConfigException}）。 */
+    /**
+     * URL 闸 → 写路径的异常族（控制器只认 {@link AiConfigException}）。
+     */
     private String checkBaseUrl(String baseUrl) {
         try {
             return this.guard.checkForWrite(baseUrl);
-        }
-        catch (AiEndpointGuard.GuardException ex) {
+        } catch (AiEndpointGuard.GuardException ex) {
             throw new AiConfigException(ex.getCode(), ex.getMessage());
         }
     }
@@ -831,8 +855,7 @@ public class AiConfigWriter {
                     .toLowerCase(Locale.ROOT);
             int port = uri.getPort() == -1 ? defaultPort(scheme) : uri.getPort();
             return scheme + "://" + host + ":" + port;
-        }
-        catch (URISyntaxException ex) {
+        } catch (URISyntaxException ex) {
             return baseUrl.trim();
         }
     }
@@ -841,7 +864,9 @@ public class AiConfigWriter {
         return "https".equals(scheme) ? 443 : ("http".equals(scheme) ? 80 : -1);
     }
 
-    /** 加密 + 指纹 + last4（一次算好，事务里只落结果；失败在事务外 ⇒ 表里不留半行）。 */
+    /**
+     * 加密 + 指纹 + last4（一次算好，事务里只落结果；失败在事务外 ⇒ 表里不留半行）。
+     */
     private KeyMaterial sealKey(String apiKey, String providerCode) {
         if (apiKey.length() < MIN_KEY_LENGTH) {
             throw invalidParam("apiKey is too short; at least " + MIN_KEY_LENGTH + " characters are required so the last-four mask"
@@ -854,8 +879,7 @@ public class AiConfigWriter {
             String envelope = this.cipher.encrypt(apiKey, providerCode, AiProvider.KEY_REF_DB);
             String fingerprint = this.cipher.fingerprint(apiKey);
             return new KeyMaterial(envelope, AiKeyCipher.last4(apiKey), fingerprint, AiProvider.KEY_REF_DB, "set");
-        }
-        catch (AiKeyCipher.KeyCipherException ex) {
+        } catch (AiKeyCipher.KeyCipherException ex) {
             // 稳定 code 原样上抛（AI_SECRET_KEK_MISSING / KEY_EMPTY），控制器按 400 落
             throw new AiConfigException(ex.getCode(), ex.getMessage());
         }

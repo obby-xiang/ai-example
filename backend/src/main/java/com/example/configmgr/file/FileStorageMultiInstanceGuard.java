@@ -1,6 +1,8 @@
 package com.example.configmgr.file;
 
+import com.example.configmgr.common.LogThrottler;
 import com.example.configmgr.config.AppProperties;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.core.env.Environment;
@@ -39,38 +41,59 @@ import java.util.Set;
  * <p><b>默认单实例开发不受影响</b>：无上述开关/profile、数据源仍是 {@code jdbc:h2:file:} /
  * {@code jdbc:h2:mem:} 时本类直接放行，相对路径 {@code ./data/files} 仍是合法缺省。
  */
+@Slf4j
 @Component
 public class FileStorageMultiInstanceGuard {
 
-    /** 既有 Redis Cluster profile（多实例数据面）。 */
+    /**
+     * 既有 Redis Cluster profile（多实例数据面）。
+     */
     public static final String CLUSTER_PROFILE = "cluster";
 
-    /** 显式多实例 profile（无专属 YAML，仅作激活标记）。 */
+    /**
+     * 显式多实例 profile（无专属 YAML，仅作激活标记）。
+     */
     public static final String MULTI_INSTANCE_PROFILE = "multi-instance";
 
-    /** H2 TCP Server 模式：数据库已跨进程共享，文件也必须共享。 */
+    /**
+     * H2 TCP Server 模式：数据库已跨进程共享，文件也必须共享。
+     */
     public static final String H2TCP_PROFILE = "h2tcp";
 
-    /** PostgreSQL 共享库 profile（M2 多实例切换）。 */
+    /**
+     * PostgreSQL 共享库 profile（M2 多实例切换）。
+     */
     public static final String POSTGRESQL_PROFILE = "postgresql";
 
-    /** H2 TCP 数据源前缀（库已跨进程共享；无需额外 profile 也必须共享文件）。 */
+    /**
+     * H2 TCP 数据源前缀（库已跨进程共享；无需额外 profile 也必须共享文件）。
+     */
     public static final String H2TCP_DATASOURCE_PREFIX = "jdbc:h2:tcp:";
 
-    /** H2 SSL（远程 Server 模式）数据源前缀。 */
+    /**
+     * H2 SSL（远程 Server 模式）数据源前缀。
+     */
     public static final String H2SSL_DATASOURCE_PREFIX = "jdbc:h2:ssl:";
 
-    /** PostgreSQL 数据源前缀（共享库）。 */
+    /**
+     * PostgreSQL 数据源前缀（共享库）。
+     */
     public static final String POSTGRESQL_DATASOURCE_PREFIX = "jdbc:postgresql:";
 
-    /** 视为多实例部署的 profile 集合。 */
+    /**
+     * 视为多实例部署的 profile 集合。
+     */
     public static final Set<String> MULTI_INSTANCE_PROFILES =
             Set.of(CLUSTER_PROFILE, MULTI_INSTANCE_PROFILE, H2TCP_PROFILE, POSTGRESQL_PROFILE);
 
-    /** 属性名（与 {@code app.file.storage-path} 同键）。 */
+    /**
+     * 属性名（与 {@code app.file.storage-path} 同键）。
+     */
     public static final String STORAGE_PATH_PROPERTY = "app.file.storage-path";
 
-    /** 标准环境变量名（Spring relaxed binding：APP_FILE_STORAGE_PATH → app.file.storage-path）。 */
+    /**
+     * 标准环境变量名（Spring relaxed binding：APP_FILE_STORAGE_PATH → app.file.storage-path）。
+     */
     public static final String STORAGE_PATH_ENV = "APP_FILE_STORAGE_PATH";
 
     public FileStorageMultiInstanceGuard(AppProperties appProperties, Environment environment) {
@@ -81,7 +104,9 @@ public class FileStorageMultiInstanceGuard {
         validateAbsolute(appProperties, reasons);
     }
 
-    /** 多实例判据（返回触发原因，空 = 单实例，不校验）。 */
+    /**
+     * 多实例判据（返回触发原因，空 = 单实例，不校验）。
+     */
     static List<String> multiInstanceReasons(AppProperties appProperties, Environment environment) {
         List<String> reasons = new ArrayList<>();
         if (appProperties.getFile().isMultiInstance()) {
@@ -98,16 +123,14 @@ public class FileStorageMultiInstanceGuard {
                 String normalized = datasourceUrl.trim().toLowerCase(Locale.ROOT);
                 if (normalized.startsWith(H2TCP_DATASOURCE_PREFIX)) {
                     reasons.add("datasource=" + H2TCP_DATASOURCE_PREFIX);
-                }
-                else if (normalized.startsWith(H2SSL_DATASOURCE_PREFIX)) {
+                } else if (normalized.startsWith(H2SSL_DATASOURCE_PREFIX)) {
                     reasons.add("datasource=" + H2SSL_DATASOURCE_PREFIX);
-                }
-                else if (normalized.startsWith(POSTGRESQL_DATASOURCE_PREFIX)) {
+                } else if (normalized.startsWith(POSTGRESQL_DATASOURCE_PREFIX)) {
                     reasons.add("datasource=" + POSTGRESQL_DATASOURCE_PREFIX);
                 }
             }
         }
-        return reasons;
+        return reasons.isEmpty() ? List.of() : reasons;
     }
 
     private static void validateAbsolute(AppProperties appProperties, List<String> reasons) {
@@ -126,8 +149,8 @@ public class FileStorageMultiInstanceGuard {
         Path path;
         try {
             path = Path.of(value);
-        }
-        catch (InvalidPathException e) {
+        } catch (InvalidPathException e) {
+            LogThrottler.warn(log, "FileStorageMultiInstanceGuard.invalidPath", "Invalid file storage path", e);
             throw new IllegalStateException(STORAGE_PATH_PROPERTY + " is not a valid path (current = " + value
                     + ", trigger: " + reason + ")", e);
         }

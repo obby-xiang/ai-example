@@ -1,5 +1,7 @@
 package com.example.configmgr.health;
 
+import com.example.configmgr.common.LogThrottler;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -18,42 +20,43 @@ import javax.sql.DataSource;
  * <p>失败诊断只保留异常类名（**不再**为拼诊断去另开一次连接：那会在失败路径上再等一轮
  * connection-timeout）。原始异常消息可能包含主机、端口或连接细节，不进入健康响应。
  */
+@Slf4j
 @Component
 class DbReadinessProbe implements ReadinessProbe {
 
-	static final String NAME = "db";
+    static final String NAME = "db";
 
-	private static final int QUERY_TIMEOUT_SECONDS = 2;
+    private static final int QUERY_TIMEOUT_SECONDS = 2;
 
-	private final JdbcTemplate jdbcTemplate;
+    private final JdbcTemplate jdbcTemplate;
 
-	DbReadinessProbe(DataSource dataSource) {
-		this.jdbcTemplate = new JdbcTemplate(dataSource);
-		this.jdbcTemplate.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
-	}
+    DbReadinessProbe(DataSource dataSource) {
+        this.jdbcTemplate = new JdbcTemplate(dataSource);
+        this.jdbcTemplate.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+    }
 
-	@Override
-	public String name() {
-		return NAME;
-	}
+    @Override
+    public String name() {
+        return NAME;
+    }
 
-	@Override
-	public ProbeResult check() {
-		long startedAt = System.nanoTime();
-		try {
-			Integer one = this.jdbcTemplate.queryForObject("SELECT 1", Integer.class);
-			if (one == null || one != 1) {
-				return ProbeResult.down("SELECT 1 返回 " + one);
-			}
-			return ProbeResult.up("SELECT 1 正常（" + elapsedMs(startedAt) + "ms）");
-		}
-		catch (RuntimeException ex) {
-			return ProbeResult.down(ex.getClass().getSimpleName());
-		}
-	}
+    @Override
+    public ProbeResult check() {
+        long startedAt = System.nanoTime();
+        try {
+            Integer one = this.jdbcTemplate.queryForObject("SELECT 1", Integer.class);
+            if (one == null || one != 1) {
+                return ProbeResult.down("SELECT 1 返回 " + one);
+            }
+            return ProbeResult.up("SELECT 1 正常（" + elapsedMs(startedAt) + "ms）");
+        } catch (RuntimeException ex) {
+            LogThrottler.warn(log, "DbReadinessProbe.failed", "Database readiness probe failed", ex);
+            return ProbeResult.down(ex.getClass().getSimpleName());
+        }
+    }
 
-	private static long elapsedMs(long startedAt) {
-		return (System.nanoTime() - startedAt) / 1_000_000L;
-	}
+    private static long elapsedMs(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000L;
+    }
 
 }
