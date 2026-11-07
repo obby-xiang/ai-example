@@ -40,8 +40,6 @@
     ├── research/       # 外部设计研究与借鉴
     ├── spike/          # PoC 决策卡（SP-01ab / 01c / 01d / 02）
     └── merge/          # 前期合流包（历史阶段产物，勿当现行设计）
-        （另有 5 份源分支遗留参考件：requirements / technical-design /
-          implementation-plan / test-cases / verification-results，同样勿当现行设计）
 ```
 
 ---
@@ -188,9 +186,8 @@ yarn dev
 1. **当前独立复测清单**：`docs/verification/AI对话独立复测清单-2026-11-05.md`。覆盖近期审查问题、导出工作流和独立浏览器/API 复测，明确不使用 `backend/src/test`、`frontend/tests`、`frontend/e2e` 作为本轮载体。
 2. **独立 API 与评估脚本**：`scripts/verification/ai-current-protocol-api.mjs`、`scripts/verification/ai-progressive-disclosure-eval.mjs`；API/桩 E2E 主脚本为 `scripts/verify-e2e.ps1`，说明见 `scripts/README.md`。
 3. **浏览器复测**：当前独立清单使用 Kimi Code Desktop 内置浏览器，不使用 CU；CI 的 Playwright 资产位于 `frontend/e2e`，配置为 `frontend/playwright*.config.ts` 和 `frontend/e2e/playwright.*.config.ts`，冒烟脚本为 `scripts/chat-panel-smoke.mjs`。
-4. **其他测试文档**：`docs/research/设计-真机E2E用例全集-2026-10-23.md` 与 `设计-AI对话E2E用例全集-2026-10-22.md` 是用例设计蓝本；`docs/merge/04-测试用例文档.md` 是生产测试策略参考；`docs/test-cases.md` 是遗留参考，均不替代当前独立复测清单。
-5. **压测入口**：`scripts/perf/ai-api/`、`scripts/perf/redis/`、`scripts/perf/redis-production/`、`scripts/perf/redis-protocol/`，各目录参数、套件和证据规则见其 `README.md`。
-6. **多实例 / Cluster**：`scripts/b23l1-dual-instance.ps1`、`scripts/redis5-cluster-smoke.sh`；五个 workflows 为 `.github/workflows/ci.yml`、`nightly.yml`、`cluster-3node.yml`、`e2e-real.yml`、`redis-5-smoke.yml`。
+4. **压测入口**：`scripts/perf/ai-api/`、`scripts/perf/redis/`、`scripts/perf/redis-production/`、`scripts/perf/redis-protocol/`，各目录参数、套件和证据规则见其 `README.md`。
+5. **多实例 / Cluster**：`scripts/b23l1-dual-instance.ps1`、`scripts/redis5-cluster-smoke.sh`；五个 workflows 为 `.github/workflows/ci.yml`、`nightly.yml`、`cluster-3node.yml`、`e2e-real.yml`、`redis-5-smoke.yml`。
 
 本轮仅维护独立用例矩阵和压测脚本，不依赖前后端既有测试代码；动态结果默认 `NOT_RUN`，真实执行需另记证据。
 

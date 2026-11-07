@@ -2551,6 +2551,57 @@
           "reason": "按当前对话实际压测报告和独立复测文件复核，历史证据与当前HEAD隔离，所有新执行结果均保持NOT_RUN，未执行测试、构建或压测。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:51a82763a6ca542687089791104426c74a084fb565cbae2a214d6fb3afa9a5ce",
+      "status": "reviewed",
+      "reason": "README测试导航已移除研究设计稿、merge测试策略和test-cases遗留参考，只保留当前独立复测清单、API/浏览器脚本、压测目录、多实例与workflow入口；同时清理目录结构中遗留test-cases说明。压测场景和证据边界未改，动态执行NOT_RUN。",
+      "reviewedAt": "2026-11-07T22:56:35+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核",
+      "specChanges": [
+        {
+          "change": "README不再列入历史遗留测试文档，仅保留当前复测与执行资产导航。",
+          "reason": "避免把遗留参考件混入当前测试入口并造成持续误用。",
+          "impact": "只删除文档导航中的历史条目，不删除或修改历史文件本身，也不改变测试、压测或生产行为。"
+        }
+      ],
+      "files": [
+        {
+          "path": "README.md",
+          "status": "checked",
+          "reason": "已删除研究设计稿、merge/04-测试用例文档、docs/test-cases.md及目录结构中的遗留test-cases说明，保留当前独立复测清单和实际脚本、压测、浏览器、多实例入口。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅删除README历史导航条目，没有新增或升级依赖。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java或通用代码变更，集合、JSON、Lombok和import均不涉及。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批没有日志、异常或敏感信息实现变化，仅删除文档历史入口。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批未修改用户界面、卡片、文案、交互或渲染。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批只删除历史文档导航，未改变API、SSE、Redis、并发、TTL或状态机实现。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批未修改UTF-8、SSE/JSON帧或流式解析实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "README仅保留当前独立复测与执行入口，历史文件本身未改，压测场景和NOT_RUN边界保持；未执行测试、构建或压测。"
+        }
+      }
     }
   ]
 }
