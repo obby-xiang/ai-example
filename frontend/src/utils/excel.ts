@@ -653,14 +653,14 @@ export async function blobToWorkbookJson(blob: Blob): Promise<string> {
     excelIo.open(
       blob,
       (json: string) => resolve(json),
-      (error: unknown) => reject(new Error(`Excel 解析失败：${describeExcelError(error)}`))
+      (error: unknown) => reject(new Error(`Excel parsing failed: ${describeExcelError(error)}`))
     )
   })
 }
 
 function describeExcelError(error: unknown): string {
   if (error && typeof error === 'object' && 'errorMessage' in error) {
-    return String((error as { errorMessage?: unknown }).errorMessage ?? '未知错误')
+    return String((error as { errorMessage?: unknown }).errorMessage ?? 'Unknown error')
   }
   if (error instanceof Error) {
     return error.message

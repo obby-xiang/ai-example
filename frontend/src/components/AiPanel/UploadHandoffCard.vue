@@ -2,6 +2,7 @@
 import { computed, ref, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
+import { unicodeCharacterCount } from '@/utils/display-text'
 
 type UploadHandoffStatus = 'waiting' | 'uploading' | 'uploaded' | 'failed' | 'unsupported' | 'missing' | 'cancelled'
 type HeaderTone = 'neutral' | 'blue' | 'green' | 'amber' | 'red' | 'purple' | 'gray'
@@ -33,7 +34,7 @@ const bodyId = `upload-handoff-body-${useId()}`
 const expandedOverride = ref<boolean | null>(null)
 
 const headerTitle = computed(() => props.title?.trim() || t('ai.uploadHandoff.title'))
-const hasLongTitle = computed(() => headerTitle.value.length > 32)
+const hasLongTitle = computed(() => unicodeCharacterCount(headerTitle.value) > 32)
 const expanded = computed({
   get: () => expandedOverride.value ?? (hasLongTitle.value || (props.status !== 'uploaded' && props.status !== 'cancelled')),
   set: (value: boolean) => {

@@ -132,6 +132,7 @@ import {
   type RunExpiryAnchor
 } from '@/utils/run-expiry'
 import { translate } from '@/composables/useCopy'
+import { userFacingErrorText } from '@/utils/ui-error'
 
 /** sessionStorage 键：会话 id 与镜像前缀（Task 4 起带身份时追加 `tenantId:userId` 指纹）。 */
 export const SESSION_ID_KEY = AI_SESSION_ID_KEY
@@ -3404,10 +3405,6 @@ function pickUiAnnouncement(): string | null {
   return peekUiAnnouncement()
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 /** 通知槽的写入面（store 的 `this` 只暴露这四个字段时即可调用）。 */
 interface NoticeSink {
   notice: string | null
@@ -4531,7 +4528,7 @@ export const useAiStore = defineStore('ai', {
       // N-1（R3）：原文只进 DEV 日志（`healthError` 也是诊断字段）—— 探针失败本身不再上屏，
       // 真实不可用由降级条与后端请求错误表达，机制词不上屏。
       if (import.meta.env.DEV) {
-        console.warn('[ai] health probe failed:', result.error instanceof Error ? result.error.message : String(result.error))
+        console.warn('[ai] health probe failed:', result.error)
       }
       // 探测失败不清策略：已生效的收紧值比"回到 20"更安全（K-10：兜底是放宽方向，仍安全）
     },
@@ -5091,8 +5088,8 @@ export const useAiStore = defineStore('ai', {
               args: call.arguments,
               result: null,
               // ① 历史摘要：`/history.toolCallStates.preflight` 是后端在挂起写点与终态写点**同源**
-              // 落下的展示摘要（target / impact / conditionSummary / publishMode）—— 卡头、条件与
-              // 影响面据此渲染，与实时帧（confirm_request / suspended）同形。缺省（旧载荷 / 无预检的
+              // 落下的展示摘要（target / impact / conditionSummary / publishMode）—— 卡头与必要
+              // 后果说明据此渲染，与实时帧（confirm_request / suspended）同形。缺省（旧载荷 / 无预检的
               // 工具）**不产生该键**，卡面回落原有形态（一字不动）。
               ...(state?.preflight ? { preflight: state.preflight } : {}),
               // A10 R-15：持久化的模型侧截断元数据随历史响应回到段上（刷新后角标/本地化 hover）。
@@ -5418,7 +5415,8 @@ export const useAiStore = defineStore('ai', {
         this.applyHistoryCompactionEvents(this.historyEvents)
       } catch (error) {
         if (this.sessionId === sid) {
-          setNotice(this, 'ai.notice.historyEarlierFailed', { message: errorText(error) }, 'error')
+          console.error('[ai] earlier history load failed', error)
+          setNotice(this, 'ai.notice.historyEarlierFailed', undefined, 'error')
         }
       } finally {
         this.historyPageLoading = false
@@ -5919,7 +5917,7 @@ export const useAiStore = defineStore('ai', {
           }
           if (probe.status >= 500) {
             // 服务端明确不可用：按批次2 的快照失败出口（可见 + 可重试 + 统一封口）。
-            this.sealRecovery('current', new ApiError('重挂探测失败', probe.status, String(probe.status), null))
+            this.sealRecovery('current', new ApiError('Reattach probe failed', probe.status, String(probe.status), null))
             return
           }
         }
@@ -7439,11 +7437,8 @@ export const useAiStore = defineStore('ai', {
         if (cardAttached) {
           return
         }
-        if (error instanceof Error) {
-          setRawNotice(this, error.message, 'error')
-        } else {
-          setNotice(this, 'ai.notice.chatRequestFailed')
-        }
+        console.error('[ai] chat request failed', error)
+        setNotice(this, 'ai.notice.chatRequestFailed')
         return
       }
       switch (error.code) {
@@ -7498,7 +7493,7 @@ export const useAiStore = defineStore('ai', {
           void this.probeHealth()
           break
         // 批③ 新增的 /chat 稳定码（模型配置面）：前端按 code 查同一份词表，
-        // 不回显后端中文 message（i18n 口径）。
+        // 不回显后端 message（i18n 口径）。
         // 批 E · E1：模型选择已退场，不再刷新「可用模型清单」（清单的唯一消费者是选择器）。
         case 'MODEL_NOT_FOUND':
         case 'INVALID_PARAM':
@@ -7506,17 +7501,13 @@ export const useAiStore = defineStore('ai', {
         case 'PROVIDER_GONE': {
           if (!cardAttached) {
             const key = aiConfigErrorKey(error.code)
-            if (key) {
-              setNotice(this, key)
-            } else {
-              setRawNotice(this, error.message, 'error')
-            }
+            setNotice(this, key ?? 'ai.settings.errors.UNKNOWN_ERROR')
           }
           break
         }
         default:
           if (!cardAttached) {
-            setRawNotice(this, error.message, 'error')
+            setNotice(this, 'ai.notice.chatRequestFailed')
           }
       }
     },
@@ -8528,8 +8519,10 @@ export const useAiStore = defineStore('ai', {
           }
         }
         if (error instanceof ApiError) {
-          setRawNotice(this, error.message)
-          return { ok: false, message: error.message }
+          console.error('[ai] frontend tool result submission failed', error)
+          const fallback = translate('ai.notice.toolSubmitFailed')
+          setNotice(this, 'ai.notice.toolSubmitFailed')
+          return { ok: false, message: fallback }
         }
         // Task 3：非后端错误（内部异常 / 网络桩）一律落本地化兜底 —— 原文不上屏、也不回给表单。
         const fallback = translate('ai.notice.toolSubmitFailed')
@@ -9109,6 +9102,7 @@ export const useAiStore = defineStore('ai', {
       try {
         files = await picked
       } catch (error) {
+        console.error('[ai] file picker failed', error)
         // 停止/换轮后不再改旧卡（单例已被收口，写了就是复活一张死卡）。
         if (!stillOwnHandoff()) {
           return
@@ -9119,7 +9113,7 @@ export const useAiStore = defineStore('ai', {
           status: 'waiting',
           reason: aborted
             ? translate('ai.notice.uploadPickerCancelled')
-            : translate('ai.notice.uploadPickerFailed', { message: errorText(error) })
+            : translate('ai.notice.uploadPickerFailed')
         }
         this.uiAnnouncement = pickUiAnnouncement()
         return
@@ -9148,13 +9142,14 @@ export const useAiStore = defineStore('ai', {
         try {
           summary = await region.receiveFile(file)
         } catch (error) {
+          console.error('[ai] upload handoff failed', error)
           if (!stillOwnHandoff()) {
             return // 交接窗口内已停止：失败也不往旧卡上写
           }
           this.activeUploadHandoff = {
             ...receivingHandoff,
             status: 'waiting',
-            reason: translate('ai.notice.uploadReceiveFailed', { message: errorText(error) })
+            reason: translate('ai.notice.uploadReceiveFailed')
           }
           return
         }
@@ -10882,8 +10877,8 @@ export const useAiStore = defineStore('ai', {
           return
         }
         this.directoryStatus = 'unavailable'
-        // 返修 round3：非 ApiError（裸 Error/网络异常原文）不得直接上屏 —— 本地化兜底。
-        this.directoryError = error instanceof ApiError ? error.message : translate('ai.notice.directoryFailed')
+        // 返修 round3：异常原文不上屏 —— 本地化兜底。
+        this.directoryError = userFacingErrorText(error, translate('ai.notice.directoryFailed'))
         return
       }
       this.tenantDirectory = directory
@@ -12416,7 +12411,7 @@ export const useAiStore = defineStore('ai', {
           if (card !== null) {
             clearNotice(this)
           } else {
-            setNotice(this, 'ai.notice.turnError', { message: frame.message }, 'error')
+            setNotice(this, 'ai.notice.chatRequestFailed', undefined, 'error')
           }
           this.lastRoundOutcome = 'error'
           // 批 E · E2：出错轮不出建议（用户下一步是"继续"，不是换话题）
@@ -12661,10 +12656,8 @@ export const useAiStore = defineStore('ai', {
           }
         })
         .catch((error: unknown) => {
-          this.noticeStartJobSyncFailure(
-            jobId,
-            error instanceof Error ? error.message : String(error)
-          )
+          console.error('[ai] job synchronization handler failed', error)
+          this.noticeStartJobSyncFailure(jobId, null)
         })
     },
 

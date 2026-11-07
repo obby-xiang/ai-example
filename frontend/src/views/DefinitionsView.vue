@@ -239,6 +239,7 @@ import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { definitionsApi } from '@/api/definitions'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { userFacingErrorText } from '@/utils/ui-error'
 import { downloadBlob } from '@/utils/excel'
 import { parseFieldOptions, type ConfigDefinition, type ConfigField, type ConfigLevel, type FieldType } from '@/types/definition'
 
@@ -353,7 +354,7 @@ async function loadDefs(): Promise<void> {
     if (seq !== loadSeq) {
       return // 旧请求的失败不得弹在当前筛选上
     }
-    ElMessage.error(error instanceof Error ? error.message : t('views.definitions.msg.loadFailed'))
+    ElMessage.error(userFacingErrorText(error, t('views.definitions.msg.loadFailed')))
   } finally {
     if (seq === loadSeq) {
       loading.value = false
@@ -377,7 +378,7 @@ async function downloadTemplate(def: ConfigDefinition): Promise<void> {
     downloadBlob(blob, `${def.code}_${def.name}.xlsx`)
     ElMessage.success(t('views.definitions.msg.templateDownloaded', { code: def.code }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.definitions.msg.templateDownloadFailed'))
+    ElMessage.error(userFacingErrorText(error, t('views.definitions.msg.templateDownloadFailed')))
   } finally {
     templateLoading.value = null
   }
@@ -503,7 +504,7 @@ async function save(): Promise<void> {
     editorVisible.value = false
     await loadDefs()
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.definitions.msg.saveFailed'))
+    ElMessage.error(userFacingErrorText(error, t('views.definitions.msg.saveFailed')))
   } finally {
     saving.value = false
   }

@@ -10,7 +10,7 @@ import { translate } from '@/composables/useCopy'
  *
  * <p>
  * 纪律：键表里没有的 code 走 {@link describeAiConfigError} 的兜底文案，<b>绝不</b>把后端的
- * `message`（中文兜底，可能含内部细节）直接显示给用户（F3 的用例锁这一条）。
+ * `message`（英文兜底，可能含内部细节）直接显示给用户（F3 的用例锁这一条）。
  */
 const COPY_KEYS = {
   title: 'ai.settings.copy.title',
@@ -140,7 +140,7 @@ const ERROR_KEYS: Record<string, string> = {
 /** 兜底文案键（未知 code / 没有 code 时使用）。 */
 const ERROR_FALLBACK_KEY = 'ai.settings.errors.UNKNOWN_ERROR'
 
-/** 已知 code 的文案键；未知 code 返回 null（调用方回落到后端 `message` 原文）。 */
+/** 已知 code 的文案键；未知 code 返回 null（调用方使用本地 UNKNOWN_ERROR，不回显后端 message）。 */
 export function aiConfigErrorKey(code: string | null | undefined): string | null {
   return code ? ERROR_KEYS[code] ?? null : null
 }
@@ -177,7 +177,8 @@ export function errorCodeOf(error: unknown): string | null {
  * 把一个错误翻成用户文案。
  *
  * <p>
- * <b>绝不</b>回显后端 `message`：它是中文兜底（设计稿 §3.5），可能带内部细节；这里只认 code。
+ * <b>绝不</b>回显后端 `message`：它是英文兜底（设计稿 §3.5），可能带内部细节；这里只认 code，
+ * 未知 code 使用本地 UNKNOWN_ERROR。
  */
 export function describeAiConfigError(error: unknown): string {
   return aiConfigErrorText(errorCodeOf(error))

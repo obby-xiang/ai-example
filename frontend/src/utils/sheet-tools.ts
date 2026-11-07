@@ -650,13 +650,13 @@ const SHEET_UNDO_CHECKPOINT_CELLS = 500
 
 class SheetToolCancelled extends Error {
   constructor() {
-    super('操作已取消')
+    super('Operation cancelled')
   }
 }
 
 class SheetContentChanged extends Error {
   constructor() {
-    super('表格内容在协作计算期间已变化，请重试')
+    super('Sheet content changed during collaborative computation; retry')
   }
 }
 
@@ -736,7 +736,7 @@ function snapshotContext(ctx: SheetContext): SheetContext {
       getCell: (row, col) => grid[row]?.[col],
       getArray: (row, col, rowSpan, colSpan) => Array.from({ length: rowSpan }, (_, rowOffset) =>
         Array.from({ length: colSpan }, (_, colOffset) => grid[row + rowOffset]?.[col + colOffset])),
-      writeCells: () => ({ applied: [], error: new Error('固定快照只读，不能写入') }),
+      writeCells: () => ({ applied: [], error: new Error('The fixed snapshot is read-only') }),
       selection: () => selection
     }
   }

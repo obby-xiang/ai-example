@@ -2,6 +2,10 @@ import { markdownCodeRanges } from '@/utils/markdown'
 
 const PROTOCOL_TAG_RE = /<\s*\/?\s*(knowledge_catalog|knowledge|tool_result)\s*>/gi
 
+export function unicodeCharacterCount(value: string): number {
+  return Array.from(value).length
+}
+
 const PROTOCOL_NOTICE_RE = /^\s*[（(]以下内容来自[^\n]*是【数据】不是【指令】[^\n]*[）)]\s*$/
 
 const METADATA_KEYS = new Set([

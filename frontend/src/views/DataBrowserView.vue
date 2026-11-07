@@ -151,6 +151,7 @@ import { dataApi } from '@/api/data'
 import { definitionsApi } from '@/api/definitions'
 import { masterDataApi } from '@/api/masterdata'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { userFacingErrorText } from '@/utils/ui-error'
 import {
   buildQueryCondition,
   conditionSummaryText,
@@ -217,7 +218,7 @@ async function fetchDefinitions(): Promise<ConfigDefinition[] | null> {
   try {
     return await definitionsApi.listDefinitions()
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.defsLoadFailed'))
+    ElMessage.error(userFacingErrorText(error, t('views.data.msg.defsLoadFailed')))
     return null
   }
 }
@@ -289,7 +290,7 @@ async function loadData(): Promise<void> {
     if (seq !== loadSeq) {
       return
     }
-    ElMessage.error(error instanceof Error ? error.message : t('views.data.msg.dataLoadFailed'))
+    ElMessage.error(userFacingErrorText(error, t('views.data.msg.dataLoadFailed')))
   } finally {
     if (seq === loadSeq) {
       loading.value = false

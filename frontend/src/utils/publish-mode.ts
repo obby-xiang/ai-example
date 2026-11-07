@@ -14,6 +14,7 @@
  */
 import { tasksApi } from '@/api/tasks'
 import type { ImportMode } from '@/types/task'
+import { userFacingErrorText } from '@/utils/ui-error'
 
 export type PublishModeResolution =
   | { ok: true; mode: ImportMode }
@@ -54,7 +55,7 @@ export async function resolvePublishMode(taskId: number): Promise<PublishModeRes
   try {
     task = await tasksApi.getTask(taskId)
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
+    const detail = userFacingErrorText(error, '暂时无法读取任务详情')
     return { ok: false, reason: `无法读取任务 #${taskId} 的发布模式（服务端为准）：${detail}` }
   }
   return parsePublishMode(task.settingsJson)

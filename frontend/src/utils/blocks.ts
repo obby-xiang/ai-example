@@ -15,6 +15,7 @@ import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPa
 import { parseFormSchema, type FormSpec } from '@/types/form-schema'
 import { conditionSummaryText, conditionSummaryView, isConditionEmpty, type FieldQueryCondition } from '@/types/condition'
 import { translate } from '@/composables/useCopy'
+import { cardFieldLabel, localizedCardFieldValue, showCardField } from '@/utils/card-content'
 
 export type ActivityPart = ToolPart | ReasoningPart
 
@@ -139,9 +140,10 @@ export function groupParts(parts: MessagePart[], messageId: string): Block[] {
  * 全部为纯函数（无 store 依赖），供 AiPanel 模板与测试同源取用。
  * ================================================================================== */
 
-/** 单行字段（参数字段表 / GF 提交摘要）：key = 字段名或人话标签，value = 可读化后的值。 */
+/** 单行字段（参数字段表 / GF 提交摘要）：key = 稳定字段键，label = 人话标签，value = 可读化后的值。 */
 export interface FieldRow {
   key: string
+  label?: string
   value: string
 }
 
@@ -220,8 +222,8 @@ export function hasConditionContent(value: unknown): boolean {
 
 /**
  * `conditions` 参数的可读摘要（与数据浏览页同一份条件契约，不渲 raw JSON）。
- * 无真实筛选 ⇒ null —— 空对象的语义随工具而异（`create_task` 的 `{}` = 条件未决定，
- * `set_condition` 的 `{}` = 明确不设），兜底文案必须由调用方按自己的语义给，不能在这里编。
+ * 无真实筛选 ⇒ null —— 空条件的语义随工具而异（创建任务可省略该字段，
+ * 显式设置为空条件时由通用规则显示“全部数据”），调用方不得编造额外提示。
  */
 export function conditionArgText(value: unknown): string | null {
   if (!hasConditionContent(value)) {
@@ -342,27 +344,30 @@ interface ArgRowsEntry {
 const argRowsCache = new WeakMap<ToolPart, ArgRowsEntry>()
 
 function buildArgRows(parsed: Record<string, unknown>, maskSensitive: boolean): FieldRow[] {
-  return Object.entries(parsed).map(([key, value]) => ({
-    key,
-    value: maskSensitive && SENSITIVE_KEY_RE.test(key) ? MASKED_VALUE : argValueText(key, value)
-  }))
+  return Object.entries(parsed)
+    .filter(([key]) => showCardField(key))
+    .map(([key, value]) => ({
+      key,
+      label: cardFieldLabel(key),
+      value: maskSensitive && SENSITIVE_KEY_RE.test(key) ? MASKED_VALUE : argValueText(key, value)
+    }))
 }
 
-/**
- * 参数值可读化：`conditions` 键走条件契约摘要（筛选条件逐项成文，不再一律报「（复杂值）」）；
- * 空对象 = 没有筛选（该键的"未决定 / 明确不设"分工由卡面调用方按工具语义补齐），其余走通用规则。
- */
+/** 参数值可读化：条件走结构化摘要，已知枚举按字段语义本地化，其余走通用安全规则。 */
 function argValueText(key: string, value: unknown): string {
   if (key === 'conditions') {
     const conditionText = conditionArgText(value)
     if (conditionText !== null) {
       return conditionText
     }
+    if (isConditionShape(value) && isConditionEmpty(value as FieldQueryCondition)) {
+      return translate('conditions.none')
+    }
     if (value !== null && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) {
       return translate('conditions.none')
     }
   }
-  return readableValue(value)
+  return localizedCardFieldValue(key, value) ?? readableValue(value)
 }
 
 /**

@@ -334,14 +334,14 @@
         {{ t('ai.panel.historyTruncated') }}
       </div>
 
-      <!-- 消息间距由元信息行承担；消息内部块间距由 blockSpacingClass 统一计算。 -->
+      <!-- 消息间距由元信息行承担；无元信息行的纯卡片消息由消息容器承担。 -->
       <div
         v-for="(m, mi) in ai.messages"
         :key="m.id"
         :data-msg-id="m.id"
         v-memo="messageMemo(m, mi)"
         class="group flex"
-        :class="m.role === 'user' ? 'flex-row-reverse' : ''"
+        :class="[m.role === 'user' ? 'flex-row-reverse' : '', cardOnlyMessageGapClass(m, mi)]"
       >
         <!-- R-163 T3：双侧去头像（demo v6 场景 2）——消息行 = 内容 + 元信息行，无头像列 -->
         <!-- 内容列：正文/卡片 + 元信息行（R-157 #1：操作行挪气泡外、卡片下沿独立行） -->
@@ -482,6 +482,7 @@
                         <div :class="['flex max-h-[min(280px,35vh)] flex-col gap-[8px] overflow-y-auto', SCROLLBAR_CLASS]">
                           <div v-if="hasLongCardTitle(part)" class="break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
                           <div
+                            v-if="gateRows(part).length > 0"
                             class="rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
                             :data-testid="'ro-rows-' + part.toolCallId"
                           >
@@ -490,10 +491,15 @@
                               :key="row.key"
                               class="flex gap-[10px] border-0 border-b border-solid border-[#eef0f3] py-[7px] text-[13px] leading-[1.5] last:border-b-0"
                             >
-                              <span class="min-w-0 max-w-[40%] flex-[0_1_auto] truncate text-[12.4px] text-[#8b949e]" :title="row.key">{{ row.key }}</span>
+                              <span class="min-w-0 max-w-[40%] flex-[0_1_auto] truncate text-[12.4px] text-[#8b949e]" :title="row.label ?? row.key">{{ row.label ?? row.key }}</span>
                               <span class="min-w-0 flex-1 break-words">{{ row.value }}</span>
                             </div>
                           </div>
+                          <div
+                            v-if="gateConsequenceText(part)"
+                            class="text-[11.9px] leading-[1.6] text-[#57606a]"
+                            :data-testid="'ro-consequence-' + part.toolCallId"
+                          >{{ gateConsequenceText(part) }}</div>
                           <div
                             v-if="readOnlyReasonText(part)"
                             class="rounded-[8px] border border-solid px-[10px] py-[7px] text-[11.9px] leading-[1.6] whitespace-pre-wrap break-words"
@@ -553,7 +559,7 @@
                               :key="row.key"
                               class="flex gap-[10px] border-0 border-b border-solid border-[#eef0f3] py-[6px] text-[12.6px] leading-[1.5] last:border-b-0"
                             >
-                              <span class="flex-[0_0_72px] break-words text-[12px] text-[#8b949e]">{{ row.key }}</span>
+                              <span class="flex-[0_0_72px] break-words text-[12px] text-[#8b949e]">{{ row.label ?? row.key }}</span>
                               <span class="min-w-0 flex-1 break-words">{{ row.value }}</span>
                             </div>
                           </div>
@@ -619,16 +625,13 @@
 
                       <template v-if="part.requiresAction || hasIndependentCardHeader(part)">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
-                          <!-- 2026-10-20 卡面一致性裁决（demo chat-ux/card-consistency-fix.html 场景一
-                               1:1 移植）：确认卡**单层** —— 内层蓝框与内层卡头（「需要你确认后才能
-                               继续」+ 内层 chip）整段退役，字段表与按钮行直接落在统一卡头的卡体内；
-                               操作/参数行一个不少（操作 + args 全键，敏感掩码口径不变）。
-                               倒计时环 / 剩余秒 / 「等待人工确认」静态兜底随去超时裁决一并退役
-                               （历史 TIMEOUT 卡只读展示保留）。普通确认不展示额外摘要；
-                               仅不可逆操作保留后果说明与勾选批准门；409 幂等拒绝后的「已提交，同步中…」瞬态保留。 -->
+                          <!-- 确认卡保持单层：标题直接表达动作，字段表只保留必要业务参数，
+                               状态仅由卡头 chip 表达；不重复操作行或后端开发向说明。
+                               待决与只读卡均保留必要后果；不可逆操作另有勾选批准门。 -->
                           <div data-testid="hitl-gate">
-                            <!-- 字段与影响说明共用一个滚动区；复选框和操作按钮始终在外。 -->
+                            <!-- 字段表在内滚动；后果说明、复选框与操作按钮在外。 -->
                             <div
+                              v-if="hasLongCardTitle(part) || gateRows(part).length > 0"
                               class="max-h-[min(280px,35vh)] overflow-y-auto rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
                               :class="SCROLLBAR_CLASS"
                               data-testid="gate-rows"
@@ -639,10 +642,15 @@
                                 :key="row.key"
                                 class="flex gap-[10px] border-0 border-b border-solid border-[#eef0f3] py-[7px] text-[13px] leading-[1.5] last:border-b-0"
                               >
-                                <span class="min-w-0 max-w-[40%] flex-[0_1_auto] truncate text-[12.4px] text-[#8b949e]" :title="row.key">{{ row.key }}</span>
+                                <span class="min-w-0 max-w-[40%] flex-[0_1_auto] truncate text-[12.4px] text-[#8b949e]" :title="row.label ?? row.key">{{ row.label ?? row.key }}</span>
                                 <span class="min-w-0 flex-1 break-words">{{ row.value }}</span>
                               </div>
                             </div>
+                            <div
+                              v-if="gateConsequenceText(part)"
+                              class="mt-[8px] text-[12.2px] leading-[1.55] text-[#57606a]"
+                              data-testid="gate-consequence"
+                            >{{ gateConsequenceText(part) }}</div>
                             <div v-if="part.irreversible" class="flex pt-[10px]" data-testid="gate-ack-row">
                               <label
                                 class="flex cursor-pointer items-start gap-[6px] text-[12.2px] leading-[1.5] text-[#1f2328]"
@@ -1285,7 +1293,8 @@ import { ArrowRight } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useI18n } from 'vue-i18n'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { formatProgressiveTs, TASK_TYPE_LABELS } from '@/utils/format'
+import { formatProgressiveTs } from '@/utils/format'
+import { cardFieldLabel, localizedCardFieldValue, showCardField, taskTypeText } from '@/utils/card-content'
 import {
   COPY_ICON_BTN_CLASS,
   COPY_ICON_SVGS,
@@ -1305,11 +1314,8 @@ import {
   argRows,
   cardStatusOf,
   cardTypeOf,
-  conditionArgText,
   formSpecOf,
-  hasConditionContent,
   isBlankText,
-  isConditionShape,
   isFormAwaitingOutcome,
   isReadOnlyCard,
   parsePublishConflicts,
@@ -1325,7 +1331,7 @@ import {
   type Block
 } from '@/utils/blocks'
 import { deriveCopyText, numericArgOf, partDiagnosticOf, partResultIsInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
-import { projectDisplayText } from '@/utils/display-text'
+import { projectDisplayText, unicodeCharacterCount } from '@/utils/display-text'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
@@ -2388,6 +2394,16 @@ function msgGapClass(index: number): string {
   return prev !== undefined && self !== undefined && prev.role === self.role
     ? MSG_GAP_SAME_SENDER
     : MSG_GAP_OTHER_SENDER
+}
+
+function cardOnlyMessageGapClass(message: ChatMessage, index: number): string {
+  const blocks = blocksOf(message)
+  const hasIndependentBottomSpacing = message.errorCard != null
+    || (message.recoveryGap === true && !recoveryNoticeVisible.value)
+  return !hasIndependentBottomSpacing && !showMetaRow(message)
+    && blocks.length > 0 && blocks.every((block) => block.kind === 'activity')
+    ? msgGapClass(index)
+    : ''
 }
 
 /** 完成淡出记账 —— streaming true→false 时该消息进 300ms 淡出，
@@ -3745,6 +3761,7 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     message.pendingCall,
     message.pendingCall?.status,
     message.recoveryGap,
+    recoveryNoticeVisible.value,
     message.errorCard,
     message.errorCard?.variant,
     message.errorCard?.title,
@@ -3970,16 +3987,7 @@ function cardSummaryTestId(part: ToolPart): string {
   return readOnlyLike(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
 }
 
-/**
- * 卡头标题。
- * - form = 表单业务标题（FormRenderer 内头已抑制，标题上提）；
- * - CONFIRM 带 `preflight.target` ⇒ **业务化标题**（demo 场景一/二/三 1:1）：
- *   `待你确认：<类型> 任务 #<id>『<title>』`（待决）/ `<类型> 任务 #<id>『<title>』`（只读）；
- * - `create_task` 的预检 target **没有任务号**（工具语义如此：任务在批准后才存在，预检只判
- *   `type/title` 是否可用，见 `ToolPreflightService#inspectCreate`）⇒ 走「创建」句式，
- *   不得套用 `任务 #<id>` 模板（旧实现在此渲染出 `任务 #undefined`）；
- * - 其余（无 preflight 的旧帧 / 普通工具）⇒ 回落工具中文名（现形态不变）。
- */
+/** 卡头只表达动作与业务对象；待确认等状态仅由右侧 chip 承载。 */
 function cardTitle(part: ToolPart): string {
   return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.preflight, part.preflight?.target, part.args], () => {
     if (isSheetPreviewTool(part)) {
@@ -3995,43 +4003,35 @@ function cardTitle(part: ToolPart): string {
     if (target) {
       const createBusiness = createTaskBusinessTitle(target)
       if (createBusiness !== null) {
-        return isReadOnlyCard(part) ? createBusiness : t('ai.panel.confirmTitle', { business: createBusiness })
+        return createBusiness
       }
-      const business = `${labelWord(TASK_TYPE_LABELS, target.type)} 任务 #${target.taskId}『${target.title}』`
-      return isReadOnlyCard(part) ? business : t('ai.panel.confirmTitle', { business })
+      const title = (target.title ?? '').trim()
+      const targetText = title === ''
+        ? t('ai.panel.taskTargetUntitled', { type: taskTypeText(target.type), taskId: target.taskId })
+        : t('ai.panel.taskTarget', { type: taskTypeText(target.type), taskId: target.taskId, title })
+      return t('ai.panel.taskActionTarget', { action: toolLabel(part.name), target: targetText })
     }
     return toolLabel(part.name)
   })
 }
 
 function hasLongCardTitle(part: ToolPart): boolean {
-  return Array.from(cardTitle(part)).length > 32
+  return unicodeCharacterCount(cardTitle(part)) > 32
 }
 
-/**
- * `create_task` 的业务化标题片段；非 create_task（target 带任务号）⇒ `null`（走既有模板）。
- *
- * 判据 = **target 里没有 taskId**：`ToolPreflightService#inspectCreate` 的 target 只有
- * `type/title`（创建后才有任务号），四个 `start_*` 的 target 恒带 `taskId`。
- * 文案随 UI 语言（类型词用建任务对话框同一份 `views.tasks.*Type`）；标题为空时用无标题句式，
- * 不留下 `『』` 空壳。
- */
+/** 创建任务的标题直接使用真实类型与标题；未知类型保留原值，不伪造业务标签。 */
 function createTaskBusinessTitle(target: ToolPreflight['target']): string | null {
   if (target.taskId !== undefined && target.taskId !== null && `${target.taskId}` !== '') {
     return null
   }
-  const typeKey = target.type === 'EXPORT'
-    ? 'views.tasks.exportType'
-    : target.type === 'IMPORT'
-      ? 'views.tasks.importType'
-      : null
-  if (typeKey === null) {
-    return null
-  }
+  const type = taskTypeText(target.type).trim()
   const title = (target.title ?? '').trim()
+  if (type === '') {
+    return title === '' ? null : title
+  }
   return title === ''
-    ? t('ai.panel.createTaskBusinessUntitled', { type: t(typeKey) })
-    : t('ai.panel.createTaskBusiness', { type: t(typeKey), title })
+    ? t('ai.panel.createTaskBusinessUntitled', { type })
+    : t('ai.panel.createTaskBusiness', { type, title })
 }
 
 /** 待填写 GF 摘要：必填项计数（无必填 / 无 schema ⇒ 空串）。 */
@@ -4197,13 +4197,13 @@ function jsonRecordText(record: Record<string, unknown>, depth: number): string 
   }
   for (const [key, value] of Object.entries(record)) {
     const normalizedKey = key.replace(/[_-]/g, '').toLowerCase()
-    if (key === 'message' || JSON_TECHNICAL_KEYS.has(normalizedKey)) {
+    if (key === 'message' || JSON_TECHNICAL_KEYS.has(normalizedKey) || !showCardField(key)) {
       continue
     }
     const sensitive = JSON_SENSITIVE_KEY_RE.test(key) || (record.format === 'idcard' && key === 'value')
-    const text = jsonValueText(value, depth + 1, sensitive)
+    const text = localizedCardFieldValue(key, value) ?? jsonValueText(value, depth + 1, sensitive)
     if (text) {
-      rows.push(`${key}: ${text}`)
+      rows.push(`${cardFieldLabel(key)}: ${text}`)
     }
   }
   return rows.join('\n')
@@ -4425,82 +4425,29 @@ function alertIcon(tone: keyof typeof ALERT_TONE): string {
   return `${ALERT_ICON_BASE} ${ALERT_TONE[tone].ic}`
 }
 
-/**
- * create_task 确认卡的筛选条件行（2026-11-03 缺陷修）：
- * - 真实结构化条件按条件契约逐项成文（不再显示「（复杂值）」）；
- * - `conditions={}` 是「条件未决定」而不是「全量」：使用面板固定词条，不把后端面向宿主的
- *   收集指引带上 C 端卡面；实时、已决与刷新恢复共用同一语义。
- * 没有 conditions 参数 ⇒ null（字段表原样，不凭空补行）。
- */
-function createTaskConditionsText(part: ToolPart): string | null {
-  if (part.name !== 'create_task') {
-    return null
-  }
-  const args = toolArgsOf(part)
-  if (args === null || !Object.prototype.hasOwnProperty.call(args, 'conditions')) {
-    return null
-  }
-  const raw = args.conditions
-  if (hasConditionContent(raw)) {
-    return conditionArgText(raw)
-  }
-  // `{}` / 空 fields 是「未决定」而不是「全量」；非条件结构的对象不冒充预检结论，
-  // 仍由字段表按通用规则显示（（复杂值））。
-  const isPlainObject = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
-  if (!isConditionShape(raw) && !(isPlainObject && Object.keys(raw).length === 0)) {
-    return null
-  }
-  return t('ai.hitl.conditionsUndecided')
-}
-
-/** create_task 的影响面行（后端预检下发的人读文本；缺省 = 不渲染，不自行拼）。 */
-function createTaskImpactText(part: ToolPart): string | null {
-  if (part.name !== 'create_task') {
-    return null
+/** 创建任务只说明用户需要的后果；其他确认卡保留预检给出的真实业务影响。 */
+function gateConsequenceText(part: ToolPart): string | null {
+  if (part.name === 'create_task') {
+    const type = part.preflight?.target?.type?.toUpperCase()
+    return type === 'EXPORT' || type === 'IMPORT'
+      ? t(`ai.hitl.createTaskConsequence.${type}`)
+      : null
   }
   const impact = part.preflight?.impact?.trim()
   return impact !== undefined && impact !== '' ? impact : null
 }
 
-/**
- * S6 批1（v7.9 场景 19-b/19-f + v7.10 规则 7）→ 2A 批：确认门字段表（v7 `.grows` 行）。
- * - 首行恒为「操作」（工具中文名）；
- * - 其后渲染 **args 全键**（原上限 5 行 = 1 + 4 防压垮门卡的旧口径退役 —— 门卡字段区已限高
- *   `min(280px,35vh)` 双约束内滚，参数表压不垮卡，「看不到的参数」才是缺陷；裁决 2026-10-16 第 3 条）；
- * - 待决门卡与已决只读卡**同源**（K1「参数区字段表原样」：只读体直接复用本函数）；
- * - **敏感值掩码**：键名命中 /pass(word)?|secret|token|api_?key/i 的值显示定长圆点（不泄值、不泄长度）；
- * - 值可读化：布尔 → 是/否、数组 → 顿号、文件路径 → 文件名、对象 →（复杂值）—— 不渲 raw JSON；
- * - create_task（2026-11-03）：conditions 行按真实条件成文 / `{}` 用 C 端「未决定」词条，
- *   并把后端已下发的 `preflight.impact` 补成「影响面」行（批准前可读懂实际条件与后果）。
- */
+/** 创建任务的类型与名称由标题承载；其他门卡只保留必要业务参数。 */
 function gateRows(part: ToolPart): FieldRow[] {
   return cachedForLocale(
     gateRowsCache,
     part,
     'gateRows',
-    [part.args, part.name, part.preflight?.impact],
-    () => {
-      const conditionsText = createTaskConditionsText(part)
-      const rows = argRows(part, true).map((row) => (
-        row.key === 'conditions' && conditionsText !== null ? { ...row, value: conditionsText } : row
-      ))
-      const impact = createTaskImpactText(part)
-      return [
-        { key: t('ai.panel.actionField'), value: toolLabel(part.name) },
-        ...rows,
-        ...(impact === null ? [] : [{ key: t('ai.hitl.impact'), value: impact }])
-      ]
-    }
+    [part.args, part.name],
+    () => argRows(part, true).filter((row) => (
+      part.name !== 'create_task' || (row.key !== 'type' && row.key !== 'conditions')
+    ))
   )
-}
-
-/**
- * 业务枚举名 → 中文：后端 `PreflightReport.target` 放的是 Task 枚举名（`EXPORT` / `IMPORT`，
- * `ToolPreflightService#targetOf` 的 `String.valueOf`），卡头业务标题要中文（「导出 任务 #411…」）
- * —— 按仓库既有的 `TASK_TYPE_LABELS` 归一；已是中文或未知取值原样显示（不臆造标签）。
- */
-function labelWord(labels: Partial<Record<string, string>>, value: string): string {
-  return labels[value] ?? value
 }
 
 /**

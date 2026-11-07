@@ -119,7 +119,7 @@ export async function createSession(): Promise<string> {
   })
   const sessionId = extractSessionId(response.data)
   if (!sessionId) {
-    throw new Error('会话发号失败：响应缺少合法的 sessionId')
+    throw new Error('Session creation failed: response is missing a valid sessionId')
   }
   return sessionId
 }
@@ -231,7 +231,7 @@ export async function uploadFormAttachment(
   )
   const payload = unwrapApiData(body) as Partial<{ fileId: string; fileName: string; size: number; contentType: string }>
   if (!payload || typeof payload.fileId !== 'string') {
-    throw new Error('附件上传失败：响应缺少 fileId')
+    throw new Error('Attachment upload failed: response is missing fileId')
   }
   return {
     fileId: payload.fileId,

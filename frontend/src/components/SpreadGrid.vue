@@ -52,6 +52,7 @@ import {
   type SpreadWorksheet
 } from '@/utils/excel'
 import { loadSpreadCore, type SpreadSheets } from '@/utils/spreadjs'
+import { userFacingErrorText } from '@/utils/ui-error'
 import type { ConfigField } from '@/types/definition'
 import { parseRowData } from '@/types/data'
 import type { SheetAdapter, SheetCellUpdate, SheetSelection } from '@/utils/sheet-tools'
@@ -325,7 +326,7 @@ async function initEngine(): Promise<void> {
       return
     }
     // 引擎不可用也必须唤醒等待者（B-07）：否则调用方永久悬挂，回灌链不 settle
-    failReady(t('sheet.engineFailed', { error: error instanceof Error ? error.message : String(error) }))
+    failReady(t('sheet.engineFailed', { error: userFacingErrorText(error, t('sheet.engineNotReady')) }))
   }
 }
 
@@ -429,7 +430,7 @@ function loadData(fieldDefs: readonly ConfigField[], rows: readonly Record<strin
 async function waitForReady(): Promise<void> {
   await readyPromise
   if (!workbook.value || !spreadNs) {
-    throw new Error(engineError.value || '表格引擎尚未就绪')
+    throw new Error(engineError.value || 'Spreadsheet engine is not ready')
   }
 }
 
@@ -440,7 +441,7 @@ async function loadFromJson(json: string, fieldDefs: readonly ConfigField[]): Pr
     await waitForReady()
     const instance = workbook.value
     if (!instance || !spreadNs) {
-      throw new Error('表格引擎尚未就绪')
+      throw new Error('Spreadsheet engine is not ready')
     }
     // 程序化载入 ⇒ 新一代（旧预览/旧适配器持有者据此判定内容已换）
     sheetLoadGeneration += 1
@@ -505,7 +506,7 @@ function toWorkbookJson(): string | null {
  */
 async function toXlsxBlob(): Promise<Blob> {
   if (!spreadNs) {
-    throw new Error('表格尚未就绪，无法导出文件')
+    throw new Error('Spreadsheet is not ready; cannot export the file')
   }
   return await buildRowsXlsxBlob(fields, collectRows(), { defCode: props.defCode, sheetName: props.sheetName })
 }
@@ -582,7 +583,7 @@ function sheetInstanceIdOf(sheet: object): string {
 function getSheetAdapter(): SheetAdapter {
   const sheet = activeSheet()
   if (!sheet) {
-    throw new Error('表格引擎尚未就绪，无法提供表格适配器')
+    throw new Error('Spreadsheet engine is not ready; cannot provide the sheet adapter')
   }
   const cached = sheetAdapters.get(sheet)
   if (cached) {
@@ -641,7 +642,7 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
     }
     const current = activeSheet()
     if (!current) {
-      throw new Error('表格已重建或已关闭，请重新打开表格后重试')
+      throw new Error('Spreadsheet was rebuilt or closed; reopen it and retry')
     }
     bound = current
     return bound

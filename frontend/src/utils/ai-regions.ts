@@ -147,26 +147,26 @@ export function registerAiRegion(options: AiRegionOptions): AiRegion {
 
 function assertRegionOptions(options: AiRegionOptions): void {
   if (!options || typeof options !== 'object') {
-    throw new Error('registerAiRegion：缺少注册参数')
+    throw new Error('registerAiRegion: options are required')
   }
   if (typeof options.id !== 'string' || options.id.trim() === '') {
-    throw new Error('registerAiRegion：区域 id 必填（形如 import.upload）')
+    throw new Error('registerAiRegion: a non-empty region id is required (for example, import.upload)')
   }
   if (options.risk !== 'read' && options.risk !== 'mutate-local' && options.risk !== 'consequential') {
     throw new Error(
-      `registerAiRegion（${options.id}）：risk 必填且只能是 read / mutate-local / consequential`
-        + '—— 缺省不允许注册（fail-fast，禁止静默用默认值）'
+      `registerAiRegion(${options.id}): risk must be read, mutate-local, or consequential`
+        + '; no default is allowed'
     )
   }
   const root = options.root as Node | undefined
   if (!root || typeof root.nodeType !== 'number') {
-    throw new Error(`registerAiRegion（${options.id}）：root 必须是 DOM 元素`)
+    throw new Error(`registerAiRegion(${options.id}): root must be a DOM element`)
   }
   if (root.isConnected !== true) {
-    throw new Error(`registerAiRegion（${options.id}）：root 必须已挂载在当前文档（detached 节点会让 ref 无法校验）`)
+    throw new Error(`registerAiRegion(${options.id}): root must be connected to the current document`)
   }
   if (typeof document !== 'undefined' && root.ownerDocument !== document) {
-    throw new Error(`registerAiRegion（${options.id}）：不接受跨文档/跨域 iframe 的 root`)
+    throw new Error(`registerAiRegion(${options.id}): root must belong to the current document`)
   }
 }
 

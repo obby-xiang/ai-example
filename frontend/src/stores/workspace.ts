@@ -33,6 +33,7 @@ import { resolvePublishMode } from '@/utils/publish-mode'
 import { findPublishTool } from '@/utils/publish-links'
 import { listAiRegions } from '@/utils/ai-regions'
 import { translate } from '@/composables/useCopy'
+import { userFacingErrorText } from '@/utils/ui-error'
 import {
   WORKSPACE_ACTION_LIMIT,
   WORKSPACE_CONTRACT_VERSION,
@@ -927,13 +928,13 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
           try {
             const response = await fetch(event.url, { signal: controller.signal })
             if (!response.ok) {
-              throw new Error(`下载失败：HTTP ${response.status}`)
+              throw new Error(`Download failed: HTTP ${response.status}`)
             }
             saveBlob(await response.blob(), event.filename ?? 'download')
           } catch (error) {
             const reason = controller.signal.aborted
               ? `下载失败：${DOWNLOAD_FETCH_TIMEOUT_MS / 1000} 秒内未取回文件（已中止本次请求），未写入任何文件`
-              : error instanceof Error ? error.message : String(error)
+              : userFacingErrorText(error, translate('views.export.msg.downloadFailed'))
             ElMessage.error(reason)
           } finally {
             clearTimeout(timer)
@@ -965,6 +966,6 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
       }
     }
   } catch (error) {
-    return fail(`ui_event 处理失败：${error instanceof Error ? error.message : String(error)}`)
+    return fail(`ui_event 处理失败：${userFacingErrorText(error, '请稍后重试')}`)
   }
 }

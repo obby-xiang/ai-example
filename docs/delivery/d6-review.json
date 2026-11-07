@@ -777,6 +777,13 @@
       "reason": "仅将取消状态接口的redisFlag从实例ID字符串修正为布尔值，Redis写入、TTL、迁移数据和状态机不变，D6无需更新。",
       "reviewedAt": "2026-11-07",
       "reviewer": "K3.1 Pro施工，K3.1 Pro独立静态审查"
+    },
+    {
+      "fingerprint": "sha256:064f3d17dc3fc29bfb8ecfaa81fed5d53a719967b309d670cff54bc14fe710c6",
+      "status": "not-affected",
+      "reason": "仅完善AI卡片业务文案、动态字段与前端异常脱敏和安全错误映射，保持迁移数据、协议形状及状态机不变，D6无需更新。",
+      "reviewedAt": "2026-11-07",
+      "reviewer": "K3.1 Pro施工，K3.1 Pro最终静态复审"
     }
   ]
 }

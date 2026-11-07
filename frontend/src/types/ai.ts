@@ -710,14 +710,14 @@ export interface ToolPart extends MessagePartBase {
    * 不可逆操作的后果说明与勾选批准门由 `irreversible` 独立控制。
    *
    * 历史恢复（`/history` 的 toolCallStates）只带展示摘要 {@link ToolPreflightSummary}
-   * （无 `checks` / `reportHash`）；卡面只读 `target` / `impact` / `conditionSummary`，两形兼容。
+   * （无 `checks` / `reportHash`）；卡面据 `target` 与 `impact` 生成标题和必要后果说明。
    */
   preflight?: ToolPreflight | ToolPreflightSummary | null
   /**
    * 批4-D（用户 2026-10-23 裁决）：该确认**不可撤销**（后端 `ToolMeta.Category.P`，当前唯一 =
    * `start_publish`）。true ⇒ 门卡在字段区与按钮行之间叠加复选框，未勾选只禁用「批准」。
    *
-   * 缺省 = 普通后果确认卡（start_export / start_precheck / start_import）/ 旧段 —— 卡面一字不动。
+   * 缺省 = 普通确认卡按真实参数与预检展示必要业务字段和后果，不叠加复选框。
    */
   irreversible?: boolean
 }

@@ -186,7 +186,7 @@
               </span>
             </div>
             <span v-else :class="FMSG">
-              {{ t('ai.gf.unsupportedType', { label: field.label, type: String(field.type) }) }}
+              {{ t('ai.gf.unsupportedType', { label: field.label, type: formFieldTypeText(field.type) }) }}
             </span>
 
             <span v-if="fieldIssues(field).length > 0" :id="errorId(field)" :class="[FMSG, 'mt-[5px]']">
@@ -274,6 +274,7 @@ import { nextReadonlyFormScope } from '@/utils/form-scope'
 import { flushFormDraft } from '@/utils/form-draft'
 import { uploadFormAttachment, formOptionSource } from '@/api/ai'
 import { useAiStore } from '@/stores/ai'
+import { formFieldTypeText, textFormatText } from '@/utils/card-content'
 
 /** 七型取值并集（number 的"未填"用 undefined 表示；attachment 的值是 fileId 字符串）。 */
 type FormModelValue = string | number | boolean | undefined | string[]
@@ -578,7 +579,7 @@ function hintOf(field: FormFieldSpec): string {
     parts.push(t('ai.gf.hint.required'))
   }
   if (field.format) {
-    parts.push(t('ai.gf.hint.format', { format: field.format }))
+    parts.push(t('ai.gf.hint.format', { format: textFormatText(field.format) }))
   }
   if (field.type === 'attachment') {
     parts.push(t('ai.gf.attachment.hint'))
@@ -875,7 +876,8 @@ async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<v
     attachments.value = { ...attachments.value, [field.key]: uploaded }
     setValue(field.key, uploaded.fileId)
     localIssues.value = localIssues.value.filter((issue) => issue.key !== field.key)
-  } catch {
+  } catch (error) {
+    console.error('[form] attachment upload failed', error)
     if (isCurrent()) {
       uploadErrors[field.key] = t('ai.gf.attachment.failed')
     }
@@ -944,7 +946,7 @@ function issueText(field: FormFieldSpec, issue: FormValueIssue): string {
       limit: field.maxLength ?? (field.variant === 'longText' ? MAX_LONGTEXT_VALUE_CHARS : MAX_TEXT_VALUE_CHARS),
       min: field.minLength ?? field.minItems ?? field.min,
       max: field.maxItems ?? field.max,
-      format: field.format
+      format: textFormatText(field.format)
     })
   }
   return issue.message

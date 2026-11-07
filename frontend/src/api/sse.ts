@@ -17,6 +17,7 @@
 
 import { ApiError, FRONTEND_ERROR_CODES } from './http'
 import { acceptLanguage } from '@/locales'
+import { translate } from '@/composables/useCopy'
 import { identityHeaders } from '@/utils/ai-identity'
 import { frameSeq, isTerminalFrame, toSseFrame } from '@/types/sse'
 import type { SseDoneFrame, SseErrorFrame, SseFrame } from '@/types/sse'
@@ -326,7 +327,7 @@ export class SseChunkParser {
 
   private assertEventSize(size: number): void {
     if (size > SSE_EVENT_BUFFER_LIMIT) {
-      throw new Error('SSE 协议错误：单个事件超过 256 KiB 上限，已中止当前流')
+      throw new Error('SSE protocol error: event exceeds the 256 KiB limit; stream aborted')
     }
   }
 
@@ -501,7 +502,7 @@ function linkAbort(external: AbortSignal | undefined, controller: AbortControlle
 /** 非 2xx 响应 → ApiError（体可能是业务信封，也可能是 AI 裸对象）。 */
 async function toResponseError(response: Response): Promise<ApiError> {
   let body: unknown = null
-  let message = `请求失败（HTTP ${response.status}）`
+  let message = `Request failed (HTTP ${response.status})`
   let code = String(response.status)
   try {
     body = await response.json()
@@ -650,10 +651,11 @@ async function readStream(
     if (aborted) {
       return abortedResult('连接被中止')
     }
+    console.error('[sse] stream read failed', error)
     return {
       terminal: state.terminal,
       aborted: false,
-      reason: error instanceof Error ? error.message : '流读取异常'
+      reason: translate('ai.notice.reasonInterrupted')
     }
   } finally {
     if (idleTimer !== null) {
@@ -951,12 +953,13 @@ export async function streamChat(
       }
       // 批次3：建连阶段超时与"网络没发出去"必须可区分（两者文案与后续动作不同）。
       if (connectTimedOut && !options.signal?.aborted) {
-        const apiError = new ApiError('连接超时', 0, SSE_TIMEOUT_CODES.connect, null)
+        const apiError = new ApiError('Connection timeout', 0, SSE_TIMEOUT_CODES.connect, null)
         handlers.onError?.(apiError)
         throw apiError
       }
+      console.error('[sse] connection failed', error)
       const apiError = new ApiError(
-        error instanceof Error ? error.message : '请求未能发出',
+        translate('api.error.network'),
         0,
         FRONTEND_ERROR_CODES.NETWORK_ERROR,
         null

@@ -187,15 +187,13 @@ export function sealTrailingStreamPart(message: ChatMessage): void {
  * - `skipped`：skipped 段的文本仍是模型向/机器向（N9：预算、步数上限、配置键）；
  * - `internal`：blocked（**未执行**）段里残留内部码/路径（N9 的错入口、资源锁同族）。
  *
- * 成功 / 进行中 / 执行失败（`failed`）的段不分类：L1「结果已清除（… toolCallId=…）」的占位符
- * 是**真执行过**的证据；`failed` 的原文常是已可读的业务解释（如 `SHEET_DISABLED` 的管理员
- * 说明），按它是否含配置键把人话整段藏起来反而是倒退 —— 码在 6C 已换成用户摘要，这一层只
- * 兜"未执行"的旧数据。
+ * 业务失败说明照常展示；只有明确的机器标记、异常类名或内部标识才归入技术诊断。
  */
 export type PartDiagnostic = 'skipped' | 'staleGate' | 'internal' | 'sheetInput'
 
-/** 机器向文本的判据（只收**码/配置键/端点**这类稳定记号；不按中文措辞猜语义）。 */
+/** 机器向文本的判据（稳定机器码、异常类名、内部标识或路径；不按中文措辞猜语义）。 */
 const INTERNAL_MARKER_RE = /(?:^|[^A-Za-z0-9_])(?:TOOL_BUDGET_EXHAUSTED|TOOL_STEP_LIMIT|TOOL_KIND_MISMATCH|RESOURCE_LOCKED|SCOPE_NOT_DISCLOSED|UPSTREAM_FAILED|TOOL_ALREADY_CLAIMED|CREATE_TASK_TURN_LIMIT|UNKNOWN_TOOL_CALL|UNKNOWN_RUN)(?:[^A-Za-z0-9_]|$)|app\.ai\.[a-z]|\/api\/ai\/frontend-tool-result|toolCallId=|runId\/toolCallId/
+const TECHNICAL_ERROR_RE = /\b[A-Za-z_$][\w$]*(?:Error|Exception)\b\s*[:：]?|\b(?:error|exception)\s*[:：]|\b(?:runId|toolCallId|fileId|sessionId)\s*[=:]|[A-Za-z]:\\|\/(?:home|var|usr|etc|opt|tmp|private)\//i
 const SHEET_INPUT_RE = /^(?:rowRange 需要|scope=predicate|columnCodes )/m
 
 function internalMarkerPresent(part: ToolPart): boolean {
@@ -203,8 +201,12 @@ function internalMarkerPresent(part: ToolPart): boolean {
     || SHEET_INPUT_RE.test(part.result ?? '')
 }
 
+function technicalFailurePresent(part: ToolPart): boolean {
+  return TECHNICAL_ERROR_RE.test(`${part.reason ?? ''}\n${part.result ?? ''}`)
+}
+
 export function partDiagnosticOf(part: MessagePart): PartDiagnostic | null {
-  if (part.kind !== 'tool' || !internalMarkerPresent(part)) {
+  if (part.kind !== 'tool' || (!internalMarkerPresent(part) && !technicalFailurePresent(part))) {
     return null
   }
   const staleGate = part.kind2 === 'CONFIRM'
@@ -219,12 +221,12 @@ export function partDiagnosticOf(part: MessagePart): PartDiagnostic | null {
   if (part.status === 'failed' && SHEET_INPUT_RE.test(part.result ?? '')) {
     return 'sheetInput'
   }
-  return part.status === 'blocked' ? 'internal' : null
+  return part.status === 'blocked' || technicalFailurePresent(part) ? 'internal' : null
 }
 
 /** 该段的 `result` 自身是否就是机器向文本（`true` ⇒ 卡面「输出」位让位给诊断详情，不同屏双显）。 */
 export function partResultIsInternal(part: MessagePart): boolean {
-  return part.kind === 'tool' && (INTERNAL_MARKER_RE.test(part.result ?? '') || SHEET_INPUT_RE.test(part.result ?? ''))
+  return part.kind === 'tool' && (INTERNAL_MARKER_RE.test(part.result ?? '') || TECHNICAL_ERROR_RE.test(part.result ?? '') || SHEET_INPUT_RE.test(part.result ?? ''))
 }
 
 /**
@@ -997,7 +999,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         // S6 批 2：视图通道（additive 可选键）—— 仅在帧带视图时落段
         ...(frame.resultView ? { resultView: frame.resultView } : {}),
         // H1 预检展示摘要（additive 可选键）：刷新恢复的全量帧重放对"已决"确认工具会跳过
-        // suspended/confirm_request，结局帧是唯一还会被应用的帧 —— 卡头业务标题与条件/影响面
+        // suspended/confirm_request，结局帧是唯一还会被应用的帧 —— 卡头业务标题与必要后果说明
         // 靠它重建（后端只发白名单 target/impact/conditionSummary/publishMode）。
         ...(frame.preflight ? { preflight: frame.preflight } : {}),
         reason,

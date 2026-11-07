@@ -194,9 +194,9 @@
       "uploadReadonly": "任务已结束，仅供查看；上传入口不可用，本次未执行上传。",
       "uploadPickerUnsupported": "当前浏览器不支持在对话内直接选择文件",
       "uploadPickerCancelled": "你取消了文件选择，可以重试",
-      "uploadPickerFailed": "文件选择失败：{message}",
+      "uploadPickerFailed": "文件选择失败，请重试",
       "uploadNoFile": "没有拿到文件，请重试",
-      "uploadReceiveFailed": "页面接收文件失败：{message}",
+      "uploadReceiveFailed": "页面接收文件失败，请重试",
       "formRejected": "提交未通过：{reason}。填写内容仍保留，可修改后重新提交。",
       "formSubmitFailed": "提交失败：{message}（可重试或点「取消」放弃）",
       "formSubmitFailedPlain": "提交失败，请重试或点「取消」放弃",
@@ -351,8 +351,10 @@
       "irreversible": "确认{action}，执行后无法恢复",
       "publishIrreversible": "确认启动发布作业：若本次为整体替换，范围内旧数据将被删除，执行后无法恢复",
       "ackHint": "请先勾选上方确认项",
-      "impact": "影响面",
-      "conditionsUndecided": "筛选条件未决定，创建后可继续设置",
+      "createTaskConsequence": {
+        "EXPORT": "仅创建任务，不会立即开始导出。",
+        "IMPORT": "仅创建任务，不会立即开始导入。"
+      },
       "action": {
         "start_publish": "启动发布作业"
       }
@@ -387,6 +389,21 @@
       "hint": {
         "required": "必填",
         "format": "格式：{format}"
+      },
+      "formats": {
+        "email": "电子邮箱",
+        "tel": "电话号码",
+        "url": "网址",
+        "idcard": "身份证号"
+      },
+      "types": {
+        "text": "文本",
+        "number": "数字",
+        "boolean": "是否",
+        "date": "日期",
+        "enum": "单选",
+        "multi_select": "多选",
+        "attachment": "附件"
       },
       "attachment": {
         "choose": "选择文件",
@@ -441,7 +458,6 @@
       "collapse": "收起",
       "breathing": "工作中…",
       "uploadFallbackLabel": "上传 xlsx / zip",
-      "confirmTitle": "待你确认：{business}",
       "requiredCount": "{count} 项必填",
       "formCancelledSummary": "未提交，填写内容不作记录",
       "gfQueue": {
@@ -451,7 +467,9 @@
       },
       "createTaskBusiness": "创建{type}任务『{title}』",
       "createTaskBusinessUntitled": "创建{type}任务",
-      "actionField": "操作",
+      "taskTarget": "{type}任务 #{taskId}『{title}』",
+      "taskTargetUntitled": "{type}任务 #{taskId}",
+      "taskActionTarget": "{action}：{target}",
       "overwriteConfirm": "输入框已有内容，继续编辑将覆盖现有输入。是否覆盖？",
       "sendNotSentInline": "（这条消息没有发出去：{message}）",
       "degradeUnknown": "未检测到 AI 可用性，请稍后重试或联系管理员。",
@@ -630,7 +648,20 @@
       "impact": "将影响 {rows} 行 / {cells} 格",
       "scope": "范围：{scope}",
       "rules": "规则：{rules}",
-      "overwriteNotice": "应用或撤销都会覆盖当前表格内容（同一文件以本次操作为准）；你在表格里的手改可能被这次操作覆盖。",
+      "scopeValues": {
+        "selection": "{def} 选区",
+        "sheet": "{def} 全表",
+        "columns": "{def} 列 {columns}",
+        "rows": "{def} 行 {rowRange}",
+        "predicate": "{def} 条件命中行"
+      },
+      "ruleValues": {
+        "replace": "{match} · 忽略大小写={ignoreCase} ·「{search}」→「{replace}」",
+        "update": "更新：{updates}",
+        "updateItem": "{columnCode}（{mode}）",
+        "normalize": "列归一化：{rules}"
+      },
+      "overwriteNotice": "应用或撤销都会覆盖当前表格内容；你的手动修改可能被覆盖。",
       "skipped": "跳过 {count} 格（校验器拒绝）",
       "distribution": "分布（按 {by}，前 {count} 组）：",
       "groupItem": "{rows} 行 / {cells} 格",
@@ -661,6 +692,120 @@
       "hintFailed": "上传失败，请重试。",
       "hintCancelled": "本次上传已取消。",
       "hintUploaded": "文件已上传。"
+    },
+    "fields": {
+      "taskId": "任务",
+      "jobId": "作业",
+      "defCode": "配置项",
+      "defCodes": "配置项",
+      "code": "配置项编码",
+      "type": "任务类型",
+      "title": "任务名称",
+      "conditions": "筛选条件",
+      "scope": "范围",
+      "format": "格式",
+      "level": "层级",
+      "mode": "方式",
+      "option": "选项",
+      "step": "步骤",
+      "page": "页面",
+      "jobType": "作业类型",
+      "status": "状态",
+      "filename": "文件名",
+      "accept": "文件类型",
+      "query": "搜索内容",
+      "term": "术语",
+      "search": "查找内容",
+      "replace": "替换为",
+      "groupBy": "分组字段",
+      "columnCode": "字段",
+      "columnCodes": "字段",
+      "metrics": "统计方式",
+      "sort": "排序方式",
+      "limit": "显示上限",
+      "rules": "归一化规则",
+      "caseMode": "大小写",
+      "commit": "应用修改",
+      "preview": "预览方式",
+      "set": "更新内容",
+      "distributionBy": "分布字段",
+      "regions": "界面区域",
+      "kinds": "控件类型",
+      "text": "包含文本",
+      "value": "值",
+      "note": "提示",
+      "delta": "滚动距离",
+      "block": "滚动位置",
+      "rowRange": "行范围",
+      "match": "匹配方式",
+      "ignoreCase": "忽略大小写",
+      "fieldType": "字段类型",
+      "maxChars": "最大字符数",
+      "offset": "起始位置"
+    },
+    "values": {
+      "level": {
+        "GLOBAL": "全局",
+        "REGION": "地区",
+        "PROJECT": "项目"
+      },
+      "mode": {
+        "ADD": "追加"
+      },
+      "step": {
+        "DONE": "完成"
+      },
+      "scope": {
+        "selection": "当前选区",
+        "sheet": "整个表格",
+        "columns": "指定列",
+        "rows": "指定行",
+        "predicate": "条件命中行",
+        "DOC_TYPE": "文档类型"
+      },
+      "match": {
+        "wholeCell": "整格相等",
+        "contains": "包含",
+        "equals": "相等",
+        "prefix": "前缀匹配",
+        "wildcard": "通配符",
+        "regex": "正则表达式"
+      },
+      "preview": {
+        "count": "计数预览",
+        "sample-diff": "样例预览",
+        "full-diff": "全量对比"
+      },
+      "sort": {
+        "metric": "按统计值降序",
+        "metricDesc": "按统计值降序",
+        "metricAsc": "按统计值升序",
+        "labelAsc": "按分组标签升序",
+        "labelDesc": "按分组标签降序",
+        "none": "保持原顺序"
+      },
+      "metric": {
+        "count": "行数",
+        "distinct": "去重计数",
+        "blankRate": "空白率",
+        "min": "最小值",
+        "max": "最大值",
+        "sum": "合计"
+      },
+      "normalizeRule": {
+        "trim": "去除首尾空格",
+        "case": "大小写转换",
+        "width": "全半角转换",
+        "space": "空白字符归一",
+        "number": "数字格式归一",
+        "date": "日期格式归一"
+      },
+      "updateMode": {
+        "literal": "固定值",
+        "template": "模板生成",
+        "fillDown": "用上方最近非空值补齐",
+        "fillSeries": "等差数列"
+      }
     }
   },
   "common": {
@@ -1332,6 +1477,9 @@
         "pickZipDefs": "请先勾选要打包的配置项",
         "noResults": "尚无导出结果",
         "noTask": "尚未绑定任务",
+        "definitionMissing": "配置定义 {code} 不在当前定义列表里（定义列表可能尚未加载或加载失败）",
+        "definitionFieldsEmpty": "配置定义 {code} 没有字段",
+        "cannotBuildExportFile": "{problem}，无法构建 {code} 的导出文件，本次未生成文件。",
         "missingHeaders": "{code} 的文件缺少字段列：{headers}",
         "resultLoadFailed": "{code} 结果文件加载失败",
         "localIssues": "{code} 存在 {count} 处本地校验问题（如第 {row} 行：{reason}），已跳过保存",

@@ -8,6 +8,7 @@ import { useI18n } from 'vue-i18n'
 import { onMounted, ref } from 'vue'
 import { aiApi, type AiFeedbackEntry } from '@/api/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { userFacingErrorText } from '@/utils/ui-error'
 
 const { t } = useI18n()
 
@@ -23,7 +24,7 @@ async function load(): Promise<void> {
   try {
     items.value = await aiApi.feedbackList()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : t('views.aiFeedback.unknownError')
+    error.value = userFacingErrorText(e, t('views.aiFeedback.unknownError'))
   } finally {
     loading.value = false
   }

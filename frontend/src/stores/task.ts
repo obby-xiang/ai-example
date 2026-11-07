@@ -38,6 +38,7 @@ import { TaskSteps, type Task, type TaskStatus, type TaskSummary, type TaskType 
 import type { Job, JobStatus, ValidationIssue } from '@/types/job'
 import { translate } from '@/composables/useCopy'
 import { watchJob } from '@/utils/job-watch'
+import { userFacingErrorText } from '@/utils/ui-error'
 import type { RouteLocationRaw } from 'vue-router'
 
 /** 向导路由目标（窄化形态，便于调用方读 name 做中文提示）。 */
@@ -289,7 +290,7 @@ export const useTaskStore = defineStore('task', {
         if (seq !== loadSeq) {
           return // 旧请求的失败不得污染当前列表的错误位
         }
-        this.loadError = error instanceof Error ? error.message : translate('views.tasks.msg.loadFailed')
+        this.loadError = userFacingErrorText(error, translate('views.tasks.msg.loadFailed'))
       } finally {
         inFlightLoads -= 1
         if (inFlightLoads === 0) {
@@ -420,7 +421,7 @@ export const useTaskStore = defineStore('task', {
         void this.refreshNow()
         return task
       } catch (error) {
-        this.actionError = error instanceof Error ? error.message : translate('views.tasks.msg.createFailed')
+        this.actionError = userFacingErrorText(error, translate('views.tasks.msg.createFailed'))
         return null
       }
     },
@@ -437,7 +438,7 @@ export const useTaskStore = defineStore('task', {
           void this.refreshNow()
           return true
         } catch (error) {
-          this.actionError = error instanceof Error ? error.message : translate('views.tasks.msg.deleteFailed')
+          this.actionError = userFacingErrorText(error, translate('views.tasks.msg.deleteFailed'))
           return false
         }
       })()
@@ -460,7 +461,7 @@ export const useTaskStore = defineStore('task', {
         if (error instanceof ApiError && error.code === ErrorCode.JOB_ALREADY_FINAL) {
           return { handled: false, message: translate('views.tasks.msg.jobAlreadyFinal', { jobId }) }
         }
-        return { handled: false, message: error instanceof Error ? error.message : translate('views.tasks.msg.cancelFailed') }
+        return { handled: false, message: userFacingErrorText(error, translate('views.tasks.msg.cancelFailed')) }
       }
     },
 
@@ -531,7 +532,7 @@ export const useTaskStore = defineStore('task', {
           watchErrorNotified = true
           notifyJobWatch(translate('views.tasks.msg.watchInterrupted', {
             jobId,
-            message: error instanceof Error ? error.message : translate('views.tasks.msg.unknownError')
+            message: userFacingErrorText(error, translate('views.tasks.msg.unknownError'))
           }))
         }
       })

@@ -24,6 +24,7 @@
 import { translate, type CopyArgs } from '@/composables/useCopy'
 import type { ToolPart, ToolRunStatus } from '@/types/ai'
 import { toolArgsOf } from '@/utils/blocks'
+import { configLevelText, importModeText, sheetScopeText, taskStepText, taskTypeText, workspacePageText } from '@/utils/card-content'
 
 /** 状态词全集（10 态）；兜底摘要与右状态标签共用同一份译文。 */
 export const TOOL_STATUSES: readonly ToolRunStatus[] = [
@@ -68,8 +69,7 @@ function num(args: ToolArgs, key: string): string {
 }
 
 function taskTypeLabel(args: ToolArgs): string {
-  const type = str(args, 'type').toUpperCase()
-  return type === 'IMPORT' ? '导入' : type === 'EXPORT' ? '导出' : type
+  return taskTypeText(str(args, 'type'))
 }
 
 function summaryArgsOf(part: ToolPart): ToolArgs {
@@ -92,7 +92,7 @@ function summaryFor(name: string, args: ToolArgs): string | null {
   switch (name) {
     case 'list_config_defs': {
       const level = str(args, 'level')
-      return level ? optional('tool.list_config_defs.withLevel', { level }) : optional('tool.list_config_defs.summary')
+      return level ? optional('tool.list_config_defs.withLevel', { level: configLevelText(level) }) : optional('tool.list_config_defs.summary')
     }
     case 'get_config_def': {
       const code = str(args, 'code')
@@ -124,13 +124,13 @@ function summaryFor(name: string, args: ToolArgs): string | null {
     case 'navigate_to':
     case 'open_page': {
       const page = str(args, 'page')
-      return page ? optional(`tool.${name}.withPage`, { page }) : optional(`tool.${name}.summary`)
+      return page ? optional(`tool.${name}.withPage`, { page: workspacePageText(page) }) : optional(`tool.${name}.summary`)
     }
     case 'restore_task':
       return taskId ? optional('tool.restore_task.withTask', { taskId }) : optional('tool.restore_task.summary')
     case 'goto_step': {
       const step = str(args, 'step')
-      return step ? optional('tool.goto_step.withStep', { step }) : optional('tool.goto_step.summary')
+      return step ? optional('tool.goto_step.withStep', { step: taskStepText(step) }) : optional('tool.goto_step.summary')
     }
     case 'open_export_file_editor':
       return optional('tool.open_export_file_editor.summary')
@@ -160,11 +160,11 @@ function summaryFor(name: string, args: ToolArgs): string | null {
       return optional(`tool.${name}.summary`)
     case 'set_import_mode': {
       const mode = str(args, 'mode')
-      return mode ? optional('tool.set_import_mode.withMode', { mode }) : optional('tool.set_import_mode.summary')
+      return mode ? optional('tool.set_import_mode.withMode', { mode: importModeText(mode) }) : optional('tool.set_import_mode.summary')
     }
     case 'confirm_step': {
       const step = str(args, 'step')
-      return step ? optional('tool.confirm_step.withStep', { step }) : optional('tool.confirm_step.summary')
+      return step ? optional('tool.confirm_step.withStep', { step: taskStepText(step) }) : optional('tool.confirm_step.summary')
     }
     case 'run_job':
       return withTask() ?? optional('tool.run_job.summary')
@@ -191,9 +191,10 @@ function summaryFor(name: string, args: ToolArgs): string | null {
     case 'read_sheet_summary': {
       const defCode = str(args, 'defCode')
       const scope = str(args, 'scope')
-      if (defCode && scope) return optional('tool.read_sheet_summary.withDefScope', { def: defCode, scope })
+      const scopeLabel = sheetScopeText(scope)
+      if (defCode && scope) return optional('tool.read_sheet_summary.withDefScope', { def: defCode, scope: scopeLabel })
       if (defCode) return optional('tool.read_sheet_summary.withDef', { def: defCode })
-      if (scope) return optional('tool.read_sheet_summary.withScope', { scope })
+      if (scope) return optional('tool.read_sheet_summary.withScope', { scope: scopeLabel })
       return optional('tool.read_sheet_summary.summary')
     }
     case 'aggregate_sheet': {

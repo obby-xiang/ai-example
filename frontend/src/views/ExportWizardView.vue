@@ -214,6 +214,7 @@ import { stepLabel } from '@/utils/format'
 import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
 import { validateConditionPayload } from '@/utils/condition-payload'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
+import { userFacingErrorText } from '@/utils/ui-error'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import { uiAbandonGuard, uiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
 
@@ -568,6 +569,16 @@ function fieldsUnavailableReason(code: string): string | null {
   return null
 }
 
+function fieldsUnavailableUiReason(code: string): string | null {
+  if (defOf(code) === null) {
+    return t('views.export.msg.definitionMissing', { code })
+  }
+  if (fieldsOf(code).length === 0) {
+    return t('views.export.msg.definitionFieldsEmpty', { code })
+  }
+  return null
+}
+
 /**
  * 结果标签文案：旧批次（新作业已启动、还没换文件）在标签上点明代次，避免把上一批文件当成本次结果。
  */
@@ -617,7 +628,7 @@ async function loadDefinitions(): Promise<boolean> {
       return true
     } catch (error) {
       defsLoaded.value = false
-      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.defsLoadFailed'))
+      ElMessage.error(userFacingErrorText(error, t('views.export.msg.defsLoadFailed')))
       return false
     } finally {
       defsLoading.value = false
@@ -702,7 +713,7 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     } catch (error) {
       if (generation === taskGeneration) {
         taskDetailReady.value = false
-        ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.taskLoadFailed'))
+        ElMessage.error(userFacingErrorText(error, t('views.export.msg.taskLoadFailed')))
       }
       return { taskOk: false, filesOk: false }
     }
@@ -776,7 +787,7 @@ async function resumeJobs(): Promise<void> {
     // fail-closed：作业清单读不到就不能"当没有作业"——否则页面上既看不出在跑的作业，
     // 又允许再建一个（重复导出）。原因落到可见重试入口，写入口据此禁写。
     if (generation === taskGeneration) {
-      jobsLoadError.value = error instanceof Error ? error.message : t('views.export.msg.jobsListLoadFailed')
+      jobsLoadError.value = userFacingErrorText(error, t('views.export.msg.jobsListLoadFailed'))
     }
     return
   }
@@ -861,7 +872,7 @@ async function loadExistingResults(): Promise<boolean> {
     // fail-closed：读不到清单 ≠ 没有文件。保留已有结果面（新作业成功前不抹掉旧结果），
     // 但把原因亮出来并禁止写服务端（保存编辑 / 开始导出），由用户点「重试读取」。
     if (generation === taskGeneration) {
-      filesLoadError.value = error instanceof Error ? error.message : t('views.export.msg.filesListLoadFailed')
+      filesLoadError.value = userFacingErrorText(error, t('views.export.msg.filesListLoadFailed'))
     }
     return false
   }
@@ -1161,8 +1172,8 @@ function describeConditionInputIssues(issues: readonly ConditionInputIssue[]): s
 /**
  * `InvalidConditionInputError` 的成文（落库闸 catch 用）。
  *
- * 错误对象只带结构化 `issues`（不硬编码中文）；普通 Error 不走这里 —— 仍按原样透传
- * `error.message`，行为不变。
+ * 错误对象只带结构化 `issues`（不硬编码中文）；其它异常由调用方按服务端/本地来源
+ * 分别走 i18n 兜底或保留本地人话。
  */
 function describeConditionInputError(error: InvalidConditionInputError): string {
   return describeConditionInputIssues(error.issues)
@@ -1248,7 +1259,7 @@ async function persistStepData(
   } catch (error) {
     const reason = error instanceof InvalidConditionInputError
       ? describeConditionInputError(error)
-      : error instanceof Error ? error.message : '保存选择与条件失败'
+      : userFacingErrorText(error, t('views.export.msg.saveToServerFailed'))
     if (generation !== taskGeneration) {
       return { ok: false, reason: '任务已切换，本次未完成落库' }
     }
@@ -1322,7 +1333,7 @@ async function countExactRows(code: string): Promise<void> {
     exactRowCounts[code] = result.count
   } catch (error) {
     if (generation === taskGeneration && rowCountRequests.get(code) === request) {
-      condErrors[code] = error instanceof Error ? error.message : String(error)
+      condErrors[code] = userFacingErrorText(error, t('views.data.msg.dataLoadFailed'))
     }
   } finally {
     if (rowCountRequests.get(code) === request) {
@@ -1467,7 +1478,7 @@ async function startExport(
       beginWatchJob(job.id ?? 0, generation)
       return { ok: true, job, taskId: forTask, detached: generation !== taskGeneration }
     } catch (error) {
-      const reason = error instanceof Error ? error.message : t('views.export.msg.jobStartFailed')
+      const reason = userFacingErrorText(error, t('views.export.msg.jobStartFailed'))
       if (created !== null) {
         // 作业已建：不能说"未启动"
         return { ok: true, job: created, taskId: forTask, detached: generation !== taskGeneration, attachError: reason }
@@ -1622,7 +1633,7 @@ async function cancelJob(): Promise<void> {
     await jobsApi.cancelJob(jobId)
     ElMessage.info(t('views.export.msg.cancelRequested'))
   } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : t('views.export.msg.cancelFailed'))
+    ElMessage.warning(userFacingErrorText(error, t('views.export.msg.cancelFailed')))
   }
 }
 
@@ -1632,7 +1643,7 @@ async function cancelJob(): Promise<void> {
  * S2-1：本函数**返回真实结局**，不再把失败只吞进 `ElMessage` —— 调用方
  * `PAGE_HANDLER_OPEN_EXPORT_EDITOR` 的 handler 必须据此回灌，否则引擎加载失败时会向模型
  * 谎报"已打开在线编辑器"（B-07 让 `waitForReady` 必结算后，这条吞错路径由不可达变可达）。
- * `error` 用 `error.message` 原文（`SpreadGrid#waitForReady` 已把引擎失败原文抛出）。
+ * `error` 保留本地引擎人话；服务端异常改用既有 i18n 兜底。
  * `ElMessage.error`（用户可见）与 `loadedGrids` 回滚（允许重试）保留不变。
  *
  * 与预算的关系（S2-2 后同值，如实登记）：`SpreadGrid` 的就绪看门狗同为 60s
@@ -1716,7 +1727,7 @@ async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
   } catch (error) {
     if (generation === taskGeneration) {
       loadedGrids.delete(code)
-      const reason = error instanceof Error ? error.message : `${code} 结果文件加载失败`
+      const reason = userFacingErrorText(error, t('views.export.msg.filesListLoadFailed'))
       ElMessage.error(reason)
       return { ok: false, error: reason }
     }
@@ -1800,10 +1811,9 @@ async function buildXlsx(code: string): Promise<XlsxSource> {
   // 字段闸（fail-closed）：0 字段时表格里没有任何列，`toXlsxBlob()` 是空工作簿；服务端回落
   // 也无法确认内容口径 ⇒ 一律失败，绝不产出空文件（否则"下载"给用户一个空 xlsx，
   // 或让上游把这批空字节当成新结果）。
-  const fieldsProblem = fieldsUnavailableReason(code)
+  const fieldsProblem = fieldsUnavailableUiReason(code)
   if (fieldsProblem !== null) {
-    throw new Error(`${fieldsProblem}：无法构建 ${code} 的导出文件（不产出空文件）。`
-      + '请确认定义列表已加载后重试')
+    throw new Error(t('views.export.msg.cannotBuildExportFile', { code, problem: fieldsProblem }))
   }
   // 任务号与代次在**入口**捕获：`ensureGridLoaded` / `toXlsxBlob` / 回落下载都是 await，
   // 期间换任务会把 A 的表格字节（或 A 的结果文件）当成 B 的文件交出去。代次一变即中止。
@@ -1835,7 +1845,7 @@ async function buildXlsx(code: string): Promise<XlsxSource> {
       throw new Error(t('views.export.msg.downloadFallbackFailed', {
         code,
         reason: loadReason,
-        error: error instanceof Error ? error.message : String(error)
+        error: userFacingErrorText(error, t('views.export.msg.downloadFailed'))
       }))
     }
     if (switched()) {
@@ -1965,8 +1975,8 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
       ElMessage.info(error.message)
       return { ok: false, reason: error.message }
     }
-    // 失败原因：后端给的是 error.message（数据），无 message 时走 i18n 词条（界面文案不硬编码）
-    const reason = error instanceof Error ? error.message : t('views.export.msg.downloadFailed')
+    // 服务端异常原文不上屏；本地明确构造的人话错误保留。
+    const reason = userFacingErrorText(error, t('views.export.msg.downloadFailed'))
     ElMessage.error(reason)
     return { ok: false, reason }
   } finally {
@@ -2000,7 +2010,7 @@ function startDownloadInBackground(code: string): void {
         ElMessage.info(error.message)
         return
       }
-      ElMessage.error(error instanceof Error ? error.message : t('views.export.msg.downloadFailed'))
+      ElMessage.error(userFacingErrorText(error, t('views.export.msg.downloadFailed')))
     })
     .finally(() => {
       inFlightDownloads.delete(code)
@@ -2055,7 +2065,7 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
       // 整批显式失败：不产出残缺 zip、不下载一部分（否则用户以为拿到了全部文件）
       ElMessage.error(t('views.export.msg.zipBatchFailed', {
         count: batch.length,
-        reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
+        reason: userFacingErrorText(error, t('views.export.msg.zipFailed'))
       }))
     })
     .finally(() => {
@@ -2089,7 +2099,7 @@ async function downloadChecked(): Promise<void> {
   } catch (error) {
     ElMessage.error(t('views.export.msg.zipBatchFailed', {
       count: batch.length,
-      reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
+      reason: userFacingErrorText(error, t('views.export.msg.zipFailed'))
     }))
   } finally {
     releaseDownloadSlot(slot)
@@ -2119,7 +2129,7 @@ async function downloadAll(): Promise<void> {
   } catch (error) {
     ElMessage.error(t('views.export.msg.zipBatchFailed', {
       count: batch.length,
-      reason: error instanceof Error ? error.message : t('views.export.msg.zipFailed')
+      reason: userFacingErrorText(error, t('views.export.msg.zipFailed'))
     }))
   } finally {
     releaseDownloadSlot(slot)
@@ -2213,7 +2223,7 @@ async function saveEdits(): Promise<SaveOutcome> {
       saved.push(item.defCode)
     }
   } catch (error) {
-    failed = error instanceof Error ? error.message : t('views.export.msg.saveToServerFailed')
+    failed = userFacingErrorText(error, t('views.export.msg.saveToServerFailed'))
     if (generation === taskGeneration) {
       ElMessage.error(failed)
     }
@@ -2318,7 +2328,7 @@ async function ensureTaskBoundForTool(rawTaskId: unknown): Promise<ToolTaskGate>
   try {
     preloaded = await tasksApi.getTask(target)
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error)
+    const reason = userFacingErrorText(error, t('views.export.msg.taskLoadFailed'))
     const current = taskId.value === null ? '未绑定任务' : `绑定任务 #${taskId.value}`
     return {
       ok: false,
@@ -2500,7 +2510,8 @@ function registerHandlers(): void {
     try {
       job = await jobsApi.getJob(jobId)
     } catch (error) {
-      return { ok: false, reason: `未同步：读取作业 #${jobId} 失败（${error instanceof Error ? error.message : String(error)}）` }
+      const reason = userFacingErrorText(error, t('views.export.msg.jobsListLoadFailed'))
+      return { ok: false, reason: `未同步：读取作业 #${jobId} 失败（${reason}）` }
     }
     if (job.taskId !== jobTaskId || job.jobType !== 'EXPORT') {
       return { ok: false, reason: `未同步：作业 #${jobId} 不属于当前导出任务 #${jobTaskId}` }

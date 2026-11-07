@@ -271,6 +271,7 @@ import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-reg
 import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIssue } from '@/utils/excel'
 import type { SheetAdapter } from '@/utils/sheet-tools'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
+import { userFacingErrorText } from '@/utils/ui-error'
 import { confirmIrreversible, confirmPublishByMode } from '@/utils/confirm-irreversible'
 import { uiAbandonGuard, uiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
 import { resolvePublishMode } from '@/utils/publish-mode'
@@ -610,7 +611,7 @@ async function loadDefinitions(): Promise<boolean> {
       defsLoaded.value = false
       // 失败即进入冷却：AI 工具的连续调用不得各自再发一次 GET（挂起/失败时会把预算吃满）
       definitionsRetryBlockedUntil = Date.now() + DEFINITIONS_RETRY_COOLDOWN_MS
-      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.defsLoadFailed'))
+      ElMessage.error(userFacingErrorText(error, t('views.import.msg.defsLoadFailed')))
       return false
     } finally {
       defsLoading.value = false
@@ -740,7 +741,7 @@ async function loadTask(): Promise<void> {
   } catch (error) {
     if (generation === taskGeneration) {
       taskDetailReady.value = false
-      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.taskLoadFailed'))
+      ElMessage.error(userFacingErrorText(error, t('views.import.msg.taskLoadFailed')))
     }
     return
   }
@@ -1009,7 +1010,7 @@ async function downloadTemplates(): Promise<void> {
     downloadBlob(blob, name)
     ElMessage.success(t('views.import.msg.templateDownloaded', { name }))
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.templateDownloadFailed'))
+    ElMessage.error(userFacingErrorText(error, t('views.import.msg.templateDownloadFailed')))
   } finally {
     busy.value = null
   }
@@ -1123,7 +1124,8 @@ async function uploadOne(file: File): Promise<string> {
     void aiStore.notifyAiUploadDone(summary)
     return summary
   } catch (error) {
-    const message = error instanceof Error ? error.message : '文件上传失败'
+    console.error('[import] file upload failed', error)
+    const message = t('views.import.msg.uploadFailed')
     ElMessage.error(message)
     return `上传失败：${message}`
   } finally {
@@ -1262,7 +1264,7 @@ async function loadEditorsNow(force: boolean, only?: readonly string[]): Promise
       aiStore.onSheetReloaded(def.code)
     } catch (error) {
       if (generation === taskGeneration) {
-        ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.editorLoadFailed', { code: def.code }))
+        ElMessage.error(userFacingErrorText(error, t('views.import.msg.editorLoadFailed', { code: def.code })))
       }
     }
   }
@@ -1333,7 +1335,7 @@ function activeEditorCode(): string {
 interface FlushOutcome {
   ok: boolean
   savedDefs: string[]
-  /** 失败原因（底层错误 / 本地校验摘要），供回执原样带出，不统一甩锅“保存失败” */
+  /** 失败原因（本地人话 / 服务端安全兜底），供回执带出 */
   reason?: string
 }
 
@@ -1439,8 +1441,8 @@ async function flushEditors(): Promise<FlushOutcome> {
       ElMessage.success(t('views.import.msg.draftSaved'))
     }
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.draftSaveFailed'))
+    const detail = userFacingErrorText(error, t('views.import.msg.draftSaveFailed'))
+    ElMessage.error(detail)
     ok = false
     failureReason = detail
   } finally {
@@ -1524,14 +1526,14 @@ async function flushDirtyDefs(
         // 单个配置项写失败不拖累其它配置项：能保住几项是几项
         failed.push(t('views.import.msg.writeBackFailedFor', {
           code,
-          reason: error instanceof Error ? error.message : String(error)
+          reason: userFacingErrorText(error, t('views.import.msg.draftSaveFailed'))
         }))
       }
     }
     // 尽量写回后仍失败的那些：把「丢数据」的决定交回用户（reason 逐项点名，不统一甩锅）
     return failed.length === 0 ? { ok: true } : { ok: false, reason: failed.join('；') }
   } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    return { ok: false, reason: userFacingErrorText(error, t('views.import.msg.draftSaveFailed')) }
   } finally {
     // 与 N1 同一条纪律：只有代次没变时才由本层复位（换任务后由 resetTaskScopedState 清）
     if (generation === taskGeneration) {
@@ -1830,15 +1832,15 @@ async function startJob(kind: 'check' | 'import' | 'publish'): Promise<JobStartO
         }
       } catch (error) {
         // 作业已建、只是本页没挂上：带着错误回去，让回执说"已启动但本页未跟踪"
-        attachError = error instanceof Error ? error.message : String(error)
+        attachError = userFacingErrorText(error, '本页未能跟踪作业')
       }
       // 挂接期间也可能换了任务：返回值必须与真实归属一致（否则回执会说"在本页已启动"）
       return { job, detached: generation !== taskGeneration, taskId: forTask, attachError }
     } catch (error) {
       if (created === null) {
-        const reason = error instanceof Error ? error.message : String(error)
+        const reason = userFacingErrorText(error, t('views.import.msg.jobStartFailed'))
         if (generation === taskGeneration) {
-          ElMessage.error(reason || t('views.import.msg.jobStartFailed'))
+          ElMessage.error(reason)
         }
         return { job: null, detached: generation !== taskGeneration, taskId: forTask, error: reason }
       }
@@ -1846,7 +1848,7 @@ async function startJob(kind: 'check' | 'import' | 'publish'): Promise<JobStartO
         job: created,
         detached: generation !== taskGeneration,
         taskId: forTask,
-        attachError: error instanceof Error ? error.message : String(error)
+        attachError: userFacingErrorText(error, '本页未能跟踪作业')
       }
     }
   } finally {
@@ -2148,7 +2150,7 @@ async function cancelJob(job: Job | null): Promise<void> {
     await jobsApi.cancelJob(job.id)
     ElMessage.info(t('views.import.msg.cancelRequested'))
   } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : t('views.import.msg.cancelFailed'))
+    ElMessage.warning(userFacingErrorText(error, t('views.import.msg.cancelFailed')))
   }
 }
 
@@ -2182,7 +2184,7 @@ async function loadStaging(): Promise<void> {
     stagingOpen.value = staging.value.map((group) => group.defCode)
   } catch (error) {
     if (generation === taskGeneration) {
-      ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.stagingLoadFailed'))
+      ElMessage.error(userFacingErrorText(error, t('views.import.msg.stagingLoadFailed')))
     }
   } finally {
     if (generation === taskGeneration) {
@@ -2219,7 +2221,7 @@ async function onImportModeChange(): Promise<void> {
       return // 旧任务失败：不回滚当前任务的选择，也不弹错
     }
     importMode.value = previous
-    ElMessage.error(error instanceof Error ? error.message : t('views.import.msg.importModeFailed'))
+    ElMessage.error(userFacingErrorText(error, t('views.import.msg.importModeFailed')))
   }
 }
 

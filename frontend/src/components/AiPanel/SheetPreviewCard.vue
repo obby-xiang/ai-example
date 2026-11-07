@@ -44,10 +44,10 @@
             {{ t('ai.sheetCard.impact', { rows: plan.rowsCount, cells: plan.cellsCount }) }}
           </div>
           <div class="text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-preview-scope">
-            {{ t('ai.sheetCard.scope', { scope: plan.scopeSummary }) }}<span v-if="plan.predicateSummary"> · {{ plan.predicateSummary }}</span>
+            {{ t('ai.sheetCard.scope', { scope: scopeSummary }) }}<span v-if="predicateSummary"> · {{ predicateSummary }}</span>
           </div>
           <div class="text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-preview-rules">
-            {{ t('ai.sheetCard.rules', { rules: plan.rulesText }) }}
+            {{ t('ai.sheetCard.rules', { rules: rulesText }) }}
           </div>
           <div class="text-[11.9px] leading-[1.6] text-[#8a5a00]" data-testid="sheet-preview-overwrite">
             {{ t('ai.sheetCard.overwriteNotice') }}
@@ -173,6 +173,8 @@ import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
 import type { SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
 import { cellAddress, type SheetAppliedSummary } from '@/utils/sheet-tools'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
+import { unicodeCharacterCount } from '@/utils/display-text'
+import { sheetPlanPredicateSummary, sheetPlanRulesText, sheetPlanScopeSummary } from '@/utils/card-content'
 
 type SheetCardStatus = 'pending' | 'applying' | 'applied' | 'failed' | 'cancelled' | 'stale'
 type HeaderTone = 'neutral' | 'blue' | 'green' | 'amber' | 'red' | 'purple' | 'gray'
@@ -211,8 +213,11 @@ const status = computed<SheetCardStatus>(() => {
 const isApplying = computed(() => status.value === 'applying')
 const isInteractive = computed(() => status.value === 'pending' || status.value === 'applying')
 const headerTitle = computed(() => props.title?.trim() || t('ai.sheetCard.title'))
-const subtitle = computed(() => props.plan?.scopeSummary || undefined)
-const hasLongTitle = computed(() => headerTitle.value.length > 32)
+const scopeSummary = computed(() => props.plan ? sheetPlanScopeSummary(props.plan) : '')
+const predicateSummary = computed(() => props.plan ? sheetPlanPredicateSummary(props.plan) : '')
+const rulesText = computed(() => props.plan ? sheetPlanRulesText(props.plan) : '')
+const subtitle = computed(() => scopeSummary.value || undefined)
+const hasLongTitle = computed(() => unicodeCharacterCount(headerTitle.value) > 32)
 const expanded = computed({
   get: () => expandedOverride.value ?? (hasLongTitle.value || !['applied', 'cancelled'].includes(status.value)),
   set: (value: boolean) => {

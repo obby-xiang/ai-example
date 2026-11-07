@@ -194,9 +194,9 @@
       "uploadReadonly": "This task has ended and is view-only; uploading is unavailable and was not executed.",
       "uploadPickerUnsupported": "This browser cannot pick files inside the chat",
       "uploadPickerCancelled": "You cancelled the file selection; you can retry",
-      "uploadPickerFailed": "File selection failed: {message}",
+      "uploadPickerFailed": "File selection failed; please retry",
       "uploadNoFile": "No file received; please retry",
-      "uploadReceiveFailed": "The page failed to receive the file: {message}",
+      "uploadReceiveFailed": "The page could not receive the file; please retry",
       "formRejected": "Submission was not accepted: {reason}. Your entries are kept; edit them and submit again.",
       "formSubmitFailed": "Submission failed: {message} (retry or cancel)",
       "formSubmitFailedPlain": "Submission failed; retry or click \"Cancel\"",
@@ -351,8 +351,10 @@
       "irreversible": "I understand that {action} cannot be undone",
       "publishIrreversible": "Confirm starting the publish job: if this run uses replace mode, old data in scope will be deleted and cannot be undone",
       "ackHint": "Tick the box above to continue",
-      "impact": "Impact",
-      "conditionsUndecided": "Filter conditions undecided; you can set them after creation",
+      "createTaskConsequence": {
+        "EXPORT": "This only creates the task; exporting does not start yet.",
+        "IMPORT": "This only creates the task; importing does not start yet."
+      },
       "action": {
         "start_publish": "starting the publish job"
       }
@@ -387,6 +389,21 @@
       "hint": {
         "required": "required",
         "format": "format: {format}"
+      },
+      "formats": {
+        "email": "email address",
+        "tel": "phone number",
+        "url": "URL",
+        "idcard": "ID number"
+      },
+      "types": {
+        "text": "text",
+        "number": "number",
+        "boolean": "yes/no",
+        "date": "date",
+        "enum": "single choice",
+        "multi_select": "multiple choice",
+        "attachment": "attachment"
       },
       "attachment": {
         "choose": "Choose file",
@@ -441,7 +458,6 @@
       "collapse": "Collapse",
       "breathing": "Working…",
       "uploadFallbackLabel": "Upload xlsx / zip",
-      "confirmTitle": "Awaiting your confirmation: {business}",
       "requiredCount": "{count} required",
       "formCancelledSummary": "Not submitted; entries are not recorded",
       "gfQueue": {
@@ -451,7 +467,9 @@
       },
       "createTaskBusiness": "Create an {type} task “{title}”",
       "createTaskBusinessUntitled": "Create an {type} task",
-      "actionField": "Action",
+      "taskTarget": "{type} task #{taskId} “{title}”",
+      "taskTargetUntitled": "{type} task #{taskId}",
+      "taskActionTarget": "{action}: {target}",
       "overwriteConfirm": "The input box already has content. Editing will overwrite it. Continue?",
       "sendNotSentInline": "(this message was not sent: {message})",
       "degradeUnknown": "AI availability has not been detected yet. Try again later or contact your administrator.",
@@ -630,7 +648,20 @@
       "impact": "Affects {rows} rows / {cells} cells",
       "scope": "Scope: {scope}",
       "rules": "Rules: {rules}",
-      "overwriteNotice": "Apply or undo overwrites the current sheet (this operation wins for the same file); manual edits you made may be overwritten.",
+      "scopeValues": {
+        "selection": "{def}, current selection",
+        "sheet": "{def}, entire sheet",
+        "columns": "{def}, columns {columns}",
+        "rows": "{def}, rows {rowRange}",
+        "predicate": "{def}, rows matching filters"
+      },
+      "ruleValues": {
+        "replace": "{match} · ignore case={ignoreCase} · \"{search}\" → \"{replace}\"",
+        "update": "Updates: {updates}",
+        "updateItem": "{columnCode} ({mode})",
+        "normalize": "Normalize columns: {rules}"
+      },
+      "overwriteNotice": "Applying or undoing overwrites the current sheet; your manual edits may be overwritten.",
       "skipped": "{count} cells skipped (rejected by the validator)",
       "distribution": "Distribution (by {by}, top {count} groups):",
       "groupItem": "{rows} rows / {cells} cells",
@@ -661,6 +692,120 @@
       "hintFailed": "Upload failed. Please retry.",
       "hintCancelled": "Upload cancelled.",
       "hintUploaded": "File uploaded."
+    },
+    "fields": {
+      "taskId": "Task",
+      "jobId": "Job",
+      "defCode": "Definition",
+      "defCodes": "Definitions",
+      "code": "Definition code",
+      "type": "Task type",
+      "title": "Task name",
+      "conditions": "Filters",
+      "scope": "Scope",
+      "format": "Format",
+      "level": "Level",
+      "mode": "Mode",
+      "option": "Option",
+      "step": "Step",
+      "page": "Page",
+      "jobType": "Job type",
+      "status": "Status",
+      "filename": "File name",
+      "accept": "File types",
+      "query": "Search",
+      "term": "Term",
+      "search": "Find",
+      "replace": "Replace with",
+      "groupBy": "Group by",
+      "columnCode": "Field",
+      "columnCodes": "Fields",
+      "metrics": "Metrics",
+      "sort": "Sort",
+      "limit": "Display limit",
+      "rules": "Normalization rules",
+      "caseMode": "Letter case",
+      "commit": "Apply changes",
+      "preview": "Preview",
+      "set": "Updates",
+      "distributionBy": "Distribution field",
+      "regions": "UI regions",
+      "kinds": "Control types",
+      "text": "Include text",
+      "value": "Value",
+      "note": "Note",
+      "delta": "Scroll distance",
+      "block": "Scroll position",
+      "rowRange": "Row range",
+      "match": "Match by",
+      "ignoreCase": "Ignore case",
+      "fieldType": "Field type",
+      "maxChars": "Maximum characters",
+      "offset": "Offset"
+    },
+    "values": {
+      "level": {
+        "GLOBAL": "Global",
+        "REGION": "Region",
+        "PROJECT": "Project"
+      },
+      "mode": {
+        "ADD": "Add"
+      },
+      "step": {
+        "DONE": "Done"
+      },
+      "scope": {
+        "selection": "Current selection",
+        "sheet": "Entire sheet",
+        "columns": "Selected columns",
+        "rows": "Selected rows",
+        "predicate": "Rows matching filters",
+        "DOC_TYPE": "Document type"
+      },
+      "match": {
+        "wholeCell": "Exact cell match",
+        "contains": "Contains",
+        "equals": "Equals",
+        "prefix": "Starts with",
+        "wildcard": "Wildcard",
+        "regex": "Regular expression"
+      },
+      "preview": {
+        "count": "Count preview",
+        "sample-diff": "Sample preview",
+        "full-diff": "Full comparison"
+      },
+      "sort": {
+        "metric": "Metric, descending",
+        "metricDesc": "Metric, descending",
+        "metricAsc": "Metric, ascending",
+        "labelAsc": "Group label, ascending",
+        "labelDesc": "Group label, descending",
+        "none": "Original order"
+      },
+      "metric": {
+        "count": "Row count",
+        "distinct": "Distinct count",
+        "blankRate": "Blank rate",
+        "min": "Minimum",
+        "max": "Maximum",
+        "sum": "Sum"
+      },
+      "normalizeRule": {
+        "trim": "Trim surrounding whitespace",
+        "case": "Convert letter case",
+        "width": "Convert character width",
+        "space": "Normalize whitespace",
+        "number": "Normalize number format",
+        "date": "Normalize date format"
+      },
+      "updateMode": {
+        "literal": "Literal value",
+        "template": "Template-generated value",
+        "fillDown": "Fill from nearest non-empty cell above",
+        "fillSeries": "Arithmetic series"
+      }
     }
   },
   "common": {
@@ -1332,6 +1477,9 @@
         "pickZipDefs": "Tick the definitions to package first",
         "noResults": "No export results yet",
         "noTask": "No task bound",
+        "definitionMissing": "Definition {code} is not in the current definition list (it may still be loading or failed to load)",
+        "definitionFieldsEmpty": "Definition {code} has no fields",
+        "cannotBuildExportFile": "Cannot build the export file for {code}: {problem}. No file was produced.",
         "missingHeaders": "{code}: the file is missing columns: {headers}",
         "resultLoadFailed": "{code}: failed to load the result file",
         "localIssues": "{code} has {count} local validation issue(s) (e.g. row {row}: {reason}); save skipped",

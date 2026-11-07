@@ -2051,7 +2051,7 @@ function defaultExecutor(name: FrontendToolName): FrontendToolExecutor | null {
     return async (call, lifetime) => {
       const handler = getPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR)
       if (!handler) {
-        throw new Error('导出向导未注册在线编辑器能力')
+        throw new Error('The export wizard did not register the online editor capability')
       }
       // 页面 handler 同样拿得到存活标记（打开编辑器前的 await 链可能跨过预算/停止）
       const outcome = await handler({ taskId: call.args.taskId, defCode: call.args.defCode }, lifetime)
