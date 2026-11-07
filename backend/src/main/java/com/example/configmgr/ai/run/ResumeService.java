@@ -113,2883 +113,2932 @@ import java.util.stream.Collectors;
 @Service
 public class ResumeService {
 
-	/** 续跑原因（日志面口径，{@code turn_start.resumeReason}）：启动扫描（快照 SUSPENDED）。 */
-	public static final String RESUME_STARTUP = "startup";
-
-	/** 续跑原因：运维/用户显式调 {@code POST /api/ai/runs/{runId}/resume}。 */
-	public static final String RESUME_MANUAL = "manual";
-
-	/** 续跑原因：启动/扫描期接管"状态仍 RUNNING 但已超龄"的死卡（僵尸轮）。 */
-	public static final String RESUME_DEADCARD = "deadcard";
-
-	/** 续跑原因：其余续跑入口（决策回灌、挂起重挂、调试直驱）—— "未标注原因"的兜底口径。 */
-	public static final String RESUME_REATTACH = "reattach";
-
-	/**
-	 * 续跑异常的<b>用户面</b>短句（R-08 白名单）。
-	 *
-	 * <p>原异常消息（上游 body / 客户端栈里带出的内部信息）只进日志；SSE {@code error} 帧、
-	 * 快照/界面能看到的只有这一句。与 {@code ResilientChatService} 的 {@code AI_RESUME_FAILED}
-	 * 白名单原文一致（同一码同一句，不另造第二套文案）。
-	 */
-	public static final String AI_RESUME_FAILED_MESSAGE = "续跑失败，请重试。";
-
-	/** en 白名单兜底（{@code messages_en} 缺失时仍不裸露原文）。 */
-	public static final String AI_RESUME_FAILED_MESSAGE_EN = "Could not resume the previous response. Please try again.";
-
-	/**
-	 * {@code PROVIDER_GONE} 的用户面短句：与 409 响应体的 {@code message} 同一句，
-	 * 终帧 {@code code=AI_PROVIDER_GONE} 的文案也取它（一处文案，两处出口）。
-	 */
-	public static final String PROVIDER_GONE_MESSAGE = "该轮使用的模型端点已被删除或停用，无法按原模型续跑；请重新发送一轮。";
-
-	/** en 白名单兜底（{@code messages_en} 缺失时仍不裸露内部信息）。 */
-	public static final String PROVIDER_GONE_MESSAGE_EN = "The model endpoint this turn used has been removed or disabled, "
-			+ "so it cannot be resumed with the same model. Please send a new message.";
-
-	/**
-	 * 接管改判"<b>重挂租约</b>"的 body 键（返修 R2，{@code true} = 本次没有新起驱动）。
-	 *
-	 * <p>含义：本进程仍登记着这一轮的驱动方（{@code isDriving=true}）且本次已抢到租约 —— 同实例两个驱动方
-	 * 共享同一份进程内租约视图，新起驱动会让旧驱动的写照样放行（双驱动），"拒绝+还租"又会把它围栏在外
-	 * 且无人驱动。故本次把租约<b>重挂给旧驱动续租</b>，调用方（{@link #resumeWithReason}）据此
-	 * <b>不得</b> {@code releaseRunLease}，改为 {@code markDriving(lease, 旧驱动存活判据)}。
-	 */
-	public static final String LEASE_REARMED_KEY = "leaseRearmed";
-
-	private final RunStore store;
-
-	private final RunRegistry registry;
-
-	private final MessageJsonCodec codec;
-
-	private final ResilientChatService chatService;
-
-	private final SpToolCallingManager toolCallingManager;
-
-	private final ThreadPoolTaskExecutor suspendExecutor;
-
-	/**
-	 * <b>保留仅为构造器兼容，锁已摘除</b>（M5）：{@code ai:resume:lock:} 在批②b 整体并入续跑权租约
-	 * （GET-比对-DEL 那条非原子释放会删掉别人的锁）；本字段已无任何读取者，留着是为了不动 10 参
-	 * 兼容构造器（{@code ResumeSkipCascadeTest}/{@code ResumeEnvelopeShapeTest} 等既有用例零改动）。
-	 * 下一次可以改签名的窗口应直接删掉它。
-	 */
-	private final StringRedisTemplate redis;
-
-	private final AiProperties properties;
-
-	private final CancellationRegistry cancellations;
-
-	/** T2：重建历史的 {@code role:tool} 也要过同一份模型侧上限（口径与首轮一致，不因续跑而变）。 */
-	private final ToolResultLimiter limiter;
-
-	/**
-	 * 上下文压缩统一入口（上下文统计与压缩专项批①）。
-	 *
-	 * <p><b>字段注入</b>：{@link #ResumeService} 的构造器被四份既有用例直接 {@code new}
-	 * （{@code ResumeServiceLeaseTest} / {@code ResumeEnvelopeShapeTest} 等），改签名等于要求它们跟改。
-	 * 未注入时续跑不压缩（"未装配"而不是"永远压不动"）。
-	 */
-	@Autowired(required = false)
-	private ContextCompactor contextCompactor;
-
-	/**
-	 * 用户展示历史（B2）：续跑是"同会话运行中升级/重启"的另一条入口，必须在压缩/窗口之前
-	 * 用快照历史补一次 baseline，避免 transcript 缺失时刷新只剩本轮。
-	 */
-	@Autowired(required = false)
-	private ConversationTranscriptStore transcript;
-
-	/**
-	 * 模型配置快照（批③ 的 {@code PROVIDER_GONE} 判据）。
-	 *
-	 * <p>同为<b>字段注入</b>：四份既有用例直接 {@code new ResumeService(...)}，改构造器签名等于要求
-	 * 它们跟改。未注入时不做 provider 存在性判定（"没有配置设施"→ 走默认口径，与批③ 之前等价）。
-	 */
-	@Autowired(required = false)
-	private AiConfigService aiConfigService;
-
-	/**
-	 * 同 sessionId 单值门（人工等待 park 批）。
-	 *
-	 * <p>park 时首轮任务结束，{@code AiController} 的 finally 会释放会话门 —— 停等期间门是空的；
-	 * 恢复方（本类）必须<b>重新 acquire</b>，否则"用户在停等期间又发了一轮"会与本轮并发。
-	 * 抢不到（被另一轮占着）⇒ {@link Outcome#SESSION_BUSY}，由派发方有界重派发，绝不静默丢决策。
-	 *
-	 * <p>字段注入而非构造器参数：本类构造器被多份既有用例直接 {@code new}。
-	 */
-	@Autowired(required = false)
-	private SessionGate sessionGate;
-
-	/**
-	 * 用户面白名单文案的 locale 来源（I-5）。
-	 *
-	 * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）。未注入（直接 {@code new} 的单测）时，
-	 * en 回落 {@link #AI_RESUME_FAILED_MESSAGE_EN}，仍不暴露异常原文。
-	 */
-	@Autowired(required = false)
-	private MessageSource messageSource;
-
-	/**
-	 * 批间运行上下文刷新器（多步工作流批的续跑侧入口）。
-	 *
-	 * <p>为什么续跑侧必须有它：生产 {@code app.ai.park.enabled=true} 时 {@code create_task} /
-	 * {@code navigate_to} / {@code confirm_step} 都在 {@code SpToolCallingManager} 执行循环的
-	 * <b>唯一刷新点之前</b>挂起，刷新一次都跑不到 —— 续跑随后拿"请求边界"的旧 {@link AiContext}
-	 * 构造下一跳，步骤工具永远不披露。字段注入保持 10 参构造器与既有直接 new 的用例零改动；
-	 * 缺席时行为与改造前一致（不刷新），但会留一条 WARN。
-	 */
-	@Autowired(required = false)
-	private RunContextRefresher contextRefresher;
-
-	/** 可选注入（生产装配同一个刷新器；轻装配面不注入 = 不刷新）。 */
-	@Autowired(required = false)
-	public void setContextRefresher(RunContextRefresher refresher) {
-		this.contextRefresher = refresher;
-	}
-
-	/**
-	 * 任务槽位解析器（可选）：续跑交棒前按<b>最新</b>上下文重算 {@code extra[taskSlots]} ——
-	 * 挂起期用户在向导里改了步骤/勾选后，旧槽位不得继续把模型引回旧选择（显式空仍是权威空）。
-	 *
-	 * <p>字段注入保持 10 参构造器与既有直接 new 的用例零改动；未注入时只跳过重算（旧槽位原样保留）。
-	 */
-	private com.example.configmgr.ai.slot.TaskSlotResolver taskSlotResolver;
-
-	/** 可选注入（槽位重算；缺席 = 不重算）。 */
-	@Autowired(required = false)
-	public void setTaskSlotResolver(com.example.configmgr.ai.slot.TaskSlotResolver resolver) {
-		this.taskSlotResolver = resolver;
-	}
-
-	/**
-	 * 宿主确定性定义选择表单（新建任务 → 停在选择步骤 → 配置未知 ⇒ 宿主自己挂起平铺多选）。
-	 *
-	 * <p>为什么挂在续跑侧：{@code navigate_to} 是前端工具，生产 {@code park=true} 时它在首轮的
-	 * 等待处就结束了执行，真正的结算与"下一跳上下文"都在本类 —— 于是"新任务已到选择步骤"之后、
-	 * 模型再次被问之前的<b>唯一</b>确定点就在这里（既不改前端，也不新增中断路径）。
-	 * 判据按任务状态而非导航瞬时成功（前端导航超时不再挡住表单）。
-	 *
-	 * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）；缺席 = 不挂起，行为与改造前一致。
-	 */
-	private com.example.configmgr.ai.form.DefinitionSelectionForm definitionSelectionForm;
-
-	/** 可选注入（缺席 = 不生成宿主表单，模型侧既有路径不变）。 */
-	@Autowired(required = false)
-	public void setDefinitionSelectionForm(com.example.configmgr.ai.form.DefinitionSelectionForm form) {
-		this.definitionSelectionForm = form;
-	}
-
-	@Autowired(required = false)
-	private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
-
-	/**
-	 * 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。
-	 *
-	 * <p>键 = <b>身份 + runId</b>（{@link LocalRunKey}）：runId 不是跨身份唯一定性，A 在续跑 X 时
-	 * B 的同名轮次必须能照常续跑（否则 B 会被永久报成 {@code IN_PROGRESS}）。无身份 = legacy 桶，
-	 * 不伪造默认身份。键在入口定一次、全程沿用（交棒任务与 finally 都用那把键摘除）。
-	 */
-	private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
-
-	public ResumeService(RunStore store, RunRegistry registry, MessageJsonCodec codec, ResilientChatService chatService,
-			SpToolCallingManager toolCallingManager, @Qualifier("aiRunExecutor") ThreadPoolTaskExecutor suspendExecutor,
-			StringRedisTemplate redis, AiProperties properties, CancellationRegistry cancellations,
-			ToolResultLimiter limiter) {
-		this.store = store;
-		this.registry = registry;
-		this.codec = codec;
-		this.chatService = chatService;
-		this.toolCallingManager = toolCallingManager;
-		this.suspendExecutor = suspendExecutor;
-		this.redis = redis;
-		this.properties = properties;
-		this.cancellations = cancellations;
-		this.limiter = limiter;
-	}
-
-	public enum Outcome {
-
-		ACCEPTED, NOT_FOUND, ALREADY_DONE, ALREADY_RUNNING, PENDING_UNRESOLVED, IN_PROGRESS, POOL_SATURATED,
-		ALREADY_CANCELLED,
-
-		/**
-		 * C2：取消状态读不出来（Redis 故障/退避）。续跑是"开始执行"的副作用入口，按 fail-closed
-		 * 拒绝，但必须是 typed 结局（对外 503），不能再以 RuntimeException 穿透。
-		 */
-		CANCEL_STATE_UNKNOWN,
-
-		/** C2：待决条目本体读不出来（不是"没有未决"）；续跑是副作用入口，按未知拒绝。 */
-		STATE_UNKNOWN,
-
-		/**
-		 * B23L1 批②b：本轮的续跑权租约在<b>别的实例</b>手里（或调用方给的租约已过期）。
-		 *
-		 * <p>它不是错误：说明那一轮已经有主（在等卡 / 在驱动 / 正在收尾），本实例什么都不该做。
-		 * 对外统一 409（{@code AiController#resume} 的 switch）。
-		 */
-		LEASE_HELD_ELSEWHERE,
-
-		/**
-		 * 批③：快照里的 provider 已不可用（删除/停用/密钥不可解/模型已不在 allowlist）。
-		 *
-		 * <p>它不是"没找到"（轮次还在），也不是 503：这一轮<b>没法按原样</b>继续 —— 换模型续跑会让
-		 * 历史与 {@code done.model} 说谎，故对外 409 + 稳定码 {@code PROVIDER_GONE}。
-		 */
-		PROVIDER_GONE,
-
-		/**
-		 * 人工等待 park 批：同一会话当前有<b>另一轮</b>在跑（park 停等期间用户又发了一轮）。
-		 *
-		 * <p>决策已经落库、回执帧已发 —— 只差"驱动权"。本结局表示<b>本拍不驱动</b>（不得并发同会话两轮），
-		 * 由派发方按 {@code app.ai.park.max-dispatch-retries} <b>有界重派发</b>；
-		 * 对 HTTP 面是 409（{@code SESSION_BUSY}，与"会话已有一轮"同一语义）。
-		 */
-		SESSION_BUSY;
-
-		/**
-		 * 该结局下，<b>自抢租约的调用方</b>是否可以归还租约（<b>归还白名单</b>，默认不还）。
-		 *
-		 * <h2>判据</h2>
-		 * 调用方已经通过 {@code created} 证明了一件事：<b>抢租那一刻全集群没有人持有这一轮的租约</b>
-		 * （否则它只会是重入命中、{@code created=false}，那条路径根本不还租）。所以"还有别人在管"只可能
-		 * 来自<b>本进程内后到的并发调用方</b> —— 而那种情形下本线程的结局必然是
-		 * {@link #IN_PROGRESS}（{@code resuming} 互斥被占）。
-		 *
-		 * <ul>
-		 * <li>{@link #IN_PROGRESS}：<b>本进程已有胜方在跑</b>，它用的是<b>同一 token</b> ——
-		 *     还租就是删它的续跑权（L-19：创建者输掉互斥时，"创建者"身份不等于"可以删"）⇒ <b>不还</b>；</li>
-		 * <li>{@link #LEASE_HELD_ELSEWHERE}：租约在别人手里（本方法只可能是 verifyHeld 判丢后返回它）⇒ 更不该碰；</li>
-		 * <li>{@link #NOT_FOUND} / {@link #ALREADY_DONE} / {@link #ALREADY_CANCELLED}：轮不存在或已收尾，
-		 *     没有任何执行者 ⇒ 还；</li>
-		 * <li>{@link #ALREADY_RUNNING} / {@link #PENDING_UNRESOLVED}：快照停在 RUNNING（僵尸轮）或
-		 *     外部卡未决 —— {@code created=true} 已说明<b>现在没有别的实例在驱动/等待</b>，
-		 *     这批租约没有接管者 ⇒ 还（否则要白等一个 TTL，启动扫描/重试才拿得回来）；</li>
-		 * <li>{@link #POOL_SATURATED}：池饱和 = 派发失败 = 无人接管（与 {@code ConfirmGate} 的
-		 *     {@code EXECUTOR_SATURATED} 必须还租同一条红线）⇒ 还；</li>
-		 * <li>{@link #ACCEPTED}：调用方把租约<b>交续租调度器</b>（不是"还"）⇒ 本方法返回 false。</li>
-		 * </ul>
-		 *
-		 * <p>白名单（默认不还）而不是黑名单：将来新增结局时，默认落在"不还"一侧 —— 漏还是一个 TTL 的
-		 * 可用性问题，错还是一次双驱动/丢 fencing 的正确性问题。
-		 */
-		@JsonIgnore
-		public boolean isLeaseReleasable() {
-			return this == NOT_FOUND || this == ALREADY_DONE || this == ALREADY_CANCELLED
-					|| this == ALREADY_RUNNING || this == PENDING_UNRESOLVED || this == POOL_SATURATED
-					|| this == PROVIDER_GONE || this == CANCEL_STATE_UNKNOWN || this == STATE_UNKNOWN
-					// park 批：会话被别的轮占着 ⇒ 本拍没有驱动者，租约还给派发方（重试时再抢）
-					|| this == SESSION_BUSY;
-		}
-
-		@JsonIgnore
-		public boolean releasesLease() {
-			return isLeaseReleasable();
-		}
-
-	}
-
-	public record ResumeResult(Outcome outcome, Map<String, Object> body) {
-	}
-
-	/**
-	 * <b>取消收尾窄入口</b>（{@link #cancelConfirmed(String)}）的三态以上结局。
-	 *
-	 * <p>与 {@link Outcome} 分开：那条枚举是"续跑/驱动"的用户面结局（HTTP 状态码映射在
-	 * {@code AiController} 的 switch 上）。本枚举只服务"已确认取消的收尾"，多出来的
-	 * {@link #PERSIST_DENIED} / {@link #UNAVAILABLE} 的含义是"这拍没落定，稍后再来"，
-	 * 绝不能混进续跑结局表（否则一次抖动会被对外报成终局）。
-	 */
-	public enum CancelFinalize {
-
-		/** 本次把终态与终帧补齐（取消事实成立，收尾已落定）。 */
-		FINALIZED,
-
-		/**
-		 * 终态轮次无可收尾：<b>DONE/FAILED</b> 直接判终态（绝不改写）；<b>CANCELLED</b> 仅在
-		 * 终帧已归档时幂等跳过（归档里没有终帧 ⇒ 仍需补齐）。
-		 *
-		 * <p><b>DONE/FAILED 也走这里</b>：延迟交棒绝不能把已经完成的轮次改写成 CANCELLED
-		 * （{@code RunStore#save} 只查租约写权限、不查原状态）。
-		 */
-		ALREADY_TERMINAL,
-
-		/**
-		 * 取消事实此刻不成立（{@code ai:cancel} 看不到）而快照仍非终态：<b>不可知</b>，
-		 * 交棒按有界重试处理；<b>绝不</b>因此驱动这一轮（不重建、不发起模型/工具）。
-		 */
-		CANCEL_FACT_UNCONFIRMED,
-
-		/** 取消状态读不出来（Redis 故障/退避）：这拍不推进，交给有界重试。 */
-		CANCEL_UNKNOWN,
-
-		/** 轮不存在（已删除）：没有可收尾的对象。 */
-		NO_RUN,
-
-		/** 续跑租约在别的实例手里（或已过期）：不抢、不覆盖。 */
-		LEASE_HELD_ELSEWHERE,
-
-		/** 租约设施不可用：无法取得写权限，这拍不写。 */
-		UNAVAILABLE,
-
-		/** 本进程已有续跑/取消收尾在推进这一轮（{@code resuming} 互斥被占）：这拍不并发，稍后重试。 */
-		IN_PROGRESS,
-
-		/** 同 sessionId 的单值门被另一轮占着：这拍不推进，稍后重试。 */
-		SESSION_BUSY,
-
-		/** 收尾跑了但终帧仍未归档（写门仍拒写/读不可知）：等恢复后重试。 */
-		PERSIST_DENIED;
-
-	}
-
-	/**
-	 * 列表只枚举当前身份的窄 ZSET；恢复则另走到期索引的有界页。成员自带记录身份，
-	 * 每条投影都在对应 {@link RunIdentityScope} 内构造，不扫描租户或其它身份的数据。
-	 */
-	public List<Map<String, Object>> listRuns() {
-		return discoverRuns(false, 0);
-	}
-
-	/** 恢复发现只读到期的轻量候选；默认页也保持有界。 */
-	public List<Map<String, Object>> listRunsForRecovery() {
-		return listRunsForRecovery(64);
-	}
-
-	public List<Map<String, Object>> listRunsForRecovery(int limit) {
-		this.store.reconcileRecoveryIndexThrottled();
-		return discoverRuns(true, limit);
-	}
-
-	/** 从指定 score + member 之后取一页，避免只在前 256 个候选内轮转。 */
-	public List<Map<String, Object>> listRunsForRecoveryAfter(int limit, long afterDueAtMs, String afterMember) {
-		this.store.reconcileRecoveryIndexThrottled();
-		List<Map<String, Object>> out = new ArrayList<>();
-		Set<String> seen = new LinkedHashSet<>();
-		for (RunStore.RecoveryCandidate candidate : this.store.recoveryDueRecordsAfter(System.currentTimeMillis(),
-				afterDueAtMs, afterMember, limit)) {
-			RunKeyScope.IndexRef ref = candidate.ref();
-			appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), true, candidate.dueAtMs());
-		}
-		return out;
-	}
-
-	private List<Map<String, Object>> discoverRuns(boolean recovery, int recoveryLimit) {
-		List<Map<String, Object>> out = new ArrayList<>();
-		Set<String> seen = new LinkedHashSet<>();
-		TenantUser current = RequestContextUtils.currentOrNull();
-		if (recovery) {
-			for (RunStore.RecoveryCandidate candidate : this.store.recoveryDueRecords(System.currentTimeMillis(),
-					recoveryLimit)) {
-				RunKeyScope.IndexRef ref = candidate.ref();
-				appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), true, candidate.dueAtMs());
-			}
-			return out;
-		}
-		if (current != null) {
-			for (String runId : this.store.allRunIds()) {
-				appendDiscovered(out, seen, runId, current.tenantId(), current.userId(), false, 0L);
-			}
-		}
-		return out;
-	}
-
-	/** 单条发现在<b>该条记录身份</b>的作用域内构造；同一复合键只出现一次。 */
-	private void appendDiscovered(List<Map<String, Object>> out, Set<String> seen, String runId, long tenantId,
-			long userId, boolean recovery, long expectedDueAtMs) {
-		if (!seen.add(tenantId + "/" + userId + "/" + runId)) {
-			return;
-		}
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
-			Map<String, Object> item = recovery ? recoveryRun(runId, tenantId, userId, expectedDueAtMs)
-					: listRun(runId, tenantId, userId);
-			if (item != null) {
-				out.add(item);
-			}
-			else if (recovery) {
-				this.store.isRecoveryCandidateRemoved(runId, tenantId, userId, expectedDueAtMs);
-			}
-		}
-	}
-
-	/** 单条列表项（在<b>该条记录身份</b>的作用域内构造；API 详情投影）。 */
-	private Map<String, Object> listRun(String runId, long tenantId, long userId) {
-		RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
-				: this.store.get(runId);
-		if (snapshot == null) {
-			return null;
-		}
-		// C2：续跑入口的清单用非抛读口；guard 读失败时仍能拿到原始条目并按 PENDING 保守处理。
-		List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
-		Map<String, Object> item = new LinkedHashMap<>();
-		item.put("runId", runId);
-		// 身份随条目交给扫描方：续跑入口据此 useContext（不读快照猜身份、不扫描租户列表）
-		item.put("tenantId", snapshot.getTenantId());
-		item.put("userId", snapshot.getUserId());
-		item.put("sessionId", snapshot.getSessionId());
-		item.put("status", snapshot.getStatus());
-		item.put("round", snapshot.getRound());
-		item.put("messageCount", snapshot.getMessageJson().size());
-		item.put("createdBy", snapshot.getCreatedBy());
-		item.put("resumedBy", snapshot.getResumedBy());
-		item.put("updatedAtMs", snapshot.getUpdatedAtMs());
-		item.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
-		item.put("pendingUnresolved", pendingIds(pendings, false));
-		item.put("ledgerCounts", this.store.ledgerCounts(runId));
-		// 发现态的"可续跑性"判定（启动自动续跑与运维端点共用同一口径）：
-		// 取消标志（Redis 为准）> 终态 > 未决外部输入 > 僵尸 RUNNING（超龄）。
-		// C2：发现/列表面 UNKNOWN 按"未取消 + 计数继续"（这里只是展示可续跑性，没有副作用）。
-		CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
-		boolean cancelled = cancelState == CancellationRegistry.CancelState.CANCELLED;
-		if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
-			if (log.isDebugEnabled()) log.debug("discovery: cancel state unknown, continuing as not cancelled runId={}", runId);
-		}
-		long activeAtMs = activeAtMs(snapshot);
-		// I-4 / M-3：SUSPENDED 等人期间没有业务帧，心跳才是"还在等"的证据。
-		// 对外展示的 activeAgeMs 按状态取口径：RUNNING = 业务年龄（僵尸判据同源），
-		// SUSPENDED = max(业务, 心跳) 的年龄 —— 否则"挂起三天"会被读成"三天没动"。
-		long heartbeatAtMs = this.store.lastBeatAtMs(runId);
-		long livenessAtMs = RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
-				? Math.max(activeAtMs, heartbeatAtMs) : activeAtMs;
-		item.put("activeAtMs", activeAtMs);
-		item.put("activeAgeMs", System.currentTimeMillis() - livenessAtMs);
-		item.put("lastHeartbeatAtMs", heartbeatAtMs);
-		item.put("zombieAgeThresholdMs", this.properties.getResume().getZombieAge().toMillis());
-		item.put("cancelled", cancelled);
-		item.put("zombieRunning", isZombieRunning(snapshot, activeAtMs));
-		item.put("unresolvedExternal", pendingIds(pendings, true));
-		return item;
-	}
-
-	/**
-	 * <b>恢复扫描的轻量投影</b>：只保留"该不该接管"的判据字段。
-	 *
-	 * <h2>省掉的是什么、为什么能省</h2>
-	 * API 列表面（{@link #listRun}）要展示明细，因此带 {@code ledgerCounts}（C65 后只读
-	 * {@code ai:idem} 里的小型元数据投影，不再 {@code LRANGE 0 -1} 整份台账）、{@code messageCount}、
-	 * 心跳时刻与逐条 {@code pending} 载荷；
-	 * 恢复扫描只问"取消 / 终态 / 未决外部输入 / 僵尸 / 活动锚点"，这些字段一个也不读：
-	 * <ul>
-	 * <li>{@code ledgerCounts}：每轮一次 {@code LLEN} + 一次 {@code HGETALL}。{@code HGETALL} 的复杂度是
-	 *     O(索引 HASH 的字段数)，字段数与台账长度<b>同阶</b>（每条工具执行一个索引字段 + 一条投影字段），
-	 *     因此读侧代价仍随台账长度线性增长；省掉的是 {@code resultText} 正文的网络传输与整份大 JSON 的
-	 *     重复解析。候选越多越慢的"正文全表读"已从列表面移走（审计 S4）；</li>
-	 * <li>{@code lastBeatAtMs}：多一次键读，且只服务 {@code SUSPENDED} 的展示年龄 ——
-	 *     僵尸判据用的是<b>业务</b>活动锚点，心跳本来就不参与（R1-09），恢复侧不读它；</li>
-	 * <li>{@code messageCount}/{@code pending}：只看条数与详情，恢复判据只用 {@code pendingUnresolved}/
-	 *     {@code unresolvedExternal}（同一份 {@code pendings} 派生，不多读一次）。</li>
-	 * </ul>
-	 *
-	 * <p><b>安全判据一个不少</b>：{@code cancelled}（Redis 为准的取消旗标）、{@code status}（终态）、
-	 * {@code pendingUnresolved}/{@code unresolvedExternal}（未决外部项）、
-	 * {@code activeAtMs}（业务活动锚点）与 {@code zombieRunning}（超龄 RUNNING）都在。
-	 */
-	private Map<String, Object> recoveryRun(String runId, long tenantId, long userId, long expectedDueAtMs) {
-		RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
-				: this.store.get(runId);
-		if (snapshot == null) {
-			return null;
-		}
-		List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
-		CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
-		if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
-			// 与列表面同一口径：UNKNOWN 按"未取消"继续，但绝不当成"已确认未取消"写回任何状态。
-			if (log.isDebugEnabled()) log.debug("discovery: cancel state unknown, continuing scan as not cancelled runId={}", runId);
-		}
-		long activeAtMs = activeAtMs(snapshot);
-		if (RunSnapshot.isTerminal(snapshot.getStatus())) {
-			this.store.isRecoveryCandidateRemoved(runId, tenantId, userId, expectedDueAtMs);
-		}
-		else {
-			this.store.isRecoveryCandidateDeferred(runId, tenantId, userId, expectedDueAtMs,
-					System.currentTimeMillis() + this.properties.getResume().getZombieAge().toMillis());
-		}
-		Map<String, Object> item = new LinkedHashMap<>();
-		item.put("runId", runId);
-		item.put("tenantId", snapshot.getTenantId());
-		item.put("userId", snapshot.getUserId());
-		item.put("status", snapshot.getStatus());
-		item.put("updatedAtMs", snapshot.getUpdatedAtMs());
-		item.put("dueAtMs", expectedDueAtMs);
-		item.put("activeAtMs", activeAtMs);
-		item.put("cancelled", cancelState == CancellationRegistry.CancelState.CANCELLED);
-		item.put("zombieRunning", isZombieRunning(snapshot, activeAtMs));
-		item.put("pendingUnresolved", pendingIds(pendings, false));
-		item.put("unresolvedExternal", pendingIds(pendings, true));
-		return item;
-	}
-
-	/**
-	 * 未决条目 id（{@code externalOnly=true} ⇒ 只留外部项：确认门/前端工具）。
-	 * 两条投影共用，避免"列表面与恢复面各写一套过滤"慢慢走偏。
-	 */
-	private static List<String> pendingIds(List<PendingToolCall> pendings, boolean externalOnly) {
-		return pendings.stream()
-			.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-			.filter(pending -> !externalOnly || !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-			.map(PendingToolCall::getToolCallId)
-			.toList();
-	}
-
-	/** RUNNING 且业务活动已超龄 ⇒ 僵尸轮（两条投影同一判据、同一窗口）。 */
-	private boolean isZombieRunning(RunSnapshot snapshot, long activeAtMs) {
-		return RunSnapshot.RUNNING.equals(snapshot.getStatus())
-				&& System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge().toMillis();
-	}
-
-	/**
-	 * 该轮的"活跃时刻"（R3 裁决 / R1-09）：取<b>较新者</b> ——
-	 * 快照 {@code updatedAtMs}（工具落定/挂起/终态写入的时刻）与
-	 * {@link RunStore#lastActivityAtMs(String)}（最后一条<b>非心跳</b>业务帧的时刻）。
-	 *
-	 * <p>
-	 * 为什么必须双条件：快照只在"轮次结构变化"时刷新，<b>长流式轮次</b>（一次模型调用吐几十秒正文、
-	 * 中途不落定任何工具）会让 {@code updatedAtMs} 长时间不动 —— 只看它就会把正在流式产出的活轮
-	 * 判成僵尸并强行接管（第二次执行同一轮）。业务帧时间戳覆盖了流式与工具帧，两者取较新即
-	 * "只要有业务前进就不算僵尸"。
-	 *
-	 * <p>
-	 * <b>为什么不用 {@link RunStore#lastEventAtMs(String)}</b>：那个口径包含心跳（"进程还活着"），
-	 * 而僵尸判据问的是"<b>业务</b>是否还在前进"。心跳一拍就刷新会让卡死的轮永远年轻（R1-09 的
-	 * "心跳掩盖卡死"）。挂起等人的轮状态是 {@code SUSPENDED}，本来就不在本判据的 RUNNING 分支里。
-	 */
-	public long activeAtMs(RunSnapshot snapshot) {
-		long lastEvent = this.store.lastActivityAtMs(snapshot.getRunId());
-		return Math.max(snapshot.getUpdatedAtMs(), lastEvent);
-	}
-
-	/** 单轮明细（台账 + 待决条目 + 历史角色序列）。 */
-	public Map<String, Object> describe(String runId) {
-		RunSnapshot snapshot = this.store.get(runId);
-		if (snapshot == null) {
-			return Map.of("exists", false);
-		}
-		List<Message> history = this.codec.deserializeAll(snapshot.getMessageJson());
-		List<String> roles = history.stream()
-			.map(message -> message.getMessageType().name())
-			.collect(Collectors.toList());
-		List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
-		Map<String, Object> out = new LinkedHashMap<>();
-		out.put("exists", true);
-		out.put("snapshot", snapshot.asMap());
-		out.put("context", snapshot.getContext());
-		out.put("historyRoles", roles);
-		out.put("inFlight", snapshot.getInFlightToolCalls().stream().map(PendingToolCall::asMap).toList());
-		out.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
-		List<Map<String, Object>> ledger = this.store.ledger(runId);
-		out.put("ledger", ledger);
-		// C65：同一路径只读一次台账 —— 计数从已读出的记录派生，不再触发第二次全表读 + 解析。
-		out.put("ledgerCounts", RunStore.ledgerCountsOf(ledger));
-		out.put("instanceId", this.store.instanceId());
-		// 批次2（AR-01 / AR-09）：**失败现场**只读判据。
-		// 全部来自 Redis（快照 + 台账 + 待决条目），不新增 DB 读写。
-		out.put("failureScene", failureScene(snapshot, pendings, history));
-		out.put("keys", describeKeys(runId, snapshot));
-		return out;
-	}
-
-	/**
-	 * 失败现场（只读、只来自 Redis）：{@code code/message/partialChars/toolCallsSettled/ledgerCount}。
-	 *
-	 * <p><b>边界（AR-01）</b>：失败现场<b>不</b>依赖 DB 新增列/写入 —— 快照的 {@code error} 与帧归档
-	 * 就是现场本身；超过 24h（Redis 运行态到期）后不可恢复，这是如实登记的限制。
-	 */
-	private Map<String, Object> failureScene(RunSnapshot snapshot, List<PendingToolCall> pendings,
-			List<Message> history) {
-		Map<String, Object> scene = new LinkedHashMap<>();
-		scene.put("status", snapshot.getStatus());
-		scene.put("error", snapshot.getError());
-		scene.put("finalText", snapshot.getFinalText());
-		scene.put("partialChars", StringUtils.length(snapshot.getAssistantContent()));
-		scene.put("toolCallsSettled", pendings.stream()
-			.noneMatch(pending -> PendingToolCall.PENDING.equals(pending.getStatus())
-					&& !PendingToolCall.KIND_BACKEND.equals(pending.getKind())));
-		scene.put("toolPairsComplete", toolPairsComplete(history));
-		scene.put("attempts", snapshot.getAttempts());
-		return scene;
-	}
-
-	/**
-	 * 运维面键表（同一个入口拼键，不另拼字符串）。
-	 *
-	 * <p>批③a 增 {@code lockTask} / {@code lockJob}：资源互斥锁（{@link LeaseKeys}）按 taskId 记，
-	 * 与 runId 记的 {@code lease}/{@code fence} <b>不是同一族键</b>。上下文里没有 taskId（页面轮）时
-	 * 两个值都是 null（键仍在，便于前端/运维面按固定键面取值）；有 taskId 但无 step/taskType 时
-	 * 只有 {@code lockJob} 为 null。
-	 */
-	private Map<String, Object> describeKeys(String runId, RunSnapshot snapshot) {
-		Map<String, Object> keys = new LinkedHashMap<>();
-		keys.put("state", this.store.runKey(runId));
-		keys.put("pending", this.store.pendingKey(runId));
-		keys.put("ledger", this.store.ledgerKey(runId));
-		keys.put("xevents", this.store.xeventsKey(runId));
-		keys.put("claim", this.store.claimKey(runId));
-		// B23L1 批②b：fencing 的两个契约键也要能在运维面上直接对上
-		keys.put("lease", this.store.runLeaseKey(runId));
-		keys.put("fence", this.store.fenceKey(runId));
-		// B23L1 批③a：L1 资源互斥的两把锁（按 taskId 记，随 TTL 自清，轮次回收不清）
-		Long taskId = contextTaskId(snapshot);
-		String jobType = contextJobType(snapshot);
-		keys.put("lockTask", taskId == null || taskId <= 0L ? null : LeaseKeys.task(taskId));
-		keys.put("lockJob", taskId == null || taskId <= 0L || jobType == null ? null : LeaseKeys.job(taskId, jobType));
-		return keys;
-	}
-
-	/** 快照上下文里的 taskId（null = 页面轮/旧数据）。 */
-	private static Long contextTaskId(RunSnapshot snapshot) {
-		Object value = snapshot.getContext().get("taskId");
-		if (value instanceof Number number) {
-			return number.longValue();
-		}
-		try {
-			return value == null ? null : Long.valueOf(String.valueOf(value));
-		}
-		catch (NumberFormatException ex) {
-			return null;
-		}
-	}
-
-	/**
-	 * 快照上下文里的作业类型（JOBTYPE 的<b>来源</b>）：取 {@code step}，缺省取 {@code taskType}。
-	 *
-	 * <p>两者在既有上下文里同义（{@code AiContext.of(page, taskType, step, taskId, extra)}：
-	 * 导出页 {@code taskType=EXPORT, step=EXPORT}）；大写归一交给 {@link LeaseKeys#normalizeJobType}。
-	 */
-	private static String contextJobType(RunSnapshot snapshot) {
-		for (String field : List.of("step", "taskType")) {
-			Object value = snapshot.getContext().get(field);
-			if (StringUtils.isNotBlank(ObjectUtils.toString(value, (String) null))) {
-				return String.valueOf(value);
-			}
-		}
-		return null;
-	}
-
-	public ResumeResult resume(String runId) {
-		// 调用线程已用 AiTrace#markResumeReason 标注过的，尊重它；未标注（运维端点 / 单测直调）按 manual 记。
-		String marked = AiTrace.currentResumeReason();
-		return resumeWithReason(runId, false, StringUtils.defaultIfBlank(marked, RESUME_MANUAL),
-				ErrorBodyFactory.requestLocale());
-	}
-
-	/**
-	 * 续跑（带<b>请求 locale</b>）：HTTP 入口在提交任务前取好 {@link ErrorBodyFactory#requestLocale()}，
-	 * 由驱动线程 set/reset —— 工作线程不继承请求上下文，否则 en 用户的续跑错误/回答语言恒为中文。
-	 *
-	 * @param replyLocale 请求 locale；{@code null} = 无请求上下文（启动扫描/单测），不设置线程 locale
-	 */
-	public ResumeResult resume(String runId, Locale replyLocale) {
-		String marked = AiTrace.currentResumeReason();
-		return resumeWithReason(runId, false, StringUtils.defaultIfBlank(marked, RESUME_MANUAL),
-				replyLocale);
-	}
-
-	/**
-	 * 续跑（带<b>续跑原因</b>）：原因只影响日志面（{@code turn_start.resumeReason}），不改变续跑判据。
-	 *
-	 * <p>为什么不重载 {@code resume(...)}：第三个参数写成 {@code String} 会让既有的
-	 * {@code resume(runId, false, null)} 变成"String 与 Lease 都匹配"的歧义调用（编译红）。
-	 * 四个取值见 {@link #RESUME_STARTUP} / {@link #RESUME_MANUAL} / {@link #RESUME_DEADCARD} /
-	 * {@link #RESUME_REATTACH}。
-	 */
-	public ResumeResult resumeWithReason(String runId, String resumeReason) {
-		return resumeWithReason(runId, false, resumeReason, ErrorBodyFactory.requestLocale());
-	}
-
-	/**
-	 * 续跑（幂等 + 互斥 + 取消优先 + 可选僵尸接管）—— <b>旧签名</b>：自抢续跑权租约。
-	 *
-	 * <p>既有调用方（{@code StartupResumeRunner} 的启动/僵尸扫描、{@code AiController} 的运维端点）
-	 * <b>零改动</b>即获得 fencing：
-	 * <ol>
-	 * <li>抢 {@code ai:lease:run:<runId>}；抢不到（且本仓有租约设施）⇒ {@code LEASE_HELD_ELSEWHERE}，
-	 * 什么都不动；无租约设施（单测/降级装配）⇒ 走原路径，由进程内互斥兜底；</li>
-	 * <li>走带租约重载 {@link #resume(String, boolean, LeaseService.Lease)}；</li>
-	 * <li>非 {@code ACCEPTED} 且结局在<b>归还白名单</b>内（{@link Outcome#releasesLease()}，
-	 * {@code IN_PROGRESS} 与 {@code LEASE_HELD_ELSEWHERE} 不在其中 = 有人正在用这一任）
-	 * ⇒ 当场还租；{@code ACCEPTED} ⇒ 交续租调度器（终态由 {@code RunStore.save} 释放）。
-	 * <b>三个条件都必要</b>：
-	 * <ul>
-	 * <li><b>只还自己创建的</b>（{@code AcquireResult#created()}）—— 可重入命中的租约属于等待方
-	 * 或另一个并发调用方；</li>
-	 * <li><b>只在无人接管的结局下还</b>（L-19）—— 创建者也可能输掉 {@code resuming} 互斥
-	 * （{@code IN_PROGRESS}），此时它手里的租约正被胜方使用，"创建者"身份并不等于"可以删"。</li>
-	 * <li><b>重挂给旧驱动时不还</b>（{@code LEASE_REARMED}）—— 这一任已被本进程仍在跑的旧驱动接手，
-	 * 还租等于把它围栏在外且无人驱动；后续续租登记失败的异常分支同样按此判定，不按"创建者"归还。</li>
-	 * </ul>
-	 * 合起来才是完整口径：<b>租约跟"这一轮还有没有人管"走，不跟"是谁建的"走</b>。</li>
-	 * </ol>
-	 *
-	 * @param forceTakeover 仅由<b>启动自动续跑</b>使用的僵尸接管开关（N3）：为 true 时允许
-	 * 接管"状态仍是 {@code RUNNING} 但已超龄"的轮次（上一进程死在模型调用中间留下的僵尸轮）。
-	 * 运维端点不传这个开关（{@code false}），保持"RUNNING 一律 409"的保守语义。
-	 */
-	public ResumeResult resume(String runId, boolean forceTakeover) {
-		// 调用方只有启动扫描：僵尸接管 = 死卡（deadcard），常规启动扫描 = startup
-		return resumeWithReason(runId, forceTakeover, forceTakeover ? RESUME_DEADCARD : RESUME_STARTUP);
-	}
-
-	/** 续跑（原因 + 僵尸接管开关）：自抢续跑权租约，其余与 {@link #resume(String, boolean, LeaseService.Lease)} 同构。 */
-	public ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason) {
-		return resumeWithReason(runId, forceTakeover, resumeReason, ErrorBodyFactory.requestLocale());
-	}
-
-	private ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason,
-			Locale replyLocale) {
-		// ===== 身份作用域：抢租 / 还租 / 续租判据都必须落在<b>记录身份</b>下 =====
-		// 租约键（{@code ai:lease:run:{<t>:<u>:run:<id>}}）由身份拼出：抢租发生在读快照之前，
-		// 若用调用线程身份（定时线程 = 无身份）拼键，抢到的是一把 legacy 租约 —— 真实那一轮既没被围栏，
-		// 又会被另一实例当成"无人持有"再次接管（双驱动）。因此身份必须在<b>进入本方法时</b>就定下来：
-		// 调用方（启动扫描 = 索引成员身份 / 确认门 = 交棒时的记录身份 / HTTP = 请求身份）负责给出。
-		TenantUser identity = RequestContextUtils.currentOrNull();
-		// 进程内互斥的本地键（身份 + runId）：同 runId 不同身份是两轮，不得互相判成 IN_PROGRESS。
-		// 键在<b>入口</b>定一次并一路沿用 —— 中途的 RunIdentityScope 会按记录身份覆盖线程身份
-		// （旧记录 0/0 时甚至是清空），若在 finally 里现取，摘除键会与登记键不同（互斥位永久占住）。
-		String resumeKey = LocalRunKey.of(identity, runId);
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-			// ===== 接管前初检（M-1）=====
-			// 抢租会把 fence 推到新 epoch（旧驱动从此只读），所以"驱动还活着"的判定必须在<b>还没夺权</b>时做。
-			// 否则"先抢租 → 复核发现驱动还活 → 拒绝并把租约还掉"的净结果是
-			// 「fence 已推进 + 租约被删 + 无人驱动」：原驱动被围栏在外，这一轮再也没人推。
-			if (forceTakeover) {
-				ResumeResult refused = takeoverPreCheck(runId);
-				if (refused != null) {
-					return refused;
-				}
-			}
-			LeaseService leases = this.store.leaseService();
-			boolean fresh = false;
-			LeaseService.Lease lease = null;
-			if (leases != null) {
-				LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
-				if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-					return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
-							"reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
-				}
-				// I4：设施不可用（{@code UNAVAILABLE}）⇒ 走"无租约降级"这条既有路径（进程内互斥放行），
-				// 与 leaseService == null 完全同义。把"我不知道有没有主"报成"别人持有"会让一次 Redis 抖动
-				// 把启动续跑/运维续跑全部 409 掉。
-				// 所有权口径：<b>谁创建谁释放</b>。只有真正建出这一任的调用方才允许交调度器/还租；
-				// 命中现值（同主重入）时 created=false —— 用"抢占前 epoch"推断是错的：并发同主双抢时
-				// 两边读到同一个前置状态，于是败方（撞 resuming 互斥 → IN_PROGRESS）会去还胜方的租约，
-				// 把胜方的 fencing 写打回 plain SET（harness lease-scripts 实锤）。
-				lease = acquired.lease();
-				fresh = acquired.created();
-			}
-			ResumeResult result;
-			try {
-				result = resumeInternal(runId, resumeKey, forceTakeover, lease, fresh, resumeReason, replyLocale);
-			}
-			catch (RuntimeException ex) {
-				if (fresh) {
-					this.store.releaseRunLease(runId);
-				}
-				throw ex;
-			}
-			if (fresh) {
-				handleFreshLease(runId, leases, lease, fresh, result, resumeKey, identity);
-			}
-			return result;
-		}
-	}
-
-	private void handleFreshLease(String runId, LeaseService leases, LeaseService.Lease lease, boolean fresh,
-			ResumeResult result, String resumeKey, TenantUser identity) {
-		// 本任租约是否已"重挂给仍在跑的旧驱动"（LEASE_REARMED）：重挂后租约由旧驱动继续持有，
-		// 它<b>不是</b>"本次创建失败、可归还"的那一任 —— 归还 = 把旧驱动围栏在外 + 这一轮无人驱动。
-		boolean rearmed = false;
-		try {
-			if (result.outcome() == Outcome.ACCEPTED) {
-				// I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
-				// 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
-				// 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
-				// 判据在续租线程上执行：身份随租约携带（不是"那一拍线程碰巧是谁"）；
-				// 互斥键也用<b>本拍登记的那一把</b>（续租线程没有身份，现取会落到 legacy 桶）。
-				leases.markDriving(lease,
-						() -> this.resuming.containsKey(resumeKey) && isSnapshotNotTerminal(runId, identity),
-						identity);
-			}
-			else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
-				// ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
-				// 还租会让旧驱动被 fence 围栏在外、且这一轮无人驱动；新起驱动又会共享同一份进程内租约视图
-				// （旧驱动的写照样放行）⇒ 双驱动。故把这一任交给旧驱动续租：
-				// 先摘掉可能仍是旧 epoch 的续租任务（它会在下一拍判 LOST 自行停，留着会让新任务登记不上），
-				// 再按"本进程仍有该轮驱动登记 && 快照非终态"起续租 —— 驱动收尾后下一拍即停续租并还租。
-				// 置位必须早于下面两步：stopDriving 之后的任何异常都不再走"按所有权归还"（见 catch）。
-				rearmed = true;
-				leases.stopDriving(lease.key(), lease.owner());
-				leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
-						&& isSnapshotNotTerminal(runId, identity), identity);
-				log.info("resume authority reattached to live driver in this process "
-						+ "runId={} epoch={} (no new driver, lease not released)", runId,
-						lease.epoch());
-			}
-			else if (result.outcome().isLeaseReleasable()) {
-				// L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
-				// 创建者输掉 resuming 互斥时，它手里这份租约仍是胜者落库前用的那一任，
-				// 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
-				this.store.releaseRunLease(runId);
-			}
-		}
-		catch (RuntimeException ex) {
-			if (!rearmed) {
-				// 本次创建（fresh=true）且未重挂的租约没交成续租任务：按<b>所有权</b>归还后再抛
-				// （releaseIfHeld 只在仍是本实例那一任时才删，不碰别人的租约）。留着等 TTL
-				// 会多出一段"无人续租、也没人知道它已无主"的窗口。
-				this.store.releaseRunLease(runId);
-				log.warn("resume renew registration failed, returning created lease runId={} epoch={}", runId,
-						lease == null ? -1L : lease.epoch(), ex);
-			}
-			else {
-				// LEASE_REARMED：这一任已经属于仍在跑的旧驱动，归还会把旧驱动围栏在外且无人驱动。
-				// 续租任务没登记上时宁可让租约按 TTL 自然到期（旧驱动的写随即被 fence 拦住），也不删它。
-				log.warn("resume reattach renew registration failed, keeping lease runId={} epoch={} (old driver still on this "
-						+ "run; releasing would leave the fence out with no driver; waiting TTL or old driver cleanup)", runId,
-						lease == null ? -1L : lease.epoch(), ex);
-			}
-			throw ex;
-		}
-	}
-
-	/**
-	 * <b>接管前初检</b>（M-1）：zombie 接管（{@code forceTakeover=true}）在<b>抢租之前</b>先判一次
-	 * "驱动是否还活着"，活着就<b>什么都不动</b>地拒绝（不抢租 ⇒ fence 不推进、不还租）。
-	 *
-	 * <p>两条证据（与抢租后的复核同源，只是提前）：
-	 * <ol>
-	 * <li><b>本进程的驱动方仍持有效租约</b>（{@code isDriving} && 进程内 epoch &gt; 0）——
-	 *     登记本身只说明"线程还在"，租约还在才说明"它仍是这一轮的主人"；</li>
-	 * <li><b>业务活动锚点仍在僵尸窗口内</b>（快照 RUNNING 且 {@code activeAtMs} 距今 ≤
-	 *     {@code app.ai.resume.zombie-age}）—— 判活方那一拍之后业务又前进了。</li>
-	 * </ol>
-	 *
-	 * <p>返回 {@code null} = 通过初检（继续抢租，按 fresh 决定后续）；不通过 = {@code ALREADY_RUNNING}。
-	 */
-	private ResumeResult takeoverPreCheck(String runId) {
-		if (this.chatService != null && this.chatService.isDriving(runId) && this.store.heldRunEpoch(runId) > 0L) {
-			return refuseTakeover(runId, "DRIVER_ALIVE_IN_PROCESS", null, null);
-		}
-		// 租约此刻已被某方持有（别人 / 或本进程别的驱动方）：不再做活动初检，把结论交给抢租与抢租后的复核 ——
-		// 别人持有 ⇒ LEASE_HELD_ELSEWHERE（比"活动还新"更具体、也是既有对外语义）；
-		// 本进程重入（created=false）⇒ 抢租后按 !fresh 拒绝（不动租约）。
-		LeaseService facility = this.store.leaseService();
-		if (facility != null) {
-			boolean leaseHeld;
-			try {
-				leaseHeld = facility.isHeld(this.store.runLeaseKey(runId));
-			}
-			catch (RuntimeException ex) {
-				// 探针读不出来 ≠ 没人持有：按"有人持有"处理，把结论交给抢租脚本（它会给出权威答案）
-				if (LogSampling.canAcquire("resume-pre-takeover-catch")) log.warn("pre-takeover lease read failed runId={} (left to acquire decision)", runId, ex);
-				leaseHeld = true;
-			}
-			if (leaseHeld) {
-				return null;
-			}
-		}
-		RunSnapshot snapshot;
-		try {
-			snapshot = this.store.get(runId);
-		}
-		catch (RuntimeException ex) {
-			// 读不出来不是"可以接管"：交给常规入口的 STATE_UNKNOWN 等既有分支处理（这里不改变方向）
-			if (LogSampling.canAcquire("resume-pre-takeover-catch")) log.warn("pre-takeover snapshot read failed runId={} (falling back to normal entry)", runId, ex);
-			return null;
-		}
-		if (snapshot == null || !RunSnapshot.RUNNING.equals(snapshot.getStatus())) {
-			return null;
-		}
-		long activeAtMs = activeAtMs(snapshot);
-		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
-		long activeAgeMs = System.currentTimeMillis() - activeAtMs;
-		if (activeAgeMs <= zombieAgeMs) {
-			return refuseTakeover(runId, "ACTIVITY_ADVANCED", activeAtMs, activeAgeMs);
-		}
-		return null;
-	}
-
-	/** 接管否决的统一出口（初检与抢租后复核共用；形态 = {@code ALREADY_RUNNING} + 具名 reason）。 */
-	private ResumeResult refuseTakeover(String runId, String reason, Long activeAtMs, Long activeAgeMs) {
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("runId", runId);
-		body.put("resumed", false);
-		body.put("reason", reason);
-		if ("DRIVER_ALIVE_IN_PROCESS".equals(reason)) {
-			body.put("driverAlive", true);
-			log.warn("zombie takeover denied runId={}: driver in this process still holds the lease (no steal, no release, driver unaffected)",
-					runId);
-		}
-		else {
-			body.put("activeAtMs", activeAtMs);
-			body.put("activeAgeMs", activeAgeMs);
-			log.warn("zombie takeover denied runId={}: business activity within zombie "
-					+ "window ({}ms <= threshold {}ms) - no steal, leave to original driver",
-					runId, activeAgeMs, this.properties.getResume().getZombieAge().toMillis());
-		}
-		body.put("instanceId", this.store.instanceId());
-		return new ResumeResult(Outcome.ALREADY_RUNNING, body);
-	}
-
-	/**
-	 * 续跑（<b>带租约重载</b>，B23L1 批②b）：调用方已经是续跑权的主人，本方法<b>不再自抢</b>，
-	 * 只校验归属 —— {@code LeaseService#verifyHeld(key, epoch)}（<b>对着 Redis 真值</b>，一次往返）。
-	 *
-	 * <p>为什么不用"抢"来校验：确认门在等待期就持租（交棒后继续持有），自抢会走可重入短路
-	 * （同一个 epoch、恒成功），于是"拿着过期 epoch 的陈旧驱动方"也能进来 —— 那正是 fencing 要拦的。
-	 * 为什么也不只比对 {@code heldRunEpoch}（进程内视图）：TTL 到期被别人接管后，视图要等下一次
-	 * 续租失败才会清，这个窗口里视图会说谎，而本方法正是"要不要驱动这一轮"的入口。
-	 * 对真值校验才能让"租约已被别的实例接管"在入口处变成 {@link Outcome#LEASE_HELD_ELSEWHERE}；
-	 * 设施不可用（{@code Hold.UNAVAILABLE}）按无租约降级放行（I4 同口径）。
-	 *
-	 * <p>租约的收尾职责在<b>调用方</b>：本方法不 {@code markDriving}、不 {@code release}
-	 * （确认门在 {@code runResume} 里做；旧签名在自己那一层做）。
-	 *
-	 * @param lease 调用方持有的租约；{@code null} = 无租约降级（单测/无 Redis 装配），
-	 * 此时只由进程内互斥排他 —— 与批②b 之前的语义一致
-	 */
-	public ResumeResult resume(String runId, boolean forceTakeover, LeaseService.Lease lease) {
-		// 决策回灌/挂起重挂等入口：未显式标注原因时按 reattach 记（"其余续跑入口"的兜底口径）。
-		// fresh=false：租约由调用方持有（本方法不抢也不还），抢租后的复核因此可以安全否决
-		// （拒绝不动租约 ⇒ 不会出现"fence 已推进 + 无人驱动"，见 {@link #takeoverPreCheck}）。
-		return resumeInternal(runId, LocalRunKey.of(runId), forceTakeover, lease, false, RESUME_REATTACH,
-				ErrorBodyFactory.requestLocale());
-	}
-
-	/**
-	 * 续跑的<b>状态写被拒</b>后的 typed 结局（N4）：区分"取消已先到"与"续跑权已丢/不可确认"。
-	 *
-	 * <p>为什么必须再读一次：{@link RunStore#saveStatusUnlessCancelled} 的 {@code false} 同时覆盖取消守卫
-	 * 与只读写门（丢租 / 设施不可用 / fence 已被接管）。取消 ⇒ {@code cancelStateOutcome} 的既有取消
-	 * 收尾（{@code ALREADY_CANCELLED} / {@code CANCEL_STATE_UNKNOWN}）；否则按状态未知收口，
-	 * <b>两者都不驱动</b>。
-	 */
-	private ResumeResult resumeStatusWriteRefused(String runId, Map<String, Object> body) {
-		ResumeResult cancelled = cancelStateOutcome(runId, body);
-		if (cancelled != null) {
-			return cancelled;
-		}
-		body.put("resumed", false);
-		body.put("reason", "STATE_UNKNOWN");
-		body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-		return new ResumeResult(Outcome.STATE_UNKNOWN, body);
-	}
-
-	/** 历史里的 {@code tool_calls} 与 {@code tool} 响应 id 集合必须相等（配对完整）。 */
-	static boolean toolPairsComplete(List<Message> history) {
-		Set<String> calls = new LinkedHashSet<>();
-		Set<String> responses = new LinkedHashSet<>();
-		for (Message message : ObjectUtils.defaultIfNull(history, List.<Message>of())) {
-			if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-				for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
-					if (call.id() != null) {
-						calls.add(call.id());
-					}
-				}
-			}
-			if (message instanceof ToolResponseMessage toolResponse && toolResponse.getResponses() != null) {
-				for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
-					if (response.id() != null) {
-						responses.add(response.id());
-					}
-				}
-			}
-		}
-		return calls.equals(responses);
-	}
-
-	/**
-	 * 续跑失败的用户面短句（R-08 + 4B）：按当前线程 locale 取 {@code messages_en}；未注入
-	 * MessageSource 时走 en 常量，绝不回落到异常原文。
-	 */
-	String resumeFailedMessage() {
-		if (!ReplyLanguage.current().english()) {
-			return AI_RESUME_FAILED_MESSAGE;
-		}
-		if (this.messageSource != null) {
-			try {
-				return this.messageSource.getMessage("error." + ErrorCodes.AI_RESUME_FAILED, null, Locale.ENGLISH);
-			}
-			catch (NoSuchMessageException ex) {
-				if (LogSampling.canAcquire("resume-message-bundle-catch")) log.warn("messages_en missing error.{}, falling back to en whitelist", ErrorCodes.AI_RESUME_FAILED, ex);
-			}
-		}
-		return AI_RESUME_FAILED_MESSAGE_EN;
-	}
-
-	private ResumeResult resumeInternal(String runId, String resumeKey, boolean forceTakeover,
-			LeaseService.Lease lease, boolean freshLease, String resumeReason, Locale replyLocale) {
-		ResumeResult leaseDenied = verifyResumeLease(runId, lease);
-		if (leaseDenied != null) {
-			return leaseDenied;
-		}
-		if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
-			return new ResumeResult(Outcome.IN_PROGRESS, Map.of("runId", runId, "resumed", false,
-					"reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
-		}
-		ResumeState state = new ResumeState(runId, resumeKey, lease, freshLease, resumeReason, replyLocale);
-		try {
-			ResumeResult result = loadResume(state);
-			if (result != null) return result;
-			result = checkResumeAdmission(state, forceTakeover);
-			if (result != null) return result;
-			restoreResumeHistory(state);
-			result = rebuildResumeTools(state);
-			if (result != null) return result;
-			result = parkResumeIfDue(state);
-			if (result != null) return result;
-			result = compactResumeHistory(state);
-			if (result != null) return result;
-			return completeResumeHandoff(state);
-		}
-		finally {
-			finishResume(state);
-		}
-	}
-
-	private ResumeResult verifyResumeLease(String runId, LeaseService.Lease lease) {
-		if (lease == null) {
-			return null;
-		}
-		LeaseService leases = this.store.leaseService();
-		LeaseService.Hold hold = leases == null ? LeaseService.Hold.UNAVAILABLE
-				: leases.verifyHeld(lease.key(), lease.epoch(), lease.owner());
-		if (hold != LeaseService.Hold.LOST) {
-			return null;
-		}
-		return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
-				"reason", "LEASE_HELD_ELSEWHERE", "staleEpoch", lease.epoch(), "heldEpoch",
-				this.store.heldRunEpoch(runId), "instanceId", this.store.instanceId()));
-	}
-
-	private ResumeResult loadResume(ResumeState state) {
-		state.snapshot = this.store.get(state.runId);
-		if (state.snapshot == null) {
-			return new ResumeResult(Outcome.NOT_FOUND, Map.of("runId", state.runId, "resumed", false,
-					"reason", "UNKNOWN_RUN", "instanceId", this.store.instanceId()));
-		}
-		state.identityScope = RunIdentityScope.open(state.snapshot.getTenantId(), state.snapshot.getUserId());
-		state.sessionId = state.snapshot.getSessionId();
-		AiTrace.bind(state.runId, state.sessionId);
-		AiTrace.markResumeReason(state.resumeReason);
-		try {
-			state.pendings = this.store.pendings(state.runId);
-		}
-		catch (RuntimeException ex) {
-			log.warn("resume entry: pending entries read failed runId={} (rejecting as unknown, no drive)", state.runId, ex);
-			state.body.put("runId", state.runId);
-			state.body.put("resumed", false);
-			state.body.put("reason", "STATE_UNKNOWN");
-			state.body.put("code", com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE);
-			return new ResumeResult(Outcome.STATE_UNKNOWN, state.body);
-		}
-		state.body.put("runId", state.runId);
-		state.body.put("sessionId", state.sessionId);
-		state.body.put("statusBeforeResume", state.snapshot.getStatus());
-		state.body.put("instanceId", this.store.instanceId());
-		return null;
-	}
-
-	private ResumeResult checkResumeAdmission(ResumeState state, boolean forceTakeover) {
-		ResumeResult result = cancelStateOutcome(state.runId, state.body);
-		if (result != null) return result;
-		result = terminalResumeResult(state);
-		if (result != null) return result;
-		result = runningResumeResult(state, forceTakeover);
-		if (result != null) return result;
-		result = providerResumeResult(state);
-		if (result != null) return result;
-		result = unresolvedResumeResult(state);
-		if (result != null) return result;
-		result = sessionGateResumeResult(state);
-		if (result != null) return result;
-		return authorityResumeResult(state);
-	}
-
-	private ResumeResult terminalResumeResult(ResumeState state) {
-		if (!RunSnapshot.isTerminal(state.snapshot.getStatus())) {
-			return null;
-		}
-		boolean cancelled = RunSnapshot.CANCELLED.equals(state.snapshot.getStatus());
-		boolean done = RunSnapshot.DONE.equals(state.snapshot.getStatus());
-		state.body.put("resumed", false);
-		state.body.put("reason", cancelled ? "ALREADY_CANCELLED" : done ? "ALREADY_DONE" : "ALREADY_FAILED");
-		return new ResumeResult(cancelled ? Outcome.ALREADY_CANCELLED : Outcome.ALREADY_DONE, state.body);
-	}
-
-	private ResumeResult runningResumeResult(ResumeState state, boolean forceTakeover) {
-		if (!RunSnapshot.RUNNING.equals(state.snapshot.getStatus())) {
-			return null;
-		}
-		if (!forceTakeover) {
-			state.body.put("resumed", false);
-			state.body.put("reason", "ALREADY_RUNNING");
-			return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
-		}
-		long activeAtMs = activeAtMs(state.snapshot);
-		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
-		long activeAgeMs = System.currentTimeMillis() - activeAtMs;
-		boolean driverAlive = this.chatService != null && this.chatService.isDriving(state.runId);
-		if (driverAlive && state.lease != null) {
-			state.body.put("resumed", false);
-			state.body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
-			state.body.put("driverAlive", true);
-			state.body.put(LEASE_REARMED_KEY, true);
-			log.warn("zombie takeover reclassified as lease reattach runId={} sessionId={}: this process still registers "
-					+ "the driver (shared lease view; a new driver would double-drive) - reattaching to old driver (fresh={})",
-					state.runId, state.sessionId, state.freshLease);
-			return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
-		}
-		ResumeResult denied = activityResumeResult(state, driverAlive, activeAtMs, activeAgeMs, zombieAgeMs);
-		if (denied != null) return denied;
-		log.warn("zombie run takeover runId={} sessionId={} inactive {}ms (snapshot {}ms / last business frame {}ms, threshold {})",
-				state.runId, state.sessionId, System.currentTimeMillis() - activeAtMs,
-				System.currentTimeMillis() - state.snapshot.getUpdatedAtMs(),
-				System.currentTimeMillis() - this.store.lastActivityAtMs(state.runId),
-				this.properties.getResume().getZombieAge());
-		state.body.put("zombieTakeover", true);
-		state.body.put("activeAtMs", activeAtMs);
-		state.body.put("activeAgeMs", activeAgeMs);
-		return null;
-	}
-
-	private ResumeResult activityResumeResult(ResumeState state, boolean driverAlive, long activeAtMs,
-			long activeAgeMs, long zombieAgeMs) {
-		boolean activityAlive = activeAgeMs <= zombieAgeMs;
-		if (!driverAlive && !activityAlive) {
-			return null;
-		}
-		if (state.freshLease) {
-			log.warn("zombie takeover recheck: live driver signs remain (driverAlive={} activeAgeMs={}), but this is a fresh acquire (fence "
-					+ "advanced) with no local driver registration (cross-instance) - taking over runId={} sessionId={} (old writes fenced)",
-					driverAlive, activeAgeMs, state.runId, state.sessionId);
-			return null;
-		}
-		state.body.put("resumed", false);
-		if (driverAlive) {
-			state.body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
-			state.body.put("driverAlive", true);
-			log.warn("zombie takeover recheck denied runId={} sessionId={}: this process still registers "
-					+ "the driver (no lease to reattach: lease=null; no state change) - not taking over",
-					state.runId, state.sessionId);
-			return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
-		}
-		state.body.put("reason", "ACTIVITY_ADVANCED");
-		state.body.put("activeAtMs", activeAtMs);
-		state.body.put("activeAgeMs", activeAgeMs);
-		log.warn("zombie takeover recheck denied runId={} sessionId={}: business activity advanced "
-				+ "after the decision ({}ms <= threshold {}ms: original driver alive) - not taking over",
-				state.runId, state.sessionId, activeAgeMs, zombieAgeMs);
-		return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
-	}
-
-	private ResumeResult providerResumeResult(ResumeState state) {
-		if (StringUtils.isBlank(state.snapshot.getModelId())) {
-			return providerGone(state.runId, state.snapshot, "快照没有冻结模型名");
-		}
-		if (this.aiConfigService == null) {
-			return null;
-		}
-		ResolvedIdentity identity = resolveForResume(state.runId,
-				() -> this.aiConfigService.resolveChatTarget(state.snapshot.getProviderId(), state.snapshot.getModelId()),
-				() -> this.aiConfigService.bindingState(state.snapshot.getProviderId(), state.snapshot.getModelId()));
-		if (identity.unknown()) {
-			return stateUnknown(state.runId, state.snapshot, identity.detail());
-		}
-		if (identity.target() == null) {
-			return providerGone(state.runId, state.snapshot, "该 provider/模型此刻不可用");
-		}
-		return null;
-	}
-
-	private ResumeResult unresolvedResumeResult(ResumeState state) {
-		List<PendingToolCall> unresolved = state.pendings.stream()
-			.filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-			.filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-			.toList();
-		if (unresolved.isEmpty()) {
-			return null;
-		}
-		state.body.put("resumed", false);
-		state.body.put("reason", "PENDING_UNRESOLVED");
-		state.body.put("unresolved", unresolved.stream().map(PendingToolCall::asMap).toList());
-		return new ResumeResult(Outcome.PENDING_UNRESOLVED, state.body);
-	}
-
-	private ResumeResult sessionGateResumeResult(ResumeState state) {
-		if (this.sessionGate == null) {
-			return null;
-		}
-		SessionGate.Busy busy = this.sessionGate.acquire(state.sessionId, state.runId, state.gateToken);
-		if (busy != null && !state.runId.equals(busy.runId())) {
-			state.body.put("resumed", false);
-			state.body.put("reason", "SESSION_BUSY");
-			state.body.put("heldBy", busy.runId());
-			state.body.put("message", "该会话当前有另一轮在跑（park 期间用户又发起了一轮）；"
-					+ "本轮决策已落库，稍后自动重试续跑。");
-			log.info("resume deferred: session gate held by another run runId={} heldBy={} (decision stored; dispatcher retries bounded)",
-					state.runId, busy.runId());
-			return new ResumeResult(Outcome.SESSION_BUSY, state.body);
-		}
-		state.gateHeld.set(true);
-		state.gateSessionId = state.sessionId;
-		return null;
-	}
-
-	private ResumeResult authorityResumeResult(ResumeState state) {
-		LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(state.runId);
-		if (authority == null || !authority.isReadOnly()) {
-			return null;
-		}
-		state.body.put("resumed", false);
-		state.body.put("reason", authority == LeaseService.LeaseAuthority.LOST ? "LEASE_HELD_ELSEWHERE"
-				: "LEASE_UNAVAILABLE");
-		state.body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-		log.warn("resume rejected: write authority {} runId={} (read-only recovery, no progress)", authority, state.runId);
-		return new ResumeResult(authority == LeaseService.LeaseAuthority.LOST ? Outcome.LEASE_HELD_ELSEWHERE
-				: Outcome.STATE_UNKNOWN, state.body);
-	}
-
-	private void restoreResumeHistory(ResumeState state) {
-		AiContext context = AiContext.fromMap(state.snapshot.getContext());
-		List<Message> loaded = new ArrayList<>(this.codec.deserializeAll(state.snapshot.getMessageJson()));
-		boolean hadSystem = SystemMessages.leadingCount(loaded) > 0;
-		state.history = restoreSystem(state.runId, state.sessionId, loaded, context, state.replyLocale);
-		state.body.put("systemRestored", !hadSystem && SystemMessages.leadingCount(state.history) > 0);
-		if (state.history != loaded) {
-			state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
-		}
-		state.nextHopContext = context;
-		state.settledInBatch = new ArrayList<>(state.snapshot.getInFlightToolCalls().size());
-	}
-
-	private ResumeResult rebuildResumeTools(ResumeState state) {
-		if (state.snapshot.getInFlightToolCalls().isEmpty()) {
-			return rebuildWithoutTools(state);
-		}
-		AssistantMessage assistant = rebuildAssistant(state.snapshot);
-		state.history.add(assistant);
-		Prompt prompt = this.chatService.buildResumedPrompt(state.runId, state.sessionId,
-				AiContext.fromMap(state.snapshot.getContext()), new ArrayList<>(state.history));
-		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
-		PendingToolCall haltedBy = null;
-		try {
-			for (PendingToolCall item : state.snapshot.getInFlightToolCalls()) {
-				RebuildItem rebuilt = rebuildResumeTool(state, prompt, item, haltedBy);
-				if (rebuilt.abort() != null) return rebuilt.abort();
-				if (rebuilt.response() != null) responses.add(rebuilt.response());
-				if (rebuilt.label() != null) state.rebuilt.add(rebuilt.label());
-				if (rebuilt.source() != null) {
-					state.settledInBatch.add(rebuilt.source());
-					if (this.toolCallingManager.isBatchHalted(rebuilt.source())) {
-						haltedBy = rebuilt.source();
-						log.warn("resume batch stops on first error runId={} upstream tool={} outcome={} code={}; remaining entries become SKIPPED",
-								state.runId, haltedBy.getName(), haltedBy.effectiveOutcome().wire(), haltedBy.effectiveCode());
-					}
-				}
-			}
-		}
-		finally {
-			this.toolCallingManager.refreshSettledBatchTranscript(state.runId, assistant,
-					state.snapshot.getInFlightToolCalls());
-		}
-		return completeToolRebuild(state, responses);
-	}
-
-	private RebuildItem rebuildResumeTool(ResumeState state, Prompt prompt, PendingToolCall item,
-			PendingToolCall haltedBy) {
-		PendingToolCall fresh = this.store.pending(state.runId, item.getToolCallId());
-		PendingToolCall effective = ObjectUtils.defaultIfNull(fresh, item);
-		if (haltedBy != null && isUnsettled(effective)) {
-			return new RebuildItem(null, this.toolCallingManager.skipAsUpstreamFailed(state.runId, effective, haltedBy),
-					effective.getToolCallId() + ":" + PendingToolCall.SKIPPED + ":not-executed", null);
-		}
-		if (isKindMisapproved(effective)) {
-			log.warn("resume found APPROVED+FRONTEND fake approval runId={} toolCallId={} "
-					+ "name={} (blocked explicitly; no backend stub, no ledger)", state.runId,
-					effective.getToolCallId(), effective.getName());
-		}
-		ResumeResult cancel = cancelStateOutcome(state.runId, state.body);
-		if (cancel != null) return new RebuildItem(cancel, null, null, null);
-		String text;
-		try {
-			text = this.toolCallingManager.resolvePending(state.runId, prompt, effective);
-		}
-		catch (StreamViolationException ex) {
-			if (!StreamViolationException.STATE_UNAVAILABLE.equals(ex.getCode())) throw ex;
-			log.warn("cancel state unknown during resume rebuild, closing with UNKNOWN outcome runId={} toolCallId={}",
-					state.runId, effective.getToolCallId(), ex);
-			return new RebuildItem(cancelUnknownOutcome(state.body), null, null, null);
-		}
-		cancel = cancelStateOutcome(state.runId, state.body);
-		if (cancel != null) return new RebuildItem(cancel, null, null, null);
-		PendingToolCall settled = this.store.pending(state.runId, effective.getToolCallId());
-		PendingToolCall source = ObjectUtils.defaultIfNull(settled, effective);
-		ToolResponseMessage.ToolResponse response = new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
-				effective.getName(), ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
-						effective.getArguments()).toModelJson(this.limiter, effective.getName()));
-		return new RebuildItem(null, response, settlementLabel(source), source);
-	}
-
-	private ResumeResult completeToolRebuild(ResumeState state, List<ToolResponseMessage.ToolResponse> responses) {
-		state.nextHopContext = refreshRunContextAfterBatch(state.runId, state.snapshot, state.settledInBatch);
-		state.nextHopContext = syncAuthorityForHandoff(state.runId, state.nextHopContext, state.history);
-		state.history = rewriteAuthoritativeSystem(state.history, state.nextHopContext, state.runId);
-		state.history.add(ToolResponseMessage.builder().responses(responses).build());
-		state.rebuiltToolTokens = responses.stream()
-			.mapToInt(response -> ContextEstimator.estimate(response.responseData()))
-			.sum();
-		state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
-		state.snapshot.setContext(state.nextHopContext.toMap());
-		state.snapshot.setInFlightToolCalls(new ArrayList<>());
-		state.snapshot.setAssistantContent(null);
-		state.snapshot.setStatus(RunSnapshot.RUNNING);
-		state.snapshot.getResumedBy().add(this.store.instanceId());
-		if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
-			log.info("post-rebuild RUNNING transition refused by write gate runId={} (cancel/authority recheck then close, no drive)",
-					state.runId);
-			return resumeStatusWriteRefused(state.runId, state.body);
-		}
-		return null;
-	}
-
-	private ResumeResult rebuildWithoutTools(ResumeState state) {
-		state.nextHopContext = syncAuthorityForHandoff(state.runId, state.nextHopContext, state.history);
-		List<Message> beforeRewrite = state.history;
-		state.history = rewriteAuthoritativeSystem(state.history, state.nextHopContext, state.runId);
-		state.snapshot.setContext(state.nextHopContext.toMap());
-		if (state.history != beforeRewrite) {
-			state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
-		}
-		state.snapshot.getResumedBy().add(this.store.instanceId());
-		state.snapshot.setStatus(RunSnapshot.RUNNING);
-		if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
-			log.info("resume RUNNING transition refused by write gate runId={} (cancel/authority recheck then close, no drive)",
-					state.runId);
-			return resumeStatusWriteRefused(state.runId, state.body);
-		}
-		return null;
-	}
-
-	private ResumeResult parkResumeIfDue(ResumeState state) {
-		ResumeResult result = parkDefinitionForms(state);
-		if (result != null) return result;
-		result = parkConditionForms(state);
-		if (result != null) return result;
-		return persistConditionHandoff(state);
-	}
-
-	private ResumeResult parkDefinitionForms(ResumeState state) {
-		if (this.definitionSelectionForm == null) {
-			return null;
-		}
-		String reason = null;
-		if (this.definitionSelectionForm.parkNavigateIfDue(state.runId, state.nextHopContext, state.settledInBatch,
-				state.history)) reason = "DEFINITION_NAVIGATE_PARKED";
-		else if (this.definitionSelectionForm.parkSelectDefinitionsIfDue(state.runId, state.nextHopContext,
-				state.settledInBatch, state.history)) reason = "DEFINITION_SELECT_PARKED";
-		else if (this.definitionSelectionForm.parkAdvanceIfDue(state.runId, state.nextHopContext, state.settledInBatch,
-				state.history)) reason = "DEFINITION_STEP_ADVANCE_PARKED";
-		else if (this.definitionSelectionForm.parkIfDue(state.runId, state.nextHopContext, state.settledInBatch,
-				state.history)) reason = "DEFINITION_FORM_PARKED";
-		if (reason == null) {
-			return null;
-		}
-		state.body.put("resumed", false);
-		state.body.put("reason", reason);
-		state.body.put("taskId", state.nextHopContext.getTaskId());
-		return new ResumeResult(Outcome.ACCEPTED, state.body);
-	}
-
-	private ResumeResult parkConditionForms(ResumeState state) {
-		if (this.conditionsForm != null && this.conditionsForm.conditionFormCancelledInBatch(state.settledInBatch,
-				state.runId, state.nextHopContext)) {
-			this.chatService.cancelParked(state.runId);
-			RunSnapshot latest = this.store.get(state.runId);
-			if (latest != null && RunSnapshot.CANCELLED.equals(latest.getStatus())) {
-				state.body.put("resumed", false);
-				state.body.put("reason", "ALREADY_CANCELLED");
-				state.body.put("taskId", state.nextHopContext.getTaskId());
-				return new ResumeResult(Outcome.ALREADY_CANCELLED, state.body);
-			}
-			return resumeStatusWriteRefused(state.runId, state.body);
-		}
-		state.enteredQueryCond = state.settledInBatch.stream()
-			.anyMatch(pending -> pending != null && "confirm_step".equals(pending.getName())
-					&& com.example.configmgr.ai.tool.ToolOutcome.OK == pending.effectiveOutcome());
-		if (this.conditionsForm != null && this.conditionsForm.parkIfDueAtQueryCond(state.runId, state.nextHopContext,
-				state.history, !state.enteredQueryCond)) {
-			state.body.put("resumed", false);
-			state.body.put("reason", conditionParkReason(state.runId));
-			state.body.put("taskId", state.nextHopContext.getTaskId());
-			return new ResumeResult(Outcome.ACCEPTED, state.body);
-		}
-		return null;
-	}
-
-	private ResumeResult persistConditionHandoff(ResumeState state) {
-		boolean handoff = state.nextHopContext.getExtra() != null && Boolean.TRUE.equals(
-				state.nextHopContext.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF));
-		if (handoff && !"QUERY_COND".equals(state.nextHopContext.getStep())) {
-			Map<String, Object> extra = new LinkedHashMap<>(state.nextHopContext.getExtra());
-			extra.remove(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
-			state.nextHopContext = AiContext.of(state.nextHopContext.getPage(), state.nextHopContext.getTaskType(),
-					state.nextHopContext.getStep(), state.nextHopContext.getTaskId(), state.nextHopContext.getTaskStatus(),
-					extra);
-			handoff = false;
-			if (!isPersistHandoffContext(state.runId, state.snapshot, state.nextHopContext)) {
-				return resumeStatusWriteRefused(state.runId, state.body);
-			}
-		}
-		else if (handoff && !isPersistHandoffContext(state.runId, state.snapshot, state.nextHopContext)) {
-			return resumeStatusWriteRefused(state.runId, state.body);
-		}
-		state.conditionInstruction = state.enteredQueryCond && handoff
-				? new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
-						+ "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
-						+ "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。")
-				: null;
-		return null;
-	}
-
-	private ResumeResult compactResumeHistory(ResumeState state) {
-		List<Message> rebuiltHistory = state.history;
-		state.compaction = null;
-		for (int attempt = 0; attempt < 3; attempt++) {
-			state.history = rebuiltHistory;
-			MemoryWindowContext window = buildMemoryWindow(state);
-			CompactionAttempt compacted = compactResumeAttempt(state, window, attempt);
-			if (compacted.abort() != null) return compacted.abort();
-			if (compacted.isRetry()) continue;
-			state.compaction = compacted.compaction();
-			return null;
-		}
-		log.warn("resume memory CAS remained contested runId={} sessionId={} (no driver handoff)", state.runId,
-				state.sessionId);
-		return resumeStatusWriteRefused(state.runId, state.body);
-	}
-
-	private MemoryWindowContext buildMemoryWindow(ResumeState state) {
-		Set<String> protectedIds = new LinkedHashSet<>();
-		for (PendingToolCall pending : this.store.pendingsLenient(state.runId)) {
-			if (PendingToolCall.PENDING.equals(pending.getStatus())
-					|| PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted()) {
-				protectedIds.add(pending.getToolCallId());
-			}
-		}
-		Set<String> activeRunIds = new LinkedHashSet<>(this.store.activeRunIds(state.sessionId));
-		activeRunIds.add(state.runId);
-		MemoryWindowSnapshot snapshot = this.chatService == null ? null
-				: this.chatService.memoryWindowSnapshot(state.sessionId);
-		List<Message> input = state.history;
-		if (snapshot != null) {
-			List<Message> ownRun = state.history.stream()
-				.filter(message -> message.getMessageType() != MessageType.SYSTEM)
-				.toList();
-			List<Message> merged = RunMemoryMerge.merge(snapshot.messages(), ownRun,
-					MemoryTurn.of(state.runId, state.snapshot.getCreatedAtMs()), true, 0, activeRunIds);
-			input = new ArrayList<>();
-			for (Message message : state.history) {
-				if (message.getMessageType() == MessageType.SYSTEM) input.add(message);
-			}
-			input.addAll(merged);
-		}
-		MemoryWindow.Budget budget = MemoryWindow.Budget.from(this.properties);
-		MemoryWindow.Plan plan = MemoryWindow.plan(input, budget, protectedIds, activeRunIds);
-		MemoryWindow.emit(state.runId, state.sessionId, plan, budget);
-		state.history = plan.messages();
-		return new MemoryWindowContext(protectedIds, activeRunIds, snapshot, plan);
-	}
-
-	private CompactionAttempt compactResumeAttempt(ResumeState state, MemoryWindowContext window, int attempt) {
-		if (this.contextCompactor == null || state.history.isEmpty()) {
-			return new CompactionAttempt(null, false, null);
-		}
-		CompactionPlanContext planned = planResumeCompaction(state, window);
-		if (planned.plan() != null && planned.plan().changed()) {
-			state.history = com.example.configmgr.ai.history.SyntheticMessages
-				.withoutCorrectionInstruction(planned.plan().messages());
-			List<Message> memoryWindow = state.history.stream()
-				.filter(message -> message.getMessageType() != MessageType.SYSTEM)
-				.toList();
-			if (!this.chatService.replaceMemoryWindow(state.runId, state.sessionId, memoryWindow, window.snapshot())) {
-				if (log.isDebugEnabled()) log.debug("resume memory CAS conflict, rereading and rebuilding runId={} attempt={}",
-						state.runId, attempt + 1);
-				return new CompactionAttempt(null, true, null);
-			}
-			state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
-			if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
-				log.info("compacted snapshot write refused by write gate runId={} (cancel/authority recheck then close, no drive)",
-						state.runId);
-				return new CompactionAttempt(resumeStatusWriteRefused(state.runId, state.body), false, null);
-			}
-		}
-		ContextCompactor.Outcome outcome = this.contextCompactor.commit(planned.request(), planned.plan());
-		if (outcome.changed()) state.body.put("contextCompaction", outcome.levelWire());
-		else {
-			state.body.put("contextCompaction", "none");
-			state.body.put("contextCompactionReason", outcome.reason());
-		}
-		return new CompactionAttempt(null, false, outcome);
-	}
-
-	private CompactionPlanContext planResumeCompaction(ResumeState state, MemoryWindowContext window) {
-		TurnKeepalive keepalive = this.chatService == null || this.registry == null ? null
-				: this.chatService.startKeepalive(state.runId, this.registry.of(state.runId),
-						TurnKeepalive.PHASE_STREAMING, true);
-		try {
-			ContextState contextState = this.contextCompactor.readState(state.sessionId);
-			List<Message> input = com.example.configmgr.ai.history.SyntheticMessages
-				.withoutCorrectionInstruction(state.history);
-			int systemTokens = 0;
-			for (Message message : input) {
-				if (message.getMessageType() == MessageType.SYSTEM) {
-					systemTokens += ContextEstimator.estimate(message.getText());
-				}
-			}
-			ProviderRuntime runtime = this.chatService == null ? null : this.chatService.runtimeForCompaction(state.runId);
-			Runnable onSummaryStart = keepalive == null ? null : () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
-			int maxOutput = Math.max(0, ObjectUtils.defaultIfNull(state.snapshot.getMaxTokens(), 0));
-			ContextCompactor.Request request = new ContextCompactor.Request(state.sessionId, state.runId,
-					state.snapshot.getModelId(), state.snapshot.getProviderId(), input, contextState.usedTokens(),
-					contextState.completionTokens(), 0, state.rebuiltToolTokens, systemTokens,
-					this.chatService.disclosedToolTokens(state.nextHopContext), window.protectedIds(), runtime,
-					window.activeRunIds(), maxOutput, window.plan().stillOverBudget(), "resume",
-					ContextCompactor.lastToolCallId(input));
-			ContextCompactor.Plan plan = this.contextCompactor.plan(request,
-					() -> this.store.touchBusinessActivity(state.runId, System.currentTimeMillis()), onSummaryStart);
-			if (keepalive != null) keepalive.phase(TurnKeepalive.PHASE_STREAMING);
-			return new CompactionPlanContext(request, plan);
-		}
-		finally {
-			if (keepalive != null) keepalive.close();
-		}
-	}
-
-	private ResumeResult completeResumeHandoff(ResumeState state) {
-		if (state.conditionInstruction != null) {
-			state.history = new ArrayList<>(state.history);
-			state.history.add(state.conditionInstruction);
-		}
-		state.body.put("resumed", true);
-		state.body.put("rebuiltTools", state.rebuilt);
-		state.body.put("promptMessageCount", state.history.size());
-		state.body.put("promptRoles", state.history.stream().map(message -> message.getMessageType().name()).toList());
-		state.body.put("resumedBy", this.store.instanceId());
-		SseChatEmitter out = this.registry.of(state.runId);
-		ResumeResult cancel = cancelStateOutcome(state.runId, state.body);
-		if (cancel != null) return cancel;
-		emitResumeCompaction(state, out);
-		List<Message> resumeHistory = state.history;
-		final AiContext handoffContext = state.nextHopContext;
-		try {
-			this.suspendExecutor.execute(() -> withRunIdentity(state.snapshot,
-					() -> driveResumedTask(state, handoffContext, resumeHistory, out)));
-			state.handedOff = true;
-		}
-		catch (RejectedExecutionException ex) {
-			state.body.put("resumed", false);
-			state.body.put("reason", "SUSPEND_POOL_SATURATED");
-			this.chatService.clearCompaction(state.runId);
-			state.snapshot.setStatus(RunSnapshot.SUSPENDED);
-			if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
-				return resumeStatusWriteRefused(state.runId, state.body);
-			}
-			return new ResumeResult(Outcome.POOL_SATURATED, state.body);
-		}
-		return new ResumeResult(Outcome.ACCEPTED, state.body);
-	}
-
-	private void emitResumeCompaction(ResumeState state, SseChatEmitter out) {
-		if (state.compaction == null || !state.compaction.changed() || !state.compaction.committed()) {
-			return;
-		}
-		try {
-			out.context(ContextCompactor.framePayload(state.compaction));
-		}
-		catch (RuntimeException ex) {
-			log.warn("resume context frame send failed (ignored, resume unaffected) runId={}", state.runId, ex);
-		}
-		this.chatService.noteCompaction(state.runId, state.compaction.levelWire());
-	}
-
-	private void driveResumedTask(ResumeState state, AiContext handoffContext, List<Message> resumeHistory,
-			SseChatEmitter out) {
-		if (state.replyLocale == null) LocaleContextHolder.resetLocaleContext();
-		else LocaleContextHolder.setLocale(state.replyLocale);
-		try {
-			this.chatService.driveResumed(state.runId, state.sessionId, handoffContext, resumeHistory, out);
-		}
-		catch (Exception ex) {
-			log.error("resume uncaught exception runId={}", state.runId, ex);
-			markDriveFailure(state.snapshot, ex, () -> emitFailureErrorUnlessArchived(out, ErrorCodes.AI_RESUME_FAILED,
-					resumeFailedMessage()));
-		}
-		finally {
-			try {
-				LocaleContextHolder.resetLocaleContext();
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-locale-reset")) log.warn("resume locale cleanup failed runId={}", state.runId, ex);
-			}
-			try {
-				this.resuming.remove(state.resumeKey);
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-mutex-remove")) log.warn("resume mutex cleanup failed runId={}", state.runId, ex);
-			}
-			try {
-				this.registry.close(state.runId);
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-registry-close")) log.warn("resume registry close failed runId={}", state.runId, ex);
-			}
-			try {
-				if (this.sessionGate != null && state.gateHeld.get()) {
-					this.sessionGate.release(state.sessionId, state.runId, state.gateToken);
-					state.gateHeld.set(false);
-				}
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-gate-release")) log.warn("resume session gate release failed runId={}", state.runId, ex);
-			}
-			try {
-				AiTrace.clear();
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-trace-clear")) log.warn("resume trace cleanup failed runId={}", state.runId, ex);
-			}
-		}
-	}
-
-	private void finishResume(ResumeState state) {
-		try {
-			if (!state.handedOff) {
-				this.resuming.remove(state.resumeKey);
-			}
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("resume-mutex-remove")) log.warn("resume mutex cleanup failed runId={}", state.runId, ex);
-		}
-		try {
-			if (!state.handedOff && this.sessionGate != null && state.gateHeld.getAndSet(false)
-					&& state.gateSessionId != null) {
-				this.sessionGate.release(state.gateSessionId, state.runId, state.gateToken);
-			}
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("resume-gate-release")) log.warn("resume session gate release failed runId={}", state.runId, ex);
-		}
-		try {
-			AiTrace.clear();
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("resume-trace-clear")) log.warn("resume trace cleanup failed runId={}", state.runId, ex);
-		}
-		if (state.identityScope != null) {
-			try {
-				state.identityScope.close();
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-identity-close")) log.warn("resume identity close failed runId={}", state.runId, ex);
-			}
-		}
-	}
-
-	private record RebuildItem(ResumeResult abort, ToolResponseMessage.ToolResponse response, String label,
-			PendingToolCall source) {
-	}
-
-	private record MemoryWindowContext(Set<String> protectedIds, Set<String> activeRunIds,
-			MemoryWindowSnapshot snapshot, MemoryWindow.Plan plan) {
-	}
-
-	private record CompactionPlanContext(ContextCompactor.Request request, ContextCompactor.Plan plan) {
-	}
-
-	private record CompactionAttempt(ResumeResult abort, boolean isRetry, ContextCompactor.Outcome compaction) {
-	}
-
-	private final class ResumeState {
-
-		private final String runId;
-		private final String resumeKey;
-		private final LeaseService.Lease lease;
-		private final boolean freshLease;
-		private final String resumeReason;
-		private final Locale replyLocale;
-		private final java.util.concurrent.atomic.AtomicBoolean gateHeld = new java.util.concurrent.atomic.AtomicBoolean();
-		private final String gateToken = UUID.randomUUID().toString();
-		private String gateSessionId;
-		private RunIdentityScope.Scope identityScope;
-		private RunSnapshot snapshot;
-		private String sessionId;
-		private List<PendingToolCall> pendings;
-		private final Map<String, Object> body = new LinkedHashMap<>();
-		private boolean handedOff;
-		private List<Message> history;
-		private AiContext nextHopContext;
-		private List<PendingToolCall> settledInBatch;
-		private final List<String> rebuilt = new ArrayList<>();
-		private int rebuiltToolTokens;
-		private boolean enteredQueryCond;
-		private Message conditionInstruction;
-		private ContextCompactor.Outcome compaction;
-
-		private ResumeState(String runId, String resumeKey, LeaseService.Lease lease, boolean freshLease,
-				String resumeReason, Locale replyLocale) {
-			this.runId = runId;
-			this.resumeKey = resumeKey;
-			this.lease = lease;
-			this.freshLease = freshLease;
-			this.resumeReason = resumeReason;
-			this.replyLocale = replyLocale;
-		}
-
-	}
-
-	/**
-	 * <b>续跑侧的批间上下文刷新</b>（本类唯一的刷新点）。
-	 *
-	 * <h2>为什么必须在续跑侧补这一刀</h2>
-	 * 首轮的刷新点在 {@code SpToolCallingManager} 执行循环的尾部。生产 {@code app.ai.park.enabled=true}
-	 * 时 {@code create_task} / {@code navigate_to} / {@code confirm_step} 都在<b>那个点之前</b>就挂起
-	 * （{@code RunParkedException} 直接结束这一轮），刷新一次都跑不到 —— 续跑随后拿请求边界的旧
-	 * {@link AiContext} 构造下一跳，于是步骤工具（{@code select_definitions} / {@code set_condition} /
-	 * {@code start_export}）永远不披露。
-	 *
-	 * <h2>三条口径</h2>
-	 * <ol>
-	 * <li><b>整批结算之后才刷新</b>：入参是本批<b>已结算</b>的条目（结算后回读的真值）。逐条刷新会让
-	 * 同批后面的条目提前看到"刚刚才解锁"的披露面 = 批内扩权；</li>
-	 * <li><b>只认真实成功</b>：判据（工具名 + {@code outcome=OK}）全在
-	 * {@link RunContextRefresher#next}，本方法只负责"读快照 → 折 → 写回 → 重读"；</li>
-	 * <li><b>失败不打断</b>：任何异常只 WARN 并保留旧上下文 —— 刷新是"让下一跳更准"的增强，
-	 * 不是这一轮的判定面，绝不能因为一次读库失败让续跑失败。</li>
-	 * </ol>
-	 *
-	 * <p>写回之后<b>重新读快照</b>：下一跳用的必须是外置真值（与 {@code RunSnapshot#getContext()} 同一份），
-	 * 而不是本方法内存里那份推算结果 —— 写门拒写时两者会分叉，此处如实反映"存下去的"。
-	 *
-	 * <p><b>写回/重读失败的 fail-safe</b>：两步都单独捕获 {@code RuntimeException}（并且重读为空也算失败）：
-	 * 只 WARN、把 {@code snapshot} 的内存上下文<b>显式回滚到 before</b>、返回 {@code before}。理由是
-	 * 未经核实的写不得扩披露面（宁可下一跳不刷新），而 {@code setContext} 已经动过内存，不回滚就会
-	 * 出现"内存是新值、Redis 是旧值"的分叉（后续状态写还会顺手把新值写进去）。
-	 *
-	 * @param settled 本批已结算条目（含已终态复用、被跳过、被拒绝的；非刷新工具由判据自动忽略）
-	 * @return 下一跳应使用的上下文；无变化时返回旧值（同一份事实、不写库）
-	 */
-	private AiContext persistRefreshedContext(String runId, RunSnapshot snapshot, AiContext before,
-			AiContext current) {
-		// ===== 写回 + 重读：任一步失败都只 WARN，并用<b>批首</b>上下文交棒 =====
-		// fail-safe：<b>未经核实的写不得扩披露面</b>。刷新只是"让下一跳更准"的增强，若它能让续跑
-		// 崩掉（Redis 抖一下整轮就死），或用一份没落成的上下文去披露新工具，都比"这一步没刷新"更糟。
-		// snapshot 与落库是<b>同一份内存对象</b>：setContext 会先改内存，写失败后若不显式回滚，
-		// 内存与持久态就各说一套（后续状态写还会把这份没落成的上下文顺手写进去）。
-		Map<String, Object> beforeMap = before.toMap();
-		try {
-			snapshot.setContext(current.toMap());
-			this.store.save(snapshot);
-		}
-		catch (RuntimeException ex) {
-			snapshot.setContext(beforeMap);
-			log.warn("post-batch context write-back failed, keeping old context (resume unaffected) runId={}", runId, ex);
-			return before;
-		}
-		RunSnapshot fresh;
-		try {
-			fresh = this.store.get(runId);
-		}
-		catch (RuntimeException ex) {
-			// 写可能成了、也可能没有（例如写门静默拒写）：读不到真值就不认这笔刷新
-			snapshot.setContext(beforeMap);
-			log.warn("post-batch context reread failed, handing off with batch-start context (resume unaffected) runId={}", runId, ex);
-			return before;
-		}
-		if (fresh == null) {
-			snapshot.setContext(beforeMap);
-			log.warn("post-batch context reread empty, handing off with batch-start context (resume unaffected) runId={}", runId);
-			return before;
-		}
-		AiContext reread = AiContext.fromMap(fresh.getContext());
-		// 以重读真值为准回写内存：写门静默拒写时它等于 before（不扩披露面），内存也随之与持久态一致。
-		snapshot.setContext(reread.toMap());
-		log.info("run context refreshed after batch settlement runId={} page={} taskId={} taskType={} step={} status={}", runId,
-				reread.getPage(), reread.getTaskId(), reread.getTaskType(), reread.getStep(), reread.getTaskStatus());
-		return reread;
-	}
-
-	private AiContext refreshRunContextAfterBatch(String runId, RunSnapshot snapshot, List<PendingToolCall> settled) {
-		AiContext before = AiContext.fromMap(snapshot.getContext());
-		if (CollectionUtils.isEmpty(settled)) {
-			return before;
-		}
-		RunContextRefresher refresher = this.contextRefresher;
-		if (refresher == null) {
-			// 可观测性（不回退、不猜根因）：本批确有"能推进上下文"的结果，但装配里没有刷新器
-			if (settled.stream().anyMatch(entry -> RunContextRefresher.isSupported(entry.getName()))) {
-				log.warn("resume batch cannot refresh run context: RunContextRefresher not injected "
-						+ "runId={} (next hop keeps request-boundary context; step tools may be undisclosed)", runId);
-			}
-			return before;
-		}
-		AiContext current = before;
-		for (PendingToolCall entry : settled) {
-			if (!RunContextRefresher.isSupported(entry.getName())) {
-				continue;
-			}
-			try {
-				Optional<AiContext> next = refresher.next(runId, current, entry);
-				if (next != null && next.isPresent()) {
-					current = next.get();
-				}
-			}
-			catch (RuntimeException ex) {
-				// 保留旧上下文继续折下一条：一条读库失败不代表整批结果不可用
-				log.warn("post-batch context refresh failed, keeping old context (resume unaffected) runId={} tool={}", runId,
-						entry.getName(), ex);
-			}
-		}
-		if (current.equals(before)) {
-			return before;
-		}
-		return persistRefreshedContext(runId, snapshot, before, current);
-	}
-
-	/**
-	 * 续跑交棒前的<b>权威同步</b>（只作用于下一跳；批内结算用的 {@code context} 保持冻结）：
-	 * <ol>
-	 * <li>按 {@code taskId} 读 {@code TaskService} 的权威 {@code type / currentStep / status} ——
-	 * 挂起期内用户可以在向导里手动改步骤，而这类改动不产生任何"刷新类工具结算"；</li>
-	 * <li>用<b>最新</b>上下文重算 {@code extra[taskSlots]} —— 当前文本按权威保护决定：页面已有非空勾选、
-	 * 或这条消息之后已有改选/清空动作时传空（权威值说话）；只有"页面还是初始默认空、且没有任何后续
-	 * 选择动作"时才用历史里<b>最近一条真实用户原文</b>（跳过合成消息）补齐初始槽位。</li>
-	 * </ol>
-	 *
-	 * <p>任一步失败只 WARN 并保留旧值：这是"让下一跳更准"的增强，不是这一轮的判定面
-	 * （与 {@link #refreshRunContextAfterBatch} 同一 fail-safe 口径）。
-	 */
-	private AiContext syncAuthorityForHandoff(String runId, AiContext context, List<Message> history) {
-		return recomputeSlotsBeforeHandoff(runId, syncTaskBeforeHandoff(runId, context), history);
-	}
-
-	/** 任务权威值的交棒前同步（读失败 = 保留旧值 + WARN，不阻断续跑）。 */
-	private AiContext syncTaskBeforeHandoff(String runId, AiContext context) {
-		if (this.contextRefresher == null) {
-			return context;
-		}
-		try {
-			return this.contextRefresher.syncTask(context).orElse(context);
-		}
-		catch (RuntimeException ex) {
-			log.warn("pre-handoff task authority sync failed, keeping old context (resume unaffected) runId={}", runId, ex);
-			return context;
-		}
-	}
-
-	/**
-	 * 槽位重算（未注入解析器 = 不重算；异常 = 保留旧槽位 + WARN）。
-	 *
-	 * <p>自然语言不参与：{@link TaskSlotResolver} 只读任务条目/工作区结构化选择，
-	 * {@code currentText/history} 不再用于推断槽位（不读任何文本意图）。
-	 */
-	private AiContext recomputeSlotsBeforeHandoff(String runId, AiContext context, List<Message> history) {
-		if (this.taskSlotResolver == null) {
-			return context;
-		}
-		try {
-			AiContext enriched = this.taskSlotResolver.enrich(context, null, history);
-			return ObjectUtils.defaultIfNull(enriched, context);
-		}
-		catch (RuntimeException ex) {
-			log.warn("pre-handoff task slot recompute failed, keeping old slots (resume unaffected) runId={}", runId, ex);
-			return context;
-		}
-	}
-
-	/**
-	 * 条件交棒的既有原因码：候选草案（{@code set_condition}）单独标识；条件表及其明确留空后的
-	 * 确定推进沿用 {@code CONDITIONS_FORM_PARKED}，不新增协议值。
-	 *
-	 * <p>事实源是刚挂起的待决条目（{@code park} 已写盘）；读失败按条件表返回（既有文案，不新增失败路径）。
-	 */
-	private String conditionParkReason(String runId) {
-		try {
-			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
-				if (pending != null && PendingToolCall.PENDING.equals(pending.getStatus())
-						&& AiToolNames.SET_CONDITION.equals(pending.getName())) {
-					return "CONDITION_DRAFTS_PARKED";
-				}
-			}
-		}
-		catch (RuntimeException ex) {
-			log.warn("cannot distinguish conditional handoff payload, returning conditional parked runId={}", runId, ex);
-		}
-		return "CONDITIONS_FORM_PARKED";
-	}
-
-	/**
-	 * 条件结构化交棒标记的写回口（置位/清理都走这里）。
-	 *
-	 * <p>为什么必须落库：披露面用的是<b>本跳</b>这份内存上下文，而执行面的第三道防线
-	 * （{@code ToolRegistry#matchesContext}）读的是<b>快照</b>上下文，{@link AiContext#fromMap}
-	 * 又是拷贝 —— 只改内存对象时 guard 与下一次续跑都看不到。
-	 *
-	 * <p>写门与其它交棒写点同源（{@code saveStatusUnlessCancelled}）：取消已先到 / 租约只读 /
-	 * fence 陈旧 ⇒ {@code false}，调用方必须<b>不驱动模型</b>（本方法不驱动任何东西，不引入双驱动）。
-	 */
-	private boolean isPersistHandoffContext(String runId, RunSnapshot snapshot, AiContext context) {
-		snapshot.setContext(context.toMap());
-		if (this.store.isStatusSavedUnlessCancelled(snapshot)) {
-			return true;
-		}
-		log.info("condition handoff context write refused by write gate runId={} step={} (recheck cancel/authority, no drive)",
-				runId, context.getStep());
-		return false;
-	}
-
-	/**
-	 * 刷新交棒历史的唯一权威 SYSTEM，稳定核心与全部非 SYSTEM 对话事实保持原样。
-	 *
-	 * <p>当前协议结构有效时，只按最新披露替换 {@code capability_rules} 与 workspace 动态段。
-	 * 当前协议结构无效时，才按最新上下文和快照模型的真实能力完整重建；不提供旧格式回退。
-	 * 重建异常或空文本直接失败，不得把无权威 SYSTEM 的历史交给模型。
-	 */
-	private List<Message> rewriteAuthoritativeSystem(List<Message> history, AiContext context, String runId) {
-		if (SystemMessages.leadingCount(history) == 0) {
-			throw new AiStateUnavailableException("Authoritative SYSTEM is still missing after resume recovery runId=" + runId);
-		}
-		boolean toolsAllowed = this.chatService.isToolCallingAllowed(runId);
-		String capabilityRules = this.chatService.capabilityRulesText(context, toolsAllowed);
-		String workspace = this.chatService.workspaceStateText(context);
-		String rewritten = replaceDynamicSections(history.getFirst().getText(), capabilityRules, workspace, toolsAllowed);
-		if (rewritten == null) {
-			rewritten = this.chatService.systemPromptText(context, toolsAllowed);
-		}
-		if (!StringUtils.isNotBlank(rewritten)) {
-			throw new AiStateUnavailableException("Rebuilt authoritative SYSTEM is empty runId=" + runId);
-		}
-		if (rewritten.equals(history.getFirst().getText())) {
-			return history;
-		}
-		List<Message> out = new ArrayList<>(history);
-		out.set(0, new SystemMessage(rewritten));
-		log.info("authoritative SYSTEM dynamic sections refreshed before handoff runId={} page={} taskId={} step={}", runId,
-				context.getPage(), context.getTaskId(), context.getStep());
-		return out;
-	}
-
-	/**
-	 * 只识别当前定界协议并替换动态段；返回 {@code null} 表示结构无效，调用方必须完整重建。
-	 * 不支持无工作区段、段不闭合、重复段或顺序错误的旧格式。
-	 */
-	static String replaceDynamicSections(String systemText, String capabilityRules, String workspace,
-			boolean toolsAllowed) {
-		if (systemText == null || capabilityRules == null || !StringUtils.isNotBlank(workspace)) {
-			return null;
-		}
-		DynamicSectionPositions positions = findDynamicSections(systemText, toolsAllowed);
-		if (positions == null) {
-			return null;
-		}
-		int workspaceEnd = positions.workspaceClose() + ContextBuilder.WORKSPACE_STATE_CLOSE.length();
-		if (workspaceEnd < systemText.length() && systemText.charAt(workspaceEnd) == '\n') {
-			workspaceEnd++;
-		}
-		String workspaceSection = workspace.endsWith("\n") ? workspace : workspace + "\n";
-		String rewritten = systemText.substring(0, positions.workspaceStart()) + workspaceSection
-				+ systemText.substring(workspaceEnd);
-		if (positions.capabilityStart() >= 0) {
-			int capabilityEnd = positions.capabilityClose() + PromptRulePacks.SECTION_CLOSE.length();
-			rewritten = rewritten.substring(0, positions.capabilityStart()) + capabilityRules
-					+ rewritten.substring(capabilityEnd);
-		}
-		return rewritten;
-	}
-
-	private static DynamicSectionPositions findDynamicSections(String systemText, boolean toolsAllowed) {
-		int workspaceStart = systemText.indexOf(ContextBuilder.WORKSPACE_SECTION_HEADING);
-		int workspaceOpen = workspaceStart < 0 ? -1
-				: systemText.indexOf(ContextBuilder.WORKSPACE_STATE_OPEN, workspaceStart);
-		int workspaceClose = workspaceStart < 0 ? -1
-				: systemText.indexOf(ContextBuilder.WORKSPACE_STATE_CLOSE, workspaceStart);
-		if (!isWorkspaceStructureValid(systemText, workspaceStart, workspaceOpen, workspaceClose)) {
-			return null;
-		}
-		int capabilityStart = systemText.indexOf(PromptRulePacks.SECTION_OPEN);
-		int capabilityClose = capabilityStart < 0 ? -1
-				: systemText.indexOf(PromptRulePacks.SECTION_CLOSE, capabilityStart);
-		if (!isCapabilityStructureValid(systemText, toolsAllowed, workspaceStart, capabilityStart, capabilityClose)) {
-			return null;
-		}
-		return new DynamicSectionPositions(workspaceStart, workspaceClose, capabilityStart, capabilityClose);
-	}
-
-	private static boolean isWorkspaceStructureValid(String systemText, int start, int open, int close) {
-		return start >= 0 && open >= start && close >= open
-				&& start == systemText.lastIndexOf(ContextBuilder.WORKSPACE_SECTION_HEADING)
-				&& open == systemText.lastIndexOf(ContextBuilder.WORKSPACE_STATE_OPEN)
-				&& close == systemText.lastIndexOf(ContextBuilder.WORKSPACE_STATE_CLOSE);
-	}
-
-	private static boolean isCapabilityStructureValid(String systemText, boolean toolsAllowed, int workspaceStart,
-			int start, int close) {
-		if (toolsAllowed && start < 0 || start < 0 && systemText.contains(PromptRulePacks.SECTION_CLOSE)) {
-			return false;
-		}
-		return start < 0 || close >= start && start == systemText.lastIndexOf(PromptRulePacks.SECTION_OPEN)
-				&& close == systemText.lastIndexOf(PromptRulePacks.SECTION_CLOSE)
-				&& close + PromptRulePacks.SECTION_CLOSE.length() <= workspaceStart;
-	}
-
-	private record DynamicSectionPositions(int workspaceStart, int workspaceClose, int capabilityStart,
-			int capabilityClose) {
-	}
-
-	/**
-	 * 驱动任务失败时落成 FAILED 终态，并清空未完成的工具调用。
-	 * 已经是终态的快照不覆盖；写终态失败只留 WARN，不把异常抛给已发出的终帧。
-	 *
-	 * <p><b>N2（返修）</b>：整段"读快照 → 判取消 → 写 FAILED → 发 error"在<b>同一把</b> per-run 监视器内，
-	 * 取消已先到（快照取消态 / 守卫拒写）时连失败终帧也不发 —— 否则一轮会同时出现
-	 * {@code error} 与 {@code done{cancelled:true}}。只在写快照时加锁不够：锁外发 error 仍可被
-	 * 取消的 done 插到前面。
-	 *
-	 * @param emitError 失败终帧的发送动作（在监视器内执行；调用方按旧口径决定是否发）
-	 */
-	private void markDriveFailure(RunSnapshot snapshot, Exception ex, Runnable emitError) {
-		if (snapshot == null || snapshot.getRunId() == null) {
-			if (emitError != null) {
-				emitError.run();
-			}
-			return;
-		}
-		String runId = snapshot.getRunId();
-		Object monitor = this.chatService == null ? null : this.chatService.finalizeMonitor(runId);
-		if (monitor == null) {
-			markDriveFailureLocked(snapshot, ex, emitError);
-			return;
-		}
-		synchronized (monitor) {
-			markDriveFailureLocked(snapshot, ex, emitError);
-		}
-	}
-
-	private void markDriveFailureLocked(RunSnapshot snapshot, Exception ex, Runnable emitError) {
-		try {
-			RunSnapshot latest = this.store.get(snapshot.getRunId());
-			RunSnapshot target = ObjectUtils.defaultIfNull(latest, snapshot);
-			if (RunSnapshot.isTerminal(target.getStatus())) {
-				// 取消是终态里唯一"终帧归别人发"的一种；DONE/FAILED 维持旧口径（写终态失败照发 error）。
-				boolean cancelled = RunSnapshot.CANCELLED.equals(target.getStatus()) || target.isCancelled();
-				if (!cancelled && emitError != null) {
-					emitError.run();
-				}
-				return;
-			}
-			boolean providerGone = ex instanceof ProviderGoneException;
-			String failureCode = providerGone ? ErrorCodes.AI_PROVIDER_GONE : ErrorCodes.AI_RESUME_FAILED;
-			String failureMessage = providerGone ? PROVIDER_GONE_MESSAGE : resumeFailedMessage();
-			List<Message> failureHistory = this.chatService == null ? null
-					: this.chatService.failureHistory(target, target.getAssistantContent(), "", failureCode, failureMessage);
-			if (failureHistory != null) {
-				target.setMessageJson(this.codec.serializeAll(failureHistory));
-			}
-			target.setStatus(RunSnapshot.FAILED);
-			target.setError((providerGone ? "PROVIDER_GONE：该轮使用的模型端点此刻不可用，无法按原模型续跑"
-					: com.example.configmgr.common.ErrorCodes.AI_RESUME_FAILED + "：续跑执行失败")
-					+ "（" + ex.getClass().getSimpleName() + "）");
-			target.setInFlightToolCalls(new ArrayList<>());
-			if (!this.store.saveTerminalUnlessCancelled(target)) {
-				log.info("resume failure terminal state refused by cancel-priority guard "
-						+ "runId={} (no error frame; cancel finalize owns terminal state/frame)",
-						snapshot.getRunId());
-				return;
-			}
-			// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
-			// 直接交出手里的终态快照：复读会按收尾线程身份拼键，身份不符时读不到 → RUN 绑定静默留存。
-			if (this.chatService != null) {
-				this.chatService.recordFailureTerminal(target, failureHistory);
-				this.chatService.clearTerminalRunState(target.getRunId(), target);
-			}
-			if (emitError != null) {
-				emitError.run();
-			}
-		}
-		catch (RuntimeException writeEx) {
-			log.warn("resume failure terminal write failed runId={} (error frame still emitted; recovery relies on snapshot/lease)",
-					snapshot.getRunId(), writeEx);
-			if (emitError != null) {
-				emitError.run();
-			}
-		}
-	}
-
-	/**
-	 * 续跑侧失败出口的<b>终帧幂等</b>（2026-10-29；返修后按<b>每次驱动</b>判）。
-	 *
-	 * <p>判据 = {@link SseChatEmitter#terminalFrameArchivedSinceDriveStart()}（本次驱动入口之后的
-	 * done/error），入口下界由 {@code ResilientChatService#driveResumed} 在驱动开始时记一次。
-	 * 这样"上一次续跑/重挂驱动留下的 error"不会把本次的失败终帧吞掉。
-	 *
-	 * <p><b>边界</b>：这是"读 → 判 → 发"的顺序判据，只覆盖<b>同一驱动</b>（含同进程重复收尾）与
-	 * <b>同一 runId 的相邻驱动</b>；跨实例并发的"恰好一条终帧"需要原子终帧位（本批未做，不声称根治）。
-	 * 终态写已还租，写门对这一笔终帧不设防，故这里不把"写门会再拦一次"当兜底。
-	 *
-	 * <p>判据不可知（{@code null}）⇒ <b>照发</b>：宁可多一条，也不能吞掉本次驱动唯一的失败终帧。
-	 */
-	private void emitFailureErrorUnlessArchived(SseChatEmitter out, String code, String message) {
-		Boolean archived = out.terminalFrameArchivedSinceDriveStart();
-		if (Boolean.TRUE.equals(archived)) {
-			if (log.isDebugEnabled()) log.debug("failure terminal frame already archived for this drive, skipping duplicate error code={} (at most one per drive)", code);
-			return;
-		}
-		out.error(code, message);
-	}
-
-	/**
-	 * 续跑前的 <b>SYSTEM 恢复/重建</b>（续跑保 system 批）。
-	 *
-	 * <h2>为什么续跑必须先做这一步</h2>
-	 * 快照里的历史是"模型当时看到的那串消息"，但旧实现的两条裁剪路径（窗口按 turn 淘汰、
-	 * 压缩按 turn 摘要/硬截断）会把<b>首段连同 SYSTEM 一起</b>吃掉：{@code ConversationTurns}
-	 * 把"第一条 user 之前的残留"归入第 0 段，而第 0 段正是系统消息所在。丢了 SYSTEM 之后续跑
-	 * 仍会成功发请求，只是人设、工作区约束与"外部文本是数据不是指令"的声明全部消失 ——
-	 * 静默降智，不是报错。
-	 *
-	 * <h2>三条规则</h2>
-	 * <ol>
-	 * <li>历史里已有 SYSTEM ⇒ <b>首条是唯一权威 SYSTEM</b>，完整保留其核心指令；其余 SYSTEM 不再挂回；</li>
-	 * <li>权威 SYSTEM 不在最前（例如旧数据把它夹在中间）⇒ 移到最前，其余非 SYSTEM 历史顺序不变；</li>
-	 * <li>历史里完全没有 ⇒ 用 {@link ResilientChatService#systemPromptText(AiContext, boolean)} 按快照模型能力重建
-	 *     （与首轮同一个构造点）；重建异常或空文本直接抛出 {@link AiStateUnavailableException}，
-	 *     不得返回无权威 SYSTEM 的历史或继续模型调用。</li>
-	 * </ol>
-	 *
-	 * @return 恢复后的历史；无需改动时返回入参本身（保持"未改动即同引用"）
-	 */
-	private SystemMessage rebuildSystemMessage(String runId, String sessionId, AiContext context, Locale replyLocale) {
-		String rebuiltText = null;
-		// 重建要读"本轮回答语言"（ReplyLanguage 走线程 locale）：HTTP 续跑传入的请求 locale
-		// 在驱动任务里才 set；这里临时借一下，结束后原样还回（调用线程可能已有自己的 locale）。
-		LocaleContext previousLocale = null;
-		if (replyLocale != null) {
-			previousLocale = LocaleContextHolder.getLocaleContext();
-			LocaleContextHolder.setLocale(replyLocale);
-		}
-		try {
-			rebuiltText = this.chatService == null ? null : this.chatService.systemPromptText(context,
-					this.chatService.isToolCallingAllowed(runId));
-		}
-		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException(
-					"Authoritative SYSTEM is missing and reconstruction failed runId=" + runId + " sessionId=" + sessionId, ex);
-		}
-		finally {
-			if (replyLocale != null) {
-				if (previousLocale == null) {
-					LocaleContextHolder.resetLocaleContext();
-				}
-				else {
-					LocaleContextHolder.setLocaleContext(previousLocale);
-				}
-			}
-		}
-		if (StringUtils.isBlank(rebuiltText)) {
-			throw new AiStateUnavailableException(
-					"Authoritative SYSTEM is missing and reconstruction returned empty runId=" + runId + " sessionId=" + sessionId);
-		}
-		log.warn("resume snapshot missing SYSTEM, rebuilt from current config runId={} "
-				+ "sessionId={} (old window/compaction may have dropped the system part)", runId, sessionId);
-		return new SystemMessage(rebuiltText);
-	}
-
-	private List<Message> restoreSystem(String runId, String sessionId, List<Message> loaded, AiContext context,
-			Locale replyLocale) {
-		List<Message> systems = new ArrayList<>();
-		List<Message> rest = new ArrayList<>(loaded.size());
-		for (Message message : loaded) {
-			if (SystemMessages.isSystem(message)) {
-				systems.add(message);
-			}
-			else {
-				rest.add(message);
-			}
-		}
-		boolean wasLeading = systems.size() == SystemMessages.leadingCount(loaded);
-		boolean rebuilt = false;
-		if (systems.isEmpty()) {
-			systems.add(rebuildSystemMessage(runId, sessionId, context, replyLocale));
-			rebuilt = true;
-		}
-		if (wasLeading && !rebuilt && systems.size() == 1) {
-			return loaded;
-		}
-		return SystemMessages.reattach(List.of(systems.getFirst()), rest);
-	}
-
-	/**
-	 * <b>取消收尾的窄入口</b>（写权限不可确认时的交棒目标，见 {@link CancelledRunFinalizer}）：
-	 * <b>只</b>把"已确认取消"的一轮收敛成终态，绝不发起模型/工具。
-	 *
-	 * <h2>与 {@code resumeInternal} 同一套准入（I-3）</h2>
-	 * <ol>
-	 * <li><b>进程内互斥</b>：与续跑共用 {@code resuming} 表 —— 同进程已有执行体在推进这一轮
-	 *     ⇒ {@link CancelFinalize#IN_PROGRESS}（交棒侧有界重试），绝不并发写/并发驱动；</li>
-	 * <li><b>会话门</b>：同 sessionId 单值门，带<b>一次性 token</b> 取、按同一 token 精确释放
-	 *     （与 {@code resumeInternal} 同形；首轮/交棒都不得误删别人的锁）。被别的轮占着 ⇒
-	 *     {@link CancelFinalize#SESSION_BUSY}；</li>
-	 * <li><b>跨实例续跑权</b>：{@code acquireRunLease}（生产 = 三键 {@code acquireFenced}）+
-	 *     {@code verifyHeld} 对 Redis 真值校验；别人持有/确定丢租 ⇒
-	 *     {@link CancelFinalize#LEASE_HELD_ELSEWHERE}，设施不可确认 ⇒ {@link CancelFinalize#UNAVAILABLE}。
-	 *     <b>不换 owner、不强行推进新 epoch、不释放调用方（原驱动）的租约</b>：{@code fresh=false}
-	 *     一律不释放。这里也不声称"隔离了原驱动"——同 owner 重入拿的是同一 epoch，隔离靠的是
-	 *     上面的 {@code resuming} 互斥与本进程的取消收尾监视器。</li>
-	 * </ol>
-	 *
-	 * <h2>终态与幂等（I-1 / I-2）</h2>
-	 * <ul>
-	 * <li>快照已是 <b>DONE/FAILED</b> ⇒ {@link CancelFinalize#ALREADY_TERMINAL}，<b>绝不改写</b>；</li>
-	 * <li>取消事实不成立而快照非终态 ⇒ {@link CancelFinalize#CANCEL_FACT_UNCONFIRMED}
-	 *     （不可知：交棒按有界重试，仍不驱动）；</li>
-	 * <li>幂等判据 = <b>归档里有没有终帧</b>（{@code cancelTerminalArchived}），不是快照状态：
-	 *     已归档 ⇒ {@code ALREADY_TERMINAL}（不重写、不重发）；未归档 ⇒ 调
-	 *     {@link ResilientChatService#cancelParked(String)} 补齐（快照已 CANCELLED 但 done 缺失的
-	 *     边界因此可恢复），收尾后再复核归档。</li>
-	 * </ul>
-	 */
-	private record CancelAdmission(RunSnapshot snapshot, LeaseService.Lease lease, boolean fresh, CancelFinalize denied,
-			boolean gateHeld, String gateSessionId) {
-
-		private CancelAdmission(RunSnapshot snapshot, LeaseService.Lease lease, boolean fresh, CancelFinalize denied) {
-			this(snapshot, lease, fresh, denied, false, null);
-		}
-	}
-
-	private CancelAdmission prepareCancelAdmission(String runId, String gateToken) {
-		RunSnapshot snapshot = this.store.get(runId);
-		if (snapshot == null) {
-			return new CancelAdmission(snapshot, null, false, CancelFinalize.NO_RUN);
-		}
-		if (RunSnapshot.isTerminal(snapshot.getStatus())
-				&& !RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
-			// I-1：延迟交棒绝不能把 DONE/FAILED 改写成 CANCELLED
-			return new CancelAdmission(snapshot, null, false, CancelFinalize.ALREADY_TERMINAL);
-		}
-		CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
-		if (state == CancellationRegistry.CancelState.UNKNOWN) {
-			return new CancelAdmission(snapshot, null, false, CancelFinalize.CANCEL_UNKNOWN);
-		}
-		if (state != CancellationRegistry.CancelState.CANCELLED) {
-			// M-6：取消事实此刻不可见 ⇒ 不可知。快照终态无可收尾（上面已返回），非终态交回
-			// 交棒侧有界重试 —— 绝不因为"读到 NOT_CANCELLED"就驱动这一轮。
-			return new CancelAdmission(snapshot, null, false, CancelFinalize.CANCEL_FACT_UNCONFIRMED);
-		}
-		// 幂等判据 = 归档里有没有终帧（不是快照状态：save 与 done 是两个存储）
-		Boolean archived = this.chatService.cancelTerminalArchived(runId);
-		if (Boolean.TRUE.equals(archived)) {
-			return new CancelAdmission(snapshot, null, false, CancelFinalize.ALREADY_TERMINAL);
-		}
-		return acquireCancelResources(runId, snapshot, gateToken);
-	}
-
-	private CancelAdmission acquireCancelResources(String runId, RunSnapshot snapshot, String gateToken) {
-		boolean gateHeld = false;
-		String gateSessionId = null;
-		LeaseService.Lease lease = null;
-		boolean fresh = false;
-		LeaseService leases = this.store.leaseService();
-		try {
-			// 会话门（与 resumeInternal 同形：抢不到就不是这一拍的事）
-			if (this.sessionGate != null) {
-				SessionGate.Busy busy = this.sessionGate.acquire(snapshot.getSessionId(), runId, gateToken);
-				if (busy != null && !runId.equals(busy.runId())) {
-					log.info("cancel finalize deferred: session gate held by another run runId={} heldBy={} (handoff retries bounded)", runId,
-							busy.runId());
-					return new CancelAdmission(snapshot, null, false, CancelFinalize.SESSION_BUSY);
-				}
-				gateHeld = true;
-				gateSessionId = snapshot.getSessionId();
-			}
-			if (leases == null) {
-				return new CancelAdmission(snapshot, null, false, null, gateHeld, gateSessionId);
-			}
-			LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
-			lease = acquired.lease();
-			fresh = acquired.created();
-			if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-				return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.LEASE_HELD_ELSEWHERE, gateHeld, gateSessionId);
-			}
-			if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
-				return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.UNAVAILABLE, gateHeld, gateSessionId);
-			}
-			if (lease != null && leases.verifyHeld(lease.key(), lease.epoch(), lease.owner()) == LeaseService.Hold.LOST) {
-				return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.LEASE_HELD_ELSEWHERE, gateHeld, gateSessionId);
-			}
-			// hold == UNAVAILABLE：这一拍证明不了"我仍是主人"；继续也只是让写门再拒一次。
-			return new CancelAdmission(snapshot, lease, fresh, null, gateHeld, gateSessionId);
-		}
-		catch (RuntimeException ex) {
-			releaseCancelResources(runId, gateToken, gateHeld, gateSessionId, leases, lease, fresh);
-			throw ex;
-		}
-	}
-
-	public CancelFinalize cancelConfirmed(String runId) {
-		// 与续跑共用同一张进程内互斥表，键同口径（身份 + runId）：A 的取消收尾不得把 B 的同名轮次
-		// 报成 IN_PROGRESS（那会让 B 的交棒链一直重试到预算耗尽）。
-		String resumeKey = LocalRunKey.of(runId);
-		if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
-			log.info("cancel finalize deferred: an executor in this process is driving this run runId={} (handoff retries bounded)", runId);
-			return CancelFinalize.IN_PROGRESS;
-		}
-		boolean gateHeld = false;
-		RunIdentityScope.Scope identityScope = null;
-		String gateSessionId = null;
-		// 一次性 token：与续跑同纪律（首轮那条迟到 finally 的 token=runId 不会误删本持有者）。
-		String gateToken = UUID.randomUUID().toString();
-		LeaseService leases = this.store.leaseService();
-		LeaseService.Lease lease = null;
-		boolean fresh = false;
-		try {
-			CancelAdmission admission = prepareCancelAdmission(runId, gateToken);
-			gateHeld = admission.gateHeld();
-			gateSessionId = admission.gateSessionId();
-			lease = admission.lease();
-			fresh = admission.fresh();
-			if (admission.denied() != null) {
-				return admission.denied();
-			}
-			// 取消收尾由独立执行体（触发池/定时重试线程）接管：身份只从本轮记录恢复。
-			identityScope = RunIdentityScope.open(admission.snapshot().getTenantId(), admission.snapshot().getUserId());
-			this.chatService.cancelParked(runId);
-			Boolean after = this.chatService.cancelTerminalArchived(runId);
-			if (Boolean.TRUE.equals(after)) {
-				return CancelFinalize.FINALIZED;
-			}
-			RunSnapshot latest = this.store.get(runId);
-			if (latest != null && RunSnapshot.isTerminal(latest.getStatus())
-					&& !RunSnapshot.CANCELLED.equals(latest.getStatus())) {
-				// 并发方把它收成了 DONE/FAILED（合法终态）：没有终帧可补，也绝不改写
-				return CancelFinalize.ALREADY_TERMINAL;
-			}
-			return CancelFinalize.PERSIST_DENIED;
-		}
-		catch (RuntimeException ex) {
-			log.warn("cancel finalize execution failed runId={} (unsettled, left to bounded retry)", runId, ex);
-			return CancelFinalize.PERSIST_DENIED;
-		}
-		finally {
-			finishCancelConfirmed(runId, resumeKey, gateToken, gateHeld, gateSessionId, identityScope, leases, lease,
-					fresh);
-		}
-	}
-
-	private void finishCancelConfirmed(String runId, String resumeKey, String gateToken, boolean gateHeld,
-			String gateSessionId, RunIdentityScope.Scope identityScope, LeaseService leases, LeaseService.Lease lease,
-			boolean fresh) {
-		releaseCancelResources(runId, gateToken, gateHeld, gateSessionId, leases, lease, fresh);
-		try {
-			this.resuming.remove(resumeKey);
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("resume-mutex-remove")) log.warn("cancel finalize mutex cleanup failed runId={}", runId, ex);
-		}
-		if (identityScope != null) {
-			try {
-				identityScope.close();
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-identity-close")) log.warn("cancel finalize identity close failed runId={}", runId, ex);
-			}
-		}
-	}
-
-	private void releaseCancelResources(String runId, String gateToken, boolean gateHeld, String gateSessionId,
-			LeaseService leases, LeaseService.Lease lease, boolean fresh) {
-		if (fresh && lease != null) {
-			releaseQuietly(leases, lease);
-		}
-		if (gateHeld && gateSessionId != null && this.sessionGate != null) {
-			try {
-				this.sessionGate.release(gateSessionId, runId, gateToken);
-			}
-			catch (RuntimeException ex) {
-				if (LogSampling.canAcquire("resume-session-gate-release")) {
-					log.warn("cancel finalize session gate release failed sessionId={} runId={}", gateSessionId, runId, ex);
-				}
-			}
-		}
-	}
-
-	/**
-	 * 在<b>交棒线程</b>上按本轮记录身份建立作用域（快照 0/0 = 空作用域，不伪造默认租户）。
-	 *
-	 * <p>执行器的 TTL 装饰只是第一层；恢复型任务的身份第一来源永远是记录本身。
-	 */
-	private static void withRunIdentity(RunSnapshot snapshot, Runnable action) {
-		long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
-		long userId = snapshot == null ? 0L : snapshot.getUserId();
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
-			action.run();
-		}
-	}
-
-	private static void releaseQuietly(LeaseService leases, LeaseService.Lease lease) {
-		try {
-			leases.isReleased(lease);
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("resume-runtime-catch")) log.warn("cancel finalize lease release failed key={} epoch={}", lease.key(), lease.epoch(), ex);
-		}
-	}
-
-	/** 续跑入口与每次工具派发前共用的取消门；null = 可以继续。 */
-	private ResumeResult cancelStateOutcome(String runId, Map<String, Object> body) {
-		CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
-		if (state == CancellationRegistry.CancelState.UNKNOWN) {
-			return cancelUnknownOutcome(body);
-		}
-		if (state == CancellationRegistry.CancelState.CANCELLED) {
-			this.chatService.cancelParked(runId);
-			body.put("resumed", false);
-			body.put("reason", "ALREADY_CANCELLED");
-			return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
-		}
-		return null;
-	}
-
-	/**
-	 * {@code UNKNOWN}（取消状态不可知）的<b>唯一</b> typed 结局（既有契约，未新增码）：
-	 * {@code CANCEL_STATE_UNKNOWN} + {@code reason=CANCEL_STATE_UNKNOWN} + {@code AI_REDIS_UNAVAILABLE}。
-	 *
-	 * <p>两个使用点共用同一份口径：①入口/逐条检查首次读到 {@code UNKNOWN}（{@link #cancelStateOutcome}）；
-	 * ②<b>认领前复核</b>读到 {@code UNKNOWN} 后抛出的既有 {@code STATE_UNAVAILABLE}（在重建循环里翻译）。
-	 * 两处必须逐字一致 —— 否则同一个"Redis 读抖动"会因落在窗口前/后而给出两种对外结局。
-	 */
-	private ResumeResult cancelUnknownOutcome(Map<String, Object> body) {
-		body.put("resumed", false);
-		body.put("reason", "CANCEL_STATE_UNKNOWN");
-		body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-		return new ResumeResult(Outcome.CANCEL_STATE_UNKNOWN, body);
-	}
-
-	/**
-	 * 续跑身份判据的<b>三态</b>：确定可用 / 确定不可用 / 此刻不可知。
-	 *
-	 * <p>
-	 * 第三态是 B2 修正的核心：配置读不到、或行在但 key 解不开，都属于"此刻不知道"，
-	 * 既不能放行（会让"答得出、存不下"的幽灵续跑跑起来），也<b>不能判死</b>
-	 * （一次读库抖动 ⇒ 永久 FAILED）。
-	 */
-	private record ResolvedIdentity(AiConfigService.ChatTarget target, boolean unknown, String detail) {
-
-		static ResolvedIdentity present(AiConfigService.ChatTarget target) {
-			return new ResolvedIdentity(target, false, null);
-		}
-
-		static ResolvedIdentity absent() {
-			return new ResolvedIdentity(null, false, null);
-		}
-
-		static ResolvedIdentity unknown(String detail) {
-			return new ResolvedIdentity(null, true, detail);
-		}
-
-	}
-
-	/**
-	 * 续跑身份解析：<b>硬否定（{@code PROVIDER_GONE}）之前必须先强制重载一次配置，且只有
-	 * "重载成功 + 仍为空 + 行级声明也没有"才算确定不可用</b>。
-	 *
-	 * <h2>为什么先刷新</h2>
-	 * {@code resolveChatTarget} 读的是<b>配置快照</b>，而快照只在版本变化时重载。跨实例场景里"另一个
-	 * 实例刚把 provider 写进共享库"与"本实例的快照还没看到"完全可能同时成立（run 40182796512 的
-	 * B/C 就是快照永久停在空列表）。此时按旧快照判 {@code PROVIDER_GONE} 是<b>把缓存陈旧当成端点消失</b>。
-	 *
-	 * <h2>为什么"刷新失败"不能算否</h2>
-	 * {@link AiConfigService#load()} 会吞掉读库异常（{@code /health}、{@code /chat} 不该因此 500），
-	 * 于是 {@code reload()} 在读库故障时<u>既不抛也不报</u>：调用方只看到"快照仍是旧的/空的"。
-	 * 如果据此判死，一次 Hikari 超时 / 迁移锁 / 只读切换就会把这一轮变成<b>永久 FAILED</b>
-	 * （本批把硬否定升级成了终态收敛，所以这条区分从"更好"变成"必需"）。
-	 * 因此这里用 {@link AiConfigService#reloadWithOutcome()} 拿"这次到底刷新成功没有"：
-	 * 不成功 ⇒ 第三态（{@code STATE_UNKNOWN}，快照保持原样，稍后重试）。
-	 *
-	 * <h2>为什么"行在但 key 解不开"也不能算否</h2>
-	 * {@code resolveChatTarget} 要求 key 可解析；KEK 缺失/轮换/密文损坏时它同样返回空，但端点并没有
-	 * 被删 —— 那种情形由 {@code binding}（{@link AiConfigService#bindingState(Long, String)} 的
-	 * {@code KEY_UNREADABLE}）识别为第三态。只有"行确实没了/停用了/模型下架/从未声明 key"
-	 * （{@code ABSENT}）才落 {@link #providerGone}。
-	 */
-	private ResolvedIdentity resolveForResume(String runId,
-			java.util.function.Supplier<java.util.Optional<AiConfigService.ChatTarget>> lookup,
-			java.util.function.Supplier<AiConfigService.BindingState> binding) {
-		java.util.Optional<AiConfigService.ChatTarget> cached;
-		try {
-			cached = lookup.get();
-		}
-		catch (RuntimeException ex) {
-			log.warn("resume identity cached config read failed runId={} (treating as unknown)", runId, ex);
-			return ResolvedIdentity.unknown("Failed to read configuration snapshot");
-		}
-		if (cached.isPresent()) {
-			return ResolvedIdentity.present(cached.get());
-		}
-		return resolveAfterCacheMiss(runId, lookup, binding);
-	}
-
-	private ResolvedIdentity resolveAfterCacheMiss(String runId,
-			java.util.function.Supplier<java.util.Optional<AiConfigService.ChatTarget>> lookup,
-			java.util.function.Supplier<AiConfigService.BindingState> binding) {
-		AiConfigService.ReloadResult reload;
-		try {
-			reload = this.aiConfigService.reloadWithOutcome();
-		}
-		catch (RuntimeException ex) {
-			log.warn("resume identity config reload threw runId={} (treating "
-					+ "as unknown; no death verdict, no terminal write)", runId, ex);
-			return ResolvedIdentity.unknown("Configuration reload threw");
-		}
-		if (reload == null || !reload.ok()) {
-			// reload == null = 替身没打桩/实现缺失：同样按"不可知"处理（宁可不判死）。
-			log.warn("resume identity config reload unsuccessful runId={} (DB unavailable; treating as unknown; no death verdict)", runId);
-			return ResolvedIdentity.unknown("Configuration snapshot refresh was unsuccessful");
-		}
-		java.util.Optional<AiConfigService.ChatTarget> refreshed;
-		try {
-			refreshed = lookup.get();
-		}
-		catch (RuntimeException ex) {
-			log.warn("resume identity refreshed config read failed runId={} (treating as unknown)", runId, ex);
-			return ResolvedIdentity.unknown("Failed to read refreshed configuration snapshot");
-		}
-		if (refreshed.isPresent()) {
-			return ResolvedIdentity.present(refreshed.get());
-		}
-		AiConfigService.BindingState state;
-		try {
-			state = binding.get();
-		}
-		catch (RuntimeException ex) {
-			log.warn("resume identity row-state read failed runId={} (treating as unknown)", runId, ex);
-			return ResolvedIdentity.unknown("Row-level binding state is unreadable");
-		}
-		if (state == AiConfigService.BindingState.KEY_UNREADABLE) {
-			return ResolvedIdentity.unknown("Provider/model remains configured, but its key is unavailable");
-		}
-		if (state == AiConfigService.BindingState.RESOLVED) {
-			// 不应发生（行/模型/key 都就绪时解析不会为空）。宁可当"不可知"也不判死。
-			log.warn("resume identity contradictory runId={} (row state=RESOLVED but resolution empty) - treating as unknown", runId);
-			return ResolvedIdentity.unknown("Row-level binding state contradicts the empty resolution");
-		}
-		return ResolvedIdentity.absent();
-	}
-
-	/**
-	 * {@code STATE_UNKNOWN} 结局（B2 修正）：配置此刻<b>不可确认</b>，这一轮既不判死也不放行。
-	 *
-	 * <p>
-	 * 对外 503 + {@code reason=STATE_UNKNOWN, code=AI_REDIS_UNAVAILABLE}（与"待决条目读失败"、
-	 * "取消状态未知"同口径）；快照保持 {@code SUSPENDED}、<b>不写终态、不出业务终帧</b>
-	 * （出终帧就是判死）；只把"没人会再推进"的当前订阅收掉 —— 否则重挂会挂上一条永远不会再有帧的
-	 * 连接（服务端 emitter 无传输超时），客户端只能等自己的超时。
-	 */
-	private ResumeResult stateUnknown(String runId, RunSnapshot snapshot, String detail) {
-		log.warn("resume deferred: config state unconfirmed runId={} providerId={} model={} ({}): no death "
-				+ "verdict, no terminal state/frame, snapshot stays {}; dispatcher/reattach retries later", runId, snapshot.getProviderId(), snapshot.getModelId(),
-				detail, snapshot.getStatus());
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("runId", runId);
-		body.put("resumed", false);
-		body.put("reason", "STATE_UNKNOWN");
-		body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
-		body.put("providerId", snapshot.getProviderId());
-		body.put("modelId", snapshot.getModelId());
-		releaseSubscriptionsWithoutFrame(runId);
-		return new ResumeResult(Outcome.STATE_UNKNOWN, body);
-	}
-
-	/**
-	 * 只收掉这一轮<b>当下的订阅</b>（不置终态标志、不写终帧、不摘注册表条目）：
-	 * 与 park 的"挂起即断"同一条语义 —— 连接不再悬挂，归档里的帧不受影响，重挂仍可回放并重试。
-	 */
-	private void releaseSubscriptionsWithoutFrame(String runId) {
-		try {
-			SseChatEmitter out = this.registry == null ? null : this.registry.find(runId);
-			if (out != null) {
-				out.completeSubscriptions();
-			}
-		}
-		catch (RuntimeException ex) {
-			if (LogSampling.canAcquire("resume-runtime-catch")) log.warn("resume deferred stream close failed runId={}", runId, ex);
-		}
-	}
-
-	/**
-	 * {@code PROVIDER_GONE} 结局（409 语义）：快照的 provider/model 此刻<b>确定</b>不可用，<b>不跨
-	 * provider、不换模型</b>续跑。
-	 *
-	 * <p>I3 起判据是<b>精确绑定</b>（{@code resolveChatTarget(providerId, modelId)}）：同名模型挂在
-	 * 别家不算数；env 合成行（无 providerId）退化为"该模型名是否仍可解析"。
-	 *
-	 * <p><b>只有"确定"才走到这里</b>（B2 修正）：调用方已确认①配置刷新成功、②行级状态为
-	 * {@code ABSENT}（行/模型不在、停用，或从未声明 key）。"刷新失败"或"key 解不开"
-	 * （{@code KEY_UNREADABLE}）走 {@link #stateUnknown}。
-	 *
-	 * <p><b>B1（run 40182796512）</b>：判到硬否定就必须收敛 —— 快照落 {@code FAILED} + 机器可读的
-	 * 终帧，而不是把这一轮留在 {@code SUSPENDED} 且"无人驱动、无帧可等"（客户端只能等到超时）。
-	 */
-	private ResumeResult providerGone(String runId, RunSnapshot snapshot, String detail) {
-		log.warn("resume rejected: snapshot provider/model unavailable runId={} providerId={} model={} ({})", runId,
-				snapshot.getProviderId(), snapshot.getModelId(), detail);
-		Map<String, Object> body = new LinkedHashMap<>();
-		body.put("resumed", false);
-		body.put("reason", "PROVIDER_GONE");
-		body.put("providerId", snapshot.getProviderId());
-		body.put("modelId", snapshot.getModelId());
-		body.put("message", PROVIDER_GONE_MESSAGE);
-		convergeProviderGone(runId, snapshot);
-		return new ResumeResult(Outcome.PROVIDER_GONE, body);
-	}
-
-	/**
-	 * {@code PROVIDER_GONE} 的终态收敛（B1）：<b>快照 FAILED + 机器可读终帧 + 收流</b>。
-	 *
-	 * <h2>为什么必须做（而不是只回 409）</h2>
-	 * 409 只回答<b>这一次</b>调用方；这一轮本身仍停在 {@code SUSPENDED}，条目已全部结算却没有任何
-	 * 驱动方 —— 后续重挂会挂上一条"不会再有帧"的连接（服务端用无传输超时的 emitter），客户端要么
-	 * 永久等待，要么等到自己的超时（实测 120s）。{@link ProviderGoneException} 的类注早已明确这条
-	 * 红线："必须落成明确终态，而不是只发一帧 error 就把快照留在非终态"。
-	 *
-	 * <p>
-	 * <b>只对"确定不可用"生效</b>：调用点只有本类的身份预检（精确绑定解析为空）。租约不可读 /
-	 * 状态未知 / 另一驱动方在跑，都<b>不</b>走这里 —— 那些是"此刻不知道"，不是"确定没了"：
-	 * 写终态与出终帧都会被 {@link RunStore#save} / {@code SseChatEmitter#emit} 的只读判据拦下
-	 * （见 {@code LeaseService.LeaseAuthority#readOnly()}），这里先显式跳过，避免"连接被收了但既无
-	 * 终帧也无终态"的半死形态。
-	 */
-	private void convergeProviderGone(String runId, RunSnapshot snapshot) {
-		if (runId == null) {
-			return;
-		}
-		// N2：与取消收尾共用同一把 per-run 监视器 —— "读快照判终态/取消 → 写 FAILED → 出 error 终帧"
-		// 必须是一个原子段，否则取消可以落在判定与写终态之间，一轮出现两条终帧。
-		Object monitor = this.chatService == null ? null : this.chatService.finalizeMonitor(runId);
-		if (monitor == null) {
-			convergeProviderGoneLocked(runId, snapshot);
-			return;
-		}
-		synchronized (monitor) {
-			convergeProviderGoneLocked(runId, snapshot);
-		}
-	}
-
-	private void convergeProviderGoneLocked(String runId, RunSnapshot snapshot) {
-		try {
-			LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(runId);
-			if (authority != null && authority.isReadOnly()) {
-				log.warn("resume hard negative not converged runId={}: write authority {} (lease "
-						+ "lost/unconfirmed) - no terminal state/frame; new owner closes by the same rule", runId, authority);
-				return;
-			}
-			RunSnapshot latest = this.store.get(runId);
-			RunSnapshot target = ObjectUtils.defaultIfNull(latest, snapshot);
-			if (target == null || RunSnapshot.isTerminal(target.getStatus())) {
-				return;
-			}
-			settleProviderGoneTools(runId);
-			String failureMessage = providerGoneMessage();
-			List<Message> failureHistory = providerGoneFailureHistory(target, failureMessage);
-			if (failureHistory != null) {
-				target.setMessageJson(this.codec.serializeAll(failureHistory));
-			}
-			target.setStatus(RunSnapshot.FAILED);
-			target.setError("PROVIDER_GONE：" + PROVIDER_GONE_MESSAGE);
-			target.setInFlightToolCalls(new ArrayList<>());
-			target.setAssistantContent(null);
-			// 取消优先：取消已先到 ⇒ 不写 FAILED、不发 error（取消侧发 done{cancelled:true}）。
-			if (!this.store.saveTerminalUnlessCancelled(target)) {
-				log.info("resume hard negative yields to cancel runId={} (no FAILED, no error frame)", runId);
-				return;
-			}
-			// F：终态出口的进程内清理（幂等；失败只影响内存卫生）。
-			// 直接交出刚写成 FAILED 的快照，避免按交棒/续跑线程身份复读时因归属不符而漏写完成态。
-			if (this.chatService != null) {
-				this.chatService.recordFailureTerminal(target, failureHistory);
-				this.chatService.clearTerminalRunState(runId, target);
-			}
-			SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
-			if (out == null) {
-				return;
-			}
-			// 本批：终帧幂等（与 fail/emptyReply/环外异常同一判据）—— 归档里已有终帧时不再补一条。
-			emitFailureErrorUnlessArchived(out, ErrorCodes.AI_PROVIDER_GONE, providerGoneMessage());
-			this.registry.close(runId);
-			log.info("resume hard negative converged runId={} status=FAILED code={} (reattach replays the terminal frame then closes)", runId,
-					ErrorCodes.AI_PROVIDER_GONE);
-		}
-		catch (RuntimeException ex) {
-			log.warn("resume hard negative convergence failed runId={} (snapshot/frame "
-					+ "not persisted; reattach or startup scan reconverges)", runId, ex);
-		}
-	}
-
-	private void settleProviderGoneTools(String runId) {
-		PendingToolCall upstream = new PendingToolCall();
-		upstream.setName("模型端点");
-		upstream.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.FAILED.wire());
-		upstream.setCode(ErrorCodes.AI_PROVIDER_GONE);
-		for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
-			if (!isUnsettled(pending)) {
-				continue;
-			}
-			try {
-				// 与批次确定性失败同一条规则：未执行项落 SKIPPED、补 tool_result，不抹掉已有终态。
-				this.toolCallingManager.skipAsUpstreamFailed(runId, pending, upstream);
-			}
-			catch (RuntimeException ex) {
-				log.warn("provider-gone tool settlement failed runId={} toolCallId={}", runId,
-						pending.getToolCallId(), ex);
-			}
-		}
-	}
-
-	private List<Message> providerGoneFailureHistory(RunSnapshot target, String failureMessage) {
-		List<Message> history = new ArrayList<>(this.codec.deserializeAll(target.getMessageJson()));
-		if (!target.getInFlightToolCalls().isEmpty()) {
-			history.add(rebuildAssistant(target));
-			List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
-			for (PendingToolCall item : target.getInFlightToolCalls()) {
-				PendingToolCall persisted = this.store.pending(target.getRunId(), item.getToolCallId());
-				PendingToolCall source = ObjectUtils.defaultIfNull(persisted, item);
-				responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
-						ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(),
-								source.getResultText(), item.getArguments())
-							.toModelJson(this.limiter, item.getName())));
-			}
-			history.add(ToolResponseMessage.builder().responses(responses).build());
-		}
-		target.setMessageJson(this.codec.serializeAll(history));
-		return this.chatService == null ? history
-				: this.chatService.failureHistory(target, target.getAssistantContent(), "",
-						ErrorCodes.AI_PROVIDER_GONE, failureMessage);
-	}
-
-	/** 用户面文案：与 409 同一句；en 走 {@code messages_en}，绝不回落到内部信息。 */
-	String providerGoneMessage() {
-		if (!ReplyLanguage.current().english()) {
-			return PROVIDER_GONE_MESSAGE;
-		}
-		if (this.messageSource != null) {
-			try {
-				return this.messageSource.getMessage("error." + ErrorCodes.AI_PROVIDER_GONE, null, Locale.ENGLISH);
-			}
-			catch (NoSuchMessageException ex) {
-				if (LogSampling.canAcquire("resume-message-bundle-catch")) log.warn("messages_en missing error.{}, falling back to en whitelist", ErrorCodes.AI_PROVIDER_GONE, ex);
-			}
-		}
-		return PROVIDER_GONE_MESSAGE_EN;
-	}
-
-	/**
-	 * 交棒后的存活判据（I7）：该轮快照仍存在且<b>非终态</b>。
-	 *
-	 * <p>与 {@code resuming} 表合用 = "本进程还有续跑任务在跑，且这一轮还没收尾"。读快照失败
-	 * （Redis 抖动）按"仍活着"处理：误判为假会提前放掉一个正在跑的轮的续跑权。
-	 *
-	 * <p><b>轻量状态口（本批）</b>：判据跑在续租线程上（默认每 {@code lease.renew-interval} 一拍），
-	 * 以前每次 {@code get} 都把整份快照（含整窗 {@code messageJson}）反序列化成对象图，只为取一个
-	 * 状态串。现在统一走 {@link RunStore#isSnapshotNotTerminal(String, TenantUser)} —— 只读轻量状态键
-	 * （缺失才回退快照原文的顶层 {@code status}），口径不变：不存在/终态 ⇒ false；读失败 ⇒ true。
-	 *
-	 * <p><b>身份</b>：本判据在<b>续租线程</b>上执行（那里没有请求身份），因此必须把<b>记录身份</b>
-	 * 显式带进来；用线程身份读只会命中 legacy 键 ⇒ 恒 {@code null} ⇒ 首拍即"驱动者已不在" ⇒
-	 * 主动还租、fence 不再推进（双驱动窗口）。
-	 */
-	private boolean isSnapshotNotTerminal(String runId, TenantUser identity) {
-		try {
-			return this.store.isSnapshotNotTerminal(runId, identity);
-		}
-		catch (Exception ex) {
-			return true;
-		}
-	}
-
-	/**
-	 * 结算标签（R6 裁决）：{@code <toolCallId>:<status>:<execution>}，其中 execution 取
-	 * {@code executed-here}（本次续跑真的执行了）、{@code reused(<实例>) }（复用他实例的执行结果）、
-	 * {@code not-executed}（未执行：放行前被取消/拒绝/超时/前端未回灌等）。
-	 */
-	private String settlementLabel(PendingToolCall pending) {
-		String execution;
-		if (!pending.isExecuted()) {
-			execution = "not-executed";
-		}
-		else if (this.store.instanceId().equals(pending.getExecutedBy())) {
-			execution = "executed-here";
-		}
-		else {
-			execution = "reused(" + pending.getExecutedBy() + ")";
-		}
-		return pending.getToolCallId() + ":" + pending.getStatus() + ":" + execution;
-	}
-
-	/**
-	 * 入口 kind 校验批（续跑假批准）：{@code APPROVED + FRONTEND} = 前端条目被写成了"已批准"
-	 * （旧代码不校验入口时留下的数据）。结算由 {@link SpToolCallingManager#resolvePending} 落成
-	 * blocked；本谓词只用于在续跑日志里点名这一现场。
-	 */
-	private static boolean isKindMisapproved(PendingToolCall pending) {
-		return pending != null && PendingToolCall.APPROVED.equals(pending.getStatus())
-				&& PendingToolCall.KIND_FRONTEND.equals(pending.getKind());
-	}
-
-	/**
-	 * 停走级联时"仍未结算"的条目：未执行且状态仍是 {@code PENDING}（等外部输入/后端待执行）
-	 * 或 {@code APPROVED}（已放行未执行）。已执行/已有结论的条目不得被覆盖成 SKIPPED。
-	 */
-	private static boolean isUnsettled(PendingToolCall pending) {
-		if (pending == null || pending.isExecuted()) {
-			return false;
-		}
-		String status = pending.getStatus();
-		return PendingToolCall.PENDING.equals(status) || PendingToolCall.APPROVED.equals(status);
-	}
-
-	/**
-	 * 从快照重建挂起那一轮的 {@code assistant(tool_calls)}（顺序与 id/type/name/arguments 原样）。
-	 *
-	 * <p><b>推理元数据（通用协议）</b>：{@code assistantMetadata} 整份挂回消息 —— 它是挂起时上游
-	 * assistant 的 metadata 原文（{@code reasoningContent} 之外还可能有 {@code encrypted_content} /
-	 * {@code signature} / {@code thinking} 等厂商私有键）。这里<b>不解析、不筛选、不截断</b>：
-	 * 未知键必须一起过桥，否则"续跑"只在支持某一种推理字段的 provider 上成立。
-	 * {@code null} = 挂起时没有 metadata（旧快照/旧调用方）⇒ 不写 metadata 键。
-	 *
-	 * <p>包级可见 + static：本方法不依赖任何字段，直接断言"metadata 与 tool_calls 全保真"比走完
-	 * 整条 resume 链更精确（整条链另有 {@code ResumeReasoningMetadataTest} 覆盖）。
-	 */
-	static AssistantMessage rebuildAssistant(RunSnapshot snapshot) {
-		List<AssistantMessage.ToolCall> calls = new ArrayList<>();
-		for (PendingToolCall item : snapshot.getInFlightToolCalls()) {
-			calls.add(new AssistantMessage.ToolCall(item.getToolCallId(),
-					ObjectUtils.defaultIfNull(item.getType(), "function"), item.getName(), item.getArguments()));
-		}
-		AssistantMessage.Builder builder = AssistantMessage.builder()
-			.content(StringUtils.defaultString(snapshot.getAssistantContent()));
-		Map<String, Object> metadata = snapshot.getAssistantMetadata();
-		if (metadata != null) {
-			builder.properties(metadata);
-		}
-		return builder.toolCalls(calls).build();
-	}
-
-	// ── 互斥：进程内表 + 续跑权租约（B23L1 批②b 起不再用 ai:resume:lock:） ──────
-	//
-	// 原实现 acquireResumeLock/releaseResumeLock 用 SETNX 拿一把 ai:resume:lock:<runId>，
-	// 释放是"GET → Java 比对 → DEL"：比对与删除之间锁可能已过期并被别的实例重抢，于是
-	// 删掉别人的锁（同一缺陷族见 LeaseService 类注 L6）。互斥语义整体并入续跑权租约：
-	//   · 跨实例 = ai:lease:run:<runId>（epoch 比对在 Lua 里原子完成）；
-	//   · 同进程 = 上面这张 resuming 表（租约可重入，挡不住同进程的两次并发续跑）。
-	// 全仓 grep 确认 ai:resume:lock: 无外部读者后才摘除（运维文档里的历史叙述保留）。
+    /**
+     * 续跑原因（日志面口径，{@code turn_start.resumeReason}）：启动扫描（快照 SUSPENDED）。
+     */
+    public static final String RESUME_STARTUP = "startup";
+
+    /**
+     * 续跑原因：运维/用户显式调 {@code POST /api/ai/runs/{runId}/resume}。
+     */
+    public static final String RESUME_MANUAL = "manual";
+
+    /**
+     * 续跑原因：启动/扫描期接管"状态仍 RUNNING 但已超龄"的死卡（僵尸轮）。
+     */
+    public static final String RESUME_DEADCARD = "deadcard";
+
+    /**
+     * 续跑原因：其余续跑入口（决策回灌、挂起重挂、调试直驱）—— "未标注原因"的兜底口径。
+     */
+    public static final String RESUME_REATTACH = "reattach";
+
+    /**
+     * 续跑异常的<b>用户面</b>短句（R-08 白名单）。
+     *
+     * <p>原异常消息（上游 body / 客户端栈里带出的内部信息）只进日志；SSE {@code error} 帧、
+     * 快照/界面能看到的只有这一句。与 {@code ResilientChatService} 的 {@code AI_RESUME_FAILED}
+     * 白名单原文一致（同一码同一句，不另造第二套文案）。
+     */
+    public static final String AI_RESUME_FAILED_MESSAGE = "续跑失败，请重试。";
+
+    /**
+     * en 白名单兜底（{@code messages_en} 缺失时仍不裸露原文）。
+     */
+    public static final String AI_RESUME_FAILED_MESSAGE_EN = "Could not resume the previous response. Please try again.";
+
+    /**
+     * {@code PROVIDER_GONE} 的用户面短句：与 409 响应体的 {@code message} 同一句，
+     * 终帧 {@code code=AI_PROVIDER_GONE} 的文案也取它（一处文案，两处出口）。
+     */
+    public static final String PROVIDER_GONE_MESSAGE = "该轮使用的模型端点已被删除或停用，无法按原模型续跑；请重新发送一轮。";
+
+    /**
+     * en 白名单兜底（{@code messages_en} 缺失时仍不裸露内部信息）。
+     */
+    public static final String PROVIDER_GONE_MESSAGE_EN = "The model endpoint this turn used has been removed or disabled, "
+            + "so it cannot be resumed with the same model. Please send a new message.";
+
+    /**
+     * 接管改判"<b>重挂租约</b>"的 body 键（返修 R2，{@code true} = 本次没有新起驱动）。
+     *
+     * <p>含义：本进程仍登记着这一轮的驱动方（{@code isDriving=true}）且本次已抢到租约 —— 同实例两个驱动方
+     * 共享同一份进程内租约视图，新起驱动会让旧驱动的写照样放行（双驱动），"拒绝+还租"又会把它围栏在外
+     * 且无人驱动。故本次把租约<b>重挂给旧驱动续租</b>，调用方（{@link #resumeWithReason}）据此
+     * <b>不得</b> {@code releaseRunLease}，改为 {@code markDriving(lease, 旧驱动存活判据)}。
+     */
+    public static final String LEASE_REARMED_KEY = "leaseRearmed";
+
+    private final RunStore store;
+
+    private final RunRegistry registry;
+
+    private final MessageJsonCodec codec;
+
+    private final ResilientChatService chatService;
+
+    private final SpToolCallingManager toolCallingManager;
+
+    private final ThreadPoolTaskExecutor suspendExecutor;
+
+    /**
+     * <b>保留仅为构造器兼容，锁已摘除</b>（M5）：{@code ai:resume:lock:} 在批②b 整体并入续跑权租约
+     * （GET-比对-DEL 那条非原子释放会删掉别人的锁）；本字段已无任何读取者，留着是为了不动 10 参
+     * 兼容构造器（{@code ResumeSkipCascadeTest}/{@code ResumeEnvelopeShapeTest} 等既有用例零改动）。
+     * 下一次可以改签名的窗口应直接删掉它。
+     */
+    private final StringRedisTemplate redis;
+
+    private final AiProperties properties;
+
+    private final CancellationRegistry cancellations;
+
+    /**
+     * T2：重建历史的 {@code role:tool} 也要过同一份模型侧上限（口径与首轮一致，不因续跑而变）。
+     */
+    private final ToolResultLimiter limiter;
+
+    /**
+     * 上下文压缩统一入口（上下文统计与压缩专项批①）。
+     *
+     * <p><b>字段注入</b>：{@link #ResumeService} 的构造器被四份既有用例直接 {@code new}
+     * （{@code ResumeServiceLeaseTest} / {@code ResumeEnvelopeShapeTest} 等），改签名等于要求它们跟改。
+     * 未注入时续跑不压缩（"未装配"而不是"永远压不动"）。
+     */
+    @Autowired(required = false)
+    private ContextCompactor contextCompactor;
+
+    /**
+     * 用户展示历史（B2）：续跑是"同会话运行中升级/重启"的另一条入口，必须在压缩/窗口之前
+     * 用快照历史补一次 baseline，避免 transcript 缺失时刷新只剩本轮。
+     */
+    @Autowired(required = false)
+    private ConversationTranscriptStore transcript;
+
+    /**
+     * 模型配置快照（批③ 的 {@code PROVIDER_GONE} 判据）。
+     *
+     * <p>同为<b>字段注入</b>：四份既有用例直接 {@code new ResumeService(...)}，改构造器签名等于要求
+     * 它们跟改。未注入时不做 provider 存在性判定（"没有配置设施"→ 走默认口径，与批③ 之前等价）。
+     */
+    @Autowired(required = false)
+    private AiConfigService aiConfigService;
+
+    /**
+     * 同 sessionId 单值门（人工等待 park 批）。
+     *
+     * <p>park 时首轮任务结束，{@code AiController} 的 finally 会释放会话门 —— 停等期间门是空的；
+     * 恢复方（本类）必须<b>重新 acquire</b>，否则"用户在停等期间又发了一轮"会与本轮并发。
+     * 抢不到（被另一轮占着）⇒ {@link Outcome#SESSION_BUSY}，由派发方有界重派发，绝不静默丢决策。
+     *
+     * <p>字段注入而非构造器参数：本类构造器被多份既有用例直接 {@code new}。
+     */
+    @Autowired(required = false)
+    private SessionGate sessionGate;
+
+    /**
+     * 用户面白名单文案的 locale 来源（I-5）。
+     *
+     * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）。未注入（直接 {@code new} 的单测）时，
+     * en 回落 {@link #AI_RESUME_FAILED_MESSAGE_EN}，仍不暴露异常原文。
+     */
+    @Autowired(required = false)
+    private MessageSource messageSource;
+
+    /**
+     * 批间运行上下文刷新器（多步工作流批的续跑侧入口）。
+     *
+     * <p>为什么续跑侧必须有它：生产 {@code app.ai.park.enabled=true} 时 {@code create_task} /
+     * {@code navigate_to} / {@code confirm_step} 都在 {@code SpToolCallingManager} 执行循环的
+     * <b>唯一刷新点之前</b>挂起，刷新一次都跑不到 —— 续跑随后拿"请求边界"的旧 {@link AiContext}
+     * 构造下一跳，步骤工具永远不披露。字段注入保持 10 参构造器与既有直接 new 的用例零改动；
+     * 缺席时行为与改造前一致（不刷新），但会留一条 WARN。
+     */
+    @Autowired(required = false)
+    private RunContextRefresher contextRefresher;
+
+    /**
+     * 可选注入（生产装配同一个刷新器；轻装配面不注入 = 不刷新）。
+     */
+    @Autowired(required = false)
+    public void setContextRefresher(RunContextRefresher refresher) {
+        this.contextRefresher = refresher;
+    }
+
+    /**
+     * 任务槽位解析器（可选）：续跑交棒前按<b>最新</b>上下文重算 {@code extra[taskSlots]} ——
+     * 挂起期用户在向导里改了步骤/勾选后，旧槽位不得继续把模型引回旧选择（显式空仍是权威空）。
+     *
+     * <p>字段注入保持 10 参构造器与既有直接 new 的用例零改动；未注入时只跳过重算（旧槽位原样保留）。
+     */
+    private com.example.configmgr.ai.slot.TaskSlotResolver taskSlotResolver;
+
+    /**
+     * 可选注入（槽位重算；缺席 = 不重算）。
+     */
+    @Autowired(required = false)
+    public void setTaskSlotResolver(com.example.configmgr.ai.slot.TaskSlotResolver resolver) {
+        this.taskSlotResolver = resolver;
+    }
+
+    /**
+     * 宿主确定性定义选择表单（新建任务 → 停在选择步骤 → 配置未知 ⇒ 宿主自己挂起平铺多选）。
+     *
+     * <p>为什么挂在续跑侧：{@code navigate_to} 是前端工具，生产 {@code park=true} 时它在首轮的
+     * 等待处就结束了执行，真正的结算与"下一跳上下文"都在本类 —— 于是"新任务已到选择步骤"之后、
+     * 模型再次被问之前的<b>唯一</b>确定点就在这里（既不改前端，也不新增中断路径）。
+     * 判据按任务状态而非导航瞬时成功（前端导航超时不再挡住表单）。
+     *
+     * <p>字段注入与既有可选依赖同姿态（不改 10 参构造器）；缺席 = 不挂起，行为与改造前一致。
+     */
+    private com.example.configmgr.ai.form.DefinitionSelectionForm definitionSelectionForm;
+
+    /**
+     * 可选注入（缺席 = 不生成宿主表单，模型侧既有路径不变）。
+     */
+    @Autowired(required = false)
+    public void setDefinitionSelectionForm(com.example.configmgr.ai.form.DefinitionSelectionForm form) {
+        this.definitionSelectionForm = form;
+    }
+
+    @Autowired(required = false)
+    private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
+
+    /**
+     * 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。
+     *
+     * <p>键 = <b>身份 + runId</b>（{@link LocalRunKey}）：runId 不是跨身份唯一定性，A 在续跑 X 时
+     * B 的同名轮次必须能照常续跑（否则 B 会被永久报成 {@code IN_PROGRESS}）。无身份 = legacy 桶，
+     * 不伪造默认身份。键在入口定一次、全程沿用（交棒任务与 finally 都用那把键摘除）。
+     */
+    private final Map<String, Boolean> resuming = new ConcurrentHashMap<>();
+
+    public ResumeService(RunStore store, RunRegistry registry, MessageJsonCodec codec, ResilientChatService chatService,
+                         SpToolCallingManager toolCallingManager, @Qualifier("aiRunExecutor") ThreadPoolTaskExecutor suspendExecutor,
+                         StringRedisTemplate redis, AiProperties properties, CancellationRegistry cancellations,
+                         ToolResultLimiter limiter) {
+        this.store = store;
+        this.registry = registry;
+        this.codec = codec;
+        this.chatService = chatService;
+        this.toolCallingManager = toolCallingManager;
+        this.suspendExecutor = suspendExecutor;
+        this.redis = redis;
+        this.properties = properties;
+        this.cancellations = cancellations;
+        this.limiter = limiter;
+    }
+
+    public enum Outcome {
+
+        ACCEPTED, NOT_FOUND, ALREADY_DONE, ALREADY_RUNNING, PENDING_UNRESOLVED, IN_PROGRESS, POOL_SATURATED,
+        ALREADY_CANCELLED,
+
+        /**
+         * C2：取消状态读不出来（Redis 故障/退避）。续跑是"开始执行"的副作用入口，按 fail-closed
+         * 拒绝，但必须是 typed 结局（对外 503），不能再以 RuntimeException 穿透。
+         */
+        CANCEL_STATE_UNKNOWN,
+
+        /**
+         * C2：待决条目本体读不出来（不是"没有未决"）；续跑是副作用入口，按未知拒绝。
+         */
+        STATE_UNKNOWN,
+
+        /**
+         * B23L1 批②b：本轮的续跑权租约在<b>别的实例</b>手里（或调用方给的租约已过期）。
+         *
+         * <p>它不是错误：说明那一轮已经有主（在等卡 / 在驱动 / 正在收尾），本实例什么都不该做。
+         * 对外统一 409（{@code AiController#resume} 的 switch）。
+         */
+        LEASE_HELD_ELSEWHERE,
+
+        /**
+         * 批③：快照里的 provider 已不可用（删除/停用/密钥不可解/模型已不在 allowlist）。
+         *
+         * <p>它不是"没找到"（轮次还在），也不是 503：这一轮<b>没法按原样</b>继续 —— 换模型续跑会让
+         * 历史与 {@code done.model} 说谎，故对外 409 + 稳定码 {@code PROVIDER_GONE}。
+         */
+        PROVIDER_GONE,
+
+        /**
+         * 人工等待 park 批：同一会话当前有<b>另一轮</b>在跑（park 停等期间用户又发了一轮）。
+         *
+         * <p>决策已经落库、回执帧已发 —— 只差"驱动权"。本结局表示<b>本拍不驱动</b>（不得并发同会话两轮），
+         * 由派发方按 {@code app.ai.park.max-dispatch-retries} <b>有界重派发</b>；
+         * 对 HTTP 面是 409（{@code SESSION_BUSY}，与"会话已有一轮"同一语义）。
+         */
+        SESSION_BUSY;
+
+        /**
+         * 该结局下，<b>自抢租约的调用方</b>是否可以归还租约（<b>归还白名单</b>，默认不还）。
+         *
+         * <h2>判据</h2>
+         * 调用方已经通过 {@code created} 证明了一件事：<b>抢租那一刻全集群没有人持有这一轮的租约</b>
+         * （否则它只会是重入命中、{@code created=false}，那条路径根本不还租）。所以"还有别人在管"只可能
+         * 来自<b>本进程内后到的并发调用方</b> —— 而那种情形下本线程的结局必然是
+         * {@link #IN_PROGRESS}（{@code resuming} 互斥被占）。
+         *
+         * <ul>
+         * <li>{@link #IN_PROGRESS}：<b>本进程已有胜方在跑</b>，它用的是<b>同一 token</b> ——
+         *     还租就是删它的续跑权（L-19：创建者输掉互斥时，"创建者"身份不等于"可以删"）⇒ <b>不还</b>；</li>
+         * <li>{@link #LEASE_HELD_ELSEWHERE}：租约在别人手里（本方法只可能是 verifyHeld 判丢后返回它）⇒ 更不该碰；</li>
+         * <li>{@link #NOT_FOUND} / {@link #ALREADY_DONE} / {@link #ALREADY_CANCELLED}：轮不存在或已收尾，
+         *     没有任何执行者 ⇒ 还；</li>
+         * <li>{@link #ALREADY_RUNNING} / {@link #PENDING_UNRESOLVED}：快照停在 RUNNING（僵尸轮）或
+         *     外部卡未决 —— {@code created=true} 已说明<b>现在没有别的实例在驱动/等待</b>，
+         *     这批租约没有接管者 ⇒ 还（否则要白等一个 TTL，启动扫描/重试才拿得回来）；</li>
+         * <li>{@link #POOL_SATURATED}：池饱和 = 派发失败 = 无人接管（与 {@code ConfirmGate} 的
+         *     {@code EXECUTOR_SATURATED} 必须还租同一条红线）⇒ 还；</li>
+         * <li>{@link #ACCEPTED}：调用方把租约<b>交续租调度器</b>（不是"还"）⇒ 本方法返回 false。</li>
+         * </ul>
+         *
+         * <p>白名单（默认不还）而不是黑名单：将来新增结局时，默认落在"不还"一侧 —— 漏还是一个 TTL 的
+         * 可用性问题，错还是一次双驱动/丢 fencing 的正确性问题。
+         */
+        @JsonIgnore
+        public boolean isLeaseReleasable() {
+            return this == NOT_FOUND || this == ALREADY_DONE || this == ALREADY_CANCELLED
+                    || this == ALREADY_RUNNING || this == PENDING_UNRESOLVED || this == POOL_SATURATED
+                    || this == PROVIDER_GONE || this == CANCEL_STATE_UNKNOWN || this == STATE_UNKNOWN
+                    // park 批：会话被别的轮占着 ⇒ 本拍没有驱动者，租约还给派发方（重试时再抢）
+                    || this == SESSION_BUSY;
+        }
+
+        @JsonIgnore
+        public boolean releasesLease() {
+            return isLeaseReleasable();
+        }
+
+    }
+
+    public record ResumeResult(Outcome outcome, Map<String, Object> body) {
+    }
+
+    /**
+     * <b>取消收尾窄入口</b>（{@link #cancelConfirmed(String)}）的三态以上结局。
+     *
+     * <p>与 {@link Outcome} 分开：那条枚举是"续跑/驱动"的用户面结局（HTTP 状态码映射在
+     * {@code AiController} 的 switch 上）。本枚举只服务"已确认取消的收尾"，多出来的
+     * {@link #PERSIST_DENIED} / {@link #UNAVAILABLE} 的含义是"这拍没落定，稍后再来"，
+     * 绝不能混进续跑结局表（否则一次抖动会被对外报成终局）。
+     */
+    public enum CancelFinalize {
+
+        /**
+         * 本次把终态与终帧补齐（取消事实成立，收尾已落定）。
+         */
+        FINALIZED,
+
+        /**
+         * 终态轮次无可收尾：<b>DONE/FAILED</b> 直接判终态（绝不改写）；<b>CANCELLED</b> 仅在
+         * 终帧已归档时幂等跳过（归档里没有终帧 ⇒ 仍需补齐）。
+         *
+         * <p><b>DONE/FAILED 也走这里</b>：延迟交棒绝不能把已经完成的轮次改写成 CANCELLED
+         * （{@code RunStore#save} 只查租约写权限、不查原状态）。
+         */
+        ALREADY_TERMINAL,
+
+        /**
+         * 取消事实此刻不成立（{@code ai:cancel} 看不到）而快照仍非终态：<b>不可知</b>，
+         * 交棒按有界重试处理；<b>绝不</b>因此驱动这一轮（不重建、不发起模型/工具）。
+         */
+        CANCEL_FACT_UNCONFIRMED,
+
+        /**
+         * 取消状态读不出来（Redis 故障/退避）：这拍不推进，交给有界重试。
+         */
+        CANCEL_UNKNOWN,
+
+        /**
+         * 轮不存在（已删除）：没有可收尾的对象。
+         */
+        NO_RUN,
+
+        /**
+         * 续跑租约在别的实例手里（或已过期）：不抢、不覆盖。
+         */
+        LEASE_HELD_ELSEWHERE,
+
+        /**
+         * 租约设施不可用：无法取得写权限，这拍不写。
+         */
+        UNAVAILABLE,
+
+        /**
+         * 本进程已有续跑/取消收尾在推进这一轮（{@code resuming} 互斥被占）：这拍不并发，稍后重试。
+         */
+        IN_PROGRESS,
+
+        /**
+         * 同 sessionId 的单值门被另一轮占着：这拍不推进，稍后重试。
+         */
+        SESSION_BUSY,
+
+        /**
+         * 收尾跑了但终帧仍未归档（写门仍拒写/读不可知）：等恢复后重试。
+         */
+        PERSIST_DENIED;
+
+    }
+
+    /**
+     * 列表只枚举当前身份的窄 ZSET；恢复则另走到期索引的有界页。成员自带记录身份，
+     * 每条投影都在对应 {@link RunIdentityScope} 内构造，不扫描租户或其它身份的数据。
+     */
+    public List<Map<String, Object>> listRuns() {
+        return discoverRuns(false, 0);
+    }
+
+    /**
+     * 恢复发现只读到期的轻量候选；默认页也保持有界。
+     */
+    public List<Map<String, Object>> listRunsForRecovery() {
+        return listRunsForRecovery(64);
+    }
+
+    public List<Map<String, Object>> listRunsForRecovery(int limit) {
+        this.store.reconcileRecoveryIndexThrottled();
+        return discoverRuns(true, limit);
+    }
+
+    /**
+     * 从指定 score + member 之后取一页，避免只在前 256 个候选内轮转。
+     */
+    public List<Map<String, Object>> listRunsForRecoveryAfter(int limit, long afterDueAtMs, String afterMember) {
+        this.store.reconcileRecoveryIndexThrottled();
+        List<Map<String, Object>> out = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (RunStore.RecoveryCandidate candidate : this.store.recoveryDueRecordsAfter(System.currentTimeMillis(),
+                afterDueAtMs, afterMember, limit)) {
+            RunKeyScope.IndexRef ref = candidate.ref();
+            appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), true, candidate.dueAtMs());
+        }
+        return out;
+    }
+
+    private List<Map<String, Object>> discoverRuns(boolean recovery, int recoveryLimit) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        TenantUser current = RequestContextUtils.currentOrNull();
+        if (recovery) {
+            for (RunStore.RecoveryCandidate candidate : this.store.recoveryDueRecords(System.currentTimeMillis(),
+                    recoveryLimit)) {
+                RunKeyScope.IndexRef ref = candidate.ref();
+                appendDiscovered(out, seen, ref.runId(), ref.tenantId(), ref.userId(), true, candidate.dueAtMs());
+            }
+            return out;
+        }
+        if (current != null) {
+            for (String runId : this.store.allRunIds()) {
+                appendDiscovered(out, seen, runId, current.tenantId(), current.userId(), false, 0L);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 单条发现在<b>该条记录身份</b>的作用域内构造；同一复合键只出现一次。
+     */
+    private void appendDiscovered(List<Map<String, Object>> out, Set<String> seen, String runId, long tenantId,
+                                  long userId, boolean recovery, long expectedDueAtMs) {
+        if (!seen.add(tenantId + "/" + userId + "/" + runId)) {
+            return;
+        }
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+            Map<String, Object> item = recovery ? recoveryRun(runId, tenantId, userId, expectedDueAtMs)
+                    : listRun(runId, tenantId, userId);
+            if (item != null) {
+                out.add(item);
+            } else if (recovery) {
+                this.store.isRecoveryCandidateRemoved(runId, tenantId, userId, expectedDueAtMs);
+            }
+        }
+    }
+
+    /**
+     * 单条列表项（在<b>该条记录身份</b>的作用域内构造；API 详情投影）。
+     */
+    private Map<String, Object> listRun(String runId, long tenantId, long userId) {
+        RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
+                : this.store.get(runId);
+        if (snapshot == null) {
+            return null;
+        }
+        // C2：续跑入口的清单用非抛读口；guard 读失败时仍能拿到原始条目并按 PENDING 保守处理。
+        List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("runId", runId);
+        // 身份随条目交给扫描方：续跑入口据此 useContext（不读快照猜身份、不扫描租户列表）
+        item.put("tenantId", snapshot.getTenantId());
+        item.put("userId", snapshot.getUserId());
+        item.put("sessionId", snapshot.getSessionId());
+        item.put("status", snapshot.getStatus());
+        item.put("round", snapshot.getRound());
+        item.put("messageCount", snapshot.getMessageJson().size());
+        item.put("createdBy", snapshot.getCreatedBy());
+        item.put("resumedBy", snapshot.getResumedBy());
+        item.put("updatedAtMs", snapshot.getUpdatedAtMs());
+        item.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
+        item.put("pendingUnresolved", pendingIds(pendings, false));
+        item.put("ledgerCounts", this.store.ledgerCounts(runId));
+        // 发现态的"可续跑性"判定（启动自动续跑与运维端点共用同一口径）：
+        // 取消标志（Redis 为准）> 终态 > 未决外部输入 > 僵尸 RUNNING（超龄）。
+        // C2：发现/列表面 UNKNOWN 按"未取消 + 计数继续"（这里只是展示可续跑性，没有副作用）。
+        CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
+        boolean cancelled = cancelState == CancellationRegistry.CancelState.CANCELLED;
+        if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+            if (log.isDebugEnabled())
+                log.debug("discovery: cancel state unknown, continuing as not cancelled runId={}", runId);
+        }
+        long activeAtMs = activeAtMs(snapshot);
+        // I-4 / M-3：SUSPENDED 等人期间没有业务帧，心跳才是"还在等"的证据。
+        // 对外展示的 activeAgeMs 按状态取口径：RUNNING = 业务年龄（僵尸判据同源），
+        // SUSPENDED = max(业务, 心跳) 的年龄 —— 否则"挂起三天"会被读成"三天没动"。
+        long heartbeatAtMs = this.store.lastBeatAtMs(runId);
+        long livenessAtMs = RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
+                ? Math.max(activeAtMs, heartbeatAtMs) : activeAtMs;
+        item.put("activeAtMs", activeAtMs);
+        item.put("activeAgeMs", System.currentTimeMillis() - livenessAtMs);
+        item.put("lastHeartbeatAtMs", heartbeatAtMs);
+        item.put("zombieAgeThresholdMs", this.properties.getResume().getZombieAge().toMillis());
+        item.put("cancelled", cancelled);
+        item.put("zombieRunning", isZombieRunning(snapshot, activeAtMs));
+        item.put("unresolvedExternal", pendingIds(pendings, true));
+        return item;
+    }
+
+    /**
+     * <b>恢复扫描的轻量投影</b>：只保留"该不该接管"的判据字段。
+     *
+     * <h2>省掉的是什么、为什么能省</h2>
+     * API 列表面（{@link #listRun}）要展示明细，因此带 {@code ledgerCounts}（C65 后只读
+     * {@code ai:idem} 里的小型元数据投影，不再 {@code LRANGE 0 -1} 整份台账）、{@code messageCount}、
+     * 心跳时刻与逐条 {@code pending} 载荷；
+     * 恢复扫描只问"取消 / 终态 / 未决外部输入 / 僵尸 / 活动锚点"，这些字段一个也不读：
+     * <ul>
+     * <li>{@code ledgerCounts}：每轮一次 {@code LLEN} + 一次 {@code HGETALL}。{@code HGETALL} 的复杂度是
+     *     O(索引 HASH 的字段数)，字段数与台账长度<b>同阶</b>（每条工具执行一个索引字段 + 一条投影字段），
+     *     因此读侧代价仍随台账长度线性增长；省掉的是 {@code resultText} 正文的网络传输与整份大 JSON 的
+     *     重复解析。候选越多越慢的"正文全表读"已从列表面移走（审计 S4）；</li>
+     * <li>{@code lastBeatAtMs}：多一次键读，且只服务 {@code SUSPENDED} 的展示年龄 ——
+     *     僵尸判据用的是<b>业务</b>活动锚点，心跳本来就不参与（R1-09），恢复侧不读它；</li>
+     * <li>{@code messageCount}/{@code pending}：只看条数与详情，恢复判据只用 {@code pendingUnresolved}/
+     *     {@code unresolvedExternal}（同一份 {@code pendings} 派生，不多读一次）。</li>
+     * </ul>
+     *
+     * <p><b>安全判据一个不少</b>：{@code cancelled}（Redis 为准的取消旗标）、{@code status}（终态）、
+     * {@code pendingUnresolved}/{@code unresolvedExternal}（未决外部项）、
+     * {@code activeAtMs}（业务活动锚点）与 {@code zombieRunning}（超龄 RUNNING）都在。
+     */
+    private Map<String, Object> recoveryRun(String runId, long tenantId, long userId, long expectedDueAtMs) {
+        RunSnapshot snapshot = tenantId > 0L && userId != 0L ? this.store.get(runId, tenantId, userId)
+                : this.store.get(runId);
+        if (snapshot == null) {
+            return null;
+        }
+        List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
+        CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
+        if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+            // 与列表面同一口径：UNKNOWN 按"未取消"继续，但绝不当成"已确认未取消"写回任何状态。
+            if (log.isDebugEnabled())
+                log.debug("discovery: cancel state unknown, continuing scan as not cancelled runId={}", runId);
+        }
+        long activeAtMs = activeAtMs(snapshot);
+        if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+            this.store.isRecoveryCandidateRemoved(runId, tenantId, userId, expectedDueAtMs);
+        } else {
+            this.store.isRecoveryCandidateDeferred(runId, tenantId, userId, expectedDueAtMs,
+                    System.currentTimeMillis() + this.properties.getResume().getZombieAge().toMillis());
+        }
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("runId", runId);
+        item.put("tenantId", snapshot.getTenantId());
+        item.put("userId", snapshot.getUserId());
+        item.put("status", snapshot.getStatus());
+        item.put("updatedAtMs", snapshot.getUpdatedAtMs());
+        item.put("dueAtMs", expectedDueAtMs);
+        item.put("activeAtMs", activeAtMs);
+        item.put("cancelled", cancelState == CancellationRegistry.CancelState.CANCELLED);
+        item.put("zombieRunning", isZombieRunning(snapshot, activeAtMs));
+        item.put("pendingUnresolved", pendingIds(pendings, false));
+        item.put("unresolvedExternal", pendingIds(pendings, true));
+        return item;
+    }
+
+    /**
+     * 未决条目 id（{@code externalOnly=true} ⇒ 只留外部项：确认门/前端工具）。
+     * 两条投影共用，避免"列表面与恢复面各写一套过滤"慢慢走偏。
+     */
+    private static List<String> pendingIds(List<PendingToolCall> pendings, boolean externalOnly) {
+        return pendings.stream()
+                .filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
+                .filter(pending -> !externalOnly || !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
+                .map(PendingToolCall::getToolCallId)
+                .toList();
+    }
+
+    /**
+     * RUNNING 且业务活动已超龄 ⇒ 僵尸轮（两条投影同一判据、同一窗口）。
+     */
+    private boolean isZombieRunning(RunSnapshot snapshot, long activeAtMs) {
+        return RunSnapshot.RUNNING.equals(snapshot.getStatus())
+                && System.currentTimeMillis() - activeAtMs > this.properties.getResume().getZombieAge().toMillis();
+    }
+
+    /**
+     * 该轮的"活跃时刻"（R3 裁决 / R1-09）：取<b>较新者</b> ——
+     * 快照 {@code updatedAtMs}（工具落定/挂起/终态写入的时刻）与
+     * {@link RunStore#lastActivityAtMs(String)}（最后一条<b>非心跳</b>业务帧的时刻）。
+     *
+     * <p>
+     * 为什么必须双条件：快照只在"轮次结构变化"时刷新，<b>长流式轮次</b>（一次模型调用吐几十秒正文、
+     * 中途不落定任何工具）会让 {@code updatedAtMs} 长时间不动 —— 只看它就会把正在流式产出的活轮
+     * 判成僵尸并强行接管（第二次执行同一轮）。业务帧时间戳覆盖了流式与工具帧，两者取较新即
+     * "只要有业务前进就不算僵尸"。
+     *
+     * <p>
+     * <b>为什么不用 {@link RunStore#lastEventAtMs(String)}</b>：那个口径包含心跳（"进程还活着"），
+     * 而僵尸判据问的是"<b>业务</b>是否还在前进"。心跳一拍就刷新会让卡死的轮永远年轻（R1-09 的
+     * "心跳掩盖卡死"）。挂起等人的轮状态是 {@code SUSPENDED}，本来就不在本判据的 RUNNING 分支里。
+     */
+    public long activeAtMs(RunSnapshot snapshot) {
+        long lastEvent = this.store.lastActivityAtMs(snapshot.getRunId());
+        return Math.max(snapshot.getUpdatedAtMs(), lastEvent);
+    }
+
+    /**
+     * 单轮明细（台账 + 待决条目 + 历史角色序列）。
+     */
+    public Map<String, Object> describe(String runId) {
+        RunSnapshot snapshot = this.store.get(runId);
+        if (snapshot == null) {
+            return Map.of("exists", false);
+        }
+        List<Message> history = this.codec.deserializeAll(snapshot.getMessageJson());
+        List<String> roles = history.stream()
+                .map(message -> message.getMessageType().name())
+                .collect(Collectors.toList());
+        List<PendingToolCall> pendings = this.store.pendingsLenient(runId);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("exists", true);
+        out.put("snapshot", snapshot.asMap());
+        out.put("context", snapshot.getContext());
+        out.put("historyRoles", roles);
+        out.put("inFlight", snapshot.getInFlightToolCalls().stream().map(PendingToolCall::asMap).toList());
+        out.put("pending", pendings.stream().map(PendingToolCall::asMap).toList());
+        List<Map<String, Object>> ledger = this.store.ledger(runId);
+        out.put("ledger", ledger);
+        // C65：同一路径只读一次台账 —— 计数从已读出的记录派生，不再触发第二次全表读 + 解析。
+        out.put("ledgerCounts", RunStore.ledgerCountsOf(ledger));
+        out.put("instanceId", this.store.instanceId());
+        // 批次2（AR-01 / AR-09）：**失败现场**只读判据。
+        // 全部来自 Redis（快照 + 台账 + 待决条目），不新增 DB 读写。
+        out.put("failureScene", failureScene(snapshot, pendings, history));
+        out.put("keys", describeKeys(runId, snapshot));
+        return out;
+    }
+
+    /**
+     * 失败现场（只读、只来自 Redis）：{@code code/message/partialChars/toolCallsSettled/ledgerCount}。
+     *
+     * <p><b>边界（AR-01）</b>：失败现场<b>不</b>依赖 DB 新增列/写入 —— 快照的 {@code error} 与帧归档
+     * 就是现场本身；超过 24h（Redis 运行态到期）后不可恢复，这是如实登记的限制。
+     */
+    private Map<String, Object> failureScene(RunSnapshot snapshot, List<PendingToolCall> pendings,
+                                             List<Message> history) {
+        Map<String, Object> scene = new LinkedHashMap<>();
+        scene.put("status", snapshot.getStatus());
+        scene.put("error", snapshot.getError());
+        scene.put("finalText", snapshot.getFinalText());
+        scene.put("partialChars", StringUtils.length(snapshot.getAssistantContent()));
+        scene.put("toolCallsSettled", pendings.stream()
+                .noneMatch(pending -> PendingToolCall.PENDING.equals(pending.getStatus())
+                        && !PendingToolCall.KIND_BACKEND.equals(pending.getKind())));
+        scene.put("toolPairsComplete", toolPairsComplete(history));
+        scene.put("attempts", snapshot.getAttempts());
+        return scene;
+    }
+
+    /**
+     * 运维面键表（同一个入口拼键，不另拼字符串）。
+     *
+     * <p>批③a 增 {@code lockTask} / {@code lockJob}：资源互斥锁（{@link LeaseKeys}）按 taskId 记，
+     * 与 runId 记的 {@code lease}/{@code fence} <b>不是同一族键</b>。上下文里没有 taskId（页面轮）时
+     * 两个值都是 null（键仍在，便于前端/运维面按固定键面取值）；有 taskId 但无 step/taskType 时
+     * 只有 {@code lockJob} 为 null。
+     */
+    private Map<String, Object> describeKeys(String runId, RunSnapshot snapshot) {
+        Map<String, Object> keys = new LinkedHashMap<>();
+        keys.put("state", this.store.runKey(runId));
+        keys.put("pending", this.store.pendingKey(runId));
+        keys.put("ledger", this.store.ledgerKey(runId));
+        keys.put("xevents", this.store.xeventsKey(runId));
+        keys.put("claim", this.store.claimKey(runId));
+        // B23L1 批②b：fencing 的两个契约键也要能在运维面上直接对上
+        keys.put("lease", this.store.runLeaseKey(runId));
+        keys.put("fence", this.store.fenceKey(runId));
+        // B23L1 批③a：L1 资源互斥的两把锁（按 taskId 记，随 TTL 自清，轮次回收不清）
+        Long taskId = contextTaskId(snapshot);
+        String jobType = contextJobType(snapshot);
+        keys.put("lockTask", taskId == null || taskId <= 0L ? null : LeaseKeys.task(taskId));
+        keys.put("lockJob", taskId == null || taskId <= 0L || jobType == null ? null : LeaseKeys.job(taskId, jobType));
+        return keys;
+    }
+
+    /**
+     * 快照上下文里的 taskId（null = 页面轮/旧数据）。
+     */
+    private static Long contextTaskId(RunSnapshot snapshot) {
+        Object value = snapshot.getContext().get("taskId");
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            return value == null ? null : Long.valueOf(String.valueOf(value));
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * 快照上下文里的作业类型（JOBTYPE 的<b>来源</b>）：取 {@code step}，缺省取 {@code taskType}。
+     *
+     * <p>两者在既有上下文里同义（{@code AiContext.of(page, taskType, step, taskId, extra)}：
+     * 导出页 {@code taskType=EXPORT, step=EXPORT}）；大写归一交给 {@link LeaseKeys#normalizeJobType}。
+     */
+    private static String contextJobType(RunSnapshot snapshot) {
+        for (String field : List.of("step", "taskType")) {
+            Object value = snapshot.getContext().get(field);
+            if (StringUtils.isNotBlank(ObjectUtils.toString(value, (String) null))) {
+                return String.valueOf(value);
+            }
+        }
+        return null;
+    }
+
+    public ResumeResult resume(String runId) {
+        // 调用线程已用 AiTrace#markResumeReason 标注过的，尊重它；未标注（运维端点 / 单测直调）按 manual 记。
+        String marked = AiTrace.currentResumeReason();
+        return resumeWithReason(runId, false, StringUtils.defaultIfBlank(marked, RESUME_MANUAL),
+                ErrorBodyFactory.requestLocale());
+    }
+
+    /**
+     * 续跑（带<b>请求 locale</b>）：HTTP 入口在提交任务前取好 {@link ErrorBodyFactory#requestLocale()}，
+     * 由驱动线程 set/reset —— 工作线程不继承请求上下文，否则 en 用户的续跑错误/回答语言恒为中文。
+     *
+     * @param replyLocale 请求 locale；{@code null} = 无请求上下文（启动扫描/单测），不设置线程 locale
+     */
+    public ResumeResult resume(String runId, Locale replyLocale) {
+        String marked = AiTrace.currentResumeReason();
+        return resumeWithReason(runId, false, StringUtils.defaultIfBlank(marked, RESUME_MANUAL),
+                replyLocale);
+    }
+
+    /**
+     * 续跑（带<b>续跑原因</b>）：原因只影响日志面（{@code turn_start.resumeReason}），不改变续跑判据。
+     *
+     * <p>为什么不重载 {@code resume(...)}：第三个参数写成 {@code String} 会让既有的
+     * {@code resume(runId, false, null)} 变成"String 与 Lease 都匹配"的歧义调用（编译红）。
+     * 四个取值见 {@link #RESUME_STARTUP} / {@link #RESUME_MANUAL} / {@link #RESUME_DEADCARD} /
+     * {@link #RESUME_REATTACH}。
+     */
+    public ResumeResult resumeWithReason(String runId, String resumeReason) {
+        return resumeWithReason(runId, false, resumeReason, ErrorBodyFactory.requestLocale());
+    }
+
+    /**
+     * 续跑（幂等 + 互斥 + 取消优先 + 可选僵尸接管）—— <b>旧签名</b>：自抢续跑权租约。
+     *
+     * <p>既有调用方（{@code StartupResumeRunner} 的启动/僵尸扫描、{@code AiController} 的运维端点）
+     * <b>零改动</b>即获得 fencing：
+     * <ol>
+     * <li>抢 {@code ai:lease:run:<runId>}；抢不到（且本仓有租约设施）⇒ {@code LEASE_HELD_ELSEWHERE}，
+     * 什么都不动；无租约设施（单测/降级装配）⇒ 走原路径，由进程内互斥兜底；</li>
+     * <li>走带租约重载 {@link #resume(String, boolean, LeaseService.Lease)}；</li>
+     * <li>非 {@code ACCEPTED} 且结局在<b>归还白名单</b>内（{@link Outcome#releasesLease()}，
+     * {@code IN_PROGRESS} 与 {@code LEASE_HELD_ELSEWHERE} 不在其中 = 有人正在用这一任）
+     * ⇒ 当场还租；{@code ACCEPTED} ⇒ 交续租调度器（终态由 {@code RunStore.save} 释放）。
+     * <b>三个条件都必要</b>：
+     * <ul>
+     * <li><b>只还自己创建的</b>（{@code AcquireResult#created()}）—— 可重入命中的租约属于等待方
+     * 或另一个并发调用方；</li>
+     * <li><b>只在无人接管的结局下还</b>（L-19）—— 创建者也可能输掉 {@code resuming} 互斥
+     * （{@code IN_PROGRESS}），此时它手里的租约正被胜方使用，"创建者"身份并不等于"可以删"。</li>
+     * <li><b>重挂给旧驱动时不还</b>（{@code LEASE_REARMED}）—— 这一任已被本进程仍在跑的旧驱动接手，
+     * 还租等于把它围栏在外且无人驱动；后续续租登记失败的异常分支同样按此判定，不按"创建者"归还。</li>
+     * </ul>
+     * 合起来才是完整口径：<b>租约跟"这一轮还有没有人管"走，不跟"是谁建的"走</b>。</li>
+     * </ol>
+     *
+     * @param forceTakeover 仅由<b>启动自动续跑</b>使用的僵尸接管开关（N3）：为 true 时允许
+     *                      接管"状态仍是 {@code RUNNING} 但已超龄"的轮次（上一进程死在模型调用中间留下的僵尸轮）。
+     *                      运维端点不传这个开关（{@code false}），保持"RUNNING 一律 409"的保守语义。
+     */
+    public ResumeResult resume(String runId, boolean forceTakeover) {
+        // 调用方只有启动扫描：僵尸接管 = 死卡（deadcard），常规启动扫描 = startup
+        return resumeWithReason(runId, forceTakeover, forceTakeover ? RESUME_DEADCARD : RESUME_STARTUP);
+    }
+
+    /**
+     * 续跑（原因 + 僵尸接管开关）：自抢续跑权租约，其余与 {@link #resume(String, boolean, LeaseService.Lease)} 同构。
+     */
+    public ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason) {
+        return resumeWithReason(runId, forceTakeover, resumeReason, ErrorBodyFactory.requestLocale());
+    }
+
+    private ResumeResult resumeWithReason(String runId, boolean forceTakeover, String resumeReason,
+                                          Locale replyLocale) {
+        // ===== 身份作用域：抢租 / 还租 / 续租判据都必须落在<b>记录身份</b>下 =====
+        // 租约键（{@code ai:lease:run:{<t>:<u>:run:<id>}}）由身份拼出：抢租发生在读快照之前，
+        // 若用调用线程身份（定时线程 = 无身份）拼键，抢到的是一把 legacy 租约 —— 真实那一轮既没被围栏，
+        // 又会被另一实例当成"无人持有"再次接管（双驱动）。因此身份必须在<b>进入本方法时</b>就定下来：
+        // 调用方（启动扫描 = 索引成员身份 / 确认门 = 交棒时的记录身份 / HTTP = 请求身份）负责给出。
+        TenantUser identity = RequestContextUtils.currentOrNull();
+        // 进程内互斥的本地键（身份 + runId）：同 runId 不同身份是两轮，不得互相判成 IN_PROGRESS。
+        // 键在<b>入口</b>定一次并一路沿用 —— 中途的 RunIdentityScope 会按记录身份覆盖线程身份
+        // （旧记录 0/0 时甚至是清空），若在 finally 里现取，摘除键会与登记键不同（互斥位永久占住）。
+        String resumeKey = LocalRunKey.of(identity, runId);
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+            // ===== 接管前初检（M-1）=====
+            // 抢租会把 fence 推到新 epoch（旧驱动从此只读），所以"驱动还活着"的判定必须在<b>还没夺权</b>时做。
+            // 否则"先抢租 → 复核发现驱动还活 → 拒绝并把租约还掉"的净结果是
+            // 「fence 已推进 + 租约被删 + 无人驱动」：原驱动被围栏在外，这一轮再也没人推。
+            if (forceTakeover) {
+                ResumeResult refused = takeoverPreCheck(runId);
+                if (refused != null) {
+                    return refused;
+                }
+            }
+            LeaseService leases = this.store.leaseService();
+            boolean fresh = false;
+            LeaseService.Lease lease = null;
+            if (leases != null) {
+                LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
+                if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+                    return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
+                            "reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
+                }
+                // I4：设施不可用（{@code UNAVAILABLE}）⇒ 走"无租约降级"这条既有路径（进程内互斥放行），
+                // 与 leaseService == null 完全同义。把"我不知道有没有主"报成"别人持有"会让一次 Redis 抖动
+                // 把启动续跑/运维续跑全部 409 掉。
+                // 所有权口径：<b>谁创建谁释放</b>。只有真正建出这一任的调用方才允许交调度器/还租；
+                // 命中现值（同主重入）时 created=false —— 用"抢占前 epoch"推断是错的：并发同主双抢时
+                // 两边读到同一个前置状态，于是败方（撞 resuming 互斥 → IN_PROGRESS）会去还胜方的租约，
+                // 把胜方的 fencing 写打回 plain SET（harness lease-scripts 实锤）。
+                lease = acquired.lease();
+                fresh = acquired.created();
+            }
+            ResumeResult result;
+            try {
+                result = resumeInternal(runId, resumeKey, forceTakeover, lease, fresh, resumeReason, replyLocale);
+            } catch (RuntimeException ex) {
+                if (fresh) {
+                    this.store.releaseRunLease(runId);
+                }
+                throw ex;
+            }
+            if (fresh) {
+                handleFreshLease(runId, leases, lease, fresh, result, resumeKey, identity);
+            }
+            return result;
+        }
+    }
+
+    private void handleFreshLease(String runId, LeaseService leases, LeaseService.Lease lease, boolean fresh,
+                                  ResumeResult result, String resumeKey, TenantUser identity) {
+        // 本任租约是否已"重挂给仍在跑的旧驱动"（LEASE_REARMED）：重挂后租约由旧驱动继续持有，
+        // 它<b>不是</b>"本次创建失败、可归还"的那一任 —— 归还 = 把旧驱动围栏在外 + 这一轮无人驱动。
+        boolean rearmed = false;
+        try {
+            if (result.outcome() == Outcome.ACCEPTED) {
+                // I7：续租带上存活判据 —— 本进程仍在续跑（resuming 表里有它）且快照非终态；
+                // 驱动任务收尾（finally 里摘除 resuming）后下一拍即停续租并还租，
+                // 于是"驱动线程异常退出、快照停在 RUNNING"不会留下永远续租的僵尸租约。
+                // 判据在续租线程上执行：身份随租约携带（不是"那一拍线程碰巧是谁"）；
+                // 互斥键也用<b>本拍登记的那一把</b>（续租线程没有身份，现取会落到 legacy 桶）。
+                leases.markDriving(lease,
+                        () -> this.resuming.containsKey(resumeKey) && isSnapshotNotTerminal(runId, identity),
+                        identity);
+            } else if (Boolean.TRUE.equals(result.body() == null ? null : result.body().get(LEASE_REARMED_KEY))) {
+                // ===== 同实例收口（返修 R2）：租约重挂给仍在跑的旧驱动，<b>不得还租</b> =====
+                // 还租会让旧驱动被 fence 围栏在外、且这一轮无人驱动；新起驱动又会共享同一份进程内租约视图
+                // （旧驱动的写照样放行）⇒ 双驱动。故把这一任交给旧驱动续租：
+                // 先摘掉可能仍是旧 epoch 的续租任务（它会在下一拍判 LOST 自行停，留着会让新任务登记不上），
+                // 再按"本进程仍有该轮驱动登记 && 快照非终态"起续租 —— 驱动收尾后下一拍即停续租并还租。
+                // 置位必须早于下面两步：stopDriving 之后的任何异常都不再走"按所有权归还"（见 catch）。
+                rearmed = true;
+                leases.stopDriving(lease.key(), lease.owner());
+                leases.markDriving(lease, () -> this.chatService != null && this.chatService.isDriving(runId)
+                        && isSnapshotNotTerminal(runId, identity), identity);
+                log.info("resume authority reattached to live driver in this process "
+                                + "runId={} epoch={} (no new driver, lease not released)", runId,
+                        lease.epoch());
+            } else if (result.outcome().isLeaseReleasable()) {
+                // L-19：只有"确认无人会接手"的结局才还租。IN_PROGRESS = 本进程已有胜方在跑 ——
+                // 创建者输掉 resuming 互斥时，它手里这份租约仍是胜者落库前用的那一任，
+                // 还了就把胜方的 fencing 写打回 plain SET（fence 键不再推进）。
+                this.store.releaseRunLease(runId);
+            }
+        } catch (RuntimeException ex) {
+            if (!rearmed) {
+                // 本次创建（fresh=true）且未重挂的租约没交成续租任务：按<b>所有权</b>归还后再抛
+                // （releaseIfHeld 只在仍是本实例那一任时才删，不碰别人的租约）。留着等 TTL
+                // 会多出一段"无人续租、也没人知道它已无主"的窗口。
+                this.store.releaseRunLease(runId);
+                log.warn("resume renew registration failed, returning created lease runId={} epoch={}", runId,
+                        lease == null ? -1L : lease.epoch(), ex);
+            } else {
+                // LEASE_REARMED：这一任已经属于仍在跑的旧驱动，归还会把旧驱动围栏在外且无人驱动。
+                // 续租任务没登记上时宁可让租约按 TTL 自然到期（旧驱动的写随即被 fence 拦住），也不删它。
+                log.warn("resume reattach renew registration failed, keeping lease runId={} epoch={} (old driver still on this "
+                                + "run; releasing would leave the fence out with no driver; waiting TTL or old driver cleanup)", runId,
+                        lease == null ? -1L : lease.epoch(), ex);
+            }
+            throw ex;
+        }
+    }
+
+    /**
+     * <b>接管前初检</b>（M-1）：zombie 接管（{@code forceTakeover=true}）在<b>抢租之前</b>先判一次
+     * "驱动是否还活着"，活着就<b>什么都不动</b>地拒绝（不抢租 ⇒ fence 不推进、不还租）。
+     *
+     * <p>两条证据（与抢租后的复核同源，只是提前）：
+     * <ol>
+     * <li><b>本进程的驱动方仍持有效租约</b>（{@code isDriving} && 进程内 epoch &gt; 0）——
+     *     登记本身只说明"线程还在"，租约还在才说明"它仍是这一轮的主人"；</li>
+     * <li><b>业务活动锚点仍在僵尸窗口内</b>（快照 RUNNING 且 {@code activeAtMs} 距今 ≤
+     *     {@code app.ai.resume.zombie-age}）—— 判活方那一拍之后业务又前进了。</li>
+     * </ol>
+     *
+     * <p>返回 {@code null} = 通过初检（继续抢租，按 fresh 决定后续）；不通过 = {@code ALREADY_RUNNING}。
+     */
+    private ResumeResult takeoverPreCheck(String runId) {
+        if (this.chatService != null && this.chatService.isDriving(runId) && this.store.heldRunEpoch(runId) > 0L) {
+            return refuseTakeover(runId, "DRIVER_ALIVE_IN_PROCESS", null, null);
+        }
+        // 租约此刻已被某方持有（别人 / 或本进程别的驱动方）：不再做活动初检，把结论交给抢租与抢租后的复核 ——
+        // 别人持有 ⇒ LEASE_HELD_ELSEWHERE（比"活动还新"更具体、也是既有对外语义）；
+        // 本进程重入（created=false）⇒ 抢租后按 !fresh 拒绝（不动租约）。
+        LeaseService facility = this.store.leaseService();
+        if (facility != null) {
+            boolean leaseHeld;
+            try {
+                leaseHeld = facility.isHeld(this.store.runLeaseKey(runId));
+            } catch (RuntimeException ex) {
+                // 探针读不出来 ≠ 没人持有：按"有人持有"处理，把结论交给抢租脚本（它会给出权威答案）
+                if (LogSampling.canAcquire("resume-pre-takeover-catch"))
+                    log.warn("pre-takeover lease read failed runId={} (left to acquire decision)", runId, ex);
+                leaseHeld = true;
+            }
+            if (leaseHeld) {
+                return null;
+            }
+        }
+        RunSnapshot snapshot;
+        try {
+            snapshot = this.store.get(runId);
+        } catch (RuntimeException ex) {
+            // 读不出来不是"可以接管"：交给常规入口的 STATE_UNKNOWN 等既有分支处理（这里不改变方向）
+            if (LogSampling.canAcquire("resume-pre-takeover-catch"))
+                log.warn("pre-takeover snapshot read failed runId={} (falling back to normal entry)", runId, ex);
+            return null;
+        }
+        if (snapshot == null || !RunSnapshot.RUNNING.equals(snapshot.getStatus())) {
+            return null;
+        }
+        long activeAtMs = activeAtMs(snapshot);
+        long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
+        long activeAgeMs = System.currentTimeMillis() - activeAtMs;
+        if (activeAgeMs <= zombieAgeMs) {
+            return refuseTakeover(runId, "ACTIVITY_ADVANCED", activeAtMs, activeAgeMs);
+        }
+        return null;
+    }
+
+    /**
+     * 接管否决的统一出口（初检与抢租后复核共用；形态 = {@code ALREADY_RUNNING} + 具名 reason）。
+     */
+    private ResumeResult refuseTakeover(String runId, String reason, Long activeAtMs, Long activeAgeMs) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("runId", runId);
+        body.put("resumed", false);
+        body.put("reason", reason);
+        if ("DRIVER_ALIVE_IN_PROCESS".equals(reason)) {
+            body.put("driverAlive", true);
+            log.warn("zombie takeover denied runId={}: driver in this process still holds the lease (no steal, no release, driver unaffected)",
+                    runId);
+        } else {
+            body.put("activeAtMs", activeAtMs);
+            body.put("activeAgeMs", activeAgeMs);
+            log.warn("zombie takeover denied runId={}: business activity within zombie "
+                            + "window ({}ms <= threshold {}ms) - no steal, leave to original driver",
+                    runId, activeAgeMs, this.properties.getResume().getZombieAge().toMillis());
+        }
+        body.put("instanceId", this.store.instanceId());
+        return new ResumeResult(Outcome.ALREADY_RUNNING, body);
+    }
+
+    /**
+     * 续跑（<b>带租约重载</b>，B23L1 批②b）：调用方已经是续跑权的主人，本方法<b>不再自抢</b>，
+     * 只校验归属 —— {@code LeaseService#verifyHeld(key, epoch)}（<b>对着 Redis 真值</b>，一次往返）。
+     *
+     * <p>为什么不用"抢"来校验：确认门在等待期就持租（交棒后继续持有），自抢会走可重入短路
+     * （同一个 epoch、恒成功），于是"拿着过期 epoch 的陈旧驱动方"也能进来 —— 那正是 fencing 要拦的。
+     * 为什么也不只比对 {@code heldRunEpoch}（进程内视图）：TTL 到期被别人接管后，视图要等下一次
+     * 续租失败才会清，这个窗口里视图会说谎，而本方法正是"要不要驱动这一轮"的入口。
+     * 对真值校验才能让"租约已被别的实例接管"在入口处变成 {@link Outcome#LEASE_HELD_ELSEWHERE}；
+     * 设施不可用（{@code Hold.UNAVAILABLE}）按无租约降级放行（I4 同口径）。
+     *
+     * <p>租约的收尾职责在<b>调用方</b>：本方法不 {@code markDriving}、不 {@code release}
+     * （确认门在 {@code runResume} 里做；旧签名在自己那一层做）。
+     *
+     * @param lease 调用方持有的租约；{@code null} = 无租约降级（单测/无 Redis 装配），
+     *              此时只由进程内互斥排他 —— 与批②b 之前的语义一致
+     */
+    public ResumeResult resume(String runId, boolean forceTakeover, LeaseService.Lease lease) {
+        // 决策回灌/挂起重挂等入口：未显式标注原因时按 reattach 记（"其余续跑入口"的兜底口径）。
+        // fresh=false：租约由调用方持有（本方法不抢也不还），抢租后的复核因此可以安全否决
+        // （拒绝不动租约 ⇒ 不会出现"fence 已推进 + 无人驱动"，见 {@link #takeoverPreCheck}）。
+        return resumeInternal(runId, LocalRunKey.of(runId), forceTakeover, lease, false, RESUME_REATTACH,
+                ErrorBodyFactory.requestLocale());
+    }
+
+    /**
+     * 续跑的<b>状态写被拒</b>后的 typed 结局（N4）：区分"取消已先到"与"续跑权已丢/不可确认"。
+     *
+     * <p>为什么必须再读一次：{@link RunStore#saveStatusUnlessCancelled} 的 {@code false} 同时覆盖取消守卫
+     * 与只读写门（丢租 / 设施不可用 / fence 已被接管）。取消 ⇒ {@code cancelStateOutcome} 的既有取消
+     * 收尾（{@code ALREADY_CANCELLED} / {@code CANCEL_STATE_UNKNOWN}）；否则按状态未知收口，
+     * <b>两者都不驱动</b>。
+     */
+    private ResumeResult resumeStatusWriteRefused(String runId, Map<String, Object> body) {
+        ResumeResult cancelled = cancelStateOutcome(runId, body);
+        if (cancelled != null) {
+            return cancelled;
+        }
+        body.put("resumed", false);
+        body.put("reason", "STATE_UNKNOWN");
+        body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+        return new ResumeResult(Outcome.STATE_UNKNOWN, body);
+    }
+
+    /**
+     * 历史里的 {@code tool_calls} 与 {@code tool} 响应 id 集合必须相等（配对完整）。
+     */
+    static boolean toolPairsComplete(List<Message> history) {
+        Set<String> calls = new LinkedHashSet<>();
+        Set<String> responses = new LinkedHashSet<>();
+        for (Message message : ObjectUtils.defaultIfNull(history, List.<Message>of())) {
+            if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
+                for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
+                    if (call.id() != null) {
+                        calls.add(call.id());
+                    }
+                }
+            }
+            if (message instanceof ToolResponseMessage toolResponse && toolResponse.getResponses() != null) {
+                for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
+                    if (response.id() != null) {
+                        responses.add(response.id());
+                    }
+                }
+            }
+        }
+        return calls.equals(responses);
+    }
+
+    /**
+     * 续跑失败的用户面短句（R-08 + 4B）：按当前线程 locale 取 {@code messages_en}；未注入
+     * MessageSource 时走 en 常量，绝不回落到异常原文。
+     */
+    String resumeFailedMessage() {
+        if (!ReplyLanguage.current().english()) {
+            return AI_RESUME_FAILED_MESSAGE;
+        }
+        if (this.messageSource != null) {
+            try {
+                return this.messageSource.getMessage("error." + ErrorCodes.AI_RESUME_FAILED, null, Locale.ENGLISH);
+            } catch (NoSuchMessageException ex) {
+                if (LogSampling.canAcquire("resume-message-bundle-catch"))
+                    log.warn("messages_en missing error.{}, falling back to en whitelist", ErrorCodes.AI_RESUME_FAILED, ex);
+            }
+        }
+        return AI_RESUME_FAILED_MESSAGE_EN;
+    }
+
+    private ResumeResult resumeInternal(String runId, String resumeKey, boolean forceTakeover,
+                                        LeaseService.Lease lease, boolean freshLease, String resumeReason, Locale replyLocale) {
+        ResumeResult leaseDenied = verifyResumeLease(runId, lease);
+        if (leaseDenied != null) {
+            return leaseDenied;
+        }
+        if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
+            return new ResumeResult(Outcome.IN_PROGRESS, Map.of("runId", runId, "resumed", false,
+                    "reason", "RESUME_IN_PROGRESS", "instanceId", this.store.instanceId()));
+        }
+        ResumeState state = new ResumeState(runId, resumeKey, lease, freshLease, resumeReason, replyLocale);
+        try {
+            ResumeResult result = loadResume(state);
+            if (result != null) return result;
+            result = checkResumeAdmission(state, forceTakeover);
+            if (result != null) return result;
+            restoreResumeHistory(state);
+            result = rebuildResumeTools(state);
+            if (result != null) return result;
+            result = parkResumeIfDue(state);
+            if (result != null) return result;
+            result = compactResumeHistory(state);
+            if (result != null) return result;
+            return completeResumeHandoff(state);
+        } finally {
+            finishResume(state);
+        }
+    }
+
+    private ResumeResult verifyResumeLease(String runId, LeaseService.Lease lease) {
+        if (lease == null) {
+            return null;
+        }
+        LeaseService leases = this.store.leaseService();
+        LeaseService.Hold hold = leases == null ? LeaseService.Hold.UNAVAILABLE
+                : leases.verifyHeld(lease.key(), lease.epoch(), lease.owner());
+        if (hold != LeaseService.Hold.LOST) {
+            return null;
+        }
+        return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
+                "reason", "LEASE_HELD_ELSEWHERE", "staleEpoch", lease.epoch(), "heldEpoch",
+                this.store.heldRunEpoch(runId), "instanceId", this.store.instanceId()));
+    }
+
+    private ResumeResult loadResume(ResumeState state) {
+        state.snapshot = this.store.get(state.runId);
+        if (state.snapshot == null) {
+            return new ResumeResult(Outcome.NOT_FOUND, Map.of("runId", state.runId, "resumed", false,
+                    "reason", "UNKNOWN_RUN", "instanceId", this.store.instanceId()));
+        }
+        state.identityScope = RunIdentityScope.open(state.snapshot.getTenantId(), state.snapshot.getUserId());
+        state.sessionId = state.snapshot.getSessionId();
+        AiTrace.bind(state.runId, state.sessionId);
+        AiTrace.markResumeReason(state.resumeReason);
+        try {
+            state.pendings = this.store.pendings(state.runId);
+        } catch (RuntimeException ex) {
+            log.warn("resume entry: pending entries read failed runId={} (rejecting as unknown, no drive)", state.runId, ex);
+            state.body.put("runId", state.runId);
+            state.body.put("resumed", false);
+            state.body.put("reason", "STATE_UNKNOWN");
+            state.body.put("code", com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE);
+            return new ResumeResult(Outcome.STATE_UNKNOWN, state.body);
+        }
+        state.body.put("runId", state.runId);
+        state.body.put("sessionId", state.sessionId);
+        state.body.put("statusBeforeResume", state.snapshot.getStatus());
+        state.body.put("instanceId", this.store.instanceId());
+        return null;
+    }
+
+    private ResumeResult checkResumeAdmission(ResumeState state, boolean forceTakeover) {
+        ResumeResult result = cancelStateOutcome(state.runId, state.body);
+        if (result != null) return result;
+        result = terminalResumeResult(state);
+        if (result != null) return result;
+        result = liveDriverResumeResult(state);
+        if (result != null) return result;
+        result = runningResumeResult(state, forceTakeover);
+        if (result != null) return result;
+        result = providerResumeResult(state);
+        if (result != null) return result;
+        result = unresolvedResumeResult(state);
+        if (result != null) return result;
+        result = sessionGateResumeResult(state);
+        if (result != null) return result;
+        return authorityResumeResult(state);
+    }
+
+    private ResumeResult terminalResumeResult(ResumeState state) {
+        if (!RunSnapshot.isTerminal(state.snapshot.getStatus())) {
+            return null;
+        }
+        boolean cancelled = RunSnapshot.CANCELLED.equals(state.snapshot.getStatus());
+        boolean done = RunSnapshot.DONE.equals(state.snapshot.getStatus());
+        state.body.put("resumed", false);
+        state.body.put("reason", cancelled ? "ALREADY_CANCELLED" : done ? "ALREADY_DONE" : "ALREADY_FAILED");
+        return new ResumeResult(cancelled ? Outcome.ALREADY_CANCELLED : Outcome.ALREADY_DONE, state.body);
+    }
+
+    private ResumeResult liveDriverResumeResult(ResumeState state) {
+        String status = state.snapshot.getStatus();
+        if (state.freshLease || state.lease == null || this.chatService == null
+                || (!RunSnapshot.SUSPENDED.equals(status) && !RunSnapshot.RUNNING.equals(status))
+                || !this.chatService.isDriving(state.runId)) {
+            return null;
+        }
+        state.body.put("resumed", false);
+        state.body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
+        state.body.put("driverAlive", true);
+        state.body.put(LEASE_REARMED_KEY, true);
+        log.info("resume reattached to live first-turn driver runId={} sessionId={} status={}",
+                state.runId, state.sessionId, state.snapshot.getStatus());
+        return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
+    }
+
+    private ResumeResult runningResumeResult(ResumeState state, boolean forceTakeover) {
+        if (!RunSnapshot.RUNNING.equals(state.snapshot.getStatus())) {
+            return null;
+        }
+        if (!forceTakeover) {
+            state.body.put("resumed", false);
+            state.body.put("reason", "ALREADY_RUNNING");
+            return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
+        }
+        long activeAtMs = activeAtMs(state.snapshot);
+        long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
+        long activeAgeMs = System.currentTimeMillis() - activeAtMs;
+        boolean driverAlive = this.chatService != null && this.chatService.isDriving(state.runId);
+        if (driverAlive && state.lease != null) {
+            state.body.put("resumed", false);
+            state.body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
+            state.body.put("driverAlive", true);
+            state.body.put(LEASE_REARMED_KEY, true);
+            log.warn("zombie takeover reclassified as lease reattach runId={} sessionId={}: this process still registers "
+                            + "the driver (shared lease view; a new driver would double-drive) - reattaching to old driver (fresh={})",
+                    state.runId, state.sessionId, state.freshLease);
+            return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
+        }
+        ResumeResult denied = activityResumeResult(state, driverAlive, activeAtMs, activeAgeMs, zombieAgeMs);
+        if (denied != null) return denied;
+        log.warn("zombie run takeover runId={} sessionId={} inactive {}ms (snapshot {}ms / last business frame {}ms, threshold {})",
+                state.runId, state.sessionId, System.currentTimeMillis() - activeAtMs,
+                System.currentTimeMillis() - state.snapshot.getUpdatedAtMs(),
+                System.currentTimeMillis() - this.store.lastActivityAtMs(state.runId),
+                this.properties.getResume().getZombieAge());
+        state.body.put("zombieTakeover", true);
+        state.body.put("activeAtMs", activeAtMs);
+        state.body.put("activeAgeMs", activeAgeMs);
+        return null;
+    }
+
+    private ResumeResult activityResumeResult(ResumeState state, boolean driverAlive, long activeAtMs,
+                                              long activeAgeMs, long zombieAgeMs) {
+        boolean activityAlive = activeAgeMs <= zombieAgeMs;
+        if (!driverAlive && !activityAlive) {
+            return null;
+        }
+        if (state.freshLease) {
+            log.warn("zombie takeover recheck: live driver signs remain (driverAlive={} activeAgeMs={}), but this is a fresh acquire (fence "
+                            + "advanced) with no local driver registration (cross-instance) - taking over runId={} sessionId={} (old writes fenced)",
+                    driverAlive, activeAgeMs, state.runId, state.sessionId);
+            return null;
+        }
+        state.body.put("resumed", false);
+        if (driverAlive) {
+            state.body.put("reason", "DRIVER_ALIVE_IN_PROCESS");
+            state.body.put("driverAlive", true);
+            log.warn("zombie takeover recheck denied runId={} sessionId={}: this process still registers "
+                            + "the driver (no lease to reattach: lease=null; no state change) - not taking over",
+                    state.runId, state.sessionId);
+            return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
+        }
+        state.body.put("reason", "ACTIVITY_ADVANCED");
+        state.body.put("activeAtMs", activeAtMs);
+        state.body.put("activeAgeMs", activeAgeMs);
+        log.warn("zombie takeover recheck denied runId={} sessionId={}: business activity advanced "
+                        + "after the decision ({}ms <= threshold {}ms: original driver alive) - not taking over",
+                state.runId, state.sessionId, activeAgeMs, zombieAgeMs);
+        return new ResumeResult(Outcome.ALREADY_RUNNING, state.body);
+    }
+
+    private ResumeResult providerResumeResult(ResumeState state) {
+        if (StringUtils.isBlank(state.snapshot.getModelId())) {
+            return providerGone(state.runId, state.snapshot, "快照没有冻结模型名");
+        }
+        if (this.aiConfigService == null) {
+            return null;
+        }
+        ResolvedIdentity identity = resolveForResume(state.runId,
+                () -> this.aiConfigService.resolveChatTarget(state.snapshot.getProviderId(), state.snapshot.getModelId()),
+                () -> this.aiConfigService.bindingState(state.snapshot.getProviderId(), state.snapshot.getModelId()));
+        if (identity.unknown()) {
+            return stateUnknown(state.runId, state.snapshot, identity.detail());
+        }
+        if (identity.target() == null) {
+            return providerGone(state.runId, state.snapshot, "该 provider/模型此刻不可用");
+        }
+        return null;
+    }
+
+    private ResumeResult unresolvedResumeResult(ResumeState state) {
+        List<PendingToolCall> unresolved = state.pendings.stream()
+                .filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
+                .filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
+                .toList();
+        if (unresolved.isEmpty()) {
+            return null;
+        }
+        state.body.put("resumed", false);
+        state.body.put("reason", "PENDING_UNRESOLVED");
+        state.body.put("unresolved", unresolved.stream().map(PendingToolCall::asMap).toList());
+        return new ResumeResult(Outcome.PENDING_UNRESOLVED, state.body);
+    }
+
+    private ResumeResult sessionGateResumeResult(ResumeState state) {
+        if (this.sessionGate == null) {
+            return null;
+        }
+        SessionGate.Busy busy = this.sessionGate.acquire(state.sessionId, state.runId, state.gateToken);
+        if (busy != null && !state.runId.equals(busy.runId())) {
+            state.body.put("resumed", false);
+            state.body.put("reason", "SESSION_BUSY");
+            state.body.put("heldBy", busy.runId());
+            state.body.put("message", "该会话当前有另一轮在跑（park 期间用户又发起了一轮）；"
+                    + "本轮决策已落库，稍后自动重试续跑。");
+            log.info("resume deferred: session gate held by another run runId={} heldBy={} (decision stored; dispatcher retries bounded)",
+                    state.runId, busy.runId());
+            return new ResumeResult(Outcome.SESSION_BUSY, state.body);
+        }
+        state.gateHeld.set(true);
+        state.gateSessionId = state.sessionId;
+        return null;
+    }
+
+    private ResumeResult authorityResumeResult(ResumeState state) {
+        LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(state.runId);
+        if (authority == null || !authority.isReadOnly()) {
+            return null;
+        }
+        state.body.put("resumed", false);
+        state.body.put("reason", authority == LeaseService.LeaseAuthority.LOST ? "LEASE_HELD_ELSEWHERE"
+                : "LEASE_UNAVAILABLE");
+        state.body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+        log.warn("resume rejected: write authority {} runId={} (read-only recovery, no progress)", authority, state.runId);
+        return new ResumeResult(authority == LeaseService.LeaseAuthority.LOST ? Outcome.LEASE_HELD_ELSEWHERE
+                : Outcome.STATE_UNKNOWN, state.body);
+    }
+
+    private void restoreResumeHistory(ResumeState state) {
+        AiContext context = AiContext.fromMap(state.snapshot.getContext());
+        List<Message> loaded = new ArrayList<>(this.codec.deserializeAll(state.snapshot.getMessageJson()));
+        boolean hadSystem = SystemMessages.leadingCount(loaded) > 0;
+        state.history = restoreSystem(state.runId, state.sessionId, loaded, context, state.replyLocale);
+        state.body.put("systemRestored", !hadSystem && SystemMessages.leadingCount(state.history) > 0);
+        if (state.history != loaded) {
+            state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
+        }
+        state.nextHopContext = context;
+        state.settledInBatch = new ArrayList<>(state.snapshot.getInFlightToolCalls().size());
+    }
+
+    private ResumeResult rebuildResumeTools(ResumeState state) {
+        if (state.snapshot.getInFlightToolCalls().isEmpty()) {
+            return rebuildWithoutTools(state);
+        }
+        AssistantMessage assistant = rebuildAssistant(state.snapshot);
+        state.history.add(assistant);
+        Prompt prompt = this.chatService.buildResumedPrompt(state.runId, state.sessionId,
+                AiContext.fromMap(state.snapshot.getContext()), new ArrayList<>(state.history));
+        List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+        PendingToolCall haltedBy = null;
+        try {
+            for (PendingToolCall item : state.snapshot.getInFlightToolCalls()) {
+                RebuildItem rebuilt = rebuildResumeTool(state, prompt, item, haltedBy);
+                if (rebuilt.abort() != null) return rebuilt.abort();
+                if (rebuilt.response() != null) responses.add(rebuilt.response());
+                if (rebuilt.label() != null) state.rebuilt.add(rebuilt.label());
+                if (rebuilt.source() != null) {
+                    state.settledInBatch.add(rebuilt.source());
+                    if (this.toolCallingManager.isBatchHalted(rebuilt.source())) {
+                        haltedBy = rebuilt.source();
+                        log.warn("resume batch stops on first error runId={} upstream tool={} outcome={} code={}; remaining entries become SKIPPED",
+                                state.runId, haltedBy.getName(), haltedBy.effectiveOutcome().wire(), haltedBy.effectiveCode());
+                    }
+                }
+            }
+        } finally {
+            this.toolCallingManager.refreshSettledBatchTranscript(state.runId, assistant,
+                    state.snapshot.getInFlightToolCalls());
+        }
+        return completeToolRebuild(state, responses);
+    }
+
+    private RebuildItem rebuildResumeTool(ResumeState state, Prompt prompt, PendingToolCall item,
+                                          PendingToolCall haltedBy) {
+        PendingToolCall fresh = this.store.pending(state.runId, item.getToolCallId());
+        PendingToolCall effective = ObjectUtils.defaultIfNull(fresh, item);
+        if (haltedBy != null && isUnsettled(effective)) {
+            return new RebuildItem(null, this.toolCallingManager.skipAsUpstreamFailed(state.runId, effective, haltedBy),
+                    effective.getToolCallId() + ":" + PendingToolCall.SKIPPED + ":not-executed", null);
+        }
+        if (isKindMisapproved(effective)) {
+            log.warn("resume found APPROVED+FRONTEND fake approval runId={} toolCallId={} "
+                            + "name={} (blocked explicitly; no backend stub, no ledger)", state.runId,
+                    effective.getToolCallId(), effective.getName());
+        }
+        ResumeResult cancel = cancelStateOutcome(state.runId, state.body);
+        if (cancel != null) return new RebuildItem(cancel, null, null, null);
+        String text;
+        try {
+            text = this.toolCallingManager.resolvePending(state.runId, prompt, effective);
+        } catch (StreamViolationException ex) {
+            if (!StreamViolationException.STATE_UNAVAILABLE.equals(ex.getCode())) throw ex;
+            log.warn("cancel state unknown during resume rebuild, closing with UNKNOWN outcome runId={} toolCallId={}",
+                    state.runId, effective.getToolCallId(), ex);
+            return new RebuildItem(cancelUnknownOutcome(state.body), null, null, null);
+        }
+        cancel = cancelStateOutcome(state.runId, state.body);
+        if (cancel != null) return new RebuildItem(cancel, null, null, null);
+        PendingToolCall settled = this.store.pending(state.runId, effective.getToolCallId());
+        PendingToolCall source = ObjectUtils.defaultIfNull(settled, effective);
+        ToolResponseMessage.ToolResponse response = new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
+                effective.getName(), ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
+                effective.getArguments()).toModelJson(this.limiter, effective.getName()));
+        return new RebuildItem(null, response, settlementLabel(source), source);
+    }
+
+    private ResumeResult completeToolRebuild(ResumeState state, List<ToolResponseMessage.ToolResponse> responses) {
+        state.nextHopContext = refreshRunContextAfterBatch(state.runId, state.snapshot, state.settledInBatch);
+        state.nextHopContext = syncAuthorityForHandoff(state.runId, state.nextHopContext, state.history);
+        state.history = rewriteAuthoritativeSystem(state.history, state.nextHopContext, state.runId);
+        state.history.add(ToolResponseMessage.builder().responses(responses).build());
+        state.rebuiltToolTokens = responses.stream()
+                .mapToInt(response -> ContextEstimator.estimate(response.responseData()))
+                .sum();
+        state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
+        state.snapshot.setContext(state.nextHopContext.toMap());
+        state.snapshot.setInFlightToolCalls(new ArrayList<>());
+        state.snapshot.setAssistantContent(null);
+        state.snapshot.setStatus(RunSnapshot.RUNNING);
+        markResumedByCurrentInstance(state);
+        if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
+            log.info("post-rebuild RUNNING transition refused by write gate runId={} (cancel/authority recheck then close, no drive)",
+                    state.runId);
+            return resumeStatusWriteRefused(state.runId, state.body);
+        }
+        return null;
+    }
+
+    private void markResumedByCurrentInstance(ResumeState state) {
+        List<String> resumedBy = new ArrayList<>(state.snapshot.getResumedBy());
+        resumedBy.add(this.store.instanceId());
+        state.snapshot.setResumedBy(resumedBy);
+    }
+
+    private ResumeResult rebuildWithoutTools(ResumeState state) {
+        state.nextHopContext = syncAuthorityForHandoff(state.runId, state.nextHopContext, state.history);
+        List<Message> beforeRewrite = state.history;
+        state.history = rewriteAuthoritativeSystem(state.history, state.nextHopContext, state.runId);
+        state.snapshot.setContext(state.nextHopContext.toMap());
+        if (state.history != beforeRewrite) {
+            state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
+        }
+        markResumedByCurrentInstance(state);
+        state.snapshot.setStatus(RunSnapshot.RUNNING);
+        if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
+            log.info("resume RUNNING transition refused by write gate runId={} (cancel/authority recheck then close, no drive)",
+                    state.runId);
+            return resumeStatusWriteRefused(state.runId, state.body);
+        }
+        return null;
+    }
+
+    private ResumeResult parkResumeIfDue(ResumeState state) {
+        ResumeResult result = parkDefinitionForms(state);
+        if (result != null) return result;
+        result = parkConditionForms(state);
+        if (result != null) return result;
+        return persistConditionHandoff(state);
+    }
+
+    private ResumeResult parkDefinitionForms(ResumeState state) {
+        if (this.definitionSelectionForm == null) {
+            return null;
+        }
+        String reason = null;
+        if (this.definitionSelectionForm.parkNavigateIfDue(state.runId, state.nextHopContext, state.settledInBatch,
+                state.history)) reason = "DEFINITION_NAVIGATE_PARKED";
+        else if (this.definitionSelectionForm.parkSelectDefinitionsIfDue(state.runId, state.nextHopContext,
+                state.settledInBatch, state.history)) reason = "DEFINITION_SELECT_PARKED";
+        else if (this.definitionSelectionForm.parkAdvanceIfDue(state.runId, state.nextHopContext, state.settledInBatch,
+                state.history)) reason = "DEFINITION_STEP_ADVANCE_PARKED";
+        else if (this.definitionSelectionForm.parkIfDue(state.runId, state.nextHopContext, state.settledInBatch,
+                state.history)) reason = "DEFINITION_FORM_PARKED";
+        if (reason == null) {
+            return null;
+        }
+        state.body.put("resumed", false);
+        state.body.put("reason", reason);
+        state.body.put("taskId", state.nextHopContext.getTaskId());
+        return new ResumeResult(Outcome.ACCEPTED, state.body);
+    }
+
+    private ResumeResult parkConditionForms(ResumeState state) {
+        if (this.conditionsForm != null && this.conditionsForm.conditionFormCancelledInBatch(state.settledInBatch,
+                state.runId, state.nextHopContext)) {
+            this.chatService.cancelParked(state.runId);
+            RunSnapshot latest = this.store.get(state.runId);
+            if (latest != null && RunSnapshot.CANCELLED.equals(latest.getStatus())) {
+                state.body.put("resumed", false);
+                state.body.put("reason", "ALREADY_CANCELLED");
+                state.body.put("taskId", state.nextHopContext.getTaskId());
+                return new ResumeResult(Outcome.ALREADY_CANCELLED, state.body);
+            }
+            return resumeStatusWriteRefused(state.runId, state.body);
+        }
+        state.enteredQueryCond = state.settledInBatch.stream()
+                .anyMatch(pending -> pending != null && "confirm_step".equals(pending.getName())
+                        && com.example.configmgr.ai.tool.ToolOutcome.OK == pending.effectiveOutcome());
+        if (this.conditionsForm != null && this.conditionsForm.parkIfDueAtQueryCond(state.runId, state.nextHopContext,
+                state.history, !state.enteredQueryCond)) {
+            state.body.put("resumed", false);
+            state.body.put("reason", conditionParkReason(state.runId));
+            state.body.put("taskId", state.nextHopContext.getTaskId());
+            return new ResumeResult(Outcome.ACCEPTED, state.body);
+        }
+        return null;
+    }
+
+    private ResumeResult persistConditionHandoff(ResumeState state) {
+        boolean handoff = state.nextHopContext.getExtra() != null && Boolean.TRUE.equals(
+                state.nextHopContext.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF));
+        if (handoff && !"QUERY_COND".equals(state.nextHopContext.getStep())) {
+            Map<String, Object> extra = new LinkedHashMap<>(state.nextHopContext.getExtra());
+            extra.remove(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
+            state.nextHopContext = AiContext.of(state.nextHopContext.getPage(), state.nextHopContext.getTaskType(),
+                    state.nextHopContext.getStep(), state.nextHopContext.getTaskId(), state.nextHopContext.getTaskStatus(),
+                    extra);
+            handoff = false;
+            if (!isPersistHandoffContext(state.runId, state.snapshot, state.nextHopContext)) {
+                return resumeStatusWriteRefused(state.runId, state.body);
+            }
+        } else if (handoff && !isPersistHandoffContext(state.runId, state.snapshot, state.nextHopContext)) {
+            return resumeStatusWriteRefused(state.runId, state.body);
+        }
+        state.conditionInstruction = state.enteredQueryCond && handoff
+                ? new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+                + "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
+                + "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。")
+                : null;
+        return null;
+    }
+
+    private ResumeResult compactResumeHistory(ResumeState state) {
+        List<Message> rebuiltHistory = state.history;
+        state.compaction = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            state.history = rebuiltHistory;
+            MemoryWindowContext window = buildMemoryWindow(state);
+            CompactionAttempt compacted = compactResumeAttempt(state, window, attempt);
+            if (compacted.abort() != null) return compacted.abort();
+            if (compacted.isRetry()) continue;
+            state.compaction = compacted.compaction();
+            return null;
+        }
+        log.warn("resume memory CAS remained contested runId={} sessionId={} (no driver handoff)", state.runId,
+                state.sessionId);
+        return resumeStatusWriteRefused(state.runId, state.body);
+    }
+
+    private MemoryWindowContext buildMemoryWindow(ResumeState state) {
+        Set<String> protectedIds = new LinkedHashSet<>();
+        for (PendingToolCall pending : this.store.pendingsLenient(state.runId)) {
+            if (PendingToolCall.PENDING.equals(pending.getStatus())
+                    || PendingToolCall.APPROVED.equals(pending.getStatus()) && !pending.isExecuted()) {
+                protectedIds.add(pending.getToolCallId());
+            }
+        }
+        Set<String> activeRunIds = new LinkedHashSet<>(this.store.activeRunIds(state.sessionId));
+        activeRunIds.add(state.runId);
+        MemoryWindowSnapshot snapshot = this.chatService == null ? null
+                : this.chatService.memoryWindowSnapshot(state.sessionId);
+        List<Message> input = state.history;
+        if (snapshot != null) {
+            List<Message> ownRun = state.history.stream()
+                    .filter(message -> message.getMessageType() != MessageType.SYSTEM)
+                    .toList();
+            List<Message> merged = RunMemoryMerge.merge(snapshot.messages(), ownRun,
+                    MemoryTurn.of(state.runId, state.snapshot.getCreatedAtMs()), true, 0, activeRunIds);
+            input = new ArrayList<>();
+            for (Message message : state.history) {
+                if (message.getMessageType() == MessageType.SYSTEM) input.add(message);
+            }
+            input.addAll(merged);
+        }
+        MemoryWindow.Budget budget = MemoryWindow.Budget.from(this.properties);
+        MemoryWindow.Plan plan = MemoryWindow.plan(input, budget, protectedIds, activeRunIds);
+        MemoryWindow.emit(state.runId, state.sessionId, plan, budget);
+        state.history = plan.messages();
+        return new MemoryWindowContext(protectedIds, activeRunIds, snapshot, plan);
+    }
+
+    private CompactionAttempt compactResumeAttempt(ResumeState state, MemoryWindowContext window, int attempt) {
+        if (this.contextCompactor == null || state.history.isEmpty()) {
+            return new CompactionAttempt(null, false, null);
+        }
+        CompactionPlanContext planned = planResumeCompaction(state, window);
+        if (planned.plan() != null && planned.plan().changed()) {
+            state.history = com.example.configmgr.ai.history.SyntheticMessages
+                    .withoutCorrectionInstruction(planned.plan().messages());
+            List<Message> memoryWindow = state.history.stream()
+                    .filter(message -> message.getMessageType() != MessageType.SYSTEM)
+                    .toList();
+            if (!this.chatService.replaceMemoryWindow(state.runId, state.sessionId, memoryWindow, window.snapshot())) {
+                if (log.isDebugEnabled())
+                    log.debug("resume memory CAS conflict, rereading and rebuilding runId={} attempt={}",
+                            state.runId, attempt + 1);
+                return new CompactionAttempt(null, true, null);
+            }
+            state.snapshot.setMessageJson(this.codec.serializeAll(state.history));
+            if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
+                log.info("compacted snapshot write refused by write gate runId={} (cancel/authority recheck then close, no drive)",
+                        state.runId);
+                return new CompactionAttempt(resumeStatusWriteRefused(state.runId, state.body), false, null);
+            }
+        }
+        ContextCompactor.Outcome outcome = this.contextCompactor.commit(planned.request(), planned.plan());
+        if (outcome.changed()) state.body.put("contextCompaction", outcome.levelWire());
+        else {
+            state.body.put("contextCompaction", "none");
+            state.body.put("contextCompactionReason", outcome.reason());
+        }
+        return new CompactionAttempt(null, false, outcome);
+    }
+
+    private CompactionPlanContext planResumeCompaction(ResumeState state, MemoryWindowContext window) {
+        TurnKeepalive keepalive = this.chatService == null || this.registry == null ? null
+                : this.chatService.startKeepalive(state.runId, this.registry.of(state.runId),
+                TurnKeepalive.PHASE_STREAMING, true);
+        try {
+            ContextState contextState = this.contextCompactor.readState(state.sessionId);
+            List<Message> input = com.example.configmgr.ai.history.SyntheticMessages
+                    .withoutCorrectionInstruction(state.history);
+            int systemTokens = 0;
+            for (Message message : input) {
+                if (message.getMessageType() == MessageType.SYSTEM) {
+                    systemTokens += ContextEstimator.estimate(message.getText());
+                }
+            }
+            ProviderRuntime runtime = this.chatService == null ? null : this.chatService.runtimeForCompaction(state.runId);
+            Runnable onSummaryStart = keepalive == null ? null : () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
+            int maxOutput = Math.max(0, ObjectUtils.defaultIfNull(state.snapshot.getMaxTokens(), 0));
+            ContextCompactor.Request request = new ContextCompactor.Request(state.sessionId, state.runId,
+                    state.snapshot.getModelId(), state.snapshot.getProviderId(), input, contextState.usedTokens(),
+                    contextState.completionTokens(), 0, state.rebuiltToolTokens, systemTokens,
+                    this.chatService.disclosedToolTokens(state.nextHopContext), window.protectedIds(), runtime,
+                    window.activeRunIds(), maxOutput, window.plan().stillOverBudget(), "resume",
+                    ContextCompactor.lastToolCallId(input));
+            ContextCompactor.Plan plan = this.contextCompactor.plan(request,
+                    () -> this.store.touchBusinessActivity(state.runId, System.currentTimeMillis()), onSummaryStart);
+            if (keepalive != null) keepalive.phase(TurnKeepalive.PHASE_STREAMING);
+            return new CompactionPlanContext(request, plan);
+        } finally {
+            if (keepalive != null) keepalive.close();
+        }
+    }
+
+    private ResumeResult completeResumeHandoff(ResumeState state) {
+        if (state.conditionInstruction != null) {
+            state.history = new ArrayList<>(state.history);
+            state.history.add(state.conditionInstruction);
+        }
+        state.body.put("resumed", true);
+        state.body.put("rebuiltTools", state.rebuilt);
+        state.body.put("promptMessageCount", state.history.size());
+        state.body.put("promptRoles", state.history.stream().map(message -> message.getMessageType().name()).toList());
+        state.body.put("resumedBy", this.store.instanceId());
+        SseChatEmitter out = this.registry.of(state.runId);
+        ResumeResult cancel = cancelStateOutcome(state.runId, state.body);
+        if (cancel != null) return cancel;
+        emitResumeCompaction(state, out);
+        List<Message> resumeHistory = state.history;
+        final AiContext handoffContext = state.nextHopContext;
+        try {
+            this.suspendExecutor.execute(() -> withRunIdentity(state.snapshot,
+                    () -> driveResumedTask(state, handoffContext, resumeHistory, out)));
+            state.handedOff = true;
+        } catch (RejectedExecutionException ex) {
+            state.body.put("resumed", false);
+            state.body.put("reason", "SUSPEND_POOL_SATURATED");
+            this.chatService.clearCompaction(state.runId);
+            state.snapshot.setStatus(RunSnapshot.SUSPENDED);
+            if (!this.store.isStatusSavedUnlessCancelled(state.snapshot)) {
+                return resumeStatusWriteRefused(state.runId, state.body);
+            }
+            return new ResumeResult(Outcome.POOL_SATURATED, state.body);
+        }
+        return new ResumeResult(Outcome.ACCEPTED, state.body);
+    }
+
+    private void emitResumeCompaction(ResumeState state, SseChatEmitter out) {
+        if (state.compaction == null || !state.compaction.changed() || !state.compaction.committed()) {
+            return;
+        }
+        try {
+            out.context(ContextCompactor.framePayload(state.compaction));
+        } catch (RuntimeException ex) {
+            log.warn("resume context frame send failed (ignored, resume unaffected) runId={}", state.runId, ex);
+        }
+        this.chatService.noteCompaction(state.runId, state.compaction.levelWire());
+    }
+
+    private void driveResumedTask(ResumeState state, AiContext handoffContext, List<Message> resumeHistory,
+                                  SseChatEmitter out) {
+        if (state.replyLocale == null) LocaleContextHolder.resetLocaleContext();
+        else LocaleContextHolder.setLocale(state.replyLocale);
+        try {
+            this.chatService.driveResumed(state.runId, state.sessionId, handoffContext, resumeHistory, out);
+        } catch (Exception ex) {
+            log.error("resume uncaught exception runId={}", state.runId, ex);
+            markDriveFailure(state.snapshot, ex, () -> emitFailureErrorUnlessArchived(out, ErrorCodes.AI_RESUME_FAILED,
+                    resumeFailedMessage()));
+        } finally {
+            try {
+                LocaleContextHolder.resetLocaleContext();
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-locale-reset"))
+                    log.warn("resume locale cleanup failed runId={}", state.runId, ex);
+            }
+            try {
+                this.resuming.remove(state.resumeKey);
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-mutex-remove"))
+                    log.warn("resume mutex cleanup failed runId={}", state.runId, ex);
+            }
+            try {
+                this.registry.close(state.runId);
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-registry-close"))
+                    log.warn("resume registry close failed runId={}", state.runId, ex);
+            }
+            try {
+                if (this.sessionGate != null && state.gateHeld.get()) {
+                    this.sessionGate.release(state.sessionId, state.runId, state.gateToken);
+                    state.gateHeld.set(false);
+                }
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-gate-release"))
+                    log.warn("resume session gate release failed runId={}", state.runId, ex);
+            }
+            try {
+                AiTrace.clear();
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-trace-clear"))
+                    log.warn("resume trace cleanup failed runId={}", state.runId, ex);
+            }
+        }
+    }
+
+    private void finishResume(ResumeState state) {
+        try {
+            if (!state.handedOff) {
+                this.resuming.remove(state.resumeKey);
+            }
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("resume-mutex-remove"))
+                log.warn("resume mutex cleanup failed runId={}", state.runId, ex);
+        }
+        try {
+            if (!state.handedOff && this.sessionGate != null && state.gateHeld.getAndSet(false)
+                    && state.gateSessionId != null) {
+                this.sessionGate.release(state.gateSessionId, state.runId, state.gateToken);
+            }
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("resume-gate-release"))
+                log.warn("resume session gate release failed runId={}", state.runId, ex);
+        }
+        try {
+            AiTrace.clear();
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("resume-trace-clear"))
+                log.warn("resume trace cleanup failed runId={}", state.runId, ex);
+        }
+        if (state.identityScope != null) {
+            try {
+                state.identityScope.close();
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-identity-close"))
+                    log.warn("resume identity close failed runId={}", state.runId, ex);
+            }
+        }
+    }
+
+    private record RebuildItem(ResumeResult abort, ToolResponseMessage.ToolResponse response, String label,
+                               PendingToolCall source) {
+    }
+
+    private record MemoryWindowContext(Set<String> protectedIds, Set<String> activeRunIds,
+                                       MemoryWindowSnapshot snapshot, MemoryWindow.Plan plan) {
+    }
+
+    private record CompactionPlanContext(ContextCompactor.Request request, ContextCompactor.Plan plan) {
+    }
+
+    private record CompactionAttempt(ResumeResult abort, boolean isRetry, ContextCompactor.Outcome compaction) {
+    }
+
+    private final class ResumeState {
+
+        private final String runId;
+        private final String resumeKey;
+        private final LeaseService.Lease lease;
+        private final boolean freshLease;
+        private final String resumeReason;
+        private final Locale replyLocale;
+        private final java.util.concurrent.atomic.AtomicBoolean gateHeld = new java.util.concurrent.atomic.AtomicBoolean();
+        private final String gateToken = UUID.randomUUID().toString();
+        private String gateSessionId;
+        private RunIdentityScope.Scope identityScope;
+        private RunSnapshot snapshot;
+        private String sessionId;
+        private List<PendingToolCall> pendings;
+        private final Map<String, Object> body = new LinkedHashMap<>();
+        private boolean handedOff;
+        private List<Message> history;
+        private AiContext nextHopContext;
+        private List<PendingToolCall> settledInBatch;
+        private final List<String> rebuilt = new ArrayList<>();
+        private int rebuiltToolTokens;
+        private boolean enteredQueryCond;
+        private Message conditionInstruction;
+        private ContextCompactor.Outcome compaction;
+
+        private ResumeState(String runId, String resumeKey, LeaseService.Lease lease, boolean freshLease,
+                            String resumeReason, Locale replyLocale) {
+            this.runId = runId;
+            this.resumeKey = resumeKey;
+            this.lease = lease;
+            this.freshLease = freshLease;
+            this.resumeReason = resumeReason;
+            this.replyLocale = replyLocale;
+        }
+
+    }
+
+    /**
+     * <b>续跑侧的批间上下文刷新</b>（本类唯一的刷新点）。
+     *
+     * <h2>为什么必须在续跑侧补这一刀</h2>
+     * 首轮的刷新点在 {@code SpToolCallingManager} 执行循环的尾部。生产 {@code app.ai.park.enabled=true}
+     * 时 {@code create_task} / {@code navigate_to} / {@code confirm_step} 都在<b>那个点之前</b>就挂起
+     * （{@code RunParkedException} 直接结束这一轮），刷新一次都跑不到 —— 续跑随后拿请求边界的旧
+     * {@link AiContext} 构造下一跳，于是步骤工具（{@code select_definitions} / {@code set_condition} /
+     * {@code start_export}）永远不披露。
+     *
+     * <h2>三条口径</h2>
+     * <ol>
+     * <li><b>整批结算之后才刷新</b>：入参是本批<b>已结算</b>的条目（结算后回读的真值）。逐条刷新会让
+     * 同批后面的条目提前看到"刚刚才解锁"的披露面 = 批内扩权；</li>
+     * <li><b>只认真实成功</b>：判据（工具名 + {@code outcome=OK}）全在
+     * {@link RunContextRefresher#next}，本方法只负责"读快照 → 折 → 写回 → 重读"；</li>
+     * <li><b>失败不打断</b>：任何异常只 WARN 并保留旧上下文 —— 刷新是"让下一跳更准"的增强，
+     * 不是这一轮的判定面，绝不能因为一次读库失败让续跑失败。</li>
+     * </ol>
+     *
+     * <p>写回之后<b>重新读快照</b>：下一跳用的必须是外置真值（与 {@code RunSnapshot#getContext()} 同一份），
+     * 而不是本方法内存里那份推算结果 —— 写门拒写时两者会分叉，此处如实反映"存下去的"。
+     *
+     * <p><b>写回/重读失败的 fail-safe</b>：两步都单独捕获 {@code RuntimeException}（并且重读为空也算失败）：
+     * 只 WARN、把 {@code snapshot} 的内存上下文<b>显式回滚到 before</b>、返回 {@code before}。理由是
+     * 未经核实的写不得扩披露面（宁可下一跳不刷新），而 {@code setContext} 已经动过内存，不回滚就会
+     * 出现"内存是新值、Redis 是旧值"的分叉（后续状态写还会顺手把新值写进去）。
+     *
+     * @param settled 本批已结算条目（含已终态复用、被跳过、被拒绝的；非刷新工具由判据自动忽略）
+     * @return 下一跳应使用的上下文；无变化时返回旧值（同一份事实、不写库）
+     */
+    private AiContext persistRefreshedContext(String runId, RunSnapshot snapshot, AiContext before,
+                                              AiContext current) {
+        // ===== 写回 + 重读：任一步失败都只 WARN，并用<b>批首</b>上下文交棒 =====
+        // fail-safe：<b>未经核实的写不得扩披露面</b>。刷新只是"让下一跳更准"的增强，若它能让续跑
+        // 崩掉（Redis 抖一下整轮就死），或用一份没落成的上下文去披露新工具，都比"这一步没刷新"更糟。
+        // snapshot 与落库是<b>同一份内存对象</b>：setContext 会先改内存，写失败后若不显式回滚，
+        // 内存与持久态就各说一套（后续状态写还会把这份没落成的上下文顺手写进去）。
+        Map<String, Object> beforeMap = before.toMap();
+        try {
+            snapshot.setContext(current.toMap());
+            this.store.save(snapshot);
+        } catch (RuntimeException ex) {
+            snapshot.setContext(beforeMap);
+            log.warn("post-batch context write-back failed, keeping old context (resume unaffected) runId={}", runId, ex);
+            return before;
+        }
+        RunSnapshot fresh;
+        try {
+            fresh = this.store.get(runId);
+        } catch (RuntimeException ex) {
+            // 写可能成了、也可能没有（例如写门静默拒写）：读不到真值就不认这笔刷新
+            snapshot.setContext(beforeMap);
+            log.warn("post-batch context reread failed, handing off with batch-start context (resume unaffected) runId={}", runId, ex);
+            return before;
+        }
+        if (fresh == null) {
+            snapshot.setContext(beforeMap);
+            log.warn("post-batch context reread empty, handing off with batch-start context (resume unaffected) runId={}", runId);
+            return before;
+        }
+        AiContext reread = AiContext.fromMap(fresh.getContext());
+        // 以重读真值为准回写内存：写门静默拒写时它等于 before（不扩披露面），内存也随之与持久态一致。
+        snapshot.setContext(reread.toMap());
+        log.info("run context refreshed after batch settlement runId={} page={} taskId={} taskType={} step={} status={}", runId,
+                reread.getPage(), reread.getTaskId(), reread.getTaskType(), reread.getStep(), reread.getTaskStatus());
+        return reread;
+    }
+
+    private AiContext refreshRunContextAfterBatch(String runId, RunSnapshot snapshot, List<PendingToolCall> settled) {
+        AiContext before = AiContext.fromMap(snapshot.getContext());
+        if (CollectionUtils.isEmpty(settled)) {
+            return before;
+        }
+        RunContextRefresher refresher = this.contextRefresher;
+        if (refresher == null) {
+            // 可观测性（不回退、不猜根因）：本批确有"能推进上下文"的结果，但装配里没有刷新器
+            if (settled.stream().anyMatch(entry -> RunContextRefresher.isSupported(entry.getName()))) {
+                log.warn("resume batch cannot refresh run context: RunContextRefresher not injected "
+                        + "runId={} (next hop keeps request-boundary context; step tools may be undisclosed)", runId);
+            }
+            return before;
+        }
+        AiContext current = before;
+        for (PendingToolCall entry : settled) {
+            if (!RunContextRefresher.isSupported(entry.getName())) {
+                continue;
+            }
+            try {
+                Optional<AiContext> next = refresher.next(runId, current, entry);
+                if (next != null && next.isPresent()) {
+                    current = next.get();
+                }
+            } catch (RuntimeException ex) {
+                // 保留旧上下文继续折下一条：一条读库失败不代表整批结果不可用
+                log.warn("post-batch context refresh failed, keeping old context (resume unaffected) runId={} tool={}", runId,
+                        entry.getName(), ex);
+            }
+        }
+        if (current.equals(before)) {
+            return before;
+        }
+        return persistRefreshedContext(runId, snapshot, before, current);
+    }
+
+    /**
+     * 续跑交棒前的<b>权威同步</b>（只作用于下一跳；批内结算用的 {@code context} 保持冻结）：
+     * <ol>
+     * <li>按 {@code taskId} 读 {@code TaskService} 的权威 {@code type / currentStep / status} ——
+     * 挂起期内用户可以在向导里手动改步骤，而这类改动不产生任何"刷新类工具结算"；</li>
+     * <li>用<b>最新</b>上下文重算 {@code extra[taskSlots]} —— 当前文本按权威保护决定：页面已有非空勾选、
+     * 或这条消息之后已有改选/清空动作时传空（权威值说话）；只有"页面还是初始默认空、且没有任何后续
+     * 选择动作"时才用历史里<b>最近一条真实用户原文</b>（跳过合成消息）补齐初始槽位。</li>
+     * </ol>
+     *
+     * <p>任一步失败只 WARN 并保留旧值：这是"让下一跳更准"的增强，不是这一轮的判定面
+     * （与 {@link #refreshRunContextAfterBatch} 同一 fail-safe 口径）。
+     */
+    private AiContext syncAuthorityForHandoff(String runId, AiContext context, List<Message> history) {
+        return recomputeSlotsBeforeHandoff(runId, syncTaskBeforeHandoff(runId, context), history);
+    }
+
+    /**
+     * 任务权威值的交棒前同步（读失败 = 保留旧值 + WARN，不阻断续跑）。
+     */
+    private AiContext syncTaskBeforeHandoff(String runId, AiContext context) {
+        if (this.contextRefresher == null) {
+            return context;
+        }
+        try {
+            return this.contextRefresher.syncTask(context).orElse(context);
+        } catch (RuntimeException ex) {
+            log.warn("pre-handoff task authority sync failed, keeping old context (resume unaffected) runId={}", runId, ex);
+            return context;
+        }
+    }
+
+    /**
+     * 槽位重算（未注入解析器 = 不重算；异常 = 保留旧槽位 + WARN）。
+     *
+     * <p>自然语言不参与：{@link TaskSlotResolver} 只读任务条目/工作区结构化选择，
+     * {@code currentText/history} 不再用于推断槽位（不读任何文本意图）。
+     */
+    private AiContext recomputeSlotsBeforeHandoff(String runId, AiContext context, List<Message> history) {
+        if (this.taskSlotResolver == null) {
+            return context;
+        }
+        try {
+            AiContext enriched = this.taskSlotResolver.enrich(context, null, history);
+            return ObjectUtils.defaultIfNull(enriched, context);
+        } catch (RuntimeException ex) {
+            log.warn("pre-handoff task slot recompute failed, keeping old slots (resume unaffected) runId={}", runId, ex);
+            return context;
+        }
+    }
+
+    /**
+     * 条件交棒的既有原因码：候选草案（{@code set_condition}）单独标识；条件表及其明确留空后的
+     * 确定推进沿用 {@code CONDITIONS_FORM_PARKED}，不新增协议值。
+     *
+     * <p>事实源是刚挂起的待决条目（{@code park} 已写盘）；读失败按条件表返回（既有文案，不新增失败路径）。
+     */
+    private String conditionParkReason(String runId) {
+        try {
+            for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+                if (pending != null && PendingToolCall.PENDING.equals(pending.getStatus())
+                        && AiToolNames.SET_CONDITION.equals(pending.getName())) {
+                    return "CONDITION_DRAFTS_PARKED";
+                }
+            }
+        } catch (RuntimeException ex) {
+            log.warn("cannot distinguish conditional handoff payload, returning conditional parked runId={}", runId, ex);
+        }
+        return "CONDITIONS_FORM_PARKED";
+    }
+
+    /**
+     * 条件结构化交棒标记的写回口（置位/清理都走这里）。
+     *
+     * <p>为什么必须落库：披露面用的是<b>本跳</b>这份内存上下文，而执行面的第三道防线
+     * （{@code ToolRegistry#matchesContext}）读的是<b>快照</b>上下文，{@link AiContext#fromMap}
+     * 又是拷贝 —— 只改内存对象时 guard 与下一次续跑都看不到。
+     *
+     * <p>写门与其它交棒写点同源（{@code saveStatusUnlessCancelled}）：取消已先到 / 租约只读 /
+     * fence 陈旧 ⇒ {@code false}，调用方必须<b>不驱动模型</b>（本方法不驱动任何东西，不引入双驱动）。
+     */
+    private boolean isPersistHandoffContext(String runId, RunSnapshot snapshot, AiContext context) {
+        snapshot.setContext(context.toMap());
+        if (this.store.isStatusSavedUnlessCancelled(snapshot)) {
+            return true;
+        }
+        log.info("condition handoff context write refused by write gate runId={} step={} (recheck cancel/authority, no drive)",
+                runId, context.getStep());
+        return false;
+    }
+
+    /**
+     * 刷新交棒历史的唯一权威 SYSTEM，稳定核心与全部非 SYSTEM 对话事实保持原样。
+     *
+     * <p>当前协议结构有效时，只按最新披露替换 {@code capability_rules} 与 workspace 动态段。
+     * 当前协议结构无效时，才按最新上下文和快照模型的真实能力完整重建；不提供旧格式回退。
+     * 重建异常或空文本直接失败，不得把无权威 SYSTEM 的历史交给模型。
+     */
+    private List<Message> rewriteAuthoritativeSystem(List<Message> history, AiContext context, String runId) {
+        if (SystemMessages.leadingCount(history) == 0) {
+            throw new AiStateUnavailableException("Authoritative SYSTEM is still missing after resume recovery runId=" + runId);
+        }
+        boolean toolsAllowed = this.chatService.isToolCallingAllowed(runId);
+        String capabilityRules = this.chatService.capabilityRulesText(context, toolsAllowed);
+        String workspace = this.chatService.workspaceStateText(context);
+        String rewritten = replaceDynamicSections(history.getFirst().getText(), capabilityRules, workspace, toolsAllowed);
+        if (rewritten == null) {
+            rewritten = this.chatService.systemPromptText(context, toolsAllowed);
+        }
+        if (!StringUtils.isNotBlank(rewritten)) {
+            throw new AiStateUnavailableException("Rebuilt authoritative SYSTEM is empty runId=" + runId);
+        }
+        if (rewritten.equals(history.getFirst().getText())) {
+            return history;
+        }
+        List<Message> out = new ArrayList<>(history);
+        out.set(0, new SystemMessage(rewritten));
+        log.info("authoritative SYSTEM dynamic sections refreshed before handoff runId={} page={} taskId={} step={}", runId,
+                context.getPage(), context.getTaskId(), context.getStep());
+        return out;
+    }
+
+    /**
+     * 只识别当前定界协议并替换动态段；返回 {@code null} 表示结构无效，调用方必须完整重建。
+     * 不支持无工作区段、段不闭合、重复段或顺序错误的旧格式。
+     */
+    static String replaceDynamicSections(String systemText, String capabilityRules, String workspace,
+                                         boolean toolsAllowed) {
+        if (systemText == null || capabilityRules == null || !StringUtils.isNotBlank(workspace)) {
+            return null;
+        }
+        DynamicSectionPositions positions = findDynamicSections(systemText, toolsAllowed);
+        if (positions == null) {
+            return null;
+        }
+        int workspaceEnd = positions.workspaceClose() + ContextBuilder.WORKSPACE_STATE_CLOSE.length();
+        if (workspaceEnd < systemText.length() && systemText.charAt(workspaceEnd) == '\n') {
+            workspaceEnd++;
+        }
+        String workspaceSection = workspace.endsWith("\n") ? workspace : workspace + "\n";
+        String rewritten = systemText.substring(0, positions.workspaceStart()) + workspaceSection
+                + systemText.substring(workspaceEnd);
+        if (positions.capabilityStart() >= 0) {
+            int capabilityEnd = positions.capabilityClose() + PromptRulePacks.SECTION_CLOSE.length();
+            rewritten = rewritten.substring(0, positions.capabilityStart()) + capabilityRules
+                    + rewritten.substring(capabilityEnd);
+        }
+        return rewritten;
+    }
+
+    private static DynamicSectionPositions findDynamicSections(String systemText, boolean toolsAllowed) {
+        int workspaceStart = systemText.indexOf(ContextBuilder.WORKSPACE_SECTION_HEADING);
+        int workspaceOpen = workspaceStart < 0 ? -1
+                : systemText.indexOf(ContextBuilder.WORKSPACE_STATE_OPEN, workspaceStart);
+        int workspaceClose = workspaceStart < 0 ? -1
+                : systemText.indexOf(ContextBuilder.WORKSPACE_STATE_CLOSE, workspaceStart);
+        if (!isWorkspaceStructureValid(systemText, workspaceStart, workspaceOpen, workspaceClose)) {
+            return null;
+        }
+        int capabilityStart = systemText.indexOf(PromptRulePacks.SECTION_OPEN);
+        int capabilityClose = capabilityStart < 0 ? -1
+                : systemText.indexOf(PromptRulePacks.SECTION_CLOSE, capabilityStart);
+        if (!isCapabilityStructureValid(systemText, toolsAllowed, workspaceStart, capabilityStart, capabilityClose)) {
+            return null;
+        }
+        return new DynamicSectionPositions(workspaceStart, workspaceClose, capabilityStart, capabilityClose);
+    }
+
+    private static boolean isWorkspaceStructureValid(String systemText, int start, int open, int close) {
+        return start >= 0 && open >= start && close >= open
+                && start == systemText.lastIndexOf(ContextBuilder.WORKSPACE_SECTION_HEADING)
+                && open == systemText.lastIndexOf(ContextBuilder.WORKSPACE_STATE_OPEN)
+                && close == systemText.lastIndexOf(ContextBuilder.WORKSPACE_STATE_CLOSE);
+    }
+
+    private static boolean isCapabilityStructureValid(String systemText, boolean toolsAllowed, int workspaceStart,
+                                                      int start, int close) {
+        if (toolsAllowed && start < 0 || start < 0 && systemText.contains(PromptRulePacks.SECTION_CLOSE)) {
+            return false;
+        }
+        return start < 0 || close >= start && start == systemText.lastIndexOf(PromptRulePacks.SECTION_OPEN)
+                && close == systemText.lastIndexOf(PromptRulePacks.SECTION_CLOSE)
+                && close + PromptRulePacks.SECTION_CLOSE.length() <= workspaceStart;
+    }
+
+    private record DynamicSectionPositions(int workspaceStart, int workspaceClose, int capabilityStart,
+                                           int capabilityClose) {
+    }
+
+    /**
+     * 驱动任务失败时落成 FAILED 终态，并清空未完成的工具调用。
+     * 已经是终态的快照不覆盖；写终态失败只留 WARN，不把异常抛给已发出的终帧。
+     *
+     * <p><b>N2（返修）</b>：整段"读快照 → 判取消 → 写 FAILED → 发 error"在<b>同一把</b> per-run 监视器内，
+     * 取消已先到（快照取消态 / 守卫拒写）时连失败终帧也不发 —— 否则一轮会同时出现
+     * {@code error} 与 {@code done{cancelled:true}}。只在写快照时加锁不够：锁外发 error 仍可被
+     * 取消的 done 插到前面。
+     *
+     * @param emitError 失败终帧的发送动作（在监视器内执行；调用方按旧口径决定是否发）
+     */
+    private void markDriveFailure(RunSnapshot snapshot, Exception ex, Runnable emitError) {
+        if (snapshot == null || snapshot.getRunId() == null) {
+            if (emitError != null) {
+                emitError.run();
+            }
+            return;
+        }
+        String runId = snapshot.getRunId();
+        Object monitor = this.chatService == null ? null : this.chatService.finalizeMonitor(runId);
+        if (monitor == null) {
+            markDriveFailureLocked(snapshot, ex, emitError);
+            return;
+        }
+        synchronized (monitor) {
+            markDriveFailureLocked(snapshot, ex, emitError);
+        }
+    }
+
+    private void markDriveFailureLocked(RunSnapshot snapshot, Exception ex, Runnable emitError) {
+        try {
+            RunSnapshot latest = this.store.get(snapshot.getRunId());
+            RunSnapshot target = ObjectUtils.defaultIfNull(latest, snapshot);
+            if (RunSnapshot.isTerminal(target.getStatus())) {
+                // 取消是终态里唯一"终帧归别人发"的一种；DONE/FAILED 维持旧口径（写终态失败照发 error）。
+                boolean cancelled = RunSnapshot.CANCELLED.equals(target.getStatus()) || target.isCancelled();
+                if (!cancelled && emitError != null) {
+                    emitError.run();
+                }
+                return;
+            }
+            boolean providerGone = ex instanceof ProviderGoneException;
+            String failureCode = providerGone ? ErrorCodes.AI_PROVIDER_GONE : ErrorCodes.AI_RESUME_FAILED;
+            String failureMessage = providerGone ? PROVIDER_GONE_MESSAGE : resumeFailedMessage();
+            List<Message> failureHistory = this.chatService == null ? null
+                    : this.chatService.failureHistory(target, target.getAssistantContent(), "", failureCode, failureMessage);
+            if (failureHistory != null) {
+                target.setMessageJson(this.codec.serializeAll(failureHistory));
+            }
+            target.setStatus(RunSnapshot.FAILED);
+            target.setError((providerGone ? "PROVIDER_GONE：该轮使用的模型端点此刻不可用，无法按原模型续跑"
+                    : com.example.configmgr.common.ErrorCodes.AI_RESUME_FAILED + "：续跑执行失败")
+                    + "（" + ex.getClass().getSimpleName() + "）");
+            target.setInFlightToolCalls(new ArrayList<>());
+            if (!this.store.saveTerminalUnlessCancelled(target)) {
+                log.info("resume failure terminal state refused by cancel-priority guard "
+                                + "runId={} (no error frame; cancel finalize owns terminal state/frame)",
+                        snapshot.getRunId());
+                return;
+            }
+            // F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
+            // 直接交出手里的终态快照：复读会按收尾线程身份拼键，身份不符时读不到 → RUN 绑定静默留存。
+            if (this.chatService != null) {
+                this.chatService.recordFailureTerminal(target, failureHistory);
+                this.chatService.clearTerminalRunState(target.getRunId(), target);
+            }
+            if (emitError != null) {
+                emitError.run();
+            }
+        } catch (RuntimeException writeEx) {
+            log.warn("resume failure terminal write failed runId={} (error frame still emitted; recovery relies on snapshot/lease)",
+                    snapshot.getRunId(), writeEx);
+            if (emitError != null) {
+                emitError.run();
+            }
+        }
+    }
+
+    /**
+     * 续跑侧失败出口的<b>终帧幂等</b>（2026-10-29；返修后按<b>每次驱动</b>判）。
+     *
+     * <p>判据 = {@link SseChatEmitter#terminalFrameArchivedSinceDriveStart()}（本次驱动入口之后的
+     * done/error），入口下界由 {@code ResilientChatService#driveResumed} 在驱动开始时记一次。
+     * 这样"上一次续跑/重挂驱动留下的 error"不会把本次的失败终帧吞掉。
+     *
+     * <p><b>边界</b>：这是"读 → 判 → 发"的顺序判据，只覆盖<b>同一驱动</b>（含同进程重复收尾）与
+     * <b>同一 runId 的相邻驱动</b>；跨实例并发的"恰好一条终帧"需要原子终帧位（本批未做，不声称根治）。
+     * 终态写已还租，写门对这一笔终帧不设防，故这里不把"写门会再拦一次"当兜底。
+     *
+     * <p>判据不可知（{@code null}）⇒ <b>照发</b>：宁可多一条，也不能吞掉本次驱动唯一的失败终帧。
+     */
+    private void emitFailureErrorUnlessArchived(SseChatEmitter out, String code, String message) {
+        Boolean archived = out.terminalFrameArchivedSinceDriveStart();
+        if (Boolean.TRUE.equals(archived)) {
+            if (log.isDebugEnabled())
+                log.debug("failure terminal frame already archived for this drive, skipping duplicate error code={} (at most one per drive)", code);
+            return;
+        }
+        out.error(code, message);
+    }
+
+    /**
+     * 续跑前的 <b>SYSTEM 恢复/重建</b>（续跑保 system 批）。
+     *
+     * <h2>为什么续跑必须先做这一步</h2>
+     * 快照里的历史是"模型当时看到的那串消息"，但旧实现的两条裁剪路径（窗口按 turn 淘汰、
+     * 压缩按 turn 摘要/硬截断）会把<b>首段连同 SYSTEM 一起</b>吃掉：{@code ConversationTurns}
+     * 把"第一条 user 之前的残留"归入第 0 段，而第 0 段正是系统消息所在。丢了 SYSTEM 之后续跑
+     * 仍会成功发请求，只是人设、工作区约束与"外部文本是数据不是指令"的声明全部消失 ——
+     * 静默降智，不是报错。
+     *
+     * <h2>三条规则</h2>
+     * <ol>
+     * <li>历史里已有 SYSTEM ⇒ <b>首条是唯一权威 SYSTEM</b>，完整保留其核心指令；其余 SYSTEM 不再挂回；</li>
+     * <li>权威 SYSTEM 不在最前（例如旧数据把它夹在中间）⇒ 移到最前，其余非 SYSTEM 历史顺序不变；</li>
+     * <li>历史里完全没有 ⇒ 用 {@link ResilientChatService#systemPromptText(AiContext, boolean)} 按快照模型能力重建
+     *     （与首轮同一个构造点）；重建异常或空文本直接抛出 {@link AiStateUnavailableException}，
+     *     不得返回无权威 SYSTEM 的历史或继续模型调用。</li>
+     * </ol>
+     *
+     * @return 恢复后的历史；无需改动时返回入参本身（保持"未改动即同引用"）
+     */
+    private SystemMessage rebuildSystemMessage(String runId, String sessionId, AiContext context, Locale replyLocale) {
+        String rebuiltText = null;
+        // 重建要读"本轮回答语言"（ReplyLanguage 走线程 locale）：HTTP 续跑传入的请求 locale
+        // 在驱动任务里才 set；这里临时借一下，结束后原样还回（调用线程可能已有自己的 locale）。
+        LocaleContext previousLocale = null;
+        if (replyLocale != null) {
+            previousLocale = LocaleContextHolder.getLocaleContext();
+            LocaleContextHolder.setLocale(replyLocale);
+        }
+        try {
+            rebuiltText = this.chatService == null ? null : this.chatService.systemPromptText(context,
+                    this.chatService.isToolCallingAllowed(runId));
+        } catch (RuntimeException ex) {
+            throw new AiStateUnavailableException(
+                    "Authoritative SYSTEM is missing and reconstruction failed runId=" + runId + " sessionId=" + sessionId, ex);
+        } finally {
+            if (replyLocale != null) {
+                if (previousLocale == null) {
+                    LocaleContextHolder.resetLocaleContext();
+                } else {
+                    LocaleContextHolder.setLocaleContext(previousLocale);
+                }
+            }
+        }
+        if (StringUtils.isBlank(rebuiltText)) {
+            throw new AiStateUnavailableException(
+                    "Authoritative SYSTEM is missing and reconstruction returned empty runId=" + runId + " sessionId=" + sessionId);
+        }
+        log.warn("resume snapshot missing SYSTEM, rebuilt from current config runId={} "
+                + "sessionId={} (old window/compaction may have dropped the system part)", runId, sessionId);
+        return new SystemMessage(rebuiltText);
+    }
+
+    private List<Message> restoreSystem(String runId, String sessionId, List<Message> loaded, AiContext context,
+                                        Locale replyLocale) {
+        List<Message> systems = new ArrayList<>();
+        List<Message> rest = new ArrayList<>(loaded.size());
+        for (Message message : loaded) {
+            if (SystemMessages.isSystem(message)) {
+                systems.add(message);
+            } else {
+                rest.add(message);
+            }
+        }
+        boolean wasLeading = systems.size() == SystemMessages.leadingCount(loaded);
+        boolean rebuilt = false;
+        if (systems.isEmpty()) {
+            systems.add(rebuildSystemMessage(runId, sessionId, context, replyLocale));
+            rebuilt = true;
+        }
+        if (wasLeading && !rebuilt && systems.size() == 1) {
+            return loaded;
+        }
+        return SystemMessages.reattach(List.of(systems.getFirst()), rest);
+    }
+
+    /**
+     * <b>取消收尾的窄入口</b>（写权限不可确认时的交棒目标，见 {@link CancelledRunFinalizer}）：
+     * <b>只</b>把"已确认取消"的一轮收敛成终态，绝不发起模型/工具。
+     *
+     * <h2>与 {@code resumeInternal} 同一套准入（I-3）</h2>
+     * <ol>
+     * <li><b>进程内互斥</b>：与续跑共用 {@code resuming} 表 —— 同进程已有执行体在推进这一轮
+     *     ⇒ {@link CancelFinalize#IN_PROGRESS}（交棒侧有界重试），绝不并发写/并发驱动；</li>
+     * <li><b>会话门</b>：同 sessionId 单值门，带<b>一次性 token</b> 取、按同一 token 精确释放
+     *     （与 {@code resumeInternal} 同形；首轮/交棒都不得误删别人的锁）。被别的轮占着 ⇒
+     *     {@link CancelFinalize#SESSION_BUSY}；</li>
+     * <li><b>跨实例续跑权</b>：{@code acquireRunLease}（生产 = 三键 {@code acquireFenced}）+
+     *     {@code verifyHeld} 对 Redis 真值校验；别人持有/确定丢租 ⇒
+     *     {@link CancelFinalize#LEASE_HELD_ELSEWHERE}，设施不可确认 ⇒ {@link CancelFinalize#UNAVAILABLE}。
+     *     <b>不换 owner、不强行推进新 epoch、不释放调用方（原驱动）的租约</b>：{@code fresh=false}
+     *     一律不释放。这里也不声称"隔离了原驱动"——同 owner 重入拿的是同一 epoch，隔离靠的是
+     *     上面的 {@code resuming} 互斥与本进程的取消收尾监视器。</li>
+     * </ol>
+     *
+     * <h2>终态与幂等（I-1 / I-2）</h2>
+     * <ul>
+     * <li>快照已是 <b>DONE/FAILED</b> ⇒ {@link CancelFinalize#ALREADY_TERMINAL}，<b>绝不改写</b>；</li>
+     * <li>取消事实不成立而快照非终态 ⇒ {@link CancelFinalize#CANCEL_FACT_UNCONFIRMED}
+     *     （不可知：交棒按有界重试，仍不驱动）；</li>
+     * <li>幂等判据 = <b>归档里有没有终帧</b>（{@code cancelTerminalArchived}），不是快照状态：
+     *     已归档 ⇒ {@code ALREADY_TERMINAL}（不重写、不重发）；未归档 ⇒ 调
+     *     {@link ResilientChatService#cancelParked(String)} 补齐（快照已 CANCELLED 但 done 缺失的
+     *     边界因此可恢复），收尾后再复核归档。</li>
+     * </ul>
+     */
+    private record CancelAdmission(RunSnapshot snapshot, LeaseService.Lease lease, boolean fresh, CancelFinalize denied,
+                                   boolean gateHeld, String gateSessionId) {
+
+        private CancelAdmission(RunSnapshot snapshot, LeaseService.Lease lease, boolean fresh, CancelFinalize denied) {
+            this(snapshot, lease, fresh, denied, false, null);
+        }
+    }
+
+    private CancelAdmission prepareCancelAdmission(String runId, String gateToken) {
+        RunSnapshot snapshot = this.store.get(runId);
+        if (snapshot == null) {
+            return new CancelAdmission(snapshot, null, false, CancelFinalize.NO_RUN);
+        }
+        if (RunSnapshot.isTerminal(snapshot.getStatus())
+                && !RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
+            // I-1：延迟交棒绝不能把 DONE/FAILED 改写成 CANCELLED
+            return new CancelAdmission(snapshot, null, false, CancelFinalize.ALREADY_TERMINAL);
+        }
+        CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
+        if (state == CancellationRegistry.CancelState.UNKNOWN) {
+            return new CancelAdmission(snapshot, null, false, CancelFinalize.CANCEL_UNKNOWN);
+        }
+        if (state != CancellationRegistry.CancelState.CANCELLED) {
+            // M-6：取消事实此刻不可见 ⇒ 不可知。快照终态无可收尾（上面已返回），非终态交回
+            // 交棒侧有界重试 —— 绝不因为"读到 NOT_CANCELLED"就驱动这一轮。
+            return new CancelAdmission(snapshot, null, false, CancelFinalize.CANCEL_FACT_UNCONFIRMED);
+        }
+        // 幂等判据 = 归档里有没有终帧（不是快照状态：save 与 done 是两个存储）
+        Boolean archived = this.chatService.cancelTerminalArchived(runId);
+        if (Boolean.TRUE.equals(archived)) {
+            return new CancelAdmission(snapshot, null, false, CancelFinalize.ALREADY_TERMINAL);
+        }
+        return acquireCancelResources(runId, snapshot, gateToken);
+    }
+
+    private CancelAdmission acquireCancelResources(String runId, RunSnapshot snapshot, String gateToken) {
+        boolean gateHeld = false;
+        String gateSessionId = null;
+        LeaseService.Lease lease = null;
+        boolean fresh = false;
+        LeaseService leases = this.store.leaseService();
+        try {
+            // 会话门（与 resumeInternal 同形：抢不到就不是这一拍的事）
+            if (this.sessionGate != null) {
+                SessionGate.Busy busy = this.sessionGate.acquire(snapshot.getSessionId(), runId, gateToken);
+                if (busy != null && !runId.equals(busy.runId())) {
+                    log.info("cancel finalize deferred: session gate held by another run runId={} heldBy={} (handoff retries bounded)", runId,
+                            busy.runId());
+                    return new CancelAdmission(snapshot, null, false, CancelFinalize.SESSION_BUSY);
+                }
+                gateHeld = true;
+                gateSessionId = snapshot.getSessionId();
+            }
+            if (leases == null) {
+                return new CancelAdmission(snapshot, null, false, null, gateHeld, gateSessionId);
+            }
+            LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
+            lease = acquired.lease();
+            fresh = acquired.created();
+            if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+                return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.LEASE_HELD_ELSEWHERE, gateHeld, gateSessionId);
+            }
+            if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
+                return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.UNAVAILABLE, gateHeld, gateSessionId);
+            }
+            if (lease != null && leases.verifyHeld(lease.key(), lease.epoch(), lease.owner()) == LeaseService.Hold.LOST) {
+                return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.LEASE_HELD_ELSEWHERE, gateHeld, gateSessionId);
+            }
+            // hold == UNAVAILABLE：这一拍证明不了"我仍是主人"；继续也只是让写门再拒一次。
+            return new CancelAdmission(snapshot, lease, fresh, null, gateHeld, gateSessionId);
+        } catch (RuntimeException ex) {
+            releaseCancelResources(runId, gateToken, gateHeld, gateSessionId, leases, lease, fresh);
+            throw ex;
+        }
+    }
+
+    public CancelFinalize cancelConfirmed(String runId) {
+        // 与续跑共用同一张进程内互斥表，键同口径（身份 + runId）：A 的取消收尾不得把 B 的同名轮次
+        // 报成 IN_PROGRESS（那会让 B 的交棒链一直重试到预算耗尽）。
+        String resumeKey = LocalRunKey.of(runId);
+        if (this.resuming.putIfAbsent(resumeKey, Boolean.TRUE) != null) {
+            log.info("cancel finalize deferred: an executor in this process is driving this run runId={} (handoff retries bounded)", runId);
+            return CancelFinalize.IN_PROGRESS;
+        }
+        boolean gateHeld = false;
+        RunIdentityScope.Scope identityScope = null;
+        String gateSessionId = null;
+        // 一次性 token：与续跑同纪律（首轮那条迟到 finally 的 token=runId 不会误删本持有者）。
+        String gateToken = UUID.randomUUID().toString();
+        LeaseService leases = this.store.leaseService();
+        LeaseService.Lease lease = null;
+        boolean fresh = false;
+        try {
+            CancelAdmission admission = prepareCancelAdmission(runId, gateToken);
+            gateHeld = admission.gateHeld();
+            gateSessionId = admission.gateSessionId();
+            lease = admission.lease();
+            fresh = admission.fresh();
+            if (admission.denied() != null) {
+                return admission.denied();
+            }
+            // 取消收尾由独立执行体（触发池/定时重试线程）接管：身份只从本轮记录恢复。
+            identityScope = RunIdentityScope.open(admission.snapshot().getTenantId(), admission.snapshot().getUserId());
+            this.chatService.cancelParked(runId);
+            Boolean after = this.chatService.cancelTerminalArchived(runId);
+            if (Boolean.TRUE.equals(after)) {
+                return CancelFinalize.FINALIZED;
+            }
+            RunSnapshot latest = this.store.get(runId);
+            if (latest != null && RunSnapshot.isTerminal(latest.getStatus())
+                    && !RunSnapshot.CANCELLED.equals(latest.getStatus())) {
+                // 并发方把它收成了 DONE/FAILED（合法终态）：没有终帧可补，也绝不改写
+                return CancelFinalize.ALREADY_TERMINAL;
+            }
+            return CancelFinalize.PERSIST_DENIED;
+        } catch (RuntimeException ex) {
+            log.warn("cancel finalize execution failed runId={} (unsettled, left to bounded retry)", runId, ex);
+            return CancelFinalize.PERSIST_DENIED;
+        } finally {
+            finishCancelConfirmed(runId, resumeKey, gateToken, gateHeld, gateSessionId, identityScope, leases, lease,
+                    fresh);
+        }
+    }
+
+    private void finishCancelConfirmed(String runId, String resumeKey, String gateToken, boolean gateHeld,
+                                       String gateSessionId, RunIdentityScope.Scope identityScope, LeaseService leases, LeaseService.Lease lease,
+                                       boolean fresh) {
+        releaseCancelResources(runId, gateToken, gateHeld, gateSessionId, leases, lease, fresh);
+        try {
+            this.resuming.remove(resumeKey);
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("resume-mutex-remove"))
+                log.warn("cancel finalize mutex cleanup failed runId={}", runId, ex);
+        }
+        if (identityScope != null) {
+            try {
+                identityScope.close();
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-identity-close"))
+                    log.warn("cancel finalize identity close failed runId={}", runId, ex);
+            }
+        }
+    }
+
+    private void releaseCancelResources(String runId, String gateToken, boolean gateHeld, String gateSessionId,
+                                        LeaseService leases, LeaseService.Lease lease, boolean fresh) {
+        if (fresh && lease != null) {
+            releaseQuietly(leases, lease);
+        }
+        if (gateHeld && gateSessionId != null && this.sessionGate != null) {
+            try {
+                this.sessionGate.release(gateSessionId, runId, gateToken);
+            } catch (RuntimeException ex) {
+                if (LogSampling.canAcquire("resume-session-gate-release")) {
+                    log.warn("cancel finalize session gate release failed sessionId={} runId={}", gateSessionId, runId, ex);
+                }
+            }
+        }
+    }
+
+    /**
+     * 在<b>交棒线程</b>上按本轮记录身份建立作用域（快照 0/0 = 空作用域，不伪造默认租户）。
+     *
+     * <p>执行器的 TTL 装饰只是第一层；恢复型任务的身份第一来源永远是记录本身。
+     */
+    private static void withRunIdentity(RunSnapshot snapshot, Runnable action) {
+        long tenantId = snapshot == null ? 0L : snapshot.getTenantId();
+        long userId = snapshot == null ? 0L : snapshot.getUserId();
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(tenantId, userId)) {
+            action.run();
+        }
+    }
+
+    private static void releaseQuietly(LeaseService leases, LeaseService.Lease lease) {
+        try {
+            leases.isReleased(lease);
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("resume-runtime-catch"))
+                log.warn("cancel finalize lease release failed key={} epoch={}", lease.key(), lease.epoch(), ex);
+        }
+    }
+
+    /**
+     * 续跑入口与每次工具派发前共用的取消门；null = 可以继续。
+     */
+    private ResumeResult cancelStateOutcome(String runId, Map<String, Object> body) {
+        CancellationRegistry.CancelState state = this.cancellations.cancelState(runId);
+        if (state == CancellationRegistry.CancelState.UNKNOWN) {
+            return cancelUnknownOutcome(body);
+        }
+        if (state == CancellationRegistry.CancelState.CANCELLED) {
+            this.chatService.cancelParked(runId);
+            body.put("resumed", false);
+            body.put("reason", "ALREADY_CANCELLED");
+            return new ResumeResult(Outcome.ALREADY_CANCELLED, body);
+        }
+        return null;
+    }
+
+    /**
+     * {@code UNKNOWN}（取消状态不可知）的<b>唯一</b> typed 结局（既有契约，未新增码）：
+     * {@code CANCEL_STATE_UNKNOWN} + {@code reason=CANCEL_STATE_UNKNOWN} + {@code AI_REDIS_UNAVAILABLE}。
+     *
+     * <p>两个使用点共用同一份口径：①入口/逐条检查首次读到 {@code UNKNOWN}（{@link #cancelStateOutcome}）；
+     * ②<b>认领前复核</b>读到 {@code UNKNOWN} 后抛出的既有 {@code STATE_UNAVAILABLE}（在重建循环里翻译）。
+     * 两处必须逐字一致 —— 否则同一个"Redis 读抖动"会因落在窗口前/后而给出两种对外结局。
+     */
+    private ResumeResult cancelUnknownOutcome(Map<String, Object> body) {
+        body.put("resumed", false);
+        body.put("reason", "CANCEL_STATE_UNKNOWN");
+        body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+        return new ResumeResult(Outcome.CANCEL_STATE_UNKNOWN, body);
+    }
+
+    /**
+     * 续跑身份判据的<b>三态</b>：确定可用 / 确定不可用 / 此刻不可知。
+     *
+     * <p>
+     * 第三态是 B2 修正的核心：配置读不到、或行在但 key 解不开，都属于"此刻不知道"，
+     * 既不能放行（会让"答得出、存不下"的幽灵续跑跑起来），也<b>不能判死</b>
+     * （一次读库抖动 ⇒ 永久 FAILED）。
+     */
+    private record ResolvedIdentity(AiConfigService.ChatTarget target, boolean unknown, String detail) {
+
+        static ResolvedIdentity present(AiConfigService.ChatTarget target) {
+            return new ResolvedIdentity(target, false, null);
+        }
+
+        static ResolvedIdentity absent() {
+            return new ResolvedIdentity(null, false, null);
+        }
+
+        static ResolvedIdentity unknown(String detail) {
+            return new ResolvedIdentity(null, true, detail);
+        }
+
+    }
+
+    /**
+     * 续跑身份解析：<b>硬否定（{@code PROVIDER_GONE}）之前必须先强制重载一次配置，且只有
+     * "重载成功 + 仍为空 + 行级声明也没有"才算确定不可用</b>。
+     *
+     * <h2>为什么先刷新</h2>
+     * {@code resolveChatTarget} 读的是<b>配置快照</b>，而快照只在版本变化时重载。跨实例场景里"另一个
+     * 实例刚把 provider 写进共享库"与"本实例的快照还没看到"完全可能同时成立（run 40182796512 的
+     * B/C 就是快照永久停在空列表）。此时按旧快照判 {@code PROVIDER_GONE} 是<b>把缓存陈旧当成端点消失</b>。
+     *
+     * <h2>为什么"刷新失败"不能算否</h2>
+     * {@link AiConfigService#load()} 会吞掉读库异常（{@code /health}、{@code /chat} 不该因此 500），
+     * 于是 {@code reload()} 在读库故障时<u>既不抛也不报</u>：调用方只看到"快照仍是旧的/空的"。
+     * 如果据此判死，一次 Hikari 超时 / 迁移锁 / 只读切换就会把这一轮变成<b>永久 FAILED</b>
+     * （本批把硬否定升级成了终态收敛，所以这条区分从"更好"变成"必需"）。
+     * 因此这里用 {@link AiConfigService#reloadWithOutcome()} 拿"这次到底刷新成功没有"：
+     * 不成功 ⇒ 第三态（{@code STATE_UNKNOWN}，快照保持原样，稍后重试）。
+     *
+     * <h2>为什么"行在但 key 解不开"也不能算否</h2>
+     * {@code resolveChatTarget} 要求 key 可解析；KEK 缺失/轮换/密文损坏时它同样返回空，但端点并没有
+     * 被删 —— 那种情形由 {@code binding}（{@link AiConfigService#bindingState(Long, String)} 的
+     * {@code KEY_UNREADABLE}）识别为第三态。只有"行确实没了/停用了/模型下架/从未声明 key"
+     * （{@code ABSENT}）才落 {@link #providerGone}。
+     */
+    private ResolvedIdentity resolveForResume(String runId,
+                                              java.util.function.Supplier<java.util.Optional<AiConfigService.ChatTarget>> lookup,
+                                              java.util.function.Supplier<AiConfigService.BindingState> binding) {
+        java.util.Optional<AiConfigService.ChatTarget> cached;
+        try {
+            cached = lookup.get();
+        } catch (RuntimeException ex) {
+            log.warn("resume identity cached config read failed runId={} (treating as unknown)", runId, ex);
+            return ResolvedIdentity.unknown("Failed to read configuration snapshot");
+        }
+        if (cached.isPresent()) {
+            return ResolvedIdentity.present(cached.get());
+        }
+        return resolveAfterCacheMiss(runId, lookup, binding);
+    }
+
+    private ResolvedIdentity resolveAfterCacheMiss(String runId,
+                                                   java.util.function.Supplier<java.util.Optional<AiConfigService.ChatTarget>> lookup,
+                                                   java.util.function.Supplier<AiConfigService.BindingState> binding) {
+        AiConfigService.ReloadResult reload;
+        try {
+            reload = this.aiConfigService.reloadWithOutcome();
+        } catch (RuntimeException ex) {
+            log.warn("resume identity config reload threw runId={} (treating "
+                    + "as unknown; no death verdict, no terminal write)", runId, ex);
+            return ResolvedIdentity.unknown("Configuration reload threw");
+        }
+        if (reload == null || !reload.ok()) {
+            // reload == null = 替身没打桩/实现缺失：同样按"不可知"处理（宁可不判死）。
+            log.warn("resume identity config reload unsuccessful runId={} (DB unavailable; treating as unknown; no death verdict)", runId);
+            return ResolvedIdentity.unknown("Configuration snapshot refresh was unsuccessful");
+        }
+        java.util.Optional<AiConfigService.ChatTarget> refreshed;
+        try {
+            refreshed = lookup.get();
+        } catch (RuntimeException ex) {
+            log.warn("resume identity refreshed config read failed runId={} (treating as unknown)", runId, ex);
+            return ResolvedIdentity.unknown("Failed to read refreshed configuration snapshot");
+        }
+        if (refreshed.isPresent()) {
+            return ResolvedIdentity.present(refreshed.get());
+        }
+        AiConfigService.BindingState state;
+        try {
+            state = binding.get();
+        } catch (RuntimeException ex) {
+            log.warn("resume identity row-state read failed runId={} (treating as unknown)", runId, ex);
+            return ResolvedIdentity.unknown("Row-level binding state is unreadable");
+        }
+        if (state == AiConfigService.BindingState.KEY_UNREADABLE) {
+            return ResolvedIdentity.unknown("Provider/model remains configured, but its key is unavailable");
+        }
+        if (state == AiConfigService.BindingState.RESOLVED) {
+            // 不应发生（行/模型/key 都就绪时解析不会为空）。宁可当"不可知"也不判死。
+            log.warn("resume identity contradictory runId={} (row state=RESOLVED but resolution empty) - treating as unknown", runId);
+            return ResolvedIdentity.unknown("Row-level binding state contradicts the empty resolution");
+        }
+        return ResolvedIdentity.absent();
+    }
+
+    /**
+     * {@code STATE_UNKNOWN} 结局（B2 修正）：配置此刻<b>不可确认</b>，这一轮既不判死也不放行。
+     *
+     * <p>
+     * 对外 503 + {@code reason=STATE_UNKNOWN, code=AI_REDIS_UNAVAILABLE}（与"待决条目读失败"、
+     * "取消状态未知"同口径）；快照保持 {@code SUSPENDED}、<b>不写终态、不出业务终帧</b>
+     * （出终帧就是判死）；只把"没人会再推进"的当前订阅收掉 —— 否则重挂会挂上一条永远不会再有帧的
+     * 连接（服务端 emitter 无传输超时），客户端只能等自己的超时。
+     */
+    private ResumeResult stateUnknown(String runId, RunSnapshot snapshot, String detail) {
+        log.warn("resume deferred: config state unconfirmed runId={} providerId={} model={} ({}): no death "
+                        + "verdict, no terminal state/frame, snapshot stays {}; dispatcher/reattach retries later", runId, snapshot.getProviderId(), snapshot.getModelId(),
+                detail, snapshot.getStatus());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("runId", runId);
+        body.put("resumed", false);
+        body.put("reason", "STATE_UNKNOWN");
+        body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+        body.put("providerId", snapshot.getProviderId());
+        body.put("modelId", snapshot.getModelId());
+        releaseSubscriptionsWithoutFrame(runId);
+        return new ResumeResult(Outcome.STATE_UNKNOWN, body);
+    }
+
+    /**
+     * 只收掉这一轮<b>当下的订阅</b>（不置终态标志、不写终帧、不摘注册表条目）：
+     * 与 park 的"挂起即断"同一条语义 —— 连接不再悬挂，归档里的帧不受影响，重挂仍可回放并重试。
+     */
+    private void releaseSubscriptionsWithoutFrame(String runId) {
+        try {
+            SseChatEmitter out = this.registry == null ? null : this.registry.find(runId);
+            if (out != null) {
+                out.completeSubscriptions();
+            }
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("resume-runtime-catch"))
+                log.warn("resume deferred stream close failed runId={}", runId, ex);
+        }
+    }
+
+    /**
+     * {@code PROVIDER_GONE} 结局（409 语义）：快照的 provider/model 此刻<b>确定</b>不可用，<b>不跨
+     * provider、不换模型</b>续跑。
+     *
+     * <p>I3 起判据是<b>精确绑定</b>（{@code resolveChatTarget(providerId, modelId)}）：同名模型挂在
+     * 别家不算数；env 合成行（无 providerId）退化为"该模型名是否仍可解析"。
+     *
+     * <p><b>只有"确定"才走到这里</b>（B2 修正）：调用方已确认①配置刷新成功、②行级状态为
+     * {@code ABSENT}（行/模型不在、停用，或从未声明 key）。"刷新失败"或"key 解不开"
+     * （{@code KEY_UNREADABLE}）走 {@link #stateUnknown}。
+     *
+     * <p><b>B1（run 40182796512）</b>：判到硬否定就必须收敛 —— 快照落 {@code FAILED} + 机器可读的
+     * 终帧，而不是把这一轮留在 {@code SUSPENDED} 且"无人驱动、无帧可等"（客户端只能等到超时）。
+     */
+    private ResumeResult providerGone(String runId, RunSnapshot snapshot, String detail) {
+        log.warn("resume rejected: snapshot provider/model unavailable runId={} providerId={} model={} ({})", runId,
+                snapshot.getProviderId(), snapshot.getModelId(), detail);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("resumed", false);
+        body.put("reason", "PROVIDER_GONE");
+        body.put("providerId", snapshot.getProviderId());
+        body.put("modelId", snapshot.getModelId());
+        body.put("message", PROVIDER_GONE_MESSAGE);
+        convergeProviderGone(runId, snapshot);
+        return new ResumeResult(Outcome.PROVIDER_GONE, body);
+    }
+
+    /**
+     * {@code PROVIDER_GONE} 的终态收敛（B1）：<b>快照 FAILED + 机器可读终帧 + 收流</b>。
+     *
+     * <h2>为什么必须做（而不是只回 409）</h2>
+     * 409 只回答<b>这一次</b>调用方；这一轮本身仍停在 {@code SUSPENDED}，条目已全部结算却没有任何
+     * 驱动方 —— 后续重挂会挂上一条"不会再有帧"的连接（服务端用无传输超时的 emitter），客户端要么
+     * 永久等待，要么等到自己的超时（实测 120s）。{@link ProviderGoneException} 的类注早已明确这条
+     * 红线："必须落成明确终态，而不是只发一帧 error 就把快照留在非终态"。
+     *
+     * <p>
+     * <b>只对"确定不可用"生效</b>：调用点只有本类的身份预检（精确绑定解析为空）。租约不可读 /
+     * 状态未知 / 另一驱动方在跑，都<b>不</b>走这里 —— 那些是"此刻不知道"，不是"确定没了"：
+     * 写终态与出终帧都会被 {@link RunStore#save} / {@code SseChatEmitter#emit} 的只读判据拦下
+     * （见 {@code LeaseService.LeaseAuthority#readOnly()}），这里先显式跳过，避免"连接被收了但既无
+     * 终帧也无终态"的半死形态。
+     */
+    private void convergeProviderGone(String runId, RunSnapshot snapshot) {
+        if (runId == null) {
+            return;
+        }
+        // N2：与取消收尾共用同一把 per-run 监视器 —— "读快照判终态/取消 → 写 FAILED → 出 error 终帧"
+        // 必须是一个原子段，否则取消可以落在判定与写终态之间，一轮出现两条终帧。
+        Object monitor = this.chatService == null ? null : this.chatService.finalizeMonitor(runId);
+        if (monitor == null) {
+            convergeProviderGoneLocked(runId, snapshot);
+            return;
+        }
+        synchronized (monitor) {
+            convergeProviderGoneLocked(runId, snapshot);
+        }
+    }
+
+    private void convergeProviderGoneLocked(String runId, RunSnapshot snapshot) {
+        try {
+            LeaseService.LeaseAuthority authority = this.store.runLeaseAuthority(runId);
+            if (authority != null && authority.isReadOnly()) {
+                log.warn("resume hard negative not converged runId={}: write authority {} (lease "
+                        + "lost/unconfirmed) - no terminal state/frame; new owner closes by the same rule", runId, authority);
+                return;
+            }
+            RunSnapshot latest = this.store.get(runId);
+            RunSnapshot target = ObjectUtils.defaultIfNull(latest, snapshot);
+            if (target == null || RunSnapshot.isTerminal(target.getStatus())) {
+                return;
+            }
+            settleProviderGoneTools(runId);
+            String failureMessage = providerGoneMessage();
+            List<Message> failureHistory = providerGoneFailureHistory(target, failureMessage);
+            if (failureHistory != null) {
+                target.setMessageJson(this.codec.serializeAll(failureHistory));
+            }
+            target.setStatus(RunSnapshot.FAILED);
+            target.setError("PROVIDER_GONE：" + PROVIDER_GONE_MESSAGE);
+            target.setInFlightToolCalls(new ArrayList<>());
+            target.setAssistantContent(null);
+            // 取消优先：取消已先到 ⇒ 不写 FAILED、不发 error（取消侧发 done{cancelled:true}）。
+            if (!this.store.saveTerminalUnlessCancelled(target)) {
+                log.info("resume hard negative yields to cancel runId={} (no FAILED, no error frame)", runId);
+                return;
+            }
+            // F：终态出口的进程内清理（幂等；失败只影响内存卫生）。
+            // 直接交出刚写成 FAILED 的快照，避免按交棒/续跑线程身份复读时因归属不符而漏写完成态。
+            if (this.chatService != null) {
+                this.chatService.recordFailureTerminal(target, failureHistory);
+                this.chatService.clearTerminalRunState(runId, target);
+            }
+            SseChatEmitter out = this.registry == null ? null : this.registry.of(runId);
+            if (out == null) {
+                return;
+            }
+            // 本批：终帧幂等（与 fail/emptyReply/环外异常同一判据）—— 归档里已有终帧时不再补一条。
+            emitFailureErrorUnlessArchived(out, ErrorCodes.AI_PROVIDER_GONE, providerGoneMessage());
+            this.registry.close(runId);
+            log.info("resume hard negative converged runId={} status=FAILED code={} (reattach replays the terminal frame then closes)", runId,
+                    ErrorCodes.AI_PROVIDER_GONE);
+        } catch (RuntimeException ex) {
+            log.warn("resume hard negative convergence failed runId={} (snapshot/frame "
+                    + "not persisted; reattach or startup scan reconverges)", runId, ex);
+        }
+    }
+
+    private void settleProviderGoneTools(String runId) {
+        PendingToolCall upstream = new PendingToolCall();
+        upstream.setName("模型端点");
+        upstream.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.FAILED.wire());
+        upstream.setCode(ErrorCodes.AI_PROVIDER_GONE);
+        for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
+            if (!isUnsettled(pending)) {
+                continue;
+            }
+            try {
+                // 与批次确定性失败同一条规则：未执行项落 SKIPPED、补 tool_result，不抹掉已有终态。
+                this.toolCallingManager.skipAsUpstreamFailed(runId, pending, upstream);
+            } catch (RuntimeException ex) {
+                log.warn("provider-gone tool settlement failed runId={} toolCallId={}", runId,
+                        pending.getToolCallId(), ex);
+            }
+        }
+    }
+
+    private List<Message> providerGoneFailureHistory(RunSnapshot target, String failureMessage) {
+        List<Message> history = new ArrayList<>(this.codec.deserializeAll(target.getMessageJson()));
+        if (!target.getInFlightToolCalls().isEmpty()) {
+            history.add(rebuildAssistant(target));
+            List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+            for (PendingToolCall item : target.getInFlightToolCalls()) {
+                PendingToolCall persisted = this.store.pending(target.getRunId(), item.getToolCallId());
+                PendingToolCall source = ObjectUtils.defaultIfNull(persisted, item);
+                responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
+                        ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(),
+                                        source.getResultText(), item.getArguments())
+                                .toModelJson(this.limiter, item.getName())));
+            }
+            history.add(ToolResponseMessage.builder().responses(responses).build());
+        }
+        target.setMessageJson(this.codec.serializeAll(history));
+        return this.chatService == null ? history
+                : this.chatService.failureHistory(target, target.getAssistantContent(), "",
+                ErrorCodes.AI_PROVIDER_GONE, failureMessage);
+    }
+
+    /**
+     * 用户面文案：与 409 同一句；en 走 {@code messages_en}，绝不回落到内部信息。
+     */
+    String providerGoneMessage() {
+        if (!ReplyLanguage.current().english()) {
+            return PROVIDER_GONE_MESSAGE;
+        }
+        if (this.messageSource != null) {
+            try {
+                return this.messageSource.getMessage("error." + ErrorCodes.AI_PROVIDER_GONE, null, Locale.ENGLISH);
+            } catch (NoSuchMessageException ex) {
+                if (LogSampling.canAcquire("resume-message-bundle-catch"))
+                    log.warn("messages_en missing error.{}, falling back to en whitelist", ErrorCodes.AI_PROVIDER_GONE, ex);
+            }
+        }
+        return PROVIDER_GONE_MESSAGE_EN;
+    }
+
+    /**
+     * 交棒后的存活判据（I7）：该轮快照仍存在且<b>非终态</b>。
+     *
+     * <p>与 {@code resuming} 表合用 = "本进程还有续跑任务在跑，且这一轮还没收尾"。读快照失败
+     * （Redis 抖动）按"仍活着"处理：误判为假会提前放掉一个正在跑的轮的续跑权。
+     *
+     * <p><b>轻量状态口（本批）</b>：判据跑在续租线程上（默认每 {@code lease.renew-interval} 一拍），
+     * 以前每次 {@code get} 都把整份快照（含整窗 {@code messageJson}）反序列化成对象图，只为取一个
+     * 状态串。现在统一走 {@link RunStore#isSnapshotNotTerminal(String, TenantUser)} —— 只读轻量状态键
+     * （缺失才回退快照原文的顶层 {@code status}），口径不变：不存在/终态 ⇒ false；读失败 ⇒ true。
+     *
+     * <p><b>身份</b>：本判据在<b>续租线程</b>上执行（那里没有请求身份），因此必须把<b>记录身份</b>
+     * 显式带进来；用线程身份读只会命中 legacy 键 ⇒ 恒 {@code null} ⇒ 首拍即"驱动者已不在" ⇒
+     * 主动还租、fence 不再推进（双驱动窗口）。
+     */
+    private boolean isSnapshotNotTerminal(String runId, TenantUser identity) {
+        try {
+            return this.store.isSnapshotNotTerminal(runId, identity);
+        } catch (Exception ex) {
+            return true;
+        }
+    }
+
+    /**
+     * 结算标签（R6 裁决）：{@code <toolCallId>:<status>:<execution>}，其中 execution 取
+     * {@code executed-here}（本次续跑真的执行了）、{@code reused(<实例>) }（复用他实例的执行结果）、
+     * {@code not-executed}（未执行：放行前被取消/拒绝/超时/前端未回灌等）。
+     */
+    private String settlementLabel(PendingToolCall pending) {
+        String execution;
+        if (!pending.isExecuted()) {
+            execution = "not-executed";
+        } else if (this.store.instanceId().equals(pending.getExecutedBy())) {
+            execution = "executed-here";
+        } else {
+            execution = "reused(" + pending.getExecutedBy() + ")";
+        }
+        return pending.getToolCallId() + ":" + pending.getStatus() + ":" + execution;
+    }
+
+    /**
+     * 入口 kind 校验批（续跑假批准）：{@code APPROVED + FRONTEND} = 前端条目被写成了"已批准"
+     * （旧代码不校验入口时留下的数据）。结算由 {@link SpToolCallingManager#resolvePending} 落成
+     * blocked；本谓词只用于在续跑日志里点名这一现场。
+     */
+    private static boolean isKindMisapproved(PendingToolCall pending) {
+        return pending != null && PendingToolCall.APPROVED.equals(pending.getStatus())
+                && PendingToolCall.KIND_FRONTEND.equals(pending.getKind());
+    }
+
+    /**
+     * 停走级联时"仍未结算"的条目：未执行且状态仍是 {@code PENDING}（等外部输入/后端待执行）
+     * 或 {@code APPROVED}（已放行未执行）。已执行/已有结论的条目不得被覆盖成 SKIPPED。
+     */
+    private static boolean isUnsettled(PendingToolCall pending) {
+        if (pending == null || pending.isExecuted()) {
+            return false;
+        }
+        String status = pending.getStatus();
+        return PendingToolCall.PENDING.equals(status) || PendingToolCall.APPROVED.equals(status);
+    }
+
+    /**
+     * 从快照重建挂起那一轮的 {@code assistant(tool_calls)}（顺序与 id/type/name/arguments 原样）。
+     *
+     * <p><b>推理元数据（通用协议）</b>：{@code assistantMetadata} 整份挂回消息 —— 它是挂起时上游
+     * assistant 的 metadata 原文（{@code reasoningContent} 之外还可能有 {@code encrypted_content} /
+     * {@code signature} / {@code thinking} 等厂商私有键）。这里<b>不解析、不筛选、不截断</b>：
+     * 未知键必须一起过桥，否则"续跑"只在支持某一种推理字段的 provider 上成立。
+     * {@code null} = 挂起时没有 metadata（旧快照/旧调用方）⇒ 不写 metadata 键。
+     *
+     * <p>包级可见 + static：本方法不依赖任何字段，直接断言"metadata 与 tool_calls 全保真"比走完
+     * 整条 resume 链更精确（整条链另有 {@code ResumeReasoningMetadataTest} 覆盖）。
+     */
+    static AssistantMessage rebuildAssistant(RunSnapshot snapshot) {
+        List<AssistantMessage.ToolCall> calls = new ArrayList<>();
+        for (PendingToolCall item : snapshot.getInFlightToolCalls()) {
+            calls.add(new AssistantMessage.ToolCall(item.getToolCallId(),
+                    ObjectUtils.defaultIfNull(item.getType(), "function"), item.getName(), item.getArguments()));
+        }
+        AssistantMessage.Builder builder = AssistantMessage.builder()
+                .content(StringUtils.defaultString(snapshot.getAssistantContent()));
+        Map<String, Object> metadata = snapshot.getAssistantMetadata();
+        if (metadata != null) {
+            builder.properties(metadata);
+        }
+        return builder.toolCalls(calls).build();
+    }
+
+    // ── 互斥：进程内表 + 续跑权租约（B23L1 批②b 起不再用 ai:resume:lock:） ──────
+    //
+    // 原实现 acquireResumeLock/releaseResumeLock 用 SETNX 拿一把 ai:resume:lock:<runId>，
+    // 释放是"GET → Java 比对 → DEL"：比对与删除之间锁可能已过期并被别的实例重抢，于是
+    // 删掉别人的锁（同一缺陷族见 LeaseService 类注 L6）。互斥语义整体并入续跑权租约：
+    //   · 跨实例 = ai:lease:run:<runId>（epoch 比对在 Lua 里原子完成）；
+    //   · 同进程 = 上面这张 resuming 表（租约可重入，挡不住同进程的两次并发续跑）。
+    // 全仓 grep 确认 ai:resume:lock: 无外部读者后才摘除（运维文档里的历史叙述保留）。
 
 }

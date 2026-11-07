@@ -249,7 +249,6 @@ public class FlywayStartupLock {
         try {
             statement.execute(sql);
         } catch (SQLException e) {
-            LogThrottler.warn(log, "FlywayStartupLock.schemaRace", "Flyway lock schema initialization hit SQL exception", e);
             if (!isAlreadyExists(e)) {
                 throw e;
             }

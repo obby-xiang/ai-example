@@ -162,6 +162,25 @@ public class RunStore {
 
     private static final int RECOVERY_RECONCILE_BATCH = 64;
 
+    /**
+     * 真实 run 写入登记 member，并在同一单键脚本内设置有界 TTL。
+     */
+    private static final RedisScript<Long> ZSET_INDEX_REGISTER_SCRIPT = new DefaultRedisScript<>("""
+            redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+            redis.call('PEXPIRE', KEYS[1], ARGV[3])
+            return 1
+            """, Long.class);
+
+    /**
+     * 只有对应 member 仍存在才续期；读取活动不得重建索引或复活 member。
+     */
+    private static final RedisScript<Long> ZSET_MEMBER_PEXPIRE_SCRIPT = new DefaultRedisScript<>("""
+            if redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+                return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            end
+            return 0
+            """, Long.class);
+
     private static final RedisScript<Long> RECOVERY_DEFER_SCRIPT = new DefaultRedisScript<>("""
             local current = redis.call('ZSCORE', KEYS[1], ARGV[3])
             if not current or tonumber(current) ~= tonumber(ARGV[1]) then return 0 end
@@ -905,6 +924,16 @@ public class RunStore {
             redis.call('SADD', KEYS[1], ARGV[1])
             redis.call('PEXPIRE', KEYS[1], ARGV[2])
             return 1
+            """, Long.class);
+
+    /**
+     * 只有 runId 仍是会话索引成员才续期，不 SADD，也不为无关 run 续期。
+     */
+    private static final RedisScript<Long> SESSION_RUNS_RENEW_SCRIPT = new DefaultRedisScript<>("""
+            if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then
+                return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            end
+            return 0
             """, Long.class);
 
     /**
@@ -1840,7 +1869,8 @@ public class RunStore {
     }
 
     /**
-     * 快照写后的索引物化：列表走身份窄索引，恢复只保留非终态的 due 候选。
+     * 快照写后的索引物化：身份列表随真实快照写登记；恢复索引只登记非终态 due 候选。
+     * 每个 ZSET 都在单键 Lua 内同时 ZADD + PEXPIRE；终态只摘出恢复索引，不为其续期。
      */
     private void addRunIndexBestEffort(RunSnapshot snapshot, String runId) {
         long tenantId = snapshot.getTenantId();
@@ -1852,17 +1882,16 @@ public class RunStore {
         try {
             String listKey = runListIndexKey(tenantId, userId);
             String identityDueKey = identityRecoveryDueKey(tenantId, userId);
-            Duration ttl = ttlFor(runId);
-            this.redis.opsForZSet().add(listKey, runId, Math.max(0L, snapshot.getUpdatedAtMs()));
-            this.redis.expire(listKey, ttl);
-            this.redis.expire(identityDueKey, ttl);
+            String ttlMs = String.valueOf(ttlFor(runId).toMillis());
+            this.redis.execute(ZSET_INDEX_REGISTER_SCRIPT, List.of(listKey),
+                    String.valueOf(Math.max(0L, snapshot.getUpdatedAtMs())), runId, ttlMs);
             if (RunSnapshot.isTerminal(snapshot.getStatus())) {
                 this.redis.opsForZSet().remove(RECOVERY_DUE_INDEX, member);
                 this.redis.opsForZSet().remove(identityDueKey, runId);
             } else {
-                long dueAt = recoveryDueAt(snapshot.getUpdatedAtMs());
-                this.redis.opsForZSet().add(RECOVERY_DUE_INDEX, member, dueAt);
-                this.redis.opsForZSet().add(identityDueKey, runId, dueAt);
+                String dueAt = String.valueOf(recoveryDueAt(snapshot.getUpdatedAtMs()));
+                this.redis.execute(ZSET_INDEX_REGISTER_SCRIPT, List.of(RECOVERY_DUE_INDEX), dueAt, member, ttlMs);
+                this.redis.execute(ZSET_INDEX_REGISTER_SCRIPT, List.of(identityDueKey), dueAt, runId, ttlMs);
             }
         } catch (Exception ex) {
             log.warn("run recovery/list index backfill failed runId={} (later writes self-heal)", runId, ex);
@@ -1882,20 +1911,21 @@ public class RunStore {
     }
 
     /**
-     * 只有成员仍以本次读取的 score 存在才推迟；identity-due 在同一 Lua 内续期。
+     * 只有成员仍以本次读取的 score 存在才推迟；全局与身份恢复索引都在各自 Lua 内续期。
      */
     public boolean isRecoveryCandidateDeferred(String runId, long tenantId, long userId, long expectedDueAtMs,
                                                long nextDueAtMs) {
         try {
             String member = RunKeyScope.indexMember(tenantId, userId, runId);
+            String ttlMs = String.valueOf(ttlFor(runId).toMillis());
             Long deferred = this.redis.execute(RECOVERY_DEFER_SCRIPT, List.of(RECOVERY_DUE_INDEX),
-                    String.valueOf(expectedDueAtMs), String.valueOf(Math.max(0L, nextDueAtMs)), member, "0");
+                    String.valueOf(expectedDueAtMs), String.valueOf(Math.max(0L, nextDueAtMs)), member, ttlMs);
             if (deferred == null || deferred <= 0L) {
                 return false;
             }
             Long identityDeferred = this.redis.execute(RECOVERY_DEFER_SCRIPT,
                     List.of(identityRecoveryDueKey(tenantId, userId)), String.valueOf(expectedDueAtMs),
-                    String.valueOf(Math.max(0L, nextDueAtMs)), runId, String.valueOf(ttlFor(runId).toMillis()));
+                    String.valueOf(Math.max(0L, nextDueAtMs)), runId, ttlMs);
             return identityDeferred != null && identityDeferred > 0L;
         } catch (Exception ex) {
             if (LogSampling.canAcquire("recovery-candidate-defer")) {
@@ -1906,7 +1936,7 @@ public class RunStore {
     }
 
     /**
-     * score 已变化表示有更新写者，旧读者不得删除或复活该成员。
+     * score 已变化表示有更新写者，旧读者不得删除或复活该成员；删除路径不续期任何索引。
      */
     public boolean isRecoveryCandidateRemoved(String runId, long tenantId, long userId, long expectedDueAtMs) {
         try {
@@ -2475,12 +2505,12 @@ public class RunStore {
      * <p>为什么需要它：这个索引是会话销毁的<b>唯一发现面</b>，它的 TTL 由写入路径和明确用户读侧的
      * 兼容续期路径推进。ConfirmGate 后台心跳不调用本方法，避免把进程存活冒充成用户活动。
      *
-     * <p><b>单键 {@code EXPIRE}</b>（键不带 hash tag ⇒ 同槽，Cluster 安全；不引入 {@code CROSSSLOT}）。
-     * 身份取<b>当前线程上下文</b>；恢复型入口没有请求身份时用四参重载把<b>记录身份</b>显式带进来。
-     * 续期失败只 debug：它不是正确性依赖，下一拍/下一次写入会再续。
+     * <p><b>单键 SISMEMBER + PEXPIRE Lua</b>（Cluster 安全；不引入 {@code CROSSSLOT}）：只有 runId
+     * 仍是成员才续期，不为无关 run 续期，也不重建已消失的索引。身份取<b>当前线程上下文</b>；
+     * 恢复型入口没有请求身份时用四参重载把<b>记录身份</b>显式带进来。失败按采样 WARN 留痕。
      *
      * @param sessionId 会话 id
-     * @param runId     该会话下的一轮（只用于日志/取证；索引按会话整键续期）
+     * @param runId     该会话下的一轮（用于成员归属校验与日志）
      */
     public void renewSessionRunsIndex(String sessionId, String runId) {
         TenantUser identity = RequestContextUtils.currentOrNull();
@@ -2495,11 +2525,12 @@ public class RunStore {
      * @param userId   记录身份用户
      */
     public void renewSessionRunsIndex(String sessionId, String runId, long tenantId, long userId) {
-        if (StringUtils.isBlank(sessionId) || this.redis == null) {
+        if (StringUtils.isBlank(sessionId) || StringUtils.isBlank(runId) || this.redis == null) {
             return;
         }
         try {
-            this.redis.expire(sessionRunsKey(sessionId, tenantId, userId), sessionCurrentTtl());
+            this.redis.execute(SESSION_RUNS_RENEW_SCRIPT, List.of(sessionRunsKey(sessionId, tenantId, userId)),
+                    runId, String.valueOf(sessionCurrentTtl().toMillis()));
         } catch (Exception ex) {
             if (LogSampling.canAcquire("session-run-index-renew")) {
                 log.warn("session->run index renew failed sessionId={} runId={}", sessionId, runId, ex);
@@ -5431,6 +5462,33 @@ public class RunStore {
     }
 
     /**
+     * 只续当前非终态 run 已存在的索引 member；三个键各自独立，失败互不影响。
+     */
+    private void renewActiveRunIndexes(RunSnapshot snapshot) {
+        String runId = snapshot.getRunId();
+        long tenantId = snapshot.getTenantId();
+        long userId = snapshot.getUserId();
+        if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
+            return;
+        }
+        Duration ttl = ttlFor(runId);
+        String member = RunKeyScope.indexMember(tenantId, userId, runId);
+        renewZsetIndexMember("global-recovery", RECOVERY_DUE_INDEX, member, runId, ttl);
+        renewZsetIndexMember("identity-recovery", identityRecoveryDueKey(tenantId, userId), runId, runId, ttl);
+        renewZsetIndexMember("run-list", runListIndexKey(tenantId, userId), runId, runId, ttl);
+    }
+
+    private void renewZsetIndexMember(String index, String key, String member, String runId, Duration ttl) {
+        try {
+            this.redis.execute(ZSET_MEMBER_PEXPIRE_SCRIPT, List.of(key), member, String.valueOf(ttl.toMillis()));
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("run-index-member-renew")) {
+                log.warn("run index member renew failed index={} runId={}", index, runId, ex);
+            }
+        }
+    }
+
+    /**
      * 读侧续期的省一次读重载（调用方刚从 Redis 读到快照）。
      *
      * <p><b>I5：业务活动锚点只在 {@code SUSPENDED} 时刷新。</b>读侧 touch 证明"还有人管这一轮"
@@ -5447,6 +5505,10 @@ public class RunStore {
             return false;
         }
         String runId = snapshot.getRunId();
+        renewActiveRunIndexes(snapshot);
+        // 会话→run 索引（销毁发现面）也随用户读侧 touch 续期：只续 session:current 不够 —— 索引才是
+        // 枚举入口，先过期就会让"卡还在、销毁时看不见这一轮"。身份取记录身份。
+        renewSessionRunsIndex(snapshot.getSessionId(), runId, snapshot.getTenantId(), snapshot.getUserId());
         if (this.activityRenewal != null) {
             SessionActivityRenewal.Result result = this.activityRenewal.renewActivity(snapshot.getTenantId(),
                     snapshot.getUserId(), snapshot.getSessionId(), runId,
@@ -5461,9 +5523,6 @@ public class RunStore {
         }
         renewSuspensionTtl(runId);
         renewSessionCurrent(snapshot.getSessionId(), runId);
-        // 会话→run 索引（销毁发现面）也随用户读侧 touch 续期：只续 session:current 不够 —— 索引才是
-        // 枚举入口，先过期就会让"卡还在、销毁时看不见这一轮"。身份取记录身份。
-        renewSessionRunsIndex(snapshot.getSessionId(), runId, snapshot.getTenantId(), snapshot.getUserId());
         Duration ttl = ttlFor(runId);
         // 停止闭环：clientRequestId 映射与取消墓碑与会话同寿（单键 EXPIRE；身份取记录身份）。
         if (StringUtils.isNotBlank(snapshot.getSessionId())) {

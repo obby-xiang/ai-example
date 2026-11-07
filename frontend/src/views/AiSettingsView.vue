@@ -985,6 +985,7 @@ async function canConfirm(message: string, confirmText: string): Promise<boolean
                 v-model="createForm.apiKey"
                 type="password"
                 autocomplete="new-password"
+                :placeholder="T.createApiKeyPlaceholder"
                 class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1"
                 data-testid="create-key"
               />

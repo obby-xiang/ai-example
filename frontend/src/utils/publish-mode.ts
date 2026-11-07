@@ -19,13 +19,14 @@ import { logCaughtError } from '@/utils/log-caught-error'
 
 export type PublishModeResolution =
   | { ok: true; mode: ImportMode }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; displayReason: string }
 
 /**
  * 把 `Task.settingsJson` 解析成后端同口径的导入模式（三态中的前两态；不可解析 = fail-closed）。
  *
  * <p>与 `PublishJobRunner#resolveImportMode` 对齐：空值 ⇒ MERGE；`importMode` 忽略大小写
  * 等于 `REPLACE` ⇒ REPLACE；其余（含缺失）⇒ MERGE；JSON 不合法 ⇒ 明确失败。
+ * `reason` 仅供中文模型回执，`displayReason` 仅供用户界面。
  */
 export function parsePublishMode(settingsJson: string | null | undefined): PublishModeResolution {
   if (settingsJson === null || settingsJson === undefined) {
@@ -33,7 +34,11 @@ export function parsePublishMode(settingsJson: string | null | undefined): Publi
   }
   // API 契约破坏时（数字/对象等）不得 TypeError 直穿到点击路径：明确 fail-closed。
   if (typeof settingsJson !== 'string') {
-    return { ok: false, reason: translate('views.import.msg.publishModeUnreadable') }
+    return {
+      ok: false,
+      reason: '任务设置格式无效',
+      displayReason: translate('views.import.msg.publishModeUnreadable')
+    }
   }
   if (settingsJson.trim() === '') {
     return { ok: true, mode: 'MERGE' }
@@ -46,8 +51,12 @@ export function parsePublishMode(settingsJson: string | null | undefined): Publi
       mode: typeof raw === 'string' && raw.toUpperCase() === 'REPLACE' ? 'REPLACE' : 'MERGE'
     }
   } catch (error) {
-      logCaughtError(error, 'utils/publish-mode.ts:47')
-    return { ok: false, reason: translate('views.import.msg.publishModeInvalid') }
+    logCaughtError(error, 'utils/publish-mode.ts:47')
+    return {
+      ok: false,
+      reason: '无法读取任务的导入模式',
+      displayReason: translate('views.import.msg.publishModeInvalid')
+    }
   }
 }
 
@@ -56,8 +65,13 @@ export async function resolvePublishMode(taskId: number): Promise<PublishModeRes
   let task: Awaited<ReturnType<typeof tasksApi.getTask>>
   try {
     task = await tasksApi.getTask(taskId)
-  } catch {
-    return { ok: false, reason: translate('views.import.msg.publishModeLoadFailed', { taskId }) }
+  } catch (error) {
+    logCaughtError(error, 'utils/publish-mode.ts:resolve')
+    return {
+      ok: false,
+      reason: `任务 #${taskId} 的导入模式读取失败`,
+      displayReason: translate('views.import.msg.publishModeLoadFailed', { taskId })
+    }
   }
   return parsePublishMode(task.settingsJson)
 }

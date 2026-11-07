@@ -349,7 +349,7 @@ public final class SseWriteBudget {
      * <li>{@link Outcome#SENT}：写出成功；</li>
      * <li>{@link Outcome#FAILED}：写出抛异常（客户端断开 / 已完成的 emitter），异常交回调用方判处置；</li>
      * <li>{@link Outcome#TIMED_OUT}：超出预算 —— <b>本类不碰 emitter</b>（写线程仍持有其监视器），
-     * 计数 + 去重 WARN，由调用方摘除维度处置（不再投递该订阅者；写出线程返回时自行收尾）；</li>
+     * 计数，由调用方记录带上下文日志并摘除维度（不再投递该订阅者；写出线程返回时自行收尾）；</li>
      * <li>{@link Outcome#SATURATED}：写出池已达硬上限（{@link #DEFAULT_MAX_WRITER_THREADS}）且无处排队 ——
      * 本次写出<b>没有发生、也不会发生</b>，调用方据此摘除触发本次写出的订阅者（慢订阅者摘除）；</li>
      * <li>{@link Outcome#INTERRUPTED}：调用线程被中断（已复位中断位并 {@code cancel(true)}）。</li>
@@ -365,20 +365,16 @@ public final class SseWriteBudget {
                 try {
                     task.send();
                 } catch (Exception ex) {
-                    LogThrottler.warn(log, "SseWriteBudget.writeFailure", "SSE write task failed", ex);
                     throw new WriteFailure(ex);
                 }
             });
         } catch (RejectedExecutionException ex) {
             // 硬上限 + SynchronousQueue + AbortPolicy ⇒ 池满即拒。这**不是**"客户端断开"
             // （旧实现把它折成 FAILED，语义与日志都会指向错误方向），而是"这条写挤不进来"：
-            // 计数 + 去重 WARN，交回调用方摘除触发本次写出的那个订阅者。
+            // 计数，交回调用方记录带上下文日志并摘除触发本次写出的那个订阅者。
             // 被摘者可能是<b>健康</b>连接、也可能来自<b>另一条通道</b>（池两通道共用）——
             // 策略是"最后无法获得写线程者"，不是"只摘慢订阅者"（见类注"跨通道"段）。
             WRITE_SATURATIONS.incrementAndGet();
-            LogThrottler.warn(log, "SseWriteBudget.saturated",
-                    "SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
-                    sharedWriterPoolMaxThreads(), ex);
             return Result.saturated();
         }
         try {
@@ -387,11 +383,8 @@ public final class SseWriteBudget {
         } catch (TimeoutException ex) {
             boolean cancelled = future.cancel(true);
             WRITE_TIMEOUTS.incrementAndGet();
-            LogThrottler.warn(log, "SseWriteBudget.timeout", "SSE write timed out (>{}ms) cancelled={}, caller released by budget",
-                    this.timeoutMillis, cancelled, ex);
             return Result.timedOut();
         } catch (ExecutionException ex) {
-            LogThrottler.warn(log, "SseWriteBudget.execution", "SSE write execution failed", ex);
             Throwable cause = ex.getCause();
             if (cause instanceof WriteFailure failure) {
                 return Result.failed(failure.failure);
@@ -411,7 +404,6 @@ public final class SseWriteBudget {
             task.send();
             return Result.sent();
         } catch (Exception ex) {
-            LogThrottler.warn(log, "SseWriteBudget.writeFailure", "SSE write task failed", ex);
             return Result.failed(ex);
         }
     }
@@ -439,9 +431,6 @@ public final class SseWriteBudget {
             future = this.executor.submit(() -> finishAsyncWrite(task, onDone, settled, timeout));
         } catch (RejectedExecutionException ex) {
             WRITE_SATURATIONS.incrementAndGet();
-            LogThrottler.warn(log, "SseWriteBudget.saturated",
-                    "SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
-                    sharedWriterPoolMaxThreads(), ex);
             if (settled.compareAndSet(false, true)) {
                 notifyDone(onDone, Result.saturated());
             }
@@ -456,11 +445,9 @@ public final class SseWriteBudget {
         try {
             task.send();
         } catch (Exception ex) {
-            LogThrottler.warn(log, "SseWriteBudget.writeFailure", "SSE write task failed", ex);
             failure = ex;
         } catch (Throwable error) {
             // Error 也必须回调（否则 drain 链永不继续）：折成可上报的异常。
-            LogThrottler.warn(log, "SseWriteBudget.fatalWrite", "SSE write task failed fatally", error);
             failure = new IllegalStateException("SSE write failed", error);
         }
         ScheduledFuture<?> timer = timeout.get();
@@ -480,8 +467,6 @@ public final class SseWriteBudget {
                 if (settled.compareAndSet(false, true)) {
                     boolean cancelled = future.cancel(true);
                     WRITE_TIMEOUTS.incrementAndGet();
-                    LogThrottler.warn(log, "SseWriteBudget.timeout", "SSE write timed out (>{}ms) cancelled={}, delivery thread released by callback",
-                            this.timeoutMillis, cancelled);
                     notifyDone(onDone, Result.timedOut());
                 }
             }, this.timeoutMillis, TimeUnit.MILLISECONDS);

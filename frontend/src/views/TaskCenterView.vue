@@ -170,7 +170,8 @@ import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { isTaskCenterRefreshEvent, useTaskStore } from '@/stores/task'
 import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
-import { formatDateTime, progressView, stepLabel as taskStepText } from '@/utils/format'
+import { formatDateTime, progressView } from '@/utils/format'
+import { taskStepText } from '@/utils/card-content'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import type { TaskStatus, TaskSummary, TaskType } from '@/types/task'
 import type { Job } from '@/types/job'
@@ -278,26 +279,8 @@ function refresh(): void {
   void taskStore.refreshNow()
 }
 
-const TASK_STEP_COPY_KEYS: Record<string, string> = {
-  SELECT_DEFS: 'views.export.steps.select',
-  QUERY_COND: 'views.export.steps.query',
-  EXPORT: 'views.export.steps.export',
-  UPLOAD: 'views.import.steps.upload',
-  PRECHECK: 'views.import.steps.check',
-  IMPORT: 'views.import.steps.import',
-  PUBLISH: 'views.import.steps.publish',
-  DONE: 'ai.values.step.DONE'
-}
-
 function currentStepText(step: string | null | undefined): string {
-  if (!step) {
-    return taskStepText(step)
-  }
-  const copyKey = TASK_STEP_COPY_KEYS[step]
-  if (!copyKey) {
-    return t('ai.value.unknown')
-  }
-  return locale.value === 'zh-CN' ? taskStepText(step) : t(copyKey)
+  return step ? taskStepText(step) : '—'
 }
 
 function statusType(status: TaskStatus): 'success' | 'danger' | 'info' | 'warning' {

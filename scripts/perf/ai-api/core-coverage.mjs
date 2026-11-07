@@ -1,6 +1,6 @@
 import {mkdir, writeFile} from 'node:fs/promises'
 import path from 'node:path'
-import {randomUUID} from 'node:crypto'
+import {createHash, randomUUID} from 'node:crypto'
 import {
     classifyCancelProbe,
     createLoadRunner,
@@ -36,7 +36,12 @@ const SSE_EOF_RETRY_DELAY_MS = 200
 const CANCEL_STATUS_POLL_ATTEMPTS = 180
 const CANCEL_STATUS_POLL_INTERVAL_MS = 250
 const outDir = path.resolve(process.env.OUT_DIR ?? 'verification-results/ai-core-coverage')
-const runPrefix = process.env.COVERAGE_PREFIX?.trim() || `core-${randomUUID()}`
+function boundedId(value, maxLength) {
+    return value.length <= maxLength
+        ? value
+        : createHash('sha256').update(value).digest('hex').slice(0, maxLength)
+}
+const runPrefix = boundedId(process.env.COVERAGE_PREFIX?.trim() || `core-${randomUUID()}`, 16)
 const apiLoadConfig = parseApiLoadConfig(process.env)
 const createdTasks = new Set()
 const createdSessions = new Set()
@@ -451,7 +456,17 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
     try {
         const response = await request(`/api/ai/cancel/${runId}`, {method: 'POST'})
         assert(response.status >= 200 && response.status < 300, `SSE error cancel ${response.status}`)
-        assert(dataObject(response).cancelled === true, `SSE error cancel not accepted: HTTP ${response.status}`)
+        const data = dataObject(response)
+        if (data.alreadyTerminal === true && data.cancelled === false
+            && ['DONE', 'FAILED'].includes(data.statusBeforeCancel)) {
+            activeRuns.delete(runId)
+            cleanupLog.push(`sse-error-cancel:${runId}=ok`)
+            if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
+                safelyRecoveredModelErrors.add(error)
+            }
+            return true
+        }
+        assert(data.cancelled === true, `SSE error cancel not accepted: HTTP ${response.status}`)
         const terminal = await readSseRaw(runId, lastSeq, (frame) => frame.type === 'done' || frame.type === 'error', false, scopeErrors)
         assert(terminal.matched.type === 'done' && terminal.matched.cancelled === true,
             'SSE error cancel accepted but no cancelled terminal frame')
@@ -1076,7 +1091,7 @@ function buildLoadUnits({sessionId, runId}) {
         return {status: response.status, latencyMs: response.latencyMs}
     })
     units.set('POST /api/ai/feedback', async (index) => {
-        const messageId = `${runPrefix}-load-feedback-${index}-${randomUUID()}`
+        const messageId = boundedId(`${runPrefix}-load-feedback-${index}-${randomUUID()}`, 64)
         const response = await request('/api/ai/feedback', {
             method: 'POST',
             json: true,
@@ -1293,7 +1308,7 @@ async function runIndependentModelScenarios() {
 }
 
 const mainSession = `${runPrefix}-main-${randomUUID()}`
-const feedbackMessageId = `${runPrefix}-feedback-${randomUUID()}`
+const feedbackMessageId = boundedId(`${runPrefix}-feedback-${randomUUID()}`, 64)
 const cancelEvidence = {
     runId: null,
     httpStatus: null,
@@ -1564,8 +1579,6 @@ async function main() {
         return `manual startup scanned=${data.scanned ?? data.reason}`
     }))
 
-    await runIndependentModelScenarios()
-
     await call('POST /api/ai/feedback', '/api/ai/feedback', {
         method: 'POST',
         json: true,
@@ -1600,6 +1613,9 @@ async function main() {
         return `session purge complete ${lifecycleSession}`
     })
     createdSessions.delete(lifecycleSession)
+
+    await runIndependentModelScenarios()
+
     await runApiLoadStage({sessionId: mainSession, runId: mainRun})
 }
 

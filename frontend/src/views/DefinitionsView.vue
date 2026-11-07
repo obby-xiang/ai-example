@@ -6,9 +6,6 @@
         <div class="mt-1 text-[13px] text-[#909399]">
           {{ t('views.definitions.subtitle') }}
         </div>
-        <div class="mt-1 text-xs text-[#909399]">
-          {{ t('views.definitions.technicalKeyHint', { keyField: 'key', legacyKeyField: 'isKey' }) }}
-        </div>
       </div>
       <div>
         <el-button :icon="Refresh" circle :title="t('views.definitions.refresh')" @click="loadDefs" />

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.config;
 
 import com.example.configmgr.ai.config.db.AiProvider;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.NonNull;
@@ -55,8 +56,8 @@ public class AiModelCatalog {
      */
     public CatalogResult fetch(Long providerId, boolean refresh) {
         AiProvider provider = this.configService.provider(providerId)
-            .orElseThrow(() -> new AiConfigException(AiConfigWriter.CODE_PROVIDER_NOT_FOUND,
-                    "Provider not found: " + providerId));
+                .orElseThrow(() -> new AiConfigException(AiConfigWriter.CODE_PROVIDER_NOT_FOUND,
+                        "Provider not found: " + providerId));
         AiConfigService.KeyResolution key = this.configService.resolveKey(provider);
         // M-1（复审）：key 解不开就没有"拉取"可言 —— 直接回 KEY_UNREADABLE（与 /test 同口径），
         // 而不是拿 null key 打上游换一个 AUTH_FAILED（用户会去改 key，但真正要修的是 KEK）。
@@ -93,8 +94,10 @@ public class AiModelCatalog {
             }
             return Optional.of(this.objectMapper.readValue(raw, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
             }));
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
+            if (LogSampling.canAcquire("model-catalog-cache-read")) {
+                log.warn("model catalog cache read failed providerId={} (treating as cache miss)", providerId, ex);
+            }
             return Optional.empty();
         }
     }
@@ -107,12 +110,13 @@ public class AiModelCatalog {
         try {
             if (ttl == null || ttl.isZero() || ttl.isNegative()) {
                 this.redis.opsForValue().set(CACHE_KEY_PREFIX + providerId, toJson(models));
-            }
-            else {
+            } else {
                 this.redis.opsForValue().set(CACHE_KEY_PREFIX + providerId, toJson(models), ttl);
             }
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
+            if (LogSampling.canAcquire("model-catalog-cache-write")) {
+                log.warn("model catalog cache write failed providerId={} (response is unaffected)", providerId, ex);
+            }
             // 缓存写入失败不影响响应。
         }
     }
@@ -130,11 +134,11 @@ public class AiModelCatalog {
      * {@link #ok(List, boolean)} 在 {@code /test} 的测试桩里有真实调用方。
      *
      * @param cached true = 本次来自缓存（没有打上游）
-     * @param code 稳定错误码（ok=true 时为 null）
+     * @param code   稳定错误码（ok=true 时为 null）
      */
     public record CatalogResult(@JsonProperty("ok") boolean ok, @JsonProperty("models") @NonNull List<String> models,
-            @JsonProperty("cached") boolean cached, @JsonProperty("code") String code,
-            @JsonProperty("message") String message) {
+                                @JsonProperty("cached") boolean cached, @JsonProperty("code") String code,
+                                @JsonProperty("message") String message) {
 
         public CatalogResult {
             models = models == null ? List.of() : List.copyOf(models);
@@ -145,7 +149,9 @@ public class AiModelCatalog {
         }
     }
 
-    /** 诊断：某 provider 是否有缓存（设置页不展示，排障用）。 */
+    /**
+     * 诊断：某 provider 是否有缓存（设置页不展示，排障用）。
+     */
     public Optional<List<String>> peekCache(Long providerId) {
         return readCache(providerId);
     }

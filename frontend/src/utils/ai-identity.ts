@@ -43,8 +43,15 @@ export interface TenantUsersEntry {
 }
 
 /** 正整数 id（目录/会话号/身份字段的统一收窄）。 */
-export function isPositiveId(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0
+export function normalizePositiveId(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? value : null
+  }
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) {
+    return null
+  }
+  const normalized = Number(value)
+  return Number.isSafeInteger(normalized) ? normalized : null
 }
 
 /** 合法身份（缺字段/非正整数/负数一律不收）。 */
@@ -53,10 +60,12 @@ export function normalizeIdentity(raw: unknown): AiIdentity | null {
     return null
   }
   const candidate = raw as { tenantId?: unknown; userId?: unknown }
-  if (!isPositiveId(candidate.tenantId) || !isPositiveId(candidate.userId)) {
+  const tenantId = normalizePositiveId(candidate.tenantId)
+  const userId = normalizePositiveId(candidate.userId)
+  if (tenantId === null || userId === null) {
     return null
   }
-  return { tenantId: candidate.tenantId, userId: candidate.userId }
+  return { tenantId, userId }
 }
 
 /** 身份指纹：键与锁的唯一定位段。 */

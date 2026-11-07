@@ -54,6 +54,7 @@ const COPY_KEYS = {
   createCodePlaceholder: 'ai.settings.copy.createCodePlaceholder',
   createDisplayNamePlaceholder: 'ai.settings.copy.createDisplayNamePlaceholder',
   createBaseUrlPlaceholder: 'ai.settings.copy.createBaseUrlPlaceholder',
+  createApiKeyPlaceholder: 'ai.settings.copy.createApiKeyPlaceholder',
   modelsTitle: 'ai.settings.copy.modelsTitle',
   modelsEmpty: 'ai.settings.copy.modelsEmpty',
   pullModels: 'ai.settings.copy.pullModels',

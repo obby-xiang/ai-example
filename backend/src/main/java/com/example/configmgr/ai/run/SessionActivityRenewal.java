@@ -259,6 +259,9 @@ public class SessionActivityRenewal {
         }
     }
 
+    /**
+     * 单次会话活动只续该会话及其 run 的键；跨会话恢复索引和身份 run 列表索引由真实 run 写入/恢复活动维护。
+     */
     private Set<String> sessionKeys(long tenantId, long userId, String sessionId, String dataKey) {
         Set<String> keys = new LinkedHashSet<>();
         keys.add(dataKey);
@@ -285,9 +288,6 @@ public class SessionActivityRenewal {
         keys.add(ConversationTranscriptStore.metaKey(sessionId, tenantId, userId));
         keys.add(ConversationTranscriptStore.truncatedKey(sessionId, tenantId, userId));
         keys.add(RedisChatMemoryRepository.stagingIndexKey(sessionId));
-        keys.add(RunStore.RECOVERY_DUE_INDEX);
-        keys.add(RunStore.RECOVERY_DUE_IDENTITY_PREFIX + tenantId + ":" + userId);
-        keys.add(RunStore.RUN_LIST_INDEX_PREFIX + tenantId + ":" + userId);
         return keys;
     }
 

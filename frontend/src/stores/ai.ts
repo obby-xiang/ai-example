@@ -24,10 +24,10 @@ import {
   currentAiIdentity,
   identityFingerprint,
   identityHeaders,
-  isPositiveId,
   isSameIdentity,
   mirrorStorageKey,
   normalizeIdentity,
+  normalizePositiveId,
   normalizeSessionId,
   sessionIdStorageKey,
   sessionLockName,
@@ -1163,7 +1163,8 @@ function normalizeTenantEntry(raw: unknown): TenantUsersEntry | null {
     return null
   }
   const candidate = raw as { tenantId?: unknown; tenantName?: unknown; users?: unknown }
-  if (!isPositiveId(candidate.tenantId) || !Array.isArray(candidate.users)) {
+  const tenantId = normalizePositiveId(candidate.tenantId)
+  if (tenantId === null || !Array.isArray(candidate.users)) {
     return null
   }
   const users = candidate.users
@@ -1172,18 +1173,19 @@ function normalizeTenantEntry(raw: unknown): TenantUsersEntry | null {
         return null
       }
       const user = item as { userId?: unknown; displayName?: unknown; userName?: unknown }
-      if (!isPositiveId(user.userId)) {
+      const userId = normalizePositiveId(user.userId)
+      if (userId === null) {
         return null
       }
       const label = typeof user.displayName === 'string' && user.displayName !== ''
         ? user.displayName
-        : (typeof user.userName === 'string' && user.userName !== '' ? user.userName : String(user.userId))
-      return { userId: user.userId, displayName: label }
+        : (typeof user.userName === 'string' && user.userName !== '' ? user.userName : String(userId))
+      return { userId, displayName: label }
     })
     .filter((user): user is { userId: number; displayName: string } => user !== null)
   return users.length > 0
     ? {
-        tenantId: candidate.tenantId,
+        tenantId,
         ...(typeof candidate.tenantName === 'string' && candidate.tenantName !== '' ? { tenantName: candidate.tenantName } : {}),
         users
       }
@@ -3117,7 +3119,6 @@ function mirrorText(parts: MirrorTextPart[]): string {
 function mergeMirrorTextSequence(
   targetParts: MirrorTextPart[],
   sourceParts: MirrorTextPart[],
-  merged: MessagePart[],
   sourceToMerged: Map<MessagePart, MessagePart>,
   targetToMerged: Map<MessagePart, MessagePart>,
   represented: Set<MessagePart>
@@ -3238,7 +3239,6 @@ function canMergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boo
     mergeMirrorTextSequence(
       target.parts.filter((part): part is MirrorTextPart => part.kind === kind),
       source.parts.filter((part): part is MirrorTextPart => part.kind === kind),
-      merged,
       sourceToMerged,
       targetToMerged,
       represented
@@ -11222,7 +11222,9 @@ export const useAiStore = defineStore('ai', {
             this.identity = identity
             this.sessionIdentity = identity
           },
-          () => this.ensureSession()
+          async () => {
+            await this.ensureSession()
+          }
         )
         return
       }
@@ -11632,7 +11634,9 @@ export const useAiStore = defineStore('ai', {
             sid,
             identityAtEntry,
             () => this.adoptFreshSession(),
-            () => this.ensureSession()
+            async () => {
+              await this.ensureSession()
+            }
           )
         }
       })()

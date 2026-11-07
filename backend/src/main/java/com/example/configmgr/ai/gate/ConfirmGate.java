@@ -2726,7 +2726,8 @@ public class ConfirmGate {
                 // 恒真续租在"驱动任务死了却没写终态"时会永久攥着租约，接管方只能干等。
                 markDrivingGuarded(lease, runId);
             }
-        } else if (result != null && result.outcome().isLeaseReleasable()) {
+        } else if (result != null && result.outcome().isLeaseReleasable()
+                && !Boolean.TRUE.equals(result.body() == null ? null : result.body().get(ResumeService.LEASE_REARMED_KEY))) {
             // L-19：与 ResumeService 同一条<b>归还白名单</b>（{@link ResumeService.Outcome#releasesLease}）。
             // IN_PROGRESS = 本进程有胜方在用<b>同一 token</b>，LEASE_HELD_ELSEWHERE = 租约已归别人 ——
             // 两者都<b>不还</b>。派发失败（EXECUTOR_SATURATED）与执行异常仍还租：

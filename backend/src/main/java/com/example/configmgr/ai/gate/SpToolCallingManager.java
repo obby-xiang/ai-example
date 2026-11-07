@@ -1018,6 +1018,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (state.budgetArmed) {
             return;
         }
+        blockSameRunStarts(state);
         long suspendedAtMs = System.currentTimeMillis();
         for (PendingToolCall pending : state.suspended) {
             Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
@@ -1029,6 +1030,93 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (!state.suspended.isEmpty()) {
             persistSuspendedBatch(state, pendings);
         }
+    }
+
+    /**
+     * 同轮已有任意 create_task 台账（或台账不可确认）时，启动类调用必须另开请求。
+     */
+    private void blockSameRunStarts(ToolBatchState state) {
+        if (state.suspended.stream().noneMatch(pending -> isStartTool(pending.getName()))
+                || !hasAnyCreateTaskRecord(state.runId)) {
+            return;
+        }
+        state.suspended.removeIf(pending -> {
+            if (!isStartTool(pending.getName())) {
+                return false;
+            }
+            state.startBlocked.add(pending.getToolCallId());
+            emitToolStartOnce(state.runId, state.toolStarted, pending);
+            state.responses.add(skipAsSeparateStartRequest(state.runId, pending));
+            return true;
+        });
+    }
+
+    private boolean hasAnyCreateTaskRecord(String runId) {
+        try {
+            List<Map<String, Object>> ledger = this.store.ledger(runId);
+            if (ledger == null) {
+                log.warn("per-turn create_task ledger was null; treating as recorded runId={}", runId);
+                return true;
+            }
+            for (Map<String, Object> record : ledger) {
+                if (record != null && TOOL_CREATE_TASK.equals(record.get("name"))) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (RuntimeException ex) {
+            log.warn("could not read per-turn create_task ledger; treating as recorded runId={}", runId, ex);
+            return true;
+        }
+    }
+
+    private static boolean isStartTool(String name) {
+        return switch (name) {
+            case AiToolNames.START_EXPORT, AiToolNames.START_PRECHECK, AiToolNames.START_IMPORT,
+                 AiToolNames.START_PUBLISH -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isCreatePrerequisiteReadTool(String name) {
+        return switch (name) {
+            case AiToolNames.LIST_CONFIG_DEFS, AiToolNames.GET_CONFIG_DEF, AiToolNames.LIST_TASKS,
+                 AiToolNames.GET_WORKSPACE_STATE, AiToolNames.UI_SNAPSHOT, "read_tool_result", "kb_search",
+                 "kb_read_doc", "kb_lookup_term" -> true;
+            default -> false;
+        };
+    }
+
+    private ToolResponseMessage.ToolResponse skipAsSeparateStartRequest(String runId, PendingToolCall pending) {
+        String message = "请在后续单独发起启动请求";
+        pending.setStatus(PendingToolCall.SKIPPED);
+        pending.setOutcome(ToolOutcome.SKIPPED.wire());
+        pending.setCode("START_REQUIRES_SEPARATE_REQUEST");
+        pending.setReason("START_REQUIRES_SEPARATE_REQUEST");
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(message);
+        this.store.putPending(runId, pending);
+        this.registry.of(runId).toolResult(pending, false, false, message);
+        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, message));
+    }
+
+    private ToolResponseMessage.ToolResponse skipAsReadBeforeCreate(String runId, PendingToolCall pending) {
+        String message = "请直接创建任务，由宿主继续选择或补充";
+        pending.setStatus(PendingToolCall.SKIPPED);
+        pending.setOutcome(ToolOutcome.SKIPPED.wire());
+        pending.setCode("READ_BEFORE_CREATE_NOT_ALLOWED");
+        pending.setReason("READ_BEFORE_CREATE_NOT_ALLOWED");
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setResolvedAtMs(System.currentTimeMillis());
+        pending.setResultText(message);
+        this.store.putPending(runId, pending);
+        this.registry.of(runId).toolResult(pending, false, false, message);
+        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, message));
     }
 
     private void persistSuspendedBatch(ToolBatchState state, List<PendingToolCall> pendings) {
@@ -1057,6 +1145,16 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private void executePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        if (state.startBlocked.contains(pending.getToolCallId())) {
+            traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
+            return;
+        }
+        if (isCreatePrerequisiteReadTool(pending.getName()) && hasAnyCreateTaskRecord(state.runId)) {
+            emitToolStartOnce(state.runId, state.toolStarted, pending);
+            state.responses.add(skipAsReadBeforeCreate(state.runId, pending));
+            traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
+            return;
+        }
         if (state.haltedBy != null) {
             skipHaltedPending(state, pending);
             return;
@@ -1309,6 +1407,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         private final List<PendingToolCall> suspended = new ArrayList<>();
         private final Set<String> preflightBlocked = new HashSet<>();
         private final Set<String> createTaskBlocked = new HashSet<>();
+        private final Set<String> startBlocked = new HashSet<>();
         private final Set<String> frontendRejected = new HashSet<>();
         private final Map<String, String> idempotentReplay = new HashMap<>();
         private final Map<String, String> batchSetConditionSeen = new HashMap<>();

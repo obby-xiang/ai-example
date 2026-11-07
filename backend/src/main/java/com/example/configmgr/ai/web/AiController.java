@@ -1654,7 +1654,6 @@ public class AiController {
             return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
         }
         body.putAll(cancelBody);
-        body.put("cancelled", true);
         body.put("alreadyCancelled", outcome.alreadyCancelled()
                 || Boolean.TRUE.equals(cancelBody.get("alreadyCancelled")));
         return ResponseEntity.ok(body);
@@ -1686,8 +1685,18 @@ public class AiController {
      *
      * <p>调用方负责归属判断；本方法只做"写旗标 + 挂起轮/运行轮收尾交棒"。快照可为 null
      * （"已 start、快照未建"窗口）：那也照常写旗标，绝不因没有快照而让取消不可达。
+     * 非取消终态只返回既有事实，不写新旗标，也不产生取消终帧；CANCELLED 仍走原幂等路径。
      */
     private Map<String, Object> cancelKnownRun(String runId, RunSnapshot snapshot) {
+        if (snapshot != null && isTerminal(snapshot.getStatus())
+                && !RunSnapshot.CANCELLED.equals(snapshot.getStatus())) {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("runId", runId);
+            body.put("cancelled", false);
+            body.put("alreadyTerminal", true);
+            body.put("statusBeforeCancel", snapshot.getStatus());
+            return body;
+        }
         Map<String, Object> before = this.cancellations.status(runId);
         CancellationRegistry.CancelResult result = this.cancellations.cancel(runId, this.runStore.instanceId());
         Map<String, Object> body = new LinkedHashMap<>();
@@ -3130,6 +3139,8 @@ public class AiController {
 
     // ── R-163 T5：赞踩反馈（ai_feedback net-new 表，parts[] 持久化不动） ──
 
+    private static final int FEEDBACK_ID_MAX_CHARS = 64;
+
     /**
      * POST /api/ai/feedback —— 赞踩上报（<b>身份内</b>幂等 upsert：(tenant_id,user_id,message_id) 唯一；
      * rating=0 = 取消=删行）。请求体 {@code {messageId, sessionId, rating∈1/-1/0, reason?}}；
@@ -3152,6 +3163,11 @@ public class AiController {
                 || (input.rating() != 1 && input.rating() != -1 && input.rating() != 0)) {
             return json(HttpStatus.BAD_REQUEST,
                     errorBody(ErrorCodes.BAD_REQUEST, "messageId/sessionId 必填，rating ∈ 1/-1/0"));
+        }
+        if (input.messageId().length() > FEEDBACK_ID_MAX_CHARS
+                || input.sessionId().length() > FEEDBACK_ID_MAX_CHARS) {
+            return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST,
+                    "messageId 和 sessionId 长度均不得超过 " + FEEDBACK_ID_MAX_CHARS + " 个字符"));
         }
         if (input.rating() == 0) {
             return cancelFeedback(input.messageId(), identity.tenantId(), identity.userId());

@@ -1293,7 +1293,6 @@ import { head } from 'lodash'
 import { ArrowRight } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useI18n } from 'vue-i18n'
-import { useWorkspaceStore } from '@/stores/workspace'
 import { formatProgressiveTs } from '@/utils/format'
 import { cardFieldLabel, localizedCardFieldValue, canShowCardField, taskTypeText } from '@/utils/card-content'
 import {
@@ -1323,7 +1322,6 @@ import {
   readOnlyStateOf,
   reasonHeadline,
   submitRows,
-  toolArgsOf,
   MASKED_VALUE,
   readableValue,
   type ConflictRow,
@@ -1364,7 +1362,6 @@ import { logCaughtError } from '@/utils/log-caught-error'
 
 const { t, locale } = useI18n()
 const ai = useAiStore()
-const workspace = useWorkspaceStore()
 const formAttachmentAbort = ref(new AbortController())
 const sheetPreviewSnapshots = ref<Record<string, SheetWritePlan>>({})
 const uploadHandoffSnapshots = ref<Record<string, ActiveUploadHandoff>>({})
@@ -2706,7 +2703,10 @@ function historyMarkdownHtml(message: ChatMessage, blockKey: string, text: strin
 function markdownHtml(message: ChatMessage, block: Block): string {
   markdownHtmlCalls += 1
   const part = head(block.parts)
-  const text = part.kind === 'text' ? projectDisplayText(part.text) : ''
+  if (part?.kind !== 'text') {
+    return ''
+  }
+  const text = projectDisplayText(part.text)
   const blockKey = `${message.id}:${part.seg}`
   const localeKey = currentLocaleKey()
   return message.streaming
@@ -3406,7 +3406,7 @@ async function renderMermaidSlot(bubble: Element, code: Element, source: string)
       if (candidates.length !== 1) {
         return
       }
-      target = head(candidates)
+      target = candidates[0]!
     }
     if (!bubble.contains(target)) {
       return

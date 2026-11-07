@@ -919,8 +919,8 @@ const TASK_DETAIL_READY_PROBES: Record<WorkspacePageId, string | null> = {
 /**
  * 任务详情是否已应用（只读探针，不发请求）。
  *
- * 探针**缺席即视为该维度不适用**：页面没挂载时由 `pageReady` 维度兜住（本维度不替它判假），
- * 页面挂载时探针与 `PAGE_READY_PROBES` 在同一处 `registerHandlers()` 里注册，不会只缺一个。
+ * 仅 `TASK_DETAIL_READY_PROBES` 明确标记为不适用时才放行；需要探针的页面缺席即为未就绪，
+ * 不能拿假设中的注册时序替代真实现场。
  */
 function isTaskDetailReady(page: WorkspacePageId): boolean {
   const name = TASK_DETAIL_READY_PROBES[page]
@@ -929,7 +929,7 @@ function isTaskDetailReady(page: WorkspacePageId): boolean {
   }
   const probe = getPageHandler(name)
   if (probe === null) {
-    return true
+    return false
   }
   try {
     return probe({}) === true
@@ -1209,17 +1209,39 @@ async function runNavigateTo(args: Record<string, unknown>, lifetime: UiEventLif
   const workspace = useWorkspaceStore()
   const context = workspace.snapshot()
   // 批 A（A-01/A-02）：同页同参幂等直返（导航重试风暴的根因就是"每次都当真执行"）。
-  // 幂等也等详情：页面与任务都没变不代表选中集/条件已恢复（否则这一条会替一次未恢复的页面背书）。
+  // 幂等也必须等真实页面/任务探针就绪，不能仅凭 workspace 当前 id 为未挂载页面背书。
   if (page === context.pageId && (intent.taskId === null || intent.taskId === context.taskId)) {
-    if (intent.taskId !== null && !(await canWaitForTaskDetailApplied(page))) {
+    const wait: TaskBindWaitResult = intent.taskId === null
+      ? { pageReady: await waitForPageReady(page), taskBound: true, detailReady: true }
+      : await waitForTaskBound(page, intent.taskId)
+    if (!wait.pageReady) {
+      return makeExecution({
+        outcome: 'failed',
+        availability: 'degraded',
+        code: 'UI_PAGE_NOT_READY',
+        result: formatUiReceipt({
+          tool: '页面导航',
+          conclusion: `目标页面在等待上界内仍未就绪（${page}${intent.taskId === null ? '' : `，任务 #${intent.taskId}`}）`,
+          reason: '页面加载慢，或该页尚未注册可操作能力',
+          next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
+        })
+      })
+    }
+    if (!wait.taskBound) {
+      return makeExecution({
+        outcome: 'failed',
+        availability: 'degraded',
+        result: `目标页面已就绪，但任务 #${intent.taskId} 的绑定未保持，本次未按同页成功处理。`
+      })
+    }
+    if (intent.taskId !== null && !wait.detailReady) {
       return taskDetailNotReady(taskLabel, intent.taskId)
     }
     const bound = intent.taskId === null ? '' : `，任务 #${intent.taskId} 已绑定`
     return makeExecution({
       outcome: 'ok',
       availability: 'available',
-      code: 'UI_ALREADY_ON_PAGE',
-      result: `已在目标页（${page}）${bound}，这一步不用再做。`
+      result: `已在目标页（${page}）${bound}，无需重复导航。`
     })
   }
   const event: UiEvent = intent.taskId === null
@@ -1350,8 +1372,13 @@ function resolveNavigateIntent(args: Record<string, unknown>): { page: Workspace
   if (!isWorkspacePageId(page)) {
     return null
   }
-  const taskId = toNumber(args.taskId)
-  return { page, taskId: taskId !== null && (page === 'export' || page === 'import') ? taskId : null }
+  const rawTaskId = args.taskId
+  const hasTaskId = rawTaskId !== undefined && rawTaskId !== null && rawTaskId !== ''
+  const taskId = toNumber(rawTaskId)
+  if (hasTaskId && taskId === null) {
+    return null
+  }
+  return { page, taskId: page === 'export' || page === 'import' ? taskId : null }
 }
 
 /** 蓝本名 / ui_event 名 → 动作名（别名表）。 */
@@ -1516,8 +1543,17 @@ function normalizeActionArgs(action: WorkspaceAction, args: Record<string, unkno
 }
 
 function toNumber(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+  if (value === undefined || value === null || value === '') {
+    return null
+  }
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value > 0 ? value : null
+  }
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) {
+    return null
+  }
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
 }
 
 /**

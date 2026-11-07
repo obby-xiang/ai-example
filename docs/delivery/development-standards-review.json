@@ -3299,6 +3299,88 @@
           "reason": "两个暂存文档已逐hunk核对，明确该边界是提交前重点审查项并覆盖直接与间接数据库调用；本批纯文档无需代码编译或IDEA格式化。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:6a29428d769f7e9195c1a305b564c229886788439fcf2eade4fddbc07803a09b",
+      "status": "reviewed",
+      "reason": "对本轮42个暂存文件逐hunk复核生产修复、压测适配和验证账本，覆盖AI数据库白名单、集合所有权、日志、JSON/Long、Redis TTL、多实例、租约与真实证据边界；首轮独立复审FAIL三项已返修并由原复审者确认PASS，生产编译打包通过，定向真实验证与25/27核心结果分别登记，未将FAIL或NOT_RUN写成通过。",
+      "reviewedAt": "2026-11-08T05:45:00+08:00",
+      "reviewer": "K3.1 Pro主会话及独立静态复审",
+      "specChanges": [
+        {
+          "change": "创建与配置完成不再自动授权启动，启动必须来自后续独立明确指令；创建前禁止只读前置，同轮创建后阻断启动工具。",
+          "reason": "避免把创建或配置完成误当执行授权，确保危险动作仍经独立确认。",
+          "impact": "创建、宿主续接和启动拆成独立用户意图；DeepSeek A/B六场景与创建确认定向验证通过。"
+        },
+        {
+          "change": "create_task通用收尾纠正仅用于TaskIntent识别的主动新建意图，普通问答、知识检索和表单收尾不再追加模型纠正。",
+          "reason": "真实验证发现普通问候也会多一次无意义模型调用。",
+          "impact": "普通知识及介绍/了解类问法不多一次纠正，明确创建导出任务仍进入确认卡。"
+        },
+        {
+          "change": "仅非fresh且SUSPENDED/RUNNING的首轮存活驱动在重挂时返回DRIVER_ALIVE_IN_PROCESS并重挂旧租约；fresh真实决策继续，任何leaseRearmed结局不释放租约。",
+          "reason": "后端工具执行期原快照为SUSPENDED，旧逻辑误判死卡造成双驱动；独立复审进一步发现fresh决策竞态和租约释放边界。",
+          "impact": "终态、forceTakeover与无租约兼容路径不变，未知状态不拦截；正确lastSeq重挂实测单driver、单done，真实批准创建任务后续跑成功。"
+        },
+        {
+          "change": "反馈ID最长64，非取消终态查询返回cancelled=false/alreadyTerminal=true，压测仅在该真实终态下跳过取消终帧要求。",
+          "reason": "消除过长ID的500和DONE/FAILED清理误报，不放宽进行中或未知状态的取消断言。",
+          "impact": "反馈边界及终态清理通过，其他取消路径仍保持严格断言。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigService.java", "status": "checked", "reason": "provider baseUrl仅保留安全URI组成，配置版本读取异常保留快照并有界WARN，无敏感查询串或userInfo外泄。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiModelCatalog.java", "status": "checked", "reason": "目录缓存读写异常分别记录有界WARN，读失败按未命中且写失败不伪报成功。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java", "status": "checked", "reason": "createdTaskId兼容Number和十进制字符串，正值校验与宿主导航、平铺配置表调用链一致。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "任何leaseRearmed=true的结局均跳过releaseLeaseQuietly，fresh=true/false均不误删续跑权，其他可释放结局不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "同轮创建后启动工具与创建前只读调用均按业务码跳过，台账不可确认时fail-closed，未伪造执行。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "系统提示拆分创建与启动授权；真实用户意图经TaskIntent复用，续跑从非合成用户历史恢复，普通回复不触发建任务纠正。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "resumedBy先复制再追加；仅非fresh且SUSPENDED/RUNNING时重挂存活首轮驱动，fresh真实决策继续，未知状态不拦截。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskIntent.java", "status": "checked", "reason": "QUESTION补充介绍/了解/讲解/说明，知识型创建任务问法不再误判为主动新建，真实新建正则不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "索引写入使用有TTL原子脚本，活动续期要求member存在，不复活已删除run或永久保存索引。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SessionActivityRenewal.java", "status": "checked", "reason": "真实会话活动只续当前会话及关联run键，不再由无关会话续全局或身份恢复索引。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/StartupResumeRunner.java", "status": "checked", "reason": "普通stop只取消任务，Bean销毁才关闭自管执行器，支持重启且避免重复销毁容器资源。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/session/AiSessionPurgeService.java", "status": "checked", "reason": "仅完整成功才删除会话锚点，半删除保留purge事实并真实记录失败，未使用数据库存状态。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/session/SessionPurgeGuard.java", "status": "checked", "reason": "Redis-only purging与owner标记采用同槽CAS，残留或读取异常继续fail-closed，owner前缀一致。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/session/SessionPurgePendingStore.java", "status": "checked", "reason": "pending/due均有界TTL，只有完整完成才删除，pending缺失不被当作清理成功。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlotResolver.java", "status": "checked", "reason": "仅明确创建后停止保留openWizard=false，其他误传移除；IDEA格式化差异不改变槽位与条件语义。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "反馈ID超64返回400，DONE/FAILED取消查询如实返回alreadyTerminal，长连接与既有API形状保持。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/dto/ProviderView.java", "status": "checked", "reason": "baseUrl显式JSON字段与安全净化，toString仍不输出地址或密钥。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/LogThrottler.java", "status": "checked", "reason": "静默窗口、淘汰和销毁均结算suppressedCount，Throwable保持末位，未吞掉错误计数。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/LogThrottlerFlusher.java", "status": "checked", "reason": "使用既有有界调度生命周期定期及销毁flush，只结算日志计数不改变业务结局。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/sse/SseWriteBudget.java", "status": "checked", "reason": "删除重复底层日志，调用方保留上下文和订阅者处理，写失败不伪报送达。"},
+        {"path": "backend/src/main/java/com/example/configmgr/config/FlywayStartupLock.java", "status": "checked", "reason": "正常schema已存在不再误报WARN，真实初始化失败仍保留异常。"},
+        {"path": "backend/src/main/java/com/example/configmgr/file/FileStorageService.java", "status": "checked", "reason": "空文件返回独立新数组，避免共享可变空数组；删除失败日志带文件维度。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "工具版本2026-10-27.32与系统提示一致，禁止只读创建前置并要求独立启动授权。"},
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "C-82明确baseUrl安全回显契约，未把其他未执行场景标为通过。"},
+        {"path": "docs/verification/整改全量验证计划-2026-11-08.md", "status": "checked", "reason": "记录整改范围、静态与真实验证拆分及独立验证职责，不作为执行通过证据。"},
+        {"path": "docs/verification/本轮整改变更账本-2026-11-08.md", "status": "checked", "reason": "逐文件登记目的、风险和证据；最终核心25 PASS/1 FAIL/1 NOT_RUN，多实例、Cluster及C-33仍NOT_RUN。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "空part和非文本读取有守卫，Mermaid首项访问安全，不改变正常流式渲染。"},
+        {"path": "frontend/src/constants/ai-settings-copy.ts", "status": "checked", "reason": "新端点API Key占位文案纳入统一COPY_KEYS，避免模型配置与界面文案漂移。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "英文清理技术话术并补作业启动中提示，与中文键一一对应。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "中文同步简洁ToC文案和启动中提示，不增加技术心智负担。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "租户与用户ID统一严格规范化，新会话历史恢复通过，未复用非法旧身份。"},
+        {"path": "frontend/src/utils/ai-identity.ts", "status": "checked", "reason": "接受安全整数和十进制字符串，拒绝越界、非正数及有损身份ID。"},
+        {"path": "frontend/src/utils/display-text.ts", "status": "checked", "reason": "read_tool_result形状收窄为content字符串类型谓词，offset校验与渲染输入一致。"},
+        {"path": "frontend/src/utils/frontend-tools.ts", "status": "checked", "reason": "taskId严格校验，页面、任务绑定和详情就绪分别核对，同页成功不再误报UI_ALREADY_ON_PAGE。"},
+        {"path": "frontend/src/utils/publish-mode.ts", "status": "checked", "reason": "模型回执与界面displayReason分离，读取失败使用安全日志和真实失败状态。"},
+        {"path": "frontend/src/views/AiFeedbackView.vue", "status": "checked", "reason": "移除会话技术详情，只保留真实摘要，避免向C端暴露内部标识。"},
+        {"path": "frontend/src/views/AiSettingsView.vue", "status": "checked", "reason": "API Key输入使用统一安全占位文案，不回显密钥。"},
+        {"path": "frontend/src/views/DefinitionsView.vue", "status": "checked", "reason": "删除key/isKey技术提示，保留必要业务说明。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "保存、启动、重复启动和任务切换结果使用真实状态与locale文案，不伪造执行。"},
+        {"path": "frontend/src/views/ImportWizardView.vue", "status": "checked", "reason": "启动和发布回执分离，错误集中提示并保留取消、切换和attach真实结局。"},
+        {"path": "frontend/src/views/TaskCenterView.vue", "status": "checked", "reason": "步骤复用共享本地化映射，未知或空步骤安全降级。"},
+        {"path": "scripts/perf/ai-api/core-coverage.mjs", "status": "checked", "reason": "反馈和会话前置独立，ID有界；仅真实DONE/FAILED且alreadyTerminal时跳过取消终帧，其余断言未放宽。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用TaskIntent、Spring生命周期、现有Redis/Lua、Commons与既有前端工具，无新增依赖或重复框架。"},
+        "java-api-style": {"status": "checked", "reason": "逐hunk核对集合防御复制、空值、JSON/Long、命名、方法规模与import；新增liveDriverResumeResult保持小方法，IDEA Reformat已执行并复核格式差异。"},
+        "logging-exception-safety": {"status": "checked", "reason": "日志仅安全标量，异常保留Throwable；缓存、配置和SSE错误真实可观测，日志节流结算丢失计数，未以降级或异步掩盖失败。"},
+        "toc-interaction": {"status": "checked", "reason": "创建与启动意图清晰分离，移除技术文案和内部标识，中英文文案同步，无新增无意义提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "重点复核租约重挂、终态吸收、TTL、purge fail-closed、多实例索引和真实活动续期；SUSPENDED存活驱动不再被重复接管，AI会话状态未写数据库。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "流式游标继续使用lastSeq严格递增，空part和非文本有守卫；未改变UTF-8、代理对或字素簇处理。"},
+        "verification-review": {"status": "checked", "reason": "生产maven.test.skip package成功；独立复审首轮FAIL三项返修后由原复审者确认PASS；DeepSeek首轮定向3/3及复审返修定向4/4通过，核心单次25 PASS/1 FAIL/1 NOT_RUN且cleanupErrors=0；启动日志的park控制流ERROR、主动断流WARN和lease-less设计WARN已分类备案，多实例、Cluster、C-33及API负载NOT_RUN。"}
+      }
     }
   ]
 }

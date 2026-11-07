@@ -1041,7 +1041,7 @@ interface StepAdvanceOutcome {
   ok: boolean
   /** persistStepData 失败 ⇒ 阻断推进的原因 */
   reason?: string
-  /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该警告带进回灌/界面 */
+  /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该中文警告带进模型回灌 */
   syncWarning?: string
 }
 
@@ -1080,8 +1080,8 @@ async function goStep(next: number, guard?: () => boolean): Promise<StepAdvanceO
     return { ok: false, reason: '任务已切换，本次未推进步骤' }
   }
   if (!synced.ok) {
-    const syncWarning = t('views.export.msg.stepSyncWarning')
-    ElMessage.warning(syncWarning)
+    const syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
+    ElMessage.warning(t('views.export.msg.stepSyncWarning'))
     return { ok: true, syncWarning }
   }
   return { ok: true }
@@ -1195,7 +1195,7 @@ async function persistStepData(
   generation: number = taskGeneration,
   forTask: number | null = taskId.value,
   guard?: () => boolean
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<{ ok: boolean; reason?: string; displayReason?: string }> {
   if (forTask === null) {
     return { ok: true }
   }
@@ -1260,18 +1260,21 @@ async function persistStepData(
     syncSelectedDefsToWorkspace()
     return { ok: true }
   } catch (error) {
-    const reason = error instanceof InvalidConditionInputError
+    const displayReason = error instanceof InvalidConditionInputError
       ? describeConditionInputError(error)
       : userFacingErrorText(error, t('api.error.safeUnknown'))
+    const reason = error instanceof InvalidConditionInputError
+      ? '查询条件格式无效，本次未完成落库'
+      : '选择与条件保存失败，本次未完成落库'
     if (generation !== taskGeneration) {
-      return { ok: false, reason: '任务已切换，本次未完成落库' }
+      return { ok: false, reason: '任务已切换，本次未完成落库', displayReason: t('views.export.msg.saveAborted') }
     }
     // 挂账 L-67：落库失败同样落在条件表单区域内（只弹一次 ElMessage 读不到「为什么不行」）
     for (const code of selectedDefs.value) {
-      condErrors[code] = reason
+      condErrors[code] = displayReason
     }
-    ElMessage.error(reason)
-    return { ok: false, reason }
+    ElMessage.error(displayReason)
+    return { ok: false, reason, displayReason }
   } finally {
     if (generation === taskGeneration) {
       persisting.value = false
@@ -1371,7 +1374,10 @@ function onConditionChange(code: string, value: ConditionDraftModel): void {
 /** `startExport` 的结构化结局；`notified` = 失败原因已自行 toast（按钮侧不重复提示）。 */
 interface StartExportOutcome {
   ok: boolean
+  /** 固定安全中文模型回执 */
   reason?: string
+  /** 失败分支的用户界面文案 */
+  displayReason?: string
   notified?: boolean
   job?: Job
   taskId?: number
@@ -1399,28 +1405,43 @@ async function startExport(
   options: { discardUnsaved?: boolean; confirmDiscardUnsaved?: boolean; guard?: () => boolean } = {}
 ): Promise<StartExportOutcome> {
   if (exportStartOwner !== null) {
-    return { ok: false, reason: t('views.export.msg.startInFlight') }
+    return {
+      ok: false,
+      reason: '导出作业正在启动，请勿重复发起',
+      displayReason: t('views.export.msg.startInFlight')
+    }
   }
   const owner = {}
   exportStartOwner = owner
   startingExport.value = true
   try {
     if (taskId.value === null) {
-      const reason = t('views.export.msg.noTaskBound')
-      ElMessage.warning(reason)
-      return { ok: false, reason, notified: true }
+      const displayReason = t('views.export.msg.noTaskBound')
+      ElMessage.warning(displayReason)
+      return {
+        ok: false,
+        reason: '尚未绑定任务，本次未启动导出作业',
+        displayReason,
+        notified: true
+      }
     }
     const generation = taskGeneration
     const forTask = taskId.value
     if (selectedDefs.value.length === 0) {
-      const reason = t('views.export.msg.pickDefs')
-      ElMessage.warning(reason)
-      return { ok: false, reason, notified: true }
+      const displayReason = t('views.export.msg.pickDefs')
+      ElMessage.warning(displayReason)
+      return {
+        ok: false,
+        reason: '未选择配置项，本次未启动导出作业',
+        displayReason,
+        notified: true
+      }
     }
     if (listsLoadError.value) {
       return {
         ok: false,
-        reason: t('views.export.msg.exportBlockedByLists', { reason: listsLoadError.value })
+        reason: '作业或文件清单读取失败，本次未启动导出作业，请先重试读取',
+        displayReason: t('views.export.msg.exportBlockedByLists', { reason: listsLoadError.value })
       }
     }
     if (gridDirty && exportResults.value.length > 0 && options.discardUnsaved !== true) {
@@ -1433,9 +1454,14 @@ async function startExport(
           cancelText: t('views.export.dialog.dirtyKeep')
         })
         if (!confirmed) {
-          const reason = t('views.export.msg.dirtyCanceled')
-          ElMessage.info(reason)
-          return { ok: false, reason, notified: true }
+          const displayReason = t('views.export.msg.dirtyCanceled')
+          ElMessage.info(displayReason)
+          return {
+            ok: false,
+            reason: '用户取消重新导出确认，本次未启动导出作业',
+            displayReason,
+            notified: true
+          }
         }
       } else {
         return {
@@ -1443,6 +1469,9 @@ async function startExport(
           // 来源分流：AI 应用后的改动仍是"未保存"（拦下，避免静默丢弃），但回执不得说成
           // "用户未保存" —— 那会让模型把 start_export 当成用户未决事项（2026-10-29 修复）。
           reason: gridDirtyBy === 'ai'
+            ? '表格存在 AI 应用后尚未保存的编辑，本次未启动导出作业；请先保存或明确丢弃这些编辑'
+            : '表格存在尚未保存的编辑，本次未启动导出作业；请先保存或明确丢弃这些编辑',
+          displayReason: gridDirtyBy === 'ai'
             ? t('views.export.msg.exportBlockedByAiDirty')
             : t('views.export.msg.exportBlockedByDirty')
         }
@@ -1451,21 +1480,37 @@ async function startExport(
     // 任务号与代次在入口捕获：落库 + createJob 都是 await，实时读 taskId.value 会在换任务后
     // 把 A 的条件落到 B、并在 B 上建作业（"旧条件启动作业"的跨任务变体）
     if (generation !== taskGeneration || forTask !== taskId.value) {
-      return { ok: false, reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）' }
+      return {
+        ok: false,
+        reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）',
+        displayReason: t('views.export.msg.saveAborted')
+      }
     }
     const persisted = await persistStepData(generation, forTask, options.guard)
     if (!persisted.ok) {
       if (options.guard?.() === true) {
         // 已作废（预算到点 / 停止）而落库其实可能已完成：直说 persisted 的真实原因，
         // 不得再包成"未能落库（会按旧条件导出）"—— 那是与事实相反的归因（复审 I-3）。
-        return { ok: false, reason: persisted.reason ?? '前端工具预算已到点或本轮已停止：本次未启动导出作业' }
+        return {
+          ok: false,
+          reason: persisted.reason ?? '前端工具预算已到点或本轮已停止：本次未启动导出作业',
+          displayReason: persisted.displayReason ?? t('api.error.safeUnknown')
+        }
       }
       const reason = `查询条件与选中集未能落库（${persisted.reason ?? '保存失败'}），本次未启动导出作业`
         + ' —— 否则会按服务端旧条件导出（可能是全量数据）'
-      return { ok: false, reason }
+      return {
+        ok: false,
+        reason,
+        displayReason: persisted.displayReason ?? t('api.error.safeUnknown')
+      }
     }
     if (generation !== taskGeneration || forTask !== taskId.value) {
-      return { ok: false, reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）' }
+      return {
+        ok: false,
+        reason: '任务已切换，本次未启动导出作业（避免把作业建到另一个任务上）',
+        displayReason: t('views.export.msg.saveAborted')
+      }
     }
     let created: Job | null = null
     try {
@@ -1484,15 +1529,29 @@ async function startExport(
       beginWatchJob(job.id ?? 0, generation)
       return { ok: true, job, taskId: forTask, detached: generation !== taskGeneration }
     } catch (error) {
-      const reason = userFacingErrorText(error, t('views.export.msg.jobStartFailed'))
+      const displayReason = userFacingErrorText(
+        error,
+        t(created === null ? 'views.export.msg.jobStartFailed' : 'api.error.safeUnknown')
+      )
       if (created !== null) {
         // 作业已建：不能说"未启动"
-        return { ok: true, job: created, taskId: forTask, detached: generation !== taskGeneration, attachError: reason }
+        return {
+          ok: true,
+          job: created,
+          taskId: forTask,
+          detached: generation !== taskGeneration,
+          attachError: '导出作业已创建，但本页未能跟踪，请勿重复发起'
+        }
       }
       if (generation === taskGeneration) {
-        ElMessage.error(reason)
+        ElMessage.error(displayReason)
       }
-      return { ok: false, reason, notified: true }
+      return {
+        ok: false,
+        reason: '导出作业未能启动，请重试',
+        displayReason,
+        notified: true
+      }
     }
   } finally {
     if (exportStartOwner === owner) {
@@ -1510,8 +1569,9 @@ async function startExport(
  */
 async function onStartExportClick(): Promise<void> {
   const outcome = await startExport({ confirmDiscardUnsaved: true })
-  if (!outcome.ok && outcome.reason && outcome.notified !== true) {
-    ElMessage.warning(outcome.reason)
+  const displayReason = outcome.displayReason
+  if (!outcome.ok && displayReason && outcome.notified !== true) {
+    ElMessage.warning(displayReason)
   }
 }
 
@@ -2710,7 +2770,7 @@ function registerHandlers(): void {
       // 条件没落库 / 清单读不到 / 有未保存编辑 ⇒ 未建作业：结构化失败。
       // 各闸门的 `reason` 自带可行动指引（先重试读取 / 先保存或确认丢弃），这里不再追加
       // 通用"重试"话术 —— 那会诱导用户在未处理脏编辑时重复发起。
-      return { ok: false, reason: outcome.reason ?? t('views.export.msg.jobStartFailed') }
+      return { ok: false, reason: outcome.reason ?? '导出作业未能启动，请重试' }
     }
     if (outcome.detached || outcome.attachError !== undefined) {
       // 作业**已建**：成功形回执 + 明确"请勿重复发起"（不得再追加重试引导，否则会重复导出）
@@ -2768,7 +2828,7 @@ function registerHandlers(): void {
       }
     } catch (error) {
       logCaughtError(error, 'export-wizard:request')
-      return { ok: false, reason: `${code} 的表格未就绪：${t('api.error.safeUnknown')}` }
+      return { ok: false, reason: `${code} 的表格未就绪，请重试` }
     }
   })
 

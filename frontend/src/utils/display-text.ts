@@ -159,7 +159,7 @@ function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0
 }
 
-function isReadToolResultShape(value: Record<string, unknown>): boolean {
+function isReadToolResultShape(value: Record<string, unknown>): value is Record<string, unknown> & { content: string } {
   for (const key of Object.keys(value)) {
     if (!READ_TOOL_RESULT_FIELDS.has(key)) {
       return false
@@ -180,7 +180,7 @@ function isReadToolResultShape(value: Record<string, unknown>): boolean {
   return value.nextOffset === null || isNonNegativeInteger(value.nextOffset)
 }
 
-function isReadToolResultOffsetValid(value: Record<string, unknown>, contentEnd: number): boolean {
+function isReadToolResultOffsetValid(value: Record<string, unknown> & { content: string }, contentEnd: number): boolean {
   if ((value.offset as number) > (value.originalChars as number)
     || (value.returnedChars as number) > (value.maxChars as number)
     || (value.returnedChars as number) !== value.content.length

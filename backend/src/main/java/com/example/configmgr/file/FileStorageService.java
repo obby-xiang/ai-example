@@ -9,7 +9,6 @@ import com.example.configmgr.config.AppProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.codec.binary.Hex;
-import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -147,8 +146,7 @@ public class FileStorageService {
     }
 
     public byte[] read(String key) throws IOException {
-        byte[] bytes = Files.readAllBytes(resolve(key));
-        return bytes.length == 0 ? ArrayUtils.EMPTY_BYTE_ARRAY : bytes;
+        return Files.readAllBytes(resolve(key));
     }
 
     /**
@@ -203,7 +201,7 @@ public class FileStorageService {
         try {
             Files.deleteIfExists(resolve(key));
         } catch (IOException e) {
-            LogThrottler.warn(log, "FileStorageService.delete", "Failed to delete file key={}", key, e);
+            LogThrottler.warn(log, "FileStorageService.delete:" + key, "Failed to delete file key={}", key, e);
         }
     }
 

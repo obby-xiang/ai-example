@@ -8,6 +8,7 @@ import com.example.configmgr.ai.config.db.AiProviderModelRepository;
 import com.example.configmgr.ai.config.db.AiProviderRepository;
 import com.example.configmgr.ai.config.db.AiSetting;
 import com.example.configmgr.ai.config.db.AiSettingRepository;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.NonNull;
@@ -19,6 +20,8 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -63,18 +66,26 @@ public class AiConfigService {
 
     private static final long REFRESH_WAIT_SECONDS = 5L;
 
-    /** 种子/合成行的稳定机读名。 */
+    /**
+     * 种子/合成行的稳定机读名。
+     */
     public static final String ENV_PROVIDER_CODE = "deepseek";
 
     public static final String ENV_PROVIDER_DISPLAY_NAME = "DeepSeek";
 
-    /** 种子行的上下文窗口占位值（UI 可改；上下文统计专项的分母初值）。 */
+    /**
+     * 种子行的上下文窗口占位值（UI 可改；上下文统计专项的分母初值）。
+     */
     public static final int ENV_SEED_MAX_CONTEXT = 128000;
 
-    /** 无 provider 时的 503 码。 */
+    /**
+     * 无 provider 时的 503 码。
+     */
     public static final String CODE_UNAVAILABLE = ErrorCodes.AI_UNAVAILABLE;
 
-    /** 无 provider 时的 503 文案（R-12：指向设置页；码仍是 {@code AI_UNAVAILABLE}）。 */
+    /**
+     * 无 provider 时的 503 文案（R-12：指向设置页；码仍是 {@code AI_UNAVAILABLE}）。
+     */
     public static final String UNAVAILABLE_REASON =
             "AI 能力未启用：请在「设置 → AI」配置供应商与 API Key";
 
@@ -88,17 +99,23 @@ public class AiConfigService {
     public static final String KEY_UNREADABLE_REASON =
             "AI 能力未启用：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置";
 
-    /** 有 provider 有 key、但默认目标解析不出自己的模型时的 503 码。 */
+    /**
+     * 有 provider 有 key、但默认目标解析不出自己的模型时的 503 码。
+     */
     public static final String CODE_NO_MODEL_CONFIGURED = ErrorCodes.NO_MODEL_CONFIGURED;
 
     public static final String NO_MODEL_REASON =
             "AI 默认模型未配置：请在「设置 → AI」为供应商添加模型并选择默认模型";
 
-    /** 默认目标硬绑定：绑定的供应商停用 ⇒ 整条 AI 不可用（不静默换别家）。 */
+    /**
+     * 默认目标硬绑定：绑定的供应商停用 ⇒ 整条 AI 不可用（不静默换别家）。
+     */
     public static final String BOUND_PROVIDER_DISABLED_REASON =
             "AI 默认供应商已停用：请在「设置 → AI」启用该供应商，或改选默认模型";
 
-    /** 默认目标硬绑定：绑定的供应商行已不存在（硬删/脏配置）⇒ 整条 AI 不可用。 */
+    /**
+     * 默认目标硬绑定：绑定的供应商行已不存在（硬删/脏配置）⇒ 整条 AI 不可用。
+     */
     public static final String BOUND_PROVIDER_MISSING_REASON =
             "AI 默认供应商不存在：请在「设置 → AI」重新选择默认模型";
 
@@ -122,20 +139,24 @@ public class AiConfigService {
 
     private final AtomicReference<CompletableFuture<RefreshOutcome>> refreshInFlight = new AtomicReference<>();
 
-    /** 按 provider code 记"已告警过解不开"，避免可用性探活逐秒刷 WARN。 */
+    /**
+     * 按 provider code 记"已告警过解不开"，避免可用性探活逐秒刷 WARN。
+     */
     private final Map<String, Boolean> unreadableWarned = new ConcurrentHashMap<>();
 
     private volatile ConfigSnapshot snapshot;
 
     private volatile long lastCheckAtMs;
 
-    /** 上一次加载是否失败（M2）：失败 ⇒ 下一个 tick 无条件重试，不依赖版本号变化。 */
+    /**
+     * 上一次加载是否失败（M2）：失败 ⇒ 下一个 tick 无条件重试，不依赖版本号变化。
+     */
     private volatile boolean lastLoadFailed;
 
     public AiConfigService(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
-            AiSettingRepository settingRepository, Environment environment, AiKeyCipher cipher,
-            AiProperties properties, OpenAiConnectionProperties connectionProperties,
-            OpenAiChatProperties chatProperties) {
+                           AiSettingRepository settingRepository, Environment environment, AiKeyCipher cipher,
+                           AiProperties properties, OpenAiConnectionProperties connectionProperties,
+                           OpenAiChatProperties chatProperties) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
         this.settingRepository = settingRepository;
@@ -148,7 +169,9 @@ public class AiConfigService {
 
     // ── 快照 ────────────────────────────────────────────────────────────────
 
-    /** 当前快照（必要时按版本号重载）。已有读者在刷新期间始终使用 last-good。 */
+    /**
+     * 当前快照（必要时按版本号重载）。已有读者在刷新期间始终使用 last-good。
+     */
     public ConfigSnapshot current() {
         ConfigSnapshot snap = this.snapshot;
         long now = System.currentTimeMillis();
@@ -165,7 +188,9 @@ public class AiConfigService {
         return current;
     }
 
-    /** 强制重载（种子或配置写提交后）。 */
+    /**
+     * 强制重载（种子或配置写提交后）。
+     */
     public ConfigSnapshot reload() {
         return reloadWithOutcome().snapshot();
     }
@@ -174,12 +199,14 @@ public class AiConfigService {
      * 一次强制重载的结局。
      *
      * @param snapshot 成功快照或 last-good；从未加载成功时为 {@code null}
-     * @param ok 本次是否取得一致且完整的新快照
+     * @param ok       本次是否取得一致且完整的新快照
      */
     public record ReloadResult(ConfigSnapshot snapshot, boolean ok) {
     }
 
-    /** 强制重载并如实报告结局；等待超时不取消在途加载。 */
+    /**
+     * 强制重载并如实报告结局；等待超时不取消在途加载。
+     */
     public ReloadResult reloadWithOutcome() {
         while (true) {
             RefreshOutcome outcome = awaitRefresh(startRefresh(true), true);
@@ -192,11 +219,9 @@ public class AiConfigService {
     private RefreshOutcome awaitRefresh(CompletableFuture<RefreshOutcome> flight, boolean forced) {
         try {
             return flight.get(REFRESH_WAIT_SECONDS, TimeUnit.SECONDS);
-        }
-        catch (InterruptedException ex) {
+        } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
             // 等待失败时保留当前快照，并按原契约返回未刷新结果。
         }
         return new RefreshOutcome(new ReloadResult(this.snapshot, false), forced);
@@ -217,14 +242,12 @@ public class AiConfigService {
             }
             try {
                 candidate.complete(performRefresh(force));
-            }
-            catch (RuntimeException ex) {
+            } catch (RuntimeException ex) {
                 applyLoad(new LoadOutcome(this.snapshot, false));
                 this.lastCheckAtMs = System.currentTimeMillis();
                 log.warn("config refresh failed (keeping last good snapshot)", ex);
                 candidate.complete(new RefreshOutcome(new ReloadResult(this.snapshot, false), force));
-            }
-            finally {
+            } finally {
                 this.refreshInFlight.compareAndSet(candidate, null);
             }
             return candidate;
@@ -273,11 +296,13 @@ public class AiConfigService {
     private Long readDbVersion() {
         try {
             return this.settingRepository.findBySettingKey(AiSetting.CONFIG_VERSION)
-                .map(AiSetting::getValueJson)
-                .map(AiConfigService::parseVersion)
-                .orElse(0L);
-        }
-        catch (Exception ex) {
+                    .map(AiSetting::getValueJson)
+                    .map(AiConfigService::parseVersion)
+                    .orElse(0L);
+        } catch (Exception ex) {
+            if (LogSampling.canAcquire("config-version-read")) {
+                log.warn("config version read failed (keeping current snapshot until the next check)", ex);
+            }
             return null;
         }
     }
@@ -299,8 +324,7 @@ public class AiConfigService {
                 }
             }
             throw new IllegalStateException("config snapshot did not stabilize after 3 loads");
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
             // 读库失败或版本持续变化时保留 last-good，绝不发布分批读取拼出的混合快照。
             if (!this.lastLoadFailed) {
                 log.warn("config snapshot load failed (keeping last good snapshot; retried on next version check)",
@@ -326,20 +350,23 @@ public class AiConfigService {
         }
         try {
             return Long.parseLong(raw.trim());
-        }
-        catch (NumberFormatException ex) {
+        } catch (NumberFormatException ex) {
             return 0L;
         }
     }
 
     // ── provider / model 视图 ────────────────────────────────────────────────
 
-    /** 库里的 provider 行（不含合成行；设置页与 {@code GET /api/ai/providers} 用）。 */
+    /**
+     * 库里的 provider 行（不含合成行；设置页与 {@code GET /api/ai/providers} 用）。
+     */
     public List<AiProvider> listProviders() {
         return current().providers();
     }
 
-    /** 按 id 找库里的 provider 行（写端点与 {@code /test} 用；合成行没有 id，不在此列）。 */
+    /**
+     * 按 id 找库里的 provider 行（写端点与 {@code /test} 用；合成行没有 id，不在此列）。
+     */
     public Optional<AiProvider> provider(Long providerId) {
         if (providerId == null) {
             return Optional.empty();
@@ -368,17 +395,19 @@ public class AiConfigService {
      * <b>读时容错</b>（批① M3 的口径）：脏值（{@code "hot"} / {@code NaN} / 负数）不抛，按"未设置"
      * 返回（{@code null}）—— 一个手填的设置项不能关掉整页；写路径（批②）负责让脏值进不来。
      *
-     * @param version {@code config.version}（诊断用：改完能确认版本真的动了）
+     * @param version    {@code config.version}（诊断用：改完能确认版本真的动了）
      * @param providerId {@code default.providerId}（与 {@code modelId} 成对；两者同为 {@code null} = 未设置默认目标）
      */
     public record Defaults(@JsonProperty("modelId") String modelId, @JsonProperty("temperature") Double temperature,
-            @JsonProperty("topP") Double topP, @JsonProperty("maxTokens") Integer maxTokens,
-            @JsonProperty("allowUserParams") Boolean allowUserParams,
-            @JsonProperty("version") @JsonFormat(shape = JsonFormat.Shape.STRING) long version,
-            @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId) {
+                           @JsonProperty("topP") Double topP, @JsonProperty("maxTokens") Integer maxTokens,
+                           @JsonProperty("allowUserParams") Boolean allowUserParams,
+                           @JsonProperty("version") @JsonFormat(shape = JsonFormat.Shape.STRING) long version,
+                           @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId) {
     }
 
-    /** 当前全局默认参数。 */
+    /**
+     * 当前全局默认参数。
+     */
     public Defaults defaults() {
         ConfigSnapshot snap = current();
         Map<String, String> settings = snap.settings();
@@ -395,8 +424,7 @@ public class AiConfigService {
         }
         try {
             return Long.parseLong(raw.trim());
-        }
-        catch (NumberFormatException ex) {
+        } catch (NumberFormatException ex) {
             return null;
         }
     }
@@ -418,8 +446,7 @@ public class AiConfigService {
                 return null;
             }
             return value;
-        }
-        catch (NumberFormatException ex) {
+        } catch (NumberFormatException ex) {
             return null;
         }
     }
@@ -437,8 +464,7 @@ public class AiConfigService {
                 return null;
             }
             return value;
-        }
-        catch (NumberFormatException ex) {
+        } catch (NumberFormatException ex) {
             return null;
         }
     }
@@ -489,7 +515,9 @@ public class AiConfigService {
         return StringUtils.hasText(envApiKey()) ? List.of(envSeedProvider()) : List.of();
     }
 
-    /** 合成的 env 种子行 —— 内容与 {@link AiConfigSeeder} 将写入的行逐值一致（不是第二套真相）。 */
+    /**
+     * 合成的 env 种子行 —— 内容与 {@link AiConfigSeeder} 将写入的行逐值一致（不是第二套真相）。
+     */
     public AiProvider envSeedProvider() {
         AiProvider provider = new AiProvider();
         provider.setCode(ENV_PROVIDER_CODE);
@@ -504,7 +532,9 @@ public class AiConfigService {
         return provider;
     }
 
-    /** 种子模型（与合成行配套；{@code is_default=true}、{@code max_context} 取占位值）。 */
+    /**
+     * 种子模型（与合成行配套；{@code is_default=true}、{@code max_context} 取占位值）。
+     */
     public AiProviderModel envSeedModel() {
         AiProviderModel model = new AiProviderModel();
         model.setModelId(resolveEnvModelId());
@@ -552,16 +582,18 @@ public class AiConfigService {
         if (configuredProviderId != null) {
             String configuredModel = text(snap.settings().get(AiSetting.DEFAULT_MODEL_ID));
             AiProvider bound = providers.stream()
-                .filter(provider -> configuredProviderId.equals(provider.getId()))
-                .findFirst()
-                .orElse(null);
+                    .filter(provider -> configuredProviderId.equals(provider.getId()))
+                    .findFirst()
+                    .orElse(null);
             // 硬绑定：不用 firstOwnTarget，任何不可用都明确为空（availability 给出对应档）
             return bound == null ? Optional.empty() : targetFor(snap, bound, configuredModel);
         }
         return firstOwnTarget(snap, providers);
     }
 
-    /** 库序里第一个"key 可解析且能给出自己默认模型"的目标。 */
+    /**
+     * 库序里第一个"key 可解析且能给出自己默认模型"的目标。
+     */
     private Optional<ResolvedProvider> firstOwnTarget(ConfigSnapshot snap, List<AiProvider> providers) {
         for (AiProvider provider : providers) {
             Optional<ResolvedProvider> target = targetFor(snap, provider, null);
@@ -592,7 +624,9 @@ public class AiConfigService {
         return provider != null && provider.isEnabled() && resolveKey(provider).status() == KeyStatus.OK;
     }
 
-    /** 指定 provider 的运行目标（批③ 的"按请求选 provider"会复用；批① 供 /health 逐条状态用）。 */
+    /**
+     * 指定 provider 的运行目标（批③ 的"按请求选 provider"会复用；批① 供 /health 逐条状态用）。
+     */
     public Optional<ResolvedProvider> resolveProvider(AiProvider provider) {
         if (provider == null) {
             return Optional.empty();
@@ -609,7 +643,7 @@ public class AiConfigService {
      * （{@code /health}、注册表、测试都在用），加字段会牵动 4 处测试构造与两个解析方法；
      * 能力位是"本轮要不要下发工具"的判据，只属于请求级解析。
      *
-     * @param modelId 本轮模型名（= 请求显式值或解析链结果）
+     * @param modelId             本轮模型名（= 请求显式值或解析链结果）
      * @param supportsToolCalling {@code false} ⇒ 本轮不下发 toolCallbacks（纯问答降级）
      */
     public record ChatTarget(ResolvedProvider provider, String modelId, boolean supportsToolCalling) {
@@ -619,7 +653,8 @@ public class AiConfigService {
      * 面板可选的模型（{@code GET /api/ai/models} 的一行；web 层原样转成
      * {@code AvailableModelView} —— config 层不依赖 web 包）。
      */
-    public record AvailableModel(@JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
+    public record AvailableModel(
+            @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
             @JsonProperty("providerCode") String providerCode, @JsonProperty("providerName") String providerName,
             @JsonProperty("modelId") String modelId, @JsonProperty("displayName") String displayName,
             @JsonProperty("supportsToolCalling") boolean supportsToolCalling,
@@ -660,24 +695,24 @@ public class AiConfigService {
      * <p>带 provider 身份的解析<b>不做</b>模型名回退；{@code providerId=null} 只匹配当前生效的
      * env 合成行（数据库无 provider 且 env key 存在），不匹配数据库里的任何 provider。</p>
      *
-     * @param providerId provider 主键；{@code null} = 仅限当前 env 合成行
+     * @param providerId       provider 主键；{@code null} = 仅限当前 env 合成行
      * @param requestedModelId 本轮模型名；<b>空白</b> = 该 provider 自己的默认模型
-     *        （不借用全局 {@code default.modelId}：那个名字属于另一家时会把"绑定"变成"按名字猜"）
+     *                         （不借用全局 {@code default.modelId}：那个名字属于另一家时会把"绑定"变成"按名字猜"）
      */
     public Optional<ChatTarget> resolveChatTarget(Long providerId, String requestedModelId) {
         ConfigSnapshot snap = current();
         AiProvider bound = effectiveProviders(snap)
-            .stream()
-            .filter(provider -> providerId == null ? provider.getId() == null : providerId.equals(provider.getId()))
-            .findFirst()
-            .orElse(null);
+                .stream()
+                .filter(provider -> providerId == null ? provider.getId() == null : providerId.equals(provider.getId()))
+                .findFirst()
+                .orElse(null);
         if (bound == null) {
             return Optional.empty();
         }
         String preferred = StringUtils.hasText(requestedModelId) ? requestedModelId.trim() : null;
         return targetFor(snap, bound, preferred)
-            .map(resolved -> new ChatTarget(resolved, resolved.modelId(),
-                    supportsToolCalling(resolved.providerId(), resolved.modelId())));
+                .map(resolved -> new ChatTarget(resolved, resolved.modelId(),
+                        supportsToolCalling(resolved.providerId(), resolved.modelId())));
     }
 
     /**
@@ -690,7 +725,9 @@ public class AiConfigService {
      */
     public enum BindingState {
 
-        /** 行、模型、key 三者都就绪（正常情况下 {@code resolveChatTarget} 不会为空）。 */
+        /**
+         * 行、模型、key 三者都就绪（正常情况下 {@code resolveChatTarget} 不会为空）。
+         */
         RESOLVED,
 
         /**
@@ -715,15 +752,15 @@ public class AiConfigService {
      * （读库失败时"没有这一行"不代表库里没有）。
      *
      * @param providerId provider 主键；{@code null} = 仅限当前 env 合成行，其他场景确定不可用
-     * @param modelId 快照里的模型名；空白 = 该 provider 自己的默认模型
+     * @param modelId    快照里的模型名；空白 = 该 provider 自己的默认模型
      */
     public BindingState bindingState(Long providerId, String modelId) {
         ConfigSnapshot snap = current();
         AiProvider bound = effectiveProviders(snap)
-            .stream()
-            .filter(provider -> providerId == null ? provider.getId() == null : providerId.equals(provider.getId()))
-            .findFirst()
-            .orElse(null);
+                .stream()
+                .filter(provider -> providerId == null ? provider.getId() == null : providerId.equals(provider.getId()))
+                .findFirst()
+                .orElse(null);
         if (bound == null || !bound.isEnabled()) {
             return BindingState.ABSENT;
         }
@@ -753,12 +790,12 @@ public class AiConfigService {
             return seed.getModelId().equals(modelId) ? seed : null;
         }
         return snap.models()
-            .stream()
-            .filter(model -> provider.getId().equals(model.getProviderId()))
-            .filter(AiProviderModel::isEnabled)
-            .filter(model -> modelId.equals(model.getModelId()))
-            .findFirst()
-            .orElse(null);
+                .stream()
+                .filter(model -> provider.getId().equals(model.getProviderId()))
+                .filter(AiProviderModel::isEnabled)
+                .filter(model -> modelId.equals(model.getModelId()))
+                .findFirst()
+                .orElse(null);
     }
 
     /**
@@ -785,12 +822,12 @@ public class AiConfigService {
             return true;
         }
         return snap.models()
-            .stream()
-            .filter(model -> providerId.equals(model.getProviderId()))
-            .filter(model -> modelId.equals(model.getModelId()))
-            .map(AiProviderModel::isSupportsToolCalling)
-            .findFirst()
-            .orElse(true);
+                .stream()
+                .filter(model -> providerId.equals(model.getProviderId()))
+                .filter(model -> modelId.equals(model.getModelId()))
+                .map(AiProviderModel::isSupportsToolCalling)
+                .findFirst()
+                .orElse(true);
     }
 
     /**
@@ -825,13 +862,12 @@ public class AiConfigService {
             List<AiProviderModel> rows;
             if (provider.getId() == null) {
                 rows = List.of(envSeedModel());
-            }
-            else {
+            } else {
                 rows = snap.models()
-                    .stream()
-                    .filter(model -> provider.getId().equals(model.getProviderId()))
-                    .filter(AiProviderModel::isEnabled)
-                    .toList();
+                        .stream()
+                        .filter(model -> provider.getId().equals(model.getProviderId()))
+                        .filter(AiProviderModel::isEnabled)
+                        .toList();
             }
             for (AiProviderModel row : rows) {
                 out.add(new AvailableModel(provider.getId(), provider.getCode(), provider.getDisplayName(),
@@ -867,12 +903,11 @@ public class AiConfigService {
         if (provider.getId() == null) {
             models = List.of(envSeedModel());
             envFallback = resolveEnvModelId();
-        }
-        else {
+        } else {
             models = snap.models()
-                .stream()
-                .filter(model -> provider.getId().equals(model.getProviderId()))
-                .toList();
+                    .stream()
+                    .filter(model -> provider.getId().equals(model.getProviderId()))
+                    .toList();
             // 缺模型就是缺模型：env AI_MODEL 不是这家 provider 的 allowlist，不许借用
             envFallback = null;
         }
@@ -883,13 +918,19 @@ public class AiConfigService {
 
     public enum KeyStatus {
 
-        /** 可解析（env 有值或密文可解）。 */
+        /**
+         * 可解析（env 有值或密文可解）。
+         */
         OK,
 
-        /** 没有声明的 key（{@code key_ref=NONE} 或 env 为空）。 */
+        /**
+         * 没有声明的 key（{@code key_ref=NONE} 或 env 为空）。
+         */
         MISSING,
 
-        /** 声明了 DB 托管 key，但本进程解不开（KEK 缺失/不符/密文损坏）。 */
+        /**
+         * 声明了 DB 托管 key，但本进程解不开（KEK 缺失/不符/密文损坏）。
+         */
         UNREADABLE
 
     }
@@ -914,7 +955,9 @@ public class AiConfigService {
         }
     }
 
-    /** 解析一行的 key（fail-closed；DB 解不开<b>不</b>回落 env）。 */
+    /**
+     * 解析一行的 key（fail-closed；DB 解不开<b>不</b>回落 env）。
+     */
     public KeyResolution resolveKey(AiProvider provider) {
         if (provider == null || !StringUtils.hasText(provider.getKeyRef())) {
             return KeyResolution.missing();
@@ -936,8 +979,7 @@ public class AiConfigService {
                     return KeyResolution.missing();
                 }
                 return KeyResolution.ok(plain, fingerprintOf(provider, plain));
-            }
-            catch (AiKeyCipher.KeyCipherException ex) {
+            } catch (AiKeyCipher.KeyCipherException ex) {
                 warnOnceUnreadable(provider, ex);
                 return KeyResolution.unreadable();
             }
@@ -952,8 +994,7 @@ public class AiConfigService {
         if (this.cipher.isConfigured()) {
             try {
                 return this.cipher.fingerprint(apiKey);
-            }
-            catch (AiKeyCipher.KeyCipherException ex) {
+            } catch (AiKeyCipher.KeyCipherException ex) {
                 // 指纹不可用时沿用原有 env/null 缓存键回退。
             }
         }
@@ -972,7 +1013,7 @@ public class AiConfigService {
     // ── 可用性 ──────────────────────────────────────────────────────────────
 
     public record Availability(@JsonProperty("available") boolean available, @JsonProperty("code") String code,
-            @JsonProperty("reason") String reason) {
+                               @JsonProperty("reason") String reason) {
     }
 
     /**
@@ -1024,12 +1065,14 @@ public class AiConfigService {
         return new Availability(false, CODE_KEY_MISSING, KEY_MISSING_REASON);
     }
 
-    /** 硬绑定的可用性：只看绑定行，任何异常都明确失败，不回退其他 provider。 */
+    /**
+     * 硬绑定的可用性：只看绑定行，任何异常都明确失败，不回退其他 provider。
+     */
     private Availability boundAvailability(ConfigSnapshot snap, List<AiProvider> providers, Long boundProviderId) {
         AiProvider bound = providers.stream()
-            .filter(provider -> boundProviderId.equals(provider.getId()))
-            .findFirst()
-            .orElse(null);
+                .filter(provider -> boundProviderId.equals(provider.getId()))
+                .findFirst()
+                .orElse(null);
         if (bound == null) {
             return new Availability(false, CODE_UNAVAILABLE, BOUND_PROVIDER_MISSING_REASON);
         }
@@ -1053,7 +1096,9 @@ public class AiConfigService {
 
     // ── env（今天 spring.ai.openai.* 的同一套回落规则） ────────────────────────
 
-    /** {@code spring.ai.openai.api-key}（即 AI_API_KEY，DEEPSEEK_API_KEY 兜底）。 */
+    /**
+     * {@code spring.ai.openai.api-key}（即 AI_API_KEY，DEEPSEEK_API_KEY 兜底）。
+     */
     public String envApiKey() {
         String chatKey = this.chatProperties.getApiKey();
         if (StringUtils.hasText(chatKey)) {
@@ -1065,6 +1110,21 @@ public class AiConfigService {
     public String resolveEnvBaseUrl() {
         String chatBaseUrl = this.chatProperties.getBaseUrl();
         return StringUtils.hasText(chatBaseUrl) ? chatBaseUrl : this.connectionProperties.getBaseUrl();
+    }
+
+    public static String sanitizeBaseUrl(String raw) {
+        if (!StringUtils.hasText(raw)) {
+            return null;
+        }
+        try {
+            URI uri = new URI(raw.trim());
+            if (uri.getScheme() == null || uri.getHost() == null) {
+                return null;
+            }
+            return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), uri.getPath(), null, null).toString();
+        } catch (URISyntaxException ex) {
+            return null;
+        }
     }
 
     public String resolveEnvCompletionsPath() {
@@ -1080,7 +1140,9 @@ public class AiConfigService {
         return DEFAULT_MODEL_FALLBACK;
     }
 
-    /** 全局默认参数（{@code ai_setting}）里的一项；缺省返回空。 */
+    /**
+     * 全局默认参数（{@code ai_setting}）里的一项；缺省返回空。
+     */
     public Optional<String> setting(String key) {
         return Optional.ofNullable(current().settings().get(key)).filter(StringUtils::hasText);
     }
@@ -1088,7 +1150,7 @@ public class AiConfigService {
     // ── 快照与解析结果 ────────────────────────────────────────────────────────
 
     public record ConfigSnapshot(long version, @NonNull List<AiProvider> providers,
-            @NonNull List<AiProviderModel> models, @NonNull Map<String, String> settings) {
+                                 @NonNull List<AiProviderModel> models, @NonNull Map<String, String> settings) {
 
         public ConfigSnapshot {
             providers = List.copyOf(providers);
@@ -1105,11 +1167,11 @@ public class AiConfigService {
      * 一次解析出的运行目标。
      *
      * @param providerId 库内 id；{@code null} = env 合成行（还没被种子写入）
-     * @param apiKey 明文 key（只活在本对象里，不落日志、不出接口）
-     * @param envBacked 是否来自 env 合成行 / {@code key_ref=ENV}
+     * @param apiKey     明文 key（只活在本对象里，不落日志、不出接口）
+     * @param envBacked  是否来自 env 合成行 / {@code key_ref=ENV}
      */
     public record ResolvedProvider(Long providerId, String providerCode, String baseUrl, String completionsPath,
-            String modelId, String apiKey, String fingerprint, boolean envBacked) {
+                                   String modelId, String apiKey, String fingerprint, boolean envBacked) {
 
         @Override
         public String toString() {
@@ -1117,13 +1179,17 @@ public class AiConfigService {
                     + ", modelId=" + this.modelId + ", envBacked=" + this.envBacked + "]";
         }
 
-        /** 运行时缓存键的成分之一（不含明文 key）。 */
+        /**
+         * 运行时缓存键的成分之一（不含明文 key）。
+         */
         public String runtimeKey() {
             return runtimeKeyOf(this);
         }
     }
 
-    /** RuntimeKey = providerId | keyFingerprint | baseUrl | completionsPath（模型刻意不在内）。 */
+    /**
+     * RuntimeKey = providerId | keyFingerprint | baseUrl | completionsPath（模型刻意不在内）。
+     */
     public static String runtimeKeyOf(ResolvedProvider resolved) {
         return String.valueOf(resolved.providerId() == null ? "env" : resolved.providerId()) + "|"
                 + String.valueOf(resolved.fingerprint()) + "|" + String.valueOf(resolved.baseUrl()) + "|"
@@ -1150,6 +1216,7 @@ public class AiConfigService {
             row.put("id", provider.getId() == null ? null : provider.getId().toString());
             row.put("code", provider.getCode());
             row.put("name", provider.getDisplayName());
+            row.put("baseUrl", sanitizeBaseUrl(provider.getBaseUrl()));
             row.put("enabled", provider.isEnabled());
             row.put("keyConfigured", provider.isKeyDeclared());
             row.put("keyRef", provider.getKeyRef());

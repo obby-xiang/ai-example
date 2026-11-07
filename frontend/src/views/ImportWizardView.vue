@@ -210,7 +210,7 @@
       </el-card>
 
       <div class="flex items-center gap-3 mb-3">
-        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'publish'" :disabled="isJobRunning(publishJob)" @click="startPublish">
+        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'publish'" :disabled="isJobRunning(publishJob)" @click="onStartPublishClick">
           {{ t('views.import.publish') }}
         </el-button>
         <span class="text-xs text-[#909399]">
@@ -1686,7 +1686,7 @@ interface StepAdvanceOutcome {
   ok: boolean
   /** 未推进的原因（越界 / 第 1 步 flushEditors 失败） */
   reason?: string
-  /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该警告带进回灌/界面 */
+  /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该中文警告带进模型回灌 */
   syncWarning?: string
   /** 离开第 1 步时**实际写回服务端文件**的配置项（R3-02：回执必须按事实说明） */
   savedDefs?: string[]
@@ -1735,8 +1735,8 @@ async function goStep(next: number, guard?: () => boolean): Promise<StepAdvanceO
   const synced = await syncStepToBackend(generation, taskId.value)
   let syncWarning: string | undefined
   if (!synced.ok) {
-    syncWarning = t('views.import.msg.stepSyncWarning')
-    ElMessage.warning(syncWarning)
+    syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
+    ElMessage.warning(t('views.import.msg.stepSyncWarning'))
   }
   if (generation === taskGeneration) {
     await ensureStepLoaded(next)
@@ -1822,7 +1822,12 @@ interface JobStartOutcome {
   taskId: number | null
   /** 作业已建但本页挂接（问题清单/watcher）失败：仍然不是"未启动" */
   attachError?: string
+  /** 固定安全中文模型回执 */
   error?: string
+  /** 用户界面错误文案 */
+  displayError?: string
+  /** 本函数是否已经完成错误提示 */
+  errorNotified?: boolean
 }
 
 /**
@@ -1837,12 +1842,14 @@ interface JobStartOutcome {
  * 而作业其实已经在后端跑（同一类"说没发生、其实发生了"的失真）。
  */
 async function startJob(kind: 'check' | 'import' | 'publish'): Promise<JobStartOutcome> {
+  const modelKind = kind === 'check' ? '预检查' : kind === 'import' ? '导入' : '发布'
   if (jobStartOwners.has(kind)) {
     return {
       job: null,
       detached: false,
       taskId: taskId.value,
-      error: `${t(`views.import.kinds.${kind}`)}作业正在启动，请勿重复发起`
+      error: `${modelKind}作业正在启动，请勿重复发起`,
+      displayError: t('views.import.msg.jobStartInFlight', { kind: t(`views.import.kinds.${kind}`) })
     }
   }
   const owner = {}
@@ -1858,6 +1865,7 @@ async function startJob(kind: 'check' | 'import' | 'publish'): Promise<JobStartO
     const jobType = kind === 'check' ? 'PRECHECK' : kind === 'import' ? 'IMPORT' : 'PUBLISH'
     let created: Job | null = null
     let attachError: string | undefined
+    let displayError: string | undefined
     try {
       const job = await jobsApi.createJob(forTask, jobType)
       created = job
@@ -1872,23 +1880,33 @@ async function startJob(kind: 'check' | 'import' | 'publish'): Promise<JobStartO
         }
       } catch (error) {
         // 作业已建、只是本页没挂上：带着错误回去，让回执说"已启动但本页未跟踪"
-        attachError = userFacingErrorText(error, '本页未能跟踪作业')
+        attachError = `${modelKind}作业已创建，但本页未能跟踪，请勿重复发起`
+        displayError = userFacingErrorText(error, t('api.error.safeUnknown'))
       }
       // 挂接期间也可能换了任务：返回值必须与真实归属一致（否则回执会说"在本页已启动"）
-      return { job, detached: generation !== taskGeneration, taskId: forTask, attachError }
+      return { job, detached: generation !== taskGeneration, taskId: forTask, attachError, displayError }
     } catch (error) {
       if (created === null) {
-        const reason = userFacingErrorText(error, t('views.import.msg.jobStartFailed'))
-        if (generation === taskGeneration) {
-          ElMessage.error(reason)
+        const displayError = userFacingErrorText(error, t('views.import.msg.jobStartFailed'))
+        const errorNotified = generation === taskGeneration
+        if (errorNotified) {
+          ElMessage.error(displayError)
         }
-        return { job: null, detached: generation !== taskGeneration, taskId: forTask, error: reason }
+        return {
+          job: null,
+          detached: generation !== taskGeneration,
+          taskId: forTask,
+          error: `${modelKind}作业未能启动，请重试`,
+          displayError,
+          errorNotified
+        }
       }
       return {
         job: created,
         detached: generation !== taskGeneration,
         taskId: forTask,
-        attachError: userFacingErrorText(error, '本页未能跟踪作业')
+        attachError: `${modelKind}作业已创建，但本页未能跟踪，请勿重复发起`,
+        displayError: userFacingErrorText(error, t('api.error.safeUnknown'))
       }
     }
   } finally {
@@ -1915,7 +1933,7 @@ type PublishStartOutcome =
   | { kind: 'cancelled' }
   /** 确认窗口期间任务被切换：A 的确认不得落到 B（**没有**建任何作业） */
   | { kind: 'switched'; from: number; to: number | null }
-  | { kind: 'failed'; reason: string }
+  | { kind: 'failed'; reason: string; displayReason: string; notified?: boolean }
   | { kind: 'readonly' }
 
 function syncResolvedPublishMode(mode: ImportMode): void {
@@ -1947,7 +1965,11 @@ async function startPublish(): Promise<PublishStartOutcome> {
   // Minor 1：getTask + 确认框都在 startJob 之前，必须在这之前挡住第二次点击
   // （否则快速双击会弹两个对话框，后端只受理一个，另一次变成多余 409/报错）。
   if (publishPending.value) {
-    return { kind: 'failed', reason: '发布请求正在处理中，请勿重复点击' }
+    return {
+      kind: 'failed',
+      reason: '发布请求正在处理中，请勿重复点击',
+      displayReason: t('views.import.msg.publishPending')
+    }
   }
   // **确认窗口的代次纪律（N2/③）**：模式读取（网络）与用户确认（人）是两个长 await。
   // 用户确认的是**发起时那个任务**；期间换了任务就必须中止 —— 否则会拿 A 的确认在 B 上建发布作业
@@ -1959,9 +1981,14 @@ async function startPublish(): Promise<PublishStartOutcome> {
   try {
     const id = forTask
     if (id === null) {
-      const reason = t('views.import.msg.noTaskBound')
-      ElMessage.warning(reason)
-      return { kind: 'failed', reason }
+      const displayReason = t('views.import.msg.noTaskBound')
+      ElMessage.warning(displayReason)
+      return {
+        kind: 'failed',
+        reason: '尚未绑定任务，本次未启动发布作业',
+        displayReason,
+        notified: true
+      }
     }
     // C-1：模式判定只认任务服务端权威值。读取失败 / settings 不可解析 ⇒ fail-closed（不建作业）。
     const resolution = await resolvePublishMode(id)
@@ -1969,9 +1996,14 @@ async function startPublish(): Promise<PublishStartOutcome> {
       return { kind: 'switched', from: id, to: taskId.value }
     }
     if (!resolution.ok) {
-      const reason = `${resolution.reason}。本次未启动发布作业`
-      ElMessage.error(reason)
-      return { kind: 'failed', reason }
+      const reason = `${resolution.reason}，本次未启动发布作业`
+      ElMessage.error(resolution.displayReason)
+      return {
+        kind: 'failed',
+        reason,
+        displayReason: resolution.displayReason,
+        notified: true
+      }
     }
     syncResolvedPublishMode(resolution.mode)
     // R-09：REPLACE 会删除范围内旧行 ⇒ 复用复选框确认；MERGE 增量更新，免确认。
@@ -1985,7 +2017,12 @@ async function startPublish(): Promise<PublishStartOutcome> {
     publishConflict.value = null
     const started = await startJob('publish')
     if (!started.job) {
-      return { kind: 'failed', reason: t('views.import.msg.jobStartFailed') }
+      return {
+        kind: 'failed',
+        reason: started.error ?? '发布作业未能启动，请重试',
+        displayReason: started.displayError ?? t('views.import.msg.jobStartFailed'),
+        notified: started.errorNotified === true
+      }
     }
     const note = publishStartWarning({ ...started, job: started.job }, id)
     return { kind: 'started', job: started.job, warning: note }
@@ -1995,6 +2032,13 @@ async function startPublish(): Promise<PublishStartOutcome> {
     if (busy.value === 'publish') {
       busy.value = null
     }
+  }
+}
+
+async function onStartPublishClick(): Promise<void> {
+  const outcome = await startPublish()
+  if (outcome.kind === 'failed' && outcome.notified !== true) {
+    ElMessage.warning(outcome.displayReason)
   }
 }
 
@@ -2385,7 +2429,7 @@ function registerHandlers(): void {
       }
     } catch (error) {
       logCaughtError(error, 'import-wizard:request')
-      return { ok: false, reason: `${code} 的编辑区表格未就绪：${t('views.import.msg.editorLoadFailed', { code })}` }
+      return { ok: false, reason: `${code} 的编辑区表格未就绪，请重试` }
     }
   })
 
@@ -2600,7 +2644,7 @@ function jobStartedNote(label: string, started: JobStartOutcome): { ok: true; re
     return null
   }
   const where = started.taskId === null ? '原任务' : `任务 #${started.taskId}`
-  const why = started.detached ? '页面已切换到别的任务，本页未跟踪' : `本页未能跟踪（${started.attachError ?? '未知原因'}）`
+  const why = started.detached ? '页面已切换到别的任务，本页未跟踪' : '本页未能跟踪该作业'
   return {
     ok: true,
     result: `${label}作业 #${started.job.id ?? ''} 已建在${where}（${why}）。作业仍在后端继续，请勿重复发起。`
