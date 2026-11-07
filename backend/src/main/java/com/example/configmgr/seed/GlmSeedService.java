@@ -15,7 +15,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * glm-5.3 种子并集移植：在基座既有 7 个定义之外追加 glm 的 8 个定义与三层级范围数据。
@@ -175,8 +178,8 @@ public class GlmSeedService {
             cf.setCode(f.code());
             cf.setLabel(f.label());
             cf.setFieldType(f.refDefCode() != null ? ConfigField.FieldType.REFERENCE : baseType(f.type()));
-            cf.setRequired(f.required());
-            cf.setKey(f.key());
+            cf.setRequired(f.isRequired());
+            cf.setKey(f.isKey());
             cf.setDefCode(spec.code());
             if (f.type() == GlmType.ENUM) {
                 List<Map<String, String>> opts = new ArrayList<>();
@@ -265,7 +268,7 @@ public class GlmSeedService {
     /** glm ConfigField.dataType 的 7 种取值（glm 实体注释：TEXT/INT/DECIMAL/DATE/BOOL/ENUM/SCOPE）。 */
     private enum GlmType { TEXT, INT, DECIMAL, BOOL, DATE, ENUM, SCOPE }
 
-    private record FieldSpec(String code, String label, GlmType type, boolean required, boolean key,
+    private record FieldSpec(String code, String label, GlmType type, boolean isRequired, boolean isKey,
                              List<String> enumOptions, String refDefCode, String refFieldCode) {
     }
 

@@ -157,7 +157,7 @@ public class JobProgressService {
             heartbeatRegistry.clear(jobId);
         }
         if (!wroteTerminal) {
-            log.debug("Job already terminal, finish ignored (first writer wins) jobId={} status={}",
+            if (log.isDebugEnabled()) log.debug("Job already terminal, finish ignored (first writer wins) jobId={} status={}",
                     jobId, jobStatus);
         }
         // R-152：返回「本次是否实际落写终态」，供 JobTerminalWriter 据此决定是否联动任务态——
@@ -265,7 +265,7 @@ public class JobProgressService {
                 jobItemRepository.finishIfJobStatusAllowed(
                         itemId, itemStatus, processed, total, ITEM_OPEN, allowed) > 0));
         if (!wrote) {
-            log.debug("Item terminal write dropped (parent terminal, item terminal, or item missing) itemId={} status={}",
+            if (log.isDebugEnabled()) log.debug("Item terminal write dropped (parent terminal, item terminal, or item missing) itemId={} status={}",
                     itemId, itemStatus);
         }
         return wrote;
@@ -307,7 +307,7 @@ public class JobProgressService {
                 jobItemRepository.compensateFailureIfInFlight(
                         itemId, processed, total, COMPENSABLE_ITEM, IN_FLIGHT) > 0));
         if (!wrote) {
-            log.debug("Item failure compensation dropped (parent terminal or item already CANCELLED/FAILED) itemId={}", itemId);
+            if (log.isDebugEnabled()) log.debug("Item failure compensation dropped (parent terminal or item already CANCELLED/FAILED) itemId={}", itemId);
         }
         return wrote;
     }
@@ -327,7 +327,7 @@ public class JobProgressService {
             }
             Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
             if (parent == null || !IN_FLIGHT.contains(parent.getStatus())) {
-                log.debug("Item failure compensation not inserted (parent missing or terminal) jobId={} defCode={}",
+                if (log.isDebugEnabled()) log.debug("Item failure compensation not inserted (parent missing or terminal) jobId={} defCode={}",
                         jobId, defCode);
                 return false;
             }
@@ -362,14 +362,14 @@ public class JobProgressService {
                 boolean wrote = jobItemRepository.finishIfJobStatusAllowed(existing.getId(), itemStatus,
                         processed, total, ITEM_OPEN, allowedJobStatuses(itemStatus)) > 0;
                 if (!wrote) {
-                    log.debug("Item mark-final dropped (parent or item terminal) itemId={} jobId={} defCode={} status={}",
+                    if (log.isDebugEnabled()) log.debug("Item mark-final dropped (parent or item terminal) itemId={} jobId={} defCode={} status={}",
                             existing.getId(), jobId, defCode, itemStatus);
                 }
                 return wrote;
             }
             Job parent = jobRepository.findByIdForUpdate(jobId).orElse(null);
             if (parent == null || !allowedJobStatuses(itemStatus).contains(parent.getStatus())) {
-                log.debug("Item mark-final not inserted (parent missing or terminal) jobId={} defCode={} status={}",
+                if (log.isDebugEnabled()) log.debug("Item mark-final not inserted (parent missing or terminal) jobId={} defCode={} status={}",
                         jobId, defCode, itemStatus);
                 return false;
             }

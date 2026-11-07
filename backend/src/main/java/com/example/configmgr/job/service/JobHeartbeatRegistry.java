@@ -33,6 +33,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -222,6 +223,7 @@ public class JobHeartbeatRegistry {
 
     private static final long AUTHORITY_CACHE_MILLIS = 250L;
     private static final long UNKNOWN_CACHE_MILLIS = 100L;
+    private static final long FAILURE_WARN_EVERY = 100L;
 
     private final Clock clock;
     private final StringRedisTemplate redis;
@@ -231,6 +233,8 @@ public class JobHeartbeatRegistry {
     private final Duration runnerActiveTtl;
     private final Duration beatTtl;
     private final AtomicInteger tickCursor = new AtomicInteger();
+    private final AtomicLong authorityReadFailures = new AtomicLong();
+    private final AtomicLong generationWriteFailures = new AtomicLong();
     private final ConcurrentMap<Long, AuthorityCache> authorityCache = new ConcurrentHashMap<>();
 
     /** 进程级共享心跳续期器（懒启动；只在 redis 模式且本实例有在跑 runner 时存在）。 */
@@ -302,8 +306,8 @@ public class JobHeartbeatRegistry {
 
     /** 分片边界续期：DB 仍在途才允许本代 token 写共享加速态。 */
     public void beat(Long jobId) {
-        if (revokedJobIds.contains(jobId) || !databaseInFlight(jobId)) {
-            log.debug("Late beat ignored, job terminal or runner revoked jobId={}", jobId);
+        if (revokedJobIds.contains(jobId) || !isDatabaseInFlight(jobId)) {
+            if (log.isDebugEnabled()) log.debug("Late beat ignored, job terminal or runner revoked jobId={}", jobId);
             return;
         }
         this.lastBeatAtMs.put(jobId, this.clock.millis());
@@ -377,7 +381,7 @@ public class JobHeartbeatRegistry {
     /** 判死撤销写入共享 tombstone；本代之后即使仍存活也不能重建 beat/anchor。 */
     public void revokeRunner(Long jobId) {
         if (!this.activeRunners.remove(jobId) && !this.revokedJobIds.contains(jobId)) {
-            log.debug("No local runner registration, shared runner state revoked anyway jobId={}", jobId);
+            if (log.isDebugEnabled()) log.debug("No local runner registration, shared runner state revoked anyway jobId={}", jobId);
         }
         this.lastBeatAtMs.remove(jobId);
         this.heldJobIds.remove(jobId);
@@ -453,12 +457,12 @@ public class JobHeartbeatRegistry {
             Long jobId = jobs.get((start + examined) % jobs.size());
             examined++;
             if (this.revokedJobIds.contains(jobId) || !this.activeRunners.contains(jobId)
-                    || !databaseInFlight(jobId)) {
+                    || !isDatabaseInFlight(jobId)) {
                 continue;
             }
             batch.add(jobId);
             if (batch.size() >= HEARTBEAT_PIPELINE_BATCH) {
-                if (!writeHeartbeatBatch(batch)) {
+                if (!isHeartbeatBatchWritten(batch)) {
                     batch.clear();
                     break;
                 }
@@ -466,7 +470,7 @@ public class JobHeartbeatRegistry {
             }
         }
         if (!batch.isEmpty() && System.nanoTime() < deadline) {
-            writeHeartbeatBatch(batch);
+            isHeartbeatBatchWritten(batch);
         }
         this.tickCursor.set(start + examined);
         if (examined < jobs.size()) {
@@ -502,7 +506,7 @@ public class JobHeartbeatRegistry {
             });
             svc.scheduleWithFixedDelay(this::tickSafely, periodMs, periodMs, TimeUnit.MILLISECONDS);
             this.ticker = svc;
-            log.debug("Shared heartbeat ticker started periodMs={} beatTtl={}", periodMs, this.beatTtl);
+            if (log.isDebugEnabled()) log.debug("Shared heartbeat ticker started periodMs={} beatTtl={}", periodMs, this.beatTtl);
         }
     }
 
@@ -578,7 +582,6 @@ public class JobHeartbeatRegistry {
             }
             return new SharedBeat(SharedBeatState.STALE, instanceOf(anchor));
         } catch (RuntimeException e) {
-            log.debug("Shared heartbeat read failed, fail-closed this round jobId={}", jobId, e);
             return SharedBeat.unavailable();
         }
     }
@@ -639,7 +642,7 @@ public class JobHeartbeatRegistry {
      * 持有者死后对端要等 65m，已被本口径取代。
      */
     public void hold(Long jobId) {
-        if (!databaseInFlight(jobId)) {
+        if (!isDatabaseInFlight(jobId)) {
             return;
         }
         this.heldJobIds.add(jobId);
@@ -650,7 +653,7 @@ public class JobHeartbeatRegistry {
     /** 解除心跳判死豁免（<b>幂等</b>）：未 hold 的作业调用无副作用。 */
     public void release(Long jobId) {
         this.heldJobIds.remove(jobId);
-        if (databaseInFlight(jobId)) {
+        if (isDatabaseInFlight(jobId)) {
             writeSharedBeat(jobId);
         }
     }
@@ -675,6 +678,7 @@ public class JobHeartbeatRegistry {
         }
         int cleaned = 0;
         int inspected = 0;
+        boolean malformedFieldLogged = false;
         try (Cursor<Map.Entry<Object, Object>> cursor = redis.opsForHash().scan(hostIndexKey(),
                 ScanOptions.scanOptions().count(CLEANUP_SCAN_COUNT).build())) {
             while (cursor.hasNext() && inspected < maxKeys) {
@@ -684,7 +688,10 @@ public class JobHeartbeatRegistry {
                 try {
                     jobId = Long.valueOf(String.valueOf(entry.getKey()));
                 } catch (NumberFormatException ex) {
-                    log.debug("Runner host index contains a non-numeric job id field={}", entry.getKey(), ex);
+                    if (!malformedFieldLogged) {
+                        log.warn("Runner host index contains a non-numeric job id field={}", entry.getKey(), ex);
+                        malformedFieldLogged = true;
+                    }
                     continue;
                 }
                 if (cleanupDeadLocalRunner(jobId, String.valueOf(entry.getValue()))) {
@@ -837,7 +844,7 @@ public class JobHeartbeatRegistry {
         return sep < 0 ? value : value.substring(0, sep + 1);
     }
 
-    private boolean databaseInFlight(Long jobId) {
+    private boolean isDatabaseInFlight(Long jobId) {
         return readAuthority(jobId, false) != AuthorityState.TERMINAL;
     }
 
@@ -858,8 +865,11 @@ public class JobHeartbeatRegistry {
             this.authorityCache.put(jobId, new AuthorityCache(current, now + AUTHORITY_CACHE_MILLIS));
             return current;
         } catch (RuntimeException ex) {
-            log.debug("Authoritative job state read unknown; liveness renewal continues jobId={}",
-                    jobId, ex);
+            long failures = this.authorityReadFailures.incrementAndGet();
+            if (failures == 1 || failures % FAILURE_WARN_EVERY == 0) {
+                log.warn("Authoritative job state read unknown; liveness renewal continues jobId={}",
+                        jobId, ex);
+            }
             this.authorityCache.put(jobId, new AuthorityCache(AuthorityState.UNKNOWN, now + UNKNOWN_CACHE_MILLIS));
             return AuthorityState.UNKNOWN;
         }
@@ -875,7 +885,7 @@ public class JobHeartbeatRegistry {
             return this.jobRepository.findCancelStateById(jobId)
                     .map(JobRepository.CancelState::getCancelVersion).orElse(null);
         } catch (RuntimeException ex) {
-            log.debug("Cancel version unavailable; existing runner fence preserved jobId={}", jobId, ex);
+            log.warn("Cancel version unavailable; existing runner fence preserved jobId={}", jobId, ex);
             return null;
         }
     }
@@ -885,7 +895,7 @@ public class JobHeartbeatRegistry {
             return;
         }
         String value = generationValue(jobId, this.clock.millis());
-        if (writeGeneration(key(jobId), jobId, runnerActiveTtl, value)) {
+        if (isGenerationWritten(key(jobId), jobId, runnerActiveTtl, value)) {
             writeRunnerIndex(jobId, value);
         }
     }
@@ -895,14 +905,14 @@ public class JobHeartbeatRegistry {
                 || revokedJobIds.contains(jobId)) {
             return;
         }
-        writeGeneration(beatKey(jobId), jobId, beatTtl);
+        isGenerationWritten(beatKey(jobId), jobId, beatTtl);
     }
 
-    private boolean writeGeneration(String redisKey, Long jobId, Duration ttl) {
-        return writeGeneration(redisKey, jobId, ttl, generationValue(jobId, this.clock.millis()));
+    private boolean isGenerationWritten(String redisKey, Long jobId, Duration ttl) {
+        return isGenerationWritten(redisKey, jobId, ttl, generationValue(jobId, this.clock.millis()));
     }
 
-    private boolean writeGeneration(String redisKey, Long jobId, Duration ttl, String value) {
+    private boolean isGenerationWritten(String redisKey, Long jobId, Duration ttl, String value) {
         String prefix = generationPrefix(jobId);
         if (prefix == null) {
             return false;
@@ -912,12 +922,15 @@ public class JobHeartbeatRegistry {
                     value, Long.toString(ttl.toMillis()));
             return written != null && written > 0L;
         } catch (RuntimeException ex) {
-            log.debug("Generation-fenced runner write failed jobId={}", jobId, ex);
+            long failures = this.generationWriteFailures.incrementAndGet();
+            if (failures == 1 || failures % FAILURE_WARN_EVERY == 0) {
+                log.warn("Generation-fenced runner write failed jobId={}", jobId, ex);
+            }
             return false;
         }
     }
 
-    private boolean writeHeartbeatBatch(List<Long> jobIds) {
+    private boolean isHeartbeatBatchWritten(List<Long> jobIds) {
         if (jobIds.isEmpty()) {
             return true;
         }
@@ -935,18 +948,7 @@ public class JobHeartbeatRegistry {
             return true;
         }
         try {
-            List<Object> activeResults = redis.executePipelined((RedisCallback<Object>) connection -> {
-                for (int i = 0; i < candidates.size(); i++) {
-                    Long jobId = candidates.get(i);
-                    byte[] value = bytes(values.get(i));
-                    byte[] generation = bytes(generationPrefix(jobId));
-                    connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
-                            bytes(key(jobId)), generation, value, bytes(Long.toString(runnerActiveTtl.toMillis())));
-                    connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
-                            bytes(beatKey(jobId)), generation, value, bytes(Long.toString(beatTtl.toMillis())));
-                }
-                return null;
-            });
+            List<Object> activeResults = writeActiveHeartbeatBatch(candidates, values);
             if (activeResults == null || activeResults.size() != candidates.size() * 2) {
                 log.warn("Generation-fenced heartbeat result shape mismatch; host index renewal skipped");
                 return false;
@@ -963,31 +965,50 @@ public class JobHeartbeatRegistry {
             if (indexJobIds.isEmpty()) {
                 return true;
             }
-            List<Object> indexResults = redis.executePipelined((RedisCallback<Object>) connection -> {
-                byte[] hostIndex = bytes(hostIndexKey());
-                for (int i = 0; i < indexJobIds.size(); i++) {
-                    connection.eval(bytes(WRITE_INDEX_LUA), ReturnType.INTEGER, 1, hostIndex,
-                            bytes(indexJobIds.get(i).toString()), bytes(indexValues.get(i)),
-                            bytes(Long.toString(runnerActiveTtl.toMillis())));
-                }
-                return null;
-            });
-            if (indexResults == null || indexResults.size() != indexJobIds.size()) {
-                log.warn("Runner host index renewal result shape mismatch; active key TTL remains authoritative");
-                return false;
-            }
-            for (Object result : indexResults) {
-                if (!(result instanceof Number number) || number.longValue() <= 0L) {
-                    log.warn("Runner host index renewal failed; active key TTL remains authoritative");
-                    return false;
-                }
-            }
-            return true;
+            return isRunnerIndexBatchWritten(indexJobIds, indexValues);
         } catch (RuntimeException ex) {
             log.warn("Generation-fenced heartbeat or host index pipeline failed, remainder of tick skipped",
                     ex);
             return false;
         }
+    }
+
+    private List<Object> writeActiveHeartbeatBatch(List<Long> candidates, List<String> values) {
+        return ObjectUtils.getIfNull(redis.executePipelined((RedisCallback<Object>) connection -> {
+            for (int i = 0; i < candidates.size(); i++) {
+                Long jobId = candidates.get(i);
+                byte[] value = bytes(values.get(i));
+                byte[] generation = bytes(generationPrefix(jobId));
+                connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
+                        bytes(key(jobId)), generation, value, bytes(Long.toString(runnerActiveTtl.toMillis())));
+                connection.eval(bytes(WRITE_GENERATION_LUA), ReturnType.INTEGER, 1,
+                        bytes(beatKey(jobId)), generation, value, bytes(Long.toString(beatTtl.toMillis())));
+            }
+            return null;
+        }), List::of);
+    }
+
+    private boolean isRunnerIndexBatchWritten(List<Long> indexJobIds, List<String> indexValues) {
+        List<Object> indexResults = redis.executePipelined((RedisCallback<Object>) connection -> {
+            byte[] hostIndex = bytes(hostIndexKey());
+            for (int i = 0; i < indexJobIds.size(); i++) {
+                connection.eval(bytes(WRITE_INDEX_LUA), ReturnType.INTEGER, 1, hostIndex,
+                        bytes(indexJobIds.get(i).toString()), bytes(indexValues.get(i)),
+                        bytes(Long.toString(runnerActiveTtl.toMillis())));
+            }
+            return null;
+        });
+        if (indexResults == null || indexResults.size() != indexJobIds.size()) {
+            log.warn("Runner host index renewal result shape mismatch; active key TTL remains authoritative");
+            return false;
+        }
+        for (Object result : indexResults) {
+            if (!(result instanceof Number number) || number.longValue() <= 0L) {
+                log.warn("Runner host index renewal failed; active key TTL remains authoritative");
+                return false;
+            }
+        }
+        return true;
     }
 
     private void writeRevocation(Long jobId, boolean includeAnchor) {
@@ -1060,7 +1081,7 @@ public class JobHeartbeatRegistry {
     }
 
     private void rearmSharedBeatForGrace(Long jobId) {
-        if (writeGeneration(beatKey(jobId), jobId, beatTtl)) {
+        if (isGenerationWritten(beatKey(jobId), jobId, beatTtl)) {
             log.warn("runner-active anchor delete failed, short-TTL heartbeat rewritten beatTtl={} jobId={}",
                     beatTtl, jobId);
         }

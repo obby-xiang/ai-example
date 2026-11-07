@@ -252,7 +252,7 @@ public class TaskSseService {
      * 订阅时补发首帧（HEARTBEAT）：{@link #subscribe} 在挂表之后立即调一次。
      *
      * <p>
-     * <b>消费 {@link #sendFrame} 的返回值</b>（2026-10-10 复核 S3-2 收口）：该方法的契约是
+     * <b>消费 {@link #isFrameSent} 的返回值</b>（2026-10-10 复核 S3-2 收口）：该方法的契约是
      * "false = 该 emitter 已不可用，应从推送表摘除"，{@link #publish} 照着做，而本方法原来把返回值
      * 丢掉了 —— 首帧写超时/失败不摘除时，该 emitter 会滞留推送表，其后每次 {@code publish} 都要
      * 陪跑它一份写预算等待，最长活到下一次重试摘除或 emitter 生命周期超时。现按同一口径摘除
@@ -271,17 +271,17 @@ public class TaskSseService {
      * 真实 emitter 首帧不失败），单测只能用桩件 emitter 直呼本方法，故不另开测试专用入口。
      *
      * <p>
-     * 序列化失败仍只记 DEBUG、不动推送表：口径同 {@link #publish}（那是服务端自身的数据问题，
+     * 序列化失败仍只记 WARN、不动推送表：口径同 {@link #publish}（那是服务端自身的数据问题，
      * 不是某个订阅者的连接问题）。
      */
     void sendEvent(Long taskId, SseEmitter emitter, String type, Object data) {
         try {
             String json = objectMapper.writeValueAsString(Map.of("type", type, "data", data));
-            if (!sendFrame(emitter, json, "initial HEARTBEAT frame taskId=" + taskId)) {
+            if (!isFrameSent(emitter, json, "initial HEARTBEAT frame taskId=" + taskId)) {
                 remove(taskId, emitter);
             }
         } catch (Exception e) {
-            log.debug("Failed to send SSE heartbeat frame taskId={}", taskId, e);
+            log.warn("Failed to send SSE heartbeat frame taskId={}", taskId, e);
         }
     }
 
@@ -310,7 +310,7 @@ public class TaskSseService {
 
         List<SseEmitter> dead = null;
         for (SseEmitter emitter : snapshot) {
-            if (!sendFrame(emitter, json, context)) {
+            if (!isFrameSent(emitter, json, context)) {
                 if (dead == null) {
                     dead = new ArrayList<>();
                 }
@@ -483,8 +483,6 @@ public class TaskSseService {
         } catch (RuntimeException e) {
             // 调度器拒绝（关停中）：撤销排期标记，后续 publish 仍能重试
             this.retryPending.remove(taskId);
-            log.debug("Task SSE cross-instance registration retry not scheduled taskId={}",
-                    taskId, e);
         }
     }
 
@@ -549,12 +547,12 @@ public class TaskSseService {
      * 中断（{@link SseWriteBudget.Outcome#INTERRUPTED}）不算不可用：那是<b>调用方</b>（作业线程被取消）
      * 的状态，与这条连接无关，保留订阅者。
      */
-    private boolean sendFrame(SseEmitter emitter, String json, String context) {
+    private boolean isFrameSent(SseEmitter emitter, String json, String context) {
         SseWriteBudget.Result result = this.writeBudget.write(() -> emitter.send(SseEmitter.event().data(json)));
         return switch (result.outcome()) {
             case SENT -> true;
             case FAILED -> {
-                log.debug("Failed to send SSE context={}", context, result.failure());
+                if (log.isDebugEnabled()) log.debug("Failed to send SSE context={}", context, result.failure());
                 yield false;
             }
             case TIMED_OUT -> {

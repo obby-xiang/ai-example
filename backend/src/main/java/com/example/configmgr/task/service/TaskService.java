@@ -49,6 +49,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -293,10 +295,10 @@ public class TaskService {
     public static boolean isContinuationEligible(Task task, Task.TaskType type, String title) {
         return task != null && task.getStatus() == Task.TaskStatus.ACTIVE
                 && StringUtils.isNotBlank(task.getAiCreateKey())
-                && sameCreateIntent(task, type, normalizeCreateName(title));
+                && isSameCreateIntent(task, type, normalizeCreateName(title));
     }
 
-    private static boolean sameCreateIntent(Task task, Task.TaskType type, String normalizedTitle) {
+    private static boolean isSameCreateIntent(Task task, Task.TaskType type, String normalizedTitle) {
         return task.getType() == type && normalizeCreateName(task.getTitle()).equals(normalizedTitle);
     }
 
@@ -305,8 +307,17 @@ public class TaskService {
             return new LinkedHashMap<>();
         }
         try {
-            return objectMapper.readValue(task.getSettingsJson(), new TypeReference<LinkedHashMap<String, Object>>() {
-            });
+            Map<String, Object> settings = objectMapper.readValue(
+                    task.getSettingsJson(), new TypeReference<LinkedHashMap<String, Object>>() {
+                    });
+            if (settings == null) {
+                throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                        "Task settings are unreadable; the creation slot cannot be reused safely");
+            }
+            return settings;
+        }
+        catch (CodedIllegalStateException ex) {
+            throw ex;
         }
         catch (Exception ex) {
             throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
@@ -501,7 +512,7 @@ public class TaskService {
      * 只有那一份；本类不再保留副本）。{@code DONE} 是两类任务通用的完成态。
      * ExportJobRunner 写 {@code EXPORT}、PublishJobRunner 写 {@code PUBLISH}，均在各自序列内。
      */
-    private static final java.util.regex.Pattern STEP_FORMAT = java.util.regex.Pattern.compile("^[A-Z][A-Z0-9_]*$");
+    private static final Pattern STEP_FORMAT = Pattern.compile("^[A-Z][A-Z0-9_]*$");
 
     @Transactional
     public Task goToStep(Long taskId, String step) {
@@ -569,7 +580,7 @@ public class TaskService {
                 ? Job.JobType.PUBLISH : Job.JobType.EXPORT;
         boolean hasFinalJob = jobRepository
                 .findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(task.getId(), finalJobType,
-                        java.util.Set.of(Job.JobStatus.COMPLETED))
+                        Set.of(Job.JobStatus.COMPLETED))
                 .isPresent();
         if (hasFinalJob) {
             throw new ConflictException(ErrorCodes.TASK_FINALIZED,
@@ -756,15 +767,7 @@ public class TaskService {
         log.info("audit action=DELETE_TASK object=task#{} before=type={} status={} jobs={} stagingRows={} files={} source=ui/api at={}",
                 taskId, task.getType(), task.getStatus(), jobIds.size(), stagingRows, files.size(), LocalDateTime.now());
 
-        if (!jobIds.isEmpty()) {
-            issueRepository.deleteByJobIdIn(jobIds);
-            jobItemRepository.deleteByJobIdIn(jobIds);
-        }
-        jobRepository.deleteByTaskId(taskId);
-        stagingRowRepository.deleteByTaskId(taskId);
-        taskItemRepository.deleteByTaskId(taskId);
-        taskFileRepository.deleteByTaskId(taskId);
-        taskRepository.deleteById(taskId);
+        deleteTaskRecords(taskId, jobIds);
 
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
@@ -776,6 +779,18 @@ public class TaskService {
         } else {
             deletePhysicalFiles(files);
         }
+    }
+
+    private void deleteTaskRecords(Long taskId, List<Long> jobIds) {
+        if (!jobIds.isEmpty()) {
+            issueRepository.deleteByJobIdIn(jobIds);
+            jobItemRepository.deleteByJobIdIn(jobIds);
+        }
+        jobRepository.deleteByTaskId(taskId);
+        stagingRowRepository.deleteByTaskId(taskId);
+        taskItemRepository.deleteByTaskId(taskId);
+        taskFileRepository.deleteByTaskId(taskId);
+        taskRepository.deleteById(taskId);
     }
 
     /** Minor 6：单个文件删除失败不阻断其余文件（FileStorageService 自身吞 IOException，这里兜运行时异常）。 */

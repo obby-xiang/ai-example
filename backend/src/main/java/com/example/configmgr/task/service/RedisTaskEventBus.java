@@ -178,10 +178,10 @@ public class RedisTaskEventBus implements TaskEventBus {
             log.warn("Task SSE cross-instance publish failed, local delivery unaffected taskId={} reason=redis-template-missing", taskId);
             return false;
         }
-        if (redisKnownDown()) {
+        if (isRedisKnownDown()) {
             // 已知不可用：不碰 Redis 命令，作业事务线程不再按帧等命令超时
             this.publishFailures.incrementAndGet();
-            log.debug("Task SSE cross-instance publish skipped, Redis known down taskId={}", taskId);
+            if (log.isDebugEnabled()) log.debug("Task SSE cross-instance publish skipped, Redis known down taskId={}", taskId);
             return false;
         }
         try {
@@ -205,7 +205,7 @@ public class RedisTaskEventBus implements TaskEventBus {
         if (!redisMode) {
             return true;
         }
-        if (redisKnownDown()) {
+        if (isRedisKnownDown()) {
             // 已知不可用：不建/不启订阅容器（容器启动同样会等连接超时）
             this.subscribers.remove(taskId, onFrame);
             this.subscribeFailures.incrementAndGet();
@@ -253,7 +253,7 @@ public class RedisTaskEventBus implements TaskEventBus {
         try {
             target.removeMessageListener(listener);
         } catch (RuntimeException e) {
-            log.debug("Task SSE cross-instance unsubscribe failed taskId={}", taskId, e);
+            log.warn("Task SSE cross-instance unsubscribe failed taskId={}", taskId, e);
         }
     }
 
@@ -330,7 +330,7 @@ public class RedisTaskEventBus implements TaskEventBus {
             try {
                 current.destroy();
             } catch (Exception e) {
-                log.debug("Task SSE cross-instance container shutdown failed", e);
+                log.warn("Task SSE cross-instance container shutdown failed", e);
             }
         }
         ThreadPoolExecutor ownedDispatch;
@@ -356,7 +356,7 @@ public class RedisTaskEventBus implements TaskEventBus {
      * <p>恢复感知：已知 DOWN 时每 {@link RedisAvailability#NEGATIVE_TTL_MS} 才真探活一次
      * （{@code isAvailable()}；在其负缓存窗口内本身也不会发命令），避免每帧探活/每帧等超时。
      */
-    private boolean redisKnownDown() {
+    private boolean isRedisKnownDown() {
         RedisAvailability availability = this.redisAvailability;
         if (availability == null) {
             return false;
@@ -404,7 +404,7 @@ public class RedisTaskEventBus implements TaskEventBus {
     private RedisMessageListenerContainer startContainer() {
         RedisConnectionFactory factory = this.redis == null ? null : this.redis.getConnectionFactory();
         if (factory == null) {
-            log.debug("No Redis connection factory, cross-instance task SSE subscribe disabled");
+            if (log.isDebugEnabled()) log.debug("No Redis connection factory, cross-instance task SSE subscribe disabled");
             return null;
         }
         try {
@@ -509,7 +509,7 @@ public class RedisTaskEventBus implements TaskEventBus {
                     log.warn("Task SSE dispatch pool saturated, frame dropped and remote replays by snapshot polling "
                             + "dispatchRejections={}", total, e);
                 } else {
-                    log.debug("Task SSE dispatch pool saturated, frame dropped dispatchRejections={}", total, e);
+                    if (log.isDebugEnabled()) log.debug("Task SSE dispatch pool saturated, frame dropped dispatchRejections={}", total, e);
                 }
             }
         }
@@ -542,7 +542,7 @@ public class RedisTaskEventBus implements TaskEventBus {
                     log.warn("Task SSE subscription pool saturated, running subscribe/unsubscribe inline on caller "
                             + "subscriptionRejections={}", total, e);
                 } else {
-                    log.debug("Task SSE subscription pool saturated, running inline subscriptionRejections={}", total, e);
+                    if (log.isDebugEnabled()) log.debug("Task SSE subscription pool saturated, running inline subscriptionRejections={}", total, e);
                 }
                 task.run();
             }

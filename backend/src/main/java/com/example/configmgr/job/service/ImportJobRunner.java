@@ -27,7 +27,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * 导入作业执行器：逐配置项读文件 → 写暂存行（含发布时并发冲突检测的 baseVersion 快照）。
@@ -63,161 +66,176 @@ public class ImportJobRunner {
     public void run(Job job) {
         final Long jobId = job.getId();
         final Long taskId = job.getTaskId();
-
-        // BZ-02 回滚收敛：本方法 @Transactional，异常路径的 terminalWriter.complete 走 afterCommit ——
-        // 事务以回滚结局收场（提交期约束失败 / 标了 rollback-only 后的 UnexpectedRollbackException）时
-        // 终态写一次都不会执行，作业停在 RUNNING：进度已被 REQUIRES_NEW 独立提交，同任务重跑又被
-        // JOB_ALREADY_RUNNING 挡住，只能等看门狗 30min 上限。这里登记与 ExportJobRunner 同款的
-        // afterCompletion 兜底。
         registerRollbackConvergence(job);
-
-        boolean cancelled = false;
-        int errorCount = 0;
-        int processedRows = 0;
-        int discoveredRows = 0; // 已发现行数（已开工配置项从文件读到的行数合计）
-        int startedItems = 0;   // 已开工配置项数
-
+        RunState state = new RunState();
         var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
-
-        // BZ-01 零数据不假成功：零条目时循环一次都不跑，errorCount 恒 0 ⇒ 旧实现报 COMPLETED。
         if (items.isEmpty()) {
             issueRepository.save(jobLevelIssue(jobId, taskId));
             terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
                     doneEvent(job, Job.JobStatus.FAILED, 1));
             return;
         }
-
         List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
         List<String> sorted = dependencyResolver.sort(defCodes);
-
-        // ③ 分母下限：导入行数来自上传文件，开工前没有便宜来源 → 先按"配置项条数"写下界
-        //    （每个未开工配置项各预留 1 行），读到文件后并入已发现行数并上调。
-        int totalRows = JobProgressTotals.denominator(0, 0, sorted.size());
-        progressService.markRunning(jobId, totalRows);
-
+        state.totalRows = JobProgressTotals.denominator(0, 0, sorted.size());
+        progressService.markRunning(jobId, state.totalRows);
         try {
-            for (String defCode : sorted) {
-                if (cancellationRegistry.isCancelled(jobId)) {
-                    cancelled = true;
-                    break;
-                }
-                Long itemId = progressService.startItem(jobId, defCode);
-                if (itemId == null) {
-                    // 父作业已终态（收敛已提交）：终态作业下不得再新增在途条目（评审 I-1）。
-                    // 走既有取消收尾：本方法末尾的终态写会被 CAS 丢弃，不会翻写任务态、不发 JOB_DONE。
-                    cancelled = true;
-                    break;
-                }
-                startedItems++;
-                int defTotal = 0;
-                int defProcessed = 0;
-
-                try {
-                    ConfigDefinition def = definitionService.findByCode(defCode);
-                    List<ConfigField> keyFields = def.getFields().stream()
-                            .filter(ConfigField::isKey).toList();
-
-                    // Clear old staging rows for this def
-                    stagingRowRepository.deleteByTaskIdAndDefCode(taskId, defCode);
-
-                    // Find file
-                    Optional<TaskFile> fileOpt = taskFileRepository
-                            .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
-                    if (fileOpt.isEmpty()) {
-                        throw new RuntimeException("Uploaded file not found");
-                    }
-
-                    byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
-                    List<Map<String, Object>> rows = excelReader.read(def, fileBytes);
-                    defTotal = rows.size();
-                    discoveredRows += defTotal;
-                    totalRows = JobProgressTotals.denominator(0, discoveredRows, sorted.size() - startedItems);
-                    progressService.updateItem(itemId, 0, defTotal);
-                    progressService.snapshot(jobId, processedRows, totalRows);
-
-                    // Write to staging
-                    String scopeType = def.getLevel() == ConfigDefinition.ConfigLevel.GLOBAL ? "GLOBAL"
-                            : def.getLevel() == ConfigDefinition.ConfigLevel.REGION ? "REGION" : "PROJECT";
-
-                    List<ConfigStagingRow> stagingBatch = new ArrayList<>();
-                    for (int i = 0; i < rows.size(); i++) {
-                        Map<String, Object> row = rows.get(i);
-                        String rowKey = buildRowKey(row, keyFields);
-                        String scopeKey = (String) row.get(def.getLevel() == ConfigDefinition.ConfigLevel.REGION
-                                ? "regionCode" : "projectCode");
-
-                        ConfigStagingRow sr = new ConfigStagingRow();
-                        sr.setTaskId(taskId);
-                        sr.setDefCode(defCode);
-                        sr.setRowKey(rowKey);
-                        sr.setScopeType(scopeType);
-                        sr.setScopeKey(scopeKey);
-                        sr.setDataJson(objectMapper.writeValueAsString(row));
-                        sr.setStatus("STAGED");
-                        // 记录导入时刻的已发布行版本号，供发布时做并发冲突检测（新增行记 null）
-                        sr.setBaseVersion(dataRowRepository
-                                .findRow(defCode, scopeType, scopeKey, rowKey)
-                                .map(ConfigDataRow::getVersion)
-                                .orElse(null));
-                        stagingBatch.add(sr);
-
-                        if (stagingBatch.size() >= appProperties.getJob().getBatchSize()) {
-                            stagingRowRepository.saveAll(stagingBatch);
-                            defProcessed += stagingBatch.size();
-                            processedRows += stagingBatch.size();
-                            stagingBatch.clear();
-                            Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                            // ⑤ 快照与 SSE 事件同数同刻：先落库、再推送，消除"事件领先于库"
-                            progressService.updateItem(itemId, defProcessed, defTotal);
-                            progressService.snapshot(jobId, processedRows, totalRows);
-                            publishProgress(job, def, processedRows, totalRows);
-                            if (cancellationRegistry.isCancelled(jobId)) {
-                                cancelled = true;
-                                progressService.finishItem(itemId, "CANCELLED", defProcessed, defTotal);
-                                break;
-                            }
-                        }
-                    }
-                    if (!stagingBatch.isEmpty()) {
-                        stagingRowRepository.saveAll(stagingBatch);
-                        defProcessed += stagingBatch.size();
-                        processedRows += stagingBatch.size();
-                        progressService.updateItem(itemId, defProcessed, defTotal);
-                        progressService.snapshot(jobId, processedRows, totalRows);
-                    }
-                    if (cancelled) break;
-
-                    progressService.finishItem(itemId, "COMPLETED", defProcessed, defTotal);
-                    taskService.updateItemStatus(taskId, defCode, "IMPORTED");
-
-                } catch (Exception e) {
-                    log.error("Import item failed defCode={}", defCode, e);
-                    ValidationIssue issue = new ValidationIssue();
-                    issue.setJobId(jobId);
-                    issue.setDefCode(defCode);
-                    issue.setSeverity(ValidationIssue.Severity.ERROR);
-                    issue.setMessage("导入过程出错，请查看服务日志或稍后重试");
-                    issueRepository.save(issue);
-                    errorCount++;
-                    // I-4：成功路径已先写条目 COMPLETED（随后任务项更新失败），catch 走补偿降级
-                    progressService.compensateItemFailure(itemId, defProcessed, defTotal);
-                    taskService.updateItemStatus(taskId, defCode, "FAILED");
-                }
-            }
+            processItems(job, sorted, state);
         } catch (Exception e) {
             log.error("Import job failed", e);
-            errorCount++;
-            terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
-                    processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED, errorCount));
+            state.errorCount++;
+            terminalWriter.complete(job, Job.JobStatus.FAILED, state.errorCount, 0,
+                    state.processedRows, state.totalRows, doneEvent(job, Job.JobStatus.FAILED, state.errorCount));
             return;
         }
+        Job.JobStatus status = state.cancelled ? Job.JobStatus.CANCELLED
+                : (state.errorCount > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+        state.totalRows = JobProgressTotals.denominator(0, state.discoveredRows, 0);
+        terminalWriter.complete(job, status, state.errorCount, 0, state.processedRows, state.totalRows,
+                doneEvent(job, status, state.errorCount));
+    }
 
-        Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
-                : (errorCount > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-        // 终态分母回归"真实工作量"（未开工预留清零）：全部跑完时 processed==total→100%
-        totalRows = JobProgressTotals.denominator(0, discoveredRows, 0);
-        terminalWriter.complete(job, status, errorCount, 0, processedRows, totalRows,
-                doneEvent(job, status, errorCount));
+    private void processItems(Job job, List<String> sorted, RunState state) {
+        for (String defCode : sorted) {
+            if (cancellationRegistry.isCancelled(job.getId())) {
+                state.cancelled = true;
+                break;
+            }
+            Long itemId = progressService.startItem(job.getId(), defCode);
+            if (itemId == null) {
+                state.cancelled = true;
+                break;
+            }
+            state.startedItems++;
+            processItem(job, defCode, itemId, sorted.size(), state);
+            if (state.cancelled) {
+                break;
+            }
+        }
+    }
+
+    private void processItem(Job job, String defCode, Long itemId, int itemCount, RunState state) {
+        ItemState item = new ItemState();
+        try {
+            importItem(job, defCode, itemId, itemCount, state, item);
+        } catch (Exception e) {
+            handleItemFailure(job, defCode, itemId, state, item, e);
+        }
+    }
+
+    private void importItem(Job job, String defCode, Long itemId, int itemCount,
+                            RunState state, ItemState item) throws Exception {
+        ConfigDefinition def = definitionService.findByCode(defCode);
+        List<ConfigField> keyFields = def.getFields().stream()
+                .filter(ConfigField::isKey).toList();
+        stagingRowRepository.deleteByTaskIdAndDefCode(job.getTaskId(), defCode);
+        Optional<TaskFile> fileOpt = taskFileRepository
+                .findByTaskIdAndDefCodeAndFileType(job.getTaskId(), defCode, "UPLOAD");
+        if (fileOpt.isEmpty()) {
+            throw new RuntimeException("Uploaded file not found");
+        }
+        byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
+        List<Map<String, Object>> rows = excelReader.read(def, fileBytes);
+        item.defTotal = rows.size();
+        state.discoveredRows += item.defTotal;
+        state.totalRows = JobProgressTotals.denominator(0, state.discoveredRows,
+                itemCount - state.startedItems);
+        progressService.updateItem(itemId, 0, item.defTotal);
+        progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+        String scopeType = def.getLevel() == ConfigDefinition.ConfigLevel.GLOBAL ? "GLOBAL"
+                : def.getLevel() == ConfigDefinition.ConfigLevel.REGION ? "REGION" : "PROJECT";
+        stageRows(job, def, defCode, scopeType, keyFields, rows, itemId, state, item);
+        if (state.cancelled) {
+            return;
+        }
+        progressService.finishItem(itemId, "COMPLETED", item.defProcessed, item.defTotal);
+        taskService.updateItemStatus(job.getTaskId(), defCode, "IMPORTED");
+    }
+
+    private void stageRows(Job job, ConfigDefinition def, String defCode, String scopeType,
+                           List<ConfigField> keyFields, List<Map<String, Object>> rows, Long itemId,
+                           RunState state, ItemState item) throws Exception {
+        List<ConfigStagingRow> stagingBatch = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            stagingBatch.add(stagingRow(job, def, defCode, scopeType, keyFields, row));
+            if (stagingBatch.size() >= appProperties.getJob().getBatchSize()) {
+                saveStagingBatch(job, def, itemId, state, item, stagingBatch);
+                if (state.cancelled) {
+                    break;
+                }
+            }
+        }
+        if (!stagingBatch.isEmpty()) {
+            stagingRowRepository.saveAll(stagingBatch);
+            item.defProcessed += stagingBatch.size();
+            state.processedRows += stagingBatch.size();
+            progressService.updateItem(itemId, item.defProcessed, item.defTotal);
+            progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+        }
+    }
+
+    private ConfigStagingRow stagingRow(Job job, ConfigDefinition def, String defCode, String scopeType,
+                                        List<ConfigField> keyFields, Map<String, Object> row) throws Exception {
+        String rowKey = buildRowKey(row, keyFields);
+        String scopeKey = (String) row.get(def.getLevel() == ConfigDefinition.ConfigLevel.REGION
+                ? "regionCode" : "projectCode");
+        ConfigStagingRow sr = new ConfigStagingRow();
+        sr.setTaskId(job.getTaskId());
+        sr.setDefCode(defCode);
+        sr.setRowKey(rowKey);
+        sr.setScopeType(scopeType);
+        sr.setScopeKey(scopeKey);
+        sr.setDataJson(objectMapper.writeValueAsString(row));
+        sr.setStatus("STAGED");
+        sr.setBaseVersion(dataRowRepository
+                .findRow(defCode, scopeType, scopeKey, rowKey)
+                .map(ConfigDataRow::getVersion)
+                .orElse(null));
+        return sr;
+    }
+
+    private void saveStagingBatch(Job job, ConfigDefinition def, Long itemId, RunState state,
+                                  ItemState item, List<ConfigStagingRow> stagingBatch) throws InterruptedException {
+        stagingRowRepository.saveAll(stagingBatch);
+        item.defProcessed += stagingBatch.size();
+        state.processedRows += stagingBatch.size();
+        stagingBatch.clear();
+        Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
+        progressService.updateItem(itemId, item.defProcessed, item.defTotal);
+        progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+        publishProgress(job, def, state.processedRows, state.totalRows);
+        if (cancellationRegistry.isCancelled(job.getId())) {
+            state.cancelled = true;
+            progressService.finishItem(itemId, "CANCELLED", item.defProcessed, item.defTotal);
+        }
+    }
+
+    private void handleItemFailure(Job job, String defCode, Long itemId, RunState state,
+                                   ItemState item, Exception e) {
+        log.error("Import item failed defCode={}", defCode, e);
+        ValidationIssue issue = new ValidationIssue();
+        issue.setJobId(job.getId());
+        issue.setDefCode(defCode);
+        issue.setSeverity(ValidationIssue.Severity.ERROR);
+        issue.setMessage("导入过程出错，请查看服务日志或稍后重试");
+        issueRepository.save(issue);
+        state.errorCount++;
+        progressService.compensateItemFailure(itemId, item.defProcessed, item.defTotal);
+        taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
+    }
+
+    private static final class RunState {
+        private boolean cancelled;
+        private int errorCount;
+        private int processedRows;
+        private int discoveredRows;
+        private int startedItems;
+        private int totalRows;
+    }
+
+    private static final class ItemState {
+        private int defTotal;
+        private int defProcessed;
     }
 
     private Map<String, Object> doneEvent(Job job, Job.JobStatus status, int errorCount) {

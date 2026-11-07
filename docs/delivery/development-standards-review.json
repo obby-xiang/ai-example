@@ -96,6 +96,197 @@
           "reason": "仅完成逐hunk静态复核、JS与shell语法检查和v2指纹重算；merge、PR、unborn及全部动态场景保持NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:483a0bad2786a1198c1724ef7dc78e51f7c6df36f65ea364d70aef812332a97a",
+      "status": "reviewed",
+      "reason": "当前28个生产文件及D6复核记录逐文件逐hunk最终静态复审通过：ConditionEvaluator.matches及JobProgressService、TaskEventBus、Heartbeat、seedIfAbsent、record访问器和条件步骤旧公开契约均已恢复；GenerativeFormRules旧方法仅作兼容委托。运行器状态拆分保持事务、回滚补偿、取消与批处理顺序，集合空返回、Optional导入、getFirst/getLast、显式import、DEBUG开关及日志Throwable和限频逐项核对无Critical/Important；测试未改，动态验证NOT_RUN。",
+      "reviewedAt": "2026-11-07T15:02:30+08:00",
+      "reviewer": "K3.1 Pro（agent-1003）最终复审",
+      "specChanges": [
+        {
+          "change": "GenerativeFormRules恢复public static conditionsStepAllowed(String step)，方法体仅调用isConditionsStepAllowed(step)作为旧公开Java契约的兼容委托。",
+          "reason": "布尔规范整改不能删除既有公开签名；兼容委托不新增条件步骤判据，也不改变JSON、JPA或HTTP协议规格。",
+          "impact": "旧调用方继续按原名编译运行，GenerativeFormGuard等内部调用方使用isConditionsStepAllowed，最终仍统一落到TaskSteps.allowsConditionCollection；测试未修改，无新增业务协议。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java",
+          "status": "checked",
+          "reason": "已核对条件事实与步骤门拆分保持原拒绝顺序，附件resolve/consume/reclaim保持keep集合和回收边界；私有布尔改名、StringUtils.isBlank及DEBUG开关均已覆盖。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java",
+          "status": "checked",
+          "reason": "已核对schema/value校验拆分、Optional非空返回、共享不可变空表、java.util.Optional导入及getFirst/getLast；旧conditionsStepAllowed仅委托isConditionsStepAllowed，Guard调用与旧公开契约同时成立。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java",
+          "status": "checked",
+          "reason": "已核对CollectionUtils.size、StringUtils.trim/upperCase、BooleanUtils.isNotFalse和Objects.toString的空值语义，createTask继续使用CreateOutcome.reused，工具签名与返回文本契约未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/controller/JobController.java",
+          "status": "checked",
+          "reason": "已核对显式Spring Web import及CancelResult.redisWritten/wokeInProcess旧访问器，取消端点仍输出原redisWritten与wokeInProcess字段。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/entity/Job.java",
+          "status": "checked",
+          "reason": "仅将Jakarta Persistence通配import展开为显式import，实体字段、关联、级联和JPA映射未发生变化。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/entity/JobItem.java",
+          "status": "checked",
+          "reason": "仅展开Jakarta Persistence显式import，job_items唯一约束、版本及进度字段映射保持原样。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/entity/ValidationIssue.java",
+          "status": "checked",
+          "reason": "仅展开Jakarta Persistence显式import，校验问题枚举、字段和表映射未改，不影响JSON或派生查询。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/ExportJobRunner.java",
+          "status": "checked",
+          "reason": "已核对RunState/ItemState拆分后hold/release、afterCompletion回滚收敛、文件回收、取消检查和批处理进度顺序不变，条件求值恢复ConditionEvaluator.matches。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/ImportJobRunner.java",
+          "status": "checked",
+          "reason": "已核对importItem/stageRows/saveStagingBatch拆分后saveAll、计数、清批、延迟、快照、SSE和取消的先后顺序以及项级失败补偿保持一致。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/JobCancellationRegistry.java",
+          "status": "checked",
+          "reason": "已核对私有布尔改名不改变本地置位与监听唤醒语义，监听异常保留Throwable并升级为WARN，CancelResult继续提供redisWritten/wokeInProcess旧访问器。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/JobHeartbeatRegistry.java",
+          "status": "checked",
+          "reason": "已核对beginRunner/cleanupDeadLocalRunner旧公开签名、代次fence和清理语义；心跳pipeline拆分、非空结果、DEBUG开关及权威读/代次写失败限频WARN均已复核。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/JobProgressService.java",
+          "status": "checked",
+          "reason": "已核对finish、updateItem、finishItem、两个compensateItemFailure重载及markItemFinal原公开签名全部保留，REQUIRES_NEW和条目收敛不变，DEBUG日志均有开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/JobService.java",
+          "status": "checked",
+          "reason": "已核对runner同步器、启动与执行拆分仍在afterCommit后派发并在失败时清理登记，beginRunner及取消record访问器保持旧契约；MissingNode显式导入和指纹解析WARN已检查。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/JobWatchdog.java",
+          "status": "checked",
+          "reason": "已核对租约权限、DB与心跳复核、issue写入、终态及取消拆分保持fail-closed与计数顺序，CancelResult旧访问器和DEBUG开关未回退。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/PrecheckJobRunner.java",
+          "status": "checked",
+          "reason": "已核对必填、重复键、引用校验helper拆分保持逐行错误计数、批处理取消和失败补偿，指纹摘要仍在终态前写入且进度快照先于SSE。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/PublishJobRunner.java",
+          "status": "checked",
+          "reason": "已核对REPLACE差集删除仍先于逐行upsert，分批进度、冲突计数、取消与PublishAbort回滚路径不变，私有PublishOutcome.isCancelled仅影响内部访问。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/job/service/StaleJobRecoveryRunner.java",
+          "status": "checked",
+          "reason": "已核对isRecoveryWritten私有改名后逐作业独立事务、runner存活fail-closed、条件终态与条目收敛顺序不变，DEBUG日志已加开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/seed/DataSeedRunner.java",
+          "status": "checked",
+          "reason": "已核对区域、项目和七组定义拆分后的执行顺序，isDefinitionsComplete使用非短路&确保各缺失单元仍全部播种，完成判据和事务后状态标记不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/seed/GlmSeedService.java",
+          "status": "checked",
+          "reason": "已核对公开seedIfAbsent及事务锁保持原契约，显式集合import替代通配import，私有FieldSpec.isRequired/isKey仅修改内部record访问器。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/controller/FileController.java",
+          "status": "checked",
+          "reason": "已核对uploadZip提取后逐条匹配、存储路径收集和RuntimeException清理不变，selected/targetCodes在长度守卫后使用getFirst，Spring Web均为显式import。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/controller/TaskController.java",
+          "status": "checked",
+          "reason": "仅将Spring Web通配import展开为显式import，任务端点、条件JSON处理和响应结构未发生变化。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/entity/Task.java",
+          "status": "checked",
+          "reason": "仅展开Jakarta Persistence显式import，任务状态、AI幂等列、items关联及唯一约束映射未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/entity/TaskFile.java",
+          "status": "checked",
+          "reason": "仅展开Jakarta Persistence显式import，task_files唯一约束、文件名与版本字段映射未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/entity/TaskItem.java",
+          "status": "checked",
+          "reason": "仅展开Jakarta Persistence显式import，task_items唯一约束和条件、排序字段映射保持原样。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/service/RedisTaskEventBus.java",
+          "status": "checked",
+          "reason": "已核对publish/subscribe旧接口及降级返回语义，私有isRedisKnownDown、容器与执行器关闭顺序不变，WARN保留Throwable且DEBUG均有开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/service/TaskService.java",
+          "status": "checked",
+          "reason": "已核对Jackson null显式失败关闭且CodedIllegalStateException不重复包装，CreateOutcome.reused旧契约保留；deleteTaskRecords维持原子删除顺序，Pattern/Set改显式import。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/service/TaskSseService.java",
+          "status": "checked",
+          "reason": "已核对eventBus.publish/subscribe旧调用、订阅锁与有界重试不变，私有isFrameSent保持写结果语义，心跳失败WARN及DEBUG开关和Throwable参数已复核。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/task/service/TaskSteps.java",
+          "status": "checked",
+          "reason": "已核对allowsConditionCollection旧公开签名保留，first在空序列守卫后使用getFirst，条件步骤判定与序列内容未改。"
+        },
+        {
+          "path": "docs/delivery/d6-review.json",
+          "status": "checked",
+          "reason": "已追加本批D6 not-affected复核记录，说明仅规范组件、方法结构、日志和公开兼容委托，迁移数据、协议、状态机及键面契约不变。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "本批复用既有Commons Lang、Commons Collections、Spring与JDK 21顺序集合API，未新增或升级依赖，也未另造重复工具框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "已核对Optional及空集合非空返回、共享空实现不可变、方法规模与复杂度、公开契约兼容委托、私有布尔命名、getFirst/getLast和显式import；无通配/static import或无冲突FQN。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "已核对catch的WARN/ERROR及末尾Throwable，心跳读取和代次写失败按首条及每100条限频，重复日志所有者与预期停机静默路径明确，DEBUG均有级别开关，未记录原始响应体。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批仅修改后端任务、作业、种子和生成式表单规则及守卫，不涉及前端卡片、滚动、样式、i18n或终端用户交互渲染。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "已核对旧Java/record/API字段与publish/subscribe契约、REQUIRES_NEW、回滚补偿、取消幂等、runner fence、SSE顺序和Redis失败降级；未引入无界Redis读取或模型并发路径。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批未修改增量UTF-8解码、SSE帧切分、字素截断或流式JSON/Mermaid解析，ZIP的UTF-8/GBK整包条目读取逻辑保持原样。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "按当前28个生产文件及D6复核记录逐hunk完成独立静态复审并关闭公开契约、Optional导入和首尾访问问题；测试文件未改，编译、测试、真实SSE/Redis及多实例运行均为NOT_RUN。"
+        }
+      }
     }
   ]
 }

@@ -16,6 +16,7 @@ import com.example.configmgr.job.entity.ValidationIssue;
 import com.example.configmgr.job.repo.ValidationIssueRepository;
 import com.example.configmgr.task.service.TaskSteps;
 import com.example.configmgr.task.entity.TaskFile;
+import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.service.TaskService;
@@ -30,7 +31,10 @@ import org.springframework.transaction.interceptor.TransactionAspectSupport;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * 导出作业执行器：逐配置项按查询条件过滤已发布行 → 写 Excel + task_files（导出结果）。
@@ -75,41 +79,11 @@ public class ExportJobRunner {
     public void run(Job job) {
         final Long jobId = job.getId();
         final Long taskId = job.getTaskId();
-
-        // 回滚收敛口径（仅 EXPORT）：进度/终态写走 REQUIRES_NEW，数据面事务回滚时它们已经独立提交，
-        // 作业会停在 RUNNING（进度满格）等看门狗 30min 判死。故登记一个 afterCompletion：
-        // 非提交结局一律补写 FAILED（finish 的 PENDING/RUNNING 守卫保证不覆盖既有终态，也不会写 COMPLETED）。
         RunSnapshot snapshot = new RunSnapshot();
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCompletion(int status) {
-                    if (status == TransactionSynchronization.STATUS_COMMITTED) {
-                        return;
-                    }
-                    log.warn("Export job data transaction rolled back, terminal FAILED written to avoid stuck RUNNING jobId={}", jobId);
-                    terminalWriter.completeNow(job, Job.JobStatus.FAILED, snapshot.errors, 0,
-                            snapshot.processed, snapshot.total, doneEvent(job, Job.JobStatus.FAILED));
-                }
-            });
-        }
-
-        boolean cancelled = false;
-        int errorCount = 0;
-        int processedRows = 0;   // 已扫描行数（已完成配置项合计 + 当前配置项已扫描）
-        int discoveredRows = 0;  // 已发现行数（已开工配置项的行数合计）
-        int finishedDefRows = 0; // 已结束配置项的扫描行数合计
-        int startedItems = 0;    // 已开工配置项数
-
-        // 幂等清理（与 PrecheckJobRunner#run 同位置同口径）：重跑同一作业不叠加历史 issue
+        registerRollbackConvergence(job, snapshot);
+        RunState state = new RunState();
         issueRepository.deleteByJobId(jobId);
-
         var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
-
-        // BZ-01 零数据不假成功：没有配置项时下面的循环一次都不跑，errorCount 恒 0 ⇒ 旧实现落到
-        // COMPLETED，并经 terminalWriter 的 successStep 把任务写成 COMPLETED/EXPORT；
-        // 之后 finalizedConflict 对任何新导出作业恒抛 TASK_FINALIZED（零数据的成功把任务永久锁死）。
-        // 这里显式收敛 FAILED + 作业级 issue：任务态由 applyJobOutcome(FAILED) 联动，不是 COMPLETED。
         if (items.isEmpty()) {
             saveIssue(jobId, JOB_LEVEL_DEF_CODE,
                     "任务 #" + taskId + " 没有任何配置项（0 条目），导出作业没有可处理的数据，作业未成功");
@@ -117,195 +91,231 @@ public class ExportJobRunner {
                     doneEvent(job, Job.JobStatus.FAILED));
             return;
         }
-
-        // ③ 分母下限：导出作业的行数能便宜地预估（各配置已发布行数合计），故开工即写终值，
-        //    不再"边发现边长"——首配置收尾瞬间不会出现 progress==total 的 100% 闪现。
         int estimatedRows = items.stream()
                 .mapToInt(i -> (int) dataRowRepository.countByDefCode(i.getDefCode()))
                 .sum();
-        int totalRows = JobProgressTotals.denominator(estimatedRows, 0, items.size());
-
-        progressService.markRunning(jobId, totalRows);
-
+        state.totalRows = JobProgressTotals.denominator(estimatedRows, 0, items.size());
+        progressService.markRunning(jobId, state.totalRows);
         try {
-            for (var item : items) {
-                if (cancellationRegistry.isCancelled(jobId)) {
-                    cancelled = true;
-                    break;
-                }
-                // 回滚收敛用的分片边界快照（本项开工时的已落库进度）
-                snapshot.processed = processedRows;
-                snapshot.total = totalRows;
-                snapshot.errors = errorCount;
-                String defCode = item.getDefCode();
-                Long itemId = progressService.startItem(jobId, defCode);
-                if (itemId == null) {
-                    // 父作业已终态（收敛已提交）：终态作业下不得再新增在途条目（评审 I-1）。
-                    // 走既有取消收尾：本方法末尾的终态写会被 CAS 丢弃，不会翻写任务态、不发 JOB_DONE。
-                    cancelled = true;
-                    break;
-                }
-                startedItems++;
-                int defTotal = 0;
-                int rowsSeen = 0;
-                String storageKey = null;
-                boolean persisted = false;
-
-                try {
-                    ConfigDefinition def = definitionService.findByCode(defCode);
-                    // W-03 fail-fast（R-96 批 B）：条件解析统一走数据面同义的
-                    // ConfigDataService#parseCondition —— 解析失败抛 IllegalArgumentException、
-                    // 未知操作符在其内的 ConditionEvaluator.validate 早失败（与 /api/data/** 的 400
-                    // 同一口径），由下面 catch 转成"该配置项 FAILED + 作业 FAILED"，
-                    // 绝不静默放宽为全量导出（原私有 parseCondition 吞异常 return null 是病灶本体）。
-                    QueryCondition cond = configDataService.parseCondition(item.getConditionJson());
-
-                    // 慢临界段（红队 M1/C2，终审微补丁 F2b）：起点上移到本配置项重活区段开头 ——
-                    // 全表载入 + 逐行过滤 + 单配置项大 sheet 写整段都无分片边界可续期心跳，大配置项
-                    // 任一段都可能远超 90s 判死窗 —— hold 覆盖「载入→过滤→finishItem/snapshot→写」，
-                    // finally 释放（幂等）；区段内的 snapshot/finishItem 是快 DB 写，被 hold 覆盖无副作用。
-                    // 30min 绝对上限不受影响，泄漏也有上限兜底；项级 catch 在更外层，异常语义不变。
-                    StoredFile storedFile = fileStorage.allocate(".xlsx");
-                    storageKey = storedFile.key();
-                    // 本项若在提交期回滚（含外层回滚），这次新写的导出件按回滚回收；
-                    // 提交成功则保留（旧件由下面的 deleteAfterCommit 清理）。
-                    fileStorage.deleteAfterRollback(storageKey);
-                    List<Map<String, Object>> filtered = new ArrayList<>();
-                    heartbeatRegistry.hold(jobId);
-                    try {
-                        // Load all rows matching condition（范围过滤 + 字段级过滤统一由 ConditionEvaluator 处理）
-                        List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);
-                        defTotal = allRows.size();
-                        discoveredRows += defTotal;
-                        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
-                                items.size() - startedItems);
-                        progressService.updateItem(itemId, 0, defTotal);
-                        progressService.snapshot(jobId, processedRows, totalRows);
-
-                        for (ConfigDataRow r : allRows) {
-                            rowsSeen++;
-                            Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
-                            if (!ConditionEvaluator.matches(data, cond)) {
-                                continue;
-                            }
-                            filtered.add(data);
-                            // Demo delay per batch
-                            if (filtered.size() % appProperties.getJob().getBatchSize() == 0) {
-                                Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                                processedRows = finishedDefRows + rowsSeen;
-                                // ⑤ 先落库再推送：快照与事件同一对数字
-                                progressService.updateItem(itemId, rowsSeen, defTotal);
-                                progressService.snapshot(jobId, processedRows, totalRows);
-                                publishProgress(job, def, processedRows, totalRows);
-                                if (cancellationRegistry.isCancelled(jobId)) {
-                                    cancelled = true;
-                                    progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
-                                    break;
-                                }
-                            }
-                        }
-                        if (cancelled) break;
-
-                        // 本配置项扫描完毕（无论命中多少行）
-                        rowsSeen = defTotal;
-                        processedRows = finishedDefRows + rowsSeen;
-                        finishedDefRows += defTotal;
-                        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
-                                items.size() - startedItems);
-                        progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
-                        progressService.snapshot(jobId, processedRows, totalRows);
-
-                        // Write Excel（本慢临界段的尾段；ExcelWriter 签名保持字符串路径）
-                        excelWriter.write(def, filtered, storedFile.pathString());
-                    } finally {
-                        heartbeatRegistry.release(jobId);
-                    }
-
-                    // Save TaskFile
-                    Optional<TaskFile> existing = taskFileRepository
-                            .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "EXPORT");
-                    TaskFile tf = existing.orElseGet(TaskFile::new);
-                    String previousKey = existing.map(TaskFile::getStoragePath).orElse(null);
-                    tf.setTaskId(taskId);
-                    tf.setDefCode(defCode);
-                    tf.setFileType("EXPORT");
-                    tf.setStoragePath(storageKey);
-                    tf.setOriginalPath(storageKey);
-                    tf.setFileName(defCode + "_" + def.getName() + ".xlsx");
-                    tf.setRowCount(filtered.size());
-                    taskFileRepository.save(tf);
-                    persisted = true;
-                    if (previousKey != null && !previousKey.equals(storageKey)) {
-                        // 旧导出件在本次提交成功后回收（失败/回滚时保持原引用可用）
-                        fileStorage.deleteAfterCommit(previousKey);
-                    }
-
-                    taskService.updateItemStatus(taskId, defCode, "COMPLETED");
-
-                } catch (Exception e) {
-                    // 新件从未成为 task_files 的引用（save 未成功/未写盘）时它是纯孤儿：立即回收。
-                    if (!persisted && storageKey != null) {
-                        fileStorage.delete(storageKey);
-                    }
-                    // 数据面事务已被标记回滚（典型：内层参与事务抛错）：后续每项都只会白写盘、
-                    // 提交时整批丢弃。立即抛出，交给外层 catch + 回滚收敛统一收尾。
-                    if (rollbackOnly()) {
-                        // 条目是 startItem 在 REQUIRES_NEW 里提交的，数据面回滚带不走它；若失败发生在
-                        // finishItem 之前，直接抛会留下 jobs=FAILED + job_items=RUNNING。补偿本身是独立事务，
-                        // 回滚后仍能落库；补偿失败只挂 suppressed，不得顶掉原始异常。
-                        try {
-                            progressService.compensateItemFailure(itemId, (int) Math.max(defTotal, rowsSeen), defTotal);
-                        }
-                        catch (RuntimeException compensationFailure) {
-                            e.addSuppressed(compensationFailure);
-                            log.warn("Export item compensation failed before rollback (original error kept) defCode={}",
-                                    defCode, compensationFailure);
-                        }
-                        throw e;
-                    }
-                    log.error("Export item failed defCode={}", defCode, e);
-                    saveIssue(jobId, defCode, issueMessage());
-                    errorCount++;
-                    finishedDefRows += defTotal;
-                    processedRows = finishedDefRows;
-                    totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
-                            items.size() - startedItems);
-                    // I-4：成功路径已先写条目 COMPLETED（随后写盘失败），catch 必须走补偿降级
-                    progressService.compensateItemFailure(itemId, (int) Math.max(defTotal, rowsSeen), defTotal);
-                    taskService.updateItemStatus(taskId, defCode, "FAILED");
-                }
-            }
+            processItems(job, items, estimatedRows, snapshot, state);
         } catch (Exception e) {
             log.error("Export job failed", e);
-            errorCount++;
-            snapshot.processed = processedRows;
-            snapshot.total = totalRows;
-            snapshot.errors = errorCount;
-            // 事务已被标记回滚时，本方法内的任何写（issue/终态）都会在提交期被整批丢弃，
-            // 终态交给 afterCompletion 的回滚收敛补写（FAILED）。
-            if (!rollbackOnly()) {
+            state.errorCount++;
+            snapshot.processed = state.processedRows;
+            snapshot.total = state.totalRows;
+            snapshot.errors = state.errorCount;
+            if (!isRollbackOnly()) {
                 saveIssue(jobId, JOB_LEVEL_DEF_CODE, "导出作业失败: " + issueMessage());
-                terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
-                        processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED));
+                terminalWriter.complete(job, Job.JobStatus.FAILED, state.errorCount, 0,
+                        state.processedRows, state.totalRows, doneEvent(job, Job.JobStatus.FAILED));
             }
             return;
         }
-
-        Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
-                : (errorCount > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-        // R-153 B1：任务 COMPLETED/步骤联动收编进 terminalWriter 的落写成功分支（原先在此处
-        // 无条件直写 updateStatus(COMPLETED)+goToStep 是取消竞态翻写点——取消胜出时这里仍会执行）。
-        // 终态分母回归"真实工作量"（= 预估/已发现行数，未开工预留清零）：全部扫完时 processed==total→100%
-        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, 0);
-        snapshot.processed = processedRows;
-        snapshot.total = totalRows;
-        snapshot.errors = errorCount;
-        terminalWriter.complete(job, status, errorCount, 0, processedRows, totalRows,
+        Job.JobStatus status = state.cancelled ? Job.JobStatus.CANCELLED
+                : (state.errorCount > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
+        state.totalRows = JobProgressTotals.denominator(estimatedRows, state.discoveredRows, 0);
+        snapshot.processed = state.processedRows;
+        snapshot.total = state.totalRows;
+        snapshot.errors = state.errorCount;
+        terminalWriter.complete(job, status, state.errorCount, 0, state.processedRows, state.totalRows,
                 doneEvent(job, status), TaskSteps.EXPORT);
     }
 
+    private void registerRollbackConvergence(Job job, RunSnapshot snapshot) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    if (status == TransactionSynchronization.STATUS_COMMITTED) {
+                        return;
+                    }
+                    log.warn("Export job data transaction rolled back, terminal FAILED written to avoid stuck RUNNING jobId={}",
+                            job.getId());
+                    terminalWriter.completeNow(job, Job.JobStatus.FAILED, snapshot.errors, 0,
+                            snapshot.processed, snapshot.total, doneEvent(job, Job.JobStatus.FAILED));
+                }
+            });
+        }
+    }
+
+    private void processItems(Job job, List<TaskItem> items, int estimatedRows,
+                              RunSnapshot snapshot, RunState state) throws Exception {
+        for (TaskItem item : items) {
+            if (cancellationRegistry.isCancelled(job.getId())) {
+                state.cancelled = true;
+                break;
+            }
+            snapshot.processed = state.processedRows;
+            snapshot.total = state.totalRows;
+            snapshot.errors = state.errorCount;
+            String defCode = item.getDefCode();
+            Long itemId = progressService.startItem(job.getId(), defCode);
+            if (itemId == null) {
+                state.cancelled = true;
+                break;
+            }
+            state.startedItems++;
+            processItem(job, item, itemId, items.size(), estimatedRows, state);
+            if (state.cancelled) {
+                break;
+            }
+        }
+    }
+
+    private void processItem(Job job, TaskItem sourceItem, Long itemId, int itemCount,
+                             int estimatedRows, RunState state) throws Exception {
+        ItemState item = new ItemState();
+        String defCode = sourceItem.getDefCode();
+        try {
+            ConfigDefinition def = definitionService.findByCode(defCode);
+            QueryCondition cond = configDataService.parseCondition(sourceItem.getConditionJson());
+            StoredFile storedFile = fileStorage.allocate(".xlsx");
+            item.storageKey = storedFile.key();
+            fileStorage.deleteAfterRollback(item.storageKey);
+            List<Map<String, Object>> filtered = filterAndWrite(job, def, defCode, cond, storedFile,
+                    itemId, itemCount, estimatedRows, state, item);
+            if (state.cancelled) {
+                return;
+            }
+            persistTaskFile(job, def, defCode, filtered, item);
+            taskService.updateItemStatus(job.getTaskId(), defCode, "COMPLETED");
+        } catch (Exception e) {
+            handleItemFailure(job, defCode, itemId, itemCount, estimatedRows, state, item, e);
+        }
+    }
+
+    private List<Map<String, Object>> filterAndWrite(Job job, ConfigDefinition def, String defCode,
+                                                     QueryCondition cond, StoredFile storedFile, Long itemId,
+                                                     int itemCount, int estimatedRows, RunState state, ItemState item)
+            throws Exception {
+        List<Map<String, Object>> filtered = new ArrayList<>();
+        heartbeatRegistry.hold(job.getId());
+        try {
+            List<ConfigDataRow> allRows = dataRowRepository.findByDefCodeOrderByRowKey(defCode);
+            item.defTotal = allRows.size();
+            state.discoveredRows += item.defTotal;
+            state.totalRows = JobProgressTotals.denominator(estimatedRows, state.discoveredRows,
+                    itemCount - state.startedItems);
+            progressService.updateItem(itemId, 0, item.defTotal);
+            progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+            filtered = filterRows(job, def, cond, allRows, itemId, state, item, filtered);
+            if (state.cancelled) {
+                return filtered;
+            }
+            item.rowsSeen = item.defTotal;
+            state.processedRows = state.finishedDefRows + item.rowsSeen;
+            state.finishedDefRows += item.defTotal;
+            state.totalRows = JobProgressTotals.denominator(estimatedRows, state.discoveredRows,
+                    itemCount - state.startedItems);
+            progressService.finishItem(itemId, "COMPLETED", item.defTotal, item.defTotal);
+            progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+            excelWriter.write(def, filtered, storedFile.pathString());
+            return filtered;
+        } finally {
+            heartbeatRegistry.release(job.getId());
+        }
+    }
+
+    private List<Map<String, Object>> filterRows(Job job, ConfigDefinition def, QueryCondition cond,
+                                                 List<ConfigDataRow> allRows, Long itemId, RunState state,
+                                                 ItemState item, List<Map<String, Object>> filtered) throws Exception {
+        for (ConfigDataRow r : allRows) {
+            item.rowsSeen++;
+            Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
+            if (!ConditionEvaluator.matches(data, cond)) {
+                continue;
+            }
+            filtered.add(data);
+            if (filtered.size() % appProperties.getJob().getBatchSize() == 0) {
+                processFilterBatch(job, def, itemId, state, item);
+                if (state.cancelled) {
+                    break;
+                }
+            }
+        }
+        return filtered;
+    }
+
+    private void processFilterBatch(Job job, ConfigDefinition def, Long itemId,
+                                    RunState state, ItemState item) throws InterruptedException {
+        Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
+        state.processedRows = state.finishedDefRows + item.rowsSeen;
+        progressService.updateItem(itemId, item.rowsSeen, item.defTotal);
+        progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+        publishProgress(job, def, state.processedRows, state.totalRows);
+        if (cancellationRegistry.isCancelled(job.getId())) {
+            state.cancelled = true;
+            progressService.finishItem(itemId, "CANCELLED", item.rowsSeen, item.defTotal);
+        }
+    }
+
+    private void persistTaskFile(Job job, ConfigDefinition def, String defCode,
+                                 List<Map<String, Object>> filtered, ItemState item) {
+        Optional<TaskFile> existing = taskFileRepository
+                .findByTaskIdAndDefCodeAndFileType(job.getTaskId(), defCode, "EXPORT");
+        TaskFile tf = existing.orElseGet(TaskFile::new);
+        String previousKey = existing.map(TaskFile::getStoragePath).orElse(null);
+        tf.setTaskId(job.getTaskId());
+        tf.setDefCode(defCode);
+        tf.setFileType("EXPORT");
+        tf.setStoragePath(item.storageKey);
+        tf.setOriginalPath(item.storageKey);
+        tf.setFileName(defCode + "_" + def.getName() + ".xlsx");
+        tf.setRowCount(filtered.size());
+        taskFileRepository.save(tf);
+        item.persisted = true;
+        if (previousKey != null && !previousKey.equals(item.storageKey)) {
+            fileStorage.deleteAfterCommit(previousKey);
+        }
+    }
+
+    private void handleItemFailure(Job job, String defCode, Long itemId, int itemCount,
+                                   int estimatedRows, RunState state, ItemState item, Exception e) throws Exception {
+        if (!item.persisted && item.storageKey != null) {
+            fileStorage.delete(item.storageKey);
+        }
+        if (isRollbackOnly()) {
+            try {
+                progressService.compensateItemFailure(itemId,
+                        Math.max(item.defTotal, item.rowsSeen), item.defTotal);
+            } catch (RuntimeException compensationFailure) {
+                e.addSuppressed(compensationFailure);
+                log.warn("Export item compensation failed before rollback (original error kept) defCode={}",
+                        defCode, compensationFailure);
+            }
+            throw e;
+        }
+        log.error("Export item failed defCode={}", defCode, e);
+        saveIssue(job.getId(), defCode, issueMessage());
+        state.errorCount++;
+        state.finishedDefRows += item.defTotal;
+        state.processedRows = state.finishedDefRows;
+        state.totalRows = JobProgressTotals.denominator(estimatedRows, state.discoveredRows,
+                itemCount - state.startedItems);
+        progressService.compensateItemFailure(itemId,
+                Math.max(item.defTotal, item.rowsSeen), item.defTotal);
+        taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
+    }
+
+    private static final class RunState {
+        private boolean cancelled;
+        private int errorCount;
+        private int processedRows;
+        private int discoveredRows;
+        private int finishedDefRows;
+        private int startedItems;
+        private int totalRows;
+    }
+
+    private static final class ItemState {
+        private int defTotal;
+        private int rowsSeen;
+        private String storageKey;
+        private boolean persisted;
+    }
+
     /** 当前事务是否已标记回滚（此时提交会被整批丢弃，继续跑只是白写）。 */
-    private static boolean rollbackOnly() {
+    private static boolean isRollbackOnly() {
         return TransactionSynchronizationManager.isActualTransactionActive()
                 && TransactionAspectSupport.currentTransactionStatus().isRollbackOnly();
     }

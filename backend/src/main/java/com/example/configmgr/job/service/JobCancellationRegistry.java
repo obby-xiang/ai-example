@@ -104,8 +104,8 @@ public class JobCancellationRegistry {
         if (flag != null && flag.get()) {
             return true;
         }
-        if (redisFlag(jobId)) {
-            markLocal(jobId);
+        if (isRedisFlagSet(jobId)) {
+            isNewlyMarkedLocal(jobId);
             return true;
         }
         long now = System.currentTimeMillis();
@@ -117,8 +117,8 @@ public class JobCancellationRegistry {
             this.negativeCacheUntilMs.remove(jobId, cachedUntil);
         }
         long version = this.cacheVersion.get();
-        if (databaseCancelled(jobId)) {
-            markLocal(jobId);
+        if (isDatabaseCancelled(jobId)) {
+            isNewlyMarkedLocal(jobId);
             return true;
         }
         this.negativeCacheUntilMs.compute(jobId, (ignored, current) -> {
@@ -140,12 +140,12 @@ public class JobCancellationRegistry {
     public CancelResult cancel(Long jobId, String requestedBy) {
         invalidate(jobId);
         Long version = authoritativeCancelVersion(jobId);
-        boolean redisWritten = version != null && writeRedisFlag(jobId, requestedBy, version);
-        boolean woke = markLocal(jobId);
+        boolean redisWritten = version != null && isRedisFlagWritten(jobId, requestedBy, version);
+        boolean woke = isNewlyMarkedLocal(jobId);
         return new CancelResult(redisWritten, woke, jobId, keyFor(jobId));
     }
 
-    private boolean databaseCancelled(Long jobId) {
+    private boolean isDatabaseCancelled(Long jobId) {
         try {
             return this.jobRepository.findCancelStateById(jobId)
                     .map(state -> state.getCancelVersion() > 0L
@@ -201,7 +201,7 @@ public class JobCancellationRegistry {
      * <p>监听者如果登记在案（{@link #onCancel} 会自建容器，不依赖加速位），无论有没有置位成功都照常
      * 唤起 —— 唤醒是"通知"，不该被"没有加速位"挡住。
      */
-    private boolean markLocal(Long jobId) {
+    private boolean isNewlyMarkedLocal(Long jobId) {
         AtomicBoolean flag = this.flags.get(jobId);
         boolean newly = flag != null && flag.compareAndSet(false, true);
         Set<Runnable> set = this.listeners.get(jobId);
@@ -210,23 +210,22 @@ public class JobCancellationRegistry {
                 try {
                     listener.run();
                 } catch (Exception ex) {
-                    log.debug("Cancel listener failed jobId={}", jobId, ex);
+                    log.warn("Cancel listener failed jobId={}", jobId, ex);
                 }
             }
         }
         return newly;
     }
 
-    private boolean redisFlag(Long jobId) {
+    private boolean isRedisFlagSet(Long jobId) {
         try {
             return this.redis.opsForValue().get(keyFor(jobId)) != null;
         } catch (Exception ex) {
-            log.debug("Cancel acceleration read failed, falling back to DB jobId={}", jobId, ex);
             return false;
         }
     }
 
-    private boolean writeRedisFlag(Long jobId, String requestedBy, long version) {
+    private boolean isRedisFlagWritten(Long jobId, String requestedBy, long version) {
         try {
             Long written = this.redis.execute(WRITE_MONOTONIC_CANCEL_SCRIPT, List.of(keyFor(jobId)),
                     Long.toString(version), version + "|" + StringUtils.defaultString(requestedBy, "unknown"),

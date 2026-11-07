@@ -31,7 +31,13 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.util.*;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 /**
  * 预检查作业执行器：逐配置项校验必填/主键重复/引用完整性。
@@ -70,238 +76,241 @@ public class PrecheckJobRunner {
     public void run(Job job) {
         final Long jobId = job.getId();
         final Long taskId = job.getTaskId();
-
-        // BZ-02 回滚收敛（与 ExportJobRunner 同款）：terminalWriter.complete 走 afterCommit，
-        // 事务回滚时终态写永不执行 ⇒ 作业停在 RUNNING 挡重跑，直到看门狗 30min 上限。
         registerRollbackConvergence(job);
-
-        boolean cancelled = false;
-        int totalErrors = 0;
-        int totalWarnings = 0;
-        int processedRows = 0;
-        int discoveredRows = 0; // 已发现行数（已开工配置项从文件读到的行数合计）
-        int startedItems = 0;   // 已开工配置项数
-        int finishedDefRows = 0;
-
-        // 幂等先例：开工即清旧 issue（与 PrecheckJobRunner 既有口径一致）
+        RunState state = new RunState();
         issueRepository.deleteByJobId(jobId);
-
-        // T3-4 文件指纹摘要：{defCode: {fileType: {sha256, size}}}。
-        // 局部变量（非字段）：本类是单例 @Service，作业可并发执行 —— 状态挂字段会串味。
-        // 键控到 fileType 而不是只到 defCode：本执行器读盘有 UPLOAD→EXPORT 回落（见下方注释），
-        // 而 ImportJobRunner 只读 UPLOAD —— 只记 defCode 会变成"记 EXPORT、比 UPLOAD"恒不相等。
         Map<String, Map<String, Map<String, Object>>> fingerprintSummary = new LinkedHashMap<>();
-
         var items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
-
-        // BZ-01 零数据不假成功：零条目时 totalErrors 恒 0 ⇒ 旧实现报 COMPLETED 且 errorCount==0，
-        // 恰好满足 precheckConflict 的"预检查已通过"判据（等于把"什么都没校验"当放行凭证）。
         if (items.isEmpty()) {
             issueRepository.save(jobLevelIssue(jobId, taskId));
             terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
                     doneEvent(job, Job.JobStatus.FAILED, 1));
             return;
         }
-
         List<String> defCodes = items.stream().map(i -> i.getDefCode()).toList();
         List<String> sorted = dependencyResolver.sort(defCodes);
-
-        // ③ 分母下限：预检查的行数来自上传文件，开工前没有便宜来源 → 先按"配置项条数"写下界
-        //    （每个未开工配置项各预留 1 行），读到文件后并入已发现行数并上调。
-        int totalRows = JobProgressTotals.denominator(0, 0, sorted.size());
-        progressService.markRunning(jobId, totalRows);
-
+        state.totalRows = JobProgressTotals.denominator(0, 0, sorted.size());
+        progressService.markRunning(jobId, state.totalRows);
         try {
-            for (String defCode : sorted) {
-                if (cancellationRegistry.isCancelled(jobId)) {
-                    cancelled = true;
-                    break;
-                }
-                Long itemId = progressService.startItem(jobId, defCode);
-                if (itemId == null) {
-                    // 父作业已终态（收敛已提交）：终态作业下不得再新增在途条目（评审 I-1）。
-                    // 走既有取消收尾：本方法末尾的终态写会被 CAS 丢弃，不会翻写任务态、不发 JOB_DONE。
-                    cancelled = true;
-                    break;
-                }
-                startedItems++;
-                int defTotal = 0;
-                int rowsSeen = 0;
-
-                try {
-                    ConfigDefinition def = definitionService.findByCode(defCode);
-                    List<ConfigField> keyFields = def.getFields().stream()
-                            .filter(ConfigField::isKey).toList();
-
-                    // Find file for this def（UPLOAD 优先，空则回落 EXPORT：预检查对"已导出件"也可跑）
-                    Optional<TaskFile> fileOpt = taskFileRepository
-                            .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
-                    String usedFileType = "UPLOAD";
-                    if (fileOpt.isEmpty()) {
-                        fileOpt = taskFileRepository
-                                .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "EXPORT");
-                        usedFileType = "EXPORT";
-                    }
-
-                    if (fileOpt.isEmpty()) {
-                        ValidationIssue issue = new ValidationIssue();
-                        issue.setJobId(jobId);
-                        issue.setDefCode(defCode);
-                        issue.setSeverity(ValidationIssue.Severity.ERROR);
-                        issue.setMessage("未找到上传文件，请先上传配置数据文件");
-                        issueRepository.save(issue);
-                        totalErrors++;
-                        progressService.finishItem(itemId, "FAILED", 0, 0);
-                        taskService.updateItemStatus(taskId, defCode, "FAILED");
-                        continue;
-                    }
-
-                    // Read rows from Excel
-                    byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
-                    // T3-4：同一份文件再过一次<b>流式</b>摘要（不复用上面的全量 read —— 摘要只经手
-                    // 8KB 缓冲，不给百 MB 级件再添一份等量堆内存）；按<b>本次实际使用的 fileType</b> 记账
-                    fingerprintSummary
-                            .computeIfAbsent(defCode, key -> new LinkedHashMap<>())
-                            .put(usedFileType, digestOf(fileOpt.get().getStoragePath()));
-                    List<Map<String, Object>> rows = excelReader.read(def, fileBytes);
-                    defTotal = rows.size();
-                    discoveredRows += defTotal;
-                    totalRows = JobProgressTotals.denominator(0, discoveredRows, sorted.size() - startedItems);
-                    progressService.updateItem(itemId, 0, defTotal);
-                    progressService.snapshot(jobId, processedRows, totalRows);
-
-                    // Validate each row
-                    int rowErrors = 0, rowWarnings = 0;
-                    Map<String, Integer> keyIndex = new HashMap<>();
-
-                    for (int i = 0; i < rows.size(); i++) {
-                        Map<String, Object> row = rows.get(i);
-                        rowsSeen = i + 1;
-
-                        // Check required fields
-                        for (ConfigField f : def.getFields()) {
-                            if (f.isRequired()) {
-                                Object val = row.get(f.getCode());
-                                if (StringUtils.isBlank(ObjectUtils.toString(val, null))) {
-                                    ValidationIssue issue = new ValidationIssue();
-                                    issue.setJobId(jobId);
-                                    issue.setDefCode(defCode);
-                                    issue.setFieldCode(f.getCode());
-                                    issue.setRowIndex(i + 2); // 1-based + header
-                                    issue.setSeverity(ValidationIssue.Severity.ERROR);
-                                    issue.setMessage("必填字段 [" + f.getLabel() + "] 不能为空");
-                                    issueRepository.save(issue);
-                                    rowErrors++;
-                                }
-                            }
-                        }
-
-                        // Check duplicate keys
-                        String rowKey = buildRowKey(row, keyFields);
-                        if (keyIndex.containsKey(rowKey)) {
-                            ValidationIssue issue = new ValidationIssue();
-                            issue.setJobId(jobId);
-                            issue.setDefCode(defCode);
-                            issue.setRowKey(rowKey);
-                            issue.setRowIndex(i + 2);
-                            issue.setSeverity(ValidationIssue.Severity.ERROR);
-                            issue.setMessage("主键重复: " + rowKey + " (第 " + keyIndex.get(rowKey) + " 行已存在)");
-                            issueRepository.save(issue);
-                            rowErrors++;
-                        } else {
-                            keyIndex.put(rowKey, i + 2);
-                        }
-
-                        if (i % appProperties.getJob().getBatchSize() == 0) {
-                            Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                            processedRows = finishedDefRows + rowsSeen;
-                            // ⑤ 先落库再推送：快照与事件同一对数字
-                            progressService.updateItem(itemId, rowsSeen, defTotal);
-                            progressService.snapshot(jobId, processedRows, totalRows);
-                            publishProgress(job, def, processedRows, totalRows);
-                            if (cancellationRegistry.isCancelled(jobId)) {
-                                cancelled = true;
-                                progressService.finishItem(itemId, "CANCELLED", rowsSeen, defTotal);
-                                break;
-                            }
-                        }
-                    }
-                    if (cancelled) break;
-
-                    // 引用完整性校验：REFERENCE 字段的值必须存在于被引用配置的
-                    // 已发布数据或本任务暂存数据中（值级依赖，依赖排序之外的第二道检查）
-                    for (ConfigField f : def.getFields()) {
-                        if (f.getFieldType() != ConfigField.FieldType.REFERENCE || f.getRefDefCode() == null) {
-                            continue;
-                        }
-                        Set<String> validValues = loadValidRefValues(
-                                taskId, f.getRefDefCode(), f.getRefFieldCode());
-                        for (int i = 0; i < rows.size(); i++) {
-                            Object v = rows.get(i).get(f.getCode());
-                            if (StringUtils.isBlank(ObjectUtils.toString(v, null))) {
-                                continue; // 空值由必填校验负责
-                            }
-                            if (!validValues.contains(v.toString())) {
-                                ValidationIssue issue = new ValidationIssue();
-                                issue.setJobId(jobId);
-                                issue.setDefCode(defCode);
-                                issue.setFieldCode(f.getCode());
-                                issue.setRowIndex(i + 2);
-                                issue.setSeverity(ValidationIssue.Severity.ERROR);
-                                issue.setMessage("引用字段 [" + f.getLabel() + "] 的值 " + v
-                                        + " 在配置 " + f.getRefDefCode() + " 中不存在");
-                                issueRepository.save(issue);
-                                rowErrors++;
-                            }
-                        }
-                    }
-
-                    totalErrors += rowErrors;
-                    totalWarnings += rowWarnings;
-
-                    rowsSeen = defTotal;
-                    finishedDefRows += defTotal;
-                    processedRows = finishedDefRows;
-                    progressService.finishItem(itemId, rowErrors > 0 ? "FAILED" : "COMPLETED",
-                            defTotal, defTotal);
-                    progressService.snapshot(jobId, processedRows, totalRows);
-                    taskService.updateItemStatus(taskId, defCode,
-                            rowErrors > 0 ? "FAILED" : "CHECKED");
-
-                } catch (Exception e) {
-                    log.error("Precheck item failed defCode={}", defCode, e);
-                    ValidationIssue issue = new ValidationIssue();
-                    issue.setJobId(jobId);
-                    issue.setDefCode(defCode);
-                    issue.setSeverity(ValidationIssue.Severity.ERROR);
-                    issue.setMessage("检查过程出错，请查看服务日志或稍后重试");
-                    issueRepository.save(issue);
-                    totalErrors++;
-                    finishedDefRows += defTotal;
-                    processedRows = finishedDefRows;
-                    totalRows = JobProgressTotals.denominator(0, discoveredRows, sorted.size() - startedItems);
-                    // I-4：成功路径已先写条目 COMPLETED（随后快照/任务项更新失败），catch 走补偿降级
-                    progressService.compensateItemFailure(itemId, (int) Math.max(defTotal, rowsSeen), defTotal);
-                    taskService.updateItemStatus(taskId, defCode, "FAILED");
-                }
-            }
+            processItems(job, sorted, fingerprintSummary, state);
         } catch (Exception e) {
             log.error("Precheck job failed", e);
-            totalErrors++;
-            terminalWriter.complete(job, Job.JobStatus.FAILED, totalErrors, totalWarnings,
-                    processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED, totalErrors));
+            state.totalErrors++;
+            terminalWriter.complete(job, Job.JobStatus.FAILED, state.totalErrors, state.totalWarnings,
+                    state.processedRows, state.totalRows, doneEvent(job, Job.JobStatus.FAILED, state.totalErrors));
             return;
         }
-
-        Job.JobStatus status = cancelled ? Job.JobStatus.CANCELLED
-                : (totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
-        // T3-4（A6）：指纹摘要收尾一次性写 —— 仍在数据面事务内、JobTerminalWriter.complete 之前；
-        // 摘要先于终态提交，故 IMPORT 建作业时读到的摘要必定已是提交态（无"终态可见但摘要未提交"的竞态）。
+        Job.JobStatus status = state.cancelled ? Job.JobStatus.CANCELLED
+                : (state.totalErrors > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
         writeFingerprintSummary(jobId, fingerprintSummary);
-        // 终态分母回归"真实工作量"（未开工预留清零）：全部跑完时 processed==total→100%
-        totalRows = JobProgressTotals.denominator(0, discoveredRows, 0);
-        terminalWriter.complete(job, status, totalErrors, totalWarnings, processedRows, totalRows,
-                doneEvent(job, status, totalErrors));
+        state.totalRows = JobProgressTotals.denominator(0, state.discoveredRows, 0);
+        terminalWriter.complete(job, status, state.totalErrors, state.totalWarnings,
+                state.processedRows, state.totalRows, doneEvent(job, status, state.totalErrors));
+    }
+
+    private void processItems(Job job, List<String> sorted,
+                              Map<String, Map<String, Map<String, Object>>> fingerprintSummary, RunState state) {
+        for (String defCode : sorted) {
+            if (cancellationRegistry.isCancelled(job.getId())) {
+                state.cancelled = true;
+                break;
+            }
+            Long itemId = progressService.startItem(job.getId(), defCode);
+            if (itemId == null) {
+                state.cancelled = true;
+                break;
+            }
+            state.startedItems++;
+            processItem(job, defCode, itemId, sorted.size(), fingerprintSummary, state);
+            if (state.cancelled) {
+                break;
+            }
+        }
+    }
+
+    private void processItem(Job job, String defCode, Long itemId, int itemCount,
+                             Map<String, Map<String, Map<String, Object>>> fingerprintSummary, RunState state) {
+        ItemState item = new ItemState();
+        try {
+            precheckItem(job, defCode, itemId, itemCount, fingerprintSummary, state, item);
+        } catch (Exception e) {
+            handleItemFailure(job, defCode, itemId, itemCount, state, item, e);
+        }
+    }
+
+    private void precheckItem(Job job, String defCode, Long itemId, int itemCount,
+                              Map<String, Map<String, Map<String, Object>>> fingerprintSummary,
+                              RunState state, ItemState item) throws Exception {
+        ConfigDefinition def = definitionService.findByCode(defCode);
+        List<ConfigField> keyFields = def.getFields().stream()
+                .filter(ConfigField::isKey).toList();
+        Optional<TaskFile> fileOpt = taskFileRepository
+                .findByTaskIdAndDefCodeAndFileType(job.getTaskId(), defCode, "UPLOAD");
+        String usedFileType = "UPLOAD";
+        if (fileOpt.isEmpty()) {
+            fileOpt = taskFileRepository
+                    .findByTaskIdAndDefCodeAndFileType(job.getTaskId(), defCode, "EXPORT");
+            usedFileType = "EXPORT";
+        }
+        if (fileOpt.isEmpty()) {
+            saveRowIssue(job, defCode, null, null, null, "未找到上传文件，请先上传配置数据文件");
+            state.totalErrors++;
+            progressService.finishItem(itemId, "FAILED", 0, 0);
+            taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
+            return;
+        }
+        byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
+        fingerprintSummary.computeIfAbsent(defCode, key -> new LinkedHashMap<>())
+                .put(usedFileType, digestOf(fileOpt.get().getStoragePath()));
+        List<Map<String, Object>> rows = excelReader.read(def, fileBytes);
+        item.defTotal = rows.size();
+        state.discoveredRows += item.defTotal;
+        state.totalRows = JobProgressTotals.denominator(0, state.discoveredRows,
+                itemCount - state.startedItems);
+        progressService.updateItem(itemId, 0, item.defTotal);
+        progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+        validateRows(job, def, defCode, keyFields, rows, itemId, state, item);
+        if (state.cancelled) {
+            return;
+        }
+        validateReferences(job, def, defCode, rows, item);
+        state.totalErrors += item.rowErrors;
+        state.totalWarnings += item.rowWarnings;
+        item.rowsSeen = item.defTotal;
+        state.finishedDefRows += item.defTotal;
+        state.processedRows = state.finishedDefRows;
+        progressService.finishItem(itemId, item.rowErrors > 0 ? "FAILED" : "COMPLETED",
+                item.defTotal, item.defTotal);
+        progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+        taskService.updateItemStatus(job.getTaskId(), defCode,
+                item.rowErrors > 0 ? "FAILED" : "CHECKED");
+    }
+
+    private void validateRows(Job job, ConfigDefinition def, String defCode, List<ConfigField> keyFields,
+                              List<Map<String, Object>> rows, Long itemId, RunState state, ItemState item)
+            throws InterruptedException {
+        Map<String, Integer> keyIndex = new HashMap<>();
+        for (int i = 0; i < rows.size(); i++) {
+            Map<String, Object> row = rows.get(i);
+            item.rowsSeen = i + 1;
+            item.rowErrors += validateRequiredFields(job, def, defCode, row, i);
+            item.rowErrors += checkDuplicateKey(job, defCode, keyFields, keyIndex, row, i);
+            if (i % appProperties.getJob().getBatchSize() == 0) {
+                Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
+                state.processedRows = state.finishedDefRows + item.rowsSeen;
+                progressService.updateItem(itemId, item.rowsSeen, item.defTotal);
+                progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+                publishProgress(job, def, state.processedRows, state.totalRows);
+                if (cancellationRegistry.isCancelled(job.getId())) {
+                    state.cancelled = true;
+                    progressService.finishItem(itemId, "CANCELLED", item.rowsSeen, item.defTotal);
+                    break;
+                }
+            }
+        }
+    }
+
+    private int validateRequiredFields(Job job, ConfigDefinition def, String defCode,
+                                       Map<String, Object> row, int rowIndex) {
+        int errors = 0;
+        for (ConfigField f : def.getFields()) {
+            if (f.isRequired()) {
+                Object val = row.get(f.getCode());
+                if (StringUtils.isBlank(ObjectUtils.toString(val, null))) {
+                    saveRowIssue(job, defCode, f.getCode(), null, rowIndex + 2,
+                            "必填字段 [" + f.getLabel() + "] 不能为空");
+                    errors++;
+                }
+            }
+        }
+        return errors;
+    }
+
+    private int checkDuplicateKey(Job job, String defCode, List<ConfigField> keyFields,
+                                  Map<String, Integer> keyIndex, Map<String, Object> row, int rowIndex) {
+        String rowKey = buildRowKey(row, keyFields);
+        if (!keyIndex.containsKey(rowKey)) {
+            keyIndex.put(rowKey, rowIndex + 2);
+            return 0;
+        }
+        saveRowIssue(job, defCode, null, rowKey, rowIndex + 2,
+                "主键重复: " + rowKey + " (第 " + keyIndex.get(rowKey) + " 行已存在)");
+        return 1;
+    }
+
+    private void validateReferences(Job job, ConfigDefinition def, String defCode,
+                                    List<Map<String, Object>> rows, ItemState item) {
+        for (ConfigField f : def.getFields()) {
+            if (f.getFieldType() != ConfigField.FieldType.REFERENCE || f.getRefDefCode() == null) {
+                continue;
+            }
+            Set<String> validValues = loadValidRefValues(
+                    job.getTaskId(), f.getRefDefCode(), f.getRefFieldCode());
+            item.rowErrors += validateReferenceField(job, defCode, f, validValues, rows);
+        }
+    }
+
+    private int validateReferenceField(Job job, String defCode, ConfigField field,
+                                       Set<String> validValues, List<Map<String, Object>> rows) {
+        int errors = 0;
+        for (int i = 0; i < rows.size(); i++) {
+            Object v = rows.get(i).get(field.getCode());
+            if (StringUtils.isBlank(ObjectUtils.toString(v, null))) {
+                continue;
+            }
+            if (!validValues.contains(v.toString())) {
+                saveRowIssue(job, defCode, field.getCode(), null, i + 2,
+                        "引用字段 [" + field.getLabel() + "] 的值 " + v
+                                + " 在配置 " + field.getRefDefCode() + " 中不存在");
+                errors++;
+            }
+        }
+        return errors;
+    }
+
+    private void saveRowIssue(Job job, String defCode, String fieldCode, String rowKey,
+                              Integer rowIndex, String message) {
+        ValidationIssue issue = new ValidationIssue();
+        issue.setJobId(job.getId());
+        issue.setDefCode(defCode);
+        issue.setFieldCode(fieldCode);
+        issue.setRowKey(rowKey);
+        issue.setRowIndex(rowIndex);
+        issue.setSeverity(ValidationIssue.Severity.ERROR);
+        issue.setMessage(message);
+        issueRepository.save(issue);
+    }
+
+    private void handleItemFailure(Job job, String defCode, Long itemId, int itemCount,
+                                   RunState state, ItemState item, Exception e) {
+        log.error("Precheck item failed defCode={}", defCode, e);
+        saveRowIssue(job, defCode, null, null, null, "检查过程出错，请查看服务日志或稍后重试");
+        state.totalErrors++;
+        state.finishedDefRows += item.defTotal;
+        state.processedRows = state.finishedDefRows;
+        state.totalRows = JobProgressTotals.denominator(0, state.discoveredRows,
+                itemCount - state.startedItems);
+        progressService.compensateItemFailure(itemId,
+                Math.max(item.defTotal, item.rowsSeen), item.defTotal);
+        taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
+    }
+
+    private static final class RunState {
+        private boolean cancelled;
+        private int totalErrors;
+        private int totalWarnings;
+        private int processedRows;
+        private int discoveredRows;
+        private int startedItems;
+        private int finishedDefRows;
+        private int totalRows;
+    }
+
+    private static final class ItemState {
+        private int defTotal;
+        private int rowsSeen;
+        private int rowErrors;
+        private int rowWarnings;
     }
 
     /** 单个文件类型的指纹（sha256 + size）。读盘失败记 WARN 并跳过 —— 该项随后走"摘要缺指纹"的从严分支。 */
@@ -344,7 +353,7 @@ public class PrecheckJobRunner {
         }
         int updated = jobRepository.writeResultJsonIfInFlight(jobId, json, IN_FLIGHT);
         if (updated == 0) {
-            log.debug("Job already terminal, fingerprint summary not written jobId={}", jobId);
+            if (log.isDebugEnabled()) log.debug("Job already terminal, fingerprint summary not written jobId={}", jobId);
         }
     }
 

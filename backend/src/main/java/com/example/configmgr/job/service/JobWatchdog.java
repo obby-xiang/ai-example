@@ -326,44 +326,9 @@ public class JobWatchdog {
      * 否则 Redis 抖动期间 N 个实例会各写一条重复 issue。心跳判死对不可用仍整体 fail-closed。
      */
     private void judge(Job job, boolean timeout) {
-        JobHeartbeatRegistry.JudgeLease lease = this.heartbeatRegistry.tryAcquireDeadJudgement(job.getId());
-        if (lease == JobHeartbeatRegistry.JudgeLease.HELD) {
-            // 别的实例正在/已经判过：本轮不落任何动作（重复 issue / 重复终态都不增加）
-            this.skippedNotLeaderTotal.incrementAndGet();
-            log.debug("Dead-judgement lease held by another instance, judgement skipped jobId={}", job.getId());
+        Boolean writeIssue = getJudgementPermission(job, timeout);
+        if (writeIssue == null) {
             return;
-        }
-        final boolean writeIssue = lease == JobHeartbeatRegistry.JudgeLease.ACQUIRED;
-        if (lease == JobHeartbeatRegistry.JudgeLease.UNAVAILABLE) {
-            if (!timeout) {
-                // 心跳判死依赖共享态：拿不到单飞键（Redis 不可用）必须 fail-closed
-                noteFailClosed(job.getId());
-                return;
-            }
-            // 超时判据只依赖本实例时钟与 jobs 行，不依赖共享态：安全网继续生效，
-            // 但 issue 必须单飞 —— 拿不到租约就不写（终态由条件 UPDATE 先到者胜）。
-            this.issueSuppressedTotal.incrementAndGet();
-            log.warn("Timeout judgement without lease (Redis), terminal state only and issue skipped jobId={}",
-                    job.getId());
-        }
-        JobRepository.CancelState current = this.jobRepository.findCancelStateById(job.getId()).orElse(null);
-        if (current == null || !IN_FLIGHT.contains(current.getStatus())) {
-            log.debug("Judgement abandoned after DB recheck jobId={} status={}", job.getId(),
-                    current == null ? "DELETED" : current.getStatus());
-            return;
-        }
-        if (!timeout) {
-            JobHeartbeatRegistry.SharedBeat rechecked = this.heartbeatRegistry.readSharedBeat(job.getId(),
-                    heartbeatInterval().multipliedBy(deadMultiplier()).toMillis());
-            if (rechecked.state() == JobHeartbeatRegistry.SharedBeatState.UNAVAILABLE) {
-                noteFailClosed(job.getId());
-                return;
-            }
-            if (rechecked.state() != JobHeartbeatRegistry.SharedBeatState.STALE) {
-                log.debug("Dead judgement abandoned after heartbeat recheck jobId={} state={}",
-                        job.getId(), rechecked.state());
-                return;
-            }
         }
         this.judgedJobIds.add(job.getId());
         if (timeout) {
@@ -378,17 +343,76 @@ public class JobWatchdog {
                         + "（app.job.heartbeat-interval × dead-multiplier），作业标记 FAILED；"
                         + "执行线程将在下一个分片边界自行止步，不自动重排队";
         if (writeIssue) {
-            try {
-                ValidationIssue issue = new ValidationIssue();
-                issue.setJobId(job.getId());
-                issue.setDefCode(JOB_LEVEL_DEF_CODE);
-                issue.setSeverity(ValidationIssue.Severity.ERROR);
-                issue.setMessage(reason);
-                this.issueRepository.save(issue);
-            } catch (Exception e) {
-                log.error("Job watchdog issue write failed jobId={}", job.getId(), e);
-            }
+            writeJudgementIssue(job, reason);
         }
+        applyJudgement(job, timeout);
+        log.warn("Job judged by watchdog jobId={} jobType={} verdict={}", job.getId(), job.getJobType(),
+                timeout ? "TIMEOUT" : "DEAD");
+    }
+
+    private Boolean getJudgementPermission(Job job, boolean timeout) {
+        JobHeartbeatRegistry.JudgeLease lease = this.heartbeatRegistry.tryAcquireDeadJudgement(job.getId());
+        if (lease == JobHeartbeatRegistry.JudgeLease.HELD) {
+            this.skippedNotLeaderTotal.incrementAndGet();
+            if (log.isDebugEnabled()) {
+                log.debug("Dead-judgement lease held by another instance, judgement skipped jobId={}", job.getId());
+            }
+            return null;
+        }
+        if (lease == JobHeartbeatRegistry.JudgeLease.UNAVAILABLE) {
+            if (!timeout) {
+                noteFailClosed(job.getId());
+                return null;
+            }
+            this.issueSuppressedTotal.incrementAndGet();
+            log.warn("Timeout judgement without lease (Redis), terminal state only and issue skipped jobId={}",
+                    job.getId());
+        }
+        JobRepository.CancelState current = this.jobRepository.findCancelStateById(job.getId()).orElse(null);
+        if (current == null || !IN_FLIGHT.contains(current.getStatus())) {
+            if (log.isDebugEnabled()) {
+                log.debug("Judgement abandoned after DB recheck jobId={} status={}", job.getId(),
+                        current == null ? "DELETED" : current.getStatus());
+            }
+            return null;
+        }
+        if (!timeout && !isHeartbeatStillStale(job)) {
+            return null;
+        }
+        return lease == JobHeartbeatRegistry.JudgeLease.ACQUIRED;
+    }
+
+    private boolean isHeartbeatStillStale(Job job) {
+        JobHeartbeatRegistry.SharedBeat rechecked = this.heartbeatRegistry.readSharedBeat(job.getId(),
+                heartbeatInterval().multipliedBy(deadMultiplier()).toMillis());
+        if (rechecked.state() == JobHeartbeatRegistry.SharedBeatState.UNAVAILABLE) {
+            noteFailClosed(job.getId());
+            return false;
+        }
+        if (rechecked.state() != JobHeartbeatRegistry.SharedBeatState.STALE) {
+            if (log.isDebugEnabled()) {
+                log.debug("Dead judgement abandoned after heartbeat recheck jobId={} state={}",
+                        job.getId(), rechecked.state());
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private void writeJudgementIssue(Job job, String reason) {
+        try {
+            ValidationIssue issue = new ValidationIssue();
+            issue.setJobId(job.getId());
+            issue.setDefCode(JOB_LEVEL_DEF_CODE);
+            issue.setSeverity(ValidationIssue.Severity.ERROR);
+            issue.setMessage(reason);
+            this.issueRepository.save(issue);
+        } catch (Exception e) {
+            log.error("Job watchdog issue write failed jobId={}", job.getId(), e);
+        }
+    }
+
+    private void applyJudgement(Job job, boolean timeout) {
         this.terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0,
                 job.getProgress(), job.getTotal(),
                 Map.of("jobId", job.getId(), "jobType", job.getJobType(),
@@ -401,22 +425,15 @@ public class JobWatchdog {
                         job.getId());
             }
         } catch (RuntimeException e) {
-            // 兜底：取消标志不是收尾必要条件（终态已落 FAILED，执行线程的迟到写由条件 UPDATE 丢弃）
             log.warn("Cancel flag write failed, terminal FAILED already written jobId={}",
                     job.getId(), e);
         }
         if (timeout) {
-            // 超时不强杀线程：runner 可能仍活着并在长事务里迟到写，删除闸门留给
-            // AsyncJobExecutor.finally 的 endRunner 释放（runner 仍活 ⇒ fail-closed 不误放行）。
             this.heartbeatRegistry.clear(job.getId());
             this.heartbeatRegistry.fenceCancelledRunner(job.getId());
         } else {
-            // 心跳判死：runner 已失联，撤销登记并清共享键 ⇒ 删除闸门随 runner 清理立即释放，
-            // 不再白等 runner-active 的 30m/65m TTL（本批硬要求）。
             this.heartbeatRegistry.revokeRunner(job.getId());
         }
-        log.warn("Job judged by watchdog jobId={} jobType={} verdict={}", job.getId(), job.getJobType(),
-                timeout ? "TIMEOUT" : "DEAD");
     }
 
     private Duration heartbeatInterval() {

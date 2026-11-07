@@ -12,6 +12,7 @@ import com.example.configmgr.task.service.TaskSteps;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
@@ -183,6 +184,29 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"配置项已确定，选择表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
+		Verdict conditionFacts = conditionFactsVerdict(purpose, slots, extra, taskId);
+		if (conditionFacts != null) {
+			return conditionFacts;
+		}
+		if (GenerativeFormRules.PURPOSE_TASK_TYPE.equals(purpose) && slots.taskType() != null) {
+			String known = slots.taskType();
+			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
+					"已确定任务类型：" + known + "（来源：任务/工作区或用户明确值）"));
+			List<String> reasons = List.of(
+					"已确定任务类型：" + known + "（系统解析，不是猜测）",
+					"下一步：直接调用 create_task（type=" + known + "，title 可选），不要再用表单重复收集类型");
+			log.warn("generative_form task type form rejected by slot gate (task type already decided; not parked, not sent) known={}", known);
+			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+					"任务类型已确定，类型表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+		}
+		Verdict conditionStep = conditionStepVerdict(purpose, step);
+		if (conditionStep != null) {
+			return conditionStep;
+		}
+		return Verdict.accept();
+	}
+
+	private static Verdict conditionFactsVerdict(String purpose, TaskSlots slots, Map<String, Object> extra, Long taskId) {
 		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && hasCreateTaskConditions(extra, taskId)) {
 			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
 					"创建任务时已给出结构化筛选条件（待宿主在 QUERY_COND 落库）"));
@@ -206,54 +230,47 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"筛选条件已确定，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
 		}
-		if (GenerativeFormRules.PURPOSE_TASK_TYPE.equals(purpose) && slots.taskType() != null) {
-			String known = slots.taskType();
-			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
-					"已确定任务类型：" + known + "（来源：任务/工作区或用户明确值）"));
-			List<String> reasons = List.of(
-					"已确定任务类型：" + known + "（系统解析，不是猜测）",
-					"下一步：直接调用 create_task（type=" + known + "，title 可选），不要再用表单重复收集类型");
-			log.warn("generative_form task type form rejected by slot gate (task type already decided; not parked, not sent) known={}", known);
-			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
-					"任务类型已确定，类型表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
+		return null;
+	}
+
+	private static Verdict conditionStepVerdict(String purpose, String step) {
+		if (!GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) || isConditionsStepAllowed(step)) {
+			return null;
 		}
-		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose) && !conditionsStepAllowed(step)) {
-			String current = step.trim();
-			boolean before = beforeConditionStep(current);
-			List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
-					(before ? "条件表单只能在 QUERY_COND 下发：当前步骤 " : "查询条件步已关闭：当前步骤 ") + current
-							+ "（条件只在 QUERY_COND 收集）"));
-			List<String> reasons = before
-					? List.of(
-							"当前步骤 " + current + " 还不收集条件：条件只在 QUERY_COND 收集（系统状态，不是猜测）",
-							"下一步：先 confirm_step（不传 step）推进到 QUERY_COND，下一批再收集一次条件，"
-									+ "不要在这一批下发条件表单")
-					: List.of(
-							"当前步骤 " + current + " 已过 QUERY_COND 或不属于条件收集步：条件只在 QUERY_COND 收集，"
-									+ "此时要么已设置、要么按「未设筛选 = 全量」推进（系统状态，不是猜测）",
-							"下一步：按既有步骤链调用 confirm_step / start_export 继续，不要重复下发条件表单");
-			log.warn("generative_form condition form rejected by step gate (current step {} is not QUERY_COND; not parked, not sent) hint={}", current, before ? "prior step; call confirm_step first" : "later/non-condition step; continue the existing step chain");
-			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
-					(before ? "条件表单只能在 QUERY_COND 下发" : "查询条件步已关闭")
-							+ "，条件表单未下发（工具未执行、未向前端下发表单）",
-					reasons, issues, null);
-		}
-		return Verdict.accept();
+		String current = step.trim();
+		boolean before = isBeforeConditionStep(current);
+		List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN,
+				(before ? "条件表单只能在 QUERY_COND 下发：当前步骤 " : "查询条件步已关闭：当前步骤 ") + current
+						+ "（条件只在 QUERY_COND 收集）"));
+		List<String> reasons = before
+				? List.of(
+						"当前步骤 " + current + " 还不收集条件：条件只在 QUERY_COND 收集（系统状态，不是猜测）",
+						"下一步：先 confirm_step（不传 step）推进到 QUERY_COND，下一批再收集一次条件，"
+								+ "不要在这一批下发条件表单")
+				: List.of(
+						"当前步骤 " + current + " 已过 QUERY_COND 或不属于条件收集步：条件只在 QUERY_COND 收集，"
+								+ "此时要么已设置、要么按「未设筛选 = 全量」推进（系统状态，不是猜测）",
+						"下一步：按既有步骤链调用 confirm_step / start_export 继续，不要重复下发条件表单");
+		log.warn("generative_form condition form rejected by step gate (current step {} is not QUERY_COND; not parked, not sent) hint={}", current, before ? "prior step; call confirm_step first" : "later/non-condition step; continue the existing step chain");
+		return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+				(before ? "条件表单只能在 QUERY_COND 下发" : "查询条件步已关闭")
+						+ "，条件表单未下发（工具未执行、未向前端下发表单）",
+				reasons, issues, null);
 	}
 
 	/**
 	 * 条件收集的步骤门：<b>有明确步骤时只有 {@code QUERY_COND} 允许条件表单</b>，
 	 * 其余步骤（{@code SELECT_DEFS}/{@code EXPORT}/{@code DONE}/导入链等）一律拒绝。
 	 *
-	 * <p>判据本体在 {@link GenerativeFormRules#conditionsStepAllowed} —— 条件表单的下发与这道闸门
+	 * <p>判据本体在 {@link GenerativeFormRules#isConditionsStepAllowed} —— 条件表单的下发与这道闸门
 	 * <b>共用同一份实现</b>（两处各写一遍必然漂移：表单发的与闸门判的不是同一步骤）。
 	 */
-	private static boolean conditionsStepAllowed(String step) {
-		return GenerativeFormRules.conditionsStepAllowed(step);
+	private static boolean isConditionsStepAllowed(String step) {
+		return GenerativeFormRules.isConditionsStepAllowed(step);
 	}
 
 	/** 是否还在 {@code QUERY_COND} 之前的前置步：指引是"先 confirm_step 推进"，而不是"步已关闭"。 */
-	private static boolean beforeConditionStep(String step) {
+	private static boolean isBeforeConditionStep(String step) {
 		return TaskSteps.isBeforeConditionStep(step);
 	}
 
@@ -377,7 +394,9 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			// NEW-2（返修二轮）：refs 为空既可能是"确实没传附件"，也可能是"入参/回灌解析失败"。
 			// 收口回收若照删，后者会把用户已上传的附件当"未提交"删光 —— 这里 fail-safe：不消费、不回收。
 			// 代价只是这些件留到登记 TTL（或会话销毁），安全方向是多留不漏删。
-			log.debug("no parseable attachment refs in submission; skipping attachment consume and closeout reclaim runId={} toolCallId={}", runId, toolCallId);
+			if (log.isDebugEnabled()) {
+				log.debug("no parseable attachment refs in submission; skipping attachment consume and closeout reclaim runId={} toolCallId={}", runId, toolCallId);
+			}
 			return;
 		}
 		// keep = 本次回灌里被提交的全部附件（无论它们最终是否消费成功）：收口回收只清理
@@ -386,6 +405,13 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		for (AttachmentRef ref : refs) {
 			keep.add(ref.fileId());
 		}
+		Map<String, FormAttachmentStore.Attachment> resolved = resolveAttachments(refs, runId, toolCallId);
+		consumeResolved(resolved, runId, toolCallId);
+		reclaimFormLeftovers(runId, toolCallId, keep);
+	}
+
+	private Map<String, FormAttachmentStore.Attachment> resolveAttachments(List<AttachmentRef> refs, String runId,
+			String toolCallId) {
 		Map<String, FormAttachmentStore.Attachment> resolved = new LinkedHashMap<>();
 		for (AttachmentRef ref : refs) {
 			try {
@@ -393,7 +419,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 				if (stored != null) {
 					resolved.put(ref.fileId(), stored);
 				}
-				else {
+				else if (log.isDebugEnabled()) {
 					log.debug("attachment registration is gone at consume time (expired or consumed) fileId={} runId={} toolCallId={}", ref.fileId(), runId, toolCallId);
 				}
 			}
@@ -402,6 +428,10 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 						runId, toolCallId, ex);
 			}
 		}
+		return resolved;
+	}
+
+	private void consumeResolved(Map<String, FormAttachmentStore.Attachment> resolved, String runId, String toolCallId) {
 		for (Map.Entry<String, FormAttachmentStore.Attachment> entry : resolved.entrySet()) {
 			try {
 				if (this.attachments.consume(entry.getKey())) {
@@ -418,7 +448,6 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 						runId, toolCallId, ex);
 			}
 		}
-		reclaimFormLeftovers(runId, toolCallId, keep);
 	}
 
 	/**
@@ -489,7 +518,6 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			}
 			catch (AiStateUnavailableException ex) {
 				// 元数据只是模型可见的补充信息；登记簿暂时不可用时不阻断已通过校验的回灌。
-				log.debug("attachment metadata temporarily unavailable fileId={}", ref.fileId(), ex);
 			}
 		}
 		if (parts.isEmpty()) {
@@ -591,7 +619,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	}
 
 	private JsonNode parse(String json) {
-		if (json == null || json.isBlank()) {
+		if (StringUtils.isBlank(json)) {
 			return null;
 		}
 		try {

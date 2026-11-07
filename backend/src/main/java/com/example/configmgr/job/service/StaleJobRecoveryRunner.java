@@ -112,7 +112,7 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
                 // 逐作业隔离：单个作业的锁/判活/写库失败不得中断整轮恢复。生产环境每个作业
                 // 是独立短事务，异常只回滚该作业；记录后继续下一页/下一个作业。
                 try {
-                    if (recoverOne(ref)) {
+                    if (isRecoveryWritten(ref)) {
                         recovered++;
                     }
                 } catch (RuntimeException e) {
@@ -122,7 +122,7 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
             }
         }
         if (scanned == 0) {
-            log.debug("Stale job recovery: nothing to do");
+            if (log.isDebugEnabled()) log.debug("Stale job recovery: nothing to do");
             return;
         }
         log.warn("Stale job recovery finished, jobs marked FAILED count={}", recovered);
@@ -138,7 +138,7 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
      * <p>本方法抛出的 {@link RuntimeException} 由 {@link #run(ApplicationArguments)} 逐作业捕获：
      * 事务已随异常回滚，不影响其它作业的恢复。
      */
-    private boolean recoverOne(JobRepository.InFlightJobRef ref) {
+    private boolean isRecoveryWritten(JobRepository.InFlightJobRef ref) {
         Long jobId = ref.getId();
         Long taskId = ref.getTaskId();
         Boolean recovered = this.perJob.execute(status -> {
@@ -151,7 +151,7 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
             // 活跃 → 跳过；读失败 → fail-closed 跳过（不用错误终态掩盖"无法确认"）。
             try {
                 if (heartbeatRegistry.isRunnerAlive(jobId)) {
-                    log.debug("Stale job recovery skipped, runner still active jobId={}", jobId);
+                    if (log.isDebugEnabled()) log.debug("Stale job recovery skipped, runner still active jobId={}", jobId);
                     return false;
                 }
             } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
@@ -164,7 +164,7 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
             boolean wrote = jobRepository.finishInterruptedIfInFlight(jobId, Job.JobStatus.FAILED,
                     LocalDateTime.now(), IN_FLIGHT) > 0;
             if (!wrote) {
-                log.debug("Stale job recovery skipped, job already left in-flight state jobId={}", jobId);
+                if (log.isDebugEnabled()) log.debug("Stale job recovery skipped, job already left in-flight state jobId={}", jobId);
                 return false;
             }
             // 实现细节补充：FAILED 作业下不得残留 RUNNING/PENDING 的作业条目（状态机不自相矛盾）；

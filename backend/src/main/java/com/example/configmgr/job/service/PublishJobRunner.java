@@ -28,7 +28,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 /**
  * 发布作业执行器（ADR-7 + Q14 定案：行级 upsert + 范围差集删除）。
@@ -116,7 +119,7 @@ public class PublishJobRunner {
 
         PublishOutcome finalOutcome = ObjectUtils.getIfNull(outcome,
                 () -> new PublishOutcome(false, 0, 0, 0));
-        Job.JobStatus status = finalOutcome.cancelled() ? Job.JobStatus.CANCELLED
+        Job.JobStatus status = finalOutcome.isCancelled() ? Job.JobStatus.CANCELLED
                 : (finalOutcome.totalErrors() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
         // R-153 B1：任务 COMPLETED/步骤联动收编进 terminalWriter 落写成功分支（孪生翻写点同 Export）。
         terminalWriter.complete(job, status, finalOutcome.totalErrors(), 0,
@@ -132,139 +135,132 @@ public class PublishJobRunner {
      * 作业行/作业条目的状态与进度写在这个事务之外（独立事务），故运行中即可见。
      */
     private PublishOutcome doPublish(Job job) {
-        final Long jobId = job.getId();
         final Long taskId = job.getTaskId();
-
-        issueRepository.deleteByJobId(jobId);
-
-        // 导入模式：MERGE=增量合并（纯 upsert）；REPLACE=范围内替换（范围内未被本次导入覆盖的旧行删除）。
-        // W-04 fail-fast（R-96 批 B）：settings_json 是坏 JSON ⇒ UNPARSEABLE，此处抛异常走整批回滚 +
-        // 作业 FAILED + 作业级 issue（recordFailure 的 defCode=null 哨兵 "-" 路径）；
-        // 「未配置」回落 MERGE 是正常语义，不在此列。
+        issueRepository.deleteByJobId(job.getId());
         ImportMode importMode = resolveImportMode(taskId);
         if (importMode == ImportMode.UNPARSEABLE) {
             throw new IllegalStateException("Could not parse the task import mode from settings_json "
                     + "(importMode is unreadable); refusing to silently downgrade REPLACE to MERGE");
         }
         boolean replaceMode = importMode == ImportMode.REPLACE;
-
-        boolean cancelled = false;
-        int totalErrors = 0;
-        int processedRows = 0;
-        int discoveredRows = 0;  // 已发现行数（已开工配置项暂存行数合计）
-        int startedItems = 0;    // 已开工配置项数
-        int finishedDefRows = 0;
-
+        RunState state = new RunState();
         List<TaskItem> items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
         List<String> defCodes = items.stream().map(TaskItem::getDefCode).toList();
         List<String> sorted = dependencyResolver.sort(defCodes);
-
-        // ③ 分母下限：发布行的来源是暂存表，可便宜地逐配置预数 → 分母开工即写终值，
-        //    首个配置项收尾瞬间不再出现 progress==total 的 100% 闪现（发现更多时仍会上调）。
         int estimatedRows = sorted.stream()
                 .mapToInt(c -> (int) stagingRowRepository.countByTaskIdAndDefCode(taskId, c))
                 .sum();
-        int totalRows = JobProgressTotals.denominator(estimatedRows, 0, sorted.size());
+        state.totalRows = JobProgressTotals.denominator(estimatedRows, 0, sorted.size());
+        processItems(job, sorted, estimatedRows, replaceMode, state);
+        state.totalRows = JobProgressTotals.denominator(estimatedRows, state.discoveredRows, 0);
+        return new PublishOutcome(state.cancelled, state.totalErrors, state.processedRows, state.totalRows);
+    }
 
+    private void processItems(Job job, List<String> sorted, int estimatedRows,
+                              boolean replaceMode, RunState state) {
         for (String defCode : sorted) {
-            if (cancellationRegistry.isCancelled(jobId)) {
-                cancelled = true;
+            if (cancellationRegistry.isCancelled(job.getId())) {
+                state.cancelled = true;
                 break;
             }
-
-            Long itemId = progressService.startItem(jobId, defCode);
+            Long itemId = progressService.startItem(job.getId(), defCode);
             if (itemId == null) {
-                // 父作业已终态（收敛已提交）：终态作业下不得再新增在途条目（评审 I-1）。
-                cancelled = true;
+                state.cancelled = true;
                 break;
             }
-            startedItems++;
-            boolean defCancelled = false;
-            int defProcessed = 0;
-            int defTotal = 0;
-
-            try {
-                ConfigDefinition def = definitionService.findByCode(defCode);
-                String scopeType = def.getLevel() == ConfigDefinition.ConfigLevel.GLOBAL ? "GLOBAL"
-                        : def.getLevel() == ConfigDefinition.ConfigLevel.REGION ? "REGION" : "PROJECT";
-
-                List<ConfigStagingRow> stagingRows = stagingRowRepository
-                        .findByTaskIdAndDefCode(taskId, defCode);
-                defTotal = stagingRows.size();
-                discoveredRows += defTotal;
-                totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows,
-                        sorted.size() - startedItems);
-                progressService.updateItem(itemId, 0, defTotal);
-                progressService.snapshot(jobId, processedRows, totalRows);
-
-                // 范围差集删除（REPLACE：本次导入覆盖范围内未出现在导入数据中的旧行删除）
-                if (replaceMode) {
-                    totalErrors += diffDelete(job, defCode, scopeType, stagingRows);
-                }
-
-                int processed = 0;
-                for (ConfigStagingRow sr : stagingRows) {
-                    // 暂存数据完整性守卫：解析失败即硬错误 → 整批回滚（不留半批）
-                    objectMapper.readValue(sr.getDataJson(), new TypeReference<Map<String, Object>>() {
-                    });
-
-                    // 并发冲突检测：导入时刻快照的 baseVersion 与当前版本不一致 → 行级 issue，跳过该行
-                    Optional<ConfigDataRow> existing = dataRowRepository
-                            .findRow(defCode, sr.getScopeType(), sr.getScopeKey(), sr.getRowKey());
-                    if (hasConflict(sr, existing)) {
-                        saveConflictIssue(job, defCode, sr.getRowKey(),
-                                "发布冲突：行 " + sr.getRowKey()
-                                        + " 在导入后被其他操作修改（快照版本 " + sr.getBaseVersion()
-                                        + "，当前版本 " + existing.map(ConfigDataRow::getVersion).orElse(null)
-                                        + "），请重新导入后再发布");
-                        totalErrors++;
-                        sr.setStatus("FAILED");
-                        stagingRowRepository.save(sr);
-                    } else {
-                        // 行级 upsert：已存在行保留 id 并强制版本递增，新业务键行插入
-                        configDataService.upsertPublished(defCode, sr.getScopeType(), sr.getScopeKey(),
-                                sr.getRowKey(), sr.getDataJson(), existing.orElse(null));
-                        sr.setStatus("PUBLISHED");
-                        stagingRowRepository.save(sr);
-                    }
-
-                    processed++;
-                    if (processed % appProperties.getJob().getBatchSize() == 0) {
-                        Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
-                        defProcessed = processed;
-                        processedRows = finishedDefRows + processed;
-                        // ⑤ 先落库再推送：快照与事件同一对数字
-                        progressService.updateItem(itemId, processed, defTotal);
-                        progressService.snapshot(jobId, processedRows, totalRows);
-                        publishProgress(job, def, processedRows, totalRows);
-                        if (cancellationRegistry.isCancelled(jobId)) {
-                            defCancelled = true;
-                            progressService.finishItem(itemId, "CANCELLED", processed, defTotal);
-                            break;
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                throw new PublishAbort(defCode, e);
-            }
-
-            if (defCancelled) {
-                cancelled = true;
+            state.startedItems++;
+            processItem(job, defCode, itemId, sorted.size(), estimatedRows, replaceMode, state);
+            if (state.cancelled) {
                 break;
             }
-
-            defProcessed = defTotal;
-            finishedDefRows += defTotal;
-            processedRows = finishedDefRows;
-            totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, sorted.size() - startedItems);
-            progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
-            progressService.snapshot(jobId, processedRows, totalRows);
-            taskService.updateItemStatus(taskId, defCode, "PUBLISHED");
         }
+    }
 
-        // 终态分母回归"真实工作量"（未开工预留清零）
-        totalRows = JobProgressTotals.denominator(estimatedRows, discoveredRows, 0);
-        return new PublishOutcome(cancelled, totalErrors, processedRows, totalRows);
+    private void processItem(Job job, String defCode, Long itemId, int itemCount,
+                             int estimatedRows, boolean replaceMode, RunState state) {
+        try {
+            ConfigDefinition def = definitionService.findByCode(defCode);
+            String scopeType = def.getLevel() == ConfigDefinition.ConfigLevel.GLOBAL ? "GLOBAL"
+                    : def.getLevel() == ConfigDefinition.ConfigLevel.REGION ? "REGION" : "PROJECT";
+            List<ConfigStagingRow> stagingRows = stagingRowRepository
+                    .findByTaskIdAndDefCode(job.getTaskId(), defCode);
+            int defTotal = stagingRows.size();
+            state.discoveredRows += defTotal;
+            state.totalRows = JobProgressTotals.denominator(estimatedRows, state.discoveredRows,
+                    itemCount - state.startedItems);
+            progressService.updateItem(itemId, 0, defTotal);
+            progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+            if (replaceMode) {
+                state.totalErrors += diffDelete(job, defCode, scopeType, stagingRows);
+            }
+            processStagingRows(job, def, defCode, stagingRows, itemId, state);
+            if (state.cancelled) {
+                return;
+            }
+            state.finishedDefRows += defTotal;
+            state.processedRows = state.finishedDefRows;
+            state.totalRows = JobProgressTotals.denominator(estimatedRows, state.discoveredRows,
+                    itemCount - state.startedItems);
+            progressService.finishItem(itemId, "COMPLETED", defTotal, defTotal);
+            progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+            taskService.updateItemStatus(job.getTaskId(), defCode, "PUBLISHED");
+        } catch (Exception e) {
+            throw new PublishAbort(defCode, e);
+        }
+    }
+
+    private void processStagingRows(Job job, ConfigDefinition def, String defCode,
+                                    List<ConfigStagingRow> stagingRows, Long itemId, RunState state)
+            throws Exception {
+        int processed = 0;
+        for (ConfigStagingRow sr : stagingRows) {
+            processStagingRow(job, defCode, sr, state);
+            processed++;
+            if (processed % appProperties.getJob().getBatchSize() == 0) {
+                Thread.sleep(appProperties.getJob().getDemoBatchDelayMs());
+                state.processedRows = state.finishedDefRows + processed;
+                progressService.updateItem(itemId, processed, stagingRows.size());
+                progressService.snapshot(job.getId(), state.processedRows, state.totalRows);
+                publishProgress(job, def, state.processedRows, state.totalRows);
+                if (cancellationRegistry.isCancelled(job.getId())) {
+                    state.cancelled = true;
+                    progressService.finishItem(itemId, "CANCELLED", processed, stagingRows.size());
+                    break;
+                }
+            }
+        }
+    }
+
+    private void processStagingRow(Job job, String defCode, ConfigStagingRow sr, RunState state) throws Exception {
+        objectMapper.readValue(sr.getDataJson(), new TypeReference<Map<String, Object>>() {
+        });
+        Optional<ConfigDataRow> existing = dataRowRepository
+                .findRow(defCode, sr.getScopeType(), sr.getScopeKey(), sr.getRowKey());
+        if (hasConflict(sr, existing)) {
+            saveConflictIssue(job, defCode, sr.getRowKey(),
+                    "发布冲突：行 " + sr.getRowKey()
+                            + " 在导入后被其他操作修改（快照版本 " + sr.getBaseVersion()
+                            + "，当前版本 " + existing.map(ConfigDataRow::getVersion).orElse(null)
+                            + "），请重新导入后再发布");
+            state.totalErrors++;
+            sr.setStatus("FAILED");
+            stagingRowRepository.save(sr);
+            return;
+        }
+        configDataService.upsertPublished(defCode, sr.getScopeType(), sr.getScopeKey(),
+                sr.getRowKey(), sr.getDataJson(), existing.orElse(null));
+        sr.setStatus("PUBLISHED");
+        stagingRowRepository.save(sr);
+    }
+
+    private static final class RunState {
+        private boolean cancelled;
+        private int totalErrors;
+        private int processedRows;
+        private int discoveredRows;
+        private int startedItems;
+        private int finishedDefRows;
+        private int totalRows;
     }
 
     /** 范围差集删除 + 并发保护冲突落 issue，返回冲突条数（软冲突，不阻断其余行）。 */
@@ -388,7 +384,7 @@ public class PublishJobRunner {
     }
 
     /** 数据面执行结果：取消标记 + 错误数 + 行级进度（供事务外写终态）。 */
-    private record PublishOutcome(boolean cancelled, int totalErrors, int processedRows, int totalRows) {
+    private record PublishOutcome(boolean isCancelled, int totalErrors, int processedRows, int totalRows) {
     }
 
     /** 硬错误载体：携带出错配置项，供事务回滚后的失败补记定位。 */

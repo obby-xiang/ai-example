@@ -19,6 +19,7 @@ import com.example.configmgr.task.service.TaskSseService;
 import com.example.configmgr.task.service.TaskSteps;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -177,33 +178,34 @@ public class JobService {
         final Job savedJob = job;
         boolean synchronizationActive = TransactionSynchronizationManager.isSynchronizationActive();
         if (synchronizationActive) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCompletion(int status) {
-                    if (status != TransactionSynchronization.STATUS_COMMITTED) {
-                        heartbeatRegistry.endRunner(savedJob.getId());
-                        cancellationRegistry.unregister(savedJob.getId());
-                    }
-                }
-
-                @Override
-                public void afterCommit() {
-                    // 提交后才允许启动执行体；beginRunner 已在事务内成功。
-                    try {
-                        asyncJobExecutor.execute(savedJob);
-                    } catch (RuntimeException e) {
-                        // P1-4：线程池拒绝等“根本没进入 runner”的失败——清 runner/取消注册，
-                        // 作业落 FAILED，不把异常抛回请求线程（避免 500），也不留 PENDING。
-                        heartbeatRegistry.endRunner(savedJob.getId());
-                        heartbeatRegistry.clear(savedJob.getId());
-                        cancellationRegistry.unregister(savedJob.getId());
-                        log.error("Failed to start async job execution, converged to FAILED jobId={}", savedJob.getId(), e);
-                        markRunnerStartFailed(savedJob);
-                    }
-                }
-            });
+            registerRunnerStartSynchronization(savedJob);
         }
+        startRunner(savedJob, synchronizationActive);
 
+        if (!synchronizationActive) {
+            executeJob(savedJob);
+        }
+        return job;
+    }
+
+    private void registerRunnerStartSynchronization(Job savedJob) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status != TransactionSynchronization.STATUS_COMMITTED) {
+                    heartbeatRegistry.endRunner(savedJob.getId());
+                    cancellationRegistry.unregister(savedJob.getId());
+                }
+            }
+
+            @Override
+            public void afterCommit() {
+                executeJob(savedJob);
+            }
+        });
+    }
+
+    private void startRunner(Job savedJob, boolean synchronizationActive) {
         final boolean runnerStarted;
         try {
             runnerStarted = heartbeatRegistry.beginRunner(savedJob.getId());
@@ -231,19 +233,18 @@ public class JobService {
                     "Could not register an active runner for job #" + savedJob.getId()
                             + " because Redis is unavailable; the job was not created, please retry later");
         }
+    }
 
-        if (!synchronizationActive) {
-            try {
-                asyncJobExecutor.execute(savedJob);
-            } catch (RuntimeException e) {
-                heartbeatRegistry.endRunner(savedJob.getId());
-                heartbeatRegistry.clear(savedJob.getId());
-                cancellationRegistry.unregister(savedJob.getId());
-                log.error("Failed to start async job execution, converged to FAILED jobId={}", savedJob.getId(), e);
-                markRunnerStartFailed(savedJob);
-            }
+    private void executeJob(Job savedJob) {
+        try {
+            asyncJobExecutor.execute(savedJob);
+        } catch (RuntimeException e) {
+            heartbeatRegistry.endRunner(savedJob.getId());
+            heartbeatRegistry.clear(savedJob.getId());
+            cancellationRegistry.unregister(savedJob.getId());
+            log.error("Failed to start async job execution, converged to FAILED jobId={}", savedJob.getId(), e);
+            markRunnerStartFailed(savedJob);
         }
-        return job;
     }
 
     /**
@@ -454,16 +455,16 @@ public class JobService {
     /** 解析指纹摘要；任何形态异常（缺失/非 JSON/非对象）都回落为空对象 —— 从严分支由此触发。 */
     private JsonNode parseFingerprintSummary(String resultJson) {
         if (StringUtils.isBlank(resultJson)) {
-            return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+            return MissingNode.getInstance();
         }
         try {
             JsonNode node = this.objectMapper.readTree(resultJson);
             return node != null && node.isObject() ? node
-                    : com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+                    : MissingNode.getInstance();
         }
         catch (Exception e) {
-            log.debug("Precheck fingerprint summary unparseable, treated as missing", e);
-            return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
+            log.warn("Precheck fingerprint summary unparseable, treated as missing", e);
+            return MissingNode.getInstance();
         }
     }
 

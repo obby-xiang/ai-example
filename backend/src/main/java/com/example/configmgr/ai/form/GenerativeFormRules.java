@@ -5,6 +5,7 @@ import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.task.service.TaskSteps;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.lang3.StringUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -19,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -206,6 +208,10 @@ public final class GenerativeFormRules {
 	 * 未知不等于"已过条件步"，既有兼容口径不变。
 	 */
 	public static boolean conditionsStepAllowed(String step) {
+		return isConditionsStepAllowed(step);
+	}
+
+	public static boolean isConditionsStepAllowed(String step) {
 		return TaskSteps.allowsConditionCollection(step);
 	}
 
@@ -284,6 +290,15 @@ public final class GenerativeFormRules {
 
 	/** 表单 schema 本身的结构化校验。 */
 	public static List<FormIssue> schemaIssues(JsonNode form) {
+		List<FormIssue> issues = schemaHeaderIssues(form);
+		if (form == null || !form.isObject()) {
+			return issues;
+		}
+		issues.addAll(schemaFieldIssues(form.get("fields")));
+		return dedupe(issues);
+	}
+
+	private static List<FormIssue> schemaHeaderIssues(JsonNode form) {
 		List<FormIssue> issues = new ArrayList<>();
 		if (form == null || !form.isObject()) {
 			issues.add(FormIssue.form(FormIssueCodes.FORM_NOT_OBJECT,
@@ -302,13 +317,28 @@ public final class GenerativeFormRules {
 			issues.add(FormIssue.form(FormIssueCodes.FORM_TOO_LARGE,
 					"表单 schema 过大：" + size + " 字符（上限 " + MAX_FORM_CHARS + "）"));
 		}
-
 		JsonNode scenario = form.get("scenario");
 		if (scenario == null || !scenario.isTextual() || !SCENARIOS.contains(scenario.asText())) {
 			issues.add(FormIssue.form(FormIssueCodes.FORM_SCENARIO_INVALID,
 					"scenario 必填且必须是 " + String.join("/", sorted(SCENARIOS)) + " 之一（实际："
 							+ (scenario == null ? "缺失" : scenario.asText()) + "）"));
 		}
+		issues.addAll(purposeIssues(form));
+		JsonNode title = form.get("title");
+		if (title != null) {
+			if (!title.isTextual()) {
+				issues.add(FormIssue.form(FormIssueCodes.FORM_TITLE_INVALID, "title 必须是文本"));
+			}
+			else if (title.asText().length() > MAX_TITLE_CHARS) {
+				issues.add(FormIssue.form(FormIssueCodes.FORM_TITLE_TOO_LONG,
+						"title 过长：" + title.asText().length() + " 字符（上限 " + MAX_TITLE_CHARS + "）"));
+			}
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> purposeIssues(JsonNode form) {
+		List<FormIssue> issues = new ArrayList<>();
 		// 用途校验走唯一解析入口：显式值非法才报 FORM_PURPOSE_INVALID（缺省/空白交给 resolve 的结构推断）
 		String explicitPurpose = FormPurposes.explicit(form);
 		if (explicitPurpose != null && !FormPurposes.isRegistered(explicitPurpose)) {
@@ -323,18 +353,11 @@ public final class GenerativeFormRules {
 							+ DEFAULT_PURPOSE + "）；实际：" + purpose));
 		}
 		issues.addAll(purposeShapeIssues(form));
-		JsonNode title = form.get("title");
-		if (title != null) {
-			if (!title.isTextual()) {
-				issues.add(FormIssue.form(FormIssueCodes.FORM_TITLE_INVALID, "title 必须是文本"));
-			}
-			else if (title.asText().length() > MAX_TITLE_CHARS) {
-				issues.add(FormIssue.form(FormIssueCodes.FORM_TITLE_TOO_LONG,
-						"title 过长：" + title.asText().length() + " 字符（上限 " + MAX_TITLE_CHARS + "）"));
-			}
-		}
+		return issues;
+	}
 
-		JsonNode fields = form.get("fields");
+	private static List<FormIssue> schemaFieldIssues(JsonNode fields) {
+		List<FormIssue> issues = new ArrayList<>();
 		if (fields == null) {
 			issues.add(FormIssue.form(FormIssueCodes.FORM_FIELDS_MISSING, "fields 必填（至少 1 个字段）"));
 			return issues;
@@ -356,7 +379,7 @@ public final class GenerativeFormRules {
 			issues.addAll(fieldIssues(fields.get(i), i, keys));
 		}
 		issues.addAll(linkageIssues(fields));
-		return dedupe(issues);
+		return issues;
 	}
 
 	/**
@@ -377,8 +400,8 @@ public final class GenerativeFormRules {
 					"回灌结果必须是 JSON 对象（字段 key → 值）"));
 			return issues;
 		}
-		Map<String, JsonNode> fields = fieldsByKey(form);
-		if (fields == null) {
+		Optional<Map<String, JsonNode>> fields = fieldsByKey(form);
+		if (fields.isEmpty()) {
 			issues.add(FormIssue.form(FormIssueCodes.RESULT_SCHEMA_UNAVAILABLE,
 					"表单 schema 不可用（缺少 fields 数组），无法复核回灌结果 —— schema 在挂起前已通过校验，"
 							+ "出现此情形说明入参在挂起后被改动"));
@@ -390,12 +413,12 @@ public final class GenerativeFormRules {
 					"回灌结果过大：" + size + " 字符（上限 " + MAX_RESULT_CHARS + "）"));
 		}
 		for (String name : names(values)) {
-			if (!fields.containsKey(name)) {
+			if (!fields.get().containsKey(name)) {
 				issues.add(FormIssue.form(FormIssueCodes.RESULT_UNKNOWN_FIELD,
-						"未知字段：" + name + "（表单字段：" + String.join(", ", fields.keySet()) + "）"));
+						"未知字段：" + name + "（表单字段：" + String.join(", ", fields.get().keySet()) + "）"));
 			}
 		}
-		for (Map.Entry<String, JsonNode> entry : fields.entrySet()) {
+		for (Map.Entry<String, JsonNode> entry : fields.get().entrySet()) {
 			String key = entry.getKey();
 			JsonNode field = entry.getValue();
 			if (!isVisible(field, values)) {
@@ -496,20 +519,38 @@ public final class GenerativeFormRules {
 	/** 问题归属：有 key 用 key，否则用 {@code fields[i]}（与字段级校验同一口径）。 */
 	private static String fieldKeyOrIndex(JsonNode field, int index) {
 		String key = textOrNull(field.get("key"));
-		return key == null || key.isBlank() ? "fields[" + index + "]" : key;
+		return StringUtils.isBlank(key) ? "fields[" + index + "]" : key;
 	}
 
 	// ── 字段级校验 ────────────────────────────────────────────────────────────
 
 	private static List<FormIssue> fieldIssues(JsonNode field, int index, Set<String> keys) {
-		List<FormIssue> issues = new ArrayList<>();
 		String at = "fields[" + index + "]";
 		if (field == null || !field.isObject()) {
-			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_NOT_OBJECT, at + " 必须是 JSON 对象"));
-			return issues;
+			return List.of(FormIssue.field(at, FormIssueCodes.FIELD_NOT_OBJECT, at + " 必须是 JSON 对象"));
 		}
 		String key = textOrNull(field.get("key"));
-		String keyForIssue = key == null || key.isBlank() ? at : key;
+		String keyForIssue = StringUtils.isBlank(key) ? at : key;
+		List<FormIssue> issues = fieldKeyIssues(field, at, keyForIssue, key, keys);
+		String type = textOrNull(field.get("type"));
+		if (type == null) {
+			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_TYPE_MISSING, at + ".type 必填"));
+			return issues;
+		}
+		if (!FIELD_TYPES.contains(type)) {
+			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_TYPE_UNSUPPORTED,
+					at + ".type=" + type + " 不在白名单类型内（" + String.join("/", FIELD_TYPES) + "）"));
+			return issues;
+		}
+		issues.addAll(fieldPresentationIssues(field, at, keyForIssue, type));
+		issues.addAll(constraintIssues(field, at, keyForIssue, type));
+		issues.addAll(fieldOptionAndDefaultIssues(field, at, keyForIssue, type));
+		return issues;
+	}
+
+	private static List<FormIssue> fieldKeyIssues(JsonNode field, String at, String keyForIssue, String key,
+			Set<String> keys) {
+		List<FormIssue> issues = new ArrayList<>();
 		for (String name : names(field)) {
 			if (!FIELD_ATTRIBUTES.contains(name)) {
 				issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_EXTRA_ATTRIBUTE,
@@ -517,8 +558,7 @@ public final class GenerativeFormRules {
 								+ String.join("/", sorted(FIELD_ATTRIBUTES)) + "）"));
 			}
 		}
-
-		if (key == null || key.isBlank()) {
+		if (StringUtils.isBlank(key)) {
 			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_KEY_MISSING, at + ".key 必填且不得为空"));
 		}
 		else if (FORBIDDEN_FIELD_KEYS.contains(key)) {
@@ -535,33 +575,24 @@ public final class GenerativeFormRules {
 			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_KEY_DUPLICATE,
 					at + ".key \"" + key + "\" 与前面的字段重复（同一表单内字段键必须唯一）"));
 		}
-
 		String label = textOrNull(field.get("label"));
-		if (label == null || label.isBlank()) {
+		if (StringUtils.isBlank(label)) {
 			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_LABEL_MISSING, at + ".label 必填且不得为空"));
 		}
 		else if (label.length() > MAX_LABEL_CHARS) {
 			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_LABEL_TOO_LONG,
 					at + ".label 过长：" + label.length() + " 字符（上限 " + MAX_LABEL_CHARS + "）"));
 		}
+		return issues;
+	}
 
-		String type = textOrNull(field.get("type"));
-		if (type == null) {
-			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_TYPE_MISSING, at + ".type 必填"));
-			return issues;
-		}
-		if (!FIELD_TYPES.contains(type)) {
-			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_TYPE_UNSUPPORTED,
-					at + ".type=" + type + " 不在白名单类型内（" + String.join("/", FIELD_TYPES) + "）"));
-			return issues;
-		}
-
+	private static List<FormIssue> fieldPresentationIssues(JsonNode field, String at, String keyForIssue, String type) {
+		List<FormIssue> issues = new ArrayList<>();
 		JsonNode requiredNode = field.get("required");
 		if (requiredNode != null && !requiredNode.isBoolean()) {
 			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.FIELD_REQUIRED_INVALID,
 					at + ".required 必须是布尔（true/false）"));
 		}
-
 		JsonNode placeholder = field.get("placeholder");
 		if (placeholder != null) {
 			if (!placeholder.isTextual()) {
@@ -579,9 +610,11 @@ public final class GenerativeFormRules {
 								+ " 类型可带（当前 type=" + type + "）"));
 			}
 		}
+		return issues;
+	}
 
-		issues.addAll(constraintIssues(field, at, keyForIssue, type));
-
+	private static List<FormIssue> fieldOptionAndDefaultIssues(JsonNode field, String at, String keyForIssue, String type) {
+		List<FormIssue> issues = new ArrayList<>();
 		JsonNode options = field.get("options");
 		if (OPTION_TYPES.contains(type)) {
 			if (options == null && field.get("optionsFrom") == null) {
@@ -596,7 +629,6 @@ public final class GenerativeFormRules {
 			issues.add(FormIssue.field(keyForIssue, FormIssueCodes.OPTIONS_NOT_ALLOWED,
 					at + ".options 仅 enum/multi_select 可带（当前 type=" + type + "）"));
 		}
-
 		JsonNode defaultValue = field.get("defaultValue");
 		if (defaultValue != null) {
 			issues.addAll(defaultValueIssues(defaultValue, at, keyForIssue, field));
@@ -607,133 +639,164 @@ public final class GenerativeFormRules {
 	// ── 校验最小集（G-C / G-F） ─────────────────────────────────────────────
 
 	private static List<FormIssue> constraintIssues(JsonNode field, String at, String key, String type) {
+		List<FormIssue> issues = lengthConstraintIssues(field, at, key, type);
+		issues.addAll(formatConstraintIssue(field, at, key, type));
+		issues.addAll(typedBoundIssues(field, at, key, type));
+		return issues;
+	}
+
+	private static List<FormIssue> lengthConstraintIssues(JsonNode field, String at, String key, String type) {
+		List<FormIssue> issues = variantIssues(field, at, key, type);
+		issues.addAll(lengthBoundIssues(field, at, key, type));
+		return issues;
+	}
+
+	private static List<FormIssue> variantIssues(JsonNode field, String at, String key, String type) {
 		List<FormIssue> issues = new ArrayList<>();
-		boolean text = "text".equals(type);
-		boolean number = "number".equals(type);
-		boolean date = "date".equals(type);
-		boolean multi = "multi_select".equals(type);
-
 		String variant = textOrNull(field.get("variant"));
-		boolean longText = false;
-		if (variant != null) {
-			if (!VARIANT_TYPES.contains(type)) {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
-						at + ".variant 仅 " + String.join("/", sorted(VARIANT_TYPES)) + " 可带（当前 type=" + type + "）"));
-			}
-			else if (!VARIANT_LONG_TEXT.equals(variant)) {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_VARIANT_UNSUPPORTED,
-						at + ".variant=" + variant + " 不在白名单内（只有 " + VARIANT_LONG_TEXT + "）"));
-			}
-			else {
-				longText = true;
-			}
+		if (variant == null) {
+			return issues;
 		}
-		int hardMax = longText ? MAX_LONGTEXT_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
+		if (!VARIANT_TYPES.contains(type)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
+					at + ".variant 仅 " + String.join("/", sorted(VARIANT_TYPES)) + " 可带（当前 type=" + type + "）"));
+		}
+		else if (!VARIANT_LONG_TEXT.equals(variant)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_VARIANT_UNSUPPORTED,
+					at + ".variant=" + variant + " 不在白名单内（只有 " + VARIANT_LONG_TEXT + "）"));
+		}
+		return issues;
+	}
 
+	private static List<FormIssue> lengthBoundIssues(JsonNode field, String at, String key, String type) {
+		List<FormIssue> issues = new ArrayList<>();
+		boolean longText = VARIANT_LONG_TEXT.equals(textOrNull(field.get("variant")));
+		int hardMax = longText ? MAX_LONGTEXT_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
 		JsonNode minLength = field.get("minLength");
 		JsonNode maxLength = field.get("maxLength");
-		if (minLength != null || maxLength != null) {
-			if (!text) {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
-						at + ".minLength/maxLength 仅 text 可带（当前 type=" + type + "）"));
-			}
-			else {
-				Integer min = integerOrNull(minLength);
-				Integer max = integerOrNull(maxLength);
-				if ((minLength != null && min == null) || (maxLength != null && max == null)) {
-					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
-							at + ".minLength/maxLength 必须是整数"));
-				}
-				else {
-					if (min != null && min < 0) {
-						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
-								at + ".minLength 不得为负（实际 " + min + "）"));
-					}
-					if (max != null && max < 0) {
-						// 负数上界无法满足：值校验阶段 text.length() > -1 恒真，用户填什么都过不了闸。
-						// schema 阶段拒绝（零副作用），模型改一次即可用。
-						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
-								at + ".maxLength 不得为负（实际 " + max + "）"));
-					}
-					if (max != null && max > hardMax) {
-						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MAX_LENGTH_TOO_LARGE,
-								at + ".maxLength 超过硬顶：" + max + "（上限 " + hardMax + "）"));
-					}
-					if (min != null && max != null && min > max) {
-						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
-								at + ".minLength 不得大于 maxLength（" + min + " > " + max + "）"));
-					}
-				}
-			}
+		if (minLength == null && maxLength == null) {
+			return issues;
 		}
+		if (!"text".equals(type)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
+					at + ".minLength/maxLength 仅 text 可带（当前 type=" + type + "）"));
+			return issues;
+		}
+		Integer min = integerOrNull(minLength);
+		Integer max = integerOrNull(maxLength);
+		if ((minLength != null && min == null) || (maxLength != null && max == null)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
+					at + ".minLength/maxLength 必须是整数"));
+			return issues;
+		}
+		if (min != null && min < 0) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
+					at + ".minLength 不得为负（实际 " + min + "）"));
+		}
+		if (max != null && max < 0) {
+			// 负数上界无法满足：值校验阶段 text.length() > -1 恒真，用户填什么都过不了闸。
+			// schema 阶段拒绝（零副作用），模型改一次即可用。
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_LENGTH_BOUND_INVALID,
+					at + ".maxLength 不得为负（实际 " + max + "）"));
+		}
+		if (max != null && max > hardMax) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MAX_LENGTH_TOO_LARGE,
+					at + ".maxLength 超过硬顶：" + max + "（上限 " + hardMax + "）"));
+		}
+		if (min != null && max != null && min > max) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
+					at + ".minLength 不得大于 maxLength（" + min + " > " + max + "）"));
+		}
+		return issues;
+	}
 
+	private static List<FormIssue> formatConstraintIssue(JsonNode field, String at, String key, String type) {
+		List<FormIssue> issues = new ArrayList<>();
 		String format = textOrNull(field.get("format"));
-		if (field.has("format")) {
-			if (format == null) {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_INVALID, at + ".format 必须是文本"));
-			}
-			else if (!text) {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
-						at + ".format 仅 text 可带（当前 type=" + type + "）"));
-			}
-			else if (!TEXT_FORMATS.contains(format)) {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_FORMAT_UNSUPPORTED,
-						at + ".format=" + format + " 不在命名格式内（" + String.join("/", TEXT_FORMATS)
-								+ "；不接受正则表达式）"));
-			}
+		if (!field.has("format")) {
+			return issues;
 		}
+		if (format == null) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_INVALID, at + ".format 必须是文本"));
+		}
+		else if (!"text".equals(type)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
+					at + ".format 仅 text 可带（当前 type=" + type + "）"));
+		}
+		else if (!TEXT_FORMATS.contains(format)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_FORMAT_UNSUPPORTED,
+					at + ".format=" + format + " 不在命名格式内（" + String.join("/", TEXT_FORMATS)
+							+ "；不接受正则表达式）"));
+		}
+		return issues;
+	}
 
+	private static List<FormIssue> typedBoundIssues(JsonNode field, String at, String key, String type) {
+		List<FormIssue> issues = scalarBoundIssues(field, at, key, type);
+		issues.addAll(itemBoundIssues(field, at, key, type));
+		return issues;
+	}
+
+	private static List<FormIssue> scalarBoundIssues(JsonNode field, String at, String key, String type) {
+		List<FormIssue> issues = new ArrayList<>();
+		boolean number = "number".equals(type);
+		boolean date = "date".equals(type);
 		JsonNode min = field.get("min");
 		JsonNode max = field.get("max");
 		JsonNode step = field.get("step");
 		JsonNode integer = field.get("integer");
-		if (min != null || max != null || step != null || integer != null) {
-			if (number) {
-				issues.addAll(numberBoundIssues(at, key, min, max, step, integer));
-			}
-			else if (date) {
-				if (step != null || integer != null) {
-					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
-							at + ".step/integer 仅 number 可带（当前 type=date）"));
-				}
-				issues.addAll(dateBoundIssues(at, key, min, max));
-			}
-			else {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
-						at + ".min/max/step/integer 仅 number 或 date 可带（当前 type=" + type + "）"));
-			}
+		if (min == null && max == null && step == null && integer == null) {
+			return issues;
 		}
+		if (number) {
+			issues.addAll(numberBoundIssues(at, key, min, max, step, integer));
+		}
+		else if (date) {
+			if (step != null || integer != null) {
+				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
+						at + ".step/integer 仅 number 可带（当前 type=date）"));
+			}
+			issues.addAll(dateBoundIssues(at, key, min, max));
+		}
+		else {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
+					at + ".min/max/step/integer 仅 number 或 date 可带（当前 type=" + type + "）"));
+		}
+		return issues;
+	}
 
+	private static List<FormIssue> itemBoundIssues(JsonNode field, String at, String key, String type) {
+		List<FormIssue> issues = new ArrayList<>();
+		boolean multi = "multi_select".equals(type);
 		JsonNode minItems = field.get("minItems");
 		JsonNode maxItems = field.get("maxItems");
-		if (minItems != null || maxItems != null) {
-			if (!multi) {
-				issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
-						at + ".minItems/maxItems 仅 multi_select 可带（当前 type=" + type + "）"));
-			}
-			else {
-				Integer minCount = integerOrNull(minItems);
-				Integer maxCount = integerOrNull(maxItems);
-				if ((minItems != null && minCount == null) || (maxItems != null && maxCount == null)) {
-					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
-							at + ".minItems/maxItems 必须是整数"));
-				}
-				else {
-					if (minCount != null && minCount < 0) {
-						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
-								at + ".minItems 不得为负（实际 " + minCount + "）"));
-					}
-					if (maxCount != null && maxCount < 0) {
-						// 负数上界在值校验阶段是"任何选集都超限"：schema 阶段拒绝，不把死约束发给用户。
-						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
-								at + ".maxItems 不得为负（实际 " + maxCount + "）"));
-					}
-					if (minCount != null && maxCount != null && minCount > maxCount) {
-						issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
-								at + ".minItems 不得大于 maxItems（" + minCount + " > " + maxCount + "）"));
-					}
-				}
-			}
+		if (minItems == null && maxItems == null) {
+			return issues;
+		}
+		if (!multi) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
+					at + ".minItems/maxItems 仅 multi_select 可带（当前 type=" + type + "）"));
+			return issues;
+		}
+		Integer minCount = integerOrNull(minItems);
+		Integer maxCount = integerOrNull(maxItems);
+		if ((minItems != null && minCount == null) || (maxItems != null && maxCount == null)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
+					at + ".minItems/maxItems 必须是整数"));
+			return issues;
+		}
+		if (minCount != null && minCount < 0) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
+					at + ".minItems 不得为负（实际 " + minCount + "）"));
+		}
+		if (maxCount != null && maxCount < 0) {
+			// 负数上界在值校验阶段是"任何选集都超限"：schema 阶段拒绝，不把死约束发给用户。
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ITEMS_BOUND_INVALID,
+					at + ".maxItems 不得为负（实际 " + maxCount + "）"));
+		}
+		if (minCount != null && maxCount != null && minCount > maxCount) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_MIN_GREATER_THAN_MAX,
+					at + ".minItems 不得大于 maxItems（" + minCount + " > " + maxCount + "）"));
 		}
 		return issues;
 	}
@@ -814,7 +877,7 @@ public final class GenerativeFormRules {
 				}
 			}
 			String value = textOrNull(option.get("value"));
-			if (value == null || value.isBlank()) {
+			if (StringUtils.isBlank(value)) {
 				issues.add(FormIssue.field(key, FormIssueCodes.OPTION_VALUE_MISSING,
 						where + ".value 必填且不得为空"));
 			}
@@ -836,25 +899,20 @@ public final class GenerativeFormRules {
 	}
 
 	private static List<FormIssue> defaultValueIssues(JsonNode value, String at, String key, JsonNode field) {
-		List<FormIssue> issues = new ArrayList<>();
 		String type = field.path("type").asText("");
 		List<String> options = optionValues(field);
 		String prefix = at + ".defaultValue";
+		if ("multi_select".equals(type)) {
+			return defaultMultiSelectIssues(value, prefix, key, options);
+		}
+		return defaultScalarIssues(value, prefix, key, type, field, options);
+	}
+
+	private static List<FormIssue> defaultScalarIssues(JsonNode value, String prefix, String key, String type,
+			JsonNode field, List<String> options) {
+		List<FormIssue> issues = new ArrayList<>();
 		switch (type) {
-			case "text" -> {
-				if (!value.isTextual()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_TYPE_MISMATCH,
-							prefix + " 期望 text（字符串），实际是" + typeName(value)));
-				}
-				else {
-					int limit = VARIANT_LONG_TEXT.equals(field.path("variant").asText())
-							? MAX_LONGTEXT_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
-					if (value.asText().length() > limit) {
-						issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_TOO_LONG,
-								prefix + " 过长：" + value.asText().length() + " 字符（上限 " + limit + "）"));
-					}
-				}
-			}
+			case "text" -> issues.addAll(defaultTextIssues(value, prefix, key, field));
 			case "number" -> {
 				if (!value.isNumber()) {
 					issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_TYPE_MISMATCH,
@@ -883,30 +941,47 @@ public final class GenerativeFormRules {
 							prefix + " \"" + value.asText() + "\" 不在选项内（" + String.join("/", options) + "）"));
 				}
 			}
-			case "multi_select" -> {
-				if (!value.isArray()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_TYPE_MISMATCH,
-							prefix + " 期望数组（多选默认值），实际是" + typeName(value)));
-				}
-				else {
-					Set<String> seen = new LinkedHashSet<>();
-					for (JsonNode element : value) {
-						if (!element.isTextual() || !options.contains(element.asText())) {
-							issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_OUT_OF_OPTIONS,
-									prefix + " 含不在选项内的值：" + element + "（可选：" + String.join("/", options) + "）"));
-							continue;
-						}
-						if (!seen.add(element.asText())) {
-							issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_DUPLICATE,
-									prefix + " 含重复值：" + element.asText()));
-						}
-					}
-				}
-			}
 			case "attachment" -> issues.add(FormIssue.field(key, FormIssueCodes.FIELD_ATTRIBUTE_TYPE_UNSUPPORTED,
 					prefix + " 不允许（attachment 的值由用户上传产生，模型不得预填）"));
 			default -> issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_TYPE_MISMATCH,
 					prefix + " 无法校验（type=" + type + " 不在白名单内)"));
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> defaultTextIssues(JsonNode value, String prefix, String key, JsonNode field) {
+		if (!value.isTextual()) {
+			return List.of(FormIssue.field(key, FormIssueCodes.DEFAULT_TYPE_MISMATCH,
+					prefix + " 期望 text（字符串），实际是" + typeName(value)));
+		}
+		int limit = VARIANT_LONG_TEXT.equals(field.path("variant").asText())
+				? MAX_LONGTEXT_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
+		if (value.asText().length() > limit) {
+			return List.of(FormIssue.field(key, FormIssueCodes.DEFAULT_TOO_LONG,
+					prefix + " 过长：" + value.asText().length() + " 字符（上限 " + limit + "）"));
+		}
+		return List.of();
+	}
+
+	private static List<FormIssue> defaultMultiSelectIssues(JsonNode value, String prefix, String key,
+			List<String> options) {
+		List<FormIssue> issues = new ArrayList<>();
+		if (!value.isArray()) {
+			issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_TYPE_MISMATCH,
+					prefix + " 期望数组（多选默认值），实际是" + typeName(value)));
+			return issues;
+		}
+		Set<String> seen = new LinkedHashSet<>();
+		for (JsonNode element : value) {
+			if (!element.isTextual() || !options.contains(element.asText())) {
+				issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_OUT_OF_OPTIONS,
+						prefix + " 含不在选项内的值：" + element + "（可选：" + String.join("/", options) + "）"));
+				continue;
+			}
+			if (!seen.add(element.asText())) {
+				issues.add(FormIssue.field(key, FormIssueCodes.DEFAULT_DUPLICATE,
+						prefix + " 含重复值：" + element.asText()));
+			}
 		}
 		return issues;
 	}
@@ -920,7 +995,7 @@ public final class GenerativeFormRules {
 		for (int i = 0; i < fields.size(); i++) {
 			JsonNode field = fields.get(i);
 			String key = textOrNull(field.get("key"));
-			if (key != null && !key.isBlank()) {
+			if (StringUtils.isNotBlank(key)) {
 				declared.add(key);
 				indexByKey.putIfAbsent(key, i);
 			}
@@ -932,48 +1007,68 @@ public final class GenerativeFormRules {
 		for (int i = 0; i < fields.size(); i++) {
 			JsonNode field = fields.get(i);
 			String key = textOrNull(field.get("key"));
-			if (key == null || key.isBlank()) {
+			if (StringUtils.isBlank(key)) {
 				continue;
 			}
-			String at = "fields[" + i + "]";
-			for (String attr : List.of("visibleWhen", "requiredWhen", "disabledWhen")) {
-				JsonNode condition = field.get(attr);
-				if (condition == null) {
-					continue;
-				}
-				issues.addAll(conditionIssues(attr, condition, at, key, declared, deps.get(key)));
-			}
-			JsonNode optionsFrom = field.get("optionsFrom");
-			if (optionsFrom != null) {
-				issues.addAll(optionsFromIssues(optionsFrom, at, key, field, declared, deps.get(key)));
-				if (field.get("options") != null) {
-					issues.add(FormIssue.field(key, FormIssueCodes.OPTIONS_SOURCE_CONFLICT,
-							at + ".options 与 optionsFrom 不能同时出现（二选一：静态选项 or 级联选项）"));
-				}
-				if (isStaticallyRequired(field) && OPTION_TYPES.contains(field.path("type").asText(""))
-						&& field.get("options") == null && !usesOptionSource(field)
-						&& optionsFrom.path("map").isObject() && optionValues(field).isEmpty()) {
-					// 空选项 + required = 死路（无分支必填）：用户永远填不了，模型必须重出可填表单。
-					// sourceId 级联的选项在后端数据里，规则层不枚举，故不在此判空。
-					issues.add(FormIssue.field(key, FormIssueCodes.OPTIONS_EMPTY,
-							at + ".optionsFrom 解析不出任何可选项（映射各分支为空或缺失），但字段 required=true —— "
-									+ "该必填字段永远无法填写，请至少给 1 个分支选项（不想必填请去掉 required）"));
-				}
-			}
-			JsonNode defaultFrom = field.get("defaultFrom");
-			if (defaultFrom != null) {
-				issues.addAll(defaultFromIssues(defaultFrom, at, key, field, declared, deps.get(key)));
-			}
+			issues.addAll(linkageFieldIssues(field, i, key, declared, deps.get(key)));
 		}
 		issues.addAll(cycleIssues(deps));
 		issues.addAll(depthIssues(deps));
 		return issues;
 	}
 
+	private static List<FormIssue> linkageFieldIssues(JsonNode field, int index, String key, Set<String> declared,
+			Set<String> depsOfField) {
+		List<FormIssue> issues = new ArrayList<>();
+		String at = "fields[" + index + "]";
+		for (String attr : List.of("visibleWhen", "requiredWhen", "disabledWhen")) {
+			JsonNode condition = field.get(attr);
+			if (condition == null) {
+				continue;
+			}
+			issues.addAll(conditionIssues(attr, condition, at, key, declared, depsOfField));
+		}
+		JsonNode optionsFrom = field.get("optionsFrom");
+		if (optionsFrom != null) {
+			issues.addAll(optionsFromIssues(optionsFrom, at, key, field, declared, depsOfField));
+			if (field.get("options") != null) {
+				issues.add(FormIssue.field(key, FormIssueCodes.OPTIONS_SOURCE_CONFLICT,
+						at + ".options 与 optionsFrom 不能同时出现（二选一：静态选项 or 级联选项）"));
+			}
+			if (isStaticallyRequired(field) && OPTION_TYPES.contains(field.path("type").asText(""))
+					&& field.get("options") == null && !isUsingOptionSource(field)
+					&& optionsFrom.path("map").isObject() && optionValues(field).isEmpty()) {
+				// 空选项 + required = 死路（无分支必填）：用户永远填不了，模型必须重出可填表单。
+				// sourceId 级联的选项在后端数据里，规则层不枚举，故不在此判空。
+				issues.add(FormIssue.field(key, FormIssueCodes.OPTIONS_EMPTY,
+						at + ".optionsFrom 解析不出任何可选项（映射各分支为空或缺失），但字段 required=true —— "
+								+ "该必填字段永远无法填写，请至少给 1 个分支选项（不想必填请去掉 required）"));
+			}
+		}
+		JsonNode defaultFrom = field.get("defaultFrom");
+		if (defaultFrom != null) {
+			issues.addAll(defaultFromIssues(defaultFrom, at, key, field, declared, depsOfField));
+		}
+		return issues;
+	}
+
 	private static List<FormIssue> conditionIssues(String attr, JsonNode condition, String at, String key,
 			Set<String> declared, Set<String> depsOfField) {
-		List<FormIssue> issues = new ArrayList<>();
 		String where = at + "." + attr;
+		List<FormIssue> issues = conditionReferenceIssues(condition, where, key, declared, depsOfField);
+		String op = textOrNull(condition.get("op"));
+		if (op == null || !CONDITION_OPS.contains(op)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.LINKAGE_OPERATOR_UNSUPPORTED,
+					where + ".op=" + op + " 不在支持的操作内（" + String.join("/", sorted(CONDITION_OPS)) + "）"));
+			return issues;
+		}
+		issues.addAll(conditionValueIssues(condition.get("value"), condition.get("values"), where, key, op));
+		return issues;
+	}
+
+	private static List<FormIssue> conditionReferenceIssues(JsonNode condition, String where, String key,
+			Set<String> declared, Set<String> depsOfField) {
+		List<FormIssue> issues = new ArrayList<>();
 		if (!condition.isObject()) {
 			issues.add(FormIssue.field(key, FormIssueCodes.LINKAGE_CONDITION_INVALID,
 					where + " 必须是结构化条件对象 {\"key\":…,\"op\":…,\"value\"/\"values\":…}（不接受表达式字符串）"));
@@ -986,7 +1081,7 @@ public final class GenerativeFormRules {
 			}
 		}
 		String ref = textOrNull(condition.get("key"));
-		if (ref == null || ref.isBlank()) {
+		if (StringUtils.isBlank(ref)) {
 			issues.add(FormIssue.field(key, FormIssueCodes.LINKAGE_CONDITION_INVALID, where + ".key 必填"));
 		}
 		else if (ref.equals(key)) {
@@ -1000,14 +1095,12 @@ public final class GenerativeFormRules {
 		else {
 			depsOfField.add(ref);
 		}
-		String op = textOrNull(condition.get("op"));
-		if (op == null || !CONDITION_OPS.contains(op)) {
-			issues.add(FormIssue.field(key, FormIssueCodes.LINKAGE_OPERATOR_UNSUPPORTED,
-					where + ".op=" + op + " 不在支持的操作内（" + String.join("/", sorted(CONDITION_OPS)) + "）"));
-			return issues;
-		}
-		JsonNode value = condition.get("value");
-		JsonNode values = condition.get("values");
+		return issues;
+	}
+
+	private static List<FormIssue> conditionValueIssues(JsonNode value, JsonNode values, String where, String key,
+			String op) {
+		List<FormIssue> issues = new ArrayList<>();
 		switch (op) {
 			case "eq" -> {
 				if (value == null) {
@@ -1121,7 +1214,7 @@ public final class GenerativeFormRules {
 			Set<String> declared, Set<String> depsOfField) {
 		List<FormIssue> issues = new ArrayList<>();
 		String dependsOn = textOrNull(node.get("dependsOn"));
-		if (dependsOn == null || dependsOn.isBlank()) {
+		if (StringUtils.isBlank(dependsOn)) {
 			issues.add(FormIssue.field(key, FormIssueCodes.LINKAGE_CONDITION_INVALID, where + ".dependsOn 必填"));
 		}
 		else if (dependsOn.equals(key)) {
@@ -1214,7 +1307,7 @@ public final class GenerativeFormRules {
 	}
 
 	/** 是否引用了后端注册的选项数据源（选项在数据里，规则层无法枚举，也就不能在 schema 期判"空"）。 */
-	private static boolean usesOptionSource(JsonNode field) {
+	private static boolean isUsingOptionSource(JsonNode field) {
 		JsonNode optionsFrom = field.get("optionsFrom");
 		return optionsFrom != null && optionsFrom.isObject() && textOrNull(optionsFrom.get("sourceId")) != null;
 	}
@@ -1264,180 +1357,214 @@ public final class GenerativeFormRules {
 
 	private static List<FormIssue> valueIssues(String key, JsonNode field, JsonNode value, boolean required,
 			JsonNode values) {
-		List<FormIssue> issues = new ArrayList<>();
 		String type = field.path("type").asText("");
 		// enum/multi_select 的可选集按**当前回灌值**解析（静态 options 或 optionsFrom.map 的父值分支）；
-		// null = 规则层无法枚举（sourceId 级联，选项在后端数据源里）⇒ 不做成员校验。
-		List<String> options = switch (type) {
+		// empty = 规则层无法枚举（sourceId 级联，选项在后端数据源里）⇒ 不做成员校验。
+		Optional<List<String>> options = switch (type) {
 			case "enum", "multi_select" -> runtimeOptionValues(field, values);
-			default -> List.of();
+			default -> Optional.of(List.of());
 		};
-		switch (type) {
-			case "text" -> {
-				if (!value.isTextual()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望 text（字符串），实际是" + typeName(value)));
-					break;
-				}
-				String text = value.asText();
-				int limit = VARIANT_LONG_TEXT.equals(field.path("variant").asText())
-						? MAX_LONGTEXT_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
-				if (text.length() > limit) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_LONG,
-							"字段 " + key + " 过长：" + text.length() + " 字符（上限 " + limit + "）"));
-					break;
-				}
-				if (required && text.isBlank()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_REQUIRED_MISSING,
-							"必填字段 " + key + " 不得为空串"));
-					break;
-				}
-				Integer minLength = integerOrNull(field.get("minLength"));
-				Integer maxLength = integerOrNull(field.get("maxLength"));
-				if (minLength != null && text.length() < minLength) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_SHORT,
-							"字段 " + key + " 过短：" + text.length() + " 字符（下限 " + minLength + "）"));
-				}
-				if (maxLength != null && text.length() > maxLength) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_LONG,
-							"字段 " + key + " 过长：" + text.length() + " 字符（上限 " + maxLength + "）"));
-				}
-				String format = textOrNull(field.get("format"));
-				if (format != null && !text.isBlank() && !matchesFormat(format, text)) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_FORMAT_MISMATCH,
-							"字段 " + key + " 不符合 " + format + " 格式：" + formatHint(format)));
-				}
-			}
-			case "number" -> {
-				if (!value.isNumber()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望 number（JSON 数字），实际是" + typeName(value) + "：" + value));
-					break;
-				}
-				double number = value.asDouble();
-				if (!Double.isFinite(number)) {
-					// JSON 的 1e999 会解析成 Infinity：后续 BigDecimal 步长计算会抛 NumberFormatException（线上 = 500）
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望有限数字（NaN/Infinity 不接受），实际是 " + value));
-					break;
-				}
-				BigDecimal exactMin = finiteDecimalOrNull(field.get("min"));
-				BigDecimal exactMax = finiteDecimalOrNull(field.get("max"));
-				BigDecimal exactValue = value.decimalValue();
-				boolean boundsBroken = (field.has("min") && exactMin == null)
-						|| (field.has("max") && exactMax == null);
-				if (boundsBroken) {
-					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_NUMBER_BOUND_INVALID,
-							"字段 " + key + " 的 schema min/max 不是有限数字，无法复核取值范围（请重新生成表单）"));
-				}
-				else if ((exactMin != null && exactValue.compareTo(exactMin) < 0)
-						|| (exactMax != null && exactValue.compareTo(exactMax) > 0)) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_RANGE,
-							"字段 " + key + " 超出范围：" + exactValue + "（允许 " + (exactMin == null ? "-∞" : exactMin)
-									+ ".." + (exactMax == null ? "+∞" : exactMax) + "）"));
-				}
-				if (field.path("integer").asBoolean(false) && !isExactInteger(value)) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_NOT_INTEGER,
-							"字段 " + key + " 必须是整数（实际 " + exactValue + "）"));
-				}
-				Double step = finiteOrNull(field.get("step"));
-				if (field.has("step") && step == null) {
-					// 非有限 step 只可能来自旧版闸门放行的待决表单：给字段错误，不做步长算术（会抛异常）
-					issues.add(FormIssue.field(key, FormIssueCodes.FIELD_STEP_INVALID,
-							"字段 " + key + " 的 schema step 不是有限正数（" + field.get("step")
-									+ "），无法按步长复核（请重新生成表单）"));
-				}
-				else if (step != null && step > 0) {
-					double base = exactMin == null ? 0 : exactMin.doubleValue();
-					BigDecimal units = BigDecimal.valueOf(number - base)
-						.divide(BigDecimal.valueOf(step), 8, java.math.RoundingMode.HALF_UP);
-					if (units.subtract(new BigDecimal(units.toBigInteger())).abs().doubleValue() > 1e-6) {
-						issues.add(FormIssue.field(key, FormIssueCodes.VALUE_STEP_MISMATCH,
-								"字段 " + key + " 必须按步长 " + step + " 取值（实际 " + number + "）"));
-					}
-				}
-			}
-			case "boolean" -> {
-				if (!value.isBoolean()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望 boolean，实际是" + typeName(value) + "：" + value));
-				}
-			}
-			case "date" -> {
-				if (!value.isTextual() || !isIsoDate(value.asText())) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望合法日期（yyyy-MM-dd），实际是 " + value));
-					break;
-				}
-				String date = value.asText();
-				String min = textOrNull(field.get("min"));
-				String max = textOrNull(field.get("max"));
-				if ((min != null && isIsoDate(min) && date.compareTo(min) < 0)
-						|| (max != null && isIsoDate(max) && date.compareTo(max) > 0)) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_RANGE,
-							"字段 " + key + " 超出日期范围：" + date + "（允许 " + (min == null ? "不限" : min)
-									+ " .. " + (max == null ? "不限" : max) + "）"));
-				}
-			}
-			case "enum" -> {
-				if (!value.isTextual()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望字符串（单选值），实际是" + typeName(value)));
-					break;
-				}
-				if (options != null && !options.contains(value.asText())) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_OPTIONS,
-							"字段 " + key + " 的值 \"" + value.asText() + "\" 不在选项内（" + optionsHint(options) + "）"));
-				}
-			}
-			case "multi_select" -> {
-				if (!value.isArray()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望数组（多选），实际是" + typeName(value)));
-					break;
-				}
-				if (required && value.isEmpty()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_REQUIRED_MISSING,
-							"必填字段 " + key + " 至少选 1 项"));
-				}
-				Integer minItems = integerOrNull(field.get("minItems"));
-				Integer maxItems = integerOrNull(field.get("maxItems"));
-				if (minItems != null && value.size() < minItems) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_FEW_ITEMS,
-							"字段 " + key + " 至少选 " + minItems + " 项（实际 " + value.size() + "）"));
-				}
-				if (maxItems != null && value.size() > maxItems) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_MANY_ITEMS,
-							"字段 " + key + " 最多选 " + maxItems + " 项（实际 " + value.size() + "）"));
-				}
-				Set<String> seen = new LinkedHashSet<>();
-				for (JsonNode element : value) {
-					if (!element.isTextual() || (options != null && !options.contains(element.asText()))) {
-						issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_OPTIONS,
-								"字段 " + key + " 含不在选项内的值：" + element + "（" + optionsHint(options) + "）"));
-						continue;
-					}
-					if (!seen.add(element.asText())) {
-						issues.add(FormIssue.field(key, FormIssueCodes.VALUE_DUPLICATE,
-								"字段 " + key + " 含重复值：" + element.asText()));
-					}
-				}
-			}
-			case "attachment" -> {
-				if (!value.isTextual()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
-							"字段 " + key + " 期望附件 fileId（字符串），实际是" + typeName(value)
-									+ "（文件内容与 URL 都不会被接受）"));
-					break;
-				}
-				if (!ATTACHMENT_ID_PATTERN.matcher(value.asText()).matches()) {
-					issues.add(FormIssue.field(key, FormIssueCodes.VALUE_ATTACHMENT_ID_INVALID,
-							"字段 " + key + " 的值不是有效的附件 fileId（应形如 att_xxxxxxxx；"
-									+ "URL/路径/文件内容一律拒绝）"));
-				}
-			}
-			default -> issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+		return switch (type) {
+			case "text" -> textValueIssues(key, field, value, required);
+			case "number" -> numberValueIssues(key, field, value);
+			case "boolean" -> booleanValueIssues(key, value);
+			case "date" -> dateValueIssues(key, field, value);
+			case "enum" -> enumValueIssues(key, value, options);
+			case "multi_select" -> multiSelectValueIssues(key, field, value, required, options);
+			case "attachment" -> attachmentValueIssues(key, value);
+			default -> List.of(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
 					"字段 " + key + " 的类型 " + type + " 不在白名单内，无法复核"));
+		};
+	}
+
+	private static List<FormIssue> textValueIssues(String key, JsonNode field, JsonNode value, boolean required) {
+		List<FormIssue> issues = new ArrayList<>();
+		if (!value.isTextual()) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望 text（字符串），实际是" + typeName(value)));
+			return issues;
+		}
+		String text = value.asText();
+		int limit = VARIANT_LONG_TEXT.equals(field.path("variant").asText())
+				? MAX_LONGTEXT_VALUE_CHARS : MAX_TEXT_VALUE_CHARS;
+		if (text.length() > limit) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_LONG,
+					"字段 " + key + " 过长：" + text.length() + " 字符（上限 " + limit + "）"));
+			return issues;
+		}
+		if (required && text.isBlank()) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_REQUIRED_MISSING,
+					"必填字段 " + key + " 不得为空串"));
+			return issues;
+		}
+		Integer minLength = integerOrNull(field.get("minLength"));
+		Integer maxLength = integerOrNull(field.get("maxLength"));
+		if (minLength != null && text.length() < minLength) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_SHORT,
+					"字段 " + key + " 过短：" + text.length() + " 字符（下限 " + minLength + "）"));
+		}
+		if (maxLength != null && text.length() > maxLength) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_LONG,
+					"字段 " + key + " 过长：" + text.length() + " 字符（上限 " + maxLength + "）"));
+		}
+		String format = textOrNull(field.get("format"));
+		if (format != null && StringUtils.isNotBlank(text) && !isFormatMatch(format, text)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_FORMAT_MISMATCH,
+					"字段 " + key + " 不符合 " + format + " 格式：" + formatHint(format)));
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> numberValueIssues(String key, JsonNode field, JsonNode value) {
+		if (!value.isNumber()) {
+			return List.of(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望 number（JSON 数字），实际是" + typeName(value) + "：" + value));
+		}
+		double number = value.asDouble();
+		if (!Double.isFinite(number)) {
+			// JSON 的 1e999 会解析成 Infinity：后续 BigDecimal 步长计算会抛 NumberFormatException（线上 = 500）
+			return List.of(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望有限数字（NaN/Infinity 不接受），实际是 " + value));
+		}
+		List<FormIssue> issues = numberRangeIssues(key, field, value);
+		issues.addAll(numberStepIssues(key, field, value, number));
+		return issues;
+	}
+
+	private static List<FormIssue> numberRangeIssues(String key, JsonNode field, JsonNode value) {
+		List<FormIssue> issues = new ArrayList<>();
+		BigDecimal exactMin = finiteDecimalOrNull(field.get("min"));
+		BigDecimal exactMax = finiteDecimalOrNull(field.get("max"));
+		BigDecimal exactValue = value.decimalValue();
+		boolean boundsBroken = (field.has("min") && exactMin == null)
+				|| (field.has("max") && exactMax == null);
+		if (boundsBroken) {
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_NUMBER_BOUND_INVALID,
+					"字段 " + key + " 的 schema min/max 不是有限数字，无法复核取值范围（请重新生成表单）"));
+		}
+		else if ((exactMin != null && exactValue.compareTo(exactMin) < 0)
+				|| (exactMax != null && exactValue.compareTo(exactMax) > 0)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_RANGE,
+					"字段 " + key + " 超出范围：" + exactValue + "（允许 " + (exactMin == null ? "-∞" : exactMin)
+							+ ".." + (exactMax == null ? "+∞" : exactMax) + "）"));
+		}
+		if (field.path("integer").asBoolean(false) && !isExactInteger(value)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_NOT_INTEGER,
+					"字段 " + key + " 必须是整数（实际 " + exactValue + "）"));
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> numberStepIssues(String key, JsonNode field, JsonNode value, double number) {
+		List<FormIssue> issues = new ArrayList<>();
+		Double step = finiteOrNull(field.get("step"));
+		if (field.has("step") && step == null) {
+			// 非有限 step 只可能来自旧版闸门放行的待决表单：给字段错误，不做步长算术（会抛异常）
+			issues.add(FormIssue.field(key, FormIssueCodes.FIELD_STEP_INVALID,
+					"字段 " + key + " 的 schema step 不是有限正数（" + field.get("step")
+							+ "），无法按步长复核（请重新生成表单）"));
+			return issues;
+		}
+		if (step != null && step > 0) {
+			BigDecimal exactMin = finiteDecimalOrNull(field.get("min"));
+			double base = exactMin == null ? 0 : exactMin.doubleValue();
+			BigDecimal units = BigDecimal.valueOf(number - base)
+				.divide(BigDecimal.valueOf(step), 8, java.math.RoundingMode.HALF_UP);
+			if (units.subtract(new BigDecimal(units.toBigInteger())).abs().doubleValue() > 1e-6) {
+				issues.add(FormIssue.field(key, FormIssueCodes.VALUE_STEP_MISMATCH,
+						"字段 " + key + " 必须按步长 " + step + " 取值（实际 " + number + "）"));
+			}
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> booleanValueIssues(String key, JsonNode value) {
+		if (!value.isBoolean()) {
+			return List.of(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望 boolean，实际是" + typeName(value) + "：" + value));
+		}
+		return List.of();
+	}
+
+	private static List<FormIssue> dateValueIssues(String key, JsonNode field, JsonNode value) {
+		if (!value.isTextual() || !isIsoDate(value.asText())) {
+			return List.of(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望合法日期（yyyy-MM-dd），实际是 " + value));
+		}
+		List<FormIssue> issues = new ArrayList<>();
+		String date = value.asText();
+		String min = textOrNull(field.get("min"));
+		String max = textOrNull(field.get("max"));
+		if ((min != null && isIsoDate(min) && date.compareTo(min) < 0)
+				|| (max != null && isIsoDate(max) && date.compareTo(max) > 0)) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_RANGE,
+					"字段 " + key + " 超出日期范围：" + date + "（允许 " + (min == null ? "不限" : min)
+							+ " .. " + (max == null ? "不限" : max) + "）"));
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> enumValueIssues(String key, JsonNode value, Optional<List<String>> options) {
+		if (!value.isTextual()) {
+			return List.of(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望字符串（单选值），实际是" + typeName(value)));
+		}
+		if (options.isPresent() && !options.get().contains(value.asText())) {
+			return List.of(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_OPTIONS,
+					"字段 " + key + " 的值 \"" + value.asText() + "\" 不在选项内（" + optionsHint(options.get()) + "）"));
+		}
+		return List.of();
+	}
+
+	private static List<FormIssue> multiSelectValueIssues(String key, JsonNode field, JsonNode value, boolean required,
+			Optional<List<String>> options) {
+		List<FormIssue> issues = new ArrayList<>();
+		if (!value.isArray()) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望数组（多选），实际是" + typeName(value)));
+			return issues;
+		}
+		if (required && value.isEmpty()) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_REQUIRED_MISSING,
+					"必填字段 " + key + " 至少选 1 项"));
+		}
+		Integer minItems = integerOrNull(field.get("minItems"));
+		Integer maxItems = integerOrNull(field.get("maxItems"));
+		if (minItems != null && value.size() < minItems) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_FEW_ITEMS,
+					"字段 " + key + " 至少选 " + minItems + " 项（实际 " + value.size() + "）"));
+		}
+		if (maxItems != null && value.size() > maxItems) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TOO_MANY_ITEMS,
+					"字段 " + key + " 最多选 " + maxItems + " 项（实际 " + value.size() + "）"));
+		}
+		Set<String> seen = new LinkedHashSet<>();
+		for (JsonNode element : value) {
+			if (!element.isTextual() || (options.isPresent() && !options.get().contains(element.asText()))) {
+				issues.add(FormIssue.field(key, FormIssueCodes.VALUE_OUT_OF_OPTIONS,
+						"字段 " + key + " 含不在选项内的值：" + element + "（" + optionsHint(options.get()) + "）"));
+				continue;
+			}
+			if (!seen.add(element.asText())) {
+				issues.add(FormIssue.field(key, FormIssueCodes.VALUE_DUPLICATE,
+						"字段 " + key + " 含重复值：" + element.asText()));
+			}
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> attachmentValueIssues(String key, JsonNode value) {
+		List<FormIssue> issues = new ArrayList<>();
+		if (!value.isTextual()) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_TYPE_MISMATCH,
+					"字段 " + key + " 期望附件 fileId（字符串），实际是" + typeName(value)
+							+ "（文件内容与 URL 都不会被接受）"));
+			return issues;
+		}
+		if (!ATTACHMENT_ID_PATTERN.matcher(value.asText()).matches()) {
+			issues.add(FormIssue.field(key, FormIssueCodes.VALUE_ATTACHMENT_ID_INVALID,
+					"字段 " + key + " 的值不是有效的附件 fileId（应形如 att_xxxxxxxx；"
+							+ "URL/路径/文件内容一律拒绝）"));
 		}
 		return issues;
 	}
@@ -1447,7 +1574,7 @@ public final class GenerativeFormRules {
 	/** 显隐联动：没有 visibleWhen 即可见；有条件则按回灌值求值。 */
 	private static boolean isVisible(JsonNode field, JsonNode values) {
 		JsonNode condition = field.get("visibleWhen");
-		return condition == null || evaluate(condition, values);
+		return condition == null || isConditionMatched(condition, values);
 	}
 
 	/** 必填联动：静态 required 或 requiredWhen 成立。 */
@@ -1456,10 +1583,10 @@ public final class GenerativeFormRules {
 			return true;
 		}
 		JsonNode condition = field.get("requiredWhen");
-		return condition != null && evaluate(condition, values);
+		return condition != null && isConditionMatched(condition, values);
 	}
 
-	private static boolean evaluate(JsonNode condition, JsonNode values) {
+	private static boolean isConditionMatched(JsonNode condition, JsonNode values) {
 		if (condition == null || !condition.isObject()) {
 			return false;
 		}
@@ -1472,10 +1599,10 @@ public final class GenerativeFormRules {
 		return switch (op) {
 			case "empty" -> isEmptyValue(actual);
 			case "notEmpty" -> !isEmptyValue(actual);
-			case "eq" -> equalValue(actual, condition.get("value"));
+			case "eq" -> isEqualValue(actual, condition.get("value"));
 			case "in" -> containsValue(condition.get("values"), actual);
 			case "notIn" -> !containsValue(condition.get("values"), actual);
-			case "between" -> between(actual, condition.get("values"));
+			case "between" -> isBetween(actual, condition.get("values"));
 			default -> false;
 		};
 	}
@@ -1493,7 +1620,7 @@ public final class GenerativeFormRules {
 		return false;
 	}
 
-	private static boolean equalValue(JsonNode actual, JsonNode expected) {
+	private static boolean isEqualValue(JsonNode actual, JsonNode expected) {
 		if (actual == null || actual.isNull() || expected == null || expected.isNull()) {
 			return false;
 		}
@@ -1512,14 +1639,14 @@ public final class GenerativeFormRules {
 			return false;
 		}
 		for (JsonNode element : list) {
-			if (equalValue(actual, element)) {
+			if (isEqualValue(actual, element)) {
 				return true;
 			}
 		}
 		return false;
 	}
 
-	private static boolean between(JsonNode actual, JsonNode bounds) {
+	private static boolean isBetween(JsonNode actual, JsonNode bounds) {
 		if (actual == null || actual.isNull() || bounds == null || !bounds.isArray() || bounds.size() != 2) {
 			return false;
 		}
@@ -1556,13 +1683,13 @@ public final class GenerativeFormRules {
 		for (FormIssue issue : issues) {
 			out.add(issue.message());
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
-	/** schema 的 {@code fields[]} → key → 字段节点（顺序保持；schema 不可用时返回 null）。 */
-	private static Map<String, JsonNode> fieldsByKey(JsonNode form) {
+	/** schema 的 {@code fields[]} → key → 字段节点（顺序保持；schema 不可用时返回 empty）。 */
+	private static Optional<Map<String, JsonNode>> fieldsByKey(JsonNode form) {
 		if (form == null || !form.isObject() || !form.path("fields").isArray()) {
-			return null;
+			return Optional.empty();
 		}
 		Map<String, JsonNode> out = new LinkedHashMap<>();
 		for (JsonNode field : form.path("fields")) {
@@ -1571,7 +1698,7 @@ public final class GenerativeFormRules {
 				out.put(key, field);
 			}
 		}
-		return out;
+		return Optional.of(out);
 	}
 
 	/**
@@ -1598,33 +1725,33 @@ public final class GenerativeFormRules {
 	 * 运行期的可取值集合：静态 {@code options}；或 {@code optionsFrom.map} 中<b>当前父值对应</b>的分支。
 	 *
 	 * <p>父值缺失/无对应分支时返回<b>空集</b> —— 此时提交任何值都应判 {@code VALUE_OUT_OF_OPTIONS}
-	 * （级联语义：父值没选，子选项就不存在）。只有 {@code sourceId} 级联返回 {@code null}
+	 * （级联语义：父值没选，子选项就不存在）。只有 {@code sourceId} 级联返回 {@code empty}
 	 * （数据源在后端，规则层无法枚举），调用方据此跳过成员校验 —— 空集与"无法枚举"必须区分开，
 	 * 否则空集会被当成"不用校验"，级联值就能任意通过。
 	 */
-	private static List<String> runtimeOptionValues(JsonNode field, JsonNode values) {
+	private static Optional<List<String>> runtimeOptionValues(JsonNode field, JsonNode values) {
 		JsonNode options = field.get("options");
 		if (options != null) {
 			List<String> out = new ArrayList<>();
 			appendOptionValues(options, out);
-			return out;
+			return Optional.of(out);
 		}
 		JsonNode optionsFrom = field.get("optionsFrom");
 		if (optionsFrom == null || !optionsFrom.isObject() || !optionsFrom.path("map").isObject()) {
-			return null;
+			return Optional.empty();
 		}
 		JsonNode map = optionsFrom.get("map");
 		List<String> out = new ArrayList<>();
 		String parent = textOrNull(optionsFrom.get("dependsOn"));
 		JsonNode parentValue = parent == null || values == null ? null : values.get(parent);
 		if (parentValue == null || parentValue.isNull()) {
-			return out;
+			return Optional.of(out);
 		}
 		JsonNode branch = map.get(parentValue.asText());
 		if (branch != null) {
 			appendOptionValues(branch, out);
 		}
-		return out;
+		return Optional.of(out);
 	}
 
 	/** 选项集合的人读说明（空集 = 级联父值未选/无分支，子选项不存在）。 */
@@ -1639,13 +1766,13 @@ public final class GenerativeFormRules {
 		}
 		for (JsonNode option : options) {
 			String value = option != null && option.isObject() ? textOrNull(option.get("value")) : null;
-			if (value != null && !value.isBlank() && !out.contains(value)) {
+			if (StringUtils.isNotBlank(value) && !out.contains(value)) {
 				out.add(value);
 			}
 		}
 	}
 
-	private static boolean matchesFormat(String format, String text) {
+	private static boolean isFormatMatch(String format, String text) {
 		return switch (format) {
 			case "email" -> EMAIL_PATTERN.matcher(text).matches();
 			case "tel" -> TEL_PATTERN.matcher(text).matches();
@@ -1686,7 +1813,7 @@ public final class GenerativeFormRules {
 			FormIssue issue = queue.poll();
 			unique.putIfAbsent(issue.key() + "\u0000" + issue.code() + "\u0000" + issue.message(), issue);
 		}
-		return new ArrayList<>(unique.values());
+		return unique.isEmpty() ? List.of() : new ArrayList<>(unique.values());
 	}
 
 	private static String textOrNull(JsonNode node) {
@@ -1714,19 +1841,22 @@ public final class GenerativeFormRules {
 	private static List<String> names(JsonNode node) {
 		List<String> out = new ArrayList<>();
 		node.fieldNames().forEachRemaining(out::add);
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	private static List<Map.Entry<String, JsonNode>> iterable(JsonNode node) {
 		List<Map.Entry<String, JsonNode>> out = new ArrayList<>();
 		node.fields().forEachRemaining(out::add);
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	private static List<String> sorted(Set<String> values) {
+		if (values.isEmpty()) {
+			return List.of();
+		}
 		List<String> out = new ArrayList<>(values);
 		out.sort(String::compareTo);
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/** JSON 节点的中文类型名（错误信息用）。 */

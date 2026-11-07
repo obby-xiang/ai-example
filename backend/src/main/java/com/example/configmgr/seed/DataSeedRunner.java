@@ -19,7 +19,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
 
 @Slf4j
 @Component
@@ -47,9 +50,9 @@ public class DataSeedRunner implements ApplicationRunner {
     public void run(ApplicationArguments args) throws Exception {
         this.seedStatus.markRunning(SeedStatus.Seed.BASE);
         this.seedLock.lock(SeedLock.SEED_LOCK);
-        boolean regionsComplete = seedRegions();
-        boolean projectsComplete = seedProjects();
-        boolean definitionsComplete = seedDefinitions();
+        boolean regionsComplete = isRegionsComplete();
+        boolean projectsComplete = isProjectsComplete();
+        boolean definitionsComplete = isDefinitionsComplete();
         boolean complete = regionsComplete && projectsComplete && definitionsComplete;
         SeedStatus.State outcome = complete ? SeedStatus.State.SKIPPED : SeedStatus.State.DONE;
         markAfterCommit(SeedStatus.Seed.BASE, outcome,
@@ -79,7 +82,7 @@ public class DataSeedRunner implements ApplicationRunner {
         });
     }
 
-    private boolean seedRegions() {
+    private boolean isRegionsComplete() {
         List<Region> missing = List.of(
             region("HE", "华东区"), region("HS", "华南区"),
             region("HB", "华北区"), region("XN", "西南区")
@@ -88,7 +91,7 @@ public class DataSeedRunner implements ApplicationRunner {
         return missing.isEmpty();
     }
 
-    private boolean seedProjects() {
+    private boolean isProjectsComplete() {
         List<Project> missing = List.of(
             project("HE-P001", "上海智慧园区", "HE"),
             project("HE-P002", "杭州数字工厂", "HE"),
@@ -102,11 +105,20 @@ public class DataSeedRunner implements ApplicationRunner {
         return missing.isEmpty();
     }
 
-    private boolean seedDefinitions() throws Exception {
-        boolean complete = true;
-        // 1. CURRENCY (GLOBAL)
-        if (!definitionRepository.existsByCode("CURRENCY")) {
-            complete = false;
+    private boolean isDefinitionsComplete() throws Exception {
+        return isCurrencyComplete()
+                & isDocTypeComplete()
+                & isApproveRoleComplete()
+                & isTaxRateComplete()
+                & isProjParamComplete()
+                & isProjApproveComplete()
+                & isProjPriceComplete();
+    }
+
+    private boolean isCurrencyComplete() throws Exception {
+        if (definitionRepository.existsByCode("CURRENCY")) {
+            return true;
+        }
         ConfigDefinition currency = def("CURRENCY", "货币字典", ConfigDefinition.ConfigLevel.GLOBAL,
             "企业使用的货币种类配置", 0,
             List.of(
@@ -116,7 +128,6 @@ public class DataSeedRunner implements ApplicationRunner {
                 field("decimalPlaces", "小数位数", ConfigField.FieldType.NUMBER, false, false, 3, null, null)
             ));
         definitionService.save(currency);
-        // Seed data
         List<Map<String,Object>> currencyRows = List.of(
             Map.of("code","CNY","name","人民币","exchangeRate",1.0,"decimalPlaces",2),
             Map.of("code","USD","name","美元","exchangeRate",7.24,"decimalPlaces",2),
@@ -125,11 +136,13 @@ public class DataSeedRunner implements ApplicationRunner {
             Map.of("code","JPY","name","日元","exchangeRate",0.048,"decimalPlaces",0)
         );
         dataService.batchSave("CURRENCY","GLOBAL",null,currencyRows,List.of("code"));
-        }
+        return false;
+    }
 
-        // 2. DOC_TYPE (GLOBAL)
-        if (!definitionRepository.existsByCode("DOC_TYPE")) {
-            complete = false;
+    private boolean isDocTypeComplete() throws Exception {
+        if (definitionRepository.existsByCode("DOC_TYPE")) {
+            return true;
+        }
         String docTypeOpts = objectMapper.writeValueAsString(List.of(
             Map.of("value","PURCHASE","label","采购单"),
             Map.of("value","SALES","label","销售单"),
@@ -152,11 +165,13 @@ public class DataSeedRunner implements ApplicationRunner {
             Map.of("code","PR","name","请购单","category","PURCHASE","enabled",true)
         );
         dataService.batchSave("DOC_TYPE","GLOBAL",null,docTypeRows,List.of("code"));
-        }
+        return false;
+    }
 
-        // 3. APPROVE_ROLE (GLOBAL)
-        if (!definitionRepository.existsByCode("APPROVE_ROLE")) {
-            complete = false;
+    private boolean isApproveRoleComplete() throws Exception {
+        if (definitionRepository.existsByCode("APPROVE_ROLE")) {
+            return true;
+        }
         ConfigDefinition approveRole = def("APPROVE_ROLE","审批角色",ConfigDefinition.ConfigLevel.GLOBAL,"审批流程角色定义",2,
             List.of(
                 field("code","角色编码",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -171,11 +186,13 @@ public class DataSeedRunner implements ApplicationRunner {
             Map.of("code","CEO","name","总裁","description","战略项目审批")
         );
         dataService.batchSave("APPROVE_ROLE","GLOBAL",null,roleRows,List.of("code"));
-        }
+        return false;
+    }
 
-        // 4. TAX_RATE (REGION)
-        if (!definitionRepository.existsByCode("TAX_RATE")) {
-            complete = false;
+    private boolean isTaxRateComplete() throws Exception {
+        if (definitionRepository.existsByCode("TAX_RATE")) {
+            return true;
+        }
         String taxTypeOpts = objectMapper.writeValueAsString(List.of(
             Map.of("value","VAT","label","增值税"),
             Map.of("value","CONSUMPTION","label","消费税"),
@@ -190,7 +207,6 @@ public class DataSeedRunner implements ApplicationRunner {
                 field("regionCode","地区编码",ConfigField.FieldType.STRING,true,true,4,null,null)
             ));
         definitionService.save(taxRate);
-        // Seed region-level data for each region
         for (String regionCode : List.of("HE","HS","HB","XN")) {
             List<Map<String,Object>> taxRows = List.of(
                 Map.of("taxCode","VAT-STD","taxType","VAT","rate",13.0,"effectiveDate","2024-01-01","regionCode",regionCode),
@@ -200,11 +216,13 @@ public class DataSeedRunner implements ApplicationRunner {
             );
             dataService.batchSave("TAX_RATE","REGION",regionCode,taxRows,List.of("taxCode","regionCode"));
         }
-        }
+        return false;
+    }
 
-        // 5. PROJ_PARAM (PROJECT)
-        if (!definitionRepository.existsByCode("PROJ_PARAM")) {
-            complete = false;
+    private boolean isProjParamComplete() {
+        if (definitionRepository.existsByCode("PROJ_PARAM")) {
+            return true;
+        }
         ConfigDefinition projParam = def("PROJ_PARAM","项目参数",ConfigDefinition.ConfigLevel.PROJECT,"项目运营参数配置",5,
             List.of(
                 field("paramKey","参数键",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -213,11 +231,13 @@ public class DataSeedRunner implements ApplicationRunner {
                 field("projectCode","项目编码",ConfigField.FieldType.STRING,true,true,3,null,null)
             ));
         definitionService.save(projParam);
-        }
+        return false;
+    }
 
-        // 6. PROJ_APPROVE (PROJECT) — references APPROVE_ROLE
-        if (!definitionRepository.existsByCode("PROJ_APPROVE")) {
-            complete = false;
+    private boolean isProjApproveComplete() {
+        if (definitionRepository.existsByCode("PROJ_APPROVE")) {
+            return true;
+        }
         ConfigDefinition projApprove = def("PROJ_APPROVE","项目审批流",ConfigDefinition.ConfigLevel.PROJECT,"项目审批流程配置",6,
             List.of(
                 field("stepCode","环节编码",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -228,11 +248,13 @@ public class DataSeedRunner implements ApplicationRunner {
                 field("projectCode","项目编码",ConfigField.FieldType.STRING,true,true,5,null,null)
             ));
         definitionService.save(projApprove);
-        }
+        return false;
+    }
 
-        // 7. PROJ_PRICE (PROJECT) — large dataset for demo, references CURRENCY and TAX_RATE
-        if (!definitionRepository.existsByCode("PROJ_PRICE")) {
-            complete = false;
+    private boolean isProjPriceComplete() throws Exception {
+        if (definitionRepository.existsByCode("PROJ_PRICE")) {
+            return true;
+        }
         ConfigDefinition projPrice = def("PROJ_PRICE","项目价格表",ConfigDefinition.ConfigLevel.PROJECT,"项目商品价格配置",8,
             List.of(
                 field("skuCode","商品编码",ConfigField.FieldType.STRING,true,true,0,null,null),
@@ -244,8 +266,6 @@ public class DataSeedRunner implements ApplicationRunner {
                 field("projectCode","项目编码",ConfigField.FieldType.STRING,true,true,6,null,null)
             ));
         definitionService.save(projPrice);
-
-        // Seed large price data for demo
         List<String> projectCodes = List.of("HE-P001","HE-P002","HS-P001","HS-P002");
         List<String> currencies = List.of("CNY","USD","EUR");
         List<String> taxCodes = List.of("VAT-STD","VAT-LOW","VAT-ZERO");
@@ -267,8 +287,7 @@ public class DataSeedRunner implements ApplicationRunner {
             }
             dataService.batchSave("PROJ_PRICE","PROJECT",projCode,priceRows,List.of("skuCode","projectCode"));
         }
-        }
-        return complete;
+        return false;
     }
 
     // Helper builders

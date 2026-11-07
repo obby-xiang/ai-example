@@ -24,6 +24,9 @@ import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSteps;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.BooleanUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
@@ -32,6 +35,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -175,7 +179,7 @@ public class AiTools {
     public String listConfigDefs(
             @ToolParam(description = "层级过滤：GLOBAL/REGION/PROJECT，不传返回全部", required = false) String level) {
         ConfigDefinition.ConfigLevel parsedLevel = null;
-        if (level != null && !level.isBlank()) {
+        if (StringUtils.isNotBlank(level)) {
             try {
                 parsedLevel = ConfigDefinition.ConfigLevel.valueOf(level.trim().toUpperCase());
             }
@@ -192,7 +196,7 @@ public class AiTools {
         String rows = defs.stream().limit(LIST_CONFIG_DEFS_MAX_ROWS).map(d ->
                 String.format("%s%s（%s）层级:%s 字段数:%d",
                         LIST_CONFIG_DEFS_ROW_PREFIX, d.getCode(), d.getName(), d.getLevel().name(),
-                        d.getFields() != null ? d.getFields().size() : 0))
+                        CollectionUtils.size(d.getFields())))
                 .collect(Collectors.joining("\n"));
         if (defs.size() <= LIST_CONFIG_DEFS_MAX_ROWS) return rows;
         return rows + "\n" + LIST_CONFIG_DEFS_TOTAL_PREFIX + defs.size() + LIST_CONFIG_DEFS_TOTAL_SUFFIX;
@@ -214,7 +218,7 @@ public class AiTools {
     @ToolCategory(ToolMeta.Category.R)
     public String getConfigDef(
             @ToolParam(description = "配置定义编码（必填，大小写敏感）") String code) {
-        String requested = code == null ? "" : code.trim();
+        String requested = StringUtils.trimToEmpty(code);
         ConfigDefinition def;
         try {
             def = definitionService.findByCode(requested);
@@ -418,17 +422,10 @@ public class AiTools {
             @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
             @ToolParam(description = "是否让宿主创建后自动打开向导并续接配置。“创建任务”只是流程入口，不等于“只创建”；默认完整续接，省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false（宿主不得自动导航、代选或发配置表单，以后用户明确打开/配置仍可继续）", required = false) Boolean openWizard,
             ToolContext toolContext) {
-        Task.TaskType taskType;
-        try {
-            taskType = Task.TaskType.valueOf(type == null ? "" : type.trim().toUpperCase());
-        } catch (IllegalArgumentException e) {
-            // 参数非法不再以字符串回填（那会让 ok=true 与失败文案自相矛盾）
-            throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-                    "Invalid task type (supported: EXPORT / IMPORT)");
-        }
+        Task.TaskType taskType = parseTaskType(type);
         boolean export = taskType == Task.TaskType.EXPORT;
         String effectiveTitle = TaskService.effectiveCreateTitle(taskType, title);
-        boolean shouldOpenWizard = openWizard == null || openWizard;
+        boolean shouldOpenWizard = BooleanUtils.isNotFalse(openWizard);
         Map<String, Object> context = toolContext == null ? null : toolContext.getContext();
         String runId = context == null ? null : stringOf(context.get("runId"));
         ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(context);
@@ -438,31 +435,8 @@ public class AiTools {
             TaskService.CreateOutcome outcome = continuationTaskId == null
                     ? taskService.createIdempotent(taskType, effectiveTitle, runId)
                     : taskService.createIdempotent(taskType, effectiveTitle, runId, continuationTaskId);
-            Task task = outcome.task();
-            if (context != null && context.get(PendingToolCall.CREATED_TASK_ID) instanceof AtomicReference<?> holder) {
-                ((AtomicReference<Long>) holder).set(task.getId());
-            }
-            String nextAction = shouldOpenWizard
-                    ? "若原始意图是完整导出/导入，下一步 navigate_to(page=\"" + (export ? "export" : "import")
-                            + "\", taskId=" + task.getId() + ") 打开向导，按真实步骤完成所需配置/条件，"
-                            + "再经确认启动；挂起等待不是完成。"
-                    : "仅创建，不自动打开向导、代选或配置表单；以后你明确打开或配置时仍可继续。";
-            if (outcome.reused()) {
-                return String.format(
-                        "该任务已创建，本次复用任务 #%d（标题：%s，当前步骤：%s）。%s"
-                                + "本次调用只复用任务，未启动作业。" + nextAction,
-                        task.getId(), task.getTitle(), task.getCurrentStep(), reusedTaskFacts(task));
-            }
-            return String.format(
-                    "已创建%s任务 #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
-                            + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。"
-                            + "用户明确限定创建后停止时可返回任务号收尾。" + nextAction
-                            + "勾选与条件都只形成前端草案，业务库由前端在下一步/启动作业前提交，"
-                            + "不要重复调用 set_condition，也不要声称已设置/已勾选。",
-                    export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep());
+            return createTaskOutcomeText(outcome, export, shouldOpenWizard, context);
         }
-        // R-137（T6 重抛面）：写路径失败不再以字符串回填 —— 抛出后由
-        // SpToolCallingManager.executeOnce 捕获置 ok=false 呈给模型（恢复框架既有失败通道）
         catch (ConflictException e) {
             throw e;
         }
@@ -472,12 +446,50 @@ public class AiTools {
         }
     }
 
+    private static Task.TaskType parseTaskType(String type) {
+        try {
+            return Task.TaskType.valueOf(StringUtils.upperCase(StringUtils.trimToEmpty(type)));
+        }
+        catch (IllegalArgumentException e) {
+            throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
+                    "Invalid task type (supported: EXPORT / IMPORT)");
+        }
+    }
+
+    private static String createTaskOutcomeText(TaskService.CreateOutcome outcome, boolean export,
+            boolean shouldOpenWizard, Map<String, Object> context) {
+        Task task = outcome.task();
+        if (context != null && context.get(PendingToolCall.CREATED_TASK_ID) instanceof AtomicReference<?> holder) {
+            ((AtomicReference<Long>) holder).set(task.getId());
+        }
+        String nextAction = nextCreateTaskAction(task, export, shouldOpenWizard);
+        if (outcome.reused()) {
+            return String.format("该任务已创建，本次复用任务 #%d（标题：%s，当前步骤：%s）。%s"
+                            + "本次调用只复用任务，未启动作业。" + nextAction,
+                    task.getId(), task.getTitle(), task.getCurrentStep(), reusedTaskFacts(task));
+        }
+        return String.format("已创建%s任务 #%d（标题：%s，当前步骤：%s）。创建不等于执行：尚未启动任何作业；"
+                        + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。"
+                        + "用户明确限定创建后停止时可返回任务号收尾。" + nextAction
+                        + "勾选与条件都只形成前端草案，业务库由前端在下一步/启动作业前提交，"
+                        + "不要重复调用 set_condition，也不要声称已设置/已勾选。",
+                export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep());
+    }
+
+    private static String nextCreateTaskAction(Task task, boolean export, boolean shouldOpenWizard) {
+        return shouldOpenWizard
+                ? "若原始意图是完整导出/导入，下一步 navigate_to(page=\"" + (export ? "export" : "import")
+                        + "\", taskId=" + task.getId() + ") 打开向导，按真实步骤完成所需配置/条件，"
+                        + "再经确认启动；挂起等待不是完成。"
+                : "仅创建，不自动打开向导、代选或配置表单；以后你明确打开或配置时仍可继续。";
+    }
+
     private static String reusedTaskFacts(Task task) {
-        if (task.getItems() == null || task.getItems().isEmpty()) {
+        if (CollectionUtils.isEmpty(task.getItems())) {
             return "当前没有任务条目，也没有已提交业务库的条目条件。";
         }
         return task.getItems().stream()
-                .map(item -> item.getDefCode() + (item.getConditionJson() == null || item.getConditionJson().isBlank()
+                .map(item -> item.getDefCode() + (StringUtils.isBlank(item.getConditionJson())
                         ? "（条件未提交业务库）" : "（条件已提交业务库：" + item.getConditionJson() + "）"))
                 .collect(Collectors.joining("、", "当前任务条目：", "。"));
     }
@@ -488,14 +500,14 @@ public class AiTools {
     }
 
     private static String stringOf(Object value) {
-        return value == null ? null : String.valueOf(value);
+        return Objects.toString(value, null);
     }
 
     private static Long longOf(Object value) {
         if (value instanceof Number number) {
             return number.longValue();
         }
-        if (value == null || String.valueOf(value).isBlank()) {
+        if (value == null || StringUtils.isBlank(String.valueOf(value))) {
             return null;
         }
         try {

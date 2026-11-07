@@ -27,7 +27,14 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
@@ -75,40 +82,7 @@ public class FileController {
         List<String> matchCodes = resolveMatchDefCodes(taskId, defCodes);
 
         if (originalName.toLowerCase().endsWith(".zip")) {
-            // ZIP 批量上传：解压后按文件名逐个匹配配置编码
-            List<ZipFileEntry> entries = readZipEntries(file.getBytes());
-            List<Map<String, String>> matched = new ArrayList<>();
-            List<String> unmatched = new ArrayList<>();
-            List<String> storedPaths = new ArrayList<>();
-            try {
-                for (ZipFileEntry entry : entries) {
-                    String name = entry.name();
-                    if (!name.toLowerCase().endsWith(".xlsx")) {
-                        unmatched.add(name + "（非 Excel 文件）");
-                        continue;
-                    }
-                    String defCode = matchDefCode(matchCodes, name);
-                    if (defCode == null) {
-                        unmatched.add(name + "（无法匹配配置编码）");
-                        continue;
-                    }
-                    storedPaths.add(storeUploadFile(taskId, defCode, name, entry.content()));
-                    matched.add(Map.of("defCode", defCode, "fileName", name));
-                }
-            } catch (RuntimeException e) {
-                // 任一条目落库失败（典型：任务被并发删除导致 FK 冲突）时，清理本次已写盘的文件。
-                storedPaths.forEach(fileStorage::delete);
-                throw e;
-            }
-            if (matched.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "The ZIP archive contains no matchable files; include a configuration code in each file name "
-                                + "(for example, CONFIG_CODE.xlsx). Unmatched: " + unmatched);
-            }
-            return ApiResponse.ok(Map.of(
-                    "matchedFiles", matched,
-                    "unmatchedFiles", unmatched,
-                    "count", matched.size()));
+            return uploadZip(taskId, file, matchCodes);
         }
 
         if (!originalName.toLowerCase().endsWith(".xlsx")) {
@@ -142,6 +116,42 @@ public class FileController {
                 "fileName", originalName,
                 "matchedFiles", List.of(Map.of("defCode", defCode, "fileName", originalName)),
                 "count", 1));
+    }
+
+    private ApiResponse<Map<String, Object>> uploadZip(Long taskId, MultipartFile file, List<String> matchCodes)
+            throws IOException {
+        List<ZipFileEntry> entries = readZipEntries(file.getBytes());
+        List<Map<String, String>> matched = new ArrayList<>();
+        List<String> unmatched = new ArrayList<>();
+        List<String> storedPaths = new ArrayList<>();
+        try {
+            for (ZipFileEntry entry : entries) {
+                String name = entry.name();
+                if (!name.toLowerCase().endsWith(".xlsx")) {
+                    unmatched.add(name + "（非 Excel 文件）");
+                    continue;
+                }
+                String defCode = matchDefCode(matchCodes, name);
+                if (defCode == null) {
+                    unmatched.add(name + "（无法匹配配置编码）");
+                    continue;
+                }
+                storedPaths.add(storeUploadFile(taskId, defCode, name, entry.content()));
+                matched.add(Map.of("defCode", defCode, "fileName", name));
+            }
+        } catch (RuntimeException e) {
+            storedPaths.forEach(fileStorage::delete);
+            throw e;
+        }
+        if (matched.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "The ZIP archive contains no matchable files; include a configuration code in each file name "
+                            + "(for example, CONFIG_CODE.xlsx). Unmatched: " + unmatched);
+        }
+        return ApiResponse.ok(Map.of(
+                "matchedFiles", matched,
+                "unmatchedFiles", unmatched,
+                "count", matched.size()));
     }
 
     private String storeUploadFile(Long taskId, String defCode, String fileName, byte[] content) throws IOException {
@@ -309,7 +319,7 @@ public class FileController {
             throw ResourceNotFoundException.of("Export file", String.join(",", codes));
         }
         if (selected.size() == 1) {
-            TaskFile only = selected.get(0);
+            TaskFile only = selected.getFirst();
             byte[] bytes = fileStorage.read(only.getStoragePath());
             String filename = ObjectUtils.getIfNull(only.getFileName(), () -> only.getDefCode() + ".xlsx");
             return ResponseEntity.ok()
@@ -372,7 +382,7 @@ public class FileController {
                 : items.stream().map(TaskItem::getDefCode).toList();
 
         if (targetCodes.size() == 1) {
-            var def = definitionService.findByCode(targetCodes.get(0));
+            var def = definitionService.findByCode(targetCodes.getFirst());
             byte[] bytes = templateBuilder.build(def);
             String filename = URLEncoder.encode(def.getCode() + "_" + def.getName() + ".xlsx", StandardCharsets.UTF_8);
             return ResponseEntity.ok()

@@ -784,6 +784,13 @@
       "reason": "仅完善AI卡片业务文案、动态字段与前端异常脱敏和安全错误映射，保持迁移数据、协议形状及状态机不变，D6无需更新。",
       "reviewedAt": "2026-11-07",
       "reviewer": "K3.1 Pro施工，K3.1 Pro最终静态复审"
+    },
+    {
+      "fingerprint": "sha256:fd708acd276e1a1a6d3249e9fd9383add7ed3fa572132370421d7bff312d4963",
+      "status": "not-affected",
+      "reason": "仅规范任务作业组件、方法结构、日志和公开兼容委托，保持迁移数据、协议、状态机及键面契约不变，D6无需更新。",
+      "reviewedAt": "2026-11-07",
+      "reviewer": "K3.1 Pro（agent-1003）最终静态复审"
     }
   ]
 }

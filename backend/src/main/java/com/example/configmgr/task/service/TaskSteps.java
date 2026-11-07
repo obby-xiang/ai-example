@@ -75,7 +75,7 @@ public final class TaskSteps {
 	/** 该任务类型的首步（建任务 / 重新勾选后的权威回落值）。 */
 	public static String first(Task.TaskType type) {
 		List<String> steps = sequence(type);
-		return steps.isEmpty() ? SELECT_DEFS : steps.get(0);
+		return steps.isEmpty() ? SELECT_DEFS : steps.getFirst();
 	}
 
 	/** 步骤名归一（去空白 + 大写）；null/空白返回空串（"未知步骤"的唯一表示）。 */
