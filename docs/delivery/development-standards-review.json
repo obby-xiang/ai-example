@@ -3030,6 +3030,62 @@
         "unicode-stream-parsing": {"status":"checked","reason":"taskId字符串规范化避免JS精度丢失，SSE既有seq/丢帧/重复检查保持；未修改生产UTF-8或流式解析实现。"},
         "verification-review": {"status":"checked","reason":"agent-1049第三轮独立静态复审整体PASS，最终14文件暂存diff检查通过；IDEA Inspect、测试编译、真实HTTP/Redis/standalone/Cluster/多实例及压测均NOT_RUN，历史PASS未冒充当前结果。"}
       }
+    },
+    {
+      "fingerprint": "sha256:9a7181083ac8af2d6ac3181b0cd2d1edb9460c4f49701b5b9cb5d9e9aa642b5e",
+      "status": "reviewed",
+      "reason": "新增前后端服务启动后的日志观测与告警闭环门禁，并同步AGENTS。规则要求逐条分析报错、告警和异常堆栈：问题必须处理并复验，非问题必须记录摘要、依据和备案位置，无法判定按问题处理；健康检查、端口和进程状态不能替代日志验收。已逐hunk核对两个暂存文档。",
+      "reviewedAt": "2026-11-08T00:28:38+08:00",
+      "reviewer": "K3.1 Pro主会话按用户明确规格逐hunk复核",
+      "specChanges": [
+        {
+          "change": "服务启动验收新增启动及运行日志观测，以及ERROR/WARN/异常堆栈的分类处理与备案要求。",
+          "reason": "健康检查通过仍可能存在循环创建异常、数据库列缺失和周期性任务持续报错，必须避免只看健康状态放行。",
+          "impact": "后续前后端启动后须核对日志并记录位置、时间和分类依据；问题修复后复验，非问题保留可审计备案，无法判断不得当作非问题忽略。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "提交清单新增第6项前后端日志观测、问题复验和非问题备案要求，原standards与pre-commit条款顺延为第7、8项。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "验证与独立审查章节新增服务日志验收条款，明确日志位置、时间、分类依据、无法判定按问题处理及健康检查不可替代，原最终暂存审查与证据边界顺延。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅增加日志验收流程，没有新增或升级依赖、日志组件或服务配置。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java、前端或通用代码修改，未调整集合、JSON、Lombok、命名和import规范。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "新增规则要求报错、告警和异常堆栈逐条分析并保留分类依据，问题需修复复验，非问题需备案，不得通过健康检查或忽略日志掩盖故障。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只修改服务验收规范，没有用户界面、卡片、文案或交互变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批未修改API、SSE、Redis、TTL、模型并发或状态机实现，只增加服务日志验收要求。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批没有UTF-8、流式帧、JSON解析或字符截断实现变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "两个暂存文档已逐hunk核对，服务日志观测、问题复验、非问题备案和无法判定处理口径完整；本批纯文档无需代码编译或IDEA格式化。"
+        }
+      }
     }
   ]
 }
