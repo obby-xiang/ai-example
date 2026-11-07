@@ -353,10 +353,10 @@ public class AiSessionPurgeService {
 
 	private PurgeResult purge(String sessionId, String requestedBy, TenantUser identity) {
 		if (sessionId == null || sessionId.isBlank()) {
-			throw new IllegalArgumentException("sessionId 不得为空白");
+			throw new IllegalArgumentException("sessionId must not be blank");
 		}
 		if (identity == null) {
-			throw new IllegalArgumentException("会话销毁必须带身份 sessionId=" + sessionId);
+			throw new IllegalArgumentException("Session purge requires an identity sessionId=" + sessionId);
 		}
 		try (RequestContextUtils.SafeCloseable ignored = scopeOf(identity)) {
 			return purgeInternal(sessionId, requestedBy, identity);
@@ -372,8 +372,7 @@ public class AiSessionPurgeService {
 					System.currentTimeMillis());
 		}
 		catch (RuntimeException ex) {
-			log.warn("Session purge: pending registration failed, nothing deleted sessionId={}: {}", sessionId,
-					rootMessage(ex));
+			log.warn("Session purge: pending registration failed, nothing deleted sessionId={}", sessionId, ex);
 			return aborted(sessionId, requestedPurgeId, "pending", enumerationForFailure(sessionId, identity), ex);
 		}
 		String purgeId = registration.pending().purgeId();
@@ -392,9 +391,9 @@ public class AiSessionPurgeService {
 			enumeration = enumerate(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "enumerate: " + rootMessage(ex));
-			log.warn("Session purge: enumeration failed, nothing deleted sessionId={} purgeId={}: {}", sessionId,
-					purgeId, rootMessage(ex));
+			recordFailureQuietly(execution, "enumerate: " + safeFailure());
+			log.warn("Session purge: enumeration failed, nothing deleted sessionId={} purgeId={}", sessionId,
+					purgeId, ex);
 			return aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId, identity), ex);
 		}
 
@@ -403,9 +402,9 @@ public class AiSessionPurgeService {
 			this.guard.arm(sessionId, purgeId + "|" + owner, guardTtl());
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "guard: " + rootMessage(ex));
-			log.warn("Session purge: guard arm failed, nothing deleted sessionId={} purgeId={}: {}", sessionId,
-					purgeId, rootMessage(ex));
+			recordFailureQuietly(execution, "guard: " + safeFailure());
+			log.warn("Session purge: guard arm failed, nothing deleted sessionId={} purgeId={}", sessionId,
+					purgeId, ex);
 			return aborted(sessionId, purgeId, "guard", enumeration, ex);
 		}
 
@@ -415,9 +414,9 @@ public class AiSessionPurgeService {
 			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "database: " + rootMessage(ex));
-			log.warn("Session purge: H2 delete failed, Redis untouched sessionId={} purgeId={}: {}", sessionId,
-					purgeId, rootMessage(ex));
+			recordFailureQuietly(execution, "database: " + safeFailure());
+			log.warn("Session purge: H2 delete failed, Redis untouched sessionId={} purgeId={}", sessionId,
+					purgeId, ex);
 			return aborted(sessionId, purgeId, "database", enumeration, ex);
 		}
 
@@ -455,7 +454,7 @@ public class AiSessionPurgeService {
 			enumeration = enumerate(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "enumerate: " + rootMessage(ex));
+			recordFailureQuietly(execution, "enumerate: " + safeFailure());
 			return aborted(sessionId, purgeId, "enumerate",
 					enumerationForFailure(sessionId, pending.identity()), ex);
 		}
@@ -466,7 +465,7 @@ public class AiSessionPurgeService {
 			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "database: " + rootMessage(ex));
+			recordFailureQuietly(execution, "database: " + safeFailure());
 			return aborted(sessionId, purgeId, "database", enumeration, ex);
 		}
 
@@ -479,7 +478,7 @@ public class AiSessionPurgeService {
 			return executeDeletionChecked(execution, purgeId, actor, enumeration, dbDeleted);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "delete: " + rootMessage(ex));
+			recordFailureQuietly(execution, "delete: " + safeFailure());
 			return aborted(execution.sessionId(), purgeId, "delete", enumeration, ex);
 		}
 	}
@@ -543,7 +542,7 @@ public class AiSessionPurgeService {
 			}
 			catch (RuntimeException ex) {
 				retained = false;
-				errors.add("guard: 收尾失败（fail-closed，保留 pending）：" + rootMessage(ex));
+				errors.add("guard: 收尾失败（fail-closed，保留 pending）：" + safeFailure());
 			}
 			if (retained) {
 				try {
@@ -553,7 +552,7 @@ public class AiSessionPurgeService {
 					}
 				}
 				catch (RuntimeException ex) {
-					errors.add("pending: 记忆复核排程失败（保留 pending 以便重试）：" + rootMessage(ex));
+					errors.add("pending: 记忆复核排程失败（保留 pending 以便重试）：" + safeFailure());
 				}
 			}
 			else if (errors.isEmpty()) {
@@ -578,8 +577,8 @@ public class AiSessionPurgeService {
 			return this.pendingStore.recordFailure(execution.claim(), reason);
 		}
 		catch (RuntimeException ex) {
-			log.warn("Session purge: failed to record failure on pending sessionId={} purgeId={} (pending kept, not disarmed): {}", execution.sessionId(),
-					execution.purgeId(), rootMessage(ex));
+			log.warn("Session purge: failed to record failure on pending sessionId={} purgeId={} (pending kept, not disarmed)", execution.sessionId(),
+					execution.purgeId(), ex);
 			return false;
 		}
 	}
@@ -604,7 +603,7 @@ public class AiSessionPurgeService {
 		}
 		catch (RuntimeException ex) {
 			throw new AiStateUnavailableException(
-					"会话销毁枚举：无法读取会话→run 索引（fail-closed，本次中止）", ex);
+					"Session purge enumeration: failed to read session->run index (fail-closed; aborted)", ex);
 		}
 		// 会话门/当前轮索引点名：索引可能因历史原因缺成员，但这两个名字本身就是本会话的轮次。
 		if (gateRunId != null) {
@@ -750,7 +749,7 @@ public class AiSessionPurgeService {
 	/** 当前身份的作用域（必须已建立身份）。 */
 	private static RequestContextUtils.SafeCloseable scopeOf(TenantUser identity) {
 		if (identity == null) {
-			throw new IllegalArgumentException("会话销毁必须带身份");
+			throw new IllegalArgumentException("Session purge requires an identity");
 		}
 		return RequestContextUtils.useContext(identity.tenantId(), identity.userId());
 	}
@@ -793,7 +792,7 @@ public class AiSessionPurgeService {
 			return out;
 		}
 		catch (RuntimeException ex) {
-			log.debug("Session purge existence pipeline failed; using ordered reads: {}", rootMessage(ex));
+			log.debug("Session purge existence pipeline failed; using ordered reads", ex);
 			return null;
 		}
 	}
@@ -825,7 +824,7 @@ public class AiSessionPurgeService {
 				}
 			}
 			catch (RuntimeException ex) {
-				warnings.add("run[" + run.runId() + "]: 取消失败（" + rootMessage(ex) + "）");
+				warnings.add("run[" + run.runId() + "]: 取消失败（" + safeFailure() + "）");
 			}
 			// 终帧读不可知时不能把"没读到"当成"没有终帧"，留给 deferred 重试。
 			if (cancelled && convergence != TerminalConvergence.UNKNOWN) {
@@ -877,7 +876,7 @@ public class AiSessionPurgeService {
 			return TerminalConvergence.CONVERGED;
 		}
 		catch (RuntimeException ex) {
-			warnings.add("run[" + runId + "]: 终帧/快照收敛不可知（" + rootMessage(ex) + "）");
+			warnings.add("run[" + runId + "]: 终帧/快照收敛不可知（" + safeFailure() + "）");
 			return TerminalConvergence.UNKNOWN;
 		}
 	}
@@ -907,7 +906,7 @@ public class AiSessionPurgeService {
 			}
 		}
 		catch (RuntimeException ex) {
-			warnings.add("run[" + run.runId() + "]: 取消收尾失败（" + rootMessage(ex) + "）");
+			warnings.add("run[" + run.runId() + "]: 取消收尾失败（" + safeFailure() + "）");
 		}
 	}
 
@@ -941,7 +940,7 @@ public class AiSessionPurgeService {
 				}
 				catch (RuntimeException ex) {
 					anyActive = true;
-					warnings.add("run[" + run.runId() + "]: 等待终态时读快照失败（" + rootMessage(ex) + "）");
+					warnings.add("run[" + run.runId() + "]: 等待终态时读快照失败（" + safeFailure() + "）");
 				}
 			}
 			if (!anyActive) {
@@ -983,7 +982,7 @@ public class AiSessionPurgeService {
 				}
 			}
 			catch (RuntimeException ex) {
-				warnings.add("run[" + run.runId() + "]: 重读状态失败（保守按活跃处理）：" + rootMessage(ex));
+				warnings.add("run[" + run.runId() + "]: 重读状态失败（保守按活跃处理）：" + safeFailure());
 				refreshed.add(run);
 			}
 		}
@@ -1023,7 +1022,7 @@ public class AiSessionPurgeService {
 			this.chatMemoryRepository.deleteByConversationId(sessionId);
 		}
 		catch (RuntimeException ex) {
-			errors.add("memory: " + rootMessage(ex));
+			errors.add("memory: " + safeFailure());
 			deleted = false;
 		}
 		StagingClear staging = clearStagingKeys(execution, knownStaging, errors);
@@ -1037,7 +1036,7 @@ public class AiSessionPurgeService {
 			}
 			catch (RuntimeException ex) {
 				// 判净这一步读不出来：不能当"已删净"（D3 的复核本身就是"不靠索引、看数据键"）。
-				errors.add("memory: 删后残留复核失败（无法确认已删净，可重试）：" + rootMessage(ex));
+				errors.add("memory: 删后残留复核失败（无法确认已删净，可重试）：" + safeFailure());
 				known = false;
 			}
 		}
@@ -1099,8 +1098,8 @@ public class AiSessionPurgeService {
 			armed = this.guard.isArmed(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "verify guard: " + rootMessage(ex));
-			return new MemoryVerify(false, List.of("guard: 状态不可知（fail-closed，不删）：" + rootMessage(ex)));
+			recordFailureQuietly(execution, "verify guard: " + safeFailure());
+			return new MemoryVerify(false, List.of("guard: 状态不可知（fail-closed，不删）：" + safeFailure()));
 		}
 		if (!armed) {
 			recordFailureQuietly(execution, "verify guard: not armed");
@@ -1120,8 +1119,8 @@ public class AiSessionPurgeService {
 			}
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "memory verify: " + rootMessage(ex));
-			return new MemoryVerify(false, List.of("pending: 复核失败（保留 pending 以便重试）：" + rootMessage(ex)));
+			recordFailureQuietly(execution, "memory verify: " + safeFailure());
+			return new MemoryVerify(false, List.of("pending: 复核失败（保留 pending 以便重试）：" + safeFailure()));
 		}
 		log.info("Session purge: memory re-verify completed (crash residue compensation) sessionId={} purgeId={}", sessionId, purgeId);
 		return new MemoryVerify(true, List.of());
@@ -1150,7 +1149,7 @@ public class AiSessionPurgeService {
 			targets = knownStaging == null ? stagingKeys(sessionId) : knownStaging;
 		}
 		catch (RuntimeException ex) {
-			errors.add("memory: staging 索引读取失败（未删净，可重试）：" + rootMessage(ex));
+			errors.add("memory: staging 索引读取失败（未删净，可重试）：" + safeFailure());
 			return new StagingClear(false, List.of());
 		}
 		if (targets.isEmpty()) {
@@ -1176,7 +1175,7 @@ public class AiSessionPurgeService {
 				throw ex;
 			}
 			catch (RuntimeException ex) {
-				errors.add("memory: staging 批量删除失败（结果不可知，可重试）：" + rootMessage(ex));
+				errors.add("memory: staging 批量删除失败（结果不可知，可重试）：" + safeFailure());
 				remaining.addAll(batch);
 			}
 		}
@@ -1213,7 +1212,7 @@ public class AiSessionPurgeService {
 				// 读不出来就保守地不删（13 键删一半比延后更糟）；重试时再判。
 				deferred.add(new DeferredView(target.runId(), target.status(), "STATUS_UNREADABLE"));
 				runViews.add(new RunView(target.runId(), target.status(), true, false, true));
-				errors.add("run[" + target.runId() + "]: 读状态失败（" + rootMessage(ex) + "）");
+				errors.add("run[" + target.runId() + "]: 读状态失败（" + safeFailure() + "）");
 				return;
 			}
 		}
@@ -1243,7 +1242,7 @@ public class AiSessionPurgeService {
 			runViews.add(new RunView(target.runId(), status, false, true, false));
 		}
 		catch (RuntimeException ex) {
-			errors.add("run[" + target.runId() + "]: 13 键删除失败（可重试）：" + rootMessage(ex));
+			errors.add("run[" + target.runId() + "]: 13 键删除失败（可重试）：" + safeFailure());
 			runViews.add(new RunView(target.runId(), status, false, false, false));
 		}
 	}
@@ -1280,7 +1279,7 @@ public class AiSessionPurgeService {
 			}
 		}
 		catch (RuntimeException ex) {
-			errors.add("run[" + runId + "]: 观测/帧附加键删除结果不可知（可重试）：" + rootMessage(ex));
+			errors.add("run[" + runId + "]: 观测/帧附加键删除结果不可知（可重试）：" + safeFailure());
 		}
 	}
 
@@ -1330,7 +1329,7 @@ public class AiSessionPurgeService {
 				}
 			}
 			catch (RuntimeException ex) {
-				errors.add(key.label() + "[" + key.key() + "]: transcript 删后复核失败（可重试）：" + rootMessage(ex));
+				errors.add(key.label() + "[" + key.key() + "]: transcript 删后复核失败（可重试）：" + safeFailure());
 			}
 		}
 		return new TranscriptView(existed, entries, deleted);
@@ -1375,7 +1374,7 @@ public class AiSessionPurgeService {
 			catch (RuntimeException ex) {
 				for (TypedKey target : batch) {
 					errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 结果不可知（可重试）："
-							+ rootMessage(ex));
+							+ safeFailure());
 				}
 				continue;
 			}
@@ -1422,7 +1421,7 @@ public class AiSessionPurgeService {
 			return Boolean.TRUE.equals(this.redis.delete(key)) ? 1 : 0;
 		}
 		catch (RuntimeException ex) {
-			errors.add(label + "[" + key + "]: " + rootMessage(ex));
+			errors.add(label + "[" + key + "]: " + safeFailure());
 			return 0;
 		}
 	}
@@ -1456,7 +1455,7 @@ public class AiSessionPurgeService {
 			}
 		}
 		catch (RuntimeException ex) {
-			errors.add("session: " + rootMessage(ex));
+			errors.add("session: " + safeFailure());
 		}
 		deleteKeyIfType(execution, CreateTaskDraftStore.sessionKey(sessionId), DataType.HASH, errors, warnings,
 				"ctdraft");
@@ -1490,7 +1489,7 @@ public class AiSessionPurgeService {
 			}
 		}
 		catch (RuntimeException ex) {
-			errors.add("sessionCurrent: " + rootMessage(ex));
+			errors.add("sessionCurrent: " + safeFailure());
 		}
 		deleteKeyIfType(execution, this.runStore.sessionRunsKey(sessionId), DataType.SET, errors, warnings,
 				"sessionRuns");
@@ -1520,7 +1519,7 @@ public class AiSessionPurgeService {
 					path = this.fileStorage.resolve(storagePath);
 				}
 				catch (IllegalArgumentException ex) {
-					errors.add("attachment[" + attachment.fileId() + "]: 登记路径非法（" + ex.getMessage() + "）");
+					errors.add("attachment[" + attachment.fileId() + "]: 登记路径非法");
 					failed.add(attachment.fileId());
 					continue;
 				}
@@ -1530,7 +1529,7 @@ public class AiSessionPurgeService {
 				}
 				catch (RuntimeException ex) {
 					errors.add("attachment[" + attachment.fileId() + "]: 文件删除失败（登记保留以便重试）："
-							+ storagePath + "（" + ex.getMessage() + "）");
+							+ storagePath);
 					failed.add(attachment.fileId());
 					continue;
 				}
@@ -1551,7 +1550,7 @@ public class AiSessionPurgeService {
 				}
 			}
 			catch (RuntimeException ex) {
-				errors.add("attachment[" + attachment.fileId() + "]: 登记删除失败（可重试）：" + rootMessage(ex));
+				errors.add("attachment[" + attachment.fileId() + "]: 登记删除失败（可重试）：" + safeFailure());
 				failed.add(attachment.fileId());
 			}
 		}
@@ -1560,7 +1559,7 @@ public class AiSessionPurgeService {
 				this.attachments.deleteSessionIndex(sessionId);
 			}
 			catch (RuntimeException ex) {
-				errors.add("attachments: 会话索引删除失败（可重试）：" + rootMessage(ex));
+				errors.add("attachments: 会话索引删除失败（可重试）：" + safeFailure());
 			}
 		}
 		return new AttachmentView(list.size(), registrations, files, List.copyOf(failed));
@@ -1587,13 +1586,8 @@ public class AiSessionPurgeService {
 		return status != null && RunSnapshot.isTerminal(status);
 	}
 
-	private static String rootMessage(Throwable error) {
-		Throwable current = error;
-		while (current.getCause() != null && current.getCause() != current) {
-			current = current.getCause();
-		}
-		String message = current.getMessage();
-		return message == null || message.isBlank() ? current.getClass().getSimpleName() : message;
+	private static String safeFailure() {
+		return "操作失败";
 	}
 
 	/** 枚举失败时的占位结果（不读取任何依赖，保证"失败不半删"可判定）。 */
@@ -1613,7 +1607,7 @@ public class AiSessionPurgeService {
 						enumeration.context().safety(), 0),
 				new AttachmentView(enumeration.attachments().size(), 0, 0, List.of()),
 				new SessionView(false, false), enumeration.clientCleanup(),
-				List.of(phase + ": " + rootMessage(error)), enumeration.warnings());
+				List.of(phase + ": " + safeFailure()), enumeration.warnings());
 	}
 
 	// ── 内部数据结构 ─────────────────────────────────────────────────────────

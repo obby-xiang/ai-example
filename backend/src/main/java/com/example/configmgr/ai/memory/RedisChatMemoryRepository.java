@@ -442,8 +442,8 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("conversation memory enumeration (SCAN) failed pattern={} (returning {} ids scanned so far, not pretending empty) error={}", prefix + "{*",
-					ids.size(), ex.getMessage());
+			log.warn("conversation memory enumeration (SCAN) failed pattern={} (returning {} ids scanned so far, not pretending empty)", prefix + "{*",
+					ids.size(), ex);
 		}
 		return List.copyOf(ids);
 	}
@@ -678,7 +678,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return active == null ? Set.of() : active;
 		}
 		catch (RuntimeException ex) {
-			log.warn("active run lookup failed, skipping message trim in this merge conversationId={} error={}", conversationId, ex.getMessage());
+			log.warn("active run lookup failed, skipping message trim in this merge conversationId={}", conversationId, ex);
 			return null;
 		}
 	}
@@ -803,7 +803,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			this.redis.expire(counterKey, ttl);
 		}
 		catch (RuntimeException ex) {
-			log.warn("conversation memory counter TTL refresh failed (next successful write refreshes again) key={} error={}", counterKey, ex.getMessage());
+			log.warn("conversation memory counter TTL refresh failed (next successful write refreshes again) key={}", counterKey, ex);
 		}
 	}
 
@@ -898,8 +898,8 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			return this.purgeGuard.isArmed(conversationId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("post-write purge guard recheck failed (fail-closed: undoing this write-back) conversationId={} key={} error={}", conversationId,
-					finalKey, ex.getMessage());
+			log.warn("post-write purge guard recheck failed (fail-closed: undoing this write-back) conversationId={} key={}", conversationId,
+					finalKey, ex);
 			return true;
 		}
 	}
@@ -919,8 +919,8 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 					+ " (write-back must not survive, landed or not)", conversationId, finalKey);
 		}
 		catch (RuntimeException ex) {
-			log.warn("undoing memory write-back failed (key has TTL; reconcile/delete by this key) conversationId={} key={} error={}", conversationId,
-					finalKey, ex.getMessage());
+			log.warn("undoing memory write-back failed (key has TTL; reconcile/delete by this key) conversationId={} key={}", conversationId,
+					finalKey, ex);
 		}
 	}
 

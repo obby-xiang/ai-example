@@ -353,7 +353,7 @@ public class FrameWakeListener {
 			subscription.close();
 		}
 		catch (Exception ex) {
-			log.warn("frame wake unsubscribe failed runId={} identity={}: {}", runId, identity, ex.getMessage());
+			log.warn("frame wake unsubscribe failed runId={} identity={}", runId, identity, ex);
 		}
 	}
 
@@ -407,8 +407,8 @@ public class FrameWakeListener {
 					target.onWake(runId, upper);
 				}
 				catch (Exception ex) {
-					log.warn("wake handling failed runId={} seq={} (target skipped this tick; next tick/reattach replays): {}", runId,
-							upper, ex.getMessage());
+					log.warn("wake handling failed runId={} seq={} (target skipped this tick; next tick/reattach replays)", runId,
+							upper, ex);
 				}
 			}
 			synchronized (this) {

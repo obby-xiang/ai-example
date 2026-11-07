@@ -19,10 +19,10 @@ public record TenantUser(long tenantId, long userId) {
 
 	public TenantUser {
 		if (tenantId <= 0L) {
-			throw new IllegalArgumentException("tenantId 必须是正数：" + tenantId);
+			throw new IllegalArgumentException("tenantId must be positive: " + tenantId);
 		}
 		if (userId <= 0L && userId != SYSTEM_USER_ID) {
-			throw new IllegalArgumentException("userId 必须是正数或系统账号 -1：" + userId);
+			throw new IllegalArgumentException("userId must be positive or the system account -1: " + userId);
 		}
 	}
 

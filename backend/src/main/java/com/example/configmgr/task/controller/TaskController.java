@@ -145,7 +145,8 @@ public class TaskController {
                 text = objectMapper.writeValueAsString(condition);
             }
             catch (Exception e) {
-                throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "condition 无法序列化为 JSON：" + e.getMessage());
+                throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
+                        "condition could not be serialized as JSON", e);
             }
         }
         // F5（2026-10-31）：写入面只把**恰好 {}** 当"明确不设"。空数组形态
@@ -156,15 +157,17 @@ public class TaskController {
             parsed = objectMapper.readTree(text);
         }
         catch (Exception e) {
-            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "condition 不是合法 JSON：" + e.getMessage());
+            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
+                    "condition must be valid JSON", e);
         }
         if (parsed == null || !parsed.isObject()) {
             throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
-                    "condition 必须是 JSON 对象（明确不设请恰好传 {}）：" + text);
+                    "condition must be a JSON object; use exactly {} to explicitly leave it unset: " + text);
         }
         if (parsed.size() > 0 && !hasConditionContent(parsed)) {
             throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
-                    "condition 不能是空数组形态（fields:[] / scopeKeys:[] 不是“明确不设”，明确不设请恰好传 {}）：" + text);
+                    "condition cannot use empty-array forms (fields:[] / scopeKeys:[]); "
+                            + "use exactly {} to explicitly leave it unset: " + text);
         }
         return text;
     }

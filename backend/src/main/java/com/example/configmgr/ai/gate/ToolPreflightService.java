@@ -245,7 +245,7 @@ public class ToolPreflightService {
 		boolean english = english();
 		AiToolNames.ConfirmTool confirmTool = AiToolNames.ConfirmTool.of(toolName)
 			.orElseThrow(() -> new CodedIllegalArgumentException(ErrorCodes.TOOL_NOT_PREFLIGHTABLE,
-					"工具 " + toolName + " 不在预检范围内（见 supports）"));
+					"Tool " + toolName + " is outside the preflight scope (see supports)"));
 		Job.JobType jobType = confirmTool.jobType();
 		Long taskId = taskIdOf(argumentsJson);
 		Optional<Task> task = jobService.findTask(taskId);
@@ -310,7 +310,7 @@ public class ToolPreflightService {
 			args.put("taskId", taskId);
 			args.put("jobType", jobType.name());
 			checks.add(PreflightReport.check(CheckCode.NO_JOB_IN_FLIGHT, inFlight == null, args,
-					inFlight == null ? "" : inFlight.getMessage()));
+					inFlight == null ? "" : english ? "Another job is in flight for this task" : "该任务已有在途作业"));
 		}
 
 		// ④ 预检指纹新鲜（IMPORT/PUBLISH 要"最近一次预检查通过"，IMPORT 还要文件指纹未变；
@@ -335,7 +335,7 @@ public class ToolPreflightService {
 		else {
 			ConflictException stale = jobService.precheckConflict(taskId, jobType);
 			checks.add(PreflightReport.check(CheckCode.FRESH_PRECHECK, stale == null, precheckArgs,
-					stale == null ? describeFingerprint(precheckBasis, jobType, english) : stale.getMessage()));
+					stale == null ? describeFingerprint(precheckBasis, jobType, english) : english ? "The precheck is stale; run precheck again" : "预检已过期，请重新预检"));
 		}
 
 		// ⑤ 配置项 / 上传文件齐备（review-03 第 4 项：此前预检四项全过，批准后作业立刻 FAILED）
@@ -508,7 +508,7 @@ public class ToolPreflightService {
 					}
 					catch (Exception ex) {
 						conditionsValid = false;
-						conditionIssues.add("conditions 无法序列化/校验：" + ex.getMessage());
+						conditionIssues.add(english ? "conditions could not be serialized or validated" : "conditions 无法序列化或校验");
 						continue;
 					}
 					var verdict = guard.inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
@@ -728,7 +728,7 @@ public class ToolPreflightService {
 							: "任务 #" + taskId + " 尚未上传数据文件；先在导入向导上传文件并重跑预检查");
 		}
 		catch (RuntimeException ex) {
-			log.debug("preflight could not read task file taskId={} error={}", taskId, ex.getMessage());
+			log.debug("preflight could not read task file taskId={}", taskId, ex);
 			// 失败开放：查不了 ≠ 没有（与 ToolTargetResolver 同一口径）
 			return PreflightReport.check(CheckCode.HAS_UPLOAD, true, args,
 					english ? "Upload state is temporarily unavailable (rechecked before execution)"
@@ -1012,7 +1012,7 @@ public class ToolPreflightService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("publish impact could not read staged row count (treated as inestimable) error={}", ex.getMessage());
+			log.debug("publish impact could not read staged row count (treated as inestimable)", ex);
 			return new Impact(
 					english ? "Will publish " + defs + " definitions · impact cannot be estimated"
 							: "将发布 " + defs + " 个配置定义 · " + IMPACT_UNKNOWN,
@@ -1070,7 +1070,7 @@ public class ToolPreflightService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("impact could not read file row count (treated as inestimable) error={}", ex.getMessage());
+			log.debug("impact could not read file row count (treated as inestimable)", ex);
 			return null;
 		}
 		return known ? rows : null;
@@ -1109,7 +1109,7 @@ public class ToolPreflightService {
 			return hex.toString();
 		}
 		catch (NoSuchAlgorithmException ex) {
-			throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "SHA-256 不可用，无法生成预检指纹", ex);
+			throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "SHA-256 is unavailable; cannot generate precheck fingerprint", ex);
 		}
 	}
 

@@ -62,7 +62,7 @@ public class YamlToolDefinitionSource implements ToolDefinitionSource {
         try (InputStream in = resource.getInputStream()) {
             Object parsed = new Yaml().load(in);
             if (!(parsed instanceof Map<?, ?> root)) {
-                throw new IllegalStateException("工具定义 YAML 顶层必须是映射：" + resource);
+                throw new IllegalStateException("Tool definition YAML root must be a mapping: " + resource);
             }
             String version = root.get("version") == null ? "unknown" : String.valueOf(root.get("version"));
             String lang = root.get("lang") == null ? null : String.valueOf(root.get("lang"));
@@ -71,11 +71,11 @@ public class YamlToolDefinitionSource implements ToolDefinitionSource {
             if (tools instanceof List<?> list) {
                 for (Object item : list) {
                     if (!(item instanceof Map<?, ?> entry)) {
-                        throw new IllegalStateException("工具定义条目必须是映射：" + item);
+                        throw new IllegalStateException("Tool definition entries must be mappings: " + item);
                     }
                     ToolDefinitionOverride override = toOverride((Map<String, Object>) entry);
                     if (byKey.put(override.toolKey(), override) != null) {
-                        throw new IllegalStateException("工具定义 toolKey 重复：" + override.toolKey());
+                        throw new IllegalStateException("Duplicate tool definition toolKey: " + override.toolKey());
                     }
                 }
             }
@@ -84,14 +84,14 @@ public class YamlToolDefinitionSource implements ToolDefinitionSource {
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
-            throw new IllegalStateException("工具定义 YAML 解析失败：" + resource, e);
+            throw new IllegalStateException("Failed to parse tool definition YAML: " + resource, e);
         }
     }
 
     private static ToolDefinitionOverride toOverride(Map<String, Object> entry) {
         String toolKey = text(entry, "toolKey");
         if (toolKey == null) {
-            throw new IllegalStateException("工具定义条目缺少 toolKey：" + entry);
+            throw new IllegalStateException("Tool definition entry is missing toolKey: " + entry);
         }
         return new ToolDefinitionOverride(
                 toolKey,

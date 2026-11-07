@@ -24,8 +24,8 @@ public class RunParkedException extends RuntimeException {
 	private final String kind;
 
 	public RunParkedException(String runId, String toolCallId, String kind) {
-		super("本轮进入人工等待挂起态（park）：runId=" + runId + " toolCallId=" + toolCallId + " kind=" + kind
-				+ "（线程交还，决策后由续跑重建执行）");
+		super("Run entered human-wait park state: runId=" + runId + " toolCallId=" + toolCallId + " kind=" + kind
+				+ " (thread returned; resume rebuilds execution after the decision)");
 		this.runId = runId;
 		this.toolCallId = toolCallId;
 		this.kind = kind;

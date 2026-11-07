@@ -426,7 +426,7 @@ public class ResilientChatService {
 			return this.cancelFinalizer.handOff(runId, CancelledRunFinalizer.CAUSE_PERSIST_DENIED);
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel finalize handoff failed runId={}: {}", runId, ex.getMessage());
+			log.warn("cancel finalize handoff failed runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -525,8 +525,8 @@ public class ResilientChatService {
 			firstTurn = this.store.sessionRunIds(sessionId).isEmpty();
 		}
 		catch (RuntimeException ex) {
-			log.warn("session first-turn probe failed; keeping the existing memory window sessionId={}: {}",
-					sessionId, ex.getMessage());
+			log.warn("session first-turn probe failed; keeping the existing memory window sessionId={}",
+					sessionId, ex);
 		}
 		if (firstTurn) {
 			// 清空会推进记忆代次，旧写者不能在本轮之后把残窗复活；随后读取新的 CAS 基线。
@@ -553,7 +553,7 @@ public class ResilientChatService {
 		if (StringUtils.hasText(request.modelId())) {
 			if (request.providerId() == null) {
 				throw new ProviderGoneException(runId, null, request.modelId(),
-						"显式 modelId 必须同时提供 providerId，不得跨 provider 猜测");
+						"An explicit modelId requires providerId; provider must not be guessed");
 			}
 			target = this.providerRegistry.target(request.providerId(), request.modelId())
 				.orElseThrow(() -> new ProviderGoneException(runId, request.providerId(), request.modelId()));
@@ -660,8 +660,7 @@ public class ResilientChatService {
 					// 快照建不起来（Redis 抖动/写门不可确认）不得让取消失去终帧：
 					// 取消收尾对"无快照"仍按既有口径发唯一 done{cancelled:true}。
 					log.warn("minimal snapshot for compaction-time cancel failed runId={} "
-							+ "(cancel finalize without snapshot; terminal frame unchanged): {}", runId,
-							ex.getMessage());
+							+ "(cancel finalize without snapshot; terminal frame unchanged)", runId, ex);
 				}
 				cancelTerminal(runId, sessionId, null, 0, null, out,
 						new TurnContext(systemTokens, toolsTokens, inputTokens,
@@ -701,9 +700,9 @@ public class ResilientChatService {
 			// "归档里有业务帧但没有快照"这段只剩 start + 心跳（即"准备中"窗口），读侧判定因此无歧义。
 			compaction.emitIfChanged(out);
 
-			// 格式契约：E2E 的披露取证按 `上下文=(\S+)\s+披露工具=\[` 正则读这一行（scripts/verify-e2e.ps1），
-			// 因此 provider/model 只能另起一行，不得插进本行字段之间；三个取证字段名保持原样。
-			log.info("AI turn start runId={} sessionId={} 会话已存在={} 上下文={} 披露工具={} "
+			// 格式契约：runId/sessionId/sessionExists/context/disclosedTools 保持此顺序；
+			// provider/model 只能另起一行，不得插进本行字段之间。
+			log.info("AI turn start runId={} sessionId={} sessionExists={} context={} disclosedTools={} "
 					+ "firstPacketTimeout={} interPacketTimeout={} maxAttempts={} totalBudget={}",
 					runId, sessionId, existed, context.getContextKey(), tools.stream().map(t -> t.getToolDefinition().name()).toList(),
 					this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
@@ -953,7 +952,7 @@ public class ResilientChatService {
 			// 条件删除：同键若已被下一个驱动方登记，不得把它的登记一起删掉。
 			this.drivingRuns.remove(drivingKey, drivingToken);
 			log.warn("first-turn resume authority acquire failed runId={} (continuing lease-less; without facility "
-					+ "the write port NEVER_HELD passes; unconfirmed facility => write port UNAVAILABLE read-only): {}", runId, ex.getMessage());
+					+ "the write port NEVER_HELD passes; unconfirmed facility => write port UNAVAILABLE read-only)", runId, ex);
 			return DriveOwnership.none();
 		}
 		if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
@@ -979,12 +978,11 @@ public class ResilientChatService {
 				this.drivingRuns.remove(drivingKey, drivingToken);
 				if (acquired.created()) {
 					boolean released = leases.release(lease);
-					log.warn("first-turn renew registration failed, returning the lease created here runId={} epoch={} released={}: {}",
-							runId, lease.epoch(), released, ex.getMessage());
+					log.warn("first-turn renew registration failed, returning the lease created here runId={} epoch={} released={}",
+							runId, lease.epoch(), released, ex);
 				}
 				else {
-					log.warn("first-turn renew registration failed (same-owner reentry, lease kept) runId={} epoch={}: {}", runId, lease.epoch(),
-							ex.getMessage());
+					log.warn("first-turn renew registration failed (same-owner reentry, lease kept) runId={} epoch={}", runId, lease.epoch(), ex);
 				}
 				throw ex;
 			}
@@ -1027,8 +1025,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("first-turn lease return failed runId={} epoch={} (wait TTL; terminal state unaffected): {}", runId, lease.epoch(),
-					ex.getMessage());
+			log.debug("first-turn lease return failed runId={} epoch={} (wait TTL; terminal state unaffected)", runId, lease.epoch(), ex);
 		}
 	}
 
@@ -1107,7 +1104,7 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			log.debug("resume compaction failed to read turn state runId={} "
-					+ "(summary unavailable, history unchanged): {}", runId, ex.getMessage());
+					+ "(summary unavailable, history unchanged)", runId, ex);
 			return null;
 		}
 	}
@@ -1126,13 +1123,13 @@ public class ResilientChatService {
 	 */
 	private ProviderRuntime runtimeForSnapshot(String runId, RunSnapshot snapshot) {
 		if (snapshot == null) {
-			throw new IllegalStateException("续跑缺少轮次快照 runId=" + runId);
+			throw new IllegalStateException("Resume requires a run snapshot runId=" + runId);
 		}
 		Long providerId = snapshot.getProviderId();
 		String modelId = snapshot.getModelId();
 		if (modelId == null || modelId.isBlank()) {
 			throw new ProviderGoneException(runId, providerId, modelId,
-					"快照没有冻结模型名（当前协议要求首笔快照完整冻结 provider/model）");
+					"Snapshot has no frozen model name (the current protocol requires the initial snapshot to freeze provider/model)");
 		}
 		AiConfigService.ChatTarget target = this.providerRegistry.target(providerId, modelId).orElse(null);
 		if (target == null) {
@@ -1141,7 +1138,7 @@ public class ResilientChatService {
 		if (providerId != null && !providerId.equals(target.provider().providerId())) {
 			// 防御：精确解析不应返回别家；真出现说明解析实现漂移，宁可失败也不跨家
 			throw new ProviderGoneException(runId, providerId, modelId,
-					"解析结果落在 provider=" + target.provider().providerId() + "，不是快照的 provider");
+					"Resolved provider=" + target.provider().providerId() + " does not match the snapshot provider");
 		}
 		return this.providerRegistry.forFrozenRequest(target.provider(), modelId,
 				new AiProviderRegistry.Overrides(snapshot.getTemperature(), snapshot.getTopP(),
@@ -1155,10 +1152,10 @@ public class ResilientChatService {
 			snapshot = this.store.get(runId);
 		}
 		catch (RuntimeException ex) {
-			throw new IllegalStateException("读取续跑快照失败 runId=" + runId, ex);
+			throw new IllegalStateException("Failed to read resume snapshot runId=" + runId, ex);
 		}
 		if (snapshot == null) {
-			throw new IllegalStateException("续跑快照不存在 runId=" + runId);
+			throw new IllegalStateException("Resume snapshot does not exist runId=" + runId);
 		}
 		return snapshot;
 	}
@@ -1470,8 +1467,8 @@ public class ResilientChatService {
 					// 若已 saveSuspended/SUSPENDED/in-flight（parkedToolRound），不得在这里 DONE —— 交给
 					// 下方的挂起轮交还逻辑保留现场，等 resume 物化。仅 SUSPENDED（suspendedRound）同样不 DONE，
 					// 但按普通失败路径收口（无 error 终帧才是真正的缺口）。
-					log.warn("close correction failed, closing with on-screen text runId={} code={}: {}", runId,
-							violation.getCode(), violation.getMessage());
+					log.warn("close correction failed, closing with on-screen text runId={} code={}", runId,
+							violation.getCode(), violation);
 					stopKeepalive(keepalive);
 					finishSuccessGuarded(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn,
 							prefixText, false);
@@ -1520,10 +1517,9 @@ public class ResilientChatService {
 				long silenceMs = Math.max(0L, failedAtMs - watchdog.lastUpstreamAtMs());
 				long toolIdleMs = toolActivityIdleMs(runId, failedAtMs);
 				log.warn("attempt failed runId={} attempt={}/{} code={} emitted={} sideEffect={} overBudget={} "
-						+ "retryable={} upstreamEvents={} silence={}ms toolIdle={} reason={} lastFrames=[{}]",
+						+ "retryable={} upstreamEvents={} silence={}ms toolIdle={} lastFrames=[{}]",
 						runId, budgetedAttempts, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
-						watchdog.upstreamEvents(), silenceMs, toolIdleMs, violation.getMessage(),
-						accumulator.tailSummary());
+						watchdog.upstreamEvents(), silenceMs, toolIdleMs, accumulator.tailSummary(), violation);
 				if (!retryable) {
 					stopKeepalive(keepalive);
 					if (parkedToolRound) {
@@ -1604,7 +1600,7 @@ public class ResilientChatService {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			log.warn("read create-tool close facts failed, skipping correction runId={}: {}", runId, ex.getMessage());
+			log.warn("read create-tool close facts failed, skipping correction runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -1709,7 +1705,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("read disclosure surface failed, treating close correction as not triggered: {}", ex.getMessage());
+			log.warn("read disclosure surface failed, treating close correction as not triggered", ex);
 		}
 		return false;
 	}
@@ -1784,7 +1780,7 @@ public class ResilientChatService {
 			return extra != null && Boolean.TRUE.equals(extra.get(CREATE_TASK_CORRECTION_MARKER));
 		}
 		catch (RuntimeException ex) {
-			log.debug("read create_task correction marker failed (treating as not marked): {}", ex.getMessage());
+			log.debug("read create_task correction marker failed (treating as not marked)", ex);
 			return false;
 		}
 	}
@@ -1799,7 +1795,7 @@ public class ResilientChatService {
 			return extra != null && Boolean.TRUE.equals(extra.get(marker));
 		}
 		catch (RuntimeException ex) {
-			log.debug("read close correction marker failed runId={} (treating as not corrected): {}", runId, ex.getMessage());
+			log.debug("read close correction marker failed runId={} (treating as not corrected)", runId, ex);
 			return false;
 		}
 	}
@@ -1822,7 +1818,7 @@ public class ResilientChatService {
 			return value == null ? "" : String.valueOf(value);
 		}
 		catch (RuntimeException ex) {
-			log.debug("read correction prefix failed (treating as none): {}", ex.getMessage());
+			log.debug("read correction prefix failed (treating as none)", ex);
 			return "";
 		}
 	}
@@ -1865,7 +1861,7 @@ public class ResilientChatService {
 			return correctionAlreadyUsed(runId, marker);
 		}
 		catch (RuntimeException ex) {
-			log.warn("write close correction marker failed, skipping correction runId={}: {}", runId, ex.getMessage());
+			log.warn("write close correction marker failed, skipping correction runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -1880,7 +1876,7 @@ public class ResilientChatService {
 			return AiContext.fromMap(snapshot.getContext());
 		}
 		catch (RuntimeException ex) {
-			log.debug("read latest context failed runId={} (falling back to drive context): {}", runId, ex.getMessage());
+			log.debug("read latest context failed runId={} (falling back to drive context)", runId, ex);
 			return fallback;
 		}
 	}
@@ -1926,8 +1922,8 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("condition workflow evidence unavailable; skipping wrap-up form runId={} taskId={}: {}",
-					runId, currentTaskId, ex.getMessage());
+			log.debug("condition workflow evidence unavailable; skipping wrap-up form runId={} taskId={}",
+					runId, currentTaskId, ex);
 		}
 		return false;
 	}
@@ -2021,7 +2017,7 @@ public class ResilientChatService {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("read pending entries failed, skipping close correction runId={}: {}", runId, ex.getMessage());
+			log.debug("read pending entries failed, skipping close correction runId={}", runId, ex);
 			return false;
 		}
 		AiContext latest = latestContext(runId, context);
@@ -2042,7 +2038,7 @@ public class ResilientChatService {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("read pending entries failed, treating as no new export evidence runId={}: {}", runId, ex.getMessage());
+			log.debug("read pending entries failed, treating as no new export evidence runId={}", runId, ex);
 			return false;
 		}
 		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
@@ -2453,7 +2449,7 @@ public class ResilientChatService {
 			this.beacon.clearRun(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("terminal cleanup of tool activity anchor failed runId={}: {}", runId, ex.getMessage());
+			log.debug("terminal cleanup of tool activity anchor failed runId={}", runId, ex);
 		}
 		try {
 			if (this.parkSettlement != null) {
@@ -2461,7 +2457,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("terminal cleanup of confirmation-gate redispatch counter failed runId={}: {}", runId, ex.getMessage());
+			log.debug("terminal cleanup of confirmation-gate redispatch counter failed runId={}", runId, ex);
 		}
 		try {
 			if (this.cancelFinalizer != null) {
@@ -2469,7 +2465,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("terminal cleanup of cancel handoff dedup flag failed runId={}: {}", runId, ex.getMessage());
+			log.debug("terminal cleanup of cancel handoff dedup flag failed runId={}", runId, ex);
 		}
 		completeClientRequest(runId, terminalSnapshot);
 	}
@@ -2534,7 +2530,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("clientRequestId completion state write failed runId={} (terminal state/frame unaffected): {}", runId, ex.getMessage());
+			log.warn("clientRequestId completion state write failed runId={} (terminal state/frame unaffected)", runId, ex);
 		}
 	}
 
@@ -2559,7 +2555,7 @@ public class ResilientChatService {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("cancel check before success terminal unreadable runId={} (continuing as not cancelled): {}", runId, ex.getMessage());
+			log.debug("cancel check before success terminal unreadable runId={} (continuing as not cancelled)", runId, ex);
 			return false;
 		}
 	}
@@ -2580,7 +2576,7 @@ public class ResilientChatService {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("cancel recheck unreadable runId={} (continuing as not cancelled): {}", runId, ex.getMessage());
+			log.debug("cancel recheck unreadable runId={} (continuing as not cancelled)", runId, ex);
 			return false;
 		}
 	}
@@ -2600,7 +2596,7 @@ public class ResilientChatService {
 			return this.clientRequests.isCancelled(sessionId, clientRequestId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("clientRequestId cancel recheck unreadable sessionId={} (continuing as not cancelled): {}", sessionId, ex.getMessage());
+			log.debug("clientRequestId cancel recheck unreadable sessionId={} (continuing as not cancelled)", sessionId, ex);
 			return false;
 		}
 	}
@@ -2614,8 +2610,8 @@ public class ResilientChatService {
 			}
 			catch (RuntimeException ex) {
 				retryableFailure = isRetryableRedisFailure(ex);
-				log.debug("terminal snapshot save attempt failed runId={} attempt={} retryable={}: {}", runId, attempt + 1,
-						retryableFailure, ex.getMessage());
+				log.debug("terminal snapshot save attempt failed runId={} attempt={} retryable={}", runId, attempt + 1,
+						retryableFailure, ex);
 			}
 			persisted = readSnapshotQuietly(runId);
 			if (isCancelledSnapshot(persisted)) {
@@ -2644,10 +2640,10 @@ public class ResilientChatService {
 			}
 			catch (RuntimeException ex) {
 				if (!isRetryableRedisFailure(ex)) {
-					log.debug("terminal transcript failed permanently runId={}: {}", runId, ex.getMessage());
+					log.debug("terminal transcript failed permanently runId={}", runId, ex);
 					return false;
 				}
-				log.debug("terminal transcript attempt failed runId={} attempt={}: {}", runId, attempt + 1, ex.getMessage());
+				log.debug("terminal transcript attempt failed runId={} attempt={}", runId, attempt + 1, ex);
 			}
 			if (attempt >= 2 || !pauseTerminalRetry(attempt)) {
 				break;
@@ -2691,7 +2687,7 @@ public class ResilientChatService {
 			return this.store.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("post-write snapshot reread failed runId={} (continuing as unknown): {}", runId, ex.getMessage());
+			log.debug("post-write snapshot reread failed runId={} (continuing as unknown)", runId, ex);
 			return null;
 		}
 	}
@@ -3251,7 +3247,7 @@ public class ResilientChatService {
 			return this.registry.of(runId).terminalFrameArchived();
 		}
 		catch (RuntimeException ex) {
-			log.debug("cancel terminal archive probe failed runId={}: {}", runId, ex.getMessage());
+			log.debug("cancel terminal archive probe failed runId={}", runId, ex);
 			return null;
 		}
 	}
@@ -3363,7 +3359,7 @@ public class ResilientChatService {
 			catch (RuntimeException ex) {
 				// 写入抛异常 = 落库与否不可判定（可能快照已写、也可能只写了轻量状态键）：
 				// 按未落库处理，不交出快照；交棒侧重新取租后幂等补写 CANCELLED + 终帧。
-				log.warn("cancel snapshot write inconclusive runId={}: {} (not treating as persisted)", runId, ex.getMessage());
+				log.warn("cancel snapshot write inconclusive runId={} (not treating as persisted)", runId, ex);
 			}
 			if (persisted) {
 				// 只有这一笔真的落库，快照才是可信的终态事实（completeClientRequest 只读它的身份/绑定）
@@ -3479,7 +3475,7 @@ public class ResilientChatService {
 			this.parkSettlement.settleCancelledToolCalls(runId, cancelledBefore);
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel finalize park settlement failed (cancel unaffected) runId={}: {}", runId, ex.getMessage());
+			log.warn("cancel finalize park settlement failed (cancel unaffected) runId={}", runId, ex);
 		}
 	}
 
@@ -3649,7 +3645,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript write authority check failed runId={} (user entry not written this turn): {}", runId, ex.getMessage());
+			log.debug("transcript write authority check failed runId={} (user entry not written this turn)", runId, ex);
 			return;
 		}
 		try {
@@ -3662,7 +3658,7 @@ public class ResilientChatService {
 					snapshot.getRunEpoch());
 		}
 		catch (RuntimeException ex) {
-			log.warn("transcript user entry write failed runId={}: {} (turn unaffected)", runId, ex.getMessage());
+			log.warn("transcript user entry write failed runId={} (turn unaffected)", runId, ex);
 		}
 	}
 
@@ -3798,7 +3794,7 @@ public class ResilientChatService {
 			if (terminalAttempt) {
 				throw ex;
 			}
-			log.warn("transcript terminal write failed runId={}: {}", runId, ex.getMessage());
+			log.warn("transcript terminal write failed runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -3824,7 +3820,7 @@ public class ResilientChatService {
 			recordTranscript(runId, sessionId, this.codec.deserializeAll(snapshot.getMessageJson()), false);
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript terminal history read failed runId={}: {} (close unaffected)", runId, ex.getMessage());
+			log.debug("transcript terminal history read failed runId={} (close unaffected)", runId, ex);
 		}
 	}
 
@@ -3838,7 +3834,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript tool entries read failed runId={}: {} (falling back to raw history)", runId, ex.getMessage());
+			log.debug("transcript tool entries read failed runId={} (falling back to raw history)", runId, ex);
 		}
 		return pendings;
 	}
@@ -3954,7 +3950,7 @@ public class ResilientChatService {
 			// redis.degradations），否则这类失败只活在会被轮询节拍刷掉的日志里。
 			// 一次失败的写只计一次（不重试、不改写协议）；计数在唯一 catch 里 ⇒ 不会重复。
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE, ex);
-			log.warn("{} failed sessionId={}: {}", stage, sessionId, ex.getMessage());
+			log.warn("{} failed sessionId={}", stage, sessionId, ex);
 		}
 	}
 
@@ -3984,8 +3980,7 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			log.warn("resume authority unreadable: skipping {} runId={} (no snapshot/memory "
-					+ "write, avoid stale driver overwriting the new answer): {}", stage, runId,
-					ex.getMessage());
+					+ "write, avoid stale driver overwriting the new answer)", stage, runId, ex);
 			return false;
 		}
 	}
@@ -4749,7 +4744,7 @@ public class ResilientChatService {
 					&& snapshot.getInFlightToolCalls() != null && !snapshot.getInFlightToolCalls().isEmpty();
 		}
 		catch (RuntimeException ex) {
-			log.debug("parked-run predicate snapshot read failed runId={} (continuing as not parked): {}", runId, ex.getMessage());
+			log.debug("parked-run predicate snapshot read failed runId={} (continuing as not parked)", runId, ex);
 			return false;
 		}
 	}
@@ -4840,7 +4835,7 @@ public class ResilientChatService {
 		}
 		if (windowSnapshot == null) {
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
-					new IllegalStateException("记忆窗口写回缺少快照基线"));
+					new IllegalStateException("Memory window write-back requires a snapshot baseline"));
 			log.warn("{} skipped: no window snapshot baseline (whole-window write-back "
 					+ "needs a CAS baseline; no blind overwrite) sessionId={} runId={}", stage,
 					sessionId, runId);
@@ -4851,7 +4846,7 @@ public class ResilientChatService {
 				return true;
 			}
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE,
-					new IllegalStateException("记忆窗口在压缩计算后被改写，整窗写回放弃"));
+					new IllegalStateException("Memory window changed after compaction calculation; whole-window write-back abandoned"));
 			log.warn("{} abandoned: window modified/cleared by another writer after compaction compute "
 					+ "(not overwriting new messages; reread and recompute this turn) sessionId={} runId={}",
 					stage, sessionId, runId);
@@ -4859,7 +4854,7 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.W1_MEMORY_WRITE, ex);
-			log.warn("{} failed sessionId={}: {}", stage, sessionId, ex.getMessage());
+			log.warn("{} failed sessionId={}", stage, sessionId, ex);
 			return false;
 		}
 	}
@@ -4879,8 +4874,7 @@ public class ResilientChatService {
 		}
 		catch (RuntimeException ex) {
 			log.warn("memory window snapshot read failed (compaction write-back skipped: "
-					+ "whole-window overwrite without baseline is unsafe) sessionId={}: {}", sessionId,
-					ex.getMessage());
+					+ "whole-window overwrite without baseline is unsafe) sessionId={}", sessionId, ex);
 			return null;
 		}
 	}
@@ -4901,7 +4895,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("current turn read failed sessionId={}: {}", sessionId, ex.getMessage());
+			log.debug("current turn read failed sessionId={}", sessionId, ex);
 		}
 		// B1 / I6：同会话其他活跃 run 的未决条目同样不得清除（用户可能正在那张卡上复核）
 		for (String active : protectedActiveRunIds(runId, sessionId)) {
@@ -4918,7 +4912,7 @@ public class ResilientChatService {
 			ids.addAll(this.store.activeRunIds(sessionId));
 		}
 		catch (RuntimeException ex) {
-			log.debug("session active run read failed sessionId={}: {}", sessionId, ex.getMessage());
+			log.debug("session active run read failed sessionId={}", sessionId, ex);
 		}
 		if (runId != null && !runId.isBlank()) {
 			ids.add(runId);
@@ -4937,7 +4931,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("pending entries read failed runId={}: {}", runId, ex.getMessage());
+			log.debug("pending entries read failed runId={}", runId, ex);
 		}
 	}
 

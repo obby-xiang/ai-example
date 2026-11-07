@@ -154,7 +154,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return result;
         }
         catch (RuntimeException e) {
-            throw failure("读缓存 HASH 失败", key, e);
+            throw failure("Failed to read cache HASH", key, e);
         }
     }
 
@@ -165,7 +165,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return value == null ? null : String.valueOf(value);
         }
         catch (RuntimeException e) {
-            throw failure("读缓存 HASH 字段失败", key, e);
+            throw failure("Failed to read cache HASH field", key, e);
         }
     }
 
@@ -176,7 +176,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             this.redis.opsForHash().putAll(key, values);
         }
         catch (RuntimeException e) {
-            throw failure("写缓存 HASH 失败", key, e);
+            throw failure("Failed to write cache HASH", key, e);
         }
     }
 
@@ -187,7 +187,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             this.redis.opsForHash().putAll(key, values);
         }
         catch (RuntimeException e) {
-            throw failure("合并写缓存 HASH 字段失败", key, e);
+            throw failure("Failed to merge cache HASH fields", key, e);
         }
     }
 
@@ -198,7 +198,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return updated != null && updated > 0;
         }
         catch (RuntimeException e) {
-            throw failure("按存在性更新缓存代次失败", key, e);
+            throw failure("Failed to update cache generation when present", key, e);
         }
     }
 
@@ -217,7 +217,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return written != null && written > 0;
         }
         catch (RuntimeException e) {
-            throw failure("按代次写缓存 HASH 失败", key, e);
+            throw failure("Failed to write cache HASH by generation", key, e);
         }
     }
 
@@ -238,7 +238,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return written != null && written > 0;
         }
         catch (RuntimeException e) {
-            throw failure("按 lease 与代次发布缓存清单失败", key, e);
+            throw failure("Failed to publish cache manifest by lease and generation", key, e);
         }
     }
 
@@ -256,7 +256,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             this.redis.execute(PUT_INDEX_FIELDS_IF_GENERATION_AT_MOST, List.of(key), args.toArray());
         }
         catch (RuntimeException e) {
-            throw failure("按代次写缓存索引失败", key, e);
+            throw failure("Failed to write cache index by generation", key, e);
         }
     }
 
@@ -268,7 +268,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return updated != null && updated > 0;
         }
         catch (RuntimeException e) {
-            throw failure("按代次提升缓存正文代次失败", key, e);
+            throw failure("Failed to advance cached document generation", key, e);
         }
     }
 
@@ -284,7 +284,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return removed == null ? 0L : removed;
         }
         catch (RuntimeException e) {
-            throw failure("删除缓存 HASH 字段失败", key, e);
+            throw failure("Failed to delete cache HASH fields", key, e);
         }
     }
 
@@ -294,7 +294,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return this.redis.opsForValue().get(key);
         }
         catch (RuntimeException e) {
-            throw failure("读缓存失败", key, e);
+            throw failure("Failed to read cache", key, e);
         }
     }
 
@@ -305,7 +305,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return value == null ? 0L : value;
         }
         catch (RuntimeException e) {
-            throw failure("缓存版本号 INCR 失败", key, e);
+            throw failure("Failed to increment cache version", key, e);
         }
     }
 
@@ -316,7 +316,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return Boolean.TRUE.equals(acquired);
         }
         catch (RuntimeException e) {
-            throw failure("抢缓存锁失败", key, e);
+            throw failure("Failed to acquire cache lock", key, e);
         }
     }
 
@@ -327,7 +327,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return deleted != null && deleted > 0;
         }
         catch (RuntimeException e) {
-            throw failure("释放缓存锁失败", key, e);
+            throw failure("Failed to release cache lock", key, e);
         }
     }
 
@@ -339,7 +339,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return renewed != null && renewed > 0;
         }
         catch (RuntimeException e) {
-            throw failure("续租缓存锁失败", key, e);
+            throw failure("Failed to renew cache lock", key, e);
         }
     }
 
@@ -349,7 +349,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             this.redis.delete(key);
         }
         catch (RuntimeException e) {
-            throw failure("删除缓存键失败", key, e);
+            throw failure("Failed to delete cache key", key, e);
         }
     }
 
@@ -361,7 +361,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return deleted != null && deleted > 0;
         }
         catch (RuntimeException e) {
-            throw failure("按代次回收缓存正文失败", key, e);
+            throw failure("Failed to retire cached document by generation", key, e);
         }
     }
 
@@ -373,7 +373,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             return deleted != null && deleted > 0;
         }
         catch (RuntimeException e) {
-            throw failure("按代次回收缓存索引失败", key, e);
+            throw failure("Failed to retire cache index by generation", key, e);
         }
     }
 
@@ -384,13 +384,13 @@ public class RedisKbCacheStore implements KbCacheStore {
             return millis == null ? null : Duration.ofMillis(millis);
         }
         catch (RuntimeException e) {
-            throw failure("读取缓存 TTL 失败", key, e);
+            throw failure("Failed to read cache TTL", key, e);
         }
     }
 
     private static KbCacheException failure(String action, String key, RuntimeException cause) {
         // 只报动作与键族（键名不含凭据/内容）；不含异常堆栈给模型可见面
-        log.debug("KB cache operation failed: key={} cause={}", key, cause.getClass().getSimpleName());
-        return new KbCacheException(action + "（key=" + key + "）：" + cause.getClass().getSimpleName(), cause);
+        log.debug("KB cache operation failed: key={}", key, cause);
+        return new KbCacheException(action + " (key=" + key + "): " + cause.getClass().getSimpleName(), cause);
     }
 }

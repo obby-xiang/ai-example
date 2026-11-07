@@ -118,7 +118,7 @@ public class CreateTaskDraftStore {
 	 */
 	public static String sessionKey(String sessionId) {
 		if (sessionId == null || sessionId.isBlank()) {
-			throw new IllegalArgumentException("sessionId 不得为空白：会话草案键由身份段 + sessionId 组成");
+			throw new IllegalArgumentException("sessionId must not be blank: session draft keys consist of an identity segment and sessionId");
 		}
 		return KEY_PREFIX + "{" + TenantKeyScope.currentSegment() + "session:" + escapedSessionId(sessionId) + "}";
 	}
@@ -171,10 +171,10 @@ public class CreateTaskDraftStore {
 				}
 			}
 			catch (RuntimeException ex) {
-				throw new IllegalStateException("写入会话任务草案失败 sessionId=" + sessionId + " taskId=" + taskId, ex);
+				throw new IllegalStateException("Failed to write session task draft sessionId=" + sessionId + " taskId=" + taskId, ex);
 			}
 		}
-		throw new IllegalStateException("会话任务草案并发合并冲突 sessionId=" + sessionId + " taskId=" + taskId);
+		throw new IllegalStateException("Concurrent merge conflict for session task draft sessionId=" + sessionId + " taskId=" + taskId);
 	}
 
 	/**
@@ -197,7 +197,7 @@ public class CreateTaskDraftStore {
 			raw = redis.opsForHash().get(sessionKey(sessionId), Long.toString(taskId));
 		}
 		catch (RuntimeException ex) {
-			throw new IllegalStateException("读取会话任务草案失败 sessionId=" + sessionId + " taskId=" + taskId, ex);
+			throw new IllegalStateException("Failed to read session task draft sessionId=" + sessionId + " taskId=" + taskId, ex);
 		}
 		if (raw == null) {
 			return null;
@@ -213,7 +213,7 @@ public class CreateTaskDraftStore {
 			raw = redis.opsForHash().get(key, field);
 		}
 		catch (RuntimeException ex) {
-			throw new IllegalStateException("读取会话任务草案失败，已中止本次写入", ex);
+			throw new IllegalStateException("Failed to read session task draft; write aborted", ex);
 		}
 		Draft existing = raw == null ? null : parse(String.valueOf(raw), taskId);
 		java.util.LinkedHashSet<String> mergedDefCodes = new java.util.LinkedHashSet<>();
@@ -258,7 +258,7 @@ public class CreateTaskDraftStore {
 			runs = this.runStoreProvider == null ? null : this.runStoreProvider.getIfAvailable();
 		}
 		catch (RuntimeException ex) {
-			log.debug("RunStore unavailable, task draft skipped runId={}: {}", runId, ex.getMessage());
+			log.debug("RunStore unavailable, task draft skipped runId={}", runId, ex);
 			return null;
 		}
 		if (runs == null) {
@@ -272,7 +272,7 @@ public class CreateTaskDraftStore {
 			case ATTRIBUTED -> owner.sessionId() == null || owner.sessionId().isBlank() ? null : owner.sessionId();
 			case MISSING, ABSENT -> null;
 			case UNREADABLE -> throw new IllegalStateException(
-					"无法解析轮次快照的会话归属（快照读失败/坏值）runId=" + runId);
+					"Cannot resolve session ownership from run snapshot (read failed or invalid value) runId=" + runId);
 		};
 	}
 
@@ -282,7 +282,7 @@ public class CreateTaskDraftStore {
 			draft = this.mapper.readValue(raw, Draft.class);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("会话任务草案内容不可解析 taskId=" + taskId, ex);
+			throw new IllegalStateException("Cannot parse session task draft content taskId=" + taskId, ex);
 		}
 		if (draft == null) {
 			return null;
@@ -295,7 +295,7 @@ public class CreateTaskDraftStore {
 			return this.mapper.writeValueAsString(value);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("会话任务草案序列化失败", ex);
+			throw new IllegalStateException("Failed to serialize session task draft", ex);
 		}
 	}
 
@@ -305,7 +305,7 @@ public class CreateTaskDraftStore {
 		}
 		catch (RuntimeException ex) {
 			// 轻装配/单测没有 Redis 模板：草案缺席，不影响调用方既有路径
-			log.debug("StringRedisTemplate unavailable, task draft skipped: {}", ex.getMessage());
+			log.debug("StringRedisTemplate unavailable, task draft skipped", ex);
 			return null;
 		}
 	}

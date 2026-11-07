@@ -57,7 +57,7 @@ public final class ToolSchemaNormalizer {
         try {
             parsed = MAPPER.readTree(inputSchema);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("工具 " + toolName + " 的 inputSchema 不是合法 JSON", e);
+            throw new IllegalStateException("Tool " + toolName + " inputSchema is not valid JSON", e);
         }
         if (!(parsed instanceof ObjectNode document)) {
             return inputSchema;
@@ -103,8 +103,8 @@ public final class ToolSchemaNormalizer {
             return document.putObject(DEFS_KEY);
         }
         if (!existing.isObject()) {
-            throw new IllegalStateException("工具 " + toolName + " 的 inputSchema 根上 " + DEFS_KEY
-                    + " 不是对象，无法合并参数级定义");
+            throw new IllegalStateException("Tool " + toolName + " inputSchema root " + DEFS_KEY
+                    + " is not an object; parameter-level definitions cannot be merged");
         }
         return (ObjectNode) existing;
     }
@@ -112,8 +112,8 @@ public final class ToolSchemaNormalizer {
     private static void hoistInto(String toolName, ObjectNode rootDefs, DefsSite site) {
         JsonNode defs = site.container.get(DEFS_KEY);
         if (!defs.isObject()) {
-            throw new IllegalStateException("工具 " + toolName + " 的 inputSchema 在 " + site.path
-                    + " 下的 " + DEFS_KEY + " 不是对象");
+            throw new IllegalStateException("Tool " + toolName + " inputSchema " + DEFS_KEY + " at " + site.path
+                    + " is not an object");
         }
         Iterator<Map.Entry<String, JsonNode>> it = defs.fields();
         while (it.hasNext()) {
@@ -124,9 +124,10 @@ public final class ToolSchemaNormalizer {
             if (atRoot == null) {
                 rootDefs.set(name, definition.deepCopy());
             } else if (!atRoot.equals(definition)) {
-                throw new IllegalStateException("工具 " + toolName + " 的 inputSchema 里 " + DEFS_KEY
-                        + " 同名冲突：" + name + "（参数级 " + site.path + " 与文档根/其他位置的定义内容不同）。"
-                        + "同名不同义无法安全合并到根，请让生成方改名后重试");
+                throw new IllegalStateException("Tool " + toolName + " inputSchema has conflicting " + DEFS_KEY
+                        + " definitions named " + name + " at parameter-level " + site.path
+                        + " and the document root or another location. Definitions with different content cannot be merged; "
+                        + "rename them at the source and retry");
             }
         }
     }
@@ -148,8 +149,8 @@ public final class ToolSchemaNormalizer {
             if ("$ref".equals(key) && value.isTextual()) {
                 String ref = value.asText();
                 if (ref.startsWith("#/") && resolvePointer(root, ref.substring(1)) == null) {
-                    throw new IllegalStateException("工具 " + toolName + " 的 inputSchema 归一化后仍存在悬空 ref："
-                            + ref + "（" + DEFS_KEY + " 提升未覆盖它）");
+                    throw new IllegalStateException("Tool " + toolName + " inputSchema still has an unresolved ref after normalization: "
+                            + ref + " (" + DEFS_KEY + " hoisting did not cover it)");
                 }
             } else {
                 assertRefsResolvable(toolName, root, value);
@@ -189,7 +190,7 @@ public final class ToolSchemaNormalizer {
         try {
             return MAPPER.writeValueAsString(document);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("工具 " + toolName + " 的 inputSchema 无法序列化", e);
+            throw new IllegalStateException("Tool " + toolName + " inputSchema could not be serialized", e);
         }
     }
 

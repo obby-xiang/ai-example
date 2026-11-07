@@ -47,8 +47,8 @@ public final class LeaseKeys {
 	/** 任务级锁键：{@code ai:lock:task:<taskId>}。 */
 	public static String task(long taskId) {
 		if (taskId <= 0L) {
-			throw new CodedIllegalArgumentException(ErrorCodes.LEASE_KEY_INVALID, "taskId 必须 > 0（当前 = " + taskId + "）：0/负值会拼出"
-					+ "一个所有调用方都能命中的'空任务'锁，互斥面随之失效");
+			throw new CodedIllegalArgumentException(ErrorCodes.LEASE_KEY_INVALID, "taskId must be > 0 (actual=" + taskId + "): zero or negative values would create "
+					+ "an 'empty task' lock shared by every caller, defeating mutual exclusion");
 		}
 		return TASK_PREFIX + taskId;
 	}
@@ -67,8 +67,8 @@ public final class LeaseKeys {
 	 */
 	public static String normalizeJobType(String jobType) {
 		if (jobType == null || jobType.isBlank()) {
-			throw new CodedIllegalArgumentException(ErrorCodes.LEASE_KEY_INVALID, "jobType 不能为空：作业级锁的键形是 "
-					+ "ai:lock:job:<taskId>:<JOBTYPE>，缺 JOBTYPE 会让不同类型的作业共用一把锁");
+			throw new CodedIllegalArgumentException(ErrorCodes.LEASE_KEY_INVALID, "jobType must not be blank: job lock keys use the shape "
+					+ "ai:lock:job:<taskId>:<JOBTYPE>; a missing JOBTYPE would make different job types share one lock");
 		}
 		return jobType.trim().toUpperCase(Locale.ROOT);
 	}

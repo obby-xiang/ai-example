@@ -193,7 +193,7 @@ public class JobWatchdog {
         } catch (Throwable t) {
             // 看门狗绝不能让扫描异常逃出调度线程（否则后续周期静默停摆）；
             // Throwable 而非 Exception：Error（StackOverflowError / OOM 等）同样兜住并留根因，不吞（红队 m4）
-            log.error("Job watchdog scan failed error={}", t.getMessage(), t);
+            log.error("Job watchdog scan failed", t);
         }
     }
 
@@ -225,7 +225,7 @@ public class JobWatchdog {
                 }
             } catch (Exception e) {
                 // 单个作业判定失败不阻断本轮其余作业
-                log.error("Job watchdog judgement failed jobId={} error={}", job.getId(), e.getMessage(), e);
+                log.error("Job watchdog judgement failed jobId={}", job.getId(), e);
             }
         }
     }
@@ -386,7 +386,7 @@ public class JobWatchdog {
                 issue.setMessage(reason);
                 this.issueRepository.save(issue);
             } catch (Exception e) {
-                log.error("Job watchdog issue write failed jobId={} error={}", job.getId(), e.getMessage(), e);
+                log.error("Job watchdog issue write failed jobId={}", job.getId(), e);
             }
         }
         this.terminalWriter.complete(job, Job.JobStatus.FAILED, 1, 0,
@@ -402,8 +402,8 @@ public class JobWatchdog {
             }
         } catch (RuntimeException e) {
             // 兜底：取消标志不是收尾必要条件（终态已落 FAILED，执行线程的迟到写由条件 UPDATE 丢弃）
-            log.warn("Cancel flag write failed, terminal FAILED already written jobId={} error={}",
-                    job.getId(), e.getMessage());
+            log.warn("Cancel flag write failed, terminal FAILED already written jobId={}",
+                    job.getId(), e);
         }
         if (timeout) {
             // 超时不强杀线程：runner 可能仍活着并在长事务里迟到写，删除闸门留给

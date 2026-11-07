@@ -370,7 +370,7 @@ public class ConditionsForm extends HostForm {
 			return park(runId, history, frontendForm(toolCallId, arguments.get()));
 		}
 		catch (RuntimeException ex) {
-			log.warn("condition form for QUERY_COND was not parked (continue on existing path) runId={} error={}", runId, ex.getMessage());
+			log.warn("condition form for QUERY_COND was not parked (continue on existing path) runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -448,13 +448,13 @@ public class ConditionsForm extends HostForm {
 			}
 			catch (RuntimeException ex) {
 				if (!conditionGateExpected(context)) {
-					log.warn("could not read task; confirm_step continues on the existing path runId={} taskId={} error={}", runId, taskId,
-							ex.getMessage());
+					log.warn("could not read task; confirm_step continues on the existing path runId={} taskId={}", runId, taskId,
+							ex);
 					return ConfirmStepDecision.allow();
 				}
 				// F3：读异常时无法确认条件状态 —— 条件链上必须 fail-closed，不能按全量放行
-				log.warn("confirm_step condition recheck could not read task; rejected with no side effects runId={} taskId={} error={}", runId, taskId,
-						ex.getMessage());
+				log.warn("confirm_step condition recheck could not read task; rejected with no side effects runId={} taskId={}", runId, taskId,
+						ex);
 				return readFailureDecision(taskId);
 			}
 			if (task == null || task.getType() != Task.TaskType.EXPORT) {
@@ -487,11 +487,11 @@ public class ConditionsForm extends HostForm {
 		}
 		catch (RuntimeException ex) {
 			if (!conditionGateExpected(context)) {
-				log.warn("confirm_step condition recheck did not complete (continue on existing path) runId={} error={}", runId, ex.getMessage());
+				log.warn("confirm_step condition recheck did not complete (continue on existing path) runId={}", runId, ex);
 				return ConfirmStepDecision.allow();
 			}
 			// F3：条件链上的意外异常同样 fail-closed（不能因为复核炸了就按全量推进）
-			log.warn("confirm_step condition recheck threw; rejected with no side effects runId={} error={}", runId, ex.getMessage());
+			log.warn("confirm_step condition recheck threw; rejected with no side effects runId={}", runId, ex);
 			return internalConditionFailure("条件复核未能完成（内部执行失败），confirm_step 未执行（未向前端推进）",
 					List.of("条件状态无法确认，不能按全量推进",
 							"请稍后重试 confirm_step；若持续失败请检查任务服务/存储健康"));
@@ -712,8 +712,8 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendings(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read this turn's raw create_task arguments (internal failure; no condition form) runId={} taskId={} error={}", runId, taskId,
-					ex.getMessage());
+			log.warn("could not read this turn's raw create_task arguments (internal failure; no condition form) runId={} taskId={}", runId, taskId,
+					ex);
 			return CandidateSource.internalFailure();
 		}
 		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
@@ -746,8 +746,8 @@ public class ConditionsForm extends HostForm {
 			draft = draftStore.read(runId, taskId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read the session task draft (internal failure; no condition form) runId={} taskId={} error={}", runId, taskId,
-					ex.getMessage());
+			log.warn("could not read the session task draft (internal failure; no condition form) runId={} taskId={}", runId, taskId,
+					ex);
 			return CandidateSource.internalFailure();
 		}
 		if (draft == null) {
@@ -841,7 +841,7 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read condition draft facts (treated as no draft) runId={} error={}", runId, ex.getMessage());
+			log.warn("could not read condition draft facts (treated as no draft) runId={}", runId, ex);
 			return DraftFacts.none();
 		}
 		long taskId = task.getId() == null ? 0L : task.getId();
@@ -1218,8 +1218,8 @@ public class ConditionsForm extends HostForm {
 			return latest.getResolvedAtMs() > taskUpdatedAtMs ? latest.getResolvedAtMs() : -1;
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not prove a current successful blank condition form; host skips advance runId={} taskId={} error={}",
-					runId, taskId, ex.getMessage());
+			log.warn("could not prove a current successful blank condition form; host skips advance runId={} taskId={}",
+					runId, taskId, ex);
 			return -1;
 		}
 	}
@@ -1253,7 +1253,7 @@ public class ConditionsForm extends HostForm {
 			return false;
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not check existing condition advance; host skips duplicate runId={} error={}", runId, ex.getMessage());
+			log.warn("could not check existing condition advance; host skips duplicate runId={}", runId, ex);
 			return true;
 		}
 	}
@@ -1264,7 +1264,7 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read condition form submission (treated as not collected) runId={} error={}", runId, ex.getMessage());
+			log.warn("could not read condition form submission (treated as not collected) runId={}", runId, ex);
 			return ConditionFeedback.none();
 		}
 		PendingToolCall latest = null;
@@ -1331,7 +1331,7 @@ public class ConditionsForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read pending entry; non-empty condition submission treated as unhandled runId={} error={}", runId, ex.getMessage());
+			log.warn("could not read pending entry; non-empty condition submission treated as unhandled runId={}", runId, ex);
 			return false;
 		}
 		Set<String> settled = new LinkedHashSet<>();

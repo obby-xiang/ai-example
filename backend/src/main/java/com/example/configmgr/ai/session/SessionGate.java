@@ -654,7 +654,7 @@ public class SessionGate {
 			return holder.lockValue.equals(this.redis.opsForValue().get(holder.gateKey));
 		}
 		catch (Exception ex) {
-			log.debug("Session gate sweep could not verify lock key={} (treated as still held): {}", holder.gateKey, ex.getMessage());
+			log.debug("Session gate sweep could not verify lock key={} (treated as still held)", holder.gateKey, ex);
 			return true;
 		}
 	}
@@ -678,7 +678,7 @@ public class SessionGate {
 			return result == 1L;
 		}
 		catch (Exception ex) {
-			log.debug("Session lock {} failed key={} (Redis error, no fallback write): {}", action, gateKey, ex.getMessage());
+			log.debug("Session lock {} failed key={} (Redis error, no fallback write)", action, gateKey, ex);
 			return null;
 		}
 	}
@@ -710,7 +710,7 @@ public class SessionGate {
 			return runIdOfValue(this.redis.opsForValue().get(gateKey));
 		}
 		catch (Exception ex) {
-			log.debug("Failed to read session gate holder key={} (treated as unknown): {}", gateKey, ex.getMessage());
+			log.debug("Failed to read session gate holder key={} (treated as unknown)", gateKey, ex);
 			return null;
 		}
 	}
@@ -755,12 +755,12 @@ public class SessionGate {
 				holder.degraded = true;
 				this.lockLost.incrementAndGet();
 				if (enteringDegraded) {
-					log.warn("Session lock renew failed, degrading to in-process gate sessionId={} key={}: {}",
-							sessionId, gateKey, ex.getMessage());
+					log.warn("Session lock renew failed, degrading to in-process gate sessionId={} key={}",
+							sessionId, gateKey, ex);
 				}
 				else {
-					log.debug("Session lock renew still failing (degraded already reported) sessionId={} key={}: {}",
-							sessionId, gateKey, ex.getMessage());
+					log.debug("Session lock renew still failing (degraded already reported) sessionId={} key={}",
+							sessionId, gateKey, ex);
 				}
 			}
 		}, period, period, TimeUnit.MILLISECONDS);

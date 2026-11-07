@@ -192,8 +192,8 @@ public class RedisTaskEventBus implements TaskEventBus {
         } catch (Exception e) {
             this.publishFailures.incrementAndGet();
             markKnownDown();
-            log.warn("Task SSE cross-instance publish failed, local delivery unaffected and remote falls back to snapshot polling taskId={} error={}",
-                    taskId, e.getMessage());
+            log.warn("Task SSE cross-instance publish failed, local delivery unaffected and remote falls back to snapshot polling taskId={}",
+                    taskId, e);
             return false;
         }
     }
@@ -235,8 +235,8 @@ public class RedisTaskEventBus implements TaskEventBus {
             this.subscribers.remove(taskId, onFrame);
             this.subscribeFailures.incrementAndGet();
             markKnownDown();
-            log.warn("Task SSE cross-instance subscribe failed, degraded to local-only taskId={} error={}",
-                    taskId, e.getMessage());
+            log.warn("Task SSE cross-instance subscribe failed, degraded to local-only taskId={}",
+                    taskId, e);
             return false;
         }
     }
@@ -252,7 +252,7 @@ public class RedisTaskEventBus implements TaskEventBus {
         try {
             target.removeMessageListener(listener);
         } catch (RuntimeException e) {
-            log.debug("Task SSE cross-instance unsubscribe failed taskId={} error={}", taskId, e.getMessage());
+            log.debug("Task SSE cross-instance unsubscribe failed taskId={}", taskId, e);
         }
     }
 
@@ -278,8 +278,8 @@ public class RedisTaskEventBus implements TaskEventBus {
             }
             frame = frameNode.asText();
         } catch (Exception e) {
-            log.warn("Task SSE cross-instance frame unparseable, frame dropped taskId={} error={}",
-                    taskId, e.getMessage());
+            log.warn("Task SSE cross-instance frame unparseable, frame dropped taskId={}",
+                    taskId, e);
             return;
         }
         Consumer<String> consumer = this.subscribers.get(taskId);
@@ -291,7 +291,7 @@ public class RedisTaskEventBus implements TaskEventBus {
             this.receivedFrames.incrementAndGet();
         } catch (RuntimeException e) {
             this.dispatchFailures.incrementAndGet();
-            log.warn("Task SSE cross-instance frame dispatch failed taskId={} error={}", taskId, e.getMessage());
+            log.warn("Task SSE cross-instance frame dispatch failed taskId={}", taskId, e);
         }
     }
 
@@ -329,7 +329,7 @@ public class RedisTaskEventBus implements TaskEventBus {
             try {
                 current.destroy();
             } catch (Exception e) {
-                log.debug("Task SSE cross-instance container shutdown failed error={}", e.getMessage());
+                log.debug("Task SSE cross-instance container shutdown failed", e);
             }
         }
         ThreadPoolExecutor ownedDispatch;
@@ -419,7 +419,7 @@ public class RedisTaskEventBus implements TaskEventBus {
             target.start();
             return target;
         } catch (Exception e) {
-            log.warn("Task SSE cross-instance container start failed, local-only subscribe error={}", e.getMessage());
+            log.warn("Task SSE cross-instance container start failed, local-only subscribe", e);
             return null;
         }
     }
@@ -506,9 +506,9 @@ public class RedisTaskEventBus implements TaskEventBus {
                 this.failures.incrementAndGet();
                 if (total == 1 || total % REJECTION_WARN_EVERY == 0) {
                     log.warn("Task SSE dispatch pool saturated, frame dropped and remote replays by snapshot polling "
-                            + "dispatchRejections={} cause={}", total, e.getClass().getSimpleName());
+                            + "dispatchRejections={}", total, e);
                 } else {
-                    log.debug("Task SSE dispatch pool saturated, frame dropped dispatchRejections={}", total);
+                    log.debug("Task SSE dispatch pool saturated, frame dropped dispatchRejections={}", total, e);
                 }
             }
         }
@@ -539,9 +539,9 @@ public class RedisTaskEventBus implements TaskEventBus {
                 long total = this.rejections.incrementAndGet();
                 if (total == 1 || total % REJECTION_WARN_EVERY == 0) {
                     log.warn("Task SSE subscription pool saturated, running subscribe/unsubscribe inline on caller "
-                            + "subscriptionRejections={} cause={}", total, e.getClass().getSimpleName());
+                            + "subscriptionRejections={}", total, e);
                 } else {
-                    log.debug("Task SSE subscription pool saturated, running inline subscriptionRejections={}", total);
+                    log.debug("Task SSE subscription pool saturated, running inline subscriptionRejections={}", total, e);
                 }
                 task.run();
             }

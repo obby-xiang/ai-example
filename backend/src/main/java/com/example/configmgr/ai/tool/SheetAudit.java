@@ -229,7 +229,7 @@ public class SheetAudit {
 		}
 		catch (RuntimeException error) {
 			// appendSafetyEvent 自身已吞异常；这里只防"store 是桩/未装配"的实现差异
-			log.warn("failed to write sheet sampling ledger (turn unaffected) tool={} error={}", pending.getName(), error.getMessage());
+			log.warn("failed to write sheet sampling ledger (turn unaffected) tool={}", pending.getName(), error);
 		}
 	}
 

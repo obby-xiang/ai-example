@@ -23,21 +23,22 @@ public final class ToolSchemaReconciler {
     }
 
     public static void reconcile(String toolKey, String reflectedJson, String overrideJson) {
-        JsonNode reflected = read(toolKey, reflectedJson, "反射");
+        JsonNode reflected = read(toolKey, reflectedJson, "reflection");
         JsonNode override = read(toolKey, overrideJson, "YAML");
         Set<String> diffs = new LinkedHashSet<>();
         Set<String> reflectedProps = propertyTypes(reflected);
         Set<String> overrideProps = propertyTypes(override);
         if (!reflectedProps.equals(overrideProps)) {
-            diffs.add("properties 不一致：反射=" + reflectedProps + "，YAML=" + overrideProps);
+            diffs.add("properties differ: reflection=" + reflectedProps + ", YAML=" + overrideProps);
         }
         Set<String> reflectedRequired = required(reflected);
         Set<String> overrideRequired = required(override);
         if (!reflectedRequired.equals(overrideRequired)) {
-            diffs.add("required 不一致：反射=" + reflectedRequired + "，YAML=" + overrideRequired);
+            diffs.add("required differs: reflection=" + reflectedRequired + ", YAML=" + overrideRequired);
         }
         if (!diffs.isEmpty()) {
-            throw new IllegalStateException("工具 " + toolKey + " 的 inputSchema 与 Java 签名漂移：" + String.join("；", diffs));
+            throw new IllegalStateException("Tool " + toolKey + " inputSchema differs from the Java signature: "
+                    + String.join("; ", diffs));
         }
     }
 
@@ -45,7 +46,7 @@ public final class ToolSchemaReconciler {
         try {
             return MAPPER.readTree(json);
         } catch (Exception e) {
-            throw new IllegalStateException("工具 " + toolKey + " 的 " + origin + " schema 不是合法 JSON", e);
+            throw new IllegalStateException("Tool " + toolKey + " " + origin + " schema is not valid JSON", e);
         }
     }
 

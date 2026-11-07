@@ -304,7 +304,7 @@ public class CancellationRegistry {
 					listener.run();
 				}
 				catch (Exception ex) {
-					log.debug("cancel listener failed runId={}: {}", runId, ex.getMessage());
+					log.debug("cancel listener failed runId={}", runId, ex);
 				}
 			}
 		}
@@ -386,13 +386,13 @@ public class CancellationRegistry {
 			// <b>已知窄残留（m1，本批只改注释）</b>：若此前已因真实故障处于退避（degraded 已为 true），
 			// 本次读在 try 之前已经刷新了节流锚点，这一拍会顺延既有退避 —— 它不解除已有退避，只是不再新增一次。
 			if (LeaseService.isLocalThreadInterrupt(ex)) {
-				log.debug("cancel flag read interrupted on this thread (this tick only; no instance-wide backoff): {}", ex.getMessage());
+				log.debug("cancel flag read interrupted on this thread (this tick only; no instance-wide backoff)", ex);
 				return RedisRead.unknown(ex);
 			}
 			if (!this.degraded) {
 				this.degraded = true;
 				log.warn("cancel flag read failed, degraded to in-process cancel "
-						+ "(single-instance only, cross-instance ineffective): {}", ex.getMessage());
+						+ "(single-instance only, cross-instance ineffective)", ex);
 			}
 			return RedisRead.unknown(ex);
 		}
@@ -419,7 +419,7 @@ public class CancellationRegistry {
 		}
 		catch (Exception ex) {
 			this.degraded = true;
-			log.warn("cancel flag write to Redis failed (in-process only) runId={}: {}", runId, ex.getMessage());
+			log.warn("cancel flag write to Redis failed (in-process only) runId={}", runId, ex);
 			return false;
 		}
 	}

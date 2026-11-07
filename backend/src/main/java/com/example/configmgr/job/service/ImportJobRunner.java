@@ -124,7 +124,7 @@ public class ImportJobRunner {
                     Optional<TaskFile> fileOpt = taskFileRepository
                             .findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
                     if (fileOpt.isEmpty()) {
-                        throw new RuntimeException("未找到文件");
+                        throw new RuntimeException("Uploaded file not found");
                     }
 
                     byte[] fileBytes = fileStorage.read(fileOpt.get().getStoragePath());
@@ -191,12 +191,12 @@ public class ImportJobRunner {
                     taskService.updateItemStatus(taskId, defCode, "IMPORTED");
 
                 } catch (Exception e) {
-                    log.error("Import item failed defCode={} error={}", defCode, e.getMessage(), e);
+                    log.error("Import item failed defCode={}", defCode, e);
                     ValidationIssue issue = new ValidationIssue();
                     issue.setJobId(jobId);
                     issue.setDefCode(defCode);
                     issue.setSeverity(ValidationIssue.Severity.ERROR);
-                    issue.setMessage("导入过程出错: " + e.getMessage());
+                    issue.setMessage("导入过程出错，请查看服务日志或稍后重试");
                     issueRepository.save(issue);
                     errorCount++;
                     // I-4：成功路径已先写条目 COMPLETED（随后任务项更新失败），catch 走补偿降级
@@ -205,7 +205,7 @@ public class ImportJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.error("Import job failed error={}", e.getMessage(), e);
+            log.error("Import job failed", e);
             errorCount++;
             terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
                     processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED, errorCount));

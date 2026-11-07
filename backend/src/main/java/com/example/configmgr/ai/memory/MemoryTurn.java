@@ -20,10 +20,10 @@ public record MemoryTurn(String runId, long turnStartedAtMs) {
 
 	public MemoryTurn {
 		if (runId == null || runId.isBlank()) {
-			throw new IllegalArgumentException("runId 不得为空白：记忆写回必须带本轮归属");
+			throw new IllegalArgumentException("runId must not be blank because memory write-back requires turn ownership");
 		}
 		if (turnStartedAtMs <= 0L) {
-			throw new IllegalArgumentException("turnStartedAtMs 必须为正数：记不到本轮起点即失败");
+			throw new IllegalArgumentException("turnStartedAtMs must be positive because the turn start is required");
 		}
 	}
 

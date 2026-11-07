@@ -98,7 +98,8 @@ public class FileController {
             }
             if (matched.isEmpty()) {
                 throw new IllegalArgumentException(
-                        "压缩包中没有可匹配的文件，请确认文件名包含配置编码（如 CONFIG_CODE.xlsx）。未匹配: " + unmatched);
+                        "The ZIP archive contains no matchable files; include a configuration code in each file name "
+                                + "(for example, CONFIG_CODE.xlsx). Unmatched: " + unmatched);
             }
             return ApiResponse.ok(Map.of(
                     "matchedFiles", matched,
@@ -107,13 +108,15 @@ public class FileController {
         }
 
         if (!originalName.toLowerCase().endsWith(".xlsx")) {
-            throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED, "仅支持 .xlsx 或 .zip 文件");
+            throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED,
+                    "Only .xlsx or .zip files are supported");
         }
 
         String defCode = matchDefCode(matchCodes, originalName);
         if (defCode == null) {
             throw new IllegalArgumentException(
-                    "无法从文件名匹配配置编码，请使用“编码_xxx.xlsx”命名（如 CONFIG_CODE.xlsx），或先下载模板编辑后上传");
+                    "Could not match a configuration code from the file name; use CODE_description.xlsx "
+                            + "(for example, CONFIG_CODE.xlsx), or download and edit the template before uploading");
         }
         StoredFile stored = fileStorage.store(file.getInputStream(), originalName);
         // 落库失败之外还有"提交期回滚"（外层事务回滚/提交失败）：新文件不能永久残留。
@@ -123,7 +126,7 @@ public class FileController {
         } catch (DataIntegrityViolationException e) {
             // 预检后任务被并发删除：FK 拒绝落行，清理刚写入的文件并返回 404 语义。
             fileStorage.delete(stored.key());
-            throw ResourceNotFoundException.of("任务", taskId);
+            throw ResourceNotFoundException.of("Task", taskId);
         } catch (RuntimeException e) {
             // 其它落库失败同样清理本次新文件（避免“库没写、盘上多一份”）。
             fileStorage.delete(stored.key());
@@ -145,7 +148,7 @@ public class FileController {
             saveUploadFile(taskId, defCode, fileName, stored.key());
         } catch (DataIntegrityViolationException e) {
             fileStorage.delete(stored.key());
-            throw ResourceNotFoundException.of("任务", taskId);
+            throw ResourceNotFoundException.of("Task", taskId);
         } catch (RuntimeException e) {
             fileStorage.delete(stored.key());
             throw e;
@@ -207,7 +210,7 @@ public class FileController {
             fileOpt = taskFileRepository.findByTaskIdAndDefCodeAndFileType(taskId, defCode, "UPLOAD");
         }
         if (fileOpt.isEmpty()) {
-            throw ResourceNotFoundException.of("文件", defCode);
+            throw ResourceNotFoundException.of("File", defCode);
         }
         byte[] bytes = fileStorage.read(fileOpt.get().getStoragePath());
         String filename = URLEncoder.encode(fileOpt.get().getFileName() != null
@@ -258,11 +261,12 @@ public class FileController {
             // 版本冲突 = 并发写同一行（典型：导出作业刚更新了该 EXPORT 行）。数据面无一行落库，
             // 新件随回滚回收、旧件与旧引用原样保留；给客户端可重试的 409。
             throw new ConflictException(ErrorCodes.ILLEGAL_STATE,
-                    "文件正被并发写入（可能有导出作业正在生成该配置项），请稍后重试");
+                    "The file is being written concurrently, possibly by an export job for this definition; "
+                            + "please retry later");
         } catch (DataIntegrityViolationException e) {
             // 预检后任务被并发删除：FK 拒绝落行。新件从未被引用，直接删；旧件未动。
             fileStorage.delete(stored.key());
-            throw ResourceNotFoundException.of("任务", taskId);
+            throw ResourceNotFoundException.of("Task", taskId);
         }
         if (previousKey != null && !previousKey.equals(stored.key())) {
             fileStorage.deleteAfterCommit(previousKey);
@@ -298,7 +302,7 @@ public class FileController {
                                                      @RequestParam List<String> codes) throws Exception {
         List<TaskFile> selected = selectOnePerCode(taskFileRepository.findByTaskId(taskId), codes);
         if (selected.isEmpty()) {
-            throw ResourceNotFoundException.of("导出文件", String.join(",", codes));
+            throw ResourceNotFoundException.of("Export file", String.join(",", codes));
         }
         if (selected.size() == 1) {
             TaskFile only = selected.get(0);
@@ -359,7 +363,7 @@ public class FileController {
     public ResponseEntity<byte[]> downloadTemplates(@PathVariable Long taskId,
                                                       @RequestParam(required = false) List<String> codes) throws Exception {
         Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
         List<TaskItem> items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
         List<String> targetCodes = codes != null && !codes.isEmpty() ? codes
                 : items.stream().map(TaskItem::getDefCode).toList();
@@ -400,7 +404,7 @@ public class FileController {
      */
     private void lockTask(Long taskId) {
         taskRepository.findByIdForUpdate(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
     }
 
     /**
@@ -437,7 +441,8 @@ public class FileController {
             definitionService.findByCode(defCode);
         } catch (ResourceNotFoundException e) {
             throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-                    "defCodes 含未知配置编码：" + defCode + "（只能上传当前勾选配置项的文件）");
+                    "defCodes contains an unknown configuration code: " + defCode
+                            + "; only files for currently selected definitions may be uploaded");
         }
     }
 

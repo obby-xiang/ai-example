@@ -128,7 +128,10 @@ public class AiConnectionProbe {
             base = this.guard.checkForOutbound(baseUrl, trusted);
         }
         catch (AiEndpointGuard.GuardException ex) {
-            return new ProbeResult(false, null, 0L, ex.getCode(), ex.getMessage(), 0, List.of());
+            String message = AiEndpointGuard.CODE_BLOCKED_PRIVATE_ENDPOINT.equals(ex.getCode())
+                    ? "模型服务地址不符合安全要求，请检查配置" : "模型服务地址不合法，请检查配置";
+            log.debug("probe rejected by endpoint guard code={}", ex.getCode(), ex);
+            return new ProbeResult(false, null, 0L, ex.getCode(), message, 0, List.of());
         }
         String path = normalisePath(modelsPath);
         URI uri;
@@ -136,8 +139,9 @@ public class AiConnectionProbe {
             uri = URI.create(base + path);
         }
         catch (IllegalArgumentException ex) {
+            log.debug("probe request URI assembly failed", ex);
             return new ProbeResult(false, null, 0L, AiEndpointGuard.CODE_INVALID_BASE_URL,
-                    "拼接后的 /models 地址不合法：" + ex.getClass().getSimpleName(), 0, List.of());
+                    "模型服务地址不合法，请检查配置", 0, List.of());
         }
 
         Duration timeout = this.properties.getConfig().getProbeTimeout();
@@ -163,7 +167,7 @@ public class AiConnectionProbe {
             return interpret(response.statusCode(), body, latencyMs);
         }
         catch (TimeoutException ex) {
-            log.debug("probe timed out uri={} (timeout means UNREACHABLE, no retry)", redacted(uri));
+            log.debug("probe timed out uri={} (timeout means UNREACHABLE, no retry)", redacted(uri), ex);
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
@@ -174,13 +178,13 @@ public class AiConnectionProbe {
         }
         catch (ExecutionException ex) {
             Throwable cause = ex.getCause() == null ? ex : ex.getCause();
-            log.debug("probe failed uri={} cause={}", redacted(uri), cause.getClass().getSimpleName());
+            log.debug("probe failed uri={}", redacted(uri), cause);
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
         catch (RuntimeException ex) {
             // URI/客户端装配期的 IllegalArgument 等：仍然只回稳定 code（绝不把上游异常文本漏给前端）
-            log.debug("probe request assembly failed uri={} cause={}", redacted(uri), ex.getClass().getSimpleName());
+            log.debug("probe request assembly failed uri={}", redacted(uri), ex);
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }

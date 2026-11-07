@@ -140,9 +140,9 @@ public class SessionPurgeGuard {
 			return Boolean.TRUE.equals(this.redis.hasKey(pendingKey(sessionId, tenantId, userId)));
 		}
 		catch (RuntimeException ex) {
-			log.warn("Failed to read session purge guard sessionId={} (fail-closed): {}", sessionId, ex.getMessage());
+			log.warn("Failed to read session purge guard sessionId={} (fail-closed)", sessionId, ex);
 			throw new com.example.configmgr.common.AiStateUnavailableException(
-					"无法确认会话销毁守卫状态（fail-closed）sessionId=" + sessionId, ex);
+					"Cannot confirm session purge guard state (fail-closed) sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -166,7 +166,7 @@ public class SessionPurgeGuard {
 		}
 		catch (RuntimeException ex) {
 			throw new com.example.configmgr.common.AiStateUnavailableException(
-					"收尾会话销毁守卫失败 sessionId=" + sessionId, ex);
+					"Failed to finalize session purge guard sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -187,8 +187,7 @@ public class SessionPurgeGuard {
 			return deleted != null && deleted > 0L;
 		}
 		catch (RuntimeException ex) {
-			log.warn("Failed to disarm session purge guard sessionId={} purgeId={} (guard self-clears after TTL): {}", sessionId, purgeId,
-					ex.getMessage());
+			log.warn("Failed to disarm session purge guard sessionId={} purgeId={} (guard self-clears after TTL)", sessionId, purgeId, ex);
 			return false;
 		}
 	}

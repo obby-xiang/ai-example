@@ -36,7 +36,7 @@ public class AsyncJobExecutor {
                 case PUBLISH -> publishJobRunner.run(job);
             }
         } catch (Exception e) {
-            log.error("Job execution failed unexpectedly jobId={} error={}", job.getId(), e.getMessage(), e);
+            log.error("Job execution failed unexpectedly jobId={}", job.getId(), e);
         } finally {
             // R1-13/C1：runner 已退出（正常/异常/取消都走这里）才放开删除闸门。
             heartbeatRegistry.endRunner(job.getId());

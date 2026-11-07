@@ -243,9 +243,9 @@ public class AiProperties {
 	void verifySseWriteTimeout() {
 		Duration writeTimeout = this.sse.getWriteTimeout();
 		if (writeTimeout == null || writeTimeout.isZero() || writeTimeout.isNegative()) {
-			throw new IllegalStateException("app.ai.sse.write-timeout 必须 > 0（当前 = " + writeTimeout
-					+ "）：0/负值会被 SseWriteBudget 静默回落为缺省 15s，运行行为与配置文件不符"
-					+ "（排障误导）；收紧写侧释放只需配一个更小的正值");
+			throw new IllegalStateException("app.ai.sse.write-timeout must be > 0 (current = " + writeTimeout
+					+ "); zero/negative values silently fall back to SseWriteBudget's 15s default and misrepresent runtime behavior"
+					+ "; configure a smaller positive value to tighten write-side release");
 		}
 	}
 
@@ -260,8 +260,8 @@ public class AiProperties {
 	@PostConstruct
 	void verifySessionTtl() {
 		if (this.sessionTtl == null || this.sessionTtl.isZero() || this.sessionTtl.isNegative()) {
-			throw new IllegalStateException("app.ai.session-ttl 必须 > 0（当前 = " + this.sessionTtl
-					+ "）：transcript 依赖它给展示历史设置 TTL；无效值会让写入被拒、历史静默不再落盘");
+			throw new IllegalStateException("app.ai.session-ttl must be > 0 (current = " + this.sessionTtl
+					+ "); transcript uses it as the display-history TTL, and an invalid value rejects writes and silently stops persistence");
 		}
 	}
 
@@ -295,26 +295,26 @@ public class AiProperties {
 		Duration interEvent = this.resilience == null ? null : this.resilience.getInterEventTimeout();
 		if (zombieAge == null || margin == null || execTimeout == null || interEvent == null) {
 			throw new IllegalStateException("app.ai.resume.zombie-age / app.ai.resume.zombie-margin / "
-					+ "app.ai.tool.exec-timeout / app.ai.resilience.inter-event-timeout 至少一项缺失："
-					+ "僵尸判据无法与合法静默对齐");
+					+ "app.ai.tool.exec-timeout / app.ai.resilience.inter-event-timeout: at least one value is missing;"
+					+ " the zombie criterion cannot be aligned with legitimate silence");
 		}
 		if (execTimeout.isZero() || execTimeout.isNegative() || interEvent.isZero() || interEvent.isNegative()) {
-			throw new IllegalStateException("app.ai.tool.exec-timeout（当前 = " + execTimeout
-					+ "）与 app.ai.resilience.inter-event-timeout（当前 = " + interEvent
-					+ "）必须 > 0：0/负值等于永不超时，合法静默没有上界，不能作为僵尸判据的基线");
+			throw new IllegalStateException("app.ai.tool.exec-timeout (current = " + execTimeout
+					+ ") and app.ai.resilience.inter-event-timeout (current = " + interEvent
+					+ ") must be > 0; zero/negative values mean no timeout and cannot provide a bounded baseline for zombie detection");
 		}
 		if (margin.isNegative()) {
-			throw new IllegalStateException("app.ai.resume.zombie-margin 必须 >= 0（当前 = " + margin
-					+ "）：负余量会让僵尸阈值落到合法静默之内");
+			throw new IllegalStateException("app.ai.resume.zombie-margin must be >= 0 (current = " + margin
+					+ "); a negative margin places the zombie threshold within legitimate silence");
 		}
 		Duration legalSilence = execTimeout.compareTo(interEvent) >= 0 ? execTimeout : interEvent;
 		Duration required = legalSilence.plus(margin);
 		if (zombieAge.compareTo(legalSilence) <= 0 || zombieAge.compareTo(required) < 0) {
-			throw new IllegalStateException("app.ai.resume.zombie-age（当前 = " + zombieAge
-					+ "）必须 >= max(app.ai.tool.exec-timeout = " + execTimeout
+			throw new IllegalStateException("app.ai.resume.zombie-age (current = " + zombieAge
+					+ ") must be >= max(app.ai.tool.exec-timeout = " + execTimeout
 					+ ", app.ai.resilience.inter-event-timeout = " + interEvent
-					+ ") + app.ai.resume.zombie-margin（当前 = " + margin + "，即 >= " + required
-					+ "）：否则正在跑长工具/慢吐字的活轮会被判成僵尸并接管（同一轮双执行）");
+					+ ") + app.ai.resume.zombie-margin (current = " + margin + ", i.e. >= " + required
+					+ "); otherwise active runs with long tools or slow output may be taken over as zombies and executed twice");
 		}
 	}
 
@@ -338,29 +338,29 @@ public class AiProperties {
 	void verifyResultBudget() {
 		ResultBudget budget = this.resultBudget;
 		if (budget == null) {
-			throw new IllegalStateException("app.ai.result-budget 段缺失（绑定为 null）：工具结果预算无法装配，启动失败");
+			throw new IllegalStateException("app.ai.result-budget section is missing (bound as null); tool result budgeting cannot be assembled");
 		}
 		ResultBudget.Model model = budget.getModel();
 		if (model == null) {
-			throw new IllegalStateException("app.ai.result-budget.model 段缺失（绑定为 null）：启动失败");
+			throw new IllegalStateException("app.ai.result-budget.model section is missing (bound as null)");
 		}
 		if (model.getMaxRows() < 0) {
-			throw new IllegalStateException("app.ai.result-budget.model.max-rows 不得为负（当前 = "
-					+ model.getMaxRows() + "）：0 = 不限制；负值只会让行数闸静默失效");
+			throw new IllegalStateException("app.ai.result-budget.model.max-rows must not be negative (current = "
+					+ model.getMaxRows() + "); 0 means unlimited, while a negative value silently disables the row limit");
 		}
 		if (model.getDefaultMaxChars() < 0) {
-			throw new IllegalStateException("app.ai.result-budget.model.default-max-chars 不得为负（当前 = "
-					+ model.getDefaultMaxChars() + "）：0 = 不限制；负值在裁剪器里同样等于关掉上限");
+			throw new IllegalStateException("app.ai.result-budget.model.default-max-chars must not be negative (current = "
+					+ model.getDefaultMaxChars() + "); 0 means unlimited, and negative values also disable the limit in the trimmer");
 		}
 		if (model.getFallbackMaxChars() < 0) {
-			throw new IllegalStateException("app.ai.result-budget.model.fallback-max-chars 不得为负（当前 = "
-					+ model.getFallbackMaxChars() + "）：0 = 不限制；未知工具的兜底档不允许静默关闸");
+			throw new IllegalStateException("app.ai.result-budget.model.fallback-max-chars must not be negative (current = "
+					+ model.getFallbackMaxChars() + "); 0 means unlimited, and the fallback for unknown tools must not silently disable the limit");
 		}
 		if (model.getPerTool() != null) {
 			for (Map.Entry<String, Integer> entry : model.getPerTool().entrySet()) {
 				if (entry.getValue() == null || entry.getValue() < 0) {
 					throw new IllegalStateException("app.ai.result-budget.model.per-tool." + entry.getKey()
-							+ " 不得为负（当前 = " + entry.getValue() + "）：0 = 该工具不限制");
+							+ " must not be negative (current = " + entry.getValue() + "); 0 means unlimited for this tool");
 				}
 			}
 		}
@@ -368,17 +368,17 @@ public class AiProperties {
 		if (ui == null || ui.getMaxFrameBytes() < ResultBudget.Ui.MIN_FRAME_BYTES) {
 			// 拆帧专项：低于 1KiB 不是"更省"，而是帧数爆炸（一条正文切成成百上千片）或正文被清空
 			// （连最小合法帧外壳都装不下）。故下限与 >0 合并成同一条 fail-fast，并点名下限值。
-			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes 必须 >= "
-					+ ResultBudget.Ui.MIN_FRAME_BYTES + "（当前 = "
-					+ (ui == null ? "段缺失" : ui.getMaxFrameBytes())
-					+ "）：0/负值等于'不限制'（单帧上限静默失效），低于 1KiB 则拆分粒度太细"
-					+ "（帧数爆炸）或把正文清空；delta/reasoning 按本值分片，result 仍走字段级降采样");
+			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes must be >= "
+					+ ResultBudget.Ui.MIN_FRAME_BYTES + " (current = "
+					+ (ui == null ? "missing section" : ui.getMaxFrameBytes())
+					+ "); zero/negative values silently disable the frame limit, and values below 1KiB split too finely"
+					+ " or erase content; delta/reasoning use this frame size while result still uses field-level downsampling");
 		}
 		ResultBudget.Callback callback = budget.getCallback();
 		if (callback == null || callback.getMaxChars() <= 0) {
-			throw new IllegalStateException("app.ai.result-budget.callback.max-chars 必须 > 0（当前 = "
-					+ (callback == null ? "段缺失" : callback.getMaxChars())
-					+ "）：0/负值会把每次前端回灌都截成空（前端工具永远拿不到结果）");
+			throw new IllegalStateException("app.ai.result-budget.callback.max-chars must be > 0 (current = "
+					+ (callback == null ? "missing section" : callback.getMaxChars())
+					+ "); zero/negative values truncate every frontend callback to empty content");
 		}
 	}
 
@@ -398,16 +398,16 @@ public class AiProperties {
 	void verifyStream() {
 		Stream stream = this.stream;
 		if (stream == null) {
-			throw new IllegalStateException("app.ai.stream 段缺失（绑定为 null）：事件日志容量治理无法装配，启动失败");
+			throw new IllegalStateException("app.ai.stream section is missing (bound as null); event-log capacity controls cannot be assembled");
 		}
 		if (stream.getByteBudget() < 0L) {
-			throw new IllegalStateException("app.ai.stream.byte-budget 不得为负（当前 = "
-					+ stream.getByteBudget() + "）：0 = 关闭字节治理（只按条数窗口），负值没有解释空间");
+			throw new IllegalStateException("app.ai.stream.byte-budget must not be negative (current = "
+					+ stream.getByteBudget() + "); 0 disables byte governance and keeps only the count window; negative values are invalid");
 		}
 		Duration interval = stream.getIndexPruneInterval();
 		if (interval == null || interval.isNegative()) {
-			throw new IllegalStateException("app.ai.stream.index-prune-interval 不得为负（当前 = " + interval
-					+ "）：负间隔让每次 create 都全表扫 ai:runs；0 = 关闭机会式清理");
+			throw new IllegalStateException("app.ai.stream.index-prune-interval must not be negative (current = " + interval
+					+ "); a negative interval scans ai:runs on every create, while 0 disables opportunistic cleanup");
 		}
 	}
 
@@ -428,55 +428,55 @@ public class AiProperties {
 	void verifyContext() {
 		Context context = this.context;
 		if (context == null) {
-			throw new IllegalStateException("app.ai.context 段缺失（绑定为 null）：上下文计量无法装配，启动失败");
+			throw new IllegalStateException("app.ai.context section is missing (bound as null); context metering cannot be assembled");
 		}
 		if (context.getReserveTokens() <= 0) {
-			throw new IllegalStateException("app.ai.context.reserve-tokens 必须 > 0（当前 = "
-					+ context.getReserveTokens() + "）：预留缓冲为 0 会让触发线与上下文上限重合，"
-					+ "输出空间被压缩判定吃掉");
+			throw new IllegalStateException("app.ai.context.reserve-tokens must be > 0 (current = "
+					+ context.getReserveTokens() + "); a zero reserve aligns the trigger with the context limit"
+					+ " and leaves no output space after compaction");
 		}
 		checkPercent("l1-percent", context.getL1Percent());
 		checkPercent("l2-percent", context.getL2Percent());
 		checkPercent("l3-percent", context.getL3Percent());
 		checkPercent("hysteresis-percent", context.getHysteresisPercent());
 		if (!(context.getL1Percent() < context.getL2Percent() && context.getL2Percent() < context.getL3Percent())) {
-			throw new IllegalStateException("app.ai.context 的 l1/l2/l3-percent 必须严格递增（当前 = "
+			throw new IllegalStateException("app.ai.context l1/l2/l3-percent must be strictly increasing (current = "
 					+ context.getL1Percent() + "/" + context.getL2Percent() + "/" + context.getL3Percent()
-					+ "）：倒挂会让谱系失效（较轻的一级永远不触发）");
+					+ "); inverted thresholds break the level progression and can prevent lighter levels from triggering");
 		}
 		if (context.getHysteresisPercent() > context.getL1Percent()) {
-			throw new IllegalStateException("app.ai.context.hysteresis-percent（" + context.getHysteresisPercent()
-					+ "）不得大于 l1-percent（" + context.getL1Percent()
-					+ "）：滞回线高于触发线 ⇒ 压缩后立刻满足再次触发条件（抖动链）");
+			throw new IllegalStateException("app.ai.context.hysteresis-percent (" + context.getHysteresisPercent()
+					+ ") must not exceed l1-percent (" + context.getL1Percent()
+					+ "); otherwise compaction immediately satisfies the trigger again and causes oscillation");
 		}
 		if (context.getKeepToolPairs() < 0 || context.getKeepRecentTurns() < 0) {
-			throw new IllegalStateException("app.ai.context.keep-tool-pairs / keep-recent-turns 不得为负（当前 = "
-					+ context.getKeepToolPairs() + " / " + context.getKeepRecentTurns() + "）");
+			throw new IllegalStateException("app.ai.context.keep-tool-pairs / keep-recent-turns must not be negative (current = "
+					+ context.getKeepToolPairs() + " / " + context.getKeepRecentTurns() + ")");
 		}
 		if (context.getChunkTokens() <= 0) {
-			throw new IllegalStateException("app.ai.context.chunk-tokens 必须 > 0（当前 = " + context.getChunkTokens()
-					+ "）：摘要分块为 0 会让摘要请求无限递归");
+			throw new IllegalStateException("app.ai.context.chunk-tokens must be > 0 (current = " + context.getChunkTokens()
+					+ "); zero-sized summary chunks cause unbounded recursion");
 		}
 		if (context.getChunkTokens() >= context.getReserveTokens()) {
 			// M-1 收口：类注与 NUMSPEC 都承诺"分块 < 预留"，无闸则承诺与实现不一致。
 			// 摘要本身也是一次模型请求：分块 ≥ 预留时，摘要请求会挤掉输出空间（越窗 ⇒ 失败 ⇒ 熔断）。
-			throw new IllegalStateException("app.ai.context.chunk-tokens（" + context.getChunkTokens()
-					+ "）必须小于 reserve-tokens（" + context.getReserveTokens()
-					+ "）：摘要请求自身的输入分块不得吃掉预留缓冲（否则摘要请求会越窗）");
+			throw new IllegalStateException("app.ai.context.chunk-tokens (" + context.getChunkTokens()
+					+ ") must be smaller than reserve-tokens (" + context.getReserveTokens()
+					+ "); summary input chunks must not consume the output reserve and overflow the context window");
 		}
 		if (context.getSummaryTimeout() == null || context.getSummaryTimeout().isZero()
 				|| context.getSummaryTimeout().isNegative()) {
-			throw new IllegalStateException("app.ai.context.summary-timeout 必须 > 0（当前 = "
-					+ context.getSummaryTimeout() + "）：0/负值等于摘要永不超时（熔断判据失去输入）");
+			throw new IllegalStateException("app.ai.context.summary-timeout must be > 0 (current = "
+					+ context.getSummaryTimeout() + "); zero/negative values disable summary timeouts and starve the circuit-breaker criterion");
 		}
 		if (context.getFuseThreshold() <= 0) {
-			throw new IllegalStateException("app.ai.context.fuse-threshold 必须 > 0（当前 = " + context.getFuseThreshold()
-					+ "）：0 = 第一次失败即熔断，L2/L3 再也不会被尝试");
+			throw new IllegalStateException("app.ai.context.fuse-threshold must be > 0 (current = " + context.getFuseThreshold()
+					+ "); 0 opens the circuit on the first failure and prevents all later L2/L3 attempts");
 		}
 		if (context.getFuseCooldown() == null || context.getFuseCooldown().isZero()
 				|| context.getFuseCooldown().isNegative()) {
-			throw new IllegalStateException("app.ai.context.fuse-cooldown 必须 > 0（当前 = " + context.getFuseCooldown()
-					+ "）：冷却为 0 = 一直半开，熔断形同虚设");
+			throw new IllegalStateException("app.ai.context.fuse-cooldown must be > 0 (current = " + context.getFuseCooldown()
+					+ "); a zero cooldown keeps the circuit half-open and defeats the breaker");
 		}
 	}
 
@@ -497,24 +497,24 @@ public class AiProperties {
 	void verifyMemory() {
 		Memory memory = this.memory;
 		if (memory == null) {
-			throw new IllegalStateException("app.ai.memory 段缺失（绑定为 null）：记忆窗口无法装配，启动失败");
+			throw new IllegalStateException("app.ai.memory section is missing (bound as null); the memory window cannot be assembled");
 		}
 		if (memory.getTokenBudget() < 0) {
-			throw new IllegalStateException("app.ai.memory.token-budget 不得为负（当前 = " + memory.getTokenBudget()
-					+ "）：0 = 关闭预算（只按条数），负值会让每一轮都判越线");
+			throw new IllegalStateException("app.ai.memory.token-budget must not be negative (current = " + memory.getTokenBudget()
+					+ "); 0 disables the token budget and uses only message counts, while negative values exceed the budget on every turn");
 		}
 		if (memory.getMinMessages() <= 0) {
-			throw new IllegalStateException("app.ai.memory.min-messages 必须 > 0（当前 = " + memory.getMinMessages()
-					+ "）：下限为 0 = 没有下限，预算可以把窗口压到只剩最后一个 turn（失忆）");
+			throw new IllegalStateException("app.ai.memory.min-messages must be > 0 (current = " + memory.getMinMessages()
+					+ "); a zero lower bound lets the budget reduce the window to only the last turn");
 		}
 		if (memory.getMaxMessages() <= 0) {
-			throw new IllegalStateException("app.ai.memory.max-messages 必须 > 0（当前 = " + memory.getMaxMessages()
-					+ "）：条数上限为 0 会让官方窗口什么都不留");
+			throw new IllegalStateException("app.ai.memory.max-messages must be > 0 (current = " + memory.getMaxMessages()
+					+ "); a zero message limit leaves the standard window empty");
 		}
 		if (memory.getMinMessages() > memory.getMaxMessages()) {
-			throw new IllegalStateException("app.ai.memory.min-messages（" + memory.getMinMessages()
-					+ "）不得大于 max-messages（" + memory.getMaxMessages()
-					+ "）：两套兜底互相打穿（上限永远不生效，窗口只剩预算一个维度）");
+			throw new IllegalStateException("app.ai.memory.min-messages (" + memory.getMinMessages()
+					+ ") must not exceed max-messages (" + memory.getMaxMessages()
+					+ "); conflicting bounds disable the upper limit and leave only the token budget");
 		}
 		if (memory.getMinMessages() == memory.getMaxMessages()) {
 			// A4：默认 min = max = 40 不是坏配置（条数钉死是明确口径），但必须诚实告知它的实际语义：
@@ -528,7 +528,7 @@ public class AiProperties {
 
 	private static void checkPercent(String key, int value) {
 		if (value < 0 || value > 100) {
-			throw new IllegalStateException("app.ai.context." + key + " 必须在 0–100（当前 = " + value + "）");
+			throw new IllegalStateException("app.ai.context." + key + " must be within 0-100 (current = " + value + ")");
 		}
 	}
 
@@ -555,17 +555,17 @@ public class AiProperties {
 	void verifySheet() {
 		Sheet sheet = this.sheet;
 		if (sheet == null) {
-			throw new IllegalStateException("app.ai.sheet 段缺失（绑定为 null）：表格工具开关无法装配，启动失败");
+			throw new IllegalStateException("app.ai.sheet section is missing (bound as null); sheet tool switches cannot be assembled");
 		}
 		if (sheet.getSampleMaxRows() <= 0) {
-			throw new IllegalStateException("app.ai.sheet.sample-max-rows 必须 > 0（当前 = "
-					+ sheet.getSampleMaxRows() + "）：0/负值会被 capSheetResult 静默救成 1 行，"
-					+ "配置面与运行面说两套话；要收紧请配 1..20 的正值");
+			throw new IllegalStateException("app.ai.sheet.sample-max-rows must be > 0 (current = "
+					+ sheet.getSampleMaxRows() + "); zero/negative values are silently converted to one row by capSheetResult,"
+					+ " which misrepresents runtime behavior; configure a positive value in 1..20");
 		}
 		if (sheet.getProjectionMaxColumns() <= 0) {
-			throw new IllegalStateException("app.ai.sheet.projection-max-columns 必须 > 0（当前 = "
-					+ sheet.getProjectionMaxColumns() + "）：0/负值会让投影列被救成 1 列，"
-					+ "与「缺省投影 = 主键列 + 前 4 列」的承诺不符；要收紧请配 1..5 的正值");
+			throw new IllegalStateException("app.ai.sheet.projection-max-columns must be > 0 (current = "
+					+ sheet.getProjectionMaxColumns() + "); zero/negative values are silently converted to one column,"
+					+ " violating the default projection contract; configure a positive value in 1..5");
 		}
 	}
 
@@ -587,62 +587,62 @@ public class AiProperties {
 	public void verifyKb() {
 		Kb kb = this.kb;
 		if (kb == null) {
-			throw new IllegalStateException("app.ai.kb 段缺失（绑定为 null）：知识库装配无法进行，启动失败");
+			throw new IllegalStateException("app.ai.kb section is missing (bound as null); the knowledge base cannot be assembled");
 		}
 		if (kb.getTopKDefault() <= 0 || kb.getTopKMax() <= 0
 				|| kb.getTopKDefault() > kb.getTopKMax()) {
-			throw new IllegalStateException("app.ai.kb.top-k-default/top-k-max 必须 > 0 且 default ≤ max（当前 = "
-					+ kb.getTopKDefault() + "/" + kb.getTopKMax() + "）：否则服务端强截后的条数与工具描述不一致");
+			throw new IllegalStateException("app.ai.kb.top-k-default/top-k-max must be > 0 with default <= max (current = "
+					+ kb.getTopKDefault() + "/" + kb.getTopKMax() + "); otherwise the server-capped count disagrees with the tool description");
 		}
 		if (kb.getReadMaxCharsDefault() <= 0 || kb.getReadMaxCharsMax() <= 0
 				|| kb.getReadMaxCharsDefault() > kb.getReadMaxCharsMax()) {
-			throw new IllegalStateException("app.ai.kb.read-max-chars-default/read-max-chars-max 必须 > 0 且 default ≤ max（当前 = "
-					+ kb.getReadMaxCharsDefault() + "/" + kb.getReadMaxCharsMax() + "）");
+			throw new IllegalStateException("app.ai.kb.read-max-chars-default/read-max-chars-max must be > 0 with default <= max (current = "
+					+ kb.getReadMaxCharsDefault() + "/" + kb.getReadMaxCharsMax() + ")");
 		}
 		if (kb.getChunkMinChars() <= 0 || kb.getChunkMaxChars() <= 0
 				|| kb.getChunkMinChars() >= kb.getChunkMaxChars()) {
-			throw new IllegalStateException("app.ai.kb.chunk-min-chars/chunk-max-chars 必须 > 0 且 min < max（当前 = "
-					+ kb.getChunkMinChars() + "/" + kb.getChunkMaxChars() + "）：倒挂会让切块空转");
+			throw new IllegalStateException("app.ai.kb.chunk-min-chars/chunk-max-chars must be > 0 with min < max (current = "
+					+ kb.getChunkMinChars() + "/" + kb.getChunkMaxChars() + "); inverted bounds make chunking ineffective");
 		}
 		if (!(kb.getMatchHighRatio() > 0 && kb.getMatchHighRatio() <= 1
 				&& kb.getMatchMediumRatio() > 0 && kb.getMatchMediumRatio() <= 1
 				&& kb.getMatchMediumRatio() < kb.getMatchHighRatio())) {
-			throw new IllegalStateException("app.ai.kb.match-high-ratio/match-medium-ratio 必须在 (0,1] 且 medium < high（当前 = "
+			throw new IllegalStateException("app.ai.kb.match-high-ratio/match-medium-ratio must be in (0,1] with medium < high (current = "
 					+ kb.getMatchHighRatio() + "/" + kb.getMatchMediumRatio()
-					+ "）：区间外会让 match 三档退化成单档");
+					+ "); out-of-range values collapse the three match levels into one");
 		}
 		if (kb.getRefreshInterval() == null || kb.getRefreshInterval().isZero()
 				|| kb.getRefreshInterval().isNegative()) {
-			throw new IllegalStateException("app.ai.kb.refresh-interval 必须 > 0（当前 = " + kb.getRefreshInterval()
-					+ "）：0/负值等于关闭定时刷新，生产 HTTP 源的增量永远不发生");
+			throw new IllegalStateException("app.ai.kb.refresh-interval must be > 0 (current = " + kb.getRefreshInterval()
+					+ "); zero/negative values disable scheduled refreshes and prevent production HTTP source updates");
 		}
 		if (kb.getRefreshWaitBudget() == null || kb.getRefreshWaitBudget().isZero()
 				|| kb.getRefreshWaitBudget().isNegative()) {
-			throw new IllegalStateException("app.ai.kb.refresh-wait-budget 必须 > 0（当前 = "
-					+ kb.getRefreshWaitBudget() + "）：0/负值会使刷新等待与可控阶段检查失去预算");
+			throw new IllegalStateException("app.ai.kb.refresh-wait-budget must be > 0 (current = "
+					+ kb.getRefreshWaitBudget() + "); zero/negative values remove the budget for refresh waits and controllable phase checks");
 		}
 		String source = kb.getSource();
 		if (!"local".equalsIgnoreCase(source) && !"http".equalsIgnoreCase(source)) {
-			throw new IllegalStateException("app.ai.kb.source 只支持 local / http（当前 = " + source + "）");
+			throw new IllegalStateException("app.ai.kb.source supports only local / http (current = " + source + ")");
 		}
 		if ("http".equalsIgnoreCase(source)
 				&& (kb.getHttp().getBaseUrl() == null || kb.getHttp().getBaseUrl().isBlank())) {
-			throw new IllegalStateException("app.ai.kb.source=http 时必须配置 app.ai.kb.http.base-url"
-					+ "（静默回落 local 会让生产读到另一份语料）");
+			throw new IllegalStateException("app.ai.kb.http.base-url is required when app.ai.kb.source=http"
+					+ "; silently falling back to local would load a different production corpus");
 		}
 		if (kb.isEnabled() && "local".equalsIgnoreCase(source)
 				&& (kb.getDir() == null || kb.getDir().isBlank())) {
-			throw new IllegalStateException("app.ai.kb.source=local 时 app.ai.kb.dir 不得为空");
+			throw new IllegalStateException("app.ai.kb.dir must not be blank when app.ai.kb.source=local");
 		}
 		if (kb.getCache().getLockTtl() == null || kb.getCache().getLockTtl().isZero()
 				|| kb.getCache().getLockTtl().isNegative()) {
-			throw new IllegalStateException("app.ai.kb.cache.lock-ttl 必须 > 0（当前 = "
-					+ kb.getCache().getLockTtl() + "）：0/负值等于刷新权永不过期，一个实例崩溃会永久锁死刷新");
+			throw new IllegalStateException("app.ai.kb.cache.lock-ttl must be > 0 (current = "
+					+ kb.getCache().getLockTtl() + "); zero/negative values make refresh ownership permanent and can lock refreshes forever after an instance crash");
 		}
 		if (kb.getCache().getVersionPollInterval() == null || kb.getCache().getVersionPollInterval().isZero()
 				|| kb.getCache().getVersionPollInterval().isNegative()) {
-			throw new IllegalStateException("app.ai.kb.cache.version-poll-interval 必须 > 0（当前 = "
-					+ kb.getCache().getVersionPollInterval() + "）：0/负值等于关闭版本号轮询，多实例永远看不到别人刷新");
+			throw new IllegalStateException("app.ai.kb.cache.version-poll-interval must be > 0 (current = "
+					+ kb.getCache().getVersionPollInterval() + "); zero/negative values disable version polling and hide refreshes from other instances");
 		}
 	}
 

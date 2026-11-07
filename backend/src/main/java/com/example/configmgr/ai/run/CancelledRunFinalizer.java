@@ -303,11 +303,11 @@ public class CancelledRunFinalizer {
 		catch (RejectedExecutionException ex) {
 			// 触发池饱和：交棒动作本身很短，排一次重试即可 —— 但同样受 maxDispatchRetries 约束
 			// （M-3：旧实现这条路径绕过上限，池满时会无界重排）。
-			log.warn("cancel finalize handoff not dispatched (trigger pool saturated) runId={}: {}", runId, ex.getMessage());
+			log.warn("cancel finalize handoff not dispatched (trigger pool saturated) runId={}", runId, ex);
 			rescheduleOrGiveUp(runId, key, cause, false, identity);
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel finalize handoff dispatch failed runId={}: {}", runId, ex.getMessage());
+			log.warn("cancel finalize handoff dispatch failed runId={}", runId, ex);
 			rescheduleOrGiveUp(runId, key, cause, false, identity);
 		}
 		catch (Error ex) {
@@ -382,7 +382,7 @@ public class CancelledRunFinalizer {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel finalize handoff execution failed runId={} cause={}: {}", runId, cause, ex.getMessage());
+			log.warn("cancel finalize handoff execution failed runId={} cause={}", runId, cause, ex);
 			rescheduleOrGiveUp(runId, key, cause, false, identity);
 			return;
 		}
@@ -438,7 +438,7 @@ public class CancelledRunFinalizer {
 		}
 		catch (RuntimeException ex) {
 			finish(runId, key);
-			log.warn("cancel finalize retry not scheduled runId={}: {}", runId, ex.getMessage());
+			log.warn("cancel finalize retry not scheduled runId={}", runId, ex);
 		}
 		catch (Error ex) {
 			finish(runId, key);

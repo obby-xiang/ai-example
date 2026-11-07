@@ -43,7 +43,7 @@ public class RunnerActiveKeyCleanupRunner implements ApplicationRunner {
                 log.info("Startup cleanup of dead local runner-active keys finished cleaned={}", cleaned);
             }
         } catch (RuntimeException e) {
-            log.warn("Startup cleanup of runner-active keys failed, startup continues error={}", e.getMessage());
+            log.warn("Startup cleanup of runner-active keys failed, startup continues", e);
         }
     }
 }

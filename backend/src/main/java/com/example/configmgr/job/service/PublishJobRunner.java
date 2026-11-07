@@ -104,8 +104,8 @@ public class PublishJobRunner {
             outcome = transactionTemplate.execute(status -> doPublish(job));
         } catch (RuntimeException e) {
             String defCode = e instanceof PublishAbort abort ? abort.getDefCode() : null;
-            log.error("Publish job aborted, whole batch rolled back jobId={} defCode={} error={}",
-                    job.getId(), defCode, e.getMessage(), e);
+            log.error("Publish job aborted, whole batch rolled back jobId={} defCode={}",
+                    job.getId(), defCode, e);
             recordFailure(job, defCode, e);
             return;
         } finally {
@@ -140,8 +140,8 @@ public class PublishJobRunner {
         // 「未配置」回落 MERGE 是正常语义，不在此列。
         ImportMode importMode = resolveImportMode(taskId);
         if (importMode == ImportMode.UNPARSEABLE) {
-            throw new IllegalStateException("任务导入模式 settings_json 解析失败（importMode 不可读）"
-                    + "——不静默降级 REPLACE→MERGE（W-04 fail-fast，R-96 批 B）");
+            throw new IllegalStateException("Could not parse the task import mode from settings_json "
+                    + "(importMode is unreadable); refusing to silently downgrade REPLACE to MERGE");
         }
         boolean replaceMode = importMode == ImportMode.REPLACE;
 
@@ -315,7 +315,7 @@ public class PublishJobRunner {
     private void recordFailure(Job job, String defCode, Exception cause) {
         int errors = 1;
         try {
-            String message = "发布过程出错: " + cause.getMessage();
+            String message = "发布过程出错，请查看服务日志或稍后重试";
             for (String def : defCode != null ? List.of(defCode) : List.<String>of()) {
                 saveConflictIssue(job, def, null, message);
                 // I-4：成功路径已先写条目 COMPLETED（随后任务项/PUBLISHED 更新失败），走补偿降级
@@ -329,7 +329,7 @@ public class PublishJobRunner {
                 taskService.updateItemStatus(job.getTaskId(), defCode, "FAILED");
             }
         } catch (Exception e) {
-            log.error("Publish job failure bookkeeping failed jobId={} error={}", job.getId(), e.getMessage(), e);
+            log.error("Publish job failure bookkeeping failed jobId={}", job.getId(), e);
         }
         terminalWriter.complete(job, Job.JobStatus.FAILED, errors, 0, 0,
                 stagingRowRepository.findByTaskId(job.getTaskId()).size(),
@@ -393,7 +393,7 @@ public class PublishJobRunner {
         private final String defCode;
 
         PublishAbort(String defCode, Throwable cause) {
-            super(cause.getMessage(), cause);
+            super("Publish failed for definition " + defCode, cause);
             this.defCode = defCode;
         }
 

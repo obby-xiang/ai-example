@@ -88,7 +88,7 @@ abstract class HostForm {
 			json = JSON.writeValueAsString(arguments);
 		}
 		catch (Exception ex) {
-			log.warn("host form serialization failed; not sent this time error={}", ex.getMessage());
+			log.warn("host form serialization failed; not sent this time", ex);
 			return Optional.empty();
 		}
 		if (json.length() > GenerativeFormRules.MAX_FORM_CHARS) {
@@ -115,7 +115,7 @@ abstract class HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read pending entry; host skips the form runId={} error={}", runId, ex.getMessage());
+			log.warn("could not read pending entry; host skips the form runId={}", runId, ex);
 			return true;
 		}
 		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
@@ -204,16 +204,16 @@ abstract class HostForm {
 		catch (RuntimeException ex) {
 			// 快照已成功挂起 ⇒ 这一拍<b>绝不能</b>交回模型（否则 SUSPENDED + 待决条目 + 模型在跑 =
 			// 双驱动：同一轮的帧与历史会分叉）。发帧是观测面，失败只告警，等恢复。
-			log.warn("host form parked but suspended frame publish failed (waiting for resume; model not driven this tick) runId={} toolCallIds={} error={}",
-					runId, toolCallIds(pendings), ex.getMessage());
+			log.warn("host form parked but suspended frame publish failed (waiting for resume; model not driven this tick) runId={} toolCallIds={}",
+					runId, toolCallIds(pendings), ex);
 			return true;
 		}
 		try {
 			this.gate.publishRequestsForParkedBatch(runId, pendings);
 		}
 		catch (RuntimeException ex) {
-			log.warn("host form parked but request frame publish failed (waiting for resume; model not driven this tick) runId={} toolCallIds={} error={}",
-					runId, toolCallIds(pendings), ex.getMessage());
+			log.warn("host form parked but request frame publish failed (waiting for resume; model not driven this tick) runId={} toolCallIds={}",
+					runId, toolCallIds(pendings), ex);
 			return true;
 		}
 		try {
@@ -222,8 +222,8 @@ abstract class HostForm {
 		}
 		catch (RuntimeException ex) {
 			// 收流失败不回退：条目与快照已就位，重挂/刷新仍能取到这张卡
-			log.warn("host form parked but turn stream close failed (park state unaffected) runId={} toolCallIds={} error={}", runId,
-					toolCallIds(pendings), ex.getMessage());
+			log.warn("host form parked but turn stream close failed (park state unaffected) runId={} toolCallIds={}", runId,
+					toolCallIds(pendings), ex);
 		}
 		log.info("host parked the form (waiting for user input) runId={} toolCallIds={}", runId, toolCallIds(pendings));
 		return true;
@@ -239,8 +239,8 @@ abstract class HostForm {
 
 	/** 挂起失败后的尽力收敛：把条目落成"未执行"的终态，避免它永远以 PENDING 挡住续跑。 */
 	private void convergeAfterParkFailure(String runId, PendingToolCall pending, RuntimeException cause) {
-		log.warn("could not persist host form park (not parked this tick; continue on existing path) runId={} toolCallId={} error={}", runId,
-				pending.getToolCallId(), cause.getMessage());
+		log.warn("could not persist host form park (not parked this tick; continue on existing path) runId={} toolCallId={}", runId,
+				pending.getToolCallId(), cause);
 		try {
 			pending.setStatus(PendingToolCall.BLOCKED);
 			pending.setOutcome(ToolOutcome.FAILED.wire());
@@ -251,8 +251,8 @@ abstract class HostForm {
 			this.store.putPending(runId, pending);
 		}
 		catch (RuntimeException nested) {
-			log.warn("entry convergence after park failure also failed (entry stays PENDING) runId={} toolCallId={} error={}", runId,
-					pending.getToolCallId(), nested.getMessage());
+			log.warn("entry convergence after park failure also failed (entry stays PENDING) runId={} toolCallId={}", runId,
+					pending.getToolCallId(), nested);
 		}
 	}
 
@@ -310,7 +310,7 @@ abstract class HostForm {
 			ledger = this.store.ledger(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read this turn's ledger; host skips the form runId={} error={}", runId, ex.getMessage());
+			log.warn("could not read this turn's ledger; host skips the form runId={}", runId, ex);
 			return null;
 		}
 		if (ledger == null || ledger.isEmpty()) {

@@ -102,7 +102,7 @@ public final class KbSampleSeeder {
             Files.createDirectories(parent);
         }
         catch (IOException e) {
-            log.warn("Failed to create KB dir (startup unaffected; loading as-is): {}: {}", parent, safeMessage(e));
+            log.warn("Failed to create KB dir (startup unaffected; loading as-is): {}", parent, e);
             return false;
         }
         try (FileChannel channel = FileChannel.open(parent.resolve(LOCK_FILE),
@@ -119,7 +119,7 @@ public final class KbSampleSeeder {
             return doSeed(parent);
         }
         catch (IOException e) {
-            log.warn("KB sample seed lock unavailable (startup unaffected; loading as-is): {}", safeMessage(e));
+            log.warn("KB sample seed lock unavailable (startup unaffected; loading as-is)", e);
             return false;
         }
     }
@@ -146,7 +146,7 @@ public final class KbSampleSeeder {
             for (KbDocMeta meta : manifest.docs()) {
                 Path out = staging.resolve(meta.effectiveFile()).normalize();
                 if (!out.startsWith(staging)) {
-                    throw new IOException("样例文档路径越界：" + meta.effectiveFile());
+                    throw new IOException("Sample document path escapes the staging directory: " + meta.effectiveFile());
                 }
                 if (out.getParent() != null) {
                     Files.createDirectories(out.getParent());
@@ -165,7 +165,7 @@ public final class KbSampleSeeder {
             if (staging != null) {
                 deleteQuietly(staging);
             }
-            log.warn("KB sample auto-seeding failed (startup unaffected; loading as-is): {}", safeMessage(e));
+            log.warn("KB sample auto-seeding failed (startup unaffected; loading as-is)", e);
             return false;
         }
     }
@@ -190,7 +190,7 @@ public final class KbSampleSeeder {
             }
         }
         catch (IOException e) {
-            log.warn("Failed to inspect KB dir; skip sample seeding: {}: {}", this.targetDir, safeMessage(e));
+            log.warn("Failed to inspect KB dir; skip sample seeding: {}", this.targetDir, e);
             return false;
         }
         return true;
@@ -212,7 +212,7 @@ public final class KbSampleSeeder {
     private String readText(String name) throws IOException {
         URL url = this.loader.getResource(CLASSPATH_ROOT + "/" + name);
         if (url == null) {
-            throw new IOException("classpath 缺少样例资源：" + CLASSPATH_ROOT + "/" + name);
+            throw new IOException("Missing classpath sample resource: " + CLASSPATH_ROOT + "/" + name);
         }
         try (InputStream in = url.openStream()) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
@@ -235,8 +235,4 @@ public final class KbSampleSeeder {
         }
     }
 
-    private static String safeMessage(Throwable error) {
-        String message = error.getMessage();
-        return message == null || message.isBlank() ? error.getClass().getSimpleName() : message;
-    }
 }

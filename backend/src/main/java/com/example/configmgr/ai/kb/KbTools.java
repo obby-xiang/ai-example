@@ -50,9 +50,9 @@ import java.util.stream.Collectors;
 @Component
 public class KbTools {
 
-    private static final String UNAVAILABLE_TEXT = "知识库暂不可用，请联系业务负责人或稍后重试";
+    private static final String UNAVAILABLE_TEXT = "Knowledge base is temporarily unavailable; contact the business owner or retry later";
 
-    private static final String INCOMPLETE_TEXT = "知识库检索未完成，请联系业务负责人或稍后重试";
+    private static final String INCOMPLETE_TEXT = "Knowledge base retrieval did not complete; contact the business owner or retry later";
 
     /** 渲染开销预留行数（定界/声明/表头/目录框/正文框/尾行 + 目录行余量）。 */
     private static final int RENDER_ROWS_RESERVE = 12;
@@ -85,7 +85,7 @@ public class KbTools {
     private IllegalStateException notReady() {
         String reason = this.kbService.status().lastError();
         if (reason != null && !reason.isBlank()) {
-            log.warn("KB index unavailable: {}", reason);
+            log.warn("KB index unavailable");
         }
         return new IllegalStateException(UNAVAILABLE_TEXT);
     }
@@ -94,8 +94,8 @@ public class KbTools {
         return new IllegalStateException(UNAVAILABLE_TEXT);
     }
 
-    private static IllegalStateException incomplete(String operation, String error) {
-        log.error("{} failed: {}", operation, error);
+    private static IllegalStateException incomplete(String operation) {
+        log.error("{} failed", operation);
         return new IllegalStateException(INCOMPLETE_TEXT);
     }
 
@@ -121,7 +121,7 @@ public class KbTools {
         return switch (result.state()) {
             case NOT_READY -> throw notReady();
             case DISABLED -> throw disabled();
-            case ERROR -> throw incomplete("KB search", result.error());
+            case ERROR -> throw incomplete("KB search");
             default -> KbText.wrap(renderSearch(result, effectiveTopK));
         };
     }
@@ -180,7 +180,7 @@ public class KbTools {
         return switch (result.state()) {
             case NOT_READY -> throw notReady();
             case DISABLED -> throw disabled();
-            case ERROR -> throw incomplete("KB document read", result.error());
+            case ERROR -> throw incomplete("KB document read");
             case DOC_NOT_FOUND -> KbText.plain("未找到文档 id=" + docId + "。\n"
                     + candidateLine(result.candidates())
                     + "建议: 用 kb_search 检索主题获取正确的 doc_id。");
@@ -233,7 +233,7 @@ public class KbTools {
             pageChars = nextChars;
             page = this.kbService.readDoc(docId, section, offset, pageChars, pageRows);
             if (page.state() != KbReadResult.State.OK) {
-                throw incomplete("KB document page read", page.error());
+                throw incomplete("KB document page read");
             }
             body = renderRead(page, docId);
         }
@@ -310,7 +310,7 @@ public class KbTools {
             throw disabled();
         }
         if (!result.error().isEmpty()) {
-            throw incomplete("KB term lookup", result.error());
+            throw incomplete("KB term lookup");
         }
         if (!result.found()) {
             StringBuilder sb = new StringBuilder();

@@ -469,7 +469,7 @@ public class ContextBuilder {
             return this.objectMapper.writeValueAsString(value);
         }
         catch (Exception ex) {
-            log.debug("could not serialize extra value; falling back to text error={}", ex.getMessage());
+            log.debug("could not serialize extra value; falling back to text", ex);
             return String.valueOf(value);
         }
     }

@@ -188,7 +188,7 @@ public class SessionPurgeRetryRunner {
 		}
 		catch (Throwable ex) {
 			// 调度线程绝不能被单轮异常杀死；状态保持在 Redis（pending/guard 不 disarm）。
-			log.warn("Session purge auto-retry round threw (state not guessed, not disarmed): {}", ex.toString());
+			log.warn("Session purge auto-retry round threw (state not guessed, not disarmed)", ex);
 		}
 	}
 
@@ -230,7 +230,7 @@ public class SessionPurgeRetryRunner {
 				}
 				catch (RuntimeException ex) {
 					// 续租登记失败不阻断本轮（锁仍是刚抢到的 300s）；finally 仍会 stop/release。
-					log.warn("Session purge retry lock renew registration failed (round continues on the TTL already acquired): {}", ex.getMessage());
+					log.warn("Session purge retry lock renew registration failed (round continues on the TTL already acquired)", ex);
 				}
 			}
 		}
@@ -240,7 +240,7 @@ public class SessionPurgeRetryRunner {
 				due = this.pendingStore.listDue(nowMs, MAX_CANDIDATES);
 			}
 			catch (RuntimeException ex) {
-				log.warn("Session purge retry failed to read pending ledger (round skipped, state not guessed): {}", ex.getMessage());
+				log.warn("Session purge retry failed to read pending ledger (round skipped, state not guessed)", ex);
 				return new RetryReport(true, 0, 0, 0, 0, 0);
 			}
 			// 取到候选 = 本轮有真实推进：重开推进窗口（否则"慢但仍在推进"的轮次会被判卡死）。
@@ -273,7 +273,7 @@ public class SessionPurgeRetryRunner {
 					catch (RuntimeException ex) {
 						failed++;
 						log.warn("Session purge retry could not retire candidate sessionId={} "
-								+ "(durable pending kept; continuing with remaining candidates): {}", pending.sessionId(), ex.getMessage());
+								+ "(durable pending kept; continuing with remaining candidates)", pending.sessionId(), ex);
 					}
 					continue;
 				}
@@ -290,8 +290,8 @@ public class SessionPurgeRetryRunner {
 						}
 						catch (RuntimeException ex) {
 							failed++;
-							log.warn("Session purge memory verify threw sessionId={} (durable pending kept): {}",
-									pending.sessionId(), ex.getMessage());
+							log.warn("Session purge memory verify threw sessionId={} (durable pending kept)",
+									pending.sessionId(), ex);
 							continue;
 						}
 						if (verify == null) {
@@ -321,15 +321,15 @@ public class SessionPurgeRetryRunner {
 					}
 					catch (RuntimeException ex) {
 						failed++;
-						log.warn("Session purge retry threw sessionId={} (durable pending kept): {}",
-								pending.sessionId(), ex.getMessage());
+						log.warn("Session purge retry threw sessionId={} (durable pending kept)",
+								pending.sessionId(), ex);
 					}
 				}
 				catch (RuntimeException ex) {
 					failed++;
 					log.warn("Session purge retry candidate failed sessionId={} "
-							+ "(identity/state not guessed; durable pending kept; continuing with remaining candidates): {}",
-							pending.sessionId(), ex.getMessage());
+							+ "(identity/state not guessed; durable pending kept; continuing with remaining candidates)",
+							pending.sessionId(), ex);
 				}
 			}
 			if (retired > 0) {
@@ -350,13 +350,13 @@ public class SessionPurgeRetryRunner {
 					this.leases.stopDriving(LOCK_KEY, lease.owner());
 				}
 				catch (RuntimeException ex) {
-					log.debug("Failed to stop session purge retry lock renewal (TTL self-clears): {}", ex.getMessage());
+					log.debug("Failed to stop session purge retry lock renewal (TTL self-clears)", ex);
 				}
 				try {
 					this.leases.release(lease);
 				}
 				catch (RuntimeException ex) {
-					log.warn("Failed to release session purge retry lock (TTL self-clears): {}", ex.getMessage());
+					log.warn("Failed to release session purge retry lock (TTL self-clears)", ex);
 				}
 			}
 			// 是否释放只看"本轮是否拿到 lease"：owner 每轮唯一 ⇒ 不存在"重入拿到的别人的那一任"。

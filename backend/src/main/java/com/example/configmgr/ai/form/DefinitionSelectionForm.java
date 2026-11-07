@@ -246,7 +246,7 @@ public class DefinitionSelectionForm extends HostForm {
 					withToolTimeout(frontendTool(toolCallId, AiToolNames.NAVIGATE_TO, json.get())));
 		}
 		catch (RuntimeException ex) {
-			log.warn("host navigate_to was not sent (continue on existing path) runId={} error={}", runId, ex.getMessage());
+			log.warn("host navigate_to was not sent (continue on existing path) runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -306,7 +306,7 @@ public class DefinitionSelectionForm extends HostForm {
 					withToolTimeout(frontendTool(toolCallId, AiToolNames.SELECT_DEFINITIONS, json.get())));
 		}
 		catch (RuntimeException ex) {
-			log.warn("host select_definitions was not sent (continue on existing path) runId={} error={}", runId, ex.getMessage());
+			log.warn("host select_definitions was not sent (continue on existing path) runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -331,7 +331,7 @@ public class DefinitionSelectionForm extends HostForm {
 			return Optional.of(JSON.writeValueAsString(arguments));
 		}
 		catch (Exception ex) {
-			log.warn("could not serialize host frontend tool arguments; not sent this time error={}", ex.getMessage());
+			log.warn("could not serialize host frontend tool arguments; not sent this time", ex);
 			return Optional.empty();
 		}
 	}
@@ -377,7 +377,7 @@ public class DefinitionSelectionForm extends HostForm {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read navigation evidence; not treated as navigated runId={} error={}", runId, ex.getMessage());
+			log.warn("could not read navigation evidence; not treated as navigated runId={}", runId, ex);
 			return false;
 		}
 		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
@@ -525,7 +525,7 @@ public class DefinitionSelectionForm extends HostForm {
 		catch (RuntimeException ex) {
 			// fail-safe：这是"让交互确定"的增强，不是这一轮的判定面 —— 任何读库/写库/发帧异常
 			// 都只 WARN，交回既有路径（模型照常决定），绝不把一轮正常续跑变成失败。
-			log.warn("host definition selection form was not parked (continue on existing path) runId={} error={}", runId, ex.getMessage());
+			log.warn("host definition selection form was not parked (continue on existing path) runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -628,7 +628,7 @@ public class DefinitionSelectionForm extends HostForm {
 			definitions = this.catalog == null ? List.of() : this.catalog.list();
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read definition catalog; host skips the definition selection form taskId={} error={}", createdTaskId, ex.getMessage());
+			log.warn("could not read definition catalog; host skips the definition selection form taskId={}", createdTaskId, ex);
 			return Optional.empty();
 		}
 		if (definitions == null || definitions.isEmpty()) {

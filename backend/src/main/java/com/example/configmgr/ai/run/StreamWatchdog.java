@@ -194,7 +194,7 @@ public class StreamWatchdog implements AutoCloseable {
 			tickOnce();
 		}
 		catch (Exception ex) {
-			log.debug("watchdog identity scope failed runId={}: {}", this.runId, ex.getMessage());
+			log.debug("watchdog identity scope failed runId={}", this.runId, ex);
 		}
 	}
 
@@ -253,7 +253,7 @@ public class StreamWatchdog implements AutoCloseable {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("watchdog tick failed runId={}: {}", this.runId, ex.getMessage());
+			log.debug("watchdog tick failed runId={}", this.runId, ex);
 		}
 	}
 
@@ -289,7 +289,7 @@ public class StreamWatchdog implements AutoCloseable {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("watchdog cancel poll failed runId={}: {}", this.runId, ex.getMessage());
+			log.debug("watchdog cancel poll failed runId={}", this.runId, ex);
 		}
 	}
 
@@ -306,7 +306,7 @@ public class StreamWatchdog implements AutoCloseable {
 				current.dispose();
 			}
 			catch (Exception ex) {
-				log.debug("upstream subscription dispose failed runId={}: {}", this.runId, ex.getMessage());
+				log.debug("upstream subscription dispose failed runId={}", this.runId, ex);
 			}
 		}
 		this.onViolation.accept(new StreamViolationException(code, message));
@@ -322,7 +322,7 @@ public class StreamWatchdog implements AutoCloseable {
 			this.cancelListener.close();
 		}
 		catch (Exception ex) {
-			log.debug("cancel listener deregistration failed runId={}: {}", this.runId, ex.getMessage());
+			log.debug("cancel listener deregistration failed runId={}", this.runId, ex);
 		}
 	}
 

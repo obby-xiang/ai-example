@@ -50,13 +50,13 @@ public final class RunKeyScope {
 
 	private static String tagContent(String identitySegment, String runId) {
 		if (identitySegment == null || identitySegment.isEmpty()) {
-			throw new IllegalArgumentException("缺少租户/用户身份：不得生成无身份 run 键");
+			throw new IllegalArgumentException("Tenant/user identity is required; identity-less run keys are forbidden");
 		}
 		if (runId == null || runId.isBlank()) {
-			throw new IllegalArgumentException("runId 不能为空：run 级键的 hash tag 由身份 + runId 组成");
+			throw new IllegalArgumentException("runId must not be blank; a run key hash tag consists of identity and runId");
 		}
 		if (runId.indexOf('{') >= 0 || runId.indexOf('}') >= 0) {
-			throw new IllegalArgumentException("runId 不得包含花括号（会破坏 hash tag 边界）：" + runId);
+			throw new IllegalArgumentException("runId must not contain braces because they break hash tag boundaries: " + runId);
 		}
 		return "{" + identitySegment + RUN_MARK + runId + "}";
 	}
@@ -90,10 +90,10 @@ public final class RunKeyScope {
 
 	private static String indexMember(String identitySegment, String runId) {
 		if (runId == null || runId.isBlank()) {
-			throw new IllegalArgumentException("runId 不能为空：全局索引成员由身份 + runId 组成");
+			throw new IllegalArgumentException("runId must not be blank; a global index member consists of identity and runId");
 		}
 		if (identitySegment == null || identitySegment.isEmpty()) {
-			throw new IllegalArgumentException("缺少租户/用户身份：不得生成无身份索引成员");
+			throw new IllegalArgumentException("Tenant/user identity is required; identity-less index members are forbidden");
 		}
 		// segment 形如 "<tenantId>:<userId>:" → 成员形如 "<tenantId>/<userId>/<runId>"
 		return identitySegment.replace(':', INDEX_SEPARATOR.charAt(0)) + runId;

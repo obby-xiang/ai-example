@@ -155,7 +155,7 @@ public class AiKeyCipher {
     public String encrypt(String plaintext, String providerCode, String keyRef) {
         // M6：空明文先判 —— 它是"调用方传错了"，不是"部署没配 KEK"（两者的修法完全不同）
         if (!StringUtils.hasText(plaintext)) {
-            throw new KeyCipherException(CODE_KEY_EMPTY, "待加密的 key 为空（该项必填；如需清空请用 clearKey）");
+            throw new KeyCipherException(CODE_KEY_EMPTY, "The key to encrypt is empty; provide a key or use clearKey");
         }
         byte[] kek = requireKek();
         try {
@@ -171,7 +171,7 @@ public class AiKeyCipher {
         }
         catch (Exception ex) {
             // 不回显任何密文/明文片段：异常消息只描述失败类别
-            throw new KeyCipherException(CODE_KEY_UNREADABLE, "加密失败（AES/GCM 不可用）：" + ex.getClass().getSimpleName());
+            throw new KeyCipherException(CODE_KEY_UNREADABLE, "Encryption failed because AES/GCM is unavailable: " + ex.getClass().getSimpleName());
         }
     }
 
@@ -185,11 +185,11 @@ public class AiKeyCipher {
         byte[] kek = requireKek();
         String[] parts = envelope == null ? new String[0] : envelope.split("\\.");
         if (parts.length != 4 || !ENVELOPE_VERSION.equals(parts[0])) {
-            throw new KeyCipherException(CODE_KEY_UNREADABLE, "密文信封格式不合法");
+            throw new KeyCipherException(CODE_KEY_UNREADABLE, "Invalid ciphertext envelope format");
         }
         if (!this.kid.equals(parts[1])) {
             // P1 单 kid：kid 不认识 = 这把钥匙不在本进程手里，绝不猜
-            throw new KeyCipherException(CODE_KEY_UNREADABLE, "密文 kid 与本进程 KEK 不匹配（需要重启换 KEK 或重新录入 key）");
+            throw new KeyCipherException(CODE_KEY_UNREADABLE, "Ciphertext kid does not match this process KEK; restart with the correct KEK or re-enter the key");
         }
         try {
             Base64.Decoder decoder = Base64.getUrlDecoder();
@@ -202,7 +202,7 @@ public class AiKeyCipher {
         }
         catch (Exception ex) {
             throw new KeyCipherException(CODE_KEY_UNREADABLE,
-                    "密文无法解密（KEK 变更、kid 不符或密文被搬到别的 provider 行）：" + ex.getClass().getSimpleName());
+                    "Ciphertext cannot be decrypted because the KEK or kid changed, or the ciphertext belongs to another provider row: " + ex.getClass().getSimpleName());
         }
     }
 
@@ -224,7 +224,7 @@ public class AiKeyCipher {
             return hex.substring(0, FINGERPRINT_HEX_CHARS);
         }
         catch (Exception ex) {
-            throw new KeyCipherException(CODE_KEK_MISSING, "无法计算 key 指纹：" + ex.getClass().getSimpleName());
+            throw new KeyCipherException(CODE_KEK_MISSING, "Failed to compute the key fingerprint: " + ex.getClass().getSimpleName());
         }
     }
 
@@ -242,7 +242,7 @@ public class AiKeyCipher {
         byte[] kek = resolveKekOrNull();
         if (kek == null) {
             throw new KeyCipherException(CODE_KEK_MISSING,
-                    "未配置可用的 AI_SECRET_KEK（base64 的 32 字节）：key 的加密/解密一律 fail-closed，不做明文降级");
+                    "AI_SECRET_KEK is missing or invalid; expected base64-encoded 32 bytes. Key encryption and decryption fail closed without plaintext fallback");
         }
         return kek;
     }

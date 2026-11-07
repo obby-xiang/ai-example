@@ -110,7 +110,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             remote = this.delegate.fetchManifest(null, force, budget);
         }
         if (remote.notModified()) {
-            throw new KbSourceException("知识源在无缓存清单可核对时仍返回 304");
+            throw new KbSourceException("Knowledge source returned 304 without a cached manifest for validation");
         }
         return remote;
     }
@@ -159,19 +159,19 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         }
         String version = this.cache.corpusVersion();
         if (!this.reconcileAfterDirect && version != null && !version.equals(this.lastSeenVersion)) {
-            return fromCache("版本已变化但清单不可读");
+            return fromCache("Cached manifest is unreadable after a version change");
         }
         if (!this.reconcileAfterDirect && isHttp() && !force
                 && Duration.between(this.lastRemoteCheck, Instant.now()).compareTo(jitteredRefreshInterval()) < 0) {
-            return fromCache("缓存清单不可读");
+            return fromCache("Cached manifest is unreadable");
         }
 
         Lease lease = acquireLease();
         if (lease == null) {
             if (this.reconcileAfterDirect) {
-                throw new KbSourceException("KB 直连降级后尚未完成对账，刷新 lease 不可用");
+                throw new KbSourceException("KB refresh lease is unavailable until direct-source fallback is reconciled");
             }
-            return fromCache("缓存清单不可读");
+            return fromCache("Cached manifest is unreadable");
         }
         try (lease) {
             KbSource.ManifestFetch remote;
@@ -182,13 +182,13 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                 if (!isHttp() || this.reconcileAfterDirect) {
                     throw e;
                 }
-                log.warn("KB source refresh failed (stale-if-error; serving stale cache): {}", e.getMessage());
-                return fromCache("缓存清单不可读");
+                log.warn("KB source refresh failed (stale-if-error; serving stale cache)", e);
+                return fromCache("Cached manifest is unreadable");
             }
             if (remote.notModified() && cachedManifestMatches(previousEtag)) {
                 this.lastRemoteCheck = Instant.now();
                 reconcileCachedRemoval(lease, budget);
-                KbSource.ManifestFetch cachedResult = fromCache("缓存清单不可读");
+                KbSource.ManifestFetch cachedResult = fromCache("Cached manifest is unreadable");
                 this.reconcileAfterDirect = false;
                 return cachedResult;
             }
@@ -197,13 +197,13 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             }
             this.lastRemoteCheck = Instant.now();
             if (remote.notModified() || remote.manifest() == null) {
-                throw new KbSourceException("知识源无条件重拉后仍未返回 manifest");
+                throw new KbSourceException("Knowledge source still returned no manifest after an unconditional reload");
             }
             try {
                 return syncToCache(remote.manifest(), remote.etag(), remote.contents(), lease, budget);
             }
             catch (KbCacheException e) {
-                throw new KbSourceException("KB 缓存发布失败，保留旧索引：" + e.getMessage(), e);
+                throw new KbSourceException("Failed to publish KB cache; keeping the previous index", e);
             }
         }
     }
@@ -218,28 +218,28 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                     remote = this.delegate.fetchManifest(null, true, budget);
                 }
                 if (remote.notModified() || remote.manifest() == null) {
-                    throw new KbSourceException("知识缓存为空且远端无条件重拉后仍未返回 manifest");
+                    throw new KbSourceException("Knowledge cache is empty and the source still returned no manifest after an unconditional reload");
                 }
                 this.lastRemoteCheck = Instant.now();
                 try {
                     return syncToCache(remote.manifest(), remote.etag(), remote.contents(), lease, budget);
                 }
                 catch (KbCacheException e) {
-                    throw new KbSourceException("知识缓存为空且缓存发布失败：" + e.getMessage(), e);
+                    throw new KbSourceException("Knowledge cache is empty and cache publication failed", e);
                 }
             }
         }
         if (this.reconcileAfterDirect) {
-            throw new KbSourceException("KB 直连降级后尚未完成对账，空缓存刷新 lease 不可用");
+            throw new KbSourceException("KB refresh lease is unavailable for an empty cache until direct-source fallback is reconciled");
         }
         for (int i = 0; i < 30; i++) {
             budget.check();
             if (this.cache.manifest().isPresent()) {
-                return fromCache("缓存清单不可读");
+                return fromCache("Cached manifest is unreadable");
             }
             sleep(100L, budget);
         }
-        throw new KbSourceException("知识缓存为空且其它实例正在刷新，请稍后重试");
+        throw new KbSourceException("Knowledge cache is empty and another instance is refreshing; retry later");
     }
 
     private boolean cachedManifestMatches(String previousEtag) {
@@ -330,7 +330,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             String content = fetchedContents.get(i);
             if (content == null) {
                 if (!this.cache.markDocGeneration(effective.id(), generation)) {
-                    throw new KbSourceException("KB 缓存正文在发布前被回收，保留旧清单并重试：" + effective.id());
+                    throw new KbSourceException("Cached KB content was reclaimed before publication; keeping the previous manifest and retrying: " + effective.id());
                 }
             }
             else {
@@ -347,14 +347,14 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             json = this.mapper.writeValueAsString(effectiveManifest);
         }
         catch (Exception e) {
-            throw new KbSourceException("知识清单序列化失败：" + e.getMessage(), e);
+            throw new KbSourceException("Failed to serialize knowledge manifest", e);
         }
         String etag = isBlank(sourceEtag) ? KbHashing.sha256Hex(json) : sourceEtag;
         String corpusVersion = "cv3:" + KbHashing.sha256Hex(json);
         lease.requireValid(budget);
         if (!this.cache.publishManifest(new KbCache.ManifestEntry(etag, corpusVersion, json), generation,
                 lease.token)) {
-            throw new KbSourceException("KB 刷新 lease 或代次已失效，禁止发布语料");
+            throw new KbSourceException("KB refresh lease or generation expired; corpus publication is forbidden");
         }
         this.lastSeenVersion = corpusVersion;
         pruneRemovedDocs(known, current, generation, lease, budget);
@@ -391,7 +391,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                     .collect(Collectors.toUnmodifiableSet());
         }
         catch (Exception e) {
-            log.warn("Failed to parse previous KB manifest; retirement uses the global doc index only: {}", e.getMessage());
+            log.warn("Failed to parse previous KB manifest; retirement uses the global doc index only", e);
             return Set.of();
         }
     }
@@ -414,7 +414,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             pruneRemovedDocs(known, current, generation, lease, budget);
         }
         catch (Exception e) {
-            log.debug("KB retirement reconcile deferred to the next round: {}", e.getMessage());
+            log.debug("KB retirement reconcile deferred to the next round", e);
         }
     }
 
@@ -441,7 +441,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                 deleted = this.cache.deleteDoc(docId, generation);
             }
             catch (RuntimeException e) {
-                log.warn("KB cache failed to delete retired doc (index entry kept) docId={}: {}", docId, e.getMessage());
+                log.warn("KB cache failed to delete retired doc (index entry kept) docId={}", docId, e);
                 continue;
             }
             if (!deleted) {
@@ -451,7 +451,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                 this.cache.removeDocId(docId, generation);
             }
             catch (RuntimeException e) {
-                log.warn("Retired doc deleted but its index entry remains docId={}: {}", docId, e.getMessage());
+                log.warn("Retired doc deleted but its index entry remains docId={}", docId, e);
             }
         }
     }
@@ -466,7 +466,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             manifest = KbManifest.parse(entry.json().getBytes(StandardCharsets.UTF_8), this.mapper);
         }
         catch (KbSourceException e) {
-            throw new KbSourceException("缓存清单解析失败：" + e.getMessage(), e);
+            throw new KbSourceException("Failed to parse cached manifest", e);
         }
         manifest.validate();
         this.lastSeenVersion = entry.version();
@@ -476,7 +476,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
     private static KbDocMeta withComputedSha(KbDocMeta meta, String content) throws KbSourceException {
         String actualSha = KbHashing.sha256Text(content);
         if (!isBlank(meta.sha()) && !meta.sha().equalsIgnoreCase(actualSha)) {
-            throw new KbSourceException("KB 正文 SHA-256（去 BOM 并统一 LF 后）与 manifest 声明不一致：" + meta.id());
+            throw new KbSourceException("KB content SHA-256 (BOM stripped, LF normalized) does not match manifest: " + meta.id());
         }
         return isBlank(meta.sha()) ? meta.withSha(actualSha) : meta;
     }
@@ -505,7 +505,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
     private void noteCacheDown(RuntimeException e) {
         if (!this.cacheDownLogged) {
             this.cacheDownLogged = true;
-            log.warn("KB cache unavailable; degrading to direct source access: {}", e.getMessage());
+            log.warn("KB cache unavailable; degrading to direct source access", e);
         }
     }
 
@@ -516,7 +516,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new KbSourceException("KB 刷新等待被中断", e);
+            throw new KbSourceException("KB refresh wait interrupted", e);
         }
     }
 
@@ -571,7 +571,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             }
             catch (RuntimeException e) {
                 this.valid.set(false);
-                log.debug("KB refresh lease renewal failed; publishing is disabled for this owner");
+                log.debug("KB refresh lease renewal failed; publishing is disabled for this owner", e);
             }
         }
 
@@ -579,7 +579,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             budget.check();
             if (!this.valid.get() || !CachedKbSource.this.cache.ownsLock(this.token)) {
                 this.valid.set(false);
-                throw new KbSourceException("KB 刷新 lease 已失效，禁止继续发布");
+                throw new KbSourceException("KB refresh lease expired; further publication is forbidden");
             }
         }
 
@@ -591,7 +591,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                 CachedKbSource.this.cache.unlock(this.token);
             }
             catch (RuntimeException e) {
-                log.debug("Failed to release KB refresh token: {}", e.getClass().getSimpleName());
+                log.debug("Failed to release KB refresh token", e);
             }
         }
     }

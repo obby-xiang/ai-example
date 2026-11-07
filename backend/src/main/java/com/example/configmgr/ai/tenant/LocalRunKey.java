@@ -32,7 +32,7 @@ public final class LocalRunKey {
 	/** 显式身份的本地键（{@code identity == null} = 失败）。 */
 	public static String of(TenantUser identity, String runId) {
 		if (identity == null) {
-			throw new IllegalArgumentException("本地 run 键必须带身份 runId=" + runId);
+			throw new IllegalArgumentException("Local run keys require an identity, runId=" + runId);
 		}
 		return RunKeyScope.tag(identity, runId);
 	}

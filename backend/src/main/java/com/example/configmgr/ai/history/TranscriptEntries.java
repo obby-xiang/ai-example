@@ -465,7 +465,7 @@ public final class TranscriptEntries {
 
 	private static String entryId(String runId, String kind, String suffix) {
 		if (runId == null || runId.isBlank()) {
-			throw new IllegalArgumentException("transcript 条目必须带 runId");
+			throw new IllegalArgumentException("Transcript entries require a runId");
 		}
 		return suffix == null ? runId + ":" + kind : runId + ":" + kind + ":" + suffix;
 	}

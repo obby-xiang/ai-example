@@ -376,7 +376,7 @@ public class AiController {
 			}
 			catch (RuntimeException ex) {
 				// 读失败按"未绑定"继续：后面的 claim 仍是权威判定（它也会失败则按 503 如实失败）。
-				log.debug("clientRequestId binding pre-read failed sessionId={} error={}", request.sessionId(), ex.getMessage());
+				log.debug("clientRequestId binding pre-read failed sessionId={}", request.sessionId(), ex);
 			}
 			if (boundRunId != null) {
 				deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, request.sessionId(), boundRunId,
@@ -513,8 +513,8 @@ public class AiController {
 				claim = this.clientRequests.claim(sessionId, clientRequestId, runId);
 			}
 			catch (RuntimeException ex) {
-				log.warn("clientRequestId binding failed (Redis unavailable) sessionId={} runId={} error={}", sessionId, runId,
-						ex.getMessage());
+				log.warn("clientRequestId binding failed (Redis unavailable) sessionId={} runId={}", sessionId, runId,
+						ex);
 				this.sessionGate.release(sessionId, runId);
 				deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
 						"client_request_registry_unavailable");
@@ -572,7 +572,7 @@ public class AiController {
 					// 没有任何结构化终态 ⇒ 按 runId grep 会看不到收尾。这里补一条终态事件。
 					AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
 							"type", ex.getClass().getSimpleName(),
-							"msg", ex.getMessage());
+							"msg", "Uncaught exception in AI turn");
 					// ===== 批次2 / AR-05：环外异常也走取消优先终态守卫 =====
 					// 环外异常（压缩/记忆写/快照建/取模型）此前只发一帧 error、快照留在 RUNNING ⇒
 					// 刷新后既无终态也无"可重跑"的依据。这里补写 FAILED，但**必须**与 fail()/emptyReply()
@@ -605,7 +605,7 @@ public class AiController {
 			});
 		}
 		catch (RejectedExecutionException ex) {
-			log.warn("suspension executor pool saturated, rejecting turn sessionId={} runId={}", sessionId, runId);
+			log.warn("suspension executor pool saturated, rejecting turn sessionId={} runId={}", sessionId, runId, ex);
 			AiTrace.event("turn_rejected", "code", "SUSPEND_POOL_SATURATED");
 			this.sessionGate.release(sessionId, runId);
 			this.runRegistry.close(runId);
@@ -616,8 +616,8 @@ public class AiController {
 					this.clientRequests.releaseBinding(sessionId, clientRequestId, runId);
 				}
 				catch (RuntimeException releaseEx) {
-					log.debug("releasing clientRequestId binding of unstarted turn failed sessionId={} error={}", sessionId,
-							releaseEx.getMessage());
+					log.debug("releasing clientRequestId binding of unstarted turn failed sessionId={}", sessionId,
+							releaseEx);
 				}
 			}
 			return json(HttpStatus.SERVICE_UNAVAILABLE, poolSaturated(runId));
@@ -713,8 +713,8 @@ public class AiController {
 			return written;
 		}
 		catch (RuntimeException writeEx) {
-			log.warn("outside-turn failure state write failed runId={} (error frame still sent; recovery falls back to snapshot/lease) error={}", runId,
-					writeEx.getMessage());
+			log.warn("outside-turn failure state write failed runId={} (error frame still sent; recovery falls back to snapshot/lease)", runId,
+					writeEx);
 			return true;
 		}
 	}
@@ -802,7 +802,7 @@ public class AiController {
 					merged.getPage(), merged.getTaskId(), merged.getStep());
 		}
 		catch (RuntimeException ex) {
-			log.warn("workspace context write-back during suspension failed (ignored; resume falls back to previous context) runId={} error={}", runId, ex.getMessage());
+			log.warn("workspace context write-back during suspension failed (ignored; resume falls back to previous context) runId={}", runId, ex);
 		}
 	}
 
@@ -1151,7 +1151,7 @@ public class AiController {
 					log.info("reattach handed off cancelled pending run runId={} handedOff={}", runId, handedOff);
 				}
 				catch (RuntimeException ex) {
-					log.warn("reattach cancel finalizer hand-off failed runId={} error={}", runId, ex.getMessage());
+					log.warn("reattach cancel finalizer hand-off failed runId={}", runId, ex);
 				}
 			}
 			// ===== F2：重挂也是"任实例可消费 expiresAt"的入口 =====
@@ -1164,8 +1164,8 @@ public class AiController {
 					expired = this.confirmGate.convergeExpiredParkedFrontend(runId);
 				}
 				catch (RuntimeException ex) {
-					log.warn("reattach failed to consume expired park entries runId={} (treating as still waiting, subscription kept) error={}", runId,
-							ex.getMessage());
+					log.warn("reattach failed to consume expired park entries runId={} (treating as still waiting, subscription kept)", runId,
+							ex);
 				}
 			}
 			if (cancelledPending) {
@@ -1197,7 +1197,7 @@ public class AiController {
 							healed == null ? null : healed.outcome());
 				}
 				catch (RuntimeException ex) {
-					log.warn("reattach self-heal reconcile failed runId={} (closing subscription, no leak) error={}", runId, ex.getMessage());
+					log.warn("reattach self-heal reconcile failed runId={} (closing subscription, no leak)", runId, ex);
 					out.completeSubscriptions();
 				}
 			}
@@ -1377,7 +1377,7 @@ public class AiController {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading cancel flag failed runId={} (continuing as not cancelled) error={}", runId, ex.getMessage());
+			log.debug("reading cancel flag failed runId={} (continuing as not cancelled)", runId, ex);
 			return false;
 		}
 	}
@@ -1393,7 +1393,7 @@ public class AiController {
 			return atMs instanceof Number number ? number.longValue() : 0L;
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading first archived frame failed runId={} (reporting elapsedMs=0) error={}", runId, ex.getMessage());
+			log.debug("reading first archived frame failed runId={} (reporting elapsedMs=0)", runId, ex);
 			return 0L;
 		}
 	}
@@ -1414,7 +1414,7 @@ public class AiController {
 			return "done".equals(type) || "error".equals(type);
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading last archived frame failed runId={} (treating as non-terminal, still preparing) error={}", runId, ex.getMessage());
+			log.debug("reading last archived frame failed runId={} (treating as non-terminal, still preparing)", runId, ex);
 			return false;
 		}
 	}
@@ -1436,7 +1436,7 @@ public class AiController {
 			return false;
 		}
 		catch (RuntimeException ex) {
-			log.warn("reattach failed to read pending entries runId={} (closing as park, no hanging connection) error={}", runId, ex.getMessage());
+			log.warn("reattach failed to read pending entries runId={} (closing as park, no hanging connection)", runId, ex);
 			return true;
 		}
 	}
@@ -1470,7 +1470,7 @@ public class AiController {
 		catch (Exception ex) {
 			// 租约设施不可读 ⇒ 按"可能有人持有"处理（不放行），与 E3 的保守方向相反是因为
 			// 这里的错误方向是并发双跑，不能靠乐观兜底
-			log.debug("reading resume lease failed runId={} (treating lease as held) error={}", heldRunId, ex.getMessage());
+			log.debug("reading resume lease failed runId={} (treating lease as held)", heldRunId, ex);
 			leaseHeld = true;
 		}
 		// 空写出器不算活跃：只有真实订阅才保留会话门。
@@ -1550,8 +1550,8 @@ public class AiController {
 			outcome = this.clientRequests.cancel(request.sessionId(), request.clientRequestId());
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel by clientRequestId failed sessionId={} clientRequestId={} error={}", request.sessionId(),
-					request.clientRequestId(), ex.getMessage());
+			log.warn("cancel by clientRequestId failed sessionId={} clientRequestId={}", request.sessionId(),
+					request.clientRequestId(), ex);
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		Map<String, Object> body = new LinkedHashMap<>();
@@ -1572,7 +1572,7 @@ public class AiController {
 			cancelBody = cancelKnownRun(outcome.runId(), snapshot);
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel of run bound to clientRequestId failed runId={} error={}", outcome.runId(), ex.getMessage());
+			log.warn("cancel of run bound to clientRequestId failed runId={}", outcome.runId(), ex);
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		body.putAll(cancelBody);
@@ -1676,7 +1676,7 @@ public class AiController {
 			return last.isPresent() && last.getAsLong() > 0L;
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading archive for cancel ownership check failed runId={} (treating as unowned, cancel flag not written) error={}", runId, ex.getMessage());
+			log.debug("reading archive for cancel ownership check failed runId={} (treating as unowned, cancel flag not written)", runId, ex);
 			return false;
 		}
 	}
@@ -1854,7 +1854,7 @@ public class AiController {
 		}
 		catch (RuntimeException ex) {
 			readable = false;
-			log.debug("archive integrity probe failed runId={} (treated as not provably complete) error={}", runId, ex.getMessage());
+			log.debug("archive integrity probe failed runId={} (treated as not provably complete)", runId, ex);
 		}
 		body.put("archiveFirstSeq", firstSeq);
 		body.put("archiveReadable", readable);
@@ -2166,7 +2166,7 @@ public class AiController {
 			transcriptPage = this.transcript.readPage(sessionId, before, latest);
 		}
 		catch (RuntimeException ex) {
-			log.warn("history transcript read failed sessionId={} error={}", sessionId, ex.getMessage());
+			log.warn("history transcript read failed sessionId={}", sessionId, ex);
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		List<Map<String, Object>> page = transcriptItems(projectableTranscriptEntries(transcriptPage.entries()));
@@ -2197,7 +2197,7 @@ public class AiController {
 			raw = this.contextStateStore.events(sessionId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("history compaction facts read failed sessionId={} error={} (returning empty events)", sessionId, ex.getMessage());
+			log.warn("history compaction facts read failed sessionId={} (returning empty events)", sessionId, ex);
 			return List.of();
 		}
 		if (raw == null || raw.isEmpty()) {
@@ -2441,7 +2441,7 @@ public class AiController {
 		}
 		catch (Exception ex) {
 			// 展示增强不得让 /history 500：解析失败按"无码"处理，原文照旧
-			log.debug("history tool result envelope code parse failed; passing through without code error={}", ex.getMessage());
+			log.debug("history tool result envelope code parse failed; passing through without code", ex);
 			return null;
 		}
 	}
@@ -2490,7 +2490,7 @@ public class AiController {
 		}
 		catch (Exception ex) {
 			// 展示增强不得让 /history 500：解析失败按"无截断元数据"处理
-			log.debug("history tool result truncation metadata parse failed; passing through without fields error={}", ex.getMessage());
+			log.debug("history tool result truncation metadata parse failed; passing through without fields", ex);
 			return null;
 		}
 	}
@@ -2579,7 +2579,7 @@ public class AiController {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("history tool result is not parseable envelope JSON; passing through raw text error={}", ex.getMessage());
+			log.debug("history tool result is not parseable envelope JSON; passing through raw text", ex);
 		}
 		return responseData;
 	}
@@ -2807,8 +2807,8 @@ public class AiController {
 	 *
 	 * <p>I-1：用户面的 {@code message} 走 {@code localize()}（{@code AI_REDIS_UNAVAILABLE} 已有 en 文案）；
 	 * {@code redis} 子对象是**安全事实面**（available/probes/failures/时间锚点）。R-11 残留收口：
-	 * 这里<b>不再带</b> {@code lastError}（含异常类名/连接地址）—— 原始诊断只进 WARN 日志与
-	 * {@code /health} 的 {@code redis.lastError}。
+	 * 这里<b>不再带</b> {@code lastError}；{@code /health} 的 {@code redis.lastError} 仅含异常简单类名
+	 * 或空 PING 分类，连接细节仅记录在服务端 Throwable 日志中。
 	 */
 	private Map<String, Object> redisUnavailable() {
 		Map<String, Object> body = new LinkedHashMap<>();

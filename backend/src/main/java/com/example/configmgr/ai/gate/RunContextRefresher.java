@@ -318,8 +318,7 @@ public class RunContextRefresher {
 			store.save(runId, taskId, defCodes, conditions);
 		}
 		catch (RuntimeException ex) {
-			log.warn("structured create_task candidate could not be written to the session task draft (extra retained; cross-turn fallback unavailable) taskId={} error={}", taskId,
-					ex.getMessage());
+			log.warn("structured create_task candidate could not be written to the session task draft (extra retained; cross-turn fallback unavailable) taskId={}", taskId, ex);
 		}
 	}
 
@@ -436,10 +435,10 @@ public class RunContextRefresher {
 			found = this.taskService.findByIdRaw(taskId);
 		}
 		catch (RuntimeException ex) {
-			throw new IllegalStateException("读取任务 #" + taskId + " 失败，运行上下文保持不变：" + ex.getMessage(), ex);
+			throw new IllegalStateException("Failed to read task #" + taskId + "; run context unchanged", ex);
 		}
 		if (found == null || found.isEmpty()) {
-			throw new IllegalStateException("任务 #" + taskId + " 不存在（或已删除），运行上下文保持不变");
+			throw new IllegalStateException("Task #" + taskId + " does not exist (or was deleted); run context unchanged");
 		}
 		return found.get();
 	}

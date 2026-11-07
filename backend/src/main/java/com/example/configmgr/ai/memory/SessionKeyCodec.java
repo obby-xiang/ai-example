@@ -21,7 +21,7 @@ public final class SessionKeyCodec {
 	/** 非空白会话 id（空白会产出空 hash tag，Cluster 下 staging/final 不同槽）。 */
 	public static String requireId(String conversationId) {
 		if (conversationId == null || conversationId.isBlank()) {
-			throw new IllegalArgumentException("conversationId 不得为空白");
+			throw new IllegalArgumentException("conversationId must not be blank");
 		}
 		return conversationId;
 	}

@@ -76,7 +76,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
             root = mapper.readTree(argumentsJson == null ? "" : argumentsJson);
         }
         catch (Exception error) {
-            return reject("入参不是合法 JSON：" + error.getMessage());
+            return reject("入参不是合法 JSON。");
         }
         if (root == null || !root.isObject()) {
             return reject("入参必须是对象。");
@@ -98,7 +98,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
             root = mapper.readTree(argumentsJson == null ? "" : argumentsJson);
         }
         catch (Exception error) {
-            return reject("入参不是合法 JSON：" + error.getMessage());
+            return reject("入参不是合法 JSON。");
         }
         if (root == null || !root.isObject()) {
             return reject("入参必须是对象。");

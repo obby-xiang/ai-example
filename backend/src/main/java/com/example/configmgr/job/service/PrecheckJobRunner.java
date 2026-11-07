@@ -267,12 +267,12 @@ public class PrecheckJobRunner {
                             rowErrors > 0 ? "FAILED" : "CHECKED");
 
                 } catch (Exception e) {
-                    log.error("Precheck item failed defCode={} error={}", defCode, e.getMessage(), e);
+                    log.error("Precheck item failed defCode={}", defCode, e);
                     ValidationIssue issue = new ValidationIssue();
                     issue.setJobId(jobId);
                     issue.setDefCode(defCode);
                     issue.setSeverity(ValidationIssue.Severity.ERROR);
-                    issue.setMessage("检查过程出错: " + e.getMessage());
+                    issue.setMessage("检查过程出错，请查看服务日志或稍后重试");
                     issueRepository.save(issue);
                     totalErrors++;
                     finishedDefRows += defTotal;
@@ -284,7 +284,7 @@ public class PrecheckJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.error("Precheck job failed error={}", e.getMessage(), e);
+            log.error("Precheck job failed", e);
             totalErrors++;
             terminalWriter.complete(job, Job.JobStatus.FAILED, totalErrors, totalWarnings,
                     processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED, totalErrors));
@@ -312,7 +312,7 @@ public class PrecheckJobRunner {
             return entry;
         }
         catch (Exception e) {
-            log.warn("Failed to compute precheck file digest path={} error={}", storagePath, e.getMessage());
+            log.warn("Failed to compute precheck file digest path={}", storagePath, e);
             Map<String, Object> entry = new LinkedHashMap<>();
             entry.put("sha256", null);
             entry.put("size", null);
@@ -337,7 +337,7 @@ public class PrecheckJobRunner {
         }
         catch (Exception e) {
             // 摘要写失败不升级为作业失败：从严口径下"摘要缺失"在 IMPORT 侧就是 409 PRECHECK_STALE
-            log.warn("Failed to serialize precheck fingerprint summary jobId={} error={}", jobId, e.getMessage());
+            log.warn("Failed to serialize precheck fingerprint summary jobId={}", jobId, e);
             return;
         }
         int updated = jobRepository.writeResultJsonIfInFlight(jobId, json, IN_FLIGHT);
@@ -418,7 +418,7 @@ public class PrecheckJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.warn("Failed to load reference value set refDef={} error={}", refDefCode, e.getMessage());
+            log.warn("Failed to load reference value set refDef={}", refDefCode, e);
         }
         return values;
     }

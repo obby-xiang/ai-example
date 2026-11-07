@@ -170,8 +170,8 @@ public class AiConfigWriter {
         this.guard = guard;
         // N-6（复审）：事务边界是写路径的正确性前提，装配期就 fail-fast —— 不要在运行时才 NPE
         this.transactionTemplate = new TransactionTemplate(
-                Objects.requireNonNull(transactionManager, "AiConfigWriter 需要 PlatformTransactionManager："
-                        + "写路径的“数据行 + 版本号 + 审计行”必须同一提交点"));
+                Objects.requireNonNull(transactionManager, "AiConfigWriter requires PlatformTransactionManager: "
+                        + "data rows, the config version, and audit rows must share one commit point"));
         this.configService = configService;
         this.objectMapper = objectMapper;
         this.versions = new AiConfigVersionPublisher(settingRepository, configService, runtimeRegistry);
@@ -224,7 +224,7 @@ public class AiConfigWriter {
 
     public AiProvider createProvider(ProviderCommand command) {
         if (command == null) {
-            throw invalidParam("请求体不能为空");
+            throw invalidParam("Request body is required");
         }
         String code = requireCode(command.code());
         String baseUrl = checkBaseUrl(command.baseUrl());
@@ -237,7 +237,7 @@ public class AiConfigWriter {
 
         AiProvider created = executeInTransaction(() -> {
             if (this.providerRepository.findByCode(code).isPresent()) {
-                throw new AiConfigException(CODE_PROVIDER_EXISTS, "provider code 已存在：" + code);
+                throw new AiConfigException(CODE_PROVIDER_EXISTS, "Provider code already exists: " + code);
             }
             AiProvider provider = new AiProvider();
             provider.setCode(code);
@@ -264,13 +264,13 @@ public class AiConfigWriter {
 
     public AiProvider updateProvider(Long providerId, ProviderCommand command) {
         if (command == null) {
-            throw invalidParam("请求体不能为空");
+            throw invalidParam("Request body is required");
         }
         AiProvider updated = executeInTransaction(() -> {
             AiProvider existing = requireProvider(providerId);
             if (StringUtils.hasText(command.code()) && !command.code().trim().equals(existing.getCode())) {
                 throw new AiConfigException(CODE_CODE_IMMUTABLE,
-                        "provider code 不可修改（它是 key 密文 AAD 的一段，改了旧密文将无法解密）");
+                        "Provider code is immutable because it is part of the key ciphertext AAD; changing it would make the existing ciphertext undecryptable");
             }
             String requestedBaseUrl = trimToNull(command.baseUrl());
             String baseUrl = requestedBaseUrl == null || requestedBaseUrl.equals(existing.getBaseUrl())
@@ -299,8 +299,8 @@ public class AiConfigWriter {
             if (key == null && existing.isKeyDeclared()
                     && !originOf(existing.getBaseUrl()).equals(originOf(baseUrl))) {
                 throw new AiConfigException(CODE_KEY_BOUND_TO_HOST,
-                        "改主机名（origin）后必须重新录入 key 或先清空 key：已有 key 只会发往它被录入时的那台主机（旧 "
-                                + originOf(existing.getBaseUrl()) + " → 新 " + originOf(baseUrl) + "）");
+                        "Changing the origin requires re-entering or clearing the key; the existing key is sent only to its original host (old "
+                                + originOf(existing.getBaseUrl()) + " to " + originOf(baseUrl) + ")");
             }
 
             existing.setDisplayName(displayName);
@@ -346,7 +346,7 @@ public class AiConfigWriter {
             if (hard) {
                 if (modelCount > 0) {
                     throw new AiConfigException(CODE_PROVIDER_IN_USE,
-                            "该 provider 仍有 " + modelCount + " 个模型引用，不能硬删（先删模型或改软删）");
+                            "Provider still has " + modelCount + " model references and cannot be hard-deleted; delete the models first or use soft delete");
                 }
                 this.providerRepository.deleteById(providerId);
             }
@@ -366,7 +366,7 @@ public class AiConfigWriter {
 
     public AiProviderModel addModel(Long providerId, ModelCommand command) {
         if (command == null) {
-            throw invalidParam("请求体不能为空");
+            throw invalidParam("Request body is required");
         }
         String modelId = requireModelId(command.modelId());
         int maxContext = validateMaxContext(command.maxContext());
@@ -375,7 +375,7 @@ public class AiConfigWriter {
         AiProviderModel created = executeInTransaction(() -> {
             AiProvider provider = requireProvider(providerId);
             if (this.modelRepository.findByProviderIdAndModelId(providerId, modelId).isPresent()) {
-                throw new AiConfigException(CODE_MODEL_EXISTS, "该模型已在 allowlist 中：" + modelId);
+                throw new AiConfigException(CODE_MODEL_EXISTS, "Model already exists in the allowlist: " + modelId);
             }
             AiProviderModel model = new AiProviderModel();
             model.setProviderId(provider.getId());
@@ -403,16 +403,16 @@ public class AiConfigWriter {
 
     public AiProviderModel updateModel(Long providerId, String modelId, ModelCommand command) {
         if (command == null) {
-            throw invalidParam("请求体不能为空");
+            throw invalidParam("Request body is required");
         }
         AiProviderModel updated = executeInTransaction(() -> {
             requireProvider(providerId);
             AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
                 .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
-                        "模型不存在：" + providerId + "/" + modelId));
+                        "Model not found: " + providerId + "/" + modelId));
             if (StringUtils.hasText(command.modelId()) && !command.modelId().trim().equals(modelId)) {
                 throw new AiConfigException(CODE_INVALID_MODEL,
-                        "modelId 不可原地修改（唯一键是 provider_id + model_id）：请删除后另建一行");
+                        "modelId is immutable because provider_id + model_id is the unique key; delete it and create a new entry");
             }
             Integer nextMaxContext = command.maxContext() == null ? existing.getMaxContext() : command.maxContext();
             Integer nextMaxOutput = command.maxOutput() == null ? existing.getMaxOutput() : command.maxOutput();
@@ -465,7 +465,7 @@ public class AiConfigWriter {
             requireProvider(providerId);
             AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
                 .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
-                        "模型不存在：" + providerId + "/" + modelId));
+                        "Model not found: " + providerId + "/" + modelId));
             this.modelRepository.delete(existing);
             audit(ACTION_MODEL_DELETE, "model", providerId + ":" + modelId,
                     diffOf("providerId", providerId, "modelId", modelId));
@@ -479,20 +479,20 @@ public class AiConfigWriter {
 
     public AiConfigService.Defaults updateDefaults(DefaultsCommand command) {
         if (command == null) {
-            throw invalidParam("请求体不能为空");
+            throw invalidParam("Request body is required");
         }
         if (command.temperature() != null && !inRange(command.temperature(), MIN_TEMPERATURE, MAX_TEMPERATURE)) {
-            throw invalidParam("temperature 必须在 [" + MIN_TEMPERATURE + "," + MAX_TEMPERATURE + "] 之间（当前 = "
-                    + command.temperature() + "）");
+            throw invalidParam("temperature must be in [" + MIN_TEMPERATURE + "," + MAX_TEMPERATURE + "] (current = "
+                    + command.temperature() + ")");
         }
         if (command.topP() != null && !inRange(command.topP(), MIN_TOP_P, MAX_TOP_P)) {
-            throw invalidParam("top_p 必须在 [" + MIN_TOP_P + "," + MAX_TOP_P + "] 之间（当前 = " + command.topP()
-                    + "）");
+            throw invalidParam("top_p must be in [" + MIN_TOP_P + "," + MAX_TOP_P + "] (current = " + command.topP()
+                    + ")");
         }
         if (command.maxTokens() != null
                 && (command.maxTokens() < MIN_TOKENS || command.maxTokens() > MAX_TOKENS)) {
-            throw invalidParam("max_tokens 必须在 [" + MIN_TOKENS + "," + MAX_TOKENS + "] 之间（当前 = "
-                    + command.maxTokens() + "）");
+            throw invalidParam("max_tokens must be in [" + MIN_TOKENS + "," + MAX_TOKENS + "] (current = "
+                    + command.maxTokens() + ")");
         }
         String modelId = trimToNull(command.modelId());
         executeInTransaction(() -> {
@@ -500,7 +500,7 @@ public class AiConfigWriter {
             if (modelId != null) {
                 Integer ceiling = maxOutputOf(boundProviderId, modelId);
                 if (ceiling != null && command.maxTokens() != null && command.maxTokens() > ceiling) {
-                    throw invalidParam("max_tokens 不能超过所选模型的 max_output（" + ceiling + "）");
+                    throw invalidParam("max_tokens must not exceed the selected model max_output (" + ceiling + ")");
                 }
             }
             putSetting(AiSetting.DEFAULT_PROVIDER_ID,
@@ -542,18 +542,18 @@ public class AiConfigWriter {
     private Long resolveDefaultProvider(Long requestedProviderId, String modelId) {
         if (requestedProviderId == null) {
             if (modelId != null) {
-                throw invalidParam("modelId 必须与 providerId 成对提交（设置页：在「默认模型」下拉中"
-                        + "选择该模型所属的供应商后保存）");
+                throw invalidParam("modelId must be submitted together with providerId; select the provider that owns the model "
+                        + "in the default-model dropdown and save");
             }
             return null;
         }
         AiProvider provider = requireProvider(requestedProviderId);
         if (!provider.isEnabled()) {
-            throw invalidParam("默认供应商已停用：请先在「设置 → AI」启用它，或改选其他默认模型");
+            throw invalidParam("The default provider is disabled; enable it in Settings > AI or choose another default model");
         }
         if (modelId != null && !hasEnabledModel(requestedProviderId, modelId)) {
             throw new AiConfigException(CODE_MODEL_NOT_FOUND,
-                    "模型不在该供应商的 allowlist 中或已停用：" + requestedProviderId + "/" + modelId);
+                    "Model is not enabled in this provider allowlist: " + requestedProviderId + "/" + modelId);
         }
         return requestedProviderId;
     }
@@ -620,7 +620,7 @@ public class AiConfigWriter {
         }
         catch (Exception ex) {
             // 审计不能因为序列化失败而阻断写路径；但也不能静默：落一个可辨认的空壳
-            log.warn("audit diff serialization failed (action already applied) error={}", ex.getMessage());
+            log.warn("audit diff serialization failed (action already applied)", ex);
             return "{}";
         }
     }
@@ -654,30 +654,30 @@ public class AiConfigWriter {
 
     private AiProvider requireProvider(Long providerId) {
         if (providerId == null) {
-            throw new AiConfigException(CODE_PROVIDER_NOT_FOUND, "provider id 必填");
+            throw new AiConfigException(CODE_PROVIDER_NOT_FOUND, "provider id is required");
         }
         return this.providerRepository.findById(providerId)
-            .orElseThrow(() -> new AiConfigException(CODE_PROVIDER_NOT_FOUND, "provider 不存在：" + providerId));
+            .orElseThrow(() -> new AiConfigException(CODE_PROVIDER_NOT_FOUND, "Provider not found: " + providerId));
     }
 
     private static String requireCode(String code) {
         if (!StringUtils.hasText(code)) {
-            throw invalidParam("code 必填（稳定机读名，如 custom-1）");
+            throw invalidParam("code is required; use a stable machine-readable identifier such as custom-1");
         }
         String trimmed = code.trim();
         if (!CODE_PATTERN.matcher(trimmed).matches()) {
-            throw invalidParam("code 只允许小写字母/数字/下划线/连字符，1-64 字符（当前 = " + trimmed + "）");
+            throw invalidParam("code may contain only lowercase letters, digits, underscores, and hyphens, with length 1-64 (current = " + trimmed + ")");
         }
         return trimmed;
     }
 
     private static String requireText(String value, String field, int maxLength) {
         if (!StringUtils.hasText(value)) {
-            throw invalidParam(field + " 必填");
+            throw invalidParam(field + " is required");
         }
         String trimmed = value.trim();
         if (trimmed.length() > maxLength) {
-            throw invalidParam(field + " 过长（>" + maxLength + " 字符）");
+            throw invalidParam(field + " exceeds the maximum length of " + maxLength + " characters");
         }
         return trimmed;
     }
@@ -688,7 +688,7 @@ public class AiConfigWriter {
         }
         String trimmed = protocol.trim();
         if (!"OPENAI_COMPAT".equals(trimmed)) {
-            throw invalidParam("protocol 本期只支持 OPENAI_COMPAT（当前 = " + trimmed + "）");
+            throw invalidParam("protocol supports only OPENAI_COMPAT (current = " + trimmed + ")");
         }
         return trimmed;
     }
@@ -699,24 +699,24 @@ public class AiConfigWriter {
         }
         String trimmed = path.trim();
         if (!trimmed.startsWith("/")) {
-            throw invalidParam(field + " 必须以 / 开头（当前 = " + trimmed + "）");
+            throw invalidParam(field + " must start with / (current = " + trimmed + ")");
         }
         if (trimmed.length() > 128) {
-            throw invalidParam(field + " 过长（>128 字符）");
+            throw invalidParam(field + " exceeds the maximum length of 128 characters");
         }
         return trimmed;
     }
 
     private static String requireModelId(String modelId) {
         if (!StringUtils.hasText(modelId)) {
-            throw new AiConfigException(CODE_INVALID_MODEL, "modelId 必填");
+            throw new AiConfigException(CODE_INVALID_MODEL, "modelId is required");
         }
         String trimmed = modelId.trim();
         if (trimmed.length() > 128) {
-            throw new AiConfigException(CODE_INVALID_MODEL, "modelId 过长（>128 字符）");
+            throw new AiConfigException(CODE_INVALID_MODEL, "modelId exceeds the maximum length of 128 characters");
         }
         if (trimmed.chars().anyMatch(Character::isWhitespace)) {
-            throw new AiConfigException(CODE_INVALID_MODEL, "modelId 不允许包含空白字符（当前 = " + trimmed + "）");
+            throw new AiConfigException(CODE_INVALID_MODEL, "modelId must not contain whitespace (current = " + trimmed + ")");
         }
         return trimmed;
     }
@@ -726,7 +726,7 @@ public class AiConfigWriter {
             return 0;
         }
         if (maxContext < 1 || maxContext > MAX_CONTEXT_CEILING) {
-            throw invalidParam("maxContext 必须在 [1," + MAX_CONTEXT_CEILING + "] 之间（当前 = " + maxContext + "）");
+            throw invalidParam("maxContext must be in [1," + MAX_CONTEXT_CEILING + "] (current = " + maxContext + ")");
         }
         return maxContext;
     }
@@ -736,10 +736,10 @@ public class AiConfigWriter {
             return 0;
         }
         if (maxOutput < MIN_TOKENS || maxOutput > MAX_TOKENS) {
-            throw invalidParam("maxOutput 必须在 [" + MIN_TOKENS + "," + MAX_TOKENS + "] 之间（当前 = " + maxOutput + "）");
+            throw invalidParam("maxOutput must be in [" + MIN_TOKENS + "," + MAX_TOKENS + "] (current = " + maxOutput + ")");
         }
         if (maxContext != null && maxOutput > maxContext) {
-            throw invalidParam("maxOutput 不能大于 maxContext（" + maxOutput + " > " + maxContext + "）");
+            throw invalidParam("maxOutput must not exceed maxContext (" + maxOutput + " > " + maxContext + ")");
         }
         return maxOutput;
     }
@@ -802,11 +802,11 @@ public class AiConfigWriter {
     /** 加密 + 指纹 + last4（一次算好，事务里只落结果；失败在事务外 ⇒ 表里不留半行）。 */
     private KeyMaterial sealKey(String apiKey, String providerCode) {
         if (apiKey.length() < MIN_KEY_LENGTH) {
-            throw invalidParam("apiKey 过短（至少 " + MIN_KEY_LENGTH + " 个字符）—— 太短的 key 会让末 4 位掩码"
-                    + "失去意义，等同于明文展示");
+            throw invalidParam("apiKey is too short; at least " + MIN_KEY_LENGTH + " characters are required so the last-four mask"
+                    + " does not expose the entire key");
         }
         if (apiKey.length() > MAX_KEY_LENGTH) {
-            throw invalidParam("apiKey 过长（>" + MAX_KEY_LENGTH + " 字符）");
+            throw invalidParam("apiKey exceeds the maximum length of " + MAX_KEY_LENGTH + " characters");
         }
         try {
             String envelope = this.cipher.encrypt(apiKey, providerCode, AiProvider.KEY_REF_DB);

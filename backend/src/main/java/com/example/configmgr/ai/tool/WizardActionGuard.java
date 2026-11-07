@@ -175,7 +175,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         catch (RuntimeException ex) {
             // 读失败不等于"参数不合法"：前端仍是最终判据（不能把一次合法调用误判成拒绝）
-            log.warn("could not read task entry; set_condition did not append the task predicate taskId={} error={}", taskId, ex.getMessage());
+            log.warn("could not read task entry; set_condition did not append the task predicate taskId={}", taskId, ex);
             return accepted;
         }
         if (task == null || task.getItems() == null || task.getItems().isEmpty()) {

@@ -48,7 +48,7 @@ public class SessionPurgeDatabase {
 	public SessionPurgeDatabase(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
 		this.jdbc = jdbc;
 		this.transaction = new TransactionTemplate(Objects.requireNonNull(transactionManager,
-				"会话销毁的 H2 面需要事务管理器（DELETE 必须与调用方事务隔离）"));
+				"Session purge H2 deletion requires a transaction manager (DELETE must be isolated from the caller transaction)"));
 		// 独立本地事务：销毁不是调用方业务事务的一部分（HTTP 端点本身无事务）。
 		// 外层事务回滚不得把"已删的反馈"回滚回来 —— 否则会出现 Redis 已删、H2 又复活的
 		// 反方向半删。只隔离 H2 删除，不参与任何分布式事务。

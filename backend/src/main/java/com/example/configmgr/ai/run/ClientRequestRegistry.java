@@ -310,14 +310,14 @@ public class ClientRequestRegistry {
 
 	public Claim claim(String sessionId, String clientRequestId, String runId) {
 		if (!isValid(clientRequestId)) {
-			throw new IllegalArgumentException("clientRequestId 非法");
+			throw new IllegalArgumentException("Invalid clientRequestId");
 		}
 		long now = System.currentTimeMillis();
 		String result = this.redis.execute(CLAIM_SCRIPT, List.of(sessionKey(sessionId)),
 				clientRequestId, runId, String.valueOf(ttl().toMillis()), String.valueOf(now),
 				String.valueOf(COMPLETED_RETENTION.toMillis()));
 		if (result == null) {
-			throw new IllegalStateException("clientRequestId claim 结果不可知");
+			throw new IllegalStateException("clientRequestId claim outcome is unknown");
 		}
 		if ("CLAIMED".equals(result)) {
 			return new Claim(ClaimState.CLAIMED, runId);
@@ -339,14 +339,14 @@ public class ClientRequestRegistry {
 	 */
 	public CancelOutcome cancel(String sessionId, String clientRequestId) {
 		if (!isValid(clientRequestId)) {
-			throw new IllegalArgumentException("clientRequestId 非法");
+			throw new IllegalArgumentException("Invalid clientRequestId");
 		}
 		long now = System.currentTimeMillis();
 		String result = this.redis.execute(CANCEL_SCRIPT, List.of(sessionKey(sessionId)),
 				clientRequestId, String.valueOf(ttl().toMillis()), String.valueOf(now),
 				String.valueOf(COMPLETED_RETENTION.toMillis()));
 		if (result == null) {
-			throw new IllegalStateException("clientRequestId 取消结果不可知");
+			throw new IllegalStateException("clientRequestId cancellation outcome is unknown");
 		}
 		boolean already = result.startsWith("ALREADY:");
 		String runId = result.substring(result.indexOf(':') + 1);

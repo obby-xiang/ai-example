@@ -151,7 +151,8 @@ public class JobCancellationRegistry {
                             || (state.getStatus() != Job.JobStatus.PENDING && state.getStatus() != Job.JobStatus.RUNNING))
                     .orElse(true);
         } catch (RuntimeException ex) {
-            throw new IllegalStateException("无法确认作业 #" + jobId + " 的取消状态（Redis 与 DB 均不可读）", ex);
+            throw new IllegalStateException("Could not confirm cancellation state for job #" + jobId
+                    + " because neither Redis nor the database is readable", ex);
         }
     }
 
@@ -160,8 +161,8 @@ public class JobCancellationRegistry {
             return this.jobRepository.findCancelStateById(jobId)
                     .map(JobRepository.CancelState::getCancelVersion).orElse(null);
         } catch (RuntimeException ex) {
-            log.warn("Authoritative job cancel version read failed; existing Redis mirror preserved jobId={} error={}",
-                    jobId, ex.getMessage());
+            log.warn("Authoritative job cancel version read failed; existing Redis mirror preserved jobId={}",
+                    jobId, ex);
             return null;
         }
     }
@@ -208,7 +209,7 @@ public class JobCancellationRegistry {
                 try {
                     listener.run();
                 } catch (Exception ex) {
-                    log.debug("Cancel listener failed jobId={} error={}", jobId, ex.getMessage());
+                    log.debug("Cancel listener failed jobId={}", jobId, ex);
                 }
             }
         }
@@ -219,7 +220,7 @@ public class JobCancellationRegistry {
         try {
             return this.redis.opsForValue().get(keyFor(jobId)) != null;
         } catch (Exception ex) {
-            log.debug("Cancel acceleration read failed, falling back to DB jobId={} error={}", jobId, ex.getMessage());
+            log.debug("Cancel acceleration read failed, falling back to DB jobId={}", jobId, ex);
             return false;
         }
     }
@@ -231,8 +232,8 @@ public class JobCancellationRegistry {
                     Long.toString(this.cancelTtl.toMillis()));
             return written != null && written > 0L;
         } catch (Exception ex) {
-            log.warn("Cancel acceleration write failed; runner boundaries will use DB jobId={} error={}",
-                    jobId, ex.getMessage());
+            log.warn("Cancel acceleration write failed; runner boundaries will use DB jobId={}",
+                    jobId, ex);
             return false;
         }
     }

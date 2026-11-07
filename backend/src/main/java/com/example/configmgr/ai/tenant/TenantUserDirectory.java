@@ -64,7 +64,7 @@ public final class TenantUserDirectory {
 	 */
 	public static TenantUser require(long tenantId, long userId) {
 		if (!exists(tenantId, userId)) {
-			throw new IllegalArgumentException("未登记的租户/用户组合：tenantId=" + tenantId + " userId=" + userId);
+			throw new IllegalArgumentException("Unregistered tenant/user combination: tenantId=" + tenantId + " userId=" + userId);
 		}
 		return new TenantUser(tenantId, userId);
 	}

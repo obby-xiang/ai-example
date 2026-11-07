@@ -157,7 +157,7 @@ public final class RedisDegradation {
 
 	private static Counter counter(String event) {
 		if (event == null || event.isBlank()) {
-			throw new IllegalArgumentException("降级事件名不能为空");
+			throw new IllegalArgumentException("Degradation event name must not be blank");
 		}
 		return COUNTERS.computeIfAbsent(event, key -> new Counter());
 	}

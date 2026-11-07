@@ -289,8 +289,8 @@ public class SessionPurgePendingStore {
 		/** 记录里的身份（缺失/非法即失败：台账必须带身份）。 */
 		public TenantUser identity() {
 			if (!TenantKeyScope.hasIdentity(this.tenantId, this.userId)) {
-				throw new IllegalStateException("会话销毁 pending 缺少可用身份 sessionId=" + this.sessionId
-						+ "（tenantId=" + this.tenantId + ", userId=" + this.userId + "）");
+				throw new IllegalStateException("Session purge pending lacks a usable identity sessionId=" + this.sessionId
+						+ " (tenantId=" + this.tenantId + ", userId=" + this.userId + ")");
 			}
 			return new TenantUser(this.tenantId, this.userId);
 		}
@@ -357,7 +357,7 @@ public class SessionPurgePendingStore {
 		if (!writeExecution(execution, next, now, true)) {
 			return false;
 		}
-		schedule(pending.key(), nextAt, "记录执行失败退避");
+		schedule(pending.key(), nextAt, "record execution failure backoff");
 		return true;
 	}
 
@@ -373,7 +373,7 @@ public class SessionPurgePendingStore {
 		if (!writeExecution(execution, next, now, true)) {
 			return false;
 		}
-		schedule(pending.key(), verifyAtMs, "排程记忆复核");
+		schedule(pending.key(), verifyAtMs, "schedule memory verification");
 		return true;
 	}
 
@@ -439,8 +439,8 @@ public class SessionPurgePendingStore {
 	/** pending 键名（显式身份；身份来自记录/调用方，不可用 = 失败）。 */
 	public static String pendingKey(String sessionId, Long tenantId, Long userId) {
 		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
-			throw new IllegalArgumentException("会话销毁 pending 缺少可用身份 sessionId=" + sessionId
-					+ "（tenantId=" + tenantId + ", userId=" + userId + "）");
+			throw new IllegalArgumentException("Session purge pending lacks a usable identity sessionId=" + sessionId
+					+ " (tenantId=" + tenantId + ", userId=" + userId + ")");
 		}
 		return TenantKeyScope.scoped(PENDING_PREFIX, tenantId, userId, sessionId);
 	}
@@ -462,7 +462,7 @@ public class SessionPurgePendingStore {
 	public Registration register(TenantUser identity, String sessionId, String purgeId, String requestedBy,
 			long nowMs) {
 		if (identity == null) {
-			throw new IllegalArgumentException("会话销毁 pending 必须带身份 sessionId=" + sessionId);
+			throw new IllegalArgumentException("Session purge pending requires an identity sessionId=" + sessionId);
 		}
 		Long tenantId = identity.tenantId();
 		Long userId = identity.userId();
@@ -471,7 +471,7 @@ public class SessionPurgePendingStore {
 		String key = candidate.key();
 		try {
 			// 1) 先放候选到期项：SET 失败时它是可被 listDue 清理的幽灵成员，而不是无到期项的台账。
-			schedule(key, nowMs, "登记候选");
+			schedule(key, nowMs, "register candidate");
 			// 2) 再落 pending 事实（不存在才写）。
 			String raw = this.redis.execute(REGISTER_IF_ABSENT, List.of(key), json(candidate));
 			// REGISTER_IF_ABSENT 在"新建"时返回 candidate JSON、已存在时返回既有 JSON，raw 不为 null；
@@ -489,12 +489,12 @@ public class SessionPurgePendingStore {
 				}
 				catch (RuntimeException parseEx) {
 					// 坏 JSON 的手工恢复入口：只有当前值仍是刚读到的坏值才覆盖，避免覆盖并发合法台账。
-					log.warn("Corrupt session purge pending JSON sessionId={} (manual DELETE overwrite recovers; recovery entry kept): {}",
-							sessionId, parseEx.getMessage());
+					log.warn("Corrupt session purge pending JSON sessionId={} (manual DELETE overwrite recovers; recovery entry kept)",
+							sessionId, parseEx);
 					Long replaced = this.redis.execute(REPLACE_IF_UNCHANGED, List.of(key), raw, json(candidate));
 					if (replaced == null || replaced <= 0L) {
 						throw new AiStateUnavailableException(
-								"无法恢复损坏的会话销毁 pending（并发变更）sessionId=" + sessionId);
+								"Cannot recover corrupt session purge pending (concurrent change) sessionId=" + sessionId);
 					}
 					effective = candidate;
 					created = true;
@@ -505,17 +505,17 @@ public class SessionPurgePendingStore {
 						Long.toString(nowMs), Integer.toString(MAX_AUTO_ATTEMPTS));
 				if (reset == null || reset.isBlank()) {
 					throw new AiStateUnavailableException(
-							"无法重置会话销毁 pending（owner 已变更）sessionId=" + sessionId);
+							"Cannot reset session purge pending (owner changed) sessionId=" + sessionId);
 				}
 				effective = parse(sessionId, reset);
 			}
 			// 3b) 对齐到期分：新建/手动重置都是 now，立即进入本轮候选。
-			schedule(key, effective.nextAtMs(), "登记对齐");
+			schedule(key, effective.nextAtMs(), "align registration");
 			return new Registration(effective, created);
 		}
 		catch (RuntimeException ex) {
 			// 台账已落就必须保留：它是守卫的一部分；调用方按失败中止，绝不删除保护事实后放行。
-			throw new AiStateUnavailableException("无法登记会话销毁 pending sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to register session purge pending sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -531,7 +531,7 @@ public class SessionPurgePendingStore {
 			raw = this.redis.opsForValue().get(key);
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("读取会话销毁 pending 失败 sessionId=" + sessionIdForLog, ex);
+			throw new AiStateUnavailableException("Failed to read session purge pending sessionId=" + sessionIdForLog, ex);
 		}
 		if (raw == null) {
 			return null;
@@ -544,7 +544,7 @@ public class SessionPurgePendingStore {
 			return this.mapper.readValue(raw, Pending.class);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("会话销毁 pending JSON 损坏 sessionId=" + sessionId, ex);
+			throw new IllegalStateException("Corrupt session purge pending JSON sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -557,7 +557,7 @@ public class SessionPurgePendingStore {
 			return Boolean.TRUE.equals(this.redis.hasKey(pendingKey(sessionId)));
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("读取会话销毁 pending 状态失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to read session purge pending state sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -580,7 +580,7 @@ public class SessionPurgePendingStore {
 			members = this.redis.opsForZSet().rangeByScore(DUE_KEY, Double.NEGATIVE_INFINITY, nowMs, 0, bounded);
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("读取会话销毁重试到期分失败", ex);
+			throw new AiStateUnavailableException("Failed to read session purge retry due scores", ex);
 		}
 		if (members == null || members.isEmpty()) {
 			return List.of();
@@ -603,8 +603,8 @@ public class SessionPurgePendingStore {
 			catch (RuntimeException ex) {
 				// 单成员 JSON 损坏：不摘除、不改 pending；只把到期分推到有界未来并 WARN，
 				// 保留手工 DELETE 的覆盖恢复入口，其余到期项继续处理。
-				log.warn("Corrupt session purge pending JSON member={} (quarantined to the future; ledger and recovery entry kept): {}",
-						member, ex.getMessage());
+				log.warn("Corrupt session purge pending JSON member={} (quarantined to the future; ledger and recovery entry kept)",
+						member, ex);
 				quarantineDueMember(member, nowMs);
 				continue;
 			}
@@ -672,11 +672,11 @@ public class SessionPurgePendingStore {
 			if (updated == null || updated <= 0L) {
 				return false;
 			}
-			schedule(key, verifyAtMs, "排程记忆复核");
+			schedule(key, verifyAtMs, "schedule memory verification");
 			return true;
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("排程会话销毁记忆复核失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to schedule session purge memory verification sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -704,11 +704,11 @@ public class SessionPurgePendingStore {
 			if (updated == null || updated <= 0L) {
 				return false;
 			}
-			schedule(key, nextAt, "记录失败退避");
+			schedule(key, nextAt, "record failure backoff");
 			return true;
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("更新会话销毁 pending 失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to update session purge pending sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -748,11 +748,11 @@ public class SessionPurgePendingStore {
 				}
 				return false;
 			}
-			schedule(key, nextAtMs, "延后重试");
+			schedule(key, nextAtMs, "defer retry");
 			return true;
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("延后会话销毁 pending 失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to defer session purge pending sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -818,7 +818,7 @@ public class SessionPurgePendingStore {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("退役会话销毁 pending 失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to retire session purge pending sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -839,7 +839,7 @@ public class SessionPurgePendingStore {
 		catch (RuntimeException ex) {
 			// 读不回来：无法确认是否已重置。不猜着补回（退役态不占发现面）；
 			// 并发 register 自己的 schedule 已写过到期项，手工路径不会因这次失败而丢。
-			log.debug("Ledger re-check after failed retirement failed key={} (not restored; next registration/operation self-heals): {}", key, ex.getMessage());
+			log.debug("Ledger re-check after failed retirement failed key={} (not restored; next registration/operation self-heals)", key, ex);
 			return;
 		}
 		if (latest == null) {
@@ -873,7 +873,7 @@ public class SessionPurgePendingStore {
 		catch (RuntimeException ex) {
 			// 读不回来：无法确认是否已重置。不猜着补回（退役态不占发现面）；
 			// 并发 register 自己的 schedule 已写过到期项，手工路径不会因这次失败而丢。
-			log.debug("Ledger re-check after retirement failed key={} (stays removed; next registration/operation self-heals): {}", key, ex.getMessage());
+			log.debug("Ledger re-check after retirement failed key={} (stays removed; next registration/operation self-heals)", key, ex);
 			return;
 		}
 		if (latest == null) {
@@ -925,7 +925,7 @@ public class SessionPurgePendingStore {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("删除会话销毁 pending 失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to delete session purge pending sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -940,7 +940,7 @@ public class SessionPurgePendingStore {
 		}
 		catch (RuntimeException ex) {
 			// 重读失败/坏 JSON：无法确认新台账，把该成员的到期分隔离到未来，保留恢复入口。
-			log.warn("Ledger re-check after completion delete failed key={} (due entry quarantined to the future; recovery entry kept): {}", key, ex.getMessage());
+			log.warn("Ledger re-check after completion delete failed key={} (due entry quarantined to the future; recovery entry kept)", key, ex);
 			quarantineDueMember(key, System.currentTimeMillis());
 			return;
 		}
@@ -948,12 +948,11 @@ public class SessionPurgePendingStore {
 			return;
 		}
 		try {
-			schedule(key, latest.nextAtMs(), "完成竞态补回");
+			schedule(key, latest.nextAtMs(), "restore completion race entry");
 		}
 		catch (RuntimeException ex) {
 			log.warn("Failed to re-add due score to the new ledger after completion delete key={} "
-					+ "(ledger kept; next registration/operation self-heals): {}", key,
-					ex.getMessage());
+					+ "(ledger kept; next registration/operation self-heals)", key, ex);
 		}
 	}
 
@@ -964,7 +963,7 @@ public class SessionPurgePendingStore {
 		}
 		catch (RuntimeException ex) {
 			throw new AiStateUnavailableException(
-					"更新会话销毁重试到期分失败（" + action + "）key=" + key, ex);
+					"Failed to update session purge retry due score (" + action + ") key=" + key, ex);
 		}
 	}
 
@@ -974,7 +973,7 @@ public class SessionPurgePendingStore {
 			this.redis.opsForZSet().add(DUE_KEY, key, nextAtMs);
 		}
 		catch (RuntimeException ex) {
-			log.debug("Failed to correct session purge retry due score key={}: {}", key, ex.getMessage());
+			log.debug("Failed to correct session purge retry due score key={}", key, ex);
 		}
 	}
 
@@ -995,7 +994,7 @@ public class SessionPurgePendingStore {
 		}
 		catch (RuntimeException ex) {
 			// 隔离写失败也不摘除：下轮仍会取到并重试，绝不静默变成永久 410。
-			log.warn("Failed to quarantine corrupt-JSON due entry key={} (retried next round; never removed permanently): {}", key, ex.getMessage());
+			log.warn("Failed to quarantine corrupt-JSON due entry key={} (retried next round; never removed permanently)", key, ex);
 		}
 	}
 
@@ -1007,7 +1006,7 @@ public class SessionPurgePendingStore {
 			this.redis.opsForZSet().remove(DUE_KEY, member);
 		}
 		catch (RuntimeException ex) {
-			log.warn("Failed to clean session purge retry due member={} (stale entries are filtered by the next scan): {}", member, ex.getMessage());
+			log.warn("Failed to clean session purge retry due member={} (stale entries are filtered by the next scan)", member, ex);
 		}
 	}
 
@@ -1025,7 +1024,7 @@ public class SessionPurgePendingStore {
 			return this.mapper.writeValueAsString(pending);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法序列化会话销毁 pending sessionId=" + pending.sessionId(), ex);
+			throw new IllegalStateException("Failed to serialize session purge pending sessionId=" + pending.sessionId(), ex);
 		}
 	}
 

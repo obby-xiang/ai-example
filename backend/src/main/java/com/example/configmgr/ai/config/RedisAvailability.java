@@ -100,11 +100,11 @@ public class RedisAvailability {
 				this.lastError = null;
 			}
 			else {
-				recordFailure("PING returned null (no PONG)");
+				recordFailure("PING returned null (no PONG)", null);
 			}
 		}
 		catch (Exception ex) {
-			recordFailure(ex.getClass().getSimpleName() + ": " + ex.getMessage());
+			recordFailure(ex.getClass().getSimpleName(), ex);
 		}
 		finally {
 			candidate.complete(this.available);
@@ -121,7 +121,7 @@ public class RedisAvailability {
 			Thread.currentThread().interrupt();
 		}
 		catch (Exception ex) {
-			log.debug("Redis probe wait ended without a completed result error={}", ex.getMessage());
+			log.debug("Redis probe wait ended without a completed result", ex);
 		}
 		return this.available;
 	}
@@ -132,17 +132,26 @@ public class RedisAvailability {
 	 * <p>两条失败路径（抛异常 / {@code PONG == null}）共用这一处，避免再次出现"某条路径不告警"
 	 * 的漂移 —— 那会让"可用 → 不可用"的唯一 WARN 被吞掉。仅 single-flight 的探活执行者调用。
 	 */
-	private void recordFailure(String error) {
+	private void recordFailure(String error, Throwable cause) {
 		boolean wasAvailable = this.available;
 		this.available = false;
 		this.failures.incrementAndGet();
 		this.lastError = error;
 		if (wasAvailable) {
-			log.warn("Redis preflight probe failed, AI endpoints fail fast from now on"
-					+ " (503 AI_REDIS_UNAVAILABLE) error={}", error);
+			if (cause == null) {
+				log.warn("Redis preflight probe failed, AI endpoints fail fast from now on"
+						+ " (503 AI_REDIS_UNAVAILABLE) error={}", error);
+			}
+			else {
+				log.warn("Redis preflight probe failed, AI endpoints fail fast from now on"
+						+ " (503 AI_REDIS_UNAVAILABLE) error={}", error, cause);
+			}
+		}
+		else if (cause == null) {
+			log.debug("Redis preflight probe still failing error={}", error);
 		}
 		else {
-			log.debug("Redis preflight probe still failing error={}", error);
+			log.debug("Redis preflight probe still failing error={}", error, cause);
 		}
 	}
 
@@ -159,7 +168,7 @@ public class RedisAvailability {
 		return !this.available;
 	}
 
-	/** 探活态（仅供 {@code GET /api/ai/health} 与证据）：含原始 {@code lastError} 与统一降级计数。 */
+	/** 探活态（仅供 {@code GET /api/ai/health} 与证据）：含安全分类 {@code lastError} 与统一降级计数。 */
 	public Map<String, Object> describe() {
 		Map<String, Object> out = describeForResponse();
 		out.put("lastError", this.lastError);
@@ -172,10 +181,8 @@ public class RedisAvailability {
 	/**
 	 * 503 响应体里的 redis 子对象：只回安全事实（判据、探活次数、失败次数、时间锚点）。
 	 *
-	 * <p>为什么去掉 {@code lastError}：它含异常类名与连接地址（如
-	 * {@code RedisConnectionFailureException: … 127.0.0.1:6379}），属于实现细节，不该出现在
-	 * 普通用户可见的 503 body 里。诊断不丢 —— 原始值仍进 WARN 日志与 {@code /health} 的
-	 * {@link #describe()}；二者与这里同源（本方法先出安全子集，{@code describe()} 再补诊断字段）。
+	 * <p>普通用户可见的 503 body 不带 {@code lastError}；运维健康面只补充异常类名或空 PING 分类。
+	 * 原始异常对象与连接细节仅通过服务端日志的 {@link Throwable} 参数保留。
 	 */
 	public Map<String, Object> describeForResponse() {
 		Map<String, Object> out = new LinkedHashMap<>();
@@ -196,8 +203,8 @@ public class RedisAvailability {
 	/**
 	 * 503 响应体的 message（用户面）：短句、可操作，不含异常类名/连接地址等内部实现细节。
 	 *
-	 * <p>诊断信息不丢：探活失败的类名与地址仍留在 WARN 日志与 /health 的 {@code lastError}；
-	 * 503 体走 {@link #describeForResponse()}，不带 {@code lastError}。
+	 * <p>诊断信息不丢：探活异常通过服务端 WARN/DEBUG 日志保留；/health 的 {@code lastError}
+	 * 只含安全分类，503 体走 {@link #describeForResponse()}，不带 {@code lastError}。
 	 */
 	public String reason() {
 		return "AI 服务暂不可用，请稍后重试。";

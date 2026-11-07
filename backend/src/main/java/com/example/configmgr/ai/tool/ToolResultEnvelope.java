@@ -134,7 +134,8 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 			return JSON.writeValueAsString(this);
 		}
 		catch (JsonProcessingException ex) {
-			throw new CodedIllegalStateException(ErrorCodes.TOOL_ENVELOPE_SERIALIZE_FAILED, "工具结果信封序列化失败：" + this.message, ex);
+			throw new CodedIllegalStateException(ErrorCodes.TOOL_ENVELOPE_SERIALIZE_FAILED,
+					"Failed to serialize tool result envelope", ex);
 		}
 	}
 
@@ -290,7 +291,8 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 			return JSON.readValue(unwrapModelJson(json), ToolResultEnvelope.class);
 		}
 		catch (JsonProcessingException ex) {
-			throw new CodedIllegalArgumentException(ErrorCodes.TOOL_ENVELOPE_PARSE_FAILED, "工具结果信封解析失败：" + json, ex);
+			throw new CodedIllegalArgumentException(ErrorCodes.TOOL_ENVELOPE_PARSE_FAILED,
+					"Failed to parse tool result envelope", ex);
 		}
 	}
 

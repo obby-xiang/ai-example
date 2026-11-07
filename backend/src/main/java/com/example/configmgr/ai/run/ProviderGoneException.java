@@ -21,12 +21,12 @@ public class ProviderGoneException extends IllegalStateException {
 	private final String modelId;
 
 	public ProviderGoneException(String runId, Long providerId, String modelId) {
-		this(runId, providerId, modelId, "该 provider/模型此刻不可用；不跨 provider 续跑");
+		this(runId, providerId, modelId, "This provider/model is unavailable; resume must not switch providers");
 	}
 
 	public ProviderGoneException(String runId, Long providerId, String modelId, String detail) {
-		super("续跑精确绑定失败 runId=" + runId + " providerId=" + providerId + " model=" + modelId
-				+ "（" + detail + "）");
+		super("Failed to bind resume to the exact provider runId=" + runId + " providerId=" + providerId + " model=" + modelId
+				+ " (" + detail + ")");
 		this.runId = runId;
 		this.providerId = providerId;
 		this.modelId = modelId;

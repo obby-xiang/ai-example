@@ -90,7 +90,7 @@ public class AiSessionPurgeController {
 		}
 		catch (IllegalArgumentException ex) {
 			return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-				.body(errorBody("BAD_REQUEST", ex.getMessage()));
+				.body(errorBody("BAD_REQUEST", "会话销毁请求无效，请检查请求后重试"));
 		}
 		Map<String, Object> body = new LinkedHashMap<>(result.toBody());
 		// 身份快照（纯 additive）：反馈行的删除面 = sessionId + tenantId + userId（V11），

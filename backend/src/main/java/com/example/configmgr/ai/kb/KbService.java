@@ -213,7 +213,7 @@ public class KbService {
             this.analyzer.close();
         }
         catch (Exception e) {
-            log.debug("Failed to close KB analyzer: {}", e.getMessage());
+            log.debug("Failed to close KB analyzer", e);
         }
     }
 
@@ -223,7 +223,7 @@ public class KbService {
         }
         catch (Throwable e) {
             // doRefresh 已兜住业务失败；这里只兜"兜底逻辑自身"（绝不让定时线程死亡）
-            log.warn("KB scheduled refresh threw unexpectedly (old index kept): {}", safeMessage(e));
+            log.warn("KB scheduled refresh threw unexpectedly (old index kept)", e);
         }
     }
 
@@ -258,9 +258,8 @@ public class KbService {
         this.retryNotBeforeNanos = System.nanoTime() + backoffMillis(this.retryAttempts) * 1_000_000L;
         if (this.retryAttempts >= MAX_VERSION_REBUILD_ATTEMPTS) {
             log.warn("KB version {} failed to rebuild {} times in a row; auto-retry paused "
-                    + "(old index kept, next attempt via scheduled refresh every {} or a new version): {}",
-                    version, this.retryAttempts, this.properties.getKb().getRefreshInterval(),
-                    this.lastError);
+                    + "(old index kept, next attempt via scheduled refresh every {} or a new version)",
+                    version, this.retryAttempts, this.properties.getKb().getRefreshInterval());
         }
     }
 
@@ -298,7 +297,7 @@ public class KbService {
         }
         catch (java.util.concurrent.RejectedExecutionException e) {
             this.reloadRunning.set(false);
-            this.lastError = "KB 刷新执行器已停止";
+            this.lastError = "KB refresh executor is stopped";
             return false;
         }
         try {
@@ -308,8 +307,8 @@ public class KbService {
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
-            this.lastError = "KB reload 等待超过预算 " + refreshWaitBudget.toMillis()
-                    + "ms；未强制中断执行中的 I/O";
+            this.lastError = "KB reload wait exceeded budget " + refreshWaitBudget.toMillis()
+                    + "ms; running I/O was not forcibly interrupted";
             return false;
         }
         catch (InterruptedException e) {
@@ -317,18 +316,20 @@ public class KbService {
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
-            this.lastError = "KB reload 等待被中断";
+            this.lastError = "KB reload wait was interrupted";
             return false;
         }
         catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException e) {
-            this.lastError = safeMessage(e.getCause() == null ? e : e.getCause());
+            this.lastError = "KB refresh failed; retry later";
+            log.warn("KB refresh execution failed", e.getCause() == null ? e : e.getCause());
             return false;
         }
         catch (KbSourceException e) {
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
-            this.lastError = safeMessage(e);
+            this.lastError = "KB refresh failed; retry later";
+            log.warn("KB refresh failed", e);
             return false;
         }
     }
@@ -349,7 +350,7 @@ public class KbService {
             }
             KbManifest manifest = fetched.manifest();
             if (manifest == null) {
-                throw new KbSourceException("知识源未返回 manifest");
+                throw new KbSourceException("Knowledge source returned no manifest");
             }
             manifest.validate();
 
@@ -369,7 +370,7 @@ public class KbService {
                 String content = MarkdownChunker.normalize(rawContent);
                 String actualSha = KbHashing.sha256Text(content);
                 if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
-                    throw new KbSourceException("KB 正文 SHA-256（去 BOM 并统一 LF 后）与 manifest 声明不一致：" + meta.id());
+                    throw new KbSourceException("KB content SHA-256 (BOM stripped, LF normalized) does not match manifest: " + meta.id());
                 }
                 KbDocMeta effectiveMeta = meta.sha() == null || meta.sha().isBlank() ? meta.withSha(actualSha) : meta;
                 List<KbSection> sections = MarkdownChunker.sections(content, effectiveMeta.title());
@@ -409,22 +410,23 @@ public class KbService {
             return true;
         }
         catch (Exception e) {
-            this.lastError = safeMessage(e);
+            this.lastError = "KB refresh failed; retry later";
             this.consecutiveFailures++;
             if ((this.consecutiveFailures - 1) % FAILURE_WARN_EVERY == 0) {
-                log.warn("KB refresh failed (old index kept, search surface unchanged; consecutive failure #{}): {}",
-                        this.consecutiveFailures, this.lastError);
+                log.warn("KB refresh failed (old index kept, search surface unchanged; consecutive failure #{})",
+                        this.consecutiveFailures, e);
             }
             else {
-                log.debug("KB refresh still failing (old index kept; consecutive failure #{}): {}", this.consecutiveFailures,
-                        this.lastError);
+                log.debug("KB refresh still failing (old index kept; consecutive failure #{})", this.consecutiveFailures,
+                        e);
             }
             if (buildDir != null) {
                 try {
                     deleteRecursively(buildDir, budget);
                 }
                 catch (KbSourceException cleanupError) {
-                    this.lastError = safeMessage(cleanupError);
+                    this.lastError = "KB refresh failed; retry later";
+                    log.warn("KB build cleanup failed", cleanupError);
                 }
             }
             return false;
@@ -463,7 +465,7 @@ public class KbService {
             budget.check();
         }
         catch (IOException e) {
-            log.debug("Failed to clean stale KB build dir: {}", e.getMessage());
+            log.debug("Failed to clean stale KB build dir", e);
         }
     }
 
@@ -572,7 +574,7 @@ public class KbService {
         }
         String trimmed = query == null ? "" : query.strip();
         if (trimmed.isEmpty()) {
-            return KbSearchResult.invalid("检索词不能为空：请给出要查的业务术语、章节名或一句话问题");
+            return KbSearchResult.invalid("Search query is required; provide a business term, section name, or question");
         }
         Snapshot acquired = acquire();
         if (acquired == null) {
@@ -581,7 +583,7 @@ public class KbService {
         try {
             List<String> terms = analyzeTerms(trimmed);
             if (terms.isEmpty() || terms.stream().allMatch(String::isBlank)) {
-                return KbSearchResult.invalid("检索词没有可检索的内容（只含标点或停用词），请补充业务关键词");
+                return KbSearchResult.invalid("Search query has no searchable content because it contains only punctuation or stop words; add business keywords");
             }
             int limit = effectiveTopK(topK);
             Query parsed = buildQuery(terms);
@@ -626,7 +628,8 @@ public class KbService {
                     : KbSearchResult.ok(hits, terms);
         }
         catch (Exception e) {
-            return KbSearchResult.error(safeMessage(e));
+            log.error("KB search failed", e);
+            return KbSearchResult.error("Knowledge base search failed; retry later");
         }
         finally {
             acquired.release();
@@ -791,7 +794,8 @@ public class KbService {
                     target == null ? null : target.path(), text, toc, truncated, nextOffset);
         }
         catch (Exception e) {
-            return KbReadResult.error(safeMessage(e));
+            log.error("KB document read failed", e);
+            return KbReadResult.error("Knowledge base read failed; retry later");
         }
         finally {
             acquired.release();
@@ -864,7 +868,7 @@ public class KbService {
             return KbLookupResult.disabled(nullSafe(term), normalized);
         }
         if (normalized.isEmpty()) {
-            return KbLookupResult.error(nullSafe(term), normalized, "术语不能为空：请给出要查的术语或口头叫法");
+            return KbLookupResult.error(nullSafe(term), normalized, "Term is required; provide a formal or colloquial term");
         }
         Snapshot acquired = acquire();
         if (acquired == null) {
@@ -882,7 +886,8 @@ public class KbService {
                     entry.title, entry.section, entry.updatedAt);
         }
         catch (Exception e) {
-            return KbLookupResult.error(nullSafe(term), normalized, safeMessage(e));
+            log.error("KB term lookup failed", e);
+            return KbLookupResult.error(nullSafe(term), normalized, "Knowledge base term lookup failed; retry later");
         }
         finally {
             acquired.release();
@@ -988,14 +993,6 @@ public class KbService {
         return value == null ? "" : value;
     }
 
-    private static String safeMessage(Throwable error) {
-        String message = error.getMessage();
-        if (message == null || message.isBlank()) {
-            message = error.getClass().getSimpleName();
-        }
-        // 原始错误只供服务端日志与管理诊断；工具层不得把它转发给模型或用户。
-        return message.length() > 300 ? message.substring(0, 300) + "…" : message;
-    }
 
     private static void deleteRecursively(Path path) {
         if (path == null || !Files.exists(path)) {

@@ -68,7 +68,7 @@ public final class UsageDetails {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("usage optional dimension extraction failed (turn unaffected): {}", ex.getMessage());
+			log.debug("usage optional dimension extraction failed (turn unaffected)", ex);
 		}
 	}
 

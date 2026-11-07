@@ -53,14 +53,14 @@ public class SeedLock {
 	 */
 	public void lock(String lockName) {
 		if (!TransactionSynchronizationManager.isActualTransactionActive()) {
-			throw new IllegalStateException("SeedLock 必须在事务内调用（" + lockName + "）："
-					+ "autocommit 下 FOR UPDATE 的锁在语句结束即释放，等于没加锁");
+			throw new IllegalStateException("SeedLock must be called within a transaction (" + lockName + "): "
+					+ "autocommit releases the FOR UPDATE lock when the statement ends, leaving the operation unprotected");
 		}
 		List<String> rows = this.jdbcTemplate.queryForList(
 				"SELECT lock_name FROM app_lock WHERE lock_name = ? FOR UPDATE", String.class, lockName);
 		if (rows.isEmpty()) {
-			throw new IllegalStateException("app_lock 缺少行 '" + lockName + "'：当前空库基线 V1__schema 未应用"
-					+ "（H2 用 classpath:db/migration，PG 用 classpath:db/postgresql），种子无法单飞");
+			throw new IllegalStateException("app_lock row '" + lockName + "' is missing; the V1__schema baseline has not been applied "
+					+ "(H2: classpath:db/migration; PostgreSQL: classpath:db/postgresql), so seed single-flight cannot be enforced");
 		}
 		this.jdbcTemplate.update(
 				"UPDATE app_lock SET holder = ?, acquired_at = CURRENT_TIMESTAMP WHERE lock_name = ?",

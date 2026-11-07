@@ -255,12 +255,12 @@ public class JobHeartbeatRegistry {
      */
     public static Duration runnerActiveTtlFor(Duration maxExecutionTime) {
         if (maxExecutionTime == null || maxExecutionTime.isZero() || maxExecutionTime.isNegative()) {
-            throw new IllegalStateException("app.job.max-execution-time 必须 > 0，无法派生 runner-active TTL");
+            throw new IllegalStateException("app.job.max-execution-time must be > 0 to derive the runner-active TTL");
         }
         Duration ttl = maxExecutionTime.multipliedBy(2).plus(RUNNER_ACTIVE_TTL_MARGIN);
         if (ttl.compareTo(maxExecutionTime) <= 0) {
             throw new IllegalStateException("runner-active TTL(" + ttl
-                    + ") 必须 > max-execution-time(" + maxExecutionTime + ")");
+                    + ") must be > max-execution-time(" + maxExecutionTime + ")");
         }
         return ttl;
     }
@@ -419,13 +419,13 @@ public class JobHeartbeatRegistry {
             return false;
         }
         if (redis == null) {
-            throw new RunnerActiveStateUnavailableException(jobId, "Redis 模板未装配");
+            throw new RunnerActiveStateUnavailableException(jobId, "Redis template is not wired");
         }
         try {
             String value = redis.opsForValue().get(key(jobId));
             return value != null && !value.startsWith(REVOKED_VALUE_PREFIX);
         } catch (RuntimeException e) {
-            throw new RunnerActiveStateUnavailableException(jobId, e.getMessage());
+            throw new RunnerActiveStateUnavailableException(jobId, e);
         }
     }
 
@@ -512,7 +512,7 @@ public class JobHeartbeatRegistry {
             tickOnce();
         } catch (Throwable t) {
             // 单个周期失败不终止 ticker（下个周期重试）；共享键失联由 TTL 兜底
-            log.warn("Shared heartbeat renewal tick failed, retrying next period error={}", t.getMessage());
+            log.warn("Shared heartbeat renewal tick failed, retrying next period", t);
         }
     }
 
@@ -577,7 +577,7 @@ public class JobHeartbeatRegistry {
             }
             return new SharedBeat(SharedBeatState.STALE, instanceOf(anchor));
         } catch (RuntimeException e) {
-            log.debug("Shared heartbeat read failed, fail-closed this round jobId={} error={}", jobId, e.getMessage());
+            log.debug("Shared heartbeat read failed, fail-closed this round jobId={}", jobId, e);
             return SharedBeat.unavailable();
         }
     }
@@ -618,7 +618,7 @@ public class JobHeartbeatRegistry {
             }
             return acquired ? JudgeLease.ACQUIRED : JudgeLease.HELD;
         } catch (RuntimeException e) {
-            log.warn("Dead-judgement lease unavailable (Redis error) jobId={} error={}", jobId, e.getMessage());
+            log.warn("Dead-judgement lease unavailable (Redis error) jobId={}", jobId, e);
             return JudgeLease.UNAVAILABLE;
         }
     }
@@ -683,7 +683,7 @@ public class JobHeartbeatRegistry {
                 try {
                     jobId = Long.valueOf(String.valueOf(entry.getKey()));
                 } catch (NumberFormatException ex) {
-                    log.debug("Runner host index contains a non-numeric job id field={}", entry.getKey());
+                    log.debug("Runner host index contains a non-numeric job id field={}", entry.getKey(), ex);
                     continue;
                 }
                 if (cleanupDeadLocalRunner(jobId, String.valueOf(entry.getValue()))) {
@@ -691,7 +691,7 @@ public class JobHeartbeatRegistry {
                 }
             }
         } catch (RuntimeException ex) {
-            log.warn("Startup runner host index read failed, remaining keys left to TTL error={}", ex.getMessage());
+            log.warn("Startup runner host index read failed, remaining keys left to TTL", ex);
             return cleaned;
         }
         if (inspected >= maxKeys) {
@@ -733,7 +733,7 @@ public class JobHeartbeatRegistry {
             }
             return false;
         } catch (RuntimeException e) {
-            log.warn("Runner active key cleanup failed, left to TTL jobId={} error={}", jobId, e.getMessage());
+            log.warn("Runner active key cleanup failed, left to TTL jobId={}", jobId, e);
             return false;
         }
     }
@@ -769,8 +769,8 @@ public class JobHeartbeatRegistry {
             Object indexedValue = redis.opsForHash().get(hostIndexKey(), jobId.toString());
             return indexedValue == null ? localValue : String.valueOf(indexedValue);
         } catch (RuntimeException ex) {
-            log.warn("Previous runner generation read failed; existing index preserved jobId={} error={}",
-                    jobId, ex.getMessage());
+            log.warn("Previous runner generation read failed; existing index preserved jobId={}",
+                    jobId, ex);
             return localValue;
         }
     }
@@ -790,8 +790,8 @@ public class JobHeartbeatRegistry {
             redis.execute(WRITE_INDEX_SCRIPT, List.of(hostIndexKey()), jobId.toString(), value,
                     Long.toString(runnerActiveTtl.toMillis()));
         } catch (RuntimeException ex) {
-            log.warn("Runner host index write failed; active key TTL remains authoritative jobId={} error={}",
-                    jobId, ex.getMessage());
+            log.warn("Runner host index write failed; active key TTL remains authoritative jobId={}",
+                    jobId, ex);
         }
     }
 
@@ -806,7 +806,7 @@ public class JobHeartbeatRegistry {
         try {
             redis.execute(DELETE_INDEX_VALUE_SCRIPT, List.of(indexKey), jobId.toString(), value);
         } catch (RuntimeException ex) {
-            log.warn("Runner host index cleanup failed jobId={} error={}", jobId, ex.getMessage());
+            log.warn("Runner host index cleanup failed jobId={}", jobId, ex);
         }
     }
 
@@ -857,8 +857,8 @@ public class JobHeartbeatRegistry {
             this.authorityCache.put(jobId, new AuthorityCache(current, now + AUTHORITY_CACHE_MILLIS));
             return current;
         } catch (RuntimeException ex) {
-            log.debug("Authoritative job state read unknown; liveness renewal continues jobId={} error={}",
-                    jobId, ex.getMessage());
+            log.debug("Authoritative job state read unknown; liveness renewal continues jobId={}",
+                    jobId, ex);
             this.authorityCache.put(jobId, new AuthorityCache(AuthorityState.UNKNOWN, now + UNKNOWN_CACHE_MILLIS));
             return AuthorityState.UNKNOWN;
         }
@@ -874,7 +874,7 @@ public class JobHeartbeatRegistry {
             return this.jobRepository.findCancelStateById(jobId)
                     .map(JobRepository.CancelState::getCancelVersion).orElse(null);
         } catch (RuntimeException ex) {
-            log.debug("Cancel version unavailable; existing runner fence preserved jobId={} error={}", jobId, ex.getMessage());
+            log.debug("Cancel version unavailable; existing runner fence preserved jobId={}", jobId, ex);
             return null;
         }
     }
@@ -911,7 +911,7 @@ public class JobHeartbeatRegistry {
                     value, Long.toString(ttl.toMillis()));
             return written != null && written > 0L;
         } catch (RuntimeException ex) {
-            log.debug("Generation-fenced runner write failed jobId={} error={}", jobId, ex.getMessage());
+            log.debug("Generation-fenced runner write failed jobId={}", jobId, ex);
             return false;
         }
     }
@@ -983,8 +983,8 @@ public class JobHeartbeatRegistry {
             }
             return true;
         } catch (RuntimeException ex) {
-            log.warn("Generation-fenced heartbeat or host index pipeline failed, remainder of tick skipped error={}",
-                    ex.getMessage());
+            log.warn("Generation-fenced heartbeat or host index pipeline failed, remainder of tick skipped",
+                    ex);
             return false;
         }
     }
@@ -1015,8 +1015,8 @@ public class JobHeartbeatRegistry {
                 }
             }
         } catch (RuntimeException ex) {
-            log.warn("Shared runner revocation write failed; DB terminal state remains authoritative jobId={} error={}",
-                    jobId, ex.getMessage());
+            log.warn("Shared runner revocation write failed; DB terminal state remains authoritative jobId={}",
+                    jobId, ex);
         }
     }
 
@@ -1029,7 +1029,7 @@ public class JobHeartbeatRegistry {
             Long deleted = redis.execute(DELETE_GENERATION_SCRIPT, List.of(redisKey), prefix);
             return deleted != null && deleted > 0L ? DeleteOutcome.DELETED : DeleteOutcome.NOT_OWNER;
         } catch (RuntimeException ex) {
-            log.warn("Generation-fenced runner delete failed jobId={} error={}", jobId, ex.getMessage());
+            log.warn("Generation-fenced runner delete failed jobId={}", jobId, ex);
             return DeleteOutcome.ERROR;
         }
     }
@@ -1094,13 +1094,13 @@ public class JobHeartbeatRegistry {
 
     public static class JobStateUnavailableException extends RuntimeException {
         public JobStateUnavailableException(Long jobId) {
-            super("无法确认作业 #" + jobId + " 的数据库状态，作业未启动");
+            super("Could not confirm the database state for job #" + jobId + "; the job was not started");
         }
     }
 
     public static class JobNotInFlightException extends RuntimeException {
         public JobNotInFlightException(Long jobId) {
-            super("作业 #" + jobId + " 已终态或不存在，不能启动 runner");
+            super("Job #" + jobId + " is terminal or does not exist; its runner cannot be started");
         }
     }
 
@@ -1143,7 +1143,12 @@ public class JobHeartbeatRegistry {
         private final Long jobId;
 
         public RunnerActiveStateUnavailableException(Long jobId, String detail) {
-            super("无法确认作业 #" + jobId + " 的 runner 活跃状态：" + detail);
+            super("Could not confirm runner activity for job #" + jobId + ": " + detail);
+            this.jobId = jobId;
+        }
+
+        public RunnerActiveStateUnavailableException(Long jobId, Throwable cause) {
+            super("Could not confirm runner activity for job #" + jobId + " because Redis is unreadable", cause);
             this.jobId = jobId;
         }
 

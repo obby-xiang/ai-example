@@ -142,7 +142,7 @@ public class AiProviderRegistry {
     public ProviderRuntime current() {
         return tryCurrent().orElseThrow(() -> {
             AiConfigService.Availability availability = this.configService.availability();
-            return new AiUnavailableException(availability.code(), availability.reason());
+            return new AiUnavailableException(availability.code(), "AI is unavailable: " + availability.code());
         });
     }
 
@@ -371,7 +371,7 @@ public class AiProviderRegistry {
         catch (RuntimeException ex) {
             // 读不到版本时对齐到 MIN_VALUE：下一次取用会再清一次（空表清空是幂等的），不会漏淘汰。
             version = Long.MIN_VALUE;
-            log.warn("cannot read config version while clearing provider runtimes (next use realigns) error={}", ex.getMessage());
+            log.warn("cannot read config version while clearing provider runtimes (next use realigns)", ex);
         }
         synchronized (this.buildLock) {
             int evicted = this.runtimes.size();
@@ -520,8 +520,8 @@ public class AiProviderRegistry {
             setter.accept(value);
         }
         catch (RuntimeException ex) {
-            log.warn("ai_setting[{}] value \"{}\" is unusable ({}): ignoring it and keeping the spring.ai.openai.* default",
-                    settingKey, abbreviate(raw), ex.getMessage());
+            log.warn("ai_setting[{}] value \"{}\" is unusable: ignoring it and keeping the spring.ai.openai.* default",
+                    settingKey, abbreviate(raw), ex);
         }
     }
 
@@ -534,8 +534,8 @@ public class AiProviderRegistry {
             setter.accept(value);
         }
         catch (RuntimeException ex) {
-            log.warn("ai_setting[{}] value \"{}\" is unusable ({}): ignoring it and keeping the spring.ai.openai.* default",
-                    settingKey, abbreviate(raw), ex.getMessage());
+            log.warn("ai_setting[{}] value \"{}\" is unusable: ignoring it and keeping the spring.ai.openai.* default",
+                    settingKey, abbreviate(raw), ex);
         }
     }
 

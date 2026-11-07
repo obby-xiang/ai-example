@@ -77,7 +77,7 @@ public class AiConfigSeeder implements ApplicationRunner {
         }
         catch (Exception ex) {
             // 种子失败绝不能让应用起不来：表空 + 无种子 = /health 503（与今天无 key 等价）
-            log.warn("AI config seeding incomplete (startup unaffected, AI endpoints degrade by availability) error={}", ex.getMessage(), ex);
+            log.warn("AI config seeding incomplete (startup unaffected, AI endpoints degrade by availability)", ex);
         }
     }
 
@@ -121,7 +121,7 @@ public class AiConfigSeeder implements ApplicationRunner {
         catch (DataIntegrityViolationException | org.hibernate.exception.ConstraintViolationException ex) {
             // 唯一约束兜底：另一实例在同一瞬间种好了。重载快照让对方写的那行生效
             // （对方的 DB 版本递增在提交后可见，本实例的周期版本比对也会补上）。
-            log.info("AI config seeding raced with another instance (already written, nothing to do) error={}", ex.getClass().getSimpleName());
+            log.info("AI config seeding raced with another instance (already written, nothing to do)", ex);
             this.configService.reload();
             return false;
         }

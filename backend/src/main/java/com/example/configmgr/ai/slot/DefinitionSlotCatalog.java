@@ -74,7 +74,7 @@ public class DefinitionSlotCatalog implements DefinitionCatalog {
 			return values;
 		}
 		catch (Exception ex) {
-			log.debug("could not parse options_json; treating options as unenumerable error={}", ex.getMessage());
+			log.debug("could not parse options_json; treating options as unenumerable", ex);
 			return List.of();
 		}
 	}

@@ -54,17 +54,17 @@ final class RedisClusterScanSupport {
 	 */
 	static List<String> scan(StringRedisTemplate template, ScanOptions options, int maxKeys) {
 		if (template == null) {
-			throw new AiStateUnavailableException("SCAN 失败：StringRedisTemplate 未装配", null);
+			throw new AiStateUnavailableException("SCAN failed: StringRedisTemplate is not configured", null);
 		}
 		RedisConnectionFactory factory;
 		try {
 			factory = template.getConnectionFactory();
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("SCAN 失败：无法获取 Redis 连接工厂", ex);
+			throw new AiStateUnavailableException("SCAN failed: unable to obtain Redis connection factory", ex);
 		}
 		if (factory == null) {
-			throw new AiStateUnavailableException("SCAN 失败：Redis 连接工厂未装配", null);
+			throw new AiStateUnavailableException("SCAN failed: Redis connection factory is not configured", null);
 		}
 		try (RedisConnection connection = factory.getConnection()) {
 			if (connection instanceof RedisClusterConnection cluster) {
@@ -76,7 +76,7 @@ final class RedisClusterScanSupport {
 			throw ex;
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("SCAN 失败（连接/节点不可用）", ex);
+			throw new AiStateUnavailableException("SCAN failed (connection/node unavailable)", ex);
 		}
 	}
 
@@ -90,7 +90,7 @@ final class RedisClusterScanSupport {
 			drain(cursor, keys, maxKeys);
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("SCAN 失败（standalone）", ex);
+			throw new AiStateUnavailableException("SCAN failed (standalone)", ex);
 		}
 		return List.copyOf(keys);
 	}
@@ -101,10 +101,10 @@ final class RedisClusterScanSupport {
 			nodes = cluster.clusterGetNodes();
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("SCAN 失败：无法读取 cluster 拓扑", ex);
+			throw new AiStateUnavailableException("SCAN failed: unable to read cluster topology", ex);
 		}
 		if (nodes == null) {
-			throw new AiStateUnavailableException("SCAN 失败：cluster 拓扑为空", null);
+			throw new AiStateUnavailableException("SCAN failed: cluster topology is empty", null);
 		}
 		Set<String> keys = new LinkedHashSet<>();
 		boolean anyMaster = false;
@@ -122,7 +122,7 @@ final class RedisClusterScanSupport {
 			}
 			catch (RuntimeException ex) {
 				// 某 master 失败 = 本次扫描不完整：上抛，调用方不得用部分结果冒充完整。
-				throw new AiStateUnavailableException("SCAN 失败：cluster master " + node.getHost() + ":"
+				throw new AiStateUnavailableException("SCAN failed: cluster master " + node.getHost() + ":"
 						+ node.getPort(), ex);
 			}
 			if (maxKeys > 0 && keys.size() >= maxKeys) {
@@ -130,7 +130,7 @@ final class RedisClusterScanSupport {
 			}
 		}
 		if (!anyMaster) {
-			throw new AiStateUnavailableException("SCAN 失败：cluster 没有可用 master", null);
+			throw new AiStateUnavailableException("SCAN failed: no available cluster master", null);
 		}
 		return List.copyOf(keys);
 	}

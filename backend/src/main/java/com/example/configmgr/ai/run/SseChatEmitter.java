@@ -715,9 +715,9 @@ public class SseChatEmitter {
 		// 装配方（Spring 或测试/非 Spring 路径）只要把上限配到下限以下，这里立刻失败，
 		// 而不是等到某一轮正文超限时才发现"无法安全分片"（那时只能截断/空串，两者都被禁止）。
 		if (maxFrameBytes < FrameSizeLimiter.MIN_FRAME_BYTES) {
-			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes 必须 >= "
-					+ FrameSizeLimiter.MIN_FRAME_BYTES + "（当前 = " + maxFrameBytes
-					+ "）：低于下限时 delta 帧骨架加一个多字节码点都放不下，正文无法安全分片（拒绝截断/空串兜底）");
+			throw new IllegalStateException("app.ai.result-budget.ui.max-frame-bytes must be >= "
+					+ FrameSizeLimiter.MIN_FRAME_BYTES + " (actual=" + maxFrameBytes
+					+ "): below this limit, a delta frame skeleton cannot hold even one multibyte code point, so content cannot be split safely (truncation and empty-string fallbacks are refused)");
 		}
 		this.maxFrameBytes = maxFrameBytes;
 		this.writeBudget = writeBudget != null ? writeBudget : SseWriteBudget.direct();
@@ -1000,7 +1000,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			// 调度器已关闭（停机/单测提前 shutdown）：保活缺席不影响轮次正确性
-			log.debug("attach keepalive timer not scheduled runId={} (scheduler shut down): {}", this.runId, ex.getMessage());
+			log.debug("attach keepalive timer not scheduled runId={} (scheduler shut down)", this.runId, ex);
 			return;
 		}
 		if (!this.attachKeepaliveFuture.compareAndSet(null, scheduled)) {
@@ -1069,7 +1069,7 @@ public class SseChatEmitter {
 					payload = this.objectMapper.writeValueAsBytes(frame);
 				}
 				catch (Exception ex) {
-					log.debug("attach keepalive frame serialization failed runId={}: {}", this.runId, ex.getMessage());
+					log.debug("attach keepalive frame serialization failed runId={}", this.runId, ex);
 					return;
 				}
 				// liveSeq = 0 ⇒ 既有心跳扇出分支：不补齐、不推进游标、不发布唤醒。
@@ -1116,7 +1116,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			this.archiveReconcileInFlight.set(false);
-			log.debug("archive reconcile not scheduled runId={} (next reconcile window retries): {}", this.runId, ex.getMessage());
+			log.debug("archive reconcile not scheduled runId={} (next reconcile window retries)", this.runId, ex);
 		}
 	}
 
@@ -1265,7 +1265,7 @@ public class SseChatEmitter {
 			hook.run();
 		}
 		catch (RuntimeException ex) {
-			log.debug("emitter reclaim hook failed runId={}: {}", this.runId, ex.getMessage());
+			log.debug("emitter reclaim hook failed runId={}", this.runId, ex);
 		}
 	}
 
@@ -1316,7 +1316,7 @@ public class SseChatEmitter {
 			}
 			catch (Exception ex) {
 				// 退订失败不改变语义（唤醒只是"补帧优化"，读侧仍按 ?lastSeq 重挂兜底），只留痕。
-				log.warn("frame wake unsubscribe failed runId={}: {}", this.runId, ex.getMessage());
+				log.warn("frame wake unsubscribe failed runId={}", this.runId, ex);
 			}
 		}
 	}
@@ -1355,7 +1355,7 @@ public class SseChatEmitter {
 			registered = listener.register(this.runId, this.wakeTarget);
 		}
 		catch (Exception ex) {
-			log.warn("frame wake subscribe failed runId={}: {}", this.runId, ex.getMessage());
+			log.warn("frame wake subscribe failed runId={}", this.runId, ex);
 			registered = false;
 		}
 		if (!registered) {
@@ -1560,7 +1560,7 @@ public class SseChatEmitter {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("replay terminal probe failed runId={} lastSeq={}: {}", this.runId, lastSeq, ex.getMessage());
+			log.debug("replay terminal probe failed runId={} lastSeq={}", this.runId, lastSeq, ex);
 			return false;
 		}
 		if (tail == null || tail.isEmpty()) {
@@ -1654,7 +1654,7 @@ public class SseChatEmitter {
 				}
 			}
 			catch (RuntimeException ex) {
-				log.debug("driver floor read failed runId={} (unknown; failure exit still emits): {}", this.runId, ex.getMessage());
+				log.debug("driver floor read failed runId={} (unknown; failure exit still emits)", this.runId, ex);
 				floor = -1L;
 			}
 		}
@@ -1823,7 +1823,7 @@ public class SseChatEmitter {
 				sub.queue.add(new QueuedFrame(this.objectMapper.writeValueAsString(error), false));
 			}
 			catch (Exception ex) {
-				log.error("degraded replay error frame serialization failed runId={}: {}", this.runId, ex.getMessage());
+				log.error("degraded replay error frame serialization failed runId={}", this.runId, ex);
 			}
 		}
 		// terminating 让回放订阅在队列排空后收尾（无论快照终态与否；L-143 起回放订阅一律挂在
@@ -1863,7 +1863,7 @@ public class SseChatEmitter {
 			meta = this.frames.replayMeta(this.runId, afterSeq);
 		}
 		catch (RuntimeException ex) {
-			log.warn("replay metadata probe failed runId={} afterSeq={} (treating as degraded): {}", this.runId, afterSeq, ex.getMessage());
+			log.warn("replay metadata probe failed runId={} afterSeq={} (treating as degraded)", this.runId, afterSeq, ex);
 			meta = new FrameStore.ReadResult(List.of(), true, false, 0L, 0L);
 		}
 		if (meta == null) {
@@ -1874,8 +1874,7 @@ public class SseChatEmitter {
 			raw = this.frames.readRawFrom(this.runId, afterSeq, REPLAY_PAGE_FRAMES);
 		}
 		catch (RuntimeException ex) {
-			log.warn("replay raw page read failed runId={} afterSeq={} (falling back to typed reader): {}", this.runId, afterSeq,
-					ex.getMessage());
+			log.warn("replay raw page read failed runId={} afterSeq={} (falling back to typed reader)", this.runId, afterSeq, ex);
 			raw = List.of();
 		}
 		if (raw == null) {
@@ -1899,7 +1898,7 @@ public class SseChatEmitter {
 			typed = this.frames.readFromWithStatus(this.runId, afterSeq, REPLAY_PAGE_FRAMES);
 		}
 		catch (RuntimeException ex) {
-			log.warn("replay compat reader failed runId={} afterSeq={} (closing stream degraded): {}", this.runId, afterSeq, ex.getMessage());
+			log.warn("replay compat reader failed runId={} afterSeq={} (closing stream degraded)", this.runId, afterSeq, ex);
 			return new ReplayStart(List.of(), null, true, meta);
 		}
 		if (typed == null) {
@@ -2107,11 +2106,10 @@ public class SseChatEmitter {
 	private void logReplayFrameDropped(String stage, Object type, Object seq, Exception ex) {
 		if (this.replayFrameDropWarned.compareAndSet(false, true)) {
 			log.warn("replay frame {} failed, frame dropped (seq hole possible; warning once per emitter) "
-					+ "runId={} type={} seq={}: {}", stage, this.runId, type, seq, ex.getMessage());
+					+ "runId={} type={} seq={}", stage, this.runId, type, seq, ex);
 		}
 		else {
-			log.debug("replay frame {} failed again, frame dropped runId={} type={} seq={}: {}", stage, this.runId, type, seq,
-					ex.getMessage());
+			log.debug("replay frame {} failed again, frame dropped runId={} type={} seq={}", stage, this.runId, type, seq, ex);
 		}
 	}
 
@@ -2209,7 +2207,7 @@ public class SseChatEmitter {
 		}
 		catch (RuntimeException ex) {
 			// I-minor：续读异常不得逃出 drain（那会静默停在半途）；按读降级收流。
-			log.warn("replay continuation failed runId={} from={} (closing stream degraded): {}", this.runId, from, ex.getMessage());
+			log.warn("replay continuation failed runId={} from={} (closing stream degraded)", this.runId, from, ex);
 			degraded = true;
 		}
 		synchronized (this.emitLock) {
@@ -2282,7 +2280,7 @@ public class SseChatEmitter {
 			return this.frames.lastSeqIfKnown(this.runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("replay continuation tail probe failed runId={}: {}", this.runId, ex.getMessage());
+			log.debug("replay continuation tail probe failed runId={}", this.runId, ex);
 			return null;
 		}
 	}
@@ -2330,7 +2328,7 @@ public class SseChatEmitter {
 					raw = this.frames.readRawFrom(this.runId, cursor, pageLimit);
 				}
 				catch (RuntimeException ex) {
-					log.debug("archive probe raw read failed runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
+					log.debug("archive probe raw read failed runId={} cursor={}", this.runId, cursor, ex);
 					return ArchiveScan.UNKNOWN;
 				}
 				if (raw != null && !raw.isEmpty()) {
@@ -2359,7 +2357,7 @@ public class SseChatEmitter {
 				typed = this.frames.readFromWithStatus(this.runId, cursor, pageLimit);
 			}
 			catch (RuntimeException ex) {
-				log.debug("archive probe compat reader failed runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
+				log.debug("archive probe compat reader failed runId={} cursor={}", this.runId, cursor, ex);
 				return ArchiveScan.UNKNOWN;
 			}
 			if (typed == null || typed.degraded()) {
@@ -2418,7 +2416,7 @@ public class SseChatEmitter {
 				page = this.frames.readRawAfterEntry(this.runId, cursor, pageLimit);
 			}
 			catch (RuntimeException ex) {
-				log.debug("archive physical read failed runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
+				log.debug("archive physical read failed runId={} cursor={}", this.runId, cursor, ex);
 				return ArchiveScan.UNKNOWN;
 			}
 			if (page == null) {
@@ -2897,8 +2895,8 @@ public class SseChatEmitter {
 		// M4：ok 保留在签名里（不改调用面），但契约上它只能是 outcome 的派生值。
 		// 传错即 fail-fast —— 否则"帧 ok 与信封 outcome 互相矛盾"会被前端按任一字段误读。
 		if (ok != outcome.ok()) {
-			throw new CodedIllegalArgumentException(ErrorCodes.TOOL_RESULT_OUTCOME_MISMATCH, "tool_result 帧的 ok 与 outcome 推导不一致：ok=" + ok
-					+ "，outcome=" + outcome.wire() + "（toolCallId=" + pending.getToolCallId() + "）");
+			throw new CodedIllegalArgumentException(ErrorCodes.TOOL_RESULT_OUTCOME_MISMATCH, "tool_result frame ok is inconsistent with the derived outcome: ok=" + ok
+					+ ", outcome=" + outcome.wire() + " (toolCallId=" + pending.getToolCallId() + ")");
 		}
 		String code = pending.effectiveCode();
 		Map<String, Object> frame = frame("tool_result");
@@ -3201,7 +3199,7 @@ public class SseChatEmitter {
 					payload = this.objectMapper.writeValueAsString(frame);
 				}
 				catch (Exception ex) {
-					log.error("resume degraded outcome frame serialization failed runId={} (frame skipped): {}", this.runId, ex.getMessage());
+					log.error("resume degraded outcome frame serialization failed runId={} (frame skipped)", this.runId, ex);
 					return 0;
 				}
 				for (Subscription sub : this.subscribers) {
@@ -3275,7 +3273,7 @@ public class SseChatEmitter {
 				archived = this.frames.readFromWithStatus(this.runId, 0L, 0);
 			}
 			catch (RuntimeException ex) {
-				log.debug("transcript timeline archive read failed runId={}: {}", this.runId, ex.getMessage());
+				log.debug("transcript timeline archive read failed runId={}", this.runId, ex);
 				return null;
 			}
 			if (archived == null || archived.degraded() || archived.truncated() || archived.frames() == null) {
@@ -3537,7 +3535,7 @@ public class SseChatEmitter {
 				this.pendingHeartbeatActivity = false;
 				this.pendingBusinessActivityStamp = 0L;
 			}
-			log.debug("activity touch not scheduled runId={}: {}", this.runId, ex.getMessage());
+			log.debug("activity touch not scheduled runId={}", this.runId, ex);
 		}
 	}
 
@@ -3562,7 +3560,7 @@ public class SseChatEmitter {
 					}
 				}
 				catch (RuntimeException ex) {
-					log.debug("activity touch failed runId={}: {}", this.runId, ex.getMessage());
+					log.debug("activity touch failed runId={}", this.runId, ex);
 				}
 			}
 			synchronized (this.activityTouchLock) {
@@ -3705,11 +3703,10 @@ public class SseChatEmitter {
 				// 正是 fencing 要拦的那一类写；宁可这一拍不发，也不能吞成 NEVER_HELD / null 放行。
 				authority = LeaseService.LeaseAuthority.UNAVAILABLE;
 				if (this.authorityReadFailureWarned.compareAndSet(false, true)) {
-					log.warn("resume authority read failed runId={} (UNAVAILABLE, read-only recovery; business frames not archived): {}", this.runId,
-							ex.getMessage());
+					log.warn("resume authority read failed runId={} (UNAVAILABLE, read-only recovery; business frames not archived)", this.runId, ex);
 				}
 				else {
-					log.debug("resume authority read failed again runId={} (already warned): {}", this.runId, ex.getMessage());
+					log.debug("resume authority read failed again runId={} (already warned)", this.runId, ex);
 				}
 			}
 			if (authority != null && (authority.readOnly() || !this.store.permittedToWrite(this.runId, "event frame"))) {
@@ -3758,7 +3755,7 @@ public class SseChatEmitter {
 						payloadBytes = this.objectMapper.writeValueAsBytes(frame);
 					}
 					catch (Exception ex) {
-						log.error("SSE frame serialization failed runId={} type={}: {}", this.runId, frame.get("type"), ex.getMessage());
+						log.error("SSE frame serialization failed runId={} type={}", this.runId, frame.get("type"), ex);
 						return;
 					}
 				}
@@ -3940,7 +3937,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			sub.unarchivedTerminalGrace.set(false);
-			log.debug("offline reattach terminal grace not scheduled runId={} (scheduler shut down): {}", this.runId, ex.getMessage());
+			log.debug("offline reattach terminal grace not scheduled runId={} (scheduler shut down)", this.runId, ex);
 		}
 	}
 
@@ -3950,7 +3947,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			sub.unarchivedTerminalGrace.set(false);
-			log.debug("offline reattach terminal grace not dispatched runId={}: {}", this.runId, ex.getMessage());
+			log.debug("offline reattach terminal grace not dispatched runId={}", this.runId, ex);
 		}
 	}
 
@@ -4008,7 +4005,7 @@ public class SseChatEmitter {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("offline reattach terminal grace snapshot read failed runId={} (synthesis abandoned): {}", this.runId, ex.getMessage());
+			log.debug("offline reattach terminal grace snapshot read failed runId={} (synthesis abandoned)", this.runId, ex);
 			return false;
 		}
 	}
@@ -4041,7 +4038,7 @@ public class SseChatEmitter {
 					payload = this.objectMapper.writeValueAsString(frame);
 				}
 				catch (Exception ex) {
-					log.error("offline reattach outcome frame serialization failed runId={}: {}", this.runId, ex.getMessage());
+					log.error("offline reattach outcome frame serialization failed runId={}", this.runId, ex);
 					return;
 				}
 				for (Subscription sub : this.subscribers) {
@@ -4188,7 +4185,7 @@ public class SseChatEmitter {
 				converted.add(new FrameStore.RawFrame(number.longValue(), this.objectMapper.writeValueAsString(frame)));
 			}
 			catch (Exception ex) {
-				log.error("padding frame serialization failed runId={} seq={}: {}", this.runId, number.longValue(), ex.getMessage());
+				log.error("padding frame serialization failed runId={} seq={}", this.runId, number.longValue(), ex);
 			}
 		}
 		return converted;
@@ -4295,7 +4292,7 @@ public class SseChatEmitter {
 			bus.publish(this.runId, seq, terminal);
 		}
 		catch (Exception ex) {
-			log.debug("frame wake publish failed runId={} seq={}: {}", this.runId, seq, ex.getMessage());
+			log.debug("frame wake publish failed runId={} seq={}", this.runId, seq, ex);
 		}
 	}
 
@@ -4453,8 +4450,7 @@ public class SseChatEmitter {
 			raw = this.frames.readRawFrom(this.runId, from, limit);
 		}
 		catch (RuntimeException ex) {
-			log.warn("wake padding raw read failed runId={} from={} (not padded this tick; next wake/reattach covers): {}", this.runId, from,
-					ex.getMessage());
+			log.warn("wake padding raw read failed runId={} from={} (not padded this tick; next wake/reattach covers)", this.runId, from, ex);
 			raw = List.of();
 		}
 		if (raw != null && !raw.isEmpty()) {
@@ -4478,7 +4474,7 @@ public class SseChatEmitter {
 			typed = this.frames.readFrom(this.runId, from, limit);
 		}
 		catch (RuntimeException ex) {
-			log.warn("wake padding delta read failed runId={} from={} (not padded this tick): {}", this.runId, from, ex.getMessage());
+			log.warn("wake padding delta read failed runId={} from={} (not padded this tick)", this.runId, from, ex);
 			return new WakePage(List.of(), 0);
 		}
 		List<WakeFrame> out = new ArrayList<>(typed.size());
@@ -4495,7 +4491,7 @@ public class SseChatEmitter {
 				out.add(new WakeFrame(number.longValue(), type, this.objectMapper.writeValueAsString(frame)));
 			}
 			catch (Exception ex) {
-				log.error("wake padding serialization failed runId={} seq={}: {}", this.runId, number.longValue(), ex.getMessage());
+				log.error("wake padding serialization failed runId={} seq={}", this.runId, number.longValue(), ex);
 			}
 		}
 		return new WakePage(out, typed.size());
@@ -4507,7 +4503,7 @@ public class SseChatEmitter {
 			return this.objectMapper.readValue(raw.json(), Map.class);
 		}
 		catch (Exception ex) {
-			log.error("wake padding parse failed runId={} seq={}: {}", this.runId, raw.seq(), ex.getMessage());
+			log.error("wake padding parse failed runId={} seq={}", this.runId, raw.seq(), ex);
 			return null;
 		}
 	}
@@ -4533,7 +4529,7 @@ public class SseChatEmitter {
 		}
 		catch (RejectedExecutionException ex) {
 			// 池拒绝：本拍不续（帧仍在归档，下一次唤醒/重挂兜底），不丢已入队帧。
-			log.debug("wake local continuation not scheduled runId={} cursor={}: {}", this.runId, cursor, ex.getMessage());
+			log.debug("wake local continuation not scheduled runId={} cursor={}", this.runId, cursor, ex);
 		}
 	}
 
@@ -4678,7 +4674,7 @@ public class SseChatEmitter {
 				// 没有提示则由调用方按身份不可确认处理（不写任何身份键）。
 				long backoffMs = recordIdentityReadFailure();
 				log.warn("SSE delivery identity read failed runId={} (no cache, retry in {}ms; "
-						+ "using explicit request identity this tick): {}", this.runId, backoffMs, ex.getMessage());
+						+ "using explicit request identity this tick)", this.runId, backoffMs, ex);
 				return hint;
 			}
 		}
@@ -4897,7 +4893,7 @@ public class SseChatEmitter {
 		catch (RuntimeException ex) {
 			// 提交阶段异常（非池拒绝）：本次写不会发生，必须复位写在飞标志并摘除，避免"永不 complete"。
 			releaseWriteSlotIfNeverStarted(sub, started);
-			log.warn("async write submit failed runId={} (subscriber evicted): {}", this.runId, ex.getMessage());
+			log.warn("async write submit failed runId={} (subscriber evicted)", this.runId, ex);
 			evict(sub, "async write submit failed");
 			finishDrain(sub);
 		}
@@ -5039,7 +5035,7 @@ public class SseChatEmitter {
 
 	/** 写出失败的统一日志口径（Q8②：它是"这一个订阅者没了"，不是本轮失败）。 */
 	private void logWriteFailure(Exception ex) {
-		log.debug("SSE write failed (client disconnected?) runId={}: {}", this.runId, ex == null ? "write timeout" : ex.getMessage());
+		log.debug("SSE write failed (client disconnected?) runId={}", this.runId, ex);
 	}
 
 	/**
@@ -5143,7 +5139,7 @@ public class SseChatEmitter {
 			sub.emitter.complete();
 		}
 		catch (Exception ex) {
-			log.debug("SSE complete failed runId={}: {}", this.runId, ex.getMessage());
+			log.debug("SSE complete failed runId={}", this.runId, ex);
 		}
 	}
 

@@ -1231,16 +1231,16 @@ public class RunStore {
 			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
 			String clientRequestId, String requestText, long turnStartedAtMs) {
 		if (frozen == null) {
-			throw new IllegalArgumentException("首笔快照必须冻结生效参数 runId=" + runId);
+			throw new IllegalArgumentException("Initial snapshot must freeze effective parameters runId=" + runId);
 		}
 		if (modelId == null || modelId.isBlank()) {
-			throw new IllegalArgumentException("首笔快照必须冻结本轮模型名 runId=" + runId);
+			throw new IllegalArgumentException("Initial snapshot must freeze the model name runId=" + runId);
 		}
 		if (requestText == null || requestText.isBlank()) {
-			throw new IllegalArgumentException("首笔快照必须记录本轮请求原文 runId=" + runId);
+			throw new IllegalArgumentException("Initial snapshot must record the original request runId=" + runId);
 		}
 		if (turnStartedAtMs <= 0L) {
-			throw new IllegalArgumentException("首笔快照必须记录本轮请求起点 runId=" + runId);
+			throw new IllegalArgumentException("Initial snapshot must record the request start runId=" + runId);
 		}
 		// 身份：首轮创建时<b>必须</b>有上下文。缺身份不落库、不登记索引 ——
 		// 没有默认租户，也没有默认用户：轮级键的 hash tag 由身份组成，凭空补一个身份
@@ -1274,7 +1274,7 @@ public class RunStore {
 						String.valueOf(ttlFor(runId).toMillis()));
 			}
 			catch (Exception ex) {
-				throw new AiStateUnavailableException("无法登记会话→run 索引 sessionId=" + sessionId
+				throw new AiStateUnavailableException("Failed to register session->run index sessionId=" + sessionId
 						+ " runId=" + runId, ex);
 			}
 		}
@@ -1287,8 +1287,8 @@ public class RunStore {
 		// "这一轮建好了"，继续跑模型并发 done —— Redis 里却根本没有这一轮（刷新/重挂/续跑/取消
 		// 全都没有持久面，用户却收到一条成功）。这里把"没落库"变成失败事实。
 		if (!persist(snapshot)) {
-			throw new AiStateUnavailableException("无法写入轮次快照 " + runId
-					+ "（首笔快照被拒写：当前快照已是取消态，或本实例对该轮无续跑权）");
+			throw new AiStateUnavailableException("Failed to write run snapshot " + runId
+					+ " (initial snapshot write refused: current snapshot is cancelled or this instance lacks resume authority)");
 		}
 		// 全局 ai:runs 是恢复发现面：创建节点补写一次（best-effort）。失败不抛；之后的 RUNNING
 		// 热路径由 repairRunIndexThrottled 每 60s 至多重试一次（首个节流拍在 t0+60s 到期）。
@@ -1388,7 +1388,7 @@ public class RunStore {
 			json = this.mapper.writeValueAsString(snapshot);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法序列化轮次快照 " + runId, ex);
+			throw new IllegalStateException("Failed to serialize run snapshot " + runId, ex);
 		}
 		Duration ttl = ttlFor(runId);
 		String state = stateOf(snapshot);
@@ -1405,7 +1405,7 @@ public class RunStore {
 							String.valueOf(ttl.toMillis()), state);
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
+			throw new AiStateUnavailableException("Failed to write run snapshot " + runId, ex);
 		}
 		if (created == null) {
 			// 生产脚本恒回 0/1；null 只可能来自"脚本没被执行"（替身未建模）。条件语义此时不可判定 ⇒
@@ -1482,12 +1482,12 @@ public class RunStore {
 		TenantUser owner = recordIdentityOf(snapshot);
 		TenantUser current = RequestContextUtils.currentOrNull();
 		if (owner == null) {
-			throw new IllegalStateException("拒绝写入无归属（0/0）的轮次快照 runId=" + snapshot.getRunId()
-					+ "（当前身份=" + current + "）：记录身份缺失即 fail-closed，不存在无身份命名空间");
+			throw new IllegalStateException("Refusing to write run snapshot without ownership (0/0) runId=" + snapshot.getRunId()
+					+ " (currentIdentity=" + current + "): missing record identity fails closed; no anonymous namespace exists");
 		}
 		if (current != null && !owner.equals(current)) {
-			throw new IllegalStateException("拒绝以他人身份写入轮次快照 runId=" + snapshot.getRunId() + "（记录归属="
-					+ owner + "，当前身份=" + current + "）：轮级键的 hash tag 含身份，错身份写会把别人的轮次覆盖掉");
+			throw new IllegalStateException("Refusing to write a run snapshot owned by another identity runId=" + snapshot.getRunId() + " (recordOwner="
+					+ owner + ", currentIdentity=" + current + "): run keys include identity in their hash tag; writing with the wrong identity could overwrite another owner's run");
 		}
 		return RunIdentityScope.open(owner);
 	}
@@ -1517,7 +1517,7 @@ public class RunStore {
 			json = this.mapper.writeValueAsString(snapshot);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法序列化轮次快照 " + runId, ex);
+			throw new IllegalStateException("Failed to serialize run snapshot " + runId, ex);
 		}
 		// 取消优先状态守卫的适用面：所有非取消状态（RUNNING / SUSPENDED / DONE / FAILED）。
 		// CANCELLED 自己不受限（幂等重写取消态照常落库）；不变量 = 任何状态写入不得从 CANCELLED 转出。
@@ -1565,7 +1565,7 @@ public class RunStore {
 				}
 			}
 			catch (Exception ex) {
-				throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
+				throw new AiStateUnavailableException("Failed to write run snapshot " + runId, ex);
 			}
 		}
 		// T2b-D#1：快照持久化成功后联动 session → current 轮索引（全部走本方法这一唯一通道，
@@ -1725,8 +1725,7 @@ public class RunStore {
 		}
 		catch (RuntimeException rollbackEx) {
 			log.warn("lightweight state key rollback failed runId={} (leftover "
-					+ "CANCELLED only rejects non-cancel writes more strictly): {}", runId,
-					rollbackEx.getMessage());
+					+ "CANCELLED only rejects non-cancel writes more strictly)", runId, rollbackEx);
 		}
 	}
 
@@ -1741,8 +1740,7 @@ public class RunStore {
 			this.redis.opsForValue().set(runStateKey(runId), state, ttlFor(runId));
 		}
 		catch (RuntimeException ex) {
-			log.warn("lightweight state key write failed runId={} state={} (liveness/guards fall back to snapshot): {}", runId, state,
-					ex.getMessage());
+			log.warn("lightweight state key write failed runId={} state={} (liveness/guards fall back to snapshot)", runId, state, ex);
 		}
 	}
 
@@ -1754,8 +1752,8 @@ public class RunStore {
 					runId, String.valueOf(ttl.toMillis()));
 		}
 		catch (Exception ex) {
-			log.warn("session->run index backfill failed sessionId={} runId={} (snapshot stored; later writes self-heal): {}",
-					sessionId, runId, ex.getMessage());
+			log.warn("session->run index backfill failed sessionId={} runId={} (snapshot stored; later writes self-heal)",
+					sessionId, runId, ex);
 		}
 	}
 
@@ -1785,8 +1783,7 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.warn("run recovery/list index backfill failed runId={} (later writes self-heal): {}", runId,
-					ex.getMessage());
+			log.warn("run recovery/list index backfill failed runId={} (later writes self-heal)", runId, ex);
 		}
 	}
 
@@ -1818,7 +1815,7 @@ public class RunStore {
 			return identityDeferred != null && identityDeferred > 0L;
 		}
 		catch (Exception ex) {
-			log.debug("recovery candidate defer failed runId={}: {}", runId, ex.getMessage());
+			log.debug("recovery candidate defer failed runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -1836,7 +1833,7 @@ public class RunStore {
 			return true;
 		}
 		catch (Exception ex) {
-			log.debug("stale recovery candidate cleanup failed runId={}: {}", runId, ex.getMessage());
+			log.debug("stale recovery candidate cleanup failed runId={}", runId, ex);
 			return false;
 		}
 	}
@@ -1910,7 +1907,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 旁路观测失败不影响写回（E3 的可用性优先）
-			log.debug("fence read failed runId={}: {}", runId, ex.getMessage());
+			log.debug("fence read failed runId={}", runId, ex);
 		}
 	}
 
@@ -1924,7 +1921,7 @@ public class RunStore {
 			return result != null && result > 0L;
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
+			throw new AiStateUnavailableException("Failed to write run snapshot " + runId, ex);
 		}
 	}
 
@@ -1943,7 +1940,7 @@ public class RunStore {
 			return result != null && result > 0L;
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法写入轮次快照 " + runId, ex);
+			throw new AiStateUnavailableException("Failed to write run snapshot " + runId, ex);
 		}
 	}
 
@@ -1992,7 +1989,7 @@ public class RunStore {
 			markActiveRun(sessionId, runId, System.currentTimeMillis());
 		}
 		catch (Exception ex) {
-			log.warn("session->current index write failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
+			log.warn("session->current index write failed sessionId={} runId={}", sessionId, runId, ex);
 		}
 	}
 
@@ -2035,7 +2032,7 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("active run index maintenance failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
+			log.debug("active run index maintenance failed sessionId={} runId={}", sessionId, runId, ex);
 		}
 	}
 
@@ -2051,7 +2048,7 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("active run index cleanup failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
+			log.debug("active run index cleanup failed sessionId={} runId={}", sessionId, runId, ex);
 		}
 	}
 
@@ -2071,7 +2068,7 @@ public class RunStore {
 			return ordered == null || ordered.isEmpty() ? null : ordered;
 		}
 		catch (Exception ex) {
-			log.debug("active run index read failed sessionId={} (falling back to legacy semantics): {}", sessionId, ex.getMessage());
+			log.debug("active run index read failed sessionId={} (falling back to legacy semantics)", sessionId, ex);
 			return null;
 		}
 	}
@@ -2114,7 +2111,7 @@ public class RunStore {
 				candidates.addAll(sessionRunIds(sessionId));
 			}
 			catch (RuntimeException ex) {
-				log.debug("session->run index read failed sessionId={} (treating active candidates as empty): {}", sessionId, ex.getMessage());
+				log.debug("session->run index read failed sessionId={} (treating active candidates as empty)", sessionId, ex);
 			}
 		}
 		if (candidates.isEmpty()) {
@@ -2158,7 +2155,7 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("stale active run member cleanup failed sessionId={} (next tick): {}", sessionId, ex.getMessage());
+			log.debug("stale active run member cleanup failed sessionId={} (next tick)", sessionId, ex);
 		}
 	}
 
@@ -2271,7 +2268,7 @@ public class RunStore {
 			return raw == null || raw.size() < keys.size() ? null : raw;
 		}
 		catch (RuntimeException ex) {
-			log.debug("batch run status read failed (falling back to per-run reads): {}", ex.getMessage());
+			log.debug("batch run status read failed (falling back to per-run reads)", ex);
 			return null;
 		}
 	}
@@ -2306,7 +2303,7 @@ public class RunStore {
 	 */
 	private String sessionRunsKey(String sessionId, long tenantId, long userId) {
 		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
-			throw new IllegalArgumentException("会话→run 索引要求显式 tenant/user，不得生成无身份键");
+			throw new IllegalArgumentException("session->run index requires explicit tenant/user; anonymous keys are forbidden");
 		}
 		return TenantKeyScope.scoped(SESSION_RUNS_PREFIX, tenantId, userId, sessionId);
 	}
@@ -2328,7 +2325,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
-			throw new AiStateUnavailableException("读取会话→run 索引失败 sessionId=" + sessionId, ex);
+			throw new AiStateUnavailableException("Failed to read session->run index sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -2354,7 +2351,7 @@ public class RunStore {
 					String.valueOf(sessionCurrentTtl().toMillis()));
 		}
 		catch (Exception ex) {
-			log.debug("session->current index renew failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
+			log.debug("session->current index renew failed sessionId={} runId={}", sessionId, runId, ex);
 		}
 	}
 
@@ -2393,7 +2390,7 @@ public class RunStore {
 			this.redis.expire(sessionRunsKey(sessionId, tenantId, userId), sessionCurrentTtl());
 		}
 		catch (Exception ex) {
-			log.debug("session->run index renew failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
+			log.debug("session->run index renew failed sessionId={} runId={}", sessionId, runId, ex);
 		}
 	}
 
@@ -2440,8 +2437,8 @@ public class RunStore {
 				index = sessionRunIds(sessionId);
 			}
 			catch (RuntimeException ex) {
-				log.warn("post-terminal session->current recheck failed sessionId={} runId={} (keeping index; not guessing active run): {}",
-						sessionId, runId, ex.getMessage());
+				log.warn("post-terminal session->current recheck failed sessionId={} runId={} (keeping index; not guessing active run)",
+						sessionId, runId, ex);
 				return;
 			}
 			RunSnapshot fallback = null;
@@ -2472,7 +2469,7 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("session->current index clear failed sessionId={} runId={}: {}", sessionId, runId, ex.getMessage());
+			log.debug("session->current index clear failed sessionId={} runId={}", sessionId, runId, ex);
 		}
 	}
 
@@ -2562,7 +2559,7 @@ public class RunStore {
 			return this.redis.opsForValue().get(sessionCurrentKey(sessionId));
 		}
 		catch (Exception ex) {
-			log.debug("session->current index read failed sessionId={}: {}", sessionId, ex.getMessage());
+			log.debug("session->current index read failed sessionId={}", sessionId, ex);
 			return null;
 		}
 	}
@@ -2618,7 +2615,7 @@ public class RunStore {
 	 */
 	public RunSnapshot get(String runId, long tenantId, long userId) {
 		if (!RunIdentityScope.usable(tenantId, userId)) {
-			throw new IllegalArgumentException("显式身份读口要求可用的记录身份（tenantId>0 且 userId>0 或系统 -1）："
+			throw new IllegalArgumentException("Explicit-identity reads require a valid recorded identity (tenantId>0 and userId>0, or system -1): "
 					+ tenantId + "/" + userId + " runId=" + runId);
 		}
 		return readSnapshot(runScopedKey(RUN_PREFIX, tenantId, userId, runId), runId,
@@ -2639,7 +2636,7 @@ public class RunStore {
 			raw = this.redis.opsForValue().get(key);
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法读取轮次快照 " + runId + "（Redis 不可用）", ex);
+			throw new AiStateUnavailableException("Failed to read run snapshot " + runId + " (Redis unavailable)", ex);
 		}
 		if (raw == null) {
 			return null;
@@ -2650,7 +2647,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 值损坏 = 数据问题，不是依赖不可用：保持 IllegalStateException（不得转成 503）
-			throw new IllegalStateException("无法读取轮次快照 " + runId, ex);
+			throw new IllegalStateException("Failed to read run snapshot " + runId, ex);
 		}
 		// 归属复核（纵深防御）：键面已经按身份分开，这里再核一次记录里的身份，
 		// 拒绝"键对了但记录不是我的"与"无归属旧快照进入新身份读路径"。
@@ -2705,7 +2702,7 @@ public class RunStore {
 			return raw == null ? null : topLevelStatus(raw);
 		}
 		catch (RuntimeException ex) {
-			log.debug("run lite state read failed runId={} (treating as unknown): {}", runId, ex.getMessage());
+			log.debug("run lite state read failed runId={} (treating as unknown)", runId, ex);
 			return null;
 		}
 	}
@@ -2833,7 +2830,7 @@ public class RunStore {
 			raw = this.redis.opsForValue().get(runKey(runId));
 		}
 		catch (RuntimeException ex) {
-			log.warn("snapshot owner read failed runId={} (treating as unreadable; caller must fail closed): {}", runId, ex.getMessage());
+			log.warn("snapshot owner read failed runId={} (treating as unreadable; caller must fail closed)", runId, ex);
 			return SnapshotOwner.unreadable();
 		}
 		if (raw == null) {
@@ -2844,7 +2841,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 坏值 = 数据问题：不得猜成"他会话"，交给调用方中止/记可重试错误。
-			log.warn("snapshot bad value runId={} (owner unreadable; caller must fail closed): {}", runId, ex.getMessage());
+			log.warn("snapshot bad value runId={} (owner unreadable; caller must fail closed)", runId, ex);
 			return SnapshotOwner.unreadable();
 		}
 	}
@@ -2957,7 +2954,7 @@ public class RunStore {
 	 */
 	public void deleteRun(String runId, long tenantId, long userId) {
 		if (!RunIdentityScope.usable(tenantId, userId)) {
-			throw new IllegalArgumentException("删除轮次要求可用的记录身份（tenantId>0 且 userId>0 或系统 -1）："
+			throw new IllegalArgumentException("Run deletion requires a valid recorded identity (tenantId>0 and userId>0, or system -1): "
 					+ tenantId + "/" + userId + " runId=" + runId);
 		}
 		deleteRun(runId, new TenantUser(tenantId, userId));
@@ -2966,21 +2963,21 @@ public class RunStore {
 	/** 按索引成员删除这一轮的键族（成员自带身份）。 */
 	public void deleteRun(RunKeyScope.IndexRef ref) {
 		if (ref == null) {
-			throw new IllegalArgumentException("删除轮次要求索引成员自带身份（不得凭 runId 猜身份）");
+			throw new IllegalArgumentException("Run deletion requires identity embedded in the index member; identity must not be guessed from runId");
 		}
 		deleteRun(ref.runId(), ref.tenantId(), ref.userId());
 	}
 
 	private void deleteRun(String runId, TenantUser identity) {
 		if (identity == null) {
-			throw new IllegalArgumentException("删除轮次必须带身份 runId=" + runId);
+			throw new IllegalArgumentException("Run deletion requires an identity runId=" + runId);
 		}
 		RunSnapshot snapshot = readForDelete(runId, identity);
 		if (snapshot != null && !identity.equals(recordIdentityOf(snapshot))) {
 			// 记录在（且是从调用线程身份那一侧读到的）却与给定删除身份不符 ⇒ 拒绝。
 			// 静默 no-op 会让销毁报告"成功"而这一轮的数据仍在。
-			throw new IllegalStateException("拒绝以身份 " + identity + " 删除不属于它的轮次 runId=" + runId
-					+ "（记录归属=" + recordIdentityOf(snapshot) + "）：键名由身份拼出，错身份删是静默 no-op/误删");
+			throw new IllegalStateException("Refusing identity " + identity + " to delete a run it does not own runId=" + runId
+					+ " (recordOwner=" + recordIdentityOf(snapshot) + "): keys are derived from identity; deletion with the wrong identity is a silent no-op or deletes the wrong data");
 		}
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			deleteRunKeys(runId, snapshot, identity);
@@ -2998,7 +2995,7 @@ public class RunStore {
 				snapshot = get(runId);
 			}
 			catch (RuntimeException ex) {
-				log.debug("pre-delete snapshot read failed runId={} (session index members left to TTL/reconcile): {}", runId, ex.getMessage());
+				log.debug("pre-delete snapshot read failed runId={} (session index members left to TTL/reconcile)", runId, ex);
 			}
 		}
 		if (snapshot == null && identity != null) {
@@ -3006,7 +3003,7 @@ public class RunStore {
 				snapshot = get(runId, identity.tenantId(), identity.userId());
 			}
 			catch (RuntimeException ex) {
-				log.debug("pre-delete snapshot read by recorded identity failed runId={} (treating as absent): {}", runId, ex.getMessage());
+				log.debug("pre-delete snapshot read by recorded identity failed runId={} (treating as absent)", runId, ex);
 			}
 		}
 		return snapshot;
@@ -3078,7 +3075,7 @@ public class RunStore {
 			return results != null && results.size() >= operationCount;
 		}
 		catch (RuntimeException ex) {
-			log.debug("pipelined run index cleanup failed runId={} (using separate cleanup): {}", runId, ex.getMessage());
+			log.debug("pipelined run index cleanup failed runId={} (using separate cleanup)", runId, ex);
 			return false;
 		}
 	}
@@ -3091,8 +3088,8 @@ public class RunStore {
 				this.redis.opsForZSet().remove(runListIndexKey(identity.tenantId(), identity.userId()), runId);
 			}
 			catch (Exception ex) {
-				log.warn("run recovery/list index cleanup failed runId={} (stale member left to bounded reconcile): {}",
-						runId, ex.getMessage());
+				log.warn("run recovery/list index cleanup failed runId={} (stale member left to bounded reconcile)",
+						runId, ex);
 			}
 		}
 		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
@@ -3103,8 +3100,8 @@ public class RunStore {
 				this.redis.opsForSet().remove(sessionRunsKey(snapshot.getSessionId(), tenantId, userId), runId);
 			}
 			catch (Exception ex) {
-				log.warn("session->run index member cleanup failed sessionId={} runId={} (stale member left to TTL/reconcile): {}",
-						snapshot.getSessionId(), runId, ex.getMessage());
+				log.warn("session->run index member cleanup failed sessionId={} runId={} (stale member left to TTL/reconcile)",
+						snapshot.getSessionId(), runId, ex);
 			}
 		}
 	}
@@ -3150,7 +3147,7 @@ public class RunStore {
 			this.leaseService.releaseIfHeld(runLeaseKey(runId));
 		}
 		catch (Exception ex) {
-			log.debug("resume lease release failed runId={}: {}", runId, ex.getMessage());
+			log.debug("resume lease release failed runId={}", runId, ex);
 		}
 	}
 
@@ -3261,11 +3258,10 @@ public class RunStore {
 			this.fenceStaleWarned.clear();
 		}
 		if (this.fenceStaleWarned.add(runId)) {
-			log.warn("resume authority unconfirmed: refusing {} runId={} (fence read failed; treating as unconfirmed): {}", action, runId,
-					ex.getMessage());
+			log.warn("resume authority unconfirmed: refusing {} runId={} (fence read failed; treating as unconfirmed)", action, runId, ex);
 		}
 		else {
-			log.debug("resume authority unconfirmed: refusing {} runId={} (already warned): {}", action, runId, ex.getMessage());
+			log.debug("resume authority unconfirmed: refusing {} runId={} (already warned)", action, runId, ex);
 		}
 	}
 
@@ -3459,7 +3455,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
-			log.warn("recovery due index bounded reconcile failed (retry next tick): {}", ex.toString());
+			log.warn("recovery due index bounded reconcile failed (retry next tick)", ex);
 			return 0;
 		}
 	}
@@ -3505,7 +3501,7 @@ public class RunStore {
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
 			List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
 		if (!permittedToWrite(runId, "suspended snapshot")) {
-			throw new AiStateUnavailableException("无法确认续跑权，拒绝写入挂起状态 " + runId);
+			throw new AiStateUnavailableException("Cannot confirm resume authority; refusing to write parked state " + runId);
 		}
 		for (PendingToolCall pending : pendings) {
 			// 只给真正挂起的条目打"请求时刻"：预检失败等已结算条目（非 PENDING）在挂起前就写了
@@ -3518,7 +3514,7 @@ public class RunStore {
 		}
 		RunSnapshot snapshot = get(runId);
 		if (snapshot == null) {
-			throw new IllegalStateException("挂起前找不到轮次快照 " + runId);
+			throw new IllegalStateException("Run snapshot not found before parking " + runId);
 		}
 		snapshot.setAssistantContent(assistantContent);
 		snapshot.setAssistantMetadata(assistantMetadata == null ? null : new LinkedHashMap<>(assistantMetadata));
@@ -3535,7 +3531,7 @@ public class RunStore {
 			this.redis.expire(pendingKey(runId), ttlFor(runId));
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法写入待决条目 " + pending.getToolCallId(), ex);
+			throw new AiStateUnavailableException("Failed to write pending entry " + pending.getToolCallId(), ex);
 		}
 	}
 
@@ -3549,14 +3545,14 @@ public class RunStore {
 					String.valueOf(claimedEpoch));
 			if (result == null || result.size() < 2 || ((Number) result.get(0)).longValue() != 1L) {
 				String outcome = result == null || result.size() < 2 ? "UNKNOWN" : String.valueOf(result.get(1));
-				throw new AiStateUnavailableException("执行回写条件不匹配 " + pending.getToolCallId() + "：" + outcome);
+				throw new AiStateUnavailableException("Execution write-back condition mismatch " + pending.getToolCallId() + ": " + outcome);
 			}
 		}
 		catch (AiStateUnavailableException ex) {
 			throw ex;
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法条件回写执行结果 " + pending.getToolCallId(), ex);
+			throw new AiStateUnavailableException("Failed to conditionally write execution result " + pending.getToolCallId(), ex);
 		}
 	}
 
@@ -3591,11 +3587,10 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			if (!lenient) {
-				throw new AiStateUnavailableException("无法读取待决条目批次：" + runId, ex);
+				throw new AiStateUnavailableException("Failed to read pending entry batch: " + runId, ex);
 			}
 			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
-			log.warn("pending entries read failed runId={} (lenient reader degrades to empty; cancel finalize/display continue): {}", runId,
-					ex.getMessage());
+			log.warn("pending entries read failed runId={} (lenient reader degrades to empty; cancel finalize/display continue)", runId, ex);
 			return List.of();
 		}
 		Map<Object, Object> markers = requestMarkers(runId);
@@ -3629,7 +3624,7 @@ public class RunStore {
 			return out;
 		}
 		catch (RuntimeException ex) {
-			log.debug("pipelined pending/marker read failed runId={} (using separate reads): {}", runId, ex.getMessage());
+			log.debug("pipelined pending/marker read failed runId={} (using separate reads)", runId, ex);
 			return null;
 		}
 	}
@@ -3646,7 +3641,7 @@ public class RunStore {
 				out.add(pending);
 			}
 			catch (Exception ex) {
-				throw new IllegalStateException("无法读取待决条目：" + entry.getValue(), ex);
+				throw new IllegalStateException("Failed to read pending entry: " + entry.getValue(), ex);
 			}
 		}
 		return out;
@@ -3675,8 +3670,7 @@ public class RunStore {
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
-			log.warn("pending entry read failed runId={} toolCallId={} (lenient reader degrades to null): {}", runId, toolCallId,
-					ex.getMessage());
+			log.warn("pending entry read failed runId={} toolCallId={} (lenient reader degrades to null)", runId, toolCallId, ex);
 			return null;
 		}
 		if (pending == null) {
@@ -3703,7 +3697,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_PENDING_READ, ex);
-			throw new AiStateUnavailableException("无法读取待决条目 " + toolCallId, ex);
+			throw new AiStateUnavailableException("Failed to read pending entry " + toolCallId, ex);
 		}
 		if (raw == null) {
 			return null;
@@ -3713,7 +3707,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// JSON 损坏是数据错误，不是基础设施故障：保持原 IllegalStateException。
-			throw new IllegalStateException("无法读取待决条目 " + toolCallId, ex);
+			throw new IllegalStateException("Failed to read pending entry " + toolCallId, ex);
 		}
 	}
 
@@ -3729,9 +3723,9 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.warn("decision guard read failed runId={} toolCallId={} (read side fail-closed: refusing to rebuild the card as undecided): {}",
-					runId, toolCallId, ex.getMessage());
-			throw new AiStateUnavailableException("无法读取决策 guard " + toolCallId, ex);
+			log.warn("decision guard read failed runId={} toolCallId={} (read side fail-closed: refusing to rebuild the card as undecided)",
+					runId, toolCallId, ex);
+			throw new AiStateUnavailableException("Failed to read decision guard " + toolCallId, ex);
 		}
 	}
 
@@ -3742,8 +3736,8 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.debug("decision guard read failed runId={} toolCallId={} (lenient reader continues with unmerged guard): {}",
-					runId, toolCallId, ex.getMessage());
+			log.debug("decision guard read failed runId={} toolCallId={} (lenient reader continues with unmerged guard)",
+					runId, toolCallId, ex);
 			return null;
 		}
 	}
@@ -3756,9 +3750,8 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.warn("decision guard read failed runId={} (batch read side fail-closed: refusing to rebuild the card as undecided): {}", runId,
-					ex.getMessage());
-			throw new AiStateUnavailableException("无法读取决策 guard 批次 " + runId, ex);
+			log.warn("decision guard read failed runId={} (batch read side fail-closed: refusing to rebuild the card as undecided)", runId, ex);
+			throw new AiStateUnavailableException("Failed to read decision guard batch " + runId, ex);
 		}
 	}
 
@@ -3770,7 +3763,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.debug("decision guard read failed runId={} (lenient reader continues with unmerged guard): {}", runId, ex.getMessage());
+			log.debug("decision guard read failed runId={} (lenient reader continues with unmerged guard)", runId, ex);
 			return Map.of();
 		}
 	}
@@ -3848,7 +3841,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 位读不出来不影响条目本身（宁可按"未发射"处理：少一张卡，不让用户点到未生效的卡）
-			log.debug("request frame marker read failed runId={} toolCallId={}: {}", runId, toolCallId, ex.getMessage());
+			log.debug("request frame marker read failed runId={} toolCallId={}", runId, toolCallId, ex);
 			return null;
 		}
 	}
@@ -3860,7 +3853,7 @@ public class RunStore {
 			return markers == null ? Map.of() : markers;
 		}
 		catch (Exception ex) {
-			log.debug("request frame marker read failed runId={}: {}", runId, ex.getMessage());
+			log.debug("request frame marker read failed runId={}", runId, ex);
 			return Map.of();
 		}
 	}
@@ -3919,8 +3912,7 @@ public class RunStore {
 		}
 		catch (AiStateUnavailableException ex) {
 			log.warn("request frame entry read failed runId={} toolCallId={} "
-					+ "(degrading to unknown, not blocking this turn): {}", runId, toolCallId,
-					ex.getMessage());
+					+ "(degrading to unknown, not blocking this turn)", runId, toolCallId, ex);
 			pending = pendingLenient(runId, toolCallId);
 		}
 		if (pending == null || !PendingToolCall.PENDING.equals(pending.getStatus())) {
@@ -3932,8 +3924,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 位没落不影响本次请求帧发射（刷新恢复会少一张卡，但不阻断本轮）
-			log.warn("request frame marker write failed runId={} toolCallId={} (frame still emitted): {}", runId, toolCallId,
-					ex.getMessage());
+			log.warn("request frame marker write failed runId={} toolCallId={} (frame still emitted)", runId, toolCallId, ex);
 		}
 		try {
 			PendingToolCall fresh = pending(runId, toolCallId);
@@ -3941,8 +3932,7 @@ public class RunStore {
 		}
 		catch (AiStateUnavailableException ex) {
 			log.warn("post-set request frame recheck failed runId={} toolCallId={} "
-					+ "(keeping known entry, not blocking this turn): {}", runId, toolCallId,
-					ex.getMessage());
+					+ "(keeping known entry, not blocking this turn)", runId, toolCallId, ex);
 			return pending;
 		}
 	}
@@ -3994,7 +3984,7 @@ public class RunStore {
 				toolCallId, String.valueOf(epoch), executedBy, String.valueOf(System.currentTimeMillis()),
 				String.valueOf(ttlFor(runId).toMillis()));
 		if (result == null || result.size() < 3) {
-			throw new AiStateUnavailableException("认领脚本返回空 " + toolCallId);
+			throw new AiStateUnavailableException("Claim script returned null " + toolCallId);
 		}
 		long fence = ((Number) result.get(2)).longValue();
 		String outcome = String.valueOf(result.get(1));
@@ -4040,9 +4030,8 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A1_FENCE_READ, ex);
-			log.warn("fence read failed runId={} (claim side fail-closed: refusing claim, no fence=0 pass): {}", runId,
-					ex.getMessage());
-			throw new AiStateUnavailableException("无法读取 fence " + runId + "：认领侧 fail-closed", ex);
+			log.warn("fence read failed runId={} (claim side fail-closed: refusing claim, no fence=0 pass)", runId, ex);
+			throw new AiStateUnavailableException("Failed to read fence " + runId + ": claim side fails closed", ex);
 		}
 	}
 
@@ -4109,7 +4098,7 @@ public class RunStore {
 			this.redis.expire(ledgerKey(runId), ttlFor(runId));
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法写入执行台账 " + pending.getToolCallId(), ex);
+			throw new IllegalStateException("Failed to write execution ledger " + pending.getToolCallId(), ex);
 		}
 	}
 
@@ -4120,7 +4109,7 @@ public class RunStore {
 	public boolean completeExecutionWithLedger(String runId, PendingToolCall pending, String resultText,
 			long claimedEpoch, String claimedBy, boolean respectCancel) {
 		if (!permittedToWrite(runId, "tool execution completion with ledger")) {
-			throw new AiStateUnavailableException("无法确认续跑权，拒绝执行结果落账 " + pending.getToolCallId());
+			throw new AiStateUnavailableException("Cannot confirm resume authority; refusing to settle execution result " + pending.getToolCallId());
 		}
 		LedgerWrite write = ledgerWrite(runId, pending, resultText);
 		String expectedClaim = claimedEpoch + "|" + claimedBy;
@@ -4137,7 +4126,7 @@ public class RunStore {
 			}
 			if (result == null || result.size() < 2 || ((Number) result.get(0)).longValue() != 1L) {
 				String outcome = result == null || result.size() < 2 ? "UNKNOWN" : String.valueOf(result.get(1));
-				throw new AiStateUnavailableException("执行结果原子落账条件不匹配 " + pending.getToolCallId() + "：" + outcome);
+				throw new AiStateUnavailableException("Atomic execution settlement condition mismatch " + pending.getToolCallId() + ": " + outcome);
 			}
 			return true;
 		}
@@ -4145,7 +4134,7 @@ public class RunStore {
 			throw ex;
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法原子写入执行结果 " + pending.getToolCallId(), ex);
+			throw new AiStateUnavailableException("Failed to atomically write execution result " + pending.getToolCallId(), ex);
 		}
 	}
 
@@ -4187,7 +4176,7 @@ public class RunStore {
 			return new LedgerWrite(json, idemField, indexTail, metaJson);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法序列化执行台账 " + toolCallId, ex);
+			throw new IllegalStateException("Failed to serialize execution ledger " + toolCallId, ex);
 		}
 	}
 
@@ -4203,7 +4192,7 @@ public class RunStore {
 				}));
 			}
 			catch (Exception ex) {
-				throw new IllegalStateException("无法读取执行台账：" + item, ex);
+				throw new IllegalStateException("Failed to read execution ledger: " + item, ex);
 			}
 		}
 		return out;
@@ -4249,7 +4238,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			log.debug("idempotency index read failed runId={} "
-					+ "toolCallId={} (falling back to ledger scan): {}", runId, toolCallId, ex.getMessage());
+					+ "toolCallId={} (falling back to ledger scan)", runId, toolCallId, ex);
 			indexed = null;
 		}
 		if (indexed != null) {
@@ -4277,13 +4266,13 @@ public class RunStore {
 	public String readToolResult(String runId, String sessionId, String toolCallId, Integer offset, Integer maxChars) {
 		if (runId == null || runId.isBlank() || sessionId == null || sessionId.isBlank()
 				|| toolCallId == null || toolCallId.isBlank()) {
-			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT, "缺少结果回读所需的轮次、会话或调用标识");
+			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT, "Run, session, or tool call identifier required for result read-back is missing");
 		}
 		int from = offset == null ? 0 : offset;
 		int limit = maxChars == null ? 4000 : maxChars;
 		if (from < 0 || limit < 2 || limit > 8000) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-					"分页游标不合法：偏移量必须 ≥0，单页字符数必须在 2..8000");
+					"Invalid page cursor: offset must be >=0 and page size must be between 2 and 8000 characters");
 		}
 		RequestContextUtils.require();
 		try {
@@ -4295,7 +4284,7 @@ public class RunStore {
 		catch (RuntimeException ex) {
 			log.warn("read_tool_result failed runId={} toolCallId={} (returning sanitized public error)",
 					runId, toolCallId, ex);
-			throw new AiStateUnavailableException("结果暂时无法读取，请稍后重试", ex);
+			throw new AiStateUnavailableException("Result is temporarily unreadable; retry later", ex);
 		}
 	}
 
@@ -4303,10 +4292,10 @@ public class RunStore {
 		SnapshotEvidence evidence = readSnapshotEvidence(runId, toolCallId);
 		SnapshotOwner owner = evidence.owner();
 		if (owner.state() == SnapshotOwner.State.UNREADABLE) {
-			throw new AiStateUnavailableException("暂时无法确认工具结果归属，请稍后重试");
+			throw new AiStateUnavailableException("Tool result ownership cannot be confirmed; retry later");
 		}
 		if (owner.state() != SnapshotOwner.State.ATTRIBUTED || !sessionId.equals(owner.sessionId())) {
-			throw new ResourceNotFoundException("当前身份下不存在该轮次或无权读取");
+			throw new ResourceNotFoundException("The run does not exist under the current identity or read access is denied");
 		}
 		Map<String, Object> record = idemFor(runId, toolCallId);
 		String name;
@@ -4318,26 +4307,26 @@ public class RunStore {
 		else {
 			PendingToolCall pending = pending(runId, toolCallId);
 			if (pending == null || !pending.resolved()) {
-				throw new ResourceNotFoundException("当前轮次中不存在已结算的工具结果");
+				throw new ResourceNotFoundException("No settled tool result exists in the current run");
 			}
 			name = pending.getName() == null ? "" : pending.getName();
 			text = pending.getResultText();
 		}
 		if (Set.of("kb_search", "kb_read_doc", "kb_lookup_term").contains(name)) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-					"KB 结果请使用 kb_read_doc 的原生 offset/next_offset 分页，不走通用结果回读");
+					"KB results must use kb_read_doc native offset/next_offset pagination instead of generic result read-back");
 		}
 		if (text == null) {
-			throw new ResourceNotFoundException("该工具调用没有可回读的结果正文");
+			throw new ResourceNotFoundException("This tool call has no result content available for read-back");
 		}
 		if (!evidence.truncated()) {
-			throw new ResourceNotFoundException("该结果没有模型侧截断证据，不支持回读");
+			throw new ResourceNotFoundException("This result has no model-side truncation evidence and does not support read-back");
 		}
 		int originalChars = text.length();
 		if (from > originalChars || (from > 0 && from < originalChars
 				&& Character.isLowSurrogate(text.charAt(from)) && Character.isHighSurrogate(text.charAt(from - 1)))) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-					"分页偏移量超出结果长度或落在代理对中间：" + from);
+					"Page offset exceeds the result length or splits a surrogate pair: " + from);
 		}
 		int end = (int) Math.min(originalChars, (long) from + limit);
 		if (end < originalChars && end > from && Character.isHighSurrogate(text.charAt(end - 1))) {
@@ -4357,7 +4346,7 @@ public class RunStore {
 			return this.mapper.writeValueAsString(page);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法序列化工具结果分页", ex);
+			throw new IllegalStateException("Failed to serialize tool result page", ex);
 		}
 	}
 
@@ -4374,7 +4363,7 @@ public class RunStore {
 			raw = this.redis.opsForValue().get(runKey(runId));
 		}
 		catch (RuntimeException ex) {
-			throw new AiStateUnavailableException("暂时无法确认工具结果归属，请稍后重试", ex);
+			throw new AiStateUnavailableException("Tool result ownership cannot be confirmed; retry later", ex);
 		}
 		if (raw == null) {
 			return new SnapshotEvidence(SnapshotOwner.missing(), false);
@@ -4405,9 +4394,9 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.warn("read_tool_result snapshot evidence unreadable runId={} toolCallId={} (fail closed): {}",
-					runId, toolCallId, ex.getMessage());
-			throw new AiStateUnavailableException("无法确认工具结果归属", ex);
+			log.warn("read_tool_result snapshot evidence unreadable runId={} toolCallId={} (fail closed)",
+					runId, toolCallId, ex);
+			throw new AiStateUnavailableException("Cannot confirm tool result ownership", ex);
 		}
 		SnapshotOwner owner = sessionId == null ? SnapshotOwner.absent() : SnapshotOwner.attributed(sessionId);
 		return new SnapshotEvidence(owner, truncated);
@@ -4573,7 +4562,7 @@ public class RunStore {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("ledger read by index failed runId={} index={}: {}", runId, index, ex.getMessage());
+			log.debug("ledger read by index failed runId={} index={}", runId, index, ex);
 			return null;
 		}
 	}
@@ -4654,19 +4643,19 @@ public class RunStore {
 		try {
 			Long rawSize = this.redis.opsForList().size(ledgerKey(runId));
 			if (rawSize == null) {
-				return incompleteProjection(runId, "LLEN 未返回长度");
+				return incompleteProjection(runId, "LLEN returned null");
 			}
 			size = rawSize;
 		}
 		catch (RuntimeException ex) {
 			rethrowIfResourceFailure(ex);
-			return incompleteProjection(runId, "读取台账长度失败：" + ex.getMessage());
+			return incompleteProjection(runId, "Failed to read ledger length", ex);
 		}
 		if (size == 0L) {
 			return List.of();
 		}
 		if (size > Integer.MAX_VALUE) {
-			return incompleteProjection(runId, "台账条数超出投影可表达范围：" + size);
+			return incompleteProjection(runId, "Ledger size exceeds projection range: " + size);
 		}
 		Map<Object, Object> entries;
 		try {
@@ -4674,10 +4663,10 @@ public class RunStore {
 		}
 		catch (RuntimeException ex) {
 			rethrowIfResourceFailure(ex);
-			return incompleteProjection(runId, "读取投影 HASH 失败：" + ex.getMessage());
+			return incompleteProjection(runId, "Failed to read projection HASH", ex);
 		}
 		if (entries == null || entries.isEmpty()) {
-			return incompleteProjection(runId, "投影字段不存在（旧数据）");
+			return incompleteProjection(runId, "Projection fields are absent (legacy data)");
 		}
 		Map<Long, Map<String, Object>> byIndex = new TreeMap<>();
 		for (Map.Entry<Object, Object> entry : entries.entrySet()) {
@@ -4691,11 +4680,11 @@ public class RunStore {
 				index = Long.parseLong(field.substring(IDEM_META_FIELD_PREFIX.length()));
 			}
 			catch (NumberFormatException ex) {
-				return incompleteProjection(runId, "投影字段下标不是整数：" + field);
+				return incompleteProjection(runId, "Projection field index is not an integer: " + field);
 			}
 			Object raw = entry.getValue();
 			if (raw == null) {
-				return incompleteProjection(runId, "投影字段值为空：" + field);
+				return incompleteProjection(runId, "Projection field value is null: " + field);
 			}
 			Map<String, Object> meta;
 			try {
@@ -4703,21 +4692,21 @@ public class RunStore {
 				});
 			}
 			catch (Exception ex) {
-				return incompleteProjection(runId, "投影值不是合法 JSON：" + field);
+				return incompleteProjection(runId, "Projection value is not valid JSON: " + field);
 			}
 			if (meta.get("atMs") == null || meta.get("toolCallId") == null) {
-				return incompleteProjection(runId, "投影缺少 atMs/toolCallId：" + field);
+				return incompleteProjection(runId, "Projection lacks atMs/toolCallId: " + field);
 			}
 			byIndex.put(index, meta);
 		}
 		if (byIndex.size() != (int) size) {
-			return incompleteProjection(runId, "投影字段数 " + byIndex.size() + " ≠ 台账长度 " + size);
+			return incompleteProjection(runId, "Projection field count " + byIndex.size() + " != ledger length " + size);
 		}
 		long expected = 0L;
 		List<Map<String, Object>> out = new ArrayList<>((int) size);
 		for (Map.Entry<Long, Map<String, Object>> entry : byIndex.entrySet()) {
 			if (entry.getKey().longValue() != expected) {
-				return incompleteProjection(runId, "投影下标不连续（缺 " + expected + "）");
+				return incompleteProjection(runId, "Projection indexes are not contiguous (missing " + expected + ")");
 			}
 			out.add(entry.getValue());
 			expected++;
@@ -4745,6 +4734,11 @@ public class RunStore {
 	 */
 	private static List<Map<String, Object>> incompleteProjection(String runId, String reason) {
 		log.debug("ledger metadata projection incomplete runId={} ({}; falling back to full scan)", runId, reason);
+		return null;
+	}
+
+	private static List<Map<String, Object>> incompleteProjection(String runId, String reason, Throwable error) {
+		log.debug("ledger metadata projection incomplete runId={} ({}; falling back to full scan)", runId, reason, error);
 		return null;
 	}
 
@@ -4797,7 +4791,7 @@ public class RunStore {
 			return result != null && !result.isEmpty() && ((Number) result.get(0)).longValue() == 1L;
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法条件取消待决条目 " + pending.getToolCallId(), ex);
+			throw new AiStateUnavailableException("Failed to conditionally cancel pending entry " + pending.getToolCallId(), ex);
 		}
 	}
 
@@ -4824,8 +4818,8 @@ public class RunStore {
 			return claimedBy(runId, pending.getToolCallId()) != null;
 		}
 		catch (RuntimeException ex) {
-			log.warn("claim table read failed, treating as existing execution evidence runId={} toolCallId={}: {}", runId,
-					pending.getToolCallId(), ex.getMessage());
+			log.warn("claim table read failed, treating as existing execution evidence runId={} toolCallId={}", runId,
+					pending.getToolCallId(), ex);
 			return true;
 		}
 	}
@@ -4867,7 +4861,7 @@ public class RunStore {
 			return raw == null ? 0L : Long.parseLong(raw);
 		}
 		catch (Exception ex) {
-			log.debug("issued seq read failed runId={}: {}", runId, ex.getMessage());
+			log.debug("issued seq read failed runId={}", runId, ex);
 			return 0L;
 		}
 	}
@@ -4899,7 +4893,7 @@ public class RunStore {
 					String.valueOf(ttlFor(runId).toMillis()));
 		}
 		catch (Exception ex) {
-			log.warn("business seq floor restore failed runId={} floor={}: {}", runId, floor, ex.getMessage());
+			log.warn("business seq floor restore failed runId={} floor={}", runId, floor, ex);
 		}
 	}
 
@@ -4920,7 +4914,7 @@ public class RunStore {
 			this.redis.opsForValue().set(beatKey(runId), String.valueOf(System.currentTimeMillis()), ttlFor(runId));
 		}
 		catch (Exception ex) {
-			log.debug("heartbeat activity stamp write failed runId={}: {}", runId, ex.getMessage());
+			log.debug("heartbeat activity stamp write failed runId={}", runId, ex);
 		}
 	}
 
@@ -4953,7 +4947,7 @@ public class RunStore {
 					String.valueOf(ttlFor(runId).toMillis()));
 		}
 		catch (Exception ex) {
-			log.debug("business activity anchor write failed runId={} atMs={}: {}", runId, atMs, ex.getMessage());
+			log.debug("business activity anchor write failed runId={} atMs={}", runId, atMs, ex);
 		}
 	}
 
@@ -5002,8 +4996,8 @@ public class RunStore {
 		}
 		catch (RuntimeException ex) {
 			log.warn("in-turn budget armed snapshot write failed runId={} "
-					+ "armedAtMs={} skippedBatches={} (tool loop not interrupted): {}", runId,
-					armedAtMs, skippedBatches, ex.getMessage());
+					+ "armedAtMs={} skippedBatches={} (tool loop not interrupted)", runId,
+					armedAtMs, skippedBatches, ex);
 		}
 	}
 
@@ -5032,7 +5026,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 只剩取键/计数等非 Redis 异常（单键 Redis 失败已在下层吞掉并计数）
-			log.debug("suspended renew key build/count failed runId={}: {}", runId, ex.getMessage());
+			log.debug("suspended renew key build/count failed runId={}", runId, ex);
 		}
 	}
 
@@ -5084,8 +5078,8 @@ public class RunStore {
 					RedisDegradation.record(RedisDegradation.L139_RENEW_KEY, ex);
 					int notAttempted = total - attempted;
 					recordNotAttempted(notAttempted);
-					log.debug("same-slot renew hit a connection error runId={} keys={} (skipping timeout waits for the remaining {} keys): {}", runId,
-							group.size(), notAttempted, ex.getMessage());
+					log.debug("same-slot renew hit a connection error runId={} keys={} (skipping timeout waits for the remaining {} keys)", runId,
+							group.size(), notAttempted, ex);
 					return;
 				}
 			}
@@ -5100,11 +5094,11 @@ public class RunStore {
 					if (isConnectionFailure(ex)) {
 						recordNotAttempted(total - attempted - 1);
 						log.debug("renew hit a connection error runId={} key={} (skipping "
-								+ "individual timeout waits for the remaining {} keys): {}", runId, key,
-								total - attempted - 1, ex.getMessage());
+								+ "individual timeout waits for the remaining {} keys)", runId, key,
+								total - attempted - 1, ex);
 						return;
 					}
-					log.debug("renew key failed runId={} key={} (continuing with other keys): {}", runId, key, ex.getMessage());
+					log.debug("renew key failed runId={} key={} (continuing with other keys)", runId, key, ex);
 				}
 				attempted++;
 			}
@@ -5152,7 +5146,7 @@ public class RunStore {
 			if (isConnectionFailure(ex)) {
 				throw ex;
 			}
-			log.debug("same-slot renew script unavailable (falling back to per-key EXPIRE) keys={}: {}", keys.size(), ex.getMessage());
+			log.debug("same-slot renew script unavailable (falling back to per-key EXPIRE) keys={}", keys.size(), ex);
 			return false;
 		}
 		if (statuses == null) {
@@ -5204,7 +5198,7 @@ public class RunStore {
 			snapshot = get(runId);
 		}
 		catch (Exception ex) {
-			log.debug("read-side renew snapshot missing runId={}: {}", runId, ex.getMessage());
+			log.debug("read-side renew snapshot missing runId={}", runId, ex);
 			return false;
 		}
 		return touchActiveRun(snapshot);
@@ -5242,7 +5236,7 @@ public class RunStore {
 						snapshot.getUserId(), snapshot.getSessionId()), ttl);
 			}
 			catch (RuntimeException ex) {
-				log.debug("stop-closure mapping renew failed runId={} (read-side renew unaffected): {}", runId, ex.getMessage());
+				log.debug("stop-closure mapping renew failed runId={} (read-side renew unaffected)", runId, ex);
 			}
 		}
 		// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）。
@@ -5291,7 +5285,7 @@ public class RunStore {
 			return new DecisionClaim(false, current == null ? null : String.valueOf(current));
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法写入决策 guard " + toolCallId, ex);
+			throw new AiStateUnavailableException("Failed to write decision guard " + toolCallId, ex);
 		}
 	}
 
@@ -5316,7 +5310,7 @@ public class RunStore {
 					this.mapper.writeValueAsString(pending), value, String.valueOf(ttlFor(runId).toMillis()),
 					expectedGuard);
 			if (result == null || result.size() < 2) {
-				throw new AiStateUnavailableException("决策脚本返回空 " + pending.getToolCallId());
+				throw new AiStateUnavailableException("Decision script returned null " + pending.getToolCallId());
 			}
 			String recorded = String.valueOf(result.get(1));
 			return new DecisionClaim(((Number) result.get(0)).longValue() == 1L,
@@ -5326,7 +5320,7 @@ public class RunStore {
 			throw ex;
 		}
 		catch (Exception ex) {
-			throw new AiStateUnavailableException("无法原子写入决策 " + pending.getToolCallId(), ex);
+			throw new AiStateUnavailableException("Failed to atomically write decision " + pending.getToolCallId(), ex);
 		}
 	}
 
@@ -5343,9 +5337,9 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.warn("decision guard read failed runId={} toolCallId={} (fail-closed: must not treat as undecided): {}", runId,
-					toolCallId, ex.getMessage());
-			throw new AiStateUnavailableException("无法读取决策 guard " + toolCallId, ex);
+			log.warn("decision guard read failed runId={} toolCallId={} (fail-closed: must not treat as undecided)", runId,
+					toolCallId, ex);
+			throw new AiStateUnavailableException("Failed to read decision guard " + toolCallId, ex);
 		}
 	}
 
@@ -5413,7 +5407,7 @@ public class RunStore {
 			return raw == null ? 0L : Long.parseLong(raw);
 		}
 		catch (Exception ex) {
-			log.debug("business activity anchor read failed runId={}: {}", runId, ex.getMessage());
+			log.debug("business activity anchor read failed runId={}", runId, ex);
 			return 0L;
 		}
 	}
@@ -5438,7 +5432,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 读失败 ≠ 没有活动：调用方还会看业务活动锚点键，这里按 0 容错。
-			log.debug("event log tail activity time read failed runId={}: {}", runId, ex.getMessage());
+			log.debug("event log tail activity time read failed runId={}", runId, ex);
 			return 0L;
 		}
 	}
@@ -5513,7 +5507,7 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 可见性失败不该把整页打成 500：返回未知，由前端按"不显示时间"处理
-			log.debug("snapshot remaining TTL read failed runId={}: {}", runId, ex.getMessage());
+			log.debug("snapshot remaining TTL read failed runId={}", runId, ex);
 			return null;
 		}
 	}
@@ -5562,7 +5556,7 @@ public class RunStore {
 			touchContextTtl(key);
 		}
 		catch (Exception ex) {
-			log.warn("safety ledger write failed sessionId={}: {} (turn unaffected)", sessionId, ex.getMessage());
+			log.warn("safety ledger write failed sessionId={} (turn unaffected)", sessionId, ex);
 		}
 	}
 
@@ -5584,7 +5578,7 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.warn("safety ledger read failed sessionId={}: {} (treating as empty)", sessionId, ex.getMessage());
+			log.warn("safety ledger read failed sessionId={} (treating as empty)", sessionId, ex);
 		}
 		return out;
 	}
@@ -5599,7 +5593,7 @@ public class RunStore {
 			this.redis.expire(key, this.properties.getSessionTtl());
 		}
 		catch (RuntimeException ex) {
-			log.debug("context key renew failed key={}: {}", key, ex.getMessage());
+			log.debug("context key renew failed key={}", key, ex);
 		}
 	}
 

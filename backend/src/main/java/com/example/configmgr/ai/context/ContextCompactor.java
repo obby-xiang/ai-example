@@ -291,8 +291,8 @@ public final class ContextCompactor {
 			state = readStateForUpdate(request.sessionId());
 		}
 		catch (RuntimeException ex) {
-			log.warn("context state strict read failed sessionId={} runId={} error={} (skip compaction; never reset state from an unknown baseline)",
-					request.sessionId(), request.runId(), ex.getMessage());
+			log.warn("context state strict read failed sessionId={} runId={} (skip compaction; never reset state from an unknown baseline)",
+					request.sessionId(), request.runId(), ex);
 			return noopPlan(request, ContextState.EMPTY, before,
 					new ContextTrigger.Decision(ContextTrigger.Level.NONE, 0d, 0, 0, reserve), REASON_FAILED);
 		}
@@ -478,8 +478,8 @@ public final class ContextCompactor {
 				return failurePlan(request, state, before, decision, REASON_SUMMARY_FAILED);
 			}
 			// L1/L3 本地动作抛错：没有摘要尝试 ⇒ 不碰熔断
-			log.warn("context compaction planning failed sessionId={} runId={} error={} (history unchanged)", request.sessionId(),
-					request.runId(), ex.getMessage());
+			log.warn("context compaction planning failed sessionId={} runId={} (history unchanged)", request.sessionId(),
+					request.runId(), ex);
 			return noopPlan(request, state, before, decision, REASON_FAILED);
 		}
 		if (!clear.changed() && turns == 0) {
@@ -579,9 +579,9 @@ public final class ContextCompactor {
 			return outcome(plan, request, compacted, true, eventId, now);
 		}
 		catch (RuntimeException ex) {
-			log.error("context compaction commit failed sessionId={} runId={} level={} compactionId={} error={} "
+			log.error("context compaction commit failed sessionId={} runId={} level={} compactionId={} "
 					+ "(retry the same Plan to complete state/ledger/facts idempotently; no context frame this turn)",
-					request.sessionId(), request.runId(), plan.action().wire(), compactionId, ex.getMessage());
+					request.sessionId(), request.runId(), plan.action().wire(), compactionId, ex);
 			return outcome(plan, request, state, false);
 		}
 	}
@@ -647,7 +647,7 @@ public final class ContextCompactor {
 					System.currentTimeMillis(), systemTokens, toolsTokens, inputTokens);
 		}
 		catch (RuntimeException ex) {
-			log.warn("context usage record write failed sessionId={} error={}", sessionId, ex.getMessage());
+			log.warn("context usage record write failed sessionId={}", sessionId, ex);
 		}
 	}
 
@@ -663,7 +663,7 @@ public final class ContextCompactor {
 			return state == null ? ContextState.EMPTY : state;
 		}
 		catch (RuntimeException ex) {
-			log.warn("context state read failed sessionId={} error={} (treating as empty)", sessionId, ex.getMessage());
+			log.warn("context state read failed sessionId={} (treating as empty)", sessionId, ex);
 			return ContextState.EMPTY;
 		}
 	}
@@ -720,7 +720,7 @@ public final class ContextCompactor {
 		}
 		catch (RuntimeException ex) {
 			committed = false;
-			log.warn("circuit-breaker counter write failed sessionId={} error={} (continuing uncounted)", request.sessionId(), ex.getMessage());
+			log.warn("circuit-breaker counter write failed sessionId={} (continuing uncounted)", request.sessionId(), ex);
 		}
 		if (CompactionFuse.OPEN.equals(failed.circuit())) {
 			log.warn("context summary circuit opened sessionId={} fails={} openUntil={} (L1 only from now on)", request.sessionId(),
@@ -838,7 +838,7 @@ public final class ContextCompactor {
 					hook.run();
 				}
 				catch (RuntimeException ex) {
-					log.debug("summary start callback failed (ignored, compaction unaffected) error={}", ex.getMessage());
+					log.debug("summary start callback failed (ignored, compaction unaffected)", ex);
 				}
 			}
 			return delegate.summarize(systemPrompt, userPrompt, runtime);
@@ -864,7 +864,7 @@ public final class ContextCompactor {
 					hook.run();
 				}
 				catch (RuntimeException ex) {
-					log.debug("summary progress callback failed (ignored, compaction unaffected) error={}", ex.getMessage());
+					log.debug("summary progress callback failed (ignored, compaction unaffected)", ex);
 				}
 			}
 		};

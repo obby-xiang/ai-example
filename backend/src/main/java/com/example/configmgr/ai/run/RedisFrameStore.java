@@ -676,13 +676,13 @@ public class RedisFrameStore implements FrameStore {
 				}
 				// seq == 0 = 脚本拒绝交出"刚重建且无法证明未被用过"的低号 ⇒ 带 forceRepair 再试一次。
 			}
-			throw new IllegalStateException("取号脚本无法确认唯一性（归档末号连续读失败）");
+			throw new IllegalStateException("Sequence script could not confirm uniqueness (failed to read consecutive archive tail sequences)");
 		}
 		catch (Exception ex) {
 			long fallback = nextFallbackSeq(runId);
 			log.warn("seq allocation degraded to in-process counter runId={} seq={} "
-					+ "(Redis unavailable; cross-instance ordering not guaranteed): {}",
-					runId, fallback, ex.getMessage());
+					+ "(Redis unavailable; cross-instance ordering not guaranteed)",
+					runId, fallback, ex);
 			return fallback;
 		}
 	}
@@ -699,7 +699,7 @@ public class RedisFrameStore implements FrameStore {
 				String.valueOf(ttlSeconds), String.valueOf(fallbackLast), String.valueOf(TAIL_PROBE),
 				state.repairDegraded.get() ? "1" : "0");
 		if (result == null || result.isEmpty()) {
-			throw new IllegalStateException("取号脚本返回空");
+			throw new IllegalStateException("Sequence script returned null");
 		}
 		long seq = scriptSeq(result.get(0));
 		boolean degraded = result.size() > 1 && scriptSeq(result.get(1)) != 0L;
@@ -866,12 +866,12 @@ public class RedisFrameStore implements FrameStore {
 				// 脚本据此按精确 ID + 本次帧体判幂等 —— 不会写出第二条。
 				unknownReplyRetries++;
 				if (unknownReplyRetries > 1) {
-					log.warn("event log archive result unknown after retry runId={} type={} (retried once, no further lock retry): {}",
-							runId, type, ex.getMessage());
+					log.warn("event log archive result unknown after retry runId={} type={} (retried once, no further lock retry)",
+							runId, type, ex);
 					break;
 				}
-				log.warn("event log archive result unknown runId={} type={} attempt={} (retrying once with same token, exact-ID idempotency): {}",
-						runId, type, attempt, ex.getMessage());
+				log.warn("event log archive result unknown runId={} type={} attempt={} (retrying once with same token, exact-ID idempotency)",
+						runId, type, attempt, ex);
 				forceRepair = true;
 				continue;
 			}
@@ -907,7 +907,7 @@ public class RedisFrameStore implements FrameStore {
 				String.valueOf(ACK_TTL_SECONDS), token, split.headText(), split.tailText(),
 				String.valueOf(expectedEpoch));
 		if (result == null || result.isEmpty()) {
-			throw new IllegalStateException("原子落档脚本返回空");
+			throw new IllegalStateException("Atomic archive script returned null");
 		}
 		long seq = scriptSeq(result.get(0));
 		boolean degraded = scriptSeq(result.get(1)) != 0L;
@@ -954,7 +954,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			log.warn("event log serialization failed runId={} type={} "
-					+ "(frame not archived; invisible cross-instance): {}", runId, type, ex.getMessage());
+					+ "(frame not archived; invisible cross-instance)", runId, type, ex);
 			return null;
 		}
 	}
@@ -996,11 +996,11 @@ public class RedisFrameStore implements FrameStore {
 			}
 			if (exact.exists()) {
 				log.warn("event log explicit seq already taken runId={} type={} seq={} (no overwrite, no renumber; frame not archived)", runId,
-						type, seq);
+						type, seq, ex);
 			}
 			else {
 				log.warn("event log explicit seq behind tail runId={} type={} seq={} (no reassign, no auto ID; frame not archived)",
-						runId, type, seq);
+						runId, type, seq, ex);
 			}
 			return AppendResult.skipped();
 		}
@@ -1024,8 +1024,7 @@ public class RedisFrameStore implements FrameStore {
 					String.valueOf(ttlSeconds));
 		}
 		catch (Exception ex) {
-			log.debug("archive trim low-watermark record failed runId={} head={} (no truncation reported this read): {}", runId, headAfter,
-					ex.getMessage());
+			log.debug("archive trim low-watermark record failed runId={} head={} (no truncation reported this read)", runId, headAfter, ex);
 		}
 	}
 
@@ -1044,7 +1043,7 @@ public class RedisFrameStore implements FrameStore {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("event log surviving first entry read failed runId={} (low watermark not recorded this time): {}", runId, ex.toString());
+			log.debug("event log surviving first entry read failed runId={} (low watermark not recorded this time)", runId, ex);
 			return null;
 		}
 	}
@@ -1079,8 +1078,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
-			log.warn("event log exact-ID read failed runId={} seq={} (idempotency unknown, treating as not archived): {}", runId, seq,
-					ex.toString());
+			log.warn("event log exact-ID read failed runId={} seq={} (idempotency unknown, treating as not archived)", runId, seq, ex);
 			return new ArchivedEntry(false, null);
 		}
 	}
@@ -1157,7 +1155,7 @@ public class RedisFrameStore implements FrameStore {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("event log renew failed (idempotent hit, proceeding with existing record): {}", ex.getMessage());
+			log.debug("event log renew failed (idempotent hit, proceeding with existing record)", ex);
 		}
 	}
 
@@ -1389,8 +1387,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
-			log.warn("event log raw read failed runId={} afterSeq={} (treating as no delta, no retry): {}", runId, afterSeq,
-					ex.toString());
+			log.warn("event log raw read failed runId={} afterSeq={} (treating as no delta, no retry)", runId, afterSeq, ex);
 		}
 		return out;
 	}
@@ -1403,8 +1400,7 @@ public class RedisFrameStore implements FrameStore {
 					? "-" : successorStreamId(afterEntryId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("event log invalid physical cursor runId={} afterEntryId={}: {}", runId, afterEntryId,
-					ex.getMessage());
+			log.warn("event log invalid physical cursor runId={} afterEntryId={}", runId, afterEntryId, ex);
 			return new FrameStore.RawEntryPage(List.of(), true);
 		}
 		if (start == null) {
@@ -1435,8 +1431,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
-			log.warn("event log physical raw read failed runId={} afterEntryId={}: {}", runId, afterEntryId,
-					ex.toString());
+			log.warn("event log physical raw read failed runId={} afterEntryId={}", runId, afterEntryId, ex);
 			return new FrameStore.RawEntryPage(List.of(), true);
 		}
 	}
@@ -1450,13 +1445,13 @@ public class RedisFrameStore implements FrameStore {
 		if (millisText.isEmpty() || sequenceText.isEmpty() || sequenceText.indexOf('-') >= 0
 				|| !millisText.chars().allMatch(ch -> ch >= '0' && ch <= '9')
 				|| !sequenceText.chars().allMatch(ch -> ch >= '0' && ch <= '9')) {
-			throw new IllegalArgumentException("非法 stream id " + id);
+			throw new IllegalArgumentException("Invalid stream id " + id);
 		}
 		java.math.BigInteger max = java.math.BigInteger.ONE.shiftLeft(64).subtract(java.math.BigInteger.ONE);
 		java.math.BigInteger millis = new java.math.BigInteger(millisText);
 		java.math.BigInteger sequence = new java.math.BigInteger(sequenceText);
 		if (millis.compareTo(max) > 0 || sequence.compareTo(max) > 0) {
-			throw new IllegalArgumentException("stream id 超出无符号 64 位 " + id);
+			throw new IllegalArgumentException("Stream id exceeds unsigned 64-bit range: " + id);
 		}
 		if (sequence.compareTo(max) < 0) {
 			return millis + "-" + sequence.add(java.math.BigInteger.ONE);
@@ -1481,7 +1476,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			log.debug("archive trim low-watermark read failed runId={} "
-					+ "(treating as never trimmed, no truncation guess): {}", runId, ex.getMessage());
+					+ "(treating as never trimmed, no truncation guess)", runId, ex);
 			return null;
 		}
 	}
@@ -1523,8 +1518,7 @@ public class RedisFrameStore implements FrameStore {
 			// 读失败 ≠ 空流：返回值对调用链仍是"暂无差量"（抛异常会让整条订阅路径失败），
 			// 但必须 WARN + 计数 —— 静默折成空会把"日志读不出来"伪装成"没有新帧"。
 			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
-			log.warn("event log read failed runId={} afterSeq={} (treating as no delta, no retry): {}", runId, afterSeq,
-					ex.toString());
+			log.warn("event log read failed runId={} afterSeq={} (treating as no delta, no retry)", runId, afterSeq, ex);
 			return out;
 		}
 		return out;
@@ -1571,7 +1565,7 @@ public class RedisFrameStore implements FrameStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A3_FRAME_RANGE_READ, ex);
-			log.warn("event log newest window read failed runId={} (treating as no delta, no retry): {}", runId, ex.toString());
+			log.warn("event log newest window read failed runId={} (treating as no delta, no retry)", runId, ex);
 		}
 		return new NewestWindow(out, headId, recordCount[0]);
 	}
@@ -1615,7 +1609,7 @@ public class RedisFrameStore implements FrameStore {
 			return new long[] { oldest, Math.max(oldest, to) };
 		}
 		catch (Exception ex) {
-			log.debug("event log full replay gap probe failed runId={} (no truncation reported): {}", runId, ex.toString());
+			log.debug("event log full replay gap probe failed runId={} (no truncation reported)", runId, ex);
 			return null;
 		}
 	}
@@ -1665,7 +1659,7 @@ public class RedisFrameStore implements FrameStore {
 			// A4：末号探测失败按"未知"表达（ok=false），不再伪装成"末号 0"。
 			// 调用方据此区分"空流"与"读失败"；readFrom 会退化为不夹窗口的 XRANGE，而不是直接空。
 			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
-			log.warn("event log tail probe failed runId={} (tail unknown; read falls back to unclamped window): {}", runId, ex.toString());
+			log.warn("event log tail probe failed runId={} (tail unknown; read falls back to unclamped window)", runId, ex);
 			return new StreamTail(0L, false);
 		}
 	}
@@ -1714,7 +1708,7 @@ public class RedisFrameStore implements FrameStore {
 			return frame;
 		}
 		catch (Exception ex) {
-			log.debug("event log single entry corrupt (skipped): {}", ex.getMessage());
+			log.debug("event log single entry corrupt (skipped)", ex);
 			return null;
 		}
 	}

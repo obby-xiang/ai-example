@@ -196,24 +196,24 @@ public final class FrameSizeLimiter {
 		Objects.requireNonNull(mapper, "mapper");
 		Object raw = frame.get(field);
 		if (!(raw instanceof String value)) {
-			throw new IllegalArgumentException("字段必须是 String：field=" + field + "，当前 = "
+			throw new IllegalArgumentException("Field must be a String: field=" + field + ", actual="
 					+ (raw == null ? "null" : raw.getClass().getName()));
 		}
 		if (maxBytes <= 0) {
 			// 拆分器的契约是"必须给上限"；"<= 0 = 不限制"只存在于 apply 的兼容路径，
 			// 流式正文不允许走那条路（那等于关掉单帧上限）。
-			throw new IllegalArgumentException("maxBytes 必须 > 0（当前 = " + maxBytes + "）：流式正文不允许无上限");
+			throw new IllegalArgumentException("maxBytes must be > 0 (actual=" + maxBytes + "): streamed content must have a limit");
 		}
 		Map<String, Object> probe = new LinkedHashMap<>(frame);
 		probe.put(field, "");
 		byte[] empty = serialize(probe, mapper);
 		if (empty == null) {
-			throw new IllegalStateException("帧骨架序列化失败：type=" + frame.get("type") + " key=" + field
+			throw new IllegalStateException("Failed to serialize frame skeleton: type=" + frame.get("type") + " key=" + field
 					+ " limit=" + maxBytes + " originalChars=" + value.length());
 		}
 		int budget = maxBytes - empty.length;
 		if (budget <= 0) {
-			throw tooSmall(frame, field, maxBytes, empty.length, value.length(), null, "帧骨架已占满单帧上限");
+			throw tooSmall(frame, field, maxBytes, empty.length, value.length(), null, "Frame skeleton already fills the frame limit");
 		}
 		if (value.isEmpty()) {
 			return List.of(value);
@@ -246,14 +246,14 @@ public final class FrameSizeLimiter {
 				int firstCodePoint = rest.codePointAt(0);
 				int needed = escapedLength(new String(Character.toChars(firstCodePoint)), mapper);
 				throw tooSmall(frame, field, maxBytes, skeletonBytes, originalChars, needed,
-						"预算放不下一个码点（codePoint=U+" + Integer.toHexString(firstCodePoint).toUpperCase()
-								+ "）");
+						"Budget cannot hold one code point (codePoint=U+" + Integer.toHexString(firstCodePoint).toUpperCase()
+								+ ")");
 			}
 			Map<String, Object> candidate = new LinkedHashMap<>(probe);
 			candidate.put(field, chunk);
 			byte[] bytes = serialize(candidate, mapper);
 			if (bytes == null) {
-				throw new IllegalStateException("分片骨架序列化失败：type=" + frame.get("type") + " key=" + field
+				throw new IllegalStateException("Failed to serialize chunk skeleton: type=" + frame.get("type") + " key=" + field
 						+ " limit=" + maxBytes + " originalChars=" + originalChars);
 			}
 			int over = bytes.length - maxBytes;
@@ -262,13 +262,13 @@ public final class FrameSizeLimiter {
 			}
 			chunk = takeChars(chunk, escapedLength(chunk, mapper) - over, mapper);
 		}
-		throw tooSmall(frame, field, maxBytes, skeletonBytes, originalChars, null, "复测收缩 5 轮后仍超限");
+		throw tooSmall(frame, field, maxBytes, skeletonBytes, originalChars, null, "Still oversized after five shrinking passes");
 	}
 
 	/** 统一的"配置/输入无法安全分片"失败：带 type/key/limit/originalChars 等可定位信息。 */
 	private static IllegalStateException tooSmall(Map<String, Object> frame, String field,
 			int maxBytes, int skeletonBytes, int originalChars, Integer firstCodePointBytes, String reason) {
-		StringBuilder message = new StringBuilder("单帧上限过小，流式正文拒绝截断/空串兜底：reason=")
+		StringBuilder message = new StringBuilder("Frame limit is too small; streamed content refuses truncation/empty fallback: reason=")
 				.append(reason)
 				.append(" type=").append(frame.get("type"))
 				.append(" key=").append(field)
@@ -278,8 +278,8 @@ public final class FrameSizeLimiter {
 		if (firstCodePointBytes != null) {
 			message.append(" firstCodePointBytes=").append(firstCodePointBytes);
 		}
-		message.append("（请提高 app.ai.result-budget.ui.max-frame-bytes，运行期下限 ")
-				.append(MIN_FRAME_BYTES).append("）");
+		message.append(" (increase app.ai.result-budget.ui.max-frame-bytes; runtime minimum ")
+				.append(MIN_FRAME_BYTES).append(")");
 		return new IllegalStateException(message.toString());
 	}
 

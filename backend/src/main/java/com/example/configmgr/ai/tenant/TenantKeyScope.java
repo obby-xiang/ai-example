@@ -48,7 +48,7 @@ public final class TenantKeyScope {
 	 */
 	public static String segmentOf(TenantUser identity) {
 		if (identity == null) {
-			throw new IllegalArgumentException("缺少租户/用户身份：不得生成无身份键");
+			throw new IllegalArgumentException("Tenant/user identity is required; identity-less keys are forbidden");
 		}
 		return segmentOf(identity.tenantId(), identity.userId());
 	}
@@ -61,7 +61,7 @@ public final class TenantKeyScope {
 	public static String segmentOf(long tenantId, long userId) {
 		if (!hasIdentity(tenantId, userId)) {
 			throw new IllegalArgumentException(
-					"租户/用户身份不可用（tenantId>0 且 userId>0 或系统 -1）：" + tenantId + "/" + userId);
+					"Invalid tenant/user identity (tenantId > 0 and userId > 0 or system -1): " + tenantId + "/" + userId);
 		}
 		return tenantId + ":" + userId + ":";
 	}

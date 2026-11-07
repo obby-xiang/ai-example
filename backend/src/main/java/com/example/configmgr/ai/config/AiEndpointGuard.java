@@ -79,34 +79,34 @@ public class AiEndpointGuard {
         URI uri = parse(url);
         String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
         if (!"http".equals(scheme) && !"https".equals(scheme)) {
-            throw invalid("baseUrl 只接受 http/https 绝对地址（当前 scheme = " + uri.getScheme() + "）");
+            throw invalid("baseUrl must be an absolute http/https URL (current scheme = " + uri.getScheme() + ")");
         }
         if (uri.getRawUserInfo() != null) {
-            throw invalid("baseUrl 不允许内嵌凭据（user:pass@）—— 密钥请走 key 字段");
+            throw invalid("baseUrl must not contain embedded credentials (user:pass@); use the key field instead");
         }
         String host = uri.getHost();
         if (!StringUtils.hasText(host)) {
-            throw invalid("baseUrl 缺少主机名");
+            throw invalid("baseUrl must include a hostname");
         }
         if (uri.getPort() != -1 && (uri.getPort() < 1 || uri.getPort() > 65535)) {
-            throw invalid("baseUrl 端口越界（" + uri.getPort() + "）");
+            throw invalid("baseUrl port is out of range (" + uri.getPort() + ")");
         }
         boolean metadataHost = isMetadataHost(host);
         if (this.properties.getConfig().isAllowPrivateEndpoints() || trusted) {
             if (metadataHost) {
                 // 元数据主机名连"放行私网"都不该放：它不是用户的网关，只可能是 SSRF 的靶子
-                throw blocked("baseUrl 指向云元数据主机（" + host + "）：任何配置下都不放行");
+                throw blocked("baseUrl points to a cloud metadata host (" + host + ") and is always blocked");
             }
             return url;
         }
         if (metadataHost) {
-            throw blocked("baseUrl 指向云元数据主机（" + host + "）：任何配置下都不放行");
+            throw blocked("baseUrl points to a cloud metadata host (" + host + ") and is always blocked");
         }
         InetAddress[] addresses = resolve(host);
         for (InetAddress address : addresses) {
             if (isPrivate(address)) {
-                throw blocked("baseUrl 解析到私网/回环/保留地址（" + host + " → " + address.getHostAddress()
-                        + "）：默认禁止（如果这是内网自建网关，请显式设 app.ai.config.allow-private-endpoints=true）");
+                throw blocked("baseUrl resolves to a private/loopback/reserved address (" + host + " -> " + address.getHostAddress()
+                        + ") and is blocked by default; set app.ai.config.allow-private-endpoints=true for an internal gateway");
             }
         }
         return url;
@@ -121,14 +121,14 @@ public class AiEndpointGuard {
      */
     private static String normalise(String baseUrl) {
         if (!StringUtils.hasText(baseUrl)) {
-            throw invalid("baseUrl 必填");
+            throw invalid("baseUrl is required");
         }
         String url = baseUrl.trim();
         while (url.endsWith("/")) {
             url = url.substring(0, url.length() - 1);
         }
         if (url.length() > MAX_URL_LENGTH) {
-            throw invalid("baseUrl 过长（>" + MAX_URL_LENGTH + " 字符）");
+            throw invalid("baseUrl exceeds the maximum length of " + MAX_URL_LENGTH + " characters");
         }
         return url;
     }
@@ -139,10 +139,10 @@ public class AiEndpointGuard {
             uri = new URI(url);
         }
         catch (Exception ex) {
-            throw invalid("baseUrl 不是合法 URL：" + ex.getClass().getSimpleName());
+            throw invalid("baseUrl is not a valid URL: " + ex.getClass().getSimpleName());
         }
         if (uri.getScheme() == null) {
-            throw invalid("baseUrl 缺少 scheme（需要 http:// 或 https://）");
+            throw invalid("baseUrl requires an http:// or https:// scheme");
         }
         return uri;
     }
@@ -168,7 +168,7 @@ public class AiEndpointGuard {
         }
         catch (UnknownHostException ex) {
             // 解析不出来 ⇒ 连接不上 ⇒ 交给探活报 UNREACHABLE（见类注"已知限制"）
-            log.debug("URL guard: host cannot be resolved now (not treated as dirty) host={}", host);
+            log.debug("URL guard: host cannot be resolved now (not treated as dirty) host={}", host, ex);
             return new InetAddress[0];
         }
     }

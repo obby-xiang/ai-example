@@ -133,7 +133,7 @@ public class RunRegistry {
 		this.store = store;
 		this.objectMapper = objectMapper;
 		this.properties = properties;
-		this.frames = java.util.Objects.requireNonNull(frames, "事件日志 FrameStore 不得为空");
+		this.frames = java.util.Objects.requireNonNull(frames, "Event log FrameStore must not be null");
 		this.wakeBus = wakeBus;
 		this.wakeListener = wakeListener;
 		// 轻装配/单测也要有模型侧标注：裁剪器是无状态、纯配置驱动的，
@@ -350,7 +350,7 @@ public class RunRegistry {
 			catch (RuntimeException ex) {
 				// 释放是"更好"，不是"更正确"的前提：簿记清不掉不能让终态出口失败。
 				log.warn("run archive bookkeeping release failed runId={} (terminal "
-						+ "state unaffected; expiry cleanup catches up): {}", runId, ex.getMessage());
+						+ "state unaffected; expiry cleanup catches up)", runId, ex);
 			}
 		}
 	}

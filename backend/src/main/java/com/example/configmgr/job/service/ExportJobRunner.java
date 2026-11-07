@@ -71,12 +71,6 @@ public class ExportJobRunner {
      */
     private static final String JOB_LEVEL_DEF_CODE = "-";
 
-    /** {@code validation_issues.message} 的列宽（VARCHAR(1024)）——写入前必须保护。 */
-    private static final int ISSUE_MESSAGE_MAX = 1024;
-
-    /** 消息截断标记（列宽保护的可见痕迹）。 */
-    private static final String ISSUE_MESSAGE_TRUNCATED = "…[已按列宽截断]";
-
     @Transactional
     public void run(Job job) {
         final Long jobId = job.getId();
@@ -264,13 +258,13 @@ public class ExportJobRunner {
                         }
                         catch (RuntimeException compensationFailure) {
                             e.addSuppressed(compensationFailure);
-                            log.warn("Export item compensation failed before rollback (original error kept) defCode={} error={}", defCode,
-                                    compensationFailure.toString());
+                            log.warn("Export item compensation failed before rollback (original error kept) defCode={}",
+                                    defCode, compensationFailure);
                         }
                         throw e;
                     }
-                    log.error("Export item failed defCode={} error={}", defCode, e.getMessage(), e);
-                    saveIssue(jobId, defCode, issueMessage(e));
+                    log.error("Export item failed defCode={}", defCode, e);
+                    saveIssue(jobId, defCode, issueMessage());
                     errorCount++;
                     finishedDefRows += defTotal;
                     processedRows = finishedDefRows;
@@ -282,7 +276,7 @@ public class ExportJobRunner {
                 }
             }
         } catch (Exception e) {
-            log.error("Export job failed error={}", e.getMessage(), e);
+            log.error("Export job failed", e);
             errorCount++;
             snapshot.processed = processedRows;
             snapshot.total = totalRows;
@@ -290,7 +284,7 @@ public class ExportJobRunner {
             // 事务已被标记回滚时，本方法内的任何写（issue/终态）都会在提交期被整批丢弃，
             // 终态交给 afterCompletion 的回滚收敛补写（FAILED）。
             if (!rollbackOnly()) {
-                saveIssue(jobId, JOB_LEVEL_DEF_CODE, "导出作业失败: " + issueMessage(e));
+                saveIssue(jobId, JOB_LEVEL_DEF_CODE, "导出作业失败: " + issueMessage());
                 terminalWriter.complete(job, Job.JobStatus.FAILED, errorCount, 0,
                         processedRows, totalRows, doneEvent(job, Job.JobStatus.FAILED));
             }
@@ -353,22 +347,9 @@ public class ExportJobRunner {
         issueRepository.save(issue);
     }
 
-    /**
-     * 异常摘要（列宽保护）：<b>异常类名 + 摘要</b>，长度不超过 {@value #ISSUE_MESSAGE_MAX}。
-     *
-     * <p>类名置于消息<b>头</b>并在截断预算里先行扣除 —— 于是"类名"这一最有排障价值的部分
-     * 永远不会被截掉（截断只吃掉摘要尾部，并在末尾留
-     * {@value #ISSUE_MESSAGE_TRUNCATED} 痕迹）。没有这层保护时，超长异常消息会让 INSERT 因列宽失败，
-     * 把"项级失败"升级成"作业级失败"（丢失其余配置项的处置）。
-     */
-    private static String issueMessage(Exception e) {
-        String head = e.getClass().getSimpleName() + ": ";
-        String detail = e.getMessage() == null ? "(无消息)" : e.getMessage();
-        int budget = ISSUE_MESSAGE_MAX - head.length() - ISSUE_MESSAGE_TRUNCATED.length();
-        if (detail.length() <= budget) {
-            return head + detail;
-        }
-        return head + detail.substring(0, Math.max(0, budget)) + ISSUE_MESSAGE_TRUNCATED;
+    /** 对外只落通用失败说明；异常详情由对应日志保留。 */
+    private static String issueMessage() {
+        return "导出失败，请查看服务日志或稍后重试";
     }
 
     /** 行级进度事件：与 {@link JobProgressService#snapshot} 同一对数字，并携当前处理项（④ 纯增量字段）。 */

@@ -61,7 +61,7 @@ public class AiModelCatalog {
     public CatalogResult fetch(Long providerId, boolean refresh) {
         AiProvider provider = this.configService.provider(providerId)
             .orElseThrow(() -> new AiConfigException(AiConfigWriter.CODE_PROVIDER_NOT_FOUND,
-                    "provider 不存在：" + providerId));
+                    "Provider not found: " + providerId));
         AiConfigService.KeyResolution key = this.configService.resolveKey(provider);
         // M-1（复审）：key 解不开就没有"拉取"可言 —— 直接回 KEY_UNREADABLE（与 /test 同口径），
         // 而不是拿 null key 打上游换一个 AUTH_FAILED（用户会去改 key，但真正要修的是 KEK）。
@@ -100,7 +100,7 @@ public class AiModelCatalog {
             });
         }
         catch (Exception ex) {
-            log.debug("model cache read failed (treated as miss) error={}", ex.getMessage());
+            log.debug("model cache read failed (treated as miss)", ex);
             return null;
         }
     }
@@ -119,7 +119,7 @@ public class AiModelCatalog {
             }
         }
         catch (Exception ex) {
-            log.debug("model cache write failed (response unaffected) error={}", ex.getMessage());
+            log.debug("model cache write failed (response unaffected)", ex);
         }
     }
 

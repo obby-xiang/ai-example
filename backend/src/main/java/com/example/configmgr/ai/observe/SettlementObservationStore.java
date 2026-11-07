@@ -138,8 +138,8 @@ public class SettlementObservationStore {
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.O1_OBSERVATION_CLAIM, ex);
-			log.debug("settlement observation slot unavailable (treated as unobserved, this line still emitted) runId={} toolCallId={} error={}", runId, toolCallId,
-					ex.getMessage());
+			log.debug("settlement observation slot unavailable (treated as unobserved, this line still emitted) runId={} toolCallId={}", runId, toolCallId,
+					ex);
 			return new ClaimHandle(true, runId, toolCallId, token);
 		}
 	}
@@ -161,8 +161,8 @@ public class SettlementObservationStore {
 			this.redis.execute(RELEASE_SCRIPT, List.of(key), handle.toolCallId(), handle.token());
 		}
 		catch (RuntimeException ex) {
-			log.warn("release of settlement observation slot failed (this settlement may still be blocked) runId={} toolCallId={} error={}", handle.runId(), handle.toolCallId(),
-					ex.getMessage());
+			log.warn("release of settlement observation slot failed (this settlement may still be blocked) runId={} toolCallId={}", handle.runId(), handle.toolCallId(),
+					ex);
 		}
 	}
 
@@ -188,7 +188,7 @@ public class SettlementObservationStore {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			log.warn("settlement observation slot purge failed runId={} key={} error={}", runId, key, ex.getMessage());
+			log.warn("settlement observation slot purge failed runId={} key={}", runId, key, ex);
 			return false;
 		}
 	}
@@ -199,7 +199,7 @@ public class SettlementObservationStore {
 		}
 		catch (RuntimeException ex) {
 			// 自愈失败只降级：脚本本身已（原子地）置过 TTL，这里只是兜底修复旧墓碑
-			log.debug("settlement observation slot TTL self-heal failed key={} error={}", key, ex.getMessage());
+			log.debug("settlement observation slot TTL self-heal failed key={}", key, ex);
 		}
 	}
 

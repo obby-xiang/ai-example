@@ -42,8 +42,8 @@ import java.util.List;
  * <li>业务信封 {@link ApiResponse}（与 AI 端点的裸对象族并存，见 {@code api/http.ts} 的
  * {@code success} 判别）；</li>
  * <li>响应体<b>永不含</b> key 的明文/密文/指纹（{@link ProviderView} 只有四件套）；</li>
- * <li>错误只给稳定 {@code code} + 中文兜底：HTTP 状态由 {@link AiConfigException#getStatus()} 统一给；
- * 前端按 code 查文案（i18n 口径，F3 的用例锁"不显示后端中文"）；</li>
+ * <li>错误只给稳定 {@code code} + 安全回退文案：HTTP 状态由 {@link AiConfigException#getStatus()} 统一给；
+ * 前端按 code 本地化（i18n 口径，F3 的用例锁"不直接显示后端回退文案"）；</li>
  * <li>{@code /test} 与 {@code /models/fetch} 的失败是<b>观测结果</b>（200 + {@code ok=false} + code），
  * 不是请求错误 —— 见 {@link ProbeView} 的类注。</li>
  * </ul>
@@ -139,7 +139,7 @@ public class AiConfigController {
         return guarded(() -> {
             AiProvider provider = this.configService.provider(id)
                 .orElseThrow(() -> new AiConfigException(AiConfigWriter.CODE_PROVIDER_NOT_FOUND,
-                        "provider 不存在：" + id));
+                        "Provider not found: " + id));
             AiConfigService.KeyResolution key = this.configService.resolveKey(provider);
             // M-1（复审）：key 声明了但本进程解不开（KEK 缺失/变更/密文损坏）⇒ 探活没有意义，
             // 直接把稳定码报出去。否则会拿 null key 去打上游，回来一个 AUTH_FAILED ——
@@ -214,7 +214,7 @@ public class AiConfigController {
     private void requireProvider(Long id) {
         this.configService.provider(id)
             .orElseThrow(() -> new AiConfigException(AiConfigWriter.CODE_PROVIDER_NOT_FOUND,
-                    "provider 不存在：" + id));
+                    "Provider not found: " + id));
     }
 
     /** 把业务异常统一落成"信封 + 稳定 code + 对应 HTTP 状态"。 */
@@ -235,7 +235,7 @@ public class AiConfigController {
     }
 
     private static <T> ResponseEntity<ApiResponse<T>> fail(HttpStatus status, String code, String message) {
-        // 只记稳定 code + 状态码：message 是给用户看的中文文案（可能回显 provider/model 标识），日志不复述用户面文本
+        // 只记稳定 code + 状态码：message 是前端按稳定 code 本地化前的安全回退文案（可能包含 provider/model 标识），日志不复述
         log.debug("config write rejected code={} status={}", code, status.value());
         return ResponseEntity.status(status).body(ApiResponse.error(code, message));
     }

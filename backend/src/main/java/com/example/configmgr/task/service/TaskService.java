@@ -92,7 +92,7 @@ public class TaskService {
 
     public Task findById(Long id) {
         Task task = taskRepository.findById(id)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", id));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", id));
         task.setItems(taskItemRepository.findByTaskIdOrderBySortOrder(id));
         return task;
     }
@@ -107,7 +107,7 @@ public class TaskService {
      */
     public Task lockForUpdate(Long id) {
         return taskRepository.findByIdForUpdate(id)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", id));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", id));
     }
 
     /**
@@ -232,7 +232,7 @@ public class TaskService {
         }
         catch (Exception ex) {
             throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
-                    "任务设置序列化失败: " + ex.getMessage(), ex);
+                    "Could not serialize task settings", ex);
         }
         task.setAiCreateKey(key);
         task.setAiCreateRun(runToken);
@@ -257,8 +257,8 @@ public class TaskService {
                 return Optional.of(new CreateOutcome(existing, true));
             }
             throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
-                    "本轮已继续任务 #" + existing.getId() + "，同一轮只允许创建或继续一次；本次未创建。"
-                            + "请用 navigate_to 打开已有任务，或在新一轮再创建。");
+                    "Task #" + existing.getId() + " was already continued in this turn; no task was created. "
+                            + "Use navigate_to to open the existing task, or start a new turn.");
         }
         if (!eligible) {
             return Optional.empty();
@@ -270,7 +270,7 @@ public class TaskService {
         }
         catch (Exception ex) {
             throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
-                    "任务创建续跑标记序列化失败: " + ex.getMessage(), ex);
+                    "Could not serialize the task continuation marker", ex);
         }
         Task saved = this.taskRepository.saveAndFlush(existing);
         log.info("create_task continuation slot reused taskId={} runId={}", saved.getId(), runToken);
@@ -311,7 +311,7 @@ public class TaskService {
         }
         catch (Exception ex) {
             throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
-                    "任务设置不可读，不能安全复用创建槽位: " + ex.getMessage(), ex);
+                    "Task settings are unreadable; the creation slot cannot be reused safely", ex);
         }
     }
 
@@ -322,13 +322,15 @@ public class TaskService {
         }
         if (!(raw instanceof List<?> values)) {
             throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
-                    "任务 #" + taskId + " 的 aiCreateRuns 必须是数组，不能安全复用创建槽位");
+                    "Task #" + taskId + " has a non-array aiCreateRuns value; "
+                            + "the creation slot cannot be reused safely");
         }
         List<String> runs = new ArrayList<>();
         for (Object value : values) {
             if (!(value instanceof String run) || run.isBlank()) {
                 throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
-                        "任务 #" + taskId + " 的 aiCreateRuns 含非法项，不能安全复用创建槽位");
+                        "Task #" + taskId + " has an invalid aiCreateRuns entry; "
+                                + "the creation slot cannot be reused safely");
             }
             if (!runs.contains(run)) {
                 runs.add(run);
@@ -345,8 +347,8 @@ public class TaskService {
             return new CreateOutcome(existing, true);
         }
         throw new ConflictException(ErrorCodes.CREATE_TASK_CONFLICT,
-                "本轮已创建任务 #" + existing.getId() + "，同一轮只允许创建一次；本次未创建。"
-                        + "请用 navigate_to 打开已有任务，或在新一轮再创建。");
+                "Task #" + existing.getId() + " was already created in this turn; no task was created. "
+                        + "Use navigate_to to open the existing task, or start a new turn.");
     }
 
     /**
@@ -382,16 +384,16 @@ public class TaskService {
         }
         catch (RuntimeException requeryFailure) {
             // 回查自身失败：不改写成"可重试冲突"，保留原始完整性错误并附带回查失败
-            log.error("create_task re-query failed after unique conflict idemKey={} runId={} error={}",
-                    key, runToken, requeryFailure.getMessage(), requeryFailure);
+            log.error("create_task re-query failed after unique conflict idemKey={} runId={}",
+                    key, runToken, requeryFailure);
             conflict.addSuppressed(requeryFailure);
             throw conflict;
         }
         if (resolved != null) {
             return resolved;
         }
-        log.error("create_task no existing task found after unique conflict, rethrowing original error idemKey={} runId={} error={}",
-                key, runToken, conflict.getMostSpecificCause().getMessage());
+        log.error("create_task no existing task found after unique conflict, rethrowing original error idemKey={} runId={}",
+                key, runToken, conflict);
         throw conflict;
     }
 
@@ -437,7 +439,8 @@ public class TaskService {
             return hex.toString();
         }
         catch (NoSuchAlgorithmException ex) {
-            throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "SHA-256 不可用，无法生成创建幂等键", ex);
+            throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE,
+                    "SHA-256 is unavailable; cannot generate the creation idempotency key", ex);
         }
     }
 
@@ -491,13 +494,13 @@ public class TaskService {
     @Transactional
     public void setCondition(Long taskId, String defCode, String conditionJson) {
         TaskItem item = taskItemRepository.findByTaskIdAndDefCode(taskId, defCode)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务条目", defCode));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task item", defCode));
         item.setConditionJson(conditionJson);
         item.setStatus("READY");
         taskItemRepository.save(item);
 
         Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
     }
 
     /**
@@ -510,22 +513,23 @@ public class TaskService {
     @Transactional
     public Task goToStep(Long taskId, String step) {
         Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
         // R-137 双守卫：①终态守卫（与 JobService.assertTaskNotFinalized / 前端 isCurrentTaskReadOnly 同口径）
         assertTaskNotFinalized(task);
         // ②step 校验：非空 + 格式 + 按任务类型白名单（非法 → IllegalArgumentException → 400）
         if (step == null || step.isBlank()) {
-            throw new CodedIllegalArgumentException(ErrorCodes.STEP_REQUIRED, "目标步骤不得为空");
+            throw new CodedIllegalArgumentException(ErrorCodes.STEP_REQUIRED, "Target step must not be empty");
         }
         String normalized = step.trim();
         if (!STEP_FORMAT.matcher(normalized).matches()) {
-            throw new CodedIllegalArgumentException(ErrorCodes.STEP_INVALID, "目标步骤格式不合法：" + step
-                    + "（应为全大写字母/数字/下划线，如 " + TaskSteps.SELECT_DEFS + "、" + TaskSteps.QUERY_COND + "）");
+            throw new CodedIllegalArgumentException(ErrorCodes.STEP_INVALID, "Invalid target step format: " + step
+                    + "; use uppercase letters, digits, and underscores (for example, "
+                    + TaskSteps.SELECT_DEFS + " or " + TaskSteps.QUERY_COND + ")");
         }
         if (!TaskSteps.isKnownFor(task.getType(), normalized)) {
             throw new CodedIllegalArgumentException(ErrorCodes.STEP_NOT_IN_SEQUENCE,
-                    "目标步骤不在该任务类型的步骤序列内：" + step
-                    + "（" + task.getType() + " 可选：" + TaskSteps.sequence(task.getType()) + "）");
+                    "Target step is not in the sequence for this task type: " + step
+                    + " (" + task.getType() + " allows " + TaskSteps.sequence(task.getType()) + ")");
         }
         task.setCurrentStep(normalized);
         task = taskRepository.save(task);
@@ -544,7 +548,7 @@ public class TaskService {
     @Transactional
     public void writeCompletionStep(Long taskId, String step) {
         Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
         if (task.getStatus() == Task.TaskStatus.CANCELLED) {
             log.info("Task already CANCELLED (absorbing-state monotonic gate), completion step write refused taskId={} step={}",
                     taskId, step);
@@ -563,7 +567,7 @@ public class TaskService {
     private void assertTaskNotFinalized(Task task) {
         if (task.getStatus() == Task.TaskStatus.CANCELLED) {
             throw new ConflictException(ErrorCodes.TASK_FINALIZED,
-                    "任务 #" + task.getId() + " 已 CANCELLED，禁止跳转步骤（TASK_FINALIZED）");
+                    "Task #" + task.getId() + " is CANCELLED; changing steps is forbidden (TASK_FINALIZED)");
         }
         if (task.getStatus() != Task.TaskStatus.COMPLETED) {
             return;
@@ -576,7 +580,8 @@ public class TaskService {
                 .isPresent();
         if (hasFinalJob) {
             throw new ConflictException(ErrorCodes.TASK_FINALIZED,
-                    "任务 #" + task.getId() + " 已 COMPLETED（" + finalJobType + " 作业成功），禁止跳转步骤（TASK_FINALIZED）");
+                    "Task #" + task.getId() + " is COMPLETED by a successful " + finalJobType
+                            + " job; changing steps is forbidden (TASK_FINALIZED)");
         }
     }
 
@@ -586,10 +591,11 @@ public class TaskService {
     @Transactional
     public Task setImportMode(Long taskId, String mode) {
         if (!"MERGE".equals(mode) && !"REPLACE".equals(mode)) {
-            throw new CodedIllegalArgumentException(ErrorCodes.IMPORT_MODE_INVALID, "导入模式只支持 MERGE 或 REPLACE");
+            throw new CodedIllegalArgumentException(ErrorCodes.IMPORT_MODE_INVALID,
+                    "Import mode must be MERGE or REPLACE");
         }
         Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
 
         Map<String, Object> settings = new HashMap<>();
         if (task.getSettingsJson() != null && !task.getSettingsJson().isBlank()) {
@@ -598,14 +604,15 @@ public class TaskService {
                 Map<String, Object> parsed = objectMapper.readValue(task.getSettingsJson(), Map.class);
                 settings.putAll(parsed);
             } catch (Exception e) {
-                log.warn("Task settings unparseable, rebuilding taskId={} error={}", taskId, e.getMessage());
+                log.warn("Task settings unparseable, rebuilding taskId={}", taskId, e);
             }
         }
         settings.put("importMode", mode);
         try {
             task.setSettingsJson(objectMapper.writeValueAsString(settings));
         } catch (Exception e) {
-            throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE, "任务设置序列化失败: " + e.getMessage(), e);
+            throw new CodedIllegalStateException(ErrorCodes.TASK_SETTINGS_UNREADABLE,
+                    "Could not serialize task settings", e);
         }
         task = taskRepository.save(task);
         return task;
@@ -621,7 +628,7 @@ public class TaskService {
     @Transactional
     public void updateStatus(Long taskId, Task.TaskStatus status) {
         Task task = taskRepository.findById(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
         if (task.getStatus() == Task.TaskStatus.CANCELLED
                 && (status == Task.TaskStatus.COMPLETED || status == Task.TaskStatus.FAILED)) {
             log.info("Task already CANCELLED (absorbing-state monotonic gate), status write refused taskId={} status={}",
@@ -724,10 +731,10 @@ public class TaskService {
                 .orElse(null);
         if (inFlight != null) {
             throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
-                    "任务 #" + taskId + " 仍有未结束作业：作业 #" + inFlight.getId() + " ["
-                            + inFlight.getJobType() + "] 状态 " + inFlight.getStatus()
-                            + "（JOB_ALREADY_RUNNING），暂时无法删除；删除任务会级联清理作业/暂存/文件，"
-                            + "请等待作业结束或先取消作业后再删除");
+                    "Task #" + taskId + " still has unfinished job #" + inFlight.getId() + " ["
+                            + inFlight.getJobType() + "] with status " + inFlight.getStatus()
+                            + " (JOB_ALREADY_RUNNING); deletion would cascade through jobs, staging rows, and files. "
+                            + "Wait for the job to finish or cancel it before deleting the task");
         }
 
         // C1：CANCELLED/FAILED 等终态也只是“状态已收”，runner 可能仍在自己的长事务里写子表。
@@ -742,14 +749,14 @@ public class TaskService {
         } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
             // C1 / 多实例：Redis 不可用时不能把“查不到”当成“没有 runner”。fail-closed。
             throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
-                    "任务 #" + taskId + " 的作业收尾状态无法确认（Redis 不可用），"
-                            + "为避免产生孤儿数据已拒绝删除，请稍后重试");
+                    "Could not confirm whether jobs for task #" + taskId + " have finished because Redis is unavailable; "
+                            + "deletion was refused to avoid orphan data, please retry later");
         }
         if (finishing != null) {
             throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
-                    "任务 #" + taskId + " 的作业 #" + finishing.getId() + " ["
-                            + finishing.getJobType() + "] 状态 " + finishing.getStatus()
-                            + " 正在收尾，请稍后重试（作业进程退出后才允许删除）");
+                    "Job #" + finishing.getId() + " [" + finishing.getJobType() + "] for task #" + taskId
+                            + " is still finishing with status " + finishing.getStatus()
+                            + "; retry after the job runner exits");
         }
 
         List<TaskFile> files = taskFileRepository.findByTaskId(taskId);
@@ -789,8 +796,8 @@ public class TaskService {
             try {
                 fileStorage.delete(file.getStoragePath());
             } catch (RuntimeException e) {
-                log.warn("Failed to delete task physical file, continuing with remaining files path={} error={}",
-                        file.getStoragePath(), e.getMessage());
+                log.warn("Failed to delete task physical file, continuing with remaining files path={}",
+                        file.getStoragePath(), e);
             }
         }
     }

@@ -39,7 +39,7 @@ public final class RequestContextUtils {
 	public static TenantUser require() {
 		TenantUser identity = HOLDER.get();
 		if (identity == null) {
-			throw new IllegalStateException("缺少租户/用户身份上下文：该执行路径必须先通过 HTTP 身份头或 useContext 建立身份");
+			throw new IllegalStateException("Tenant/user identity context is required; establish it through HTTP identity headers or useContext");
 		}
 		return identity;
 	}
@@ -117,8 +117,8 @@ public final class RequestContextUtils {
 				return;
 			}
 			if (Thread.currentThread().threadId() != this.ownerThreadId) {
-				throw new IllegalStateException("身份作用域只能由建立它的线程关闭：owner=" + this.ownerThreadId + " current="
-						+ Thread.currentThread().threadId());
+				throw new IllegalStateException("An identity scope must be closed by its creating thread: owner="
+						+ this.ownerThreadId + " current=" + Thread.currentThread().threadId());
 			}
 			// 先置位再回写：重复关闭不得第二次回写“旧值”（会覆盖后来新开的作用域）。
 			this.closed = true;

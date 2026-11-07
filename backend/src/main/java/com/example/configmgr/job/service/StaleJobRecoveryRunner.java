@@ -155,8 +155,8 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
                     return false;
                 }
             } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
-                log.error("Stale job recovery skipped, runner state unavailable (fail-closed) jobId={} error={}",
-                        jobId, e.getMessage());
+                log.error("Stale job recovery skipped, runner state unavailable (fail-closed) jobId={}",
+                        jobId, e);
                 return false;
             }
             // 只迁移状态：候选分页读到的 progress/total 是扫描时刻的旧快照，不能随终态写回

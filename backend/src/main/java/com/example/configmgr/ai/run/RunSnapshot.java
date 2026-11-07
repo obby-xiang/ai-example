@@ -218,7 +218,7 @@ public class RunSnapshot {
 	 */
 	public void freezeParams(FrozenParams frozen) {
 		if (frozen == null) {
-			throw new IllegalArgumentException("首笔快照必须冻结生效参数");
+			throw new IllegalArgumentException("Initial snapshot must freeze effective parameters");
 		}
 		this.temperature = frozen.temperature();
 		this.topP = frozen.topP();
@@ -308,7 +308,7 @@ public class RunSnapshot {
 	 */
 	public long transcriptUserTurnStartedAtMs() {
 		if (this.createdAtMs <= 0L || this.turnStartedAtMs <= 0L) {
-			throw new IllegalStateException("轮次快照缺少 createdAtMs/turnStartedAtMs runId=" + this.runId);
+			throw new IllegalStateException("Run snapshot lacks createdAtMs/turnStartedAtMs runId=" + this.runId);
 		}
 		return Math.min(this.turnStartedAtMs, this.createdAtMs - 1L);
 	}
@@ -321,7 +321,7 @@ public class RunSnapshot {
 	 */
 	public long transcriptToolTurnStartedAtMs() {
 		if (this.createdAtMs <= 0L) {
-			throw new IllegalStateException("轮次快照缺少 createdAtMs runId=" + this.runId);
+			throw new IllegalStateException("Run snapshot lacks createdAtMs runId=" + this.runId);
 		}
 		return this.createdAtMs;
 	}

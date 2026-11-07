@@ -509,7 +509,7 @@ public class LeaseService {
 	 */
 	public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
 		if (fenceKey == null || fenceKey.isBlank()) {
-			throw new IllegalArgumentException("run 租约必须带 fence：key=" + key);
+			throw new IllegalArgumentException("Run lease requires a fence: key=" + key);
 		}
 		return acquire(key, fenceKey, ttl, owner);
 	}
@@ -530,7 +530,7 @@ public class LeaseService {
 			// 编程错误（不是运行时降级面）：带 tag 的键是 run 租约，必须带同槽 fence。
 			// 静默改走全局资源锁会让 epoch 与 run 的 fence 脱钩 —— 在 try 之外直接抛。
 			if (leaseTag != null) {
-				throw new IllegalArgumentException("带 hash tag 的租约必须带 fence（run 租约没有无 fence 形态）：key="
+				throw new IllegalArgumentException("A lease with a hash tag requires a fence (run leases have no fence-free form): key="
 						+ key + " tag=" + leaseTag);
 			}
 		}
@@ -541,8 +541,8 @@ public class LeaseService {
 			// 这是编程错误，不是运行时降级面，故在 try 之外直接抛。
 			String fenceTag = hashTagOf(fenceKey);
 			if (leaseTag == null || !leaseTag.equals(fenceTag)) {
-				throw new IllegalArgumentException("fenceKey 必须与租约键同槽（同一 hash tag）：key=" + key
-						+ " tag=" + leaseTag + "，fence=" + fenceKey + " tag=" + fenceTag);
+				throw new IllegalArgumentException("fenceKey must share the lease key slot (same hash tag): key=" + key
+						+ " tag=" + leaseTag + ", fence=" + fenceKey + " tag=" + fenceTag);
 			}
 		}
 		String holder = owner(owner);
@@ -580,13 +580,12 @@ public class LeaseService {
 					markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 				}
 				log.warn("lease acquire interrupted on this thread key={} owner={} (local "
-						+ "cancellation, not facility fault; read-only this turn): {}", key,
-						holder, ex.getMessage());
+						+ "cancellation, not facility fault; read-only this turn)", key,
+						holder, ex);
 				return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 			}
 			markFacilityUnhealthy(ex);
-			log.warn("lease acquire degraded key={} owner={} (Redis unavailable; caller falls back to in-process mutex): {}", key, holder,
-					ex.getMessage());
+			log.warn("lease acquire degraded key={} owner={} (Redis unavailable; caller falls back to in-process mutex)", key, holder, ex);
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 		}
 	}
@@ -683,8 +682,8 @@ public class LeaseService {
 			if (hashTagOf(key) != null) {
 				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			}
-			log.warn("lease ownership check degraded key={} owner={} epoch={} (Redis unavailable; read-only, no progress): {}", key, holder,
-					epoch, ex.getMessage());
+			log.warn("lease ownership check degraded key={} owner={} epoch={} (Redis unavailable; read-only, no progress)", key, holder,
+					epoch, ex);
 			return Hold.UNAVAILABLE;
 		}
 	}
@@ -736,7 +735,7 @@ public class LeaseService {
 			if (hashTagOf(lease.key()) != null) {
 				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			}
-			log.debug("lease renew failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
+			log.debug("lease renew failed key={} epoch={}", lease.key(), lease.epoch(), ex);
 			return RenewOutcome.UNAVAILABLE;
 		}
 	}
@@ -783,7 +782,7 @@ public class LeaseService {
 			else {
 				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			}
-			log.debug("lease release failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
+			log.debug("lease release failed key={} epoch={}", lease.key(), lease.epoch(), ex);
 			return false;
 		}
 	}
@@ -917,7 +916,7 @@ public class LeaseService {
 	private void markFacilityUnhealthy(Throwable cause) {
 		if (isLocalThreadInterrupt(cause)) {
 			log.debug("facility health flag unchanged: failure caused by "
-					+ "thread interrupt (local signal, not facility fault): {}", cause.getMessage());
+					+ "thread interrupt (local signal, not facility fault)", cause);
 			return;
 		}
 		this.facilityHealthy = false;
@@ -1107,7 +1106,7 @@ public class LeaseService {
 			handle.close();
 		}
 		catch (Exception ex) {
-			log.debug("stop renew task failed key={}: {}", viewKey, ex.getMessage());
+			log.debug("stop renew task failed key={}", viewKey, ex);
 		}
 	}
 
@@ -1127,7 +1126,7 @@ public class LeaseService {
 				driving = alive.getAsBoolean();
 			}
 			catch (RuntimeException ex) {
-				log.debug("renew liveness probe failed key={} (assuming alive, renewing as usual): {}", lease.key(), ex.getMessage());
+				log.debug("renew liveness probe failed key={} (assuming alive, renewing as usual)", lease.key(), ex);
 				driving = true;
 			}
 			if (!driving) {
@@ -1158,7 +1157,7 @@ public class LeaseService {
 		}
 		catch (Exception ex) {
 			// 续租是后台动作：单拍失败不杀任务，下一拍再试（TTL 三倍于间隔，容忍两拍失败）
-			log.debug("renew task failed key={} epoch={}: {}", lease.key(), lease.epoch(), ex.getMessage());
+			log.debug("renew task failed key={} epoch={}", lease.key(), lease.epoch(), ex);
 		}
 	}
 
@@ -1180,7 +1179,7 @@ public class LeaseService {
 			return Boolean.TRUE.equals(this.redis.hasKey(key));
 		}
 		catch (Exception ex) {
-			log.debug("lease read-only probe failed key={}: {}", key, ex.getMessage());
+			log.debug("lease read-only probe failed key={}", key, ex);
 			return false;
 		}
 	}
@@ -1236,7 +1235,7 @@ public class LeaseService {
 		}
 		catch (Exception ex) {
 			markFacilityUnhealthy(ex);
-			log.debug("lease probe failed: {}", ex.getMessage());
+			log.debug("lease probe failed", ex);
 			return isLocalThreadInterrupt(ex) ? null : Boolean.FALSE;
 		}
 	}
@@ -1334,7 +1333,7 @@ public class LeaseService {
 	private long nextEpoch() {
 		Long epoch = this.redis.opsForValue().increment(EPOCH_KEY);
 		if (epoch == null || epoch <= 0L) {
-			throw new IllegalStateException("epoch 取号失败（INCR " + EPOCH_KEY + " 返回 " + epoch + "）");
+			throw new IllegalStateException("Failed to obtain epoch (INCR " + EPOCH_KEY + " returned " + epoch + ")");
 		}
 		return epoch;
 	}

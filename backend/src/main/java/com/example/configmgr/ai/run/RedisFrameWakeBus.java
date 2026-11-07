@@ -172,8 +172,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 						state.running = false;
 						this.publishStates.remove(channel, state);
 					}
-					log.debug("frame wake coalesced publish not dispatched runId={} seq={}: {}", runId, upperBoundSeq,
-							ex.getMessage());
+					log.debug("frame wake coalesced publish not dispatched runId={} seq={}", runId, upperBoundSeq, ex);
 				}
 			}
 			return;
@@ -218,8 +217,8 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 			this.redis.convertAndSend(channel, Long.toString(upperBoundSeq));
 		}
 		catch (Exception ex) {
-			log.debug("frame wake publish failed channel={} seq={} (wake is best-effort; archive reconcile is authoritative): {}",
-					channel, upperBoundSeq, ex.getMessage());
+			log.debug("frame wake publish failed channel={} seq={} (wake is best-effort; archive reconcile is authoritative)",
+					channel, upperBoundSeq, ex);
 		}
 	}
 
@@ -248,7 +247,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 			target.addMessageListener(listener, new ChannelTopic(channel));
 		}
 		catch (Exception ex) {
-			log.warn("frame wake subscribe failed runId={} (cross-instance wake unavailable; reattach replays): {}", runId, ex.getMessage());
+			log.warn("frame wake subscribe failed runId={} (cross-instance wake unavailable; reattach replays)", runId, ex);
 			return null;
 		}
 		AtomicBoolean closed = new AtomicBoolean();
@@ -264,7 +263,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 				current.removeMessageListener(listener);
 			}
 			catch (Exception ex) {
-				log.debug("frame wake unsubscribe failed runId={}: {}", runId, ex.getMessage());
+				log.debug("frame wake unsubscribe failed runId={}", runId, ex);
 			}
 		};
 	}
@@ -320,7 +319,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 			return container;
 		}
 		catch (Exception ex) {
-			log.warn("frame wake container start failed (cross-instance wake unavailable; reattach replays): {}", ex.getMessage());
+			log.warn("frame wake container start failed (cross-instance wake unavailable; reattach replays)", ex);
 			return null;
 		}
 	}
@@ -429,7 +428,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 				current.destroy();
 			}
 			catch (Exception ex) {
-				log.debug("frame wake container close failed: {}", ex.getMessage());
+				log.debug("frame wake container close failed", ex);
 			}
 		}
 		shutdownBounded(subscription);

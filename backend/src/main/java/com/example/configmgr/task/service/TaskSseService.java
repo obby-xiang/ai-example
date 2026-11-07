@@ -237,8 +237,8 @@ public class TaskSseService {
         try {
             json = objectMapper.writeValueAsString(Map.of("type", type, "data", data));
         } catch (Exception e) {
-            log.warn("SSE frame serialization failed, frame not sent taskId={} type={} error={}",
-                    taskId, type, e.getMessage());
+            log.warn("SSE frame serialization failed, frame not sent taskId={} type={}",
+                    taskId, type, e);
             return;
         }
 
@@ -279,7 +279,7 @@ public class TaskSseService {
                 remove(taskId, emitter);
             }
         } catch (Exception e) {
-            log.debug("Failed to send SSE heartbeat frame taskId={} error={}", taskId, e.getMessage());
+            log.debug("Failed to send SSE heartbeat frame taskId={}", taskId, e);
         }
     }
 
@@ -481,8 +481,8 @@ public class TaskSseService {
         } catch (RuntimeException e) {
             // 调度器拒绝（关停中）：撤销排期标记，后续 publish 仍能重试
             this.retryPending.remove(taskId);
-            log.debug("Task SSE cross-instance registration retry not scheduled taskId={} error={}",
-                    taskId, e.getMessage());
+            log.debug("Task SSE cross-instance registration retry not scheduled taskId={}",
+                    taskId, e);
         }
     }
 
@@ -552,8 +552,7 @@ public class TaskSseService {
         return switch (result.outcome()) {
             case SENT -> true;
             case FAILED -> {
-                log.debug("Failed to send SSE context={} reason={}", context,
-                        result.failure() == null ? "write failed" : result.failure().getMessage());
+                log.debug("Failed to send SSE context={}", context, result.failure());
                 yield false;
             }
             case TIMED_OUT -> {

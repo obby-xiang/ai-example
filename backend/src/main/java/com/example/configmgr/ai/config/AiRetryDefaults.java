@@ -158,7 +158,7 @@ public final class AiRetryDefaults {
 			}
 			catch (InterruptedException ex) {
 				Thread.currentThread().interrupt();
-				throw new BackOffInterruptedException("模型重试退避被中断（" + sleep + "ms）", ex);
+				throw new BackOffInterruptedException("Model retry backoff interrupted (" + sleep + "ms)", ex);
 			}
 		}
 

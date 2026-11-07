@@ -298,8 +298,8 @@ public class ConversationTranscriptStore {
 			if (isTransientResourceFailure(ex)) {
 				throw ex;
 			}
-			log.warn("transcript append failed sessionId={} error={} (display history does not affect this turn)",
-					sessionId, ex.getMessage());
+			log.warn("transcript append failed sessionId={} (display history does not affect this turn)",
+					sessionId, ex);
 			return false;
 		}
 	}
@@ -403,7 +403,7 @@ public class ConversationTranscriptStore {
 			return this.mapper.writeValueAsString(entry);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("transcript 条目序列化失败：" + ex.getMessage(), ex);
+			throw new IllegalStateException("Failed to serialize transcript entry", ex);
 		}
 	}
 
@@ -412,7 +412,7 @@ public class ConversationTranscriptStore {
 			return this.mapper.readValue(payload, TranscriptEntry.class);
 		}
 		catch (Exception ex) {
-			log.warn("transcript entry parse failed (skipped) sessionId={} error={}", sessionId, ex.getMessage());
+			log.warn("transcript entry parse failed (skipped) sessionId={}", sessionId, ex);
 			return null;
 		}
 	}

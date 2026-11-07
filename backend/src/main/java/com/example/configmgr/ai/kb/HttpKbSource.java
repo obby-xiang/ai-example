@@ -123,8 +123,8 @@ public class HttpKbSource implements KbSource {
     public String fetchContent(KbDocMeta meta, KbSource.RefreshBudget budget) throws KbSourceException {
         Duration timeout = effectiveTimeout(budget);
         HttpRequest.Builder builder = request(documentUri(meta), timeout);
-        HttpResponse<byte[]> response = send(builder.build(), "文档 " + meta.id(), timeout);
-        requireSuccess(response, "文档 " + meta.id());
+        HttpResponse<byte[]> response = send(builder.build(), "document " + meta.id(), timeout);
+        requireSuccess(response, "document " + meta.id());
         return new String(response.body(), StandardCharsets.UTF_8);
     }
 
@@ -160,7 +160,7 @@ public class HttpKbSource implements KbSource {
         }
         catch (RuntimeException e) {
             log.debug("Failed to read auth env variable ({}); sending request without Authorization header",
-                    this.authEnv);
+                    this.authEnv, e);
             return null;
         }
     }
@@ -170,15 +170,15 @@ public class HttpKbSource implements KbSource {
             return this.client.send(request, HttpResponse.BodyHandlers.ofByteArray());
         }
         catch (HttpTimeoutException e) {
-            throw new KbSourceException("请求超时（本次预算 " + timeout.toMillis() + "ms）：" + target, e);
+            throw new KbSourceException("Request timed out (budget " + timeout.toMillis() + "ms): " + target, e);
         }
         catch (IOException e) {
             // 只报"连不上"的类别与目标名：不拼 URL（避免把带查询串/凭据的地址带进日志面）
-            throw new KbSourceException("无法连接知识服务（" + target + "）：" + e.getClass().getSimpleName(), e);
+            throw new KbSourceException("Cannot connect to knowledge service (" + target + "): " + e.getClass().getSimpleName(), e);
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new KbSourceException("请求被中断：" + target, e);
+            throw new KbSourceException("Request interrupted: " + target, e);
         }
     }
 
@@ -188,7 +188,7 @@ public class HttpKbSource implements KbSource {
             return;
         }
         // 不包含响应体（可能回显请求头/内部地址）；只给状态码 + 目标名，模型侧可行动（稍后重试/联系管理员）
-        throw new KbSourceException("知识服务返回 HTTP " + status + "（" + target + "）");
+        throw new KbSourceException("Knowledge service returned HTTP " + status + " (" + target + ")");
     }
 
     private URI manifestUri() throws KbSourceException {
@@ -200,7 +200,7 @@ public class HttpKbSource implements KbSource {
         StringBuilder encoded = new StringBuilder();
         for (String segment : path.split("/")) {
             if (segment.isEmpty() || ".".equals(segment) || "..".equals(segment)) {
-                throw new KbSourceException("文档路径不合法：" + meta.id());
+                throw new KbSourceException("Invalid document path: " + meta.id());
             }
             if (encoded.length() > 0) {
                 encoded.append('/');
@@ -215,7 +215,7 @@ public class HttpKbSource implements KbSource {
             return URI.create(value);
         }
         catch (IllegalArgumentException e) {
-            throw new KbSourceException("知识服务地址不合法（检查 app.ai.kb.http.base-url）");
+            throw new KbSourceException("Invalid knowledge service URL; check app.ai.kb.http.base-url");
         }
     }
 

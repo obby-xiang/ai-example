@@ -756,6 +756,13 @@
       "reason": "仅统一AI卡片卡头、图标、状态、限高、边距和真实交互状态展示，保持迁移数据、协议及工作流契约不变，D6无需更新。",
       "reviewedAt": "2026-11-07",
       "reviewer": "K3.1 Pro施工，K3.1 Pro独立静态审查"
+    },
+    {
+      "fingerprint": "sha256:f0032be7fa4ac22f9c00aa26816c4c61538cde5489f61e6b572394a6abd9f6f0",
+      "status": "not-affected",
+      "reason": "仅规范生产异常消息、异常日志Throwable参数及安全错误映射，保持迁移数据、协议形状、状态机和键面契约不变，D6无需更新。",
+      "reviewedAt": "2026-11-07",
+      "reviewer": "K3.1 Pro施工，K3.1 Pro分区独立静态审查"
     }
   ]
 }

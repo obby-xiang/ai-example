@@ -166,7 +166,7 @@ public final class RunMemoryMerge {
 	public static List<Message> merge(List<Message> current, List<Message> incoming, MemoryTurn turn,
 			boolean replaceRunBlock, int maxMessages, Set<String> pinnedRunIds) {
 		if (turn == null) {
-			throw new IllegalArgumentException("记忆合并必须带本轮 runId（无归属消息不得被收养）");
+			throw new IllegalArgumentException("Memory merge requires the current runId; unowned messages must not be adopted");
 		}
 		MemoryTurn owner = turn;
 		// 压缩摘要（合成前缀）先摘出来：它不属于任何 run，必须留在窗口最前、按前缀块处理。
@@ -378,7 +378,7 @@ public final class RunMemoryMerge {
 		if (message instanceof SystemMessage) {
 			return SystemMessage.builder().text(message.getText()).metadata(metadata).build();
 		}
-		throw new IllegalStateException("不支持的记忆消息类型：" + message.getMessageType());
+		throw new IllegalStateException("Unsupported memory message type: " + message.getMessageType());
 	}
 
 }

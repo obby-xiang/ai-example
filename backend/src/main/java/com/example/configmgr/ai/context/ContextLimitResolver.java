@@ -114,8 +114,8 @@ public final class ContextLimitResolver {
 		}
 		catch (RuntimeException ex) {
 			// 配置快照读失败不该让一轮对话失败：上限是观测/压缩的输入，降级为未知即可
-			log.warn("reading ai_model.max_context failed providerId={} model={} error={} (limit unknown)",
-					providerId, modelId, ex.getMessage());
+			log.warn("reading ai_model.max_context failed providerId={} model={} (limit unknown)",
+					providerId, modelId, ex);
 			return new ResolveResult(0, Source.UNKNOWN);
 		}
 		if (maxContext == null || maxContext <= 0) {

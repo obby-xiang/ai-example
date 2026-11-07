@@ -158,7 +158,7 @@ public class RedisContextStateStore implements ContextStateStore {
 	@Override
 	public void write(String sessionId, ContextState state) {
 		if (writeState(sessionId, state, "", "") != 1L) {
-			throw new IllegalStateException("上下文状态 version CAS 冲突 sessionId=" + sessionId);
+			throw new IllegalStateException("Context state version CAS conflict sessionId=" + sessionId);
 		}
 	}
 
@@ -203,7 +203,7 @@ public class RedisContextStateStore implements ContextStateStore {
 				String.valueOf(Math.max(1, threshold)), String.valueOf(atMs), String.valueOf(Math.max(0L, cooldownMs)),
 				String.valueOf(ttlMillis()));
 		if (result == null || result.size() != 4) {
-			throw new IllegalStateException("摘要熔断计数返回不完整 sessionId=" + sessionId);
+			throw new IllegalStateException("Incomplete summary circuit-breaker counter result sessionId=" + sessionId);
 		}
 		return failed.withFuse(String.valueOf(result.get(0)), parseInt(result.get(1)), parseLong(result.get(2)))
 				.withVersion(parseLong(result.get(3)));
@@ -258,7 +258,7 @@ public class RedisContextStateStore implements ContextStateStore {
 			return this.mapper.writeValueAsString(pending);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法序列化压缩提交：" + ex.getMessage(), ex);
+			throw new IllegalStateException("Failed to serialize pending compaction", ex);
 		}
 	}
 
@@ -267,7 +267,7 @@ public class RedisContextStateStore implements ContextStateStore {
 			return this.mapper.readValue(raw, PendingCompaction.class);
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法读取待补写压缩提交：" + ex.getMessage(), ex);
+			throw new IllegalStateException("Failed to read pending compaction", ex);
 		}
 	}
 
@@ -286,7 +286,7 @@ public class RedisContextStateStore implements ContextStateStore {
 					String.valueOf(CONTEXT_LEDGER_MAX), String.valueOf(ttlMillis()));
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法写入上下文台账 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
+			throw new IllegalStateException("Failed to write context ledger sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -302,7 +302,7 @@ public class RedisContextStateStore implements ContextStateStore {
 					String.valueOf(CONTEXT_EVENTS_MAX), String.valueOf(ttlMillis()));
 		}
 		catch (Exception ex) {
-			throw new IllegalStateException("无法写入压缩事实 sessionId=" + sessionId + "：" + ex.getMessage(), ex);
+			throw new IllegalStateException("Failed to write compaction event sessionId=" + sessionId, ex);
 		}
 	}
 
@@ -325,7 +325,7 @@ public class RedisContextStateStore implements ContextStateStore {
 			}
 		}
 		catch (Exception ex) {
-			log.warn("context event read failed key={}: {} (treating as empty)", key, ex.getMessage());
+			log.warn("context event read failed key={} (treating as empty)", key, ex);
 		}
 		return out;
 	}
@@ -351,7 +351,7 @@ public class RedisContextStateStore implements ContextStateStore {
 			this.redis.expire(key, this.properties.getSessionTtl());
 		}
 		catch (RuntimeException ex) {
-			log.debug("context key renew failed key={}: {}", key, ex.getMessage());
+			log.debug("context key renew failed key={}", key, ex);
 		}
 	}
 

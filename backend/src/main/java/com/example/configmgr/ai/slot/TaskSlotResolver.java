@@ -186,7 +186,7 @@ public class TaskSlotResolver {
 			return this.objectMapper.writeValueAsString(arguments);
 		}
 		catch (Exception ex) {
-			log.warn("could not complete create_task slots; original arguments kept error={}", ex.getMessage());
+			log.warn("could not complete create_task slots; original arguments kept", ex);
 			return argumentsJson;
 		}
 	}
@@ -263,7 +263,7 @@ public class TaskSlotResolver {
 		}
 		catch (RuntimeException ex) {
 			// 目录读失败 = 没有可识别项：槽位保持缺失（表单照常可用），不影响本轮
-			log.warn("could not read definition catalog; slots treated as missing this turn error={}", ex.getMessage());
+			log.warn("could not read definition catalog; slots treated as missing this turn", ex);
 			return List.of();
 		}
 	}
@@ -385,7 +385,7 @@ public class TaskSlotResolver {
 			return this.taskService.findById(context.getTaskId());
 		}
 		catch (RuntimeException ex) {
-			log.debug("could not read task #{}; authoritative slots treated as missing error={}", context.getTaskId(), ex.getMessage());
+			log.debug("could not read task #{}; authoritative slots treated as missing", context.getTaskId(), ex);
 			return null;
 		}
 	}

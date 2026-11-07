@@ -109,12 +109,12 @@ public final class PromptDelimiters {
 
 	private static String alternatives(String... names) {
 		if (names == null || names.length == 0) {
-			throw new IllegalArgumentException("至少需要一个定界标签名");
+			throw new IllegalArgumentException("At least one delimiter tag name is required");
 		}
 		StringBuilder sb = new StringBuilder();
 		for (String name : names) {
 			if (name == null || name.isBlank()) {
-				throw new IllegalArgumentException("定界标签名不能为空");
+				throw new IllegalArgumentException("Delimiter tag names must not be blank");
 			}
 			if (sb.length() > 0) {
 				sb.append('|');

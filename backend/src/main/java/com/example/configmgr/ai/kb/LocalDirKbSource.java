@@ -56,14 +56,14 @@ public class LocalDirKbSource implements KbSource {
         }
         Path manifestPath = this.dir.resolve("manifest.json").normalize();
         if (!Files.isRegularFile(manifestPath)) {
-            throw new KbSourceException("知识库目录缺少 manifest.json：" + this.dir);
+            throw new KbSourceException("Knowledge directory has no manifest.json: " + this.dir);
         }
         byte[] raw;
         try {
             raw = Files.readAllBytes(manifestPath);
         }
         catch (IOException e) {
-            throw new KbSourceException("读取 manifest.json 失败：" + e.getMessage(), e);
+            throw new KbSourceException("Failed to read manifest.json", e);
         }
         if (budget != null) {
             budget.check();
@@ -79,14 +79,14 @@ public class LocalDirKbSource implements KbSource {
             Path file = resolve(meta);
             if (!Files.isRegularFile(file)) {
                 // 单篇缺失是配置错误：整份失败比"静默少一篇"好（少一篇会让检索面无声缩水）
-                throw new KbSourceException("知识文档不存在：" + meta.id() + "（" + file + "）");
+                throw new KbSourceException("Knowledge document does not exist: " + meta.id() + " (" + file + ")");
             }
             byte[] body;
             try {
                 body = Files.readAllBytes(file);
             }
             catch (IOException e) {
-                throw new KbSourceException("读取知识文档失败：" + meta.id() + "：" + e.getMessage(), e);
+                throw new KbSourceException("Failed to read knowledge document: " + meta.id(), e);
             }
             if (budget != null) {
                 // 文件读取本身不可硬中断，只能在调用前后检查。
@@ -95,7 +95,7 @@ public class LocalDirKbSource implements KbSource {
             String content = new String(body, StandardCharsets.UTF_8);
             String actualSha = KbHashing.sha256Text(content);
             if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
-                throw new KbSourceException("KB 正文 SHA-256（去 BOM 并统一 LF 后）与 manifest 声明不一致：" + meta.id());
+                throw new KbSourceException("KB content SHA-256 (BOM stripped, LF normalized) does not match manifest: " + meta.id());
             }
             String updatedAt = meta.updatedAt() == null ? "" : meta.updatedAt();
             resolved.add(new KbDocMeta(meta.id(), meta.title(), meta.summary(), meta.tags(), meta.aliases(),
@@ -128,14 +128,14 @@ public class LocalDirKbSource implements KbSource {
             return content;
         }
         catch (IOException e) {
-            throw new KbSourceException("读取知识文档失败：" + meta.id() + "：" + e.getMessage(), e);
+            throw new KbSourceException("Failed to read knowledge document: " + meta.id(), e);
         }
     }
 
     private Path resolve(KbDocMeta meta) throws KbSourceException {
         Path resolved = this.dir.resolve(meta.effectiveFile()).normalize();
         if (!resolved.startsWith(this.dir)) {
-            throw new KbSourceException("知识文档路径越界（必须是知识目录内的相对路径）：" + meta.id());
+            throw new KbSourceException("Knowledge document path escapes the knowledge directory; a relative path is required: " + meta.id());
         }
         return resolved;
     }

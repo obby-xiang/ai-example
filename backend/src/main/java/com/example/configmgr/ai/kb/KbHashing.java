@@ -16,7 +16,7 @@ public final class KbHashing {
             return toHex(digest.digest(bytes));
         }
         catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("JDK 缺少 SHA-256", e);
+            throw new IllegalStateException("JDK does not provide SHA-256", e);
         }
     }
 

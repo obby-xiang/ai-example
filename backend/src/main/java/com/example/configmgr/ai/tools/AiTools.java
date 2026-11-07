@@ -13,7 +13,6 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.ai.run.PendingToolCall;
-import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
@@ -183,7 +182,7 @@ public class AiTools {
             catch (IllegalArgumentException e) {
                 // 参数非法不再以字符串回填（那会让 ok=true 与失败文案自相矛盾；同 createTask 手法）
                 throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-                        "配置定义层级不合法：" + level + "（只支持 GLOBAL / REGION / PROJECT）");
+                        "Invalid config definition level (supported: GLOBAL / REGION / PROJECT)");
             }
         }
         List<ConfigDefinition> defs = parsedLevel != null
@@ -206,7 +205,7 @@ public class AiTools {
      * 的默认文案直接上抛，而是抛携带稳定码 {@code RESOURCE_NOT_FOUND} 的
      * {@link com.example.configmgr.common.ResourceNotFoundException}，并把<b>入参编码</b>放进统一信封的
      * {@code target}（{@code ToolResultEnvelope#TARGET_KEYS} 已登记 {@code code}）—— 模型/前端拿到的是
-     * "码 + 参数"，不是一句只能靠关键词猜的中文。人读文案按本轮 {@link ReplyLanguage} 渲染。
+     * "码 + 参数"，不是一句只能靠关键词猜的中文。异常人读文案固定英文，不以其承担前端本地化。
      */
     @Tool(name = AiToolNames.GET_CONFIG_DEF, description = "获取指定配置定义的字段详情（编码/标签/类型/必填/主键/引用）",
             resultConverter = PlainTextToolResultConverter.class)
@@ -221,9 +220,8 @@ public class AiTools {
             def = definitionService.findByCode(requested);
         }
         catch (ResourceNotFoundException ex) {
-            throw new ResourceNotFoundException(ex.getCode(), ReplyLanguage.current().english()
-                    ? "Config definition not found: " + requested + " (use list_config_defs to look up codes)"
-                    : "配置定义不存在: " + requested + "（可用 list_config_defs 查编码）");
+            throw new ResourceNotFoundException(ex.getCode(),
+                    "Config definition not found; use list_config_defs to look up codes");
         }
         StringBuilder sb = new StringBuilder();
         sb.append("配置定义: ").append(def.getCode()).append("（").append(def.getName()).append("）\n");
@@ -362,7 +360,7 @@ public class AiTools {
             @ToolParam(description = "本页最大字符数，默认 4000，范围 2..8000", required = false) Integer maxChars,
             ToolContext toolContext) {
         if (this.runStore == null) {
-            throw new IllegalStateException("当前装配没有轮次台账，无法读取工具结果");
+            throw new IllegalStateException("No run ledger is configured; tool results cannot be read");
         }
         Map<String, Object> context = toolContext == null ? null : toolContext.getContext();
         String runId = context == null ? null : stringOf(context.get("runId"));
@@ -426,7 +424,7 @@ public class AiTools {
         } catch (IllegalArgumentException e) {
             // 参数非法不再以字符串回填（那会让 ok=true 与失败文案自相矛盾）
             throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
-                    "任务类型不合法：" + type + "（只支持 EXPORT / IMPORT）");
+                    "Invalid task type (supported: EXPORT / IMPORT)");
         }
         boolean export = taskType == Task.TaskType.EXPORT;
         String effectiveTitle = TaskService.effectiveCreateTitle(taskType, title);
@@ -470,7 +468,7 @@ public class AiTools {
         }
         catch (Exception e) {
             throw new CodedIllegalStateException(ErrorCodes.TOOL_EXECUTION_FAILED,
-                    "创建任务失败，请核对当前任务状态后再继续，或联系管理员", e);
+                    "Failed to create the task; verify the current task state and retry, or contact an administrator", e);
         }
     }
 

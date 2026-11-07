@@ -85,7 +85,7 @@ public class ToolRegistry {
                     log.error("tool bean creation failed (startup aborts after scanning) bean={}", beanName, e);
                 }
                 else {
-                    log.debug("skipped bean that failed to create during scan (not a tool bean) bean={} error={}", beanName, e.toString());
+                    log.debug("skipped bean that failed to create during scan (not a tool bean) bean={}", beanName, e);
                 }
                 continue;
             }
@@ -138,14 +138,15 @@ public class ToolRegistry {
                 }
                 // 真工具 bean 的注册失败绝不能吞：schema 归一化/构建出问题而静默掉工具，
                 // 会让应用"看起来启动成功"却少了一批工具（比启动失败更难查）。
-                throw new IllegalStateException("工具 bean " + beanName + " 的回调注册失败", e);
+                throw new IllegalStateException("Failed to register callbacks for tool bean " + beanName, e);
             }
         }
         if (!failedToolBeans.isEmpty()) {
             // L-94：工具 bean 创建失败绝不能吞（2026-10-23 实证：构造期环让 KB 三工具整批消失，
             // 注册数 37→34，而应用"正常启动"）。少工具比启动失败更难查 ⇒ 收集全部失败后带清单抛。
-            throw new IllegalStateException("工具 bean 创建失败（" + failedToolBeans.size() + " 个："
-                    + String.join("、", failedToolBeans) + "）—— 启动中止：少一批工具比启动失败更难查",
+            throw new IllegalStateException("Failed to create " + failedToolBeans.size() + " tool beans: "
+                    + String.join(", ", failedToolBeans)
+                    + "; startup aborted because missing tools are harder to diagnose than a startup failure",
                     failures.get(0));
         }
         applyOverrides();
@@ -168,8 +169,8 @@ public class ToolRegistry {
                 .sorted()
                 .toList();
         if (!missingMeta.isEmpty()) {
-            throw new IllegalStateException("工具回调缺少元数据（回调表必须 ⊆ 元数据表）：" + missingMeta
-                    + " —— 启动中止：缺元数据会让该工具在所有上下文披露并放行执行");
+            throw new IllegalStateException("Tool callbacks are missing metadata (callbacks must be a subset of metadata): "
+                    + missingMeta + "; startup aborted because missing metadata exposes and executes the tool in every context");
         }
         List<String> emptyScope = metaMap.values().stream()
                 .filter(meta -> meta.getScopePatterns() == null || meta.getScopePatterns().length == 0)
@@ -177,8 +178,8 @@ public class ToolRegistry {
                 .sorted()
                 .toList();
         if (!emptyScope.isEmpty()) {
-            throw new IllegalStateException("工具 scope 为空（@ToolScope 必须至少声明一个标签）：" + emptyScope
-                    + " —— 启动中止：空 scope 会让披露面与执行面得出相反结论");
+            throw new IllegalStateException("Tool scope is empty (@ToolScope requires at least one tag): " + emptyScope
+                    + "; startup aborted because disclosure and execution would reach opposite conclusions");
         }
         assertRiskChannelInvariant();
     }
@@ -214,16 +215,16 @@ public class ToolRegistry {
         if (dangerousFrontend.isEmpty() && backendWrite.isEmpty()) {
             return;
         }
-        StringBuilder message = new StringBuilder("工具风险/通道不变量被破坏（DANGER ⇒ BACKEND；BACKEND ⇒ READ/DANGER）");
+        StringBuilder message = new StringBuilder("Tool risk/channel invariant violated (DANGER => BACKEND; BACKEND => READ/DANGER)");
         if (!dangerousFrontend.isEmpty()) {
-            message.append("：DANGER+FRONTEND（高危动作会死卡）")
+            message.append(": DANGER+FRONTEND tools would deadlock ")
                 .append(dangerousFrontend.stream().sorted().toList());
         }
         if (!backendWrite.isEmpty()) {
-            message.append("：后端直执行的写类工具（会绕过确认门）")
+            message.append(": backend write tools would bypass confirmation ")
                 .append(backendWrite.stream().sorted().toList());
         }
-        throw new IllegalStateException(message + " —— 启动中止：运行期只能死卡或绕过确认，没有安全默认");
+        throw new IllegalStateException(message + "; startup aborted because runtime behavior would deadlock or bypass confirmation");
     }
 
     /**
@@ -243,7 +244,7 @@ public class ToolRegistry {
         }
         catch (RuntimeException e) {
             // 手工注册的单例没有 BeanDefinition 等：无法判定 ⇒ 按非工具 bean 处理
-            log.debug("could not resolve bean declared type bean={} error={}", beanName, e.toString());
+            log.debug("could not resolve bean declared type bean={}", beanName, e);
             return false;
         }
     }
@@ -349,8 +350,8 @@ public class ToolRegistry {
             String modelName = override.effectiveModelName();
             ToolCallback original = callbackMap.get(modelName);
             if (original == null) {
-                throw new IllegalStateException("工具定义覆盖指向未注册的工具：" + override.toolKey()
-                        + "（modelName=" + modelName + "）");
+                throw new IllegalStateException("Tool definition override targets an unregistered tool: " + override.toolKey()
+                        + " (modelName=" + modelName + ")");
             }
             if (!override.published()) {
                 log.debug("tool definition override skipped: {} status={} (not in snapshot)", override.toolKey(), override.status());

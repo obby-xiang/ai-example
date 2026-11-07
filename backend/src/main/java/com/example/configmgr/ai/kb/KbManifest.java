@@ -35,32 +35,32 @@ public record KbManifest(
         try {
             KbManifest manifest = mapper.readValue(json, KbManifest.class);
             if (manifest == null) {
-                throw new KbSourceException("manifest.json 解析为 null（文件内容不是对象）");
+                throw new KbSourceException("manifest.json parsed as null; expected an object");
             }
             return manifest;
         }
         catch (IOException e) {
-            throw new KbSourceException("manifest.json 解析失败：" + e.getMessage(), e);
+            throw new KbSourceException("Failed to parse manifest.json", e);
         }
     }
 
-    /** 校验 manifest 自身的一致性（docs 非空、id 非空且唯一、标题非空）；返回可行动的中文原因。 */
+    /** 校验 manifest 自身的一致性（docs 非空、id 非空且唯一、标题非空）；返回可行动的失败原因。 */
     public void validate() throws KbSourceException {
         if (docs.isEmpty()) {
             // 空清单不是"空知识库"：一次发布/同步故障就会把线上检索面清空，
             // 调用方按源不可用处理（保留旧索引 + WARN），就绪态不得成立。
-            throw new KbSourceException("manifest.json 里没有任何文档（docs 为空）：按源不可用处理，保留旧索引");
+            throw new KbSourceException("manifest.json contains no documents; treating the source as unavailable and keeping the previous index");
         }
         java.util.Set<String> seen = new java.util.HashSet<>();
         for (KbDocMeta doc : docs) {
             if (doc == null || doc.id() == null || doc.id().isBlank()) {
-                throw new KbSourceException("manifest.json 存在缺少 id 的文档条目");
+                throw new KbSourceException("manifest.json contains a document entry without an id");
             }
             if (!seen.add(doc.id())) {
-                throw new KbSourceException("manifest.json 的文档 id 重复：" + doc.id());
+                throw new KbSourceException("Duplicate document id in manifest.json: " + doc.id());
             }
             if (doc.title() == null || doc.title().isBlank()) {
-                throw new KbSourceException("manifest.json 的文档 " + doc.id() + " 缺少 title");
+                throw new KbSourceException("Document " + doc.id() + " in manifest.json has no title");
             }
         }
     }

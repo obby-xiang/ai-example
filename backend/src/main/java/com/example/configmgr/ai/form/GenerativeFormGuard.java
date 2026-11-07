@@ -398,8 +398,8 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 				}
 			}
 			catch (AiStateUnavailableException ex) {
-				log.warn("could not read attachment registration before consuming (file kept until TTL) fileId={} runId={} toolCallId={} error={}", ref.fileId(),
-						runId, toolCallId, ex.getMessage());
+				log.warn("could not read attachment registration before consuming (file kept until TTL) fileId={} runId={} toolCallId={}", ref.fileId(),
+						runId, toolCallId, ex);
 			}
 		}
 		for (Map.Entry<String, FormAttachmentStore.Attachment> entry : resolved.entrySet()) {
@@ -414,8 +414,8 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 				}
 			}
 			catch (AiStateUnavailableException ex) {
-				log.warn("could not consume attachment (decision persisted, no rollback) fileId={} runId={} toolCallId={} error={}", entry.getKey(),
-						runId, toolCallId, ex.getMessage());
+				log.warn("could not consume attachment (decision persisted, no rollback) fileId={} runId={} toolCallId={}", entry.getKey(),
+						runId, toolCallId, ex);
 			}
 		}
 		reclaimFormLeftovers(runId, toolCallId, keep);
@@ -466,7 +466,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		}
 		catch (RuntimeException ex) {
 			// 回收失败不影响结论；残留件仍受登记 TTL 覆盖（与登记同寿）
-			log.warn("could not reclaim unsubmitted attachments on form closeout runId={} toolCallId={} error={}", runId, toolCallId, ex.getMessage());
+			log.warn("could not reclaim unsubmitted attachments on form closeout runId={} toolCallId={}", runId, toolCallId, ex);
 		}
 	}
 
@@ -489,7 +489,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			}
 			catch (AiStateUnavailableException ex) {
 				// 元数据只是模型可见的补充信息；登记簿暂时不可用时不阻断已通过校验的回灌。
-				log.debug("attachment metadata temporarily unavailable fileId={} error={}", ref.fileId(), ex.getMessage());
+				log.debug("attachment metadata temporarily unavailable fileId={}", ref.fileId(), ex);
 			}
 		}
 		if (parts.isEmpty()) {
@@ -559,8 +559,8 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			this.fileStorage.delete(stored.storagePath());
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not delete stored file after consuming attachment fileId={} storageKey={} error={}", stored.fileId(),
-					stored.storagePath(), ex.getMessage());
+			log.warn("could not delete stored file after consuming attachment fileId={} storageKey={}", stored.fileId(),
+					stored.storagePath(), ex);
 		}
 	}
 

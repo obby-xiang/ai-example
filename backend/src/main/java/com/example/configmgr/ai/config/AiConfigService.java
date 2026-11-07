@@ -192,7 +192,7 @@ public class AiConfigService {
             Thread.currentThread().interrupt();
         }
         catch (Exception ex) {
-            log.debug("config refresh wait ended without a completed result error={}", ex.getMessage());
+            log.debug("config refresh wait ended without a completed result", ex);
         }
         return new RefreshOutcome(new ReloadResult(this.snapshot, false), forced);
     }
@@ -216,7 +216,7 @@ public class AiConfigService {
             catch (RuntimeException ex) {
                 applyLoad(new LoadOutcome(this.snapshot, false));
                 this.lastCheckAtMs = System.currentTimeMillis();
-                log.warn("config refresh failed (keeping last good snapshot) error={}", ex.getMessage());
+                log.warn("config refresh failed (keeping last good snapshot)", ex);
                 candidate.complete(new RefreshOutcome(new ReloadResult(this.snapshot, false), force));
             }
             finally {
@@ -273,7 +273,7 @@ public class AiConfigService {
                 .orElse(0L);
         }
         catch (Exception ex) {
-            log.debug("reading config.version failed (keeping last good snapshot) error={}", ex.getMessage());
+            log.debug("reading config.version failed (keeping last good snapshot)", ex);
             return null;
         }
     }
@@ -297,11 +297,11 @@ public class AiConfigService {
         catch (Exception ex) {
             // 读库失败或版本持续变化时保留 last-good，绝不发布分批读取拼出的混合快照。
             if (this.lastLoadFailed) {
-                log.debug("config snapshot reload failed again (keeping last good snapshot) error={}", ex.getMessage());
+                log.debug("config snapshot reload failed again (keeping last good snapshot)", ex);
             }
             else {
-                log.warn("config snapshot load failed (keeping last good snapshot; retried on next version check) error={}",
-                        ex.getMessage());
+                log.warn("config snapshot load failed (keeping last good snapshot; retried on next version check)",
+                        ex);
             }
             return new LoadOutcome(this.snapshot, false);
         }
@@ -391,7 +391,7 @@ public class AiConfigService {
             return Long.parseLong(raw.trim());
         }
         catch (NumberFormatException ex) {
-            log.debug("ignoring invalid ai_setting integer value={}", raw);
+            log.debug("ignoring invalid ai_setting integer value={}", raw, ex);
             return null;
         }
     }
@@ -413,7 +413,7 @@ public class AiConfigService {
             return value;
         }
         catch (NumberFormatException ex) {
-            log.debug("ignoring invalid ai_setting decimal value={}", raw);
+            log.debug("ignoring invalid ai_setting decimal value={}", raw, ex);
             return null;
         }
     }
@@ -431,7 +431,7 @@ public class AiConfigService {
             return value;
         }
         catch (NumberFormatException ex) {
-            log.debug("ignoring invalid ai_setting integer value={}", raw);
+            log.debug("ignoring invalid ai_setting integer value={}", raw, ex);
             return null;
         }
     }
@@ -927,7 +927,7 @@ public class AiConfigService {
                 return this.cipher.fingerprint(apiKey);
             }
             catch (AiKeyCipher.KeyCipherException ex) {
-                log.debug("key fingerprint computation failed provider={} error={}", provider.getCode(), ex.getMessage());
+                log.debug("key fingerprint computation failed provider={}", provider.getCode(), ex);
             }
         }
         // 无 KEK 时，env key 只能重启才变 ⇒ 用固定标记作缓存键成分（不含任何 key 片段）
@@ -938,7 +938,7 @@ public class AiConfigService {
         String key = String.valueOf(provider.getCode());
         if (this.unreadableWarned.putIfAbsent(key, Boolean.TRUE) == null) {
             log.warn("provider={} key cannot be decrypted ({}): reporting {}, not falling back to env key; fix = restore AI_SECRET_KEK"
-                    + " or re-enter the key", key, ex.getCode(), CODE_KEY_UNREADABLE);
+                    + " or re-enter the key", key, ex.getCode(), CODE_KEY_UNREADABLE, ex);
         }
     }
 

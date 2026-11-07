@@ -83,9 +83,15 @@ public class SeedStatus {
 	}
 
 	public synchronized void markFailed(Seed seed, Throwable error) {
-		String detail = error == null ? "unknown"
-				: error.getClass().getSimpleName() + (error.getMessage() == null ? "" : ": " + error.getMessage());
-		mark(seed, State.FAILED, detail);
+		if (error == null) {
+			mark(seed, State.FAILED, "unknown");
+			return;
+		}
+		String detail = "Seed operation failed (" + error.getClass().getSimpleName() + ")";
+		this.states.put(seed, State.FAILED);
+		this.failures.put(seed, detail);
+		log.warn("Seed failed, readiness stays up and failure is exposed via /health/ready seed={} detail={}",
+		        seed.key(), detail, error);
 	}
 
 	public State stateOf(Seed seed) {

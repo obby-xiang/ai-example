@@ -288,7 +288,7 @@ public class StartupResumeRunner {
 				Thread.currentThread().interrupt();
 			}
 			catch (Throwable ex) {
-				log.error("startup auto-resume uncaught exception (degraded to no auto-resume): {}", ex.getMessage(), ex);
+				log.error("startup auto-resume uncaught exception (degraded to no auto-resume)", ex);
 			}
 		}, "ai-startup-resume");
 		starter.setDaemon(true);
@@ -331,12 +331,12 @@ public class StartupResumeRunner {
 			catch (Exception ex) {
 				// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
 				// 业务与 AI 端点各自有自己的降级路径，这里只记事实。
-				log.warn("startup auto-resume scan failed (Redis unavailable?): {}", ex.getMessage());
+				log.warn("startup auto-resume scan failed (Redis unavailable?)", ex);
 				Map<String, Object> failed = new LinkedHashMap<>();
 				failed.put("scanned", true);
 				failed.put("at", Instant.now().toString());
 				failed.put("instanceId", this.store.instanceId());
-				failed.put("error", String.valueOf(ex.getMessage()));
+				failed.put("error", "AI_RESUME_FAILED");
 				failed.put("resumed", List.of());
 				failed.put("skipped", List.of());
 				this.lastScan = failed;
@@ -532,12 +532,12 @@ public class StartupResumeRunner {
 			}
 			catch (Exception ex) {
 				// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
-				log.warn("runtime dead-run sweep failed (Redis unavailable?): {}", ex.getMessage());
+				log.warn("runtime dead-run sweep failed (Redis unavailable?)", ex);
 				Map<String, Object> failed = new LinkedHashMap<>();
 				failed.put("swept", true);
 				failed.put("at", Instant.now().toString());
 				failed.put("instanceId", this.store.instanceId());
-				failed.put("error", String.valueOf(ex.getMessage()));
+				failed.put("error", "AI_RESUME_FAILED");
 				failed.put("resumed", List.of());
 				failed.put("skipped", List.of());
 				this.lastSweep = failed;
@@ -661,7 +661,7 @@ public class StartupResumeRunner {
 					}
 					catch (RuntimeException ex) {
 						skipped.add(sweepSkipItem(runId, status, "CANCEL_EXCEPTION"));
-						log.warn("runtime scan cancel finalize failed runId={} (retry next tick): {}", runId, ex.getMessage());
+						log.warn("runtime scan cancel finalize failed runId={} (retry next tick)", runId, ex);
 						continue;
 					}
 					if (outcome == ResumeService.CancelFinalize.FINALIZED
@@ -742,7 +742,7 @@ public class StartupResumeRunner {
 					Map<String, Object> item = new LinkedHashMap<>();
 					item.put("runId", runId);
 					item.put("outcome", "EXCEPTION");
-					item.put("error", String.valueOf(ex.getMessage()));
+					item.put("error", "AI_RESUME_FAILED");
 					resumed.add(item);
 					log.error("runtime dead-run sweep resume failed runId={}", runId, ex);
 				}
@@ -793,7 +793,7 @@ public class StartupResumeRunner {
 				item.put("tenantId", recordTenantId);
 				item.put("userId", recordUserId);
 				item.put("outcome", "EXCEPTION");
-				item.put("error", String.valueOf(ex.getMessage()));
+				item.put("error", "AI_RESUME_FAILED");
 				resumed.add(item);
 				log.error("startup auto-resume failed runId={}", runId, ex);
 			}
@@ -942,7 +942,7 @@ public class StartupResumeRunner {
 			catch (RuntimeException ex) {
 				// 租约设施异常：按进程内单飞继续（LeaseService 的降级契约），别把扫描整体停摆。
 				log.warn("scan single-flight lease unavailable (falling "
-						+ "back to in-process single-flight) trigger={}: {}", trigger, ex.getMessage());
+						+ "back to in-process single-flight) trigger={}", trigger, ex);
 				this.scanInFlight.set(true);
 				return new ScanFlight(null, null, "UNAVAILABLE");
 			}
@@ -966,7 +966,7 @@ public class StartupResumeRunner {
 					catch (RuntimeException ex) {
 						// 续租登记失败（调度器已停机等）：仍按"已拿到席位"继续 —— TTL 到期后自然可被接手，
 						// 绝不能让一次登记异常把闸门留在锁住状态。
-						log.warn("scan single-flight renew registration failed (TTL fallback) trigger={}: {}", trigger, ex.getMessage());
+						log.warn("scan single-flight renew registration failed (TTL fallback) trigger={}", trigger, ex);
 					}
 				}
 				// owner 唯一 ⇒ created 恒为真；仍把它写进报告口径（日志/观测可区分异常形态）。
@@ -1092,13 +1092,13 @@ public class StartupResumeRunner {
 					this.leases.stopDriving(this.lease.key(), this.lease.owner());
 				}
 				catch (RuntimeException ex) {
-					log.debug("scan single-flight renew stop failed (TTL fallback): {}", ex.getMessage());
+					log.debug("scan single-flight renew stop failed (TTL fallback)", ex);
 				}
 				try {
 					this.leases.release(this.lease);
 				}
 				catch (RuntimeException ex) {
-					log.debug("scan single-flight lease release failed (waiting TTL expiry): {}", ex.getMessage());
+					log.debug("scan single-flight lease release failed (waiting TTL expiry)", ex);
 				}
 			}
 			unlockScanGate();
@@ -1247,7 +1247,7 @@ public class StartupResumeRunner {
 			return this.confirmGate == null ? 0 : this.confirmGate.convergeExpiredParkedFrontend(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("runtime scan park expiry convergence failed runId={} (no state change; retry next tick): {}", runId, ex.getMessage());
+			log.warn("runtime scan park expiry convergence failed runId={} (no state change; retry next tick)", runId, ex);
 			return 0;
 		}
 	}
@@ -1258,7 +1258,7 @@ public class StartupResumeRunner {
 			sweep();
 		}
 		catch (Throwable ex) {
-			log.warn("runtime dead-run sweep tick failed (no state guess; retry next tick): {}", ex.toString());
+			log.warn("runtime dead-run sweep tick failed (no state guess; retry next tick)", ex);
 		}
 	}
 
@@ -1284,7 +1284,7 @@ public class StartupResumeRunner {
 			leaseHeld = leases != null && leases.isHeldStrict(leaseKeyOf(run, runId));
 		}
 		catch (Exception ex) {
-			log.debug("runtime scan read resume lease failed runId={} (treating as active, no takeover): {}", runId, ex.getMessage());
+			log.debug("runtime scan read resume lease failed runId={} (treating as active, no takeover)", runId, ex);
 			leaseHeld = true;
 		}
 		boolean liveInProcess;
@@ -1297,7 +1297,7 @@ public class StartupResumeRunner {
 							identityField(run, "userId"));
 		}
 		catch (Exception ex) {
-			log.debug("runtime scan read local subscription failed runId={} (treating as active, no takeover): {}", runId, ex.getMessage());
+			log.debug("runtime scan read local subscription failed runId={} (treating as active, no takeover)", runId, ex);
 			liveInProcess = true;
 		}
 		long updatedAtMs = asLong(run.get("updatedAtMs"));

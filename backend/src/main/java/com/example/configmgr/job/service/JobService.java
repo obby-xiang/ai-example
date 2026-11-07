@@ -90,8 +90,8 @@ public class JobService {
         Task task = task(taskId);
         if (task.getStatus() == Task.TaskStatus.CANCELLED) {
             return new ConflictException(ErrorCodes.TASK_FINALIZED,
-                    "任务 #" + taskId + " 已 CANCELLED，禁止新建作业（TASK_FINALIZED）。"
-                            + "任务取消是用户明确意志，如需重新开始请创建新任务");
+                    "Task #" + taskId + " is CANCELLED; new jobs are forbidden (TASK_FINALIZED). "
+                            + "Create a new task if you want to start again");
         }
         // 以真实成功作业为准，任务状态只作展示：联动写失败时即使仍为 ACTIVE/FAILED 也不得重复创建。
         // IMPORT 的最终作业是 PUBLISH；预检查成功本身不构成终态，仍可继续导入/发布。
@@ -102,7 +102,8 @@ public class JobService {
                 .isPresent();
         if (hasFinalJob) {
             return new ConflictException(ErrorCodes.TASK_FINALIZED,
-                    "任务 #" + taskId + " 已有成功的 " + finalJobType + " 作业，禁止重复创建（TASK_FINALIZED）");
+                    "Task #" + taskId + " already has a successful " + finalJobType
+                            + " job; duplicate jobs are forbidden (TASK_FINALIZED)");
         }
         return null;
     }
@@ -114,7 +115,7 @@ public class JobService {
 
     private Task task(Long taskId) {
         return taskService.findByIdRaw(taskId)
-                .orElseThrow(() -> ResourceNotFoundException.of("任务", taskId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
     }
 
     private final JobRepository jobRepository;
@@ -210,13 +211,15 @@ public class JobService {
             if (!synchronizationActive) {
                 cancellationRegistry.unregister(savedJob.getId());
             }
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), ex);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "Job state is temporarily unavailable; the job was not started", ex);
         } catch (JobHeartbeatRegistry.JobNotInFlightException ex) {
             heartbeatRegistry.endRunner(savedJob.getId());
             if (!synchronizationActive) {
                 cancellationRegistry.unregister(savedJob.getId());
             }
-            throw new ConflictException(ErrorCodes.JOB_ALREADY_FINAL, ex.getMessage());
+            throw new ConflictException(ErrorCodes.JOB_ALREADY_FINAL,
+                    "Job #" + savedJob.getId() + " is already terminal or no longer exists");
         }
         if (!runnerStarted) {
             heartbeatRegistry.endRunner(savedJob.getId());
@@ -224,8 +227,8 @@ public class JobService {
                 cancellationRegistry.unregister(savedJob.getId());
             }
             throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
-                    "作业 #" + savedJob.getId() + " 的 runner 活跃登记失败（Redis 不可用），"
-                            + "作业未创建，请稍后重试");
+                    "Could not register an active runner for job #" + savedJob.getId()
+                            + " because Redis is unavailable; the job was not created, please retry later");
         }
 
         if (!synchronizationActive) {
@@ -264,7 +267,7 @@ public class JobService {
             issueTx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
             issueTx.executeWithoutResult(status -> issueRepository.save(issue));
         } catch (Exception e) {
-            log.error("Runner-start failure issue write failed jobId={} error={}", job.getId(), e.getMessage(), e);
+            log.error("Runner-start failure issue write failed jobId={}", job.getId(), e);
         }
         terminalWriter.completeNow(job, Job.JobStatus.FAILED, 1, 0, 0, 0,
                 Map.of("jobId", job.getId(), "jobType", job.getJobType(),
@@ -280,7 +283,7 @@ public class JobService {
 
     public Job findById(Long jobId) {
         return jobRepository.findById(jobId)
-                .orElseThrow(() -> ResourceNotFoundException.of("作业", jobId));
+                .orElseThrow(() -> ResourceNotFoundException.of("Job", jobId));
     }
 
     /**
@@ -312,14 +315,15 @@ public class JobService {
                 alive = heartbeatRegistry.isRunnerAlive(existing.getId());
             } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
                 throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
-                        "任务 #" + taskId + " 的旧作业收尾状态无法确认（Redis 不可用），"
-                                + "为避免并发写者已拒绝新建；请稍后重试");
+                        "Could not confirm whether the previous job for task #" + taskId
+                                + " has finished because Redis is unavailable; "
+                                + "new jobs are refused to prevent concurrent writers, please retry later");
             }
             if (alive) {
                 throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
-                        "任务 #" + taskId + " 的旧作业 #" + existing.getId() + " ["
-                                + existing.getJobType() + "] 状态 " + existing.getStatus()
-                                + " 正在收尾，请稍后重试（runner 退出后才允许新建作业）");
+                        "Previous job #" + existing.getId() + " [" + existing.getJobType() + "] for task #"
+                                + taskId + " is still finishing with status " + existing.getStatus()
+                                + "; retry after its runner exits");
             }
         }
     }
@@ -332,10 +336,10 @@ public class JobService {
     public ConflictException inFlightConflict(Long taskId, Job.JobType jobType) {
         return jobRepository.findFirstByTaskIdAndJobTypeAndStatusInOrderByIdDesc(taskId, jobType, IN_FLIGHT)
                 .map(job -> new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
-                        "任务 #" + taskId + " 已有同类作业在途：作业 #" + job.getId() + " [" + jobType
-                                + "] 状态 " + job.getStatus()
-                                + "（JOB_ALREADY_RUNNING）。并发执行会互相覆盖同一批文件/暂存行，"
-                                + "请等待其结束，或先取消该作业再发起"))
+                        "Task #" + taskId + " already has job #" + job.getId() + " [" + jobType
+                                + "] in flight with status " + job.getStatus()
+                                + " (JOB_ALREADY_RUNNING). Concurrent jobs could overwrite the same files "
+                                + "or staging rows; wait for it to finish or cancel it before retrying"))
                 .orElse(null);
     }
 
@@ -373,14 +377,15 @@ public class JobService {
         Job precheck = latestPrecheck(taskId).orElse(null);
         if (precheck == null) {
             return new ConflictException(ErrorCodes.PRECHECK_NOT_PASSED,
-                    "任务 #" + taskId + " 尚无预检查记录，不能发起 " + jobType
-                            + "（PRECHECK_NOT_PASSED）：请先上传数据文件并执行预检查，通过后再继续");
+                    "Task #" + taskId + " has no precheck record; " + jobType
+                            + " is forbidden (PRECHECK_NOT_PASSED). Upload data files and pass precheck first");
         }
         if (precheck.getStatus() != Job.JobStatus.COMPLETED || precheck.getErrorCount() > 0) {
             return new ConflictException(ErrorCodes.PRECHECK_NOT_PASSED,
-                    "任务 #" + taskId + " 最近一次预检查未通过：作业 #" + precheck.getId() + " 状态 "
-                            + precheck.getStatus() + "，错误数 " + precheck.getErrorCount()
-                            + "（PRECHECK_NOT_PASSED）。请先修复数据并重跑预检查通过后再发起 " + jobType);
+                    "The latest precheck for task #" + taskId + " did not pass: job #" + precheck.getId()
+                            + " has status " + precheck.getStatus() + " and " + precheck.getErrorCount()
+                            + " errors (PRECHECK_NOT_PASSED). Fix the data and pass precheck before starting "
+                            + jobType);
         }
         if (jobType == Job.JobType.IMPORT) {
             return importFingerprintConflict(taskId, precheck);
@@ -415,29 +420,31 @@ public class JobService {
             String defCode = item.getDefCode();
             JsonNode recorded = summary.path(defCode).path(IMPORT_FILE_TYPE);
             if (!recorded.isObject()) {
-                return stale(defCode, "最近一次通过预检查的作业 #" + precheck.getId()
-                        + " 没有记下 " + IMPORT_FILE_TYPE + " 件指纹（历史预检查或预检查记的是其它 fileType）");
+                return stale(defCode, "the latest successful precheck job #" + precheck.getId()
+                        + " has no " + IMPORT_FILE_TYPE + " file fingerprint "
+                        + "(it is a historical precheck or recorded another fileType)");
             }
             TaskFile file = taskFileRepository
                     .findByTaskIdAndDefCodeAndFileType(taskId, defCode, IMPORT_FILE_TYPE)
                     .orElse(null);
             if (file == null) {
-                return stale(defCode, "当前任务没有 " + IMPORT_FILE_TYPE + " 件");
+                return stale(defCode, "the current task has no " + IMPORT_FILE_TYPE + " file");
             }
             FileStorageService.FileDigest current;
             try {
                 current = fileStorageService.digest(file.getStoragePath());
             }
             catch (IOException e) {
-                return stale(defCode, IMPORT_FILE_TYPE + " 件不可读：" + e.getMessage());
+                log.warn("Current upload fingerprint could not be read taskId={} defCode={}", taskId, defCode, e);
+                return stale(defCode, "the current " + IMPORT_FILE_TYPE + " file is unreadable");
             }
             String expectedSha = recorded.path("sha256").asText(null);
             long expectedSize = recorded.path("size").asLong(-1L);
             if (expectedSha == null || !expectedSha.equals(current.sha256()) || expectedSize != current.size()) {
-                return stale(defCode, IMPORT_FILE_TYPE + " 件已被替换（预检查时 sha256="
+                return stale(defCode, IMPORT_FILE_TYPE + " file was replaced (precheck sha256="
                         + (expectedSha == null ? "null" : expectedSha.substring(0, Math.min(12, expectedSha.length())))
-                        + " size=" + expectedSize + "；当前 sha256="
-                        + current.sha256().substring(0, 12) + " size=" + current.size() + "）");
+                        + " size=" + expectedSize + "; current sha256="
+                        + current.sha256().substring(0, 12) + " size=" + current.size() + ")");
             }
         }
         return null;
@@ -454,15 +461,16 @@ public class JobService {
                     : com.fasterxml.jackson.databind.node.MissingNode.getInstance();
         }
         catch (Exception e) {
-            log.debug("Precheck fingerprint summary unparseable, treated as missing error={}", e.getMessage());
+            log.debug("Precheck fingerprint summary unparseable, treated as missing", e);
             return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
         }
     }
 
     private ConflictException stale(String defCode, String detail) {
         return new ConflictException(PRECHECK_STALE_CODE,
-                "配置项 " + defCode + " 的预检查结果已失效：" + detail
-                        + "（" + PRECHECK_STALE_CODE + "）。请重新上传该配置项的数据文件并重跑预检查，通过后再导入");
+                "The precheck result for definition " + defCode + " is stale: " + detail
+                        + " (" + PRECHECK_STALE_CODE + "). Reupload the data file for this definition "
+                        + "and pass precheck again before importing");
     }
 
     public List<Job> findByTaskId(Long taskId) {
@@ -533,7 +541,7 @@ public class JobService {
 
     private ConflictException finalConflict(Long jobId, Job.JobStatus status) {
         return new ConflictException(ErrorCodes.JOB_ALREADY_FINAL,
-                "作业 #" + jobId + " 已是终态 " + status + "，不可取消");
+                "Job #" + jobId + " is already terminal with status " + status + " and cannot be cancelled");
     }
 
     /**
@@ -549,8 +557,7 @@ public class JobService {
         try {
             result = cancellationRegistry.cancel(jobId, requestedBy);
         } catch (Exception e) {
-            log.error("Cancel committed but shared cancel flag write failed jobId={} error={}",
-                    jobId, e.getMessage(), e);
+            log.error("Cancel committed but shared cancel flag write failed jobId={}", jobId, e);
             result = new JobCancellationRegistry.CancelResult(
                     false, false, jobId, cancellationRegistry.keyFor(jobId));
         }
@@ -562,8 +569,7 @@ public class JobService {
             taskSseService.publish(taskId, "JOB_DONE", Map.of(
                     "jobId", jobId, "status", "CANCELLED"));
         } catch (Exception e) {
-            log.error("Cancel committed but JOB_DONE publish failed jobId={} error={}",
-                    jobId, e.getMessage(), e);
+            log.error("Cancel committed but JOB_DONE publish failed jobId={}", jobId, e);
         }
         return result;
     }

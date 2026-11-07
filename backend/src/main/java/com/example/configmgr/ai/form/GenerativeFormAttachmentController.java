@@ -120,35 +120,35 @@ public class GenerativeFormAttachmentController {
 			@RequestParam(value = "sessionId", required = false) String clientSessionId,
 			@RequestParam(value = "fieldKey", required = false) String fieldKey) throws Exception {
 		if (file == null || file.isEmpty()) {
-			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "附件为空，请重新选择文件");
+			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "The attachment is empty; select a file again");
 		}
 		if (file.getSize() > MAX_ATTACHMENT_BYTES) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-					"附件过大：" + file.getSize() + " 字节（上限 " + MAX_ATTACHMENT_BYTES + " 字节）");
+					"Attachment is too large: " + file.getSize() + " bytes (limit " + MAX_ATTACHMENT_BYTES + " bytes)");
 		}
 		String originalName = file.getOriginalFilename() == null ? "attachment" : file.getOriginalFilename();
 		String ext = extensionOf(originalName);
 		Set<String> mimes = ALLOWED.get(ext);
 		if (mimes == null) {
 			throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED,
-					"附件类型不支持：" + originalName + "（允许 "
-							+ String.join("/", ALLOWED.keySet().stream().sorted().toList()) + "）");
+					"Unsupported attachment type: " + originalName + " (allowed "
+							+ String.join("/", ALLOWED.keySet().stream().sorted().toList()) + ")");
 		}
 		String contentType = file.getContentType() == null ? "" : file.getContentType();
 		if (!contentType.isBlank() && !mimes.contains(contentType)) {
 			throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED,
-					"附件 MIME 与扩展名不符：" + contentType + "（." + ext + " 允许 " + String.join("/", mimes) + "）");
+					"Attachment MIME does not match the extension: " + contentType + " (." + ext + " allows " + String.join("/", mimes) + ")");
 		}
 		PendingToolCall pending = assertFormIsWaiting(runId, toolCallId);
 		Set<String> attachmentFields = attachmentFieldKeys(runId, pending);
 		if (attachmentFields.isEmpty()) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-					"该表单没有附件字段（无法上传附件），请重新发起表单");
+					"This form has no attachment fields; start a new form before uploading");
 		}
 		// 目标字段先判：非法请求必须在任何"顶掉旧件/落盘"之前被挡下（否则一次错请求会删掉用户的文件）
 		if (fieldKey != null && !fieldKey.isBlank() && !attachmentFields.contains(fieldKey)) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-					"字段 " + fieldKey + " 不是本表单的附件字段（attachment），无法接收上传");
+					"Field " + fieldKey + " is not an attachment field in this form and cannot receive uploads");
 		}
 		List<FormAttachmentStore.Attachment> existing = this.attachments.findByForm(runId, toolCallId);
 		List<FormAttachmentStore.Attachment> superseded = List.of();
@@ -163,9 +163,9 @@ public class GenerativeFormAttachmentController {
 			}
 			else {
 				throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-						"该表单的附件位已满：" + existing.size() + " 件在册（表单共 " + attachmentFields.size()
-								+ " 个附件字段，每个字段只装一个文件Id）。当前无法替换已上传的附件：请直接提交当前表单，"
-								+ "或取消表单后重新发起再上传");
+						"The attachment slots in this form are full: " + existing.size() + " registered files across " + attachmentFields.size()
+								+ " attachment fields, one fileId per field. Submit the current form, "
+								+ "or cancel and start a new one before replacing an attachment");
 			}
 		}
 		long usedBytes = 0L;
@@ -174,8 +174,8 @@ public class GenerativeFormAttachmentController {
 		}
 		if (usedBytes + file.getSize() > MAX_TOTAL_ATTACHMENT_BYTES) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-					"附件总量超限：在册 " + usedBytes + " 字节 + 本次 " + file.getSize() + " 字节 > 单表上限 "
-							+ MAX_TOTAL_ATTACHMENT_BYTES + " 字节");
+					"Total attachment size exceeds the per-form limit: registered " + usedBytes + " bytes + current " + file.getSize() + " bytes > "
+							+ MAX_TOTAL_ATTACHMENT_BYTES + " bytes");
 		}
 		String authoritativeSessionId = authoritativeSessionId(runId);
 		StoredFile storedFile;
@@ -191,8 +191,8 @@ public class GenerativeFormAttachmentController {
 		catch (RuntimeException ex) {
 			// I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。
 			deleteQuietly(storedFile.key());
-			log.warn("attachment registration failed; stored file cleaned up runId={} toolCallId={} key={} error={}", runId, toolCallId,
-					storedFile.key(), ex.getMessage());
+			log.warn("attachment registration failed; stored file cleaned up runId={} toolCallId={} key={}", runId, toolCallId,
+					storedFile.key(), ex);
 			throw ex;
 		}
 		// 新件登记成功之后才回收被顶掉的旧件：先删旧的再存新的会把"换一张"变成"两张都没了"
@@ -207,8 +207,8 @@ public class GenerativeFormAttachmentController {
 				}
 			}
 			catch (RuntimeException ex) {
-				log.warn("could not supersede old attachment (new file registered; old file kept until TTL) runId={} toolCallId={} fileId={} error={}", runId,
-						toolCallId, old.fileId(), ex.getMessage());
+				log.warn("could not supersede old attachment (new file registered; old file kept until TTL) runId={} toolCallId={} fileId={}", runId,
+						toolCallId, old.fileId(), ex);
 			}
 		}
 		Map<String, Object> data = new LinkedHashMap<>();
@@ -233,7 +233,7 @@ public class GenerativeFormAttachmentController {
 			@RequestParam("value") String parentValue) {
 		if (!this.optionSources.supports(sourceId)) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-					"未注册的选项数据源：" + sourceId + "（可用：" + String.join("/", this.optionSources.ids()) + "）");
+					"Unregistered option source: " + sourceId + " (available: " + String.join("/", this.optionSources.ids()) + ")");
 		}
 		List<Map<String, String>> options = this.optionSources.options(sourceId, parentValue);
 		Map<String, Object> data = new LinkedHashMap<>();
@@ -254,13 +254,13 @@ public class GenerativeFormAttachmentController {
 			snapshot = this.runStore.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not read sessionId from run snapshot (fail-closed; request parameter not trusted) runId={} error={}", runId, ex.getMessage());
-			throw new AiStateUnavailableException("附件上传暂不可用：读不到本轮会话归属，请稍后重试", ex);
+			log.warn("could not read sessionId from run snapshot (fail-closed; request parameter not trusted) runId={}", runId, ex);
+			throw new AiStateUnavailableException("Attachment upload is temporarily unavailable because the current session ownership cannot be read; retry later", ex);
 		}
 		String sessionId = snapshot == null ? null : snapshot.getSessionId();
 		if (sessionId == null || sessionId.isBlank()) {
 			log.warn("run snapshot has no sessionId (fail-closed: unowned registrations cannot be reclaimed on session destroy) runId={}", runId);
-			throw new AiStateUnavailableException("附件上传暂不可用：本轮缺少会话归属，请稍后重试");
+			throw new AiStateUnavailableException("Attachment upload is temporarily unavailable because the current run has no session ownership; retry later");
 		}
 		return sessionId;
 	}
@@ -274,7 +274,7 @@ public class GenerativeFormAttachmentController {
 			this.fileStorage.delete(storageKey);
 		}
 		catch (RuntimeException ex) {
-			log.warn("could not delete stored file key={} (registration TTL / session destroy will clean up) error={}", storageKey, ex.getMessage());
+			log.warn("could not delete stored file key={} (registration TTL / session destroy will clean up)", storageKey, ex);
 		}
 	}
 
@@ -306,8 +306,8 @@ public class GenerativeFormAttachmentController {
 			}
 		}
 		catch (Exception ex) {
-			// 不打印入参原文（schema 可能带用户填的默认值/长文本）：只记形状与异常摘要
-			log.warn("form arguments are not parseable; upload rejected as having no attachment field runId={} toolCallId={} chars={} errorType={}", runId, pending.getToolCallId(), arguments.length(), ex.getClass().getSimpleName());
+			// 不打印入参原文（schema 可能带用户填的默认值/长文本）：只记入参形状，异常仅用于服务端诊断
+			log.warn("form arguments are not parseable; upload rejected as having no attachment field runId={} toolCallId={} chars={}", runId, pending.getToolCallId(), arguments.length(), ex);
 		}
 		return keys;
 	}
@@ -315,13 +315,13 @@ public class GenerativeFormAttachmentController {
 	/** 上传前确认"这张表单确实在等用户"（跨轮次/跨表单的调用直接拒绝）。 */
 	private PendingToolCall assertFormIsWaiting(String runId, String toolCallId) {
 		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
-			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "runId 与 toolCallId 均为必填");
+			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "runId and toolCallId are required");
 		}
 		PendingToolCall pending = this.runStore.pending(runId, toolCallId);
 		if (pending == null || !GenerativeFormRules.TOOL_NAME.equals(pending.getName())
 				|| !PendingToolCall.PENDING.equals(pending.getStatus())) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-					"该表单调用不在等待填写状态（无法上传附件），请重新发起表单");
+					"This form call is not waiting for input and cannot receive attachments; start a new form");
 		}
 		return pending;
 	}

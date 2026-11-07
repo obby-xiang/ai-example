@@ -186,7 +186,7 @@ public class ToolResourceLocks {
 			return jobType != null && !jobType.isBlank() && this.leaseService.isHeld(LeaseKeys.job(taskId, jobType));
 		}
 		catch (RuntimeException ex) {
-			log.debug("resource lock read-only probe failed taskId={} job={} error={}", taskId, jobType, ex.getMessage());
+			log.debug("resource lock read-only probe failed taskId={} job={}", taskId, jobType, ex);
 			return false;
 		}
 	}
@@ -204,7 +204,7 @@ public class ToolResourceLocks {
 				}
 			}
 			catch (RuntimeException ex) {
-				log.warn("failed to release resource lock (clears itself at TTL) key={} error={}", lease.key(), ex.getMessage());
+				log.warn("failed to release resource lock (clears itself at TTL) key={}", lease.key(), ex);
 			}
 		}
 	}
@@ -215,7 +215,7 @@ public class ToolResourceLocks {
 			return this.leaseService.acquire(key, ttl, owner);
 		}
 		catch (RuntimeException ex) {
-			log.warn("resource lock acquisition degraded (Redis unavailable => allow) key={} owner={} error={}", key, owner, ex.getMessage());
+			log.warn("resource lock acquisition degraded (Redis unavailable => allow) key={} owner={}", key, owner, ex);
 			return null;
 		}
 	}
