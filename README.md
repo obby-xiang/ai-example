@@ -177,11 +177,24 @@ yarn dev
 | 确认门（HITL） | 高风险工具（`start_export` / `start_precheck` / `start_import` / `start_publish`）执行前挂起，渲染确认卡片等待人类放行；拒绝或超时以"未执行"语义回填，工具不执行 |
 | 挂起与回灌 | 前端通道工具（打开导出编辑器、下载文件、跳转、选择定义、设置条件、确认步骤、生成式表单）在后端是哨兵桩，副作用在浏览器，结果经 `POST /api/ai/frontend-tool-result` 回灌续跑 |
 | 取消与续跑 | 轮次取消（`POST /api/ai/cancel/{runId}`）、断线重挂（`GET /api/ai/events/{runId}`，按 `lastSeq` 差量补发）、应用启动自动续跑（仅续"已有人类结论/无需外部输入"的轮次，仍挂起的确认门一律跳过） |
-| 会话与帧契约 | 会话记忆存 Redis（滑动 TTL 6h，非持久化）；同 `sessionId` 串行化（占用中返回 409）；SSE 自有帧契约，业务帧带单调 `seq`，心跳不占业务序号也不入归档 |
+| 会话与帧契约 | 会话记忆存 Redis（以最后真实用户活动起 24h 滑动 TTL，跨实例节流续期）；同 `sessionId` 串行化（占用中返回 409）；SSE 自有帧契约，业务帧带单调 `seq`，心跳不占业务序号也不入归档 |
 
 ---
 
 ## 测试与 CI 门禁
+
+### 独立用例与压测导航
+
+1. **当前 AI 真机主用例**：`docs/research/设计-真机E2E用例全集-2026-10-23.md`（24 域 301 条 + 2026-11-07 独立补充）。
+2. **上一版蓝本**：`docs/research/设计-AI对话E2E用例全集-2026-10-22.md`。
+3. **生产测试策略**：`docs/merge/04-测试用例文档.md`，作为全项目生产测试策略参考。
+4. **遗留参考**：`docs/test-cases.md`，不是当前 AI 主用例。
+5. **单元 / API 脚本**：`backend/src/test/java`、`frontend/tests`、`scripts/verify-e2e.ps1`、`scripts/verification/`。
+6. **真实浏览器**：`frontend/e2e`、`frontend/playwright*.config.ts`、`scripts/chat-panel-smoke.mjs`。
+7. **压测**：`scripts/perf/ai-api/`、`scripts/perf/redis/`、`scripts/perf/redis-production/`、`scripts/perf/redis-protocol/`，各目录入口见其 `README.md`。
+8. **多实例 / Cluster**：`scripts/b23l1-dual-instance.ps1`、`scripts/redis5-cluster-smoke.sh`；五个 workflows 为 `.github/workflows/ci.yml`、`nightly.yml`、`cluster-3node.yml`、`e2e-real.yml`、`redis-5-smoke.yml`。
+
+本轮仅维护独立用例矩阵和压测脚本，不依赖前后端既有测试代码；动态结果默认 `NOT_RUN`，真实执行需另记证据。
 
 ### 本地跑法
 
