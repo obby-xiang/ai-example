@@ -1,10 +1,10 @@
-# Git 钩子：敏感信息扫描 + D6 同步复核 + 统一开发规范审查
+# Git 钩子：敏感信息扫描 + 统一开发规范审查
 
-`pre-commit` 提供三道阻断检查，另以 `scan-history.sh` 复查历史；敏感信息的两个入口共用 `scan-lib.sh`，D6 与统一规范共用 `check-d6-sync.mjs` 的读取、指纹和判定基础函数，避免规则漂移：
+`pre-commit` 提供两道阻断检查，另以 `scan-history.sh` 复查历史；敏感信息的两个入口共用 `scan-lib.sh`，统一规范使用 `check-d6-sync.mjs --standards`。同一脚本保留的默认 D6 模式仅作历史工具，不由 pre-commit 或 CI 调用：
 
 | 脚本 | 作用 | 退出码 |
 | --- | --- | --- |
-| `pre-commit` | 依次扫描**暂存区新增/修改的行**（敏感信息）、跑 **D6 同步复核**和**统一开发规范审查**；任一不过即阻断 | 0 通过 / 1 有命中、确认缺失或环境失败 |
+| `pre-commit` | 依次扫描**暂存区新增/修改的行**（敏感信息）、跑**统一开发规范审查**；任一不过即阻断 | 0 通过 / 1 有命中、确认缺失或环境失败 |
 | `scan-history.sh` | 用 `git rev-list --objects --all` 遍历**全部历史 blob** 复查 | 0 无命中 / 1 有命中 / 2 参数或环境错误 |
 
 ## 1. 启用
@@ -59,87 +59,24 @@ git commit --allow-secrets -m "..."
 ```
 
 - 放行只对本次提交生效，不会修改仓库配置；
-- `AI_SECRETS_ALLOW=1` 与 `--allow-secrets` **只对敏感信息扫描生效**，不影响下面的 D6 同步复核和统一开发规范审查；
-- 不得绕过本仓库钩子；三道检查缺一即不能形成合规提交。
+- `AI_SECRETS_ALLOW=1` 与 `--allow-secrets` **只对敏感信息扫描生效**，不影响统一开发规范审查；
+- 不得绕过本仓库钩子；两道检查缺一即不能形成合规提交。
 
-## 4.1 D6 同步复核（pre-commit 第二道）
+## 4.1 D6 历史资料（非提交门禁）
 
-**目的**：`docs/delivery/06-新项目复用与落地指南.md`（D6）是"只迁移 AI 对话能力"的唯一说明书。暂存区出现 **AI 对话生产代码与核心契约**时，要求同一笔提交里留一条**当次**人工确认，防止"改了运行时却不复核复用指南"。
+`docs/delivery/06-新项目复用与落地指南.md`（D6）及 `docs/delivery/d6-review.json` 仅作历史参考，正文和已有记录保留。它们不是现行提交或 CI 门禁，不再要求更新 D6 或新增 D6 审查记录。
 
-**它证明什么、不证明什么**：只证明"改 block 面的人留下了本批专用的书面确认"；**不证明** D6 内容与代码语义一致，也不校验 `reason` 是否属实。CI / 人工复核仍是必要补充。
+`check-d6-sync.mjs` 的默认 D6 模式仅保留为历史工具，pre-commit 和 CI 均不调用；不运行该模式不会导致提交失败。统一规范审查继续使用同一脚本的 `--standards` 模式。
 
-### 4.1.1 路径分类（`scripts/ci/check-d6-sync.mjs`）
+## 4.2 统一开发规范审查（pre-commit 第二道，强制）
 
-| 分类 | 覆盖 | 是否阻断 |
-| --- | --- | --- |
-| `block` | `backend/src/main/java/.../ai/**`、`backend/src/main/resources/ai/**`（`tools.yaml`）、`common/id/**`、`common/sse/**`、`frontend/src/components/AiPanel/**`、`stores/ai.ts`、`api/{ai,aiConfig,sse,http}.ts`、`types/{ai,sse,tools}.ts`、`utils/{ai-*,frontend-tools,context-usage,parts}.ts`、`locales/**` | **是**（必须有有效确认） |
-| `warn` | 后端 `src/test` 下的 AI / `common/id` / `common/sse` 测试、前端单测与 `e2e/**`、`scripts/ci/stub-*`、`verify-e2e.ps1`、`b23l1-dual-instance.ps1`、`messages_*.properties`、`stores/locale.ts` | 否（只打印告警） |
-| `doc` | `docs/**`、任何 `*.md`（含 `docs/delivery/d6-review.json`） | 否 |
-| `infra` | `scripts/**`、`.github/**`、构建配置（`pom.xml`/`package.json`/`tsconfig*`/`vite.config.*`/`application*.yml` 等） | 否 |
-| `other` | 其余业务文件 | 否（忽略） |
-
-> 测试与模拟设施（桩、harness、E2E、Fake/InMemory）**只告警**：它们不属于 D6 的搬迁资产；业务文件一律忽略。改 block / warn 分类表必须同时把 `RULE_VERSION` 升一版，让旧确认失效。
-
-### 4.1.2 确认记录：`docs/delivery/d6-review.json`
-
-```json
-{
-  "version": 1,
-  "reviews": [
-    {
-      "fingerprint": "sha256:<64 位小写十六进制>",
-      "status": "synced",
-      "reason": "本次改了什么、D6 是否需要更新及原因",
-      "reviewedAt": "2026-10-30",
-      "reviewer": "<姓名或工号>"
-    }
-  ]
-}
-```
-
-- `status` 只有两种：`synced` = 本批**同时**更新了 D6 正文（门禁核对 D6 文件确实在暂存区）；`not-affected` = 本次改动不影响 D6 描述的迁移面，`reason` 必须是**具体**理由（去空白后 ≥8 字，且不是 `n/a` / `无` / `待补` 这类占位）。
-- **确认必须本次新增**：HEAD 里已有的同指纹记录不会被复用（防止历史确认被反复套用）；
-- **指纹** = `sha256(规则版本 + 排序后的「状态 blob 路径」)`，只取本次暂存的 block 文件；`d6-review.json` 自身不参与计算。改文件内容、增减 block 文件都会让旧确认立即失效——重新跑一次门禁即可拿到新指纹和可直接粘贴的模板。
-
-### 4.1.3 退出码与处理
-
-| 退出码 | 含义 | 处理 |
-| --- | --- | --- |
-| 0 | 无 block 变更，或确认有效 | 继续提交 |
-| 1 | 有 block 变更但确认缺失 / 指纹不符 / `synced` 未同批改 D6 / `not-affected` 理由不具体 / 复用了历史记录 | 按输出里的模板补 `d6-review.json` 并 `git add` 同一笔提交 |
-| 2 | `d6-review.json` 非法 JSON、`reviews` 结构错误、`version` 不符、非 git 仓库 | **按失败处理**：先修 JSON 再提交（坏 JSON 不会被当成"无确认"放行） |
-
-单独跑（不动索引）：
-
-```sh
-node scripts/ci/check-d6-sync.mjs            # 读当前暂存区
-node scripts/ci/check-d6-sync.mjs --root <仓库根>
-node scripts/ci/check-d6-sync.mjs --help
-```
-
-单测（**逐条**跑，不要一次跑全部）：
-
-```sh
-node --test --test-name-pattern="核心 AI 文件带空 reviews 时阻断" scripts/ci/check-d6-sync.test.mjs
-node --test --test-name-pattern="synced 确认缺少同批 D6 变更时阻断" scripts/ci/check-d6-sync.test.mjs
-node --test --test-name-pattern="d6-review.json 非法 JSON 返回 rc2" scripts/ci/check-d6-sync.test.mjs
-```
-
-### 4.1.4 跳过与局限（必须知道）
-
-- **没装 Node.js**：单看第二道，pre-commit 会明确告警并跳过 D6；但第三道统一规范检查会失败关闭，因此整个提交仍被阻断。
-- **CI 范围**：本次接入的 CI 逐提交门禁用于统一开发规范，不改变 D6 原有的 block/warn 分类和本地复核口径。
-- **不判断正确性**：门禁无法验证 `reason` 真实、也无法验证 D6 写对了。它是"提醒 + 留痕"，不是语义证明。
-
-## 4.2 统一开发规范审查（pre-commit 第三道，强制）
-
-规范正文见 `docs/delivery/development-standards.md`，记录见 `docs/delivery/development-standards-review.json`。它覆盖当前暂存区的**全部**生产、测试、压测、脚本、CI 和文档变更，不复用 D6 的 block-only 范围或文档分类。
+规范正文见 `docs/delivery/development-standards.md`，记录见 `docs/delivery/development-standards-review.json`。它覆盖当前暂存区的**全部**生产、测试、压测、脚本、CI 和文档变更，路径分类和文档白名单按统一规范自身规则判断。
 
 - 每条记录必须有 `fingerprint`、`status`、具体 `reason`、带时区的 `reviewedAt`、`reviewer`、`specChanges`、逐文件 `files` 和七域 `domains`。`specChanges` 每项为 `{change, reason, impact}`，三个字段都必填且具体。
-- standards 指纹版本为 `development-standards/v2`：排序后的 JSON 元组 `[status, mode, fromPath, path, blob]`，Git `-z` 原始路径，禁用 rename detection；D6 v1 算法不变。ledger 排除全链路使用原始 `String` 严格相等，文档白名单不把反斜杠当目录分隔。
+- standards 指纹版本为 `development-standards/v2`：排序后的 JSON 元组 `[status, mode, fromPath, path, blob]`，Git `-z` 原始路径，禁用 rename detection。ledger 排除全链路使用原始 `String` 严格相等，文档白名单不把反斜杠当目录分隔。
 - 父 ledger 的 `reviews` 必须是当前 ledger 的严格前缀，历史不得删改或重排。父 ledger 中已有 fingerprint 不得再次追加，修改其他字段也不能复用。
 - 当前和父 ledger 的 `reviews` 缺失或非数组均返回 `rc=2`。父 ledger 只有经 Git 树确认不存在才视为空历史；pre-commit 的 unborn HEAD 单独视为空父历史，其他 Git/JSON/版本错误失败关闭。
-- `status=reviewed` 适用于代码或混合变更；符合独立白名单的纯文档可用 `not-affected`。docs 下 JS/JSON/HTML 不自动算文档，AI block 内纯文本文档可按白名单处理。
+- `status=reviewed` 适用于代码或混合变更；符合独立白名单的纯文档可用 `not-affected`。docs 下 JS/JSON/HTML 不自动算文档，原 D6 block 路径内纯文本文档可按白名单处理。
 - 所有理由拒绝空值、整体尖括号占位、已知模板原文、泛化子句及其连接组合；包含文件、hunk 或具体技术对象的说明不按组合规则误伤。`checked` 只表示人工逐 hunk 审查，不表示测试、真实接口或真实 Redis 已通过；结构校验不证明语义真实。
 
 ```sh
@@ -162,7 +99,7 @@ CI 在 `.github/workflows/ci.yml` 的 `docs` job 中执行范围模式：push �
 | 1 | 记录未同批暂存、指纹过期、复用历史、非 append-only、字段/文件/规范域缺失或理由不具体 | 逐 hunk 复审并追加完整记录 |
 | 2 | 当前或父 JSON、版本、参数、祖先关系、仓库或提交读取错误 | 失败关闭，先修输入或环境 |
 
-第三道没有敏感信息逃生口；缺少 Node 或检查脚本同样阻断，不得绕过。门禁只保证书面记录的结构、指纹、新鲜度和 append-only，不替代独立语义审查和真实运行验证。
+第二道没有敏感信息逃生口；缺少 Node 或检查脚本同样阻断，不得绕过。门禁只保证书面记录的结构、指纹、新鲜度和 append-only，不替代独立语义审查和真实运行验证。
 
 本轮新增的 merge-tree、octopus、PR merge-base、append、组合套话、原始路径、白名单、父读取、reviews 结构和 unborn HEAD 场景只做了独立静态复核，全部 `NOT_RUN`；未修改测试代码，未执行测试、构建、git、pre-commit 或 CI。
 
@@ -211,17 +148,5 @@ GIT_INDEX_FILE=$IDX git add -f /tmp/t1.txt
 GIT_INDEX_FILE=$IDX sh scripts/githooks/pre-commit   # expected: FAIL, blocked, exit code 1
 ```
 
-- D6 门禁自测（同样不动工作树）：用临时索引改一个 block 文件的 blob，再直接跑检查器：
-
-```sh
-IDX=/tmp/d6-test-index
-GIT_INDEX_FILE=$IDX git read-tree HEAD
-b=$(printf 'class Probe {}\n' | git hash-object -w --stdin)
-GIT_INDEX_FILE=$IDX git update-index --cacheinfo 100644,$b,backend/src/main/java/com/example/configmgr/ai/web/AiController.java
-GIT_INDEX_FILE=$IDX node scripts/ci/check-d6-sync.mjs   # expected: FAIL (record not updated in this commit), rc 1; the new fingerprint is printed
-```
-
-  按输出模板把记录写进 `docs/delivery/d6-review.json` 并用 `git update-index --add --cacheinfo` 放进同一临时索引，再跑一次期望 rc 0；把该 JSON 破坏成非法 JSON 期望 rc 2；
-- 改 D6 门禁的分类表（`BLOCK_RULES` / `WARN_RULES`）或指纹算法：**必须同时升 `scripts/ci/check-d6-sync.mjs` 的 `RULE_VERSION`**（否则旧确认不会失效），并**逐条**跑 `scripts/ci/check-d6-sync.test.mjs` 的用例；
 - 改统一规范域、记录结构或全变更指纹算法：同步规范文档并升 `STANDARDS_RULE_VERSION`，不得修改或删除既有审查记录来制造通过；按项目授权执行相应验证，未执行项保持 `NOT_RUN`；
 - 清理：删除临时索引与测试文件即可，仓库索引与工作树不受影响。

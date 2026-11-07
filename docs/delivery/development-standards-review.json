@@ -373,6 +373,132 @@
           "reason": "已对七份文档逐文件静态复核并检查暂存README diff，固定指令和V01–V11状态有明确证据；官方页面实时抓取、测试、构建、真实模型、浏览器和接口均为NOT_RUN，规范门禁结果以实际命令回执为准。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:bb3e2ec1adcb4b45fdce899b96b98a485db732b6a5eb5b31ebf27d6a00878ed2",
+      "status": "reviewed",
+      "reason": "主会话逐hunk核对并由agent-1016、agent-1015分别独立静态复审D6移除和前后端静态分析组件：D6正文与历史记录保留，pre-commit仅保留敏感信息扫描和standards；Checkstyle/PMD与ESLint坐标、规则、生产范围和显式执行方式一致，新配置可被Git跟踪。主会话两次执行yarn install --ignore-scripts均退出0；Maven、Checkstyle、PMD、ESLint、typecheck、测试、构建、pre-commit和CI均NOT_RUN。Checkstyle MethodLength不完整计入方法头注解、PMD空返回为保守分析，均保留人工审查，不冒充完整自动门禁。",
+      "reviewedAt": "2026-11-07T15:52:14+08:00",
+      "reviewer": "K3.1 Pro主会话，agent-1016与agent-1015独立静态复审",
+      "specChanges": [
+        {
+          "change": "默认D6检查从pre-commit和CI现行门禁移除，仅保留敏感信息扫描与统一开发规范审查；D6正文、d6-review.json及默认手动模式作为历史资料保留。",
+          "reason": "用户明确要求去掉D6提交拦截机制但保留文档和历史记录。",
+          "impact": "提交不再要求更新D6或新增d6-review记录；standards指纹、append-only、防复用、敏感信息扫描及失败关闭行为不变。"
+        },
+        {
+          "change": "新增禁止自写脚本或内联命令分析、统计、批量替换和自动重构源代码的规范，静态分析使用成熟组件，自动重构仅使用经审查的AST工具。",
+          "reason": "防止以正则、字符串切片或括号匹配另造解析器并绕过逐hunk审查。",
+          "impact": "自写脚本结果不得作为开发验收证据；Java采用Checkstyle/PMD，前端采用ESLint，既有CI、构建和压测脚本不得承担源代码分析或修改。"
+        },
+        {
+          "change": "后端引入Checkstyle/PMD显式静态分析配置，前端引入ESLint、typescript-eslint、eslint-plugin-vue和vue-eslint-parser及独立lint命令，均不绑定默认测试或构建生命周期。",
+          "reason": "以业界成熟AST组件替代自写分析脚本，组件及版本已由用户明确授权。",
+          "impact": "新增构建期/开发期工具和锁文件条目，不改变生产运行时依赖、API或默认构建行为；Java方法行数注解口径和SLF4J异常日志仍保留人工审查。"
+        },
+        {
+          "change": "单函数50行和圈复杂度20门槛明确仅适用于Java，前端不设置这两项限制；ESLint仅禁止生产TS/Vue中的命名空间通配导入。",
+          "reason": "用户明确取消前端函数行数和圈复杂度门槛，避免把Java规范机械扩展到Vue/TypeScript。",
+          "impact": "此前前端81个长方法和48个高复杂度方法不再作为整改或验收要求；Java的50行和圈复杂度20规范及Checkstyle配置保持不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "D6及d6-review明确为历史参考，standards逐hunk、指纹和pre-commit失败关闭要求保留，与现行两道提交检查一致。"
+        },
+        {
+          "path": "README.md",
+          "status": "checked",
+          "reason": "pre-commit说明仅保留敏感信息和standards，默认D6不再由pre-commit/CI调用且历史正文和记录保留。"
+        },
+        {
+          "path": "backend/pom.xml",
+          "status": "checked",
+          "reason": "Checkstyle 14.4.0、PMD 7.29.0及Maven插件版本固定，quality路径正确，仅分析生产源码且无executions/phase，不改变默认Maven生命周期。"
+        },
+        {
+          "path": "backend/quality/checkstyle.xml",
+          "status": "checked",
+          "reason": "MethodLength 50、CyclomaticComplexity 20及通配/static import规则符合Java规范；文件可跟踪，方法头注解不完整计入的口径已明确保留人工复核。"
+        },
+        {
+          "path": "backend/quality/pmd-ruleset.xml",
+          "status": "checked",
+          "reason": "仅保留集合/Map/数组空返回与认知复杂度规则，认知复杂度21起报告即20允许；不适用SLF4J的UseCorrectExceptionLogging已移除。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "D6门禁移除、自写脚本禁令、成熟组件要求和Java/前端方法指标边界均已同步，standards两道检查与七域审查未削弱。"
+        },
+        {
+          "path": "frontend/eslint.config.js",
+          "status": "checked",
+          "reason": "Vue flat/base与TypeScript parser分工正确，规则仅作用于src生产TS/Vue并禁止ImportNamespaceSpecifier，没有前端50行或圈复杂度规则。"
+        },
+        {
+          "path": "frontend/package.json",
+          "status": "checked",
+          "reason": "新增独立lint命令和四个ESLint相关精确版本，既有@types/lodash 4.17.25为用户此前明确授权；build/test/CI未串联lint。"
+        },
+        {
+          "path": "frontend/yarn.lock",
+          "status": "checked",
+          "reason": "ESLint及typescript-eslint传递依赖版本与package.json一致并包含resolved/integrity；@types/lodash仅合并4.17.25精确选择器，未改变其既有版本。"
+        },
+        {
+          "path": "scripts/README.md",
+          "status": "checked",
+          "reason": "脚本说明只保留standards现行命令和D6历史手动模式，不再提供默认D6提交门禁操作要求。"
+        },
+        {
+          "path": "scripts/ci/check-d6-sync.mjs",
+          "status": "checked",
+          "reason": "差异仅文件头注释、局限说明和帮助文本，standards判定、指纹、默认D6手动runD6路径及失败关闭逻辑未改。"
+        },
+        {
+          "path": "scripts/githooks/README.md",
+          "status": "checked",
+          "reason": "检查表、豁免和验证说明统一为敏感信息与standards两道检查，D6记录模板和退出说明仅作为历史资料，不再要求执行。"
+        },
+        {
+          "path": "scripts/githooks/pre-commit",
+          "status": "checked",
+          "reason": "D6函数、状态变量、调用、汇总和失败条件完整移除；敏感信息扫描及standards缺Node/脚本/记录/指纹失败关闭保持原样。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "新增Checkstyle、PMD、ESLint及Vue/TypeScript解析组件均经用户明确授权并采用成熟官方包；@types/lodash沿用既有授权，无自写分析器或重复工具框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "Java 50行、圈复杂度20和导入规则已组件化；方法头注解统计差异及PMD保守null分析仍需人工逐hunk复核，前端明确不适用50/20。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "未修改生产日志或异常行为；已删除仅支持Commons Logging的PMD规则，不宣称本配置自动覆盖SLF4J异常参数、日志级别或脱敏规范。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只修改提交门禁、分析工具和规范文档，未变更任何用户界面、卡片、交互、文案或渲染行为。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批未修改API、SSE、Redis、取消确认、pre/post、状态机或模型调用，新增分析插件不进入生产运行路径。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批仅配置源码静态分析，不修改UTF-8、代理对、字素簇、SSE/JSON帧或流式解析实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "13个暂存文件已逐hunk核对，agent-1016与agent-1015独立静态复审均为PASS；yarn install --ignore-scripts两次退出0，其余分析、测试、构建、pre-commit和CI均NOT_RUN。"
+        }
+      }
     }
   ]
 }

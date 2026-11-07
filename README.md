@@ -222,14 +222,16 @@ E2E 脚本的参数、退出码口径、桩模式（`E2E_STUB_MODE=1` 零容忍�
 
 ### 提交前门禁
 
-仓库内置 pre-commit 钩子依次执行敏感信息扫描、D6 同步复核和统一开发规范审查，任一失败即阻断。统一规范审查覆盖全部暂存变更，必须在 `docs/delivery/development-standards-review.json` 仅追加与最终指纹匹配的记录，且父 ledger 为当前 ledger 的严格前缀；缺少 Node 时该强制检查同样阻断。
+仓库内置 pre-commit 钩子依次执行敏感信息扫描和统一开发规范审查，任一失败即阻断。统一规范审查覆盖全部暂存变更，必须在 `docs/delivery/development-standards-review.json` 仅追加与最终指纹匹配的记录，且父 ledger 为当前 ledger 的严格前缀；缺少 Node 时该强制检查同样阻断。
 
 ```sh
 git config core.hooksPath scripts/githooks   # 仓库根执行一次
 node scripts/ci/check-d6-sync.mjs --standards
 ```
 
-规范与逐 hunk 记录格式见 `docs/delivery/development-standards.md`；敏感信息规则、D6 口径与全历史扫描见 `scripts/githooks/README.md`。不得绕过提交门禁。
+规范与逐 hunk 记录格式见 `docs/delivery/development-standards.md`；敏感信息规则、统一规范门禁与全历史扫描见 `scripts/githooks/README.md`。不得绕过提交门禁。
+
+D6 迁移指南及 `docs/delivery/d6-review.json` 仅作历史参考，正文和已有记录保留；它们不是提交或 CI 门禁，不再要求更新 D6 或新增 D6 审查记录。`check-d6-sync.mjs` 的默认 D6 模式不再由 pre-commit 或 CI 调用。
 
 ---
 

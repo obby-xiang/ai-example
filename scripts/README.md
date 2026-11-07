@@ -11,9 +11,9 @@
 | `scripts/ci/forbid-redis-cluster-unsafe.mjs` | **Cluster / 5.0 兼容面 grep 守卫**：禁多库、禁 `KEYS`/`FLUSHDB`/跨键 `SCAN`、禁 6.2+ 的排他流 ID。`--self-check` 自证规则（命中/不命中/命中数），CI 两步均跑 |
 | `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单）+ `usageShapes` + `faults.switches`（§4.6 桩开关清单的唯一取数点），与 `GenerativeFormRules` 白名单**事实源逐值对账** |
-| `scripts/githooks/` | 提交前三道检查：敏感信息扫描（DC-08）+ **D6 同步复核** + **统一开发规范审查**，详见 `scripts/githooks/README.md` |
-| `scripts/ci/check-d6-sync.mjs` | **D6 与统一开发规范门禁**：默认模式复核 AI block 面并要求 `d6-review.json`；`--standards` 覆盖全部暂存变更并要求 `development-standards-review.json`，CI 可逐提交检查 |
-| `docs/delivery/d6-review.json` | D6 复核确认记录（`synced` / `not-affected`，每条带指纹）。门禁阻断时会打印可直接粘贴的模板；该文件自身不计入指纹 |
+| `scripts/githooks/` | 提交前两道检查：敏感信息扫描（DC-08）+ **统一开发规范审查**，详见 `scripts/githooks/README.md` |
+| `scripts/ci/check-d6-sync.mjs` | **统一开发规范门禁**：`--standards` 覆盖全部暂存变更并要求 `development-standards-review.json`，CI 可逐提交检查；默认 D6 模式仅保留为历史工具，不由 pre-commit 或 CI 调用 |
+| `docs/delivery/d6-review.json` | D6 历史审查记录，仅作历史参考并保留已有内容；不再要求新增记录，也不参与提交或 CI 门禁 |
 | `docs/delivery/development-standards-review.json` | 统一开发规范逐 hunk 审查记录，含全变更 v2 指纹、逐文件与七域理由、三字段 `specChanges`；父 ledger 必须严格 append-only |
 
 ---
@@ -305,51 +305,9 @@ node scripts/ci/forbid-redis-cluster-unsafe.mjs --root <dir> # 指定目录（�
 
 ---
 
-## 6. `scripts/ci/check-d6-sync.mjs` —— D6 同步复核门禁（2026-10-30，D6 Task 2）
+## 6. `scripts/ci/check-d6-sync.mjs` —— 统一规范门禁与 D6 历史模式
 
-> **一句话边界**：这是一道**人工确认门禁**，不是语义验证。它只保证"改 AI 对话核心文件的人在同一笔提交里留了一条当次专用确认"，**不保证** D6 正文写对了，也**不校验** `reason` 是否属实。
-
-```sh
-node scripts/ci/check-d6-sync.mjs             # 读当前暂存区（pre-commit 就是这么调的）
-node scripts/ci/check-d6-sync.mjs --root <仓库根>
-node scripts/ci/check-d6-sync.mjs --help
-```
-
-| 退出码 | 含义 |
-| --- | --- |
-| `0` | 暂存区没有 block 面文件，或确认有效 |
-| `1` | 有 block 面文件但确认缺失 / 指纹不符 / `synced` 未同批改 D6 / `not-affected` 理由不具体 / 复用了历史记录 |
-| `2` | `d6-review.json` 非法 JSON、`reviews` 结构错误、`version` 不符、非 git 仓库（**fail-closed**，不会被当成"无确认"放行） |
-
-**路径分类（轻量，只 block 一处阻断）**
-
-| 分类 | 覆盖 | 阻断 |
-| --- | --- | --- |
-| `block` | `backend/src/main/java/.../ai/**`、`backend/src/main/resources/ai/**`、`common/id/**`、`common/sse/**`、`frontend/src/components/AiPanel/**`、`stores/ai.ts`、`api/{ai,aiConfig,sse,http}.ts`、`types/{ai,sse,tools}.ts`、`utils/{ai-*,frontend-tools,context-usage,parts}.ts`、`locales/**` | 是 |
-| `warn` | 后端 AI/发号/SSE 测试、前端单测与 `e2e/**`、`scripts/ci/stub-*`、`verify-e2e.ps1`、`b23l1-dual-instance.ps1`、`messages_*.properties`、`stores/locale.ts` | 否（只告警） |
-| `doc` | `docs/**` 与任意 `*.md`（含 `docs/delivery/d6-review.json`） | 否 |
-| `infra` | `scripts/**`、`.github/**`、构建配置（`pom.xml` / `package.json` / `tsconfig*` / `vite.config.*` / `application*.yml`） | 否 |
-| 其余 | 业务文件 | 否（忽略） |
-
-> 缩写口径：后端路径前缀 `backend/src/main/java/com/example/configmgr/`，前端路径前缀 `frontend/src/`；完整判定表见 `scripts/githooks/README.md` §4.1.1。
-
-**确认记录**（`docs/delivery/d6-review.json`，`version: 1` + `reviews` 数组）：每条含 `fingerprint` / `status` / `reason` / `reviewedAt` / `reviewer`。
-
-- `status=synced`：本批**同时**更新了 `docs/delivery/06-新项目复用与落地指南.md`（门禁核对它确实在暂存区）；
-- `status=not-affected`：本次改动不影响 D6 描述的迁移面，`reason` 必须具体（去空白后 ≥8 字，且不是 `n/a` / `无` / `待补`）；
-- **确认必须本次新增**：HEAD 里已有的同指纹记录不复用；改文件内容或增减 block 文件都会改变指纹，旧确认立即失效（重跑门禁即可拿到新指纹与可粘贴模板）；
-- `d6-review.json` 自身不参与指纹计算。
-
-**单测**（**逐条**跑，禁止一次跑全部；本仓库测试口径要求精确单点命令）：
-
-```sh
-node --test --test-name-pattern="核心 AI 文件未带 d6-review.json 变更时阻断" scripts/ci/check-d6-sync.test.mjs
-node --test --test-name-pattern="synced 确认且同批含 D6 时通过" scripts/ci/check-d6-sync.test.mjs
-node --test --test-name-pattern="指纹变化使旧确认失效" scripts/ci/check-d6-sync.test.mjs
-```
-
-**局限（如实）**：① 单看 D6，未安装 Node.js 时 pre-commit 会明确告警并跳过；但第三道统一规范检查会失败关闭，整个提交仍被阻断；② D6 没有专属 CI job，未启用 `core.hooksPath` 的克隆或绕过本地钩子的客户端不会执行它，不得以此规避；③ 门禁只证明"有人留了确认"，不证明"确认是对的"。改 D6 分类表或指纹算法必须升 `RULE_VERSION`（`scripts/ci/check-d6-sync.mjs`），否则旧确认不会失效。
-
+> 当前 pre-commit 和 CI 只使用 `--standards`。D6 正文及 `docs/delivery/d6-review.json` 仅作历史参考并保留已有内容，不再要求更新 D6 或新增 D6 审查记录。默认 D6 模式仍保留在脚本中，但不由 pre-commit 或 CI 调用，不构成提交门禁。
 
 ### 6.1 统一开发规范审查入口
 

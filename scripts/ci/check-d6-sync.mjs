@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * check-d6-sync.mjs —— D6 同步复核 + 统一开发规范审查门禁
+ * check-d6-sync.mjs —— D6 历史检查 + 统一开发规范审查门禁
  *
- * 默认模式的 D6 规则保持不变；--standards 模式覆盖全部暂存变更，并要求逐文件、七规范域、
- * 规格变化和真实证据边界的当次记录。--standards --base <sha> --head <sha> 用于 CI 逐提交复核。
- * 统一规范模式在 pre-commit 中缺少 Node 或脚本时失败关闭，不沿用 D6 的告警跳过。
+ * 默认 D6 实现保留为历史工具，不再由 pre-commit 或 CI 调用；D6 正文与既有 d6-review.json
+ * 仅作历史参考，不要求随提交更新或新增记录。--standards 模式覆盖全部暂存变更，并要求逐文件、
+ * 七规范域、规格变化和真实证据边界的当次记录。--standards --base <sha> --head <sha> 用于 CI 逐提交复核。
+ * 统一规范模式在 pre-commit 中缺少 Node 或脚本时失败关闭。
  *
  * 目标（轻量，只证明"有人工确认"，不证明语义正确）：
  *   本次暂存区出现 **AI 对话生产代码与核心契约**（block 面）时，要求同一笔提交里
@@ -24,9 +25,8 @@
  *         （d6-review.json 非法 JSON、reviews 结构错误、version 缺失或不为 1、非 git 仓库等，fail-closed）。
  *
  * 局限（写在文档里，也必须在这里说清）：
- *   本门禁无法验证 `reason` 的真实性，也无法判断 D6 内容是否与代码语义一致 —— 它只能保证
- *   "改 block 面的人留下了一条当次专用的书面确认"。`git commit --no-verify` 会跳过本检查；
- *   没装 Node 的环境也会跳过（输出明确告警）。CI / 人工复核仍是必要补充。
+ *   默认模式无法验证 `reason` 的真实性，也无法判断 D6 内容是否与代码语义一致；它不再接入
+ *   pre-commit 或 CI，不产生现行提交义务，手动运行结果也不证明 D6 内容正确。
  *
  * 用法：
  *   node scripts/ci/check-d6-sync.mjs [--root <仓库根>]   # 默认按 git 暂存区检查
@@ -1016,7 +1016,7 @@ export function describeStandards(result) {
 }
 
 function printHelp() {
-  console.log(`D6 sync + development standards gates
+  console.log(`D6 historical check + development standards gates
 
 usage:
   node scripts/ci/check-d6-sync.mjs [--root <repo root>] [--staged]
@@ -1024,7 +1024,7 @@ usage:
   node scripts/ci/check-d6-sync.mjs --standards [--root <repo root>] [--base <sha>] --head <sha>
   node scripts/ci/check-d6-sync.mjs --help
 
-D6 default mode: staged AI block files need a fresh matching ${REVIEW_PATH} record.
+D6 default mode (historical manual tool only): staged AI block files need a fresh matching ${REVIEW_PATH} record when this mode is explicitly run.
 standards mode: every staged change needs an appended matching ${STANDARDS_REVIEW_PATH} record,
   including production, test/stress, scripts, CI and docs. All seven domains and every file need reasons.
   Parent reviews must be a strict prefix; a parent fingerprint cannot be reused.
@@ -1035,7 +1035,7 @@ standards mode: every staged change needs an appended matching ${STANDARDS_REVIE
 standards fingerprint: sha256(v2 + sorted JSON [status,mode,fromPath,path,blob]); D6 v1 is unchanged.
 The corresponding review ledger is excluded.
 exit code: 0 pass / 1 required confirmation missing or invalid / 2 input or environment error.
-D6 keeps its existing pre-commit skip behavior without Node; the standards hook fails closed without Node.
+D6 default mode is not invoked by pre-commit or CI; the standards hook fails closed without Node.
 A confirmation proves written review only, not semantic correctness or real test/interface/Redis execution.`)
 }
 
