@@ -37,6 +37,10 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _json_long(value: int, string_form: bool) -> object:
+    return str(int(value)) if string_form else int(value)
+
+
 def _message_json(role: str, text: str) -> str:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return json.dumps({
@@ -49,12 +53,13 @@ def _message_json(role: str, text: str) -> str:
 
 def _transcript_entry(session_id: str, run_id: str, index: int, now_ms: int) -> str:
     kind = "user" if index % 2 == 0 else "assistant"
+    string_form = index % 2 == 1
     return json.dumps({
         "entryId": "e-%s-%06d" % (session_id, index),
         "kind": kind,
         "runId": run_id,
-        "turnStartedAtMs": now_ms - 100000 + index,
-        "atMs": now_ms - 100000 + index,
+        "turnStartedAtMs": _json_long(now_ms - 100000 + index, string_form),
+        "atMs": _json_long(now_ms - 100000 + index, string_form),
         "text": "perf transcript entry %d for %s" % (index, session_id),
     }, ensure_ascii=False)
 
@@ -107,7 +112,7 @@ def _form_arguments(field_count: int) -> str:
 
 
 def _pending_entry(run_id: str, index: int, status: str, name: str, kind: str,
-                   arguments: str, now_ms: int) -> Dict[str, object]:
+                   arguments: str, now_ms: int, string_form: bool) -> Dict[str, object]:
     return {
         "toolCallId": M.tool_call_id(run_id, index),
         "name": name,
@@ -118,22 +123,22 @@ def _pending_entry(run_id: str, index: int, status: str, name: str, kind: str,
         "outcome": "ok" if status == "EXECUTED" else None,
         "executed": status == "EXECUTED",
         "executedBy": "perf" if status == "EXECUTED" else None,
-        "requestedAtMs": now_ms,
-        "atMs": now_ms,
+        "requestedAtMs": _json_long(now_ms, string_form),
+        "atMs": _json_long(now_ms, string_form),
         "req": True,
-        "reqAtMs": now_ms,
+        "reqAtMs": _json_long(now_ms, string_form),
         "irreversible": False,
     }
 
 
 def _snapshot(run_id: str, session_id: str, t: int, u: int, status: str,
-              pendings: List[Dict[str, object]], now_ms: int) -> Dict[str, object]:
+              pendings: List[Dict[str, object]], now_ms: int, string_form: bool) -> Dict[str, object]:
     cancelled = status == "CANCELLED"
     snapshot: Dict[str, object] = {
         "runId": run_id,
         "sessionId": session_id,
-        "tenantId": t,
-        "userId": u,
+        "tenantId": _json_long(t, string_form),
+        "userId": _json_long(u, string_form),
         "status": status,
         "round": 1,
         "attempts": 0,
@@ -145,10 +150,10 @@ def _snapshot(run_id: str, session_id: str, t: int, u: int, status: str,
         ],
         "context": {"page": "perf", "taskId": None},
         "createdBy": "perf-tool",
-        "createdAtMs": now_ms - 60000,
-        "updatedAtMs": now_ms,
+        "createdAtMs": _json_long(now_ms - 60000, string_form),
+        "updatedAtMs": _json_long(now_ms, string_form),
         "requestText": "perf request",
-        "turnStartedAtMs": now_ms - 60000,
+        "turnStartedAtMs": _json_long(now_ms - 60000, string_form),
     }
     if status in ("RUNNING", "SUSPENDED"):
         snapshot["assistantContent"] = ""
@@ -181,8 +186,8 @@ def _context_fields(turn_no: int, now_ms: int) -> Dict[str, str]:
 
 
 def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: Dict[str, object],
-               t: int, u: int, now_ms: int) -> Dict[str, object]:
-    ttl = cfg.key_ttl_seconds
+               t: int, u: int, now_ms: int, ttl_seconds: int, string_form: bool) -> Dict[str, object]:
+    ttl = ttl_seconds
     status = str(spec.get("status", "DONE"))
     pending_count = int(spec.get("pending", 0))
     pending_fields = int(spec.get("pending_fields", 0))
@@ -202,10 +207,10 @@ def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: D
         else:
             name = "start_export"
             kind = "CONFIRM"
-            arguments = "{\"taskId\":1}"
-        pendings.append(_pending_entry(run_id, index, pending_status, name, kind, arguments, now_ms))
+            arguments = json.dumps({"taskId": _json_long(1, string_form)})
+        pendings.append(_pending_entry(run_id, index, pending_status, name, kind, arguments, now_ms, string_form))
 
-    snapshot = _snapshot(run_id, session_id, t, u, status, pendings, now_ms)
+    snapshot = _snapshot(run_id, session_id, t, u, status, pendings, now_ms, string_form)
     frame_entries = _frame_entries(frame_count, terminal, gap, terminal_type)
     last_seq = frame_entries[-1][0].split("-")[0] if frame_entries else "0"
     run_keys = K.run_keys_13(run_id, t, u)
@@ -215,7 +220,7 @@ def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: D
     items.append((run_keys["fence"], "1", ttl))
     items.append((run_keys["lease_epoch"], "1", ttl))
     if bool(spec.get("lease_held")):
-        items.append((run_keys["lease"], "1|perf-other-instance", ttl))
+        items.append((run_keys["lease"], "1|perf-other-instance", min(ttl, 30)))
     ops.set_values(items)
 
     if pendings:
@@ -232,17 +237,25 @@ def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: D
             "outcome": "ok",
             "code": None,
             "executedBy": "perf",
-            "atMs": now_ms,
+            "atMs": _json_long(now_ms, string_form),
         }, ensure_ascii=False)
         ops.rpush_values(run_keys["ledger"], [ledger_entry], ttl)
         first_tool_call = list(mapping)[0]
         ops.hset_mapping(run_keys["idem"], {
             "%s:%s" % (run_id, first_tool_call): "0|ok||perf|%d" % now_ms,
-            "~meta:0": json.dumps({"name": "start_export", "atMs": now_ms, "toolCallId": first_tool_call}),
+            "~meta:0": json.dumps({
+                "name": "start_export",
+                "atMs": _json_long(now_ms, string_form),
+                "toolCallId": first_tool_call,
+            }),
         }, ttl)
         ops.hset_mapping(K.observed_key(run_id, t, u), {first_tool_call: "1"}, ttl)
     else:
-        ops.rpush_values(run_keys["ledger"], [json.dumps({"name": "list_tasks", "outcome": "ok", "atMs": now_ms})], ttl)
+        ops.rpush_values(run_keys["ledger"], [json.dumps({
+            "name": "list_tasks",
+            "outcome": "ok",
+            "atMs": _json_long(now_ms, string_form),
+        })], ttl)
 
     if frame_entries:
         written = ops.xadd_frames(run_keys["xevents"], frame_entries, ttl)
@@ -271,6 +284,7 @@ def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: D
         "status": status,
         "pending": pending_count,
         "lease_held": bool(spec.get("lease_held")),
+        "long_form": "string" if string_form else "number",
         "frames": {"count": frame_count, "terminal": terminal, "gap": gap, "terminalType": terminal_type},
         "slot_check": {"single_slot": ok, "slots": sorted(set(slots.values()))},
         "keys": run_keys,
@@ -317,15 +331,17 @@ def _upload_attachments(cfg: Config, api: ApiClient, ops: RedisOps, session_id: 
 
 def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario: str,
                   plan: Dict[str, object], copy_name: str) -> Dict[str, object]:
-    ttl = cfg.key_ttl_seconds
+    ttl = int(plan.get("initial_ttl_seconds") or cfg.key_ttl_seconds)
     t = cfg.tenant_id
     u = cfg.user_id
     now_ms = _now_ms()
     session_id = M.session_id_for(cfg, scenario, copy_name)
+    string_form = (len(scenario) + len(copy_name)) % 2 == 1
     copy: Dict[str, object] = {
         "copy": copy_name,
         "session_id": session_id,
         "generated_at": M.utc_now_iso(),
+        "initial_ttl_seconds": ttl,
         "runs": [],
         "staging_count": int(plan.get("staging_count", 0)),
         "archive_count": int(plan.get("archive_count", 0)),
@@ -343,8 +359,8 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
             json.dumps({
                 "sessionId": session_id,
                 "lastActivity": M.utc_now_iso(),
-                "tenantId": t,
-                "userId": u,
+                "tenantId": _json_long(t, string_form),
+                "userId": _json_long(u, string_form),
             }, ensure_ascii=False),
             ttl,
         )])
@@ -393,17 +409,24 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
     for index, spec in enumerate(run_specs):
         run_id = M.run_id_for(cfg, scenario, copy_name, index)
         run_ids.append(run_id)
-        written = _write_run(ops, cfg, run_id, session_id, spec, t, u, now_ms)
+        run_string_form = (len(scenario) + len(copy_name) + index) % 2 == 1
+        written = _write_run(ops, cfg, run_id, session_id, spec, t, u, now_ms, ttl, run_string_form)
         copy["runs"].append(written)
         status = str(spec.get("status"))
-        ops.zadd_mapping(K.run_list_index_key(t, u), {run_id: float(now_ms)}, ttl)
+        ops.zadd_shared_mapping(K.run_list_index_key(t, u), {run_id: float(now_ms)}, ttl)
         if status in ("RUNNING", "SUSPENDED"):
             active_run_ids.append(run_id)
             due_at = float(now_ms + 180000)
-            ops.zadd_mapping(K.identity_recovery_due_key(t, u), {run_id: due_at}, ttl)
+            ops.zadd_shared_mapping(K.identity_recovery_due_key(t, u), {run_id: due_at}, ttl)
             global_recovery_members[K.run_index_member(run_id, t, u)] = due_at
         if status == "SUSPENDED":
             suspended_run_ids.append(run_id)
+
+    if plan.get("activity_sentinel"):
+        sentinel = "perf-sentinel/" + session_id
+        sentinel_key = K.run_list_index_key(t, u)
+        copy["activity_sentinel"] = {"key": sentinel_key, "member": sentinel}
+        ops.zadd_shared_mapping(sentinel_key, {sentinel: float(now_ms + 86400000)}, ttl)
 
     if run_ids:
         ops.sadd_members(K.session_runs_key(session_id, t, u), run_ids, ttl)
@@ -414,7 +437,7 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
             ops.set_values([(K.session_current_key(session_id, t, u), suspended_run_ids[0], ttl)])
         if cfg.write_global_run_index:
             try:
-                ops.zadd_mapping(K.RECOVERY_DUE_INDEX, global_recovery_members, None)
+                ops.zadd_shared_mapping(K.RECOVERY_DUE_INDEX, global_recovery_members, ttl)
             except Exception as exc:
                 copy["errors"].append("ai:recovery:due ZADD failed: %s" % error_detail(exc))
         else:
@@ -429,6 +452,8 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
                 "%s|perf-token" % run_ids[index],
                 min(ttl, 600),
             )])
+    if plan.get("guard_prefilled"):
+        ops.set_values([(K.purge_guard_key(session_id, t, u), "perf-retained|perf", min(ttl, 300))])
 
     archive_count = int(plan.get("archive_count", 0))
     ctx_turn_no = plan.get("ctx_turn_no")
@@ -436,13 +461,25 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
         turn_no = int(ctx_turn_no)
         ops.hset_mapping(K.context_key(session_id, t, u), _context_fields(turn_no, now_ms), ttl)
         ops.rpush_values(K.context_ledger_key(session_id, t, u), [
-            json.dumps({"kind": "compact", "level": "L1", "atMs": now_ms, "lost": 0}),
+            json.dumps({
+                "kind": "compact",
+                "level": "L1",
+                "atMs": _json_long(now_ms, string_form),
+                "lost": 0,
+            }),
         ], ttl)
         ops.rpush_values(K.safety_key(session_id, t, u), [
-            json.dumps({"atMs": now_ms, "ruleId": "perf", "action": "observe"}),
+            json.dumps({
+                "atMs": _json_long(now_ms, string_form),
+                "ruleId": "perf",
+                "action": "observe",
+            }),
         ], ttl)
         ops.rpush_values(K.context_events_key(session_id, t, u), [
-            json.dumps({"eventId": "perf-%s" % session_id, "atMs": now_ms}),
+            json.dumps({
+                "eventId": "perf-%s" % session_id,
+                "atMs": _json_long(now_ms, string_form),
+            }),
         ], ttl)
     if archive_count > 0:
         archives: List[Tuple[str, str, int]] = []

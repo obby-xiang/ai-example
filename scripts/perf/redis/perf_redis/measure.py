@@ -15,6 +15,8 @@ import concurrent.futures
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
+from . import derive as D
+from . import keys as K
 from . import manifest as M
 from .api import ApiClient
 from .envcfg import Config
@@ -113,6 +115,11 @@ def _skipped_entry(scenario: str, copy_name: str, round_no: int, warmup: bool,
 READ_OPERATIONS = {
     "history",
     "history_before",
+    "history_secondary",
+    "history_after_window",
+    "history_cap_retry",
+    "history_data_missing",
+    "history_data_restored",
     "context",
     "runs_current",
     "runs_list",
@@ -148,8 +155,11 @@ def _call(cfg: Config, api: ApiClient, copy: Dict[str, object], operation: str, 
     session_id = str(copy.get("session_id"))
     if operation == "delete":
         return api.delete_session(session_id, operation=label, timeout=timeout)
-    if operation == "history":
-        return api.history(session_id, timeout=timeout)
+    if operation in {
+        "history", "history_secondary", "history_after_window", "history_cap_retry",
+        "history_data_missing", "history_data_restored",
+    }:
+        return api.history(session_id, timeout=timeout, operation=operation)
     if operation == "history_before":
         transcript_entries = int(copy.get("transcript_entries", 0))
         before = max(1, transcript_entries - 20 + 1)
@@ -277,6 +287,97 @@ def _execute_concurrent(cfg: Config, api: ApiClient, budget: _Budget, copy: Dict
     return results
 
 
+ACTIVITY_SCENARIOS = {
+    "session_activity", "session_activity_guard", "session_activity_run_cap",
+    "session_activity_enumeration_cap", "session_activity_data_key",
+}
+ACTIVITY_FIXTURE_TTL_SECONDS = 3600
+
+
+def _activity_background_keys(cfg: Config, plan: Dict[str, object]) -> List[str]:
+    bucket = str(plan.get("background") or "")
+    if not bucket:
+        return []
+    return [K.background_key(cfg.namespace, bucket, index) for index in range(cfg.sizes_for(bucket))]
+
+
+def _activity_ttl_keys(scenario: str, keys: Dict[str, object]) -> List[str]:
+    if scenario in ("session_activity_run_cap", "session_activity_enumeration_cap"):
+        return [str(keys["data_key"])] if keys["data_key"] else []
+    return list(keys["renewable"])
+
+
+def _activity_snapshot(cfg: Config, ops: RedisOps, scenario: str, plan: Dict[str, object],
+                       copy: Dict[str, object], operation: str, phase: str, warmup: bool,
+                       setup: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    keys = D.activity_keys(cfg, scenario, plan, copy)
+    background = _activity_background_keys(cfg, plan)
+    sentinel = keys["sentinel"]
+    sentinel_evidence: Dict[str, object] = dict(sentinel) if isinstance(sentinel, dict) else {}
+    if sentinel_evidence.get("key") and sentinel_evidence.get("member"):
+        sentinel_evidence["score"] = ops.zscore(str(sentinel_evidence["key"]), str(sentinel_evidence["member"]))
+    return {
+        "copy": str(copy.get("copy") or ""),
+        "operation": operation,
+        "phase": phase,
+        "warmup": bool(warmup),
+        "observed_at_ms": int(time.time() * 1000),
+        "target": "secondary" if operation == "history_secondary" else "primary",
+        "ttl": ops.ttl_many(_activity_ttl_keys(scenario, keys)),
+        "lease_ttl": ops.ttl_many(keys["leases"]),
+        "throttle_ttl": ops.ttl(keys["throttle"]),
+        "guard_ttl": ops.ttl(keys["guard"]),
+        "lock_ttl": ops.ttl(keys["lock"]),
+        "background_ttl": ops.ttl_many(background),
+        "data_key": keys["data_key"],
+        "sentinel": sentinel_evidence,
+        "setup": dict(setup or {}),
+    }
+
+
+def _activity_prepare(cfg: Config, ops: RedisOps, scenario: str, plan: Dict[str, object],
+                      copy: Dict[str, object], operation: str, warmup: bool,
+                      scenario_result: Dict[str, object]) -> Optional[Dict[str, object]]:
+    if scenario not in ACTIVITY_SCENARIOS:
+        return None
+    keys = D.activity_keys(cfg, scenario, plan, copy)
+    setup: Dict[str, object] = {"window_reset": False, "errors": []}
+    shorten = operation in {
+        "history", "history_after_window", "history_cap_retry",
+        "history_data_missing", "history_data_restored", "startup_resume",
+    }
+    if shorten:
+        expiry = ops.expire_many(_activity_ttl_keys(scenario, keys), ACTIVITY_FIXTURE_TTL_SECONDS)
+        setup["fixture_ttl_seconds"] = ACTIVITY_FIXTURE_TTL_SECONDS
+        setup["shortened_keys"] = len([value for value in expiry.values() if value == 1])
+        setup["errors"] = [key for key, value in expiry.items() if value == -3]
+        background = _activity_background_keys(cfg, plan)
+        background_expiry = ops.expire_many(background, ACTIVITY_FIXTURE_TTL_SECONDS)
+        setup["background_missing"] = [key for key, value in background_expiry.items() if value == 0]
+        setup["errors"].extend(key for key, value in background_expiry.items() if value == -3)
+    if operation in ("history_after_window", "startup_resume") or (scenario == "session_activity" and operation == "history"):
+        deleted = ops.delete_keys([keys["throttle"]])
+        setup["window_reset"] = True
+        setup["window_delete_errors"] = deleted.get("errors") or []
+    if operation == "history_data_missing":
+        backup = ops.hgetall(keys["data_key"])
+        scenario_result["activity_data_backup"] = backup
+        setup["data_backup_entries"] = len(backup)
+        if not backup:
+            setup["errors"].append("transcript dataKey backup was empty or unreadable")
+        deleted = ops.delete_keys([keys["data_key"]])
+        setup["data_key_deleted"] = not (deleted.get("errors") or [])
+        setup["errors"].extend(str(item) for item in (deleted.get("errors") or []))
+    if operation == "history_data_restored":
+        backup = scenario_result.get("activity_data_backup") or {}
+        setup["data_restore_entries"] = len(backup)
+        if backup:
+            ops.hset_mapping(keys["data_key"], backup, ACTIVITY_FIXTURE_TTL_SECONDS)
+        else:
+            setup["errors"].append("no transcript dataKey backup was available for restoration")
+    return _activity_snapshot(cfg, ops, scenario, plan, copy, operation, "before", warmup, setup)
+
+
 def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Dict[str, object]:
     cfg.require_write_safety()
     started_at = M.utc_now_iso()
@@ -284,6 +385,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
     rows: List[Dict[str, object]] = []
     scenario_rows: List[Dict[str, object]] = []
     api = ApiClient(cfg)
+    secondary_api = ApiClient(cfg, cfg.secondary_app_base_url) if cfg.secondary_app_base_url else None
     redis_ops = RedisOps(cfg)
     environment: Dict[str, object] = {}
     try:
@@ -310,6 +412,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
         def run_operations(scenario: str, copy_name: str, round_no: int, warmup: bool,
                            copy: Dict[str, object], operations: List[str],
                            scenario_result: Dict[str, object]) -> None:
+            plan = (manifest.get("scenarios") or {}).get(scenario, {}).get("plan") or {}
             for index, operation in enumerate(operations):
                 label = _op_label(operation, index)
                 timeout = _request_timeout(cfg, budget)
@@ -317,11 +420,19 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                     scenario_result["skipped"].append(
                         _skipped_entry(scenario, copy_name, round_no, warmup, label, budget))
                     continue
+                before = _activity_prepare(cfg, redis_ops, scenario, plan, copy, operation, warmup, scenario_result)
+                if before is not None:
+                    scenario_result["activity_evidence"].append(before)
+                request_api = api
+                if operation == "history_secondary":
+                    if secondary_api is None:
+                        raise RuntimeError("history_secondary requires APP_SECONDARY_BASE_URL")
+                    request_api = secondary_api
                 concurrent_scenario = (operation == "delete" and index == 0
                                        and (cfg.concurrency > 1 or scenario == "concurrent_delete"))
                 if concurrent_scenario:
                     count = max(2, cfg.concurrency) if scenario == "concurrent_delete" else cfg.concurrency
-                    results = _execute_concurrent(cfg, api, budget, copy, operation, label, count)
+                    results = _execute_concurrent(cfg, request_api, budget, copy, operation, label, count)
                     for result in results:
                         rows.append(_row(scenario, copy_name, round_no, warmup, label, result))
                         if result.get("budget_error"):
@@ -334,7 +445,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                             scenario, copy_name, round_no, warmup, label, budget,
                             "budget allowed only %d/%d concurrent requests to execute" % (len(results), count)))
                 else:
-                    result = _call(cfg, api, copy, operation, label, timeout=timeout)
+                    result = _call(cfg, request_api, copy, operation, label, timeout=timeout)
                     result = _mark_budget_timeout(cfg, budget, timeout, result)
                     rows.append(_row(scenario, copy_name, round_no, warmup, label, result))
                     if result.get("budget_error"):
@@ -342,6 +453,9 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                             "copy": copy_name, "round": round_no, "operation": label,
                             "budget_kind": result.get("budget_error"),
                         })
+                if scenario in ACTIVITY_SCENARIOS:
+                    scenario_result["activity_evidence"].append(_activity_snapshot(
+                        cfg, redis_ops, scenario, plan, copy, operation, "after", warmup))
 
         for scenario in selected:
             entry = (manifest.get("scenarios") or {}).get(scenario)
@@ -376,6 +490,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                 "errors": [],
                 "skipped": [],
                 "budget_errors": [],
+                "activity_evidence": [],
                 "executed_requests": 0,
             }
             first_row = len(rows)
@@ -411,6 +526,8 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
             scenario_rows.append(scenario_result)
     finally:
         api.close()
+        if secondary_api is not None:
+            secondary_api.close()
         redis_ops.close()
 
     measured = [row for row in rows if not row["warmup"]]

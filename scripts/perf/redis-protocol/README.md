@@ -261,8 +261,8 @@ PERF_SCENARIOS=b_frame_fence ./run.sh cleanup --execute
 - staging：索引与 staging 键同 `{sessionId}` tag，同槽 Lua 批量删。
 - archive：键本身无 tag，**不假设同槽**；每个键一条单键 `TYPE+DEL` Lua，pipeline 分批。
 - purge lease/pending/guard 三键同 `{sessionId}` tag；acquire/stage/complete 都是同槽 Lua。
-- `durable pending` 无 TTL，包含 `purgeId/owner/epoch/stage/verifyAtMs/deferred`；
-  完成/延后都保留，`ai:purge:retry:due` 记录到期项。
+- **当前 Java harness 实际契约**（`Scripts.java` / `HarnessMain.java`，本批不修改普通测试）：`durable pending` 的 SET 不带 TTL，包含 `purgeId/owner/epoch/stage/verifyAtMs/deferred`；完成/延后保留，`ai:purge:retry:due` 记录到期项。这里是候选 harness 的现行行为，不是生产 TTL 目标，也不得被文档改写成另一种断言。
+- **生产目标，非当前 Java harness 验收口径**：所有 Redis 键都必须有与生命周期匹配的 TTL，7 天只是绝对上限而不是默认值；对话数据目标为最后真实用户活动起 24h。pending/due 与共享全局/身份恢复、列表索引也不能永久；写入/续期只维护本工具 member 和索引 TTL，清理只 `ZREM` 本工具 member，不 `DEL` 仍有其他 member 的索引键，不 `PERSIST`。真实用户 history 通过 `ai:session:user-activity:<t>:<u>:<sid>` 做 60s 跨实例 Redis 节流并续期全部现存关联键；后台读取不续期，完成后的 purge guard 跳过续期，transcript `dataKey` 必须续期成功，失败必须释放窗口。锁和 run lease 等协调键保持各自更短 TTL。
 - 守卫写回验证：完成前调用 `PURGE_GUARDED_WRITE`，守卫/pending 存在时必须返回 0。
 - 终态收敛：已有终帧（`ai:xterminal` 或 Stream 内 `done/error`）时条件写快照；
   `done` → DONE、`error` → FAILED、`cancelled:true` → CANCELLED；未知/解析失败不得伪收敛，
@@ -348,11 +348,11 @@ verify fail/unknown 后仍尽量执行 cleanup，但任一项失败最终都非 
 ## 7. verify / cleanup 判定
 
 - `state=purged`：manifest 里所有计划键必须不存在；只允许保留：
-  - `chat:mem:*:gen` / `:ver`（防复活 tombstone）
-  - `ai:purge:guard:*` / `ai:purge:pending:*`（durable 台账/守卫）
-  - `perf:bg:*` 与背景 marker（背景不属于本会话）
-- `state=deferred`：`ai:purge:pending` 存在且 TTL=-1，run 快照仍存在，计划键无缺失
-  （证明没有半删）。
+  - `chat:mem:*:gen` / `:ver`（防复活 tombstone，TTL ∈ (0,86400]）
+  - `ai:purge:guard:*` / `ai:purge:pending:*`（按当前 harness 的台账/守卫保留规则；当前 `durable pending` 无 TTL）
+  - `perf:bg:*` 与背景 marker（背景不属于本会话，仍有兜底 TTL）
+- `state=deferred`：当前 Java harness 要求 `ai:purge:pending` 存在且 **TTL=-1**，run 快照仍存在，计划键无缺失
+  （证明没有半删）；锁/租约继续核对各自短 TTL。生产目标的 pending/due 有界 TTL 见 §5，不能据此把当前 HarnessMain 的 `pendingTtl == -1` 断言改成生产目标。
 - `state=protocol`：`protocols.json` 全 pass，且关键最终键存在（xterminal/decided/claim）。
 - `state=generated`：未测量，`unknown`，不算通过。
 - `state=failed` / `residue`：unknown，不算通过；`FAILED_RETRYABLE` 的 pending 与 archive
@@ -368,7 +368,7 @@ guard/pending/lease、`ai:purge:retry:due` 成员、背景键公式与 marker。
 复核（manifest 计划键与背景键公式全量复核），残留则 `complete=false`。
 
 **禁止**：`FLUSHDB`、`FLUSHALL`、`KEYS`、`DEBUG`、`CONFIG`、无界 `SCAN`。
-不会删除其他命名空间、其他会话、业务作业/任务/配置、KB 缓存、`ai:runs` 全局索引本身。
+不会删除其他命名空间、其他会话、业务作业/任务/配置、KB 缓存、共享索引键本身或其他 member；共享索引只按 manifest 精确 `ZREM` 本工具 member，不能为了清理而 `PERSIST` 或整键删除。
 
 ---
 
@@ -461,6 +461,7 @@ summary.csv 的 P50/P95/P99、命令数、pipeline 批次数、SCAN 页数、slo
 
 ## 9. 已知边界 / 未实测
 
+- 本轮 JSON Long 双形态、pending/due 与共享索引 TTL、24h 滑动续期及 60s 跨实例节流文档同步仅为静态修改，测试、构建、真实 HTTP/Redis、standalone/Cluster 均为 `NOT_RUN`；上述规则的真实键/TTL 验收由 `scripts/perf/redis` 的显式 `session_activity*` 场景执行，不能用本段文字替代运行证据。
 - 新设备首次运行默认 `PERF_MVN_MODE=online`，需要能访问 Maven 仓库（或已配置镜像）；内网无网设备
   可先在线预热一次 `~/.m2`，之后用 `PERF_MVN_MODE=offline`。脚本不再要求手工增删 `-o`。
 - **本机基线测试源集**有与本任务无关的编译错误（例如 `AiRateLimiter`、`ClientIpResolver`

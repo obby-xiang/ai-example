@@ -7,7 +7,8 @@ Safety rules enforced here:
     keys that live on other masters;
   * multi-key commands are never issued on cluster (single-key commands are
     routed by redis-py);
-  * owned-key writes require a TTL; shared global index writes never expire the key.
+  * every write has a TTL; shared index writes never remove foreign members and
+    never shorten an existing TTL, while a persistent shared key gains a bounded TTL.
 """
 
 from __future__ import annotations
@@ -321,6 +322,10 @@ class RedisOps:
         except Exception:
             return None
 
+    def zscore_strict(self, key: str, member: str) -> Optional[float]:
+        value = self.client.zscore(key, member)
+        return None if value is None else float(value)
+
     def smembers(self, key: str) -> Optional[List[str]]:
         try:
             raw = self.client.smembers(key)
@@ -458,10 +463,7 @@ class RedisOps:
             pipe.rpush(key, *chunk)
             pipe.execute()
             total += len(chunk)
-        try:
-            self.client.expire(key, max(1, int(ttl)))
-        except Exception:
-            pass
+        self.client.expire(key, max(1, int(ttl)))
         return total
 
     def hset_mapping(self, key: str, mapping: Dict[str, str], ttl: int) -> None:
@@ -482,12 +484,52 @@ class RedisOps:
         except Exception:
             return 0
 
-    def zadd_mapping(self, key: str, mapping: Dict[str, float], ttl: Optional[int]) -> None:
+    def expire_many(self, keys: Sequence[str], ttl: int) -> Dict[str, int]:
+        result: Dict[str, int] = {}
+        for chunk in self._chunks(list(keys)):
+            try:
+                pipe = self._pipeline()
+                for key in chunk:
+                    pipe.expire(key, max(1, int(ttl)))
+                values = pipe.execute()
+                for key, value in zip(chunk, values):
+                    result[str(key)] = 1 if value else 0
+            except Exception:
+                for key in chunk:
+                    try:
+                        result[str(key)] = 1 if self.client.expire(key, max(1, int(ttl))) else 0
+                    except Exception:
+                        result[str(key)] = -3
+        return result
+
+    def zadd_mapping(self, key: str, mapping: Dict[str, float], ttl: int) -> None:
         if not mapping:
             return
         self.client.zadd(key, mapping)
-        if ttl is not None:
-            self.client.expire(key, max(1, int(ttl)))
+        self.client.expire(key, max(1, int(ttl)))
+
+    def zadd_shared_mapping(self, key: str, mapping: Dict[str, float], ttl: int) -> None:
+        if not mapping:
+            return
+        args: List[str] = [str(max(1, int(ttl)))]
+        for member, score in mapping.items():
+            args.extend((str(float(score)), str(member)))
+        remaining = self.client.eval("""
+            local current = redis.call('TTL', KEYS[1])
+            if current > 86400 then return -10001 end
+            for index = 2, #ARGV, 2 do
+              redis.call('ZADD', KEYS[1], ARGV[index], ARGV[index + 1])
+            end
+            local wanted = tonumber(ARGV[1])
+            if current == -2 or current == -1 or (current >= 0 and current < wanted) then
+              redis.call('EXPIRE', KEYS[1], wanted)
+            end
+            return redis.call('TTL', KEYS[1])
+            """, 1, key, *args)
+        if int(remaining) == -10001:
+            raise RedisUnavailable("shared ZSET existing TTL exceeds 24h; rejected before ZADD without changing members")
+        if not 0 < int(remaining) <= 86400:
+            raise RedisUnavailable("shared ZSET TTL must be in (0,86400] after ZADD")
 
     def zrem_members(self, key: str, members: Sequence[str]) -> int:
         if not members:
@@ -515,10 +557,7 @@ class RedisOps:
                         written += 1
                     except Exception:
                         continue
-        try:
-            self.client.expire(key, max(1, int(ttl)))
-        except Exception:
-            pass
+        self.client.expire(key, max(1, int(ttl)))
         return written
 
     def xlen(self, key: str) -> int:

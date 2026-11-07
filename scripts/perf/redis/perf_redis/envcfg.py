@@ -125,6 +125,7 @@ class Config:
     connect_timeout: float = 5.0
 
     app_base_url: str = "http://127.0.0.1:8081"
+    secondary_app_base_url: str = ""
     tenant_id: int = 1
     user_id: int = 101
     tenant_header: str = "X-Tenant-Id"
@@ -219,6 +220,7 @@ class Config:
             },
             "app": {
                 "base_url": self.app_base_url,
+                "secondary_base_url": self.secondary_app_base_url,
                 "identity": {"tenantId": self.tenant_id, "userId": self.user_id},
                 "headers": [self.tenant_header, self.user_header],
                 "http_timeout": self.http_timeout,
@@ -298,6 +300,11 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
     if not (base_url.startswith("http://") or base_url.startswith("https://")):
         errors.append("APP_BASE_URL must start with http:// or https:// (current=%r)" % base_url)
     cfg.app_base_url = base_url
+    secondary_base_url = _get(source, "APP_SECONDARY_BASE_URL", "").rstrip("/")
+    if secondary_base_url and not (secondary_base_url.startswith("http://")
+                                   or secondary_base_url.startswith("https://")):
+        errors.append("APP_SECONDARY_BASE_URL must start with http:// or https:// (current=%r)" % secondary_base_url)
+    cfg.secondary_app_base_url = secondary_base_url
     cfg.tenant_id = _int(source, "APP_TENANT_ID", 1, errors, 1)
     cfg.user_id = _int(source, "APP_USER_ID", 101, errors, 1)
     cfg.tenant_header = _get(source, "APP_TENANT_HEADER", "X-Tenant-Id")
@@ -328,6 +335,8 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
 
     cfg.output_dir = _get(source, "PERF_OUTPUT_DIR", "./perf-redis-out") or "./perf-redis-out"
     cfg.key_ttl_seconds = _int(source, "PERF_KEY_TTL_SECONDS", 43200, errors, 60)
+    if cfg.key_ttl_seconds > 86400:
+        errors.append("PERF_KEY_TTL_SECONDS maximum is 86400 (24h; shorter lifecycle-specific TTLs still apply)")
     cfg.batch_size = _int(source, "PERF_BATCH_SIZE", 500, errors, 1)
     if cfg.batch_size > 10000:
         errors.append("PERF_BATCH_SIZE maximum is 10000")
@@ -353,6 +362,7 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
     cfg.isolated_env = _bool(source, "PERF_ISOLATED_ENV", False, errors)
 
     cfg.sizes = {
+        "bg_activity": _int(source, "PERF_BG_KEYS_ACTIVITY", 3, errors, 1),
         "bg_10k": _int(source, "PERF_BG_KEYS_10K", 10000, errors, 1),
         "bg_100k": _int(source, "PERF_BG_KEYS_100K", 100000, errors, 1),
         "bg_1m": _int(source, "PERF_BG_KEYS_1M", 1000000, errors, 1),

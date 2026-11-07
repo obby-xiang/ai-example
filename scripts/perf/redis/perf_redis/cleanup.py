@@ -59,6 +59,7 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
     background_map: Dict[str, Dict[str, object]] = {}
     skipped: List[Dict[str, str]] = []
     unknown_attachment_index: List[str] = []
+    unknown_file_ids: List[str] = []
     unknown_background: List[str] = []
 
     for scenario, entry in (manifest.get("scenarios") or {}).items():
@@ -68,18 +69,21 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
         for copy in entry.get("copies") or []:
             if not isinstance(copy, dict):
                 continue
+            copy_unknown_file_ids: List[str] = []
             filled = _synthetic_copy(cfg, scenario, plan, copy)
             derived = D.copy_keys(cfg, scenario, plan, filled)
             exact.extend(derived["expected_absent_on_clean"])
             exact.append(str(derived["guard"]))
             exact.append(str(derived["pending"]))
             exact.append(str(derived["lock"]))
+            exact.append(K.session_user_activity_key(str(derived["session_id"]), cfg.tenant_id, cfg.user_id))
             exact.append(str(derived["memory"]["ver"]))
             exact.append(str(derived["memory"]["gen"]))
             # Attachment registrations are also discovered from the live session index,
             # so an interrupted upload (manifest has no fileId yet) is still cleanable.
             current_session_id = str(derived["session_id"])
             session_index = str(derived["attachments"]["session_index"])
+            copy_form_index_keys = {str(key) for key in derived["attachments"]["form_indexes"]}
             exact.append(session_index)
             members = ops.smembers(session_index)
             if members is None:
@@ -91,7 +95,16 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
                 members = []
             for file_id in members:
                 registration = K.attachment_registration_key(file_id, cfg.tenant_id, cfg.user_id)
-                raw = ops.get_str(registration)
+                try:
+                    raw = ops.get_str_strict(registration)
+                except Exception as exc:
+                    skipped.append({
+                        "file_id": file_id,
+                        "status": "unknown",
+                        "reason": "registration GET failed (%s); registration and file deletion skipped" % error_detail(exc),
+                    })
+                    copy_unknown_file_ids.append(file_id)
+                    continue
                 storage_key = ""
                 form_run_id = ""
                 form_tool_call_id = ""
@@ -105,15 +118,19 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
                         if not registered_session:
                             skipped.append({
                                 "file_id": file_id,
+                                "status": "unknown",
                                 "reason": "registration has no sessionId; ownership cannot be proven, skipping file and registration deletion",
                             })
+                            copy_unknown_file_ids.append(file_id)
                             continue
                         if registered_session != current_session_id:
                             skipped.append({
                                 "file_id": file_id,
+                                "status": "unknown",
                                 "reason": "registration sessionId=%s does not match indexed session=%s; skipping deletion of another session's files"
                                           % (registered_session, current_session_id),
                             })
+                            copy_unknown_file_ids.append(file_id)
                             continue
                         storage_key = str(parsed.get("storagePath") or "")
                         form_run_id = str(parsed.get("runId") or "")
@@ -121,18 +138,30 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
                     else:
                         skipped.append({
                             "file_id": file_id,
+                            "status": "unknown",
                             "reason": "registration JSON is invalid; skipping to avoid orphaned files after registration deletion",
                         })
+                        copy_unknown_file_ids.append(file_id)
                         continue
                 exact.append(registration)
                 exact.append(K.attachment_consumed_key(file_id, cfg.tenant_id, cfg.user_id))
                 if storage_key:
                     files.append((file_id, storage_key))
                 if form_run_id and form_tool_call_id:
-                    exact.append(K.attachment_form_index_key(form_run_id, form_tool_call_id,
-                                                             cfg.tenant_id, cfg.user_id))
+                    form_index = K.attachment_form_index_key(form_run_id, form_tool_call_id,
+                                                             cfg.tenant_id, cfg.user_id)
+                    exact.append(form_index)
+                    copy_form_index_keys.add(form_index)
             due_members.append(str(derived["pending"]))
             index_members.extend(derived["run_index_refs"])
+            sentinel = filled.get("activity_sentinel") or {}
+            if not sentinel and plan.get("activity_sentinel"):
+                sentinel = {
+                    "key": K.run_list_index_key(cfg.tenant_id, cfg.user_id),
+                    "member": "perf-sentinel/" + str(derived["session_id"]),
+                }
+            if sentinel.get("key") and sentinel.get("member"):
+                index_members.append({"key": str(sentinel["key"]), "member": str(sentinel["member"])})
             runs.extend(list(derived["runs"].keys()))
             for run_id in derived["runs"].keys():
                 exact.append(K.run_scoped(K.XTRIM_PREFIX, run_id, cfg.tenant_id, cfg.user_id))
@@ -144,6 +173,21 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
             for item in filled.get("feedback") or []:
                 if isinstance(item, dict) and item.get("message_id"):
                     feedback.append((str(item.get("message_id")), str(derived["session_id"])))
+            if copy_unknown_file_ids:
+                unknown_exact = {
+                    key
+                    for file_id in copy_unknown_file_ids
+                    for key in (
+                        K.attachment_registration_key(file_id, cfg.tenant_id, cfg.user_id),
+                        K.attachment_consumed_key(file_id, cfg.tenant_id, cfg.user_id),
+                    )
+                }
+                unknown_exact.update(copy_form_index_keys)
+                exact = [key for key in exact if key not in unknown_exact]
+                files = [(file_id, storage_key) for file_id, storage_key in files
+                         if file_id not in copy_unknown_file_ids]
+                unknown_file_ids.extend(file_id for file_id in copy_unknown_file_ids
+                                        if file_id not in unknown_file_ids)
         bucket = plan.get("background")
         if bucket:
             bucket_name = str(bucket)
@@ -206,6 +250,7 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
         "background": list(background_map.values()),
         "skipped": skipped,
         "unknown_attachment_index": unknown_attachment_index,
+        "unknown_file_ids": unknown_file_ids,
         "unknown_background": unknown_background,
     }
 
@@ -383,6 +428,7 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             ],
             "skipped": targets["skipped"],
             "unknown_attachment_index": targets["unknown_attachment_index"],
+            "unknown_file_ids": targets["unknown_file_ids"],
             "unknown_background": targets["unknown_background"],
         }
 
@@ -478,7 +524,14 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
         presence = ops.exists_many(exact) if exact else {}
         remaining_exact = [key for key in exact if presence.get(key) is True]
         unknown_exact = [key for key in exact if presence.get(key) is None]
-        remaining_due = [member for member in targets["due_members"] if ops.zscore(K.PURGE_DUE_KEY, member) is not None]
+        remaining_due = []
+        unknown_due = []
+        for member in targets["due_members"]:
+            try:
+                if ops.client.zscore(K.PURGE_DUE_KEY, member) is not None:
+                    remaining_due.append(member)
+            except Exception:
+                unknown_due.append(member)
         remaining_index = []
         unknown_index = []
         for ref in targets["index_members"]:
@@ -492,11 +545,13 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             "exact": remaining_exact,
             "exact_unknown": unknown_exact,
             "due": remaining_due,
+            "due_unknown": unknown_due,
             "index_members": remaining_index,
             "index_unknown": unknown_index,
             "scanned": [],
             "background": remaining_background,
             "unknown_background": targets["unknown_background"],
+            "unknown_file_ids": targets["unknown_file_ids"],
         }
         feedback_failed = [item for item in feedback_result if not item.get("ok")]
         file_failed = [item for item in file_delete_result if item.get("status") == "fail"]
@@ -506,10 +561,12 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             not remaining_exact
             and not unknown_exact
             and not remaining_due
+            and not unknown_due
             and not remaining_index
             and not unknown_index
             and not remaining_background
             and not targets["unknown_background"]
+            and not targets["unknown_file_ids"]
             and not feedback_failed
             and not file_failed
             and not file_left

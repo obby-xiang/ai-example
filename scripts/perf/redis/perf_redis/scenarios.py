@@ -56,7 +56,9 @@ def _plan(session_record: bool = True, memory: int = 0, staging: int = 0,
           archives: int = 0, ctx_turn_no: Optional[int] = None,
           attachments: int = 0, feedback: int = 0, background: Optional[str] = None,
           ops: Optional[List[str]] = None, verify_mode: str = "delete",
-          gate_holder_index: Optional[int] = None, notes: str = "") -> Dict[str, object]:
+          gate_holder_index: Optional[int] = None, initial_ttl_seconds: Optional[int] = None,
+          guard_prefilled: bool = False, activity_sentinel: bool = False,
+          notes: str = "") -> Dict[str, object]:
     return {
         "session_record": bool(session_record),
         "memory_messages": int(memory),
@@ -71,6 +73,9 @@ def _plan(session_record: bool = True, memory: int = 0, staging: int = 0,
         "ops": list(ops or ["delete"]),
         "verify_mode": verify_mode,
         "gate_holder_index": gate_holder_index,
+        "initial_ttl_seconds": initial_ttl_seconds,
+        "guard_prefilled": bool(guard_prefilled),
+        "activity_sentinel": bool(activity_sentinel),
         "notes": notes,
     }
 
@@ -250,6 +255,37 @@ def build_matrix(cfg: Config) -> Dict[str, Dict[str, object]]:
         "POST /api/ai/kb/reload（本地 Lucene 重建，不涉及模型/会话 Redis；需 PERF_ENABLE_KB_RELOAD=true）",
         ("full",), _plan(session_record=False, ops=["kb_reload"], verify_mode="reads"), False)
 
+    matrix["session_activity"] = _scenario(
+        "显式双实例：history 驱动 24h 全键滑动续期、60s Redis 节流、背景不续期及共享索引 member 保留",
+        (), _plan(runs=[_run("SUSPENDED", pending=1, frames=8, pending_fields=1, lease_held=True)],
+                  memory=int(s["memory_small"]), staging=int(s["staging_small"]),
+                  transcript=int(s["transcript_small"]), ctx_turn_no=2, attachments=1,
+                  background="bg_activity", activity_sentinel=True, initial_ttl_seconds=3600,
+                  ops=["history", "history_secondary", "history_after_window", "startup_resume"],
+                  verify_mode="reads"), False, needs_http=True)
+
+    matrix["session_activity_guard"] = _scenario(
+        "显式：完成后的 purge guard 跳过 history 续期且不创建用户活动节流键",
+        (), _plan(runs=[_run("SUSPENDED", pending=1, frames=8)], memory=int(s["memory_small"]),
+                  transcript=int(s["transcript_small"]), ctx_turn_no=2,
+                  guard_prefilled=True, initial_ttl_seconds=3600,
+                  ops=["history"], verify_mode="reads"), False)
+
+    matrix["session_activity_run_cap"] = _scenario(
+        "显式：129 个 run 超过 128 run 硬上限；续期失败释放窗口，后续真实 GET 不被错误节流",
+        (), _plan(runs=[_run("DONE") for _ in range(129)], transcript=int(s["transcript_small"]),
+                  initial_ttl_seconds=3600, ops=["history", "history_cap_retry"], verify_mode="reads"), False)
+
+    matrix["session_activity_enumeration_cap"] = _scenario(
+        "显式：1025 个 staging member 超过 1024 枚举项硬上限；失败释放窗口，后续 GET 不被错误节流",
+        (), _plan(runs=_runs(1), staging=1025, transcript=int(s["transcript_small"]),
+                  initial_ttl_seconds=3600, ops=["history", "history_cap_retry"], verify_mode="reads"), False)
+
+    matrix["session_activity_data_key"] = _scenario(
+        "显式：transcript dataKey 首次缺失必须续期失败并释放窗口；恢复后下一次 GET 必须续期成功",
+        (), _plan(runs=_runs(1), transcript=int(s["transcript_small"]), initial_ttl_seconds=3600,
+                  ops=["history_data_missing", "history_data_restored"], verify_mode="reads"), False)
+
     matrix["bg_10k"] = _scenario(
         "背景键空间 1 万：证明两趟全库 SCAN 的固定成本",
         ("full",), _plan(runs=_runs(1), background="bg_10k"), True)
@@ -299,8 +335,12 @@ def resolve_selection(cfg: Config) -> Tuple[List[str], List[Dict[str, str]]]:
             reason = "one million background keys also require PERF_ALLOW_LARGE_SCALE=true"
         if name == "kb_reload" and not cfg.enable_kb_reload:
             reason = "KB reload is disabled by default; set PERF_ENABLE_KB_RELOAD=true"
-        if name.startswith("attachments") and not cfg.enable_attachments:
+        if (name.startswith("attachments") or name == "session_activity") and not cfg.enable_attachments:
             reason = "attachment scenarios are disabled by PERF_ENABLE_ATTACHMENTS=false"
+        if name == "session_activity" and not cfg.secondary_app_base_url:
+            reason = "session_activity requires APP_SECONDARY_BASE_URL for a real second application instance"
+        if name == "session_activity" and cfg.secondary_app_base_url == cfg.app_base_url:
+            reason = "APP_SECONDARY_BASE_URL must identify a different application instance from APP_BASE_URL"
         if name == "kb_status_read" and not cfg.enable_kb:
             reason = "KB reads are disabled by PERF_ENABLE_KB=false"
         if reason:

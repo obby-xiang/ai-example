@@ -6,7 +6,8 @@ All builders were derived from the real Java sources:
   ai/memory/RedisChatMemoryRepository, ai/memory/SessionKeyCodec,
   ai/history/ConversationTranscriptStore,
   ai/session/{AiSessionPurgeService, SessionPurgeGuard, SessionPurgePendingStore, SessionGate},
-  ai/form/RedisFormAttachmentStore, ai/run/{CreateTaskDraftStore, ClientRequestRegistry}.
+  ai/form/RedisFormAttachmentStore,
+  ai/run/{CreateTaskDraftStore, ClientRequestRegistry, SessionActivityRenewal}.
 
 Do not change a key string here without re-reading those files.
 """
@@ -43,6 +44,7 @@ SESSION_LOCK_PREFIX = "ai:session:lock:"
 SESSION_CURRENT_PREFIX = "ai:session:current:"
 SESSION_RUNS_PREFIX = "ai:session:runs:"
 SESSION_ACTIVE_PREFIX = "ai:session:active:"
+SESSION_USER_ACTIVITY_PREFIX = "ai:session:user-activity:"
 
 CONTEXT_PREFIX = "ai:ctx:"
 CONTEXT_LEDGER_PREFIX = "ai:ctx:ledger:"
@@ -263,6 +265,10 @@ def session_runs_key(session_id: str, t: int, u: int) -> str:
 
 def session_active_key(session_id: str, t: int, u: int) -> str:
     return scoped(SESSION_ACTIVE_PREFIX, session_id, t, u)
+
+
+def session_user_activity_key(session_id: str, t: int, u: int) -> str:
+    return scoped(SESSION_USER_ACTIVITY_PREFIX, session_id, t, u)
 
 
 def ctdraft_key(session_id: str, t: int, u: int) -> str:

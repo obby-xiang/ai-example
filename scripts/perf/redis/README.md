@@ -30,7 +30,8 @@
 | transcript：条目 HASH + `:order` ZSET + `:meta` HASH + `:truncated`；history 使用 `latest/before` | `ai/history/ConversationTranscriptStore.java`、`AiController#history` |
 | 帧 Stream：`ai:xevents:{tag}`，ID=`<seq>-0`，字段 `seq` + `frame` JSON；`ai:seq`、`ai:xack:<token>:<tag>`（120s）、`ai:xtrim:<tag>` | `ai/run/RedisFrameStore.java` |
 | 终帧探测预算 = 6000 + 256 帧，起点 = `lastSeq - 6256` | `ai/run/SseChatEmitter.java#terminalScanStart/scanArchive` |
-| guard / pending / due：`ai:purge:guard:*`、`ai:purge:pending:*`（无 TTL）、`ai:purge:retry:due` | `ai/session/SessionPurgeGuard.java`、`SessionPurgePendingStore.java` |
+| guard / pending / due：`ai:purge:guard:*`、`ai:purge:pending:*`、`ai:purge:retry:due` 均有界，pending/due 随有效重试或用户活动续期，TTL 不超过 24h | `ai/session/SessionPurgeGuard.java`、`SessionPurgePendingStore.java` |
+| 24h 会话滑动续期、60s 跨实例 Redis 节流、全键有界枚举及 dataKey 必成功 | `ai/run/SessionActivityRenewal.java`、`ai/session/AiSessionService.java`、`ai/history/ConversationTranscriptStore.java` |
 | 60 秒记忆复核（complete 后保留 pending） | `AiSessionPurgeService#MEMORY_VERIFY_DELAY_MS/verifyMemoryOnly` |
 | 附件四族键与真实上传口 | `ai/form/RedisFormAttachmentStore.java`、`GenerativeFormAttachmentController.java` |
 | 真实读取接口：history / context / runs/current / runs/{id} / events?probe=1 / cancel / pending / kb | `ai/web/AiController.java`、`ai/kb/AiKbController.java` |
@@ -39,12 +40,12 @@
 
 | 键 | 语义 | 工具判定 |
 | --- | --- | --- |
-| `ai:purge:guard:<t>:<u>:<sid>` | 防写回守卫，TTL=session-ttl（默认 24h） | `complete=true` 时必须存在且 TTL>0 |
-| `ai:purge:pending:<t>:<u>:<sid>` | durable 台账，无 TTL；complete 后保留到 60s 记忆复核 | 存在时 TTL 必须为 -1，包含 `verifyAtMs`，且在 `ai:purge:retry:due` |
-| `chat:mem:...:{sid}:gen` / `:ver` | 防复活 tombstone，清空脚本会 INCR 并续 TTL | 存在且 TTL>0；**不是残留** |
+| `ai:purge:guard:<t>:<u>:<sid>` | 防写回守卫，TTL=session-ttl（默认 24h） | `complete=true` 时必须存在且 TTL ∈ (0,86400] |
+| `ai:purge:pending:<t>:<u>:<sid>` | durable 台账，24h 滑动 TTL；complete 后保留到 60s 记忆复核 | 存在时 TTL ∈ (0,86400]，包含 `verifyAtMs`，且在 `ai:purge:retry:due`；due 键本身也必须有界 |
+| `chat:mem:...:{sid}:gen` / `:ver` | 防复活 tombstone，清空脚本会 INCR 并续 TTL | 存在且 TTL ∈ (0,86400]；**不是残留** |
 | `ai:xack:<token>:<tag>` | 出帧幂等标记，120s | 存在时 TTL ∈ (0,130] |
-| `ai:xtrim:<tag>` | 真实裁剪低水位，不在 13 键内 | 存在且 TTL>0，仅报告 |
-| `ai:session:lock:<t>:<u>:<sid>` | 协调锁，源码明确不删 | 存在且 TTL>0，仅报告 |
+| `ai:xtrim:<tag>` | 真实裁剪低水位，不在 13 键内 | 存在且 TTL ∈ (0,86400]，仅报告 |
+| `ai:session:lock:<t>:<u>:<sid>` | 协调锁，源码明确不删，保持短 TTL，不随会话续到 24h | 存在时 TTL ∈ (0,600]，仅报告 |
 | `ai:lock:task:*` / `ai:lock:job:*` | 资源锁，按 taskId 记，与 run 生死无关 | 不在删除面，仅提示 |
 
 ### 1.2 源码已证实的删除顺序（用于判读结果）
@@ -138,6 +139,7 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `REDIS_USERNAME` `REDIS_PASSWORD` | 空 | ACL；不打印、不落结果 |
 | `REDIS_TLS` `REDIS_TLS_INSECURE` | `false` | TLS；自签集群才用 insecure |
 | `APP_BASE_URL` | `http://127.0.0.1:8081` | 应用地址 |
+| `APP_SECONDARY_BASE_URL` | 空 | 显式 `session_activity` 必填；必须指向共享同一 Redis 的另一应用实例，不能用同地址伪装跨实例 |
 | `APP_TENANT_ID` `APP_USER_ID` | `1` `101` | 必须在 `/api/ai/tenants` 目录内 |
 | `APP_HTTP_TIMEOUT_SECONDS` | `30` | 单请求上限；用于快速暴露慢链。耐久测试可显式调大；measure 会再被剩余预算压低 |
 | `PERF_MEASURE_SCENARIO_TIMEOUT_SECONDS` | `60` | 每场景测量预算；`0` 关闭。含预热+所有轮次 |
@@ -150,7 +152,7 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `PERF_SCENARIOS` | 空 | 逗号分隔；显式点名被阻止的场景会直接失败 |
 | `PERF_REPEAT` `PERF_WARMUP` `PERF_CONCURRENCY` | `2` `1` `1` | 每个破坏性场景每轮一个独立 copy；并发只作用于首个 DELETE；`concurrent_delete` 至少 2 路并发 |
 | `PERF_OUTPUT_DIR` | `./perf-redis-out` | 相对当前目录；跨设备可任意 |
-| `PERF_KEY_TTL_SECONDS` | `43200` | 工具自有生成键的兜底 TTL（12h）；共享全局恢复索引键不设 TTL |
+| `PERF_KEY_TTL_SECONDS` | `43200` | 生成键兜底 TTL（12h，允许 60..86400s）；共享索引也会获得/续期有界 TTL，不缩短既有更长 TTL，但既有 TTL 超过 24h 会拒绝生成；锁/租约保持各自短 TTL |
 | `PERF_BATCH_SIZE` `PERF_SCAN_COUNT` | `500` `1000` | pipeline 批量 / SCAN COUNT（cleanup 不 SCAN） |
 | `PERF_VERIFY_SETTLE_SECONDS` | `0` | verify 前等待（例如等 60s 记忆复核） |
 | `PERF_KEEP_GUARD` | `false` | cleanup 时保留 guard/pending（有真实写者时用） |
@@ -162,7 +164,7 @@ export APP_FILE_STORAGE_PATH=/mnt/shared/config-mgr/files
 | `PERF_ALLOW_LARGE_SCALE` | `false` | 大规模场景开关 |
 | `PERF_ALLOW_BACKGROUND_MILLION` | `false` | 100 万背景键开关（还需 large） |
 
-尺寸变量：`PERF_BG_KEYS_{10K,100K,1M}`、`PERF_RUNS_{SMALL,MED,LARGE}`、`PERF_STAGING_{SMALL,LARGE}`、`PERF_ARCHIVE_{SMALL,LARGE}`、`PERF_FRAMES_{SMALL,LARGE}`、`PERF_TRANSCRIPT_{SMALL,LARGE}`、`PERF_MEMORY_{SMALL,LARGE}`、`PERF_ATTACHMENT_MAX`、`PERF_FEEDBACK_ROWS`。
+尺寸变量：`PERF_BG_KEYS_ACTIVITY`、`PERF_BG_KEYS_{10K,100K,1M}`、`PERF_RUNS_{SMALL,MED,LARGE}`、`PERF_STAGING_{SMALL,LARGE}`、`PERF_ARCHIVE_{SMALL,LARGE}`、`PERF_FRAMES_{SMALL,LARGE}`、`PERF_TRANSCRIPT_{SMALL,LARGE}`、`PERF_MEMORY_{SMALL,LARGE}`、`PERF_ATTACHMENT_MAX`、`PERF_FEEDBACK_ROWS`。
 
 ---
 
@@ -251,7 +253,7 @@ python -m perf_redis all
 
 ### 5.2 中断后恢复
 
-- 工具自有的生成键都有 TTL（默认 12h）；即使机器断电也会自清。共享全局恢复索引键不设 TTL，避免误伤其他 member；中断后用 cleanup 只 `ZREM` 本工具 member。
+- 工具自有的生成键都有 TTL（默认 12h）；即使机器断电也会自清。共享全局/身份索引同样必须有 TTL：生成时通过单键 Lua 写入本工具 member 并补齐或续期 TTL，不缩短既有更长 TTL；cleanup 只 `ZREM` 本工具 member（含显式 sentinel），不删除仍有其他 member 的索引键。
 - `manifest.json` 在**每个 copy 生成前**先写占位（含 `session_id`/场景/计划），中断后 `cleanup` 仍能按计划推导 runId 与键。
 - 直接再跑 `cleanup`（先 dry-run）即可；不要手动 `FLUSHDB`。
 - `generate` 对已生成场景会跳过；要**重新完整测量**，换 `PERF_NAMESPACE`（或换 `PERF_OUTPUT_DIR`）后重新 generate。
@@ -292,6 +294,11 @@ python -m perf_redis all
 | `repeat_delete` | 同会话连续两次 DELETE 的幂等 | ✓ | ✓ | ✓ |
 | `concurrent_delete` | 同会话并发 DELETE（源码无记录级单飞） | ✓ | ✓ | ✓ |
 | `reads_suspended` | history latest+before/context/runs-current/runs 列表/runs/{id}/events-probe/cancel/pending/startup-resume | ✓ | ✓ | ✓ |
+| `session_activity` | 显式双实例：24h 全键续期、60s 节流、背景不续期、短租约及共享 member 保留 | — | — | — |
+| `session_activity_guard` | 显式：完成后的 purge guard 跳过续期且不创建节流键 | — | — | — |
+| `session_activity_run_cap` | 显式：129 run 触达 128 run 上限并验证失败释放窗口 | — | — | — |
+| `session_activity_enumeration_cap` | 显式：1025 staging member 触达 1024 枚举项上限并验证失败释放窗口 | — | — | — |
+| `session_activity_data_key` | 显式：dataKey 缺失必须失败并释放窗口，恢复后下一 GET 必须续期 | — | — | — |
 | `health_read` | `GET /api/ai/health` | ✓ | ✓ | ✓ |
 | `kb_status_read` | KB 状态只读（KB 缓存不属于会话销毁面） | ✓ | ✓ | ✓ |
 | `kb_reload` | 可选：本地 Lucene 重建（需显式开启） |  | ✓ | ✓ |
@@ -301,14 +308,16 @@ python -m perf_redis all
 
 背景键位于 `perf:bg:<namespace>:<bucket>:<n>`，**不属于任何会话**；删除后必须仍存在。verify 用 manifest 的 planned 与首/中/尾精确键抽查，不做背景 SCAN。
 
+`SessionActivityRenewal` 另设 `MAX_RENEWAL_KEYS=4096`，但当前真实枚举路径中它不能在前两个上限之内独立触达：128 run 每轮最多 16 个登记续期键；除 run 枚举项外，最多还能枚举 896 个附件 member（若另有一个 form 索引项则为 895），每个附件产生登记/墓碑两键，加会话固定键后仍不足 4096。更多 run/member 会先被 128/1024 截断。因此本工具只把可真实到达的 128/1024 分支列为场景，不把较早失败伪报成 4096 证据。若生产调整枚举或键族，需再补独立 4096 场景。
+
 ### 6.1 数据形状
 
-功能未上线，不做旧数据或旧协议兼容。`archive_turnno`、`archive_scan_only`、`archive_large`、`archive_over_turnno` 仅保留为 `unsupported_legacy` 标记：默认不生成旧 `ai:ctx:archive` 键、不计当前 PASS/FAIL，显式选择也会被阻止；`ai:xevents` 的当前 Stream 场景继续覆盖。
+旧 archive 协议已停止写入；`archive_turnno`、`archive_scan_only`、`archive_large`、`archive_over_turnno` 仅保留为 `unsupported_legacy` 标记：默认不生成旧 `ai:ctx:archive` 键、不计当前 PASS/FAIL，显式选择也会被阻止；`ai:xevents` 的当前 Stream 场景继续覆盖。现行 JSON `Long` 则同时生成旧数值与新十进制字符串两种形态，transcript 的 `atMs/turnStartedAtMs`、run 快照时间/身份、pending 时间、ledger/idem 及上下文 JSON 均按记录交替覆盖，不机械改成单一形态。
 
 - 会话号：`p-<namespace>-<scenario>-<copy>`；runId：`<sessionId>-r<i>`。两者都是不透明字符串，删除服务按精确键/转义 glob 处理，支持非数字 id。
 - run 快照：`ai:run:{<t>:<u>:run:<id>}`，JSON 字段与 `RunSnapshot` 一致（`runId/sessionId/tenantId/userId/status/messageJson/...`）；取消键为 `ai:cancel:{<t>:<u>:run:<id>}`。
 - 待决：`ai:pending:{...}` HASH，field=`toolCallId`，value=`PendingToolCall` JSON；`ai:req`/`ai:decided`/`ai:claim` 为 HASH。
-- 索引：所有 run 在 `ai:runs:<t>:<u>` ZSET 中以 `runId` 为 member、`updatedAtMs` 为 score；非终态 run 还在身份 `ai:recovery:due:<t>:<u>` 中以 `runId` 为 member，并可选写入全局 `ai:recovery:due`（member=`t/u/runId`）。score 的 due 延迟采用生产默认 180s；共享全局键不设 TTL。
+- 索引：所有 run 在 `ai:runs:<t>:<u>` ZSET 中以 `runId` 为 member、`updatedAtMs` 为 score；非终态 run 还在身份 `ai:recovery:due:<t>:<u>` 中以 `runId` 为 member，并可选写入全局 `ai:recovery:due`（member=`t/u/runId`）。score 的 due 延迟采用生产默认 180s；共享全局/身份索引均有 TTL，真实用户活动可续期，cleanup 不删除索引键或其他 member。
 - transcript：data HASH 的 field=`entryId`、value=`TranscriptEntry` JSON；`:order` ZSET 的 score 从 1 递增；`:meta` HASH 包含 `bytes/seq/rev/fence:<entryId>`；未发生裁剪时不写 `:truncated`。
 - staging：`chat:mem:staging:<t>:<u>:{<sid>}:<token>` 与 `chat:mem:staging:idx:<t>:<u>:{<sid>}` 同时生成；索引 SET 成员为 token，索引与数据键使用相同 TTL，不能用全库 SCAN 代替索引。
 - Stream：`ai:xevents:{...}`，`XADD <seq>-0 seq <n> frame <json>`；终帧 `{"type":"done"|"error","seq":n,...}`。
@@ -385,26 +394,32 @@ pending 在记忆复核完成后允许且应该被移除。若首次响应为 de
 
 1. `complete=true`
    - 本会话所有生成键（含 13 键、anchors、ctx/archive、transcript、memory/staging、会话/发现键、ctdraft/creq、附件四族）必须不存在；
-   - guard 必须存在且 TTL>0；
-   - pending 若存在：无 TTL、`verifyAtMs` 非空、在 `ai:purge:retry:due`；
-   - `gen/ver` 必须存在且 TTL>0（有意 tombstone）；
-   - `xack` 若存在 TTL ∈ (0,130]；`xtrim`/`session lock` 仅报告；
-   - 全局/身份恢复及身份列表 ZSET 中本 run 的 member 必须已 `ZREM`；`ZSCORE` 读取失败记 `unknown`，不得当成不存在；
+   - guard 必须存在且 TTL ∈ (0,86400]；
+   - pending 若存在：TTL ∈ (0,86400]、`verifyAtMs` 非空、在 `ai:purge:retry:due`，且 due 键本身 TTL ∈ (0,86400]；
+   - `gen/ver` 必须存在且 TTL ∈ (0,86400]（有意 tombstone）；
+   - `xack` 若存在 TTL ∈ (0,130]；`xtrim` TTL ∈ (0,86400]；`session lock` 保持 (0,600] 短 TTL；
+   - 全局/身份恢复及身份列表 ZSET 中本 run 的 member 必须已 `ZREM`；`ZSCORE` 读取失败记 `unknown`，不得当成不存在；仍存在的共享索引键 TTL 也必须在 (0,86400]；
    - 附件登记/索引/文件按响应 `attachments.registrationsDeleted` 与磁盘核对；
    - 反馈行通过 `GET /api/ai/feedback` 按 messageId 核对（列表上限 100；达到上限记 `info`，不伪报 pass）。
 2. `complete=false`
    - 每个 `deferred` run 只核对 **manifest 记录的 `generated_keys`**：`pending=0` 的 run 只生成 7 个基础键（run/runstate/seq/fence/lease_epoch/ledger，有帧时加 `xevents`），不存在 pending/claim/idem/req/decided/lease；缺失其中任何一个已生成键仍为 fail；
    - 旧 manifest 没有 `generated_keys` 时按记录的形状推导（`pending` / `frames.count` / `lease_held`）；`lease_held` 缺失等不可知项记 `unknown`，不伪报 pass；
    - 响应 `deleted=true` 的 run 的 13 键必须不存在（未生成的键本来就不存在）；
-   - pending 必须存在且无 TTL；guard 必须存在且 TTL>0；
+   - pending 必须存在且 TTL ∈ (0,86400]，due member 存在、due TTL 有界；guard 必须存在且 TTL ∈ (0,86400]；deferred 数据键有界，run lease 保持 (0,30]；
    - 仍有 deferred run 时，current/runs/active 至少一个存在；无 deferred 时仅提示（空集合会被 Redis 自动删除）。
 3. `aborted=true`
    - 会话记录/run 快照/台账/ctx/transcript/memory 仍在（“一个键都没删”）。
 4. 只读场景
    - 每个读接口 HTTP 2xx（health 允许 503）；
-   - 读后数据仍完整（不会被读接口删除）；
+   - 读后数据仍完整（不会被读接口删除），所有现存会话/索引键 TTL ∈ (0,86400]，短租约不被续到 24h；
    - `runs/current found=true`（有 SUSPENDED 时）、`runs/{id} exists=true`；history latest/before 除总数外，必须按夹具 entryId/文本序号核对预期范围、升序、两页不重叠及 `nextCursor/hasMore`。
    - 因 measure 预算超时未完成的读请求记 `unknown`，不当作该接口通过或失败。
+5. 显式 `session_activity*`
+   - measure 在真实 history GET 前后按 copy 保存精确 Redis 键/TTL 与观测时刻，warmup 不参与判定；verify 要求全部已存在关联键从 1h 夹具 TTL 续到接近 24h，并以 `TTL + 实测间隔 >= 86398s` 证明目标，而不是只接受任意增长；transcript `dataKey` 必须实际续期成功，不能只凭 HTTP 200；
+   - 第二请求发往 `APP_SECONDARY_BASE_URL`，60s 窗口内会话 TTL 不得增长，也不得出现超过实测间隔加 2s 的异常缩短；节流键 `ai:session:user-activity:<t>:<u>:<sid>` 目标接近 60s。每轮第一次请求前清理本命名空间节流键以隔离 warmup，第三次请求前再删除它以模拟窗口到期，之后必须重新续满；
+   - `startup_resume` 前把会话夹具重置为 1h 并清理自有节流键，调用后会话 TTL 不得增长且不得重新创建节流键；背景键保持 1h 夹具 TTL，30s run lease 不得被续到 24h；共享列表中的 sentinel member 必须仍在，cleanup 只移除本工具 run/sentinel member；
+   - guard 场景不得续期任何键且不得创建节流键；129 run/1025 member 场景和 dataKey 缺失场景必须释放失败窗口。dataKey 恢复后第二次 GET 必须续期并新建 `0 < TTL <= 60s` 的节流键，夹具不得删除窗口伪造成功；
+   - 硬上限场景只缩短/记录 `dataKey`，避免压测自身额外产生全量 TTL 读写放大；普通全键场景仍逐键核对。
 
 状态含义：`pass` 通过；`fail` 明确违反；`unknown` 读/接口不可达、生成键清单不可知、预算超时，不能当通过；`info` 有意保留或不可判定；`skip` 场景未生成或未测量。
 
@@ -422,13 +437,14 @@ pending 在记忆复核完成后允许且应该被移除。若首次响应为 de
 - 清理范围：
   - manifest 推导的本命名空间会话/run/上下文/记忆/transcript/附件登记；
   - 本命名空间 `perf:bg:*`：按 manifest 的 bucket/planned 与确定性 key 公式分批删除，**不做背景 SCAN**；每批删除后用精确 EXISTS 复核。manifest 记录 `planned` 与逐批 `written` 进度（旧 manifest 的 `count/written` 兼容）；
-  - 本会话的 guard/pending（可 `PERF_KEEP_GUARD=true` 保留）、`ai:purge:retry:due` 成员，以及全局 `ai:recovery:due`、身份 `ai:recovery:due:<t>:<u>`、列表 `ai:runs:<t>:<u>` 中本工具 run 的 ZSET member；
+  - 本会话的 guard/pending（可 `PERF_KEEP_GUARD=true` 保留）、`ai:session:user-activity:*` 节流键、`ai:purge:retry:due` 成员，以及全局 `ai:recovery:due`、身份 `ai:recovery:due:<t>:<u>`、列表 `ai:runs:<t>:<u>` 中本工具 run/显式 sentinel 的 ZSET member；
   - archive/staging/run 附加键全部使用 manifest 已登记的确定 token、索引 member 或固定 run 键公式精确删除并复核；cleanup 不做全键空间 SCAN，也不设置扫描预算；
   - 附件文件仅在 `PERF_ALLOW_FILE_DELETE=true` 且路径**严格位于** `PERF_APP_FILE_STORAGE_PATH` 下的普通文件时删除；存储根目录本身、越界路径、目录/符号链接一律拒绝，不进入删除。
+  - 附件归属未证实即不删除：严格 GET 失败、缺 sessionId、session 不匹配或非法 JSON 都登记 `unknown_file_ids`，在本 copy 的 live/manifest 信息合并后统一排除该 fileId 的 registration、consumed、相关 form index 和 manifest 文件项；已证实归属的其他 fileId 仍按原路径清理，`complete=false`。
   - 反馈行通过真实 `POST /api/ai/feedback`（rating=0）删除。
 - `cleanup` 默认 dry-run，输出精确键数、样本、背景 planned/written 清单、文件、反馈清单；`--execute` 才删除。没有 manifest 时无法确认历史背景键，会明确 `complete=false`（不再用通配 SCAN 冒充清理）。
 - 附件场景若未配置 `PERF_APP_FILE_STORAGE_PATH` / `PERF_ALLOW_FILE_DELETE=true`，`verify` 会把文件存在性记为 `unknown`，`cleanup` 会因“文件不可确认/仍存在”报 `complete=false`；这是有意为之，不伪报干净。
-- 不会删除：`ai:recovery:due*` / `ai:runs:*` / `ai:purge:retry:due` 索引键本身、其他 member、其他会话、业务作业/任务/配置、KB 缓存、`ai:lock:task:*`；也不会给共享全局恢复索引设置 TTL。
+- 不会删除：`ai:recovery:due*` / `ai:runs:*` / `ai:purge:retry:due` 索引键本身、其他 member、其他会话、业务作业/任务/配置、KB 缓存、`ai:lock:task:*`。共享索引写入会设置或续期有界 TTL，但 cleanup 不 `DEL` 索引键、不 `PERSIST`，也不误删其他 member。
 
 ---
 
@@ -454,6 +470,8 @@ pending 在记忆复核完成后允许且应该被移除。若首次响应为 de
 ---
 
 ## 11. 已知限制 / unsupported
+
+本轮 Long/TTL/滑动续期修改仅完成静态复核；测试、构建、真实 HTTP/Redis、standalone/Cluster 均为 `NOT_RUN`，不得以 README 或静态代码审阅替代运行证据。
 
 | 项 | 状态 | 原因 |
 | --- | --- | --- |

@@ -21,13 +21,13 @@ def _quote(value: str) -> str:
 
 
 class ApiClient:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, base_url: Optional[str] = None) -> None:
         import httpx
 
         self.cfg = cfg
         timeout = httpx.Timeout(cfg.http_timeout, connect=min(10.0, cfg.http_timeout))
         self._client = httpx.Client(
-            base_url=cfg.app_base_url,
+            base_url=base_url or cfg.app_base_url,
             timeout=timeout,
             verify=cfg.http_verify_tls,
             follow_redirects=False,

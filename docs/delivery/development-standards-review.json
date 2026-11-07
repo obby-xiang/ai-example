@@ -2991,6 +2991,45 @@
         "unicode-stream-parsing": {"status":"checked","reason":"Hex摘要输出逐字符等价，SSE写出与回放结构未改，未引入二次转码、代理对切分或不完整帧解析。"},
         "verification-review": {"status":"checked","reason":"各修复组独立静态复审PASS且最终49文件暂存diff检查通过；IDEA Reformat已执行，Inspect按用户决定NOT_RUN；mvn -Dmaven.test.skip=true package于00:16:33 BUILD SUCCESS，测试编译/执行和真实接口Redis验证均NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:617ecedaacb5edbf8616f23ceb52ee2beb68bd8e3ef7ca048e5a38f31271fba2",
+      "status": "reviewed",
+      "reason": "14个压测与说明文件完成Long双形态、TTL/续期/跨实例节流、后台纯读、purge/dataKey、有界容量和真实Redis证据整改。agent-1049三轮独立静态复审最终PASS：六项返修及unknown_file_ids统一过滤均闭环，其他已证实附件不误删且complete=false保持。已完成的IDEA格式化不再调整，Inspect按用户要求NOT_RUN；最终暂存diff检查通过，真实压测未执行。",
+      "reviewedAt": "2026-11-08T00:19:17+08:00",
+      "reviewer": "K3.1 Pro主会话最终暂存复核，agent-1049第三轮独立静态复审PASS",
+      "specChanges": [
+        {
+          "change": "压测新增会话24小时滑动续期、60秒Redis跨实例节流、后台纯读、purge/dataKey及128 run/1024枚举项断言，并明确4096在当前合法枚举路径不可独立触达。",
+          "reason": "使真实压测覆盖当前会话生命周期和有界容量规格，同时避免伪造不可达证据。",
+          "impact": "只改变压测数据、测量、验证、清理和说明，不改变生产协议；所有结果仍需真实环境执行，当前为NOT_RUN。"
+        }
+      ],
+      "files": [
+        {"path":"scripts/perf/ai-api/core-coverage.mjs","status":"checked","reason":"taskId安全整数数值和十进制字符串统一规范化后用于Set/URL/DELETE，非法及越界值仍拒绝；已完成格式化保持现状。"},
+        {"path":"scripts/perf/redis-protocol/README.md","status":"checked","reason":"明确当前Java harness无TTL/pendingTtl=-1与生产24小时目标的分界，不再把目标语义冒充harness现行断言。"},
+        {"path":"scripts/perf/redis/.env.example","status":"checked","reason":"第二实例地址、60..86400秒TTL和活动背景键配置与envcfg及测量实现一致。"},
+        {"path":"scripts/perf/redis/README.md","status":"checked","reason":"记录copy证据、24h/60s观测公式、startup纯读、最多896/form时895及4096不可独立触达边界，并补充未知归属不删除规则。"},
+        {"path":"scripts/perf/redis/perf_redis/api.py","status":"checked","reason":"第二HTTP客户端只覆盖base URL并复用身份/TLS/超时，history与startup-resume路径一致。"},
+        {"path":"scripts/perf/redis/perf_redis/cleanup.py","status":"checked","reason":"严格GET/zscore异常与不存在分离，unknown_file_ids在copy合并后统一过滤registration/consumed/form index和文件，complete=false且不误删已证实附件。"},
+        {"path":"scripts/perf/redis/perf_redis/derive.py","status":"checked","reason":"续期键族、短lease、dataKey、throttle/guard/lock和附件推导与生产键面一致，cleanup消费端未知过滤已闭环。"},
+        {"path":"scripts/perf/redis/perf_redis/envcfg.py","status":"checked","reason":"第二地址校验、TTL上限86400及背景尺寸变量与模板一致，未放宽生产上限。"},
+        {"path":"scripts/perf/redis/perf_redis/generate.py","status":"checked","reason":"Long数值/字符串双形态、30秒run lease、短会话锁、共享索引和purge guard夹具接线正确，写入均有界TTL。"},
+        {"path":"scripts/perf/redis/perf_redis/keys.py","status":"checked","reason":"用户活动节流键复用统一租户/用户/会话身份作用域，与生产键形一致。"},
+        {"path":"scripts/perf/redis/perf_redis/measure.py","status":"checked","reason":"快照记录copy和observed_at_ms，warmup排除，startup前每轮重置1小时并清自有节流键，真实前后TTL证据独立。"},
+        {"path":"scripts/perf/redis/perf_redis/redisops.py","status":"checked","reason":"共享ZSET在首个ZADD前拒绝超24小时TTL，合法更长TTL不缩短；严格GET/ZSCORE保留异常，RPUSH/XADD后EXPIRE失败不吞。"},
+        {"path":"scripts/perf/redis/perf_redis/scenarios.py","status":"checked","reason":"活动、guard、128 run、1024枚举项和dataKey场景真实可达，未伪造独立4096场景。"},
+        {"path":"scripts/perf/redis/perf_redis/verify.py","status":"checked","reason":"按copy过滤全部证据，24h/60s观测公式和第二实例缩短边界正确，dataKey失败-2/成功0<TTL<=60，异常读取单独unknown。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status":"checked","reason":"复用现有Node/Python压测组件、Redis Lua和HTTP客户端，没有新增依赖或自写源代码分析/修改脚本。"},
+        "java-api-style": {"status":"not-affected","reason":"本批仅修改Node/Python压测及Markdown/env说明，没有Java生产或普通测试代码变化。"},
+        "logging-exception-safety": {"status":"checked","reason":"严格读取异常不再折叠为键不存在，unknown/complete=false防止伪造干净结果；证据只保存白名单键/TTL/游标与计数，不写入真实密钥。"},
+        "toc-interaction": {"status":"not-affected","reason":"本批为仓内压测资产和说明，没有终端用户界面、卡片、提示或交互变化。"},
+        "protocol-redis-concurrency": {"status":"checked","reason":"覆盖24小时滑动TTL、60秒Redis跨实例节流、后台纯读、purge guard、dataKey成功条件、Cluster同槽、128/1024上限和有界清理，未知归属不删除恢复证据。"},
+        "unicode-stream-parsing": {"status":"checked","reason":"taskId字符串规范化避免JS精度丢失，SSE既有seq/丢帧/重复检查保持；未修改生产UTF-8或流式解析实现。"},
+        "verification-review": {"status":"checked","reason":"agent-1049第三轮独立静态复审整体PASS，最终14文件暂存diff检查通过；IDEA Inspect、测试编译、真实HTTP/Redis/standalone/Cluster/多实例及压测均NOT_RUN，历史PASS未冒充当前结果。"}
+      }
     }
   ]
 }

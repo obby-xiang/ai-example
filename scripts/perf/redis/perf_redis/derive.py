@@ -212,3 +212,41 @@ def copy_keys(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[st
         "lock": K.session_lock_key(sid, t, u),
         "session_id": sid,
     }
+
+
+def activity_keys(cfg: Config, scenario: str, plan: Dict[str, object],
+                  copy: Dict[str, object]) -> Dict[str, object]:
+    keys = copy_keys(cfg, scenario, plan, copy)
+    renewable: List[str] = []
+    leases: List[str] = []
+    if keys["session_record"]:
+        renewable.append(str(keys["session_record"]))
+    for item in keys["runs"].values():
+        renewable.extend(str(key) for name, key in item["keys13"].items() if name != "lease")
+        if item["keys13"].get("lease") and item.get("generated_keys", {}).get("lease"):
+            leases.append(str(item["keys13"]["lease"]))
+        renewable.extend(str(key) for key in item["anchors"].values())
+    renewable.extend(str(key) for key in keys["context"])
+    renewable.extend(str(key) for key in keys["transcript"])
+    renewable.extend(str(key) for key in (keys["memory"]["data"], keys["memory"]["ver"], keys["memory"]["gen"]) if key)
+    renewable.extend(str(key) for key in keys["memory"]["staging"])
+    if int(plan.get("staging_count", 0)) > 0:
+        renewable.append(K.memory_staging_index_key(keys["session_id"], cfg.tenant_id, cfg.user_id))
+    renewable.extend(str(key) for key in keys["misc"])
+    attachments = keys["attachments"]
+    renewable.extend(str(key) for key in attachments["registrations"])
+    renewable.extend(str(key) for key in attachments["consumed"])
+    renewable.extend(str(key) for key in attachments["form_indexes"])
+    if attachments["registrations"]:
+        renewable.append(str(attachments["session_index"]))
+    renewable.extend(str(ref["key"]) for ref in keys["run_index_refs"])
+    return {
+        "derived": keys,
+        "renewable": K.dedupe(renewable),
+        "leases": K.dedupe(leases),
+        "data_key": str(keys["transcript"][0]) if keys["transcript"] else "",
+        "throttle": K.session_user_activity_key(keys["session_id"], cfg.tenant_id, cfg.user_id),
+        "guard": str(keys["guard"]),
+        "lock": str(keys["lock"]),
+        "sentinel": copy.get("activity_sentinel") or {},
+    }
