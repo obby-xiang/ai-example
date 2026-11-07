@@ -2602,6 +2602,57 @@
           "reason": "README仅保留当前独立复测与执行入口，历史文件本身未改，压测场景和NOT_RUN边界保持；未执行测试、构建或压测。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:0597c19c3debde32fe50f47429e413781fc24815ce5b6314248b08111b5aae50",
+      "status": "reviewed",
+      "reason": "单独审查本地启动目录排除规则：scripts/local/下的模型环境文件、前后端启动脚本和说明均不进入版本控制；git check-ignore已逐项命中该规则。未读取、输出或提交模型密钥，未修改生产、测试或压测代码。",
+      "reviewedAt": "2026-11-07T23:27:17+08:00",
+      "reviewer": "K3.1 Pro主会话逐hunk静态复核",
+      "specChanges": [
+        {
+          "change": "将scripts/local/整个本地启动目录加入Git忽略规则。",
+          "reason": "本地目录包含真实模型环境配置，启动脚本和说明也只用于本机，不应入库或外发。",
+          "impact": "仅阻止本地启动资产被意外暂存，不改变服务启动命令、应用配置或运行行为。"
+        }
+      ],
+      "files": [
+        {
+          "path": ".gitignore",
+          "status": "checked",
+          "reason": "新增scripts/local/单一目录排除，未放宽其他敏感文件规则；check-ignore确认model.env、两个启动脚本和README均由该条规则覆盖。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批只新增Git忽略目录，没有引入、升级或替换任何依赖与组件。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java、前端或通用源代码变化，集合、JSON、命名和import规则不适用。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "排除规则防止本地model.env及真实模型连接配置进入提交；未读取或记录密钥内容，也未修改日志和异常实现。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批仅调整版本控制忽略范围，没有用户界面、文案、卡片或渲染变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批不修改API、SSE、Redis、TTL、并发或状态机，本地启动脚本内容也未纳入提交。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批仅增加文本忽略规则，不涉及UTF-8、流式帧、JSON或字符截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "已逐hunk核对暂存的.gitignore，并用git check-ignore验证四个本地文件均命中预期规则；构建、测试和服务运行验证本批NOT_RUN。"
+        }
+      }
     }
   ]
 }

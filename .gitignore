@@ -25,6 +25,9 @@ frontend/coverage/
 backend/config/*
 !backend/config/application.yml.example
 
+# Local development launch scripts (never commit local environment configuration)
+scripts/local/
+
 # Scratch
 .scratch/
 
