@@ -52,7 +52,7 @@ public class DefinitionService {
 
     public ConfigDefinition findByCode(String code) {
         return definitionRepository.findByCode(code)
-                .orElseThrow(() -> ResourceNotFoundException.of("配置定义", code));
+                .orElseThrow(() -> ResourceNotFoundException.of("Configuration definition", code));
     }
 
     /**
@@ -68,8 +68,8 @@ public class DefinitionService {
         // 编号为空时交给唯一约束/后续校验，这里只拦"已存在的编码"
         if (definition.getCode() != null && definitionRepository.findByCode(definition.getCode()).isPresent()) {
             throw new ConflictException(ErrorCodes.DEFINITION_CODE_DUPLICATE,
-                    "配置定义编码 " + definition.getCode() + " 已存在（DEFINITION_CODE_DUPLICATE），"
-                            + "请换一个编码，或改用更新接口修改该定义");
+                    "Configuration definition code " + definition.getCode()
+                            + " already exists (DEFINITION_CODE_DUPLICATE); use a different code or the update endpoint");
         }
         validateFields(definition);
         // Set defCode on all fields
@@ -118,7 +118,8 @@ public class DefinitionService {
         long publishedRows = dataRowRepository.countByDefCode(code);
         if (publishedRows > 0) {
             throw new ConflictException(ErrorCodes.DEFINITION_HAS_DATA,
-                    "配置定义 " + code + " 存在 " + publishedRows + " 行已发布数据，禁止删除（不级联删除业务数据）");
+                    "Configuration definition " + code + " has " + publishedRows
+                            + " published rows and cannot be deleted; business data is not deleted by cascade");
         }
 
         List<ConfigField> referencing = fieldRepository.findByRefDefCode(code);
@@ -127,13 +128,14 @@ public class DefinitionService {
                     .map(f -> f.getDefCode() + "." + f.getCode())
                     .distinct().sorted().reduce((a, b) -> a + ", " + b).orElse("");
             throw new ConflictException(ErrorCodes.DEFINITION_REFERENCED,
-                    "配置定义 " + code + " 被他定义引用（" + refs + "），请先解除引用再删除");
+                    "Configuration definition " + code + " is referenced by " + refs + "; remove those references first");
         }
 
         long activeTaskRefs = taskItemRepository.countByDefCodeAndTaskStatus(code, Task.TaskStatus.ACTIVE);
         if (activeTaskRefs > 0) {
             throw new ConflictException(ErrorCodes.DEFINITION_IN_ACTIVE_TASK,
-                    "配置定义 " + code + " 被 " + activeTaskRefs + " 个进行中任务选中，请先结束或删除这些任务");
+                    "Configuration definition " + code + " is selected by " + activeTaskRefs
+                            + " active tasks; finish or delete those tasks first");
         }
 
         long cascadedStagingRows = stagingRowRepository.countByDefCode(code);
@@ -235,21 +237,27 @@ public class DefinitionService {
         java.util.Set<String> codes = new java.util.HashSet<>();
         for (ConfigField f : fields) {
             if (f.getCode() == null || f.getCode().isBlank()) {
-                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_EMPTY, "字段编码不能为空");
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_EMPTY,
+                        "Field code must not be blank");
             }
             if (!f.getCode().matches("[A-Za-z][A-Za-z0-9_]*")) {
-                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_INVALID, "字段编码必须以字母开头，只允许字母、数字、下划线: " + f.getCode());
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_INVALID,
+                        "Field code must start with a letter and contain only letters, digits, and underscores: "
+                                + f.getCode());
             }
             if (!codes.add(f.getCode())) {
-                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_DUPLICATE, "字段编码重复: " + f.getCode());
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_DUPLICATE,
+                        "Duplicate field code: " + f.getCode());
             }
             if (f.getFieldType() == ConfigField.FieldType.REFERENCE
                     && (f.getRefDefCode() == null || f.getRefFieldCode() == null)) {
-                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_REFERENCE_INCOMPLETE, "REFERENCE 字段 [" + f.getCode() + "] 必须指定引用配置与引用字段");
+                throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_REFERENCE_INCOMPLETE,
+                        "REFERENCE field [" + f.getCode() + "] must specify both a referenced definition and field");
             }
         }
         if (fields.stream().noneMatch(ConfigField::isKey)) {
-            throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_PRIMARY_KEY_REQUIRED, "至少需要一个主键字段");
+            throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_PRIMARY_KEY_REQUIRED,
+                    "At least one primary-key field is required");
         }
     }
 

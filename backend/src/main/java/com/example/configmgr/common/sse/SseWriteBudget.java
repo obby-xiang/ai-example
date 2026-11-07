@@ -363,7 +363,7 @@ public final class SseWriteBudget {
             // 策略是"最后无法获得写线程者"，不是"只摘慢订阅者"（见类注"跨通道"段）。
             WRITE_SATURATIONS.incrementAndGet();
             log.debug("SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
-                    sharedWriterPoolMaxThreads());
+                    sharedWriterPoolMaxThreads(), ex);
             return Result.saturated();
         }
         try {
@@ -374,7 +374,7 @@ public final class SseWriteBudget {
             boolean cancelled = future.cancel(true);
             WRITE_TIMEOUTS.incrementAndGet();
             log.debug("SSE write timed out (>{}ms) cancelled={}, caller released by budget",
-                    this.timeoutMillis, cancelled);
+                    this.timeoutMillis, cancelled, ex);
             return Result.timedOut();
         }
         catch (ExecutionException ex) {
@@ -444,7 +444,7 @@ public final class SseWriteBudget {
         catch (RejectedExecutionException ex) {
             WRITE_SATURATIONS.incrementAndGet();
             log.debug("SSE writer pool saturated maxThreads={}, caller evicts this subscriber",
-                    sharedWriterPoolMaxThreads());
+                    sharedWriterPoolMaxThreads(), ex);
             if (settled.compareAndSet(false, true)) {
                 notifyDone(onDone, Result.saturated());
             }
@@ -464,7 +464,7 @@ public final class SseWriteBudget {
         }
         catch (RejectedExecutionException ex) {
             // 定时器已关闭（停机）：不再施加写预算，写出线程返回时仍会回调（恰一次）。
-            log.debug("SSE write timeout scheduler closed, write runs without budget: {}", ex.getMessage());
+            log.debug("SSE write timeout scheduler closed, write runs without budget", ex);
         }
         timeout.set(timer);
         if (settled.get() && timer != null) {

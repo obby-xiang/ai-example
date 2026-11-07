@@ -3,6 +3,9 @@ package com.example.configmgr.health;
 import com.example.configmgr.seed.SeedStatus;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /**
  * {@code seed} 维度：本实例的种子播种是否走完（{@link SeedStatus} 的判据见该类类注）。
  *
@@ -12,7 +15,7 @@ import org.springframework.stereotype.Component;
  * 这个窗口通常只有几秒。
  *
  * <p>GLM 失败仍算 ready（fail-open 的既有设计），失败事实在 {@code detail.failures} 里；
- * BASE 失败会直接导致启动失败，走不到 ready 判定。
+ * BASE 失败会直接导致启动失败，走不到 ready 判定。失败详情只保留通用文案，不透出上游异常原文。
  */@Component
 class SeedReadinessProbe implements ReadinessProbe {
 
@@ -32,7 +35,13 @@ class SeedReadinessProbe implements ReadinessProbe {
 	@Override
 	public ProbeResult check() {
 		boolean ready = this.seedStatus.isReady();
-		return new ProbeResult(ready, this.seedStatus.describe());
+		Map<String, Object> description = new LinkedHashMap<>(this.seedStatus.describe());
+		if (description.get("failures") instanceof Map<?, ?> failures) {
+			Map<String, Object> safeFailures = new LinkedHashMap<>();
+			failures.forEach((seed, detail) -> safeFailures.put(String.valueOf(seed), "Seed execution failed"));
+			description.put("failures", safeFailures);
+		}
+		return new ProbeResult(ready, description);
 	}
 
 }

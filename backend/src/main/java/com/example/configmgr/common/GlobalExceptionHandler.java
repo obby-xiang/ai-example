@@ -12,7 +12,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
-import org.springframework.util.StringUtils;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
@@ -47,8 +46,9 @@ import java.util.Map;
  * <li><b>错误响应必带 {@code code}</b>：带码异常用自己的码；无码的
  * {@code IllegalArgumentException/IllegalStateException} 按类型给稳定缺省码
  * （{@code ILLEGAL_ARGUMENT} / {@code ILLEGAL_STATE}），不再出现"只有中文 message、前端只能猜"的形态。</li>
- * <li><b>形态默认不变</b>：只有请求 {@code Accept} 含 {@code application/problem+json} 时才回
- * RFC 9457；其余一律业务信封。存量字节不变（{@code args}/{@code traceId} 是 NON_NULL）。</li>
+ * <li><b>形状与语义不变</b>：只有请求 {@code Accept} 含 {@code application/problem+json} 时才回
+ * RFC 9457；其余一律业务信封。字段形状不变（{@code args}/{@code traceId} 是 NON_NULL），
+ * 中文安全动态业务文案保留任务号、定义编码、字段编码等标识，独立 HTTP 状态文案不被错误码覆盖。</li>
  * </ol>
  */
 @Slf4j
@@ -63,8 +63,9 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<?> handleIllegalArg(IllegalArgumentException e, HttpServletRequest request) {
+        String message = e instanceof CodedException ? e.getMessage() : "请求参数不合法";
         return respond(HttpStatus.BAD_REQUEST, ErrorBodyFactory.codeOf(e, ErrorCodes.ILLEGAL_ARGUMENT),
-                e.getMessage(), null, request);
+                message, null, request);
     }
 
     @ExceptionHandler(IllegalStateException.class)
@@ -83,7 +84,8 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(AiStateUnavailableException.class)
     public ResponseEntity<?> handleAiStateUnavailable(AiStateUnavailableException e, HttpServletRequest request) {
-        log.warn("AI runtime dependency unavailable uri={} reason={}", request == null ? null : request.getRequestURI(), e.getMessage());
+        log.warn("AI runtime dependency unavailable uri={}",
+                request == null ? null : request.getRequestURI(), e);
         return respond(HttpStatus.SERVICE_UNAVAILABLE, ErrorCodes.AI_REDIS_UNAVAILABLE,
                 "AI 服务暂不可用，请稍后重试。", null, request);
     }
@@ -98,7 +100,10 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ConstraintViolationException.class)
     public ResponseEntity<?> handleConstraint(ConstraintViolationException e, HttpServletRequest request) {
-        return respond(HttpStatus.BAD_REQUEST, ErrorCodes.VALIDATION_FAILED, e.getMessage(), null, request);
+        String msg = e.getConstraintViolations().stream()
+                .map(v -> v.getPropertyPath() + ": " + v.getMessage())
+                .findFirst().orElse("参数校验失败");
+        return respond(HttpStatus.BAD_REQUEST, ErrorCodes.VALIDATION_FAILED, msg, null, request);
     }
 
     /**
@@ -109,19 +114,19 @@ public class GlobalExceptionHandler {
      * "请求体写错了"读成"服务端炸了"（重试 / 告警 / 上报全指错方向）。口径与其它 400 一致：
      * 业务信封 {@code code+message}（{@code Accept} 含 {@code application/problem+json} 时切
      * RFC 9457）；码复用既有 {@link ErrorCodes#BAD_REQUEST}（不新增码 ⇒ 前端镜像与 messages 键集不动）；
-     * zh 用本条原文，en 走 {@code messages_en} 的 {@code error.BAD_REQUEST} 兜底。
+     * zh 保留本条安全原文，en 走 {@code messages_en} 的 {@code error.BAD_REQUEST} 兜底。
      *
      * <p>
      * 不回显 Jackson 的解析细节：那是英文技术栈文本，对终端用户无意义（需要细节时看 DEBUG 日志）。
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<?> handleUnreadableBody(HttpMessageNotReadableException e, HttpServletRequest request) {
-        log.debug("Unreadable request body (malformed JSON, type mismatch, or empty) uri={} reason={}",
-                request == null ? null : request.getRequestURI(), e.getMessage());
+        log.debug("Unreadable request body (malformed JSON, type mismatch, or empty) uri={}",
+                request == null ? null : request.getRequestURI(), e);
         return respond(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, "请求体格式不合法", null, request);
     }
 
-    /** 异常族的一条映射：HTTP 状态 + 稳定码 + zh 固定文案（en 由 {@code messages_en} 的 {@code error.<CODE>} 兜底）。 */
+    /** 异常族的一条映射：HTTP 状态 + 稳定码 + 中文安全原文（en 由 {@code messages_en} 按码兜底）。 */
     private record WebFamily(HttpStatus status, String code, String zhMessage) {
     }
 
@@ -136,13 +141,27 @@ public class GlobalExceptionHandler {
      */
     private static final Map<Class<? extends Throwable>, WebFamily> WEB_FAMILIES = webFamilies();
 
-    /** 无 reason 的 {@link ResponseStatusException} 按状态给的 zh 缺省文案。 */
-    private static final Map<HttpStatus, String> STATUS_MESSAGES = Map.of(
-            HttpStatus.BAD_REQUEST, "请求无法完成",
-            HttpStatus.NOT_FOUND, "请求的资源不存在",
-            HttpStatus.CONFLICT, "请求与当前状态冲突",
-            HttpStatus.TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试",
-            HttpStatus.SERVICE_UNAVAILABLE, "服务暂不可用，请稍后重试");
+    /** {@link ResponseStatusException} 的独立 HTTP 状态文案，不被业务错误码覆盖，也不透出原始 reason。 */
+    private record StatusMessage(String zh, String en) {
+    }
+
+    private static final Map<HttpStatus, StatusMessage> STATUS_MESSAGES = Map.of(
+            HttpStatus.BAD_REQUEST, new StatusMessage("请求无法完成", "The request could not be completed"),
+            HttpStatus.NOT_FOUND, new StatusMessage("请求的资源不存在", "The requested resource was not found"),
+            HttpStatus.CONFLICT, new StatusMessage("请求与当前状态冲突", "The request conflicts with the current state"),
+            HttpStatus.TOO_MANY_REQUESTS,
+                    new StatusMessage("请求过于频繁，请稍后再试", "Too many requests; please retry later"),
+            HttpStatus.SERVICE_UNAVAILABLE,
+                    new StatusMessage("服务暂不可用，请稍后重试", "Service is temporarily unavailable; please retry later"));
+
+    private static String statusMessage(HttpStatus status, Locale locale) {
+        StatusMessage message = STATUS_MESSAGES.get(status);
+        if (message == null) {
+            return ErrorBodyFactory.isChinese(locale)
+                    ? "请求无法完成" : "The request could not be completed";
+        }
+        return ErrorBodyFactory.isChinese(locale) ? message.zh() : message.en();
+    }
 
     private static Map<Class<? extends Throwable>, WebFamily> webFamilies() {
         Map<Class<? extends Throwable>, WebFamily> families = new LinkedHashMap<>();
@@ -175,7 +194,7 @@ public class GlobalExceptionHandler {
         // 显式覆盖父族：bean 属性没有可用的转换器 = 服务端配置缺陷（500），不是客户端参数错
         families.put(ConversionNotSupportedException.class,
                 new WebFamily(HttpStatus.INTERNAL_SERVER_ERROR, ErrorCodes.INTERNAL_ERROR, "服务器内部错误"));
-        // 显式状态异常：状态与 reason 由异常自带，下表值只是"无法解析时"的缺省
+        // 显式状态异常：状态由异常自带，响应文案统一按状态安全映射
         families.put(ResponseStatusException.class,
                 new WebFamily(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, "请求无法完成"));
         return Collections.unmodifiableMap(families);
@@ -210,8 +229,8 @@ public class GlobalExceptionHandler {
     })
     public ResponseEntity<?> handleWebFamily(Exception e, HttpServletRequest request, HttpServletResponse response) {
         if (isStreamingResponse(response)) {
-            log.warn("Web exception on SSE response, JSON body skipped uri={} error={}",
-                    request == null ? null : request.getRequestURI(), e.toString());
+            log.warn("Web exception on SSE response, JSON body skipped uri={}",
+                    request == null ? null : request.getRequestURI(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
         WebFamily family = familyOf(e);
@@ -221,25 +240,23 @@ public class GlobalExceptionHandler {
         HttpStatus status = family.status();
         String code = family.code();
         String message = family.zhMessage();
+        boolean localizeByCode = true;
         if (e instanceof ResponseStatusException statusException) {
             HttpStatus resolved = HttpStatus.resolve(statusException.getStatusCode().value());
             status = resolved == null ? HttpStatus.INTERNAL_SERVER_ERROR : resolved;
             code = codeOfStatus(status);
-            if (StringUtils.hasText(statusException.getReason())) {
-                message = statusException.getReason();
-            } else {
-                message = STATUS_MESSAGES.getOrDefault(status, "请求无法完成");
-            }
+            message = statusMessage(status, requestLocale());
+            localizeByCode = false;
         }
         HttpHeaders headers = headersOf(e);
-        log.debug("Web exception mapped uri={} type={} status={} code={} reason={}",
+        log.debug("Web exception mapped uri={} type={} status={} code={}",
                 request == null ? null : request.getRequestURI(), e.getClass().getSimpleName(),
-                status.value(), code, e.getMessage());
+                status.value(), code, e);
         if (status == HttpStatus.NOT_ACCEPTABLE) {
             // 不能再写 JSON 体（客户端不接受），否则二次协商失败
             return ResponseEntity.status(status).headers(headers).build();
         }
-        return respond(status, code, message, null, request, headers);
+        return respond(status, code, message, null, request, headers, localizeByCode);
     }
 
     /** 按运行时类型向上找最近的族；表外异常返回 {@code null}（交回兜底 500）。 */
@@ -293,8 +310,8 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<?> handleDataIntegrity(DataIntegrityViolationException e, HttpServletRequest request) {
         if (isForeignKeyViolation(e)) {
-            log.warn("Foreign-key integrity violation mapped to 409 uri={} reason={}",
-                    request == null ? null : request.getRequestURI(), e.getMostSpecificCause().getMessage());
+            log.warn("Foreign-key integrity violation mapped to 409 uri={}",
+                    request == null ? null : request.getRequestURI(), e);
             return respond(HttpStatus.CONFLICT, ErrorCodes.ILLEGAL_STATE,
                     "关联的任务或作业已被删除/正在变更，请刷新后重试", null, request);
         }
@@ -327,9 +344,8 @@ public class GlobalExceptionHandler {
         // Content-Type 'text/event-stream' —— 除了把日志刷成噪音，什么也送达不了客户端
         // （连接已断）。故识别出来只记日志、不写体。
         if (isStreamingResponse(response)) {
-            log.warn("Unhandled exception on SSE response, JSON body skipped uri={} error={}",
-                    request.getRequestURI(), e.toString());
-            log.debug("Unhandled exception on SSE response uri={}", request.getRequestURI(), e);
+            log.warn("Unhandled exception on SSE response, JSON body skipped uri={}",
+                    request == null ? null : request.getRequestURI(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
         // A10 R-13：用户 message 固定短句；异常原文只进日志（traceId 由 respond 回填到响应体）。
@@ -350,17 +366,23 @@ public class GlobalExceptionHandler {
     /** 同上，额外带上响应头（L-111：405 的 {@code Allow}、415 的 {@code Accept} 等协议头照搬）。 */
     private ResponseEntity<?> respond(HttpStatus status, String code, String message,
             Map<String, Object> args, HttpServletRequest request, HttpHeaders headers) {
+        return respond(status, code, message, args, request, headers, true);
+    }
+
+    /** 同上；独立状态文案可绕过码级本地化，但状态、错误码、响应头和响应形状保持原路径。 */
+    private ResponseEntity<?> respond(HttpStatus status, String code, String message,
+            Map<String, Object> args, HttpServletRequest request, HttpHeaders headers, boolean localizeByCode) {
         Locale locale = requestLocale();
         String traceId = request == null ? null : traceIdOf(request);
         if (wantsProblemJson(request)) {
             ProblemDetail problem = bodyFactory.problem(code, status, message, args,
-                    request == null ? null : request.getRequestURI(), traceId, locale);
+                    request == null ? null : request.getRequestURI(), traceId, locale, localizeByCode);
             return ResponseEntity.status(status)
                     .headers(headers)
                     .contentType(MediaType.APPLICATION_PROBLEM_JSON)
                     .body(problem);
         }
-        ApiResponse<Object> body = bodyFactory.envelope(code, message, args, locale);
+        ApiResponse<Object> body = bodyFactory.envelope(code, message, args, locale, localizeByCode);
         if (traceId != null) {
             body.setTraceId(traceId);
         }

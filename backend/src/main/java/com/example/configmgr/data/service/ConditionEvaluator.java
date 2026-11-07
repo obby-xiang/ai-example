@@ -52,8 +52,8 @@ public final class ConditionEvaluator {
     }
 
     private static IllegalArgumentException unknownOperator(String op, String fieldCode) {
-        return new CodedIllegalArgumentException(ErrorCodes.CONDITION_OPERATOR_UNKNOWN, "未知的查询条件操作符: " + op
-                + "（字段 " + fieldCode + "），已登记的操作符: " + OPERATORS);
+        return new CodedIllegalArgumentException(ErrorCodes.CONDITION_OPERATOR_UNKNOWN, "Unknown query condition operator: " + op
+                + " (field " + fieldCode + "); registered operators: " + OPERATORS);
     }
 
     public static boolean matches(Map<String, Object> row, QueryCondition cond) {

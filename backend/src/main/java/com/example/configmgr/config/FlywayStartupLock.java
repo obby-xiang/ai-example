@@ -106,7 +106,7 @@ public class FlywayStartupLock {
             if (e instanceof RuntimeException runtime) {
                 throw runtime;
             }
-            throw new FlywayException("Flyway 启动锁失败", e);
+            throw new FlywayException("Flyway startup lock failed", e);
         }
         catch (Error e) {
             failure = e;
@@ -146,7 +146,8 @@ public class FlywayStartupLock {
                     failure.addSuppressed(releaseFailure);
                 }
                 else {
-                    throw new FlywayException("Flyway 启动锁释放失败（已 abort 物理连接）", releaseFailure);
+                    throw new FlywayException("Failed to release Flyway startup lock; physical connection aborted",
+                            releaseFailure);
                 }
             }
         }
@@ -190,7 +191,7 @@ public class FlywayStartupLock {
             statement.setString(1, H2_LOCK_ROW);
             try (ResultSet rs = statement.executeQuery()) {
                 if (!rs.next()) {
-                    throw new SQLException("H2 Flyway 启动锁行缺失：" + H2_LOCK_TABLE + "." + H2_LOCK_ROW);
+                    throw new SQLException("H2 Flyway startup lock row is missing: " + H2_LOCK_TABLE + "." + H2_LOCK_ROW);
                 }
             }
         }
@@ -205,14 +206,14 @@ public class FlywayStartupLock {
     /** 迁移完成后复核：锁连接仍存活，且 holder 仍是本次 token；否则 fail-closed。 */
     static void verifyH2LockStillHeld(Connection connection, String token) throws SQLException {
         if (!connection.isValid(2)) {
-            throw new SQLException("H2 Flyway 启动锁连接已失效（迁移期间中断）");
+            throw new SQLException("H2 Flyway startup lock connection became invalid during migration");
         }
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT holder FROM " + H2_LOCK_TABLE + " WHERE lock_name = ?")) {
             statement.setString(1, H2_LOCK_ROW);
             try (ResultSet rs = statement.executeQuery()) {
                 if (!rs.next() || !token.equals(rs.getString(1))) {
-                    throw new SQLException("H2 Flyway 启动锁已丢失或被接管（holder 不匹配）");
+                    throw new SQLException("H2 Flyway startup lock was lost or taken over (holder mismatch)");
                 }
             }
         }
@@ -235,7 +236,7 @@ public class FlywayStartupLock {
         try (Statement statement = connection.createStatement();
                 ResultSet rs = statement.executeQuery("SELECT pg_advisory_unlock(" + PG_LOCK_KEY + ")")) {
             if (!rs.next() || !rs.getBoolean(1)) {
-                throw new SQLException("pg_advisory_unlock 返回 false：会话锁未释放");
+                throw new SQLException("pg_advisory_unlock returned false; the session lock was not released");
             }
         }
     }
@@ -265,6 +266,6 @@ public class FlywayStartupLock {
         if (normalized.startsWith("jdbc:postgresql:")) {
             return "postgresql";
         }
-        throw new IllegalStateException("Flyway 启动锁只支持 H2 / PostgreSQL，当前 URL=" + url);
+        throw new IllegalStateException("Flyway startup lock supports only H2 and PostgreSQL; current URL=" + url);
     }
 }

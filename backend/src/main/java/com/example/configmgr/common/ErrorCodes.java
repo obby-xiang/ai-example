@@ -415,7 +415,7 @@ public final class ErrorCodes {
             try {
                 all.add((String) field.get(null));
             } catch (IllegalAccessException e) {
-                throw new IllegalStateException("ErrorCodes 常量不可读：" + field.getName(), e);
+                throw new IllegalStateException("ErrorCodes constant is unreadable: " + field.getName(), e);
             }
         }
         ALL = Collections.unmodifiableSet(all);

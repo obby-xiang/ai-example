@@ -99,7 +99,8 @@ public class DependencyResolver {
         if (sorted.size() != defCodes.size()) {
             Set<String> remaining = new HashSet<>(defCodes);
             remaining.removeAll(sorted);
-            throw new CodedIllegalStateException(ErrorCodes.DEFINITION_DEPENDENCY_CYCLE, "配置定义间存在循环依赖: " + remaining);
+            throw new CodedIllegalStateException(ErrorCodes.DEFINITION_DEPENDENCY_CYCLE,
+                    "Circular dependency between configuration definitions: " + remaining);
         }
         return sorted;
     }

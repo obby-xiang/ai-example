@@ -44,19 +44,19 @@ public class RedisClusterTopologyGuard {
 			.bind(NODES_PROPERTY, org.springframework.boot.context.properties.bind.Bindable.listOf(String.class))
 			.orElse(List.of());
 		if (nodes.isEmpty()) {
-			throw new IllegalStateException("cluster profile 缺少 Redis 种子节点：请配置环境变量 " + NODES_ENV
-					+ "（逗号分隔的 host:port 列表，" + NODES_PROPERTY + "）");
+			throw new IllegalStateException("cluster profile has no Redis seed nodes; configure environment variable "
+					+ NODES_ENV + " as a comma-separated host:port list for " + NODES_PROPERTY);
 		}
 		for (String node : nodes) {
 			if (node == null || node.isBlank() || node.contains("${")) {
-				throw new IllegalStateException("cluster profile 的 Redis 种子节点未解析（当前 = " + node
-						+ "）：请配置环境变量 " + NODES_ENV + "（逗号分隔的 host:port 列表）");
+				throw new IllegalStateException("cluster profile has an unresolved Redis seed node (current = " + node
+						+ "); configure environment variable " + NODES_ENV + " as a comma-separated host:port list");
 			}
 			// host:port 形状校验（评审 Minor 5）：漏端口的条目（如 "10.0.0.11"）也是"配置错"，
 			// 但如果不在这里挡，它要到建连时才炸，报错是一句 "Unable to connect"，运维看不出是漏写端口。
 			if (!HOST_PORT.matcher(node.trim()).matches()) {
-				throw new IllegalStateException("cluster profile 的 Redis 种子节点形状不合法：'" + node
-						+ "'，期望 host:port（例：10.0.0.11:6379）；请检查环境变量 " + NODES_ENV);
+				throw new IllegalStateException("Invalid Redis seed node for cluster profile: '" + node
+						+ "'; expected host:port (for example, 10.0.0.11:6379); check environment variable " + NODES_ENV);
 			}
 		}
 	}

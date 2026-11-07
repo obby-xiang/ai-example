@@ -112,26 +112,29 @@ public class FileStorageMultiInstanceGuard {
         String reason = String.join(" / ", reasons);
         String value = appProperties.getFile().getStoragePath();
         if (value == null || value.isBlank()) {
-            throw new IllegalStateException("多实例部署缺少 " + STORAGE_PATH_PROPERTY
-                    + "（判据：" + reason + "）：请配置共享存储的绝对路径（或环境变量 " + STORAGE_PATH_ENV + "）");
+            throw new IllegalStateException("Multi-instance deployment requires " + STORAGE_PATH_PROPERTY
+                    + " (trigger: " + reason + "); configure an absolute shared-storage path or environment variable "
+                    + STORAGE_PATH_ENV);
         }
         if (value.contains("${")) {
-            throw new IllegalStateException(STORAGE_PATH_PROPERTY + " 未解析（当前 = " + value
-                    + "，判据：" + reason + "）：多实例部署须显式提供绝对路径（环境变量 " + STORAGE_PATH_ENV + "）");
+            throw new IllegalStateException(STORAGE_PATH_PROPERTY + " is unresolved (current = " + value
+                    + ", trigger: " + reason + "); multi-instance deployment requires an explicit absolute path"
+                    + " via environment variable " + STORAGE_PATH_ENV);
         }
         Path path;
         try {
             path = Path.of(value);
         }
         catch (InvalidPathException e) {
-            throw new IllegalStateException(STORAGE_PATH_PROPERTY + " 不是合法路径（当前 = " + value
-                    + "，判据：" + reason + "）", e);
+            throw new IllegalStateException(STORAGE_PATH_PROPERTY + " is not a valid path (current = " + value
+                    + ", trigger: " + reason + ")", e);
         }
         if (!path.isAbsolute()) {
-            throw new IllegalStateException("多实例部署要求 " + STORAGE_PATH_PROPERTY + " 为绝对路径（当前 = "
-                    + value + "，判据：" + reason + "）：相对路径按各实例的 JVM 工作目录解析，"
-                    + "同一存储键在 A/B 实例会指向不同目录（A 写、B 读不到）。"
-                    + "请配置绝对路径（或环境变量 " + STORAGE_PATH_ENV + "）；单实例本地开发可保持默认 profile。");
+            throw new IllegalStateException("Multi-instance deployment requires an absolute " + STORAGE_PATH_PROPERTY
+                    + " (current = " + value + ", trigger: " + reason + "); relative paths resolve against each"
+                    + " instance's JVM working directory, so the same storage key can point to different directories."
+                    + " Configure an absolute path or environment variable " + STORAGE_PATH_ENV
+                    + "; single-instance local development can keep the default profile.");
         }
     }
 }

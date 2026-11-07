@@ -65,16 +65,18 @@ public final class ReadinessProbeRunner implements AutoCloseable {
 
 	public ReadinessProbeRunner(int threads, int queueCapacity, Duration timeout) {
 		if (threads <= 0) {
-			throw new IllegalStateException("app.health.readiness.probe-threads 必须 > 0（当前 = " + threads + "）");
+			throw new IllegalStateException("app.health.readiness.probe-threads must be > 0 (current = " + threads + ")");
 		}
 		if (queueCapacity <= 0) {
 			throw new IllegalStateException(
-					"app.health.readiness.probe-queue-capacity 必须 > 0（当前 = " + queueCapacity
-							+ "）：0 容量的有界队列不合法；要「不排队」请配 1（饱和语义仍是「拒绝即 DOWN」）");
+					"app.health.readiness.probe-queue-capacity must be > 0 (current = " + queueCapacity
+							+ "); a bounded queue cannot have zero capacity; use 1 for no waiting queue"
+							+ " (saturation still means rejection and DOWN)");
 		}
 		if (timeout == null || timeout.isZero() || timeout.isNegative()) {
 			throw new IllegalStateException(
-					"app.health.readiness.probe-timeout 必须 > 0（当前 = " + timeout + "）：0/负值等于取消就绪探测的时限");
+					"app.health.readiness.probe-timeout must be > 0 (current = " + timeout
+							+ "); zero or a negative value disables the readiness probe deadline");
 		}
 		this.timeout = timeout;
 		this.threads = threads;
@@ -193,8 +195,7 @@ public final class ReadinessProbeRunner implements AutoCloseable {
 
 	private static ProbeResult failed(ExecutionException ex) {
 		Throwable cause = ex.getCause() == null ? ex : ex.getCause();
-		return ProbeResult.down(cause.getClass().getSimpleName()
-				+ (cause.getMessage() == null ? "" : ": " + cause.getMessage()));
+		return ProbeResult.down(cause.getClass().getSimpleName());
 	}
 
 	private ProbeResult timeoutResult() {

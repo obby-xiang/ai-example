@@ -47,9 +47,10 @@ public class AppProperties {
     void verifyTaskSseEmitterTimeout() {
         Duration emitterTimeout = this.task.getSse().getEmitterTimeout();
         if (emitterTimeout == null || emitterTimeout.isZero() || emitterTimeout.isNegative()) {
-            throw new IllegalStateException("app.task.sse.emitter-timeout 必须 > 0（当前 = " + emitterTimeout
-                    + "）：0/负值等于取消订阅者的生命周期超时，卡住的写在写预算（15s）之后只剩容器写超时"
-                    + "（connection-timeout，缺省 120s 且随配置漂移）兜底");
+            throw new IllegalStateException("app.task.sse.emitter-timeout must be > 0 (current = " + emitterTimeout
+                    + "); zero or a negative value disables the subscriber lifetime timeout, leaving blocked writes"
+                    + " after the 15s write budget with only the container connection-timeout as a fallback"
+                    + " (default 120s, varying with configuration)");
         }
     }
 
@@ -72,9 +73,10 @@ public class AppProperties {
     void verifyTaskSseWriteTimeout() {
         Duration writeTimeout = this.task.getSse().getWriteTimeout();
         if (writeTimeout == null || writeTimeout.isZero() || writeTimeout.isNegative()) {
-            throw new IllegalStateException("app.task.sse.write-timeout 必须 > 0（当前 = " + writeTimeout
-                    + "）：0/负值会被 SseWriteBudget 静默回落为缺省 15s，运行行为与配置文件不符"
-                    + "（排障误导）；收紧写侧释放只需配一个更小的正值");
+            throw new IllegalStateException("app.task.sse.write-timeout must be > 0 (current = " + writeTimeout
+                    + "); zero or a negative value silently falls back to SseWriteBudget's default of 15s,"
+                    + " making runtime behavior differ from the configuration; use a smaller positive value"
+                    + " to release blocked writes sooner");
         }
     }
 
@@ -99,20 +101,20 @@ public class AppProperties {
         int deadMultiplier = this.job.getWatchdog().getDeadMultiplier();
         Duration maxExecutionTime = this.job.getMaxExecutionTime();
         if (heartbeatInterval == null || heartbeatInterval.isZero() || heartbeatInterval.isNegative()) {
-            throw new IllegalStateException("app.job.heartbeat-interval 必须 > 0（当前 = " + heartbeatInterval
-                    + "）：非正值会让作业在第一个分片边界就被看门狗判死");
+            throw new IllegalStateException("app.job.heartbeat-interval must be > 0 (current = " + heartbeatInterval
+                    + "); a non-positive value lets the watchdog declare jobs dead at the first batch boundary");
         }
         if (scanPeriod == null || scanPeriod.isZero() || scanPeriod.isNegative()) {
-            throw new IllegalStateException("app.job.watchdog.scan-period 必须 > 0（当前 = " + scanPeriod
-                    + "）：非正值等于关闭看门狗扫描，运行期作业失联无任何收敛手段");
+            throw new IllegalStateException("app.job.watchdog.scan-period must be > 0 (current = " + scanPeriod
+                    + "); a non-positive value disables watchdog scans and leaves lost jobs without recovery");
         }
         if (deadMultiplier <= 0) {
-            throw new IllegalStateException("app.job.watchdog.dead-multiplier 必须 > 0（当前 = " + deadMultiplier
-                    + "）：非正值会让任何一次心跳间隔即判死，正常作业被误杀");
+            throw new IllegalStateException("app.job.watchdog.dead-multiplier must be > 0 (current = " + deadMultiplier
+                    + "); a non-positive value declares jobs dead after any heartbeat interval, killing healthy jobs");
         }
         if (maxExecutionTime == null || maxExecutionTime.isZero() || maxExecutionTime.isNegative()) {
-            throw new IllegalStateException("app.job.max-execution-time 必须 > 0（当前 = " + maxExecutionTime
-                    + "）：非正值等于一切作业立刻判超时，作业体系不可用");
+            throw new IllegalStateException("app.job.max-execution-time must be > 0 (current = " + maxExecutionTime
+                    + "); a non-positive value times out every job immediately and makes job execution unavailable");
         }
         Duration deadWindow;
         try {
@@ -120,15 +122,15 @@ public class AppProperties {
         } catch (ArithmeticException ex) {
             // 溢出守卫（收口修，红队 m6）：极大家 × dead-multiplier 溢出时统一 fail-fast 面
             // （IllegalStateException 含当前值回显），不让裸 ArithmeticException 逃出启动校验
-            throw new IllegalStateException("app.job 看门狗配置溢出：heartbeat-interval(" + heartbeatInterval
-                    + ") × dead-multiplier(" + deadMultiplier + ") 超出 Duration 可表示范围（当前值见前），"
-                    + "请调小 app.job.heartbeat-interval 或 app.job.watchdog.dead-multiplier", ex);
+            throw new IllegalStateException("app.job watchdog configuration overflows Duration: heartbeat-interval("
+                    + heartbeatInterval + ") × dead-multiplier(" + deadMultiplier + "); reduce"
+                    + " app.job.heartbeat-interval or app.job.watchdog.dead-multiplier", ex);
         }
         if (deadWindow.compareTo(maxExecutionTime) >= 0) {
-            throw new IllegalStateException("app.job 看门狗上限关系不成立：heartbeat-interval(" + heartbeatInterval
+            throw new IllegalStateException("Invalid app.job watchdog limit: heartbeat-interval(" + heartbeatInterval
                     + ") × dead-multiplier(" + deadMultiplier + ") = " + deadWindow
-                    + " 必须 < max-execution-time(" + maxExecutionTime + ")"
-                    + "（判死窗必须显著小于绝对上限，否则 dead-multiplier 形同虚设）");
+                    + " must be < max-execution-time(" + maxExecutionTime + "); the dead-detection window must be"
+                    + " significantly shorter than the absolute limit or dead-multiplier has no effect");
         }
     }
 

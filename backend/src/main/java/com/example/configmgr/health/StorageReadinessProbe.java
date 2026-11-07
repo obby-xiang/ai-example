@@ -63,8 +63,7 @@ class StorageReadinessProbe implements ReadinessProbe {
 			return ProbeResult.up(dir.toAbsolutePath().toString());
 		}
 		catch (IOException | RuntimeException ex) {
-			return ProbeResult.down(ex.getClass().getSimpleName()
-					+ (ex.getMessage() == null ? "" : ": " + ex.getMessage()));
+			return ProbeResult.down(ex.getClass().getSimpleName());
 		}
 	}
 

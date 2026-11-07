@@ -70,7 +70,7 @@ public class FileStorageService {
         try {
             Files.createDirectories(dir);
         } catch (IOException e) {
-            throw new RuntimeException("无法创建文件存储目录: " + dir, e);
+            throw new RuntimeException("Unable to create file storage directory: " + dir, e);
         }
         return dir;
     }
@@ -107,25 +107,25 @@ public class FileStorageService {
      */
     public Path resolve(String key) {
         if (key == null || key.isBlank()) {
-            throw new IllegalArgumentException("文件存储键为空");
+            throw new IllegalArgumentException("File storage key must not be blank");
         }
         Path raw;
         try {
             raw = Path.of(key);
         }
         catch (InvalidPathException e) {
-            throw new IllegalArgumentException("文件存储键非法: " + key, e);
+            throw new IllegalArgumentException("Invalid file storage key: " + key, e);
         }
         if (raw.isAbsolute()) {
-            throw new IllegalArgumentException("文件存储键不得为绝对路径: " + key);
+            throw new IllegalArgumentException("File storage key must not be an absolute path: " + key);
         }
         if (hasParentSegment(raw)) {
-            throw new IllegalArgumentException("文件存储键不得包含上跳段 '..': " + key);
+            throw new IllegalArgumentException("File storage key must not contain a parent segment '..': " + key);
         }
         Path base = baseDir();
         Path resolved = base.resolve(raw).normalize();
         if (!resolved.startsWith(base)) {
-            throw new IllegalArgumentException("文件存储键越出存储目录: " + key);
+            throw new IllegalArgumentException("File storage key escapes the storage directory: " + key);
         }
         return resolved;
     }
@@ -150,7 +150,8 @@ public class FileStorageService {
             md = MessageDigest.getInstance("SHA-256");
         }
         catch (NoSuchAlgorithmException ex) {
-            throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE, "运行环境缺少 SHA-256 实现", ex);
+            throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE,
+                    "The runtime does not provide a SHA-256 implementation", ex);
         }
         long size = 0L;
         byte[] buffer = new byte[DIGEST_BUFFER_BYTES];
@@ -184,7 +185,7 @@ public class FileStorageService {
             Files.deleteIfExists(resolve(key));
         }
         catch (IOException e) {
-            log.warn("Failed to delete file key={} error={}", key, e.getMessage());
+            log.warn("Failed to delete file key={}", key, e);
         }
     }
 
@@ -266,7 +267,8 @@ public class FileStorageService {
             delete(key);
         }
         catch (RuntimeException e) {
-            log.warn("Transaction callback file delete failed (ignored, does not block later synchronizers) key={} error={}", key, e.toString());
+            log.warn("Transaction callback file delete failed (ignored, does not block later synchronizers) key={}",
+                    key, e);
         }
     }
 
@@ -274,19 +276,19 @@ public class FileStorageService {
         Path base = baseDir();
         Path resolved = base.resolve(key).normalize();
         if (!resolved.startsWith(base)) {
-            throw new IllegalStateException("生成的存储键越出存储目录: " + key);
+            throw new IllegalStateException("Generated storage key escapes the storage directory: " + key);
         }
         return resolved;
     }
 
     private Path requireUnderBase(Path path) {
         if (path == null) {
-            throw new IllegalArgumentException("存储路径为空");
+            throw new IllegalArgumentException("Storage path must not be null");
         }
         Path base = baseDir();
         Path target = path.toAbsolutePath().normalize();
         if (!target.startsWith(base)) {
-            throw new IllegalArgumentException("写盘路径越出存储目录: " + path);
+            throw new IllegalArgumentException("Write path escapes the storage directory: " + path);
         }
         return target;
     }
@@ -296,7 +298,7 @@ public class FileStorageService {
             Files.deleteIfExists(path);
         }
         catch (IOException | RuntimeException e) {
-            log.warn("Failed to clean up partial file after write failure path={} error={}", path, e.toString());
+            log.warn("Failed to clean up partial file after write failure path={}", path, e);
         }
     }
 
@@ -326,7 +328,7 @@ public class FileStorageService {
         String candidate = ext.startsWith(".") ? ext : "." + ext;
         if (!SAFE_EXTENSION.matcher(candidate).matches()) {
             throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED,
-                    "文件扩展名不合法：" + ext);
+                    "Invalid file extension: " + ext);
         }
         return candidate.toLowerCase(Locale.ROOT);
     }

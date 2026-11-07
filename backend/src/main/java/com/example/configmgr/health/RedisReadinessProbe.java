@@ -7,7 +7,7 @@ import org.springframework.stereotype.Component;
  * {@code redis} 维度：复用 AI 链路的共享探活（{@link RedisAvailability#isAvailable()}）。
  *
  * <h2>非硬依赖（required=false）</h2>
- * Redis 故障时本维度如实报 DOWN（含 {@code lastError} 摘要），并让 AI capability 标降级，
+ * Redis 故障时本维度如实报 DOWN（通用详情，不含原始 {@code lastError}），并让 AI capability 标降级，
  * 但<b>不把整站 ready 拉成 503</b>。理由：
  * <ul>
  * <li>Redis 承载 AI 会话/帧/租约与作业取消标志，AI 端点本来就有 503 快速失败与降级路径
@@ -55,7 +55,7 @@ class RedisReadinessProbe implements ReadinessProbe {
 	public ProbeResult check() {
 		boolean available = this.redisAvailability.isAvailable();
 		return available ? ProbeResult.up("PING 正常")
-				: ProbeResult.down(this.redisAvailability.reason());
+				: ProbeResult.down("Redis is unavailable");
 	}
 
 }

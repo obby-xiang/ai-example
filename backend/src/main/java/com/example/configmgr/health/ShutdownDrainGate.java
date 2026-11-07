@@ -78,7 +78,7 @@ class ShutdownDrainGate {
 			catch (InterruptedException interrupted) {
 				// 停机被外部打断（例如第二次信号）：立即交给后续的 graceful shutdown，不吞中断标记
 				Thread.currentThread().interrupt();
-				log.warn("Draining window interrupted, shutting down now (visible 503s are not reverted)");
+				log.warn("Draining window interrupted, shutting down now (visible 503s are not reverted)", interrupted);
 				return;
 			}
 		}

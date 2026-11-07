@@ -13,10 +13,10 @@ public record StoredFile(String key, Path path) {
 
     public StoredFile {
         if (key == null || key.isBlank()) {
-            throw new IllegalArgumentException("存储键不能为空");
+            throw new IllegalArgumentException("Storage key must not be blank");
         }
         if (path == null) {
-            throw new IllegalArgumentException("存储路径不能为空");
+            throw new IllegalArgumentException("Storage path must not be null");
         }
     }
 

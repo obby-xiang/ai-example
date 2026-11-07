@@ -93,7 +93,7 @@ public class ConfigDataService {
         try {
             cond = objectMapper.readValue(conditions, QueryCondition.class);
         } catch (Exception e) {
-            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "条件 JSON 解析失败: " + e.getMessage());
+            throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "Invalid condition JSON", e);
         }
         ConditionEvaluator.validate(cond);
         return cond;

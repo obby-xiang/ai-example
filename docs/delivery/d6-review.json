@@ -763,6 +763,13 @@
       "reason": "仅规范生产异常消息、异常日志Throwable参数及安全错误映射，保持迁移数据、协议形状、状态机和键面契约不变，D6无需更新。",
       "reviewedAt": "2026-11-07",
       "reviewer": "K3.1 Pro施工，K3.1 Pro分区独立静态审查"
+    },
+    {
+      "fingerprint": "sha256:9d4cc4c0cefa388172d7b6cdba17dc8269ef310bb1ee16b525054fe35463289c",
+      "status": "not-affected",
+      "reason": "仅收紧公共异常响应、健康脱敏和SSE异常日志，恢复安全动态业务文案及状态语义，迁移数据与协议形状不变，D6无需更新。",
+      "reviewedAt": "2026-11-07",
+      "reviewer": "K3.1 Pro施工，K3.1 Pro定向静态复审"
     }
   ]
 }

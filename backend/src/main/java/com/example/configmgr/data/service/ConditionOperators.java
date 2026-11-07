@@ -87,7 +87,8 @@ public final class ConditionOperators {
 	static {
 		String joined = String.join("/", NAMES);
 		if (!JOINED_NAMES.equals(joined)) {
-			throw new IllegalStateException("算子注册表与描述常量漂移：JOINED_NAMES=" + JOINED_NAMES + "，注册表=" + joined);
+			throw new IllegalStateException("Operator registry differs from description constant: JOINED_NAMES="
+					+ JOINED_NAMES + ", registry=" + joined);
 		}
 	}
 

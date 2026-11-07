@@ -15,8 +15,8 @@ import javax.sql.DataSource;
  * 决定（application-postgresql.yml 收到 5s）—— 探针必须在 LB 探测超时内给结论。
  * 不缓存结果：LB 要的是"此刻"。
  *
- * <p>失败诊断只用异常类名 + 消息（**不再**为拼诊断去另开一次连接：那会在失败路径上再等一轮
- * connection-timeout）。消息里可能出现主机/端口，但不会出现口令 —— JDBC 驱动的异常不带密码。
+ * <p>失败诊断只保留异常类名（**不再**为拼诊断去另开一次连接：那会在失败路径上再等一轮
+ * connection-timeout）。原始异常消息可能包含主机、端口或连接细节，不进入健康响应。
  */
 @Component
 class DbReadinessProbe implements ReadinessProbe {
@@ -48,8 +48,7 @@ class DbReadinessProbe implements ReadinessProbe {
 			return ProbeResult.up("SELECT 1 正常（" + elapsedMs(startedAt) + "ms）");
 		}
 		catch (RuntimeException ex) {
-			return ProbeResult.down(ex.getClass().getSimpleName()
-					+ (ex.getMessage() == null ? "" : ": " + ex.getMessage()));
+			return ProbeResult.down(ex.getClass().getSimpleName());
 		}
 	}
 

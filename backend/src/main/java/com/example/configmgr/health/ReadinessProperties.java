@@ -55,25 +55,25 @@ public class ReadinessProperties {
 	@PostConstruct
 	void verify() {
 		if (this.probeTimeout == null || this.probeTimeout.isZero() || this.probeTimeout.isNegative()) {
-			throw new IllegalStateException("app.health.readiness.probe-timeout 必须 > 0（当前 = "
-					+ this.probeTimeout + "）：0/负值等于取消就绪探测的时限");
+			throw new IllegalStateException("app.health.readiness.probe-timeout must be > 0 (current = "
+					+ this.probeTimeout + "); zero or a negative value disables the readiness probe deadline");
 		}
 		if (this.probeThreads <= 0) {
-			throw new IllegalStateException("app.health.readiness.probe-threads 必须 > 0（当前 = "
-					+ this.probeThreads + "）");
+			throw new IllegalStateException("app.health.readiness.probe-threads must be > 0 (current = "
+					+ this.probeThreads + ")");
 		}
 		if (this.probeQueueCapacity <= 0) {
-			throw new IllegalStateException("app.health.readiness.probe-queue-capacity 必须 > 0（当前 = "
-					+ this.probeQueueCapacity + "）：0 容量的有界队列不合法");
+			throw new IllegalStateException("app.health.readiness.probe-queue-capacity must be > 0 (current = "
+					+ this.probeQueueCapacity + "); a bounded queue cannot have zero capacity");
 		}
 		if (this.drainWindow == null || this.drainWindow.isNegative()) {
-			throw new IllegalStateException("app.health.readiness.drain-window 不得为负（当前 = "
-					+ this.drainWindow + "）：0 = 关闭 draining 窗口，负值没有语义");
+			throw new IllegalStateException("app.health.readiness.drain-window must not be negative (current = "
+					+ this.drainWindow + "); zero disables the draining window and negative values have no meaning");
 		}
 		if (this.drainWindow.compareTo(MAX_DRAIN_WINDOW) > 0) {
-			throw new IllegalStateException("app.health.readiness.drain-window 不得超过 " + MAX_DRAIN_WINDOW
-					+ "（当前 = " + this.drainWindow + "）：它与 timeout-per-shutdown-phase 相加就是停机总时长，"
-					+ "过大会被编排器的 SIGKILL 宽限期截断");
+			throw new IllegalStateException("app.health.readiness.drain-window must not exceed " + MAX_DRAIN_WINDOW
+					+ " (current = " + this.drainWindow + "); together with timeout-per-shutdown-phase it bounds"
+					+ " total shutdown time, and an excessive value will be cut off by the orchestrator's SIGKILL grace period");
 		}
 	}
 

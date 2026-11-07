@@ -14,17 +14,12 @@ import java.util.Map;
  * 错误响应体的唯一出口：把 {@code code} + 参数 + locale 变成"给前端/脚本看的 message"。
  *
  * <p>
- * 两条硬口径（写在这里，避免各 handler 各写一套）：
- * <ol>
- * <li><b>zh 逐字不变</b>：中文（默认 locale）下 message = 调用方原文。存量 29 条 E2E 与
- * 前端断言按中文文案判定，任何"顺手把硬编码搬进 messages_zh 再回读"的做法都会改字节。</li>
- * <li><b>en 只做码级兜底</b>：非中文 locale 下取 {@code messages_en.properties} 的
- * {@code error.<CODE>}；没有该键就回落调用方原文（**绝不回显裸 key**）。动态文案
- * （"任务 #12 已是终态"）仍以原文为准——服务端不重排业务参数。</li>
- * </ol>
+ * 中文 locale 使用调用方已确认安全的原文和动态业务文案，保留任务号、定义编码、字段编码等标识；
+ * 非中文 locale 优先取 {@code messages_en.properties} 的 {@code error.<CODE>}，缺键才回落安全原文。
+ * 底层异常消息只能由调用方按类型和安全白名单显式传入，工厂不做任意异常原文透出。
  *
  * <p>
- * {@code args} / {@code traceId} 为 {@code NON_NULL} 字段：存量响应不新增键，字节不变。
+ * {@code args} / {@code traceId} 为 {@code NON_NULL} 字段：不新增响应键，公开形状不变。
  */
 @Component
 public class ErrorBodyFactory {
@@ -38,9 +33,16 @@ public class ErrorBodyFactory {
         this.messageSource = messageSource;
     }
 
-    /** 业务信封形态（默认形态，字节与迁移前一致）。 */
+    /** 业务信封形态（默认形态，字段形状不变）。 */
     public ApiResponse<Object> envelope(String code, String fallbackMessage, Map<String, Object> args, Locale locale) {
-        ApiResponse<Object> body = ApiResponse.error(code, message(code, fallbackMessage, args, locale));
+        return envelope(code, fallbackMessage, args, locale, true);
+    }
+
+    /** 同上；{@code localizeByCode=false} 时保留调用方已本地化的独立文案。 */
+    public ApiResponse<Object> envelope(String code, String fallbackMessage, Map<String, Object> args, Locale locale,
+            boolean localizeByCode) {
+        ApiResponse<Object> body = ApiResponse.error(code,
+                message(code, fallbackMessage, args, locale, localizeByCode));
         if (args != null && !args.isEmpty()) {
             body.setArgs(args);
         }
@@ -56,13 +58,19 @@ public class ErrorBodyFactory {
     }
 
     /**
-     * 本地化 message；缺键一律回落调用方原文。
+     * 本地化 message；中文保留调用方安全动态文案，非中文缺键时回落同一安全文案。
      *
      * <p>{@code args} 保留在签名里兼容既有调用点：码级文案不含 {@code MessageFormat} 占位符，
      * 格式化参数不会改变输出；结构化参数仍由 {@link #envelope}/{@link #problem} 原样回填。
      */
     public String message(String code, String fallbackMessage, Map<String, Object> args, Locale locale) {
-        if (locale == null || isChinese(locale)) {
+        return message(code, fallbackMessage, args, locale, true);
+    }
+
+    /** 同上；{@code localizeByCode=false} 用于按 HTTP 状态等独立语义选择的本地化文案。 */
+    public String message(String code, String fallbackMessage, Map<String, Object> args, Locale locale,
+            boolean localizeByCode) {
+        if (isChinese(locale) || !localizeByCode) {
             return fallbackMessage == null ? "" : fallbackMessage;
         }
         String localized = lookup(KEY_PREFIX + code, locale);
@@ -70,6 +78,10 @@ public class ErrorBodyFactory {
             return localized;
         }
         return fallbackMessage == null ? "" : fallbackMessage;
+    }
+
+    static boolean isChinese(Locale locale) {
+        return locale == null || "zh".equalsIgnoreCase(locale.getLanguage());
     }
 
     /**
@@ -80,7 +92,14 @@ public class ErrorBodyFactory {
      */
     public ProblemDetail problem(String code, HttpStatus status, String fallbackMessage,
             Map<String, Object> args, String instance, String traceId, Locale locale) {
-        ProblemDetail detail = ProblemDetail.forStatusAndDetail(status, message(code, fallbackMessage, args, locale));
+        return problem(code, status, fallbackMessage, args, instance, traceId, locale, true);
+    }
+
+    /** 同上；{@code localizeByCode=false} 时保留调用方已本地化的独立文案。 */
+    public ProblemDetail problem(String code, HttpStatus status, String fallbackMessage,
+            Map<String, Object> args, String instance, String traceId, Locale locale, boolean localizeByCode) {
+        ProblemDetail detail = ProblemDetail.forStatusAndDetail(status,
+                message(code, fallbackMessage, args, locale, localizeByCode));
         detail.setType(URI.create("urn:cfg:error:" + code));
         // 码级文案没有 .title 键：标题固定用稳定码，不再做必然落空的查找。
         detail.setTitle(code);
@@ -109,15 +128,11 @@ public class ErrorBodyFactory {
         }
     }
 
-    private static boolean isChinese(Locale locale) {
-        return "zh".equalsIgnoreCase(locale.getLanguage());
-    }
-
     /**
      * 当前请求 locale（无上下文时硬编码 zh-CN，不回落 JVM 默认 —— CI 是 en-US 机）。
      *
      * <p>与 {@code GlobalExceptionHandler} 的拒绝出口同一取值口径：单一源放在这里，
-     * 直接构造 controller 的用例（无 locale 上下文）得到的就是中文原文。
+     * 直接构造 controller 的调用（无 locale 上下文）也得到中文安全动态文案。
      */
     public static Locale requestLocale() {
         org.springframework.context.i18n.LocaleContext context =

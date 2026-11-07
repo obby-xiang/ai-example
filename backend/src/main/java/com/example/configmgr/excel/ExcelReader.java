@@ -40,13 +40,14 @@ public class ExcelReader {
                 fieldCodes = readHeaderRow(wb, def);
             }
             if (fieldCodes == null || fieldCodes.isEmpty()) {
-                throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_COLUMN_MAPPING_INVALID, "无法解析文件列映射，请确认文件格式正确");
+                throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_COLUMN_MAPPING_INVALID,
+                        "Unable to resolve file column mapping; check the file format");
             }
 
             // Read data sheet (first non-hidden, non-meta sheet)
             Sheet dataSheet = findDataSheet(wb);
             if (dataSheet == null) {
-                throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_SHEET_NOT_FOUND, "未找到数据工作表");
+                throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_SHEET_NOT_FOUND, "Data worksheet not found");
             }
 
             FormulaEvaluator evaluator = wb.getCreationHelper().createFormulaEvaluator();
@@ -109,8 +110,8 @@ public class ExcelReader {
         if (metaDefCode == null || metaDefCode.isBlank()) return;
         if (!metaDefCode.equals(def.getCode())) {
             throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_COLUMN_MAPPING_INVALID,
-                    "文件配置定义不匹配：文件为 " + metaDefCode + "，当前目标为 " + def.getCode()
-                            + "，请确认上传的文件与配置项一致");
+                    "Configuration definition mismatch: file = " + metaDefCode + ", target = " + def.getCode()
+                            + "; upload a file that matches the selected configuration");
         }
     }
 
