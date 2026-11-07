@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionPurgePendingStore;
@@ -89,7 +90,11 @@ public final class ProductionHarnessMain {
 				default -> 2;
 			};
 			int reportedExit = "PARTIAL".equals(support.coverageStatus) && exit == 0 ? 1 : exit;
-			writeResults(support, writer, metrics, manifest, reportedExit, null, null);
+			boolean cleanupExecuted = "cleanup".equals(command)
+					|| ("all".equals(command) && !(keep || cleanupDryRun));
+			Map<String, Object> cleanupResult = cleanupExecuted
+					? readJson(cfg.outputDir.resolve("cleanup.json")) : null;
+			writeResults(support, writer, metrics, manifest, reportedExit, null, cleanupResult);
 			return reportedExit;
 		}
 		catch (RuntimeException ex) {
@@ -170,6 +175,8 @@ public final class ProductionHarnessMain {
 				});
 				metrics.scenarioStatus(scenario.id(), "measured".equals(dataset.state) ? "ok" : "fail",
 						"state=" + dataset.state);
+				manifest.add(dataset);
+				manifest.save(manifestPath);
 			}
 			catch (Exception ex) {
 				exit = 1;
@@ -236,6 +243,8 @@ public final class ProductionHarnessMain {
 
 	private static int cleanup(ProductionSupport support, List<ProductionScenario> selected, Manifest manifest,
 			Path manifestPath, OutputWriter writer, HarnessMetrics metrics) {
+		String attemptId = UUID.randomUUID().toString();
+		String startedAt = Instant.now().toString();
 		int exit = 0;
 		List<Map<String, Object>> rows = new ArrayList<>();
 		for (ProductionScenario scenario : selected) {
@@ -255,8 +264,10 @@ public final class ProductionHarnessMain {
 			long deleted = 0L;
 			long unknown = 0L;
 			List<Map<String, Object>> failures = List.of();
+			List<Map<String, Object>> removalReplies = new ArrayList<>();
 			try {
-				KeyCleanup cleaned = support.stage(dataset, "cleanup_exact_owned_keys", () -> deleteOwned(support, dataset));
+				KeyCleanup cleaned = support.stage(dataset, "cleanup_exact_owned_keys",
+						() -> deleteOwned(support, dataset, removalReplies));
 				deleted = cleaned.deleted;
 				failures = cleaned.failures;
 				unknown = failures.size();
@@ -266,6 +277,7 @@ public final class ProductionHarnessMain {
 				dataset.state = clean ? "cleaned" : "residue";
 				row.put("status", !failures.isEmpty() ? "unknown" : (clean ? "ok" : "fail"));
 				row.put("residue", residue.stream().limit(20).toList());
+				row.put("residueCount", residue.size());
 				row.put("retainedPresent", retained);
 				row.put("failures", failures);
 				if (!failures.isEmpty()) {
@@ -286,11 +298,15 @@ public final class ProductionHarnessMain {
 			metrics.scenarioStatus(scenario.id(), String.valueOf(row.get("status")), "state=" + dataset.state);
 			row.put("deleted", deleted);
 			row.put("unknown", unknown);
+			row.put("removalReplies", removalReplies);
 			rows.add(row);
 			manifest.add(dataset);
 			manifest.save(manifestPath);
 		}
 		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("attemptId", attemptId);
+		body.put("startedAt", startedAt);
+		body.put("endedAt", Instant.now().toString());
 		body.put("complete", exit == 0);
 		body.put("datasets", rows);
 		body.put("safety", "exact owned keys and members only; retained keys are never deleted; no FLUSH/KEYS/SCAN");
@@ -313,7 +329,8 @@ public final class ProductionHarnessMain {
 	private record KeyCleanup(long deleted, List<Map<String, Object>> failures) {
 	}
 
-	private static KeyCleanup deleteOwned(ProductionSupport support, Manifest.Dataset dataset) {
+	private static KeyCleanup deleteOwned(ProductionSupport support, Manifest.Dataset dataset,
+			List<Map<String, Object>> removalReplies) {
 		long deleted = 0L;
 		List<Map<String, Object>> failures = new ArrayList<>();
 		if ("kb_generation_prune_recovery".equals(dataset.scenario)) {
@@ -327,7 +344,9 @@ public final class ProductionHarnessMain {
 		}
 		for (Map.Entry<String, List<String>> index : dataset.ownedHashFields.entrySet()) {
 			for (String field : index.getValue()) {
-				deleted += support.redis.opsForHash().delete(index.getKey(), field);
+				Long reply = support.redis.opsForHash().delete(index.getKey(), field);
+				removalReplies.add(removalReply("HDEL", index.getKey(), field, reply));
+				deleted += reply;
 			}
 		}
 		KeyCleanup owned = deleteKeysPipelined(support, dataset.keys);
@@ -339,12 +358,17 @@ public final class ProductionHarnessMain {
 			}
 		}
 		for (String runId : dataset.runIds) {
-			support.redis.opsForZSet().remove(RunStore.RECOVERY_DUE_INDEX,
-					support.cfg.tenantId + "/" + support.cfg.userId + "/" + runId);
-			support.redis.opsForZSet().remove(RunStore.RECOVERY_DUE_IDENTITY_PREFIX
-					+ support.cfg.tenantId + ":" + support.cfg.userId, runId);
-			support.redis.opsForZSet().remove(RunStore.RUN_LIST_INDEX_PREFIX
-					+ support.cfg.tenantId + ":" + support.cfg.userId, runId);
+			String recoveryDueMember = support.cfg.tenantId + "/" + support.cfg.userId + "/" + runId;
+			Long recoveryDueReply = support.redis.opsForZSet().remove(RunStore.RECOVERY_DUE_INDEX, recoveryDueMember);
+			removalReplies.add(removalReply("ZREM", RunStore.RECOVERY_DUE_INDEX, recoveryDueMember, recoveryDueReply));
+			String identityIndex = RunStore.RECOVERY_DUE_IDENTITY_PREFIX
+					+ support.cfg.tenantId + ":" + support.cfg.userId;
+			Long identityReply = support.redis.opsForZSet().remove(identityIndex, runId);
+			removalReplies.add(removalReply("ZREM", identityIndex, runId, identityReply));
+			String runListIndex = RunStore.RUN_LIST_INDEX_PREFIX
+					+ support.cfg.tenantId + ":" + support.cfg.userId;
+			Long runListReply = support.redis.opsForZSet().remove(runListIndex, runId);
+			removalReplies.add(removalReply("ZREM", runListIndex, runId, runListReply));
 		}
 		if (!dataset.externalBackground) {
 			List<String> backgroundKeys = new ArrayList<>(dataset.background);
@@ -356,6 +380,15 @@ public final class ProductionHarnessMain {
 			failures.addAll(background.failures);
 		}
 		return new KeyCleanup(deleted, failures);
+	}
+
+	private static Map<String, Object> removalReply(String operation, String key, String member, Object reply) {
+		Map<String, Object> row = new LinkedHashMap<>();
+		row.put("operation", operation);
+		row.put("key", key);
+		row.put("member", member);
+		row.put("reply", reply);
+		return row;
 	}
 
 	private static KeyCleanup deleteKeysPipelined(ProductionSupport support, List<String> keys) {
@@ -444,13 +477,19 @@ public final class ProductionHarnessMain {
 			}
 		}
 		for (String runId : dataset.runIds) {
-			if (support.redis.opsForZSet().score(RunStore.RECOVERY_DUE_INDEX,
-					support.cfg.tenantId + "/" + support.cfg.userId + "/" + runId) != null
-					|| support.redis.opsForZSet().score(RunStore.RECOVERY_DUE_IDENTITY_PREFIX
-							+ support.cfg.tenantId + ":" + support.cfg.userId, runId) != null
-					|| support.redis.opsForZSet().score(RunStore.RUN_LIST_INDEX_PREFIX
-							+ support.cfg.tenantId + ":" + support.cfg.userId, runId) != null) {
-				present.add("run-index:" + runId);
+			String recoveryDueMember = support.cfg.tenantId + "/" + support.cfg.userId + "/" + runId;
+			if (support.redis.opsForZSet().score(RunStore.RECOVERY_DUE_INDEX, recoveryDueMember) != null) {
+				present.add("run-index:" + RunStore.RECOVERY_DUE_INDEX + "#" + recoveryDueMember);
+			}
+			String identityIndex = RunStore.RECOVERY_DUE_IDENTITY_PREFIX
+					+ support.cfg.tenantId + ":" + support.cfg.userId;
+			if (support.redis.opsForZSet().score(identityIndex, runId) != null) {
+				present.add("run-index:" + identityIndex + "#" + runId);
+			}
+			String runListIndex = RunStore.RUN_LIST_INDEX_PREFIX
+					+ support.cfg.tenantId + ":" + support.cfg.userId;
+			if (support.redis.opsForZSet().score(runListIndex, runId) != null) {
+				present.add("run-index:" + runListIndex + "#" + runId);
 			}
 		}
 		return present;
@@ -594,7 +633,7 @@ public final class ProductionHarnessMain {
 		body.put("keyspaceScanPages", support.commandMetrics.keyspaceScanPages());
 		body.put("hashScanPages", support.commandMetrics.hashScanPages());
 		body.put("verify", verify == null ? readJson(support.cfg.outputDir.resolve("verify.json")) : verify);
-		body.put("cleanup", cleanup == null ? readJson(support.cfg.outputDir.resolve("cleanup.json")) : cleanup);
+		body.put("cleanup", cleanup);
 		body.put("coverageStatus", support.coverageStatus);
 		body.put("coverageReason", support.coverageReason);
 		body.put("status", "PARTIAL".equals(support.coverageStatus) && exit == 1 ? "partial"
