@@ -3086,6 +3086,62 @@
           "reason": "两个暂存文档已逐hunk核对，服务日志观测、问题复验、非问题备案和无法判定处理口径完整；本批纯文档无需代码编译或IDEA格式化。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:c1bd3816b675be583498d24afe0a553210c5eee866a8000f4871768ddca86682",
+      "status": "reviewed",
+      "reason": "新增禁止掩盖错误与性能问题的规范并同步AGENTS，准确区分“掩盖”与合理的异常忽略/异步处理：具有业务依据的忽略、降级和异步允许保留，但错误、延迟、失败、残留和未知状态必须真实可观测、可记录、可追踪；不得把异步受理、提前返回、日志减少或未确认结果包装成成功或问题消失。已逐hunk核对两个暂存文档。",
+      "reviewedAt": "2026-11-08T00:30:51+08:00",
+      "reviewer": "K3.1 Pro主会话按用户明确规格逐hunk复核",
+      "specChanges": [
+        {
+          "change": "禁止通过异常忽略、异步、提前返回、降级、重试、日志采样或状态包装掩盖错误、性能问题和未知结局，同时明确这些技术本身不被一律禁止。",
+          "reason": "既防止以减少日志、转移线程或提前响应隐藏真实故障与性能问题，也保留有明确业务依据且结果可观测的合理设计。",
+          "impact": "后续实现和审查须验证错误、延迟、失败、残留和未知状态的真实可观测性；异步受理、降级和忽略必须有依据与追踪证据，不得冒充成功或完成。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "提交清单新增第7项禁止掩盖及合理例外边界，原standards与pre-commit条款顺延为第8、9项。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "验证与独立审查章节新增禁止掩盖条款，列明异步受理、提前返回、日志减少和未确认结果不得伪装，原最终暂存审查及证据边界顺延。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批只增加结果真实性规范，没有新增或升级依赖、异步框架或日志组件。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java或通用代码变化，未调整集合、JSON、Lombok、命名和import规范。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "明确异常可基于业务依据处理但不得吞没真实结果，日志采样和限频不得被用来制造问题消失假象，错误与未知状态必须可追踪。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "不得把异步受理、降级或未确认状态向用户包装为确定成功；合理静默处理仍需保持真实状态和必要人工出口。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "异步执行、重试、降级、提前返回和跨实例任务必须保留真实延迟、失败、残留与终局证据，不得伪造完成、成功或清理结果。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批没有UTF-8、SSE/JSON帧、代理对或字符截断实现变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "两个暂存文档已逐hunk核对，禁止掩盖与合理异步/异常忽略的边界明确且可审查；本批纯文档无需代码编译或IDEA格式化。"
+        }
+      }
     }
   ]
 }
