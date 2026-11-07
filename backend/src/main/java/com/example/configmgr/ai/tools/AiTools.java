@@ -171,7 +171,10 @@ public class AiTools {
      * <li>非法 {@code level} 仍以带码异常浮出（不返回 ok=true 的失败文案）。</li>
      * </ul>
      */
-    @Tool(name = AiToolNames.LIST_CONFIG_DEFS, description = "列出系统中的配置定义（编码/名称/层级/字段数），可按层级筛选，最多返回前 50 个，超出时给出总数",
+    @Tool(name = AiToolNames.LIST_CONFIG_DEFS, description = "列出配置定义目录，用于按名称、编码或层级查找定义、确认编码；"
+            + "返回编码、名称、层级和字段数，按 sortOrder、code 稳定排序。level 可收窄为 GLOBAL/REGION/PROJECT，"
+            + "省略表示全部层级；最多返回前 50 个，超出时给出总数，不把截断清单当作全集。"
+            + "无匹配时返回“没有找到配置定义”。已确知编码且需要字段详情时改用 get_config_def；不要用本工具代替创建任务。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -211,7 +214,9 @@ public class AiTools {
      * {@code target}（{@code ToolResultEnvelope#TARGET_KEYS} 已登记 {@code code}）—— 模型/前端拿到的是
      * "码 + 参数"，不是一句只能靠关键词猜的中文。异常人读文案固定英文，不以其承担前端本地化。
      */
-    @Tool(name = AiToolNames.GET_CONFIG_DEF, description = "获取指定配置定义的字段详情（编码/标签/类型/必填/主键/引用）",
+    @Tool(name = AiToolNames.GET_CONFIG_DEF, description = "按配置定义编码读取单个定义的字段详情（编码、标签、类型、必填、主键、引用），"
+            + "用于已确知编码后的精确查询。code 必填且大小写敏感；编码未知时先用 list_config_defs 查找，"
+            + "不要猜测或改用其他编码。找不到时返回结构化 not-found；本工具只读，不修改定义，也不代替创建任务。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -288,7 +293,10 @@ public class AiTools {
     // 上限的**调用前**告知：模型据此知道本工具不是"全量返回"，避免把截断后的列表当成任务的完整集合
     // （消除谎报族；数字规格清点 B-1.4）。描述里的"前 50 条"与"超出时给出总条数"是
     // 下方 limit(LIST_TASKS_MAX_ROWS) 与截断告知的现态口径 —— 三者必须同改（改值即改描述）。
-    @Tool(name = AiToolNames.LIST_TASKS, description = "列出最近的任务列表（含类型/步骤/状态），最多返回前 50 条，超出时给出总条数",
+    @Tool(name = AiToolNames.LIST_TASKS, description = "列出最近的任务，用于查找已有任务、核对任务类型、当前步骤和状态；"
+            + "返回任务 ID、标题、类型、步骤和状态，最多返回前 50 条，超出时给出总条数，不把截断清单当作全集。"
+            + "没有任务时返回空结果提示。已知任务上下文且需要工作区快照时改用 get_workspace_state；"
+            + "查询作业进度改用 check_job_status。本工具只读，不创建任务、不启动作业。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -306,13 +314,17 @@ public class AiTools {
         return rows + "\n" + LIST_TASKS_TOTAL_PREFIX + tasks.size() + LIST_TASKS_TOTAL_SUFFIX;
     }
 
-    @Tool(name = AiToolNames.GET_WORKSPACE_STATE, description = "获取当前工作区的任务状态快照",
+    @Tool(name = AiToolNames.GET_WORKSPACE_STATE, description = "读取当前工作区绑定任务的状态快照，"
+            + "返回任务 ID、标题、类型、当前步骤、状态及已选配置项状态。任务上下文由宿主提供；"
+            + "未打开任务时返回提示，不自动创建或选择任务。需要查找已有任务时改用 list_tasks；"
+            + "需要作业进度时改用 check_job_status。本工具只读，不推进步骤或启动作业。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String getWorkspaceState(
-            @ToolParam(description = "任务ID", required = false) Long taskId, ToolContext toolContext) {
+            @ToolParam(description = "任务ID（可选；宿主已有任务上下文时以当前绑定为准）", required = false) Long taskId,
+            ToolContext toolContext) {
         ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromToolContext(
                 toolContext == null ? null : toolContext.getContext());
         Long currentTaskId = envelope == null ? taskId : longOf(envelope.context().get("taskId"));
@@ -338,13 +350,15 @@ public class AiTools {
         return sb.toString();
     }
 
-    @Tool(name = AiToolNames.CHECK_JOB_STATUS, description = "查询作业状态和进度",
+    @Tool(name = AiToolNames.CHECK_JOB_STATUS, description = "按作业 ID 查询单个已有作业的类型、状态、进度和错误数，"
+            + "用于作业启动后的状态核对。jobId 必须来自已启动作业返回的作业编号或已有作业信息，不要用任务 ID 代替。"
+            + "本工具只读，不启动、取消或重试作业，也不表示导出文件已经下载；任务步骤改用 list_tasks 或 get_workspace_state。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", "task:*" })
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.R)
     public String checkJobStatus(
-            @ToolParam(description = "作业ID") Long jobId) {
+            @ToolParam(description = "作业ID（必须来自已启动作业返回的作业编号或已有作业信息，不是任务ID）") Long jobId) {
         Job job = jobService.findById(jobId);
         return String.format("作业 #%d [%s] 状态:%s 进度:%d/%d 错误:%d",
                 job.getId(), job.getJobType(), job.getStatus(),
@@ -353,7 +367,7 @@ public class AiTools {
 
     @Tool(name = "read_tool_result", description = "按 toolCallId 分页读取本轮被截断的非 KB 工具结果。"
             + "offset 从 0 开始，maxChars 默认 4000、范围 2..8000；返回 originalChars/returnedChars/nextOffset/content，"
-            + "nextOffset 非空时用它继续读。只能读取当前 run、当前身份下的既有台账，不支持 KB 结果（KB 用原生分页工具）",
+            + "nextOffset 非空时用它续读。只能读取当前 run、当前身份下的既有台账；KB 结果继续使用 kb_read_doc 原生分页。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
@@ -409,7 +423,14 @@ public class AiTools {
      * @param openWizard 是否让宿主创建后自动打开向导；省略 = true
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
-    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；导出任务还必须显式传 conditions：已知条件传与 set_condition 相同的结构（同时给 defCodes），未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义/中文名/别名时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用表单选类型。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建≠执行。“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false；宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后用户明确打开/配置仍可继续。原始意图是完整导出/导入时，返回任务 id 后用 navigate_to(page=..., taskId=...) 打开向导并完成所需配置/条件和启动确认（不要与本次调用并批发起），SUSPENDED 不得提前 DONE",
+    @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。"
+            + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：已知条件传与 set_condition 相同的结构并同时给 defCodes，未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。"
+            + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。"
+            + "条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
+            + "标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。"
+            + "“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。"
+            + "只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false；宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后明确打开/配置仍可继续。"
+            + "原始意图是完整导出/导入时，批准后继续用 navigate_to(page=..., taskId=...) 打开向导，完成所需配置/条件和启动确认；SUSPENDED 不得提前 DONE。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -539,7 +560,9 @@ public class AiTools {
      * 机制完全由风险等级驱动（{@code SpToolCallingManager#kindOf}），
      * 此处不新增工具名清单。披露范围不变。
      */
-    @Tool(name = AiToolNames.START_EXPORT, description = "启动配置导出作业，开始将数据导出为Excel文件（高风险，需要用户确认）",
+    @Tool(name = AiToolNames.START_EXPORT, description = "启动配置导出作业（需要用户确认）。前置：EXPORT 任务已选配置项；"
+            + "任务未终态（CANCELLED/已完成导出成功的任务不可再导出）、无同类在途作业。任务已完成时不要重复发起导出；"
+            + "下载或打开编辑器只在用户明确要求时进行（已完成状态本身不是授权）。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", AiToolNames.SCOPE_EXPORT_EXECUTION })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -560,7 +583,7 @@ public class AiTools {
      * 风险等级同为 {@code DANGER}（确认门，S4.4e 裁决⑥；FR-5.3 把"启动检查"与"启动导出/导入/发布"
      * 并列写进确认清单）。
      */
-    @Tool(name = AiToolNames.START_PRECHECK, description = "启动预检查作业，验证上传的Excel文件格式和数据（需要用户确认）",
+    @Tool(name = AiToolNames.START_PRECHECK, description = "启动预检查作业（需要用户确认）。前置：IMPORT 任务已选配置项且已上传数据文件；无在途作业。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", AiToolNames.SCOPE_IMPORT_PRECHECK })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -577,7 +600,7 @@ public class AiTools {
      * 只有向导走到「导入执行」步才披露）；风险等级 {@code DANGER}（确认门，S4.4e 裁决⑥）——
      * 它会真正写暂存区，人工确认的必要性不低于导出。
      */
-    @Tool(name = AiToolNames.START_IMPORT, description = "启动导入作业，将数据写入暂存区（高风险，需要用户确认）",
+    @Tool(name = AiToolNames.START_IMPORT, description = "启动导入作业（需要用户确认）。前置：IMPORT 任务有上传文件，且最近一次预检查通过且未过期；无在途作业。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope(AiToolNames.SCOPE_IMPORT_EXECUTION)
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -589,7 +612,8 @@ public class AiTools {
         return String.format("导入作业已启动（作业 #%d），进度由页面展示；发布前可预览暂存数据", job.getId());
     }
 
-    @Tool(name = AiToolNames.START_PUBLISH, description = "启动发布作业，将暂存数据正式发布到生产数据（高风险，需要用户确认）",
+    @Tool(name = AiToolNames.START_PUBLISH, description = "启动发布作业（需要用户确认，不可撤销）。前置：IMPORT 任务、最近一次预检查通过；"
+            + "发布模式由任务设置决定（MERGE/REPLACE），以确认卡上的权威值为准，不以对话文本为准。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope(AiToolNames.SCOPE_IMPORT_PUBLISH)
     @ToolRisk(ToolMeta.RiskLevel.DANGER)
@@ -611,7 +635,9 @@ public class AiTools {
      */
     static final String FRONTEND_STUB = "FRONTEND_STUB_SHOULD_NOT_RUN";
 
-    @Tool(name = AiToolNames.OPEN_EXPORT_FILE_EDITOR, description = "请求前端打开指定配置的导出文件在线编辑器（SpreadJS）")
+    @Tool(name = AiToolNames.OPEN_EXPORT_FILE_EDITOR, description = "打开指定配置项的导出文件在线编辑器（前端执行），用于查看或编辑既有文件；不下载文件，也不启动新的导出。"
+            + "前置：EXPORT 任务已有成功导出作业/导出文件。只在用户明确提出查看/编辑导出文件意图时调用；只要保存到本机时改用 download_export_files。"
+            + "任务已完成（COMPLETED）本身不是授权，不要把它当作已完成任务的下一步建议。返回前端打开结果，不把已打开等同于编辑已保存。")
     @ToolScope(AiToolNames.SCOPE_EXPORT_EXECUTION)
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.U)
@@ -631,7 +657,9 @@ public class AiTools {
      * <li>码不在当前可导出清单里 ⇒ 整体失败并回执可用码清单，不静默丢弃。</li>
      * </ul>
      */
-    @Tool(name = AiToolNames.DOWNLOAD_EXPORT_FILES, description = "触发浏览器下载导出文件：1 个码 = 直出单文件 xlsx；≥2 个码 = 打包为单个 zip 下载")
+    @Tool(name = AiToolNames.DOWNLOAD_EXPORT_FILES, description = "下载指定配置项的既有导出文件（前端执行）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。"
+            + "前置：EXPORT 任务已有成功导出作业/导出文件。只在用户明确提出下载/获取文件意图时调用；查看/编辑时改用 open_export_file_editor。"
+            + "任务已完成（COMPLETED）本身不是授权，不要用它替代 start_export，也不要仅凭状态自动下载。浏览器下载结局未确认时如实说明，不把已发起当作已保存。")
     @ToolScope(AiToolNames.SCOPE_EXPORT_EXECUTION)
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.F)
@@ -648,8 +676,8 @@ public class AiTools {
      * 页面导航。披露范围为 {@code *}：它是任意页面进入向导的唯一入口动作，
      * 目标页面的合法性由前端动作表白名单（{@code allowPages}）兜底校验。
      */
-    @Tool(name = AiToolNames.NAVIGATE_TO, description = "驱动前端页面导航：切换到任务中心/导出向导/导入向导/配置定义/数据浏览页；带 taskId 时直接打开该任务的向导。"
-            + "只打开任务时，页面、任务绑定与详情就绪后即可收尾；完整执行时下一批按最新披露继续页面动作，同一目标页不要重复导航")
+    @Tool(name = AiToolNames.NAVIGATE_TO, description = "跳转页面并绑定任务（前端执行）。前置：目标页面存在；create_task 返回任务 id 后用它打开该任务向导。"
+            + "只打开任务时，页面、任务绑定与详情就绪后即可收尾；完整执行时下一批按最新披露继续，不要在同一批里并排调用后续动作。同一目标页不要重复导航。")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.U)
@@ -677,8 +705,11 @@ public class AiTools {
      * 小写/未知 {@code mode}（前端会把 {@code "add"} 静默当成 REPLACE）、不存在的配置定义编码
      * ⇒ <b>不挂起、不下发</b>，只回填逐条原因（fail-closed）。
      */
-    @Tool(name = AiToolNames.SELECT_DEFINITIONS, description = "在导出/导入向导的「选择配置」步骤勾选配置项（按配置定义编码；需已导航到对应向导且当前在该步骤；勾选只形成前端草案，业务库由前端在下一步提交）。"
-            + "用户已明确配置定义时直接调用，不用表单重复询问（编码、中文名称/别名、或已用 list_config_defs/get_config_def 确认的映射都算已明确）")
+    @Tool(name = AiToolNames.SELECT_DEFINITIONS, description = "在工作区勾选配置项（前端执行，勾选只形成前端草案，业务库由前端在下一步/启动作业前提交）。"
+            + "前置：已打开对应导出/导入向导并绑定 taskId，且当前在「选择配置」步（导出 SELECT_DEFS / 导入 UPLOAD）—— 只在它被披露的步骤调用。"
+            + "选择项优先用本工具，不要用开放式文字询问。用户已明确配置定义时直接调用，不用表单重复询问"
+            + "（编码、中文名称/别名、或已用 list_config_defs / get_config_def 确认的映射都算已明确）。"
+            + "勾选后不要声称已写入业务库：确认与提交由下一步（confirm_step）完成。")
     @ToolScope({ AiToolNames.SCOPE_EXPORT_SELECT_DEFS, AiToolNames.SCOPE_IMPORT_UPLOAD })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -736,18 +767,20 @@ public class AiTools {
      * 只有非空文本明确"不筛选"或需要清空已有条件时，才由模型调用 {@code set_condition(defCode, {})}。
      * 未知 {@code defCode}/字段编码、未知键、非法算子同样 fail-closed。
      */
-    @Tool(name = AiToolNames.SET_CONDITION, description = "在导出向导的「查询条件」步骤为指定配置项设置数据过滤条件的草案（只写前端草案，不写业务库条件；业务库由前端在下一步或启动作业前提交。"
-            + "conditions 传真实条件（至少给 scopeKeys 或 fields 之一）；"
-            + "表单留空时直接 confirm_step，不调用本工具；只有非空文本明确不筛选或需要清空已有条件时"
-            + "才由模型调用 set_condition(defCode, {})；"
-            + "conditions 缺失、null、fields:[]、scopeKeys:[] 仍会被拒绝；"
+    @Tool(name = AiToolNames.SET_CONDITION, description = "设置导出查询条件的草案（前端执行：只写前端草案/会话内候选，不写业务库条件）。"
+            + "前置：EXPORT 任务且当前在 QUERY_COND 步骤；条件必须是结构化对象"
+            + "（fields[].fieldCode/operator/value + 可选 scopeKeys），不要传扁平参数；真实条件至少给 scopeKeys 或 fields 之一。"
+            + "用户给出条件（含 generative_form(purpose=SET_CONDITIONS) 自由文本框回填后解析出的条件）时才调用；"
+            + "用户没给条件就不设筛选（不设条件即全量），不要为凑条件而调用；条件表单留空时直接 confirm_step，不调用本工具。"
+            + "已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链。设置后不要说\"已落库/已生效\"："
+            + "业务库由前端在下一步（confirm_step）或启动作业前 persistStepData 提交。"
+            + "非空文本明确“不筛选”或需要清空已有条件时，对表单覆盖的每个 defCode 各调用一次 set_condition(defCode, {})"
+            + "（恰好空对象 = 明确不设 = 清空该配置项条件），不要重发 SET_CONDITIONS；"
+            + "conditions 缺失、null、fields:[]、scopeKeys:[] 仍会被拒绝。"
             + "只能对任务已勾选的配置项调用（未勾选/未绑定会被零副作用拒绝：先 select_definitions 或让用户勾选）；"
-            + "同一 defCode + 完全相同入参的重复调用幂等复用（不再下发前端；不同值 = 修改，照常执行）；"
-            + "需已导航到导出向导并已勾选该配置项；"
-            + "用户给出条件（含条件表单回填文本解析出的条件）时才调用，没给条件就不设筛选（不设条件即全量）；"
-            + "已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链；设置后不要声称已落库/已生效）。"
-            + "本工具只能在 QUERY_COND 步骤调用："
-            + "若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，下一批再调用本工具，不要抢跑")
+            + "同一 defCode + 完全相同入参的重复调用幂等复用（不再下发前端；不同值 = 修改，照常执行）。"
+            + "本工具只能在 QUERY_COND 步骤调用：若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，"
+            + "下一批再调用本工具，不要在 SELECT_DEFS 这一批抢跑（前端会以步骤不符拒绝）。")
     @ToolScope({ AiToolNames.SCOPE_EXPORT_QUERY_COND })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -794,18 +827,20 @@ public class AiTools {
      * 通道判定优先于风险等级，WRITE 不会触发后端确认卡；用户点页面「下一步」与 AI 调用
      * {@code confirm_step} 仍是同一条路径。回执必须如实说明实际写回了哪些配置项。
      */
-    @Tool(name = AiToolNames.CONFIRM_STEP, description = "确认并推进向导步骤（当前步骤校验通过时前端才前进；需已导航到导出/导入向导）。"
-            + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，不要擅自跳步。"
-            + "只推进到目标步骤时，目标达成即可收尾；完整执行时下一批按最新披露继续，推进失败即停"
-            + "（回执给出明确纠正指引且本次零副作用时，允许一次不同的纠正动作；"
-            + "同参数/同目标仍在禁止之列）。进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单："
-            + "条件未决定时由宿主统一给一次非必填自由文本框（框内留空即全量推进），不要用文字追问是否筛选。"
-            + "禁止从 SELECT_DEFS 直接跳到 EXPORT；条件已知但还没有草案、或条件表回灌了非空文本却还没 set_condition 时，"
-            + "confirm_step 会被零副作用拒绝并指回 set_condition（先形成草案，下一批再推进；业务库由前端在本步提交）。"
-            + "本步认可本轮已结算的结构化草案（含逐项 set_condition(defCode, {}) 的明确不设）与留空=明确不设的决定；"
+    @Tool(name = AiToolNames.CONFIRM_STEP, description = "确认并推进向导步骤（前端执行），需已导航到导出/导入向导；本工具只推进步骤，不启动作业。"
+            + "默认不传 step，只前进一步；step 仅在用户点名目标步骤或明确要求跳过筛选时才传，合法目标步骤仍须完成必经步骤，不要擅自跳步。"
+            + "前置：当前步骤校验通过。只推进到目标步骤时，目标达成即可收尾；完整执行时下一批按最新披露继续（不要在同一批里连续推进）；"
+            + "推进失败即停，如实说明原因与当前步骤，不要重试推进或跳步（回执给出明确纠正指引且本次零副作用时，"
+            + "允许一次不同的纠正动作；同参数/同目标仍在禁止之列）。step 的合法枚举：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；"
+            + "导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_condition。"
+            + "禁止从 SELECT_DEFS 直接跳到 EXPORT（那条路会跳过 QUERY_COND 与条件收集，会被宿主零副作用拒绝）；即使传 step，也必须先完成 QUERY_COND 才能推进到 EXPORT。"
+            + "未设筛选是正常状态（= 全量导出）：进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单；"
+            + "条件未决定时由宿主统一给一次非必填自由文本框（只此一次，留空即明确不设筛选并照常推进），不要重复收集或用文字追问。"
+            + "条件已知但还没有草案、或条件表回灌了非空文本却还没 set_condition 时，confirm_step 会被零副作用拒绝并指回 set_condition："
+            + "先形成草案，下一批再推进（业务库由前端在本步提交，模型不写库）。"
+            + "本步认可本轮已结算的结构化草案（含逐项 set_condition(defCode, {}) 的明确不设）与\"留空=明确不设\"的决定；"
             + "本工具必须单独成批：同一批里还有其它工具时会被零副作用拒绝并要求先单独调用 confirm_step"
-            + "（条件表需要单独一张卡；混批挂起会先外置整批历史、吞掉同批其它调用的卡与回执）；"
-            + "start_export 预检仍校验业务库最终条件")
+            + "（条件表需要单独一张卡；混批挂起会先外置整批历史、吞掉同批其它调用的卡与回执）；start_export 预检仍校验业务库里的最终条件。")
     @ToolScope({ AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT })
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
@@ -878,12 +913,12 @@ public class AiTools {
      * 后端只挂起与回灌；schema 与回灌的校验在挂起机制里（{@code SpToolCallingManager}/
      * {@code ConfirmGate} + {@code FrontendToolGuard}），不在此处。
      */
-    @Tool(name = AiToolNames.GENERATIVE_FORM, description = "在对话内渲染结构化表单并等待用户填写。"
-            + "只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问；purpose 必须是当前用途。"
-            + "TASK_TYPE 只在类型未知时使用单个 EXPORT/IMPORT 单选；SET_CONDITIONS 由宿主统一发放，模型不得自行调用。"
-            + "配置项已明确时直接用 select_definitions。字段类型统一为 text/number/boolean/date/enum/multi_select/attachment，"
-            + "禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，不得预填。披露时保留完整当前 Schema 和联动能力。"
-            + "表单只收集值，不推进向导步骤；结果读取统一信封的 message 字段")
+    @Tool(name = AiToolNames.GENERATIVE_FORM, description = "在对话内渲染结构化表单并等待用户填写，只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问。"
+            + "purpose 必须对应实际用途。TASK_TYPE 只在类型未知时使用单个 EXPORT/IMPORT 单选；SET_CONDITIONS 由宿主统一发放，模型不得自行调用。"
+            + "配置项已明确时直接使用 select_definitions。字段类型统一为 text/number/boolean/date/enum/multi_select/attachment，"
+            + "禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，不得预填。"
+            + "披露时保留完整当前 Schema 和联动能力，高级联动仍受后端白名单与闭集数据源校验。表单只收集值，不推进向导步骤；"
+            + "用户提交后的字段值在统一信封 message 中，取消为 outcome=cancelled，schema 不合规则 rejected 且未下发。")
     @ToolScope("*")
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.H)

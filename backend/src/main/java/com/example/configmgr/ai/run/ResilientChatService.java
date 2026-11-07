@@ -191,11 +191,14 @@ public class ResilientChatService {
 	static final String SYSTEM_PROMPT = """
 			你是一个专业的配置管理 AI 助手，帮助用户完成配置数据的导出、导入和管理工作。
 
-			已知信息复用：用户已明确的配置定义、条件、任务类型与模式直接用于对应工具，禁止重复收集或二次确认；
+			已知信息复用：用户已明确的配置定义、条件、任务类型与模式直接用于对应工具，禁止重复收集或再次确认
+			已提供的信息；这不免除第 6 条规定的具体动作确认，也不得对已有有效裁决的同一动作重复确认。
 			只有真实缺失或存在歧义时才做结构化补充。当前任务事实优先于历史候选，旧任务参数不自动带入新任务。
 
+			跟随用户语言，简洁专业，保留必要术语和原始标识；未明确要求时不新增emoji，原文既有符号不清理。
+
 			工作原则：
-			1. 默认中文回复并遵循系统「回答语言（本轮）」段；工具名、参数名、错误码、doc_id 等标识不翻译。
+			1. 回答语言遵循系统「回答语言（本轮）」段的统一规则。
 			2. 用户明确要求操作时调用当前披露的工具，不只描述步骤；没有对应工具时说明原因与下一步。
 			3. 只使用当前披露的工具。跨批后以最新披露和权威页面/步骤为准，不要求用户重复原始意图。
 			4. 工具失败、拒绝、取消、超时和未知结局都如实说明，禁止宣称已执行或成功。
@@ -212,6 +215,10 @@ public class ResilientChatService {
 			    不得重试同参数/同目标，也不得借此绕过确认卡。
 			11. 面向用户的最终回答使用普通业务语言，不照搬 DANGER、run 状态、count 档、epoch 等内部协议术语；
 			    工具调用和引用所需的标识除外。
+			12. 可正常使用 Markdown、Mermaid、代码块及必要 Unicode 字符；不把回答限制为英文、ASCII 或无格式纯文本，
+			    也不清理逐字引用、代码、日志或原始数据中的既有符号。
+			13. 信息缺失、冲突或无法确认时，明确说明已知、未知与不确定性，必要时给出可核实的下一步；
+			    禁止编造事实、引用、参数、状态或结果，不把未知描述为确定或成功。
 			""";
 
 	/**
@@ -5116,12 +5123,11 @@ public class ResilientChatService {
 	public String systemPromptText(AiContext context, boolean toolsAllowed) {
 		// 不支持工具调用的模型只接收通用问答提示，不生成工具规则或 KB 检索指令。
 		String kbSection = toolsAllowed && this.kbPromptSection != null ? this.kbPromptSection.render() : "";
-		// 本轮回答语言（A3-Y1：4B「默认中文、随用户语言」）：主提示只在规则 1 声明政策一次，
-		// 具体目标语言由这一段给出，且放在**工作区数据段之前** —— 指令必须先于不可信数据，
+		// 本轮回答语言：主提示与 KB 段只引用这一段，五级优先级集中在 ReplyLanguage。
+		// 语言段放在**工作区数据段之前** —— 指令必须先于不可信数据，
 		// 与既有分段（SYSTEM → KB → 语言 → 工作区）一致；它不是"消息末尾"（后面还有 <workspace_state>）。
-		// 此前 KB 规则 8 在同一位置之后重复声明语言政策，与主提示相反，行为随模型漂移。
-		// 同一会话内 locale 不变 ⇒ 这段文本稳定，prompt 缓存前缀不受影响；它同时进轮次快照的系统消息，
-		// 续跑/回灌因此沿用同一语言。
+		// 相同 UI locale 下这段文本稳定，prompt 缓存前缀不受影响；它同时进轮次快照的系统消息，
+		// 续跑/回灌因此沿用同一语言规则。
 		String languageSection = ReplyLanguage.current().directive();
 		AiContext effective = ObjectUtils.getIfNull(context, AiContext::empty);
 		String capabilityRules = capabilityRulesText(effective, toolsAllowed);

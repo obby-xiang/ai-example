@@ -2192,6 +2192,97 @@
           "reason": "按186个实际暂存路径逐hunk静态复核，agent-1012/1013/1018/1025四区最终PASS，前次严格pipeline回包、Bean name、嵌套toString、CancelAdmission及保活竞态均已关闭；测试、构建、Maven、真实Redis/Cluster、API/SSE、多实例及TTL动态核验均NOT_RUN，门禁留由主会话执行。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:27b385b556f1f6a34676534780bee24078bcd178c9b434cb7e88c9ae4b272689",
+      "status": "reviewed",
+      "reason": "agent-1030对A1/A2/A3七个文件逐hunk独立静态复审均为PASS，A4 KbTools核对无需修改。固定emoji指令、语言优先级、术语与原文保留、确认和跳步、编辑器与下载、18项工具描述及YAML版本均符合裁决；工具名、Schema、风险、确认门、检索和执行逻辑未改。测试、构建、Maven、真实模型和真实接口均NOT_RUN。",
+      "reviewedAt": "2026-11-07T22:04:40+08:00",
+      "reviewer": "K3.1 Pro agent-1030独立静态复审",
+      "specChanges": [
+        {
+          "change": "系统提示词集中语言优先级并加入固定emoji短指令，补全术语、原始标识、Markdown、Unicode、确认和不确定性边界。",
+          "reason": "统一助手回答语言与原文保留规则，消除二次确认和格式限制歧义。",
+          "impact": "仅改变模型侧提示文本，不改变locale解析、线程传播、确认门、KB检索或业务执行。"
+        },
+        {
+          "change": "能力包和工具描述区分不得擅自跳步与合法目标步骤、查看/编辑与下载，18项工具定义按消歧需要同步，tools.yaml版本由2026-10-27.28升至.29并追加一条记录。",
+          "reason": "减少工具选择、参数来源、创建确认和下载结局歧义，保持三处定义一致。",
+          "impact": "仅修改提示词、注解参数说明、YAML描述和前端两项镜像，工具名、Schema、风险、披露、执行和前端协议不变。"
+        },
+        {
+          "change": "AI工具确认与结果文案明确不得重复确认已有有效裁决，同时具体动作仍须按风险进入确认。",
+          "reason": "区分重复收集信息与具体动作审批，避免跳过或重复审批。",
+          "impact": "仅调整模型侧确认说明，不改变确认门三态、执行授权或状态机。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbPromptSection.java",
+          "status": "checked",
+          "reason": "KB段引用统一语言优先级，doc_id、章节和标题保留原文，检索、翻页和引用行为未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java",
+          "status": "checked",
+          "reason": "不得擅自跳步与合法目标步骤、查看/编辑与下载边界符合裁决，能力包结构和工具名不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ReplyLanguage.java",
+          "status": "checked",
+          "reason": "集中五级语言优先级和短指令继承，术语、标识、逐字引文及外部原始值保留，of/current解析未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "固定emoji指令逐字一致，主提示引用统一语言段并区分信息确认和动作审批，未改执行逻辑。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java",
+          "status": "checked",
+          "reason": "18项注解缺省与YAML同步，参数说明补充而方法体、Schema、风险、披露和确认执行未改。"
+        },
+        {
+          "path": "backend/src/main/resources/ai/tools.yaml",
+          "status": "checked",
+          "reason": "版本仅升一次至2026-10-27.29并追加单条记录，描述与Java注解和前端镜像一致。"
+        },
+        {
+          "path": "frontend/src/types/tools.ts",
+          "status": "checked",
+          "reason": "仅同步编辑器与下载两项镜像，明确成功导出前置、文件形式和未知结局，不改前端协议。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅修改既有提示词、工具描述和前端镜像，未新增或升级依赖，也未另造工具或分析框架。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java方法结构、集合、布尔命名、Lombok或线程资源实现变化，仅修改既有字符串和注解描述。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "技术异常摘要和原始标识保留英文及原文，未把异常消息或原始工具结果改写成面向用户文案，未修改生产日志调用。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "确认、跳步、查看/下载、工具返回和前端镜像均按ToC消歧规则审查，未引入技术话术或改变业务状态。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批未修改API、SSE、Redis、状态机、确认门、线程池或模型并发实现，仅变更提示词和描述。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "明确不限制Markdown、Mermaid、代码块、Unicode和原文既有符号，未修改增量解码、帧解析或二次转码实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "七个暂存文件已逐hunk独立静态复审，A1/A2/A3均PASS，A4无修改；测试、构建、真实模型、浏览器和接口均NOT_RUN。"
+        }
+      }
     }
   ]
 }

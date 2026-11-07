@@ -67,7 +67,7 @@ final class PromptRulePacks {
 		if (tools.contains(AiToolNames.CONFIRM_STEP)) {
 			sb.append("""
 
-					confirm_step 必须单独成批，每次只确认当前一步，禁止跳步；只推进到目标步骤时，
+					confirm_step 必须单独成批，每次只确认当前一步，不得擅自跳步，合法目标步骤仍遵守必经步骤；只推进到目标步骤时，
 					目标达成即可收尾。完整执行时按最新披露和权威步骤继续。
 					""");
 		}
@@ -105,7 +105,7 @@ final class PromptRulePacks {
 		if (tools.contains(AiToolNames.DOWNLOAD_EXPORT_FILES)) {
 			sb.append("""
 
-					只有用户明确提出下载/查看导出文件意图时才调用 download_export_files；
+					只有用户明确提出下载导出文件意图时才调用 download_export_files；查看或编辑导出文件不等于下载，不得因此调用下载工具；
 					任务或作业完成状态本身不是授权，不得自动下载或打开编辑器。
 					""");
 		}

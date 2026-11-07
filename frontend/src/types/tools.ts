@@ -160,7 +160,9 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'open_export_file_editor',
     displayName: '打开导出文件在线编辑器',
-    description: '请求前端打开指定配置的导出文件在线编辑器（SpreadJS）',
+    description: '打开指定配置项的导出文件在线编辑器（前端执行），用于查看或编辑既有文件；不下载文件，也不启动新的导出。'
+      + '前置：EXPORT 任务已有成功导出作业/导出文件。只在用户明确提出查看/编辑导出文件意图时调用；只要保存到本机时改用 download_export_files。'
+      + '任务已完成（COMPLETED）本身不是授权，不要把它当作已完成任务的下一步建议。返回前端打开结果，不把已打开等同于编辑已保存。',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: ['task:EXPORT/EXPORT'],
@@ -172,7 +174,9 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'download_export_files',
     displayName: '下载导出文件',
-    description: '触发浏览器下载导出文件：1 个码 = 直出单文件 xlsx；≥2 个码 = 打包为单个 zip 下载',
+    description: '下载指定配置项的既有导出文件（前端执行）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。'
+      + '前置：EXPORT 任务已有成功导出作业/导出文件。只在用户明确提出下载/获取文件意图时调用；查看/编辑时改用 open_export_file_editor。'
+      + '任务已完成（COMPLETED）本身不是授权，不要用它替代 start_export，也不要仅凭状态自动下载。浏览器下载结局未确认时如实说明，不把已发起当作已保存。',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: ['task:EXPORT/EXPORT'],
