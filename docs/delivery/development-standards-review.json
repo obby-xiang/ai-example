@@ -2760,6 +2760,62 @@
           "reason": "两份暂存文档已逐hunk核对，新增规则明确编译证据不得由静态审查或旧产物冒充；本批纯文档无需代码编译，当前生产修复的编译失败不得据此记为通过。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:a12022cd823205ade7b6f95a3ea6de637cdafd8439d2f1a772b8179a2c708f1b",
+      "status": "reviewed",
+      "reason": "新增IDEA代码质量门禁并同步AGENTS提交清单：代码必须先经IDEA Reformat Code格式化，再通过IDEA Inspect Code检查；检查问题修复后必须再次IDEA格式化并复查闭环。规则明确人工浏览、其他格式化工具和编译成功都不能替代IDEA操作，审查记录必须包含操作、文件范围、profile、问题修复与再次格式化结果。已逐hunk复核两个暂存文档。",
+      "reviewedAt": "2026-11-07T23:43:28+08:00",
+      "reviewer": "K3.1 Pro主会话按用户明确规格逐hunk复核",
+      "specChanges": [
+        {
+          "change": "新增IDEA Reformat Code与Inspect Code提交门禁，并要求检查问题修复后再次IDEA格式化和复查。",
+          "reason": "将格式化和IDEA静态检查变成可追溯的代码交付步骤，避免只做编译和人工审查而遗漏IDEA检查问题。",
+          "impact": "后续代码提交须记录IDEA操作、实际文件、检查profile、问题修复与再次格式化结果；格式化产生的变化重新进入逐hunk审查。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "提交清单第5项新增IDEA格式化、检查、修复后再次格式化和证据要求，原standards门禁与pre-commit条款顺延且未改。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "验证与独立审查章节第5项完整定义IDEA操作顺序、不可替代性、记录字段和格式化后重审要求，原最终暂存审查及验证边界顺延。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "本批指定复用现有IDEA Reformat Code和Inspect Code能力，没有新增格式化、静态分析依赖或组件。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批只增加格式化与检查流程，没有调整Java集合、JSON、Lombok、命名或import规则，也没有代码变更。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批未修改日志、异常、脱敏或错误响应规则，IDEA检查记录不得因此写入密钥或异常正文。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批仅修改开发门禁文档，没有用户界面、卡片、文案或渲染变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批不修改API、SSE、Redis、TTL、并发或状态机规则与实现。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批没有UTF-8、流式帧、JSON解析或字符截断实现变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "两个暂存文档已逐hunk核对，IDEA操作顺序、证据字段和格式化后重审明确；本批纯文档无需执行IDEA代码格式化或Inspect Code，当前生产代码尚未据此记为通过。"
+        }
+      }
     }
   ]
 }
