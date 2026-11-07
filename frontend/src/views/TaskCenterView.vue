@@ -36,7 +36,7 @@
       type="warning"
       :closable="false"
       show-icon
-      :title="t('views.tasks.loadFailed', { error: taskStore.loadError })"
+      :title="taskStore.loadError"
       class="mb-3"
     />
 
@@ -78,7 +78,7 @@
         </template>
       </el-table-column>
       <el-table-column :label="t('views.tasks.currentStep')" width="110">
-        <template #default="{ row }: { row: TaskSummary }">{{ stepLabel(row.task.currentStep) }}</template>
+        <template #default="{ row }: { row: TaskSummary }">{{ currentStepText(row.task.currentStep) }}</template>
       </el-table-column>
       <el-table-column :label="t('views.tasks.createdAt')" width="170">
         <template #default="{ row }: { row: TaskSummary }">{{ formatDateTime(row.task.createdAt) }}</template>
@@ -170,7 +170,7 @@ import { ElMessage } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { isTaskCenterRefreshEvent, useTaskStore } from '@/stores/task'
 import { onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
-import { formatDateTime, progressView, stepLabel } from '@/utils/format'
+import { formatDateTime, progressView, stepLabel as taskStepText } from '@/utils/format'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import type { TaskStatus, TaskSummary, TaskType } from '@/types/task'
 import type { Job } from '@/types/job'
@@ -278,6 +278,28 @@ function refresh(): void {
   void taskStore.refreshNow()
 }
 
+const TASK_STEP_COPY_KEYS: Record<string, string> = {
+  SELECT_DEFS: 'views.export.steps.select',
+  QUERY_COND: 'views.export.steps.query',
+  EXPORT: 'views.export.steps.export',
+  UPLOAD: 'views.import.steps.upload',
+  PRECHECK: 'views.import.steps.check',
+  IMPORT: 'views.import.steps.import',
+  PUBLISH: 'views.import.steps.publish',
+  DONE: 'ai.values.step.DONE'
+}
+
+function currentStepText(step: string | null | undefined): string {
+  if (!step) {
+    return taskStepText(step)
+  }
+  const copyKey = TASK_STEP_COPY_KEYS[step]
+  if (!copyKey) {
+    return t('ai.value.unknown')
+  }
+  return locale.value === 'zh-CN' ? taskStepText(step) : t(copyKey)
+}
+
 function statusType(status: TaskStatus): 'success' | 'danger' | 'info' | 'warning' {
   switch (status) {
     case 'COMPLETED':
@@ -302,7 +324,7 @@ function statusLabel(status: TaskStatus): string {
     case 'FAILED':
       return t('views.tasks.failed')
     default:
-      return String(status)
+      return t('views.tasks.unknown')
   }
 }
 
@@ -347,7 +369,9 @@ async function cancelTask(row: TaskSummary): Promise<void> {
   const confirmed = await confirmIrreversible({
     title: t('views.tasks.dialog.cancelTitle'),
     message: t('views.tasks.dialog.cancelMessage', { title: row.task.title, jobId }),
-    ack: t('views.tasks.dialog.cancelAck')
+    ack: t('views.tasks.dialog.cancelAck'),
+    confirmText: t('views.tasks.dialog.cancelConfirm', { jobId }),
+    cancelText: t('views.tasks.dialog.cancelKeep')
   })
   if (!confirmed) {
     return
@@ -376,6 +400,8 @@ async function removeTask(row: TaskSummary): Promise<void> {
     title: t('views.tasks.dialog.deleteTitle'),
     message: t('views.tasks.dialog.deleteMessage', { title: row.task.title }),
     ack: t('views.tasks.dialog.deleteAck'),
+    confirmText: t('views.tasks.dialog.deleteConfirm', { title: row.task.title }),
+    cancelText: t('views.tasks.dialog.deleteKeep'),
     type: 'error'
   })
   if (!confirmed) {

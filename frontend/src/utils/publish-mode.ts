@@ -14,7 +14,7 @@
  */
 import { tasksApi } from '@/api/tasks'
 import type { ImportMode } from '@/types/task'
-import { userFacingErrorText } from '@/utils/ui-error'
+import { translate } from '@/composables/useCopy'
 import { logCaughtError } from '@/utils/log-caught-error'
 
 export type PublishModeResolution =
@@ -33,7 +33,7 @@ export function parsePublishMode(settingsJson: string | null | undefined): Publi
   }
   // API 契约破坏时（数字/对象等）不得 TypeError 直穿到点击路径：明确 fail-closed。
   if (typeof settingsJson !== 'string') {
-    return { ok: false, reason: '任务设置格式异常（settingsJson 不是字符串）' }
+    return { ok: false, reason: translate('views.import.msg.publishModeUnreadable') }
   }
   if (settingsJson.trim() === '') {
     return { ok: true, mode: 'MERGE' }
@@ -47,7 +47,7 @@ export function parsePublishMode(settingsJson: string | null | undefined): Publi
     }
   } catch (error) {
       logCaughtError(error, 'utils/publish-mode.ts:47')
-    return { ok: false, reason: '任务设置无法解析（importMode 不可读）' }
+    return { ok: false, reason: translate('views.import.msg.publishModeInvalid') }
   }
 }
 
@@ -56,9 +56,8 @@ export async function resolvePublishMode(taskId: number): Promise<PublishModeRes
   let task: Awaited<ReturnType<typeof tasksApi.getTask>>
   try {
     task = await tasksApi.getTask(taskId)
-  } catch (error) {
-    const detail = userFacingErrorText(error, '暂时无法读取任务详情')
-    return { ok: false, reason: `无法读取任务 #${taskId} 的发布模式（服务端为准）：${detail}` }
+  } catch {
+    return { ok: false, reason: translate('views.import.msg.publishModeLoadFailed', { taskId }) }
   }
   return parsePublishMode(task.settingsJson)
 }

@@ -310,7 +310,7 @@ interface AttachmentMeta {
 const props = withDefaults(defineProps<{
   schema: FormSpec
   submitting: boolean
-  /** 卡级错误（后端 FORM_RESULT_REJECTED 的人读说明；字段级见 fieldErrors） */
+  /** 卡级错误标记（仅触发安全通用文案；字段级见 fieldErrors） */
   error: string | null
   /** 已决只读态：控件原生禁用并回填真实值，不渲染操作区或卡级错误。 */
   readonly?: boolean
@@ -951,7 +951,7 @@ function fieldIssues(field: FormFieldSpec): FormValueIssue[] {
   return issues
 }
 
-/** 错误文案：优先按 code 查 locales（双语）；缺键回落后端/本地给的人读 message。 */
+/** 已识别错误码使用安全命名参数；未识别错误码使用完整通用文案，不回显原始 message。 */
 function issueText(field: FormFieldSpec, issue: FormValueIssue): string {
   const key = `ai.gf.errors.${issue.code}`
   if (te(key)) {
@@ -963,7 +963,7 @@ function issueText(field: FormFieldSpec, issue: FormValueIssue): string {
       format: textFormatText(field.format)
     })
   }
-  return issue.message
+  return t('ai.gf.errors.UNKNOWN_ERROR')
 }
 
 const liveSummary = computed(() => {
@@ -982,19 +982,12 @@ const liveSummary = computed(() => {
  */
 const canRetry = computed(() => (props.fieldErrors ?? []).every((issue) => isRetryableIssue(issue.code)))
 
-/** 卡级问题 = 无法归属到单字段的问题 + 后端 FORM_RESULT_REJECTED 的说明。 */
-const cardError = computed(() => {  const parts = localIssues.value
-    .filter((issue) => !props.schema.fields.some((field) => issue.key === field.key))
-    .map((issue) => issue.message)
-  for (const issue of props.fieldErrors ?? []) {
-    if (!props.schema.fields.some((field) => issue.key === field.key)) {
-      parts.push(issue.message)
-    }
-  }
-  if (props.error) {
-    parts.push(props.error)
-  }
-  return parts.join('；')
+/** 卡级问题只触发完整通用文案，不展示后端或本地原始说明。 */
+const cardError = computed(() => {
+  const hasCardIssue = localIssues.value.some((issue) => !props.schema.fields.some((field) => issue.key === field.key))
+    || (props.fieldErrors ?? []).some((issue) => !props.schema.fields.some((field) => issue.key === field.key))
+    || Boolean(props.error)
+  return hasCardIssue ? t('ai.gf.cardError') : ''
 })
 
 function fieldClass(field: FormFieldSpec): string {

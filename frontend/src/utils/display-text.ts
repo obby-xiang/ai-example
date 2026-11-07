@@ -1,5 +1,6 @@
 import { markdownCodeRanges } from '@/utils/markdown'
 import { logCaughtError } from '@/utils/log-caught-error'
+import { translate } from '@/composables/useCopy'
 
 
 const PROTOCOL_TAG_RE = /<\s*\/?\s*(knowledge_catalog|knowledge|tool_result)\s*>/gi
@@ -212,10 +213,13 @@ function readToolResultPage(text: string): EnvelopeRead {
     if (!isReadToolResultOffsetValid(value, contentEnd)) {
       return { status: 'notProtocol', end }
     }
-    const progress = value.nextOffset === null ? '已读完' : '未读完'
     return {
       status: 'valid',
-      display: `${value.content}\n\n已显示 ${contentEnd}/${value.originalChars} 字符，${progress}`,
+      display: translate(`ai.panel.readToolResultPage.${value.nextOffset === null ? 'complete' : 'hasMore'}`, {
+        content: value.content as string,
+        shown: contentEnd,
+        total: value.originalChars as number
+      }),
       end
     }
   } catch (error) {

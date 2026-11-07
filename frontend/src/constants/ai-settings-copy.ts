@@ -46,9 +46,14 @@ const COPY_KEYS = {
   code: 'ai.settings.copy.code',
   displayName: 'ai.settings.copy.displayName',
   baseUrl: 'ai.settings.copy.baseUrl',
+  baseUrlHint: 'ai.settings.copy.baseUrlHint',
   completionsPath: 'ai.settings.copy.completionsPath',
   modelsPath: 'ai.settings.copy.modelsPath',
   apiKey: 'ai.settings.copy.apiKey',
+  apiKeyHint: 'ai.settings.copy.apiKeyHint',
+  createCodePlaceholder: 'ai.settings.copy.createCodePlaceholder',
+  createDisplayNamePlaceholder: 'ai.settings.copy.createDisplayNamePlaceholder',
+  createBaseUrlPlaceholder: 'ai.settings.copy.createBaseUrlPlaceholder',
   modelsTitle: 'ai.settings.copy.modelsTitle',
   modelsEmpty: 'ai.settings.copy.modelsEmpty',
   pullModels: 'ai.settings.copy.pullModels',
@@ -59,7 +64,12 @@ const COPY_KEYS = {
   manualAdd: 'ai.settings.copy.manualAdd',
   modelId: 'ai.settings.copy.modelId',
   maxContext: 'ai.settings.copy.maxContext',
+  maxContextHint: 'ai.settings.copy.maxContextHint',
   maxOutput: 'ai.settings.copy.maxOutput',
+  maxOutputHint: 'ai.settings.copy.maxOutputHint',
+  manualModelIdPlaceholder: 'ai.settings.copy.manualModelIdPlaceholder',
+  manualMaxContextPlaceholder: 'ai.settings.copy.manualMaxContextPlaceholder',
+  manualMaxOutputPlaceholder: 'ai.settings.copy.manualMaxOutputPlaceholder',
   toolCalling: 'ai.settings.copy.toolCalling',
   vision: 'ai.settings.copy.vision',
   reasoning: 'ai.settings.copy.reasoning',
@@ -99,6 +109,14 @@ export function useAiSettingsCopy(): Readonly<Record<AiSettingsCopyKey, string>>
     })
   }
   return copy as Readonly<Record<AiSettingsCopyKey, string>>
+}
+
+export function probeOkText(count: number, latencyMs: number): string {
+  return translate(COPY_KEYS.probeOk, { count, latencyMs })
+}
+
+export function probeFailedText(reason: string): string {
+  return translate(COPY_KEYS.probeFailed, { reason })
 }
 
 /**

@@ -42,7 +42,7 @@ export const TOOL_STATUSES: readonly ToolRunStatus[] = [
 
 /** 当前语言下的状态词。 */
 export function toolStatusWord(status: ToolRunStatus): string {
-  return status === 'unknown' ? '' : translate(`tool.status.${status}`)
+  return translate(`tool.status.${status}`)
 }
 
 /** 当前语言下的状态词集合（摘要位去重判据用；随语言变化 ⇒ 调用点须实时取）。 */
@@ -241,7 +241,7 @@ function summaryFor(name: string, args: ToolArgs): string | null {
 
 /**
  * 工具卡折叠态一行摘要（T0 交付）。已决失败/未知态也走具体模板（args 仍是事实），
- * 无映射工具与解析失败态兜底「工具名 + 状态词」。
+ * 无映射工具与解析失败态使用业务化兜底，不暴露内部工具名。
  */
 export function toolSummary(part: ToolPart): string {
   const args = summaryArgsOf(part)
@@ -249,5 +249,5 @@ export function toolSummary(part: ToolPart): string {
   if (mapped) {
     return mapped
   }
-  return translate('tool.fallback', { name: part.name, status: toolStatusWord(part.status) })
+  return translate('tool.fallback', { status: toolStatusWord(part.status) })
 }

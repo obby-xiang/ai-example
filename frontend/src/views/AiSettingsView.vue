@@ -23,7 +23,14 @@ import { head } from 'lodash'
 import { aiApi } from '@/api/ai'
 import type { AiHealth } from '@/types/ai'
 import { aiConfigApi, type AiDefaults, type AiModelRow, type AiProbeResult, type AiProviderView } from '@/api/aiConfig'
-import { useAiSettingsCopy, describeAiConfigError, errorCodeOf, softDeleteHint } from '@/constants/ai-settings-copy'
+import {
+  useAiSettingsCopy,
+  describeAiConfigError,
+  errorCodeOf,
+  probeFailedText,
+  probeOkText,
+  softDeleteHint
+} from '@/constants/ai-settings-copy'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { logCaughtError } from '@/utils/log-caught-error'
 
@@ -483,7 +490,10 @@ async function saveProvider(provider: AiProviderView): Promise<void> {
 }
 
 async function clearKey(provider: AiProviderView): Promise<void> {
-  const confirmed = await canConfirm(T.clearKeyConfirm)
+  const confirmed = await canConfirm(
+    T.clearKeyConfirm,
+    t('ai.settings.copy.clearKeyConfirmAction', { name: provider.displayName })
+  )
   if (!confirmed) {
     return
   }
@@ -518,7 +528,10 @@ function clearCardKey(providerId: number): void {
 
 async function toggleEnabled(provider: AiProviderView): Promise<void> {
   if (provider.enabled) {
-    const confirmed = await canConfirm(T.disableConfirm)
+    const confirmed = await canConfirm(
+      T.disableConfirm,
+      t('ai.settings.copy.disableConfirmAction', { name: provider.displayName })
+    )
     if (!confirmed) {
       return
     }
@@ -543,7 +556,10 @@ async function toggleEnabled(provider: AiProviderView): Promise<void> {
  * 会让人以为删失败了。硬删优先 + 明确回落，既尊重意图又不会悄悄丢掉模型清单。
  */
 async function removeProvider(provider: AiProviderView): Promise<void> {
-  const confirmed = await canConfirm(T.removeConfirm)
+  const confirmed = await canConfirm(
+    t('ai.settings.copy.removeProviderConfirm', { name: provider.displayName }),
+    t('ai.settings.copy.removeProviderConfirmAction', { name: provider.displayName })
+  )
   if (!confirmed) {
     return
   }
@@ -586,9 +602,9 @@ function probeText(result: AiProbeResult | null | undefined): string {
     return ''
   }
   if (result.ok) {
-    return `${T.probeOk} ${result.modelCount}（${result.latencyMs}ms）`
+    return probeOkText(result.modelCount, result.latencyMs)
   }
-  return `${T.probeFailed}：${describeAiConfigError({ code: result.code ?? undefined })}`
+  return probeFailedText(describeAiConfigError({ code: result.code ?? undefined }))
 }
 
 async function createProvider(): Promise<void> {
@@ -750,7 +766,10 @@ async function removeModelRow(model: AiModelRow): Promise<void> {
   if (!provider) {
     return
   }
-  const confirmed = await canConfirm(T.removeConfirm)
+  const confirmed = await canConfirm(
+    t('ai.settings.copy.removeModelConfirm', { modelId: model.modelId }),
+    t('ai.settings.copy.removeModelConfirmAction', { modelId: model.modelId })
+  )
   if (!confirmed) {
     return
   }
@@ -797,9 +816,13 @@ async function saveDefaults(): Promise<void> {
   })
 }
 
-async function canConfirm(message: string): Promise<boolean> {
+async function canConfirm(message: string, confirmText: string): Promise<boolean> {
   try {
-    return await ElMessageBox.confirm(message, T.title, { type: 'warning' }).then(
+    return await ElMessageBox.confirm(message, T.title, {
+      type: 'warning',
+      confirmButtonText: confirmText,
+      cancelButtonText: t('ai.settings.copy.keepConfiguration')
+    }).then(
       () => true,
       (error) => {
         if (error === 'cancel' || error === 'close') {
@@ -884,6 +907,7 @@ async function canConfirm(message: string): Promise<boolean> {
               <span class="text-[#909399] w-20 shrink-0">{{ T.baseUrl }}</span>
               <input v-model="cardForms[provider.id].baseUrl" class="flex-1 border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="provider-base-url" />
             </label>
+            <p class="col-span-2 -mt-1 text-[11px] text-[#909399]">{{ T.baseUrlHint }}</p>
             <label class="flex items-center gap-2">
               <span class="text-[#909399] w-20 shrink-0">{{ T.completionsPath }}</span>
               <input v-model="cardForms[provider.id].completionsPath" class="flex-1 border border-solid border-[#dcdfe6] rounded px-2 py-1" />
@@ -903,6 +927,7 @@ async function canConfirm(message: string): Promise<boolean> {
                 data-testid="key-input"
               />
             </label>
+            <p class="col-span-2 -mt-1 text-[11px] text-[#909399]">{{ T.apiKeyHint }}</p>
           </div>
 
           <div class="mt-2 flex items-center gap-2 text-[12px]">
@@ -941,17 +966,30 @@ async function canConfirm(message: string): Promise<boolean> {
         <div class="border border-dashed border-[#dcdfe6] rounded p-3" data-testid="create-provider">
           <div class="text-sm font-medium mb-2">{{ T.createTitle }}</div>
           <div class="grid grid-cols-2 gap-2 text-[12px]">
-            <input v-model="createForm.code" :placeholder="T.code" class="border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="create-code" />
-            <input v-model="createForm.displayName" :placeholder="T.displayName" class="border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="create-name" />
-            <input v-model="createForm.baseUrl" :placeholder="T.baseUrl" class="border border-solid border-[#dcdfe6] rounded px-2 py-1 col-span-2" data-testid="create-base-url" />
-            <input
-              v-model="createForm.apiKey"
-              type="password"
-              autocomplete="new-password"
-              :placeholder="T.apiKey"
-              class="border border-solid border-[#dcdfe6] rounded px-2 py-1 col-span-2"
-              data-testid="create-key"
-            />
+            <label class="flex flex-col gap-1">
+              <span class="text-[#909399]">{{ T.code }}</span>
+              <input v-model="createForm.code" :placeholder="T.createCodePlaceholder" class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="create-code" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[#909399]">{{ T.displayName }}</span>
+              <input v-model="createForm.displayName" :placeholder="T.createDisplayNamePlaceholder" class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="create-name" />
+            </label>
+            <label class="col-span-2 flex flex-col gap-1">
+              <span class="text-[#909399]">{{ T.baseUrl }}</span>
+              <input v-model="createForm.baseUrl" :placeholder="T.createBaseUrlPlaceholder" class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="create-base-url" />
+              <span class="text-[11px] text-[#909399]">{{ T.baseUrlHint }}</span>
+            </label>
+            <label class="col-span-2 flex flex-col gap-1">
+              <span class="text-[#909399]">{{ T.apiKey }}</span>
+              <input
+                v-model="createForm.apiKey"
+                type="password"
+                autocomplete="new-password"
+                class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1"
+                data-testid="create-key"
+              />
+              <span class="text-[11px] text-[#909399]">{{ T.apiKeyHint }}</span>
+            </label>
           </div>
           <button
             class="mt-2 px-2 py-1 rounded bg-[#409eff] text-white text-[12px] disabled:opacity-50"
@@ -1026,14 +1064,27 @@ async function canConfirm(message: string): Promise<boolean> {
           </tbody>
         </table>
 
-        <div class="mt-2 flex items-center gap-2 text-[12px]" data-testid="manual-model-form">
-          <span class="text-[#909399]">{{ T.manualAdd }}</span>
-          <input v-model="manualForm.modelId" :placeholder="T.modelId" class="border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-id" />
-          <input v-model="manualForm.maxContext" :placeholder="T.maxContext" class="w-28 border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-context" />
-          <input v-model="manualForm.maxOutput" :placeholder="T.maxOutput" class="w-28 border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-output" />
-          <button class="px-2 py-1 rounded bg-[#409eff] text-white" :disabled="!selectedProvider || isBusy('manual')" data-testid="manual-model-submit" @click="addManualModel">
-            {{ T.addModel }}
-          </button>
+        <div class="mt-2 text-[12px]" data-testid="manual-model-form">
+          <div class="text-[#909399] mb-1">{{ T.manualAdd }}</div>
+          <div class="grid grid-cols-4 gap-2 items-end">
+            <label class="flex flex-col gap-1">
+              <span class="text-[#909399]">{{ T.modelId }}</span>
+              <input v-model="manualForm.modelId" :placeholder="T.manualModelIdPlaceholder" class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-id" />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[#909399]">{{ T.maxContext }}</span>
+              <input v-model="manualForm.maxContext" :placeholder="T.manualMaxContextPlaceholder" class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-context" />
+              <span class="text-[11px] text-[#909399]">{{ T.maxContextHint }}</span>
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[#909399]">{{ T.maxOutput }}</span>
+              <input v-model="manualForm.maxOutput" :placeholder="T.manualMaxOutputPlaceholder" class="w-full border border-solid border-[#dcdfe6] rounded px-2 py-1" data-testid="manual-model-output" />
+              <span class="text-[11px] text-[#909399]">{{ T.maxOutputHint }}</span>
+            </label>
+            <button class="px-2 py-1 rounded bg-[#409eff] text-white" :disabled="!selectedProvider || isBusy('manual')" data-testid="manual-model-submit" @click="addManualModel">
+              {{ T.addModel }}
+            </button>
+          </div>
         </div>
       </section>
     </template>

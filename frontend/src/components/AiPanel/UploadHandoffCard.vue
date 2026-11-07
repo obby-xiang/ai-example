@@ -2,6 +2,7 @@
 import { computed, ref, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
+import { UPLOAD_ACCEPT, UPLOAD_MAX_BYTES } from '@/constants/upload'
 import { unicodeCharacterCount } from '@/utils/display-text'
 
 type UploadHandoffStatus = 'waiting' | 'uploading' | 'uploaded' | 'failed' | 'unsupported' | 'missing' | 'cancelled'
@@ -75,10 +76,12 @@ const acceptText = computed(() => {
     ? raw
     : typeof raw === 'string' && raw !== ''
       ? raw.split(',').map((item) => item.trim()).filter((item) => item !== '')
-      : ['xlsx', 'zip']
-  const effective = list.length > 0 ? list : ['xlsx', 'zip']
+      : UPLOAD_ACCEPT.split(',')
+  const effective = list.length > 0 ? list : UPLOAD_ACCEPT.split(',')
   return effective.map((item) => `.${item.replace(/^\./, '')}`).join(' / ')
 })
+const maxSizeText = `${UPLOAD_MAX_BYTES / 1024 / 1024}MB`
+const maxFilesPerSelection = 1
 
 const hasReason = computed(() => Boolean(props.reason?.trim()))
 const isRetry = computed(() => props.status === 'failed' || (props.status === 'waiting' && hasReason.value))
@@ -149,7 +152,7 @@ const SECONDARY_BUTTON = 'min-w-[56px] flex-none whitespace-nowrap rounded-[8px]
 
         <template v-if="status !== 'uploading' && status !== 'uploaded' && status !== 'cancelled'">
           <p class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
-            {{ t('ai.uploadHandoff.acceptHint', { accept: acceptText }) }}
+            {{ t('ai.uploadHandoff.limitsHint', { accept: acceptText, maxSize: maxSizeText, maxFiles: maxFilesPerSelection }) }}
           </p>
           <p v-if="showEntryHint" class="m-0 text-[12.2px] leading-[1.55] text-[#57606a]">
             {{ t('ai.uploadHandoff.orClick', { label: entryLabel }) }}

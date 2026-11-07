@@ -2283,6 +2283,167 @@
           "reason": "七个暂存文件已逐hunk独立静态复审，A1/A2/A3均PASS，A4无修改；测试、构建、真实模型、浏览器和接口均NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:14e0eb62fa5e8eae630297e2c1adade396186102407157f1bb456481e61da588",
+      "status": "reviewed",
+      "reason": "当前20个前端文案及关联模板文件已逐文件逐hunk独立静态复审，agent-1030整体结论PASS；HITL具体动作批准、不可逆结果型按钮、未知值安全兜底、异常脱敏、上传前置限制、设置常显标签和中英参数化消息均已核对，前次导入异常原文及未知范围类型缺口已关闭。仅呈现层变化，测试、构建、typecheck、浏览器和真实接口均NOT_RUN，本记录未运行门禁。",
+      "reviewedAt": "2026-11-07T22:48:07+08:00",
+      "reviewer": "K3.1 Pro agent-1030独立静态复审",
+      "specChanges": [
+        {
+          "change": "HITL批准按钮改为“批准{action}/不执行”，SheetPreview按{cells}展示应用结果，confirmIrreversible的confirmText/cancelText改为必传且删除通用回退，所有删除、停用、清密钥、取消作业、放弃编辑和REPLACE发布调用传入结果型按钮。",
+          "reason": "高风险确认必须点明动作对象与后果，否决只表示不执行提议，保留出口需说明保留对象，避免通用确定/取消造成误授权。",
+          "impact": "仅对话框和按钮呈现变化，beforeClose勾选闸、批准/取消布尔结果、作业调用、表格应用、发布模式和业务执行顺序不变，未改API或确认门状态机。"
+        },
+        {
+          "change": "未知工具名、未知枚举和未知状态使用“其他操作/未知值/需人工核对”等安全兜底，仅符合公开代码形态的枚举可附代码；普通异常统一使用白名单或安全通用文案，上传选择前展示格式、5MB和单文件限制。",
+          "reason": "内部工具名、异常原文和未知值不能误导用户或泄露实现细节，上传限制必须在文件选择前可见。",
+          "impact": "AiPanel/tool-summaries不再回显未注册name，DataBrowser未知scopeType显示未知值，ui-error及导入步骤不再上屏普通异常原文；仅展示与错误投影变化，实际工具参数、状态值、上传multiple=false和既有 accept 校验不变。"
+        },
+        {
+          "change": "AI设置新建端点和手动模型改为常显label及用途hint，反馈关联ID收进二级技术详情，定义主说明与key/isKey技术说明分离；中英locale补齐HITL、写表、上传、设置、发布、步骤和分页消息的参数化文本。",
+          "reason": "占位符不能替代表单字段含义，技术标识应留在二级说明，所有面向用户动态内容必须随locale完整翻译并使用命名参数。",
+          "impact": "probeOk/probeFailed以count/latencyMs/reason构造，上传使用accept/maxSize/maxFiles，写表使用cells，发布与任务使用taskId/jobId/title/modelId等参数；仅信息架构与文案变化，配置字段、反馈记录和定义数据不变。"
+        },
+        {
+          "change": "本批规格变更严格限定为呈现层：非白名单异常不上屏，SafeDownloadError仅承载本地显式构造的安全下载文案，readToolResultPage将分页进度改为本地化模板。",
+          "reason": "需要同时保证错误脱敏、真实结果可核对以及流式/分页协议不被文案修改破坏。",
+          "impact": "logCaughtError继续保留脱敏技术日志，下载/步骤/保存的真实ok/failed及重试路径不变；分页content、shown、total和nextOffset计算不变，不修改SSE、Redis、API、工具执行或异步状态机。"
+        }
+      ],
+      "files": [
+        {
+          "path": "frontend/src/components/AiPanel/AiPanel.vue",
+          "status": "checked",
+          "reason": "HITL批准按钮传toolLabel动作名，未知工具/创建类型/状态改安全通用兜底，摘要不再按内部name剥壳；门卡decide、工具数据和状态机未改。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/FormRenderer.vue",
+          "status": "checked",
+          "reason": "已识别字段错误仅传label/limit/min/max/format等安全参数，未知码与卡级错误使用通用文案；原始message不再上屏，字段校验、提交和取消流程不变。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/SheetPreviewCard.vue",
+          "status": "checked",
+          "reason": "应用及应用中按钮传入plan.cellsCount，显示“应用N格改动”，取消侧保留当前表格；预览档位、应用调用和单元格计数来源不变。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/UploadHandoffCard.vue",
+          "status": "checked",
+          "reason": "复用UPLOAD_ACCEPT和UPLOAD_MAX_BYTES，选择前展示.xlsx/.zip、5MB和每次1个文件；maxFiles与multiple=false一致，实际上传和回灌行为未改。"
+        },
+        {
+          "path": "frontend/src/constants/ai-settings-copy.ts",
+          "status": "checked",
+          "reason": "新增设置hint/placeholder键和probeOkText/probeFailedText参数化函数，探测失败只按稳定code描述；未知码不回显后端消息，既有COPY_KEYS消费保持。"
+        },
+        {
+          "path": "frontend/src/locales/en-US.json",
+          "status": "checked",
+          "reason": "英文新增HITL、未知值、写表cells、上传限制、设置hint、结果型确认、发布/步骤/分页及安全异常文案；与中文键集和命名参数逐项对应。"
+        },
+        {
+          "path": "frontend/src/locales/zh-CN.json",
+          "status": "checked",
+          "reason": "中文补齐“批准{action}/不执行”、保留出口、未知状态和错误安全兜底，按钮点明对象与后果；所有动态值使用命名参数，业务状态值本身未改。"
+        },
+        {
+          "path": "frontend/src/utils/card-content.ts",
+          "status": "checked",
+          "reason": "统一枚举原文归一和unknownEnumText，未知任务/作业/范围/模式/步骤/状态使用安全兜底，只有公开大写代码可附加；已知映射保持不变。"
+        },
+        {
+          "path": "frontend/src/utils/confirm-irreversible.ts",
+          "status": "checked",
+          "reason": "confirmText/cancelText改为必传并直接设置按钮，无通用回退，REPLACE发布传结果型按钮；beforeClose勾选闸和取消/异常boolean语义不变。"
+        },
+        {
+          "path": "frontend/src/utils/display-text.ts",
+          "status": "checked",
+          "reason": "工具分页进度改readToolResultPage.complete/hasMore本地化模板，content/shown/total参数化；offset、原文内容和分页协议计算未改。"
+        },
+        {
+          "path": "frontend/src/utils/publish-mode.ts",
+          "status": "checked",
+          "reason": "settingsJson非字符串、解析失败和任务读取失败分别使用publishModeUnreadable/Invalid/LoadFailed安全消息，不再输出原始异常或设置细节；权威模式解析和fail-closed不变。"
+        },
+        {
+          "path": "frontend/src/utils/tool-summaries.ts",
+          "status": "checked",
+          "reason": "unknown状态也有“需人工核对”文案，无映射工具使用“其他操作+状态”而不带内部name；已有summary模板与真实args消费不变。"
+        },
+        {
+          "path": "frontend/src/utils/ui-error.ts",
+          "status": "checked",
+          "reason": "非ApiError及普通Error统一返回fallback，白名单ApiError安全消息例外保留；logCaughtError继续记录脱敏技术日志，原始异常不上屏。"
+        },
+        {
+          "path": "frontend/src/views/AiFeedbackView.vue",
+          "status": "checked",
+          "reason": "消息摘要优先真实excerpt，缺失时提示查看技术详情，完整session/message ID移至details；只读反馈列表和rating/reason数据未改。"
+        },
+        {
+          "path": "frontend/src/views/AiSettingsView.vue",
+          "status": "checked",
+          "reason": "新建端点和手动模型使用常显label/hint，探测结果参数化，删除/停用/清密钥分别传结果型按钮；保存、探测、软删回退和canConfirm取消分支不变。"
+        },
+        {
+          "path": "frontend/src/views/DataBrowserView.vue",
+          "status": "checked",
+          "reason": "scopeTypeLabel仅映射GLOBAL/REGION/PROJECT，默认改ai.value.unknown而不再显示字段名“范围”；行详情与表格列均复用同一安全标签，查询逻辑不变。"
+        },
+        {
+          "path": "frontend/src/views/DefinitionsView.vue",
+          "status": "checked",
+          "reason": "主说明与技术说明分离，key/isKey差异通过keyField/legacyKeyField参数展示；定义筛选、模板下载和编辑功能未改。"
+        },
+        {
+          "path": "frontend/src/views/ExportWizardView.vue",
+          "status": "checked",
+          "reason": "步骤同步/保存/编辑器/下载普通异常改安全兜底，SafeDownloadError仅保留本地安全文案；重新导出和取消作业接结果型按钮，任务代次、下载和回灌顺序不变。"
+        },
+        {
+          "path": "frontend/src/views/ImportWizardView.vue",
+          "status": "checked",
+          "reason": "syncStepToBackend改用userFacingErrorText安全兜底，上传/切换/取消勾选/离开及取消作业按钮全部结果化；文件清单提示本地化，步骤同步和编辑写回状态机不变。"
+        },
+        {
+          "path": "frontend/src/views/TaskCenterView.vue",
+          "status": "checked",
+          "reason": "当前步骤按locale映射且未知步骤/状态安全兜底，加载错误直接使用store安全文本；取消和删除任务传jobId/title结果型按钮，removeTask等公共契约不变。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅修改现有Vue/TypeScript文案与模板，复用既有translate、UPLOAD_ACCEPT/UPLOAD_MAX_BYTES和logCaughtError，未新增依赖、工具框架或集合处理库，Tailwind结构只做既有类名排版。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "20个文件均为前端文案、locale JSON和模板调用，没有Java集合、Lombok、import或JSON实体变更；前端本来就不适用函数50行/圈复杂度20门槛，未引入新的公共API形态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "普通Error.message、String(error)、后端表单message和发布settingsJson细节均不再上屏，只有白名单业务错误与本地SafeDownloadError安全文案可显示；logCaughtError仍保留脱敏日志，未把异常通道改成静默失败。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "HITL批准具体动作、不可逆结果型按钮、未知工具/枚举/状态、上传前置限制、常显标签、反馈二级ID和中英参数化文案逐项核对；仅呈现变化，真实卡片状态、字段数据和操作出口保持。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批不修改API请求/响应、SSE、Redis、确认门、pre/post、工具执行、取消/重试状态机或模型并发；按钮文案和安全错误投影不改变既有布尔结局及业务执行顺序，真实接口未运行。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "readToolResultPage仅将既有content/shown/total插入locale纯文本，offset和原文内容不变；未修改增量UTF-8、SSE帧、Markdown/Mermaid解析、字素截断或二次转码，参数化中文文案不引入解析变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "按20个实际暂存路径逐hunk静态复核，agent-1030最终整体PASS，专项回执中的C6按钮完整性及整体回执中的导入异常/未知范围问题均已关闭；测试、构建、typecheck、浏览器、真实模型和真实接口均NOT_RUN，门禁留由主会话执行。"
+        }
+      }
     }
   ]
 }

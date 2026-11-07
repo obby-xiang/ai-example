@@ -1080,7 +1080,7 @@ async function goStep(next: number, guard?: () => boolean): Promise<StepAdvanceO
     return { ok: false, reason: '任务已切换，本次未推进步骤' }
   }
   if (!synced.ok) {
-    const syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
+    const syncWarning = t('views.export.msg.stepSyncWarning')
     ElMessage.warning(syncWarning)
     return { ok: true, syncWarning }
   }
@@ -1135,7 +1135,7 @@ async function syncStepToBackend(
     // 批3③b D11（R-143①）：单点提示 —— 本函数**不自弹**（原 ElMessage.error 删除），由调用方
     // goStep 只弹一条 warning（全仓仅两个调用方：Export/Import 向导的 goStep，不留静默路径）。
     // 结构化失败结局照常返回，由 goStep 带进回灌/界面。
-    const reason = error instanceof Error ? error.message : String(error)
+    const reason = userFacingErrorText(error, t('api.error.safeUnknown'))
     return { ok: false, reason }
   }
 }
@@ -1262,7 +1262,7 @@ async function persistStepData(
   } catch (error) {
     const reason = error instanceof InvalidConditionInputError
       ? describeConditionInputError(error)
-      : userFacingErrorText(error, t('views.export.msg.saveToServerFailed'))
+      : userFacingErrorText(error, t('api.error.safeUnknown'))
     if (generation !== taskGeneration) {
       return { ok: false, reason: '任务已切换，本次未完成落库' }
     }
@@ -1319,7 +1319,7 @@ async function countExactRows(code: string): Promise<void> {
       logCaughtError(error, 'views/ExportWizardView.vue:1170')
     condErrors[code] = error instanceof InvalidConditionInputError
       ? describeConditionInputError(error)
-      : error instanceof Error ? error.message : String(error)
+      : t('api.error.safeUnknown')
     return
   }
   rowCountRequests.set(code, request)
@@ -1399,7 +1399,7 @@ async function startExport(
   options: { discardUnsaved?: boolean; confirmDiscardUnsaved?: boolean; guard?: () => boolean } = {}
 ): Promise<StartExportOutcome> {
   if (exportStartOwner !== null) {
-    return { ok: false, reason: '导出作业正在启动，请勿重复发起' }
+    return { ok: false, reason: t('views.export.msg.startInFlight') }
   }
   const owner = {}
   exportStartOwner = owner
@@ -1428,7 +1428,9 @@ async function startExport(
         const confirmed = await confirmIrreversible({
           title: t('views.export.dialog.dirtyTitle'),
           message: t('views.export.dialog.dirtyMessage'),
-          ack: t('views.export.dialog.dirtyAck')
+          ack: t('views.export.dialog.dirtyAck'),
+          confirmText: t('views.export.dialog.dirtyConfirm'),
+          cancelText: t('views.export.dialog.dirtyKeep')
         })
         if (!confirmed) {
           const reason = t('views.export.msg.dirtyCanceled')
@@ -1630,7 +1632,9 @@ async function cancelJob(): Promise<void> {
   const confirmed = await confirmIrreversible({
     title: t('views.export.dialog.cancelTitle'),
     message: t('views.export.dialog.cancelMessage'),
-    ack: t('views.export.dialog.cancelAck')
+    ack: t('views.export.dialog.cancelAck'),
+    confirmText: t('views.export.dialog.cancelConfirm', { jobId }),
+    cancelText: t('views.export.dialog.cancelKeep')
   })
   if (!confirmed) {
     return
@@ -1649,13 +1653,13 @@ async function cancelJob(): Promise<void> {
  * S2-1：本函数**返回真实结局**，不再把失败只吞进 `ElMessage` —— 调用方
  * `PAGE_HANDLER_OPEN_EXPORT_EDITOR` 的 handler 必须据此回灌，否则引擎加载失败时会向模型
  * 谎报"已打开在线编辑器"（B-07 让 `waitForReady` 必结算后，这条吞错路径由不可达变可达）。
- * `error` 保留本地引擎人话；服务端异常改用既有 i18n 兜底。
+ * `error` 使用安全 i18n 兜底，异常原文只进脱敏日志。
  * `ElMessage.error`（用户可见）与 `loadedGrids` 回滚（允许重试）保留不变。
  *
  * 与预算的关系（S2-2 后同值，如实登记）：`SpreadGrid` 的就绪看门狗同为 60s
  * （`READY_TIMEOUT_MS`），而前端工具预算折算后也是 60s（120s − 60s）——两者同值时预算可能
  * 先到，那次回灌会是**通用超时文案**（同样声明"结局未知"、不谎报），本函数的失败结局来不及
- * 被回灌；只有预算后到时才会回灌下面 handler 产出的"表格未就绪 + 引擎原文"。
+ * 被回灌；只有预算后到时才会回灌下面 handler 产出的"表格未就绪 + 安全兜底"。
  *
  * <p>**L-115 并发去重**：并发调用会拿到"已加载"的假肯定 —— 后来者若据此提前放行，读到的是
  * 还没载入的空表。故这里按 code 记住在途 promise：后来者**等同一个结局**，而不是提前放行；
@@ -1733,7 +1737,7 @@ async function loadGrid(code: string): Promise<{ ok: boolean; error: string }> {
   } catch (error) {
     if (generation === taskGeneration) {
       loadedGrids.delete(code)
-      const reason = userFacingErrorText(error, t('views.export.msg.filesListLoadFailed'))
+      const reason = userFacingErrorText(error, t('api.error.safeUnknown'))
       ElMessage.error(reason)
       return { ok: false, error: reason }
     }
@@ -1801,6 +1805,16 @@ interface XlsxSource {
   rowCount: number
 }
 
+class SafeDownloadError extends Error {}
+
+function downloadErrorText(error: unknown, fallback: string): string {
+  if (error instanceof SafeDownloadError) {
+    logCaughtError(error, 'export-wizard:download')
+    return error.message
+  }
+  return userFacingErrorText(error, fallback)
+}
+
 /**
  * 取某配置项的下载用 xlsx：**先确保表格已载入**，载入不了才回落服务端字节。
  *
@@ -1820,31 +1834,31 @@ async function buildGridXlsx(
 ): Promise<XlsxSource> {
   const loaded = await ensureGridLoaded(code)
   if (isSwitched()) {
-    throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+    throw new SafeDownloadError(t('views.export.msg.taskSwitchedNoDownload'))
   }
   if (loaded.ok) {
     const blob = await grid.toXlsxBlob()
     if (isSwitched()) {
-      throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+      throw new SafeDownloadError(t('views.export.msg.taskSwitchedNoDownload'))
     }
     return { blob, fileName, source: 'grid', rowCount }
   }
   const loadReason = loaded.error || t('views.export.msg.gridNotLoaded')
   if (forTask === null) {
-    throw new Error(t('views.export.msg.downloadNotLoadedNoTask', { code, reason: loadReason }))
+    throw new SafeDownloadError(t('views.export.msg.downloadNotLoadedNoTask', { code, reason: loadReason }))
   }
   let fallback: Blob
   try {
     fallback = await tasksApi.downloadFile(forTask, code)
   } catch (error) {
-    throw new Error(t('views.export.msg.downloadFallbackFailed', {
+    throw new SafeDownloadError(t('views.export.msg.downloadFallbackFailed', {
       code,
       reason: loadReason,
       error: userFacingErrorText(error, t('views.export.msg.downloadFailed'))
     }))
   }
   if (isSwitched()) {
-    throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+    throw new SafeDownloadError(t('views.export.msg.taskSwitchedNoDownload'))
   }
   return { blob: fallback, fileName, source: 'server', rowCount }
 }
@@ -1858,7 +1872,7 @@ async function buildXlsx(code: string): Promise<XlsxSource> {
   // 或让上游把这批空字节当成新结果）。
   const fieldsProblem = fieldsUnavailableUiReason(code)
   if (fieldsProblem !== null) {
-    throw new Error(t('views.export.msg.cannotBuildExportFile', { code, problem: fieldsProblem }))
+    throw new SafeDownloadError(t('views.export.msg.cannotBuildExportFile', { code, problem: fieldsProblem }))
   }
   // 任务号与代次在**入口**捕获：`ensureGridLoaded` / `toXlsxBlob` / 回落下载都是 await，
   // 期间换任务会把 A 的表格字节（或 A 的结果文件）当成 B 的文件交出去。代次一变即中止。
@@ -1870,11 +1884,11 @@ async function buildXlsx(code: string): Promise<XlsxSource> {
     return await buildGridXlsx(grid, code, forTask, fileName, rowCount, isSwitched)
   }
   if (forTask === null) {
-    throw new Error(t('views.export.msg.noTask'))
+    throw new SafeDownloadError(t('views.export.msg.noTask'))
   }
   const blob = await tasksApi.downloadFile(forTask, code)
   if (isSwitched()) {
-    throw new Error(t('views.export.msg.taskSwitchedNoDownload'))
+    throw new SafeDownloadError(t('views.export.msg.taskSwitchedNoDownload'))
   }
   return { blob, fileName, source: 'server', rowCount }
 }
@@ -1992,7 +2006,7 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
       return { ok: false, reason: error.message }
     }
     // 服务端异常原文不上屏；本地明确构造的人话错误保留。
-    const reason = userFacingErrorText(error, t('views.export.msg.downloadFailed'))
+    const reason = downloadErrorText(error, t('api.error.safeUnknown'))
     ElMessage.error(reason)
     return { ok: false, reason }
   } finally {
@@ -2026,7 +2040,7 @@ function startDownloadInBackground(code: string): void {
         ElMessage.info(error.message)
         return
       }
-      ElMessage.error(userFacingErrorText(error, t('views.export.msg.downloadFailed')))
+      ElMessage.error(downloadErrorText(error, t('api.error.safeUnknown')))
     })
     .finally(() => {
       inFlightDownloads.delete(code)
@@ -2081,7 +2095,7 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
       // 整批显式失败：不产出残缺 zip、不下载一部分（否则用户以为拿到了全部文件）
       ElMessage.error(t('views.export.msg.zipBatchFailed', {
         count: batch.length,
-        reason: userFacingErrorText(error, t('views.export.msg.zipFailed'))
+        reason: downloadErrorText(error, t('api.error.safeUnknown'))
       }))
     })
     .finally(() => {
@@ -2115,7 +2129,7 @@ async function downloadChecked(): Promise<void> {
   } catch (error) {
     ElMessage.error(t('views.export.msg.zipBatchFailed', {
       count: batch.length,
-      reason: userFacingErrorText(error, t('views.export.msg.zipFailed'))
+      reason: downloadErrorText(error, t('api.error.safeUnknown'))
     }))
   } finally {
     releaseDownloadSlot(slot)
@@ -2145,7 +2159,7 @@ async function downloadAll(): Promise<void> {
   } catch (error) {
     ElMessage.error(t('views.export.msg.zipBatchFailed', {
       count: batch.length,
-      reason: userFacingErrorText(error, t('views.export.msg.zipFailed'))
+      reason: downloadErrorText(error, t('api.error.safeUnknown'))
     }))
   } finally {
     releaseDownloadSlot(slot)
@@ -2239,7 +2253,7 @@ async function saveEdits(): Promise<SaveOutcome> {
       saved.push(item.defCode)
     }
   } catch (error) {
-    failed = userFacingErrorText(error, t('views.export.msg.saveToServerFailed'))
+    failed = userFacingErrorText(error, t('api.error.safeUnknown'))
     if (generation === taskGeneration) {
       ElMessage.error(failed)
     }
@@ -2249,7 +2263,7 @@ async function saveEdits(): Promise<SaveOutcome> {
     }
   }
   if (aborted) {
-    ElMessage.warning('任务已切换，本次保存中止（未把上一个任务的内容写到新任务上）')
+    ElMessage.warning(t('views.export.msg.saveAborted'))
     return { ok: false, saved, skipped, invalid, unsupported, reason: t('views.export.msg.saveAborted') }
   }
   const incomplete = skipped.length + invalid.length + unsupported.length
@@ -2754,7 +2768,7 @@ function registerHandlers(): void {
       }
     } catch (error) {
       logCaughtError(error, 'export-wizard:request')
-      return { ok: false, reason: `${code} 的表格未就绪：${error instanceof Error ? error.message : String(error)}` }
+      return { ok: false, reason: `${code} 的表格未就绪：${t('api.error.safeUnknown')}` }
     }
   })
 

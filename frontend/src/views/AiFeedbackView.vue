@@ -2,7 +2,7 @@
 import { useI18n } from 'vue-i18n'
 /**
  * R-163 T5：设置页「AI 反馈」查看界面（闭环四要素 ③）——
- * 时间 / 消息摘要（messageId+sessionId）/ rating（赞/踩）/ reason，仅当前用户（单用户应用全表）。
+ * 时间 / 消息摘要 / rating（赞/踩）/ reason，关联 ID 收在二级技术详情；仅当前用户（单用户应用全表）。
  * 数据消费方 = 人工复盘，无自动回流；列表只读。
  */
 import { onMounted, ref } from 'vue'
@@ -75,15 +75,12 @@ function ratingLabel(rating: number): { text: string; cls: string } {
 }
 
 /**
- * R-163 收口修 F2：消息摘要 = 正文快照（excerpt，人工复盘可读）；旧数据/未携时回退 ID 片段。
+ * R-163 收口修 F2：消息摘要 = 正文快照（excerpt，人工复盘可读）；关联 ID 放入二级技术详情。
  */
 function summaryOf(item: AiFeedbackEntry): string {
   return item.excerpt && item.excerpt.trim() !== ''
     ? item.excerpt
-    : t('views.aiFeedback.sessionMessage', {
-      session: item.sessionId.slice(0, 8),
-      message: item.messageId.slice(0, 8)
-    })
+    : t('views.aiFeedback.noExcerpt')
 }
 </script>
 
@@ -108,7 +105,15 @@ function summaryOf(item: AiFeedbackEntry): string {
       <tbody>
         <tr v-for="item in items" :key="item.messageId" class="border-t border-solid border-[#ebeef5]" data-testid="ai-feedback-row">
           <td class="py-1.5 pr-3 text-[#606266] whitespace-nowrap">{{ item.updatedAt?.replace('T', ' ').slice(0, 19) }}</td>
-          <td class="py-1.5 pr-3 text-[#606266] max-w-[280px] truncate" :title="summaryOf(item)">{{ summaryOf(item) }}</td>
+          <td class="py-1.5 pr-3 text-[#606266] max-w-[280px]">
+            <div class="truncate" :title="summaryOf(item)">{{ summaryOf(item) }}</div>
+            <details class="mt-1 text-[11px] text-[#909399]">
+              <summary class="cursor-pointer">{{ t('views.aiFeedback.technicalDetails') }}</summary>
+              <div class="mt-1 break-all">
+                {{ t('views.aiFeedback.sessionMessage', { session: item.sessionId, message: item.messageId }) }}
+              </div>
+            </details>
+          </td>
           <td class="py-1.5 pr-3" :class="ratingLabel(item.rating).cls">{{ ratingLabel(item.rating).text }}</td>
           <td class="py-1.5 text-[#909399]">{{ item.reason ?? '—' }}</td>
         </tr>

@@ -692,7 +692,7 @@
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
                                   :disabled="isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
                                   @click="decide(true, part.toolCallId)"
-                                >{{ t('ai.panel.approve') }}</button>
+                                >{{ t('ai.panel.approve', { action: toolLabel(part.name) }) }}</button>
                               </span>
                             </div>
                           </div>
@@ -2726,9 +2726,7 @@ function markdownHtml(message: ChatMessage, block: Block): string {
  * 同义族的模板本身也已按同口径收敛（`list_config_defs` / `list_tasks` / `get_workspace_state`
  * 三个模板的「首词 = 工具名」措辞改由参数部分承载），故这三者的摘要只剩参数信息或为空。
  *
- * 修复轮 1（向导工具泄漏）：`export.start` / `download_templates` 等 10 个 FRONTEND 向导工具
- * 有中文展示名（`toolLabel`）但 `tool-summaries.ts` 无 summaryFor 映射，兜底串为
- * 「<原始 name> · <状态词>」—— 展示名前缀剥不到它。故展示名剥壳失败时**再按 part.name 剥一次**；
+ * 无 summaryFor 映射的工具使用业务化兜底，不暴露内部工具名；
  * 剥后只剩状态词（`STATUS_WORD_SET`，含兜底用的「待确认」）⇒ 同样返回 null，
  * 由右状态标签（普通 tool pending = 「待执行」）唯一承载状态。
  */
@@ -2813,8 +2811,7 @@ function toolSummaryOrNull(part: ToolPart): string | null {
       }
       return summary.slice(prefix.length).replace(SUMMARY_PREFIX_SEP, '').trim()
     }
-    // 展示名优先；无 summaryFor 映射的向导工具再按原始 name 剥壳（兜底串以前者打头）。
-    const rest = stripPrefix(toolLabel(part.name)) ?? stripPrefix(part.name)
+    const rest = stripPrefix(toolLabel(part.name))
     if (rest === null) {
       return summary
     }
@@ -4022,7 +4019,7 @@ function hasLongCardTitle(part: ToolPart): boolean {
   return unicodeCharacterCount(cardTitle(part)) > 32
 }
 
-/** 创建任务的标题直接使用真实类型与标题；未知类型保留原值，不伪造业务标签。 */
+/** 创建任务的标题使用真实类型与标题；未知类型走安全通用标签。 */
 function createTaskBusinessTitle(target: ToolPreflight['target']): string | null {
   if (target.taskId !== undefined && target.taskId !== null && `${target.taskId}` !== '') {
     return null
@@ -4105,9 +4102,6 @@ function cardStatusLabel(part: ToolPart): string {
   const uploadStatus = isUploadHandoffTool(part) ? uploadHandoffTerminalStatus(part) : null
   if (uploadStatus) {
     return t(`ai.uploadHandoff.status.${uploadStatus}`)
-  }
-  if (part.status === 'unknown' && !hasUnknownReviewRequirement(part)) {
-    return ''
   }
   const key = cardPresentationStatusKey(part)
   return t(businessCardStatusLabelKey(key, cardFamilyOf(part), isUnknownUnrecoverable(part)))
@@ -4350,12 +4344,12 @@ function faceReasonText(part: ToolPart): string {
 
 /**
  * 工具展示名（S2 收口）：`tool.<name>.title` 是唯一来源（zh 值与迁移前 `TOOL_LABELS` 逐字一致）。
- * 缺键时回落工具名原文 —— 保证"永远有字"，不渲染 key 片段。
+ * 缺键时使用业务化通用名称，不渲染内部工具名或资源键。
  */
 function toolLabel(name: string): string {
   const key = `tool.${name}.title`
   const value = t(key)
-  return value === key ? name : value
+  return value === key ? t('tool.unknown.title') : value
 }
 
 /**
@@ -4939,7 +4933,7 @@ function hasGateAckRequirement(part: ToolPart): boolean {
  *
  * 动作名两段回落，保证"永远有字"：
  * ① `ai.hitl.action.<name>`（仅英文有实质值，中文与 `tool.<name>.title` 同字）；
- * ② 缺键 ⇒ `tool.<name>.title`（工具展示名，与门卡「操作」行同源）；再缺 ⇒ 工具名原文。
+ * ② 缺键 ⇒ `tool.<name>.title`（工具展示名，与门卡「操作」行同源）；再缺 ⇒ 业务化通用名称。
  */
 function gateAckText(part: ToolPart): string {
   // R-09（fix round 1 / I-2）：start_publish 的后果与模式有关，但这里**不读本地模式**

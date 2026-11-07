@@ -19,5 +19,5 @@ export function userFacingErrorText(error: unknown, fallback: string, key?: stri
   if (error instanceof ApiError) {
     return SAFE_BUSINESS_MESSAGE_CODES.has(error.code) && error.message !== '' ? error.message : fallback
   }
-  return error instanceof Error && error.message !== '' ? error.message : fallback
+  return fallback
 }

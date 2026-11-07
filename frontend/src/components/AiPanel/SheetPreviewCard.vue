@@ -158,7 +158,7 @@
             @click="emit('apply', acknowledged)"
           >
             <span v-if="isApplying" class="mr-[6px] inline-block h-[11px] w-[11px] animate-spin rounded-[50%] border-[1.5px] border-solid border-[rgba(255,255,255,.4)] border-t-white align-[-1px] motion-reduce:animate-none" aria-hidden="true"></span>
-            {{ isApplying ? t('ai.sheetCard.applying') : t('ai.sheetCard.apply') }}
+            {{ isApplying ? t('ai.sheetCard.applying', { cells: plan.cellsCount }) : t('ai.sheetCard.apply', { cells: plan.cellsCount }) }}
           </button>
         </div>
       </div>

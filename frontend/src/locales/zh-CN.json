@@ -5,6 +5,8 @@
       "no": "否",
       "empty": "（空）",
       "complex": "（复杂值）",
+      "unknown": "未知值",
+      "unknownWithCode": "未知值（{code}）",
       "listSeparator": "、"
     },
     "card": {
@@ -15,15 +17,15 @@
           "form": "待填写"
         },
         "submitting": "提交中",
-        "queued": "排队",
+        "queued": "排队中",
         "running": "执行中",
-        "succeeded": "成功",
+        "succeeded": "已完成",
         "failed": "失败",
-        "rejected": "拒绝",
+        "rejected": "未执行",
         "blocked": "未执行",
-        "expired": "失效",
-        "cancelled": "取消",
-        "skipped": "跳过",
+        "expired": "已失效",
+        "cancelled": "已取消",
+        "skipped": "已跳过",
         "unknown": "需人工核对",
         "unrecoverable": "不可恢复",
         "submissionRejected": "提交未通过"
@@ -189,7 +191,7 @@
       "sessionPurged": "这个会话已在服务端销毁，已为你新建对话。刚才那条消息没有发出，内容已留在输入框，请再点一次发送。",
       "formSubmittedElsewhere": "该表单已在其他窗口提交，本地填写已停止",
       "upstreamRetry": "连接中断，正在恢复",
-      "turnError": "本轮出错：{message}",
+      "turnError": "本轮未完成，已生成和已填写的内容保留。请重试。",
       "uploadNoRegion": "请先打开导入向导第 1 步",
       "uploadReadonly": "任务已结束，仅供查看；上传入口不可用，本次未执行上传。",
       "uploadPickerUnsupported": "当前浏览器不支持在对话内直接选择文件",
@@ -197,13 +199,13 @@
       "uploadPickerFailed": "文件选择失败，请重试",
       "uploadNoFile": "没有拿到文件，请重试",
       "uploadReceiveFailed": "页面接收文件失败，请重试",
-      "formRejected": "提交未通过：{reason}。填写内容仍保留，可修改后重新提交。",
-      "formSubmitFailed": "提交失败：{message}（可重试或点「取消」放弃）",
-      "formSubmitFailedPlain": "提交失败，请重试或点「取消」放弃",
-      "formCancelFailed": "取消结果暂未送达（{message}），请重新载入以确认状态",
+      "formRejected": "提交未通过，填写内容仍保留。请根据字段提示修改后重新提交。",
+      "formSubmitFailed": "表单提交未完成，填写内容仍保留。请重试，或点「取消」放弃表单。",
+      "formSubmitFailedPlain": "表单提交未完成，填写内容仍保留。请重试，或点「取消」放弃表单。",
+      "formCancelFailed": "取消结果尚未确认，填写内容仍保留。请重新载入核对表单状态后再重试。",
       "formResultTooLarge": "表单内容超出上限（{chars} / {max} 字符）：本次未发出，填写已保留；请缩短后重试。",
       "formResultTooLargeRejected": "表单内容超出上限：请缩短后重新提交，填写内容仍保留。",
-      "networkError": "网络异常"
+      "networkError": "网络不可用，操作未完成，当前页面内容保留。请检查网络后重试。"
     },
     "workspace": {
       "page": {
@@ -220,21 +222,21 @@
     "settings": {
       "copy": {
         "title": "AI 设置",
-        "subtitle": "端点、模型清单与全局默认参数。修改即时生效（无需重启）。",
+        "subtitle": "管理 AI 服务地址、可用模型和默认参数，保存后立即生效，无需重启。",
         "retry": "重试",
         "loading": "加载中…",
-        "loadFailed": "加载失败",
-        "empty": "还没有配置任何端点：可以新建一个，或在环境变量里给出 AI_API_KEY 让首次启动自动种子。",
-        "envFallbackTitle": "当前配置来自环境变量兜底（尚未写入配置库）",
-        "envFallbackBody": "表里没有 provider 行，AI 仍能用是因为 env 里给了 AI_API_KEY。在这里保存一次即转为数据库配置。",
-        "sourceEnvSeed": "来源：环境变量种子",
+        "loadFailed": "AI 设置未能加载，已填写的内容保留。请点击「重试」。",
+        "empty": "尚未配置 AI 服务端点。请新建端点并填写 API Key；如管理员已提供环境配置，也可沿用。",
+        "envFallbackTitle": "当前使用管理员提供的环境配置，尚未保存到配置库",
+        "envFallbackBody": "AI 当前可用是因为管理员已配置 API Key。在下方保存一次后，即可在此管理该端点和模型。",
+        "sourceEnvSeed": "来源：管理员环境配置",
         "sourceDb": "来源：数据库",
         "keyConfigured": "已配置",
         "keyMissing": "未配置",
         "keyUnreadable": "密钥不可解（加密配置变更或密文损坏）",
         "keyDisabled": "已停用",
         "keyLast4": "末 4 位",
-        "keyInputPlaceholder": "留空 = 不修改",
+        "keyInputPlaceholder": "留空则不修改",
         "save": "保存",
         "saving": "保存中…",
         "updateKey": "更新密钥",
@@ -247,14 +249,27 @@
         "removeConfirm": "删除后该端点不再出现在对话可选模型里。确认删除？",
         "disableConfirm": "停用后该端点的模型不再可选。确认停用？",
         "clearKeyConfirm": "清除后需要重新录入密钥才能使用该端点。确认清除？",
+        "removeProviderConfirm": "删除端点「{name}」后，它将不再出现在对话可选模型中。此操作无法恢复。",
+        "removeProviderConfirmAction": "删除端点「{name}」",
+        "removeModelConfirm": "删除模型「{modelId}」后，它将不再可选。此操作无法恢复。",
+        "removeModelConfirmAction": "删除模型「{modelId}」",
+        "disableConfirmAction": "停用端点「{name}」",
+        "clearKeyConfirmAction": "清除端点「{name}」的 API Key",
+        "keepConfiguration": "保留当前配置",
         "createTitle": "新建端点",
         "create": "新建",
         "code": "标识（code）",
         "displayName": "名称",
         "baseUrl": "Base URL",
+        "baseUrlHint": "AI 服务的完整地址，需以 http:// 或 https:// 开头。",
         "completionsPath": "对话路径",
         "modelsPath": "模型列表路径",
         "apiKey": "API Key",
+        "apiKeyHint": "由 AI 服务供应商签发；保存后仅显示配置状态，不显示完整密钥。",
+        "createCodePlaceholder": "例如：OPENAI_MAIN",
+        "createDisplayNamePlaceholder": "例如：主 AI 服务",
+        "createBaseUrlPlaceholder": "例如：https://api.example.com/v1",
+        "createApiKeyPlaceholder": "可选：填写供应商签发的 API Key",
         "modelsTitle": "模型清单",
         "modelsEmpty": "该端点还没有模型：拉取一次，或手填一行。",
         "pullModels": "拉取模型",
@@ -265,7 +280,12 @@
         "manualAdd": "手填一行",
         "modelId": "模型 ID",
         "maxContext": "上下文窗口",
+        "maxContextHint": "模型可处理的最大上下文 token 数；留空使用供应商缺省值。",
         "maxOutput": "最大输出",
+        "maxOutputHint": "模型单次回答的最大输出 token 数；留空使用供应商缺省值。",
+        "manualModelIdPlaceholder": "例如：gpt-4o-mini",
+        "manualMaxContextPlaceholder": "例如：128000",
+        "manualMaxOutputPlaceholder": "例如：4096",
         "toolCalling": "工具调用",
         "vision": "视觉",
         "reasoning": "推理",
@@ -282,8 +302,8 @@
         "defaultValueModelUnbound": "旧配置·未绑定供应商",
         "defaultValueModelUnavailable": "当前不可用",
         "saved": "已保存",
-        "probeOk": "连通，模型数",
-        "probeFailed": "失败"
+        "probeOk": "连接成功，发现 {count} 个模型，耗时 {latencyMs}ms。",
+        "probeFailed": "连接测试未完成：{reason}请检查配置后重试。"
       },
       "errors": {
         "AI_SECRET_KEK_MISSING": "尚未配置加密密钥，无法保存 API Key。请让管理员配置后重试。",
@@ -308,8 +328,8 @@
         "INVALID_PARAM": "参数不在允许范围，或默认目标不合法：请检查取值范围，并在「默认模型」下拉中重新选择供应商后重试。",
         "KEY_BOUND_TO_HOST": "该供应商的密钥绑定在原主机上：更改主机名（协议/域名/端口）后必须重新录入密钥，或先清空密钥再保存。",
         "INVALID_MODEL": "模型 ID 不合法：不能为空、不能含空格。",
-        "NETWORK_ERROR": "后端不可达，请确认服务已启动。",
-        "UNKNOWN_ERROR": "操作失败，请重试。"
+        "NETWORK_ERROR": "后端不可达，已填写的内容保留。请确认服务已启动后重试。",
+        "UNKNOWN_ERROR": "操作未完成，已填写的内容保留。请重试；若仍失败，请联系管理员。"
       },
       "softDeleteHint": "仍有 {count} 个模型引用，不能删除，已改为停用（模型清单保留，可随时恢复）"
     },
@@ -367,9 +387,9 @@
         "submitted": "已提交",
         "rejected": "提交未通过",
         "failed": "执行失败",
-        "cancelled": "取消",
-        "queued": "排队",
-        "expired": "失效",
+        "cancelled": "已取消",
+        "queued": "排队中",
+        "expired": "已失效",
         "unrecoverable": "不可恢复"
       },
       "scenario": {
@@ -381,7 +401,7 @@
       "submit": "提交",
       "submitting": "提交中…",
       "notRetryable": "该表单已无法继续提交，请取消后让 AI 重新发起",
-      "unsupportedType": "字段「{label}」类型不支持（{type}），未渲染",
+      "unsupportedType": "字段「{label}」的类型暂不支持，未渲染。请让 AI 重新发起表单。",
       "cascadeCleared": "已清空「{fields}」（新条件下不再适用）",
       "advancedExpand": "更多条件（{count}）",
       "advancedCollapse": "收起高级条件",
@@ -413,6 +433,7 @@
         "failed": "附件上传失败，请重试",
         "unknownName": "已上传附件"
       },
+      "cardError": "表单提交未完成，填写内容仍保留。请核对后重新提交；若仍失败，请取消后让 AI 重新发起。",
       "errors": {
         "VALUE_REQUIRED_MISSING": "「{label}」为必填项",
         "VALUE_TOO_SHORT": "「{label}」过短（至少 {min} 字符）",
@@ -436,7 +457,8 @@
         "ATTACHMENT_UNAVAILABLE": "「{label}」的附件校验暂不可用，请稍后重试",
         "ATTACHMENT_UPLOAD_FAILED": "「{label}」上传失败，请重试",
         "ATTACHMENT_TOO_LARGE": "「{label}」附件不能超过 5MB，请压缩后重试",
-        "ATTACHMENT_TYPE_UNSUPPORTED": "「{label}」不支持该文件类型，仅支持 png/jpg/webp/pdf/txt/csv/xlsx"
+        "ATTACHMENT_TYPE_UNSUPPORTED": "「{label}」不支持该文件类型，仅支持 png/jpg/webp/pdf/txt/csv/xlsx",
+        "UNKNOWN_ERROR": "表单提交未完成，填写内容仍保留。请核对后重新提交；若仍失败，请取消后让 AI 重新发起。"
       }
     },
     "panel": {
@@ -448,7 +470,7 @@
         "description": "当前对话将被清空，且无法恢复。",
         "runningNote": "当前回答仍在生成，清空后本轮内容将不会保留。",
         "pendingNote": "当前对话还有待确认或填写的操作，清空后这些内容将不会保留。",
-        "cancel": "取消",
+        "cancel": "保留当前对话",
         "confirm": "清空并新建"
       },
       "identity": "身份",
@@ -514,6 +536,10 @@
         "SHEET_ARGUMENTS_REJECTED": "表格参数不完整或超出允许范围，本次未执行；请调整后重试。",
         "UI_PRIMITIVE_ARGUMENTS_REJECTED": "界面操作参数不符合要求，本次未执行；请重新获取界面快照后再试。"
       },
+      "readToolResultPage": {
+        "complete": "{content}\n\n已显示 {shown}/{total} 字符，已读完。",
+        "hasMore": "{content}\n\n已显示 {shown}/{total} 字符，未读完，可继续读取下一页。"
+      },
       "skippedHuman": "这一步没有执行，AI 会用已有信息继续回答。",
       "internalHuman": "这一步没有正常完成。",
       "sheetInputHuman": "表格参数不完整或超出允许范围，请调整后重试。",
@@ -531,8 +557,8 @@
       "rowKey": "行键",
       "reason": "原因",
       "submitting": "同步中…",
-      "reject": "拒绝",
-      "approve": "批准",
+      "reject": "不执行",
+      "approve": "批准{action}",
       "resumeChat": "继续本轮对话",
       "editMessage": "编辑该条消息（回填到输入框）",
       "regenerateMessage": "重新生成这条回答",
@@ -627,9 +653,9 @@
       "noMatches": "没有匹配的单元格。",
       "prevPage": "上一页",
       "nextPage": "下一页",
-      "cancel": "取消",
-      "apply": "应用",
-      "applying": "应用中…",
+      "cancel": "保留当前表格",
+      "apply": "应用 {cells} 格改动",
+      "applying": "正在应用 {cells} 格改动…",
       "status": {
         "pending": "待确认",
         "applying": "应用中",
@@ -681,10 +707,11 @@
         "cancelled": "已取消"
       },
       "acceptHint": "支持 {accept}；文件名需包含配置项编码（如 COUNTRY.xlsx）。",
+      "limitsHint": "选择前请确认：支持 {accept}；单个文件不超过 {maxSize}；每次最多选择 {maxFiles} 个文件。",
       "orClick": "也可使用页面中的「{label}」入口，或拖放文件。",
       "choose": "选择文件",
       "retry": "重试",
-      "discard": "放弃",
+      "discard": "不再上传",
       "fallbackEntry": "上传入口",
       "uploadingHint": "正在上传所选文件，请稍候。",
       "hintDegraded": "当前浏览器不支持在对话内直接选择文件，请使用页面中的上传入口。",
@@ -1089,17 +1116,22 @@
       "summary": "查询术语解释（{term}）"
     },
     "status": {
-      "pending": "待确认",
-      "running": "调用中",
+      "pending": "待执行",
+      "running": "执行中",
       "succeeded": "已完成",
       "failed": "失败",
-      "rejected": "已拒绝",
-      "blocked": "超出范围",
+      "rejected": "未执行",
+      "blocked": "未执行",
       "expired": "已失效",
       "cancelled": "已取消",
-      "skipped": "已跳过"
+      "skipped": "已跳过",
+      "unknown": "需人工核对"
     },
-    "fallback": "{name} · {status}",
+    "unknown": {
+      "title": "其他操作",
+      "summary": "执行其他操作"
+    },
+    "fallback": "其他操作 · {status}",
     "export": {
       "selectDefs": {
         "title": "选择配置项"
@@ -1216,7 +1248,8 @@
       "RUNNING": "运行中",
       "COMPLETED": "成功",
       "FAILED": "失败",
-      "CANCELLED": "已取消"
+      "CANCELLED": "已取消",
+      "UNKNOWN": "未知状态"
     },
     "severity": {
       "ERROR": "错误",
@@ -1229,10 +1262,11 @@
   },
   "api": {
     "error": {
-      "network": "无法连接后端，请检查网络或稍后重试。",
-      "server": "后端服务暂时不可用，请稍后重试。",
-      "request": "请求失败，请稍后重试。",
-      "unknown": "操作失败，请稍后重试。"
+      "network": "操作未完成，当前页面内容保留。请检查网络后重试；若仍失败，请联系管理员。",
+      "server": "操作未完成，当前页面内容保留。服务暂时不可用，请稍后刷新核对状态后再决定是否重试。",
+      "request": "操作未完成，当前页面内容保留。请稍后刷新核对状态后再决定是否重试。",
+      "unknown": "操作未完成，结果尚未确认。当前页面内容保留，请刷新核对状态后再决定是否重试；若仍失败，请联系管理员。",
+      "safeUnknown": "操作未完成，结果尚未确认。当前页面内容保留，请刷新核对状态后再决定是否重试；若仍失败，请联系管理员。"
     }
   },
   "task": {
@@ -1278,18 +1312,20 @@
   "views": {
     "aiFeedback": {
       "title": "AI 反馈",
-      "subtitle": "赞踩上报记录（最近 100 条，仅当前用户可见），用于人工复盘。",
+      "subtitle": "查看最近 100 条赞踩记录和对应消息摘要，仅当前用户可见，用于人工复盘。",
       "loading": "加载中…",
       "time": "时间",
       "messageSummary": "消息摘要",
       "rating": "评价",
       "reason": "原因",
-      "loadFailed": "加载失败：{error}",
-      "unknownError": "未知错误",
+      "loadFailed": "AI 反馈记录未能加载，当前页面内容保留，请重试。",
+      "unknownError": "AI 反馈记录未能加载，当前页面内容保留，请重试。",
       "retry": "重试",
       "like": "赞",
       "dislike": "踩",
       "sessionMessage": "会话 {session} · 消息 {message}",
+      "technicalDetails": "技术详情",
+      "noExcerpt": "暂无消息摘要，关联 ID 请查看技术详情。",
       "empty": "暂无反馈记录"
     },
     "aiSettings": {
@@ -1313,15 +1349,15 @@
       "updatedAt": "更新时间",
       "regionShort": "地区",
       "projectShort": "项目",
-      "subtitle": "已发布配置数据分页浏览 + 范围过滤 + 字段级条件（FR-1.1）",
-      "hint": "条件随「查询」一并提交服务端；清空表示不设条件",
+      "subtitle": "按配置项、范围和字段条件浏览已发布数据，并分页查看结果。",
+      "hint": "点击「查询」应用当前条件；清空全部字段条件可浏览该范围内的数据。",
       "emptyPick": "请选择配置项",
       "emptyScope": "该范围下暂无数据",
-      "conditionNone": "未设置字段条件：展示服务端按范围过滤后的分页数据（分页与命中总数均为服务端口径）。",
-      "conditionApplied": "字段条件：{summary}；列表由服务端按同一份 conditions 过滤（前端不再做本页求值），当前命中 {total} 行。",
+      "conditionNone": "未设置字段条件，当前显示符合范围条件的数据；分页和总数按全部匹配结果计算。",
+      "conditionApplied": "字段条件：{summary}。共匹配 {total} 行，可分页查看结果。",
       "msg": {
-        "defsLoadFailed": "配置定义加载失败",
-        "dataLoadFailed": "数据加载失败"
+        "defsLoadFailed": "配置定义未能加载，当前选择和筛选条件已保留。请点击「刷新」重试。",
+        "dataLoadFailed": "数据未能加载，当前选择和筛选条件已保留。请点击「刷新」重试。"
       }
     },
     "definitions": {
@@ -1368,6 +1404,8 @@
       "projectShort": "项目（PROJECT）",
       "subtitle1": "定义与字段浏览（层级 / 关键词过滤 + 模板下载 + 字段编辑）；主键标志的 JSON 名是",
       "subtitle2": "（不是 isKey）",
+      "subtitle": "浏览配置定义与字段，按层级或关键词筛选，并下载模板或编辑字段。",
+      "technicalKeyHint": "技术说明：主键标志的 JSON 字段名为 {keyField}，不是 {legacyKeyField}。",
       "none": "无",
       "downloadTemplate": "下载模板",
       "empty": "暂无配置定义",
@@ -1392,12 +1430,12 @@
       "detailTitle": "配置详情 · {name}",
       "detailTitlePlain": "配置详情",
       "msg": {
-        "loadFailed": "配置定义加载失败",
+        "loadFailed": "配置定义未能加载，当前筛选条件已保留。请点击「刷新」重试。",
         "templateDownloaded": "已下载 {code} 的导入模板",
-        "templateDownloadFailed": "模板下载失败",
+        "templateDownloadFailed": "模板未能下载，未生成新的下载文件。请重试；若仍失败，请联系管理员。",
         "savedUpdated": "配置定义已更新（字段结构即时生效）",
         "savedCreated": "配置定义已创建",
-        "saveFailed": "保存失败"
+        "saveFailed": "配置定义未能保存，已填写的内容保留。请检查后重试。"
       },
       "validate": {
         "codeRequired": "请填写配置编码",
@@ -1453,20 +1491,22 @@
         "emptyIn": "包含于的取值列表为空"
       },
       "msg": {
-        "defsLoadFailed": "配置定义加载失败",
-        "taskLoadFailed": "任务加载失败",
+        "defsLoadFailed": "配置定义未能加载，当前选择和筛选条件已保留。请重试。",
+        "taskLoadFailed": "任务未能加载，当前页面内容保留。请重试。",
         "unsavedDiscarded": "表格有未保存的在线编辑内容，本次切换任务已丢弃这些改动（可先用「保存编辑到服务端」写回再切换）",
         "pickAtLeastOne": "请先选择至少一个配置项",
         "noTaskBound": "尚未绑定任务，请先创建或从任务中心打开一条导出任务",
         "pickDefs": "请先选择配置项",
         "jobStarted": "导出作业已启动（作业 #{id}）",
-        "jobStartFailed": "导出作业启动失败",
+        "jobStartFailed": "导出作业未能启动，当前任务和编辑内容保留。请重试。",
+        "startInFlight": "导出作业正在启动，请勿重复发起。",
+        "stepSyncWarning": "步骤已推进，但最新步骤未能保存。当前页面内容保留，下次切换步骤时会重试。",
         "exportDone": "导出完成",
         "exportFailed": "导出失败，请查看作业明细",
         "exportCancelled": "导出作业已取消",
         "taskEndedNoCancel": "任务已结束，仅供查看，未取消作业",
         "cancelRequested": "已请求取消作业",
-        "cancelFailed": "取消作业失败",
+        "cancelFailed": "作业取消未完成，请刷新核对当前状态后再决定是否重试。",
         "pickDownload": "请选择要下载的配置项",
         "downloadInFlight": "{code} 的下载已在进行中，本次未重复发起",
         "downloaded": "已下载 {name}",
@@ -1516,9 +1556,13 @@
         "cancelTitle": "取消作业",
         "cancelMessage": "作业将立即终止，已处理的部分不会回滚。",
         "cancelAck": "确认取消作业，执行后无法恢复",
+        "cancelConfirm": "取消作业 #{jobId}",
+        "cancelKeep": "保留作业继续运行",
         "dirtyTitle": "重新导出会丢弃未保存的编辑",
         "dirtyMessage": "导出结果表格里有尚未保存到服务端的编辑。\n新作业完成后，服务端导出文件会被替换，这些编辑将无法找回。\n建议先点「保存编辑到服务端」。",
-        "dirtyAck": "确认丢弃这些未保存的编辑并重新导出"
+        "dirtyAck": "确认丢弃这些未保存的编辑并重新导出",
+        "dirtyConfirm": "丢弃未保存编辑并重新导出",
+        "dirtyKeep": "保留编辑并返回"
       }
     },
     "import": {
@@ -1567,25 +1611,26 @@
       "unmatchedFiles": "以下文件未匹配到配置项",
       "sheetData": "数据",
       "msg": {
-        "defsLoadFailed": "配置定义加载失败",
-        "taskLoadFailed": "任务加载失败",
+        "defsLoadFailed": "配置定义未能加载，当前选择和编辑内容已保留。请重试。",
+        "taskLoadFailed": "任务未能加载，当前页面内容保留。请重试。",
         "noTaskBound": "尚未绑定任务",
         "pickDefs": "请先勾选配置项",
         "templateDownloaded": "已下载模板 {name}",
-        "templateDownloadFailed": "模板下载失败",
+        "templateDownloadFailed": "模板未能下载，未生成新的下载文件。请重试。",
         "uploadedMatched": "已上传并匹配 {count} 个文件",
-        "uploadFailed": "文件上传失败",
+        "uploadFailed": "文件未能上传，当前选择和编辑内容已保留。请重试。",
         "uploadUnsupportedType": "「{name}」不是支持的格式：仅支持 .xlsx / .zip，本次未上传",
         "uploadTooLarge": "「{name}」超过 5MB 上限，本次未上传",
         "missingHeaders": "{code} 的文件缺少字段列：{headers}",
-        "editorLoadFailed": "{code} 编辑区加载失败",
+        "editorLoadFailed": "{code} 编辑区未能加载，当前编辑内容保留。请重试。",
         "localIssues": "{code} 存在 {count} 处本地校验问题（如第 {row} 行：{reason}），已跳过写回",
         "draftSaved": "草稿已保存到服务端（作业将读取该文件）",
-        "draftSaveFailed": "草稿保存失败",
+        "draftSaveFailed": "草稿未能保存，编辑内容仍保留。请重试。",
         "unsavedEdits": "存在未写回的编辑内容，请先修正后再继续",
         "unknownReason": "未知原因",
         "writeBackAbortedOnSwitch": "任务已切换，本次写回中止",
-        "fileListUnreadable": "任务 #{taskId} 的服务端文件清单读取失败（GET /files）",
+        "fileListUnreadable": "任务 #{taskId} 的文件清单未能读取，编辑内容未写回。请重试。",
+        "fileListRequired": "文件清单未能读取，编辑区暂不能载入。已填写的内容保留，请稍后重试或点击「保存草稿到服务端」。",
         "editorUnmounted": "{code} 的编辑区未挂载",
         "editorSourceUnknown": "{code} 的编辑区内容来源不明（载入未完成）",
         "localIssuesDetail": "{code} 存在 {count} 处本地校验问题（如第 {row} 行：{reason}）",
@@ -1597,7 +1642,12 @@
         "unsavedLeaveConfirm": "以下配置项的编辑区有未保存的编辑内容：{codes}。写回服务端文件失败（{reason}）。离开本页将丢失这些改动。",
         "pickAtLeastOne": "请先选择至少一个配置项",
         "jobStarted": "{kind}作业已启动（作业 #{id}）",
-        "jobStartFailed": "作业启动失败",
+        "jobStartFailed": "作业未能启动，当前任务和编辑内容保留。请重试。",
+        "stepSyncWarning": "步骤已推进，但最新步骤未能保存。当前页面内容保留，下次切换步骤时会重试。",
+        "publishPending": "发布请求正在处理中，请勿重复点击。",
+        "publishModeInvalid": "无法读取任务的导入模式，本次未启动发布。任务和编辑内容保留，请联系管理员。",
+        "publishModeUnreadable": "任务设置格式无效，本次未启动发布。任务和编辑内容保留，请联系管理员。",
+        "publishModeLoadFailed": "任务 #{taskId} 的导入模式读取失败，本次未启动发布。任务和编辑内容保留，请刷新任务后重试。",
         "publishConflict": "发布未成功：请查看冲突明细后重新导入再发布",
         "publishDone": "发布成功，任务已完成",
         "publishCancelled": "发布作业已取消",
@@ -1606,11 +1656,11 @@
         "publishJobFailed": "发布作业失败，请查看校验问题清单",
         "taskEndedNoCancel": "任务已结束，仅供查看，未取消作业",
         "cancelRequested": "已请求取消作业",
-        "cancelFailed": "取消作业失败",
-        "stagingLoadFailed": "暂存数据加载失败",
+        "cancelFailed": "作业取消未完成，请刷新核对当前状态后再决定是否重试。",
+        "stagingLoadFailed": "暂存数据未能加载，当前任务和编辑内容保留。请点击「刷新」重试。",
         "importModeSet": "导入模式已设为{mode}",
-        "importModeFailed": "导入模式设置失败",
-        "taskCreateFailed": "创建任务失败",
+        "importModeFailed": "导入模式未能更改，仍沿用原模式。请重试。",
+        "taskCreateFailed": "任务未能创建，已填写的内容保留。请检查后重试。",
         "taskCreated": "已创建导入任务 #{id}"
       },
       "kinds": {
@@ -1622,13 +1672,22 @@
         "cancelTitle": "取消作业",
         "cancelMessage": "作业将立即终止，已处理的部分不会回滚。",
         "cancelAck": "确认取消作业，执行后无法恢复",
+        "cancelConfirm": "取消作业 #{jobId}",
+        "cancelKeep": "保留作业继续运行",
         "unsavedSwitchTitle": "切换任务",
+        "unsavedSwitchConfirm": "丢弃未保存编辑并切换任务",
         "unsavedDeselectTitle": "取消勾选配置项",
+        "unsavedDeselectConfirm": "丢弃未保存编辑并取消勾选",
         "unsavedLeaveTitle": "离开导入向导",
+        "unsavedLeaveConfirm": "丢弃未保存编辑并离开",
         "unsavedUploadTitle": "上传文件",
+        "unsavedUploadConfirm": "丢弃未保存编辑并上传",
+        "unsavedEditKeep": "保留编辑并返回",
         "publishReplaceTitle": "确认发布（整体替换）",
         "publishReplaceMessage": "发布将按配置项范围内整体替换正式区数据：范围内未被本次导入覆盖的旧行会被删除，执行后无法恢复。",
-        "publishReplaceAck": "确认整体替换发布，范围内旧数据将被删除且无法恢复"
+        "publishReplaceAck": "确认整体替换发布，范围内旧数据将被删除且无法恢复",
+        "publishReplaceConfirm": "发布并替换范围内旧数据",
+        "publishReplaceKeep": "保留旧数据并返回"
       }
     },
     "tasks": {
@@ -1644,6 +1703,7 @@
       "completed": "已完成",
       "cancelled": "已取消",
       "failed": "已失败",
+      "unknown": "未知状态",
       "search": "查询",
       "reset": "重置",
       "task": "任务",
@@ -1658,9 +1718,9 @@
       "taskTitlePlaceholder": "例如：Q4 税率批量导入（留空则自动命名）",
       "cancel": "取消",
       "createTitle": "创建",
-      "subtitle": "导出配置 / 导入配置 任务管理",
-      "refreshHint": "· 手动刷新（右上角）；收到作业事件且存在在途作业时才自动刷新（不轮询）",
-      "loadFailed": "任务列表加载失败：{error}",
+      "subtitle": "创建、筛选并跟踪导出与导入任务，查看当前步骤和作业进度。",
+      "refreshHint": "点击右上角刷新获取最新状态；有作业进行时，相关更新会同步到本页。",
+      "loadFailed": "任务列表未能加载，当前筛选条件已保留。请点击「刷新」重试。",
       "empty": "暂无任务，点击右上角创建",
       "exportDesc": "选择配置项 → 设置查询条件 → 导出 Excel",
       "importDesc": "上传/编辑 → 检查 → 导入暂存 → 发布生效",
@@ -1671,21 +1731,25 @@
         "cancelTitle": "取消作业",
         "cancelMessage": "确定取消任务「{title}」当前运行的作业 #{jobId}？已处理的部分不会回滚。",
         "cancelAck": "确认取消作业，执行后无法恢复",
+        "cancelConfirm": "取消作业 #{jobId}",
+        "cancelKeep": "保留作业继续运行",
         "deleteTitle": "删除任务",
         "deleteMessage": "确定删除任务「{title}」？关联作业、暂存与导出结果将一并删除。",
-        "deleteAck": "确认删除任务，执行后无法恢复"
+        "deleteAck": "确认删除任务，执行后无法恢复",
+        "deleteConfirm": "删除任务「{title}」",
+        "deleteKeep": "保留任务"
       },
       "msg": {
         "deleted": "任务已删除",
-        "deleteFailed": "任务删除失败",
-        "createFailed": "任务创建失败",
+        "deleteFailed": "任务未能删除，任务及关联结果仍保留。请刷新后重试。",
+        "createFailed": "任务未能创建，已填写的内容保留。请检查后重试。",
         "created": "任务「{title}」已创建",
-        "loadFailed": "任务列表加载失败",
+        "loadFailed": "任务列表未能加载，当前筛选条件已保留。请点击「刷新」重试。",
         "cancelRequested": "已请求取消作业 #{jobId}",
         "jobAlreadyFinal": "作业 #{jobId} 已是终态，无需取消",
-        "cancelFailed": "取消作业失败",
-        "unknownError": "未知错误",
-        "watchInterrupted": "发布作业 #{jobId} 的终态跟踪中断：{message}",
+        "cancelFailed": "作业取消未完成，请刷新核对当前状态后再决定是否重试。",
+        "unknownError": "操作未完成，当前页面内容保留。请刷新核对状态后再决定是否重试。",
+        "watchInterrupted": "发布作业 #{jobId} 的进度更新中断，请刷新任务中心核对最终状态。",
         "watchTimeout": "发布作业 #{jobId} 等待超时（仍未进入终态），结果请稍后在任务中心刷新查看",
         "issuesLoadFailed": "发布作业 #{jobId} 失败，校验问题清单拉取失败，请在任务中心查看",
         "conflictSummary": "发布冲突：{count} 处，明细见 AI 面板回执"

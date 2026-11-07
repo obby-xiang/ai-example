@@ -4,8 +4,10 @@
       <div>
         <h2 class="m-0 text-xl text-[#303133]">{{ t('views.definitions.title') }}</h2>
         <div class="mt-1 text-[13px] text-[#909399]">
-          {{ t('views.definitions.subtitle1') }}
-          <span class="font-mono">key</span>{{ t('views.definitions.subtitle2') }}
+          {{ t('views.definitions.subtitle') }}
+        </div>
+        <div class="mt-1 text-xs text-[#909399]">
+          {{ t('views.definitions.technicalKeyHint', { keyField: 'key', legacyKeyField: 'isKey' }) }}
         </div>
       </div>
       <div>

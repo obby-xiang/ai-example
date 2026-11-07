@@ -5,6 +5,8 @@
       "no": "No",
       "empty": "(empty)",
       "complex": "(complex value)",
+      "unknown": "Unknown value",
+      "unknownWithCode": "Unknown value ({code})",
       "listSeparator": ", "
     },
     "card": {
@@ -17,9 +19,9 @@
         "submitting": "Submitting",
         "queued": "Queued",
         "running": "Running",
-        "succeeded": "Success",
+        "succeeded": "Completed",
         "failed": "Failed",
-        "rejected": "Rejected",
+        "rejected": "Not executed",
         "blocked": "Not executed",
         "expired": "Expired",
         "cancelled": "Cancelled",
@@ -189,7 +191,7 @@
       "sessionPurged": "This conversation was already deleted on the server, so a new conversation was started. Your message was not sent and is still in the input box — press send again.",
       "formSubmittedElsewhere": "This form was submitted in another window; local editing has stopped",
       "upstreamRetry": "Connection interrupted; restoring",
-      "turnError": "Error this turn: {message}",
+      "turnError": "This turn did not complete. Generated content and your entries are preserved; please retry.",
       "uploadNoRegion": "Open step 1 of the import wizard first",
       "uploadReadonly": "This task has ended and is view-only; uploading is unavailable and was not executed.",
       "uploadPickerUnsupported": "This browser cannot pick files inside the chat",
@@ -197,13 +199,13 @@
       "uploadPickerFailed": "File selection failed; please retry",
       "uploadNoFile": "No file received; please retry",
       "uploadReceiveFailed": "The page could not receive the file; please retry",
-      "formRejected": "Submission was not accepted: {reason}. Your entries are kept; edit them and submit again.",
-      "formSubmitFailed": "Submission failed: {message} (retry or cancel)",
-      "formSubmitFailedPlain": "Submission failed; retry or click \"Cancel\"",
-      "formCancelFailed": "The cancellation outcome was not delivered ({message}); reload to confirm its status",
+      "formRejected": "The submission was not accepted. Your entries are preserved; review the field guidance and submit again.",
+      "formSubmitFailed": "The form was not submitted. Your entries are preserved; retry or click Cancel to discard the form.",
+      "formSubmitFailedPlain": "The form was not submitted. Your entries are preserved; retry or click Cancel to discard the form.",
+      "formCancelFailed": "The cancellation outcome is not confirmed. Your entries are preserved; reload to check the form's status before retrying.",
       "formResultTooLarge": "The form content exceeds the limit ({chars} / {max} characters): nothing was sent and your input is kept. Please shorten it and retry.",
       "formResultTooLargeRejected": "The form content exceeds the limit. Shorten it and submit again; your entries are kept.",
-      "networkError": "Network error"
+      "networkError": "The action did not complete because the network is unavailable. The current page is preserved; check the network and retry."
     },
     "workspace": {
       "page": {
@@ -220,21 +222,21 @@
     "settings": {
       "copy": {
         "title": "AI settings",
-        "subtitle": "Endpoints, model list and global default parameters. Changes take effect immediately (no restart).",
+        "subtitle": "Manage AI service addresses, available models and default parameters. Changes take effect immediately without a restart.",
         "retry": "Retry",
         "loading": "Loading…",
-        "loadFailed": "Failed to load",
-        "empty": "No endpoints configured yet: create one, or provide AI_API_KEY in the environment so the first start seeds one.",
-        "envFallbackTitle": "Current configuration comes from environment variables (not yet stored in the config database)",
-        "envFallbackBody": "There are no provider rows here; AI still works because AI_API_KEY is set in the environment. Save once here to turn it into database configuration.",
-        "sourceEnvSeed": "Source: environment seed",
+        "loadFailed": "AI settings could not be loaded. Your entries are kept; click Retry.",
+        "empty": "No AI service endpoint is configured. Create one and enter its API Key, or keep using the environment configuration supplied by your administrator.",
+        "envFallbackTitle": "Using the administrator's environment configuration; not yet saved to the configuration database",
+        "envFallbackBody": "AI is available because the administrator has configured an API Key. Save once below to manage this endpoint and its models here.",
+        "sourceEnvSeed": "Source: administrator environment configuration",
         "sourceDb": "Source: database",
         "keyConfigured": "Configured",
         "keyMissing": "Not configured",
         "keyUnreadable": "Key cannot be decrypted (encryption configuration changed or ciphertext corrupted)",
         "keyDisabled": "Disabled",
         "keyLast4": "last 4",
-        "keyInputPlaceholder": "Leave blank = unchanged",
+        "keyInputPlaceholder": "Leave blank to keep unchanged",
         "save": "Save",
         "saving": "Saving…",
         "updateKey": "Update key",
@@ -247,14 +249,27 @@
         "removeConfirm": "After deletion this endpoint disappears from the selectable models. Delete?",
         "disableConfirm": "After disabling, this endpoint's models are no longer selectable. Disable?",
         "clearKeyConfirm": "After clearing, you must re-enter the key before this endpoint can be used. Clear?",
+        "removeProviderConfirm": "Deleting endpoint \"{name}\" removes it from the models available in chat. This cannot be undone.",
+        "removeProviderConfirmAction": "Delete endpoint \"{name}\"",
+        "removeModelConfirm": "Deleting model \"{modelId}\" makes it unavailable for selection. This cannot be undone.",
+        "removeModelConfirmAction": "Delete model \"{modelId}\"",
+        "disableConfirmAction": "Disable endpoint \"{name}\"",
+        "clearKeyConfirmAction": "Clear the API Key for endpoint \"{name}\"",
+        "keepConfiguration": "Keep current configuration",
         "createTitle": "New endpoint",
         "create": "Create",
         "code": "Identifier (code)",
         "displayName": "Name",
         "baseUrl": "Base URL",
+        "baseUrlHint": "The full AI service address, starting with http:// or https://.",
         "completionsPath": "Chat path",
         "modelsPath": "Models path",
         "apiKey": "API Key",
+        "apiKeyHint": "Issued by the AI service provider. After saving, only its configuration status is shown, never the full key.",
+        "createCodePlaceholder": "e.g. OPENAI_MAIN",
+        "createDisplayNamePlaceholder": "e.g. Primary AI service",
+        "createBaseUrlPlaceholder": "e.g. https://api.example.com/v1",
+        "createApiKeyPlaceholder": "Optional: enter the API Key issued by the provider",
         "modelsTitle": "Model list",
         "modelsEmpty": "This endpoint has no models yet: fetch once, or add one manually.",
         "pullModels": "Fetch models",
@@ -265,7 +280,12 @@
         "manualAdd": "Add manually",
         "modelId": "Model ID",
         "maxContext": "Context window",
+        "maxContextHint": "Maximum context tokens the model can process; leave blank to use the provider default.",
         "maxOutput": "Max output",
+        "maxOutputHint": "Maximum output tokens per answer; leave blank to use the provider default.",
+        "manualModelIdPlaceholder": "e.g. gpt-4o-mini",
+        "manualMaxContextPlaceholder": "e.g. 128000",
+        "manualMaxOutputPlaceholder": "e.g. 4096",
         "toolCalling": "Tool calling",
         "vision": "Vision",
         "reasoning": "Reasoning",
@@ -282,8 +302,8 @@
         "defaultValueModelUnbound": "legacy · provider not bound",
         "defaultValueModelUnavailable": "currently unavailable",
         "saved": "Saved",
-        "probeOk": "Connected, models:",
-        "probeFailed": "Failed"
+        "probeOk": "Connected: {count} models found in {latencyMs}ms.",
+        "probeFailed": "The connection test did not complete: {reason} Check the configuration and try again."
       },
       "errors": {
         "AI_SECRET_KEK_MISSING": "The encryption key is not configured, so the API key cannot be saved. Ask the administrator to configure it and retry.",
@@ -308,8 +328,8 @@
         "INVALID_PARAM": "A parameter is out of range, or the default target is invalid. Check the range and reselect the provider in the Default model dropdown, then retry.",
         "KEY_BOUND_TO_HOST": "This provider's API key is bound to its original host. Re-enter the key (or clear it first) when you change the host (scheme, domain or port).",
         "INVALID_MODEL": "Invalid model ID: it must not be empty or contain spaces.",
-        "NETWORK_ERROR": "The backend is unreachable; make sure the service is running.",
-        "UNKNOWN_ERROR": "Operation failed; please retry."
+        "NETWORK_ERROR": "The backend is unreachable. Your entries are preserved; make sure the service is running and retry.",
+        "UNKNOWN_ERROR": "The action did not complete. Your entries are preserved; retry, or contact an administrator if this happens again."
       },
       "softDeleteHint": "Still referenced by {count} model(s), so it cannot be deleted; it has been disabled instead (the model list is kept and can be restored)."
     },
@@ -381,7 +401,7 @@
       "submit": "Submit",
       "submitting": "Submitting…",
       "notRetryable": "This form can no longer be submitted; cancel and ask the assistant to start over",
-      "unsupportedType": "Field \"{label}\" has an unsupported type ({type}) and was not rendered",
+      "unsupportedType": "Field \"{label}\" uses an unsupported type and was not rendered. Ask the assistant to start the form again.",
       "cascadeCleared": "Cleared {fields} — no longer applicable after the change",
       "advancedExpand": "More conditions ({count})",
       "advancedCollapse": "Hide advanced conditions",
@@ -413,6 +433,7 @@
         "failed": "Attachment upload failed, please retry",
         "unknownName": "Uploaded attachment"
       },
+      "cardError": "The form was not submitted. Your entries are kept; review them and submit again. If this happens again, cancel and ask the assistant to start a new form.",
       "errors": {
         "VALUE_REQUIRED_MISSING": "\"{label}\" is required",
         "VALUE_TOO_SHORT": "\"{label}\" is too short (at least {min} characters)",
@@ -436,7 +457,8 @@
         "ATTACHMENT_UNAVAILABLE": "\"{label}\" attachment check is temporarily unavailable, please retry later",
         "ATTACHMENT_UPLOAD_FAILED": "\"{label}\" upload failed, please retry",
         "ATTACHMENT_TOO_LARGE": "\"{label}\" attachment must be 5MB or smaller",
-        "ATTACHMENT_TYPE_UNSUPPORTED": "\"{label}\" unsupported file type; allowed: png/jpg/webp/pdf/txt/csv/xlsx"
+        "ATTACHMENT_TYPE_UNSUPPORTED": "\"{label}\" unsupported file type; allowed: png/jpg/webp/pdf/txt/csv/xlsx",
+        "UNKNOWN_ERROR": "The form was not submitted. Your entries are kept; review them and submit again. If this happens again, cancel and ask the assistant to start a new form."
       }
     },
     "panel": {
@@ -448,7 +470,7 @@
         "description": "The current conversation will be cleared and cannot be recovered.",
         "runningNote": "The current response is still being generated. Its contents will not be kept if you clear the conversation.",
         "pendingNote": "There are actions awaiting confirmation or forms awaiting input. These will not be kept if you clear the conversation.",
-        "cancel": "Cancel",
+        "cancel": "Keep current conversation",
         "confirm": "Clear and start new"
       },
       "identity": "Identity",
@@ -514,6 +536,10 @@
         "SHEET_ARGUMENTS_REJECTED": "The spreadsheet parameters are incomplete or outside the allowed range. No action was executed. Adjust them and try again.",
         "UI_PRIMITIVE_ARGUMENTS_REJECTED": "The UI action parameters are invalid. No action was executed. Take a fresh UI snapshot and try again."
       },
+      "readToolResultPage": {
+        "complete": "{content}\n\n{shown} of {total} characters shown; this is the end of the result.",
+        "hasMore": "{content}\n\n{shown} of {total} characters shown; more content is available on the next page."
+      },
       "skippedHuman": "This step was not executed; the assistant will continue with what it already has.",
       "internalHuman": "This step did not complete normally.",
       "sheetInputHuman": "The spreadsheet parameters are incomplete or outside the allowed range. Adjust them and retry.",
@@ -531,8 +557,8 @@
       "rowKey": "Row key",
       "reason": "Reason",
       "submitting": "Syncing…",
-      "reject": "Reject",
-      "approve": "Approve",
+      "reject": "Do not execute",
+      "approve": "Approve: {action}",
       "resumeChat": "Continue this turn",
       "editMessage": "Edit this message (copy it into the input box)",
       "regenerateMessage": "Regenerate this answer",
@@ -627,9 +653,9 @@
       "noMatches": "No matching cells.",
       "prevPage": "Previous",
       "nextPage": "Next",
-      "cancel": "Cancel",
-      "apply": "Apply",
-      "applying": "Applying…",
+      "cancel": "Keep current sheet",
+      "apply": "Apply changes to {cells} cells",
+      "applying": "Applying changes to {cells} cells…",
       "status": {
         "pending": "Awaiting confirmation",
         "applying": "Applying",
@@ -681,10 +707,11 @@
         "cancelled": "Cancelled"
       },
       "acceptHint": "Supported: {accept}. The file name must contain the definition code (e.g. COUNTRY.xlsx).",
+      "limitsHint": "Before choosing a file: allowed formats are {accept}; each file must be no larger than {maxSize}; select up to {maxFiles} file(s) at a time.",
       "orClick": "You can also use the \"{label}\" entry on the page or drop a file onto it.",
       "choose": "Choose file",
       "retry": "Retry",
-      "discard": "Discard",
+      "discard": "Do not upload",
       "fallbackEntry": "upload entry",
       "uploadingHint": "Uploading the selected file. Please wait.",
       "hintDegraded": "This browser cannot pick files inside the conversation. Use the upload entry on the page.",
@@ -1089,17 +1116,22 @@
       "summary": "Look up term ({term})"
     },
     "status": {
-      "pending": "pending",
-      "running": "running",
-      "succeeded": "done",
-      "failed": "failed",
-      "rejected": "rejected",
-      "blocked": "beyond the presentable range",
-      "expired": "expired",
-      "cancelled": "cancelled",
-      "skipped": "skipped"
+      "pending": "Pending",
+      "running": "Running",
+      "succeeded": "Completed",
+      "failed": "Failed",
+      "rejected": "Not executed",
+      "blocked": "Not executed",
+      "expired": "Expired",
+      "cancelled": "Cancelled",
+      "skipped": "Skipped",
+      "unknown": "Manual review"
     },
-    "fallback": "{name} · {status}",
+    "unknown": {
+      "title": "Other action",
+      "summary": "Perform another action"
+    },
+    "fallback": "Other action · {status}",
     "export": {
       "selectDefs": {
         "title": "Select definitions"
@@ -1216,7 +1248,8 @@
       "RUNNING": "Running",
       "COMPLETED": "Succeeded",
       "FAILED": "Failed",
-      "CANCELLED": "Cancelled"
+      "CANCELLED": "Cancelled",
+      "UNKNOWN": "Unknown status"
     },
     "severity": {
       "ERROR": "Error",
@@ -1229,10 +1262,11 @@
   },
   "api": {
     "error": {
-      "network": "Cannot reach the backend. Check your network and try again.",
-      "server": "The backend service is temporarily unavailable. Try again later.",
-      "request": "Request failed. Try again later.",
-      "unknown": "Something went wrong. Try again later."
+      "network": "The action did not complete. The current page is preserved; check the network and retry, or contact an administrator if this happens again.",
+      "server": "The action did not complete. The current page is preserved; the service is temporarily unavailable, so refresh later to check the state before deciding whether to retry.",
+      "request": "The action did not complete. The current page is preserved; refresh later to check the state before deciding whether to retry.",
+      "unknown": "The action did not complete and its result is unconfirmed. The current page is preserved; refresh to check the state before deciding whether to retry, or contact an administrator if this happens again.",
+      "safeUnknown": "The action did not complete and its result is unconfirmed. The current page is preserved; refresh to check the state before deciding whether to retry, or contact an administrator if this happens again."
     }
   },
   "task": {
@@ -1278,18 +1312,20 @@
   "views": {
     "aiFeedback": {
       "title": "AI feedback",
-      "subtitle": "Thumbs-up/down records (latest 100, visible only to you) for manual review.",
+      "subtitle": "Review your latest 100 thumbs-up/down records and message excerpts. Records are visible only to you.",
       "loading": "Loading…",
       "time": "Time",
       "messageSummary": "Message summary",
       "rating": "Rating",
       "reason": "Reason",
-      "loadFailed": "Load failed: {error}",
-      "unknownError": "Unknown error",
+      "loadFailed": "AI feedback could not be loaded. The current page is preserved; please retry.",
+      "unknownError": "AI feedback could not be loaded. The current page is preserved; please retry.",
       "retry": "Retry",
       "like": "Like",
       "dislike": "Dislike",
       "sessionMessage": "Session {session} · message {message}",
+      "technicalDetails": "Technical details",
+      "noExcerpt": "No message excerpt is available. See the association IDs in Technical details.",
       "empty": "No feedback yet"
     },
     "aiSettings": {
@@ -1313,15 +1349,15 @@
       "updatedAt": "Updated",
       "regionShort": "Region",
       "projectShort": "Project",
-      "subtitle": "Browse published configuration data with paging, scope filters and field-level conditions (FR-1.1)",
-      "hint": "Conditions are sent to the server with \"Search\"; leave empty for no conditions.",
+      "subtitle": "Browse published configuration data by definition, scope and field conditions, with paged results.",
+      "hint": "Choose Search to apply the current conditions. Clear all conditions to browse without field filters.",
       "emptyPick": "Select a definition",
       "emptyScope": "No data in this scope",
-      "conditionNone": "No field conditions: the server returns paged data filtered by scope (paging and total hits are server-side).",
-      "conditionApplied": "Field conditions: {summary}; the list is filtered server-side by the same conditions (no client-side evaluation here). Currently {total} rows match.",
+      "conditionNone": "No field conditions are set. Results match the selected scope, and pagination and totals cover all matching rows.",
+      "conditionApplied": "Field conditions: {summary}. {total} rows match; use pagination to browse the results.",
       "msg": {
-        "defsLoadFailed": "Failed to load definitions",
-        "dataLoadFailed": "Failed to load data"
+        "defsLoadFailed": "Definitions could not be loaded. Your current selection and conditions are preserved; click Refresh to retry.",
+        "dataLoadFailed": "Data could not be loaded. Your current selection and conditions are preserved; click Refresh to retry."
       }
     },
     "definitions": {
@@ -1368,6 +1404,8 @@
       "projectShort": "Project (PROJECT)",
       "subtitle1": "Browse definitions and fields (level / keyword filters, template download, field editing). The JSON name of the key flag is",
       "subtitle2": " (not isKey)",
+      "subtitle": "Browse definitions and fields, filter by level or keyword, download templates and edit fields.",
+      "technicalKeyHint": "Technical note: the JSON field that marks a key field is {keyField}, not {legacyKeyField}.",
       "none": "None",
       "downloadTemplate": "Download template",
       "empty": "No definitions yet",
@@ -1392,12 +1430,12 @@
       "detailTitle": "Definition details · {name}",
       "detailTitlePlain": "Definition details",
       "msg": {
-        "loadFailed": "Failed to load definitions",
+        "loadFailed": "Definitions could not be loaded. Your current filters are preserved; click Refresh to retry.",
         "templateDownloaded": "Import template for {code} downloaded",
-        "templateDownloadFailed": "Failed to download the template",
+        "templateDownloadFailed": "The template could not be downloaded, and no new file was produced. Please retry; contact an administrator if this happens again.",
         "savedUpdated": "Definition updated (field structure applies immediately)",
         "savedCreated": "Definition created",
-        "saveFailed": "Save failed"
+        "saveFailed": "The definition was not saved. Your entries are preserved; review them and retry."
       },
       "validate": {
         "codeRequired": "Enter a definition code",
@@ -1453,20 +1491,22 @@
         "emptyIn": "empty \"in\" list"
       },
       "msg": {
-        "defsLoadFailed": "Failed to load definitions",
-        "taskLoadFailed": "Failed to load the task",
+        "defsLoadFailed": "Definitions could not be loaded. Your current selections and conditions are preserved; please retry.",
+        "taskLoadFailed": "The task could not be loaded. The current page is preserved; please retry.",
         "unsavedDiscarded": "The table has unsaved online edits; switching tasks discarded them (use \"Save edits to server\" to write them back first)",
         "pickAtLeastOne": "Select at least one definition first",
         "noTaskBound": "No task bound: create one, or open an export task from the Task Center",
         "pickDefs": "Select definitions first",
         "jobStarted": "Export job started (job #{id})",
-        "jobStartFailed": "Failed to start the export job",
+        "jobStartFailed": "The export job did not start. The current task and edits are preserved; please retry.",
+        "startInFlight": "The export job is already being started. Do not start it again.",
+        "stepSyncWarning": "The step changed, but the latest step could not be saved. The current page is preserved; saving will be retried the next time you change steps.",
         "exportDone": "Export finished",
         "exportFailed": "Export failed; check the job details",
         "exportCancelled": "Export job cancelled",
         "taskEndedNoCancel": "The task has ended (view only); the job was not cancelled",
         "cancelRequested": "Job cancellation requested",
-        "cancelFailed": "Failed to cancel the job",
+        "cancelFailed": "Job cancellation was not completed. Refresh to check its current state before deciding whether to retry.",
         "pickDownload": "Select the definitions to download",
         "downloadInFlight": "{code} download already in progress; not started again",
         "downloaded": "Downloaded {name}",
@@ -1516,9 +1556,13 @@
         "cancelTitle": "Cancel job",
         "cancelMessage": "The job stops immediately; processed data will not be rolled back.",
         "cancelAck": "Confirm cancelling the job; this cannot be undone",
+        "cancelConfirm": "Cancel job #{jobId}",
+        "cancelKeep": "Keep job running",
         "dirtyTitle": "Re-exporting discards unsaved edits",
         "dirtyMessage": "The result table has edits that are not saved to the server.\nAfter the new job finishes, the server export file is replaced and these edits cannot be recovered.\nConsider clicking \"Save edits to server\" first.",
-        "dirtyAck": "Confirm discarding these unsaved edits and re-exporting"
+        "dirtyAck": "Confirm discarding these unsaved edits and re-exporting",
+        "dirtyConfirm": "Discard unsaved edits and export again",
+        "dirtyKeep": "Keep edits and go back"
       }
     },
     "import": {
@@ -1567,25 +1611,26 @@
       "unmatchedFiles": "Files not matched to any definition",
       "sheetData": "Data",
       "msg": {
-        "defsLoadFailed": "Failed to load definitions",
-        "taskLoadFailed": "Failed to load the task",
+        "defsLoadFailed": "Definitions could not be loaded. Your current selections and edits are preserved; please retry.",
+        "taskLoadFailed": "The task could not be loaded. The current page is preserved; please retry.",
         "noTaskBound": "No task bound",
         "pickDefs": "Select definitions first",
         "templateDownloaded": "Template {name} downloaded",
-        "templateDownloadFailed": "Failed to download the template",
+        "templateDownloadFailed": "The template could not be downloaded, and no new file was produced. Please retry.",
         "uploadedMatched": "{count} files uploaded and matched",
-        "uploadFailed": "File upload failed",
+        "uploadFailed": "The file was not uploaded. Your current selections and edits are preserved; please retry.",
         "uploadUnsupportedType": "\"{name}\" is not a supported format: only .xlsx / .zip are accepted; the file was not uploaded",
         "uploadTooLarge": "\"{name}\" exceeds the 5MB limit; the file was not uploaded",
         "missingHeaders": "{code}: the file is missing columns: {headers}",
-        "editorLoadFailed": "{code}: failed to load the editor",
+        "editorLoadFailed": "{code}: the editor could not be loaded. Your current edits are preserved; please retry.",
         "localIssues": "{code} has {count} local validation issue(s) (e.g. row {row}: {reason}); write-back skipped",
         "draftSaved": "Draft saved to the server (the job will read this file)",
-        "draftSaveFailed": "Failed to save the draft",
+        "draftSaveFailed": "The draft was not saved. Your edits are preserved; please retry.",
         "unsavedEdits": "There are edits not written back; fix them before continuing",
         "unknownReason": "unknown reason",
         "writeBackAbortedOnSwitch": "The task changed meanwhile; write-back aborted",
-        "fileListUnreadable": "Task #{taskId}: failed to read the server file list (GET /files)",
+        "fileListUnreadable": "Task #{taskId}: the file list could not be read. Your edits were not written back; please retry.",
+        "fileListRequired": "The file list could not be read, so the editor cannot be loaded yet. Your edits are preserved; retry later or click \"Save draft to server\".",
         "editorUnmounted": "{code}: the editor is not mounted",
         "editorSourceUnknown": "{code}: the editor content source is unknown (load not finished)",
         "localIssuesDetail": "{code} has {count} local validation issue(s) (e.g. row {row}: {reason})",
@@ -1597,7 +1642,12 @@
         "unsavedLeaveConfirm": "These definitions have unsaved edits in their editors: {codes}. Writing them back to the server failed ({reason}). Leaving this page will discard these edits.",
         "pickAtLeastOne": "Select at least one definition first",
         "jobStarted": "{kind} job started (job #{id})",
-        "jobStartFailed": "Failed to start the job",
+        "jobStartFailed": "The job did not start. The current task and edits are preserved; please retry.",
+        "stepSyncWarning": "The step changed, but the latest step could not be saved. The current page is preserved; saving will be retried the next time you change steps.",
+        "publishPending": "The publish request is already being processed. Do not click again.",
+        "publishModeInvalid": "The task's import mode could not be read, so publishing did not start. Your task and edits are preserved; contact an administrator.",
+        "publishModeUnreadable": "The task settings are invalid, so publishing did not start. Your task and edits are preserved; contact an administrator.",
+        "publishModeLoadFailed": "The import mode for task #{taskId} could not be read, so publishing did not start. Your task and edits are preserved; retry after refreshing the task.",
         "publishConflict": "Publish did not succeed: check the conflict details, re-import and publish again",
         "publishDone": "Published successfully; the task is complete",
         "publishCancelled": "Publish job cancelled",
@@ -1606,11 +1656,11 @@
         "publishJobFailed": "Publish job failed; check the validation issue list",
         "taskEndedNoCancel": "The task has ended (view only); the job was not cancelled",
         "cancelRequested": "Job cancellation requested",
-        "cancelFailed": "Failed to cancel the job",
-        "stagingLoadFailed": "Failed to load staging data",
+        "cancelFailed": "Job cancellation was not completed. Refresh to check its current state before deciding whether to retry.",
+        "stagingLoadFailed": "Staging data could not be loaded. The current task and edits are preserved; click Refresh to retry.",
         "importModeSet": "Import mode set to {mode}",
-        "importModeFailed": "Failed to set the import mode",
-        "taskCreateFailed": "Failed to create the task",
+        "importModeFailed": "The import mode was not changed. The previous mode remains active; please retry.",
+        "taskCreateFailed": "The task was not created. Your entries are preserved; review them and retry.",
         "taskCreated": "Import task #{id} created"
       },
       "kinds": {
@@ -1622,13 +1672,22 @@
         "cancelTitle": "Cancel job",
         "cancelMessage": "The job stops immediately; processed data will not be rolled back.",
         "cancelAck": "Confirm cancelling the job; this cannot be undone",
+        "cancelConfirm": "Cancel job #{jobId}",
+        "cancelKeep": "Keep job running",
         "unsavedSwitchTitle": "Switch task",
+        "unsavedSwitchConfirm": "Discard unsaved edits and switch tasks",
         "unsavedDeselectTitle": "Deselect definitions",
+        "unsavedDeselectConfirm": "Discard unsaved edits and deselect",
         "unsavedLeaveTitle": "Leave the import wizard",
+        "unsavedLeaveConfirm": "Discard unsaved edits and leave",
         "unsavedUploadTitle": "Upload files",
+        "unsavedUploadConfirm": "Discard unsaved edits and upload",
+        "unsavedEditKeep": "Keep edits and go back",
         "publishReplaceTitle": "Confirm publish (replace in scope)",
         "publishReplaceMessage": "Publishing replaces production data within each definition's scope: old rows in scope that are not covered by this import will be deleted. This cannot be undone.",
-        "publishReplaceAck": "I understand publishing will delete old data in scope and cannot be undone"
+        "publishReplaceAck": "I understand publishing will delete old data in scope and cannot be undone",
+        "publishReplaceConfirm": "Publish and replace old data in scope",
+        "publishReplaceKeep": "Keep old data and go back"
       }
     },
     "tasks": {
@@ -1644,6 +1703,7 @@
       "completed": "Completed",
       "cancelled": "Cancelled",
       "failed": "Failed",
+      "unknown": "Unknown status",
       "search": "Search",
       "reset": "Reset",
       "task": "Task",
@@ -1658,9 +1718,9 @@
       "taskTitlePlaceholder": "e.g. Q4 tax rate bulk import (leave blank to auto-name)",
       "cancel": "Cancel",
       "createTitle": "Create",
-      "subtitle": "Export / import task management",
-      "refreshHint": "· Manual refresh (top right); auto-refreshes only after job events while jobs are in flight (no polling)",
-      "loadFailed": "Failed to load tasks: {error}",
+      "subtitle": "Create, filter and track export and import tasks, and review their current steps and job progress.",
+      "refreshHint": "Click Refresh at the top right for the latest state. Related updates appear here while jobs are running.",
+      "loadFailed": "The task list could not be loaded. Your filters are preserved; click Refresh to retry.",
       "empty": "No tasks yet; create one from the top right",
       "exportDesc": "Select definitions → set conditions → export Excel",
       "importDesc": "Upload/edit → check → import to staging → publish",
@@ -1671,21 +1731,25 @@
         "cancelTitle": "Cancel job",
         "cancelMessage": "Cancel job #{jobId} currently running for task \"{title}\"? Processed data will not be rolled back.",
         "cancelAck": "Confirm cancelling the job; this cannot be undone",
+        "cancelConfirm": "Cancel job #{jobId}",
+        "cancelKeep": "Keep job running",
         "deleteTitle": "Delete task",
         "deleteMessage": "Delete task \"{title}\"? Its jobs, staging data and export results will be deleted as well.",
-        "deleteAck": "Confirm deleting the task; this cannot be undone"
+        "deleteAck": "Confirm deleting the task; this cannot be undone",
+        "deleteConfirm": "Delete task \"{title}\"",
+        "deleteKeep": "Keep task"
       },
       "msg": {
         "deleted": "Task deleted",
-        "deleteFailed": "Failed to delete the task",
-        "createFailed": "Failed to create the task",
+        "deleteFailed": "The task was not deleted. The task and its related results are preserved; refresh and retry.",
+        "createFailed": "The task was not created. Your entries are preserved; review them and retry.",
         "created": "Task \"{title}\" created",
-        "loadFailed": "Failed to load the task list",
+        "loadFailed": "The task list could not be loaded. Your filters are preserved; click Refresh to retry.",
         "cancelRequested": "Cancellation requested for job #{jobId}",
         "jobAlreadyFinal": "Job #{jobId} is already in a terminal state; nothing to cancel",
-        "cancelFailed": "Failed to cancel the job",
-        "unknownError": "unknown error",
-        "watchInterrupted": "Tracking the final state of publish job #{jobId} was interrupted: {message}",
+        "cancelFailed": "Job cancellation was not completed. Refresh to check its current state before deciding whether to retry.",
+        "unknownError": "The action did not complete. The current page is preserved; refresh to check the state before deciding whether to retry.",
+        "watchInterrupted": "Progress updates for publish job #{jobId} were interrupted. Refresh the Task Center to check its final state.",
         "watchTimeout": "Publish job #{jobId} timed out waiting for a terminal state; refresh the Task Center later for the result",
         "issuesLoadFailed": "Publish job #{jobId} failed and the validation issue list could not be loaded; check the Task Center",
         "conflictSummary": "Publish conflicts: {count}; details are in the AI panel receipt"

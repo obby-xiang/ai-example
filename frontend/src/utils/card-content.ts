@@ -2,25 +2,38 @@ import { translate } from '@/composables/useCopy'
 import type { SheetWritePlan } from '@/types/ai'
 import { conditionSummaryText, conditionSummaryView, isConditionEmpty, type FieldQueryCondition } from '@/types/condition'
 
-function translated(key: string, fallback: string): string {
-  const value = translate(key)
-  return value === key ? fallback : value
+const PUBLIC_ENUM_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/
+
+function enumRaw(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
+}
+
+function unknownEnumText(value: unknown): string {
+  const raw = enumRaw(value)
+  return PUBLIC_ENUM_CODE_RE.test(raw)
+    ? translate('ai.value.unknownWithCode', { code: raw })
+    : translate('ai.value.unknown')
+}
+
+function translated(key: string, value: unknown): string {
+  const localized = translate(key)
+  return localized === key ? unknownEnumText(value) : localized
 }
 
 export function taskTypeText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   switch (raw.toUpperCase()) {
     case 'EXPORT':
       return translate('views.tasks.exportType')
     case 'IMPORT':
       return translate('views.tasks.importType')
     default:
-      return raw
+      return unknownEnumText(raw)
   }
 }
 
 export function jobTypeText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   switch (raw.toUpperCase()) {
     case 'EXPORT':
       return translate('tool.start_export.title')
@@ -31,12 +44,12 @@ export function jobTypeText(value: unknown): string {
     case 'PUBLISH':
       return translate('tool.start_publish.title')
     default:
-      return raw
+      return unknownEnumText(raw)
   }
 }
 
 export function configLevelText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   switch (raw.toUpperCase()) {
     case 'GLOBAL':
       return translated('ai.values.level.GLOBAL', raw)
@@ -45,12 +58,12 @@ export function configLevelText(value: unknown): string {
     case 'PROJECT':
       return translated('ai.values.level.PROJECT', raw)
     default:
-      return raw
+      return unknownEnumText(raw)
   }
 }
 
 export function importModeText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   switch (raw.toUpperCase()) {
     case 'MERGE':
       return translate('views.import.mergeMode')
@@ -59,12 +72,12 @@ export function importModeText(value: unknown): string {
     case 'ADD':
       return translated('ai.values.mode.ADD', raw)
     default:
-      return raw
+      return unknownEnumText(raw)
   }
 }
 
 export function taskStepText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   switch (raw.toUpperCase()) {
     case 'SELECT_DEFS':
       return translate('views.export.steps.select')
@@ -83,37 +96,38 @@ export function taskStepText(value: unknown): string {
     case 'DONE':
       return translated('ai.values.step.DONE', raw)
     default:
-      return raw
+      return unknownEnumText(raw)
   }
 }
 
 export function workspacePageText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   return translated(`ai.workspace.page.${raw.toLowerCase()}`, raw)
 }
 
 export function sheetScopeText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   return translated(`ai.values.scope.${raw}`, raw)
 }
 
 export function textFormatText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   return translated(`ai.gf.formats.${raw.toLowerCase()}`, raw)
 }
 
 export function formFieldTypeText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   return translated(`ai.gf.types.${raw.toLowerCase()}`, raw)
 }
 
 export function configFieldTypeText(value: unknown): string {
-  const raw = String(value ?? '')
+  const raw = enumRaw(value)
   return translated(`views.definitions.types.${raw.toUpperCase()}`, raw)
 }
 
 function taskStatusText(value: string): string {
-  switch (value.toUpperCase()) {
+  const raw = enumRaw(value)
+  switch (raw.toUpperCase()) {
     case 'ACTIVE':
       return translate('views.tasks.active')
     case 'COMPLETED':
@@ -123,7 +137,7 @@ function taskStatusText(value: string): string {
     case 'FAILED':
       return translate('views.tasks.failed')
     default:
-      return translated(`tool.status.${value.toLowerCase()}`, value)
+      return translated(`tool.status.${raw.toLowerCase()}`, raw)
   }
 }
 

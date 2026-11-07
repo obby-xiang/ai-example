@@ -1038,9 +1038,13 @@ async function downloadTemplates(): Promise<void> {
  *
  * @returns true = 用户确认放弃这些编辑；false = 用户取消（调用方必须回滚到原状）
  */
-async function canConfirmDiscardEdits(title: string, message: string): Promise<boolean> {
+async function canConfirmDiscardEdits(title: string, message: string, confirmText: string): Promise<boolean> {
   try {
-    return await ElMessageBox.confirm(message, title, { type: 'warning' }).then(
+    return await ElMessageBox.confirm(message, title, {
+      type: 'warning',
+      confirmButtonText: confirmText,
+      cancelButtonText: t('views.import.dialog.unsavedEditKeep')
+    }).then(
       () => true,
       (error) => {
         if (error === 'cancel' || error === 'close') {
@@ -1070,7 +1074,8 @@ async function canConfirmDirtyBeforeUpload(): Promise<boolean> {
   }
   return await canConfirmDiscardEdits(
     t('views.import.dialog.unsavedUploadTitle'),
-    t('views.import.msg.unsavedUploadConfirm', { codes: [...dirtyDefs].join('、') })
+    t('views.import.msg.unsavedUploadConfirm', { codes: [...dirtyDefs].join('、') }),
+    t('views.import.dialog.unsavedUploadConfirm')
   )
 }
 
@@ -1219,7 +1224,7 @@ async function loadEditorsNow(force: boolean, only?: readonly string[]): Promise
   }
   if (!listed) {
     // 清单未知：不构造模板（否则模板会被当成 B 的文件内容写回）。用户可见地说明一次。
-    ElMessage.warning('服务端文件清单读取失败，编辑区暂不能载入（请稍后重试或点「保存草稿到服务端」重试）')
+    ElMessage.warning(t('views.import.msg.fileListRequired'))
     return
   }
   await nextTick()
@@ -1583,6 +1588,7 @@ async function canSettleDirtyOrConfirm(
   forTask: number,
   codes: readonly string[],
   title: string,
+  confirmText: string,
   message: (reason: string) => string
 ): Promise<boolean> {
   if (codes.length === 0) {
@@ -1596,7 +1602,11 @@ async function canSettleDirtyOrConfirm(
   if (generation !== taskGeneration) {
     return false
   }
-  return await canConfirmDiscardEdits(title, message(outcome.reason ?? t('views.import.msg.unknownReason')))
+  return await canConfirmDiscardEdits(
+    title,
+    message(outcome.reason ?? t('views.import.msg.unknownReason')),
+    confirmText
+  )
 }
 
 /**
@@ -1610,6 +1620,7 @@ async function canSettleDirtyBeforeSwitch(from: number): Promise<boolean> {
     from,
     codes,
     t('views.import.dialog.unsavedSwitchTitle'),
+    t('views.import.dialog.unsavedSwitchConfirm'),
     (reason) => t('views.import.msg.unsavedSwitchConfirm', {
       codes: codes.join('、'),
       taskId: from,
@@ -1635,6 +1646,7 @@ async function canSettleDirtyBeforeDeselect(codes: readonly string[]): Promise<b
     forTask,
     codes,
     t('views.import.dialog.unsavedDeselectTitle'),
+    t('views.import.dialog.unsavedDeselectConfirm'),
     (reason) => t('views.import.msg.unsavedDeselectConfirm', {
       codes: codes.join('、'),
       reason
@@ -1723,7 +1735,7 @@ async function goStep(next: number, guard?: () => boolean): Promise<StepAdvanceO
   const synced = await syncStepToBackend(generation, taskId.value)
   let syncWarning: string | undefined
   if (!synced.ok) {
-    syncWarning = '步骤已推进但服务端步骤同步失败，下次切步会重试'
+    syncWarning = t('views.import.msg.stepSyncWarning')
     ElMessage.warning(syncWarning)
   }
   if (generation === taskGeneration) {
@@ -1775,7 +1787,7 @@ async function syncStepToBackend(
     // 批3③b D11（R-143①）：单点提示 —— 本函数**不自弹**（原 ElMessage.error 删除），由调用方
     // goStep 只弹一条 warning（与导出侧同改；全仓仅两个调用方，不留静默路径）。
     // 结构化失败结局照常返回，由 goStep 带进回灌。
-    const reason = error instanceof Error ? error.message : String(error)
+    const reason = userFacingErrorText(error, t('api.error.safeUnknown'))
     return { ok: false, reason }
   }
 }
@@ -2177,7 +2189,9 @@ async function cancelJob(job: Job | null): Promise<void> {
   const confirmed = await confirmIrreversible({
     title: t('views.import.dialog.cancelTitle'),
     message: t('views.import.dialog.cancelMessage'),
-    ack: t('views.import.dialog.cancelAck')
+    ack: t('views.import.dialog.cancelAck'),
+    confirmText: t('views.import.dialog.cancelConfirm', { jobId: job.id }),
+    cancelText: t('views.import.dialog.cancelKeep')
   })
   if (!confirmed) {
     return
@@ -2371,7 +2385,7 @@ function registerHandlers(): void {
       }
     } catch (error) {
       logCaughtError(error, 'import-wizard:request')
-      return { ok: false, reason: `${code} 的编辑区表格未就绪：${error instanceof Error ? error.message : String(error)}` }
+      return { ok: false, reason: `${code} 的编辑区表格未就绪：${t('views.import.msg.editorLoadFailed', { code })}` }
     }
   })
 
@@ -2767,6 +2781,7 @@ onBeforeRouteLeave(async () => {
     forTask,
     codes,
     t('views.import.dialog.unsavedLeaveTitle'),
+    t('views.import.dialog.unsavedLeaveConfirm'),
     (reason) => t('views.import.msg.unsavedLeaveConfirm', {
       codes: codes.join('、'),
       reason

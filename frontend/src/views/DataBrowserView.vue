@@ -74,7 +74,7 @@
         <template #default="{ row }: { row: ConfigDataRow }">
           <el-descriptions :column="2" border size="small" class="my-1 mx-4">
             <el-descriptions-item :label="t('views.data.rowKey')">{{ row.rowKey }}</el-descriptions-item>
-            <el-descriptions-item :label="t('views.data.scope')">{{ row.scopeType }} / {{ row.scopeKey || '—' }}</el-descriptions-item>
+            <el-descriptions-item :label="t('views.data.scope')">{{ scopeTypeLabel(row.scopeType) }} / {{ row.scopeKey || '—' }}</el-descriptions-item>
             <el-descriptions-item :label="t('views.data.version')">{{ row.version ?? '—' }}</el-descriptions-item>
             <el-descriptions-item :label="t('views.data.updatedAt')">{{ formatDateTime(row.updatedAt) }}</el-descriptions-item>
             <el-descriptions-item
@@ -93,7 +93,7 @@
         :label="t('views.data.scope')"
         width="160"
       >
-        <template #default="{ row }: { row: ConfigDataRow }">{{ row.scopeType }} / {{ row.scopeKey || '—' }}</template>
+        <template #default="{ row }: { row: ConfigDataRow }">{{ scopeTypeLabel(row.scopeType) }} / {{ row.scopeKey || '—' }}</template>
       </el-table-column>
       <el-table-column
         v-for="field in currentFields"
@@ -207,6 +207,19 @@ const browserNote = computed(() => {
     total: total.value
   })
 })
+
+function scopeTypeLabel(scopeType: ScopeType | string): string {
+  switch (scopeType) {
+    case 'GLOBAL':
+      return t('views.data.global')
+    case 'REGION':
+      return t('views.data.region')
+    case 'PROJECT':
+      return t('views.data.project')
+    default:
+      return t('ai.value.unknown')
+  }
+}
 
 function dataOf(row: ConfigDataRow): Readonly<Record<string, unknown>> {
   return parseRowData(row)

@@ -9,8 +9,8 @@
  *
  * <p>
  * 实现要点：`beforeClose` 是**唯一**放行闸 —— `action='confirm'` 且未勾选时不调 `done()`
- * （对话框不关、什么也不发生）；取消永远放行。按钮文案不在这里覆盖，交给根级
- * `<el-config-provider :locale>`（`App.vue`）跟随语言 —— 与仓库其余对话框同一口径。
+ * （对话框不关、什么也不发生）；取消永远放行。调用方必须通过 `confirmText` / `cancelText`
+ * 点明动作对象与后果，并提供保留、返回或继续编辑的出口，不回退通用按钮。
  */
 import { h, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
@@ -22,10 +22,14 @@ import { logCaughtError } from '@/utils/log-caught-error'
 export interface IrreversibleConfirmOptions {
   /** 对话框标题（如「取消作业」/「删除任务」） */
   title: string
-  /** 正文说明（原有文案原样保留；换行按 `whitespace-pre-line` 还原） */
+  /** 正文说明（须点明动作对象与后果；换行按 `whitespace-pre-line` 还原） */
   message: string
   /** 复选框文案（如「确认取消作业，执行后无法恢复」） */
   ack: string
+  /** 结果型确认按钮（须点明动作对象与后果） */
+  confirmText: string
+  /** 保留、返回或继续编辑按钮 */
+  cancelText: string
   type?: 'warning' | 'error' | 'info'
 }
 
@@ -55,6 +59,8 @@ export async function confirmIrreversible(options: IrreversibleConfirmOptions): 
       options.title,
       {
         type: options.type ?? 'warning',
+        confirmButtonText: options.confirmText,
+        cancelButtonText: options.cancelText,
         beforeClose: (action, _instance, done) => {
           if (action === 'confirm' && !acked.value) {
             return
@@ -95,6 +101,8 @@ export async function confirmPublishByMode(mode: ImportMode | null): Promise<boo
   return confirmIrreversible({
     title: translate('views.import.dialog.publishReplaceTitle'),
     message: translate('views.import.dialog.publishReplaceMessage'),
-    ack: translate('views.import.dialog.publishReplaceAck')
+    ack: translate('views.import.dialog.publishReplaceAck'),
+    confirmText: translate('views.import.dialog.publishReplaceConfirm'),
+    cancelText: translate('views.import.dialog.publishReplaceKeep')
   })
 }
