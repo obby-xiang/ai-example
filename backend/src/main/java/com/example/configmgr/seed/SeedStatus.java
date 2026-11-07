@@ -1,6 +1,7 @@
 package com.example.configmgr.seed;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
@@ -73,7 +74,7 @@ public class SeedStatus {
 	public synchronized void mark(Seed seed, State state, String detail) {
 		this.states.put(seed, state);
 		if (state == State.FAILED) {
-			this.failures.put(seed, detail == null ? "unknown" : detail);
+			this.failures.put(seed, StringUtils.defaultString(detail, "unknown"));
 			log.warn("Seed failed, readiness stays up and failure is exposed via /health/ready seed={} detail={}",
 			        seed.key(), detail);
 		}

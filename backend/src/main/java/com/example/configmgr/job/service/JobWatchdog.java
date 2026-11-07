@@ -8,6 +8,8 @@ import com.example.configmgr.job.repo.ValidationIssueRepository;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -180,7 +182,7 @@ public class JobWatchdog {
         body.put("issueSuppressedTotal", this.issueSuppressedTotal.get());
         body.put("judgedTracked", this.judgedJobIds.size());
         body.put("failClosedTracked", this.failClosedLogged.size());
-        body.put("lastScanAt", this.lastScanAt == null ? null : this.lastScanAt.toString());
+        body.put("lastScanAt", ObjectUtils.toString(this.lastScanAt, null));
         return body;
     }
 
@@ -246,9 +248,7 @@ public class JobWatchdog {
             return;
         }
         Set<Long> trackedIds = new HashSet<>(Math.max(16, inFlight.size() * 2));
-        for (Job job : inFlight) {
-            trackedIds.add(job.getId());
-        }
+        CollectionUtils.collect(inFlight, Job::getId, trackedIds);
         this.judgedJobIds.retainAll(trackedIds);
         this.failClosedLogged.retainAll(trackedIds);
     }

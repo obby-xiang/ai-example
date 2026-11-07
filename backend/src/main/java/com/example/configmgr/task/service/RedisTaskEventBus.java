@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ArrayUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -261,7 +262,7 @@ public class RedisTaskEventBus implements TaskEventBus {
      * <b>包内可见</b>供单测直呼（单测不起真 Redis；断言对象是分发语义，容器只是搬运工）。
      */
     void handleMessage(Long taskId, byte[] body) {
-        if (body == null || body.length == 0) {
+        if (ArrayUtils.isEmpty(body)) {
             return;
         }
         final String frame;

@@ -17,6 +17,10 @@ import com.example.configmgr.task.repo.TaskFileRepository;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import com.example.configmgr.task.repo.TaskRepository;
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.IterableUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -67,7 +71,7 @@ public class FileController {
                                                     @RequestParam(value = "defCodes", required = false) List<String> defCodes)
             throws Exception {
         lockTask(taskId);
-        String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "upload.xlsx";
+        String originalName = StringUtils.defaultString(file.getOriginalFilename(), "upload.xlsx");
         List<String> matchCodes = resolveMatchDefCodes(taskId, defCodes);
 
         if (originalName.toLowerCase().endsWith(".zip")) {
@@ -180,7 +184,7 @@ public class FileController {
      */
     private List<ZipFileEntry> readZipEntries(byte[] zipBytes) throws IOException {
         List<ZipFileEntry> utf8 = extractZip(zipBytes, StandardCharsets.UTF_8);
-        if (utf8.stream().anyMatch(e -> e.name().contains("\uFFFD"))) {
+        if (IterableUtils.matchesAny(utf8, e -> e.name().contains("\uFFFD"))) {
             return extractZip(zipBytes, Charset.forName("GBK"));
         }
         return utf8;
@@ -213,8 +217,8 @@ public class FileController {
             throw ResourceNotFoundException.of("File", defCode);
         }
         byte[] bytes = fileStorage.read(fileOpt.get().getStoragePath());
-        String filename = URLEncoder.encode(fileOpt.get().getFileName() != null
-                ? fileOpt.get().getFileName() : defCode + ".xlsx", StandardCharsets.UTF_8);
+        String filename = URLEncoder.encode(ObjectUtils.getIfNull(fileOpt.get().getFileName(),
+                () -> defCode + ".xlsx"), StandardCharsets.UTF_8);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''" + filename)
                 .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
@@ -307,7 +311,7 @@ public class FileController {
         if (selected.size() == 1) {
             TaskFile only = selected.get(0);
             byte[] bytes = fileStorage.read(only.getStoragePath());
-            String filename = only.getFileName() != null ? only.getFileName() : only.getDefCode() + ".xlsx";
+            String filename = ObjectUtils.getIfNull(only.getFileName(), () -> only.getDefCode() + ".xlsx");
             return ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_DISPOSITION,
                             "attachment; filename*=UTF-8''" + URLEncoder.encode(filename, StandardCharsets.UTF_8))
@@ -328,16 +332,15 @@ public class FileController {
     private static List<TaskFile> selectOnePerCode(List<TaskFile> taskFiles, List<String> codes) {
         List<TaskFile> selected = new ArrayList<>();
         for (String code : codes) {
-            if (selected.stream().anyMatch(f -> f.getDefCode().equals(code))) {
+            if (IterableUtils.matchesAny(selected, f -> f.getDefCode().equals(code))) {
                 continue;
             }
-            TaskFile pick = taskFiles.stream()
-                    .filter(f -> code.equals(f.getDefCode()) && "EXPORT".equals(f.getFileType()))
-                    .findFirst()
-                    .or(() -> taskFiles.stream()
-                            .filter(f -> code.equals(f.getDefCode()) && "UPLOAD".equals(f.getFileType()))
-                            .findFirst())
-                    .orElse(null);
+            TaskFile pick = IterableUtils.find(taskFiles,
+                    f -> code.equals(f.getDefCode()) && "EXPORT".equals(f.getFileType()));
+            if (pick == null) {
+                pick = IterableUtils.find(taskFiles,
+                        f -> code.equals(f.getDefCode()) && "UPLOAD".equals(f.getFileType()));
+            }
             if (pick != null) {
                 selected.add(pick);
             }
@@ -350,7 +353,7 @@ public class FileController {
         // 显式 UTF-8：中文文件名在 Windows 压缩工具下不乱码
         try (ZipOutputStream zos = new ZipOutputStream(bos, StandardCharsets.UTF_8)) {
             for (TaskFile tf : files) {
-                String name = tf.getFileName() != null ? tf.getFileName() : tf.getDefCode() + ".xlsx";
+                String name = ObjectUtils.getIfNull(tf.getFileName(), () -> tf.getDefCode() + ".xlsx");
                 zos.putNextEntry(new ZipEntry(name));
                 zos.write(fileStorage.read(tf.getStoragePath()));
                 zos.closeEntry();
@@ -365,7 +368,7 @@ public class FileController {
         Task task = taskRepository.findById(taskId)
                 .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
         List<TaskItem> items = taskItemRepository.findByTaskIdOrderBySortOrder(taskId);
-        List<String> targetCodes = codes != null && !codes.isEmpty() ? codes
+        List<String> targetCodes = CollectionUtils.isNotEmpty(codes) ? codes
                 : items.stream().map(TaskItem::getDefCode).toList();
 
         if (targetCodes.size() == 1) {
@@ -415,14 +418,14 @@ public class FileController {
      * 条目 —— 与改动前行为一致，旧客户端/既有调用面零变化。
      */
     private List<String> resolveMatchDefCodes(Long taskId, List<String> requested) {
-        if (requested == null || requested.isEmpty()) {
+        if (CollectionUtils.isEmpty(requested)) {
             return taskItemRepository.findByTaskIdOrderBySortOrder(taskId).stream()
                     .map(TaskItem::getDefCode)
                     .toList();
         }
         List<String> codes = new ArrayList<>();
         for (String raw : requested) {
-            String code = raw == null ? "" : raw.trim();
+            String code = StringUtils.trimToEmpty(raw);
             if (code.isEmpty() || codes.contains(code)) {
                 continue;
             }

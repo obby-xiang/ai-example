@@ -5,6 +5,7 @@ import com.example.configmgr.common.sse.SseWriteBudget;
 import com.example.configmgr.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -204,7 +205,8 @@ public class TaskSseService {
         // 同一 taskId 的挂/摘必须原子：computeIfPresent 的"空表即摘条目"与 computeIfAbsent 的挂载
         // 若各走各的，会出现"条目被摘掉的瞬间新订阅者挂在已摘除的 list 上"（订阅者永久失联）。
         emitters.compute(taskId, (key, list) -> {
-            List<SseEmitter> target = list != null ? list : Collections.synchronizedList(new ArrayList<>());
+            List<SseEmitter> target = ObjectUtils.getIfNull(list,
+                    () -> Collections.synchronizedList(new ArrayList<>()));
             target.add(emitter);
             return target;
         });
@@ -360,7 +362,7 @@ public class TaskSseService {
      */
     private void reconcileRemoteSubscription(Long taskId) {
         SubscriptionLock lock = this.subscriptionLocks.compute(taskId, (key, existing) -> {
-            SubscriptionLock target = existing != null ? existing : new SubscriptionLock();
+            SubscriptionLock target = ObjectUtils.getIfNull(existing, SubscriptionLock::new);
             target.holders++;
             return target;
         });

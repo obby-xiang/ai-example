@@ -4,6 +4,7 @@ import com.example.configmgr.config.AppProperties;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -228,7 +229,7 @@ public class JobCancellationRegistry {
     private boolean writeRedisFlag(Long jobId, String requestedBy, long version) {
         try {
             Long written = this.redis.execute(WRITE_MONOTONIC_CANCEL_SCRIPT, List.of(keyFor(jobId)),
-                    Long.toString(version), version + "|" + (requestedBy == null ? "unknown" : requestedBy),
+                    Long.toString(version), version + "|" + StringUtils.defaultString(requestedBy, "unknown"),
                     Long.toString(this.cancelTtl.toMillis()));
             return written != null && written > 0L;
         } catch (Exception ex) {

@@ -22,6 +22,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -112,7 +114,8 @@ public class PublishJobRunner {
             heartbeatRegistry.release(job.getId());
         }
 
-        PublishOutcome finalOutcome = outcome != null ? outcome : new PublishOutcome(false, 0, 0, 0);
+        PublishOutcome finalOutcome = ObjectUtils.getIfNull(outcome,
+                () -> new PublishOutcome(false, 0, 0, 0));
         Job.JobStatus status = finalOutcome.cancelled() ? Job.JobStatus.CANCELLED
                 : (finalOutcome.totalErrors() > 0 ? Job.JobStatus.FAILED : Job.JobStatus.COMPLETED);
         // R-153 B1：任务 COMPLETED/步骤联动收编进 terminalWriter 落写成功分支（孪生翻写点同 Export）。
@@ -360,7 +363,7 @@ public class PublishJobRunner {
         return taskRepository.findById(taskId)
                 .map(t -> {
                     String settings = t.getSettingsJson();
-                    if (settings == null || settings.isBlank()) {
+                    if (StringUtils.isBlank(settings)) {
                         return ImportMode.MERGE;
                     }
                     try {

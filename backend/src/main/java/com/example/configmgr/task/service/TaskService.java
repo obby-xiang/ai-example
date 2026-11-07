@@ -24,6 +24,9 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.collections4.IterableUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -40,10 +43,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -82,12 +85,8 @@ public class TaskService {
     }
 
     static String escapeLike(String keyword) {
-        if (keyword == null) {
-            return null;
-        }
-        return keyword.replace("\\", "\\\\")
-                .replace("%", "\\%")
-                .replace("_", "\\_");
+        return StringUtils.replaceEach(keyword,
+                new String[]{"\\", "%", "_"}, new String[]{"\\\\", "\\%", "\\_"});
     }
 
     public Task findById(Long id) {
@@ -174,7 +173,7 @@ public class TaskService {
      */
     public CreateOutcome createIdempotent(Task.TaskType type, String title, String runId, Long continuationTaskId) {
         String normalizedTitle = normalizeCreateName(title);
-        String runToken = runId == null || runId.isBlank() ? null : runId.trim();
+        String runToken = StringUtils.isBlank(runId) ? null : runId.trim();
         String key = createIdempotencyKey(type, normalizedTitle, runToken);
         Object lock = createLock(runToken == null ? "key:" + key : "run:" + runToken);
         synchronized (lock) {
@@ -278,7 +277,7 @@ public class TaskService {
     }
 
     public static String effectiveCreateTitle(Task.TaskType type, String title) {
-        if (title != null && !title.isBlank()) {
+        if (StringUtils.isNotBlank(title)) {
             return title.trim();
         }
         if (type == Task.TaskType.EXPORT) {
@@ -293,7 +292,7 @@ public class TaskService {
     /** 预检与执行共用的续用资格：只有同意图且仍活跃的 AI 创建任务才可续用。 */
     public static boolean isContinuationEligible(Task task, Task.TaskType type, String title) {
         return task != null && task.getStatus() == Task.TaskStatus.ACTIVE
-                && task.getAiCreateKey() != null && !task.getAiCreateKey().isBlank()
+                && StringUtils.isNotBlank(task.getAiCreateKey())
                 && sameCreateIntent(task, type, normalizeCreateName(title));
     }
 
@@ -302,7 +301,7 @@ public class TaskService {
     }
 
     private Map<String, Object> readCreateSettings(Task task) {
-        if (task.getSettingsJson() == null || task.getSettingsJson().isBlank()) {
+        if (StringUtils.isBlank(task.getSettingsJson())) {
             return new LinkedHashMap<>();
         }
         try {
@@ -410,9 +409,7 @@ public class TaskService {
 
     private static Object[] createLocks() {
         Object[] locks = new Object[64];
-        for (int i = 0; i < locks.length; i++) {
-            locks[i] = new Object();
-        }
+        Arrays.setAll(locks, index -> new Object());
         return locks;
     }
 
@@ -421,22 +418,18 @@ public class TaskService {
     }
 
     private static String normalizeCreateName(String title) {
-        String normalized = title == null ? "" : title.trim().replaceAll("\\s+", " ");
-        return normalized.isEmpty() ? "未命名任务" : normalized;
+        String normalized = StringUtils.trimToEmpty(title).replaceAll("\\s+", " ");
+        return StringUtils.defaultIfEmpty(normalized, "未命名任务");
     }
 
     /** 幂等键：name（规范化标题）+ parent（runId）+ 稳定参数（type）的 sha256。 */
     static String createIdempotencyKey(Task.TaskType type, String normalizedTitle, String runToken) {
-        String material = "create_task|name=" + normalizedTitle + "|parent=" + (runToken == null ? "-" : runToken)
+        String material = "create_task|name=" + normalizedTitle + "|parent=" + StringUtils.defaultString(runToken, "-")
                 + "|params=" + type.name();
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
                     .digest(material.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder(64);
-            for (byte value : digest) {
-                hex.append(String.format(Locale.ROOT, "%02x", value));
-            }
-            return hex.toString();
+            return Hex.encodeHexString(digest);
         }
         catch (NoSuchAlgorithmException ex) {
             throw new CodedIllegalStateException(ErrorCodes.SHA256_UNAVAILABLE,
@@ -517,7 +510,7 @@ public class TaskService {
         // R-137 双守卫：①终态守卫（与 JobService.assertTaskNotFinalized / 前端 isCurrentTaskReadOnly 同口径）
         assertTaskNotFinalized(task);
         // ②step 校验：非空 + 格式 + 按任务类型白名单（非法 → IllegalArgumentException → 400）
-        if (step == null || step.isBlank()) {
+        if (StringUtils.isBlank(step)) {
             throw new CodedIllegalArgumentException(ErrorCodes.STEP_REQUIRED, "Target step must not be empty");
         }
         String normalized = step.trim();
@@ -598,7 +591,7 @@ public class TaskService {
                 .orElseThrow(() -> ResourceNotFoundException.of("Task", taskId));
 
         Map<String, Object> settings = new HashMap<>();
-        if (task.getSettingsJson() != null && !task.getSettingsJson().isBlank()) {
+        if (StringUtils.isNotBlank(task.getSettingsJson())) {
             try {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> parsed = objectMapper.readValue(task.getSettingsJson(), Map.class);
@@ -724,11 +717,8 @@ public class TaskService {
         Task task = lockForUpdate(taskId);
 
         List<Job> jobs = jobRepository.findByTaskId(taskId);
-        Job inFlight = jobs.stream()
-                .filter(job -> job.getStatus() == Job.JobStatus.PENDING
-                        || job.getStatus() == Job.JobStatus.RUNNING)
-                .findFirst()
-                .orElse(null);
+        Job inFlight = IterableUtils.find(jobs, job -> job.getStatus() == Job.JobStatus.PENDING
+                || job.getStatus() == Job.JobStatus.RUNNING);
         if (inFlight != null) {
             throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,
                     "Task #" + taskId + " still has unfinished job #" + inFlight.getId() + " ["
@@ -742,10 +732,8 @@ public class TaskService {
         // 的 finally 注销 runner 后才放行。心跳过期/看门狗清心跳不等于 runner 已退出。
         Job finishing;
         try {
-            finishing = jobs.stream()
-                    .filter(job -> heartbeatRegistry.isRunnerAlive(job.getId()))
-                    .findFirst()
-                    .orElse(null);
+            finishing = IterableUtils.find(jobs,
+                    job -> heartbeatRegistry.isRunnerAlive(job.getId()));
         } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
             // C1 / 多实例：Redis 不可用时不能把“查不到”当成“没有 runner”。fail-closed。
             throw new ConflictException(ErrorCodes.JOB_ALREADY_RUNNING,

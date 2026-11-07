@@ -14,10 +14,13 @@ import com.example.configmgr.task.service.TaskSseService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.CollectionUtils;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -48,8 +51,8 @@ public class TaskController {
             @RequestParam(required = false) String keyword,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
-        Task.TaskType tt = (type == null || type.isBlank()) ? null : Task.TaskType.valueOf(type.toUpperCase());
-        Task.TaskStatus st = (status == null || status.isBlank()) ? null : Task.TaskStatus.valueOf(status.toUpperCase());
+        Task.TaskType tt = StringUtils.isBlank(type) ? null : Task.TaskType.valueOf(type.toUpperCase());
+        Task.TaskStatus st = StringUtils.isBlank(status) ? null : Task.TaskStatus.valueOf(status.toUpperCase());
         Page<Task> result = taskService.search(tt, st, keyword, PageRequest.of(page, size));
         return ApiResponse.ok(result.map(this::toSummary));
     }
@@ -67,7 +70,7 @@ public class TaskController {
 
     private TaskSummary toSummary(Task task) {
         List<Job> jobs = jobRepository.findByTaskIdOrderByCreatedAtDescIdDesc(task.getId());
-        Job latest = jobs.isEmpty() ? null : jobs.get(0);
+        Job latest = CollectionUtils.firstElement(jobs);
         int fileCount = taskFileRepository.findByTaskId(task.getId()).size();
         return new TaskSummary(task,
                 task.getItems() != null ? task.getItems().size() : 0,
@@ -97,7 +100,7 @@ public class TaskController {
     public ApiResponse<Task> selectDefs(@PathVariable Long id, @RequestBody Map<String, Object> body) {
         @SuppressWarnings("unchecked")
         List<String> codes = (List<String>) body.get("defCodes");
-        return ApiResponse.ok(taskService.selectDefs(id, codes != null ? codes : List.of()));
+        return ApiResponse.ok(taskService.selectDefs(id, ObjectUtils.getIfNull(codes, List::of)));
     }
 
     @PutMapping("/{id}/items/{defCode}/condition")
@@ -135,8 +138,8 @@ public class TaskController {
         }
         String text;
         if (condition instanceof String raw) {
-            text = raw.trim();
-            if (text.isEmpty()) {
+            text = StringUtils.trimToEmpty(raw);
+            if (StringUtils.isEmpty(text)) {
                 return "{}";
             }
         }

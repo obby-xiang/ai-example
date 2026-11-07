@@ -24,6 +24,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -180,7 +182,7 @@ public class PrecheckJobRunner {
                         for (ConfigField f : def.getFields()) {
                             if (f.isRequired()) {
                                 Object val = row.get(f.getCode());
-                                if (val == null || val.toString().isBlank()) {
+                                if (StringUtils.isBlank(ObjectUtils.toString(val, null))) {
                                     ValidationIssue issue = new ValidationIssue();
                                     issue.setJobId(jobId);
                                     issue.setDefCode(defCode);
@@ -236,7 +238,7 @@ public class PrecheckJobRunner {
                                 taskId, f.getRefDefCode(), f.getRefFieldCode());
                         for (int i = 0; i < rows.size(); i++) {
                             Object v = rows.get(i).get(f.getCode());
-                            if (v == null || v.toString().isBlank()) {
+                            if (StringUtils.isBlank(ObjectUtils.toString(v, null))) {
                                 continue; // 空值由必填校验负责
                             }
                             if (!validValues.contains(v.toString())) {
@@ -406,14 +408,14 @@ public class PrecheckJobRunner {
             for (ConfigDataRow r : dataRowRepository.findByDefCodeOrderByRowKey(refDefCode)) {
                 Map<String, Object> data = objectMapper.readValue(r.getDataJson(), new TypeReference<>() {});
                 Object v = data.get(refFieldCode);
-                if (v != null && !v.toString().isBlank()) {
+                if (StringUtils.isNotBlank(ObjectUtils.toString(v, null))) {
                     values.add(v.toString());
                 }
             }
             for (ConfigStagingRow s : stagingRowRepository.findByTaskIdAndDefCode(taskId, refDefCode)) {
                 Map<String, Object> data = objectMapper.readValue(s.getDataJson(), new TypeReference<>() {});
                 Object v = data.get(refFieldCode);
-                if (v != null && !v.toString().isBlank()) {
+                if (StringUtils.isNotBlank(ObjectUtils.toString(v, null))) {
                     values.add(v.toString());
                 }
             }

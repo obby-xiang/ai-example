@@ -1,6 +1,8 @@
 package com.example.configmgr.task.service;
 
 import com.example.configmgr.task.entity.Task;
+import org.apache.commons.collections4.IterableUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -78,7 +80,7 @@ public final class TaskSteps {
 
 	/** 步骤名归一（去空白 + 大写）；null/空白返回空串（"未知步骤"的唯一表示）。 */
 	public static String normalize(String step) {
-		return step == null ? "" : step.trim().toUpperCase(Locale.ROOT);
+		return StringUtils.trimToEmpty(step).toUpperCase(Locale.ROOT);
 	}
 
 	/** 是否是步骤名（含通用的 {@code DONE}）；null/空白返回 false。 */
@@ -90,12 +92,7 @@ public final class TaskSteps {
 		if (DONE.equals(normalized)) {
 			return true;
 		}
-		for (List<String> steps : SEQUENCES.values()) {
-			if (steps.contains(normalized)) {
-				return true;
-			}
-		}
-		return false;
+		return IterableUtils.matchesAny(SEQUENCES.values(), steps -> steps.contains(normalized));
 	}
 
 	/** 该任务类型是否接受这个步骤（{@code DONE} 通用）。 */

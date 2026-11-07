@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
@@ -442,7 +443,7 @@ public class JobService {
             long expectedSize = recorded.path("size").asLong(-1L);
             if (expectedSha == null || !expectedSha.equals(current.sha256()) || expectedSize != current.size()) {
                 return stale(defCode, IMPORT_FILE_TYPE + " file was replaced (precheck sha256="
-                        + (expectedSha == null ? "null" : expectedSha.substring(0, Math.min(12, expectedSha.length())))
+                        + StringUtils.left(expectedSha, 12)
                         + " size=" + expectedSize + "; current sha256="
                         + current.sha256().substring(0, 12) + " size=" + current.size() + ")");
             }
@@ -452,7 +453,7 @@ public class JobService {
 
     /** 解析指纹摘要；任何形态异常（缺失/非 JSON/非对象）都回落为空对象 —— 从严分支由此触发。 */
     private JsonNode parseFingerprintSummary(String resultJson) {
-        if (resultJson == null || resultJson.isBlank()) {
+        if (StringUtils.isBlank(resultJson)) {
             return com.fasterxml.jackson.databind.node.MissingNode.getInstance();
         }
         try {

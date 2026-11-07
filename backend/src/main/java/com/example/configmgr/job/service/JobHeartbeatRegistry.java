@@ -6,6 +6,7 @@ import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobRepository;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.ReturnType;
@@ -711,7 +712,7 @@ public class JobHeartbeatRegistry {
         }
         try {
             String value = redis.opsForValue().get(key(jobId));
-            String ownerValue = value == null ? indexedValue : value;
+            String ownerValue = ObjectUtils.defaultIfNull(value, indexedValue);
             if (ownerValue != null && ownerValue.startsWith(REVOKED_VALUE_PREFIX)) {
                 removeRunnerIndex(jobId, generationPrefixOfValue(indexedValue));
                 return false;

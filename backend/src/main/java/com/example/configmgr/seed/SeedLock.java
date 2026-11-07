@@ -2,6 +2,7 @@ package com.example.configmgr.seed;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -72,8 +73,8 @@ public class SeedLock {
 	private static String holder() {
 		try {
 			String name = ManagementFactory.getRuntimeMXBean().getName();
-			if (name != null && !name.isBlank()) {
-				return name.length() > 128 ? name.substring(0, 128) : name;
+			if (StringUtils.isNotBlank(name)) {
+				return StringUtils.left(name, 128);
 			}
 		}
 		catch (RuntimeException ignored) {
