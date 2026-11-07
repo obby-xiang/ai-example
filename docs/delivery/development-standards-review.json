@@ -3142,6 +3142,51 @@
           "reason": "两个暂存文档已逐hunk核对，禁止掩盖与合理异步/异常忽略的边界明确且可审查；本批纯文档无需代码编译或IDEA格式化。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:34f09b8fd1ed9e93711623d016446f95ce1c1c04665326d152f2e0f81b7e56ae",
+      "status": "reviewed",
+      "reason": "ToolRegistry仅新增5行，在getBean前跳过正在创建且声明类型不含@Tool的非工具Bean，消除aiConfigSeeder重复获取产生的循环创建异常堆栈。正在创建的工具Bean仍执行getBean并保留失败启动，非工具其他异常仍WARN，未掩盖真实工具缺失。IDEA Reformat已执行且agent-1048独立静态复审PASS；最终mvn -Dmaven.test.skip=true package成功。",
+      "reviewedAt": "2026-11-08T00:32:22+08:00",
+      "reviewer": "K3.1 Pro主会话最终暂存复核，agent-1048独立静态复审PASS",
+      "specChanges": [],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java",
+          "status": "checked",
+          "reason": "init复用同一ConfigurableListableBeanFactory，仅跳过isCurrentlyInCreation且非声明工具Bean；工具失败启动、applyOverrides、披露断言及其他非工具异常处理均保持。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用Spring现有ConfigurableListableBeanFactory.isCurrentlyInCreation和既有工具声明识别，没有新增依赖或另造Bean扫描框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "仅增加一个组合条件与局部BeanFactory变量，方法规模和复杂度保持低水平，无通配import或集合/JSON变化。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "只消除预期扫描噪音，真实工具Bean创建失败仍ERROR并中止启动，非工具其他异常仍按原WARN记录，未通过忽略异常掩盖故障。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批仅调整后端启动扫描，没有用户界面、卡片、提示或交互变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "工具注册和披露一致性断言保持完整，未把缺失工具或启动异常异步化/降级为正常；API、SSE和Redis协议未改。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批没有UTF-8、流式帧、JSON解析或字符截断变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "agent-1048确认5行新增无夹带并PASS，IDEA Reformat已执行；mvn -Dmaven.test.skip=true package成功，测试执行与真实启动日志复核将在服务启动后单独记录。"
+        }
+      }
     }
   ]
 }

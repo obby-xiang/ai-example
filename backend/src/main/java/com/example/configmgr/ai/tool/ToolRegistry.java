@@ -91,7 +91,12 @@ public class ToolRegistry {
     public void init() {
         List<String> failedToolBeans = new ArrayList<>();
         List<RuntimeException> failures = new ArrayList<>();
+        ConfigurableListableBeanFactory beanFactory =
+                (ConfigurableListableBeanFactory) applicationContext.getAutowireCapableBeanFactory();
         for (String beanName : applicationContext.getBeanDefinitionNames()) {
+            if (beanFactory.isCurrentlyInCreation(beanName) && !isDeclaredToolBean(beanName)) {
+                continue;
+            }
             Object bean;
             try {
                 bean = applicationContext.getBean(beanName);
