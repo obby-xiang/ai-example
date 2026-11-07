@@ -2867,6 +2867,62 @@
           "reason": "AGENTS单个新增段落已逐hunk复核，要求直接文件操作保留读写记录、禁止apply_patch并让IDEA重构/格式化差异重新进入审查；本批纯文档无需IDEA代码检查或编译。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:dc281a01225d6d00454ebfaa4bef478b95a6f40d253fd593e7441e3481dfedc0",
+      "status": "reviewed",
+      "reason": "按用户最新决定撤销IDEA Inspect Code及其问题处理的提交门禁，只保留IDEA Reformat Code。开发规范与AGENTS同步明确：不执行Inspect不得写成检查通过，格式化范围和结果仍须记录，格式化差异仍须逐hunk审查。已核对两个暂存文档的全部差异。",
+      "reviewedAt": "2026-11-08T00:09:36+08:00",
+      "reviewer": "K3.1 Pro主会话按用户最新规格逐hunk复核",
+      "specChanges": [
+        {
+          "change": "IDEA Inspect Code及检查问题处理暂缓且不再作为提交门禁，IDEA Reformat Code继续作为必做项。",
+          "reason": "用户明确决定当前只进行IDEA格式化，不处理IDEA代码检查问题。",
+          "impact": "后续代码提交不再要求Inspect profile、问题清单或修复证据；仍须记录真实格式化范围并审查格式化差异，禁止虚构Inspect通过结论。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "第5项移除Inspect和检查问题修复要求，保留IDEA Reformat、格式化证据及差异复审，和第6、7项门禁衔接不变。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "第8章第5项同步暂缓Inspect，明确其不作为提交门禁且未执行不得写通过；IDEA格式化不可替代性及重审要求保留。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅调整现有IDEA操作要求，没有新增、升级或移除依赖与组件。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java或通用代码变化，未调整集合、JSON、Lombok、命名和import规范。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批未修改日志、异常、脱敏或错误响应规则与实现。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只修改开发流程文档，没有用户界面、卡片、文案或交互变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批不涉及API、SSE、Redis、TTL、模型并发或状态机实现。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批未修改UTF-8、流式帧、JSON解析或字符截断规则与实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "两个暂存文档已逐hunk核对，最新暂缓Inspect的用户决定完整同步且保留真实证据边界；本批纯文档无需IDEA格式化或代码编译。"
+        }
+      }
     }
   ]
 }

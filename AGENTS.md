@@ -8,7 +8,7 @@
 2. 在 `docs/delivery/development-standards-review.json` 仅追加一条有效记录，覆盖全部暂存文件、七个规范域、具体理由、规格变化和真实证据边界，并将该文件同批暂存；父 ledger 必须是当前 ledger 的严格前缀。
 3. 确认记录指纹与最终暂存内容一致。审查后导致覆盖暂存状态变化的修改必须重新审查并更新记录，父 ledger 中已有 fingerprint 不得复用。
 4. 非测试代码修改必须由实际编译命令覆盖并编译通过；不执行测试不等于不编译，编译不通过不得提交或推送，静态审查和旧构建产物不能替代编译证据。
-5. 代码必须使用 IDEA Reformat Code 格式化并通过 IDEA Inspect Code 检查；检查问题修复后必须再次格式化并复查闭环，审查记录写明实际范围、检查结果和再次格式化结果。
+5. 代码必须使用 IDEA Reformat Code 格式化；IDEA Inspect Code 及其检查问题处理暂不执行。审查记录写明实际格式化范围和结果，格式化导致的变化仍须逐 hunk 审查。
 6. 运行 `node scripts/ci/check-d6-sync.mjs --standards` 核对记录。
 7. 不得绕过 pre-commit。缺少有效记录、指纹过期、理由空泛、缺少 Node 或门禁脚本异常均按失败处理。
 
