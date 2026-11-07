@@ -1,6 +1,7 @@
 package com.example.configmgr.health;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -156,7 +157,7 @@ public final class ReadinessProbeRunner implements AutoCloseable {
 		}
 		try {
 			ProbeResult result = future.get(remainingNanos, TimeUnit.NANOSECONDS);
-			return result == null ? ProbeResult.down("probe 返回空结果") : result;
+			return ObjectUtils.getIfNull(result, () -> ProbeResult.down("probe 返回空结果"));
 		}
 		catch (TimeoutException ex) {
 			future.cancel(true);
@@ -179,7 +180,7 @@ public final class ReadinessProbeRunner implements AutoCloseable {
 	private ProbeResult completed(Future<ProbeResult> future) {
 		try {
 			ProbeResult result = future.get();
-			return result == null ? ProbeResult.down("probe 返回空结果") : result;
+			return ObjectUtils.getIfNull(result, () -> ProbeResult.down("probe 返回空结果"));
 		}
 		catch (CancellationException ex) {
 			return ProbeResult.down("探测被取消");
@@ -194,7 +195,7 @@ public final class ReadinessProbeRunner implements AutoCloseable {
 	}
 
 	private static ProbeResult failed(ExecutionException ex) {
-		Throwable cause = ex.getCause() == null ? ex : ex.getCause();
+		Throwable cause = ObjectUtils.getIfNull(ex.getCause(), () -> ex);
 		return ProbeResult.down(cause.getClass().getSimpleName());
 	}
 

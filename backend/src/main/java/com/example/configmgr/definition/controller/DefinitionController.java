@@ -5,6 +5,7 @@ import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.excel.ExcelTemplateBuilder;
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -31,7 +32,7 @@ public class DefinitionController {
         List<ConfigDefinition> defs = level != null
                 ? definitionService.findByLevel(ConfigDefinition.ConfigLevel.valueOf(level))
                 : definitionService.findAll();
-        if (keyword != null && !keyword.isBlank()) {
+        if (StringUtils.isNotBlank(keyword)) {
             defs = defs.stream().filter(d ->
                     d.getCode().contains(keyword) || d.getName().contains(keyword)).toList();
         }

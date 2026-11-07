@@ -2,6 +2,8 @@ package com.example.configmgr.data.service;
 
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
@@ -41,7 +43,7 @@ public final class ConditionEvaluator {
             return;
         }
         for (QueryCondition.FieldCondition fc : cond.getFields()) {
-            if (fc.getOperator() == null || fc.getOperator().isBlank()) {
+            if (StringUtils.isBlank(fc.getOperator())) {
                 continue; // 无操作符 = 该字段不参与过滤（前端"用户未填即忽略"的既有口径）
             }
             String op = fc.getOperator().toUpperCase();
@@ -62,8 +64,9 @@ public final class ConditionEvaluator {
         }
 
         // 1. 范围过滤（地区/项目）
-        if (cond.getScopeKeys() != null && !cond.getScopeKeys().isEmpty()) {
-            Object scopeVal = row.get("regionCode") != null ? row.get("regionCode") : row.get("projectCode");
+        if (CollectionUtils.isNotEmpty(cond.getScopeKeys())) {
+            Object scopeVal = org.apache.commons.lang3.ObjectUtils.getIfNull(
+                    row.get("regionCode"), () -> row.get("projectCode"));
             if (scopeVal == null || !cond.getScopeKeys().contains(scopeVal.toString())) {
                 return false;
             }
@@ -72,7 +75,7 @@ public final class ConditionEvaluator {
         // 2. 字段级过滤（AND）
         if (cond.getFields() != null) {
             for (QueryCondition.FieldCondition fc : cond.getFields()) {
-                if (fc.getOperator() == null || fc.getOperator().isBlank()) {
+                if (StringUtils.isBlank(fc.getOperator())) {
                     continue;
                 }
                 Object val = row.get(fc.getFieldCode());
@@ -86,23 +89,23 @@ public final class ConditionEvaluator {
 
     private static boolean matchesOp(Object val, QueryCondition.FieldCondition fc) {
         String op = fc.getOperator().toUpperCase();
-        String s = val == null ? null : val.toString();
-        String expect = fc.getValue() == null ? null : fc.getValue().toString();
+        String s = java.util.Objects.toString(val, null);
+        String expect = java.util.Objects.toString(fc.getValue(), null);
 
         switch (op) {
             case "EMPTY":
-                return s == null || s.isBlank();
+                return StringUtils.isBlank(s);
             case "NOT_EMPTY":
-                return s != null && !s.isBlank();
+                return StringUtils.isNotBlank(s);
             case "EQ":
                 return s != null && s.equals(expect);
             case "NE":
                 return s == null || !s.equals(expect);
             case "CONTAINS":
             case "LIKE": // 文本包含（S4.4b P2：以 LIKE 之名的文本模糊口径，与 CONTAINS 等价）
-                return s != null && expect != null && s.contains(expect);
+                return StringUtils.contains(s, expect);
             case "STARTS_WITH":
-                return s != null && expect != null && s.startsWith(expect);
+                return StringUtils.startsWith(s, expect);
             case "IN": {
                 if (s == null || fc.getValue() == null) {
                     return false;

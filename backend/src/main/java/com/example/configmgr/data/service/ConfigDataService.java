@@ -16,6 +16,8 @@ import jakarta.persistence.LockModeType;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -39,13 +41,13 @@ public class ConfigDataService {
 
     public List<ConfigDataRow> findAll(String defCode, String scopeType, String scopeKey) {
         return dataRowRepository.findRowsInScope(defCode,
-                scopeType != null ? scopeType : "GLOBAL", scopeKey);
+                ObjectUtils.defaultIfNull(scopeType, "GLOBAL"), scopeKey);
     }
 
     public Page<ConfigDataRow> findPaged(String defCode, String scopeType, String scopeKey, int page, int size) {
         return dataRowRepository.findRowsInScopePaged(
                 defCode,
-                scopeType != null ? scopeType : "GLOBAL",
+                ObjectUtils.defaultIfNull(scopeType, "GLOBAL"),
                 scopeKey,
                 PageRequest.of(page, size));
     }
@@ -86,7 +88,7 @@ public class ConfigDataService {
      * 也不会被 {@link #filterRows} 的逐行兜底吞掉。
      */
     public QueryCondition parseCondition(String conditions) {
-        if (conditions == null || conditions.isBlank()) {
+        if (StringUtils.isBlank(conditions)) {
             return null;
         }
         QueryCondition cond;
@@ -102,7 +104,7 @@ public class ConfigDataService {
     /** 逐行求值：范围键收窄 + {@link ConditionEvaluator} 字段级条件（AND）。 */
     private List<ConfigDataRow> filterRows(String defCode, String scopeKey, QueryCondition cond) {
         return dataRowRepository.findByDefCodeOrderByRowKey(defCode).stream()
-                .filter(r -> scopeKey == null || scopeKey.isBlank() || scopeKey.equals(r.getScopeKey()))
+                .filter(r -> StringUtils.isBlank(scopeKey) || scopeKey.equals(r.getScopeKey()))
                 .filter(r -> {
                     Map<String, Object> data;
                     try {
@@ -121,11 +123,11 @@ public class ConfigDataService {
                                String rowKey, Map<String, Object> data) throws Exception {
         String dataJson = objectMapper.writeValueAsString(data);
         Optional<ConfigDataRow> existing = dataRowRepository
-                .findRow(defCode, scopeType != null ? scopeType : "GLOBAL", scopeKey, rowKey);
+                .findRow(defCode, ObjectUtils.defaultIfNull(scopeType, "GLOBAL"), scopeKey, rowKey);
 
         ConfigDataRow row = existing.orElseGet(ConfigDataRow::new);
         row.setDefCode(defCode);
-        row.setScopeType(scopeType != null ? scopeType : "GLOBAL");
+        row.setScopeType(ObjectUtils.defaultIfNull(scopeType, "GLOBAL"));
         row.setScopeKey(scopeKey);
         row.setRowKey(rowKey);
         row.setDataJson(dataJson);
@@ -149,13 +151,9 @@ public class ConfigDataService {
     }
 
     public static String buildRowKey(Map<String, Object> data, List<String> keyFields) {
-        StringBuilder sb = new StringBuilder();
-        for (String k : keyFields) {
-            if (sb.length() > 0) sb.append("|");
-            Object v = data.get(k);
-            sb.append(v != null ? v.toString() : "");
-        }
-        return sb.toString();
+        return keyFields.stream()
+                .map(k -> Objects.toString(data.get(k), ""))
+                .collect(java.util.stream.Collectors.joining("|"));
     }
 
     // ────────────── 发布路径（ADR-7 / Q14：行级 upsert + 范围差集删除）──────────────
@@ -173,7 +171,7 @@ public class ConfigDataService {
     @Transactional
     public ConfigDataRow upsertPublished(String defCode, String scopeType, String scopeKey,
                                          String rowKey, String dataJson, ConfigDataRow existing) {
-        ConfigDataRow row = existing != null ? existing : new ConfigDataRow();
+        ConfigDataRow row = ObjectUtils.getIfNull(existing, ConfigDataRow::new);
         row.setDefCode(defCode);
         row.setScopeType(scopeType);
         row.setScopeKey(scopeKey);

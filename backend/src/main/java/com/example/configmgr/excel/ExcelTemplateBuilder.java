@@ -5,8 +5,10 @@ import com.example.configmgr.definition.entity.ConfigField;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.ss.util.CellRangeAddressList;
+import org.apache.poi.ss.util.CellReference;
 import org.apache.poi.xssf.usermodel.*;
 import org.springframework.stereotype.Service;
 
@@ -41,7 +43,7 @@ public class ExcelTemplateBuilder {
 
                 // Add comment with field description
                 String comment = buildComment(f);
-                if (!comment.isBlank()) {
+                if (StringUtils.isNotBlank(comment)) {
                     XSSFDrawing drawing = dataSheet.createDrawingPatriarch();
                     XSSFClientAnchor anchor = drawing.createAnchor(0, 0, 0, 0, c, 0, c + 2, 4);
                     XSSFComment xcomment = drawing.createCellComment(anchor);
@@ -80,9 +82,10 @@ public class ExcelTemplateBuilder {
                 for (int i = 0; i < opts.size(); i++) {
                     XSSFRow row = dict.getRow(i + 1);
                     if (row == null) row = dict.createRow(i + 1);
-                    Object val = opts.get(i).get("label");
-                    if (val == null) val = opts.get(i).get("value");
-                    row.createCell(col).setCellValue(val != null ? val.toString() : "");
+                    java.util.Map<String, String> option = opts.get(i);
+                    Object val = org.apache.commons.lang3.ObjectUtils.getIfNull(
+                            option.get("label"), () -> option.get("value"));
+                    row.createCell(col).setCellValue(java.util.Objects.toString(val, ""));
                 }
                 col++;
             }
@@ -102,7 +105,8 @@ public class ExcelTemplateBuilder {
                 List<java.util.Map<String, String>> opts = objectMapper.readValue(f.getOptionsJson(), List.class);
                 int optCount = opts.size();
                 String dictSheetName = "_dict";
-                String formula = "'" + dictSheetName + "'!$" + colLetter(dictCol) + "$2:$" + colLetter(dictCol) + "$" + (optCount + 1);
+                String formula = "'" + dictSheetName + "'!$" + CellReference.convertNumToColString(dictCol)
+                        + "$2:$" + CellReference.convertNumToColString(dictCol) + "$" + (optCount + 1);
 
                 CellRangeAddressList addressList = new CellRangeAddressList(1, 1000, c, c);
                 XSSFDataValidationConstraint constraint = (XSSFDataValidationConstraint)
@@ -149,14 +153,4 @@ public class ExcelTemplateBuilder {
         return sb.toString();
     }
 
-    private static String colLetter(int col) {
-        StringBuilder s = new StringBuilder();
-        col++;
-        while (col > 0) {
-            col--;
-            s.insert(0, (char) ('A' + col % 26));
-            col /= 26;
-        }
-        return s.toString();
-    }
 }

@@ -1,6 +1,7 @@
 package com.example.configmgr.health;
 
 import com.example.configmgr.config.AppProperties;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -46,7 +47,7 @@ class StorageReadinessProbe implements ReadinessProbe {
 	@Override
 	public ProbeResult check() {
 		String configured = this.appProperties.getFile().getStoragePath();
-		if (configured == null || configured.isBlank()) {
+		if (StringUtils.isBlank(configured)) {
 			return ProbeResult.down("app.file.storage-path 未配置");
 		}
 		Path dir = Path.of(configured);

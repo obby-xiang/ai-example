@@ -3,6 +3,7 @@ package com.example.configmgr.health;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.event.ContextClosedEvent;
@@ -166,7 +167,7 @@ public class ReadinessService {
 				}
 			}
 		}
-		boolean ready = !isDraining && down.isEmpty();
+		boolean ready = !isDraining && CollectionUtils.isEmpty(down);
 
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("status", ready ? "UP" : "DOWN");

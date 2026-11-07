@@ -1,5 +1,7 @@
 package com.example.configmgr.config;
 
+import org.apache.commons.lang3.ArrayUtils;
+
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -114,7 +116,7 @@ final class FlywayConnectionPin {
                         if ("isClosed".equals(name)) {
                             return false;
                         }
-                        if ("unwrap".equals(name) && args != null && args.length == 1
+                        if ("unwrap".equals(name) && ArrayUtils.getLength(args) == 1
                                 && ((Class<?>) args[0]).isInstance(target)) {
                             return target;
                         }

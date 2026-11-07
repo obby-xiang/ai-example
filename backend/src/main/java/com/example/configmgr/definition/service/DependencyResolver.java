@@ -6,6 +6,7 @@ import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.repo.ConfigDefinitionRepository;
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -24,7 +25,7 @@ public class DependencyResolver {
      * 循环依赖时抛出 IllegalStateException。
      */
     public List<String> sort(List<String> defCodes) {
-        if (defCodes == null || defCodes.isEmpty()) return Collections.emptyList();
+        if (CollectionUtils.isEmpty(defCodes)) return Collections.emptyList();
 
         // 构建局部依赖图（仅在 defCodes 范围内的依赖）
         Map<String, Set<String>> deps = new HashMap<>();

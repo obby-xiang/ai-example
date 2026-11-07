@@ -1,5 +1,6 @@
 package com.example.configmgr.config;
 
+import org.apache.commons.lang3.StringUtils;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.FlywayException;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -251,7 +252,7 @@ public class FlywayStartupLock {
     }
 
     private static boolean isAlreadyExists(SQLException e) {
-        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        String message = StringUtils.defaultString(e.getMessage()).toLowerCase(Locale.ROOT);
         return message.contains("already exists")
                 || "23505".equals(e.getSQLState())
                 || message.contains("primary key violation")
@@ -259,7 +260,7 @@ public class FlywayStartupLock {
     }
 
     static String dialectOf(String url) {
-        String normalized = url == null ? "" : url.trim().toLowerCase(Locale.ROOT);
+        String normalized = StringUtils.lowerCase(StringUtils.trimToEmpty(url), Locale.ROOT);
         if (normalized.startsWith("jdbc:h2:")) {
             return "h2";
         }

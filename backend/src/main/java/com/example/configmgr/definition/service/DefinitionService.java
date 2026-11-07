@@ -15,6 +15,8 @@ import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.repo.TaskItemRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -123,10 +125,10 @@ public class DefinitionService {
         }
 
         List<ConfigField> referencing = fieldRepository.findByRefDefCode(code);
-        if (!referencing.isEmpty()) {
+        if (CollectionUtils.isNotEmpty(referencing)) {
             String refs = referencing.stream()
                     .map(f -> f.getDefCode() + "." + f.getCode())
-                    .distinct().sorted().reduce((a, b) -> a + ", " + b).orElse("");
+                    .distinct().sorted().collect(java.util.stream.Collectors.joining(", "));
             throw new ConflictException(ErrorCodes.DEFINITION_REFERENCED,
                     "Configuration definition " + code + " is referenced by " + refs + "; remove those references first");
         }
@@ -203,7 +205,7 @@ public class DefinitionService {
 
         List<ConfigField> merged = new ArrayList<>();
         int order = 0;
-        for (ConfigField src : incoming == null ? List.<ConfigField>of() : incoming) {
+        for (ConfigField src : CollectionUtils.emptyIfNull(incoming)) {
             ConfigField target = retained.remove(src.getCode());
             if (target == null) {
                 target = new ConfigField();
@@ -231,12 +233,12 @@ public class DefinitionService {
      */
     private void validateFields(ConfigDefinition definition) {
         List<ConfigField> fields = definition.getFields();
-        if (fields == null || fields.isEmpty()) {
+        if (CollectionUtils.isEmpty(fields)) {
             return; // 允许空定义（后续再补字段）
         }
         java.util.Set<String> codes = new java.util.HashSet<>();
         for (ConfigField f : fields) {
-            if (f.getCode() == null || f.getCode().isBlank()) {
+            if (StringUtils.isBlank(f.getCode())) {
                 throw new CodedIllegalArgumentException(ErrorCodes.DEFINITION_FIELD_CODE_EMPTY,
                         "Field code must not be blank");
             }

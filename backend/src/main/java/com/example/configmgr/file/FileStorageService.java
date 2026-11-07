@@ -7,6 +7,8 @@ import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.config.AppProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -17,7 +19,6 @@ import java.nio.file.*;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -106,7 +107,7 @@ public class FileStorageService {
      * @throws IllegalArgumentException 空值、绝对路径、非法路径、相对键含 {@code ..}、或解析结果越出基目录
      */
     public Path resolve(String key) {
-        if (key == null || key.isBlank()) {
+        if (StringUtils.isBlank(key)) {
             throw new IllegalArgumentException("File storage key must not be blank");
         }
         Path raw;
@@ -162,7 +163,7 @@ public class FileStorageService {
                 size += read;
             }
         }
-        return new FileDigest(HexFormat.of().formatHex(md.digest()), size);
+        return new FileDigest(Hex.encodeHexString(md.digest()), size);
     }
 
     /** 文件摘要值对象（sha256 小写十六进制 + 字节数）。 */
@@ -205,7 +206,7 @@ public class FileStorageService {
      * </ul>
      */
     public void deleteAfterCommit(String key) {
-        if (key == null || key.isBlank()) {
+        if (StringUtils.isBlank(key)) {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -237,7 +238,7 @@ public class FileStorageService {
      * </ul>
      */
     public void deleteAfterRollback(String key) {
-        if (key == null || key.isBlank()) {
+        if (StringUtils.isBlank(key)) {
             return;
         }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -322,7 +323,7 @@ public class FileStorageService {
 
     /** 只接受 ASCII 字母数字扩展名；挡掉客户端文件名里夹带的路径片段。 */
     private static String safeExtension(String ext) {
-        if (ext == null || ext.isEmpty()) {
+        if (StringUtils.isEmpty(ext)) {
             return "";
         }
         String candidate = ext.startsWith(".") ? ext : "." + ext;

@@ -1,6 +1,8 @@
 package com.example.configmgr.file;
 
 import com.example.configmgr.config.AppProperties;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
@@ -73,7 +75,7 @@ public class FileStorageMultiInstanceGuard {
 
     public FileStorageMultiInstanceGuard(AppProperties appProperties, Environment environment) {
         List<String> reasons = multiInstanceReasons(appProperties, environment);
-        if (reasons.isEmpty()) {
+        if (CollectionUtils.isEmpty(reasons)) {
             return;
         }
         validateAbsolute(appProperties, reasons);
@@ -111,7 +113,7 @@ public class FileStorageMultiInstanceGuard {
     private static void validateAbsolute(AppProperties appProperties, List<String> reasons) {
         String reason = String.join(" / ", reasons);
         String value = appProperties.getFile().getStoragePath();
-        if (value == null || value.isBlank()) {
+        if (StringUtils.isBlank(value)) {
             throw new IllegalStateException("Multi-instance deployment requires " + STORAGE_PATH_PROPERTY
                     + " (trigger: " + reason + "); configure an absolute shared-storage path or environment variable "
                     + STORAGE_PATH_ENV);

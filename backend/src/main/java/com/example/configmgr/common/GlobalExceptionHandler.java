@@ -4,6 +4,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.ConversionNotSupportedException;
 import org.springframework.beans.TypeMismatchException;
 import org.springframework.http.HttpHeaders;
@@ -243,7 +245,7 @@ public class GlobalExceptionHandler {
         boolean localizeByCode = true;
         if (e instanceof ResponseStatusException statusException) {
             HttpStatus resolved = HttpStatus.resolve(statusException.getStatusCode().value());
-            status = resolved == null ? HttpStatus.INTERNAL_SERVER_ERROR : resolved;
+            status = ObjectUtils.defaultIfNull(resolved, HttpStatus.INTERNAL_SERVER_ERROR);
             code = codeOfStatus(status);
             message = statusMessage(status, requestLocale());
             localizeByCode = false;
@@ -325,7 +327,7 @@ public class GlobalExceptionHandler {
             if (current instanceof SQLException sql) {
                 String state = sql.getSQLState();
                 int code = sql.getErrorCode();
-                String message = sql.getMessage() == null ? "" : sql.getMessage().toLowerCase(Locale.ROOT);
+                String message = StringUtils.defaultString(sql.getMessage()).toLowerCase(Locale.ROOT);
                 if ("23506".equals(state) || code == 1452
                         || message.contains("referential integrity") || message.contains("foreign key")) {
                     return true;
@@ -400,7 +402,7 @@ public class GlobalExceptionHandler {
     private static Locale requestLocale() {
         LocaleContext context = LocaleContextHolder.getLocaleContext();
         Locale locale = context == null ? null : context.getLocale();
-        return locale == null ? Locale.SIMPLIFIED_CHINESE : locale;
+        return ObjectUtils.defaultIfNull(locale, Locale.SIMPLIFIED_CHINESE);
     }
 
     /** `Accept` 含 `application/problem+json` 才切 RFC 9457 形态（默认形态零变化）。 */
@@ -415,7 +417,7 @@ public class GlobalExceptionHandler {
 
     private static String traceIdOf(HttpServletRequest request) {
         Object trace = request.getAttribute("traceId");
-        return trace instanceof String value && !value.isBlank() ? value : null;
+        return trace instanceof String value && StringUtils.isNotBlank(value) ? value : null;
     }
 
     /** 该响应是否已经"只能写流、不能再写 JSON 体"（内容类型已固定为 text/event-stream 或已提交）。 */

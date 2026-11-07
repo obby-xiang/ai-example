@@ -1,5 +1,7 @@
 package com.example.configmgr.data.service;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -97,7 +99,7 @@ public final class ConditionOperators {
 
 	/** 是否登记在册（大小写不敏感；null/空白 = false）。 */
 	public static boolean isKnown(String operator) {
-		if (operator == null || operator.isBlank()) {
+		if (StringUtils.isBlank(operator)) {
 			return false;
 		}
 		return NAME_SET.contains(operator.trim().toUpperCase(Locale.ROOT));
@@ -121,6 +123,6 @@ public final class ConditionOperators {
 
 	/** 归一（去空白 + 大写）；null 返回空串。 */
 	public static String normalize(String operator) {
-		return operator == null ? "" : operator.trim().toUpperCase(Locale.ROOT);
+		return StringUtils.upperCase(StringUtils.trimToEmpty(operator), Locale.ROOT);
 	}
 }

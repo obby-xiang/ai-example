@@ -1,5 +1,7 @@
 package com.example.configmgr.config;
 
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.env.Environment;
@@ -43,12 +45,12 @@ public class RedisClusterTopologyGuard {
 		List<String> nodes = Binder.get(environment)
 			.bind(NODES_PROPERTY, org.springframework.boot.context.properties.bind.Bindable.listOf(String.class))
 			.orElse(List.of());
-		if (nodes.isEmpty()) {
+		if (CollectionUtils.isEmpty(nodes)) {
 			throw new IllegalStateException("cluster profile has no Redis seed nodes; configure environment variable "
 					+ NODES_ENV + " as a comma-separated host:port list for " + NODES_PROPERTY);
 		}
 		for (String node : nodes) {
-			if (node == null || node.isBlank() || node.contains("${")) {
+			if (StringUtils.isBlank(node) || node.contains("${")) {
 				throw new IllegalStateException("cluster profile has an unresolved Redis seed node (current = " + node
 						+ "); configure environment variable " + NODES_ENV + " as a comma-separated host:port list");
 			}

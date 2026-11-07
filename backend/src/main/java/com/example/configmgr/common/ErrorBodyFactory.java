@@ -1,5 +1,8 @@
 package com.example.configmgr.common;
 
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -43,7 +46,7 @@ public class ErrorBodyFactory {
             boolean localizeByCode) {
         ApiResponse<Object> body = ApiResponse.error(code,
                 message(code, fallbackMessage, args, locale, localizeByCode));
-        if (args != null && !args.isEmpty()) {
+        if (MapUtils.isNotEmpty(args)) {
             body.setArgs(args);
         }
         return body;
@@ -51,7 +54,7 @@ public class ErrorBodyFactory {
 
     /** 无码异常的类型缺省码：{@code IllegalArgumentException} → ILLEGAL_ARGUMENT 等。 */
     public static String codeOf(Throwable error, String fallbackCode) {
-        if (error instanceof CodedException coded && coded.getCode() != null && !coded.getCode().isBlank()) {
+        if (error instanceof CodedException coded && StringUtils.isNotBlank(coded.getCode())) {
             return coded.getCode();
         }
         return fallbackCode;
@@ -71,13 +74,13 @@ public class ErrorBodyFactory {
     public String message(String code, String fallbackMessage, Map<String, Object> args, Locale locale,
             boolean localizeByCode) {
         if (isChinese(locale) || !localizeByCode) {
-            return fallbackMessage == null ? "" : fallbackMessage;
+            return StringUtils.defaultString(fallbackMessage);
         }
         String localized = lookup(KEY_PREFIX + code, locale);
         if (localized != null) {
             return localized;
         }
-        return fallbackMessage == null ? "" : fallbackMessage;
+        return StringUtils.defaultString(fallbackMessage);
     }
 
     static boolean isChinese(Locale locale) {
@@ -107,7 +110,7 @@ public class ErrorBodyFactory {
             detail.setInstance(URI.create(instance));
         }
         detail.setProperty("code", code);
-        if (args != null && !args.isEmpty()) {
+        if (MapUtils.isNotEmpty(args)) {
             detail.setProperty("args", new LinkedHashMap<>(args));
         }
         if (traceId != null) {
@@ -138,6 +141,6 @@ public class ErrorBodyFactory {
         org.springframework.context.i18n.LocaleContext context =
                 org.springframework.context.i18n.LocaleContextHolder.getLocaleContext();
         Locale locale = context == null ? null : context.getLocale();
-        return locale == null ? Locale.SIMPLIFIED_CHINESE : locale;
+        return ObjectUtils.defaultIfNull(locale, Locale.SIMPLIFIED_CHINESE);
     }
 }

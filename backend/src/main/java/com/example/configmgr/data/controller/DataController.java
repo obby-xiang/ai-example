@@ -8,6 +8,7 @@ import com.example.configmgr.data.service.QueryCondition;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.domain.Page;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,7 +25,7 @@ public class DataController {
 
     /** scopeType 未传时按配置定义的层级推导（而非写死 GLOBAL） */
     private String effectiveScopeType(String defCode, String scopeType) {
-        if (scopeType != null && !scopeType.isBlank()) {
+        if (StringUtils.isNotBlank(scopeType)) {
             return scopeType;
         }
         try {

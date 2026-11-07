@@ -1,6 +1,7 @@
 package com.example.configmgr.common;
 
 import jakarta.servlet.http.HttpServletRequest;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
@@ -52,7 +53,7 @@ public class WebI18nConfig {
         @Override
         public Locale resolveLocale(HttpServletRequest request) {
             String header = request.getHeader(HttpHeaders.ACCEPT_LANGUAGE);
-            if (header == null || header.isBlank()) {
+            if (StringUtils.isBlank(header)) {
                 return DEFAULT_LOCALE;
             }
             List<Locale.LanguageRange> ranges;
@@ -82,7 +83,7 @@ public class WebI18nConfig {
 
         /** 语言级匹配（忽略区变体/脚本）：`en-GB` → en-US，`zh-TW` → zh-CN，`de-DE` → null。 */
         private static Locale byLanguage(String range) {
-            if (range == null || range.isBlank() || "*".equals(range)) {
+            if (StringUtils.isBlank(range) || "*".equals(range)) {
                 return null;
             }
             String tag = range.startsWith("*-") ? "" : range;
@@ -93,7 +94,7 @@ public class WebI18nConfig {
                 return null;
             }
             String language = declared.getLanguage();
-            if (language.isEmpty()) {
+            if (StringUtils.isEmpty(language)) {
                 return null;
             }
             for (Locale supported : SUPPORTED_LOCALES) {

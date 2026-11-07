@@ -1,5 +1,7 @@
 package com.example.configmgr.file;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.nio.file.Path;
 
 /**
@@ -12,7 +14,7 @@ import java.nio.file.Path;
 public record StoredFile(String key, Path path) {
 
     public StoredFile {
-        if (key == null || key.isBlank()) {
+        if (StringUtils.isBlank(key)) {
             throw new IllegalArgumentException("Storage key must not be blank");
         }
         if (path == null) {

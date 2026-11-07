@@ -9,6 +9,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
@@ -39,7 +42,7 @@ public class ExcelReader {
             if (fieldCodes == null) {
                 fieldCodes = readHeaderRow(wb, def);
             }
-            if (fieldCodes == null || fieldCodes.isEmpty()) {
+            if (CollectionUtils.isEmpty(fieldCodes)) {
                 throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_COLUMN_MAPPING_INVALID,
                         "Unable to resolve file column mapping; check the file format");
             }
@@ -61,14 +64,14 @@ public class ExcelReader {
                 Map<String, Object> rowData = new LinkedHashMap<>();
                 for (int c = 0; c < fieldCodes.size(); c++) {
                     String code = fieldCodes.get(c);
-                    if (code == null || code.isBlank() || code.startsWith("_")) continue;
+                    if (StringUtils.isBlank(code) || code.startsWith("_")) continue;
                     Cell cell = row.getCell(c);
                     Object value = getCellValue(cell, formatter, evaluator);
                     if (value != null) {
                         rowData.put(code, value);
                     }
                 }
-                if (!rowData.isEmpty()) {
+                if (MapUtils.isNotEmpty(rowData)) {
                     result.add(rowData);
                 }
             }
@@ -107,7 +110,7 @@ public class ExcelReader {
      * 没有 {@code _meta} 或旧文件未写 def_code 时不做比对（沿用既有表头映射回退）。
      */
     private void requireMetaDefCode(ConfigDefinition def, String metaDefCode) {
-        if (metaDefCode == null || metaDefCode.isBlank()) return;
+        if (StringUtils.isBlank(metaDefCode)) return;
         if (!metaDefCode.equals(def.getCode())) {
             throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_COLUMN_MAPPING_INVALID,
                     "Configuration definition mismatch: file = " + metaDefCode + ", target = " + def.getCode()
@@ -153,13 +156,12 @@ public class ExcelReader {
 
     private Object getCellValue(Cell cell, DataFormatter fmt, FormulaEvaluator evaluator) {
         if (cell == null) return null;
-        String s = fmt.formatCellValue(cell, evaluator).trim();
-        return s.isEmpty() ? null : s;
+        return StringUtils.trimToNull(fmt.formatCellValue(cell, evaluator));
     }
 
     private boolean isRowEmpty(Row row, DataFormatter fmt) {
         for (int c = row.getFirstCellNum(); c < row.getLastCellNum(); c++) {
-            if (!fmt.formatCellValue(row.getCell(c)).isBlank()) return false;
+            if (StringUtils.isNotBlank(fmt.formatCellValue(row.getCell(c)))) return false;
         }
         return true;
     }
