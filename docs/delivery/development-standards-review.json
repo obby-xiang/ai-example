@@ -3243,6 +3243,62 @@
           "reason": "agent-1048确认原端口阻断关闭并PASS，最终两文件暂存diff检查通过；生产package成功，真实启动37工具注册、无ERROR/WARN/异常堆栈、AI_AVAILABLE及JobWatchdog扫描证据已核对，测试执行仍NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:e659432af3ef5da0b6b3e291f3f03d75292ac681de7af675df9b71b499a741e4",
+      "status": "reviewed",
+      "reason": "按用户明确硬约束新增AI对话数据库边界并同步AGENTS：只有模型配置和用户赞同/反对反馈可访问数据库，其他AI会话及运行数据（包括少量ID/哈希/purgeId/pending/guard/恢复元数据）一律禁止直接或间接数据库交互。业务任务、作业和配置表不得被借用，且禁止以数据库禁令制造永久Redis数据或fail-open。已逐hunk核对两个暂存文档。",
+      "reviewedAt": "2026-11-08T01:37:05+08:00",
+      "reviewer": "K3.1 Pro主会话按用户明确规格逐hunk复核",
+      "specChanges": [
+        {
+          "change": "将AI对话数据库访问白名单限定为模型配置和用户赞同/反对反馈，其余AI会话及运行数据全部禁止与数据库交互。",
+          "reason": "防止通过配置表或业务表隐蔽保存对话、pending/purge、恢复和其他运行状态，确保AI数据边界一致。",
+          "impact": "所有新增和既有代码均须按调用链重点审查数据库访问；任何AI运行状态落库都必须返修，Redis-only实现仍须满足TTL、容量和fail-closed要求。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "新增重点审查段，明确白名单、禁止pending/purge/guard及元数据落库、禁止借用业务表和禁止永久Redis/fail-open。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "新增6.10 AI对话数据库边界，逐项列出禁止的数据类型、直接/间接访问方式、允许项和提交前调用链审查要求，原资源释放章节顺延为6.11。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "明确不得借用ai_setting、JPA、JdbcTemplate、SQL、仓储、事务、视图或存储过程保存AI运行状态，现有Redis及业务专用边界不得被滥用。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批只增加数据库边界与审查规则，没有调整集合、JSON、Lombok、命名或import技术规范。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "禁止以故障处理、审计或少量元数据为名把AI运行状态写入数据库，未知状态仍需真实暴露且不得fail-open。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只修改数据访问与审查规范，没有用户界面、卡片、文案或交互变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "AI会话、run、SSE、工具、HITL、表单、记忆、租约、pending/purge/guard和恢复台账禁止落库，Redis-only实现必须有界TTL且不得在守卫失效后放行写回。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批没有UTF-8、流式帧、JSON解析或字符截断实现变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "两个暂存文档已逐hunk核对，明确该边界是提交前重点审查项并覆盖直接与间接数据库调用；本批纯文档无需代码编译或IDEA格式化。"
+        }
+      }
     }
   ]
 }
