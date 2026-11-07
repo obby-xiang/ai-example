@@ -2816,6 +2816,57 @@
           "reason": "两个暂存文档已逐hunk核对，IDEA操作顺序、证据字段和格式化后重审明确；本批纯文档无需执行IDEA代码格式化或Inspect Code，当前生产代码尚未据此记为通过。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:16137008b75729f0ed4ed4a4c04bd93ec53ca983ef9da17e0628d64186bf6309",
+      "status": "reviewed",
+      "reason": "AGENTS新增IDEA工具边界：文件读取、写入和直接代码修改必须使用能展示差异并保留读写记录的内置工具，禁止IDEA apply_patch；IDEA Inspect Code、重构和Reformat Code仍按上一门禁允许使用，但产生或暴露的变化必须通过可见diff逐hunk审查。已核对单个暂存文档的全部差异。",
+      "reviewedAt": "2026-11-07T23:47:24+08:00",
+      "reviewer": "K3.1 Pro主会话按用户明确规格逐hunk复核",
+      "specChanges": [
+        {
+          "change": "禁止使用IDEA能力读写文件或直接修改代码，明确禁止IDEA apply_patch；Inspect、重构和格式化命令保留为允许的例外。",
+          "reason": "确保所有直接文件操作都有可见差异与读写记录，同时保留已要求的IDEA检查、重构和格式化质量门禁。",
+          "impact": "后续直接编辑统一走内置可记录工具；IDEA检查、重构和格式化后仍须查看完整diff并重新审查，不允许隐藏文件变化。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "新增段落同时列出禁止的IDEA读写/直接修改/apply_patch与允许的Inspect、重构、Reformat Code，且要求执行后可见diff逐hunk审查，与现有IDEA门禁无冲突。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批只规定现有工具的使用边界，没有新增、升级或替换依赖和组件。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java或通用代码修改，未调整集合、JSON、Lombok、命名或import规范。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批没有日志、异常、脱敏或错误响应实现变化，仅增加工具可追溯性要求。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只修改项目协作说明，没有用户界面、卡片、文案或交互变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批不涉及API、SSE、Redis、TTL、模型并发或状态机实现。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批未修改UTF-8、流式帧、JSON解析或字符截断规则与实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "AGENTS单个新增段落已逐hunk复核，要求直接文件操作保留读写记录、禁止apply_patch并让IDEA重构/格式化差异重新进入审查；本批纯文档无需IDEA代码检查或编译。"
+        }
+      }
     }
   ]
 }

@@ -12,4 +12,6 @@
 6. 运行 `node scripts/ci/check-d6-sync.mjs --standards` 核对记录。
 7. 不得绕过 pre-commit。缺少有效记录、指纹过期、理由空泛、缺少 Node 或门禁脚本异常均按失败处理。
 
+文件读取、写入和直接代码修改必须使用能展示差异并保留读写记录的内置工具，不得使用 IDEA 能力执行这些操作；明确禁止 IDEA `apply_patch`。IDEA 的 Inspect Code、重构、Reformat Code 等检查、重构和格式化命令可以使用，但执行后仍须通过可见 diff 逐 hunk 审查，不得让文件变化绕过读写记录和审查。
+
 新增或升级依赖必须取得用户明确授权。优先复用项目已有 Apache Commons、Guava、Spring、Tailwind CSS 和 lodash，不另造重复框架或门禁。
