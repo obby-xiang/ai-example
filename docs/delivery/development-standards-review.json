@@ -2653,6 +2653,57 @@
           "reason": "已逐hunk核对暂存的.gitignore，并用git check-ignore验证四个本地文件均命中预期规则；构建、测试和服务运行验证本批NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:40b28e4334a3f00cbb28f847b4db7205c6c85884cdf48df5e58e776cbd10e245",
+      "status": "reviewed",
+      "reason": "独立复测清单仅追加C-72～C-110共39条场景，覆盖JSON/presence/集合/Lombok、敏感输出、执行器、KB与会话TTL、purge、多实例Cluster、资源释放、提示词/HITL和双语ToC页面。独立审查agent-1030复审PASS，四项返修均已对照生产实现关闭；主会话已逐hunk核对暂存diff，既有用例与证据未改写，新增场景全部NOT_RUN。",
+      "reviewedAt": "2026-11-07T23:28:32+08:00",
+      "reviewer": "K3.1 Pro主会话逐hunk复核，agent-1030独立静态复审",
+      "specChanges": [
+        {
+          "change": "独立复测清单新增39条验收场景及真实接口、SSE、Redis、浏览器证据要求。",
+          "reason": "将本轮生产规范整改、会话24小时滑动续期、跨实例节流、有界容量和ToC文案要求转化为可独立执行的验收清单。",
+          "impact": "只增加后续验收场景与证据口径，不修改生产协议、测试代码或历史结果；所有新增场景仍待真实环境执行。"
+        }
+      ],
+      "files": [
+        {
+          "path": "docs/verification/AI对话独立复测清单-2026-11-05.md",
+          "status": "checked",
+          "reason": "C-72改为仓外反射核对@JsonProperty公开契约；C-82区分敏感字段、ProviderView白名单和baseUrl；C-93/C-94分离purge与dataKey续期；C-95～C-97限定SessionActivityRenewal上限，编号连续且39条均为NOT_RUN。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅追加Markdown验收场景，没有引入或升级依赖；仓外探针要求不改变项目组件。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "用例逐项覆盖显式JSON字段名、Long字符串双向转换、presence、空值、集合可变性、Boolean拆箱、Lombok相等性和执行器装配的后续验收，不声称实现已动态通过。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "C-82～C-84明确敏感JSON、toString、日志白名单、实体序列化禁令和Throwable保留的证据要求，金丝雀值不得进入真实密钥或日志。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "C-103～C-110覆盖语言选择、工具/HITL业务文案、不可逆结果、中英文页面、宽窄屏、键盘和ARIA，要求无技术话术、裸key或危险后果截断。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "C-88～C-102核对KB约30分钟TTL、对话24小时滑动续期、60秒Redis跨实例节流、后台纯读、purge隔离、dataKey成功条件、128/1024/4096上限、Cluster同槽和随机路由。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "SSE与JSON证据要求保留真实帧、字符串Long往返及SSE/REST语言一致性；本批没有修改UTF-8、代理对、字素簇或流式解析实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "agent-1030独立复审PASS且主会话逐hunk核对当前暂存diff；39条执行状态全部NOT_RUN，测试、构建、HTTP/SSE/Redis/浏览器、真实模型与多实例验证均未执行。"
+        }
+      }
     }
   ]
 }
