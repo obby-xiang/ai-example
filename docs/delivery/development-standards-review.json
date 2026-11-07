@@ -287,6 +287,92 @@
           "reason": "按当前28个生产文件及D6复核记录逐hunk完成独立静态复审并关闭公开契约、Optional导入和首尾访问问题；测试文件未改，编译、测试、真实SSE/Redis及多实例运行均为NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:bbe2395bb131d62ebebaa52c21cb0a8a4fee569f146918c3bc145231f4445c89",
+      "status": "reviewed",
+      "reason": "K3.1 Pro对六份提示词/工具/ToC整改过程文档及研究索引进行独立静态复核：69个官方URL均能在指定输入材料中找到，官方建议与项目裁决分层明确；固定emoji短指令逐字一致，AI按钮、不可逆结果型按钮、工具中文单语和原始结果不自动机器翻译的裁决一致；V01–V11均为NOT_RUN，索引第103件、计数102→103及日期2026-11-07准确。仅声明静态审查，官方页面实时抓取、测试、构建、真实模型、真实浏览器和真实接口均为NOT_RUN。",
+      "reviewedAt": "2026-11-07T15:08:30+08:00",
+      "reviewer": "K3.1 Pro（agent-1011）静态复核",
+      "specChanges": [
+        {
+          "change": "施工前裁决固定emoji短指令为“跟随用户语言，简洁专业，保留必要术语和原始标识；未明确要求时不新增emoji，原文既有符号不清理。”，并明确不限制Markdown。",
+          "reason": "统一助手新增装饰性符号与原文既有符号的处理边界，避免把emoji约束误写为英文、ASCII或纯文本限制。",
+          "impact": "约束后续系统提示词及新写ToC静态文案，逐字引用、代码、日志和原始数据中的既有符号不清理；本批仅记录文档裁决，生产行为未改，动态验证NOT_RUN。"
+        },
+        {
+          "change": "AI工具确认按钮采用“批准具体动作/不执行”，不可逆页面确认采用结果型按钮，均登记为呈现规格变化。",
+          "reason": "明确批准对象和动作后果，区分否决AI提议、业务审批、取消流程及删除对象，避免泛化的批准/拒绝和确定/取消造成歧义。",
+          "impact": "仅约束后续确认卡、写表及不可逆确认的呈现文案和必要参数，不改变确认门三态、风险级别、执行授权或业务流程；本批未实施生产变更，动态验证NOT_RUN。"
+        }
+      ],
+      "files": [
+        {
+          "path": "docs/research/prompt-tool-toc-copy-remediation/01-research.md",
+          "status": "checked",
+          "reason": "逐节核对官方来源名称、URL、输入材料支持的结论、共识/分歧及适用边界；69个URL均见于指定输入材料，未将二手整理或实时未抓取内容冒充官方实时核验。"
+        },
+        {
+          "path": "docs/research/prompt-tool-toc-copy-remediation/02-analysis.md",
+          "status": "checked",
+          "reason": "核对B01–B08、F01–F09、T01–T11的位置、消费路径、问题性质、优先级及非目标均沿用指定静态方案，明确行号时点且未把静态问题矩阵写成真实运行故障。"
+        },
+        {
+          "path": "docs/research/prompt-tool-toc-copy-remediation/03-decisions.md",
+          "status": "checked",
+          "reason": "核对D01–D16区分官方建议与项目决定，固定emoji短指令逐字准确，并完整记录四条语言通道、工具稳定中文单语、原始结果不自动机器翻译、AI按钮及不可逆结果型按钮的呈现规格变化。"
+        },
+        {
+          "path": "docs/research/prompt-tool-toc-copy-remediation/04-tasks.md",
+          "status": "checked",
+          "reason": "核对共享前置、A/B/C组任务的依赖、并行关系和文件边界，工具三处要求同批同步，ai-settings-copy.ts未猜造目录；V01–V11验收初始状态全部为NOT_RUN。"
+        },
+        {
+          "path": "docs/research/prompt-tool-toc-copy-remediation/05-conclusion.md",
+          "status": "checked",
+          "reason": "核对本文明确为施工前基线而非完成报告，实际变更、裁决落实、偏差和后续事项均留待回填；重复的emoji短指令与裁决件逐字一致，所有动态证据均为NOT_RUN。"
+        },
+        {
+          "path": "docs/research/prompt-tool-toc-copy-remediation/06-review.md",
+          "status": "checked",
+          "reason": "核对本文保持待审查模板，未预造实际发现、返修或放行结论；七规范域、呈现规格变化、逐hunk要求及动态验证NOT_RUN边界完整。"
+        },
+        {
+          "path": "docs/research/README.md",
+          "status": "checked",
+          "reason": "核对暂存diff仅将索引头部改为2026-11-07及102→103并追加第103件，条目链接指向新目录01-research.md，摘要与固定裁决和NOT_RUN状态一致，其他历史行未改。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅新增整改过程文档和索引条目，未修改生产实现、依赖清单或锁文件，未新增或升级依赖，Apache Commons、Guava、Spring、Tailwind及lodash复用顺序不涉及。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java或通用生产代码变更，文档中的Java路径和方法锚点仅用于后续施工定位，不涉及集合返回、方法规模、布尔命名或import。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批未修改生产日志、异常处理、错误映射或日志脱敏实现；文档仅规划后续安全错误文案，未产生实际日志或异常行为变化。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "已核对ToC文案、完整i18n、真实状态、卡片和上传边界，以及固定emoji指令、AI“批准具体动作/不执行”和不可逆结果型按钮；相关按钮明确登记为呈现规格变化，未声称已施工。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批仅记录后续整改决策和任务，未修改API、SSE、Redis、确认门、pre/post、状态机、工具执行或模型并发，文档亦将这些内容列为非目标。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批未修改UTF-8解码、代理对或字素簇截断、SSE/JSON帧解析及二次转码；emoji和原文保留仅为后续文案裁决，不涉及流式实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "已对七份文档逐文件静态复核并检查暂存README diff，固定指令和V01–V11状态有明确证据；官方页面实时抓取、测试、构建、真实模型、浏览器和接口均为NOT_RUN，规范门禁结果以实际命令回执为准。"
+        }
+      }
     }
   ]
 }
