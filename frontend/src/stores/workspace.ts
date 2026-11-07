@@ -20,6 +20,7 @@
  */
 
 import { defineStore } from 'pinia'
+import { head, uniq } from 'lodash'
 import router, { ROUTE_NAMES } from '@/router'
 import { saveBlob } from '@/api/http'
 import { ElMessage } from 'element-plus'
@@ -34,6 +35,7 @@ import { findPublishTool } from '@/utils/publish-links'
 import { listAiRegions } from '@/utils/ai-regions'
 import { translate } from '@/composables/useCopy'
 import { userFacingErrorText } from '@/utils/ui-error'
+import { logCaughtError } from '@/utils/log-caught-error'
 import {
   WORKSPACE_ACTION_LIMIT,
   WORKSPACE_CONTRACT_VERSION,
@@ -85,6 +87,29 @@ const PAGE_LABEL_KEYS: Record<WorkspacePageId, string> = {
 
 /** 发布跟踪的轮次 dispose（S4）：run_job 每发起一轮 publish 跟踪先收上一轮，卸载/收尾不留活口。 */
 let publishWatcherDispose: (() => void) | null = null
+
+type WorkspacePageState = Pick<WorkspaceSnapshot,
+  'taskType' | 'step' | 'taskId' | 'taskStatus' | 'selectedDefs' | 'queryConditions' | 'importMode'>
+
+function resetWorkspacePage(store: WorkspacePageState, init: Partial<WorkspaceSnapshot>): void {
+  store.taskType = init.taskType ?? null
+  store.step = init.step ?? null
+  store.taskId = init.taskId ?? null
+  store.taskStatus = init.taskStatus ?? null
+  store.selectedDefs = init.selectedDefs === undefined ? [] : [...init.selectedDefs]
+  store.queryConditions = init.queryConditions === undefined ? {} : { ...init.queryConditions }
+  store.importMode = init.importMode ?? null
+}
+
+function patchWorkspacePage(store: WorkspacePageState, init: Partial<WorkspaceSnapshot>): void {
+  if (init.taskType !== undefined) store.taskType = init.taskType
+  if (init.step !== undefined) store.step = init.step
+  if (init.taskId !== undefined) store.taskId = init.taskId
+  if (init.taskStatus !== undefined) store.taskStatus = init.taskStatus
+  if (init.selectedDefs !== undefined) store.selectedDefs = [...init.selectedDefs]
+  if (init.queryConditions !== undefined) store.queryConditions = { ...init.queryConditions }
+  if (init.importMode !== undefined) store.importMode = init.importMode
+}
 
 export const useWorkspaceStore = defineStore('workspace', {
   state: () => ({
@@ -180,35 +205,9 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.page = init.pageId
       }
       if (init.pageId !== undefined || init.page !== undefined) {
-        this.taskType = init.taskType ?? null
-        this.step = init.step ?? null
-        this.taskId = init.taskId ?? null
-        this.taskStatus = init.taskStatus ?? null
-        this.selectedDefs = init.selectedDefs === undefined ? [] : [...init.selectedDefs]
-        this.queryConditions = init.queryConditions === undefined ? {} : { ...init.queryConditions }
-        this.importMode = init.importMode ?? null
+        resetWorkspacePage(this, init)
       } else {
-        if (init.taskType !== undefined) {
-          this.taskType = init.taskType
-        }
-        if (init.step !== undefined) {
-          this.step = init.step
-        }
-        if (init.taskId !== undefined) {
-          this.taskId = init.taskId
-        }
-        if (init.taskStatus !== undefined) {
-          this.taskStatus = init.taskStatus
-        }
-        if (init.selectedDefs !== undefined) {
-          this.selectedDefs = [...init.selectedDefs]
-        }
-        if (init.queryConditions !== undefined) {
-          this.queryConditions = { ...init.queryConditions }
-        }
-        if (init.importMode !== undefined) {
-          this.importMode = init.importMode
-        }
+        patchWorkspacePage(this, init)
       }
       this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, 'UI')
     },
@@ -293,9 +292,9 @@ export const useWorkspaceStore = defineStore('workspace', {
      *   AI 经页面 handler 驱动的写入记「AI」—— `recentActions` 展示该来源，
      *   标错会让模型以为"用户自己点的"。可选参数，既有调用点无需改动。
      */
-    setSelectedDefs(codes: string[], mode: 'REPLACE' | 'ADD' = 'REPLACE', source: WorkspaceActionSource = 'UI'): void {
+    setSelectedDefs(codes: readonly string[], mode: 'REPLACE' | 'ADD' = 'REPLACE', source: WorkspaceActionSource = 'UI'): void {
       if (mode === 'ADD') {
-        this.selectedDefs = Array.from(new Set([...this.selectedDefs, ...codes]))
+        this.selectedDefs = uniq([...this.selectedDefs, ...codes])
       } else {
         this.selectedDefs = [...codes]
       }
@@ -461,7 +460,8 @@ function isTaskDetailApplied(pageId: WorkspacePageId, taskId: number | null): bo
   }
   try {
     return handler({}) === true
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/workspace.ts:465')
     return false
   }
 }
@@ -505,7 +505,7 @@ export function emitWorkspaceEvent(topic: 'ui_event_result', payload?: unknown):
     try {
       subscriber(payload)
     } catch (error) {
-      console.warn('[workspace] subscriber failed', topic, error)
+      logCaughtError(error, 'stores/workspace.ts:509')
     }
   }
 }
@@ -685,8 +685,11 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
   // 守卫拒新建；失败/取消均经 applyJobOutcome 联动改任务态），实际影响仅限遗留脏数据窗口。
   // 统一 finder 口径留待后续清理批（红队 R-1 / 复核 F-1 登记），本注释不改判定逻辑。
   const finalJobType = workspace.taskType === 'IMPORT' ? 'PUBLISH' : 'EXPORT'
-  const jobs = await jobsApi.listJobs(workspace.taskId).catch(() => null)
-  const latest = jobs?.filter((job) => job.jobType === finalJobType)[0]
+  const jobs = await jobsApi.listJobs(workspace.taskId).catch((error) => {
+    logCaughtError(error, 'workspace:jobs:list')
+    return null
+  })
+  const latest = head(jobs?.filter((job) => job.jobType === finalJobType))
   return latest?.status === 'COMPLETED'
 }
 
@@ -728,9 +731,9 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
   const workspace = useWorkspaceStore()
   const taskStore = useTaskStore()
   /** 预算是否已作废（到点后不再写工作区；每个 await 之后各查一次）。 */
-  const abandoned = (): boolean => lifetime?.abandoned === true
+  const isAbandoned = (): boolean => lifetime?.abandoned === true
   /** 任务身份核对：await 之后工作区绑定的仍是发起时的那个任务，才允许写回。 */
-  const taskStill = (taskId: number): boolean => workspace.taskId === taskId
+  const isTaskStill = (taskId: number): boolean => workspace.taskId === taskId
   /** 任务已切换的如实回执（不写工作区、不假称已完成）。 */
   const switched = (taskId: number): UiEventResult => fail(
     `任务已切换（原任务 #${taskId}，当前任务 #${workspace.taskId ?? '（无）'}）：本次动作已提交给原任务，未写入当前工作区`
@@ -765,7 +768,7 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
           return fail('任务已结束，无法跳转步骤')
         }
         // 守卫期间预算可能已到点：到点后不得再发写请求
-        if (abandoned()) {
+        if (isAbandoned()) {
           return fail('前端工具预算已到点：本次未跳转步骤')
         }
         // 草案写类只认页面能力：页面未挂载时**不再** `tasksApi.goToStep` —— 那会绕过页面的
@@ -787,7 +790,7 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (await isCurrentTaskReadOnly(workspace)) {
           return fail('任务已结束，仅供查看，未变更所选配置项')
         }
-        if (abandoned()) {
+        if (isAbandoned()) {
           return fail('前端工具预算已到点：本次未变更所选配置项')
         }
         // 编码是否存在于**当前**定义列表由页面 handler 判（`selectDefsProblem`，与用户勾选同口径）；
@@ -813,7 +816,7 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (await isCurrentTaskReadOnly(workspace)) {
           return fail('任务已结束，仅供查看，未设置查询条件')
         }
-        if (abandoned()) {
+        if (isAbandoned()) {
           return fail('前端工具预算已到点：本次未设置查询条件')
         }
         // 载荷校验与"显式 {} = 清空"的语义都在页面 handler（`export.setConditions`，与用户手点
@@ -840,14 +843,14 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         if (await isCurrentTaskReadOnly(workspace)) {
           return fail('任务已结束，仅供查看，未变更导入模式')
         }
-        if (abandoned()) {
+        if (isAbandoned()) {
           return fail('前端工具预算已到点：本次未变更导入模式')
         }
         await tasksApi.setImportMode(taskId, event.mode)
-        if (abandoned()) {
+        if (isAbandoned()) {
           return fail(`前端工具预算已到点：导入模式已提交给任务 #${taskId}，未写入当前工作区`)
         }
-        if (!taskStill(taskId)) {
+        if (!isTaskStill(taskId)) {
           return switched(taskId)
         }
         workspace.setImportMode(event.mode)

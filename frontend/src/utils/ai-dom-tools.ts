@@ -31,6 +31,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import type { FrontendToolOutcome } from '@/types/tools'
 import { translate } from '@/composables/useCopy'
 import { formatUiReceipt } from './ui-receipt'
+import { logCaughtError } from '@/utils/log-caught-error'
 import type { AiRisk } from './ai-regions'
 import {
   currentAiEpoch,
@@ -39,13 +40,14 @@ import {
   rememberAiRef,
   resolveAiRef,
   riskOfElement,
-  verbAllowed,
+  canUseVerb,
   warnAiRegionAudit,
   type AiRegion,
   type AiRegionAuditTarget,
   type AiRegionHit,
   type AiVerb
 } from './ai-regions'
+
 
 // ── 常量（设计稿 §3.7；与后端 Guard / 工具描述同源） ──────────────────────────
 
@@ -270,14 +272,15 @@ function delay(ms: number): Promise<void> {
   })
 }
 
-function prefersReducedMotion(): boolean {
+function shouldReduceMotion(): boolean {
   const media = typeof window !== 'undefined' ? window.matchMedia : undefined
   if (typeof media !== 'function') {
     return false
   }
   try {
     return media.call(window, '(prefers-reduced-motion: reduce)').matches === true
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/ai-dom-tools.ts:281')
     return false
   }
 }
@@ -293,7 +296,8 @@ export function currentUiContext(): UiContext {
   try {
     const snapshot = useWorkspaceStore().snapshot()
     return { pageId: snapshot.pageId ?? null, step: snapshot.step ?? null, taskId: snapshot.taskId ?? null }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/ai-dom-tools.ts:297')
     return { pageId: null, step: null, taskId: null }
   }
 }
@@ -302,7 +306,8 @@ export function currentUiContext(): UiContext {
 function touchWorkspace(summary: string): number {
   try {
     return useWorkspaceStore().touch(summary, 'AI')
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/ai-dom-tools.ts:306')
     return 0
   }
 }
@@ -357,6 +362,27 @@ type UiRole = 'button' | 'input' | 'select' | 'toggle' | 'tab' | 'link'
  */
 const ROLE_FILTER_DEFAULT: readonly UiRole[] = ['button', 'input', 'select', 'toggle', 'tab']
 
+function nativeInputRoleOf(el: HTMLElement, tag: string): UiRole | null {
+  if (tag === 'input') {
+    const type = (el.getAttribute('type') ?? 'text').toLowerCase()
+    return type === 'checkbox' || type === 'radio' ? 'toggle' : 'input'
+  }
+  if (tag === 'textarea' || el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
+    return 'input'
+  }
+  return null
+}
+
+function ariaRoleOf(el: HTMLElement, role: string): UiRole | null {
+  if (role === 'switch' || el.hasAttribute('aria-pressed') || role === 'checkbox' || role === 'radio') {
+    return 'toggle'
+  }
+  if (role === 'textbox' || role === 'searchbox') {
+    return 'input'
+  }
+  return null
+}
+
 function roleOf(el: HTMLElement): UiRole | null {
   const tag = el.tagName.toLowerCase()
   const role = (el.getAttribute('role') ?? '').toLowerCase()
@@ -366,32 +392,13 @@ function roleOf(el: HTMLElement): UiRole | null {
   if (tag === 'select' || role === 'combobox' || role === 'listbox') {
     return 'select'
   }
-  if (tag === 'a' && el.hasAttribute('href')) {
-    return 'link'
-  }
-  if (role === 'link') {
+  if ((tag === 'a' && el.hasAttribute('href')) || role === 'link') {
     return 'link'
   }
   if (role === 'tab') {
     return 'tab'
   }
-  if (tag === 'input') {
-    const type = (el.getAttribute('type') ?? 'text').toLowerCase()
-    if (type === 'checkbox' || type === 'radio') {
-      return 'toggle'
-    }
-    return 'input'
-  }
-  if (tag === 'textarea' || el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
-    return 'input'
-  }
-  if (role === 'switch' || el.hasAttribute('aria-pressed') || role === 'checkbox' || role === 'radio') {
-    return 'toggle'
-  }
-  if (role === 'textbox' || role === 'searchbox') {
-    return 'input'
-  }
-  return null
+  return nativeInputRoleOf(el, tag) ?? ariaRoleOf(el, role)
 }
 
 function stateOf(el: HTMLElement, role: UiRole): string {
@@ -437,7 +444,8 @@ function isBuiltinDenied(el: HTMLElement): boolean {
         if (url.origin !== window.location.origin) {
           return true
         }
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'utils/ai-dom-tools.ts:441')
         return true
       }
     }
@@ -445,7 +453,7 @@ function isBuiltinDenied(el: HTMLElement): boolean {
   return el.hasAttribute('data-ai-deny')
 }
 
-function fillAllowed(el: HTMLElement): boolean {
+function canFill(el: HTMLElement): boolean {
   return el.getAttribute('data-ai-fill') === 'allow'
 }
 
@@ -505,7 +513,8 @@ export function isElementVisibleForAi(el: HTMLElement): boolean {
         if (computed.display === 'none' || computed.visibility === 'hidden' || computed.visibility === 'collapse') {
           return false
         }
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'utils/ai-dom-tools.ts:509')
         // 拿不到计算样式（脱离文档/被裁剪）：按"可见"处理，不因环境缺陷拒执
       }
     }
@@ -517,7 +526,8 @@ export function isElementVisibleForAi(el: HTMLElement): boolean {
       if (check.call(el) === false) {
         return false
       }
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/ai-dom-tools.ts:521')
       // 同上
     }
   }
@@ -526,7 +536,7 @@ export function isElementVisibleForAi(el: HTMLElement): boolean {
 
 /** `fill=allow` 的输入框才回显值，且 ≤24 字符。 */
 function valueEchoOf(el: HTMLElement): string | null {
-  if (!fillAllowed(el)) {
+  if (!canFill(el)) {
     return null
   }
   const role = roleOf(el)
@@ -566,62 +576,75 @@ interface SnapshotArgs {
   text: boolean
 }
 
-function parseSnapshotArgs(args: Record<string, unknown>): { ok: true; value: SnapshotArgs } | { ok: false; reason: string } {
-  const rawLimit = args.limit
-  let limit = UI_SNAPSHOT_DEFAULT_ROWS
-  if (rawLimit !== undefined && rawLimit !== null) {
-    const numeric = typeof rawLimit === 'number' ? rawLimit : Number(rawLimit)
-    if (!Number.isInteger(numeric) || numeric < 1 || numeric > UI_SNAPSHOT_MAX_ROWS) {
-      return {
-        ok: false,
-        reason: `limit 必须是 1..${UI_SNAPSHOT_MAX_ROWS} 的整数（收到 ${String(rawLimit)}）。`
-      }
-    }
-    limit = numeric
+type SnapshotParse<T> = { ok: true; value: T } | { ok: false; reason: string }
+
+function parseSnapshotLimit(raw: unknown): SnapshotParse<number> {
+  if (raw === undefined || raw === null) {
+    return { ok: true, value: UI_SNAPSHOT_DEFAULT_ROWS }
   }
-  let regions: string[] | null = null
-  if (args.regions !== undefined && args.regions !== null) {
-    if (!Array.isArray(args.regions)) {
-      return { ok: false, reason: 'regions 必须是区域 id 的字符串数组（缺省 = 全部已注册区域）。' }
-    }
-    regions = args.regions.map((item) => String(item)).filter((item) => item !== '')
+  const numeric = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isInteger(numeric) || numeric < 1 || numeric > UI_SNAPSHOT_MAX_ROWS) {
+    return { ok: false, reason: `limit 必须是 1..${UI_SNAPSHOT_MAX_ROWS} 的整数（收到 ${String(raw)}）。` }
   }
-  let kinds: readonly UiRole[] = ROLE_FILTER_DEFAULT
-  if (args.kinds !== undefined && args.kinds !== null) {
-    if (!Array.isArray(args.kinds)) {
-      return { ok: false, reason: 'kinds 必须是角色枚举的字符串数组（button/input/select/toggle/tab/link/all）。' }
+  return { ok: true, value: numeric }
+}
+
+function parseSnapshotRegions(raw: unknown): SnapshotParse<string[] | null> {
+  if (raw === undefined || raw === null) {
+    return { ok: true, value: null }
+  }
+  if (!Array.isArray(raw)) {
+    return { ok: false, reason: 'regions 必须是区域 id 的字符串数组（缺省 = 全部已注册区域）。' }
+  }
+  return { ok: true, value: raw.map((item) => String(item)).filter((item) => item !== '') }
+}
+
+function parseSnapshotKinds(raw: unknown): SnapshotParse<readonly UiRole[]> {
+  if (raw === undefined || raw === null) {
+    return { ok: true, value: ROLE_FILTER_DEFAULT }
+  }
+  if (!Array.isArray(raw)) {
+    return { ok: false, reason: 'kinds 必须是角色枚举的字符串数组（button/input/select/toggle/tab/link/all）。' }
+  }
+  const requested = raw.map((item) => String(item).toLowerCase())
+  if (requested.includes('all')) {
+    return { ok: true, value: ['button', 'input', 'select', 'toggle', 'tab', 'link'] }
+  }
+  const valid: UiRole[] = []
+  for (const item of requested) {
+    if (item !== 'button' && item !== 'input' && item !== 'select' && item !== 'toggle' && item !== 'tab' && item !== 'link') {
+      return { ok: false, reason: `kinds 里出现未知角色「${item}」（可选：button/input/select/toggle/tab/link/all）。` }
     }
-    const requested = args.kinds.map((item) => String(item).toLowerCase())
-    if (requested.includes('all')) {
-      kinds = ['button', 'input', 'select', 'toggle', 'tab', 'link']
-    } else {
-      const valid: UiRole[] = []
-      for (const item of requested) {
-        if (item === 'button' || item === 'input' || item === 'select' || item === 'toggle'
-          || item === 'tab' || item === 'link') {
-          valid.push(item)
-        } else {
-          return {
-            ok: false,
-            reason: `kinds 里出现未知角色「${item}」（可选：button/input/select/toggle/tab/link/all）。`
-          }
-        }
-      }
-      kinds = valid
+    valid.push(item)
+  }
+  return { ok: true, value: valid }
+}
+
+function parseSnapshotText(raw: unknown): SnapshotParse<boolean> {
+  if (raw === undefined || raw === null) return { ok: true, value: false }
+  if (typeof raw === 'boolean') return { ok: true, value: raw }
+  if (raw === 'true' || raw === 'false') return { ok: true, value: raw === 'true' }
+  return { ok: false, reason: `text 必须是布尔值（收到 ${String(raw)}）。` }
+}
+
+function parseSnapshotArgs(args: Record<string, unknown>): SnapshotParse<SnapshotArgs> {
+  const limit = parseSnapshotLimit(args.limit)
+  if (!limit.ok) return limit
+  const regions = parseSnapshotRegions(args.regions)
+  if (!regions.ok) return regions
+  const kinds = parseSnapshotKinds(args.kinds)
+  if (!kinds.ok) return kinds
+  const text = parseSnapshotText(args.text)
+  if (!text.ok) return text
+  return {
+    ok: true,
+    value: {
+      regions: regions.value,
+      kinds: kinds.value,
+      limit: limit.value,
+      text: text.value
     }
   }
-  let text = false
-  if (args.text !== undefined && args.text !== null) {
-    if (typeof args.text === 'boolean') {
-      text = args.text
-    } else if (args.text === 'true' || args.text === 'false') {
-      // 模型侧偶有把布尔写成字符串的形态：只认这两个字面量，其余一律拒（不猜）
-      text = args.text === 'true'
-    } else {
-      return { ok: false, reason: `text 必须是布尔值（收到 ${String(args.text)}）。` }
-    }
-  }
-  return { ok: true, value: { regions, kinds, limit, text } }
 }
 
 /** `ui_snapshot`：只回已注册区域内、带 `data-ai-ref`、非 deny 的元素。 */
@@ -701,7 +724,7 @@ export function aiSnapshot(args: Record<string, unknown> = {}): UiToolOutcome {
 function formatRow(ref: string, role: UiRole, el: HTMLElement): string {
   const label = labelTextOf(el)
   const state = stateOf(el, role)
-  const fill = fillAllowed(el) ? ' fill=allow' : ''
+  const fill = canFill(el) ? ' fill=allow' : ''
   const value = valueEchoOf(el)
   const valuePart = value === null ? '' : ` value="${value}"`
   const head = `[${ref}] ${role} "${label}" state=${state}${fill}`
@@ -1136,7 +1159,7 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
   if (hit.el.hasAttribute('data-ai-deny')) {
     return { ok: false, outcome: fail(`该元素声明了 data-ai-deny（禁止 AI 操作），本次未执行。ref=${ref}`) }
   }
-  if (!verbAllowed(hit.el, hit.region, verb)) {
+  if (!canUseVerb(hit.el, hit.region, verb)) {
     return { ok: false, outcome: fail(`该元素不允许「${verb}」动词（data-ai-verbs 收紧了允许集）。ref=${ref}`) }
   }
   // ⑥ 禁用闸（挂账 L-65）：写动词命中禁用 / 只读控件 ⇒ 拒执 + `UI_TARGET_DISABLED`。
@@ -1162,7 +1185,7 @@ async function acquireWriteSlot(): Promise<UiToolOutcome | null> {
     }
     lastWriteAt = Date.now()
   })
-  writeChain = gate.catch(() => undefined)
+  writeChain = gate.catch((error) => logCaughtError(error, 'ai-dom:write-chain'))
   await gate
   if (aborted) {
     return fail('本轮已停止，后续界面操作一律不执行（已执行的不回滚）。')
@@ -1261,7 +1284,7 @@ export async function waitForDomSettled(
  * 等某个条件成立（弹层/选项出现）：`MutationObserver` 触发检查 + 25ms 轮询兜底，
  * 上限 `timeoutMs`；超时如实回 false（调用方据此说"没有/未出现"，不谎报成功）。
  */
-export async function waitUntil(
+export async function canWaitUntil(
   check: () => boolean,
   timeoutMs: number = UI_ACTION_SETTLE_MS,
   pollMs: number = UI_ACTION_POLL_MS
@@ -1324,7 +1347,7 @@ export async function waitForPopupAfterClick(
 ): Promise<UiPopupWaitResult> {
   const started = Date.now()
   const baseline = beforeCount < 0 ? popupSurfaceCount() : beforeCount
-  const appeared = await waitUntil(() => popupSurfaceCount() > baseline, UI_ACTION_SETTLE_MS)
+  const appeared = await canWaitUntil(() => popupSurfaceCount() > baseline, UI_ACTION_SETTLE_MS)
   if (!appeared) {
     return { appeared: false, settled: false, ms: Date.now() - started }
   }
@@ -1494,7 +1517,7 @@ export async function aiFill(args: Record<string, unknown> = {}): Promise<UiTool
   const { hit, label, risk } = fenced
   const ref = String(args.ref)
   const epoch = String(args.epoch)
-  if (!fillAllowed(hit.el)) {
+  if (!canFill(hit.el)) {
     return fail(`该输入框未声明可填写（data-ai-fill="allow"），拒绝填写。ref=${ref}`)
   }
   if (risk !== 'mutate-local') {
@@ -1571,6 +1594,31 @@ function readSelectedOption(hit: AiRegionHit): string {
 }
 
 /** `ui_select`：setter 优先（Element Plus 自绘弹层只能靠它），回退「点开→精确匹配→点选→回读」。 */
+async function applySelectOption(
+  hit: AiRegionHit,
+  ref: string,
+  option: string,
+  label: string
+): Promise<UiToolOutcome | null> {
+  const setter = hit.region.setters?.[ref]
+  if (setter) {
+    const applied = await setter(option)
+    return applied ? null : fail(`未选择：setter 未能把「${label}」设为「${option}」。ref=${ref}`)
+  }
+  hit.el.click()
+  await canWaitUntil(() => optionNodes(hit.region).length > 0)
+  const candidates = optionNodes(hit.region)
+  const exact = candidates.find((node) => optionOf(node) === option)
+  const trimmed = exact ?? candidates.find((node) => optionOf(node).trim() === option.trim())
+  if (!trimmed) {
+    const available = candidates.slice(0, 10).map(optionOf).filter((item) => item !== '')
+    const list = available.length > 0 ? available.join('、') : `（${UI_ACTION_SETTLE_MS}ms 内未见下拉选项）`
+    return fail(`未选择：下拉选项里没有「${option}」。可选：${list}。ref=${ref}`)
+  }
+  trimmed.click()
+  return null
+}
+
 export async function aiSelect(args: Record<string, unknown> = {}): Promise<UiToolOutcome> {
   const option = asString(args.option)
   if (!option) {
@@ -1595,25 +1643,9 @@ export async function aiSelect(args: Record<string, unknown> = {}): Promise<UiTo
     return slot
   }
   const previous = readSelectedOption(hit)
-  const setter = hit.region.setters?.[ref]
-  if (setter) {
-    const applied = await setter(option)
-    if (!applied) {
-      return fail(`未选择：setter 未能把「${label}」设为「${option}」。ref=${ref}`)
-    }
-  } else {
-    hit.el.click()
-    // 批 C / D11-②：点开 → 等选项出现（≤500ms）；超时如实"没有/未打开"，不谎报成功
-    await waitUntil(() => optionNodes(hit.region).length > 0)
-    const candidates = optionNodes(hit.region)
-    const exact = candidates.find((node) => optionOf(node) === option)
-    const trimmed = exact ?? candidates.find((node) => optionOf(node).trim() === option.trim())
-    if (!trimmed) {
-      const available = candidates.slice(0, 10).map(optionOf).filter((item) => item !== '')
-      const list = available.length > 0 ? available.join('、') : `（${UI_ACTION_SETTLE_MS}ms 内未见下拉选项）`
-      return fail(`未选择：下拉选项里没有「${option}」。可选：${list}。ref=${ref}`)
-    }
-    trimmed.click()
+  const applied = await applySelectOption(hit, ref, option, label)
+  if (applied) {
+    return applied
   }
   const readback = readSelectedOption(hit)
   if (readback !== '' && readback !== option) {
@@ -1679,7 +1711,7 @@ const HIGHLIGHT_CLASSES = ['ring-2', 'ring-offset-1', 'ring-[#2563eb]']
 
 function highlightElement(el: HTMLElement, label: string, note?: string): void {
   clearUiHighlights()
-  const reduce = prefersReducedMotion()
+  const reduce = shouldReduceMotion()
   for (const name of HIGHLIGHT_CLASSES) {
     el.classList.add(name)
   }
@@ -1862,7 +1894,7 @@ export function uploadFileNameOf(file: File): string {
 }
 
 /** 浏览器是否支持 `showOpenFilePicker`（供 store 提前分流 available/degraded）。 */
-export function supportsFilePicker(): boolean {
+export function canUseFilePicker(): boolean {
   return typeof window !== 'undefined'
     && typeof (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker === 'function'
 }

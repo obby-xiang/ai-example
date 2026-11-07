@@ -20,6 +20,7 @@
  */
 
 import { AI_FORM_DRAFT_PREFIX, formDraftPrefix, formDraftStorageKey } from '@/utils/ai-identity'
+import { logCaughtError } from '@/utils/log-caught-error'
 
 export const FORM_DRAFT_PREFIX = AI_FORM_DRAFT_PREFIX
 
@@ -36,7 +37,8 @@ export function formDraftKey(toolCallId: string): string {
 function storage(): Storage | null {
   try {
     return globalThis.sessionStorage ?? null
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/form-draft.ts:40')
     // 隐私模式/被禁用：草稿能力静默降级（表单照常可填，只是刷新不恢复）
     return null
   }
@@ -65,11 +67,11 @@ const lastWriteAt = new Map<string, number>()
 /**
  * 落一笔（唯一写口）：返回**是否真的写进 storage**。
  *
- * <p>容量/序列化异常仍静默吞掉（不影响填写），但调用方必须据此决定是否推进
+ * <p>容量/序列化异常按存储键去重记录日志且不打断填写，但调用方必须据此决定是否推进
  * {@link lastWriteAt} —— 写失败还留下"刚写过"的假时间，会让 250ms 节流把下一次重试一并吞掉，
  * 草稿就一直停在内存里直到出口 flush（甚至出口也救不回）。
  */
-function writeDraftKey(key: string, values: Record<string, unknown>): boolean {
+function canWriteDraftKey(key: string, values: Record<string, unknown>): boolean {
   const target = storage()
   if (!target) {
     return false
@@ -77,8 +79,9 @@ function writeDraftKey(key: string, values: Record<string, unknown>): boolean {
   try {
     target.setItem(key, JSON.stringify(values))
     return true
-  } catch {
+  } catch (error) {
     // QuotaExceeded 等：草稿只是体验增强，绝不因此打断填写
+    logCaughtError(error, `form-draft:${key}`)
     return false
   }
 }
@@ -92,7 +95,7 @@ function flushKey(key: string): void {
   if (entry.timer !== null) {
     clearTimeout(entry.timer)
   }
-  if (writeDraftKey(key, entry.values)) {
+  if (canWriteDraftKey(key, entry.values)) {
     lastWriteAt.set(key, Date.now())
   } else {
     // 写失败：删掉节流账，下一次键入会立即重试（而不是被窗口误判成"刚写过"）
@@ -163,7 +166,7 @@ export function scheduleFormDraft(toolCallId: string, values: Record<string, unk
   const now = Date.now()
   const last = lastWriteAt.get(key)
   if (!pendingWrites.has(key) && (last === undefined || now - last >= FORM_DRAFT_DEBOUNCE_MS)) {
-    if (writeDraftKey(key, values)) {
+    if (canWriteDraftKey(key, values)) {
       lastWriteAt.set(key, now)
       return
     }
@@ -232,7 +235,8 @@ export function loadFormDraft(toolCallId: string): Record<string, unknown> | nul
       return null
     }
     return { ...(parsed as Record<string, unknown>) }
-  } catch {
+  } catch (error) {
+    logCaughtError(error, `form-draft:${formDraftKey(toolCallId)}`)
     return null
   }
 }
@@ -256,7 +260,7 @@ export function saveFormDraft(toolCallId: string, values: Record<string, unknown
     return
   }
   const key = formDraftKey(toolCallId)
-  if (writeDraftKey(key, values)) {
+  if (canWriteDraftKey(key, values)) {
     lastWriteAt.set(key, Date.now())
   } else {
     lastWriteAt.delete(key)
@@ -281,7 +285,8 @@ export function clearFormDraft(toolCallId: string): void {
   }
   try {
     target.removeItem(formDraftKey(toolCallId))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/form-draft.ts:296')
     // 同上：清理失败不影响主流程
   }
 }
@@ -331,7 +336,8 @@ export function pruneFormDrafts(present: Iterable<string>): number {
       // 而跳过 leading 写（读回语义要求写进去的下次读就在）。
       lastWriteAt.delete(key)
     })
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/form-draft.ts:346')
     // 隐私模式/配额：清理失败不影响主流程（孤儿键只是卫生问题）
     return 0
   }

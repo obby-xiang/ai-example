@@ -19,11 +19,13 @@ import { useCopy } from '@/composables/useCopy'
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { head } from 'lodash'
 import { aiApi } from '@/api/ai'
 import type { AiHealth } from '@/types/ai'
 import { aiConfigApi, type AiDefaults, type AiModelRow, type AiProbeResult, type AiProviderView } from '@/api/aiConfig'
 import { useAiSettingsCopy, describeAiConfigError, errorCodeOf, softDeleteHint } from '@/constants/ai-settings-copy'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { logCaughtError } from '@/utils/log-caught-error'
 
 const { t } = useCopy()
 /** 文案对象：属性是 getter（取值时按当前语言翻译），模板里照旧写 `T.title`。 */
@@ -72,7 +74,7 @@ const defaultsForm = reactive({
 const syntheticProviders = computed(() => (health.value?.providers ?? []).filter((p) => p.synthetic === true))
 
 const selectedProvider = computed(
-  () => providers.value.find((p) => p.id === selectedProviderId.value) ?? providers.value[0] ?? null
+  () => providers.value.find((p) => p.id === selectedProviderId.value) ?? head(providers.value) ?? null
 )
 
 const allModels = computed(() =>
@@ -189,7 +191,7 @@ function defaultTargetKeyOf(providerId: number | null | undefined, modelId: stri
     provider.enabled && provider.models.some((model) => model.enabled && model.modelId === modelId)
   )
   return owners.length === 1
-    ? modelTargetKey(owners[0].id, modelId)
+    ? modelTargetKey(head(owners)!.id, modelId)
     : `${LEGACY_TARGET_PREFIX}${modelId}`
 }
 
@@ -292,7 +294,7 @@ function applyProviders(nextProviders: AiProviderView[]): void {
   fillForms()
   fillDefaults()
   if (selectedProviderId.value == null && providers.value.length > 0) {
-    selectedProviderId.value = providers.value[0].id
+    selectedProviderId.value = head(providers.value)!.id
   }
 }
 
@@ -306,6 +308,7 @@ async function refreshProviders(): Promise<void> {
       applyProviders(nextProviders)
     }
   } catch (error) {
+      logCaughtError(error, 'views/AiSettingsView.vue:310')
     if (seq !== providersLoadSeq) {
       return
     }
@@ -331,6 +334,7 @@ async function refreshDefaults(): Promise<void> {
     fillDefaults()
   } catch (error) {
     if (seq === defaultsLoadSeq) {
+      logCaughtError(error, 'ai-settings:request')
       defaultsError.value = error
     }
   } finally {
@@ -347,7 +351,8 @@ async function refreshHealth(): Promise<void> {
     if (seq === healthLoadSeq) {
       health.value = nextHealth
     }
-  } catch {
+  } catch (error) {
+    logCaughtError(error, 'ai-settings:request')
     if (seq === healthLoadSeq) {
       health.value = null
     }
@@ -355,7 +360,7 @@ async function refreshHealth(): Promise<void> {
 }
 
 async function load(): Promise<void> {
-  void refreshProviders().catch(() => {})
+  void refreshProviders().catch((error) => logCaughtError(error, 'ai-settings:providers'))
   void refreshDefaults()
   void refreshHealth()
 }
@@ -469,15 +474,16 @@ async function saveProvider(provider: AiProviderView): Promise<void> {
       // 用非空断言会在**成功之后**抛 TypeError，被 catch 说成"保存失败"（把成功误报成失败）。
       clearCardKey(provider.id)
       ElMessage.success(T.saved)
-      await refreshProviders().catch(() => {})
+      await refreshProviders().catch((error) => logCaughtError(error, 'ai-settings:providers'))
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
 }
 
 async function clearKey(provider: AiProviderView): Promise<void> {
-  const confirmed = await confirm(T.clearKeyConfirm)
+  const confirmed = await canConfirm(T.clearKeyConfirm)
   if (!confirmed) {
     return
   }
@@ -489,8 +495,9 @@ async function clearKey(provider: AiProviderView): Promise<void> {
       // N2（R2）：同 saveProvider —— 卡片已被并发删除时安全跳过，不把成功误报成失败。
       clearCardKey(provider.id)
       ElMessage.success(T.saved)
-      await refreshProviders().catch(() => {})
+      await refreshProviders().catch((error) => logCaughtError(error, 'ai-settings:providers'))
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -511,7 +518,7 @@ function clearCardKey(providerId: number): void {
 
 async function toggleEnabled(provider: AiProviderView): Promise<void> {
   if (provider.enabled) {
-    const confirmed = await confirm(T.disableConfirm)
+    const confirmed = await canConfirm(T.disableConfirm)
     if (!confirmed) {
       return
     }
@@ -521,6 +528,7 @@ async function toggleEnabled(provider: AiProviderView): Promise<void> {
       await aiConfigApi.updateProvider(provider.id, { enabled: !provider.enabled })
       await refreshProviders()
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -535,7 +543,7 @@ async function toggleEnabled(provider: AiProviderView): Promise<void> {
  * 会让人以为删失败了。硬删优先 + 明确回落，既尊重意图又不会悄悄丢掉模型清单。
  */
 async function removeProvider(provider: AiProviderView): Promise<void> {
-  const confirmed = await confirm(T.removeConfirm)
+  const confirmed = await canConfirm(T.removeConfirm)
   if (!confirmed) {
     return
   }
@@ -545,6 +553,7 @@ async function removeProvider(provider: AiProviderView): Promise<void> {
       await refreshProviders()
     } catch (error) {
       if (errorCodeOf(error) !== 'PROVIDER_IN_USE') {
+        logCaughtError(error, 'ai-settings:request')
         ElMessage.error(describeAiConfigError(error))
         return
       }
@@ -553,6 +562,7 @@ async function removeProvider(provider: AiProviderView): Promise<void> {
         ElMessage.warning(softDeleteHint(provider.models.length))
         await refreshProviders()
       } catch (fallbackError) {
+        logCaughtError(fallbackError, 'ai-settings:delete-fallback')
         ElMessage.error(describeAiConfigError(fallbackError))
       }
     }
@@ -564,6 +574,7 @@ async function testConnection(provider: AiProviderView): Promise<void> {
     try {
       probeResults[provider.id] = await aiConfigApi.testProvider(provider.id)
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       probeResults[provider.id] = null
       ElMessage.error(describeAiConfigError(error))
     }
@@ -602,6 +613,7 @@ async function createProvider(): Promise<void> {
       createForm.apiKey = ''
       await refreshProviders()
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -641,6 +653,7 @@ async function pullModels(): Promise<void> {
       if (selectedProvider.value?.id !== forProviderId) {
         return // 旧 provider 的失败不弹在当前卡片上
       }
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -675,6 +688,7 @@ async function addFetched(modelId: string): Promise<void> {
       await aiConfigApi.addModel(provider.id, { modelId })
       await refreshProviders()
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -700,6 +714,7 @@ async function addManualModel(): Promise<void> {
       manualForm.maxOutput = ''
       await refreshProviders()
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -722,8 +737,9 @@ async function saveModelRow(model: AiModelRow): Promise<void> {
         isDefault: model.isDefault
       })
       ElMessage.success(T.saved)
-      await refreshProviders().catch(() => {})
+      await refreshProviders().catch((error) => logCaughtError(error, 'ai-settings:providers'))
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -734,7 +750,7 @@ async function removeModelRow(model: AiModelRow): Promise<void> {
   if (!provider) {
     return
   }
-  const confirmed = await confirm(T.removeConfirm)
+  const confirmed = await canConfirm(T.removeConfirm)
   if (!confirmed) {
     return
   }
@@ -743,6 +759,7 @@ async function removeModelRow(model: AiModelRow): Promise<void> {
       await aiConfigApi.deleteModel(provider.id, model.modelId)
       await refreshProviders()
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
@@ -774,16 +791,25 @@ async function saveDefaults(): Promise<void> {
       fillDefaults()
       ElMessage.success(T.saved)
     } catch (error) {
+      logCaughtError(error, 'ai-settings:request')
       ElMessage.error(describeAiConfigError(error))
     }
   })
 }
 
-async function confirm(message: string): Promise<boolean> {
+async function canConfirm(message: string): Promise<boolean> {
   try {
-    await ElMessageBox.confirm(message, T.title, { type: 'warning' })
-    return true
-  } catch {
+    return await ElMessageBox.confirm(message, T.title, { type: 'warning' }).then(
+      () => true,
+      (error) => {
+        if (error === 'cancel' || error === 'close') {
+          return false
+        }
+        throw error
+      }
+    )
+  } catch (error) {
+      logCaughtError(error, 'views/AiSettingsView.vue:803')
     return false
   }
 }

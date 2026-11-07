@@ -143,6 +143,7 @@ import { useI18n } from 'vue-i18n'
  * - 行数据来自 `dataJson` 字符串，渲染时按定义字段做中文标签转换（ENUM/BOOLEAN）。
  */
 import { computed, onMounted, ref } from 'vue'
+import { head } from 'lodash'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
@@ -152,6 +153,7 @@ import { definitionsApi } from '@/api/definitions'
 import { masterDataApi } from '@/api/masterdata'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { userFacingErrorText } from '@/utils/ui-error'
+import { logCaughtError } from '@/utils/log-caught-error'
 import {
   buildQueryCondition,
   conditionSummaryText,
@@ -206,7 +208,7 @@ const browserNote = computed(() => {
   })
 })
 
-function dataOf(row: ConfigDataRow): Record<string, unknown> {
+function dataOf(row: ConfigDataRow): Readonly<Record<string, unknown>> {
   return parseRowData(row)
 }
 
@@ -312,7 +314,7 @@ async function refreshDefinitions(): Promise<void> {
     return
   }
   const queryDef = typeof route.query.defCode === 'string' ? route.query.defCode : ''
-  const next = queryDef || list[0]?.code || ''
+  const next = queryDef || head(list)?.code || ''
   defCode.value = next
   applyDefSelection(next)
 }
@@ -364,8 +366,14 @@ onMounted(async () => {
   })
   await reload()
   const [regionList, projectList] = await Promise.all([
-    masterDataApi.listRegions().catch(() => []),
-    masterDataApi.listProjects().catch(() => [])
+    masterDataApi.listRegions().catch((error) => {
+      logCaughtError(error, 'data-browser:load-options')
+      return []
+    }),
+    masterDataApi.listProjects().catch((error) => {
+      logCaughtError(error, 'data-browser:load-options')
+      return []
+    })
   ])
   regions.value = regionList
   projects.value = projectList

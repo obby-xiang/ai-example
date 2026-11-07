@@ -15,6 +15,7 @@
 import { tasksApi } from '@/api/tasks'
 import type { ImportMode } from '@/types/task'
 import { userFacingErrorText } from '@/utils/ui-error'
+import { logCaughtError } from '@/utils/log-caught-error'
 
 export type PublishModeResolution =
   | { ok: true; mode: ImportMode }
@@ -44,7 +45,8 @@ export function parsePublishMode(settingsJson: string | null | undefined): Publi
       ok: true,
       mode: typeof raw === 'string' && raw.toUpperCase() === 'REPLACE' ? 'REPLACE' : 'MERGE'
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/publish-mode.ts:47')
     return { ok: false, reason: '任务设置无法解析（importMode 不可读）' }
   }
 }

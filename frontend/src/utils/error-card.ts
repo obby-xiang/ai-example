@@ -218,62 +218,62 @@ export function classifyErrorVariant(code: string, message: string): ErrorCardVa
  * 建立错误卡；返回 `null` = 本错误不内联出卡（专属 Alert 承载 / 通知槽承载）。
  * `code` 允许为空串（网络异常等无码路径 ⇒ 落通用红卡）。
  */
+type ErrorCardText = Pick<ErrorCard, 'variant' | 'title' | 'summary' | 'guide' | 'action'>
+
+function variantErrorCardText(variant: Exclude<ErrorCardVariant, 'generic'>): ErrorCardText {
+  const text = VARIANT_TEXT_KEY[variant]
+  return {
+    variant,
+    title: translate(text.title),
+    summary: translate(text.summary),
+    guide: translate(text.guide),
+    action: translate(text.action)
+  }
+}
+
+function errorCardText(code: string, base: string, message: string): ErrorCardText {
+  const forcedVariant = CODE_VARIANT[code] ?? CODE_VARIANT[base]
+  if (forcedVariant !== undefined && forcedVariant !== 'generic') {
+    return variantErrorCardText(forcedVariant)
+  }
+  const dedicated = CODE_CARD_TEXT[code] ?? CODE_CARD_TEXT[base]
+  if (dedicated !== undefined) {
+    return {
+      variant: 'generic',
+      title: translate(dedicated.title),
+      summary: translate(CODE_SUMMARY_KEY[code] ?? CODE_SUMMARY_KEY[base] ?? 'ai.card.error.summary.generic'),
+      guide: translate(dedicated.guide),
+      action: ''
+    }
+  }
+  const variant = classifyErrorVariant(code, message)
+  if (variant !== 'generic') {
+    return variantErrorCardText(variant)
+  }
+  return {
+    variant,
+    title: translate('ai.card.error.generic.title'),
+    summary: translate('ai.card.error.summary.generic'),
+    guide: '',
+    action: ''
+  }
+}
+
+/** 建立错误卡；返回 `null` = 本错误不内联出卡（专属 Alert 承载 / 通知槽承载）。 */
 export function buildErrorCard(code: string, message: string): ErrorCard | null {
   const { base, derived } = splitErrorCode(code)
   if (base !== '' && DEDICATED_ALERT_CODES.has(base)) {
     return null
   }
-
-  let variant: ErrorCardVariant
-  let title: string
-  let summary: string
-  let guide: string
-  let action: string
-
-  const forcedVariant = CODE_VARIANT[code] ?? CODE_VARIANT[base]
-  const dedicated = CODE_CARD_TEXT[code] ?? CODE_CARD_TEXT[base]
-  if (forcedVariant !== undefined && forcedVariant !== 'generic') {
-    variant = forcedVariant
-    const text = VARIANT_TEXT_KEY[forcedVariant]
-    title = translate(text.title)
-    summary = translate(text.summary)
-    guide = translate(text.guide)
-    action = translate(text.action)
-  } else if (dedicated !== undefined) {
-    variant = 'generic'
-    title = translate(dedicated.title)
-    summary = translate(CODE_SUMMARY_KEY[code] ?? CODE_SUMMARY_KEY[base] ?? 'ai.card.error.summary.generic')
-    guide = translate(dedicated.guide)
-    action = ''
-  } else {
-    variant = classifyErrorVariant(code, message)
-    if (variant === 'generic') {
-      title = translate('ai.card.error.generic.title')
-      summary = translate('ai.card.error.summary.generic')
-      guide = ''
-      action = ''
-    } else {
-      const text = VARIANT_TEXT_KEY[variant]
-      title = translate(text.title)
-      summary = translate(text.summary)
-      guide = translate(text.guide)
-      action = translate(text.action)
-    }
-  }
-
+  const text = errorCardText(code, base, message)
   if (derived !== null) {
     const derivedText = DERIVED_TEXT_KEY[derived]
-    title = `${title} · ${translate(derivedText.label)}`
-    summary = `${summary}${translate(derivedText.summary)}`
+    text.title = `${text.title} · ${translate(derivedText.label)}`
+    text.summary = `${text.summary}${translate(derivedText.summary)}`
   }
-
   return {
-    variant,
-    title,
-    summary,
+    ...text,
     detail: message,
-    guide,
-    action,
     code,
     baseCode: base,
     derived

@@ -1,3 +1,4 @@
+import { logCaughtError } from '@/utils/log-caught-error'
 /**
  * AI 对话域的**租户/用户身份**（Task 4）。
  *
@@ -82,7 +83,8 @@ export function readAiIdentity(): AiIdentity | null {
       return null
     }
     return normalizeIdentity(JSON.parse(raw))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/ai-identity.ts:85')
     return null
   }
 }
@@ -117,7 +119,8 @@ export function writeAiIdentity(identity: AiIdentity | null): void {
     } else {
       sessionStorage.removeItem(AI_IDENTITY_KEY)
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/ai-identity.ts:120')
     // 忽略：本页签内存态照常生效
   }
 }

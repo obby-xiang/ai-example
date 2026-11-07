@@ -150,7 +150,7 @@ import { useI18n } from 'vue-i18n'
  * 任务中心（五页之①）。
  *
  * - 过滤（类型/状态/关键词）+ 分页：参数原样交后端（key 排序与 LIKE 转义后端已处理）；
- *   控件值是**草稿**（改动不请求），`commitFilterDraft()` 在查询/翻页/刷新/写后刷新时
+ *   控件值是**草稿**（改动不请求），`canCommitFilterDraft()` 在查询/翻页/刷新/写后刷新时
  *   把它提交成 store 的已应用值 —— 三个入口同一份筛选，控件与列表不再错位（P1-5）；
  * - 刷新口径（手动刷新批 M1 + F2 + AR-08）：**无任何周期自刷、零 EventSource 连接** ——
  *   挂载只拉一次列表，此后静止对后端零请求；更新入口 = 右上角刷新按钮、写操作成功后的
@@ -227,7 +227,7 @@ function onVisibilityChange(): void {
  * 三者永远同源，不会出现「下拉显示已完成、列表却按旧筛选翻页」的错位。
  * 草稿有实质改动时页码回到第一页（否则新筛选可能落在空页上）。
  */
-function commitFilterDraft(): boolean {
+function canCommitFilterDraft(): boolean {
   const keyword = filterKeyword.value.trim()
   if (
     keyword === taskStore.filterKeyword &&
@@ -263,18 +263,18 @@ function resetFilters(): void {
 }
 
 function onPageChange(page: number): void {
-  commitFilterDraft()
+  canCommitFilterDraft()
   taskStore.setPage(page - 1)
 }
 
 function onSizeChange(size: number): void {
-  commitFilterDraft()
+  canCommitFilterDraft()
   taskStore.setSize(size)
 }
 
 /** 手动刷新：与查询/翻页同一份筛选（草稿有改动时按新筛选从第一页拉）。 */
 function refresh(): void {
-  commitFilterDraft()
+  canCommitFilterDraft()
   void taskStore.refreshNow()
 }
 

@@ -16,9 +16,12 @@
  */
 
 import JSZip from 'jszip'
+import { head, uniq } from 'lodash'
 import type GC from '@grapecity/spread-sheets'
 import { parseFieldOptions, type ConfigField } from '@/types/definition'
 import { loadSpreadCore, loadSpreadExcelIO, type SpreadSheets } from '@/utils/spreadjs'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 /** SpreadJS 工作表类型（默认导入的名称空间下的 Worksheet）。 */
 export type SpreadWorksheet = GC.Spread.Sheets.Worksheet
@@ -103,18 +106,12 @@ function isFalsyText(text: string): boolean {
   return lower === 'false' || lower === '0' || text === '否' || text === 'N' || lower === 'n'
 }
 
+const EMPTY_ENUM_VALUES: readonly string[] = Object.freeze([])
+
 /** ENUM 字段的合法取值集合（同时接受 code 与 label，便于用户按中文填）。 */
-export function enumValues(field: ConfigField): string[] {
-  const values = new Set<string>()
-  for (const option of parseFieldOptions(field)) {
-    if (option.value) {
-      values.add(option.value)
-    }
-    if (option.label) {
-      values.add(option.label)
-    }
-  }
-  return [...values]
+export function enumValues(field: ConfigField): readonly string[] {
+  const values = uniq(parseFieldOptions(field).flatMap((option) => [option.value, option.label].filter(Boolean)))
+  return values.length === 0 ? EMPTY_ENUM_VALUES : values
 }
 
 /**
@@ -230,58 +227,73 @@ function normalizeHeader(value: unknown): string {
  * 校验器逐个字段 try/catch（glm 蓝本实践）：单个字段的校验器创建失败不影响整表渲染。
  * `row = -1` 表示整列（列级校验器），ExcelIO 不导出 colHeader 区域，故表头必须写视口第 0 行。
  */
-export function applyColumnsToSheet(gs: SpreadSheets, sheet: SpreadWorksheet, fields: readonly ConfigField[]): void {
-  const DataValidation = gs.Spread.Sheets.DataValidation
-  const ComparisonOperators = gs.Spread.Sheets.ConditionalFormatting.ComparisonOperators
+function applyColumnField(
+  gs: SpreadSheets,
+  sheet: SpreadWorksheet,
+  field: ConfigField,
+  index: number
+): void {
   const SheetArea = gs.Spread.Sheets.SheetArea
+  sheet.setColumnWidth(index, Math.min(200, Math.max(90, headerText(field).length * 16 + 30)), SheetArea.viewport)
+  const columnCell = sheet.getCell(-1, index, SheetArea.viewport)
+  if (field.fieldType === 'DATE') {
+    columnCell.formatter('yyyy-mm-dd')
+  } else if (field.fieldType === 'NUMBER') {
+    columnCell.formatter('General')
+  }
+  if (field.required) {
+    columnCell.backColor('#fff7e6')
+  }
+  try {
+    const validator = buildValidator(
+      field,
+      gs.Spread.Sheets.DataValidation,
+      gs.Spread.Sheets.ConditionalFormatting.ComparisonOperators
+    )
+    if (validator) {
+      columnCell.validator(validator)
+    }
+  } catch (error) {
+    logCaughtError(error, `excel:validator:${field.code}`)
+  }
+}
 
+function applyHeaderRow(gs: SpreadSheets, sheet: SpreadWorksheet, fields: readonly ConfigField[]): void {
+  const SheetArea = gs.Spread.Sheets.SheetArea
+  fields.forEach((field, index) => {
+    sheet.setValue(0, index, headerText(field), SheetArea.viewport)
+    const headCell = sheet.getCell(0, index, SheetArea.viewport)
+    headCell.font('bold 12px sans-serif')
+    headCell.backColor('#eef2f7')
+    headCell.hAlign(gs.Spread.Sheets.HorizontalAlign.center)
+    if (field.key) {
+      headCell.foreColor('#c0392b')
+    }
+  })
+}
+
+function applySheetDisplayOptions(sheet: SpreadWorksheet): void {
+  try {
+    sheet.frozenRowCount(1)
+  } catch (error) {
+    logCaughtError(error, 'excel:freeze-first-row')
+  }
+  try {
+    sheet.options.selectionBackColor = 'rgba(64,158,255,0.2)'
+  } catch (error) {
+    logCaughtError(error, 'excel:selection-color')
+  }
+}
+
+export function applyColumnsToSheet(gs: SpreadSheets, sheet: SpreadWorksheet, fields: readonly ConfigField[]): void {
+  const SheetArea = gs.Spread.Sheets.SheetArea
   sheet.suspendPaint()
   try {
     sheet.setRowCount(Math.max(sheet.getRowCount(), DEFAULT_SHEET_ROWS), SheetArea.viewport)
     sheet.setColumnCount(Math.max(fields.length, 1), SheetArea.viewport)
-
-    fields.forEach((field, index) => {
-      sheet.setColumnWidth(index, Math.min(200, Math.max(90, headerText(field).length * 16 + 30)), SheetArea.viewport)
-      const columnCell = sheet.getCell(-1, index, SheetArea.viewport)
-      if (field.fieldType === 'DATE') {
-        columnCell.formatter('yyyy-mm-dd')
-      } else if (field.fieldType === 'NUMBER') {
-        columnCell.formatter('General')
-      }
-      if (field.required) {
-        columnCell.backColor('#fff7e6')
-      }
-      try {
-        const validator = buildValidator(field, DataValidation, ComparisonOperators)
-        if (validator) {
-          columnCell.validator(validator)
-        }
-      } catch (error) {
-        console.warn('[excel] validator creation failed for field: ' + field.code, error)
-      }
-    })
-
-    fields.forEach((field, index) => {
-      sheet.setValue(0, index, headerText(field), SheetArea.viewport)
-      const headCell = sheet.getCell(0, index, SheetArea.viewport)
-      headCell.font('bold 12px sans-serif')
-      headCell.backColor('#eef2f7')
-      headCell.hAlign(gs.Spread.Sheets.HorizontalAlign.center)
-      if (field.key) {
-        headCell.foreColor('#c0392b')
-      }
-    })
-
-    try {
-      sheet.frozenRowCount(1)
-    } catch (error) {
-      console.warn('[excel] freeze first row failed', error)
-    }
-    try {
-      sheet.options.selectionBackColor = 'rgba(64,158,255,0.2)'
-    } catch (error) {
-      console.warn('[excel] selection color setup failed', error)
-    }
+    fields.forEach((field, index) => applyColumnField(gs, sheet, field, index))
+    applyHeaderRow(gs, sheet, fields)
+    applySheetDisplayOptions(sheet)
   } finally {
     sheet.resumePaint()
   }
@@ -440,7 +452,8 @@ function createHiddenWorkbook(gs: SpreadSheets): HiddenWorkbook {
     dispose: () => {
       try {
         workbook.destroy()
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'utils/excel.ts:438')
         // 销毁失败无需上抛（宿主即将移除）
       }
       host.remove()
@@ -721,7 +734,7 @@ function sampleRow(fields: readonly ConfigField[]): Record<string, unknown> {
   const sample: Record<string, unknown> = {}
   for (const field of fields) {
     if (field.fieldType === 'ENUM') {
-      const first = parseFieldOptions(field)[0]
+      const first = head(parseFieldOptions(field))
       sample[field.code] = first ? first.value : ''
     } else if (field.fieldType === 'BOOLEAN') {
       sample[field.code] = 'true'
@@ -866,7 +879,8 @@ export function parseContentDisposition(header: string | null | undefined, fallb
   if (utf8 && utf8[1]) {
     try {
       return decodeURIComponent(utf8[1])
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/excel.ts:864')
       return utf8[1]
     }
   }

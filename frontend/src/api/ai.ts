@@ -8,6 +8,7 @@
 import type { AxiosRequestConfig } from 'axios'
 import { ApiError, del, get, http, post } from './http'
 import { reattach, streamChat } from './sse'
+import { logCaughtError } from '@/utils/log-caught-error'
 import type { SseFrameHandlers, SseStreamOptions } from './sse'
 import { getActivePinia } from 'pinia'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -98,7 +99,8 @@ function currentWorkspaceContext(): AiChatContext | undefined {
       return undefined
     }
     return useWorkspaceStore().buildContext()
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'api/ai.ts:102')
     return undefined
   }
 }
@@ -314,6 +316,7 @@ export async function health(): Promise<AiHealth> {
         return body
       }
     }
+    logCaughtError(error, 'ai:health')
     throw error
   }
 }

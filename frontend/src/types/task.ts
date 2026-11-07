@@ -1,3 +1,4 @@
+import { logCaughtError } from '@/utils/log-caught-error'
 /**
  * 任务与任务条目契约。
  *
@@ -142,7 +143,8 @@ export function readImportMode(task: Pick<Task, 'settingsJson'>): ImportMode | n
   try {
     const parsed = JSON.parse(task.settingsJson) as { importMode?: string }
     return parsed.importMode === 'MERGE' || parsed.importMode === 'REPLACE' ? parsed.importMode : null
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'types/task.ts:145')
     return null
   }
 }

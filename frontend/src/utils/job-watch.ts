@@ -45,6 +45,7 @@ import { tasksApi } from '@/api/tasks'
 import { isJobFinal, type Job } from '@/types/job'
 import type { JobDonePayload, JobProgressPayload, TaskEventFrame } from '@/types/sse'
 import { createPollingController } from '@/utils/polling'
+import { logCaughtError } from '@/utils/log-caught-error'
 
 /** 兜底轮询间隔（通道判死降级后的 3s 自愈节奏）。 */
 export const JOB_FALLBACK_POLL_MS = 3000
@@ -201,6 +202,7 @@ export function watchJob(options: JobWatchOptions): () => void {
       poller.refreshNow() // onopen 后的权威快照（D6）
     }
   } catch (error) {
+      logCaughtError(error, 'utils/job-watch.ts:204')
     // F1：通道构造同步抛错（环境无 EventSource / URL 非法）⇒ **SSE 不可用，但跟踪继续**。
     // 起表在前的 3s 兜底轮询 + visibilitychange 监听就是此刻可用的进度面，就地收摊会把它
     // 变成"死跟踪"（页面停在最后一次快照）；故 disposed 保持 false，poller 不 stop。
@@ -243,9 +245,11 @@ export function watchJob(options: JobWatchOptions): () => void {
         if (isJobFinal(job.status)) {
           const finalJob = job
           dispose()
-          void Promise.resolve(options.onFinal?.(finalJob)).catch(() => {})
+          void Promise.resolve(options.onFinal?.(finalJob))
+            .catch((error) => logCaughtError(error, `job-watch:final:${finalJob.id ?? 0}`))
         }
       } catch (error) {
+          logCaughtError(error, 'utils/job-watch.ts:250')
         // F8：与 resolve 面的 disposed 复检对称 —— dispose 后迟到失败不许再透传 onError
         // （此时回调已被回收语义作废，透传会把死跟踪的错误弹到新作业的展示位上）。
         if (!disposed) {

@@ -20,6 +20,7 @@ import App from './App.vue'
 import router from './router'
 import i18n from './locales'
 import { useLocaleStore } from './stores/locale'
+import { logCaughtError } from '@/utils/log-caught-error'
 import './styles/main.css'
 
 const app = createApp(App)
@@ -38,7 +39,7 @@ for (const [name, component] of Object.entries(ElementPlusIconsVue)) {
 }
 
 app.config.errorHandler = (error) => {
-  console.error('[vue] uncaught error', error)
+  logCaughtError(error, 'vue:uncaught')
 }
 
 app.mount('#app')

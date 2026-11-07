@@ -39,6 +39,7 @@ import type { Job, JobStatus, ValidationIssue } from '@/types/job'
 import { translate } from '@/composables/useCopy'
 import { watchJob } from '@/utils/job-watch'
 import { userFacingErrorText } from '@/utils/ui-error'
+import { logCaughtError } from '@/utils/log-caught-error'
 import type { RouteLocationRaw } from 'vue-router'
 
 /** 向导路由目标（窄化形态，便于调用方读 name 做中文提示）。 */
@@ -138,7 +139,7 @@ export function isTaskCenterRefreshEvent(event: unknown): event is string {
  * 起作业后该作业必然非终态，而列表快照**还没回来**（甚至还是旧数据、看不出在途）——
  * 只按列表判据会把"刚起的那一次"整条丢掉（用户停在任务中心等结果时最需要那一次刷新）。
  */
-export function jobEventStartedJob(event: string): boolean {
+export function hasJobEventStartedJob(event: string): boolean {
   return event === 'run_job' || event.startsWith('start_')
 }
 
@@ -206,6 +207,35 @@ function isTransientTaskReadFailure(error: unknown): boolean {
     return true
   }
   return error.status >= 500
+}
+
+function publishWatchCallbacks(
+  jobId: number,
+  clearWallClock: () => void,
+  dispose: () => void,
+  applyOutcome: (job: Job) => void
+): { onSnapshot: () => void; onFinal: (job: Job) => void; onError: (error: unknown) => void } {
+  let watchErrorNotified = false
+  return {
+    onSnapshot: () => {
+      watchErrorNotified = false
+    },
+    onFinal: (job) => {
+      clearWallClock()
+      dispose()
+      applyOutcome(job)
+    },
+    onError: (error) => {
+      if (watchErrorNotified) {
+        return
+      }
+      watchErrorNotified = true
+      notifyJobWatch(translate('views.tasks.msg.watchInterrupted', {
+        jobId,
+        message: userFacingErrorText(error, translate('views.tasks.msg.unknownError'))
+      }))
+    }
+  }
 }
 
 export const useTaskStore = defineStore('task', {
@@ -347,7 +377,7 @@ export const useTaskStore = defineStore('task', {
      * 三条件同时成立才刷一次：
      * ① 事件后 —— 由调用方保证（`start_*` 工具结果 / 面板转发的 `ui_event_result`）；
      * ② 存在非终态作业 —— 列表里已有 `PENDING`/`RUNNING`，或**本次事件就是起作业**
-     *    （`jobEventStartedJob`：刚起的作业必然非终态，列表快照还没回来的那一拍靠它兜住）；
+     *    （`hasJobEventStartedJob`：刚起的作业必然非终态，列表快照还没回来的那一拍靠它兜住）；
      * ③ 页面可见 —— `visibilityState === 'visible'`。
      *
      * ③ 不成立 ⇒ **不刷**，只记 `autoRefreshPending`（回可见补刷恰好 1 次，不补后台错过的次数）。
@@ -360,7 +390,7 @@ export const useTaskStore = defineStore('task', {
       if (!this.watchingCenter) {
         return
       }
-      if (!jobEventStartedJob(event) && !hasInFlightJob(this.items)) {
+      if (!hasJobEventStartedJob(event) && !hasInFlightJob(this.items)) {
         return
       }
       if (!isDocumentVisible()) {
@@ -506,7 +536,6 @@ export const useTaskStore = defineStore('task', {
         }
       }
       let disposeWatched: (() => void) | null = null
-      let watchErrorNotified = false
       const dispose = (): void => {
         clearWallClock()
         publishWatchers.delete(key)
@@ -517,24 +546,9 @@ export const useTaskStore = defineStore('task', {
       disposeWatched = watchJob({
         taskId,
         jobId,
-        onSnapshot: () => {
-          watchErrorNotified = false
-        },
-        onFinal: (job) => {
-          clearWallClock() // 终态到达即清墙钟（360s 出口只在"没等到终态"时发生）
-          dispose()
+        ...publishWatchCallbacks(jobId, clearWallClock, dispose, (job) => {
           void this.applyPublishOutcome(jobId, job, handlers)
-        },
-        onError: (error) => {
-          if (watchErrorNotified) {
-            return
-          }
-          watchErrorNotified = true
-          notifyJobWatch(translate('views.tasks.msg.watchInterrupted', {
-            jobId,
-            message: userFacingErrorText(error, translate('views.tasks.msg.unknownError'))
-          }))
-        }
+        })
       })
       publishWatchers.set(key, dispose)
       // 360s 墙钟：与 watchJob 内部定时器独立；非终态到达 ⇒ 单次提示 + 收摊
@@ -568,7 +582,8 @@ export const useTaskStore = defineStore('task', {
       try {
         const result = await jobsApi.getIssues(jobId, 0, 50)
         issues = result.content ?? []
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/task.ts:571')
         issues = null // 明细拉取失败：提示纪律不变（F5），明细通道降级为无清单形态
       }
       if (issues === null) {
@@ -665,6 +680,7 @@ export const useTaskStore = defineStore('task', {
           this.knownTaskTypes[taskId] = task.type
           return task.type
         } catch (error) {
+            logCaughtError(error, 'stores/task.ts:667')
           // 确定性不存在（404 等）：重试同一条也不会变，立即 fail-closed
           if (!isTransientTaskReadFailure(error)) {
             return null

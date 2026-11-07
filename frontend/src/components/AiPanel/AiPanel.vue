@@ -460,7 +460,7 @@
                       :tone="cardStatusTone(part)"
                       :expanded="isBlockExpanded(block)"
                       :controls="'business-card-body-' + block.id"
-                      :class="readOnlyLike(part) ? 'ro-hd' : ''"
+                      :class="isReadOnlyLike(part) ? 'ro-hd' : ''"
                       :data-testid="cardToggleTestId(part, block)"
                       :data-icon-type="cardTypeOf(part)"
                       :data-card-icon-testid="'card-icon-' + part.toolCallId"
@@ -472,7 +472,7 @@
                     />
                     <!-- 已决 HITL / GF 保持原字段或表单只读，不另建回执卡。 -->
                     <div
-                      v-if="readOnlyLike(part)"
+                      v-if="isReadOnlyLike(part)"
                       :id="'business-card-body-' + block.id"
                       v-show="isBlockExpanded(block)"
                       class="px-[10px] pb-[10px]"
@@ -539,7 +539,7 @@
                         </div>
                       </template>
                     </div>
-                    <template v-else-if="cardBodyShown(part)">
+                    <template v-else-if="canShowCardBody(part)">
                       <div
                         :id="'business-card-body-' + block.id"
                         v-show="hasIndependentCardHeader(part) || isBlockExpanded(block)"
@@ -571,7 +571,7 @@
                         >
                           <span class="min-w-0 flex-1 break-words">{{ t('ai.panel.skippedHuman') }}</span>
                         </div>
-                        <div v-if="!isBlankText(toolResultText(part)) && !outputByView(part) && !outputSupersededByDiagnostics(part)">
+                        <div v-if="!isBlankText(toolResultText(part)) && !hasViewOutput(part) && !isOutputSupersededByDiagnostics(part)">
                           <div class="mb-[4px] block text-[11px] uppercase tracking-[.5px] text-[#8b949e]">{{ t('ai.panel.output') }}</div>
                           <div data-testid="tool-output-text" class="whitespace-pre-wrap break-words rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[8px] text-[12.1px] leading-[1.6] text-[#606266] [overflow-wrap:anywhere]">
                             {{ toolResultText(part) }}<span
@@ -660,8 +660,8 @@
                                   type="checkbox"
                                   class="mt-[2px] flex-none cursor-pointer accent-[#2563eb]"
                                   data-testid="gate-ack-box"
-                                  :checked="gateAcked(part.toolCallId)"
-                                  :disabled="gateSubmitting(part.toolCallId)"
+                                  :checked="isGateAcked(part.toolCallId)"
+                                  :disabled="isGateSubmitting(part.toolCallId)"
                                   @change="onGateAckChange(part.toolCallId, $event)"
                                 />
                                 <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
@@ -670,13 +670,13 @@
                             <div class="flex flex-wrap items-center gap-[8px] pt-[10px]" data-testid="gate-actions">
                               <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用。 -->
                               <span
-                                v-if="gateNeedsAck(part)"
+                                v-if="hasGateAckRequirement(part)"
                                 class="text-[12.2px] text-[#b45309]"
                                 data-testid="gate-ack-hint"
                               >{{ t('ai.hitl.ackHint') }}</span>
                               <!-- R-166 口径③：409 幂等拒绝后的「已提交，同步中…」瞬态（不写任何乐观裁决） -->
                               <span
-                                v-if="gateSyncing(part.toolCallId)"
+                                v-if="isGateSyncing(part.toolCallId)"
                                 class="text-[12.2px] text-[#57606a]"
                                 data-testid="gate-syncing"
                               >{{ t('ai.panel.submitting') }}</span>
@@ -684,13 +684,13 @@
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                  :disabled="gateSubmitting(part.toolCallId)"
+                                  :disabled="isGateSubmitting(part.toolCallId)"
                                   @click="decide(false, part.toolCallId)"
                                 >{{ t('ai.panel.reject') }}</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="gateSubmitting(part.toolCallId) || gateNeedsAck(part)"
+                                  :disabled="isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
                                   @click="decide(true, part.toolCallId)"
                                 >{{ t('ai.panel.approve') }}</button>
                               </span>
@@ -723,7 +723,7 @@
                           />
                           <!-- 已提交、结局未到（`isFormAwaitingOutcome`）：同一张表单**原样锁定**在同一张卡里
                                —— 此时活动表单已置 submitted（`liveForm` 不再提供表单），卡由上方
-                               `readOnlyLike` 的只读体分支承接（`ro-form-*` + 段上的 `submittedValues`），
+                               `isReadOnlyLike` 的只读体分支承接（`ro-form-*` + 段上的 `submittedValues`），
                                这里不再重复渲一份：不闪普通工具卡 / 不闪 schema，结局帧到达后形态不变。
                                AR-07（批次4 集成返修）：排队中的表单一律有说明 + 取消出口 ——
                                它还没轮到呈现，不能靠"卡体空白"让用户以为坏了；也不能逼用户先处理
@@ -756,7 +756,7 @@
                         <div v-else-if="isSheetPreviewPart(part)" class="min-w-0">
                           <SheetPreviewCard
                             :plan="sheetPreviewFor(part)"
-                            :applying="sheetPreviewApplying(part)"
+                            :applying="isSheetPreviewApplying(part)"
                             :applied-summary="appliedSummaryFor(part)"
                             @apply="onSheetPreviewApply"
                             @cancel="onSheetPreviewCancel"
@@ -830,7 +830,7 @@
              按钮组的 `visibility:hidden`（助手流式期占位不显）是 R-159 独立语义，不属浮出机制，保留。
              行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
         <div
-          v-if="showMetaRow(m)"
+          v-if="canShowMetaRow(m)"
           class="flex items-center gap-2 text-xs text-[#8b949e] w-full max-w-[82%]"
           :class="[msgGapClass(mi), m.role === 'user' ? 'mt-[6px] flex-row-reverse' : 'mt-[12px]']"
           :data-testid="'msg-ops-' + m.id"
@@ -859,7 +859,7 @@
             >
               <span class="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-breathe"></span><span class="text-[12.2px] text-[#57606a] tracking-[.5px] animate-breathe-text">{{ t('ai.panel.breathing') }}</span>
             </span>
-            <span v-else-if="showTimestamp(m)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
+            <span v-else-if="canShowTimestamp(m)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
           <div
             class="flex items-center gap-2"
@@ -895,10 +895,10 @@
             </span>
             <!-- 失败/断流的最后一条助手消息统一给「继续」：无论有无正文/思考，都走正常发送并显示一条
                  「继续」用户消息；停止/取消、unconfirmed、非末轮不出。配额错误卡已带「继续」时，
-                 元信息行不再重复（见 errorCardContinueVisible）。
+                 元信息行不再重复（见 isErrorCardContinueVisible）。
                  普通 regenerate 本批不做 ⇒ **入口不渲染**（无禁用 / unsupported 死 UI）。 -->
             <button
-              v-if="showContinue(m)"
+              v-if="canShowContinue(m)"
               type="button"
               data-testid="continue-round"
               :aria-label="t('ai.panel.resumeChat')"
@@ -989,7 +989,7 @@
             <span v-if="errorCardGuide(m)" class="mt-[3px] block text-[11.4px] leading-[1.55] text-[#57606a]">{{ errorCardGuide(m) }}</span>
           </div>
           <button
-            v-if="m.errorCard.action && errorCardActionVisible(m)"
+            v-if="m.errorCard.action && isErrorCardActionVisible(m)"
             type="button"
             class="flex-none border-0 bg-transparent p-0 text-[11.5px]"
             :class="ERROR_CARD_TONE[m.errorCard.variant].action"
@@ -1289,12 +1289,13 @@
  * 原始 JSON、轮次标识与机器诊断原文不上用户卡面。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { head } from 'lodash'
 import { ArrowRight } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useI18n } from 'vue-i18n'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatProgressiveTs } from '@/utils/format'
-import { cardFieldLabel, localizedCardFieldValue, showCardField, taskTypeText } from '@/utils/card-content'
+import { cardFieldLabel, localizedCardFieldValue, canShowCardField, taskTypeText } from '@/utils/card-content'
 import {
   COPY_ICON_BTN_CLASS,
   COPY_ICON_SVGS,
@@ -1330,7 +1331,7 @@ import {
   groupParts,
   type Block
 } from '@/utils/blocks'
-import { deriveCopyText, numericArgOf, partDiagnosticOf, partResultIsInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
+import { deriveCopyText, numericArgOf, partDiagnosticOf, isPartResultInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
 import { projectDisplayText, unicodeCharacterCount } from '@/utils/display-text'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
@@ -1342,11 +1343,11 @@ import ContextPill from '@/components/AiPanel/ContextPill.vue'
 import ReasoningHeader from '@/components/AiPanel/ReasoningHeader.vue'
 import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
 import {
-  businessCardDefaultExpanded,
+  isBusinessCardDefaultExpanded,
   businessCardStatusLabelKey,
   businessCardStatusTone,
-  unknownNeedsReview,
-  unknownUnrecoverable,
+  hasUnknownReviewRequirement,
+  isUnknownUnrecoverable,
   type BusinessCardFamily,
   type BusinessCardTone
 } from '@/components/AiPanel/cardPresentation'
@@ -1358,6 +1359,8 @@ import { resolveAiRef } from '@/utils/ai-regions'
 import type { SheetAppliedSummary } from '@/utils/sheet-tools'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCardVariant } from '@/utils/error-card'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 const { t, locale } = useI18n()
 const ai = useAiStore()
@@ -1697,7 +1700,7 @@ function markUserScrollIntent(): void {
   userIntentAt = Date.now()
 }
 
-function userIntentRecent(): boolean {
+function hasRecentUserIntent(): boolean {
   return Date.now() - userIntentAt <= USER_INTENT_MS
 }
 
@@ -1724,7 +1727,7 @@ function onMsgScroll(): void {
   }
   // D2③ 滞回：钉底静默期内、没有用户意图 ⇒ 这是布局补偿 / 内容增长引发的 scroll，
   // 不参与跟随判定（只允许它把跟随"恢复"回来）。
-  if (Date.now() < pinSettleUntil && !userIntentRecent()) {
+  if (Date.now() < pinSettleUntil && !hasRecentUserIntent()) {
     if (dist < FOLLOW_THRESHOLD_PX) {
       followBottom.value = true
     }
@@ -1830,9 +1833,9 @@ const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; gly
 
 /**
  * 配额错误卡上的「继续」：只在失败/断流的最后一条助手消息上出现（与元信息行同一判据）。
- * 该动作显示时，元信息行不再重复出「继续」（{@link showContinue} 已排除）。
+ * 该动作显示时，元信息行不再重复出「继续」（{@link canShowContinue} 已排除）。
  */
-function errorCardContinueVisible(message: ChatMessage): boolean {
+function isErrorCardContinueVisible(message: ChatMessage): boolean {
   const card = message.errorCard
   return card != null && card.variant === 'quota'
     && Boolean(card.action)
@@ -1840,7 +1843,7 @@ function errorCardContinueVisible(message: ChatMessage): boolean {
 }
 
 function errorCardGuide(message: ChatMessage): string {
-  if (message.errorCard?.variant === 'quota' && !errorCardActionVisible(message)) {
+  if (message.errorCard?.variant === 'quota' && !isErrorCardActionVisible(message)) {
     return t('ai.card.error.quota.guideUnavailable')
   }
   return message.errorCard?.guide ?? ''
@@ -1854,16 +1857,16 @@ function errorCardActionLabel(message: ChatMessage): string {
 }
 
 /**
- * 错误卡动作是否可见（批次2 / AR-17）：quota 卡的「继续」按 {@link errorCardContinueVisible}；
+ * 错误卡动作是否可见（批次2 / AR-17）：quota 卡的「继续」按 {@link isErrorCardContinueVisible}；
  * 其它变体的动作维持既有入口。不满足条件的动作**直接隐藏**，不做禁用 / unsupported 死 UI。
  */
-function errorCardActionVisible(message: ChatMessage): boolean {
+function isErrorCardActionVisible(message: ChatMessage): boolean {
   const card = message.errorCard
   if (!card?.action) {
     return false
   }
   if (card.variant === 'quota') {
-    return errorCardContinueVisible(message)
+    return isErrorCardContinueVisible(message)
   }
   return true
 }
@@ -1879,7 +1882,7 @@ function runErrorCardAction(message: ChatMessage): void {
     return
   }
   if (card.variant === 'quota') {
-    if (errorCardContinueVisible(message)) {
+    if (isErrorCardContinueVisible(message)) {
       continueTurn(message)
     }
     return
@@ -2269,7 +2272,7 @@ function isLastAssistantMessage(message: ChatMessage): boolean {
  * <p>生成式表单「已提交、结局未到」这一段，人这一侧已经没有待办
  * （卡头是「已提交」、卡体是只读表单），该窗口归**既有的工作中语义**（呼吸点），不新增状态。
  */
-function waitingForAction(message: ChatMessage): boolean {
+function isWaitingForAction(message: ChatMessage): boolean {
   if (message.role !== 'assistant' || message.done || ai.runPhase !== 'parked' || false) {
     return false
   }
@@ -2289,7 +2292,7 @@ function isCompacting(message: ChatMessage): boolean {
   return message.role === 'assistant'
     && !message.done
     && message.compactingStartedAtMs !== undefined
-    && !waitingForAction(message)
+    && !isWaitingForAction(message)
     && !false
 }
 
@@ -2298,7 +2301,7 @@ function isBreathing(message: ChatMessage): boolean {
   return message.role === 'assistant'
     && active
     && !message.done
-    && !waitingForAction(message)
+    && !isWaitingForAction(message)
     && !isCompacting(message)
     && !false
 }
@@ -2306,7 +2309,7 @@ function isBreathing(message: ChatMessage): boolean {
 type MessageActivityState = 'working' | 'waiting' | 'compacting' | 'idle'
 
 function activityStateOf(message: ChatMessage): MessageActivityState {
-  if (waitingForAction(message)) {
+  if (isWaitingForAction(message)) {
     return 'waiting'
   }
   if (isCompacting(message)) {
@@ -2350,7 +2353,7 @@ const COLLAPSED_ACTIVITY_STYLES = {
 
 const collapsedActivityStyle = computed(() => COLLAPSED_ACTIVITY_STYLES[collapsedActivityState.value])
 
-function showTimestamp(message: ChatMessage): boolean {
+function canShowTimestamp(message: ChatMessage): boolean {
   if (formatProgressiveTs(message.timestamp) === '') {
     return false
   }
@@ -2368,12 +2371,12 @@ function showTimestamp(message: ChatMessage): boolean {
  * 判据给位置，避免正文被清空/渲染失败时标记消失）。
  * 批次2：park 等待态 / unconfirmed 中性视图同样自带位置。
  */
-function showMetaRow(message: ChatMessage): boolean {
+function canShowMetaRow(message: ChatMessage): boolean {
   return message.parts.some((part) => part.kind === 'text' && part.text)
     || activityStateOf(message) !== 'idle'
     || false
-    || showContinue(message)
-    || errorCardContinueVisible(message)
+    || canShowContinue(message)
+    || isErrorCardContinueVisible(message)
     || message.stopped === true
     || message.truncated === true
 }
@@ -2400,7 +2403,7 @@ function cardOnlyMessageGapClass(message: ChatMessage, index: number): string {
   const blocks = blocksOf(message)
   const hasIndependentBottomSpacing = message.errorCard != null
     || (message.recoveryGap === true && !recoveryNoticeVisible.value)
-  return !hasIndependentBottomSpacing && !showMetaRow(message)
+  return !hasIndependentBottomSpacing && !canShowMetaRow(message)
     && blocks.length > 0 && blocks.every((block) => block.kind === 'activity')
     ? msgGapClass(index)
     : ''
@@ -2647,42 +2650,32 @@ setStreamFlushHandler(() => {
   mdStreamTick.value += 1
 })
 
-function markdownHtml(message: ChatMessage, block: Block): string {
-  markdownHtmlCalls += 1
-  const part = block.parts[0]
-  const text = part.kind === 'text' ? projectDisplayText(part.text) : ''
-  // aj14d ③：块级稳定 key = 消息 + 段（与文本长度/流式态解耦，作防抖记账与围栏身份的命名空间）
-  const blockKey = `${message.id}:${part.seg}`
-  // 渲染器注入的复制按钮文案随 UI 语言变化 —— 缓存键必须带 locale，否则切语言会命中旧 HTML。
-  const localeKey = currentLocaleKey()
-
-  if (message.streaming) {
-    const cached = streamMdCache.get(blockKey)
-    if (cached !== undefined && cached.text === text && cached.tick === mdStreamTick.value && cached.locale === localeKey) {
-      streamMdCache.delete(blockKey)
-      streamMdCache.set(blockKey, cached)
-      rememberDegradeNotice(message.id, cached.degradeNotice)
-      hydrateMermaidIfNeeded(message.id, cached.mermaid)
-      return cached.html
-    }
-    const { html, mermaid, degradeNotice } = renderMarkdown(text, true, blockKey)
-    // 降级提示只在本条首个降级帧由渲染层给出；后续帧沿用首帧文案，避免流式过程把它冲掉。
-    const carriedNotice = degradeNotice ?? cached?.degradeNotice ?? null
-    setStreamEntry(blockKey, {
-      text,
-      tick: mdStreamTick.value,
-      locale: localeKey,
-      html,
-      mermaid,
-      degradeNotice: carriedNotice,
-      bytes: estimateMdBytes(text, html)
-    })
-    rememberDegradeNotice(message.id, carriedNotice)
-    hydrateMermaidIfNeeded(message.id, mermaid)
-    return html
+function streamingMarkdownHtml(message: ChatMessage, blockKey: string, text: string, localeKey: string): string {
+  const cached = streamMdCache.get(blockKey)
+  if (cached !== undefined && cached.text === text && cached.tick === mdStreamTick.value && cached.locale === localeKey) {
+    streamMdCache.delete(blockKey)
+    streamMdCache.set(blockKey, cached)
+    rememberDegradeNotice(message.id, cached.degradeNotice)
+    hydrateMermaidIfNeeded(message.id, cached.mermaid)
+    return cached.html
   }
+  const { html, mermaid, degradeNotice } = renderMarkdown(text, true, blockKey)
+  const carriedNotice = degradeNotice ?? cached?.degradeNotice ?? null
+  setStreamEntry(blockKey, {
+    text,
+    tick: mdStreamTick.value,
+    locale: localeKey,
+    html,
+    mermaid,
+    degradeNotice: carriedNotice,
+    bytes: estimateMdBytes(text, html)
+  })
+  rememberDegradeNotice(message.id, carriedNotice)
+  hydrateMermaidIfNeeded(message.id, mermaid)
+  return html
+}
 
-  // 完成态：释放该块的流式最后一帧槽，只走历史 LRU（降级提示随槽带到历史条目）。
+function historyMarkdownHtml(message: ChatMessage, blockKey: string, text: string, localeKey: string): string {
   const streamNotice = streamMdCache.get(blockKey)?.degradeNotice ?? null
   deleteStreamEntry(blockKey)
   const key = `${blockKey}:${localeKey}:${text.length}:${hashText(text)}`
@@ -2701,7 +2694,6 @@ function markdownHtml(message: ChatMessage, block: Block): string {
   const entry: MdHistoryEntry = { text, html, mermaid, degradeNotice: carriedNotice, bytes: estimateMdBytes(text, html) }
   const replaced = historyMdCache.get(key)
   if (replaced !== undefined) {
-    // 指纹碰撞：同一 key 的旧条目先退字节，再以原文全等的新条目替换。
     historyMdCacheBytes -= replaced.bytes
   }
   historyMdCache.set(key, entry)
@@ -2709,6 +2701,17 @@ function markdownHtml(message: ChatMessage, block: Block): string {
   evictHistoryEntries()
   hydrateMermaidIfNeeded(message.id, mermaid)
   return html
+}
+
+function markdownHtml(message: ChatMessage, block: Block): string {
+  markdownHtmlCalls += 1
+  const part = head(block.parts)
+  const text = part.kind === 'text' ? projectDisplayText(part.text) : ''
+  const blockKey = `${message.id}:${part.seg}`
+  const localeKey = currentLocaleKey()
+  return message.streaming
+    ? streamingMarkdownHtml(message, blockKey, text, localeKey)
+    : historyMarkdownHtml(message, blockKey, text, localeKey)
 }
 
 /**
@@ -2760,7 +2763,7 @@ const toolDeriveMisses: Record<string, number> = {
   gateRows: 0,
   cardSummary: 0,
   conflictRows: 0,
-  outputByView: 0,
+  hasViewOutput: 0,
   cardTitle: 0,
   cardStatus: 0,
   summary: 0,
@@ -2771,7 +2774,7 @@ function currentLocaleKey(): string {
   return String(locale.value)
 }
 
-function sameStamp(left: readonly unknown[], right: readonly unknown[]): boolean {
+function isSameStamp(left: readonly unknown[], right: readonly unknown[]): boolean {
   if (left.length !== right.length) {
     return false
   }
@@ -2792,7 +2795,7 @@ function cachedForLocale<T>(
 ): T {
   const localeKey = currentLocaleKey()
   const hit = cache.get(part)
-  if (hit !== undefined && hit.locale === localeKey && sameStamp(hit.stamp, stamp)) {
+  if (hit !== undefined && hit.locale === localeKey && isSameStamp(hit.stamp, stamp)) {
     return hit.value
   }
   toolDeriveMisses[kind] = (toolDeriveMisses[kind] ?? 0) + 1
@@ -2822,7 +2825,7 @@ function toolSummaryOrNull(part: ToolPart): string | null {
 /**
  * R-163B G4 → R-165 S5a 项 7 → S5b：v-html 注入内容的点击委托 —— 代码块复制图标钮 / mermaid 卡内
  * 四钮（源码态复制源码、双态 tab 切换、预览复位、全屏查看）。不在注入 HTML 内联脚本；
- * 剪贴板走既有 legacyCopy 回退链。复制成功反馈统一为 v7 口径：钮挂 `is-copied`（绿勾 + 绿字，
+ * 剪贴板走既有 canLegacyCopy 回退链。复制成功反馈统一为 v7 口径：钮挂 `is-copied`（绿勾 + 绿字，
  * 见 COPY_STATE_CLASS），2s 后复原。
  */
 function onMdBodyClick(event: MouseEvent): void {
@@ -2834,7 +2837,7 @@ function onMdBodyClick(event: MouseEvent): void {
   if (copyBtn) {
     const pre = copyBtn.parentElement?.parentElement?.querySelector('pre')
     const text = pre?.textContent ?? ''
-    const ok = legacyCopy(text)
+    const ok = canLegacyCopy(text)
     flashCopied(copyBtn, ok)
     return
   }
@@ -2842,7 +2845,7 @@ function onMdBodyClick(event: MouseEvent): void {
   const srcCopy = target.closest('.mmdc .mmdc-copy')
   if (srcCopy) {
     const code = srcCopy.closest('.mmdc')?.querySelector('.mmdc-src')
-    flashCopied(srcCopy, legacyCopy(code?.textContent ?? ''))
+    flashCopied(srcCopy, canLegacyCopy(code?.textContent ?? ''))
     return
   }
   const tab = target.closest('.mmdc .mmdc-tab')
@@ -3288,7 +3291,7 @@ function closeMmdViewer(): void {
 
 /** 查看器「复制源码」：绿勾反馈与卡内复制钮同一机制（`is-copied` + COPY_STATE_CLASS），状态走响应式。 */
 function copyMmdViewerSource(): void {
-  mmdViewerCopied.value = legacyCopy(mmdViewerSource.value)
+  mmdViewerCopied.value = canLegacyCopy(mmdViewerSource.value)
   if (mmdViewerCopyTimer !== null) {
     clearTimeout(mmdViewerCopyTimer)
   }
@@ -3406,7 +3409,7 @@ async function renderMermaidSlot(bubble: Element, code: Element, source: string)
       if (candidates.length !== 1) {
         return
       }
-      target = candidates[0]
+      target = head(candidates)
     }
     if (!bubble.contains(target)) {
       return
@@ -3541,7 +3544,7 @@ function blockPartSignature(part: MessagePart): BlockPartSignature {
   }
 }
 
-function matchesBlockPartSignature(part: MessagePart, signature: BlockPartSignature): boolean {
+function isBlockPartSignatureMatch(part: MessagePart, signature: BlockPartSignature): boolean {
   return Object.is(part.kind, signature.kind)
     && Object.is(part.seg, signature.seg)
     && Object.is(part.kind === 'text' || part.kind === 'reasoning' ? part.text : undefined, signature.text)
@@ -3558,7 +3561,7 @@ function blocksOf(message: ChatMessage): Block[] {
     && cached.signatures.length === message.parts.length
     && cached.signatures.every((signature, index) => {
       const part = message.parts[index]
-      return part !== undefined && matchesBlockPartSignature(part, signature)
+      return part !== undefined && isBlockPartSignatureMatch(part, signature)
     })) {
     blocksCache.delete(message)
     blocksCache.set(message, cached)
@@ -3587,16 +3590,16 @@ function isBlockExpanded(block: Block): boolean {
   if (manual !== undefined) {
     return manual
   }
-  const part = block.parts[0]
+  const part = head(block.parts)
   if (part?.kind !== 'tool') {
     return false
   }
-  const needsReview = unknownNeedsReview(part)
+  const needsReview = hasUnknownReviewRequirement(part)
   if (part.status === 'unknown') {
     return needsReview
   }
   return hasLongCardTitle(part)
-    || businessCardDefaultExpanded(cardPresentationStatusKey(part), cardTypeOf(part), needsReview)
+    || isBusinessCardDefaultExpanded(cardPresentationStatusKey(part), cardTypeOf(part), needsReview)
 }
 
 /** 块级间距只由相邻块关系决定，卡片自身不再叠加上下外边距。 */
@@ -3616,7 +3619,7 @@ function blockSpacingClass(blocks: Block[], index: number): string {
 }
 
 /** 已决只读与 GF 提交在途共用原卡锁定形态，不产生新的数据状态。 */
-function readOnlyLike(part: ToolPart): boolean {
+function isReadOnlyLike(part: ToolPart): boolean {
   return !hasIndependentCardHeader(part) && (isReadOnlyCard(part) || isFormAwaitingOutcome(part))
 }
 
@@ -3698,7 +3701,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     part.noticeCode,
     part.originalChars,
     part.returnedChars,
-    readOnlyLike(part),
+    isReadOnlyLike(part),
     cardTypeOf(part),
     ai.gateSubmissionOf(part.toolCallId),
     ai.gateAckOf(part.toolCallId),
@@ -3724,7 +3727,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     deps.push(ai.activeUploadHandoff, uploadHandoffStatus(part), uploadHandoffAccept(part), uploadHandoffLabel(part), uploadHandoffReason(part), uploadHandoffFileName(part))
   }
   if (isSheetPreviewPart(part)) {
-    deps.push(sheetPreviewFor(part), sheetPreviewApplying(part))
+    deps.push(sheetPreviewFor(part), isSheetPreviewApplying(part))
   }
   if (appliedSummaryFor(part) !== null) {
     deps.push(appliedSummaryFor(part))
@@ -3747,8 +3750,8 @@ function blockMemo(block: Block, message: ChatMessage): unknown[] {
   return deps
 }
 
-function messageMemo(message: ChatMessage, index: number): unknown[] {
-  const deps: unknown[] = [
+function messageBaseDeps(message: ChatMessage, index: number): unknown[] {
+  return [
     message.id,
     message.role,
     message.parts.length,
@@ -3770,22 +3773,19 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     message.errorCard?.code,
     message.errorCard?.detail,
     message.errorCard?.action,
-    // 失败/断流的消息级事实（刷新后「继续」判据；不仅靠上面的判定结果缓存）
     message.code,
     message.interrupted,
     index,
     msgGapClass(index),
     locale.value,
     false,
-    // 元信息行 / 恢复入口的**判定结果**（各自已经把 loading / runPhase / 末条身份算进去了）。
-    // 全局现场本身不入 memo：否则历史行跟着每一次收流翻转一起失效（整屏闪根因）。
-    showMetaRow(message),
-    showTimestamp(message),
+    canShowMetaRow(message),
+    canShowTimestamp(message),
     activityStateOf(message),
     activityStateOf(message) === 'compacting' ? compactingLabel(message) : '',
     isFading(message),
-    showContinue(message),
-    errorCardContinueVisible(message),
+    canShowContinue(message),
+    isErrorCardContinueVisible(message),
     feedbackOf(message.id),
     isMsgCopied(message.id),
     copyState.value?.id === message.id ? copyState.value?.ok ?? null : null,
@@ -3794,9 +3794,12 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
     userMsgExpanded.value.has(message.id),
     degradeNotices.value[degradeNoticeKey(message.id)] ?? null
   ]
+}
+
+function messageMemo(message: ChatMessage, index: number): unknown[] {
+  const deps = messageBaseDeps(message, index)
   for (const block of blocksOf(message)) {
     deps.push(block.id, block.kind, isBlockExpanded(block))
-    // 段级依赖必须并进消息级 memo：否则消息行被 v-memo 跳过时，卡内 v-memo 根本没有机会更新。
     for (const part of block.parts) {
       deps.push(...partMemo(part, block))
     }
@@ -3805,7 +3808,7 @@ function messageMemo(message: ChatMessage, index: number): unknown[] {
 }
 
 /** 所有正式卡片都保留可访问的折叠控件和受控卡体。 */
-function cardBodyShown(_part: ToolPart): boolean {
+function canShowCardBody(_part: ToolPart): boolean {
   return true
 }
 
@@ -3948,7 +3951,7 @@ function sheetPreviewFor(part: ToolPart): SheetWritePlan | null {
   return ai.activePreview?.toolCallId === part.toolCallId ? ai.activePreview : null
 }
 
-function sheetPreviewApplying(part: ToolPart): boolean {
+function isSheetPreviewApplying(part: ToolPart): boolean {
   return ai.previewApplyingToolCallId === part.toolCallId
 }
 
@@ -3965,26 +3968,26 @@ function onSheetPreviewAbandon(toolCallId: string): void {
 }
 
 function cardShellClass(part: ToolPart): string {
-  return `${readOnlyLike(part) ? 'rocard ' : ''}block overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white`
+  return `${isReadOnlyLike(part) ? 'rocard ' : ''}block overflow-hidden rounded-[10px] border border-solid border-[#e3e6ea] bg-white`
 }
 
 function cardTestId(part: ToolPart): string {
-  if (readOnlyLike(part)) {
+  if (isReadOnlyLike(part)) {
     return 'hitl-receipt'
   }
   return part.requiresAction ? `pending-card-${part.toolCallId}` : `tool-card-${part.toolCallId}`
 }
 
 function cardToggleTestId(part: ToolPart, block: Block): string {
-  return readOnlyLike(part) ? `ro-toggle-${part.toolCallId}` : `block-toggle-${block.id}`
+  return isReadOnlyLike(part) ? `ro-toggle-${part.toolCallId}` : `block-toggle-${block.id}`
 }
 
 function cardStatusTestId(part: ToolPart): string {
-  return readOnlyLike(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
+  return isReadOnlyLike(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
 }
 
 function cardSummaryTestId(part: ToolPart): string {
-  return readOnlyLike(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
+  return isReadOnlyLike(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
 }
 
 /** 卡头只表达动作与业务对象；待确认等状态仅由右侧 chip 承载。 */
@@ -4050,7 +4053,7 @@ function formRequiredSummary(part: ToolPart): string {
 function cardSummary(part: ToolPart): string {
   return cachedForLocale(cardSummaryCache, part, 'cardSummary', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.submittedValues, part.args, part.preflight], () => {
     if (cardTypeOf(part) === 'form') {
-      if (!readOnlyLike(part)) {
+      if (!isReadOnlyLike(part)) {
         return formRequiredSummary(part)
       }
       return readOnlyStateOf(part) === 'cancelled' ? t('ai.panel.formCancelledSummary') : generativeFormSummary(part)
@@ -4065,7 +4068,7 @@ function cardSummary(part: ToolPart): string {
 function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {
   const submitting = liveForm.value?.toolCallId === part.toolCallId && liveForm.value.status === 'submitting'
   const queued = formQueuePosition(part.toolCallId) > 0
-  const syncing = gateSyncing(part.toolCallId)
+  const syncing = isGateSyncing(part.toolCallId)
   return cachedForLocale(
     cardStatusCache,
     part,
@@ -4103,11 +4106,11 @@ function cardStatusLabel(part: ToolPart): string {
   if (uploadStatus) {
     return t(`ai.uploadHandoff.status.${uploadStatus}`)
   }
-  if (part.status === 'unknown' && !unknownNeedsReview(part)) {
+  if (part.status === 'unknown' && !hasUnknownReviewRequirement(part)) {
     return ''
   }
   const key = cardPresentationStatusKey(part)
-  return t(businessCardStatusLabelKey(key, cardFamilyOf(part), unknownUnrecoverable(part)))
+  return t(businessCardStatusLabelKey(key, cardFamilyOf(part), isUnknownUnrecoverable(part)))
 }
 
 function cardStatusTone(part: ToolPart): BusinessCardTone {
@@ -4145,8 +4148,8 @@ function toolContentLimitClass(part: ToolPart): string {
  * （原文仍是 `part.result`，模型侧与技术详情展示不受影响）；视图渲不出 / 段上没有视图 ⇒ 原文盒照旧。
  * `data.ref` 的求值域是 `part.result` 原文（与渲染器同源），所以两处传同一份文本。
  */
-function outputByView(part: ToolPart): boolean {
-  return cachedForLocale(outputByViewCache, part, 'outputByView', [part.resultView, part.result], () => (
+function hasViewOutput(part: ToolPart): boolean {
+  return cachedForLocale(outputByViewCache, part, 'hasViewOutput', [part.resultView, part.result], () => (
     part.resultView != null && isRenderableView(part.resultView, part.result ?? null)
   ))
 }
@@ -4197,7 +4200,7 @@ function jsonRecordText(record: Record<string, unknown>, depth: number): string 
   }
   for (const [key, value] of Object.entries(record)) {
     const normalizedKey = key.replace(/[_-]/g, '').toLowerCase()
-    if (key === 'message' || JSON_TECHNICAL_KEYS.has(normalizedKey) || !showCardField(key)) {
+    if (key === 'message' || JSON_TECHNICAL_KEYS.has(normalizedKey) || !canShowCardField(key)) {
       continue
     }
     const sensitive = JSON_SENSITIVE_KEY_RE.test(key) || (record.format === 'idcard' && key === 'value')
@@ -4230,7 +4233,8 @@ function jsonValueText(value: unknown, depth: number, sensitive: boolean): strin
       }
       try {
         return jsonValueText(JSON.parse(trimmed) as unknown, depth + 1, false)
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'components/AiPanel/AiPanel.vue:3012')
         return projectDisplayText(readableValue(value))
       }
     }
@@ -4250,7 +4254,8 @@ function displayToolResult(text: string | null | undefined): string {
   if (raw.startsWith('{') || raw.startsWith('[')) {
     try {
       return jsonValueText(JSON.parse(raw) as unknown, 0, false)
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'components/AiPanel/AiPanel.vue:3032')
       // 非完整 JSON 继续走既有文本清理。
     }
   }
@@ -4272,7 +4277,7 @@ function toolResultText(part: ToolPart): string {
 }
 
 function textPartOf(block: Block): TextPart | null {
-  const part = block.parts[0]
+  const part = head(block.parts)
   return part?.kind === 'text' ? part : null
 }
 
@@ -4316,8 +4321,8 @@ function diagnosticHumanOf(part: ToolPart): string | null {
 }
 
 /** 机器向原文不上用户卡面；分层命中时只保留对应的人话说明。 */
-function outputSupersededByDiagnostics(part: ToolPart): boolean {
-  return diagnosticOf(part) !== null && partResultIsInternal(part)
+function isOutputSupersededByDiagnostics(part: ToolPart): boolean {
+  return diagnosticOf(part) !== null && isPartResultInternal(part)
 }
 
 /** 只读卡原因保留业务说明；机器标记与整段 JSON 不上用户面。 */
@@ -4524,7 +4529,7 @@ function scrollBottom(force = false): void {
  */
 async function loadEarlierHistory(): Promise<void> {
   const wrap = msgWrapRef.value
-  const firstId = ai.messages[0]?.id ?? null
+  const firstId = head(ai.messages)?.id ?? null
   const beforeTop = wrap?.scrollTop ?? 0
   const anchorBefore = firstId === null
     ? null
@@ -4611,8 +4616,8 @@ function isFailedLastAssistant(message: ChatMessage): boolean {
  * 配额错误卡已带「继续」时，元信息行不重复该入口。
  * 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
  */
-function showContinue(message: ChatMessage): boolean {
-  return isFailedLastAssistant(message) && !errorCardContinueVisible(message)
+function canShowContinue(message: ChatMessage): boolean {
+  return isFailedLastAssistant(message) && !isErrorCardContinueVisible(message)
 }
 
 /** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的
@@ -4797,7 +4802,7 @@ function stop(): void {
  *
  * @returns 是否复制成功（失败必须有可见反馈，见 `copyMessage`）。
  */
-function legacyCopy(text: string): boolean {
+function canLegacyCopy(text: string): boolean {
   const area = document.createElement('textarea')
   area.value = text
   area.setAttribute('readonly', '')
@@ -4809,7 +4814,8 @@ function legacyCopy(text: string): boolean {
     area.select()
     area.setSelectionRange(0, text.length)
     return document.execCommand('copy')
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'components/AiPanel/AiPanel.vue:3591')
     return false
   } finally {
     document.body.removeChild(area)
@@ -4849,11 +4855,12 @@ async function copyText(id: string, text: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(text)
       ok = true
-    } catch {
-      ok = legacyCopy(text)
+    } catch (error) {
+        logCaughtError(error, 'components/AiPanel/AiPanel.vue:3631')
+      ok = canLegacyCopy(text)
     }
   } else {
-    ok = legacyCopy(text)
+    ok = canLegacyCopy(text)
   }
   setCopyFeedback(id, ok)
 }
@@ -4903,25 +4910,25 @@ function onNewChatDialogClose(): void {
  * R-166 口径③：该门卡是否**已提交**（在途 / 已提交待同步）—— 批准与拒绝双按钮据此一并
  * 禁用（"点击即禁用"的按钮侧；store 侧另有同 toolCallId 的提交守卫兜底）。
  */
-function gateSubmitting(toolCallId: string): boolean {
+function isGateSubmitting(toolCallId: string): boolean {
   return ai.gateSubmissionOf(toolCallId) !== null
 }
 
 /** R-166 口径③：该门卡是否处于 409 之后的「已提交，同步中…」瞬态。 */
-function gateSyncing(toolCallId: string): boolean {
+function isGateSyncing(toolCallId: string): boolean {
   return ai.gateSubmissionOf(toolCallId)?.syncing === true
 }
 
 // ── 批4-D（用户 2026-10-23 裁决）：不可撤销确认卡的复选框 ──────────────────────
 
 /** 该卡是否已勾选（普通确认卡无复选框，恒 false —— 也不参与任何禁用判据）。 */
-function gateAcked(toolCallId: string): boolean {
+function isGateAcked(toolCallId: string): boolean {
   return ai.gateAckOf(toolCallId)
 }
 
 /** 不可撤销卡还差这一步：`批准` 置灰 + 提示行出现的唯一判据。 */
-function gateNeedsAck(part: ToolPart): boolean {
-  return part.irreversible === true && !gateAcked(part.toolCallId)
+function hasGateAckRequirement(part: ToolPart): boolean {
+  return part.irreversible === true && !isGateAcked(part.toolCallId)
 }
 
 /**
@@ -4962,7 +4969,7 @@ function onGateAckChange(toolCallId: string, event: Event): void {
  * 固定口径 `用户拒绝执行`（后端 reason 字段仍为可选，契约不变；「修正走会话」）。
  *
  * 审批身份（调研 §3.9 ③）：`toolCallId` 由按钮所在卡片逐段传入 —— 多卡并存时不得回落到
- * 全局单槽投影；按钮防重由 `gateSubmitting(part.toolCallId)` 按卡片承担。
+ * 全局单槽投影；按钮防重由 `isGateSubmitting(part.toolCallId)` 按卡片承担。
  */
 async function decide(approved: boolean, toolCallId: string): Promise<void> {
   const reason = approved ? undefined : '用户拒绝执行'
@@ -5291,7 +5298,7 @@ function scheduleUserMsgWidthMeasure(): void {
 }
 
 function onContentResized(entries: ResizeObserverEntry[] = []): void {
-  const width = entries[0]?.contentRect.width
+  const width = head(entries)?.contentRect.width
     ?? (msgContentRef.value ?? msgWrapRef.value)?.getBoundingClientRect().width
     ?? 0
   if (lastMessageContentWidth !== null && width !== lastMessageContentWidth) {

@@ -16,6 +16,8 @@ import { h, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { translate } from '@/composables/useCopy'
 import type { ImportMode } from '@/types/task'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 export interface IrreversibleConfirmOptions {
   /** 对话框标题（如「取消作业」/「删除任务」） */
@@ -31,7 +33,7 @@ export interface IrreversibleConfirmOptions {
 export async function confirmIrreversible(options: IrreversibleConfirmOptions): Promise<boolean> {
   const acked = ref(false)
   try {
-    await ElMessageBox.confirm(
+    return await ElMessageBox.confirm(
       h('div', { class: 'flex flex-col gap-[8px]' }, [
         h('span', { class: 'whitespace-pre-line break-words' }, options.message),
         h(
@@ -60,9 +62,17 @@ export async function confirmIrreversible(options: IrreversibleConfirmOptions): 
           done()
         }
       }
+    ).then(
+      () => true,
+      (error) => {
+        if (error === 'cancel' || error === 'close') {
+          return false
+        }
+        throw error
+      }
     )
-    return true
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/confirm-irreversible.ts:65')
     return false
   }
 }

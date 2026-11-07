@@ -1,3 +1,4 @@
+import { logCaughtError } from '@/utils/log-caught-error'
 /**
  * 配置定义契约。
  *
@@ -70,21 +71,26 @@ export interface DefinitionQuery {
   keyword?: string
 }
 
-/** 解析 optionsJson 的安全工具：非 JSON 或非数组时返回空数组。 */
-export function parseFieldOptions(field: Pick<ConfigField, 'optionsJson'>): ConfigFieldOption[] {
+import { map } from 'lodash'
+
+export const EMPTY_FIELD_OPTIONS: readonly ConfigFieldOption[] = Object.freeze([])
+
+/** 解析 optionsJson 的安全工具：非 JSON 或非数组时返回共享空数组。 */
+export function parseFieldOptions(field: Pick<ConfigField, 'optionsJson'>): readonly ConfigFieldOption[] {
   if (!field.optionsJson) {
-    return []
+    return EMPTY_FIELD_OPTIONS
   }
   try {
     const parsed: unknown = JSON.parse(field.optionsJson)
     if (!Array.isArray(parsed)) {
-      return []
+      return EMPTY_FIELD_OPTIONS
     }
-    return parsed.map((item) => {
+    return map(parsed, (item) => {
       const option = item as Partial<ConfigFieldOption>
       return { value: String(option.value ?? ''), label: String(option.label ?? option.value ?? '') }
     })
-  } catch {
-    return []
+  } catch (error) {
+      logCaughtError(error, 'types/definition.ts:91')
+    return EMPTY_FIELD_OPTIONS
   }
 }

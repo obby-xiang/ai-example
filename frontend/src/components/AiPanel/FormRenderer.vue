@@ -138,7 +138,7 @@
                 :for="`${controlId(field)}-${option.value}`"
                 class="inline-flex items-center gap-[5px] rounded-[999px] border border-solid px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms]"
                 :class="[
-                  multiChecked(field, option.value)
+                  isMultiChecked(field, option.value)
                     ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
                     : 'border-[#e3e6ea] bg-white text-[#57606a]',
                   readonly ? 'cursor-default' : 'cursor-pointer'
@@ -149,7 +149,7 @@
                   :data-testid="`${controlTestId(field)}-${option.value}`"
                   type="checkbox"
                   class="m-0"
-                  :checked="multiChecked(field, option.value)"
+                  :checked="isMultiChecked(field, option.value)"
                   :disabled="isDisabled(field)"
                   @change="onMultiToggle(field.key, option.value, ($event.target as HTMLInputElement).checked)"
                 />
@@ -250,6 +250,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
+  EMPTY_FORM_FIELD_OPTIONS,
   MAX_LONGTEXT_VALUE_CHARS,
   MAX_TEXT_VALUE_CHARS,
   applyDefaultFrom,
@@ -269,12 +270,14 @@ import {
   type FormValueIssue
 } from '@/types/form-schema'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
+import { head } from 'lodash'
 import { MASKED_VALUE } from '@/utils/blocks'
 import { nextReadonlyFormScope } from '@/utils/form-scope'
 import { flushFormDraft } from '@/utils/form-draft'
 import { uploadFormAttachment, formOptionSource } from '@/api/ai'
 import { useAiStore } from '@/stores/ai'
 import { formFieldTypeText, textFormatText } from '@/utils/card-content'
+import { logCaughtError } from '@/utils/log-caught-error'
 
 /** 七型取值并集（number 的"未填"用 undefined 表示；attachment 的值是 fileId 字符串）。 */
 type FormModelValue = string | number | boolean | undefined | string[]
@@ -425,7 +428,7 @@ const attachmentOperationSeq = new Map<string, number>()
 const attachmentControllers = new Map<string, AbortController>()
 let attachmentsDisposed = false
 const attachmentRejections = reactive<Record<string, AttachmentRejection>>({})
-const externalOptions = ref<Record<string, FormFieldOption[]>>({})
+const externalOptions = ref<Record<string, readonly FormFieldOption[]>>({})
 const sourceRequestSeq = new Map<string, number>()
 
 function resizeLongTextarea(textarea: HTMLTextAreaElement): void {
@@ -687,7 +690,7 @@ function onNumberInput(key: string, event: Event): void {
   setValue(key, Number.isFinite(parsed) ? parsed : undefined)
 }
 
-function multiChecked(field: FormFieldSpec, value: string): boolean {
+function isMultiChecked(field: FormFieldSpec, value: string): boolean {
   if (props.readonly === true && isSensitiveField(field)) {
     return false
   }
@@ -702,7 +705,7 @@ function onMultiToggle(key: string, value: string, checked: boolean): void {
 }
 
 /** 选项级联：静态 options → optionsFrom.map 父值分支 → 数据源解析结果（sourceId 分支）。 */
-function optionsOf(field: FormFieldSpec): FormFieldOption[] {
+function optionsOf(field: FormFieldSpec): readonly FormFieldOption[] {
   return resolveFieldOptions(field, model.value, externalOptions.value)
 }
 
@@ -722,21 +725,23 @@ async function refreshSourceOptions(field: FormFieldSpec): Promise<void> {
   const isCurrent = (): boolean => sourceRequestSeq.get(field.key) === seq
     && model.value[from.dependsOn] === parent
   if (typeof parent !== 'string' || parent === '') {
-    externalOptions.value = { ...externalOptions.value, [field.key]: [] }
+    externalOptions.value = { ...externalOptions.value, [field.key]: EMPTY_FORM_FIELD_OPTIONS }
     return
   }
+  const failureKey = `${field.key}:${parent}`
   try {
     const resolved = await formOptionSource(from.sourceId, parent)
     if (!isCurrent()) {
       return
     }
     externalOptions.value = { ...externalOptions.value, [field.key]: resolved.options }
-  } catch {
+  } catch (error) {
     if (!isCurrent()) {
       return
     }
+    logCaughtError(error, `form-source:${failureKey}`)
     // 数据源不可用：选项留空（字段自身仍可按"值不在选项内"提示），不阻塞其余字段
-    externalOptions.value = { ...externalOptions.value, [field.key]: [] }
+    externalOptions.value = { ...externalOptions.value, [field.key]: EMPTY_FORM_FIELD_OPTIONS }
   }
 }
 
@@ -787,7 +792,8 @@ function rejectAttachment(file: File): AttachmentRejection | null {
 async function ensuredUploadSessionId(): Promise<string> {
   try {
     return await useAiStore().ensureSession()
-  } catch {
+  } catch (error) {
+    logCaughtError(error, 'form-attachment:session')
     return ''
   }
 }
@@ -822,10 +828,38 @@ watch(
   }
 )
 
+async function uploadAttachment(
+  field: FormFieldSpec,
+  file: File,
+  uploadContext: NonNullable<typeof props.uploadContext>,
+  isCurrent: () => boolean,
+  controller: AbortController
+): Promise<void> {
+  const sessionId = await ensuredUploadSessionId()
+  if (!isCurrent() || uploadContext.signal?.aborted) {
+    return
+  }
+  if (sessionId === '') {
+    uploadErrors[field.key] = t('ai.gf.attachment.failed')
+    return
+  }
+  const uploaded = await uploadFormAttachment(file, {
+    ...uploadContext,
+    sessionId,
+    signal: controller.signal
+  })
+  if (!isCurrent()) {
+    return
+  }
+  attachments.value = { ...attachments.value, [field.key]: uploaded }
+  setValue(field.key, uploaded.fileId)
+  localIssues.value = localIssues.value.filter((issue) => issue.key !== field.key)
+}
+
 async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<void> {
   const seq = invalidateAttachment(field.key)
   const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
+  const file = head(input.files)
   const uploadContext = props.uploadContext
   if (!file || !uploadContext || attachmentsDisposed) {
     return
@@ -855,29 +889,9 @@ async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<v
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
   uploading[field.key] = true
   try {
-    // Task 4：附件上传同样属于对话域请求，必须过会话就绪闸；并把**最新**会话号随上下文传给
-    // 上传口（附件 API 契约不变，sessionId 仍是可选字段；这里只保证不拿空号/旧号去传）。
-    const sessionId = await ensuredUploadSessionId()
-    if (!isCurrent() || externalSignal?.aborted) {
-      return
-    }
-    if (sessionId === '') {
-      uploadErrors[field.key] = t('ai.gf.attachment.failed')
-      return
-    }
-    const uploaded = await uploadFormAttachment(file, {
-      ...uploadContext,
-      sessionId,
-      signal: controller.signal
-    })
-    if (!isCurrent()) {
-      return
-    }
-    attachments.value = { ...attachments.value, [field.key]: uploaded }
-    setValue(field.key, uploaded.fileId)
-    localIssues.value = localIssues.value.filter((issue) => issue.key !== field.key)
+    await uploadAttachment(field, file, uploadContext, isCurrent, controller)
   } catch (error) {
-    console.error('[form] attachment upload failed', error)
+    logCaughtError(error, 'components/AiPanel/FormRenderer.vue:647')
     if (isCurrent()) {
       uploadErrors[field.key] = t('ai.gf.attachment.failed')
     }
@@ -995,7 +1009,7 @@ function fieldClass(field: FormFieldSpec): string {
  */
 async function focusFirstIssue(issues: FormValueIssue[]): Promise<void> {
   await nextTick()
-  const first = issues[0]
+  const first = head(issues)
   if (!first) {
     return
   }

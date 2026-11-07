@@ -19,6 +19,7 @@ import { ApiError, FRONTEND_ERROR_CODES } from './http'
 import { acceptLanguage } from '@/locales'
 import { translate } from '@/composables/useCopy'
 import { identityHeaders } from '@/utils/ai-identity'
+import { logCaughtError } from '@/utils/log-caught-error'
 import { frameSeq, isTerminalFrame, toSseFrame } from '@/types/sse'
 import type { SseDoneFrame, SseErrorFrame, SseFrame } from '@/types/sse'
 import type { AiChatRequest, StreamCloseInfo } from '@/types/ai'
@@ -231,16 +232,16 @@ export interface SseFrameHandlers {
   onArchiveTrim?: (signal: ArchiveTrimSignal) => void
 }
 
-export function pageHidden(): boolean {
+export function isPageHidden(): boolean {
   return typeof document !== 'undefined'
     && (document.hidden || document.visibilityState === 'hidden')
 }
 
-export function waitForPageVisible(signal?: AbortSignal): Promise<boolean> {
+export function getPageVisible(signal?: AbortSignal): Promise<boolean> {
   if (signal?.aborted) {
     return Promise.resolve(false)
   }
-  if (!pageHidden()) {
+  if (!isPageHidden()) {
     return Promise.resolve(true)
   }
   return new Promise((resolve) => {
@@ -253,7 +254,7 @@ export function waitForPageVisible(signal?: AbortSignal): Promise<boolean> {
       resolve(visible)
     }
     const onVisibility = (): void => {
-      if (!pageHidden()) {
+      if (!isPageHidden()) {
         settle(true)
       }
     }
@@ -415,7 +416,8 @@ export function parseSseFrame(text: string): SseFrame | null {
   }
   try {
     return toSseFrame(JSON.parse(payload))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'api/sse.ts:419')
     return null
   }
 }
@@ -506,7 +508,8 @@ async function toResponseError(response: Response): Promise<ApiError> {
   let code = String(response.status)
   try {
     body = await response.json()
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'api/sse.ts:510')
     body = null
   }
   if (body && typeof body === 'object') {
@@ -651,7 +654,7 @@ async function readStream(
     if (aborted) {
       return abortedResult('连接被中止')
     }
-    console.error('[sse] stream read failed', error)
+    logCaughtError(error, 'api/sse.ts:652')
     return {
       terminal: state.terminal,
       aborted: false,
@@ -665,13 +668,15 @@ async function readStream(
     if (state.terminal && !reachedEof && !controller.signal.aborted) {
       try {
         await reader.cancel()
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'api/sse.ts:669')
         // 已关闭 / 不可取消：不影响终帧的正常清理
       }
     }
     try {
       reader.releaseLock()
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'api/sse.ts:675')
       // releaseLock 在已关闭的流上可能抛错，忽略
     }
   }
@@ -698,7 +703,7 @@ async function readStream(
  * 本函数**不**消费流，也不重试；调用方**不得**在退避之前 await 它（探测慢不能推迟重连）。
  */
 export async function probeReattach(runId: string, signal?: AbortSignal): Promise<ReattachProbe> {
-  if (!await waitForPageVisible(signal)) {
+  if (!await getPageVisible(signal)) {
     return { status: 0, preparing: null }
   }
   const controller = new AbortController()
@@ -715,7 +720,8 @@ export async function probeReattach(runId: string, signal?: AbortSignal): Promis
       let body: unknown = null
       try {
         body = await response.json()
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'api/sse.ts:719')
         body = null
       }
       if (body && typeof body === 'object' && (body as { preparing?: unknown }).preparing === true) {
@@ -746,17 +752,20 @@ export async function probeReattach(runId: string, signal?: AbortSignal): Promis
         if (body && typeof body.status === 'string' && body.status !== '') {
           snapshotStatus = body.status
         }
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'api/sse.ts:750')
         snapshotStatus = null
       }
     }
     try {
       await response.body?.cancel()
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'api/sse.ts:756')
       // 已关闭 / 不可取消：忽略
     }
     return { status: response.status, preparing: null, snapshotStatus }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'api/sse.ts:760')
     return { status: 0, preparing: null }
   } finally {
     unlink()
@@ -794,7 +803,8 @@ function openLiveStream(
     closed = true
     try {
       controller.abort()
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'api/sse.ts:798')
       // 已中止/不可中止：忽略
     }
   }
@@ -813,7 +823,8 @@ function openLiveStream(
       if (closed) {
         try {
           await response.body?.cancel()
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'api/sse.ts:817')
           // 已关闭：忽略
         }
         return
@@ -836,7 +847,8 @@ function openLiveStream(
       if (response.status === 202 || !contentType.includes('text/event-stream')) {
         try {
           await response.body?.cancel()
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'api/sse.ts:840')
           // 已关闭/不可取消：忽略
         }
         handlers.onFailure('重挂连接中断')
@@ -879,7 +891,8 @@ function openLiveStream(
       } finally {
         try {
           reader.releaseLock()
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'api/sse.ts:883')
           // 已在关闭的流上释放：忽略
         }
       }
@@ -887,6 +900,7 @@ function openLiveStream(
       if (closed) {
         return
       }
+      logCaughtError(error, 'sse:reattach')
       handlers.onFailure('重挂连接中断')
     }
   })()
@@ -957,7 +971,7 @@ export async function streamChat(
         handlers.onError?.(apiError)
         throw apiError
       }
-      console.error('[sse] connection failed', error)
+      logCaughtError(error, 'api/sse.ts:959')
       const apiError = new ApiError(
         translate('api.error.network'),
         0,
@@ -1091,7 +1105,7 @@ export async function reattach(
     let openWhenVisible = false
 
     const onVisibility = (): void => {
-      if (pageHidden()) {
+      if (isPageHidden()) {
         if (retryTimer !== null) {
           clearRetry()
         }
@@ -1247,7 +1261,7 @@ export async function reattach(
       const delay = reconnectDelayMs(attempt, random)
       pendingReconnect = { attempt, delay }
       clearRetry()
-      if (pageHidden()) {
+      if (isPageHidden()) {
         return
       }
       retryTimer = setTimeout(() => {
@@ -1255,7 +1269,7 @@ export async function reattach(
         if (settled || options.signal?.aborted) {
           return
         }
-        if (pageHidden()) {
+        if (isPageHidden()) {
           return
         }
         pendingReconnect = null
@@ -1271,7 +1285,7 @@ export async function reattach(
       if (settled || options.signal?.aborted || source !== null) {
         return
       }
-      if (pageHidden()) {
+      if (isPageHidden()) {
         openWhenVisible = true
         return
       }
@@ -1344,14 +1358,14 @@ export async function reattach(
       if (!connectionEstablished && !probedThisConnection) {
         probedThisConnection = true
         scheduleReconnect(reason)
-        if (settled || pageHidden()) {
+        if (settled || isPageHidden()) {
           // 已收尾 / 后台暂停：不再发探测；visible 只恢复已排期的重连
           return
         }
         const probeGeneration = generation
         const probeAttempt = attempts
         void probeReattach(runId, options.signal).then((probe) => {
-          if (settled || pageHidden() || generation !== probeGeneration || attempts !== probeAttempt) {
+          if (settled || isPageHidden() || generation !== probeGeneration || attempts !== probeAttempt) {
             // 已收尾 / 后台暂停 / 世代已换代 / 尝试已推进：本探测结果不得改写当前现场
             return
           }

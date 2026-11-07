@@ -85,6 +85,8 @@ import { ROUTE_NAMES } from '@/router'
 import { EXPANDED_KEY, useAiStore } from '@/stores/ai'
 import { useLocaleStore } from '@/stores/locale'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 const { t } = useI18n()
 const ai = useAiStore()
@@ -127,7 +129,8 @@ let resizeStartWidth = 0
 function persistPanelWidth() {
   try {
     window.localStorage.setItem(AI_PANEL_WIDTH_STORAGE_KEY, String(preferredPanelWidth.value))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'App.vue:62')
     return
   }
 }
@@ -143,7 +146,8 @@ function restorePanelWidth() {
         Math.max(MIN_AI_PANEL_WIDTH, parsedWidth),
       )
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'App.vue:78')
     return
   }
 }

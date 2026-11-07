@@ -13,6 +13,10 @@ import { acceptLanguage } from '@/locales'
 import { translate } from '@/composables/useCopy'
 import { HTTP_TIMEOUT_MS } from '@/utils/time-constants'
 import { identityHeaders, isAiConversationPath } from '@/utils/ai-identity'
+import { logCaughtError } from '@/utils/log-caught-error'
+import { sanitizeUrl } from '@/utils/url-sanitize'
+
+export { sanitizeUrl } from '@/utils/url-sanitize'
 
 /** 前端侧补充的错误码（后端未定义，仅用于网络层异常）。 */
 export const FRONTEND_ERROR_CODES = {
@@ -57,37 +61,9 @@ function readBodyField(body: unknown, key: 'code' | 'message'): string | null {
 
 /** 诊断面：技术细节只进 console，不进用户可见串（A10 R-06）。 */
 function logDiagnostic(stage: string, detail: Record<string, unknown>, error?: unknown): void {
-  console.warn(`[http] ${stage}`, detail, ...(error === undefined ? [] : [error]))
-}
-
-/** 诊断日志只保留 origin + path：query/hash 可能携带会话标识等敏感参数。 */
-function sanitizeUrl(raw: string): string {
-  const queryIndex = raw.indexOf('?')
-  const hashIndex = raw.indexOf('#')
-  const cutIndexes = [queryIndex, hashIndex].filter((index) => index >= 0)
-  return cutIndexes.length > 0 ? raw.slice(0, Math.min(...cutIndexes)) : raw
-}
-
-const SAFE_LOG_HEADERS = new Set(['accept', 'content-type', 'accept-language'])
-
-function diagnosticAxiosError(error: AxiosError): Record<string, unknown> {
-  const rawHeaders: Record<string, unknown> = typeof error.config?.headers?.toJSON === 'function'
-    ? error.config.headers.toJSON()
-    : (error.config?.headers ?? {}) as Record<string, unknown>
-  const headers = Object.fromEntries(
-    Object.entries(rawHeaders).filter(([key]) => SAFE_LOG_HEADERS.has(key.toLowerCase()))
-  )
-  return {
-    name: error.name,
-    message: error.message,
-    stack: error.stack,
-    code: error.code,
-    status: error.response?.status ?? 0,
-    config: {
-      method: error.config?.method,
-      url: sanitizeUrl(error.config?.url ?? ''),
-      headers
-    }
+  console.warn(`[http] ${stage}`, detail)
+  if (error !== undefined) {
+    logCaughtError(error, `http:${stage}`)
   }
 }
 
@@ -101,7 +77,7 @@ function normalizeError(error: unknown): ApiError {
     const body: unknown = error.response?.data
     const url = error.config?.url ?? ''
     if (status === 0) {
-      logDiagnostic('network error', { url: sanitizeUrl(url) }, diagnosticAxiosError(error))
+      logDiagnostic('network error', { url: sanitizeUrl(url) }, error)
       return new ApiError(
         translate('api.error.network'),
         0,
@@ -120,7 +96,7 @@ function normalizeError(error: unknown): ApiError {
       status,
       url: sanitizeUrl(url),
       code
-    }, diagnosticAxiosError(error))
+    }, error)
     return new ApiError(
       translate(status >= 500 ? 'api.error.server' : 'api.error.request'),
       status,

@@ -99,7 +99,7 @@
     <!-- ============ 第 2 步：检查配置 ============ -->
     <div v-show="stepIndex === 1">
       <div class="flex items-center gap-3 mb-3">
-        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'check'" :disabled="jobRunning(checkJob)" @click="startCheck">
+        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'check'" :disabled="isJobRunning(checkJob)" @click="startCheck">
           {{ t('views.import.startPrecheck') }}
         </el-button>
         <span class="text-xs text-[#909399]">{{ t('views.import.precheckHint') }}</span>
@@ -133,7 +133,7 @@
     <!-- ============ 第 3 步：导入配置 ============ -->
     <div v-show="stepIndex === 2">
       <div class="flex items-center gap-3 mb-3">
-        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'import'" :disabled="jobRunning(importJob)" @click="startImport">
+        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'import'" :disabled="isJobRunning(importJob)" @click="startImport">
           {{ t('views.import.startImport') }}
         </el-button>
         <span class="text-xs text-[#909399]">{{ t('views.import.importHint') }}</span>
@@ -210,7 +210,7 @@
       </el-card>
 
       <div class="flex items-center gap-3 mb-3">
-        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'publish'" :disabled="jobRunning(publishJob)" @click="startPublish">
+        <el-button v-if="!isReadOnly" type="primary" :loading="busy === 'publish'" :disabled="isJobRunning(publishJob)" @click="startPublish">
           {{ t('views.import.publish') }}
         </el-button>
         <span class="text-xs text-[#909399]">
@@ -257,6 +257,7 @@ import { useI18n } from 'vue-i18n'
 import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type UploadFile } from 'element-plus'
+import { head, uniq } from 'lodash'
 import DefSelector from '@/components/wizard/DefSelector.vue'
 import JobProgress from '@/components/JobProgress.vue'
 import SpreadGrid from '@/components/SpreadGrid.vue'
@@ -272,8 +273,9 @@ import { buildTemplateWorkbookJson, downloadBlob, xlsxFileName, type ExcelRowIss
 import type { SheetAdapter } from '@/utils/sheet-tools'
 import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { userFacingErrorText } from '@/utils/ui-error'
+import { logCaughtError } from '@/utils/log-caught-error'
 import { confirmIrreversible, confirmPublishByMode } from '@/utils/confirm-irreversible'
-import { uiAbandonGuard, uiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
+import { uiAbandonGuard, isUiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
 import { resolvePublishMode } from '@/utils/publish-mode'
 import { stepLabel } from '@/utils/format'
 import { definitionCodesProblem, normalizeDefinitionCodes } from '@/utils/definition-codes'
@@ -285,6 +287,7 @@ import type { Job, ValidationIssue } from '@/types/job'
 import { readImportMode, TaskSteps, type ImportMode, type Task } from '@/types/task'
 import type { WorkspaceActionSource } from '@/types/tools'
 
+const EMPTY_JOBS: readonly Job[] = Object.freeze([])
 const { t, locale } = useI18n()
 
 interface GridApi {
@@ -393,7 +396,7 @@ const editorState = new Map<string, EditorState>()
 const dirtyDefs = reactive(new Set<string>())
 
 /** 该配置项的编辑区是否已按**当前代次**载入过内容。 */
-function editorReady(code: string): boolean {
+function isEditorReady(code: string): boolean {
   return editorState.get(code)?.generation === taskGeneration
 }
 
@@ -410,7 +413,7 @@ let taskGeneration = 0
  *
  * `false` 的含义是"**不知道**服务端有哪些文件"，不是"没有文件"：把它当空清单会让第 1 步
  * 用客户端空模板 `PUT` 上去，直接覆盖服务端已有文件。所以它是**载入的前置条件**：
- * 清单未知时 `loadEditors` 不构造模板（见 `ensureFileList`），写回闸也不放行（`flushEditors`）。
+ * 清单未知时 `loadEditors` 不构造模板（见 `canEnsureFileList`），写回闸也不放行（`flushEditors`）。
  */
 const filesOk = ref(false)
 /** 文件清单的在途请求（单飞：清单只拉一次，载入/写回/重试共用同一笔）。 */
@@ -526,7 +529,7 @@ function setGridRef(code: string, el: unknown): void {
   gridRefs[code] = el as GridApi
 }
 
-function jobRunning(job: Job | null): boolean {
+function isJobRunning(job: Job | null): boolean {
   return job !== null && ['PENDING', 'RUNNING'].includes(job.status)
 }
 
@@ -569,9 +572,9 @@ function syncSelectedDefsToWorkspace(source: WorkspaceActionSource = 'UI'): void
 /**
  * 等待定义列表就绪的上限（毫秒；与导出向导同口径）。
  *
- * <p>挂载时 `loadDefinitions()` 与 `loadTask()` 并行，`selectedDefs` 的 watch 会在定义到达前
+ * <p>挂载时 `canLoadDefinitions()` 与 `loadTask()` 并行，`selectedDefs` 的 watch 会在定义到达前
  * 触发 `loadEditors()` —— 此刻 `editorDefs` 为空，一次什么都没载入就结束。首轮定义**失败**后
- * 换任务（`bindTask → loadTask → watch`）也没有任何重试 ⇒ 编辑区永久空白。这里补上与导出
+ * 换任务（`canBindTask → loadTask → watch`）也没有任何重试 ⇒ 编辑区永久空白。这里补上与导出
  * 侧同族的"等待 / 补一次 / 到达后恢复"，失败仍 fail-closed（不按 0 字段载入）。
  */
 const DEFINITIONS_READY_TIMEOUT_MS = 10_000
@@ -592,7 +595,7 @@ let definitionsRetryBlockedUntil = 0
 /** 本轮定义请求的起始时刻（用于把"等待上界"按**每次请求**计，而不是每次调用各等一轮）。 */
 let defsAttemptStartedAt = 0
 
-async function loadDefinitions(): Promise<boolean> {
+async function canLoadDefinitions(): Promise<boolean> {
   if (defsInFlight !== null) {
     return await defsInFlight
   }
@@ -636,7 +639,7 @@ async function loadDefinitions(): Promise<boolean> {
  *
  * @returns true = 已成功读到**非空**定义列表（可建编辑区）；false = 加载中到点 / 失败 / 列表为空
  */
-async function awaitDefinitionsReady(timeoutMs = DEFINITIONS_READY_TIMEOUT_MS): Promise<boolean> {
+async function canAwaitDefinitionsReady(timeoutMs = DEFINITIONS_READY_TIMEOUT_MS): Promise<boolean> {
   if (defsInFlight === null) {
     return defsLoaded.value && defs.value.length > 0
   }
@@ -671,7 +674,7 @@ async function ensureDefinitionsForEditors(): Promise<void> {
     return
   }
   if (defsInFlight !== null) {
-    await awaitDefinitionsReady()
+    await canAwaitDefinitionsReady()
     return
   }
   if (defsLoaded.value) {
@@ -680,7 +683,7 @@ async function ensureDefinitionsForEditors(): Promise<void> {
   if (Date.now() < definitionsRetryBlockedUntil) {
     return
   }
-  await loadDefinitions()
+  await canLoadDefinitions()
 }
 
 /** 重置定义补请求冷却（显式换任务 / 用户显式重载 = 新的重试意图）。 */
@@ -727,6 +730,28 @@ async function recoverEditorsAfterDefinitions(): Promise<void> {
  * `uploadedFiles`。若先赋选中集再等清单，编辑区必然先构造出模板并置位"已载入"，
  * 清单回来后**没有任何东西会重载它** ⇒ 第 1 步「下一步」就把模板 PUT 覆盖 B 的真实文件。
  */
+function applyImportTaskState(loaded: Task): void {
+  task.value = loaded
+  selectedDefs.value = (loaded.items ?? []).map((item) => item.defCode)
+  const mode = readImportMode(loaded)
+  if (mode) {
+    importMode.value = mode
+  }
+  const restored = STEP_KEYS.indexOf(loaded.currentStep as (typeof STEP_KEYS)[number])
+  stepIndex.value = restored >= 0 ? restored : 0
+  activeEditorTab.value = head(selectedDefs.value) ?? ''
+  workspace.enterPage({
+    pageId: 'import',
+    page: 'import',
+    taskType: 'IMPORT',
+    step: STEP_KEYS[stepIndex.value],
+    taskId: taskId.value,
+    taskStatus: loaded.status,
+    selectedDefs: [...selectedDefs.value],
+    importMode: importMode.value
+  })
+}
+
 async function loadTask(): Promise<void> {
   if (taskId.value === null) {
     taskDetailReady.value = false
@@ -758,28 +783,11 @@ async function loadTask(): Promise<void> {
   }
   task.value = loaded
   // 清单先落定：编辑区的"文件 / 模板"分支只能基于已知清单决定
-  await ensureFileList()
+  await canEnsureFileList()
   if (generation !== taskGeneration) {
     return
   }
-  selectedDefs.value = (task.value.items ?? []).map((item) => item.defCode)
-  const mode = readImportMode(task.value)
-  if (mode) {
-    importMode.value = mode
-  }
-  const restored = STEP_KEYS.indexOf(task.value.currentStep as (typeof STEP_KEYS)[number])
-  stepIndex.value = restored >= 0 ? restored : 0
-  activeEditorTab.value = selectedDefs.value[0] ?? ''
-  workspace.enterPage({
-    pageId: 'import',
-    page: 'import',
-    taskType: 'IMPORT',
-    step: STEP_KEYS[stepIndex.value],
-    taskId: taskId.value,
-    taskStatus: task.value.status,
-    selectedDefs: [...selectedDefs.value],
-    importMode: importMode.value
-  })
+  applyImportTaskState(loaded)
   // 详情已应用：选中集 / 导入模式 / 步骤 / 状态都已按服务端事实恢复并声明进工作区
   //（**不等**下面的作业恢复与暂存行 —— 它们不影响后续动作的正确性）
   taskDetailReady.value = true
@@ -797,7 +805,7 @@ async function loadTask(): Promise<void> {
  *
  * @returns 文件清单是否读到。`false` 时页面**不知道**服务端有哪些文件，写回闸必须关闭。
  */
-async function loadUploadedFiles(): Promise<boolean> {
+async function canLoadUploadedFiles(): Promise<boolean> {
   if (taskId.value === null) {
     filesOk.value = false
     return false
@@ -824,7 +832,8 @@ async function loadUploadedFiles(): Promise<boolean> {
       }
     }
     return true
-  } catch {
+  } catch (error) {
+    logCaughtError(error, 'import-wizard:request')
     // 文件列表失败不影响向导本身 —— 但"不知道有哪些文件"绝不能当成"没有文件"
     if (generation === taskGeneration) {
       filesOk.value = false
@@ -838,14 +847,14 @@ async function loadUploadedFiles(): Promise<boolean> {
  *
  * 这是编辑区载入的**前置条件**：清单未知时不允许构造模板（否则模板会被当成内容写回）。
  */
-async function ensureFileList(): Promise<boolean> {
+async function canEnsureFileList(): Promise<boolean> {
   if (filesOk.value) {
     return true
   }
   if (filesInFlight !== null) {
     return await filesInFlight
   }
-  const run = loadUploadedFiles()
+  const run = canLoadUploadedFiles()
   filesInFlight = run
   try {
     return await run
@@ -886,7 +895,8 @@ function resetTaskScopedState(): void {
   for (const [code, grid] of Object.entries(gridRefs)) {
     try {
       grid.loadData(fieldsOf(code), [])
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'views/ImportWizardView.vue:649')
       // 引擎未就绪等情形：真正的载入由 loadEditors 覆盖，清屏失败不影响读闸
     }
   }
@@ -920,13 +930,16 @@ async function resumeJobs(): Promise<void> {
     return
   }
   const generation = taskGeneration
-  const jobs = await jobsApi.listJobs(taskId.value).catch(() => [])
+  const jobs = await jobsApi.listJobs(taskId.value).catch((error) => {
+    logCaughtError(error, 'import-wizard:request')
+    return EMPTY_JOBS
+  })
   // 旧任务的作业列表晚到：不得挂到新任务的作业面板，更不得为新任务登记旧作业的 watcher（I5）
   if (generation !== taskGeneration) {
     return
   }
   const latest = (type: 'PRECHECK' | 'IMPORT' | 'PUBLISH'): Job | undefined =>
-    jobs.filter((job) => job.jobType === type)[0]
+    head(jobs.filter((job) => job.jobType === type))
   const check = latest('PRECHECK')
   if (check) {
     await attachJob('check', check, generation)
@@ -962,7 +975,7 @@ async function attachJob(
   if (generation !== taskGeneration) {
     return
   }
-  if (jobRunning(job) && job.id !== undefined) {
+  if (isJobRunning(job) && job.id !== undefined) {
     beginWatchJob(kind, job.id, generation)
   } else if (kind === 'publish' && job.status === 'FAILED') {
     await buildPublishConflict(job)
@@ -1005,7 +1018,7 @@ async function downloadTemplates(): Promise<void> {
   try {
     const blob = await tasksApi.downloadTemplates(taskId.value, [...selectedDefs.value])
     const name = selectedDefs.value.length === 1
-      ? xlsxFileName(selectedDefs.value[0] ?? '', defName(selectedDefs.value[0] ?? ''))
+      ? xlsxFileName(head(selectedDefs.value) ?? '', defName(head(selectedDefs.value) ?? ''))
       : `templates-${taskId.value}.zip`
     downloadBlob(blob, name)
     ElMessage.success(t('views.import.msg.templateDownloaded', { name }))
@@ -1025,11 +1038,19 @@ async function downloadTemplates(): Promise<void> {
  *
  * @returns true = 用户确认放弃这些编辑；false = 用户取消（调用方必须回滚到原状）
  */
-async function confirmDiscardEdits(title: string, message: string): Promise<boolean> {
+async function canConfirmDiscardEdits(title: string, message: string): Promise<boolean> {
   try {
-    await ElMessageBox.confirm(message, title, { type: 'warning' })
-    return true
-  } catch {
+    return await ElMessageBox.confirm(message, title, { type: 'warning' }).then(
+      () => true,
+      (error) => {
+        if (error === 'cancel' || error === 'close') {
+          return false
+        }
+        throw error
+      }
+    )
+  } catch (error) {
+      logCaughtError(error, 'views/ImportWizardView.vue:795')
     return false
   }
 }
@@ -1043,11 +1064,11 @@ async function confirmDiscardEdits(title: string, message: string): Promise<bool
  *
  * @returns false = 用户取消本次上传（调用方必须中止，一个字节都不发）
  */
-async function confirmDirtyBeforeUpload(): Promise<boolean> {
+async function canConfirmDirtyBeforeUpload(): Promise<boolean> {
   if (dirtyDefs.size === 0) {
     return true
   }
-  return await confirmDiscardEdits(
+  return await canConfirmDiscardEdits(
     t('views.import.dialog.unsavedUploadTitle'),
     t('views.import.msg.unsavedUploadConfirm', { codes: [...dirtyDefs].join('、') })
   )
@@ -1063,6 +1084,27 @@ async function confirmDirtyBeforeUpload(): Promise<boolean> {
  * <p>上传**不提交选择集**：落库对象是 `task_files` + 文件存储，文件名匹配由后端按请求携带的
  * `defCodes` 完成（选择集的提交点仍是"下一步"）。
  */
+function applyUploadedMatches(matched: Array<{ defCode: string; fileName: string }>): void {
+  for (const item of matched) {
+    uploadedFiles[item.defCode] = item.fileName
+    savedDefs.add(item.defCode)
+    editorState.delete(item.defCode)
+    dirtyDefs.delete(item.defCode)
+    aiStore.onSheetReloaded(item.defCode)
+  }
+}
+
+async function showUnmatchedFiles(files: string[] | undefined): Promise<void> {
+  if (!files || files.length === 0) {
+    return
+  }
+  await ElMessageBox.alert(
+    h('span', { class: 'whitespace-pre-line' }, files.join('\n')),
+    t('views.import.unmatchedFiles'),
+    { type: 'warning' }
+  )
+}
+
 async function uploadOne(file: File): Promise<string> {
   // F9：扩展名 / 大小前置拦截。三条入口（手点 el-upload、AI 交接 `import.receiveFile`、
   // 交接高亮区的拖放）都汇到本函数，因此**只这一处**就覆盖全部入口：
@@ -1081,7 +1123,7 @@ async function uploadOne(file: File): Promise<string> {
   }
   // 批次 1C：上传会替换匹配项的编辑区内容 ⇒ 有未保存编辑时先明确确认（确认框期间可能换任务，
   // 故代次/任务号在确认之后才捕获）
-  if (!(await confirmDirtyBeforeUpload())) {
+  if (!(await canConfirmDirtyBeforeUpload())) {
     return t('views.import.msg.uploadCancelledUnsaved')
   }
   const generation = taskGeneration
@@ -1096,23 +1138,8 @@ async function uploadOne(file: File): Promise<string> {
       return '上传已提交给原任务，但页面已切换到别的任务，本次结果未应用到当前页面'
     }
     const matched = result.matchedFiles ?? []
-    for (const item of matched) {
-      uploadedFiles[item.defCode] = item.fileName
-      savedDefs.add(item.defCode)
-      editorState.delete(item.defCode)
-      // 该配置项的内容被新文件替换：编辑区里的旧编辑已无意义（确认框已如实告知）
-      dirtyDefs.delete(item.defCode)
-      // 上传新文件 ⇒ 该配置项的旧预览立即失效（内容即将被新文件替换）
-      aiStore.onSheetReloaded(item.defCode)
-    }
-    if (result.unmatchedFiles && result.unmatchedFiles.length > 0) {
-      // 多条目须换行展示：ElMessageBox 的 message 支持 VNode，用 Tailwind whitespace-pre-line 还原 \n
-      await ElMessageBox.alert(
-        h('span', { class: 'whitespace-pre-line' }, result.unmatchedFiles.join('\n')),
-        t('views.import.unmatchedFiles'),
-        { type: 'warning' }
-      )
-    }
+    applyUploadedMatches(matched)
+    await showUnmatchedFiles(result.unmatchedFiles)
     ElMessage.success(t('views.import.msg.uploadedMatched', { count: matched.length }))
     // 用服务端刚存下的文件刷新编辑区（保证"所见即服务端所有"）
     await nextTick()
@@ -1124,7 +1151,7 @@ async function uploadOne(file: File): Promise<string> {
     void aiStore.notifyAiUploadDone(summary)
     return summary
   } catch (error) {
-    console.error('[import] file upload failed', error)
+    logCaughtError(error, 'views/ImportWizardView.vue:891')
     const message = t('views.import.msg.uploadFailed')
     ElMessage.error(message)
     return `上传失败：${message}`
@@ -1148,7 +1175,7 @@ async function handleUpload(uploadFile: UploadFile): Promise<void> {
  * 同一次载入上 —— 页面能力 `sheet.current` 等待的必须是**这一次真的载入**。
  *
  * <p>**前置条件（C1）**：文件清单必须先落定。清单未知时既不能下载（不知道有没有文件），
- * 更不能构造模板（模板会被当成内容写回）。所以这里先 `ensureFileList()`；拉不到就不载入，
+ * 更不能构造模板（模板会被当成内容写回）。所以这里先 `canEnsureFileList()`；拉不到就不载入，
  * 由写回闸如实拦下并提示重试。
  *
  * @param force `true` = 已载入的也重载（只有**内容确实被替换**时才该这么用：上传新文件）。
@@ -1186,7 +1213,7 @@ async function loadEditorsNow(force: boolean, only?: readonly string[]): Promise
   }
   const generation = taskGeneration
   const forTask = taskId.value
-  const listed = await ensureFileList()
+  const listed = await canEnsureFileList()
   if (generation !== taskGeneration) {
     return
   }
@@ -1215,7 +1242,7 @@ async function loadEditorsNow(force: boolean, only?: readonly string[]): Promise
     if (generation !== taskGeneration) {
       return
     }
-    if (editorReady(def.code) && !force) {
+    if (isEditorReady(def.code) && !force) {
       continue
     }
     const grid = gridRefs[def.code]
@@ -1288,11 +1315,11 @@ function onGridSelectionChanged(defCode: string): void {
  * 必须能把失败如实说出来，而不是交出一张空表让工具读成「0 行」。
  */
 async function ensureEditorLoaded(code: string): Promise<{ ok: boolean; error: string }> {
-  if (editorReady(code)) {
+  if (isEditorReady(code)) {
     return { ok: true, error: '' }
   }
   await loadEditors()
-  if (editorReady(code)) {
+  if (isEditorReady(code)) {
     return { ok: true, error: '' }
   }
   const hint = definitionsUnavailableHint()
@@ -1355,7 +1382,7 @@ async function flushEditors(): Promise<FlushOutcome> {
     // 写回闸①：文件清单没落定时不得写回 —— 此时编辑区可能什么都没有，或（更糟）是
     // "清单未知期间"留下的模板；PUT 上去就是拿空工作簿覆盖服务端真文件。先补读一次。
     if (!filesOk.value) {
-      const listed = await ensureFileList()
+      const listed = await canEnsureFileList()
       if (generation !== taskGeneration || forTask !== taskId.value) {
         return { ok: false, savedDefs: [], reason: '任务已切换，本次写回中止（未把上一个任务的内容写到新任务上）' }
       }
@@ -1406,7 +1433,7 @@ async function flushEditors(): Promise<FlushOutcome> {
       }
       const issues = grid.validateLocal()
       if (issues.length > 0) {
-        const first = issues[0]
+        const first = head(issues)
         ElMessage.warning(t('views.import.msg.localIssues', {
           code: def.code,
           count: issues.length,
@@ -1471,7 +1498,7 @@ async function flushDirtyDefs(
   busy.value = 'flush'
   try {
     if (!filesOk.value) {
-      const listed = await ensureFileList()
+      const listed = await canEnsureFileList()
       if (generation !== taskGeneration || forTask !== taskId.value) {
         return { ok: false, reason: t('views.import.msg.writeBackAbortedOnSwitch') }
       }
@@ -1505,7 +1532,7 @@ async function flushDirtyDefs(
       }
       const issues = grid.validateLocal()
       if (issues.length > 0) {
-        const first = issues[0]
+        const first = head(issues)
         failed.push(t('views.import.msg.localIssuesDetail', {
           code,
           count: issues.length,
@@ -1552,7 +1579,7 @@ async function flushDirtyDefs(
  * @param message 由 `reason` 生成正文（各路径文案不同，但都按 locales 完整模板插值）
  * @returns true = 已写回或用户确认放弃；false = 用户取消（调用方必须维持原状：勾选/导航/任务都不动）
  */
-async function settleDirtyOrConfirm(
+async function canSettleDirtyOrConfirm(
   forTask: number,
   codes: readonly string[],
   title: string,
@@ -1569,17 +1596,17 @@ async function settleDirtyOrConfirm(
   if (generation !== taskGeneration) {
     return false
   }
-  return await confirmDiscardEdits(title, message(outcome.reason ?? t('views.import.msg.unknownReason')))
+  return await canConfirmDiscardEdits(title, message(outcome.reason ?? t('views.import.msg.unknownReason')))
 }
 
 /**
- * 换任务前的脏区结算（走 {@link settleDirtyOrConfirm}）。
+ * 换任务前的脏区结算（走 {@link canSettleDirtyOrConfirm}）。
  *
  * @returns false = 用户选择留在原任务（调用方必须中止改绑，连地址栏一起还原）
  */
-async function settleDirtyBeforeSwitch(from: number): Promise<boolean> {
+async function canSettleDirtyBeforeSwitch(from: number): Promise<boolean> {
   const codes = [...dirtyDefs]
-  return await settleDirtyOrConfirm(
+  return await canSettleDirtyOrConfirm(
     from,
     codes,
     t('views.import.dialog.unsavedSwitchTitle'),
@@ -1592,19 +1619,19 @@ async function settleDirtyBeforeSwitch(from: number): Promise<boolean> {
 }
 
 /**
- * 取消勾选前的脏区结算（走 {@link settleDirtyOrConfirm}）。
+ * 取消勾选前的脏区结算（走 {@link canSettleDirtyOrConfirm}）。
  *
  * <p>为什么必须在这里写回：取消勾选会让标签页卸载、表格引擎销毁 —— 那时连 `toXlsxBlob()`
  * 都取不到，编辑就真的没了。所以调用方必须**先把勾选回滚**（保持编辑区挂载）再调本函数。
  *
  * @returns true = 已写回，或用户确认放弃（调用方清脏后照常应用新勾选）；false = 用户取消（保持原勾选）
  */
-async function settleDirtyBeforeDeselect(codes: readonly string[]): Promise<boolean> {
+async function canSettleDirtyBeforeDeselect(codes: readonly string[]): Promise<boolean> {
   const forTask = taskId.value
   if (forTask === null) {
     return true
   }
-  return await settleDirtyOrConfirm(
+  return await canSettleDirtyOrConfirm(
     forTask,
     codes,
     t('views.import.dialog.unsavedDeselectTitle'),
@@ -1744,6 +1771,7 @@ async function syncStepToBackend(
     }
     return { ok: true }
   } catch (error) {
+    logCaughtError(error, 'import-wizard:request')
     // 批3③b D11（R-143①）：单点提示 —— 本函数**不自弹**（原 ElMessage.error 删除），由调用方
     // goStep 只弹一条 warning（与导出侧同改；全仓仅两个调用方，不留静默路径）。
     // 结构化失败结局照常返回，由 goStep 带进回灌。
@@ -1878,6 +1906,27 @@ type PublishStartOutcome =
   | { kind: 'failed'; reason: string }
   | { kind: 'readonly' }
 
+function syncResolvedPublishMode(mode: ImportMode): void {
+  if (importMode.value !== mode) {
+    importMode.value = mode
+  }
+  if (workspace.importMode !== mode) {
+    workspace.importMode = mode
+  }
+}
+
+function publishStartWarning(
+  started: Awaited<ReturnType<typeof startJob>> & { job: Job },
+  id: number
+): string | undefined {
+  if (!started.detached && started.attachError === undefined) {
+    return undefined
+  }
+  return `发布作业 #${started.job.id} 已建在任务 #${started.taskId ?? id}`
+    + (started.detached ? '（页面已切换到别的任务，本页未跟踪）' : '（本页未能跟踪该作业）')
+    + '；作业仍在后端继续，请勿重复发起'
+}
+
 async function startPublish(): Promise<PublishStartOutcome> {
   // 施工卡 §S3e：只读态不得 createJob
   if (isReadOnly.value) {
@@ -1912,15 +1961,7 @@ async function startPublish(): Promise<PublishStartOutcome> {
       ElMessage.error(reason)
       return { kind: 'failed', reason }
     }
-    if (resolution.mode !== importMode.value) {
-      // 本地副本与服务端不一致时以服务端为准，并让单选回到真实模式。
-      importMode.value = resolution.mode
-    }
-    // Minor 2：同一次权威读取也回写工作区（模型上下文/get_workspace_state 的事实源）。
-    // 直接赋字段而非 setImportMode()，避免记一条并不存在的“界面动作”。
-    if (workspace.importMode !== resolution.mode) {
-      workspace.importMode = resolution.mode
-    }
+    syncResolvedPublishMode(resolution.mode)
     // R-09：REPLACE 会删除范围内旧行 ⇒ 复用复选框确认；MERGE 增量更新，免确认。
     const confirmed = await confirmPublishByMode(resolution.mode)
     if (generation !== taskGeneration || forTask !== taskId.value) {
@@ -1929,19 +1970,12 @@ async function startPublish(): Promise<PublishStartOutcome> {
     if (!confirmed) {
       return { kind: 'cancelled' }
     }
-    // Minor：只有“确认通过、真的要发起”时才清理旧冲突提示；取消不得清掉既有告警。
     publishConflict.value = null
     const started = await startJob('publish')
     if (!started.job) {
-      // 作业真的没建出来（createJob 失败）——这才是"未启动"
       return { kind: 'failed', reason: t('views.import.msg.jobStartFailed') }
     }
-    // 作业已建：若期间换了任务/挂接失败，回执必须说"已建在任务 #N、本页未跟踪"，绝不能说失败
-    const note = started.detached || started.attachError !== undefined
-      ? `发布作业 #${started.job.id} 已建在任务 #${started.taskId ?? id}`
-        + (started.detached ? '（页面已切换到别的任务，本页未跟踪）' : '（本页未能跟踪该作业）')
-        + '；作业仍在后端继续，请勿重复发起'
-      : undefined
+    const note = publishStartWarning({ ...started, job: started.job }, id)
     return { kind: 'started', job: started.job, warning: note }
   } finally {
     publishPending.value = false
@@ -2062,7 +2096,8 @@ async function refreshTaskSnapshot(
     // 与导出页同一口径：终态后刷新到的 COMPLETED/CANCELLED/FAILED 必须进工作区，
     // 否则下一轮请求仍带旧状态，模型看到"还能预检查/导入"的假入口。
     workspace.setTaskStatus(snapshot.status)
-  } catch {
+  } catch (error) {
+    logCaughtError(error, 'import-wizard:request')
     // 任务快照刷新失败不阻断作业结果的展示
   }
 }
@@ -2110,7 +2145,8 @@ async function refreshIssues(
     } else {
       publishIssues.value = list
     }
-  } catch {
+  } catch (error) {
+    logCaughtError(error, 'import-wizard:request')
     // 问题清单拉取失败不阻断主流程
   }
 }
@@ -2123,7 +2159,7 @@ async function buildPublishConflict(job: Job): Promise<void> {
     jobId,
     jobStatus: 'FAILED',
     issueKeys: errorIssues.map((issue) => `${issue.defCode}#${issue.rowKey ?? issue.rowIndex ?? '-'}`),
-    message: errorIssues[0]?.message ?? t('views.import.msg.publishJobFailed')
+    message: head(errorIssues)?.message ?? t('views.import.msg.publishJobFailed')
   }
 }
 
@@ -2274,7 +2310,7 @@ function registerHandlers(): void {
     }
     // 终态：结果面刷一次（问题清单由 attachJob 按作业拉过；暂存行只在导入完成时才有内容）。
     // 跑得快的小作业会在结果帧到达前就进入终态 ⇒ 不补这一次，页面会停在空进度上。
-    if (!jobRunning(bound)) {
+    if (!isJobRunning(bound)) {
       await refreshTaskSnapshot()
       if (bound.jobType === 'IMPORT' && bound.status === 'COMPLETED') {
         await loadStaging()
@@ -2334,6 +2370,7 @@ function registerHandlers(): void {
         adapter: grid.getSheetAdapter()
       }
     } catch (error) {
+      logCaughtError(error, 'import-wizard:request')
       return { ok: false, reason: `${code} 的编辑区表格未就绪：${error instanceof Error ? error.message : String(error)}` }
     }
   })
@@ -2345,7 +2382,7 @@ function registerHandlers(): void {
       return { ok: false, reason: '任务已结束，仅供查看，不能推进步骤' }
     }
     // 预算到点 / 本轮已停止 ⇒ 零写（交回执为确定性失败，不返回字符串）
-    if (uiAbandoned(lifetime)) {
+    if (isUiAbandoned(lifetime)) {
       return uiAbandonedReply('推进步骤')
     }
     const target = typeof payload.step === 'string' && payload.step !== '' ? payload.step : null
@@ -2369,7 +2406,7 @@ function registerHandlers(): void {
     if (!advanced.ok) {
       // 复审 Minor-4：作废不是"数据问题" —— 不追加"修正数据/保存草稿"这类错误指引。
       // 复审 M7：`flushEditors` 可能已把若干配置写回服务端文件 —— 这部分事实必须带出。
-      if (uiAbandoned(lifetime)) {
+      if (isUiAbandoned(lifetime)) {
         return uiStepAbandonedReply(advanced.reason, advanced.savedDefs ?? [])
       }
       const partial = advanced.savedDefs ?? []
@@ -2409,7 +2446,7 @@ function registerHandlers(): void {
       return { ok: false, reason: '任务已结束，仅供查看，未变更所选配置项' }
     }
     // 预算到点 / 停止 ⇒ 选中集、工作区、编辑区一律不动
-    if (uiAbandoned(lifetime)) {
+    if (isUiAbandoned(lifetime)) {
       return uiAbandonedReply('变更所选配置项')
     }
     const codes = normalizeDefinitionCodes(Array.isArray(payload.defCodes) ? payload.defCodes : [])
@@ -2419,7 +2456,7 @@ function registerHandlers(): void {
     if (problem !== null) {
       return { ok: false, reason: problem }
     }
-    selectedDefs.value = payload.mode === 'ADD' ? [...new Set([...selectedDefs.value, ...codes])] : codes
+    selectedDefs.value = payload.mode === 'ADD' ? uniq([...selectedDefs.value, ...codes]) : codes
     // issue #3：AI handler 分支同样要显式收敛（来源记 'AI'；watch 随后比较已相等 ⇒ 短路）
     syncSelectedDefsToWorkspace('AI')
     // B：下面的写回（标签页 / 编辑区载入 / 回执）要等 watch 与落定 Promise —— 期间可能换任务，
@@ -2434,7 +2471,7 @@ function registerHandlers(): void {
     if (generation !== taskGeneration) {
       return { ok: false, reason: '任务已切换：本次所选配置项属于原任务，未应用到当前页面的编辑区' }
     }
-    if (uiAbandoned(lifetime)) {
+    if (isUiAbandoned(lifetime)) {
       // 已作废：选中集与工作区已在作废前同步（那一步发生在超时/停止之前），
       // 但**编辑区切换与载入**是作废之后才要写的页面态 —— 一律不做。
       return {
@@ -2445,7 +2482,7 @@ function registerHandlers(): void {
     // 当前标签页仍被选中就别跳回第一张表；新增的编辑区由 loadEditors() 补齐，
     // 已载入的**不重载**（整页强制重载会把它们未保存的编辑换成服务端旧文件）
     if (!selectedDefs.value.includes(activeEditorTab.value)) {
-      activeEditorTab.value = selectedDefs.value[0] ?? ''
+      activeEditorTab.value = head(selectedDefs.value) ?? ''
     }
     void loadEditors()
     return `已选择配置项：${selectedDefs.value.join('、') || '（空）'}`
@@ -2574,7 +2611,7 @@ function onAiDrop(event: DragEvent): void {
     return
   }
   event.preventDefault()
-  const file = event.dataTransfer?.files?.[0]
+  const file = head(event.dataTransfer?.files)
   if (file) {
     void uploadOne(file)
   }
@@ -2588,7 +2625,7 @@ onMounted(async () => {
   registerAiUploadRegion()
   registerAiSelectDefsRegion()
   registerAiModeRegion()
-  await Promise.all([loadDefinitions(), loadTask()])
+  await Promise.all([canLoadDefinitions(), loadTask()])
   await loadEditors()
   // 编辑区标签页是 `v-if` 渲染的：挂载期可能还不存在，出现后再补注册（批 B / import.grid）
   await nextTick()
@@ -2716,8 +2753,8 @@ onBeforeUnmount(() => {
  * - 写回成功（或用户确认放弃）⇒ 放行；
  * - 用户取消 ⇒ 返回 false 中止导航，页面与编辑区原样保留（脏标记不清）。
  *
- * <p>与换任务 / 取消勾选共用同一套结算（{@link settleDirtyOrConfirm} → `flushDirtyDefs`），
- * 只换文案；同路由 query 变化换任务不会触发本守卫（那条路走 `settleDirtyBeforeSwitch`），
+ * <p>与换任务 / 取消勾选共用同一套结算（{@link canSettleDirtyOrConfirm} → `flushDirtyDefs`），
+ * 只换文案；同路由 query 变化换任务不会触发本守卫（那条路走 `canSettleDirtyBeforeSwitch`），
  * 不会双弹框。
  */
 onBeforeRouteLeave(async () => {
@@ -2726,7 +2763,7 @@ onBeforeRouteLeave(async () => {
     return true
   }
   const codes = [...dirtyDefs]
-  return await settleDirtyOrConfirm(
+  return await canSettleDirtyOrConfirm(
     forTask,
     codes,
     t('views.import.dialog.unsavedLeaveTitle'),
@@ -2747,11 +2784,11 @@ onBeforeRouteLeave(async () => {
  *
  * @returns false = 用户在有未保存编辑时选择「留在原任务」（调用方不得改地址栏/继续建任务流程）
  */
-async function bindTask(id: number): Promise<boolean> {
+async function canBindTask(id: number): Promise<boolean> {
   // 批次 1C：复位会清屏并换文件清单 ⇒ 先把 A 的未保存编辑写回 A（写不回才问用户是否放弃）。
   // 必须放在 resetTaskScopedState 之前：那之后 gridRefs 已被清、字节也无从取出。
   const from = taskId.value
-  if (from !== null && from !== id && !(await settleDirtyBeforeSwitch(from))) {
+  if (from !== null && from !== id && !(await canSettleDirtyBeforeSwitch(from))) {
     return false
   }
   // 交互专项：换任务 ⇒ 旧任务的表格预览一律失效（不允许拿旧计划改新任务的数据）
@@ -2779,7 +2816,7 @@ async function createAndBindTask(): Promise<void> {
       return
     }
     // 未保存编辑结算被取消 ⇒ 不切任务、不改地址栏（新任务已建出，可在任务中心打开）
-    if (!(await bindTask(created.id))) {
+    if (!(await canBindTask(created.id))) {
       ElMessage.info(t('views.import.msg.taskCreated', { id: created.id }))
       return
     }
@@ -2794,7 +2831,7 @@ async function createAndBindTask(): Promise<void> {
 //
 // 批次 1C 两条纪律：
 // ① **不再整页强制重载** —— 勾选 B 时把 A 的编辑区也用服务端旧文件重画一遍，就是把 A 未保存的
-//    编辑静默丢掉（审查 P1-1）。`loadEditors()` 按 `editorReady` 短路，只补新出现的配置项。
+//    编辑静默丢掉（审查 P1-1）。`loadEditors()` 按 `isEditorReady` 短路，只补新出现的配置项。
 // ② **取消勾选含脏项 ⇒ 先写回再卸载** —— 标签页卸载后表格引擎销毁，连 `toXlsxBlob()` 都取不到；
 //    所以先同步回滚勾选（DOM 尚未更新 ⇒ 编辑区仍挂载），结算完再决定应用新勾选还是保持原状。
 //
@@ -2812,7 +2849,7 @@ let selectionSettle: Promise<void> | null = null
  */
 async function syncEditorsWithSelection(codes: readonly string[]): Promise<void> {
   if (!codes.includes(activeEditorTab.value)) {
-    activeEditorTab.value = codes[0] ?? ''
+    activeEditorTab.value = head(codes) ?? ''
   }
   await loadEditors()
 }
@@ -2839,7 +2876,7 @@ watch(selectedDefs, async (next, previous) => {
   selectedDefs.value = [...previousCodes]
   selectionGuardInFlight = true
   const settle = (async () => {
-    if (!(await settleDirtyBeforeDeselect(removedDirty))) {
+    if (!(await canSettleDirtyBeforeDeselect(removedDirty))) {
       // 用户取消：保持 previous、脏标记原样保留（编辑内容一行都没动）
       return
     }
@@ -2877,7 +2914,7 @@ watch(
       return
     }
     const from = taskId.value
-    if (await bindTask(id)) {
+    if (await canBindTask(id)) {
       return
     }
     // 用户选择「留在原任务」：地址栏已指向 B，必须还原 —— 否则刷新/复制链接就会跑到 B

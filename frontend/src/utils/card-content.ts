@@ -199,7 +199,7 @@ const INTERNAL_FIELDS = new Set([
   'reporthash'
 ])
 
-export function showCardField(key: string): boolean {
+export function canShowCardField(key: string): boolean {
   return !INTERNAL_FIELDS.has(key.replace(/[_-]/g, '').toLowerCase())
 }
 
@@ -314,65 +314,76 @@ export function sheetPlanScopeSummary(plan: SheetWritePlan): string {
   }
 }
 
+function replaceRulesText(plan: SheetWritePlan, args: Record<string, unknown>): string {
+  if (typeof args.search !== 'string' || args.search.trim() === '') {
+    return plan.rulesText
+  }
+  const match = typeof args.match === 'string'
+    ? args.match.trim()
+    : Array.isArray(args.match)
+      ? args.match.map((item) => typeof item === 'string' ? item.trim() : '').find((item) => item !== '') ?? ''
+      : ''
+  if (match === '') {
+    return plan.rulesText
+  }
+  const ignoreCase = args.ignoreCase !== false
+  return translate('ai.sheetCard.ruleValues.replace', {
+    match: translated(`ai.values.match.${match}`, match),
+    search: args.search,
+    replace: typeof args.replace === 'string' ? args.replace : '',
+    ignoreCase: translate(ignoreCase ? 'ai.value.yes' : 'ai.value.no')
+  })
+}
+
+function updateRulesText(plan: SheetWritePlan, args: Record<string, unknown>): string {
+  if (!Array.isArray(args.set) || args.set.length === 0) {
+    return plan.rulesText
+  }
+  const updates = args.set.map((raw) => {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      return null
+    }
+    const item = raw as Record<string, unknown>
+    const columnCode = typeof item.columnCode === 'string' ? item.columnCode.trim() : ''
+    if (columnCode === '') {
+      return null
+    }
+    const mode = typeof item.mode === 'string' && item.mode !== '' ? item.mode : 'literal'
+    return translate('ai.sheetCard.ruleValues.updateItem', {
+      columnCode,
+      mode: translated(`ai.values.updateMode.${mode}`, mode)
+    })
+  })
+  if (updates.some((item) => item === null)) {
+    return plan.rulesText
+  }
+  return translate('ai.sheetCard.ruleValues.update', {
+    updates: updates.join(translate('ai.value.listSeparator'))
+  })
+}
+
+function normalizeRulesText(plan: SheetWritePlan, args: Record<string, unknown>): string {
+  if (!Array.isArray(args.rules) || args.rules.length === 0
+    || args.rules.some((rule) => typeof rule !== 'string' || rule.trim() === '')) {
+    return plan.rulesText
+  }
+  const labels = args.rules.map((rule) => translated(`ai.values.normalizeRule.${rule}`, rule))
+    .join(translate('ai.value.listSeparator'))
+  return translate('ai.sheetCard.ruleValues.normalize', { rules: labels })
+}
+
 export function sheetPlanRulesText(plan: SheetWritePlan): string {
   if (plan.args === undefined) {
     return plan.rulesText
   }
-  const args = plan.args
   if (plan.tool === 'replace_values') {
-    if (typeof args.search !== 'string' || args.search.trim() === '') {
-      return plan.rulesText
-    }
-    const match = typeof args.match === 'string'
-      ? args.match.trim()
-      : Array.isArray(args.match)
-        ? args.match.map((item) => typeof item === 'string' ? item.trim() : '').find((item) => item !== '') ?? ''
-        : ''
-    if (match === '') {
-      return plan.rulesText
-    }
-    const ignoreCase = args.ignoreCase !== false
-    return translate('ai.sheetCard.ruleValues.replace', {
-      match: translated(`ai.values.match.${match}`, match),
-      search: args.search,
-      replace: typeof args.replace === 'string' ? args.replace : '',
-      ignoreCase: translate(ignoreCase ? 'ai.value.yes' : 'ai.value.no')
-    })
+    return replaceRulesText(plan, plan.args)
   }
   if (plan.tool === 'update_rows') {
-    if (!Array.isArray(args.set) || args.set.length === 0) {
-      return plan.rulesText
-    }
-    const updates = args.set.map((raw) => {
-      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-        return null
-      }
-      const item = raw as Record<string, unknown>
-      const columnCode = typeof item.columnCode === 'string' ? item.columnCode.trim() : ''
-      if (columnCode === '') {
-        return null
-      }
-      const mode = typeof item.mode === 'string' && item.mode !== '' ? item.mode : 'literal'
-      return translate('ai.sheetCard.ruleValues.updateItem', {
-        columnCode,
-        mode: translated(`ai.values.updateMode.${mode}`, mode)
-      })
-    })
-    if (updates.some((item) => item === null)) {
-      return plan.rulesText
-    }
-    return translate('ai.sheetCard.ruleValues.update', {
-      updates: updates.join(translate('ai.value.listSeparator'))
-    })
+    return updateRulesText(plan, plan.args)
   }
   if (plan.tool === 'normalize_column') {
-    if (!Array.isArray(args.rules) || args.rules.length === 0
-      || args.rules.some((rule) => typeof rule !== 'string' || rule.trim() === '') {
-      return plan.rulesText
-    }
-    const labels = args.rules.map((rule) => translated(`ai.values.normalizeRule.${rule}`, rule))
-      .join(translate('ai.value.listSeparator'))
-    return translate('ai.sheetCard.ruleValues.normalize', { rules: labels })
+    return normalizeRulesText(plan, plan.args)
   }
   return plan.rulesText
 }

@@ -56,7 +56,7 @@
         <el-input
           v-if="isTextOperator(row.operator)"
           v-model="row.value"
-          :disabled="props.disabled || !operatorNeedsValue(row.operator)"
+          :disabled="props.disabled || !hasOperatorValueRequirement(row.operator)"
           :placeholder="valuePlaceholder(row)"
           class="w-[180px]"
           v-bind="aiAttrs(row, 'value', {
@@ -130,7 +130,7 @@
       <template v-else>
         <el-input
           v-model="row.value"
-          :disabled="props.disabled || !operatorNeedsValue(row.operator)"
+          :disabled="props.disabled || !hasOperatorValueRequirement(row.operator)"
           :placeholder="valuePlaceholder(row)"
           class="w-[180px]"
           v-bind="aiAttrs(row, 'value', {
@@ -199,12 +199,13 @@ import { useI18n } from 'vue-i18n'
  * 因此它们的动词集收紧到 `highlight,scroll`；文本取值框才是 `fill` 写入口。
  */
 import { computed, ref, watch } from 'vue'
+import { head } from 'lodash'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import {
   buildFieldConditions,
   draftContentEqual,
   emptyDraftModel,
-  operatorNeedsValue,
+  hasOperatorValueRequirement,
   operatorsForFieldType,
   validateDraftModel,
   type ConditionDraft,
@@ -213,7 +214,7 @@ import {
   type DraftOperator,
   type OperatorOption
 } from '@/types/condition'
-import { parseFieldOptions, type ConfigField, type FieldType } from '@/types/definition'
+import { EMPTY_FIELD_OPTIONS, parseFieldOptions, type ConfigField, type FieldType } from '@/types/definition'
 
 const { t } = useI18n()
 
@@ -375,24 +376,24 @@ function onOperatorChange(row: DraftRow, next: DraftOperator): void {
   // 上限位不跨算子复用：BETWEEN 的两个框与单值算子的取值是不同语义
   row.value2 = ''
   if (previous === 'IN' && !isMultiValueOperator(next)) {
-    row.value = multiValuesOf(row)[0] ?? ''
+    row.value = head(multiValuesOf(row)) ?? ''
   }
 }
 
 function optionsOf(code: string) {
   const field = fieldMap.value.get(code)
-  return field ? parseFieldOptions(field) : []
+  return field ? parseFieldOptions(field) : EMPTY_FIELD_OPTIONS
 }
 
 function valuePlaceholder(row: DraftRow): string {
-  if (!operatorNeedsValue(row.operator)) {
+  if (!hasOperatorValueRequirement(row.operator)) {
     return '该操作符不需要值'
   }
   return row.operator === 'IN' ? '多个值用英文逗号分隔' : '值'
 }
 
 function addRow(): void {
-  const first = props.fields[0]
+  const first = head(props.fields)
   if (!first) {
     return
   }

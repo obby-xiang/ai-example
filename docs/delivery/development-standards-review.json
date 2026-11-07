@@ -499,6 +499,693 @@
           "reason": "13个暂存文件已逐hunk核对，agent-1016与agent-1015独立静态复审均为PASS；yarn install --ignore-scripts两次退出0，其余分析、测试、构建、pre-commit和CI均NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:c1285f7b3a54eb12316809a1e92d6f2303db1ba13b236c43bc37676e56536af6",
+      "status": "reviewed",
+      "reason": "ai/config、context、form、memory、kb范围当前65个生产Java文件已逐文件逐hunk独立静态复审，agent-1012最终结论PASS；前次复审发现的Commons StringUtils.hasText源码不兼容已在AiConfigWriter 14处、AiConnectionProbe 4处、AiProviderRegistry 2处、AiKeyCipher 4处合计24处修为isNotBlank并复核无残留。集合空实现、旧公开布尔签名兼容委托、条件表失败收口、KB租约代次及记忆staging/CAS均已逐项核对；测试、构建、Maven和真实Redis均NOT_RUN，本记录未运行门禁。",
+      "reviewedAt": "2026-11-07T16:04:48+08:00",
+      "reviewer": "K3.1 Pro agent-1012独立静态复审",
+      "specChanges": [
+        {
+          "change": "集合、Map和数组返回实施非null规范，空结果使用List.of、Set.of、Map.of或新建空数组；record入参先以共享不可变空实现补null再copyOf，缓存和pipeline等内部三态改用Optional表达缺失/非法与有效空值。",
+          "reason": "消除集合null返回及共享可变空对象，同时避免把未知数据源、缓存未命中、管道未执行与合法空结果混成同一种空集合语义。",
+          "impact": "FormOptionSourceRegistry未知来源不再以null作内部哨兵，调用方仍通过supports/isSupported区分非法来源，合法无选项继续返回空列表；AiConnectionProbe、AiModelCatalog和RedisFormAttachmentStore分别保留非法响应/缓存缺失/管道未执行与有效空结果的差别，AiKeyCipher缺失或非法KEK返回新建空数组且加密仍失败关闭，既有HTTP/Jackson响应结构不变。"
+        },
+        {
+          "change": "布尔方法按is/has/can/should/get/contains/lock规范命名，同时保留seed、allowsSummary、measured、everCompacted、known、lastMeasured、upgradeAllowed、hardOverflow、hysteresisUnlocked、readyToAdvance、refreshNow、ready、expired、fits及KbCache旧布尔入口作为兼容委托。",
+          "reason": "规范私有及新增布尔命名时不能删除既有公开Java签名，也不能因record访问器改名改变Jackson属性、JPA投影或旧测试编译契约。",
+          "impact": "旧调用方和旧测试继续经原签名获得同一结果，新名称仅作单向实现入口；私有record组件改名不影响公开Plan.summarised等访问器，实体和Jackson注解未改，既有JSON字段、JPA映射及前端协议不新增或重命名。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigSeeder.java",
+          "status": "checked",
+          "reason": "公开seed保留并委托isSeedApplied，写种子拆出saveSeedProvider且私有布尔改为isSeedWritten/isSeedAlreadyLanded；事务锁、用户行保护、no-op不发版本及模型补齐顺序不变，新增DEBUG均有开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigService.java",
+          "status": "checked",
+          "reason": "supportsToolCalling与allowUserParams保留旧签名并委托新规范名，刷新/解析方法拆分且重复DEBUG收敛；空模型和状态列表返回List.of，last-good快照、版本稳定重读和安全回退未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigWriter.java",
+          "status": "checked",
+          "reason": "provider/model更新拆为prepare/apply，14处hasText改为Commons isNotBlank并复用BooleanUtils/ObjectUtils；code不可变、origin换绑重录key、事务版本递增、审计和afterCommit顺序保持，URI等FQN已显式导入。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConnectionProbe.java",
+          "status": "checked",
+          "reason": "模型ID解析改为Optional<List<String>>以区分非法响应与合法空数组，4处hasText修复且请求执行helper保持超时/稳定错误码；有界响应仍一次性UTF-8解码，未引入增量流解析变化。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiEndpointGuard.java",
+          "status": "checked",
+          "reason": "元数据主机匹配复用ArrayUtils.contains，DNS失败仍返回新建空InetAddress数组并交由探活报UNREACHABLE；私网/元数据拦截判据及安全错误码未放宽。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiKeyCipher.java",
+          "status": "checked",
+          "reason": "4处hasText改为isNotBlank，KEK解析以非null空数组表示缺失/非法且requireKek继续失败关闭；HMAC十六进制复用Commons Codec Hex，密文AAD、指纹截断和last4契约不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiModelCatalog.java",
+          "status": "checked",
+          "reason": "readCache由nullable List改为Optional并直接供peekCache返回，缓存缺失/读取异常与合法空模型列表不再混淆；Redis读取失败仍按未命中处理，缓存写失败不影响真实探活响应。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiModelResolver.java",
+          "status": "checked",
+          "reason": "providerModels空值改由ObjectUtils.defaultIfNull补不可变List.of，默认启用模型和首个启用模型的选择顺序未改，显式modelId仍优先。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java",
+          "status": "checked",
+          "reason": "上下文摘要及KB shape/refresh/cache校验拆为职责明确的helper，原阈值、配置键和异常文本逐项保留；HTTP base-url与本地dir空白判断改StringUtils.isBlank，未放宽启动校验。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java",
+          "status": "checked",
+          "reason": "两处hasText修复为isNotBlank，Overrides空值复用ObjectUtils，runtimeKeys空时返回不可变Set.of；runtime复用、options覆盖和参数范围校验不变，Consumer改显式import。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/RedisAvailability.java",
+          "status": "checked",
+          "reason": "私有awaitProbe改名isProbeAvailable但single-flight CAS、超时等待和中断恢复不变；可用性翻转仍WARN并保留Throwable，持续失败DEBUG已移除以避免逐次刷屏。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/CompactionFuse.java",
+          "status": "checked",
+          "reason": "公开allowsSummary委托canSummarize，config/state/circuit空值复用ObjectUtils；OPEN冷却、HALF_OPEN单次尝试、失败计数和成功闭合状态机保持原判据。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextBreakdown.java",
+          "status": "checked",
+          "reason": "usage Map取值改MapUtils.getInteger并继续钳为非负，消息空判断复用CollectionUtils；system/tools单独计量、最后用户轮归属和used汇总逻辑未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextCompactor.java",
+          "status": "checked",
+          "reason": "决策、L2/L3动作、状态提交和台账拆为DecisionContext/ActionResult等helper，公开Plan.summarised保持；滞回升级、HITL降级、摘要熔断、清理后适配判断、CAS重试及事件字段顺序均保留，DEBUG增加开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextEstimator.java",
+          "status": "checked",
+          "reason": "文本、消息和工具schema空判断改StringUtils/CollectionUtils，CJK与ASCII估算、SYSTEM去重及工具schema计量算法未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextLimitResolver.java",
+          "status": "checked",
+          "reason": "ResolveResult.known保留并委托isKnown，modelId空白判断改StringUtils；provider身份必需、未知limit返回0/UNKNOWN及不跨provider猜测的边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextMeter.java",
+          "status": "checked",
+          "reason": "lastMeasured旧公开入口委托isLastMeasured，usage三值以ObjectUtils补0；空帧忽略、prompt/total异常判脏及completion最大值的计量规则未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextOverflow.java",
+          "status": "checked",
+          "reason": "仅将空文本判断替换为StringUtils.isEmpty，超限错误关键词的小写匹配、大小写Locale.ROOT及多文本扫描逻辑保持原样。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextState.java",
+          "status": "checked",
+          "reason": "measured与everCompacted旧访问器分别委托isMeasured/hasEverCompacted，raw空Map及空白providerId改Commons判断；脏字段宽松解析、缺省状态和谱系wire值不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextSummaryClient.java",
+          "status": "checked",
+          "reason": "runtime modelId和摘要正文空白判断改StringUtils，原始摘要trimToEmpty后仍要求闭合标签；本轮runtime限定、length截断拒绝及空摘要失败关闭未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextTrigger.java",
+          "status": "checked",
+          "reason": "upgradeAllowed、hardOverflow及两个hysteresisUnlocked公开重载全部保留并委托新is名称；升级逃逸、有效输出预留分母和未压缩即解锁判据逐项一致。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ConversationTurns.java",
+          "status": "checked",
+          "reason": "消息/segment空判断及保护run/tool集合默认值复用Commons，空输入仍List.of；按UserMessage切段、近期轮pin及保护ID向前扩窗逻辑不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/HardTrim.java",
+          "status": "checked",
+          "reason": "仅将messages空判断改为CollectionUtils.isEmpty，空输入Plan仍保留原messages引用；system前缀、tool配对和受保护run的硬截断规则未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/MemoryWindow.java",
+          "status": "checked",
+          "reason": "messages、Budget和protectedRunIds空值改ObjectUtils默认实现，空消息使用List.of；绝对token/count预算、turn保护及Drop裁剪顺序保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/RedisContextStateStore.java",
+          "status": "checked",
+          "reason": "HASH空判断、state/applied/model默认值复用Commons，熔断结果首项改getFirst且空事件返回List.of；CAS参数、代次结果校验和续期失败不影响读取的语义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/RollingSummarizer.java",
+          "status": "checked",
+          "reason": "分段摘要、递归合并和Plan构建拆为SummaryWork流程，单段及首项访问改getFirst；空/异常摘要整次不变更、单段合并不重复请求、超预算保留全部段及请求计数均保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/SystemMessages.java",
+          "status": "checked",
+          "reason": "system空判断改CollectionUtils，空系统段仍直接返回原body引用；非空时system先于body及新建结果列表的行为不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ToolResultClearing.java",
+          "status": "checked",
+          "reason": "slot收集、清理计划及替换应用拆分，保护run判断改isInProtectedRun；keepToolPairs、活跃run/tool保护、占位符不复用截断标记和savedTokens非负钳制均保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ToolResultShrink.java",
+          "status": "checked",
+          "reason": "候选收窄、单slot三次尝试和消息重建拆为ShrinkPlan/SlotRewrite；最新优先、MIN_KEEP、originalChars取较大值、非法信封跳过及metadata保留未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java",
+          "status": "checked",
+          "reason": "QUERY_COND求值、候选草案和confirm_step门禁拆分，草案立即park且构建失败返回true停止后续条件表；空集合/私有record布尔规范化，明确留空、取消、混批拒绝和条件未决fail-closed顺序保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/DefinitionSelectionForm.java",
+          "status": "checked",
+          "reason": "导航决策拆为NavigationDecision且createdInBatch先判null再比较，parkAdvanceIfDue公开入口委托shouldParkAdvance；首发/一次重试、页面归属证据、已知配置直选和批量去重未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/ExportConditionWorkflow.java",
+          "status": "checked",
+          "reason": "Plan.commands/undecided统一非null不可变化，readyToAdvance旧访问器委托canAdvance；SET/EXPLICIT_UNSET/UNDECIDED三态、EXPORT空白即明确全量及空code列表处理不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormIssue.java",
+          "status": "checked",
+          "reason": "record构造器仅用StringUtils.defaultString保证key/message非null，code字段、表单级工厂和结构化错误JSON形状未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormOptionSource.java",
+          "status": "checked",
+          "reason": "字段和层级选项源统一以StringUtils处理父值/标签，所有无结果分支返回List.of；非法父值不回落全量、数据库异常返回空选项及既有排序/去重规则保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormOptionSourceRegistry.java",
+          "status": "checked",
+          "reason": "未知sourceId的options由null改为List.of，supports保留并委托isSupported；非法来源仍可经supports判定，合法来源空选项不被误判为未知，API输出继续为非null数组。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormAttachmentController.java",
+          "status": "checked",
+          "reason": "上传类型/容量校验、存储和旧件回收拆分，响应仍含fileId/fileName/size/contentType；登记失败回收新文件、新件登记后再删旧件、fieldKey先校验及options空数组语义均保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java",
+          "status": "checked",
+          "reason": "仅将条件步骤私有门调用及Javadoc指向保留的公开conditionsStepAllowed，私有isConditionsStepAllowed名称不变；QUERY_COND唯一放行及旧公开兼容委托继续共用同一判据。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java",
+          "status": "checked",
+          "reason": "park/parkAll等protected布尔方法改should命名，挂起写入拆为isParkStateSaved；saveSuspended失败仍逐条converge、合成指令不入记忆、正文/metadata同进同退及SSE发送顺序未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/RedisFormAttachmentStore.java",
+          "status": "checked",
+          "reason": "pipelineGet以Optional区分未执行与有效结果，批量续期/逐件回退、单键GET避免CROSSSLOT及索引TTL维护不变；列表/快照空返回不可变化，续期重复DEBUG移除且读取失败不误当空附件。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/TaskTypeForm.java",
+          "status": "checked",
+          "reason": "宿主调用同步为isParkEnabled/hasIssued/shouldPark，参数空白判断改StringUtils；缺失或非法type仍只发一次TASK_TYPE表并保留正文/metadata。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/CachedKbSource.java",
+          "status": "checked",
+          "reason": "租约刷新及collect/write/publish轮次拆分，shaMatches等私有布尔规范命名；ETag无条件重取、SHA复用、代次写入、发布前lease检查、stale-if-error和旧索引退休顺序均保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/HttpKbSource.java",
+          "status": "checked",
+          "reason": "env名、ETag、Authorization和baseUrl空白处理复用StringUtils；条件请求、鉴权读取失败不泄密且不带Authorization、超时预算及URL规范化行为不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbCache.java",
+          "status": "checked",
+          "reason": "新增is/has/lock规范布尔名并完整保留markDocGeneration、deleteDoc、publishManifest、tryLock、ownsLock、renewLock、unlock等旧委托；Lua代次fence/token比较及空docIds返回Set.of未改契约。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbDoc.java",
+          "status": "checked",
+          "reason": "sections/chunks先补List.of再List.copyOf，null与空输入均得到不可变列表；withMeta继续复用正文和切块，不改文档结构。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbDocMeta.java",
+          "status": "checked",
+          "reason": "tags/aliases/terms/aliasesEn统一不可变非null，summary默认空串且effectiveFile/displaySummary改Commons；JsonProperty aliases_en等Jackson映射和withSha字段顺序不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbLookupResult.java",
+          "status": "checked",
+          "reason": "suggestions不可变非null，answer/error默认空串；hit/notReady/disabled等工厂的真实状态和工具输出字段未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbManifest.java",
+          "status": "checked",
+          "reason": "version/generatedAt/docs实施非null及不可变空实现，文档id/title空白校验改StringUtils；重复id失败、JSON解析异常包装和empty工厂行为不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbReadResult.java",
+          "status": "checked",
+          "reason": "toc/candidates统一不可变非null，text/error默认空串；分页nextOffset、truncated和候选列表的既有协议字段未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSampleSeeder.java",
+          "status": "checked",
+          "reason": "公开seedIfAbsent保留并委托isSeedApplied，私有播种布尔规范命名；资源缺失跳过、文件锁后重判、staging原子替换及失败WARN不变，DEBUG加开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSearchResult.java",
+          "status": "checked",
+          "reason": "hits/searchedTerms/suggestions均先补不可变空表再copyOf，error默认空串；ok/noMatch/lowConfidence等状态及结果JSON字段不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbService.java",
+          "status": "checked",
+          "reason": "refreshNow两个旧重载和ready保留委托新规范名，刷新、建索引、排序和分页拆分；单飞reloadRunning、超时取消、旧快照保留、每4次WARN、引用计数及搜索阈值/分页offset均保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSource.java",
+          "status": "checked",
+          "reason": "RefreshBudget.expired旧入口委托isExpired，ManifestFetch.contents以Map.of补null后copyOf；deadline单调时钟判据及条件请求内容不可变性不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbTerm.java",
+          "status": "checked",
+          "reason": "aliases改为非null不可变列表、answer默认空串，name/section及Jackson反序列化record形状未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbText.java",
+          "status": "checked",
+          "reason": "公开fits保留并委托canFit，distinctTerms空结果返回List.of且空白过滤改StringUtils；8000字预算、清理/包装、去重顺序和160字片段逻辑未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbTools.java",
+          "status": "checked",
+          "reason": "私有fitsModelSide改名canFitModelSide，未就绪仅记录通用WARN且模型仍只得固定UNAVAILABLE文本；页面缩减尝试、next_offset一致性和read/search/lookup工具输出未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/LocalDirKbSource.java",
+          "status": "checked",
+          "reason": "manifest/document读取复用Commons IO FileUtils并拆出ResolvedDoc，fetchContent仍直接返回Path对应文本；路径逃逸防护、缺文整份失败、BOM/LF归一化SHA校验及budget前后检查不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/MarkdownChunker.java",
+          "status": "checked",
+          "reason": "BlockScan与assembleChunks拆分区块扫描和组装，栈首尾改getLast/removeLast，空结果List.of；围栏/表格/段落边界、标题层级、chunk大小与未闭合围栏保留逻辑逐项保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/RedisKbCacheStore.java",
+          "status": "checked",
+          "reason": "空HASH返回Map.of，空字段HDEL继续守卫，删除/计数null以ObjectUtils补0；failure仍保留cause并只暴露动作、键族和异常类简单名，逐次DEBUG已移除且Lua键面未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/IdentityBoundChatMemoryAdvisor.java",
+          "status": "checked",
+          "reason": "toolContext缺失统一Map.of并直接交给ToolExecutionEnvelope，denied私有改名isDenied；无身份时读返回空、写/清拒绝及有身份RunIdentityScope包裹语义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/MemoryTurn.java",
+          "status": "checked",
+          "reason": "runId空白校验改StringUtils，非法runId或起点仍由构造器抛出、of仍返回null供调用方失败处理；不伪造run归属的契约未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/MemoryWindowSnapshot.java",
+          "status": "checked",
+          "reason": "messages先以List.of补null再List.copyOf，version/generation字段及快照不可变语义保持，调用方不能通过原列表改状态。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/ReasoningOrigin.java",
+          "status": "checked",
+          "reason": "metadata空值以Map.of补默认，已有providerId/modelId任一键时不重复盖章的逻辑不变；无归属消息处理及来源metadata字段未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/RedisChatMemoryRepository.java",
+          "status": "checked",
+          "reason": "merge拆为prepare/stage/executeCAS及MergeAttempt，未变化窗口先续期计数器且不写staging，空payload仍对finalKey执行delete CAS；代次变更放弃复活、失败清staging、purge fail-closed和活跃run查询三态均保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/RunMemoryMerge.java",
+          "status": "checked",
+          "reason": "incoming前缀分区、run块收集/追加和排序合并拆分，空块列表返回List.of；摘要前缀替换、当前run所有权、清除单调、tool配对裁剪及pinnedRunIds保护不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/SessionKeyCodec.java",
+          "status": "checked",
+          "reason": "conversationId空白校验改StringUtils.isBlank，非法id仍抛出同一IllegalArgumentException；Redis hash tag转义与Cluster同槽键生成逻辑未改。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "本批复用项目已有Commons Lang、Collections、IO和Codec完成空值、集合、文件及Hex处理，未修改pom或锁文件、未新增依赖；方法拆分继续复用既有Spring、Lucene、Jackson和Redis组件，没有另造平行工具框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "逐hunk核对集合/Map/数组非null、共享空实现不可变、record防御复制、长方法拆分、getFirst/getLast及显式import；旧公开布尔签名均有兼容委托，私有record改名不误伤公开访问器，Checkstyle/PMD未运行。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "保留的DEBUG均有级别开关，高频探活、续期、缓存和刷新重复DEBUG已收敛；WARN/ERROR继续将Throwable置末并保留因果，KB/探活/附件对外仍为稳定安全码和通用文案，未新增原始响应体或密钥日志。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "65个文件均为后端Java，未修改Vue、i18n、卡片、滚动或终端用户文案；HostForm仅调整内部挂起方法名和既有PendingToolCall流程，上传响应字段不变，没有新的ToC呈现变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "旧Java公开入口、Jackson字段和API响应保持兼容；条件确认失败关闭、KB lease/generation fence、记忆version/generation CAS、staging清理及附件批量回退均逐项核对，未新增无界Redis读取或模型调用并发路径，真实多实例/Redis为NOT_RUN。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批未修改SSE帧切分、增量UTF-8解码、代理对/字素截断或流式JSON解析；AiConnectionProbe仍在既有有界字节边界一次解码，LocalDirKbSource仍以UTF-8整文件读取，MarkdownChunker仅重组既有文本块扫描。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "依据当前65个暂存路径和逐hunk diff完成静态复核，agent-1012最终回执PASS；四个目标文件Grep确认24处isNotBlank且无hasText残留，规格变化和旧契约已登记，测试、构建、Maven、真实Redis、SSE及多实例运行均NOT_RUN，门禁留由主会话执行。"
+        }
+      }
+    },
+    {
+      "fingerprint": "sha256:3ff4f46d236bdb184f3795e41b7d025f007140af9d8412f94f625b00969d3323",
+      "status": "reviewed",
+      "reason": "当前51个前端生产文件已逐文件逐hunk独立静态复审，agent-1017最终结论PASS；前端函数不设50行和圈复杂度20验收门槛。8处共享空集合均Object.freeze并标readonly，canonical旧导出与Pinia公共getter/action已恢复，统一日志仅保留白名单投影且stack帧和URL脱敏；前次URL内部地址与解析失败泄漏已关闭。测试、构建、typecheck、lint、浏览器/E2E和真实SSE均NOT_RUN，本记录未运行门禁。",
+      "reviewedAt": "2026-11-07T16:26:08+08:00",
+      "reviewer": "K3.1 Pro agent-1017独立静态复审",
+      "specChanges": [
+        {
+          "change": "EMPTY_ROW_DATA、EMPTY_FIELD_OPTIONS、EMPTY_FORM_FIELD_OPTIONS、EMPTY_ENUM_VALUES、EMPTY_TOOL_ARGS、EMPTY_STRING_LIST、EMPTY_RESULT_ROWS、EMPTY_JOBS共8处共享空数组/对象改为Object.freeze，相关返回值、props、UiEvent.defCodes和store入参标readonly。",
+          "reason": "共享空集合必须不可变，调用方不得通过修改全局空实例污染其他表单、结果视图或任务；同时明确Pinia状态边界的写入所有权。",
+          "impact": "解析失败和无数据仍返回空集合而非null，非空输入的读取流程不变；workspace的reset/patch和setSelectedDefs在写入前复制数组/对象，FormRenderer与ResultView只读消费，未把冻结实例交回可变Pinia状态。"
+        },
+        {
+          "change": "新增logCaughtError统一异常日志投影，只输出name、净化后的stack帧、code、status；不输出原始message/config/headers，stack仅保留帧行并清理源码路径和URL，http与SSE等catch改走该helper，url-sanitize对内部地址及带scheme解析失败fail-closed。",
+          "reason": "原Axios异常、异常首行message和URL可能携带凭据、userinfo、query/hash、内部origin或本地源码路径，原始console.error不符合脱敏与刷屏控制要求。",
+          "impact": "日志按键5秒去重且最多保留512个键，form-draft每个失败catch只调用一次；URL仅重建非内部protocol/hostname/port/pathname，127/8、169.254/16、IPv6环回/ULA/link-local和localhost根点形式均被屏蔽，非法绝对URL返回[url]，普通相对API path仅去query/hash，业务异常映射和用户提示不变。"
+        },
+        {
+          "change": "恢复confirm-irreversible、types/condition、blocks、parts、frontend-tools、sheet-tools的canonical旧导出，以及Pinia sessionReady、available、submitFeedback、attachPublishConflict、removeTask、inWizard公共契约，不再以规范改名删除这些入口。",
+          "reason": "既有生产调用、旧测试导入和按旧key mock的测试替身依赖这些导出和Pinia getter/action，内部布尔命名整改不能造成源码公共契约回归。",
+          "impact": "AiPanel、TaskCenterView等消费点继续调用旧公共名称，既有导入和mock可保持；本批实际helper拆分和经核对的新布尔谓词改名不改变上述canonical契约，旧导入及Pinia状态消费无需迁移。"
+        }
+      ],
+      "files": [
+        {
+          "path": "frontend/src/App.vue",
+          "status": "checked",
+          "reason": "AI面板宽度读写localStorage失败改logCaughtError，仍保持本次偏好不持久化但不阻断界面；宽度数值校验和恢复逻辑未改。"
+        },
+        {
+          "path": "frontend/src/api/ai.ts",
+          "status": "checked",
+          "reason": "workspace上下文读取失败与健康检查异常接入白名单日志，上下文不可读仍返回undefined、health仍原样抛出；请求参数和API契约未改。"
+        },
+        {
+          "path": "frontend/src/api/http.ts",
+          "status": "checked",
+          "reason": "sanitizeUrl迁至专用模块并保留旧re-export，网络/HTTP错误不再输出完整Axios异常、headers或原始message；ApiError状态码、业务code和安全提示映射保持。"
+        },
+        {
+          "path": "frontend/src/api/sse.ts",
+          "status": "checked",
+          "reason": "pageHidden/waitForPageVisible改isPageHidden/getPageVisible并同步调用，catch统一脱敏日志；完整帧JSON解析、增量读取、取消/releaseLock、后台暂停和probeGeneration防旧写均保持，真实SSE为NOT_RUN。"
+        },
+        {
+          "path": "frontend/src/api/tasks.ts",
+          "status": "checked",
+          "reason": "任务事件订阅回调、JSON帧和OPEN回调异常接入helper；单订阅者异常仍隔离、非JSON心跳仍忽略、共享EventSource通道与回调注册契约未改。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/AiPanel.vue",
+          "status": "checked",
+          "reason": "布尔展示谓词规范命名并拆分流式/历史Markdown缓存和messageMemo，head替换首项访问；卡片状态/只读形态、门卡逐段toolCallId、LRU与Mermaid降级提示保持，JSON/复制失败仅安全日志。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/FormRenderer.vue",
+          "status": "checked",
+          "reason": "外部选项改readonly并使用冻结EMPTY_FORM_FIELD_OPTIONS，上传流程拆helper且附件仍先等会话；数据源失败按field/parent稳定键记录且不维护无界Set，序号防旧写和上传取消语义不变。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/cardPresentation.ts",
+          "status": "checked",
+          "reason": "unknownNeedsReview等布尔导出改has/is/isBusinessCard规范名，unknown真实结局、UNRECOVERABLE识别和默认展开判据未改，AiPanel消费已同步。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/resultview/ResultViewRenderer.vue",
+          "status": "checked",
+          "reason": "无视图或无行时统一使用冻结EMPTY_RESULT_ROWS，normalizeResultView和文档解析回退不变；渲染器仍收到readonly行集合。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/resultview/ResultViewTable.vue",
+          "status": "checked",
+          "reason": "rows prop改为readonly Record数组以匹配冻结空表和解析结果，表格列/行渲染方式未改，无新增可写共享状态。"
+        },
+        {
+          "path": "frontend/src/components/SpreadGrid.vue",
+          "status": "checked",
+          "reason": "SpreadJS事件绑定、挂起载入和resize观察拆为helper，异常接入helper且首项用head；restoring期间不发用户事件、pendingLoad结算、批量写入失败回执及销毁顺序保持。"
+        },
+        {
+          "path": "frontend/src/components/wizard/ConditionForm.vue",
+          "status": "checked",
+          "reason": "操作符值需求改hasOperatorValueRequirement，首项用head且缺字段返回冻结EMPTY_FIELD_OPTIONS；IN转单值、操作符禁用和新增行行为不变。"
+        },
+        {
+          "path": "frontend/src/locales/index.ts",
+          "status": "checked",
+          "reason": "语言存储异常直接导入logCaughtError，避免经ui-error形成底层循环；非法/不可读语言仍回默认，持久化失败不阻断内存态切换。"
+        },
+        {
+          "path": "frontend/src/main.ts",
+          "status": "checked",
+          "reason": "Vue全局errorHandler由原始console.error改为白名单logCaughtError，未捕获异常仍被记录但不再直接展开原始对象。"
+        },
+        {
+          "path": "frontend/src/stores/ai.ts",
+          "status": "checked",
+          "reason": "预览重算、身份/锁、镜像合并、前端工具fence等拆为helper并使用head/last/uniq；sessionReady、available、submitFeedback、attachPublishConflict旧契约保留，压缩事件锚点、终态复制、重复执行围栏和ai:chat-request/ai:job-sync安全日志均已核对。"
+        },
+        {
+          "path": "frontend/src/stores/task.ts",
+          "status": "checked",
+          "reason": "发布watch回调拆为publishWatchCallbacks并保持onSnapshot重置单次错误通知、onFinal清墙钟/dispose；removeTask旧action保留，作业事件谓词改名和明细失败降级不改变任务协议。"
+        },
+        {
+          "path": "frontend/src/stores/workspace.ts",
+          "status": "checked",
+          "reason": "reset/patch工作区页状态复制selectedDefs/queryConditions，setSelectedDefs接readonly并用uniq，inWizard旧getter保留；UiEventLifetime.abandoned仍按===true判断，异步任务身份/作废后写回边界不变。"
+        },
+        {
+          "path": "frontend/src/types/condition.ts",
+          "status": "checked",
+          "reason": "数字/日期草案校验拆helper，操作符与条件等价谓词规范命名，JSON解析异常安全记录；canonical条件导出保留，NUMBER/DATE/RANGE错误码和重建冻结语义未改。"
+        },
+        {
+          "path": "frontend/src/types/data.ts",
+          "status": "checked",
+          "reason": "新增冻结EMPTY_ROW_DATA并将parseRowData返回标Readonly，空/非法dataJson仍得空对象；解析失败只记录安全投影，不产生可变共享空状态。"
+        },
+        {
+          "path": "frontend/src/types/definition.ts",
+          "status": "checked",
+          "reason": "EMPTY_FIELD_OPTIONS冻结且parseFieldOptions返回readonly，选项映射复用lodash.map；非数组/非法JSON仍回共享空表，value/code与label/text映射不变。"
+        },
+        {
+          "path": "frontend/src/types/form-schema.ts",
+          "status": "checked",
+          "reason": "字段解析和联动校验拆分，新增冻结EMPTY_FORM_FIELD_OPTIONS并贯通readonly外部选项；未知op恒false、必填选项不可达fail-closed、级联清理和格式/范围校验不变。"
+        },
+        {
+          "path": "frontend/src/types/task.ts",
+          "status": "checked",
+          "reason": "settingsJson解析失败改白名单日志，仍返回null；仅MERGE/REPLACE被接受，未知导入模式不被猜测。"
+        },
+        {
+          "path": "frontend/src/types/tools.ts",
+          "status": "checked",
+          "reason": "select_defs.defCodes改readonly string[]以允许冻结/只读集合进入工作区边界，事件判别联合和其它工具参数结构未改。"
+        },
+        {
+          "path": "frontend/src/utils/ai-dom-tools.ts",
+          "status": "checked",
+          "reason": "DOM角色、snapshot参数和select应用拆helper，谓词改can/should并接入安全日志；区域/元素双层动词收紧、串行writeChain、填值白名单、超时如实失败及风险门不变。"
+        },
+        {
+          "path": "frontend/src/utils/ai-identity.ts",
+          "status": "checked",
+          "reason": "身份读写存储异常直接调用logCaughtError，避免ui-error循环；非法身份仍回null，隐私模式下内存身份继续有效，身份头生成未改。"
+        },
+        {
+          "path": "frontend/src/utils/ai-regions.ts",
+          "status": "checked",
+          "reason": "page首段使用head，verbAllowed改canUseVerb，区域审计按scope/element拆分；重复ref只报一次、缺可访问名、风险降级及root-detached判据均保持。"
+        },
+        {
+          "path": "frontend/src/utils/blocks.ts",
+          "status": "checked",
+          "reason": "只读状态按form/decision/status拆helper，首字段过滤改canShowCardField并用last取文件名；canonical blocks导出保留，已批准/未批准、取消/失败/未执行等真实卡态映射不变。"
+        },
+        {
+          "path": "frontend/src/utils/card-content.ts",
+          "status": "checked",
+          "reason": "表格replace/update/normalize规则文案拆helper，showCardField改canShowCardField；内部字段白名单、i18n插值和非法参数回退plan.rulesText保持不变。"
+        },
+        {
+          "path": "frontend/src/utils/condition-payload.ts",
+          "status": "checked",
+          "reason": "字符串解析和对象序列化异常接入logCaughtError，载荷损坏/不可序列化仍返回原拒绝理由；结构白名单校验与工具执行闸未放宽。"
+        },
+        {
+          "path": "frontend/src/utils/confirm-irreversible.ts",
+          "status": "checked",
+          "reason": "canonical confirmIrreversible导出保持，ElMessageBox的cancel/close明确返回false且不记异常，其它异常安全记录后仍不批准；不可逆确认文案和复选框结构未改。"
+        },
+        {
+          "path": "frontend/src/utils/display-text.ts",
+          "status": "checked",
+          "reason": "信封形状/offset校验和tool_result/generic标签投影拆helper，JSON失败安全记录；完整协议字段、nextOffset一致性、未闭合标签保留/隐藏及Markdown代码区保护语义保持。"
+        },
+        {
+          "path": "frontend/src/utils/error-card.ts",
+          "status": "checked",
+          "reason": "错误卡variant与文案选择拆为ErrorCardText/helper，专属Alert仍返回null；业务码分类、派生后缀、i18n标题/指南/动作和detail来源未改。"
+        },
+        {
+          "path": "frontend/src/utils/excel.ts",
+          "status": "checked",
+          "reason": "EMPTY_ENUM_VALUES冻结并复用head/uniq，列格式、表头和显示设置拆helper；验证器/冻结行等异常安全记录，列宽、校验规则、样例行与Content-Disposition回退不变。"
+        },
+        {
+          "path": "frontend/src/utils/form-draft.ts",
+          "status": "checked",
+          "reason": "写草稿谓词改canWriteDraftKey，每个存储失败catch只调用一次logCaughtError；仅成功写入更新lastWriteAt，250ms节流、失败可重试、读取/清理降级及无组件级失败Set保持。"
+        },
+        {
+          "path": "frontend/src/utils/frontend-tools.ts",
+          "status": "checked",
+          "reason": "参数coerce、恢复任务结局和工作区门拆helper，EMPTY_TOOL_ARGS/EMPTY_STRING_LIST冻结且返回readonly；canonical工具导出保留，可用性/降级回执、任务绑定和表格fence语义不变。"
+        },
+        {
+          "path": "frontend/src/utils/job-watch.ts",
+          "status": "checked",
+          "reason": "通道构造、终态回调和帧处理异常接入helper；SSE不可用仍继续轮询，onFinal Promise失败安全记录，dispose后迟到结果不透传的状态边界未改。"
+        },
+        {
+          "path": "frontend/src/utils/log-caught-error.ts",
+          "status": "checked",
+          "reason": "新增统一投影只含name/code/status及净化stack帧，排除异常首行message；5秒去重、512键上限、源码路径与URL清理完整，使用方均直接导入避免循环。"
+        },
+        {
+          "path": "frontend/src/utils/markdown.ts",
+          "status": "checked",
+          "reason": "renderChunk拆HTML生成、尾语言清理和Mermaid收集，解析/渲染失败接安全日志；fenceLedger finally回滚、sanitize/backfill、未闭合围栏降级和Mermaid源码回退均保持。"
+        },
+        {
+          "path": "frontend/src/utils/parts.ts",
+          "status": "checked",
+          "reason": "内部诊断谓词规范命名、诊断去重复用uniq，提交结果JSON异常安全记录；canonical parts导出保留，只有succeeded帧写submittedValues且first-wins，失败/取消不伪造提交值。"
+        },
+        {
+          "path": "frontend/src/utils/polling.ts",
+          "status": "checked",
+          "reason": "轮询run同步抛错接入logCaughtError，本次执行仍按原出口结束；异步调度、取消和错误由store/watcher承担的边界未改。"
+        },
+        {
+          "path": "frontend/src/utils/publish-mode.ts",
+          "status": "checked",
+          "reason": "importMode解析失败接安全日志，仍返回ok:false及原有人读原因；权威模式解析和不可用时不默认覆盖的判据不变。"
+        },
+        {
+          "path": "frontend/src/utils/resultview.ts",
+          "status": "checked",
+          "reason": "新增冻结EMPTY_RESULT_ROWS并贯通readonly，候选/表格规范化和冲突视图拆helper；版本/kind/status白名单、行列字节三闸、JSON失败fallback和冲突总数截断保持。"
+        },
+        {
+          "path": "frontend/src/utils/sheet-tools.ts",
+          "status": "checked",
+          "reason": "字符截断、条件求值、协作扫描、列诊断和撤销结局拆helper，head/last/uniq替换首尾及去重；canonical sheet导出保留，行指纹/身份闸、部分写入回执、撤销剩余项和预算取消语义不变。"
+        },
+        {
+          "path": "frontend/src/utils/ui-error.ts",
+          "status": "checked",
+          "reason": "userFacingErrorText先走logCaughtError并保留helper re-export，底层模块已改直接导入以断循环；SAFE_BUSINESS_MESSAGE_CODES之外仍回fallback，不向用户泄露原始异常。"
+        },
+        {
+          "path": "frontend/src/utils/ui-lifetime.ts",
+          "status": "checked",
+          "reason": "uiAbandoned改isUiAbandoned并同步guard， lifetime?.abandoned === true布尔契约未改；缺省lifetime仍恒false，作废回执不伪造执行结果。"
+        },
+        {
+          "path": "frontend/src/utils/url-sanitize.ts",
+          "status": "checked",
+          "reason": "新增hostname小写、IPv6方括号/DNS根点规范化，覆盖完整IPv4私网/环回/链路本地及IPv6 ::、::1、fc00::/7、fe80::/10；绝对URL解析失败固定[url]，成功重建不含userinfo/query/hash。"
+        },
+        {
+          "path": "frontend/src/views/AiSettingsView.vue",
+          "status": "checked",
+          "reason": "provider/model首项改head且非空断言均有前置长度条件，请求异常安全记录；canConfirm对cancel/close静默false，其它异常记录，软删回退和安全业务提示不变。"
+        },
+        {
+          "path": "frontend/src/views/DataBrowserView.vue",
+          "status": "checked",
+          "reason": "dataOf返回Readonly，首个定义使用head，区域/项目选项失败分别记录并回空数组；路由defCode优先和页面加载流程未改。"
+        },
+        {
+          "path": "frontend/src/views/ExportWizardView.vue",
+          "status": "checked",
+          "reason": "任务恢复、结果/作业载入、Xlsx构建和下载预检拆helper，head/uniq替代首尾/去重；条件恢复、任务代次、下载binding防旧交付、文件清单未知不判空及UI预算作废回执保持。"
+        },
+        {
+          "path": "frontend/src/views/ImportWizardView.vue",
+          "status": "checked",
+          "reason": "EMPTY_JOBS冻结，任务恢复、上传匹配、发布告警和脏区结算拆helper；cancel/close不记异常，文件清单未知不写回、任务代次防旧watch、权威importMode同步和已建作业真实告警不变。"
+        },
+        {
+          "path": "frontend/src/views/TaskCenterView.vue",
+          "status": "checked",
+          "reason": "筛选提交谓词改canCommitFilterDraft并同步翻页/分页/刷新调用，筛选草稿与已应用值边界不变；继续消费task store旧removeTask公共action。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "首项/末项/去重/映射复用现有lodash head、last、uniq、map，@types/lodash沿用已授权4.17.25；日志直接复用同一helper避免循环，未在这51个文件中新增依赖或以自写集合工具替代库能力。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "本批为Vue/TypeScript，不适用Java函数50行和圈复杂度20门槛；8个共享空集合均冻结并标readonly，Pinia写入前复制，lodash head/last的undefined分支及非空断言前置条件逐项核对，import均为明确命名。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "统一helper仅输出白名单name/code/status和无原始message的stack帧，路径/内部URL fail-closed脱敏；5秒去重与512键上限控制刷屏，form-draft单次记录、cancel/close静默及业务安全fallback保持，原始console.error已替换。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "卡片真实状态、只读回执、默认展开、内部字段隐藏和i18n文案均保持；不可逆确认取消不产生技术日志，上传/选项失败不阻断其它字段，未新增runId/toolCallId等终端文案或无界组件状态，浏览器呈现为NOT_RUN。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "canonical导出和Pinia公共契约恢复；SSE可见性/probeGeneration、历史镜像终态合并、前端工具执行台账/fence、UiEventLifetime、job watch dispose和下载任务binding均逐hunk核对，未改后端API/Redis或放宽异步状态机，真实SSE和异步运行NOT_RUN。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "api/sse仍按完整事件payload解析且增量TextDecoder读取路径未改，非法帧保持null/降级；Markdown仅拆分渲染helper，未闭合围栏、代码区范围、Mermaid源码回退和display-text不完整标签投影保持，无新增二次转码或代理对截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "按51个实际暂存路径逐hunk静态复核，agent-1017最终PASS且前次URL未关闭项已修复；公共契约、8处冻结空集合和日志脱敏有源码证据，前端无50/20要求，测试、构建、typecheck、lint、浏览器/E2E、真实SSE/历史恢复/异步状态机均NOT_RUN，门禁留由主会话执行。"
+        }
+      }
     }
   ]
 }

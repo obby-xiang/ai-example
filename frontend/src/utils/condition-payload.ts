@@ -21,6 +21,8 @@ import {
   type ConditionInputIssue,
   type FieldQueryCondition
 } from '@/types/condition'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 export type ConditionPayloadVerdict =
   | {
@@ -92,14 +94,16 @@ export function validateConditionPayload(payload: unknown): ConditionPayloadVerd
     }
     try {
       parsed = JSON.parse(payload)
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/condition-payload.ts:95')
       return reject('查询条件无法解析为 JSON（载荷损坏）')
     }
   } else {
     try {
       // 深拷贝一次：避免调用方对象与后续判读共享引用（也顺带吃掉 undefined / 函数值）
       parsed = JSON.parse(JSON.stringify(payload))
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/condition-payload.ts:102')
       return reject('查询条件载荷无法序列化')
     }
   }

@@ -1,3 +1,4 @@
+import { logCaughtError } from '@/utils/log-caught-error'
 /**
  * 轮询治理 · 手动刷新批（S2，M2 + F1）：**单节奏**可见性纪律定时器封装。
  *
@@ -129,7 +130,8 @@ export function createPollingController(options: PollingControllerOptions): Poll
     let result: void | Promise<void>
     try {
       result = options.run()
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/polling.ts:132')
       // 同步抛错：本次就此结束（异常出口由 `run` 自身承担：store 写 error 字段 / watcher 走 onError），
       // 仍走收尾补发，避免"挡掉的那次刷新"随异常一起丢。
       settleRun()

@@ -1,5 +1,8 @@
 import { ApiError } from '@/api/http'
 import { ErrorCode } from '@/types/api'
+import { logCaughtError } from '@/utils/log-caught-error'
+
+export { logCaughtError } from '@/utils/log-caught-error'
 
 const SAFE_BUSINESS_MESSAGE_CODES: ReadonlySet<string> = new Set([
   ErrorCode.JOB_ALREADY_RUNNING,
@@ -11,9 +14,9 @@ const SAFE_BUSINESS_MESSAGE_CODES: ReadonlySet<string> = new Set([
   ErrorCode.DEFINITION_PRIMARY_KEY_REQUIRED
 ])
 
-export function userFacingErrorText(error: unknown, fallback: string): string {
+export function userFacingErrorText(error: unknown, fallback: string, key?: string): string {
+  logCaughtError(error, key)
   if (error instanceof ApiError) {
-    console.error('[ui] request failed', error)
     return SAFE_BUSINESS_MESSAGE_CODES.has(error.code) && error.message !== '' ? error.message : fallback
   }
   return error instanceof Error && error.message !== '' ? error.message : fallback

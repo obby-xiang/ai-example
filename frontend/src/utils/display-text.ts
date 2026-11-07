@@ -1,4 +1,6 @@
 import { markdownCodeRanges } from '@/utils/markdown'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 const PROTOCOL_TAG_RE = /<\s*\/?\s*(knowledge_catalog|knowledge|tool_result)\s*>/gi
 
@@ -116,43 +118,78 @@ function jsonEnd(text: string, start: number): number {
   return -1
 }
 
-function hasOwn(value: Record<string, unknown>, key: string): boolean {
+function containsOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key)
 }
 
-function isEnvelope(value: Record<string, unknown>): boolean {
-  for (const key of Object.keys(value)) {
-    if (!ENVELOPE_FIELDS.has(key)) {
-      return false
-    }
-  }
-  for (const key of ENVELOPE_REQUIRED_FIELDS) {
-    if (!hasOwn(value, key)) {
-      return false
-    }
-  }
-  if (typeof value.ok !== 'boolean' || typeof value.outcome !== 'string' || !OUTCOMES.has(value.outcome)
-    || typeof value.retryable !== 'boolean' || typeof value.message !== 'string'
-    || typeof value.truncated !== 'boolean' || !Number.isInteger(value.originalChars)
-    || !Number.isInteger(value.returnedChars) || (value.originalChars as number) < 0
-    || (value.returnedChars as number) < 0) {
+function isEnvelopeScalarShape(value: Record<string, unknown>): boolean {
+  return typeof value.ok === 'boolean' && typeof value.outcome === 'string' && OUTCOMES.has(value.outcome)
+    && typeof value.retryable === 'boolean' && typeof value.message === 'string'
+    && typeof value.truncated === 'boolean' && Number.isInteger(value.originalChars)
+    && Number.isInteger(value.returnedChars) && (value.originalChars as number) >= 0
+    && (value.returnedChars as number) >= 0
+}
+
+function isEnvelopeOptionalFieldValid(value: Record<string, unknown>): boolean {
+  if (containsOwn(value, 'code') && value.code !== null && typeof value.code !== 'string') {
     return false
   }
-  if (hasOwn(value, 'code') && value.code !== null && typeof value.code !== 'string') {
-    return false
-  }
-  if (hasOwn(value, 'target') && value.target !== null
+  if (containsOwn(value, 'target') && value.target !== null
     && (typeof value.target !== 'object' || Array.isArray(value.target))) {
     return false
   }
-  if (hasOwn(value, 'strategy') && value.strategy !== null && typeof value.strategy !== 'string') {
+  if (containsOwn(value, 'strategy') && value.strategy !== null && typeof value.strategy !== 'string') {
     return false
   }
-  return !hasOwn(value, 'notice') || value.notice === null || typeof value.notice === 'string'
+  return !containsOwn(value, 'notice') || value.notice === null || typeof value.notice === 'string'
+}
+
+function isEnvelope(value: Record<string, unknown>): boolean {
+  if (!Object.keys(value).every((key) => ENVELOPE_FIELDS.has(key))) {
+    return false
+  }
+  if (!ENVELOPE_REQUIRED_FIELDS.every((key) => containsOwn(value, key))) {
+    return false
+  }
+  return isEnvelopeScalarShape(value) && isEnvelopeOptionalFieldValid(value)
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0
+}
+
+function isReadToolResultShape(value: Record<string, unknown>): boolean {
+  for (const key of Object.keys(value)) {
+    if (!READ_TOOL_RESULT_FIELDS.has(key)) {
+      return false
+    }
+  }
+  for (const key of READ_TOOL_RESULT_REQUIRED_FIELDS) {
+    if (!containsOwn(value, key)) {
+      return false
+    }
+  }
+  if (typeof value.toolCallId !== 'string' || value.toolCallId === '' || typeof value.name !== 'string'
+    || !isNonNegativeInteger(value.offset) || !Number.isInteger(value.maxChars)
+    || (value.maxChars as number) < 2 || (value.maxChars as number) > 8000
+    || !isNonNegativeInteger(value.originalChars) || !isNonNegativeInteger(value.returnedChars)
+    || typeof value.content !== 'string') {
+    return false
+  }
+  return value.nextOffset === null || isNonNegativeInteger(value.nextOffset)
+}
+
+function isReadToolResultOffsetValid(value: Record<string, unknown>, contentEnd: number): boolean {
+  if ((value.offset as number) > (value.originalChars as number)
+    || (value.returnedChars as number) > (value.maxChars as number)
+    || (value.returnedChars as number) !== value.content.length
+    || contentEnd > (value.originalChars as number)) {
+    return false
+  }
+  if (value.nextOffset === null) {
+    return contentEnd === value.originalChars
+  }
+  return contentEnd === value.nextOffset && contentEnd < (value.originalChars as number)
 }
 
 function readToolResultPage(text: string): EnvelopeRead {
@@ -168,41 +205,11 @@ function readToolResultPage(text: string): EnvelopeRead {
   }
   try {
     const value = JSON.parse(text.slice(start, end)) as Record<string, unknown>
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      return { status: 'notProtocol', end }
-    }
-    for (const key of Object.keys(value)) {
-      if (!READ_TOOL_RESULT_FIELDS.has(key)) {
-        return { status: 'notProtocol', end }
-      }
-    }
-    for (const key of READ_TOOL_RESULT_REQUIRED_FIELDS) {
-      if (!hasOwn(value, key)) {
-        return { status: 'notProtocol', end }
-      }
-    }
-    if (typeof value.toolCallId !== 'string' || value.toolCallId === '' || typeof value.name !== 'string'
-      || !isNonNegativeInteger(value.offset) || !Number.isInteger(value.maxChars)
-      || (value.maxChars as number) < 2 || (value.maxChars as number) > 8000
-      || !isNonNegativeInteger(value.originalChars) || !isNonNegativeInteger(value.returnedChars)
-      || typeof value.content !== 'string') {
-      return { status: 'notProtocol', end }
-    }
-    if (value.nextOffset !== null && !isNonNegativeInteger(value.nextOffset)) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || !isReadToolResultShape(value)) {
       return { status: 'notProtocol', end }
     }
     const contentEnd = (value.offset as number) + (value.returnedChars as number)
-    if ((value.offset as number) > (value.originalChars as number)
-      || (value.returnedChars as number) > (value.maxChars as number)
-      || (value.returnedChars as number) !== value.content.length
-      || contentEnd > (value.originalChars as number)) {
-      return { status: 'notProtocol', end }
-    }
-    if (value.nextOffset === null) {
-      if (contentEnd !== value.originalChars) {
-        return { status: 'notProtocol', end }
-      }
-    } else if (contentEnd !== value.nextOffset || contentEnd >= (value.originalChars as number)) {
+    if (!isReadToolResultOffsetValid(value, contentEnd)) {
       return { status: 'notProtocol', end }
     }
     const progress = value.nextOffset === null ? '已读完' : '未读完'
@@ -211,7 +218,8 @@ function readToolResultPage(text: string): EnvelopeRead {
       display: `${value.content}\n\n已显示 ${contentEnd}/${value.originalChars} 字符，${progress}`,
       end
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/display-text.ts:214')
     return { status: 'notProtocol', end }
   }
 }
@@ -237,7 +245,8 @@ function readEnvelope(text: string): EnvelopeRead {
       return { status: 'notProtocol', end }
     }
     return { status: 'valid', display: projectDisplayText(value.message as string), end }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/display-text.ts:240')
     return { status: 'notProtocol', end }
   }
 }
@@ -373,6 +382,46 @@ export function projectDisplayText(text: string | null | undefined): string {
   return restoreMarkdownCode(projectDisplayTextCore(masked.text), masked.characters)
 }
 
+interface TagProjection {
+  cursor: number
+  result?: string
+}
+
+function projectToolResultTag(text: string, index: number, token: string, output: string[]): TagProjection {
+  const bodyStart = index + token.length
+  const closeMatch = /<\s*\/\s*tool_result\s*>/i.exec(text.slice(bodyStart))
+  const nested = readEnvelope(text.slice(bodyStart))
+  if (nested.status === 'incomplete') {
+    return closeMatch === null
+      ? { cursor: bodyStart, result: joinDisplaySegments(output) }
+      : { cursor: bodyStart + closeMatch.index + closeMatch[0].length }
+  }
+  if (nested.end < 0) {
+    const bodyEnd = closeMatch === null ? text.length : bodyStart + closeMatch.index
+    output.push(plainSegment(text.slice(bodyStart, bodyEnd), true))
+    return closeMatch === null
+      ? { cursor: bodyEnd, result: joinDisplaySegments(output) }
+      : { cursor: bodyEnd + closeMatch[0].length }
+  }
+  output.push(nested.status === 'valid' ? nested.display ?? '' : plainSegment(text.slice(bodyStart, bodyStart + nested.end), true))
+  return { cursor: bodyStart + nested.end }
+}
+
+function projectGenericTag(text: string, index: number, token: string, tag: string, output: string[]): TagProjection {
+  const closeMatch = new RegExp('<\\s*\\/\\s*' + tag + '\\s*>', 'i').exec(text.slice(index + token.length))
+  if (closeMatch === null) {
+    if (tag !== 'knowledge_catalog') {
+      output.push(plainSegment(text.slice(index + token.length), true))
+    }
+    return { cursor: text.length }
+  }
+  const bodyEnd = index + token.length + closeMatch.index
+  if (tag !== 'knowledge_catalog') {
+    output.push(plainSegment(text.slice(index + token.length, bodyEnd), true))
+  }
+  return { cursor: bodyEnd + closeMatch[0].length }
+}
+
 function projectDisplayTextCore(text: string): string {
   const envelope = readEnvelope(text)
   if (envelope.status === 'incomplete') {
@@ -393,49 +442,13 @@ function projectDisplayTextCore(text: string): string {
       cursor = index + token.length
       continue
     }
-    if (tag === 'tool_result') {
-      const bodyStart = index + token.length
-      const closePattern = new RegExp('<\\s*\\/\\s*tool_result\\s*>', 'i')
-      const closeMatch = closePattern.exec(text.slice(bodyStart))
-      const nested = readEnvelope(text.slice(bodyStart))
-      if (nested.status === 'incomplete') {
-        if (closeMatch !== null) {
-          cursor = bodyStart + closeMatch.index + closeMatch[0].length
-          continue
-        }
-        return joinDisplaySegments(output)
-      }
-      if (nested.end < 0) {
-        const bodyEnd = closeMatch === null ? text.length : bodyStart + closeMatch.index
-        output.push(plainSegment(text.slice(bodyStart, bodyEnd), true))
-        if (closeMatch !== null) {
-          cursor = bodyEnd + closeMatch[0].length
-          continue
-        }
-        return joinDisplaySegments(output)
-      }
-      if (nested.status === 'valid') {
-        output.push(nested.display ?? '')
-      } else {
-        output.push(plainSegment(text.slice(bodyStart, bodyStart + nested.end), true))
-      }
-      cursor = bodyStart + nested.end
-      continue
+    const projected = tag === 'tool_result'
+      ? projectToolResultTag(text, index, token, output)
+      : projectGenericTag(text, index, token, tag, output)
+    if (projected.result !== undefined) {
+      return projected.result
     }
-    const closePattern = new RegExp('<\\s*\\/\\s*' + tag + '\\s*>', 'i')
-    const closeMatch = closePattern.exec(text.slice(index + token.length))
-    if (closeMatch === null) {
-      if (tag !== 'knowledge_catalog') {
-        output.push(plainSegment(text.slice(index + token.length), true))
-      }
-      cursor = text.length
-      break
-    }
-    const bodyEnd = index + token.length + closeMatch.index
-    if (tag !== 'knowledge_catalog') {
-      output.push(plainSegment(text.slice(index + token.length, bodyEnd), true))
-    }
-    cursor = bodyEnd + closeMatch[0].length
+    cursor = projected.cursor
   }
   const remainder = text.slice(cursor)
   const partial = partialTagSuffix(remainder)

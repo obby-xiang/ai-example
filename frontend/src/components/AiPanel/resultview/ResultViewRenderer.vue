@@ -12,7 +12,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ResultView } from '@/types/resultview'
-import { normalizeResultView, resolveViewRows, resolveViewText } from '@/utils/resultview'
+import { EMPTY_RESULT_ROWS, normalizeResultView, resolveViewRows, resolveViewText } from '@/utils/resultview'
 import { RESULTVIEW_RENDERERS } from './registry'
 
 const props = defineProps<{
@@ -50,7 +50,7 @@ const emptyText = computed(() => {
 })
 const rows = computed(() => {
   const view = resolved.value
-  return view === null ? [] : (resolveViewRows(view, props.documentText) ?? [])
+  return view === null ? EMPTY_RESULT_ROWS : (resolveViewRows(view, props.documentText) ?? EMPTY_RESULT_ROWS)
 })
 </script>
 

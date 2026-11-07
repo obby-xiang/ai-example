@@ -5,12 +5,12 @@
  * 每次写页面态或工作区之前**读同一个判据。三处各写一遍 `lifetime?.abandoned === true`
  * 迟早漂移；文案也只该有一份（与契约层 `dispatchUiEvent` 的"预算已到点"口径一致）。
  *
- * <p>缺省（用户手点 / 单测直调）不传 lifetime ⇒ `uiAbandoned` 恒 false，行为与改动前一致。
+ * <p>缺省（用户手点 / 单测直调）不传 lifetime ⇒ `isUiAbandoned` 恒 false，行为与改动前一致。
  */
 import type { UiEventLifetime } from '@/types/workspace'
 
 /** 本次执行是否已作废（预算到点，或用户停止了本轮）。 */
-export function uiAbandoned(lifetime?: UiEventLifetime): boolean {
+export function isUiAbandoned(lifetime?: UiEventLifetime): boolean {
   return lifetime?.abandoned === true
 }
 
@@ -49,5 +49,5 @@ export function uiStepAbandonedReply(
 
 /** 作废判据的页面侧传参形态：`() => boolean`，供 goStep / persistStepData 这类页内函数复用。 */
 export function uiAbandonGuard(lifetime?: UiEventLifetime): () => boolean {
-  return () => uiAbandoned(lifetime)
+  return () => isUiAbandoned(lifetime)
 }

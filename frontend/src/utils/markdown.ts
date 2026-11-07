@@ -73,6 +73,8 @@ import kotlin from 'highlight.js/lib/languages/kotlin'
 // hljs 库默认主题（决策卡 §二.2：高亮用库默认主题色，不计入 UI 用色收敛）
 import 'highlight.js/styles/github.css'
 import { translate } from '@/composables/useCopy'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 /**
  * 常用语言白名单（15 种）。别名随语言定义自带：xml → html/svg 等、markdown → md、
@@ -167,7 +169,8 @@ export function isSameOrigin(url: string): boolean {
     const base = typeof window !== 'undefined' && window.location ? window.location.href : 'http://localhost/'
     const parsed = new URL(url, base)
     return parsed.origin === new URL(base).origin
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/markdown.ts:170')
     return false
   }
 }
@@ -231,7 +234,8 @@ function highlightCode(lang: string, code: string): string {
     } else {
       out = escapeHtml(code)
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/markdown.ts:234')
     out = escapeHtml(code)
   }
   if (highlightCache.size >= HIGHLIGHT_CACHE_MAX) {
@@ -919,7 +923,8 @@ function probePrefix(text: string): PrefixProbe {
   let tokens
   try {
     tokens = md.parse(text, env)
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/markdown.ts:922')
     return { length: -1, parsed: null, structure: '' }
   }
   const parsed: ParsedSource = { tokens, env }
@@ -1073,7 +1078,8 @@ export function markdownCodeRanges(text: string): MarkdownSourceRange[] {
   let tokens: ParsedSource['tokens']
   try {
     tokens = md.parse(text, {})
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/markdown.ts:1076')
     return [{ start: 0, end: text.length }]
   }
   const lineStarts = [0]
@@ -1132,65 +1138,65 @@ interface ChunkResult {
  * `mermaidBase` 是该 chunk 在整篇里的 mermaid 起始下标（跨 chunk 合并后 index 仍是全局序号）。
  * `stripTailLanguage` 只对「含未闭合流式尾围栏」的那个 chunk 为真。
  */
+function renderChunkHtml(
+  source: string,
+  instance: MarkdownItInstance,
+  parsed?: ParsedSource | null
+): { html: string; keys: string[]; nonce: string; fences: number } {
+  const startSeq = fenceRenderSeq
+  const ledgerStart = fenceLedger.length
+  activeFenceNonce = newFenceNonce()
+  const nonce = activeFenceNonce
+  const protectedSource = escapeUnclosedInlineCode(source)
+  const protectedParsed = protectedSource === source ? parsed : null
+  try {
+    const html = protectedParsed === undefined || protectedParsed === null
+      ? instance.render(protectedSource)
+      : instance.renderer.render(protectedParsed.tokens, instance.options, protectedParsed.env)
+    return { html, keys: fenceLedger.slice(ledgerStart), nonce, fences: fenceRenderSeq - startSeq }
+  } finally {
+    fenceLedger.length = ledgerStart
+  }
+}
+
+function stripTailLanguageClass(html: string): string {
+  const at = html.lastIndexOf('class="language-')
+  return at < 0 ? html : html.slice(0, at) + html.slice(at).replace(/class="language-[^"]*"/, 'class=""')
+}
+
+function collectChunkMermaid(safe: string, base: number): ChunkResult['mermaid'] {
+  const mermaid: ChunkResult['mermaid'] = []
+  let match: RegExpExecArray | null
+  mermaidIndexRe.lastIndex = 0
+  while ((match = mermaidIndexRe.exec(safe)) !== null) {
+    const key = /data-fence-key="([^"]*)"/.exec(match[1])?.[1] ?? ''
+    if (key !== '') {
+      mermaid.push({ index: base + mermaid.length, key, source: unescapeHtml(match[2]) })
+    }
+  }
+  return mermaid
+}
+
 function renderChunk(
   source: string,
   instance: MarkdownItInstance,
   options: { collectMermaid: boolean; mermaidBase: number; stripTailLanguage: boolean },
   parsed?: ParsedSource | null
 ): ChunkResult {
-  const startSeq = fenceRenderSeq
-  const ledgerStart = fenceLedger.length
-  activeFenceNonce = newFenceNonce()
-  const nonce = activeFenceNonce
-  let html: string
-  let keys: string[] = []
-  const protectedSource = escapeUnclosedInlineCode(source)
-  const protectedParsed = protectedSource === source ? parsed : null
-  try {
-    // 已有整篇 token 时直接走 renderer（等价 instance.render，但省掉一次 parse）
-    html =
-      protectedParsed === undefined || protectedParsed === null
-        ? instance.render(protectedSource)
-        : instance.renderer.render(protectedParsed.tokens, instance.options, protectedParsed.env)
-    keys = fenceLedger.slice(ledgerStart)
-  } finally {
-    // 账本只服务本次 chunk；即使渲染抛错也不把残缺 key 留给下一块
-    fenceLedger.length = ledgerStart
-  }
-  const fences = fenceRenderSeq - startSeq
-  html = wrapTables(html)
+  const rendered = renderChunkHtml(source, instance, parsed)
+  let html = wrapTables(rendered.html)
   if (options.stripTailLanguage) {
-    // 未闭合尾围栏先剥语言标记：保持纯文本，且不包装图容器、不登记 mermaid。
-    const at = html.lastIndexOf('class="language-')
-    if (at >= 0) {
-      html = html.slice(0, at) + html.slice(at).replace(/class="language-[^"]*"/, 'class=""')
-    }
+    html = stripTailLanguageClass(html)
   }
   if (options.collectMermaid) {
-    // G4：闭合的非 mermaid 围栏包成图容器（语言标签 + 复制按钮）
     html = wrapFenceFigures(html)
   }
-  // 批次 7C：净化期 key 被白名单剥掉，这里只给「渲染器 token 认领的 pre」按出现序回填
-  const safe = backfillFenceKeys(sanitizeHtml(html), keys, nonce)
-  const mermaid: Array<{ index: number; key: string; source: string }> = []
-  if (options.collectMermaid) {
-    // 登记闭合 mermaid 围栏（按出现序）；源码块本身留在净化后 HTML 里。
-    // 只认带 key 的 pre ⇒ 模型原生 HTML 的 language-mermaid 预块不进清单。
-    let match: RegExpExecArray | null
-    mermaidIndexRe.lastIndex = 0
-    while ((match = mermaidIndexRe.exec(safe)) !== null) {
-      const key = /data-fence-key="([^"]*)"/.exec(match[1])?.[1] ?? ''
-      if (key === '') {
-        continue
-      }
-      mermaid.push({
-        index: options.mermaidBase + mermaid.length,
-        key,
-        source: unescapeHtml(match[2])
-      })
-    }
+  const safe = backfillFenceKeys(sanitizeHtml(html), rendered.keys, rendered.nonce)
+  return {
+    html: safe,
+    fences: rendered.fences,
+    mermaid: options.collectMermaid ? collectChunkMermaid(safe, options.mermaidBase) : []
   }
-  return { html: safe, fences, mermaid }
 }
 
 /**
@@ -1346,7 +1352,8 @@ function encodeMermaidProtocolTags(source: string): string {
   let tokens: ParsedSource['tokens']
   try {
     tokens = md.parseInline(source, {})
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/markdown.ts:1349')
     return source
   }
   let encoded = source
@@ -1478,7 +1485,8 @@ async function renderMermaidSvgUncached(source: string): Promise<string | null> 
         clearTimeout(timer)
       }
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/markdown.ts:1481')
     return null
   }
 }

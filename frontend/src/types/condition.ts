@@ -1,3 +1,5 @@
+import { head } from 'lodash'
+
 /**
  * 查询条件契约（**后端口径**）。
  *
@@ -24,6 +26,8 @@
 
 import type { ConfigField, FieldType } from './definition'
 import { parseFieldOptions } from './definition'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 /**
  * 操作符白名单（ConditionEvaluator.matchesOp 的 case 全量，含 LIKE）。
@@ -153,7 +157,7 @@ export function operatorsForFieldType(type: FieldType): OperatorOption[] {
 }
 
 /** 该操作符是否要求用户填值。 */
-export function operatorNeedsValue(operator: DraftOperator): boolean {
+export function hasOperatorValueRequirement(operator: DraftOperator): boolean {
   if (operator === 'BETWEEN') {
     return true
   }
@@ -262,7 +266,7 @@ function expandFields(model: ConditionDraftModel): {
   const issues: ConditionInputIssue[] = []
   for (const [fieldCode, draft] of Object.entries(model.fields)) {
     const operator = draft.operator
-    if (!operatorNeedsValue(operator)) {
+    if (!hasOperatorValueRequirement(operator)) {
       if (operator === 'EMPTY' || operator === 'NOT_EMPTY') {
         conditions.push({ fieldCode, operator })
       }
@@ -424,6 +428,26 @@ function isDateText(text: string): boolean {
  * 并在提交前阻断（不是"未填即忽略"），本函数只报字段类型与区间问题。
  * 返回定位信息而非成文文案：文案走 i18n（双 locale），本函数保持无 UI 依赖。
  */
+function validateNumberDraft(fieldCode: string, value: string, value2: string, issues: ConditionIssue[]): void {
+  if ((value !== '' && !isNumberText(value)) || (value2 !== '' && !isNumberText(value2))) {
+    issues.push({ fieldCode, code: 'NUMBER', value, value2 })
+    return
+  }
+  if (value !== '' && value2 !== '' && Number(value) > Number(value2)) {
+    issues.push({ fieldCode, code: 'RANGE', value, value2 })
+  }
+}
+
+function validateDateDraft(fieldCode: string, value: string, value2: string, issues: ConditionIssue[]): void {
+  if ((value !== '' && !isDateText(value)) || (value2 !== '' && !isDateText(value2))) {
+    issues.push({ fieldCode, code: 'DATE', value, value2 })
+    return
+  }
+  if (value !== '' && value2 !== '' && value > value2) {
+    issues.push({ fieldCode, code: 'RANGE', value, value2 })
+  }
+}
+
 export function validateDraftModel(
   model: ConditionDraftModel,
   fields: readonly ConfigField[]
@@ -432,7 +456,7 @@ export function validateDraftModel(
   const issues: ConditionIssue[] = []
   for (const [fieldCode, draft] of Object.entries(model.fields)) {
     const field = byCode.get(fieldCode)
-    if (!field || !operatorNeedsValue(draft.operator)) {
+    if (!field || !hasOperatorValueRequirement(draft.operator)) {
       continue
     }
     const value = draft.value.trim()
@@ -441,23 +465,9 @@ export function validateDraftModel(
       continue
     }
     if (field.fieldType === 'NUMBER') {
-      if ((value !== '' && !isNumberText(value)) || (value2 !== '' && !isNumberText(value2))) {
-        issues.push({ fieldCode, code: 'NUMBER', value, value2 })
-        continue
-      }
-      if (value !== '' && value2 !== '' && Number(value) > Number(value2)) {
-        issues.push({ fieldCode, code: 'RANGE', value, value2 })
-      }
-      continue
-    }
-    if (field.fieldType === 'DATE') {
-      if ((value !== '' && !isDateText(value)) || (value2 !== '' && !isDateText(value2))) {
-        issues.push({ fieldCode, code: 'DATE', value, value2 })
-        continue
-      }
-      if (value !== '' && value2 !== '' && value > value2) {
-        issues.push({ fieldCode, code: 'RANGE', value, value2 })
-      }
+      validateNumberDraft(fieldCode, value, value2, issues)
+    } else if (field.fieldType === 'DATE') {
+      validateDateDraft(fieldCode, value, value2, issues)
     }
   }
   return issues
@@ -516,7 +526,8 @@ export function parseConditionJson(json: string | null | undefined): FieldQueryC
       }
     }
     return isConditionEmpty(condition) ? null : condition
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'types/condition.ts:521')
     return null
   }
 }
@@ -721,7 +732,7 @@ function fieldConditionKey(field: FieldCondition): string {
  * 它比"逐字节相等"宽松一点（顺序/标量文字形态不算换义），但比"草案重建完事"严格：
  * 类型变化（`IN` 数组 → 逗号串）、条目丢失、取值被拆散都会判不等价。
  */
-export function conditionsEquivalent(
+export function isConditionEquivalent(
   a: FieldQueryCondition | null | undefined,
   b: FieldQueryCondition | null | undefined
 ): boolean {
@@ -851,7 +862,7 @@ export function draftModelFromCondition(condition: FieldQueryCondition | null | 
       }
       continue
     }
-    const first = list[0]
+    const first = head(list)
     if (!first) {
       continue
     }
@@ -863,7 +874,7 @@ export function draftModelFromCondition(condition: FieldQueryCondition | null | 
   }
   if (condition && !isConditionEmpty(condition)) {
     const rebuilt = buildConditionOutcome(model).condition
-    if (!conditionsEquivalent(condition, rebuilt)) {
+    if (!isConditionEquivalent(condition, rebuilt)) {
       // 冻结一份：调用方（工作区 / 落库）可能继续持有原对象，别名会让两处互相改
       model.verbatim = JSON.parse(JSON.stringify(condition)) as FieldQueryCondition
     }

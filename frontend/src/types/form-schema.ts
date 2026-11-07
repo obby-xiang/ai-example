@@ -15,6 +15,8 @@
  * **不接受模型自带正则**（ReDoS 面不开放）。
  */
 
+import { head } from 'lodash'
+
 /** 字段类型白名单：GF 优化批后为七型（新增 attachment）。 */
 export type FormFieldType = 'text' | 'number' | 'boolean' | 'date' | 'enum' | 'multi_select' | 'attachment'
 
@@ -331,22 +333,13 @@ function parseField(raw: unknown): FormFieldSpec | null {
  * 只判"能不能安全渲染"，不重复后端闸门的强度校验；但**计数与上限**与后端同源
  * （字段 ≤20、选项 ≤50）—— 这些是前端先校验的硬边界。
  */
-export function parseFormSchema(raw: unknown): FormSpec | null {
-  if (!isRecord(raw)) {
-    return null
-  }
-  if (typeof raw.scenario !== 'string' || raw.scenario === '') {
-    return null
-  }
-  if (raw.title !== undefined && typeof raw.title !== 'string') {
-    return null
-  }
-  if (!Array.isArray(raw.fields) || raw.fields.length === 0 || raw.fields.length > MAX_FORM_FIELDS) {
+function parseFormFields(rawFields: unknown): FormFieldSpec[] | null {
+  if (!Array.isArray(rawFields) || rawFields.length === 0 || rawFields.length > MAX_FORM_FIELDS) {
     return null
   }
   const keys = new Set<string>()
   const fields: FormFieldSpec[] = []
-  for (const item of raw.fields) {
+  for (const item of rawFields) {
     const field = parseField(item)
     if (field === null || keys.has(field.key) || !KEY_PATTERN.test(field.key)) {
       return null
@@ -354,10 +347,14 @@ export function parseFormSchema(raw: unknown): FormSpec | null {
     keys.add(field.key)
     fields.push(field)
   }
-  // 联动条件的引用必须落在**已声明字段**上，且不得自引用；任何不可用声明 ⇒ 该字段 fail-closed。
+  return fields
+}
+
+function applyFormLinkage(fields: FormFieldSpec[], rawFields: readonly unknown[]): void {
+  const keys = new Set(fields.map((field) => field.key))
   for (let index = 0; index < fields.length; index++) {
     const field = fields[index] as FormFieldSpec
-    const rawField = raw.fields[index] as Record<string, unknown>
+    const rawField = rawFields[index] as Record<string, unknown>
     let invalid = false
     for (const attr of ['visibleWhen', 'requiredWhen', 'disabledWhen'] as const) {
       const condition = parseCondition(rawField[attr])
@@ -384,9 +381,22 @@ export function parseFormSchema(raw: unknown): FormSpec | null {
       field.linkageInvalid = true
     }
   }
-  // AR-07：必填选择题的可选项必须真的可达 —— 否则用户切到某个父值时这一格没有任何可选项，
-  // 既填不了也交不出去（只能取消重开）。这类"注定填不完"的 schema 判不可渲染（fail-closed）。
-  if (fields.some((field) => requiredOptionsUnreachable(field, fields))) {
+}
+
+/** 防御性解析 `args.form`：任何不符白名单的形状一律返回 null（调用方走取消收敛）。 */
+export function parseFormSchema(raw: unknown): FormSpec | null {
+  if (!isRecord(raw) || typeof raw.scenario !== 'string' || raw.scenario === '') {
+    return null
+  }
+  if (raw.title !== undefined && typeof raw.title !== 'string') {
+    return null
+  }
+  const fields = parseFormFields(raw.fields)
+  if (fields === null) {
+    return null
+  }
+  applyFormLinkage(fields, raw.fields as unknown[])
+  if (fields.some((field) => hasUnreachableRequiredOptions(field, fields))) {
     return null
   }
   return {
@@ -404,7 +414,7 @@ export function parseFormSchema(raw: unknown): FormSpec | null {
  * <p>判不了就不猜：父值不是"静态可枚举的 enum"（自身来自数据源 / 多选 / 非选项型）时一律放行，
  * 数据源分支的空集留给运行期判据（`checkFormIssues` 的必填/选项校验）。
  */
-function requiredOptionsUnreachable(field: FormFieldSpec, fields: readonly FormFieldSpec[]): boolean {
+function hasUnreachableRequiredOptions(field: FormFieldSpec, fields: readonly FormFieldSpec[]): boolean {
   if (field.required !== true || (field.type !== 'enum' && field.type !== 'multi_select')) {
     return false
   }
@@ -449,13 +459,13 @@ function initialValueOf(field: FormFieldSpec): unknown {
     // 2A 批（裁决 §1.4 / §3「枚举初值合法默认」）：enum 的初值必须落在合法枚举内 ——
     // defaultValue 缺省 / 非法（不在 options 内）时取**首个选项**，不再回落空串。
     case 'enum':
-      if (typeof candidate === 'string' && inOptions(field, candidate)) {
+      if (typeof candidate === 'string' && isInOptions(field, candidate)) {
         return candidate
       }
-      return field.options?.[0]?.value ?? ''
+      return head(field.options)?.value ?? ''
     case 'multi_select':
       return Array.isArray(candidate)
-        ? candidate.filter((item): item is string => typeof item === 'string' && inOptions(field, item))
+        ? candidate.filter((item): item is string => typeof item === 'string' && isInOptions(field, item))
         : []
     // attachment：值只能由用户上传产生（fileId），模型给的 defaultValue 一律忽略
     case 'attachment':
@@ -463,7 +473,7 @@ function initialValueOf(field: FormFieldSpec): unknown {
   }
 }
 
-function inOptions(field: FormFieldSpec, value: string): boolean {
+function isInOptions(field: FormFieldSpec, value: string): boolean {
   return (field.options ?? []).some((option) => option.value === value)
 }
 
@@ -501,7 +511,7 @@ function isEmptyValue(value: unknown): boolean {
   return Array.isArray(value) && value.length === 0
 }
 
-function equalValue(actual: unknown, expected: unknown): boolean {
+function isEqualValue(actual: unknown, expected: unknown): boolean {
   const left = comparable(actual)
   const right = comparable(expected)
   if (left === null || right === null) {
@@ -514,7 +524,7 @@ function equalValue(actual: unknown, expected: unknown): boolean {
 }
 
 /** 条件求值（op 闭集；未知 op 恒 false）。 */
-export function evaluateCondition(condition: FormCondition | undefined, values: Record<string, unknown>): boolean {
+export function isConditionTrue(condition: FormCondition | undefined, values: Record<string, unknown>): boolean {
   if (!condition) {
     return false
   }
@@ -525,11 +535,11 @@ export function evaluateCondition(condition: FormCondition | undefined, values: 
     case 'notEmpty':
       return !isEmptyValue(actual)
     case 'eq':
-      return equalValue(actual, condition.value)
+      return isEqualValue(actual, condition.value)
     case 'in':
-      return (condition.values ?? []).some((item) => equalValue(actual, item))
+      return (condition.values ?? []).some((item) => isEqualValue(actual, item))
     case 'notIn':
-      return !(condition.values ?? []).some((item) => equalValue(actual, item))
+      return !(condition.values ?? []).some((item) => isEqualValue(actual, item))
     case 'between': {
       const [low, high] = condition.values ?? []
       if (typeof actual === 'number' && typeof low === 'number' && typeof high === 'number') {
@@ -551,31 +561,33 @@ export function isFieldVisible(field: FormFieldSpec, values: Record<string, unkn
   if (field.linkageInvalid === true) {
     return false
   }
-  return field.visibleWhen === undefined || evaluateCondition(field.visibleWhen, values)
+  return field.visibleWhen === undefined || isConditionTrue(field.visibleWhen, values)
 }
 
 /** 必填联动：静态 required 或 requiredWhen 成立。 */
 export function isFieldRequired(field: FormFieldSpec, values: Record<string, unknown>): boolean {
-  return field.required === true || evaluateCondition(field.requiredWhen, values)
+  return field.required === true || isConditionTrue(field.requiredWhen, values)
 }
 
 /** 禁用联动：disabledWhen 成立 ⇒ 只读（值保留、不参与修改）。 */
 export function isFieldDisabled(field: FormFieldSpec, values: Record<string, unknown>): boolean {
-  return evaluateCondition(field.disabledWhen, values)
+  return isConditionTrue(field.disabledWhen, values)
 }
+
+export const EMPTY_FORM_FIELD_OPTIONS: readonly FormFieldOption[] = Object.freeze([])
 
 /**
  * 解析字段当前可见的选项：静态 options → optionsFrom.map 的父值分支 → 外部数据源结果。
  * `external` 按**字段 key** 提供（组件取到 sourceId 的分支后回填；数据源闭集由后端把关）。
  *
- * 解析不出选项时返回**空数组**（渲染口径：控件只剩占位项）。
+ * 解析不出选项时返回**共享空数组**（渲染口径：控件只剩占位项）。
  */
 export function resolveFieldOptions(
   field: FormFieldSpec,
   values: Record<string, unknown>,
-  external?: Record<string, FormFieldOption[]>
-): FormFieldOption[] {
-  return resolvableOptions(field, values, external) ?? []
+  external?: Record<string, readonly FormFieldOption[]>
+): readonly FormFieldOption[] {
+  return resolvableOptions(field, values, external) ?? EMPTY_FORM_FIELD_OPTIONS
 }
 
 /**
@@ -590,8 +602,8 @@ export function resolveFieldOptions(
 function resolvableOptions(
   field: FormFieldSpec,
   values: Record<string, unknown>,
-  external?: Record<string, FormFieldOption[]>
-): FormFieldOption[] | null {
+  external?: Record<string, readonly FormFieldOption[]>
+): readonly FormFieldOption[] | null {
   if (field.options) {
     return field.options
   }
@@ -608,9 +620,9 @@ function resolvableOptions(
   }
   const parentValue = values[from.dependsOn]
   if (parentValue === undefined || parentValue === null || parentValue === '') {
-    return []
+    return EMPTY_FORM_FIELD_OPTIONS
   }
-  return from.map[String(parentValue)] ?? []
+  return from.map[String(parentValue)] ?? EMPTY_FORM_FIELD_OPTIONS
 }
 
 /**
@@ -676,7 +688,7 @@ export function pruneCascadeValues(
       }
       const current = next[field.key]
       const pruned = prunedCascadeValue(field, current, next)
-      if (sameValue(pruned, current)) {
+      if (isSameValue(pruned, current)) {
         continue
       }
       next[field.key] = pruned
@@ -713,7 +725,7 @@ function prunedCascadeValue(
   return value.filter((item): item is string => typeof item === 'string' && allowed.has(item))
 }
 
-function sameValue(left: unknown, right: unknown): boolean {
+function isSameValue(left: unknown, right: unknown): boolean {
   if (!Array.isArray(left) || !Array.isArray(right)) {
     return left === right
   }
@@ -758,7 +770,7 @@ const TEL_PATTERN = /^\+?[0-9][0-9\s\-()]{5,19}$/
 const URL_PATTERN = /^https?:\/\/[^\s]+$/
 const IDCARD_PATTERN = /^(\d{15}|\d{17}[\dXx])$/
 
-function matchesFormat(format: TextFormat, text: string): boolean {
+function isFormatMatch(format: TextFormat, text: string): boolean {
   switch (format) {
     case 'email':
       return EMAIL_PATTERN.test(text)
@@ -781,19 +793,19 @@ function isIsoDate(value: string): boolean {
   return DATE_PATTERN.test(value) && !Number.isNaN(Date.parse(value))
 }
 
-function numberOutOfRange(field: FormFieldSpec, value: number): boolean {
+function isNumberOutOfRange(field: FormFieldSpec, value: number): boolean {
   const min = typeof field.min === 'number' ? field.min : undefined
   const max = typeof field.max === 'number' ? field.max : undefined
   return (min !== undefined && value < min) || (max !== undefined && value > max)
 }
 
-function dateOutOfRange(field: FormFieldSpec, value: string): boolean {
+function isDateOutOfRange(field: FormFieldSpec, value: string): boolean {
   const min = typeof field.min === 'string' ? field.min : undefined
   const max = typeof field.max === 'string' ? field.max : undefined
   return (min !== undefined && value < min) || (max !== undefined && value > max)
 }
 
-function stepMismatch(field: FormFieldSpec, value: number): boolean {
+function hasStepMismatch(field: FormFieldSpec, value: number): boolean {
   if (field.step === undefined || field.step <= 0) {
     return false
   }
@@ -860,7 +872,7 @@ function fieldValueIssues(
       if (field.maxLength !== undefined && value.length > field.maxLength) {
         push('VALUE_TOO_LONG', `「${field.label}」过长：${value.length} 字符（上限 ${field.maxLength}）`)
       }
-      if (field.format && !matchesFormat(field.format, value)) {
+      if (field.format && !isFormatMatch(field.format, value)) {
         push('VALUE_FORMAT_MISMATCH', `「${field.label}」不符合 ${field.format} 格式`)
       }
       break
@@ -870,10 +882,10 @@ function fieldValueIssues(
         push('VALUE_TYPE_MISMATCH', `「${field.label}」应为数字`)
         break
       }
-      if (numberOutOfRange(field, value)) {
+      if (isNumberOutOfRange(field, value)) {
         push('VALUE_OUT_OF_RANGE', `「${field.label}」超出范围：${value}`)
       }
-      if (stepMismatch(field, value)) {
+      if (hasStepMismatch(field, value)) {
         push('VALUE_STEP_MISMATCH', `「${field.label}」必须按步长 ${field.step} 取值（实际 ${value}）`)
       }
       if (field.integer === true && !Number.isInteger(value)) {
@@ -892,7 +904,7 @@ function fieldValueIssues(
         push('VALUE_TYPE_MISMATCH', `「${field.label}」应为 yyyy-MM-dd 格式的合法日期`)
         break
       }
-      if (dateOutOfRange(field, value)) {
+      if (isDateOutOfRange(field, value)) {
         push('VALUE_OUT_OF_RANGE', `「${field.label}」超出日期范围：${value}`)
       }
       break

@@ -1,3 +1,4 @@
+import { logCaughtError } from '@/utils/log-caught-error'
 /**
  * 数据面契约（已发布行 / 导入暂存行）。
  *
@@ -55,15 +56,18 @@ export interface DataQuery {
   size?: number
 }
 
+export const EMPTY_ROW_DATA: Readonly<Record<string, unknown>> = Object.freeze({})
+
 /** 把 dataJson 安全解析为对象。 */
-export function parseRowData(row: Pick<ConfigDataRow | ConfigStagingRow, 'dataJson'>): Record<string, unknown> {
+export function parseRowData(row: Pick<ConfigDataRow | ConfigStagingRow, 'dataJson'>): Readonly<Record<string, unknown>> {
   try {
     const parsed: unknown = JSON.parse(row.dataJson)
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>
     }
-    return {}
-  } catch {
-    return {}
+    return EMPTY_ROW_DATA
+  } catch (error) {
+      logCaughtError(error, 'types/data.ts:68')
+    return EMPTY_ROW_DATA
   }
 }

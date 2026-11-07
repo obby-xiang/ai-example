@@ -11,6 +11,7 @@
  *
  * 本文件**不依赖 store**（纯函数：入参 message 就地改写、返回 void），便于仓内 vitest 直测。
  */
+import { uniq } from 'lodash'
 import {
   GENERATIVE_FORM_TOOL,
   type ChatMessage,
@@ -28,6 +29,8 @@ import type { SseFrame } from '@/types/sse'
 import { parseToolArgs } from '@/utils/frontend-tools'
 import { translate } from '@/composables/useCopy'
 import { projectDisplayText } from '@/utils/display-text'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 /** 段序列的下一个 seg（单调递增：封口后另起的段不复用旧编号）。 */
 export function nextSeg(parts: MessagePart[]): number {
@@ -196,17 +199,17 @@ const INTERNAL_MARKER_RE = /(?:^|[^A-Za-z0-9_])(?:TOOL_BUDGET_EXHAUSTED|TOOL_STE
 const TECHNICAL_ERROR_RE = /\b[A-Za-z_$][\w$]*(?:Error|Exception)\b\s*[:：]?|\b(?:error|exception)\s*[:：]|\b(?:runId|toolCallId|fileId|sessionId)\s*[=:]|[A-Za-z]:\\|\/(?:home|var|usr|etc|opt|tmp|private)\//i
 const SHEET_INPUT_RE = /^(?:rowRange 需要|scope=predicate|columnCodes )/m
 
-function internalMarkerPresent(part: ToolPart): boolean {
+function hasInternalMarker(part: ToolPart): boolean {
   return INTERNAL_MARKER_RE.test(`${part.reason ?? ''}\n${part.result ?? ''}`)
     || SHEET_INPUT_RE.test(part.result ?? '')
 }
 
-function technicalFailurePresent(part: ToolPart): boolean {
+function hasTechnicalFailure(part: ToolPart): boolean {
   return TECHNICAL_ERROR_RE.test(`${part.reason ?? ''}\n${part.result ?? ''}`)
 }
 
 export function partDiagnosticOf(part: MessagePart): PartDiagnostic | null {
-  if (part.kind !== 'tool' || (!internalMarkerPresent(part) && !technicalFailurePresent(part))) {
+  if (part.kind !== 'tool' || (!hasInternalMarker(part) && !hasTechnicalFailure(part))) {
     return null
   }
   const staleGate = part.kind2 === 'CONFIRM'
@@ -221,11 +224,11 @@ export function partDiagnosticOf(part: MessagePart): PartDiagnostic | null {
   if (part.status === 'failed' && SHEET_INPUT_RE.test(part.result ?? '')) {
     return 'sheetInput'
   }
-  return part.status === 'blocked' || technicalFailurePresent(part) ? 'internal' : null
+  return part.status === 'blocked' || hasTechnicalFailure(part) ? 'internal' : null
 }
 
 /** 该段的 `result` 自身是否就是机器向文本（`true` ⇒ 卡面「输出」位让位给诊断详情，不同屏双显）。 */
-export function partResultIsInternal(part: MessagePart): boolean {
+export function isPartResultInternal(part: MessagePart): boolean {
   return part.kind === 'tool' && (INTERNAL_MARKER_RE.test(part.result ?? '') || TECHNICAL_ERROR_RE.test(part.result ?? '') || SHEET_INPUT_RE.test(part.result ?? ''))
 }
 
@@ -242,7 +245,7 @@ export function partDiagnosticText(part: MessagePart): string | null {
     .filter((value): value is string => typeof value === 'string'
       && value.trim() !== ''
       && (INTERNAL_MARKER_RE.test(value) || SHEET_INPUT_RE.test(value)))
-  const unique = Array.from(new Set(values))
+  const unique = uniq(values)
   return unique.length > 0 ? unique.join('\n\n') : null
 }
 
@@ -767,7 +770,8 @@ export function submittedValuesFromResult(name: string, result: string | null | 
   let parsed: unknown
   try {
     parsed = JSON.parse(result)
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/parts.ts:771')
     return null
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -791,7 +795,7 @@ export interface SubmittedValuesWriteOptions {
  * 把值写到该消息内**所有**匹配 `toolCallId` 的段（同消息重复段也不漏），不碰其他工具；
  * `overwrite=false` 时已有值的段保持原值。返回是否有段被改写（调用方据此派生投影）。
  */
-export function writeSubmittedValuesToMessage(
+export function canWriteSubmittedValuesToMessage(
   message: ChatMessage,
   toolCallId: string,
   values: Record<string, unknown>,
@@ -1109,7 +1113,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         : frameStatus
       // 2A②：结局帧先于 POST 应答到达时，只读卡已挂载且 submittedValues 尚未写回 —— 同帧把
       // result（提交值原文）落到段上，卡面无需等应答即可显示真值。只有帧本身是 succeeded 才写
-      // （失败 / 取消不伪造），已有值 first-wins；落值走唯一写口 `writeSubmittedValuesToMessage`。
+      // （失败 / 取消不伪造），已有值 first-wins；落值走唯一写口 `canWriteSubmittedValuesToMessage`。
       const submittedValues = status === 'succeeded' && frameStatus === 'succeeded'
         ? submittedValuesFromResult(frame.name, frame.result)
         : null
@@ -1138,7 +1142,7 @@ export function applyFrameToParts(message: ChatMessage, frame: SseFrame): void {
         requiresAction: false
       })
       if (submittedValues) {
-        writeSubmittedValuesToMessage(message, frame.toolCallId, submittedValues, { overwrite: false })
+        canWriteSubmittedValuesToMessage(message, frame.toolCallId, submittedValues, { overwrite: false })
       }
       break
     }

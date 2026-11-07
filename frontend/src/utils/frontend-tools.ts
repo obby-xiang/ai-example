@@ -88,8 +88,10 @@ import { dispatchUiEvent, getPageHandler, useWorkspaceStore, type UiEventLifetim
 import { useTaskStore } from '@/stores/task'
 import { currentAiEpoch, listAiRegions } from '@/utils/ai-regions'
 import { formatUiReceipt, sanitizeUiCode } from '@/utils/ui-receipt'
+import { logCaughtError } from '@/utils/log-caught-error'
 import type { ConfigField } from '@/types/definition'
 import type { TaskType } from '@/types/task'
+import type { WorkspaceSnapshot } from '@/types/workspace'
 import {
   aggregateSheetAsync,
   findRowsAsync,
@@ -220,6 +222,43 @@ export function matchesScope(
   })
 }
 
+type CoercedArg = { ok: true; value: unknown } | { ok: false; reason: string }
+
+function coerceArgValue(spec: FrontendToolDescriptor['args'][number], value: unknown): CoercedArg {
+  if (spec.type === 'number') {
+    const num = typeof value === 'number' ? value : Number(value)
+    return Number.isFinite(num)
+      ? { ok: true, value: num }
+      : { ok: false, reason: `参数 ${spec.name} 应为数字，实际为 ${String(value)}` }
+  }
+  if (spec.type === 'string') {
+    return { ok: true, value: String(value) }
+  }
+  if (spec.type === 'object') {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { ok: true, value }
+      : { ok: false, reason: `参数 ${spec.name} 应为对象，实际为 ${String(value)}` }
+  }
+  if (spec.type === 'object[]') {
+    return Array.isArray(value) && value.every((item) => item && typeof item === 'object' && !Array.isArray(item))
+      ? { ok: true, value }
+      : { ok: false, reason: `参数 ${spec.name} 应为对象数组` }
+  }
+  if (spec.type === 'string[]') {
+    if (!Array.isArray(value)) {
+      return { ok: false, reason: `参数 ${spec.name} 应为字符串数组，实际为 ${String(value)}` }
+    }
+    const list = value.map((item) => String(item)).filter((item) => item !== '')
+    if (spec.required && list.length === 0) {
+      return { ok: false, reason: `参数 ${spec.name} 不能为空（${spec.description}）` }
+    }
+    return { ok: true, value: list }
+  }
+  return typeof value === 'boolean'
+    ? { ok: true, value }
+    : { ok: false, reason: `参数 ${spec.name} 应为布尔值` }
+}
+
 /** 参数校验：必填缺失或类型不符即视为不可用（返回原因）。 */
 function validateArgs(
   descriptor: FrontendToolDescriptor,
@@ -234,55 +273,31 @@ function validateArgs(
       }
       continue
     }
-    if (spec.type === 'number') {
-      const num = typeof value === 'number' ? value : Number(value)
-      if (!Number.isFinite(num)) {
-        return { ok: false, reason: `参数 ${spec.name} 应为数字，实际为 ${String(value)}` }
-      }
-      coerced[spec.name] = num
-    } else if (spec.type === 'string') {
-      coerced[spec.name] = String(value)
-    } else if (spec.type === 'object') {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        return { ok: false, reason: `参数 ${spec.name} 应为对象，实际为 ${String(value)}` }
-      }
-      coerced[spec.name] = value
-    } else if (spec.type === 'object[]') {
-      if (!Array.isArray(value) || value.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
-        return { ok: false, reason: `参数 ${spec.name} 应为对象数组` }
-      }
-      coerced[spec.name] = value
-    } else if (spec.type === 'string[]') {
-      // 列表参数（后端 `String[]`）：必填的语义是**必填非空** —— 空数组等于没给，
-      // 缺参不猜即失败；顺带滤掉空串项（后端 `[]` 与 `[""]` 都不是合法的编码列表）。
-      if (!Array.isArray(value)) {
-        return { ok: false, reason: `参数 ${spec.name} 应为字符串数组，实际为 ${String(value)}` }
-      }
-      const list = value.map((item) => String(item)).filter((item) => item !== '')
-      if (spec.required && list.length === 0) {
-        return { ok: false, reason: `参数 ${spec.name} 不能为空（${spec.description}）` }
-      }
-      coerced[spec.name] = list
-    } else if (typeof value !== 'boolean') {
-      return { ok: false, reason: `参数 ${spec.name} 应为布尔值` }
+    const result = coerceArgValue(spec, value)
+    if (!result.ok) {
+      return result
     }
+    coerced[spec.name] = result.value
   }
   return { ok: true, coerced }
 }
 
+const EMPTY_TOOL_ARGS: Readonly<Record<string, unknown>> = Object.freeze({})
+
 /** 解析后端帧里的 args（JSON 字符串）。 */
-export function parseToolArgs(raw: string | undefined | null): Record<string, unknown> {
+export function parseToolArgs(raw: string | undefined | null): Readonly<Record<string, unknown>> {
   if (!raw) {
-    return {}
+    return EMPTY_TOOL_ARGS
   }
   try {
     const parsed: unknown = JSON.parse(raw)
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>
     }
-    return {}
-  } catch {
-    return {}
+    return EMPTY_TOOL_ARGS
+  } catch (error) {
+      logCaughtError(error, 'utils/frontend-tools.ts:287')
+    return EMPTY_TOOL_ARGS
   }
 }
 
@@ -918,7 +933,8 @@ function isTaskDetailReady(page: WorkspacePageId): boolean {
   }
   try {
     return probe({}) === true
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/frontend-tools.ts:924')
     return false
   }
 }
@@ -928,7 +944,7 @@ function isTaskDetailReady(page: WorkspacePageId): boolean {
  *
  * @returns true = 详情已应用（或该维度不适用）；false = 上界内仍未应用（按最后一拍现场判）
  */
-export async function waitForTaskDetailApplied(
+export async function canWaitForTaskDetailApplied(
   page: WorkspacePageId,
   timeoutMs = PAGE_READY_TIMEOUT_MS
 ): Promise<boolean> {
@@ -1076,6 +1092,43 @@ function taskDetailNotReady(label: string | null, taskId: number): FrontendToolE
  * 与 `navigate_to(page, taskId)` 的分工：本动作**不需要** page 入参（类型是事实，不是参数），
  * 模型只给任务号即可；`navigate_to` 给了 page 也仍以服务端类型为准（见 {@link runNavigateTo}）。
  */
+function restoreTaskWaitResult(
+  message: string,
+  wait: Awaited<ReturnType<typeof waitForTaskBound>>,
+  label: string,
+  taskId: number
+): FrontendToolExecution {
+  if (wait.pageReady && wait.taskBound && wait.detailReady) {
+    return makeExecution({
+      outcome: 'ok',
+      availability: 'available',
+      result: `${message}（页面已就绪，任务 #${taskId} 已绑定且详情已加载；类型以服务端为准：${label}任务）`
+    })
+  }
+  if (wait.pageReady && wait.taskBound) {
+    return taskDetailNotReady(label, taskId)
+  }
+  if (wait.pageReady) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'degraded',
+      result: `${message}，但任务 #${taskId} 的绑定没有完成（${label}向导已就绪，未绑定该任务）。`
+        + '请核对任务号，或提示用户手动在任务中心打开该任务后重试。'
+    })
+  }
+  return makeExecution({
+    outcome: 'failed',
+    availability: 'degraded',
+    code: 'UI_PAGE_NOT_READY',
+    result: formatUiReceipt({
+      tool: '恢复任务',
+      conclusion: `导航已提交，但${label}向导在等待上界内仍未就绪（任务 #${taskId}）`,
+      reason: '页面加载慢，或该页尚未注册可操作能力',
+      next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
+    })
+  })
+}
+
 async function runRestoreTask(args: Record<string, unknown>, lifetime: UiEventLifetime): Promise<FrontendToolExecution> {
   const taskId = toNumber(args.taskId)
   if (taskId === null) {
@@ -1094,7 +1147,7 @@ async function runRestoreTask(args: Record<string, unknown>, lifetime: UiEventLi
   const context = workspace.snapshot()
   if (context.pageId === page && context.taskId === taskId) {
     // 幂等早退也要等详情：页面/任务没变不代表选中集与条件已经恢复（详见 TASK_DETAIL_READY_PROBES）
-    if (!(await waitForTaskDetailApplied(page))) {
+    if (!(await canWaitForTaskDetailApplied(page))) {
       return taskDetailNotReady(label, taskId)
     }
     return makeExecution({
@@ -1113,35 +1166,7 @@ async function runRestoreTask(args: Record<string, unknown>, lifetime: UiEventLi
     })
   }
   const wait = await waitForTaskBound(page, taskId)
-  if (wait.pageReady && wait.taskBound && wait.detailReady) {
-    return makeExecution({
-      outcome: 'ok',
-      availability: 'available',
-      result: `${outcome.message}（页面已就绪，任务 #${taskId} 已绑定且详情已加载；类型以服务端为准：${label}任务）`
-    })
-  }
-  if (wait.pageReady && wait.taskBound) {
-    return taskDetailNotReady(label, taskId)
-  }
-  if (wait.pageReady) {
-    return makeExecution({
-      outcome: 'failed',
-      availability: 'degraded',
-      result: `${outcome.message}，但任务 #${taskId} 的绑定没有完成（${label}向导已就绪，未绑定该任务）。`
-        + '请核对任务号，或提示用户手动在任务中心打开该任务后重试。'
-    })
-  }
-  return makeExecution({
-    outcome: 'failed',
-    availability: 'degraded',
-    code: 'UI_PAGE_NOT_READY',
-    result: formatUiReceipt({
-      tool: '恢复任务',
-      conclusion: `导航已提交，但${label}向导在等待上界内仍未就绪（任务 #${taskId}）`,
-      reason: '页面加载慢，或该页尚未注册可操作能力',
-      next: '本轮不要重复导航；请稍后重试或提示用户手动打开该页面'
-    })
-  })
+  return restoreTaskWaitResult(outcome.message, wait, label, taskId)
 }
 
 /**
@@ -1186,7 +1211,7 @@ async function runNavigateTo(args: Record<string, unknown>, lifetime: UiEventLif
   // 批 A（A-01/A-02）：同页同参幂等直返（导航重试风暴的根因就是"每次都当真执行"）。
   // 幂等也等详情：页面与任务都没变不代表选中集/条件已恢复（否则这一条会替一次未恢复的页面背书）。
   if (page === context.pageId && (intent.taskId === null || intent.taskId === context.taskId)) {
-    if (intent.taskId !== null && !(await waitForTaskDetailApplied(page))) {
+    if (intent.taskId !== null && !(await canWaitForTaskDetailApplied(page))) {
       return taskDetailNotReady(taskLabel, intent.taskId)
     }
     const bound = intent.taskId === null ? '' : `，任务 #${intent.taskId} 已绑定`
@@ -1407,18 +1432,7 @@ function stepMismatchHint(name: string): string {
 }
 
 /** 动作执行：可用性（unavailable）→ 页面 handler（available）→ 契约层（available/degraded）。 */
-async function runWorkspaceAction(
-  action: WorkspaceAction,
-  args: Record<string, unknown>,
-  lifetime: UiEventLifetime
-): Promise<FrontendToolExecution> {
-  // 导航是唯一需要"先查权威任务类型、后等页面就绪"的动作：单独成体（批次 5B）。
-  // 其余三条（选配置 / 设条件 / 推进步骤）留在本函数里按"本页动作"处理。
-  if (action.name === 'navigate_to') {
-    return await runNavigateTo(args, lifetime)
-  }
-  const workspace = useWorkspaceStore()
-  const context = workspace.snapshot()
+function workspaceActionGate(action: WorkspaceAction, context: WorkspaceSnapshot): FrontendToolExecution | null {
   if (!action.allowPages.includes(context.pageId)) {
     return makeExecution({
       outcome: 'failed',
@@ -1439,6 +1453,24 @@ async function runWorkspaceAction(
       availability: 'unavailable',
       result: `${action.displayName}需要绑定任务：当前没有进行中的任务，请先在任务中心创建或打开一条任务。`
     })
+  }
+  return null
+}
+
+async function runWorkspaceAction(
+  action: WorkspaceAction,
+  args: Record<string, unknown>,
+  lifetime: UiEventLifetime
+): Promise<FrontendToolExecution> {
+  // 导航是唯一需要"先查权威任务类型、后等页面就绪"的动作：单独成体（批次 5B）。
+  // 其余三条（选配置 / 设条件 / 推进步骤）留在本函数里按"本页动作"处理。
+  if (action.name === 'navigate_to') {
+    return await runNavigateTo(args, lifetime)
+  }
+  const workspace = useWorkspaceStore()
+  const gate = workspaceActionGate(action, workspace.snapshot())
+  if (gate) {
+    return gate
   }
 
   for (const handlerName of action.handlerNames) {
@@ -1500,8 +1532,10 @@ function hasExplicitConditionPayload(args: Record<string, unknown>): boolean {
     && args.conditions !== null
 }
 
-function toStringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((item) => String(item)).filter((item) => item !== '') : []
+const EMPTY_STRING_LIST: readonly string[] = Object.freeze([])
+
+function toStringList(value: unknown): readonly string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter((item) => item !== '') : EMPTY_STRING_LIST
 }
 
 /**
@@ -1525,6 +1559,7 @@ export async function resolveSheetContext(
   try {
     raw = await handler({ defCode })
   } catch (error) {
+    logCaughtError(error, 'frontend-tool:execute')
     return { ok: false, reason: `读取表格失败：${error instanceof Error ? error.message : String(error)}` }
   }
   if (!raw || typeof raw !== 'object') {
@@ -1624,6 +1659,7 @@ async function runSheetTool(
         result: '表格操作已停止或已超时，本次未返回部分计算结果。'
       })
     }
+    logCaughtError(error, 'frontend-tool:execute')
     throw error
   }
   // 表格采样元数据（治理批 §4.2）：只有成功读数才有"出域体积"可言 —— 失败路径不带，
@@ -1689,6 +1725,7 @@ async function runRegisteredTool(
     // 批3③a A4：执行器可返回结构化结局（如实报失败不必 throw）；字符串保持成功兼容解读。
     return normalizeExecutorReturn(value)
   } catch (error) {
+    logCaughtError(error, 'frontend-tool:execute')
     return makeExecution({
       outcome: 'failed',
       availability: 'degraded',
@@ -1828,6 +1865,7 @@ async function runUiEventAction(
       result: wait.kind === 'ready' ? `${outcome.message}（页面已就绪，可继续执行本页动作）` : outcome.message
     })
   } catch (error) {
+    logCaughtError(error, 'frontend-tool:execute')
     return makeExecution({
       outcome: 'failed',
       availability: 'degraded',
@@ -1859,6 +1897,7 @@ async function runPageHandler(
       reason: interpreted.reason
     })
   } catch (error) {
+    logCaughtError(error, 'frontend-tool:execute')
     return makeExecution({
       outcome: 'failed',
       availability: 'degraded',

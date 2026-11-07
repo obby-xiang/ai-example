@@ -5,6 +5,8 @@ import type { PageResult } from '@/types/api'
 import type { Job, JobType } from '@/types/job'
 import type { TaskListQuery, Task, TaskFile, TaskSummary } from '@/types/task'
 import type { TaskEventFrame } from '@/types/sse'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 /** 任务列表：type/status/keyword 过滤 + 分页（后端 createdAt DESC, id DESC）。 */
 export function listTasks(params: TaskListQuery = {}): Promise<PageResult<TaskSummary>> {
@@ -147,7 +149,8 @@ export function openTaskEvents(
     const dispatch = (callback: () => void): void => {
       try {
         callback()
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'api/tasks.ts:150')
         // 单个订阅者的回调异常不阻断其他订阅者，也不冒充 JSON 解析失败
       }
     }
@@ -155,7 +158,8 @@ export function openTaskEvents(
       let frame: TaskEventFrame
       try {
         frame = JSON.parse(event.data) as TaskEventFrame
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'api/tasks.ts:158')
         // 非 JSON 帧（心跳注释等）忽略
         return
       }
@@ -215,7 +219,8 @@ export function openTaskEvents(
       subscriber.opened = true
       try {
         handle.onopen?.(new Event('open'))
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'api/tasks.ts:218')
         // 单个订阅者的 OPEN 回调异常不影响共享通道
       }
     })

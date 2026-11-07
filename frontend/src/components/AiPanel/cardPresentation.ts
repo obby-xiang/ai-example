@@ -3,14 +3,14 @@ import type { ToolPart } from '@/types/ai'
 export type BusinessCardTone = 'neutral' | 'blue' | 'green' | 'amber' | 'red' | 'purple' | 'gray'
 export type BusinessCardFamily = 'tool' | 'hitl' | 'form'
 
-export function unknownNeedsReview(part: ToolPart): boolean {
+export function hasUnknownReviewRequirement(part: ToolPart): boolean {
   return part.status === 'unknown' && (typeof part.outcome === 'string' && part.outcome.trim() !== ''
     || typeof part.userTextCode === 'string' && part.userTextCode.trim() !== ''
     || typeof part.result === 'string' && part.result.trim() !== ''
     || typeof part.reason === 'string' && part.reason.trim() !== '')
 }
 
-export function unknownUnrecoverable(part: ToolPart): boolean {
+export function isUnknownUnrecoverable(part: ToolPart): boolean {
   return part.userTextCode === 'UNRECOVERABLE' || part.userTextCode === 'RECOVERY_UNAVAILABLE'
     || String(part.outcome ?? '').toLowerCase() === 'unrecoverable'
 }
@@ -118,7 +118,7 @@ export function businessCardStatusTone(key: string, family: BusinessCardFamily):
   return 'neutral'
 }
 
-export function businessCardDefaultExpanded(
+export function isBusinessCardDefaultExpanded(
   key: string,
   family: BusinessCardFamily,
   needsReview = false

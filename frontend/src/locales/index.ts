@@ -18,6 +18,8 @@
 import { createI18n } from 'vue-i18n'
 import zhCN from './zh-CN.json'
 import enUS from './en-US.json'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 export const SUPPORTED_LOCALES = ['zh-CN', 'en-US'] as const
 export type AppLocale = (typeof SUPPORTED_LOCALES)[number]
@@ -49,7 +51,8 @@ export function readStoredLocale(): AppLocale {
   try {
     const stored = globalThis.localStorage?.getItem(LOCALE_STORAGE_KEY)
     return isAppLocale(stored) ? stored : DEFAULT_LOCALE
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'locales/index.ts:52')
     return DEFAULT_LOCALE
   }
 }
@@ -77,7 +80,8 @@ export function applyLocale(locale: AppLocale): AppLocale {
   }
   try {
     globalThis.localStorage?.setItem(LOCALE_STORAGE_KEY, locale)
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'locales/index.ts:80')
     // 隐私模式/配额满：内存态已是新语言，持久化失败不阻断切换
   }
   return locale

@@ -39,6 +39,7 @@ import { useI18n } from 'vue-i18n'
  * 失败态提供「重新加载表格」重试（重跑 `loadSpreadCore`），旧一轮晚到结果由代数闸丢弃。
  */
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { head } from 'lodash'
 import type GC from '@grapecity/spread-sheets'
 import {
   applyColumnsToSheet,
@@ -53,6 +54,7 @@ import {
 } from '@/utils/excel'
 import { loadSpreadCore, type SpreadSheets } from '@/utils/spreadjs'
 import { userFacingErrorText } from '@/utils/ui-error'
+import { logCaughtError } from '@/utils/log-caught-error'
 import type { ConfigField } from '@/types/definition'
 import { parseRowData } from '@/types/data'
 import type { SheetAdapter, SheetCellUpdate, SheetSelection } from '@/utils/sheet-tools'
@@ -259,6 +261,47 @@ function retryEngine(): void {
   void initEngine()
 }
 
+function bindSheetEvents(gs: SpreadSheets, sheet: SpreadWorksheet): void {
+  const events = gs.Spread.Sheets.Events
+  const onChanged = (): void => {
+    if (!restoring) {
+      sheetContentVersion += 1
+      emit('data-changed', 'user')
+    }
+  }
+  sheet.bind(events.CellChanged, onChanged)
+  sheet.bind(events.RangeChanged, onChanged)
+  sheet.bind(events.RowChanged, onChanged)
+  sheet.bind(events.SelectionChanged, () => {
+    if (!restoring) {
+      emit('selection-changed', selectionOf(sheet.getSelections()))
+    }
+  })
+}
+
+function flushPendingLoad(): void {
+  if (!pendingLoad) {
+    return
+  }
+  const request = pendingLoad
+  pendingLoad = null
+  try {
+    applyLoad(request.fields, request.rows)
+  } finally {
+    finishLoad()
+  }
+}
+
+function observeHostResize(hostElement: HTMLElement): void {
+  resizeObserver = new ResizeObserver(() => {
+    if (resizeTimer !== null) {
+      clearTimeout(resizeTimer)
+    }
+    resizeTimer = setTimeout(() => workbook.value?.refresh(), 50)
+  })
+  resizeObserver.observe(hostElement)
+}
+
 async function initEngine(): Promise<void> {
   const generation = engineGeneration
   try {
@@ -273,54 +316,15 @@ async function initEngine(): Promise<void> {
       return
     }
     const instance = new gs.Spread.Sheets.Workbook(host.value)
-    const sheet = instance.getActiveSheet()
-    const events = gs.Spread.Sheets.Events
-    const onChanged = (): void => {
-      if (!restoring) {
-        // 用户手改：表内内容版本 +1，事件来源 = user（页面按「界面」记工作区动作）
-        sheetContentVersion += 1
-        emit('data-changed', 'user')
-      }
-    }
-    sheet.bind(events.CellChanged, onChanged)
-    sheet.bind(events.RangeChanged, onChanged)
-    sheet.bind(events.RowChanged, onChanged)
-    // B12：选区变化是"预览计划可能不再匹配"的唯一信号源（只报坐标，不带值）。
-    // 程序化载入 / 上色期间（restoring）不触发 —— 那是系统动作，不是用户换选区。
-    sheet.bind(events.SelectionChanged, () => {
-      if (restoring) {
-        return
-      }
-      emit('selection-changed', selectionOf(sheet.getSelections()))
-    })
-
+    bindSheetEvents(gs, instance.getActiveSheet())
     workbook.value = instance
     spreadNs = gs
     applyReadOnly()
     engineState.value = 'ready'
-    if (pendingLoad) {
-      const request = pendingLoad
-      pendingLoad = null
-      try {
-        applyLoad(request.fields, request.rows)
-      } finally {
-        // 挂起的载入在 `loadData` 里记了一层，这里补落定（L-115）
-        finishLoad()
-      }
-    }
+    flushPendingLoad()
     settleReady()
     emit('ready')
-
-    // 宿主尺寸从 0 变为有效值（el-tabs 懒渲染）时需要一次 refresh
-    resizeObserver = new ResizeObserver(() => {
-      if (resizeTimer !== null) {
-        clearTimeout(resizeTimer)
-      }
-      resizeTimer = setTimeout(() => {
-        workbook.value?.refresh()
-      }, 50)
-    })
-    resizeObserver.observe(host.value)
+    observeHostResize(host.value)
   } catch (error) {
     if (generation !== engineGeneration) {
       return
@@ -351,7 +355,8 @@ onBeforeUnmount(() => {
   resizeObserver = null
   try {
     workbook.value?.destroy()
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'components/SpreadGrid.vue:335')
     // 销毁失败无需上抛（宿主即将移除）
   }
   workbook.value = null
@@ -523,7 +528,7 @@ function validateLocal(): ExcelRowIssue[] {
 function selectionOf(
   ranges: ReadonlyArray<{ row: number; rowCount: number; col: number; colCount: number }> | null | undefined
 ): SheetSelection | null {
-  const first = ranges && ranges.length > 0 ? ranges[0] : null
+  const first = head(ranges)
   if (!first) {
     return null
   }
@@ -617,7 +622,8 @@ function isLiveSheet(sheet: SpreadWorksheet): boolean {
         return true
       }
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'components/SpreadGrid.vue:601')
     return false
   }
   return false
@@ -662,6 +668,7 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
       try {
         sheet = live()
       } catch (error) {
+          logCaughtError(error, 'components/SpreadGrid.vue:645')
         return { applied, error }
       }
       // 边界只算一次（复审 I-B/M2）：getRowCount/getColumnCount 与 live() 一样可能在
@@ -672,6 +679,7 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
         rows = Math.max(0, sheet.getRowCount() - 1)
         cols = fields.length > 0 ? fields.length : sheet.getColumnCount()
       } catch (error) {
+          logCaughtError(error, 'components/SpreadGrid.vue:655')
         return { applied, error }
       }
       const list = updates.filter((update) => update.row >= 0 && update.row < rows && update.col >= 0 && update.col < cols)
@@ -701,12 +709,13 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
               continue
             }
             const run = bucket.slice(runStart, index)
-            const first = run[0]
+            const first = head(run)
             if (first) {
               try {
                 sheet.setArray(first.row + 1, col, run.map((item) => [item.value]))
                 applied.push(...run)
               } catch (error) {
+                  logCaughtError(error, 'components/SpreadGrid.vue:690')
                 // 这一 run 没落成 ⇒ 后面的 run/列都不再写（与"引擎失活"同向），如实回报已落部分
                 failed = true
                 failure = error
@@ -720,6 +729,7 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
           }
         }
       } catch (error) {
+          logCaughtError(error, 'components/SpreadGrid.vue:703')
         // suspendPaint 等前置动作失败：没有任何一格落笔
         failed = true
         failure = error
@@ -730,7 +740,8 @@ function buildSheetAdapter(initial: SpreadWorksheet): SheetAdapter {
         if (suspended) {
           try {
             sheet.resumePaint()
-          } catch {
+          } catch (error) {
+              logCaughtError(error, 'components/SpreadGrid.vue:714')
             // 绘制失败只是屏幕态问题，不影响"已落笔"的事实与回执
           }
         }

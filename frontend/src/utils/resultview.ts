@@ -19,6 +19,8 @@ import type {
   ResultViewKind,
   ResultViewStatus
 } from '@/types/resultview'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 /** 契约版本（major-only：major 不同即不兼容，走 fallback）。 */
 export const RESULTVIEW_VERSION = '1.0'
@@ -135,20 +137,27 @@ export function resolveJsonPointer(document: unknown, ref: string): unknown {
   return cursor
 }
 
+export const EMPTY_RESULT_ROWS: readonly Record<string, unknown>[] = Object.freeze([])
+
 /** 把"行容器"（数组 / `{rows|issues|items}`）规范成行数组。 */
-function rowsOf(document: unknown): Record<string, unknown>[] {
+function rowsOf(document: unknown): readonly Record<string, unknown>[] {
+  let source: unknown[] | null = null
   if (Array.isArray(document)) {
-    return document.filter((row): row is Record<string, unknown> => row !== null && typeof row === 'object')
-  }
-  if (document !== null && typeof document === 'object') {
+    source = document
+  } else if (document !== null && typeof document === 'object') {
     for (const key of ['rows', 'issues', 'items'] as const) {
       const candidate = (document as Record<string, unknown>)[key]
       if (Array.isArray(candidate)) {
-        return candidate.filter((row): row is Record<string, unknown> => row !== null && typeof row === 'object')
+        source = candidate
+        break
       }
     }
   }
-  return []
+  if (source === null) {
+    return EMPTY_RESULT_ROWS
+  }
+  const rows = source.filter((row): row is Record<string, unknown> => row !== null && typeof row === 'object')
+  return rows.length === 0 ? EMPTY_RESULT_ROWS : rows
 }
 
 /**
@@ -160,10 +169,10 @@ function rowsOf(document: unknown): Record<string, unknown>[] {
 export function resolveViewRows(
   view: ResultView,
   documentText?: string | null
-): Record<string, unknown>[] | null {
+): readonly Record<string, unknown>[] | null {
   const data = view.data
   if (!data) {
-    return []
+    return EMPTY_RESULT_ROWS
   }
   if (data.inline !== undefined && data.inline !== null) {
     return rowsOf(data.inline)
@@ -175,13 +184,14 @@ export function resolveViewRows(
     let document: unknown
     try {
       document = JSON.parse(documentText)
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/resultview.ts:185')
       return null
     }
     const target = resolveJsonPointer(document, data.ref)
     return target === undefined ? null : rowsOf(target)
   }
-  return []
+  return EMPTY_RESULT_ROWS
 }
 
 // ── 归一化（白名单 + 规模收敛 + 降级） ────────────────────────────────────
@@ -211,7 +221,8 @@ function majorOf(version: unknown): string | null {
 function viewBytes(view: ResultView): number {
   try {
     return new TextEncoder().encode(JSON.stringify(view)).length
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/resultview.ts:221')
     return 0
   }
 }
@@ -253,46 +264,32 @@ function repairEmptyText(view: ResultView): ResultView {
  *
  * @param documentText `result` 原文（供 `data.ref` 求值；缺省 = 只有 inline 能解）
  */
-export function normalizeResultView(raw: unknown, documentText?: string | null): NormalizedResultView {
-  const fallbackText = fallbackTextOf(raw)
+function resultViewCandidate(raw: unknown): Record<string, unknown> | null {
   if (raw === null || typeof raw !== 'object') {
-    return { view: null, fallbackText }
+    return null
   }
   const candidate = raw as Record<string, unknown>
-  if (majorOf(candidate.version) !== '1') {
-    return { view: null, fallbackText }
-  }
-  if (typeof candidate.kind !== 'string' || !(IMPLEMENTED_KINDS as readonly string[]).includes(candidate.kind)) {
-    return { view: null, fallbackText }
+  if (majorOf(candidate.version) !== '1' || typeof candidate.kind !== 'string'
+    || !(IMPLEMENTED_KINDS as readonly string[]).includes(candidate.kind)) {
+    return null
   }
   if (typeof candidate.status !== 'string' || !(STATUSES as readonly string[]).includes(candidate.status)) {
-    return { view: null, fallbackText }
+    return null
   }
   const fallback = candidate.fallback
-  if (fallback === null || typeof fallback !== 'object'
-    || typeof (fallback as Record<string, unknown>).text !== 'string'
-    || ((fallback as Record<string, unknown>).text as string).trim().length === 0) {
-    return { view: null, fallbackText }
-  }
-  const kind = candidate.kind as ResultViewKind
-  let columns: ResultViewColumn[] | undefined
-  if (kind === 'table') {
-    const rawColumns = candidate.columns
-    if (!Array.isArray(rawColumns) || rawColumns.length === 0 || !rawColumns.every(isColumn)) {
-      return { view: null, fallbackText }
-    }
-    columns = rawColumns.slice(0, RESULTVIEW_LIMITS.maxColumns)
-  }
+  return fallback !== null && typeof fallback === 'object'
+    && typeof (fallback as Record<string, unknown>).text === 'string'
+    && ((fallback as Record<string, unknown>).text as string).trim().length > 0
+    ? candidate
+    : null
+}
 
-  const view = repairEmptyText({ ...(candidate as unknown as ResultView), columns })
-  if (kind !== 'table') {
-    return viewBytes(view) > RESULTVIEW_LIMITS.maxBytes ? { view: null, fallbackText } : { view, fallbackText }
-  }
-
-  const rows = resolveViewRows(view, documentText)
-  if (rows === null) {
-    return { view: null, fallbackText }
-  }
+function normalizeTableView(
+  view: ResultView,
+  rows: readonly Record<string, unknown>[],
+  candidate: Record<string, unknown>,
+  columns: ResultViewColumn[] | undefined
+): ResultView {
   let status = view.status
   let meta = view.meta
   const clippedColumns = (columns?.length ?? 0) < ((candidate.columns as unknown[]).length)
@@ -320,9 +317,33 @@ export function normalizeResultView(raw: unknown, documentText?: string | null):
   if (clippedColumns && status === 'ok') {
     status = 'partial'
   }
-  const finalView: ResultView = trimmed === view ? { ...view, status, meta } : { ...trimmed, status }
-  // §4-规则 8 的第三把尺：超 256KB ⇒ 不渲（走 fallback），绝不把超大载荷交给渲染层。
-  // 行数收敛之后仍超预算的情形也由这里兜住（行 / 列 / 字节三把尺都可独立触发降级）。
+  return trimmed === view ? { ...view, status, meta } : { ...trimmed, status }
+}
+
+export function normalizeResultView(raw: unknown, documentText?: string | null): NormalizedResultView {
+  const fallbackText = fallbackTextOf(raw)
+  const candidate = resultViewCandidate(raw)
+  if (candidate === null) {
+    return { view: null, fallbackText }
+  }
+  const kind = candidate.kind as ResultViewKind
+  let columns: ResultViewColumn[] | undefined
+  if (kind === 'table') {
+    const rawColumns = candidate.columns
+    if (!Array.isArray(rawColumns) || rawColumns.length === 0 || !rawColumns.every(isColumn)) {
+      return { view: null, fallbackText }
+    }
+    columns = rawColumns.slice(0, RESULTVIEW_LIMITS.maxColumns)
+  }
+  const view = repairEmptyText({ ...(candidate as unknown as ResultView), columns })
+  if (kind !== 'table') {
+    return viewBytes(view) > RESULTVIEW_LIMITS.maxBytes ? { view: null, fallbackText } : { view, fallbackText }
+  }
+  const rows = resolveViewRows(view, documentText)
+  if (rows === null) {
+    return { view: null, fallbackText }
+  }
+  const finalView = normalizeTableView(view, rows, candidate, columns)
   return viewBytes(finalView) > RESULTVIEW_LIMITS.maxBytes ? { view: null, fallbackText } : { view: finalView, fallbackText }
 }
 
@@ -354,42 +375,30 @@ function labelOrNull(label: string): string | null {
  * 所以视图在**检出点**按同一份契约确定性构造，并经 `ToolPart.resultView` 随段持久化。
  * 后端契约模型仍是口径权威（上限 / 消毒 / 降级判据两侧同值）。
  */
-export function buildPublishConflictView(input: {
-  /** 视图 id（约定 `rv-<toolCallId>`） */
-  id: string
-  issues: PublishConflictIssue[]
-  /** 真实冲突总数（issues 可能已被上游裁剪） */
-  total: number
-}): ResultView {
-  const shown = input.issues.slice(0, PUBLISH_CONFLICT_SHOWN_ROWS).map((issue) => ({
+function publishConflictRows(issues: readonly PublishConflictIssue[]): Array<Record<string, unknown>> {
+  return issues.slice(0, PUBLISH_CONFLICT_SHOWN_ROWS).map((issue) => ({
     defCode: sanitizeResultViewText(issue.defCode),
     rowKey: sanitizeResultViewText(issue.rowKey ?? '-') || '-',
     message: sanitizeResultViewText(issue.message)
   }))
-  const totalRows = Math.max(input.total, input.issues.length)
-  const truncated = totalRows > shown.length
-    ? { shownRows: shown.length, totalRows }
-    : undefined
-  const columns: ResultViewColumn[] = [
-    {
-      key: 'defCode',
-      type: 'string',
-      label: labelOrNull('i18n:resultview.publishConflict.col.defCode') ?? undefined,
-      width: 4
-    },
-    {
-      key: 'rowKey',
-      type: 'string',
-      label: labelOrNull('i18n:resultview.publishConflict.col.rowKey') ?? undefined,
-      width: 3
-    },
-    {
-      key: 'message',
-      type: 'string',
-      label: labelOrNull('i18n:resultview.publishConflict.col.message') ?? undefined,
-      width: 5
-    }
+}
+
+function publishConflictColumns(): ResultViewColumn[] {
+  return [
+    { key: 'defCode', type: 'string', label: labelOrNull('i18n:resultview.publishConflict.col.defCode') ?? undefined, width: 4 },
+    { key: 'rowKey', type: 'string', label: labelOrNull('i18n:resultview.publishConflict.col.rowKey') ?? undefined, width: 3 },
+    { key: 'message', type: 'string', label: labelOrNull('i18n:resultview.publishConflict.col.message') ?? undefined, width: 5 }
   ]
+}
+
+export function buildPublishConflictView(input: {
+  id: string
+  issues: PublishConflictIssue[]
+  total: number
+}): ResultView {
+  const shown = publishConflictRows(input.issues)
+  const totalRows = Math.max(input.total, input.issues.length)
+  const truncated = totalRows > shown.length ? { shownRows: shown.length, totalRows } : undefined
   return {
     version: RESULTVIEW_VERSION,
     id: input.id,
@@ -398,7 +407,7 @@ export function buildPublishConflictView(input: {
     title: labelOrNull('i18n:resultview.publishConflict.title') ?? undefined,
     status: truncated ? 'partial' : 'ok',
     data: { inline: { rows: shown } },
-    columns,
+    columns: publishConflictColumns(),
     a11y: { label: 'i18n:resultview.publishConflict.label', role: 'table' },
     fallback: { text: 'i18n:resultview.publishConflict.fallback', format: 'plain' },
     meta: {

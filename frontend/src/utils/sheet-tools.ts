@@ -15,12 +15,15 @@
  * 行列口径：适配器行 = **数据行下标（0 基）**，对外文案统一 `excelRowNumber(row)`（Excel 行号）；
  * 列 = 适配器列下标（0 基），业务列由字段编码经表头归一化解析。
  */
+import { head, last, uniq } from 'lodash'
 import type { ConfigField } from '@/types/definition'
-import type { FieldQueryCondition } from '@/types/condition'
+import type { FieldCondition, FieldQueryCondition } from '@/types/condition'
 import { conditionSummary } from '@/types/condition'
 import type { SheetChange, SheetDistribution, SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
 import { columnLetter, excelRowNumber, validateCell, validateRows } from '@/utils/excel'
 import { translate } from '@/composables/useCopy'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 // ── 常量（设计稿 §3.3，读侧硬顶 / 写侧分层） ─────────────────────────────────
 
@@ -288,6 +291,33 @@ export interface CapSheetInput {
  * - `limits.whole = true`：调用方把**整条结果**（表头 + 明细）一次交进来，
  *   字符闸对“正文 + 截断标记 + 尾行”整体生效（缺省只对明细块生效，保留旧口径）。
  */
+function capWholeBody(
+  input: CapSheetInput,
+  charLimit: number,
+  initialBody: string,
+  initialReturned: number,
+  tail: (count: number) => string,
+  charsMarker: (count: number) => string
+): { body: string; returned: number; reason?: 'chars' } {
+  let body = initialBody
+  let returned = initialReturned
+  let reason: 'chars' | undefined
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const marker = charsMarker(returned)
+    const budget = charLimit - marker.length - tail(returned).length - 2
+    if (body.length <= budget) break
+    const clipped = budget > 0 ? body.slice(0, budget) : ''
+    const lastBreak = clipped.lastIndexOf('\n')
+    body = lastBreak > 0 ? clipped.slice(0, lastBreak) : clipped
+    reason = 'chars'
+    const keptLines = body === '' ? 0 : body.split('\n').length
+    const nextReturned = Math.min(input.returned, Math.max(0, keptLines - (input.prefixLines ?? 0)))
+    if (nextReturned === returned) break
+    returned = nextReturned
+  }
+  return { body, returned, ...(reason ? { reason } : {}) }
+}
+
 export function capSheetResult(
   input: CapSheetInput,
   limits: { rows?: number; chars?: number; whole?: boolean } = {}
@@ -309,20 +339,10 @@ export function capSheetResult(
   const charsMarker = (count: number): string =>
     `…[已截断：原 ${originalLines} 行 / ${originalChars} 字符，已回 ${count} ${input.unit}]`
   if (limits.whole) {
-    // 整条结果计入字符闸：先按标记 + 尾行预留字数，再从末尾整行回退。
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const marker = charsMarker(returned)
-      const budget = charLimit - marker.length - tail(returned).length - 2
-      if (body.length <= budget) break
-      const clipped = budget > 0 ? body.slice(0, budget) : ''
-      const lastBreak = clipped.lastIndexOf('\n')
-      body = lastBreak > 0 ? clipped.slice(0, lastBreak) : clipped
-      reason = 'chars'
-      const keptLines = body === '' ? 0 : body.split('\n').length
-      const nextReturned = Math.min(input.returned, Math.max(0, keptLines - (input.prefixLines ?? 0)))
-      if (nextReturned === returned) break
-      returned = nextReturned
-    }
+    const capped = capWholeBody(input, charLimit, body, returned, tail, charsMarker)
+    body = capped.body
+    returned = capped.returned
+    reason = capped.reason
   } else if (body.length > charLimit) {
     const clipped = body.slice(0, charLimit)
     const lastBreak = clipped.lastIndexOf('\n')
@@ -384,60 +404,61 @@ function compareValues(a: string, b: string): number {
  *
  * `scopeKeys` 在表格面忽略 —— 它是服务端地区/项目范围过滤，屏幕表已限定单一 def。
  */
+function isOrderedComparisonMatch(operator: string, actual: string, expected: string): boolean {
+  const comparison = compareValues(actual, expected)
+  switch (operator) {
+    case 'GT': return comparison > 0
+    case 'GTE': return comparison >= 0
+    case 'LT': return comparison < 0
+    case 'LTE': return comparison <= 0
+    default: return false
+  }
+}
+
+function isTextConditionMatch(operator: string, actual: string | null, expected: string | null): boolean | null {
+  switch (operator) {
+    case 'EMPTY': return actual === null || actual.trim() === ''
+    case 'NOT_EMPTY': return actual !== null && actual.trim() !== ''
+    case 'EQ': return actual !== null && expected !== null && actual === expected
+    case 'NE': return actual === null || expected === null || actual !== expected
+    case 'CONTAINS':
+    case 'LIKE': return actual !== null && expected !== null && actual.includes(expected)
+    case 'STARTS_WITH': return actual !== null && expected !== null && actual.startsWith(expected)
+    default: return null
+  }
+}
+
+function isInConditionMatch(actual: string | null, value: unknown): boolean {
+  if (actual === null || value === null || value === undefined) {
+    return false
+  }
+  const list = Array.isArray(value) ? value : [value]
+  return list.some((item) => item !== null && item !== undefined && String(item) === actual)
+}
+
+function isFieldConditionMatch(row: Record<string, unknown>, field: FieldCondition): boolean {
+  const operator = String(field.operator ?? '').toUpperCase()
+  if (operator === '') {
+    return true
+  }
+  const actual = textOf(row[field.fieldCode])
+  const expected = textOf(field.value)
+  const textResult = isTextConditionMatch(operator, actual, expected)
+  if (textResult !== null) {
+    return textResult
+  }
+  if (operator === 'IN') {
+    return isInConditionMatch(actual, field.value)
+  }
+  return actual !== null && expected !== null && isOrderedComparisonMatch(operator, actual, expected)
+}
+
+/** 单字段条件按 AND 求值；`scopeKeys` 由服务端处理，表格面不重复过滤。 */
 export function matchesCondition(row: Record<string, unknown>, condition: FieldQueryCondition | null | undefined): boolean {
   if (!condition || !Array.isArray(condition.fields)) {
     return true
   }
-  for (const field of condition.fields) {
-    const operator = String(field.operator ?? '').toUpperCase()
-    if (operator === '') {
-      continue
-    }
-    const actual = textOf(row[field.fieldCode])
-    const expected = textOf(field.value)
-    switch (operator) {
-      case 'EMPTY':
-        if (!(actual === null || actual.trim() === '')) return false
-        break
-      case 'NOT_EMPTY':
-        if (!(actual !== null && actual.trim() !== '')) return false
-        break
-      case 'EQ':
-        if (actual === null || expected === null || actual !== expected) return false
-        break
-      case 'NE':
-        if (actual !== null && expected !== null && actual === expected) return false
-        break
-      case 'CONTAINS':
-      case 'LIKE':
-        if (actual === null || expected === null || !actual.includes(expected)) return false
-        break
-      case 'STARTS_WITH':
-        if (actual === null || expected === null || !actual.startsWith(expected)) return false
-        break
-      case 'IN': {
-        if (actual === null || field.value === null || field.value === undefined) return false
-        const list = Array.isArray(field.value) ? field.value : [field.value]
-        if (!list.some((item) => item !== null && item !== undefined && String(item) === actual)) return false
-        break
-      }
-      case 'GT':
-      case 'GTE':
-      case 'LT':
-      case 'LTE': {
-        if (actual === null || expected === null) return false
-        const cmp = compareValues(actual, expected)
-        if (operator === 'GT' && cmp <= 0) return false
-        if (operator === 'GTE' && cmp < 0) return false
-        if (operator === 'LT' && cmp >= 0) return false
-        if (operator === 'LTE' && cmp > 0) return false
-        break
-      }
-      default:
-        return false
-    }
-  }
-  return true
+  return condition.fields.every((field) => isFieldConditionMatch(row, field))
 }
 
 // ── 列/行解析 ────────────────────────────────────────────────────────────────
@@ -505,9 +526,9 @@ interface RowRun {
 function rowRuns(rows: readonly number[]): RowRun[] {
   const runs: RowRun[] = []
   for (const row of rows) {
-    const last = runs[runs.length - 1]
-    if (last && row === last.start + last.length) {
-      last.length += 1
+    const lastRun = last(runs)
+    if (lastRun && row === lastRun.start + lastRun.length) {
+      lastRun.length += 1
     } else {
       runs.push({ start: row, length: 1 })
     }
@@ -523,10 +544,10 @@ interface ColumnRun {
 function columnRuns(columns: readonly number[]): ColumnRun[] {
   const runs: ColumnRun[] = []
   for (const col of columns) {
-    const last = runs[runs.length - 1]
-    const prev = last ? last.cols[last.cols.length - 1] : undefined
-    if (last && prev !== undefined && col === prev + 1) {
-      last.cols.push(col)
+    const lastRun = last(runs)
+    const prev = lastRun ? last(lastRun.cols) : undefined
+    if (lastRun && prev !== undefined && col === prev + 1) {
+      lastRun.cols.push(col)
     } else {
       runs.push({ start: col, cols: [col] })
     }
@@ -630,6 +651,7 @@ function writeCellsSync(ctx: SheetContext, updates: readonly SheetCellUpdate[]):
   try {
     return ctx.adapter.writeCells(updates) ?? { applied: [...updates] }
   } catch (error) {
+      logCaughtError(error, 'utils/sheet-tools.ts:633')
     return { applied: [], error }
   }
 }
@@ -671,7 +693,7 @@ function readSnapshotGrid(ctx: SheetContext): unknown[][] {
   return rows > 0 && columns > 0 ? ctx.adapter.getArray(0, 0, rows, columns) : []
 }
 
-function sameSnapshotGrid(left: readonly unknown[][], right: readonly unknown[][]): boolean {
+function isSameSnapshotGrid(left: readonly unknown[][], right: readonly unknown[][]): boolean {
   if (left.length !== right.length) return false
   for (let row = 0; row < left.length; row += 1) {
     const leftLine = left[row] ?? []
@@ -690,7 +712,7 @@ function sheetVersionClock(ctx: SheetContext, snapshotFallback = false): SheetVe
     let expected = readSnapshotGrid(ctx)
     return {
       assert: () => {
-        if (!sameSnapshotGrid(expected, readSnapshotGrid(ctx))) throw new SheetContentChanged()
+        if (!isSameSnapshotGrid(expected, readSnapshotGrid(ctx))) throw new SheetContentChanged()
       },
       afterWrite: () => {
         expected = readSnapshotGrid(ctx)
@@ -742,6 +764,40 @@ function snapshotContext(ctx: SheetContext): SheetContext {
   }
 }
 
+function assertScanAlive(lifetime: SheetToolLifetime | undefined, clock: SheetVersionClock | null): void {
+  if (lifetime?.abandoned) throw new SheetToolCancelled()
+  clock?.assert()
+}
+
+function readScanBatch(
+  ctx: SheetContext,
+  run: RowRun,
+  offset: number,
+  span: number,
+  runs: readonly ColumnRun[],
+  colIndex: ReadonlyMap<number, number>,
+  columnCount: number
+): unknown[][] {
+  const buffer: unknown[][] = Array.from({ length: span }, () => new Array<unknown>(columnCount).fill(undefined))
+  for (const colRun of runs) {
+    const grid = ctx.adapter.getArray(run.start + offset, colRun.start, span, colRun.cols.length)
+    for (let r = 0; r < span; r += 1) {
+      const line = grid[r]
+      if (!Array.isArray(line)) continue
+      for (let c = 0; c < colRun.cols.length; c += 1) {
+        const col = colRun.cols[c]
+        if (col === undefined) continue
+        const index = colIndex.get(col)
+        if (index !== undefined) {
+          const target = buffer[r]
+          if (target) target[index] = line[c]
+        }
+      }
+    }
+  }
+  return buffer
+}
+
 async function scanRowsCooperative(
   request: SheetScanRequest,
   lifetime: SheetToolLifetime | undefined,
@@ -750,11 +806,9 @@ async function scanRowsCooperative(
 ): Promise<void> {
   const { ctx, rows, columns, visit } = request
   if (rows.length === 0 || columns.length === 0) {
-    if (lifetime?.abandoned) throw new SheetToolCancelled()
-    clock?.assert()
+    assertScanAlive(lifetime, clock)
     if (allowYield) await yieldToMainThread()
-    if (lifetime?.abandoned) throw new SheetToolCancelled()
-    clock?.assert()
+    assertScanAlive(lifetime, clock)
     return
   }
   const colIndex = new Map<number, number>()
@@ -763,35 +817,16 @@ async function scanRowsCooperative(
   let sliceStartedAt = Date.now()
   outer: for (const run of rowRuns(rows)) {
     for (let offset = 0; offset < run.length; offset += SHEET_READ_BATCH_ROWS) {
-      if (lifetime?.abandoned) throw new SheetToolCancelled()
-      clock?.assert()
+      assertScanAlive(lifetime, clock)
       const span = Math.min(SHEET_READ_BATCH_ROWS, run.length - offset)
-      const buffer: unknown[][] = Array.from({ length: span }, () => new Array<unknown>(columns.length).fill(undefined))
-      for (const colRun of runs) {
-        const grid = ctx.adapter.getArray(run.start + offset, colRun.start, span, colRun.cols.length)
-        for (let r = 0; r < span; r += 1) {
-          const line = grid[r]
-          if (!Array.isArray(line)) continue
-          for (let c = 0; c < colRun.cols.length; c += 1) {
-            const col = colRun.cols[c]
-            if (col === undefined) continue
-            const index = colIndex.get(col)
-            if (index !== undefined) {
-              const target = buffer[r]
-              if (target) target[index] = line[c]
-            }
-          }
-        }
-      }
+      const buffer = readScanBatch(ctx, run, offset, span, runs, colIndex, columns.length)
       for (let r = 0; r < span; r += 1) {
         if (visit(run.start + offset + r, buffer[r] ?? []) === false) break outer
       }
-      if (lifetime?.abandoned) throw new SheetToolCancelled()
-      clock?.assert()
+      assertScanAlive(lifetime, clock)
       if (allowYield && Date.now() - sliceStartedAt >= SHEET_MAIN_THREAD_SLICE_MS) {
         await yieldToMainThread()
-        if (lifetime?.abandoned) throw new SheetToolCancelled()
-        clock?.assert()
+        assertScanAlive(lifetime, clock)
         sliceStartedAt = Date.now()
       }
     }
@@ -821,6 +856,7 @@ async function runSheetProgramCooperative<T>(
         clock?.assert()
         result = writeCellsSync(request.ctx, request.updates)
       } catch (error) {
+          logCaughtError(error, 'utils/sheet-tools.ts:824')
         result = { applied: [], error }
       }
     }
@@ -828,6 +864,7 @@ async function runSheetProgramCooperative<T>(
       try {
         clock?.afterWrite()
       } catch (error) {
+          logCaughtError(error, 'utils/sheet-tools.ts:831')
         result.error ??= error
       }
     }
@@ -837,6 +874,7 @@ async function runSheetProgramCooperative<T>(
       try {
         clock.assert()
       } catch (error) {
+          logCaughtError(error, 'utils/sheet-tools.ts:840')
         result.error = error
       }
       sliceStartedAt = Date.now()
@@ -882,6 +920,7 @@ async function runPlanReadonlySheetProgram(
   try {
     return await runReadonlySheetProgram(ctx, lifetime, programOf)
   } catch (error) {
+      logCaughtError(error, 'utils/sheet-tools.ts:885')
     return { ok: false, reason: cooperativeErrorReason(error) }
   }
 }
@@ -894,6 +933,7 @@ async function runPlanWriteSheetProgram(
   try {
     return await runWriteSheetProgram(ctx, lifetime, programOf)
   } catch (error) {
+      logCaughtError(error, 'utils/sheet-tools.ts:897')
     return { ok: false, reason: cooperativeErrorReason(error) }
   }
 }
@@ -906,6 +946,7 @@ async function runApplyWriteSheetProgram(
   try {
     return await runWriteSheetProgram(ctx, lifetime, programOf)
   } catch (error) {
+      logCaughtError(error, 'utils/sheet-tools.ts:909')
     return { ok: false, reason: cooperativeErrorReason(error), appliedCells: 0, undoable: false }
   }
 }
@@ -963,7 +1004,7 @@ function parseRowRange(value: unknown, maxRows: number): number[] | null {
   let start: number | null = null
   let end: number | null = null
   if (Array.isArray(value) && value.length === 2) {
-    start = Number(value[0])
+    start = Number(head(value))
     end = Number(value[1])
   } else if (typeof value === 'string') {
     const matched = /^\s*(\d+)\s*[-~至]\s*(\d+)\s*$/.exec(value)
@@ -1033,7 +1074,7 @@ function* resolveScopeProgram(
         resolved: {
           scope: 'rows',
           rows: filtered,
-          summary: `${ctx.defCode} 第 ${rows[0] !== undefined ? excelDisplay(rows[0]) : ''}-${rows[rows.length - 1] !== undefined ? excelDisplay(rows[rows.length - 1]) : ''} 行`,
+          summary: `${ctx.defCode} 第 ${head(rows) !== undefined ? excelDisplay(head(rows)!) : ''}-${last(rows) !== undefined ? excelDisplay(last(rows)!) : ''} 行`,
           predicateSummary
         }
       }
@@ -1398,9 +1439,9 @@ function parseAggregateSort(
     case '':
     case 'metric':
     case 'metricDesc':
-      return { ok: true, sort: { kind: 'metric', metric: metrics[0] ?? 'count', desc: true } }
+      return { ok: true, sort: { kind: 'metric', metric: head(metrics) ?? 'count', desc: true } }
     case 'metricAsc':
-      return { ok: true, sort: { kind: 'metric', metric: metrics[0] ?? 'count', desc: false } }
+      return { ok: true, sort: { kind: 'metric', metric: head(metrics) ?? 'count', desc: false } }
     case 'label':
     case 'labelAsc':
       return { ok: true, sort: { kind: 'label', desc: false } }
@@ -1491,7 +1532,7 @@ function* aggregateSheetProgram(ctx: SheetContext, args: SheetArgs): SheetProgra
     const state = newMetricState(metrics)
     if (metricCol !== null) {
       yield* scanRowsProgram(ctx, resolved.rows, [metricCol], (_row, values) => {
-        addMetricValue(state, values[0], metrics)
+        addMetricValue(state, head(values), metrics)
       })
     }
     const parts = metrics.map((metric) => `${metric}=${metricFromState(state, metric).text}`)
@@ -1502,7 +1543,7 @@ function* aggregateSheetProgram(ctx: SheetContext, args: SheetArgs): SheetProgra
   }
 
   const valueCol = metricCol ?? 0
-  const scanColumns = Array.from(new Set([groupBy, valueCol]))
+  const scanColumns = uniq([groupBy, valueCol])
   const groupIdx = scanColumns.indexOf(groupBy)
   const valueIdx = scanColumns.indexOf(valueCol)
   const groups = new Map<string, GroupEntry>()
@@ -1583,7 +1624,7 @@ export function groupCounts(
 ): Map<string, GroupCount> {
   const counts = new Map<string, GroupCount>()
   scanRows(ctx, rows, [byCol], (row, values) => {
-    const key = groupKeyOf(values[0])
+    const key = groupKeyOf(head(values))
     const entry = counts.get(key) ?? { key, rows: 0, cells: 0 }
     entry.rows += 1
     entry.cells += cellsOf ? cellsOf(row) : 1
@@ -1594,25 +1635,22 @@ export function groupCounts(
 
 // ── 读侧：列映射诊断 ─────────────────────────────────────────────────────────
 
-export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
-  const defError = validateDefCode(ctx, args)
-  if (defError) return { ok: false, reason: defError }
-  const colCount = ctx.adapter.colCount()
-  const headers = Array.from({ length: colCount }, (_, col) => ctx.adapter.header(col))
+interface ExtraColumn {
+  header: string
+  col: number
+}
+
+function matchSheetColumns(ctx: SheetContext, headers: readonly unknown[]): { missing: string[]; matched: number; usedColumns: Set<number> } {
   const missing: string[] = []
   let matched = 0
   const usedColumns = new Set<number>()
   for (const field of ctx.fields) {
     const normalizedLabel = normalizeHeader(field.label)
     const normalizedCode = normalizeHeader(field.code)
-    let found = -1
-    for (let col = 0; col < colCount; col += 1) {
-      const header = normalizeHeader(headers[col])
-      if (header === normalizedLabel || header === normalizedCode) {
-        found = col
-        break
-      }
-    }
+    const found = headers.findIndex((header) => {
+      const normalized = normalizeHeader(header)
+      return normalized === normalizedLabel || normalized === normalizedCode
+    })
     if (found >= 0) {
       matched += 1
       usedColumns.add(found)
@@ -1620,10 +1658,10 @@ export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOut
       missing.push(field.label)
     }
   }
-  const extras = headers
-    .map((header, col) => ({ header: String(header ?? ''), col }))
-    .filter((item) => !usedColumns.has(item.col) && item.header.trim() !== '')
+  return { missing, matched, usedColumns }
+}
 
+function columnMappingSuggestions(ctx: SheetContext, extras: readonly ExtraColumn[]): string[] {
   const suggestions: string[] = []
   for (const extra of extras) {
     const squashed = normalizeHeader(extra.header).replace(/\s+/g, '')
@@ -1637,12 +1675,24 @@ export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOut
       suggestions.push(`列「${extra.header}」→ 字段 ${matchedField.code}（理由：${reason}）`)
     }
   }
+  return suggestions
+}
 
-  const lines: string[] = []
-  lines.push(`已匹配 ${matched}/${ctx.fields.length} 列`)
-  lines.push(`缺失：${missing.length > 0 ? missing.join('、') : '无'}`)
-  lines.push(`多余：${extras.length > 0 ? extras.map((item) => item.header).join('、') : '无'}`)
-  lines.push(`疑似映射（${Math.min(5, suggestions.length)} 条${suggestions.length > 5 ? `，共 ${suggestions.length} 条` : ''}）：`)
+export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOutcome {
+  const defError = validateDefCode(ctx, args)
+  if (defError) return { ok: false, reason: defError }
+  const headers = Array.from({ length: ctx.adapter.colCount() }, (_, col) => ctx.adapter.header(col))
+  const { missing, matched, usedColumns } = matchSheetColumns(ctx, headers)
+  const extras = headers
+    .map((header, col) => ({ header: String(header ?? ''), col }))
+    .filter((item) => !usedColumns.has(item.col) && item.header.trim() !== '')
+  const suggestions = columnMappingSuggestions(ctx, extras)
+  const lines = [
+    `已匹配 ${matched}/${ctx.fields.length} 列`,
+    `缺失：${missing.length > 0 ? missing.join('、') : '无'}`,
+    `多余：${extras.length > 0 ? extras.map((item) => item.header).join('、') : '无'}`,
+    `疑似映射（${Math.min(5, suggestions.length)} 条${suggestions.length > 5 ? `，共 ${suggestions.length} 条` : ''}）：`
+  ]
   const capped = capSheetResult({
     lines: [...lines, ...suggestions.slice(0, 5).map((line) => `  ${line}`)],
     total: suggestions.length,
@@ -1650,7 +1700,6 @@ export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOut
     unit: '列',
     prefixLines: lines.length
   }, { whole: true })
-  // 列映射诊断只回列名与建议（0 行业务值）⇒ D1
   return { ok: true, text: capped.text, meta: readMeta(ctx, 'D1') }
 }
 
@@ -1795,7 +1844,7 @@ function* findRowsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<Shee
       columns.push(col)
     }
     columnLabel = `列 ${(args.columnCodes as unknown[]).map((code) => String(code)).join('、')}`
-    columns = Array.from(new Set(columns))
+    columns = uniq(columns)
   } else {
     columns = allColumnsOf(ctx)
     columnLabel = `全部 ${columns.length} 列`
@@ -1905,7 +1954,8 @@ export function sheetInstanceIdOf(ctx: SheetContext): string {
       if (typeof value === 'string' && value !== '') {
         return value
       }
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/sheet-tools.ts:1909')
       // 适配器已不可用：回落到快照（随后 apply 会因代数/指纹不符拒绝）
     }
   }
@@ -1929,7 +1979,8 @@ export function sheetLoadGenerationOf(ctx: SheetContext): number {
       if (typeof value === 'number' && Number.isFinite(value)) {
         return value
       }
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/sheet-tools.ts:1933')
       // 同上：回落到快照
     }
   }
@@ -1953,7 +2004,7 @@ const derivedContentVersions = new WeakMap<SheetAdapter, { loadGeneration: numbe
  * 无关，拿它当 `sheetVer` 会把无关 touch 误判成表被修改（2026-10-29 修复）。</li>
  * </ol>
  *
- * <p>本函数只回答"表内版本是多少"，**不是**预览硬闸：硬闸见 `previewIdentityMismatch`
+ * <p>本函数只回答"表内版本是多少"，**不是**预览硬闸：硬闸见 `isPreviewIdentityMismatch`
  * 与 `applySheetPlan` / `replanSheet` 的行指纹比对。
  */
 export function sheetContentVersionOf(adapter: SheetAdapter): number {
@@ -1963,7 +2014,8 @@ export function sheetContentVersionOf(adapter: SheetAdapter): number {
       if (typeof value === 'number' && Number.isFinite(value)) {
         return value
       }
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/sheet-tools.ts:1967')
       // 适配器已不可用：回落到派生计数（不把异常抛给读工具）
     }
   }
@@ -1974,7 +2026,8 @@ export function sheetContentVersionOf(adapter: SheetAdapter): number {
       if (typeof value === 'number' && Number.isFinite(value)) {
         generation = value
       }
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'utils/sheet-tools.ts:1978')
       // 同上：按 0 处理
     }
   }
@@ -2004,7 +2057,7 @@ export function previewIdentityOf(
  *
  * <p>缺 `previewId` 的手搭/旧载荷不在此拒绝（没有可判身份），真实计划恒有值。
  */
-function previewIdentityMismatch(plan: SheetWritePlan, ctx: SheetContext): boolean {
+function isPreviewIdentityMismatch(plan: SheetWritePlan, ctx: SheetContext): boolean {
   if (!plan.previewId) {
     return false
   }
@@ -2015,7 +2068,7 @@ const PREVIEW_INVALID_REASON = '该预览已失效或已处理，本次未应用
 const UNDO_PREVIEW_INVALID_REASON = '该预览已失效或已处理，本次未执行撤销。请重新发起。'
 const STALE_PREVIEW_REASON = '预览已失效（表格在此期间被修改），未产出新的明细。请让 AI 重新发起。'
 
-function makePlan(input: {
+interface MakePlanInput {
   ctx: SheetContext
   tool: string
   toolCallId: string
@@ -2039,7 +2092,9 @@ function makePlan(input: {
   planId?: string
   /** 协作驱动已按同一版本/快照算出的指纹；缺省保持原同步现算。 */
   fingerprint?: string[]
-}): SheetWritePlan {
+}
+
+function makePlan(input: MakePlanInput): SheetWritePlan {
   const detail = input.detail ?? 'full'
   const rows = new Set(input.changes.map((change) => change.row))
   const rowsCount = input.counts?.rowsCount ?? rows.size
@@ -2221,7 +2276,7 @@ function newCounts(): SheetCounts {
  * @param key 分布分组键（null = 不做分布）
  * @returns true = 已越硬上限（调用方应立即停扫）
  */
-function countRow(counts: SheetCounts, hitCells: number, key: string | null): boolean {
+function canCountRow(counts: SheetCounts, hitCells: number, key: string | null): boolean {
   if (hitCells > 0) {
     counts.rows += 1
     counts.cells += hitCells
@@ -2261,13 +2316,13 @@ function resolveDistributionColumn(
     if (explicit !== null) return explicit
   }
   const predicate = args.predicate as FieldQueryCondition | null | undefined
-  const firstField = predicate && Array.isArray(predicate.fields) ? predicate.fields[0] : undefined
+  const firstField = predicate && Array.isArray(predicate.fields) ? head(predicate.fields) : undefined
   const fieldCode = firstField && typeof firstField.fieldCode === 'string' ? firstField.fieldCode : ''
   if (fieldCode !== '') {
     const resolved = resolveColumn(ctx, fieldCode)
     if (resolved !== null) return resolved
   }
-  return fallbackColumns.length > 0 ? (fallbackColumns[0] ?? null) : null
+  return fallbackColumns.length > 0 ? (head(fallbackColumns) ?? null) : null
 }
 
 /** 把累加器转成卡面分布（前 5 组 + 折叠计数；§6.3 排序口径：rows 降序、同值按键字典序）。 */
@@ -2297,7 +2352,7 @@ function buildMatcher(args: SheetArgs): { ok: true; match: (text: string) => { h
     if (values.includes('wildcard') && values.includes('regex')) {
       return { ok: false, reason: 'match 不能同时给 wildcard 与 regex（两者互斥，语义不确定），本次未做任何修改。' }
     }
-    kind = values[0] ?? 'wholeCell'
+    kind = head(values) ?? 'wholeCell'
   } else {
     kind = typeof args.match === 'string' && args.match !== '' ? args.match : 'wholeCell'
   }
@@ -2329,6 +2384,7 @@ function buildMatcher(args: SheetArgs): { ok: true; match: (text: string) => { h
         match: (text) => ({ hit: re.test(text), next: text.replace(re, replace) })
       }
     } catch (error) {
+        logCaughtError(error, 'utils/sheet-tools.ts:2332')
       return { ok: false, reason: `正则表达式不合法：${error instanceof Error ? error.message : String(error)}。本次未做任何修改。` }
     }
   }
@@ -2427,7 +2483,7 @@ function* planReplaceProgram(ctx: SheetContext, args: SheetArgs, toolCallId: str
     })
     if (lightMode) {
       if (hitCells > 0) matchedRows.push(row)
-      return !countRow(counts, hitCells, byIndex >= 0 ? groupKeyOf(values[byIndex]) : null)
+      return !canCountRow(counts, hitCells, byIndex >= 0 ? groupKeyOf(values[byIndex]) : null)
     }
     return changes.length <= SHEET_WRITE_HARD_MAX_CELLS
   })
@@ -2582,7 +2638,7 @@ function* planUpdateProgram(ctx: SheetContext, args: SheetArgs, toolCallId: stri
       const value = item.value === undefined ? '' : item.value
       ruleParts.push(`${item.columnCode} ← 「${cellDisplay(value)}」`)
       yield* scanRowsProgram(ctx, rows, [col], (row, values) => {
-        const oldValue = values[0]
+        const oldValue = head(values)
         if (cellDisplay(oldValue) !== cellDisplay(value)) {
           if (field && validateCell(field, value) !== null) counts.skipped += 1
           else recordHit(row, col, oldValue, value)
@@ -2600,7 +2656,7 @@ function* planUpdateProgram(ctx: SheetContext, args: SheetArgs, toolCallId: stri
       for (const code of refCodes) {
         if (!resolvedRefs.has(code)) resolvedRefs.set(code, resolveColumn(ctx, code))
       }
-      const scanColumns = Array.from(new Set([col, ...[...resolvedRefs.values()].filter((ref): ref is number => ref !== null)]))
+      const scanColumns = uniq([col, ...[...resolvedRefs.values()].filter((ref): ref is number => ref !== null)])
       const refIndexByCode = new Map<string, number>()
       for (const [code, refCol] of resolvedRefs) {
         refIndexByCode.set(code, refCol === null ? -1 : scanColumns.indexOf(refCol))
@@ -2622,7 +2678,7 @@ function* planUpdateProgram(ctx: SheetContext, args: SheetArgs, toolCallId: stri
       ruleParts.push(`${item.columnCode} ← 用上方最近的非空值补齐空单元格`)
       let last: unknown = ''
       yield* scanRowsProgram(ctx, allRowIndexes(ctx), [col], (row, values) => {
-        const value = values[0]
+        const value = head(values)
         if (!isBlank(value)) {
           last = value
         } else if (rowSet.has(row) && !isBlank(last)) {
@@ -2641,7 +2697,7 @@ function* planUpdateProgram(ctx: SheetContext, args: SheetArgs, toolCallId: stri
       ruleParts.push(`${item.columnCode} ← 等差数列（start=${start}，step=${step}）`)
       let index = 0
       yield* scanRowsProgram(ctx, rows, [col], (row, values) => {
-        const value = values[0]
+        const value = head(values)
         if (isBlank(value)) {
           const next = String(start + step * index)
           index += 1
@@ -2668,17 +2724,17 @@ function* planUpdateProgram(ctx: SheetContext, args: SheetArgs, toolCallId: stri
       .map((item) => resolveColumn(ctx, item.columnCode))
       .filter((col): col is number => col !== null)
     byCol = preview === 'count' ? resolveDistributionColumn(ctx, args, itemColumns) : null
-    const countHits = (row: number, key: string | null): boolean => {
+    const canCountHits = (row: number, key: string | null): boolean => {
       const hits = perRowHits.get(row) ?? 0
       if (hits > 0) matchedRows.push(row)
-      return countRow(counts, hits, key)
+      return canCountRow(counts, hits, key)
     }
     if (byCol === null) {
       for (const row of rows) {
-        if (countHits(row, null)) break
+        if (canCountHits(row, null)) break
       }
     } else {
-      yield* scanRowsProgram(ctx, rows, [byCol], (row, values) => !countHits(row, groupKeyOf(values[0])))
+      yield* scanRowsProgram(ctx, rows, [byCol], (row, values) => !canCountHits(row, groupKeyOf(head(values))))
     }
     if (counts.overflow) {
       return {
@@ -2833,7 +2889,7 @@ function* computeNormalizeProgram(
   for (const col of setup.columns) {
     const field = fieldOfColumn(ctx, col)
     yield* scanRowsProgram(ctx, rows, [col], (row, values) => {
-      const oldValue = values[0]
+      const oldValue = head(values)
       let next = cellDisplay(oldValue)
       const before = next
       for (const rule of setup.rules) {
@@ -2977,17 +3033,17 @@ function* planNormalizeProgram(ctx: SheetContext, args: SheetArgs, toolCallId: s
   if (lightMode) {
     byCol = preview === 'count' ? resolveDistributionColumn(ctx, args, parsed.setup.columns) : null
     const matchedRows: number[] = []
-    const countHits = (row: number, key: string | null): boolean => {
+    const canCountHits = (row: number, key: string | null): boolean => {
       const hits = diff.perRowHits.get(row) ?? 0
       if (hits > 0) matchedRows.push(row)
-      return countRow(counts, hits, key)
+      return canCountRow(counts, hits, key)
     }
     if (byCol === null) {
       for (const row of scope.resolved.rows) {
-        if (countHits(row, null)) break
+        if (canCountHits(row, null)) break
       }
     } else {
-      yield* scanRowsProgram(ctx, scope.resolved.rows, [byCol], (row, values) => !countHits(row, groupKeyOf(values[0])))
+      yield* scanRowsProgram(ctx, scope.resolved.rows, [byCol], (row, values) => !canCountHits(row, groupKeyOf(head(values))))
     }
     diff.matchedRows = matchedRows
     if (counts.overflow) {
@@ -3078,7 +3134,7 @@ export function sheetUndoDepth(adapter: SheetAdapter): number {
  */
 export function sheetManualChangeCount(ctx: SheetContext): number {
   const stack = undoStack.get(ctx.adapter)
-  const entry = stack && stack.length > 0 ? stack[stack.length - 1] : undefined
+  const entry = stack && stack.length > 0 ? last(stack) : undefined
   if (!entry || entry.defCode !== ctx.defCode) {
     return 0
   }
@@ -3116,7 +3172,7 @@ export function sheetAppliedSummary(ctx: SheetContext): SheetAppliedSummary | nu
   if (!stack || stack.length === 0) {
     return null
   }
-  const entry = stack[stack.length - 1]
+  const entry = last(stack)
   if (!entry || entry.defCode !== ctx.defCode) {
     return null
   }
@@ -3161,7 +3217,7 @@ function* applySheetPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetP
     return { ok: false, reason: `表格已切换（当前 ${ctx.defCode}，预览属于 ${plan.defCode}），本次未应用任何改动。请重新发起。` }
   }
   // 身份闸（换文件/程序化重载/换任务/换选区）：与逐格 CAS 无关，只看"还是不是这张表的这份内容"
-  if (previewIdentityMismatch(plan, ctx)) {
+  if (isPreviewIdentityMismatch(plan, ctx)) {
     return { ok: false, reason: PREVIEW_INVALID_REASON }
   }
   if (plan.status !== 'pending') {
@@ -3212,7 +3268,7 @@ function* applySheetPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetP
   const nothingApplied = failure === null && plan.changes.length > 0 && appliedCells === 0
   // I-2：计划状态**先**落定，再做强收尾（撤销登记 / 上色是 best-effort，失败不得让回执消失）
   plan.status = (failure !== null || nothingApplied) ? 'failed' : 'applied'
-  const undoable = registerUndoEntrySafe(ctx, plan, written)
+  const undoable = canRegisterUndoEntrySafe(ctx, plan, written)
   markAppliedCellsSafe(ctx, written)
   if (nothingApplied) {
     return {
@@ -3292,7 +3348,7 @@ function selectAppliedChanges(changes: readonly SheetChange[], applied: readonly
  * <p>同一 `planId` 不重复入栈（防双击应用 / 半批重放把同一批改动记两次）。
  * @returns 真实登记结果（`undoable` 必须与它一致，不得按"想登记"报 true）
  */
-function registerUndoEntry(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): boolean {
+function canRegisterUndoEntry(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): boolean {
   if (changes.length === 0) {
     return false
   }
@@ -3320,10 +3376,11 @@ function registerUndoEntry(ctx: SheetContext, plan: SheetWritePlan, changes: rea
 }
 
 /** 撤销登记 best-effort（I-2）：登记本身失败不得把"已落笔"的事实变成无回执异常。 */
-function registerUndoEntrySafe(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): boolean {
+function canRegisterUndoEntrySafe(ctx: SheetContext, plan: SheetWritePlan, changes: readonly SheetChange[]): boolean {
   try {
-    return registerUndoEntry(ctx, plan, changes)
-  } catch {
+    return canRegisterUndoEntry(ctx, plan, changes)
+  } catch (error) {
+      logCaughtError(error, 'utils/sheet-tools.ts:3327')
     return false
   }
 }
@@ -3335,7 +3392,8 @@ function markAppliedCellsSafe(ctx: SheetContext, changes: readonly SheetChange[]
   }
   try {
     ctx.adapter.markCells?.(changes.map((change) => ({ row: change.row, col: change.col })), 'applied')
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/sheet-tools.ts:3339')
     // 上色的典型失败面正是"表已重建/关闭"（与半批失败的同一场景）：只影响屏幕态
   }
 }
@@ -3374,7 +3432,7 @@ type UndoTop =
 
 function* undoTopProgram(ctx: SheetContext): SheetProgram<UndoTop> {
   const stack = undoStack.get(ctx.adapter)
-  const entry = stack && stack.length > 0 ? stack[stack.length - 1] : undefined
+  const entry = stack && stack.length > 0 ? last(stack) : undefined
   if (!stack || !entry || entry.defCode !== ctx.defCode || entry.changes.length === 0) {
     return { ok: false, reason: '没有可撤销的 AI 修改（AI 改动只在本次页面有效，刷新后不可撤）。\n共 0 格' }
   }
@@ -3459,6 +3517,40 @@ export function undoLastSheetEditAsync(
  * 使重试只针对剩余格、且不被冲突闸误拦（剩余格的现值仍等于其 `appliedValues`）。
  * 只有**全量回写**才 pop。
  */
+function remainingUndoOutcome(
+  entry: SheetUndoEntry,
+  remaining: SheetChange[],
+  totalCells: number,
+  failure: unknown
+): ApplySheetPlanOutcome {
+  const keyOf = (change: { row: number; col: number }): string => `${change.row}:${change.col}`
+  const expectedByKey = new Map<string, unknown>()
+  entry.changes.forEach((change, index) => expectedByKey.set(keyOf(change), entry.appliedValues[index]))
+  entry.changes = remaining
+  entry.appliedValues = remaining.map((change) => expectedByKey.get(keyOf(change)))
+  entry.cellsCount = remaining.length
+  entry.rowsCount = new Set(remaining.map((change) => change.row)).size
+  const revertedCells = totalCells - remaining.length
+  const reasonNote = failure !== null
+    ? `（原因：${failure instanceof Error ? failure.message : String(failure)}）`
+    : '（适配器未写入全部格）'
+  return {
+    ok: false,
+    reason: `撤销未完成：已回写 ${revertedCells} 格 / 共 ${totalCells} 格，剩余 ${remaining.length} 格仍在撤销记录里`
+      + `（plan #${entry.planId}，可再次撤销这 ${remaining.length} 格）${reasonNote}。`,
+    appliedCells: revertedCells,
+    undoable: true
+  }
+}
+
+function clearAppliedMarks(ctx: SheetContext): void {
+  try {
+    ctx.adapter.clearMarks?.('applied')
+  } catch (error) {
+    logCaughtError(error, 'sheet:clear-applied-marks')
+  }
+}
+
 function* applyUndoEntryProgram(
   ctx: SheetContext,
   stack: SheetUndoEntry[],
@@ -3483,27 +3575,8 @@ function* applyUndoEntryProgram(
   const keyOf = (change: { row: number; col: number }): string => `${change.row}:${change.col}`
   const appliedKeys = new Set(appliedUpdates.map(keyOf))
   const remaining = entry.changes.filter((change) => !appliedKeys.has(keyOf(change)))
-  const revertedCells = totalCells - remaining.length
   if (remaining.length > 0) {
-    // 收缩栈顶到"尚未回写"的格：重试只针对它们，冲突闸只比它们（现值仍等于各自 appliedValues）
-    const expectedByKey = new Map<string, unknown>()
-    entry.changes.forEach((change, index) => {
-      expectedByKey.set(keyOf(change), entry.appliedValues[index])
-    })
-    entry.changes = remaining
-    entry.appliedValues = remaining.map((change) => expectedByKey.get(keyOf(change)))
-    entry.cellsCount = remaining.length
-    entry.rowsCount = new Set(remaining.map((change) => change.row)).size
-    const reasonNote = failure !== null
-      ? `（原因：${failure instanceof Error ? failure.message : String(failure)}）`
-      : '（适配器未写入全部格）'
-    return {
-      ok: false,
-      reason: `撤销未完成：已回写 ${revertedCells} 格 / 共 ${totalCells} 格，剩余 ${remaining.length} 格仍在撤销记录里`
-        + `（plan #${entry.planId}，可再次撤销这 ${remaining.length} 格）${reasonNote}。`,
-      appliedCells: revertedCells,
-      undoable: true
-    }
+    return remainingUndoOutcome(entry, remaining, totalCells, failure)
   }
   stack.pop()
   if (stack.length === 0) {
@@ -3511,11 +3584,7 @@ function* applyUndoEntryProgram(
   }
   // 被回滚的格清标记；其余层保留（§5.4 第 3 条）。**只清已应用色**：撤销与"另一张尚未应用
   // 的预览"无关，无参全清会把那张卡刚上的预览琥珀也一并抹掉（卡还在、高亮没了）。
-  try {
-    ctx.adapter.clearMarks?.('applied')
-  } catch {
-    // best-effort：屏幕态清理失败不影响"已撤销"的事实与回执（复审 I-2 同口径）
-  }
+  clearAppliedMarks(ctx)
   return {
     ok: true,
     text: `已撤销 ${entry.cellsCount} 格（plan #${entry.planId}，回到修改前值）。剩余可撤销 ${stack.length} 层。\n共 ${entry.cellsCount} 格`,
@@ -3553,7 +3622,7 @@ function* planUndoProgram(ctx: SheetContext, toolCallId: string): SheetProgram<S
     scope: 'sheet',
     scopeSummary: translate('sheet.undoScopeSummary', { planId: entry.planId }),
     predicateSummary: '',
-    targetRows: [...new Set(reverse.map((change) => change.row))],
+    targetRows: uniq(reverse.map((change) => change.row)),
     changes: reverse,
     skippedCount: 0,
     rulesText: translate('sheet.undoRulesText', {
@@ -3596,12 +3665,12 @@ function* applyUndoPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetPr
     return { ok: false, reason: `表格已切换（当前 ${ctx.defCode}，预览属于 ${plan.defCode}），本次未执行撤销。请重新发起。` }
   }
   // 身份闸：撤销同样绑定"预览时那张表/那份内容"（换文件/程序化重载后不得回滚新数据）
-  if (previewIdentityMismatch(plan, ctx)) {
+  if (isPreviewIdentityMismatch(plan, ctx)) {
     return { ok: false, reason: UNDO_PREVIEW_INVALID_REASON }
   }
   const targetPlanId = plan.planId.slice(UNDO_PLAN_PREFIX.length)
   const stack = undoStack.get(ctx.adapter)
-  const entry = stack && stack.length > 0 ? stack[stack.length - 1] : undefined
+  const entry = stack && stack.length > 0 ? last(stack) : undefined
   if (!stack || !entry || entry.planId !== targetPlanId) {
     return { ok: false, reason: '这次撤销已执行或撤销栈已变化（同一次撤销不会执行第二次），本次未做任何修改。' }
   }
@@ -3679,6 +3748,7 @@ export async function planSheetWithLevelAsync(
     return await runReadonlySheetProgram(ctx, lifetime, (effectiveCtx) =>
       planSheetWithLevelProgram(effectiveCtx, tool, args, toolCallId))
   } catch (error) {
+      logCaughtError(error, 'utils/sheet-tools.ts:3682')
     return { ok: false, reason: cooperativeErrorReason(error) }
   }
 }
@@ -3687,7 +3757,7 @@ export async function planSheetWithLevelAsync(
  * 切档重算（§6.2 的明细按需计算）：用计划的入参快照重跑同一确定性函数，`planId` 不变。
  *
  * <p>
- * 重跑前硬闸 = `previewIdentityMismatch`（身份：toolCallId + instanceId + loadGeneration + scope）
+ * 重跑前硬闸 = `isPreviewIdentityMismatch`（身份：toolCallId + instanceId + loadGeneration + scope）
  * 与 `sameTargetFingerprint`（目标行主键指纹）；**不比对 `sheetVer`**（表内版本只作元数据，
  * 拿全局 `dataVersion` 当版本会让无关 touch 误伤预览）。任一不符 ⇒ "预览已失效"，不静默套用旧结果。
  * 物化后仍超 `HARD_MAX` ⇒ 回 `null` 的 detail 说明（调用方保持计数档并提示"明细不可用"）。
@@ -3706,7 +3776,7 @@ function* replanSheetProgram(
   }
   // 硬闸只有两道：表格身份（previewId：toolCallId + instanceId + loadGeneration + scope）
   // 与**目标行指纹**（表真的变了才算失效）。
-  if (previewIdentityMismatch(plan, ctx)) {
+  if (isPreviewIdentityMismatch(plan, ctx)) {
     return { ok: false, reason: STALE_PREVIEW_REASON }
   }
   const current: string[] = []

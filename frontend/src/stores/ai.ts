@@ -14,6 +14,7 @@
 
 import { defineStore, getActivePinia } from 'pinia'
 import { markRaw, ref, watch } from 'vue'
+import { head, last, uniq } from 'lodash'
 import { ApiError, FRONTEND_ERROR_CODES } from '@/api/http'
 import { aiApi, type AiHistoryPage } from '@/api/ai'
 import {
@@ -37,7 +38,7 @@ import {
 import {
   SSE_TIMEOUT_CODES,
   probeReattach,
-  waitForPageVisible,
+  getPageVisible,
   type ArchiveTrimSignal,
   type SseFrameHandlers,
   type SseStreamOptions
@@ -60,7 +61,7 @@ import {
   peekUiUndo,
   isRefSnapshotted,
   requestFilePicker,
-  supportsFilePicker,
+  canUseFilePicker,
   takeUiUndo,
   uploadFileNameOf,
   validateUploadArgs
@@ -105,7 +106,7 @@ import {
   outcomeStatus,
   sealTrailingStreamPart,
   upsertToolPart as writeToolPart,
-  writeSubmittedValuesToMessage
+  canWriteSubmittedValuesToMessage
 } from '@/utils/parts'
 import { ErrorCode, STRUCTURED_RESULT_MAX_CHARS, type SuspendPoolSaturated } from '@/types/api'
 import {
@@ -133,6 +134,7 @@ import {
 } from '@/utils/run-expiry'
 import { translate } from '@/composables/useCopy'
 import { userFacingErrorText } from '@/utils/ui-error'
+import { logCaughtError } from '@/utils/log-caught-error'
 
 /** sessionStorage 键：会话 id 与镜像前缀（Task 4 起带身份时追加 `tenantId:userId` 指纹）。 */
 export const SESSION_ID_KEY = AI_SESSION_ID_KEY
@@ -224,7 +226,7 @@ function previewDecisionKey(plan: SheetWritePlan): string {
 }
 
 /** 尝试占用决策权（false = 同一张卡已有决策在途）。 */
-function beginPreviewDecision(plan: SheetWritePlan, applying = false): boolean {
+function canBeginPreviewDecision(plan: SheetWritePlan, applying = false): boolean {
   const key = previewDecisionKey(plan)
   if (previewDecisionInFlight === key) {
     return false
@@ -306,6 +308,142 @@ function sheetWriteBudgetMs(messages: ChatMessage[], toolCallId: string): number
   return deriveFrontendToolBudgetMs()
 }
 
+async function clearCountPreviewMarks(
+  defCode: string,
+  isCurrent: () => boolean,
+  applyContext: (ctx: SheetContext) => void
+): Promise<void> {
+  const resolved = await resolveSheetContext(defCode)
+  if (!isCurrent()) {
+    return
+  }
+  if (resolved.ok) {
+    applyContext(resolved.ctx)
+  }
+}
+
+function applyExistingCompactionEvent(
+  anchored: ChatMessage | undefined,
+  existing: ChatMessage,
+  event: NonNullable<AiHistory['events']>[number]
+): void {
+  if (!anchored) {
+    return
+  }
+  if (existing === anchored) {
+    const eventIndex = anchored.parts.findIndex((part) => part.kind === 'event' && part.eventId === event.eventId)
+    const anchorIndex = event.anchorToolCallId
+      ? anchored.parts.findIndex((part) => part.kind === 'tool' && part.toolCallId === event.anchorToolCallId)
+      : -1
+    if (anchorIndex < 0 || eventIndex < 0 || eventIndex >= anchorIndex) {
+      return
+    }
+  }
+  canRemoveCompactionEventPart(existing, event.eventId)
+  insertCompactionEvent(anchored, {
+    eventId: event.eventId,
+    anchorToolCallId: event.anchorToolCallId,
+    atMs: typeof event.atMs === 'number' ? event.atMs : undefined
+  })
+}
+
+async function forceIdentitySession(
+  identity: AiIdentity,
+  adoptFresh: () => void,
+  applyIdentity: () => void,
+  ensureSession: () => Promise<void>
+): Promise<void> {
+  clearHandoffOrigin()
+  adoptFresh()
+  writeAiIdentity(identity)
+  applyIdentity()
+  try {
+    sessionStorage.removeItem(sessionIdStorageKey(identity))
+  } catch (error) {
+    logCaughtError(error, 'ai:force-identity:clear-pointer')
+  }
+  await ensureSession()
+}
+
+async function prepareDuplicatedTab(
+  identity: AiIdentity | null,
+  sourceSessionId: string,
+  identityAtEntry: AiIdentity | null,
+  adoptFresh: () => void,
+  ensureSession: () => Promise<void>
+): Promise<void> {
+  clearDuplicatedTabStorage(identity)
+  adoptFresh()
+  rememberHandoffOrigin(sourceSessionId, identityAtEntry)
+  rotatePageId()
+  await ensureSession()
+}
+
+type PreviewReplanOutcome =
+  | { kind: 'aborted' }
+  | { kind: 'failure'; ctx: SheetContext | null; reason: string | null }
+  | { kind: 'success'; plan: SheetWritePlan }
+
+async function replanPreviewLevel(
+  plan: SheetWritePlan,
+  level: SheetPreviewLevel,
+  budgetMs: () => number,
+  isCurrent: () => boolean,
+  onContext: (ctx: SheetContext) => void
+): Promise<PreviewReplanOutcome> {
+  const resolved = await resolveSheetContext(plan.defCode)
+  if (!isCurrent()) {
+    return { kind: 'aborted' }
+  }
+  if (!resolved.ok) {
+    return { kind: 'failure', ctx: null, reason: null }
+  }
+  onContext(resolved.ctx)
+  const phase = await runSheetWritePhase(
+    budgetMs(),
+    (lifetime) => replanSheetAsync(resolved.ctx, plan, level, lifetime)
+  )
+  if (!isCurrent()) {
+    return { kind: 'aborted' }
+  }
+  const replanned = phase.settled ? phase.value : { ok: false as const, reason: SHEET_WRITE_PHASE_CANCELLED }
+  return replanned.ok
+    ? { kind: 'success', plan: replanned.plan }
+    : { kind: 'failure', ctx: resolved.ctx, reason: replanned.reason }
+}
+
+function applyPreviewFailure(
+  outcome: { ctx: SheetContext | null; reason: string | null },
+  onResolveFailure: () => void,
+  onReplanFailure: (reason: string) => void
+): void {
+  if (outcome.reason === null) {
+    onResolveFailure()
+  } else {
+    onReplanFailure(outcome.reason)
+  }
+}
+
+function claimOwnerSession(sessionId: string, identity: AiIdentity | null): void {
+  ownedSessionId = sessionId
+  clearReturnIntentPending()
+  postOwnership('claim', sessionId, identity)
+}
+
+function claimReturningSession(sessionId: string, identityAtEntry: AiIdentity | null): void {
+  returnIntentPending = {
+    sessionId,
+    fingerprint: identityAtEntry ? identityFingerprint(identityAtEntry) : ''
+  }
+  postOwnership('claim', sessionId, identityAtEntry, { returning: true })
+}
+
+function releaseProbedSessionLock(verdict: Awaited<ReturnType<typeof probeSessionLock>>): void {
+  if (verdict !== 'occupied') {
+    releaseSessionLock()
+  }
+}
+
 /**
  * 当前轮的宿主助手消息 id（模块级：与 `currentAbort` 同为"这一轮"的身份判据）。
  *
@@ -361,7 +499,7 @@ function captureRound(sessionId: string | null, runId: string | null, recovery =
  * <p>runId 只做**附加**约束：调用方读不到当前 run（轮已收尾 / 首次挂载）时以会话 + 纪元为准，
  * 否则同会话里换了 run 也算换轮。
  */
-function stillSameRound(guard: RoundGuard, sessionId: string | null, runId: string | null): boolean {
+function isStillSameRound(guard: RoundGuard, sessionId: string | null, runId: string | null): boolean {
   if (roundEpoch !== guard.epoch || sessionId !== guard.sessionId) {
     return false
   }
@@ -554,12 +692,12 @@ function autoRecoveryEpoch(kind: AutoRecoveryKind): number {
  */
 function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
   const kinds = kind === undefined
-    ? [...new Set<AutoRecoveryKind>([
+    ? uniq<AutoRecoveryKind>([
       ...autoRecoveryEpochs.keys(),
       ...autoRecoveryTimers.keys(),
       ...autoRecoveryWaiters.keys(),
       ...autoRecoveryInFlight
-    ])]
+    ])
     : [kind]
   for (const item of kinds) {
     autoRecoveryEpochs.set(item, autoRecoveryEpoch(item) + 1)
@@ -574,6 +712,18 @@ function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
       waiter()
     }
   }
+}
+
+function canWaitAutoRecoveryDelay(kind: AutoRecoveryKind): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    autoRecoveryWaiters.set(kind, () => resolve(false))
+    const timer = setTimeout(() => {
+      autoRecoveryTimers.delete(kind)
+      autoRecoveryWaiters.delete(kind)
+      resolve(true)
+    }, AUTO_RECOVERY_DELAY_MS)
+    autoRecoveryTimers.set(kind, timer)
+  })
 }
 
 /**
@@ -676,6 +826,10 @@ function pendingStopIntentOf(transport: AbortController): PendingStopIntentEntry
   return pendingStopIntents.get(transport)
 }
 
+function isStopIntentHostMatch(intent: PendingStopIntentEntry, hostMessageId: string): boolean {
+  return intent.hostMessageId !== null && intent.hostMessageId === hostMessageId
+}
+
 /** 该传输是否已被标记为"只取消、不再写入本地现场"（切身份 / 换会话后的旧传输）。 */
 function isCancelOnlyStopTransport(transport: AbortController): boolean {
   return pendingStopIntents.get(transport)?.cancelOnly === true
@@ -694,12 +848,13 @@ function releaseSupersededTransport(transport: AbortController | null): void {
   if (transport === null) {
     return
   }
-  if (markPendingStopIntentCancelOnly(transport, null)) {
+  if (canMarkPendingStopIntentCancelOnly(transport, null)) {
     return
   }
   try {
     transport.abort()
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:703')
     // 忽略：中止失败不影响新连接
   }
 }
@@ -710,7 +865,7 @@ function releaseSupersededTransport(transport: AbortController | null): void {
  *
  * @returns 是否确实有可保留的停止意向（false = 普通在途连接，调用方可按既有口径中止）
  */
-function markPendingStopIntentCancelOnly(
+function canMarkPendingStopIntentCancelOnly(
   transport: AbortController,
   identity: AiIdentity | null
 ): boolean {
@@ -750,7 +905,7 @@ const CLIENT_REQUEST_CANCEL_MAX = 16
 const clientRequestCancelSent = new Set<string>()
 const clientRequestCancelInFlight = new Map<string, Promise<void>>()
 
-function beginClientRequestCancel(clientRequestId: string): boolean {
+function canBeginClientRequestCancel(clientRequestId: string): boolean {
   if (clientRequestCancelSent.has(clientRequestId)) {
     return false
   }
@@ -764,7 +919,7 @@ function beginClientRequestCancel(clientRequestId: string): boolean {
   return true
 }
 
-function beginTombstoneRecancel(runId: string): boolean {
+function canBeginTombstoneRecancel(runId: string): boolean {
   if (stopTombstoneRecancelled.has(runId)) {
     return false
   }
@@ -792,7 +947,8 @@ function rememberStoppedRun(sessionId: string, runId: string, identity: AiIdenti
   }
   try {
     localStorage.setItem(stoppedRunKey(sessionId, runId, identity), JSON.stringify({ at: Date.now() }))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:796')
     // 当前页签的镜像仍是停止事实的兜底持久面。
   }
 }
@@ -813,7 +969,8 @@ function hasStoppedRun(sessionId: string, runId: string, identity: AiIdentity | 
       return false
     }
     return true
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:817')
     return false
   }
 }
@@ -830,7 +987,8 @@ function clearStoppedRuns(sessionId: string, identity: AiIdentity | null): void 
       }
     }
     keys.forEach((key) => localStorage.removeItem(key))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:834')
     // 被销毁会话的 id 不复用；失败不影响新会话。
   }
 }
@@ -1033,7 +1191,7 @@ function normalizeTenantEntry(raw: unknown): TenantUsersEntry | null {
 }
 
 /** 目录里是否有该身份（刷新恢复时校验存量身份仍然有效）。 */
-function directoryHas(directory: TenantUsersEntry[], identity: AiIdentity): boolean {
+function containsDirectoryEntry(directory: TenantUsersEntry[], identity: AiIdentity): boolean {
   return directory.some(
     (entry) => entry.tenantId === identity.tenantId
       && entry.users.some((user) => user.userId === identity.userId)
@@ -1088,7 +1246,8 @@ export function createPageIdToken(): string {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
       return crypto.randomUUID()
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1092')
     // 落回退实现
   }
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
@@ -1224,6 +1383,28 @@ export interface OwnershipMessage {
 let heldLock: { name: string; release: () => void } | null = null
 let ownedSessionId: string | null = null
 
+function releasePreviousSessionLock(
+  previousLock: { name: string; release: () => void },
+  previous: string,
+  identity: AiIdentity | null
+): void {
+  postOwnership('released', previous, identity)
+  try {
+    previousLock.release()
+  } catch (error) {
+    logCaughtError(error, 'ai:take-over:release-previous')
+  }
+}
+
+function persistTakenOverSession(sessionId: string, previous: string, identity: AiIdentity | null): void {
+  try {
+    sessionStorage.setItem(sessionIdStorageKey(identity), sessionId)
+    sessionStorage.removeItem(mirrorStorageKey(previous, identity))
+  } catch (error) {
+    logCaughtError(error, 'ai:take-over:persist')
+  }
+}
+
 /**
  * 只读探针（诊断/测试）：本页签当前记账的会话锁名（null = 账本为空）。
  * 用于断言"当前会话身份"与 `heldLock` 不发生分叉（例如竞态放弃分支不得留下别人的锁）。
@@ -1254,7 +1435,8 @@ function sleep(ms: number): Promise<void> {
 function readPageId(): string {
   try {
     return sessionStorage.getItem(PAGE_ID_KEY) ?? ''
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1258')
     return ''
   }
 }
@@ -1269,7 +1451,8 @@ function rotatePageId(): string {
   const created = createPageIdToken()
   try {
     sessionStorage.setItem(PAGE_ID_KEY, created)
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1273')
     // 隐私模式/配额：落不了盘不影响本页签内存里的身份
   }
   return created
@@ -1305,7 +1488,8 @@ function openOwnershipChannel(onMessage: (message: OwnershipMessage) => void): v
       })
     }
     ownershipChannel = channel
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1309')
     ownershipChannel = null
   }
 }
@@ -1313,7 +1497,8 @@ function openOwnershipChannel(onMessage: (message: OwnershipMessage) => void): v
 function closeOwnershipChannel(): void {
   try {
     ownershipChannel?.close()
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1317')
     // 关不掉只影响本页签的广播能力，不影响所有权判定
   }
   ownershipChannel = null
@@ -1323,7 +1508,7 @@ function closeOwnershipChannel(): void {
  * 所有权消息的身份判据（Task 4）：双方身份必须**完全一致**（含"双方都无身份"的旧单用户口径）。
  * 不同租户/用户之间既不认领也不让渡 —— 收到异身份消息一律忽略，避免跨身份接管。
  */
-function ownershipIdentityMatches(message: OwnershipMessage, identity: AiIdentity | null): boolean {
+function isOwnershipIdentityMatch(message: OwnershipMessage, identity: AiIdentity | null): boolean {
   const hasMessageIdentity = typeof message.tenantId === 'number' && typeof message.userId === 'number'
   if (identity === null) {
     return !hasMessageIdentity
@@ -1357,7 +1542,8 @@ function postOwnership(
   }
   try {
     ownershipChannel?.postMessage(message)
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1361')
     // 广播失败只影响让渡，不影响本页签继续用当前会话
   }
 }
@@ -1367,7 +1553,8 @@ function lockManager(): LockManager | null {
   try {
     const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
     return locks && typeof locks.request === 'function' ? locks : null
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1371')
     return null
   }
 }
@@ -1418,7 +1605,8 @@ async function probeSessionLock(
           heldLock = { name, release }
         })
       }).catch(() => settle('unsupported'))
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'stores/ai.ts:1422')
       settle('unsupported')
     }
   })
@@ -1431,7 +1619,8 @@ function releaseSessionLock(): void {
   ownedSessionId = null
   try {
     held?.release()
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1435')
     // 释放失败只影响让渡时序
   }
 }
@@ -1486,7 +1675,8 @@ function rememberReturnIntent(
         ...(identity ? { fingerprint: identityFingerprint(identity) } : {})
       })
     )
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1490')
     // 隐私模式/配额：写不进去只是少一条降级保护，不影响所有权判定
   }
 }
@@ -1495,14 +1685,15 @@ function rememberReturnIntent(
  * 读取并**消费**返回意向：一次性（读到即删），且必须同会话 + 同 pageId + 未过期。
  * 任何不自洽的意向都当不存在 —— 复制页签继承了旧意向时，最多退化成"不清屏"的无害降级。
  */
-function takeReturnIntent(sessionId: string): boolean {
+function canTakeReturnIntent(sessionId: string): boolean {
   let raw: string | null = null
   try {
     raw = sessionStorage.getItem(RETURN_INTENT_KEY)
     if (raw !== null) {
       sessionStorage.removeItem(RETURN_INTENT_KEY)
     }
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1506')
     return false
   }
   if (raw === null) {
@@ -1519,7 +1710,8 @@ function takeReturnIntent(sessionId: string): boolean {
       && fingerprintMatches
       && typeof value.at === 'number'
       && Date.now() - value.at <= RETURN_INTENT_TTL_MS
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1523')
     return false
   }
 }
@@ -1562,7 +1754,7 @@ function clearHandoffOrigin(): void {
 }
 
 /** 接手**资格**（尚未用过）：仍是复制来源那一段、且身份一致。 */
-function handoffOriginMatches(sessionId: string, identity: AiIdentity | null): boolean {
+function isHandoffOriginMatch(sessionId: string, identity: AiIdentity | null): boolean {
   if (handoffOrigin === null || handoffOrigin.sessionId !== sessionId || handoffOrigin.takenOver) {
     return false
   }
@@ -1570,7 +1762,7 @@ function handoffOriginMatches(sessionId: string, identity: AiIdentity | null): b
 }
 
 /** F1 回让资格：本页签**确实是从这条会话接管来的**（资格已用掉），且身份一致。 */
-function tookOverOriginMatches(sessionId: string, identity: AiIdentity | null): boolean {
+function isTookOverOriginMatch(sessionId: string, identity: AiIdentity | null): boolean {
   if (handoffOrigin === null || handoffOrigin.sessionId !== sessionId || !handoffOrigin.takenOver) {
     return false
   }
@@ -1670,7 +1862,8 @@ function clearMirrorRefs(): void {
       }
     }
     doomed.forEach((key) => sessionStorage.removeItem(key))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1674')
     // 隐私模式/配额：清不掉不影响"本页签用新 id"的口径
   }
 }
@@ -1691,7 +1884,8 @@ function clearMirrorRefs(): void {
 function clearDuplicatedTabStorage(identity: AiIdentity | null): void {
   try {
     sessionStorage.clear()
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1695')
     clearMirrorRefs()
   }
   // Task 4 返修 C1：清空的是"从原页签继承来的现场"，**不包括**本页签当前选择的身份。
@@ -1725,7 +1919,8 @@ function initSessionId(): string {
 function storedSessionPointer(identity: AiIdentity): string {
   try {
     return normalizeSessionId(sessionStorage.getItem(sessionIdStorageKey(identity)) ?? '')
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1729')
     return ''
   }
 }
@@ -1733,10 +1928,11 @@ function storedSessionPointer(identity: AiIdentity): string {
 /** AI 栏展开态（同源布局偏好：用户收起后刷新及其他页签仍保持收起）。 */
 export const EXPANDED_KEY = 'ai-panel-expanded'
 
-function initExpanded(): boolean {
+function canInitExpanded(): boolean {
   try {
     return localStorage.getItem(EXPANDED_KEY) !== '0'
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1740')
     return true
   }
 }
@@ -1744,7 +1940,8 @@ function initExpanded(): boolean {
 function persistExpanded(expanded: boolean): void {
   try {
     localStorage.setItem(EXPANDED_KEY, expanded ? '1' : '0')
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1748')
     // 隐私模式忽略：展开态只是展示偏好
   }
 }
@@ -1756,7 +1953,8 @@ function readMirror(sessionId: string): AiSessionMirror | null {
       return null
     }
     return JSON.parse(raw) as AiSessionMirror
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:1760')
     return null
   }
 }
@@ -1788,7 +1986,7 @@ function isCurrentMirror(mirror: AiSessionMirror): boolean {
  * ⚠️ 反向风险（保留警示）：若未来直调镜像**原始**数据（done 为 undefined），`undefined !== true`
  *  ⇒ 全段跳过（守卫方向反了：本该收口却整段罢工）——届时须在调用点先归一，不得恢复本守卫。
  */
-function sanitizeMirrorResidues(messages: ChatMessage[]): boolean {
+function canSanitizeMirrorResidues(messages: ChatMessage[]): boolean {
   let changed = false
   for (const message of messages) {
     message.parts.forEach((part, index) => {
@@ -1911,7 +2109,7 @@ const frontendToolChains = new Map<string, Promise<void>>()
 function enqueueFrontendTool(
   messageId: string,
   stillCurrent: () => boolean,
-  // 执行体可带返回值（`runFrontendToolAttempt` 回"回灌是否受理"）：队列本身只关心"排到即执行"，
+  // 执行体可带返回值（`canRunFrontendToolAttempt` 回"回灌是否受理"）：队列本身只关心"排到即执行"，
   // 返回值由执行体自己的收尾（`onSettled` / `.then`）消费。
   run: () => Promise<unknown>,
   onSettled?: () => void
@@ -2013,12 +2211,13 @@ function readFrontendToolJournal(
       return null
     }
     return value as FrontendToolJournalEntry
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:2017')
     return null
   }
 }
 
-function writeFrontendToolJournal(entry: FrontendToolJournalEntry, identity: AiIdentity | null): boolean {
+function canWriteFrontendToolJournal(entry: FrontendToolJournalEntry, identity: AiIdentity | null): boolean {
   if (entry.sessionId === '') {
     return false
   }
@@ -2028,7 +2227,8 @@ function writeFrontendToolJournal(entry: FrontendToolJournalEntry, identity: AiI
       JSON.stringify(entry)
     )
     return true
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:2032')
     // 存储不可用时仍由 Web Locks 与页签内占位防重；不得因此伪造执行事实。
     return false
   }
@@ -2045,7 +2245,8 @@ function clearFrontendToolJournals(sessionId: string, identity: AiIdentity | nul
       }
     }
     keys.forEach((key) => localStorage.removeItem(key))
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:2049')
     // 会话 id 不复用；清理失败不会污染新会话。
   }
 }
@@ -2097,7 +2298,7 @@ function snapshotExecutionFact(entry: AiRunCurrentEntry | undefined): SnapshotEx
   return 'not-executed'
 }
 
-function replaySafeWithoutSnapshotFact(name: string): boolean {
+function isReplaySafeWithoutSnapshotFact(name: string): boolean {
   if (name === 'navigate_to') {
     return true
   }
@@ -2141,14 +2342,15 @@ async function withFrontendToolFence<T>(
       }
       return { acquired: true, value: await task() }
     })
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:2145')
     return { acquired: false, failed: true }
   }
 }
 
 const CONFIRM_STEP_TOOL_NAMES: ReadonlySet<string> = new Set(['confirm_step', 'goto_step', 'advance_step'])
 
-function stepAlreadyReached(
+function isStepAlreadyReached(
   current: string | null,
   target: string,
   taskType: 'EXPORT' | 'IMPORT' | null
@@ -2248,7 +2450,7 @@ function mirrorSnapshotOf(message: ChatMessage): MirrorMessageSnapshot {
 }
 
 /** 段字段浅比较（值按 `===`；正文/args 都是不可变字符串，同引用时 O(1)）。 */
-function sameMirrorPartFields(previous: Array<[string, unknown]>, part: MessagePart): boolean {
+function hasSameMirrorPartFields(previous: Array<[string, unknown]>, part: MessagePart): boolean {
   const comparable = Object.keys(part).filter((key) => key !== 'lastFrameLocalAt')
   if (comparable.length !== previous.length) {
     return false
@@ -2263,7 +2465,7 @@ function sameMirrorPartFields(previous: Array<[string, unknown]>, part: MessageP
   return true
 }
 
-function sameMirrorSnapshot(snapshot: MirrorMessageSnapshot, message: ChatMessage): boolean {
+function isSameMirrorSnapshot(snapshot: MirrorMessageSnapshot, message: ChatMessage): boolean {
   for (let index = 0; index < MIRROR_MESSAGE_SCALAR_KEYS.length; index += 1) {
     if (snapshot.scalars[index] !== message[MIRROR_MESSAGE_SCALAR_KEYS[index]]) {
       return false
@@ -2278,7 +2480,7 @@ function sameMirrorSnapshot(snapshot: MirrorMessageSnapshot, message: ChatMessag
     if (previous === undefined || part === undefined || previous.part !== part) {
       return false
     }
-    if (!sameMirrorPartFields(previous.fields, part)) {
+    if (!hasSameMirrorPartFields(previous.fields, part)) {
       return false
     }
   }
@@ -2311,7 +2513,7 @@ function mirrorMessageOf(message: ChatMessage): MirroredMessage {
 }
 
 /** 末条 assistant 是否以断流收尾（镜像 `inFlight` 判据：#1 断流后仍要能刷新恢复半截 + 继续）。 */
-function lastAssistantInterrupted(messages: ChatMessage[]): boolean {
+function isLastAssistantInterrupted(messages: ChatMessage[]): boolean {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
     if (message?.role === 'assistant') {
@@ -2322,7 +2524,7 @@ function lastAssistantInterrupted(messages: ChatMessage[]): boolean {
 }
 
 /** 移除一条消息里的压缩事件段并重排 seg（分页后事件需要从粗宿主校正到锚点宿主）。 */
-function removeCompactionEventPart(message: ChatMessage, eventId: string): boolean {
+function canRemoveCompactionEventPart(message: ChatMessage, eventId: string): boolean {
   const index = message.parts.findIndex((part) => part.kind === 'event' && part.eventId === eventId)
   if (index < 0) {
     return false
@@ -2336,7 +2538,7 @@ function removeCompactionEventPart(message: ChatMessage, eventId: string): boole
 
 function mirrorMessageJsonOf(message: ChatMessage): string {
   const cached = mirrorMessageCache.get(message)
-  if (cached !== undefined && sameMirrorSnapshot(cached.snapshot, message)) {
+  if (cached !== undefined && isSameMirrorSnapshot(cached.snapshot, message)) {
     return cached.json
   }
   const json = JSON.stringify(mirrorMessageOf(message))
@@ -2490,7 +2692,8 @@ function writeMirror(
       ...(clientRequestStopped ? { clientRequestStopped: true } : {})
     })
     payload = `${envelope.slice(0, -1)},"messages":[${messageJsons.join(',')}]}`
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:2494')
     // 序列化异常（脏段 / 循环引用等）：旧实现整体在 try 内、异常不外溢 —— 镜像是刷新体验
     // 增强，不是正确性依赖，绝不能把异常抛进 `$subscribe`。此类失败不冒充配额提示。
     return 'error'
@@ -2512,7 +2715,8 @@ function writeMirror(
       clearNotice(sink)
     }
     return 'ok'
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:2516')
     // 配额/隐私模式：镜像是刷新体验优化，不是正确性依赖 —— 但失败必须**一次性可见**。
     noteMirrorFailure(sink, sessionId)
     return 'error'
@@ -2656,7 +2860,7 @@ function hasTerminalEvidence(part: ToolPart): boolean {
  * <p>镜像可能由上一次刷新后的历史占位段落盘而来；这种段不能在合并时被当成真实终态写掉。
  * result/kind 不参与判定（历史占位也可能配到 TOOL 原文与 kind）。
  */
-function looksLikeInheritedPlaceholder(part: ToolPart): boolean {
+function isInheritedPlaceholderLike(part: ToolPart): boolean {
   return part.status === 'unknown' && !hasTerminalEvidence(part)
 }
 
@@ -2756,20 +2960,14 @@ function preferMergedValue<T>(
  * **状态胜者**取值，胜者缺值才回落到另一侧；`requiresAction` 只在 pending 段上保留
  * （running 是执行中，终态一律不挂起）。
  */
-function mergeToolPartState(target: ToolPart, source: ToolPart): void {
-  const targetPlaceholder = isHistoryPlaceholderStatus(target.toolCallId, target.status)
-  const sourceInherited = looksLikeInheritedPlaceholder(source)
-  // 继承的 unknown 占位、或本地未受理的 unknown/failed/cancelled（无结局证据）都不是权威终态：
-  // 不得盖掉历史真实的 pending/running，也不得在没胜出时删占位账。
-  const sourceUnproven = sourceInherited || isUnprovenLocalTerminal(source)
-  const unprovenBlocks = sourceUnproven
-    && (target.status === 'pending' || target.status === 'running')
-  const mirrorWins = !unprovenBlocks && toolStatusRank(source.status)
-    > toolStatusRank(target.status, targetPlaceholder)
-  const status = mirrorWins ? source.status : target.status
-  target.status = status
+function syncHistoryPlaceholderStatus(
+  target: ToolPart,
+  sourceUnproven: boolean,
+  mirrorWins: boolean,
+  targetPlaceholder: boolean,
+  status: ToolPart['status']
+): void {
   if (sourceUnproven) {
-    // 历史占位目标：保持 unknown 占位；被未受理本地终态改写则不再是占位。
     if (targetPlaceholder) {
       if (status === 'unknown') {
         historyPlaceholderStatusIds.add(target.toolCallId)
@@ -2777,20 +2975,16 @@ function mergeToolPartState(target: ToolPart, source: ToolPart): void {
         historyPlaceholderStatusIds.delete(target.toolCallId)
       }
     }
-    // 非占位目标：保持 Set 原样，不因未受理终态删账/伪造"已决"。
   } else if (mirrorWins) {
-    // 真实状态写入 ⇒ 占位作废。
     historyPlaceholderStatusIds.delete(target.toolCallId)
   } else if (targetPlaceholder && status === 'unknown') {
-    // 历史占位胜出：按 toolCallId 继续登记（段对象可能已被复制，Set 不受影响）。
     historyPlaceholderStatusIds.add(target.toolCallId)
   } else {
     historyPlaceholderStatusIds.delete(target.toolCallId)
   }
-  // 未受理终态且没有胜出（历史 pending/running/真实终态）：不搬它的结果/决策字段。
-  if (sourceUnproven && !mirrorWins) {
-    return
-  }
+}
+
+function mergeToolPartFields(target: ToolPart, source: ToolPart, mirrorWins: boolean, status: ToolPart['status']): void {
   target.args = target.args ?? source.args
   if (target.kind2 === 'UNKNOWN' && source.kind2 !== 'UNKNOWN') {
     target.kind2 = source.kind2
@@ -2816,10 +3010,101 @@ function mergeToolPartState(target: ToolPart, source: ToolPart): void {
   target.expiresAt = preferMergedValue(target.expiresAt, source.expiresAt, mirrorWins)
   target.atMs = preferMergedValue(target.atMs, source.atMs, mirrorWins)
   target.messageId = target.messageId ?? source.messageId
-  // 只有 pending 段才承载"等人工/前端动作"；running 是执行中，终态一律不挂起
-  //（unknown 的 X1 不变式同口径）。pending 时保留任一侧的待人工事实（历史侧不写 requiresAction，
-  // 该 true 通常来自仍在途的镜像）。
   target.requiresAction = status === 'pending' && (target.requiresAction || source.requiresAction)
+}
+
+function canApplyGenericToolTerminal(
+  item: ChatMessage,
+  partIndex: number,
+  part: ToolPart,
+  mapped: ToolRunStatus | null
+): boolean {
+  const correctable = part.status === 'pending' || part.status === 'failed'
+    || part.status === 'unknown' || part.status === 'running'
+  if (mapped !== null && correctable) {
+    item.parts.splice(partIndex, 1, { ...part, requiresAction: false, status: mapped })
+    deriveProjections(item)
+    return true
+  }
+  if (part.requiresAction) {
+    item.parts.splice(partIndex, 1, { ...part, requiresAction: false })
+    deriveProjections(item)
+  }
+  return false
+}
+
+function canApplyGenerativeToolTerminal(
+  item: ChatMessage,
+  partIndex: number,
+  part: ToolPart,
+  mapped: ToolRunStatus | null
+): boolean {
+  if (part.status !== 'pending' && part.status !== 'cancelled'
+    && part.status !== 'failed' && part.status !== 'unknown') {
+    return false
+  }
+  item.parts.splice(partIndex, 1, mapped === null
+    ? { ...part, requiresAction: false }
+    : { ...part, requiresAction: false, status: mapped })
+  deriveProjections(item)
+  return mapped !== null
+}
+
+function mergeToolPartState(target: ToolPart, source: ToolPart): void {
+  const targetPlaceholder = isHistoryPlaceholderStatus(target.toolCallId, target.status)
+  const sourceUnproven = isInheritedPlaceholderLike(source) || isUnprovenLocalTerminal(source)
+  const unprovenBlocks = sourceUnproven && (target.status === 'pending' || target.status === 'running')
+  const mirrorWins = !unprovenBlocks && toolStatusRank(source.status) > toolStatusRank(target.status, targetPlaceholder)
+  const status = mirrorWins ? source.status : target.status
+  target.status = status
+  syncHistoryPlaceholderStatus(target, sourceUnproven, mirrorWins, targetPlaceholder, status)
+  if (!sourceUnproven || mirrorWins) {
+    mergeToolPartFields(target, source, mirrorWins, status)
+  }
+}
+
+function hasOutcomeMarkers(message: ChatMessage): boolean {
+  return message.errorCard != null || message.code != null
+    || message.unconfirmed === true || message.recoveryGap === true
+}
+
+function isSameUserRound(historical: ChatMessage[], mirrorMessages: ChatMessage[]): boolean {
+  const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user')
+  const historyUser = [...historical].reverse().find((item) => item.role === 'user')
+  return mirrorUser !== undefined && historyUser !== undefined
+    && normalizeUserText(messageText(mirrorUser)) === normalizeUserText(messageText(historyUser))
+}
+
+function mirrorOutcomePair(
+  historical: ChatMessage[],
+  mirrorMessages: ChatMessage[]
+): { tail: ChatMessage; target: ChatMessage } | null {
+  const tail = last(mirrorMessages)
+  if (!tail || tail.role !== 'assistant' || typeof tail.runId !== 'string' || tail.runId === '') {
+    return null
+  }
+  if (!hasOutcomeMarkers(tail)) {
+    return null
+  }
+  const target = last(historical)
+  if (!target || target.role !== 'assistant') {
+    return null
+  }
+  const targetRunId = typeof target.runId === 'string' && target.runId !== '' ? target.runId : null
+  if (targetRunId !== null && targetRunId !== tail.runId) {
+    return null
+  }
+  return isSameUserRound(historical, mirrorMessages) ? { tail, target } : null
+}
+
+function copyMirrorOutcomeMarkers(target: ChatMessage, tail: ChatMessage): void {
+  if (hasOutcomeMarkers(target)) {
+    return
+  }
+  if (tail.errorCard != null) target.errorCard = tail.errorCard
+  if (tail.code != null) target.code = tail.code
+  if (tail.unconfirmed === true) target.unconfirmed = true
+  if (tail.recoveryGap === true) target.recoveryGap = true
 }
 
 type MirrorTextPart = Extract<MessagePart, { kind: 'text' } | { kind: 'reasoning' }>
@@ -2848,7 +3133,7 @@ function mergeMirrorTextSequence(
   if (targetParts.length <= sourceParts.length || sourceText.startsWith(targetText)) {
     if (targetText.length > sourceText.length) {
       const delta = targetText.slice(sourceText.length)
-      const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? sourceParts[sourceParts.length - 1]
+      const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? last(sourceParts)
       const copy = anchor ? sourceToMerged.get(anchor) : null
       if (copy?.kind === 'text' || copy?.kind === 'reasoning') {
         copy.text += delta
@@ -2877,7 +3162,7 @@ function mergeMirrorTextSequence(
     pairs.push({ target: targetPart, source: sourcePart })
   }
   if (!aligned) {
-    const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? sourceParts[sourceParts.length - 1]
+    const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? last(sourceParts)
     const copy = anchor ? sourceToMerged.get(anchor) : null
     if (copy?.kind === 'text' || copy?.kind === 'reasoning') {
       copy.text += targetText.slice(sourceText.length)
@@ -2904,7 +3189,7 @@ function mergeMirrorTextSequence(
 }
 
 /** 镜像实时段序是骨架；历史状态与历史独有内容按 toolCallId/原段锚点并入。 */
-function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolean {
+function canMergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolean {
   if (target.parts.length === 0 && source.parts.length === 0) {
     return false
   }
@@ -2939,7 +3224,7 @@ function mergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolea
     if (owner) {
       mergeToolPartState(owner, sourcePart)
       targetToMerged.set(owner, owner)
-    } else if (tool.kind2 === 'UNKNOWN' && looksLikeInheritedPlaceholder(tool)) {
+    } else if (tool.kind2 === 'UNKNOWN' && isInheritedPlaceholderLike(tool)) {
       historyPlaceholderStatusIds.add(tool.toolCallId)
     } else {
       historyPlaceholderStatusIds.delete(tool.toolCallId)
@@ -3044,7 +3329,7 @@ function findHistoryRoundUserIndex(
  * 镜像 tail 是否已经"开流"：正文/思考有非空文本，或存在工具/事件等非文本段。
  * 只有空正文段（或完全没有段）不算开流 —— 空 tail 仍按旧口径补宿主。
  */
-function messageShowsProgress(message: ChatMessage): boolean {
+function hasProgressMessage(message: ChatMessage): boolean {
   return message.parts.some((part) => {
     if (part.kind === 'text' || part.kind === 'reasoning') {
       return part.text.trim() !== ''
@@ -3054,7 +3339,7 @@ function messageShowsProgress(message: ChatMessage): boolean {
 }
 
 /** 历史终态覆盖镜像最新内容时，才不采用镜像遗留的在途标记。 */
-function historyCoversMirrorRound(target: ChatMessage, mirror: ChatMessage): boolean {
+function hasHistoryCoveredMirrorRound(target: ChatMessage, mirror: ChatMessage): boolean {
   if (target.done !== true || target.streaming
     || !messageText(target).startsWith(messageText(mirror))
     || !target.reasoning.startsWith(mirror.reasoning)) {
@@ -3065,7 +3350,7 @@ function historyCoversMirrorRound(target: ChatMessage, mirror: ChatMessage): boo
 }
 
 /** 刷新合并：同一 run 的全部历史助手，保持原消息与段落顺序。 */
-function sameRoundAssistant(message: ChatMessage, roundRunId: string | null): boolean {
+function isSameRoundAssistant(message: ChatMessage, roundRunId: string | null): boolean {
   return message?.role === 'assistant' && (message.runId ?? null) === roundRunId
 }
 
@@ -3075,7 +3360,7 @@ function roundAssistantMessages(
   roundRunId: string | null
 ): ChatMessage[] {
   if (roundRunId !== null) {
-    return historical.filter((message) => sameRoundAssistant(message, roundRunId))
+    return historical.filter((message) => isSameRoundAssistant(message, roundRunId))
   }
   if (historyUserIndex < 0) {
     return []
@@ -3089,7 +3374,7 @@ function roundAssistantMessages(
     if (message.role === 'user') {
       break
     }
-    if (sameRoundAssistant(message, roundRunId)) {
+    if (isSameRoundAssistant(message, roundRunId)) {
       found.push(message)
     }
   }
@@ -3396,7 +3681,8 @@ const UPLOAD_READONLY_TEXT = (): string => translate('ai.notice.uploadReadonly')
 function highlightUploadEntry(ref: string): void {
   try {
     aiHighlight({ ref, epoch: currentAiEpoch() })
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:3400')
     // 高亮失败不改变交接三态（用户仍能在对话里点「选择文件」）
   }
 }
@@ -3551,7 +3837,8 @@ function cleanupSessionLocalArtifacts(
   const mirrorKey = cleanup?.mirrorKey === expectedMirror ? cleanup.mirrorKey : expectedMirror
   try {
     sessionStorage.removeItem(mirrorKey)
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'stores/ai.ts:3555')
     // 隐私模式/存储被禁用：清不掉不影响主流程（新会话已换 id）
   }
   // 草稿键按**当前身份**拼；身份在销毁回包前已切换 ⇒ 一个都不清（那是新身份的草稿）。
@@ -3571,7 +3858,8 @@ function cleanupSessionLocalArtifacts(
       if (serverPrefix !== null) {
         try {
           sessionStorage.removeItem(`${serverPrefix}${toolCallId}`)
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:3575')
           // 隐私模式/存储被禁用：忽略
         }
       }
@@ -3607,7 +3895,8 @@ function purgeSession(sessionId: string, identity: AiIdentity | null): Promise<v
       cleanupSessionLocalArtifacts(sessionId, purge, identity)
       clearFrontendToolJournals(sessionId, identity)
       clearStoppedRuns(sessionId, identity)
-    } catch {
+    } catch (error) {
+        logCaughtError(error, 'stores/ai.ts:3611')
       cleanupSessionLocalArtifacts(sessionId, null, identity)
       clearFrontendToolJournals(sessionId, identity)
       clearStoppedRuns(sessionId, identity)
@@ -3648,7 +3937,7 @@ export const useAiStore = defineStore('ai', {
      */
     tabOwnership: 'unknown' as TabOwnership,
     /** AI 面板是否展开（裁剪性：收起后业务照常；同源布局偏好，刷新及其他页签保持用户选择） */
-    expanded: initExpanded(),
+    expanded: canInitExpanded(),
     messages: [] as ChatMessage[],
     /** 是否有轮次在进行 */
     loading: false,
@@ -3825,7 +4114,7 @@ export const useAiStore = defineStore('ai', {
     /**
      * 批4④ A5'/D4：折叠块展开态（**会话内内存态**：不进镜像、不做 sessionStorage）。
      * 三态（D-C6）：true = 显式展开 / false = 显式收起 / 键缺省（undefined）= 未触碰 ——
-     * 自动逻辑（defaultExpanded）只作用于未触碰组；requiresAction 组强制展开（resolveBlockExpanded，
+     * 自动逻辑（isDefaultExpanded）只作用于未触碰组；requiresAction 组强制展开（resolveBlockExpanded，
      * 手动收起不生效）。resetSession / 新建会话须清空（防跨会话串味）。
      */
     expandedBlocks: {} as Record<string, boolean>,
@@ -4188,7 +4477,7 @@ export const useAiStore = defineStore('ai', {
       this.loading = true
       this.suspended = false
       this.streamInterrupted = false
-      this.startAutoRecovery(
+      this.canStartAutoRecovery(
         'preparing',
         async () => {
           if (this.preparingRun === null) {
@@ -4249,13 +4538,13 @@ export const useAiStore = defineStore('ai', {
      *   **既有**手动出口（错误条 + 重试钮 / 回稿），不新增 UI
      * @returns 是否恢复成功
      */
-    async autoRecoverBounded(
+    async canAutoRecoverBounded(
       kind: AutoRecoveryKind,
       attempt: () => Promise<boolean>,
       onExhausted?: () => void
     ): Promise<boolean> {
       const epoch = autoRecoveryEpoch(kind)
-      await waitForPageVisible()
+      await getPageVisible()
       if (autoRecoveryEpoch(kind) !== epoch || autoRecoveryInFlight.has(kind)) {
         return false
       }
@@ -4267,7 +4556,7 @@ export const useAiStore = defineStore('ai', {
       autoRecoveryInFlight.add(kind)
       try {
         while (used < AUTO_RECOVERY_MAX_ATTEMPTS) {
-          await waitForPageVisible()
+          await getPageVisible()
           if (autoRecoveryEpoch(kind) !== epoch) {
             return false
           }
@@ -4283,15 +4572,7 @@ export const useAiStore = defineStore('ai', {
           if (used >= AUTO_RECOVERY_MAX_ATTEMPTS) {
             break
           }
-          const keepGoing = await new Promise<boolean>((resolve) => {
-            autoRecoveryWaiters.set(kind, () => resolve(false))
-            const timer = setTimeout(() => {
-              autoRecoveryTimers.delete(kind)
-              autoRecoveryWaiters.delete(kind)
-              resolve(true)
-            }, AUTO_RECOVERY_DELAY_MS)
-            autoRecoveryTimers.set(kind, timer)
-          })
+          const keepGoing = await canWaitAutoRecoveryDelay(kind)
           if (!keepGoing || autoRecoveryEpoch(kind) !== epoch) {
             return false
           }
@@ -4309,7 +4590,7 @@ export const useAiStore = defineStore('ai', {
      * @returns 是否排上（false = 同类已在跑 / 已排 / 预算用尽 —— 调用方据此保留既有手动出口；
      *   注意 false 不区分"在跑"与"用尽"，只有用尽时才回调 `onExhausted`）
      */
-    startAutoRecovery(
+    canStartAutoRecovery(
       kind: AutoRecoveryKind,
       attempt: () => Promise<boolean>,
       onExhausted?: () => void
@@ -4327,7 +4608,7 @@ export const useAiStore = defineStore('ai', {
         if (autoRecoveryEpoch(kind) !== epoch) {
           return
         }
-        void this.autoRecoverBounded(kind, attempt, onExhausted)
+        void this.canAutoRecoverBounded(kind, attempt, onExhausted)
       }, AUTO_RECOVERY_DELAY_MS)
       autoRecoveryTimers.set(kind, timer)
       return true
@@ -4427,7 +4708,7 @@ export const useAiStore = defineStore('ai', {
         // interrupted，若只看 loading，镜像会把断流轮的半截回答标成"不在途"，刷新后被历史
         // 整体替换且不出现「继续」。只认**末条** assistant（新轮一开始就不再命中）。
         // 表单填写/提交/已受理与续跑建连也是在途；已取消表单不算。
-        inFlight: (this.loading || this.suspended || lastAssistantInterrupted(this.messages)
+        inFlight: (this.loading || this.suspended || isLastAssistantInterrupted(this.messages)
           || (this.activeForm !== null && this.activeForm.status !== 'cancelled')
           || pendingAttachRunId !== null) && !this.stopped,
         runSeq: this.runSeq,
@@ -4494,10 +4775,11 @@ export const useAiStore = defineStore('ai', {
       let task = healthProbe
       if (task === null) {
         const request = (async (): Promise<HealthProbeResult> => {
-          await waitForPageVisible()
+          await getPageVisible()
           try {
             return { health: await aiApi.health(), error: null }
           } catch (error) {
+              logCaughtError(error, 'stores/ai.ts:4501')
             return { health: null, error }
           }
         })()
@@ -4528,7 +4810,7 @@ export const useAiStore = defineStore('ai', {
       // N-1（R3）：原文只进 DEV 日志（`healthError` 也是诊断字段）—— 探针失败本身不再上屏，
       // 真实不可用由降级条与后端请求错误表达，机制词不上屏。
       if (import.meta.env.DEV) {
-        console.warn('[ai] health probe failed:', result.error)
+        logCaughtError(result.error, 'ai:health-probe')
       }
       // 探测失败不清策略：已生效的收紧值比"回到 20"更安全（K-10：兜底是放宽方向，仍安全）
     },
@@ -4559,7 +4841,7 @@ export const useAiStore = defineStore('ai', {
      * </ul>
      */
     async loadContext(): Promise<void> {
-      await waitForPageVisible()
+      await getPageVisible()
       const ownership = this.ensureTabOwnership()
       if (ownership !== null) {
         await ownership
@@ -4588,7 +4870,8 @@ export const useAiStore = defineStore('ai', {
           est: snapshot.estimated,
           circuit: snapshot.compaction?.circuit ?? 'closed'
         }
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:4592')
         // 读不到就不动数据：ContextPill 继续显示最近一次已知摘要（没有则保持空轨）。
       }
     },
@@ -4600,7 +4883,7 @@ export const useAiStore = defineStore('ai', {
      * 分支，逐个补复位必然会漏一个（漏掉就是"永久恢复中"）。`loadHistoryInner` 只管取数与落盘。
      */
     async loadHistory(): Promise<void> {
-      await waitForPageVisible()
+      await getPageVisible()
       const ownership = this.ensureTabOwnership()
       if (ownership !== null) {
         await ownership
@@ -4617,6 +4900,7 @@ export const useAiStore = defineStore('ai', {
       try {
         await this.loadHistoryInner(requestGeneration)
       } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:4620')
         if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
           return // 会话已换或已有更新请求：过期异常不封口、不写旧错误
         }
@@ -4637,7 +4921,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     async loadHistoryInner(requestedGeneration?: number): Promise<void> {
-      await waitForPageVisible()
+      await getPageVisible()
       const sid = this.sessionId
       const requestGeneration = requestedGeneration ?? (historyRequestGenerations.get(sid) ?? 0) + 1
       historyRequestGenerations.set(sid, requestGeneration)
@@ -4683,7 +4967,7 @@ export const useAiStore = defineStore('ai', {
           // 批3③b D4（R-140①-4）：存量 v2 镜像把 message.parts 原样入镜像（writeMirror 不做
           // 段级归一），段级 streaming=true 假态随镜像存活；消费侧 openStreamPart /
           // sealTrailingStreamPart 读段 streaming（段边界假态）—— 与上一行消息级归一同口径，
-          // 读取侧逐段归一。parts 是数组须逐段 map；**不收进** sanitizeMirrorResidues（防职责扩大）。
+          // 读取侧逐段归一。parts 是数组须逐段 map；**不收进** canSanitizeMirrorResidues（防职责扩大）。
           parts: message.parts.map((part) => ('streaming' in part && part.streaming ? { ...part, streaming: false } : part))
         }))
         // 批次6A 返修：思考段计时用**帧接收锚**（服务器 lastFrameAt ↔ 本地收帧时刻）。
@@ -4717,7 +5001,7 @@ export const useAiStore = defineStore('ai', {
         }
         // 读取侧收口存量镜像残留的 requiresAction=true，须在 writeMirror 回写之前完成 ——
         // 否则刷新复活挂起语义。在途轮保留原样（它还没收尾，挂起语义可能是真的）。
-        const sanitized = mirrorInFlight ? false : sanitizeMirrorResidues(this.messages)
+        const sanitized = mirrorInFlight ? false : canSanitizeMirrorResidues(this.messages)
         // 镜像里的投影一律按段重算（历史双写期的镜像可能仍留着旧口径的投影）
         this.messages.forEach((message) => deriveProjections(message))
         mirrorMessages = this.messages
@@ -4738,6 +5022,7 @@ export const useAiStore = defineStore('ai', {
       try {
         history = await aiApi.history(this.sessionId, { latest: HISTORY_PAGE_SIZE })
       } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:4741')
         if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
           return // 会话已换或已有更新请求：过期失败不落任何状态
         }
@@ -4751,7 +5036,7 @@ export const useAiStore = defineStore('ai', {
         this.sealRecovery('history', error)
         // 2026-10-29 收口（共用有界自动恢复）：历史是**纯 GET**（零副作用）⇒ 自动重读有界；
         // 耗尽后回到既有手动出口（错误条 + 「重新载入历史」钮 + 恢复缺口入口）。
-        this.startAutoRecovery('history', async () => {
+        this.canStartAutoRecovery('history', async () => {
           await this.loadHistory()
           return this.historyError === null
         })
@@ -5112,7 +5397,8 @@ export const useAiStore = defineStore('ai', {
                 let submitted: Record<string, unknown> | null = null
                 try {
                   submitted = JSON.parse(state.submittedValues) as Record<string, unknown>
-                } catch {
+                } catch (error) {
+                    logCaughtError(error, 'stores/ai.ts:5116')
                   submitted = null // 兜底 null（不伪造提交值；徽标/回执从 status 派生）
                 }
                 part.submittedValues = (submitted ?? undefined) as Record<string, unknown>
@@ -5224,38 +5510,38 @@ export const useAiStore = defineStore('ai', {
           return
         }
         if (group.length === 1) {
-          mergedMessages.push(group[0] as ChatMessage)
+          mergedMessages.push(head(group) as ChatMessage)
         } else {
           // 合并：parts 顺次拼接（保留空 text 段），seg 全局单调重排（渲染 key = kind+'-'+seg）；
           // id 取首条（history-{首条原始 index}，flatMap 时已钉）；被并条目沿用自身 toolCallId
           // 用其自身原始 index（flatMap 时已钉，此处不触碰）
-          const head = group[0] as ChatMessage
-          head.parts = group.flatMap((member) => (member as ChatMessage).parts)
+          const headMessage = head(group) as ChatMessage
+          headMessage.parts = group.flatMap((member) => (member as ChatMessage).parts)
             .map((part, seg) => ({ ...part, seg })) as MessagePart[]
           // 同一轮拆成多条时，最后一个已记录时间才对应整轮结局；空值不覆盖。
           for (let index = group.length - 1; index >= 0; index -= 1) {
             const timestamp = group[index]?.timestamp
             if (timestamp !== undefined && timestamp !== null && timestamp !== '') {
-              head.timestamp = timestamp
+              headMessage.timestamp = timestamp
               break
             }
           }
           // ③ 真实终态不得随合并丢失：`stopped` / `truncated` 可能落在**后续**成员上（历史把一轮拆成
           // 多条 ASSISTANT 条目）。只做单向 OR（缺键 → true），绝不用成员的"未终止"覆盖已终止事实。
           if (group.some((member) => member.stopped === true)) {
-            head.stopped = true
+            headMessage.stopped = true
           }
           if (group.some((member) => member.truncated === true)) {
-            head.truncated = true
+            headMessage.truncated = true
           }
           for (const member of group) {
             if (member.errorCard !== undefined || member.code !== undefined) {
-              head.errorCard = member.errorCard
-              head.code = member.code
+              headMessage.errorCard = member.errorCard
+              headMessage.code = member.code
             }
           }
-          deriveProjections(head) // 拼接 + 重 seg 后重派生投影（content/toolRuns 随 parts）
-          mergedMessages.push(head)
+          deriveProjections(headMessage) // 拼接 + 重 seg 后重派生投影（content/toolRuns 随 parts）
+          mergedMessages.push(headMessage)
         }
         group = []
       }
@@ -5295,7 +5581,7 @@ export const useAiStore = defineStore('ai', {
           mergedMessages.push(message)
           continue
         }
-        const previous = group[group.length - 1]
+        const previous = last(group)
         if (previous && (!previous.runId || !message.runId || previous.runId !== message.runId)) {
           flushGroup()
         }
@@ -5330,7 +5616,7 @@ export const useAiStore = defineStore('ai', {
         const anchored = event.anchorToolCallId
           ? hosts.find((item) => findToolPart(item, event.anchorToolCallId as string))
           : undefined
-        const target = anchored ?? hosts[hosts.length - 1]
+        const target = anchored ?? last(hosts)
         if (!target) {
           continue
         }
@@ -5338,33 +5624,7 @@ export const useAiStore = defineStore('ai', {
           (part) => part.kind === 'event' && part.eventId === event.eventId
         ))
         if (existing) {
-          // 全局唯一不变；分页锚点到达后允许**校正位置**：从粗宿主移到锚点宿主，
-          // 或同消息内从锚点工具段之前移到其后（首个窗口没锚点时会落在开头）。
-          if (anchored && existing === anchored) {
-            const eventIndex = anchored.parts.findIndex(
-              (part) => part.kind === 'event' && part.eventId === event.eventId
-            )
-            const anchorIndex = event.anchorToolCallId
-              ? anchored.parts.findIndex(
-                (part) => part.kind === 'tool' && part.toolCallId === event.anchorToolCallId
-              )
-              : -1
-            if (anchorIndex >= 0 && eventIndex >= 0 && eventIndex < anchorIndex) {
-              removeCompactionEventPart(anchored, event.eventId)
-              insertCompactionEvent(anchored, {
-                eventId: event.eventId,
-                anchorToolCallId: event.anchorToolCallId,
-                atMs: typeof event.atMs === 'number' ? event.atMs : undefined
-              })
-            }
-          } else if (anchored && existing !== anchored) {
-            removeCompactionEventPart(existing, event.eventId)
-            insertCompactionEvent(anchored, {
-              eventId: event.eventId,
-              anchorToolCallId: event.anchorToolCallId,
-              atMs: typeof event.atMs === 'number' ? event.atMs : undefined
-            })
-          }
+          applyExistingCompactionEvent(anchored, existing, event)
           continue
         }
         insertCompactionEvent(target, {
@@ -5415,7 +5675,7 @@ export const useAiStore = defineStore('ai', {
         this.applyHistoryCompactionEvents(this.historyEvents)
       } catch (error) {
         if (this.sessionId === sid) {
-          console.error('[ai] earlier history load failed', error)
+          logCaughtError(error, 'stores/ai.ts:5454')
           setNotice(this, 'ai.notice.historyEarlierFailed', undefined, 'error')
         }
       } finally {
@@ -5433,16 +5693,16 @@ export const useAiStore = defineStore('ai', {
       if (older.length === 0) {
         return
       }
-      const head = this.messages[0]
-      const tail = older[older.length - 1]
-      if (head && tail && head.role === 'assistant' && tail.role === 'assistant'
-        && head.runId && tail.runId && head.runId === tail.runId) {
-        head.parts = [...tail.parts, ...head.parts]
+      const headMessage = head(this.messages)
+      const tail = last(older)
+      if (headMessage && tail && headMessage.role === 'assistant' && tail.role === 'assistant'
+        && headMessage.runId && tail.runId && headMessage.runId === tail.runId) {
+        headMessage.parts = [...tail.parts, ...headMessage.parts]
           .map((part, seg) => ({ ...part, seg })) as MessagePart[]
-        if (head.timestamp === undefined && tail.timestamp !== undefined) {
-          head.timestamp = tail.timestamp
+        if (headMessage.timestamp === undefined && tail.timestamp !== undefined) {
+          headMessage.timestamp = tail.timestamp
         }
-        deriveProjections(head)
+        deriveProjections(headMessage)
         older = older.slice(0, -1)
       }
       this.messages = [...older, ...this.messages]
@@ -5456,10 +5716,11 @@ export const useAiStore = defineStore('ai', {
      * 也没有封口。这里把这两类失败合成同一个出口（不重复处理已登记的 `currentError`）。
      */
     async restoreSnapshotGuarded(): Promise<void> {
-      await waitForPageVisible()
+      await getPageVisible()
       try {
         await this.restoreSuspendedSnapshot()
       } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:5463')
         // 问题3：停止后的恢复异常不写恢复失败现场（本轮已被放弃，不该再被恢复面收口）。
         if (!this.stopped && this.currentError === null) {
           this.sealRecovery('current', error)
@@ -5469,7 +5730,7 @@ export const useAiStore = defineStore('ai', {
 
     /** 同 run 的 history 尚无终局时，保留 last-good 停止现场；真实终局到达后仍由 history 接管。 */
     shouldPreserveStoppedRound(entries: AiHistoryMessage[], mirrorMessages: ChatMessage[]): boolean {
-      const tail = mirrorMessages[mirrorMessages.length - 1]
+      const tail = last(mirrorMessages)
       if (!tail || tail.role !== 'assistant' || tail.stopped !== true) {
         return false
       }
@@ -5503,7 +5764,7 @@ export const useAiStore = defineStore('ai', {
       if ((!inFlight && !preserveStoppedRound) || mirrorMessages.length === 0) {
         return historical
       }
-      const tail = mirrorMessages[mirrorMessages.length - 1]
+      const tail = last(mirrorMessages)
       if (!tail || tail.role !== 'assistant') {
         return historical
       }
@@ -5516,7 +5777,7 @@ export const useAiStore = defineStore('ai', {
         return historical
       }
       const mirrorAssistants = mirrorMessages.slice(mirrorUserIndex + 1)
-        .filter((message) => sameRoundAssistant(message, roundRunId))
+        .filter((message) => isSameRoundAssistant(message, roundRunId))
       const historyUserIndex = mirrorUser
         ? findHistoryRoundUserIndex(historical, mirrorUser, roundRunId)
         : -1
@@ -5530,18 +5791,18 @@ export const useAiStore = defineStore('ai', {
       const seenIds = new Set(merged.map((message) => message.id))
       const roundTargets = roundAssistantMessages(merged, historyUserIndex, roundRunId)
       const occupiedTargets = new Set<ChatMessage>()
-      const firstTarget = roundTargets[0] ?? null
+      const firstTarget = head(roundTargets) ?? null
       const findAvailableTarget = (
         source: ChatMessage,
         unavailable: Set<ChatMessage>
       ): ChatMessage | null => {
         const byId = roundTargets.find((message) => message.id === source.id
-          && sameRoundAssistant(message, roundRunId) && !unavailable.has(message))
+          && isSameRoundAssistant(message, roundRunId) && !unavailable.has(message))
         if (byId) {
           return byId
         }
         const byToolCallId = assistantMessageByToolCallId(roundTargets, source)
-        return byToolCallId && sameRoundAssistant(byToolCallId, roundRunId)
+        return byToolCallId && isSameRoundAssistant(byToolCallId, roundRunId)
           && !unavailable.has(byToolCallId) ? byToolCallId : null
       }
       const matchedTargets: (ChatMessage | null)[] = []
@@ -5594,13 +5855,13 @@ export const useAiStore = defineStore('ai', {
           if (target.timestamp === undefined && source.timestamp !== undefined) {
             target.timestamp = source.timestamp
           }
-          const completedByHistory = historyCoversMirrorRound(target, source)
-          mergeMirrorRoundParts(target, source)
+          const completedByHistory = hasHistoryCoveredMirrorRound(target, source)
+          canMergeMirrorRoundParts(target, source)
           if (preserveStoppedRound && source === tail) {
             target.stopped = true
           }
           // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
-          if (source === tail && merged[merged.length - 1] === target) {
+          if (source === tail && last(merged) === target) {
             target.streaming = completedByHistory
               ? false
               : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
@@ -5613,19 +5874,19 @@ export const useAiStore = defineStore('ai', {
 
         // 历史没有这条助手：同 id 已存在则就地合并，否则按镜像顺序插入，不重复建段。
         const existing = merged.find((message) => message.id === source.id
-          && sameRoundAssistant(message, roundRunId) && !occupiedTargets.has(message))
+          && isSameRoundAssistant(message, roundRunId) && !occupiedTargets.has(message))
         if (existing && existing.role === 'assistant') {
           occupiedTargets.add(existing)
           previousAnchor = existing
           if (existing.timestamp === undefined && source.timestamp !== undefined) {
             existing.timestamp = source.timestamp
           }
-          const completedByHistory = historyCoversMirrorRound(existing, source)
-          mergeMirrorRoundParts(existing, source)
+          const completedByHistory = hasHistoryCoveredMirrorRound(existing, source)
+          canMergeMirrorRoundParts(existing, source)
           if (preserveStoppedRound && source === tail) {
             existing.stopped = true
           }
-          if (source === tail && merged[merged.length - 1] === existing) {
+          if (source === tail && last(merged) === existing) {
             existing.streaming = completedByHistory
               ? false
               : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
@@ -5675,66 +5936,14 @@ export const useAiStore = defineStore('ai', {
      * 后者证明该轮正常完成，不能把断流标记搬到完成回答上。
      */
     carryMirrorOutcomeMarkers(historical: ChatMessage[], mirrorMessages: ChatMessage[]): void {
-      if (mirrorMessages.length === 0) {
+      const pair = mirrorOutcomePair(historical, mirrorMessages)
+      if (!pair) {
         return
       }
-      const tail = mirrorMessages[mirrorMessages.length - 1]
-      if (!tail || tail.role !== 'assistant') {
-        return
+      if (!pair.target.runId && pair.tail.runId) {
+        pair.target.runId = pair.tail.runId
       }
-      // tail 无 runId ⇒ 无法证明与 target 同轮；宁可少补，不把结局贴到上一轮。
-      if (typeof tail.runId !== 'string' || tail.runId === '') {
-        return
-      }
-      // transcript 只在**有终态**时写该轮 assistant 条目 ⇒ 历史末条是 assistant 即证明该轮
-      // 不是断流；镜像里的 `interrupted` 只可能属于"没有终态的那一半"，因此**不搬运**
-      // （搬过来会让已完成回答凭空多出「继续」）。需要保留半截的场景由
-      // `mergeMirrorInFlightRound` 在历史无该轮答复时整体并入 tail（`interrupted` 随 tail 自带）。
-      const hasOutcome = tail.errorCard != null || tail.code != null || tail.unconfirmed === true
-        || tail.recoveryGap === true
-      if (!hasOutcome) {
-        return
-      }
-      // 只认**历史末条**且必须是 assistant：末条是 USER 说明历史里还没有本轮答复
-      // （断流轮 transcript 不写 assistant 终态）—— 此时绝不能回落到"上一条 assistant"，
-      // 那会把 interrupted/errorCard/runId 贴到上一轮的成功回答上。
-      const target = historical[historical.length - 1]
-      if (!target || target.role !== 'assistant') {
-        return
-      }
-      // run 守卫比较**助手 tail / target**（用户消息可能没有 runId）：不同 run 的助手绝不搬运。
-      const tailRunId = typeof tail.runId === 'string' && tail.runId !== '' ? tail.runId : null
-      const targetRunId = typeof target.runId === 'string' && target.runId !== '' ? target.runId : null
-      if (tailRunId !== null && targetRunId !== null && tailRunId !== targetRunId) {
-        return
-      }
-      const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
-      const historyUser = [...historical].reverse().find((item) => item.role === 'user') ?? null
-      if (!mirrorUser || !historyUser
-        || normalizeUserText(messageText(mirrorUser)) !== normalizeUserText(messageText(historyUser))) {
-        return
-      }
-      // 批次2：run 归属与结局标记同一轮才搬运；即使目标已有结局标记，也补 runId
-      // （历史通道通常不带 runId，缺了它后续断流重挂/恢复就缺少可证明的归属）。
-      if (!target.runId && tail.runId) {
-        target.runId = tail.runId
-      }
-      if (target.errorCard != null || target.code != null || target.unconfirmed === true
-        || target.recoveryGap === true) {
-        return
-      }
-      if (tail.errorCard != null) {
-        target.errorCard = tail.errorCard
-      }
-      if (tail.code != null) {
-        target.code = tail.code
-      }
-      if (tail.unconfirmed === true) {
-        target.unconfirmed = true
-      }
-      if (tail.recoveryGap === true) {
-        target.recoveryGap = true
-      }
+      copyMirrorOutcomeMarkers(pair.target, pair.tail)
     },
 
     /**
@@ -5801,6 +6010,7 @@ export const useAiStore = defineStore('ai', {
       try {
         current = await aiApi.runsCurrent(sid)
       } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:5804')
         if (this.sessionId !== sid) {
           return // 会话已换：过期失败不落进新会话
         }
@@ -5837,7 +6047,7 @@ export const useAiStore = defineStore('ai', {
       const tombstoneRunId = this.stoppedRunId
       if (tombstoneRunId !== null && current.found && current.runId === tombstoneRunId) {
         this.sealLeftoverInFlight()
-        if (!isTerminalRunStatus(current.snapshotStatus) && beginTombstoneRecancel(tombstoneRunId)) {
+        if (!isTerminalRunStatus(current.snapshotStatus) && canBeginTombstoneRecancel(tombstoneRunId)) {
           void this.cancelStoppedRun(tombstoneRunId, this.sessionIdentity)
         }
         return
@@ -5911,7 +6121,7 @@ export const useAiStore = defineStore('ai', {
               hostMessageId: inFlightHost.id,
               lastSeq: this.runSeq[recoveryRunId] ?? 0,
               awaitingInput: probe.snapshotStatus === 'SUSPENDED'
-                && this.hostHasPendingCard(inFlightHost.id)
+                && this.hasHostPendingCard(inFlightHost.id)
             })
             return
           }
@@ -6065,8 +6275,8 @@ export const useAiStore = defineStore('ai', {
         frontendToolsInFlight.add(toolCallId)
         enqueueFrontendTool(
           host.id,
-          () => stillSameRound(round, this.sessionId, this.activeRunId ?? null),
-          () => this.runFrontendToolAttempt(host, frame, round),
+          () => isStillSameRound(round, this.sessionId, this.activeRunId ?? null),
+          () => this.canRunFrontendToolAttempt(host, frame, round),
           () => frontendToolsInFlight.delete(toolCallId)
         )
         // 自动前端工具只让后端等待回灌，不在面板伪造一张“待人确认”的挂起态。
@@ -6113,7 +6323,7 @@ export const useAiStore = defineStore('ai', {
       rememberRecoveryEntries(runId, current.pendingEntries)
       const appliedSeq = appliedSeqOfRun(this.runSeq, this.messages, runId)
       const lastSeq = appliedSeq > 0 ? appliedSeq : current.archiveMaxSeq
-      if (appliedSeq === 0 && current.archiveMaxSeq > 0 && messageShowsProgress(host)) {
+      if (appliedSeq === 0 && current.archiveMaxSeq > 0 && hasProgressMessage(host)) {
         host.recoveryGap = true
 
       }
@@ -6160,7 +6370,7 @@ export const useAiStore = defineStore('ai', {
      * 按 park 建连就会变成"永久 park + 静默收流"（⑤）。这里只读既有段，不新建任何状态；判据与
      * 面板的挂起投影同源（`requiresAction=true` 的工具段）。
      */
-    hostHasPendingCard(hostMessageId?: string): boolean {
+    hasHostPendingCard(hostMessageId?: string): boolean {
       const host = hostMessageId
         ? this.messages.find((item) => item.id === hostMessageId) ?? null
         : this.findInFlightHost()
@@ -6220,13 +6430,13 @@ export const useAiStore = defineStore('ai', {
      */
     sealInterruptedHost(hostMessageId?: string | null, runId?: string | null): void {
       const run = runId ?? this.activeStreamRunId ?? this.activeRunId
-      const sameRun = (item: ChatMessage): boolean => run !== null && item.runId === run
+      const isSameRun = (item: ChatMessage): boolean => run !== null && item.runId === run
       const host = (hostMessageId ? this.messages.find((item) => item.id === hostMessageId) : undefined)
         ?? (activeRoundHostId !== null
           ? this.messages.find((item) => item.id === activeRoundHostId)
           : undefined)
         ?? [...this.messages].reverse().find(
-          (item) => item.role === 'assistant' && !item.done && sameRun(item)
+          (item) => item.role === 'assistant' && !item.done && isSameRun(item)
         )
       if (!host || host.role !== 'assistant' || host.done) {
         return
@@ -6323,7 +6533,7 @@ export const useAiStore = defineStore('ai', {
     /**
      * 批次2：显式登记"不可完整恢复"（中性事实）。
      *
-     * <p>`archive-window` 只由后端**明确**的裁剪标记登记（见 {@link noteArchiveTrim}）；
+     * <p>`archive-window` 只由后端**明确**的裁剪标记登记（见 {@link canNoteArchiveTrim}）；
      * 历史/快照不可用由 {@link sealRecovery} 登记。缺口**不是**轮失败：不改 `lastRoundOutcome`、
      * 不挂错误卡。
      *
@@ -6346,7 +6556,7 @@ export const useAiStore = defineStore('ai', {
      *
      * @returns 是否登记了缺口（调用方据此只报一次）
      */
-    noteArchiveTrim(signal: ArchiveTrimSignal | null): boolean {
+    canNoteArchiveTrim(signal: ArchiveTrimSignal | null): boolean {
       if (signal === null) {
         return false
       }
@@ -6384,7 +6594,7 @@ export const useAiStore = defineStore('ai', {
         this.followupReady = false
       }
       showManualRecovery()
-      const scheduled = this.startAutoRecovery('history', async () => {
+      const scheduled = this.canStartAutoRecovery('history', async () => {
         await this.loadHistory()
         if (this.sessionId !== sessionId || message.runId !== runId) {
           return true
@@ -6762,7 +6972,7 @@ export const useAiStore = defineStore('ai', {
     ): Promise<void> {
       // 问题2：同上 —— 首个 await 之前同步登记，stop 同 tick 才能停到这一轮。
       pendingAttachRunId = runId
-      await waitForPageVisible()
+      await getPageVisible()
       // Task 4 引导门：续收是对话域 SSE（带身份头），无后端发号会话不建连。
       if (this.sessionId === '' && (await this.ensureSession()) === '') {
         if (pendingAttachRunId === runId) {
@@ -6870,7 +7080,7 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              this.noteArchiveTrim(signal)
+              this.canNoteArchiveTrim(signal)
             },
             onClose: (info) => {
               if (!isCurrentRound()) {
@@ -7080,7 +7290,7 @@ export const useAiStore = defineStore('ai', {
        */
       let firstFrameRecovery = false
       /** 首帧超时（零帧 = 零副作用）的自动恢复：只按快照把**既有轮**接回来，绝不重发。 */
-      const startFirstFrameRecovery = (): boolean => this.startAutoRecovery(
+      const canStartFirstFrameRecovery = (): boolean => this.canStartAutoRecovery(
         'first-frame',
         async () => {
           if (this.stopped || !isCurrentRound()) {
@@ -7139,7 +7349,7 @@ export const useAiStore = defineStore('ai', {
           }
           if (isCancelOnlyStopTransport(controller)) {
             if (frame.type === 'start' && frame.runId !== undefined && frame.runId !== '') {
-              this.cancelRunIfStopIntended(frame.runId, assistant.id, controller)
+              this.canCancelRunIfStopIntended(frame.runId, assistant.id, controller)
             }
             return
           }
@@ -7150,10 +7360,10 @@ export const useAiStore = defineStore('ai', {
           // M-19（C2）：start 帧之前就停止过（runId 当时未知）⇒ 这条 start 带来 runId，立刻补真实
           // cancel。**不挂 isCurrentRound 门**：停止后连接仍在（C2 故意不 abort），而轮次身份判据
           // 是"连接句柄"级的，任何被替换过的句柄都会把这一帧挡在补 cancel 之外；归属改由
-          // `cancelRunIfStopIntended` 的"同一传输 + 同一宿主"判据保证（不同宿主的 start 只忽略，
+          // `canCancelRunIfStopIntended` 的"同一传输 + 同一宿主"判据保证（不同宿主的 start 只忽略，
           // 不清除旧意向、也不误取消新轮）。
           if (frame.type === 'start' && frame.runId !== undefined && frame.runId !== '') {
-            if (this.cancelRunIfStopIntended(frame.runId, assistant.id, controller)) {
+            if (this.canCancelRunIfStopIntended(frame.runId, assistant.id, controller)) {
               // 已精确补过 cancel：这一帧及其后的旧帧不再进入本地现场（停止轮已封口）。
               return
             }
@@ -7189,7 +7399,7 @@ export const useAiStore = defineStore('ai', {
               // 可证明"零副作用"的失败面 —— 但**不重发**同一条请求（后端可能已建轮，
               // 重发就是第二次真实副作用）；恢复只做"按 /runs/current 把既有轮接回来"。
               // 耗尽后回到既有手动出口（首帧超时提示 + 面板回稿）。
-              firstFrameRecovery = !sawAnyFrame && startFirstFrameRecovery()
+              firstFrameRecovery = !sawAnyFrame && canStartFirstFrameRecovery()
             } else {
               setNotice(this, 'ai.notice.interruptedKeep', {
                 reason: info.reason ?? translate('ai.notice.reasonNoDone')
@@ -7250,6 +7460,7 @@ export const useAiStore = defineStore('ai', {
             )
             break
           } catch (error) {
+              logCaughtError(error, 'stores/ai.ts:7253')
             /**
              * 停止闭环兼容批：开流前瞬时失败会用**同一个 clientRequestId** 重发 /chat。
              * 若第一次请求其实已到达后端（映射已绑定既有 run），后端回 409 SESSION_BUSY +
@@ -7275,7 +7486,7 @@ export const useAiStore = defineStore('ai', {
                 outcome = 'cancelled'
                 return { outcome, userMessageId }
               }
-              if (this.adoptDuplicateClientRequest(duplicateRunId, assistant.id)) {
+              if (this.canAdoptDuplicateClientRequest(duplicateRunId, assistant.id)) {
                 // 同步接管已完成登记（pendingAttachRunId/loading/host）；原 send 的 finally 让位。
                 delegatedToDuplicate = true
                 outcome = 'ok'
@@ -7304,6 +7515,7 @@ export const useAiStore = defineStore('ai', {
         }
         outcome = settleOutcome(sawErrorTerminal ? 'error' : 'ok')
       } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:7307')
         const busyConflict = error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY
         const sessionPurged = error instanceof ApiError && error.code === ErrorCode.SESSION_PURGED
         // 批次2（ADR-5）：409 回执里的 runId/reattach 只作**手动**"回到进行中的回答"入口。
@@ -7314,7 +7526,7 @@ export const useAiStore = defineStore('ai', {
           const busy = readBusyRunRef(error)
           // M-19（I5，R1 返修）：**不拿 409 猜归属去取消**。会话级 409 的 runId 无法证明是本端被停
           // 的那一轮（可能是另一页签刚起的新轮），猜着取消会误杀别人的轮。归属只认"同一宿主的
-          // start 帧"（见 `cancelRunIfStopIntended`）—— C2 保留 /chat 传输正是为了让这条路径可达。
+          // start 帧"（见 `canCancelRunIfStopIntended`）—— C2 保留 /chat 传输正是为了让这条路径可达。
           // 因此这里照旧：能证明是本端已停的轮（stoppedRunId）或已终态的轮才不算"仍在进行中"。
           this.busyRun = this.isAuthoritativeBusyRun(busy) ? busy : null
         }
@@ -7336,7 +7548,7 @@ export const useAiStore = defineStore('ai', {
             // 2026-10-29 收口（共用有界自动恢复）：410 是**开新轮前**的销毁守卫拦下的，
             // 那一次请求零副作用 ⇒ 可以自动恢复。但恢复面**只到**"给新会话做一次对账"：
             // 绝不把用户那句话再发一遍（那是第二次真实副作用，且与面板的失败回稿叠成重复文本）。
-            this.startAutoRecovery('purged', async () => {
+            this.canStartAutoRecovery('purged', async () => {
               await this.loadHistory()
               return this.historyError === null
             })
@@ -7437,7 +7649,7 @@ export const useAiStore = defineStore('ai', {
         if (cardAttached) {
           return
         }
-        console.error('[ai] chat request failed', error)
+        logCaughtError(error, 'ai:chat-request')
         setNotice(this, 'ai.notice.chatRequestFailed')
         return
       }
@@ -7541,7 +7753,7 @@ export const useAiStore = defineStore('ai', {
       if (targetRunId) {
         pendingAttachRunId = targetRunId
       }
-      await waitForPageVisible()
+      await getPageVisible()
       // Task 4 引导门：SSE 重挂带身份头与会话身份，没有后端发号的会话就不建连。
       if (this.sessionId === '' && (await this.ensureSession()) === '') {
         if (pendingAttachRunId === targetRunId) {
@@ -7702,7 +7914,7 @@ export const useAiStore = defineStore('ai', {
               if (!isCurrentRound()) {
                 return
               }
-              this.noteArchiveTrim(signal)
+              this.canNoteArchiveTrim(signal)
             },
             onClose: (info) => {
               if (!isCurrentRound()) {
@@ -7738,7 +7950,8 @@ export const useAiStore = defineStore('ai', {
           },
           { signal: controller.signal, lastSeq, awaitingInput: options.awaitingInput === true }
         )
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:7742')
         // 静默：接管失败的现场由当前画面承担（refresh 后仍可再试），不写技术文案
       } finally {
         if (pendingAttachRunId === targetRunId) {
@@ -7925,7 +8138,7 @@ export const useAiStore = defineStore('ai', {
      * 但也不无限等待：走 {@link retryOrGiveUpGateSync} 有界重试，用尽即解锁（FE-17）。
      */
     async syncGateFromAuthority(toolCallId: string): Promise<void> {
-      await waitForPageVisible()
+      await getPageVisible()
       // Task 4 返修 I1：409 校正计时器可能落在身份切换/发号失败窗口 —— 空号一律早退，
       // 绝不给 `/runs/current?sessionId=` 发空 id 请求。
       const sid = await this.ensureSession()
@@ -7936,7 +8149,8 @@ export const useAiStore = defineStore('ai', {
       let current: AiRunCurrent
       try {
         current = await aiApi.runsCurrent(sid)
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:7940')
         // 取数不可用：不写任何推测性裁决（重试/解锁口径同"仍未定"）
         this.retryOrGiveUpGateSync(toolCallId)
         return
@@ -8267,8 +8481,8 @@ export const useAiStore = defineStore('ai', {
        * 都必须原样。换身份 = 换会话：旧身份那张卡的 POST 回包一律作废（不重连、不补卡、
        * 不改挂起态、不写通知），否则旧轮的失败会盖住新身份的通知槽。
        */
-      const stillLive = (): boolean =>
-        stillSameRound(roundAtDecision, this.sessionId, runId)
+      const isStillLive = (): boolean =>
+        isStillSameRound(roundAtDecision, this.sessionId, runId)
         && isSameIdentity(identityAtDecision, this.sessionIdentity)
       try {
         await aiApi.confirm(
@@ -8276,7 +8490,7 @@ export const useAiStore = defineStore('ai', {
           // R7：身份头显式随请求发出（拦截器在微任务里跑，点击后立刻切身份时它读到的是新身份）。
           { headers: identityHeaders(identityAtDecision) }
         )
-        if (!stillLive()) {
+        if (!isStillLive()) {
           return
         }
         // 批4-D：决策送达 ⇒ 勾选态复位（该卡已收尾，不留"已同意"的残影）
@@ -8291,8 +8505,9 @@ export const useAiStore = defineStore('ai', {
         // 多卡并存：本轮还有别的确认门待决时保持挂起态（只清自己这张）
         this.clearSuspendedIfNoOtherConfirms(toolCallId)
       } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:8294')
         // Task 3：换身份/换轮之后的旧卡回包 —— 整段作废（不写通知、不改新身份的挂起/门状态）。
-        if (!stillLive()) {
+        if (!isStillLive()) {
           return
         }
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
@@ -8336,7 +8551,7 @@ export const useAiStore = defineStore('ai', {
         const livePart = host ? findToolPart(host, toolCallId) : null
         const mayRevive = livePart !== null
           && livePart.status !== 'cancelled'
-          && stillSameRound(roundAtDecision, this.sessionId, this.activeRunId)
+          && isStillSameRound(roundAtDecision, this.sessionId, this.activeRunId)
         this.clearGateSubmission(toolCallId)
         if (host && mayRevive) {
           this.upsertToolPart(host, {
@@ -8418,8 +8633,8 @@ export const useAiStore = defineStore('ai', {
       // 换身份 = 换会话：旧身份那次回灌的回包一律作废（不重连、不补卡、不写通知）。
       const roundAtSubmit = captureRound(this.sessionId, targetRunId)
       const identityAtSubmit = this.sessionIdentity
-      const stillLive = (): boolean =>
-        stillSameRound(roundAtSubmit, this.sessionId, targetRunId)
+      const isStillLive = (): boolean =>
+        isStillSameRound(roundAtSubmit, this.sessionId, targetRunId)
         && isSameIdentity(identityAtSubmit, this.sessionIdentity)
         && !hasStoppedRun(this.sessionId, targetRunId, identityAtSubmit)
       try {
@@ -8441,7 +8656,7 @@ export const useAiStore = defineStore('ai', {
           // R7：身份头显式随请求发出（拦截器在微任务里跑，提交后立刻切身份时它读到的是新身份）。
           { headers: identityHeaders(identityAtSubmit) }
         )
-        if (!stillLive()) {
+        if (!isStillLive()) {
           // 请求本身已被后端受理；只是本地轮次已不在场（停止 / 换轮）⇒ 不做续跑/补卡，
           // 但把"受理"这一事实交给调用方（表单据此保持已提交，不回退可编辑）。
           return { ok: false, accepted: true }
@@ -8456,7 +8671,7 @@ export const useAiStore = defineStore('ai', {
         return { ok: true }
       } catch (error) {
         // Task 3：换身份/换轮之后的旧回灌包 —— 整段作废（不写通知、不改新身份的卡/挂起态）。
-        if (!stillLive()) {
+        if (!isStillLive()) {
           return { ok: false }
         }
         if (error instanceof ApiError && error.code === ErrorCode.DUPLICATE_TOOL_CALL_ID) {
@@ -8519,7 +8734,7 @@ export const useAiStore = defineStore('ai', {
           }
         }
         if (error instanceof ApiError) {
-          console.error('[ai] frontend tool result submission failed', error)
+          logCaughtError(error, 'stores/ai.ts:8502')
           const fallback = translate('ai.notice.toolSubmitFailed')
           setNotice(this, 'ai.notice.toolSubmitFailed')
           return { ok: false, message: fallback }
@@ -8663,7 +8878,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       while (this.queuedForms.length > 0) {
-        const next = this.queuedForms[0] as QueuedGenerativeForm
+        const next = head(this.queuedForms) as QueuedGenerativeForm
         this.queuedForms = this.queuedForms.slice(1)
         if (this.hasDecidedPendingResidue(next.toolCallId)) {
           clearFormDraft(next.toolCallId)
@@ -8869,7 +9084,7 @@ export const useAiStore = defineStore('ai', {
       const resolved = await resolveSheetContext(args.defCode)
       // B2：换会话 / 停止发生在这段 await 里 ⇒ 预览不得在新会话里复活：既不建卡、不上色，
       // 也不把失败结局回灌到已经收口的旧 run（后端已按取消收尾，回灌只会被幂等拒绝）。
-      if (!stillSameRound(roundAtOpen, this.sessionId, this.activeRunId ?? null)) {
+      if (!isStillSameRound(roundAtOpen, this.sessionId, this.activeRunId ?? null)) {
         return
       }
       if (!resolved.ok) {
@@ -8885,7 +9100,7 @@ export const useAiStore = defineStore('ai', {
         deriveFrontendToolBudgetMs(frame.timeoutSeconds),
         (lifetime) => planSheetWithLevelAsync(resolved.ctx, frame.name, args, toolCallId, lifetime)
       )
-      if (!stillSameRound(roundAtOpen, this.sessionId, this.activeRunId ?? null)) {
+      if (!isStillSameRound(roundAtOpen, this.sessionId, this.activeRunId ?? null)) {
         return
       }
       if (!plannedPhase.settled) {
@@ -9028,7 +9243,7 @@ export const useAiStore = defineStore('ai', {
       }
       // 高亮入口（把用户送到上传按钮；视觉零变化，只加描边 + 徽标 + 播报）
       highlightUploadEntry(target.entry)
-      const pickerOk = supportsFilePicker()
+      const pickerOk = canUseFilePicker()
       this.activeUploadHandoff = {
         toolCallId,
         runId,
@@ -9070,9 +9285,9 @@ export const useAiStore = defineStore('ai', {
       }
       // 问题7：入队即捕获本轮现场 —— picker / 页面交接都是 await，回来后必须仍是同一轮。
       const roundAtPick = captureRound(this.sessionId, handoff.runId)
-      const stillOwnHandoff = (): boolean => !this.stopped
+      const isStillOwnHandoff = (): boolean => !this.stopped
         && this.activeUploadHandoff?.toolCallId === handoff.toolCallId
-        && stillSameRound(roundAtPick, this.sessionId, this.activeRunId ?? null)
+        && isStillSameRound(roundAtPick, this.sessionId, this.activeRunId ?? null)
       if (this.uploadHandoffAvailability() === 'missing') {
         // 不打开文件对话框：区域都没了，选了也无处可交 —— 直接如实收口（不谎报、不留死卡）。
         // A09：ref 缺省时同样按区域实况回落（缺 ref ≠ 没有落点，区域可能刚刚才注册）。
@@ -9102,9 +9317,9 @@ export const useAiStore = defineStore('ai', {
       try {
         files = await picked
       } catch (error) {
-        console.error('[ai] file picker failed', error)
+        logCaughtError(error, 'stores/ai.ts:9149')
         // 停止/换轮后不再改旧卡（单例已被收口，写了就是复活一张死卡）。
-        if (!stillOwnHandoff()) {
+        if (!isStillOwnHandoff()) {
           return
         }
         const aborted = error instanceof Error && (error.name === 'AbortError' || /abort/i.test(error.message))
@@ -9118,10 +9333,10 @@ export const useAiStore = defineStore('ai', {
         this.uiAnnouncement = pickUiAnnouncement()
         return
       }
-      if (!stillOwnHandoff()) {
+      if (!isStillOwnHandoff()) {
         return // 选择窗口内已停止：不再接收文件/写交接卡
       }
-      const file = files[0]
+      const file = head(files)
       if (!file) {
         this.activeUploadHandoff = { ...pickingHandoff, status: 'waiting', reason: translate('ai.notice.uploadNoFile') }
         return
@@ -9142,8 +9357,8 @@ export const useAiStore = defineStore('ai', {
         try {
           summary = await region.receiveFile(file)
         } catch (error) {
-          console.error('[ai] upload handoff failed', error)
-          if (!stillOwnHandoff()) {
+          logCaughtError(error, 'stores/ai.ts:9189')
+          if (!isStillOwnHandoff()) {
             return // 交接窗口内已停止：失败也不往旧卡上写
           }
           this.activeUploadHandoff = {
@@ -9154,7 +9369,7 @@ export const useAiStore = defineStore('ai', {
           return
         }
       }
-      if (!stillOwnHandoff()) {
+      if (!isStillOwnHandoff()) {
         // 停止发生在文件交接期间：副作用已经发生（不回滚），但不再回灌/标成功到已停止的轮。
         return
       }
@@ -9360,53 +9575,47 @@ export const useAiStore = defineStore('ai', {
       if (level === 'count' || plan.detail === 'full') {
         this.activePreview = { ...plan, preview: level }
         if (level === 'count') {
-          // 计数档没有逐格明细 ⇒ 预览色随之撤掉（卡面也没有可核对的单元格）
-          const resolved = await resolveSheetContext(plan.defCode)
-          // 问题6：停止/换卡之后不得把已收口的预览计划重新落回单例。
-          if (this.stopped || this.activePreview?.planId !== plan.planId) {
-            return
-          }
-          if (resolved.ok) {
-            previewSheetCtx = resolved.ctx
-            clearPreviewMarks(resolved.ctx)
-          }
+          await clearCountPreviewMarks(
+            plan.defCode,
+            () => !this.stopped && this.activePreview?.planId === plan.planId,
+            (ctx) => {
+              previewSheetCtx = ctx
+              clearPreviewMarks(ctx)
+            }
+          )
         }
         return
       }
-      const resolved = await resolveSheetContext(plan.defCode)
-      if (this.stopped || this.activePreview?.planId !== plan.planId) {
-        return
-      }
-      if (!resolved.ok) {
-        this.activePreview = null
-        previewSheetCtx = null
-        this.markPreviewStale(plan.toolCallId)
-        return
-      }
-      previewSheetCtx = resolved.ctx
-      const replannedPhase = await runSheetWritePhase(
-        sheetWriteBudgetMs(this.messages, plan.toolCallId),
-        (lifetime) => replanSheetAsync(resolved.ctx, plan, level, lifetime)
+      const outcome = await replanPreviewLevel(
+        plan,
+        level,
+        () => sheetWriteBudgetMs(this.messages, plan.toolCallId),
+        () => !this.stopped && this.activePreview?.planId === plan.planId,
+        (ctx) => {
+          previewSheetCtx = ctx
+        }
       )
-      if (this.stopped || this.activePreview?.planId !== plan.planId) {
+      if (outcome.kind === 'aborted') {
         return
       }
-      const replanned = replannedPhase.settled
-        ? replannedPhase.value
-        : { ok: false as const, reason: SHEET_WRITE_PHASE_CANCELLED }
-      if (!replanned.ok) {
-        // 两种都收口到"预览已失效"：表格被改（stale）与明细超上限（物化失败）。
-        // 前者用户重新发起即可，后者卡面会显示原因（不静默降级成 0 格预览）。
-        clearPreviewMarks(resolved.ctx)
+      if (outcome.kind === 'failure') {
+        if (outcome.ctx) {
+          clearPreviewMarks(outcome.ctx)
+        }
         this.activePreview = null
         previewSheetCtx = null
-        this.stalePreviewToolCallId = plan.toolCallId
-        setRawNotice(this, replanned.reason)
+        applyPreviewFailure(
+          outcome,
+          () => this.markPreviewStale(plan.toolCallId),
+          (reason) => {
+            this.stalePreviewToolCallId = plan.toolCallId
+            setRawNotice(this, reason)
+          }
+        )
         return
       }
-      this.activePreview = replanned.plan
-      // 明细算出来了才谈得上"待改格"：此刻上预览色（同一套绘制入口，屏幕态）
-      markPreviewCells(resolved.ctx, replanned.plan)
+      this.activePreview = outcome.plan
+      markPreviewCells(previewSheetCtx as SheetContext, outcome.plan)
     },
 
     /**
@@ -9468,7 +9677,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // 恰好一次：双击/跨实例重复确认在首个 await 之前就被这里挡住（第二次是空操作）
-      if (!beginPreviewDecision(plan, true)) {
+      if (!canBeginPreviewDecision(plan, true)) {
         return
       }
       /**
@@ -9477,9 +9686,9 @@ export const useAiStore = defineStore('ai', {
        * 已由 `stop()` 取消的段不再被迟到成功覆盖；已经落笔的副作用保持原样（不回滚、不谎报）。
        */
       const roundAtApply = captureRound(this.sessionId, plan.runId ?? this.activeRunId ?? null)
-      const stillOwnApply = (): boolean => !this.stopped
+      const isStillOwnApply = (): boolean => !this.stopped
         && this.stoppedRunId !== (plan.runId ?? null)
-        && stillSameRound(roundAtApply, this.sessionId, this.activeRunId ?? null)
+        && isStillSameRound(roundAtApply, this.sessionId, this.activeRunId ?? null)
       // 异步期间可能已有新卡到来：只清自己这张
       const clearOwnPreview = (): void => {
         if (this.activePreview?.planId === plan.planId) {
@@ -9489,7 +9698,7 @@ export const useAiStore = defineStore('ai', {
       }
       try {
         const resolved = await resolveSheetContext(plan.defCode)
-        if (!stillOwnApply()) {
+        if (!isStillOwnApply()) {
           return // 停止/换轮：尚未落笔的应用失效（决策令牌在 finally 释放）
         }
         if (!resolved.ok) {
@@ -9512,7 +9721,7 @@ export const useAiStore = defineStore('ai', {
             sheetWriteBudgetMs(this.messages, plan.toolCallId),
             (lifetime) => replanSheetAsync(resolved.ctx, plan, 'sample-diff', lifetime)
           )
-          if (!stillOwnApply()) {
+          if (!isStillOwnApply()) {
             return
           }
           const materialized = materializedPhase.settled
@@ -9549,7 +9758,7 @@ export const useAiStore = defineStore('ai', {
             : applySheetPlanAsync(resolved.ctx, applied, lifetime),
           true
         )
-        if (!stillOwnApply()) {
+        if (!isStillOwnApply()) {
           return
         }
         clearOwnPreview()
@@ -9610,7 +9819,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // 与「应用」共用同一张卡的决策权：应用在途时取消不再抢跑（一次决策只有一种结局）
-      if (!beginPreviewDecision(plan)) {
+      if (!canBeginPreviewDecision(plan)) {
         return
       }
       this.activePreview = null
@@ -9773,12 +9982,12 @@ export const useAiStore = defineStore('ai', {
      *
      * 2A②：写回**全部匹配段**（多消息 / 同消息重复段），不碰其他 toolCallId。
      * `overwrite=true`（默认，POST 成功路径）以本次提交值为准；`overwrite=false`（帧路径）
-     * first-wins，只补空段 —— 两条路径共用 `writeSubmittedValuesToMessage` 单一写口。
+     * first-wins，只补空段 —— 两条路径共用 `canWriteSubmittedValuesToMessage` 单一写口。
      */
     writeSubmittedValues(toolCallId: string, values: Record<string, unknown>, overwrite = true): void {
       const decidedAt = Date.now()
       for (const item of this.messages) {
-        if (writeSubmittedValuesToMessage(item, toolCallId, values, { overwrite, decidedAt })) {
+        if (canWriteSubmittedValuesToMessage(item, toolCallId, values, { overwrite, decidedAt })) {
           deriveProjections(item)
         }
       }
@@ -9848,7 +10057,7 @@ export const useAiStore = defineStore('ai', {
       form.fieldErrors = []
       const outcome = await this.submitFrontendToolResult(form.toolCallId, resultText, 'http-post', false, form.runId, 'ok')
       /**
-       * 问题1（返修）：等待回包期间本轮被停止 ⇒ `stillSameRound` 会让结果表现为 `ok=false`。
+       * 问题1（返修）：等待回包期间本轮被停止 ⇒ `isStillSameRound` 会让结果表现为 `ok=false`。
        * 停止轮**不得**因此回退到可编辑（`filling`）、不得新增错误提示，也不得抹掉
        * `holdSubmittedFormPart` 已经固定的「已提交/结果待确认」。
        *
@@ -10152,7 +10361,7 @@ export const useAiStore = defineStore('ai', {
      * @param transport 送达该 start 帧的 /chat 传输（缺省 = 当前 `stopIntent` 记录的传输）
      * @returns 是否真的发起了 cancel（`false` = 没有意向 / 已过期 / 归属不符）
      */
-    cancelRunIfStopIntended(
+    canCancelRunIfStopIntended(
       runId: string,
       hostMessageId: string,
       transport?: AbortController | null
@@ -10176,13 +10385,7 @@ export const useAiStore = defineStore('ai', {
         }
         return false
       }
-      if (intent.hostMessageId === null) {
-        // 停止时没有可归属的宿主（本端没有"这一轮"的证明）：不猜，等 TTL / 传输收尾
-        return false
-      }
-      if (intent.hostMessageId !== hostMessageId) {
-        // 这条 start 不是被停的那一轮（不同宿主）：**不取消、也不清除意向**。
-        // 旧传输自己的 start 仍可能稍后到达，那是唯一能精确补 cancel 的证据。
+      if (!isStopIntentHostMatch(intent, hostMessageId)) {
         return false
       }
       // 命中：消耗这一条意向；之后该传输再派发的任何帧都不得写本地现场。
@@ -10247,7 +10450,8 @@ export const useAiStore = defineStore('ai', {
       const identityAtSend = identity === undefined ? this.sessionIdentity : identity
       try {
         await aiApi.cancel(runId, { headers: identityHeaders(identityAtSend) })
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:10251')
         // 后端不可达不影响本地已落地的停止
       }
     },
@@ -10280,7 +10484,7 @@ export const useAiStore = defineStore('ai', {
         await pending
         return
       }
-      if (!beginClientRequestCancel(clientRequestId)) {
+      if (!canBeginClientRequestCancel(clientRequestId)) {
         return
       }
       const identityAtCancel = this.sessionIdentity
@@ -10290,7 +10494,8 @@ export const useAiStore = defineStore('ai', {
             { sessionId, clientRequestId },
             { headers: identityHeaders(identityAtCancel) }
           )
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:10294')
           // 后端不可达不影响本地已落地的停止
         }
       })()
@@ -10319,7 +10524,7 @@ export const useAiStore = defineStore('ai', {
      *
      * @returns false = 已停/墓碑/宿主缺失/会话已换 —— 调用方必须按取消/中断结局收尾，不能返回 ok
      */
-    adoptDuplicateClientRequest(runId: string, hostMessageId: string): boolean {
+    canAdoptDuplicateClientRequest(runId: string, hostMessageId: string): boolean {
       if (this.stopped || this.stoppedRunId === runId
         || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
         return false
@@ -10352,7 +10557,8 @@ export const useAiStore = defineStore('ai', {
       currentAbort = null
       try {
         stale?.abort()
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:10356')
         // 忽略：传输已失败，abort 仅清理句柄
       }
       void this.probeAndAttachDuplicateRun(runId, host.id, sessionId, epoch)
@@ -10360,7 +10566,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     /** 重复轮次的现场是否仍属于本次接管（停止/换轮/换会话/节点消失 ⇒ false）。 */
-    duplicateRoundStillCurrent(runId: string, hostMessageId: string, sessionId: string, epoch: number): boolean {
+    isDuplicateRoundStillCurrent(runId: string, hostMessageId: string, sessionId: string, epoch: number): boolean {
       return !this.stopped
         && this.stoppedRunId !== runId
         && !hasStoppedRun(sessionId, runId, this.sessionIdentity)
@@ -10399,7 +10605,7 @@ export const useAiStore = defineStore('ai', {
         this.releaseDuplicateScene(hostMessageId, runId)
         return
       }
-      if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+      if (!this.isDuplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
         // 现场已被停止/新轮/其它同 run 接管：不在这里清 pendingAttachRunId（它可能已是
         // 另一条同 run 接管入口的同步登记）；停止路径由 releaseDuplicateScene 精确清理。
         return
@@ -10411,7 +10617,7 @@ export const useAiStore = defineStore('ai', {
           hostMessageId,
           lastSeq: this.runSeq[runId] ?? 0,
           awaitingInput: probe.snapshotStatus === 'SUSPENDED'
-            && this.hostHasPendingCard(hostMessageId)
+            && this.hasHostPendingCard(hostMessageId)
         })
         if (this.activeStreamRunId === runId || pendingAttachRunId === runId || this.activeStreamParked) {
           this.clearPreparingRun()
@@ -10431,7 +10637,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 尚无归档帧时的有界 readiness：复用 `startAutoRecovery('preparing')` 的预算/调度，
+     * 尚无归档帧时的有界 readiness：复用 `canStartAutoRecovery('preparing')` 的预算/调度，
      * 每拍 probe 既有 run；就绪即接回，耗尽走 `notePreparingExhausted`（既有手动恢复出口）。
      */
     beginDuplicateReadiness(
@@ -10441,7 +10647,7 @@ export const useAiStore = defineStore('ai', {
       epoch: number,
       elapsedMs: number
     ): void {
-      if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+      if (!this.isDuplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
         return
       }
       this.notePreparingHeartbeat(runId, elapsedMs)
@@ -10450,14 +10656,14 @@ export const useAiStore = defineStore('ai', {
       this.suspended = false
       this.streamInterrupted = false
       this.resetAutoRecovery('preparing')
-      this.startAutoRecovery(
+      this.canStartAutoRecovery(
         'preparing',
         async () => {
           if (this.stopped || this.stoppedRunId === runId) {
             this.releaseDuplicateScene(hostMessageId, runId)
             return true
           }
-          if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+          if (!this.isDuplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
             return true
           }
           const probe = await probeReattach(runId)
@@ -10465,7 +10671,7 @@ export const useAiStore = defineStore('ai', {
             this.releaseDuplicateScene(hostMessageId, runId)
             return true
           }
-          if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+          if (!this.isDuplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
             return true
           }
           if (probe.status === 200) {
@@ -10474,7 +10680,7 @@ export const useAiStore = defineStore('ai', {
               hostMessageId,
               lastSeq: this.runSeq[runId] ?? 0,
               awaitingInput: probe.snapshotStatus === 'SUSPENDED'
-                && this.hostHasPendingCard(hostMessageId)
+                && this.hasHostPendingCard(hostMessageId)
             })
             if (this.activeStreamRunId === runId || pendingAttachRunId === runId || this.activeStreamParked) {
               this.clearPreparingRun()
@@ -10491,7 +10697,7 @@ export const useAiStore = defineStore('ai', {
               if (this.stopped || this.stoppedRunId === runId) {
                 return
               }
-              if (!this.duplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+              if (!this.isDuplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
                 return
               }
               this.notePreparingState(runId, probe.preparing?.elapsedMs ?? 0)
@@ -10575,7 +10781,7 @@ export const useAiStore = defineStore('ai', {
         // M-19（2026-10-29，R1）：start 帧还没到 ⇒ runId 未知，现在没有 cancel 的对象。
         // 记下"本会话停止意向"，并**保留这条 /chat 传输**（不 abort，见下方 abort 分支）：
         // start 一到即按 runId 精确补一次真实 cancel（C2：abort 掉就等于把唯一的到达路径掐了）。
-        // 归属按**传输 + 宿主**判定（见 cancelRunIfStopIntended）：不同宿主（另一轮 / 新轮）的
+        // 归属按**传输 + 宿主**判定（见 canCancelRunIfStopIntended）：不同宿主（另一轮 / 新轮）的
         // start 不取消、也不清除这份意向；被停轮自己的 start 稍后仍会从这条传输到达并补 cancel。
         this.noteStopIntent(currentAbort)
         // 停止闭环：runId 未知时还有一条**不依赖 start 帧**的精确通道 —— 发送前生成的
@@ -10619,7 +10825,8 @@ export const useAiStore = defineStore('ai', {
       if (!keepTransport) {
         try {
           currentAbort?.abort()
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:10623')
           // 忽略：中止失败不影响后续取消请求
         }
       }
@@ -10671,8 +10878,8 @@ export const useAiStore = defineStore('ai', {
       // 轮次与身份现场在这里捕获，回包写 `lastRoundOutcome` 前必须仍原样。
       const roundAtCancel = captureRound(this.sessionId, runId)
       const identityAtCancel = this.sessionIdentity
-      const stillOwnStop = (): boolean =>
-        stillSameRound(roundAtCancel, this.sessionId, null)
+      const isStillOwnStop = (): boolean =>
+        isStillSameRound(roundAtCancel, this.sessionId, null)
         && isSameIdentity(identityAtCancel, this.sessionIdentity)
       try {
         if (runId) {
@@ -10683,13 +10890,14 @@ export const useAiStore = defineStore('ai', {
           // S2：读 alreadyCancelled —— 服务端幂等已生效（另一页签/重复点击已取消过）。
           // 本地收口在上方早就完成，这里只对齐轮次结局，不追加任何提示（同一件事不说两遍）。
           // Task 3：迟到回包不得改写**新身份/新轮**的结局（旧轮的取消是旧轮的事实）。
-          if (response?.alreadyCancelled === true && stillOwnStop()) {
+          if (response?.alreadyCancelled === true && isStillOwnStop()) {
             this.lastRoundOutcome = 'cancelled'
           }
         } else if (preStartCancel !== null) {
           await preStartCancel
         }
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:10693')
         // 后端不可达不影响本地停止（上面已收敛）；不写技术文案，用户看到的仍是「已停止」
       } finally {
         // O02：停止落地 —— 等在**本次**闸门上的发送可以开始判断"能不能发 / 是不是忙态"了。
@@ -10811,7 +11019,8 @@ export const useAiStore = defineStore('ai', {
       try {
         await aiApi.feedbackSubmit({ messageId, sessionId, rating, excerpt })
         return true
-      } catch {
+      } catch (error) {
+        logCaughtError(error, 'ai:feedback')
         // 不打断对话（人工复盘数据，非关键链路）——但必须让调用方知道"没记上"
         return false
       }
@@ -10889,12 +11098,12 @@ export const useAiStore = defineStore('ai', {
       }
       this.directoryStatus = 'ready'
       const stored = this.identity
-      if (stored !== null && directoryHas(directory, stored)) {
+      if (stored !== null && containsDirectoryEntry(directory, stored)) {
         await this.ensureSession()
         return
       }
-      const firstTenant = directory[0]
-      const firstUser = firstTenant.users[0]
+      const firstTenant = head(directory)!
+      const firstUser = head(firstTenant.users)!
       await this.enterIdentity({ tenantId: firstTenant.tenantId, userId: firstUser.userId })
     },
 
@@ -10906,7 +11115,8 @@ export const useAiStore = defineStore('ai', {
       if (inFlight !== null) {
         try {
           await inFlight
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:10911')
           // 目录加载自身的失败已在状态里；这里只等它落定
         }
       }
@@ -11005,19 +11215,15 @@ export const useAiStore = defineStore('ai', {
         // 清孤儿表单草稿（释放 sessionStorage 配额）。此时身份仍是旧的，键形才对。
         // **后端历史原样保留**（不调任何 purge 端点）。
         // N09/M07：用户主动切身份 = 换会话意图 ⇒ 复制来源的接手资格作废（防跨身份/串会话接手）。
-        clearHandoffOrigin()
-        this.adoptFreshSession()
-        writeAiIdentity(identity)
-        this.identity = identity
-        this.sessionIdentity = identity
-        // 目标身份若残留旧指针（复制页签继承等），一并清掉：发号失败时刷新也不得复活旧会话。
-        try {
-          sessionStorage.removeItem(sessionIdStorageKey(identity))
-        } catch {
-          // 隐私模式/配额：本页签内存态照常
-        }
-        // 发号成功后的所有权认领由 `ensureSession()` **统一**完成（只探一次、只 claim 一次）。
-        await this.ensureSession()
+        await forceIdentitySession(
+          identity,
+          () => this.adoptFreshSession(),
+          () => {
+            this.identity = identity
+            this.sessionIdentity = identity
+          },
+          () => this.ensureSession()
+        )
         return
       }
       const pointer = storedSessionPointer(identity)
@@ -11039,9 +11245,7 @@ export const useAiStore = defineStore('ai', {
           // **还回去** —— 它已经把账本改成这把锁；带着"放弃"返回会把会话锁句柄覆盖掉/泄漏，
           // 之后本页签再也认领不到自己的会话锁。这里用文档级 releaseSessionLock()（释放的正是
           // 本次刚探到的那把），不依赖任何身份重算锁名。
-          if (verdict !== 'occupied') {
-            releaseSessionLock()
-          }
+          releaseProbedSessionLock(verdict)
           return
         }
         if (verdict !== 'occupied') {
@@ -11130,7 +11334,8 @@ export const useAiStore = defineStore('ai', {
         try {
           // 会话号唯一来源 = `createSession()` 的 `sessionIdText` 字符串。
           issued = normalizeSessionId(await issue())
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:11135')
           if (token === sessionGateToken) {
             // 返修 round3：显式失败态（横幅据此显示），与"正在发号"区分，避免正常窗口闪红条。
             this.sessionIssueFailed = true
@@ -11150,7 +11355,8 @@ export const useAiStore = defineStore('ai', {
         this.sessionIdentity = identity
         try {
           sessionStorage.setItem(sessionIdStorageKey(identity), issued)
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:11155')
           // 隐私模式/配额：本页签内存态照常使用（刷新后重新发号）
         }
         // 返修 I2 + Task 3：发号成功 = 本页签自己的**新会话** ⇒ 在这里**统一**补齐所有权
@@ -11235,7 +11441,8 @@ export const useAiStore = defineStore('ai', {
       } else {
         try {
           abortingTransport?.abort()
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:11240')
           // 忽略：中止失败不影响重置
         }
       }
@@ -11261,7 +11468,8 @@ export const useAiStore = defineStore('ai', {
         if (!options.keepSessionPointer) {
           sessionStorage.removeItem(sessionIdStorageKey(scopeIdentity))
         }
-      } catch {
+      } catch (error) {
+          logCaughtError(error, 'stores/ai.ts:11266')
         // 隐私模式/配额：持久化失败不阻断本次重置（本页签内照常换 id）
       }
       // 发号令牌递增：在途的旧发号回包一律作废（不得写进这次换出来的会话）。
@@ -11402,7 +11610,7 @@ export const useAiStore = defineStore('ai', {
       // Task 3：判定/认领/广播都按**入口捕获**的会话身份（探活是异步的，期间身份可能被切走）。
       const identityAtEntry = this.sessionIdentity
       // 返回意向一次性消费：无论这次判成 owner 还是 duplicate，都不能留到下一次刷新
-      const returning = takeReturnIntent(sid)
+      const returning = canTakeReturnIntent(sid)
       const task = (async (): Promise<void> => {
         const role = await resolveTabOwnership(sid, identityAtEntry)
         if (this.sessionId !== sid || epochAtEntry !== sessionEpoch) {
@@ -11411,41 +11619,21 @@ export const useAiStore = defineStore('ai', {
         }
         this.tabOwnership = role
         if (role === 'owner') {
-          ownedSessionId = sid
-          // 锁到手 = 会话回到本页签，返回意向的待收回记录不再需要
-          clearReturnIntentPending()
-          // Task 3：探活期间身份可能已切走 —— claim 按**该会话**的身份发（入口捕获）。
-          postOwnership('claim', sid, this.sessionIdentity)
+          claimOwnerSession(sid, this.sessionIdentity)
           return
         }
         if (role === 'duplicate') {
           if (returning) {
-            // 慢重载回来的原页签（F1）：会话已被别人接手 —— 降级但不清场（见方法注释），
-            // 并把**返回意向随 claim 广播出去**：接管方若仍是空白就静默让回。不延长宽限、
-            // 不猜"某个毫秒之后对方一定死了"——让回与收回都由可观测消息驱动。
-            returnIntentPending = {
-              sessionId: sid,
-              fingerprint: identityAtEntry ? identityFingerprint(identityAtEntry) : ''
-            }
-            postOwnership('claim', sid, this.sessionIdentity, { returning: true })
+            claimReturningSession(sid, identityAtEntry)
             return
           }
-          // 复制页签：确认复制之后，先对本页签整份 sessionStorage 清一次（继承来的镜像、未提交
-          // 草稿、业务页签键一律不带走），再起新会话、轮换 pageId（同源广播里两个页签的 pageId
-          // 必须可区分）。顺序不可反：先 adopt/rotate 再 clear 会把刚写下的新身份抹掉。
-          clearDuplicatedTabStorage(this.identity)
-          this.adoptFreshSession()
-          // N09/M07：记下**复制来源**作为让渡接手资格（必须在 adoptFreshSession **之后**记：
-          // F7 起 adoptFreshSession 会作废资格）。复制页签取号后角色就变 'owner'，旧判据
-          // （只认 'duplicate'）会让"原页签关闭 ⇒ 空白副本接手"不可达；资格本身不换会话、
-          // 不读历史，只在**该会话**的 `released` 到达且本页签仍空白时才生效。
-          rememberHandoffOrigin(sid, identityAtEntry)
-          // 复制页签只换本地会话并保持静默；不提供接回入口，也不在这里读原会话历史。
-          rotatePageId()
-          // Task 4：先判完所有权（到这里才确定"本页签要自己的会话"）再向后端取号；
-          // 取号失败就保持"未就绪"（后续请求被引导门拦住），绝不发空 id。
-          // Task 3：认领已由 `ensureSession()` 统一完成，这里不再重复探活/claim。
-          await this.ensureSession()
+          await prepareDuplicatedTab(
+            this.identity,
+            sid,
+            identityAtEntry,
+            () => this.adoptFreshSession(),
+            () => this.ensureSession()
+          )
         }
       })()
       const tracked = task.finally(() => {
@@ -11542,7 +11730,7 @@ export const useAiStore = defineStore('ai', {
      */
     onOwnershipMessage(message: OwnershipMessage): void {
       // Task 4：不同身份（租户/用户）的页签不互相认领/让渡 —— 接管必须同 tenant + user。
-      if (!ownershipIdentityMatches(message, this.identity)) {
+      if (!isOwnershipIdentityMatch(message, this.identity)) {
         return
       }
       // F8：资格/让回属于**会话**，一律按 `sessionIdentity` 判（界面当前选中的 identity 可能已切走）。
@@ -11552,7 +11740,7 @@ export const useAiStore = defineStore('ai', {
         if (message.returning === true
           && this.sessionId === message.sessionId
           && this.tabOwnership === 'owner'
-          && tookOverOriginMatches(message.sessionId, sessionIdentity)) {
+          && isTookOverOriginMatch(message.sessionId, sessionIdentity)) {
           void this.giveBackTakenOverSession(message.sessionId)
           return
         }
@@ -11575,13 +11763,13 @@ export const useAiStore = defineStore('ai', {
       // ② 角色已是 owner，但本页签是**从这条会话复制来的空白页签**（复制来源已记录）。
       // 旧实现只看 ①，而复制页签取号后角色立刻变 owner ⇒ ② 这条路径永远不可达。
       const handoff = this.tabOwnership === 'duplicate'
-        || handoffOriginMatches(message.sessionId, sessionIdentity)
+        || isHandoffOriginMatch(message.sessionId, sessionIdentity)
       if (!handoff) {
         return
       }
       if (this.messages.length > 0 || this.loading || this.activeRunId !== null) {
         // F7：已经在这页签产生内容 ⇒ 永不接手，且**资格作废**（此后即便屏被清空也不得再回头接手）
-        if (handoffOriginMatches(message.sessionId, sessionIdentity)) {
+        if (isHandoffOriginMatch(message.sessionId, sessionIdentity)) {
           clearHandoffOrigin()
         }
         return
@@ -11593,7 +11781,7 @@ export const useAiStore = defineStore('ai', {
         pendingTakeover = null
         // 宽限期间现场可能已变（用户新建对话 / 接管完成 / 降级 / 已说话）：只有仍具资格才接手
         if (this.tabOwnership !== 'duplicate'
-          && !handoffOriginMatches(sessionId, this.sessionIdentity)) {
+          && !isHandoffOriginMatch(sessionId, this.sessionIdentity)) {
           return
         }
         void this.takeOverSession(sessionId)
@@ -11610,7 +11798,7 @@ export const useAiStore = defineStore('ai', {
      */
     async giveBackTakenOverSession(sessionId: string): Promise<void> {
       const identityAtEntry = this.sessionIdentity
-      if (!tookOverOriginMatches(sessionId, identityAtEntry)) {
+      if (!isTookOverOriginMatch(sessionId, identityAtEntry)) {
         return
       }
       if (this.sessionId !== sessionId || this.tabOwnership !== 'owner') {
@@ -11689,7 +11877,7 @@ export const useAiStore = defineStore('ai', {
       // 已清场换号），也可能资格已被作废。会话身份变了、或"待接手角色 / 接手资格"都不再成立
       // ⇒ 整体放弃并把锁还回去（否则探活回来会把刚新建的会话直接覆盖掉）。
       if (this.sessionId !== previous
-        || !(this.tabOwnership === 'duplicate' || handoffOriginMatches(sessionId, identityAtEntry))) {
+        || !(this.tabOwnership === 'duplicate' || isHandoffOriginMatch(sessionId, identityAtEntry))) {
         releaseOwnLock(sessionId, identityAtEntry)
         return
       }
@@ -11697,19 +11885,13 @@ export const useAiStore = defineStore('ai', {
         // 探活已把账本换成"待接手"的锁，但二次判据不允许接手 ⇒ 立刻还回去（不占别人的会话）
         releaseOwnLock(sessionId, identityAtEntry)
         // 用户已经在这页签说话 ⇒ 复制来源的接手资格作废（不把眼前内容换掉，也不再反复重试）
-        if (handoffOriginMatches(sessionId, identityAtEntry)) {
+        if (isHandoffOriginMatch(sessionId, identityAtEntry)) {
           clearHandoffOrigin()
         }
         return
       }
       if (previousLock !== null) {
-        // 放弃本页签那个空白会话：把它的所有权一并让出去（不占着不再使用的锁）
-        postOwnership('released', previous, identityAtEntry)
-        try {
-          previousLock.release()
-        } catch {
-          // 释放失败只影响让渡时序
-        }
+        releasePreviousSessionLock(previousLock, previous, identityAtEntry)
       }
       this.sessionId = sessionId
       this.sessionIdentity = this.identity
@@ -11717,13 +11899,7 @@ export const useAiStore = defineStore('ai', {
       if (this.noticeCode === 'ai.notice.sessionIssueFailed') {
         clearNotice(this)
       }
-      try {
-        // 显式绑定到本页签身份（不依赖默认参数），避免身份事实源分叉时写裸键（返修 M6）。
-        sessionStorage.setItem(sessionIdStorageKey(this.identity), sessionId)
-        sessionStorage.removeItem(mirrorStorageKey(previous, this.identity))
-      } catch {
-        // 持久化失败：本页签内存里仍按接手后的会话走
-      }
+      persistTakenOverSession(sessionId, previous, this.identity)
       this.tabOwnership = 'owner'
       ownedSessionId = sessionId
       // 资格用掉 ⇒ 标记"这条会话是本页签接管来的"（F1：原页签带返回意向回来时据此静默让回）。
@@ -12145,8 +12321,8 @@ export const useAiStore = defineStore('ai', {
           frontendToolsInFlight.add(frame.toolCallId)
           enqueueFrontendTool(
             message.id,
-            () => stillSameRound(round, this.sessionId, this.activeRunId ?? null),
-            () => this.runFrontendToolAttempt(message, frame, round),
+            () => isStillSameRound(round, this.sessionId, this.activeRunId ?? null),
+            () => this.canRunFrontendToolAttempt(message, frame, round),
             () => frontendToolsInFlight.delete(frame.toolCallId)
           )
           break
@@ -12225,7 +12401,7 @@ export const useAiStore = defineStore('ai', {
               ? hosts.find((item) => findToolPart(item, frame.anchorToolCallId as string))
               : undefined
             // 找不到锚点/无锚点 ⇒ 本 run 最后一条 assistant（没有则本帧宿主）
-            const target = anchored ?? hosts[hosts.length - 1]
+            const target = anchored ?? last(hosts)
               ?? ((!message.runId || !runId || message.runId === runId) ? message : undefined)
             if (target) {
               insertCompactionEvent(target, {
@@ -12515,31 +12691,10 @@ export const useAiStore = defineStore('ai', {
           continue
         }
         const generative = part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL
-        if (!generative) {
-          // 409 响应体 / 续收快照的 mapped 是后端权威终态；pending/running 与本地
-          // failed/unknown 都不是权威裁决，必须允许纠正。其它已定终态保持 first-wins。
-          const correctable = part.status === 'pending' || part.status === 'failed'
-            || part.status === 'unknown' || part.status === 'running'
-          if (mapped !== null && correctable) {
-            item.parts.splice(partIndex, 1, { ...part, requiresAction: false, status: mapped })
-            wroteStatus = true
-            deriveProjections(item)
-          } else if (part.requiresAction) {
-            item.parts.splice(partIndex, 1, { ...part, requiresAction: false })
-            deriveProjections(item)
-          }
-        } else if (part.status === 'pending' || part.status === 'cancelled'
-          || part.status === 'failed' || part.status === 'unknown') {
-          // GF 待决/乐观取消/本地未定结论都可由 409 的后端权威结局纠正。
-          item.parts.splice(partIndex, 1, mapped === null
-            ? { ...part, requiresAction: false }
-            : { ...part, requiresAction: false, status: mapped })
-          if (mapped !== null) {
-            wroteStatus = true
-          }
-          deriveProjections(item)
-        }
-        // GF 已终态段：first-wins 单调，跳过
+        const wrote = generative
+          ? canApplyGenerativeToolTerminal(item, partIndex, part, mapped)
+          : canApplyGenericToolTerminal(item, partIndex, part, mapped)
+        wroteStatus = wrote || wroteStatus
       }
       if (wroteStatus) {
         // 只有真的写了状态才清占位；占位 unknown 的空写不得先删账。
@@ -12560,7 +12715,7 @@ export const useAiStore = defineStore('ai', {
     /**
      * 批4④ A5'/D4：折叠块展开态写动作。blockId = groupParts 产出的稳定组 id
      * （`${messageId}:${toolCallId}` / `${messageId}:reasoning-${seg}`，收口修 F1 命名空间）；expanded 为显式三态值（D-C6），
-     * 由 AiPanel 经 resolveBlockExpanded 与 defaultExpanded 合成最终展开态。
+     * 由 AiPanel 经 resolveBlockExpanded 与 isDefaultExpanded 合成最终展开态。
      */
     setBlockExpanded(blockId: string, expanded: boolean): void {
       this.expandedBlocks[blockId] = expanded
@@ -12656,7 +12811,7 @@ export const useAiStore = defineStore('ai', {
           }
         })
         .catch((error: unknown) => {
-          console.error('[ai] job synchronization handler failed', error)
+          logCaughtError(error, 'ai:job-sync')
           this.noticeStartJobSyncFailure(jobId, null)
         })
     },
@@ -12747,7 +12902,7 @@ export const useAiStore = defineStore('ai', {
         return null
       }
       const workspace = useWorkspaceStore()
-      if (!stepAlreadyReached(workspace.step, target, workspace.taskType)) {
+      if (!isStepAlreadyReached(workspace.step, target, workspace.taskType)) {
         return null
       }
       return {
@@ -12779,7 +12934,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * `stillHere=false` 的出口：轮次已不在场（新轮 / 换会话）时把本段中性收口，避免永久 running。
+     * `isStillHere=false` 的出口：轮次已不在场（新轮 / 换会话）时把本段中性收口，避免永久 running。
      *
      * <p>**同一 run 的宿主仍是本轮宿主时不动作** —— 那是重挂/重放在同一轮里接管，段的终态由
      * 帧写点给出（此处收成 unknown 反而会盖掉刚重建出来的真实结局）。
@@ -12792,7 +12947,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     /** 恢复事实不足时不执行；unknown 只描述这份真实的不确定性，并释放后端等待。 */
-    async settleUncertainRecoveryTool(
+    async canSettleUncertainRecoveryTool(
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
       round: RoundGuard
@@ -12805,7 +12960,7 @@ export const useAiStore = defineStore('ai', {
         frame.runId ?? this.activeRunId ?? undefined,
         'unknown'
       )
-      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+      if (!isStillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
         return false
       }
       if (submitted.duplicate) {
@@ -12860,7 +13015,7 @@ export const useAiStore = defineStore('ai', {
       const round = guard ?? captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null)
       // B2：排队期间已停止 / 换会话 / 换轮 ⇒ 本动作**零副作用**：不推进 UI 轮次 token
       //（那会把 `abortUiOperations()` 落下的停止位重新放开）、不写段、不动浏览器、不回灌。
-      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+      if (!isStillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
         return
       }
       // #2（2026-10-31 阻断）：同一 toolCallId 的执行去重。P03 起回灌受理前段仍是 running，
@@ -12871,20 +13026,20 @@ export const useAiStore = defineStore('ai', {
       }
       frontendToolsInFlight.add(frame.toolCallId)
       try {
-        await this.runFrontendToolAttempt(message, frame, round)
+        await this.canRunFrontendToolAttempt(message, frame, round)
       } finally {
         frontendToolsInFlight.delete(frame.toolCallId)
       }
     },
 
     /** 锁被占用时等待持锁方权威结局；仅锁能力不可用时由本端走未知活性出口。 */
-    async runFrontendToolAttempt(
+    async canRunFrontendToolAttempt(
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
       round: RoundGuard
     ): Promise<boolean> {
       const runId = frame.runId ?? this.activeRunId
-      if (!runId || !stillSameRound(round, this.sessionId, this.activeRunId ?? null)
+      if (!runId || !isStillSameRound(round, this.sessionId, this.activeRunId ?? null)
         || this.stopped || this.stoppedRunId === runId
         || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
         return false
@@ -12894,23 +13049,23 @@ export const useAiStore = defineStore('ai', {
         this.sessionId,
         runId,
         frame.toolCallId,
-        () => this.executeFencedFrontendTool(message, frame, round, runId)
+        () => this.canExecuteFencedFrontendTool(message, frame, round, runId)
       )
-      if (!fenced.acquired && stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+      if (!fenced.acquired && isStillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
         if (fenced.failed !== true) {
           // 锁已由他端持有：他端负责执行与回灌，本端只等既有结果帧/恢复通道的权威结局。
           return false
         }
         // 幂等导航可在锁不可用时安全重放；其它动作维持既定未知活性出口。
         if (frame.name !== 'navigate_to') {
-          return await this.settleUncertainRecoveryTool(message, frame, round)
+          return await this.canSettleUncertainRecoveryTool(message, frame, round)
         }
-        return await this.executeFencedFrontendTool(message, frame, round, runId)
+        return await this.canExecuteFencedFrontendTool(message, frame, round, runId)
       }
       return fenced.value ?? false
     },
 
-    async executeFencedFrontendTool(
+    async canExecuteFencedFrontendTool(
       message: ChatMessage,
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
       round: RoundGuard,
@@ -12926,7 +13081,7 @@ export const useAiStore = defineStore('ai', {
         if (recovery?.trusted !== true || entry === undefined) {
           try {
             const current = await aiApi.runsCurrent(sessionId)
-            if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)
+            if (!isStillSameRound(round, this.sessionId, this.activeRunId ?? null)
               || hasStoppedRun(sessionId, runId, identity)) {
               return false
             }
@@ -12942,13 +13097,14 @@ export const useAiStore = defineStore('ai', {
               recovery = undefined
               entry = undefined
             }
-          } catch {
+          } catch (error) {
+              logCaughtError(error, 'stores/ai.ts:12947')
             if (entry !== undefined) {
               recovery = undefined
               entry = undefined
             }
-            if (!replaySafeWithoutSnapshotFact(frame.name) && recovery?.trusted !== true) {
-              return await this.settleUncertainRecoveryTool(message, frame, round)
+            if (!isReplaySafeWithoutSnapshotFact(frame.name) && recovery?.trusted !== true) {
+              return await this.canSettleUncertainRecoveryTool(message, frame, round)
             }
           }
         }
@@ -12958,16 +13114,16 @@ export const useAiStore = defineStore('ai', {
         }
         const newSinceTrustedSnapshot = recovery?.trusted === true && entry === undefined
         if (fact !== 'not-executed' && !newSinceTrustedSnapshot
-          && !replaySafeWithoutSnapshotFact(frame.name) && this.confirmStepAlreadyReached(frame) === null) {
-          return await this.settleUncertainRecoveryTool(message, frame, round)
+          && !isReplaySafeWithoutSnapshotFact(frame.name) && this.confirmStepAlreadyReached(frame) === null) {
+          return await this.canSettleUncertainRecoveryTool(message, frame, round)
         }
       }
       if (journal?.state === 'claimed' && frame.name !== 'navigate_to') {
-        return await this.settleUncertainRecoveryTool(message, frame, round)
+        return await this.canSettleUncertainRecoveryTool(message, frame, round)
       }
       const executionToken = createPageIdToken()
       if (completed === null) {
-        writeFrontendToolJournal({
+        canWriteFrontendToolJournal({
           token: executionToken,
           sessionId,
           runId,
@@ -12981,7 +13137,7 @@ export const useAiStore = defineStore('ai', {
       // 段不再等动作）——前端工具段生命周期 pending→running→终态，与确认门放行同口径。
       // 先让出同步窗口：request 帧的 pending 段必须先落盘（m-R2 写点①的同步可观测语义）
       await Promise.resolve()
-      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+      if (!isStillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
         return false
       }
       this.upsertToolPart(message, {
@@ -12996,7 +13152,7 @@ export const useAiStore = defineStore('ai', {
       // F6 残留（2026-11-01）：`confirm_step` 幂等 —— 目标步骤**已经到达**（刷新回放 / 重复投递 /
       // 回灌 409 后的重放）就不再 goStep / persistStepData：那会真的把向导再推进一次（导入向导
       // 离开第 1 步还会整表写回服务端文件）。仍停在原步骤时才真正执行。
-      const stepAlreadyReached = this.confirmStepAlreadyReached(frame)
+      const isStepAlreadyReached = this.confirmStepAlreadyReached(frame)
       // 已完成台账只允许重放真实结局；没有台账且获准执行时才调用执行器。
       let execution: Awaited<ReturnType<typeof executeFrontendTool>> | null = completed !== null
         ? {
@@ -13006,7 +13162,7 @@ export const useAiStore = defineStore('ai', {
             ...(completed.sheetMeta !== undefined ? { sheetMeta: completed.sheetMeta } : {}),
             ...(completed.code !== undefined ? { code: completed.code } : {})
           }
-        : stepAlreadyReached
+        : isStepAlreadyReached
       if (execution === null && completed === null) {
         try {
           execution = await executeFrontendTool({
@@ -13016,14 +13172,15 @@ export const useAiStore = defineStore('ai', {
             args: parseToolArgs(frame.args),
             budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
           })
-        } catch {
+        } catch (error) {
+            logCaughtError(error, 'stores/ai.ts:13021')
           execution = null
         }
       }
-      if (!stillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
+      if (!isStillSameRound(round, this.sessionId, this.activeRunId ?? null)) {
         return false
       }
-      writeFrontendToolJournal({
+      canWriteFrontendToolJournal({
         token: executionToken,
         sessionId,
         runId,
@@ -13035,7 +13192,7 @@ export const useAiStore = defineStore('ai', {
         ...(execution?.sheetMeta !== undefined ? { sheetMeta: execution.sheetMeta } : {}),
         ...(execution?.code !== undefined ? { code: execution.code } : {})
       }, identity)
-      const stillHere = (): boolean => stillSameRound(round, this.sessionId, this.activeRunId ?? null)
+      const isStillHere = (): boolean => isStillSameRound(round, this.sessionId, this.activeRunId ?? null)
         && !this.stopped && this.stoppedRunId !== runId && !hasStoppedRun(sessionId, runId, identity)
       if (execution === null) {
         // P03/F4：异常同样要**回灌失败事实** —— 只落本地 failed 的话，后端的挂起条目只能等满
@@ -13043,7 +13200,7 @@ export const useAiStore = defineStore('ai', {
         // outcome='failed'（这是"确定性失败"，不是用户取消，故不写 cancelled）。
         // 停止/换轮后**不覆盖** —— 停止已把段收成 cancelled，晚到的异常结论不该把它翻成失败。
         let accepted = false
-        if (stillHere()) {
+        if (isStillHere()) {
           const crashSubmit = await this.submitFrontendToolResult(
             frame.toolCallId,
             EXECUTOR_CRASH_TEXT,
@@ -13054,7 +13211,7 @@ export const useAiStore = defineStore('ai', {
           )
           accepted = crashSubmit.ok
         }
-        if (stillHere()) {
+        if (isStillHere()) {
           this.upsertToolPart(message, {
             toolCallId: frame.toolCallId,
             name: frame.name,
@@ -13076,7 +13233,7 @@ export const useAiStore = defineStore('ai', {
       // **不**递增纪元 ⇒ 工具回灌照常（C-1 的原始缺陷即栽在"controller 引用变了"这条判据上）。
       // 本轮正常结束（done）后晚到的执行器同属本轮：段落真实结局、回灌交给 409 幂等收敛，
       // 不把卡留在 running 假态（后端此时已超时/取消，重复回灌只会被幂等拒绝）。
-      if (!stillHere()) {
+      if (!isStillHere()) {
         // #4：轮次已不在场 ⇒ 中性收敛（不留永久 running；不误判 failed）
         this.settleAbandonedToolPart(message, frame.toolCallId)
         return false
@@ -13099,7 +13256,7 @@ export const useAiStore = defineStore('ai', {
         execution.code
       )
       // 回灌窗口内可能已停止/换轮：本地已收口的 cancelled（或新轮现场）不得被旧结局覆盖。
-      if (!stillHere()) {
+      if (!isStillHere()) {
         this.settleAbandonedToolPart(message, frame.toolCallId)
         return false
       }

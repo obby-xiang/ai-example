@@ -1,3 +1,5 @@
+import { head } from 'lodash'
+
 /**
  * AI 可视可操作专项 · 区域注册表（设计稿 §3.4.1 / §3.5 围栏①）。
  *
@@ -136,7 +138,7 @@ export function aiCurrentPage(): string | null {
 /** 注册区域（幂等：同 id 覆盖 + epoch+1）。缺 risk / 空 id / detached root 一律抛错。 */
 export function registerAiRegion(options: AiRegionOptions): AiRegion {
   assertRegionOptions(options)
-  const page = options.page ?? options.id.split('.')[0] ?? ''
+  const page = options.page ?? head(options.id.split('.')) ?? ''
   const region: AiRegion = { ...options, page }
   regions.set(region.id, region)
   epochCounter += 1
@@ -214,7 +216,7 @@ export function verbsOfElement(el: HTMLElement): AiVerb[] | null {
 }
 
 /** 动词是否被区域/元素双层允许（只能收紧，不能放宽）。 */
-export function verbAllowed(el: HTMLElement, region: AiRegion, verb: AiVerb): boolean {
+export function canUseVerb(el: HTMLElement, region: AiRegion, verb: AiVerb): boolean {
   if (region.verbs && !region.verbs.includes(verb)) {
     return false
   }
@@ -359,69 +361,86 @@ export interface AiRegionAuditTarget {
  * `targets` 缺省时自行遍历；`ui_snapshot` 传入自己那一次的遍历结果，
  * 因此 DEV 审计**不额外多扫一遍 DOM**（T-12「同一 epoch 只遍历一次」的断言不变）。
  */
+function auditRegionElement(
+  el: HTMLElement,
+  region: AiRegion,
+  refOwners: Map<string, string>,
+  reportedDuplicate: Set<string>,
+  issues: AiRegionAuditIssue[]
+): void {
+  const ref = el.getAttribute('data-ai-ref') ?? ''
+  if (!ref) {
+    return
+  }
+  const owner = refOwners.get(ref)
+  if (owner !== undefined && !reportedDuplicate.has(ref)) {
+    reportedDuplicate.add(ref)
+    issues.push({
+      code: 'ref-duplicate',
+      regionId: region.id,
+      ref,
+      detail: `ref ${ref} appears in both region ${owner} and ${region.id} (click target depends on traversal order)`
+    })
+  } else if (owner === undefined) {
+    refOwners.set(ref, region.id)
+  }
+  if (accessibleNameOf(el) === '') {
+    issues.push({
+      code: 'missing-name',
+      regionId: region.id,
+      ref,
+      detail: `ref ${ref} has no accessible name (data-ai-label / aria-label / title / text all empty)`
+    })
+  }
+  const declared = el.getAttribute('data-ai-risk')
+  if ((declared === 'read' || declared === 'mutate-local' || declared === 'consequential')
+    && RISK_ORDER[declared] < RISK_ORDER[region.risk]) {
+    issues.push({
+      code: 'risk-below-region',
+      regionId: region.id,
+      ref,
+      detail: `ref ${ref} risk ${declared} is lower than region ${region.id} risk ${region.risk} (downgrade must be intentional)`
+    })
+  }
+}
+
+function auditRegionScope(
+  target: AiRegionAuditTarget,
+  refOwners: Map<string, string>,
+  reportedDuplicate: Set<string>,
+  issues: AiRegionAuditIssue[]
+): void {
+  const { region, elements } = target
+  if (region.root.isConnected !== true) {
+    issues.push({
+      code: 'root-detached',
+      regionId: region.id,
+      detail: `region ${region.id} root is no longer in the document (refs would point to unmounted nodes)`
+    })
+    return
+  }
+  if (elements.length === 0) {
+    issues.push({
+      code: 'region-empty',
+      regionId: region.id,
+      detail: `region ${region.id} has no data-ai-ref elements (registered but invisible to the model)`
+    })
+  }
+  for (const el of elements) {
+    auditRegionElement(el, region, refOwners, reportedDuplicate, issues)
+  }
+}
+
 export function auditAiRegions(targets?: readonly AiRegionAuditTarget[]): AiRegionAuditIssue[] {
   const issues: AiRegionAuditIssue[] = []
   const refOwners = new Map<string, string>()
   const reportedDuplicate = new Set<string>()
   const scopes: readonly AiRegionAuditTarget[] = targets ?? [...regions.values()].map((region) => ({
     region,
-    elements: region.root.isConnected === true
-      ? queryRegistered(region.root, '[data-ai-ref]')
-      : []
+    elements: region.root.isConnected === true ? queryRegistered(region.root, '[data-ai-ref]') : []
   }))
-  for (const { region, elements } of scopes) {
-    if (region.root.isConnected !== true) {
-      issues.push({
-        code: 'root-detached',
-        regionId: region.id,
-        detail: `region ${region.id} root is no longer in the document (refs would point to unmounted nodes)`
-      })
-      continue
-    }
-    if (elements.length === 0) {
-      issues.push({
-        code: 'region-empty',
-        regionId: region.id,
-        detail: `region ${region.id} has no data-ai-ref elements (registered but invisible to the model)`
-      })
-    }
-    for (const el of elements) {
-      const ref = el.getAttribute('data-ai-ref') ?? ''
-      if (!ref) {
-        continue
-      }
-      const owner = refOwners.get(ref)
-      if (owner !== undefined && !reportedDuplicate.has(ref)) {
-        reportedDuplicate.add(ref)
-        issues.push({
-          code: 'ref-duplicate',
-          regionId: region.id,
-          ref,
-          detail: `ref ${ref} appears in both region ${owner} and ${region.id} (click target depends on traversal order)`
-        })
-      } else if (owner === undefined) {
-        refOwners.set(ref, region.id)
-      }
-      if (accessibleNameOf(el) === '') {
-        issues.push({
-          code: 'missing-name',
-          regionId: region.id,
-          ref,
-          detail: `ref ${ref} has no accessible name (data-ai-label / aria-label / title / text all empty)`
-        })
-      }
-      const declared = el.getAttribute('data-ai-risk')
-      if (declared === 'read' || declared === 'mutate-local' || declared === 'consequential') {
-        if (RISK_ORDER[declared] < RISK_ORDER[region.risk]) {
-          issues.push({
-            code: 'risk-below-region',
-            regionId: region.id,
-            ref,
-            detail: `ref ${ref} risk ${declared} is lower than region ${region.id} risk ${region.risk} (downgrade must be intentional)`
-          })
-        }
-      }
-    }
+  for (const target of scopes) {
+    auditRegionScope(target, refOwners, reportedDuplicate, issues)
   }
   return issues
 }

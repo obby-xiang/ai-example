@@ -11,11 +11,14 @@
  * 本文件**不依赖 store**（纯函数层，循 utils/parts.ts 分层自述）；展开态三态判定在
  * {@link resolveBlockExpanded}，用户触碰记录存 store 的 `expandedBlocks`（D4：会话内内存态）。
  */
+import { last } from 'lodash'
 import { GENERATIVE_FORM_TOOL, type MessagePart, type ReasoningPart, type ToolPart, type ToolRunStatus } from '@/types/ai'
 import { parseFormSchema, type FormSpec } from '@/types/form-schema'
 import { conditionSummaryText, conditionSummaryView, isConditionEmpty, type FieldQueryCondition } from '@/types/condition'
 import { translate } from '@/composables/useCopy'
-import { cardFieldLabel, localizedCardFieldValue, showCardField } from '@/utils/card-content'
+import { cardFieldLabel, localizedCardFieldValue, canShowCardField } from '@/utils/card-content'
+import { logCaughtError } from '@/utils/log-caught-error'
+
 
 export type ActivityPart = ToolPart | ReasoningPart
 
@@ -66,7 +69,7 @@ function isActivityPart(part: MessagePart): part is ActivityPart {
  * ③ 其余（含 reason 非空、pending/running 进行中、纯 reasoning 段）一律 false。
  * 决策瞬间「不折叠」的时序不在这里判 —— 那是回合级时序（见 AiPanel 的 turnStillOpen）。
  */
-export function defaultExpandedOf(parts: ActivityPart[]): boolean {
+export function isDefaultExpanded(parts: ActivityPart[]): boolean {
   return parts.some((part) => part.kind === 'tool'
     && (part.requiresAction || (isReadOnlyCard(part) && readOnlyDefaultExpanded(part))))
 }
@@ -127,7 +130,7 @@ export function groupParts(parts: MessagePart[], messageId: string): Block[] {
       messageId,
       kind: 'activity',
       parts: [part],
-      defaultExpanded: defaultExpandedOf([part])
+      defaultExpanded: isDefaultExpanded([part])
     })
   }
   return blocks
@@ -197,7 +200,7 @@ function fileBasename(value: string): string {
     return value
   }
   const parts = value.split(/[\\/]/)
-  return parts[parts.length - 1] ?? value
+  return last(parts) ?? value
 }
 
 /**
@@ -244,7 +247,8 @@ function parseArgObject(args: string | null | undefined): Record<string, unknown
     }
     const keys = Object.keys(parsed as Record<string, unknown>)
     return keys.length === 0 ? null : (parsed as Record<string, unknown>)
-  } catch {
+  } catch (error) {
+      logCaughtError(error, 'utils/blocks.ts:248')
     return null
   }
 }
@@ -345,7 +349,7 @@ const argRowsCache = new WeakMap<ToolPart, ArgRowsEntry>()
 
 function buildArgRows(parsed: Record<string, unknown>, maskSensitive: boolean): FieldRow[] {
   return Object.entries(parsed)
-    .filter(([key]) => showCardField(key))
+    .filter(([key]) => canShowCardField(key))
     .map(([key, value]) => ({
       key,
       label: cardFieldLabel(key),
@@ -596,7 +600,7 @@ export function isReadOnlyCard(part: ToolPart): boolean {
  * <p>为什么单列一条判据：提交成功那一刻 store 会写回 `submittedValues`（`writeSubmittedValues`），
  * 而段状态在结局帧之前仍是 `pending` / `running` —— 旧实现让这张卡掉出只读态（`liveForm` 也不再
  * 提供表单），卡体瞬间空白或换成普通工具卡，等结局帧到达再变回只读表单，用户看到"闪一下 schema"。
- * 本判据把「已提交、未结局」这一段固定成**同一张只读表单**（{@link AiPanel} 的 readOnlyLike 分支），
+ * 本判据把「已提交、未结局」这一段固定成**同一张只读表单**（{@link AiPanel} 的 isReadOnlyLike 分支），
  * 卡头状态也统一按「✓ 已提交」显示，直到结局帧把段推入终态。
  *
  * <p>边界：只在 `pending` / `running` 两态成立（终态一律由 {@link isReadOnlyCard} 接管）；
@@ -637,60 +641,47 @@ export function isFormAwaitingOutcome(part: ToolPart): boolean {
  */
 export type ReadOnlyState = 'approved' | 'rejected' | 'expired' | 'failed' | 'submitted' | 'cancelled' | 'notApproved' | 'notExecuted'
 
-export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
-  if (part.name === GENERATIVE_FORM_TOOL) {
-    // 表单系的已决态 = 这一段**真实发生了什么**，不是"非成功即取消"（见下）：
-    // 2026-10-29 批：旧口径只留「已提交 / 已取消」两态，`status !== 'succeeded'` 一律画成
-    // 「✗ 已取消」—— 于是被安全闸拒绝（rejected）、等表单超时（expired）、执行失败（failed）、
-    // 越界/上游跳过（blocked/skipped）全被说成"用户自己取消了"。事实相反：只有真取消是取消。
-    switch (part.status) {
-      case 'succeeded':
-        return 'submitted'
-      case 'cancelled':
-        return 'cancelled'
-      case 'rejected':
-        return 'rejected'
-      case 'expired':
-        return 'expired'
-      case 'failed':
-        return 'failed'
-      case 'blocked':
-      case 'skipped':
-        return 'notExecuted'
-      default:
-        // pending/running 已被 isReadOnlyCard 挡住；unknown 等"还没结论"的残留沿用旧兜底
-        return 'expired'
-    }
+function formReadOnlyState(part: ToolPart): ReadOnlyState {
+  switch (part.status) {
+    case 'succeeded': return 'submitted'
+    case 'cancelled': return 'cancelled'
+    case 'rejected': return 'rejected'
+    case 'expired': return 'expired'
+    case 'failed': return 'failed'
+    case 'blocked':
+    case 'skipped': return 'notExecuted'
+    default: return 'expired'
   }
+}
+
+function decisionReadOnlyState(part: ToolPart): ReadOnlyState | null {
   if (part.decision === 'approved') {
-    if (part.status === 'failed') {
-      return 'failed'
-    }
-    if (part.status === 'blocked' || part.status === 'skipped') {
-      return 'notExecuted'
-    }
+    if (part.status === 'failed') return 'failed'
+    if (part.status === 'blocked' || part.status === 'skipped') return 'notExecuted'
     return 'approved'
   }
-  if (part.decision === 'rejected') {
-    return 'rejected'
-  }
-  if (part.decision === 'cancel') {
-    return 'cancelled'
-  }
+  if (part.decision === 'rejected') return 'rejected'
+  if (part.decision === 'cancel') return 'cancelled'
+  return null
+}
+
+function statusReadOnlyState(part: ToolPart): ReadOnlyState {
   switch (part.status) {
     case 'succeeded':
-    case 'running':
-      return 'approved'
+    case 'running': return 'approved'
     case 'failed':
     case 'blocked':
-    case 'skipped':
-      // 批4：无批准证据的未执行/失败一律「未批准 · 未执行」—— 预检未通过不得显示「已批准」。
-      return 'notApproved'
-    case 'rejected':
-      return 'rejected'
-    default:
-      return 'expired'
+    case 'skipped': return 'notApproved'
+    case 'rejected': return 'rejected'
+    default: return 'expired'
   }
+}
+
+export function readOnlyStateOf(part: ToolPart): ReadOnlyState {
+  if (part.name === GENERATIVE_FORM_TOOL) {
+    return formReadOnlyState(part)
+  }
+  return decisionReadOnlyState(part) ?? statusReadOnlyState(part)
 }
 
 /**

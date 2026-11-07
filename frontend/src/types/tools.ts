@@ -488,7 +488,7 @@ export type UiEvent =
   | { type: 'open_page'; page: WorkspacePageId }
   | { type: 'restore_task'; taskId: number; taskType?: TaskType }
   | { type: 'goto_step'; step: string }
-  | { type: 'select_defs'; task: 'export' | 'import'; defCodes: string[] }
+  | { type: 'select_defs'; task: 'export' | 'import'; defCodes: readonly string[] }
   | { type: 'set_conditions'; defCode: string; conditions: unknown }
   | { type: 'set_import_mode'; mode: 'MERGE' | 'REPLACE' }
   | { type: 'run_job'; jobType: JobType; taskId: number }

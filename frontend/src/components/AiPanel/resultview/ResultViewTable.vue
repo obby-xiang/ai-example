@@ -17,7 +17,7 @@ import type { ResultView, ResultViewColumn } from '@/types/resultview'
 const props = defineProps<{
   view: ResultView
   /** 已解析的行（`data.inline` 或 `data.ref` 求值结果） */
-  rows: Record<string, unknown>[]
+  rows: readonly Record<string, unknown>[]
 }>()
 
 const { t } = useI18n()
