@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.memory;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.chat.messages.AssistantMessage;
 
 import java.util.LinkedHashMap;
@@ -34,7 +37,9 @@ import java.util.Map;
  * @param providerId 产出该消息的供应方主键（{@code null} = env 合成行，部署内唯一）
  * @param modelId 产出该消息的模型名（取证用；同供应方换模型仍回放）
  */
-public record ReasoningOrigin(Long providerId, String modelId) {
+public record ReasoningOrigin(
+        @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
+        @JsonProperty("modelId") String modelId) {
 
     /** metadata 键：产出该消息的供应方主键（中性、无密钥）。 */
     public static final String KEY_PROVIDER_ID = "aiOriginProviderId";
@@ -77,8 +82,23 @@ public record ReasoningOrigin(Long providerId, String modelId) {
         if (provider == null && model == null) {
             return null;
         }
-        Long providerId = provider instanceof Number number ? number.longValue() : null;
+        Long providerId = providerIdOf(provider);
         return new ReasoningOrigin(providerId, model instanceof String text ? text : null);
+    }
+
+    private static Long providerIdOf(Object raw) {
+        if (raw instanceof Number number) {
+            return number.longValue();
+        }
+        if (raw instanceof String text) {
+            try {
+                return Long.valueOf(text);
+            }
+            catch (NumberFormatException ex) {
+                return null;
+            }
+        }
+        return null;
     }
 
     /**
@@ -96,7 +116,7 @@ public record ReasoningOrigin(Long providerId, String modelId) {
         if (message == null) {
             return null;
         }
-        Map<String, Object> metadata = message.getMetadata() == null ? Map.of() : message.getMetadata();
+        Map<String, Object> metadata = ObjectUtils.defaultIfNull(message.getMetadata(), Map.of());
         if (metadata.containsKey(KEY_PROVIDER_ID) || metadata.containsKey(KEY_MODEL_ID)) {
             return message;
         }
@@ -105,7 +125,7 @@ public record ReasoningOrigin(Long providerId, String modelId) {
         }
         Map<String, Object> merged = new LinkedHashMap<>(metadata);
         if (providerId != null) {
-            merged.put(KEY_PROVIDER_ID, providerId);
+            merged.put(KEY_PROVIDER_ID, providerId.toString());
         }
         if (modelId != null) {
             merged.put(KEY_MODEL_ID, modelId);

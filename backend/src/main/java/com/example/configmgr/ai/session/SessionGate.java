@@ -6,6 +6,7 @@ import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -385,14 +386,14 @@ public class SessionGate {
 		String expected = encode(runId, token);
 		String gateKey = gateKey(sessionId);
 		Holder holder = this.inProcess.get(gateKey);
-		if (!matches(holder, runId, token)) {
+		if (!isMatches(holder, runId, token)) {
 			Holder recorded = findHolder(sessionId, runId, token);
 			if (recorded != null) {
 				holder = recorded;
 				gateKey = recorded.gateKey;
 			}
 		}
-		if (matches(holder, runId, token)) {
+		if (isMatches(holder, runId, token)) {
 			this.inProcess.remove(holder.gateKey, holder);
 			cancelWatchdog(holder);
 			released = true;
@@ -411,7 +412,7 @@ public class SessionGate {
 		return released;
 	}
 
-	private static boolean matches(Holder holder, String runId, String token) {
+	private static boolean isMatches(Holder holder, String runId, String token) {
 		return holder != null && holder.runId.equals(runId) && token.equals(holder.token);
 	}
 
@@ -429,7 +430,7 @@ public class SessionGate {
 	private Holder findHolder(String sessionId, String runId, String token) {
 		Holder found = null;
 		for (Holder holder : this.inProcess.values()) {
-			if (!holder.sessionId.equals(sessionId) || !matches(holder, runId, token)) {
+			if (!holder.sessionId.equals(sessionId) || !isMatches(holder, runId, token)) {
 				continue;
 			}
 			if (!holder.gateKey.equals(gateKeyOf(holder))) {
@@ -465,7 +466,7 @@ public class SessionGate {
 	 * 不同身份之间永不互相强释放。
 	 */
 	public void releaseDeadHeld(String sessionId, String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			// 持有者不可知（RT-35 的 busy.unknown）：没有任何 runId 可以匹配，强释放必须放弃 ——
 			// 猜一个 id 去删锁，删到别人那一任就是"静默抢门"。
 			log.warn("Session gate force release missing runId sessionId={} (holder unknown: no guessing, no lock deleted)",
@@ -478,7 +479,7 @@ public class SessionGate {
 		if (holder == null) {
 			holder = findDeadHolder(sessionId, runId, identity);
 		}
-		if (holder != null && holder.runId.equals(runId) && sameIdentity(holder, identity)) {
+		if (holder != null && holder.runId.equals(runId) && isSameIdentity(holder, identity)) {
 			this.inProcess.remove(holder.gateKey, holder);
 			cancelWatchdog(holder);
 			gateKey = holder.gateKey;
@@ -549,7 +550,7 @@ public class SessionGate {
 	private Holder findDeadHolder(String sessionId, String runId, TenantUser identity) {
 		for (Holder holder : this.inProcess.values()) {
 			if (holder.sessionId.equals(sessionId) && holder.runId.equals(runId)
-					&& sameIdentity(holder, identity)) {
+					&& isSameIdentity(holder, identity)) {
 				return holder;
 			}
 		}
@@ -557,7 +558,7 @@ public class SessionGate {
 	}
 
 	/** 持有者身份与给定身份是否同一。 */
-	private static boolean sameIdentity(Holder holder, TenantUser identity) {
+	private static boolean isSameIdentity(Holder holder, TenantUser identity) {
 		return holder.identity.equals(identity);
 	}
 
@@ -571,7 +572,7 @@ public class SessionGate {
 	 */
 	boolean renewLockOnce(String sessionId, String expectedValue) {
 		String gateKey = gateKey(sessionId);
-		return renewLockAt(gateKey, sessionId, expectedValue, this.inProcess.get(gateKey));
+		return isRenewLockAt(gateKey, sessionId, expectedValue, this.inProcess.get(gateKey));
 	}
 
 	/**
@@ -581,7 +582,7 @@ public class SessionGate {
 	 * <p>续期成功即"这一条持有记录还活着"的证据：刷新 {@code lastConfirmedAtMs}，
 	 * 过期清扫因此不会碰仍在续期的活跃门（见 {@link #sweepExpiredHolders(long)}）。
 	 */
-	private boolean renewLockAt(String gateKey, String sessionId, String expectedValue, Holder holder) {
+	private boolean isRenewLockAt(String gateKey, String sessionId, String expectedValue, Holder holder) {
 		Long renewed = this.redis.execute(RENEW_SCRIPT, List.of(gateKey), expectedValue, ttlMs());
 		if (renewed == null || renewed != 1L) {
 			return false;
@@ -611,7 +612,7 @@ public class SessionGate {
 	int sweepExpiredHolders(long nowMs) {
 		int removed = 0;
 		for (Holder holder : this.inProcess.values()) {
-			if (!expired(holder, nowMs) || watchdogRunning(holder) || stillHoldsLock(holder)) {
+			if (!isExpired(holder, nowMs) || isWatchdogRunning(holder) || isStillHoldsLock(holder)) {
 				continue;
 			}
 			if (this.inProcess.remove(holder.gateKey, holder)) {
@@ -626,13 +627,13 @@ public class SessionGate {
 	}
 
 	/** 续期任务是否仍在跑（= 这次持有仍在主动保活）。 */
-	private static boolean watchdogRunning(Holder holder) {
+	private static boolean isWatchdogRunning(Holder holder) {
 		ScheduledFuture<?> future = holder.watchdog;
 		return future != null && !future.isCancelled() && !future.isDone();
 	}
 
 	/** 过期判据：最后一次确认活着的时刻 + 宽限（降级记录用更长的保守窗口）。 */
-	private boolean expired(Holder holder, long nowMs) {
+	private boolean isExpired(Holder holder, long nowMs) {
 		long last = holder.lastConfirmedAtMs > 0L ? holder.lastConfirmedAtMs : holder.acquiredAtMs;
 		if (last <= 0L) {
 			return false;
@@ -646,7 +647,7 @@ public class SessionGate {
 	}
 
 	/** 记录是否仍真的持有那把锁（读不到 ⇒ true：证明不了是残留，保留）。 */
-	private boolean stillHoldsLock(Holder holder) {
+	private boolean isStillHoldsLock(Holder holder) {
 		if (holder.lockValue == null) {
 			return false;
 		}
@@ -654,7 +655,7 @@ public class SessionGate {
 			return holder.lockValue.equals(this.redis.opsForValue().get(holder.gateKey));
 		}
 		catch (Exception ex) {
-			log.debug("Session gate sweep could not verify lock key={} (treated as still held)", holder.gateKey, ex);
+			if (log.isDebugEnabled()) log.debug("Session gate sweep could not verify lock key={} (treated as still held)", holder.gateKey, ex);
 			return true;
 		}
 	}
@@ -672,13 +673,13 @@ public class SessionGate {
 		try {
 			Long result = this.redis.execute(script, List.of(gateKey), args);
 			if (result == null) {
-				log.debug("Session lock {} outcome unknown (script returned null) key={} (no fallback write)", action, gateKey);
+				if (log.isDebugEnabled()) log.debug("Session lock {} outcome unknown (script returned null) key={} (no fallback write)", action, gateKey);
 				return null;
 			}
 			return result == 1L;
 		}
 		catch (Exception ex) {
-			log.debug("Session lock {} failed key={} (Redis error, no fallback write)", action, gateKey, ex);
+			if (log.isDebugEnabled()) log.debug("Session lock {} failed key={} (Redis error, no fallback write)", action, gateKey, ex);
 			return null;
 		}
 	}
@@ -693,7 +694,7 @@ public class SessionGate {
 	private Busy busyHeldByAnother(String gateKey, String sessionId) {
 		String observed = observedRunId(gateKey);
 		if (observed == null) {
-			log.debug("Session gate busy but holder unknown sessionId={} (diagnostic read failed / lock gone: "
+			if (log.isDebugEnabled()) log.debug("Session gate busy but holder unknown sessionId={} (diagnostic read failed / lock gone: "
 					+ "reject as unknown, never fall back to the caller runId)", sessionId);
 			return new Busy(null, true, true);
 		}
@@ -710,7 +711,7 @@ public class SessionGate {
 			return runIdOfValue(this.redis.opsForValue().get(gateKey));
 		}
 		catch (Exception ex) {
-			log.debug("Failed to read session gate holder key={} (treated as unknown)", gateKey, ex);
+			if (log.isDebugEnabled()) log.debug("Failed to read session gate holder key={} (treated as unknown)", gateKey, ex);
 			return null;
 		}
 	}
@@ -737,7 +738,7 @@ public class SessionGate {
 		String sessionId = holder.sessionId;
 		holder.watchdog = this.watchdog.scheduleAtFixedRate(() -> {
 			try (RequestContextUtils.SafeCloseable scope = holder.useIdentity()) {
-				if (!renewLockAt(gateKey, sessionId, expectedValue, holder)) {
+				if (!isRenewLockAt(gateKey, sessionId, expectedValue, holder)) {
 					// RT-34：续期返回 0 是"锁已失效/换主"的确定结论 —— 必须与异常同口径记降级，
 					// 否则只在日志里说一句就没了，调用方看到的仍是"一切正常"。
 					holder.degraded = true;
@@ -759,7 +760,7 @@ public class SessionGate {
 							sessionId, gateKey, ex);
 				}
 				else {
-					log.debug("Session lock renew still failing (degraded already reported) sessionId={} key={}",
+					if (log.isDebugEnabled()) log.debug("Session lock renew still failing (degraded already reported) sessionId={} key={}",
 							sessionId, gateKey, ex);
 				}
 			}

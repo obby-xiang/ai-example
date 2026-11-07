@@ -1,9 +1,17 @@
 package com.example.configmgr.ai.run;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import lombok.Data;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,7 +42,9 @@ import java.util.Map;
  * <p><b>滚动升级兼容</b>：{@code @JsonIgnoreProperties(ignoreUnknown = true)} —— 多实例滚动期新版本
  * 先写入的 additive 字段，旧版本反序列化时直接忽略，不会因为"多了一个键"读不出快照。
  */
-@Data
+@Getter
+@Setter
+@ToString(onlyExplicitlyIncluded = true)
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class RunSnapshot {
 
@@ -64,8 +74,12 @@ public class RunSnapshot {
 		return DONE.equals(status) || FAILED.equals(status) || CANCELLED.equals(status);
 	}
 
+	@JsonProperty("runId")
+	@ToString.Include
 	private String runId;
 
+	@JsonProperty("sessionId")
+	@ToString.Include
 	private String sessionId;
 
 	/**
@@ -74,6 +88,7 @@ public class RunSnapshot {
 	 *
 	 * <p>它只是关联键，<b>不是 runId</b>，也不能用来指定 run。
 	 */
+	@JsonProperty("clientRequestId")
 	private String clientRequestId;
 
 	/**
@@ -82,6 +97,9 @@ public class RunSnapshot {
 	 * <p><b>只读不重算</b>：续跑/恢复/跨实例接管都发生在原请求结束之后，身份只能从这条记录读回，
 	 * 不得按当前线程上下文"重新判定归属"（那会让接管方以自己的身份改写别人的轮次）。
 	 */
+	@JsonProperty("tenantId")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
+	@ToString.Include
 	private long tenantId;
 
 	/**
@@ -89,15 +107,24 @@ public class RunSnapshot {
 	 *
 	 * <p>与 {@link #tenantId} 同源同寿：创建时一起固定，续跑只读。
 	 */
+	@JsonProperty("userId")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
+	@ToString.Include
 	private long userId;
 
 	/** 轮次状态，取值见本类常量。 */
+	@JsonProperty("status")
+	@ToString.Include
 	private String status = RUNNING;
 
 	/** 已完成的工具轮数（挂起即 +1，用于"轮数上限"类判定与取证）。 */
+	@JsonProperty("round")
+	@ToString.Include
 	private int round;
 
 	/** 本轮的尝试次数（韧性棒：&gt;1 说明发生过断流重试）。 */
+	@JsonProperty("attempts")
+	@ToString.Include
 	private int attempts;
 
 	/**
@@ -108,36 +135,68 @@ public class RunSnapshot {
 	 * 挂起后的续跑可能落在另一个进程上，进程内计数器会被重置成 0（五段挂起就能刷出 5×25 步）。
 	 * {@code 0} = 还没用过工具。
 	 */
+	@JsonProperty("toolSteps")
+	@ToString.Include
 	private int toolSteps;
 
 	/** 是否由用户取消（终态判据之一，与 {@link #CANCELLED} 同步设置）。 */
+	@JsonProperty("cancelled")
+	@ToString.Include
 	private boolean cancelled;
 
 	/** 完整请求历史（每条一个 {@code MessageJsonCodec} JSON 字符串）。 */
+	@JsonProperty("messageJson")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
 	private List<String> messageJson = new ArrayList<>();
 
+	@JsonProperty("messageJsonPresent")
+	private boolean messageJsonPresent;
+
 	/** 挂起中那一轮的 assistant 正文（通常为空串：工具轮的 assistant 正文就是空的）。 */
+	@JsonProperty("assistantContent")
 	private String assistantContent;
 
 	/** 挂起中那一轮的工具调用（顺序即模型给出的顺序）。 */
+	@JsonProperty("inFlightToolCalls")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
 	private List<PendingToolCall> inFlightToolCalls = new ArrayList<>();
 
+	@JsonProperty("inFlightToolCallsPresent")
+	private boolean inFlightToolCallsPresent;
+
 	/** 披露上下文快照（{@code AiContext.toMap()}）。 */
+	@JsonProperty("context")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
 	private Map<String, Object> context = new LinkedHashMap<>();
 
+	@JsonProperty("contextPresent")
+	private boolean contextPresent;
+
+	@JsonProperty("finalText")
 	private String finalText;
 
+	@JsonProperty("error")
 	private String error;
 
 	/** 本实例标识：证明某次执行发生在"重启后的新进程"里。 */
+	@JsonProperty("createdBy")
 	private String createdBy;
 
+	@JsonProperty("createdAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long createdAtMs;
 
+	@JsonProperty("updatedAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long updatedAtMs;
 
 	/** 续跑过的实例标识（按时间顺序）。 */
+	@JsonProperty("resumedBy")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
 	private List<String> resumedBy = new ArrayList<>();
+
+	@JsonProperty("resumedByPresent")
+	private boolean resumedByPresent;
 
 	/**
 	 * 本轮使用的 provider（{@code ai_provider.id}）。
@@ -145,27 +204,41 @@ public class RunSnapshot {
 	 * <p>{@code null} = env 合成行（种子尚未落库）。续跑<b>按快照</b>取模型：provider 已删/停用
 	 * ⇒ 409 {@code PROVIDER_GONE}，不静默换模型续跑（历史与 {@code done.model} 都不许说谎）。
 	 */
+	@JsonProperty("providerId")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private Long providerId;
 
 	/** 本轮使用的模型名（请求体 {@code model} 的原值）。 */
+	@JsonProperty("modelId")
 	private String modelId;
 
 	/** 冻结的生效 temperature（null 也是冻结值：当时没有配置/请求未覆盖）。 */
+	@JsonProperty("temperature")
 	private Double temperature;
 
 	/** 冻结的生效 top_p。 */
+	@JsonProperty("topP")
 	private Double topP;
 
 	/** 冻结的生效 max_tokens。 */
+	@JsonProperty("maxTokens")
 	private Integer maxTokens;
 
 	/** 冻结的"参数被策略锁住"标记（续跑轮的 {@code done.paramsLocked} 不许改口）。 */
+	@JsonProperty("paramsLocked")
 	private Boolean paramsLocked;
 
 	/**
 	 * 冻结的生效参数（L-26）。三值可为 null —— 那是"当时该项没有值"，不是"没冻结"。
 	 */
-	public record FrozenParams(Double temperature, Double topP, Integer maxTokens, boolean paramsLocked) {
+	public record FrozenParams(@JsonProperty("temperature") Double temperature,
+			@JsonProperty("topP") Double topP, @JsonProperty("maxTokens") Integer maxTokens,
+			@JsonProperty("paramsLocked") boolean paramsLocked) {
+
+		@Override
+		public String toString() {
+			return "FrozenParams[maxTokens=" + this.maxTokens + ", paramsLocked=" + this.paramsLocked + "]";
+		}
 	}
 
 	/**
@@ -177,7 +250,12 @@ public class RunSnapshot {
 	 * <b>不解析、不截断、不按 provider 分支</b>；未知键也因此不会丢。
 	 * {@code null} = 挂起时上游没有 metadata。
 	 */
+	@JsonProperty("assistantMetadata")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
 	private Map<String, Object> assistantMetadata;
+
+	@JsonProperty("assistantMetadataPresent")
+	private boolean assistantMetadataPresent;
 
 	/**
 	 * 写入本条快照的<b>租约 epoch</b>：0 = 无租约写入（单实例/降级路径）。
@@ -185,6 +263,8 @@ public class RunSnapshot {
 	 * <p>它回答"这条状态是哪一任续跑权写的"：与 {@code ai:fence:run:<runId>} 对账即可判定
 	 * 一次写回是否已被后来者超越（陈旧写不得覆盖新主人的状态）。0 = 无租约写入。
 	 */
+	@JsonProperty("runEpoch")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long runEpoch;
 
 	/**
@@ -198,6 +278,8 @@ public class RunSnapshot {
 	 * 恢复后到顶仍按既有 {@code MAX_ARMED_BATCHES} 收尾。它不是新的持久面：键族/TTL 与
 	 * {@code ai:run:<runId>} 完全同寿（{@code app.ai.session-ttl}），不新增列、不碰 DB。
 	 */
+	@JsonProperty("budgetArmedAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long budgetArmedAtMs;
 
 	/**
@@ -205,6 +287,7 @@ public class RunSnapshot {
 	 *
 	 * <p>与 {@link #budgetArmedAtMs} 同寿同源：随快照落库 ⇒ 跨 park 不重置，恢复后继续累计。
 	 */
+	@JsonProperty("budgetSkippedBatches")
 	private int budgetSkippedBatches;
 
 	/**
@@ -244,6 +327,7 @@ public class RunSnapshot {
 	 * <p>transcript 终态补写用户条目<b>只认它</b> —— 不从快照历史里挑"最后一条 USER"（那会把记忆窗口
 	 * 里别的轮次的提问写成这一轮），也不按消息 metadata 推断归属。建快照时必填（非空白）。
 	 */
+	@JsonProperty("requestText")
 	private String requestText;
 
 	/**
@@ -255,7 +339,89 @@ public class RunSnapshot {
 	 * 排序只保证"本 run 的用户条目早于本 run 的工具条目"，不给工具键加 1ms（那会让相邻 run 的条目
 	 * 在跨轮排序里交错）。
 	 */
+	@JsonProperty("turnStartedAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long turnStartedAtMs;
+
+	@JsonProperty("messageJsonPresent")
+	public boolean isMessageJsonPresent() {
+		return this.messageJsonPresent;
+	}
+
+	public List<String> getMessageJson() {
+		return this.messageJson == null || this.messageJson.isEmpty() ? List.of()
+				: Collections.unmodifiableList(new ArrayList<>(this.messageJson));
+	}
+
+	public void setMessageJson(List<String> messageJson) {
+		this.messageJsonPresent = messageJson != null;
+		this.messageJson = messageJson == null || messageJson.isEmpty() ? List.of()
+				: Collections.unmodifiableList(new ArrayList<>(messageJson));
+	}
+
+	@JsonProperty("inFlightToolCallsPresent")
+	public boolean isInFlightToolCallsPresent() {
+		return this.inFlightToolCallsPresent;
+	}
+
+	public List<PendingToolCall> getInFlightToolCalls() {
+		return this.inFlightToolCalls == null || this.inFlightToolCalls.isEmpty() ? List.of()
+				: Collections.unmodifiableList(new ArrayList<>(this.inFlightToolCalls));
+	}
+
+	public void setInFlightToolCalls(List<PendingToolCall> inFlightToolCalls) {
+		this.inFlightToolCallsPresent = inFlightToolCalls != null;
+		this.inFlightToolCalls = inFlightToolCalls == null || inFlightToolCalls.isEmpty() ? List.of()
+				: Collections.unmodifiableList(new ArrayList<>(inFlightToolCalls));
+	}
+
+	@JsonProperty("contextPresent")
+	public boolean isContextPresent() {
+		return this.contextPresent;
+	}
+
+	public Map<String, Object> getContext() {
+		return this.context == null || this.context.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(this.context));
+	}
+
+	public void setContext(Map<String, Object> context) {
+		this.contextPresent = context != null;
+		this.context = context == null || context.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(context));
+	}
+
+	@JsonProperty("resumedByPresent")
+	public boolean isResumedByPresent() {
+		return this.resumedByPresent;
+	}
+
+	public List<String> getResumedBy() {
+		return this.resumedBy == null || this.resumedBy.isEmpty() ? List.of()
+				: Collections.unmodifiableList(new ArrayList<>(this.resumedBy));
+	}
+
+	public void setResumedBy(List<String> resumedBy) {
+		this.resumedByPresent = resumedBy != null;
+		this.resumedBy = resumedBy == null || resumedBy.isEmpty() ? List.of()
+				: Collections.unmodifiableList(new ArrayList<>(resumedBy));
+	}
+
+	@JsonProperty("assistantMetadataPresent")
+	public boolean isAssistantMetadataPresent() {
+		return this.assistantMetadataPresent;
+	}
+
+	public Map<String, Object> getAssistantMetadata() {
+		return this.assistantMetadata == null || this.assistantMetadata.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(this.assistantMetadata));
+	}
+
+	public void setAssistantMetadata(Map<String, Object> assistantMetadata) {
+		this.assistantMetadataPresent = assistantMetadata != null;
+		this.assistantMetadata = assistantMetadata == null || assistantMetadata.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(assistantMetadata));
+	}
 
 	/** 取证视图（不含 messageJson 正文）。 */
 	public Map<String, Object> asMap() {
@@ -263,25 +429,25 @@ public class RunSnapshot {
 		out.put("runId", this.runId);
 		out.put("sessionId", this.sessionId);
 		// 身份归属
-		out.put("tenantId", this.tenantId);
-		out.put("userId", this.userId);
+		out.put("tenantId", Long.toString(this.tenantId));
+		out.put("userId", Long.toString(this.userId));
 		out.put("status", this.status);
 		out.put("round", this.round);
 		out.put("attempts", this.attempts);
 		out.put("toolSteps", this.toolSteps);
 		out.put("cancelled", this.cancelled);
-		out.put("messageCount", this.messageJson.size());
-		out.put("inFlight", this.inFlightToolCalls.size());
+		out.put("messageCount", getMessageJson().size());
+		out.put("inFlight", getInFlightToolCalls().size());
 		out.put("assistantContent", this.assistantContent);
 		out.put("finalText", this.finalText);
 		out.put("error", this.error);
 		out.put("createdBy", this.createdBy);
-		out.put("createdAtMs", this.createdAtMs);
-		out.put("updatedAtMs", this.updatedAtMs);
-		out.put("resumedBy", this.resumedBy);
-		out.put("runEpoch", this.runEpoch);
+		out.put("createdAtMs", Long.toString(this.createdAtMs));
+		out.put("updatedAtMs", Long.toString(this.updatedAtMs));
+		out.put("resumedBy", getResumedBy());
+		out.put("runEpoch", Long.toString(this.runEpoch));
 		// 模型身份
-		out.put("providerId", this.providerId);
+		out.put("providerId", this.providerId == null ? null : String.valueOf(this.providerId));
 		out.put("modelId", this.modelId);
 		// 生效参数：四值是这一轮当时的生效值（null 也是冻结值）
 		out.put("temperature", this.temperature);
@@ -289,10 +455,10 @@ public class RunSnapshot {
 		out.put("maxTokens", this.maxTokens);
 		out.put("paramsLocked", this.paramsLocked);
 		// AR-10 第 3 条：armed 跨 park 持久化的两个事实；0 = 未武装
-		out.put("budgetArmedAtMs", this.budgetArmedAtMs);
+		out.put("budgetArmedAtMs", Long.toString(this.budgetArmedAtMs));
 		out.put("budgetSkippedBatches", this.budgetSkippedBatches);
 		// B2：请求原文只报字符数（取证够用，不回显正文）
-		out.put("requestTextChars", this.requestText == null ? 0 : this.requestText.length());
+		out.put("requestTextChars", StringUtils.length(this.requestText));
 		return out;
 	}
 

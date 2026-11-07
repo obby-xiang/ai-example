@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.session;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -81,13 +82,13 @@ public class SessionPurgeDatabase {
 		Deleted result = this.transaction.execute(status -> new Deleted(this.jdbc.update(
 				"DELETE FROM " + FEEDBACK_TABLE + " WHERE session_id = ? AND tenant_id = ? AND user_id = ?", sessionId,
 				tenantId, userId)));
-		return result == null ? new Deleted(0) : result;
+		return ObjectUtils.getIfNull(result, () -> new Deleted(0));
 	}
 
 	private int count(String table, String sessionId, long tenantId, long userId) {
 		Long rows = this.jdbc.queryForObject("SELECT COUNT(*) FROM " + table
 				+ " WHERE session_id = ? AND tenant_id = ? AND user_id = ?", Long.class, sessionId, tenantId, userId);
-		return rows == null ? 0 : rows.intValue();
+		return ObjectUtils.defaultIfNull(rows, 0L).intValue();
 	}
 
 }

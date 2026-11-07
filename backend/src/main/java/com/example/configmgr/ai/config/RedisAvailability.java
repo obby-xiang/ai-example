@@ -84,12 +84,12 @@ public class RedisAvailability {
 		}
 		CompletableFuture<Boolean> existing = this.probeInFlight.get();
 		if (existing != null) {
-			return awaitProbe(existing);
+			return isProbeAvailable(existing);
 		}
 		CompletableFuture<Boolean> candidate = new CompletableFuture<>();
 		if (!this.probeInFlight.compareAndSet(null, candidate)) {
 			CompletableFuture<Boolean> winner = this.probeInFlight.get();
-			return winner == null ? isAvailable() : awaitProbe(winner);
+			return winner == null ? isAvailable() : isProbeAvailable(winner);
 		}
 		this.checkedAtMs = now;
 		this.probes.incrementAndGet();
@@ -113,7 +113,7 @@ public class RedisAvailability {
 		return this.available;
 	}
 
-	private boolean awaitProbe(CompletableFuture<Boolean> flight) {
+	private boolean isProbeAvailable(CompletableFuture<Boolean> flight) {
 		try {
 			return Boolean.TRUE.equals(flight.get(PROBE_WAIT_SECONDS, TimeUnit.SECONDS));
 		}
@@ -121,13 +121,13 @@ public class RedisAvailability {
 			Thread.currentThread().interrupt();
 		}
 		catch (Exception ex) {
-			log.debug("Redis probe wait ended without a completed result", ex);
+			// 保留最近一次可用性，等待下一次探活。
 		}
 		return this.available;
 	}
 
 	/**
-	 * 记一次探活失败：翻转（可用 → 不可用）时 WARN、持续失败只 DEBUG。
+	 * 记一次探活失败：翻转（可用 → 不可用）时 WARN，持续失败不重复记录。
 	 *
 	 * <p>两条失败路径（抛异常 / {@code PONG == null}）共用这一处，避免再次出现"某条路径不告警"
 	 * 的漂移 —— 那会让"可用 → 不可用"的唯一 WARN 被吞掉。仅 single-flight 的探活执行者调用。
@@ -146,12 +146,6 @@ public class RedisAvailability {
 				log.warn("Redis preflight probe failed, AI endpoints fail fast from now on"
 						+ " (503 AI_REDIS_UNAVAILABLE) error={}", error, cause);
 			}
-		}
-		else if (cause == null) {
-			log.debug("Redis preflight probe still failing error={}", error);
-		}
-		else {
-			log.debug("Redis preflight probe still failing error={}", error, cause);
 		}
 	}
 

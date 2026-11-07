@@ -1,9 +1,13 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -17,7 +21,7 @@ import java.util.Set;
  * 白烧一轮 token，且用户看到的是"工具坏了"而不是"功能被关了"（方案 §2.3 明文禁止）。
  *
  * <p>
- * 因此本类只做一件事：{@code allows(name)} —— 并且 {@code ToolRegistry} 的披露谓词与执行兜底
+ * 因此本类只做一件事：{@code isAllowed(name)} —— 并且 {@code ToolRegistry} 的披露谓词与执行兜底
  * <b>共用它</b>，从结构上排除"披露面与执行面两套口径"。
  *
  * <h2>四类工具与三档判定</h2>
@@ -66,7 +70,7 @@ public final class SheetSwitches {
 	public SheetSwitches(AiProperties.Sheet sheet) {
 		// 段缺失时按"缺省四键"装配而不是抛错：本类是决策组件，段缺失的启动失败由
 		// AiProperties#verifySheet 负责（单一失败点，错误信息带键名与当前值）。
-		this.sheet = sheet == null ? new AiProperties.Sheet() : sheet;
+		this.sheet = ObjectUtils.getIfNull(sheet, AiProperties.Sheet::new);
 	}
 
 	/** 缺省装配（读开 / 写关 / 20 / 5）—— 仅供单元测试与"未注入"的轻装配面。 */
@@ -75,17 +79,19 @@ public final class SheetSwitches {
 	}
 
 	private static Set<String> union() {
-		Set<String> all = new java.util.HashSet<>(READ_TOOLS);
+		Set<String> all = new HashSet<>(READ_TOOLS);
 		all.addAll(WRITE_TOOLS);
 		all.addAll(DUAL_TOOLS);
 		return Set.copyOf(all);
 	}
 
-	public boolean readEnabled() {
+	@JsonIgnore
+	public boolean isReadEnabled() {
 		return this.sheet.isReadEnabled();
 	}
 
-	public boolean writeEnabled() {
+	@JsonIgnore
+	public boolean isWriteEnabled() {
 		return this.sheet.isWriteEnabled();
 	}
 
@@ -100,44 +106,58 @@ public final class SheetSwitches {
 	}
 
 	/** 该工具此刻是否可以进披露面（唯一判定入口）。 */
-	public boolean allows(String toolName) {
-		if (toolName == null || toolName.isBlank()) {
+	public boolean isAllowed(String toolName) {
+		if (StringUtils.isBlank(toolName)) {
 			return true;
 		}
 		if (READ_TOOLS.contains(toolName)) {
-			return readEnabled();
+			return isReadEnabled();
 		}
 		if (DUAL_TOOLS.contains(toolName)) {
-			return readEnabled() && writeEnabled();
+			return isReadEnabled() && isWriteEnabled();
 		}
 		if (WRITE_TOOLS.contains(toolName)) {
-			return writeEnabled();
+			return isWriteEnabled();
 		}
 		return true;
+	}
+
+	@JsonIgnore
+	public boolean readEnabled() {
+		return isReadEnabled();
+	}
+
+	@JsonIgnore
+	public boolean writeEnabled() {
+		return isWriteEnabled();
+	}
+
+	public boolean allows(String toolName) {
+		return isAllowed(toolName);
 	}
 
 	/**
 	 * 被关掉的闸门键名（`read-enabled` / `write-enabled`）；未关或非受治理工具返回 {@code null}。
 	 *
-	 * <p>为什么需要"哪一侧"：{@link #allows} 只回答"能不能进披露面"，回执文案还要告诉管理员
+	 * <p>为什么需要"哪一侧"：{@link #isAllowed} 只回答"能不能进披露面"，回执文案还要告诉管理员
 	 * 该去看哪个键。双档工具（`normalize_column`）是"两闸同时开才披露"，<b>关哪侧就报哪侧</b> ——
 	 * 按"是不是读工具"二分会把「读关写开」误报成 write-enabled（管理员去查会发现它本来就是 true）。
 	 */
 	public String disabledGate(String toolName) {
-		if (toolName == null || toolName.isBlank()) {
+		if (StringUtils.isBlank(toolName)) {
 			return null;
 		}
 		if (READ_TOOLS.contains(toolName)) {
-			return readEnabled() ? null : "read-enabled";
+			return isReadEnabled() ? null : "read-enabled";
 		}
 		if (WRITE_TOOLS.contains(toolName)) {
-			return writeEnabled() ? null : "write-enabled";
+			return isWriteEnabled() ? null : "write-enabled";
 		}
 		if (DUAL_TOOLS.contains(toolName)) {
-			if (!readEnabled()) {
+			if (!isReadEnabled()) {
 				return "read-enabled";
 			}
-			return writeEnabled() ? null : "write-enabled";
+			return isWriteEnabled() ? null : "write-enabled";
 		}
 		return null;
 	}
@@ -145,8 +165,8 @@ public final class SheetSwitches {
 	/** {@code /health.sheet} 的配置面（键名与设计稿 §2.5 逐字一致）。 */
 	public Map<String, Object> health() {
 		Map<String, Object> out = new LinkedHashMap<>();
-		out.put("readEnabled", readEnabled());
-		out.put("writeEnabled", writeEnabled());
+		out.put("readEnabled", isReadEnabled());
+		out.put("writeEnabled", isWriteEnabled());
 		out.put("sampleMaxRows", effectiveSampleMaxRows());
 		out.put("projectionMaxColumns", effectiveProjectionMaxColumns());
 		out.put("effectiveFrom", "config");

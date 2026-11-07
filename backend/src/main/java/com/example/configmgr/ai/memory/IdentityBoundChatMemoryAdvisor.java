@@ -183,19 +183,19 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 	 * 身份侧由 {@link RunIdentityScope#usable} 判定）。
 	 */
 	private static ToolExecutionEnvelope envelopeOf(ChatClientRequest chatClientRequest) {
-		Map<String, Object> toolContext = toolContextOf(chatClientRequest);
-		if (toolContext == null) {
-			return null;
-		}
-		return ToolExecutionEnvelope.fromToolContext(toolContext);
+		return ToolExecutionEnvelope.fromToolContext(toolContextOf(chatClientRequest));
 	}
 
 	private static Map<String, Object> toolContextOf(ChatClientRequest chatClientRequest) {
 		if (chatClientRequest == null || chatClientRequest.prompt() == null) {
-			return null;
+			return Map.of();
 		}
 		ChatOptions options = chatClientRequest.prompt().getOptions();
-		return options instanceof ToolCallingChatOptions toolCalling ? toolCalling.getToolContext() : null;
+		if (!(options instanceof ToolCallingChatOptions toolCalling)) {
+			return Map.of();
+		}
+		Map<String, Object> toolContext = toolCalling.getToolContext();
+		return toolContext == null ? Map.of() : toolContext;
 	}
 
 	/**
@@ -226,7 +226,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 
 		@Override
 		public void add(String conversationId, List<Message> messages) {
-			if (denied("write", conversationId)) {
+			if (isDenied("write", conversationId)) {
 				return;
 			}
 			if (this.turn == null) {
@@ -246,7 +246,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 
 		@Override
 		public List<Message> get(String conversationId) {
-			if (denied("read", conversationId)) {
+			if (isDenied("read", conversationId)) {
 				return List.of();
 			}
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
@@ -256,7 +256,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 
 		@Override
 		public void clear(String conversationId) {
-			if (denied("clear", conversationId)) {
+			if (isDenied("clear", conversationId)) {
 				return;
 			}
 			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
@@ -264,7 +264,7 @@ public final class IdentityBoundChatMemoryAdvisor implements BaseChatMemoryAdvis
 			}
 		}
 
-		private boolean denied(String action, String conversationId) {
+		private boolean isDenied(String action, String conversationId) {
 			if (this.identity != null) {
 				return false;
 			}

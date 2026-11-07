@@ -1,8 +1,18 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.tool.ToolOutcome;
-import lombok.Data;
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -15,7 +25,9 @@ import java.util.Map;
  * （executed/executedBy/executedAtMs —— 跨进程防重放的判据），以及结果文本
  * （resultText，用于重建 {@code role:tool} 消息）。
  */
-@Data
+@Getter
+@Setter
+@ToString(onlyExplicitlyIncluded = true)
 public class PendingToolCall {
 
 	public static final String CREATED_TASK_ID = "createdTaskId";
@@ -106,27 +118,43 @@ public class PendingToolCall {
 	/** 挂起种类：后端直接执行（不挂起，仅留台账）。 */
 	public static final String KIND_BACKEND = "BACKEND";
 
+	@JsonProperty("toolCallId")
+	@ToString.Include
 	private String toolCallId;
 
+	@JsonProperty("name")
+	@ToString.Include
 	private String name;
 
 	/** {@code AssistantMessage.ToolCall.type()} 原文（OpenAI 协议下为 function）。 */
+	@JsonProperty("type")
 	private String type = "function";
 
 	/** 挂起种类，取值见 {@link #KIND_CONFIRM} / {@link #KIND_FRONTEND} / {@link #KIND_BACKEND}。 */
+	@JsonProperty("kind")
+	@ToString.Include
 	private String kind;
 
+	@JsonProperty("arguments")
 	private String arguments;
 
+	@JsonProperty("draftRunId")
 	private String draftRunId;
 
+	@JsonProperty("draftTaskId")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private Long draftTaskId;
 
+	@JsonProperty("draftDefCode")
 	private String draftDefCode;
 
+	@JsonProperty("status")
+	@ToString.Include
 	private String status = PENDING;
 
 	/** 结果信封的结局（终态写点必填；缺失不得推断成成功）。 */
+	@JsonProperty("outcome")
+	@ToString.Include
 	private String outcome;
 
 	/**
@@ -134,27 +162,40 @@ public class PendingToolCall {
 	 * 批 A 起前端也可自报 {@code UI_*} 机器码（回灌体 additive 字段，入口已归一）：
 	 * {@link #effectiveCode()} 优先读本字段，因此前端码与后端码在帧/台账/卡面同源。
 	 */
+	@JsonProperty("code")
+	@ToString.Include
 	private String code;
 
+	@JsonProperty("reason")
 	private String reason;
 
+	@JsonProperty("resultText")
 	private String resultText;
 
 	/** create_task 已落库任务号（结构化控制流事实；不从 resultText 反解）。 */
+	@JsonProperty("createdTaskId")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private Long createdTaskId;
 
+	@JsonProperty("executed")
+	@ToString.Include
 	private boolean executed;
 
 	/** 执行者实例标识 —— 跨进程"重放与否"的直接判据。 */
+	@JsonProperty("executedBy")
 	private String executedBy;
 
 	/**
 	 * 认领时刻（N5）：执行<b>之前</b>由 {@link RunStore#claimExecution} 写入，
 	 * 与 {@link #executedAtMs}（执行完成时刻）分列，不再互相覆写。
 	 */
+	@JsonProperty("claimedAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long claimedAtMs;
 
 	/** 执行完成时刻（认领先于执行，故 {@code claimedAtMs ≤ executedAtMs}）。 */
+	@JsonProperty("executedAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long executedAtMs;
 
 	/**
@@ -164,10 +205,16 @@ public class PendingToolCall {
 	 * <p>用途：换主之后的"旧认领"要能跟当前 fence 对账（旧 epoch 的执行权已失效），
 	 * 因此 epoch 必须随条目可读，而不是只能从 claim 哈希的原始串里剥。
 	 */
+	@JsonProperty("claimedEpoch")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long claimedEpoch;
 
+	@JsonProperty("requestedAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long requestedAtMs;
 
+	@JsonProperty("resolvedAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long resolvedAtMs;
 
 	/**
@@ -175,9 +222,13 @@ public class PendingToolCall {
 	 * 包装类型：null = 无期限（确认门/表单/旧数据）。去超时裁决后前端不再据此倒计时或
 	 * 渲染「等待人工确认」静态兜底，本字段只作对账/取证口径。
 	 */
+	@JsonProperty("expiresAt")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private Long expiresAt;
 
 	/** R-160 M3：算定 expiresAt 的构造时刻（同帧单点取值；仅作对账口径，前端不据此武装倒计时）。 */
+	@JsonProperty("atMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private Long atMs;
 
 	/**
@@ -196,9 +247,12 @@ public class PendingToolCall {
 	 * {@code ai:req:<runId>}（{@code HSETNX}，首写者胜），{@code RunStore} 读出条目后合并；
 	 * 本字段仍是它的读侧视图（回写会与并发决策互相覆盖，见 M-2）。
 	 */
+	@JsonProperty("req")
 	private Boolean req;
 
 	/** {@link #req} 置位的时刻（服务端钟；0 = 未发射）。 */
+	@JsonProperty("reqAtMs")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
 	private long reqAtMs;
 
 	/**
@@ -209,7 +263,12 @@ public class PendingToolCall {
 	 * <p>缺省为 null（非确认门工具、旧数据）—— 契约上它是可选字段，
 	 * 前端"没有就不显示预检区"，不改变既有卡面。
 	 */
+	@JsonProperty("preflight")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
 	private Map<String, Object> preflight;
+
+	@JsonProperty("preflightPresent")
+	private boolean preflightPresent;
 
 	/**
 	 * 表格工具的采样/改动元数据（AI 表格工具治理批；additive）。
@@ -222,7 +281,12 @@ public class PendingToolCall {
 	 * ② {@code ai:safety:<sessionId>} 的 {@code kind=sheet_sample} 台账；③ {@code /health.sheet} 计数。
 	 * {@code null} = 非表格工具 / 旧前端（不上送）。
 	 */
+	@JsonProperty("sheetMeta")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
 	private Map<String, Object> sheetMeta;
+
+	@JsonProperty("sheetMetaPresent")
+	private boolean sheetMetaPresent;
 
 	/**
 	 * 批4-D（用户 2026-10-23 裁决）：本次确认是否<b>不可撤销</b>
@@ -233,7 +297,40 @@ public class PendingToolCall {
 	 * 缺省 {@code false} = 普通后果确认卡 / 旧数据。本字段是<b>展示与闸门口径</b>，
 	 * 不改变任何执行语义。
 	 */
+	@JsonProperty("irreversible")
 	private boolean irreversible;
+
+	@JsonProperty("preflightPresent")
+	public boolean isPreflightPresent() {
+		return this.preflightPresent;
+	}
+
+	public Map<String, Object> getPreflight() {
+		return this.preflight == null || this.preflight.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(this.preflight));
+	}
+
+	public void setPreflight(Map<String, Object> preflight) {
+		this.preflightPresent = preflight != null;
+		this.preflight = preflight == null || preflight.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(preflight));
+	}
+
+	@JsonProperty("sheetMetaPresent")
+	public boolean isSheetMetaPresent() {
+		return this.sheetMetaPresent;
+	}
+
+	public Map<String, Object> getSheetMeta() {
+		return this.sheetMeta == null || this.sheetMeta.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(this.sheetMeta));
+	}
+
+	public void setSheetMeta(Map<String, Object> sheetMeta) {
+		this.sheetMetaPresent = sheetMeta != null;
+		this.sheetMeta = sheetMeta == null || sheetMeta.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(sheetMeta));
+	}
 
 	public boolean resolved() {
 		return !PENDING.equals(this.status);
@@ -247,7 +344,7 @@ public class PendingToolCall {
 	 */
 	public ToolOutcome effectiveOutcome() {
 		ToolOutcome persisted = ToolOutcome.fromWire(this.outcome);
-		return persisted == null ? ToolOutcome.UNKNOWN : persisted;
+		return ObjectUtils.defaultIfNull(persisted, ToolOutcome.UNKNOWN);
 	}
 
 	/**
@@ -255,13 +352,13 @@ public class PendingToolCall {
 	 * （{@code BLOCKED→SCOPE_NOT_DISCLOSED}、{@code TIMEOUT→reason}、{@code CANCELLED→RUN_CANCELLED} 等）。
 	 */
 	public String effectiveCode() {
-		if (this.code != null && !this.code.isBlank()) {
+		if (StringUtils.isNotBlank(this.code)) {
 			return this.code;
 		}
 		return switch (this.status) {
 			case BLOCKED -> ToolOutcome.CODE_SCOPE_NOT_DISCLOSED;
-			case TIMEOUT -> this.reason == null || this.reason.isBlank() ? "TIMEOUT" : this.reason;
-			case REJECTED_ARGUMENTS -> this.reason == null || this.reason.isBlank() ? "REJECTED_ARGUMENTS" : this.reason;
+			case TIMEOUT -> StringUtils.defaultIfBlank(this.reason, "TIMEOUT");
+			case REJECTED_ARGUMENTS -> StringUtils.defaultIfBlank(this.reason, "REJECTED_ARGUMENTS");
 			case CANCELLED -> ToolOutcome.CODE_RUN_CANCELLED;
 			case FRONTEND_CANCELLED -> ToolOutcome.CODE_FRONTEND_CANCELLED;
 			case SKIPPED -> ToolOutcome.CODE_UPSTREAM_FAILED;
@@ -278,7 +375,7 @@ public class PendingToolCall {
 	 * 调用方必须按错入口/不可执行处理，<b>不得放行</b>。
 	 */
 	public boolean hasKind() {
-		return this.kind != null && !this.kind.isBlank();
+		return StringUtils.isNotBlank(this.kind);
 	}
 
 	/**
@@ -302,19 +399,21 @@ public class PendingToolCall {
 		out.put("code", effectiveCode());
 		out.put("reason", this.reason);
 		out.put("resultText", this.resultText);
-		out.put(CREATED_TASK_ID, this.createdTaskId);
+		out.put(CREATED_TASK_ID, this.createdTaskId == null ? null : String.valueOf(this.createdTaskId));
 		out.put("executed", this.executed);
 		out.put("executedBy", this.executedBy);
-		out.put("claimedAtMs", this.claimedAtMs);
-		out.put("executedAtMs", this.executedAtMs);
-		out.put("claimedEpoch", this.claimedEpoch);
-		out.put("requestedAtMs", this.requestedAtMs);
-		out.put("resolvedAtMs", this.resolvedAtMs);
-		out.put("expiresAt", this.expiresAt);
-		out.put("atMs", this.atMs);
+		out.put("claimedAtMs", Long.toString(this.claimedAtMs));
+		out.put("executedAtMs", Long.toString(this.executedAtMs));
+		out.put("claimedEpoch", Long.toString(this.claimedEpoch));
+		out.put("requestedAtMs", Long.toString(this.requestedAtMs));
+		out.put("resolvedAtMs", Long.toString(this.resolvedAtMs));
+		out.put("expiresAt", this.expiresAt == null ? null : String.valueOf(this.expiresAt));
+		out.put("atMs", this.atMs == null ? null : String.valueOf(this.atMs));
 		out.put("req", Boolean.TRUE.equals(this.req));
-		out.put("reqAtMs", this.reqAtMs);
-		out.put("preflight", this.preflight);
+		out.put("reqAtMs", Long.toString(this.reqAtMs));
+		if (!getPreflight().isEmpty()) {
+			out.put("preflight", getPreflight());
+		}
 		out.put("irreversible", this.irreversible);
 		return out;
 	}

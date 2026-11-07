@@ -12,6 +12,8 @@ import com.example.configmgr.file.StoredFile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -119,6 +121,25 @@ public class GenerativeFormAttachmentController {
 			@RequestParam("toolCallId") String toolCallId,
 			@RequestParam(value = "sessionId", required = false) String clientSessionId,
 			@RequestParam(value = "fieldKey", required = false) String fieldKey) throws Exception {
+		UploadValidation validation = validateUpload(file, runId, toolCallId, fieldKey);
+		FormAttachmentStore.Attachment stored = storeUpload(file, validation, runId, toolCallId);
+		supersedeUploads(validation.superseded(), runId, toolCallId);
+		Map<String, Object> data = new LinkedHashMap<>();
+		data.put("fileId", stored.fileId());
+		data.put("fileName", stored.fileName());
+		data.put("size", Long.toString(stored.size()));
+		data.put("contentType", stored.contentType());
+		log.info("form attachment registered runId={} toolCallId={} fileId={} size={}", runId, toolCallId,
+				stored.fileId(), stored.size());
+		return ApiResponse.ok(data);
+	}
+
+	private UploadValidation validateUpload(MultipartFile file, String runId, String toolCallId, String fieldKey) {
+		UploadType type = validateUploadType(file);
+		return validateUploadCapacity(type, runId, toolCallId, fieldKey, file.getSize());
+	}
+
+	private UploadType validateUploadType(MultipartFile file) {
 		if (file == null || file.isEmpty()) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "The attachment is empty; select a file again");
 		}
@@ -134,11 +155,16 @@ public class GenerativeFormAttachmentController {
 					"Unsupported attachment type: " + originalName + " (allowed "
 							+ String.join("/", ALLOWED.keySet().stream().sorted().toList()) + ")");
 		}
-		String contentType = file.getContentType() == null ? "" : file.getContentType();
+		String contentType = StringUtils.defaultString(file.getContentType());
 		if (!contentType.isBlank() && !mimes.contains(contentType)) {
 			throw new CodedIllegalArgumentException(ErrorCodes.FILE_TYPE_UNSUPPORTED,
 					"Attachment MIME does not match the extension: " + contentType + " (." + ext + " allows " + String.join("/", mimes) + ")");
 		}
+		return new UploadType(originalName, contentType);
+	}
+
+	private UploadValidation validateUploadCapacity(UploadType type, String runId, String toolCallId, String fieldKey,
+			long fileSize) {
 		PendingToolCall pending = assertFormIsWaiting(runId, toolCallId);
 		Set<String> attachmentFields = attachmentFieldKeys(runId, pending);
 		if (attachmentFields.isEmpty()) {
@@ -146,7 +172,7 @@ public class GenerativeFormAttachmentController {
 					"This form has no attachment fields; start a new form before uploading");
 		}
 		// 目标字段先判：非法请求必须在任何"顶掉旧件/落盘"之前被挡下（否则一次错请求会删掉用户的文件）
-		if (fieldKey != null && !fieldKey.isBlank() && !attachmentFields.contains(fieldKey)) {
+		if (StringUtils.isNotBlank(fieldKey) && !attachmentFields.contains(fieldKey)) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
 					"Field " + fieldKey + " is not an attachment field in this form and cannot receive uploads");
 		}
@@ -172,21 +198,28 @@ public class GenerativeFormAttachmentController {
 		for (FormAttachmentStore.Attachment attachment : existing) {
 			usedBytes += Math.max(0L, attachment.size());
 		}
-		if (usedBytes + file.getSize() > MAX_TOTAL_ATTACHMENT_BYTES) {
+		if (usedBytes + fileSize > MAX_TOTAL_ATTACHMENT_BYTES) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST,
-					"Total attachment size exceeds the per-form limit: registered " + usedBytes + " bytes + current " + file.getSize() + " bytes > "
+					"Total attachment size exceeds the per-form limit: registered " + usedBytes + " bytes + current " + fileSize + " bytes > "
 							+ MAX_TOTAL_ATTACHMENT_BYTES + " bytes");
 		}
+		return new UploadValidation(type.originalName(), type.contentType(), superseded);
+	}
+
+	private record UploadType(String originalName, String contentType) {
+	}
+
+	private FormAttachmentStore.Attachment storeUpload(MultipartFile file, UploadValidation validation, String runId,
+			String toolCallId) throws Exception {
 		String authoritativeSessionId = authoritativeSessionId(runId);
 		StoredFile storedFile;
 		// MultipartFile 的输入流由容器分配：不关会把连接/临时文件留到 GC（上传口是高频入口）
 		try (InputStream in = file.getInputStream()) {
-			storedFile = this.fileStorage.store(in, originalName);
+			storedFile = this.fileStorage.store(in, validation.originalName());
 		}
-		FormAttachmentStore.Attachment stored;
 		try {
-			stored = this.attachments.register(runId, toolCallId, authoritativeSessionId,
-					originalName, file.getSize(), contentType, storedFile.key());
+			return this.attachments.register(runId, toolCallId, authoritativeSessionId,
+					validation.originalName(), file.getSize(), validation.contentType(), storedFile.key());
 		}
 		catch (RuntimeException ex) {
 			// I-5：登记失败（B3 fail-closed）时已落盘文件必须回收，不能留下孤儿。
@@ -195,6 +228,9 @@ public class GenerativeFormAttachmentController {
 					storedFile.key(), ex);
 			throw ex;
 		}
+	}
+
+	private void supersedeUploads(List<FormAttachmentStore.Attachment> superseded, String runId, String toolCallId) {
 		// 新件登记成功之后才回收被顶掉的旧件：先删旧的再存新的会把"换一张"变成"两张都没了"
 		// （存档/磁盘失败时旧证据已不可恢复）。这里失败只告警：旧件仍可用，由表单收口或 TTL 兜底。
 		for (FormAttachmentStore.Attachment old : superseded) {
@@ -211,14 +247,10 @@ public class GenerativeFormAttachmentController {
 						toolCallId, old.fileId(), ex);
 			}
 		}
-		Map<String, Object> data = new LinkedHashMap<>();
-		data.put("fileId", stored.fileId());
-		data.put("fileName", stored.fileName());
-		data.put("size", stored.size());
-		data.put("contentType", stored.contentType());
-		log.info("form attachment registered runId={} toolCallId={} fileId={} size={}", runId, toolCallId,
-				stored.fileId(), stored.size());
-		return ApiResponse.ok(data);
+	}
+
+	private record UploadValidation(String originalName, String contentType,
+			List<FormAttachmentStore.Attachment> superseded) {
 	}
 
 	/** 兼容重载：旧调用方不带目标字段（限额仍按表单总附件位）。 */
@@ -238,7 +270,7 @@ public class GenerativeFormAttachmentController {
 		List<Map<String, String>> options = this.optionSources.options(sourceId, parentValue);
 		Map<String, Object> data = new LinkedHashMap<>();
 		data.put("sourceId", sourceId);
-		data.put("options", options == null ? List.of() : options);
+		data.put("options", ObjectUtils.defaultIfNull(options, List.of()));
 		return ApiResponse.ok(data);
 	}
 
@@ -258,7 +290,7 @@ public class GenerativeFormAttachmentController {
 			throw new AiStateUnavailableException("Attachment upload is temporarily unavailable because the current session ownership cannot be read; retry later", ex);
 		}
 		String sessionId = snapshot == null ? null : snapshot.getSessionId();
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			log.warn("run snapshot has no sessionId (fail-closed: unowned registrations cannot be reclaimed on session destroy) runId={}", runId);
 			throw new AiStateUnavailableException("Attachment upload is temporarily unavailable because the current run has no session ownership; retry later");
 		}
@@ -267,7 +299,7 @@ public class GenerativeFormAttachmentController {
 
 	/** 删盘（空路径/<b>历史登记</b>的空 storagePath 安全跳过；失败只告警）。 */
 	private void deleteQuietly(String storageKey) {
-		if (storageKey == null || storageKey.isBlank()) {
+		if (StringUtils.isBlank(storageKey)) {
 			return;
 		}
 		try {
@@ -287,7 +319,7 @@ public class GenerativeFormAttachmentController {
 	private Set<String> attachmentFieldKeys(String runId, PendingToolCall pending) {
 		Set<String> keys = new java.util.LinkedHashSet<>();
 		String arguments = pending == null ? null : pending.getArguments();
-		if (arguments == null || arguments.isBlank()) {
+		if (StringUtils.isBlank(arguments)) {
 			return keys;
 		}
 		try {
@@ -314,7 +346,7 @@ public class GenerativeFormAttachmentController {
 
 	/** 上传前确认"这张表单确实在等用户"（跨轮次/跨表单的调用直接拒绝）。 */
 	private PendingToolCall assertFormIsWaiting(String runId, String toolCallId) {
-		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+		if (StringUtils.isBlank(runId) || StringUtils.isBlank(toolCallId)) {
 			throw new CodedIllegalArgumentException(ErrorCodes.BAD_REQUEST, "runId and toolCallId are required");
 		}
 		PendingToolCall pending = this.runStore.pending(runId, toolCallId);

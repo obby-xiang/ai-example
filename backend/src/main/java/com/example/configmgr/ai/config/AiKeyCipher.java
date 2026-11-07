@@ -2,10 +2,11 @@ package com.example.configmgr.ai.config;
 
 import com.example.configmgr.common.ErrorCodes;
 
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
@@ -14,6 +15,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.regex.Pattern;
 
 /**
  * key 加密（模型配置专项 §3.2）：AES-256-GCM，JDK 内置，<b>零新依赖</b>。
@@ -87,7 +89,7 @@ public class AiKeyCipher {
     private static final int FINGERPRINT_HEX_CHARS = 16;
 
     /** kid 的字符集与长度约束：只允许进信封点分段而不破坏分段完整性的字符（复审 N2 半条）。 */
-    private static final java.util.regex.Pattern KID_PATTERN = java.util.regex.Pattern
+    private static final Pattern KID_PATTERN = Pattern
         .compile("[A-Za-z0-9_-]{1,16}");
 
     private final String kekBase64;
@@ -122,7 +124,7 @@ public class AiKeyCipher {
      * 密钥混淆），并由 {@link #isKidValid(String)} 的返回值给调用方留复核口。
      */
     private static String normalizeKid(String kid) {
-        if (!StringUtils.hasText(kid)) {
+        if (!StringUtils.isNotBlank(kid)) {
             return DEFAULT_KID;
         }
         String trimmed = kid.trim();
@@ -136,7 +138,7 @@ public class AiKeyCipher {
 
     /** KEK 是否可用（能解出 32 字节）。<b>不</b>暴露 KEK 本身。 */
     public boolean isConfigured() {
-        return resolveKekOrNull() != null;
+        return resolveKek().length == KEK_BYTES;
     }
 
     public String kid() {
@@ -154,7 +156,7 @@ public class AiKeyCipher {
      */
     public String encrypt(String plaintext, String providerCode, String keyRef) {
         // M6：空明文先判 —— 它是"调用方传错了"，不是"部署没配 KEK"（两者的修法完全不同）
-        if (!StringUtils.hasText(plaintext)) {
+        if (!StringUtils.isNotBlank(plaintext)) {
             throw new KeyCipherException(CODE_KEY_EMPTY, "The key to encrypt is empty; provide a key or use clearKey");
         }
         byte[] kek = requireKek();
@@ -216,11 +218,9 @@ public class AiKeyCipher {
         try {
             Mac mac = Mac.getInstance(HMAC);
             mac.init(new SecretKeySpec(kek, HMAC));
-            byte[] digest = mac.doFinal(plaintext == null ? new byte[0] : plaintext.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder(digest.length * 2);
-            for (byte b : digest) {
-                hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            }
+            byte[] digest = mac.doFinal(StringUtils.defaultString(plaintext)
+                    .getBytes(StandardCharsets.UTF_8));
+            String hex = Hex.encodeHexString(digest);
             return hex.substring(0, FINGERPRINT_HEX_CHARS);
         }
         catch (Exception ex) {
@@ -230,7 +230,7 @@ public class AiKeyCipher {
 
     /** key 末 4 位（唯一允许出库/出口的 key 片段；短于 4 位原样返回）。 */
     public static String last4(String key) {
-        if (!StringUtils.hasText(key)) {
+        if (!StringUtils.isNotBlank(key)) {
             return null;
         }
         return key.length() <= 4 ? key : key.substring(key.length() - 4);
@@ -239,24 +239,24 @@ public class AiKeyCipher {
     // ── 内部 ────────────────────────────────────────────────────────────────
 
     private byte[] requireKek() {
-        byte[] kek = resolveKekOrNull();
-        if (kek == null) {
+        byte[] kek = resolveKek();
+        if (kek.length != KEK_BYTES) {
             throw new KeyCipherException(CODE_KEK_MISSING,
                     "AI_SECRET_KEK is missing or invalid; expected base64-encoded 32 bytes. Key encryption and decryption fail closed without plaintext fallback");
         }
         return kek;
     }
 
-    private byte[] resolveKekOrNull() {
-        if (!StringUtils.hasText(this.kekBase64)) {
-            return null;
+    private byte[] resolveKek() {
+        if (!StringUtils.isNotBlank(this.kekBase64)) {
+            return new byte[0];
         }
         try {
             byte[] decoded = Base64.getDecoder().decode(this.kekBase64.trim());
-            return decoded.length == KEK_BYTES ? decoded : null;
+            return decoded.length == KEK_BYTES ? decoded : new byte[0];
         }
         catch (IllegalArgumentException ex) {
-            return null;
+            return new byte[0];
         }
     }
 

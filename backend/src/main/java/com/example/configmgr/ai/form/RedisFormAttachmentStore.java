@@ -6,9 +6,13 @@ import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.common.AiStateUnavailableException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -24,7 +28,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -121,13 +127,13 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	private final Map<String, Attachment> memory = new ConcurrentHashMap<>();
 
 	/** 进程内已消费墓碑（与 Redis 的 {@link #CONSUMED_PREFIX} 同义）。 */
-	private final java.util.Set<String> consumed = ConcurrentHashMap.newKeySet();
+	private final Set<String> consumed = ConcurrentHashMap.newKeySet();
 
 	public RedisFormAttachmentStore(ObjectProvider<StringRedisTemplate> redisProvider, ObjectMapper objectMapper) {
 		this(redisProvider, objectMapper, new AiProperties());
 	}
 
-	@org.springframework.beans.factory.annotation.Autowired
+	@Autowired
 	public RedisFormAttachmentStore(ObjectProvider<StringRedisTemplate> redisProvider, ObjectMapper objectMapper,
 			AiProperties properties) {
 		this.redisProvider = redisProvider;
@@ -191,7 +197,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 
 	@Override
 	public Attachment find(String fileId) {
-		if (fileId == null || fileId.isBlank()) {
+		if (StringUtils.isBlank(fileId)) {
 			return null;
 		}
 		TenantUser identity = RequestContextUtils.require();
@@ -214,7 +220,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 
 	@Override
 	public boolean consume(String fileId) {
-		if (fileId == null || fileId.isBlank()) {
+		if (StringUtils.isBlank(fileId)) {
 			return false;
 		}
 		TenantUser identity = RequestContextUtils.require();
@@ -266,7 +272,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 */
 	@Override
 	public List<Attachment> findBySessionId(String sessionId) {
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			return List.of();
 		}
 		TenantUser identity = RequestContextUtils.require();
@@ -291,7 +297,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
 			throw new AiStateUnavailableException("Failed to read the attachment session index; destroy enumeration must not treat it as empty", ex);
 		}
-		if (ids == null || ids.isEmpty()) {
+		if (CollectionUtils.isEmpty(ids)) {
 			return List.of();
 		}
 		List<Attachment> out = new ArrayList<>();
@@ -305,7 +311,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			}
 			out.add(attachment);
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/**
@@ -348,13 +354,12 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
-			log.debug("attachment renewal could not read form index (retry next tick) runId={} toolCallId={}", runId, toolCallId, ex);
 			return;
 		}
-		if (ids == null || ids.isEmpty()) {
+		if (CollectionUtils.isEmpty(ids)) {
 			return;
 		}
-		if (!touchBatched(redis, identity, indexKey, ids, runId, toolCallId)) {
+		if (!isBatchTouchSuccessful(redis, identity, indexKey, ids, runId, toolCallId)) {
 			touchPerItem(redis, identity, indexKey, ids, runId, toolCallId);
 		}
 	}
@@ -365,14 +370,14 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 * @return {@code false} = 批量面没有被真的执行（替身/包装层），调用方退回逐件路径；
 	 *         {@code true} = 已处理（含"批量读失败只告警"的降级）
 	 */
-	private boolean touchBatched(StringRedisTemplate redis, TenantUser identity, String indexKey, Set<String> ids,
+	private boolean isBatchTouchSuccessful(StringRedisTemplate redis, TenantUser identity, String indexKey, Set<String> ids,
 			String runId, String toolCallId) {
 		List<String> fileIds = new ArrayList<>(ids);
 		List<String> registrationKeys = new ArrayList<>(fileIds.size());
 		for (String fileId : fileIds) {
 			registrationKeys.add(registrationKey(identity, fileId));
 		}
-		List<Object> raw;
+		Optional<List<Object>> raw;
 		try {
 			raw = pipelineGet(redis, registrationKeys);
 		}
@@ -380,18 +385,17 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			// 读失败 ≠ 不存在：只告警（续期是养活性维护，下一拍再试），不把附件当成已过期。
 			// 表单索引本身仍尽力续一次 —— 索引先过期会让整张表单的附件一起从回收面消失。
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
-			log.debug("attachment renewal bulk read failed (retry next tick) runId={} toolCallId={} count={}", runId, toolCallId, registrationKeys.size(), ex);
 			expireIndexQuietly(redis, indexKey, runId, toolCallId);
 			return true;
 		}
-		if (raw == null) {
+		if (raw.isEmpty()) {
 			return false;
 		}
 		List<String> liveRegistrationKeys = new ArrayList<>(fileIds.size());
 		// distinct sessionId：同一会话的多件附件只续一次会话索引（旧实现逐件续，重复往返）
 		Set<String> sessionIndexKeys = new LinkedHashSet<>();
 		for (int i = 0; i < fileIds.size(); i++) {
-			Attachment attachment = parseRegistration(asString(raw.get(i)), fileIds.get(i));
+			Attachment attachment = parseRegistration(asString(raw.get().get(i)), fileIds.get(i));
 			if (attachment == null) {
 				// 陈旧成员（登记已过期/被并发消费）：不续一条不存在的登记，枚举时的 find 会过滤掉它
 				continue;
@@ -406,7 +410,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		keys.addAll(liveRegistrationKeys);
 		keys.addAll(sessionIndexKeys);
 		keys.add(indexKey);
-		return expireInPipeline(redis, keys, runId, toolCallId);
+		return isPipelineExpirySuccessful(redis, keys, runId, toolCallId);
 	}
 
 	/**
@@ -416,12 +420,12 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 * —— Cluster 下会整条回 {@code CROSSSLOT}，一件都读不到。pipeline 里的<b>单键</b> {@code GET}
 	 * 各自路由到自己的槽，合法且同样只需一次往返。
 	 *
-	 * @return 与 {@code keys} 同序的结果（缺失成员为 {@code null}）；{@code null} = 管道未被执行
+	 * @return 与 {@code keys} 同序的结果（缺失成员为 {@code null}）；{@code Optional.empty()} = 管道未被执行
 	 *         （替身/包装层），调用方退回逐件路径
 	 */
-	private static List<Object> pipelineGet(StringRedisTemplate redis, List<String> keys) {
+	private static Optional<List<Object>> pipelineGet(StringRedisTemplate redis, List<String> keys) {
 		if (keys.isEmpty()) {
-			return List.of();
+			return Optional.of(List.of());
 		}
 		List<Object> raw = redis.executePipelined((RedisCallback<Object>) connection -> {
 			for (String key : keys) {
@@ -429,7 +433,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			}
 			return null;
 		});
-		return raw == null || raw.size() < keys.size() ? null : raw;
+		return raw == null || raw.size() < keys.size() ? Optional.empty() : Optional.of(raw);
 	}
 
 	/** pipeline 结果的字符串化（{@code String} / {@code byte[]} 都接受：模板/连接实现可能各给一种）。 */
@@ -454,7 +458,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 *
 	 * @return {@code false} = 流水线没有真的执行（替身返回空表），调用方退回逐件路径
 	 */
-	private boolean expireInPipeline(StringRedisTemplate redis, List<String> keys, String runId, String toolCallId) {
+	private boolean isPipelineExpirySuccessful(StringRedisTemplate redis, List<String> keys, String runId, String toolCallId) {
 		StringRedisSerializer serializer = new StringRedisSerializer();
 		long ttlMillis = this.ttl.toMillis();
 		List<Object> results;
@@ -473,13 +477,13 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 					keys.size(), ex);
 			return true;
 		}
-		return results != null && !results.isEmpty();
+		return CollectionUtils.isNotEmpty(results);
 	}
 
 	/**
-	 * 逐件续期（替身/包装层兜底 + 历史语义）：单件失败只告警，不影响其余件。
+	 * 逐件续期（替身/包装层兜底 + 历史语义）：单件失败隔离，不影响其余件。
 	 *
-	 * <p>每件三步：续登记、读登记（拿 sessionId）、续会话索引。读失败只告警（下一拍再试），
+	 * <p>每件三步：续登记、读登记（拿 sessionId）、续会话索引。失败留待下一拍重试，
 	 * 不让确认门心跳因一个键失败而中断 —— 与批量路径的降级口径一致。
 	 */
 	private void touchPerItem(StringRedisTemplate redis, TenantUser identity, String indexKey, Set<String> ids,
@@ -493,7 +497,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 				}
 			}
 			catch (Exception ex) {
-				log.debug("attachment renewal failed (retry next tick) fileId={} runId={} toolCallId={}", fileId, runId, toolCallId, ex);
+				// 单件失败不影响其他附件。
 			}
 		}
 		expireIndexQuietly(redis, indexKey, runId, toolCallId);
@@ -505,7 +509,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			redis.expire(indexKey, this.ttl);
 		}
 		catch (Exception ex) {
-			log.debug("attachment renewal could not write form index (retry next tick) runId={} toolCallId={}", runId, toolCallId, ex);
+			// 索引续期失败留待下一拍重试。
 		}
 	}
 
@@ -517,7 +521,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 */
 	@Override
 	public List<Attachment> findByForm(String runId, String toolCallId) {
-		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+		if (StringUtils.isBlank(runId) || StringUtils.isBlank(toolCallId)) {
 			return List.of();
 		}
 		TenantUser identity = RequestContextUtils.require();
@@ -541,7 +545,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			RedisDegradation.record(RedisDegradation.B3_ATTACHMENT_READ, ex);
 			throw new AiStateUnavailableException("Failed to read the attachment form index; upload limits and closeout cleanup must not treat it as empty", ex);
 		}
-		if (ids == null || ids.isEmpty()) {
+		if (CollectionUtils.isEmpty(ids)) {
 			return List.of();
 		}
 		List<Attachment> out = new ArrayList<>();
@@ -555,7 +559,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			}
 			out.add(attachment);
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/**
@@ -567,7 +571,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 	 */
 	@Override
 	public Attachment deleteRegistration(String fileId) {
-		if (fileId == null || fileId.isBlank()) {
+		if (StringUtils.isBlank(fileId)) {
 			return null;
 		}
 		return deleteKnownRegistration(find(fileId), fileId);
@@ -676,7 +680,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 			}
 			String message = current.getMessage();
 			if (message != null) {
-				String lower = message.toLowerCase(java.util.Locale.ROOT);
+				String lower = message.toLowerCase(Locale.ROOT);
 				if (lower.contains("unknown command") || lower.contains("not supported")) {
 					return true;
 				}
@@ -690,12 +694,12 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 
 	private static String sessionIndexKey(TenantUser identity, String sessionId) {
 		String segment = TenantKeyScope.segmentOf(identity);
-		return sessionId == null || sessionId.isBlank() ? null : SESSION_INDEX_PREFIX + segment + sessionId;
+		return StringUtils.isBlank(sessionId) ? null : SESSION_INDEX_PREFIX + segment + sessionId;
 	}
 
 	private static String formIndexKey(TenantUser identity, String runId, String toolCallId) {
 		String segment = TenantKeyScope.segmentOf(identity);
-		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+		if (StringUtils.isBlank(runId) || StringUtils.isBlank(toolCallId)) {
 			return null;
 		}
 		return FORM_INDEX_PREFIX + segment + runId + ":" + toolCallId;
@@ -768,7 +772,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 		try {
 			return this.objectMapper.readValue(json, Attachment.class);
 		}
-		catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+		catch (JsonProcessingException ex) {
 			log.warn("attachment registration payload is unparseable (treated as unregistered) fileId={}", fileId, ex);
 			return null;
 		}
@@ -776,7 +780,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 
 	@Override
 	public boolean wasConsumed(String fileId) {
-		if (fileId == null || fileId.isBlank()) {
+		if (StringUtils.isBlank(fileId)) {
 			return false;
 		}
 		TenantUser identity = RequestContextUtils.require();
@@ -807,7 +811,7 @@ public class RedisFormAttachmentStore implements FormAttachmentStore {
 
 	/** 进程内登记簿快照（排障/用例用，只读）。 */
 	public Map<String, Attachment> snapshot() {
-		return new LinkedHashMap<>(this.memory);
+		return this.memory.isEmpty() ? Map.of() : new LinkedHashMap<>(this.memory);
 	}
 
 }

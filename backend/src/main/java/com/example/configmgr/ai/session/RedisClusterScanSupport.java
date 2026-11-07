@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.session;
 
 import com.example.configmgr.common.AiStateUnavailableException;
+import org.apache.commons.codec.binary.StringUtils;
 import org.springframework.data.redis.connection.RedisClusterConnection;
 import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.connection.RedisConnection;
@@ -9,7 +10,6 @@ import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -142,7 +142,7 @@ final class RedisClusterScanSupport {
 			}
 			byte[] raw = cursor.next();
 			if (raw != null) {
-				keys.add(new String(raw, StandardCharsets.UTF_8));
+				keys.add(StringUtils.newStringUtf8(raw));
 			}
 		}
 	}

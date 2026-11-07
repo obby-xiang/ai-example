@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.slot;
 
 import com.example.configmgr.ai.history.SyntheticMessages;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 
@@ -46,7 +47,7 @@ public final class TaskIntent {
 
 	/** 这一句是否"主动新建任务"（类型未知时宿主据此先给类型单选）。 */
 	public static boolean isNewTaskIntent(String text) {
-		if (text == null || text.isBlank()) {
+		if (StringUtils.isBlank(text)) {
 			return false;
 		}
 		if (QUESTION.matcher(text).find() || NEGATED_CREATE.matcher(text).find()) {
@@ -72,7 +73,7 @@ public final class TaskIntent {
 	 * 不得触发 start_export 的收尾纠正。
 	 */
 	public static boolean isExportIntent(String text) {
-		if (text == null || text.isBlank()) {
+		if (StringUtils.isBlank(text)) {
 			return false;
 		}
 		if (NEGATED_CREATE.matcher(text).find() || QUESTION.matcher(text).find()

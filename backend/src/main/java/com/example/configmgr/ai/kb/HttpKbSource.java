@@ -2,6 +2,7 @@ package com.example.configmgr.ai.kb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
 import java.net.URI;
@@ -66,7 +67,7 @@ public class HttpKbSource implements KbSource {
     }
 
     private static String readEnv(String name) {
-        if (name == null || name.isBlank()) {
+        if (StringUtils.isBlank(name)) {
             return null;
         }
         try {
@@ -97,7 +98,7 @@ public class HttpKbSource implements KbSource {
             throws KbSourceException {
         Duration timeout = effectiveTimeout(budget);
         HttpRequest.Builder builder = request(manifestUri(), timeout);
-        if (previousEtag != null && !previousEtag.isBlank()) {
+        if (StringUtils.isNotBlank(previousEtag)) {
             builder.header("If-None-Match", previousEtag);
         }
         HttpResponse<byte[]> response = send(builder.build(), "manifest.json", timeout);
@@ -144,7 +145,7 @@ public class HttpKbSource implements KbSource {
                 .GET()
                 .header("Accept", "application/json, text/markdown, text/plain;q=0.9, */*;q=0.5");
         String auth = authHeaderValue();
-        if (auth != null && !auth.isBlank()) {
+        if (StringUtils.isNotBlank(auth)) {
             builder.header("Authorization", auth);
         }
         return builder;
@@ -159,8 +160,6 @@ public class HttpKbSource implements KbSource {
             return this.authSupplier == null ? null : this.authSupplier.get();
         }
         catch (RuntimeException e) {
-            log.debug("Failed to read auth env variable ({}); sending request without Authorization header",
-                    this.authEnv, e);
             return null;
         }
     }
@@ -220,7 +219,7 @@ public class HttpKbSource implements KbSource {
     }
 
     private static String normalizeBase(String baseUrl) {
-        String value = baseUrl == null ? "" : baseUrl.trim();
+        String value = StringUtils.trimToEmpty(baseUrl);
         while (value.endsWith("/")) {
             value = value.substring(0, value.length() - 1);
         }

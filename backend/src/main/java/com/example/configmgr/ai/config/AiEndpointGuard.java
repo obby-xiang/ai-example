@@ -2,7 +2,9 @@ package com.example.configmgr.ai.config;
 
 import com.example.configmgr.common.ErrorCodes;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ArrayUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -39,6 +41,7 @@ import java.util.Locale;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class AiEndpointGuard {
 
     /** URL 不合法（scheme/host/凭据/长度/端口）。 */
@@ -55,10 +58,6 @@ public class AiEndpointGuard {
             "metadata.azure.com" };
 
     private final AiProperties properties;
-
-    public AiEndpointGuard(AiProperties properties) {
-        this.properties = properties;
-    }
 
     /** 写路径（新建/更新 provider 的 baseUrl）：<b>全闸</b>，私网判定总是生效（除非开关打开）。 */
     public String checkForWrite(String baseUrl) {
@@ -149,12 +148,7 @@ public class AiEndpointGuard {
 
     private static boolean isMetadataHost(String host) {
         String lower = host.toLowerCase(Locale.ROOT);
-        for (String candidate : METADATA_HOSTS) {
-            if (lower.equals(candidate)) {
-                return true;
-            }
-        }
-        return false;
+        return ArrayUtils.contains(METADATA_HOSTS, lower);
     }
 
     private static InetAddress[] resolve(String host) {
@@ -168,7 +162,6 @@ public class AiEndpointGuard {
         }
         catch (UnknownHostException ex) {
             // 解析不出来 ⇒ 连接不上 ⇒ 交给探活报 UNREACHABLE（见类注"已知限制"）
-            log.debug("URL guard: host cannot be resolved now (not treated as dirty) host={}", host, ex);
             return new InetAddress[0];
         }
     }

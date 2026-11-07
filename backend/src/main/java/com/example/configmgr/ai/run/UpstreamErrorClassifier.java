@@ -10,6 +10,7 @@ import java.util.concurrent.TimeoutException;
 
 import com.example.configmgr.ai.context.ContextOverflow;
 import com.example.configmgr.common.ErrorCodes;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.retry.NonTransientAiException;
 import org.springframework.ai.retry.TransientAiException;
 import org.springframework.http.HttpHeaders;
@@ -106,7 +107,7 @@ public final class UpstreamErrorClassifier {
 	 */
 	public static Outcome classify(Throwable error, int upstreamEvents) {
 		if (error instanceof StreamViolationException violation) {
-			return new Outcome(violation.getCode(), violation.brokenStream(), null, null);
+			return new Outcome(violation.getCode(), violation.isBrokenStream(), null, null);
 		}
 		Integer status = httpStatus(error);
 		if (status != null) {
@@ -130,7 +131,7 @@ public final class UpstreamErrorClassifier {
 		}
 		// 空流特例：一个事件都没给就结束，Spring AI 的流式聚合会以 "conversationId cannot be null"
 		// 这类客户端侧异常暴露 —— 它本质就是"缺终帧"（[DONE] 但没有任何 finishReason）。
-		if (upstreamEvents == 0 && messageContains(error, "conversationId cannot be null")) {
+		if (upstreamEvents == 0 && isMessageContains(error, "conversationId cannot be null")) {
 			return new Outcome(ErrorCodes.UPSTREAM_STREAM_INCOMPLETE, true, null, null);
 		}
 		return new Outcome(ErrorCodes.UPSTREAM_STREAM_ERROR, false, null, null);
@@ -138,7 +139,7 @@ public final class UpstreamErrorClassifier {
 
 	/** finishReason 归一：大小写/连字符不敏感；空白 = 本轮没收到终帧。 */
 	public static Finish finishOf(String raw) {
-		if (raw == null || raw.isBlank()) {
+		if (StringUtils.isBlank(raw)) {
 			return null;
 		}
 		String value = raw.trim().toLowerCase(Locale.ROOT).replace('-', '_');
@@ -197,7 +198,7 @@ public final class UpstreamErrorClassifier {
 	 * @return 毫秒；缺失/非法 = null；过去时刻 = 0（立即重试，不再额外等待）
 	 */
 	static Long parseRetryAfter(String raw, Instant now) {
-		if (raw == null || raw.isBlank()) {
+		if (StringUtils.isBlank(raw)) {
 			return null;
 		}
 		String value = raw.trim();
@@ -326,7 +327,7 @@ public final class UpstreamErrorClassifier {
 		return false;
 	}
 
-	private static boolean messageContains(Throwable error, String needle) {
+	private static boolean isMessageContains(Throwable error, String needle) {
 		for (Throwable cause = error; cause != null; cause = next(cause)) {
 			String message = cause.getMessage();
 			if (message != null && message.contains(needle)) {

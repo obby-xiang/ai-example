@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.tenant;
 
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * run 级 Redis 键的<b>身份段 / hash tag</b>唯一拼接口（租户任务 2 核心组）。
  *
@@ -49,13 +51,13 @@ public final class RunKeyScope {
 	}
 
 	private static String tagContent(String identitySegment, String runId) {
-		if (identitySegment == null || identitySegment.isEmpty()) {
+		if (StringUtils.isEmpty(identitySegment)) {
 			throw new IllegalArgumentException("Tenant/user identity is required; identity-less run keys are forbidden");
 		}
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			throw new IllegalArgumentException("runId must not be blank; a run key hash tag consists of identity and runId");
 		}
-		if (runId.indexOf('{') >= 0 || runId.indexOf('}') >= 0) {
+		if (StringUtils.containsAny(runId, "{", "}")) {
 			throw new IllegalArgumentException("runId must not contain braces because they break hash tag boundaries: " + runId);
 		}
 		return "{" + identitySegment + RUN_MARK + runId + "}";
@@ -89,10 +91,10 @@ public final class RunKeyScope {
 	}
 
 	private static String indexMember(String identitySegment, String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			throw new IllegalArgumentException("runId must not be blank; a global index member consists of identity and runId");
 		}
-		if (identitySegment == null || identitySegment.isEmpty()) {
+		if (StringUtils.isEmpty(identitySegment)) {
 			throw new IllegalArgumentException("Tenant/user identity is required; identity-less index members are forbidden");
 		}
 		// segment 形如 "<tenantId>:<userId>:" → 成员形如 "<tenantId>/<userId>/<runId>"
@@ -106,7 +108,7 @@ public final class RunKeyScope {
 	 *         —— 调用方必须把它当"无归属"，不得猜成任何真实身份
 	 */
 	public static IndexRef parseIndexMember(String member) {
-		if (member == null || member.isBlank()) {
+		if (StringUtils.isBlank(member)) {
 			return null;
 		}
 		int first = member.indexOf(INDEX_SEPARATOR);
@@ -115,7 +117,7 @@ public final class RunKeyScope {
 			return null;
 		}
 		String runId = member.substring(second + 1);
-		if (runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return null;
 		}
 		try {
@@ -138,11 +140,11 @@ public final class RunKeyScope {
 	 * （{@code ai:lease:run:<runId>}）与 legacy tag 没有身份，返回 {@code null}。
 	 */
 	public static RunRef parseScopedKey(String prefix, String key) {
-		if (key == null || prefix == null || !key.startsWith(prefix)) {
+		if (!StringUtils.startsWith(key, prefix)) {
 			return null;
 		}
 		String tail = key.substring(prefix.length());
-		if (!tail.startsWith("{") || !tail.endsWith("}")) {
+		if (!StringUtils.startsWith(tail, "{") || !StringUtils.endsWith(tail, "}")) {
 			return null;
 		}
 		String inner = tail.substring(1, tail.length() - 1);
@@ -155,7 +157,7 @@ public final class RunKeyScope {
 			return null;
 		}
 		String runId = inner.substring(runMark + RUN_MARK.length());
-		if (runId.isEmpty()) {
+		if (StringUtils.isEmpty(runId)) {
 			return null;
 		}
 		String[] parts = identity.substring(0, identity.length() - 1).split(":", 2);

@@ -1,6 +1,10 @@
 package com.example.configmgr.ai.kb;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -22,6 +26,7 @@ import java.util.concurrent.TimeUnit;
  * （单实例仍可用），不让缓存设施成为知识问答的单点。
  */
 @Slf4j
+@RequiredArgsConstructor
 public class RedisKbCacheStore implements KbCacheStore {
 
     private static final RedisScript<Long> COMPARE_DELETE = new DefaultRedisScript<>("""
@@ -59,6 +64,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             for i = 4, #ARGV, 2 do
               redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
             end
+            redis.call('PEXPIRE', KEYS[1], 1800000)
             return 1
             """, Long.class);
 
@@ -74,6 +80,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             for i = 3, #ARGV, 2 do
               redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
             end
+            redis.call('PEXPIRE', KEYS[1], 1800000)
             return 1
             """, Long.class);
 
@@ -86,6 +93,7 @@ public class RedisKbCacheStore implements KbCacheStore {
                 redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
               end
             end
+            redis.call('PEXPIRE', KEYS[1], 1800000)
             return 1
             """, Long.class);
 
@@ -100,6 +108,7 @@ public class RedisKbCacheStore implements KbCacheStore {
               return 0
             end
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            redis.call('PEXPIRE', KEYS[1], 1800000)
             return 1
             """, Long.class);
 
@@ -136,14 +145,14 @@ public class RedisKbCacheStore implements KbCacheStore {
               return 0
             end
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            redis.call('PEXPIRE', KEYS[1], 1800000)
             return 1
             """, Long.class);
 
-    private final StringRedisTemplate redis;
+    /** 30 分钟 = 默认 10 分钟刷新周期的 3 倍，允许两次短暂失败后由下一次恢复刷新续期。 */
+    private static final Duration CACHE_TTL = Duration.ofMinutes(30);
 
-    public RedisKbCacheStore(StringRedisTemplate redis) {
-        this.redis = redis;
-    }
+    private final StringRedisTemplate redis;
 
     @Override
     public Map<String, String> hashGetAll(String key) {
@@ -151,7 +160,7 @@ public class RedisKbCacheStore implements KbCacheStore {
             Map<Object, Object> raw = this.redis.opsForHash().entries(key);
             Map<String, String> result = new LinkedHashMap<>();
             raw.forEach((field, value) -> result.put(String.valueOf(field), String.valueOf(value)));
-            return result;
+            return result.isEmpty() ? Map.of() : result;
         }
         catch (RuntimeException e) {
             throw failure("Failed to read cache HASH", key, e);
@@ -172,8 +181,8 @@ public class RedisKbCacheStore implements KbCacheStore {
     @Override
     public void hashPutAll(String key, Map<String, String> values) {
         try {
-            // 刻意不设 TTL：知识文档/清单/文档 id 索引键按定稿常驻（版本号兜底刷新）
             this.redis.opsForHash().putAll(key, values);
+            this.redis.expire(key, CACHE_TTL);
         }
         catch (RuntimeException e) {
             throw failure("Failed to write cache HASH", key, e);
@@ -183,8 +192,9 @@ public class RedisKbCacheStore implements KbCacheStore {
     @Override
     public void hashPutFields(String key, Map<String, String> values) {
         try {
-            // 单条 HSET：只合并给定字段，不读改写（无丢失更新），不设 TTL
+            // 单条 HSET：只合并给定字段，不读改写（无丢失更新），并续 7 天 TTL
             this.redis.opsForHash().putAll(key, values);
+            this.redis.expire(key, CACHE_TTL);
         }
         catch (RuntimeException e) {
             throw failure("Failed to merge cache HASH fields", key, e);
@@ -244,7 +254,7 @@ public class RedisKbCacheStore implements KbCacheStore {
 
     @Override
     public void hashPutFieldsIfValueAtMost(String key, Map<String, String> values) {
-        if (values == null || values.isEmpty()) {
+        if (MapUtils.isEmpty(values)) {
             return;
         }
         List<String> args = new java.util.ArrayList<>(values.size() * 2);
@@ -275,13 +285,13 @@ public class RedisKbCacheStore implements KbCacheStore {
     @Override
     public long hashDeleteFields(String key, Collection<String> fields) {
         // 空集合守卫：HDEL 至少需要一个字段，Redis 对"零字段"直接报语法错误
-        if (fields == null || fields.isEmpty()) {
+        if (CollectionUtils.isEmpty(fields)) {
             return 0L;
         }
         try {
             // 单条 HDEL：单键、无跨槽问题；不用 KEYS/SCAN
             Long removed = this.redis.opsForHash().delete(key, fields.toArray());
-            return removed == null ? 0L : removed;
+            return ObjectUtils.defaultIfNull(removed, 0L);
         }
         catch (RuntimeException e) {
             throw failure("Failed to delete cache HASH fields", key, e);
@@ -299,10 +309,21 @@ public class RedisKbCacheStore implements KbCacheStore {
     }
 
     @Override
+    public void touch(String key) {
+        try {
+            this.redis.expire(key, CACHE_TTL);
+        }
+        catch (RuntimeException e) {
+            throw failure("Failed to renew cache TTL", key, e);
+        }
+    }
+
+    @Override
     public long incr(String key) {
         try {
             Long value = this.redis.opsForValue().increment(key);
-            return value == null ? 0L : value;
+            this.redis.expire(key, CACHE_TTL);
+            return ObjectUtils.defaultIfNull(value, 0L);
         }
         catch (RuntimeException e) {
             throw failure("Failed to increment cache version", key, e);
@@ -390,7 +411,6 @@ public class RedisKbCacheStore implements KbCacheStore {
 
     private static KbCacheException failure(String action, String key, RuntimeException cause) {
         // 只报动作与键族（键名不含凭据/内容）；不含异常堆栈给模型可见面
-        log.debug("KB cache operation failed: key={}", key, cause);
         return new KbCacheException(action + " (key=" + key + "): " + cause.getClass().getSimpleName(), cause);
     }
 }

@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.tool;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * 单个工具的**可选覆盖项**（来自 YAML / 未来的 DB 版本表）。
  *
@@ -16,35 +20,41 @@ package com.example.configmgr.ai.tool;
  * 不随界面语言切换）。
  */
 public record ToolDefinitionOverride(
-        String toolKey,
-        String modelName,
-        String description,
-        String inputSchema,
-        String title,
-        String titleKey,
-        String lang,
-        String status) {
+        @JsonProperty("toolKey") String toolKey,
+        @JsonProperty("modelName") String modelName,
+        @JsonProperty("description") String description,
+        @JsonProperty("inputSchema") String inputSchema,
+        @JsonProperty("title") String title,
+        @JsonProperty("titleKey") String titleKey,
+        @JsonProperty("lang") String lang,
+        @JsonProperty("status") String status) {
 
     public boolean hasDescription() {
-        return description != null && !description.isBlank();
+        return StringUtils.isNotBlank(description);
     }
 
     public boolean hasSchema() {
-        return inputSchema != null && !inputSchema.isBlank();
+        return StringUtils.isNotBlank(inputSchema);
     }
 
     /** 是否已发布（未写 status 视为已发布：YAML 阶段没有草稿工作流）。 */
+    @JsonProperty("published")
+    public boolean isPublished() {
+        return StringUtils.isBlank(status) || "published".equalsIgnoreCase(status);
+    }
+
+    @JsonIgnore
     public boolean published() {
-        return status == null || status.isBlank() || "published".equalsIgnoreCase(status);
+        return isPublished();
     }
 
     /** 模型侧 name：缺省等于 toolKey（新工具不必写两遍）。 */
     public String effectiveModelName() {
-        return modelName == null || modelName.isBlank() ? toolKey : modelName;
+        return StringUtils.defaultIfBlank(modelName, toolKey);
     }
 
     /** UI 用 i18n key：缺省按约定推导 `tool.<toolKey>.title`。 */
     public String effectiveTitleKey() {
-        return titleKey == null || titleKey.isBlank() ? "tool." + toolKey + ".title" : titleKey;
+        return StringUtils.defaultIfBlank(titleKey, "tool." + toolKey + ".title");
     }
 }

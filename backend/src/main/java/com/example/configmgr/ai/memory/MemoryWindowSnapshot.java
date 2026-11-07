@@ -2,6 +2,7 @@ package com.example.configmgr.ai.memory;
 
 import java.util.List;
 
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.chat.messages.Message;
 
 /**
@@ -20,7 +21,7 @@ import org.springframework.ai.chat.messages.Message;
 public record MemoryWindowSnapshot(long version, long generation, List<Message> messages) {
 
 	public MemoryWindowSnapshot {
-		messages = messages == null ? List.of() : List.copyOf(messages);
+		messages = List.copyOf(ObjectUtils.defaultIfNull(messages, List.of()));
 	}
 
 }

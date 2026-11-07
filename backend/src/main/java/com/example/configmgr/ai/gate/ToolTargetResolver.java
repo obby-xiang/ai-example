@@ -10,6 +10,8 @@ import com.example.configmgr.task.repo.TaskRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -70,8 +72,12 @@ public class ToolTargetResolver {
 	}
 
 	/** 该工具是否走目标资源校验（只有四个作业发起工具）。 */
-	public static boolean supports(String toolName) {
+	public static boolean isSupported(String toolName) {
 		return jobTypeOf(toolName) != null;
+	}
+
+	public static boolean supports(String toolName) {
+		return isSupported(toolName);
 	}
 
 	/** 工具发起的作业类型；非作业发起工具返回 null。 */
@@ -171,7 +177,7 @@ public class ToolTargetResolver {
 		if (task == null) {
 			return Verdict.invalid("缺任务，无法校验配置定义 " + defCode);
 		}
-		List<TaskItem> items = task.getItems() == null ? List.of() : task.getItems();
+		List<TaskItem> items = ObjectUtils.defaultIfNull(task.getItems(), List.of());
 		boolean belongs = items.stream()
 			.anyMatch(item -> item != null && item.getDefCode() != null
 					&& item.getDefCode().equalsIgnoreCase(defCode));
@@ -204,7 +210,7 @@ public class ToolTargetResolver {
 	}
 
 	private static JsonNode parse(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return null;
 		}
 		try {
@@ -229,7 +235,7 @@ public class ToolTargetResolver {
 		}
 
 		public static Verdict invalid(String detail) {
-			return new Verdict(false, detail == null ? "" : detail);
+			return new Verdict(false, StringUtils.defaultString(detail));
 		}
 
 	}

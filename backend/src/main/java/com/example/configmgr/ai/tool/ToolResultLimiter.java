@@ -2,8 +2,12 @@ package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.context.ContextEstimator;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+
+import java.util.function.Supplier;
 
 /**
  * 工具结果回填模型的裁剪器（DC-14 T2 / R10-1；G5 起预算收敛到
@@ -64,7 +68,7 @@ public class ToolResultLimiter {
 	 * 创建顺序抖动都会以"bean 创建失败"被注册表的扫描兜底吞掉，表现为工具静默消失
 	 * （2026-10-23 实测：KB 三工具 37→34）。延迟到判档时再取，环在结构上不存在。
 	 */
-	private final java.util.function.Supplier<ToolRegistry> toolRegistrySupplier;
+	private final Supplier<ToolRegistry> toolRegistrySupplier;
 
 	/** 无注册表装配（单测/非 Spring）：具名工具一律按默认档。 */
 	public ToolResultLimiter(AiProperties properties) {
@@ -77,7 +81,7 @@ public class ToolResultLimiter {
 	}
 
 	@Autowired
-	public ToolResultLimiter(AiProperties properties, org.springframework.beans.factory.ObjectProvider<ToolRegistry> toolRegistry) {
+	public ToolResultLimiter(AiProperties properties, ObjectProvider<ToolRegistry> toolRegistry) {
 		this.properties = properties;
 		this.toolRegistrySupplier = toolRegistry::getIfAvailable;
 	}
@@ -97,7 +101,7 @@ public class ToolResultLimiter {
 
 		/** 未截断的判定（字段面与截断判定同一套，值为客观事实）。 */
 		public static Truncation untouched(String text) {
-			String value = text == null ? "" : text;
+			String value = StringUtils.defaultString(text);
 			return new Truncation(false, null, value.length(), value.length(), null, value);
 		}
 	}
@@ -170,26 +174,26 @@ public class ToolResultLimiter {
 	 * @param remainingChars 剩余窗口折算的字符额度（{@code <=0} = 没有窗口信息 ⇒ 只按配置档）
 	 */
 	public Truncation forModel(String toolName, String text, int remainingChars) {
-		if (text == null || text.isEmpty()) {
+		if (StringUtils.isEmpty(text)) {
 			return Truncation.untouched(text);
 		}
 		AiProperties.ResultBudget.Model model = this.properties.getResultBudget().getModel();
 		int maxRows = model.getMaxRows();
 		int maxChars = maxCharsFor(toolName, model);
 		if (remainingChars > 0) {
-			// 0 = "该档不限" 的既有语义，遇到窗口额度时以窗口为准（否则窗口形同虚设）
 			maxChars = maxChars <= 0 ? remainingChars : Math.min(maxChars, remainingChars);
 		}
 		int originalChars = text.length();
-
 		if (TruncationContract.looksStructured(text)) {
-			// 结构化结果：行数语义不适用（一行 JSON），只按字符档判
 			if (maxChars <= 0 || originalChars <= maxChars) {
 				return Truncation.untouched(text);
 			}
 			return structured(text, maxChars);
 		}
+		return truncatePlainText(text, originalChars, maxRows, maxChars);
+	}
 
+	private Truncation truncatePlainText(String text, int originalChars, int maxRows, int maxChars) {
 		int totalRows = countRows(text);
 		boolean rowsCut = maxRows > 0 && totalRows > maxRows;
 		String kept = rowsCut ? firstRows(text, maxRows) : text;
@@ -197,29 +201,16 @@ public class ToolResultLimiter {
 		if (!rowsCut && !charsCut) {
 			return Truncation.untouched(text);
 		}
-
 		if (maxChars <= 0) {
 			String notice = notice(originalChars, totalRows, kept.length(), maxRows, 0, rowsCut);
 			String visited = kept + marker(notice);
 			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, visited.length(), notice,
 					visited);
 		}
-		// 标记长度计入预算：正文只拿"上限 − 标记"的额度
 		String notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
 		String marker = marker(notice);
 		if (marker.length() > maxChars) {
-			// I7：额度装不下完整说明 ⇒ 退到短说明；仍装不下就<b>只留标记</b>并截到额度。
-			// 绝不"吐一整段标记"（那会让单份结果比额度大一个数量级，预算形同虚设）。
-			// N2：只返回标记时，说明里的"返回 N 字符"必须等于 returnedChars（= 返回文本的实际长度），
-			// 不能还把被丢掉的正文长度（kept.length()）写成返回量 —— 那会自相矛盾。
-			String markerOnly = markerOnly(originalChars);
-			if (markerOnly.length() > maxChars) {
-				String trimmed = cutChars(markerOnly, maxChars);
-				return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, trimmed.length(),
-						compactNotice(originalChars, trimmed.length()), trimmed);
-			}
-			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, markerOnly.length(),
-					compactNotice(originalChars, markerOnly.length()), markerOnly);
+			return markerOnlyTruncation(originalChars, maxChars);
 		}
 		kept = cutChars(kept, maxChars - marker.length());
 		notice = notice(originalChars, totalRows, kept.length(), maxRows, maxChars, rowsCut);
@@ -233,18 +224,33 @@ public class ToolResultLimiter {
 				visited);
 	}
 
+	private Truncation markerOnlyTruncation(int originalChars, int maxChars) {
+		String markerOnly = markerOnly(originalChars);
+		if (markerOnly.length() > maxChars) {
+			String trimmed = cutChars(markerOnly, maxChars);
+			return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, trimmed.length(),
+					compactNotice(originalChars, trimmed.length()), trimmed);
+		}
+		return new Truncation(true, TruncationContract.STRATEGY_HEAD, originalChars, markerOnly.length(),
+				compactNotice(originalChars, markerOnly.length()), markerOnly);
+	}
+
 	/** 兼容口（无工具名 ⇒ 兜底档）。 */
 	public String forModel(String text) {
 		return forModel(null, text).text();
 	}
 
 	/** 是否被裁剪过（供诊断/帧字段标注；判据只认标记，避免"恰好等长"的误判）。 */
+	public boolean isTruncated(String text) {
+		return StringUtils.contains(text, TRUNCATION_MARKER);
+	}
+
 	public boolean truncated(String text) {
-		return text != null && text.contains(TRUNCATION_MARKER);
+		return isTruncated(text);
 	}
 
 	private int maxCharsFor(String toolName, AiProperties.ResultBudget.Model model) {
-		if (toolName == null || toolName.isBlank()) {
+		if (StringUtils.isBlank(toolName)) {
 			return model.getFallbackMaxChars();
 		}
 		Integer explicit = model.getPerTool() == null ? null : model.getPerTool().get(toolName);
@@ -335,7 +341,7 @@ public class ToolResultLimiter {
 	}
 
 	private static String marker(String notice) {
-		String body = notice.startsWith(NOTICE_PREFIX) ? notice.substring(NOTICE_PREFIX.length()) : notice;
+		String body = StringUtils.removeStart(notice, NOTICE_PREFIX);
 		return TRUNCATION_MARKER + body + "]";
 	}
 
@@ -360,8 +366,7 @@ public class ToolResultLimiter {
 	 * 行数上限形同虚设）。既然"行"的语义就是"分隔的行"，两种形态一并计。
 	 */
 	private static int countRows(String text) {
-		int rows = 1 + countChar(text, '\n') + countEscapedNewlines(text);
-		return rows;
+		return 1 + StringUtils.countMatches(text, '\n') + StringUtils.countMatches(text, "\\n");
 	}
 
 	/** 前 rows 行（在"\n"字符或字面 "\n" 两字符处切开）。 */
@@ -395,27 +400,6 @@ public class ToolResultLimiter {
 			end--;
 		}
 		return text.substring(0, end);
-	}
-
-	private static int countChar(String text, char target) {
-		int count = 0;
-		for (int i = 0; i < text.length(); i++) {
-			if (text.charAt(i) == target) {
-				count++;
-			}
-		}
-		return count;
-	}
-
-	private static int countEscapedNewlines(String text) {
-		int count = 0;
-		for (int i = 0; i + 1 < text.length(); i++) {
-			if (text.charAt(i) == '\\' && text.charAt(i + 1) == 'n') {
-				count++;
-				i++;
-			}
-		}
-		return count;
 	}
 
 }

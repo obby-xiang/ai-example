@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.kb;
 
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+
 import java.time.Duration;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -22,10 +25,10 @@ import java.util.Set;
  * <li>{@code kb:cache:{kb:cache:manifest}:refresh:lock}（{@code SET NX PX} + token 续租）—— 与清单同槽的刷新权。</li>
  * </ul>
  *
- * <p><b>TTL</b>：文档、文档 id 索引与清单键<b>不设 TTL</b>（定稿：刷新权属显式刷新，版本号兜底；过期会让
- * 缓存无声消失，冷启动重新拉远端，反而把"远端故障"放大成"知识空白"）。只有锁键有 30s TTL。
+ * <p><b>TTL</b>：文档、文档 id 索引与清单键统一为 30 分钟，即默认 10 分钟刷新周期的 3 倍；
+ * 允许两次短暂失败后由下一次恢复刷新续期。7 天只是全局绝对上限，不是 KB 的目标值；锁键仍使用 30s TTL。
  *
- * <p><b>下线回收（收敛，不靠一次性成功）</b>：不设 TTL 意味着文档下线后必须显式删键。
+ * <p><b>下线回收（收敛，不靠一次性成功）</b>：文档下线后必须显式删键。
  * {@code CachedKbSource#syncToCache} 每轮按 {@code kb:cache:docs} 与当前 manifest 的差集逐篇删除，
  * <b>条件删除成功后才按同一上限从索引摘除</b>：正文与索引均带代次，旧实例不能回收新实例重写的正文。
  * 删除失败或进程在两者之间崩溃时条目仍留在索引里，下一轮自动重试。
@@ -33,14 +36,14 @@ import java.util.Set;
  * 索引键与文档键同属<b>全局公共知识域</b>（无租户段），一次刷新覆盖全部实例。
  *
  * <p><b>写入顺序</b>：先分批记文档 id 索引 → 写文档 → 校验 lease token 并在清单 HASH 内原子发布
- * JSON/version（最后分批回收下线文档）。索引先于正文是硬约束：正文键无 TTL，只有索引能把它找回来删；
+ * JSON/version（最后分批回收下线文档）。索引先于正文是硬约束：正文与索引在写入或 304 活动时续 30 分钟 TTL，索引用于找回待删正文；
  * 反过来"索引有、正文无"无害，下一轮补写正文或删空键后摘索引。
  */
 public class KbCache {
 
     public static final String DOC_PREFIX = "kb:cache:doc:";
 
-    /** 全局文档 id 索引（HASH 当 SET 用：field = 文档 id，value = 写入代次；<b>无 TTL</b>）。 */
+    /** 全局文档 id 索引（HASH 当 SET 用：field = 文档 id，value = 写入代次；30 分钟 TTL，成功写入及 304 活动时续期）。 */
     public static final String DOC_IDS_KEY = "kb:cache:docs";
 
     public static final String MANIFEST_KEY = "kb:cache:manifest";
@@ -73,6 +76,22 @@ public class KbCache {
 
     public static String docKey(String docId) {
         return DOC_PREFIX + docId;
+    }
+
+    public void touchDoc(String docId) {
+        this.store.touch(docKey(docId));
+    }
+
+    public void touchDocIds() {
+        this.store.touch(DOC_IDS_KEY);
+    }
+
+    public void touchManifest() {
+        this.store.touch(MANIFEST_KEY);
+    }
+
+    public void touchGeneration() {
+        this.store.touch(GENERATION_KEY);
     }
 
     /** 单篇缓存条目。 */
@@ -108,7 +127,7 @@ public class KbCache {
     }
 
     /** 内容未变但清单仍引用该文档时，只提升 fencing 代次；false = 正文已回收或属于更高代次。 */
-    public boolean markDocGeneration(String docId, long generation) {
+    public boolean isDocGenerationMarked(String docId, long generation) {
         return this.store.hashPutFieldIfPresentAndValueAtMost(docKey(docId), F_GENERATION,
                 Math.max(0L, generation));
     }
@@ -123,7 +142,7 @@ public class KbCache {
     }
 
     /** 旧刷新不能删除更高代次重新写入的正文；false = 本键由新刷新所有，保留索引待其对账。 */
-    public boolean deleteDoc(String docId, long generation) {
+    public boolean isDocDeleted(String docId, long generation) {
         return this.store.deleteDocIfGenerationAtMost(docKey(docId), F_GENERATION, Math.max(0L, generation));
     }
 
@@ -135,30 +154,30 @@ public class KbCache {
     public Set<String> docIds() {
         Set<String> ids = new LinkedHashSet<>();
         for (String id : this.store.hashGetAll(DOC_IDS_KEY).keySet()) {
-            if (id != null && !id.isBlank()) {
+            if (StringUtils.isNotBlank(id)) {
                 ids.add(id);
             }
         }
-        return ids;
+        return ids.isEmpty() ? Set.of() : ids;
     }
 
     /**
      * 把文档 id 记入全局索引（幂等；代次只允许单调提升）。
      *
      * <p>必须在写正文与写新清单<b>之前</b>成功：这样"正文有 ⇒ 索引有""清单里有 ⇒ 索引里有"，
-     * 否则将来它下线时就没有可回收的线索（正文键无 TTL，会永久残留）。
+     * 否则下线回收缺少线索（索引与正文均为 30 分钟 TTL，成功写入及 304 活动时续期）。
      */
     public void putDocIds(Collection<String> docIds) {
         putDocIds(docIds, 0L);
     }
 
     public void putDocIds(Collection<String> docIds, long generation) {
-        if (docIds == null || docIds.isEmpty()) {
+        if (CollectionUtils.isEmpty(docIds)) {
             return;
         }
         Map<String, String> fields = new LinkedHashMap<>();
         for (String id : docIds) {
-            if (id != null && !id.isBlank()) {
+            if (StringUtils.isNotBlank(id)) {
                 fields.put(id, String.valueOf(Math.max(0L, generation)));
             }
         }
@@ -171,14 +190,14 @@ public class KbCache {
      * 把单个文档 id 记入全局索引（单条 {@code HSET}）。
      *
      * <p>供"写单篇正文"的路径使用：调用方必须<b>先</b>调本方法、<b>再</b>写正文键，
-     * 否则正文可能没有任何回收线索（正文键无 TTL，只能靠索引找回）。
+     * 否则正文在 30 分钟未续期过期后将缺少回收线索。
      */
     public void putDocId(String docId) {
         putDocId(docId, 0L);
     }
 
     public void putDocId(String docId, long generation) {
-        if (docId == null || docId.isBlank()) {
+        if (StringUtils.isBlank(docId)) {
             return;
         }
         putDocIds(List.of(docId), generation);
@@ -186,15 +205,15 @@ public class KbCache {
 
     /** 从全局索引摘除文档 id（正文键回收成功后调用；失败由调用方留待下一轮重试）。 */
     public void removeDocId(String docId) {
-        if (docId == null || docId.isBlank()) {
+        if (StringUtils.isBlank(docId)) {
             return;
         }
         this.store.hashDeleteFields(DOC_IDS_KEY, List.of(docId));
     }
 
     /** 与正文同一道代次闸：旧回收不能摘掉新刷新刚重建的回收线索。 */
-    public boolean removeDocId(String docId, long generation) {
-        if (docId == null || docId.isBlank()) {
+    public boolean isDocIdRemoved(String docId, long generation) {
+        if (StringUtils.isBlank(docId)) {
             return true;
         }
         return this.store.hashDeleteFieldIfValueAtMost(DOC_IDS_KEY, docId, Math.max(0L, generation));
@@ -209,7 +228,7 @@ public class KbCache {
     }
 
     /** manifest JSON 与通知 version 在同一个 HASH、同一条 Lua 中发布，lease token 失效时拒绝。 */
-    public boolean publishManifest(ManifestEntry entry, long generation, String leaseToken) {
+    public boolean isManifestPublished(ManifestEntry entry, long generation, String leaseToken) {
         long fencedGeneration = Math.max(0L, generation);
         Map<String, String> hash = new LinkedHashMap<>();
         hash.put(F_ETAG, nullSafe(entry.etag()));
@@ -222,12 +241,12 @@ public class KbCache {
 
     public String corpusVersion() {
         String version = this.store.hashGet(MANIFEST_KEY, F_VERSION);
-        return version == null || version.isBlank() ? null : version;
+        return StringUtils.isBlank(version) ? null : version;
     }
 
     public long generation() {
         String raw = this.store.get(GENERATION_KEY);
-        if (raw == null || raw.isBlank()) {
+        if (StringUtils.isBlank(raw)) {
             return 0L;
         }
         try {
@@ -244,21 +263,53 @@ public class KbCache {
     }
 
     /** 抢刷新权（{@code SET NX PX}）。 */
-    public boolean tryLock(String token, Duration ttl) {
+    public boolean lock(String token, Duration ttl) {
         return this.store.setIfAbsent(LOCK_KEY, token, ttl);
     }
 
-    public boolean ownsLock(String token) {
+    public boolean isLockOwned(String token) {
         return token.equals(this.store.get(LOCK_KEY));
     }
 
-    public boolean renewLock(String token, Duration ttl) {
+    public boolean isLockRenewed(String token, Duration ttl) {
         return this.store.compareAndExpire(LOCK_KEY, token, ttl);
     }
 
     /** 放刷新权（Lua 比对 token 才删；不会删掉别人的锁）。 */
-    public boolean unlock(String token) {
+    public boolean isUnlocked(String token) {
         return this.store.compareAndDelete(LOCK_KEY, token);
+    }
+
+    public boolean markDocGeneration(String docId, long generation) {
+        return isDocGenerationMarked(docId, generation);
+    }
+
+    public boolean deleteDoc(String docId, long generation) {
+        return isDocDeleted(docId, generation);
+    }
+
+    public boolean removeDocId(String docId, long generation) {
+        return isDocIdRemoved(docId, generation);
+    }
+
+    public boolean publishManifest(ManifestEntry entry, long generation, String leaseToken) {
+        return isManifestPublished(entry, generation, leaseToken);
+    }
+
+    public boolean tryLock(String token, Duration ttl) {
+        return lock(token, ttl);
+    }
+
+    public boolean ownsLock(String token) {
+        return isLockOwned(token);
+    }
+
+    public boolean renewLock(String token, Duration ttl) {
+        return isLockRenewed(token, ttl);
+    }
+
+    public boolean unlock(String token) {
+        return isUnlocked(token);
     }
 
     /** 诊断：键的 TTL（{@code -1} 无 TTL；{@code null} = 存储未实现）。 */
@@ -267,6 +318,6 @@ public class KbCache {
     }
 
     private static String nullSafe(String value) {
-        return value == null ? "" : value;
+        return StringUtils.defaultString(value);
     }
 }

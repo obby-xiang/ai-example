@@ -1,12 +1,17 @@
 package com.example.configmgr.ai.history;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.SessionKeyCodec;
+import com.example.configmgr.ai.run.SessionActivityRenewal;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.session.SessionPurgeGuard;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -18,6 +23,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 用户展示历史的规范读模型。entryId 对应 HASH 中的一个当前条目，ZSET 只保存首次写入顺序；
@@ -227,7 +233,6 @@ public class ConversationTranscriptStore {
 			local revision = redis.call('HGET', KEYS[3], 'rev') or '0'
 			local total = redis.call('ZCARD', KEYS[2])
 			local truncated = redis.call('EXISTS', KEYS[4])
-			for _, key in ipairs(KEYS) do redis.call('PEXPIRE', key, ttl) end
 			local out = {tostring(revision), tostring(total), tostring(hasMore), nextCursor, tostring(truncated)}
 			if #ids > 0 then
 			  local payloads = redis.call('HMGET', KEYS[1], unpack(ids))
@@ -245,6 +250,13 @@ public class ConversationTranscriptStore {
 
 	private final Duration ttl;
 
+	private SessionActivityRenewal activityRenewal;
+
+	@Autowired(required = false)
+	void setActivityRenewal(SessionActivityRenewal activityRenewal) {
+		this.activityRenewal = activityRenewal;
+	}
+
 	private final int maxEntries;
 
 	private final long maxBytes;
@@ -257,7 +269,7 @@ public class ConversationTranscriptStore {
 			long maxBytes) {
 		this.redis = redis;
 		this.mapper = mapper;
-		this.ttl = ttl;
+		this.ttl = AiProperties.effectiveSessionTtl(ttl);
 		this.maxEntries = Math.max(1, maxEntries);
 		this.maxBytes = Math.max(1L, maxBytes);
 	}
@@ -272,7 +284,9 @@ public class ConversationTranscriptStore {
 	/** runEpoch 来自写者已读取的快照；旧 epoch 的迟到写不得覆盖新主人的规范条目。 */
 	public boolean append(String sessionId, long tenantId, long userId, List<TranscriptEntry> entries, long runEpoch) {
 		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
-			log.debug("transcript append skipped: no usable identity sessionId={}", sessionId);
+			if (log.isDebugEnabled()) {
+				log.debug("transcript append skipped: no usable identity sessionId={}", sessionId);
+			}
 			return false;
 		}
 		List<TranscriptEntry> filtered = filter(entries);
@@ -298,8 +312,10 @@ public class ConversationTranscriptStore {
 			if (isTransientResourceFailure(ex)) {
 				throw ex;
 			}
-			log.warn("transcript append failed sessionId={} (display history does not affect this turn)",
-					sessionId, ex);
+			if (LogSampling.canAcquire("transcript-append")) {
+				log.warn("transcript append failed sessionId={} (display history does not affect this turn)",
+						sessionId, ex);
+			}
 			return false;
 		}
 	}
@@ -331,7 +347,7 @@ public class ConversationTranscriptStore {
 		List<?> raw = this.redis.execute(READ_PAGE_SCRIPT,
 				List.of(dataKey(sessionId, tenantId, userId), orderKey(sessionId, tenantId, userId),
 						metaKey(sessionId, tenantId, userId), truncatedKey(sessionId, tenantId, userId)),
-				String.valueOf(this.ttl.toMillis()), mode, before == null ? "" : String.valueOf(before),
+				String.valueOf(this.ttl.toMillis()), mode, Objects.toString(before, ""),
 				String.valueOf(pageSize));
 		if (raw == null || raw.size() < 5) {
 			throw new IllegalStateException("transcript page returned no metadata");
@@ -345,8 +361,11 @@ public class ConversationTranscriptStore {
 				}
 			}
 		}
-		return new ReadPage(List.copyOf(entries), longValue(raw.get(1)), longValue(raw.get(0)),
-				String.valueOf(raw.get(3)).isBlank() ? null : String.valueOf(raw.get(3)), longValue(raw.get(2)) == 1L,
+		if (this.activityRenewal != null) {
+			this.activityRenewal.isActivityRenewed(tenantId, userId, sessionId, null, dataKey(sessionId, tenantId, userId));
+		}
+		return new ReadPage(List.copyOf(entries), longValue(raw.get(1)), longValue(raw.getFirst()),
+				StringUtils.isBlank(String.valueOf(raw.get(3))) ? null : String.valueOf(raw.get(3)), longValue(raw.get(2)) == 1L,
 				longValue(raw.get(4)) == 1L);
 	}
 
@@ -412,7 +431,9 @@ public class ConversationTranscriptStore {
 			return this.mapper.readValue(payload, TranscriptEntry.class);
 		}
 		catch (Exception ex) {
-			log.warn("transcript entry parse failed (skipped) sessionId={}", sessionId, ex);
+			if (LogSampling.canAcquire("transcript-entry-parse")) {
+				log.warn("transcript entry parse failed (skipped) sessionId={}", sessionId, ex);
+			}
 			return null;
 		}
 	}
@@ -422,16 +443,16 @@ public class ConversationTranscriptStore {
 	}
 
 	private static List<TranscriptEntry> filter(Collection<TranscriptEntry> entries) {
-		if (entries == null || entries.isEmpty()) {
+		if (CollectionUtils.isEmpty(entries)) {
 			return List.of();
 		}
 		List<TranscriptEntry> out = new ArrayList<>(entries.size());
 		for (TranscriptEntry entry : entries) {
-			if (entry != null && entry.entryId() != null && !entry.entryId().isBlank()) {
+			if (entry != null && StringUtils.isNotBlank(entry.entryId())) {
 				out.add(entry);
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 }

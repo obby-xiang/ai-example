@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.kb;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.List;
 
 /**
@@ -21,14 +25,17 @@ import java.util.List;
  * @param disabled   知识库未启用
  * @param error      可行动错误
  */
-public record KbLookupResult(boolean found, String term, String normalized, String answer,
-        String docId, String title, String section, String updatedAt, List<String> suggestions,
-        boolean notReady, boolean disabled, String error) {
+public record KbLookupResult(@JsonProperty("found") boolean found, @JsonProperty("term") String term,
+        @JsonProperty("normalized") String normalized, @JsonProperty("answer") String answer,
+        @JsonProperty("docId") String docId, @JsonProperty("title") String title,
+        @JsonProperty("section") String section, @JsonProperty("updatedAt") String updatedAt,
+        @JsonProperty("suggestions") List<String> suggestions, @JsonProperty("notReady") boolean notReady,
+        @JsonProperty("disabled") boolean disabled, @JsonProperty("error") String error) {
 
     public KbLookupResult {
-        suggestions = suggestions == null ? List.of() : List.copyOf(suggestions);
-        answer = answer == null ? "" : answer;
-        error = error == null ? "" : error;
+        suggestions = List.copyOf(ObjectUtils.defaultIfNull(suggestions, List.of()));
+        answer = StringUtils.defaultString(answer);
+        error = StringUtils.defaultString(error);
     }
 
     public static KbLookupResult hit(String term, String normalized, String answer, String docId,

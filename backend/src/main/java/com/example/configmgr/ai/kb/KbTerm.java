@@ -1,6 +1,9 @@
 package com.example.configmgr.ai.kb;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
 
@@ -17,10 +20,11 @@ import java.util.List;
  * @param answer  预制答案（纯文本；渲染时同样过定界与安全剥离）
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record KbTerm(String name, List<String> aliases, String section, String answer) {
+public record KbTerm(@JsonProperty("name") String name, @JsonProperty("aliases") List<String> aliases,
+        @JsonProperty("section") String section, @JsonProperty("answer") String answer) {
 
     public KbTerm {
-        aliases = aliases == null ? List.of() : List.copyOf(aliases);
-        answer = answer == null ? "" : answer;
+        aliases = List.copyOf(ObjectUtils.defaultIfNull(aliases, List.of()));
+        answer = StringUtils.defaultString(answer);
     }
 }

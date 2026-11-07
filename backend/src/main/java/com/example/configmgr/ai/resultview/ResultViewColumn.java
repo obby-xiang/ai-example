@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.resultview;
 
+import org.apache.commons.collections4.CollectionUtils;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +44,7 @@ public record ResultViewColumn(String key, ResultViewColumnType type, String lab
 		if (this.align != null) {
 			map.put("align", this.align);
 		}
-		if (this.options != null && !this.options.isEmpty()) {
+		if (CollectionUtils.isNotEmpty(this.options)) {
 			map.put("options", List.copyOf(this.options));
 		}
 		if (this.hidden != null) {

@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.feedback;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -62,8 +64,8 @@ public final class ExcerptGuard {
 	 *
 	 * <p>裸私钥头也算：截断的私钥同样是私钥本体。
 	 */
-	public static boolean sensitive(String text) {
-		if (text == null || text.isEmpty()) {
+	public static boolean isSensitive(String text) {
+		if (StringUtils.isEmpty(text)) {
 			return false;
 		}
 		for (Pattern pattern : PATTERNS) {
@@ -72,6 +74,11 @@ public final class ExcerptGuard {
 			}
 		}
 		return false;
+	}
+
+	/** 兼容旧调用：摘录里是否出现高置信凭据。 */
+	public static boolean sensitive(String text) {
+		return isSensitive(text);
 	}
 
 }

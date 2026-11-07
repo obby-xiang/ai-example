@@ -2,6 +2,9 @@ package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 
@@ -98,8 +101,8 @@ public final class ToolResultShrink {
 	 */
 	public static Plan plan(List<Message> messages, int currentTokens, int limitTokens,
 			Set<String> protectedToolCallIds, ToolResultLimiter limiter) {
-		if (messages == null || messages.isEmpty() || limiter == null || protectedToolCallIds == null) {
-			return new Plan(messages, List.of(), 0);
+		if (CollectionUtils.isEmpty(messages) || limiter == null || protectedToolCallIds == null) {
+			return new Plan(messages == null ? List.of() : messages, List.of(), 0);
 		}
 		int target = Math.max(0, limitTokens - 1);
 		int needToSave = currentTokens - target;
@@ -110,79 +113,97 @@ public final class ToolResultShrink {
 		if (candidates.isEmpty()) {
 			return new Plan(messages, List.of(), 0);
 		}
+		ShrinkPlan shrink = planShrink(candidates, needToSave, limiter);
+		if (shrink.shrunk().isEmpty()) {
+			return new Plan(messages, List.of(), 0);
+		}
+		List<Message> out = applyShrink(messages, shrink.replacements());
+		return new Plan(out, List.copyOf(shrink.shrunk()), shrink.savedTokens());
+	}
+
+	private static ShrinkPlan planShrink(List<Slot> candidates, int needToSave, ToolResultLimiter limiter) {
 		List<Shrunk> shrunk = new ArrayList<>();
 		Map<Integer, Map<Integer, String>> replacements = new HashMap<>();
 		int savedTokens = 0;
 		int remainingNeed = needToSave;
-		for (int index = 0; index < candidates.size(); index++) {
+		for (Slot slot : candidates) {
 			if (remainingNeed <= 0) {
 				break;
 			}
-			Slot slot = candidates.get(index);
-			// 最新优先"按需"收窄：先让最新的一条吐出缺口（到 MIN_KEEP 为止），仍不够才动下一条 ——
-			// 均匀摊薄会把"还能读全的最新结果"也一起削掉，而模型接下来最可能用的就是它。
-			// 同一条最多重试 3 次：字符额度 → token 的换算是保守近似（标记本身也占字符），
-			// 一次削下来可能差几十 token；差多少再补多少，直到真的落在窗口内。
-			int dataTokens = slot.tokens();
-			int before = dataTokens;
-			String data = slot.data();
-			for (int attempt = 0; attempt < 3 && remainingNeed > 0; attempt++) {
-				// 防御：这一条是我们自己拼出来的（必然合法），但收窄是"最后一道救场"，
-				// 解析异常也不能把整轮恢复弄崩 —— 跳过它、让后面的条目/硬截断接手。
-				ToolResultEnvelope envelope;
-				try {
-					envelope = ToolResultEnvelope.fromJson(data);
-				}
-				catch (RuntimeException ex) {
-					break;
-				}
-				if (envelope == null) {
-					break;
-				}
-				// 额度算在 message 上（信封外壳/字段不参与"还能留多少正文"），否则第二轮会算出
-				// "刚好等于当前长度"的额度而原地打转。
-				int messageTokens = ContextEstimator.estimate(envelope.message());
-				int take = Math.min(remainingNeed, Math.max(0, messageTokens - MIN_KEEP_TOKENS));
-				if (take <= 0) {
-					break;
-				}
-				int capChars = ToolResultLimiter.charsForRemainingTokens(messageTokens - take);
-				if (capChars <= 0 || envelope.message().length() <= capChars) {
-					break;
-				}
-				ToolResultLimiter.Truncation truncation = limiter.forModel(slot.name(), envelope.message(), capChars);
-				if (!truncation.truncated()) {
-					break;
-				}
-				// I6：再收缩不得把<b>首次</b>的 originalChars 改写成"这次看到的长度"。
-				// 已被裁过的结果（如 originalChars=20000 / message≈5100）再收一刀时，forModel 只看得见
-				// 现在这份文本；沿用更大的那个才是"原文有多长"的事实（取两值最大，不新造字段）。
-				truncation = keepLargerOriginalChars(truncation, envelope.originalChars());
-				String rewritten = envelope.withTruncation(truncation).toModelJsonWith(truncation);
-				int after = ContextEstimator.estimate(rewritten);
-				if (after >= dataTokens) {
-					break;
-				}
-				data = rewritten;
-				remainingNeed = Math.max(0, remainingNeed - (dataTokens - after));
-				dataTokens = after;
-			}
-			if (dataTokens >= before) {
+			SlotRewrite rewrite = shrinkSlot(slot, remainingNeed, limiter);
+			if (rewrite.afterTokens() >= rewrite.beforeTokens()) {
 				continue;
 			}
-			replacements.computeIfAbsent(slot.messageIndex(), key -> new HashMap<>()).put(slot.responseIndex(), data);
-			shrunk.add(new Shrunk(slot.toolCallId(), slot.name(), before, dataTokens));
-			savedTokens += before - dataTokens;
+			replacements.computeIfAbsent(slot.messageIndex(), key -> new HashMap<>()).put(slot.responseIndex(),
+					rewrite.data());
+			shrunk.add(new Shrunk(slot.toolCallId(), slot.name(), rewrite.beforeTokens(), rewrite.afterTokens()));
+			savedTokens += rewrite.beforeTokens() - rewrite.afterTokens();
+			remainingNeed = Math.max(0, remainingNeed - (rewrite.beforeTokens() - rewrite.afterTokens()));
 		}
-		if (shrunk.isEmpty()) {
-			return new Plan(messages, List.of(), 0);
+		return new ShrinkPlan(shrunk, replacements, savedTokens);
+	}
+
+	private static SlotRewrite shrinkSlot(Slot slot, int remainingNeed, ToolResultLimiter limiter) {
+		int dataTokens = slot.tokens();
+		int before = dataTokens;
+		String data = slot.data();
+		for (int attempt = 0; attempt < 3 && remainingNeed > 0; attempt++) {
+			// 防御：这一条是我们自己拼出来的（必然合法），但收窄是"最后一道救场"，
+			// 解析异常也不能把整轮恢复弄崩 —— 跳过它、让后面的条目/硬截断接手。
+			ToolResultEnvelope envelope;
+			try {
+				envelope = ToolResultEnvelope.fromJson(data);
+			}
+			catch (RuntimeException ex) {
+				break;
+			}
+			if (envelope == null) {
+				break;
+			}
+			// 额度算在 message 上（信封外壳/字段不参与"还能留多少正文"），否则第二轮会算出
+			// "刚好等于当前长度"的额度而原地打转。
+			int messageTokens = ContextEstimator.estimate(envelope.message());
+			int take = Math.min(remainingNeed, Math.max(0, messageTokens - MIN_KEEP_TOKENS));
+			if (take <= 0) {
+				break;
+			}
+			int capChars = ToolResultLimiter.charsForRemainingTokens(messageTokens - take);
+			if (capChars <= 0 || envelope.message().length() <= capChars) {
+				break;
+			}
+			ToolResultLimiter.Truncation truncation = limiter.forModel(slot.name(), envelope.message(), capChars);
+			if (!truncation.truncated()) {
+				break;
+			}
+			// I6：再收缩不得把<b>首次</b>的 originalChars 改写成"这次看到的长度"。
+			// 已被裁过的结果（如 originalChars=20000 / message≈5100）再收一刀时，forModel 只看得见
+			// 现在这份文本；沿用更大的那个才是"原文有多长"的事实（取两值最大，不新造字段）。
+			truncation = keepLargerOriginalChars(truncation, envelope.originalChars());
+			String rewritten = envelope.withTruncation(truncation).toModelJsonWith(truncation);
+			int after = ContextEstimator.estimate(rewritten);
+			if (after >= dataTokens) {
+				break;
+			}
+			data = rewritten;
+			remainingNeed = Math.max(0, remainingNeed - (dataTokens - after));
+			dataTokens = after;
 		}
+		return new SlotRewrite(data, before, dataTokens);
+	}
+
+	private static List<Message> applyShrink(List<Message> messages, Map<Integer, Map<Integer, String>> replacements) {
 		List<Message> out = new ArrayList<>(messages.size());
 		for (int i = 0; i < messages.size(); i++) {
 			Map<Integer, String> patch = replacements.get(i);
 			out.add(patch == null ? messages.get(i) : rebuild((ToolResponseMessage) messages.get(i), patch));
 		}
-		return new Plan(out, List.copyOf(shrunk), savedTokens);
+		return out;
+	}
+
+	private record ShrinkPlan(List<Shrunk> shrunk, Map<Integer, Map<Integer, String>> replacements, int savedTokens) {
+	}
+
+	private record SlotRewrite(String data, int beforeTokens, int afterTokens) {
 	}
 
 	/**
@@ -215,7 +236,7 @@ public final class ToolResultShrink {
 			for (int j = responses.size() - 1; j >= 0; j--) {
 				ToolResponseMessage.ToolResponse response = responses.get(j);
 				String data = response.responseData();
-				if (data == null || data.isEmpty() || ToolResultClearing.isAlreadyCleared(data)) {
+				if (StringUtils.isEmpty(data) || ToolResultClearing.isAlreadyCleared(data)) {
 					continue;
 				}
 				if (response.id() != null && protectedIds.contains(response.id())) {
@@ -228,7 +249,7 @@ public final class ToolResultShrink {
 				catch (RuntimeException ex) {
 					continue;
 				}
-				if (envelope == null || envelope.message() == null || envelope.message().isEmpty()) {
+				if (envelope == null || StringUtils.isEmpty(envelope.message())) {
 					continue;
 				}
 				candidates.add(new Slot(i, j, response.id(), response.name(), ContextEstimator.estimate(data), data));
@@ -245,7 +266,7 @@ public final class ToolResultShrink {
 					new ToolResponseMessage.ToolResponse(existing.id(), existing.name(), entry.getValue()));
 		}
 		ToolResponseMessage.Builder builder = ToolResponseMessage.builder().responses(responses);
-		if (original.getMetadata() != null && !original.getMetadata().isEmpty()) {
+		if (MapUtils.isNotEmpty(original.getMetadata())) {
 			builder.metadata(original.getMetadata());
 		}
 		return builder.build();

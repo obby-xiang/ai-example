@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.web.dto;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * {@code POST /api/ai/providers/{id}/test} 的结果（设计稿 §3.5）。
  *
@@ -12,5 +15,8 @@ package com.example.configmgr.ai.web.dto;
  * @param latencyMs 端到端耗时
  * @param modelCount 上游报告的模型数（ok=false 时 0）
  */
-public record ProbeView(boolean ok, Integer status, long latencyMs, String code, String message, int modelCount) {
+public record ProbeView(@JsonProperty("ok") boolean ok, @JsonProperty("status") Integer status,
+        @JsonProperty("latencyMs") @JsonFormat(shape = JsonFormat.Shape.STRING) long latencyMs,
+        @JsonProperty("code") String code, @JsonProperty("message") String message,
+        @JsonProperty("modelCount") int modelCount) {
 }

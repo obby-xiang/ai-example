@@ -76,7 +76,7 @@ public class StreamViolationException extends RuntimeException {
 	 * {@code UpstreamErrorClassifier} 里按异常类型归到 {@link #CONNECTION_BROKEN}/
 	 * {@link #INCOMPLETE}，不会落到这个兜底码上。
 	 */
-	public boolean brokenStream() {
+	public boolean isBrokenStream() {
 		return FIRST_BYTE_TIMEOUT.equals(this.code) || SILENT_TIMEOUT.equals(this.code)
 				|| INCOMPLETE.equals(this.code) || CONNECTION_BROKEN.equals(this.code)
 				|| STATE_UNAVAILABLE.equals(this.code);

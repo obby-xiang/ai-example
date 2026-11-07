@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.memory;
 
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * 会话域 Redis 键的<b>会话 id 转义</b>唯一实现（B2）。
  *
@@ -20,7 +22,7 @@ public final class SessionKeyCodec {
 
 	/** 非空白会话 id（空白会产出空 hash tag，Cluster 下 staging/final 不同槽）。 */
 	public static String requireId(String conversationId) {
-		if (conversationId == null || conversationId.isBlank()) {
+		if (StringUtils.isBlank(conversationId)) {
 			throw new IllegalArgumentException("conversationId must not be blank");
 		}
 		return conversationId;

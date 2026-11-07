@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.context;
 
+import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.ai.chat.messages.Message;
 
 import java.util.ArrayList;
@@ -55,8 +56,8 @@ public final class HardTrim {
 
 	public static Plan plan(List<Message> messages, int keepRecentTurns, Set<String> protectedToolCallIds,
 			Set<String> protectedRunIds) {
-		if (messages == null || messages.isEmpty()) {
-			return new Plan(messages, 0, 0, REASON_NOTHING_TO_TRIM);
+		if (CollectionUtils.isEmpty(messages)) {
+			return new Plan(messages == null ? List.of() : messages, 0, 0, REASON_NOTHING_TO_TRIM);
 		}
 		// 续跑保 system 批：SYSTEM 前缀不参与硬截断（它不是 turn，丢了模型就没人设/工作区约束）。
 		List<Message> system = SystemMessages.leading(messages);

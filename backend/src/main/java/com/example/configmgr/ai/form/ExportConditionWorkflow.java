@@ -6,8 +6,10 @@ import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
 import com.example.configmgr.task.service.TaskSteps;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -38,14 +40,10 @@ import java.util.Set;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class ExportConditionWorkflow {
 
 	private final TaskService taskService;
-
-	@Autowired
-	public ExportConditionWorkflow(TaskService taskService) {
-		this.taskService = taskService;
-	}
 
 	/**
 	 * 工作流计划。
@@ -57,12 +55,16 @@ public class ExportConditionWorkflow {
 	public record Plan(List<ConditionCommand> commands, List<String> undecided, boolean malformed) {
 
 		public Plan {
-			commands = commands == null ? List.of() : List.copyOf(commands);
-			undecided = undecided == null ? List.of() : List.copyOf(undecided);
+			commands = List.copyOf(ObjectUtils.defaultIfNull(commands, List.of()));
+			undecided = List.copyOf(ObjectUtils.defaultIfNull(undecided, List.of()));
 		}
 
 		/** 没有缺口且没有残缺结构：可以推进。 */
 		public boolean readyToAdvance() {
+			return canAdvance();
+		}
+
+		public boolean canAdvance() {
 			return !this.malformed && this.undecided.isEmpty();
 		}
 	}
@@ -89,7 +91,7 @@ public class ExportConditionWorkflow {
 			else if (item != null && item.state() == ConditionAssessment.State.SET) {
 				command = ConditionCommand.set(defCode, rawConditionJson(task, defCode));
 			}
-			else if (atExport && blankCondition(task, defCode)) {
+			else if (atExport && isBlankCondition(task, defCode)) {
 				// 权威步骤 EXPORT 的空白 = 用户留空（全量）
 				command = ConditionCommand.explicitUnset(defCode);
 			}
@@ -109,21 +111,21 @@ public class ExportConditionWorkflow {
 		Set<String> codes = new LinkedHashSet<>();
 		if (task.getItems() != null) {
 			for (TaskItem item : task.getItems()) {
-				if (item != null && item.getDefCode() != null && !item.getDefCode().isBlank()) {
+				if (item != null && StringUtils.isNotBlank(item.getDefCode())) {
 					codes.add(item.getDefCode());
 				}
 			}
 		}
-		return new ArrayList<>(codes);
+		return codes.isEmpty() ? List.of() : new ArrayList<>(codes);
 	}
 
-	private static boolean blankCondition(Task task, String defCode) {
+	private static boolean isBlankCondition(Task task, String defCode) {
 		if (task.getItems() == null || defCode == null) {
 			return false;
 		}
 		for (TaskItem item : task.getItems()) {
 			if (item != null && defCode.equals(item.getDefCode())) {
-				return item.getConditionJson() == null || item.getConditionJson().isBlank();
+				return StringUtils.isBlank(item.getConditionJson());
 			}
 		}
 		return false;
@@ -142,6 +144,6 @@ public class ExportConditionWorkflow {
 	}
 
 	private static String trim(String value) {
-		return value == null ? "" : value.trim();
+		return StringUtils.trimToEmpty(value);
 	}
 }

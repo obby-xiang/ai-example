@@ -22,6 +22,9 @@ import com.example.configmgr.task.service.TaskService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -183,7 +186,7 @@ public class ConditionsForm extends HostForm {
 	 */
 	static String toolCallId(String runId, long taskId, List<String> undecidedDefCodes, List<String> allDefCodes) {
 		String base = toolCallId(runId, taskId);
-		if (undecidedDefCodes == null || undecidedDefCodes.isEmpty() || allDefCodes == null
+		if (CollectionUtils.isEmpty(undecidedDefCodes) || allDefCodes == null
 				|| undecidedDefCodes.size() >= allDefCodes.size()) {
 			// 全部配置项都未决定 = 首张条件表：沿用旧号（既有卡与去重口径不变）
 			return base;
@@ -198,11 +201,11 @@ public class ConditionsForm extends HostForm {
 		}
 		List<String> out = new ArrayList<>();
 		for (var item : task.getItems()) {
-			if (item != null && item.getDefCode() != null && !item.getDefCode().isBlank()) {
+			if (item != null && StringUtils.isNotBlank(item.getDefCode())) {
 				out.add(item.getDefCode());
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/**
@@ -222,7 +225,7 @@ public class ConditionsForm extends HostForm {
 		}
 
 		public ConfirmStepDecision {
-			reasons = reasons == null ? List.of() : List.copyOf(reasons);
+			reasons = List.copyOf(ObjectUtils.defaultIfNull(reasons, List.of()));
 		}
 
 		static ConfirmStepDecision allow() {
@@ -275,7 +278,7 @@ public class ConditionsForm extends HostForm {
 		for (PendingToolCall pending : settledBatch) {
 			if (pending != null && PendingToolCall.FRONTEND_CANCELLED.equals(pending.getStatus())
 					&& GenerativeFormRules.TOOL_NAME.equals(pending.getName())
-					&& isConditionForm(pending.getArguments()) && belongsToTask(pending.getToolCallId(), runId, taskId)) {
+					&& isConditionForm(pending.getArguments()) && isBoundToTask(pending.getToolCallId(), runId, taskId)) {
 				return true;
 			}
 		}
@@ -294,7 +297,7 @@ public class ConditionsForm extends HostForm {
 	 */
 	public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
 			boolean allowUnknownForm) {
-		if (runId == null || context == null || history == null || !parkEnabled()) {
+		if (runId == null || context == null || history == null || !isParkEnabled()) {
 			return false;
 		}
 		try {
@@ -304,75 +307,93 @@ public class ConditionsForm extends HostForm {
 			}
 			Task task = readTask(taskId);
 			if (task == null || task.getType() != Task.TaskType.EXPORT
-					|| !TaskSteps.QUERY_COND.equals(TaskSteps.normalize(task.getCurrentStep()))) {
+					|| !TaskSteps.QUERY_COND.equals(TaskSteps.normalize(task.getCurrentStep()))
+					|| CollectionUtils.isEmpty(task.getItems())) {
 				return false;
 			}
-			if (task.getItems() == null || task.getItems().isEmpty()) {
-				return false;
-			}
-			DraftFacts drafts = draftFacts(runId, task);
-			ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
-			if (plan.malformed()) {
-				// 坏结构不弹表：由向导修正或模型走 set_condition 结构化路径
-				return false;
-			}
-			ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
-			if (feedback.blank()) {
+			QueryCondEvaluation evaluation = evaluateQueryCond(runId, taskId, task);
+			if (evaluation.isAdvance()) {
 				// 明确留空已覆盖当前全部缺口：由宿主确定推进，仍由前端 persistStepData 落库。
-				return parkConditionAdvanceIfDue(runId, taskId, task, plan.undecided(), history);
+				return shouldParkConditionAdvance(runId, taskId, task, evaluation.plan().undecided(), history);
 			}
-			if (feedback.nonEmpty()) {
-				// 非空答案待模型解析：不得用 create_task 候选覆盖，也不自动重问。
+			if (evaluation.isSkip()) {
 				return false;
 			}
-			CandidateDispatch candidates = dispatchCreateTaskCandidates(runId, taskId, context, task, drafts);
+			CandidateDispatch candidates = dispatchCreateTaskCandidates(runId, taskId, context, task, evaluation.drafts());
 			if (!candidates.drafts().isEmpty()) {
-				return parkAll(runId, history, candidates.drafts());
+				return shouldParkAll(runId, history, candidates.drafts());
 			}
-			if (candidates.failure()) {
+			if (candidates.isFailure()) {
 				// 内部失败口径：不交代表单、不弹表、不写库；confirm_step 会按同一口径拒绝
 				log.warn("create_task condition candidate could not build a page draft (internal failure; no condition form) runId={} taskId={}", runId,
 						taskId);
-				return false;
+				return true;
 			}
-			List<String> remaining = subtract(plan.undecided(), drafts.settled());
-			if (remaining.isEmpty()) {
-				// 任务已有条件（已落库）/ 本轮已有成功草案：直接推进，不弹表
-				return false;
-			}
-			if (attemptedAny(remaining, drafts)) {
-				// 草案已下发但执行失败：内部失败，不再询问用户
-				log.warn("condition draft failed; host will not show the condition form runId={} taskId={} defs={}", runId, taskId, remaining);
-				return false;
-			}
-			if (feedback.cancelled()) {
-				// 取消：不自动重问（恢复通道由 confirm_step 拒绝说明）
-				return false;
-			}
-			if (!allowUnknownForm) {
-				// 刚进入条件步骤：先把"用户原话里已给出的筛选值"交给模型用既有 set_condition 通道结构化
-				// （披露面与执行面据此只留查定义/设置条件/推进）。未知条件仍由后续交棒或正文收尾收集一次。
-				Map<String, Object> extra = new LinkedHashMap<>(context.getExtra());
-				extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
-				context.setExtra(extra);
-				return false;
-			}
-			String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
-			if (alreadyIssued(runId, toolCallId)) {
-				return false;
-			}
-			Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
-			if (arguments.isEmpty()) {
-				return false;
-			}
-			log.info("QUERY_COND with undecided conditions; host parks one condition form runId={} taskId={} defs={}", runId, taskId,
-					remaining);
-			return park(runId, history, frontendForm(toolCallId, arguments.get()));
+			return shouldParkUnknownConditionForm(runId, taskId, task, context, evaluation, history, allowUnknownForm);
 		}
 		catch (RuntimeException ex) {
 			log.warn("condition form for QUERY_COND was not parked (continue on existing path) runId={}", runId, ex);
 			return false;
 		}
+	}
+
+	private QueryCondEvaluation evaluateQueryCond(String runId, long taskId, Task task) {
+		DraftFacts drafts = draftFacts(runId, task);
+		ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
+		if (plan.malformed()) {
+			// 坏结构不弹表：由向导修正或模型走 set_condition 结构化路径
+			return new QueryCondEvaluation(drafts, plan, null, false, true);
+		}
+		ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
+		if (feedback.blank()) {
+			return new QueryCondEvaluation(drafts, plan, feedback, true, false);
+		}
+		if (feedback.nonEmpty()) {
+			// 非空答案待模型解析：不得用 create_task 候选覆盖，也不自动重问。
+			return new QueryCondEvaluation(drafts, plan, feedback, false, true);
+		}
+		return new QueryCondEvaluation(drafts, plan, feedback, false, false);
+	}
+
+	private boolean shouldParkUnknownConditionForm(String runId, long taskId, Task task, AiContext context,
+			QueryCondEvaluation evaluation, List<Message> history, boolean allowUnknownForm) {
+		List<String> remaining = subtract(evaluation.plan().undecided(), evaluation.drafts().settled());
+		if (remaining.isEmpty()) {
+			// 任务已有条件（已落库）/ 本轮已有成功草案：直接推进，不弹表
+			return false;
+		}
+		if (hasAttemptedAny(remaining, evaluation.drafts())) {
+			// 草案已下发但执行失败：内部失败，不再询问用户
+			log.warn("condition draft failed; host will not show the condition form runId={} taskId={} defs={}", runId, taskId, remaining);
+			return false;
+		}
+		if (evaluation.feedback().cancelled()) {
+			// 取消：不自动重问（恢复通道由 confirm_step 拒绝说明）
+			return false;
+		}
+		if (!allowUnknownForm) {
+			// 刚进入条件步骤：先把"用户原话里已给出的筛选值"交给模型用既有 set_condition 通道结构化
+			// （披露面与执行面据此只留查定义/设置条件/推进）。未知条件仍由后续交棒或正文收尾收集一次。
+			Map<String, Object> extra = new LinkedHashMap<>(context.getExtra());
+			extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
+			context.setExtra(extra);
+			return false;
+		}
+		String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
+		if (hasIssued(runId, toolCallId)) {
+			return false;
+		}
+		Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
+		if (arguments.isEmpty()) {
+			return false;
+		}
+		log.info("QUERY_COND with undecided conditions; host parks one condition form runId={} taskId={} defs={}", runId, taskId,
+				remaining);
+		return shouldPark(runId, history, frontendForm(toolCallId, arguments.get()));
+	}
+
+	private record QueryCondEvaluation(DraftFacts drafts, ExportConditionWorkflow.Plan plan, ConditionFeedback feedback,
+			boolean isAdvance, boolean isSkip) {
 	}
 
 	/**
@@ -442,51 +463,15 @@ public class ConditionsForm extends HostForm {
 			if (taskId == null) {
 				return ConfirmStepDecision.allow();
 			}
-			Task task;
-			try {
-				task = readTask(taskId);
+			ConfirmTaskEvaluation evaluation = evaluateConfirmTask(context, taskId, pending);
+			if (evaluation.earlyExit() != null) {
+				return evaluation.earlyExit();
 			}
-			catch (RuntimeException ex) {
-				if (!conditionGateExpected(context)) {
-					log.warn("could not read task; confirm_step continues on the existing path runId={} taskId={}", runId, taskId,
-							ex);
-					return ConfirmStepDecision.allow();
-				}
-				// F3：读异常时无法确认条件状态 —— 条件链上必须 fail-closed，不能按全量放行
-				log.warn("confirm_step condition recheck could not read task; rejected with no side effects runId={} taskId={}", runId, taskId,
-						ex);
-				return readFailureDecision(taskId);
-			}
-			if (task == null || task.getType() != Task.TaskType.EXPORT) {
-				return ConfirmStepDecision.allow();
-			}
-			String step = trim(task.getCurrentStep());
-			if (step.isEmpty()) {
-				// 步骤未知（旧任务/直调）：不据此新增拒绝或表单
-				return ConfirmStepDecision.allow();
-			}
-			String target = targetStep(pending);
-			if (TaskSteps.SELECT_DEFS.equals(step) && TaskSteps.EXPORT.equals(target)) {
-				log.info("confirm_step tried to jump from SELECT_DEFS to EXPORT; rejected with no side effects runId={} taskId={}", runId,
-						taskId);
-				return ConfirmStepDecision.reject(ErrorCodes.STEP_NOT_IN_SEQUENCE,
-						"不能从 SELECT_DEFS 直接跳到 EXPORT（工具未执行）",
-						List.of("当前步骤 SELECT_DEFS，EXPORT 不是下一步：直接跳步会跳过 QUERY_COND 与条件收集",
-								"下一步：先 confirm_step（不传 step）推进到 QUERY_COND，按条件链处理后再推进到 EXPORT"));
-			}
-			if (!TaskSteps.QUERY_COND.equals(step)) {
-				// 只在真正会发生 QUERY_COND→EXPORT 的推进上做条件兜底；EXPORT 及之后一律放行
-				return ConfirmStepDecision.allow();
-			}
-			if (task.getItems() == null || task.getItems().isEmpty()) {
-				// 没有已选配置项就没有"条件"可收集（这类任务本就推进不下去）
-				return ConfirmStepDecision.allow();
-			}
-			return conditionGate(runId, taskId, task, context, pending, history, assistantContent, assistantMetadata,
-					allowPark);
+			return conditionGate(runId, taskId, evaluation.task(), context, pending, history, assistantContent,
+					assistantMetadata, allowPark);
 		}
 		catch (RuntimeException ex) {
-			if (!conditionGateExpected(context)) {
+			if (!isConditionGateExpected(context)) {
 				log.warn("confirm_step condition recheck did not complete (continue on existing path) runId={}", runId, ex);
 				return ConfirmStepDecision.allow();
 			}
@@ -498,12 +483,56 @@ public class ConditionsForm extends HostForm {
 		}
 	}
 
+	private ConfirmTaskEvaluation evaluateConfirmTask(AiContext context, long taskId, PendingToolCall pending) {
+		Task task;
+		try {
+			task = readTask(taskId);
+		}
+		catch (RuntimeException ex) {
+			if (!isConditionGateExpected(context)) {
+				log.warn("could not read task; confirm_step continues on the existing path taskId={}", taskId, ex);
+				return new ConfirmTaskEvaluation(null, ConfirmStepDecision.allow());
+			}
+			// F3：读异常时无法确认条件状态 —— 条件链上必须 fail-closed，不能按全量放行
+			log.warn("confirm_step condition recheck could not read task; rejected with no side effects taskId={}", taskId, ex);
+			return new ConfirmTaskEvaluation(null, readFailureDecision(taskId));
+		}
+		if (task == null || task.getType() != Task.TaskType.EXPORT) {
+			return new ConfirmTaskEvaluation(null, ConfirmStepDecision.allow());
+		}
+		String step = trim(task.getCurrentStep());
+		if (step.isEmpty()) {
+			// 步骤未知（旧任务/直调）：不据此新增拒绝或表单
+			return new ConfirmTaskEvaluation(null, ConfirmStepDecision.allow());
+		}
+		String target = targetStep(pending);
+		if (TaskSteps.SELECT_DEFS.equals(step) && TaskSteps.EXPORT.equals(target)) {
+			log.info("confirm_step tried to jump from SELECT_DEFS to EXPORT; rejected with no side effects taskId={}", taskId);
+			return new ConfirmTaskEvaluation(null, ConfirmStepDecision.reject(ErrorCodes.STEP_NOT_IN_SEQUENCE,
+					"不能从 SELECT_DEFS 直接跳到 EXPORT（工具未执行）",
+					List.of("当前步骤 SELECT_DEFS，EXPORT 不是下一步：直接跳步会跳过 QUERY_COND 与条件收集",
+							"下一步：先 confirm_step（不传 step）推进到 QUERY_COND，按条件链处理后再推进到 EXPORT")));
+		}
+		if (!TaskSteps.QUERY_COND.equals(step)) {
+			// 只在真正会发生 QUERY_COND→EXPORT 的推进上做条件兜底；EXPORT 及之后一律放行
+			return new ConfirmTaskEvaluation(null, ConfirmStepDecision.allow());
+		}
+		if (CollectionUtils.isEmpty(task.getItems())) {
+			// 没有已选配置项就没有"条件"可收集（这类任务本就推进不下去）
+			return new ConfirmTaskEvaluation(null, ConfirmStepDecision.allow());
+		}
+		return new ConfirmTaskEvaluation(task, null);
+	}
+
+	private record ConfirmTaskEvaluation(Task task, ConfirmStepDecision earlyExit) {
+	}
+
 	/**
 	 * 上下文是否落在"导出 QUERY_COND"这个条件链上（读任务失败/复核异常时的 fail-closed 判据）。
 	 *
 	 * <p>只看上下文：任务本身读不出来时这是唯一可用的事实。导入没有 QUERY_COND 步，因此不会误伤。
 	 */
-	private static boolean conditionGateExpected(AiContext context) {
+	private static boolean isConditionGateExpected(AiContext context) {
 		if (context == null) {
 			return false;
 		}
@@ -529,8 +558,8 @@ public class ConditionsForm extends HostForm {
 		}
 	}
 
-	/** 候选下发结果：{@code failure} = 绑定/校验/序列化内部失败（不弹表、不写库）。 */
-	private record CandidateDispatch(boolean failure, List<PendingToolCall> drafts) {
+	/** 候选下发结果：{@code isFailure} = 绑定/校验/序列化内部失败（不弹表、不写库）。 */
+	private record CandidateDispatch(boolean isFailure, List<PendingToolCall> drafts) {
 
 		static CandidateDispatch none() {
 			return new CandidateDispatch(false, List.of());
@@ -561,7 +590,7 @@ public class ConditionsForm extends HostForm {
 	private CandidateDispatch dispatchCreateTaskCandidates(String runId, long taskId, AiContext context, Task task,
 			DraftFacts drafts) {
 		CandidateSource source = resolveCandidateSource(runId, taskId, context);
-		if (source.failure()) {
+		if (source.isFailure()) {
 			// 绑定错误/读取基础设施故障：内部失败口径（不弹表、不写库）；WARN 已在解析处留痕
 			return new CandidateDispatch(true, List.of());
 		}
@@ -583,7 +612,7 @@ public class ConditionsForm extends HostForm {
 		Map<String, TaskItem> itemsByDefCode = new LinkedHashMap<>();
 		if (task != null && task.getItems() != null) {
 			for (TaskItem item : task.getItems()) {
-				if (item != null && item.getDefCode() != null && !item.getDefCode().isBlank()) {
+				if (item != null && StringUtils.isNotBlank(item.getDefCode())) {
 					itemsByDefCode.put(item.getDefCode(), item);
 				}
 			}
@@ -592,47 +621,58 @@ public class ConditionsForm extends HostForm {
 		List<PendingToolCall> draftsToPark = new ArrayList<>();
 		Set<String> issued = new LinkedHashSet<>(drafts.issued());
 		for (String defCode : candidateDefCodes) {
-			TaskItem item = itemsByDefCode.get(defCode);
-			if (item == null) {
-				log.warn("create_task condition candidate defCode={} is not in the current task entries (binding error; no draft) runId={} taskId={}",
-						defCode, runId, taskId);
+			DraftOutcome outcome = buildCandidateDraft(runId, taskId, defCode, conditions, itemsByDefCode, issued);
+			if (outcome.isFailure()) {
 				failure = true;
-				continue;
 			}
-			if (item.getConditionJson() != null && !item.getConditionJson().isBlank()) {
-				// 任务条目已有条件事实（含明确的 "{}"）：不覆盖用户/前端的答案
-				continue;
+			if (outcome.draft() != null) {
+				draftsToPark.add(outcome.draft());
+				issued.add(defCode);
 			}
-			if (issued.contains(defCode)) {
-				// 已有草案（成功/失败/待回灌）：确定性 id 幂等，不重复下发
-				continue;
-			}
-			String draftId = draftToolCallId(runId, taskId, defCode);
-			if (alreadyIssued(runId, draftId)) {
-				// 确定性 toolCallId 已在待决条目里：重复调用不得再下发一次
-				continue;
-			}
-			String probe = conditionArguments(defCode, conditions);
-			if (probe == null) {
-				log.warn("create_task structured conditions are not serializable; no draft created runId={} taskId={} defCode={}", runId,
-						taskId, defCode);
-				failure = true;
-				continue;
-			}
-			FrontendToolGuard.Verdict verdict = this.wizardActionGuard
-				.inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
-			if (!verdict.accepted()) {
-				log.warn("create_task structured conditions failed the same set_condition validation; no draft created runId={} taskId={} defCode={} codes={}", runId, taskId, defCode, verdict.issues().stream().map(i -> i.code()).toList());
-				failure = true;
-				continue;
-			}
-			PendingToolCall draft = frontendTool(draftId, AiToolNames.SET_CONDITION, probe);
-			bindDraft(draft, runId, taskId, defCode);
-			applyToolTimeout(draft);
-			draftsToPark.add(draft);
-			issued.add(defCode);
 		}
 		return new CandidateDispatch(failure, List.copyOf(draftsToPark));
+	}
+
+	private DraftOutcome buildCandidateDraft(String runId, long taskId, String defCode, Map<?, ?> conditions,
+			Map<String, TaskItem> itemsByDefCode, Set<String> issued) {
+		TaskItem item = itemsByDefCode.get(defCode);
+		if (item == null) {
+			log.warn("create_task condition candidate defCode={} is not in the current task entries (binding error; no draft) runId={} taskId={}",
+					defCode, runId, taskId);
+			return new DraftOutcome(null, true);
+		}
+		if (StringUtils.isNotBlank(item.getConditionJson())) {
+			// 任务条目已有条件事实（含明确的 "{}"）：不覆盖用户/前端的答案
+			return new DraftOutcome(null, false);
+		}
+		if (issued.contains(defCode)) {
+			// 已有草案（成功/失败/待回灌）：确定性 id 幂等，不重复下发
+			return new DraftOutcome(null, false);
+		}
+		String draftId = draftToolCallId(runId, taskId, defCode);
+		if (hasIssued(runId, draftId)) {
+			// 确定性 toolCallId 已在待决条目里：重复调用不得再下发一次
+			return new DraftOutcome(null, false);
+		}
+		String probe = conditionArguments(defCode, conditions);
+		if (probe == null) {
+			log.warn("create_task structured conditions are not serializable; no draft created runId={} taskId={} defCode={}", runId,
+					taskId, defCode);
+			return new DraftOutcome(null, true);
+		}
+		FrontendToolGuard.Verdict verdict = this.wizardActionGuard
+			.inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
+		if (!verdict.accepted()) {
+			log.warn("create_task structured conditions failed the same set_condition validation; no draft created runId={} taskId={} defCode={} codes={}", runId, taskId, defCode, verdict.issues().stream().map(i -> i.code()).toList());
+			return new DraftOutcome(null, true);
+		}
+		PendingToolCall draft = frontendTool(draftId, AiToolNames.SET_CONDITION, probe);
+		bindDraft(draft, runId, taskId, defCode);
+		applyToolTimeout(draft);
+		return new DraftOutcome(draft, false);
+	}
+
+	private record DraftOutcome(PendingToolCall draft, boolean isFailure) {
 	}
 
 	/**
@@ -647,7 +687,7 @@ public class ConditionsForm extends HostForm {
 	 * <p><b>空 {@code conditions={}} 不表示已知</b>：任何一层为空都继续看下一层；任务级草案的写侧
 	 * 也不会用空值覆盖明确的非空候选。
 	 *
-	 * <p><b>读取异常 = 内部失败</b>：Redis 读失败/草案内容损坏一律返回 {@code failure}
+	 * <p><b>读取异常 = 内部失败</b>：Redis 读失败/草案内容损坏一律返回 {@code isFailure}
 	 * （不弹条件表、不写库、不再问用户），绝不把基础设施故障伪装成"条件未知"。
 	 */
 	private CandidateSource resolveCandidateSource(String runId, long taskId, AiContext context) {
@@ -659,8 +699,8 @@ public class ConditionsForm extends HostForm {
 					taskId, runId);
 			return CandidateSource.internalFailure();
 		}
-		Map<?, ?> extraConditions = extra == null ? Map.of()
-				: conditionsOf(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS));
+		Map<?, ?> extraConditions = conditionsOf(ObjectUtils.defaultIfNull(extra, Map.of())
+				.get(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS));
 		if (boundTaskId != null && !extraConditions.isEmpty()) {
 			// 绑定确认过的即时事实：defCodes 也只认 extra（缺 = 由内部失败口径收敛）
 			return new CandidateSource(false, stringList(extra.get(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES)),
@@ -668,7 +708,7 @@ public class ConditionsForm extends HostForm {
 		}
 		// extra 缺失 / 绑定信息丢失：回落到按任务号归属的事实
 		CandidateSource fallback = taskScopedCandidate(runId, taskId);
-		if (fallback.failure()) {
+		if (fallback.isFailure()) {
 			return fallback;
 		}
 		if (!fallback.conditions().isEmpty()) {
@@ -690,11 +730,11 @@ public class ConditionsForm extends HostForm {
 	/** 按任务号归属的候选事实：本轮已结算 {@code create_task} 原始入参优先，其次会话级 Redis 草案。 */
 	private CandidateSource taskScopedCandidate(String runId, long taskId) {
 		CandidateSource settled = settledCreateTaskCandidate(runId, taskId);
-		if (settled.failure()) {
+		if (settled.isFailure()) {
 			return settled;
 		}
 		CandidateSource draft = taskDraftCandidate(runId, taskId);
-		if (draft.failure()) {
+		if (draft.isFailure()) {
 			return draft;
 		}
 		return new CandidateSource(false, settled.defCodes().isEmpty() ? draft.defCodes() : settled.defCodes(),
@@ -716,7 +756,7 @@ public class ConditionsForm extends HostForm {
 					ex);
 			return CandidateSource.internalFailure();
 		}
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (pending == null || !AiToolNames.CREATE_TASK.equals(pending.getName()) || !pending.resolved()
 					|| pending.effectiveOutcome() != ToolOutcome.OK) {
 				continue;
@@ -785,11 +825,11 @@ public class ConditionsForm extends HostForm {
 				out.add(value);
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
-	/** create_task 候选来源：{@code failure} = 绑定/结构/读取的内部失败（不弹表、不写库）。 */
-	private record CandidateSource(boolean failure, List<String> defCodes, Map<?, ?> conditions) {
+	/** create_task 候选来源：{@code isFailure} = 绑定/结构/读取的内部失败（不弹表、不写库）。 */
+	private record CandidateSource(boolean isFailure, List<String> defCodes, Map<?, ?> conditions) {
 
 		static CandidateSource none() {
 			return new CandidateSource(false, List.of(), Map.of());
@@ -800,8 +840,8 @@ public class ConditionsForm extends HostForm {
 		}
 
 		CandidateSource {
-			defCodes = defCodes == null ? List.of() : List.copyOf(defCodes);
-			conditions = conditions == null ? Map.of() : conditions;
+			defCodes = List.copyOf(ObjectUtils.defaultIfNull(defCodes, List.of()));
+			conditions = ObjectUtils.defaultIfNull(conditions, Map.of());
 		}
 	}
 
@@ -844,8 +884,8 @@ public class ConditionsForm extends HostForm {
 			log.warn("could not read condition draft facts (treated as no draft) runId={}", runId, ex);
 			return DraftFacts.none();
 		}
-		long taskId = task.getId() == null ? 0L : task.getId();
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		long taskId = ObjectUtils.defaultIfNull(task.getId(), 0L);
+		for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
 					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
 				continue;
@@ -910,7 +950,7 @@ public class ConditionsForm extends HostForm {
 		if (task == null || !taskDefCodesFor(task).contains(defCode)) {
 			return null;
 		}
-		long taskId = task.getId() == null ? 0L : task.getId();
+		long taskId = ObjectUtils.defaultIfNull(task.getId(), 0L);
 		List<PendingToolCall> pendings;
 		try {
 			pendings = this.store.pendingsLenient(runId);
@@ -918,7 +958,12 @@ public class ConditionsForm extends HostForm {
 		catch (RuntimeException ex) {
 			return null;
 		}
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		return findSettledReplay(runId, taskId, defCode, conditions, pendings);
+	}
+
+	private static String findSettledReplay(String runId, long taskId, String defCode, JsonNode conditions,
+			List<PendingToolCall> pendings) {
+		for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
 					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
 					|| !PendingToolCall.FRONTEND_RESULT.equals(pending.getStatus())
@@ -926,16 +971,16 @@ public class ConditionsForm extends HostForm {
 				continue;
 			}
 			if (!defCode.equals(defCodeOf(pending.getArguments()))
-					|| !sameConditions(pending.getArguments(), conditions)
+					|| !isSameConditions(pending.getArguments(), conditions)
 					|| !isBoundDraft(pending, runId, taskId, defCode)) {
 				continue;
 			}
-			return pending.getResultText() == null ? "" : pending.getResultText();
+			return StringUtils.defaultString(pending.getResultText());
 		}
 		return null;
 	}
 
-	private static boolean sameConditions(String argumentsJson, JsonNode conditions) {
+	private static boolean isSameConditions(String argumentsJson, JsonNode conditions) {
 		JsonNode arguments = parseJson(argumentsJson);
 		JsonNode other = arguments == null ? null : arguments.get("conditions");
 		return other != null && other.equals(conditions);
@@ -963,11 +1008,11 @@ public class ConditionsForm extends HostForm {
 				out.add(defCode);
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/** 这些配置项里是否有已下发但未成功结算的草案（内部失败，不再询问用户）。 */
-	private static boolean attemptedAny(List<String> defCodes, DraftFacts drafts) {
+	private static boolean hasAttemptedAny(List<String> defCodes, DraftFacts drafts) {
 		for (String defCode : defCodes) {
 			if (drafts.attempted().contains(defCode)) {
 				return true;
@@ -991,7 +1036,7 @@ public class ConditionsForm extends HostForm {
 				out.add(value);
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/** 服务端 extra 里的任务号（数字或数字文本；其它形态 = 没有绑定）。 */
@@ -1013,20 +1058,33 @@ public class ConditionsForm extends HostForm {
 	private ConfirmStepDecision conditionGate(String runId, long taskId, Task task, AiContext context,
 			PendingToolCall pending, List<Message> history, String assistantContent,
 			Map<String, Object> assistantMetadata, boolean allowPark) {
+		ConditionGateFacts facts = evaluateConditionGate(runId, taskId, task);
+		if (facts.earlyExit() != null) {
+			return facts.earlyExit();
+		}
+		ConditionGateCandidates candidates = dispatchGateCandidates(runId, taskId, context, task, facts,
+				history, assistantContent, assistantMetadata, allowPark);
+		if (candidates.earlyExit() != null) {
+			return candidates.earlyExit();
+		}
+		return parkConditionForm(runId, taskId, task, facts, history, assistantContent, assistantMetadata, allowPark);
+	}
+
+	private ConditionGateFacts evaluateConditionGate(String runId, long taskId, Task task) {
 		// ① 草案事实只来自 Redis 待决条目：任务 conditionJson 已落库条件 + 本轮成功的 set_condition 草案，
 		// 以及表单明确留空。坏 JSON/残缺结构明确拒绝，不按全量放行。
 		DraftFacts drafts = draftFacts(runId, task);
 		ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
 		if (plan.malformed()) {
 			log.info("confirm_step saw an incomplete condition structure; rejected with no side effects runId={} taskId={}", runId, taskId);
-			return ConfirmStepDecision.reject(ErrorCodes.CONDITION_JSON_INVALID,
+			return new ConditionGateFacts(null, ConfirmStepDecision.reject(ErrorCodes.CONDITION_JSON_INVALID,
 					"条件结构无法解析，confirm_step 未执行（未向前端推进）",
 					List.of("任务条目里存在坏 JSON/未知键/残缺结构，不能按全量放行",
-							"下一步：让用户在向导里重新设置合法条件（或清空为明确全量）后再 confirm_step"));
+							"下一步：让用户在向导里重新设置合法条件（或清空为明确全量）后再 confirm_step")));
 		}
 		if (plan.undecided().isEmpty()) {
 			// 任务条目已有条件事实（已设置/明确不设）：历史回灌不再挡路
-			return ConfirmStepDecision.allow();
+			return new ConditionGateFacts(null, ConfirmStepDecision.allow());
 		}
 		ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
 		List<String> remaining = subtract(plan.undecided(), drafts.settled());
@@ -1034,55 +1092,66 @@ public class ConditionsForm extends HostForm {
 		// 后端<b>不写</b> "{}"，由前端在离开 QUERY_COND 时经 persistStepData 提交。新增项必须重新收集。
 		// 留空也压过 create_task 候选：用户的最新明确回答优先。
 		if (feedback.blank()) {
-			return ConfirmStepDecision.allow();
+			return new ConditionGateFacts(null, ConfirmStepDecision.allow());
 		}
 		// ③ 非空回灌必须先由模型解析成 set_condition 草案；在此之前不得下发候选或换卡重问。
 		// 拒绝清单只点名**还没有草案**的剩余项：已按 set_condition(defCode, {}) 结算的配置项不算缺口。
 		if (feedback.nonEmpty() && !feedback.handled()) {
 			log.info("confirm_step saw non-empty condition text without a matching draft; rejected with no side effects runId={} taskId={}", runId, taskId);
-			return unparsedFeedbackDecision(remaining);
+			return new ConditionGateFacts(null, unparsedFeedbackDecision(remaining));
 		}
+		return new ConditionGateFacts(drafts, feedback, remaining, null);
+	}
+
+	private ConditionGateCandidates dispatchGateCandidates(String runId, long taskId, AiContext context, Task task,
+			ConditionGateFacts facts, List<Message> history, String assistantContent,
+			Map<String, Object> assistantMetadata, boolean allowPark) {
 		// ④ 合法 create_task 候选：复用前端 set_condition 通道生成页面草案（不弹条件表、不写库）
-		CandidateDispatch candidates = parkEnabled()
-				? dispatchCreateTaskCandidates(runId, taskId, context, task, drafts)
+		CandidateDispatch candidates = isParkEnabled()
+				? dispatchCreateTaskCandidates(runId, taskId, context, task, facts.drafts())
 				: CandidateDispatch.none();
 		if (!candidates.drafts().isEmpty()) {
 			if (!allowPark) {
 				// F4：混批不能在这里 park（同样会先外置整批历史、吞掉同批调用）
 				log.info("confirm_step in a mixed batch would need to issue condition drafts; rejected with no side effects (call it alone) runId={} taskId={}",
 						runId, taskId);
-				return mixedBatchDecision();
+				return new ConditionGateCandidates(mixedBatchDecision());
 			}
-			boolean parked = parkAll(runId, history, candidates.drafts(), assistantContent, assistantMetadata);
+			boolean parked = shouldParkAll(runId, history, candidates.drafts(), assistantContent, assistantMetadata);
 			if (parked) {
 				log.info("issuing condition drafts before confirm_step runId={} taskId={} drafts={}", runId, taskId,
 						candidates.drafts().size());
-				return ConfirmStepDecision.parkedDecision();
+				return new ConditionGateCandidates(ConfirmStepDecision.parkedDecision());
 			}
-			return internalConditionFailure("条件草案下发失败，confirm_step 未执行（未向前端推进）",
+			return new ConditionGateCandidates(internalConditionFailure("条件草案下发失败，confirm_step 未执行（未向前端推进）",
 					List.of("create_task 的结构化条件已通过校验，但页面草案没有成功挂起（内部执行失败）",
-							"不会改用条件表再次询问用户；请重试 confirm_step"));
+							"不会改用条件表再次询问用户；请重试 confirm_step")));
 		}
-		if (candidates.failure()) {
+		if (candidates.isFailure()) {
 			// 绑定错误/校验失败：WARN 已记录；内部失败口径，绝不转化成"再问用户一次"
-			return internalConditionFailure("条件候选无法生成页面草案，confirm_step 未执行（未向前端推进）",
+			return new ConditionGateCandidates(internalConditionFailure("条件候选无法生成页面草案，confirm_step 未执行（未向前端推进）",
 					List.of("create_task 的结构化条件绑定/校验失败（内部失败口径，不弹条件表）",
-							"不会改用条件表再次询问用户；请由用户或向导修正条件后再 confirm_step"));
+							"不会改用条件表再次询问用户；请由用户或向导修正条件后再 confirm_step")));
 		}
-		if (remaining.isEmpty()) {
+		if (facts.remaining().isEmpty()) {
 			// 本轮草案已覆盖全部缺口：放行；前端 persistStepData 负责真正的提交
-			return ConfirmStepDecision.allow();
+			return new ConditionGateCandidates(ConfirmStepDecision.allow());
 		}
+		return new ConditionGateCandidates(null);
+	}
+
+	private ConfirmStepDecision parkConditionForm(String runId, long taskId, Task task, ConditionGateFacts facts,
+			List<Message> history, String assistantContent, Map<String, Object> assistantMetadata, boolean allowPark) {
 		// ⑤ 已下发但执行失败的草案：内部失败，不再把问题转回用户
-		if (attemptedAny(remaining, drafts)) {
+		if (hasAttemptedAny(facts.remaining(), facts.drafts())) {
 			log.warn("condition draft execution failed; rejected with no side effects (no further user prompt) runId={} taskId={} defs={}", runId,
-					taskId, remaining);
+					taskId, facts.remaining());
 			return internalConditionFailure("条件草案执行失败，confirm_step 未执行（未向前端推进）",
 					List.of("本轮已下发的 set_condition 草案没有成功结算（内部执行失败）",
 							"不会改用条件表再次询问用户；请由用户或向导修正条件后再 confirm_step"));
 		}
 		// ⑥ 取消不自动重问，但也不能放行：条件仍未决定，confirm_step 零副作用拒绝并给出两条明确出口
-		if (feedback.cancelled()) {
+		if (facts.feedback().cancelled()) {
 			log.info("condition form was cancelled and conditions are still undecided; rejected with no side effects runId={} taskId={}", runId, taskId);
 			return ConfirmStepDecision.reject(ErrorCodes.FORM_RESULT_REJECTED,
 					"条件仍未决定（条件表已取消），confirm_step 未执行（未向前端推进）",
@@ -1090,21 +1159,8 @@ public class ConditionsForm extends HostForm {
 							"恢复通道：由用户下一轮明确选择——给出筛选条件（模型先 set_condition）"
 									+ "或明确按全量导出；本 run 不再自动弹条件表"));
 		}
-		// ⑦ 真正未知的条件：同一缺口只问一次。
-		//
-		// F3：以下每条"收不到答案"的路径都必须 fail-closed —— 条件仍 UNDECIDED 时不能 allow
-		// （allow 会让 confirm_step 把一次"宿主没问成"变成全量导出）。只有 SET / EXPLICIT_UNSET /
-		// 已结算草案 / 明确留空才走上面的放行分支。
-		String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
-		if (!parkEnabled()) {
-			log.warn("conditions undecided but host form parking is disabled; rejected with no side effects runId={} taskId={} defs={}", runId, taskId,
-					remaining);
-			return internalConditionFailure("条件未决定且宿主表单挂起未启用（app.ai.park.enabled=false），"
-					+ "confirm_step 未执行（未向前端推进）",
-					List.of("条件仍未决定，不能按全量推进",
-							"下一步：先 set_condition 给出结构化条件（明确不设请对每个 defCode 传 {}），"
-									+ "或让用户明确按全量导出后再 confirm_step",
-							"宿主不会在未挂起状态下等待用户填表"));
+		if (!isParkEnabled()) {
+			return conditionParkDisabled(runId, taskId, facts.remaining());
 		}
 		if (!allowPark) {
 			// F4：混批 park 会先外置整批历史，吞掉同批其它调用的卡/回执 —— 改成让模型分批
@@ -1112,7 +1168,28 @@ public class ConditionsForm extends HostForm {
 					taskId);
 			return mixedBatchDecision();
 		}
-		if (alreadyIssued(runId, toolCallId)) {
+		return parkConditionFormOnce(runId, taskId, task, facts.remaining(), history, assistantContent, assistantMetadata);
+	}
+
+	private ConfirmStepDecision conditionParkDisabled(String runId, long taskId, List<String> remaining) {
+		// ⑦ 真正未知的条件：同一缺口只问一次。
+		// F3：以下每条"收不到答案"的路径都必须 fail-closed —— 条件仍 UNDECIDED 时不能 allow
+		// （allow 会让 confirm_step 把一次"宿主没问成"变成全量导出）。只有 SET / EXPLICIT_UNSET /
+		// 已结算草案 / 明确留空才走上面的放行分支。
+		log.warn("conditions undecided but host form parking is disabled; rejected with no side effects runId={} taskId={} defs={}", runId, taskId,
+				remaining);
+		return internalConditionFailure("条件未决定且宿主表单挂起未启用（app.ai.park.enabled=false），"
+				+ "confirm_step 未执行（未向前端推进）",
+				List.of("条件仍未决定，不能按全量推进",
+						"下一步：先 set_condition 给出结构化条件（明确不设请对每个 defCode 传 {}），"
+								+ "或让用户明确按全量导出后再 confirm_step",
+						"宿主不会在未挂起状态下等待用户填表"));
+	}
+
+	private ConfirmStepDecision parkConditionFormOnce(String runId, long taskId, Task task, List<String> remaining,
+			List<Message> history, String assistantContent, Map<String, Object> assistantMetadata) {
+		String toolCallId = toolCallId(runId, taskId, remaining, taskDefCodesFor(task));
+		if (hasIssued(runId, toolCallId)) {
 			log.warn("a condition form for the same gap exists and is unsettled; rejected with no side effects (no second form) runId={} taskId={} toolCallId={}",
 					runId, taskId, toolCallId);
 			return internalConditionFailure("同一缺口的条件表已下发但未结算（或已作废），条件仍未决定，"
@@ -1132,7 +1209,7 @@ public class ConditionsForm extends HostForm {
 		}
 		log.info("conditions undecided before confirm_step; collecting optional conditions once instead runId={} taskId={} defs={}", runId, taskId,
 				remaining);
-		boolean parked = park(runId, history, frontendForm(toolCallId, arguments.get()), assistantContent,
+		boolean parked = shouldPark(runId, history, frontendForm(toolCallId, arguments.get()), assistantContent,
 				assistantMetadata);
 		if (!parked) {
 			// F3：挂起写失败（saveSuspended/converge 失败）同样不能 allow
@@ -1144,6 +1221,17 @@ public class ConditionsForm extends HostForm {
 							"不会在条件未决定时按全量推进"));
 		}
 		return ConfirmStepDecision.parkedDecision();
+	}
+
+	private record ConditionGateFacts(DraftFacts drafts, ConditionFeedback feedback, List<String> remaining,
+			ConfirmStepDecision earlyExit) {
+
+		private ConditionGateFacts(ConfirmStepDecision earlyExit) {
+			this(null, null, null, earlyExit);
+		}
+	}
+
+	private record ConditionGateCandidates(ConfirmStepDecision earlyExit) {
 	}
 
 	private static ConfirmStepDecision internalConditionFailure(String message, List<String> reasons) {
@@ -1184,20 +1272,20 @@ public class ConditionsForm extends HostForm {
 		}
 	}
 
-	private boolean parkConditionAdvanceIfDue(String runId, long taskId, Task task, List<String> undecidedDefCodes,
+	private boolean shouldParkConditionAdvance(String runId, long taskId, Task task, List<String> undecidedDefCodes,
 			List<Message> history) {
 		long submittedAtMs = successfulBlankConditionFormResolvedAt(runId, taskId, task, undecidedDefCodes);
 		if (submittedAtMs < 0) {
 			return false;
 		}
 		String toolCallId = "host-cond-next-" + taskId;
-		if (alreadyIssued(runId, toolCallId) || conditionAdvanceHandled(runId, submittedAtMs)) {
+		if (hasIssued(runId, toolCallId) || isConditionAdvanceHandled(runId, submittedAtMs)) {
 			return false;
 		}
 		PendingToolCall advance = withToolTimeout(frontendTool(toolCallId, TOOL_CONFIRM_STEP,
 				"{\"step\":\"" + TaskSteps.EXPORT + "\"}"));
 		log.info("blank conditions settled; host sends confirm_step to advance to EXPORT runId={} taskId={}", runId, taskId);
-		return park(runId, history, advance);
+		return shouldPark(runId, history, advance);
 	}
 
 	private long successfulBlankConditionFormResolvedAt(String runId, long taskId, Task task,
@@ -1229,7 +1317,7 @@ public class ConditionsForm extends HostForm {
 		long latestRequestedAtMs = -1;
 		for (PendingToolCall form : this.store.pendingsLenient(runId)) {
 			if (form == null || !GenerativeFormRules.TOOL_NAME.equals(form.getName())
-					|| !isConditionForm(form.getArguments()) || !belongsToTask(form.getToolCallId(), runId, taskId)) {
+					|| !isConditionForm(form.getArguments()) || !isBoundToTask(form.getToolCallId(), runId, taskId)) {
 				continue;
 			}
 			long requestedAtMs = form.getRequestedAtMs() > 0 ? form.getRequestedAtMs() : form.getResolvedAtMs();
@@ -1242,7 +1330,7 @@ public class ConditionsForm extends HostForm {
 		return latest;
 	}
 
-	private boolean conditionAdvanceHandled(String runId, long submittedAtMs) {
+	private boolean isConditionAdvanceHandled(String runId, long submittedAtMs) {
 		try {
 			for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
 				if (pending != null && isConfirmStepForward(pending)
@@ -1268,9 +1356,9 @@ public class ConditionsForm extends HostForm {
 			return ConditionFeedback.none();
 		}
 		PendingToolCall latest = null;
-		for (PendingToolCall form : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		for (PendingToolCall form : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (form == null || !GenerativeFormRules.TOOL_NAME.equals(form.getName())
-					|| !isConditionForm(form.getArguments()) || !belongsToTask(form.getToolCallId(), runId, taskId)) {
+					|| !isConditionForm(form.getArguments()) || !isBoundToTask(form.getToolCallId(), runId, taskId)) {
 				continue;
 			}
 			if (latest == null || form.getResolvedAtMs() >= latest.getResolvedAtMs()) {
@@ -1298,13 +1386,13 @@ public class ConditionsForm extends HostForm {
 		}
 		Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
 		return new ConditionFeedback(false, false, true,
-				setConditionDraftsSettled(runId, taskId, asked, latest.getResolvedAtMs()));
+				isConditionDraftSettled(runId, taskId, asked, latest.getResolvedAtMs()));
 	}
 
 	/** 表单实际覆盖的 defCode：宿主缺口卡 id 后缀优先；整卡 = 当前全部未决定项。 */
 	private static Set<String> askedDefCodesOf(PendingToolCall form, String runId, long taskId,
 			List<String> undecidedDefCodes) {
-		Set<String> fallback = new LinkedHashSet<>(undecidedDefCodes == null ? List.of() : undecidedDefCodes);
+		Set<String> fallback = new LinkedHashSet<>(ObjectUtils.defaultIfNull(undecidedDefCodes, List.of()));
 		String toolCallId = form.getToolCallId();
 		String base = toolCallId(runId, taskId);
 		if (toolCallId != null && toolCallId.startsWith(base + "-")) {
@@ -1322,8 +1410,8 @@ public class ConditionsForm extends HostForm {
 		return fallback;
 	}
 
-	private boolean setConditionDraftsSettled(String runId, long taskId, Set<String> defCodes, long submittedAtMs) {
-		if (defCodes == null || defCodes.isEmpty()) {
+	private boolean isConditionDraftSettled(String runId, long taskId, Set<String> defCodes, long submittedAtMs) {
+		if (CollectionUtils.isEmpty(defCodes)) {
 			return false;
 		}
 		List<PendingToolCall> pendings;
@@ -1335,7 +1423,7 @@ public class ConditionsForm extends HostForm {
 			return false;
 		}
 		Set<String> settled = new LinkedHashSet<>();
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
 					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
 					|| !PendingToolCall.FRONTEND_RESULT.equals(pending.getStatus())
@@ -1350,7 +1438,7 @@ public class ConditionsForm extends HostForm {
 		return settled.containsAll(defCodes);
 	}
 
-	private static boolean belongsToTask(String toolCallId, String runId, long taskId) {
+	private static boolean isBoundToTask(String toolCallId, String runId, long taskId) {
 		if (toolCallId == null || !toolCallId.startsWith(TOOL_CALL_ID_PREFIX)) {
 			return false;
 		}
@@ -1483,7 +1571,7 @@ public class ConditionsForm extends HostForm {
 	}
 
 	private static String trim(String step) {
-		return step == null ? "" : step.trim();
+		return StringUtils.trimToEmpty(step);
 	}
 
 }

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.run.CreateTaskDraftStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
@@ -14,6 +15,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -112,9 +115,13 @@ public class RunContextRefresher {
 	}
 
 	/** 该工具是否会推进运行上下文（调用方据此跳过无谓的 Redis 读）。 */
-	public static boolean supports(String toolName) {
+	public static boolean isSupported(String toolName) {
 		return TOOL_NAVIGATE.equals(toolName) || TOOL_CREATE_TASK.equals(toolName)
 				|| TOOL_CONFIRM_STEP.equals(toolName);
+	}
+
+	public static boolean supports(String toolName) {
+		return isSupported(toolName);
 	}
 
 	/**
@@ -144,7 +151,7 @@ public class RunContextRefresher {
 		if (!settled.resolved() || settled.effectiveOutcome() != ToolOutcome.OK) {
 			return Optional.empty();
 		}
-		AiContext before = current == null ? AiContext.empty() : current;
+		AiContext before = ObjectUtils.getIfNull(current, AiContext::empty);
 		AiContext base = copyOf(before);
 		if (TOOL_NAVIGATE.equals(settled.getName())) {
 			applyNavigate(base, settled);
@@ -227,16 +234,16 @@ public class RunContextRefresher {
 		applyCreateTaskDefCodes(base, settled, sameTask);
 		applyCreateTaskConditions(base, settled);
 		persistCreateTaskDraft(runId, taskId, settled);
-		if (openWizard(settled.getArguments()) && (base.getPage() == null || base.getPage().isBlank())) {
+		if (openWizard(settled.getArguments()) && (StringUtils.isBlank(base.getPage()))) {
 			applyPage(base, pageOf(task.getType()));
 		}
 	}
 
 	/** 候选记录来源 run 并绑定 task；同任务重放不越过已有草案与表单的历史边界。 */
 	private static void bindCreateTaskCandidates(String runId, AiContext base, Long taskId) {
-		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
-		extra.put(EXTRA_CREATE_TASK_TASK_ID, taskId);
-		if (runId != null && !runId.isBlank()) {
+		Map<String, Object> extra = ObjectUtils.getIfNull(base.getExtra(), LinkedHashMap::new);
+		extra.put(EXTRA_CREATE_TASK_TASK_ID, String.valueOf(taskId));
+		if (StringUtils.isNotBlank(runId)) {
 			extra.put(EXTRA_CREATE_TASK_RUN_ID, runId.trim());
 		}
 		base.setExtra(extra);
@@ -256,7 +263,7 @@ public class RunContextRefresher {
 		if (defCodes.isEmpty()) {
 			return;
 		}
-		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
+		Map<String, Object> extra = ObjectUtils.getIfNull(base.getExtra(), LinkedHashMap::new);
 		extra.put(EXTRA_CREATE_TASK_DEF_CODES, defCodes);
 		TaskSlots existing = TaskSlots.fromExtra(extra);
 		if (!sameTask || !defCodes.equals(existing.defCodes())) {
@@ -282,7 +289,7 @@ public class RunContextRefresher {
 		if (conditions.isEmpty()) {
 			return;
 		}
-		Map<String, Object> extra = base.getExtra() == null ? new LinkedHashMap<>() : base.getExtra();
+		Map<String, Object> extra = ObjectUtils.getIfNull(base.getExtra(), LinkedHashMap::new);
 		extra.put(EXTRA_CREATE_TASK_CONDITIONS, conditions);
 		base.setExtra(extra);
 	}
@@ -318,7 +325,9 @@ public class RunContextRefresher {
 			store.save(runId, taskId, defCodes, conditions);
 		}
 		catch (RuntimeException ex) {
-			log.warn("structured create_task candidate could not be written to the session task draft (extra retained; cross-turn fallback unavailable) taskId={}", taskId, ex);
+			if (LogSampling.canAcquire("run-context-create-task-draft")) {
+				log.warn("structured create_task candidate could not be written to the session task draft (extra retained; cross-turn fallback unavailable) taskId={}", taskId, ex);
+			}
 		}
 	}
 
@@ -355,7 +364,7 @@ public class RunContextRefresher {
 		}
 		Task task = requireTask(taskId);
 		applyTask(base, task);
-		if (base.getPage() == null || base.getPage().isBlank()) {
+		if (StringUtils.isBlank(base.getPage())) {
 			applyPage(base, pageOf(task.getType()));
 		}
 	}
@@ -408,12 +417,12 @@ public class RunContextRefresher {
 	/**
 	 * 页面事实：只在真的换页时改写，并清掉旧页的 {@code uiRegionCount}。
 	 *
-	 * <p>为什么是"删键"而不是写 0：{@code ToolRegistry#uiRegionsPresent} 把<b>缺失</b>当"存在"
+	 * <p>为什么是"删键"而不是写 0：{@code ToolRegistry#hasUiRegions} 把<b>缺失</b>当"存在"
 	 * （fail-open，旧客户端/桩不带该键时工具不得静默消失），写 0 会变成确定的"本页没有 AI 区域"，
 	 * 那是拿旧页的数字冒充新页的事实。
 	 */
 	private static void applyPage(AiContext base, String page) {
-		if (page == null || page.isBlank() || page.equals(base.getPage())) {
+		if (StringUtils.isBlank(page) || page.equals(base.getPage())) {
 			return;
 		}
 		base.setPage(page);
@@ -462,7 +471,7 @@ public class RunContextRefresher {
 	}
 
 	private static JsonNode parse(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return null;
 		}
 		try {
@@ -509,7 +518,7 @@ public class RunContextRefresher {
 			return null;
 		}
 		String value = node.asText();
-		return value == null || value.isBlank() ? null : value.trim();
+		return StringUtils.isBlank(value) ? null : value.trim();
 	}
 
 	/** JSON 取值 → long（只认整数与数字文本；小数/布尔/对象/数组/空一律 null，口径同 ToolTargetResolver）。 */

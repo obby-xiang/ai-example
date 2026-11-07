@@ -3,6 +3,7 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.CancelledRunFinalizer;
@@ -28,8 +29,13 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
 import com.example.configmgr.common.ErrorCodes;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -48,6 +54,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -87,8 +94,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * 否则被唤醒的等待方会先于回执帧产出"后果帧"（{@code tool_result} 等）。
  *
  * <h2>挂起期心跳保活（仅 park 关闭时）</h2>
- * 等待循环每 {@value #HEARTBEAT_SECONDS} 秒发一帧 {@code heartbeat}（带挂起种类与已等待秒数）：
- * ① 保活 SSE；② 续期轮键与 session 索引；③ 实测证据里"挂起期确实还有帧"由此可证。
+ * 等待循环每 {@value #HEARTBEAT_SECONDS} 秒发一帧 {@code heartbeat}（带挂起种类与已等待秒数），
+ * 只保活 SSE、进程信号与短租约，不续期 24 小时会话数据。
  * 心跳<b>不再携带</b>等待上限（确认门/表单卡没有到期时刻，前端据此不武装倒计时）。
  * <b>park 开启（生产）时没有等待线程</b>：请求帧公布 + 收流后本轮执行即结束，
  * 不心跳、不续租、不进看门狗；恢复由决策落库后的续跑负责。
@@ -141,43 +148,6 @@ public class ConfirmGate {
 
 	/** 心跳与"跨进程决策发现"的节拍（秒）。 */
 	public static final int HEARTBEAT_SECONDS = 2;
-
-	/**
-	 * 长 TTL 资源续期的<b>默认/上限间隔</b>（60s）：{@code session-ttl} 足够大时按这一档，
-	 * 避免每 2s 拍发 10+ 条续期（换成批脚本后也要 2–3 次往返）。
-	 */
-	static final long RESOURCE_RENEW_MAX_INTERVAL_MS = 60_000L;
-
-	/**
-	 * 长 TTL 资源（轮键族 / session:current / 会话→run 索引 / 附件登记）在心跳里的<b>续期跳数</b>：
-	 * 按 {@code app.ai.session-ttl} 自适应（见 {@link #longTtlRenewTicksFor(Duration)}），默认 24h ⇒ 30 跳
-	 * （≈60s）。
-	 */
-	private final long longTtlRenewTicks;
-
-	/**
-	 * 续期间隔 → 心跳跳数：<b>间隔不超过 {@code session-ttl / 3}</b>，也不超过
-	 * {@link #RESOURCE_RENEW_MAX_INTERVAL_MS}（60s），且不慢于心跳本身。
-	 *
-	 * <p>为什么必须有 TTL/3 这条上界：这两个数原来是一把写死的 60s —— 运维把
-	 * {@code app.ai.session-ttl} 调到 90s（或更短）时，资源会在两次续期之间<b>先过期</b>：
-	 * 卡还在、待决条目/帧归档/会话索引已经没了，人点批准反而找不到挂起态。TTL/3 与续跑租约的
-	 * {@code ttl : renew = 3 : 1} 同口径，容忍连续两次续期失败。
-	 *
-	 * <p><b>粒度下限</b>：心跳就是 2s 一拍，所以 1 跳 = 2s 是能达到的最快续期；{@code session-ttl}
-	 * 小于 6s 时 TTL/3 已小于 2s，这条上界在该量级不可达（续期已经按每一拍执行）。
-	 *
-	 * @param sessionTtl {@code app.ai.session-ttl}；{@code null}/非正 ⇒ 按默认 24h
-	 * @return 跳数（≥ 1）
-	 */
-	static long longTtlRenewTicksFor(Duration sessionTtl) {
-		long ttlMs = sessionTtl == null || sessionTtl.isZero() || sessionTtl.isNegative()
-				? Duration.ofHours(24).toMillis() : sessionTtl.toMillis();
-		long tickMs = HEARTBEAT_SECONDS * 1000L;
-		long intervalMs = Math.min(RESOURCE_RENEW_MAX_INTERVAL_MS, ttlMs / 3L);
-		// 向下取整：宁可续得比 TTL/3 更勤，也不要跨过过期边界
-		return Math.max(1L, intervalMs / tickMs);
-	}
 
 	/**
 	 * 等**人**的前端工具名单（等待无上限；设计稿 §3.4 / §7-裁 1 选项 A）。
@@ -295,7 +265,7 @@ public class ConfirmGate {
 	 * 不共享任何状态（各自身份表/键族仍然分开）。
 	 */
 	private Object submitLockFor(String runId) {
-		int hash = runId == null ? 0 : runId.hashCode();
+		int hash = ObjectUtils.hashCode(runId);
 		return this.submitLocks[(hash & 0x7FFFFFFF) % SUBMIT_LOCK_STRIPES];
 	}
 
@@ -339,18 +309,16 @@ public class ConfirmGate {
 	/** 抢租失败后的一次性延迟重试调度器（见 {@link RetryScheduler}）。 */
 	private final RetryScheduler retryScheduler;
 
-	/**
-	 * 本实例登记的那一代默认调度器（{@code null} = 注入的调度器，生命周期归注入方）。
-	 *
-	 * <p>停机时只释放这一份：别的 context 还在用就不再是"最后 owner"，不会关掉它在用的线程池。
-	 */
-	private final RetryExecutorGeneration retryGeneration;
+	/** 默认重试调度器：生产为容器共享 Bean，轻量装配为实例自管回退池。 */
+	private final ScheduledExecutorService retryExecutor;
 
-	/** 释放只做一次（{@code @PreDestroy} 幂等；避免重复扣减 owner 计数）。 */
-	private boolean retryGenerationReleased;
+	private final boolean ownsRetryExecutor;
+
+	/** 释放只做一次（{@code @PreDestroy} 幂等）。 */
+	private boolean retryExecutorShutdown;
 
 	/**
-	 * 抢租失败后的<b>一次性</b>延迟重试调度缝（默认 = 守护线程单线程调度器）。
+	 * 抢租失败后的<b>一次性</b>延迟重试调度缝（默认 = 受管单线程调度器）。
 	 *
 	 * <p>为什么是接口：用例要断言"35s 后重试一次、holder 还活着就不动作、且不再排下一次"，
 	 * 真线程只能 sleep 真实时间（慢且不稳）。生产路径就是 {@code schedule(task, 35s)}。
@@ -361,146 +329,22 @@ public class ConfirmGate {
 
 	}
 
-	/**
-	 * 默认调度器的<b>一代</b>：执行器（懒建）+ 仍在使用它的 owner 数。
-	 *
-	 * <p><b>为什么需要"代 + owner 计数"</b>（本批复查）：默认调度器是<b>进程级静态</b>资源，
-	 * 同一个 JVM 里可能有多个 Spring Context（父子上下文、集成测试、嵌入式部署）。旧口径
-	 * "任一 context 关闭就关当前这一代"会让<b>先关闭的 context 掐掉其它仍在运行 context 的既排期重试</b>
-	 * —— {@code shutdown()} 之后有界等待 1s 就 {@code shutdownNow()}，别人的延时任务被静默取消
-	 * （那条已落库的决策于是"没人再派发"，直到下一次交互/启动扫描）。
-	 *
-	 * <p>现在：<b>构造时登记一个 owner，关闭时只释放自己那一份；只有最后一个 owner 释放才真正关闭
-	 * 当前代</b>，且用 CAS 把"自己登记的那一代"从全局摘下 —— 别人已经换代时绝不碰新代。
-	 * 代价是一个保守方向：直接构造（无 {@code @PreDestroy}）的实例会让该代"永远不关"，
-	 * 这与引入本机制之前"进程寿命"的口径一致（不新增失效面，只少一次回收）。
-	 */
-	private static final class RetryExecutorGeneration {
-
-		private final AtomicReference<ScheduledExecutorService> executor = new AtomicReference<>();
-
-		private final AtomicInteger owners = new AtomicInteger();
-
-		ScheduledExecutorService executor() {
-			ScheduledExecutorService current = this.executor.get();
-			if (current != null) {
-				return current;
-			}
-			synchronized (this.executor) {
-				current = this.executor.get();
-				if (current == null) {
-					current = Executors.newSingleThreadScheduledExecutor(runnable -> {
-						Thread thread = new Thread(runnable, "ai-resume-lease-retry");
-						thread.setDaemon(true);
-						return thread;
-					});
-					this.executor.set(current);
-				}
-				return current;
-			}
-		}
-
-		/** 关闭本代执行器（幂等；{@code null} = 早已关闭）。 */
-		void shutdownExecutor() {
-			ScheduledExecutorService current = this.executor.getAndSet(null);
-			if (current == null) {
-				return;
-			}
-			current.shutdown();
-			try {
-				if (!current.awaitTermination(RETRY_SHUTDOWN_WAIT_MS, TimeUnit.MILLISECONDS)) {
-					current.shutdownNow();
-				}
-			}
-			catch (InterruptedException ex) {
-				current.shutdownNow();
-				Thread.currentThread().interrupt();
-			}
-		}
-	}
-
-	/** 当前默认调度器代（{@code null} = 上一代已由最后的 owner 关闭；下一次取用/登记会重建）。 */
-	private static final AtomicReference<RetryExecutorGeneration> DEFAULT_RETRY_GENERATION =
-			new AtomicReference<>();
-
-	/** 默认重试调度器（守护线程，不阻止 JVM 退出；单线程足够：重试任务是"一次 Redis 读 + 转投"）。 */
-	static final RetryScheduler DEFAULT_RETRY_SCHEDULER = defaultRetryScheduler();
-
 	/** 停机时有界等待在飞重试任务收尾的时间；超时即 {@code shutdownNow()}。 */
 	private static final long RETRY_SHUTDOWN_WAIT_MS = 1_000L;
 
-	/** 取当前代（不存在则建新一代）。登记与取用共用同一入口，代际只在"最后一 owner 释放"时消失。 */
-	private static RetryExecutorGeneration currentRetryGeneration() {
-		RetryExecutorGeneration current = DEFAULT_RETRY_GENERATION.get();
-		if (current != null) {
-			return current;
-		}
-		synchronized (DEFAULT_RETRY_GENERATION) {
-			current = DEFAULT_RETRY_GENERATION.get();
-			if (current == null) {
-				current = new RetryExecutorGeneration();
-				DEFAULT_RETRY_GENERATION.set(current);
-			}
-			return current;
-		}
-	}
-
-	private static RetryScheduler defaultRetryScheduler() {
+	private static RetryScheduler defaultRetryScheduler(ScheduledExecutorService executor) {
 		return (task, delay) -> {
 			long millis = delay == null ? 0L : Math.max(1L, delay.toMillis());
-			var future = currentRetryGeneration().executor().schedule(task, millis, TimeUnit.MILLISECONDS);
+			var future = executor.schedule(task, millis, TimeUnit.MILLISECONDS);
 			return () -> future.cancel(false);
 		};
-	}
-
-	/**
-	 * 登记本实例对默认调度器的使用权（返回 {@code null} = 注入的调度器：生命周期归注入方，不登记）。
-	 *
-	 * <p>登记发生在<b>构造</b>：此刻还不知道谁会先关闭，先记一份"还有人在用"，别人的关闭就不会
-	 * 把本实例在用的执行器关掉。
-	 */
-	private static RetryExecutorGeneration acquireDefaultRetryGeneration(RetryScheduler scheduler) {
-		if (scheduler != DEFAULT_RETRY_SCHEDULER) {
-			return null;
-		}
-		synchronized (DEFAULT_RETRY_GENERATION) {
-			RetryExecutorGeneration generation = DEFAULT_RETRY_GENERATION.get();
-			if (generation == null) {
-				generation = new RetryExecutorGeneration();
-				DEFAULT_RETRY_GENERATION.set(generation);
-			}
-			generation.owners.incrementAndGet();
-			return generation;
-		}
-	}
-
-	/**
-	 * 释放本实例登记的那一代：<b>只有最后一个 owner 释放才关</b>，且只关"自己登记的那一代"
-	 * （CAS 成功才关；别人已经换代时不动新代）。
-	 */
-	private static void releaseDefaultRetryGeneration(RetryExecutorGeneration generation) {
-		if (generation == null) {
-			return;
-		}
-		boolean lastOwner;
-		synchronized (DEFAULT_RETRY_GENERATION) {
-			lastOwner = generation.owners.decrementAndGet() <= 0;
-			if (lastOwner) {
-				// 先摘引用：摘掉之后的新登记会建新一代，绝不会落回这个"正在关闭"的代
-				DEFAULT_RETRY_GENERATION.compareAndSet(generation, null);
-			}
-		}
-		if (lastOwner) {
-			// 关闭放在锁外：有界等待最长 1s，不阻塞其它上下文的登记/取用
-			generation.shutdownExecutor();
-		}
 	}
 
 	/** 兼容构造（6 参：既有单测）：无续跑通路、无租约设施。 */
 	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
 			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards) {
 		this(store, registry, properties, cancellations, beacon, frontendGuards, null, null, null,
-				DEFAULT_RETRY_SCHEDULER);
+				null);
 	}
 
 	/**
@@ -512,21 +356,25 @@ public class ConfirmGate {
 			ObjectProvider<ResumeService> resumeServiceProvider,
 			@Qualifier("aiResumeTrigger") Executor resumeTriggerExecutor) {
 		this(store, registry, properties, cancellations, beacon, frontendGuards, resumeServiceProvider,
-				resumeTriggerExecutor, null, DEFAULT_RETRY_SCHEDULER);
+				resumeTriggerExecutor, null, null);
 	}
 
-	/**
-	 * Spring 装配路径（T3-6a + B23L1 批②b）：多出 {@code ObjectProvider<ResumeService>}（惰性，解环）、
-	 * 续跑触发的轻量执行器（{@code aiResumeTrigger}，见 {@link #maybeTriggerResume}）与
-	 * 续跑权租约设施（{@link LeaseService}）。
-	 */
-	@Autowired
 	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
 			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
 			ObjectProvider<ResumeService> resumeServiceProvider,
 			@Qualifier("aiResumeTrigger") Executor resumeTriggerExecutor, LeaseService leaseService) {
 		this(store, registry, properties, cancellations, beacon, frontendGuards, resumeServiceProvider,
-				resumeTriggerExecutor, leaseService, DEFAULT_RETRY_SCHEDULER);
+				resumeTriggerExecutor, leaseService, null, null);
+	}
+
+	@Autowired
+	public ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties,
+			CancellationRegistry cancellations, ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
+			ObjectProvider<ResumeService> resumeServiceProvider,
+			@Qualifier("aiResumeTrigger") Executor resumeTriggerExecutor, LeaseService leaseService,
+			@Qualifier("aiResumeLeaseRetryScheduler") ScheduledExecutorService retryExecutor) {
+		this(store, registry, properties, cancellations, beacon, frontendGuards, resumeServiceProvider,
+				resumeTriggerExecutor, leaseService, null, retryExecutor);
 	}
 
 	/** 包内构造（测试注入重试调度器）：全部字段的唯一赋值点。 */
@@ -534,6 +382,14 @@ public class ConfirmGate {
 			ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
 			ObjectProvider<ResumeService> resumeServiceProvider, Executor resumeTriggerExecutor,
 			LeaseService leaseService, RetryScheduler retryScheduler) {
+		this(store, registry, properties, cancellations, beacon, frontendGuards, resumeServiceProvider,
+				resumeTriggerExecutor, leaseService, retryScheduler, null);
+	}
+
+	private ConfirmGate(RunStore store, RunRegistry registry, AiProperties properties, CancellationRegistry cancellations,
+			ToolActivityBeacon beacon, List<FrontendToolGuard> frontendGuards,
+			ObjectProvider<ResumeService> resumeServiceProvider, Executor resumeTriggerExecutor,
+			LeaseService leaseService, RetryScheduler retryScheduler, ScheduledExecutorService retryExecutor) {
 		this.store = store;
 		this.registry = registry;
 		this.properties = properties;
@@ -543,36 +399,45 @@ public class ConfirmGate {
 		this.resumeServiceProvider = resumeServiceProvider;
 		this.resumeTriggerExecutor = resumeTriggerExecutor;
 		this.leaseService = leaseService;
-		this.retryScheduler = retryScheduler == null ? DEFAULT_RETRY_SCHEDULER : retryScheduler;
-		// 默认调度器是进程级共享资源：构造即登记一份使用权，停机只释放自己那一份
-		// （别人还在用 ⇒ 不关；见 RetryExecutorGeneration 的注释）。
-		this.retryGeneration = acquireDefaultRetryGeneration(this.retryScheduler);
-		this.longTtlRenewTicks = longTtlRenewTicksFor(this.properties == null ? null : this.properties.getSessionTtl());
+		ScheduledExecutorService effectiveExecutor = retryExecutor;
+		boolean ownsExecutor = false;
+		if (retryScheduler == null && effectiveExecutor == null) {
+			ScheduledThreadPoolExecutor pool = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+			pool.setKeepAliveTime(60L, TimeUnit.SECONDS);
+			pool.allowCoreThreadTimeOut(true);
+			pool.setRemoveOnCancelPolicy(true);
+			pool.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+			pool.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+			effectiveExecutor = pool;
+			ownsExecutor = true;
+		}
+		this.retryExecutor = effectiveExecutor;
+		this.ownsRetryExecutor = ownsExecutor;
+		this.retryScheduler = retryScheduler == null ? defaultRetryScheduler(effectiveExecutor) : retryScheduler;
 		for (int i = 0; i < SUBMIT_LOCK_STRIPES; i++) {
 			this.submitLocks[i] = new Object();
 		}
 	}
 
-	/**
-	 * <b>应用停机</b>：释放本实例对默认重试调度器的使用权（幂等）。
-	 *
-	 * <p>为什么必须显式关：{@link #DEFAULT_RETRY_SCHEDULER} 是<b>进程级静态</b>守护线程 ——
-	 * 不阻止 JVM 退出，但会跨 Spring Context 存活：旧上下文的线程与在飞任务引用不会被释放，
-	 * 也不再有归属者回收。这里只收敛调度线程本身：<b>不</b>取消已落库的决策、<b>不</b>清重派发计数、
-	 * <b>不</b>碰租约 —— 最坏后果只是"停机后不再重派发"，而下一次明确交互/重挂/启动扫描会重建链路。
-	 *
-	 * <p><b>只释放自己那一份（同 JVM 多 Context 安全）</b>：登记在构造（{@link #retryGeneration}），
-	 * 释放时递减 owner 计数；<b>还有别的 owner 就不关</b>（否则先关闭的 context 会掐掉别人在排期的
-	 * 重试），只有最后一位 owner 释放才关闭"自己登记的那一代"，且不碰别人已换代的新代。
-	 * 注入的调度器（用例/manual 推进）不登记也不释放 —— 它不是本类的进程级资源。
-	 */
 	@PreDestroy
 	void shutdown() {
-		if (this.retryGenerationReleased) {
+		if (this.retryExecutorShutdown) {
 			return;
 		}
-		this.retryGenerationReleased = true;
-		releaseDefaultRetryGeneration(this.retryGeneration);
+		this.retryExecutorShutdown = true;
+		if (!this.ownsRetryExecutor) {
+			return;
+		}
+		this.retryExecutor.shutdown();
+		try {
+			if (!this.retryExecutor.awaitTermination(RETRY_SHUTDOWN_WAIT_MS, TimeUnit.MILLISECONDS)) {
+				this.retryExecutor.shutdownNow();
+			}
+		}
+		catch (InterruptedException ex) {
+			this.retryExecutor.shutdownNow();
+			Thread.currentThread().interrupt();
+		}
 	}
 
 	/**
@@ -632,7 +497,7 @@ public class ConfirmGate {
 
 
 	/**
-	 * 轮快照的 sessionId（索引续期用；快照缺失返回 null，调用方据此跳过续期）。
+	 * 轮快照的 sessionId（追踪及用户读侧续期用；快照缺失返回 null，调用方据此跳过续期）。
 	 */
 	private String snapshotSessionId(String runId) {
 		try {
@@ -640,7 +505,9 @@ public class ConfirmGate {
 			return snapshot == null ? null : snapshot.getSessionId();
 		}
 		catch (Exception ex) {
-			log.debug("could not read sessionId from run snapshot runId={}", runId, ex);
+			if (LogSampling.canAcquire("confirm-snapshot-session-read")) {
+				log.warn("could not read sessionId from run snapshot runId={}", runId, ex);
+			}
 			return null;
 		}
 	}
@@ -750,7 +617,7 @@ public class ConfirmGate {
 	 * 判定统一以本方法为准 —— 单一事实源就是 {@link #publishRequestsForParkedBatch} 的同一条件，
 	 * 避免"管理器自己的 properties 实例"与闸门的实例不一致时帧序错位。
 	 */
-	public boolean publishesRequestsAheadOfLoop() {
+	public boolean canPublishRequestsAheadOfLoop() {
 		return this.properties.getPark().isEnabled();
 	}
 
@@ -770,7 +637,7 @@ public class ConfirmGate {
 	 * 避免把已收敛的卡瞬时复活。幂等：{@code req} 已置的条目直接跳过。
 	 */
 	public void publishRequestsForParkedBatch(String runId, List<PendingToolCall> pendings) {
-		if (runId == null || pendings == null || pendings.isEmpty()
+		if (runId == null || CollectionUtils.isEmpty(pendings)
 				|| !this.properties.getPark().isEnabled()) {
 			return;
 		}
@@ -822,275 +689,243 @@ public class ConfirmGate {
 	}
 
 	private PendingToolCall await(String runId, PendingToolCall pending, boolean confirm) {
-		// ===== C1：本批请求帧可能已在 park 前由 publishRequestsForParkedBatch 整批公布 =====
-		// 那个入口已置 req 并发过帧；这里只登记闸门/收流/结束执行，<b>不重复发帧</b>
-		// （否则重挂或续跑的重建执行会把同一张卡再弹一次）。
 		boolean prePublished = this.properties.getPark().isEnabled() && Boolean.TRUE.equals(pending.getReq());
-		// ===== L0（2026-10-21 裁决 A/C）：先判已决，再给请求帧"发车位" =====
-		// ①已决（另一页签/旧客户端早已提交该 toolCallId）：<b>不补发请求帧</b>、不断流，直接消费既有决策
-		//   —— 旧行为是无条件 emit，前端会把已收敛的卡瞬时复活成 pending、再被随后的结局帧收敛；
-		// ②未决：先把 Redis 条目的 req 位置上，再发帧（刷新恢复只认 req=true 的卡，见
-		//   AiController#runsCurrent 与前端 restoreSuspendedSnapshot）。
 		PendingToolCall decided = reserveRequestSlot(runId, pending);
 		if (decided != null) {
 			return decided;
 		}
-		// 等待上限（null = 无上限；只有即时执行类前端工具有值）
+		AwaitPreparation preparation = prepareAwait(runId, pending, confirm, prePublished);
+		preparation.out().completeSubscriptions();
+		long startedAt = System.currentTimeMillis();
+		String sessionId = snapshotSessionId(runId);
+		AwaitState state = new AwaitState(runId, pending, confirm, preparation, startedAt, sessionId);
+		if (this.properties.getPark().isEnabled()) {
+			return parkAwait(state);
+		}
+		return waitForDecision(state);
+	}
+
+	private AwaitPreparation prepareAwait(String runId, PendingToolCall pending, boolean confirm,
+			boolean prePublished) {
 		Integer timeoutSeconds = this.suspendWaitSeconds(pending);
-		// ===== B23L1 批②b：<b>等待方持租</b>（设计稿 §2.2；方案第 1 条）=====
-		// 从"进入等待"起，本进程是本轮续跑权的主人：另一实例的死卡兜底抢不到租约，于是不会与本
-		// 等待方的原循环双驱动同一轮（重复帧 / settle 分叉）。抢不到（别的实例持有 / 无租约设施 /
-		// Redis 降级）就照常等 —— "抢不到租约"绝不能变成"等不到人"；那条路径的互斥由
-		// woke / ACTIVE_LATCH_IN_PROCESS 与 claimExecution 兜底。
 		LeaseService leases = leases();
-		// 带 fence 抢租（N-1）：三键同槽脚本会在取号时与 fence 对账，计数器先死也不会永久 STALE。
 		LeaseService.Lease lease = leases == null ? null
 				: leases.tryAcquireFenced(this.store.runLeaseKey(runId), this.store.fenceKey(runId),
 						this.properties.getLease().getTtl(), null).orElse(null);
-		int renewEveryTicks = leaseRenewEveryTicks();
-		long heartbeatTicks = 0L;
-		// 决策到达 = 把续跑权交棒给驱动方（原循环）；此刻<b>不释放</b>租约：释放会让另一个实例
-		// 在"原循环正在执行已放行工具"的窗口里接管并重放同一轮。
-		boolean handedOff = false;
 		String key = key(runId, pending.getToolCallId());
-		// 先登记闸门再发请求，避免"外部输入已到、闸门还没登记"白等到超时。
-		// F8：复用 arm 的预登记（同一 key 只允许一把）—— 这里无条件 new 会盖掉预登记闸门，
-		// 使"帧已发出后、进入等待前"到达的唤醒（已 countDown 在旧闸门上）丢失。
 		Latch latch = this.latches.computeIfAbsent(key, ignored -> new Latch());
-		// 取消的加速通道（ADR-8 修正③）：同进程取消立即解开等待，权威态仍在
-		// ai:cancel:{<tenantId>:<userId>:run:<runId>}。
-		// 跨进程取消则由下方循环里的 isCancelled 轮询发现（节拍 = 心跳节拍，属"分片边界"）。
 		AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
 		SseChatEmitter out = this.registry.of(runId);
 		if (!prePublished) {
 			if (confirm) {
-				// 确认卡不再有到期时刻（裁决第 1 条）：帧里不带 timeoutSeconds/expiresAt，
-				// 前端据此不武装倒计时、不把按钮置灰。
 				out.confirmRequest(pending);
 			}
 			else {
 				out.frontendToolRequest(pending, timeoutSeconds);
 			}
 		}
-		// ===== B1（2026-10-20 裁决 1）：请求帧发出之后、进入阻塞等待之前，主动完成本 run 的全部订阅 =====
-		// 流派 B（挂起即断）：人机等待期不再占用 SSE 连接，连接在"卡已送达"这一刻收尾；
-		// 决策到达后再由前端带 ?lastSeq 重连做差量补帧（delta 已入档，见 SseChatEmitter#emit）。
-		//
-		// 断连点为什么在这里、不在 suspended 帧上：实测帧序是 suspended（SpToolCallingManager）
-		// **早于** confirm_request / frontend_tool_request（本方法）—— 挂在 suspended 上会把
-		// 请求帧截断在门外，用户根本收不到卡。
-		//
-		// 为什么不会截断本帧：completeSubscriptions 复用到"排空队列后才 complete"的收尾路径，
-		// 刚 emit 的请求帧先写出、再关连接。
-		//
-		// 一批多 toolCall 的实施口径（C1 起）：park 开启时，整批请求帧由
-		// {@link #publishRequestsForParkedBatch} 在 suspended 帧之后、执行循环之前<b>一次性公布</b>
-		// （本方法看到 req 已置就不再重复发）—— 逐条发会让 park 后的第二张卡永远收不到请求帧。
-		// park 关闭时仍按旧口径逐条发：每张卡在它自己的 await 里发帧，发完即断，然后阻塞等人。
-		out.completeSubscriptions();
-		long startedAt = System.currentTimeMillis();
-		// T2b-D#1：挂起期续期 session→current 索引用的 sessionId（快照可能缺失，取一次缓存并判空）
-		String sessionId = snapshotSessionId(runId);
-		// ===== 人工等待 <b>park</b>（用户裁决 2026-10-25）=====
-		// 请求帧已投递、本轮订阅已收流：此刻"等人"这件事没有任何本进程要做的事 ——
-		// 决策会经 HTTP 落 Redis，届时由 ResumeService 重建执行（与跨实例续跑同一条通路）。
-		// 因此<b>结束本次执行</b>：交还驱动租约（驱动方重抢）、不登记 latch 等待、不心跳、不续租、
-		// 不进看门狗等待；快照保持 SUSPENDED（pending/req/decided/帧归档就是合法恢复状态）。
-		//
-		// 主动 stop 优先：取消标志已在 ⇒ 走取消终态（"普通断线/刷新只 park，主动 stop 才取消"）。
-		// 注意异常出口：RunParkedException 由 SpToolCallingManager 原样穿出、ResilientChatService
-		// 识别后直接退出（不写终帧、不判失败）。
-		if (this.properties.getPark().isEnabled()) {
-			if (this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED) {
-				// 主动 stop：先把本卡的结局落到条目上（未执行），再判"本线程能不能把整轮写进终态"。
-				// 本进程此刻若已无写权限（租约设施抖动 / 已被接管 / fence 越过），本线程随后在
-				// ResilientChatService#cancelTerminal 里的写会被同一判据拒绝 —— 于是"取消已确认"
-				// 会停在 SUSPENDED 且无人再试（主 CI run 40211303032 · W-30）。这里就把收尾交棒给
-				// 非驱动执行器（它重新取租，fencing 不绕过）；写权限正常时<b>不</b>交棒，仍由本线程
-				// 随后的 cancelTerminal 收尾（不产生第二条终帧）。
-				PendingToolCall cancelled = cancel(runId, pending, confirm, startedAt);
-				handOffCancelFinalizationIfUnwritable(runId);
-				return cancelled;
-			}
-			// ===== park 退出 = 一次原子生命周期切换（与决策写共用同一把 run 条带锁）=====
-			// 缺陷形态（主 CI run 40174289141 / H-01）：旧实现在"预登记闸门之后、还租之前"无锁地做
-			// 还租（Redis 往返 1–3ms）。决策落在窗口内 ⇒ signal 命中这把<b>没人 await</b> 的闸门
-			// （woke=true）⇒ 决策侧按 WOKE_IN_PROCESS_GATE 静默跳过派发；本线程随后还租、退出
-			// ⇒ 一轮既没有驱动方也没有终帧，快照停在 SUSPENDED。
-			// 切换在锁内复读条目，于是只有两个确定出口：已决 ⇒ 本线程接手驱动；未决 ⇒ 还租 + 摘闸门
-			// 后 park（之后的 signal 必 miss，走死卡兜底）。
-			PendingToolCall settled = switchParkedLifecycle(runId, pending, lease);
-			if (settled != null) {
-				// 决策已落库且本线程还在：由它接手驱动（不 park、不派发续跑）。
-				// 决策侧此前的 woke=true 因此成立 —— 它唤醒的就是这个线程。
-				// 本分支不在下方 try/finally 内，取消监听者要在这里注销。
-				closeCancelHandle(cancelHandle, runId);
-				handedOff = true;
-				handOffLease(lease, runId);
-				return settled;
-			}
-			// 未决：还租与摘闸门已在锁内完成，lease 已归还，finally 不得重复释放。
-			lease = null;
-			// 同上：park 在 try 之前退出，取消监听者不会走 finally。
-			closeCancelHandle(cancelHandle, runId);
-			AiTrace.eventOn(runId, sessionId, "approval_park", "toolCallId", pending.getToolCallId(), "tool",
-					pending.getName(), "kind", confirm ? "confirm" : "frontend");
-			log.info("park: waiting for human runId={} toolCallId={} tool={} kind={} (request frame delivered and stream closed; thread returned, resume rebuilds execution after the decision)", runId, pending.getToolCallId(), pending.getName(),
-					confirm ? "confirm" : "frontend");
-			// ===== I4：park 之后即时前端工具的到期收敛 =====
-			// 即时类前端工具（navigate_to 等）有回执上限；旧实现靠<b>等待线程</b>到期后写 TIMEOUT。
-			// park 后没有等待线程 ⇒ 条目会永远 PENDING。这里按 expiresAt 排一次收敛：
-			// 到点仍 PENDING ⇒ 写 TIMEOUT/FRONTEND_TIMEOUT + 发结局帧，并<b>派发一次续跑</b>让本轮收尾
-			// （到期是系统裁决；不派发会留下"没有驱动方也没有终帧"的悬轮）。
-			// 确认门无上限（timeoutSeconds == null）不排。
-			boolean scheduled = false;
-			for (PendingToolCall parked : this.store.pendingsLenient(runId)) {
-				if (!PendingToolCall.PENDING.equals(parked.getStatus())
-						|| !PendingToolCall.KIND_FRONTEND.equals(parked.getKind())) {
-					continue;
-				}
-				Integer parkedTimeout = suspendWaitSeconds(parked);
-				if (parkedTimeout != null) {
-					scheduleParkedFrontendExpiry(runId, parked, parkedTimeout);
-					scheduled = true;
-				}
-			}
-			if (!scheduled && !confirm && timeoutSeconds != null) {
-				scheduleParkedFrontendExpiry(runId, pending, timeoutSeconds);
-			}
-			throw new RunParkedException(runId, pending.getToolCallId(), pending.getKind());
+		return new AwaitPreparation(timeoutSeconds, lease, latch, cancelHandle, out);
+	}
+
+	private PendingToolCall parkAwait(AwaitState state) {
+		if (this.cancellations.cancelState(state.runId) == CancellationRegistry.CancelState.CANCELLED) {
+			PendingToolCall cancelled = cancel(state.runId, state.pending, state.confirm, state.startedAt);
+			handOffCancelFinalizationIfUnwritable(state.runId);
+			return cancelled;
 		}
-		// 人机预算分离（裁决第 3 条）：等待窗口内的时间累计到信标上，总预算判据据此扣除
-		this.beacon.beginGateWait(runId);
-		// 日志链路批：等待期间的心跳/续租/取消都是这条线程产的 —— 锚点在这里续上，
-		// 于是"挂起期"的每一行都能按 runId 归到这一轮（跨实例续跑时由 ResumeService 的入口绑）
-		if (sessionId != null) {
-			AiTrace.bind(runId, sessionId);
+		PendingToolCall settled = switchParkedLifecycle(state.runId, state.pending, state.lease);
+		if (settled != null) {
+			closeCancelHandle(state.cancelHandle, state.runId);
+			handOffLease(state.lease, state.runId);
+			return settled;
 		}
-		// 日志链路批：卡已发出、等待开始 —— 这一行是"这一轮为什么慢"的第一个解释项
-		AiTrace.eventOn(runId, sessionId, "approval_suspend", "toolCallId", pending.getToolCallId(), "tool",
-				pending.getName(), "kind", confirm ? "confirm" : "frontend",
-				"timeoutS", timeoutSeconds == null ? "none" : timeoutSeconds,
-				"preflight", pending.getPreflight() != null);
-		boolean cancelUnknownWarned = false;
+		closeCancelHandle(state.cancelHandle, state.runId);
+		AiTrace.eventOn(state.runId, state.sessionId, "approval_park", "toolCallId", state.pending.getToolCallId(),
+				"tool", state.pending.getName(), "kind", state.confirm ? "confirm" : "frontend");
+		log.info("park: waiting for human runId={} toolCallId={} tool={} kind={} (request frame delivered and stream closed; thread returned, resume rebuilds execution after the decision)", state.runId, state.pending.getToolCallId(), state.pending.getName(),
+				state.confirm ? "confirm" : "frontend");
+		scheduleParkedExpiries(state);
+		throw new RunParkedException(state.runId, state.pending.getToolCallId(), state.pending.getKind());
+	}
+
+	private void scheduleParkedExpiries(AwaitState state) {
+		boolean scheduled = false;
+		for (PendingToolCall parked : this.store.pendingsLenient(state.runId)) {
+			if (!PendingToolCall.PENDING.equals(parked.getStatus())
+					|| !PendingToolCall.KIND_FRONTEND.equals(parked.getKind())) {
+				continue;
+			}
+			Integer parkedTimeout = suspendWaitSeconds(parked);
+			if (parkedTimeout != null) {
+				scheduleParkedFrontendExpiry(state.runId, parked, parkedTimeout);
+				scheduled = true;
+			}
+		}
+		if (!scheduled && !state.confirm && state.timeoutSeconds != null) {
+			scheduleParkedFrontendExpiry(state.runId, state.pending, state.timeoutSeconds);
+		}
+	}
+
+	private PendingToolCall waitForDecision(AwaitState state) {
+		this.beacon.beginGateWait(state.runId);
+		if (state.sessionId != null) {
+			AiTrace.bind(state.runId, state.sessionId);
+		}
+		AiTrace.eventOn(state.runId, state.sessionId, "approval_suspend", "toolCallId", state.pending.getToolCallId(),
+				"tool", state.pending.getName(), "kind", state.confirm ? "confirm" : "frontend",
+				"timeoutS", state.timeoutSeconds == null ? "none" : state.timeoutSeconds,
+				"preflight", state.pending.getPreflight() != null);
 		try {
-			while (true) {
-				CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(runId);
-				if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
-					return cancel(runId, pending, confirm, startedAt);
-				}
-				if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
-					// C2：确认门不依赖 Redis 才能继续等（心跳续期另算）—— UNKNOWN 按"继续等待"处理，
-					// 每张卡只 WARN 一次，避免 2s 一拍刷日志。
-					if (!cancelUnknownWarned) {
-						log.warn("confirm gate cancel state unknown (Redis read failed; keep waiting, do not finish as cancelled) runId={}", runId);
-						cancelUnknownWarned = true;
-					}
-				}
-				else {
-					cancelUnknownWarned = false;
-				}
-				PendingToolCall fresh;
-				// S5c-6：与提交侧读同一把锁 —— 提交方在锁内完成"落库 + 发回执帧 + 唤醒"，
-				// 因此这里读到的"已决"状态一定伴随着已经写出去的回执帧。
-				synchronized (submitLockFor(runId)) {
-					// C2：guard 读失败不得让等待线程退出（卡仍 PENDING、工具会被记成执行失败）；
-					// 用非抛读口，把"读不出来"降级为"这一拍没合并 guard"。
-					fresh = this.store.pendingLenient(runId, pending.getToolCallId());
-				}
-				if (fresh != null && fresh.resolved()) {
-					// 决策可能来自本进程（闸门唤醒）也可能来自另一实例（Redis 轮询发现）
-					handedOff = true;
-					handOffLease(lease, runId);
-					return fresh;
-				}
-				long sliceMs = HEARTBEAT_SECONDS * 1000L;
-				if (timeoutSeconds != null) {
-					long remain = startedAt + timeoutSeconds * 1000L - System.currentTimeMillis();
-					if (remain <= 0) {
-						// C1（复审必修）：前端超时<b>不是本轮结束</b> —— 结局文本回填给模型后，本线程继续驱动
-						// （后续帧/工具/续跑都还在这一轮里）。所以超时出口与"决策到达"同形：交棒（不释放）。
-						// 旧实现走 finally 的"未交棒即还租"，等于在轮次仍在跑的时候把续跑权扔回池子：
-						// fencing 失效，另一实例的死卡兜底可以据此接管并双驱动同一轮。
-						handedOff = true;
-						handOffLease(lease, runId);
-						try {
-							return expireFrontend(runId, pending, timeoutSeconds);
-						}
-						catch (RuntimeException ex) {
-							// F2 失败关闭：到期结论的决策 guard 不可用 ⇒ 这一拍<b>不落库、不发结局帧、
-							// 不派发续跑</b>（否则跨实例会各写一次 TIMEOUT）。条目保持 PENDING，
-							// 等一拍再回来重试；期间的决策/取消仍经闸门唤醒走循环顶部的既有两个出口。
-							log.warn("decision guard unavailable for frontend receipt expiry (stays PENDING, retry next tick; nothing persisted, no frame sent) runId={} toolCallId={}", runId,
-									pending.getToolCallId(), ex);
-							latch.await(HEARTBEAT_SECONDS * 1000L);
-							continue;
-						}
-					}
-					sliceMs = Math.min(sliceMs, remain);
-				}
-				boolean signalled = latch.await(sliceMs);
-				if (!signalled) {
-					heartbeatTicks++;
-					// 工具活动脉冲（韧性看门狗据此在挂起期不计静默，硬规范①）
-					this.beacon.pulse(runId);
-					// ===== 续期分两档（本批）=====
-					// · 2s 一拍只做"必要心跳"：心跳帧（下面）、取消轮询（循环顶部）、租约续期（下面的
-					//   renew-interval）—— 这几件是秒级判定，晚一拍就改语义；
-					// · 长 TTL 资源（轮键族 / session:current / 会话→run 索引 / 附件登记）每
-					//   {@code longTtlRenewTicks} 跳整额续期一次：间隔 = min(60s, session-ttl/3)
-					//   （默认 24h ⇒ 约 60s；TTL 调小则跟着变密，绝不晚于 TTL/3 过期）。
-					// 节流状态是<b>本等待循环的局部计数</b>（不按 run 建表）⇒ 没有"终态要清理"的常驻
-					// 状态，也就不会因为等待线程异常退出而留下泄漏。
-					if (heartbeatTicks == 1L || heartbeatTicks % this.longTtlRenewTicks == 0L) {
-						// T2b-D#1：与心跳同节拍续期 session→current 索引（TTL 对齐 session-ttl，与会话同寿）
-						if (sessionId != null) {
-							this.store.renewSessionCurrent(sessionId, runId);
-							// 会话→run 索引是会话销毁的<b>唯一发现面</b>：长挂起只续 current 不够 ——
-							// 索引先过期，销毁时就再也看不见这条挂起轮（清不干净的轮次）。
-							this.store.renewSessionRunsIndex(sessionId, runId);
-						}
-						// 裁决第 4 条：续期卡的后台数据（快照/待决/归档/序号），
-						// 于是"会话活着，卡的后台数据就活着"—— 等多久都不会出现"卡还在、挂起态已过期"。
-						this.store.renewSuspensionTtl(runId);
-						// 同拍续期复核器持有的一次性资源（表单附件登记）：卡活着，附件也得活着
-						touchSuspendedResources(runId);
-					}
-					// B23L1 批②b：续跑权租约按 lease.renew-interval 续期（默认 10s = 5 跳；
-					// 与 TTL 30s 的关系是 3:1，容忍两次连续续租失败）。等多久都不会"把租约等丢"。
-					if (lease != null && heartbeatTicks % renewEveryTicks == 0L) {
-						renewWaitingLease(lease, runId);
-					}
-					out.heartbeat(heartbeatData(runId, pending, confirm, timeoutSeconds,
-							(System.currentTimeMillis() - startedAt) / 1000));
-				}
-			}
+			return waitLoop(state);
 		}
 		catch (InterruptedException ex) {
-			// 线程被中断（应用停止 / 池关闭）：<b>不写超时结局</b>（用户裁决 2026-10-20 第 1 条口径：
-			// 确认门不设超时 —— 中断不是到期，不能把"没等到人"伪装成 TIMEOUT）。
-			// 条目保持未决，进程重启后仍可由挂起态外置 + 人决策继续收敛；本轮按中断收尾。
 			Thread.currentThread().interrupt();
-			log.warn("park wait interrupted (entry stays pending; no timeout outcome written) runId={} toolCallId={}", runId, pending.getToolCallId(), ex);
-			// C2：中断出口也不得再抛（否则原始中断被替换）；读不到就退回入参。
-			PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
-			return fresh == null ? pending : fresh;
+			log.warn("park wait interrupted (entry stays pending; no timeout outcome written) runId={} toolCallId={}",
+					state.runId, state.pending.getToolCallId(), ex);
+			PendingToolCall fresh = this.store.pendingLenient(state.runId, state.pending.getToolCallId());
+			return ObjectUtils.defaultIfNull(fresh, state.pending);
 		}
 		finally {
-			this.beacon.endGateWait(runId);
-			this.latches.remove(key, latch);
-			this.armedKeys.remove(key);
-			// 续跑权只在"没有交棒"的出口归还（R5：与 C1 对齐后的口径）：
-			// · 决策到达 与 <b>前端超时</b> 都置 handedOff=true —— 两者之后本线程都还在驱动这一轮
-			//   （已放行的工具要执行 / 超时文案回填给模型继续跑），租约交续租调度器、终态由
-			//   RunStore.save 释放，这里<b>不动作</b>；
-			// · 取消 与 中断 是真"本轮不驱动"（前者整轮终止、后者按收尾退出）⇒ 当场还租。
-			// 释放是 epoch scoped（若是迟到的释放，不会删掉新持有者的租约）。
-			if (lease != null && !handedOff) {
-				releaseWaitingLease(lease, runId);
-			}
-			closeCancelHandle(cancelHandle, runId);
+			finishAwait(state);
 		}
+	}
+
+	private PendingToolCall waitLoop(AwaitState state) throws InterruptedException {
+		while (true) {
+			WaitStep step = pollDecision(state);
+			if (step.finished()) {
+				return step.result();
+			}
+			if (step.retry()) {
+				continue;
+			}
+			if (!state.latch.await(step.sliceMs())) {
+				heartbeatAwait(state);
+			}
+		}
+	}
+
+	private WaitStep pollDecision(AwaitState state) throws InterruptedException {
+		CancellationRegistry.CancelState cancelState = this.cancellations.cancelState(state.runId);
+		if (cancelState == CancellationRegistry.CancelState.CANCELLED) {
+			return WaitStep.finished(cancel(state.runId, state.pending, state.confirm, state.startedAt));
+		}
+		if (cancelState == CancellationRegistry.CancelState.UNKNOWN) {
+			if (!state.cancelUnknownWarned) {
+				log.warn("confirm gate cancel state unknown (Redis read failed; keep waiting, do not finish as cancelled) runId={}", state.runId);
+				state.cancelUnknownWarned = true;
+			}
+		}
+		else {
+			state.cancelUnknownWarned = false;
+		}
+		PendingToolCall fresh;
+		synchronized (submitLockFor(state.runId)) {
+			fresh = this.store.pendingLenient(state.runId, state.pending.getToolCallId());
+		}
+		if (fresh != null && fresh.resolved()) {
+			state.handedOff = true;
+			handOffLease(state.lease, state.runId);
+			return WaitStep.finished(fresh);
+		}
+		return expiryStep(state);
+	}
+
+	private WaitStep expiryStep(AwaitState state) throws InterruptedException {
+		long sliceMs = HEARTBEAT_SECONDS * 1000L;
+		if (state.timeoutSeconds == null) {
+			return WaitStep.ongoing(sliceMs);
+		}
+		long remain = state.startedAt + state.timeoutSeconds * 1000L - System.currentTimeMillis();
+		if (remain > 0) {
+			return WaitStep.ongoing(Math.min(sliceMs, remain));
+		}
+		state.handedOff = true;
+		handOffLease(state.lease, state.runId);
+		try {
+			return WaitStep.finished(expireFrontend(state.runId, state.pending, state.timeoutSeconds));
+		}
+		catch (RuntimeException ex) {
+			log.warn("decision guard unavailable for frontend receipt expiry (stays PENDING, retry next tick; nothing persisted, no frame sent) runId={} toolCallId={}", state.runId,
+					state.pending.getToolCallId(), ex);
+			state.latch.await(HEARTBEAT_SECONDS * 1000L);
+			return WaitStep.retry();
+		}
+	}
+
+	private void heartbeatAwait(AwaitState state) {
+		state.heartbeatTicks++;
+		this.beacon.pulse(state.runId);
+		if (state.lease != null && state.heartbeatTicks % state.renewEveryTicks == 0L) {
+			renewWaitingLease(state.lease, state.runId);
+		}
+		state.out.heartbeat(heartbeatData(state.runId, state.pending, state.confirm, state.timeoutSeconds,
+				(System.currentTimeMillis() - state.startedAt) / 1000));
+	}
+
+	private void finishAwait(AwaitState state) {
+		this.beacon.endGateWait(state.runId);
+		String key = key(state.runId, state.pending.getToolCallId());
+		this.latches.remove(key, state.latch);
+		this.armedKeys.remove(key);
+		if (state.lease != null && !state.handedOff) {
+			releaseWaitingLease(state.lease, state.runId);
+		}
+		closeCancelHandle(state.cancelHandle, state.runId);
+	}
+
+	private record AwaitPreparation(Integer timeoutSeconds, LeaseService.Lease lease, Latch latch,
+			AutoCloseable cancelHandle, SseChatEmitter out) {
+	}
+
+	private record WaitStep(boolean finished, PendingToolCall result, boolean retry, long sliceMs) {
+
+		private static WaitStep finished(PendingToolCall result) {
+			return new WaitStep(true, result, false, 0L);
+		}
+
+		private static WaitStep ongoing(long sliceMs) {
+			return new WaitStep(false, null, false, sliceMs);
+		}
+
+		private static WaitStep retry() {
+			return new WaitStep(false, null, true, 0L);
+		}
+
+	}
+
+	private final class AwaitState {
+
+		private final String runId;
+		private final PendingToolCall pending;
+		private final boolean confirm;
+		private final Integer timeoutSeconds;
+		private final LeaseService.Lease lease;
+		private final Latch latch;
+		private final AutoCloseable cancelHandle;
+		private final SseChatEmitter out;
+		private final int renewEveryTicks;
+		private final long startedAt;
+		private final String sessionId;
+		private long heartbeatTicks;
+		private boolean handedOff;
+		private boolean cancelUnknownWarned;
+
+		private AwaitState(String runId, PendingToolCall pending, boolean confirm, AwaitPreparation preparation,
+				long startedAt, String sessionId) {
+			this.runId = runId;
+			this.pending = pending;
+			this.confirm = confirm;
+			this.timeoutSeconds = preparation.timeoutSeconds();
+			this.lease = preparation.lease();
+			this.latch = preparation.latch();
+			this.cancelHandle = preparation.cancelHandle();
+			this.out = preparation.out();
+			this.renewEveryTicks = leaseRenewEveryTicks();
+			this.startedAt = startedAt;
+			this.sessionId = sessionId;
+		}
+
 	}
 
 	/** 注销取消监听者（幂等；失败只留痕，不影响正在收尾的这一轮）。 */
@@ -1099,7 +934,9 @@ public class ConfirmGate {
 			cancelHandle.close();
 		}
 		catch (Exception ex) {
-			log.debug("could not deregister cancel listener runId={}", runId, ex);
+			if (LogSampling.canAcquire("confirm-cancel-listener-close")) {
+				log.warn("could not deregister cancel listener runId={}", runId, ex);
+			}
 		}
 	}
 
@@ -1198,7 +1035,7 @@ public class ConfirmGate {
 		}
 		// 判据在<b>续租线程</b>上执行：身份随租约携带（记录身份），不是"那一拍线程碰巧是谁"。
 		TenantUser identity = recordIdentityNow(runId);
-		holder.markDriving(lease, () -> stillDriving(runId, lease, identity), identity);
+		holder.markDriving(lease, () -> isStillDriving(runId, lease, identity), identity);
 	}
 
 	/**
@@ -1217,9 +1054,9 @@ public class ConfirmGate {
 	 * <p>读失败（Redis 抖动）按"仍活着"处理：判据误判为假会提前放掉一个正在跑的轮的续跑权，
 	 * 代价远大于多续一拍（续租本身会失败并走 {@code renewTick} 的既有降级）。
 	 */
-	private boolean stillDriving(String runId, LeaseService.Lease lease, TenantUser identity) {
+	private boolean isStillDriving(String runId, LeaseService.Lease lease, TenantUser identity) {
 		try {
-			if (!this.store.snapshotNotTerminal(runId, identity)) {
+			if (!this.store.isSnapshotNotTerminal(runId, identity)) {
 				return false;
 			}
 			return this.store.heldRunEpoch(runId) == lease.epoch();
@@ -1245,7 +1082,7 @@ public class ConfirmGate {
 	/** 等待期续租的节拍（心跳跳数）= {@code lease.renew-interval} / {@link #HEARTBEAT_SECONDS}，下限 1 跳。 */
 	private int leaseRenewEveryTicks() {
 		Duration interval = this.properties.getLease().getRenewInterval();
-		long millis = interval == null ? 0L : interval.toMillis();
+		long millis = ObjectUtils.defaultIfNull(interval, Duration.ZERO).toMillis();
 		return (int) Math.max(1L, Math.round(millis / (HEARTBEAT_SECONDS * 1000.0)));
 	}
 
@@ -1255,7 +1092,7 @@ public class ConfirmGate {
 		if (leases == null) {
 			return;
 		}
-		if (!leases.renew(lease, this.properties.getLease().getTtl())) {
+		if (!leases.isRenewed(lease, this.properties.getLease().getTtl())) {
 			log.warn("lease renewal failed while waiting (another instance may have taken over: the decision still converges, but this process no longer owns resume) runId={} epoch={}", runId, lease.epoch());
 		}
 	}
@@ -1266,8 +1103,8 @@ public class ConfirmGate {
 		if (leases == null) {
 			return;
 		}
-		if (!leases.release(lease)) {
-			log.debug("waiter's resume lease release had no effect (current holder is no longer this epoch) runId={} epoch={}", runId, lease.epoch());
+		if (!leases.isReleased(lease)) {
+			if (log.isDebugEnabled()) log.debug("waiter's resume lease release had no effect (current holder is no longer this epoch) runId={} epoch={}", runId, lease.epoch());
 		}
 	}
 
@@ -1346,7 +1183,7 @@ public class ConfirmGate {
 		}
 		boolean writable;
 		try {
-			writable = this.store.permittedToWrite(runId, "cancel handoff");
+			writable = this.store.isWritePermitted(runId, "cancel handoff");
 		}
 		catch (RuntimeException ex) {
 			writable = false;
@@ -1383,7 +1220,7 @@ public class ConfirmGate {
 			fresh.setResultText("本轮对话已被用户取消，该工具未执行。");
 			if (!this.store.cancelPending(runId, fresh)) {
 				PendingToolCall current = this.store.pendingLenient(runId, pending.getToolCallId());
-				return current == null ? pending : current;
+				return ObjectUtils.defaultIfNull(current, pending);
 			}
 		}
 		SseChatEmitter out = this.registry.of(runId);
@@ -1440,15 +1277,15 @@ public class ConfirmGate {
 		if (claim == null) {
 			return new ExpiryResult(writeFrontendTimeout(runId, timedOut, timeoutSeconds), true, true);
 		}
-		if (!claim.won()) {
+		if (!claim.isWon()) {
 			PendingToolCall current = this.store.pendingLenient(runId, pending.getToolCallId());
-			PendingToolCall entry = current == null ? pending : current;
+			PendingToolCall entry = ObjectUtils.defaultIfNull(current, pending);
 			if (PendingToolCall.PENDING.equals(entry.getStatus()) && isStaleExpiryClaim(claim.recorded())) {
 				PendingToolCall raw = rawOr(entry, runId, pending.getToolCallId());
 				if (PendingToolCall.PENDING.equals(raw.getStatus())) {
 					PendingToolCall repaired = applyFrontendTimeout(raw, timeoutSeconds);
 					RunStore.DecisionClaim repair = this.store.tryRepairDecision(runId, repaired, claim.recorded());
-					if (repair != null && repair.won()) {
+					if (repair != null && repair.isWon()) {
 						return new ExpiryResult(repaired, true, false);
 					}
 				}
@@ -1487,10 +1324,12 @@ public class ConfirmGate {
 	private PendingToolCall rawOr(PendingToolCall fallback, String runId, String toolCallId) {
 		try {
 			PendingToolCall raw = this.store.pendingRaw(runId, toolCallId);
-			return raw == null ? fallback : raw;
+			return ObjectUtils.defaultIfNull(raw, fallback);
 		}
 		catch (RuntimeException ex) {
-			log.debug("could not read raw pending entry; using the copy already read runId={} toolCallId={}", runId, toolCallId, ex);
+			if (LogSampling.canAcquire("confirm-raw-pending-read")) {
+				log.warn("could not read raw pending entry; using the copy already read runId={} toolCallId={}", runId, toolCallId, ex);
+			}
 			return fallback;
 		}
 	}
@@ -1568,7 +1407,7 @@ public class ConfirmGate {
 					ExpiryResult result = expireFrontendClaimed(runId, fresh, timeoutSeconds);
 					if (!result.winner()) {
 						// 结论已由别的写者抢到（人工决策 / 另一实例的到期收敛）：不发第二条结局帧。
-						log.debug("frontend receipt expiry after park was claimed by another writer (no state change this tick) runId={} toolCallId={}", runId, toolCallId);
+						if (log.isDebugEnabled()) log.debug("frontend receipt expiry after park was claimed by another writer (no state change this tick) runId={} toolCallId={}", runId, toolCallId);
 						return;
 					}
 					PendingToolCall expired = result.entry();
@@ -1614,7 +1453,7 @@ public class ConfirmGate {
 	 * @return 本拍由本实例收敛的条目数（0 = 没有到期条目，或都已被别的写者取得）
 	 */
 	public int convergeExpiredParkedFrontend(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return 0;
 		}
 		List<PendingToolCall> pendings;
@@ -1628,36 +1467,8 @@ public class ConfirmGate {
 		long now = System.currentTimeMillis();
 		int converged = 0;
 		for (PendingToolCall pending : pendings) {
-			if (!PendingToolCall.PENDING.equals(pending.getStatus())
-					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-				continue;
-			}
-			Long expiresAt = pending.getExpiresAt();
-			if (expiresAt == null || expiresAt <= 0L || expiresAt > now) {
-				continue;
-			}
-			Integer timeoutSeconds = suspendWaitSeconds(pending);
-			if (timeoutSeconds == null) {
-				// 确认门 / 表单 / 表格写工具：等的是人，没有上限 —— 到期字段（若有）不作数。
-				continue;
-			}
-			String toolCallId = pending.getToolCallId();
-			String toolName = pending.getName();
-			try {
-				ExpiryResult result = expireFrontendClaimed(runId, pending, timeoutSeconds);
-				if (!result.winner()) {
-					continue;
-				}
-				PendingToolCall expired = result.entry();
-				settleParkedToolCall(runId, expired, expired.getResultText());
-				AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
-						toolCallId, "tool", toolName, "timeoutS", timeoutSeconds, "source", "converge");
-				log.debug("park expiry entry converged by this instance runId={} toolCallId={} tool={} timeoutS={}", runId, toolCallId, toolName, timeoutSeconds);
+			if (convergeExpiredFrontendEntry(runId, pending, now)) {
 				converged++;
-			}
-			catch (RuntimeException ex) {
-				log.warn("park expiry entry convergence failed (no state change; retry next tick) runId={} toolCallId={}", runId,
-						toolCallId, ex);
 			}
 		}
 		if (converged > 0) {
@@ -1670,6 +1481,41 @@ public class ConfirmGate {
 		return converged;
 	}
 
+	private boolean convergeExpiredFrontendEntry(String runId, PendingToolCall pending, long now) {
+		if (!PendingToolCall.PENDING.equals(pending.getStatus())
+				|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+			return false;
+		}
+		Long expiresAt = pending.getExpiresAt();
+		if (expiresAt == null || expiresAt <= 0L || expiresAt > now) {
+			return false;
+		}
+		Integer timeoutSeconds = suspendWaitSeconds(pending);
+		if (timeoutSeconds == null) {
+			// 确认门 / 表单 / 表格写工具：等的是人，没有上限 —— 到期字段（若有）不作数。
+			return false;
+		}
+		String toolCallId = pending.getToolCallId();
+		String toolName = pending.getName();
+		try {
+			ExpiryResult result = expireFrontendClaimed(runId, pending, timeoutSeconds);
+			if (!result.winner()) {
+				return false;
+			}
+			PendingToolCall expired = result.entry();
+			settleParkedToolCall(runId, expired, expired.getResultText());
+			AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
+					toolCallId, "tool", toolName, "timeoutS", timeoutSeconds, "source", "converge");
+			if (log.isDebugEnabled()) log.debug("park expiry entry converged by this instance runId={} toolCallId={} tool={} timeoutS={}", runId, toolCallId, toolName, timeoutSeconds);
+			return true;
+		}
+		catch (RuntimeException ex) {
+			log.warn("park expiry entry convergence failed (no state change; retry next tick) runId={} toolCallId={}", runId,
+					toolCallId, ex);
+			return false;
+		}
+	}
+
 	private Map<String, Object> heartbeatData(String runId, PendingToolCall pending, boolean confirm,
 			Integer timeoutSeconds, long waitedSeconds) {
 		Map<String, Object> data = new LinkedHashMap<>();
@@ -1678,7 +1524,7 @@ public class ConfirmGate {
 		data.put("toolCallId", pending.getToolCallId());
 		data.put("name", pending.getName());
 		data.put("status", pending.getStatus());
-		data.put("waitedSeconds", waitedSeconds);
+		data.put("waitedSeconds", String.valueOf(waitedSeconds));
 		// 无上限的挂起（确认门 / generative_form）报 null：前端据此不武装倒计时
 		data.put("timeoutSeconds", timeoutSeconds);
 		return data;
@@ -1718,8 +1564,10 @@ public class ConfirmGate {
 	 * @param verdict 安全闸的裁定（仅 {@link Outcome#REJECTED} 时非空）
 	 * @param resumeTrigger 死卡兜底的续跑触发结果（T3-6a；随响应体回给调用方，只读信息）
 	 */
-	public record Submission(Outcome outcome, PendingToolCall pending, boolean woke, FrontendToolGuard.Verdict verdict,
-			ResumeTrigger resumeTrigger) {
+	public record Submission(@JsonProperty("outcome") Outcome outcome,
+			@JsonProperty("pending") PendingToolCall pending, @JsonProperty("woke") boolean woke,
+			@JsonProperty("verdict") FrontendToolGuard.Verdict verdict,
+			@JsonProperty("resumeTrigger") ResumeTrigger resumeTrigger) {
 
 		/** 兼容构造（非 ACCEPTED 分支与既有调用方）：不涉及续跑触发。 */
 		public Submission(Outcome outcome, PendingToolCall pending, boolean woke, FrontendToolGuard.Verdict verdict) {
@@ -1740,7 +1588,8 @@ public class ConfirmGate {
 	 * @param outcome   投递结论（机器可读；见 {@link #maybeTriggerResume} 的取值表）
 	 * @param detail    人读补充（可空）
 	 */
-	public record ResumeTrigger(boolean triggered, String outcome, String detail) {
+	public record ResumeTrigger(@JsonProperty("triggered") boolean triggered,
+			@JsonProperty("outcome") String outcome, @JsonProperty("detail") String detail) {
 
 		public static ResumeTrigger notApplicable() {
 			return new ResumeTrigger(false, "NOT_APPLICABLE", null);
@@ -1794,7 +1643,7 @@ public class ConfirmGate {
 		if (pending == null) {
 			return new Submission(Outcome.NOT_FOUND, null, false, null);
 		}
-		if (kindMismatch(pending, PendingToolCall.KIND_CONFIRM, "confirm")) {
+		if (isKindMismatch(pending, PendingToolCall.KIND_CONFIRM, "confirm")) {
 			return new Submission(Outcome.TOOL_KIND_MISMATCH, pending, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
@@ -1802,7 +1651,7 @@ public class ConfirmGate {
 		}
 		String decidedStatus = approved ? PendingToolCall.APPROVED : PendingToolCall.REJECTED;
 		pending.setStatus(decidedStatus);
-		pending.setReason(reason == null || reason.isBlank()
+		pending.setReason(StringUtils.isBlank(reason)
 				? (approved ? "用户在确认门中批准" : "用户在确认门中拒绝") : reason);
 		pending.setExecuted(false);
 		pending.setExecutedBy(null);
@@ -1817,7 +1666,7 @@ public class ConfirmGate {
 			pending.setCode(null);
 		}
 		RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
-		if (claim != null && !claim.won()) {
+		if (claim != null && !claim.isWon()) {
 			return convergeOnDecided(runId, toolCallId, claim.recorded());
 		}
 		boolean woke;
@@ -1840,7 +1689,7 @@ public class ConfirmGate {
 		//    dismiss 的判据）；
 		// ③ 必须在 submitLock <b>之外</b>（锁内不做 Redis 往返，理由同 submitFrontendResult）；
 		// ④ 与批循环/续跑认领的那一条由 ai:observed 的首写者仲裁（决策恰落在交接窗口时只发一条）。
-		if (!approved && publishesRequestsAheadOfLoop()) {
+		if (!approved && canPublishRequestsAheadOfLoop()) {
 			settleParkedToolCall(runId, pending, pending.getResultText());
 		}
 		return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
@@ -1887,7 +1736,7 @@ public class ConfirmGate {
 	 */
 	private String sessionOf(String runId) {
 		String fromMdc = AiTrace.currentSessionId();
-		return fromMdc != null ? fromMdc : snapshotSessionId(runId);
+		return ObjectUtils.getIfNull(fromMdc, () -> snapshotSessionId(runId));
 	}
 
 	/**
@@ -1902,7 +1751,7 @@ public class ConfirmGate {
 	 */
 	private PendingToolCall pendingForWrite(String runId, String toolCallId) {
 		PendingToolCall raw = this.store.pendingRaw(runId, toolCallId);
-		return raw != null ? raw : this.store.pending(runId, toolCallId);
+		return ObjectUtils.getIfNull(raw, () -> this.store.pending(runId, toolCallId));
 	}
 
 	/**
@@ -1923,7 +1772,7 @@ public class ConfirmGate {
 	 *
 	 * @param endpoint 入口名（只进日志，便于定位是谁把哪张卡发错了）
 	 */
-	private boolean kindMismatch(PendingToolCall pending, String expectedKind, String endpoint) {
+	private boolean isKindMismatch(PendingToolCall pending, String expectedKind, String endpoint) {
 		if (!pending.hasKind()) {
 			log.warn("entry has no kind; approval/submission refused (no evidence, no authorization) toolCallId={} name={} endpoint={} expected={} (no state write, no guard, no frame)", pending.getToolCallId(), pending.getName(), endpoint,
 					expectedKind);
@@ -1959,7 +1808,7 @@ public class ConfirmGate {
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
 			return new Submission(Outcome.DUPLICATE, pending, false, null);
 		}
-		if (decidedStatus == null || !RunStore.mergeableDecisionStatus(decidedStatus)) {
+		if (decidedStatus == null || !RunStore.isDecisionStatusMergeable(decidedStatus)) {
 			// I1：不可重建的结论（APPROVED / FRONTEND_RESULT）<b>不写裸状态</b> —— 前者需要执行侧字段
 			// （executed=false 等由驱动方按 E2 语义补），后者的 resultText 就是用户填的值，裸写会把载荷抹掉。
 			// 读侧（RunStore#applyDecisionMarker）对这两类同样不合并 ⇒ 卡继续显示为待处理，不出现"已决但没内容"。
@@ -1990,7 +1839,7 @@ public class ConfirmGate {
 				this.store.putPending(runId, pending);
 			}
 		}
-		else if (!repair.won()) {
+		else if (!repair.isWon()) {
 			PendingToolCall current = this.store.pendingRaw(runId, toolCallId);
 			return new Submission(current == null ? Outcome.NOT_FOUND : Outcome.DUPLICATE, current, false, null);
 		}
@@ -2005,7 +1854,7 @@ public class ConfirmGate {
 
 	/** guard 原值 {@code <status>|<atMs>|<instanceId>} → status；格式不认识返回 null。 */
 	private static String statusOfDecision(String recorded) {
-		if (recorded == null || recorded.isBlank()) {
+		if (StringUtils.isBlank(recorded)) {
 			return null;
 		}
 		int sep = recorded.indexOf('|');
@@ -2036,12 +1885,40 @@ public class ConfirmGate {
 	 * <p>必须在每次「重新读条目」之后调用一次 —— 外置存储读出来的是新对象，落值不会跟着走。
 	 */
 	private static void applySheetMeta(PendingToolCall pending, Map<String, Object> sheetMeta) {
-		if (pending == null || sheetMeta == null || sheetMeta.isEmpty()) {
+		if (pending == null || MapUtils.isEmpty(sheetMeta)) {
 			return;
 		}
 		Map<String, Object> sanitized = SheetAudit.sanitize(sheetMeta);
 		if (!sanitized.isEmpty()) {
 			pending.setSheetMeta(sanitized);
+		}
+	}
+
+	private boolean emitFrontendDecision(String runId, String toolCallId, PendingToolCall pending,
+			RunStore.DecisionClaim claim, boolean ok, String resultText) {
+		synchronized (submitLockFor(runId)) {
+			if (claim == null) {
+				this.store.putPending(runId, pending);
+			}
+			// ===== 决策侧帧册收口（suspend-kill-a 的 FRONTEND_RESULT 残支）=====
+			// 前端卡的结局帧由本方法发出、<b>早于</b>续跑 —— 续跑侧再补只会排在 result 之后，
+			// 所以补发点必须在这里：同一把 submitLock 内、发结局帧之前。判据是事件日志（跨实例），
+			// 原实例的 tool_start 已在归档则一条不补。写出器取 registry.of(runId) 这同一个身份，
+			// 保证补发帧与结局帧走同一条取号/落档/订阅扇出路径。
+			// 决策幂等不受影响：原子决策已决出唯一写者，重复回灌在上面就返回。
+			SseChatEmitter out = this.registry.of(runId);
+			try {
+				if (out.isToolStartEmitted(pending)) {
+					log.info("decision side re-sent missing tool_start runId={} toolCallId={} name={}", runId, toolCallId,
+							pending.getName());
+				}
+			}
+			catch (RuntimeException ex) {
+				// 补发是帧册修复面：失败只 WARN，绝不改变决策语义（落库与唤醒都必须照常完成）
+				log.warn("decision side failed to re-send tool_start (decision unaffected) runId={} toolCallId={}", runId, toolCallId, ex);
+			}
+			out.frontendToolResult(pending, ok, resultText);
+			return signal(runId, toolCallId);
 		}
 	}
 
@@ -2054,7 +1931,7 @@ public class ConfirmGate {
 		}
 		// 入口 kind 校验（与 submitDecision 同一把尺）：错入口在"取消/复核/写 guard"之前就返回 ——
 		// 放弃（cancelled=true）也一样，否则确认门条目会被写成"用户放弃了前端表单"。
-		if (kindMismatch(pending, PendingToolCall.KIND_FRONTEND, "frontend-tool-result")) {
+		if (isKindMismatch(pending, PendingToolCall.KIND_FRONTEND, "frontend-tool-result")) {
 			return new Submission(Outcome.TOOL_KIND_MISMATCH, pending, false, null);
 		}
 		if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
@@ -2090,42 +1967,19 @@ public class ConfirmGate {
 		// 批 A：前端机器码随条目落库（入口已归一；未带 = null）。
 		pending.setCode(code);
 		boolean ok = declared.ok();
-		pending.setReason("source=" + (source == null || source.isBlank() ? "http-post" : source));
+		pending.setReason("source=" + (StringUtils.defaultIfBlank(source, "http-post")));
 		// G-E：复核器可在放行时补一段**元数据**（附件只暴露 fileName/fileId/size，内容永不进上下文）
-		String resultText = result == null ? "" : result;
+		String resultText = StringUtils.defaultString(result);
 		if (verdict != null && verdict.resultSuffix() != null) {
 			resultText = resultText + verdict.resultSuffix();
 		}
 		pending.setResultText(resultText);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
-		if (claim != null && !claim.won()) {
+		if (claim != null && !claim.isWon()) {
 			return convergeOnDecided(runId, toolCallId, claim.recorded());
 		}
-		boolean woke;
-		synchronized (submitLockFor(runId)) {
-			if (claim == null) {
-				this.store.putPending(runId, pending);
-			}
-			// ===== 决策侧帧册收口（suspend-kill-a 的 FRONTEND_RESULT 残支）=====
-			// 前端卡的结局帧由本方法发出、<b>早于</b>续跑 —— 续跑侧再补只会排在 result 之后，
-			// 所以补发点必须在这里：同一把 submitLock 内、发结局帧之前。判据是事件日志（跨实例），
-			// 原实例的 tool_start 已在归档则一条不补。写出器取 registry.of(runId) 这同一个身份，
-			// 保证补发帧与结局帧走同一条取号/落档/订阅扇出路径。
-			// 决策幂等不受影响：原子决策已决出唯一写者，重复回灌在上面就返回。
-			SseChatEmitter out = this.registry.of(runId);
-			try {
-				if (out.ensureToolStart(pending)) {
-					log.info("decision side re-sent missing tool_start runId={} toolCallId={} name={}", runId, toolCallId,
-							pending.getName());
-				}
-			}
-			catch (RuntimeException ex) {
-				// 补发是帧册修复面：失败只 WARN，绝不改变决策语义（落库与唤醒都必须照常完成）
-				log.warn("decision side failed to re-send tool_start (decision unaffected) runId={} toolCallId={}", runId, toolCallId, ex);
-			}
-			out.frontendToolResult(pending, ok, resultText);
-			woke = signal(runId, toolCallId);
+		boolean woke = emitFrontendDecision(runId, toolCallId, pending, claim, ok, resultText);
 		}
 		// ===== park 结算：决策写胜者也是候选发点（在提交锁之外）=====
 		// ① 不判 woke（那是实例内事实，见 settleParkedToolCall 的方法注）：park 开启时本行与源实例
@@ -2133,7 +1987,7 @@ public class ConfirmGate {
 		// ② 必须在锁外：提交锁按 run 条带化后不再跨 run 排队，但持锁做 Redis/删盘往返仍会推迟
 		//    <b>同一轮</b>的决策可见性（等待侧也读这把锁，见 await）。次序不变：落库 → 结局帧 → 唤醒
 		//    之后才发这一行，再往后才是续跑派发（maybeTriggerResume），因此"帧先于 end、end 先于续跑"仍成立。
-		if (publishesRequestsAheadOfLoop()) {
+		if (canPublishRequestsAheadOfLoop()) {
 			settleParkedToolCall(runId, pending, resultText);
 		}
 		// ===== 校验与消费分离（2026-10-29 修复批）=====
@@ -2150,7 +2004,7 @@ public class ConfirmGate {
 	/** 第一个认领该工具名的复核器的回灌判定；没有复核器返回 null（= 该工具不受闸门约束）。 */
 	private FrontendToolGuard.Verdict inspectResult(String runId, PendingToolCall pending, String result) {
 		for (FrontendToolGuard guard : this.frontendGuards) {
-			if (guard.supports(pending.getName())) {
+			if (guard.isSupported(pending.getName())) {
 				// GF 优化批 G-E：带上归属上下文（附件"属本表单 + 一次性"校验需要 runId/toolCallId）；
 				// 未覆写四参版本的复核器走默认实现，退回两参口径，行为不变。
 				return guard.inspectResult(runId, pending.getToolCallId(), pending.getArguments(), result);
@@ -2196,7 +2050,7 @@ public class ConfirmGate {
 
 	private FrontendToolGuard guardFor(String toolName) {
 		for (FrontendToolGuard guard : this.frontendGuards) {
-			if (guard.supports(toolName)) {
+			if (guard.isSupported(toolName)) {
 				return guard;
 			}
 		}
@@ -2206,15 +2060,14 @@ public class ConfirmGate {
 	/**
 	 * 挂起期续期：对该轮仍 {@code PENDING} 的条目，逐个调复核器的 {@link FrontendToolGuard#touchSuspension}。
 	 *
-	 * <p><b>公开</b>是因为它是"挂起续期链"的<b>可复用入口</b>：除本类的心跳（park 关闭时的等待线程）之外，
-	 * 读侧（{@code AiController} 的 {@code /confirm}、{@code /frontend-tool-result}、
-	 * {@code GET /events/{runId}}、{@code /runs/current}）在与 {@code RunStore#touchActiveRun}
-	 * <b>同一位置</b>调用它。park 开启时没有心跳线程，待决条目靠读侧续命 —— 复核器持有的一次性资源
-	 * （表单附件登记）必须跟着同一条链续，否则"卡还活着、附件先过期"。
+	 * <p><b>公开</b>是因为它是明确用户读侧的"挂起续期链"入口：
+	 * {@code AiController} 的 {@code /confirm}、{@code /frontend-tool-result}、
+	 * {@code GET /events/{runId}}、{@code /runs/current} 在与 {@code RunStore#touchActiveRun}
+	 * <b>同一位置</b>调用它。ConfirmGate 后台心跳不调用本方法；一次性资源只随真实用户活动续期。
 	 *
 	 * <p>只续 {@code PENDING}：决策/放弃之后一次性资源已被消费或回收，再续只会把已删的键重新养出来
 	 * （Redis {@code EXPIRE} 对缺键虽是无操作，但语义上"已收口就不该再续"）。
-	 * <b>不抛</b>：续期是养活性维护，读侧/心跳都不得因它失败而中断，失败只 DEBUG/WARN。
+	 * <b>不抛</b>：续期是养活性维护，用户读侧不得因它失败而中断，失败只 DEBUG/WARN。
 	 */
 	public void touchSuspendedResources(String runId) {
 		List<PendingToolCall> entries;
@@ -2222,10 +2075,12 @@ public class ConfirmGate {
 			entries = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("park renewal could not read pending entry runId={}", runId, ex);
+			if (LogSampling.canAcquire("park-renewal-pending-read")) {
+				log.warn("park renewal could not read pending entry runId={}", runId, ex);
+			}
 			return;
 		}
-		if (entries == null || entries.isEmpty()) {
+		if (CollectionUtils.isEmpty(entries)) {
 			return;
 		}
 		for (PendingToolCall entry : entries) {
@@ -2260,14 +2115,14 @@ public class ConfirmGate {
 		pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
 		pending.setOutcome(ToolOutcome.CANCELLED.wire());
 		pending.setCode(ToolOutcome.CODE_FRONTEND_CANCELLED);
-		pending.setReason("FRONTEND_DISMISSED" + (source == null || source.isBlank() ? "" : " source=" + source));
+		pending.setReason("FRONTEND_DISMISSED" + (StringUtils.isBlank(source) ? "" : " source=" + source));
 		pending.setExecuted(false);
 		pending.setResolvedAtMs(System.currentTimeMillis());
 		String text = "FRONTEND_CANCELLED：用户取消了该前端操作（关闭表单/放弃填写），"
 				+ "本次调用未获得任何数据；如需继续，请改为向用户询问或换用其它方式。";
 		pending.setResultText(text);
 		RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
-		if (claim != null && !claim.won()) {
+		if (claim != null && !claim.isWon()) {
 			return convergeOnDecided(runId, pending.getToolCallId(), claim.recorded());
 		}
 		boolean woke;
@@ -2279,7 +2134,7 @@ public class ConfirmGate {
 			woke = signal(runId, pending.getToolCallId());
 		}
 		// 与回灌同一口径：锁外发、按 ai:observed 仲裁、次序在结局帧与唤醒之后、续跑派发之前
-		if (publishesRequestsAheadOfLoop()) {
+		if (canPublishRequestsAheadOfLoop()) {
 			settleParkedToolCall(runId, pending, text);
 		}
 		// 放弃也是"这张卡的结论"：校验与消费分离批的回收钩子（该表单名下没提交的附件）。
@@ -2325,7 +2180,7 @@ public class ConfirmGate {
 	 * 关掉 park 时"等人"始终占着一条线程（即使决策落在别的实例，它也会在下一拍轮询到"已决"
 	 * 并自己结算）——结算权在等待方，决策侧<b>不参与</b>，这是既有口径。
 	 * 判据与 {@code SpToolCallingManager} 前移 {@code tool_start} 的那条同源
-	 * （{@link #publishesRequestsAheadOfLoop()}）。
+	 * （{@link #canPublishRequestsAheadOfLoop()}）。
 	 *
 	 * <p>失败只 WARN：帧册/审计是观测面，不得改变决策语义（决策已落库、结局帧已发）。
 	 */
@@ -2372,8 +2227,8 @@ public class ConfirmGate {
 	 * @return 走到结算口的条目数（观测/断言用；真正发出的行数由仲裁决定，可能更少）
 	 */
 	public int settleCancelledToolCalls(String runId, List<PendingToolCall> cancelledBefore) {
-		if (runId == null || cancelledBefore == null || cancelledBefore.isEmpty()
-				|| !publishesRequestsAheadOfLoop()) {
+		if (runId == null || CollectionUtils.isEmpty(cancelledBefore)
+				|| !canPublishRequestsAheadOfLoop()) {
 			return 0;
 		}
 		Map<String, PendingToolCall> cancelled = new LinkedHashMap<>();
@@ -2386,7 +2241,7 @@ public class ConfirmGate {
 		int settled = 0;
 		for (PendingToolCall before : cancelledBefore) {
 			PendingToolCall entry = before == null ? null : cancelled.get(before.getToolCallId());
-			if (entry == null || !settlesOnPark(entry.getKind())) {
+			if (entry == null || !isSettlesOnPark(entry.getKind())) {
 				continue;
 			}
 			settleParkedToolCall(runId, entry, entry.getResultText());
@@ -2399,7 +2254,7 @@ public class ConfirmGate {
 	 * 挂起后可能被"决策/放弃/取消/认领"在<b>别处</b>结算的两个通道 —— 与
 	 * {@link ToolCallEndTrace} 的仲裁口径同源（{@code BACKEND} 由执行认领独占，不占观测位）。
 	 */
-	private static boolean settlesOnPark(String kind) {
+	private static boolean isSettlesOnPark(String kind) {
 		return PendingToolCall.KIND_CONFIRM.equals(kind) || PendingToolCall.KIND_FRONTEND.equals(kind);
 	}
 
@@ -2460,7 +2315,7 @@ public class ConfirmGate {
 			return ResumeTrigger.skipped("WOKE_IN_PROCESS_GATE", null);
 		}
 		if (hasActiveLatch(runId)) {
-			log.debug("dead-card fallback skipped: this process still has an active wait for the runId runId={}", runId);
+			if (log.isDebugEnabled()) log.debug("dead-card fallback skipped: this process still has an active wait for the runId runId={}", runId);
 			return ResumeTrigger.skipped("ACTIVE_LATCH_IN_PROCESS", null);
 		}
 		RunSnapshot snapshot = this.store.get(runId);
@@ -2635,7 +2490,7 @@ public class ConfirmGate {
 					ResumeTrigger trigger = triggerResume(runId, false, false);
 					if (!trigger.triggered()) {
 						// 常见于快照已 DONE / 已有人接管：本链到此为止，但不清计数（清零点只在外部触发）。
-						log.debug("resume re-dispatch not dispatched runId={} reason={} detail={}", runId, trigger.outcome(),
+						if (log.isDebugEnabled()) log.debug("resume re-dispatch not dispatched runId={} reason={} detail={}", runId, trigger.outcome(),
 								trigger.detail());
 					}
 				}
@@ -2745,7 +2600,7 @@ public class ConfirmGate {
 	 * <p>调用时机由终态收尾方（{@code CancelFinalizer} / 终态写成功之后）决定，本类不做触发。
 	 */
 	public void clearRunState(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return;
 		}
 		this.dispatchRetries.remove(LocalRunKey.of(runId));
@@ -2785,7 +2640,9 @@ public class ConfirmGate {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("could not read snapshot while capturing turn identity (falling back to submitter thread identity) runId={}", runId, ex);
+			if (LogSampling.canAcquire("confirm-record-identity-read")) {
+				log.warn("could not read snapshot while capturing turn identity (falling back to submitter thread identity) runId={}", runId, ex);
+			}
 		}
 		return current;
 	}
@@ -2825,6 +2682,43 @@ public class ConfirmGate {
 	 * 不还，其余"确认无人接管"的结局当场还）。{@code fresh=false} 表示租约本来就在本进程手里
 	 * （等待方/上一次派发），本次不动它。
 	 */
+	private void handleResumeOutcome(String runId, LeaseService.Lease lease, boolean fresh,
+			ResumeService.ResumeResult result) {
+		// park 批：池饱和 / 会话被占 = "决策已落库但这一拍没有驱动者" ⇒ 有界重派发。
+		// W-21：取消状态"此刻不可确认"同属这一类（不是终态、也不是有人接管）——
+		// 一次失败就永久搁置会让已结算的前端工具没有物化路径（STATE_UNKNOWN 不在其列：可能是
+		// 永久性条目损坏，见 isRetriableDispatchOutcome）。
+		// 已确认取消的 IN_PROGRESS 也只表示这一拍互斥未抢到，进入同一份有界预算；普通批准不变。
+		// 该标记随重试链传递，耗尽时选择取消收尾未获驱动出口，而非 CANCEL_STATE_UNKNOWN。
+		// 注意：这里<b>不清零</b>计数（成功/终态也不清）—— 清零点只有外部触发入口，
+		// 否则耗尽的链会被"某个结局"悄悄续命（见 dispatchRetries 字段注释）。
+		boolean cancelledInProgress = result != null && result.outcome() == ResumeService.Outcome.IN_PROGRESS
+				&& isCancelConfirmed(runId);
+		if (result != null && (isRetriableDispatchOutcome(result.outcome()) || cancelledInProgress)) {
+			retryDispatch(runId, cancelledInProgress);
+		}
+		if (lease == null) {
+			return;
+		}
+		if (result != null && result.outcome() == ResumeService.Outcome.ACCEPTED) {
+			if (fresh) {
+				// R2：与 handOffLease 同形的存活判据（快照非终态 ∧ 本进程仍是该 epoch 主人）。
+				// 恒真续租在"驱动任务死了却没写终态"时会永久攥着租约，接管方只能干等。
+				markDrivingGuarded(lease, runId);
+			}
+		}
+		else if (result != null && result.outcome().isLeaseReleasable()) {
+			// L-19：与 ResumeService 同一条<b>归还白名单</b>（{@link ResumeService.Outcome#releasesLease}）。
+			// IN_PROGRESS = 本进程有胜方在用<b>同一 token</b>，LEASE_HELD_ELSEWHERE = 租约已归别人 ——
+			// 两者都<b>不还</b>。派发失败（EXECUTOR_SATURATED）与执行异常仍还租：
+			// 那是"确认没人接管"的两条路径（与 ResumeService 池饱和同口径的红线）。
+			releaseLeaseQuietly(lease, runId, fresh);
+		}
+		else if (result == null) {
+			log.warn("dead-card resume returned no outcome (treated as taken over: lease not returned, wait at most the TTL) runId={}", runId);
+		}
+	}
+
 	private void runResume(String runId, LeaseService.Lease lease, boolean fresh) {
 		try {
 			ResumeService service = this.resumeServiceProvider.getIfAvailable();
@@ -2864,39 +2758,7 @@ public class ConfirmGate {
 			}
 			log.info("dead-card resume outcome runId={} outcome={} body={}", runId,
 					result == null ? null : result.outcome(), result == null ? null : result.body());
-			// park 批：池饱和 / 会话被占 = "决策已落库但这一拍没有驱动者" ⇒ 有界重派发。
-			// W-21：取消状态"此刻不可确认"同属这一类（不是终态、也不是有人接管）——
-			// 一次失败就永久搁置会让已结算的前端工具没有物化路径（STATE_UNKNOWN 不在其列：可能是
-			// 永久性条目损坏，见 isRetriableDispatchOutcome）。
-			// 已确认取消的 IN_PROGRESS 也只表示这一拍互斥未抢到，进入同一份有界预算；普通批准不变。
-			// 该标记随重试链传递，耗尽时选择取消收尾未获驱动出口，而非 CANCEL_STATE_UNKNOWN。
-			// 注意：这里<b>不清零</b>计数（成功/终态也不清）—— 清零点只有外部触发入口，
-			// 否则耗尽的链会被"某个结局"悄悄续命（见 dispatchRetries 字段注释）。
-			boolean cancelledInProgress = result != null && result.outcome() == ResumeService.Outcome.IN_PROGRESS
-					&& isCancelConfirmed(runId);
-			if (result != null && (isRetriableDispatchOutcome(result.outcome()) || cancelledInProgress)) {
-				retryDispatch(runId, cancelledInProgress);
-			}
-			if (lease == null) {
-				return;
-			}
-			if (result != null && result.outcome() == ResumeService.Outcome.ACCEPTED) {
-				if (fresh) {
-					// R2：与 handOffLease 同形的存活判据（快照非终态 ∧ 本进程仍是该 epoch 主人）。
-					// 恒真续租在"驱动任务死了却没写终态"时会永久攥着租约，接管方只能干等。
-					markDrivingGuarded(lease, runId);
-				}
-			}
-			else if (result != null && result.outcome().releasesLease()) {
-				// L-19：与 ResumeService 同一条<b>归还白名单</b>（{@link ResumeService.Outcome#releasesLease}）。
-				// IN_PROGRESS = 本进程有胜方在用<b>同一 token</b>，LEASE_HELD_ELSEWHERE = 租约已归别人 ——
-				// 两者都<b>不还</b>。派发失败（EXECUTOR_SATURATED）与执行异常仍还租：
-				// 那是"确认没人接管"的两条路径（与 ResumeService 池饱和同口径的红线）。
-				releaseLeaseQuietly(lease, runId, fresh);
-			}
-			else if (result == null) {
-				log.warn("dead-card resume returned no outcome (treated as taken over: lease not returned, wait at most the TTL) runId={}", runId);
-			}
+			handleResumeOutcome(runId, lease, fresh, result);
 		}
 		catch (AiStateUnavailableException ex) {
 			// ResumeService 内部同类临时读取失败（审批条目/快照/fence）：同样只是"这一拍不可确认"，
@@ -2917,7 +2779,9 @@ public class ConfirmGate {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("cancel state unreadable during resume compensation runId={}", runId, ex);
+			if (LogSampling.canAcquire("confirm-cancel-state-read")) {
+				log.warn("cancel state unreadable during resume compensation runId={}", runId, ex);
+			}
 			return false;
 		}
 	}
@@ -2932,10 +2796,12 @@ public class ConfirmGate {
 			return;
 		}
 		try {
-			leases.release(lease);
+			leases.isReleased(lease);
 		}
 		catch (Exception ex) {
-			log.debug("dispatch path failed to release resume lease runId={} epoch={}", runId, lease.epoch(), ex);
+			if (LogSampling.canAcquire("confirm-resume-lease-release")) {
+				log.warn("dispatch path failed to release resume lease runId={} epoch={}", runId, lease.epoch(), ex);
+			}
 		}
 	}
 
@@ -2959,13 +2825,17 @@ public class ConfirmGate {
 	}
 
 	/** 唤醒本进程内正在等待该 toolCallId 的闸门；无等待方返回 false（不报错）。 */
-	public boolean signal(String runId, String toolCallId) {
+	public boolean isSignaled(String runId, String toolCallId) {
 		Latch latch = this.latches.get(key(runId, toolCallId));
 		if (latch == null) {
 			return false;
 		}
 		latch.signal();
 		return true;
+	}
+
+	public boolean signal(String runId, String toolCallId) {
+		return isSignaled(runId, toolCallId);
 	}
 
 	/**

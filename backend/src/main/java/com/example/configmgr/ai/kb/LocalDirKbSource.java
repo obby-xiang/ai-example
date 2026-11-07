@@ -1,6 +1,8 @@
 package com.example.configmgr.ai.kb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -60,7 +62,7 @@ public class LocalDirKbSource implements KbSource {
         }
         byte[] raw;
         try {
-            raw = Files.readAllBytes(manifestPath);
+            raw = FileUtils.readFileToByteArray(manifestPath.toFile());
         }
         catch (IOException e) {
             throw new KbSourceException("Failed to read manifest.json", e);
@@ -73,40 +75,49 @@ public class LocalDirKbSource implements KbSource {
         List<KbDocMeta> resolved = new ArrayList<>(manifest.docs().size());
         java.util.Map<String, String> contents = new java.util.LinkedHashMap<>();
         for (KbDocMeta meta : manifest.docs()) {
-            if (budget != null) {
-                budget.check();
-            }
-            Path file = resolve(meta);
-            if (!Files.isRegularFile(file)) {
-                // 单篇缺失是配置错误：整份失败比"静默少一篇"好（少一篇会让检索面无声缩水）
-                throw new KbSourceException("Knowledge document does not exist: " + meta.id() + " (" + file + ")");
-            }
-            byte[] body;
-            try {
-                body = Files.readAllBytes(file);
-            }
-            catch (IOException e) {
-                throw new KbSourceException("Failed to read knowledge document: " + meta.id(), e);
-            }
-            if (budget != null) {
-                // 文件读取本身不可硬中断，只能在调用前后检查。
-                budget.check();
-            }
-            String content = new String(body, StandardCharsets.UTF_8);
-            String actualSha = KbHashing.sha256Text(content);
-            if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
-                throw new KbSourceException("KB content SHA-256 (BOM stripped, LF normalized) does not match manifest: " + meta.id());
-            }
-            String updatedAt = meta.updatedAt() == null ? "" : meta.updatedAt();
-            resolved.add(new KbDocMeta(meta.id(), meta.title(), meta.summary(), meta.tags(), meta.aliases(),
-                    actualSha, updatedAt, meta.file(), meta.terms(), meta.aliasesEn()));
-            contents.put(meta.id(), content);
+            ResolvedDoc doc = resolveDoc(meta, budget);
+            resolved.add(doc.meta());
+            contents.put(meta.id(), doc.content());
         }
         if (budget != null) {
             budget.check();
         }
         return KbSource.ManifestFetch.modified(
                 new KbManifest(manifest.version(), manifest.generatedAt(), resolved), null, null, contents);
+    }
+
+    private ResolvedDoc resolveDoc(KbDocMeta meta, KbSource.RefreshBudget budget) throws KbSourceException {
+        if (budget != null) {
+            budget.check();
+        }
+        Path file = resolve(meta);
+        if (!Files.isRegularFile(file)) {
+            // 单篇缺失是配置错误：整份失败比"静默少一篇"好（少一篇会让检索面无声缩水）
+            throw new KbSourceException("Knowledge document does not exist: " + meta.id() + " (" + file + ")");
+        }
+        byte[] body;
+        try {
+            body = FileUtils.readFileToByteArray(file.toFile());
+        }
+        catch (IOException e) {
+            throw new KbSourceException("Failed to read knowledge document: " + meta.id(), e);
+        }
+        if (budget != null) {
+            // 文件读取本身不可硬中断，只能在调用前后检查。
+            budget.check();
+        }
+        String content = new String(body, StandardCharsets.UTF_8);
+        String actualSha = KbHashing.sha256Text(content);
+        if (StringUtils.isNotBlank(meta.sha()) && !meta.sha().equalsIgnoreCase(actualSha)) {
+            throw new KbSourceException("KB content SHA-256 (BOM stripped, LF normalized) does not match manifest: " + meta.id());
+        }
+        String updatedAt = StringUtils.defaultString(meta.updatedAt());
+        KbDocMeta resolved = new KbDocMeta(meta.id(), meta.title(), meta.summary(), meta.tags(), meta.aliases(),
+                actualSha, updatedAt, meta.file(), meta.terms(), meta.aliasesEn());
+        return new ResolvedDoc(resolved, content);
+    }
+
+    private record ResolvedDoc(KbDocMeta meta, String content) {
     }
 
     @Override
@@ -121,7 +132,7 @@ public class LocalDirKbSource implements KbSource {
         }
         Path file = resolve(meta);
         try {
-            String content = Files.readString(file, StandardCharsets.UTF_8);
+            String content = FileUtils.readFileToString(file.toFile(), StandardCharsets.UTF_8);
             if (budget != null) {
                 budget.check();
             }

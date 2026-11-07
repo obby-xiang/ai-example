@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.Locale;
 
@@ -66,7 +67,7 @@ public final class LeaseKeys {
 	 * 调用方会共用一把锁 —— 看起来互斥，实际是误伤）
 	 */
 	public static String normalizeJobType(String jobType) {
-		if (jobType == null || jobType.isBlank()) {
+		if (StringUtils.isBlank(jobType)) {
 			throw new CodedIllegalArgumentException(ErrorCodes.LEASE_KEY_INVALID, "jobType must not be blank: job lock keys use the shape "
 					+ "ai:lock:job:<taskId>:<JOBTYPE>; a missing JOBTYPE would make different job types share one lock");
 		}

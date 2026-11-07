@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.CodedIllegalStateException;
@@ -25,6 +26,9 @@ import com.example.configmgr.definition.service.DefinitionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -213,11 +217,15 @@ public class ToolPreflightService {
 	/**
 	 * 该工具是否走预检（{@link AiToolNames.ConfirmTool} 的四个作业工具 + {@code create_task}）。
 	 */
-	public static boolean supports(String toolName) {
+	public static boolean isSupported(String toolName) {
 		if (AiToolNames.ConfirmTool.of(toolName).isPresent()) {
 			return true;
 		}
 		return TOOL_CREATE_TASK.equals(toolName);
+	}
+
+	public static boolean supports(String toolName) {
+		return isSupported(toolName);
 	}
 
 	/**
@@ -242,7 +250,7 @@ public class ToolPreflightService {
 		if (TOOL_CREATE_TASK.equals(toolName)) {
 			return inspectCreate(argumentsJson, context);
 		}
-		boolean english = english();
+		boolean english = isEnglish();
 		AiToolNames.ConfirmTool confirmTool = AiToolNames.ConfirmTool.of(toolName)
 			.orElseThrow(() -> new CodedIllegalArgumentException(ErrorCodes.TOOL_NOT_PREFLIGHTABLE,
 					"Tool " + toolName + " is outside the preflight scope (see supports)"));
@@ -259,47 +267,12 @@ public class ToolPreflightService {
 				exists ? "" : english ? "Task #" + taskId + " not found (or not accessible)"
 						: "未找到任务 #" + taskId + "（或当前无权访问）"));
 
-		// ② 类型匹配（任务类型 vs 作业类型；任务已终态也在此项失败 —— 检查项名称/顺序保持既有口径，
-		//    失败 detail 直说"任务已 <STATUS>，不可再发起 <JOB> 作业"，不把终态结论藏在类型文案里）
-		if (!exists) {
-			checks.add(PreflightReport.check(CheckCode.TYPE_MATCH, false, argsOf("taskId", taskId),
-					english ? "Task not found; type cannot be determined" : "任务不存在，无法判断类型"));
-		}
-		else {
-			Task present = task.get();
-			ConflictException finalized = finalizedOf(taskId, jobType);
-			Task.TaskType expected = confirmTool.taskType();
-			boolean typeMatches = present.getType() == expected;
-			boolean pass = typeMatches && finalized == null;
-			String detail;
-			if (!typeMatches) {
-				detail = english
-						? "Task #" + taskId + " is " + present.getType() + " and cannot start a " + jobType + " job"
-						: "任务 #" + taskId + " 类型 " + present.getType() + "，不能发起 " + jobType + " 作业";
-			}
-			else if (finalized != null) {
-				detail = english
-						? "Task #" + taskId + " is " + present.getStatus() + " and cannot start another " + jobType
-								+ " job (" + finalized.getCode() + ")"
-						: "任务 #" + taskId + " 已 " + present.getStatus() + "，不可再发起 " + jobType + " 作业（"
-								+ finalized.getCode() + "）";
-			}
-			else {
-				detail = "";
-			}
-			Map<String, Object> args = new LinkedHashMap<>();
-			args.put("taskId", taskId);
-			args.put("taskType", String.valueOf(present.getType()));
-			args.put("jobType", jobType.name());
-			// 状态是语言中立枚举：终态迁移必须改变指纹（否则"卡上还是 ACTIVE、批准时已 COMPLETED"会漏检）
-			args.put("status", String.valueOf(present.getStatus()));
-			checks.add(PreflightReport.check(CheckCode.TYPE_MATCH, pass, args, detail));
-		}
+		checks.add(typeMatchCheck(taskId, task, confirmTool, exists, english));
 
 		// ③ 无在途作业
 		if (!exists) {
 			Map<String, Object> args = new LinkedHashMap<>();
-			args.put("taskId", taskId);
+			args.put("taskId", taskId == null ? null : String.valueOf(taskId));
 			args.put("jobType", jobType.name());
 			checks.add(PreflightReport.check(CheckCode.NO_JOB_IN_FLIGHT, false, args,
 					english ? "Task not found; in-flight job cannot be checked" : "任务不存在，无法检查在途作业"));
@@ -307,36 +280,13 @@ public class ToolPreflightService {
 		else {
 			ConflictException inFlight = jobService.inFlightConflict(taskId, jobType);
 			Map<String, Object> args = new LinkedHashMap<>();
-			args.put("taskId", taskId);
+			args.put("taskId", taskId == null ? null : String.valueOf(taskId));
 			args.put("jobType", jobType.name());
 			checks.add(PreflightReport.check(CheckCode.NO_JOB_IN_FLIGHT, inFlight == null, args,
 					inFlight == null ? "" : english ? "Another job is in flight for this task" : "该任务已有在途作业"));
 		}
 
-		// ④ 预检指纹新鲜（IMPORT/PUBLISH 要"最近一次预检查通过"，IMPORT 还要文件指纹未变；
-		//    EXPORT/PRECHECK 不依赖既往预检查 —— 通过但如实说明依据）
-		Optional<Job> latestPrecheck = exists ? jobService.latestPrecheck(taskId) : Optional.empty();
-		// 指纹依据进 args（语言中立）：预检查换了一份，"批准时看到的那一版"必须随之变号
-		Job precheckBasis = latestPrecheck.orElse(null);
-		Map<String, Object> precheckArgs = new LinkedHashMap<>();
-		precheckArgs.put("taskId", taskId);
-		precheckArgs.put("jobType", jobType.name());
-		precheckArgs.put("jobId", precheckBasis == null ? null : precheckBasis.getId());
-		precheckArgs.put("fingerprint", fingerprint4(precheckBasis == null ? null : precheckBasis.getResultJson()));
-		if (!exists) {
-			checks.add(PreflightReport.check(CheckCode.FRESH_PRECHECK, false, precheckArgs,
-					english ? "Task not found; precheck fingerprint cannot be checked"
-							: "任务不存在，无法检查预检指纹"));
-		}
-		else if (jobType != Job.JobType.IMPORT && jobType != Job.JobType.PUBLISH) {
-			checks.add(PreflightReport.check(CheckCode.FRESH_PRECHECK, true, precheckArgs,
-					describeFingerprint(precheckBasis, jobType, english)));
-		}
-		else {
-			ConflictException stale = jobService.precheckConflict(taskId, jobType);
-			checks.add(PreflightReport.check(CheckCode.FRESH_PRECHECK, stale == null, precheckArgs,
-					stale == null ? describeFingerprint(precheckBasis, jobType, english) : english ? "The precheck is stale; run precheck again" : "预检已过期，请重新预检"));
-		}
+		checks.add(freshPrecheckCheck(taskId, jobType, exists, english));
 
 		// ⑤ 配置项 / 上传文件齐备（review-03 第 4 项：此前预检四项全过，批准后作业立刻 FAILED）
 		checks.add(itemsCheck(taskId, task.orElse(null), english));
@@ -387,7 +337,7 @@ public class ToolPreflightService {
 	 * 自动续接意图；非布尔值按 false 处理，不把未知值当成允许自动续接。
 	 */
 	private PreflightReport inspectCreate(String argumentsJson, AiContext context) {
-		boolean english = english();
+		boolean english = isEnglish();
 		Map<String, Object> target = new LinkedHashMap<>();
 		String type = argumentText(argumentsJson, "type");
 		String title = argumentText(argumentsJson, "title");
@@ -399,7 +349,7 @@ public class ToolPreflightService {
 		target.put("openWizard", RunContextRefresher.openWizard(argumentsJson));
 		Task continuationTask = continuationTask(argumentsJson, context, requestedType, effectiveTitle);
 		if (continuationTask != null) {
-			target.put("taskId", continuationTask.getId());
+			target.put("taskId", String.valueOf(continuationTask.getId()));
 			target.put("type", continuationTask.getType().name());
 			target.put("title", continuationTask.getTitle());
 		}
@@ -409,8 +359,101 @@ public class ToolPreflightService {
 						? "Illegal task type: " + type + " (EXPORT / IMPORT only)"
 						: "任务类型不合法：" + type + "（只支持 EXPORT / IMPORT）"));
 
-		// 结构化 defCodes：宿主校验通过后才允许成为"已知配置"候选
 		DefCodes requested = defCodesOf(argumentsJson);
+		List<String> defCodes = requested.codes();
+		PreflightReport.Check defCodeCheck = checkCreateDefCodes(requested, english);
+		if (defCodeCheck != null) {
+			if (!defCodes.isEmpty() || requested.invalid()) {
+				target.put("defCodes", defCodes);
+			}
+			checks.add(defCodeCheck);
+		}
+
+		ConditionsRequest requestedConditions = conditionsOf(argumentsJson);
+		JsonNode conditionsNode = requestedConditions.node();
+		PreflightReport.Check conditionCheck = checkCreateConditions(requestedConditions, requested, defCodes, type, english);
+		if (conditionCheck != null) {
+			if (requestedConditions.present()) {
+				target.put("conditions", conditionsMap(conditionsNode));
+			}
+			checks.add(conditionCheck);
+		}
+
+		CreateImpact impact = renderCreateImpact(argumentsJson, type, title, defCodes, requestedConditions,
+				continuationTask, english);
+		boolean pass = checks.stream().allMatch(PreflightReport.Check::pass);
+		String reportHash = reportHash(TOOL_CREATE_TASK, target, checks, impact.fact(), impact.conditionFact(), null);
+		return new PreflightReport(pass, target, checks, impact.text(), impact.conditionText(), null, reportHash);
+	}
+
+	private PreflightReport.Check typeMatchCheck(Long taskId, Optional<Task> task,
+			AiToolNames.ConfirmTool confirmTool, boolean exists, boolean english) {
+		// ② 类型匹配（任务类型 vs 作业类型；任务已终态也在此项失败 —— 检查项名称/顺序保持既有口径，
+		//    失败 detail 直说"任务已 <STATUS>，不可再发起 <JOB> 作业"，不把终态结论藏在类型文案里）
+		if (!exists) {
+			return PreflightReport.check(CheckCode.TYPE_MATCH, false, argsOf("taskId", taskId),
+					english ? "Task not found; type cannot be determined" : "任务不存在，无法判断类型");
+		}
+		Task present = task.get();
+		Job.JobType jobType = confirmTool.jobType();
+		ConflictException finalized = finalizedOf(taskId, jobType);
+		Task.TaskType expected = confirmTool.taskType();
+		boolean typeMatches = present.getType() == expected;
+		boolean pass = typeMatches && finalized == null;
+		String detail;
+		if (!typeMatches) {
+			detail = english
+					? "Task #" + taskId + " is " + present.getType() + " and cannot start a " + jobType + " job"
+					: "任务 #" + taskId + " 类型 " + present.getType() + "，不能发起 " + jobType + " 作业";
+		}
+		else if (finalized != null) {
+			detail = english
+					? "Task #" + taskId + " is " + present.getStatus() + " and cannot start another " + jobType
+							+ " job (" + finalized.getCode() + ")"
+					: "任务 #" + taskId + " 已 " + present.getStatus() + "，不可再发起 " + jobType + " 作业（"
+							+ finalized.getCode() + "）";
+		}
+		else {
+			detail = "";
+		}
+		Map<String, Object> args = new LinkedHashMap<>();
+		args.put("taskId", taskId == null ? null : String.valueOf(taskId));
+		args.put("taskType", String.valueOf(present.getType()));
+		args.put("jobType", jobType.name());
+		// 状态是语言中立枚举：终态迁移必须改变指纹（否则"卡上还是 ACTIVE、批准时已 COMPLETED"会漏检）
+		args.put("status", String.valueOf(present.getStatus()));
+		return PreflightReport.check(CheckCode.TYPE_MATCH, pass, args, detail);
+	}
+
+	private PreflightReport.Check freshPrecheckCheck(Long taskId, Job.JobType jobType, boolean exists,
+			boolean english) {
+		// ④ 预检指纹新鲜（IMPORT/PUBLISH 要"最近一次预检查通过"，IMPORT 还要文件指纹未变；
+		//    EXPORT/PRECHECK 不依赖既往预检查 —— 通过但如实说明依据）
+		Optional<Job> latestPrecheck = exists ? jobService.latestPrecheck(taskId) : Optional.empty();
+		// 指纹依据进 args（语言中立）：预检查换了一份，"批准时看到的那一版"必须随之变号
+		Job precheckBasis = latestPrecheck.orElse(null);
+		Map<String, Object> precheckArgs = new LinkedHashMap<>();
+		precheckArgs.put("taskId", taskId == null ? null : String.valueOf(taskId));
+		precheckArgs.put("jobType", jobType.name());
+		precheckArgs.put("jobId", precheckBasis == null ? null : String.valueOf(precheckBasis.getId()));
+		precheckArgs.put("fingerprint", fingerprint4(precheckBasis == null ? null : precheckBasis.getResultJson()));
+		if (!exists) {
+			return PreflightReport.check(CheckCode.FRESH_PRECHECK, false, precheckArgs,
+					english ? "Task not found; precheck fingerprint cannot be checked"
+							: "任务不存在，无法检查预检指纹");
+		}
+		if (jobType != Job.JobType.IMPORT && jobType != Job.JobType.PUBLISH) {
+			return PreflightReport.check(CheckCode.FRESH_PRECHECK, true, precheckArgs,
+					describeFingerprint(precheckBasis, jobType, english));
+		}
+		ConflictException stale = jobService.precheckConflict(taskId, jobType);
+		return PreflightReport.check(CheckCode.FRESH_PRECHECK, stale == null, precheckArgs,
+				stale == null ? describeFingerprint(precheckBasis, jobType, english)
+						: english ? "The precheck is stale; run precheck again" : "预检已过期，请重新预检");
+	}
+
+	private PreflightReport.Check checkCreateDefCodes(DefCodes requested, boolean english) {
+		// 结构化 defCodes：宿主校验通过后才允许成为"已知配置"候选
 		List<String> defCodes = requested.codes();
 		if (requested.present() && !requested.invalid()) {
 			List<String> missing = new ArrayList<>();
@@ -441,144 +484,165 @@ public class ToolPreflightService {
 									+ "（不得创建；可用 list_config_defs 查编码）";
 				}
 			}
-			if (!defCodes.isEmpty()) {
-				target.put("defCodes", defCodes);
-			}
-			checks.add(PreflightReport.check(CheckCode.CREATE_DEF_CODES, valid,
-					argsOf("defCodes", defCodes, "missing", missing), detail));
+			return PreflightReport.check(CheckCode.CREATE_DEF_CODES, valid,
+					argsOf("defCodes", defCodes, "missing", missing), detail);
 		}
-		else if (requested.present()) {
+		if (requested.present()) {
 			// 形状非法（非字符串数组/含空编码）：同样不得创建
-			target.put("defCodes", defCodes);
 			String invalidDetail = english
 					? defCodes.isEmpty() ? "defCodes must be a non-empty array of definition codes"
 							: "defCodes contains invalid entries; only non-blank definition codes are allowed"
 					: defCodes.isEmpty() ? "defCodes 必须是配置定义编码组成的非空数组（不得创建）"
 							: "defCodes 含非法元素：只能是非空配置定义编码（不得创建）";
-			checks.add(PreflightReport.check(CheckCode.CREATE_DEF_CODES, false,
-					argsOf("defCodes", defCodes, "missing", defCodes), invalidDetail));
+			return PreflightReport.check(CheckCode.CREATE_DEF_CODES, false,
+					argsOf("defCodes", defCodes, "missing", defCodes), invalidDetail);
 		}
+		return null;
+	}
 
+	private PreflightReport.Check checkCreateConditions(ConditionsRequest requestedConditions, DefCodes requested,
+			List<String> defCodes, String type, boolean english) {
 		// 结构化 conditions：与 set_condition 同一份校验（定义存在/字段属于该定义/算子与取值合法/非空），
 		// 非法结构一律不得进入（预检失败 ⇒ 不挂确认卡、不创建）。
-		ConditionsRequest requestedConditions = conditionsOf(argumentsJson);
 		JsonNode conditionsNode = requestedConditions.node();
 		if (!requestedConditions.present() && "EXPORT".equalsIgnoreCase(type)) {
-			checks.add(PreflightReport.check(CheckCode.CREATE_CONDITIONS, false,
+			return PreflightReport.check(CheckCode.CREATE_CONDITIONS, false,
 					argsOf("reason", "missing conditions"),
-					"导出任务必须显式给出 conditions：已知条件传结构化对象，未决定传 {}（本次未创建）"));
+					"导出任务必须显式给出 conditions：已知条件传结构化对象，未决定传 {}（本次未创建）");
 		}
-		else if (requestedConditions.present()) {
-			List<String> conditionIssues = new ArrayList<>();
-			boolean conditionsValid = true;
-			Map<String, Object> conditionsMap = conditionsMap(conditionsNode);
-			if (!"EXPORT".equalsIgnoreCase(type)) {
-				conditionsValid = false;
-				conditionIssues.add(english
-						? "conditions apply to EXPORT tasks only (import tasks have no filter step)"
-						: "conditions 仅适用于导出（EXPORT）任务（导入没有筛选步骤）");
+		if (!requestedConditions.present()) {
+			return null;
+		}
+		List<String> conditionIssues = new ArrayList<>();
+		boolean conditionsValid = true;
+		Map<String, Object> conditionsMap = conditionsMap(conditionsNode);
+		if (!"EXPORT".equalsIgnoreCase(type)) {
+			conditionsValid = false;
+			conditionIssues.add(english
+					? "conditions apply to EXPORT tasks only (import tasks have no filter step)"
+					: "conditions 仅适用于导出（EXPORT）任务（导入没有筛选步骤）");
+		}
+		else if (conditionsNode == null || !conditionsNode.isObject()) {
+			conditionsValid = false;
+			conditionIssues.add(english
+					? "conditions must be an object; use {} when undecided"
+					: "conditions 必须是对象；条件未决定时传 {}");
+		}
+		else if (!conditionsNode.isEmpty() && (!requested.present() || requested.invalid() || defCodes.isEmpty())) {
+			conditionsValid = false;
+			conditionIssues.add(english
+					? "conditions need a valid defCodes array: conditions target specific definitions"
+					: "conditions 必须与合法的 defCodes 同时给出（条件属于具体配置项）");
+		}
+		else if (!conditionsNode.isEmpty() && this.definitionService == null) {
+			conditionsValid = false;
+			conditionIssues.add(english
+					? "Definition validation is unavailable; cannot create a task with conditions"
+					: "配置定义校验不可用，不能带 conditions 创建任务");
+		}
+		else if (!conditionsNode.isEmpty()) {
+			conditionsValid = validateConditionDefinitions(defCodes, conditionsNode, conditionIssues, english);
+		}
+		return PreflightReport.check(CheckCode.CREATE_CONDITIONS, conditionsValid,
+				argsOf("conditions", conditionsMap, "reasons", conditionIssues),
+				conditionsValid ? "" : String.join("；", conditionIssues));
+	}
+
+	private boolean validateConditionDefinitions(List<String> defCodes, JsonNode conditionsNode,
+			List<String> conditionIssues, boolean english) {
+		boolean conditionsValid = true;
+		WizardActionGuard guard = new WizardActionGuard(this.definitionService);
+		for (String defCode : defCodes) {
+			String probe;
+			try {
+				Map<String, Object> args = new LinkedHashMap<>();
+				args.put("defCode", defCode);
+				args.put("conditions", conditionsNode);
+				probe = JSON.writeValueAsString(args);
 			}
-			else if (conditionsNode == null || !conditionsNode.isObject()) {
+			catch (Exception ex) {
 				conditionsValid = false;
-				conditionIssues.add(english
-						? "conditions must be an object; use {} when undecided"
-						: "conditions 必须是对象；条件未决定时传 {}");
+				conditionIssues.add(english ? "conditions could not be serialized or validated" : "conditions 无法序列化或校验");
+				if (LogSampling.canAcquire("preflight-condition-serialization")) {
+					log.warn("conditions could not be serialized or validated", ex);
+				}
+				continue;
 			}
-			else if (!conditionsNode.isEmpty() && (!requested.present() || requested.invalid() || defCodes.isEmpty())) {
+			var verdict = guard.inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
+			if (!verdict.accepted()) {
 				conditionsValid = false;
-				conditionIssues.add(english
-						? "conditions need a valid defCodes array: conditions target specific definitions"
-						: "conditions 必须与合法的 defCodes 同时给出（条件属于具体配置项）");
-			}
-			else if (!conditionsNode.isEmpty() && this.definitionService == null) {
-				conditionsValid = false;
-				conditionIssues.add(english
-						? "Definition validation is unavailable; cannot create a task with conditions"
-						: "配置定义校验不可用，不能带 conditions 创建任务");
-			}
-			else if (!conditionsNode.isEmpty()) {
-				WizardActionGuard guard = new WizardActionGuard(this.definitionService);
-				for (String defCode : defCodes) {
-					String probe;
-					try {
-						Map<String, Object> args = new LinkedHashMap<>();
-						args.put("defCode", defCode);
-						args.put("conditions", conditionsNode);
-						probe = JSON.writeValueAsString(args);
-					}
-					catch (Exception ex) {
-						conditionsValid = false;
-						conditionIssues.add(english ? "conditions could not be serialized or validated" : "conditions 无法序列化或校验");
-						continue;
-					}
-					var verdict = guard.inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
-					if (!verdict.accepted()) {
-						conditionsValid = false;
-						for (String reason : verdict.reasons()) {
-							if (conditionIssues.size() < 5) {
-								conditionIssues.add(reason);
-							}
-						}
+				for (String reason : verdict.reasons()) {
+					if (conditionIssues.size() < 5) {
+						conditionIssues.add(reason);
 					}
 				}
 			}
-			target.put("conditions", conditionsMap);
-			checks.add(PreflightReport.check(CheckCode.CREATE_CONDITIONS, conditionsValid,
-					argsOf("conditions", conditionsMap, "reasons", conditionIssues),
-					conditionsValid ? "" : String.join("；", conditionIssues)));
 		}
+		return conditionsValid;
+	}
 
-		String label = typeValid ? type.trim().toUpperCase(Locale.ROOT)
-				: english ? "unknown type" : "未知类型";
-		String codesText = defCodes.isEmpty() ? ""
-				: english ? " · definitions: " + String.join(", ", defCodes)
-						: " · 配置项：" + String.join("、", defCodes);
-		ConditionView continuedConditions = continuationTask == null ? null
-				: continuationConditionViewOf(continuationTask);
-		String conditionText = continuedConditions != null ? continuedConditions.text()
-				: requestedConditions.present()
-						? (conditionsNode != null && conditionsNode.isEmpty()
-								? (english ? "Filter conditions undecided; host collects once" : "筛选条件未决定，由宿主收集一次")
-								: (english
-										? "Structured filter conditions supplied at creation (applied after definitions are selected; no condition form)"
-										: "创建时已给出结构化筛选条件（勾选配置项后落库，不再弹条件表）"))
-						: (english ? "Filter conditions missing; creation rejected" : "缺少 conditions 决策，不得创建");
-		String impactText;
-		String impactFact;
-		String conditionFact;
-		if (continuationTask != null) {
-			String continuedTitle = continuationTask.getTitle();
-			impactText = english
-					? "Will reuse " + continuationTask.getType() + " task #" + continuationTask.getId()
-							+ (continuedTitle == null || continuedTitle.isBlank() ? "" : " \"" + continuedTitle.trim() + "\"")
-							+ " · conditions: " + conditionText + " (reuse is not execute; no job is started)"
-					: "将复用 " + continuationTask.getType() + " 任务 #" + continuationTask.getId()
-							+ (continuedTitle == null || continuedTitle.isBlank() ? "" : "「" + continuedTitle.trim() + "」")
-							+ " · 条件：" + conditionText + "（复用≠执行，不启动作业）";
-			impactFact = "continue:" + continuationTask.getType() + ":" + continuationTask.getId() + ":"
-					+ (continuedTitle == null ? "" : continuedTitle);
-			conditionFact = continuedConditions.fact();
+	private record CreateImpact(String text, String fact, String conditionText, String conditionFact) {
+	}
+
+	private CreateImpact renderCreateImpact(String argumentsJson, String type, String title, List<String> defCodes,
+			ConditionsRequest requestedConditions, Task continuationTask, boolean english) {
+		ConditionView continued = continuationTask == null ? null : continuationConditionViewOf(continuationTask);
+		String conditionText = createConditionText(requestedConditions, continued, english);
+		CreateImpact impact = continuationTask != null
+				? renderContinuationImpact(continuationTask, continued, conditionText, english)
+				: renderNewImpact(type, title, defCodes, requestedConditions, conditionText, english);
+		if (RunContextRefresher.openWizard(argumentsJson)) {
+			return impact;
 		}
-		else {
-			impactText = english
-					? "Will create a " + label + " task"
-							+ (title == null || title.isBlank() ? "" : " \"" + title.trim() + "\"") + codesText
-							+ " (create is not execute; no job is started)"
-					: "将创建 " + label + " 任务"
-							+ (title == null || title.isBlank() ? "" : "「" + title.trim() + "」") + codesText
-							+ "（创建≠执行，不启动作业）";
-			impactFact = "create:" + (typeValid ? type.trim().toUpperCase(Locale.ROOT) : "-") + ":"
-					+ (title == null ? "" : title) + ":" + String.join(",", defCodes)
-					+ (requestedConditions.present() ? ":" + conditionsNode : "");
-			conditionFact = "create:none";
+		return new CreateImpact(impact.text() + (english ? " (create only; do not open the wizard automatically)"
+				: "（仅创建，不自动打开向导）"), impact.fact(), impact.conditionText(), impact.conditionFact());
+	}
+
+	private String createConditionText(ConditionsRequest requested, ConditionView continued, boolean english) {
+		if (continued != null) {
+			return continued.text();
 		}
-		if (!RunContextRefresher.openWizard(argumentsJson)) {
-			impactText += english ? " (create only; do not open the wizard automatically)"
-					: "（仅创建，不自动打开向导）";
+		if (!requested.present()) {
+			return english ? "Filter conditions missing; creation rejected" : "缺少 conditions 决策，不得创建";
 		}
-		boolean pass = checks.stream().allMatch(PreflightReport.Check::pass);
-		String reportHash = reportHash(TOOL_CREATE_TASK, target, checks, impactFact, conditionFact, null);
-		return new PreflightReport(pass, target, checks, impactText, conditionText, null, reportHash);
+		JsonNode node = requested.node();
+		if (node != null && node.isEmpty()) {
+			return english ? "Filter conditions undecided; host collects once" : "筛选条件未决定，由宿主收集一次";
+		}
+		return english
+				? "Structured filter conditions supplied at creation (applied after definitions are selected; no condition form)"
+				: "创建时已给出结构化筛选条件（勾选配置项后落库，不再弹条件表）";
+	}
+
+	private CreateImpact renderContinuationImpact(Task task, ConditionView continued, String conditionText,
+			boolean english) {
+		String title = task.getTitle();
+		String text = english
+				? "Will reuse " + task.getType() + " task #" + task.getId()
+						+ (StringUtils.isBlank(title) ? "" : " \"" + title.trim() + "\"")
+						+ " · conditions: " + conditionText + " (reuse is not execute; no job is started)"
+				: "将复用 " + task.getType() + " 任务 #" + task.getId()
+						+ (StringUtils.isBlank(title) ? "" : "「" + title.trim() + "」")
+						+ " · 条件：" + conditionText + "（复用≠执行，不启动作业）";
+		String fact = "continue:" + task.getType() + ":" + task.getId() + ":" + StringUtils.defaultString(title);
+		return new CreateImpact(text, fact, conditionText, continued.fact());
+	}
+
+	private CreateImpact renderNewImpact(String type, String title, List<String> defCodes,
+			ConditionsRequest requested, String conditionText, boolean english) {
+		boolean typeValid = "EXPORT".equalsIgnoreCase(type) || "IMPORT".equalsIgnoreCase(type);
+		String label = typeValid ? type.trim().toUpperCase(Locale.ROOT) : english ? "unknown type" : "未知类型";
+		String codesText = defCodes.isEmpty() ? "" : english ? " · definitions: " + String.join(", ", defCodes)
+				: " · 配置项：" + String.join("、", defCodes);
+		String text = english ? "Will create a " + label + " task"
+				+ (StringUtils.isBlank(title) ? "" : " \"" + title.trim() + "\"") + codesText
+				+ " (create is not execute; no job is started)"
+				: "将创建 " + label + " 任务" + (StringUtils.isBlank(title) ? "" : "「" + title.trim() + "」") + codesText
+						+ "（创建≠执行，不启动作业）";
+		String fact = "create:" + (typeValid ? type.trim().toUpperCase(Locale.ROOT) : "-") + ":"
+				+ StringUtils.defaultString(title) + ":" + String.join(",", defCodes)
+				+ (requested.present() ? ":" + requested.node() : "");
+		return new CreateImpact(text, fact, conditionText, "create:none");
 	}
 
 	private Task continuationTask(String argumentsJson, AiContext context, Task.TaskType requestedType,
@@ -614,7 +678,7 @@ public class ToolPreflightService {
 	}
 
 	private static JsonNode parseObject(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return null;
 		}
 		try {
@@ -651,7 +715,7 @@ public class ToolPreflightService {
 	 * {@code invalid=true}（调用方据此判预检失败）。缺失该键 ⇒ {@code present=false}。
 	 */
 	private static DefCodes defCodesOf(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return new DefCodes(false, false, List.of());
 		}
 		JsonNode node;
@@ -697,7 +761,7 @@ public class ToolPreflightService {
 			return PreflightReport.check(CheckCode.HAS_ITEMS, false, argsOf("taskId", taskId),
 					english ? "Task not found; definitions cannot be checked" : "任务不存在，无法检查配置项");
 		}
-		List<TaskItem> items = task.getItems() == null ? List.of() : task.getItems();
+		List<TaskItem> items = ObjectUtils.defaultIfNull(task.getItems(), List.of());
 		Map<String, Object> args = argsOf("taskId", taskId, "itemCount", items.size());
 		if (items.isEmpty()) {
 			return PreflightReport.check(CheckCode.HAS_ITEMS, false, args,
@@ -728,7 +792,9 @@ public class ToolPreflightService {
 							: "任务 #" + taskId + " 尚未上传数据文件；先在导入向导上传文件并重跑预检查");
 		}
 		catch (RuntimeException ex) {
-			log.debug("preflight could not read task file taskId={}", taskId, ex);
+			if (LogSampling.canAcquire("preflight-upload-read")) {
+				log.warn("preflight could not read task file taskId={}", taskId, ex);
+			}
 			// 失败开放：查不了 ≠ 没有（与 ToolTargetResolver 同一口径）
 			return PreflightReport.check(CheckCode.HAS_UPLOAD, true, args,
 					english ? "Upload state is temporarily unavailable (rechecked before execution)"
@@ -740,8 +806,8 @@ public class ToolPreflightService {
 			boolean english) {
 		Long workspaceTaskId = context == null ? null : context.getTaskId();
 		Map<String, Object> args = new LinkedHashMap<>();
-		args.put("taskId", taskId);
-		args.put("workspaceTaskId", workspaceTaskId);
+		args.put("taskId", taskId == null ? null : String.valueOf(taskId));
+		args.put("workspaceTaskId", workspaceTaskId == null ? null : String.valueOf(workspaceTaskId));
 		if (!exists) {
 			return PreflightReport.check(CheckCode.TARGET_CONSISTENT, false, args,
 					english ? "Task not found; target cannot be verified" : "任务不存在，无法核对目标");
@@ -774,7 +840,7 @@ public class ToolPreflightService {
 					argsOf("taskId", taskId, "expectedStep", expected),
 					english ? "Task not found; step cannot be checked" : "任务不存在，无法检查步骤");
 		}
-		String step = task.getCurrentStep() == null ? "" : task.getCurrentStep().trim();
+		String step = StringUtils.trimToEmpty(task.getCurrentStep());
 		Map<String, Object> args = argsOf("taskId", taskId, "step", step, "expectedStep", expected);
 		if (step.isEmpty()) {
 			// fail-closed：步骤未知时不能声称"已到 EXPORT"，否则直接 start_export 会同时绕过步骤与条件
@@ -806,7 +872,7 @@ public class ToolPreflightService {
 			return PreflightReport.check(CheckCode.CONDITIONS_DECIDED, false, argsOf("taskId", taskId),
 					english ? "Task not found; conditions cannot be checked" : "任务不存在，无法检查条件");
 		}
-		String step = task.getCurrentStep() == null ? "" : task.getCurrentStep().trim();
+		String step = StringUtils.trimToEmpty(task.getCurrentStep());
 		if (step.isEmpty()) {
 			return PreflightReport.check(CheckCode.CONDITIONS_DECIDED, false,
 					argsOf("taskId", taskId, "step", step),
@@ -822,7 +888,7 @@ public class ToolPreflightService {
 			// 手工已经推进到 EXPORT 的空白条件（conditionJson=null）代表用户留空 = 全量：
 			// 只在权威步骤 EXPORT 时生效；SELECT_DEFS/QUERY_COND 的 null 仍是未决定，必须收集。
 			// 坏 JSON/残缺结构（unparseable=true）在 EXPORT 也继续拒绝。
-			if (atExport && blankCondition(task, defCode)) {
+			if (atExport && isBlankCondition(task, defCode)) {
 				continue;
 			}
 			undecided.add(defCode);
@@ -845,13 +911,13 @@ public class ToolPreflightService {
 	// ── 条件摘要 / 发布模式（AR-02：只三字段，不恢复旧预检区） ────────────────
 
 	/** 该配置项的条件 JSON 是否为空/空白（只有 null/空串；坏 JSON 不算）。 */
-	private static boolean blankCondition(Task task, String defCode) {
+	private static boolean isBlankCondition(Task task, String defCode) {
 		if (task == null || task.getItems() == null || defCode == null) {
 			return false;
 		}
 		for (TaskItem item : task.getItems()) {
 			if (item != null && defCode.equals(item.getDefCode())) {
-				return item.getConditionJson() == null || item.getConditionJson().isBlank();
+				return StringUtils.isBlank(item.getConditionJson());
 			}
 		}
 		return false;
@@ -865,8 +931,8 @@ public class ToolPreflightService {
 	}
 
 	private static ConditionView continuationConditionViewOf(Task task) {
-		if (task.getType() == Task.TaskType.EXPORT && (task.getItems() == null || task.getItems().isEmpty())) {
-			return new ConditionView(english() ? "Filter conditions undecided" : "筛选条件未决定", "undecided");
+		if (task.getType() == Task.TaskType.EXPORT && (CollectionUtils.isEmpty(task.getItems()))) {
+			return new ConditionView(isEnglish() ? "Filter conditions undecided" : "筛选条件未决定", "undecided");
 		}
 		return conditionViewOf(task, false);
 	}
@@ -876,7 +942,7 @@ public class ToolPreflightService {
 	}
 
 	private static ConditionView conditionViewOf(Task task, boolean manualExportBlankAsExplicit) {
-		boolean english = english();
+		boolean english = isEnglish();
 		if (task == null || task.getItems() == null) {
 			return new ConditionView(english ? "All data (no condition)" : CONDITION_ALL, "none");
 		}
@@ -887,34 +953,7 @@ public class ToolPreflightService {
 		List<String> parts = new ArrayList<>();
 		StringBuilder fact = new StringBuilder();
 		for (ConditionAssessment.ItemCondition item : assessment.items()) {
-			if (!export && item.state() == ConditionAssessment.State.UNDECIDED) {
-				// 导入没有筛选步：没有条件事实不等于"未决定"，不得渲染成缺口
-				continue;
-			}
-			String prefix = item.defCode() == null ? "" : item.defCode() + (english ? ": " : "：");
-			ConditionAssessment.State state = item.state();
-			if (state == ConditionAssessment.State.UNDECIDED && manualExport && !item.unparseable()
-					&& blankCondition(task, item.defCode())) {
-				// 已进入 EXPORT 的空白条件 = 用户留空（全量），不是"未决定"
-				state = ConditionAssessment.State.EXPLICIT_UNSET;
-			}
-			fact.append(item.defCode() == null ? "-" : item.defCode()).append(':').append(state.name())
-				.append(':').append(item.unparseable()).append(':');
-			for (ConditionAssessment.ConditionFact conditionFact : item.facts()) {
-				fact.append(conditionFact.fieldCode()).append('|').append(conditionFact.operator()).append('|')
-					.append(conditionFact.value()).append(';');
-			}
-			fact.append('/');
-			switch (state) {
-				case SET -> parts.add(prefix + renderFacts(item.facts(), english));
-				case EXPLICIT_UNSET -> parts.add(prefix
-						+ (english ? "no filter (all data)" : "未设筛选（全量）"));
-				case UNDECIDED -> parts.add(prefix + (item.unparseable()
-						? english ? "condition cannot be parsed (must not be treated as all data)"
-								: "条件无法解析（不能按全量处理）"
-						: english ? "condition undecided (must not be treated as all data)"
-								: "条件未决定（不能按全量处理）"));
-			}
+			appendConditionView(task, item, export, manualExport, english, parts, fact);
 		}
 		if (parts.isEmpty()) {
 			return new ConditionView(english ? "All data (no condition)" : CONDITION_ALL, "none");
@@ -926,6 +965,44 @@ public class ToolPreflightService {
 		return new ConditionView(summary, fact.toString());
 	}
 
+	private static void appendConditionView(Task task, ConditionAssessment.ItemCondition item, boolean export,
+			boolean manualExport, boolean english, List<String> parts, StringBuilder fact) {
+		if (!export && item.state() == ConditionAssessment.State.UNDECIDED) {
+			return;
+		}
+		String prefix = item.defCode() == null ? "" : item.defCode() + (english ? ": " : "：");
+		ConditionAssessment.State state = item.state();
+		if (state == ConditionAssessment.State.UNDECIDED && manualExport && !item.unparseable()
+				&& isBlankCondition(task, item.defCode())) {
+			state = ConditionAssessment.State.EXPLICIT_UNSET;
+		}
+		appendConditionFact(item, state, fact);
+		switch (state) {
+			case SET -> parts.add(prefix + renderFacts(item.facts(), english));
+			case EXPLICIT_UNSET -> parts.add(prefix + (english ? "no filter (all data)" : "未设筛选（全量）"));
+			case UNDECIDED -> parts.add(prefix + undecidedConditionText(item, english));
+		}
+	}
+
+	private static void appendConditionFact(ConditionAssessment.ItemCondition item, ConditionAssessment.State state,
+			StringBuilder fact) {
+		fact.append(item.defCode() == null ? "-" : item.defCode()).append(':').append(state.name())
+			.append(':').append(item.unparseable()).append(':');
+		for (ConditionAssessment.ConditionFact conditionFact : item.facts()) {
+			fact.append(conditionFact.fieldCode()).append('|').append(conditionFact.operator()).append('|')
+				.append(conditionFact.value()).append(';');
+		}
+		fact.append('/');
+	}
+
+	private static String undecidedConditionText(ConditionAssessment.ItemCondition item, boolean english) {
+		if (item.unparseable()) {
+			return english ? "condition cannot be parsed (must not be treated as all data)"
+					: "条件无法解析（不能按全量处理）";
+		}
+		return english ? "condition undecided (must not be treated as all data)" : "条件未决定（不能按全量处理）";
+	}
+
 	private static String renderFacts(List<ConditionAssessment.ConditionFact> facts, boolean english) {
 		List<String> rendered = new ArrayList<>(facts.size());
 		for (ConditionAssessment.ConditionFact fact : facts) {
@@ -934,7 +1011,7 @@ public class ToolPreflightService {
 			}
 			else {
 				rendered.add(fact.fieldCode() + " " + ConditionOperators.label(fact.operator(), english)
-						+ (fact.value() == null || fact.value().isBlank() ? "" : " " + fact.value()));
+						+ (StringUtils.isBlank(fact.value()) ? "" : " " + fact.value()));
 			}
 		}
 		return String.join(english ? "; " : "；", rendered);
@@ -953,12 +1030,12 @@ public class ToolPreflightService {
 			return fromTask;
 		}
 		Object raw = context == null || context.getExtra() == null ? null : context.getExtra().get("importMode");
-		String fromContext = normalizeImportMode(raw == null ? null : String.valueOf(raw));
-		return fromContext == null ? "MERGE" : fromContext;
+		String fromContext = normalizeImportMode(ObjectUtils.toString(raw, (String) null));
+		return ObjectUtils.defaultIfNull(fromContext, "MERGE");
 	}
 
 	private static String importModeOf(Task task) {
-		if (task == null || task.getSettingsJson() == null || task.getSettingsJson().isBlank()) {
+		if (task == null || StringUtils.isBlank(task.getSettingsJson())) {
 			return null;
 		}
 		try {
@@ -987,7 +1064,7 @@ public class ToolPreflightService {
 		if (task == null) {
 			return new Impact(english ? "Impact cannot be estimated" : IMPACT_UNKNOWN, "unknown");
 		}
-		List<TaskItem> items = task.getItems() == null ? List.of() : task.getItems();
+		List<TaskItem> items = ObjectUtils.defaultIfNull(task.getItems(), List.of());
 		int defs = items.size();
 		if (defs == 0) {
 			return new Impact(english ? "Impact cannot be estimated" : IMPACT_UNKNOWN, "unknown");
@@ -1012,7 +1089,9 @@ public class ToolPreflightService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("publish impact could not read staged row count (treated as inestimable)", ex);
+			if (LogSampling.canAcquire("preflight-staging-impact-read")) {
+				log.warn("publish impact could not read staged row count (treated as inestimable)", ex);
+			}
 			return new Impact(
 					english ? "Will publish " + defs + " definitions · impact cannot be estimated"
 							: "将发布 " + defs + " 个配置定义 · " + IMPACT_UNKNOWN,
@@ -1070,7 +1149,9 @@ public class ToolPreflightService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("impact could not read file row count (treated as inestimable)", ex);
+			if (LogSampling.canAcquire("preflight-file-impact-read")) {
+				log.warn("impact could not read file row count (treated as inestimable)", ex);
+			}
 			return null;
 		}
 		return known ? rows : null;
@@ -1125,7 +1206,7 @@ public class ToolPreflightService {
 
 	/** 预检查结果指纹（4 位）：没有结果摘要时锚定作业号，"改了预检查就换号"的判据仍在。 */
 	private static String fingerprint4(String material) {
-		String source = material == null || material.isBlank() ? "-" : material;
+		String source = StringUtils.defaultIfBlank(material, "-");
 		try {
 			byte[] digest = MessageDigest.getInstance("SHA-256").digest(source.getBytes(StandardCharsets.UTF_8));
 			StringBuilder hex = new StringBuilder(4);
@@ -1141,7 +1222,7 @@ public class ToolPreflightService {
 
 	private static Map<String, Object> targetOf(Long taskId, Optional<Task> task) {
 		Map<String, Object> target = new LinkedHashMap<>();
-		target.put("taskId", taskId);
+		target.put("taskId", taskId == null ? null : String.valueOf(taskId));
 		target.put("title", task.map(Task::getTitle).orElse(null));
 		target.put("type", task.map(t -> String.valueOf(t.getType())).orElse(null));
 		target.put("status", task.map(t -> String.valueOf(t.getStatus())).orElse(null));
@@ -1152,14 +1233,19 @@ public class ToolPreflightService {
 	private static Map<String, Object> argsOf(Object... keyValues) {
 		Map<String, Object> args = new LinkedHashMap<>();
 		for (int i = 0; i + 1 < keyValues.length; i += 2) {
-			args.put(String.valueOf(keyValues[i]), keyValues[i + 1]);
+			String key = String.valueOf(keyValues[i]);
+			Object value = keyValues[i + 1];
+			if (value instanceof Number && ("taskId".equals(key) || "jobId".equals(key) || "workspaceTaskId".equals(key))) {
+				value = String.valueOf(value);
+			}
+			args.put(key, value);
 		}
 		return args;
 	}
 
 	/** 从工具入参取 {@code taskId}（缺失/非法一律 null，由"任务存在"检查如实失败）。 */
 	private static Long taskIdOf(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return null;
 		}
 		try {
@@ -1174,7 +1260,7 @@ public class ToolPreflightService {
 
 	/** 从入参取文本字段（缺失/非法一律 null）。 */
 	private static String argumentText(String argumentsJson, String field) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return null;
 		}
 		try {
@@ -1197,7 +1283,7 @@ public class ToolPreflightService {
 	}
 
 	/** 本轮回答语言（与系统提示、错误体同一个取值点；缺失/异常一律中文）。 */
-	private static boolean english() {
+	private static boolean isEnglish() {
 		return ReplyLanguage.current().english();
 	}
 
@@ -1254,7 +1340,7 @@ public class ToolPreflightService {
 
 		/** 构造一个检查项（码 + 双语名称 + 参数 + 人读 detail）。 */
 		static Check check(CheckCode code, boolean pass, Map<String, Object> args, String detail) {
-			return new Check(code.code(), code.label(english()), pass, detail == null ? "" : detail, args);
+			return new Check(code.code(), code.label(isEnglish()), pass, StringUtils.defaultString(detail), args);
 		}
 
 		/**
@@ -1297,7 +1383,7 @@ public class ToolPreflightService {
 		 * <p>按本轮 {@link ReplyLanguage} 渲染；检查码本身不翻译（模型按码分支）。
 		 */
 		public String failureMessage() {
-			boolean english = english();
+			boolean english = isEnglish();
 			StringBuilder sb = new StringBuilder(english
 					? "NOT APPROVED · NOT EXECUTED (preflight failed): this call did not enter the confirm gate and did "
 							+ "not execute (the user was not asked to confirm). Failed checks:"

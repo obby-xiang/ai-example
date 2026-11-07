@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.slot;
 
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * 单个配置项的<b>无损条件命令</b>（确定性导出条件工作流）。
  *
@@ -18,8 +20,8 @@ public record ConditionCommand(String defCode, State state, String conditionJson
 	}
 
 	public ConditionCommand {
-		defCode = defCode == null || defCode.isBlank() ? null : defCode;
-		conditionJson = conditionJson == null || conditionJson.isBlank() ? null : conditionJson;
+		defCode = StringUtils.defaultIfBlank(defCode, null);
+		conditionJson = StringUtils.defaultIfBlank(conditionJson, null);
 		if (state == State.SET && conditionJson == null) {
 			state = State.UNDECIDED;
 		}

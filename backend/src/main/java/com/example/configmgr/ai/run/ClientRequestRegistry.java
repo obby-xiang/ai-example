@@ -3,6 +3,8 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -363,9 +365,8 @@ public class ClientRequestRegistry {
 	 *
 	 * @return true = 本次写入完成态；false = 无需写（未绑定/已取消/已是完成态/runId 不匹配）
 	 */
-	public boolean complete(long tenantId, long userId, String sessionId, String clientRequestId, String runId) {
-		if (!isValid(clientRequestId) || sessionId == null || sessionId.isBlank() || runId == null
-				|| runId.isBlank()) {
+	public boolean isCompleted(long tenantId, long userId, String sessionId, String clientRequestId, String runId) {
+		if (!isValid(clientRequestId) || StringUtils.isBlank(sessionId) || StringUtils.isBlank(runId)) {
 			return false;
 		}
 		String key = TenantKeyScope.hasIdentity(tenantId, userId)
@@ -382,7 +383,7 @@ public class ClientRequestRegistry {
 	 * @return true = 绑定已释放，前端可用同一 id 重新 claim（等价于一次全新发送）
 	 */
 	public boolean releaseBinding(String sessionId, String clientRequestId, String runId) {
-		if (!isValid(clientRequestId) || runId == null || runId.isBlank()) {
+		if (!isValid(clientRequestId) || StringUtils.isBlank(runId)) {
 			return false;
 		}
 		Long removed = this.redis.execute(RELEASE_SCRIPT, List.of(sessionKey(sessionId)),
@@ -409,7 +410,7 @@ public class ClientRequestRegistry {
 			return null;
 		}
 		Object value = this.redis.opsForHash().get(sessionKey(sessionId), clientRequestId);
-		return value == null ? null : String.valueOf(value);
+		return ObjectUtils.toString(value, (String) null);
 	}
 
 	/**
@@ -435,7 +436,7 @@ public class ClientRequestRegistry {
 		}
 		if (value.startsWith(RUN_PREFIX)) {
 			String runId = value.substring(RUN_PREFIX.length());
-			return runId.isBlank() ? null : runId;
+			return StringUtils.defaultIfBlank(runId, null);
 		}
 		if (!value.startsWith(DONE_PREFIX)) {
 			return null;
@@ -455,7 +456,7 @@ public class ClientRequestRegistry {
 			return null;
 		}
 		String runId = value.substring(DONE_PREFIX.length(), separator);
-		return runId.isBlank() ? null : runId;
+		return StringUtils.defaultIfBlank(runId, null);
 	}
 
 	private Duration ttl() {

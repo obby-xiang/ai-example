@@ -1,8 +1,11 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.RedisDegradation;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -52,7 +55,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>键的清理</h2>
  * 取消标志<b>故意不随轮终态删除</b>：它要在 TTL 内继续可见（取证），并且"取消后立刻重启"
- * 时仍然拦得住续跑。TTL = {@code app.ai.session-ttl}（缺省 24h，与会话同寿；超时面治理批①
+ * 时仍然拦得住续跑。TTL = min({@code app.ai.session-ttl}, 7 天)（缺省 24h；超时面治理批①
  * 第 11 项改述 —— 原为 {@code total-budget × 2 = 600s}，见 {@link #cancelFlagTtl()}）。
  */
 @Slf4j
@@ -96,6 +99,8 @@ public class CancellationRegistry {
 	 */
 	private final ConcurrentMap<String, Long> degradedCancels = new ConcurrentHashMap<>();
 
+	private final Object degradedCancelLock = new Object();
+
 	/** 降级取消事实的存活期（毫秒）：只覆盖"取消早于 register / register 稍后到达"的窄窗。 */
 	private static final long DEGRADED_CANCEL_TTL_MS = 120_000L;
 
@@ -137,7 +142,7 @@ public class CancellationRegistry {
 		this.listeners.putIfAbsent(slot, ConcurrentHashMap.newKeySet());
 		// 取消早于本进程 register、且当时 Redis 写失败：把降级事实补置位到本地取消位上
 		// （一次性取走；TTL 内未登记则自然遗忘，不会变成 sticky）。
-		if (consumeDegradedCancel(slot) && markLocal(runId)) {
+		if (isConsumeDegradedCancel(slot) && isMarkLocal(runId)) {
 			this.localSignals.incrementAndGet();
 		}
 	}
@@ -160,7 +165,7 @@ public class CancellationRegistry {
 		if (flag != null && flag.get()) {
 			return CancelState.CANCELLED;
 		}
-		if (degradedCancelActive(slot)) {
+		if (isDegradedCancelActive(slot)) {
 			// 进程内已记下"取消发生过"（当时 Redis 写失败）：这是确定事实，不必等 Redis 恢复。
 			return CancelState.CANCELLED;
 		}
@@ -172,7 +177,7 @@ public class CancellationRegistry {
 		if (read.value() != null) {
 			if (flag != null) {
 				this.redisConfirmations.incrementAndGet();
-				markLocal(runId);
+				isMarkLocal(runId);
 			}
 			return CancelState.CANCELLED;
 		}
@@ -192,8 +197,8 @@ public class CancellationRegistry {
 	 * @return 本次调用产生的取消事实（供端点返回体取证）
 	 */
 	public CancelResult cancel(String runId, String requestedBy) {
-		boolean woke = markLocal(runId);
-		boolean redisWritten = writeRedisFlag(runId, requestedBy);
+		boolean woke = isMarkLocal(runId);
+		boolean redisWritten = isWriteRedisFlag(runId, requestedBy);
 		if (!redisWritten) {
 			// 权威面没写成：把"已取消"记进有 TTL、有上限的降级表。
 			// 若 register 稍后才到（取消早于登记的窄窗），register 会把它补置位到本地取消位。
@@ -241,7 +246,7 @@ public class CancellationRegistry {
 		RedisRead read = readRedisFlag(runId);
 		out.put("redisFlag", read.value() != null);
 		AtomicBoolean flag = this.flags.get(slot);
-		boolean degradedCancel = degradedCancelActive(slot);
+		boolean degradedCancel = isDegradedCancelActive(slot);
 		out.put("localFlag", flag != null && flag.get());
 		out.put("degradedCancel", degradedCancel);
 		out.put("redisReadFailed", read.failed());
@@ -293,7 +298,7 @@ public class CancellationRegistry {
 	 * {@link #cancel(String, String)} 的注）。监听者容器若存在（{@link #onCancel} 先于
 	 * {@code register} 登记的极窄路径），仍照常唤起 —— 唤醒是"通知"，不该被"没有加速位"挡住。
 	 */
-	private boolean markLocal(String runId) {
+	private boolean isMarkLocal(String runId) {
 		String slot = keyFor(runId);
 		AtomicBoolean flag = this.flags.get(slot);
 		boolean newly = flag != null && flag.compareAndSet(false, true);
@@ -304,7 +309,9 @@ public class CancellationRegistry {
 					listener.run();
 				}
 				catch (Exception ex) {
-					log.debug("cancel listener failed runId={}", runId, ex);
+					if (LogSampling.canAcquire("cancel-listener")) {
+						log.warn("cancel listener failed runId={}", runId, ex);
+					}
 				}
 			}
 		}
@@ -319,23 +326,25 @@ public class CancellationRegistry {
 	 */
 	private void rememberDegradedCancel(String slot) {
 		long now = System.currentTimeMillis();
-		purgeExpiredDegradedCancels(now);
-		if (this.degradedCancels.size() >= DEGRADED_CANCEL_CAP && !this.degradedCancels.containsKey(slot)) {
-			log.warn("degraded cancel records at cap {}, not adding this one (run stays UNKNOWN, not faked as not cancelled) slot={}",
-					DEGRADED_CANCEL_CAP, slot);
-			return;
+		synchronized (this.degradedCancelLock) {
+			purgeExpiredDegradedCancels(now);
+			if (this.degradedCancels.size() >= DEGRADED_CANCEL_CAP && !this.degradedCancels.containsKey(slot)) {
+				log.warn("degraded cancel records at cap {}, not adding this one (run stays UNKNOWN, not faked as not cancelled) slot={}",
+						DEGRADED_CANCEL_CAP, slot);
+				return;
+			}
+			this.degradedCancels.put(slot, now + DEGRADED_CANCEL_TTL_MS);
 		}
-		this.degradedCancels.put(slot, now + DEGRADED_CANCEL_TTL_MS);
 	}
 
 	/** 取走一条降级取消事实（{@code register} 补置位用）：过期的不算。 */
-	private boolean consumeDegradedCancel(String slot) {
+	private boolean isConsumeDegradedCancel(String slot) {
 		Long expiresAt = this.degradedCancels.remove(slot);
 		return expiresAt != null && expiresAt > System.currentTimeMillis();
 	}
 
 	/** 该 slot 是否仍有一条未过期的降级取消事实（过期项顺手清掉）。 */
-	private boolean degradedCancelActive(String slot) {
+	private boolean isDegradedCancelActive(String slot) {
 		Long expiresAt = this.degradedCancels.get(slot);
 		if (expiresAt == null) {
 			return false;
@@ -360,7 +369,7 @@ public class CancellationRegistry {
 		if (this.degraded
 				&& System.currentTimeMillis() - this.lastDegradedPollAtMs.get() < DEGRADED_POLL_BACKOFF_MS) {
 			// 退避期不访问 Redis，但仍是 UNKNOWN；调用方（cancelState）会计数，这里留 debug 供排障。
-			log.debug("cancel flag read in 5s backoff, returning UNKNOWN this tick runId={}", runId);
+			if (log.isDebugEnabled()) log.debug("cancel flag read in 5s backoff, returning UNKNOWN this tick runId={}", runId);
 			return RedisRead.unknown(this.lastReadFailure);
 		}
 		this.lastDegradedPollAtMs.set(System.currentTimeMillis());
@@ -386,7 +395,9 @@ public class CancellationRegistry {
 			// <b>已知窄残留（m1，本批只改注释）</b>：若此前已因真实故障处于退避（degraded 已为 true），
 			// 本次读在 try 之前已经刷新了节流锚点，这一拍会顺延既有退避 —— 它不解除已有退避，只是不再新增一次。
 			if (LeaseService.isLocalThreadInterrupt(ex)) {
-				log.debug("cancel flag read interrupted on this thread (this tick only; no instance-wide backoff)", ex);
+				if (LogSampling.canAcquire("cancel-flag-read-interrupted")) {
+					log.warn("cancel flag read interrupted on this thread (this tick only; no instance-wide backoff)", ex);
+				}
 				return RedisRead.unknown(ex);
 			}
 			if (!this.degraded) {
@@ -411,10 +422,10 @@ public class CancellationRegistry {
 
 	}
 
-	private boolean writeRedisFlag(String runId, String requestedBy) {
+	private boolean isWriteRedisFlag(String runId, String requestedBy) {
 		Duration ttl = cancelFlagTtl();
 		try {
-			this.redis.opsForValue().set(keyFor(runId), requestedBy == null ? "unknown" : requestedBy, ttl);
+			this.redis.opsForValue().set(keyFor(runId), ObjectUtils.defaultIfNull(requestedBy, "unknown"), ttl);
 			return true;
 		}
 		catch (Exception ex) {
@@ -425,7 +436,7 @@ public class CancellationRegistry {
 	}
 
 	/**
-	 * 取消标志的存活期 = <b>{@code app.ai.session-ttl}（缺省 24h）</b>，与会话同寿。
+	 * 取消标志的存活期 = <b>min({@code app.ai.session-ttl}, 7 天)</b>（缺省 24h），只在真实读写时续期。
 	 *
 	 * <p>
 	 * 超时面治理批① 第 11 项（用户裁决「取消信号随会话共亡」）：原值 {@code total-budget × 2 = 600s}
@@ -434,9 +445,12 @@ public class CancellationRegistry {
 	 * 取消标志与 run 快照/待决条目/帧归档同寿；它同时登记在
 	 * {@link SessionKeyRegistry} 的读侧续期面（{@code touchActiveRun} 会像其他会话级键一样整额续期）。
 	 */
+	@NonNull
 	private Duration cancelFlagTtl() {
 		Duration sessionTtl = this.properties.getSessionTtl();
-		return sessionTtl != null ? sessionTtl : Duration.ofHours(24);
+		Duration effective = ObjectUtils.getIfNull(sessionTtl, () -> Duration.ofHours(24));
+		Duration maxTtl = Duration.ofDays(7);
+		return effective.compareTo(maxTtl) > 0 ? maxTtl : effective;
 	}
 
 	/**

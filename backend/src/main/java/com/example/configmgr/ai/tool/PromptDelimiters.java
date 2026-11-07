@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.tool;
 
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -65,7 +68,7 @@ public final class PromptDelimiters {
 	 * <p>与 {@code ContextBuilder#neutralizeClosingDelimiters} 的既有输出逐字一致。
 	 */
 	public static String neutralizeClosing(String text, Pattern closingTags) {
-		if (text == null || text.isEmpty()) {
+		if (StringUtils.isEmpty(text)) {
 			return "";
 		}
 		return closingTags.matcher(text).replaceAll(FULLWIDTH_LT + "/$1" + FULLWIDTH_GT);
@@ -78,7 +81,7 @@ public final class PromptDelimiters {
 	 * 是按中和<b>前</b>的文本判定的，中和若吃掉字符，模型侧 message 长度就会与契约字段对不上。
 	 */
 	public static String neutralizeTagEdges(String text, Pattern tags) {
-		if (text == null || text.isEmpty()) {
+		if (StringUtils.isEmpty(text)) {
 			return "";
 		}
 		Matcher matcher = tags.matcher(text);
@@ -101,19 +104,19 @@ public final class PromptDelimiters {
 
 	/** 固定字面量替换（{@code KbText} 的 knowledge 口径：正反标签都替换成同一个全角形态）。 */
 	public static String neutralizeTag(String text, Pattern tags, String replacement) {
-		if (text == null || text.isEmpty()) {
+		if (StringUtils.isEmpty(text)) {
 			return "";
 		}
 		return tags.matcher(text).replaceAll(Matcher.quoteReplacement(replacement));
 	}
 
 	private static String alternatives(String... names) {
-		if (names == null || names.length == 0) {
+		if (ArrayUtils.isEmpty(names)) {
 			throw new IllegalArgumentException("At least one delimiter tag name is required");
 		}
 		StringBuilder sb = new StringBuilder();
 		for (String name : names) {
-			if (name == null || name.isBlank()) {
+			if (StringUtils.isBlank(name)) {
 				throw new IllegalArgumentException("Delimiter tag names must not be blank");
 			}
 			if (sb.length() > 0) {

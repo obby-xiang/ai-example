@@ -87,8 +87,8 @@ public class AiToolsController {
         body.put("count", names.size());
         body.put("registeredCount", toolRegistry.registeredCount());
         body.put("definitionsVersion", toolRegistry.snapshotVersion());
-        body.put("toolNames", names);
-        body.put("tools", tools);
+        body.put("toolNames", names.isEmpty() ? List.of() : names);
+        body.put("tools", tools.isEmpty() ? List.of() : tools);
         return ApiResponse.ok(body);
     }
 }

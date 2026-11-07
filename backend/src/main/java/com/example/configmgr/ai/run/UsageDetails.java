@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Method;
@@ -68,7 +69,9 @@ public final class UsageDetails {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("usage optional dimension extraction failed (turn unaffected)", ex);
+			if (LogSampling.canAcquire("usage-details-enrich")) {
+				log.warn("usage optional dimension extraction failed (turn unaffected)", ex);
+			}
 		}
 	}
 

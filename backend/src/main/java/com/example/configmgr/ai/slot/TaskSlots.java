@@ -1,7 +1,12 @@
 package com.example.configmgr.ai.slot;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.Objects;
 import java.util.List;
 import java.util.Map;
 
@@ -20,8 +25,8 @@ import java.util.Map;
  * <ul>
  * <li>{@code conditionDefCodes}：已有条件事实的配置项（含 IN/GT 等非 EQ 算子与 {@code scopeKeys}，
  * 由 {@link ConditionAssessment} 统一解析）；</li>
- * <li>{@code undecidedDefCodes}：条件<b>未决定/无法解析</b>的配置项（{@code null} = 旧数据，
- * 没有三态信息，按旧的"未覆盖即缺口"口径）。</li>
+ * <li>{@code undecidedDefCodes}：条件<b>未决定/无法解析</b>的配置项；独立 presence=false 表示
+ * 旧数据没有三态信息，按旧的"未覆盖即缺口"口径，集合本身始终非空。</li>
  * </ul>
  * 明确不设（{@code "{}"}）既不在 {@code conditionDefCodes} 也不在 {@code undecidedDefCodes} ——
  * 它已经有答案，不需要再问。
@@ -38,33 +43,47 @@ import java.util.Map;
  * {@code ContextFieldGate} 的白名单丢掉（见 {@code ContextBuilder#SERVER_EXTRA_KEYS}），
  * 因此客户端无法用伪造槽位压掉表单。
  */
-public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions,
-		List<String> conditionDefCodes, List<String> undecidedDefCodes, List<String> conditionTexts,
-		List<String> verifiedConditionDefCodes) {
+public record TaskSlots(@JsonProperty("taskType") String taskType, @JsonProperty("defCodes") List<String> defCodes,
+		@JsonProperty("conditions") List<ConditionSlot> conditions,
+		@JsonProperty("conditionDefCodes") List<String> conditionDefCodes,
+		@JsonProperty("undecidedDefCodes") List<String> undecidedDefCodes,
+		@JsonProperty("conditionTexts") List<String> conditionTexts,
+		@JsonProperty("verifiedConditionDefCodes") List<String> verifiedConditionDefCodes,
+		@JsonIgnore boolean undecidedDefCodesPresent) {
 
 	/** {@code AiContext.extra} 里的键名（服务端写入，不来自客户端）。 */
 	public static final String EXTRA_KEY = "taskSlots";
 
 	public TaskSlots {
-		taskType = taskType == null || taskType.isBlank() ? null : taskType;
+		taskType = StringUtils.defaultIfBlank(taskType, null);
 		defCodes = defCodes == null ? List.of() : List.copyOf(defCodes);
 		conditions = conditions == null ? List.of() : List.copyOf(conditions);
 		conditionDefCodes = conditionDefCodes == null ? List.of() : List.copyOf(conditionDefCodes);
-		undecidedDefCodes = undecidedDefCodes == null ? null : List.copyOf(undecidedDefCodes);
+		undecidedDefCodes = !undecidedDefCodesPresent || undecidedDefCodes == null ? List.of()
+				: List.copyOf(undecidedDefCodes);
 		conditionTexts = conditionTexts == null ? List.of() : List.copyOf(conditionTexts);
 		verifiedConditionDefCodes = verifiedConditionDefCodes == null ? List.of()
 				: List.copyOf(verifiedConditionDefCodes);
 	}
 
+	/** 旧七参入口：list=null 只表示调用方未提供三态信息，读取侧不再暴露 null。 */
+	public TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions,
+			List<String> conditionDefCodes, List<String> undecidedDefCodes, List<String> conditionTexts,
+			List<String> verifiedConditionDefCodes) {
+		this(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts,
+				verifiedConditionDefCodes, undecidedDefCodes != null);
+	}
+
 	/**
-	 * 兼容构造器（三参）：没有三态信息（{@code undecidedDefCodes=null}）⇒ 放行判定退回旧的
-	 * "EQ 条件覆盖全部配置项"口径。生产路径由 {@link TaskSlotResolver} 提供完整三态。
+	 * 兼容构造器（三参）：没有三态信息 ⇒ 放行判定退回旧的"EQ 条件覆盖全部配置项"口径。
+	 * 生产路径由 {@link TaskSlotResolver} 提供完整三态。
 	 */
 	public TaskSlots(String taskType, List<String> defCodes, List<ConditionSlot> conditions) {
 		this(taskType, defCodes, conditions,
 				conditions == null ? List.of() : conditions.stream().map(ConditionSlot::defCode).distinct().toList(),
-				null, List.of(),
-				conditions == null ? List.of() : conditions.stream().map(ConditionSlot::defCode).distinct().toList());
+				List.of(), List.of(),
+				conditions == null ? List.of() : conditions.stream().map(ConditionSlot::defCode).distinct().toList(),
+				false);
 	}
 
 	/** 兼容构造器（六参）：verified 默认与 conditionDefCodes 相同（旧快照/旧调用）。 */
@@ -90,7 +109,7 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 	 * 条件是否<b>覆盖了全部已确定配置项</b>：只有这样才能说"条件槽位已齐"。
 	 * 单个配置项有值即成立；多配置项时缺任何一个都不算（避免用一张表单重复收集已知条件）。
 	 */
-	public boolean conditionsCoverDefCodes() {
+	public boolean hasFullConditionCoverage() {
 		if (conditions.isEmpty()) {
 			return false;
 		}
@@ -112,13 +131,14 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 	 * <p>三态口径：任一配置项 {@code UNDECIDED}（含无法解析）即缺口；明确不设与已设置都不是缺口。
 	 * 禁止"任一配置项有条件就整体放行"——多配置时必须逐项判断。
 	 */
-	public boolean needsConditionCollection() {
+	@JsonIgnore
+	public boolean isConditionCollectionNeeded() {
 		if (defCodes.isEmpty()) {
 			return false;
 		}
-		if (this.undecidedDefCodes == null) {
+		if (!this.undecidedDefCodesPresent) {
 			// 旧数据：没有三态信息，按旧的"未覆盖即缺口"口径（不把未知当全量）
-			return !conditionsCoverDefCodes();
+			return !hasFullConditionCoverage();
 		}
 		for (String defCode : defCodes) {
 			if (this.undecidedDefCodes.contains(defCode)) {
@@ -128,6 +148,10 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		return false;
 	}
 
+	@JsonIgnore
+	public boolean needsConditionCollection() {
+		return isConditionCollectionNeeded();
+	}
 
 	/** 快照/上下文里的形态（只写有值的键，读侧见 {@link #fromValue(Object)}）。 */
 	public Map<String, Object> toMap() {
@@ -145,7 +169,7 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 			out.put("conditionDefCodes", conditionDefCodes);
 		}
 		// 空列表也要写：它表示"逐项核对过、没有未决定的"，与"没有三态信息"必须可区分
-		if (this.undecidedDefCodes != null) {
+		if (this.undecidedDefCodesPresent) {
 			out.put("undecidedDefCodes", this.undecidedDefCodes);
 		}
 		if (!conditionTexts.isEmpty()) {
@@ -190,11 +214,11 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 		List<String> conditionTexts = stringList(map.get("conditionTexts"));
 		// 缺键 = 旧快照/未声明：按未验证处理（启发式文本不得因子段缺失被自动落库）
 		List<String> verifiedConditionDefCodes = stringList(map.get("verifiedConditionDefCodes"));
-		// 键缺失 = 旧数据（没有三态信息）；键存在（含空列表）= 已逐项核对
-		List<String> undecidedDefCodes = map.containsKey("undecidedDefCodes")
-				? stringList(map.get("undecidedDefCodes")) : null;
+		// 键缺失 = 旧数据（没有三态信息）；键存在（含非法值与空列表）沿用原协议归一为空且 presence=true
+		boolean undecidedDefCodesPresent = map.containsKey("undecidedDefCodes");
+		List<String> undecidedDefCodes = undecidedDefCodesPresent ? stringList(map.get("undecidedDefCodes")) : List.of();
 		return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts,
-				verifiedConditionDefCodes);
+				verifiedConditionDefCodes, undecidedDefCodesPresent);
 	}
 
 	private static List<String> stringList(Object raw) {
@@ -207,15 +231,11 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 				}
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	private static String text(Object raw) {
-		if (raw == null) {
-			return null;
-		}
-		String value = String.valueOf(raw).trim();
-		return value.isEmpty() ? null : value;
+		return StringUtils.trimToNull(Objects.toString(raw, null));
 	}
 
 	/**
@@ -226,12 +246,13 @@ public record TaskSlots(String taskType, List<String> defCodes, List<ConditionSl
 	 * @param fieldCode 字段编码（该定义的字段）
 	 * @param value     等值
 	 */
-	public record ConditionSlot(String defCode, String fieldCode, String value) {
+	public record ConditionSlot(@JsonProperty("defCode") String defCode,
+			@JsonProperty("fieldCode") String fieldCode, @JsonProperty("value") String value) {
 
 		public ConditionSlot {
-			defCode = defCode == null || defCode.isBlank() ? null : defCode;
-			fieldCode = fieldCode == null || fieldCode.isBlank() ? null : fieldCode;
-			value = value == null || value.isBlank() ? null : value;
+			defCode = StringUtils.defaultIfBlank(defCode, null);
+			fieldCode = StringUtils.defaultIfBlank(fieldCode, null);
+			value = StringUtils.defaultIfBlank(value, null);
 		}
 
 		public boolean isComplete() {

@@ -4,12 +4,14 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -22,9 +24,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -236,7 +238,7 @@ public class StartupResumeRunner {
 
 	private final Object sweepLock = new Object();
 
-	private volatile ScheduledExecutorService sweepExecutor;
+	private final ScheduledExecutorService sweepExecutor;
 
 	private volatile ScheduledFuture<?> sweepFuture;
 
@@ -253,6 +255,16 @@ public class StartupResumeRunner {
 		this.properties = properties;
 		this.availability = availability;
 		this.registry = registry;
+		ScheduledExecutorService executor = null;
+		if (properties.getResume().isRuntimeSweepEnabled() || properties.getResume().isOnStartup()) {
+			ScheduledThreadPoolExecutor pool = new ScheduledThreadPoolExecutor(1);
+			pool.setKeepAliveTime(60L, TimeUnit.SECONDS);
+			pool.allowCoreThreadTimeOut(true);
+			pool.setRemoveOnCancelPolicy(true);
+			pool.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+			executor = pool;
+		}
+		this.sweepExecutor = executor;
 	}
 
 	@EventListener(ApplicationReadyEvent.class)
@@ -276,23 +288,61 @@ public class StartupResumeRunner {
 		long jitterMs = startupJitterMs();
 		log.info("startup auto-resume scheduled: delay={} jitter={}ms "
 				+ "(bounded stagger, avoids multi-instance scan collision)", delay, jitterMs);
-		Thread starter = new Thread(() -> {
-			try {
-				long waitMs = (delay == null || delay.isZero() || delay.isNegative() ? 0L : delay.toMillis()) + jitterMs;
-				if (waitMs > 0L) {
-					Thread.sleep(waitMs);
-				}
-				startupScan();
+		long waitMs = (delay == null || delay.isZero() || delay.isNegative() ? 0L : delay.toMillis()) + jitterMs;
+		this.sweepExecutor.schedule(this::startupScanQuietly, waitMs, TimeUnit.MILLISECONDS);
+	}
+
+	private void startupScanQuietly() {
+		try {
+			startupScan();
+		}
+		catch (Throwable ex) {
+			log.error("startup auto-resume uncaught exception (degraded to no auto-resume)", ex);
+		}
+	}
+
+	private Map<String, Object> scanCandidates(ScanFlight flight) {
+		String cursorScope = cursorScope(Mode.STARTUP, RequestContextUtils.currentOrNull());
+		RecoveryPageCursor pageCursor = this.scanCursors.get(cursorScope);
+		List<Map<String, Object>> candidates;
+		try {
+			// 每拍只取一页；下一拍从 score + member 游标后继续，而不是重读前 256 条。
+			candidates = recoveryPage(pageCursor);
+			if (candidates.isEmpty() && pageCursor != null) {
+				this.scanCursors.remove(cursorScope);
+				candidates = recoveryPage(null);
 			}
-			catch (InterruptedException ex) {
-				Thread.currentThread().interrupt();
-			}
-			catch (Throwable ex) {
-				log.error("startup auto-resume uncaught exception (degraded to no auto-resume)", ex);
-			}
-		}, "ai-startup-resume");
-		starter.setDaemon(true);
-		starter.start();
+		}
+		catch (Exception ex) {
+			// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
+			// 业务与 AI 端点各自有自己的降级路径，这里只记事实。
+			log.warn("startup auto-resume scan failed (Redis unavailable?)", ex);
+			Map<String, Object> failed = new LinkedHashMap<>();
+			failed.put("scanned", true);
+			failed.put("at", Instant.now().toString());
+			failed.put("instanceId", this.store.instanceId());
+			failed.put("error", "AI_RESUME_FAILED");
+			failed.put("resumed", List.of());
+			failed.put("skipped", List.of());
+			this.lastScan = failed;
+			return failed;
+		}
+		PipelineResult result = runPipeline(candidates, Mode.STARTUP);
+		rememberCursor(cursorScope, cursorOfLast(candidates));
+		Map<String, Object> report = new LinkedHashMap<>();
+		report.put("scanned", true);
+		report.put("at", Instant.now().toString());
+		report.put("instanceId", this.store.instanceId());
+		report.put("candidates", candidates.size());
+		report.put("resumed", result.resumed());
+		report.put("skipped", result.skipped());
+		report.put("onStartup", this.properties.getResume().isOnStartup());
+		report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
+		report.put("scanLease", flight.outcome());
+		this.lastScan = report;
+		log.info("startup auto-resume done: candidates={} resumed={} skipped={} (single-flight={}, see GET /api/ai/startup-resume)",
+				candidates.size(), result.resumed().size(), result.skipped().size(), flight.outcome());
+		return report;
 	}
 
 	/** 扫描并续跑（同一实例只自动跑一次；运维端点可强制重扫）。 */
@@ -317,47 +367,7 @@ public class StartupResumeRunner {
 			return deferred;
 		}
 		try {
-			String cursorScope = cursorScope(Mode.STARTUP, RequestContextUtils.currentOrNull());
-			RecoveryPageCursor pageCursor = this.scanCursors.get(cursorScope);
-			List<Map<String, Object>> candidates;
-			try {
-				// 每拍只取一页；下一拍从 score + member 游标后继续，而不是重读前 256 条。
-				candidates = recoveryPage(pageCursor);
-				if (candidates.isEmpty() && pageCursor != null) {
-					this.scanCursors.remove(cursorScope);
-					candidates = recoveryPage(null);
-				}
-			}
-			catch (Exception ex) {
-				// Redis 不可用时（Q2/§13.1 降级场景）扫描必须"响亮地失败"，而不是让启动线程抛异常：
-				// 业务与 AI 端点各自有自己的降级路径，这里只记事实。
-				log.warn("startup auto-resume scan failed (Redis unavailable?)", ex);
-				Map<String, Object> failed = new LinkedHashMap<>();
-				failed.put("scanned", true);
-				failed.put("at", Instant.now().toString());
-				failed.put("instanceId", this.store.instanceId());
-				failed.put("error", "AI_RESUME_FAILED");
-				failed.put("resumed", List.of());
-				failed.put("skipped", List.of());
-				this.lastScan = failed;
-				return failed;
-			}
-			PipelineResult result = runPipeline(candidates, Mode.STARTUP);
-			rememberCursor(cursorScope, cursorOfLast(candidates));
-			Map<String, Object> report = new LinkedHashMap<>();
-			report.put("scanned", true);
-			report.put("at", Instant.now().toString());
-			report.put("instanceId", this.store.instanceId());
-			report.put("candidates", candidates.size());
-			report.put("resumed", result.resumed());
-			report.put("skipped", result.skipped());
-			report.put("onStartup", this.properties.getResume().isOnStartup());
-			report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
-			report.put("scanLease", flight.outcome());
-			this.lastScan = report;
-			log.info("startup auto-resume done: candidates={} resumed={} skipped={} (single-flight={}, see GET /api/ai/startup-resume)",
-					candidates.size(), result.resumed().size(), result.skipped().size(), flight.outcome());
-			return report;
+			return scanCandidates(flight);
 		}
 		finally {
 			flight.close();
@@ -383,7 +393,7 @@ public class StartupResumeRunner {
 						+ "{} ticks (another instance/this process scanning; coverage not lost)", attempt);
 				return;
 			}
-			if (!sleepQuietly(STARTUP_SCAN_RETRY_MS + ThreadLocalRandom.current().nextLong(STARTUP_SCAN_RETRY_MS))) {
+			if (!isSleepQuietly(STARTUP_SCAN_RETRY_MS + ThreadLocalRandom.current().nextLong(STARTUP_SCAN_RETRY_MS))) {
 				return;
 			}
 		}
@@ -435,7 +445,7 @@ public class StartupResumeRunner {
 		List<Map<String, Object>> owned = new ArrayList<>();
 		for (Object item : list) {
 			if (item instanceof Map<?, ?> map
-					&& sameIdentity(identity, asLong(map.get("tenantId")), asLong(map.get("userId")))) {
+					&& isSameIdentity(identity, asLong(map.get("tenantId")), asLong(map.get("userId")))) {
 				owned.add((Map<String, Object>) map);
 			}
 		}
@@ -447,7 +457,7 @@ public class StartupResumeRunner {
 	 * {@code userId>0 或 -1}）。{@code 0/0} 记录不属于任何身份 —— 不得被"恰好没有身份"
 	 * 的调用方认领，也不得被请求面扫描拾起。
 	 */
-	private static boolean sameIdentity(TenantUser identity, long tenantId, long userId) {
+	private static boolean isSameIdentity(TenantUser identity, long tenantId, long userId) {
 		return identity != null && RunIdentityScope.usable(tenantId, userId) && identity.tenantId() == tenantId
 				&& identity.userId() == userId;
 	}
@@ -505,6 +515,52 @@ public class StartupResumeRunner {
 	 * 两条都按<b>记录身份</b>开作用域（不扫描租户列表），产出预算仍与续跑共用 {@code max-on-startup}；
 	 * 动作尝试（含失败/无果）另受 {@code scan-max-attempts} 约束，起点按轮转推进（见 {@link #runPipeline}）。
 	 */
+	private Map<String, Object> sweepCandidates(ScanFlight flight) {
+		String cursorScope = cursorScope(Mode.RUNTIME, RequestContextUtils.currentOrNull());
+		RecoveryPageCursor pageCursor = this.scanCursors.get(cursorScope);
+		List<Map<String, Object>> candidates;
+		try {
+			candidates = recoveryPage(pageCursor);
+			if (candidates.isEmpty() && pageCursor != null) {
+				this.scanCursors.remove(cursorScope);
+				candidates = recoveryPage(null);
+			}
+		}
+		catch (Exception ex) {
+			// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
+			log.warn("runtime dead-run sweep failed (Redis unavailable?)", ex);
+			Map<String, Object> failed = new LinkedHashMap<>();
+			failed.put("swept", true);
+			failed.put("at", Instant.now().toString());
+			failed.put("instanceId", this.store.instanceId());
+			failed.put("error", "AI_RESUME_FAILED");
+			failed.put("resumed", List.of());
+			failed.put("skipped", List.of());
+			this.lastSweep = failed;
+			return failed;
+		}
+		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
+		PipelineResult result = runPipeline(candidates, Mode.RUNTIME);
+		rememberCursor(cursorScope, cursorOfLast(candidates));
+		Map<String, Object> report = new LinkedHashMap<>();
+		report.put("swept", true);
+		report.put("at", Instant.now().toString());
+		report.put("instanceId", this.store.instanceId());
+		report.put("candidates", candidates.size());
+		report.put("resumed", result.resumed());
+		report.put("finalized", result.finalized());
+		report.put("expired", result.expired());
+		report.put("skipped", result.skipped());
+		report.put("zombieAgeMs", zombieAgeMs);
+		report.put("scanLease", flight.outcome());
+		this.lastSweep = report;
+		log.info("runtime dead-run sweep done: candidates={} resumed={} finalized={} "
+				+ "expired={} skipped={} (zombieAge={}, single-flight={})",
+				candidates.size(), result.resumed().size(), result.finalized().size(), result.expired().size(),
+				result.skipped().size(), this.properties.getResume().getZombieAge(), flight.outcome());
+		return report;
+	}
+
 	public Map<String, Object> sweep() {
 		if (!this.availability.isAvailable()) {
 			Map<String, Object> skippedReport = unavailableSweep();
@@ -520,49 +576,7 @@ public class StartupResumeRunner {
 			return deferred;
 		}
 		try {
-			String cursorScope = cursorScope(Mode.RUNTIME, RequestContextUtils.currentOrNull());
-			RecoveryPageCursor pageCursor = this.scanCursors.get(cursorScope);
-			List<Map<String, Object>> candidates;
-			try {
-				candidates = recoveryPage(pageCursor);
-				if (candidates.isEmpty() && pageCursor != null) {
-					this.scanCursors.remove(cursorScope);
-					candidates = recoveryPage(null);
-				}
-			}
-			catch (Exception ex) {
-				// 与启动扫描同一姿态：Redis 不可用时"响亮地失败"并留事实，不把异常丢给调度线程。
-				log.warn("runtime dead-run sweep failed (Redis unavailable?)", ex);
-				Map<String, Object> failed = new LinkedHashMap<>();
-				failed.put("swept", true);
-				failed.put("at", Instant.now().toString());
-				failed.put("instanceId", this.store.instanceId());
-				failed.put("error", "AI_RESUME_FAILED");
-				failed.put("resumed", List.of());
-				failed.put("skipped", List.of());
-				this.lastSweep = failed;
-				return failed;
-			}
-			long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
-			PipelineResult result = runPipeline(candidates, Mode.RUNTIME);
-			rememberCursor(cursorScope, cursorOfLast(candidates));
-			Map<String, Object> report = new LinkedHashMap<>();
-			report.put("swept", true);
-			report.put("at", Instant.now().toString());
-			report.put("instanceId", this.store.instanceId());
-			report.put("candidates", candidates.size());
-			report.put("resumed", result.resumed());
-			report.put("finalized", result.finalized());
-			report.put("expired", result.expired());
-			report.put("skipped", result.skipped());
-			report.put("zombieAgeMs", zombieAgeMs);
-			report.put("scanLease", flight.outcome());
-			this.lastSweep = report;
-			log.info("runtime dead-run sweep done: candidates={} resumed={} finalized={} "
-					+ "expired={} skipped={} (zombieAge={}, single-flight={})",
-					candidates.size(), result.resumed().size(), result.finalized().size(), result.expired().size(),
-					result.skipped().size(), this.properties.getResume().getZombieAge(), flight.outcome());
-			return report;
+			return sweepCandidates(flight);
 		}
 		finally {
 			flight.close();
@@ -604,204 +618,241 @@ public class StartupResumeRunner {
 	 */
 	private PipelineResult runPipeline(List<Map<String, Object>> candidates, Mode mode) {
 		int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
-		// 尝试预算 = 本拍"真正做动作"的次数上界（取消收尾/到期收敛/续跑各算一次，失败也算）。
-		// 产出预算仍是 limit：报告口径（resumed/finalized/expired 的条数）不变。
 		int attemptLimit = Math.max(limit, this.properties.getResume().getScanMaxAttempts());
-		long nowMs = System.currentTimeMillis();
-		long zombieAgeMs = this.properties.getResume().getZombieAge().toMillis();
-		List<Map<String, Object>> resumed = new ArrayList<>();
-		List<Map<String, Object>> skipped = new ArrayList<>();
-		List<Map<String, Object>> finalized = new ArrayList<>();
-		List<Map<String, Object>> expired = new ArrayList<>();
-		// 请求面（线程有身份）只处理自己的轮次；系统面（无身份线程）按每条记录的记录身份推进。
+		PipelineBudget budget = new PipelineBudget(limit, attemptLimit,
+				this.properties.getResume().getZombieAge().toMillis());
+		PipelineResult result = new PipelineResult(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
+				new ArrayList<>());
 		TenantUser caller = RequestContextUtils.currentOrNull();
-		int attempts = 0;
-		// F2（到期收敛）单独计数：它的"无果尝试"不能吃掉续跑/取消收尾的尝试预算，
-		// 否则一堆活跃非终态轮次的 F2 探测会把真正该接管的轮次挤到下一拍。两本账各自有界 ⇒ 单拍仍有界。
-		int expireAttempts = 0;
 		for (Map<String, Object> run : candidates) {
-			String runId = String.valueOf(run.get("runId"));
-			String status = run.get("status") == null ? null : String.valueOf(run.get("status"));
-			long recordTenantId = identityField(run, "tenantId");
-			long recordUserId = identityField(run, "userId");
-			if (caller != null && !sameIdentity(caller, recordTenantId, recordUserId)) {
-				// 别人的轮次：不续跑、也不进报告（runId 与跳过原因都属于跨身份信息）。
-				log.debug("scan skipped run of another identity runId={} (identity mismatch)", runId);
-				continue;
-			}
-			if (!RunIdentityScope.usable(recordTenantId, recordUserId)) {
-				// 入口硬校验：0/0 记录没有身份可恢复，续跑只会在无身份下驱动模型与工具。
-				skipped.add(mode == Mode.STARTUP
-						? scanDiscoverySkipItem(runId, status, recordTenantId, recordUserId, run,
-								LEGACY_NO_IDENTITY)
-						: sweepSkipItem(runId, status, LEGACY_NO_IDENTITY));
-				log.info("scan skipped run without identity runId={} (reason={}; no model/tool drive)", runId,
-						LEGACY_NO_IDENTITY);
-				continue;
-			}
-			if (mode == Mode.RUNTIME) {
-				// ===== F3：取消旗标优先于"跳过" =====
-				// 取消是已确认的事实：驱动进程死了也必须有人落终态/终帧，交给既有 cancelConfirmed
-				// （抢租约 + 校验取消事实 + 归档终帧幂等，绝不驱动模型）。
-				if (Boolean.TRUE.equals(run.get("cancelled")) && !RunSnapshot.isTerminal(status)) {
-					if (productive(resumed, finalized, expired) >= limit) {
-						skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
-						continue;
-					}
-					if (attempts >= attemptLimit) {
-						// 尝试预算用尽：本拍不做动作（失败也算预算 —— 否则"每轮都试一次但都不成"会让
-						// 单拍动作数随候选数无界增长）。下一拍轮转起点会往前走，这些轮次不会被永久跳过。
-						skipped.add(sweepSkipItem(runId, status, ATTEMPT_BUDGET_REACHED));
-						continue;
-					}
-					attempts++;
-					ResumeService.CancelFinalize outcome;
-					try {
-						outcome = cancelWithRunIdentity(runId, recordTenantId, recordUserId);
-					}
-					catch (RuntimeException ex) {
-						skipped.add(sweepSkipItem(runId, status, "CANCEL_EXCEPTION"));
-						log.warn("runtime scan cancel finalize failed runId={} (retry next tick)", runId, ex);
-						continue;
-					}
-					if (outcome == ResumeService.CancelFinalize.FINALIZED
-							|| outcome == ResumeService.CancelFinalize.ALREADY_TERMINAL
-							|| outcome == ResumeService.CancelFinalize.NO_RUN) {
-						Map<String, Object> item = new LinkedHashMap<>();
-						item.put("runId", runId);
-						item.put("tenantId", recordTenantId);
-						item.put("userId", recordUserId);
-						item.put("statusBeforeSweep", status);
-						item.put("outcome", outcome.name());
-						finalized.add(item);
-					}
-					else {
-						// 租约在别处/会话门被占/这拍不可确认：不是终态，也不得因此驱动 ⇒ 下一拍再收尾。
-						skipped.add(sweepSkipItem(runId, status, "CANCEL_" + outcome));
-					}
-					continue;
-				}
-				// ===== F2：消费持久化的 expiresAt =====
-				// park 后的到期收敛只有原实例进程内定时器；实例被杀后没有任何读侧看 expiresAt。
-				// 任一实例的扫描都可以做这件事（真前端工具才有时限；确认门/表单无上限，不消费）。
-				if (!RunSnapshot.isTerminal(status) && this.confirmGate != null
-						&& productive(resumed, finalized, expired) < limit && expireAttempts < attemptLimit) {
-					expireAttempts++;
-					int converged = expireParkedWithRunIdentity(runId, recordTenantId, recordUserId);
-					if (converged > 0) {
-						Map<String, Object> item = new LinkedHashMap<>();
-						item.put("runId", runId);
-						item.put("tenantId", recordTenantId);
-						item.put("userId", recordUserId);
-						item.put("statusBeforeSweep", status);
-						item.put("expired", converged);
-						expired.add(item);
-						// 到期收敛已派发一次续跑（系统裁决）：本拍不再重复续跑同一轮。
-						continue;
-					}
-				}
-			}
-			Discovery discovery = discoveryOf(run);
-			if (discovery != Discovery.TAKEABLE) {
-				skipped.add(mode == Mode.STARTUP
-						? scanDiscoverySkipItem(runId, status, recordTenantId, recordUserId, run,
-								scanSkipReason(discovery))
-						: sweepSkipItem(runId, status, sweepSkipReason(discovery)));
-				continue;
-			}
-			if (mode == Mode.RUNTIME) {
-				if (!deadWithoutDriver(run, status, nowMs, zombieAgeMs)) {
-					// 租约/活订阅/活动窗口三者都说"还有人管" ⇒ 这一拍不碰（下一拍再看）。
-					skipped.add(sweepSkipItem(runId, status, "ACTIVE"));
-					continue;
-				}
-				if (resumed.size() >= limit) {
-					skipped.add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
-					continue;
-				}
-				if (attempts >= attemptLimit) {
-					skipped.add(sweepSkipItem(runId, status, ATTEMPT_BUDGET_REACHED));
-					continue;
-				}
-				attempts++;
-
-				boolean takeover = RunSnapshot.RUNNING.equals(status);
-				AiTrace.bind(runId, null);
-				try {
-					ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover, recordTenantId,
-							recordUserId);
-					Map<String, Object> item = new LinkedHashMap<>();
-					item.put("runId", runId);
-					item.put("statusBeforeSweep", status);
-					item.put("zombieTakeover", takeover);
-					item.put("outcome", result.outcome().name());
-					item.put("body", result.body());
-					resumed.add(item);
-				}
-				catch (Exception ex) {
-					Map<String, Object> item = new LinkedHashMap<>();
-					item.put("runId", runId);
-					item.put("outcome", "EXCEPTION");
-					item.put("error", "AI_RESUME_FAILED");
-					resumed.add(item);
-					log.error("runtime dead-run sweep resume failed runId={}", runId, ex);
-				}
-				finally {
-					AiTrace.clear();
-				}
-				continue;
-			}
-			// 启动/手工：接管时效仍由发现面的 zombieRunning（zombie-age 判据）给出。
-			if (resumed.size() >= limit) {
-				Map<String, Object> skippedItem = new LinkedHashMap<>();
-				skippedItem.put("runId", runId);
-				skippedItem.put("tenantId", recordTenantId);
-				skippedItem.put("userId", recordUserId);
-				skippedItem.put("reason", "MAX_ON_STARTUP_REACHED");
-				skipped.add(skippedItem);
-				continue;
-			}
-			if (attempts >= attemptLimit) {
-				Map<String, Object> skippedItem = new LinkedHashMap<>();
-				skippedItem.put("runId", runId);
-				skippedItem.put("tenantId", recordTenantId);
-				skippedItem.put("userId", recordUserId);
-				skippedItem.put("reason", ATTEMPT_BUDGET_REACHED);
-				skipped.add(skippedItem);
-				continue;
-			}
-			attempts++;
-
-			boolean zombie = Boolean.TRUE.equals(run.get("zombieRunning"));
-			// 日志链路批：启动扫描是"没有 HTTP 入口"的续跑路径，锚点只能在循环里逐轮装。
-			AiTrace.bind(runId, null);
-			try {
-				ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie, recordTenantId,
-						recordUserId);
-				Map<String, Object> item = new LinkedHashMap<>();
-				item.put("runId", runId);
-				item.put("tenantId", recordTenantId);
-				item.put("userId", recordUserId);
-				item.put("zombieTakeover", zombie);
-				item.put("outcome", result.outcome().name());
-				item.put("body", result.body());
-				resumed.add(item);
-			}
-			catch (Exception ex) {
-				Map<String, Object> item = new LinkedHashMap<>();
-				item.put("runId", runId);
-				item.put("tenantId", recordTenantId);
-				item.put("userId", recordUserId);
-				item.put("outcome", "EXCEPTION");
-				item.put("error", "AI_RESUME_FAILED");
-				resumed.add(item);
-				log.error("startup auto-resume failed runId={}", runId, ex);
-			}
-			finally {
-				AiTrace.clear();
-			}
+			processPipelineCandidate(run, mode, caller, budget, result);
 		}
-		return new PipelineResult(resumed, skipped, finalized, expired);
+		return result;
+	}
+
+	private void processPipelineCandidate(Map<String, Object> run, Mode mode, TenantUser caller,
+			PipelineBudget budget, PipelineResult result) {
+		String runId = String.valueOf(run.get("runId"));
+		String status = ObjectUtils.toString(run.get("status"), (String) null);
+		long tenantId = identityField(run, "tenantId");
+		long userId = identityField(run, "userId");
+		if (caller != null && !isSameIdentity(caller, tenantId, userId)) {
+			if (log.isDebugEnabled()) log.debug("scan skipped run of another identity runId={} (identity mismatch)", runId);
+			return;
+		}
+		if (!RunIdentityScope.usable(tenantId, userId)) {
+			result.skipped().add(mode == Mode.STARTUP
+					? scanDiscoverySkipItem(runId, status, tenantId, userId, run, LEGACY_NO_IDENTITY)
+					: sweepSkipItem(runId, status, LEGACY_NO_IDENTITY));
+			log.info("scan skipped run without identity runId={} (reason={}; no model/tool drive)", runId,
+					LEGACY_NO_IDENTITY);
+			return;
+		}
+		if (mode == Mode.RUNTIME && processRuntimeCancellation(run, runId, status, tenantId, userId, budget, result)) {
+			return;
+		}
+		if (mode == Mode.RUNTIME && processRuntimeExpiry(runId, status, tenantId, userId, budget, result)) {
+			return;
+		}
+		Discovery discovery = discoveryOf(run);
+		if (discovery != Discovery.TAKEABLE) {
+			result.skipped().add(mode == Mode.STARTUP
+					? scanDiscoverySkipItem(runId, status, tenantId, userId, run, scanSkipReason(discovery))
+					: sweepSkipItem(runId, status, sweepSkipReason(discovery)));
+			return;
+		}
+		if (mode == Mode.RUNTIME) {
+			processRuntimeResume(run, runId, status, tenantId, userId, budget, result);
+		}
+		else {
+			processStartupResume(run, runId, status, tenantId, userId, budget, result);
+		}
+	}
+
+	private boolean processRuntimeCancellation(Map<String, Object> run, String runId, String status, long tenantId,
+			long userId, PipelineBudget budget, PipelineResult result) {
+		if (!Boolean.TRUE.equals(run.get("cancelled")) || RunSnapshot.isTerminal(status)) {
+			return false;
+		}
+		if (productive(result.resumed(), result.finalized(), result.expired()) >= budget.limit()) {
+			result.skipped().add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
+			return true;
+		}
+		if (budget.attempts() >= budget.attemptLimit()) {
+			result.skipped().add(sweepSkipItem(runId, status, ATTEMPT_BUDGET_REACHED));
+			return true;
+		}
+		budget.attempts++;
+		ResumeService.CancelFinalize outcome;
+		try {
+			outcome = cancelWithRunIdentity(runId, tenantId, userId);
+		}
+		catch (RuntimeException ex) {
+			result.skipped().add(sweepSkipItem(runId, status, "CANCEL_EXCEPTION"));
+			log.warn("runtime scan cancel finalize failed runId={} (retry next tick)", runId, ex);
+			return true;
+		}
+		if (outcome == ResumeService.CancelFinalize.FINALIZED
+				|| outcome == ResumeService.CancelFinalize.ALREADY_TERMINAL
+				|| outcome == ResumeService.CancelFinalize.NO_RUN) {
+			result.finalized().add(cancelFinalizedItem(runId, status, tenantId, userId, outcome));
+		}
+		else {
+			result.skipped().add(sweepSkipItem(runId, status, "CANCEL_" + outcome));
+		}
+		return true;
+	}
+
+	private static Map<String, Object> cancelFinalizedItem(String runId, String status, long tenantId, long userId,
+			ResumeService.CancelFinalize outcome) {
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("runId", runId);
+		item.put("tenantId", tenantId);
+		item.put("userId", userId);
+		item.put("statusBeforeSweep", status);
+		item.put("outcome", outcome.name());
+		return item;
+	}
+
+	private boolean processRuntimeExpiry(String runId, String status, long tenantId, long userId,
+			PipelineBudget budget, PipelineResult result) {
+		if (RunSnapshot.isTerminal(status) || this.confirmGate == null
+				|| productive(result.resumed(), result.finalized(), result.expired()) >= budget.limit()
+				|| budget.expireAttempts() >= budget.attemptLimit()) {
+			return false;
+		}
+		budget.expireAttempts++;
+		int converged = expireParkedWithRunIdentity(runId, tenantId, userId);
+		if (converged <= 0) {
+			return false;
+		}
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("runId", runId);
+		item.put("tenantId", tenantId);
+		item.put("userId", userId);
+		item.put("statusBeforeSweep", status);
+		item.put("expired", converged);
+		result.expired().add(item);
+		return true;
+	}
+
+	private void processRuntimeResume(Map<String, Object> run, String runId, String status, long tenantId,
+			long userId, PipelineBudget budget, PipelineResult result) {
+		if (!isDeadWithoutDriver(run, status, budget.nowMs(), budget.zombieAgeMs())) {
+			result.skipped().add(sweepSkipItem(runId, status, "ACTIVE"));
+			return;
+		}
+		if (result.resumed().size() >= budget.limit()) {
+			result.skipped().add(sweepSkipItem(runId, status, "MAX_PER_SWEEP_REACHED"));
+			return;
+		}
+		if (budget.attempts() >= budget.attemptLimit()) {
+			result.skipped().add(sweepSkipItem(runId, status, ATTEMPT_BUDGET_REACHED));
+			return;
+		}
+		budget.attempts++;
+		result.resumed().add(resumeRuntimeCandidate(runId, status, tenantId, userId));
+	}
+
+	private void processStartupResume(Map<String, Object> run, String runId, String status, long tenantId,
+			long userId, PipelineBudget budget, PipelineResult result) {
+		if (result.resumed().size() >= budget.limit()) {
+			result.skipped().add(startupBudgetSkipItem(runId, tenantId, userId, "MAX_ON_STARTUP_REACHED"));
+			return;
+		}
+		if (budget.attempts() >= budget.attemptLimit()) {
+			result.skipped().add(startupBudgetSkipItem(runId, tenantId, userId, ATTEMPT_BUDGET_REACHED));
+			return;
+		}
+		budget.attempts++;
+		result.resumed().add(resumeStartupCandidate(runId, tenantId, userId,
+				Boolean.TRUE.equals(run.get("zombieRunning"))));
+	}
+
+	private static Map<String, Object> startupBudgetSkipItem(String runId, long tenantId, long userId,
+			String reason) {
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("runId", runId);
+		item.put("tenantId", tenantId);
+		item.put("userId", userId);
+		item.put("reason", reason);
+		return item;
+	}
+
+	private static final class PipelineBudget {
+
+		private final int limit;
+		private final int attemptLimit;
+		private final long nowMs = System.currentTimeMillis();
+		private final long zombieAgeMs;
+		private int attempts;
+		private int expireAttempts;
+
+		private PipelineBudget(int limit, int attemptLimit, long zombieAgeMs) {
+			this.limit = limit;
+			this.attemptLimit = attemptLimit;
+			this.zombieAgeMs = zombieAgeMs;
+		}
+
+		private int limit() { return this.limit; }
+		private int attemptLimit() { return this.attemptLimit; }
+		private long nowMs() { return this.nowMs; }
+		private long zombieAgeMs() { return this.zombieAgeMs; }
+		private int attempts() { return this.attempts; }
+		private int expireAttempts() { return this.expireAttempts; }
+
+	}
+
+	private Map<String, Object> resumeRuntimeCandidate(String runId, String status, long tenantId, long userId) {
+		boolean takeover = RunSnapshot.RUNNING.equals(status);
+		AiTrace.bind(runId, null);
+		try {
+			ResumeService.ResumeResult result = resumeWithRunIdentity(runId, takeover, tenantId, userId);
+			Map<String, Object> item = new LinkedHashMap<>();
+			item.put("runId", runId);
+			item.put("statusBeforeSweep", status);
+			item.put("zombieTakeover", takeover);
+			item.put("outcome", result.outcome().name());
+			item.put("body", result.body());
+			return item;
+		}
+		catch (Exception ex) {
+			log.error("runtime dead-run sweep resume failed runId={}", runId, ex);
+			return resumeExceptionItem(runId);
+		}
+		finally {
+			AiTrace.clear();
+		}
+	}
+
+	private Map<String, Object> resumeStartupCandidate(String runId, long tenantId, long userId, boolean zombie) {
+		AiTrace.bind(runId, null);
+		try {
+			ResumeService.ResumeResult result = resumeWithRunIdentity(runId, zombie, tenantId, userId);
+			Map<String, Object> item = new LinkedHashMap<>();
+			item.put("runId", runId);
+			item.put("tenantId", tenantId);
+			item.put("userId", userId);
+			item.put("zombieTakeover", zombie);
+			item.put("outcome", result.outcome().name());
+			item.put("body", result.body());
+			return item;
+		}
+		catch (Exception ex) {
+			log.error("startup auto-resume failed runId={}", runId, ex);
+			return resumeExceptionItem(runId);
+		}
+		finally {
+			AiTrace.clear();
+		}
+	}
+
+	private static Map<String, Object> resumeExceptionItem(String runId) {
+		Map<String, Object> item = new LinkedHashMap<>();
+		item.put("runId", runId);
+		item.put("outcome", "EXCEPTION");
+		item.put("error", "AI_RESUME_FAILED");
+		return item;
 	}
 
 	/**
@@ -823,7 +874,7 @@ public class StartupResumeRunner {
 		if (candidates.isEmpty()) {
 			return null;
 		}
-		Map<String, Object> last = candidates.get(candidates.size() - 1);
+		Map<String, Object> last = candidates.getLast();
 		String runId = String.valueOf(last.get("runId"));
 		String member = RequestContextUtils.currentOrNull() == null
 				? RunKeyScope.indexMember(identityField(last, "tenantId"), identityField(last, "userId"), runId)
@@ -837,7 +888,7 @@ public class StartupResumeRunner {
 			return;
 		}
 		if (this.scanCursors.size() >= MAX_SCAN_CURSORS && !this.scanCursors.containsKey(scope)
-				&& !evictIdentityCursor()) {
+				&& !isEvictIdentityCursor()) {
 			// 理论上不可达（系统面至多 2 条 < 上限 ⇒ 达上限时必有请求面游标可淘汰）。
 			// 真到这里就宁可不记（该身份下一次从头部开始），也守住"游标表有界"这条硬约束。
 			return;
@@ -846,7 +897,7 @@ public class StartupResumeRunner {
 	}
 
 	/** 淘汰一条请求面游标；系统面（{@code MODE/system}）永不淘汰。 */
-	private boolean evictIdentityCursor() {
+	private boolean isEvictIdentityCursor() {
 		for (String scope : this.scanCursors.keySet()) {
 			if (!scope.endsWith("/system") && this.scanCursors.remove(scope) != null) {
 				return true;
@@ -918,6 +969,35 @@ public class StartupResumeRunner {
 	 * @param waitMs  抢不到时的有界等待（运行期拍传 0：下一次周期再来）
 	 * @return 席位（必须 {@code close()}）；{@code null} = 本拍让位
 	 */
+	private ScanFlight acquiredScanFlight(LeaseService leases, LeaseService.AcquireResult result,
+			TenantUser scanIdentity, String trigger) {
+		this.scanInFlight.set(true);
+		LeaseService.Lease lease = result.lease();
+		if (lease != null) {
+			try {
+				// 带续租：扫描期间保持席位；收尾先停续租再释放（见 ScanFlight#close）。
+				// 续租 TTL 必须与抢锁 TTL 同值：默认口径是 app.ai.lease.ttl（30s），
+				// 用它续期会把 60s 的 scan-lease-ttl 直接在下一拍缩成 30s。
+				leases.markDriving(lease, this.scanInFlight::get, scanIdentity, scanLeaseTtl());
+			}
+			catch (RuntimeException ex) {
+				// 续租登记失败（调度器已停机等）：仍按"已拿到席位"继续 —— TTL 到期后自然可被接手，
+				// 绝不能让一次登记异常把闸门留在锁住状态。
+				log.warn("scan single-flight renew registration failed (TTL fallback) trigger={}", trigger, ex);
+			}
+		}
+		// owner 唯一 ⇒ created 恒为真；仍把它写进报告口径（日志/观测可区分异常形态）。
+		return new ScanFlight(leases, lease, result.created() ? "ACQUIRED" : "REENTRANT");
+	}
+
+	private ScanFlight inconclusiveScanFlight(String trigger) {
+		// 设施返回了"没有结论"（非生产形态：真实现恒返回三态之一；替身/桩可能给 null）：
+		// 同样按"不可确认"降级，绝不让一次 null 把整拍扫描打崩。
+		log.warn("scan single-flight lease inconclusive (falling back to in-process single-flight) trigger={}", trigger);
+		this.scanInFlight.set(true);
+		return new ScanFlight(null, null, "UNAVAILABLE");
+	}
+
 	private ScanFlight tryStartScan(String trigger, long waitMs) {
 		if (!lockScanGate(waitMs)) {
 			log.info("scan skipped: scan already running in this process (trigger={}), not scanning the same candidates concurrently", trigger);
@@ -947,30 +1027,10 @@ public class StartupResumeRunner {
 				return new ScanFlight(null, null, "UNAVAILABLE");
 			}
 			if (result == null) {
-				// 设施返回了"没有结论"（非生产形态：真实现恒返回三态之一；替身/桩可能给 null）：
-				// 同样按"不可确认"降级，绝不让一次 null 把整拍扫描打崩。
-				log.warn("scan single-flight lease inconclusive (falling back to in-process single-flight) trigger={}", trigger);
-				this.scanInFlight.set(true);
-				return new ScanFlight(null, null, "UNAVAILABLE");
+				return inconclusiveScanFlight(trigger);
 			}
-			if (result.acquired()) {
-				this.scanInFlight.set(true);
-				LeaseService.Lease lease = result.lease();
-				if (lease != null) {
-					try {
-						// 带续租：扫描期间保持席位；收尾先停续租再释放（见 ScanFlight#close）。
-						// 续租 TTL 必须与抢锁 TTL 同值：默认口径是 app.ai.lease.ttl（30s），
-						// 用它续期会把 60s 的 scan-lease-ttl 直接在下一拍缩成 30s。
-						leases.markDriving(lease, this.scanInFlight::get, scanIdentity, scanLeaseTtl());
-					}
-					catch (RuntimeException ex) {
-						// 续租登记失败（调度器已停机等）：仍按"已拿到席位"继续 —— TTL 到期后自然可被接手，
-						// 绝不能让一次登记异常把闸门留在锁住状态。
-						log.warn("scan single-flight renew registration failed (TTL fallback) trigger={}", trigger, ex);
-					}
-				}
-				// owner 唯一 ⇒ created 恒为真；仍把它写进报告口径（日志/观测可区分异常形态）。
-				return new ScanFlight(leases, lease, result.created() ? "ACQUIRED" : "REENTRANT");
+			if (result.isAcquired()) {
+				return acquiredScanFlight(leases, result, scanIdentity, trigger);
 			}
 			if (result.outcome() != LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
 				log.warn("scan single-flight lease facility unconfirmed (falling back to in-process single-flight) trigger={} outcome={}", trigger,
@@ -983,7 +1043,7 @@ public class StartupResumeRunner {
 				log.info("scan deferred: another instance holds scan single-flight (trigger={}, wait budget {}ms exhausted)", trigger, waitMs);
 				return null;
 			}
-			if (!sleepQuietly(SCAN_LEASE_RETRY_MS + ThreadLocalRandom.current().nextLong(SCAN_LEASE_RETRY_MS))) {
+			if (!isSleepQuietly(SCAN_LEASE_RETRY_MS + ThreadLocalRandom.current().nextLong(SCAN_LEASE_RETRY_MS))) {
 				unlockScanGate();
 				log.info("scan abandoned: single-flight wait interrupted (trigger={})", trigger);
 				return null;
@@ -1020,7 +1080,7 @@ public class StartupResumeRunner {
 	}
 
 	/** 睡一小段；被中断时返回 false（调用方负责归还门）。 */
-	private static boolean sleepQuietly(long ms) {
+	private static boolean isSleepQuietly(long ms) {
 		if (ms <= 0L) {
 			return true;
 		}
@@ -1092,13 +1152,13 @@ public class StartupResumeRunner {
 					this.leases.stopDriving(this.lease.key(), this.lease.owner());
 				}
 				catch (RuntimeException ex) {
-					log.debug("scan single-flight renew stop failed (TTL fallback)", ex);
+					if (LogSampling.canAcquire("startup-resume-runtime-catch")) log.warn("scan single-flight renew stop failed (TTL fallback)", ex);
 				}
 				try {
-					this.leases.release(this.lease);
+					this.leases.isReleased(this.lease);
 				}
 				catch (RuntimeException ex) {
-					log.debug("scan single-flight lease release failed (waiting TTL expiry)", ex);
+					if (LogSampling.canAcquire("startup-resume-runtime-catch")) log.warn("scan single-flight lease release failed (waiting TTL expiry)", ex);
 				}
 			}
 			unlockScanGate();
@@ -1146,7 +1206,7 @@ public class StartupResumeRunner {
 	 * 注册运行期扫描定时器（{@code app.ai.resume.runtime-sweep-enabled}）。
 	 *
 	 * <p>缺省关闭（代码缺省 {@code false}，出厂 yml 打开，与 {@code on-startup} 同一纪律）；
-	 * 关闭时<b>不建线程</b>。周期非法（{@code <= 0}）时只 ERROR 留痕、不注册 ——
+	 * 与启动扫描同时关闭时<b>不建线程</b>。周期非法（{@code <= 0}）时只 ERROR 留痕、不注册 ——
 	 * {@code scheduleWithFixedDelay} 对非正值会抛 {@link IllegalArgumentException}，
 	 * 不能让一个配错的间隔把启动路径带崩。
 	 */
@@ -1165,13 +1225,7 @@ public class StartupResumeRunner {
 			if (this.sweepFuture != null && !this.sweepFuture.isDone()) {
 				return;
 			}
-			ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-				Thread thread = new Thread(runnable, "ai-runtime-sweep");
-				thread.setDaemon(true);
-				return thread;
-			});
-			this.sweepExecutor = executor;
-			this.sweepFuture = executor.scheduleWithFixedDelay(this::sweepQuietly, interval.toMillis(),
+			this.sweepFuture = this.sweepExecutor.scheduleWithFixedDelay(this::sweepQuietly, interval.toMillis(),
 					interval.toMillis(), TimeUnit.MILLISECONDS);
 		}
 		log.info("runtime dead-run sweep registered: interval={} zombie-age={} (threshold not relaxed)", interval,
@@ -1182,18 +1236,25 @@ public class StartupResumeRunner {
 	@PreDestroy
 	public void stopRuntimeSweep() {
 		ScheduledFuture<?> future;
-		ScheduledExecutorService executor;
 		synchronized (this.sweepLock) {
 			future = this.sweepFuture;
-			executor = this.sweepExecutor;
 			this.sweepFuture = null;
-			this.sweepExecutor = null;
 		}
-		if (future != null) {
-			future.cancel(false);
+		try {
+			if (future != null) {
+				future.cancel(false);
+			}
 		}
-		if (executor != null) {
-			executor.shutdownNow();
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("startup-sweep-future-close")) log.warn("runtime sweep task close failed", ex);
+		}
+		try {
+			if (this.sweepExecutor != null) {
+				this.sweepExecutor.shutdownNow();
+			}
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("startup-sweep-executor-close")) log.warn("runtime sweep executor close failed", ex);
 		}
 	}
 
@@ -1272,7 +1333,7 @@ public class StartupResumeRunner {
 	 * <p>租约读不出来时按"可能有人持有"处理（fail-closed）：这里的错误方向是并发双跑，
 	 * 不能靠乐观兜底。
 	 */
-	private boolean deadWithoutDriver(Map<String, Object> run, String status, long nowMs, long zombieAgeMs) {
+	private boolean isDeadWithoutDriver(Map<String, Object> run, String status, long nowMs, long zombieAgeMs) {
 		String runId = String.valueOf(run.get("runId"));
 		boolean leaseHeld;
 		try {
@@ -1284,7 +1345,7 @@ public class StartupResumeRunner {
 			leaseHeld = leases != null && leases.isHeldStrict(leaseKeyOf(run, runId));
 		}
 		catch (Exception ex) {
-			log.debug("runtime scan read resume lease failed runId={} (treating as active, no takeover)", runId, ex);
+			if (LogSampling.canAcquire("startup-resume-exception-catch")) log.warn("runtime scan read resume lease failed runId={} (treating as active, no takeover)", runId, ex);
 			leaseHeld = true;
 		}
 		boolean liveInProcess;
@@ -1297,7 +1358,7 @@ public class StartupResumeRunner {
 							identityField(run, "userId"));
 		}
 		catch (Exception ex) {
-			log.debug("runtime scan read local subscription failed runId={} (treating as active, no takeover)", runId, ex);
+			if (LogSampling.canAcquire("startup-resume-exception-catch")) log.warn("runtime scan read local subscription failed runId={} (treating as active, no takeover)", runId, ex);
 			liveInProcess = true;
 		}
 		long updatedAtMs = asLong(run.get("updatedAtMs"));
@@ -1344,7 +1405,7 @@ public class StartupResumeRunner {
 			return Discovery.PENDING_UNRESOLVED;
 		}
 		Object rawStatus = run.get("status");
-		String status = rawStatus == null ? null : String.valueOf(rawStatus);
+		String status = ObjectUtils.toString(rawStatus, (String) null);
 		if (status == null || RunSnapshot.isTerminal(status)) {
 			return Discovery.TERMINAL;
 		}

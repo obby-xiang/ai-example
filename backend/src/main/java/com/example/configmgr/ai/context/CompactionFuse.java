@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.AiProperties;
+import org.apache.commons.lang3.ObjectUtils;
 
 /**
  * 摘要压缩熔断（上下文统计与压缩专项批③；设计稿 §3.5"熔断"）。
@@ -35,15 +36,19 @@ public final class CompactionFuse {
 	private final AiProperties.Context config;
 
 	public CompactionFuse(AiProperties.Context config) {
-		this.config = config == null ? new AiProperties.Context() : config;
+		this.config = ObjectUtils.getIfNull(config, AiProperties.Context::new);
 	}
 
 	/** 本次是否允许摘要（L2/L3）。{@code open} 且未到冷却点 ⇒ false。 */
 	public boolean allowsSummary(ContextState state, long nowMs) {
+		return canSummarize(state, nowMs);
+	}
+
+	public boolean canSummarize(ContextState state, long nowMs) {
 		if (state == null) {
 			return true;
 		}
-		String circuit = state.circuit() == null ? CLOSED : state.circuit();
+		String circuit = ObjectUtils.defaultIfNull(state.circuit(), CLOSED);
 		if (OPEN.equals(circuit)) {
 			return state.openUntilMs() > 0L && nowMs >= state.openUntilMs();
 		}
@@ -52,19 +57,19 @@ public final class CompactionFuse {
 
 	/** 摘要成功：清零并闭合。 */
 	public ContextState onSuccess(ContextState state, long nowMs) {
-		ContextState base = state == null ? ContextState.EMPTY : state;
+		ContextState base = ObjectUtils.defaultIfNull(state, ContextState.EMPTY);
 		return base.withFuse(CLOSED, 0, 0L);
 	}
 
 	/** 冷却到点：标记半开（只放一次摘要尝试）。 */
 	public ContextState halfOpen(ContextState state, long nowMs) {
-		ContextState base = state == null ? ContextState.EMPTY : state;
+		ContextState base = ObjectUtils.defaultIfNull(state, ContextState.EMPTY);
 		return base.withFuse(HALF_OPEN, base.fuseFails(), base.openUntilMs());
 	}
 
 	/** 摘要失败：计数 +1，达阈值即打开并给出冷却窗。 */
 	public ContextState onFailure(ContextState state, long nowMs) {
-		ContextState base = state == null ? ContextState.EMPTY : state;
+		ContextState base = ObjectUtils.defaultIfNull(state, ContextState.EMPTY);
 		int fails = base.fuseFails() + 1;
 		if (fails >= Math.max(1, this.config.getFuseThreshold())) {
 			long openUntil = nowMs + this.config.getFuseCooldown().toMillis();

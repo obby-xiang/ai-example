@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.web;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.Map;
 
 /**
@@ -35,8 +38,12 @@ import java.util.Map;
  * @param clientRequestId 客户端请求 id（停止闭环 additive 字段；前端发送前生成并持久化，
  *     后端据此在 run 创建前绑定/识别取消墓碑。null = 旧客户端，行为与改造前一致）
  */
-public record AiChatRequest(String sessionId, String message, Context context, String modelId, Long providerId,
-		Params params, String clientRequestId, String displayText) {
+public record AiChatRequest(@JsonProperty("sessionId") String sessionId,
+		@JsonProperty("message") String message, @JsonProperty("context") Context context,
+		@JsonProperty("modelId") String modelId,
+		@JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
+		@JsonProperty("params") Params params, @JsonProperty("clientRequestId") String clientRequestId,
+		@JsonProperty("displayText") String displayText) {
 
 	/** 旧调用方没有独立展示文本时，展示历史与模型输入共用 message。 */
 	public AiChatRequest(String sessionId, String message, Context context, String modelId, Long providerId,
@@ -54,6 +61,14 @@ public record AiChatRequest(String sessionId, String message, Context context, S
 		this(sessionId, message, context, modelId, null, params, null);
 	}
 
+	@Override
+	public String toString() {
+		return "AiChatRequest[sessionId=" + this.sessionId + ", modelId=" + this.modelId
+				+ ", providerId=" + this.providerId + ", clientRequestId=" + this.clientRequestId
+				+ ", messageChars=" + (this.message == null ? -1 : this.message.length())
+				+ ", displayTextChars=" + (this.displayText == null ? -1 : this.displayText.length()) + "]";
+	}
+
 	/**
 	 * 工作区上下文。{@code ignoreUnknown} 是形状闸的前置条件：
 	 * {@code ContextFieldGate} 的裁决是"未知字段一律降级（白名单化 + WARN），不拒绝请求"，
@@ -61,12 +76,19 @@ public record AiChatRequest(String sessionId, String message, Context context, S
 	 * 闸门根本轮不到执行。故这里显式放行未知键，由闸门负责丢弃与计数（X-06）。
 	 */
 	@com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
-	public record Context(String page, String taskType, String step, Long taskId, String taskStatus,
-			Map<String, Object> extra) {
+	public record Context(@JsonProperty("page") String page, @JsonProperty("taskType") String taskType,
+			@JsonProperty("step") String step,
+			@JsonProperty("taskId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long taskId,
+			@JsonProperty("taskStatus") String taskStatus, @JsonProperty("extra") Map<String, Object> extra) {
 
 		/** 兼容构造器：{@code taskStatus} 之前的调用点（含测试）无需改动。 */
 		public Context(String page, String taskType, String step, Long taskId, Map<String, Object> extra) {
 			this(page, taskType, step, taskId, null, extra);
+		}
+
+		@Override
+		public String toString() {
+			return "Context[taskId=" + this.taskId + "]";
 		}
 	}
 
@@ -80,7 +102,13 @@ public record AiChatRequest(String sessionId, String message, Context context, S
 	 * <p>
 	 * 三个字段都可空 —— 只覆盖用户动过的那几项，其余沿用全局默认。
 	 */
-	public record Params(Double temperature, Double topP, Integer maxTokens) {
+	public record Params(@JsonProperty("temperature") Double temperature, @JsonProperty("topP") Double topP,
+			@JsonProperty("maxTokens") Integer maxTokens) {
+
+		@Override
+		public String toString() {
+			return "Params[maxTokens=" + this.maxTokens + "]";
+		}
 	}
 
 }

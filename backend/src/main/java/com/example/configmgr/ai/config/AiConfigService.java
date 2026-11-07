@@ -8,7 +8,11 @@ import com.example.configmgr.ai.config.db.AiProviderModelRepository;
 import com.example.configmgr.ai.config.db.AiProviderRepository;
 import com.example.configmgr.ai.config.db.AiSetting;
 import com.example.configmgr.ai.config.db.AiSettingRepository;
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.model.openai.autoconfigure.OpenAiChatProperties;
 import org.springframework.ai.model.openai.autoconfigure.OpenAiConnectionProperties;
 import org.springframework.core.env.Environment;
@@ -16,6 +20,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -192,7 +197,7 @@ public class AiConfigService {
             Thread.currentThread().interrupt();
         }
         catch (Exception ex) {
-            log.debug("config refresh wait ended without a completed result", ex);
+            // 等待失败时保留当前快照，并按原契约返回未刷新结果。
         }
         return new RefreshOutcome(new ReloadResult(this.snapshot, false), forced);
     }
@@ -229,7 +234,7 @@ public class AiConfigService {
     private RefreshOutcome performRefresh(boolean force) {
         ConfigSnapshot snap = this.snapshot;
         if (!force) {
-            if (!checkReload(snap)) {
+            if (!isReloadRequired(snap)) {
                 this.lastCheckAtMs = System.currentTimeMillis();
                 return new RefreshOutcome(new ReloadResult(snap, true), false);
             }
@@ -257,7 +262,7 @@ public class AiConfigService {
     private record LoadOutcome(ConfigSnapshot snapshot, boolean ok) {
     }
 
-    private boolean checkReload(ConfigSnapshot snap) {
+    private boolean isReloadRequired(ConfigSnapshot snap) {
         if (snap == null || this.lastLoadFailed) {
             return true;
         }
@@ -273,7 +278,6 @@ public class AiConfigService {
                 .orElse(0L);
         }
         catch (Exception ex) {
-            log.debug("reading config.version failed (keeping last good snapshot)", ex);
             return null;
         }
     }
@@ -290,16 +294,15 @@ public class AiConfigService {
                 if (after != null && before.equals(after) && loaded.version() == after) {
                     return new LoadOutcome(loaded, true);
                 }
-                log.debug("config snapshot changed during load, retrying attempt={} before={} after={}", attempt, before, after);
+                if (log.isDebugEnabled()) {
+                    log.debug("config snapshot changed during load, retrying attempt={} before={} after={}", attempt, before, after);
+                }
             }
             throw new IllegalStateException("config snapshot did not stabilize after 3 loads");
         }
         catch (Exception ex) {
             // 读库失败或版本持续变化时保留 last-good，绝不发布分批读取拼出的混合快照。
-            if (this.lastLoadFailed) {
-                log.debug("config snapshot reload failed again (keeping last good snapshot)", ex);
-            }
-            else {
+            if (!this.lastLoadFailed) {
                 log.warn("config snapshot load failed (keeping last good snapshot; retried on next version check)",
                         ex);
             }
@@ -368,8 +371,11 @@ public class AiConfigService {
      * @param version {@code config.version}（诊断用：改完能确认版本真的动了）
      * @param providerId {@code default.providerId}（与 {@code modelId} 成对；两者同为 {@code null} = 未设置默认目标）
      */
-    public record Defaults(String modelId, Double temperature, Double topP, Integer maxTokens,
-            Boolean allowUserParams, long version, Long providerId) {
+    public record Defaults(@JsonProperty("modelId") String modelId, @JsonProperty("temperature") Double temperature,
+            @JsonProperty("topP") Double topP, @JsonProperty("maxTokens") Integer maxTokens,
+            @JsonProperty("allowUserParams") Boolean allowUserParams,
+            @JsonProperty("version") @JsonFormat(shape = JsonFormat.Shape.STRING) long version,
+            @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId) {
     }
 
     /** 当前全局默认参数。 */
@@ -379,7 +385,7 @@ public class AiConfigService {
         return new Defaults(text(settings.get(AiSetting.DEFAULT_MODEL_ID)),
                 parseDouble(settings.get(AiSetting.DEFAULT_TEMPERATURE)),
                 parseDouble(settings.get(AiSetting.DEFAULT_TOP_P)), parseInteger(settings.get(AiSetting.DEFAULT_MAX_TOKENS)),
-                parseBoolean(settings.get(AiSetting.ALLOW_USER_PARAMS)), snap.version(),
+                getBooleanValue(settings.get(AiSetting.ALLOW_USER_PARAMS)), snap.version(),
                 parseLong(settings.get(AiSetting.DEFAULT_PROVIDER_ID)));
     }
 
@@ -391,7 +397,6 @@ public class AiConfigService {
             return Long.parseLong(raw.trim());
         }
         catch (NumberFormatException ex) {
-            log.debug("ignoring invalid ai_setting integer value={}", raw, ex);
             return null;
         }
     }
@@ -407,13 +412,14 @@ public class AiConfigService {
         try {
             double value = Double.parseDouble(raw.trim());
             if (Double.isNaN(value) || Double.isInfinite(value)) {
-                log.debug("ignoring invalid ai_setting decimal value={}", raw);
+                if (log.isDebugEnabled()) {
+                    log.debug("ignoring invalid ai_setting decimal value={}", raw);
+                }
                 return null;
             }
             return value;
         }
         catch (NumberFormatException ex) {
-            log.debug("ignoring invalid ai_setting decimal value={}", raw, ex);
             return null;
         }
     }
@@ -425,18 +431,19 @@ public class AiConfigService {
         try {
             int value = Integer.parseInt(raw.trim());
             if (value < 1) {
-                log.debug("ignoring invalid ai_setting integer value={}", raw);
+                if (log.isDebugEnabled()) {
+                    log.debug("ignoring invalid ai_setting integer value={}", raw);
+                }
                 return null;
             }
             return value;
         }
         catch (NumberFormatException ex) {
-            log.debug("ignoring invalid ai_setting integer value={}", raw, ex);
             return null;
         }
     }
 
-    private static Boolean parseBoolean(String raw) {
+    private static Boolean getBooleanValue(String raw) {
         if (!StringUtils.hasText(raw)) {
             return null;
         }
@@ -447,7 +454,9 @@ public class AiConfigService {
         if ("false".equalsIgnoreCase(trimmed)) {
             return Boolean.FALSE;
         }
-        log.debug("ignoring invalid ai_setting boolean value={}", raw);
+        if (log.isDebugEnabled()) {
+            log.debug("ignoring invalid ai_setting boolean value={}", raw);
+        }
         return null;
     }
 
@@ -610,9 +619,14 @@ public class AiConfigService {
      * 面板可选的模型（{@code GET /api/ai/models} 的一行；web 层原样转成
      * {@code AvailableModelView} —— config 层不依赖 web 包）。
      */
-    public record AvailableModel(Long providerId, String providerCode, String providerName, String modelId,
-            String displayName, boolean supportsToolCalling, boolean supportsVision, boolean supportsReasoning,
-            Integer maxContext, Integer maxOutput, boolean isDefault) {
+    public record AvailableModel(@JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
+            @JsonProperty("providerCode") String providerCode, @JsonProperty("providerName") String providerName,
+            @JsonProperty("modelId") String modelId, @JsonProperty("displayName") String displayName,
+            @JsonProperty("supportsToolCalling") boolean supportsToolCalling,
+            @JsonProperty("supportsVision") boolean supportsVision,
+            @JsonProperty("supportsReasoning") boolean supportsReasoning,
+            @JsonProperty("maxContext") Integer maxContext, @JsonProperty("maxOutput") Integer maxOutput,
+            @JsonProperty("isDefault") boolean isDefault) {
     }
 
     /**
@@ -755,6 +769,14 @@ public class AiConfigService {
      * 的行为就是"所有模型都下发工具"，无行可查时保持等价；只有显式登记为 {@code false} 的行才降级。
      */
     public boolean supportsToolCalling(Long providerId, String modelId) {
+        return isToolCallingSupported(providerId, modelId);
+    }
+
+    public boolean allowUserParams() {
+        return isUserParamsAllowed();
+    }
+
+    public boolean isToolCallingSupported(Long providerId, String modelId) {
         if (modelId == null) {
             return true;
         }
@@ -778,7 +800,7 @@ public class AiConfigService {
      * <b>缺省 = 允许</b>：该项未设置时谈"锁定"没有依据（设置页的 {@code allowUserParams !== false}
      * 是同一口径），只有显式 {@code false} 才锁。
      */
-    public boolean allowUserParams() {
+    public boolean isUserParamsAllowed() {
         return !Boolean.FALSE.equals(defaults().allowUserParams());
     }
 
@@ -813,13 +835,13 @@ public class AiConfigService {
             }
             for (AiProviderModel row : rows) {
                 out.add(new AvailableModel(provider.getId(), provider.getCode(), provider.getDisplayName(),
-                        row.getModelId(), row.getDisplayName() == null ? row.getModelId() : row.getDisplayName(),
+                        row.getModelId(), ObjectUtils.getIfNull(row.getDisplayName(), row::getModelId),
                         row.isSupportsToolCalling(), Boolean.TRUE.equals(row.getSupportsVision()),
                         Boolean.TRUE.equals(row.getSupportsReasoning()),
                         row.getMaxContext(), row.getMaxOutput(), row.isDefault()));
             }
         }
-        return out;
+        return out.isEmpty() ? List.of() : out;
     }
 
     /**
@@ -874,6 +896,11 @@ public class AiConfigService {
 
     public record KeyResolution(KeyStatus status, String apiKey, String fingerprint) {
 
+        @Override
+        public String toString() {
+            return "KeyResolution[status=" + this.status + "]";
+        }
+
         static KeyResolution ok(String apiKey, String fingerprint) {
             return new KeyResolution(KeyStatus.OK, apiKey, fingerprint);
         }
@@ -927,7 +954,7 @@ public class AiConfigService {
                 return this.cipher.fingerprint(apiKey);
             }
             catch (AiKeyCipher.KeyCipherException ex) {
-                log.debug("key fingerprint computation failed provider={}", provider.getCode(), ex);
+                // 指纹不可用时沿用原有 env/null 缓存键回退。
             }
         }
         // 无 KEK 时，env key 只能重启才变 ⇒ 用固定标记作缓存键成分（不含任何 key 片段）
@@ -944,7 +971,8 @@ public class AiConfigService {
 
     // ── 可用性 ──────────────────────────────────────────────────────────────
 
-    public record Availability(boolean available, String code, String reason) {
+    public record Availability(@JsonProperty("available") boolean available, @JsonProperty("code") String code,
+            @JsonProperty("reason") String reason) {
     }
 
     /**
@@ -1059,13 +1087,13 @@ public class AiConfigService {
 
     // ── 快照与解析结果 ────────────────────────────────────────────────────────
 
-    public record ConfigSnapshot(long version, List<AiProvider> providers, List<AiProviderModel> models,
-            Map<String, String> settings) {
+    public record ConfigSnapshot(long version, @NonNull List<AiProvider> providers,
+            @NonNull List<AiProviderModel> models, @NonNull Map<String, String> settings) {
 
         public ConfigSnapshot {
             providers = List.copyOf(providers);
             models = List.copyOf(models);
-            settings = Map.copyOf(settings);
+            settings = Collections.unmodifiableMap(new LinkedHashMap<>(settings));
         }
 
         public List<AiProviderModel> modelsOf(Long providerId) {
@@ -1082,6 +1110,12 @@ public class AiConfigService {
      */
     public record ResolvedProvider(Long providerId, String providerCode, String baseUrl, String completionsPath,
             String modelId, String apiKey, String fingerprint, boolean envBacked) {
+
+        @Override
+        public String toString() {
+            return "ResolvedProvider[providerId=" + this.providerId + ", providerCode=" + this.providerCode
+                    + ", modelId=" + this.modelId + ", envBacked=" + this.envBacked + "]";
+        }
 
         /** 运行时缓存键的成分之一（不含明文 key）。 */
         public String runtimeKey() {
@@ -1113,10 +1147,9 @@ public class AiConfigService {
         for (AiProvider provider : effectiveProviders()) {
             KeyResolution key = resolveKey(provider);
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id", provider.getId());
+            row.put("id", provider.getId() == null ? null : provider.getId().toString());
             row.put("code", provider.getCode());
             row.put("name", provider.getDisplayName());
-            row.put("baseUrl", provider.getBaseUrl());
             row.put("enabled", provider.isEnabled());
             row.put("keyConfigured", provider.isKeyDeclared());
             row.put("keyRef", provider.getKeyRef());
@@ -1125,6 +1158,6 @@ public class AiConfigService {
             row.put("status", provider.isEnabled() ? key.status().name() : "DISABLED");
             out.add(row);
         }
-        return out;
+        return out.isEmpty() ? List.of() : out;
     }
 }

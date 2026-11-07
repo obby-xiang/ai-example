@@ -1,10 +1,14 @@
 package com.example.configmgr.ai.resultview;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tools.AiTools;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -65,7 +69,7 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 	@Autowired
 	public ListTasksResultViewProvider(TaskService taskService, AiProperties properties) {
 		this.taskService = taskService;
-		this.properties = properties == null ? new AiProperties() : properties;
+		this.properties = ObjectUtils.getIfNull(properties, AiProperties::new);
 	}
 
 	@Override
@@ -91,7 +95,10 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 					"i18n:resultview.listTasks.fallback", "list_tasks", viewBudget(), tasks.size(), EMPTY_TEXT);
 		}
 		catch (RuntimeException ex) {
-			log.warn("list_tasks view build failed (no resultView this time; card falls back to legacy shape) toolCallId={}", toolCallId, ex);
+			if (LogSampling.canAcquire("list-tasks-view-build")) {
+				log.warn("list_tasks view build failed (no resultView this time; card falls back to legacy shape) toolCallId={}",
+						toolCallId, ex);
+			}
 			return null;
 		}
 	}
@@ -121,7 +128,7 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 	 * 卡面回落到原文形态 —— 那是诚实的旧形态；用今天的库补一张表才是改写历史。
 	 */
 	private ResultView fromPersistedText(String toolCallId, String resultText) {
-		String text = resultText == null ? "" : resultText.strip();
+		String text = StringUtils.stripToEmpty(resultText);
 		if (text.isEmpty()) {
 			return null;
 		}
@@ -132,9 +139,11 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 				continue;
 			}
 			Map<String, Object> row = parseRow(trimmed);
-			if (row == null) {
-				log.debug("list_tasks history result row format is unparseable (no view this turn; card shows raw text) toolCallId={}",
-						toolCallId);
+			if (row.isEmpty()) {
+				if (log.isDebugEnabled()) {
+					log.debug("list_tasks history result row format is unparseable (no view this turn; card shows raw text) toolCallId={}",
+							toolCallId);
+				}
 				return null;
 			}
 			rows.add(row);
@@ -163,22 +172,22 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 		if (statusAt < 0 || stepAt < 0 || statusAt <= stepAt
 				|| typeStart < prefixLength || typeEnd < typeStart || idEnd < prefixLength || idEnd > typeStart
 				|| stepAt <= typeEnd) {
-			return null;
+			return Map.of();
 		}
 		String id = line.substring(prefixLength, idEnd).strip();
 		String type = line.substring(typeStart + 1, typeEnd).strip();
 		String title = line.substring(typeEnd + 1, stepAt).strip();
 		String step = line.substring(stepAt + AiTools.LIST_TASKS_STEP_TOKEN.length(), statusAt).strip();
 		String status = line.substring(statusAt + AiTools.LIST_TASKS_STATUS_TOKEN.length()).strip();
-		if (type.isEmpty() || step.isEmpty() || status.isEmpty()) {
-			return null;
+		if (StringUtils.isAnyEmpty(type, step, status)) {
+			return Map.of();
 		}
 		long taskId;
 		try {
 			taskId = Long.parseLong(id);
 		}
 		catch (NumberFormatException ex) {
-			return null;
+			return Map.of();
 		}
 		Map<String, Object> row = new LinkedHashMap<>();
 		row.put("id", taskId);
@@ -200,12 +209,7 @@ public class ListTasksResultViewProvider implements ToolResultViewProvider {
 		if (to < 0) {
 			return fallback;
 		}
-		try {
-			return Math.max(fallback, Integer.parseInt(text.substring(from, to).strip()));
-		}
-		catch (NumberFormatException ex) {
-			return fallback;
-		}
+		return Math.max(fallback, NumberUtils.toInt(text.substring(from, to).strip(), fallback));
 	}
 
 	/** 视图预算 = min(契约上限, 单帧预算 − 其余字段余量)：{@code resultView} 是不可截字段（§6.3-3）。 */

@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.kb;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -49,99 +51,113 @@ public final class MarkdownChunker {
             out.add(new KbSection(h.level, h.title, pathOf(headings, i, docTitle),
                     h.lineStart, h.bodyStart, end));
         }
-        return out;
+        return out.isEmpty() ? List.of() : out;
     }
 
     /** 切块。 */
     public static List<KbChunk> chunk(String docId, String docTitle, String content,
             int minChars, int maxChars) {
+        return assembleChunks(new BlockScan().scan(content), docId, docTitle, maxChars);
+    }
+
+    private static final class BlockScan {
+
+        private final List<Block> blocks = new ArrayList<>();
+        private boolean inFence;
+        private String fenceMarker;
+        private int fenceStartLine;
+        private final StringBuilder fence = new StringBuilder();
+        private final StringBuilder paragraph = new StringBuilder();
+        private int paragraphStart = -1;
+        private StringBuilder table;
+        private int tableStart = -1;
+
+        private List<Block> scan(String content) {
+            int pos = 0;
+            while (pos <= content.length()) {
+                int lineEnd = content.indexOf('\n', pos);
+                if (lineEnd < 0) {
+                    lineEnd = content.length();
+                }
+                String line = content.substring(pos, lineEnd);
+                String trimmed = line.stripLeading();
+                boolean fenceLine = trimmed.startsWith("```") || trimmed.startsWith("~~~");
+                if (this.inFence) {
+                    appendFenceLine(line, trimmed, fenceLine);
+                }
+                else if (fenceLine) {
+                    startFence(line, trimmed, pos);
+                }
+                else if (line.isBlank()) {
+                    flushParagraph(this.blocks, this.paragraph, this.paragraphStart);
+                    flushTable(this.blocks, this.table, this.tableStart);
+                    this.table = null;
+                }
+                else {
+                    appendRegularLine(line, trimmed, pos, lineEnd);
+                }
+                pos = lineEnd + 1;
+            }
+            flushParagraph(this.blocks, this.paragraph, this.paragraphStart);
+            flushTable(this.blocks, this.table, this.tableStart);
+            if (this.inFence && this.fence.length() > 0) {
+                this.blocks.add(new Block(this.fence.toString(), this.fenceStartLine, true));
+            }
+            return this.blocks;
+        }
+
+        private void appendFenceLine(String line, String trimmed, boolean fenceLine) {
+            this.fence.append(line).append('\n');
+            if (fenceLine && trimmed.startsWith(this.fenceMarker)
+                    && trimmed.substring(this.fenceMarker.length()).isBlank()) {
+                this.blocks.add(new Block(this.fence.toString(), this.fenceStartLine, true));
+                this.fence.setLength(0);
+                this.inFence = false;
+            }
+        }
+
+        private void startFence(String line, String trimmed, int pos) {
+            flushParagraph(this.blocks, this.paragraph, this.paragraphStart);
+            flushTable(this.blocks, this.table, this.tableStart);
+            this.table = null;
+            this.inFence = true;
+            this.fenceMarker = trimmed.startsWith("```") ? "```" : "~~~";
+            this.fenceStartLine = pos;
+            this.fence.append(line).append('\n');
+        }
+
+        private void appendRegularLine(String line, String trimmed, int pos, int lineEnd) {
+            if (trimmed.startsWith("|")) {
+                flushParagraph(this.blocks, this.paragraph, this.paragraphStart);
+                if (this.table == null) {
+                    this.table = new StringBuilder();
+                    this.tableStart = pos;
+                }
+                this.table.append(line).append('\n');
+                return;
+            }
+            flushTable(this.blocks, this.table, this.tableStart);
+            this.table = null;
+            if (isHeading(line)) {
+                flushParagraph(this.blocks, this.paragraph, this.paragraphStart);
+                Heading heading = parseHeading(line, pos, lineEnd + 1);
+                this.blocks.add(new Block(heading.rawLine + "\n", pos, true, heading));
+            }
+            else {
+                if (this.paragraph.length() == 0) {
+                    this.paragraphStart = pos;
+                }
+                this.paragraph.append(line).append('\n');
+            }
+        }
+    }
+
+    private static List<KbChunk> assembleChunks(List<Block> blocks, String docId, String docTitle, int maxChars) {
         List<KbChunk> out = new ArrayList<>();
         StringBuilder buffer = new StringBuilder();
         int[] bufferStart = { 0 };
         String[] path = { docTitle };
         List<Heading> stack = new ArrayList<>();
-
-        boolean inFence = false;
-        String fenceMarker = null;
-        int fenceStartLine = 0;
-        StringBuilder fence = new StringBuilder();
-        StringBuilder paragraph = new StringBuilder();
-        int paragraphStart = -1;
-        StringBuilder table = null;
-        int tableStart = -1;
-
-        List<Block> blocks = new ArrayList<>();
-
-        int pos = 0;
-        while (pos <= content.length()) {
-            int lineEnd = content.indexOf('\n', pos);
-            if (lineEnd < 0) {
-                lineEnd = content.length();
-            }
-            String line = content.substring(pos, lineEnd);
-
-            String trimmed = line.stripLeading();
-            boolean fenceLine = trimmed.startsWith("```") || trimmed.startsWith("~~~");
-            if (inFence) {
-                fence.append(line).append('\n');
-                if (fenceLine && trimmed.startsWith(fenceMarker)
-                        && trimmed.substring(fenceMarker.length()).isBlank()) {
-                    blocks.add(new Block(fence.toString(), fenceStartLine, true));
-                    fence.setLength(0);
-                    inFence = false;
-                }
-                pos = lineEnd + 1;
-                continue;
-            }
-            if (fenceLine) {
-                flushParagraph(blocks, paragraph, paragraphStart);
-                flushTable(blocks, table, tableStart);
-                table = null;
-                inFence = true;
-                fenceMarker = trimmed.startsWith("```") ? "```" : "~~~";
-                fenceStartLine = pos;
-                fence.append(line).append('\n');
-                pos = lineEnd + 1;
-                continue;
-            }
-            if (line.isBlank()) {
-                flushParagraph(blocks, paragraph, paragraphStart);
-                flushTable(blocks, table, tableStart);
-                table = null;
-                pos = lineEnd + 1;
-                continue;
-            }
-            if (trimmed.startsWith("|")) {
-                flushParagraph(blocks, paragraph, paragraphStart);
-                if (table == null) {
-                    table = new StringBuilder();
-                    tableStart = pos;
-                }
-                table.append(line).append('\n');
-                pos = lineEnd + 1;
-                continue;
-            }
-            flushTable(blocks, table, tableStart);
-            table = null;
-            if (isHeading(line)) {
-                flushParagraph(blocks, paragraph, paragraphStart);
-                Heading heading = parseHeading(line, pos, lineEnd + 1);
-                blocks.add(new Block(heading.rawLine + "\n", pos, true, heading));
-            }
-            else {
-                if (paragraph.length() == 0) {
-                    paragraphStart = pos;
-                }
-                paragraph.append(line).append('\n');
-            }
-            pos = lineEnd + 1;
-        }
-        flushParagraph(blocks, paragraph, paragraphStart);
-        flushTable(blocks, table, tableStart);
-        if (inFence && fence.length() > 0) {
-            blocks.add(new Block(fence.toString(), fenceStartLine, true));
-        }
-
         for (Block block : blocks) {
             if (block.heading != null) {
                 Heading h = block.heading;
@@ -151,8 +167,8 @@ public final class MarkdownChunker {
                     path[0] = docTitle;
                 }
                 else {
-                    while (!stack.isEmpty() && stack.get(stack.size() - 1).level >= h.level) {
-                        stack.remove(stack.size() - 1);
+                    while (!stack.isEmpty() && stack.getLast().level >= h.level) {
+                        stack.removeLast();
                     }
                     stack.add(h);
                     path[0] = docTitle + " > " + joinStack(stack);
@@ -237,7 +253,7 @@ public final class MarkdownChunker {
         if (!rest.isBlank()) {
             pieces.add(rest);
         }
-        return pieces;
+        return pieces.isEmpty() ? List.of() : pieces;
     }
 
     /**
@@ -268,7 +284,7 @@ public final class MarkdownChunker {
         if (piece.length() > header.length()) {
             pieces.add(piece.toString());
         }
-        return pieces;
+        return pieces.isEmpty() ? List.of() : pieces;
     }
 
     private static int lastIndexOfAny(String text, int from, int to, String chars) {
@@ -292,7 +308,7 @@ public final class MarkdownChunker {
     }
 
     private static void flushTable(List<Block> blocks, StringBuilder table, int start) {
-        if (table == null || table.length() == 0) {
+        if (StringUtils.isEmpty(table)) {
             return;
         }
         String text = table.toString().stripTrailing();
@@ -408,7 +424,7 @@ public final class MarkdownChunker {
             }
             pos = lineEnd + 1;
         }
-        return out;
+        return out.isEmpty() ? List.of() : out;
     }
 
     private static String pathOf(List<Heading> headings, int index, String docTitle) {
@@ -423,8 +439,8 @@ public final class MarkdownChunker {
             if (h.level < 2) {
                 continue;
             }
-            while (!stack.isEmpty() && stack.get(stack.size() - 1).level >= h.level) {
-                stack.remove(stack.size() - 1);
+            while (!stack.isEmpty() && stack.getLast().level >= h.level) {
+                stack.removeLast();
             }
             stack.add(h);
         }

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.context;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.messages.Message;
 
 import java.util.LinkedHashMap;
@@ -28,16 +29,12 @@ import java.util.Map;
  * （记忆被压缩过的话，这里读到的就是压缩后的形态 —— 这正是"压缩可见"的另一半）。</li>
  * </ul>
  */
+@RequiredArgsConstructor
 public final class ContextBreakdownService {
 
 	private final ContextCompactor compactor;
 
 	private final ContextStateStore store;
-
-	public ContextBreakdownService(ContextCompactor compactor, ContextStateStore store) {
-		this.compactor = compactor;
-		this.store = store;
-	}
 
 	/**
 	 * 会话上下文快照（端点响应体的 {@code data}）。
@@ -63,7 +60,7 @@ public final class ContextBreakdownService {
 		body.put("sessionId", sessionId);
 		body.put("model", state.model());
 		body.put("turnNo", state.turnNo());
-		body.put("measuredAtMs", state.atMs() > 0L ? state.atMs() : null);
+		body.put("measuredAtMs", state.atMs() > 0L ? Long.toString(state.atMs()) : null);
 		body.put("limitTokens", limit > 0 ? limit : null);
 		// A6：来源进只读诊断（schema / unknown），不新增用户强提示
 		body.put("limitSource", resolved.source().wire());
@@ -97,7 +94,7 @@ public final class ContextBreakdownService {
 		compaction.put("level", state.level() == null ? "none" : state.level());
 		compaction.put("compactedTurns", state.compactedTurns());
 		compaction.put("lostTokens", state.lostTokens());
-		compaction.put("lastAtMs", state.atMs() > 0L ? state.atMs() : null);
+		compaction.put("lastAtMs", state.atMs() > 0L ? Long.toString(state.atMs()) : null);
 		compaction.put("reason", state.reason());
 		// 熔断态由批③ 的 CompactionFuse 维护（closed/open/half_open）
 		compaction.put("circuit", state.circuit() == null ? "closed" : state.circuit());

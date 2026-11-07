@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.form;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * 生成式表单的<b>结构化错误</b>：一条问题 = 归属字段 + 机器可读码 + 人读说明。
  *
@@ -20,11 +23,12 @@ package com.example.configmgr.ai.form;
  * @param code    机器可读码（{@link FormIssueCodes} 的白名单之一）
  * @param message 人读说明
  */
-public record FormIssue(String key, String code, String message) {
+public record FormIssue(@JsonProperty("key") String key, @JsonProperty("code") String code,
+        @JsonProperty("message") String message) {
 
 	public FormIssue {
-		key = key == null ? "" : key;
-		message = message == null ? "" : message;
+		key = StringUtils.defaultString(key);
+		message = StringUtils.defaultString(message);
 	}
 
 	/** 表单级（无字段归属）问题。 */

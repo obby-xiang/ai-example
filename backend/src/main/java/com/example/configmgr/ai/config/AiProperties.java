@@ -2,8 +2,11 @@ package com.example.configmgr.ai.config;
 
 import com.example.configmgr.common.sse.SseWriteBudget;
 import jakarta.annotation.PostConstruct;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
@@ -24,18 +27,39 @@ import java.util.Map;
  * <p>
  * 模型侧参数不在这里，走官方 {@code spring.ai.openai.*}（DC-01 全配置化）。
  */
-@Data
+@Getter
+@Setter
+@ToString
 @Slf4j
 @ConfigurationProperties(prefix = "app.ai")
 public class AiProperties {
 
+	public static final Duration SESSION_ACTIVITY_TTL = Duration.ofHours(24);
+
+	public static final Duration MAX_SESSION_TTL = Duration.ofDays(7);
+
 	/**
 	 * 会话记忆滑动 TTL（写入刷新；默认 24h，用户裁决 2026-10-20 第 4 条）。
 	 *
-	 * <p>滑动续期 = 活跃即续；整个会话维度，<b>无绝对上限</b>。run 级外置键（快照/待决/台账/帧/序号/心跳）
-	 * 的 TTL 同取本值且每次写/心跳都整额续期 —— 挂起等人期间卡的背景数据不会先于会话过期。
+	 * <p>滑动续期 = 活跃即续；目标为最后真实用户活动起 24 小时，7 天仅作全局绝对上限。
+	 * run 级外置键（快照/待决/台账/帧/序号/心跳）的 TTL 同取本值且每次写/心跳都整额续期。
 	 */
 	private Duration sessionTtl = Duration.ofHours(24);
+
+	public static Duration effectiveSessionTtl(Duration configured) {
+		if (configured == null || configured.isZero() || configured.isNegative()) {
+			throw new IllegalStateException("app.ai.session-ttl must be > 0 (current = " + configured + ")");
+		}
+		return configured.compareTo(SESSION_ACTIVITY_TTL) > 0 ? SESSION_ACTIVITY_TTL : configured;
+	}
+
+	public Duration getEffectiveSessionTtl() {
+		return effectiveSessionTtl(this.sessionTtl);
+	}
+
+	public Duration getAbsoluteSessionTtl() {
+		return MAX_SESSION_TTL;
+	}
 
 	private Memory memory = new Memory();
 
@@ -101,7 +125,9 @@ public class AiProperties {
 	 * （读路径版本比对的最小间隔）。批②：{@link #allowPrivateEndpoints}（URL 闸的私网开关）、
 	 * {@link #probeTimeout}（{@code /test} 与拉取模型的超时）、{@link #modelsCacheTtl}（远端模型清单缓存）。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Config {
 
 		/**
@@ -170,7 +196,9 @@ public class AiProperties {
 	 * （有效值 = {@code min(本键, 硬顶)}，由 {@code SheetSwitches} 收敛并经 {@code /health.sheet}
 	 * 下发前端）—— 硬顶是 R3 的物理边界，不随配置漂移。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Sheet {
 
 		/**
@@ -453,6 +481,10 @@ public class AiProperties {
 			throw new IllegalStateException("app.ai.context.keep-tool-pairs / keep-recent-turns must not be negative (current = "
 					+ context.getKeepToolPairs() + " / " + context.getKeepRecentTurns() + ")");
 		}
+		verifyContextSummary(context);
+	}
+
+	private void verifyContextSummary(Context context) {
 		if (context.getChunkTokens() <= 0) {
 			throw new IllegalStateException("app.ai.context.chunk-tokens must be > 0 (current = " + context.getChunkTokens()
 					+ "); zero-sized summary chunks cause unbounded recursion");
@@ -589,6 +621,12 @@ public class AiProperties {
 		if (kb == null) {
 			throw new IllegalStateException("app.ai.kb section is missing (bound as null); the knowledge base cannot be assembled");
 		}
+		verifyKbShape(kb);
+		verifyKbRefresh(kb);
+		verifyKbCache(kb);
+	}
+
+	private static void verifyKbShape(Kb kb) {
 		if (kb.getTopKDefault() <= 0 || kb.getTopKMax() <= 0
 				|| kb.getTopKDefault() > kb.getTopKMax()) {
 			throw new IllegalStateException("app.ai.kb.top-k-default/top-k-max must be > 0 with default <= max (current = "
@@ -611,6 +649,9 @@ public class AiProperties {
 					+ kb.getMatchHighRatio() + "/" + kb.getMatchMediumRatio()
 					+ "); out-of-range values collapse the three match levels into one");
 		}
+	}
+
+	private static void verifyKbRefresh(Kb kb) {
 		if (kb.getRefreshInterval() == null || kb.getRefreshInterval().isZero()
 				|| kb.getRefreshInterval().isNegative()) {
 			throw new IllegalStateException("app.ai.kb.refresh-interval must be > 0 (current = " + kb.getRefreshInterval()
@@ -626,14 +667,17 @@ public class AiProperties {
 			throw new IllegalStateException("app.ai.kb.source supports only local / http (current = " + source + ")");
 		}
 		if ("http".equalsIgnoreCase(source)
-				&& (kb.getHttp().getBaseUrl() == null || kb.getHttp().getBaseUrl().isBlank())) {
+				&& StringUtils.isBlank(kb.getHttp().getBaseUrl())) {
 			throw new IllegalStateException("app.ai.kb.http.base-url is required when app.ai.kb.source=http"
 					+ "; silently falling back to local would load a different production corpus");
 		}
 		if (kb.isEnabled() && "local".equalsIgnoreCase(source)
-				&& (kb.getDir() == null || kb.getDir().isBlank())) {
+				&& StringUtils.isBlank(kb.getDir())) {
 			throw new IllegalStateException("app.ai.kb.dir must not be blank when app.ai.kb.source=local");
 		}
+	}
+
+	private static void verifyKbCache(Kb kb) {
 		if (kb.getCache().getLockTtl() == null || kb.getCache().getLockTtl().isZero()
 				|| kb.getCache().getLockTtl().isNegative()) {
 			throw new IllegalStateException("app.ai.kb.cache.lock-ttl must be > 0 (current = "
@@ -646,7 +690,9 @@ public class AiProperties {
 		}
 	}
 
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Memory {
 
 		/**
@@ -689,7 +735,9 @@ public class AiProperties {
 
 	}
 
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Suspend {
 
 		/**
@@ -703,7 +751,9 @@ public class AiProperties {
 		private int poolSize = 20;
 	}
 
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Hitl {
 
 		/**
@@ -747,7 +797,9 @@ public class AiProperties {
 		private Duration frontendToolTimeout = Duration.ofSeconds(120);
 	}
 
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Resilience {
 
 		/**
@@ -802,7 +854,9 @@ public class AiProperties {
 	/**
 	 * 后端工具执行面（超时面治理批② 第 3 项）。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Tool {
 
 		/**
@@ -842,7 +896,9 @@ public class AiProperties {
 	 * <b>出厂 {@code application.yml} = true</b>：生产（Spring 装配）走 park。
 	 * 判别方法 = {@code app.ai.park.enabled} 是否被显式配置，而不是看字段初值。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Park {
 
 		/**
@@ -876,7 +932,9 @@ public class AiProperties {
 
 	}
 
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Resume {
 		/**
 		 * 启动自动续跑（N3/N8）：应用就绪后扫描 {@link com.example.configmgr.ai.run.RunStore}
@@ -1013,12 +1071,16 @@ public class AiProperties {
 		private int triggerQueueCapacity = 16;
 	}
 
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Session {
 
 		private Lock lock = new Lock();
 
-		@Data
+		@Getter
+	@Setter
+	@ToString
 		public static class Lock {
 
 			/**
@@ -1057,7 +1119,9 @@ public class AiProperties {
 		 * 记到邻类窗口，同 tree 两遍录制出现成对假边（nightly 40219310874，diff=58）。单测直接驱动
 		 * {@code runOnce()} 即可覆盖同一批语义。
 		 */
-		@Data
+		@Getter
+	@Setter
+	@ToString
 		public static class PurgeRetry {
 
 			private boolean periodicEnabled = true;
@@ -1071,7 +1135,9 @@ public class AiProperties {
 	 * 容量联动（S2-8）：{@code 专用池 × 2 + 投递池 ≤ boundedElastic 容量}，纳入 §13.2 #2
 	 * 压测（T3-5 场景 E：N 挂起 × M 慢订阅者争抢 boundedElastic 的最坏态）。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Sse {
 
 		/**
@@ -1166,7 +1232,9 @@ public class AiProperties {
 	 * {@code callback.max-chars} 必须 &gt; 0 —— 它们不是"性能参数"，而是"宁可截断也不产坏帧/坏链路"
 	 * 的安全阀，配成 0 等于静默关闸。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class ResultBudget {
 
 		private Model model = new Model();
@@ -1176,7 +1244,9 @@ public class AiProperties {
 		private Callback callback = new Callback();
 
 		/** 模型侧（{@code role:tool} 回填）的预算与分档。 */
-		@Data
+		@Getter
+	@Setter
+	@ToString
 		public static class Model {
 
 			/** 回填模型的最大行数（0 = 不限；JSON 转义形态的 {@code \n} 也计行）。 */
@@ -1193,7 +1263,9 @@ public class AiProperties {
 		}
 
 		/** 前端/SSE 侧的单帧预算。 */
-		@Data
+		@Getter
+	@Setter
+	@ToString
 		public static class Ui {
 
 			/** 单帧 JSON 的 UTF-8 字节上限的<b>单一事实源</b>（缺省 64KB）。 */
@@ -1229,7 +1301,9 @@ public class AiProperties {
 		}
 
 		/** 前端工具结果回灌端点（{@code POST /api/ai/frontend-tool-result}）的单条上限。 */
-		@Data
+		@Getter
+	@Setter
+	@ToString
 		public static class Callback {
 
 			/** 回灌载荷的字符上限（超限<b>截断 + 标记</b>，不 400 —— 拒绝回灌会让这一轮永久挂起）。 */
@@ -1262,7 +1336,9 @@ public class AiProperties {
 	 * ③ 收窄会让"能补回多远"变小 —— 读侧对"游标早于幸存窗口"单独计数
 	 * （{@code c1.streamReplayGap}），不伪装成"没有新帧"。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Stream {
 
 		/**
@@ -1302,7 +1378,9 @@ public class AiProperties {
 	 * 退避重试（批②b 的续跑触发路径消费，本批只建键与设施）。{@code resource-ttl} 60s 是
 	 * <b>另一条线</b>（L1 资源互斥，批③a），依据见字段注。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Lease {
 
 		/** 租约有效期（秒级冗余：续租间隔的三倍）。 */
@@ -1338,7 +1416,9 @@ public class AiProperties {
 	 * （同一作业被两个实例同时发起）。因此它是显式配置项而不是"抢锁失败就降级"的兜底：
 	 * 降级会让"锁坏了"与"锁关了"在日志里长得一样。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Lock {
 
 		/** 是否启用资源互斥（{@code ai:lock:*}）。false ⇒ 使用方不抢锁、不释放（本层不续租，见 {@link Lease#getResourceTtl()}）。 */
@@ -1357,7 +1437,9 @@ public class AiProperties {
 	 * <p>
 	 * 超限<b>拒绝</b>而非截断（用户裁决 A1 建议 400）：截断会让模型基于半句话下结论。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Input {
 
 		/** 单条 message 的字符上限的<b>单一事实源</b>（前端 {@code MESSAGE_MAX_CHARS} 与它同值）。 */
@@ -1387,7 +1469,9 @@ public class AiProperties {
 	 * —— 压缩只使用本轮同一供应商、同一模型（{@code ProviderRuntime}），<b>不存在</b>独立摘要模型分支，
 	 * 也不会再加回来。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Context {
 
 		/**
@@ -1456,7 +1540,9 @@ public class AiProperties {
 	 * 拉取正文、切块结果直接复用；变的只重建该篇。HTTP 源另用 manifest 的 ETag 做
 	 * "整份未变就不重建"的第一道短路。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Kb {
 
 		/** 总开关（关 = 不建索引、工具返回"知识库未启用"）。 */
@@ -1511,7 +1597,9 @@ public class AiProperties {
 		 * <p>缓存是<b>全局知识域</b>（会话无关）：本地源读盘后也写入缓存，索引一律从缓存重建，
 		 * 保证多实例看到同一份字节；缓存键不设 TTL（刷新权属显式刷新，版本号兜底）。
 		 */
-		@Data
+		@Getter
+	@Setter
+	@ToString
 		public static class Cache {
 
 			/** 是否启用缓存层（Redis 不可用时自动降级直连源，见 {@code CachedKbSource}）。 */
@@ -1525,10 +1613,13 @@ public class AiProperties {
 		}
 
 		/** 生产 HTTP 源（{@code app.ai.kb.http.*}）。 */
-		@Data
+		@Getter
+	@Setter
+	@ToString
 		public static class Http {
 
 			/** 知识服务基地址（如 {@code https://kb.internal/api/kb}；manifest 与文档都相对它解析）。 */
+			@ToString.Exclude
 			private String baseUrl = "";
 
 			/** 连接超时（默认 5s）。 */
@@ -1555,7 +1646,9 @@ public class AiProperties {
 	 * 不影响落进 assistant 消息 metadata 的思考全文（{@code persist-content=true} 时）——
 	 * 下一轮的上下文回填（{@code ReasoningAwareOpenAiChatModel}）读的正是那份 metadata。
 	 */
-	@Data
+	@Getter
+	@Setter
+	@ToString
 	public static class Reasoning {
 
 		/**

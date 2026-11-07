@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 
@@ -13,16 +14,15 @@ import java.util.function.Function;
  *
  * <h2>为什么要有这张表</h2>
  * 到批① 为止，"哪些 Redis 键活多久、由谁续期"散在三处：{@link RunStore#renewSuspensionTtl}
- * （挂起期心跳约 60s 一拍、5 类）、{@link RunStore#touchActiveRun}（读/决策追加 5 类）、
+ * （挂起数据自有 TTL 面，5 类）、{@link RunStore#touchActiveRun}（用户读/决策追加 5 类）、
  * {@link CancellationRegistry}（取消标志，TTL 自己算 `total-budget × 2`）。三个地方各写各的
  * ⇒ 新增一个"与会话同寿"的键时必然漏一处（取消标志就是漏掉的那一处：会话 24h、取消信号只有 10min）。
  * 本表把"键族 → 作用域 → 续期面 → 说明"一次登记，续期动作只从本表派生。
  *
  * <h2>三档续期面（口径固定；改档 = 改语义，须同步用例）</h2>
  * <ul>
- * <li>{@link Renewal#HEARTBEAT}：挂起期心跳（`ConfirmGate` 的心跳按约 60s 的资源档触发；
- * 2s 那一拍只做心跳帧/取消轮询/租约续期）整额续期。<b>键数 = 5</b>
- * （快照 / 轻量状态 / 待决 / seq / 事件 Stream）；
+ * <li>{@link Renewal#HEARTBEAT}：挂起数据自有 TTL 面，仅供明确用户读侧的兼容续期路径使用；
+ * ConfirmGate 后台心跳不调用。<b>键数 = 5</b>（快照 / 轻量状态 / 待决 / seq / 事件 Stream）；
  * {@code RunStoreSlidingTtlTest} 断言<b>每个应续的键都续到了</b>（L-139 后不再锁调用次数形态，
  * 因为逐键 try 下"某键失败"不应改变其余键的续期）。</li>
  * <li>{@link Renewal#READ}：任何实例的读/决策（{@code touchActiveRun}）在心跳面<b>之上追加</b>的键
@@ -36,17 +36,16 @@ import java.util.function.Function;
  * <h2>显式不进本表（分类而不遗漏）</h2>
  * <ul>
  * <li><b>全局键</b>：{@code ai:lease:epoch}（旧全局计数，<b>已不参与 fencing</b>，只剩资源锁 token 编号）；</li>
- * <li><b>短命协调键</b>：{@code ai:lock:task|job:* }（60s，临界区上界，<b>不续租</b>）、
- * {@code ai:claim:<runId>}（认领位，写路径自带 TTL，无独立续期口径）。</li>
+ * <li><b>短命协调键</b>：{@code ai:lock:task|job:* } 与 {@code ai:lease:run:*}（短临界区/租约，不随会话续期）。</li>
  * </ul>
  *
- * <h2>两套数字要说清（评审 Minor 2；R1-09 后为 14 / 13）</h2>
+ * <h2>两套数字要说清（评审 Minor 2；当前为 16 / 13）</h2>
  * <ul>
- * <li><b>本表的 run 级登记 = 14 条</b>（见 {@link #RUN_KEY_COUNT}）：快照 / 轻量状态 / 待决 / seq /
- * 事件 Stream（心跳 5）＋ req / decided / fence / cancel（读侧 4）＋ beat / ledger / idem / activity
- * （随写 4）＋ <b>取号计数器</b>（读侧，与 fence 同面）。本表只登记"谁需要被续期"，不登记"谁要被删除"。</li>
- * <li><b>{@code deleteRun} 手里的 = 13 个</b>：本表 14 条里去掉 {@code ai:beat:} / {@code ai:activity:}
- * / {@code ai:cancel:}（各自按 TTL 走），加上本表不登记的 {@code ai:claim:} 与 {@code ai:lease:run:}。
+ * <li><b>本表的 run 级登记 = 16 条</b>（见 {@link #RUN_KEY_COUNT}）：快照 / 轻量状态 / 待决 / seq /
+ * 事件 Stream（心跳 5）＋ req / decided / fence / cancel（读侧 4）＋ beat / ledger / idem / activity /
+ * claim / observed（随写 6）＋ <b>取号计数器</b>（读侧，与 fence 同面）。本表只登记"谁需要被续期"，不登记"谁要被删除"。</li>
+ * <li><b>{@code deleteRun} 手里的 = 13 个</b>：本表 16 条里去掉 {@code ai:beat:} / {@code ai:activity:}
+ * / {@code ai:cancel:} / {@code ai:observed:}（各自按 TTL 走），加上本表不登记的 {@code ai:lease:run:}。
  * 两套数字不同不是笔误 —— 一个是"续期面"，一个是"同生同死面"。</li>
  * </ul>
  *
@@ -84,7 +83,7 @@ public final class SessionKeyRegistry {
 	/** 续期面。 */
 	public enum Renewal {
 
-		/** 挂起期心跳逐拍续期（5 类，计数被用例锁定）。 */
+		/** 挂起数据自有 TTL 面（5 类）；只由明确用户读侧的兼容路径使用。 */
 		HEARTBEAT,
 
 		/**
@@ -134,7 +133,7 @@ public final class SessionKeyRegistry {
 
 	private static final List<Entry> ENTRIES = buildEntries();
 
-	/** run 级登记条数（14：5 心跳 + 5 读侧追加〔含取号计数器〕+ 4 随写）。 */
+	/** run 级登记条数（16：5 心跳 + 5 读侧追加〔含取号计数器〕+ 6 随写）。 */
 	public static final int RUN_KEY_COUNT = RUN_KEYS.size();
 
 	private SessionKeyRegistry() {
@@ -178,6 +177,11 @@ public final class SessionKeyRegistry {
 				List.of(Renewal.WRITE), "工具执行台账（与幂等索引同槽；只追加、永不 LTRIM）"));
 		keys.add(new RunKey(RunStore.IDEM_PREFIX, runId -> RunStore.runScopedKey(RunStore.IDEM_PREFIX, runId),
 				List.of(Renewal.WRITE), "幂等索引（与台账同槽；同一 HASH 内承载计数用元数据投影 ~meta:）"));
+		keys.add(new RunKey(RunStore.CLAIM_PREFIX, runId -> RunStore.runScopedKey(RunStore.CLAIM_PREFIX, runId),
+				List.of(Renewal.WRITE), "工具执行认领位（持久执行证据；随会话续期，不是短租约）"));
+		keys.add(new RunKey(SettlementObservationStore.KEY_PREFIX,
+				runId -> TenantKeyScope.scoped(SettlementObservationStore.KEY_PREFIX, runId), List.of(Renewal.WRITE),
+				"工具结算观测位（裸前缀 + 身份段；随会话续期）"));
 		return List.copyOf(keys);
 	}
 
@@ -206,13 +210,14 @@ public final class SessionKeyRegistry {
 	 * 拼键的真实入口；这里用固定身份占位，只服务文档/断言里的键形展示。
 	 */
 	private static String sampleKey(String prefix) {
-		if (RunStore.BEAT_PREFIX.equals(prefix) || RunStore.ACTIVITY_PREFIX.equals(prefix)) {
+		if (RunStore.BEAT_PREFIX.equals(prefix) || RunStore.ACTIVITY_PREFIX.equals(prefix)
+				|| SettlementObservationStore.KEY_PREFIX.equals(prefix)) {
 			return TenantKeyScope.scoped(prefix, 1L, 1L, "<runId>");
 		}
 		return RunKeyScope.scoped(prefix, 1L, 1L, "<runId>");
 	}
 
-	/** 全部登记（run 级 14 条 + session 级 5 条）。 */
+	/** 全部登记（run 级 16 条 + session 级 5 条）。 */
 	public static List<Entry> entries() {
 		return ENTRIES;
 	}

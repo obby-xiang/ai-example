@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.kb;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.List;
 
 /**
@@ -18,18 +22,19 @@ import java.util.List;
  * <li>{@link State#INVALID_QUERY}：查询为空/全为停用字符（参数问题，由工具层转成参数异常）。</li>
  * </ul>
  */
-public record KbSearchResult(State state, List<KbSearchHit> hits, List<String> searchedTerms,
-        List<String> suggestions, String error) {
+public record KbSearchResult(@JsonProperty("state") State state, @JsonProperty("hits") List<KbSearchHit> hits,
+        @JsonProperty("searchedTerms") List<String> searchedTerms,
+        @JsonProperty("suggestions") List<String> suggestions, @JsonProperty("error") String error) {
 
     public enum State {
         OK, LOW_CONFIDENCE, NO_MATCH, ERROR, NOT_READY, DISABLED, INVALID_QUERY
     }
 
     public KbSearchResult {
-        hits = hits == null ? List.of() : List.copyOf(hits);
-        searchedTerms = searchedTerms == null ? List.of() : List.copyOf(searchedTerms);
-        suggestions = suggestions == null ? List.of() : List.copyOf(suggestions);
-        error = error == null ? "" : error;
+        hits = List.copyOf(ObjectUtils.defaultIfNull(hits, List.of()));
+        searchedTerms = List.copyOf(ObjectUtils.defaultIfNull(searchedTerms, List.of()));
+        suggestions = List.copyOf(ObjectUtils.defaultIfNull(suggestions, List.of()));
+        error = StringUtils.defaultString(error);
     }
 
     public static KbSearchResult ok(List<KbSearchHit> hits, List<String> terms) {

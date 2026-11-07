@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tool;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import org.springframework.core.io.Resource;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * YAML 定义源（阶段 A）：`classpath:ai/tools.yaml`。
@@ -64,8 +66,8 @@ public class YamlToolDefinitionSource implements ToolDefinitionSource {
             if (!(parsed instanceof Map<?, ?> root)) {
                 throw new IllegalStateException("Tool definition YAML root must be a mapping: " + resource);
             }
-            String version = root.get("version") == null ? "unknown" : String.valueOf(root.get("version"));
-            String lang = root.get("lang") == null ? null : String.valueOf(root.get("lang"));
+            String version = Objects.toString(root.get("version"), "unknown");
+            String lang = Objects.toString(root.get("lang"), null);
             Map<String, ToolDefinitionOverride> byKey = new LinkedHashMap<>();
             Object tools = root.get("tools");
             if (tools instanceof List<?> list) {
@@ -106,7 +108,7 @@ public class YamlToolDefinitionSource implements ToolDefinitionSource {
 
     private static String text(Map<String, Object> entry, String key) {
         Object value = entry.get(key);
-        return value == null ? null : String.valueOf(value).trim();
+        return StringUtils.trim(Objects.toString(value, null));
     }
 
     /** 解析结果里的 toolKey 列表（诊断/测试用）。 */

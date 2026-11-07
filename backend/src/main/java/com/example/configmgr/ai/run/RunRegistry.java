@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -210,7 +212,7 @@ public class RunRegistry {
 	 * 扫描线程必须改用 {@link #hasLiveSubscriber(String, long, long)}。
 	 */
 	public boolean hasLiveSubscriber(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return false;
 		}
 		EmitterEntry exact = this.emitters.get(LocalRunKey.of(runId));
@@ -230,7 +232,7 @@ public class RunRegistry {
 	 * @return {@code true} = 该精确身份条目存在且有订阅者；其余（含非法 runId/身份）一律 {@code false}
 	 */
 	public boolean hasLiveSubscriber(String runId, long tenantId, long userId) {
-		if (runId == null || runId.isBlank() || runId.indexOf('{') >= 0 || runId.indexOf('}') >= 0
+		if (StringUtils.isBlank(runId) || runId.indexOf('{') >= 0 || runId.indexOf('}') >= 0
 				|| !RunIdentityScope.usable(tenantId, userId)) {
 			return false;
 		}
@@ -283,12 +285,12 @@ public class RunRegistry {
 
 	/** 包内可见：收紧空闲窗口（用例把 30 分钟压到毫秒级）。 */
 	void setIdleRecycleAfter(java.time.Duration idle) {
-		this.idleRecycleAfterMs = Math.max(0L, idle == null ? 0L : idle.toMillis());
+		this.idleRecycleAfterMs = Math.max(0L, ObjectUtils.defaultIfNull(idle, java.time.Duration.ZERO).toMillis());
 	}
 
 	/** 包内可见：收紧扫描间隔（{@code of()} 摊还扫描的节流）。 */
 	void setSweepInterval(java.time.Duration interval) {
-		this.sweepIntervalMs = Math.max(0L, interval == null ? 0L : interval.toMillis());
+		this.sweepIntervalMs = Math.max(0L, ObjectUtils.defaultIfNull(interval, java.time.Duration.ZERO).toMillis());
 	}
 
 	/** {@link #of} 上的摊还扫描：到间隔才扫一次，多线程只有一个 CAS 成功者执行。 */
@@ -315,7 +317,7 @@ public class RunRegistry {
 			}
 			if (this.emitters.remove(candidate.getKey(), entry)) {
 				removed++;
-				log.debug("idle emitter entry reclaimed key={} runId={} (no subscribers/not writing/non-terminal)", candidate.getKey(),
+				if (log.isDebugEnabled()) log.debug("idle emitter entry reclaimed key={} runId={} (no subscribers/not writing/non-terminal)", candidate.getKey(),
 						entry.runId());
 			}
 		}
@@ -427,7 +429,7 @@ public class RunRegistry {
 		 * 尚未落档"的线程与新建的写出器并存（帧号/扇出分家）；终态收尾中的条目由写出器自己的
 		 * 终态钩子收，抢在它前面摘会让仍在排空的尾帧失去归属。
 		 */
-		private boolean reclaimable(long nowMs, long idleMs) {
+		private boolean isReclaimable(long nowMs, long idleMs) {
 			if (nowMs - this.lastTouchedAtMs.get() < idleMs) {
 				return false;
 			}

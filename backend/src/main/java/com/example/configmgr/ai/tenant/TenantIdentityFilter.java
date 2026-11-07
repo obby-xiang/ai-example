@@ -9,7 +9,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
-import org.springframework.util.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
@@ -93,14 +93,14 @@ public class TenantIdentityFilter extends OncePerRequestFilter {
 			return true;
 		}
 		String contextPath = request.getContextPath();
-		if (StringUtils.hasText(contextPath) && path.startsWith(contextPath)) {
+		if (StringUtils.isNotBlank(contextPath) && path.startsWith(contextPath)) {
 			path = path.substring(contextPath.length());
 		}
 		// /api/ai 本身也明确纳入边界（缺头 = 400），不静默跳过。
 		if (!path.equals(AI_ROOT) && !path.startsWith(AI_PREFIX)) {
 			return true;
 		}
-		String normalized = path.length() > 1 && path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+		String normalized = path.length() > 1 ? StringUtils.removeEnd(path, "/") : path;
 		if (EXCLUDED_EXACT.contains(normalized)) {
 			return true;
 		}
@@ -117,7 +117,7 @@ public class TenantIdentityFilter extends OncePerRequestFilter {
 			throws ServletException, IOException {
 		String rawTenant = request.getHeader(HEADER_TENANT_ID);
 		String rawUser = request.getHeader(HEADER_USER_ID);
-		if (!StringUtils.hasText(rawTenant) || !StringUtils.hasText(rawUser)) {
+		if (!StringUtils.isNotBlank(rawTenant) || !StringUtils.isNotBlank(rawUser)) {
 			reject(response, ErrorCodes.TENANT_IDENTITY_REQUIRED, "缺少身份请求头 X-Tenant-Id / X-User-Id");
 			return;
 		}
@@ -141,7 +141,7 @@ public class TenantIdentityFilter extends OncePerRequestFilter {
 							: "userId 必须是正数");
 			return;
 		}
-		if (!TenantUserDirectory.exists(tenantId, userId)) {
+		if (!TenantUserDirectory.isRegistered(tenantId, userId)) {
 			reject(response, ErrorCodes.TENANT_IDENTITY_UNKNOWN, "未登记的租户/用户组合");
 			return;
 		}

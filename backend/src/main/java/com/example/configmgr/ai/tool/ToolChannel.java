@@ -1,6 +1,10 @@
 package com.example.configmgr.ai.tool;
 
-import java.lang.annotation.*;
+import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 
 /**
  * 声明工具的执行通道（谁真正执行这次调用）。

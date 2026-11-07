@@ -2,6 +2,7 @@ package com.example.configmgr.ai.form;
 
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -59,27 +60,27 @@ public interface FormOptionSource {
 		@Override
 		public List<Map<String, String>> options(String parentValue) {
 			List<Map<String, String>> out = new ArrayList<>();
-			if (parentValue == null || parentValue.isBlank()) {
-				return out;
+			if (StringUtils.isBlank(parentValue)) {
+				return out.isEmpty() ? List.of() : out;
 			}
 			ConfigDefinition definition;
 			try {
 				definition = this.definitionService.findByCode(parentValue);
 			}
 			catch (RuntimeException ex) {
-				return out;
+				return out.isEmpty() ? List.of() : out;
 			}
 			if (definition == null || definition.getFields() == null) {
-				return out;
+				return out.isEmpty() ? List.of() : out;
 			}
 			for (var field : definition.getFields()) {
 				Map<String, String> option = new LinkedHashMap<>();
 				option.put("value", field.getCode());
-				option.put("label", field.getLabel() == null || field.getLabel().isBlank()
+				option.put("label", StringUtils.isBlank(field.getLabel())
 						? field.getCode() : field.getLabel());
 				out.add(option);
 			}
-			return out;
+			return out.isEmpty() ? List.of() : out;
 		}
 	}
 
@@ -119,21 +120,21 @@ public interface FormOptionSource {
 			List<Map<String, String>> out = new ArrayList<>();
 			ConfigDefinition.ConfigLevel level = levelOf(parentValue);
 			if (level == null) {
-				return out;
+				return out.isEmpty() ? List.of() : out;
 			}
 			List<ConfigDefinition> definitions;
 			try {
 				definitions = this.definitionService.findByLevel(level);
 			}
 			catch (RuntimeException ex) {
-				return out;
+				return out.isEmpty() ? List.of() : out;
 			}
 			if (definitions == null) {
-				return out;
+				return out.isEmpty() ? List.of() : out;
 			}
 			List<ConfigDefinition> ordered = new ArrayList<>();
 			for (ConfigDefinition definition : definitions) {
-				if (definition != null && definition.getCode() != null && !definition.getCode().isBlank()) {
+				if (definition != null && StringUtils.isNotBlank(definition.getCode())) {
 					ordered.add(definition);
 				}
 			}
@@ -145,16 +146,16 @@ public interface FormOptionSource {
 				}
 				Map<String, String> option = new LinkedHashMap<>();
 				option.put("value", definition.getCode());
-				option.put("label", definition.getName() == null || definition.getName().isBlank()
+				option.put("label", StringUtils.isBlank(definition.getName())
 						? definition.getCode() : definition.getName());
 				out.add(option);
 			}
-			return out;
+			return out.isEmpty() ? List.of() : out;
 		}
 
 		/** 父值 → 层级；空/未知一律 null（调用方据此返回空列表，不做"全部"回落）。 */
 		private static ConfigDefinition.ConfigLevel levelOf(String parentValue) {
-			if (parentValue == null || parentValue.isBlank()) {
+			if (StringUtils.isBlank(parentValue)) {
 				return null;
 			}
 			try {

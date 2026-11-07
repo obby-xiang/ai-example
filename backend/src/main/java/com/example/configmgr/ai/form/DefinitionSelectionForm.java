@@ -18,6 +18,9 @@ import com.example.configmgr.task.entity.Task;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -175,7 +178,7 @@ public class DefinitionSelectionForm extends HostForm {
 	 */
 	public boolean parkNavigateIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch,
 			List<Message> history) {
-		if (runId == null || context == null || history == null || settledBatch == null || !parkEnabled()) {
+		if (runId == null || context == null || history == null || settledBatch == null || !isParkEnabled()) {
 			return false;
 		}
 		try {
@@ -184,71 +187,74 @@ public class DefinitionSelectionForm extends HostForm {
 				// 不是本轮新建并已绑定的任务：不改既有页面（旧 run 恢复同口径）
 				return false;
 			}
-			boolean retry = false;
-			String page;
-			PendingToolCall created = settledCreateTask(settledBatch);
-			if (created != null) {
-				if (!RunContextRefresher.openWizard(created.getArguments())) {
-					return false;
-				}
-				Long createdInBatch = created.getCreatedTaskId();
-				if (!createdTaskId.equals(createdInBatch)) {
-					return false;
-				}
-				String type = taskTypeOf(created.getArguments());
-				if (type == null) {
-					// 上下文已绑定该新任务（上面的判据），类型可用其权威值
-					type = context.getTaskType();
-				}
-				page = wizardPage(type);
-				if (page == null) {
-					return false;
-				}
-				if (settledBatch.stream()
-					.filter(settled -> settled != null && AiToolNames.NAVIGATE_TO.equals(settled.getName()))
-					.anyMatch(settled -> !settled.resolved() || settled.effectiveOutcome() == ToolOutcome.OK)) {
-					// 成功或仍在等待的导航不重复；非 OK 终态由宿主在创建成功后接管一次
-					return false;
-				}
-				retry = failedFirstHostNavigation(settledBatch, createdTaskId) != null;
-			}
-			else {
-				PendingToolCall failed = failedFirstHostNavigation(settledBatch, createdTaskId);
-				if (failed == null) {
-					// 本批没有"刚失败的第一次宿主导航"：不因历史台账/旧失败把用户拉回页面
-					return false;
-				}
-				retry = true;
-				page = wizardPage(context.getTaskType());
-				if (page == null) {
-					return false;
-				}
-				if (otherNavigateInBatch(settledBatch, failed.getToolCallId())) {
-					// 本批还有模型自发/其它导航：不抢发第二次
-					return false;
-				}
+			NavigationDecision decision = resolveNavigation(context, settledBatch, createdTaskId);
+			if (decision == null) {
+				return false;
 			}
 			String toolCallId = NAVIGATE_TOOL_CALL_ID_PREFIX + createdTaskId
-					+ (retry ? NAVIGATE_RETRY_SUFFIX : "");
-			if (alreadyIssued(runId, toolCallId)) {
+					+ (decision.isRetry() ? NAVIGATE_RETRY_SUFFIX : "");
+			if (hasIssued(runId, toolCallId)) {
 				// 首发已发过；重试 id 只允许一次（-r2 再失败不会再发）
 				return false;
 			}
 			Map<String, Object> arguments = new LinkedHashMap<>();
-			arguments.put("page", page);
+			arguments.put("page", decision.page());
 			arguments.put("taskId", createdTaskId);
 			Optional<String> json = toJson(arguments);
 			if (json.isEmpty()) {
 				return false;
 			}
-			log.info("{} task #{}, host sends navigate_to(page={}, id={}) runId={}", retry ? "retry after non-OK navigation" : "created in this batch", createdTaskId, page, toolCallId, runId);
-			return park(runId, history,
+			log.info("{} task #{}, host sends navigate_to(page={}, id={}) runId={}", decision.isRetry() ? "retry after non-OK navigation" : "created in this batch", createdTaskId, decision.page(), toolCallId, runId);
+			return shouldPark(runId, history,
 					withToolTimeout(frontendTool(toolCallId, AiToolNames.NAVIGATE_TO, json.get())));
 		}
 		catch (RuntimeException ex) {
 			log.warn("host navigate_to was not sent (continue on existing path) runId={}", runId, ex);
 			return false;
 		}
+	}
+
+	private NavigationDecision resolveNavigation(AiContext context, List<PendingToolCall> settledBatch, long createdTaskId) {
+		PendingToolCall created = settledCreateTask(settledBatch);
+		if (created != null) {
+			if (!RunContextRefresher.openWizard(created.getArguments())) {
+				return null;
+			}
+			Long createdInBatch = created.getCreatedTaskId();
+			if (createdInBatch == null || createdTaskId != createdInBatch) {
+				return null;
+			}
+			String type = taskTypeOf(created.getArguments());
+			if (type == null) {
+				// 上下文已绑定该新任务（上面的判据），类型可用其权威值
+				type = context.getTaskType();
+			}
+			String page = wizardPage(type);
+			if (page == null) {
+				return null;
+			}
+			if (settledBatch.stream()
+				.filter(settled -> settled != null && AiToolNames.NAVIGATE_TO.equals(settled.getName()))
+				.anyMatch(settled -> !settled.resolved() || settled.effectiveOutcome() == ToolOutcome.OK)) {
+				// 成功或仍在等待的导航不重复；非 OK 终态由宿主在创建成功后接管一次
+				return null;
+			}
+			return new NavigationDecision(failedFirstHostNavigation(settledBatch, createdTaskId) != null, page);
+		}
+		PendingToolCall failed = failedFirstHostNavigation(settledBatch, createdTaskId);
+		if (failed == null) {
+			// 本批没有"刚失败的第一次宿主导航"：不因历史台账/旧失败把用户拉回页面
+			return null;
+		}
+		String page = wizardPage(context.getTaskType());
+		if (page == null || hasOtherNavigateInBatch(settledBatch, failed.getToolCallId())) {
+			// 本批还有模型自发/其它导航：不抢发第二次
+			return null;
+		}
+		return new NavigationDecision(true, page);
+	}
+
+	private record NavigationDecision(boolean isRetry, String page) {
 	}
 
 	/**
@@ -265,7 +271,7 @@ public class DefinitionSelectionForm extends HostForm {
 	 */
 	public boolean parkSelectDefinitionsIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch,
 			List<Message> history) {
-		if (runId == null || context == null || history == null || !parkEnabled()) {
+		if (runId == null || context == null || history == null || !isParkEnabled()) {
 			return false;
 		}
 		try {
@@ -276,7 +282,7 @@ public class DefinitionSelectionForm extends HostForm {
 			if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {
 				return false;
 			}
-			if (!navigatedToTaskInRun(runId, createdTaskId) && !hasPersistedPageFact(context)) {
+			if (!hasNavigatedToTaskInRun(runId, createdTaskId) && !hasPersistedPageFact(context)) {
 				// 没有导航回执或已同步页面事实：页面归属不确定，交回模型
 				return false;
 			}
@@ -285,12 +291,12 @@ public class DefinitionSelectionForm extends HostForm {
 				// 配置未知：交给平铺多选表单
 				return false;
 			}
-			if (handledInBatch(settledBatch, AiToolNames.SELECT_DEFINITIONS)) {
+			if (isHandledInBatch(settledBatch, AiToolNames.SELECT_DEFINITIONS)) {
 				// 本批已处理（含失败）：不重复下发，让既有路径继续
 				return false;
 			}
 			String toolCallId = SELECT_TOOL_CALL_ID_PREFIX + createdTaskId;
-			if (alreadyIssued(runId, toolCallId)) {
+			if (hasIssued(runId, toolCallId)) {
 				return false;
 			}
 			Map<String, Object> arguments = new LinkedHashMap<>();
@@ -302,7 +308,7 @@ public class DefinitionSelectionForm extends HostForm {
 			}
 			log.info("definitions already known; host sends select_definitions runId={} taskId={} codes={}", runId, createdTaskId,
 					codes);
-			return park(runId, history,
+			return shouldPark(runId, history,
 					withToolTimeout(frontendTool(toolCallId, AiToolNames.SELECT_DEFINITIONS, json.get())));
 		}
 		catch (RuntimeException ex) {
@@ -313,7 +319,7 @@ public class DefinitionSelectionForm extends HostForm {
 
 	/** 任务类型 → 向导页（{@code navigate_to} 的同源取值）；未知类型 = {@code null}。 */
 	private static String wizardPage(String taskType) {
-		if (taskType == null || taskType.isBlank()) {
+		if (StringUtils.isBlank(taskType)) {
 			return null;
 		}
 		if (Task.TaskType.EXPORT.name().equalsIgnoreCase(taskType.trim())) {
@@ -371,7 +377,7 @@ public class DefinitionSelectionForm extends HostForm {
 	 * <p>这是页面归属的一种结构证据；手工切换则由 {@link #hasPersistedPageFact} 补充证明。
 	 * 读失败按"没有导航证据"处理（交回模型，不猜）。
 	 */
-	private boolean navigatedToTaskInRun(String runId, long taskId) {
+	private boolean hasNavigatedToTaskInRun(String runId, long taskId) {
 		List<PendingToolCall> pendings;
 		try {
 			pendings = this.store.pendingsLenient(runId);
@@ -380,7 +386,7 @@ public class DefinitionSelectionForm extends HostForm {
 			log.warn("could not read navigation evidence; not treated as navigated runId={}", runId, ex);
 			return false;
 		}
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (pending == null || !AiToolNames.NAVIGATE_TO.equals(pending.getName())
 					|| !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
 					|| !pending.resolved() || pending.effectiveOutcome() != ToolOutcome.OK) {
@@ -465,7 +471,7 @@ public class DefinitionSelectionForm extends HostForm {
 	}
 
 	/** 本批除给定条目外是否还有别的 {@code navigate_to}（模型自发或其它导航）；有则不抢发重试。 */
-	private static boolean otherNavigateInBatch(List<PendingToolCall> settledBatch, String excludedToolCallId) {
+	private static boolean hasOtherNavigateInBatch(List<PendingToolCall> settledBatch, String excludedToolCallId) {
 		if (settledBatch == null) {
 			return false;
 		}
@@ -511,7 +517,7 @@ public class DefinitionSelectionForm extends HostForm {
 		if (runId == null || context == null || history == null) {
 			return false;
 		}
-		if (!parkEnabled()) {
+		if (!isParkEnabled()) {
 			// 阻塞式等待不承接这条新增流程（见类注：不新增中断路径）
 			return false;
 		}
@@ -520,7 +526,7 @@ public class DefinitionSelectionForm extends HostForm {
 			if (arguments.isEmpty()) {
 				return false;
 			}
-			return park(runId, history, frontendForm(toolCallId(context.getTaskId()), arguments.get()));
+			return shouldPark(runId, history, frontendForm(toolCallId(context.getTaskId()), arguments.get()));
 		}
 		catch (RuntimeException ex) {
 			// fail-safe：这是"让交互确定"的增强，不是这一轮的判定面 —— 任何读库/写库/发帧异常
@@ -544,25 +550,30 @@ public class DefinitionSelectionForm extends HostForm {
 	 */
 	public boolean parkAdvanceIfDue(String runId, AiContext context, List<PendingToolCall> settledBatch,
 			List<Message> history) {
-		if (runId == null || context == null || history == null || !parkEnabled()
+		return shouldParkAdvance(runId, context, settledBatch, history);
+	}
+
+	public boolean shouldParkAdvance(String runId, AiContext context, List<PendingToolCall> settledBatch,
+			List<Message> history) {
+		if (runId == null || context == null || history == null || !isParkEnabled()
 				|| context.getTaskId() == null || !EXPORT_PAGE.equals(context.getPage())
 				|| !SELECT_DEFS_STEP.equals(context.getStep())
 				|| !TaskSlots.fromExtra(context.getExtra()).hasDefCodes()
-				|| handledInBatch(settledBatch, AiToolNames.CONFIRM_STEP)
-				|| !successfulSelection(settledBatch)) {
+				|| isHandledInBatch(settledBatch, AiToolNames.CONFIRM_STEP)
+				|| !hasSuccessfulSelection(settledBatch)) {
 			return false;
 		}
 		String toolCallId = "host-def-next-" + context.getTaskId();
-		if (alreadyIssued(runId, toolCallId)) {
+		if (hasIssued(runId, toolCallId)) {
 			return false;
 		}
 		PendingToolCall advance = withToolTimeout(frontendTool(toolCallId, AiToolNames.CONFIRM_STEP,
 				"{\"step\":\"" + QUERY_COND_STEP + "\"}"));
 		log.info("definitions selected; host sends confirm_step to advance to the condition step runId={} taskId={}", runId, context.getTaskId());
-		return park(runId, history, advance);
+		return shouldPark(runId, history, advance);
 	}
 
-	private static boolean successfulSelection(List<PendingToolCall> settledBatch) {
+	private static boolean hasSuccessfulSelection(List<PendingToolCall> settledBatch) {
 		if (settledBatch == null) {
 			return false;
 		}
@@ -594,11 +605,11 @@ public class DefinitionSelectionForm extends HostForm {
 			// 还在旧任务上（或根本没到向导）：旧任务的配置不能被当成新任务的已知信息
 			return Optional.empty();
 		}
-		if (!navigatedToTaskInRun(runId, createdTaskId) && !hasPersistedPageFact(context)) {
+		if (!hasNavigatedToTaskInRun(runId, createdTaskId) && !hasPersistedPageFact(context)) {
 			// 没有导航回执或已同步页面事实：交回模型
 			return Optional.empty();
 		}
-		if (handledInBatch(settledBatch, GenerativeFormRules.TOOL_NAME, AiToolNames.SELECT_DEFINITIONS)) {
+		if (isHandledInBatch(settledBatch, GenerativeFormRules.TOOL_NAME, AiToolNames.SELECT_DEFINITIONS)) {
 			return Optional.empty();
 		}
 		if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {
@@ -608,7 +619,7 @@ public class DefinitionSelectionForm extends HostForm {
 			// 配置已知 ⇒ 直接走 select_definitions，不弹表单（与槽位放行同一判据）
 			return Optional.empty();
 		}
-		if (alreadyIssued(runId, toolCallId(createdTaskId))) {
+		if (hasIssued(runId, toolCallId(createdTaskId))) {
 			return Optional.empty();
 		}
 		return buildArguments(createdTaskId);
@@ -631,7 +642,7 @@ public class DefinitionSelectionForm extends HostForm {
 			log.warn("could not read definition catalog; host skips the definition selection form taskId={}", createdTaskId, ex);
 			return Optional.empty();
 		}
-		if (definitions == null || definitions.isEmpty()) {
+		if (CollectionUtils.isEmpty(definitions)) {
 			log.info("definition catalog is empty; host skips the empty form taskId={} (fall back to failure recovery and the model path)", createdTaskId);
 			return Optional.empty();
 		}
@@ -644,7 +655,7 @@ public class DefinitionSelectionForm extends HostForm {
 		Set<String> seen = new LinkedHashSet<>();
 		for (SlotDefinition definition : definitions) {
 			String value = definition == null ? null : definition.code();
-			if (value == null || value.isBlank() || value.length() > GenerativeFormRules.MAX_OPTION_TEXT_CHARS
+			if (StringUtils.isBlank(value) || value.length() > GenerativeFormRules.MAX_OPTION_TEXT_CHARS
 					|| !seen.add(value)) {
 				// 编码缺失/过长/重复：这不是"少一项"，而是"这张表选不全" —— 交给模型侧路径
 				log.warn("definition code cannot be flattened (missing/too long/duplicate); host skips the truncated form taskId={} code={}",
@@ -674,7 +685,7 @@ public class DefinitionSelectionForm extends HostForm {
 	/** 选项文案：定义名称（只作展示，回灌值是编码）；超长按选项文本上限截断。 */
 	private static String label(SlotDefinition definition) {
 		String name = definition.name();
-		if (name == null || name.isBlank()) {
+		if (StringUtils.isBlank(name)) {
 			return definition.code();
 		}
 		String trimmed = name.trim();

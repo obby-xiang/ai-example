@@ -5,6 +5,8 @@ import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.tool.SheetAudit;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -56,7 +58,7 @@ final class ToolCallEndTrace {
 	static void emitOnce(SettlementObservationStore observations, String runId, String sessionId,
 			PendingToolCall settled, String toolCallId, String tool, String kind, long ms, long execMs, String text,
 			SheetAudit audit) {
-		if (!requiresArbitration(kind) || observations == null) {
+		if (!isArbitrationRequired(kind) || observations == null) {
 			// 无仲裁面（BACKEND 由认领独占 / 轻装配）：与引入观测位之前逐字同形
 			emit(runId, sessionId, settled, toolCallId, tool, kind, ms, execMs, text, audit);
 			return;
@@ -65,7 +67,7 @@ final class ToolCallEndTrace {
 		Object[] payload = pairs(settled, toolCallId, tool, kind, ms, execMs, text);
 		SettlementObservationStore.ClaimHandle claim = observations.claim(runId, toolCallId);
 		if (!claim.claimed()) {
-			log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} tool={} kind={}", runId, toolCallId,
+			if (log.isDebugEnabled()) log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} tool={} kind={}", runId, toolCallId,
 					tool, kind);
 			return;
 		}
@@ -93,7 +95,7 @@ final class ToolCallEndTrace {
 	 *
 	 * <p>语义与 {@link #emitOnce} 逐字同源：
 	 * <ul>
-	 * <li>{@code BACKEND} 不占位（结算权归执行认领，见 {@link #requiresArbitration}）⇒ 直发；</li>
+	 * <li>{@code BACKEND} 不占位（结算权归执行认领，见 {@link #isArbitrationRequired}）⇒ 直发；</li>
 	 * <li>无仲裁面（轻装配/单测）⇒ 直发，与引入观测位之前同形；</li>
 	 * <li>抢不到位 ⇒ 一条不发（这条调用已被别的执行体结算）；</li>
 	 * <li>写行失败 ⇒ 释放占位（下一位可补发；宁重不宁缺）。</li>
@@ -103,13 +105,13 @@ final class ToolCallEndTrace {
 	 */
 	static void emitCustomOnce(SettlementObservationStore observations, String runId, String toolCallId, String kind,
 			Runnable payload) {
-		if (!requiresArbitration(kind) || observations == null) {
+		if (!isArbitrationRequired(kind) || observations == null) {
 			payload.run();
 			return;
 		}
 		SettlementObservationStore.ClaimHandle claim = observations.claim(runId, toolCallId);
 		if (!claim.claimed()) {
-			log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} kind={}", runId, toolCallId, kind);
+			if (log.isDebugEnabled()) log.debug("settlement row already emitted by another executor; skipping runId={} toolCallId={} kind={}", runId, toolCallId, kind);
 			return;
 		}
 		try {
@@ -138,7 +140,7 @@ final class ToolCallEndTrace {
 			return;
 		}
 		Map<String, Object> sheetMeta = settled.getSheetMeta();
-		if (sheetMeta == null || sheetMeta.isEmpty()) {
+		if (MapUtils.isEmpty(sheetMeta)) {
 			return;
 		}
 		audit.record(sessionId, settled);
@@ -173,7 +175,7 @@ final class ToolCallEndTrace {
 	 * （以及 {@code kind} 缺失的旧数据 —— 宁可多一次 HSETNX，也不猜）。
 	 * {@code BACKEND} 的执行由认领（{@code tryClaimExecution}）独占，不占键位。
 	 */
-	private static boolean requiresArbitration(String kind) {
+	private static boolean isArbitrationRequired(String kind) {
 		return !PendingToolCall.KIND_BACKEND.equals(kind);
 	}
 
@@ -202,12 +204,12 @@ final class ToolCallEndTrace {
 		pairs.add("executed");
 		pairs.add(settled.isExecuted());
 		pairs.add("chars");
-		pairs.add(text == null ? 0 : text.length());
+		pairs.add(StringUtils.length(text));
 		// AI 表格工具治理批（2026-10-22 §4.2）：表格工具的采样元数据挂同一行的 additive 字段
 		// （8 键；非表格工具一个键都不写 —— "逐键可缺席"）。值一律来自条目上的 sheetMeta 白名单副本
 		// （SheetAudit#sanitize 在入口就丢掉了任何业务值）。
 		Map<String, Object> sheetMeta = settled.getSheetMeta();
-		if (sheetMeta != null && !sheetMeta.isEmpty()) {
+		if (MapUtils.isNotEmpty(sheetMeta)) {
 			pairs.addAll(SheetAudit.logPairs(sheetMeta));
 		}
 		return pairs.toArray();

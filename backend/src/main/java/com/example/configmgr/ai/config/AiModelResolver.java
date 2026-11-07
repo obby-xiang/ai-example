@@ -1,9 +1,11 @@
 package com.example.configmgr.ai.config;
 
 import com.example.configmgr.ai.config.db.AiProviderModel;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.util.StringUtils;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -43,7 +45,7 @@ public final class AiModelResolver {
         if (StringUtils.hasText(explicitModelId)) {
             return explicitModelId.trim();
         }
-        Collection<AiProviderModel> models = providerModels == null ? java.util.List.of() : providerModels;
+        Collection<AiProviderModel> models = ObjectUtils.defaultIfNull(providerModels, List.of());
         Optional<AiProviderModel> flagged = models.stream()
             .filter(AiProviderModel::isEnabled)
             .filter(AiProviderModel::isDefault)

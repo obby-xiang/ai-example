@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.tenant;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.List;
 
 /**
@@ -17,14 +21,17 @@ import java.util.List;
 public final class TenantUserDirectory {
 
 	/** 用户选项（前端身份切换用）。 */
-	public record UserView(long userId, String userName) {
+	public record UserView(@JsonProperty("userId") @JsonFormat(shape = JsonFormat.Shape.STRING) long userId,
+			@JsonProperty("userName") String userName) {
 	}
 
 	/** 租户选项（含该租户下的用户）。 */
-	public record TenantView(long tenantId, String tenantName, List<UserView> users) {
+	public record TenantView(@JsonProperty("tenantId") @JsonFormat(shape = JsonFormat.Shape.STRING) long tenantId,
+			@JsonProperty("tenantName") String tenantName,
+			@JsonProperty("users") @JsonInclude(JsonInclude.Include.NON_EMPTY) List<UserView> users) {
 
 		public TenantView {
-			users = List.copyOf(users);
+			users = users == null ? List.of() : List.copyOf(users);
 		}
 
 	}
@@ -41,8 +48,13 @@ public final class TenantUserDirectory {
 		return TENANTS;
 	}
 
-	/** 该 (tenantId, userId) 组合是否已登记。 */
+	/** 兼容旧调用：该 (tenantId, userId) 组合是否已登记。 */
 	public static boolean exists(long tenantId, long userId) {
+		return isRegistered(tenantId, userId);
+	}
+
+	/** 该 (tenantId, userId) 组合是否已登记。 */
+	public static boolean isRegistered(long tenantId, long userId) {
 		for (TenantView tenant : TENANTS) {
 			if (tenant.tenantId() != tenantId) {
 				continue;
@@ -63,7 +75,7 @@ public final class TenantUserDirectory {
 	 * @throws IllegalArgumentException 组合未登记（跨租户拼装同样是未登记）
 	 */
 	public static TenantUser require(long tenantId, long userId) {
-		if (!exists(tenantId, userId)) {
+		if (!isRegistered(tenantId, userId)) {
 			throw new IllegalArgumentException("Unregistered tenant/user combination: tenantId=" + tenantId + " userId=" + userId);
 		}
 		return new TenantUser(tenantId, userId);

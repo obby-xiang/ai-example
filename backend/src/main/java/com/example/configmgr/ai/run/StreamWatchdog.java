@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
@@ -194,7 +195,9 @@ public class StreamWatchdog implements AutoCloseable {
 			tickOnce();
 		}
 		catch (Exception ex) {
-			log.debug("watchdog identity scope failed runId={}", this.runId, ex);
+			if (LogSampling.canAcquire("watchdog-identity-scope")) {
+				log.warn("watchdog identity scope failed runId={}", this.runId, ex);
+			}
 		}
 	}
 
@@ -220,7 +223,7 @@ public class StreamWatchdog implements AutoCloseable {
 			// 挂起点（确认门 / 无超时工具 suspend）段已结束 ⇒ 等待期<b>不判</b>；
 			// 恢复点（决策/回灌/续跑）由 ToolActivityBeacon#endGateWait / markSegmentStart 重置段起点，
 			// 于是每段各自重新拥有 app.ai.resilience.total-budget。code 名沿用 TOTAL_BUDGET（码名保留）。
-			if (!this.beacon.inGateWait(this.runId)) {
+			if (!this.beacon.isInGateWait(this.runId)) {
 				long segmentStart = this.beacon.segmentStartedAtMs(this.runId, this.segmentSeedAtMs);
 				// 轻装配面（mock/无锚点）读回 0 ⇒ 按播种值算（否则"没有锚点"会当场判成预算耗尽）
 				if (segmentStart <= 0L) {
@@ -253,7 +256,9 @@ public class StreamWatchdog implements AutoCloseable {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("watchdog tick failed runId={}", this.runId, ex);
+			if (LogSampling.canAcquire("watchdog-tick")) {
+				log.warn("watchdog tick failed runId={}", this.runId, ex);
+			}
 		}
 	}
 
@@ -289,7 +294,9 @@ public class StreamWatchdog implements AutoCloseable {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("watchdog cancel poll failed runId={}", this.runId, ex);
+			if (LogSampling.canAcquire("watchdog-cancel-poll")) {
+				log.warn("watchdog cancel poll failed runId={}", this.runId, ex);
+			}
 		}
 	}
 
@@ -306,7 +313,9 @@ public class StreamWatchdog implements AutoCloseable {
 				current.dispose();
 			}
 			catch (Exception ex) {
-				log.debug("upstream subscription dispose failed runId={}", this.runId, ex);
+				if (LogSampling.canAcquire("watchdog-upstream-dispose")) {
+					log.warn("upstream subscription dispose failed runId={}", this.runId, ex);
+				}
 			}
 		}
 		this.onViolation.accept(new StreamViolationException(code, message));
@@ -314,15 +323,27 @@ public class StreamWatchdog implements AutoCloseable {
 
 	@Override
 	public void close() {
-		this.future.cancel(false);
-		if (this.cancelPollFuture != null) {
-			this.cancelPollFuture.cancel(false);
+		try {
+			if (this.cancelPollFuture != null) {
+				this.cancelPollFuture.cancel(false);
+			}
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("watchdog-cancel-poll-close")) log.warn("cancel poll task close failed runId={}", this.runId, ex);
+		}
+		try {
+			this.future.cancel(false);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("watchdog-future-close")) log.warn("watchdog task close failed runId={}", this.runId, ex);
 		}
 		try {
 			this.cancelListener.close();
 		}
 		catch (Exception ex) {
-			log.debug("cancel listener deregistration failed runId={}", this.runId, ex);
+			if (LogSampling.canAcquire("watchdog-cancel-listener-close")) {
+				log.warn("cancel listener deregistration failed runId={}", this.runId, ex);
+			}
 		}
 	}
 

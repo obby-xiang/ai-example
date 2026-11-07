@@ -1,10 +1,13 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.codec.binary.StringUtils;
+import org.apache.commons.lang3.ArrayUtils;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
@@ -13,9 +16,9 @@ import org.springframework.data.redis.listener.ChannelTopic;
 import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 import org.springframework.stereotype.Component;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -73,7 +76,7 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	 * "有界线程 + 有界队列"；饱和时<b>调用线程内联执行</b>（C1：不丢订阅/取消通知，避免容器内部
 	 * future.join 永久等待），饱和次数用 {@link #dispatchSaturations()} 观测。
 	 */
-	private volatile ThreadPoolExecutor dispatchExecutor;
+	private final ThreadPoolExecutor dispatchExecutor;
 
 	/**
 	 * 订阅/退订操作的独立有界执行器（T-07）。
@@ -90,10 +93,10 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	 * {@code ScheduledExecutorService} 才改为异步排期），而本类给的是普通有界池 ⇒ 每次恢复尝试
 	 * 会在订阅线程上睡满一个退避间隔。若与派发共池，这段睡眠会直接占住派发线程（core=2），
 	 * 把跨实例唤醒一起拖慢，重连风暴时更明显。因此这里给它一条<b>独立、有界</b>的时间线：
-	 * {@code core=1 / max=2 / queue=64}，守护线程 {@code sse-wake-subscribe-N}，与容器同寿命，
-	 * 在 {@link #stop()} 里一起关闭；饱和时调用线程内联执行（不丢订阅操作，容器内部的等待不会悬挂）。
+	 * {@code core=1 / max=2 / queue=64}，与 Bean 同寿命，在 {@link #stop()} 里一起关闭；
+	 * 饱和时调用线程内联执行（不丢订阅操作，容器内部的等待不会悬挂）。
 	 */
-	private volatile ThreadPoolExecutor subscriptionExecutor;
+	private final ThreadPoolExecutor subscriptionExecutor;
 
 	/**
 	 * 唤醒派发执行器<b>饱和</b>次数（进程级；C1：饱和时改为调用线程内联执行，<b>不丢</b>订阅通知）。
@@ -119,12 +122,6 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 
 	private static final int SUBSCRIBE_QUEUE_CAPACITY = 64;
 
-	/** 派发线程编号（{@code sse-wake-dispatch-N}）。 */
-	private static final AtomicLong DISPATCH_THREAD_NO = new AtomicLong();
-
-	/** 订阅线程编号（{@code sse-wake-subscribe-N}）。 */
-	private static final AtomicLong SUBSCRIBE_THREAD_NO = new AtomicLong();
-
 	/** 唤醒派发饱和（内联执行）累计次数（诊断/健康指标）。 */
 	static long dispatchSaturations() {
 		return WAKE_DISPATCH_SATURATIONS.get();
@@ -132,6 +129,23 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 
 	public RedisFrameWakeBus(StringRedisTemplate redis) {
 		this.redis = redis;
+		this.dispatchExecutor = new ThreadPoolExecutor(DISPATCH_CORE_THREADS, DISPATCH_MAX_THREADS, 60L,
+				TimeUnit.SECONDS, new LinkedBlockingQueue<>(DISPATCH_QUEUE_CAPACITY), Executors.defaultThreadFactory(),
+				(runnable, executor) -> {
+					WAKE_DISPATCH_SATURATIONS.incrementAndGet();
+					if (log.isDebugEnabled()) log.debug("frame wake dispatch executor saturated (threads {} / queue {}): running inline on caller (no notification lost)",
+							executor.getMaximumPoolSize(), executor.getQueue().size());
+					runnable.run();
+				});
+		this.dispatchExecutor.allowCoreThreadTimeOut(true);
+		this.subscriptionExecutor = new ThreadPoolExecutor(SUBSCRIBE_CORE_THREADS, SUBSCRIBE_MAX_THREADS,
+				60L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(SUBSCRIBE_QUEUE_CAPACITY), Executors.defaultThreadFactory(),
+				(runnable, executor) -> {
+					if (log.isDebugEnabled()) log.debug("frame wake subscription executor saturated (threads {} / queue {}): running inline on caller",
+							executor.getMaximumPoolSize(), executor.getQueue().size());
+					runnable.run();
+				});
+		this.subscriptionExecutor.allowCoreThreadTimeOut(true);
 	}
 
 	@Override
@@ -165,14 +179,16 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 			}
 			if (submit) {
 				try {
-					dispatchExecutor().execute(() -> drainPublish(channel, state));
+					this.dispatchExecutor.execute(() -> drainPublish(channel, state));
 				}
 				catch (RuntimeException ex) {
 					synchronized (state) {
 						state.running = false;
 						this.publishStates.remove(channel, state);
 					}
-					log.debug("frame wake coalesced publish not dispatched runId={} seq={}", runId, upperBoundSeq, ex);
+					if (LogSampling.canAcquire("frame-wake-publish-dispatch")) {
+						log.warn("frame wake coalesced publish not dispatched runId={} seq={}", runId, upperBoundSeq, ex);
+					}
 				}
 			}
 			return;
@@ -217,8 +233,10 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 			this.redis.convertAndSend(channel, Long.toString(upperBoundSeq));
 		}
 		catch (Exception ex) {
-			log.debug("frame wake publish failed channel={} seq={} (wake is best-effort; archive reconcile is authoritative)",
-					channel, upperBoundSeq, ex);
+			if (LogSampling.canAcquire("frame-wake-publish")) {
+				log.warn("frame wake publish failed channel={} seq={} (wake is best-effort; archive reconcile is authoritative)",
+						channel, upperBoundSeq, ex);
+			}
 		}
 	}
 
@@ -263,7 +281,9 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 				current.removeMessageListener(listener);
 			}
 			catch (Exception ex) {
-				log.debug("frame wake unsubscribe failed runId={}", runId, ex);
+				if (LogSampling.canAcquire("frame-wake-unsubscribe")) {
+					log.warn("frame wake unsubscribe failed runId={}", runId, ex);
+				}
 			}
 		};
 	}
@@ -303,87 +323,30 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	private RedisMessageListenerContainer startContainer() {
 		RedisConnectionFactory factory = this.redis.getConnectionFactory();
 		if (factory == null) {
-			log.debug("no Redis connection factory: frame wake runs without subscription (single-instance semantics unaffected)");
+			if (log.isDebugEnabled()) log.debug("no Redis connection factory: frame wake runs without subscription (single-instance semantics unaffected)");
 			return null;
 		}
+		RedisMessageListenerContainer container = new RedisMessageListenerContainer();
 		try {
-			RedisMessageListenerContainer container = new RedisMessageListenerContainer();
 			container.setConnectionFactory(factory);
 			// P2-06：唤醒派发显式有界（缺省 SimpleAsyncTaskExecutor 是无界线程）。
-			container.setTaskExecutor(dispatchExecutor());
+			container.setTaskExecutor(this.dispatchExecutor);
 			// T-07：订阅/退订单独一条有界时间线 —— 容器缺省会直接把 subscriptionExecutor 指向
 			// taskExecutor（即上面的派发池），订阅失败恢复里的 Thread.sleep(5s) 会占住派发线程。
-			container.setSubscriptionExecutor(subscriptionExecutor());
+			container.setSubscriptionExecutor(this.subscriptionExecutor);
 			container.afterPropertiesSet();
 			container.start();
 			return container;
 		}
 		catch (Exception ex) {
+			try {
+				container.destroy();
+			}
+			catch (Exception closeEx) {
+				ex.addSuppressed(closeEx);
+			}
 			log.warn("frame wake container start failed (cross-instance wake unavailable; reattach replays)", ex);
 			return null;
-		}
-	}
-
-	/**
-	 * 有界派发执行器（懒建、幂等）：{@code core=2 / max=8 / queue=1024}，守护线程。
-	 *
-	 * <p><b>C1：饱和不得丢订阅通知。</b>拒绝策略改为"计数 + 调用线程内联执行"（CallerRuns 等效）：
-	 * 一是订阅/取消通知不能被丢（否则容器内部的 future.join 可能永久等待），二是唤醒消息本身也不能
-	 * 静默消失。代价只是饱和时短暂占用 Redis 订阅线程（有界于单条回调）。
-	 */
-	private ThreadPoolExecutor dispatchExecutor() {
-		ThreadPoolExecutor current = this.dispatchExecutor;
-		if (current != null) {
-			return current;
-		}
-		synchronized (this) {
-			if (this.dispatchExecutor == null) {
-				this.dispatchExecutor = new ThreadPoolExecutor(DISPATCH_CORE_THREADS, DISPATCH_MAX_THREADS, 60L,
-						TimeUnit.SECONDS, new LinkedBlockingQueue<>(DISPATCH_QUEUE_CAPACITY), runnable -> {
-							Thread thread = new Thread(runnable,
-									"sse-wake-dispatch-" + DISPATCH_THREAD_NO.incrementAndGet());
-							thread.setDaemon(true);
-							return thread;
-						}, (runnable, executor) -> {
-							WAKE_DISPATCH_SATURATIONS.incrementAndGet();
-							log.debug("frame wake dispatch executor saturated (threads {} / queue {}): running inline on caller (no notification lost)",
-									executor.getMaximumPoolSize(), executor.getQueue().size());
-							runnable.run();
-						});
-				this.dispatchExecutor.allowCoreThreadTimeOut(true);
-			}
-			return this.dispatchExecutor;
-		}
-	}
-
-	/**
-	 * 有界订阅执行器（懒建、幂等）：{@code core=1 / max=2 / queue=64}，守护线程。
-	 *
-	 * <p>与派发执行器同样的拒绝语义：队列满时<b>调用线程内联执行</b>。不用
-	 * {@code CallerRunsPolicy} 是因为它在执行器已关闭时会<b>静默丢弃</b>任务 —— 订阅 task 被丢掉，
-	 * 调用方（可能已持有容器内部锁/等待 future）就会悬挂；内联执行至少保证"这次订阅真的做完了"。
-	 */
-	private ThreadPoolExecutor subscriptionExecutor() {
-		ThreadPoolExecutor current = this.subscriptionExecutor;
-		if (current != null) {
-			return current;
-		}
-		synchronized (this) {
-			if (this.subscriptionExecutor == null) {
-				this.subscriptionExecutor = new ThreadPoolExecutor(SUBSCRIBE_CORE_THREADS, SUBSCRIBE_MAX_THREADS,
-						60L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(SUBSCRIBE_QUEUE_CAPACITY), runnable -> {
-							Thread thread = new Thread(runnable,
-									"sse-wake-subscribe-" + SUBSCRIBE_THREAD_NO.incrementAndGet());
-							thread.setDaemon(true);
-							return thread;
-						}, (runnable, executor) -> {
-							log.debug("frame wake subscription executor saturated (threads {} / queue {}): running inline on caller",
-									executor.getMaximumPoolSize(), executor.getQueue().size());
-							runnable.run();
-						});
-				this.subscriptionExecutor.allowCoreThreadTimeOut(true);
-			}
-			return this.subscriptionExecutor;
 		}
 	}
 
@@ -398,25 +361,18 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	 * <p>C1：与 {@link #container()} 的创建路径<b>同一把锁</b>（{@code synchronized(this)}）并复查
 	 * {@code closed}，避免"stop 读到 null → 并发创建路径把容器建起来并 start"后容器无人 destroy。
 	 *
-	 * <p>旧实现只把容器创建出来、从不 destroy：守护线程不阻止 JVM 退出，但容器/连接/派发线程会随
-	 * Spring Context 一起泄漏（多上下文/嵌入式部署）。停机顺序：先置 closed 拦新发布/订阅，再
+	 * <p>容器/连接/派发线程必须随 Spring Context 释放（多上下文/嵌入式部署）。
+	 * 停机顺序：先置 closed 拦新发布/订阅，再
 	 * destroy 容器（停止订阅连接、释放监听器），最后关闭订阅与派发执行器（等在飞任务有界收尾）。
 	 */
 	@PreDestroy
 	void stop() {
 		RedisMessageListenerContainer current;
-		ThreadPoolExecutor dispatch;
-		ThreadPoolExecutor subscription;
 		synchronized (this) {
-			// 与 container()/dispatchExecutor()/subscriptionExecutor() 的创建互斥：拿到锁时要么创建
-			// 已完成（下面能 destroy），要么之后创建方会看到 closed=true 直接返回 null。
+			// 与 container() 的创建互斥：拿到锁时要么创建已完成，要么之后创建方看到 closed=true。
 			this.closed = true;
 			current = this.container;
 			this.container = null;
-			dispatch = this.dispatchExecutor;
-			this.dispatchExecutor = null;
-			subscription = this.subscriptionExecutor;
-			this.subscriptionExecutor = null;
 		}
 		for (PublishState state : this.publishStates.values()) {
 			synchronized (state) {
@@ -428,11 +384,23 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 				current.destroy();
 			}
 			catch (Exception ex) {
-				log.debug("frame wake container close failed", ex);
+				if (LogSampling.canAcquire("frame-wake-container-close")) {
+					log.warn("frame wake container close failed", ex);
+				}
 			}
 		}
-		shutdownBounded(subscription);
-		shutdownBounded(dispatch);
+		try {
+			shutdownBounded(this.subscriptionExecutor);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("frame-wake-subscription-close")) log.warn("frame wake subscription close failed", ex);
+		}
+		try {
+			shutdownBounded(this.dispatchExecutor);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("frame-wake-dispatch-close")) log.warn("frame wake dispatch close failed", ex);
+		}
 		this.publishStates.clear();
 	}
 
@@ -454,11 +422,11 @@ public class RedisFrameWakeBus implements FrameWakeBus {
 	}
 
 	private static long parseUpperBound(byte[] body) {
-		if (body == null || body.length == 0) {
+		if (ArrayUtils.isEmpty(body)) {
 			return 0L;
 		}
 		try {
-			return Long.parseLong(new String(body, StandardCharsets.UTF_8).trim());
+			return Long.parseLong(StringUtils.newStringUtf8(body).trim());
 		}
 		catch (NumberFormatException ex) {
 			return 0L;

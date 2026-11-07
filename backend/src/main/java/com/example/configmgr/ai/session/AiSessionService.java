@@ -1,14 +1,21 @@
 package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.run.SessionActivityRenewal;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.web.context.support.RequestHandledEvent;
+import org.springframework.web.util.UriUtils;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -22,7 +29,10 @@ import java.util.Map;
  * <b>2026-10-20 用户裁决第 4 条</b>：会话有效期 6h → <b>24h</b>，滑动续期（活跃即续），
  * 整个会话维度，<b>无绝对上限</b> —— 挂起等人的卡可以跨过任何"创建时刻"封顶。
  * 这里只维护"页签会话还活着"这一件事：{@code ai:session:<sessionId>} 一个带
- * <b>滑动 TTL</b>（{@code app.ai.session-ttl}，默认 24h）的轻量记录，每轮对话 touch 一次。
+ * <b>滑动 TTL</b>（min(配置 session TTL, 24h)）的轻量记录。真实用户对话、历史查询和会话操作
+ * 统一委托 {@link SessionActivityRenewal} 的 60 秒分布式窗口续整组关联数据；
+ * 不使用实例本地 Map/时间戳，也不维护第二套节流键。后台重试不进入该用户活动入口，
+ * 短锁/租约不随整组续期。
  * 记忆窗口（{@code chat:mem:{<sessionId>}}，官方 {@code ChatMemoryRepository} 实现；整窗覆盖写走
  * {@code saveAll}，空窗即删除）
  * 与挂起态（{@code ai:run:<runId>}）各有自己的 TTL，本类不复制它们的内容，
@@ -55,11 +65,16 @@ public class AiSessionService {
 
 	public static final String KEY_PREFIX = "ai:session:";
 
+	static final Duration DEFAULT_SESSION_DATA_TTL = Duration.ofHours(24);
+
 	private final StringRedisTemplate redis;
 
 	private final ObjectMapper objectMapper;
 
 	private final AiProperties properties;
+
+	@Autowired(required = false)
+	private SessionActivityRenewal activityRenewal;
 
 	public AiSessionService(StringRedisTemplate redis, ObjectMapper objectMapper, AiProperties properties) {
 		this.redis = redis;
@@ -94,7 +109,7 @@ public class AiSessionService {
 	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
 	 */
 	public boolean ensure(String sessionId) {
-		return ensureInternal(sessionId, RequestContextUtils.require());
+		return isEnsureInternal(sessionId, RequestContextUtils.require());
 	}
 
 	/**
@@ -106,7 +121,7 @@ public class AiSessionService {
 	 * @return true = 该 sessionId 此前已存在（续期）；false = 首次登记
 	 */
 	public boolean ensure(String sessionId, long tenantId, long userId) {
-		return ensureInternal(sessionId, new TenantUser(tenantId, userId));
+		return isEnsureInternal(sessionId, new TenantUser(tenantId, userId));
 	}
 
 	/**
@@ -144,15 +159,16 @@ public class AiSessionService {
 
 	private Registration registerInternal(String sessionId, TenantUser identity) {
 		String key = keyFor(sessionId, identity);
-		Duration ttl = this.properties.getSessionTtl();
+		Duration ttl = sessionDataTtl(this.properties);
 		try {
+			if (isPurgeGuarded(sessionId, identity)) {
+				return Registration.EXISTED;
+			}
 			// 原子"不存在才创建"（SET NX EX）：两个实例拿到同一个号时，只有先到者写入。
 			if (Boolean.TRUE.equals(this.redis.opsForValue().setIfAbsent(key, valueOf(sessionId, identity), ttl))) {
 				return Registration.CREATED;
 			}
-			// 已存在：只滑动 TTL，<b>不重写记录</b>。撞号时旧会话的归属/内容必须原样保留
-			// （发号入口据此换号重取，绝不把两条会话静默合成一条）。
-			this.redis.expire(key, ttl);
+			refreshUserActivity(sessionId, identity);
 			return Registration.EXISTED;
 		}
 		catch (Exception ex) {
@@ -163,9 +179,20 @@ public class AiSessionService {
 		}
 	}
 
-	private boolean ensureInternal(String sessionId, TenantUser identity) {
+	private boolean isEnsureInternal(String sessionId, TenantUser identity) {
 		// 布尔口径保持原语义：只有"已存在"才是 true；登记失败仍按"首次登记"处理（只影响日志取证）。
 		return registerInternal(sessionId, identity) == Registration.EXISTED;
+	}
+
+	static Duration sessionDataTtl(AiProperties properties) {
+		Duration configured = properties == null ? null : properties.getSessionTtl();
+		return boundedSessionDataTtl(configured);
+	}
+
+	static Duration boundedSessionDataTtl(Duration configured) {
+		Duration effective = configured == null || configured.isZero() || configured.isNegative()
+				? DEFAULT_SESSION_DATA_TTL : configured;
+		return effective.compareTo(DEFAULT_SESSION_DATA_TTL) > 0 ? DEFAULT_SESSION_DATA_TTL : effective;
 	}
 
 	private String valueOf(String sessionId, TenantUser identity) throws Exception {
@@ -181,11 +208,77 @@ public class AiSessionService {
 
 	public boolean exists(String sessionId) {
 		try {
-			return Boolean.TRUE.equals(this.redis.hasKey(keyFor(sessionId)));
+			TenantUser identity = RequestContextUtils.require();
+			refreshUserActivity(sessionId, identity);
+			return Boolean.TRUE.equals(this.redis.hasKey(keyFor(sessionId, identity)));
 		}
 		catch (Exception ex) {
 			return false;
 		}
+	}
+
+	private void refreshUserActivity(String sessionId, TenantUser identity) {
+		if (isRetainedPurge(sessionId, identity)) {
+			return;
+		}
+		if (this.activityRenewal != null) {
+			this.activityRenewal.isActivityRenewed(identity.tenantId(), identity.userId(), sessionId, null,
+					keyFor(sessionId, identity));
+			return;
+		}
+		this.redis.expire(keyFor(sessionId, identity), sessionDataTtl(this.properties));
+	}
+
+	@EventListener
+	public void onUserSessionRead(RequestHandledEvent event) {
+		if (!(event.getRequest() instanceof HttpServletRequest request)
+				|| !(event.getResponse() instanceof jakarta.servlet.http.HttpServletResponse response)
+				|| !"GET".equals(request.getMethod()) || event.getFailureCause() != null
+				|| response.getStatus() < 200 || response.getStatus() >= 300) {
+			return;
+		}
+		String sessionId = userReadSessionId(request);
+		if (sessionId == null) {
+			return;
+		}
+		try {
+			refreshUserActivity(sessionId, RequestContextUtils.require());
+		}
+		catch (RuntimeException ex) {
+			log.warn("Session user-activity refresh after history read failed sessionId={}", sessionId, ex);
+		}
+	}
+
+	private static String userReadSessionId(HttpServletRequest request) {
+		String uri = request.getRequestURI();
+		String contextPath = request.getContextPath();
+		if (contextPath != null && !contextPath.isEmpty() && uri.startsWith(contextPath)) {
+			uri = uri.substring(contextPath.length());
+		}
+		String sessionId = sessionIdAfterPrefix(uri, "/api/ai/history/");
+		return sessionId != null ? sessionId : sessionIdAfterPrefix(uri, "/api/ai/context/");
+	}
+
+	private static String sessionIdAfterPrefix(String uri, String prefix) {
+		if (uri == null || !uri.startsWith(prefix)) {
+			return null;
+		}
+		String raw = uri.substring(prefix.length());
+		return raw.isEmpty() || raw.indexOf('/') >= 0 ? null : UriUtils.decode(raw, StandardCharsets.UTF_8);
+	}
+
+	private boolean isPurgeGuarded(String sessionId, TenantUser identity) {
+		return Boolean.TRUE.equals(this.redis.hasKey(SessionPurgeGuard.keyFor(sessionId, identity.tenantId(), identity.userId())))
+				|| Boolean.TRUE.equals(this.redis.hasKey(
+						SessionPurgePendingStore.pendingKey(sessionId, identity.tenantId(), identity.userId())));
+	}
+
+	private boolean isRetainedPurge(String sessionId, TenantUser identity) {
+		boolean guarded = Boolean.TRUE.equals(this.redis.hasKey(
+				SessionPurgeGuard.keyFor(sessionId, identity.tenantId(), identity.userId())));
+		boolean pending = Boolean.TRUE.equals(this.redis.hasKey(
+				SessionPurgePendingStore.pendingKey(sessionId, identity.tenantId(), identity.userId())));
+		return guarded && !pending;
 	}
 
 }

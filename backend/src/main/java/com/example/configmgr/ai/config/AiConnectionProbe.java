@@ -2,19 +2,27 @@ package com.example.configmgr.ai.config;
 
 import com.example.configmgr.common.ErrorCodes;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -99,11 +107,11 @@ public class AiConnectionProbe {
     /** 取（必要时重建）HttpClient：连接超时 = <b>本次调用读到的</b> {@code probe-timeout}。 */
     HttpClient client(Duration timeout) {
         HttpClient existing = this.client;
-        if (existing != null && java.util.Objects.equals(timeout, this.clientTimeout)) {
+        if (existing != null && Objects.equals(timeout, this.clientTimeout)) {
             return existing;
         }
         synchronized (this) {
-            if (this.client != null && java.util.Objects.equals(timeout, this.clientTimeout)) {
+            if (this.client != null && Objects.equals(timeout, this.clientTimeout)) {
                 return this.client;
             }
             HttpClient rebuilt = HttpClient.newBuilder()
@@ -130,7 +138,6 @@ public class AiConnectionProbe {
         catch (AiEndpointGuard.GuardException ex) {
             String message = AiEndpointGuard.CODE_BLOCKED_PRIVATE_ENDPOINT.equals(ex.getCode())
                     ? "模型服务地址不符合安全要求，请检查配置" : "模型服务地址不合法，请检查配置";
-            log.debug("probe rejected by endpoint guard code={}", ex.getCode(), ex);
             return new ProbeResult(false, null, 0L, ex.getCode(), message, 0, List.of());
         }
         String path = normalisePath(modelsPath);
@@ -139,11 +146,13 @@ public class AiConnectionProbe {
             uri = URI.create(base + path);
         }
         catch (IllegalArgumentException ex) {
-            log.debug("probe request URI assembly failed", ex);
             return new ProbeResult(false, null, 0L, AiEndpointGuard.CODE_INVALID_BASE_URL,
                     "模型服务地址不合法，请检查配置", 0, List.of());
         }
+        return executeModelsRequest(uri, apiKey);
+    }
 
+    private ProbeResult executeModelsRequest(URI uri, String apiKey) {
         Duration timeout = this.properties.getConfig().getProbeTimeout();
         long startedAt = System.nanoTime();
         try {
@@ -151,7 +160,7 @@ public class AiConnectionProbe {
                 .timeout(timeout)
                 .header("Accept", "application/json")
                 .GET();
-            if (StringUtils.hasText(apiKey)) {
+            if (StringUtils.isNotBlank(apiKey)) {
                 builder.header("Authorization", "Bearer " + apiKey);
             }
             HttpClient client = client(timeout);
@@ -167,7 +176,6 @@ public class AiConnectionProbe {
             return interpret(response.statusCode(), body, latencyMs);
         }
         catch (TimeoutException ex) {
-            log.debug("probe timed out uri={} (timeout means UNREACHABLE, no retry)", redacted(uri), ex);
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
@@ -177,14 +185,11 @@ public class AiConnectionProbe {
                     List.of());
         }
         catch (ExecutionException ex) {
-            Throwable cause = ex.getCause() == null ? ex : ex.getCause();
-            log.debug("probe failed uri={}", redacted(uri), cause);
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
         catch (RuntimeException ex) {
             // URI/客户端装配期的 IllegalArgument 等：仍然只回稳定 code（绝不把上游异常文本漏给前端）
-            log.debug("probe request assembly failed uri={}", redacted(uri), ex);
             return new ProbeResult(false, null, elapsedMs(startedAt), CODE_UNREACHABLE, MESSAGE_UNREACHABLE, 0,
                     List.of());
         }
@@ -203,7 +208,7 @@ public class AiConnectionProbe {
             return "-";
         }
         String authority = uri.getPort() > 0 ? uri.getHost() + ":" + uri.getPort() : uri.getHost();
-        return uri.getScheme() + "://" + authority + (uri.getPath() == null ? "" : uri.getPath());
+        return uri.getScheme() + "://" + authority + ObjectUtils.defaultIfNull(uri.getPath(), "");
     }
 
     /**
@@ -217,19 +222,19 @@ public class AiConnectionProbe {
      * {@code ofInputStream} + 自管读循环与截止时间，登记为后续（本批不做）。
      */
     private static String boundedBody(byte[] body) {
-        if (body == null || body.length == 0) {
+        if (ArrayUtils.isEmpty(body)) {
             return "";
         }
         int length = Math.min(body.length, MAX_BODY_BYTES);
-        if (length < body.length) {
+        if (length < body.length && log.isDebugEnabled()) {
             log.debug("probe response body {} bytes, truncating to {} bytes before parsing (MODELS_INVALID is an acceptable outcome)", body.length,
                     MAX_BODY_BYTES);
         }
-        return new String(body, 0, length, java.nio.charset.StandardCharsets.UTF_8);
+        return new String(body, 0, length, StandardCharsets.UTF_8);
     }
 
     private static String normalisePath(String modelsPath) {
-        String path = StringUtils.hasText(modelsPath) ? modelsPath.trim() : "/models";
+        String path = StringUtils.isNotBlank(modelsPath) ? modelsPath.trim() : "/models";
         return path.startsWith("/") ? path : "/" + path;
     }
 
@@ -242,40 +247,40 @@ public class AiConnectionProbe {
             return new ProbeResult(false, status, latencyMs, CODE_MODELS_UNSUPPORTED, MESSAGE_MODELS_UNSUPPORTED, 0,
                     List.of());
         }
-        List<String> ids = parseModelIds(body);
-        if (ids == null) {
+        Optional<List<String>> ids = parseModelIds(body);
+        if (ids.isEmpty()) {
             return new ProbeResult(false, status, latencyMs, CODE_MODELS_INVALID, MESSAGE_MODELS_INVALID, 0,
                     List.of());
         }
-        return new ProbeResult(true, status, latencyMs, null, null, ids.size(), ids);
+        return new ProbeResult(true, status, latencyMs, null, null, ids.get().size(), ids.get());
     }
 
     /**
      * 从 {@code {data:[{id:"..."}]}} 抽 id；也容 {@code {data:["..."]}} 与顶层数组。
      *
-     * @return {@code null} = 200 但不是模型数组（MODELS_INVALID）
+     * @return {@code empty} = 200 但不是模型数组（MODELS_INVALID）
      */
-    private List<String> parseModelIds(String body) {
-        if (!StringUtils.hasText(body)) {
-            return null;
+    private Optional<List<String>> parseModelIds(String body) {
+        if (!StringUtils.isNotBlank(body)) {
+            return Optional.empty();
         }
         try {
             JsonNode root = this.objectMapper.readTree(body);
             JsonNode array = root.isArray() ? root : root.path("data");
             if (!array.isArray()) {
-                return null;
+                return Optional.empty();
             }
             List<String> ids = new ArrayList<>();
             for (JsonNode item : array) {
                 String id = item.isTextual() ? item.asText() : item.path("id").asText(null);
-                if (StringUtils.hasText(id)) {
+                if (StringUtils.isNotBlank(id)) {
                     ids.add(id);
                 }
             }
-            return ids;
+            return Optional.of(ids);
         }
         catch (Exception ex) {
-            return null;
+            return Optional.empty();
         }
     }
 
@@ -289,11 +294,17 @@ public class AiConnectionProbe {
      * @param modelCount 模型数量（ok=false 时为 0）
      * @param models 模型 id 列表（ok=false 时为空）
      */
-    public record ProbeResult(boolean ok, Integer status, long latencyMs, String code, String message,
-            int modelCount, List<String> models) {
+    public record ProbeResult(@JsonProperty("ok") boolean ok, @JsonProperty("status") Integer status,
+            @JsonProperty("latencyMs") @JsonFormat(shape = JsonFormat.Shape.STRING) long latencyMs,
+            @JsonProperty("code") String code, @JsonProperty("message") String message,
+            @JsonProperty("modelCount") int modelCount, @JsonProperty("models") @NonNull List<String> models) {
+
+        public ProbeResult {
+            models = models == null ? List.of() : List.copyOf(models);
+        }
 
         public static ProbeResult ok(int status, long latencyMs, List<String> models) {
-            return new ProbeResult(true, status, latencyMs, null, null, models.size(), models);
+            return new ProbeResult(true, status, latencyMs, null, null, models == null ? 0 : models.size(), models);
         }
 
         public static ProbeResult failed(String code, Integer status, long latencyMs, String message) {

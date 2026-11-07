@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.web;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * POST /api/ai/confirm 请求体（确认门的人工决策）。
  *
@@ -11,11 +13,18 @@ package com.example.configmgr.ai.web;
  *                用户在挂起期间可能已在向导里改了步骤/勾选，续跑前按它更新快照，
  *                由 {@code TaskSlotResolver} 重算槽位。同一套 {@code ContextFieldGate} 消毒。
  */
-public record ConfirmRequest(String runId, String toolCallId, Boolean approved, String reason,
-		AiChatRequest.Context context) {
+public record ConfirmRequest(@JsonProperty("runId") String runId,
+		@JsonProperty("toolCallId") String toolCallId, @JsonProperty("approved") Boolean approved,
+		@JsonProperty("reason") String reason, @JsonProperty("context") AiChatRequest.Context context) {
 
 	/** 兼容构造器：不带工作区上下文的旧调用点（含既有单测）无需改动。 */
 	public ConfirmRequest(String runId, String toolCallId, Boolean approved, String reason) {
 		this(runId, toolCallId, approved, reason, null);
+	}
+
+	@Override
+	public String toString() {
+		return "ConfirmRequest[runId=" + this.runId + ", toolCallId=" + this.toolCallId
+				+ ", approved=" + this.approved + "]";
 	}
 }

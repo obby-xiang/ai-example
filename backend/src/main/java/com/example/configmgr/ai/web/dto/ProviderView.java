@@ -1,5 +1,10 @@
 package com.example.configmgr.ai.web.dto;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.NonNull;
+
 import java.util.List;
 
 /**
@@ -16,7 +21,23 @@ import java.util.List;
  * @param keyStatus 运行时结论：OK / MISSING / UNREADABLE / DISABLED（{@code KEY_UNREADABLE} 的展示位）
  * @param source ENV_SEED / DB（设置页"来源"标签）
  */
-public record ProviderView(Long id, String code, String displayName, String protocol, String baseUrl,
-        String completionsPath, String modelsPath, boolean keyConfigured, String keyLast4, String keyRef,
-        String keyStatus, String source, boolean enabled, List<ModelView> models) {
+public record ProviderView(@JsonProperty("id") @JsonFormat(shape = JsonFormat.Shape.STRING) Long id,
+        @JsonProperty("code") String code, @JsonProperty("displayName") String displayName,
+        @JsonProperty("protocol") String protocol, @JsonIgnore String baseUrl,
+        @JsonProperty("completionsPath") String completionsPath, @JsonProperty("modelsPath") String modelsPath,
+        @JsonProperty("keyConfigured") boolean keyConfigured, @JsonProperty("keyLast4") String keyLast4,
+        @JsonProperty("keyRef") String keyRef, @JsonProperty("keyStatus") String keyStatus,
+        @JsonProperty("source") String source, @JsonProperty("enabled") boolean enabled,
+        @JsonProperty("models") @NonNull List<ModelView> models) {
+
+    public ProviderView {
+        models = models == null ? List.of() : List.copyOf(models);
+    }
+
+    @Override
+    public String toString() {
+        return "ProviderView[id=" + this.id + ", code=" + this.code + ", displayName=" + this.displayName
+                + ", protocol=" + this.protocol + ", keyConfigured=" + this.keyConfigured + ", keyRef=" + this.keyRef
+                + ", keyStatus=" + this.keyStatus + ", source=" + this.source + ", enabled=" + this.enabled + "]";
+    }
 }

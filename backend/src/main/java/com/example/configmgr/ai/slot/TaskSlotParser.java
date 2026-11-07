@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.slot;
 
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -97,79 +98,82 @@ final class TaskSlotParser {
 	 * @param fallbackDefCodes 本条文本没提选择时，条件解析可依附的已知配置项（权威/历史）
 	 */
 	static Intent parse(String text, List<SlotDefinition> definitions, List<String> fallbackDefCodes) {
-		if (text == null || text.isBlank()) {
+		if (StringUtils.isBlank(text)) {
 			return Intent.absent();
 		}
 		SelectionMatch match = matchSelection(text, definitions);
 		boolean selectIntent = SELECT_INTENT.matcher(text).find();
 		boolean negated = NEGATED_SELECT.matcher(text).find();
 		boolean clearAll = CLEAR_ALL.matcher(text).find();
+		SelectionResolution selection = resolveSelection(match, selectIntent, negated, clearAll);
+		ConditionResolution condition = resolveConditions(text, definitions, fallbackDefCodes, selection, clearAll);
+		return new Intent(selection.state(), selection.defCodes(), condition.state(), condition.conditions(),
+				condition.verifiedConditionDefCodes(), taskType(text, negated));
+	}
 
-		SlotState selection;
-		List<String> defCodes = List.of();
+	private static SelectionResolution resolveSelection(SelectionMatch match, boolean selectIntent, boolean negated,
+			boolean clearAll) {
 		if (selectIntent && !negated) {
 			if (match.ambiguous()) {
 				// 同一中文名对应多个定义编码（且文本里没有编码消歧）：不猜
-				selection = SlotState.AMBIGUOUS;
+				return new SelectionResolution(SlotState.AMBIGUOUS, List.of());
 			}
-			else if (!match.definitions().isEmpty()) {
-				selection = SlotState.DETERMINED;
-				defCodes = match.definitions().stream().map(SlotDefinition::code).toList();
+			if (!match.definitions().isEmpty()) {
+				return new SelectionResolution(SlotState.DETERMINED,
+						match.definitions().stream().map(SlotDefinition::code).toList());
 			}
-			else {
-				selection = SlotState.ABSENT;
-			}
+			return new SelectionResolution(SlotState.ABSENT, List.of());
 		}
-		else if (negated || clearAll) {
-			selection = SlotState.CLEARED;
+		if (negated || clearAll) {
+			return new SelectionResolution(SlotState.CLEARED, List.of());
 		}
-		else {
-			selection = SlotState.ABSENT;
-		}
+		return new SelectionResolution(SlotState.ABSENT, List.of());
+	}
 
-		List<String> effectiveDefCodes = switch (selection) {
-			case DETERMINED -> defCodes;
+	private static ConditionResolution resolveConditions(String text, List<SlotDefinition> definitions,
+			List<String> fallbackDefCodes, SelectionResolution selection, boolean clearAll) {
+		List<String> effectiveDefCodes = switch (selection.state()) {
+			case DETERMINED -> selection.defCodes();
 			case CLEARED, AMBIGUOUS -> List.of();
 			case ABSENT -> fallbackDefCodes == null ? List.of() : fallbackDefCodes;
 		};
-
-		SlotState condition;
-		List<ConditionSlot> conditions = List.of();
-		List<String> verifiedConditionDefCodes = List.of();
 		if (clearAll || CLEAR_CONDITION.matcher(text).find()) {
-			condition = SlotState.CLEARED;
+			return new ConditionResolution(SlotState.CLEARED, List.of(), List.of());
 		}
-		else if (effectiveDefCodes.size() == 1) {
-			SlotDefinition def = definitionOf(definitions, effectiveDefCodes.get(0));
-			ParsedConditions explicit = def == null ? null : explicitConditions(text, def);
-			if (explicit != null && !explicit.slots().isEmpty()) {
-				condition = SlotState.DETERMINED;
-				conditions = explicit.slots();
-				verifiedConditionDefCodes = explicit.verified() ? List.of(def.code()) : List.of();
-			}
-			else if (def != null && (selection == SlotState.DETERMINED
-					|| FILTER_INTENT.matcher(text).find())) {
-				// 裸值缩写：本轮已明确选定唯一配置时不再要求"筛选/只要"等词
-				// （"导出CONFIG_VALUE货币字典"）；仍要求唯一主键 + 唯一合法大写候选。
-				ShorthandResult shorthand = shorthandCondition(text, def);
-				condition = shorthand.state();
-				conditions = shorthand.slot() == null ? List.of() : List.of(shorthand.slot());
-				verifiedConditionDefCodes = shorthand.verified() ? List.of(def.code()) : List.of();
-			}
-			else {
-				condition = SlotState.ABSENT;
-			}
+		if (effectiveDefCodes.size() == 1) {
+			return resolveSingleDefinitionConditions(text, definitions, effectiveDefCodes, selection.state());
 		}
-		else if (effectiveDefCodes.size() > 1 && FILTER_INTENT.matcher(text).find()) {
+		if (effectiveDefCodes.size() > 1 && FILTER_INTENT.matcher(text).find()) {
 			// 条件属于哪个配置项不唯一 —— 不造条件
-			condition = SlotState.AMBIGUOUS;
+			return new ConditionResolution(SlotState.AMBIGUOUS, List.of(), List.of());
 		}
-		else {
-			condition = SlotState.ABSENT;
-		}
+		return new ConditionResolution(SlotState.ABSENT, List.of(), List.of());
+	}
 
-		return new Intent(selection, defCodes, condition, conditions, verifiedConditionDefCodes,
-				taskType(text, negated));
+	private static ConditionResolution resolveSingleDefinitionConditions(String text,
+			List<SlotDefinition> definitions, List<String> effectiveDefCodes, SlotState selection) {
+		SlotDefinition def = definitionOf(definitions, effectiveDefCodes.getFirst());
+		ParsedConditions explicit = def == null ? null : explicitConditions(text, def);
+		if (explicit != null && !explicit.slots().isEmpty()) {
+			return new ConditionResolution(SlotState.DETERMINED, explicit.slots(),
+					explicit.verified() ? List.of(def.code()) : List.of());
+		}
+		if (def != null && (selection == SlotState.DETERMINED || FILTER_INTENT.matcher(text).find())) {
+			// 裸值缩写：本轮已明确选定唯一配置时不再要求"筛选/只要"等词
+			// （"导出CONFIG_VALUE货币字典"）；仍要求唯一主键 + 唯一合法大写候选。
+			ShorthandResult shorthand = shorthandCondition(text, def);
+			return new ConditionResolution(shorthand.state(),
+					shorthand.slot() == null ? List.of() : List.of(shorthand.slot()),
+					shorthand.verified() ? List.of(def.code()) : List.of());
+		}
+		return new ConditionResolution(SlotState.ABSENT, List.of(), List.of());
+	}
+
+	private record SelectionResolution(SlotState state, List<String> defCodes) {
+	}
+
+	private record ConditionResolution(SlotState state, List<ConditionSlot> conditions,
+			List<String> verifiedConditionDefCodes) {
 	}
 
 	// ── 配置定义识别 ─────────────────────────────────────────────────────────
@@ -205,19 +209,19 @@ final class TaskSlotParser {
 			}
 			List<SlotDefinition> group = definition.name() == null ? null : byName.get(definition.name().trim());
 			boolean byUniqueName = group != null && group.size() == 1
-					&& group.get(0).code().equals(definition.code());
+					&& group.getFirst().code().equals(definition.code());
 			if (codeMatched.contains(definition.code()) || byUniqueName) {
 				selected.add(definition);
 			}
 		}
-		return new SelectionMatch(false, selected);
+		return new SelectionMatch(false, selected.isEmpty() ? List.of() : selected);
 	}
 
 	private record SelectionMatch(boolean ambiguous, List<SlotDefinition> definitions) {
 	}
 
 	private static boolean containsCode(String text, String code) {
-		if (code.isBlank()) {
+		if (StringUtils.isBlank(code)) {
 			return false;
 		}
 		Pattern pattern = Pattern.compile("(?i)(?<![A-Za-z0-9_])" + Pattern.quote(code) + "(?![A-Za-z0-9_])");
@@ -291,7 +295,7 @@ final class TaskSlotParser {
 
 	/** 单一字面量：ASCII 标识符/数字，或配置枚举里的完整值（引号内允许原样）。 */
 	private static boolean isSingleValueToken(String raw, SlotDefinition.SlotField field) {
-		String value = raw == null ? "" : raw.trim();
+		String value = StringUtils.trimToEmpty(raw);
 		if (value.isEmpty()) {
 			return false;
 		}
@@ -325,7 +329,7 @@ final class TaskSlotParser {
 			literals.add(definition.name());
 		}
 		for (String literal : literals) {
-			if (literal != null && !literal.isBlank()) {
+			if (StringUtils.isNotBlank(literal)) {
 				residual = Pattern.compile(Pattern.quote(literal), Pattern.CASE_INSENSITIVE)
 						.matcher(residual).replaceAll(" ");
 			}
@@ -344,7 +348,7 @@ final class TaskSlotParser {
 			Matcher matcher = pattern.matcher(text);
 			while (matcher.find()) {
 				String value = matcher.group(1);
-				if (value != null && !value.isBlank()) {
+				if (StringUtils.isNotBlank(value)) {
 					out.add(new ValueMatch(value, matcher.start(), matcher.end()));
 				}
 			}
@@ -355,13 +359,13 @@ final class TaskSlotParser {
 	/** 字段的匹配记号：编码带词边界，中文标签按原文（>1 字才用）。 */
 	private static List<String> tokens(SlotDefinition.SlotField field) {
 		List<String> tokens = new ArrayList<>();
-		if (field.code() != null && !field.code().isBlank()) {
+		if (StringUtils.isNotBlank(field.code())) {
 			tokens.add("(?<![A-Za-z0-9_])" + Pattern.quote(field.code()) + "(?![A-Za-z0-9_])");
 		}
 		if (field.label() != null && field.label().trim().length() >= 2) {
 			tokens.add(Pattern.quote(field.label().trim()));
 		}
-		return tokens;
+		return tokens.isEmpty() ? List.of() : tokens;
 	}
 
 	/**
@@ -399,7 +403,7 @@ final class TaskSlotParser {
 		if (candidates.size() > 1) {
 			return new ShorthandResult(SlotState.AMBIGUOUS, null, false);
 		}
-		String candidate = candidates.get(0);
+		String candidate = candidates.getFirst();
 		String value = key.optionValues().stream().filter(option -> option.equalsIgnoreCase(candidate))
 				.findFirst().orElse(null);
 		if (!key.optionValues().isEmpty() && value == null) {
@@ -426,7 +430,7 @@ final class TaskSlotParser {
 	 * 宿主判定"新任务的类型是否已知"只看用户原话，复用这里的口径，避免两处各写一套正则。
 	 */
 	static String explicitTaskType(String text) {
-		if (text == null || text.isBlank()) {
+		if (StringUtils.isBlank(text)) {
 			return null;
 		}
 		return taskType(text, NEGATED_SELECT.matcher(text).find());

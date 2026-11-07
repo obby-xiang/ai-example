@@ -10,6 +10,7 @@ import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
 import com.example.configmgr.common.ConflictException;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -84,7 +85,7 @@ public class KbTools {
     /** 未就绪走真实失败结局；原始原因只写服务端日志，模型与用户只得到公开摘要。 */
     private IllegalStateException notReady() {
         String reason = this.kbService.status().lastError();
-        if (reason != null && !reason.isBlank()) {
+        if (StringUtils.isNotBlank(reason)) {
             log.warn("KB index unavailable");
         }
         return new IllegalStateException(UNAVAILABLE_TEXT);
@@ -211,7 +212,7 @@ public class KbTools {
         String body = renderRead(page, docId);
         for (int attempt = 0; attempt < PAGE_FIT_ATTEMPTS; attempt++) {
             String rendered = KbText.wrap(body);
-            if (fitsModelSide(rendered, body, budget)) {
+            if (canFitModelSide(rendered, body, budget)) {
                 return rendered;
             }
             int nextRows = pageRows;
@@ -246,7 +247,7 @@ public class KbTools {
      * <p>结构尾巴（{@code [truncated=…]} 行）在 = 正文没被切掉尾部；与限流器判定同源，
      * 因此"模型看到的这页"与"工具算出的 next_offset"说的是同一段文字。
      */
-    private boolean fitsModelSide(String rendered, String body, ToolResultLimiter.ModelBudget budget) {
+    private boolean canFitModelSide(String rendered, String body, ToolResultLimiter.ModelBudget budget) {
         if (!KbText.fits(body)) {
             return false;
         }
@@ -330,7 +331,7 @@ public class KbTools {
         sb.append("answer: ").append(result.answer()).append('\n');
         sb.append("source_doc=").append(result.docId())
                 .append(" | title=").append(result.title());
-        if (result.section() != null && !result.section().isBlank()) {
+        if (StringUtils.isNotBlank(result.section())) {
             sb.append(" | section=").append(result.section());
         }
         sb.append(" | updated_at=").append(result.updatedAt()).append('\n');

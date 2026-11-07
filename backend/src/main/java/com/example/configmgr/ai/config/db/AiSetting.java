@@ -1,10 +1,13 @@
 package com.example.configmgr.ai.config.db;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
@@ -17,7 +20,9 @@ import java.time.LocalDateTime;
  * {@code default.topP} / {@code default.maxTokens} / {@code allow.userParams} / {@code config.version}。
  * V1 空库基线预置 {@code config.version=1}。
  */
-@Data
+@Getter
+@Setter
+@ToString
 @Entity
 @Table(name = "ai_setting")
 public class AiSetting {
@@ -51,12 +56,15 @@ public class AiSetting {
 
     @Id
     @Column(name = "setting_key", length = 64)
+    @JsonProperty("settingKey")
     private String settingKey;
 
     @Column(name = "value_json", length = 2048)
+    @JsonProperty("valueJson")
     private String valueJson;
 
     @UpdateTimestamp
     @Column(name = "updated_at")
+    @JsonProperty("updatedAt")
     private LocalDateTime updatedAt;
 }

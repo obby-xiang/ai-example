@@ -4,12 +4,16 @@ import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -39,6 +43,8 @@ public final class ConditionAssessment {
 
 	private static final ObjectMapper JSON = new ObjectMapper();
 
+	private static final List<ConditionFact> INVALID_FACTS = Collections.singletonList(null);
+
 	private ConditionAssessment() {
 	}
 
@@ -61,7 +67,7 @@ public final class ConditionAssessment {
 			if ("SCOPE".equals(this.operator)) {
 				return "范围 = " + this.value;
 			}
-			return this.fieldCode + " " + this.operator + (this.value == null || this.value.isBlank() ? "" : " " + this.value);
+			return this.fieldCode + " " + this.operator + (StringUtils.isBlank(this.value) ? "" : " " + this.value);
 		}
 	}
 
@@ -106,7 +112,7 @@ public final class ConditionAssessment {
 					out.add(item.defCode());
 				}
 			}
-			return out;
+			return out.isEmpty() ? Set.of() : out;
 		}
 
 		/** 未决定/无法解析的配置项编码。 */
@@ -117,7 +123,7 @@ public final class ConditionAssessment {
 					out.add(item.defCode());
 				}
 			}
-			return out;
+			return out.isEmpty() ? List.of() : out;
 		}
 
 		/** 是否存在无法解析的条件 JSON（"坏 JSON"与"没设置"必须可区分）。 */
@@ -136,7 +142,7 @@ public final class ConditionAssessment {
 			for (ItemCondition item : this.items) {
 				out.addAll(item.facts());
 			}
-			return out;
+			return out.isEmpty() ? List.of() : out;
 		}
 
 		/** 该配置项是否已有条件（任何算子/范围键）。 */
@@ -155,7 +161,7 @@ public final class ConditionAssessment {
 	 * 因为"至少有一条真实条件"就已经是已设置。
 	 */
 	public static Assessment ofItems(Collection<TaskItem> items) {
-		if (items == null || items.isEmpty()) {
+		if (CollectionUtils.isEmpty(items)) {
 			return new Assessment(List.of());
 		}
 		Map<String, ItemCondition> merged = new LinkedHashMap<>();
@@ -193,7 +199,7 @@ public final class ConditionAssessment {
 	 * 按 {@code UNDECIDED + unparseable} 处理（既不能当全量，也不能当已设置）。
 	 */
 	public static ItemCondition assess(String defCode, String conditionJson) {
-		if (conditionJson == null || conditionJson.isBlank()) {
+		if (StringUtils.isBlank(conditionJson)) {
 			return new ItemCondition(defCode, State.UNDECIDED, false, List.of());
 		}
 		JsonNode node;
@@ -208,12 +214,8 @@ public final class ConditionAssessment {
 		}
 		// 只有 fields / scopeKeys 两个键是条件契约；未知键说明结构来路不明（未来版本/坏载荷），
 		// 不得当成"空条件 = 全量"（Task 1 第 1 项）。
-		var names = node.fieldNames();
-		while (names.hasNext()) {
-			String name = names.next();
-			if (!"fields".equals(name) && !"scopeKeys".equals(name)) {
-				return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
-			}
+		if (!hasOnlyConditionKeys(node)) {
+			return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
 		}
 		JsonNode fields = node.get("fields");
 		if (fields != null && !fields.isArray()) {
@@ -231,7 +233,7 @@ public final class ConditionAssessment {
 			facts.add(new ConditionFact(defCode, null, "SCOPE", key));
 		}
 		List<ConditionFact> fieldFacts = fieldFacts(defCode, fields);
-		if (fieldFacts == null) {
+		if (fieldFacts == INVALID_FACTS) {
 			return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
 		}
 		facts.addAll(fieldFacts);
@@ -245,8 +247,19 @@ public final class ConditionAssessment {
 		return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
 	}
 
+	private static boolean hasOnlyConditionKeys(JsonNode node) {
+		var names = node.fieldNames();
+		while (names.hasNext()) {
+			String name = names.next();
+			if (!"fields".equals(name) && !"scopeKeys".equals(name)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	/**
-	 * 字段事实；任一字段残缺（非对象 / 缺 fieldCode / 缺 operator）返回 {@code null} ——
+	 * 字段事实；任一字段残缺（非对象 / 缺 fieldCode / 缺 operator）返回私有无效哨兵 ——
 	 * 残缺结构不是"没有条件"，调用方按未决定处理。
 	 */
 	private static List<ConditionFact> fieldFacts(String defCode, JsonNode fields) {
@@ -256,17 +269,17 @@ public final class ConditionAssessment {
 		List<ConditionFact> out = new ArrayList<>();
 		for (JsonNode field : fields) {
 			if (field == null || !field.isObject()) {
-				return null;
+				return INVALID_FACTS;
 			}
 			String fieldCode = text(field.get("fieldCode"));
 			String operator = text(field.get("operator"));
 			if (fieldCode == null || operator == null) {
-				return null;
+				return INVALID_FACTS;
 			}
-			out.add(new ConditionFact(defCode, fieldCode, operator.toUpperCase(java.util.Locale.ROOT),
+			out.add(new ConditionFact(defCode, fieldCode, operator.toUpperCase(Locale.ROOT),
 					renderValue(field.get("value"))));
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/**
@@ -279,14 +292,14 @@ public final class ConditionAssessment {
 		}
 		List<String> out = new ArrayList<>();
 		for (JsonNode key : scopeKeys) {
-			if (key == null || !key.isTextual() || key.asText().isBlank()) {
+			if (key == null || !key.isTextual() || StringUtils.isBlank(key.asText())) {
 				out.add(null);
 			}
 			else {
 				out.add(key.asText().trim());
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	private static String renderValue(JsonNode value) {
@@ -309,11 +322,7 @@ public final class ConditionAssessment {
 	}
 
 	private static String plainText(String raw) {
-		if (raw == null) {
-			return null;
-		}
-		String value = raw.trim();
-		return value.isEmpty() ? null : value;
+		return StringUtils.trimToNull(raw);
 	}
 
 	private static int rank(State state) {

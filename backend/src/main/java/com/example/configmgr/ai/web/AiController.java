@@ -9,6 +9,15 @@ import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.history.TranscriptEntries;
+import com.example.configmgr.ai.history.TranscriptEntry;
+import com.example.configmgr.ai.context.ContextStateStore;
+import com.example.configmgr.ai.context.ContextCompactor;
+import com.example.configmgr.ai.context.ContextBreakdownService;
+import com.example.configmgr.ai.resultview.ToolResultViewProvider;
+import com.example.configmgr.ai.resultview.ResultView;
+import com.example.configmgr.ai.run.ReplyLanguage;
+import com.example.configmgr.ai.run.LeaseService;
+import com.example.configmgr.ai.session.SessionPurgeGuard;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ContextFieldGate;
 import com.example.configmgr.ai.gate.InputSanitizer;
@@ -18,6 +27,7 @@ import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.CancelledRunFinalizer;
 import com.example.configmgr.ai.run.ClientRequestRegistry;
@@ -65,7 +75,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-import org.springframework.util.StringUtils;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -82,6 +96,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.RejectedExecutionException;
 
@@ -161,7 +176,7 @@ public class AiController {
 	private final RunStore runStore;
 
 	@Autowired(required = false)
-	private com.example.configmgr.ai.context.ContextStateStore contextStateStore;
+	private ContextStateStore contextStateStore;
 
 	private final RunRegistry runRegistry;
 
@@ -231,7 +246,7 @@ public class AiController {
 	 * 守卫读失败<b>不</b>放行（fail-closed），按 Redis 不可用 503 处理。
 	 */
 	@Autowired(required = false)
-	private com.example.configmgr.ai.session.SessionPurgeGuard sessionPurgeGuard;
+	private SessionPurgeGuard sessionPurgeGuard;
 
 	/**
 	 * AI 表格工具治理批：表格开关（{@code /health.sheet} 的配置面）。未注入时少该键。
@@ -268,17 +283,17 @@ public class AiController {
 	 * {@code /health} 的 {@code compactionOn} 为 false。
 	 */
 	@Autowired(required = false)
-	private com.example.configmgr.ai.context.ContextCompactor contextCompactor;
+	private ContextCompactor contextCompactor;
 
 	@Autowired(required = false)
-	private com.example.configmgr.ai.context.ContextBreakdownService contextBreakdownService;
+	private ContextBreakdownService contextBreakdownService;
 
 	/**
 	 * 用户展示历史（transcript）。字段注入（构造器签名不变 ⇒ 既有单测零触碰）；
 	 * 未注入时 {@code /history} 返回 503（展示历史只有一个读源）。
 	 */
 	@Autowired(required = false)
-	private com.example.configmgr.ai.history.ConversationTranscriptStore transcript;
+	private ConversationTranscriptStore transcript;
 
 	/**
 	 * L-78（真机 E2E 批② NFEZUI 域 Z-06）：历史面的**结果视图投影器**（与帧面同一批 Bean）。
@@ -291,7 +306,7 @@ public class AiController {
 	 * 未注入时历史载荷**不产** {@code resultView} 键（旧形态逐字不变）。
 	 */
 	@Autowired(required = false)
-	private List<com.example.configmgr.ai.resultview.ToolResultViewProvider> resultViewProviders = List.of();
+	private List<ToolResultViewProvider> resultViewProviders = List.of();
 
 	/**
 	 * S6 尾项（批3二）：错误体的码级本地化。**字段注入**的理由同既有各组件 —— 构造器签名不变 ⇒
@@ -337,72 +352,96 @@ public class AiController {
 					null, "reason", "ai_unavailable");
 			return json(HttpStatus.SERVICE_UNAVAILABLE, unavailable());
 		}
-		// R4：Redis 不可用时在**开流之前**快速失败（≤ 一次 PING 的超时，见 RedisAvailability）。
-		// 顺序：必填校验 → Redis 探活 → 归一化 → 空拒 → 长度。
-		// 必填校验在探活之前（参数错就该报 400，不该被 Redis 状态遮住）；其余闸保持在探活之后
-		// （顺序不变）—— 由此产生的既定顺序是：Redis 不可用时，超长请求会先撞 503 而不是 400。
-		if (request == null || !StringUtils.hasText(request.sessionId()) || !StringUtils.hasText(request.message())) {
+		ChatPreRead preRead = preReadChat(request);
+		if (preRead.rejection() != null) {
+			return preRead.rejection();
+		}
+		ChatInput input = sanitizeChatInput(request);
+		if (input.rejection() != null) {
+			return input.rejection();
+		}
+		AiChatRequest effective = effectiveChatRequest(request, preRead.clientRequestId(), input.text());
+		ResponseEntity<?> rejection = validateEffectiveChatRequest(effective);
+		if (rejection != null) {
+			return rejection;
+		}
+		rejection = sessionPurgeRejection(effective.sessionId());
+		if (rejection != null) {
+			return rejection;
+		}
+		String runId = UUID.randomUUID().toString();
+		SessionGate.Busy busy = acquireSessionGate(effective.sessionId(), runId);
+		if (busy != null) {
+			return sessionBusy(effective.sessionId(), busy);
+		}
+		rejection = claimClientRequest(effective.sessionId(), preRead.clientRequestId(), runId);
+		if (rejection != null) {
+			return rejection;
+		}
+		return submitChat(service, effective, input.text(), preRead.clientRequestId(), runId);
+	}
+
+	/** 必填校验 → clientRequestId 形状 → Redis 探活 → 重复请求预读，顺序与原入口一致。 */
+	private ChatPreRead preReadChat(AiChatRequest request) {
+		if (request == null || !StringUtils.isNotBlank(request.sessionId()) || !StringUtils.isNotBlank(request.message())) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request == null ? null : request.sessionId(), null,
 					"reason", "missing_session_or_message");
-			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 与 message 均为必填"));
+			return new ChatPreRead(json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.BAD_REQUEST, "sessionId 与 message 均为必填")), null);
 		}
-		// 停止闭环 additive 字段：形状非法在入口 400（不进 Redis、不占会话门）。缺省/空白 = 旧客户端。
-		String clientRequestId = StringUtils.hasText(request.clientRequestId()) ? request.clientRequestId() : null;
+		String clientRequestId = StringUtils.isNotBlank(request.clientRequestId()) ? request.clientRequestId() : null;
 		if (clientRequestId != null && !ClientRequestRegistry.isValid(clientRequestId)) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request.sessionId(), null,
 					"reason", "invalid_client_request_id");
-			return json(HttpStatus.BAD_REQUEST,
-					errorBody(ErrorCodes.BAD_REQUEST, "clientRequestId 形状非法（1..128 位，字母数字 . _ : -）"));
+			return new ChatPreRead(json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.BAD_REQUEST, "clientRequestId 形状非法（1..128 位，字母数字 . _ : -）")), null);
 		}
 		if (!this.redisAvailability.isAvailable()) {
 			deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), request.sessionId(), null,
 					"reason", "redis_unavailable");
-			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+			return new ChatPreRead(json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable()), null);
 		}
-		/**
-		 * 停止闭环 / 重复请求：同一 {@code clientRequestId} 的重试（网络抖动导致前端重发同一条 /chat）
-		 * 必须识别为**同一个既有请求** —— 不新建 run、不占新会话门、不启动第二条驱动。
-		 *
-		 * <p>只要映射已绑定 {@code RUN:<runId>}（或仍在短保留期内的终态 {@code DONE:<runId>:<ts>}），
-		 * 直接回既有 409 {@code SESSION_BUSY} 形态 +
-		 * additive 标记 {@code duplicateRequest/clientRequestId}；前端据此走既有 events/reattach
-		 * 自动收帧（活动轮继续、终态轮回放终局），不会显示"消息没发出"。
-		 * 已取消墓碑不在这里拦：仍按既有 claim → 取消优先收敛（不恢复执行）。
-		 */
-		if (clientRequestId != null && this.clientRequests != null) {
-			String boundRunId = null;
-			try {
-				boundRunId = this.clientRequests.boundRunId(request.sessionId(), clientRequestId);
-			}
-			catch (RuntimeException ex) {
-				// 读失败按"未绑定"继续：后面的 claim 仍是权威判定（它也会失败则按 503 如实失败）。
-				log.debug("clientRequestId binding pre-read failed sessionId={}", request.sessionId(), ex);
-			}
-			if (boundRunId != null) {
-				deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, request.sessionId(), boundRunId,
-						"reason", "duplicate_client_request");
-				return json(HttpStatus.CONFLICT,
-						duplicateClientRequestBody(request.sessionId(), clientRequestId, boundRunId));
+		ResponseEntity<?> duplicate = duplicateClientRequest(request.sessionId(), clientRequestId);
+		return new ChatPreRead(duplicate, clientRequestId);
+	}
+
+	/** 已绑定映射直接接回既有轮；预读失败仍由后续原子 claim 作权威判定。 */
+	private ResponseEntity<?> duplicateClientRequest(String sessionId, String clientRequestId) {
+		if (clientRequestId == null || this.clientRequests == null) {
+			return null;
+		}
+		String boundRunId = null;
+		try {
+			boundRunId = this.clientRequests.boundRunId(sessionId, clientRequestId);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("client-request-pre-read")) {
+				log.warn("clientRequestId binding pre-read failed sessionId={}", sessionId, ex);
 			}
 		}
-		// 批① 闸门 1：归一化（只归一不拦截，§5.1 #2）。先归一后量长度 —— 量的是"真正进模型的那份"，
-		// 零宽填充不该算进用户的长度上限；长度口径 = UTF-16 码元数，与前端 maxlength 同一把尺。
+		if (boundRunId == null) {
+			return null;
+		}
+		deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, boundRunId,
+				"reason", "duplicate_client_request");
+		return json(HttpStatus.CONFLICT, duplicateClientRequestBody(sessionId, clientRequestId, boundRunId));
+	}
+
+	/** 先归一化再按 UTF-16 码元数验空与长度；超限拒绝而不截断。 */
+	private ChatInput sanitizeChatInput(AiChatRequest request) {
 		InputSanitizer.Result sanitized = this.inputSanitizer.sanitize(request.message());
-		if (sanitized.changed()) {
+		if (sanitized.isChanged()) {
 			// 只记长度差与剥离计数：原文可能含敏感数据，日志里不得出现
 			log.info("input normalized sessionId={} chars {}->{} (formatRemoved={} controlRemoved={})",
 					request.sessionId(), sanitized.originalLength(), sanitized.text().length(), sanitized.removedFormat(),
 					sanitized.removedControl());
 		}
-		// 归一后为空 = 原文只由不可见字符构成（"零宽填充"式空转）：与"message 必填"同一口径拒掉，
-		// 否则会带着一条空 user 消息进模型与记忆窗口。
-		if (!StringUtils.hasText(sanitized.text())) {
+		if (!StringUtils.isNotBlank(sanitized.text())) {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, request.sessionId(), null, "reason",
 					"empty_after_sanitize", "chars", sanitized.text().length());
-			return json(HttpStatus.BAD_REQUEST,
-					errorBody(ErrorCodes.BAD_REQUEST, "message 归一化后为空（原文仅含不可见字符），请重新输入"));
+			return new ChatInput(json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.BAD_REQUEST, "message 归一化后为空（原文仅含不可见字符），请重新输入")), null);
 		}
-		// 批① 闸门 2：长度（§5.1 #1 / 数据最小化 R5）。超限**拒绝不截断**：截断会让模型基于半句话下结论。
 		int maxChars = this.properties.getInput().getMaxChars();
 		if (sanitized.text().length() > maxChars) {
 			if (this.securityEvents != null) {
@@ -410,32 +449,28 @@ public class AiController {
 			}
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.MESSAGE_TOO_LONG, request.sessionId(), null,
 					"chars", sanitized.text().length(), "limit", maxChars);
-			return json(HttpStatus.BAD_REQUEST, messageTooLong(sanitized.text().length(), maxChars));
+			return new ChatInput(json(HttpStatus.BAD_REQUEST, messageTooLong(sanitized.text().length(), maxChars)), null);
 		}
+		return new ChatInput(null, sanitized.text());
+	}
 
-		String sessionId = request.sessionId();
-		// 批② 新段（追加在既有拒绝闸之后，既有闸顺序不变）：
-		// context 形状闸 —— 白名单化 + **降级不回显**（用户裁决 2026-10-21 第 1 条：不拒绝请求）。
-		// L-99：输入侧 DLP 已删除 —— 归一层（InputSanitizer）之后的文本原样进模型与记忆。
+	/** 模型与记忆使用归一文本；展示历史仍携带原始输入。 */
+	private AiChatRequest effectiveChatRequest(AiChatRequest request, String clientRequestId, String modelText) {
 		ContextFieldGate.Result gated = this.contextFieldGate == null ? null : this.contextFieldGate.sanitize(request.context());
 		AiChatRequest.Context effectiveContext = gated == null ? request.context() : gated.context();
-		if (gated != null && gated.downgraded() > 0) {
-			if (this.securityEvents != null) {
-				this.securityEvents.contextDowngraded(gated.downgraded());
-			}
+		if (gated != null && gated.downgraded() > 0 && this.securityEvents != null) {
+			this.securityEvents.contextDowngraded(gated.downgraded());
 		}
-		String modelText = sanitized.text();
-		// 模型与记忆使用归一文本；用户展示历史单独携带原始输入，终态重写也不能把它换成归一文本。
-		AiChatRequest effective = new AiChatRequest(sessionId, modelText, effectiveContext, request.modelId(),
+		return new AiChatRequest(request.sessionId(), modelText, effectiveContext, request.modelId(),
 				request.providerId(), request.params(), clientRequestId, request.message());
-		// 批③：模型与参数的<b>存在性</b>校验（纯查快照，不碰上游）。放在归一化/长度之后、会话门之前 ——
-		// 与既有闸序一致（归一化与长度先过、超长先撞），且拒绝不占 in-flight 位。
-		// 显式模型不可用 ⇒ 400 MODEL_NOT_FOUND（不静默回落默认模型：用户点了 A 却跑 B 比报错更糟）。
-		if (this.aiConfigService != null && StringUtils.hasText(effective.modelId())
+	}
+
+	private ResponseEntity<?> validateEffectiveChatRequest(AiChatRequest effective) {
+		String sessionId = effective.sessionId();
+		if (this.aiConfigService != null && StringUtils.isNotBlank(effective.modelId())
 				&& (effective.providerId() == null
 						|| this.aiConfigService.resolveChatTarget(effective.providerId(), effective.modelId()).isEmpty())) {
-			deny(HttpStatus.BAD_REQUEST, ErrorCodes.MODEL_NOT_FOUND, sessionId, null,
-					"model", effective.modelId());
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.MODEL_NOT_FOUND, sessionId, null, "model", effective.modelId());
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.MODEL_NOT_FOUND,
 					"该模型当前不可用（未在可用端点的模型清单里，或端点已停用/密钥不可用）：" + effective.modelId()));
 		}
@@ -444,188 +479,185 @@ public class AiController {
 			deny(HttpStatus.BAD_REQUEST, ErrorCodes.INVALID_PARAM, sessionId, null, "reason", paramsRejection);
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.INVALID_PARAM, paramsRejection));
 		}
-		// 会话销毁守卫（复审 #3）：已销毁的 sessionId 不得再开新轮 —— 否则 run 能建、记忆/历史
-		// 却被守卫拒绝写，表现为"能聊天但不留痕"的静默复活。必须在创建 runId / 占会话门之前。
-		// 守卫读失败 fail-closed：按 Redis 不可用 503，绝不按"未销毁"放行。
-		if (this.sessionPurgeGuard != null) {
-			boolean purged;
-			try {
-				purged = this.sessionPurgeGuard.isArmed(sessionId);
-			}
-			catch (AiStateUnavailableException ex) {
-				deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
-						"purge_guard_unreadable");
-				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
-			}
-			if (purged) {
-				deny(HttpStatus.GONE, ErrorCodes.SESSION_PURGED, sessionId, null, "action", "NEW_SESSION");
-				return json(HttpStatus.GONE, sessionPurged(sessionId));
-			}
+		return null;
+	}
+
+	/** 已销毁会话不得开新轮；守卫不可读时 fail-closed。 */
+	private ResponseEntity<?> sessionPurgeRejection(String sessionId) {
+		if (this.sessionPurgeGuard == null) {
+			return null;
 		}
-		String runId = UUID.randomUUID().toString();
+		boolean purged;
+		try {
+			purged = this.sessionPurgeGuard.isArmed(sessionId);
+		}
+		catch (AiStateUnavailableException ex) {
+			deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
+					"purge_guard_unreadable");
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		if (purged) {
+			deny(HttpStatus.GONE, ErrorCodes.SESSION_PURGED, sessionId, null, "action", "NEW_SESSION");
+			return json(HttpStatus.GONE, sessionPurged(sessionId));
+		}
+		return null;
+	}
+
+	/** 持有者可知且已判死时才释放旧门；未知持有者不强释放。 */
+	private SessionGate.Busy acquireSessionGate(String sessionId, String runId) {
 		SessionGate.Busy busy = this.sessionGate.acquire(sessionId, runId);
-		// 批G · G6：僵尸轮放行 —— 上一轮所在进程死了，会话门却还留着他的 runId 时，用户会永远
-		// 409（只能刷新）。判据见 RunLiveness（无租约 + 本进程无活连接 + 活动早已超出僵尸窗口）。
-		// RT-35：持有者不可知（{@code busy.unknown()}、runId=null）时没有可判的轮 —— 不拿 null 去读
-		// 快照/租约（Redis 抖动时那会把"如实 409"变成异常），也不做任何强释放。
 		if (busy != null && !busy.unknown() && isDeadRound(busy.runId())) {
-			log.warn("session gate held by dead run, allowing new turn sessionId={} deadRunId={} newRunId={}", sessionId, busy.runId(), runId);
-			// 死轮已判定不再推进：按 runId 强释放，仅当会话门仍属于这个死轮才生效。
+			if (LogSampling.canAcquire("dead-session-gate")) {
+				log.warn("session gate held by dead run, allowing new turn sessionId={} deadRunId={} newRunId={}",
+						sessionId, busy.runId(), runId);
+			}
 			this.sessionGate.releaseDeadHeld(sessionId, busy.runId());
 			busy = this.sessionGate.acquire(sessionId, runId);
 		}
-		if (busy != null) {
-			// ADR-5：409 携带进行中轮的 runId，前端据此改走 /api/ai/events/{runId}
-			// —— 仅当持有者可知；不可知时不写 runId/reattach（不编造指向不存在流的地址）。
-			Map<String, Object> body = new LinkedHashMap<>();
-			body.put("code", ErrorCodes.SESSION_BUSY);
-			body.put("message", localize(ErrorCodes.SESSION_BUSY, "该会话已有一轮对话在进行中，请先处理或重挂该轮"));
-			body.put("sessionId", sessionId);
-			if (busy.unknown()) {
-				// RT-35：持有者不可知 ⇒ 没有可指向的轮，**不编造** runId 与 reattach
-				// （否则对外给出 /api/ai/events/null 这条不存在的流，把调用方粘死在假地址上）。
-				// 状态码与 degraded 不变：调用方按既有重试/退避即可恢复（无粘滞、不改状态码语义）。
-				body.put("unknown", true);
-			}
-			else {
-				body.put("runId", busy.runId());
-				body.put("reattach", "/api/ai/events/" + busy.runId());
-			}
-			body.put("degraded", busy.degraded());
-			// 本轮没有 runId（被拒了）：锚到"占着会话的那一轮"，那才是要看的那条链
-			deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, busy.runId(), "heldBy",
-					busy.unknown() ? "unknown" : busy.runId(), "degraded", busy.degraded());
-			return json(HttpStatus.CONFLICT, body);
-		}
+		return busy;
+	}
 
-		/**
-		 * 停止闭环：在**创建 run / 出首帧之前**把 clientRequestId 与本轮绑定。
-		 *
-		 * <p>取消可能早于本次 /chat（刷新后补取消）：映射在取消端已写成 {@code CANCELLED} 墓碑，
-		 * 这里的 claim 原子地识别它、不覆盖，并给本轮写上取消旗标；服务在压缩/建快照/模型调用之前
-		 * 收敛为 {@code done{cancelled:true}}。同一 clientRequestId 已绑定既有 run ⇒ 视为**同一请求的
-		 * 重复到达**：释放新会话门，回 409 SESSION_BUSY + `duplicateRequest` 标记让前端接回既有轮
-		 * （绝不覆盖映射、绝不新建第二条驱动、绝不取消另一轮）。
-		 */
-		if (this.clientRequests != null && clientRequestId != null) {
-			ClientRequestRegistry.Claim claim;
-			try {
-				claim = this.clientRequests.claim(sessionId, clientRequestId, runId);
-			}
-			catch (RuntimeException ex) {
-				log.warn("clientRequestId binding failed (Redis unavailable) sessionId={} runId={}", sessionId, runId,
-						ex);
-				this.sessionGate.release(sessionId, runId);
-				deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
-						"client_request_registry_unavailable");
-				return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
-			}
-			if (claim.state() == ClientRequestRegistry.ClaimState.ALREADY_BOUND) {
-				// 预读与 claim 之间的竞态：映射已绑定既有 run ⇒ 同样按重复请求接回既有轮，
-				// **不**占用新会话门、不新建驱动。只有映射值不可解析时才按真正的坏请求 400。
-				this.sessionGate.release(sessionId, runId);
-				String existingRunId = claim.runId();
-				if (existingRunId != null && !existingRunId.isBlank()) {
-					deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, existingRunId,
-							"reason", "duplicate_client_request");
-					return json(HttpStatus.CONFLICT,
-							duplicateClientRequestBody(sessionId, clientRequestId, existingRunId));
-				}
-				deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, sessionId, null, "reason",
-						"client_request_id_reused");
-				return json(HttpStatus.BAD_REQUEST,
-						errorBody(ErrorCodes.BAD_REQUEST, "clientRequestId 已被另一轮使用，请使用新的请求 id"));
-			}
-			if (claim.state() == ClientRequestRegistry.ClaimState.CANCELLED) {
-				// 取消早于 run 创建：先写本轮取消旗标（同身份键），服务第一条检查即收敛，不跑模型。
-				this.cancellations.cancel(runId, this.runStore.instanceId());
-				log.info("clientRequestId already cancelled before run creation; turn finishes as cancelled sessionId={} runId={}",
-						sessionId, runId);
-			}
+	private ResponseEntity<?> sessionBusy(String sessionId, SessionGate.Busy busy) {
+		Map<String, Object> body = new LinkedHashMap<>();
+		body.put("code", ErrorCodes.SESSION_BUSY);
+		body.put("message", localize(ErrorCodes.SESSION_BUSY, "该会话已有一轮对话在进行中，请先处理或重挂该轮"));
+		body.put("sessionId", sessionId);
+		if (busy.unknown()) {
+			body.put("unknown", true);
 		}
+		else {
+			body.put("runId", busy.runId());
+			body.put("reattach", "/api/ai/events/" + busy.runId());
+		}
+		body.put("degraded", busy.degraded());
+		deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, busy.runId(), "heldBy",
+				busy.unknown() ? "unknown" : busy.runId(), "degraded", busy.degraded());
+		return json(HttpStatus.CONFLICT, body);
+	}
 
+	/** 原子绑定请求与 run；重复绑定、提前取消及注册表失败的语义保持原样。 */
+	private ResponseEntity<?> claimClientRequest(String sessionId, String clientRequestId, String runId) {
+		if (this.clientRequests == null || clientRequestId == null) {
+			return null;
+		}
+		ClientRequestRegistry.Claim claim;
+		try {
+			claim = this.clientRequests.claim(sessionId, clientRequestId, runId);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("client-request-claim")) {
+				log.warn("clientRequestId binding failed (Redis unavailable) sessionId={} runId={}", sessionId, runId, ex);
+			}
+			this.sessionGate.release(sessionId, runId);
+			deny(HttpStatus.SERVICE_UNAVAILABLE, RedisAvailability.code(), sessionId, null, "reason",
+					"client_request_registry_unavailable");
+			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
+		}
+		if (claim.state() == ClientRequestRegistry.ClaimState.ALREADY_BOUND) {
+			this.sessionGate.release(sessionId, runId);
+			String existingRunId = claim.runId();
+			if (StringUtils.isNotBlank(existingRunId)) {
+				deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, existingRunId,
+						"reason", "duplicate_client_request");
+				return json(HttpStatus.CONFLICT,
+						duplicateClientRequestBody(sessionId, clientRequestId, existingRunId));
+			}
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.BAD_REQUEST, sessionId, null, "reason", "client_request_id_reused");
+			return json(HttpStatus.BAD_REQUEST,
+					errorBody(ErrorCodes.BAD_REQUEST, "clientRequestId 已被另一轮使用，请使用新的请求 id"));
+		}
+		if (claim.state() == ClientRequestRegistry.ClaimState.CANCELLED) {
+			this.cancellations.cancel(runId, this.runStore.instanceId());
+			log.info("clientRequestId already cancelled before run creation; turn finishes as cancelled sessionId={} runId={}",
+					sessionId, runId);
+		}
+		return null;
+	}
+
+	private ResponseEntity<?> submitChat(ResilientChatService service, AiChatRequest effective, String modelText,
+			String clientRequestId, String runId) {
+		String sessionId = effective.sessionId();
 		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
 		out.attach(emitter);
-		// 日志链路批：HTTP 线程先装锚点 —— 线程池的 TaskDecorator 在 submit 时刻抓快照，一行不带锚点的
-		// "已受理/池饱和"日志会让"这一轮的日志到底有没有开"无从判断。
 		AiTrace.bind(runId, sessionId);
 		AiTrace.event("turn_accepted",
 				"context", effective.context() == null || effective.context().page() == null ? "none"
 						: effective.context().page(),
-				"model", effective.modelId() == null ? "default" : effective.modelId(),
-				"chars", modelText.length());
-		// 回答语言来源（A3-Y1 / A3-Y7）：与错误体本地化**同一个取值点** ——
-		// ErrorBodyFactory.requestLocale() 读 Accept-Language（无头/畸形回落 zh-CN）。
-		// 必须在 HTTP 线程取好：LocaleContextHolder 是线程级的，工作线程拿不到请求上下文，
-		// 不显式搬运的话 SSE 这条通道的回答语言会恒为中文（A3-Y1 选"随用户语言"后遗症）。
+				"model", effective.modelId() == null ? "default" : effective.modelId(), "chars", modelText.length());
 		Locale replyLocale = ErrorBodyFactory.requestLocale();
 		try {
-			this.aiRunExecutor.execute(() -> {
-				LocaleContextHolder.setLocale(replyLocale);
-				try {
-					service.chat(runId, effective, out);
-				}
-				catch (Exception ex) {
-					log.error("uncaught exception in AI turn sessionId={} runId={}", sessionId, runId, ex);
-					// 每轮必有终态行：压缩/记忆写/快照建/取模型这些"环外"抛错此前只有一行 ERROR，
-					// 没有任何结构化终态 ⇒ 按 runId grep 会看不到收尾。这里补一条终态事件。
-					AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
-							"type", ex.getClass().getSimpleName(),
-							"msg", "Uncaught exception in AI turn");
-					// ===== 批次2 / AR-05：环外异常也走取消优先终态守卫 =====
-					// 环外异常（压缩/记忆写/快照建/取模型）此前只发一帧 error、快照留在 RUNNING ⇒
-					// 刷新后既无终态也无"可重跑"的依据。这里补写 FAILED，但**必须**与 fail()/emptyReply()
-					// 共用 RunStore 的同一个 CAS：取消先到时不得把 CANCELLED 盖成 FAILED，
-					// 也不得再发第二条终帧（取消侧的 done{cancelled:true} 才是这一轮的终帧）。
-					// N2（返修）：失败终帧也由写口在**同一把** per-run 监视器内发出 —— 只在写快照时
-					// 加锁不够，取消的 done{cancelled:true} 可以插在"写完 FAILED"与"锁外发 error"之间。
-					writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED, () -> {
-						// F：终态出口的进程内清理（与 cancel/finish 同一个统一出口；幂等）。
-						service.clearTerminalRunState(runId);
-						// 本批（返修后按<b>每次驱动</b>判）：环外异常的 error 只跳过"<b>本次驱动</b>已落的终帧"。
-						// 判据的下界由 ResilientChatService#chat 在驱动入口记一次；这里不能用"整轮有没有终帧"
-						// （同一 runId 会被多次驱动，上一次的 error 会吞掉本次的环外失败）。
-						// 判据不可知（null）⇒ 照发：宁可多一条，也不吞掉本次失败。
-						if (Boolean.TRUE.equals(out.terminalFrameArchivedSinceDriveStart())) {
-							log.info("failure terminal frame already archived for this drive; skipping outside-turn error runId={}",
-									runId);
-							return;
-						}
-						// R-08：用户面只给白名单短句；异常原文（可能含上游 body）已在上一行 ERROR 日志。
-						out.error(ErrorCodes.AI_RUN_FAILED,
-								localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
-					});
-				}
-				finally {
-					LocaleContextHolder.resetLocaleContext();
-					this.sessionGate.release(sessionId, runId);
-					this.runRegistry.close(runId);
-				}
-			});
+			this.aiRunExecutor.execute(() -> runChatTurn(service, effective, out, replyLocale, runId));
 		}
 		catch (RejectedExecutionException ex) {
-			log.warn("suspension executor pool saturated, rejecting turn sessionId={} runId={}", sessionId, runId, ex);
+			if (LogSampling.canAcquire("turn-pool-saturated")) {
+				log.warn("suspension executor pool saturated, rejecting turn sessionId={} runId={}", sessionId, runId, ex);
+			}
 			AiTrace.event("turn_rejected", "code", "SUSPEND_POOL_SATURATED");
 			this.sessionGate.release(sessionId, runId);
 			this.runRegistry.close(runId);
-			// 停止闭环兼容：这一轮**明确没有开始**。释放本次 clientRequestId 绑定，
-			// 让前端同 id 的瞬时重试能重新 claim（否则会被一条从未启动的映射当成重复请求）。
-			if (this.clientRequests != null && clientRequestId != null) {
-				try {
-					this.clientRequests.releaseBinding(sessionId, clientRequestId, runId);
-				}
-				catch (RuntimeException releaseEx) {
-					log.debug("releasing clientRequestId binding of unstarted turn failed sessionId={}", sessionId,
-							releaseEx);
-				}
-			}
+			releaseUnstartedClientRequest(sessionId, clientRequestId, runId);
 			return json(HttpStatus.SERVICE_UNAVAILABLE, poolSaturated(runId));
 		}
 		finally {
 			AiTrace.clear();
 		}
 		return ResponseEntity.ok(emitter);
+	}
+
+	private void runChatTurn(ResilientChatService service, AiChatRequest effective, SseChatEmitter out,
+			Locale replyLocale, String runId) {
+		String sessionId = effective.sessionId();
+		LocaleContextHolder.setLocale(replyLocale);
+		try {
+			service.chat(runId, effective, out);
+		}
+		catch (Exception ex) {
+			handleOutsideTurnException(service, out, sessionId, runId, ex);
+		}
+		finally {
+			LocaleContextHolder.resetLocaleContext();
+			this.sessionGate.release(sessionId, runId);
+			this.runRegistry.close(runId);
+		}
+	}
+
+	/** 环外异常仍走取消优先 CAS 与每驱动终帧判据。 */
+	private void handleOutsideTurnException(ResilientChatService service, SseChatEmitter out, String sessionId,
+			String runId, Exception ex) {
+		if (LogSampling.canAcquire("outside-turn-exception")) {
+			log.error("uncaught exception in AI turn sessionId={} runId={}", sessionId, runId, ex);
+		}
+		AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
+				"type", ex.getClass().getSimpleName(), "msg", "Uncaught exception in AI turn");
+		writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED, () -> {
+			service.clearTerminalRunState(runId);
+			if (Boolean.TRUE.equals(out.terminalFrameArchivedSinceDriveStart())) {
+				log.info("failure terminal frame already archived for this drive; skipping outside-turn error runId={}", runId);
+				return;
+			}
+			out.error(ErrorCodes.AI_RUN_FAILED, localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
+		});
+	}
+
+	private void releaseUnstartedClientRequest(String sessionId, String clientRequestId, String runId) {
+		if (this.clientRequests == null || clientRequestId == null) {
+			return;
+		}
+		try {
+			this.clientRequests.releaseBinding(sessionId, clientRequestId, runId);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("client-request-release-unstarted")) {
+				log.warn("releasing clientRequestId binding of unstarted turn failed sessionId={}", sessionId, ex);
+			}
+		}
+	}
+
+	private record ChatPreRead(ResponseEntity<?> rejection, String clientRequestId) {
+	}
+
+	private record ChatInput(ResponseEntity<?> rejection, String text) {
 	}
 
 	/**
@@ -661,29 +693,17 @@ public class AiController {
 	}
 
 	private void writeOutsideTurnFailureLocked(String runId, String code, Runnable emitError) {
-		if (writeOutsideTurnFailureState(runId, code) && emitError != null) {
+		if (canWriteOutsideTurnFailureState(runId, code) && emitError != null) {
 			emitError.run();
 		}
 	}
 
 	/** 写失败状态并收敛失败历史（返回"调用方可否发失败终帧"），调用方必须已持有 per-run 监视器。 */
-	private boolean writeOutsideTurnFailureState(String runId, String code) {
+	private boolean canWriteOutsideTurnFailureState(String runId, String code) {
 		try {
 			RunSnapshot snapshot = this.runStore.get(runId);
 			if (snapshot == null) {
-				// ===== AR-06：首帧已发、快照未建（请求前压缩窗口）里抛出 =====
-				// 这一段没有快照可写，也<b>禁止</b>为了"有个终态"而新建一份快照（裸 save 会凭空造出
-				// 一个"已失败"的轮，盖住"这一轮还没真正开始"的事实）。但也不能因此不发终帧：
-				// start 已经发给客户端了，没有终帧就成了"永远等不到结局"的悬挂流。
-				// 于是只做两件事：①取消优先（权威取消态已置位 ⇒ 不发 error，取消侧才是终帧）；
-				// ②否则补一条 error 终帧（不写任何快照）。
-				if (isCancelledFlag(runId)) {
-					log.info("outside-turn exception emits no terminal frame: cancel flag set and snapshot absent (cancel first) runId={}", runId);
-					return false;
-				}
-				log.warn("outside-turn exception before snapshot creation runId={} code={}; not creating snapshot (no naked save), error frame only", runId,
-						code);
-				return true;
+				return canEmitOutsideTurnFailureWithoutSnapshot(runId, code);
 			}
 			if (RunSnapshot.isTerminal(snapshot.getStatus())) {
 				return false;
@@ -700,7 +720,7 @@ public class AiController {
 				snapshot.setMessageJson(new MessageJsonCodec(this.objectMapper).serializeAll(failureHistory));
 			}
 			snapshot.setStatus(RunSnapshot.FAILED);
-			snapshot.setInFlightToolCalls(new java.util.ArrayList<>());
+			snapshot.setInFlightToolCalls(new ArrayList<>());
 			snapshot.setError(code + "：" + failureMessage);
 			boolean written = this.runStore.saveTerminalUnlessCancelled(snapshot);
 			if (!written) {
@@ -713,10 +733,25 @@ public class AiController {
 			return written;
 		}
 		catch (RuntimeException writeEx) {
-			log.warn("outside-turn failure state write failed runId={} (error frame still sent; recovery falls back to snapshot/lease)", runId,
-					writeEx);
+			if (LogSampling.canAcquire("outside-turn-failure-write")) {
+				log.warn("outside-turn failure state write failed runId={} (error frame still sent; recovery falls back to snapshot/lease)",
+						runId, writeEx);
+			}
 			return true;
 		}
+	}
+
+	/** 快照未建时不得裸建失败快照；取消优先，否则只发失败终帧。 */
+	private boolean canEmitOutsideTurnFailureWithoutSnapshot(String runId, String code) {
+		if (isCancelledFlag(runId)) {
+			log.info("outside-turn exception emits no terminal frame: cancel flag set and snapshot absent (cancel first) runId={}", runId);
+			return false;
+		}
+		if (LogSampling.canAcquire("outside-turn-before-snapshot")) {
+			log.warn("outside-turn exception before snapshot creation runId={} code={}; not creating snapshot (no naked save), error frame only",
+					runId, code);
+		}
+		return true;
 	}
 
 	/**
@@ -787,7 +822,7 @@ public class AiController {
 			return;
 		}
 		AiChatRequest.Context effective = sanitizedWorkspaceContext(raw);
-		if (effective == null || !StringUtils.hasText(effective.page())) {
+		if (effective == null || !StringUtils.isNotBlank(effective.page())) {
 			return;
 		}
 		try {
@@ -802,7 +837,10 @@ public class AiController {
 					merged.getPage(), merged.getTaskId(), merged.getStep());
 		}
 		catch (RuntimeException ex) {
-			log.warn("workspace context write-back during suspension failed (ignored; resume falls back to previous context) runId={}", runId, ex);
+			if (LogSampling.canAcquire("workspace-context-writeback")) {
+				log.warn("workspace context write-back during suspension failed (ignored; resume falls back to previous context) runId={}",
+						runId, ex);
+			}
 		}
 	}
 
@@ -832,7 +870,7 @@ public class AiController {
 			}
 		}
 		Object serverImportMode = extra.get("importMode");
-		if ((serverImportMode == null || String.valueOf(serverImportMode).isBlank())
+		if (StringUtils.isBlank(Objects.toString(serverImportMode, null))
 				&& clientExtra.get("importMode") != null) {
 			extra.put("importMode", clientExtra.get("importMode"));
 		}
@@ -853,62 +891,61 @@ public class AiController {
 
 	@PostMapping("/confirm")
 	public ResponseEntity<?> confirm(@RequestBody(required = false) ConfirmRequest request) {
-		if (request == null || !StringUtils.hasText(request.runId())
-				|| !StringUtils.hasText(request.toolCallId())) {
+		if (request == null || !StringUtils.isNotBlank(request.runId())
+				|| !StringUtils.isNotBlank(request.toolCallId())) {
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "runId 与 toolCallId 均为必填"));
 		}
-		// 防护批③ B2-6 / N5：{@code reason} 先归一化，再按<b>归一后</b>的文本过 1024 长度闸 ——
-		// 量的是真正落进 pending、并原样回填模型的那份，零宽填充不该把用户挡在门外，
-		// 也不该借归一化把超长正文塞进去。归一后为空（原文仅不可见/空白字符）⇒ 按 null 交给确认门，
-		// 沿用它的默认「用户在确认门中批准/拒绝」文案。
-		InputSanitizer.Result sanitizedReason = this.inputSanitizer.sanitize(request.reason());
-		if (sanitizedReason.changed()) {
-			// 只记长度差与剥离计数：原因原文可能含敏感数据，日志里不得出现
-			log.info("confirmation reason normalized runId={} chars {}->{} (formatRemoved={} controlRemoved={})", request.runId(),
-					sanitizedReason.originalLength(), sanitizedReason.text().length(),
-					sanitizedReason.removedFormat(), sanitizedReason.removedControl());
+		ConfirmationReason confirmationReason = confirmationReason(request);
+		if (confirmationReason.rejection() != null) {
+			return confirmationReason.rejection();
 		}
-		String reason = StringUtils.hasText(sanitizedReason.text()) ? sanitizedReason.text() : null;
-		if (reason != null && reason.length() > REASON_MAX_CHARS) {
-			return json(HttpStatus.BAD_REQUEST, reasonTooLong(reason.length()));
-		}
-		// B23L1 批②b（读侧续期 touchActiveRun，方案第 5 条）：<b>先续命再落决策</b> —— 挂起线程可能早已不在本实例
-		// （挂起在 A、决策落在 B），卡的后台数据只能由"有人在读/在写"这件事本身来续。
-		// 自带终态判据：轮已终态 / 快照已删 ⇒ 不续期（不养孤儿键）。
 		this.runStore.touchActiveRun(request.runId());
-		// 同拍续期复核器持有的一次性资源（表单附件登记）：park 期没有心跳，读侧是唯一续期来源
 		this.confirmGate.touchSuspendedResources(request.runId());
-		// 只接受服务端 kind=CONFIRM；错入口在进闸门前拒绝，不改变任何条目。
 		PendingToolCall entry = this.runStore.pendingLenient(request.runId(), request.toolCallId());
 		PendingToolCall wrongKind = wrongKindEntry(entry, PendingToolCall.KIND_CONFIRM);
 		if (wrongKind != null) {
 			deny(HttpStatus.CONFLICT, ErrorCodes.TOOL_KIND_MISMATCH, null, request.runId(),
-					"kind", wrongKind.getKind(), "expected", PendingToolCall.KIND_CONFIRM,
-					"name", wrongKind.getName());
+					"kind", wrongKind.getKind(), "expected", PendingToolCall.KIND_CONFIRM, "name", wrongKind.getName());
 			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(), wrongKind,
 					PendingToolCall.KIND_CONFIRM));
 		}
-		// 挂起期工作区事实（可选字段）：只在"决策会被受理"的前置满足后写 —— 未知/错 kind/DUPLICATE/
-		// RUNNING 均不写（入口拒绝必须零副作用；在跑轮不得被页面上下文改写）。
-		// 位置仍在 submitDecision 之前：同一请求触发的续跑一定读到新值。
 		applyWorkspaceContext(request.runId(), request.context(), entry, PendingToolCall.KIND_CONFIRM);
 		boolean approved = Boolean.TRUE.equals(request.approved());
-		ConfirmGate.Submission submission;
-		// 日志链路批：决策落在 HTTP 线程上 —— 装锚点，使 approval_decided 与"决策触发的续跑任务"
-		// （同一 MDC 快照进池）都能挂回这一轮。
+		ConfirmGate.Submission submission = submitConfirmation(request, approved, confirmationReason.reason());
+		ResponseEntity<?> rejection = confirmationRejection(request, submission);
+		return rejection != null ? rejection : confirmationResponse(request, submission, approved);
+	}
+
+	/** 原因先归一化再验长；归一后空白仍按 null 使用确认门默认文案。 */
+	private ConfirmationReason confirmationReason(ConfirmRequest request) {
+		InputSanitizer.Result sanitizedReason = this.inputSanitizer.sanitize(request.reason());
+		if (sanitizedReason.isChanged()) {
+			log.info("confirmation reason normalized runId={} chars {}->{} (formatRemoved={} controlRemoved={})", request.runId(),
+					sanitizedReason.originalLength(), sanitizedReason.text().length(),
+					sanitizedReason.removedFormat(), sanitizedReason.removedControl());
+		}
+		String reason = StringUtils.isNotBlank(sanitizedReason.text()) ? sanitizedReason.text() : null;
+		if (reason != null && reason.length() > REASON_MAX_CHARS) {
+			return new ConfirmationReason(null, json(HttpStatus.BAD_REQUEST, reasonTooLong(reason.length())));
+		}
+		return new ConfirmationReason(reason, null);
+	}
+
+	private ConfirmGate.Submission submitConfirmation(ConfirmRequest request, boolean approved, String reason) {
 		AiTrace.bind(request.runId(), null);
 		try {
-			submission = this.confirmGate.submitDecision(request.runId(), request.toolCallId(), approved,
-					reason);
+			return this.confirmGate.submitDecision(request.runId(), request.toolCallId(), approved, reason);
 		}
 		finally {
 			AiTrace.clear();
 		}
+	}
+
+	private ResponseEntity<?> confirmationRejection(ConfirmRequest request, ConfirmGate.Submission submission) {
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
 		}
 		if (submission.outcome() == ConfirmGate.Outcome.TOOL_KIND_MISMATCH) {
-			// 入口预读不可用时由闸门判定，仍统一为 409，而不是"已受理"。
 			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(),
 					submission.pending(), PendingToolCall.KIND_CONFIRM));
 		}
@@ -916,6 +953,11 @@ public class AiController {
 			return json(HttpStatus.CONFLICT,
 					duplicateToolCall(request.runId(), request.toolCallId(), submission.pending().getStatus()));
 		}
+		return null;
+	}
+
+	private ResponseEntity<?> confirmationResponse(ConfirmRequest request, ConfirmGate.Submission submission,
+			boolean approved) {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("accepted", true);
 		body.put("duplicate", false);
@@ -933,19 +975,18 @@ public class AiController {
 		return ResponseEntity.ok(body);
 	}
 
+	private record ConfirmationReason(String reason, ResponseEntity<?> rejection) {
+	}
+
 	@PostMapping("/frontend-tool-result")
 	public ResponseEntity<?> frontendToolResult(@RequestBody(required = false) FrontendToolResultRequest request) {
-		if (request == null || !StringUtils.hasText(request.runId())
-				|| !StringUtils.hasText(request.toolCallId())) {
+		if (request == null || !StringUtils.isNotBlank(request.runId())
+				|| !StringUtils.isNotBlank(request.toolCallId())) {
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "runId 与 toolCallId 均为必填"));
 		}
-		// B23L1 批②b：读侧续期（同 /confirm 的口径：先续命再落回灌）
 		this.runStore.touchActiveRun(request.runId());
-		// 同拍续期一次性资源（附件登记）：与 touchActiveRun 同一位置
 		this.confirmGate.touchSuspendedResources(request.runId());
 		boolean cancelled = Boolean.TRUE.equals(request.cancelled());
-		// 只接受服务端 kind=FRONTEND；同一条目供 kind 与结构化判定共用，避免重复读取。
-		// kind 先于体积判断；cancelled=true 也先校验，因为取消同样改变状态。
 		PendingToolCall entry = this.runStore.pendingLenient(request.runId(), request.toolCallId());
 		PendingToolCall wrongKind = wrongKindEntry(entry, PendingToolCall.KIND_FRONTEND);
 		if (wrongKind != null) {
@@ -955,74 +996,70 @@ public class AiController {
 			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(), wrongKind,
 					PendingToolCall.KIND_FRONTEND));
 		}
-		// 防护批③ B2-7：回灌载荷闸 —— 机器数据超限**截断并标记**（不像用户输入那样 400：
-		// 表格摘要本来就可能很长，拒绝回灌会让前端工具永远无法收尾）。
-		// G5：上限来自 app.ai.result-budget.callback.max-chars（不再是类内常量），
-		// 截断标记计入预算，响应体与工具结果帧共用同一套截断字段（truncated/strategy/
-		// originalChars/returnedChars/noticeCode）。
-		// 结构化回灌超限拒绝批：**结构化结果**（JSON 对象/数组、表格写结果）是这条闸门的例外 ——
-		// substring 截断会切坏 JSON、切掉表格「共 N 格」尾行，落库的会是半截数据。这类超限在
-		// 进入确认门**之前**以 400 FRONTEND_RESULT_TOO_LARGE 拒绝：不调 submit、不写条目、
-		// pending 原样留着，客户端把结果改小后重试（与 /chat 的超长输入同一姿态：拒绝不截断）。
+		FrontendResultPayload payload = prepareFrontendResult(request, entry, cancelled);
+		if (payload.rejection() != null) {
+			return payload.rejection();
+		}
+		applyWorkspaceContext(request.runId(), request.context(), entry, PendingToolCall.KIND_FRONTEND);
+		ConfirmGate.Submission submission = submitFrontendResult(request, payload.result(), cancelled);
+		ResponseEntity<?> rejection = frontendResultRejection(request, submission);
+		return rejection != null ? rejection : frontendResultResponse(request, submission, payload, cancelled);
+	}
+
+	/** 结构化超限拒绝；普通文本按原标记与代理对规则截断。 */
+	private FrontendResultPayload prepareFrontendResult(FrontendToolResultRequest request, PendingToolCall entry,
+			boolean cancelled) {
 		int callbackMaxChars = this.properties.getResultBudget().getCallback().getMaxChars();
 		String result = request.result();
 		int originalChars = result == null ? 0 : result.length();
-		if (!cancelled && result != null && originalChars > callbackMaxChars) {
-			PendingToolCall pending = entry;
-			if (structuredOversize(pending, result)) {
-				deny(HttpStatus.BAD_REQUEST, ErrorCodes.FRONTEND_RESULT_TOO_LARGE, null, request.runId(),
-						"chars", originalChars, "limit", callbackMaxChars, "name", pending.getName(),
-						"kind", pending.getKind());
-				log.info("structured frontend result oversized; rejected without persisting runId={} toolCallId={} tool={} chars={} limit={}",
-						request.runId(), request.toolCallId(), pending.getName(), originalChars, callbackMaxChars);
-				return json(HttpStatus.BAD_REQUEST,
-						frontendResultTooLarge(request.runId(), request.toolCallId(), pending, originalChars,
-								callbackMaxChars));
-			}
+		if (!cancelled && result != null && originalChars > callbackMaxChars && isStructuredOversize(entry, result)) {
+			deny(HttpStatus.BAD_REQUEST, ErrorCodes.FRONTEND_RESULT_TOO_LARGE, null, request.runId(),
+					"chars", originalChars, "limit", callbackMaxChars, "name", entry.getName(), "kind", entry.getKind());
+			log.info("structured frontend result oversized; rejected without persisting runId={} toolCallId={} tool={} chars={} limit={}",
+					request.runId(), request.toolCallId(), entry.getName(), originalChars, callbackMaxChars);
+			return new FrontendResultPayload(json(HttpStatus.BAD_REQUEST, frontendResultTooLarge(request.runId(),
+					request.toolCallId(), entry, originalChars, callbackMaxChars)), null, false, originalChars, originalChars);
 		}
-		boolean truncated = false;
-		int returnedChars = originalChars;
-		String notice = null;
-		if (result != null && result.length() > callbackMaxChars) {
-			notice = "结果过长已截断：原 " + originalChars + " 字符，上限 " + callbackMaxChars
-					+ " 字符；strategy=" + TruncationContract.STRATEGY_HEAD;
-			String marker = "…（" + notice + "）";
-			int budget = Math.max(0, callbackMaxChars - marker.length());
-			int end = Math.min(budget, result.length());
-			if (end > 0 && Character.isHighSurrogate(result.charAt(end - 1))) {
-				end--;
-			}
-			result = result.substring(0, end) + marker;
-			truncated = true;
-			returnedChars = result.length();
-			if (this.securityEvents != null) {
-				this.securityEvents.payloadTruncated();
-			}
-			log.info("frontend tool result truncated runId={} toolCallId={} originalChars={} limit={}", request.runId(),
-					request.toolCallId(), originalChars, callbackMaxChars);
+		if (result == null || result.length() <= callbackMaxChars) {
+			return new FrontendResultPayload(null, result, false, originalChars, originalChars);
 		}
-		// 挂起期工作区事实（可选字段）：与 /confirm 同一口径 —— 条目存在 + PENDING + kind 正确 +
-		// 快照 SUSPENDED 才写；体积拒绝/DUPLICATE/RUNNING 均不写。
-		applyWorkspaceContext(request.runId(), request.context(), entry, PendingToolCall.KIND_FRONTEND);
-		ConfirmGate.Submission submission;
-		// 日志链路批：回灌同样落在 HTTP 线程上（同 /confirm 的口径）
+		String notice = "结果过长已截断：原 " + originalChars + " 字符，上限 " + callbackMaxChars
+				+ " 字符；strategy=" + TruncationContract.STRATEGY_HEAD;
+		String marker = "…（" + notice + "）";
+		int budget = Math.max(0, callbackMaxChars - marker.length());
+		int end = Math.min(budget, result.length());
+		if (end > 0 && Character.isHighSurrogate(result.charAt(end - 1))) {
+			end--;
+		}
+		result = result.substring(0, end) + marker;
+		if (this.securityEvents != null) {
+			this.securityEvents.payloadTruncated();
+		}
+		log.info("frontend tool result truncated runId={} toolCallId={} originalChars={} limit={}", request.runId(),
+				request.toolCallId(), originalChars, callbackMaxChars);
+		return new FrontendResultPayload(null, result, true, originalChars, result.length());
+	}
+
+	private ConfirmGate.Submission submitFrontendResult(FrontendToolResultRequest request, String result,
+			boolean cancelled) {
 		AiTrace.bind(request.runId(), null);
 		try {
-			// 当前唯一协议：显式 outcome + 当前结构（sheetMeta/code 均按入口归一后的值传入）。
-			// sheetMeta 在入口就过白名单（任何业务值到此为止）；code 非 UI_* 形态在入口归一为 null。
 			Map<String, Object> sheetMeta = SheetAudit.sanitize(request.sheetMeta());
 			String uiCode = FrontendToolResultRequest.normalizeCode(request.code());
-			submission = this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
+			return this.confirmGate.submitFrontendResult(request.runId(), request.toolCallId(), result,
 					request.source(), cancelled, request.outcome(), sheetMeta, uiCode);
 		}
 		finally {
 			AiTrace.clear();
 		}
+	}
+
+	private ResponseEntity<?> frontendResultRejection(FrontendToolResultRequest request,
+			ConfirmGate.Submission submission) {
 		if (submission.outcome() == ConfirmGate.Outcome.NOT_FOUND) {
 			return json(HttpStatus.CONFLICT, unknownToolCall(request.runId(), request.toolCallId()));
 		}
 		if (submission.outcome() == ConfirmGate.Outcome.TOOL_KIND_MISMATCH) {
-			// 入口预读不可用时由闸门判定，统一映射为 409。
 			return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(),
 					submission.pending(), PendingToolCall.KIND_FRONTEND));
 		}
@@ -1030,12 +1067,14 @@ public class AiController {
 			return json(HttpStatus.CONFLICT,
 					duplicateToolCall(request.runId(), request.toolCallId(), submission.pending().getStatus()));
 		}
-		// DC-15：回灌被安全闸拒绝（如表单填写值不合 schema）→ 400 带机器可读码 + 原因清单；
-		// 注意"挂起仍在等待"（状态未变），前端可修正后重试，或带 cancelled=true 放弃。
 		if (submission.outcome() == ConfirmGate.Outcome.REJECTED) {
-			return json(HttpStatus.BAD_REQUEST,
-					rejectedFrontendResult(request.runId(), request.toolCallId(), submission));
+			return json(HttpStatus.BAD_REQUEST, rejectedFrontendResult(request.runId(), request.toolCallId(), submission));
 		}
+		return null;
+	}
+
+	private ResponseEntity<?> frontendResultResponse(FrontendToolResultRequest request,
+			ConfirmGate.Submission submission, FrontendResultPayload payload, boolean cancelled) {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("accepted", true);
 		body.put("duplicate", false);
@@ -1048,14 +1087,18 @@ public class AiController {
 		body.put("resumeTriggered", submission.resumeTrigger().triggered());
 		body.put("resumeOutcome", submission.resumeTrigger().outcome());
 		body.put("storedBy", this.runStore.instanceId());
-		body.put("truncated", truncated);
-		if (truncated) {
+		body.put("truncated", payload.truncated());
+		if (payload.truncated()) {
 			body.put(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
-			body.put(TruncationContract.ORIGINAL_CHARS_FIELD, originalChars);
-			body.put(TruncationContract.RETURNED_CHARS_FIELD, returnedChars);
+			body.put(TruncationContract.ORIGINAL_CHARS_FIELD, payload.originalChars());
+			body.put(TruncationContract.RETURNED_CHARS_FIELD, payload.returnedChars());
 			body.put(TruncationContract.NOTICE_CODE_FIELD, TruncationContract.NOTICE_CODE_FRAME_TRUNCATED);
 		}
 		return ResponseEntity.ok(body);
+	}
+
+	private record FrontendResultPayload(ResponseEntity<?> rejection, String result, boolean truncated,
+			int originalChars, int returnedChars) {
 	}
 
 	// ── reattach / 发现 / 续跑 ──────────────────────────────────────────────
@@ -1098,25 +1141,10 @@ public class AiController {
 	public ResponseEntity<?> events(@PathVariable String runId,
 			@RequestParam(required = false) Long lastSeq, HttpServletResponse response) {
 		RunSnapshot snapshot = ownedRun(runId);
-		if (snapshot == null) {
-			// ===== AR-06：已 start、快照未建 =====
-			// 首帧（start）已前移到首轮压缩之前 ⇒ 存在这样一段合法窗口：runId 已有、帧面已开、
-			// 快照还没建立。此时重挂<b>不得</b>返回 404 / "轮不存在"（那会把正常压缩显示成失败），
-			// 而应返回"准备中"（可重试 + 已用时间）。判定只认<b>归档</b>这一份跨实例事实。
-			ResponseEntity<?> early = this.preparingOrUnknown(runId);
-			if (early != null) {
-				return early;
-			}
-			// early == null ⇒ 归档里已有终帧（快照被 TTL 先回收）：照常回放，让重挂者拿到终态。
+		ResponseEntity<?> early = prepareReattach(runId, snapshot);
+		if (early != null) {
+			return early;
 		}
-		else {
-			// B23L1 批②b：读侧续期（重挂是最强的"有人还在看这张卡"信号；终态/缺失不续期）
-			this.runStore.touchActiveRun(snapshot);
-			// 同拍续期一次性资源（附件登记）：重挂 = 用户刷新回来，park 期没有心跳
-			this.confirmGate.touchSuspendedResources(runId);
-		}
-		// I-1：回放前先确认事件日志末号可读。末号未知时不得进入"按 0 全量回放"（会拿到最旧窗口、
-		// 拿不到 done）；明确回 503 + degraded，让前端下一拍重试。
 		if (this.frameStore.lastSeqIfKnown(runId).isEmpty()) {
 			Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
 					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
@@ -1125,96 +1153,105 @@ public class AiController {
 		}
 		SseEmitter emitter = new SseEmitter(NO_TRANSPORT_DEADLINE);
 		SseChatEmitter out = this.runRegistry.of(runId);
-		// 快照缺失但归档已有终帧 ⇒ 按终态回放（归档里有没有终帧才决定"回放完收尾"还是"留挂"，
-		// 见 SseChatEmitter 的 L-143 口径）。
 		SseChatEmitter.ReplayResult replay = out.replayAndAttachWithStatus(emitter, lastSeq,
 				snapshot == null || isTerminal(snapshot.getStatus()));
-		int replayed = replay.staged();
-		log.debug("reattach runId={} status={} lastSeq={} replayedFrames={} truncated={} gap={}..{}", runId,
-				snapshot == null ? "none" : snapshot.getStatus(), lastSeq, replayed, replay.truncated(),
-				replay.trimmedFromSeq(), replay.trimmedToSeq());
-		// park 的挂起轮：回放（含请求帧）完成后主动收流，决策/回灌再触发续跑。
-		// 只在<b>确实还在等人</b>（仍有 PENDING 条目）时收流：条目已全部结算 ⇒ 决策/回灌已落库、
-		// 续跑在即（快照要等驱动方才能翻 RUNNING），此刻收流会把续跑随后产出的 done/error 挡在
-		// 连接之外 —— E2E 的标准时序正是「POST 决策/回灌 200 → 立刻 GET /events 收终帧」，
-		// 这条竞态就是 GF4 / W-01..W-22 / H-10 / S-11 / T-13 的"done 缺失"。
-		if (snapshot != null && this.properties.getPark().isEnabled()
-				&& RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
-			// 已确认取消且仍有 PENDING：重挂只负责把收尾交棒给既有取消执行体，不走普通到期/续跑，
-			// 也不在这里另写 done。finalizer 会重取租约并经 ResumeService.cancelConfirmed 幂等收尾。
-			// cancelledPending 一经确立就直接收流，不再复读 PENDING：同步 finalizer 可能已把它结算，
-			// 后续读取不得把这条取消分支导向普通 triggerResumeForParked。
-			boolean cancelledPending = isCancelledFlag(runId) && stillWaitingForInput(runId);
-			if (cancelledPending && this.cancelFinalizer != null) {
-				try {
-					boolean handedOff = this.cancelFinalizer.handOff(runId, "CANCEL_REATTACH_PENDING");
-					log.info("reattach handed off cancelled pending run runId={} handedOff={}", runId, handedOff);
-				}
-				catch (RuntimeException ex) {
-					log.warn("reattach cancel finalizer hand-off failed runId={}", runId, ex);
-				}
-			}
-			// ===== F2：重挂也是"任实例可消费 expiresAt"的入口 =====
-			// park 后的到期收敛原来只有原实例进程内定时器；实例被杀后重挂方只看到 PENDING 就
-			// 收流/等待，条目永远不收敛。这里在"是否还在等人"之前先用持久化 expiresAt 收一次
-			// （既有 expireFrontend + 决策 guard；确认门/表单无上限，不会被消费）。
-			int expired = 0;
-			if (!cancelledPending) {
-				try {
-					expired = this.confirmGate.convergeExpiredParkedFrontend(runId);
-				}
-				catch (RuntimeException ex) {
-					log.warn("reattach failed to consume expired park entries runId={} (treating as still waiting, subscription kept)", runId,
-							ex);
-				}
-			}
-			if (cancelledPending) {
-				out.completeSubscriptions();
-			}
-			else if (expired > 0 && !stillWaitingForInput(runId)) {
-				// 到期收敛已派发一次续跑：保留订阅，让随后产出的 done/error 能从这条连接到达。
-				log.info("reattach consumed {} expired frontend entries runId={} (resume dispatched, keeping connection for terminal frame)", expired,
-						runId);
-			}
-			else if (stillWaitingForInput(runId)) {
-				out.completeSubscriptions();
-			}
-			else {
-				// ===== 已决但无驱动方的自愈对账（H-01）=====
-				// 条目全决 + 快照仍 SUSPENDED ⇒ 决策已落库却没有线程在驱动（park 退出窗口内的决策
-				// 曾命中预登记闸门导致无派发；续跑派发也可能失败）。重挂是最可靠的"有人在看"信号，
-				// 这里走与死卡兜底同一条判定：本进程无闸门才派发、租约/幂等由既有路径保证 ——
-				// 已有驱动方时只会得到 ALREADY_RUNNING / LEASE_HELD_ELSEWHERE 的跳过。
-				// 对账要读快照（RunStore.get 在 Redis 故障时抛 AiStateUnavailableException），而此刻
-				// 订阅已由 replayAndAttach 挂上、emitter 还没交给容器：异常上抛 = 500，且这条 emitter 的
-				// onCompletion/onTimeout/onError 永不触发 ⇒ 订阅留到进程结束（hasLiveSubscriber 常真、
-				// recycleIfIdle 永不放行、唤醒/回放继续往死订阅排队）。按 stillWaitingForInput 的同口径
-				// 就地降级：记 warn + 收流；不补 error 帧 —— 那是归档里的终态帧，会把这轮后续的重挂回放
-				// 当成"已终止"而漏掉真正的 done。
-				try {
-					ConfirmGate.ResumeTrigger healed = this.confirmGate.triggerResumeForParked(runId);
-					log.debug("reattach self-heal reconcile for decided run without driver runId={} outcome={}", runId,
-							healed == null ? null : healed.outcome());
-				}
-				catch (RuntimeException ex) {
-					log.warn("reattach self-heal reconcile failed runId={} (closing subscription, no leak)", runId, ex);
-					out.completeSubscriptions();
-				}
+		if (log.isDebugEnabled()) {
+			log.debug("reattach runId={} status={} lastSeq={} replayedFrames={} truncated={} gap={}..{}", runId,
+					snapshot == null ? "none" : snapshot.getStatus(), lastSeq, replay.staged(), replay.truncated(),
+					replay.trimmedFromSeq(), replay.trimmedToSeq());
+		}
+		handleParkedReattach(runId, snapshot, out);
+		writeArchiveTrimHeaders(response, replay);
+		return ResponseEntity.ok(emitter);
+	}
+
+	/** 快照未建时区分准备中/未知/仅余归档；已有快照则按原顺序续期。 */
+	private ResponseEntity<?> prepareReattach(String runId, RunSnapshot snapshot) {
+		if (snapshot == null) {
+			return this.preparingOrUnknown(runId);
+		}
+		this.runStore.touchActiveRun(snapshot);
+		this.confirmGate.touchSuspendedResources(runId);
+		return null;
+	}
+
+	/** park 重挂只在仍等待输入时收流；已决无驱动时走既有自愈。 */
+	private void handleParkedReattach(String runId, RunSnapshot snapshot, SseChatEmitter out) {
+		if (snapshot == null || !this.properties.getPark().isEnabled()
+				|| !RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+			return;
+		}
+		boolean cancelledPending = isCancelledFlag(runId) && isWaitingForInput(runId);
+		if (cancelledPending) {
+			handOffCancelledPending(runId);
+		}
+		int expired = cancelledPending ? 0 : convergeExpiredParkedFrontend(runId);
+		if (cancelledPending) {
+			out.completeSubscriptions();
+		}
+		else if (expired > 0 && !isWaitingForInput(runId)) {
+			log.info("reattach consumed {} expired frontend entries runId={} (resume dispatched, keeping connection for terminal frame)",
+					expired, runId);
+		}
+		else if (isWaitingForInput(runId)) {
+			out.completeSubscriptions();
+		}
+		else {
+			selfHealParkedRun(runId, out);
+		}
+	}
+
+	private void handOffCancelledPending(String runId) {
+		if (this.cancelFinalizer == null) {
+			return;
+		}
+		try {
+			boolean handedOff = this.cancelFinalizer.handOff(runId, "CANCEL_REATTACH_PENDING");
+			log.info("reattach handed off cancelled pending run runId={} handedOff={}", runId, handedOff);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("reattach-cancel-handoff")) {
+				log.warn("reattach cancel finalizer hand-off failed runId={}", runId, ex);
 			}
 		}
-		// <b>C-1（Task 2 返修第 2 轮）：归档截断由后端明确告知，头名与前端已落地契约一致</b>。
-		// 前端<b>不得</b>再用"首帧号 > lastSeq + 1"推断缺口（跳号是正常形态，猜会把跳号误报成丢帧）；
-		// 后端也不再拿"幸存首条"猜 —— 截断只来自原子落档脚本记录的<b>真实裁剪低水位</b>。
-		// 只加<b>响应头</b>（业务帧形态与数量一律不变），且必须在 SSE 开始写出之前落到响应上：
-		//   archive-trimmed: true —— 本次回放确实跳过了不可回放的区间；
-		//   archive-from / archive-to —— <b>缺口</b>区间（含端点），不是回放区间。
+	}
+
+	private int convergeExpiredParkedFrontend(String runId) {
+		try {
+			return this.confirmGate.convergeExpiredParkedFrontend(runId);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("reattach-expired-converge")) {
+				log.warn("reattach failed to consume expired park entries runId={} (treating as still waiting, subscription kept)",
+						runId, ex);
+			}
+			return 0;
+		}
+	}
+
+	/** 对账异常必须收流，避免尚未交给容器的 emitter 永久留存。 */
+	private void selfHealParkedRun(String runId, SseChatEmitter out) {
+		try {
+			ConfirmGate.ResumeTrigger healed = this.confirmGate.triggerResumeForParked(runId);
+			if (log.isDebugEnabled()) {
+				log.debug("reattach self-heal reconcile for decided run without driver runId={} outcome={}", runId,
+						healed == null ? null : healed.outcome());
+			}
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("reattach-self-heal")) {
+				log.warn("reattach self-heal reconcile failed runId={} (closing subscription, no leak)", runId, ex);
+			}
+			out.completeSubscriptions();
+		}
+	}
+
+	private static void writeArchiveTrimHeaders(HttpServletResponse response, SseChatEmitter.ReplayResult replay) {
 		if (response != null && replay.truncated()) {
-			// 只在确实被裁过时出现（前端：出现即裁剪，缺失 = 没裁/不可知）。
 			response.setHeader(HEADER_ARCHIVE_TRIMMED, "true");
 			response.setHeader(HEADER_ARCHIVE_FROM, Long.toString(replay.trimmedFromSeq()));
 			response.setHeader(HEADER_ARCHIVE_TO, Long.toString(replay.trimmedToSeq()));
 		}
-		return ResponseEntity.ok(emitter);
 	}
 
 	/**
@@ -1263,7 +1300,7 @@ public class AiController {
 	@GetMapping(value = "/events/{runId}")
 	public ResponseEntity<?> eventsNotAcceptable() throws HttpMediaTypeNotAcceptableException {
 		throw new HttpMediaTypeNotAcceptableException(
-				java.util.List.of(MediaType.TEXT_EVENT_STREAM, MediaType.APPLICATION_JSON));
+				List.of(MediaType.TEXT_EVENT_STREAM, MediaType.APPLICATION_JSON));
 	}
 
 	/** 探测的响应体构造（只读；见 {@link #probeEvents} 的口径）。 */
@@ -1333,7 +1370,7 @@ public class AiController {
 		if (last.getAsLong() <= 0L) {
 			return json(HttpStatus.NOT_FOUND, Map.of("code", ErrorCodes.UNKNOWN_RUN, "runId", runId));
 		}
-		if (this.archiveEndsWithTerminal(frames, runId, last.getAsLong())) {
+		if (this.hasTerminalArchiveEnd(frames, runId, last.getAsLong())) {
 			return null;
 		}
 		return preparing(runId, this.firstArchivedAtMs(frames, runId));
@@ -1360,13 +1397,15 @@ public class AiController {
 		if (isCancelledFlag(runId)) {
 			body.put("cancelled", true);
 		}
-		log.debug("reattach hit started-without-snapshot phase runId={} elapsedMs={}", runId, elapsedMs);
+		if (log.isDebugEnabled()) {
+			log.debug("reattach hit started-without-snapshot phase runId={} elapsedMs={}", runId, elapsedMs);
+		}
 		return json(HttpStatus.ACCEPTED, body);
 	}
 
 	/** "准备中"的用户面短句（双语各一份；不进 messages 键表 —— 它不是错误码）。 */
 	private static String preparingMessage() {
-		return com.example.configmgr.ai.run.ReplyLanguage.current().english()
+		return ReplyLanguage.current().english()
 				? "The reply is being prepared. Retry shortly."
 				: "这一轮正在准备中（压缩上下文），请稍后重试。";
 	}
@@ -1377,7 +1416,9 @@ public class AiController {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading cancel flag failed runId={} (continuing as not cancelled)", runId, ex);
+			if (LogSampling.canAcquire("cancel-flag-read")) {
+				log.warn("reading cancel flag failed runId={} (continuing as not cancelled)", runId, ex);
+			}
 			return false;
 		}
 	}
@@ -1386,14 +1427,16 @@ public class AiController {
 	private long firstArchivedAtMs(FrameStore frames, String runId) {
 		try {
 			List<Map<String, Object>> head = frames.readFrom(runId, 0L, 1);
-			if (head == null || head.isEmpty()) {
+			if (CollectionUtils.isEmpty(head)) {
 				return 0L;
 			}
-			Object atMs = head.get(0).get("atMs");
+			Object atMs = head.getFirst().get("atMs");
 			return atMs instanceof Number number ? number.longValue() : 0L;
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading first archived frame failed runId={} (reporting elapsedMs=0)", runId, ex);
+			if (LogSampling.canAcquire("archive-head-read")) {
+				log.warn("reading first archived frame failed runId={} (reporting elapsedMs=0)", runId, ex);
+			}
 			return 0L;
 		}
 	}
@@ -1404,17 +1447,19 @@ public class AiController {
 	 * <p>只读末<b>一</b>帧而不是全量扫描（{@code terminalFrameArchived} 会整段读）：终帧之后不得再有
 	 * 业务帧是帧序不变量，所以"末帧不是终帧"就等于"没有终帧"。
 	 */
-	private boolean archiveEndsWithTerminal(FrameStore frames, String runId, long lastSeq) {
+	private boolean hasTerminalArchiveEnd(FrameStore frames, String runId, long lastSeq) {
 		try {
 			List<Map<String, Object>> tail = frames.readFrom(runId, lastSeq - 1L, 1);
-			if (tail == null || tail.isEmpty()) {
+			if (CollectionUtils.isEmpty(tail)) {
 				return false;
 			}
-			String type = String.valueOf(tail.get(tail.size() - 1).get("type"));
+			String type = String.valueOf(tail.getLast().get("type"));
 			return "done".equals(type) || "error".equals(type);
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading last archived frame failed runId={} (treating as non-terminal, still preparing)", runId, ex);
+			if (LogSampling.canAcquire("archive-tail-read")) {
+				log.warn("reading last archived frame failed runId={} (treating as non-terminal, still preparing)", runId, ex);
+			}
 			return false;
 		}
 	}
@@ -1426,7 +1471,7 @@ public class AiController {
 	 * <p>读失败按"仍在等"处理：状态不可知时回到旧的 park 收流（不把连接悬挂在一个说不清
 	 * 状态的轮上），也不冒充"续跑在即"。
 	 */
-	private boolean stillWaitingForInput(String runId) {
+	private boolean isWaitingForInput(String runId) {
 		try {
 			for (PendingToolCall pending : this.runStore.pendings(runId)) {
 				if (PendingToolCall.PENDING.equals(pending.getStatus())) {
@@ -1436,7 +1481,9 @@ public class AiController {
 			return false;
 		}
 		catch (RuntimeException ex) {
-			log.warn("reattach failed to read pending entries runId={} (closing as park, no hanging connection)", runId, ex);
+			if (LogSampling.canAcquire("reattach-pending-read")) {
+				log.warn("reattach failed to read pending entries runId={} (closing as park, no hanging connection)", runId, ex);
+			}
 			return true;
 		}
 	}
@@ -1462,7 +1509,7 @@ public class AiController {
 		RunSnapshot snapshot = this.runStore.get(heldRunId);
 		boolean leaseHeld = false;
 		try {
-			com.example.configmgr.ai.run.LeaseService leases = this.runStore.leaseService();
+			LeaseService leases = this.runStore.leaseService();
 			// 判死口径必须用严格读取口：isHeld 吞异常返回 false，会把"读不出来"当成"没人持有"
 			// ⇒ 仍有租约的活轮被判死放行（同一会话双驱动）。异常由下面 catch 折成 fail-closed。
 			leaseHeld = leases != null && leases.isHeldStrict(this.runStore.runLeaseKey(heldRunId));
@@ -1470,7 +1517,9 @@ public class AiController {
 		catch (Exception ex) {
 			// 租约设施不可读 ⇒ 按"可能有人持有"处理（不放行），与 E3 的保守方向相反是因为
 			// 这里的错误方向是并发双跑，不能靠乐观兜底
-			log.debug("reading resume lease failed runId={} (treating lease as held)", heldRunId, ex);
+			if (LogSampling.canAcquire("resume-lease-read")) {
+				log.warn("reading resume lease failed runId={} (treating lease as held)", heldRunId, ex);
+			}
 			leaseHeld = true;
 		}
 		// 空写出器不算活跃：只有真实订阅才保留会话门。
@@ -1533,8 +1582,8 @@ public class AiController {
 	 */
 	@PostMapping("/cancel/client-request")
 	public ResponseEntity<?> cancelClientRequest(@RequestBody(required = false) ClientRequestCancelRequest request) {
-		if (request == null || !StringUtils.hasText(request.sessionId())
-				|| !StringUtils.hasText(request.clientRequestId())) {
+		if (request == null || !StringUtils.isNotBlank(request.sessionId())
+				|| !StringUtils.isNotBlank(request.clientRequestId())) {
 			return json(HttpStatus.BAD_REQUEST,
 					errorBody(ErrorCodes.BAD_REQUEST, "sessionId 与 clientRequestId 均为必填"));
 		}
@@ -1550,8 +1599,10 @@ public class AiController {
 			outcome = this.clientRequests.cancel(request.sessionId(), request.clientRequestId());
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel by clientRequestId failed sessionId={} clientRequestId={}", request.sessionId(),
-					request.clientRequestId(), ex);
+			if (LogSampling.canAcquire("cancel-client-request")) {
+				log.warn("cancel by clientRequestId failed sessionId={} clientRequestId={}", request.sessionId(),
+						request.clientRequestId(), ex);
+			}
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		Map<String, Object> body = new LinkedHashMap<>();
@@ -1565,14 +1616,21 @@ public class AiController {
 			body.put("note", "取消墓碑已写入；若该请求随后到达，会在压缩/建快照/模型调用前直接按取消收尾");
 			return ResponseEntity.ok(body);
 		}
-		// runId 来自本身份的映射 ⇒ 写本身份取消旗标（键也按身份隔离；不需要扫描/猜归属）。
+		return cancelBoundClientRequest(outcome, body);
+	}
+
+	/** runId 来自本身份映射，沿用同身份取消与合并响应语义。 */
+	private ResponseEntity<?> cancelBoundClientRequest(ClientRequestRegistry.CancelOutcome outcome,
+			Map<String, Object> body) {
 		Map<String, Object> cancelBody;
 		try {
 			RunSnapshot snapshot = ownedRun(outcome.runId());
 			cancelBody = cancelKnownRun(outcome.runId(), snapshot);
 		}
 		catch (RuntimeException ex) {
-			log.warn("cancel of run bound to clientRequestId failed runId={}", outcome.runId(), ex);
+			if (LogSampling.canAcquire("cancel-bound-run")) {
+				log.warn("cancel of run bound to clientRequestId failed runId={}", outcome.runId(), ex);
+			}
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		body.putAll(cancelBody);
@@ -1668,15 +1726,18 @@ public class AiController {
 	 */
 	private boolean hasOwnArchive(String runId) {
 		FrameStore frames = this.frameStore;
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return false;
 		}
 		try {
-			java.util.OptionalLong last = frames.lastSeqIfKnown(runId);
+			OptionalLong last = frames.lastSeqIfKnown(runId);
 			return last.isPresent() && last.getAsLong() > 0L;
 		}
 		catch (RuntimeException ex) {
-			log.debug("reading archive for cancel ownership check failed runId={} (treating as unowned, cancel flag not written)", runId, ex);
+			if (LogSampling.canAcquire("cancel-archive-ownership")) {
+				log.warn("reading archive for cancel ownership check failed runId={} (treating as unowned, cancel flag not written)",
+						runId, ex);
+			}
 			return false;
 		}
 	}
@@ -1696,7 +1757,7 @@ public class AiController {
 	 * 读/写路径 —— 归属复核就此形同虚设。归属只能由<b>显式作用域</b>（HTTP 头 /
 	 * {@link RunIdentityScope}）证明，因此这里返回 {@code false}，调用方按"不存在"处理。
 	 */
-	private boolean ownedByCurrentIdentity(RunSnapshot snapshot) {
+	private boolean isOwnedByCurrentIdentity(RunSnapshot snapshot) {
 		if (snapshot == null) {
 			return false;
 		}
@@ -1716,15 +1777,15 @@ public class AiController {
 	 * 只带 runId 的端点（续跑/重跑/列表单项）：快照不存在也算"可继续按原语义处理"，
 	 * 只有<b>存在但不属于当前身份</b>时才拒绝。
 	 */
-	private boolean ownedOrAbsent(String runId) {
+	private boolean isOwnedOrAbsent(String runId) {
 		RunSnapshot snapshot = this.runStore.get(runId);
-		return snapshot == null || ownedByCurrentIdentity(snapshot);
+		return snapshot == null || isOwnedByCurrentIdentity(snapshot);
 	}
 
 	/** 只带 runId 的端点：读快照并核归属；他人/无归属/不存在统一返回 {@code null}。 */
 	private RunSnapshot ownedRun(String runId) {
 		RunSnapshot snapshot = this.runStore.get(runId);
-		if (snapshot != null && !ownedByCurrentIdentity(snapshot)) {
+		if (snapshot != null && !isOwnedByCurrentIdentity(snapshot)) {
 			TenantUser current = RequestContextUtils.currentOrNull();
 			log.warn("cross-identity access rejected runId={} (snapshotOwner={}/{} currentIdentity={}); treated as nonexistent", runId,
 					snapshot.getTenantId(), snapshot.getUserId(), current);
@@ -1802,7 +1863,7 @@ public class AiController {
 	@GetMapping("/runs/{runId}")
 	public ApiResponse<Map<String, Object>> run(@PathVariable String runId) {
 		ResumeService service = this.resumeService.getIfAvailable();
-		if (service == null || !ownedOrAbsent(runId)) {
+		if (service == null || !isOwnedOrAbsent(runId)) {
 			return ApiResponse.ok(Map.of("exists", false));
 		}
 		Map<String, Object> body = new LinkedHashMap<>(service.describe(runId));
@@ -1841,8 +1902,8 @@ public class AiController {
 			FrameStore.ReadResult read = this.frameStore.readFromWithStatus(runId, 0L, 1);
 			readable = !read.degraded();
 			List<Map<String, Object>> frames = read.frames();
-			if (frames != null && !frames.isEmpty()) {
-				Map<String, Object> first = frames.get(0);
+			if (CollectionUtils.isNotEmpty(frames)) {
+				Map<String, Object> first = frames.getFirst();
 				if (first.get("seq") instanceof Number number) {
 					firstSeq = number.longValue();
 				}
@@ -1854,7 +1915,9 @@ public class AiController {
 		}
 		catch (RuntimeException ex) {
 			readable = false;
-			log.debug("archive integrity probe failed runId={} (treated as not provably complete)", runId, ex);
+			if (LogSampling.canAcquire("archive-integrity-probe")) {
+				log.warn("archive integrity probe failed runId={} (treated as not provably complete)", runId, ex);
+			}
 		}
 		body.put("archiveFirstSeq", firstSeq);
 		body.put("archiveReadable", readable);
@@ -1894,91 +1957,91 @@ public class AiController {
 	 */
 	@GetMapping("/runs/current")
 	public ResponseEntity<?> runsCurrent(@RequestParam(required = false) String sessionId) {
-		if (!StringUtils.hasText(sessionId)) {
+		if (!StringUtils.isNotBlank(sessionId)) {
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 为必填"));
 		}
 		String runId = this.runStore.sessionCurrentRunId(sessionId);
 		RunSnapshot snapshot = runId == null ? null : this.runStore.get(runId);
 		if (runId == null || snapshot == null) {
-			// 索引缺失（TTL 过期=进程已死）或索引残留但快照已消失：明确空态
 			return ResponseEntity.ok(ApiResponse.ok(emptyCurrentRun()));
 		}
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("found", true);
 		body.put("runId", runId);
 		body.put("snapshotStatus", snapshot.getStatus());
-		// B23L1 批②b：读侧续期（快照重载，省掉 touch 内部的一次读；终态快照由 RunStore 判掉）
 		this.runStore.touchActiveRun(snapshot);
-		// 同拍续期一次性资源（附件登记）：刷新恢复是 park 期最强的"有人还在看"信号
 		this.confirmGate.touchSuspendedResources(runId);
-		// AR-10（批次3 补齐）：24h 只可见化 —— 快照键的**权威**剩余寿命，用 PTTL 只读推导。
-		// 不改 TTL、不续期、不延长不缩短、不新增持久化；量在 touch 之后取，反映本次响应后的真实寿命。
-		// null = 未知（键刚过期 / 读失败 / 无 TTL）：前端按"不显示时间"处理，不得折算成 0。
 		Long snapshotRemainingMs = this.runStore.runKeyTtlRemainingMs(runId);
 		Long snapshotExpiresAt = snapshotRemainingMs == null ? null
 				: Long.valueOf(System.currentTimeMillis() + snapshotRemainingMs);
 		body.put("snapshotRemainingMs", snapshotRemainingMs);
 		body.put("snapshotExpiresAt", snapshotExpiresAt);
-		// C2：展示/恢复面用非抛读口（guard 读失败不能把整页打成 500）。
+		PendingEntriesProjection projection = pendingEntriesProjection(runId, snapshot);
+		body.put("pendingEntries", projection.entries());
+		body.put("unresolvedExternal", projection.unresolvedExternal());
+		body.put("awaitingExternal",
+				RunSnapshot.SUSPENDED.equals(snapshot.getStatus()) && !projection.unresolvedExternal().isEmpty());
+		return currentRunArchiveResponse(runId, body);
+	}
+
+	private PendingEntriesProjection pendingEntriesProjection(String runId, RunSnapshot snapshot) {
 		List<PendingToolCall> pendings = this.runStore.pendingsLenient(runId);
+		Map<String, Integer> batchIndexes = batchIndexes(snapshot.getInFlightToolCalls());
+		List<Map<String, Object>> entries = new ArrayList<>();
+		List<String> unresolvedExternal = new ArrayList<>();
+		for (PendingToolCall pending : pendings) {
+			entries.add(pendingEntry(pending, batchIndexes));
+			if (PendingToolCall.PENDING.equals(pending.getStatus())
+					&& !PendingToolCall.KIND_BACKEND.equals(pending.getKind())) {
+				unresolvedExternal.add(pending.getToolCallId());
+			}
+		}
+		return new PendingEntriesProjection(entries.isEmpty() ? List.of() : entries,
+				unresolvedExternal.isEmpty() ? List.of() : unresolvedExternal);
+	}
+
+	private static Map<String, Integer> batchIndexes(List<PendingToolCall> batchOrder) {
 		Map<String, Integer> batchIndexes = new LinkedHashMap<>();
-		List<PendingToolCall> batchOrder = snapshot.getInFlightToolCalls();
 		for (int i = 0; batchOrder != null && i < batchOrder.size(); i++) {
 			PendingToolCall pending = batchOrder.get(i);
 			if (pending != null && pending.getToolCallId() != null) {
 				batchIndexes.putIfAbsent(pending.getToolCallId(), i);
 			}
 		}
-		List<Map<String, Object>> pendingEntries = new ArrayList<>();
-		List<String> unresolvedExternal = new ArrayList<>();
-		for (PendingToolCall pending : pendings) {
-			Map<String, Object> entry = new LinkedHashMap<>();
-			entry.put("toolCallId", pending.getToolCallId());
-			Integer batchIndex = batchIndexes.get(pending.getToolCallId());
-			if (batchIndex != null) {
-				entry.put("batchIndex", batchIndex);
-			}
-			entry.put("entryStatus", pending.getStatus());
-			entry.put("outcome", pending.effectiveOutcome().wire());
-			entry.put("executed", pending.isExecuted());
-			if (pending.getExecutedBy() != null) {
-				entry.put("executedBy", pending.getExecutedBy());
-			}
-			entry.put("claimedAtMs", pending.getClaimedAtMs() > 0L ? pending.getClaimedAtMs() : null);
-			entry.put("claimedEpoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : null);
-			entry.put("kind", pending.getKind());
-			entry.put("name", pending.getName());
-			entry.put("arguments", pending.getArguments());
-			// L0（2026-10-21 裁决 A/B）：刷新恢复的两个判据原样透出 ——
-			// req = 该条目的请求帧（confirm_request / frontend_tool_request）<b>真的发过</b>，
-			// 由 ConfirmGate 在发射前经 RunStore#markRequestEmitted 置位；kind 是<b>三值原文</b>
-			// （CONFIRM/FRONTEND/BACKEND），前端只为 CONFIRM/FRONTEND 且 req=true 的 PENDING 条目建卡。
-			// 缺 req 键 = 请求帧尚未发射，前端按 false 处理（宁可少一张卡，不可让用户点到未生效的卡）。
-			entry.put("req", Boolean.TRUE.equals(pending.getReq()));
-			entry.put("reqAtMs", pending.getReqAtMs() > 0L ? pending.getReqAtMs() : null);
-			// R-160 M3：透出到期口径。去超时裁决后前端已退役倒计时/「等待人工确认」静态兜底，
-			// 快照里的 expiresAt/atMs 只作对账口径（null = 无期限：确认门/表单）。
-			// 字段保留是兼容与取证需要（前端 utils/parts 仍原样携带，不据此置灰按钮）。
-			entry.put("expiresAt", pending.getExpiresAt());
-			entry.put("atMs", pending.getAtMs());
-			// MAJOR-1（收口）：刷新恢复路径也要带预检报告，否则卡面丢了"批准的是哪一版预检"。
-			// 非确认门工具/未产出预检为 null ⇒ 键仍出现但值为 null（前端按"没有就不显示预检区"处理）。
-			entry.put("preflight", pending.getPreflight());
-			// 批4-D（用户 2026-10-23 裁决）：不可撤销位随条目透出 —— 刷新恢复要据此重建复选框
-			// （否则刷新后"一点即发"，复选框消失 = 安全回退）。恒给布尔值（false = 不加复选框）。
-			entry.put("irreversible", pending.isIrreversible());
-			pendingEntries.add(entry);
-			if (PendingToolCall.PENDING.equals(pending.getStatus())
-					&& !PendingToolCall.KIND_BACKEND.equals(pending.getKind())) {
-				unresolvedExternal.add(pending.getToolCallId());
-			}
+		return batchIndexes.isEmpty() ? Map.of() : batchIndexes;
+	}
+
+	/** req/expiresAt/preflight 等键的形状与空值语义均按恢复协议原样透出。 */
+	private static Map<String, Object> pendingEntry(PendingToolCall pending, Map<String, Integer> batchIndexes) {
+		Map<String, Object> entry = new LinkedHashMap<>();
+		entry.put("toolCallId", pending.getToolCallId());
+		Integer batchIndex = batchIndexes.get(pending.getToolCallId());
+		if (batchIndex != null) {
+			entry.put("batchIndex", batchIndex);
 		}
-		body.put("pendingEntries", pendingEntries);
-		body.put("unresolvedExternal", unresolvedExternal);
-		body.put("awaitingExternal", RunSnapshot.SUSPENDED.equals(snapshot.getStatus()) && !unresolvedExternal.isEmpty());
+		entry.put("entryStatus", pending.getStatus());
+		entry.put("outcome", pending.effectiveOutcome().wire());
+		entry.put("executed", pending.isExecuted());
+		if (pending.getExecutedBy() != null) {
+			entry.put("executedBy", pending.getExecutedBy());
+		}
+		entry.put("claimedAtMs", pending.getClaimedAtMs() > 0L ? pending.getClaimedAtMs() : null);
+		entry.put("claimedEpoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : null);
+		entry.put("kind", pending.getKind());
+		entry.put("name", pending.getName());
+		entry.put("arguments", pending.getArguments());
+		entry.put("req", Boolean.TRUE.equals(pending.getReq()));
+		entry.put("reqAtMs", pending.getReqAtMs() > 0L ? pending.getReqAtMs() : null);
+		entry.put("expiresAt", pending.getExpiresAt());
+		entry.put("atMs", pending.getAtMs());
+		entry.put("preflight", pending.getPreflight());
+		entry.put("irreversible", pending.isIrreversible());
+		return entry;
+	}
+
+	private ResponseEntity<?> currentRunArchiveResponse(String runId, Map<String, Object> body) {
 		Long maxSeq = archiveMaxSeq(runId);
 		if (maxSeq == null) {
-			// I-1：末号读失败不得回 0（前端会把 0 当全量回放锚点）；503 + degraded 让前端重试。
 			Map<String, Object> error = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
 					"AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
 			error.put("degraded", true);
@@ -1986,6 +2049,9 @@ public class AiController {
 		}
 		body.put("archiveMaxSeq", maxSeq);
 		return ResponseEntity.ok(ApiResponse.ok(body));
+	}
+
+	private record PendingEntriesProjection(List<Map<String, Object>> entries, List<String> unresolvedExternal) {
 	}
 
 	/**
@@ -2020,7 +2086,7 @@ public class AiController {
 
 	@PostMapping(value = "/runs/{runId}/resume", produces = MediaType.APPLICATION_JSON_VALUE)
 	public ResponseEntity<?> resume(@PathVariable String runId) {
-		if (!ownedOrAbsent(runId)) {
+		if (!isOwnedOrAbsent(runId)) {
 			return json(HttpStatus.NOT_FOUND, errorBody(ErrorCodes.UNKNOWN_RUN, "轮次不存在"));
 		}
 		ResumeService service = this.resumeService.getIfAvailable();
@@ -2104,12 +2170,7 @@ public class AiController {
 	 * @param extra 追加的 {@code k,v} 对
 	 */
 	private void deny(HttpStatus status, String code, String sessionId, String runId, Object... extra) {
-		Object[] fields = new Object[extra.length + 4];
-		fields[0] = "status";
-		fields[1] = status.value();
-		fields[2] = "code";
-		fields[3] = code;
-		System.arraycopy(extra, 0, fields, 4, extra.length);
+		Object[] fields = ArrayUtils.addAll(new Object[] { "status", status.value(), "code", code }, extra);
 		AiTrace.eventOn(runId, sessionId, "turn_denied", fields);
 	}
 
@@ -2166,7 +2227,9 @@ public class AiController {
 			transcriptPage = this.transcript.readPage(sessionId, before, latest);
 		}
 		catch (RuntimeException ex) {
-			log.warn("history transcript read failed sessionId={}", sessionId, ex);
+			if (LogSampling.canAcquire("history-transcript-read")) {
+				log.warn("history transcript read failed sessionId={}", sessionId, ex);
+			}
 			return json(HttpStatus.SERVICE_UNAVAILABLE, redisUnavailable());
 		}
 		List<Map<String, Object>> page = transcriptItems(projectableTranscriptEntries(transcriptPage.entries()));
@@ -2197,10 +2260,12 @@ public class AiController {
 			raw = this.contextStateStore.events(sessionId);
 		}
 		catch (RuntimeException ex) {
-			log.warn("history compaction facts read failed sessionId={} (returning empty events)", sessionId, ex);
+			if (LogSampling.canAcquire("history-compaction-read")) {
+				log.warn("history compaction facts read failed sessionId={} (returning empty events)", sessionId, ex);
+			}
 			return List.of();
 		}
-		if (raw == null || raw.isEmpty()) {
+		if (CollectionUtils.isEmpty(raw)) {
 			return List.of();
 		}
 		List<Map<String, Object>> sorted = new ArrayList<>(raw);
@@ -2228,12 +2293,7 @@ public class AiController {
 			return number.longValue();
 		}
 		if (value instanceof String text) {
-			try {
-				return Long.parseLong(text.trim());
-			}
-			catch (NumberFormatException ex) {
-				return 0L;
-			}
+			return NumberUtils.toLong(StringUtils.trim(text), 0L);
 		}
 		return 0L;
 	}
@@ -2245,45 +2305,45 @@ public class AiController {
 	 * 工具结果仍走 {@link #historyToolResponses} 同一份用户面投影（信封解包 / 文案码 / resultView），
 	 * 因此展示历史的卡面语义与实时帧同源。
 	 */
-	private List<Map<String, Object>> transcriptItems(List<com.example.configmgr.ai.history.TranscriptEntry> entries) {
+	private List<Map<String, Object>> transcriptItems(List<TranscriptEntry> entries) {
 		List<Map<String, Object>> items = new ArrayList<>(entries.size());
-		for (com.example.configmgr.ai.history.TranscriptEntry entry : entries) {
+		for (TranscriptEntry entry : entries) {
 			Map<String, Object> item = transcriptItem(entry);
-			if (item != null) {
+			if (MapUtils.isNotEmpty(item)) {
 				items.add(item);
 			}
 		}
-		return items;
+		return items.isEmpty() ? List.of() : items;
 	}
 
 	/** 只保留能投影成 USER/ASSISTANT/TOOL 的条目（计数与切片都只用它，避免全量建 map）。 */
-	private static List<com.example.configmgr.ai.history.TranscriptEntry> projectableTranscriptEntries(
-			List<com.example.configmgr.ai.history.TranscriptEntry> entries) {
-		List<com.example.configmgr.ai.history.TranscriptEntry> out = new ArrayList<>(entries.size());
-		for (com.example.configmgr.ai.history.TranscriptEntry entry : entries) {
+	private static List<TranscriptEntry> projectableTranscriptEntries(
+			List<TranscriptEntry> entries) {
+		List<TranscriptEntry> out = new ArrayList<>(entries.size());
+		for (TranscriptEntry entry : entries) {
 			if (transcriptType(entry) != null) {
 				out.add(entry);
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
-	private static String transcriptType(com.example.configmgr.ai.history.TranscriptEntry entry) {
-		if (entry.kind() == null || entry.kind().isBlank()) {
+	private static String transcriptType(TranscriptEntry entry) {
+		if (StringUtils.isBlank(entry.kind())) {
 			return null;
 		}
 		String type = entry.kind().toUpperCase();
 		return "USER".equals(type) || "ASSISTANT".equals(type) || "TOOL".equals(type) ? type : null;
 	}
 
-	private Map<String, Object> transcriptItem(com.example.configmgr.ai.history.TranscriptEntry entry) {
+	private Map<String, Object> transcriptItem(TranscriptEntry entry) {
 		String type = transcriptType(entry);
 		if (type == null) {
-			return null;
+			return Map.of();
 		}
 		Map<String, Object> item = new LinkedHashMap<>();
 		item.put("type", type);
-		item.put("text", entry.text() == null ? "" : entry.text());
+		item.put("text", StringUtils.defaultString(entry.text()));
 		if (entry.runId() != null) {
 			item.put("runId", entry.runId());
 		}
@@ -2291,61 +2351,7 @@ public class AiController {
 			item.put("timestamp", entry.atMs());
 		}
 		if ("ASSISTANT".equals(type)) {
-			if (entry.errorCode() != null && !entry.errorCode().isBlank()) {
-				item.put(TranscriptEntries.ERROR_CODE_KEY, entry.errorCode());
-			}
-			if (entry.errorMessage() != null && !entry.errorMessage().isBlank()) {
-				item.put(TranscriptEntries.ERROR_MESSAGE_KEY, entry.errorMessage());
-			}
-			if (entry.outcome() != null && !entry.outcome().isBlank()) {
-				item.put("outcome", entry.outcome());
-			}
-			if (entry.errorCardKey() != null && !entry.errorCardKey().isBlank()) {
-				item.put("errorCardKey", entry.errorCardKey());
-			}
-			if (Boolean.TRUE.equals(entry.unconfirmed())) {
-				item.put("unconfirmed", true);
-			}
-			if (entry.toolCalls() != null && !entry.toolCalls().isEmpty()) {
-				List<Map<String, Object>> calls = new ArrayList<>(entry.toolCalls().size());
-				for (com.example.configmgr.ai.history.TranscriptEntry.ToolCallView call : entry.toolCalls()) {
-					Map<String, Object> view = new LinkedHashMap<>();
-					view.put("id", call.id());
-					view.put("type", call.type());
-					view.put("name", call.name());
-					view.put("arguments", call.arguments());
-					calls.add(view);
-				}
-				item.put("toolCalls", calls);
-			}
-			if (entry.toolCallStates() != null && !entry.toolCallStates().isEmpty()) {
-				item.put("toolCallStates", entry.toolCallStates());
-			}
-			if (entry.segments() != null) {
-				List<Map<String, Object>> segments = new ArrayList<>(entry.segments().size());
-				for (com.example.configmgr.ai.history.TranscriptEntry.SegmentView segment : entry.segments()) {
-					if (!this.properties.getReasoning().isDisplayEnabled() && "reasoning".equals(segment.kind())) {
-						continue;
-					}
-					Map<String, Object> view = new LinkedHashMap<>();
-					view.put("kind", segment.kind());
-					view.put("text", segment.text());
-					view.put("toolCallId", segment.toolCallId());
-					view.put("seq", segment.seq());
-					segments.add(view);
-				}
-				item.put("segments", segments);
-			}
-			if (this.properties.getReasoning().isDisplayEnabled() && entry.reasoning() != null
-					&& !entry.reasoning().isBlank()) {
-				item.put(ResilientChatService.REASONING_METADATA_KEY, entry.reasoning());
-			}
-			if (Boolean.TRUE.equals(entry.stopped())) {
-				item.put("stopped", true);
-			}
-			if (Boolean.TRUE.equals(entry.truncated())) {
-				item.put(ResilientChatService.TRUNCATED_KEY, true);
-			}
+			addAssistantTranscriptFacts(item, entry);
 		}
 		if ("TOOL".equals(type)) {
 			item.put("toolResponses", List.of(transcriptToolResponse(entry)));
@@ -2353,13 +2359,86 @@ public class AiController {
 		return item;
 	}
 
-	private Map<String, Object> transcriptToolResponse(com.example.configmgr.ai.history.TranscriptEntry entry) {
+	private void addAssistantTranscriptFacts(Map<String, Object> item, TranscriptEntry entry) {
+		addAssistantErrorFacts(item, entry);
+		if (CollectionUtils.isNotEmpty(entry.toolCalls())) {
+			item.put("toolCalls", transcriptToolCalls(entry.toolCalls()));
+		}
+		if (MapUtils.isNotEmpty(entry.toolCallStates())) {
+			item.put("toolCallStates", entry.toolCallStates());
+		}
+		if (CollectionUtils.isNotEmpty(entry.segments())) {
+			item.put("segments", transcriptSegments(entry.segments()));
+		}
+		addAssistantStateFacts(item, entry);
+	}
+
+	private static void addAssistantErrorFacts(Map<String, Object> item, TranscriptEntry entry) {
+		if (StringUtils.isNotBlank(entry.errorCode())) {
+			item.put(TranscriptEntries.ERROR_CODE_KEY, entry.errorCode());
+		}
+		if (StringUtils.isNotBlank(entry.errorMessage())) {
+			item.put(TranscriptEntries.ERROR_MESSAGE_KEY, entry.errorMessage());
+		}
+		if (StringUtils.isNotBlank(entry.outcome())) {
+			item.put("outcome", entry.outcome());
+		}
+		if (StringUtils.isNotBlank(entry.errorCardKey())) {
+			item.put("errorCardKey", entry.errorCardKey());
+		}
+		if (Boolean.TRUE.equals(entry.unconfirmed())) {
+			item.put("unconfirmed", true);
+		}
+	}
+
+	private static List<Map<String, Object>> transcriptToolCalls(List<TranscriptEntry.ToolCallView> toolCalls) {
+		List<Map<String, Object>> calls = new ArrayList<>(toolCalls.size());
+		for (TranscriptEntry.ToolCallView call : toolCalls) {
+			Map<String, Object> view = new LinkedHashMap<>();
+			view.put("id", call.id());
+			view.put("type", call.type());
+			view.put("name", call.name());
+			view.put("arguments", call.arguments());
+			calls.add(view);
+		}
+		return calls.isEmpty() ? List.of() : calls;
+	}
+
+	private List<Map<String, Object>> transcriptSegments(List<TranscriptEntry.SegmentView> entrySegments) {
+		List<Map<String, Object>> segments = new ArrayList<>(entrySegments.size());
+		for (TranscriptEntry.SegmentView segment : entrySegments) {
+			if (!this.properties.getReasoning().isDisplayEnabled() && "reasoning".equals(segment.kind())) {
+				continue;
+			}
+			Map<String, Object> view = new LinkedHashMap<>();
+			view.put("kind", segment.kind());
+			view.put("text", segment.text());
+			view.put("toolCallId", segment.toolCallId());
+			view.put("seq", segment.seq());
+			segments.add(view);
+		}
+		return segments.isEmpty() ? List.of() : segments;
+	}
+
+	private void addAssistantStateFacts(Map<String, Object> item, TranscriptEntry entry) {
+		if (this.properties.getReasoning().isDisplayEnabled() && StringUtils.isNotBlank(entry.reasoning())) {
+			item.put(ResilientChatService.REASONING_METADATA_KEY, entry.reasoning());
+		}
+		if (Boolean.TRUE.equals(entry.stopped())) {
+			item.put("stopped", true);
+		}
+		if (Boolean.TRUE.equals(entry.truncated())) {
+			item.put(ResilientChatService.TRUNCATED_KEY, true);
+		}
+	}
+
+	private Map<String, Object> transcriptToolResponse(TranscriptEntry entry) {
 		ToolResponseMessage single = ToolResponseMessage.builder()
 			.responses(List.of(new ToolResponseMessage.ToolResponse(entry.toolCallId(), entry.name(),
-					entry.result() == null ? "" : entry.result())))
+					StringUtils.defaultString(entry.result()))))
 			.build();
 		List<Map<String, Object>> responses = historyToolResponses(single);
-		Map<String, Object> item = !responses.isEmpty() ? responses.get(0) : new LinkedHashMap<>();
+		Map<String, Object> item = !responses.isEmpty() ? responses.getFirst() : new LinkedHashMap<>();
 		if (item.isEmpty()) {
 			item.put("id", entry.toolCallId());
 			item.put("name", entry.name());
@@ -2367,7 +2446,7 @@ public class AiController {
 		}
 		// P2：transcript 只存用户面原文，信封里的 code 与截断事实在写入时另存；
 		// 读取时按它们还原 userTextCode / 截断五字段 —— 与 chat:mem 的信封路径同形。
-		if (entry.code() != null && !entry.code().isBlank()) {
+		if (StringUtils.isNotBlank(entry.code())) {
 			item.put("responseData", ToolResultUserText.forUser(entry.code(),
 					item.get("responseData") == null ? null : String.valueOf(item.get("responseData"))));
 			item.put("userTextCode", ToolResultUserText.userTextCode(entry.code()));
@@ -2413,22 +2492,22 @@ public class AiController {
 			// A10 R-15：模型侧视图截断是**持久事实**（信封五字段），历史通道必须原样透出，
 			// 否则刷新后截断角标与 locale hover 消失（帧只活在实时流里）。
 			Map<String, Object> truncation = historyTruncation(response.responseData());
-			if (truncation != null) {
+			if (MapUtils.isNotEmpty(truncation)) {
 				item.putAll(truncation);
 			}
 			Map<String, Object> view = historyResultView(response);
-			if (view != null) {
+			if (MapUtils.isNotEmpty(view)) {
 				item.put("resultView", view);
 			}
 			out.add(item);
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/** 信封里的机器可读码（非信封/无码为 null）；只用于选择用户摘要，不改写原文。 */
 	private String envelopeCode(String responseData) {
 		String json = ToolResultEnvelope.unwrapModelJson(responseData);
-		if (json == null || !json.trim().startsWith("{")) {
+		if (!StringUtils.startsWith(StringUtils.trim(json), "{")) {
 			return null;
 		}
 		try {
@@ -2441,7 +2520,9 @@ public class AiController {
 		}
 		catch (Exception ex) {
 			// 展示增强不得让 /history 500：解析失败按"无码"处理，原文照旧
-			log.debug("history tool result envelope code parse failed; passing through without code", ex);
+			if (LogSampling.canAcquire("history-envelope-code-parse")) {
+				log.warn("history tool result envelope code parse failed; passing through without code", ex);
+			}
 			return null;
 		}
 	}
@@ -2459,18 +2540,18 @@ public class AiController {
 	 * 信封可能带模型侧定界外壳（{@code <tool_result>}），先剥壳再解析。
 	 */
 	private Map<String, Object> historyTruncation(String responseData) {
-		if (responseData == null || responseData.isBlank()) {
-			return null;
+		if (StringUtils.isBlank(responseData)) {
+			return Map.of();
 		}
 		try {
 			String json = ToolResultEnvelope.unwrapModelJson(responseData);
-			if (json == null || !json.trim().startsWith("{")) {
-				return null;
+			if (!StringUtils.startsWith(StringUtils.trim(json), "{")) {
+				return Map.of();
 			}
 			JsonNode node = this.objectMapper.readTree(json);
 			if (node == null || !node.isObject() || !isToolResultEnvelope(node)
 					|| !node.path(TruncationContract.TRUNCATED_FIELD).asBoolean(false)) {
-				return null;
+				return Map.of();
 			}
 			Map<String, Object> fields = new LinkedHashMap<>();
 			fields.put(TruncationContract.TRUNCATED_FIELD, true);
@@ -2490,8 +2571,10 @@ public class AiController {
 		}
 		catch (Exception ex) {
 			// 展示增强不得让 /history 500：解析失败按"无截断元数据"处理
-			log.debug("history tool result truncation metadata parse failed; passing through without fields", ex);
-			return null;
+			if (LogSampling.canAcquire("history-truncation-parse")) {
+				log.warn("history tool result truncation metadata parse failed; passing through without fields", ex);
+			}
+			return Map.of();
 		}
 	}
 
@@ -2501,7 +2584,7 @@ public class AiController {
 	 * <p>三条口径与帧路径（`SpToolCallingManager#resultViewOf`）逐条对齐：
 	 * ① 只对**成功结局**出视图 —— 失败/取消的卡面不产视图（"视图是成功结果的投影"）；
 	 * ② 认领按工具名，投影器异常一律吞掉（展示增强不得让 {@code /history} 500）；
-	 * ③ 返回 {@code null} 时不写键。
+	 * ③ 返回空 Map 时不写键。
 	 *
 	 * <p><b>与帧路径唯一的差别</b>（Task 6 / BZ-33）：这里显式标 {@code historical=true}。
 	 * 归档是"重放"，不允许再查一次业务库 —— 否则刷新后卡面显示的是今天的任务/数据，
@@ -2510,39 +2593,41 @@ public class AiController {
 	 */
 	private Map<String, Object> historyResultView(ToolResponseMessage.ToolResponse response) {
 		if (this.resultViewProviders.isEmpty() || response.name() == null || response.id() == null) {
-			return null;
+			return Map.of();
 		}
-		if (!historyOutcomeOk(response.responseData())) {
-			return null;
+		if (!isHistoryOutcomeOk(response.responseData())) {
+			return Map.of();
 		}
 		String resultText = historyMessageText(response.responseData());
-		for (com.example.configmgr.ai.resultview.ToolResultViewProvider provider : this.resultViewProviders) {
+		for (ToolResultViewProvider provider : this.resultViewProviders) {
 			if (!provider.supports(response.name())) {
 				continue;
 			}
 			try {
 				// Task 6 / BZ-33：历史是"重放"，不是"重新查库"。投影器据此改用那次调用的结果原文，
 				// 不得用当前业务库改写归档卡面（旧实现每次 /history 都重跑 taskService.findAll()）。
-				com.example.configmgr.ai.resultview.ResultView view = provider.build(response.id(),
+				ResultView view = provider.build(response.id(),
 						response.name(), resultText, true);
-				return view == null ? null : view.toMap();
+				return view == null ? Map.of() : view.toMap();
 			}
 			catch (RuntimeException ex) {
-				log.warn("history resultView build failed (no view this time, card shape without view) tool={} toolCallId={}",
-						response.name(), response.id(), ex);
-				return null;
+				if (LogSampling.canAcquire("history-result-view-build")) {
+					log.warn("history resultView build failed (no view this time, card shape without view) tool={} toolCallId={}",
+							response.name(), response.id(), ex);
+				}
+				return Map.of();
 			}
 		}
-		return null;
+		return Map.of();
 	}
 
 	/**
 	 * 历史响应的结局是否成功：信封带 {@code ok=false} ⇒ 否；非信封 / 无该键 ⇒ 仅视为"无失败证据"。
 	 * 本判据只决定是否产出 resultView，<b>不代表</b>工具结局为成功（工具结局只认 outcome）。
 	 */
-	private boolean historyOutcomeOk(String responseData) {
+	private boolean isHistoryOutcomeOk(String responseData) {
 		String json = ToolResultEnvelope.unwrapModelJson(responseData);
-		if (json == null || !json.trim().startsWith("{")) {
+		if (!StringUtils.startsWith(StringUtils.trim(json), "{")) {
 			return true;
 		}
 		try {
@@ -2567,7 +2652,7 @@ public class AiController {
 
 	/** 信封 JSON → {@code message} 原文；识别不了（非信封/普通 JSON 结果）一律原样返回。 */
 	private String unwrapEnvelope(String responseData) {
-		if (responseData == null || !responseData.trim().startsWith("{")) {
+		if (!StringUtils.startsWith(StringUtils.trim(responseData), "{")) {
 			return responseData;
 		}
 		try {
@@ -2579,7 +2664,9 @@ public class AiController {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("history tool result is not parseable envelope JSON; passing through raw text", ex);
+			if (LogSampling.canAcquire("history-envelope-unwrap")) {
+				log.warn("history tool result is not parseable envelope JSON; passing through raw text", ex);
+			}
 		}
 		return responseData;
 	}
@@ -2612,7 +2699,7 @@ public class AiController {
 	@GetMapping("/context/{sessionId}")
 	public ResponseEntity<Map<String, Object>> context(@PathVariable String sessionId,
 			@RequestParam(name = "ledger", required = false) Boolean ledger) {
-		if (!StringUtils.hasText(sessionId)) {
+		if (!StringUtils.isNotBlank(sessionId)) {
 			return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 必填"));
 		}
 		if (!this.redisAvailability.isAvailable()) {
@@ -2643,33 +2730,30 @@ public class AiController {
 		body.put("available", this.availability.isAvailable());
 		String availabilityCode = this.availability.isAvailable() ? "AI_AVAILABLE" : this.availability.code();
 		body.put("code", availabilityCode);
-		// 模型配置专项批①（additive）：model/baseUrl 仍<b>保留</b>同名同语义，值优先取配置快照的
-		// 默认目标；快照里没有可用 provider 时回落 env 回读 —— "空表 + 无 env" 下与批①之前逐值相同。
+		addHealthConfiguration(body);
+		addHealthRuntime(body);
+		addHealthObservability(body);
+		ResponseEntity<Map<String, Object>> unavailable = healthUnavailable(body, availabilityCode);
+		return unavailable != null ? unavailable : ResponseEntity.ok(body);
+	}
+
+	/** 默认模型、上下文上限与默认参数仍按配置快照优先、环境变量回落。 */
+	private void addHealthConfiguration(Map<String, Object> body) {
 		AiConfigService.ResolvedProvider resolved = this.aiConfigService == null ? null
 				: this.aiConfigService.resolveDefault().orElse(null);
 		body.put("model", resolved != null ? resolved.modelId()
 				: this.environment.getProperty("spring.ai.openai.chat.options.model", "(unset)"));
-		body.put("baseUrl", resolved != null ? resolved.baseUrl()
-				: this.environment.getProperty("spring.ai.openai.base-url", "(unset)"));
-		// 新增：当前默认目标的 provider/model 身份 + 逐 provider 的 key 状态（永不含 key 本身）
-		body.put("providerId", resolved != null ? resolved.providerId() : null);
+		body.put("providerId", resolved == null || resolved.providerId() == null ? null : resolved.providerId().toString());
 		body.put("defaultModelId", resolved != null ? resolved.modelId() : null);
-		// 上下文专项批①（additive，仅观测）：分母的实际取值 + 压缩是否真的会被判。
-		// 上限未知（null）时压缩不做比例判定（降级态），故 compactionOn 也随之为 false —— 两者同源。
 		ContextLimitResolver.ResolveResult contextLimit = this.contextCompactor == null
 				? new ContextLimitResolver.ResolveResult(0, ContextLimitResolver.Source.UNKNOWN)
 				: this.contextCompactor.resolveLimit(resolved != null ? resolved.providerId() : null,
 						resolved != null ? resolved.modelId() : null);
 		int contextLimitTokens = contextLimit.limitTokens();
 		body.put("contextLimitTokens", contextLimitTokens > 0 ? contextLimitTokens : null);
-		// 取数来源（schema / unknown）：UNKNOWN = 上限不可知（真实降级态，不做比例判定）；
-		// 只进只读诊断，不做用户强提示。
 		body.put("contextLimitSource", contextLimit.source().wire());
 		body.put("compactionOn", this.contextCompactor != null && contextLimitTokens > 0);
 		body.put("providers", this.aiConfigService == null ? List.of() : this.aiConfigService.describeProviders());
-		// 批③（additive）：面板据此决定参数 popover 是否可用、初值取什么。
-		// allowedParams = ai_setting['allow.userParams']（缺省 true，与设置页同一口径）；
-		// defaultParams = 全局默认三值（null = 该项未设置，前端留空）。
 		AiConfigService.Defaults defaults = this.aiConfigService == null ? null : this.aiConfigService.defaults();
 		body.put("allowedParams", defaults == null || !Boolean.FALSE.equals(defaults.allowUserParams()));
 		Map<String, Object> defaultParams = new LinkedHashMap<>();
@@ -2677,51 +2761,40 @@ public class AiController {
 		defaultParams.put("topP", defaults == null ? null : defaults.topP());
 		defaultParams.put("maxTokens", defaults == null ? null : defaults.maxTokens());
 		body.put("defaultParams", defaultParams);
+	}
+
+	private void addHealthRuntime(Map<String, Object> body) {
 		body.put("memoryBackend", this.chatMemoryRepository.getClass().getSimpleName());
 		body.put("sessionTtl", String.valueOf(this.properties.getSessionTtl()));
-		// 确认门自 2026-10-20 起不再超时（等人无上限），故 /health 不再报告 confirmTimeoutSeconds。
-		// 与确认门原地对称的观测面仍在：值是前端工具键的折算秒（只对即时执行类前端工具有意义，
-		// generative_form 豁免 —— 见 ConfirmGate#suspendWaitSeconds）。
 		body.put("frontendToolTimeoutSeconds", this.confirmGate.frontendToolTimeoutSeconds());
 		body.put("suspendPoolSize", this.properties.getSuspend().getPoolSize());
 		body.put("sseDelivery", sseDeliverySnapshot());
 		body.put("activeSuspendGates", this.confirmGate.pendingGates());
 		body.put("heldSessions", this.sessionGate.heldSessions());
 		body.put("sessionLockRenewals", this.sessionGate.renewals());
-		// RT-34 的聚合面（additive）：续期累计丢锁 + 当前仍降级的持有者。两条来源都必须算进来 ——
-		// 取门时 Redis 不可用只置 holder.degraded、**不**累加 lockLost，只看计数会把那次降级漏报。
 		body.put("sessionLockLost", this.sessionGate.lockLost());
 		body.put("sessionLockDegraded", this.sessionGate.lockLost() > 0 || this.sessionGate.degradedSessions() > 0);
+	}
 
+	/** Redis/租约自检保持现算；未装配的安全与表格指标仍不产键。 */
+	private void addHealthObservability(Map<String, Object> body) {
 		body.put("resilience", Map.of(
 				"firstByteTimeout", String.valueOf(this.properties.getResilience().getFirstByteTimeout()),
 				"interEventTimeout", String.valueOf(this.properties.getResilience().getInterEventTimeout()),
 				"maxAttempts", this.properties.getResilience().getMaxAttempts(),
 				"totalBudget", String.valueOf(this.properties.getResilience().getTotalBudget())));
 		body.put("resumeOnStartup", this.properties.getResume().isOnStartup());
-		// 探活态必须"现算"：describe() 只回读上次结果，运维看 /health 时要能立刻看到 Redis 是否可用
-		// （代价 = 一次带短超时的 PING，不可用时 ≤ spring.data.redis.timeout）。
 		this.redisAvailability.isAvailable();
 		body.put("redis", this.redisAvailability.describe());
 		body.put("cancellations", Map.of("registeredRuns", this.cancellations.registeredRuns(),
 				"redisPolls", this.cancellations.polls(), "degraded", this.cancellations.degraded()));
 		body.put("instanceId", this.runStore.instanceId());
-		// B23L1 批②b：租约设施自检（additive 字段）。值<b>现算</b>（每次真打一次 PING）——
-		// 运维要看的是"现在能不能抢租"，不是"上一次抢的时候行不行"。无租约设施（降级装配）= false。
 		body.put("leaseOk", this.runStore.leaseService() != null && this.runStore.leaseService().leaseOk());
 		body.put("checkedAt", Instant.now().toString());
-		// 作业看门狗观测面（R-96 批 B，Q1）：tracked / judgedDeadTotal / judgedTimeoutTotal / lastScanAt，
-		// 与上面 AI 通道的投递池指标同一姿态 —— 作业侧失联/超时收敛在 /health 可观测。
 		body.put("jobWatchdog", this.jobWatchdog.metrics());
-		// 防护批③ B3-6（additive）：安全事件计数 —— 进程内口径，见 SecurityEvents 类注。
-		// 未注入时<b>不写</b>该键（"未装配"与"全 0"必须可区分，与 contextLimitTokens 同姿态）。
 		if (this.securityEvents != null) {
 			body.put("security", this.securityEvents.metrics());
 		}
-		// AI 表格工具治理批（additive）：表格开关的<b>有效值</b> + 进程内计数。
-		// 为什么必须回显有效值而不是配置原值：前端据此收紧采样/投影上界（min(键值, 硬顶)），
-		// 若这里报"配置写 200"而实际生效 20，前端就会以为还能取 200 行（配置面对运行面说谎）。
-		// 未装配时不写该键（"未装配"与"全 0"必须可区分，与 security/contextLimitTokens 同姿态）。
 		if (this.sheetSwitches != null) {
 			Map<String, Object> sheet = new LinkedHashMap<>(this.sheetSwitches.health());
 			if (this.sheetAudit != null) {
@@ -2729,19 +2802,18 @@ public class AiController {
 			}
 			body.put("sheet", sheet);
 		}
-		if (!this.availability.isAvailable()) {
-			// I-2 / 4B：/health 的 503 message 与 /chat 同一本地化出口 —— zh 由 ErrorBodyFactory
-			// 直接返回 fallback（= availability.reason() 原文，逐字不变），en 取 messages_en。
-			body.put("message", localize(availabilityCode,
-					this.availability.reason() == null ? "" : this.availability.reason()));
-			// I-1：变量名/机制词只留在 /health 诊断面，不进任何用户面 message/卡片/横幅。
-			Map<String, Object> diagnostics = keyDiagnostics(availabilityCode);
-			if (!diagnostics.isEmpty()) {
-				body.put("keyDiagnostics", diagnostics);
-			}
-			return json(HttpStatus.SERVICE_UNAVAILABLE, body);
+	}
+
+	private ResponseEntity<Map<String, Object>> healthUnavailable(Map<String, Object> body, String availabilityCode) {
+		if (this.availability.isAvailable()) {
+			return null;
 		}
-		return ResponseEntity.ok(body);
+		body.put("message", localize(availabilityCode, StringUtils.defaultString(this.availability.reason())));
+		Map<String, Object> diagnostics = keyDiagnostics(availabilityCode);
+		if (!diagnostics.isEmpty()) {
+			body.put("keyDiagnostics", diagnostics);
+		}
+		return json(HttpStatus.SERVICE_UNAVAILABLE, body);
 	}
 
 	/**
@@ -2798,7 +2870,7 @@ public class AiController {
 		body.put("code", code);
 		// A3-Y7 / I-1：与错误体同一本地化出口（zh 逐字不变）。AI_UNAVAILABLE / AI_KEY_MISSING /
 		// AI_KEY_UNREADABLE 三档都已在 messages_en 登记，en 不再回落中文原文。
-		body.put("message", localize(code, reason == null ? "" : reason));
+		body.put("message", localize(code, StringUtils.defaultString(reason)));
 		return body;
 	}
 
@@ -2898,19 +2970,19 @@ public class AiController {
 	 * 非前端 kind（确认门条目）一律<b>不接管</b> —— 它们的既有语义是 409 UNKNOWN/DUPLICATE，
 	 * 不能被一条新的尺寸判据吞成 400。
 	 *
-	 * <p>判定本体见 {@link FrontendToolGuard#structuredResult}：表格写四件按工具名，其余按
+	 * <p>判定本体见 {@link FrontendToolGuard#isStructuredResult}：表格写四件按工具名，其余按
 	 * "能解析成 JSON 对象/数组"的形状。普通超长文本（含以 <code>{</code> 开头但不是 JSON 的）
 	 * 仍走既有的截断 + 标记路径。
 	 *
 	 * <p>读条目的是<b>非抛读口</b>（{@code pendingLenient}）：Redis 抖动时退回"只看形状"的旧路径，
 	 * 不把一次读失败升级成回灌失败（真正写路径上的 fail-closed 仍在确认门里）。
 	 */
-	private boolean structuredOversize(PendingToolCall pending, String result) {
+	private boolean isStructuredOversize(PendingToolCall pending, String result) {
 		if (pending == null || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
 				|| !PendingToolCall.PENDING.equals(pending.getStatus())) {
 			return false;
 		}
-		return FrontendToolGuard.structuredResult(pending.getName(), this.objectMapper, result);
+		return FrontendToolGuard.isStructuredResult(pending.getName(), this.objectMapper, result);
 	}
 
 	/**
@@ -2966,7 +3038,7 @@ public class AiController {
 		// GF 优化批 G-A：结构化错误随拒绝体下发（前端按 key 点亮字段、按 code 决定是否可重试）；
 		// 人读 reasons 保留（E2E 中文断言与模型错误信封逐字不变）。
 		body.put("issues", verdict.issues());
-		body.put("retryable", verdict.retryable());
+		body.put("retryable", verdict.isRetryable());
 		body.put("runId", runId);
 		body.put("toolCallId", toolCallId);
 		body.put("name", submission.pending() == null ? null : submission.pending().getName());
@@ -3000,7 +3072,7 @@ public class AiController {
 	/** 挂起项快照（诊断用：确认门/前端工具各自等在哪里）。 */
 	@GetMapping("/pending/{runId}")
 	public ApiResponse<List<Map<String, Object>>> pending(@PathVariable String runId) {
-		if (!ownedOrAbsent(runId)) {
+		if (!isOwnedOrAbsent(runId)) {
 			// 他人/无归属的轮次按"没有待决条目"回答：不泄漏这一轮在谁手里
 			return ApiResponse.ok(List.of());
 		}
@@ -3008,7 +3080,7 @@ public class AiController {
 		for (PendingToolCall pending : this.runStore.pendingsLenient(runId)) {
 			items.add(pending.asMap());
 		}
-		return ApiResponse.ok(items);
+		return ApiResponse.ok(items.isEmpty() ? List.of() : items);
 	}
 
 	// ── R-163 T5：赞踩反馈（ai_feedback net-new 表，parts[] 持久化不动） ──
@@ -3030,55 +3102,61 @@ public class AiController {
 			return json(HttpStatus.BAD_REQUEST,
 					errorBody(ErrorCodes.TENANT_IDENTITY_REQUIRED, "缺少租户/用户身份上下文，反馈不可跨身份读写"));
 		}
-		String messageId = stringOf(body.get("messageId"));
-		String sessionId = stringOf(body.get("sessionId"));
-		Object ratingRaw = body.get("rating");
-		Integer rating = ratingRaw instanceof Number number ? number.intValue() : null;
-		String reason = stringOf(body.get("reason"));
-		// R-163 收口修 F2：被评价消息正文快照（前 200 字符，人工复盘可读摘要）
-		String excerpt = stringOf(body.get("excerpt"));
-		if (messageId == null || sessionId == null || rating == null
-				|| (rating != 1 && rating != -1 && rating != 0)) {
+		FeedbackInput input = feedbackInput(body);
+		if (input.messageId() == null || input.sessionId() == null || input.rating() == null
+				|| (input.rating() != 1 && input.rating() != -1 && input.rating() != 0)) {
 			return json(HttpStatus.BAD_REQUEST,
 					errorBody(ErrorCodes.BAD_REQUEST, "messageId/sessionId 必填，rating ∈ 1/-1/0"));
 		}
+		if (input.rating() == 0) {
+			return cancelFeedback(input.messageId(), identity.tenantId(), identity.userId());
+		}
+		return upsertFeedback(input, identity);
+	}
+
+	private static FeedbackInput feedbackInput(Map<String, Object> body) {
+		Object ratingRaw = body.get("rating");
+		Integer rating = ratingRaw instanceof Number number ? number.intValue() : null;
+		return new FeedbackInput(stringOf(body.get("messageId")), stringOf(body.get("sessionId")), rating,
+				stringOf(body.get("reason")), stringOf(body.get("excerpt")));
+	}
+
+	private ResponseEntity<?> cancelFeedback(String messageId, long tenantId, long userId) {
+		AiFeedback existing = this.aiFeedbackRepository.findByMessageIdAndTenantIdAndUserId(messageId, tenantId, userId);
+		if (existing != null) {
+			this.aiFeedbackRepository.delete(existing);
+		}
+		return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", false, "cancelled", existing != null)));
+	}
+
+	/** 摘录命中高置信凭据时整条隐去，再按原上限入库。 */
+	private ResponseEntity<?> upsertFeedback(FeedbackInput input, TenantUser identity) {
 		long tenantId = identity.tenantId();
 		long userId = identity.userId();
-		if (rating == 0) {
-			AiFeedback existing = this.aiFeedbackRepository.findByMessageIdAndTenantIdAndUserId(messageId, tenantId,
-					userId);
-			if (existing != null) {
-				this.aiFeedbackRepository.delete(existing);
-			}
-			return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", false, "cancelled", existing != null)));
-		}
-		AiFeedback entry = this.aiFeedbackRepository.findByMessageIdAndTenantIdAndUserId(messageId, tenantId, userId);
-		boolean saved;
+		AiFeedback entry = this.aiFeedbackRepository.findByMessageIdAndTenantIdAndUserId(input.messageId(), tenantId,
+				userId);
+		boolean saved = entry == null;
 		if (entry == null) {
 			entry = new AiFeedback();
-			entry.setMessageId(messageId);
-			saved = true;
-		}
-		else {
-			saved = false;
+			entry.setMessageId(input.messageId());
 		}
 		entry.setTenantId(tenantId);
 		entry.setUserId(userId);
 		entry.setCreatedBy(String.valueOf(userId));
-		entry.setSessionId(sessionId);
-		entry.setRating(rating);
-		if (reason != null) {
-			entry.setReason(reason.length() > 1024 ? reason.substring(0, 1024) : reason);
+		entry.setSessionId(input.sessionId());
+		entry.setRating(input.rating());
+		if (input.reason() != null) {
+			entry.setReason(StringUtils.left(input.reason(), 1024));
 		}
-		if (excerpt != null) {
-			// 防护批③ B3-8（L-99 裁定下保留）：摘录<b>永久入库</b>（H2），误伤不可逆 ⇒ 命中高置信凭据
-			// 即整条替换为 [已隐去]，而不是逐处脱敏（逐处脱敏会把"这条曾被脱敏"的事实一起模糊掉）。
-			// 判据来自 {@link ExcerptGuard}：它不是 DLP 管道的一部分，只服务这一个写点（见类注）。
-			String safeExcerpt = ExcerptGuard.sensitive(excerpt) ? "[已隐去]" : excerpt;
-			entry.setMessageExcerpt(safeExcerpt.length() > 200 ? safeExcerpt.substring(0, 200) : safeExcerpt);
+		if (input.excerpt() != null) {
+			String safeExcerpt = ExcerptGuard.sensitive(input.excerpt()) ? "[已隐去]" : input.excerpt();
+			entry.setMessageExcerpt(StringUtils.left(safeExcerpt, 200));
 		}
 		this.aiFeedbackRepository.save(entry);
 		return ResponseEntity.ok(ApiResponse.ok(Map.of("saved", saved, "cancelled", false)));
+	}
+
+	private record FeedbackInput(String messageId, String sessionId, Integer rating, String reason, String excerpt) {
 	}
 
 	/**
@@ -3106,15 +3184,11 @@ public class AiController {
 			item.put("updatedAt", entry.getUpdatedAt());
 			items.add(item);
 		}
-		return ApiResponse.ok(items);
+		return ApiResponse.ok(items.isEmpty() ? List.of() : items);
 	}
 
 	private static String stringOf(Object value) {
-		if (value == null) {
-			return null;
-		}
-		String s = String.valueOf(value).trim();
-		return s.isEmpty() ? null : s;
+		return StringUtils.trimToNull(Objects.toString(value, null));
 	}
 
 }

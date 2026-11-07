@@ -1,5 +1,11 @@
 package com.example.configmgr.ai.context;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -36,9 +42,17 @@ import java.util.Map;
  * @param providerId       记账时的 provider id（B1：与 {@code model} 成对，端点解析分母时不再丢失身份；
  *                         旧数据无此字段 ⇒ {@code null}，按"无 provider 身份"的旧口径全局匹配）
  */
-public record ContextState(int usedTokens, int completionTokens, int turnNo, boolean est, long atMs, String model,
-		String level, int compactedTurns, int lostTokens, String reason, String circuit, int fuseFails,
-		int systemTokens, int toolsTokens, int inputTokens, long openUntilMs, Long providerId, long version) {
+public record ContextState(@JsonProperty("usedTokens") int usedTokens,
+		@JsonProperty("completionTokens") int completionTokens, @JsonProperty("turnNo") int turnNo,
+		@JsonProperty("est") boolean est, @JsonProperty("atMs") @JsonFormat(shape = JsonFormat.Shape.STRING) long atMs,
+		@JsonProperty("model") String model, @JsonProperty("level") String level,
+		@JsonProperty("compactedTurns") int compactedTurns, @JsonProperty("lostTokens") int lostTokens,
+		@JsonProperty("reason") String reason, @JsonProperty("circuit") String circuit,
+		@JsonProperty("fuseFails") int fuseFails, @JsonProperty("systemTokens") int systemTokens,
+		@JsonProperty("toolsTokens") int toolsTokens, @JsonProperty("inputTokens") int inputTokens,
+		@JsonProperty("openUntilMs") @JsonFormat(shape = JsonFormat.Shape.STRING) long openUntilMs,
+		@JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
+		@JsonProperty("version") @JsonFormat(shape = JsonFormat.Shape.STRING) long version) {
 
 	/** 空态（会话从未记账）。 */
 	public static final ContextState EMPTY = new ContextState(0, 0, 0, false, 0L, null, "none", 0, 0, null, "closed", 0,
@@ -46,11 +60,20 @@ public record ContextState(int usedTokens, int completionTokens, int turnNo, boo
 
 	/** 是否已有真值/估算可展示（否则端点回"未测"而不是"用了 0"）。 */
 	public boolean measured() {
+		return isMeasured();
+	}
+
+	public boolean everCompacted() {
+		return hasEverCompacted();
+	}
+
+	@JsonIgnore
+	public boolean isMeasured() {
 		return this.atMs > 0L;
 	}
 
 	/** 已压缩过（滞回判据的输入）。 */
-	public boolean everCompacted() {
+	public boolean hasEverCompacted() {
 		return ContextTrigger.Level.fromWire(this.level) != ContextTrigger.Level.NONE;
 	}
 
@@ -127,7 +150,7 @@ public record ContextState(int usedTokens, int completionTokens, int turnNo, boo
 
 	/** 读侧的宽松解析（缺字段/脏值一律按缺省；计量面不因一份脏 HASH 抛错）。 */
 	public static ContextState fromFields(Map<String, String> raw) {
-		if (raw == null || raw.isEmpty()) {
+		if (MapUtils.isEmpty(raw)) {
 			return EMPTY;
 		}
 		return new ContextState(intOf(raw, "used", 0), intOf(raw, "completion", 0), intOf(raw, "turnNo", 0),
@@ -167,7 +190,7 @@ public record ContextState(int usedTokens, int completionTokens, int turnNo, boo
 	/** 可空的长整型字段（缺字段/脏值 ⇒ {@code null}，不把 0 冒充成 provider id）。 */
 	private static Long longOrNull(Map<String, String> raw, String key) {
 		String value = raw.get(key);
-		if (value == null || value.isBlank()) {
+		if (StringUtils.isBlank(value)) {
 			return null;
 		}
 		try {

@@ -2,6 +2,7 @@ package com.example.configmgr.ai.tool;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -91,7 +92,7 @@ public final class TruncationContract {
 		if (text == null) {
 			return false;
 		}
-		String trimmed = text.stripLeading();
+		String trimmed = StringUtils.stripStart(text, null);
 		if (trimmed.isEmpty()) {
 			return false;
 		}
@@ -140,7 +141,7 @@ public final class TruncationContract {
 		marker.put(ORIGINAL_CHARS_FIELD, originalChars);
 		marker.put(RETURNED_CHARS_FIELD, returnedChars);
 		marker.put(NOTICE_FIELD, notice);
-		marker.put(PREVIEW_FIELD, preview == null ? "" : preview);
+		marker.put(PREVIEW_FIELD, StringUtils.defaultString(preview));
 		try {
 			return JSON.writeValueAsString(marker);
 		}

@@ -1,6 +1,8 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.run.UsageDetails;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 
@@ -109,9 +111,9 @@ public final class ContextMeter {
 		if (prompt == null && completion == null && total == null) {
 			return;
 		}
-		int pv = prompt == null ? 0 : prompt;
-		int cv = completion == null ? 0 : completion;
-		int tv = total == null ? 0 : total;
+		int pv = ObjectUtils.defaultIfNull(prompt, 0);
+		int cv = ObjectUtils.defaultIfNull(completion, 0);
+		int tv = ObjectUtils.defaultIfNull(total, 0);
 		// R1：空帧（0/0/0）不参与 —— 这是"末帧 0/0/0"失真的第一道闸
 		if (pv <= 0 && cv <= 0 && tv <= 0) {
 			return;
@@ -154,6 +156,11 @@ public final class ContextMeter {
 
 	/** 是否至少见过一个非空 usage 帧（含被 R4 判脏的帧）。 */
 	public boolean lastMeasured() {
+		return isLastMeasured();
+	}
+
+	@JsonIgnore
+	public boolean isLastMeasured() {
 		return this.lastMeasured;
 	}
 

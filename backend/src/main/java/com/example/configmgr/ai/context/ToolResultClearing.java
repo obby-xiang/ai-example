@@ -1,6 +1,9 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.memory.RunMemoryMerge;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 
@@ -33,7 +36,7 @@ import java.util.Set;
  * 对模型没有额外信息量，落在用户面还会暴露内部键。原文仍可从台账/归档回取。
  * 占位符<b>刻意不复用</b>
  * {@code ToolResultLimiter.TRUNCATION_MARKER}：那个标记的语义是"上游结果过长被截断"，
- * 复用会让 {@code ToolResultLimiter#truncated} 把"已清理"误判成"被截断"。
+ * 复用会让 {@code ToolResultLimiter#isTruncated} 把"已清理"误判成"被截断"。
  */
 public final class ToolResultClearing {
 
@@ -99,11 +102,24 @@ public final class ToolResultClearing {
 	 */
 	public static Plan plan(List<Message> messages, int keepToolPairs, Set<String> protectedToolCallIds,
 			Set<String> protectedRunIds) {
-		if (messages == null || messages.isEmpty()) {
+		if (CollectionUtils.isEmpty(messages)) {
+			return new Plan(messages == null ? List.of() : messages, List.of(), 0);
+		}
+		List<Slot> slots = collectSlots(messages);
+		if (slots.isEmpty()) {
 			return new Plan(messages, List.of(), 0);
 		}
-		Set<String> protectedIds = protectedToolCallIds == null ? Set.of() : protectedToolCallIds;
-		Set<String> protectedRuns = protectedRunIds == null ? Set.of() : protectedRunIds;
+		ClearingPlan clearing = planClearing(messages, slots, keepToolPairs, protectedToolCallIds, protectedRunIds);
+		if (clearing.cleared().isEmpty()) {
+			return new Plan(messages, List.of(), 0);
+		}
+		List<Message> out = applyClearing(messages, clearing.replacements());
+		// 逐条已按 max(0) 累计（占位符可能比原结果还长）；这里再显式钳一次总量，
+		// 保证 Plan 的契约"省下的量 ∈ [0, 原文量]"在改实现时不会破（判据值按它递推，负数会倒扣）。
+		return new Plan(out, List.copyOf(clearing.cleared()), Math.max(0, clearing.savedTokens()));
+	}
+
+	private static List<Slot> collectSlots(List<Message> messages) {
 		List<Slot> slots = new ArrayList<>();
 		for (int i = 0; i < messages.size(); i++) {
 			Message message = messages.get(i);
@@ -116,23 +132,24 @@ public final class ToolResultClearing {
 				slots.add(new Slot(i, j, response.id(), response.name(), response.responseData()));
 			}
 		}
-		if (slots.isEmpty()) {
-			return new Plan(messages, List.of(), 0);
-		}
+		return slots;
+	}
+
+	private static ClearingPlan planClearing(List<Message> messages, List<Slot> slots, int keepToolPairs,
+			Set<String> protectedToolCallIds, Set<String> protectedRunIds) {
+		Set<String> protectedIds = ObjectUtils.defaultIfNull(protectedToolCallIds, Set.of());
+		Set<String> protectedRuns = ObjectUtils.defaultIfNull(protectedRunIds, Set.of());
 		// pin 窗口 = 最后 keepToolPairs 条（按"工具结果条数"数对，与 keep-tool-pairs 的键名一致）
 		int pinnedFrom = keepToolPairs <= 0 ? slots.size() : Math.max(0, slots.size() - keepToolPairs);
 		List<Cleared> cleared = new ArrayList<>();
 		Map<Integer, Map<Integer, String>> replacements = new HashMap<>();
 		int savedTokens = 0;
-		for (int index = 0; index < slots.size(); index++) {
+		for (int index = 0; index < pinnedFrom; index++) {
 			Slot slot = slots.get(index);
-			if (index >= pinnedFrom) {
-				continue;
-			}
 			if (slot.toolCallId() != null && protectedIds.contains(slot.toolCallId())) {
 				continue;
 			}
-			if (!protectedRuns.isEmpty() && inProtectedRun(messages.get(slot.messageIndex()), protectedRuns)) {
+			if (!protectedRuns.isEmpty() && isInProtectedRun(messages.get(slot.messageIndex()), protectedRuns)) {
 				continue;
 			}
 			if (isAlreadyCleared(slot.data())) {
@@ -145,9 +162,10 @@ public final class ToolResultClearing {
 			cleared.add(new Cleared(slot.toolCallId(), slot.name(), tokens));
 			savedTokens += Math.max(0, tokens - ContextEstimator.estimate(placeholder));
 		}
-		if (cleared.isEmpty()) {
-			return new Plan(messages, List.of(), 0);
-		}
+		return new ClearingPlan(cleared, replacements, savedTokens);
+	}
+
+	private static List<Message> applyClearing(List<Message> messages, Map<Integer, Map<Integer, String>> replacements) {
 		List<Message> out = new ArrayList<>(messages.size());
 		for (int i = 0; i < messages.size(); i++) {
 			Map<Integer, String> patch = replacements.get(i);
@@ -157,13 +175,14 @@ public final class ToolResultClearing {
 			}
 			out.add(rebuild((ToolResponseMessage) messages.get(i), patch));
 		}
-		// 逐条已按 max(0) 累计（占位符可能比原结果还长）；这里再显式钳一次总量，
-		// 保证 Plan 的契约"省下的量 ∈ [0, 原文量]"在改实现时不会破（判据值按它递推，负数会倒扣）。
-		return new Plan(out, List.copyOf(cleared), Math.max(0, savedTokens));
+		return out;
+	}
+
+	private record ClearingPlan(List<Cleared> cleared, Map<Integer, Map<Integer, String>> replacements, int savedTokens) {
 	}
 
 	/** 该消息是否属于受保护的 run（metadata.runId 命中；无归属的迁移期消息不保护）。 */
-	private static boolean inProtectedRun(Message message, Set<String> protectedRuns) {
+	private static boolean isInProtectedRun(Message message, Set<String> protectedRuns) {
 		if (message == null || message.getMetadata() == null) {
 			return false;
 		}
@@ -193,7 +212,7 @@ public final class ToolResultClearing {
 					new ToolResponseMessage.ToolResponse(existing.id(), existing.name(), entry.getValue()));
 		}
 		ToolResponseMessage.Builder builder = ToolResponseMessage.builder().responses(responses);
-		if (original.getMetadata() != null && !original.getMetadata().isEmpty()) {
+		if (MapUtils.isNotEmpty(original.getMetadata())) {
 			builder.metadata(original.getMetadata());
 		}
 		return builder.build();

@@ -1,10 +1,16 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -41,7 +47,7 @@ import java.util.Map;
  * tag 只用于键族识别与同槽书写规范，读路径<b>不</b>做多键脚本；</li>
  * <li><b>tag 含身份</b>：与 {@link TenantKeyScope} 同一口径 —— 两个租户可以拥有同名 sessionId，
  * 键本身就不同；无身份过渡期退回 {@code {session:<sid>}} 独立命名空间（不冒充任何真实身份）；</li>
- * <li><b>TTL = {@code app.ai.session-ttl}</b>：与会话/待决条目/快照同一把尺；每次写入续满。</li>
+ * <li><b>TTL = min({@code app.ai.session-ttl}, 7 天)</b>：每次写入真实续期，不保留永久键。</li>
  * </ul>
  *
  * <h2>runId → sessionId</h2>
@@ -93,6 +99,7 @@ public class CreateTaskDraftStore {
 
 	private final ObjectMapper mapper;
 
+	@NonNull
 	private final Duration ttl;
 
 	public CreateTaskDraftStore(ObjectProvider<StringRedisTemplate> redisProvider, ObjectMapper mapper) {
@@ -104,9 +111,11 @@ public class CreateTaskDraftStore {
 			AiProperties properties, ObjectProvider<RunStore> runStoreProvider) {
 		this.redisProvider = redisProvider;
 		this.runStoreProvider = runStoreProvider;
-		this.mapper = mapper == null ? FALLBACK_MAPPER : mapper;
+		this.mapper = ObjectUtils.defaultIfNull(mapper, FALLBACK_MAPPER);
 		Duration configured = properties == null ? null : properties.getSessionTtl();
-		this.ttl = configured == null || configured.isZero() || configured.isNegative() ? DEFAULT_TTL : configured;
+		Duration effective = configured == null || configured.isZero() || configured.isNegative() ? DEFAULT_TTL : configured;
+		Duration maxTtl = Duration.ofDays(7);
+		this.ttl = effective.compareTo(maxTtl) > 0 ? maxTtl : effective;
 	}
 
 	/**
@@ -117,7 +126,7 @@ public class CreateTaskDraftStore {
 	 * tag 边界提前结束（两个不同会话可能落到同一个键上），转义后 tag 非空且无碰撞。
 	 */
 	public static String sessionKey(String sessionId) {
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			throw new IllegalArgumentException("sessionId must not be blank: session draft keys consist of an identity segment and sessionId");
 		}
 		return KEY_PREFIX + "{" + TenantKeyScope.currentSegment() + "session:" + escapedSessionId(sessionId) + "}";
@@ -145,8 +154,8 @@ public class CreateTaskDraftStore {
 		if (redis == null || taskId <= 0L) {
 			return;
 		}
-		boolean hasDefCodes = defCodes != null && !defCodes.isEmpty();
-		boolean hasConditions = conditions != null && !conditions.isEmpty();
+		boolean hasDefCodes = CollectionUtils.isNotEmpty(defCodes);
+		boolean hasConditions = MapUtils.isNotEmpty(conditions);
 		if (!hasDefCodes && !hasConditions) {
 			// 空候选不表示"已知"：不建键、不写字段，也不覆盖先前那份明确候选
 			return;
@@ -235,7 +244,7 @@ public class CreateTaskDraftStore {
 		if (mergedDefCodes.isEmpty() && mergedConditions.isEmpty()) {
 			return null;
 		}
-		String expectedRaw = raw == null ? "" : String.valueOf(raw);
+		String expectedRaw = ObjectUtils.toString(raw, "");
 		return new MergeResult(expectedRaw,
 				new Draft(java.util.List.copyOf(mergedDefCodes), mergedConditions, System.currentTimeMillis()));
 	}
@@ -250,7 +259,7 @@ public class CreateTaskDraftStore {
 	 * @throws IllegalStateException 快照读失败或坏值（归属不可知，调用方按内部失败处理）
 	 */
 	private String sessionIdOf(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return null;
 		}
 		RunStore runs;
@@ -258,7 +267,9 @@ public class CreateTaskDraftStore {
 			runs = this.runStoreProvider == null ? null : this.runStoreProvider.getIfAvailable();
 		}
 		catch (RuntimeException ex) {
-			log.debug("RunStore unavailable, task draft skipped runId={}", runId, ex);
+			if (LogSampling.canAcquire("task-draft-run-store-unavailable")) {
+				log.warn("RunStore unavailable, task draft skipped runId={}", runId, ex);
+			}
 			return null;
 		}
 		if (runs == null) {
@@ -269,7 +280,7 @@ public class CreateTaskDraftStore {
 			return null;
 		}
 		return switch (owner.state()) {
-			case ATTRIBUTED -> owner.sessionId() == null || owner.sessionId().isBlank() ? null : owner.sessionId();
+			case ATTRIBUTED -> StringUtils.defaultIfBlank(owner.sessionId(), null);
 			case MISSING, ABSENT -> null;
 			case UNREADABLE -> throw new IllegalStateException(
 					"Cannot resolve session ownership from run snapshot (read failed or invalid value) runId=" + runId);
@@ -305,7 +316,9 @@ public class CreateTaskDraftStore {
 		}
 		catch (RuntimeException ex) {
 			// 轻装配/单测没有 Redis 模板：草案缺席，不影响调用方既有路径
-			log.debug("StringRedisTemplate unavailable, task draft skipped", ex);
+			if (LogSampling.canAcquire("task-draft-redis-unavailable")) {
+				log.warn("StringRedisTemplate unavailable, task draft skipped", ex);
+			}
 			return null;
 		}
 	}

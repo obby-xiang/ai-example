@@ -25,8 +25,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * <h2>为什么需要</h2>
  * 销毁可能因活跃 run 延后或 Redis 部分失败而 {@code complete=false}。只靠客户端重试，用户关页
  * 就永远删不净；guard 若只有 session TTL，墓碑到期后同一个 sessionId 又能聊天并写回。
- * 因此 pending 是 durable 的（无 TTL），guard 同时看 pending；本类按固定周期把 pending 收敛到
- * complete（随后 guard 进入有限保留期）。
+ * 因此 pending 是 durable 的（24h 滑动 TTL，重试与真实用户活动续期），guard 同时看 pending；
+ * 本类按固定周期把 pending 收敛到 complete（随后 guard 进入有限保留期）。后台重试只维护删除保护，
+ * 不进入真实用户活动的整组续期入口。
  *
  * <h2>有界</h2>
  * <ul>
@@ -201,39 +202,14 @@ public class SessionPurgeRetryRunner {
 
 	/** 可注入时钟的一轮清理（测试确定性；生产走 {@link #runOnce()}）。 */
 	public RetryReport runOnce(long nowMs) {
-		LeaseService.Lease lease = null;
-		// C-62：续租的<b>存活判据</b>（在续租线程上执行）：
-		// 本轮仍在跑（finally 会置假）且当前候选没有超过"推进窗口"。
-		// 单条候选卡死 ⇒ 判据转假 ⇒ LeaseService 归还租约，另一实例可接手同一批 durable 台账。
 		AtomicBoolean roundLive = new AtomicBoolean(true);
 		AtomicLong progressDeadlineMs = new AtomicLong(System.currentTimeMillis() + CANDIDATE_STALL_TIMEOUT_MS);
-		// C-62 判死标记：一旦某条候选超过推进窗口，本轮不再续租，也<b>不再处理剩余候选</b>。
-		// 只置一次（CAS）：续租线程与主循环线程可能同时判到。
 		AtomicBoolean stalled = new AtomicBoolean(false);
-		if (this.leases != null) {
-			// 每轮唯一 owner（见 runSeq 的注）：release 失败留下的旧 (key, owner) 视图不会让下一轮
-			// 命中 created=false，因此"续租 / 释放"在每一轮都是必须做的两件事。
-			String owner = this.leases.instanceId() + ":purge:" + this.runSeq.incrementAndGet();
-			LeaseService.AcquireResult lock = this.leases.acquire(LOCK_KEY, Duration.ofSeconds(LOCK_TTL_SECONDS),
-					owner);
-			if (lock == null || !lock.acquired()) {
-				return new RetryReport(false, 0, 0, 0, 0, 0);
-			}
-			lease = lock.lease();
-			if (lease != null) {
-				try {
-					// 与抢锁相同的 TTL：默认 lease-ttl（30s）会把 300s 的锁在下一拍缩短。
-					// 存活判据见上方 roundLive/progressDeadlineMs：卡死的一轮不再无限续租（C-62），
-					// 并在判死时置 stalled —— 主循环随后停止处理剩余候选。
-					this.leases.markDriving(lease, () -> roundLive.get() && !stallReached(stalled, progressDeadlineMs),
-							null, Duration.ofSeconds(LOCK_TTL_SECONDS));
-				}
-				catch (RuntimeException ex) {
-					// 续租登记失败不阻断本轮（锁仍是刚抢到的 300s）；finally 仍会 stop/release。
-					log.warn("Session purge retry lock renew registration failed (round continues on the TTL already acquired)", ex);
-				}
-			}
+		RoundLease roundLease = acquireRoundLease(roundLive, progressDeadlineMs, stalled);
+		if (!roundLease.isAcquired()) {
+			return new RetryReport(false, 0, 0, 0, 0, 0);
 		}
+		LeaseService.Lease lease = roundLease.lease();
 		try {
 			List<SessionPurgePendingStore.Pending> due;
 			try {
@@ -243,124 +219,168 @@ public class SessionPurgeRetryRunner {
 				log.warn("Session purge retry failed to read pending ledger (round skipped, state not guessed)", ex);
 				return new RetryReport(true, 0, 0, 0, 0, 0);
 			}
-			// 取到候选 = 本轮有真实推进：重开推进窗口（否则"慢但仍在推进"的轮次会被判卡死）。
 			progressDeadlineMs.set(System.currentTimeMillis() + CANDIDATE_STALL_TIMEOUT_MS);
-			int skipped = 0;
-			int attempted = 0;
-			int completed = 0;
-			int failed = 0;
-			int retired = 0;
-			for (SessionPurgePendingStore.Pending pending : due) {
-				// C-62 判死后的止血：剩余候选一条都不再碰（它们仍在 due ZSET，交给下一轮/接管实例）。
-				// 判死时正在执行的那条留在上面的调用栈里自行收尾 —— 只有它承担"租约已放、对方可能也在跑"
-				// 的并发窗口，不会把窗口扩散到整批候选。
-				if (stallReached(stalled, progressDeadlineMs)) {
-					log.warn("Session purge retry round declared stalled (C-62): stop processing remaining candidates (kept due for the next round/takeover instance)");
-					break;
-				}
-				// 每处理一条（含退役）都重开推进窗口（C-62）：慢但仍在推进的轮次继续持锁；
-				// 单条卡死超过窗口 ⇒ 续租判据转假 ⇒ 置 stalled、放锁，另一实例可接手。
-				progressDeadlineMs.set(System.currentTimeMillis() + CANDIDATE_STALL_TIMEOUT_MS);
-				if (pending.attempts() >= MAX_ATTEMPTS) {
-					// I4/C37：耗尽且不再自动执行 ⇒ 推到 24h + 抖动未来并<b>摘掉全局 due 成员</b>。
-					// durable 台账保留（守卫/人工入口都靠它），绝不在这里 complete 伪装成功。
-					skipped++;
-					try {
-						if (retireExhausted(pending, exhaustedRetireAt(nowMs, pending))) {
-							retired++;
-						}
-					}
-					catch (RuntimeException ex) {
-						failed++;
-						log.warn("Session purge retry could not retire candidate sessionId={} "
-								+ "(durable pending kept; continuing with remaining candidates)", pending.sessionId(), ex);
-					}
-					continue;
-				}
-				// 身份按<b>记录</b>恢复（台账里的 tenantId/userId）：本线程没有请求身份，
-				// 不恢复就会按无身份键去删 —— 跨身份或删不干净。
-				try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
-					if (pending.verifyAtMs() != null) {
-						// fix4：这条台账的删除主体已完成，只剩一次"记忆面"复核（崩溃残留补偿）。
-						// 到点只做 delete+staging+删后复核 —— 不重跑整轮 retry（那会再删 DB/附件）。
-						attempted++;
-						AiSessionPurgeService.MemoryVerify verify;
-						try {
-							verify = this.purgeService.verifyMemoryOnly(pending.sessionId(), pending.purgeId());
-						}
-						catch (RuntimeException ex) {
-							failed++;
-							log.warn("Session purge memory verify threw sessionId={} (durable pending kept)",
-									pending.sessionId(), ex);
-							continue;
-						}
-						if (verify == null) {
-							skipped++;
-						}
-						else if (verify.verified()) {
-							completed++;
-						}
-						else {
-							failed++;
-						}
-						continue;
-					}
-					attempted++;
-					try {
-						AiSessionPurgeService.PurgeResult result = this.purgeService.retry(pending.sessionId(),
-								pending.purgeId(), "purge-retry");
-						if (result == null) {
-							skipped++;
-						}
-						else if (result.complete()) {
-							completed++;
-						}
-						else {
-							failed++;
-						}
-					}
-					catch (RuntimeException ex) {
-						failed++;
-						log.warn("Session purge retry threw sessionId={} (durable pending kept)",
-								pending.sessionId(), ex);
-					}
-				}
-				catch (RuntimeException ex) {
-					failed++;
-					log.warn("Session purge retry candidate failed sessionId={} "
-							+ "(identity/state not guessed; durable pending kept; continuing with remaining candidates)",
-							pending.sessionId(), ex);
-				}
-			}
-			if (retired > 0) {
-				// C-38 容量告警：耗尽台账只有人工 DELETE 才回到自动推进；这里只留痕，不删事实。
+			RetryCounters counters = processDue(due, nowMs, progressDeadlineMs, stalled);
+			if (counters.retired() > 0) {
 				log.warn("Session purge retry retired {} exhausted ledger entries this round (durable ledger kept, "
-						+ "global due member removed; a manual DELETE is required to re-enter auto-advance)", retired);
+						+ "global due member removed; a manual DELETE is required to re-enter auto-advance)",
+						counters.retired());
 			}
-			return new RetryReport(true, due.size(), attempted, completed, failed, skipped);
+			return new RetryReport(true, due.size(), counters.attempted(), counters.completed(), counters.failed(),
+					counters.skipped());
 		}
 		finally {
-			// 先让存活判据转假（续租线程读它）：本轮已经结束，不再续租；无论下面 release 是否成功，
-			// 都不会出现"线程已退出、续租任务还在续"的幽灵锁。
-			roundLive.set(false);
-			if (lease != null) {
-				// 先停续租再释放：顺序反过来会出现"release 成功、续租任务下一拍又把键 SET 回去"的幽灵锁
-				// （release 的脚本只删值匹配的那一任，但续租任务持有同一个 Lease 对象）。
-				try {
-					this.leases.stopDriving(LOCK_KEY, lease.owner());
-				}
-				catch (RuntimeException ex) {
-					log.debug("Failed to stop session purge retry lock renewal (TTL self-clears)", ex);
-				}
-				try {
-					this.leases.release(lease);
-				}
-				catch (RuntimeException ex) {
-					log.warn("Failed to release session purge retry lock (TTL self-clears)", ex);
-				}
-			}
-			// 是否释放只看"本轮是否拿到 lease"：owner 每轮唯一 ⇒ 不存在"重入拿到的别人的那一任"。
+			releaseRoundLease(lease, roundLive);
 		}
+	}
+
+	private RoundLease acquireRoundLease(AtomicBoolean roundLive, AtomicLong progressDeadlineMs,
+			AtomicBoolean stalled) {
+		if (this.leases == null) {
+			return new RoundLease(true, null);
+		}
+		String owner = this.leases.instanceId() + ":purge:" + this.runSeq.incrementAndGet();
+		LeaseService.AcquireResult lock = this.leases.acquire(LOCK_KEY, Duration.ofSeconds(LOCK_TTL_SECONDS), owner);
+		if (lock == null || !lock.acquired()) {
+			return new RoundLease(false, null);
+		}
+		LeaseService.Lease lease = lock.lease();
+		if (lease != null) {
+			try {
+				this.leases.markDriving(lease, () -> roundLive.get() && !isStallReached(stalled, progressDeadlineMs),
+						null, Duration.ofSeconds(LOCK_TTL_SECONDS));
+			}
+			catch (RuntimeException ex) {
+				log.warn("Session purge retry lock renew registration failed (round continues on the TTL already acquired)", ex);
+			}
+		}
+		return new RoundLease(true, lease);
+	}
+
+	private record RoundLease(boolean isAcquired, LeaseService.Lease lease) {
+	}
+
+	private RetryCounters processDue(List<SessionPurgePendingStore.Pending> due, long nowMs,
+			AtomicLong progressDeadlineMs, AtomicBoolean stalled) {
+		RetryCounters counters = new RetryCounters();
+		for (SessionPurgePendingStore.Pending pending : due) {
+			if (isStallReached(stalled, progressDeadlineMs)) {
+				log.warn("Session purge retry round declared stalled (C-62): stop processing remaining candidates (kept due for the next round/takeover instance)");
+				break;
+			}
+			progressDeadlineMs.set(System.currentTimeMillis() + CANDIDATE_STALL_TIMEOUT_MS);
+			processPending(pending, nowMs, counters);
+		}
+		return counters;
+	}
+
+	private void processPending(SessionPurgePendingStore.Pending pending, long nowMs, RetryCounters counters) {
+		if (pending.attempts() >= MAX_ATTEMPTS) {
+			retireExhausted(pending, nowMs, counters);
+			return;
+		}
+		try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
+			if (pending.verifyAtMs() != null) {
+				verifyMemory(pending, counters);
+			}
+			else {
+				retryPending(pending, counters);
+			}
+		}
+		catch (RuntimeException ex) {
+			counters.failed++;
+			log.warn("Session purge retry candidate failed sessionId={} "
+					+ "(identity/state not guessed; durable pending kept; continuing with remaining candidates)",
+					pending.sessionId(), ex);
+		}
+	}
+
+	private void retireExhausted(SessionPurgePendingStore.Pending pending, long nowMs, RetryCounters counters) {
+		counters.skipped++;
+		try {
+			if (isRetireExhausted(pending, exhaustedRetireAt(nowMs, pending))) {
+				counters.retired++;
+			}
+		}
+		catch (RuntimeException ex) {
+			counters.failed++;
+			log.warn("Session purge retry could not retire candidate sessionId={} "
+					+ "(durable pending kept; continuing with remaining candidates)", pending.sessionId(), ex);
+		}
+	}
+
+	private void verifyMemory(SessionPurgePendingStore.Pending pending, RetryCounters counters) {
+		counters.attempted++;
+		AiSessionPurgeService.MemoryVerify verify;
+		try {
+			verify = this.purgeService.verifyMemoryOnly(pending.sessionId(), pending.purgeId());
+		}
+		catch (RuntimeException ex) {
+			counters.failed++;
+			log.warn("Session purge memory verify threw sessionId={} (durable pending kept)", pending.sessionId(), ex);
+			return;
+		}
+		recordOutcome(verify == null ? null : verify.verified(), counters);
+	}
+
+	private void retryPending(SessionPurgePendingStore.Pending pending, RetryCounters counters) {
+		counters.attempted++;
+		try {
+			AiSessionPurgeService.PurgeResult result = this.purgeService.retry(pending.sessionId(), pending.purgeId(),
+					"purge-retry");
+			recordOutcome(result == null ? null : result.complete(), counters);
+		}
+		catch (RuntimeException ex) {
+			counters.failed++;
+			log.warn("Session purge retry threw sessionId={} (durable pending kept)", pending.sessionId(), ex);
+		}
+	}
+
+	private static void recordOutcome(Boolean complete, RetryCounters counters) {
+		if (complete == null) {
+			counters.skipped++;
+		}
+		else if (complete) {
+			counters.completed++;
+		}
+		else {
+			counters.failed++;
+		}
+	}
+
+	private void releaseRoundLease(LeaseService.Lease lease, AtomicBoolean roundLive) {
+		roundLive.set(false);
+		if (lease == null) {
+			return;
+		}
+		try {
+			this.leases.stopDriving(LOCK_KEY, lease.owner());
+		}
+		catch (RuntimeException ex) {
+			if (log.isDebugEnabled()) log.debug("Failed to stop session purge retry lock renewal (TTL self-clears)", ex);
+		}
+		try {
+			this.leases.release(lease);
+		}
+		catch (RuntimeException ex) {
+			log.warn("Failed to release session purge retry lock (TTL self-clears)", ex);
+		}
+	}
+
+	private static final class RetryCounters {
+
+		private int skipped;
+		private int attempted;
+		private int completed;
+		private int failed;
+		private int retired;
+
+		private int skipped() { return this.skipped; }
+		private int attempted() { return this.attempted; }
+		private int completed() { return this.completed; }
+		private int failed() { return this.failed; }
+		private int retired() { return this.retired; }
+
 	}
 
 	/**
@@ -370,7 +390,7 @@ public class SessionPurgeRetryRunner {
 	 * （判死 ⇒ 不再处理剩余候选）。没有租约（同步入口/降级）时续租线程不存在，主循环仍会在每条候选
 	 * 之后用同一助手补判，判死语义不依赖续租调度是否在场。
 	 */
-	private static boolean stallReached(AtomicBoolean stalled, AtomicLong progressDeadlineMs) {
+	private static boolean isStallReached(AtomicBoolean stalled, AtomicLong progressDeadlineMs) {
 		if (stalled.get()) {
 			return true;
 		}
@@ -409,10 +429,10 @@ public class SessionPurgeRetryRunner {
 	/**
 	 * 把一条已耗尽的台账退役：推到长未来并摘掉全局 due 成员；仅 owner-CAS 成功返回 true。
 	 */
-	private boolean retireExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
+	private boolean isRetireExhausted(SessionPurgePendingStore.Pending pending, long nextAtMs) {
 		// 改期写的是该台账自己的键（purgeId 条件 CAS）：必须按记录恢复身份。
 		try (RequestContextUtils.SafeCloseable ignored = scopeOf(pending)) {
-			return this.pendingStore.retireExhausted(pending.sessionId(), pending.purgeId(), nextAtMs);
+			return this.pendingStore.isRetireExhausted(pending.sessionId(), pending.purgeId(), nextAtMs);
 		}
 	}
 

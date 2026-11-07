@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.Getter;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenStream;
@@ -19,6 +20,7 @@ import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
@@ -30,11 +32,14 @@ import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.similarities.BM25Similarity;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -45,9 +50,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Delayed;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -72,6 +86,7 @@ import java.util.stream.Stream;
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class KbService {
 
     private static final String F_DOC_ID = "doc_id";
@@ -131,7 +146,7 @@ public class KbService {
      */
     static final int MAX_VERSION_REBUILD_ATTEMPTS = 3;
 
-    /** 连续失败满几次再打一条 WARN（其余降到 DEBUG：排障看得到、日志不被刷）。 */
+    /** 连续失败满几次再打一条 WARN，其余失败不重复记录。 */
     private static final int FAILURE_WARN_EVERY = 4;
 
     // 下面三个字段只在 kb-refresh 单线程（pollVersionQuietly）里读写，故不加同步；
@@ -149,7 +164,11 @@ public class KbService {
     /** 连续刷新失败次数（WARN 节流用；任一成功路径清零）。管理端点线程也会调 refreshNow，故 volatile。 */
     private volatile int consecutiveFailures;
 
-    private ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService scheduler = new BoundedScheduledExecutor(8, runnable -> {
+        Thread thread = Thread.ofPlatform().daemon(true).name("kb-refresh").unstarted(runnable);
+        this.refreshThread = thread;
+        return thread;
+    });
 
     private volatile Thread refreshThread;
 
@@ -157,12 +176,6 @@ public class KbService {
 
     @Getter
     private volatile boolean stopped;
-
-    public KbService(AiProperties properties, ObjectMapper mapper, KbSource source) {
-        this.properties = properties;
-        this.mapper = mapper;
-        this.source = source;
-    }
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -174,12 +187,6 @@ public class KbService {
         }
         // 首启自播种（local 源且目录为空时复制随包样例；http 源无操作）必须在第一次回源前完成
         this.source.prepare();
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "kb-refresh");
-            thread.setDaemon(true);
-            this.refreshThread = thread;
-            return thread;
-        });
         // 首版索引由 refreshNow 的成功路径自己记 lastObservedVersion；失败时**不**记（下一拍重试同一版本）
         this.scheduler.submit(this::refreshQuietly);
         long interval = Math.max(1, this.properties.getKb().getRefreshInterval().toMillis());
@@ -213,7 +220,7 @@ public class KbService {
             this.analyzer.close();
         }
         catch (Exception e) {
-            log.debug("Failed to close KB analyzer", e);
+            // 停机阶段继续释放其余资源。
         }
     }
 
@@ -278,32 +285,45 @@ public class KbService {
      * @return true = 本次真的重建了索引；false = 未变化、已有刷新在飞、超时或失败
      */
     public boolean refreshNow() {
-        return refreshNow(false);
+        return isRefreshNowPerformed();
     }
 
     public boolean refreshNow(boolean force) {
+        return isRefreshNowPerformed(force);
+    }
+
+    public boolean isRefreshNowPerformed() {
+        return isRefreshNowPerformed(false);
+    }
+
+    public boolean isRefreshNowPerformed(boolean force) {
         if (!enabled() || this.stopped || !this.reloadRunning.compareAndSet(false, true)) {
             return false;
         }
-        java.time.Duration refreshWaitBudget = this.properties.getKb().getRefreshWaitBudget();
+        Duration refreshWaitBudget = this.properties.getKb().getRefreshWaitBudget();
         KbSource.RefreshBudget budget = KbSource.RefreshBudget.within(refreshWaitBudget);
         if (this.scheduler == null || Thread.currentThread() == this.refreshThread) {
-            return performRefresh(force, budget);
+            return isRefreshPerformed(force, budget);
         }
 
-        final java.util.concurrent.Future<Boolean> task;
+        final Future<Boolean> task;
         try {
-            task = this.scheduler.submit(() -> performRefresh(force, budget));
+            task = this.scheduler.submit(() -> isRefreshPerformed(force, budget));
         }
-        catch (java.util.concurrent.RejectedExecutionException e) {
+        catch (RejectedExecutionException e) {
             this.reloadRunning.set(false);
             this.lastError = "KB refresh executor is stopped";
             return false;
         }
+        return isRefreshAwaited(task, refreshWaitBudget, budget);
+    }
+
+    private boolean isRefreshAwaited(Future<Boolean> task, Duration refreshWaitBudget,
+            KbSource.RefreshBudget budget) {
         try {
             return task.get(budget.remaining().toNanos(), TimeUnit.NANOSECONDS);
         }
-        catch (java.util.concurrent.TimeoutException e) {
+        catch (TimeoutException e) {
             if (task.cancel(false)) {
                 this.reloadRunning.set(false);
             }
@@ -319,9 +339,9 @@ public class KbService {
             this.lastError = "KB reload wait was interrupted";
             return false;
         }
-        catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException e) {
+        catch (ExecutionException | CancellationException e) {
             this.lastError = "KB refresh failed; retry later";
-            log.warn("KB refresh execution failed", e.getCause() == null ? e : e.getCause());
+            log.warn("KB refresh execution failed", ObjectUtils.defaultIfNull(e.getCause(), e));
             return false;
         }
         catch (KbSourceException e) {
@@ -334,7 +354,7 @@ public class KbService {
         }
     }
 
-    private boolean performRefresh(boolean force, KbSource.RefreshBudget budget) {
+    private boolean isRefreshPerformed(boolean force, KbSource.RefreshBudget budget) {
         this.lastRefreshAt = Instant.now();
         Path buildDir = null;
         try {
@@ -355,32 +375,8 @@ public class KbService {
             manifest.validate();
 
             Snapshot old = this.snapshot;
-            Map<String, KbDoc> nextDocs = new LinkedHashMap<>();
-            for (KbDocMeta meta : manifest.docs()) {
-                budget.check();
-                KbDoc previous = old == null ? null : old.docs.get(meta.id());
-                if (previous != null && sameSha(previous.meta().sha(), meta.sha())) {
-                    nextDocs.put(meta.id(), previous.meta().equals(meta) ? previous : previous.withMeta(meta));
-                    continue;
-                }
-                String rawContent = fetched.contentFor(meta.id());
-                if (rawContent == null) {
-                    rawContent = this.source.fetchContent(meta, budget);
-                }
-                String content = MarkdownChunker.normalize(rawContent);
-                String actualSha = KbHashing.sha256Text(content);
-                if (meta.sha() != null && !meta.sha().isBlank() && !meta.sha().equalsIgnoreCase(actualSha)) {
-                    throw new KbSourceException("KB content SHA-256 (BOM stripped, LF normalized) does not match manifest: " + meta.id());
-                }
-                KbDocMeta effectiveMeta = meta.sha() == null || meta.sha().isBlank() ? meta.withSha(actualSha) : meta;
-                List<KbSection> sections = MarkdownChunker.sections(content, effectiveMeta.title());
-                List<KbChunk> chunks = MarkdownChunker.chunk(effectiveMeta.id(), effectiveMeta.title(), content,
-                        this.properties.getKb().getChunkMinChars(), this.properties.getKb().getChunkMaxChars());
-                budget.check();
-                nextDocs.put(meta.id(), new KbDoc(effectiveMeta, content, sections, chunks));
-            }
-
-            if (old != null && sameDocuments(old, nextDocs)
+            Map<String, KbDoc> nextDocs = collectDocs(manifest, fetched, old, budget);
+            if (old != null && isSameDocuments(old, nextDocs)
                     && Objects.equals(old.manifest.version(), manifest.version())) {
                 this.lastEtag = fetched.etag();
                 this.consecutiveFailures = 0;
@@ -388,47 +384,12 @@ public class KbService {
                 markObservedVersion(fetched);
                 return false;
             }
-
             budget.check();
             buildDir = newBuildDir(budget);
-            Snapshot built = buildSnapshot(manifest, nextDocs, buildDir, budget);
-            if (this.stopped) {
-                built.retire();
-                return false;
-            }
-            Snapshot previous = this.snapshot;
-            this.snapshot = built;
-            this.lastEtag = fetched.etag();
-            this.consecutiveFailures = 0;
-            this.lastError = "";
-            markObservedVersion(fetched);
-            if (previous != null) {
-                previous.retire();
-            }
-            log.info("Business KB index rebuilt: docs={} chunks={} source={} dir={}", nextDocs.size(),
-                    built.chunkCount, source.kind(), buildDir.getFileName());
-            return true;
+            return isSnapshotPublished(manifest, nextDocs, buildDir, fetched, budget);
         }
         catch (Exception e) {
-            this.lastError = "KB refresh failed; retry later";
-            this.consecutiveFailures++;
-            if ((this.consecutiveFailures - 1) % FAILURE_WARN_EVERY == 0) {
-                log.warn("KB refresh failed (old index kept, search surface unchanged; consecutive failure #{})",
-                        this.consecutiveFailures, e);
-            }
-            else {
-                log.debug("KB refresh still failing (old index kept; consecutive failure #{})", this.consecutiveFailures,
-                        e);
-            }
-            if (buildDir != null) {
-                try {
-                    deleteRecursively(buildDir, budget);
-                }
-                catch (KbSourceException cleanupError) {
-                    this.lastError = "KB refresh failed; retry later";
-                    log.warn("KB build cleanup failed", cleanupError);
-                }
-            }
+            handleRefreshFailure(e, buildDir, budget);
             return false;
         }
         finally {
@@ -436,8 +397,76 @@ public class KbService {
         }
     }
 
+    private Map<String, KbDoc> collectDocs(KbManifest manifest, KbSource.ManifestFetch fetched, Snapshot old,
+            KbSource.RefreshBudget budget) throws Exception {
+        Map<String, KbDoc> nextDocs = new LinkedHashMap<>();
+        for (KbDocMeta meta : manifest.docs()) {
+            budget.check();
+            KbDoc previous = old == null ? null : old.docs.get(meta.id());
+            if (previous != null && isSameSha(previous.meta().sha(), meta.sha())) {
+                nextDocs.put(meta.id(), previous.meta().equals(meta) ? previous : previous.withMeta(meta));
+                continue;
+            }
+            String rawContent = fetched.contentFor(meta.id());
+            if (rawContent == null) {
+                rawContent = this.source.fetchContent(meta, budget);
+            }
+            String content = MarkdownChunker.normalize(rawContent);
+            String actualSha = KbHashing.sha256Text(content);
+            if (StringUtils.isNotBlank(meta.sha()) && !meta.sha().equalsIgnoreCase(actualSha)) {
+                throw new KbSourceException("KB content SHA-256 (BOM stripped, LF normalized) does not match manifest: " + meta.id());
+            }
+            KbDocMeta effectiveMeta = StringUtils.isBlank(meta.sha()) ? meta.withSha(actualSha) : meta;
+            List<KbSection> sections = MarkdownChunker.sections(content, effectiveMeta.title());
+            List<KbChunk> chunks = MarkdownChunker.chunk(effectiveMeta.id(), effectiveMeta.title(), content,
+                    this.properties.getKb().getChunkMinChars(), this.properties.getKb().getChunkMaxChars());
+            budget.check();
+            nextDocs.put(meta.id(), new KbDoc(effectiveMeta, content, sections, chunks));
+        }
+        return nextDocs;
+    }
+
+    private boolean isSnapshotPublished(KbManifest manifest, Map<String, KbDoc> nextDocs, Path buildDir,
+            KbSource.ManifestFetch fetched, KbSource.RefreshBudget budget) throws Exception {
+        Snapshot built = buildSnapshot(manifest, nextDocs, buildDir, budget);
+        if (this.stopped) {
+            built.retire();
+            return false;
+        }
+        Snapshot previous = this.snapshot;
+        this.snapshot = built;
+        this.lastEtag = fetched.etag();
+        this.consecutiveFailures = 0;
+        this.lastError = "";
+        markObservedVersion(fetched);
+        if (previous != null) {
+            previous.retire();
+        }
+        log.info("Business KB index rebuilt: docs={} chunks={} source={} dir={}", nextDocs.size(),
+                built.chunkCount, source.kind(), buildDir.getFileName());
+        return true;
+    }
+
+    private void handleRefreshFailure(Exception e, Path buildDir, KbSource.RefreshBudget budget) {
+        this.lastError = "KB refresh failed; retry later";
+        this.consecutiveFailures++;
+        if ((this.consecutiveFailures - 1) % FAILURE_WARN_EVERY == 0) {
+            log.warn("KB refresh failed (old index kept, search surface unchanged; consecutive failure #{})",
+                    this.consecutiveFailures, e);
+        }
+        if (buildDir != null) {
+            try {
+                deleteRecursively(buildDir, budget);
+            }
+            catch (KbSourceException cleanupError) {
+                this.lastError = "KB refresh failed; retry later";
+                log.warn("KB build cleanup failed", cleanupError);
+            }
+        }
+    }
+
     private void markObservedVersion(KbSource.ManifestFetch fetched) {
-        if (fetched.corpusVersion() != null && !fetched.corpusVersion().isBlank()) {
+        if (StringUtils.isNotBlank(fetched.corpusVersion())) {
             this.lastObservedVersion = fetched.corpusVersion();
         }
     }
@@ -465,7 +494,7 @@ public class KbService {
             budget.check();
         }
         catch (IOException e) {
-            log.debug("Failed to clean stale KB build dir", e);
+            // 陈旧目录清理失败不影响当前索引，后续刷新会重试。
         }
     }
 
@@ -475,36 +504,7 @@ public class KbService {
         Directory directory = FSDirectory.open(buildDir);
         DirectoryReader reader = null;
         try {
-            budget.check();
-            IndexWriterConfig config = new IndexWriterConfig(this.analyzer);
-            config.setSimilarity(new BM25Similarity());
-            config.setOpenMode(IndexWriterConfig.OpenMode.CREATE);
-            try (IndexWriter writer = new IndexWriter(directory, config)) {
-                for (KbDoc doc : docs.values()) {
-                    budget.check();
-                    String aliases = String.join(" ", doc.meta().aliases());
-                    String aliasesEn = String.join(" ", doc.meta().aliasesEn());
-                    String tags = String.join(" ", doc.meta().tags());
-                    for (KbChunk chunk : doc.chunks()) {
-                        budget.check();
-                        Document document = new Document();
-                        document.add(new StringField(F_DOC_ID, doc.meta().id(), Field.Store.YES));
-                        document.add(new TextField(F_TITLE, doc.meta().title(), Field.Store.YES));
-                        document.add(new TextField(F_SECTION, chunk.sectionPath(), Field.Store.YES));
-                        document.add(new TextField(F_ALIASES, aliases, Field.Store.NO));
-                        document.add(new TextField(F_ALIASES_EN, aliasesEn, Field.Store.NO));
-                        document.add(new TextField(F_TAGS, tags, Field.Store.NO));
-                        document.add(new StringField(F_UPDATED, nullSafe(doc.meta().updatedAt()), Field.Store.YES));
-                        // 正文入索引的文本带章节路径前缀（定稿要求），展示/摘要仍用不带前缀的 body
-                        document.add(new TextField(F_BODY, chunk.indexText(), Field.Store.YES));
-                        writer.addDocument(document);
-                    }
-                }
-                budget.check();
-                // commit/close 不可硬中断；等待方独立超时，工作线程只在下一可控点停止。
-                writer.commit();
-            }
-            budget.check();
+            writeDocuments(docs, directory, budget);
             reader = DirectoryReader.open(directory);
             budget.check();
             Map<String, KbTermEntry> terms = buildTermIndex(manifest, docs, budget);
@@ -528,6 +528,40 @@ public class KbService {
             }
             throw e;
         }
+    }
+
+    private void writeDocuments(Map<String, KbDoc> docs, Directory directory, KbSource.RefreshBudget budget)
+            throws Exception {
+        budget.check();
+        IndexWriterConfig config = new IndexWriterConfig(this.analyzer);
+        config.setSimilarity(new BM25Similarity());
+        config.setOpenMode(IndexWriterConfig.OpenMode.CREATE);
+        try (IndexWriter writer = new IndexWriter(directory, config)) {
+            for (KbDoc doc : docs.values()) {
+                budget.check();
+                String aliases = String.join(" ", doc.meta().aliases());
+                String aliasesEn = String.join(" ", doc.meta().aliasesEn());
+                String tags = String.join(" ", doc.meta().tags());
+                for (KbChunk chunk : doc.chunks()) {
+                    budget.check();
+                    Document document = new Document();
+                    document.add(new StringField(F_DOC_ID, doc.meta().id(), Field.Store.YES));
+                    document.add(new TextField(F_TITLE, doc.meta().title(), Field.Store.YES));
+                    document.add(new TextField(F_SECTION, chunk.sectionPath(), Field.Store.YES));
+                    document.add(new TextField(F_ALIASES, aliases, Field.Store.NO));
+                    document.add(new TextField(F_ALIASES_EN, aliasesEn, Field.Store.NO));
+                    document.add(new TextField(F_TAGS, tags, Field.Store.NO));
+                    document.add(new StringField(F_UPDATED, nullSafe(doc.meta().updatedAt()), Field.Store.YES));
+                    // 正文入索引的文本带章节路径前缀（定稿要求），展示/摘要仍用不带前缀的 body
+                    document.add(new TextField(F_BODY, chunk.indexText(), Field.Store.YES));
+                    writer.addDocument(document);
+                }
+            }
+            budget.check();
+            // commit/close 不可硬中断；等待方独立超时，工作线程只在下一可控点停止。
+            writer.commit();
+        }
+        budget.check();
     }
 
     private Map<String, KbTermEntry> buildTermIndex(KbManifest manifest, Map<String, KbDoc> docs,
@@ -572,7 +606,7 @@ public class KbService {
         if (!enabled()) {
             return KbSearchResult.disabled();
         }
-        String trimmed = query == null ? "" : query.strip();
+        String trimmed = StringUtils.stripToEmpty(query);
         if (trimmed.isEmpty()) {
             return KbSearchResult.invalid("Search query is required; provide a business term, section name, or question");
         }
@@ -586,46 +620,11 @@ public class KbService {
                 return KbSearchResult.invalid("Search query has no searchable content because it contains only punctuation or stop words; add business keywords");
             }
             int limit = effectiveTopK(topK);
-            Query parsed = buildQuery(terms);
-            TopDocs topDocs = acquired.searcher.search(parsed, Math.max(limit * SEARCH_OVERFETCH, 20));
-
-            Map<String, ScoredHit> deduped = new LinkedHashMap<>();
-            float topScore = 0f;
-            for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
-                topScore = Math.max(topScore, scoreDoc.score);
-                Document stored = acquired.searcher.storedFields().document(scoreDoc.doc);
-                String docId = stored.get(F_DOC_ID);
-                if (docId == null || deduped.containsKey(docId)) {
-                    continue;
-                }
-                String section = stored.get(F_SECTION);
-                String body = stored.get(F_BODY);
-                KbSearchHit hit = new KbSearchHit(docId, stored.get(F_TITLE), section,
-                        KbText.snippet(stripPathPrefix(body, section), terms, 160),
-                        nullSafe(stored.get(F_UPDATED)), KbSearchHit.LOW);
-                deduped.put(docId, new ScoredHit(hit, scoreDoc.score));
-            }
-            List<ScoredHit> ranked = new ArrayList<>(deduped.values());
-            if (ranked.size() > limit) {
-                ranked = new ArrayList<>(ranked.subList(0, limit));
-            }
-            if (ranked.isEmpty()) {
+            RankedResult ranked = rankHits(acquired, terms, limit);
+            if (ranked.hits().isEmpty()) {
                 return KbSearchResult.noMatch(terms, suggestTitles(trimmed));
             }
-            List<KbSearchHit> hits = new ArrayList<>(ranked.size());
-            boolean lowConfidence = ranked.size() <= 2;
-            float highThreshold = topScore * (float) this.properties.getKb().getMatchHighRatio();
-            float mediumThreshold = topScore * (float) this.properties.getKb().getMatchMediumRatio();
-            for (ScoredHit scored : ranked) {
-                KbSearchHit hit = scored.hit;
-                String match = lowConfidence ? KbSearchHit.LOW
-                        : scored.score >= highThreshold ? KbSearchHit.HIGH
-                        : scored.score >= mediumThreshold ? KbSearchHit.MEDIUM : KbSearchHit.LOW;
-                hits.add(new KbSearchHit(hit.docId(), hit.title(), hit.section(), hit.snippet(),
-                        hit.updatedAt(), match));
-            }
-            return lowConfidence ? KbSearchResult.lowConfidence(hits, terms)
-                    : KbSearchResult.ok(hits, terms);
+            return toSearchResult(ranked, limit, terms);
         }
         catch (Exception e) {
             log.error("KB search failed", e);
@@ -634,6 +633,52 @@ public class KbService {
         finally {
             acquired.release();
         }
+    }
+
+    private RankedResult rankHits(Snapshot acquired, List<String> terms, int limit) throws IOException {
+        Query parsed = buildQuery(terms);
+        TopDocs topDocs = acquired.searcher.search(parsed, Math.max(limit * SEARCH_OVERFETCH, 20));
+        Map<String, ScoredHit> deduped = new LinkedHashMap<>();
+        float topScore = 0f;
+        for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+            topScore = Math.max(topScore, scoreDoc.score);
+            Document stored = acquired.searcher.storedFields().document(scoreDoc.doc);
+            String docId = stored.get(F_DOC_ID);
+            if (docId == null || deduped.containsKey(docId)) {
+                continue;
+            }
+            String section = stored.get(F_SECTION);
+            String body = stored.get(F_BODY);
+            KbSearchHit hit = new KbSearchHit(docId, stored.get(F_TITLE), section,
+                    KbText.snippet(stripPathPrefix(body, section), terms, 160),
+                    nullSafe(stored.get(F_UPDATED)), KbSearchHit.LOW);
+            deduped.put(docId, new ScoredHit(hit, scoreDoc.score));
+        }
+        List<ScoredHit> ranked = new ArrayList<>(deduped.values());
+        if (ranked.size() > limit) {
+            ranked = new ArrayList<>(ranked.subList(0, limit));
+        }
+        return new RankedResult(ranked, topScore);
+    }
+
+    private KbSearchResult toSearchResult(RankedResult ranked, int limit, List<String> terms) {
+        List<KbSearchHit> hits = new ArrayList<>(ranked.hits().size());
+        boolean lowConfidence = ranked.hits().size() <= 2;
+        float highThreshold = ranked.topScore() * (float) this.properties.getKb().getMatchHighRatio();
+        float mediumThreshold = ranked.topScore() * (float) this.properties.getKb().getMatchMediumRatio();
+        for (ScoredHit scored : ranked.hits()) {
+            KbSearchHit hit = scored.hit;
+            String match = lowConfidence ? KbSearchHit.LOW
+                    : scored.score >= highThreshold ? KbSearchHit.HIGH
+                    : scored.score >= mediumThreshold ? KbSearchHit.MEDIUM : KbSearchHit.LOW;
+            hits.add(new KbSearchHit(hit.docId(), hit.title(), hit.section(), hit.snippet(),
+                    hit.updatedAt(), match));
+        }
+        return lowConfidence ? KbSearchResult.lowConfidence(hits, terms)
+                : KbSearchResult.ok(hits, terms);
+    }
+
+    private record RankedResult(List<ScoredHit> hits, float topScore) {
     }
 
     /**
@@ -647,7 +692,7 @@ public class KbService {
         BooleanQuery.Builder builder = new BooleanQuery.Builder();
         for (String term : terms) {
             for (Map.Entry<String, Float> field : BOOSTS.entrySet()) {
-                Query clause = new TermQuery(new org.apache.lucene.index.Term(field.getKey(), term));
+                Query clause = new TermQuery(new Term(field.getKey(), term));
                 builder.add(new BoostQuery(clause, field.getValue()), BooleanClause.Occur.SHOULD);
             }
         }
@@ -670,7 +715,7 @@ public class KbService {
             }
             stream.end();
         }
-        return new ArrayList<>(terms);
+        return terms.isEmpty() ? List.of() : new ArrayList<>(terms);
     }
 
     private static String stripPathPrefix(String body, String section) {
@@ -745,7 +790,7 @@ public class KbService {
         if (!enabled()) {
             return KbReadResult.disabled();
         }
-        if (docId == null || docId.isBlank()) {
+        if (StringUtils.isBlank(docId)) {
             return KbReadResult.docNotFound("", List.of());
         }
         Snapshot acquired = acquire();
@@ -760,7 +805,7 @@ public class KbService {
             int limit = effectiveMaxChars(maxChars);
             int from = offset == null || offset < 0 ? 0 : offset;
             KbSection target = null;
-            if (section != null && !section.isBlank()) {
+            if (StringUtils.isNotBlank(section)) {
                 SectionMatch match = resolveSection(doc, section);
                 if (match.section == null) {
                     return KbReadResult.sectionNotFound(docId, doc.meta().title(), section,
@@ -768,30 +813,7 @@ public class KbService {
                 }
                 target = match.section;
             }
-            int scopeStart = target == null ? 0 : Math.min(target.bodyOffset(), doc.content().length());
-            int scopeEnd = target == null ? doc.content().length()
-                    : Math.min(Math.max(target.endOffset(), scopeStart), doc.content().length());
-            int scopeLength = scopeEnd - scopeStart;
-            if (from > scopeLength) {
-                from = scopeLength;
-            }
-            boolean firstScreen = target == null && from == 0;
-            int effectiveLimit = firstScreen ? Math.min(limit, FIRST_SCREEN_CHARS) : limit;
-            int to = Math.min(scopeLength, from + effectiveLimit);
-            if (maxRows > 0) {
-                int cut = rowAlignedEnd(doc.content(), scopeStart + from, scopeStart + to, maxRows);
-                to = Math.max(from, cut - scopeStart);
-                if (to == from && from < scopeLength) {
-                    to = Math.min(scopeLength, from + 1);
-                }
-            }
-            String text = doc.content().substring(scopeStart + from, scopeStart + to);
-            boolean truncated = to < scopeLength;
-            int nextOffset = truncated ? to : -1;
-            List<String> toc = firstScreen ? doc.sections().stream().map(s -> s.tocLine()).toList()
-                    : List.of();
-            return KbReadResult.ok(doc.meta().id(), doc.meta().title(),
-                    target == null ? null : target.path(), text, toc, truncated, nextOffset);
+            return readPage(doc, target, from, limit, maxRows);
         }
         catch (Exception e) {
             log.error("KB document read failed", e);
@@ -800,6 +822,33 @@ public class KbService {
         finally {
             acquired.release();
         }
+    }
+
+    private static KbReadResult readPage(KbDoc doc, KbSection target, int from, int limit, int maxRows) {
+        int scopeStart = target == null ? 0 : Math.min(target.bodyOffset(), doc.content().length());
+        int scopeEnd = target == null ? doc.content().length()
+                : Math.min(Math.max(target.endOffset(), scopeStart), doc.content().length());
+        int scopeLength = scopeEnd - scopeStart;
+        if (from > scopeLength) {
+            from = scopeLength;
+        }
+        boolean firstScreen = target == null && from == 0;
+        int effectiveLimit = firstScreen ? Math.min(limit, FIRST_SCREEN_CHARS) : limit;
+        int to = Math.min(scopeLength, from + effectiveLimit);
+        if (maxRows > 0) {
+            int cut = rowAlignedEnd(doc.content(), scopeStart + from, scopeStart + to, maxRows);
+            to = Math.max(from, cut - scopeStart);
+            if (to == from && from < scopeLength) {
+                to = Math.min(scopeLength, from + 1);
+            }
+        }
+        String text = doc.content().substring(scopeStart + from, scopeStart + to);
+        boolean truncated = to < scopeLength;
+        int nextOffset = truncated ? to : -1;
+        List<String> toc = firstScreen ? doc.sections().stream().map(s -> s.tocLine()).toList()
+                : List.of();
+        return KbReadResult.ok(doc.meta().id(), doc.meta().title(),
+                target == null ? null : target.path(), text, toc, truncated, nextOffset);
     }
 
     /**
@@ -841,7 +890,7 @@ public class KbService {
             return new SectionMatch(exact, List.of());
         }
         if (suffixMatches.size() == 1) {
-            return new SectionMatch(suffixMatches.get(0), List.of());
+            return new SectionMatch(suffixMatches.getFirst(), List.of());
         }
         List<String> candidates = (suffixMatches.isEmpty() ? nearSections(doc, wanted)
                 : suffixMatches.stream().map(KbSection::path).toList());
@@ -901,6 +950,10 @@ public class KbService {
     }
 
     public boolean ready() {
+        return isReady();
+    }
+
+    public boolean isReady() {
         return this.snapshot != null;
     }
 
@@ -954,7 +1007,7 @@ public class KbService {
     /**
      * 取一份可用快照（引用计数 +1，用完必须 {@link Snapshot#release()}）。
      *
-     * <p>循环条件是"还有快照可试"，且<b>停机即退出</b>：{@code tryAcquire()} 只在快照已退休时返回
+     * <p>循环条件是"还有快照可试"，且<b>停机即退出</b>：{@code canAcquire()} 只在快照已退休时返回
      * false，而 {@code this.snapshot} 只会指向活的快照或 null（{@link #stop()} 先摘引用再退休）。
      * 少了这两个前提（停机后仍留着已退休快照），失败分支重读到的还是同一个 retired 快照 ⇒ 死循环。
      */
@@ -964,7 +1017,7 @@ public class KbService {
             if (current == null) {
                 return null;
             }
-            if (current.tryAcquire()) {
+            if (current.canAcquire()) {
                 return current;
             }
             // 读到的是刚被热重载替换掉的快照：重读一次（新快照可继续用；停机则下一轮退出）
@@ -972,7 +1025,7 @@ public class KbService {
         return null;
     }
 
-    private static boolean sameDocuments(Snapshot old, Map<String, KbDoc> next) {
+    private static boolean isSameDocuments(Snapshot old, Map<String, KbDoc> next) {
         if (!new ArrayList<>(old.docs.keySet()).equals(new ArrayList<>(next.keySet()))) {
             return false;
         }
@@ -985,12 +1038,12 @@ public class KbService {
         return true;
     }
 
-    private static boolean sameSha(String left, String right) {
-        return left != null && !left.isBlank() && Objects.equals(left, right);
+    private static boolean isSameSha(String left, String right) {
+        return StringUtils.isNotBlank(left) && Objects.equals(left, right);
     }
 
     private static String nullSafe(String value) {
-        return value == null ? "" : value;
+        return StringUtils.defaultString(value);
     }
 
 
@@ -1090,7 +1143,7 @@ public class KbService {
             this.builtAt = Instant.now();
         }
 
-        private boolean tryAcquire() {
+        private boolean canAcquire() {
             this.refs.incrementAndGet();
             if (this.retired.get()) {
                 release();
@@ -1128,6 +1181,228 @@ public class KbService {
                 // 同上
             }
             deleteRecursively(this.dir);
+        }
+    }
+
+    static final class BoundedScheduledExecutor implements ScheduledExecutorService {
+
+        private final int maxPending;
+
+        private final Set<Reservation> pending = new HashSet<>();
+
+        private final ScheduledExecutorService delegate;
+
+        BoundedScheduledExecutor(int maxPending, ThreadFactory threadFactory) {
+            this.maxPending = maxPending;
+            this.delegate = Executors.newSingleThreadScheduledExecutor(threadFactory);
+        }
+
+        @Override
+        public <T> Future<T> submit(Callable<T> task) {
+            return track(reservation -> this.delegate.schedule(() -> {
+                try {
+                    return task.call();
+                }
+                finally {
+                    reservation.release();
+                }
+            }, 0L, TimeUnit.NANOSECONDS));
+        }
+
+        @Override
+        public Future<?> submit(Runnable task) {
+            return track(reservation -> this.delegate.schedule(() -> {
+                try {
+                    task.run();
+                }
+                finally {
+                    reservation.release();
+                }
+            }, 0L, TimeUnit.NANOSECONDS));
+        }
+
+        @Override
+        public void execute(Runnable command) {
+            submit(command);
+        }
+
+        @Override
+        public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+            return track(reservation -> this.delegate.schedule(() -> {
+                try {
+                    command.run();
+                }
+                finally {
+                    reservation.release();
+                }
+            }, delay, unit));
+        }
+
+        @Override
+        public <V> ScheduledFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
+            return track(reservation -> this.delegate.schedule(() -> {
+                try {
+                    return callable.call();
+                }
+                finally {
+                    reservation.release();
+                }
+            }, delay, unit));
+        }
+
+        @Override
+        public ScheduledFuture<?> scheduleAtFixedRate(Runnable command, long initialDelay, long period,
+                TimeUnit unit) {
+            return track(reservation -> this.delegate.scheduleAtFixedRate(() -> {
+                try {
+                    command.run();
+                }
+                catch (RuntimeException | Error ex) {
+                    reservation.release();
+                    throw ex;
+                }
+            }, initialDelay, period, unit));
+        }
+
+        @Override
+        public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay,
+                TimeUnit unit) {
+            return track(reservation -> this.delegate.scheduleWithFixedDelay(() -> {
+                try {
+                    command.run();
+                }
+                catch (RuntimeException | Error ex) {
+                    reservation.release();
+                    throw ex;
+                }
+            }, initialDelay, delay, unit));
+        }
+
+        private <T> ScheduledFuture<T> track(ScheduledTaskFactory<T> factory) {
+            synchronized (this.pending) {
+                if (this.pending.size() >= this.maxPending) {
+                    throw new RejectedExecutionException("KB scheduled task limit exceeded: " + this.maxPending);
+                }
+                Reservation reservation = new Reservation();
+                this.pending.add(reservation);
+                ScheduledFuture<T> future = null;
+                try {
+                    future = factory.schedule(reservation);
+                    return new BoundedScheduledFuture<>(future, reservation::release);
+                }
+                catch (RuntimeException | Error ex) {
+                    if (future != null) {
+                        future.cancel(false);
+                    }
+                    reservation.release();
+                    throw ex;
+                }
+            }
+        }
+
+        @Override
+        public void shutdown() {
+            this.delegate.shutdown();
+            releaseAll();
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            List<Runnable> dropped = this.delegate.shutdownNow();
+            releaseAll();
+            return dropped;
+        }
+
+        private void releaseAll() {
+            synchronized (this.pending) {
+                for (Reservation reservation : new HashSet<>(this.pending)) {
+                    reservation.release();
+                }
+                this.pending.clear();
+            }
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return this.delegate.isShutdown();
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return this.delegate.isTerminated();
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+            return this.delegate.awaitTermination(timeout, unit);
+        }
+
+        private final class Reservation {
+            private final AtomicBoolean released = new AtomicBoolean();
+
+            private void release() {
+                if (this.released.compareAndSet(false, true)) {
+                    synchronized (BoundedScheduledExecutor.this.pending) {
+                        BoundedScheduledExecutor.this.pending.remove(this);
+                    }
+                }
+            }
+        }
+    }
+
+    @FunctionalInterface
+    private interface ScheduledTaskFactory<T> {
+        ScheduledFuture<T> schedule(Reservation reservation);
+    }
+
+    private static final class BoundedScheduledFuture<T> implements ScheduledFuture<T> {
+
+        private final ScheduledFuture<T> delegate;
+
+        private final Runnable onDone;
+
+        private BoundedScheduledFuture(ScheduledFuture<T> delegate, Runnable onDone) {
+            this.delegate = delegate;
+            this.onDone = onDone;
+        }
+
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            boolean cancelled = this.delegate.cancel(mayInterruptIfRunning);
+            if (cancelled || this.delegate.isDone()) {
+                this.onDone.run();
+            }
+            return cancelled;
+        }
+
+        @Override
+        public boolean isCancelled() {
+            return this.delegate.isCancelled();
+        }
+
+        @Override
+        public boolean isDone() {
+            return this.delegate.isDone();
+        }
+
+        @Override
+        public T get() throws InterruptedException, ExecutionException {
+            return this.delegate.get();
+        }
+
+        @Override
+        public T get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+            return this.delegate.get(timeout, unit);
+        }
+
+        @Override
+        public long getDelay(TimeUnit unit) {
+            return this.delegate.getDelay(unit);
+        }
+
+        @Override
+        public int compareTo(Delayed other) {
+            return this.delegate.compareTo(other);
         }
     }
 }

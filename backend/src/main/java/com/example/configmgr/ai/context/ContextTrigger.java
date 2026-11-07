@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.AiProperties;
+import org.apache.commons.lang3.ObjectUtils;
 
 /**
  * 触发判定（上下文统计与压缩专项批①；设计稿 §3.2）。
@@ -103,7 +104,7 @@ public final class ContextTrigger {
 	private final AiProperties.Context config;
 
 	public ContextTrigger(AiProperties.Context config) {
-		this.config = config == null ? new AiProperties.Context() : config;
+		this.config = ObjectUtils.getIfNull(config, AiProperties.Context::new);
 	}
 
 	/**
@@ -149,9 +150,9 @@ public final class ContextTrigger {
 	 * <p>B1 修复的缺陷现场：{@code armed=false} 时 {@link #decide} 直接把 decision 压成 NONE，
 	 * 连"原始占比已经要求更高一级"也一起挡掉。升级的判据只能看<b>原始目标级</b>与谱系位置。
 	 */
-	public static boolean upgradeAllowed(Level raw, Level lineage) {
-		Level target = raw == null ? Level.NONE : raw;
-		Level current = lineage == null ? Level.NONE : lineage;
+	public static boolean isUpgradeAllowed(Level raw, Level lineage) {
+		Level target = ObjectUtils.defaultIfNull(raw, Level.NONE);
+		Level current = ObjectUtils.defaultIfNull(lineage, Level.NONE);
 		return target.ordinal() > current.ordinal();
 	}
 
@@ -161,8 +162,25 @@ public final class ContextTrigger {
 	 * <p>这一档必须能逃逸滞回：否则一次"压完刚好落在 60% 以上"的会话会被永久锁死，
 	 * 下一次请求直接撞上游 400，而本地还在报 {@code hysteresis_locked}。
 	 */
-	public static boolean hardOverflow(int nextEst, int limitTokens) {
+	public static boolean isHardOverflow(int nextEst, int limitTokens) {
 		return limitTokens > 0 && nextEst >= limitTokens;
+	}
+
+	public static boolean upgradeAllowed(Level raw, Level lineage) {
+		return isUpgradeAllowed(raw, lineage);
+	}
+
+	public static boolean hardOverflow(int nextEst, int limitTokens) {
+		return isHardOverflow(nextEst, limitTokens);
+	}
+
+	public boolean hysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted) {
+		return isHysteresisUnlocked(usedNow, fixedPrefixTokens, limitTokens, everCompacted);
+	}
+
+	public boolean hysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted,
+			int maxOutputTokens) {
+		return isHysteresisUnlocked(usedNow, fixedPrefixTokens, limitTokens, everCompacted, maxOutputTokens);
 	}
 
 	/**
@@ -271,8 +289,8 @@ public final class ContextTrigger {
 	 * @param limitTokens        实际窗口（{@code <=0} = 未知 ⇒ 解锁）
 	 * @param everCompacted      本会话是否压缩过
 	 */
-	public boolean hysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted) {
-		return hysteresisUnlocked(usedNow, fixedPrefixTokens, limitTokens, everCompacted, 0);
+	public boolean isHysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted) {
+		return isHysteresisUnlocked(usedNow, fixedPrefixTokens, limitTokens, everCompacted, 0);
 	}
 
 	/**
@@ -281,7 +299,7 @@ public final class ContextTrigger {
 	 * <p>分母必须与 {@link #decide} 完全一致（{@code limit − effectiveReserve(limit, reserve, maxOutput)}）：
 	 * 触发看一个分母、解锁看另一个分母，会在小窗口/大 max_tokens 的模型上互相打架。
 	 */
-	public boolean hysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted,
+	public boolean isHysteresisUnlocked(int usedNow, int fixedPrefixTokens, int limitTokens, boolean everCompacted,
 			int maxOutputTokens) {
 		if (!everCompacted) {
 			return true;

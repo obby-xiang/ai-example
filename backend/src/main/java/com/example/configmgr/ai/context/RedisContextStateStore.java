@@ -1,10 +1,20 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.run.SessionActivityRenewal;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
+import org.springframework.beans.factory.annotation.Autowired;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -12,6 +22,7 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +30,7 @@ import java.util.Map;
 @Slf4j
 @Primary
 @Component
+@RequiredArgsConstructor
 public class RedisContextStateStore implements ContextStateStore {
 
 	private static final String CONTEXT_PREFIX = "ai:ctx:";
@@ -129,10 +141,11 @@ public class RedisContextStateStore implements ContextStateStore {
 	private final ObjectMapper mapper;
 	private final AiProperties properties;
 
-	public RedisContextStateStore(StringRedisTemplate redis, ObjectMapper mapper, AiProperties properties) {
-		this.redis = redis;
-		this.mapper = mapper;
-		this.properties = properties;
+	private SessionActivityRenewal activityRenewal;
+
+	@Autowired(required = false)
+	void setActivityRenewal(SessionActivityRenewal activityRenewal) {
+		this.activityRenewal = activityRenewal;
 	}
 
 	@Override
@@ -144,9 +157,11 @@ public class RedisContextStateStore implements ContextStateStore {
 	public ContextState readStrict(String sessionId) {
 		String key = contextKey(sessionId);
 		Map<Object, Object> raw = this.redis.opsForHash().entries(key);
-		touchQuietly(key);
-		if (raw == null || raw.isEmpty()) {
+		if (MapUtils.isEmpty(raw)) {
 			return ContextState.EMPTY;
+		}
+		if (this.activityRenewal == null) {
+			touchQuietly(key);
 		}
 		Map<String, String> fields = new LinkedHashMap<>();
 		for (Map.Entry<Object, Object> entry : raw.entrySet()) {
@@ -171,7 +186,7 @@ public class RedisContextStateStore implements ContextStateStore {
 	}
 
 	private long writeState(String sessionId, ContextState state, String compactionId, String pendingJson) {
-		ContextState base = state == null ? ContextState.EMPTY : state;
+		ContextState base = ObjectUtils.defaultIfNull(state, ContextState.EMPTY);
 		List<String> args = new ArrayList<>();
 		args.add(String.valueOf(base.version()));
 		args.add(String.valueOf(ttlMillis()));
@@ -182,7 +197,7 @@ public class RedisContextStateStore implements ContextStateStore {
 			args.add(value);
 		});
 		Long applied = this.redis.execute(CAS_WRITE, List.of(contextKey(sessionId)), args.toArray());
-		return applied == null ? 0L : applied;
+		return ObjectUtils.defaultIfNull(applied, 0L);
 	}
 
 	@Override
@@ -191,7 +206,7 @@ public class RedisContextStateStore implements ContextStateStore {
 		this.redis.execute(RECORD_TURN, List.of(contextKey(sessionId)), String.valueOf(Math.max(0, usedTokens)),
 				String.valueOf(Math.max(0, completionTokens)), String.valueOf(estimated), String.valueOf(atMs),
 				String.valueOf(Math.max(0, systemTokens)), String.valueOf(Math.max(0, toolsTokens)),
-				String.valueOf(Math.max(0, inputTokens)), model == null ? "" : model,
+				String.valueOf(Math.max(0, inputTokens)), StringUtils.defaultString(model),
 				providerId == null || providerId <= 0L ? "" : String.valueOf(providerId), String.valueOf(ttlMillis()));
 	}
 
@@ -205,7 +220,7 @@ public class RedisContextStateStore implements ContextStateStore {
 		if (result == null || result.size() != 4) {
 			throw new IllegalStateException("Incomplete summary circuit-breaker counter result sessionId=" + sessionId);
 		}
-		return failed.withFuse(String.valueOf(result.get(0)), parseInt(result.get(1)), parseLong(result.get(2)))
+		return failed.withFuse(String.valueOf(result.getFirst()), parseInt(result.get(1)), parseLong(result.get(2)))
 				.withVersion(parseLong(result.get(3)));
 	}
 
@@ -275,8 +290,14 @@ public class RedisContextStateStore implements ContextStateStore {
 		this.redis.execute(COMPLETE_COMPACTION, List.of(contextKey(sessionId)), compactionId, String.valueOf(ttlMillis()));
 	}
 
-	private record PendingCompaction(String compactionId, List<Map<String, Object>> ledgerEvents,
-			Map<String, Object> event) {
+	private record PendingCompaction(@JsonProperty("compactionId") String compactionId,
+			@JsonProperty("ledgerEvents") @NonNull List<Map<String, Object>> ledgerEvents,
+			@JsonProperty("event") @NonNull Map<String, Object> event) {
+
+		public PendingCompaction {
+			ledgerEvents = ledgerEvents == null ? List.of() : List.copyOf(ledgerEvents);
+			event = Collections.unmodifiableMap(new LinkedHashMap<>(event == null ? Map.of() : event));
+		}
 	}
 
 	@Override
@@ -292,7 +313,7 @@ public class RedisContextStateStore implements ContextStateStore {
 
 	@Override
 	public List<Map<String, Object>> contextLedger(String sessionId) {
-		return readEvents(contextLedgerKey(sessionId), CONTEXT_LEDGER_MAX, false);
+		return readEvents(sessionId, contextLedgerKey(sessionId), CONTEXT_LEDGER_MAX, false);
 	}
 
 	@Override
@@ -308,10 +329,10 @@ public class RedisContextStateStore implements ContextStateStore {
 
 	@Override
 	public List<Map<String, Object>> events(String sessionId) {
-		return readEvents(contextEventsKey(sessionId), CONTEXT_EVENTS_MAX, true);
+		return readEvents(sessionId, contextEventsKey(sessionId), CONTEXT_EVENTS_MAX, true);
 	}
 
-	private List<Map<String, Object>> readEvents(String key, int limit, boolean touch) {
+	private List<Map<String, Object>> readEvents(String sessionId, String key, int limit, boolean touch) {
 		List<Map<String, Object>> out = new ArrayList<>();
 		try {
 			List<String> raw = this.redis.opsForList().range(key, 0, limit - 1L);
@@ -320,14 +341,20 @@ public class RedisContextStateStore implements ContextStateStore {
 					out.add(this.mapper.readValue(item, new TypeReference<Map<String, Object>>() { }));
 				}
 			}
-			if (touch) {
+			if (touch && !out.isEmpty() && this.activityRenewal != null) {
+				TenantUser identity = RequestContextUtils.currentOrNull();
+				if (identity != null) {
+					this.activityRenewal.isActivityRenewed(identity.tenantId(), identity.userId(), sessionId, null, key);
+				}
+			}
+			else if (touch && this.activityRenewal == null) {
 				touchQuietly(key);
 			}
 		}
 		catch (Exception ex) {
 			log.warn("context event read failed key={} (treating as empty)", key, ex);
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	private String contextKey(String sessionId) {
@@ -343,15 +370,15 @@ public class RedisContextStateStore implements ContextStateStore {
 	}
 
 	private long ttlMillis() {
-		return this.properties.getSessionTtl().toMillis();
+		return this.properties.getEffectiveSessionTtl().toMillis();
 	}
 
 	private void touchQuietly(String key) {
 		try {
-			this.redis.expire(key, this.properties.getSessionTtl());
+			this.redis.expire(key, this.properties.getEffectiveSessionTtl());
 		}
 		catch (RuntimeException ex) {
-			log.debug("context key renew failed key={}", key, ex);
+			// 续期失败不影响本次读取，后续请求会重试。
 		}
 	}
 

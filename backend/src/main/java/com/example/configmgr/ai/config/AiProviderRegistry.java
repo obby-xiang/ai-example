@@ -3,7 +3,10 @@ package com.example.configmgr.ai.config;
 import com.example.configmgr.ai.config.db.AiSetting;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import io.micrometer.observation.ObservationRegistry;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.BaseChatMemoryAdvisor;
 import org.springframework.ai.chat.model.ChatModel;
@@ -15,7 +18,6 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.client.reactive.JdkClientHttpConnector;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
@@ -25,6 +27,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * provider 级实例注册表（模型配置专项 §3.4）：<b>热生效</b>的唯一落点。
@@ -65,6 +68,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class AiProviderRegistry {
 
     private final AiConfigService configService;
@@ -123,17 +127,6 @@ public class AiProviderRegistry {
      * 语义面从"没有读超时"变成"有 300s 读空闲超时"。
      */
     static final Duration UPSTREAM_SOCKET_IDLE_TIMEOUT = Duration.ofSeconds(300);
-
-    public AiProviderRegistry(AiConfigService configService, SpToolCallingManager toolCallingManager,
-            BaseChatMemoryAdvisor memoryAdvisor, ObjectProvider<RetryTemplate> retryTemplate,
-            ObjectProvider<ObservationRegistry> observationRegistry, OpenAiChatProperties chatProperties) {
-        this.configService = configService;
-        this.toolCallingManager = toolCallingManager;
-        this.memoryAdvisor = memoryAdvisor;
-        this.retryTemplate = retryTemplate;
-        this.observationRegistry = observationRegistry;
-        this.chatProperties = chatProperties;
-    }
 
     /**
      * 当前默认运行态；没有可用 provider 时抛 {@link AiUnavailableException}（控制器已按
@@ -299,8 +292,8 @@ public class AiProviderRegistry {
             Overrides overrides) {
         ensureConfigVersion();
         ProviderRuntime base = runtimeFor(resolved);
-        String effectiveModel = StringUtils.hasText(modelId) ? modelId.trim() : base.modelId();
-        Overrides effectiveOverrides = overrides == null ? Overrides.NONE : overrides;
+        String effectiveModel = StringUtils.isNotBlank(modelId) ? modelId.trim() : base.modelId();
+        Overrides effectiveOverrides = ObjectUtils.defaultIfNull(overrides, Overrides.NONE);
         if (effectiveModel.equals(base.modelId()) && effectiveOverrides.isEmpty()) {
             return base;
         }
@@ -333,7 +326,7 @@ public class AiProviderRegistry {
             Overrides frozen) {
         ensureConfigVersion();
         ProviderRuntime base = runtimeFor(resolved);
-        String effectiveModel = StringUtils.hasText(modelId) ? modelId.trim() : base.modelId();
+        String effectiveModel = StringUtils.isNotBlank(modelId) ? modelId.trim() : base.modelId();
         OpenAiChatOptions options = buildOptions(effectiveModel, Overrides.NONE);
         options.setTemperature(frozen == null ? null : frozen.temperature());
         options.setTopP(frozen == null ? null : frozen.topP());
@@ -351,7 +344,7 @@ public class AiProviderRegistry {
     }
 
     public Set<String> runtimeKeys() {
-        return new LinkedHashSet<>(this.runtimes.keySet());
+        return this.runtimes.isEmpty() ? Set.of() : new LinkedHashSet<>(this.runtimes.keySet());
     }
 
     /**
@@ -494,7 +487,7 @@ public class AiProviderRegistry {
     }
 
     private void applyRange(String label, double value, double min, double max,
-            java.util.function.Consumer<Double> setter) {
+            Consumer<Double> setter) {
         if (!Double.isFinite(value) || value < min || value > max) {
             log.warn("value {} for {} out of range [{},{}]: ignoring it and keeping the global default", label, value, min, max);
             return;
@@ -502,7 +495,7 @@ public class AiProviderRegistry {
         setter.accept(value);
     }
 
-    private void applyPositiveInt(String label, int value, java.util.function.Consumer<Integer> setter) {
+    private void applyPositiveInt(String label, int value, Consumer<Integer> setter) {
         if (value <= 0) {
             log.warn("value {} for {} must be a positive integer: ignoring it and keeping the global default", label, value);
             return;
@@ -511,7 +504,7 @@ public class AiProviderRegistry {
     }
 
 
-    private void applyDouble(String settingKey, String raw, java.util.function.Consumer<Double> setter) {
+    private void applyDouble(String settingKey, String raw, Consumer<Double> setter) {
         try {
             double value = Double.parseDouble(raw.trim());
             if (!Double.isFinite(value)) {
@@ -525,7 +518,7 @@ public class AiProviderRegistry {
         }
     }
 
-    private void applyMaxTokens(String settingKey, String raw, java.util.function.Consumer<Integer> setter) {
+    private void applyMaxTokens(String settingKey, String raw, Consumer<Integer> setter) {
         try {
             int value = Integer.parseInt(raw.trim());
             if (value <= 0) {
@@ -540,7 +533,7 @@ public class AiProviderRegistry {
     }
 
     private static String abbreviate(String raw) {
-        String text = raw == null ? "" : raw.trim();
+        String text = StringUtils.trimToEmpty(raw);
         return text.length() <= 32 ? text : text.substring(0, 32) + "…";
     }
 }

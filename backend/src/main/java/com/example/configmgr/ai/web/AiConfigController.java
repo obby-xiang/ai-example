@@ -17,6 +17,7 @@ import com.example.configmgr.ai.web.dto.ProbeView;
 import com.example.configmgr.ai.web.dto.ProviderView;
 import com.example.configmgr.common.ApiResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -31,6 +32,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * 模型配置端点（模型配置专项 §3.5）：批① 的只读面 + 批② 的写路径、{@code /test}、{@code /models/fetch}、
@@ -78,7 +80,7 @@ public class AiConfigController {
         for (AiProvider provider : this.configService.listProviders()) {
             out.add(toView(provider, this.configService.modelsOf(provider.getId())));
         }
-        return ApiResponse.ok(out);
+        return ApiResponse.ok(out.isEmpty() ? List.of() : out);
     }
 
     // ── provider 写 ──────────────────────────────────────────────────────────
@@ -98,7 +100,7 @@ public class AiConfigController {
                     row.displayName(), row.supportsToolCalling(), row.supportsVision(), row.supportsReasoning(),
                     row.maxContext(), row.maxOutput(), row.isDefault()));
         }
-        return ApiResponse.ok(out);
+        return ApiResponse.ok(out.isEmpty() ? List.of() : out);
     }
 
     @PostMapping("/providers")
@@ -218,7 +220,7 @@ public class AiConfigController {
     }
 
     /** 把业务异常统一落成"信封 + 稳定 code + 对应 HTTP 状态"。 */
-    private <T> ResponseEntity<ApiResponse<T>> guarded(java.util.function.Supplier<T> action) {
+    private <T> ResponseEntity<ApiResponse<T>> guarded(Supplier<T> action) {
         try {
             return ResponseEntity.ok(ApiResponse.ok(action.get()));
         }
@@ -236,7 +238,9 @@ public class AiConfigController {
 
     private static <T> ResponseEntity<ApiResponse<T>> fail(HttpStatus status, String code, String message) {
         // 只记稳定 code + 状态码：message 是前端按稳定 code 本地化前的安全回退文案（可能包含 provider/model 标识），日志不复述
-        log.debug("config write rejected code={} status={}", code, status.value());
+        if (log.isDebugEnabled()) {
+            log.debug("config write rejected code={} status={}", code, status.value());
+        }
         return ResponseEntity.status(status).body(ApiResponse.error(code, message));
     }
 
@@ -251,7 +255,7 @@ public class AiConfigController {
 
     private static ModelView toModelView(AiProviderModel model) {
         return new ModelView(model.getId(), model.getModelId(),
-                model.getDisplayName() == null ? model.getModelId() : model.getDisplayName(),
+                ObjectUtils.getIfNull(model.getDisplayName(), model::getModelId),
                 model.isSupportsToolCalling(), Boolean.TRUE.equals(model.getSupportsVision()),
                 Boolean.TRUE.equals(model.getSupportsReasoning()), model.getMaxContext(), model.getMaxOutput(),
                 model.isEnabled(), model.isDefault(), model.getSortOrder());

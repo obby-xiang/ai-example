@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.form;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.List;
 
 /**
@@ -116,8 +119,16 @@ public interface FormAttachmentStore {
 	 * @param contentType MIME（模型可见）
 	 * @param storagePath 服务器存储路径（<b>绝不下发前端/模型</b>）
 	 */
-	record Attachment(String fileId, String runId, String toolCallId, String sessionId, String fileName,
-			long size, String contentType, String storagePath) {
+	record Attachment(@JsonProperty("fileId") String fileId, @JsonProperty("runId") String runId,
+			@JsonProperty("toolCallId") String toolCallId, @JsonProperty("sessionId") String sessionId,
+			@JsonProperty("fileName") String fileName,
+			@JsonProperty("size") @JsonFormat(shape = JsonFormat.Shape.STRING) long size,
+			@JsonProperty("contentType") String contentType, @JsonProperty("storagePath") String storagePath) {
+
+		@Override
+		public String toString() {
+			return "Attachment[fileId=" + this.fileId + ", size=" + this.size + ", contentType=" + this.contentType + "]";
+		}
 	}
 
 }

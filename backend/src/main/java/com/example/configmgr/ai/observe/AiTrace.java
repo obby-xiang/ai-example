@@ -5,8 +5,12 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
 import com.example.configmgr.ai.run.InstanceId;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 /**
  * 一轮 AI 对话的<b>日志链路锚点</b>（AI 可观测性专项·日志链路追踪批）。
@@ -67,7 +71,7 @@ public final class AiTrace {
 	 * @param sessionId 会话 id；空 = 只绑 runId（跨实例唤醒线程只认 runId）
 	 */
 	public static void bind(String runId, String sessionId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return;
 		}
 		if (!runId.equals(MDC.get(RUN_ID))) {
@@ -76,7 +80,7 @@ public final class AiTrace {
 		}
 		// 实例标识是"本进程常量"，随锚点一起进 MDC：多实例下两份 app.log 合并后仍能分清来源
 		MDC.put(INSTANCE_ID, InstanceId.get());
-		if (sessionId != null && !sessionId.isBlank()) {
+		if (StringUtils.isNotBlank(sessionId)) {
 			MDC.put(SESSION_ID, sessionId);
 		}
 	}
@@ -113,7 +117,7 @@ public final class AiTrace {
 	 * 驱动线程的 {@code turn_start} 读到它 —— 于是"这一轮为什么又跑起来了"不必靠时间戳推断。
 	 */
 	public static void markResumeReason(String reason) {
-		if (reason == null || reason.isBlank()) {
+		if (StringUtils.isBlank(reason)) {
 			MDC.remove(RESUME_REASON);
 			return;
 		}
@@ -131,15 +135,7 @@ public final class AiTrace {
 	}
 
 	private static long parseLong(String text) {
-		if (text == null || text.isBlank()) {
-			return -1L;
-		}
-		try {
-			return Long.parseLong(text.trim());
-		}
-		catch (NumberFormatException ex) {
-			return -1L;
-		}
+		return NumberUtils.toLong(StringUtils.trim(text), -1L);
 	}
 
 	/** 当前 MDC 里的 runId（无则 null）。 */
@@ -178,7 +174,7 @@ public final class AiTrace {
 	 * <p>刻意换个名字而不做重载：一个"返回值的 lambda"同时也是合法的 {@code Runnable}，
 	 * 重载会在调用点产生歧义。
 	 */
-	public static <T> java.util.concurrent.Callable<T> wrapCallable(java.util.concurrent.Callable<T> callable) {
+	public static <T> Callable<T> wrapCallable(Callable<T> callable) {
 		Map<String, String> captured = MDC.getCopyOfContextMap();
 		return () -> {
 			Map<String, String> previous = MDC.getCopyOfContextMap();
@@ -192,7 +188,8 @@ public final class AiTrace {
 		};
 	}
 
-	private static void apply(Map<String, String> from) {		if (from == null || from.isEmpty()) {
+	private static void apply(Map<String, String> from) {
+		if (MapUtils.isEmpty(from)) {
 			MDC.clear();
 			return;
 		}
@@ -227,10 +224,10 @@ public final class AiTrace {
 		// （压缩/决策这类"由旁路线程发射"的事件就是这样丢了行首）。这里临时补绑、发射后还原 ——
 		// "显式给了 runId 就一定能在行首看到它"不依赖调用线程的 MDC 运气。
 		Map<String, String> previous = MDC.getCopyOfContextMap();
-		if (currentRunId() == null && runId != null && !runId.isBlank()) {
+		if (currentRunId() == null && StringUtils.isNotBlank(runId)) {
 			bind(runId, sessionId);
 		}
-		else if (currentSessionId() == null && sessionId != null && !sessionId.isBlank() && currentRunId() != null) {
+		else if (currentSessionId() == null && StringUtils.isNotBlank(sessionId) && currentRunId() != null) {
 			MDC.put(SESSION_ID, sessionId);
 		}
 		try {
@@ -244,9 +241,9 @@ public final class AiTrace {
 	private static void writeEvent(String runId, String sessionId, String name, Object... kv) {
 		StringBuilder line = new StringBuilder(96);
 		line.append("event=").append(clean(name)).append(' ');
-		appendField(line, RUN_ID, runId == null || runId.isBlank() ? currentRunId() : runId);
+		appendField(line, RUN_ID, StringUtils.getIfBlank(runId, AiTrace::currentRunId));
 		line.append(' ');
-		appendField(line, SESSION_ID, sessionId == null || sessionId.isBlank() ? currentSessionId() : sessionId);
+		appendField(line, SESSION_ID, StringUtils.getIfBlank(sessionId, AiTrace::currentSessionId));
 		for (int i = 0; i + 1 < kv.length; i += 2) {
 			line.append(' ');
 			appendField(line, String.valueOf(kv[i]), kv[i + 1]);

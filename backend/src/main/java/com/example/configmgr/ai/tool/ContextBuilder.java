@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.task.entity.Task;
@@ -7,9 +8,13 @@ import com.example.configmgr.task.service.TaskService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -117,6 +122,8 @@ public class ContextBuilder {
      */
     public static final List<String> SELECTION_PAGE_IDS = List.of("export", "import");
 
+    private static final List<String> UNSYNCED_SELECTION = Collections.singletonList(null);
+
     /**
      * 页面 id 的中文名（提示词的 {@code 页面} 行文案用）——与前端
      * {@code frontend/src/stores/workspace.ts#PAGE_LABELS} 逐项镜像，改动必须两侧同改。
@@ -213,7 +220,7 @@ public class ContextBuilder {
                 List<String> taskDefs = task.getItems().stream()
                         .map(i -> i.getDefCode()).toList();
                 List<String> pageDefs = pageSelectedDefs(ctx);
-                if (pageDefs != null) {
+                if (pageDefs != UNSYNCED_SELECTION) {
                     // 页面已同步过选中集（**含空集合**）⇒ 以页面真值为准：手动勾选/减选不落库，
                     // 任务条目代表的是"上一次落库"而非"用户当下选的"，两者对立时模型会答错。
                     sb.append("已选配置项: ")
@@ -267,22 +274,13 @@ public class ContextBuilder {
             lines.add("- 缺失（需要时收集，不要猜测）: 配置项");
         }
         if (slots.hasDefCodes() && "EXPORT".equals(slots.taskType())
-                && slots.undecidedDefCodes() != null && !slots.undecidedDefCodes().isEmpty()) {
-            List<String> safe = new ArrayList<>(slots.undecidedDefCodes().size());
-            for (String code : slots.undecidedDefCodes()) {
-                safe.add(safeDelimitedField(code, SELECTED_DEF_MAX_CHARS));
-            }
-            safe.sort(String::compareTo);
+                && CollectionUtils.isNotEmpty(slots.undecidedDefCodes())) {
+            List<String> safe = safeSortedCodes(slots.undecidedDefCodes());
             lines.add("- 筛选条件未决定: " + String.join(", ", safe)
                     + "（进入 QUERY_COND 时收集一次；未决定前不得按全量导出）");
         }
         if (slots.hasDefCodes()) {
-            List<String> safe = new ArrayList<>(slots.defCodes().size());
-            for (String code : slots.defCodes()) {
-                safe.add(safeDelimitedField(code, SELECTED_DEF_MAX_CHARS));
-            }
-            safe.sort(String::compareTo);
-            lines.add("- 已确定配置项: " + String.join(", ", safe));
+            lines.add("- 已确定配置项: " + String.join(", ", safeSortedCodes(slots.defCodes())));
         }
         List<String> renderedConditions = new ArrayList<>();
         for (ConditionSlot condition : slots.conditions()) {
@@ -301,11 +299,20 @@ public class ContextBuilder {
             lines.add("- 已确定条件: " + rendered);
         }
         if (slots.hasDefCodes() && "EXPORT".equals(slots.taskType())
-                && (slots.undecidedDefCodes() == null || slots.undecidedDefCodes().isEmpty())
+                && CollectionUtils.isEmpty(slots.undecidedDefCodes())
                 && renderedConditions.isEmpty()) {
             lines.add("- 未设筛选: 全量（已明确不设筛选）");
         }
         return appendSlotLines(lines);
+    }
+
+    private static List<String> safeSortedCodes(List<String> codes) {
+        List<String> safe = new ArrayList<>(codes.size());
+        for (String code : codes) {
+            safe.add(safeDelimitedField(code, SELECTED_DEF_MAX_CHARS));
+        }
+        safe.sort(String::compareTo);
+        return safe.isEmpty() ? List.of() : safe;
     }
 
     private static String appendSlotLines(List<String> lines) {
@@ -377,7 +384,7 @@ public class ContextBuilder {
      * 同时保留括号里的 id，避免"文案变了但排查口径跟着变"。
      */
     static String pageLabel(String page) {
-        if (page == null || page.isBlank()) {
+        if (StringUtils.isBlank(page)) {
             return "任务中心";
         }
         String label = PAGE_LABELS.get(page);
@@ -390,10 +397,10 @@ public class ContextBuilder {
      * <p>
      * 两态必须分开（issue #3 裁决③ + 2026-10-29 返修）：
      * <ul>
-     * <li><b>返回 {@code null} = 页面从未同步</b>：客户端没带这个键，当前不在拥有选中集的向导页上
+     * <li><b>返回私有未同步哨兵</b>：客户端没带这个键，当前不在拥有选中集的向导页上
      * （任务中心 / 定义页 / 数据浏览上报的 {@code pageId} 都不在 {@link #SELECTION_PAGE_IDS} 里），
      * <b>或</b>带了空列表但任务详情还没应用（{@link #SELECTION_SYNCED_KEY} 不为 {@code true}）。
-     * 此时的空值只表示"不知道"，调用方应退回任务已存条目；</li>
+     * 此时只表示"不知道"，调用方应退回任务已存条目；</li>
      * <li><b>返回空列表 = 页面同步了空集合</b>：任务详情已应用且用户把勾选全部取消。这是有效信息，
      * 必须以页面真值呈现，否则模型会把陈旧的"任务条目"当成用户现在选的。</li>
      * </ul>
@@ -401,22 +408,22 @@ public class ContextBuilder {
     private List<String> pageSelectedDefs(AiContext ctx) {
         Map<String, Object> extra = ctx.getExtra();
         if (extra == null) {
-            return null;
+            return UNSYNCED_SELECTION;
         }
         Object pageId = extra.get("pageId");
         if (pageId == null || !SELECTION_PAGE_IDS.contains(String.valueOf(pageId))) {
-            return null;
+            return UNSYNCED_SELECTION;
         }
         Object raw = extra.get("selectedDefs");
         if (!(raw instanceof List<?> list)) {
-            return null;
+            return UNSYNCED_SELECTION;
         }
         List<String> codes = list.stream().map(String::valueOf).toList();
         if (codes.isEmpty() && !Boolean.TRUE.equals(extra.get(SELECTION_SYNCED_KEY))) {
             // 未水合 / 旧客户端：[] 只表示"还不知道"，不是"用户清空"
-            return null;
+            return UNSYNCED_SELECTION;
         }
-        return codes;
+        return codes.isEmpty() ? List.of() : codes;
     }
 
     /**
@@ -426,7 +433,7 @@ public class ContextBuilder {
      * {@code </workspace_state>} 一类收口标签都不会原样落到 {@code 额外上下文} 行里。
      */
     public String renderExtra(Map<String, Object> raw) {
-        if (raw == null || raw.isEmpty()) {
+        if (MapUtils.isEmpty(raw)) {
             return "";
         }
         Map<String, String> allowed = new LinkedHashMap<>();
@@ -437,7 +444,7 @@ public class ContextBuilder {
                 allowed.put(key, safeDelimitedField(serialize(value), EXTRA_VALUE_MAX_CHARS));
             }
         }
-        if (allowed.isEmpty()) {
+        if (MapUtils.isEmpty(allowed)) {
             return "";
         }
         Map<String, String> kept = new LinkedHashMap<>();
@@ -469,7 +476,9 @@ public class ContextBuilder {
             return this.objectMapper.writeValueAsString(value);
         }
         catch (Exception ex) {
-            log.debug("could not serialize extra value; falling back to text", ex);
+            if (LogSampling.canAcquire("workspace-extra-serialize")) {
+                log.warn("could not serialize extra value; falling back to text", ex);
+            }
             return String.valueOf(value);
         }
     }

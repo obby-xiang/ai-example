@@ -1,9 +1,11 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -62,6 +64,12 @@ public final class TurnKeepalive implements AutoCloseable {
 
 	private final AtomicBoolean closed = new AtomicBoolean();
 
+	private final Object lifecycleLock = new Object();
+
+	private boolean acceptingEmits;
+
+	private long generation;
+
 	/** 本尝试序号（0 = 还没进尝试循环，例如压缩阶段）。 */
 	private volatile int attempt;
 
@@ -79,6 +87,7 @@ public final class TurnKeepalive implements AutoCloseable {
 		this.scheduler = scheduler;
 		this.intervalMs = Math.max(1L, intervalMs);
 		this.stage = new AtomicReference<>(new Stage(phase, System.currentTimeMillis()));
+		this.acceptingEmits = out != null;
 		schedule();
 	}
 
@@ -118,20 +127,17 @@ public final class TurnKeepalive implements AutoCloseable {
 	 * 与定时器节拍共用同一个 {@link Stage} 起点。
 	 */
 	public void phase(String phase) {
-		if (phase == null || phase.isBlank()) {
+		if (StringUtils.isBlank(phase)) {
 			return;
 		}
-		while (true) {
+		synchronized (this.lifecycleLock) {
 			Stage current = this.stage.get();
 			if (phase.equals(current.phase())) {
 				return;
 			}
-			Stage next = new Stage(phase, System.currentTimeMillis());
-			if (this.stage.compareAndSet(current, next)) {
-				if (!this.closed.get()) {
-					emit(next.phase(), 0L);
-				}
-				return;
+			this.stage.set(new Stage(phase, System.currentTimeMillis()));
+			if (!this.closed.get()) {
+				emit(phase, 0L, this.generation);
 			}
 		}
 	}
@@ -143,69 +149,92 @@ public final class TurnKeepalive implements AutoCloseable {
 
 	/** 停表：此后本定时器不再出帧（可 {@link #rearm()} 重新武装）。 */
 	public void stop() {
-		ScheduledFuture<?> current = this.future.getAndSet(null);
-		if (current != null) {
-			current.cancel(false);
+		synchronized (this.lifecycleLock) {
+			this.acceptingEmits = false;
+			this.generation++;
+			ScheduledFuture<?> current = this.future.getAndSet(null);
+			if (current != null) {
+				current.cancel(false);
+			}
 		}
 	}
 
 	/** 重新武装（只服务"同一轮继续"的分支：空的模型步再试一次）。已 close 的实例不再武装。 */
 	public void rearm() {
-		if (!this.closed.get()) {
-			schedule();
-		}
+		schedule();
 	}
 
 	@Override
 	public void close() {
-		this.closed.set(true);
-		stop();
+		synchronized (this.lifecycleLock) {
+			this.closed.set(true);
+			stop();
+		}
 	}
 
 	/** 阶段开始帧（同步、由调用线程在进入同步压缩之前发）。 */
 	private void announce() {
-		Stage current = this.stage.get();
-		emit(current.phase(), 0L);
+		long expectedGeneration;
+		Stage current;
+		synchronized (this.lifecycleLock) {
+			expectedGeneration = this.generation;
+			current = this.stage.get();
+		}
+		emit(current.phase(), 0L, expectedGeneration);
 	}
 
 	private void schedule() {
-		if (this.scheduler == null || this.out == null) {
-			return;
-		}
-		if (this.future.get() != null) {
-			return;
-		}
-		try {
-			ScheduledFuture<?> scheduled = this.scheduler.scheduleAtFixedRate(this::beat, this.intervalMs,
-					this.intervalMs, TimeUnit.MILLISECONDS);
-			this.future.set(scheduled);
-		}
-		catch (RejectedExecutionException ex) {
-			// 调度器已关闭（应用停机 / 单测提前 shutdown）：保活缺席不影响本轮正确性，只记 DEBUG
-			log.debug("keepalive timer not scheduled runId={} (scheduler shut down)", this.runId, ex);
+		synchronized (this.lifecycleLock) {
+			if (this.closed.get() || this.out == null || this.future.get() != null) {
+				return;
+			}
+			this.acceptingEmits = true;
+			if (this.scheduler == null) {
+				return;
+			}
+			try {
+				ScheduledFuture<?> scheduled = this.scheduler.scheduleAtFixedRate(this::beat, this.intervalMs,
+						this.intervalMs, TimeUnit.MILLISECONDS);
+				this.future.set(scheduled);
+			}
+			catch (RejectedExecutionException ex) {
+				// 调度器已关闭（应用停机 / 单测提前 shutdown）：保活缺席不影响本轮正确性，采样记录 WARN
+				if (LogSampling.canAcquire("keepalive-schedule")) {
+					log.warn("keepalive timer not scheduled runId={} (scheduler shut down)", this.runId, ex);
+				}
+			}
 		}
 	}
 
 	private void beat() {
-		if (this.closed.get()) {
-			return;
+		long expectedGeneration;
+		Stage current;
+		synchronized (this.lifecycleLock) {
+			if (this.closed.get() || !this.acceptingEmits) {
+				return;
+			}
+			expectedGeneration = this.generation;
+			current = this.stage.get();
 		}
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(this.identity)) {
-			Stage current = this.stage.get();
-			emit(current.phase(), Math.max(0L, System.currentTimeMillis() - current.startedAtMs()));
+			emit(current.phase(), Math.max(0L, System.currentTimeMillis() - current.startedAtMs()), expectedGeneration);
 		}
 	}
 
-	private void emit(String phase, long elapsedMs) {
-		if (this.out == null) {
-			return;
-		}
-		try {
-			this.out.stage(phase, elapsedMs, this.attempt);
-		}
-		catch (RuntimeException ex) {
-			// 观测面不得反噬轮次：客户端已断/写出器已关闭/序列化异常都只降级为 DEBUG
-			log.debug("keepalive frame send failed (ignored) runId={} phase={}", this.runId, phase, ex);
+	private void emit(String phase, long elapsedMs, long expectedGeneration) {
+		synchronized (this.lifecycleLock) {
+			if (this.out == null || this.closed.get() || !this.acceptingEmits || this.generation != expectedGeneration) {
+				return;
+			}
+			try {
+				this.out.stage(phase, elapsedMs, this.attempt);
+			}
+			catch (RuntimeException ex) {
+				// 观测面不得反噬轮次：客户端已断/写出器已关闭/序列化异常只采样记录 WARN
+				if (LogSampling.canAcquire("keepalive-emit")) {
+					log.warn("keepalive frame send failed (ignored) runId={} phase={}", this.runId, phase, ex);
+				}
+			}
 		}
 	}
 

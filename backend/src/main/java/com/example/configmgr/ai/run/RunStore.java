@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolOutcome;
@@ -14,12 +15,18 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -38,6 +45,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -326,6 +334,13 @@ public class RunStore {
 	private final ObjectMapper mapper;
 
 	private final AiProperties properties;
+
+	private SessionActivityRenewal activityRenewal;
+
+	@Autowired(required = false)
+	void setActivityRenewal(SessionActivityRenewal activityRenewal) {
+		this.activityRenewal = activityRenewal;
+	}
 
 	/**
 	 * "无租约写回但 fence 已在前面"的<b>已告警</b> runId 集合（R6 节流）。
@@ -954,7 +969,8 @@ public class RunStore {
 	public record ClaimResult(ClaimOutcome outcome, long epoch, long fence) {
 
 		/** 是否认领成功（{@link ClaimOutcome#WON}）。 */
-		public boolean won() {
+		@JsonIgnore
+		public boolean isWon() {
 			return this.outcome == ClaimOutcome.WON;
 		}
 
@@ -1060,7 +1076,7 @@ public class RunStore {
 			return RunSnapshot.CANCELLED;
 		}
 		String status = snapshot.getStatus();
-		return status == null ? "" : status;
+		return StringUtils.defaultString(status);
 	}
 
 	public String pendingKey(String runId) {
@@ -1087,7 +1103,7 @@ public class RunStore {
 	 * 同一个 HASH 里若只按 toolCallId 记，续跑/重试时换了一轮却撞上同一个 id 就会误判"已执行"。
 	 */
 	public static String idemField(String runId, String toolCallId) {
-		return runId + ":" + (toolCallId == null ? "" : toolCallId);
+		return runId + ":" + StringUtils.defaultString(toolCallId);
 	}
 
 	/** 已发放最大业务序号的键名（{@code ai:seq:{run:<runId>}}；诊断/取证可直读）。 */
@@ -1230,22 +1246,39 @@ public class RunStore {
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
 			String clientRequestId, String requestText, long turnStartedAtMs) {
+		validateInitialSnapshot(runId, modelId, requestText, turnStartedAtMs, frozen);
+		TenantUser identity = RequestContextUtils.require();
+		RunSnapshot snapshot = newInitialSnapshot(runId, sessionId, context, history, codec, providerId, modelId,
+				frozen, clientRequestId, requestText, turnStartedAtMs, identity);
+		registerSessionRun(runId, sessionId, identity);
+		primeRunIndexRepair(snapshot, runId);
+		if (!isPersist(snapshot)) {
+			throw new AiStateUnavailableException("Failed to write run snapshot " + runId
+					+ " (initial snapshot write refused: current snapshot is cancelled or this instance lacks resume authority)");
+		}
+		addRunIndexBestEffort(snapshot, runId);
+		return snapshot;
+	}
+
+	private static void validateInitialSnapshot(String runId, String modelId, String requestText, long turnStartedAtMs,
+			RunSnapshot.FrozenParams frozen) {
 		if (frozen == null) {
 			throw new IllegalArgumentException("Initial snapshot must freeze effective parameters runId=" + runId);
 		}
-		if (modelId == null || modelId.isBlank()) {
+		if (StringUtils.isBlank(modelId)) {
 			throw new IllegalArgumentException("Initial snapshot must freeze the model name runId=" + runId);
 		}
-		if (requestText == null || requestText.isBlank()) {
+		if (StringUtils.isBlank(requestText)) {
 			throw new IllegalArgumentException("Initial snapshot must record the original request runId=" + runId);
 		}
 		if (turnStartedAtMs <= 0L) {
 			throw new IllegalArgumentException("Initial snapshot must record the request start runId=" + runId);
 		}
-		// 身份：首轮创建时<b>必须</b>有上下文。缺身份不落库、不登记索引 ——
-		// 没有默认租户，也没有默认用户：轮级键的 hash tag 由身份组成，凭空补一个身份
-		// 就是"把这一轮写进别人的命名空间"。
-		TenantUser identity = RequestContextUtils.require();
+	}
+
+	private RunSnapshot newInitialSnapshot(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+			String clientRequestId, String requestText, long turnStartedAtMs, TenantUser identity) {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
@@ -1255,45 +1288,29 @@ public class RunStore {
 		snapshot.setTenantId(identity.tenantId());
 		snapshot.setUserId(identity.userId());
 		snapshot.setStatus(RunSnapshot.RUNNING);
-		snapshot.setContext(context == null ? AiContext.empty().toMap() : context.toMap());
+		snapshot.setContext(ObjectUtils.getIfNull(context, AiContext::empty).toMap());
 		snapshot.setMessageJson(codec.serializeAll(history));
 		snapshot.setProviderId(providerId);
 		snapshot.setModelId(modelId);
 		snapshot.freezeParams(frozen);
 		snapshot.setCreatedBy(this.instanceId);
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
-		// ===== 会话→run 索引必须在首笔快照<b>之前</b>原子登记 =====
-		// 它是会话销毁的唯一发现面。先写索引再写快照：
-		// - 索引失败 ⇒ 直接失败，Redis 里没有快照，不会产生"存在但删不掉"的轮；
-		// - 快照随后失败 ⇒ 索引里留一个无快照的死成员，枚举按快照缺失跳过，随 TTL 消失。
-		// 不能反过来：快照成功而索引失败会留下一个不可发现、只能等 TTL 的 RUNNING 轮。
-		if (sessionId != null && !sessionId.isBlank()) {
-			try {
-				this.redis.execute(SESSION_RUNS_REGISTER_SCRIPT,
-						List.of(sessionRunsKey(sessionId, identity.tenantId(), identity.userId())), runId,
-						String.valueOf(ttlFor(runId).toMillis()));
-			}
-			catch (Exception ex) {
-				throw new AiStateUnavailableException("Failed to register session->run index sessionId=" + sessionId
-						+ " runId=" + runId, ex);
-			}
-		}
-		// 首笔快照写入前先预留"创建节点的节流位"：afterSnapshotWrite 的 RUNNING 节流拍据此跳过，
-		// 由下面的创建节点补写统一执行一次 SADD（避免同一笔写两次）。
-		primeRunIndexRepair(snapshot, runId);
-		// ===== 首笔快照写入必须<b>显式判定</b>（2026-10-29）=====
-		// save 是"可判定"的：取消优先守卫会拒写（当前快照已是取消态）、续跑权判据会拒写
-		// （丢租 / 设施不可确认 / fence 已被接管），两条都静默返回 false。旧实现忽略它 ⇒ 调用方以为
-		// "这一轮建好了"，继续跑模型并发 done —— Redis 里却根本没有这一轮（刷新/重挂/续跑/取消
-		// 全都没有持久面，用户却收到一条成功）。这里把"没落库"变成失败事实。
-		if (!persist(snapshot)) {
-			throw new AiStateUnavailableException("Failed to write run snapshot " + runId
-					+ " (initial snapshot write refused: current snapshot is cancelled or this instance lacks resume authority)");
-		}
-		// 全局 ai:runs 是恢复发现面：创建节点补写一次（best-effort）。失败不抛；之后的 RUNNING
-		// 热路径由 repairRunIndexThrottled 每 60s 至多重试一次（首个节流拍在 t0+60s 到期）。
-		addRunIndexBestEffort(snapshot, runId);
 		return snapshot;
+	}
+
+	private void registerSessionRun(String runId, String sessionId, TenantUser identity) {
+		if (StringUtils.isBlank(sessionId)) {
+			return;
+		}
+		try {
+			this.redis.execute(SESSION_RUNS_REGISTER_SCRIPT,
+					List.of(sessionRunsKey(sessionId, identity.tenantId(), identity.userId())), runId,
+					String.valueOf(ttlFor(runId).toMillis()));
+		}
+		catch (Exception ex) {
+			throw new AiStateUnavailableException("Failed to register session->run index sessionId=" + sessionId
+					+ " runId=" + runId, ex);
+		}
 	}
 
 	/**
@@ -1343,7 +1360,7 @@ public class RunStore {
 	 * 记忆窗口的整窗写回不在这一个原子步内（见 {@code ResilientChatService#finishSuccess} 的落库后复读）。
 	 */
 	public void save(RunSnapshot snapshot) {
-		persist(snapshot);
+		isPersist(snapshot);
 	}
 
 	/**
@@ -1365,17 +1382,21 @@ public class RunStore {
 	 *
 	 * @return {@code true} = 本次创建并落库；{@code false} = 已有快照（不覆盖）或无写权限
 	 */
-	public boolean createIfAbsent(RunSnapshot snapshot) {
+	public boolean isCreatedIfAbsent(RunSnapshot snapshot) {
 		try (RunIdentityScope.Scope ignored = openSnapshotWriteScope(snapshot)) {
-			return createIfAbsentInScope(snapshot);
+			return isCreateIfAbsentInScope(snapshot);
 		}
 	}
 
-	private boolean createIfAbsentInScope(RunSnapshot snapshot) {
+	public boolean createIfAbsent(RunSnapshot snapshot) {
+		return isCreatedIfAbsent(snapshot);
+	}
+
+	private boolean isCreateIfAbsentInScope(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
 		String runId = snapshot.getRunId();
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
-		if (authority.readOnly()) {
+		if (authority.isReadOnly()) {
 			warnReadOnly(runId, authority, "run snapshot (conditional create)");
 			return false;
 		}
@@ -1423,7 +1444,7 @@ public class RunStore {
 		afterSnapshotWrite(snapshot, runId);
 		// 恢复路径同样要出现在 restart 的发现面里：挂起/终态已由 afterSnapshotWrite 直接补过，
 		// 这里只补它没覆盖的状态（RUNNING 的节流拍已被 prime 跳过，避免同一笔写两次 SADD）。
-		if (!repairRunIndexStatus(snapshot)) {
+		if (!isRepairRunIndexStatus(snapshot)) {
 			addRunIndexBestEffort(snapshot, runId);
 		}
 		return true;
@@ -1441,7 +1462,7 @@ public class RunStore {
 	 *         （当前快照是取消态，或本实例已无续跑权；也不改会话索引 / 租约）
 	 */
 	public boolean saveTerminalUnlessCancelled(RunSnapshot snapshot) {
-		return saveStatusUnlessCancelled(snapshot);
+		return isStatusSavedUnlessCancelled(snapshot);
 	}
 
 	/**
@@ -1462,8 +1483,8 @@ public class RunStore {
 	 *         本实例已无续跑权 / fence 已推进到更高 epoch）。调用方必须复核后再决定取消语义
 	 *         还是续跑权语义，不能一律当成"已取消"。
 	 */
-	public boolean saveStatusUnlessCancelled(RunSnapshot snapshot) {
-		return persist(snapshot);
+	public boolean isStatusSavedUnlessCancelled(RunSnapshot snapshot) {
+		return isPersist(snapshot);
 	}
 
 	/**
@@ -1492,19 +1513,19 @@ public class RunStore {
 		return RunIdentityScope.open(owner);
 	}
 
-	private boolean persist(RunSnapshot snapshot) {
+	private boolean isPersist(RunSnapshot snapshot) {
 		try (RunIdentityScope.Scope ignored = openSnapshotWriteScope(snapshot)) {
-			return persistInScope(snapshot);
+			return isPersistInScope(snapshot);
 		}
 	}
 
-	private boolean persistInScope(RunSnapshot snapshot) {
+	private boolean isPersistInScope(RunSnapshot snapshot) {
 		snapshot.setUpdatedAtMs(System.currentTimeMillis());
 		String runId = snapshot.getRunId();
 		// 续租 fencing 收口批：写权限由 authority 判定，不再用 epoch==0 当"可写"。
 		// LOST（确定丢租）/ UNAVAILABLE（设施异常，无法确认）⇒ 只读：这一笔不落库。
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
-		if (authority.readOnly()) {
+		if (authority.isReadOnly()) {
 			warnReadOnly(runId, authority, "run snapshot");
 			return false;
 		}
@@ -1521,36 +1542,16 @@ public class RunStore {
 		}
 		// 取消优先状态守卫的适用面：所有非取消状态（RUNNING / SUSPENDED / DONE / FAILED）。
 		// CANCELLED 自己不受限（幂等重写取消态照常落库）；不变量 = 任何状态写入不得从 CANCELLED 转出。
-		boolean guardedStatus = guardedStatus(snapshot.getStatus());
+		boolean guardedStatus = isGuardedStatus(snapshot.getStatus());
 		String state = stateOf(snapshot);
-		if (epoch > 0L) {
-			boolean written = guardedStatus ? fencedTerminalSet(runId, json, epoch, state)
-					: fencedSet(runId, json, epoch, state);
-			if (!written) {
-				if (guardedStatus) {
-					Long fence = fenceAheadOf(runId, epoch);
-					if (fence != null) {
-						log.warn("STALE_EPOCH refused snapshot write runId={} status={} epoch={} fence={} "
-								+ "(fence advanced to a higher epoch: another instance took over this run)", runId, snapshot.getStatus(),
-								epoch, fence);
-					}
-					else {
-						log.warn("{} refused snapshot write runId={} epoch={} (stale fence or snapshot "
-								+ "already cancelled: not overwriting CANCELLED, no index/lease change)", snapshot.getStatus(), runId, epoch);
-					}
-				}
-				else {
-					log.warn("STALE_EPOCH refused snapshot write runId={} epoch={} (fence "
-							+ "advanced to a higher epoch: another instance took over this run)", runId, epoch);
-				}
-				return false;
-			}
+		if (epoch > 0L && !persistFenced(runId, snapshot, guardedStatus, json, epoch, state)) {
+			return false;
 		}
 		else {
 			warnIfFenceIsAhead(runId);
 			try {
 				if (guardedStatus) {
-					if (!terminalSetIfNotCancelled(runId, json, state)) {
+					if (!isTerminalSetIfNotCancelled(runId, json, state)) {
 						log.warn("{} refused snapshot write runId={} (snapshot already "
 								+ "cancelled: not overwriting CANCELLED, no index/lease change)", snapshot.getStatus(), runId);
 						return false;
@@ -1575,6 +1576,32 @@ public class RunStore {
 		// T3-7（A14）：终态分支改调统一判定函数（不再散点比对字面量）。
 		afterSnapshotWrite(snapshot, runId);
 		return true;
+	}
+
+	private boolean persistFenced(String runId, RunSnapshot snapshot, boolean guardedStatus, String json, long epoch,
+			String state) {
+		boolean written = guardedStatus ? isFencedTerminalSet(runId, json, epoch, state)
+				: isFencedSet(runId, json, epoch, state);
+		if (written) {
+			return true;
+		}
+		if (guardedStatus) {
+			Long fence = fenceAheadOf(runId, epoch);
+			if (fence != null) {
+				log.warn("STALE_EPOCH refused snapshot write runId={} status={} epoch={} fence={} "
+						+ "(fence advanced to a higher epoch: another instance took over this run)", runId, snapshot.getStatus(),
+						epoch, fence);
+			}
+			else {
+				log.warn("{} refused snapshot write runId={} epoch={} (stale fence or snapshot "
+						+ "already cancelled: not overwriting CANCELLED, no index/lease change)", snapshot.getStatus(), runId, epoch);
+			}
+		}
+		else {
+			log.warn("STALE_EPOCH refused snapshot write runId={} epoch={} (fence "
+					+ "advanced to a higher epoch: another instance took over this run)", runId, epoch);
+		}
+		return false;
 	}
 
 	/**
@@ -1603,13 +1630,13 @@ public class RunStore {
 			forgetRunIndexRepair(snapshot.getTenantId(), snapshot.getUserId(), runId);
 		}
 		String sessionId = snapshot.getSessionId();
-		if (sessionId != null && !sessionId.isBlank()) {
+		if (StringUtils.isNotBlank(sessionId)) {
 			// 会话→run 索引是销毁的唯一发现面：这里用同一原子脚本补登记 + 续期，
 			// 覆盖"首轮 SADD 漏写 / createIfAbsent 恢复 / 后续 save"三种自愈入口。
 			registerSessionRunIndexBestEffort(sessionId, snapshot.getTenantId(), snapshot.getUserId(), runId,
 					ttlFor(runId));
 		}
-		if (repairRunIndexStatus(snapshot)) {
+		if (isRepairRunIndexStatus(snapshot)) {
 			// 低频状态写（挂起 / 终态）顺手补恢复发现面：失败只 WARN，下一次低频写或创建节点会再补。
 			addRunIndexBestEffort(snapshot, runId);
 		}
@@ -1691,7 +1718,7 @@ public class RunStore {
 	 * <p>挂起态（{@code SUSPENDED}）与终态都是一轮里至多几次的写；{@code RUNNING} 是每帧/每拍都
 	 * 可能发生的热路径，必须排除，否则等于退回"每次 save 都 SADD"。
 	 */
-	private static boolean repairRunIndexStatus(RunSnapshot snapshot) {
+	private static boolean isRepairRunIndexStatus(RunSnapshot snapshot) {
 		String status = snapshot.getStatus();
 		return RunSnapshot.SUSPENDED.equals(status) || RunSnapshot.isTerminal(status);
 	}
@@ -1800,7 +1827,7 @@ public class RunStore {
 	}
 
 	/** 只有成员仍以本次读取的 score 存在才推迟；identity-due 在同一 Lua 内续期。 */
-	public boolean deferRecoveryCandidate(String runId, long tenantId, long userId, long expectedDueAtMs,
+	public boolean isRecoveryCandidateDeferred(String runId, long tenantId, long userId, long expectedDueAtMs,
 			long nextDueAtMs) {
 		try {
 			String member = RunKeyScope.indexMember(tenantId, userId, runId);
@@ -1815,13 +1842,15 @@ public class RunStore {
 			return identityDeferred != null && identityDeferred > 0L;
 		}
 		catch (Exception ex) {
-			log.debug("recovery candidate defer failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("recovery-candidate-defer")) {
+				log.warn("recovery candidate defer failed runId={}", runId, ex);
+			}
 			return false;
 		}
 	}
 
 	/** score 已变化表示有更新写者，旧读者不得删除或复活该成员。 */
-	public boolean removeRecoveryCandidate(String runId, long tenantId, long userId, long expectedDueAtMs) {
+	public boolean isRecoveryCandidateRemoved(String runId, long tenantId, long userId, long expectedDueAtMs) {
 		try {
 			Long removed = this.redis.execute(RECOVERY_REMOVE_SCRIPT, List.of(RECOVERY_DUE_INDEX),
 					String.valueOf(expectedDueAtMs), RunKeyScope.indexMember(tenantId, userId, runId));
@@ -1833,7 +1862,9 @@ public class RunStore {
 			return true;
 		}
 		catch (Exception ex) {
-			log.debug("stale recovery candidate cleanup failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("stale-recovery-candidate-cleanup")) {
+				log.warn("stale recovery candidate cleanup failed runId={}", runId, ex);
+			}
 			return false;
 		}
 	}
@@ -1846,7 +1877,7 @@ public class RunStore {
 	 * <p>{@code CANCELLED} 自己的写不受守卫限制（幂等重写取消态照常落库）；其它状态在
 	 * "当前快照已是取消态"时一律拒写 —— 这就是"任何状态写入均不得从 CANCELLED 转出"的判据。
 	 */
-	private static boolean guardedStatus(String status) {
+	private static boolean isGuardedStatus(String status) {
 		return !RunSnapshot.CANCELLED.equals(status);
 	}
 
@@ -1902,17 +1933,19 @@ public class RunStore {
 						+ "resume-authority semantics; check lease view if this is a stale write after owner change)", runId, fence);
 			}
 			else {
-				log.debug("lease-less write runId={}: fence still epoch={} (already warned for this run; demoted to debug)", runId, fence);
+				if (log.isDebugEnabled()) log.debug("lease-less write runId={}: fence still epoch={} (already warned for this run; demoted to debug)", runId, fence);
 			}
 		}
 		catch (Exception ex) {
 			// 旁路观测失败不影响写回（E3 的可用性优先）
-			log.debug("fence read failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("fence-read")) {
+				log.warn("fence read failed runId={}", runId, ex);
+			}
 		}
 	}
 
 	/** fence 写：{@code fence ≤ epoch} 才写（并把 fence 推到 epoch）；返回 false = 陈旧写被拒。 */
-	private boolean fencedSet(String runId, String json, long epoch, String state) {
+	private boolean isFencedSet(String runId, String json, long epoch, String state) {
 		Duration ttl = ttlFor(runId);
 		try {
 			Long result = this.redis.execute(FENCED_SET_SCRIPT,
@@ -1931,7 +1964,7 @@ public class RunStore {
 	 *
 	 * @return false = 陈旧 epoch <b>或</b> 当前快照是取消态（两者都不落库、不改索引）
 	 */
-	private boolean fencedTerminalSet(String runId, String json, long epoch, String state) {
+	private boolean isFencedTerminalSet(String runId, String json, long epoch, String state) {
 		Duration ttl = ttlFor(runId);
 		try {
 			Long result = this.redis.execute(FENCED_TERMINAL_SET_SCRIPT,
@@ -1953,7 +1986,7 @@ public class RunStore {
 	 *
 	 * @return false = 当前快照是取消态（不落库、不改索引）
 	 */
-	private boolean terminalSetIfNotCancelled(String runId, String json, String state) {
+	private boolean isTerminalSetIfNotCancelled(String runId, String json, String state) {
 		Duration ttl = ttlFor(runId);
 		Long result = this.redis.execute(TERMINAL_SET_IF_NOT_CANCELLED_SCRIPT,
 				List.of(runKey(runId), runStateKey(runId)), json, String.valueOf(ttl.toMillis()), state);
@@ -2014,7 +2047,7 @@ public class RunStore {
 	 * 不影响任何正确性。
 	 */
 	private void markActiveRun(String sessionId, String runId, long atMs) {
-		if (sessionId == null || sessionId.isBlank() || runId == null) {
+		if (StringUtils.isBlank(sessionId) || runId == null) {
 			return;
 		}
 		String key = sessionActiveKey(sessionId);
@@ -2032,13 +2065,15 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("active run index maintenance failed sessionId={} runId={}", sessionId, runId, ex);
+			if (LogSampling.canAcquire("active-run-index-maintenance")) {
+				log.warn("active run index maintenance failed sessionId={} runId={}", sessionId, runId, ex);
+			}
 		}
 	}
 
 	/** 从活跃索引摘掉一轮（幂等；终态 / 回收都调，失败只降级）。 */
 	private void forgetActiveRun(String sessionId, String runId) {
-		if (sessionId == null || sessionId.isBlank() || runId == null) {
+		if (StringUtils.isBlank(sessionId) || runId == null) {
 			return;
 		}
 		try {
@@ -2048,7 +2083,8 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("active run index cleanup failed sessionId={} runId={}", sessionId, runId, ex);
+			if (LogSampling.canAcquire("active-run-index-cleanup")) {
+				log.warn("active run index cleanup failed sessionId={} runId={}", sessionId, runId, ex);
 		}
 	}
 
@@ -2065,10 +2101,12 @@ public class RunStore {
 			}
 			Set<ZSetOperations.TypedTuple<String>> ordered = active.reverseRangeWithScores(sessionActiveKey(sessionId),
 					0, -1);
-			return ordered == null || ordered.isEmpty() ? null : ordered;
+			return CollectionUtils.isEmpty(ordered) ? null : ordered;
 		}
 		catch (Exception ex) {
-			log.debug("active run index read failed sessionId={} (falling back to legacy semantics)", sessionId, ex);
+			if (LogSampling.canAcquire("active-run-index-read")) {
+				log.warn("active run index read failed sessionId={} (falling back to legacy semantics)", sessionId, ex);
+			}
 			return null;
 		}
 	}
@@ -2091,7 +2129,7 @@ public class RunStore {
 	 * </ol>
 	 */
 	public Set<String> activeRunIds(String sessionId) {
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			return Set.of();
 		}
 		Set<String> candidates = new java.util.LinkedHashSet<>();
@@ -2111,7 +2149,9 @@ public class RunStore {
 				candidates.addAll(sessionRunIds(sessionId));
 			}
 			catch (RuntimeException ex) {
-				log.debug("session->run index read failed sessionId={} (treating active candidates as empty)", sessionId, ex);
+				if (LogSampling.canAcquire("session-run-index-read")) {
+					log.warn("session->run index read failed sessionId={} (treating active candidates as empty)", sessionId, ex);
+				}
 			}
 		}
 		if (candidates.isEmpty()) {
@@ -2145,7 +2185,7 @@ public class RunStore {
 
 	/** 批量摘除活跃索引成员（单键 {@code ZREM}；stale 清理失败只降级，不影响返回的活跃集合）。 */
 	private void forgetActiveRuns(String sessionId, List<String> runIds) {
-		if (sessionId == null || runIds == null || runIds.isEmpty()) {
+		if (sessionId == null || CollectionUtils.isEmpty(runIds)) {
 			return;
 		}
 		try {
@@ -2155,7 +2195,9 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("stale active run member cleanup failed sessionId={} (next tick)", sessionId, ex);
+			if (LogSampling.canAcquire("stale-active-run-cleanup")) {
+				log.warn("stale active run member cleanup failed sessionId={} (next tick)", sessionId, ex);
+			}
 		}
 	}
 
@@ -2179,7 +2221,7 @@ public class RunStore {
 	 * @return {@code null} = 批量面不可用（替身/包装层未建模 pipeline），调用方回退逐条读
 	 */
 	private Map<String, RunLite> readRunLites(List<String> runIds) {
-		if (runIds == null || runIds.isEmpty()) {
+		if (CollectionUtils.isEmpty(runIds)) {
 			return Map.of();
 		}
 		List<String> stateKeys = new ArrayList<>(runIds.size());
@@ -2194,7 +2236,7 @@ public class RunStore {
 		List<Integer> missing = new ArrayList<>();
 		for (int index = 0; index < runIds.size(); index++) {
 			String state = index < states.size() ? asString(states.get(index)) : null;
-			if (state == null || state.isBlank()) {
+			if (StringUtils.isBlank(state)) {
 				missing.add(index);
 			}
 			else {
@@ -2233,7 +2275,7 @@ public class RunStore {
 	private RunLite readRunLite(String runId) {
 		try {
 			String state = this.redis.opsForValue().get(runStateKey(runId));
-			if (state != null && !state.isBlank()) {
+			if (StringUtils.isNotBlank(state)) {
 				return liteOf(state);
 			}
 			String raw = this.redis.opsForValue().get(runKey(runId));
@@ -2268,7 +2310,9 @@ public class RunStore {
 			return raw == null || raw.size() < keys.size() ? null : raw;
 		}
 		catch (RuntimeException ex) {
-			log.debug("batch run status read failed (falling back to per-run reads)", ex);
+			if (LogSampling.canAcquire("batch-run-status-read")) {
+				log.warn("batch run status read failed (falling back to per-run reads)", ex);
+			}
 			return null;
 		}
 	}
@@ -2286,7 +2330,7 @@ public class RunStore {
 			return text;
 		}
 		if (raw instanceof byte[] bytes) {
-			return new String(bytes, StandardCharsets.UTF_8);
+			return org.apache.commons.codec.binary.StringUtils.newStringUtf8(bytes);
 		}
 		return String.valueOf(raw);
 	}
@@ -2316,12 +2360,12 @@ public class RunStore {
 	 * 空集只表示确实没有成员（新会话 / 索引已过期）。
 	 */
 	public Set<String> sessionRunIds(String sessionId) {
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			return Set.of();
 		}
 		try {
 			Set<String> members = this.redis.opsForSet().members(sessionRunsKey(sessionId));
-			return members == null || members.isEmpty() ? Set.of() : Set.copyOf(members);
+			return CollectionUtils.isEmpty(members) ? Set.of() : Set.copyOf(members);
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
@@ -2351,17 +2395,17 @@ public class RunStore {
 					String.valueOf(sessionCurrentTtl().toMillis()));
 		}
 		catch (Exception ex) {
-			log.debug("session->current index renew failed sessionId={} runId={}", sessionId, runId, ex);
+			if (LogSampling.canAcquire("session-current-index-renew")) {
+				log.warn("session->current index renew failed sessionId={} runId={}", sessionId, runId, ex);
+			}
 		}
 	}
 
 	/**
 	 * 续期"会话 → 全部 runId"索引（{@code ai:session:runs:<...>:<sessionId>}）。
 	 *
-	 * <p>为什么需要它：这个索引是会话销毁的<b>唯一发现面</b>，它的 TTL 只由写入路径
-	 * （{@link #create} / {@code afterSnapshotWrite} 的 SADD+PEXPIRE）推进。长时间挂起/等待时
-	 * 只有心跳在续快照与待决条目 —— 若索引先过期，销毁就再也看不见这条挂起轮（清不干净的轮次）。
-	 * 确认门心跳（{@code ConfirmGate}）因此在续 {@code session:current} 的同时调用本方法。
+	 * <p>为什么需要它：这个索引是会话销毁的<b>唯一发现面</b>，它的 TTL 由写入路径和明确用户读侧的
+	 * 兼容续期路径推进。ConfirmGate 后台心跳不调用本方法，避免把进程存活冒充成用户活动。
 	 *
 	 * <p><b>单键 {@code EXPIRE}</b>（键不带 hash tag ⇒ 同槽，Cluster 安全；不引入 {@code CROSSSLOT}）。
 	 * 身份取<b>当前线程上下文</b>；恢复型入口没有请求身份时用四参重载把<b>记录身份</b>显式带进来。
@@ -2383,14 +2427,16 @@ public class RunStore {
 	 * @param userId 记录身份用户
 	 */
 	public void renewSessionRunsIndex(String sessionId, String runId, long tenantId, long userId) {
-		if (sessionId == null || sessionId.isBlank() || this.redis == null) {
+		if (StringUtils.isBlank(sessionId) || this.redis == null) {
 			return;
 		}
 		try {
 			this.redis.expire(sessionRunsKey(sessionId, tenantId, userId), sessionCurrentTtl());
 		}
 		catch (Exception ex) {
-			log.debug("session->run index renew failed sessionId={} runId={}", sessionId, runId, ex);
+			if (LogSampling.canAcquire("session-run-index-renew")) {
+				log.warn("session->run index renew failed sessionId={} runId={}", sessionId, runId, ex);
+			}
 		}
 	}
 
@@ -2424,44 +2470,18 @@ public class RunStore {
 			if (ordered != null) {
 				RunSnapshot fallback = newestActive(sessionId, ordered, runId);
 				if (fallback == null) {
-					deleteSessionCurrentIfOwned(key, runId);
+					isDeleteSessionCurrentIfOwned(key, runId);
 				}
 				else {
-					setSessionCurrentIfOwned(key, runId, fallback.getRunId());
+					isSetSessionCurrentIfOwned(key, runId, fallback.getRunId());
 				}
 				return;
 			}
-			// ===== 老会话一次性回退：SMEMBERS + 逐个快照（与升级前逐字同形）=====
-			Set<String> index;
-			try {
-				index = sessionRunIds(sessionId);
-			}
-			catch (RuntimeException ex) {
-				log.warn("post-terminal session->current recheck failed sessionId={} runId={} (keeping index; not guessing active run)",
-						sessionId, runId, ex);
-				return;
-			}
-			RunSnapshot fallback = null;
-			for (String candidateId : index) {
-				if (runId.equals(candidateId)) {
-					continue;
-				}
-				RunSnapshot candidate = get(candidateId);
-				if (candidate == null || (!RunSnapshot.SUSPENDED.equals(candidate.getStatus())
-						&& !RunSnapshot.RUNNING.equals(candidate.getStatus()))) {
-					continue;
-				}
-				if (fallback == null || candidate.getUpdatedAtMs() > fallback.getUpdatedAtMs()
-						|| (candidate.getUpdatedAtMs() == fallback.getUpdatedAtMs()
-								&& RunSnapshot.SUSPENDED.equals(candidate.getStatus())
-								&& !RunSnapshot.SUSPENDED.equals(fallback.getStatus()))) {
-					fallback = candidate;
-				}
-			}
+			RunSnapshot fallback = fallbackActiveRun(sessionId, runId);
 			if (fallback == null) {
-				deleteSessionCurrentIfOwned(key, runId);
+				isDeleteSessionCurrentIfOwned(key, runId);
 			}
-			else if (setSessionCurrentIfOwned(key, runId, fallback.getRunId())) {
+			else if (isSetSessionCurrentIfOwned(key, runId, fallback.getRunId())) {
 				// 回填：下一次终态就能走单次确认的快路径（不再 SMEMBERS + N 份快照）。
 				// <b>只在回填真的写成功后才做</b>（MI1）：CAS 失败说明 current 已归新轮，
 				// 这时再把 fallback 塞进活跃索引就等于替一条已经不是 current 的轮记活跃。
@@ -2469,8 +2489,41 @@ public class RunStore {
 			}
 		}
 		catch (Exception ex) {
-			log.debug("session->current index clear failed sessionId={} runId={}", sessionId, runId, ex);
+			if (LogSampling.canAcquire("session-current-index-clear")) {
+				log.warn("session->current index clear failed sessionId={} runId={}", sessionId, runId, ex);
+			}
 		}
+	}
+
+	private RunSnapshot fallbackActiveRun(String sessionId, String runId) {
+		// ===== 老会话一次性回退：SMEMBERS + 逐个快照（与升级前逐字同形）=====
+		Set<String> index;
+		try {
+			index = sessionRunIds(sessionId);
+		}
+		catch (RuntimeException ex) {
+			log.warn("post-terminal session->current recheck failed sessionId={} runId={} (keeping index; not guessing active run)",
+					sessionId, runId, ex);
+			return null;
+		}
+		RunSnapshot fallback = null;
+		for (String candidateId : index) {
+			if (runId.equals(candidateId)) {
+				continue;
+			}
+			RunSnapshot candidate = get(candidateId);
+			if (candidate == null || (!RunSnapshot.SUSPENDED.equals(candidate.getStatus())
+					&& !RunSnapshot.RUNNING.equals(candidate.getStatus()))) {
+				continue;
+			}
+			if (fallback == null || candidate.getUpdatedAtMs() > fallback.getUpdatedAtMs()
+					|| (candidate.getUpdatedAtMs() == fallback.getUpdatedAtMs()
+							&& RunSnapshot.SUSPENDED.equals(candidate.getStatus())
+							&& !RunSnapshot.SUSPENDED.equals(fallback.getStatus()))) {
+				fallback = candidate;
+			}
+		}
+		return fallback;
 	}
 
 	/**
@@ -2478,7 +2531,7 @@ public class RunStore {
 	 *
 	 * @return true = 本次确实删掉了；false = current 已换成他轮（不动作）
 	 */
-	private boolean deleteSessionCurrentIfOwned(String key, String expectedRunId) {
+	private boolean isDeleteSessionCurrentIfOwned(String key, String expectedRunId) {
 		Long deleted = this.redis.execute(SESSION_CURRENT_CAS_DELETE_SCRIPT, List.of(key), expectedRunId);
 		return deleted != null && deleted > 0L;
 	}
@@ -2489,7 +2542,7 @@ public class RunStore {
 	 *
 	 * @return true = 本次确实写入；false = current 已换成他轮（不动作）
 	 */
-	private boolean setSessionCurrentIfOwned(String key, String expectedRunId, String fallbackRunId) {
+	private boolean isSetSessionCurrentIfOwned(String key, String expectedRunId, String fallbackRunId) {
 		Long written = this.redis.execute(SESSION_CURRENT_CAS_SET_SCRIPT, List.of(key), expectedRunId, fallbackRunId,
 				String.valueOf(sessionCurrentTtl().toMillis()));
 		return written != null && written > 0L;
@@ -2511,7 +2564,7 @@ public class RunStore {
 			if (candidateId == null) {
 				continue;
 			}
-			double score = entry.getScore() == null ? 0d : entry.getScore();
+			double score = ObjectUtils.defaultIfNull(entry.getScore(), 0d);
 			if (tieScore == null || score != tieScore) {
 				RunSnapshot picked = pickActive(sessionId, tied, excludeRunId);
 				if (picked != null) {
@@ -2559,7 +2612,9 @@ public class RunStore {
 			return this.redis.opsForValue().get(sessionCurrentKey(sessionId));
 		}
 		catch (Exception ex) {
-			log.debug("session->current index read failed sessionId={}", sessionId, ex);
+			if (LogSampling.canAcquire("session-current-index-read")) {
+				log.warn("session->current index read failed sessionId={}", sessionId, ex);
+			}
 			return null;
 		}
 	}
@@ -2571,12 +2626,12 @@ public class RunStore {
 	 * （10m），但锁 TTL 只约束"一轮的互斥窗口"，不是"进程死后索引该活多久"。进程在挂起期崩溃后，
 	 * 心跳随进程一起停摆；索引若只活 10m，就会比同轮的快照/归档（24h）先消失，
 	 * 重启后的 {@code GET /api/ai/runs/current} 于是报"无当前轮"——正是"索引孤儿"。
-	 * 现在取值与会话同寿，<b>续期逻辑不变</b>：确认门挂起等待循环每拍调用
-	 * {@link #renewSessionCurrent(String, String)} 续期，轮落到终态由
+	 * 现在取值与会话同寿：仅明确用户读侧的兼容续期路径调用
+	 * {@link #renewSessionCurrent(String, String)}，ConfirmGate 后台心跳不调用；轮落到终态由
 	 * {@link #clearSessionCurrent(String, String)} 主动删除。
 	 */
 	private Duration sessionCurrentTtl() {
-		return this.properties.getSessionTtl();
+		return this.properties.getEffectiveSessionTtl();
 	}
 
 	/**
@@ -2680,7 +2735,7 @@ public class RunStore {
 	 *         （<b>null 是"不可知/不存在"，调用方不得当成"未取消"或"非终态"的证明</b>）
 	 */
 	public String runStatus(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return null;
 		}
 		if (this.redis == null) {
@@ -2695,14 +2750,16 @@ public class RunStore {
 		}
 		try {
 			String state = this.redis.opsForValue().get(runStateKey(runId));
-			if (state != null && !state.isBlank()) {
+			if (StringUtils.isNotBlank(state)) {
 				return state;
 			}
 			String raw = this.redis.opsForValue().get(runKey(runId));
 			return raw == null ? null : topLevelStatus(raw);
 		}
 		catch (RuntimeException ex) {
-			log.debug("run lite state read failed runId={} (treating as unknown)", runId, ex);
+			if (LogSampling.canAcquire("run-lite-state-read")) {
+				log.warn("run lite state read failed runId={} (treating as unknown)", runId, ex);
+			}
 			return null;
 		}
 	}
@@ -2721,8 +2778,8 @@ public class RunStore {
 	 *
 	 * @param identity 本轮记录身份（不可用 = 无法定位这一轮的键，保守视为仍活跃）
 	 */
-	public boolean snapshotNotTerminal(String runId, TenantUser identity) {
-		if (runId == null || runId.isBlank()) {
+	public boolean isSnapshotNotTerminal(String runId, TenantUser identity) {
+		if (StringUtils.isBlank(runId)) {
 			return false;
 		}
 		if (identity == null) {
@@ -2742,7 +2799,7 @@ public class RunStore {
 		try {
 			String stateKey = runScopedKey(RUN_STATE_PREFIX, identity.tenantId(), identity.userId(), runId);
 			String state = this.redis.opsForValue().get(stateKey);
-			if (state != null && !state.isBlank()) {
+			if (StringUtils.isNotBlank(state)) {
 				return !RunSnapshot.isTerminal(state);
 			}
 			String snapshotKey = runScopedKey(RUN_PREFIX, identity.tenantId(), identity.userId(), runId);
@@ -2759,9 +2816,17 @@ public class RunStore {
 		}
 	}
 
-	/** 当前线程身份下的 {@link #snapshotNotTerminal(String, TenantUser)}。 */
+	/** 当前线程身份下的 {@link #isSnapshotNotTerminal(String, TenantUser)}。 */
+	public boolean isSnapshotNotTerminal(String runId) {
+		return isSnapshotNotTerminal(runId, RequestContextUtils.currentOrNull());
+	}
+
+	public boolean snapshotNotTerminal(String runId, TenantUser identity) {
+		return isSnapshotNotTerminal(runId, identity);
+	}
+
 	public boolean snapshotNotTerminal(String runId) {
-		return snapshotNotTerminal(runId, RequestContextUtils.currentOrNull());
+		return isSnapshotNotTerminal(runId);
 	}
 
 	/**
@@ -2822,7 +2887,7 @@ public class RunStore {
 	 * 由调用方折算成"中止枚举/可重试错误"。
 	 */
 	public SnapshotOwner snapshotOwner(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return SnapshotOwner.missing();
 		}
 		String raw;
@@ -2995,7 +3060,9 @@ public class RunStore {
 				snapshot = get(runId);
 			}
 			catch (RuntimeException ex) {
-				log.debug("pre-delete snapshot read failed runId={} (session index members left to TTL/reconcile)", runId, ex);
+				if (LogSampling.canAcquire("pre-delete-snapshot-read")) {
+					log.warn("pre-delete snapshot read failed runId={} (session index members left to TTL/reconcile)", runId, ex);
+				}
 			}
 		}
 		if (snapshot == null && identity != null) {
@@ -3003,7 +3070,9 @@ public class RunStore {
 				snapshot = get(runId, identity.tenantId(), identity.userId());
 			}
 			catch (RuntimeException ex) {
-				log.debug("pre-delete snapshot read by recorded identity failed runId={} (treating as absent)", runId, ex);
+				if (LogSampling.canAcquire("pre-delete-identity-snapshot-read")) {
+					log.warn("pre-delete snapshot read by recorded identity failed runId={} (treating as absent)", runId, ex);
+				}
 			}
 		}
 		return snapshot;
@@ -3036,12 +3105,12 @@ public class RunStore {
 		// 同 runId 的其它租户/用户成员原样保留。
 		// 13 键已经删成功时，索引清理失败<b>不得</b>把整次删除报成失败（会误报"13 键删除失败"并
 		// 把已删净的轮次重新 deferred）。stale 成员由 prune / 恢复面按快照缺失跳过，best-effort 即可。
-		if (!cleanupRunIndexesPipelined(runId, snapshot, identity)) {
+		if (!isCleanupRunIndexesPipelined(runId, snapshot, identity)) {
 			cleanupRunIndexesSeparately(runId, snapshot, identity);
 		}
 	}
 
-	private boolean cleanupRunIndexesPipelined(String runId, RunSnapshot snapshot, TenantUser identity) {
+	private boolean isCleanupRunIndexesPipelined(String runId, RunSnapshot snapshot, TenantUser identity) {
 		List<IndexRemoval> zsetRemovals = new ArrayList<>(4);
 		if (identity != null) {
 			zsetRemovals.add(new IndexRemoval(RECOVERY_DUE_INDEX, RunKeyScope.indexMember(identity, runId)));
@@ -3050,7 +3119,7 @@ public class RunStore {
 		}
 		String sessionId = snapshot == null ? null : snapshot.getSessionId();
 		String sessionRunsKey = null;
-		if (sessionId != null && !sessionId.isBlank()) {
+		if (StringUtils.isNotBlank(sessionId)) {
 			zsetRemovals.add(new IndexRemoval(sessionActiveKey(sessionId), runId));
 			long tenantId = identity == null ? snapshot.getTenantId() : identity.tenantId();
 			long userId = identity == null ? snapshot.getUserId() : identity.userId();
@@ -3075,7 +3144,9 @@ public class RunStore {
 			return results != null && results.size() >= operationCount;
 		}
 		catch (RuntimeException ex) {
-			log.debug("pipelined run index cleanup failed runId={} (using separate cleanup)", runId, ex);
+			if (LogSampling.canAcquire("pipelined-run-index-cleanup")) {
+				log.warn("pipelined run index cleanup failed runId={} (using separate cleanup)", runId, ex);
+			}
 			return false;
 		}
 	}
@@ -3092,7 +3163,7 @@ public class RunStore {
 						runId, ex);
 			}
 		}
-		if (snapshot != null && snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
+		if (snapshot != null && StringUtils.isNotBlank(snapshot.getSessionId())) {
 			forgetActiveRun(snapshot.getSessionId(), runId);
 			long tenantId = identity == null ? snapshot.getTenantId() : identity.tenantId();
 			long userId = identity == null ? snapshot.getUserId() : identity.userId();
@@ -3144,10 +3215,12 @@ public class RunStore {
 			return;
 		}
 		try {
-			this.leaseService.releaseIfHeld(runLeaseKey(runId));
+			this.leaseService.isReleasedIfHeld(runLeaseKey(runId));
 		}
 		catch (Exception ex) {
-			log.debug("resume lease release failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("resume-lease-release")) {
+				log.warn("resume lease release failed runId={}", runId, ex);
+			}
 		}
 	}
 
@@ -3172,7 +3245,7 @@ public class RunStore {
 		}
 		LeaseService.LeaseAuthority authority = facility.authority(runLeaseKey(runId));
 		// 替身/测试子类可能给出 null（"没意见"）：按"无租约语义"放行，不让判定本身 NPE。
-		return authority == null ? LeaseService.LeaseAuthority.NEVER_HELD : authority;
+		return ObjectUtils.defaultIfNull(authority, LeaseService.LeaseAuthority.NEVER_HELD);
 	}
 
 	/** 只读拒绝的节流 WARN（每个 runId 第一条点名动作，其后 debug）。 */
@@ -3189,7 +3262,7 @@ public class RunStore {
 					runId, detail);
 		}
 		else {
-			log.debug("resume authority read-only: refusing {} runId={} ({}; already warned for this run)", action, runId, detail);
+			if (log.isDebugEnabled()) log.debug("resume authority read-only: refusing {} runId={} ({}; already warned for this run)", action, runId, detail);
 		}
 	}
 
@@ -3212,9 +3285,9 @@ public class RunStore {
 	 * 的"答案面"写口（快照终态 / 记忆整窗）复用（RT-20）—— 帧、台账、序号、快照、记忆因此共享
 	 * 同一套判据，不会出现"快照拒写、但答案已经写回"的半只读状态。
 	 */
-	public boolean permittedToWrite(String runId, String action) {
+	public boolean isWritePermitted(String runId, String action) {
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
-		if (authority.readOnly()) {
+		if (authority.isReadOnly()) {
 			warnReadOnly(runId, authority, action);
 			return false;
 		}
@@ -3237,6 +3310,10 @@ public class RunStore {
 		return true;
 	}
 
+	public boolean permittedToWrite(String runId, String action) {
+		return isWritePermitted(runId, action);
+	}
+
 	/** fence 已越过本进程 epoch 的拒写留痕（每个 runId 一条 WARN，其后 debug）。 */
 	private void warnFenceStale(String runId, String action, long epoch, long fence) {
 		if (this.fenceStaleWarned.size() > FENCE_AHEAD_WARNED_CAP) {
@@ -3247,7 +3324,7 @@ public class RunStore {
 					+ "another instance took over; read-only recovery, no frames/ledger/seq)", action, runId, fence, epoch);
 		}
 		else {
-			log.debug("resume authority stale: refusing {} runId={} (fence={} > epoch={}; already warned for this run)", action, runId,
+			if (log.isDebugEnabled()) log.debug("resume authority stale: refusing {} runId={} (fence={} > epoch={}; already warned for this run)", action, runId,
 					fence, epoch);
 		}
 	}
@@ -3257,11 +3334,8 @@ public class RunStore {
 		if (this.fenceStaleWarned.size() > FENCE_AHEAD_WARNED_CAP) {
 			this.fenceStaleWarned.clear();
 		}
-		if (this.fenceStaleWarned.add(runId)) {
+		if (LogSampling.canAcquire("resume-authority-unconfirmed")) {
 			log.warn("resume authority unconfirmed: refusing {} runId={} (fence read failed; treating as unconfirmed)", action, runId, ex);
-		}
-		else {
-			log.debug("resume authority unconfirmed: refusing {} runId={} (already warned)", action, runId, ex);
 		}
 	}
 
@@ -3288,7 +3362,7 @@ public class RunStore {
 			return List.of();
 		}
 		Set<String> ids = this.redis.opsForZSet().range(runListIndexKey(current.tenantId(), current.userId()), 0, -1);
-		if (ids == null || ids.isEmpty()) {
+		if (CollectionUtils.isEmpty(ids)) {
 			return List.of();
 		}
 		List<String> out = new ArrayList<>(ids);
@@ -3314,7 +3388,7 @@ public class RunStore {
 		String key = current == null ? RECOVERY_DUE_INDEX : identityRecoveryDueKey(current.tenantId(), current.userId());
 		Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeByScoreWithScores(key,
 				Double.NEGATIVE_INFINITY, nowMs, 0, limit);
-		if (members == null || members.isEmpty()) {
+		if (CollectionUtils.isEmpty(members)) {
 			return List.of();
 		}
 		List<RecoveryCandidate> out = new ArrayList<>(members.size());
@@ -3348,7 +3422,7 @@ public class RunStore {
 		while (out.size() < pageLimit) {
 			Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeByScoreWithScores(key,
 					afterDueAtMs, afterDueAtMs, offset, 256);
-			if (members == null || members.isEmpty()) {
+			if (CollectionUtils.isEmpty(members)) {
 				break;
 			}
 			offset += members.size();
@@ -3381,7 +3455,7 @@ public class RunStore {
 
 	private List<RecoveryCandidate> recoveryCandidates(Set<ZSetOperations.TypedTuple<String>> members,
 			TenantUser current, int limit) {
-		if (members == null || members.isEmpty() || limit <= 0) {
+		if (CollectionUtils.isEmpty(members) || limit <= 0) {
 			return List.of();
 		}
 		List<RecoveryCandidate> out = new ArrayList<>(Math.min(members.size(), limit));
@@ -3407,7 +3481,7 @@ public class RunStore {
 		}
 		try {
 			Long cardinality = this.redis.opsForZSet().zCard(RECOVERY_DUE_INDEX);
-			long total = cardinality == null ? 0L : cardinality;
+			long total = ObjectUtils.defaultIfNull(cardinality, 0L);
 			if (total == 0L) {
 				this.recoveryReconcileOffset.set(0L);
 				return 0;
@@ -3418,46 +3492,50 @@ public class RunStore {
 			}
 			Set<ZSetOperations.TypedTuple<String>> members = this.redis.opsForZSet().rangeWithScores(
 					RECOVERY_DUE_INDEX, offset, Math.min(total - 1L, offset + RECOVERY_RECONCILE_BATCH - 1L));
-			if (members == null || members.isEmpty()) {
+			if (CollectionUtils.isEmpty(members)) {
 				this.recoveryReconcileOffset.set(0L);
 				return 0;
 			}
 			long nextOffset = offset + members.size();
 			this.recoveryReconcileOffset.set(nextOffset >= total ? 0L : nextOffset);
-			int removed = 0;
-			for (ZSetOperations.TypedTuple<String> tuple : members) {
-				String member = tuple.getValue();
-				Double score = tuple.getScore();
-				if (member == null || score == null) {
-					continue;
-				}
-				long expectedScore = score.longValue();
-				RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
-				if (ref == null) {
-					Long result = this.redis.execute(RECOVERY_REMOVE_SCRIPT, List.of(RECOVERY_DUE_INDEX),
-							String.valueOf(expectedScore), member);
-					if (result != null && result > 0L) {
-						removed++;
-					}
-					continue;
-				}
-				RunSnapshot snapshot = get(ref.runId(), ref.tenantId(), ref.userId());
-				if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
-					if (removeRecoveryCandidate(ref.runId(), ref.tenantId(), ref.userId(), expectedScore)) {
-						if (snapshot == null) {
-							this.redis.opsForZSet().remove(runListIndexKey(ref.tenantId(), ref.userId()), ref.runId());
-						}
-						removed++;
-					}
-				}
-			}
-			return removed;
+			return pruneRecoveryMembers(members);
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
 			log.warn("recovery due index bounded reconcile failed (retry next tick)", ex);
 			return 0;
 		}
+	}
+
+	private int pruneRecoveryMembers(Set<ZSetOperations.TypedTuple<String>> members) {
+		int removed = 0;
+		for (ZSetOperations.TypedTuple<String> tuple : members) {
+			String member = tuple.getValue();
+			Double score = tuple.getScore();
+			if (member == null || score == null) {
+				continue;
+			}
+			long expectedScore = score.longValue();
+			RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
+			if (ref == null) {
+				Long result = this.redis.execute(RECOVERY_REMOVE_SCRIPT, List.of(RECOVERY_DUE_INDEX),
+						String.valueOf(expectedScore), member);
+				if (result != null && result > 0L) {
+					removed++;
+				}
+				continue;
+			}
+			RunSnapshot snapshot = get(ref.runId(), ref.tenantId(), ref.userId());
+			if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+				if (isRecoveryCandidateRemoved(ref.runId(), ref.tenantId(), ref.userId(), expectedScore)) {
+					if (snapshot == null) {
+						this.redis.opsForZSet().remove(runListIndexKey(ref.tenantId(), ref.userId()), ref.runId());
+					}
+					removed++;
+				}
+			}
+		}
+		return removed;
 	}
 
 	/** 对账只由恢复扫描触发；创建路径不执行任何全量或逐成员清理。 */
@@ -3500,7 +3578,7 @@ public class RunStore {
 	 */
 	public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
 			List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
-		if (!permittedToWrite(runId, "suspended snapshot")) {
+		if (!isWritePermitted(runId, "suspended snapshot")) {
 			throw new AiStateUnavailableException("Cannot confirm resume authority; refusing to write parked state " + runId);
 		}
 		for (PendingToolCall pending : pendings) {
@@ -3543,7 +3621,7 @@ public class RunStore {
 					List.of(pendingKey(runId), claimKey(runId), fenceKey(runId)), pending.getToolCallId(),
 					expectedClaim, this.mapper.writeValueAsString(pending), String.valueOf(ttlFor(runId).toMillis()),
 					String.valueOf(claimedEpoch));
-			if (result == null || result.size() < 2 || ((Number) result.get(0)).longValue() != 1L) {
+			if (result == null || result.size() < 2 || ((Number) result.getFirst()).longValue() != 1L) {
 				String outcome = result == null || result.size() < 2 ? "UNKNOWN" : String.valueOf(result.get(1));
 				throw new AiStateUnavailableException("Execution write-back condition mismatch " + pending.getToolCallId() + ": " + outcome);
 			}
@@ -3575,7 +3653,7 @@ public class RunStore {
 	private List<PendingToolCall> readPendings(String runId, boolean lenient) {
 		List<Map<Object, Object>> batch = readPendingHashes(runId);
 		if (batch != null) {
-			return decodePendings(batch.get(0), batch.get(1), batch.get(2));
+			return decodePendings(batch.getFirst(), batch.get(1), batch.get(2));
 		}
 		return readPendingsSeparately(runId, lenient);
 	}
@@ -3624,7 +3702,9 @@ public class RunStore {
 			return out;
 		}
 		catch (RuntimeException ex) {
-			log.debug("pipelined pending/marker read failed runId={} (using separate reads)", runId, ex);
+			if (LogSampling.canAcquire("pipelined-pending-marker-read")) {
+				log.warn("pipelined pending/marker read failed runId={} (using separate reads)", runId, ex);
+			}
 			return null;
 		}
 	}
@@ -3736,8 +3816,10 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.debug("decision guard read failed runId={} toolCallId={} (lenient reader continues with unmerged guard)",
-					runId, toolCallId, ex);
+			if (LogSampling.canAcquire("decision-guard-read-lenient")) {
+				log.warn("decision guard read failed runId={} toolCallId={} (lenient reader continues with unmerged guard)",
+						runId, toolCallId, ex);
+			}
 			return null;
 		}
 	}
@@ -3746,7 +3828,7 @@ public class RunStore {
 	private Map<Object, Object> decisionMarkers(String runId) {
 		try {
 			Map<Object, Object> markers = this.redis.opsForHash().entries(decidedKey(runId));
-			return markers == null ? Map.of() : markers;
+			return ObjectUtils.defaultIfNull(markers, Map.of());
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
@@ -3759,11 +3841,13 @@ public class RunStore {
 	private Map<Object, Object> decisionMarkersLenient(String runId) {
 		try {
 			Map<Object, Object> markers = this.redis.opsForHash().entries(decidedKey(runId));
-			return markers == null ? Map.of() : markers;
+			return ObjectUtils.defaultIfNull(markers, Map.of());
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
-			log.debug("decision guard read failed runId={} (lenient reader continues with unmerged guard)", runId, ex);
+			if (LogSampling.canAcquire("decision-guard-batch-read-lenient")) {
+				log.warn("decision guard read failed runId={} (lenient reader continues with unmerged guard)", runId, ex);
+			}
 			return Map.of();
 		}
 	}
@@ -3790,7 +3874,7 @@ public class RunStore {
 		String raw = String.valueOf(guardValue);
 		int sep = raw.indexOf('|');
 		String status = sep < 0 ? raw : raw.substring(0, sep);
-		if (!mergeableDecisionStatus(status)) {
+		if (!isDecisionStatusMergeable(status)) {
 			return;
 		}
 		pending.setStatus(status);
@@ -3829,9 +3913,13 @@ public class RunStore {
 	}
 
 	/** 读侧可据 guard 完整重建的结论集合（I1；见 {@link #applyDecisionMarker}）。 */
-	public static boolean mergeableDecisionStatus(String status) {
+	public static boolean isDecisionStatusMergeable(String status) {
 		return PendingToolCall.REJECTED.equals(status) || PendingToolCall.FRONTEND_CANCELLED.equals(status)
 				|| PendingToolCall.CANCELLED.equals(status);
+	}
+
+	public static boolean mergeableDecisionStatus(String status) {
+		return isDecisionStatusMergeable(status);
 	}
 
 	/** 单个条目的 req 位（{@code ai:req:} 的 field；null = 未发射/旧数据）。 */
@@ -3841,7 +3929,9 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 位读不出来不影响条目本身（宁可按"未发射"处理：少一张卡，不让用户点到未生效的卡）
-			log.debug("request frame marker read failed runId={} toolCallId={}", runId, toolCallId, ex);
+			if (LogSampling.canAcquire("request-frame-marker-read")) {
+				log.warn("request frame marker read failed runId={} toolCallId={}", runId, toolCallId, ex);
+			}
 			return null;
 		}
 	}
@@ -3850,10 +3940,12 @@ public class RunStore {
 	private Map<Object, Object> requestMarkers(String runId) {
 		try {
 			Map<Object, Object> markers = this.redis.opsForHash().entries(reqKey(runId));
-			return markers == null ? Map.of() : markers;
+			return ObjectUtils.defaultIfNull(markers, Map.of());
 		}
 		catch (Exception ex) {
-			log.debug("request frame marker read failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("request-frame-markers-read")) {
+				log.warn("request frame marker read failed runId={}", runId, ex);
+			}
 			return Map.of();
 		}
 	}
@@ -3928,7 +4020,7 @@ public class RunStore {
 		}
 		try {
 			PendingToolCall fresh = pending(runId, toolCallId);
-			return fresh == null ? pending : fresh;
+			return ObjectUtils.defaultIfNull(fresh, pending);
 		}
 		catch (AiStateUnavailableException ex) {
 			log.warn("post-set request frame recheck failed runId={} toolCallId={} "
@@ -3962,10 +4054,14 @@ public class RunStore {
 	 * （<b>不得</b>执行）。批③a 起两者可用 {@link #tryClaimExecution} 区分（{@code LOST} /
 	 * {@code STALE_FENCE}）
 	 */
-	public boolean claimExecution(String runId, String toolCallId, String executedBy) {
+	public boolean isExecutionClaimed(String runId, String toolCallId, String executedBy) {
 		// 批③a：布尔口保留（既有调用与用例零改动），三态由 tryClaimExecution 给出；
 		// LOST 与 STALE_FENCE 在布尔面上都是 false（"不得执行"这一点相同）。
 		return tryClaimExecution(runId, toolCallId, executedBy).won();
+	}
+
+	public boolean claimExecution(String runId, String toolCallId, String executedBy) {
+		return isExecutionClaimed(runId, toolCallId, executedBy);
 	}
 
 	/**
@@ -3974,7 +4070,7 @@ public class RunStore {
 	 */
 	public ClaimResult tryClaimExecution(String runId, String toolCallId, String executedBy) {
 		LeaseService.LeaseAuthority authority = runLeaseAuthority(runId);
-		if (authority.readOnly()) {
+		if (authority.isReadOnly()) {
 			warnReadOnly(runId, authority, "new tool claim");
 			return new ClaimResult(ClaimOutcome.STALE_FENCE, heldRunEpoch(runId), 0L);
 		}
@@ -3996,7 +4092,7 @@ public class RunStore {
 					epoch, fence);
 			return new ClaimResult(ClaimOutcome.STALE_FENCE, epoch, fence);
 		}
-		boolean won = ((Number) result.get(0)).longValue() == 1L && "WON".equals(outcome);
+		boolean won = ((Number) result.getFirst()).longValue() == 1L && "WON".equals(outcome);
 		return new ClaimResult(won ? ClaimOutcome.WON : ClaimOutcome.LOST, epoch, fence);
 	}
 
@@ -4026,7 +4122,7 @@ public class RunStore {
 	public long fenceEpoch(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(fenceKey(runId));
-			return raw == null ? 0L : Long.parseLong(raw);
+			return Long.parseLong(ObjectUtils.defaultIfNull(raw, "0"));
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A1_FENCE_READ, ex);
@@ -4085,7 +4181,7 @@ public class RunStore {
 		// 续租 fencing 收口批：台账是"已执行"的跨进程判据 —— 丢租后不得追加（B 的台账才是真值），
 		// 否则 A 的迟到执行会让续跑回放出一个新主人没有执行过的结果。
 		// RT-21：持租但 fence 已被推进（HELD-but-fence-ahead）同样是"没有续跑权"，一并拒写。
-		if (!permittedToWrite(runId, "tool execution ledger append")) {
+		if (!isWritePermitted(runId, "tool execution ledger append")) {
 			return;
 		}
 		LedgerWrite write = ledgerWrite(runId, pending, resultText);
@@ -4106,9 +4202,9 @@ public class RunStore {
 	 * 成功结果的原子落账：取消条件、pending 完成态、台账与幂等索引在同一条 Lua 中推进。
 	 * 返回 false 仅表示只读工具在落账前已见取消；其它条件冲突按状态不可知抛出。
 	 */
-	public boolean completeExecutionWithLedger(String runId, PendingToolCall pending, String resultText,
+	public boolean isExecutionCompletedWithLedger(String runId, PendingToolCall pending, String resultText,
 			long claimedEpoch, String claimedBy, boolean respectCancel) {
-		if (!permittedToWrite(runId, "tool execution completion with ledger")) {
+		if (!isWritePermitted(runId, "tool execution completion with ledger")) {
 			throw new AiStateUnavailableException("Cannot confirm resume authority; refusing to settle execution result " + pending.getToolCallId());
 		}
 		LedgerWrite write = ledgerWrite(runId, pending, resultText);
@@ -4124,7 +4220,7 @@ public class RunStore {
 			if (result != null && result.size() >= 2 && "CANCELLED".equals(String.valueOf(result.get(1)))) {
 				return false;
 			}
-			if (result == null || result.size() < 2 || ((Number) result.get(0)).longValue() != 1L) {
+			if (result == null || result.size() < 2 || ((Number) result.getFirst()).longValue() != 1L) {
 				String outcome = result == null || result.size() < 2 ? "UNKNOWN" : String.valueOf(result.get(1));
 				throw new AiStateUnavailableException("Atomic execution settlement condition mismatch " + pending.getToolCallId() + ": " + outcome);
 			}
@@ -4138,6 +4234,11 @@ public class RunStore {
 		}
 	}
 
+	public boolean completeExecutionWithLedger(String runId, PendingToolCall pending, String resultText,
+			long claimedEpoch, String claimedBy, boolean respectCancel) {
+		return isExecutionCompletedWithLedger(runId, pending, resultText, claimedEpoch, claimedBy, respectCancel);
+	}
+
 	private record LedgerWrite(String json, String idemField, String indexTail, String metaJson) {
 	}
 
@@ -4145,11 +4246,11 @@ public class RunStore {
 		long atMs = System.currentTimeMillis();
 		String toolCallId = pending.getToolCallId();
 		String idemField = idemField(runId, toolCallId);
-		String executedBy = pending.getExecutedBy() == null ? this.instanceId : pending.getExecutedBy();
+		String executedBy = ObjectUtils.defaultIfNull(pending.getExecutedBy(), this.instanceId);
 		String outcome = pending.effectiveOutcome().wire();
 		String code = pending.effectiveCode();
 		Map<String, Object> record = new LinkedHashMap<>();
-		record.put("atMs", atMs);
+		record.put("atMs", Long.toString(atMs));
 		record.put("at", Instant.now().toString());
 		record.put("executedBy", executedBy);
 		record.put("toolCallId", toolCallId);
@@ -4159,20 +4260,20 @@ public class RunStore {
 		record.put("code", code);
 		record.put("preflightHash", pending.getPreflight() == null ? null
 				: pending.getPreflight().get("reportHash"));
-		record.put("epoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : heldRunEpoch(runId));
+		record.put("epoch", Long.toString(pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : heldRunEpoch(runId)));
 		record.put("idemKey", idemField);
 		record.put("resultText", resultText);
 		if (pending.getCreatedTaskId() != null) {
-			record.put(PendingToolCall.CREATED_TASK_ID, pending.getCreatedTaskId());
+			record.put(PendingToolCall.CREATED_TASK_ID, String.valueOf(pending.getCreatedTaskId()));
 		}
 		try {
 			String json = this.mapper.writeValueAsString(record);
 			Map<String, Object> meta = new LinkedHashMap<>();
 			meta.put("name", pending.getName());
-			meta.put("atMs", atMs);
+			meta.put("atMs", Long.toString(atMs));
 			meta.put("toolCallId", toolCallId);
 			String metaJson = this.mapper.writeValueAsString(meta);
-			String indexTail = outcome + "|" + (code == null ? "" : code) + "|" + executedBy + "|" + atMs;
+			String indexTail = outcome + "|" + StringUtils.defaultString(code) + "|" + executedBy + "|" + atMs;
 			return new LedgerWrite(json, idemField, indexTail, metaJson);
 		}
 		catch (Exception ex) {
@@ -4201,14 +4302,14 @@ public class RunStore {
 	/** 该 toolCallId 是否已经真实执行完成（跨进程口径，判据 = 台账）。 */
 	public Map<String, Object> ledgerFor(String runId, String toolCallId) {
 		if (toolCallId == null) {
-			return null;
+			return Map.of();
 		}
 		for (Map<String, Object> record : ledger(runId)) {
 			if (toolCallId.equals(record.get("toolCallId"))) {
 				return record;
 			}
 		}
-		return null;
+		return Map.of();
 	}
 
 	/**
@@ -4228,48 +4329,49 @@ public class RunStore {
 	 */
 	public Map<String, Object> idemFor(String runId, String toolCallId) {
 		if (toolCallId == null) {
-			return null;
+			return Map.of();
 		}
 		String field = idemField(runId, toolCallId);
 		String indexed;
 		try {
 			Object raw = this.redis.opsForHash().get(idemKey(runId), field);
-			indexed = raw == null ? null : String.valueOf(raw);
+			indexed = ObjectUtils.toString(raw, (String) null);
 		}
 		catch (Exception ex) {
-			log.debug("idempotency index read failed runId={} "
-					+ "toolCallId={} (falling back to ledger scan)", runId, toolCallId, ex);
+			if (LogSampling.canAcquire("idempotency-index-read")) {
+				log.warn("idempotency index read failed runId={} "
+						+ "toolCallId={} (falling back to ledger scan)", runId, toolCallId, ex);
+			}
 			indexed = null;
 		}
 		if (indexed != null) {
 			Long index = listIndexOf(indexed);
-			Map<String, Object> record = index == null ? null : recordAt(runId, index);
-			if (record != null && matchesToolCall(record, toolCallId)) {
+			Map<String, Object> record = index == null ? Map.of() : recordAt(runId, index);
+			if (MapUtils.isNotEmpty(record) && isMatchesToolCall(record, toolCallId)) {
 				return record;
 			}
-			if (record != null) {
+			if (MapUtils.isNotEmpty(record)) {
 				// M-1（复审裁决）：索引指向<b>别人的</b>记录（下标错位/索引被污染）时绝不能把它当成本调用的结果 ——
 				// 那会把 A 的产物交给 B（重放错了副作用结论比"没查到"更危险）。回落扫描由记录自身定身份。
 				log.warn("idempotency index misaligned runId={} toolCallId={} index={} "
 						+ "(index belongs to toolCallId={}; falling back to ledger scan)", runId,
 						toolCallId, indexed, record.get("toolCallId"));
 			}
-			else {
-				log.debug("idempotency index hit but record not retrievable runId={} "
-						+ "toolCallId={} index={} (falling back to ledger scan)", runId, toolCallId,
-						indexed);
+			else if (LogSampling.canAcquire("idempotency-index-record-missing")) {
+				log.warn("idempotency index hit but record not retrievable runId={} "
+						+ "toolCallId={} index={} (falling back to ledger scan)", runId, toolCallId, indexed);
 			}
 		}
 		return ledgerFor(runId, toolCallId);
 	}
 
 	public String readToolResult(String runId, String sessionId, String toolCallId, Integer offset, Integer maxChars) {
-		if (runId == null || runId.isBlank() || sessionId == null || sessionId.isBlank()
-				|| toolCallId == null || toolCallId.isBlank()) {
+		if (StringUtils.isBlank(runId) || StringUtils.isBlank(sessionId)
+				|| StringUtils.isBlank(toolCallId)) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT, "Run, session, or tool call identifier required for result read-back is missing");
 		}
-		int from = offset == null ? 0 : offset;
-		int limit = maxChars == null ? 4000 : maxChars;
+		int from = ObjectUtils.defaultIfNull(offset, 0);
+		int limit = ObjectUtils.defaultIfNull(maxChars, 4000);
 		if (from < 0 || limit < 2 || limit > 8000) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
 					"Invalid page cursor: offset must be >=0 and page size must be between 2 and 8000 characters");
@@ -4297,21 +4399,9 @@ public class RunStore {
 		if (owner.state() != SnapshotOwner.State.ATTRIBUTED || !sessionId.equals(owner.sessionId())) {
 			throw new ResourceNotFoundException("The run does not exist under the current identity or read access is denied");
 		}
-		Map<String, Object> record = idemFor(runId, toolCallId);
-		String name;
-		String text;
-		if (record != null) {
-			name = record.get("name") == null ? "" : String.valueOf(record.get("name"));
-			text = record.get("resultText") instanceof String value ? value : null;
-		}
-		else {
-			PendingToolCall pending = pending(runId, toolCallId);
-			if (pending == null || !pending.resolved()) {
-				throw new ResourceNotFoundException("No settled tool result exists in the current run");
-			}
-			name = pending.getName() == null ? "" : pending.getName();
-			text = pending.getResultText();
-		}
+		ToolResultSource source = readToolResultSource(runId, toolCallId);
+		String name = source.name();
+		String text = source.text();
 		if (Set.of("kb_search", "kb_read_doc", "kb_lookup_term").contains(name)) {
 			throw new ConflictException(ToolOutcome.CODE_ILLEGAL_ARGUMENT,
 					"KB results must use kb_read_doc native offset/next_offset pagination instead of generic result read-back");
@@ -4350,6 +4440,22 @@ public class RunStore {
 		}
 	}
 
+	private record ToolResultSource(String name, String text) {
+	}
+
+	private ToolResultSource readToolResultSource(String runId, String toolCallId) {
+		Map<String, Object> record = idemFor(runId, toolCallId);
+		if (MapUtils.isNotEmpty(record)) {
+			return new ToolResultSource(ObjectUtils.toString(record.get("name"), ""),
+					record.get("resultText") instanceof String value ? value : null);
+		}
+		PendingToolCall pending = pending(runId, toolCallId);
+		if (pending == null || !pending.resolved()) {
+			throw new ResourceNotFoundException("No settled tool result exists in the current run");
+		}
+		return new ToolResultSource(StringUtils.defaultString(pending.getName()), pending.getResultText());
+	}
+
 	private record SnapshotEvidence(SnapshotOwner owner, boolean truncated) {
 	}
 
@@ -4386,7 +4492,7 @@ public class RunStore {
 					}
 				}
 				else if ("messageJson".equals(field)) {
-					truncated = readTruncationEvidence(parser, toolCallId);
+					truncated = isReadTruncationEvidence(parser, toolCallId);
 				}
 				else {
 					parser.skipChildren();
@@ -4403,7 +4509,7 @@ public class RunStore {
 	}
 
 	/** 顺序流式扫描并保留最后一个目标 TOOL 响应的截断结论；任何损坏证据均失败关闭。 */
-	private boolean readTruncationEvidence(JsonParser parser, String toolCallId) throws Exception {
+	private boolean isReadTruncationEvidence(JsonParser parser, String toolCallId) throws Exception {
 		if (parser.currentToken() != JsonToken.START_ARRAY) {
 			throw new IllegalStateException("messageJson must be an array");
 		}
@@ -4451,7 +4557,7 @@ public class RunStore {
 			if (!org.springframework.ai.chat.messages.MessageType.TOOL.name().equals(type) || candidate == null) {
 				return null;
 			}
-			return readEnvelopeTruncated(candidate.responseData());
+			return isReadEnvelopeTruncated(candidate.responseData());
 		}
 	}
 
@@ -4498,9 +4604,9 @@ public class RunStore {
 		return candidate;
 	}
 
-	private boolean readEnvelopeTruncated(String responseData) throws Exception {
+	private boolean isReadEnvelopeTruncated(String responseData) throws Exception {
 		String json = ToolResultEnvelope.unwrapModelJson(responseData);
-		if (json == null || json.isBlank()) {
+		if (StringUtils.isBlank(json)) {
 			return false;
 		}
 		try (JsonParser parser = this.mapper.getFactory().createParser(json)) {
@@ -4531,7 +4637,7 @@ public class RunStore {
 	}
 
 	/** 索引指向的记录是否<b>就是</b>请求的 {@code toolCallId}（错位/字段缺失一律 false ⇒ 回落扫描）。 */
-	private static boolean matchesToolCall(Map<String, Object> record, String toolCallId) {
+	private static boolean isMatchesToolCall(Map<String, Object> record, String toolCallId) {
 		Object recordId = record.get("toolCallId");
 		return recordId != null && toolCallId.equals(String.valueOf(recordId));
 	}
@@ -4548,22 +4654,24 @@ public class RunStore {
 		}
 	}
 
-	/** 台账第 {@code index} 条（越界/读不出来返回 null）。 */
+	/** 台账第 {@code index} 条（越界/读不出来返回空 Map）。 */
 	private Map<String, Object> recordAt(String runId, long index) {
 		if (index < 0L) {
-			return null;
+			return Map.of();
 		}
 		try {
 			String item = this.redis.opsForList().index(ledgerKey(runId), index);
 			if (item == null) {
-				return null;
+				return Map.of();
 			}
 			return this.mapper.readValue(item, new TypeReference<Map<String, Object>>() {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("ledger read by index failed runId={} index={}", runId, index, ex);
-			return null;
+			if (LogSampling.canAcquire("ledger-read-by-index")) {
+				log.warn("ledger read by index failed runId={} index={}", runId, index, ex);
+			}
+			return Map.of();
 		}
 	}
 
@@ -4582,8 +4690,8 @@ public class RunStore {
 	 * 再等一遍（见 {@link #ledgerMetadata}）。
 	 */
 	public Map<String, Integer> ledgerCounts(String runId) {
-		List<Map<String, Object>> metadata = ledgerMetadata(runId);
-		return ledgerCountsOf(metadata != null ? metadata : ledger(runId));
+		LedgerMetadataRead metadata = ledgerMetadata(runId);
+		return ledgerCountsOf(metadata.available() ? metadata.records() : ledger(runId));
 	}
 
 	/** 已读出的台账/投影记录按 {@code name} 计数（同一份记录只解析一次，例如 {@code describe}）。 */
@@ -4605,15 +4713,15 @@ public class RunStore {
 	 * 不传输 {@code resultText}；旧数据或不完整投影回落台账全表扫描，连接/超时等资源故障直接抛出。
 	 */
 	public int ledgerCountSince(String runId, long sinceMs) {
-		List<Map<String, Object>> metadata = ledgerMetadata(runId);
-		return countLedgerSince(metadata != null ? metadata : ledger(runId), sinceMs);
+		LedgerMetadataRead metadata = ledgerMetadata(runId);
+		return countLedgerSince(metadata.available() ? metadata.records() : ledger(runId), sinceMs);
 	}
 
 	private static int countLedgerSince(List<Map<String, Object>> records, long sinceMs) {
 		int count = 0;
 		for (Map<String, Object> record : records) {
 			Object atMs = record.get("atMs");
-			if (atMs instanceof Number number && number.longValue() >= sinceMs) {
+			if (NumberUtils.toLong(String.valueOf(atMs), Long.MIN_VALUE) >= sinceMs) {
 				count++;
 			}
 		}
@@ -4624,7 +4732,7 @@ public class RunStore {
 	 * 读取台账的<b>小型元数据投影</b>（{@code ai:idem} 里的 {@code ~meta:<index>} 字段）。
 	 *
 	 * <p><b>故障分级（C65 返修）</b>：只有<b>数据形态异常</b>（旧数据没有投影 / 投影混排 / 值坏 /
-	 * 下标错位 / 键类型不对）才返回 {@code null} 让调用方回落台账扫描；<b>数据访问资源故障</b>
+	 * 下标错位 / 键类型不对）才以 {@code available=false} 让调用方回落台账扫描；<b>数据访问资源故障</b>
 	 * （连接不可用、命令超时，可能被 {@code RedisSystemException} 等包装）<b>直接抛出</b>。
 	 * 理由：回落 {@code LRANGE 0 -1} 并不能修复"Redis 读不到"，只会把同一次连接/超时故障
 	 * 再等一遍（{@code LLEN} 等一个 {@code spring.data.redis.timeout}，{@code LRANGE} 再等一个），
@@ -4634,11 +4742,60 @@ public class RunStore {
 	 * <b>不新增按 runId 的指标</b> —— "这批记录本来就旧/被外部改坏"是一次性事实，
 	 * 按 run 记账会变成无界表。
 	 *
-	 * @return 逐下标覆盖整份台账的投影（下标 0..{@code LLEN-1} 连续）；<b>null = 投影不可用，调用方回落台账扫描</b>
-	 *         （旧数据没有投影 / 投影混排 / 值坏 / 下标错位）。空台账返回空列表，不算"不可用"。
+	 * @return 显式投影结果；{@code available=false} 才由调用方回落台账扫描。{@code byIndex} 始终非空，
+	 *         空 Map 只表示真实空投影（旧数据没有投影 / 投影混排 / 值坏 / 下标错位时不可用）。
 	 * @throws RuntimeException 连接/超时等数据访问资源故障（原样上抛，不回落）
 	 */
-	private List<Map<String, Object>> ledgerMetadata(String runId) {
+	private ProjectionRead readProjectionByIndex(String runId, Map<Object, Object> entries) {
+		Map<Long, Map<String, Object>> byIndex = new TreeMap<>();
+		for (Map.Entry<Object, Object> entry : entries.entrySet()) {
+			String field = ObjectUtils.toString(entry.getKey(), "");
+			// 索引自身的 field（<runId>:<toolCallId>）不参与投影；UUID runId 不会以 '~' 开头。
+			if (!field.startsWith(IDEM_META_FIELD_PREFIX)) {
+				continue;
+			}
+			long index;
+			try {
+				index = Long.parseLong(field.substring(IDEM_META_FIELD_PREFIX.length()));
+			}
+			catch (NumberFormatException ex) {
+				incompleteProjection(runId, "Projection field index is not an integer: " + field);
+				return ProjectionRead.unavailable();
+			}
+			Object raw = entry.getValue();
+			if (raw == null) {
+				incompleteProjection(runId, "Projection field value is null: " + field);
+				return ProjectionRead.unavailable();
+			}
+			Map<String, Object> meta;
+			try {
+				meta = this.mapper.readValue(String.valueOf(raw), new TypeReference<Map<String, Object>>() {
+				});
+			}
+			catch (Exception ex) {
+				incompleteProjection(runId, "Projection value is not valid JSON: " + field);
+				return ProjectionRead.unavailable();
+			}
+			if (meta.get("atMs") == null || meta.get("toolCallId") == null) {
+				incompleteProjection(runId, "Projection lacks atMs/toolCallId: " + field);
+				return ProjectionRead.unavailable();
+			}
+			byIndex.put(index, meta);
+		}
+		return new ProjectionRead(true, byIndex);
+	}
+
+	private record ProjectionRead(boolean available, Map<Long, Map<String, Object>> byIndex) {
+		private ProjectionRead {
+			byIndex = byIndex == null ? Map.of() : Collections.unmodifiableMap(new TreeMap<>(byIndex));
+		}
+
+		private static ProjectionRead unavailable() {
+			return new ProjectionRead(false, Map.of());
+		}
+	}
+
+	private LedgerMetadataRead ledgerMetadata(String runId) {
 		long size;
 		try {
 			Long rawSize = this.redis.opsForList().size(ledgerKey(runId));
@@ -4652,7 +4809,7 @@ public class RunStore {
 			return incompleteProjection(runId, "Failed to read ledger length", ex);
 		}
 		if (size == 0L) {
-			return List.of();
+			return new LedgerMetadataRead(true, List.of());
 		}
 		if (size > Integer.MAX_VALUE) {
 			return incompleteProjection(runId, "Ledger size exceeds projection range: " + size);
@@ -4665,40 +4822,14 @@ public class RunStore {
 			rethrowIfResourceFailure(ex);
 			return incompleteProjection(runId, "Failed to read projection HASH", ex);
 		}
-		if (entries == null || entries.isEmpty()) {
+		if (MapUtils.isEmpty(entries)) {
 			return incompleteProjection(runId, "Projection fields are absent (legacy data)");
 		}
-		Map<Long, Map<String, Object>> byIndex = new TreeMap<>();
-		for (Map.Entry<Object, Object> entry : entries.entrySet()) {
-			String field = entry.getKey() == null ? "" : String.valueOf(entry.getKey());
-			// 索引自身的 field（<runId>:<toolCallId>）不参与投影；UUID runId 不会以 '~' 开头。
-			if (!field.startsWith(IDEM_META_FIELD_PREFIX)) {
-				continue;
-			}
-			long index;
-			try {
-				index = Long.parseLong(field.substring(IDEM_META_FIELD_PREFIX.length()));
-			}
-			catch (NumberFormatException ex) {
-				return incompleteProjection(runId, "Projection field index is not an integer: " + field);
-			}
-			Object raw = entry.getValue();
-			if (raw == null) {
-				return incompleteProjection(runId, "Projection field value is null: " + field);
-			}
-			Map<String, Object> meta;
-			try {
-				meta = this.mapper.readValue(String.valueOf(raw), new TypeReference<Map<String, Object>>() {
-				});
-			}
-			catch (Exception ex) {
-				return incompleteProjection(runId, "Projection value is not valid JSON: " + field);
-			}
-			if (meta.get("atMs") == null || meta.get("toolCallId") == null) {
-				return incompleteProjection(runId, "Projection lacks atMs/toolCallId: " + field);
-			}
-			byIndex.put(index, meta);
+		ProjectionRead projection = readProjectionByIndex(runId, entries);
+		if (!projection.available()) {
+			return incompleteProjection(runId, "Projection fields are invalid");
 		}
+		Map<Long, Map<String, Object>> byIndex = projection.byIndex();
 		if (byIndex.size() != (int) size) {
 			return incompleteProjection(runId, "Projection field count " + byIndex.size() + " != ledger length " + size);
 		}
@@ -4711,7 +4842,17 @@ public class RunStore {
 			out.add(entry.getValue());
 			expected++;
 		}
-		return out;
+		return new LedgerMetadataRead(true, out);
+	}
+
+	private record LedgerMetadataRead(boolean available, List<Map<String, Object>> records) {
+		private LedgerMetadataRead {
+			records = records == null ? List.of() : Collections.unmodifiableList(new ArrayList<>(records));
+		}
+
+		private static LedgerMetadataRead unavailable() {
+			return new LedgerMetadataRead(false, List.of());
+		}
 	}
 
 	/**
@@ -4728,18 +4869,18 @@ public class RunStore {
 	}
 
 	/**
-	 * 投影不可用（数据形态异常）⇒ {@code null} 触发回落，并留一条 {@code DEBUG} 原因。
+	 * 投影不可用（数据形态异常）⇒ {@code available=false} 触发回落，并留一条 {@code DEBUG} 原因。
 	 *
 	 * <p>只打日志、不记账：这条路径的事实是"该 run 的投影不完整"，按 run 记指标会无界增长。
 	 */
-	private static List<Map<String, Object>> incompleteProjection(String runId, String reason) {
-		log.debug("ledger metadata projection incomplete runId={} ({}; falling back to full scan)", runId, reason);
-		return null;
+	private static LedgerMetadataRead incompleteProjection(String runId, String reason) {
+		if (log.isDebugEnabled()) log.debug("ledger metadata projection incomplete runId={} ({}; falling back to full scan)", runId, reason);
+		return LedgerMetadataRead.unavailable();
 	}
 
-	private static List<Map<String, Object>> incompleteProjection(String runId, String reason, Throwable error) {
-		log.debug("ledger metadata projection incomplete runId={} ({}; falling back to full scan)", runId, reason, error);
-		return null;
+	private static LedgerMetadataRead incompleteProjection(String runId, String reason, Throwable error) {
+		if (log.isDebugEnabled()) log.debug("ledger metadata projection incomplete runId={} ({}; falling back to full scan)", runId, reason, error);
+		return LedgerMetadataRead.unavailable();
 	}
 
 	/**
@@ -4788,7 +4929,7 @@ public class RunStore {
 					List.of(pendingKey(runId), decidedKey(runId), claimKey(runId), fenceKey(runId)),
 					pending.getToolCallId(), this.mapper.writeValueAsString(pending), decided,
 					String.valueOf(ttlFor(runId).toMillis()), String.valueOf(heldRunEpoch(runId)));
-			return result != null && !result.isEmpty() && ((Number) result.get(0)).longValue() == 1L;
+			return CollectionUtils.isNotEmpty(result) && ((Number) result.getFirst()).longValue() == 1L;
 		}
 		catch (Exception ex) {
 			throw new AiStateUnavailableException("Failed to conditionally cancel pending entry " + pending.getToolCallId(), ex);
@@ -4858,10 +4999,12 @@ public class RunStore {
 	public long lastIssuedSeq(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(seqKey(runId));
-			return raw == null ? 0L : Long.parseLong(raw);
+			return Long.parseLong(ObjectUtils.defaultIfNull(raw, "0"));
 		}
 		catch (Exception ex) {
-			log.debug("issued seq read failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("issued-seq-read")) {
+				log.warn("issued seq read failed runId={}", runId, ex);
+			}
 			return 0L;
 		}
 	}
@@ -4875,7 +5018,7 @@ public class RunStore {
 	 * 前端带 {@code lastSeq} 重挂时会把新帧当孤儿丢掉（确认卡正好在这批帧里 ⇒ 卡消失）。
 	 *
 	 * <p>单键 Lua 做"比较 + 只升 + 续期"：并发的更大号不会被回拨；已有更大号时只续期。
-	 * 写权限走 {@link #permittedToWrite(String, String)}（丢租/换主后不得再推进号空间）。
+	 * 写权限走 {@link #isWritePermitted(String, String)}（丢租/换主后不得再推进号空间）。
 	 * 帧存储的下一号由 {@link RedisFrameStore} 的 {@code INCR ai:seq} 给出，
 	 * 因此抬这一个键即可覆盖当前取号路径。
 	 *
@@ -4885,7 +5028,7 @@ public class RunStore {
 		if (runId == null || floor <= 0L) {
 			return;
 		}
-		if (!permittedToWrite(runId, "business seq floor restore")) {
+		if (!isWritePermitted(runId, "business seq floor restore")) {
 			return;
 		}
 		try {
@@ -4914,7 +5057,9 @@ public class RunStore {
 			this.redis.opsForValue().set(beatKey(runId), String.valueOf(System.currentTimeMillis()), ttlFor(runId));
 		}
 		catch (Exception ex) {
-			log.debug("heartbeat activity stamp write failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("heartbeat-activity-stamp-write")) {
+				log.warn("heartbeat activity stamp write failed runId={}", runId, ex);
+			}
 		}
 	}
 
@@ -4947,7 +5092,9 @@ public class RunStore {
 					String.valueOf(ttlFor(runId).toMillis()));
 		}
 		catch (Exception ex) {
-			log.debug("business activity anchor write failed runId={} atMs={}", runId, atMs, ex);
+			if (LogSampling.canAcquire("business-activity-anchor-write")) {
+				log.warn("business activity anchor write failed runId={} atMs={}", runId, atMs, ex);
+			}
 		}
 	}
 
@@ -4992,7 +5139,7 @@ public class RunStore {
 			}
 			snapshot.setBudgetArmedAtMs(nextArmed);
 			snapshot.setBudgetSkippedBatches(nextSkipped);
-			persist(snapshot);
+			isPersist(snapshot);
 		}
 		catch (RuntimeException ex) {
 			log.warn("in-turn budget armed snapshot write failed runId={} "
@@ -5002,16 +5149,8 @@ public class RunStore {
 	}
 
 	/**
-	 * 挂起期心跳对<b>卡的后台数据</b>的滑动续期（用户裁决 2026-10-20 第 4 条）。
-	 *
-	 * <p>确认门 / 表单卡的等待没有上限，而这张卡的可重建性依赖四类键：轮快照
-	 * （{@code ai:run}，含挂起中的 assistant(tool_calls) 与历史）、待决条目
-	 * （{@code ai:pending}，人的决策落点）、事件日志 Stream（{@code ai:xevents}，回放真值）、
-	 * 已发放序号（{@code ai:seq}，差量补发锚点）。若只续心跳键，一次超过 session-ttl 的长等
-	 * 会让"卡还在、后台已过期" —— 人点批准时反而找不到挂起态。
-	 * 故 {@code ConfirmGate} 的心跳（2s 一拍）按<b>约 60s 的资源档</b>把这些键（存在才生效）整额续期：
-	 * <b>会话活着，卡的后台数据就活着</b>；不计入预算的等待也因此可以放心地长。
-	 * 2s 那一拍只保留心跳帧、取消轮询与续跑租约续期（明细见 {@code ConfirmGate#await}）。
+	 * 挂起数据自有 TTL 面：轮快照、轻量状态、待决条目、事件日志和已发放序号。
+	 * 仅供明确用户读侧的兼容续期路径使用；ConfirmGate 后台心跳不得调用本方法续期 24 小时会话数据。
 	 *
 	 * <p>Redis {@code EXPIRE} 对不存在的键是无操作（不报错），故本方法对"尚未写出"的键安全。
 	 * 单个键失败已在 {@link #renew} 内逐键隔离（I-3：连接类失败提前收手），本方法不再整面抛出。
@@ -5026,7 +5165,9 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 只剩取键/计数等非 Redis 异常（单键 Redis 失败已在下层吞掉并计数）
-			log.debug("suspended renew key build/count failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("suspended-renew-key-build")) {
+				log.warn("suspended renew key build/count failed runId={}", runId, ex);
+			}
 		}
 	}
 
@@ -5061,12 +5202,16 @@ public class RunStore {
 		for (java.util.function.Function<String, String> builder : builders) {
 			keys.add(builder.apply(runId));
 		}
+		renewKeyGroups(runId, ttl, keys);
+	}
+
+	private void renewKeyGroups(String runId, Duration ttl, List<String> keys) {
 		int total = keys.size();
 		int attempted = 0;
 		for (List<String> group : groupBySlot(keys)) {
 			if (group.size() > 1) {
 				try {
-					if (renewSameSlot(group, ttl)) {
+					if (isRenewSameSlot(group, ttl)) {
 						attempted += group.size();
 						continue;
 					}
@@ -5078,8 +5223,10 @@ public class RunStore {
 					RedisDegradation.record(RedisDegradation.L139_RENEW_KEY, ex);
 					int notAttempted = total - attempted;
 					recordNotAttempted(notAttempted);
-					log.debug("same-slot renew hit a connection error runId={} keys={} (skipping timeout waits for the remaining {} keys)", runId,
-							group.size(), notAttempted, ex);
+					if (LogSampling.canAcquire("same-slot-renew-connection")) {
+						log.warn("same-slot renew hit a connection error runId={} keys={} (skipping timeout waits for the remaining {} keys)", runId,
+								group.size(), notAttempted, ex);
+					}
 					return;
 				}
 			}
@@ -5093,12 +5240,16 @@ public class RunStore {
 					RedisDegradation.record(RedisDegradation.L139_RENEW_KEY, ex);
 					if (isConnectionFailure(ex)) {
 						recordNotAttempted(total - attempted - 1);
-						log.debug("renew hit a connection error runId={} key={} (skipping "
-								+ "individual timeout waits for the remaining {} keys)", runId, key,
-								total - attempted - 1, ex);
+						if (LogSampling.canAcquire("renew-key-connection")) {
+							log.warn("renew hit a connection error runId={} key={} (skipping "
+									+ "individual timeout waits for the remaining {} keys)", runId, key,
+									total - attempted - 1, ex);
+						}
 						return;
 					}
-					log.debug("renew key failed runId={} key={} (continuing with other keys)", runId, key, ex);
+					if (LogSampling.canAcquire("renew-key-failure")) {
+						log.warn("renew key failed runId={} key={} (continuing with other keys)", runId, key, ex);
+					}
 				}
 				attempted++;
 			}
@@ -5137,7 +5288,7 @@ public class RunStore {
 	 *         调用方退回逐键 {@code EXPIRE}（语义不变，只多 RTT）
 	 * @throws RuntimeException 连接类失败（调用方据此立即收手）；其它异常已折成"不可用"
 	 */
-	private boolean renewSameSlot(List<String> keys, Duration ttl) {
+	private boolean isRenewSameSlot(List<String> keys, Duration ttl) {
 		String statuses;
 		try {
 			statuses = this.redis.execute(RENEW_SAME_SLOT_SCRIPT, keys, String.valueOf(ttl.toMillis()));
@@ -5146,7 +5297,9 @@ public class RunStore {
 			if (isConnectionFailure(ex)) {
 				throw ex;
 			}
-			log.debug("same-slot renew script unavailable (falling back to per-key EXPIRE) keys={}", keys.size(), ex);
+			if (LogSampling.canAcquire("same-slot-renew-script-unavailable")) {
+				log.warn("same-slot renew script unavailable (falling back to per-key EXPIRE) keys={}", keys.size(), ex);
+			}
 			return false;
 		}
 		if (statuses == null) {
@@ -5161,7 +5314,9 @@ public class RunStore {
 			if ("-1".equals(parts[i].trim())) {
 				// 单键失败已在脚本内隔离（pcall）：只计数，其余键的续期不受影响
 				RedisDegradation.record(RedisDegradation.L139_RENEW_KEY);
-				log.debug("renew key failed (isolated within same-slot batch) key={}", keys.get(i));
+				if (LogSampling.canAcquire("renew-key-isolated-failure")) {
+					log.warn("renew key failed (isolated within same-slot batch) key={}", keys.get(i));
+				}
 			}
 		}
 		return true;
@@ -5177,17 +5332,18 @@ public class RunStore {
 	// ── 挂起态的读侧续期唯一入口（B23L1 批②a / 方案第 10 条） ────────────────
 
 	/**
-	 * 读侧续期：<b>唯一入口</b>（设计稿 §2.2 "挂起态 TTL 续期改由读侧触发"）。
+	 * 明确用户读/决策入口的续期方法（设计稿 §2.2 "挂起态 TTL 续期改由读侧触发"）。
+	 * 后台恢复扫描、压缩与心跳不得调用本方法冒充用户活动。
 	 *
 	 * <p>批②b 起挂起线程不再被假设一定活着（挂起在 A、读取/决策落在 B），因此"谁养着卡的后台数据"
-	 * 从"挂起线程的心跳"改为"任何实例的读/决策都 touch 一次"。本方法自带<b>终态判据</b>：
+	 * 从"挂起线程的心跳"改为"任何实例的用户读/决策都 touch 一次"。本方法自带<b>终态判据</b>：
 	 * 快照不存在或已终态 ⇒ <b>不续期</b>（读侧不得把已收尾/已删除的轮重新养出孤儿键），返回 false。
 	 *
 	 * <p>续期面 = 心跳同款的五类键（{@link #renewSuspensionTtl}，本体不动）+ session → current 索引
 	 * + 本批新增的两个契约位键（{@code ai:req} / {@code ai:decided}）：req 位若先于待决条目过期，
 	 * 刷新恢复会拿不到卡（L0 修复的那个洞会换个形式复发）。
 	 *
-	 * @return true = 已续期（挂起态）；false = 缺失/终态，未做任何续期
+	 * @return true = 已续期或处于有效节流窗口；false = 缺失/终态或续期失败
 	 */
 	public boolean touchActiveRun(String runId) {
 		if (runId == null) {
@@ -5198,7 +5354,9 @@ public class RunStore {
 			snapshot = get(runId);
 		}
 		catch (Exception ex) {
-			log.debug("read-side renew snapshot missing runId={}", runId, ex);
+			if (LogSampling.canAcquire("read-side-renew-snapshot")) {
+				log.warn("read-side renew snapshot missing runId={}", runId, ex);
+			}
 			return false;
 		}
 		return touchActiveRun(snapshot);
@@ -5221,22 +5379,34 @@ public class RunStore {
 			return false;
 		}
 		String runId = snapshot.getRunId();
+		if (this.activityRenewal != null) {
+			SessionActivityRenewal.Result result = this.activityRenewal.renewActivity(snapshot.getTenantId(),
+					snapshot.getUserId(), snapshot.getSessionId(), runId,
+					runScopedKey(RUN_PREFIX, snapshot.getTenantId(), snapshot.getUserId(), runId));
+			if (result == SessionActivityRenewal.Result.FAILED) {
+				return false;
+			}
+			if (RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+				touchBusinessActivity(runId, System.currentTimeMillis());
+			}
+			return true;
+		}
 		renewSuspensionTtl(runId);
 		renewSessionCurrent(snapshot.getSessionId(), runId);
-		// 会话→run 索引（销毁发现面）也随读侧 touch 续期：只续 session:current 不够 —— 索引才是
-		// 枚举入口，先过期就会让"卡还在、销毁时看不见这一轮"。身份取记录身份（本方法也会在
-		// 无请求身份的恢复/续租线程上被调用）。
+		// 会话→run 索引（销毁发现面）也随用户读侧 touch 续期：只续 session:current 不够 —— 索引才是
+		// 枚举入口，先过期就会让"卡还在、销毁时看不见这一轮"。身份取记录身份。
 		renewSessionRunsIndex(snapshot.getSessionId(), runId, snapshot.getTenantId(), snapshot.getUserId());
 		Duration ttl = ttlFor(runId);
-		// 停止闭环：clientRequestId 映射与取消墓碑与会话同寿（单键 EXPIRE；身份取记录身份，
-		// 本方法也会在无请求身份的恢复/续租线程上被调用）。
-		if (snapshot.getSessionId() != null && !snapshot.getSessionId().isBlank()) {
+		// 停止闭环：clientRequestId 映射与取消墓碑与会话同寿（单键 EXPIRE；身份取记录身份）。
+		if (StringUtils.isNotBlank(snapshot.getSessionId())) {
 			try {
 				this.redis.expire(TenantKeyScope.scoped(ClientRequestRegistry.KEY_PREFIX, snapshot.getTenantId(),
 						snapshot.getUserId(), snapshot.getSessionId()), ttl);
 			}
 			catch (RuntimeException ex) {
-				log.debug("stop-closure mapping renew failed runId={} (read-side renew unaffected)", runId, ex);
+				if (LogSampling.canAcquire("stop-closure-mapping-renew")) {
+					log.warn("stop-closure mapping renew failed runId={} (read-side renew unaffected)", runId, ex);
+				}
 			}
 		}
 		// 契约位 / 决策 guard / fence / 取消信号（超时面治理批① 第 11 项：取键走登记表）。
@@ -5282,7 +5452,7 @@ public class RunStore {
 				return new DecisionClaim(true, value);
 			}
 			Object current = this.redis.opsForHash().get(decidedKey(runId), toolCallId);
-			return new DecisionClaim(false, current == null ? null : String.valueOf(current));
+			return new DecisionClaim(false, ObjectUtils.toString(current, (String) null));
 		}
 		catch (Exception ex) {
 			throw new AiStateUnavailableException("Failed to write decision guard " + toolCallId, ex);
@@ -5296,7 +5466,7 @@ public class RunStore {
 
 	/** 仅修补旧版遗留的同值 guard 半状态；正常新决策不走此口。 */
 	public DecisionClaim tryRepairDecision(String runId, PendingToolCall pending, String expectedGuard) {
-		if (expectedGuard == null || expectedGuard.isBlank()) {
+		if (StringUtils.isBlank(expectedGuard)) {
 			return new DecisionClaim(false, null);
 		}
 		return applyDecision(runId, pending, expectedGuard);
@@ -5313,7 +5483,7 @@ public class RunStore {
 				throw new AiStateUnavailableException("Decision script returned null " + pending.getToolCallId());
 			}
 			String recorded = String.valueOf(result.get(1));
-			return new DecisionClaim(((Number) result.get(0)).longValue() == 1L,
+			return new DecisionClaim(((Number) result.getFirst()).longValue() == 1L,
 					recorded.isEmpty() ? null : recorded);
 		}
 		catch (AiStateUnavailableException ex) {
@@ -5333,7 +5503,7 @@ public class RunStore {
 	public String decisionOf(String runId, String toolCallId) {
 		try {
 			Object value = this.redis.opsForHash().get(decidedKey(runId), toolCallId);
-			return value == null ? null : String.valueOf(value);
+			return ObjectUtils.toString(value, (String) null);
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A6_DECISION_GUARD_READ, ex);
@@ -5404,10 +5574,12 @@ public class RunStore {
 	private long activityAnchorAtMs(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(activityKey(runId));
-			return raw == null ? 0L : Long.parseLong(raw);
+			return Long.parseLong(ObjectUtils.defaultIfNull(raw, "0"));
 		}
 		catch (Exception ex) {
-			log.debug("business activity anchor read failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("business-activity-anchor-read")) {
+				log.warn("business activity anchor read failed runId={}", runId, ex);
+			}
 			return 0L;
 		}
 	}
@@ -5419,7 +5591,7 @@ public class RunStore {
 			Long max = this.redis.execute((RedisCallback<Long>) connection -> {
 				List<ByteRecord> records = connection.xRevRange(key, Range.unbounded(),
 						Limit.limit().count(ACTIVITY_TAIL_PROBE));
-				if (records == null || records.isEmpty()) {
+				if (CollectionUtils.isEmpty(records)) {
 					return 0L;
 				}
 				long result = 0L;
@@ -5428,11 +5600,13 @@ public class RunStore {
 				}
 				return result;
 			});
-			return max == null ? 0L : max;
+			return ObjectUtils.defaultIfNull(max, 0L);
 		}
 		catch (Exception ex) {
 			// 读失败 ≠ 没有活动：调用方还会看业务活动锚点键，这里按 0 容错。
-			log.debug("event log tail activity time read failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("event-log-tail-activity-read")) {
+				log.warn("event log tail activity time read failed runId={}", runId, ex);
+			}
 			return 0L;
 		}
 	}
@@ -5458,7 +5632,7 @@ public class RunStore {
 	/** Stream 记录里的 {@code frame} 字段原文（字段缺失返回 null）。 */
 	private static byte[] frameFieldOf(ByteRecord record) {
 		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
-			if ("frame".equals(new String(entry.getKey(), StandardCharsets.UTF_8))) {
+			if ("frame".equals(org.apache.commons.codec.binary.StringUtils.newStringUtf8(entry.getKey()))) {
 				return entry.getValue();
 			}
 		}
@@ -5473,7 +5647,7 @@ public class RunStore {
 	public long lastBeatAtMs(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(beatKey(runId));
-			return raw == null ? 0L : Long.parseLong(raw);
+			return Long.parseLong(ObjectUtils.defaultIfNull(raw, "0"));
 		}
 		catch (Exception ex) {
 			return 0L;
@@ -5498,7 +5672,7 @@ public class RunStore {
 	 *         {@code null} 是"未知"，调用方不得折算成 0 或某个默认 24h。
 	 */
 	public Long runKeyTtlRemainingMs(String runId) {
-		if (runId == null || runId.isEmpty()) {
+		if (StringUtils.isEmpty(runId)) {
 			return null;
 		}
 		try {
@@ -5507,7 +5681,9 @@ public class RunStore {
 		}
 		catch (Exception ex) {
 			// 可见性失败不该把整页打成 500：返回未知，由前端按"不显示时间"处理
-			log.debug("snapshot remaining TTL read failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("snapshot-remaining-ttl-read")) {
+				log.warn("snapshot remaining TTL read failed runId={}", runId, ex);
+			}
 			return null;
 		}
 	}
@@ -5522,7 +5698,7 @@ public class RunStore {
 	 * 它的外置态不会被 6h 的创建时刻封顶掐断。整条会话的寿命由会话记忆键自己的滑动 TTL 承载。
 	 */
 	private Duration ttlFor(String runId) {
-		return this.properties.getSessionTtl();
+		return this.properties.getEffectiveSessionTtl();
 	}
 
 	// ── 上下文计量与压缩的三个键族（上下文统计与压缩专项批①） ──────────────────────
@@ -5546,7 +5722,7 @@ public class RunStore {
 	 * （缺一条审计好过整个请求 500）。
 	 */
 	public void appendSafetyEvent(String sessionId, Map<String, Object> event) {
-		if (sessionId == null || sessionId.isBlank() || event == null) {
+		if (StringUtils.isBlank(sessionId) || event == null) {
 			return;
 		}
 		String key = TenantKeyScope.scoped(SAFETY_PREFIX, sessionId);
@@ -5563,7 +5739,7 @@ public class RunStore {
 	/** 读安全台账（新→旧，最多 {@value #SAFETY_LEDGER_MAX} 条；Redis 抖动按空台账）。 */
 	public List<Map<String, Object>> safetyLedger(String sessionId) {
 		List<Map<String, Object>> out = new ArrayList<>();
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			return out;
 		}
 		try {
@@ -5590,10 +5766,12 @@ public class RunStore {
 
 	private void touchContextTtl(String key) {
 		try {
-			this.redis.expire(key, this.properties.getSessionTtl());
+			this.redis.expire(key, this.properties.getEffectiveSessionTtl());
 		}
 		catch (RuntimeException ex) {
-			log.debug("context key renew failed key={}", key, ex);
+			if (LogSampling.canAcquire("context-key-renew")) {
+				log.warn("context key renew failed key={}", key, ex);
+			}
 		}
 	}
 

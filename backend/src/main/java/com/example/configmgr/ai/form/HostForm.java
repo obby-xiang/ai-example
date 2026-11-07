@@ -14,6 +14,9 @@ import com.example.configmgr.ai.tool.ToolOutcome;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 
 import java.util.LinkedHashMap;
@@ -71,7 +74,7 @@ abstract class HostForm {
 	}
 
 	/** 宿主表单只在 park 装配下生效（见类注）。 */
-	protected boolean parkEnabled() {
+	protected boolean isParkEnabled() {
 		return this.properties != null && this.properties.getPark().isEnabled();
 	}
 
@@ -109,7 +112,7 @@ abstract class HostForm {
 	 *
 	 * <p>读不出来就不冒"重复弹表"的险：宁可不发，交回既有路径。
 	 */
-	protected boolean alreadyIssued(String runId, String toolCallId) {
+	protected boolean hasIssued(String runId, String toolCallId) {
 		List<PendingToolCall> pendings;
 		try {
 			pendings = this.store.pendingsLenient(runId);
@@ -118,7 +121,7 @@ abstract class HostForm {
 			log.warn("could not read pending entry; host skips the form runId={}", runId, ex);
 			return true;
 		}
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (pending != null && toolCallId.equals(pending.getToolCallId())) {
 				return true;
 			}
@@ -136,8 +139,8 @@ abstract class HostForm {
 	 *
 	 * @return {@code true} = 已挂起：调用方本拍<b>不得</b>再驱动模型（这一轮在等人填表）
 	 */
-	protected boolean park(String runId, List<Message> history, PendingToolCall pending) {
-		return park(runId, history, pending, null, null);
+	protected boolean shouldPark(String runId, List<Message> history, PendingToolCall pending) {
+		return shouldPark(runId, history, pending, null, null);
 	}
 
 	/**
@@ -147,9 +150,9 @@ abstract class HostForm {
 	 * 工具执行点在 {@code confirm_step} 等提前 park 场景必须显式传本段正文：此刻快照里的
 	 * {@code assistantContent} 还是上一轮/空值，不传就会把模型刚产出的正文丢掉。
 	 */
-	protected boolean park(String runId, List<Message> history, PendingToolCall pending, String assistantContent,
+	protected boolean shouldPark(String runId, List<Message> history, PendingToolCall pending, String assistantContent,
 			Map<String, Object> assistantMetadata) {
-		return parkAll(runId, history, List.of(pending), assistantContent, assistantMetadata);
+		return shouldParkAll(runId, history, List.of(pending), assistantContent, assistantMetadata);
 	}
 
 	/**
@@ -160,8 +163,8 @@ abstract class HostForm {
 	 * <p>用于宿主一次性下发的多条结构化草案（例如多个 {@code defCodes} 的 {@code set_condition}）：
 	 * 逐条 {@code saveSuspended} 会互相覆盖 {@code inFlightToolCalls}，只留最后一条。
 	 */
-	protected boolean parkAll(String runId, List<Message> history, List<PendingToolCall> pendings) {
-		return parkAll(runId, history, pendings, null, null);
+	protected boolean shouldParkAll(String runId, List<Message> history, List<PendingToolCall> pendings) {
+		return shouldParkAll(runId, history, pendings, null, null);
 	}
 
 	/**
@@ -170,29 +173,12 @@ abstract class HostForm {
 	 *                        使取消/刷新/续跑都能从挂起快照恢复这段正文。
 	 * @param assistantMetadata 显式正文对应的元数据（推理/来源等）；与 {@code assistantContent} 同进同退。
 	 */
-	protected boolean parkAll(String runId, List<Message> history, List<PendingToolCall> pendings,
+	protected boolean shouldParkAll(String runId, List<Message> history, List<PendingToolCall> pendings,
 			String assistantContent, Map<String, Object> assistantMetadata) {
-		if (pendings == null || pendings.isEmpty()) {
+		if (CollectionUtils.isEmpty(pendings)) {
 			return false;
 		}
-		try {
-			RunSnapshot current = this.store.get(runId);
-			boolean explicit = assistantContent != null;
-			String content = explicit ? assistantContent : current == null ? null : current.getAssistantContent();
-			Map<String, Object> metadata = explicit ? assistantMetadata
-					: current == null ? null : current.getAssistantMetadata();
-			// 合成内部指令（尤其 condition handoff 的一次性 USER）只属于当前请求视图，
-			// 不得随宿主表单挂起进入 messageJson/chat memory。
-			List<Message> persistedHistory = SyntheticMessages.withoutCorrectionInstruction(history);
-			this.store.saveSuspended(runId, content, pendings, persistedHistory, this.codec, metadata);
-		}
-		catch (RuntimeException ex) {
-			// 写挂起态失败：<b>不得留下一条看不见的待决条目</b>（saveSuspended 先写条目再写快照，
-			// 快照那一步失败时条目会留在 Redis 里；前端没有请求帧、用户看不到卡，而后续续跑会被
-			// 既有 PENDING_UNRESOLVED 前置挡住 —— 一轮就此卡死）。这里尽力把它收敛成终态。
-			for (PendingToolCall pending : pendings) {
-				convergeAfterParkFailure(runId, pending, ex);
-			}
+		if (!isParkStateSaved(runId, history, pendings, assistantContent, assistantMetadata)) {
 			return false;
 		}
 		SseChatEmitter out;
@@ -229,12 +215,37 @@ abstract class HostForm {
 		return true;
 	}
 
+	private boolean isParkStateSaved(String runId, List<Message> history, List<PendingToolCall> pendings,
+			String assistantContent, Map<String, Object> assistantMetadata) {
+		try {
+			RunSnapshot current = this.store.get(runId);
+			boolean explicit = assistantContent != null;
+			String content = explicit ? assistantContent : current == null ? null : current.getAssistantContent();
+			Map<String, Object> metadata = explicit ? assistantMetadata
+					: current == null ? null : current.getAssistantMetadata();
+			// 合成内部指令（尤其 condition handoff 的一次性 USER）只属于当前请求视图，
+			// 不得随宿主表单挂起进入 messageJson/chat memory。
+			List<Message> persistedHistory = SyntheticMessages.withoutCorrectionInstruction(history);
+			this.store.saveSuspended(runId, content, pendings, persistedHistory, this.codec, metadata);
+			return true;
+		}
+		catch (RuntimeException ex) {
+			// 写挂起态失败：<b>不得留下一条看不见的待决条目</b>（saveSuspended 先写条目再写快照，
+			// 快照那一步失败时条目会留在 Redis 里；前端没有请求帧、用户看不到卡，而后续续跑会被
+			// 既有 PENDING_UNRESOLVED 前置挡住 —— 一轮就此卡死）。这里尽力把它收敛成终态。
+			for (PendingToolCall pending : pendings) {
+				convergeAfterParkFailure(runId, pending, ex);
+			}
+			return false;
+		}
+	}
+
 	private static List<String> toolCallIds(List<PendingToolCall> pendings) {
 		List<String> ids = new java.util.ArrayList<>(pendings.size());
 		for (PendingToolCall pending : pendings) {
 			ids.add(pending.getToolCallId());
 		}
-		return ids;
+		return ids.isEmpty() ? List.of() : ids;
 	}
 
 	/** 挂起失败后的尽力收敛：把条目落成"未执行"的终态，避免它永远以 PENDING 挡住续跑。 */
@@ -313,7 +324,7 @@ abstract class HostForm {
 			log.warn("could not read this turn's ledger; host skips the form runId={}", runId, ex);
 			return null;
 		}
-		if (ledger == null || ledger.isEmpty()) {
+		if (CollectionUtils.isEmpty(ledger)) {
 			return null;
 		}
 		for (Map<String, Object> record : ledger) {
@@ -333,7 +344,7 @@ abstract class HostForm {
 	}
 
 	/** 本批已经有模型自己的同名调用：宿主不再重复（同一缺口只问一次）。 */
-	protected static boolean handledInBatch(List<PendingToolCall> settledBatch, String... toolNames) {
+	protected static boolean isHandledInBatch(List<PendingToolCall> settledBatch, String... toolNames) {
 		if (settledBatch == null || toolNames == null) {
 			return false;
 		}
@@ -351,7 +362,7 @@ abstract class HostForm {
 	}
 
 	protected static JsonNode parseJson(String json) {
-		if (json == null || json.isBlank()) {
+		if (StringUtils.isBlank(json)) {
 			return null;
 		}
 		try {

@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.kb;
 
+import org.apache.commons.lang3.ObjectUtils;
+
 /**
  * 知识源抽象（追加 2）：{@code KbService} 只依赖本接口，生产可切 HTTP 源而不动检索/工具/提示词。
  *
@@ -89,6 +91,10 @@ public interface KbSource {
         }
 
         public boolean expired() {
+            return isExpired();
+        }
+
+        public boolean isExpired() {
             return this.deadlineNanos - System.nanoTime() <= 0L;
         }
     }
@@ -106,7 +112,7 @@ public interface KbSource {
             java.util.Map<String, String> contents) {
 
         public ManifestFetch {
-            contents = contents == null ? java.util.Map.of() : java.util.Map.copyOf(contents);
+            contents = java.util.Map.copyOf(ObjectUtils.defaultIfNull(contents, java.util.Map.of()));
         }
 
         public ManifestFetch(KbManifest manifest, String etag, boolean notModified) {

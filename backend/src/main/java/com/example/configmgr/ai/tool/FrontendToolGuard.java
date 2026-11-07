@@ -1,8 +1,12 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.form.FormIssue;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,6 +42,10 @@ public interface FrontendToolGuard {
 
 	/** 是否由本实现复核该工具（按模型给出的工具名原文判定）。 */
 	boolean supports(String toolName);
+
+	default boolean isSupported(String toolName) {
+		return supports(toolName);
+	}
 
 	/**
 	 * 下发前的入参复核。
@@ -167,21 +175,18 @@ public interface FrontendToolGuard {
 	 * @param mapper     JSON 解析器（调用方注入，便于与端点共用同一份配置）
 	 * @param resultJson 前端回灌的 {@code result} 原文（可空 = 不是结构化）
 	 */
-	static boolean structuredResult(String toolName, ObjectMapper mapper, String resultJson) {
+	static boolean isStructuredResult(String toolName, ObjectMapper mapper, String resultJson) {
 		if (toolName != null && SheetWriteGuard.SUPPORTED.contains(toolName)) {
 			return true;
 		}
 		if (mapper == null || resultJson == null) {
 			return false;
 		}
-		int start = 0;
-		while (start < resultJson.length() && Character.isWhitespace(resultJson.charAt(start))) {
-			start++;
-		}
-		if (start >= resultJson.length()) {
+		String stripped = StringUtils.stripStart(resultJson, null);
+		if (stripped.isEmpty()) {
 			return false;
 		}
-		char first = resultJson.charAt(start);
+		char first = stripped.charAt(0);
 		if (first != '{' && first != '[') {
 			return false;
 		}
@@ -193,6 +198,10 @@ public interface FrontendToolGuard {
 			// 坏 JSON / 超深嵌套 / 超长字符串：一律按普通文本处理（旧路径仍可用）
 			return false;
 		}
+	}
+
+	static boolean structuredResult(String toolName, ObjectMapper mapper, String resultJson) {
+		return isStructuredResult(toolName, mapper, resultJson);
 	}
 
 	/**
@@ -209,13 +218,14 @@ public interface FrontendToolGuard {
 	 * @param reasons   被拒原因清单（逐条给出"哪一处、期望什么、实际什么"）
 	 * @param issues    结构化清单（与 {@code reasons} 同源；{@code reasons} 即其 {@code message} 投影）
 	 */
-	record Verdict(boolean accepted, String code, String message, List<String> reasons,
-			List<FormIssue> issues, String resultSuffix) {
+	record Verdict(@JsonProperty("accepted") boolean accepted, @JsonProperty("code") String code,
+			@JsonProperty("message") String message, @JsonProperty("reasons") List<String> reasons,
+			@JsonProperty("issues") List<FormIssue> issues, @JsonProperty("resultSuffix") String resultSuffix) {
 
 		public Verdict {
 			reasons = reasons == null ? List.of() : List.copyOf(reasons);
 			issues = issues == null ? List.of() : List.copyOf(issues);
-			resultSuffix = resultSuffix == null || resultSuffix.isBlank() ? null : resultSuffix;
+			resultSuffix = StringUtils.defaultIfBlank(resultSuffix, null);
 		}
 
 		public static Verdict accept() {
@@ -250,8 +260,14 @@ public interface FrontendToolGuard {
 		 * 本次拒绝是否"改对后可以重试"：{@code *_RESULT_REJECTED} 语义 = 挂起未消费，可改值重发；
 		 * schema 级拒绝不行（表单根本没下发，必须模型改 schema 重新调用）。
 		 */
+		@JsonIgnore
+		public boolean isRetryable() {
+			return this.accepted || StringUtils.endsWith(this.code, "_RESULT_REJECTED");
+		}
+
+		@JsonIgnore
 		public boolean retryable() {
-			return this.accepted || (this.code != null && this.code.endsWith("_RESULT_REJECTED"));
+			return isRetryable();
 		}
 
 		/**
@@ -262,18 +278,18 @@ public interface FrontendToolGuard {
 		 */
 		public String render() {
 			StringBuilder sb = new StringBuilder();
-			sb.append(this.code == null ? "FRONTEND_TOOL_REJECTED" : this.code);
-			if (this.message != null && !this.message.isBlank()) {
+			sb.append(StringUtils.defaultString(this.code, "FRONTEND_TOOL_REJECTED"));
+			if (StringUtils.isNotBlank(this.message)) {
 				sb.append('：').append(this.message);
 			}
-			if (this.reasons != null && !this.reasons.isEmpty()) {
+			if (CollectionUtils.isNotEmpty(this.reasons)) {
 				sb.append("\n被拒原因：");
 				for (int i = 0; i < this.reasons.size(); i++) {
 					sb.append("\n").append(i + 1).append(". ").append(this.reasons.get(i));
 				}
 			}
 			// G-A：机器可读清单（与上面的人读清单同源）—— 模型可据此精准定位字段与问题类别
-			if (this.issues != null && !this.issues.isEmpty()) {
+			if (CollectionUtils.isNotEmpty(this.issues)) {
 				sb.append("\n机器可读：");
 				for (int i = 0; i < this.issues.size(); i++) {
 					FormIssue issue = this.issues.get(i);

@@ -2,6 +2,8 @@ package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.tool.PromptDelimiters;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -176,8 +178,8 @@ public final class RollingSummarizer {
 	 */
 	public static Plan plan(List<Message> messages, int keepRecentTurns, int chunkTokens,
 			Set<String> protectedToolCallIds, ProviderRuntime runtime, Summarizer summarizer, long nowMs) {
-		if (messages == null || messages.isEmpty()) {
-			return unchanged(messages, 0, REASON_NOTHING_TO_SUMMARIZE);
+		if (CollectionUtils.isEmpty(messages)) {
+			return unchanged(messages == null ? List.of() : messages, 0, REASON_NOTHING_TO_SUMMARIZE);
 		}
 		if (summarizer == null || runtime == null) {
 			return unchanged(messages, 0, REASON_SUMMARY_FAILED);
@@ -196,67 +198,83 @@ public final class RollingSummarizer {
 		}
 		int cutIndex = segments.get(cut).startIndex();
 		List<Message> prefix = body.subList(0, cutIndex);
-		int chunk = Math.max(1, chunkTokens);
-		int bodyBudget = Math.max(1, chunk - PROMPT_RESERVE_TOKENS);
-		int requests = 0;
-		int keptSegments = 0;
-		String summary;
+		int[] requests = { 0 };
+		SummaryWork work = null;
 		try {
-			List<String> blocks = new ArrayList<>(prefix.size());
-			for (Message message : prefix) {
-				String rendered = render(message);
-				if (!rendered.isBlank()) {
-					blocks.add(rendered);
-				}
-			}
-			List<String> partials = new ArrayList<>();
-			for (List<String> group : group(blocks, bodyBudget)) {
-				String partial = summarizer.summarize(chunkSystemPrompt(chunk), chunkUserPrompt(group), runtime);
-				requests++;
-				if (partial == null || partial.isBlank()) {
-					// 这一段旧轮没有任何产物覆盖：拼进摘要或跳过它都等于静默丢历史 ⇒ 整次摘要按失败收口
-					return unchanged(messages, requests, REASON_SUMMARY_FAILED);
-				}
-				partials.add(partial);
-			}
-			while (partials.size() > 1) {
-				List<List<String>> mergeGroups = group(partials, bodyBudget);
-				if (mergeGroups.size() >= partials.size()) {
-					// 每段摘要自身就超过合并正文预算：再合并既不会更小、请求体也必然越窗。
-					// 停在这里并保留全部段（绝不只取第一段）。
-					break;
-				}
-				List<String> merged = new ArrayList<>(mergeGroups.size());
-				for (List<String> mergeGroup : mergeGroups) {
-					if (mergeGroup.size() == 1) {
-						// 单段组原样带过：为它单发"合并"请求既缩不小，还会重写一遍已有摘要
-						merged.add(mergeGroup.get(0));
-						continue;
-					}
-					String combined = summarizer.summarize(mergeSystemPrompt(chunk), mergeUserPrompt(mergeGroup),
-							runtime);
-					requests++;
-					if (combined == null || combined.isBlank()) {
-						return unchanged(messages, requests, REASON_SUMMARY_FAILED);
-					}
-					merged.add(combined);
-				}
-				partials = merged;
-			}
-			keptSegments = partials.size();
-			summary = partials.isEmpty() ? "" : joinPartials(partials);
+			work = summarizePrefix(prefix, Math.max(1, chunkTokens), runtime, summarizer, requests);
 		}
 		catch (InterruptedException ex) {
 			Thread.currentThread().interrupt();
-			return unchanged(messages, requests, REASON_SUMMARY_FAILED);
+			return unchanged(messages, requests[0], REASON_SUMMARY_FAILED);
 		}
 		catch (Exception ex) {
-			return unchanged(messages, requests, REASON_SUMMARY_FAILED);
+			return unchanged(messages, requests[0], REASON_SUMMARY_FAILED);
 		}
-		if (summary == null || summary.isBlank()) {
-			return unchanged(messages, requests, REASON_SUMMARY_FAILED);
+		return buildSummaryPlan(messages, system, body, cutIndex, cut, prefix, work, Math.max(1, chunkTokens), nowMs);
+	}
+
+	private static SummaryWork summarizePrefix(List<Message> prefix, int chunk, ProviderRuntime runtime,
+			Summarizer summarizer, int[] requests) throws Exception {
+		int bodyBudget = Math.max(1, chunk - PROMPT_RESERVE_TOKENS);
+		List<String> blocks = new ArrayList<>(prefix.size());
+		for (Message message : prefix) {
+			String rendered = render(message);
+			if (!rendered.isBlank()) {
+				blocks.add(rendered);
+			}
 		}
-		summary = summary.trim();
+		SummaryWork initial = summarizeGroups(blocks, chunk, bodyBudget, runtime, summarizer, requests);
+		if (initial.summary() == null) {
+			return initial;
+		}
+		return mergePartials(initial.partials(), chunk, bodyBudget, runtime, summarizer, requests);
+	}
+
+	private static SummaryWork summarizeGroups(List<String> blocks, int chunk, int bodyBudget, ProviderRuntime runtime,
+			Summarizer summarizer, int[] requests) throws Exception {
+		List<String> partials = new ArrayList<>();
+		for (List<String> group : group(blocks, bodyBudget)) {
+			String partial = summarizer.summarize(chunkSystemPrompt(chunk), chunkUserPrompt(group), runtime);
+			requests[0]++;
+			if (StringUtils.isBlank(partial)) {
+				return new SummaryWork(null, requests[0], 0, partials);
+			}
+			partials.add(partial);
+		}
+		return new SummaryWork(joinPartials(partials), requests[0], partials.size(), partials);
+	}
+
+	private static SummaryWork mergePartials(List<String> partials, int chunk, int bodyBudget, ProviderRuntime runtime,
+			Summarizer summarizer, int[] requests) throws Exception {
+		while (partials.size() > 1) {
+			List<List<String>> mergeGroups = group(partials, bodyBudget);
+			if (mergeGroups.size() >= partials.size()) {
+				break;
+			}
+			List<String> merged = new ArrayList<>(mergeGroups.size());
+			for (List<String> mergeGroup : mergeGroups) {
+				if (mergeGroup.size() == 1) {
+					merged.add(mergeGroup.getFirst());
+					continue;
+				}
+				String combined = summarizer.summarize(mergeSystemPrompt(chunk), mergeUserPrompt(mergeGroup), runtime);
+				requests[0]++;
+				if (StringUtils.isBlank(combined)) {
+					return new SummaryWork(null, requests[0], 0, partials);
+				}
+				merged.add(combined);
+			}
+			partials = merged;
+		}
+		return new SummaryWork(joinPartials(partials), requests[0], partials.size(), partials);
+	}
+
+	private static Plan buildSummaryPlan(List<Message> messages, List<Message> system, List<Message> body, int cutIndex,
+			int cut, List<Message> prefix, SummaryWork work, int chunk, long nowMs) {
+		if (StringUtils.isBlank(work.summary())) {
+			return unchanged(messages, work.requests(), REASON_SUMMARY_FAILED);
+		}
+		String summary = work.summary().trim();
 		String digestText = SUMMARY_PREFIX + "\n" + SUMMARY_OPEN + "\n"
 				+ neutralizeAll(summary, SUMMARY_TAGS) + "\n" + SUMMARY_CLOSE;
 		int prefixTokens = ContextEstimator.estimateMessages(prefix);
@@ -267,14 +285,17 @@ public final class RollingSummarizer {
 		metadata.put(META_TURNS, cut);
 		metadata.put(META_LOST, lost);
 		metadata.put(META_AT, nowMs);
-		metadata.put(META_SEGMENTS, keptSegments);
+		metadata.put(META_SEGMENTS, work.keptSegments());
 		metadata.put(META_OVER_BUDGET, Math.max(0, ContextEstimator.estimate(summary) - chunk));
 		UserMessage digest = UserMessage.builder().text(digestText).metadata(metadata).build();
 		List<Message> out = new ArrayList<>(system.size() + 1 + body.size() - cutIndex);
 		out.addAll(system);
 		out.add(digest);
 		out.addAll(body.subList(cutIndex, body.size()));
-		return new Plan(List.copyOf(out), cut, lost, summary.length(), requests, summary, REASON_SUMMARY);
+		return new Plan(List.copyOf(out), cut, lost, summary.length(), work.requests(), summary, REASON_SUMMARY);
+	}
+
+	private record SummaryWork(String summary, int requests, int keptSegments, List<String> partials) {
 	}
 
 	private static Plan unchanged(List<Message> messages, int requests, String reason) {
@@ -311,7 +332,7 @@ public final class RollingSummarizer {
 	 */
 	private static String joinPartials(List<String> partials) {
 		if (partials.size() == 1) {
-			return partials.get(0);
+			return partials.getFirst();
 		}
 		StringBuilder summary = new StringBuilder();
 		for (String partial : partials) {
@@ -398,7 +419,7 @@ public final class RollingSummarizer {
 		if (message == null) {
 			return "";
 		}
-		String text = message.getText() == null ? "" : message.getText();
+		String text = StringUtils.defaultString(message.getText());
 		return switch (message.getMessageType()) {
 			case USER -> "user: " + text;
 			case ASSISTANT -> {

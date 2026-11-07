@@ -2,6 +2,7 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
@@ -144,7 +145,7 @@ public class ToolActivityBeacon {
 		finished.put("outcome", outcome);
 		finished.put("exitedAtMs", now);
 		this.lastFinished.put(key, finished);
-		log.debug("tool execution finished runId={} tool={} outcome={}", runId, finished.get("tool"), outcome);
+		if (log.isDebugEnabled()) log.debug("tool execution finished runId={} tool={} outcome={}", runId, finished.get("tool"), outcome);
 	}
 
 	/**
@@ -214,7 +215,7 @@ public class ToolActivityBeacon {
 	 * <p>预算判据在段结束期间<b>暂停</b>：否则一次十几分钟的表单填写会在等待期里被判成
 	 * {@code TOTAL_BUDGET}，把"无上限的等待"变成 300s 的死线（决策看板 {@code :14} 的挂起点）。
 	 */
-	public boolean inGateWait(String runId) {
+	public boolean isInGateWait(String runId) {
 		AtomicLong since = this.gateWaitSinceMs.get(key(runId));
 		return since != null && since.get() > 0L;
 	}
@@ -261,7 +262,7 @@ public class ToolActivityBeacon {
 	}
 
 	/** 本轮是否已武装（收尾中）。 */
-	public boolean budgetArmed(String runId) {
+	public boolean isBudgetArmed(String runId) {
 		AtomicLong armedAt = this.budgetArmedAtMs.get(key(runId));
 		return armedAt != null && armedAt.get() > 0L;
 	}
@@ -319,7 +320,7 @@ public class ToolActivityBeacon {
 	 * <p>幂等：未活动过 / 已清理 / {@code runId=null} 都不报错、不产生新记录。
 	 */
 	public void clearRun(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return;
 		}
 		this.lastActivityAtMs.remove(key(runId));

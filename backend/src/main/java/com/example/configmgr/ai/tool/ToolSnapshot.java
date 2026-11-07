@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.tool;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -11,7 +13,8 @@ import java.util.Map;
  * 快照版本（{@code version()}）用于日志与缓存排查：工具描述是 prompt 前缀的第一段，
  * 改文案会让"tools → system → messages"整段缓存失效，故版本变化必须可观测。
  */
-public record ToolSnapshot(Map<String, ToolDefinitionOverride> byToolKey, String version, String lang) {
+public record ToolSnapshot(@JsonProperty("byToolKey") Map<String, ToolDefinitionOverride> byToolKey,
+        @JsonProperty("version") String version, @JsonProperty("lang") String lang) {
 
     public ToolSnapshot {
         byToolKey = byToolKey == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(byToolKey));
@@ -27,7 +30,7 @@ public record ToolSnapshot(Map<String, ToolDefinitionOverride> byToolKey, String
             return null;
         }
         for (ToolDefinitionOverride override : byToolKey.values()) {
-            if (modelName.equals(override.effectiveModelName()) && override.published()) {
+            if (modelName.equals(override.effectiveModelName()) && override.isPublished()) {
                 return override;
             }
         }

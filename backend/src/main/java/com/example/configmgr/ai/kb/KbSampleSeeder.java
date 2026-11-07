@@ -85,12 +85,18 @@ public final class KbSampleSeeder {
      * @return true = 本次真的播种了；false = 跳过/失败（失败已 WARN）
      */
     public boolean seedIfAbsent() {
+        return isSeedApplied();
+    }
+
+    public boolean isSeedApplied() {
         if (this.loader.getResource(CLASSPATH_ROOT + "/" + MANIFEST) == null) {
             // 非打包构建（IDE 直接跑测试等）：没有随包样例可播，静默跳过
-            log.debug("Classpath resource {}/{} missing; skip sample seeding", CLASSPATH_ROOT, MANIFEST);
+            if (log.isDebugEnabled()) {
+                log.debug("Classpath resource {}/{} missing; skip sample seeding", CLASSPATH_ROOT, MANIFEST);
+            }
             return false;
         }
-        if (!needsSeed()) {
+        if (!isSeedNeeded()) {
             return false;
         }
         Path parent = this.targetDir.getParent();
@@ -113,10 +119,10 @@ public final class KbSampleSeeder {
                 return false;
             }
             // 抢锁后重判：持锁方可能刚播完并释放
-            if (!needsSeed()) {
+            if (!isSeedNeeded()) {
                 return false;
             }
-            return doSeed(parent);
+            return isSeedWritten(parent);
         }
         catch (IOException e) {
             log.warn("KB sample seed lock unavailable (startup unaffected; loading as-is)", e);
@@ -134,7 +140,7 @@ public final class KbSampleSeeder {
         }
     }
 
-    private boolean doSeed(Path parent) {
+    private boolean isSeedWritten(Path parent) {
         Path staging = null;
         try {
             String manifestText = MarkdownChunker.normalize(readText(MANIFEST));
@@ -170,7 +176,7 @@ public final class KbSampleSeeder {
         }
     }
 
-    private boolean needsSeed() {
+    private boolean isSeedNeeded() {
         if (!Files.exists(this.targetDir)) {
             return true;
         }

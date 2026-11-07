@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.data.service.ConditionOperators;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.definition.entity.ConfigDefinition;
@@ -12,6 +13,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -131,7 +134,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         if (!supports(toolName)) {
             return Verdict.accept();
         }
-        if (argumentsJson == null || argumentsJson.isBlank()) {
+        if (StringUtils.isBlank(argumentsJson)) {
             return reject("入参不能为空：至少要有 "
                     + (AiToolNames.SELECT_DEFINITIONS.equals(toolName) ? "codes" : "defCode/conditions") + "。");
         }
@@ -175,19 +178,22 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         catch (RuntimeException ex) {
             // 读失败不等于"参数不合法"：前端仍是最终判据（不能把一次合法调用误判成拒绝）
-            log.warn("could not read task entry; set_condition did not append the task predicate taskId={}", taskId, ex);
+            if (LogSampling.canAcquire("wizard-task-selection-read")) {
+                log.warn("could not read task entry; set_condition did not append the task predicate taskId={}", taskId, ex);
+            }
             return accepted;
         }
-        if (task == null || task.getItems() == null || task.getItems().isEmpty()) {
+        if (task == null || CollectionUtils.isEmpty(task.getItems())) {
             return accepted;
         }
         JsonNode root = parse(argumentsJson);
         String defCode = root == null ? null : text(root.get("defCode"));
-        if (defCode == null || defCode.isBlank()) {
+        if (StringUtils.isBlank(defCode)) {
             return accepted;
         }
         for (TaskItem item : task.getItems()) {
-            if (item != null && item.getDefCode() != null && defCode.trim().equals(item.getDefCode().trim())) {
+            if (item != null && item.getDefCode() != null
+                    && StringUtils.equals(StringUtils.trim(defCode), StringUtils.trim(item.getDefCode()))) {
                 return accepted;
             }
         }
@@ -217,7 +223,7 @@ public class WizardActionGuard implements FrontendToolGuard {
     /** 解析入参原文；不是合法 JSON 对象时返回 {@code null}（调用方给固定文案）。 */
     private JsonNode parse(String argumentsJson) {
         try {
-            JsonNode root = this.mapper.readTree(argumentsJson == null ? "" : argumentsJson);
+            JsonNode root = this.mapper.readTree(StringUtils.defaultString(argumentsJson));
             return root != null && root.isObject() ? root : null;
         }
         catch (Exception error) {
@@ -235,6 +241,18 @@ public class WizardActionGuard implements FrontendToolGuard {
             }
         }
         JsonNode codesNode = root.has("codes") ? root.get("codes") : root.get("defCodes");
+        List<String> codes = validateSelectCodes(codesNode, reasons);
+        if (root.hasNonNull("mode") && !MODES.contains(text(root.get("mode")))) {
+            reasons.add("mode 只能是 REPLACE 或 ADD（大小写敏感；小写会被前端静默当成 REPLACE，故不接受）：实际 "
+                    + root.get("mode") + "。");
+        }
+        if (reasons.isEmpty() && !codes.isEmpty()) {
+            validateKnownDefinitions(codes, reasons);
+        }
+        return reasons;
+    }
+
+    private List<String> validateSelectCodes(JsonNode codesNode, List<String> reasons) {
         List<String> codes = new ArrayList<>();
         if (codesNode == null || codesNode.isNull()) {
             reasons.add("codes 必填（要勾选的配置定义编码列表，不能为空）。");
@@ -245,7 +263,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         else {
             for (JsonNode item : codesNode) {
                 String code = item != null && item.isTextual() ? item.asText() : null;
-                if (code == null || code.isBlank()) {
+                if (StringUtils.isBlank(code)) {
                     reasons.add("codes 的每一项都必须是非空字符串（实际出现：" + item + "）。");
                     continue;
                 }
@@ -257,29 +275,25 @@ public class WizardActionGuard implements FrontendToolGuard {
                 reasons.add("codes 不能为空数组（要勾选哪些配置项必须写明；清空选择请让用户手动操作）。");
             }
         }
-        if (root.hasNonNull("mode") && !MODES.contains(text(root.get("mode")))) {
-            reasons.add("mode 只能是 REPLACE 或 ADD（大小写敏感；小写会被前端静默当成 REPLACE，故不接受）：实际 "
-                    + root.get("mode") + "。");
-        }
-        // 形状先判：codes 已经不合法时不再挨个查定义（也避免把"空选"解释成"全部有效"）
-        if (reasons.isEmpty() && !codes.isEmpty()) {
-            List<String> known = new ArrayList<>();
-            List<String> unknown = new ArrayList<>();
-            for (String code : codes) {
-                if (definitionExists(code)) {
-                    known.add(code);
-                }
-                else {
-                    unknown.add(code);
-                }
+        return codes;
+    }
+
+    private void validateKnownDefinitions(List<String> codes, List<String> reasons) {
+        List<String> known = new ArrayList<>();
+        List<String> unknown = new ArrayList<>();
+        for (String code : codes) {
+            if (isDefinitionPresent(code)) {
+                known.add(code);
             }
-            if (!unknown.isEmpty()) {
-                reasons.add("以下配置定义不存在（未下发、未勾选任何不存在的项）：" + String.join("、", unknown)
-                        + (known.isEmpty() ? "" : "；本次可用的 codes：" + String.join("、", known))
-                        + "。可用 list_config_defs 查编码。");
+            else {
+                unknown.add(code);
             }
         }
-        return reasons;
+        if (!unknown.isEmpty()) {
+            reasons.add("以下配置定义不存在（未下发、未勾选任何不存在的项）：" + String.join("、", unknown)
+                    + (known.isEmpty() ? "" : "；本次可用的 codes：" + String.join("、", known))
+                    + "。可用 list_config_defs 查编码。");
+        }
     }
 
     // ── set_condition ───────────────────────────────────────────────────────
@@ -293,7 +307,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         String defCode = text(root.get("defCode"));
         ConfigDefinition definition = null;
-        if (defCode == null || defCode.isBlank()) {
+        if (StringUtils.isBlank(defCode)) {
             reasons.add("defCode 必填（要给哪个配置定义设条件）。");
         }
         else {
@@ -325,7 +339,7 @@ public class WizardActionGuard implements FrontendToolGuard {
             }
         }
         List<String> scopeKeys = validateScopeKeys(conditions.get("scopeKeys"), reasons);
-        boolean hasFields = validateFields(conditions.get("fields"), definition, reasons);
+        boolean hasFields = hasValidFields(conditions.get("fields"), definition, reasons);
         if (scopeKeys.isEmpty() && !hasFields) {
             reasons.add("条件为空：fields:[] / scopeKeys:[] 有结构但没有可提交的条件（压平后等于导出全部数据），"
                     + "不能当作“设置成功”；要表达明确不设筛选请恰好传空对象 {}。");
@@ -344,7 +358,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         for (JsonNode item : scopeKeys) {
             String value = item != null && item.isTextual() ? item.asText() : null;
-            if (value == null || value.isBlank()) {
+            if (StringUtils.isBlank(value)) {
                 reasons.add("conditions.scopeKeys 的每一项都必须是非空字符串（实际出现：" + item + "）。");
                 continue;
             }
@@ -354,7 +368,7 @@ public class WizardActionGuard implements FrontendToolGuard {
     }
 
     /** @return 是否至少有一条合法的字段条件（用于"空条件"判定） */
-    private boolean validateFields(JsonNode fields, ConfigDefinition definition, List<String> reasons) {
+    private boolean hasValidFields(JsonNode fields, ConfigDefinition definition, List<String> reasons) {
         if (fields == null || fields.isNull()) {
             return false;
         }
@@ -368,49 +382,54 @@ public class WizardActionGuard implements FrontendToolGuard {
         int index = 0;
         for (JsonNode field : fields) {
             index += 1;
-            if (field == null || !field.isObject()) {
-                reasons.add("conditions.fields[" + index + "] 必须是对象。");
-                continue;
-            }
-            boolean fieldOk = true;
-            for (String key : fieldNames(field)) {
-                if (!FIELD_CONDITION_KEYS.contains(key)) {
-                    reasons.add("conditions.fields[" + index + "] 不认识的键 `" + key
-                            + "`：只接受 fieldCode / operator / value。");
-                    fieldOk = false;
-                }
-            }
-            String fieldCode = text(field.get("fieldCode"));
-            if (fieldCode == null || fieldCode.isBlank()) {
-                reasons.add("conditions.fields[" + index + "].fieldCode 必填。");
-                fieldOk = false;
-            }
-            else if (!seenFieldCodes.add(fieldCode.trim())) {
-                reasons.add("conditions.fields[" + index + "].fieldCode 重复：" + fieldCode.trim()
-                        + "（同一字段只能有一条条件；单字段区间用 GTE + LTE 两条，不接受重复字段）。");
-                fieldOk = false;
-            }
-            else if (definition != null && !fieldCodes.contains(fieldCode.trim())) {
-                reasons.add("conditions.fields[" + index + "].fieldCode 不属于 " + definition.getCode()
-                        + "：" + fieldCode + "（可用字段：" + String.join("、", fieldCodes) + "）。");
-                fieldOk = false;
-            }
-            String operator = text(field.get("operator"));
-            if (operator == null || !OPERATORS.contains(operator.trim().toUpperCase())) {
-                reasons.add("conditions.fields[" + index + "].operator 只能是 "
-                        + "EQ/NE/CONTAINS/LIKE/STARTS_WITH/IN/EMPTY/NOT_EMPTY/GT/GTE/LT/LTE"
-                        + "（实际 " + operator + "）。");
-                fieldOk = false;
-            }
-            else if (!validateOperatorValue(field.get("value"), operator.trim().toUpperCase(), index, reasons)) {
-                fieldOk = false;
-            }
-            accepted |= fieldOk;
+            accepted |= validateField(field, index, fieldCodes, definition, seenFieldCodes, reasons);
         }
         return accepted;
     }
 
-    private boolean validateOperatorValue(JsonNode value, String operator, int index, List<String> reasons) {
+    private boolean validateField(JsonNode field, int index, Set<String> fieldCodes, ConfigDefinition definition,
+            Set<String> seenFieldCodes, List<String> reasons) {
+        if (field == null || !field.isObject()) {
+            reasons.add("conditions.fields[" + index + "] 必须是对象。");
+            return false;
+        }
+        boolean fieldOk = true;
+        for (String key : fieldNames(field)) {
+            if (!FIELD_CONDITION_KEYS.contains(key)) {
+                reasons.add("conditions.fields[" + index + "] 不认识的键 `" + key
+                        + "`：只接受 fieldCode / operator / value。");
+                fieldOk = false;
+            }
+        }
+        String fieldCode = text(field.get("fieldCode"));
+        if (StringUtils.isBlank(fieldCode)) {
+            reasons.add("conditions.fields[" + index + "].fieldCode 必填。");
+            fieldOk = false;
+        }
+        else if (!seenFieldCodes.add(fieldCode.trim())) {
+            reasons.add("conditions.fields[" + index + "].fieldCode 重复：" + fieldCode.trim()
+                    + "（同一字段只能有一条条件；单字段区间用 GTE + LTE 两条，不接受重复字段）。");
+            fieldOk = false;
+        }
+        else if (definition != null && !fieldCodes.contains(fieldCode.trim())) {
+            reasons.add("conditions.fields[" + index + "].fieldCode 不属于 " + definition.getCode()
+                    + "：" + fieldCode + "（可用字段：" + String.join("、", fieldCodes) + "）。");
+            fieldOk = false;
+        }
+        String operator = text(field.get("operator"));
+        if (operator == null || !OPERATORS.contains(StringUtils.upperCase(StringUtils.trim(operator)))) {
+            reasons.add("conditions.fields[" + index + "].operator 只能是 "
+                    + "EQ/NE/CONTAINS/LIKE/STARTS_WITH/IN/EMPTY/NOT_EMPTY/GT/GTE/LT/LTE"
+                    + "（实际 " + operator + "）。");
+            fieldOk = false;
+        }
+        else if (!isOperatorValueValid(field.get("value"), StringUtils.upperCase(StringUtils.trim(operator)), index, reasons)) {
+            fieldOk = false;
+        }
+        return fieldOk;
+    }
+
+    private boolean isOperatorValueValid(JsonNode value, String operator, int index, List<String> reasons) {
         if (VALUELESS_OPERATORS.contains(operator)) {
             return true;
         }
@@ -431,7 +450,7 @@ public class WizardActionGuard implements FrontendToolGuard {
                 return false;
             }
             for (JsonNode item : value) {
-                if (item == null || item.isNull() || (item.isTextual() && item.asText().isBlank())) {
+                if (item == null || item.isNull() || (item.isTextual() && StringUtils.isBlank(item.asText()))) {
                     reasons.add("conditions.fields[" + index + "].value 在 operator=IN 时每一项都必须是非空字符串"
                             + "（实际出现：" + item + "）。");
                     return false;
@@ -440,7 +459,7 @@ public class WizardActionGuard implements FrontendToolGuard {
             return true;
         }
         String expect = text(value);
-        if (expect != null && expect.isBlank()) {
+        if (StringUtils.isBlank(expect)) {
             reasons.add("conditions.fields[" + index + "].value 不能是空串或纯空白（operator=" + operator
                     + " 需要真实比较值；空值会被前端压平丢弃并放大成导出全部；判断空值请用 EMPTY / NOT_EMPTY）。");
             return false;
@@ -465,7 +484,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
     }
 
-    private boolean definitionExists(String code) {
+    private boolean isDefinitionPresent(String code) {
         return findDefinition(code) != null;
     }
 
@@ -474,7 +493,7 @@ public class WizardActionGuard implements FrontendToolGuard {
         List<ConfigField> fields = definition.getFields();
         if (fields != null) {
             for (ConfigField field : fields) {
-                if (field != null && field.getCode() != null && !field.getCode().isBlank()) {
+                if (field != null && StringUtils.isNotBlank(field.getCode())) {
                     codes.add(field.getCode());
                 }
             }

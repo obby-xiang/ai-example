@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.kb;
 
+import org.apache.commons.lang3.ObjectUtils;
+
 import java.util.List;
 
 /**
@@ -12,8 +14,8 @@ import java.util.List;
 public record KbDoc(KbDocMeta meta, String content, List<KbSection> sections, List<KbChunk> chunks) {
 
     public KbDoc {
-        sections = sections == null ? List.of() : List.copyOf(sections);
-        chunks = chunks == null ? List.of() : List.copyOf(chunks);
+        sections = List.copyOf(ObjectUtils.defaultIfNull(sections, List.of()));
+        chunks = List.copyOf(ObjectUtils.defaultIfNull(chunks, List.of()));
     }
 
     /** 只换元数据（标题/别名/摘要），正文与切块原样复用。 */

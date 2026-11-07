@@ -1,11 +1,16 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.stream.ByteRecord;
@@ -45,7 +50,7 @@ import java.util.function.LongSupplier;
  * seq <n> frame <json>}（近似裁剪；<b>窗口 = min(条数窗口 {@link #STREAM_WINDOW}, 字节预算推导的等效窗口)</b>，
  * 见 {@link #windowForPayload(long)}；<b>entry ID = {@code seq}-0</b>），
  * 字段 {@code seq} + {@code frame}（帧 JSON 原文，已含截断结果，与实时投递同一份）；
- * 每次追加后 {@code EXPIRE}= session-ttl（滑动续期，与 {@code ai:run:} 同寿）；</li>
+ * 每次追加后 {@code EXPIRE}= min(session-ttl, 7 天)（仅真实读写续期，不保留永久键）；</li>
  * <li>{@code ai:seq:<runId>} STRING —— 业务序号发放口（{@code INCR}，跨实例原子）；
  * 键缺失/过期/降级后恢复时按"已落档末号"自修复抬回（{@code repairRollback}），
  * 保证 24h 后键过期不会让号从 1 重来；</li>
@@ -587,7 +592,7 @@ public class RedisFrameStore implements FrameStore {
 		this.mapper = mapper;
 		this.properties = properties;
 		this.streamWindow = streamWindow > 0 ? streamWindow : STREAM_WINDOW;
-		this.clock = clock != null ? clock : System::currentTimeMillis;
+		this.clock = ObjectUtils.defaultIfNull(clock, System::currentTimeMillis);
 		this.lastSweepMs.set(this.clock.getAsLong());
 	}
 
@@ -698,10 +703,10 @@ public class RedisFrameStore implements FrameStore {
 				List.of(seqKey(runId), streamKey(runId)),
 				String.valueOf(ttlSeconds), String.valueOf(fallbackLast), String.valueOf(TAIL_PROBE),
 				state.repairDegraded.get() ? "1" : "0");
-		if (result == null || result.isEmpty()) {
+		if (CollectionUtils.isEmpty(result)) {
 			throw new IllegalStateException("Sequence script returned null");
 		}
-		long seq = scriptSeq(result.get(0));
+		long seq = scriptSeq(result.getFirst());
 		boolean degraded = result.size() > 1 && scriptSeq(result.get(1)) != 0L;
 		return new SeqAllocation(seq, degraded);
 	}
@@ -721,7 +726,7 @@ public class RedisFrameStore implements FrameStore {
 			return number.longValue();
 		}
 		if (value instanceof byte[] bytes) {
-			return parseSeq(new String(bytes, StandardCharsets.UTF_8));
+			return parseSeq(org.apache.commons.codec.binary.StringUtils.newStringUtf8(bytes));
 		}
 		return parseSeq(String.valueOf(value));
 	}
@@ -777,7 +782,7 @@ public class RedisFrameStore implements FrameStore {
 		long seq = seqOf(frame);
 		if (seq <= 0L) {
 			// N-4：无 seq 的帧不进 Stream（否则会写入一条 seq=0 记录，被 streamTailSeq 当成末号）。
-			log.debug("event log skipping frame without seq runId={} type={}", runId, type);
+			if (log.isDebugEnabled()) log.debug("event log skipping frame without seq runId={} type={}", runId, type);
 			return AppendResult.skipped();
 		}
 		byte[] payload = producePayload(runId, type, frame, payloadFactory);
@@ -854,6 +859,43 @@ public class RedisFrameStore implements FrameStore {
 		// 回包未知的重试<b>最多一次</b>（返修第 6 条）：每次重试都是持出帧锁跑一遍脚本
 		// （INCR + XADD），回包持续丢失时多试只会把锁占住更久；而同 token 的幂等判定是确定性的
 		// —— 第二次认不出，第三次也不会认出。
+		return appendWithRetries(runId, frame, type, split, state, token, ttlSeconds, window, forceRepair,
+				expectedEpoch);
+	}
+
+	/** 执行一次原子落档脚本，并把回包解码成 {@code {seq, degraded, idempotent}}。 */
+	private AppendAllocation allocateAndAppend(String runId, RunState state, String token, SeqSplit split,
+			long ttlSeconds, int window, boolean forceRepair, long expectedEpoch) {
+		List<?> result = this.redis.execute(APPEND_SCRIPT,
+				List.of(seqKey(runId), streamKey(runId), ackKey(runId), trimKey(runId),
+						RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, runId)),
+				String.valueOf(ttlSeconds), String.valueOf(Math.max(0L, state.fallbackSeq.get())),
+				String.valueOf(TAIL_PROBE), String.valueOf(window), forceRepair ? "1" : "0",
+				String.valueOf(ACK_TTL_SECONDS), token, split.headText(), split.tailText(),
+				String.valueOf(expectedEpoch));
+		if (CollectionUtils.isEmpty(result)) {
+			throw new IllegalStateException("Atomic archive script returned null");
+		}
+		long seq = scriptSeq(result.getFirst());
+		boolean degraded = scriptSeq(result.get(1)) != 0L;
+		boolean idempotent = result.size() > 2 && scriptSeq(result.get(2)) != 0L;
+		if (degraded) {
+			state.repairDegraded.set(true);
+			// I-4：降级必须进统一计数（/api/ai/health 的 redis.degradations）—— 脚本里读不出的是
+			// 归档末号，与 A4 的语义一致；日志每轮一次。
+			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ);
+			if (state.repairDegradedWarned.compareAndSet(false, true)) {
+				log.warn("archive degraded runId={} (archive tail unreadable; using counter seq; next append re-anchors with forceRepair)", runId);
+			}
+		}
+		else if (seq > 0L) {
+			state.repairDegraded.set(false);
+		}
+		return new AppendAllocation(seq, degraded, idempotent);
+	}
+
+	private AppendResult appendWithRetries(String runId, Map<String, Object> frame, String type, SeqSplit split,
+			RunState state, String token, long ttlSeconds, int window, boolean forceRepair, long expectedEpoch) {
 		int unknownReplyRetries = 0;
 		for (int attempt = 1; attempt <= APPEND_ATTEMPTS; attempt++) {
 			AppendAllocation allocation;
@@ -891,40 +933,9 @@ public class RedisFrameStore implements FrameStore {
 					+ "cursor not advanced; further same failures only counted)", runId, type);
 		}
 		else {
-			log.debug("event log archive failed runId={} type={} (already counted, no duplicate warning this turn)", runId, type);
+			if (log.isDebugEnabled()) log.debug("event log archive failed runId={} type={} (already counted, no duplicate warning this turn)", runId, type);
 		}
 		return AppendResult.skipped();
-	}
-
-	/** 执行一次原子落档脚本，并把回包解码成 {@code {seq, degraded, idempotent}}。 */
-	private AppendAllocation allocateAndAppend(String runId, RunState state, String token, SeqSplit split,
-			long ttlSeconds, int window, boolean forceRepair, long expectedEpoch) {
-		List<?> result = this.redis.execute(APPEND_SCRIPT,
-				List.of(seqKey(runId), streamKey(runId), ackKey(runId), trimKey(runId),
-						RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, runId)),
-				String.valueOf(ttlSeconds), String.valueOf(Math.max(0L, state.fallbackSeq.get())),
-				String.valueOf(TAIL_PROBE), String.valueOf(window), forceRepair ? "1" : "0",
-				String.valueOf(ACK_TTL_SECONDS), token, split.headText(), split.tailText(),
-				String.valueOf(expectedEpoch));
-		if (result == null || result.isEmpty()) {
-			throw new IllegalStateException("Atomic archive script returned null");
-		}
-		long seq = scriptSeq(result.get(0));
-		boolean degraded = scriptSeq(result.get(1)) != 0L;
-		boolean idempotent = result.size() > 2 && scriptSeq(result.get(2)) != 0L;
-		if (degraded) {
-			state.repairDegraded.set(true);
-			// I-4：降级必须进统一计数（/api/ai/health 的 redis.degradations）—— 脚本里读不出的是
-			// 归档末号，与 A4 的语义一致；日志每轮一次。
-			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ);
-			if (state.repairDegradedWarned.compareAndSet(false, true)) {
-				log.warn("archive degraded runId={} (archive tail unreadable; using counter seq; next append re-anchors with forceRepair)", runId);
-			}
-		}
-		else if (seq > 0L) {
-			state.repairDegraded.set(false);
-		}
-		return new AppendAllocation(seq, degraded, idempotent);
 	}
 
 	/** 固定 run 幂等 HASH：{@code ai:xack:{...run:<runId>}}，token 为 field。 */
@@ -989,10 +1000,16 @@ public class RedisFrameStore implements FrameStore {
 		catch (Exception ex) {
 			ArchivedEntry exact = entryAt(runId, seq);
 			if (exact.exists() && Arrays.equals(exact.frame(), payload)) {
-				// 幂等：同一号 + 同一份帧体已在归档里（重试 / 回包丢失）—— 不写第二条，只续期。
-				refreshTtl(key, ttlSeconds);
-				refreshTrimTtl(runId, ttlSeconds);
-				return new AppendResult(seq, payload);
+				if (!isArchiveTtlValid(key, ttlSeconds)) {
+					refreshTtl(key, ttlSeconds);
+				}
+				if (isArchiveTtlValid(key, ttlSeconds)) {
+					refreshTrimTtl(runId, ttlSeconds);
+					return new AppendResult(seq, payload);
+				}
+				log.warn("event log exact frame TTL unverified runId={} type={} seq={} (not reported as archived)", runId,
+						type, seq, ex);
+				return AppendResult.skipped();
 			}
 			if (exact.exists()) {
 				log.warn("event log explicit seq already taken runId={} type={} seq={} (no overwrite, no renumber; frame not archived)", runId,
@@ -1024,7 +1041,10 @@ public class RedisFrameStore implements FrameStore {
 					String.valueOf(ttlSeconds));
 		}
 		catch (Exception ex) {
-			log.debug("archive trim low-watermark record failed runId={} head={} (no truncation reported this read)", runId, headAfter, ex);
+			if (LogSampling.canAcquire("frame-archive-trim-record")) {
+				log.warn("archive trim low-watermark record failed runId={} head={} (no truncation reported this read)", runId,
+						headAfter, ex);
+			}
 		}
 	}
 
@@ -1035,15 +1055,18 @@ public class RedisFrameStore implements FrameStore {
 			return this.redis.execute((RedisCallback<Long>) connection -> {
 				List<ByteRecord> records = connection.xRange(key, Range.unbounded(),
 						org.springframework.data.redis.connection.Limit.limit().count(1));
-				if (records == null || records.isEmpty()) {
+				if (CollectionUtils.isEmpty(records)) {
 					return null;
 				}
-				long seq = seqFieldOf(records.get(0));
+				long seq = seqFieldOf(records.getFirst());
 				return seq > 0L ? seq : null;
 			});
 		}
 		catch (Exception ex) {
-			log.debug("event log surviving first entry read failed runId={} (low watermark not recorded this time)", runId, ex);
+			if (LogSampling.canAcquire("frame-archive-head-read")) {
+				log.warn("event log surviving first entry read failed runId={} (low watermark not recorded this time)", runId,
+						ex);
+			}
 			return null;
 		}
 	}
@@ -1069,12 +1092,12 @@ public class RedisFrameStore implements FrameStore {
 				List<ByteRecord> records = connection.xRange(key,
 						Range.closed(seq + "-0", seq + "-0"),
 						org.springframework.data.redis.connection.Limit.limit().count(1));
-				if (records == null || records.isEmpty()) {
+				if (CollectionUtils.isEmpty(records)) {
 					return new ArchivedEntry(false, null);
 				}
-				return new ArchivedEntry(true, frameFieldOf(records.get(0)));
+				return new ArchivedEntry(true, frameFieldOf(records.getFirst()));
 			});
-			return entry == null ? new ArchivedEntry(false, null) : entry;
+			return ObjectUtils.getIfNull(entry, () -> new ArchivedEntry(false, null));
 		}
 		catch (Exception ex) {
 			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
@@ -1117,11 +1140,11 @@ public class RedisFrameStore implements FrameStore {
 		}
 
 		String headText() {
-			return new String(this.head, StandardCharsets.UTF_8);
+			return org.apache.commons.codec.binary.StringUtils.newStringUtf8(this.head);
 		}
 
 		String tailText() {
-			return new String(this.tail, StandardCharsets.UTF_8);
+			return org.apache.commons.codec.binary.StringUtils.newStringUtf8(this.tail);
 		}
 
 	}
@@ -1155,7 +1178,23 @@ public class RedisFrameStore implements FrameStore {
 			});
 		}
 		catch (Exception ex) {
-			log.debug("event log renew failed (idempotent hit, proceeding with existing record)", ex);
+			if (LogSampling.canAcquire("frame-archive-renew")) {
+				log.warn("event log renew failed (idempotent hit, proceeding with existing record)", ex);
+			}
+		}
+	}
+
+	private boolean isArchiveTtlValid(byte[] key, long ttlSeconds) {
+		try {
+			Long pttl = this.redis.execute((RedisCallback<Long>) connection -> connection.pTtl(key));
+			long maxTtlMs = Math.min(Math.max(1L, ttlSeconds) * 1000L, Duration.ofDays(7).toMillis());
+			return pttl != null && pttl > 0L && pttl <= maxTtlMs;
+		}
+		catch (Exception ex) {
+			if (LogSampling.canAcquire("frame-archive-ttl-probe")) {
+				log.warn("event log TTL probe failed (archive success not confirmed)", ex);
+			}
+			return false;
 		}
 	}
 
@@ -1170,7 +1209,7 @@ public class RedisFrameStore implements FrameStore {
 	/** 只取一条 Stream 记录的 {@code frame} 字段原文（幂等比对用；不反序列化帧体）。 */
 	private static byte[] frameFieldOf(MapRecord<byte[], byte[], byte[]> record) {
 		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
-			if (FIELD_FRAME.equals(new String(entry.getKey(), StandardCharsets.UTF_8))) {
+			if (FIELD_FRAME.equals(org.apache.commons.codec.binary.StringUtils.newStringUtf8(entry.getKey()))) {
 				return entry.getValue();
 			}
 		}
@@ -1178,7 +1217,7 @@ public class RedisFrameStore implements FrameStore {
 	}
 
 	/**
-	 * 追加一条 Stream 记录：{@code XADD key MAXLEN ~ <窗口> <seq>-0 seq <n> frame <json>}，随后续期 TTL。
+	 * 追加一条 Stream 记录：{@code XADD + EXPIRE} 在同一单键 Lua 脚本内原子完成，成功后必有 TTL。
 	 *
 	 * <p>
 	 * <b>为什么用原始命令而不是 {@code StreamOperations} / {@code RedisConnection#xAdd(record, options)}</b>：
@@ -1198,14 +1237,17 @@ public class RedisFrameStore implements FrameStore {
 	 *
 	 * @param window 本条落档用的 MAXLEN 窗口（&gt; 0）
 	 */
+	private static final String EXACT_APPEND_BODY = """
+			redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], ARGV[2], 'seq', ARGV[3], 'frame', ARGV[4])
+			redis.call('EXPIRE', KEYS[1], ARGV[5])
+			return 1
+			""";
+
 	private void xadd(byte[] key, long seq, byte[] payload, long ttlSeconds, int window) {
 		this.redis.execute((RedisCallback<Object>) connection -> {
-			connection.execute("XADD", key,
-					bytes("MAXLEN"), bytes("~"), bytes(String.valueOf(window)),
-					bytes(seq + "-0"),
-					bytes(FIELD_SEQ), bytes(String.valueOf(seq)),
-					bytes(FIELD_FRAME), payload);
-			connection.expire(key, ttlSeconds);
+			connection.eval(bytes(EXACT_APPEND_BODY), org.springframework.data.redis.connection.ReturnType.INTEGER, 1,
+					key, bytes(String.valueOf(window)), bytes(seq + "-0"), bytes(String.valueOf(seq)), payload,
+					bytes(String.valueOf(ttlSeconds)));
 			return null;
 		});
 	}
@@ -1242,7 +1284,7 @@ public class RedisFrameStore implements FrameStore {
 		if (stream.degraded()) {
 			// 结果可能仍非空（例如末号探测失败但 XRANGE 成功）——但它是"降级读"，不是完整差量。
 			// 计数已在 streamTailSeq / streamFramesAbove 落；这里把信号继续传给调用方（API 层可拒绝）。
-			log.debug("event log delta read degraded runId={} afterSeq={} (read failure counted; result may be incomplete)", runId, afterSeq);
+			if (log.isDebugEnabled()) log.debug("event log delta read degraded runId={} afterSeq={} (read failure counted; result may be incomplete)", runId, afterSeq);
 		}
 		List<Map<String, Object>> result = stream.frames();
 		if (limit > 0 && result.size() > limit) {
@@ -1349,7 +1391,7 @@ public class RedisFrameStore implements FrameStore {
 		if (truncated) {
 			// 可聚合观测：本次回放确实跳过了不可回放的区间（每次读只计一次；含义 = 有缺口，不是"读失败"）。
 			RedisDegradation.record(RedisDegradation.C1_STREAM_REPLAY_GAP);
-			log.debug("event log replay skipping non-replayable range runId={} afterSeq={} gap={}..{} effective window={}", runId, afterSeq,
+			if (log.isDebugEnabled()) log.debug("event log replay skipping non-replayable range runId={} afterSeq={} gap={}..{} effective window={}", runId, afterSeq,
 					gapFrom, gapTo, window);
 		}
 		return new FrameStore.ReadResult(frames, false, truncated, gapFrom, gapTo);
@@ -1379,7 +1421,7 @@ public class RedisFrameStore implements FrameStore {
 				for (ByteRecord record : records) {
 					byte[] raw = frameFieldOf(record);
 					if (raw != null) {
-						out.add(new FrameStore.RawFrame(seqFieldOf(record), new String(raw, StandardCharsets.UTF_8)));
+						out.add(new FrameStore.RawFrame(seqFieldOf(record), org.apache.commons.codec.binary.StringUtils.newStringUtf8(raw)));
 					}
 				}
 				return null;
@@ -1396,7 +1438,7 @@ public class RedisFrameStore implements FrameStore {
 	public FrameStore.RawEntryPage readRawAfterEntry(String runId, String afterEntryId, int limit) {
 		String start;
 		try {
-			start = afterEntryId == null || afterEntryId.isBlank() || "-".equals(afterEntryId)
+			start = StringUtils.isBlank(afterEntryId) || "-".equals(afterEntryId)
 					? "-" : successorStreamId(afterEntryId);
 		}
 		catch (RuntimeException ex) {
@@ -1423,7 +1465,7 @@ public class RedisFrameStore implements FrameStore {
 					}
 					byte[] raw = frameFieldOf(record);
 					out.add(new FrameStore.RawEntryFrame(record.getId().getValue(), seqFieldOf(record),
-							raw == null ? null : new String(raw, StandardCharsets.UTF_8)));
+							raw == null ? null : org.apache.commons.codec.binary.StringUtils.newStringUtf8(raw)));
 				}
 				return null;
 			});
@@ -1438,7 +1480,7 @@ public class RedisFrameStore implements FrameStore {
 
 	/** Redis 5 兼容的物理 ID 后继；最大无符号 64 位两段 ID 没有后继。 */
 	static String successorStreamId(String id) {
-		String value = id == null ? "" : id.trim();
+		String value = StringUtils.trimToEmpty(id);
 		int dash = value.indexOf('-');
 		String millisText = dash < 0 ? value : value.substring(0, dash);
 		String sequenceText = dash < 0 ? "0" : value.substring(dash + 1);
@@ -1468,15 +1510,17 @@ public class RedisFrameStore implements FrameStore {
 	private Long trimWatermark(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(trimKey(runId));
-			if (raw == null || raw.isBlank()) {
+			if (StringUtils.isBlank(raw)) {
 				return null;
 			}
 			long value = Long.parseLong(raw.trim());
 			return value > 0L ? value : null;
 		}
 		catch (Exception ex) {
-			log.debug("archive trim low-watermark read failed runId={} "
-					+ "(treating as never trimmed, no truncation guess)", runId, ex);
+			if (LogSampling.canAcquire("frame-archive-trim-read")) {
+				log.warn("archive trim low-watermark read failed runId={} "
+						+ "(treating as never trimmed, no truncation guess)", runId, ex);
+			}
 			return null;
 		}
 	}
@@ -1588,7 +1632,7 @@ public class RedisFrameStore implements FrameStore {
 			Long oldest = this.redis.execute((RedisCallback<Long>) connection -> {
 				List<ByteRecord> records = connection.xRange(key, Range.unbounded(),
 						org.springframework.data.redis.connection.Limit.limit().count(1));
-				return records == null || records.isEmpty() ? null : seqFieldOf(records.get(0));
+				return CollectionUtils.isEmpty(records) ? null : seqFieldOf(records.getFirst());
 			});
 			if (oldest == null || oldest <= 0L) {
 				return null;
@@ -1609,7 +1653,9 @@ public class RedisFrameStore implements FrameStore {
 			return new long[] { oldest, Math.max(oldest, to) };
 		}
 		catch (Exception ex) {
-			log.debug("event log full replay gap probe failed runId={} (no truncation reported)", runId, ex);
+			if (LogSampling.canAcquire("frame-archive-gap-probe")) {
+				log.warn("event log full replay gap probe failed runId={} (no truncation reported)", runId, ex);
+			}
 			return null;
 		}
 	}
@@ -1644,7 +1690,7 @@ public class RedisFrameStore implements FrameStore {
 			Long tail = this.redis.execute((RedisCallback<Long>) connection -> {
 				List<ByteRecord> records = connection.xRevRange(key, Range.unbounded(),
 						org.springframework.data.redis.connection.Limit.limit().count(TAIL_PROBE));
-				if (records == null || records.isEmpty()) {
+				if (CollectionUtils.isEmpty(records)) {
 					return 0L;
 				}
 				long max = 0L;
@@ -1653,7 +1699,7 @@ public class RedisFrameStore implements FrameStore {
 				}
 				return max;
 			});
-			return new StreamTail(tail == null ? 0L : tail, true);
+			return new StreamTail(ObjectUtils.defaultIfNull(tail, 0L), true);
 		}
 		catch (Exception ex) {
 			// A4：末号探测失败按"未知"表达（ok=false），不再伪装成"末号 0"。
@@ -1671,9 +1717,9 @@ public class RedisFrameStore implements FrameStore {
 	/** 只取一条 Stream 记录的 {@code seq} 字段（不反序列化帧体）。 */
 	private static long seqFieldOf(MapRecord<byte[], byte[], byte[]> record) {
 		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
-			if (FIELD_SEQ.equals(new String(entry.getKey(), StandardCharsets.UTF_8))) {
+			if (FIELD_SEQ.equals(org.apache.commons.codec.binary.StringUtils.newStringUtf8(entry.getKey()))) {
 				try {
-					return Long.parseLong(new String(entry.getValue(), StandardCharsets.UTF_8));
+					return Long.parseLong(org.apache.commons.codec.binary.StringUtils.newStringUtf8(entry.getValue()));
 				}
 				catch (NumberFormatException ex) {
 					return 0L;
@@ -1688,7 +1734,7 @@ public class RedisFrameStore implements FrameStore {
 		byte[] raw = null;
 		byte[] seq = null;
 		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
-			String field = new String(entry.getKey(), StandardCharsets.UTF_8);
+			String field = org.apache.commons.codec.binary.StringUtils.newStringUtf8(entry.getKey());
 			if (FIELD_FRAME.equals(field)) {
 				raw = entry.getValue();
 			}
@@ -1703,12 +1749,14 @@ public class RedisFrameStore implements FrameStore {
 			Map<String, Object> frame = this.mapper.readValue(raw, new TypeReference<Map<String, Object>>() {
 			});
 			if (seq != null) {
-				frame.putIfAbsent("seq", Long.parseLong(new String(seq, StandardCharsets.UTF_8)));
+				frame.putIfAbsent("seq", Long.parseLong(org.apache.commons.codec.binary.StringUtils.newStringUtf8(seq)));
 			}
 			return frame;
 		}
 		catch (Exception ex) {
-			log.debug("event log single entry corrupt (skipped)", ex);
+			if (LogSampling.canAcquire("frame-archive-entry-corrupt")) {
+				log.warn("event log single entry corrupt (skipped)", ex);
+			}
 			return null;
 		}
 	}
@@ -1876,8 +1924,7 @@ public class RedisFrameStore implements FrameStore {
 
 	/** 簿记的保留时长 = 归档键的 TTL（归档没了，簿记也就没有读者）。 */
 	private long retentionMs() {
-		Duration ttl = this.properties == null ? null : this.properties.getSessionTtl();
-		return ttl == null ? 0L : ttl.toMillis();
+		return ttl().toMillis();
 	}
 
 	// ── 内部 ────────────────────────────────────────────────────────────────
@@ -1905,15 +1952,20 @@ public class RedisFrameStore implements FrameStore {
 	private long issuedSeqOf(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(seqKey(runId));
-			return raw == null ? 0L : Math.max(0L, Long.parseLong(raw));
+			return Math.max(0L, Long.parseLong(ObjectUtils.defaultIfNull(raw, "0")));
 		}
 		catch (Exception ex) {
 			return 0L;
 		}
 	}
 
+	@NonNull
 	private Duration ttl() {
-		return this.properties.getSessionTtl();
+		Duration configured = this.properties == null ? null : this.properties.getSessionTtl();
+		Duration effective = configured == null || configured.isZero() || configured.isNegative()
+				? Duration.ofHours(24) : configured;
+		Duration maxTtl = Duration.ofDays(7);
+		return effective.compareTo(maxTtl) > 0 ? maxTtl : effective;
 	}
 
 	private static long seqOf(Map<String, Object> frame) {

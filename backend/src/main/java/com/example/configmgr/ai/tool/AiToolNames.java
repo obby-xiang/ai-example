@@ -3,6 +3,7 @@ package com.example.configmgr.ai.tool;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskSteps;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
 import java.util.Optional;
@@ -171,7 +172,7 @@ public final class AiToolNames {
 
 		/** 工具名 → 登记项；非作业发起工具返回 empty。 */
 		public static Optional<ConfirmTool> of(String toolName) {
-			if (toolName == null || toolName.isBlank()) {
+			if (StringUtils.isBlank(toolName)) {
 				return Optional.empty();
 			}
 			for (ConfirmTool tool : values()) {
@@ -188,6 +189,6 @@ public final class AiToolNames {
 
 	/** 是否登记在册（null/空白 = false）。 */
 	public static boolean isKnown(String toolName) {
-		return toolName != null && !toolName.isBlank() && ALL.contains(toolName);
+		return StringUtils.isNotBlank(toolName) && ALL.contains(toolName);
 	}
 }

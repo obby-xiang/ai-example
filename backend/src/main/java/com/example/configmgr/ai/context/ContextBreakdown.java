@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.context;
 
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -79,7 +81,7 @@ public final class ContextBreakdown {
 		Map<String, Integer> out = new LinkedHashMap<>();
 		long sum = 0L;
 		for (String key : USED_KEYS) {
-			int value = values == null || values.get(key) == null ? 0 : Math.max(0, values.get(key));
+			int value = Math.max(0, MapUtils.getInteger(values, key, 0));
 			out.put(key, value);
 			sum += value;
 		}
@@ -128,7 +130,7 @@ public final class ContextBreakdown {
 		}
 		out.put(SYSTEM, Math.max(0, systemTokens));
 		out.put(TOOLS, Math.max(0, toolsTokens));
-		if (messages == null || messages.isEmpty()) {
+		if (CollectionUtils.isEmpty(messages)) {
 			return out;
 		}
 		int lastUserIndex = -1;

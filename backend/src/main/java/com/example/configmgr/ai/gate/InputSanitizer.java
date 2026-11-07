@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.springframework.stereotype.Component;
 
 import java.text.Normalizer;
@@ -62,8 +63,14 @@ public class InputSanitizer {
 	public record Result(String text, int originalLength, int removedFormat, int removedControl, boolean rewritten) {
 
 		/** 内容是否被改动。 */
-		public boolean changed() {
+		@JsonIgnore
+		public boolean isChanged() {
 			return this.rewritten;
+		}
+
+		@JsonIgnore
+		public boolean changed() {
+			return isChanged();
 		}
 
 		/** 归一前后的字符数差（负数 = 变短）。 */

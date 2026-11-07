@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.context;
 
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
@@ -50,7 +52,7 @@ public final class ContextEstimator {
 
 	/** 单段文本的 token 估算（null/空串 = 0）。 */
 	public static int estimate(String text) {
-		if (text == null || text.isEmpty()) {
+		if (StringUtils.isEmpty(text)) {
 			return 0;
 		}
 		int cjk = 0;
@@ -103,7 +105,7 @@ public final class ContextEstimator {
 
 	/** 一串消息的估算（跳过 {@code SYSTEM}：它在装配点单列，避免与 system 类目重复计）。 */
 	public static int estimateMessages(List<Message> messages) {
-		if (messages == null || messages.isEmpty()) {
+		if (CollectionUtils.isEmpty(messages)) {
 			return 0;
 		}
 		int tokens = 0;
@@ -123,7 +125,7 @@ public final class ContextEstimator {
 	 * 7–18 个工具的 JSON 可以轻松吃掉几千 token —— 不单列这一项，"system 巨大"的结论会误导排障。
 	 */
 	public static int estimateToolSchemas(List<ToolCallback> callbacks) {
-		if (callbacks == null || callbacks.isEmpty()) {
+		if (CollectionUtils.isEmpty(callbacks)) {
 			return 0;
 		}
 		int tokens = 0;

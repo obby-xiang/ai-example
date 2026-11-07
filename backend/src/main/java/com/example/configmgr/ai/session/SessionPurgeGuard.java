@@ -3,6 +3,7 @@ package com.example.configmgr.ai.session;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -27,9 +28,10 @@ import java.util.List;
  * <h2>为什么是带 TTL 的墓碑而不是永久标记</h2>
  * TTL 取 {@code app.ai.session-ttl}（默认 24h），与会话同寿：覆盖"在飞轮次最迟一个会话 TTL 内
  * 必然收尾"的窗口；过期后同名 sessionId（页签随机 UUID，正常不会复用）可重新使用。
- * 但会话销毁失败/延后时，{@link SessionPurgePendingStore} 的 durable pending 会保留 ——
- * {@link #isArmed(String)} 同时看 pending：<b>未完成期间即使 guard key 的 TTL 到了，也不会放行</b>。
- * 只有删除全部完成、pending 移除后才由 {@link #retainOrArmIfOwner} 进入有限保留期。
+ * 但会话销毁失败/延后时，{@link SessionPurgePendingStore} 的 durable pending 会按同一 24h 窗口滑动续期 ——
+ * {@link #isArmed(String)} 同时看 pending：<b>重试期间即使 guard key 的 TTL 到了，也不会放行</b>。
+ * 只有删除全部完成、pending 移除后才由 {@link #retainOrArmIfOwner} 进入有限保留期；
+ * 完成后的保留守卫不被历史查询续期，避免已销毁会话被永久锁定。
  *
  * <h2>身份隔离（2026-10-30）</h2>
  * 守卫键 = {@code ai:purge:guard:<tenantId>:<userId>:<sessionId>}，pending 键同口径
@@ -114,7 +116,7 @@ public class SessionPurgeGuard {
 
 	/** 装守卫（销毁流程在删除任何数据之前调用）。值 = {@code purgeId|requestedBy}，便于取证。 */
 	public void arm(String sessionId, String purgeId, Duration ttl) {
-		Duration effective = ttl == null || ttl.isZero() || ttl.isNegative() ? Duration.ofHours(24) : ttl;
+		Duration effective = AiSessionService.boundedSessionDataTtl(ttl);
 		this.redis.opsForValue().set(keyFor(sessionId), purgeId, effective);
 	}
 
@@ -130,7 +132,7 @@ public class SessionPurgeGuard {
 	}
 
 	public boolean isArmed(String sessionId, long tenantId, long userId) {
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			return false;
 		}
 		try {
@@ -153,12 +155,16 @@ public class SessionPurgeGuard {
 	 * @throws com.example.configmgr.common.AiStateUnavailableException Redis 不可用（不得 blind 继续）
 	 */
 	public boolean retainOrArmIfOwner(String sessionId, String purgeId, String actor, Duration ttl) {
-		if (sessionId == null || sessionId.isBlank()) {
+		return isRetainedOrArmedIfOwner(sessionId, purgeId, actor, ttl);
+	}
+
+	public boolean isRetainedOrArmedIfOwner(String sessionId, String purgeId, String actor, Duration ttl) {
+		if (StringUtils.isBlank(sessionId)) {
 			return false;
 		}
-		Duration effective = ttl == null || ttl.isZero() || ttl.isNegative() ? Duration.ofHours(24) : ttl;
+		Duration effective = AiSessionService.boundedSessionDataTtl(ttl);
 		String ownerPrefix = purgeId + "|";
-		String value = ownerPrefix + (actor == null || actor.isBlank() ? "unknown" : actor);
+		String value = ownerPrefix + StringUtils.defaultIfBlank(actor, "unknown");
 		try {
 			Long result = this.redis.execute(RETAIN_OR_ARM, List.of(keyFor(sessionId)), ownerPrefix, value,
 					String.valueOf(effective.toMillis()));
@@ -179,7 +185,11 @@ public class SessionPurgeGuard {
 	 * @return true = 确实由本次 purgeId 撤销；false = 守卫属于别人或已不存在（不动它）
 	 */
 	public boolean disarmQuietly(String sessionId, String purgeId) {
-		if (sessionId == null || sessionId.isBlank() || purgeId == null || purgeId.isBlank()) {
+		return isDisarmedQuietly(sessionId, purgeId);
+	}
+
+	public boolean isDisarmedQuietly(String sessionId, String purgeId) {
+		if (StringUtils.isBlank(sessionId) || StringUtils.isBlank(purgeId)) {
 			return false;
 		}
 		try {

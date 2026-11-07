@@ -1,8 +1,12 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunStore;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -85,7 +89,7 @@ public class SheetAudit {
 	 * <b>不做"猜测式修复"</b>：拿不准的键宁可缺席（日志里是 {@code -}），也不写一个错值。
 	 */
 	public static Map<String, Object> sanitize(Map<String, Object> raw) {
-		if (raw == null || raw.isEmpty()) {
+		if (MapUtils.isEmpty(raw)) {
 			return Map.of();
 		}
 		Map<String, Object> out = new LinkedHashMap<>();
@@ -96,12 +100,12 @@ public class SheetAudit {
 		for (String numeric : List.of("sampleRows", "sampleChars", "projCols", "totalRows", "sheetVer")) {
 			Long value = nonNegative(raw.get(numeric));
 			if (value != null) {
-				out.put(numeric, value);
+				out.put(numeric, String.valueOf(value));
 			}
 		}
 		Object planId = raw.get("planId");
-		if (planId instanceof String text && !text.isBlank()) {
-			out.put("planId", text.length() > 64 ? text.substring(0, 64) : text);
+		if (planId instanceof String text && StringUtils.isNotBlank(text)) {
+			out.put("planId", StringUtils.left(text, 64));
 		}
 		Object previewLevel = raw.get("previewLevel");
 		if (previewLevel instanceof String level && PREVIEW_LEVELS.contains(level)) {
@@ -109,11 +113,11 @@ public class SheetAudit {
 		}
 		for (String label : List.of("defCode", "page")) {
 			Object value = raw.get(label);
-			if (value instanceof String text && !text.isBlank() && text.length() <= 128) {
+			if (value instanceof String text && StringUtils.isNotBlank(text) && text.length() <= 128) {
 				out.put(label, text);
 			}
 		}
-		return out;
+		return out.isEmpty() ? Map.of() : out;
 	}
 
 	private static Long nonNegative(Object value) {
@@ -125,13 +129,8 @@ public class SheetAudit {
 			return number.longValue();
 		}
 		if (value instanceof String text) {
-			try {
-				long parsed = Long.parseLong(text.trim());
-				return parsed < 0 ? null : parsed;
-			}
-			catch (NumberFormatException error) {
-				return null;
-			}
+			long parsed = NumberUtils.toLong(StringUtils.trim(text), -1L);
+			return parsed < 0 ? null : parsed;
 		}
 		return null;
 	}
@@ -154,7 +153,7 @@ public class SheetAudit {
 			return;
 		}
 		Map<String, Object> meta = pending.getSheetMeta();
-		if (meta == null || meta.isEmpty()) {
+		if (MapUtils.isEmpty(meta)) {
 			return;
 		}
 		String name = pending.getName();
@@ -176,13 +175,13 @@ public class SheetAudit {
 				this.writeCancelled.incrementAndGet();
 			}
 		}
-		Object rows = meta.get("sampleRows");
-		if (rows instanceof Number number && number.longValue() > 0) {
-			this.sampleRowsTotal.addAndGet(number.longValue());
+		Long rows = nonNegative(meta.get("sampleRows"));
+		if (rows != null && rows > 0) {
+			this.sampleRowsTotal.addAndGet(rows);
 		}
-		Object chars = meta.get("sampleChars");
-		if (chars instanceof Number number) {
-			this.sampleCharsMax.accumulateAndGet(number.longValue(), Math::max);
+		Long chars = nonNegative(meta.get("sampleChars"));
+		if (chars != null) {
+			this.sampleCharsMax.accumulateAndGet(chars, Math::max);
 		}
 		if ("D2".equals(meta.get("dataClass"))) {
 			appendLedger(sessionId, pending, meta);
@@ -204,12 +203,13 @@ public class SheetAudit {
 		Map<String, Object> out = new LinkedHashMap<>();
 		Map<String, Object> meta = sanitize(pending.getSheetMeta());
 		out.put("kind", "sheet_sample");
-		out.put("atMs", System.currentTimeMillis());
+		out.put("atMs", String.valueOf(System.currentTimeMillis()));
 		out.put("tool", pending.getName());
 		for (String key : List.of("page", "defCode", "sampleRows", "sampleChars", "projCols", "totalRows",
 				"sheetVer")) {
 			if (meta.containsKey(key)) {
-				out.put(key, meta.get(key));
+				Object value = meta.get(key);
+				out.put(key, value instanceof Number number ? String.valueOf(number.longValue()) : value);
 			}
 		}
 		return out;
@@ -219,7 +219,7 @@ public class SheetAudit {
 		if (this.store == null) {
 			return;
 		}
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			// 没有会话锚点 = 无法落到随会话共亡的键上：宁可不记，也不写一个没有归属的台账
 			log.warn("sheet sampling ledger skipped: no sessionId tool={}", pending.getName());
 			return;
@@ -229,7 +229,9 @@ public class SheetAudit {
 		}
 		catch (RuntimeException error) {
 			// appendSafetyEvent 自身已吞异常；这里只防"store 是桩/未装配"的实现差异
-			log.warn("failed to write sheet sampling ledger (turn unaffected) tool={}", pending.getName(), error);
+			if (LogSampling.canAcquire("sheet-sampling-ledger-write")) {
+				log.warn("failed to write sheet sampling ledger (turn unaffected) tool={}", pending.getName(), error);
+			}
 		}
 	}
 
@@ -242,14 +244,14 @@ public class SheetAudit {
 	public Map<String, Object> metrics() {
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("scope", "process");
-		out.put("readCalls", this.readCalls.get());
-		out.put("writePlans", this.writePlans.get());
-		out.put("writeApplied", this.writeApplied.get());
-		out.put("writeCancelled", this.writeCancelled.get());
-		out.put("undoCalls", this.undoCalls.get());
-		out.put("sampleRowsTotal", this.sampleRowsTotal.get());
-		out.put("sampleCharsMax", this.sampleCharsMax.get());
-		out.put("disabledRejects", this.disabledRejects.get());
+		out.put("readCalls", String.valueOf(this.readCalls.get()));
+		out.put("writePlans", String.valueOf(this.writePlans.get()));
+		out.put("writeApplied", String.valueOf(this.writeApplied.get()));
+		out.put("writeCancelled", String.valueOf(this.writeCancelled.get()));
+		out.put("undoCalls", String.valueOf(this.undoCalls.get()));
+		out.put("sampleRowsTotal", String.valueOf(this.sampleRowsTotal.get()));
+		out.put("sampleCharsMax", String.valueOf(this.sampleCharsMax.get()));
+		out.put("disabledRejects", String.valueOf(this.disabledRejects.get()));
 		return out;
 	}
 
@@ -264,8 +266,12 @@ public class SheetAudit {
 	}
 
 	/** 该工具名是否受本审计面治理（= 9 个表格工具）。 */
-	public boolean covers(String toolName) {
+	public boolean isCovered(String toolName) {
 		return this.switches != null && SheetSwitches.SHEET_TOOLS.contains(toolName);
+	}
+
+	public boolean covers(String toolName) {
+		return isCovered(toolName);
 	}
 
 }

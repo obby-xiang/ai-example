@@ -2,7 +2,12 @@ package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.kb.KbService;
 import com.example.configmgr.common.ErrorCodes;
+import com.example.configmgr.ai.observe.LogSampling;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.definition.DefaultToolDefinition;
@@ -17,7 +22,13 @@ import org.springframework.util.ClassUtils;
 
 import jakarta.annotation.PostConstruct;
 import java.lang.reflect.Method;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -69,89 +80,99 @@ public class ToolRegistry {
 
     @PostConstruct
     public void init() {
-        // 扫描期创建失败的 bean 名 + 原始异常：工具 bean 的失败必须在扫描结束后整批抛出，
-        // 非工具 bean 的失败仍按"扫描噪音"跳过（MethodToolCallbackProvider 对无 @Tool 的 bean 本身就抛错）。
         List<String> failedToolBeans = new ArrayList<>();
         List<RuntimeException> failures = new ArrayList<>();
-
-        // Scan all beans for @Tool annotated methods
         for (String beanName : applicationContext.getBeanDefinitionNames()) {
             Object bean;
-            try { bean = applicationContext.getBean(beanName); }
+            try {
+                bean = applicationContext.getBean(beanName);
+            }
             catch (RuntimeException e) {
-                if (isDeclaredToolBean(beanName)) {
-                    failedToolBeans.add(beanName);
-                    failures.add(e);
-                    log.error("tool bean creation failed (startup aborts after scanning) bean={}", beanName, e);
-                }
-                else {
-                    log.debug("skipped bean that failed to create during scan (not a tool bean) bean={}", beanName, e);
-                }
+                handleBeanFailure(beanName, e, failedToolBeans, failures);
                 continue;
             }
-            Class<?> cls = bean.getClass();
-            // Walk through proxy to find real class
-            while (cls.isSynthetic() || cls.getName().contains("$$")) {
-                cls = cls.getSuperclass();
-                if (cls == null || cls == Object.class) { cls = bean.getClass(); break; }
-            }
-
-            boolean hasToolAnnotation = false;
-            for (Method method : cls.getDeclaredMethods()) {
-                Tool toolAnn = method.getAnnotation(Tool.class);
-                if (toolAnn == null) continue;
-                hasToolAnnotation = true;
-
-                String name = toolAnn.name().isBlank() ? method.getName() : toolAnn.name();
-                ToolScope scopeAnn = method.getAnnotation(ToolScope.class);
-                ToolRisk riskAnn = method.getAnnotation(ToolRisk.class);
-                ToolChannel channelAnn = method.getAnnotation(ToolChannel.class);
-                ToolCategory categoryAnn = method.getAnnotation(ToolCategory.class);
-
-                ToolMeta meta = new ToolMeta();
-                meta.setName(name);
-                // E9：展示名不再取 description 前 20 字（改描述会连带改 UI 文案）。
-                // 缺省 = 工具名；YAML 有 title 时由 applyOverrides 覆盖。
-                meta.setDisplayName(name);
-                meta.setTitleKey("tool." + name + ".title");
-                meta.setLang("zh");
-                meta.setScopePatterns(scopeAnn != null ? scopeAnn.value() : new String[]{"*"});
-                meta.setRiskLevel(riskAnn != null ? riskAnn.value() : ToolMeta.RiskLevel.READ);
-                meta.setChannel(channelAnn != null ? channelAnn.value() : ToolMeta.Channel.BACKEND);
-                meta.setCategory(categoryAnn != null ? categoryAnn.value() : null);
-
-                metaMap.put(name, meta);
-                log.debug("registered tool name={} scopes={}", name, Arrays.toString(meta.getScopePatterns()));
-            }
-
-            // Build ToolCallbacks from all @Tool methods on this bean
-            try {
-                var provider = MethodToolCallbackProvider.builder().toolObjects(bean).build();
-                for (ToolCallback tc : provider.getToolCallbacks()) {
-                    callbackMap.put(tc.getToolDefinition().name(), normalizeSchema(tc));
-                }
-            } catch (Exception e) {
-                // 非工具 bean：MethodToolCallbackProvider 对"没有 @Tool 方法"的 bean 会直接抛错，
-                // 这是扫描期的正常噪音，继续。
-                if (!hasToolAnnotation) {
-                    continue;
-                }
-                // 真工具 bean 的注册失败绝不能吞：schema 归一化/构建出问题而静默掉工具，
-                // 会让应用"看起来启动成功"却少了一批工具（比启动失败更难查）。
-                throw new IllegalStateException("Failed to register callbacks for tool bean " + beanName, e);
-            }
+            scanBean(bean, beanName);
         }
         if (!failedToolBeans.isEmpty()) {
-            // L-94：工具 bean 创建失败绝不能吞（2026-10-23 实证：构造期环让 KB 三工具整批消失，
-            // 注册数 37→34，而应用"正常启动"）。少工具比启动失败更难查 ⇒ 收集全部失败后带清单抛。
             throw new IllegalStateException("Failed to create " + failedToolBeans.size() + " tool beans: "
                     + String.join(", ", failedToolBeans)
                     + "; startup aborted because missing tools are harder to diagnose than a startup failure",
-                    failures.get(0));
+                    failures.getFirst());
         }
         applyOverrides();
         assertDisclosureConsistency();
         log.info("ToolRegistry: registered {} tools (definitions={})", callbackMap.size(), snapshotVersion);
+    }
+
+    private void handleBeanFailure(String beanName, RuntimeException error, List<String> failedToolBeans,
+            List<RuntimeException> failures) {
+        if (isDeclaredToolBean(beanName)) {
+            failedToolBeans.add(beanName);
+            failures.add(error);
+            log.error("tool bean creation failed (startup aborts after scanning) bean={}", beanName, error);
+        }
+        else if (LogSampling.canAcquire("tool-bean-scan-skip")) {
+            log.warn("skipped bean that failed to create during scan (not a tool bean) bean={}", beanName, error);
+        }
+    }
+
+    private void scanBean(Object bean, String beanName) {
+        Class<?> cls = bean.getClass();
+        while (cls.isSynthetic() || cls.getName().contains("$$")) {
+            cls = cls.getSuperclass();
+            if (cls == null || cls == Object.class) {
+                cls = bean.getClass();
+                break;
+            }
+        }
+        boolean hasToolAnnotation = scanToolMethods(cls);
+        try {
+            var provider = MethodToolCallbackProvider.builder().toolObjects(bean).build();
+            for (ToolCallback tc : provider.getToolCallbacks()) {
+                callbackMap.put(tc.getToolDefinition().name(), normalizeSchema(tc));
+            }
+        }
+        catch (Exception e) {
+            if (!hasToolAnnotation) {
+                return;
+            }
+            throw new IllegalStateException("Failed to register callbacks for tool bean " + beanName, e);
+        }
+    }
+
+    private boolean scanToolMethods(Class<?> cls) {
+        boolean hasToolAnnotation = false;
+        for (Method method : cls.getDeclaredMethods()) {
+            Tool toolAnn = method.getAnnotation(Tool.class);
+            if (toolAnn == null) {
+                continue;
+            }
+            hasToolAnnotation = true;
+            String name = StringUtils.defaultIfBlank(toolAnn.name(), method.getName());
+            ToolMeta meta = createToolMeta(name, method, toolAnn);
+            metaMap.put(name, meta);
+            if (log.isDebugEnabled()) {
+                log.debug("registered tool name={} scopes={}", name, Arrays.toString(meta.getScopePatterns()));
+            }
+        }
+        return hasToolAnnotation;
+    }
+
+    private ToolMeta createToolMeta(String name, Method method, Tool toolAnn) {
+        ToolScope scopeAnn = method.getAnnotation(ToolScope.class);
+        ToolRisk riskAnn = method.getAnnotation(ToolRisk.class);
+        ToolChannel channelAnn = method.getAnnotation(ToolChannel.class);
+        ToolCategory categoryAnn = method.getAnnotation(ToolCategory.class);
+        ToolMeta meta = new ToolMeta();
+        meta.setName(name);
+        meta.setDisplayName(name);
+        meta.setTitleKey("tool." + name + ".title");
+        meta.setLang("zh");
+        meta.setScopePatterns(scopeAnn != null ? scopeAnn.value() : new String[]{"*"});
+        meta.setRiskLevel(riskAnn != null ? riskAnn.value() : ToolMeta.RiskLevel.READ);
+        meta.setChannel(channelAnn != null ? channelAnn.value() : ToolMeta.Channel.BACKEND);
+        meta.setCategory(categoryAnn != null ? categoryAnn.value() : null);
+        return meta;
     }
 
     /**
@@ -173,7 +194,7 @@ public class ToolRegistry {
                     + missingMeta + "; startup aborted because missing metadata exposes and executes the tool in every context");
         }
         List<String> emptyScope = metaMap.values().stream()
-                .filter(meta -> meta.getScopePatterns() == null || meta.getScopePatterns().length == 0)
+                .filter(meta -> ArrayUtils.isEmpty(meta.getScopePatterns()))
                 .map(ToolMeta::getName)
                 .sorted()
                 .toList();
@@ -244,7 +265,9 @@ public class ToolRegistry {
         }
         catch (RuntimeException e) {
             // 手工注册的单例没有 BeanDefinition 等：无法判定 ⇒ 按非工具 bean 处理
-            log.debug("could not resolve bean declared type bean={}", beanName, e);
+            if (LogSampling.canAcquire("tool-bean-declared-type")) {
+                log.warn("could not resolve bean declared type bean={}", beanName, e);
+            }
             return false;
         }
     }
@@ -327,7 +350,9 @@ public class ToolRegistry {
                 .description(definition.description())
                 .inputSchema(normalized)
                 .build();
-        log.debug("tool schema normalized (parameter-level $defs hoisted to document root) tool={}", definition.name());
+        if (log.isDebugEnabled()) {
+            log.debug("tool schema normalized (parameter-level $defs hoisted to document root) tool={}", definition.name());
+        }
         return new OverriddenToolCallback(callback, rebuilt);
     }
 
@@ -353,16 +378,18 @@ public class ToolRegistry {
                 throw new IllegalStateException("Tool definition override targets an unregistered tool: " + override.toolKey()
                         + " (modelName=" + modelName + ")");
             }
-            if (!override.published()) {
-                log.debug("tool definition override skipped: {} status={} (not in snapshot)", override.toolKey(), override.status());
+            if (!override.isPublished()) {
+                if (log.isDebugEnabled()) {
+                    log.debug("tool definition override skipped: {} status={} (not in snapshot)", override.toolKey(), override.status());
+                }
                 continue;
             }
             ToolMeta meta = metaMap.get(modelName);
             if (meta != null) {
                 meta.setTitleKey(override.effectiveTitleKey());
                 meta.setTitle(override.title());
-                meta.setLang(override.lang() == null ? "zh" : override.lang());
-                if (override.title() != null && !override.title().isBlank()) {
+                meta.setLang(StringUtils.defaultString(override.lang(), "zh"));
+                if (StringUtils.isNotBlank(override.title())) {
                     meta.setDisplayName(override.title());
                 }
             }
@@ -404,16 +431,17 @@ public class ToolRegistry {
      */
     public List<ToolCallback> forContext(AiContext ctx) {
         Set<String> tags = buildTags(ctx);
-        return callbackMap.entrySet().stream()
+        List<ToolCallback> disclosed = callbackMap.entrySet().stream()
                 .filter(e -> {
-                    if (!conditionStructuringAllows(e.getKey(), ctx) || !kbAllows(e.getKey())) return false;
+                    if (!isConditionStructuringAllowed(e.getKey(), ctx) || !isKbAllowed(e.getKey())) return false;
                     ToolMeta meta = metaMap.get(e.getKey());
                     if (meta == null) return true; // unscoped: always include
-                    return scopeAllows(meta, tags) && stateAllows(e.getKey(), ctx)
-                            && this.sheetSwitches.allows(e.getKey());
+                    return isScopeAllowed(meta, tags) && isStateAllowed(e.getKey(), ctx)
+                            && this.sheetSwitches.isAllowed(e.getKey());
                 })
                 .map(Map.Entry::getValue)
                 .collect(Collectors.toList());
+        return disclosed.isEmpty() ? List.of() : disclosed;
     }
 
     /**
@@ -425,7 +453,7 @@ public class ToolRegistry {
             "kb_search", "kb_read_doc", "kb_lookup_term", "read_tool_result");
 
     /** 交棒标记只在 {@code QUERY_COND} 生效（离开步骤 = 完整工具面恢复，判据与披露面同源）。 */
-    private static boolean conditionStructuringAllows(String name, AiContext ctx) {
+    private static boolean isConditionStructuringAllowed(String name, AiContext ctx) {
         if (ctx == null || !"QUERY_COND".equals(ctx.getStep()) || ctx.getExtra() == null
                 || !Boolean.TRUE.equals(ctx.getExtra().get(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF))) {
             return true;
@@ -433,7 +461,7 @@ public class ToolRegistry {
         return CONDITION_STRUCTURING_TOOLS.contains(name);
     }
 
-    private boolean kbAllows(String name) {
+    private boolean isKbAllowed(String name) {
         return !KB_TOOLS.contains(name) || this.kbService == null || this.kbService.enabled();
     }
 
@@ -479,24 +507,28 @@ public class ToolRegistry {
      * @param ctx  本轮冻结的工作区上下文（与披露时用的是同一份，见 {@code RunSnapshot#getContext()}）
      * @return true = 该工具在当前上下文内本就被披露（可执行）；false = 越 scope（必须拦截）
      */
-    public boolean matchesContext(String name, AiContext ctx) {
+    public boolean isContextMatched(String name, AiContext ctx) {
         AiContext effective = ctx == null ? AiContext.empty() : ctx;
         ToolMeta meta = metaMap.get(name);
-        boolean scopeOk = meta == null || scopeAllows(meta, buildTags(effective));
-        return scopeOk && stateAllows(name, effective) && !sheetDisabled(name)
-                && conditionStructuringAllows(name, effective) && kbAllows(name);
+        boolean scopeOk = meta == null || isScopeAllowed(meta, buildTags(effective));
+        return scopeOk && isStateAllowed(name, effective) && !isSheetDisabled(name)
+                && isConditionStructuringAllowed(name, effective) && isKbAllowed(name);
+    }
+
+    public boolean matchesContext(String name, AiContext ctx) {
+        return isContextMatched(name, ctx);
     }
 
     /**
      * scope 披露判据（披露面 {@link #forContext} 与执行面 {@link #matchesContext} 共用）。
      *
-     * <p>空数组 = <b>谁都不匹配</b>（与 {@code matchesAny([], tags)} 同结论）：两侧同判、
+     * <p>空数组 = <b>谁都不匹配</b>（与 {@code containsAnyPattern([], tags)} 同结论）：两侧同判、
      * 不存在"披露不出去却在执行时放行"的分叉；启动期另有 {@link #assertDisclosureConsistency}
      * 把空 scope 直接判成启动失败。
      */
-    private static boolean scopeAllows(ToolMeta meta, Set<String> tags) {
+    private static boolean isScopeAllowed(ToolMeta meta, Set<String> tags) {
         String[] patterns = meta.getScopePatterns();
-        return patterns != null && patterns.length > 0 && matchesAny(patterns, tags);
+        return ArrayUtils.isNotEmpty(patterns) && containsAnyPattern(patterns, tags);
     }
 
     /**
@@ -507,7 +539,7 @@ public class ToolRegistry {
      * 后续导入/发布仍应可用 —— 把整组 {@code start_*} 一起收窄会误杀主流程。
      * 该判据只是"让模型看不见假入口"，执行面仍有预检与域层终态守卫兜底。
      */
-    private static boolean stateAllows(String name, AiContext ctx) {
+    private static boolean isStateAllowed(String name, AiContext ctx) {
         if (ctx == null || !TOOL_START_EXPORT.equals(name)) {
             return true;
         }
@@ -524,8 +556,12 @@ public class ToolRegistry {
      * {@code SCOPE_NOT_DISCLOSED}（页面/步骤不对，切过去就能用）。
      * 两者都<b>零副作用</b>，区别只在于把"该怎么办"如实告诉模型与用户（方案 §2.4）。
      */
+    public boolean isSheetDisabled(String name) {
+        return !this.sheetSwitches.isAllowed(name);
+    }
+
     public boolean sheetDisabled(String name) {
-        return !this.sheetSwitches.allows(name);
+        return isSheetDisabled(name);
     }
 
     /**
@@ -540,7 +576,7 @@ public class ToolRegistry {
 
     /** 未披露的原因码（{@code SHEET_DISABLED} / {@code SCOPE_NOT_DISCLOSED}）。 */
     public String undisclosedCode(String name) {
-        return sheetDisabled(name) ? ErrorCodes.SHEET_DISABLED : ErrorCodes.SCOPE_NOT_DISCLOSED;
+        return isSheetDisabled(name) ? ErrorCodes.SHEET_DISABLED : ErrorCodes.SCOPE_NOT_DISCLOSED;
     }
 
     public ToolMeta getMeta(String name) {
@@ -577,13 +613,13 @@ public class ToolRegistry {
     private Set<String> buildTags(AiContext ctx) {
         Set<String> tags = new HashSet<>();
         tags.add("*");
-        if (ctx.getPage() != null && !ctx.getPage().isBlank()) tags.add("page:" + ctx.getPage());
+        if (StringUtils.isNotBlank(ctx.getPage())) tags.add("page:" + ctx.getPage());
         if (ctx.getTaskType() != null) {
             tags.add("task:*");
             tags.add("task:" + ctx.getTaskType());
             if (ctx.getStep() != null) tags.add("task:" + ctx.getTaskType() + "/" + ctx.getStep());
         }
-        if (uiRegionsPresent(ctx)) tags.add("ui:on");
+        if (hasUiRegions(ctx)) tags.add("ui:on");
         return tags;
     }
 
@@ -599,7 +635,7 @@ public class ToolRegistry {
      * 该标签只用于<b>收窄</b>披露面，永远不能用于授权：伪造 {@code uiRegionCount} 最多让工具
      * 消失，换不来任何未披露的工具（执行兜底 {@link #matchesContext} 用同一份判定）。
      */
-    private static boolean uiRegionsPresent(AiContext ctx) {
+    private static boolean hasUiRegions(AiContext ctx) {
         if (ctx == null || ctx.getExtra() == null) {
             return true;
         }
@@ -607,19 +643,12 @@ public class ToolRegistry {
         if (raw == null) {
             return true;
         }
-        try {
-            double value = raw instanceof Number number ? number.doubleValue()
-                    : Double.parseDouble(String.valueOf(raw).trim());
-            return value != 0d;
-        } catch (NumberFormatException ex) {
-            return true;
-        }
+        double value = raw instanceof Number number ? number.doubleValue()
+                : NumberUtils.toDouble(StringUtils.trim(String.valueOf(raw)), Double.NaN);
+        return value != 0d;
     }
 
-    private static boolean matchesAny(String[] patterns, Set<String> tags) {
-        for (String p : patterns) {
-            if (tags.contains(p)) return true;
-        }
-        return false;
+    private static boolean containsAnyPattern(String[] patterns, Set<String> tags) {
+        return CollectionUtils.containsAny(tags, Arrays.asList(patterns));
     }
 }

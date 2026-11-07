@@ -1,7 +1,13 @@
 package com.example.configmgr.ai.tool;
 
-import lombok.Data;
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
+import org.apache.commons.lang3.StringUtils;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -13,7 +19,9 @@ import java.util.Map;
  * ② 注入系统消息的工作区快照（{@link ContextBuilder#buildContextMessage}）。
  * 由请求体携带，跨轮不落库（会话态见后续棒次的 session 包）。
  */
-@Data
+@Getter
+@Setter
+@ToString(onlyExplicitlyIncluded = true)
 public class AiContext {
 
 	/**
@@ -28,10 +36,15 @@ public class AiContext {
 	 */
 	public static final String EXTRA_CONDITION_STRUCTURE_HANDOFF = "conditionStructureHandoff";
 
+	@JsonProperty("page")
 	private String page = "";
 
+	@JsonProperty("taskId")
+	@JsonFormat(shape = JsonFormat.Shape.STRING)
+	@ToString.Include
 	private Long taskId;
 
+	@JsonProperty("taskType")
 	private String taskType;
 
 	/**
@@ -41,10 +54,13 @@ public class AiContext {
 	 * 已完成任务不再披露 {@code start_export}，避免模型看到"可导出"的假入口；
 	 * 执行面仍由预检与域层终态守卫兜底，本字段不构成授权。
 	 */
+	@JsonProperty("taskStatus")
 	private String taskStatus;
 
+	@JsonProperty("step")
 	private String step;
 
+	@JsonProperty("extra")
 	private Map<String, Object> extra = new LinkedHashMap<>();
 
 	public static AiContext of(String page, String taskType, String step, Long taskId, Map<String, Object> extra) {
@@ -54,7 +70,7 @@ public class AiContext {
 	public static AiContext of(String page, String taskType, String step, Long taskId, String taskStatus,
 			Map<String, Object> extra) {
 		AiContext context = new AiContext();
-		context.setPage(page != null ? page : "");
+		context.setPage(StringUtils.defaultString(page));
 		context.setTaskType(taskType);
 		context.setStep(step);
 		context.setTaskId(taskId);
@@ -74,7 +90,7 @@ public class AiContext {
 		if (taskType != null && step != null) {
 			return "task:" + taskType + "/" + step;
 		}
-		if (page != null && !page.isBlank()) {
+		if (StringUtils.isNotBlank(page)) {
 			return "page:" + page;
 		}
 		return "*";
@@ -88,11 +104,12 @@ public class AiContext {
 	public Map<String, Object> toMap() {
 		Map<String, Object> out = new LinkedHashMap<>();
 		out.put("page", page);
-		out.put("taskId", taskId);
+		out.put("taskId", taskId == null ? null : String.valueOf(taskId));
 		out.put("taskType", taskType);
 		out.put("taskStatus", taskStatus);
 		out.put("step", step);
-		out.put("extra", extra);
+		out.put("extra", extra == null || extra.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(extra)));
 		return out;
 	}
 

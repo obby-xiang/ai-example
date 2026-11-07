@@ -1,6 +1,10 @@
 package com.example.configmgr.ai.context;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 
 /**
  * 上下文上限（分母）的<b>单一取数点</b>（上下文统计与压缩专项批①；设计稿 §3.2）。
@@ -24,6 +28,7 @@ import lombok.extern.slf4j.Slf4j;
  * 归到未知（{@code max_context=0} 若被当真值，任何轮次都会立刻判"已满"）。
  */
 @Slf4j
+@RequiredArgsConstructor
 public final class ContextLimitResolver {
 
 	/**
@@ -45,10 +50,6 @@ public final class ContextLimitResolver {
 	}
 
 	private final ModelContextSource source;
-
-	public ContextLimitResolver(ModelContextSource source) {
-		this.source = source;
-	}
 
 	/**
 	 * 上限的来源（只读诊断面：{@code /context}、{@code /health}）。
@@ -81,9 +82,14 @@ public final class ContextLimitResolver {
 	 * @param limitTokens {@code > 0} 的 token 上限；{@code 0} = 未知
 	 * @param source     取数来源（{@link Source#wire()} 是线上值）
 	 */
-	public record ResolveResult(int limitTokens, Source source) {
+	public record ResolveResult(@JsonProperty("limitTokens") int limitTokens, @JsonProperty("source") Source source) {
 
 		public boolean known() {
+			return isKnown();
+		}
+
+		@JsonIgnore
+		public boolean isKnown() {
 			return this.limitTokens > 0;
 		}
 
@@ -104,7 +110,7 @@ public final class ContextLimitResolver {
 	 * <p>没有 provider 身份就没有可判定的归属：返回未知，不按模型名跨 provider 猜。
 	 */
 	public ResolveResult resolveDetailed(Long providerId, String modelId) {
-		if (providerId == null || providerId <= 0L || modelId == null || modelId.isBlank()
+		if (providerId == null || providerId <= 0L || StringUtils.isBlank(modelId)
 				|| this.source == null) {
 			return new ResolveResult(0, Source.UNKNOWN);
 		}

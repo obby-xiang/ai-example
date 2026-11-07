@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.context;
 
+import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 
@@ -52,7 +53,7 @@ public final class SystemMessages {
 
 	/** 把系统段复位到 body 之前；系统段为空时返回 body 本身（同引用）。 */
 	public static List<Message> reattach(List<Message> system, List<Message> body) {
-		if (system == null || system.isEmpty()) {
+		if (CollectionUtils.isEmpty(system)) {
 			return body;
 		}
 		List<Message> out = new ArrayList<>(system.size() + body.size());

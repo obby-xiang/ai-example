@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.kb;
 
 import com.example.configmgr.common.ApiResponse;
+import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -27,13 +28,10 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api/ai/kb")
+@RequiredArgsConstructor
 public class AiKbController {
 
     private final KbService kbService;
-
-    public AiKbController(KbService kbService) {
-        this.kbService = kbService;
-    }
 
     @GetMapping("/status")
     public ApiResponse<Map<String, Object>> status() {

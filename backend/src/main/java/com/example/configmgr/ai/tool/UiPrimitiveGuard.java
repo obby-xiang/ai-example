@@ -2,6 +2,7 @@ package com.example.configmgr.ai.tool;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -77,14 +78,19 @@ public class UiPrimitiveGuard implements FrontendToolGuard {
 
     @Override
     public boolean supports(String toolName) {
-        return toolName != null && toolName.startsWith(PREFIX);
+        return isSupported(toolName);
+    }
+
+    @Override
+    public boolean isSupported(String toolName) {
+        return StringUtils.startsWith(toolName, PREFIX);
     }
 
     @Override
     public Verdict inspectArguments(String argumentsJson) {
         JsonNode root;
         try {
-            String text = argumentsJson == null || argumentsJson.isBlank() ? "{}" : argumentsJson;
+            String text = StringUtils.defaultIfBlank(argumentsJson, "{}");
             root = this.mapper.readTree(text);
         } catch (Exception ex) {
             return Verdict.reject("UI_PRIMITIVE_ARGUMENTS_REJECTED", "入参不是合法 JSON，未下发到前端",
@@ -94,17 +100,26 @@ public class UiPrimitiveGuard implements FrontendToolGuard {
             return Verdict.reject("UI_PRIMITIVE_ARGUMENTS_REJECTED", "入参必须是 JSON 对象，未下发到前端",
                     List.of("顶层应为 {...}"));
         }
-
         List<String> reasons = new ArrayList<>();
-        List<String> fields = new ArrayList<>();
-        root.fieldNames().forEachRemaining(fields::add);
+        inspectForbiddenFields(root, reasons);
+        inspectScalarArguments(root, reasons);
+        inspectArrayArguments(root, reasons);
+        if (!reasons.isEmpty()) {
+            return Verdict.reject("UI_PRIMITIVE_ARGUMENTS_REJECTED",
+                    "界面原语入参不合法，未下发到前端（没有挂起、界面未被操作）", reasons);
+        }
+        return Verdict.accept();
+    }
 
-        for (String key : fields) {
+    private static void inspectForbiddenFields(JsonNode root, List<String> reasons) {
+        root.fieldNames().forEachRemaining(key -> {
             if (FORBIDDEN_KEYS.contains(key)) {
                 reasons.add("禁止键 `" + key + "`：本工具只接受 ref/epoch 一类语义参数，不接受选择器或文件路径");
             }
-        }
+        });
+    }
 
+    private static void inspectScalarArguments(JsonNode root, List<String> reasons) {
         String ref = text(root, "ref");
         if (ref != null && !REF_PATTERN.matcher(ref).matches()) {
             reasons.add("`ref` 形如 import.upload.choose（至少三段，段字符集 [A-Za-z0-9_-]，实际：" + ref + "）");
@@ -122,26 +137,26 @@ public class UiPrimitiveGuard implements FrontendToolGuard {
             reasons.add("`note` 不得超过 " + NOTE_MAX + " 字符（实际 " + note.length() + "）");
         }
         Integer limit = number(root, "limit");
-        if (root.hasNonNull("limit")) {
-            if (limit == null || limit < 1 || limit > LIMIT_MAX) {
-                reasons.add("`limit` 必须是 1.." + LIMIT_MAX + " 的整数（实际：" + root.get("limit") + "）");
-            }
+        if (root.hasNonNull("limit") && (limit == null || limit < 1 || limit > LIMIT_MAX)) {
+            reasons.add("`limit` 必须是 1.." + LIMIT_MAX + " 的整数（实际：" + root.get("limit") + "）");
         }
         Integer delta = number(root, "delta");
-        if (root.hasNonNull("delta")) {
-            if (delta == null || Math.abs(delta) > DELTA_MAX) {
-                reasons.add("`delta` 必须是不超过 ±" + DELTA_MAX + " 的数字（实际：" + root.get("delta") + "）");
-            }
+        if (root.hasNonNull("delta") && (delta == null || Math.abs(delta) > DELTA_MAX)) {
+            reasons.add("`delta` 必须是不超过 ±" + DELTA_MAX + " 的数字（实际：" + root.get("delta") + "）");
         }
         String block = text(root, "block");
         if (block != null && !BLOCKS.contains(block)) {
             reasons.add("`block` 只能是 start/center/end/nearest（实际：" + block + "）");
         }
+    }
+
+    private static void inspectArrayArguments(JsonNode root, List<String> reasons) {
         JsonNode kinds = root.get("kinds");
         if (kinds != null && !kinds.isNull()) {
             if (!kinds.isArray()) {
                 reasons.add("`kinds` 必须是字符串数组（button/input/select/toggle/tab/link/all）");
-            } else {
+            }
+            else {
                 for (JsonNode item : kinds) {
                     if (!item.isTextual() || !KINDS.contains(item.asText())) {
                         reasons.add("`kinds` 里的角色不合法：" + item);
@@ -157,26 +172,21 @@ public class UiPrimitiveGuard implements FrontendToolGuard {
         if (accept != null && !accept.isNull()) {
             if (!accept.isArray()) {
                 reasons.add("`accept` 必须是扩展名数组（只能收窄到 xlsx / zip）");
-            } else {
+            }
+            else {
                 for (JsonNode item : accept) {
-                    String ext = item.isTextual() ? item.asText().replaceFirst("^\\.", "").toLowerCase() : "";
+                    String ext = item.isTextual() ? StringUtils.lowerCase(StringUtils.removeStart(item.asText(), ".")) : "";
                     if (!ACCEPT_EXTENSIONS.contains(ext)) {
                         reasons.add("`accept` 只能收窄到 xlsx / zip（收到：" + item + "）");
                     }
                 }
             }
         }
-
-        if (!reasons.isEmpty()) {
-            return Verdict.reject("UI_PRIMITIVE_ARGUMENTS_REJECTED",
-                    "界面原语入参不合法，未下发到前端（没有挂起、界面未被操作）", reasons);
-        }
-        return Verdict.accept();
     }
 
     @Override
     public Verdict inspectResult(String argumentsJson, String resultJson) {
-        String text = resultJson == null ? "" : resultJson;
+        String text = StringUtils.defaultString(resultJson);
         if (RESULT_FORBIDDEN.matcher(text).find()) {
             return Verdict.reject("UI_PRIMITIVE_RESULT_REJECTED", "回灌结果含路径或可执行片段，已拒绝采用",
                     List.of("结果里出现了盘符路径 / file:// / <script> / <iframe> / javascript: 之一；"

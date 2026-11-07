@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.web.dto;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * {@code GET/PUT /api/ai/settings/defaults} 的视图（设计稿 §3.5）。
  *
@@ -14,6 +17,9 @@ package com.example.configmgr.ai.web.dto;
  * @param version {@code config.version}（诊断用：改完能确认版本真的动了）
  * @param providerId {@code default.providerId}（{@code null} = 旧配置未绑定，读侧按模型归属解析）
  */
-public record DefaultsView(String modelId, Double temperature, Double topP, Integer maxTokens,
-        Boolean allowUserParams, long version, Long providerId) {
+public record DefaultsView(@JsonProperty("modelId") String modelId, @JsonProperty("temperature") Double temperature,
+        @JsonProperty("topP") Double topP, @JsonProperty("maxTokens") Integer maxTokens,
+        @JsonProperty("allowUserParams") Boolean allowUserParams,
+        @JsonProperty("version") @JsonFormat(shape = JsonFormat.Shape.STRING) long version,
+        @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId) {
 }

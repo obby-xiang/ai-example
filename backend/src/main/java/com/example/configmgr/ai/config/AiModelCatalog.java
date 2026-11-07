@@ -1,7 +1,10 @@
 package com.example.configmgr.ai.config;
 
 import com.example.configmgr.ai.config.db.AiProvider;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -29,6 +32,7 @@ import java.util.Optional;
  */
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class AiModelCatalog {
 
     public static final String CACHE_KEY_PREFIX = "ai:cfg:models:";
@@ -42,15 +46,6 @@ public class AiModelCatalog {
     private final AiProperties properties;
 
     private final ObjectMapper objectMapper;
-
-    public AiModelCatalog(AiConnectionProbe probe, AiConfigService configService, StringRedisTemplate redis,
-            AiProperties properties, ObjectMapper objectMapper) {
-        this.probe = probe;
-        this.configService = configService;
-        this.redis = redis;
-        this.properties = properties;
-        this.objectMapper = objectMapper;
-    }
 
     /**
      * 拉一次（或读缓存）。
@@ -71,9 +66,9 @@ public class AiModelCatalog {
                     "库里的密钥无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置");
         }
         if (!refresh) {
-            List<String> cached = readCache(providerId);
-            if (cached != null) {
-                return new CatalogResult(true, cached, true, null, null);
+            Optional<List<String>> cached = readCache(providerId);
+            if (cached.isPresent()) {
+                return new CatalogResult(true, cached.get(), true, null, null);
             }
         }
         // env 种子行是受信来源（私网闸对它是例外；否则 CI 的 127.0.0.1 桩会被拦）
@@ -87,21 +82,20 @@ public class AiModelCatalog {
         return new CatalogResult(true, result.models(), false, null, null);
     }
 
-    private List<String> readCache(Long providerId) {
+    private Optional<List<String>> readCache(Long providerId) {
         if (this.redis == null) {
-            return null;
+            return Optional.empty();
         }
         try {
             String raw = this.redis.opsForValue().get(CACHE_KEY_PREFIX + providerId);
             if (!StringUtils.hasText(raw)) {
-                return null;
+                return Optional.empty();
             }
-            return this.objectMapper.readValue(raw, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
-            });
+            return Optional.of(this.objectMapper.readValue(raw, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
+            }));
         }
         catch (Exception ex) {
-            log.debug("model cache read failed (treated as miss)", ex);
-            return null;
+            return Optional.empty();
         }
     }
 
@@ -119,7 +113,7 @@ public class AiModelCatalog {
             }
         }
         catch (Exception ex) {
-            log.debug("model cache write failed (response unaffected)", ex);
+            // 缓存写入失败不影响响应。
         }
     }
 
@@ -138,15 +132,21 @@ public class AiModelCatalog {
      * @param cached true = 本次来自缓存（没有打上游）
      * @param code 稳定错误码（ok=true 时为 null）
      */
-    public record CatalogResult(boolean ok, List<String> models, boolean cached, String code, String message) {
+    public record CatalogResult(@JsonProperty("ok") boolean ok, @JsonProperty("models") @NonNull List<String> models,
+            @JsonProperty("cached") boolean cached, @JsonProperty("code") String code,
+            @JsonProperty("message") String message) {
+
+        public CatalogResult {
+            models = models == null ? List.of() : List.copyOf(models);
+        }
 
         public static CatalogResult ok(List<String> models, boolean cached) {
-            return new CatalogResult(true, List.copyOf(models), cached, null, null);
+            return new CatalogResult(true, models, cached, null, null);
         }
     }
 
     /** 诊断：某 provider 是否有缓存（设置页不展示，排障用）。 */
     public Optional<List<String>> peekCache(Long providerId) {
-        return Optional.ofNullable(readCache(providerId));
+        return readCache(providerId);
     }
 }

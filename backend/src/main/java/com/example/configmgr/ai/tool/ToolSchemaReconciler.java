@@ -60,7 +60,7 @@ public final class ToolSchemaReconciler {
                     : node.has("$ref") ? "$ref" : "unknown";
             out.add(name + ":" + type);
         });
-        return out;
+        return out.isEmpty() ? Set.of() : out;
     }
 
     private static Set<String> required(JsonNode schema) {
@@ -69,6 +69,6 @@ public final class ToolSchemaReconciler {
         if (required.isArray()) {
             required.forEach(node -> out.add(node.asText()));
         }
-        return out;
+        return out.isEmpty() ? Set.of() : out;
     }
 }

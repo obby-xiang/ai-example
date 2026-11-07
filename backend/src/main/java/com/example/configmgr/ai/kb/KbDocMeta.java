@@ -2,6 +2,8 @@ package com.example.configmgr.ai.kb;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.List;
 
@@ -29,28 +31,28 @@ import java.util.List;
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record KbDocMeta(
-        String id,
-        String title,
-        String summary,
-        List<String> tags,
-        List<String> aliases,
-        String sha,
+        @JsonProperty("id") String id,
+        @JsonProperty("title") String title,
+        @JsonProperty("summary") String summary,
+        @JsonProperty("tags") List<String> tags,
+        @JsonProperty("aliases") List<String> aliases,
+        @JsonProperty("sha") String sha,
         @JsonProperty("updated_at") String updatedAt,
-        String file,
-        List<KbTerm> terms,
+        @JsonProperty("file") String file,
+        @JsonProperty("terms") List<KbTerm> terms,
         @JsonProperty("aliases_en") List<String> aliasesEn) {
 
     public KbDocMeta {
-        tags = tags == null ? List.of() : List.copyOf(tags);
-        aliases = aliases == null ? List.of() : List.copyOf(aliases);
-        terms = terms == null ? List.of() : List.copyOf(terms);
-        aliasesEn = aliasesEn == null ? List.of() : List.copyOf(aliasesEn);
-        summary = summary == null ? "" : summary;
+        tags = List.copyOf(ObjectUtils.defaultIfNull(tags, List.of()));
+        aliases = List.copyOf(ObjectUtils.defaultIfNull(aliases, List.of()));
+        terms = List.copyOf(ObjectUtils.defaultIfNull(terms, List.of()));
+        aliasesEn = List.copyOf(ObjectUtils.defaultIfNull(aliasesEn, List.of()));
+        summary = StringUtils.defaultString(summary);
     }
 
     /** 文档在源侧的相对路径（缺省 {@code <id>.md}）。 */
     public String effectiveFile() {
-        return file == null || file.isBlank() ? id + ".md" : file;
+        return StringUtils.isBlank(file) ? id + ".md" : file;
     }
 
     /** 换一份内容 sha（只换元数据，不动正文/切块）。 */
@@ -65,6 +67,6 @@ public record KbDocMeta(
 
     /** 摘要的展示文本：优先 summary，其次标题（目录里不出现空摘要行）。 */
     public String displaySummary() {
-        return summary == null || summary.isBlank() ? title : summary;
+        return StringUtils.isBlank(summary) ? title : summary;
     }
 }

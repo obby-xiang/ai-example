@@ -29,6 +29,8 @@ public interface KbCacheStore {
 
     String get(String key);
 
+    void touch(String key);
+
     long incr(String key);
 
     boolean setIfAbsent(String key, String value, Duration ttl);

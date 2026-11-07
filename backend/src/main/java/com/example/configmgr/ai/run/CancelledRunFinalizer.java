@@ -5,9 +5,10 @@ import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
-import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -21,6 +22,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -79,60 +81,6 @@ public class CancelledRunFinalizer {
 	}
 
 	/**
-	 * 默认调度器的底层线程池（懒建、进程内共享；<b>停机后可重建</b>）。
-	 *
-	 * <p>为什么不是 {@code static final}：JVM 内可能有多个 Spring Context（测试上下文、
-	 * 嵌入式部署）。若停机把它永久关死，后续上下文的重试链会直接从"调度被拒"开始
-	 * （{@link #reschedule} 只能清位 + WARN）。这里停机关闭并置空，下一次需要时再建，
-	 * 所以 {@code @PreDestroy} 只回收"当前这一代"，不破坏下一代的正常投递语义。
-	 */
-	private static final java.util.concurrent.atomic.AtomicReference<ScheduledExecutorService> DEFAULT_RETRY_EXECUTOR =
-			new java.util.concurrent.atomic.AtomicReference<>();
-
-	private static final Scheduler DEFAULT_SCHEDULER = defaultScheduler();
-
-	/**
-	 * 默认调度器的 owner 计数（I5）：多 Spring Context 并存时，先关闭的上下文不得停掉兄弟上下文
-	 * 共用的重试调度线程；只有最后一个 owner 离开才 shutdown。
-	 */
-	private static final AtomicInteger DEFAULT_SCHEDULER_OWNERS = new AtomicInteger();
-
-	private static ScheduledExecutorService defaultRetryExecutor() {
-		ScheduledExecutorService current = DEFAULT_RETRY_EXECUTOR.get();
-		if (current != null) {
-			return current;
-		}
-		synchronized (DEFAULT_RETRY_EXECUTOR) {
-			current = DEFAULT_RETRY_EXECUTOR.get();
-			if (current == null) {
-				current = Executors.newSingleThreadScheduledExecutor(runnable -> {
-					Thread thread = new Thread(runnable, "ai-cancel-finalize-retry");
-					thread.setDaemon(true);
-					return thread;
-				});
-				DEFAULT_RETRY_EXECUTOR.set(current);
-			}
-			return current;
-		}
-	}
-
-	private static Scheduler defaultScheduler() {
-		return (task, delay) -> {
-			long millis = delay == null ? 0L : Math.max(1L, delay.toMillis());
-			var future = defaultRetryExecutor().schedule(task, millis, TimeUnit.MILLISECONDS);
-			return () -> future.cancel(false);
-		};
-	}
-
-	/** 关闭当前一代默认调度线程（{@code @PreDestroy} 调用；幂等，可被后续上下文重建）。 */
-	private static void shutdownDefaultRetryExecutor() {
-		ScheduledExecutorService current = DEFAULT_RETRY_EXECUTOR.getAndSet(null);
-		if (current != null) {
-			current.shutdownNow();
-		}
-	}
-
-	/**
 	 * 取消收尾的进程内互斥（按 runId 分条）。
 	 *
 	 * <p>为什么需要：交棒执行体与驱动线程可能同时收尾同一轮（交棒刚取到租，驱动线程的写门又恰好
@@ -149,8 +97,9 @@ public class CancelledRunFinalizer {
 
 	private final Scheduler scheduler;
 
-	/** 本实例是否登记了默认调度器 owner（直接 new 的窄路径不登记）。 */
-	private volatile boolean ownsDefaultScheduler;
+	private final ScheduledExecutorService retryExecutor;
+
+	private final boolean ownsRetryExecutor;
 
 	private final AiProperties properties;
 
@@ -174,44 +123,51 @@ public class CancelledRunFinalizer {
 	/** 应用停机标志：置位后不再派发/重排（重试链随上下文关闭一起收敛）。 */
 	private volatile boolean closed;
 
-	@Autowired
 	public CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider,
 			@Qualifier("aiResumeTrigger") Executor executor, AiProperties properties) {
+		this(resumeServiceProvider, executor, properties, null);
+	}
+
+	@Autowired
+	public CancelledRunFinalizer(ObjectProvider<ResumeService> resumeServiceProvider,
+			@Qualifier("aiResumeTrigger") Executor executor, AiProperties properties,
+			@Qualifier("aiCancelFinalizeRetryScheduler") ScheduledExecutorService retryExecutor) {
 		this.resumeServiceProvider = resumeServiceProvider;
 		this.executor = executor;
 		this.properties = properties;
-		this.scheduler = DEFAULT_SCHEDULER;
+		if (retryExecutor == null) {
+			ScheduledThreadPoolExecutor pool = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+			pool.setKeepAliveTime(60L, TimeUnit.SECONDS);
+			pool.allowCoreThreadTimeOut(true);
+			pool.setRemoveOnCancelPolicy(true);
+			pool.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+			pool.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+			this.retryExecutor = pool;
+			this.ownsRetryExecutor = true;
+		}
+		else {
+			this.retryExecutor = retryExecutor;
+			this.ownsRetryExecutor = false;
+		}
+		this.scheduler = (task, delay) -> {
+			long millis = delay == null ? 0L : Math.max(1L, delay.toMillis());
+			var future = this.retryExecutor.schedule(task, millis, TimeUnit.MILLISECONDS);
+			return () -> future.cancel(false);
+		};
 		for (int i = 0; i < MONITOR_STRIPES; i++) {
 			this.finalizeMonitors[i] = new Object();
 		}
 	}
 
 	/**
-	 * 装配完成后登记默认调度器 owner（I5）：只让 Spring 生命周期路径参与计数，
-	 * 直接 {@code new} 的单测/窄路径与构造失败都不会留下永不释放的 owner。
-	 */
-	@PostConstruct
-	void registerDefaultSchedulerOwner() {
-		DEFAULT_SCHEDULER_OWNERS.incrementAndGet();
-		this.ownsDefaultScheduler = true;
-	}
-
-	/**
-	 * <b>应用停机</b>：停止重试调度线程，并拒绝之后的新派发/重排。
-	 *
-	 * <p>为什么必须显式关：默认调度器是<b>进程级</b>守护线程（不阻止 JVM 退出，但会跨上下文存活）。
-	 * 只让进程退出"顺手带走"会让旧上下文的线程继续持有类加载器与在飞任务引用。停机只收敛重试链
-	 * （取消事实仍在 Redis，下一次取消/续跑/启动扫描会重新触发）；不改变正常交棒语义。
+	 * <b>应用停机</b>：拒绝之后的新派发/重排；只关闭实例自管的回退调度器，容器 Bean 不重复销毁。
+	 * 取消事实仍在 Redis，下一次取消/续跑/启动扫描会重新触发。
 	 */
 	@PreDestroy
 	void shutdown() {
 		this.closed = true;
-		if (this.ownsDefaultScheduler) {
-			this.ownsDefaultScheduler = false;
-			if (DEFAULT_SCHEDULER_OWNERS.decrementAndGet() <= 0) {
-				DEFAULT_SCHEDULER_OWNERS.set(0);
-				shutdownDefaultRetryExecutor();
-			}
+		if (this.ownsRetryExecutor) {
+			this.retryExecutor.shutdownNow();
 		}
 		// I5-minor：停机时被取消的重试任务不会再执行，必须在本地补偿释放去重位与重试计数，
 		// 否则同一实例/后续重入会看到"永久 inFlight"。取消事实仍在 Redis，不会因此漏收尾。
@@ -229,7 +185,7 @@ public class CancelledRunFinalizer {
 	 * 真正的去重/归属键是 {@link LocalRunKey}（见 {@link #handOff}）。
 	 */
 	public Object finalizeMonitor(String runId) {
-		int hash = runId == null ? 0 : runId.hashCode();
+		int hash = ObjectUtils.hashCode(runId);
 		return this.finalizeMonitors[(hash & 0x7fffffff) % MONITOR_STRIPES];
 	}
 
@@ -245,7 +201,7 @@ public class CancelledRunFinalizer {
 	 * @return 本次是否真的派发了一次
 	 */
 	public boolean handOff(String runId, String cause) {
-		if (runId == null || runId.isBlank() || this.closed) {
+		if (StringUtils.isBlank(runId) || this.closed) {
 			return false;
 		}
 		// 身份只取调用线程的显式 tenant/user 作用域（没有就拒绝交棒），再拼本地键 —— 键必须与
@@ -259,7 +215,7 @@ public class CancelledRunFinalizer {
 		String key = LocalRunKey.of(identity, runId);
 		synchronized (this.cleanupLock) {
 			if (!this.inFlight.add(key)) {
-				log.debug("cancel finalize already in handoff, not dispatched again runId={} cause={}", runId, cause);
+				if (log.isDebugEnabled()) log.debug("cancel finalize already in handoff, not dispatched again runId={} cause={}", runId, cause);
 				return false;
 			}
 			this.attempts.put(key, new AtomicInteger());
@@ -285,16 +241,16 @@ public class CancelledRunFinalizer {
 	}
 
 	private void submit(String runId, String key, String cause, TenantUser identity) {
-		if (absentAfterCleanup(runId, key)) {
+		if (isAbsentAfterCleanup(runId, key)) {
 			// 已被 forget（终态收尾）/停机清理：排队的重试任务不再执行，避免重新登记出残影。
-			log.debug("cancel finalize handoff skipped (already forgotten) runId={} cause={}", runId, cause);
+			if (log.isDebugEnabled()) log.debug("cancel finalize handoff skipped (already forgotten) runId={} cause={}", runId, cause);
 			return;
 		}
 		registerKey(runId, key);
 		if (this.closed) {
 			// 停机中：不再向（可能已关闭的）触发池派发；交棒位立刻释放，取消事实仍留在 Redis。
 			finish(runId, key);
-			log.debug("cancel finalize handoff skipped (app shutting down) runId={} cause={}", runId, cause);
+			if (log.isDebugEnabled()) log.debug("cancel finalize handoff skipped (app shutting down) runId={} cause={}", runId, cause);
 			return;
 		}
 		try {
@@ -336,7 +292,7 @@ public class CancelledRunFinalizer {
 	 * 上抛；本方法则是终态收尾方的兜底入口（终态写成功/失败后都可调用）。
 	 */
 	public void forget(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return;
 		}
 		synchronized (this.cleanupLock) {
@@ -352,7 +308,7 @@ public class CancelledRunFinalizer {
 	}
 
 	private void attempt(String runId, String key, String cause, TenantUser identity) {
-		if (absentAfterCleanup(runId, key)) {
+		if (isAbsentAfterCleanup(runId, key)) {
 			return;
 		}
 		try {
@@ -405,7 +361,7 @@ public class CancelledRunFinalizer {
 
 	private void rescheduleOrGiveUp(String runId, String key, String cause, boolean leaseHeldElsewhere,
 			TenantUser identity) {
-		if (absentAfterCleanup(runId, key)) {
+		if (isAbsentAfterCleanup(runId, key)) {
 			// forget 已按 runId 清掉本轮交棒位：不再排重试，也不重新登记索引。
 			return;
 		}
@@ -424,13 +380,13 @@ public class CancelledRunFinalizer {
 	}
 
 	private void reschedule(String runId, String key, String cause, Duration delay, TenantUser identity) {
-		if (absentAfterCleanup(runId, key)) {
+		if (isAbsentAfterCleanup(runId, key)) {
 			return;
 		}
 		if (this.closed) {
 			// 停机中：重试链在这里收敛（不重排、不留去重位；取消事实仍在 Redis，下次入口重新触发）。
 			finish(runId, key);
-			log.debug("cancel finalize retry skipped (app shutting down) runId={} cause={}", runId, cause);
+			if (log.isDebugEnabled()) log.debug("cancel finalize retry skipped (app shutting down) runId={} cause={}", runId, cause);
 			return;
 		}
 		try {
@@ -469,7 +425,7 @@ public class CancelledRunFinalizer {
 	 * 不清），要么本方法先清掉（handOff 随后加入的是新一代交棒，不受影响），避免晚到的旧任务
 	 * 把同名新交棒误清。
 	 */
-	private boolean absentAfterCleanup(String runId, String key) {
+	private boolean isAbsentAfterCleanup(String runId, String key) {
 		synchronized (this.cleanupLock) {
 			if (this.inFlight.contains(key)) {
 				return false;

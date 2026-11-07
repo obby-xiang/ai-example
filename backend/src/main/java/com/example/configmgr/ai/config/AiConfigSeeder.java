@@ -87,11 +87,17 @@ public class AiConfigSeeder implements ApplicationRunner {
      * @return true = 本次写入了种子行
      */
     public boolean seed() {
+        return isSeedApplied();
+    }
+
+    public boolean isSeedApplied() {
         String envKey = this.configService.envApiKey();
         boolean force = this.properties.getConfig().isSeedForce();
         long existing = this.providerRepository.count();
         if (existing > 0 && !force) {
-            log.debug("AI config seeding skipped: ai_provider already has {} rows (strict seed: env not applied)", existing);
+            if (log.isDebugEnabled()) {
+                log.debug("AI config seeding skipped: ai_provider already has {} rows (strict seed: env not applied)", existing);
+            }
             return false;
         }
         if (!StringUtils.hasText(envKey)) {
@@ -106,7 +112,7 @@ public class AiConfigSeeder implements ApplicationRunner {
         }
         try {
             boolean[] wrote = new boolean[1];
-            this.transactionTemplate.executeWithoutResult(status -> wrote[0] = writeSeed(force));
+            this.transactionTemplate.executeWithoutResult(status -> wrote[0] = isSeedWritten(force));
             if (!wrote[0]) {
                 // 没写数据就不发版本：no-op 种子（表非空 / seed-force 只撞到用户改过的行）不得让版本抖动，
                 // 否则每个实例都会为一次"什么都没改"白重载一次全表。
@@ -131,7 +137,7 @@ public class AiConfigSeeder implements ApplicationRunner {
      * 写种子行（与 {@code config.version}+1 同一事务）。
      *
      * <h2>并发交错下也必须"恰好一次"</h2>
-     * {@link #seed()} 的 {@code count()==0} 判据在事务<b>外</b>：实例 C 可能读到 0，随后实例 A 完整种好并提交，
+     * {@link #isSeedApplied()} 的 {@code count()==0} 判据在事务<b>外</b>：实例 C 可能读到 0，随后实例 A 完整种好并提交，
      * 然后 C 才进事务并<b>看得见</b> A 写的行（READ_COMMITTED）。此时不得重灌数据并重复推进版本。
      *
      * <p>行已存在且<b>本次不是 seed-force</b> ⇒ 先判"这一版种子是否已经完整落地"
@@ -140,37 +146,13 @@ public class AiConfigSeeder implements ApplicationRunner {
      *
      * @return true = 本次真的写了数据行（调用方据此决定要不要发布版本）
      */
-    private boolean writeSeed(boolean force) {
+    private boolean isSeedWritten(boolean force) {
         // 与人工写路径同一锁顺序；no-op 种子只锁定、不递增版本。
         this.versions.lockInTransaction();
-        Optional<AiProvider> existing = this.providerRepository.findByCode(AiConfigService.ENV_PROVIDER_CODE);
-        AiProvider provider;
-        if (existing.isPresent()) {
-            provider = existing.get();
-            if (!AiProvider.SOURCE_ENV_SEED.equals(provider.getSource())) {
-                // 用户在 UI 改过这一行 ⇒ 不碰（seed-force 也只重灌"来源=ENV_SEED"的行）
-                log.info("AI config re-seed skipped: provider={} source={} (not ENV_SEED)",
-                        provider.getCode(), provider.getSource());
-                return false;
-            }
-            if (!force && seedAlreadyLanded(provider)) {
-                // 并发交错："count 检查之后别人才种好"。值完全一致 ⇒ 真 no-op，不制造版本抖动。
-                log.debug("AI config seeding skipped: provider={} matches env and model rows complete (seeded by another instance)",
-                        provider.getCode());
-                return false;
-            }
-            provider.setDisplayName(AiConfigService.ENV_PROVIDER_DISPLAY_NAME);
-            provider.setBaseUrl(this.configService.resolveEnvBaseUrl());
-            provider.setCompletionsPath(this.configService.resolveEnvCompletionsPath());
-            provider.setKeyLast4(AiKeyCipher.last4(this.configService.envApiKey()));
-            provider = this.providerRepository.saveAndFlush(provider);
-            log.info("AI config re-seeded provider={} (force={}; needed only when env and DB diverge)",
-                    provider.getCode(), force);
+        AiProvider provider = saveSeedProvider(force);
+        if (provider == null) {
+            return false;
         }
-        else {
-            provider = this.providerRepository.saveAndFlush(this.configService.envSeedProvider());
-        }
-
         String modelId = this.configService.resolveEnvModelId();
         Long providerId = provider.getId();
         AiProviderModel model = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
@@ -193,6 +175,36 @@ public class AiConfigSeeder implements ApplicationRunner {
         return true;
     }
 
+    private AiProvider saveSeedProvider(boolean force) {
+        Optional<AiProvider> existing = this.providerRepository.findByCode(AiConfigService.ENV_PROVIDER_CODE);
+        if (existing.isEmpty()) {
+            return this.providerRepository.saveAndFlush(this.configService.envSeedProvider());
+        }
+        AiProvider provider = existing.get();
+        if (!AiProvider.SOURCE_ENV_SEED.equals(provider.getSource())) {
+            // 用户在 UI 改过这一行 ⇒ 不碰（seed-force 也只重灌"来源=ENV_SEED"的行）
+            log.info("AI config re-seed skipped: provider={} source={} (not ENV_SEED)",
+                    provider.getCode(), provider.getSource());
+            return null;
+        }
+        if (!force && isSeedAlreadyLanded(provider)) {
+            // 并发交错："count 检查之后别人才种好"。值完全一致 ⇒ 真 no-op，不制造版本抖动。
+            if (log.isDebugEnabled()) {
+                log.debug("AI config seeding skipped: provider={} matches env and model rows complete (seeded by another instance)",
+                        provider.getCode());
+            }
+            return null;
+        }
+        provider.setDisplayName(AiConfigService.ENV_PROVIDER_DISPLAY_NAME);
+        provider.setBaseUrl(this.configService.resolveEnvBaseUrl());
+        provider.setCompletionsPath(this.configService.resolveEnvCompletionsPath());
+        provider.setKeyLast4(AiKeyCipher.last4(this.configService.envApiKey()));
+        provider = this.providerRepository.saveAndFlush(provider);
+        log.info("AI config re-seeded provider={} (force={}; needed only when env and DB diverge)",
+                provider.getCode(), force);
+        return provider;
+    }
+
     /**
      * 这一版种子是否<b>已经完整落地</b>（no-op 判据）：只比"种子会写的那些字段"，不看用户可改的其它列。
      *
@@ -200,7 +212,7 @@ public class AiConfigSeeder implements ApplicationRunner {
      * 用"将要写的值 vs 行里的值"比较，而不是"行存在 ⇒ 跳过"：模型行可以因为半途失败/人工删除而缺失，
      * 那种情况必须补齐（否则实例永远拿不到可用模型）。
      */
-    private boolean seedAlreadyLanded(AiProvider provider) {
+    private boolean isSeedAlreadyLanded(AiProvider provider) {
         if (!java.util.Objects.equals(provider.getDisplayName(), AiConfigService.ENV_PROVIDER_DISPLAY_NAME)
                 || !java.util.Objects.equals(provider.getBaseUrl(), this.configService.resolveEnvBaseUrl())
                 || !java.util.Objects.equals(provider.getCompletionsPath(),

@@ -1,8 +1,12 @@
 package com.example.configmgr.ai.history;
 
 import com.example.configmgr.ai.gate.SpToolCallingManager;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -94,7 +98,7 @@ public final class SyntheticMessages {
 		if (text == null) {
 			return null;
 		}
-		if (text.equals(SUMMARY_PLACEHOLDER) || text.startsWith(SUMMARY_PLACEHOLDER)) {
+		if (StringUtils.startsWith(text, SUMMARY_PLACEHOLDER)) {
 			return Kind.COMPACTION;
 		}
 		if (text.startsWith(STEP_LIMIT_PREFIX)) {
@@ -118,17 +122,17 @@ public final class SyntheticMessages {
 	 * 去掉"导出收尾纠正"内部指令（写快照/记忆前的过滤口）：只过滤这一种合成消息，
 	 * 压缩摘要/步数收尾等既有合成消息<b>照旧保留</b>（它们本来就是模型记忆的一部分）。
 	 */
-	public static java.util.List<Message> withoutCorrectionInstruction(java.util.List<Message> messages) {
-		if (messages == null || messages.isEmpty()) {
-			return java.util.List.of();
+	public static List<Message> withoutCorrectionInstruction(List<Message> messages) {
+		if (CollectionUtils.isEmpty(messages)) {
+			return List.of();
 		}
-		java.util.List<Message> out = new java.util.ArrayList<>(messages.size());
+		List<Message> out = new ArrayList<>(messages.size());
 		for (Message message : messages) {
 			String text = message == null ? null : message.getText();
-			if (text == null || !text.startsWith(EXPORT_CORRECTION_PREFIX)) {
+			if (!StringUtils.startsWith(text, EXPORT_CORRECTION_PREFIX)) {
 				out.add(message);
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 }

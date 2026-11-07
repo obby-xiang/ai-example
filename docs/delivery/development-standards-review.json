@@ -1186,6 +1186,1012 @@
           "reason": "按51个实际暂存路径逐hunk静态复核，agent-1017最终PASS且前次URL未关闭项已修复；公共契约、8处冻结空集合和日志脱敏有源码证据，前端无50/20要求，测试、构建、typecheck、lint、浏览器/E2E、真实SSE/历史恢复/异步状态机均NOT_RUN，门禁留由主会话执行。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:233062d7185237f5d157fdd9e81dbe538e0d72b21946194da54db2450d15ba08",
+      "status": "reviewed",
+      "reason": "当前185个后端AI生产文件及development-standards.md共186个暂存路径已逐文件逐hunk独立静态复审，配置agent-1012、接口agent-1013、session agent-1018、run agent-1025最终结论均PASS；集合presence、JSON/Long兼容、敏感输出、组合线程池、KB 30分钟、24小时会话续期及跨实例状态机问题均已关闭。测试、构建、Maven、真实Redis/Cluster和多实例运行均NOT_RUN，本记录未运行门禁。",
+      "reviewedAt": "2026-11-07T21:22:44+08:00",
+      "reviewer": "K3.1 Pro agent-1012/1013/1018/1025独立静态复审",
+      "specChanges": [
+        {
+          "change": "集合和Map返回统一非null及不可变防御性副本，TaskSlots、TranscriptEntry、FrontendToolResultRequest、RunSnapshot/PendingToolCall等以独立presence位区分字段缺失、非法值、有效空值和非空值。",
+          "reason": "空集合不能同时承担旧数据未知与已确认空两种语义，外部来源集合也不能被共享修改。",
+          "impact": "新增presence字段均为additive，旧构造器和旧读取投影保留；缺失时沿用旧三态/回退判据，合法空集合不再被误判为未同步，嵌套Map/List在写入前复制并只读暴露。"
+        },
+        {
+          "change": "JSON实体、record和构造参数显式声明@JsonProperty，long/Long使用@JsonFormat(STRING)，Map中的ID和时间戳同步字符串化，派生布尔属性按协议需要@JsonIgnore。",
+          "reason": "防止Java字段/访问器重命名隐式改变JSON，并避免JavaScript数值精度损失。",
+          "impact": "JSON输出Long为字符串，Jackson仍可将数字或数字字符串恢复为long/Long；epochMs等读取同时接受Number和数字字符串，旧前端字段名不变，合法双方向转换不依赖全局配置。"
+        },
+        {
+          "change": "ProviderCommand.apiKey改为WRITE_ONLY，ProviderView.baseUrl停止JSON输出，实体敏感字段和record自动toString改为白名单或长度摘要，AiProvider等敏感路径/keyLast4不进入toString。",
+          "reason": "明文密钥、内部地址、参数正文、消息正文和上下文不得经API、日志或自动toString泄露。",
+          "impact": "apiKey仅写入不读出，ProviderView保留业务必需字段但隐藏baseUrl；TranscriptEntry嵌套ToolCallView/SegmentView只输出ID、类型、名称和argumentsLength/textLength，ProviderRuntime/ToolExecutionEnvelope等不输出ChatModel、options或上下文正文。"
+        },
+        {
+          "change": "Lombok实体由@Data/@Value改为@Getter/@Setter及显式@ToString，禁止Lombok生成equals/hashCode；现行兼容API保留旧签名和委托且不加@Deprecated，development-standards.md同步集合、JSON、线程池、TTL和资源释放规则。",
+          "reason": "隐式相等性可能错误纳入敏感或框架字段，废弃标记与现行兼容委托职责冲突，规范需与实现一致。",
+          "impact": "JPA/Jackson实体保持身份与输出边界，旧公开方法和测试调用继续可用；仅真正无消费者的死代码删除，documented现行兼容入口不视为废弃，静态导入和通配import同步清理。"
+        },
+        {
+          "change": "线程池改为实例/Spring Bean中的固定有界组合，AiModelConfig提供按精确Bean名称条件装配的执行器，LeaseService固定2线程且最多1024个续租登记，ConfirmGate/SpToolCallingManager/CancelledRunFinalizer区分容器池与轻量自管池。",
+          "reason": "静态共享池、无界任务及继承覆写线程池会造成跨Context关闭、资源泄漏和容量不可控。",
+          "impact": "ScheduledThreadPoolExecutor仅作组合委托，线程/队列/拒绝策略/回收固定；@Qualifier与Bean name逐一匹配，容器池不重复销毁，自管池在@PreDestroy关闭，任务和订阅分别释放并恢复中断。"
+        },
+        {
+          "change": "KB缓存统一30分钟TTL，文档、文档ID集合、manifest和generation在读取、304及发布路径续期，RedisKbCacheStore新增touch并给计数器设置同样TTL。",
+          "reason": "KB是刷新型缓存，不应使用7天或永久数据，304未修改也必须延续有效缓存生命周期。",
+          "impact": "命中、未修改、重建和代次递增均回到30分钟，未命中不创建数据；旧索引在刷新失败时继续服务，release/generation fence不变，真实TTL核验NOT_RUN。"
+        },
+        {
+          "change": "AI对话数据采用24小时滑动TTL和60秒Redis跨实例节流，SessionActivityRenewal合并显式run/current/active/session-runs全历史并限制128 run、1024枚举项、4096续期键及64键批次；后台纯读不续期，purge guard统一隔离。",
+          "reason": "真实用户活动应续期全部会话关联数据，高频/多实例续期需共享节流且不能复活删除数据或把后台读取冒充活动。",
+          "impact": "transcript、RunStore、AiSessionService和上下文事件共用SET NX PX窗口及owner条件释放；严格校验pipeline回包，dataKey必须TRUE，超限/异常失败；pending/due/短租约保留各自TTL，RunStore后台快照纯读且FAILED不返回成功。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigSeeder.java",
+          "status": "checked",
+          "reason": "公开seed保留并委托isSeedApplied，写种子拆出saveSeedProvider且私有布尔规范化；事务锁、用户行保护、no-op不发版本及模型补齐顺序不变，DEBUG均有开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigService.java",
+          "status": "checked",
+          "reason": "Defaults/AvailableModel等显式JSON字段及Long字符串，ConfigSnapshot集合@NonNull并防御复制；旧布尔委托、last-good快照保留，provider状态Map移除baseUrl且空列表非null。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigWriter.java",
+          "status": "checked",
+          "reason": "Provider/Model/Defaults命令显式JSON字段，apiKey WRITE_ONLY，ProviderUpdate安全toString；14处isNotBlank及prepare/apply拆分保持code不可变、origin换绑、事务版本和审计顺序。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiConnectionProbe.java",
+          "status": "checked",
+          "reason": "ProbeResult显式JSON、latencyMs字符串及models非null副本，Optional解析区分非法响应与有效空数组；4处hasText修复，稳定错误码和有界UTF-8响应处理不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiEndpointGuard.java",
+          "status": "checked",
+          "reason": "元数据主机匹配复用ArrayUtils.contains，DNS失败返回新建空InetAddress数组并交探活报UNREACHABLE；私网/元数据拦截和安全错误码未放宽。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiKeyCipher.java",
+          "status": "checked",
+          "reason": "4处hasText改isNotBlank，KEK缺失/非法以新建空数组表示且requireKek失败关闭；Hex指纹、AAD和last4契约不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiModelCatalog.java",
+          "status": "checked",
+          "reason": "CatalogResult显式JSON且models非null不可变，readCache Optional区分缺失/异常与合法空列表；Redis失败仍按未命中，缓存写失败不影响真实探活。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiModelConfig.java",
+          "status": "checked",
+          "reason": "新增三个按精确name条件的执行器Bean，工具超时时使用SynchronousQueue/AbortPolicy，两个调度器固定单线程并启用回收/取消出队；与三处@Qualifier匹配且容器管理生命周期。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiModelResolver.java",
+          "status": "checked",
+          "reason": "providerModels空值以不可变List.of补默认，显式modelId、默认启用模型及首个启用模型选择顺序未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java",
+          "status": "checked",
+          "reason": "effectiveSessionTtl将缺省/非法配置回24小时并限制有效值不超过24小时，上下文/KB校验拆helper；原配置键、阈值和启动失败语义保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java",
+          "status": "checked",
+          "reason": "两处hasText修复，Overrides空值复用ObjectUtils，runtimeKeys空时Set.of；runtime复用、options覆盖和参数范围校验不变，Consumer显式导入。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/ProviderRuntime.java",
+          "status": "checked",
+          "reason": "record新增白名单toString，仅输出providerId/providerCode/modelId，不包含ChatModel、OpenAiChatOptions或请求覆盖参数，避免配置与敏感运行态经日志泄漏。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/RedisAvailability.java",
+          "status": "checked",
+          "reason": "私有awaitProbe改isProbeAvailable但single-flight CAS、超时和中断恢复不变；可用性翻转WARN保留Throwable，持续失败不重复DEBUG。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiConfigAudit.java",
+          "status": "checked",
+          "reason": "@Data改@Getter/@Setter/@ToString以避免Lombok equals，字段显式@JsonProperty且id字符串；actor/diffJson排除toString，JPA审计映射不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiProvider.java",
+          "status": "checked",
+          "reason": "实体不再使用@Data，id显式字符串JSON，baseUrl/completionsPath/modelsPath/keyLast4均排除toString；keyCipher/keyFingerprint仍@JsonIgnore，isKeyDeclared派生属性关闭。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiProviderModel.java",
+          "status": "checked",
+          "reason": "@Data拆为Getter/Setter/ToString，id/providerId字符串化且所有JSON字段显式命名；default字段保持default，不再隐式生成equals/hashCode。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiSetting.java",
+          "status": "checked",
+          "reason": "实体改Getter/Setter/ToString并显式settingKey/valueJson/updatedAt字段，消除Lombok equals；复合主键和JSON设置内容映射未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/CompactionFuse.java",
+          "status": "checked",
+          "reason": "allowsSummary旧公开入口委托canSummarize，config/state/circuit空值复用ObjectUtils；OPEN冷却、HALF_OPEN、失败计数和成功闭合不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextBreakdown.java",
+          "status": "checked",
+          "reason": "usage取值改MapUtils.getInteger并钳非负，消息空判断复用CollectionUtils；system/tools单列和used汇总不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextBreakdownService.java",
+          "status": "checked",
+          "reason": "构造器改Lombok RequiredArgsConstructor，measuredAtMs/lastAtMs输出Long字符串；measured旧公开访问器调用保持，端点摘要结构不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextCompactor.java",
+          "status": "checked",
+          "reason": "决策/L2/L3/提交拆helper，压缩事件atMs改字符串，noop空消息统一List.of；滞回、HITL降级、熔断、CAS重试和公开Plan.summarised均保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextEstimator.java",
+          "status": "checked",
+          "reason": "文本/消息/schema空判断改Commons，CJK与ASCII估算、SYSTEM去重及工具schema计量算法未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextLimitResolver.java",
+          "status": "checked",
+          "reason": "ResolveResult显式limitTokens/source，known/isKnown派生属性@JsonIgnore且旧known保留；provider必需和UNKNOWN回退不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextMeter.java",
+          "status": "checked",
+          "reason": "lastMeasured/isLastMeasured派生属性@JsonIgnore并保留旧入口，usage空值补0；空帧忽略、脏usage判据和completion最大值不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextOverflow.java",
+          "status": "checked",
+          "reason": "仅将空文本判断替换为StringUtils.isEmpty，超限关键词小写匹配与多文本扫描逻辑不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextState.java",
+          "status": "checked",
+          "reason": "record全字段显式JSON，atMs/openUntilMs/providerId/version字符串化，派生measured等@JsonIgnore且旧委托保留；脏HASH宽松解析不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextSummaryClient.java",
+          "status": "checked",
+          "reason": "runtime modelId和摘要正文空白判断改StringUtils，摘要仍需闭合标签；本轮runtime限定、length拒绝及空摘要失败关闭不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ContextTrigger.java",
+          "status": "checked",
+          "reason": "upgradeAllowed、hardOverflow及hysteresisUnlocked旧公开重载全部委托新is名称；升级逃逸和输出预留分母判据一致。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ConversationTurns.java",
+          "status": "checked",
+          "reason": "空集合及保护集合默认值复用Commons，空输入List.of；UserMessage切段、近期轮pin和保护ID扩窗不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/HardTrim.java",
+          "status": "checked",
+          "reason": "空消息判断改CollectionUtils且空Plan统一非null列表；system前缀、tool配对和受保护run硬裁规则未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/MemoryWindow.java",
+          "status": "checked",
+          "reason": "messages/Budget/protectedRunIds空值改ObjectUtils默认实现；绝对token/count预算和Drop裁剪顺序保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/RedisContextStateStore.java",
+          "status": "checked",
+          "reason": "PendingCompaction显式JSON、ledgerEvents不可变副本及event只读Map，熔断首项getFirst；CAS参数、代次校验、空事件和续期降级不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/RollingSummarizer.java",
+          "status": "checked",
+          "reason": "分段摘要、合并和Plan构建拆SummaryWork，空消息统一List.of；空/异常摘要不变更、请求计数和超预算保留段语义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/SystemMessages.java",
+          "status": "checked",
+          "reason": "system空判断改CollectionUtils，空系统段仍返回原body引用；非空system先于body不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ToolResultClearing.java",
+          "status": "checked",
+          "reason": "slot/计划/替换拆分且空消息统一List.of；keepToolPairs、活跃run保护、占位符和savedTokens非负钳制保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/context/ToolResultShrink.java",
+          "status": "checked",
+          "reason": "ShrinkPlan/SlotRewrite拆分且空消息统一List.of；三次收窄、MIN_KEEP、originalChars取大值及非法信封跳过不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/feedback/AiFeedback.java",
+          "status": "checked",
+          "reason": "JPA通配import展开且@Data改Getter/Setter及onlyExplicitlyIncluded ToString，仅输出ID、租户用户、message/session和rating；正文、原因和摘录不进入日志，唯一约束不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/feedback/ExcerptGuard.java",
+          "status": "checked",
+          "reason": "敏感判断改isSensitive并保留旧sensitive委托，空文本用StringUtils；高置信凭据识别与调用方脱敏行为不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java",
+          "status": "checked",
+          "reason": "QUERY_COND求值、候选草案和confirm门禁拆分，草案立即park且构建失败停止条件表；空集合/私有record规范化，明确留空、取消和未决fail-closed不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/DefinitionSelectionForm.java",
+          "status": "checked",
+          "reason": "导航决策拆NavigationDecision且createdInBatch先判null，parkAdvanceIfDue旧入口委托shouldParkAdvance；一次重试、页面归属和批量去重不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/ExportConditionWorkflow.java",
+          "status": "checked",
+          "reason": "Plan列表非null不可变，readyToAdvance委托canAdvance；SET/EXPLICIT_UNSET/UNDECIDED三态和EXPORT空白全量判据不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormAttachmentStore.java",
+          "status": "checked",
+          "reason": "Attachment显式JSON字段、size字符串及安全toString，storagePath不进摘要；附件登记协议字段保持，文件路径不进入日志。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormIssue.java",
+          "status": "checked",
+          "reason": "record构造器以StringUtils保证key/message非null，code和结构化错误JSON形状未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormOptionSource.java",
+          "status": "checked",
+          "reason": "字段/层级选项源以StringUtils处理父值和标签，无结果List.of；非法父值不回落全量，异常和排序规则不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormOptionSourceRegistry.java",
+          "status": "checked",
+          "reason": "未知sourceId返回List.of，supports委托isSupported；非法来源与合法空选项仍可区分，API数组非null。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormAttachmentController.java",
+          "status": "checked",
+          "reason": "上传校验/存储/旧件回收拆分，响应字段不变；登记失败回收新文件、新件成功后再删旧件及fieldKey先校验不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java",
+          "status": "checked",
+          "reason": "条件步骤私有门继续调用保留的公开conditionsStepAllowed；QUERY_COND唯一放行和旧兼容委托共用判据。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java",
+          "status": "checked",
+          "reason": "park/parkAll改should命名，挂起写入拆isParkStateSaved；失败逐条converge、合成指令不入记忆及正文/metadata顺序不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/RedisFormAttachmentStore.java",
+          "status": "checked",
+          "reason": "pipelineGet Optional区分未执行与有效结果，批量/逐件续期回退保持；空列表/快照不可变，读失败不误当空附件。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/TaskTypeForm.java",
+          "status": "checked",
+          "reason": "宿主调用改isParkEnabled/hasIssued/shouldPark，参数空白判断改StringUtils；非法type只发一次TASK_TYPE表且正文/metadata保留。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java",
+          "status": "checked",
+          "reason": "等待准备/轮询/心跳/结束拆AwaitState，重试调度器改@Qualifier容器Bean加轻量自管回退；心跳不再续24小时数据，自管池独立关闭，Submission/ResumeTrigger显式JSON。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ContextFieldGate.java",
+          "status": "checked",
+          "reason": "page/taskType/taskStatus/step空值处理改StringUtils，extra空Map复用MapUtils；原未知字段理由、步骤空串语义和extra可变副本边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/InputSanitizer.java",
+          "status": "checked",
+          "reason": "SanitizeResult新增isChanged并保留changed旧委托，两个派生属性均@JsonIgnore；文本归一和字符差值协议不产生重复JSON。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/RunContextRefresher.java",
+          "status": "checked",
+          "reason": "supports旧入口委托isSupported，create_task任务ID以字符串写入extra并保留绑定/候选事实；草案写失败限频WARN，页面/UI区域同步规则不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "工具批次准备/执行/结算和预算拆ToolBatchState，工具超时池改精确@Qualifier注入并区分自管池；pre/post、幂等、条件闸、挂起顺序和关闭边界均静态复核。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolCallEndTrace.java",
+          "status": "checked",
+          "reason": "仲裁谓词改isArbitrationRequired，Map/String空值复用Commons；BACKEND直发、观测认领去重、sheet additive元数据和DEBUG开关不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolExecutionEnvelope.java",
+          "status": "checked",
+          "reason": "改record并显式JSON/Long字符串，context构造和访问均防御只读副本，toString仅数量与安全标识；fromToolContext缺失返回Map.of，restorableBy派生属性关闭且旧兼容保留。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolPreflightService.java",
+          "status": "checked",
+          "reason": "任务类型、最新预检、创建defCodes/条件及影响文案拆helper；创建与续任务pre-check事实分离、条件残缺拒绝和i18n安全回退不变，resultViewProviders空列表非null。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolResourceLocks.java",
+          "status": "checked",
+          "reason": "heldElsewhere/enabled/supports旧入口均保留并JsonIgnore派生属性，释放改用isReleased；任务/作业锁顺序、锁不可用降级及失败限频WARN保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolTargetResolver.java",
+          "status": "checked",
+          "reason": "supports委托isSupported，任务items空值List.of且Verdict.detail非null；四个作业工具目标归属和参数解析失败拒绝不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolUnknownReconciler.java",
+          "status": "checked",
+          "reason": "Reconciliation.isAdopted与旧adopted共存且JsonIgnore，空台账Map/result文本 Commons化；UNKNOWN不伪成功、台账证据与前端跳过逻辑不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/history/ConversationTranscriptStore.java",
+          "status": "checked",
+          "reason": "TTL改effectiveSessionTtl并接入统一SessionActivityRenewal，追加Lua不再逐键续期而由成功GET触发；分页条目副本、游标、截断及失败限频保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/history/SyntheticMessages.java",
+          "status": "checked",
+          "reason": "合成消息识别和去除纠正指令复用Commons，空结果List.of；Compaction标记和原文顺序不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntries.java",
+          "status": "checked",
+          "reason": "assistant/tool条目生成和preflight合并拆helper，segments以presence而非null判空；真实状态证据、失败事实、Map空实现和entryId稳定性不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntry.java",
+          "status": "checked",
+          "reason": "record显式JSON/Long字符串并新增三个additive presence，嵌套集合只读副本；toString只留安全标识/数量，参数和segment正文仅长度，旧26参构造器保留。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/AiKbController.java",
+          "status": "checked",
+          "reason": "构造器改RequiredArgsConstructor，refreshNow(true)旧公开调用保持；status/refresh端点和响应不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/CachedKbSource.java",
+          "status": "checked",
+          "reason": "租约调度改组合有界执行器，刷新轮次拆分并保持ETag/SHA/发布fence；304文档/索引/manifest续期接入30分钟策略，close只释放自管调度器。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/HttpKbSource.java",
+          "status": "checked",
+          "reason": "env/ETag/Authorization/baseUrl空白处理复用StringUtils；条件请求、鉴权失败不泄密和超时预算不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbCache.java",
+          "status": "checked",
+          "reason": "旧锁/发布/代次布尔入口全部保留委托，doc/docIds/manifest/generation读取调用touch续30分钟；Lua fence和空docIds Set.of不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbCacheStore.java",
+          "status": "checked",
+          "reason": "新增touch(key)续期接口并由Redis实现30分钟TTL，既有读写/Lua接口不变，为KB 304和读取续期提供统一出口。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbDoc.java",
+          "status": "checked",
+          "reason": "sections/chunks先补List.of再copyOf，null与空输入均不可变；withMeta复用正文/切块。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbDocMeta.java",
+          "status": "checked",
+          "reason": "record各组件显式JsonProperty且保留updated_at/aliases_en，列表非null不可变、summary默认空串；withSha和展示回退不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbLookupResult.java",
+          "status": "checked",
+          "reason": "字段显式JSON，suggestions不可变非null，answer/error默认空串；hit/notReady/disabled真实状态不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbManifest.java",
+          "status": "checked",
+          "reason": "version/generated_at/docs显式命名且非null不可变，id/title校验改StringUtils；重复id和非法文档失败不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbReadResult.java",
+          "status": "checked",
+          "reason": "字段显式JSON，toc/candidates不可变非null，text/error默认空串；分页nextOffset/truncated协议不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSampleSeeder.java",
+          "status": "checked",
+          "reason": "seedIfAbsent旧入口委托isSeedApplied，资源缺失跳过、锁后重判和staging原子替换不变，DEBUG加开关。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSearchHit.java",
+          "status": "checked",
+          "reason": "搜索命中record各字段显式JsonProperty，docId/title/section/snippet/updatedAt/match协议名称不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSearchResult.java",
+          "status": "checked",
+          "reason": "字段显式JSON且hits/searchedTerms/suggestions不可变非null，error默认空串；ok/noMatch/lowConfidence状态不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbService.java",
+          "status": "checked",
+          "reason": "refreshNow/ready旧入口委托新名，调度改组合BoundedScheduledExecutor且刷新/索引/搜索拆分；单飞、旧快照、每4次WARN、引用计数和停止释放不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSource.java",
+          "status": "checked",
+          "reason": "RefreshBudget.expired委托isExpired，ManifestFetch.contents以Map.of补null后copyOf；deadline与不可变内容契约不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbTerm.java",
+          "status": "checked",
+          "reason": "字段显式JSON，aliases非null不可变、answer默认空串；name/section映射不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbText.java",
+          "status": "checked",
+          "reason": "fits旧入口委托canFit，distinctTerms空结果List.of且空白过滤改StringUtils；8000预算、清理/包装和去重顺序不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/KbTools.java",
+          "status": "checked",
+          "reason": "私有fitsModelSide改canFitModelSide，未就绪只记录通用WARN且模型得固定UNAVAILABLE；页面缩减和next_offset一致性不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/LocalDirKbSource.java",
+          "status": "checked",
+          "reason": "文件读取复用Commons IO并拆ResolvedDoc，fetchContent直接返回文本；路径逃逸、缺文失败、SHA和budget检查不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/MarkdownChunker.java",
+          "status": "checked",
+          "reason": "BlockScan/assembleChunks拆分，栈首尾getLast/removeLast，空结果List.of；围栏/表格/标题层级和chunk边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/kb/RedisKbCacheStore.java",
+          "status": "checked",
+          "reason": "CACHE_TTL固定30分钟并用于写入、touch、generation/incr，空HASH Map.of、HDEL空守卫和计数null补0；failure保留cause且不再逐次DEBUG。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/IdentityBoundChatMemoryAdvisor.java",
+          "status": "checked",
+          "reason": "toolContext缺失统一Map.of并直接构造信封，denied改isDenied；无身份读空/写清拒绝及RunIdentityScope边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/MemoryTurn.java",
+          "status": "checked",
+          "reason": "runId空白校验改StringUtils，非法归属仍构造抛出/of返回null；不伪造run。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/MemoryWindowSnapshot.java",
+          "status": "checked",
+          "reason": "messages先List.of补null再copyOf，version/generation及不可变快照语义保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/ReasoningOrigin.java",
+          "status": "checked",
+          "reason": "providerId显式JSON字符串且metadata写入同步toString，空metadata Map.of；已有来源键不重复盖章逻辑不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/RedisChatMemoryRepository.java",
+          "status": "checked",
+          "reason": "merge拆prepare/stage/CAS，messages空值统一List.of，未变化不写staging，空payload直接delete CAS；代次放弃复活、失败清理和purge fail-closed不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/RunMemoryMerge.java",
+          "status": "checked",
+          "reason": "前缀分区/run块/排序合并拆分，空块List.of；摘要替换、所有权、清除单调和tool配对裁剪不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/memory/SessionKeyCodec.java",
+          "status": "checked",
+          "reason": "conversationId空白校验改StringUtils，非法id仍抛同一异常；hash tag转义与Cluster同槽不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/observe/AiTrace.java",
+          "status": "checked",
+          "reason": "MDC空值/数字解析复用Commons并修正apply格式，Callable显式导入；trace上下文捕获恢复和事件字段清理不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/observe/LogSampling.java",
+          "status": "checked",
+          "reason": "新增按类别Guava RateLimiter的60秒一次canAcquire，仅控制诊断日志频率不改变业务控制流；用于本地间接异常WARN采样，不冒充跨实例会话节流。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/observe/RedisDegradation.java",
+          "status": "checked",
+          "reason": "降级事件名空白校验改StringUtils，仍拒绝无名计数；Micrometer指标映射不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/observe/SettlementObservationStore.java",
+          "status": "checked",
+          "reason": "properties空值ObjectUtils，claim/release/purge/TTL异常改分类采样WARN并保留Throwable；观测缺失不阻断结算及token所有权不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/resultview/ListTasksResultViewProvider.java",
+          "status": "checked",
+          "reason": "历史行解析由nullable Map改Map.of空实现，数字解析NumberUtils，视图构建失败限频WARN；无resultView时回退原文和行字段白名单不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/resultview/ResultView.java",
+          "status": "checked",
+          "reason": "columns/actions空判断改CollectionUtils，非空才输出字段；ResultView Map协议不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/resultview/ResultViewColumn.java",
+          "status": "checked",
+          "reason": "options非空才List.copyOf输出，空判断复用CollectionUtils；列key/type/label/width结构不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/resultview/ResultViews.java",
+          "status": "checked",
+          "reason": "文本/列校验改StringUtils，options及嵌套空Map/List改不可变空实现；非法列丢弃、整体fallback和文本脱敏不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/CancellationRegistry.java",
+          "status": "checked",
+          "reason": "degradedCancels以同一锁完成过期清理/容量检查/新增，新增不超4096且同slot可更新；取消监听异常采样WARN，Redis/本地取消事实与TTL边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/CancelledRunFinalizer.java",
+          "status": "checked",
+          "reason": "取消终局重试调度器改精确@Qualifier注入，轻量null回退创建单线程自管池并shutdownNow；公开构造器保留，终局清理和absent复核不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ClientRequestRegistry.java",
+          "status": "checked",
+          "reason": "完成查询改isCompleted并保留幂等身份维度，登记TTL仍以较短配置和7天上限约束；clientRequestId/runId完成事实不被后台续期伪造。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/CreateTaskDraftStore.java",
+          "status": "checked",
+          "reason": "草案条目集合@NonNull并保证读取空实现，RunStore/Redis不可用分别限频WARN；create_task结构化候选跨轮回退和身份隔离不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/FrameSizeLimiter.java",
+          "status": "checked",
+          "reason": "字段join、数组长度、末块访问和空字符串复用Commons，DEBUG加开关；逐字段预算、序列化探测、二分截取和超标标记算法未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/FrameWakeListener.java",
+          "status": "checked",
+          "reason": "register改isRegistered并拆installSubscription，身份捕获和bucket代次保持；订阅建立/提升/释放DEBUG均加开关，最后订阅者语义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/LeaseKeys.java",
+          "status": "checked",
+          "reason": "jobType空白校验改StringUtils，非法类型仍抛CodedIllegalArgumentException；任务/作业锁键形状和租户边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/LeaseService.java",
+          "status": "checked",
+          "reason": "acquired/readOnly/releaseIfHeld旧公开委托及JsonIgnore恢复，续租固定2线程、同锁1024原子容量上限和停止登记；epoch单调、60秒回收、异常采样WARN及旧构造器不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java",
+          "status": "checked",
+          "reason": "全字段显式JSON及Long字符串，preflight/sheetMeta有独立additive presence和只读非null Map；旧状态/结果字段和幂等信息不删。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java",
+          "status": "checked",
+          "reason": "任务/导航/条件/导出及表格读写规则拆为独立append helper，工具集合驱动的提示词内容、顺序和禁用边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/RedisFrameStore.java",
+          "status": "checked",
+          "reason": "精确ID XADD+EXPIRE合并单键Lua，未知回包须同帧ID且PTTL>0并不超过min(对话TTL,7天)才认归档成功；24小时默认、无PERSIST及采样WARN保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/RedisFrameWakeBus.java",
+          "status": "checked",
+          "reason": "容器、订阅池、派发池分别独立关闭，初始化失败destroy并addSuppressed；订阅派发异常采样WARN、中断恢复及容器所有权不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "首轮setup/execution/drive及续跑清理拆helper，AiTrace bind后立即进入finally；保活、驱动权、取消登记、信标和trace分别释放，toolCallingAllowed旧公开委托恢复。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java",
+          "status": "checked",
+          "reason": "CancelAdmission统一持有会话门/租约，denied前取资源并在finally按租约→会话门逆序释放；locale、互斥、registry、trace和身份作用域独立清理，派生JSON属性忽略。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/RunRegistry.java",
+          "status": "checked",
+          "reason": "本地订阅回收谓词改isReclaimable并规范布尔命名，空闲判定和registry清理语义不变，未引入新的共享事实源。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/RunSnapshot.java",
+          "status": "checked",
+          "reason": "快照及FrozenParams显式JSON/Long字符串，messageJson/inFlight/context/resumedBy/assistantMetadata增加presence和防御副本；旧字段及恢复协议保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java",
+          "status": "checked",
+          "reason": "快照/挂起/恢复流程拆helper，后台快照纯读不触发统一续期，业务活动入口对FAILED返回false；CAS、pending、全历史索引和purge隔离已静态复核。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/SessionActivityRenewal.java",
+          "status": "checked",
+          "reason": "新增统一60秒SET NX PX窗口、24小时全历史续期和purge guard，128/1024/4096总量及64键分批有界；pipeline严格回包，dataKey必须TRUE，缺失/类型错/后续失败均不RENEWED。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/SessionKeyRegistry.java",
+          "status": "checked",
+          "reason": "会话键登记/读取布尔方法规范命名并保留身份作用域，session/run索引生命周期及删除安全不变，统一活动枚举可复用其全量run集合。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java",
+          "status": "checked",
+          "reason": "reasoningEnd/textStart/textEnd旧公开入口恢复，emitLock同时拦截terminalFrameSeen/terminating后心跳；epochMs兼容Number/数字字符串，共享写出/投递/attach调度器分别释放。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/StartupResumeRunner.java",
+          "status": "checked",
+          "reason": "启动扫描/接管/死亡判定拆helper，定时任务与执行器分别关闭且异常不互相阻断；扫描失败按活跃不接管、租约fence和后台不续用户活动语义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/StreamViolationException.java",
+          "status": "checked",
+          "reason": "流违规查询改isBrokenStream，异常类型和对外安全错误映射不变，不把协议破坏伪造成正常终帧。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/StreamWatchdog.java",
+          "status": "checked",
+          "reason": "close按取消轮询→主任务→监听器分别保护并采样WARN，身份scope/tick异常限频；取消监听和上游dispose互不妨碍。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ToolActivityBeacon.java",
+          "status": "checked",
+          "reason": "信标等待/布尔谓词规范命名并保持工具活动观测边界，关闭和信号通知不改变真实执行结局。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/TurnKeepalive.java",
+          "status": "checked",
+          "reason": "生命周期锁、acceptingEmits和generation共同串行化停止/排程，实际出帧锁内复核；stop后不能开始新心跳，发送失败仅采样WARN。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/UpstreamErrorClassifier.java",
+          "status": "checked",
+          "reason": "错误消息匹配改isMessageContains并保留Throwable因果遍历，原上游分类、重试/断流判定和安全摘要不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/UsageDetails.java",
+          "status": "checked",
+          "reason": "可选usage维度提取失败改分类采样WARN，仍不影响本轮；真实usage字段和缺失维度回退不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/AiSessionPurgeService.java",
+          "status": "checked",
+          "reason": "purge准备/执行/结束拆分，枚举/guard/H2失败均在Redis删除前中止，身份不匹配run跳过；guard所有权、验证调度、deferred/errors和memory证据保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/AiSessionService.java",
+          "status": "checked",
+          "reason": "成功GET历史/上下文接入统一续期，仍要求无failureCause、2xx和精确路径；会话创建/读取业务活动与后台重试分离，purge拒绝不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/RedisClusterScanSupport.java",
+          "status": "checked",
+          "reason": "Cluster扫描辅助仅规范空值处理，游标、页大小和终止边界未改，未引入KEYS或无界SCAN。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/SessionGate.java",
+          "status": "checked",
+          "reason": "会话门获取/释放及busy判断拆helper并规范布尔名，owner代次与跨实例互斥不变；denied和获取异常均能释放已持有资源。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/SessionPurgeDatabase.java",
+          "status": "checked",
+          "reason": "数据库删除辅助仅规范空值/布尔处理，租户用户条件和反馈删除顺序未改，仍作为Redis purge前置事实。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/SessionPurgeGuard.java",
+          "status": "checked",
+          "reason": "retainOrArmIfOwner/disarmQuietly旧入口保留并委托is名称，guard TTL有效值与owner前缀校验不变；续期入口armed跳过、读异常失败。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/SessionPurgePendingStore.java",
+          "status": "checked",
+          "reason": "pending Lua写入/CAS统一PX，due原子ZADD+PEXPIRE，普通三参与退役四参语义保持；AcquireResult.acquired旧委托及JsonIgnore保留，腐败记录隔离和attempts上限不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/session/SessionPurgeRetryRunner.java",
+          "status": "checked",
+          "reason": "重试候选处理拆分并保持HEAD acquired()/release()旧契约，roundLive=false→stopDriving→release逐项执行；过期、耗尽量和失败pending保留，后台不触发用户续期。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/ConditionAssessment.java",
+          "status": "checked",
+          "reason": "无效字段事实改私有INVALID_FACTS哨兵，集合空实现统一；未知键/残缺字段仍UNDECIDED不当作全量，scopeKeys和条件事实解析不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/ConditionCommand.java",
+          "status": "checked",
+          "reason": "defCode/conditionJson空白归一改StringUtils，SET无JSON仍抛出；命令三态校验不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/DefinitionSlotCatalog.java",
+          "status": "checked",
+          "reason": "定义/选项集合空实现统一，options_json异常限频WARN；不可枚举选项按缺失处理且字段映射不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/SlotDefinition.java",
+          "status": "checked",
+          "reason": "record显式JSON，SlotField.isKey映射仍key且旧key()@JsonIgnore，单主键getFirst；字段/选项结构不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskIntent.java",
+          "status": "checked",
+          "reason": "新任务/导出意图空白判断改StringUtils，合成消息排除和意图识别规则不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlotParser.java",
+          "status": "checked",
+          "reason": "选择与条件解析拆SelectionResolution/ConditionResolution，首项getFirst和空集合统一；歧义不猜、裸值唯一主键/合法候选约束不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlotResolver.java",
+          "status": "checked",
+          "reason": "新增PageSelection presence区分未同步与权威空，旧pageSelectedDefCodes仅作列表投影；补全参数/条件拆helper且失败保留原文，任务条目回退不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlots.java",
+          "status": "checked",
+          "reason": "新增undecidedDefCodesPresent additive位，所有列表非null副本，旧七参/三参构造器保留；缺失走旧覆盖判据，显式空表示已核对无缺口，派生JSON忽略。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tenant/RunKeyScope.java",
+          "status": "checked",
+          "reason": "身份/runId/key形态判断改StringUtils，仍拒绝无身份、空白和花括号；hash tag和索引解析兼容不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tenant/TenantIdentityFilter.java",
+          "status": "checked",
+          "reason": "Spring hasText替换为Commons isNotBlank，contextPath/尾斜杠规范化复用StringUtils；身份头缺失/未登记仍按原错误码拒绝。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tenant/TenantUserDirectory.java",
+          "status": "checked",
+          "reason": "tenantId/userId显式JSON字符串，users空值List.copyOf且NON_EMPTY，exists旧入口委托isRegistered；目录内容和require校验不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/AiContext.java",
+          "status": "checked",
+          "reason": "@Data改Getter/Setter及白名单ToString，taskId显式字符串，toMap同步字符串并给extra只读副本；仅taskId进入日志摘要，页面字段协议不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/AiToolNames.java",
+          "status": "checked",
+          "reason": "工具名空白和已知集合判断改StringUtils，ConfirmTool.of仍Optional.empty，工具名协议不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ContextBuilder.java",
+          "status": "checked",
+          "reason": "页面未同步改私有UNSYNCED_SELECTION哨兵并复用PageSelection三态，安全编码排序拆helper；序列化失败限频WARN且回退文本不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/FrontendToolGuard.java",
+          "status": "checked",
+          "reason": "新增isSupported/isStructuredResult规范入口并保留旧委托，Verdict显式JSON且retryable派生属性JsonIgnore；问题列表副本和拒绝文案不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/PromptDelimiters.java",
+          "status": "checked",
+          "reason": "空文本/空标签数组复用Commons，标签中和和非法空白名称拒绝不变，未改变提示词边界处理。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/SheetAudit.java",
+          "status": "checked",
+          "reason": "审计数值字段及atMs改字符串，sanitize空Map/样本统计和台账写入限频WARN；covers旧入口委托isCovered，白名单元数据不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/SheetSwitches.java",
+          "status": "checked",
+          "reason": "read/write/allows派生属性规范并JsonIgnore且旧委托保留，披露与执行共用isAllowed；read/write双闸及disabledGate原因不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/SheetWriteGuard.java",
+          "status": "checked",
+          "reason": "undo参数校验拆inspectUndo，JSON空白和字段/操作符判断改StringUtils；撤销只认defCode、写工具闭集和结果拒绝语义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolCategory.java",
+          "status": "checked",
+          "reason": "仅将java.lang.annotation通配import展开为显式类型，注解保留策略和目标不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolChannel.java",
+          "status": "checked",
+          "reason": "仅展开注解类型显式import，channel元数据定义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolDefinitionOverride.java",
+          "status": "checked",
+          "reason": "record字段显式JSON，isPublished映射published且旧published()JsonIgnore；description/schema/default名称回退不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolMeta.java",
+          "status": "checked",
+          "reason": "@Data改Getter/Setter和白名单ToString，字段显式JSON，仅name/risk/channel/category进入摘要；callback及scopeArrays不进日志。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolOutcome.java",
+          "status": "checked",
+          "reason": "fromWire空白判断改StringUtils，未知wire仍回null，结局映射不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java",
+          "status": "checked",
+          "reason": "Bean扫描/注册/披露谓词拆helper，通配import展开且失败聚合getFirst；matchesContext等旧公开委托保留，scope/state/KB/sheet披露与执行一致性不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultEnvelope.java",
+          "status": "checked",
+          "reason": "显式JSON并新增targetStatus MISSING/INVALID/PRESENT，target非null只读副本及taskId字符串化；toString不含message/evidence，withTruncation保留状态。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultLimiter.java",
+          "status": "checked",
+          "reason": "纯文本和marker-only截断拆helper，truncated旧入口委托isTruncated；字符/行预算、structured判断和返回长度自洽不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultUserText.java",
+          "status": "checked",
+          "reason": "模型文本空值改StringUtils，创建/复用任务ID提取及安全用户文案回退不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRisk.java",
+          "status": "checked",
+          "reason": "仅展开注解类型显式import，风险元数据定义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolSchemaNormalizer.java",
+          "status": "checked",
+          "reason": "inputSchema空白判断改StringUtils，空值原样返回及schema归一逻辑不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolSchemaReconciler.java",
+          "status": "checked",
+          "reason": "schema差异集合为空时统一Set.of，原有字段对照与差异内容不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolScope.java",
+          "status": "checked",
+          "reason": "仅展开注解类型显式import，scope元数据定义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolSnapshot.java",
+          "status": "checked",
+          "reason": "record字段显式JSON，发布判断改isPublished；按modelName查找和不可变快照边界不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/TruncationContract.java",
+          "status": "checked",
+          "reason": "前导空白和preview默认值改StringUtils，结构识别、notice标记和JSON解析契约不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/UiPrimitiveGuard.java",
+          "status": "checked",
+          "reason": "supports/isSupported并存，禁用字段、标量和数组参数校验拆helper；ref/limit/delta/kinds/accept闭集及结果敏感标记拒绝不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/WizardActionGuard.java",
+          "status": "checked",
+          "reason": "codes/定义/字段校验拆helper，任务读取失败限频WARN且不追加谓词；mode大小写、字段闭集、重复字段和条件值校验不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/YamlToolDefinitionSource.java",
+          "status": "checked",
+          "reason": "YAML version/lang文本转换复用Objects/StringUtils，缺省unknown和覆盖map构建不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/AiChatRequest.java",
+          "status": "checked",
+          "reason": "请求及Context/Params显式JSON，providerId/taskId字符串，toString只含安全标识和message/displayText长度；正文、context extra和温度参数不进入日志。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/AiConfigController.java",
+          "status": "checked",
+          "reason": "provider/model列表空时List.of，displayName回退ObjectUtils，guarded Supplier显式导入；稳定业务码/HTTP状态和DEBUG开关不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java",
+          "status": "checked",
+          "reason": "chat预读/消毒/提交、确认/前端结果、重挂/历史/健康及反馈拆helper，空列表非null；会话门/幂等/取消/终帧和敏感摘录边界保持，不再新增技术文案。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/AiToolsController.java",
+          "status": "checked",
+          "reason": "toolNames/tools空列表统一List.of，definitionsVersion和工具披露响应结构不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/ConfirmRequest.java",
+          "status": "checked",
+          "reason": "字段显式JSON，toString只输出runId/toolCallId/approved而不含reason/context；确认输入协议不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/FrontendToolResultRequest.java",
+          "status": "checked",
+          "reason": "新增sheetMetaPresent additive字段，sheetMeta只读非null副本，旧九参构造器保留；toString仅数量/状态不含result正文，UI code白名单不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/dto/AvailableModelView.java",
+          "status": "checked",
+          "reason": "providerId显式JSON字符串，其余模型字段名称固定，isDefault协议不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/dto/DefaultsView.java",
+          "status": "checked",
+          "reason": "version/providerId显式JSON字符串，默认模型和allowUserParams等字段兼容不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/dto/FetchModelsView.java",
+          "status": "checked",
+          "reason": "models以@NonNull标注并List.copyOf归一空值，字段显式JSON；cached/code/message及有效空模型列表语义不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/dto/ModelView.java",
+          "status": "checked",
+          "reason": "id显式JSON字符串，模型能力/default/enabled等字段显式命名，协议不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/dto/ProbeView.java",
+          "status": "checked",
+          "reason": "latencyMs显式JSON字符串，status/code/message/modelCount字段固定，探活结果结构不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/web/dto/ProviderView.java",
+          "status": "checked",
+          "reason": "id字符串且models非null副本，baseUrl明确@JsonIgnore，toString仅业务标识/状态不含地址和keyLast4；其余配置视图字段保持。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "新增废弃代码、集合所有权、JSON/Lombok/Long、日志禁实体序列化、24小时会话TTL、线程池/多实例/容量及资源释放条款，与186文件实现逐项一致；现行兼容API不被误判为废弃。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用Commons Lang/Collections/IO/Codec、Guava RateLimiter、Jackson、Lombok Getter/Setter/ToString及Spring Bean生命周期，未新增依赖；执行器以ScheduledThreadPoolExecutor组合而非继承，无重复工具框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "集合非null、presence additive、只读防御副本、getFirst/getLast、显式import和Java 50/20拆分均逐hunk核对；JSON显式字段、Long字符串双向转换、禁止Lombok equals及旧公开API不加@Deprecated均有具体覆盖。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "apiKey WRITE_ONLY、baseUrl及敏感record组件关闭输出，toString只留白名单/长度；DEBUG有开关，间接异常按类别采样WARN且Throwable置末，禁止实体JSON日志，原始业务异常与addSuppressed清理保序。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "provider敏感baseUrl不再输出，历史/模型/条件/附件字段保持既有名称和真实状态，Long字符串避免前端精度丢失；错误码、i18n、表单回执、transcript正文消费及用户提示不被技术异常或toString污染，浏览器实测NOT_RUN。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "JSON/presence向后兼容、租约/fence/CAS、前端工具幂等、帧精确ID/TTL、24小时全历史续期、60秒Redis跨实例节流、后台纯读和purge隔离均覆盖；固定有界池与Spring生命周期及多实例随机路由仅静态审查，真实Redis/Cluster/多实例NOT_RUN。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "SSE仍按完整帧解析并保持增量字节读取，FrameSizeLimiter逐字段序列化预算/二分截取/超标标记未改，ToolResultLimiter和MarkdownChunker边界保持；未新增逐chunk独立UTF-8解码、代理对截断或二次转码，真实SSE NOT_RUN。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "按186个实际暂存路径逐hunk静态复核，agent-1012/1013/1018/1025四区最终PASS，前次严格pipeline回包、Bean name、嵌套toString、CancelAdmission及保活竞态均已关闭；测试、构建、Maven、真实Redis/Cluster、API/SSE、多实例及TTL动态核验均NOT_RUN，门禁留由主会话执行。"
+        }
+      }
     }
   ]
 }

@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.web.dto;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * {@code GET /api/ai/models} 的一行（设计稿 §3.5：「对话面板用」的跨 provider 可用模型）。
  *
@@ -15,7 +18,13 @@ package com.example.configmgr.ai.web.dto;
  * @param modelId 请求 {@code /api/ai/chat} 时要回填的值
  * @param isDefault 该 provider 的 {@code is_default} 标记（面板后缀用）
  */
-public record AvailableModelView(Long providerId, String providerCode, String providerName, String modelId,
-        String displayName, boolean supportsToolCalling, boolean supportsVision, boolean supportsReasoning,
-        Integer maxContext, Integer maxOutput, boolean isDefault) {
+public record AvailableModelView(
+        @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
+        @JsonProperty("providerCode") String providerCode, @JsonProperty("providerName") String providerName,
+        @JsonProperty("modelId") String modelId, @JsonProperty("displayName") String displayName,
+        @JsonProperty("supportsToolCalling") boolean supportsToolCalling,
+        @JsonProperty("supportsVision") boolean supportsVision,
+        @JsonProperty("supportsReasoning") boolean supportsReasoning,
+        @JsonProperty("maxContext") Integer maxContext, @JsonProperty("maxOutput") Integer maxOutput,
+        @JsonProperty("isDefault") boolean isDefault) {
 }

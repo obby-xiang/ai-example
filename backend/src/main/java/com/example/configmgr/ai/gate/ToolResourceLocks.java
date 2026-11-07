@@ -1,12 +1,16 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.run.LeaseKeys;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.LeaseService.AcquireOutcome;
 import com.example.configmgr.ai.run.LeaseService.AcquireResult;
 import com.example.configmgr.ai.run.LeaseService.Lease;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -84,8 +88,14 @@ public class ToolResourceLocks {
 		}
 
 		/** 是否被别人持有（调用方据此走 blocked）。 */
-		public boolean heldElsewhere() {
+		@JsonIgnore
+		public boolean isHeldElsewhere() {
 			return this.outcome == LockOutcome.HELD_ELSEWHERE;
+		}
+
+		@JsonIgnore
+		public boolean heldElsewhere() {
+			return isHeldElsewhere();
 		}
 
 		@Override
@@ -108,13 +118,21 @@ public class ToolResourceLocks {
 	}
 
 	/** 是否启用资源互斥（{@code app.ai.lock.enabled}）。 */
-	public boolean enabled() {
+	public boolean isEnabled() {
 		return this.properties.getLock().isEnabled();
 	}
 
+	public boolean enabled() {
+		return isEnabled();
+	}
+
 	/** 该工具是否走资源互斥（四个作业发起工具：它们以 taskId 定位一个可锁的业务对象）。 */
-	public static boolean supports(String toolName) {
+	public static boolean isSupported(String toolName) {
 		return ToolTargetResolver.jobTypeOf(toolName) != null;
+	}
+
+	public static boolean supports(String toolName) {
+		return isSupported(toolName);
 	}
 
 	/**
@@ -125,11 +143,11 @@ public class ToolResourceLocks {
 	 * @param owner 持有者（{@code instanceId:runId:toolCallId}）—— 同一实例内的不同调用也是不同 owner
 	 */
 	public LockHandle acquire(long taskId, String jobType, String owner) {
-		if (!enabled()) {
+		if (!isEnabled()) {
 			return LockHandle.none(LockOutcome.DISABLED);
 		}
 		if (this.leaseService == null) {
-			log.debug("resource lock facility not wired; allowing as unavailable taskId={} job={} owner={}", taskId, jobType, owner);
+			if (log.isDebugEnabled()) log.debug("resource lock facility not wired; allowing as unavailable taskId={} job={} owner={}", taskId, jobType, owner);
 			return LockHandle.none(LockOutcome.UNAVAILABLE);
 		}
 		Duration ttl = this.properties.getLease().getResourceTtl();
@@ -147,7 +165,7 @@ public class ToolResourceLocks {
 			created.add(taskLock.lease());
 		}
 		// ② 作业级（同一任务上不同类型的作业可以并行）
-		if (jobType != null && !jobType.isBlank()) {
+		if (StringUtils.isNotBlank(jobType)) {
 			AcquireResult jobLock = acquireQuietly(LeaseKeys.job(taskId, jobType), ttl, owner);
 			if (jobLock != null && jobLock.outcome() == AcquireOutcome.HELD_ELSEWHERE) {
 				// 被拒就不该白占任务级锁：就地归还本次创建的那把
@@ -176,35 +194,39 @@ public class ToolResourceLocks {
 	 * <p>不判 owner：对账问的是"这个任务上还有没有动作在进行"，而不是"是不是我"。
 	 */
 	public boolean isHeld(long taskId, String jobType) {
-		if (!enabled() || this.leaseService == null || taskId <= 0L) {
+		if (!isEnabled() || this.leaseService == null || taskId <= 0L) {
 			return false;
 		}
 		try {
 			if (this.leaseService.isHeld(LeaseKeys.task(taskId))) {
 				return true;
 			}
-			return jobType != null && !jobType.isBlank() && this.leaseService.isHeld(LeaseKeys.job(taskId, jobType));
+			return StringUtils.isNotBlank(jobType) && this.leaseService.isHeld(LeaseKeys.job(taskId, jobType));
 		}
 		catch (RuntimeException ex) {
-			log.debug("resource lock read-only probe failed taskId={} job={}", taskId, jobType, ex);
+			if (LogSampling.canAcquire("resource-lock-read-probe")) {
+				log.warn("resource lock read-only probe failed taskId={} job={}", taskId, jobType, ex);
+			}
 			return false;
 		}
 	}
 
 	/** 归还本句柄创建的锁（反向：先作业级、后任务级；只放自己创建的那一任）。 */
 	void release(List<Lease> created) {
-		if (created == null || created.isEmpty() || this.leaseService == null) {
+		if (CollectionUtils.isEmpty(created) || this.leaseService == null) {
 			return;
 		}
 		for (int i = created.size() - 1; i >= 0; i--) {
 			Lease lease = created.get(i);
 			try {
-				if (!this.leaseService.release(lease)) {
-					log.debug("resource lock release missed (expired or owner changed) key={} epoch={}", lease.key(), lease.epoch());
+				if (!this.leaseService.isReleased(lease)) {
+					if (log.isDebugEnabled()) log.debug("resource lock release missed (expired or owner changed) key={} epoch={}", lease.key(), lease.epoch());
 				}
 			}
 			catch (RuntimeException ex) {
-				log.warn("failed to release resource lock (clears itself at TTL) key={}", lease.key(), ex);
+				if (LogSampling.canAcquire("resource-lock-release")) {
+					log.warn("failed to release resource lock (clears itself at TTL) key={}", lease.key(), ex);
+				}
 			}
 		}
 	}

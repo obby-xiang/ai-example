@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.common.ErrorCodes;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -81,8 +82,8 @@ public final class ToolResultUserText {
 	 * @param modelText 模型面原文（{@code resultText} / 信封 {@code message}）
 	 */
 	public static String forUser(String code, String modelText) {
-		if (code == null || code.isBlank()) {
-			Matcher created = CREATED_OR_REUSED_TASK_ID.matcher(modelText == null ? "" : modelText);
+		if (StringUtils.isBlank(code)) {
+			Matcher created = CREATED_OR_REUSED_TASK_ID.matcher(StringUtils.defaultString(modelText));
 			if (created.find()) {
 				boolean createOnly = modelText != null && modelText.contains("仅创建，不自动打开向导");
 				return "任务 #" + created.group(1) + (createOnly
@@ -92,7 +93,7 @@ public final class ToolResultUserText {
 			return modelText;
 		}
 		if (ErrorCodes.CREATE_TASK_TURN_LIMIT.equals(code)) {
-			Matcher matcher = CREATED_TASK_ID.matcher(modelText == null ? "" : modelText);
+			Matcher matcher = CREATED_TASK_ID.matcher(StringUtils.defaultString(modelText));
 			if (matcher.find()) {
 				return "本轮已创建任务 #" + matcher.group(1)
 						+ "；同一轮只允许创建一次任务，这一次没有再创建。";

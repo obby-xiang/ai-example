@@ -10,16 +10,24 @@ import com.example.configmgr.ai.config.db.AiProviderModelRepository;
 import com.example.configmgr.ai.config.db.AiProviderRepository;
 import com.example.configmgr.ai.config.db.AiSetting;
 import com.example.configmgr.ai.config.db.AiSettingRepository;
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.BooleanUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.util.StringUtils;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -189,9 +197,18 @@ public class AiConfigWriter {
      * @param apiKey 明文 key；省略/空白 = 不修改（新建时 = 不配置 key）
      * @param clearKey true = 清空 key（优先于 apiKey）
      */
-    public record ProviderCommand(String code, String displayName, String protocol, String baseUrl,
-            String completionsPath, String modelsPath, String apiKey, Boolean clearKey, Boolean enabled,
-            Integer sortOrder) {
+    public record ProviderCommand(@JsonProperty("code") String code, @JsonProperty("displayName") String displayName,
+            @JsonProperty("protocol") String protocol, @JsonProperty("baseUrl") String baseUrl,
+            @JsonProperty("completionsPath") String completionsPath, @JsonProperty("modelsPath") String modelsPath,
+            @JsonProperty(value = "apiKey", access = JsonProperty.Access.WRITE_ONLY) String apiKey,
+            @JsonProperty("clearKey") Boolean clearKey,
+            @JsonProperty("enabled") Boolean enabled, @JsonProperty("sortOrder") Integer sortOrder) {
+
+        @Override
+        public String toString() {
+            return "ProviderCommand[code=" + this.code + ", displayName=" + this.displayName + ", protocol=" + this.protocol
+                    + ", clearKey=" + this.clearKey + ", enabled=" + this.enabled + ", sortOrder=" + this.sortOrder + "]";
+        }
     }
 
     /**
@@ -201,9 +218,13 @@ public class AiConfigWriter {
      * 数值：{@code maxContext} 1..1e7（上限只是防手滑写 <i>12亿</i> 这种值撑爆分母）；
      * {@code maxOutput} 1..maxContext。
      */
-    public record ModelCommand(String modelId, String displayName, Integer maxContext, Integer maxOutput,
-            Boolean supportsToolCalling, Boolean supportsVision, Boolean supportsReasoning, Boolean enabled,
-            Boolean isDefault, Integer sortOrder) {
+    public record ModelCommand(@JsonProperty("modelId") String modelId,
+            @JsonProperty("displayName") String displayName, @JsonProperty("maxContext") Integer maxContext,
+            @JsonProperty("maxOutput") Integer maxOutput,
+            @JsonProperty("supportsToolCalling") Boolean supportsToolCalling,
+            @JsonProperty("supportsVision") Boolean supportsVision,
+            @JsonProperty("supportsReasoning") Boolean supportsReasoning, @JsonProperty("enabled") Boolean enabled,
+            @JsonProperty("isDefault") Boolean isDefault, @JsonProperty("sortOrder") Integer sortOrder) {
     }
 
     /**
@@ -216,8 +237,10 @@ public class AiConfigWriter {
      * @param providerId 默认目标所属 provider（与 {@code modelId} 成对；给出 {@code modelId} 时必填，
      * 该 provider 必须已启用且模型在其 enabled allowlist 中；两者同为 {@code null} = 清空默认目标）
      */
-    public record DefaultsCommand(String modelId, Double temperature, Double topP, Integer maxTokens,
-            Boolean allowUserParams, Long providerId) {
+    public record DefaultsCommand(@JsonProperty("modelId") String modelId,
+            @JsonProperty("temperature") Double temperature, @JsonProperty("topP") Double topP,
+            @JsonProperty("maxTokens") Integer maxTokens, @JsonProperty("allowUserParams") Boolean allowUserParams,
+            @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId) {
     }
 
     // ── provider ────────────────────────────────────────────────────────────
@@ -251,8 +274,8 @@ public class AiConfigWriter {
             provider.setKeyFingerprint(key.fingerprint());
             provider.setKeyRef(key.keyRef());
             provider.setSource(AiProvider.SOURCE_DB);
-            provider.setEnabled(command.enabled() == null || command.enabled());
-            provider.setSortOrder(command.sortOrder() == null ? 0 : command.sortOrder());
+            provider.setEnabled(BooleanUtils.isNotFalse(command.enabled()));
+            provider.setSortOrder(ObjectUtils.defaultIfNull(command.sortOrder(), 0));
             this.providerRepository.saveAndFlush(provider);
             audit(ACTION_PROVIDER_CREATE, "provider", String.valueOf(provider.getId()),
                     diffOf("code", code, "baseUrl", baseUrl, "key", key.action(), "last4", key.last4()));
@@ -266,72 +289,90 @@ public class AiConfigWriter {
         if (command == null) {
             throw invalidParam("Request body is required");
         }
-        AiProvider updated = executeInTransaction(() -> {
-            AiProvider existing = requireProvider(providerId);
-            if (StringUtils.hasText(command.code()) && !command.code().trim().equals(existing.getCode())) {
-                throw new AiConfigException(CODE_CODE_IMMUTABLE,
-                        "Provider code is immutable because it is part of the key ciphertext AAD; changing it would make the existing ciphertext undecryptable");
-            }
-            String requestedBaseUrl = trimToNull(command.baseUrl());
-            String baseUrl = requestedBaseUrl == null || requestedBaseUrl.equals(existing.getBaseUrl())
-                    ? existing.getBaseUrl() : checkBaseUrl(requestedBaseUrl);
-            String displayName = StringUtils.hasText(command.displayName())
-                    ? requireText(command.displayName(), "displayName", 128) : existing.getDisplayName();
-            String protocol = StringUtils.hasText(command.protocol()) ? requireProtocol(command.protocol())
-                    : existing.getProtocol();
-            String completionsPath = StringUtils.hasText(command.completionsPath())
-                    ? requirePath(command.completionsPath(), "/chat/completions", "completionsPath")
-                    : existing.getCompletionsPath();
-            String modelsPath = StringUtils.hasText(command.modelsPath())
-                    ? requirePath(command.modelsPath(), "/models", "modelsPath") : existing.getModelsPath();
-
-            KeyMaterial key;
-            if (Boolean.TRUE.equals(command.clearKey())) {
-                key = KeyMaterial.cleared();
-            }
-            else if (trimToNull(command.apiKey()) != null) {
-                KeyMaterial sealed = sealKey(trimToNull(command.apiKey()), existing.getCode());
-                key = new KeyMaterial(sealed.cipher(), sealed.last4(), sealed.fingerprint(), sealed.keyRef(), "updated");
-            }
-            else {
-                key = null;
-            }
-            if (key == null && existing.isKeyDeclared()
-                    && !originOf(existing.getBaseUrl()).equals(originOf(baseUrl))) {
-                throw new AiConfigException(CODE_KEY_BOUND_TO_HOST,
-                        "Changing the origin requires re-entering or clearing the key; the existing key is sent only to its original host (old "
-                                + originOf(existing.getBaseUrl()) + " to " + originOf(baseUrl) + ")");
-            }
-
-            existing.setDisplayName(displayName);
-            existing.setProtocol(protocol);
-            existing.setBaseUrl(baseUrl);
-            existing.setCompletionsPath(completionsPath);
-            existing.setModelsPath(modelsPath);
-            existing.setEnabled(command.enabled() == null ? existing.isEnabled() : command.enabled());
-            existing.setSortOrder(command.sortOrder() == null ? existing.getSortOrder() : command.sortOrder());
-            if (!AiProvider.SOURCE_DB.equals(existing.getSource())) {
-                existing.setSource(AiProvider.SOURCE_DB);
-            }
-            if (key != null) {
-                existing.setKeyCipher(key.cipher());
-                existing.setKeyLast4(key.last4());
-                existing.setKeyFingerprint(key.fingerprint());
-                existing.setKeyRef(key.keyRef());
-            }
-            this.providerRepository.saveAndFlush(existing);
-            Map<String, Object> diff = diffOf("code", existing.getCode(), "baseUrl", baseUrl);
-            if (key != null) {
-                diff.put("key", key.action());
-                if (key.last4() != null) {
-                    diff.put("last4", key.last4());
-                }
-            }
-            audit(ACTION_PROVIDER_UPDATE, "provider", String.valueOf(existing.getId()), diff);
-            return existing;
-        });
+        AiProvider updated = executeInTransaction(() -> applyProviderUpdate(prepareProviderUpdate(providerId, command)));
         afterCommit();
         return updated;
+    }
+
+    private ProviderUpdate prepareProviderUpdate(Long providerId, ProviderCommand command) {
+        AiProvider existing = requireProvider(providerId);
+        if (StringUtils.isNotBlank(command.code()) && !command.code().trim().equals(existing.getCode())) {
+            throw new AiConfigException(CODE_CODE_IMMUTABLE,
+                    "Provider code is immutable because it is part of the key ciphertext AAD; changing it would make the existing ciphertext undecryptable");
+        }
+        String requestedBaseUrl = trimToNull(command.baseUrl());
+        String baseUrl = requestedBaseUrl == null || requestedBaseUrl.equals(existing.getBaseUrl())
+                ? existing.getBaseUrl() : checkBaseUrl(requestedBaseUrl);
+        String displayName = StringUtils.isNotBlank(command.displayName())
+                ? requireText(command.displayName(), "displayName", 128) : existing.getDisplayName();
+        String protocol = StringUtils.isNotBlank(command.protocol()) ? requireProtocol(command.protocol())
+                : existing.getProtocol();
+        String completionsPath = StringUtils.isNotBlank(command.completionsPath())
+                ? requirePath(command.completionsPath(), "/chat/completions", "completionsPath")
+                : existing.getCompletionsPath();
+        String modelsPath = StringUtils.isNotBlank(command.modelsPath())
+                ? requirePath(command.modelsPath(), "/models", "modelsPath") : existing.getModelsPath();
+        KeyMaterial key = providerKey(command, existing);
+        if (key == null && existing.isKeyDeclared()
+                && !originOf(existing.getBaseUrl()).equals(originOf(baseUrl))) {
+            throw new AiConfigException(CODE_KEY_BOUND_TO_HOST,
+                    "Changing the origin requires re-entering or clearing the key; the existing key is sent only to its original host (old "
+                            + originOf(existing.getBaseUrl()) + " to " + originOf(baseUrl) + ")");
+        }
+        return new ProviderUpdate(existing, baseUrl, displayName, protocol, completionsPath, modelsPath, key,
+                command.enabled(), command.sortOrder());
+    }
+
+    private static KeyMaterial providerKey(ProviderCommand command, AiProvider existing) {
+        if (Boolean.TRUE.equals(command.clearKey())) {
+            return KeyMaterial.cleared();
+        }
+        if (trimToNull(command.apiKey()) != null) {
+            KeyMaterial sealed = sealKey(trimToNull(command.apiKey()), existing.getCode());
+            return new KeyMaterial(sealed.cipher(), sealed.last4(), sealed.fingerprint(), sealed.keyRef(), "updated");
+        }
+        return null;
+    }
+
+    private AiProvider applyProviderUpdate(ProviderUpdate update) {
+        AiProvider existing = update.provider();
+        KeyMaterial key = update.key();
+        existing.setDisplayName(update.displayName());
+        existing.setProtocol(update.protocol());
+        existing.setBaseUrl(update.baseUrl());
+        existing.setCompletionsPath(update.completionsPath());
+        existing.setModelsPath(update.modelsPath());
+        existing.setEnabled(update.enabled() == null ? existing.isEnabled() : update.enabled());
+        existing.setSortOrder(update.sortOrder() == null ? existing.getSortOrder() : update.sortOrder());
+        if (!AiProvider.SOURCE_DB.equals(existing.getSource())) {
+            existing.setSource(AiProvider.SOURCE_DB);
+        }
+        if (key != null) {
+            existing.setKeyCipher(key.cipher());
+            existing.setKeyLast4(key.last4());
+            existing.setKeyFingerprint(key.fingerprint());
+            existing.setKeyRef(key.keyRef());
+        }
+        this.providerRepository.saveAndFlush(existing);
+        Map<String, Object> diff = diffOf("code", existing.getCode(), "baseUrl", update.baseUrl());
+        if (key != null) {
+            diff.put("key", key.action());
+            if (key.last4() != null) {
+                diff.put("last4", key.last4());
+            }
+        }
+        audit(ACTION_PROVIDER_UPDATE, "provider", String.valueOf(existing.getId()), diff);
+        return existing;
+    }
+
+    private record ProviderUpdate(AiProvider provider, String baseUrl, String displayName, String protocol,
+            String completionsPath, String modelsPath, KeyMaterial key, Boolean enabled, Integer sortOrder) {
+
+        @Override
+        public String toString() {
+            return "ProviderUpdate[displayName=" + this.displayName + ", protocol=" + this.protocol
+                    + ", enabled=" + this.enabled + ", sortOrder=" + this.sortOrder + "]";
+        }
     }
 
     /**
@@ -380,15 +421,15 @@ public class AiConfigWriter {
             AiProviderModel model = new AiProviderModel();
             model.setProviderId(provider.getId());
             model.setModelId(modelId);
-            model.setDisplayName(StringUtils.hasText(command.displayName()) ? command.displayName().trim() : modelId);
+            model.setDisplayName(StringUtils.isNotBlank(command.displayName()) ? command.displayName().trim() : modelId);
             model.setMaxContext(command.maxContext() == null ? null : maxContext);
             model.setMaxOutput(command.maxOutput() == null ? null : maxOutput);
-            model.setSupportsToolCalling(command.supportsToolCalling() == null || command.supportsToolCalling());
+            model.setSupportsToolCalling(BooleanUtils.isNotFalse(command.supportsToolCalling()));
             model.setSupportsVision(Boolean.TRUE.equals(command.supportsVision()));
             model.setSupportsReasoning(Boolean.TRUE.equals(command.supportsReasoning()));
-            model.setEnabled(command.enabled() == null || command.enabled());
+            model.setEnabled(BooleanUtils.isNotFalse(command.enabled()));
             model.setDefault(Boolean.TRUE.equals(command.isDefault()));
-            model.setSortOrder(command.sortOrder() == null ? 0 : command.sortOrder());
+            model.setSortOrder(ObjectUtils.defaultIfNull(command.sortOrder(), 0));
             if (model.isDefault()) {
                 clearDefaultFlag(providerId, null);
             }
@@ -410,54 +451,57 @@ public class AiConfigWriter {
             AiProviderModel existing = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
                 .orElseThrow(() -> new AiConfigException(CODE_MODEL_NOT_FOUND,
                         "Model not found: " + providerId + "/" + modelId));
-            if (StringUtils.hasText(command.modelId()) && !command.modelId().trim().equals(modelId)) {
+            if (StringUtils.isNotBlank(command.modelId()) && !command.modelId().trim().equals(modelId)) {
                 throw new AiConfigException(CODE_INVALID_MODEL,
                         "modelId is immutable because provider_id + model_id is the unique key; delete it and create a new entry");
             }
-            Integer nextMaxContext = command.maxContext() == null ? existing.getMaxContext() : command.maxContext();
-            Integer nextMaxOutput = command.maxOutput() == null ? existing.getMaxOutput() : command.maxOutput();
+            Integer nextMaxContext = ObjectUtils.getIfNull(command.maxContext(), existing::getMaxContext);
+            Integer nextMaxOutput = ObjectUtils.getIfNull(command.maxOutput(), existing::getMaxOutput);
             validateMaxContext(nextMaxContext);
             validateMaxOutput(nextMaxOutput, nextMaxContext);
-
-            if (command.displayName() != null) {
-                existing.setDisplayName(StringUtils.hasText(command.displayName()) ? command.displayName().trim()
-                        : existing.getModelId());
-            }
-            if (command.maxContext() != null) {
-                existing.setMaxContext(command.maxContext());
-            }
-            if (command.maxOutput() != null) {
-                existing.setMaxOutput(command.maxOutput());
-            }
-            if (command.supportsToolCalling() != null) {
-                existing.setSupportsToolCalling(command.supportsToolCalling());
-            }
-            if (command.supportsVision() != null) {
-                existing.setSupportsVision(command.supportsVision());
-            }
-            if (command.supportsReasoning() != null) {
-                existing.setSupportsReasoning(command.supportsReasoning());
-            }
-            if (command.enabled() != null) {
-                existing.setEnabled(command.enabled());
-            }
-            if (command.sortOrder() != null) {
-                existing.setSortOrder(command.sortOrder());
-            }
-            if (command.isDefault() != null) {
-                existing.setDefault(command.isDefault());
-                if (command.isDefault()) {
-                    clearDefaultFlag(providerId, existing.getId());
-                }
-            }
-            this.modelRepository.saveAndFlush(existing);
-            audit(ACTION_MODEL_UPDATE, "model", providerId + ":" + modelId,
-                    diffOf("providerId", providerId, "modelId", modelId, "enabled", existing.isEnabled(),
-                            "supportsToolCalling", existing.isSupportsToolCalling()));
-            return existing;
+            return applyModelUpdate(existing, command, providerId);
         });
         afterCommit();
         return updated;
+    }
+
+    private AiProviderModel applyModelUpdate(AiProviderModel existing, ModelCommand command, Long providerId) {
+        if (command.displayName() != null) {
+            existing.setDisplayName(StringUtils.isNotBlank(command.displayName()) ? command.displayName().trim()
+                    : existing.getModelId());
+        }
+        if (command.maxContext() != null) {
+            existing.setMaxContext(command.maxContext());
+        }
+        if (command.maxOutput() != null) {
+            existing.setMaxOutput(command.maxOutput());
+        }
+        if (command.supportsToolCalling() != null) {
+            existing.setSupportsToolCalling(command.supportsToolCalling());
+        }
+        if (command.supportsVision() != null) {
+            existing.setSupportsVision(command.supportsVision());
+        }
+        if (command.supportsReasoning() != null) {
+            existing.setSupportsReasoning(command.supportsReasoning());
+        }
+        if (command.enabled() != null) {
+            existing.setEnabled(command.enabled());
+        }
+        if (command.sortOrder() != null) {
+            existing.setSortOrder(command.sortOrder());
+        }
+        if (command.isDefault() != null) {
+            existing.setDefault(command.isDefault());
+            if (BooleanUtils.isTrue(command.isDefault())) {
+                clearDefaultFlag(providerId, existing.getId());
+            }
+        }
+        this.modelRepository.saveAndFlush(existing);
+        audit(ACTION_MODEL_UPDATE, "model", providerId + ":" + existing.getModelId(),
+                diffOf("providerId", providerId, "modelId", existing.getModelId(), "enabled", existing.isEnabled(),
+                        "supportsToolCalling", existing.isSupportsToolCalling()));
+        return existing;
     }
 
     public AiProviderModel deleteModel(Long providerId, String modelId) {
@@ -481,11 +525,11 @@ public class AiConfigWriter {
         if (command == null) {
             throw invalidParam("Request body is required");
         }
-        if (command.temperature() != null && !inRange(command.temperature(), MIN_TEMPERATURE, MAX_TEMPERATURE)) {
+        if (command.temperature() != null && !isInRange(command.temperature(), MIN_TEMPERATURE, MAX_TEMPERATURE)) {
             throw invalidParam("temperature must be in [" + MIN_TEMPERATURE + "," + MAX_TEMPERATURE + "] (current = "
                     + command.temperature() + ")");
         }
-        if (command.topP() != null && !inRange(command.topP(), MIN_TOP_P, MAX_TOP_P)) {
+        if (command.topP() != null && !isInRange(command.topP(), MIN_TOP_P, MAX_TOP_P)) {
             throw invalidParam("top_p must be in [" + MIN_TOP_P + "," + MAX_TOP_P + "] (current = " + command.topP()
                     + ")");
         }
@@ -581,7 +625,7 @@ public class AiConfigWriter {
 
     // ── 内部：事务/版本/审计 ──────────────────────────────────────────────────
 
-    private <T> T executeInTransaction(java.util.function.Supplier<T> action) {
+    private <T> T executeInTransaction(Supplier<T> action) {
         return this.transactionTemplate.execute(status -> {
             // 先锁主键版本行并递增，再写数据与审计；并发事务不会提交同号配置快照。
             this.versions.bumpInTransaction();
@@ -661,7 +705,7 @@ public class AiConfigWriter {
     }
 
     private static String requireCode(String code) {
-        if (!StringUtils.hasText(code)) {
+        if (!StringUtils.isNotBlank(code)) {
             throw invalidParam("code is required; use a stable machine-readable identifier such as custom-1");
         }
         String trimmed = code.trim();
@@ -672,7 +716,7 @@ public class AiConfigWriter {
     }
 
     private static String requireText(String value, String field, int maxLength) {
-        if (!StringUtils.hasText(value)) {
+        if (!StringUtils.isNotBlank(value)) {
             throw invalidParam(field + " is required");
         }
         String trimmed = value.trim();
@@ -683,7 +727,7 @@ public class AiConfigWriter {
     }
 
     private static String requireProtocol(String protocol) {
-        if (!StringUtils.hasText(protocol)) {
+        if (!StringUtils.isNotBlank(protocol)) {
             return "OPENAI_COMPAT";
         }
         String trimmed = protocol.trim();
@@ -694,7 +738,7 @@ public class AiConfigWriter {
     }
 
     private static String requirePath(String path, String fallback, String field) {
-        if (!StringUtils.hasText(path)) {
+        if (!StringUtils.isNotBlank(path)) {
             return fallback;
         }
         String trimmed = path.trim();
@@ -708,7 +752,7 @@ public class AiConfigWriter {
     }
 
     private static String requireModelId(String modelId) {
-        if (!StringUtils.hasText(modelId)) {
+        if (!StringUtils.isNotBlank(modelId)) {
             throw new AiConfigException(CODE_INVALID_MODEL, "modelId is required");
         }
         String trimmed = modelId.trim();
@@ -744,16 +788,12 @@ public class AiConfigWriter {
         return maxOutput;
     }
 
-    private static boolean inRange(double value, double min, double max) {
-        return !Double.isNaN(value) && !Double.isInfinite(value) && value >= min && value <= max;
+    private static boolean isInRange(double value, double min, double max) {
+        return Double.isFinite(value) && value >= min && value <= max;
     }
 
     private static String trimToNull(String value) {
-        if (value == null) {
-            return null;
-        }
-        String trimmed = value.trim();
-        return trimmed.isEmpty() ? null : trimmed;
+        return StringUtils.trimToNull(value);
     }
 
     private static AiConfigException invalidParam(String message) {
@@ -780,17 +820,19 @@ public class AiConfigWriter {
      * 合法 origin 不等 ⇒ 走"必须重录 key"的保守分支，不会静默放行）。
      */
     private static String originOf(String baseUrl) {
-        if (!StringUtils.hasText(baseUrl)) {
+        if (!StringUtils.isNotBlank(baseUrl)) {
             return "";
         }
         try {
-            java.net.URI uri = new java.net.URI(baseUrl.trim());
-            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
-            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(java.util.Locale.ROOT);
+            URI uri = new URI(baseUrl.trim());
+            String scheme = StringUtils.defaultString(uri.getScheme())
+                    .toLowerCase(Locale.ROOT);
+            String host = StringUtils.defaultString(uri.getHost())
+                    .toLowerCase(Locale.ROOT);
             int port = uri.getPort() == -1 ? defaultPort(scheme) : uri.getPort();
             return scheme + "://" + host + ":" + port;
         }
-        catch (java.net.URISyntaxException ex) {
+        catch (URISyntaxException ex) {
             return baseUrl.trim();
         }
     }
@@ -825,6 +867,11 @@ public class AiConfigWriter {
      * @param action 审计里的动作词：set / updated / cleared / none
      */
     private record KeyMaterial(String cipher, String last4, String fingerprint, String keyRef, String action) {
+
+        @Override
+        public String toString() {
+            return "KeyMaterial[keyRef=" + this.keyRef + ", action=" + this.action + "]";
+        }
 
         static KeyMaterial none() {
             return new KeyMaterial(null, null, null, AiProvider.KEY_REF_NONE, "none");

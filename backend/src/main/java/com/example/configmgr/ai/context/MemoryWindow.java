@@ -2,6 +2,7 @@ package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.AiTrace;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.chat.messages.Message;
 
 import java.util.ArrayList;
@@ -141,13 +142,13 @@ public final class MemoryWindow {
 
 	public static Plan plan(List<Message> messages, Budget budget, Set<String> protectedToolCallIds,
 			Set<String> protectedRunIds) {
-		List<Message> original = messages == null ? List.of() : messages;
+		List<Message> original = ObjectUtils.defaultIfNull(messages, List.of());
 		int beforeTokens = ContextEstimator.estimateMessages(original);
 		int beforeCount = original.size();
 		if (original.isEmpty()) {
 			return new Plan(original, 0, 0, 0, 0, 0, false, REASON_NOTHING_TO_TRIM);
 		}
-		Budget config = budget == null ? new Budget(0, 1, 0, 5) : budget;
+		Budget config = ObjectUtils.getIfNull(budget, () -> new Budget(0, 1, 0, 5));
 		boolean overBudget = config.tokenBudget() > 0 && beforeTokens > config.tokenBudget();
 		boolean overCount = config.maxMessages() > 0 && beforeCount > config.maxMessages();
 		if (!overBudget && !overCount) {
@@ -222,7 +223,7 @@ public final class MemoryWindow {
 		if (segments.size() <= 1) {
 			return new Drop(messages, 0);
 		}
-		Set<String> activeRuns = protectedRunIds == null ? Set.of() : protectedRunIds;
+		Set<String> activeRuns = ObjectUtils.defaultIfNull(protectedRunIds, Set.of());
 		int cut = 0;
 		while (cut < segments.size() - 1) {
 			ConversationTurns.Segment next = segments.get(cut);

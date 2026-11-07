@@ -3,14 +3,18 @@ package com.example.configmgr.ai.context;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.observe.AiTrace;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -62,6 +66,7 @@ import java.util.Set;
  * 同一 Plan 的重试可收敛缺失事实而不覆盖其它写者。
  */
 @Slf4j
+@RequiredArgsConstructor
 public final class ContextCompactor {
 
 	/** 已实现的最高级别（批③ 升到 L3；配置 l1/l2/l3-percent 与它对齐）。 */
@@ -213,17 +218,6 @@ public final class ContextCompactor {
 	private final RollingSummarizer.Summarizer summarizer;
 
 	/**
-	 * @param summarizer L2/L3 的摘要模型（null = 摘要设施未装配 ⇒ L2 走"不可用"路径、不计数熔断）
-	 */
-	public ContextCompactor(AiProperties properties, ContextLimitResolver resolver, ContextStateStore store,
-			RollingSummarizer.Summarizer summarizer) {
-		this.properties = properties;
-		this.resolver = resolver;
-		this.store = store;
-		this.summarizer = summarizer;
-	}
-
-	/**
 	 * 解析本轮分母（触发判定、端点、健康检查、压缩日志都走这里，保证"分母只有一个取数点"）。
 	 *
 	 * <p>{@link ContextTrigger#decide} 的分母也由 {@link #plan} 从这里取后<b>注入</b>：显示、触发、
@@ -261,7 +255,7 @@ public final class ContextCompactor {
 		payload.put("cause", outcome.cause());
 		payload.put("anchorToolCallId", outcome.anchorToolCallId());
 		payload.put("runId", outcome.runId());
-		payload.put("atMs", outcome.atMs());
+		payload.put("atMs", Long.toString(outcome.atMs()));
 		return payload;
 	}
 
@@ -277,7 +271,7 @@ public final class ContextCompactor {
 	 * @param onSummaryStart    第一次真正调用摘要模型之前的回调（null = 不回调）
 	 */
 	public Plan plan(Request request, Runnable onSummaryProgress, Runnable onSummaryStart) {
-		List<Message> original = request.messages() == null ? List.of() : request.messages();
+		List<Message> original = ObjectUtils.defaultIfNull(request.messages(), List.of());
 		AiProperties.Context config = this.properties.getContext();
 		ContextTrigger trigger = new ContextTrigger(config);
 		int limit = limitTokens(request.providerId(), request.model());
@@ -304,192 +298,226 @@ public final class ContextCompactor {
 					REASON_LIMIT_UNKNOWN);
 		}
 		long now = System.currentTimeMillis();
-		ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
-		ContextTrigger.Decision decision;
-		ContextTrigger.Level target;
-		boolean prefixDominated = false;
-		{
-			// C13 / I3：滞回判"可压缩历史"，先扣掉本轮不可压缩的 system + tools（否则大前缀永久锁死 L2/L3）
-			int fixedPrefix = Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
-			boolean unlocked = trigger.hysteresisUnlocked(state.usedTokens(), fixedPrefix, limit,
-					state.everCompacted(), maxOutput);
-			// C13：无真值时用整包估算判（system + tools + 历史 + 本轮输入）—— 轮首/压缩后基线没有
-			// 上游 truth，只算"新输入"会让 system 与工具 schema 在小窗口模型上完全不计入判据。
-			int wholeRequest = before + Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens())
-					+ Math.max(0, request.inputTokens()) + Math.max(0, request.toolResultsSinceMeasure());
-			// B1 / I1：先算"原始判定"（阈值视为已武装），只用于判断是否允许升级或硬越窗逃逸。
-			// 滞回只抑制同级重复：rawLevel 更高 ⇒ 照常升级；nextEst >= limit ⇒ 硬越窗必须逃逸。
-			ContextTrigger.Decision raw = trigger.decide(limit, request.usedTokens(), request.completionTokens(),
-					request.inputTokens(), request.toolResultsSinceMeasure(), wholeRequest, true, maxOutput);
-			boolean escape = ContextTrigger.upgradeAllowed(raw.level(), lineage)
-					|| ContextTrigger.hardOverflow(raw.nextEst(), limit);
-			boolean armed = unlocked || escape;
-			decision = trigger.decide(limit, request.usedTokens(), request.completionTokens(), request.inputTokens(),
-					request.toolResultsSinceMeasure(), wholeRequest, armed, maxOutput);
-			if (!decision.triggered()) {
-				if (!request.l1Due()) {
-					return noopPlan(request, state, before, decision,
-							armed ? REASON_UNDER_THRESHOLD : REASON_HYSTERESIS_LOCKED);
-				}
-				// MemoryWindow 的绝对预算越线：只强制 L1，不因 L1 空操作升级到 L2/L3（A1 的最稳默认）
-				target = ContextTrigger.Level.L1;
-			}
-			else {
-				// 每次最多升一级；但<b>不得借谱系位置在低占比重复更高一级</b>：
-				// 谱系已到 L2/L3、本次占比只要求 L1 时，只做 L1（A1：不在 L2 线以下改写整个前缀）。
-				target = decision.level().ordinal() < lineage.ordinal() ? decision.level()
-						: lineage.advanceTo(decision.level());
-				if (target.ordinal() > MAX_LEVEL.ordinal()) {
-					target = MAX_LEVEL;
-				}
-				// P7：有未决 HITL 条目（挂起期）只允许 L1 —— 用户还要在卡片上决策，摘要会改写卡片上下文
-				boolean suspended = request.protectedToolCallIds() != null
-						&& !request.protectedToolCallIds().isEmpty();
-				if (suspended && target.ordinal() > ContextTrigger.Level.L1.ordinal()) {
-					target = ContextTrigger.Level.L1;
-				}
-				CompactionFuse fuse = new CompactionFuse(config);
-				if (target.ordinal() >= ContextTrigger.Level.L2.ordinal() && !fuse.allowsSummary(state, now)) {
-					// 熔断打开且未到冷却点：只留 L1（可用性优先）
-					target = ContextTrigger.Level.L1;
-				}
-				// N3：前缀主导守卫 —— system + tools 本身就过 L2 线时，L2/L3 压不动它（只能丢历史），
-				// 而触发线看整条请求 ⇒ 会每轮判 L3、每轮空截一次。此时只留 L1。
-				int prefixTokens = Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
-				int l2 = config.getL2Percent() <= 0 ? 80 : config.getL2Percent();
-				int completionReserve = ContextTrigger.effectiveReserve(limit, config.getReserveTokens(), maxOutput);
-				long denominator = Math.max(1L, (long) limit - completionReserve);
-				// C1 + R4/N-A：守卫只在"这一发**连同输出预留**都放得下"时成立 —— 那时 L2/L3 确实徒劳
-				// （压不动固定前缀）。判据必须带上输出预留：`limit − reserve ≤ nextEst < limit` 这段
-				// prompt 看似没满，但加上 max_tokens 就放不下，上游照样 400。故：
-				//   放得下 ⇒ 降级（L1）；放不下（含 nextEst >= limit 的真越窗）⇒ 保留 L3。
-				boolean fitsWithCompletion = decision.nextEst() + completionReserve <= limit;
-				prefixDominated = prefixTokens > 0 && prefixTokens * 100d / denominator >= l2
-						&& decision.nextEst() < limit && fitsWithCompletion;
-				if (prefixDominated && target.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
-					target = ContextTrigger.Level.L1;
-				}
-			}
+		DecisionContext decisionContext = decideTarget(request, state, before, limit, maxOutput, trigger, now);
+		if (decisionContext.earlyExit() != null) {
+			return decisionContext.earlyExit();
 		}
+		ContextTrigger.Decision decision = decisionContext.decision();
 		Set<String> otherActiveRuns = otherActiveRuns(request);
 		ToolResultClearing.Plan clear = ToolResultClearing.plan(original, config.getKeepToolPairs(),
 				request.protectedToolCallIds(), otherActiveRuns);
-		List<Message> current = clear.messages();
-		ContextTrigger.Level action = target;
-		int turns = 0;
-		int summaryChars = 0;
-		int lost = 0;
-		String reason = target == ContextTrigger.Level.L2 ? RollingSummarizer.REASON_SUMMARY
-				: (target == ContextTrigger.Level.L3 ? HardTrim.REASON_HARD_TRIM : REASON_L1);
-		boolean summaryAttempted = false;
-		boolean summarised = false;
 		ContextState[] summaryState = { state };
+		boolean[] summaryAttempted = { false };
+		ActionResult action = evaluateAction(request, original, decisionContext, clear, otherActiveRuns, summaryState,
+				summaryAttempted, before, onSummaryProgress, onSummaryStart, now);
+		if (action.earlyExit() != null) {
+			return action.earlyExit();
+		}
+		return buildActionPlan(request, state, before, decisionContext, action, summaryAttempted[0], now);
+	}
+
+	private ActionResult evaluateAction(Request request, List<Message> original, DecisionContext decisionContext,
+			ToolResultClearing.Plan clear, Set<String> otherActiveRuns, ContextState[] summaryState,
+			boolean[] summaryAttempted, int before, Runnable onSummaryProgress, Runnable onSummaryStart, long now) {
 		try {
-			if (target == ContextTrigger.Level.L2) {
-				// 2026-10-29 压缩阶段信号批：摘要是唯一"真在压缩上下文"的动作 —— 只在第一次真正调用
-				// 摘要模型之前公告阶段。L1/L3（本地操作）、摘要器缺席、没有可摘要旧轮都静默。
-				RollingSummarizer.Summarizer summarizer = withStart(
-						withProgress(this.summarizer, onSummaryProgress), onSummaryStart);
-				if (CompactionFuse.OPEN.equals(state.circuit())) {
-					summarizer = withHalfOpenReservation(summarizer, request, summaryState, now);
-				}
-				if (summarizer == null || request.runtime() == null) {
-					// 摘要只使用本轮 provider/model/options：没有本轮 runtime 就不压，绝不回落全局默认。
-					// B1：这不是一次"摘要尝试"（没有调用模型）⇒ 不推进熔断计数。
-					return noopPlan(request, state, before, decision, REASON_SUMMARY_UNAVAILABLE);
-				}
-				summaryAttempted = true;
-				// B1 / I2：摘要输入 = 未清除的工具结果（L1 不能先污染摘要的输入）
-				RollingSummarizer.Plan summary = RollingSummarizer.plan(original, config.getKeepRecentTurns(),
-						config.getChunkTokens(), request.protectedToolCallIds(), request.runtime(), summarizer, now);
-				state = summaryState[0];
-				if (!summary.changed()) {
-					if (!RollingSummarizer.REASON_NOTHING_TO_SUMMARIZE.equals(summary.reason())) {
-						return failurePlan(request, state, before, decision, REASON_SUMMARY_FAILED);
-					}
-					// 没有可摘要的旧轮（全在 keep 窗口）：本节只做了 L1 的活，如实报 L1
-					action = ContextTrigger.Level.L1;
-					reason = REASON_L1;
-				}
-				else {
-					summarised = true;
-					turns = summary.summarizedTurns();
-					summaryChars = summary.summaryChars();
-					lost = summary.lostTokens();
-					current = summary.messages();
-					// B1：L1 只作用于摘要后保留的后缀（折叠掉的旧轮已进摘要，不需要再清）
-					ToolResultClearing.Plan suffix = ToolResultClearing.plan(current, config.getKeepToolPairs(),
-							request.protectedToolCallIds(), otherActiveRuns);
-					clear = suffix;
-					current = suffix.messages();
-				}
-			}
-			else if (target == ContextTrigger.Level.L3) {
-				HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(),
-						request.protectedToolCallIds(), request.protectedRunIds());
-				// N-D：`clear` 在本节之前就已算好（零代价、未落任何存储），判据必须计入它的收益 ——
-				// 旧实现只减 `trim.lostTokens()`，"清掉旧结果就能过"的一轮被误判成"裁了也没用"。
-				int afterClear = decision.nextEst() - clear.savedTokens();
-				int completionReserve = ContextTrigger.effectiveReserve(limit, config.getReserveTokens(), maxOutput);
-				boolean clearAloneFits = clear.changed() && afterClear + completionReserve <= limit;
-				if (clearAloneFits) {
-					// 清除本身已经够了 ⇒ 只做 L1、不丢轮次（硬裁换不回额外空间）
-					action = ContextTrigger.Level.L1;
-					reason = REASON_L1;
-				}
-				else if (trim.changed()) {
-					// N-C：按<b>清 + 裁后</b>估算判 —— 清 + 裁都放不下时，这一刀只丢历史、
-					// 换不回可用请求（下一发照样 400），不做。
-					int afterTrim = afterClear - trim.lostTokens();
-					if (afterTrim + completionReserve > limit) {
-						if (clear.changed()) {
-							// 至少把这次零代价的 L1 清除落地（不丢轮、不写硬裁台账）
-							action = ContextTrigger.Level.L1;
-							reason = REASON_L1;
-						}
-						else {
-							return noopPlan(request, state, before, decision, REASON_TRIM_CANNOT_FIT);
-						}
-					}
-					else {
-						current = trim.messages();
-						turns = trim.droppedTurns();
-						lost = trim.lostTokens();
-					}
-				}
-				else {
-					// 全在 pin 集里：这一刻没有可丢的，别把"只清了结果"报成 L3
-					action = ContextTrigger.Level.L1;
-					reason = REASON_L1;
-				}
-			}
-			else {
-				// L1：current 已是清除后的列表
-				action = ContextTrigger.Level.L1;
-				reason = REASON_L1;
-			}
+			return switch (decisionContext.target()) {
+				case L2 -> applyL2(request, original, decisionContext.decision(), clear, otherActiveRuns, summaryState,
+						summaryAttempted, before, onSummaryProgress, onSummaryStart, now);
+				case L3 -> applyL3(request, decisionContext.decision(), clear, summaryState[0], before);
+				default -> ActionResult.of(clear, ContextTrigger.Level.L1, REASON_L1, summaryState[0]);
+			};
 		}
 		catch (HalfOpenReservationException ex) {
-			return noopPlan(request, summaryState[0], before, decision, REASON_CIRCUIT_OPEN);
+			return ActionResult.early(noopPlan(request, summaryState[0], before, decisionContext.decision(),
+					REASON_CIRCUIT_OPEN));
 		}
 		catch (RuntimeException ex) {
-			state = summaryState[0];
-			if (summaryAttempted) {
-				return failurePlan(request, state, before, decision, REASON_SUMMARY_FAILED);
+			ContextState state = summaryState[0];
+			if (summaryAttempted[0]) {
+				return ActionResult.early(failurePlan(request, state, before, decisionContext.decision(),
+						REASON_SUMMARY_FAILED));
 			}
 			// L1/L3 本地动作抛错：没有摘要尝试 ⇒ 不碰熔断
 			log.warn("context compaction planning failed sessionId={} runId={} (history unchanged)", request.sessionId(),
 					request.runId(), ex);
-			return noopPlan(request, state, before, decision, REASON_FAILED);
+			return ActionResult.early(noopPlan(request, state, before, decisionContext.decision(), REASON_FAILED));
 		}
-		if (!clear.changed() && turns == 0) {
-			return noopPlan(request, state, before, decision,
-					prefixDominated ? REASON_PREFIX_DOMINATED : REASON_NOTHING_TO_CLEAR);
+	}
+
+	private Plan buildActionPlan(Request request, ContextState state, int before, DecisionContext decisionContext,
+			ActionResult action, boolean summaryAttempted, long now) {
+		if (!action.clear().changed() && action.turns() == 0) {
+			return noopPlan(request, state, before, decisionContext.decision(),
+					decisionContext.isPrefixDominated() ? REASON_PREFIX_DOMINATED : REASON_NOTHING_TO_CLEAR);
 		}
-		int after = ContextEstimator.estimateMessages(current);
+		int after = ContextEstimator.estimateMessages(action.current());
 		int saved = Math.max(0, before - after);
-		return new Plan(state, action, current, before, after, saved, clear, turns, summaryChars, lost, reason, now,
-				summaryAttempted, summarised, false, prefixDominated, decision);
+		return new Plan(action.state(), action.action(), action.current(), before, after, saved, action.clear(),
+				action.turns(), action.summaryChars(), action.lostTokens(), action.reason(), now, summaryAttempted,
+				action.isSummarised(), false, decisionContext.isPrefixDominated(), decisionContext.decision());
+	}
+
+	private DecisionContext decideTarget(Request request, ContextState state, int before, int limit, int maxOutput,
+			ContextTrigger trigger, long now) {
+		ContextTrigger.Level lineage = ContextTrigger.Level.fromWire(state.level());
+		// C13 / I3：滞回判"可压缩历史"，先扣掉本轮不可压缩的 system + tools（否则大前缀永久锁死 L2/L3）
+		int fixedPrefix = Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
+		boolean unlocked = trigger.hysteresisUnlocked(state.usedTokens(), fixedPrefix, limit,
+				state.everCompacted(), maxOutput);
+		// C13：无真值时用整包估算判（system + tools + 历史 + 本轮输入）—— 轮首/压缩后基线没有
+		// 上游 truth，只算"新输入"会让 system 与工具 schema 在小窗口模型上完全不计入判据。
+		int wholeRequest = before + Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens())
+				+ Math.max(0, request.inputTokens()) + Math.max(0, request.toolResultsSinceMeasure());
+		// B1 / I1：先算"原始判定"（阈值视为已武装），只用于判断是否允许升级或硬越窗逃逸。
+		// 滞回只抑制同级重复：rawLevel 更高 ⇒ 照常升级；nextEst >= limit ⇒ 硬越窗必须逃逸。
+		ContextTrigger.Decision raw = trigger.decide(limit, request.usedTokens(), request.completionTokens(),
+				request.inputTokens(), request.toolResultsSinceMeasure(), wholeRequest, true, maxOutput);
+		boolean escape = ContextTrigger.upgradeAllowed(raw.level(), lineage)
+				|| ContextTrigger.hardOverflow(raw.nextEst(), limit);
+		boolean armed = unlocked || escape;
+		ContextTrigger.Decision decision = trigger.decide(limit, request.usedTokens(), request.completionTokens(),
+				request.inputTokens(), request.toolResultsSinceMeasure(), wholeRequest, armed, maxOutput);
+		if (!decision.triggered()) {
+			if (!request.l1Due()) {
+				return new DecisionContext(null, noopPlan(request, state, before, decision,
+						armed ? REASON_UNDER_THRESHOLD : REASON_HYSTERESIS_LOCKED), false, null);
+			}
+			return new DecisionContext(decision, null, false, ContextTrigger.Level.L1);
+		}
+		// 每次最多升一级；但<b>不得借谱系位置在低占比重复更高一级</b>：
+		// 谱系已到 L2/L3、本次占比只要求 L1 时，只做 L1（A1：不在 L2 线以下改写整个前缀）。
+		ContextTrigger.Level target = decision.level().ordinal() < lineage.ordinal() ? decision.level()
+				: lineage.advanceTo(decision.level());
+		return applyTargetGuards(request, state, decision, target, maxOutput, now);
+	}
+
+	private DecisionContext applyTargetGuards(Request request, ContextState state, ContextTrigger.Decision decision,
+			ContextTrigger.Level target, int maxOutput, long now) {
+		if (target.ordinal() > MAX_LEVEL.ordinal()) {
+			target = MAX_LEVEL;
+		}
+		// P7：有未决 HITL 条目（挂起期）只允许 L1 —— 用户还要在卡片上决策，摘要会改写卡片上下文
+		boolean suspended = request.protectedToolCallIds() != null
+				&& !request.protectedToolCallIds().isEmpty();
+		if (suspended && target.ordinal() > ContextTrigger.Level.L1.ordinal()) {
+			target = ContextTrigger.Level.L1;
+		}
+		CompactionFuse fuse = new CompactionFuse(this.properties.getContext());
+		if (target.ordinal() >= ContextTrigger.Level.L2.ordinal() && !fuse.allowsSummary(state, now)) {
+			target = ContextTrigger.Level.L1;
+		}
+		boolean prefixDominated = isPrefixDominated(request, decision, target, maxOutput);
+		if (prefixDominated && target.ordinal() >= ContextTrigger.Level.L2.ordinal()) {
+			target = ContextTrigger.Level.L1;
+		}
+		return new DecisionContext(decision, null, prefixDominated, target);
+	}
+
+	private boolean isPrefixDominated(Request request, ContextTrigger.Decision decision, ContextTrigger.Level target,
+			int maxOutput) {
+		AiProperties.Context config = this.properties.getContext();
+		int limit = decision.limitTokens();
+		// N3：前缀主导守卫 —— system + tools 本身就过 L2 线时，L2/L3 压不动它（只能丢历史），
+		// 而触发线看整条请求 ⇒ 会每轮判 L3、每轮空截一次。此时只留 L1。
+		int prefixTokens = Math.max(0, request.systemTokens()) + Math.max(0, request.toolsTokens());
+		int l2 = config.getL2Percent() <= 0 ? 80 : config.getL2Percent();
+		int completionReserve = ContextTrigger.effectiveReserve(limit, config.getReserveTokens(), maxOutput);
+		long denominator = Math.max(1L, (long) limit - completionReserve);
+		// C1 + R4/N-A：守卫只在"这一发**连同输出预留**都放得下"时成立 —— 那时 L2/L3 确实徒劳
+		// （压不动固定前缀）。判据必须带上输出预留：`limit − reserve ≤ nextEst < limit` 这段
+		// prompt 看似没满，但加上 max_tokens 就放不下，上游照样 400。故：
+		//   放得下 ⇒ 降级（L1）；放不下（含 nextEst >= limit 的真越窗）⇒ 保留 L3。
+		boolean fitsWithCompletion = decision.nextEst() + completionReserve <= limit;
+		return prefixTokens > 0 && prefixTokens * 100d / denominator >= l2
+				&& decision.nextEst() < limit && fitsWithCompletion;
+	}
+
+	private ActionResult applyL2(Request request, List<Message> original, ContextTrigger.Decision decision,
+			ToolResultClearing.Plan clear, Set<String> otherActiveRuns, ContextState[] summaryState,
+			boolean[] summaryAttempted, int before, Runnable onSummaryProgress, Runnable onSummaryStart, long now) {
+		AiProperties.Context config = this.properties.getContext();
+		// 2026-10-29 压缩阶段信号批：摘要是唯一"真在压缩上下文"的动作 —— 只在第一次真正调用
+		// 摘要模型之前公告阶段。L1/L3（本地操作）、摘要器缺席、没有可摘要旧轮都静默。
+		RollingSummarizer.Summarizer summarizer = withStart(
+				withProgress(this.summarizer, onSummaryProgress), onSummaryStart);
+		if (CompactionFuse.OPEN.equals(summaryState[0].circuit())) {
+			summarizer = withHalfOpenReservation(summarizer, request, summaryState, now);
+		}
+		if (summarizer == null || request.runtime() == null) {
+			// 摘要只使用本轮 provider/model/options：没有本轮 runtime 就不压，绝不回落全局默认。
+			// B1：这不是一次"摘要尝试"（没有调用模型）⇒ 不推进熔断计数。
+			return ActionResult.early(noopPlan(request, summaryState[0], before, decision, REASON_SUMMARY_UNAVAILABLE));
+		}
+		summaryAttempted[0] = true;
+		// B1 / I2：摘要输入 = 未清除的工具结果（L1 不能先污染摘要的输入）
+		RollingSummarizer.Plan summary = RollingSummarizer.plan(original, config.getKeepRecentTurns(),
+				config.getChunkTokens(), request.protectedToolCallIds(), request.runtime(), summarizer, now);
+		if (!summary.changed()) {
+			if (!RollingSummarizer.REASON_NOTHING_TO_SUMMARIZE.equals(summary.reason())) {
+				return ActionResult.early(failurePlan(request, summaryState[0], before, decision,
+						REASON_SUMMARY_FAILED));
+			}
+			// 没有可摘要的旧轮（全在 keep 窗口）：本节只做了 L1 的活，如实报 L1
+			return ActionResult.of(clear, ContextTrigger.Level.L1, REASON_L1, summaryState[0]);
+		}
+		List<Message> current = summary.messages();
+		// B1：L1 只作用于摘要后保留的后缀（折叠掉的旧轮已进摘要，不需要再清）
+		ToolResultClearing.Plan suffix = ToolResultClearing.plan(current, config.getKeepToolPairs(),
+				request.protectedToolCallIds(), otherActiveRuns);
+		return new ActionResult(suffix.messages(), suffix, ContextTrigger.Level.L2, summary.summarizedTurns(),
+				summary.summaryChars(), summary.lostTokens(), RollingSummarizer.REASON_SUMMARY, true, summaryState[0], null);
+	}
+
+	private ActionResult applyL3(Request request, ContextTrigger.Decision decision, ToolResultClearing.Plan clear,
+			ContextState state, int before) {
+		AiProperties.Context config = this.properties.getContext();
+		List<Message> current = clear.messages();
+		HardTrim.Plan trim = HardTrim.plan(current, config.getKeepRecentTurns(),
+				request.protectedToolCallIds(), request.protectedRunIds());
+		// N-D：`clear` 在本节之前就已算好（零代价、未落任何存储），判据必须计入它的收益 ——
+		// 旧实现只减 `trim.lostTokens()`，"清掉旧结果就能过"的一轮被误判成"裁了也没用"。
+		int afterClear = decision.nextEst() - clear.savedTokens();
+		int completionReserve = ContextTrigger.effectiveReserve(decision.limitTokens(), config.getReserveTokens(),
+				Math.max(0, request.maxOutputTokens()));
+		boolean clearAloneFits = clear.changed() && afterClear + completionReserve <= decision.limitTokens();
+		if (clearAloneFits) {
+			// 清除本身已经够了 ⇒ 只做 L1、不丢轮次（硬裁换不回额外空间）
+			return ActionResult.of(clear, ContextTrigger.Level.L1, REASON_L1, state);
+		}
+		if (trim.changed()) {
+			// N-C：按<b>清 + 裁后</b>估算判 —— 清 + 裁都放不下时，这一刀只丢历史、
+			// 换不回可用请求（下一发照样 400），不做。
+			int afterTrim = afterClear - trim.lostTokens();
+			if (afterTrim + completionReserve > decision.limitTokens()) {
+				if (clear.changed()) {
+					// 至少把这次零代价的 L1 清除落地（不丢轮、不写硬裁台账）
+					return ActionResult.of(clear, ContextTrigger.Level.L1, REASON_L1, state);
+				}
+				return ActionResult.early(noopPlan(request, state, before, decision, REASON_TRIM_CANNOT_FIT));
+			}
+			return new ActionResult(trim.messages(), clear, ContextTrigger.Level.L3, trim.droppedTurns(), 0,
+					trim.lostTokens(), HardTrim.REASON_HARD_TRIM, false, state, null);
+		}
+		// 全在 pin 集里：这一刻没有可丢的，别把"只清了结果"报成 L3
+		return ActionResult.of(clear, ContextTrigger.Level.L1, REASON_L1, state);
+	}
+
+	private record DecisionContext(ContextTrigger.Decision decision, Plan earlyExit, boolean isPrefixDominated,
+			ContextTrigger.Level target) {
+	}
+
+	private record ActionResult(List<Message> current, ToolResultClearing.Plan clear, ContextTrigger.Level action,
+			int turns, int summaryChars, int lostTokens, String reason, boolean isSummarised, ContextState state,
+			Plan earlyExit) {
+
+		private static ActionResult of(ToolResultClearing.Plan clear, ContextTrigger.Level action, String reason,
+				ContextState state) {
+			return new ActionResult(clear.messages(), clear, action, 0, 0, 0, reason, false, state, null);
+		}
+
+		private static ActionResult early(Plan earlyExit) {
+			return new ActionResult(null, null, null, 0, 0, 0, null, false, null, earlyExit);
+		}
 	}
 
 	/**
@@ -519,45 +547,18 @@ public final class ContextCompactor {
 		long now = System.currentTimeMillis();
 		String compactionId = compactionId(request, plan);
 		try {
-			// 压缩成功后基线置为"压缩后规模估算"，等下一次真值回填。
-			// C13：这条基线必须<b>含 system + tools</b> —— 上游真值（promptTokens）本就包含这两项，
-			// 基线只写历史估算会让下一轮 nextEst 永远少算前缀，小窗口上"看着没满、一发就 400"。
-			// 台账/帧的 before/after 仍是消息口径（与轮首同账），只有基线补齐前缀。
-			int baseline = plan.after() + Math.max(0, request.systemTokens())
-					+ Math.max(0, request.toolsTokens());
-			// N-D：本次只做了 L1 的活、而谱系已在 L2/L3 时，"只升不降"必须成立（否则快照档位在这里
-			// 回退成 L1，下一轮会重爬 L1→L2）。与轮内 L1 同处置：台账照记这次 L1 事件，
-			// 但不改写状态档位（台账的 level 仍如实是本次动作 L1）。
-			ContextTrigger.Level lineageNow = ContextTrigger.Level.fromWire(state.level());
-			ContextState compacted = plan.action().ordinal() < lineageNow.ordinal() ? state
-					: state.withCompaction(plan.action(), plan.turns(), plan.lostTokens(), plan.reason(), now)
-						.withUsage(baseline, 0, state.turnNo(), true, now, request.model(), request.providerId(),
-								request.systemTokens(), request.toolsTokens(), request.inputTokens());
-			// I4：只有真实 L2 摘要成功才关闭摘要熔断；L1/L3（本地动作）不碰熔断
-			if (plan.summarised()) {
-				compacted = new CompactionFuse(this.properties.getContext()).onSuccess(compacted, now);
-			}
-			List<Map<String, Object>> ledgerEvents = new ArrayList<>(2);
-			Map<String, Object> mainLedger = ledgerEvent(plan.action(), plan.before(), plan.after(), plan.turns(),
-					plan.lostTokens(), plan.summaryChars(), plan.reason(), plan.clear(), request, now, compacted.circuit());
-			mainLedger.put("commitEntryId", compactionId + ":main");
-			ledgerEvents.add(mainLedger);
-			boolean wasOpen = state.circuit() != null && !CompactionFuse.CLOSED.equals(state.circuit());
-			if (wasOpen && plan.summarised()) {
-				log.info("context summary circuit recovered sessionId={} level={} fails=0", request.sessionId(),
-						plan.action().wire());
-				Map<String, Object> circuitLedger = fuseEvent("circuit_closed", compacted, request, now, plan.before());
-				circuitLedger.put("commitEntryId", compactionId + ":circuit-closed");
-				ledgerEvents.add(circuitLedger);
-			}
+			ContextState compacted = compactedState(request, plan, state, now);
+			List<Map<String, Object>> ledgerEvents = ledgerEvents(request, plan, compacted, state, compactionId, now);
 			ContextStateStore.CompactionCommitStatus commitStatus = this.store.commitCompaction(request.sessionId(),
 					compactionId, compacted, ledgerEvents, compactionEvent(request, plan, compactionId, now));
 			if (commitStatus == ContextStateStore.CompactionCommitStatus.CONFLICT) {
 				if (attemptsLeft > 1) {
 					ContextState latest = readStateForUpdate(request.sessionId());
-					log.debug("context compaction state CAS conflict; merging onto latest version sessionId={} runId={} "
-							+ "compactionId={} attemptsLeft={}", request.sessionId(), request.runId(), compactionId,
-							attemptsLeft - 1);
+					if (log.isDebugEnabled()) {
+						log.debug("context compaction state CAS conflict; merging onto latest version sessionId={} runId={} "
+								+ "compactionId={} attemptsLeft={}", request.sessionId(), request.runId(), compactionId,
+								attemptsLeft - 1);
+					}
 					return commit(request, plan.withState(latest), attemptsLeft - 1);
 				}
 				log.warn("context compaction state CAS conflict sessionId={} runId={} compactionId={} "
@@ -565,17 +566,7 @@ public final class ContextCompactor {
 				return outcome(plan, request, state, false);
 			}
 			String eventId = compactionId;
-			log.info("context compacted sessionId={} runId={} level={} eventId={} cause={} anchor={} before={} after={} "
-					+ "turns={} lostTokens={} clearedPairs={} summaryChars={} reason={} ratio={}", request.sessionId(),
-					request.runId(), plan.action().wire(), eventId, request.cause(), request.anchorToolCallId(),
-					plan.before(), plan.after(), plan.turns(), plan.lostTokens(), plan.clear().cleared().size(),
-					plan.summaryChars(), plan.reason(), String.format(Locale.ROOT, "%.3f", plan.decision().ratio()));
-			// 日志链路批：压缩是"这一轮为什么变了/省了多少"的唯一解释项（与上面那行同源，字段可聚合）
-			AiTrace.eventOn(request.runId(), request.sessionId(), "compaction", "level", plan.action().wire(),
-					"reason", plan.reason(), "before", plan.before(), "after", plan.after(), "savedTokens",
-					plan.savedTokens(), "lostTokens", plan.lostTokens(), "turns", plan.turns(), "clearedPairs",
-					plan.clear().cleared().size(), "summaryChars", plan.summaryChars(), "limit",
-					plan.decision().limitTokens());
+			logCommit(request, plan, eventId);
 			return outcome(plan, request, compacted, true, eventId, now);
 		}
 		catch (RuntimeException ex) {
@@ -586,14 +577,68 @@ public final class ContextCompactor {
 		}
 	}
 
+	private ContextState compactedState(Request request, Plan plan, ContextState state, long now) {
+		// 压缩成功后基线置为"压缩后规模估算"，等下一次真值回填。
+		// C13：这条基线必须<b>含 system + tools</b> —— 上游真值（promptTokens）本就包含这两项，
+		// 基线只写历史估算会让下一轮 nextEst 永远少算前缀，小窗口上"看着没满、一发就 400"。
+		// 台账/帧的 before/after 仍是消息口径（与轮首同账），只有基线补齐前缀。
+		int baseline = plan.after() + Math.max(0, request.systemTokens())
+				+ Math.max(0, request.toolsTokens());
+		// N-D：本次只做了 L1 的活、而谱系已在 L2/L3 时，"只升不降"必须成立（否则快照档位在这里
+		// 回退成 L1，下一轮会重爬 L1→L2）。与轮内 L1 同处置：台账照记这次 L1 事件，
+		// 但不改写状态档位（台账的 level 仍如实是本次动作 L1）。
+		ContextTrigger.Level lineageNow = ContextTrigger.Level.fromWire(state.level());
+		ContextState compacted = plan.action().ordinal() < lineageNow.ordinal() ? state
+				: state.withCompaction(plan.action(), plan.turns(), plan.lostTokens(), plan.reason(), now)
+					.withUsage(baseline, 0, state.turnNo(), true, now, request.model(), request.providerId(),
+							request.systemTokens(), request.toolsTokens(), request.inputTokens());
+		// I4：只有真实 L2 摘要成功才关闭摘要熔断；L1/L3（本地动作）不碰熔断
+		if (plan.summarised()) {
+			compacted = new CompactionFuse(this.properties.getContext()).onSuccess(compacted, now);
+		}
+		return compacted;
+	}
+
+	private List<Map<String, Object>> ledgerEvents(Request request, Plan plan, ContextState compacted,
+			ContextState state, String compactionId, long now) {
+		List<Map<String, Object>> ledgerEvents = new ArrayList<>(2);
+		Map<String, Object> mainLedger = ledgerEvent(plan.action(), plan.before(), plan.after(), plan.turns(),
+				plan.lostTokens(), plan.summaryChars(), plan.reason(), plan.clear(), request, now, compacted.circuit());
+		mainLedger.put("commitEntryId", compactionId + ":main");
+		ledgerEvents.add(mainLedger);
+		boolean wasOpen = state.circuit() != null && !CompactionFuse.CLOSED.equals(state.circuit());
+		if (wasOpen && plan.summarised()) {
+			log.info("context summary circuit recovered sessionId={} level={} fails=0", request.sessionId(),
+					plan.action().wire());
+			Map<String, Object> circuitLedger = fuseEvent("circuit_closed", compacted, request, now, plan.before());
+			circuitLedger.put("commitEntryId", compactionId + ":circuit-closed");
+			ledgerEvents.add(circuitLedger);
+		}
+		return ledgerEvents;
+	}
+
+	private void logCommit(Request request, Plan plan, String eventId) {
+		log.info("context compacted sessionId={} runId={} level={} eventId={} cause={} anchor={} before={} after={} "
+				+ "turns={} lostTokens={} clearedPairs={} summaryChars={} reason={} ratio={}", request.sessionId(),
+				request.runId(), plan.action().wire(), eventId, request.cause(), request.anchorToolCallId(),
+				plan.before(), plan.after(), plan.turns(), plan.lostTokens(), plan.clear().cleared().size(),
+				plan.summaryChars(), plan.reason(), String.format(Locale.ROOT, "%.3f", plan.decision().ratio()));
+		// 日志链路批：压缩是"这一轮为什么变了/省了多少"的唯一解释项（与上面那行同源，字段可聚合）
+		AiTrace.eventOn(request.runId(), request.sessionId(), "compaction", "level", plan.action().wire(),
+				"reason", plan.reason(), "before", plan.before(), "after", plan.after(), "savedTokens",
+				plan.savedTokens(), "lostTokens", plan.lostTokens(), "turns", plan.turns(), "clearedPairs",
+				plan.clear().cleared().size(), "summaryChars", plan.summaryChars(), "limit",
+				plan.decision().limitTokens());
+	}
+
 	private static Map<String, Object> compactionEvent(Request request, Plan plan, String compactionId, long now) {
-		String runId = request.runId() == null || request.runId().isBlank() ? "run-unknown" : request.runId();
+		String runId = StringUtils.isBlank(request.runId()) ? "run-unknown" : request.runId();
 		Map<String, Object> event = new LinkedHashMap<>();
 		event.put("eventId", compactionId);
 		event.put("compactionId", compactionId);
 		event.put("runId", runId);
-		event.put("atMs", now);
-		event.put("cause", request.cause() == null ? "unknown" : request.cause());
+		event.put("atMs", Long.toString(now));
+		event.put("cause", ObjectUtils.defaultIfNull(request.cause(), "unknown"));
 		event.put("level", plan.action().wire());
 		event.put("anchorToolCallId", request.anchorToolCallId());
 		event.put("turns", plan.turns());
@@ -602,13 +647,13 @@ public final class ContextCompactor {
 	}
 
 	private static String compactionId(Request request, Plan plan) {
-		String runId = request.runId() == null || request.runId().isBlank() ? "run-unknown" : request.runId();
+		String runId = StringUtils.isBlank(request.runId()) ? "run-unknown" : request.runId();
 		String material = runId + '\n' + plan.atMs() + '\n' + plan.action().wire() + '\n' + plan.before() + '\n'
 				+ plan.after() + '\n' + plan.turns() + '\n' + plan.lostTokens() + '\n' + plan.reason() + '\n'
 				+ plan.clear().clearedIds();
 		try {
 			byte[] digest = MessageDigest.getInstance("SHA-256").digest(material.getBytes(StandardCharsets.UTF_8));
-			return runId + ":c:" + plan.atMs() + ":" + HexFormat.of().formatHex(digest, 0, 8);
+			return runId + ":c:" + plan.atMs() + ":" + Hex.encodeHexString(digest, 0, 8, false);
 		}
 		catch (NoSuchAlgorithmException ex) {
 			throw new IllegalStateException("SHA-256 unavailable", ex);
@@ -624,7 +669,7 @@ public final class ContextCompactor {
 			if (messages.get(i) instanceof org.springframework.ai.chat.messages.ToolResponseMessage tool) {
 				for (int j = tool.getResponses().size() - 1; j >= 0; j--) {
 					String id = tool.getResponses().get(j).id();
-					if (id != null && !id.isBlank()) {
+					if (StringUtils.isNotBlank(id)) {
 						return id;
 					}
 				}
@@ -653,14 +698,14 @@ public final class ContextCompactor {
 
 	private ContextState readStateForUpdate(String sessionId) {
 		ContextState state = this.store.readStrict(sessionId);
-		return state == null ? ContextState.EMPTY : state;
+		return ObjectUtils.defaultIfNull(state, ContextState.EMPTY);
 	}
 
 	/** 当前会话状态（端点读；异常降级为空态）。 */
 	public ContextState readState(String sessionId) {
 		try {
 			ContextState state = this.store.read(sessionId);
-			return state == null ? ContextState.EMPTY : state;
+			return ObjectUtils.defaultIfNull(state, ContextState.EMPTY);
 		}
 		catch (RuntimeException ex) {
 			log.warn("context state read failed sessionId={} (treating as empty)", sessionId, ex);
@@ -671,7 +716,7 @@ public final class ContextCompactor {
 	/** 本 run 之外的活跃 run（L1 不得清它们的工具结果）。 */
 	private static Set<String> otherActiveRuns(Request request) {
 		Set<String> ids = request.protectedRunIds();
-		if (ids == null || ids.isEmpty()) {
+		if (CollectionUtils.isEmpty(ids)) {
 			return Set.of();
 		}
 		Set<String> other = new LinkedHashSet<>(ids);
@@ -683,10 +728,12 @@ public final class ContextCompactor {
 
 	private Plan noopPlan(Request request, ContextState state, int before, ContextTrigger.Decision decision,
 			String reason) {
-		log.debug("context compaction skipped sessionId={} runId={} reason={} limit={} ratio={}", request.sessionId(),
-				request.runId(), reason, decision.limitTokens(), String.format(Locale.ROOT, "%.3f",
-						decision.ratio()));
-		return new Plan(state, ContextTrigger.Level.NONE, request.messages(), before, before, 0,
+		if (log.isDebugEnabled()) {
+			log.debug("context compaction skipped sessionId={} runId={} reason={} limit={} ratio={}", request.sessionId(),
+					request.runId(), reason, decision.limitTokens(), String.format(Locale.ROOT, "%.3f",
+							decision.ratio()));
+		}
+		return new Plan(state, ContextTrigger.Level.NONE, request.messages() == null ? List.of() : request.messages(), before, before, 0,
 				new ToolResultClearing.Plan(List.of(), List.of(), 0), 0, 0, 0, reason, System.currentTimeMillis(),
 				false, false, false, false, decision);
 	}
@@ -696,7 +743,7 @@ public final class ContextCompactor {
 			String reason) {
 		log.error("context summary failed sessionId={} runId={} reason={} (history unchanged, turn continues)", request.sessionId(),
 				request.runId(), reason);
-		return new Plan(state, ContextTrigger.Level.NONE, request.messages(), before, before, 0,
+		return new Plan(state, ContextTrigger.Level.NONE, request.messages() == null ? List.of() : request.messages(), before, before, 0,
 				new ToolResultClearing.Plan(List.of(), List.of(), 0), 0, 0, 0, reason, System.currentTimeMillis(),
 				true, false, true, false, decision);
 	}
@@ -748,11 +795,11 @@ public final class ContextCompactor {
 		if (!plan.changed()) {
 			return new Outcome(ContextTrigger.Level.NONE, request.messages(), plan.before(), plan.before(), 0, 0,
 					List.of(), plan.reason(), plan.decision().limitTokens(), request.usedTokens(), false,
-					stateAfter == null ? CompactionFuse.CLOSED : stateAfter.circuit(), plan.decision().ratio(),
+					ObjectUtils.defaultIfNull(stateAfter, ContextState.EMPTY).circuit(), plan.decision().ratio(),
 					plan.decision().nextEst(), 0, 0, 0, committed, null, request.runId(), request.cause(),
 					request.anchorToolCallId(), 0L);
 		}
-		ContextState effective = stateAfter == null ? plan.state() : stateAfter;
+		ContextState effective = ObjectUtils.getIfNull(stateAfter, () -> plan.state());
 		return new Outcome(plan.action(), plan.messages(), plan.before(), plan.after(), plan.savedTokens(),
 				plan.clear().cleared().size(), plan.clear().clearedIds(), plan.reason(),
 				plan.decision().limitTokens(), effective.usedTokens(), effective.est(), effective.circuit(),
@@ -772,11 +819,11 @@ public final class ContextCompactor {
 		event.put("summaryChars", summaryChars);
 		event.put("model", request.model());
 		event.put("est", false);
-		event.put("atMs", now);
+		event.put("atMs", Long.toString(now));
 		event.put("reason", reason);
 		event.put("clearedPairs", plan.cleared().size());
 		event.put("clearedToolCallIds", plan.clearedIds());
-		event.put("circuit", circuit == null ? CompactionFuse.CLOSED : circuit);
+		event.put("circuit", ObjectUtils.defaultIfNull(circuit, CompactionFuse.CLOSED));
 		return event;
 	}
 
@@ -791,9 +838,9 @@ public final class ContextCompactor {
 		event.put("summaryChars", 0);
 		event.put("model", request.model());
 		event.put("est", false);
-		event.put("atMs", now);
+		event.put("atMs", Long.toString(now));
 		event.put("reason", reason);
-		event.put("circuit", state.circuit() == null ? CompactionFuse.CLOSED : state.circuit());
+		event.put("circuit", ObjectUtils.defaultIfNull(state.circuit(), CompactionFuse.CLOSED));
 		event.put("fails", state.fuseFails());
 		return event;
 	}
@@ -825,7 +872,7 @@ public final class ContextCompactor {
 	 *
 	 * <p>包装位置就是判据：只有摘要器真的被调用，回调才可能执行 —— L1/L3、未达阈值、摘要器不可用、
 	 * 没有可摘要旧轮等路径根本走不到 {@code summarize}，因此<b>不会</b>误报"正在压缩"。
-	 * 回调抛异常同样不改写摘要结果（只记 DEBUG）：它只负责阶段信号，不是判定面。
+	 * 回调抛异常同样不改写摘要结果：它只负责阶段信号，不是判定面。
 	 */
 	private static RollingSummarizer.Summarizer withStart(RollingSummarizer.Summarizer delegate, Runnable hook) {
 		if (delegate == null || hook == null) {
@@ -838,7 +885,7 @@ public final class ContextCompactor {
 					hook.run();
 				}
 				catch (RuntimeException ex) {
-					log.debug("summary start callback failed (ignored, compaction unaffected)", ex);
+					// 阶段信号失败不影响压缩。
 				}
 			}
 			return delegate.summarize(systemPrompt, userPrompt, runtime);
@@ -864,7 +911,7 @@ public final class ContextCompactor {
 					hook.run();
 				}
 				catch (RuntimeException ex) {
-					log.debug("summary progress callback failed (ignored, compaction unaffected)", ex);
+					// 进度信号失败不影响摘要结果。
 				}
 			}
 		};

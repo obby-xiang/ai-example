@@ -1,12 +1,16 @@
 package com.example.configmgr.ai.config.db;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
@@ -25,32 +29,44 @@ import java.time.LocalDateTime;
  * 永远不写密文或明文（{@code AiConfigWriterTest#auditNeverCarriesTheKeyOrTheCipher} 与
  * {@code AiConfigWritePersistenceTest#auditRowsCarryOnlyTheLast4AndTheAction} 两处锁死）。
  */
-@Data
+@Getter
+@Setter
+@ToString
 @Entity
 @Table(name = "ai_config_audit")
 public class AiConfigAudit {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @JsonProperty("id")
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long id;
 
     /** 单用户本地应用暂无登录体系，预留操作者位（同 {@code AiFeedback#createdBy} 先例）。 */
+    @ToString.Exclude
     @Column(name = "actor", length = 64)
+    @JsonProperty("actor")
     private String actor;
 
     @Column(name = "action", nullable = false, length = 32)
+    @JsonProperty("action")
     private String action;
 
     @Column(name = "target_type", nullable = false, length = 32)
+    @JsonProperty("targetType")
     private String targetType;
 
     @Column(name = "target_id", length = 64)
+    @JsonProperty("targetId")
     private String targetId;
 
+    @ToString.Exclude
     @Column(name = "diff_json", length = 4096)
+    @JsonProperty("diffJson")
     private String diffJson;
 
     @CreationTimestamp
     @Column(name = "at", updatable = false)
+    @JsonProperty("at")
     private LocalDateTime at;
 }

@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.memory;
 
+import org.apache.commons.lang3.StringUtils;
+
 /**
  * 一次记忆写回的<b>轮次归属</b>：哪个 run 写的 + 这一轮从什么时候开始。
  *
@@ -19,7 +21,7 @@ package com.example.configmgr.ai.memory;
 public record MemoryTurn(String runId, long turnStartedAtMs) {
 
 	public MemoryTurn {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			throw new IllegalArgumentException("runId must not be blank because memory write-back requires turn ownership");
 		}
 		if (turnStartedAtMs <= 0L) {
@@ -29,7 +31,7 @@ public record MemoryTurn(String runId, long turnStartedAtMs) {
 
 	/** 若 runId/起点可用则构造，否则返回 {@code null}（调用方按失败处理，不伪造 run）。 */
 	public static MemoryTurn of(String runId, long turnStartedAtMs) {
-		return runId == null || runId.isBlank() || turnStartedAtMs <= 0L
+		return StringUtils.isBlank(runId) || turnStartedAtMs <= 0L
 				? null : new MemoryTurn(runId, turnStartedAtMs);
 	}
 

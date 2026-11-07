@@ -4,13 +4,19 @@ import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,9 +49,35 @@ import java.util.regex.Pattern;
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public record ToolResultEnvelope(boolean ok, String code, String outcome, boolean retryable,
-		Map<String, Object> target, Object evidence, String message, boolean truncated, String strategy,
-		int originalChars, int returnedChars, String notice) {
+public record ToolResultEnvelope(@JsonProperty("ok") boolean ok, @JsonProperty("code") String code,
+		@JsonProperty("outcome") String outcome, @JsonProperty("retryable") boolean retryable,
+		@JsonProperty("target") @JsonInclude(JsonInclude.Include.NON_EMPTY) Map<String, Object> target,
+		@JsonProperty("evidence") Object evidence, @JsonProperty("message") String message,
+		@JsonProperty("truncated") boolean truncated, @JsonProperty("strategy") String strategy,
+		@JsonProperty("originalChars") int originalChars, @JsonProperty("returnedChars") int returnedChars,
+		@JsonProperty("notice") String notice, @JsonProperty("targetStatus") TargetStatus targetStatus) {
+
+	public ToolResultEnvelope {
+		targetStatus = targetStatus == null ? (target == null ? TargetStatus.MISSING : TargetStatus.PRESENT) : targetStatus;
+		target = target == null || target.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(target));
+	}
+
+	public ToolResultEnvelope(boolean ok, String code, String outcome, boolean retryable,
+			Map<String, Object> target, Object evidence, String message, boolean truncated, String strategy,
+			int originalChars, int returnedChars, String notice) {
+		this(ok, code, outcome, retryable, target, evidence, message, truncated, strategy, originalChars, returnedChars,
+				notice, target == null ? TargetStatus.MISSING : TargetStatus.PRESENT);
+	}
+
+	public enum TargetStatus {
+		MISSING, INVALID, PRESENT
+	}
+
+	@JsonIgnore
+	public boolean isTargetPresent() {
+		return this.targetStatus == TargetStatus.PRESENT;
+	}
 
 	/**
 	 * 目标资源提取的字段白名单（顺序即序列化顺序）。
@@ -98,33 +130,46 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 
 	/** 统一工厂：outcome 为 null 时按 {@link ToolOutcome#UNKNOWN}（未知不等于失败）。 */
 	public static ToolResultEnvelope of(ToolOutcome outcome, String code, String message, String argumentsJson) {
-		ToolOutcome effective = outcome == null ? ToolOutcome.UNKNOWN : outcome;
-		String text = message == null ? "" : message;
+		ToolOutcome effective = ObjectUtils.defaultIfNull(outcome, ToolOutcome.UNKNOWN);
+		String text = StringUtils.defaultString(message);
+		TargetRead target = readTarget(argumentsJson);
 		return new ToolResultEnvelope(effective.ok(), code, effective.wire(), effective.retryable(code),
-				targetOf(argumentsJson), null, text, false, null, text.length(), text.length(), null);
+				target.value(), null, text, false, null, text.length(), text.length(), null, target.status());
 	}
 
-	/** 从参数 JSON 提取目标资源；没有可提取字段/解析失败一律 null。 */
+	/** 从参数 JSON 提取目标资源；读取不到目标时返回不可变空 Map。 */
 	public static Map<String, Object> targetOf(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
-			return null;
+		return readTarget(argumentsJson).value();
+	}
+
+	private static TargetRead readTarget(String argumentsJson) {
+		if (StringUtils.isBlank(argumentsJson)) {
+			return new TargetRead(TargetStatus.MISSING, Map.of());
 		}
 		try {
 			JsonNode node = JSON.readTree(argumentsJson);
 			if (node == null || !node.isObject()) {
-				return null;
+				return new TargetRead(TargetStatus.INVALID, Map.of());
 			}
 			Map<String, Object> target = new LinkedHashMap<>();
 			for (String key : TARGET_KEYS) {
 				JsonNode value = node.get(key);
 				if (value != null && !value.isNull()) {
-					target.put(key, JSON.convertValue(value, Object.class));
+					target.put(key, "taskId".equals(key) && value.isNumber() ? value.asText()
+							: JSON.convertValue(value, Object.class));
 				}
 			}
-			return target.isEmpty() ? null : target;
+			return new TargetRead(TargetStatus.PRESENT, target);
 		}
 		catch (Exception ex) {
-			return null;
+			return new TargetRead(TargetStatus.INVALID, Map.of());
+		}
+	}
+
+	private record TargetRead(TargetStatus status, Map<String, Object> value) {
+		private TargetRead {
+			value = value == null || value.isEmpty() ? Map.of()
+					: Collections.unmodifiableMap(new LinkedHashMap<>(value));
 		}
 	}
 
@@ -215,7 +260,7 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 		ToolResultEnvelope modelSide = new ToolResultEnvelope(this.ok, neutralize(this.code), neutralize(this.outcome),
 				this.retryable, neutralizeTarget(this.target), neutralizeValue(this.evidence),
 				neutralize(truncation.text()), truncation.truncated(), neutralize(truncation.strategy()),
-				truncation.originalChars(), truncation.returnedChars(), neutralize(notice));
+				truncation.originalChars(), truncation.returnedChars(), neutralize(notice), this.targetStatus);
 		String json = modelSide.toJson();
 		return TOOL_RESULT_NOTICE + "\n" + TOOL_RESULT_OPEN + "\n" + json + "\n" + TOOL_RESULT_CLOSE;
 	}
@@ -224,7 +269,15 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 	public ToolResultEnvelope withTruncation(ToolResultLimiter.Truncation truncation) {
 		return new ToolResultEnvelope(this.ok, this.code, this.outcome, this.retryable, this.target, this.evidence,
 				truncation.text(), truncation.truncated(), truncation.strategy(), truncation.originalChars(),
-				truncation.returnedChars(), truncation.notice());
+				truncation.returnedChars(), truncation.notice(), this.targetStatus);
+	}
+
+	@Override
+	public String toString() {
+		return "ToolResultEnvelope[ok=" + this.ok + ", code=" + this.code + ", outcome=" + this.outcome
+				+ ", retryable=" + this.retryable + ", truncated=" + this.truncated + ", strategy=" + this.strategy
+				+ ", originalChars=" + this.originalChars + ", returnedChars=" + this.returnedChars
+				+ ", targetStatus=" + this.targetStatus + "]";
 	}
 
 	/** 模型侧字符串值的闭标签中和（等长；只处理本信封拥有的 {@code </tool_result>}）。 */
@@ -234,8 +287,8 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 
 	/** 目标资源按值中和（{@code defCode}/{@code step} 等也来自参数 JSON）。 */
 	private static Map<String, Object> neutralizeTarget(Map<String, Object> target) {
-		if (target == null || target.isEmpty()) {
-			return target;
+		if (MapUtils.isEmpty(target)) {
+			return Map.of();
 		}
 		Map<String, Object> copy = new LinkedHashMap<>();
 		target.forEach((key, value) -> copy.put(neutralize(key), neutralizeValue(value)));
@@ -248,11 +301,17 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 			return neutralize(text);
 		}
 		if (value instanceof Map<?, ?> map) {
+			if (map.isEmpty()) {
+				return Map.of();
+			}
 			Map<Object, Object> copy = new LinkedHashMap<>();
 			map.forEach((key, item) -> copy.put(neutralizeValue(key), neutralizeValue(item)));
 			return copy;
 		}
 		if (value instanceof List<?> list) {
+			if (list.isEmpty()) {
+				return List.of();
+			}
 			List<Object> copy = new ArrayList<>(list.size());
 			for (Object item : list) {
 				copy.add(neutralizeValue(item));
@@ -284,7 +343,7 @@ public record ToolResultEnvelope(boolean ok, String code, String outcome, boolea
 	 * （诊断、续跑重建、用例断言都不必关心外壳）。
 	 */
 	public static ToolResultEnvelope fromJson(String json) {
-		if (json == null || json.isBlank()) {
+		if (StringUtils.isBlank(json)) {
 			return null;
 		}
 		try {

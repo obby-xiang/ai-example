@@ -1,5 +1,9 @@
 package com.example.configmgr.ai.kb;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.List;
 
 /**
@@ -21,18 +25,21 @@ import java.util.List;
  * @param candidates 候选（id/section 不存在时给出，不抛异常）
  * @param error      可行动错误消息（不含堆栈）
  */
-public record KbReadResult(State state, String docId, String title, String section, String text,
-        List<String> toc, boolean truncated, int nextOffset, List<String> candidates, String error) {
+public record KbReadResult(@JsonProperty("state") State state, @JsonProperty("docId") String docId,
+        @JsonProperty("title") String title, @JsonProperty("section") String section,
+        @JsonProperty("text") String text, @JsonProperty("toc") List<String> toc,
+        @JsonProperty("truncated") boolean truncated, @JsonProperty("nextOffset") int nextOffset,
+        @JsonProperty("candidates") List<String> candidates, @JsonProperty("error") String error) {
 
     public enum State {
         OK, DOC_NOT_FOUND, SECTION_NOT_FOUND, NOT_READY, DISABLED, ERROR
     }
 
     public KbReadResult {
-        toc = toc == null ? List.of() : List.copyOf(toc);
-        candidates = candidates == null ? List.of() : List.copyOf(candidates);
-        text = text == null ? "" : text;
-        error = error == null ? "" : error;
+        toc = List.copyOf(ObjectUtils.defaultIfNull(toc, List.of()));
+        candidates = List.copyOf(ObjectUtils.defaultIfNull(candidates, List.of()));
+        text = StringUtils.defaultString(text);
+        error = StringUtils.defaultString(error);
     }
 
     public static KbReadResult ok(String docId, String title, String section, String text,

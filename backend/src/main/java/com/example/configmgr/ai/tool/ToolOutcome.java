@@ -2,6 +2,7 @@ package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.common.ErrorCodes;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.Set;
 
@@ -197,7 +198,7 @@ public enum ToolOutcome {
 
 	/** 字面量 → 结局；未知字面量按 {@link #UNKNOWN}（未知不等于失败）。 */
 	public static ToolOutcome fromWire(String value) {
-		if (value == null || value.isBlank()) {
+		if (StringUtils.isBlank(value)) {
 			return null;
 		}
 		for (ToolOutcome outcome : values()) {

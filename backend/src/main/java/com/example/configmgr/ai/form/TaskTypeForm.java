@@ -9,6 +9,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.tool.AiContext;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -127,13 +128,13 @@ public class TaskTypeForm extends HostForm {
 	 */
 	public boolean parkIfCreateTaskMissingType(String runId, AiContext context, String argumentsJson,
 			List<Message> history, String assistantContent, Map<String, Object> assistantMetadata) {
-		if (runId == null || context == null || history == null || !parkEnabled()) {
+		if (runId == null || context == null || history == null || !isParkEnabled()) {
 			return false;
 		}
 		if (!typeMissingOrInvalid(argumentsJson)) {
 			return false;
 		}
-		if (alreadyIssued(runId, toolCallId(runId))) {
+		if (hasIssued(runId, toolCallId(runId))) {
 			return false;
 		}
 		Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
@@ -141,13 +142,13 @@ public class TaskTypeForm extends HostForm {
 			return false;
 		}
 		log.info("create_task has no valid type; host parks a TASK_TYPE form runId={}", runId);
-		return park(runId, history, frontendForm(toolCallId(runId), arguments.get()), assistantContent,
+		return shouldPark(runId, history, frontendForm(toolCallId(runId), arguments.get()), assistantContent,
 				assistantMetadata);
 	}
 
 	/** type 缺失/空白/不在 EXPORT|IMPORT 闭集。 */
 	public static boolean typeMissingOrInvalid(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return true;
 		}
 		try {

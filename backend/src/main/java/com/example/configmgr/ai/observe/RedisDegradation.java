@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.observe;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -156,7 +158,7 @@ public final class RedisDegradation {
 	}
 
 	private static Counter counter(String event) {
-		if (event == null || event.isBlank()) {
+		if (StringUtils.isBlank(event)) {
 			throw new IllegalArgumentException("Degradation event name must not be blank");
 		}
 		return COUNTERS.computeIfAbsent(event, key -> new Counter());

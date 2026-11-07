@@ -1,13 +1,16 @@
 package com.example.configmgr.ai.config.db;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
@@ -23,12 +26,14 @@ import java.time.LocalDateTime;
  * {@code ddl-auto=validate} ⇒ 实体不许建表），PostgreSQL 方言见 {@code db/postgresql/V1__schema.sql}。
  *
  * <h2>密钥纪律（设计稿 §3.2 三条硬约束之一）</h2>
- * {@link #keyCipher} 是<b>密文</b>，不进 {@code toString()}、不进 JSON —— 实体{@code @Data} 默认生成的
+ * {@link #keyCipher} 是<b>密文</b>，不进 {@code toString()}、不进 JSON —— 实体{@code @ToString} 默认生成的
  * {@code toString()} 会把整行打出来（日志泄漏面），故显式 {@code @ToString.Exclude}；再加
  * {@code @JsonIgnore} 兜住"哪天有人直接序列化实体"的可能。是否配置了 key 由 {@code keyRef} +
  * {@code keyLast4} 表达，明文/密文一概不出口。
  */
-@Data
+@Getter
+@Setter
+@ToString
 @Entity
 @Table(name = "ai_provider")
 public class AiProvider {
@@ -50,26 +55,37 @@ public class AiProvider {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @JsonProperty("id")
+    @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long id;
 
     /** 稳定机读名（{@code deepseek} / {@code custom-<n>}）；唯一约束的落点。 */
     @Column(name = "code", nullable = false, length = 64)
+    @JsonProperty("code")
     private String code;
 
     @Column(name = "display_name", nullable = false, length = 128)
+    @JsonProperty("displayName")
     private String displayName;
 
     /** 预留列：本期只实现 {@code OPENAI_COMPAT}。 */
     @Column(name = "protocol", nullable = false, length = 32)
+    @JsonProperty("protocol")
     private String protocol = "OPENAI_COMPAT";
 
+    @ToString.Exclude
     @Column(name = "base_url", nullable = false, length = 512)
+    @JsonProperty("baseUrl")
     private String baseUrl;
 
+    @ToString.Exclude
     @Column(name = "completions_path", nullable = false, length = 128)
+    @JsonProperty("completionsPath")
     private String completionsPath = "/chat/completions";
 
+    @ToString.Exclude
     @Column(name = "models_path", nullable = false, length = 128)
+    @JsonProperty("modelsPath")
     private String modelsPath = "/models";
 
     /** 信封串 {@code v1.<kid>.<iv>.<ct+tag>}；env 种子行恒为 null。 */
@@ -78,7 +94,9 @@ public class AiProvider {
     @Column(name = "key_cipher", length = 2048)
     private String keyCipher;
 
+    @ToString.Exclude
     @Column(name = "key_last4", length = 8)
+    @JsonProperty("keyLast4")
     private String keyLast4;
 
     /**
@@ -89,29 +107,37 @@ public class AiProvider {
      */
     @ToString.Exclude
     @Column(name = "key_fingerprint", length = 64)
+    @JsonIgnore
     private String keyFingerprint;
 
     @Column(name = "key_ref", nullable = false, length = 8)
+    @JsonProperty("keyRef")
     private String keyRef = KEY_REF_NONE;
 
     @Column(name = "source", nullable = false, length = 16)
+    @JsonProperty("source")
     private String source = SOURCE_DB;
 
     @Column(name = "enabled", nullable = false)
+    @JsonProperty("enabled")
     private boolean enabled = true;
 
     @Column(name = "sort_order", nullable = false)
+    @JsonProperty("sortOrder")
     private int sortOrder;
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
+    @JsonProperty("createdAt")
     private LocalDateTime createdAt;
 
     @UpdateTimestamp
     @Column(name = "updated_at")
+    @JsonProperty("updatedAt")
     private LocalDateTime updatedAt;
 
     /** 是否"有 key 可用"的<b>声明面</b>（真正可解析与否要运行时解一遍，见 AiConfigService）。 */
+    @JsonIgnore
     public boolean isKeyDeclared() {
         return !KEY_REF_NONE.equals(this.keyRef) && this.keyRef != null;
     }

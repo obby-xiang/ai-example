@@ -9,6 +9,7 @@ import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -95,11 +96,17 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 
 	private static final AtomicInteger THREAD_NO = new AtomicInteger();
 
-	private final ExecutorService executor = newExecutor();
+	private final ExecutorService executor;
 
 	public ContextSummaryClient(AiProperties properties, ModelCall call) {
 		this.properties = properties;
 		this.call = call;
+		ThreadPoolExecutor pool = new ThreadPoolExecutor(POOL_THREADS, POOL_THREADS, 30L, TimeUnit.SECONDS,
+				new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> Thread.ofPlatform()
+					.daemon(true).name("ctx-summary-" + THREAD_NO.incrementAndGet()).unstarted(runnable),
+				new ThreadPoolExecutor.AbortPolicy());
+		pool.allowCoreThreadTimeOut(true);
+		this.executor = pool;
 	}
 
 	/**
@@ -114,7 +121,7 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 			if (runtime.chatModel() == null) {
 				throw unavailable("turn provider runtime has no ChatModel: summary uses only the current turn's model");
 			}
-			if (runtime.modelId() == null || runtime.modelId().isBlank()) {
+			if (StringUtils.isBlank(runtime.modelId())) {
 				throw unavailable("turn provider runtime has no model id: summary uses only the current turn's model");
 			}
 			OpenAiChatOptions options = runtime.options() != null
@@ -134,7 +141,7 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 				throw unavailable("summary truncated (finishReason=length): incomplete summary is not used");
 			}
 			String text = response.getResult().getOutput().getText();
-			if (text == null || text.isBlank()) {
+			if (StringUtils.isBlank(text)) {
 				throw unavailable("summary model returned blank text");
 			}
 			return text;
@@ -188,7 +195,7 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 	 * 当成了新段落 —— 那正是这里要判失败（而不是悄悄截一段）的形态。
 	 */
 	static String requireClosedSummary(String raw) {
-		String text = raw == null ? "" : raw.trim();
+		String text = StringUtils.trimToEmpty(raw);
 		if (text.isEmpty()) {
 			throw unavailable("summary output is empty");
 		}
@@ -216,23 +223,6 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 	/** 由 Spring 在容器关闭时调用（{@code @Bean} 的推断销毁方法）。 */
 	public void close() {
 		this.executor.shutdownNow();
-	}
-
-	/**
-	 * 摘要执行池（超时面治理批① 第 5 项）：有界、平台线程、守护、空闲回收。
-	 *
-	 * <p>为什么 {@code allowCoreThreadTimeOut(true)}：摘要不是常驻负载，一个只压缩过几次的进程
-	 * 不该长期占着 4 条线程（单测里每个用例都新建一个客户端，线程泄漏会拖垮整轮门禁）。
-	 */
-	private static ExecutorService newExecutor() {
-		ThreadPoolExecutor pool = new ThreadPoolExecutor(POOL_THREADS, POOL_THREADS, 30L, TimeUnit.SECONDS,
-				new ArrayBlockingQueue<>(QUEUE_CAPACITY), runnable -> {
-					Thread thread = new Thread(runnable, "ctx-summary-" + THREAD_NO.incrementAndGet());
-					thread.setDaemon(true);
-					return thread;
-				}, new ThreadPoolExecutor.AbortPolicy());
-		pool.allowCoreThreadTimeOut(true);
-		return pool;
 	}
 
 	/** 本客户端实际使用的执行池（诊断/用例断言"不是虚拟线程 + 有界"）。 */

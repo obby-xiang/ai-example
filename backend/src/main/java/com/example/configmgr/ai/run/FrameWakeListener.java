@@ -196,7 +196,7 @@ public class FrameWakeListener {
 	 * @return true = 订阅已生效且本目标已在桶里（<b>已确认</b>）；false = <b>未确认</b>（目标已保留、
 	 * 订阅尚未建立）、订阅失败（整桶已回滚）或身份缺失（未登记）。三种情形调用方都可安全重试
 	 */
-	public boolean register(String runId, WakeTarget target) {
+	public boolean isRegistered(String runId, WakeTarget target) {
 		TenantUser identity = RequestContextUtils.currentOrNull();
 		if (identity == null) {
 			log.warn("frame wake register skipped runId={} (no explicit tenant/user identity)", runId);
@@ -222,6 +222,10 @@ public class FrameWakeListener {
 			bucket.targets.add(target);
 			this.registrations.put(target, new Registration(identity, runId, key));
 		}
+		return installSubscription(key, bucket, target, runId, identity);
+	}
+
+	private boolean installSubscription(String key, Bucket bucket, WakeTarget target, String runId, TenantUser identity) {
 		FrameWakeBus.Subscription subscription;
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			// 订阅在<b>该桶身份</b>下执行：RedisFrameWakeBus 用线程身份拼频道名。
@@ -262,7 +266,7 @@ public class FrameWakeListener {
 			closeSubscription(subscription, runId, identity);
 			return false;
 		}
-		log.debug("frame wake subscription established runId={} identity={} generation={}", runId, identity, bucket.generation);
+		if (log.isDebugEnabled()) log.debug("frame wake subscription established runId={} identity={} generation={}", runId, identity, bucket.generation);
 		return true;
 	}
 
@@ -331,13 +335,13 @@ public class FrameWakeListener {
 				// （同代次、零次 unsubscribe），自愈；客人之后再登记只会拿到 true（幂等）。
 				WakeTarget promoted = bucket.targets.iterator().next();
 				bucket.confirmed.add(promoted);
-				log.debug("frame wake last confirmed subscriber left but live targets "
+				if (log.isDebugEnabled()) log.debug("frame wake last confirmed subscriber left but live targets "
 						+ "remain, promoting to confirmed runId={} identity={} generation={}", registration.runId(), registration.identity(), bucket.generation);
 			}
 		}
 		if (released != null) {
 			closeSubscription(released, runId, registration.identity());
-			log.debug("frame wake subscription released runId={} identity={} generation={}", runId, registration.identity(),
+			if (log.isDebugEnabled()) log.debug("frame wake subscription released runId={} identity={} generation={}", runId, registration.identity(),
 					bucket.generation);
 		}
 	}

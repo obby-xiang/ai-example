@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.resultview;
 
+import org.apache.commons.collections4.CollectionUtils;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -112,10 +114,10 @@ public final class ResultView {
 		if (this.data != null) {
 			map.put("data", this.data);
 		}
-		if (this.columns != null && !this.columns.isEmpty()) {
+		if (CollectionUtils.isNotEmpty(this.columns)) {
 			map.put("columns", this.columns.stream().map(ResultViewColumn::toMap).toList());
 		}
-		if (this.actions != null && !this.actions.isEmpty()) {
+		if (CollectionUtils.isNotEmpty(this.actions)) {
 			map.put("actions", this.actions);
 		}
 		if (this.empty != null) {

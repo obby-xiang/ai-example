@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
@@ -112,7 +113,7 @@ public final class RunMemoryMerge {
 	/** 消息所属的 run（无归属 = {@code null}）。 */
 	public static String runIdOf(Message message) {
 		Object value = message == null ? null : message.getMetadata().get(RUN_ID_KEY);
-		return value instanceof String text && !text.isBlank() ? text : null;
+		return value instanceof String text && StringUtils.isNotBlank(text) ? text : null;
 	}
 
 	/** 消息携带的本轮起点（缺省 0）。 */
@@ -169,9 +170,13 @@ public final class RunMemoryMerge {
 			throw new IllegalArgumentException("Memory merge requires the current runId; unowned messages must not be adopted");
 		}
 		MemoryTurn owner = turn;
-		// 压缩摘要（合成前缀）先摘出来：它不属于任何 run，必须留在窗口最前、按前缀块处理。
-		// 若把它当成本轮消息收养，它就会跟着本轮的块排到中间 —— 之后既不会被后续 L2 折叠，
-		// 又会占掉 keep-recent-turns 的一个位置，窗口就再也压不下去（C-13 的"summary 没换来进展"）。
+		Partition partition = partitionIncoming(incoming);
+		BlockState state = collectBlocks(current, partition, owner);
+		appendOwnBlock(state, partition.body(), owner, replaceRunBlock);
+		return mergeOrderedBlocks(state.kept(), current, partition.body(), maxMessages, pinnedRunIds);
+	}
+
+	private static Partition partitionIncoming(List<Message> incoming) {
 		List<Message> prefix = new ArrayList<>();
 		List<Message> body = new ArrayList<>();
 		if (incoming != null) {
@@ -187,7 +192,10 @@ public final class RunMemoryMerge {
 				}
 			}
 		}
-		boolean replacePrefix = !prefix.isEmpty();
+		return new Partition(prefix, body);
+	}
+
+	private static BlockState collectBlocks(List<Message> current, Partition partition, MemoryTurn owner) {
 		List<Message> currentDigests = new ArrayList<>();
 		if (current != null) {
 			for (Message message : current) {
@@ -208,14 +216,18 @@ public final class RunMemoryMerge {
 		}
 		// 摘要：本轮带来新的 ⇒ 用它整体替换；没带 ⇒ 保留窗口里那份（迟到的旧轮历史可能没有摘要，
 		// 丢了等于把已折叠的旧轮凭空抹掉）。
-		List<Message> unowned = new ArrayList<>(selectDigests(prefix, currentDigests, replacePrefix));
+		List<Message> unowned = new ArrayList<>(selectDigests(partition.prefix(), currentDigests,
+				!partition.prefix().isEmpty()));
 		if (!unowned.isEmpty()) {
 			kept.put(UNOWNED, new Block(null, 0L, unowned));
 		}
+		return new BlockState(kept, existingOwn);
+	}
 
+	private static void appendOwnBlock(BlockState state, List<Message> body, MemoryTurn owner, boolean replaceRunBlock) {
 		List<Message> own = new ArrayList<>();
-		if (!replaceRunBlock && existingOwn != null) {
-			own.addAll(existingOwn.messages);
+		if (!replaceRunBlock && state.existingOwn() != null) {
+			own.addAll(state.existingOwn().messages);
 		}
 		for (Message message : body) {
 			String messageOwner = runIdOf(message);
@@ -226,14 +238,17 @@ public final class RunMemoryMerge {
 		}
 		if (!own.isEmpty()) {
 			// 起点：块已存在 ⇒ 沿用（续跑不漂移）；块是新建的 ⇒ 用本轮起点。
-			long startedAt = existingOwn != null && existingOwn.turnStartedAtMs > 0L ? existingOwn.turnStartedAtMs
-					: owner.turnStartedAtMs();
-			kept.put(owner.runId(), new Block(owner.runId(), startedAt, own));
+			long startedAt = state.existingOwn() != null && state.existingOwn().turnStartedAtMs > 0L
+					? state.existingOwn().turnStartedAtMs : owner.turnStartedAtMs();
+			state.kept().put(owner.runId(), new Block(owner.runId(), startedAt, own));
 		}
+	}
 
+	private static List<Message> mergeOrderedBlocks(Map<String, Block> kept, List<Message> current, List<Message> body,
+			int maxMessages, Set<String> pinnedRunIds) {
 		List<Block> ordered = new ArrayList<>(kept.values());
 		ordered.sort(Comparator.comparingLong((Block block) -> block.turnStartedAtMs)
-			.thenComparing(block -> block.runId == null ? "" : block.runId));
+			.thenComparing(block -> StringUtils.defaultString(block.runId)));
 		// 清除单调：任一侧已清除的工具结果都不许被另一侧的原文盖回去（去重后窗口副本可能已被丢弃，
 		// 所以两侧都要收集；incoming 侧后写、优先）。
 		Map<String, String> clearedById = clearedToolResults(current);
@@ -245,6 +260,12 @@ public final class RunMemoryMerge {
 			}
 		}
 		return trimKeepingToolPairs(merged, maxMessages, pinnedRunIds);
+	}
+
+	private record Partition(List<Message> prefix, List<Message> body) {
+	}
+
+	private record BlockState(Map<String, Block> kept, Block existingOwn) {
 	}
 
 	/**
@@ -341,7 +362,7 @@ public final class RunMemoryMerge {
 				block.messages.add(message);
 			}
 		}
-		return new ArrayList<>(blocks.values());
+		return blocks.isEmpty() ? List.of() : new ArrayList<>(blocks.values());
 	}
 
 	private static final class Block {

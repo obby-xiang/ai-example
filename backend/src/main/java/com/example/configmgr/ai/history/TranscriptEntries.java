@@ -5,6 +5,10 @@ import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.NumberUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -14,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Predicate;
 
 /**
@@ -101,83 +106,108 @@ public final class TranscriptEntries {
 	public static List<TranscriptEntry> fromRunTerminal(List<Message> messages, Map<String, PendingToolCall> pendings,
 			String runId, long turnStartedAtMs, boolean includeLastAssistant,
 			Map<String, String> resolvedStatusByToolCallId, Predicate<String> executedInLedger) {
-		if (messages == null || messages.isEmpty() || runId == null || runId.isBlank()) {
+		if (CollectionUtils.isEmpty(messages) || StringUtils.isBlank(runId)) {
 			return List.of();
 		}
 		Map<String, String> statuses = resolvedStatusByToolCallId == null ? Map.of() : resolvedStatusByToolCallId;
-		int lastAssistant = -1;
-		for (int i = 0; i < messages.size(); i++) {
-			if (messages.get(i) instanceof AssistantMessage) {
-				lastAssistant = i;
-			}
-		}
+		int lastAssistant = lastAssistantIndex(messages);
+		int currentRunStart = currentRunStart(messages);
 		List<TranscriptEntry> out = new ArrayList<>();
 		long atMs = System.currentTimeMillis();
-		int currentRunStart = -1;
-		for (int i = 0; i < messages.size(); i++) {
-			if (messages.get(i) instanceof UserMessage user && !SyntheticMessages.isSynthetic(user)) {
-				currentRunStart = i;
-			}
-		}
 		for (int i = 0; i < messages.size(); i++) {
 			Message message = messages.get(i);
 			if (message == null || SyntheticMessages.isSynthetic(message)) {
 				continue;
 			}
 			if (message instanceof AssistantMessage assistant) {
-				boolean hasOwnToolCall = assistant.hasToolCalls() && assistant.getToolCalls().stream()
-					.anyMatch(call -> call.id() != null && pendings.containsKey(call.id()));
-				if (i < currentRunStart || assistant.hasToolCalls() && !hasOwnToolCall) {
-					continue;
+				TranscriptEntry entry = assistantEntry(assistant, i, currentRunStart, lastAssistant,
+						includeLastAssistant, pendings, runId, turnStartedAtMs, atMs);
+				if (entry != null) {
+					out.add(entry);
 				}
-				Map<String, Object> metadata = message.getMetadata();
-				boolean hasVisibleContent = hasText(assistant.getText()) || hasText(stringOf(metadata, REASONING_KEY));
-				boolean hasFailureFacts = hasText(stringOf(metadata, ERROR_CODE_KEY))
-						|| hasText(stringOf(metadata, ERROR_MESSAGE_KEY));
-				if (!hasOwnToolCall && !hasVisibleContent
-						&& !(includeLastAssistant && i == lastAssistant && hasFailureFacts)) {
-					continue;
-				}
-				List<TranscriptEntry.ToolCallView> calls = toolCalls(assistant);
-				Map<String, Object> states = mapOf(metadata, TOOL_CALL_STATES_KEY);
-				String entryId = calls.isEmpty() ? entryId(runId, "assistant", "text-" + i) : assistantEntryId(runId, calls);
-				out.add(new TranscriptEntry(entryId, "assistant", runId,
-						turnStartedAtMs, atMs, assistant.getText(), stringOf(metadata, REASONING_KEY),
-						metadata != null && Boolean.TRUE.equals(metadata.get(STOPPED_KEY)) ? Boolean.TRUE : null,
-						metadata != null && Boolean.TRUE.equals(metadata.get(TRUNCATED_KEY)) ? Boolean.TRUE : null,
-						calls.isEmpty() ? null : calls, states, null, null, null, null, null, null, null, null, null,
-						null, stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY), null, null,
-						null, null));
-				continue;
 			}
-			if (message instanceof ToolResponseMessage toolResponse) {
-				List<ToolResponseMessage.ToolResponse> responses = toolResponse.getResponses();
-				for (int j = 0; j < responses.size(); j++) {
-					ToolResponseMessage.ToolResponse response = responses.get(j);
-					PendingToolCall pending = response.id() == null ? null : pendings.get(response.id());
-					if (pending == null) {
-						// 不属于本 run 的旧工具结果：保留在 memory/既有 transcript 里，不重复写
-						continue;
-					}
-					String result = resultOf(pending, response.responseData());
-					if (result == null) {
-						continue;
-					}
-					EnvelopeFacts facts = factsOf(pending, response.responseData());
-					String status = statuses.get(response.id());
-					if (status == null) {
-						// 缺失 status 的回落也必须带同一份台账证据（否则可能 assistant=EXECUTED、tool=APPROVED）
-						status = settledStatus(pending, executedInLedger);
-					}
-					out.add(new TranscriptEntry(toolEntryId(runId, response.id()), "tool", runId,
-							turnStartedAtMs, atMs, null, null, null, null, null, null, response.id(),
-							hasText(pending.getName()) ? pending.getName() : response.name(), pending.getKind(),
-							status, result, facts.code(), facts.truncated(), facts.strategy(),
-							facts.originalChars(), facts.returnedChars(), null, null, null, null, null, null));
-				}
+			else if (message instanceof ToolResponseMessage toolResponse) {
+				out.addAll(toolEntries(toolResponse, pendings, statuses, executedInLedger, runId, turnStartedAtMs, atMs));
 			}
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
+	}
+
+	private static int lastAssistantIndex(List<Message> messages) {
+		int lastAssistant = -1;
+		for (int i = 0; i < messages.size(); i++) {
+			if (messages.get(i) instanceof AssistantMessage) {
+				lastAssistant = i;
+			}
+		}
+		return lastAssistant;
+	}
+
+	private static int currentRunStart(List<Message> messages) {
+		int currentRunStart = -1;
+		for (int i = 0; i < messages.size(); i++) {
+			if (messages.get(i) instanceof UserMessage user && !SyntheticMessages.isSynthetic(user)) {
+				currentRunStart = i;
+			}
+		}
+		return currentRunStart;
+	}
+
+	private static TranscriptEntry assistantEntry(AssistantMessage assistant, int index, int currentRunStart,
+			int lastAssistant, boolean includeLastAssistant, Map<String, PendingToolCall> pendings, String runId,
+			long turnStartedAtMs, long atMs) {
+		boolean hasOwnToolCall = assistant.hasToolCalls() && assistant.getToolCalls().stream()
+				.anyMatch(call -> call.id() != null && pendings.containsKey(call.id()));
+		if (index < currentRunStart || assistant.hasToolCalls() && !hasOwnToolCall) {
+			return null;
+		}
+		Map<String, Object> metadata = assistant.getMetadata();
+		boolean hasVisibleContent = hasText(assistant.getText()) || hasText(stringOf(metadata, REASONING_KEY));
+		boolean hasFailureFacts = hasText(stringOf(metadata, ERROR_CODE_KEY))
+				|| hasText(stringOf(metadata, ERROR_MESSAGE_KEY));
+		if (!hasOwnToolCall && !hasVisibleContent
+				&& !(includeLastAssistant && index == lastAssistant && hasFailureFacts)) {
+			return null;
+		}
+		List<TranscriptEntry.ToolCallView> calls = toolCalls(assistant);
+		Map<String, Object> states = mapOf(metadata, TOOL_CALL_STATES_KEY);
+		String entryId = calls.isEmpty() ? entryId(runId, "assistant", "text-" + index)
+				: assistantEntryId(runId, calls);
+		return new TranscriptEntry(entryId, "assistant", runId, turnStartedAtMs, atMs, assistant.getText(),
+				stringOf(metadata, REASONING_KEY),
+				metadata != null && Boolean.TRUE.equals(metadata.get(STOPPED_KEY)) ? Boolean.TRUE : null,
+				metadata != null && Boolean.TRUE.equals(metadata.get(TRUNCATED_KEY)) ? Boolean.TRUE : null,
+				calls.isEmpty() ? null : calls, states, null, null, null, null, null, null, null, null, null, null,
+				stringOf(metadata, ERROR_CODE_KEY), stringOf(metadata, ERROR_MESSAGE_KEY), null, null, null, null);
+	}
+
+	private static List<TranscriptEntry> toolEntries(ToolResponseMessage toolResponse,
+			Map<String, PendingToolCall> pendings, Map<String, String> statuses, Predicate<String> executedInLedger,
+			String runId, long turnStartedAtMs, long atMs) {
+		List<TranscriptEntry> out = new ArrayList<>();
+		for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
+			PendingToolCall pending = response.id() == null ? null : pendings.get(response.id());
+			if (pending == null) {
+				// 不属于本 run 的旧工具结果：保留在 memory/既有 transcript 里，不重复写
+				continue;
+			}
+			String result = resultOf(pending, response.responseData());
+			if (result == null) {
+				continue;
+			}
+			EnvelopeFacts facts = factsOf(pending, response.responseData());
+			String status = statuses.get(response.id());
+			if (status == null) {
+				// 缺失 status 的回落也必须带同一份台账证据（否则可能 assistant=EXECUTED、tool=APPROVED）
+				status = settledStatus(pending, executedInLedger);
+			}
+			out.add(new TranscriptEntry(toolEntryId(runId, response.id()), "tool", runId, turnStartedAtMs, atMs,
+					null, null, null, null, null, null, response.id(),
+					hasText(pending.getName()) ? pending.getName() : response.name(), pending.getKind(), status, result,
+					facts.code(), facts.truncated(), facts.strategy(), facts.originalChars(), facts.returnedChars(),
+					null, null, null, null, null, null));
+		}
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	/**
@@ -191,7 +221,7 @@ public final class TranscriptEntries {
 			Predicate<String> executedInLedger) {
 		Map<String, String> statuses = new LinkedHashMap<>();
 		if (pendings == null) {
-			return statuses;
+			return Map.of();
 		}
 		for (PendingToolCall pending : pendings) {
 			if (pending == null || pending.getToolCallId() == null) {
@@ -199,14 +229,14 @@ public final class TranscriptEntries {
 			}
 			statuses.put(pending.getToolCallId(), settledStatus(pending, executedInLedger));
 		}
-		return statuses;
+		return statuses.isEmpty() ? Map.of() : statuses;
 	}
 
 	/** 用已解析 status 生成段级状态映射（{@link #settledStatuses} 的产物；缺失 id 不写）。 */
 	public static Map<String, Object> statesFrom(List<PendingToolCall> pendings, Map<String, String> statuses) {
 		Map<String, Object> states = new LinkedHashMap<>();
 		if (pendings == null) {
-			return states;
+			return Map.of();
 		}
 		Map<String, String> resolved = statuses == null ? Map.of() : statuses;
 		for (PendingToolCall pending : pendings) {
@@ -219,7 +249,7 @@ public final class TranscriptEntries {
 			}
 			states.put(pending.getToolCallId(), toolCallState(pending, status));
 		}
-		return states;
+		return states.isEmpty() ? Map.of() : states;
 	}
 
 	/**
@@ -246,7 +276,7 @@ public final class TranscriptEntries {
 			state.put("code", code);
 		}
 		String kind = pending.getKind();
-		if (kind != null && !kind.isBlank()) {
+		if (StringUtils.isNotBlank(kind)) {
 			state.put("kind", kind);
 		}
 		String decision = decisionOf(pending.getStatus());
@@ -256,8 +286,7 @@ public final class TranscriptEntries {
 		if (pending.getResolvedAtMs() > 0) {
 			state.put("decidedAt", pending.getResolvedAtMs());
 		}
-		if (PendingToolCall.KIND_FRONTEND.equals(kind) && pending.getResultText() != null
-				&& !pending.getResultText().isBlank()) {
+		if (PendingToolCall.KIND_FRONTEND.equals(kind) && StringUtils.isNotBlank(pending.getResultText())) {
 			state.put("submittedValues", pending.getResultText());
 		}
 		Map<String, Object> preflight = displayPreflight(pending.getPreflight());
@@ -279,7 +308,7 @@ public final class TranscriptEntries {
 	 * 两处必须同源，避免"刷新看到的卡"与"历史看到的卡"各说一套。
 	 */
 	public static Map<String, Object> displayPreflight(Map<String, Object> preflight) {
-		if (preflight == null || preflight.isEmpty() || !hasDisplayValue(preflight.get("target"))) {
+		if (MapUtils.isEmpty(preflight) || !hasDisplayValue(preflight.get("target"))) {
 			return null;
 		}
 		Map<String, Object> out = new LinkedHashMap<>();
@@ -289,7 +318,7 @@ public final class TranscriptEntries {
 				out.put(key, value);
 			}
 		}
-		return out.isEmpty() ? null : out;
+		return MapUtils.isEmpty(out) ? null : out;
 	}
 
 	/**
@@ -307,21 +336,21 @@ public final class TranscriptEntries {
 		if (previous == null || newer == null) {
 			return newer;
 		}
-		TranscriptEntry current = newer.segments() == null ? newer.withSegments(previous.segments()) : newer;
+		TranscriptEntry current = !newer.segmentPresence().isPresent() ? newer.withSegments(previous.segments()) : newer;
 		Map<String, Object> previousStates = previous.toolCallStates();
 		Map<String, Object> newerStates = current.toolCallStates();
-		if (previousStates == null || previousStates.isEmpty() || newerStates == null || newerStates.isEmpty()) {
+		if (MapUtils.isEmpty(previousStates) || MapUtils.isEmpty(newerStates)) {
 			return current;
 		}
 		Map<String, Object> states = new LinkedHashMap<>(newerStates);
 		boolean changed = false;
 		for (Map.Entry<String, Object> previousState : previousStates.entrySet()) {
 			Map<String, Object> older = asMap(previousState.getValue());
-			if (older == null || asMap(older.get("preflight")) == null) {
+			if (older == MISSING_MAP || asMap(older.get("preflight")) == MISSING_MAP) {
 				continue;
 			}
 			Map<String, Object> currentState = asMap(states.get(previousState.getKey()));
-			if (currentState == null) {
+			if (currentState == MISSING_MAP) {
 				continue;
 			}
 			Map<String, Object> merged = new LinkedHashMap<>(currentState);
@@ -340,12 +369,12 @@ public final class TranscriptEntries {
 	 */
 	static Map<String, Object> carryPreflightState(Map<String, Object> newerState, Object previousState) {
 		Map<String, Object> previous = asMap(previousState);
-		Map<String, Object> older = previous == null ? null : asMap(previous.get("preflight"));
-		if (newerState == null || older == null || older.isEmpty()) {
+		Map<String, Object> older = previous == MISSING_MAP ? MISSING_MAP : asMap(previous.get("preflight"));
+		if (newerState == null || MapUtils.isEmpty(older)) {
 			return newerState;
 		}
 		Map<String, Object> current = asMap(newerState.get("preflight"));
-		if (current == null) {
+		if (current == MISSING_MAP) {
 			Map<String, Object> carried = displayPreflight(older);
 			if (carried != null) {
 				newerState.put("preflight", carried);
@@ -372,17 +401,19 @@ public final class TranscriptEntries {
 			return false;
 		}
 		if (value instanceof String text) {
-			return !text.isBlank();
+			return StringUtils.isNotBlank(text);
 		}
 		if (value instanceof Map<?, ?> map) {
-			return !map.isEmpty();
+			return MapUtils.isNotEmpty(map);
 		}
 		return true;
 	}
 
+	private static final Map<String, Object> MISSING_MAP = Map.of("missing", Boolean.TRUE);
+
 	@SuppressWarnings("unchecked")
 	private static Map<String, Object> asMap(Object value) {
-		return value instanceof Map<?, ?> map ? (Map<String, Object>) map : null;
+		return value instanceof Map<?, ?> map ? (Map<String, Object>) map : MISSING_MAP;
 	}
 
 	/**
@@ -448,10 +479,10 @@ public final class TranscriptEntries {
 
 	/** assistant 条目的稳定 id：有工具调用按首个 toolCallId，无调用按轮。 */
 	public static String assistantEntryId(String runId, List<TranscriptEntry.ToolCallView> calls) {
-		if (calls == null || calls.isEmpty()) {
+		if (CollectionUtils.isEmpty(calls)) {
 			return entryId(runId, "assistant", null);
 		}
-		String first = calls.get(0).id();
+		String first = calls.getFirst().id();
 		return entryId(runId, "assistant", first == null ? "none" : first);
 	}
 
@@ -464,7 +495,7 @@ public final class TranscriptEntries {
 	}
 
 	private static String entryId(String runId, String kind, String suffix) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			throw new IllegalArgumentException("Transcript entries require a runId");
 		}
 		return suffix == null ? runId + ":" + kind : runId + ":" + kind + ":" + suffix;
@@ -503,7 +534,7 @@ public final class TranscriptEntries {
 	 */
 	private static EnvelopeFacts factsOf(PendingToolCall pending, String responseData) {
 		String code = pending != null && hasText(pending.getCode()) ? pending.getCode() : null;
-		if (responseData == null || responseData.isBlank()) {
+		if (StringUtils.isBlank(responseData)) {
 			return new EnvelopeFacts(code, null, null, null, null);
 		}
 		try {
@@ -528,7 +559,7 @@ public final class TranscriptEntries {
 	}
 
 	private static boolean hasText(String value) {
-		return value != null && !value.isBlank();
+		return StringUtils.isNotBlank(value);
 	}
 
 	private static String stringOf(Map<String, Object> metadata, String key) {
@@ -536,7 +567,7 @@ public final class TranscriptEntries {
 			return null;
 		}
 		Object value = metadata.get(key);
-		return value == null ? null : String.valueOf(value);
+		return Objects.toString(value, null);
 	}
 
 	private static long longOf(Map<String, Object> metadata, String key, long fallback) {
@@ -548,12 +579,7 @@ public final class TranscriptEntries {
 			return number.longValue();
 		}
 		if (value instanceof String text) {
-			try {
-				return Long.parseLong(text.trim());
-			}
-			catch (NumberFormatException ex) {
-				return fallback;
-			}
+			return NumberUtils.toLong(StringUtils.trim(text), fallback);
 		}
 		return fallback;
 	}
@@ -561,10 +587,10 @@ public final class TranscriptEntries {
 	@SuppressWarnings("unchecked")
 	private static Map<String, Object> mapOf(Map<String, Object> metadata, String key) {
 		if (metadata == null) {
-			return null;
+			return Map.of();
 		}
 		Object value = metadata.get(key);
-		return value instanceof Map<?, ?> map ? (Map<String, Object>) map : null;
+		return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
 	}
 
 }

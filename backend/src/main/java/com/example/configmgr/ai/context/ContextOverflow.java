@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.context;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.List;
 import java.util.Locale;
 
@@ -31,11 +33,15 @@ public final class ContextOverflow {
 
 	/** 是否像"上下文越窗"（任一文本命中即算）。 */
 	public static boolean matches(String... texts) {
+		return isMatched(texts);
+	}
+
+	public static boolean isMatched(String... texts) {
 		if (texts == null) {
 			return false;
 		}
 		for (String text : texts) {
-			if (text == null || text.isEmpty()) {
+			if (StringUtils.isEmpty(text)) {
 				continue;
 			}
 			String lower = text.toLowerCase(Locale.ROOT);

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.resultview;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -203,21 +204,21 @@ public final class ResultViews {
 
 	/** 自由文本消毒：命中的片段替换为 {@link #REDACTED}（保留其余业务文本的形状）。 */
 	public static String sanitize(String text) {
-		if (text == null || text.isEmpty()) {
+		if (StringUtils.isEmpty(text)) {
 			return text;
 		}
 		return FORBIDDEN_MARKUP.matcher(text).replaceAll(REDACTED);
 	}
 
 	private static String optionalText(String text) {
-		if (text == null || text.isBlank()) {
+		if (StringUtils.isBlank(text)) {
 			return null;
 		}
 		return containsForbiddenMarkup(text) ? null : text;
 	}
 
 	private static String requiredText(String text) {
-		if (text == null || text.isBlank()) {
+		if (StringUtils.isBlank(text)) {
 			return "i18n:resultview.blocked";
 		}
 		return sanitize(text);
@@ -232,7 +233,7 @@ public final class ResultViews {
 			if (out.size() >= MAX_COLUMNS) {
 				break;
 			}
-			if (column == null || column.key() == null || column.key().isBlank() || column.type() == null) {
+			if (column == null || StringUtils.isBlank(column.key()) || column.type() == null) {
 				// 列定义不合法 ⇒ 丢掉这一列（不猜类型），全丢则整视图降级
 				continue;
 			}
@@ -244,7 +245,7 @@ public final class ResultViews {
 
 	private static List<Map<String, Object>> sanitizeOptions(List<Map<String, Object>> options) {
 		if (options == null) {
-			return null;
+			return List.of();
 		}
 		List<Map<String, Object>> out = new ArrayList<>(options.size());
 		for (Map<String, Object> option : options) {
@@ -268,7 +269,7 @@ public final class ResultViews {
 			Map<String, Object> safe = (Map<String, Object>) sanitizeValue(row);
 			out.add(safe);
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -277,11 +278,17 @@ public final class ResultViews {
 			return sanitize(text);
 		}
 		if (value instanceof Map<?, ?> map) {
+			if (map.isEmpty()) {
+				return Map.of();
+			}
 			Map<String, Object> out = new LinkedHashMap<>();
 			map.forEach((key, item) -> out.put(String.valueOf(key), sanitizeValue(item)));
 			return out;
 		}
 		if (value instanceof List<?> list) {
+			if (list.isEmpty()) {
+				return List.of();
+			}
 			List<Object> out = new ArrayList<>(list.size());
 			list.forEach(item -> out.add(sanitizeValue(item)));
 			return out;
@@ -318,7 +325,7 @@ public final class ResultViews {
 	private static Map<String, Object> meta(String source, Map<String, Object> truncated) {
 		Map<String, Object> meta = new LinkedHashMap<>();
 		meta.put("catalogId", CATALOG_ID);
-		if (source != null && !source.isBlank()) {
+		if (StringUtils.isNotBlank(source)) {
 			meta.put("source", source);
 		}
 		if (truncated != null) {

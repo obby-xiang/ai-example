@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -50,7 +51,7 @@ public final class ToolSchemaNormalizer {
      * @return 归一化后的 schema；无嵌套 {@code $defs} 时返回入参原串（同一引用）
      */
     public static String normalize(String toolName, String inputSchema) {
-        if (inputSchema == null || inputSchema.isBlank()) {
+        if (StringUtils.isBlank(inputSchema)) {
             return inputSchema;
         }
         JsonNode parsed;

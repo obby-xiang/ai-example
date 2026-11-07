@@ -18,6 +18,9 @@ import com.example.configmgr.file.FileStorageService;
 import io.lettuce.core.RedisFuture;
 import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.connection.DataType;
@@ -81,7 +84,7 @@ import java.util.concurrent.CompletableFuture;
  * {@code DEL}，<b>不扫描</b>；失败进 {@code errors} ⇒ {@code complete=false} + pending 保留；</li>
  * <li><b>发现键最后删</b>：{@code ai:session:current:<sid>} / {@code ai:session:runs:<sid>} /
  * {@code ai:session:active:<sid>} 只在本次删除主体<b>无 errors 且无 deferred</b> 时才删。
- * 提前删会让 deferred/失败的轮次重试时无法再被枚举，pending/guard 却仍在（永久 410）；</li>
+ * 提前删会让 deferred/失败的轮次重试时无法再被枚举，pending/guard 却仍在（持续 410）；</li>
  * <li>浏览器本地镜像/草稿：服务端无法访问 sessionStorage，结果里给出精确的
  * {@code clientCleanup}（镜像键 + 草稿键前缀 + 本轮 toolCallId 清单），由前端执行删除。</li>
  * </ol>
@@ -177,8 +180,8 @@ public class AiSessionPurgeService {
 
 	/**
 	 * 取消收尾的窄入口（F3）：取消旗标写完之后，驱动进程已死的轮次没有任何人写终态 ——
-	 * 只等 {@code awaitTerminal} 必然超时，13 键被无限延后（{@code ai:purge:pending} 无 TTL
-	 * ⇒ 会话永久 410 且删不掉）。**字段注入 + ObjectProvider** 保持构造器签名（多份既有用例
+	 * 只等 {@code awaitTerminal} 必然超时，13 键会被反复延后（pending 与守卫只在重试/真实用户活动时
+	 * 按 24h 滑动续期，停止活动后随整组会话数据到期）。**字段注入 + ObjectProvider** 保持构造器签名（多份既有用例
 	 * 直接 {@code new}），也不把销毁流程与 AI 运行面的创建顺序耦合；未装配（轻装配/单测）时
 	 * 保持旧行为：只写旗标 + 等一个短窗口。
 	 */
@@ -229,7 +232,7 @@ public class AiSessionPurgeService {
 		this.database = database;
 		this.guard = guard;
 		this.pendingStore = pendingStore;
-		this.properties = properties == null ? new AiProperties() : properties;
+		this.properties = ObjectUtils.getIfNull(properties, AiProperties::new);
 		this.activeWait = activeWait == null || activeWait.isNegative() ? Duration.ZERO : activeWait;
 	}
 
@@ -352,7 +355,7 @@ public class AiSessionPurgeService {
 	}
 
 	private PurgeResult purge(String sessionId, String requestedBy, TenantUser identity) {
-		if (sessionId == null || sessionId.isBlank()) {
+		if (StringUtils.isBlank(sessionId)) {
 			throw new IllegalArgumentException("sessionId must not be blank");
 		}
 		if (identity == null) {
@@ -365,7 +368,7 @@ public class AiSessionPurgeService {
 
 	private PurgeResult purgeInternal(String sessionId, String requestedBy, TenantUser identity) {
 		String requestedPurgeId = UUID.randomUUID().toString();
-		String actor = requestedBy == null || requestedBy.isBlank() ? "unknown" : requestedBy;
+		String actor = StringUtils.defaultIfBlank(requestedBy, "unknown");
 		SessionPurgePendingStore.Registration registration;
 		try {
 			registration = this.pendingStore.register(identity, sessionId, requestedPurgeId, actor,
@@ -376,25 +379,38 @@ public class AiSessionPurgeService {
 			return aborted(sessionId, requestedPurgeId, "pending", enumerationForFailure(sessionId, identity), ex);
 		}
 		String purgeId = registration.pending().purgeId();
-		String owner = registration.pending().requestedBy() == null || registration.pending().requestedBy().isBlank()
-				? actor : registration.pending().requestedBy();
+		String owner = StringUtils.defaultIfBlank(registration.pending().requestedBy(), actor);
 		SessionPurgePendingStore.AcquireResult claim = this.pendingStore.acquire(sessionId, purgeId,
 				UUID.randomUUID().toString(), System.currentTimeMillis(), EXECUTION_LEASE.toMillis());
-		if (!claim.acquired()) {
+		if (!claim.isAcquired()) {
 			return inProgress(sessionId, purgeId, claim.pending(), identity);
 		}
 		PurgeExecution execution = new PurgeExecution(claim.execution());
 
+		DeletionPreparation preparation = prepareDeletion(execution, sessionId, purgeId, owner, identity);
+		if (preparation.aborted() != null) {
+			return preparation.aborted();
+		}
+		return executeDeletion(execution, purgeId, owner, preparation.enumeration(), preparation.dbDeleted());
+	}
+
+	private record DeletionPreparation(Enumeration enumeration, SessionPurgeDatabase.Deleted dbDeleted,
+			PurgeResult aborted) {
+	}
+
+	private DeletionPreparation prepareDeletion(PurgeExecution execution, String sessionId, String purgeId,
+			String owner, TenantUser identity) {
 		Enumeration enumeration;
 		try {
 			execution.checkpoint("ENUMERATING");
 			enumeration = enumerate(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "enumerate: " + safeFailure());
+			isRecordFailureQuietly(execution, "enumerate: " + safeFailure());
 			log.warn("Session purge: enumeration failed, nothing deleted sessionId={} purgeId={}", sessionId,
 					purgeId, ex);
-			return aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId, identity), ex);
+			return new DeletionPreparation(null, null,
+					aborted(sessionId, purgeId, "enumerate", enumerationForFailure(sessionId, identity), ex));
 		}
 
 		try {
@@ -402,10 +418,10 @@ public class AiSessionPurgeService {
 			this.guard.arm(sessionId, purgeId + "|" + owner, guardTtl());
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "guard: " + safeFailure());
+			isRecordFailureQuietly(execution, "guard: " + safeFailure());
 			log.warn("Session purge: guard arm failed, nothing deleted sessionId={} purgeId={}", sessionId,
 					purgeId, ex);
-			return aborted(sessionId, purgeId, "guard", enumeration, ex);
+			return new DeletionPreparation(null, null, aborted(sessionId, purgeId, "guard", enumeration, ex));
 		}
 
 		SessionPurgeDatabase.Deleted dbDeleted;
@@ -414,13 +430,12 @@ public class AiSessionPurgeService {
 			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "database: " + safeFailure());
+			isRecordFailureQuietly(execution, "database: " + safeFailure());
 			log.warn("Session purge: H2 delete failed, Redis untouched sessionId={} purgeId={}", sessionId,
 					purgeId, ex);
-			return aborted(sessionId, purgeId, "database", enumeration, ex);
+			return new DeletionPreparation(null, null, aborted(sessionId, purgeId, "database", enumeration, ex));
 		}
-
-		return executeDeletion(execution, purgeId, owner, enumeration, dbDeleted);
+		return new DeletionPreparation(enumeration, dbDeleted, null);
 	}
 
 	/**
@@ -433,17 +448,17 @@ public class AiSessionPurgeService {
 	 * @return null = pending 不存在、正在执行或已换主（旧重试应停止）；否则与 {@link #purge} 同形结果
 	 */
 	public PurgeResult retry(String sessionId, String purgeId, String requestedBy) {
-		if (sessionId == null || sessionId.isBlank() || purgeId == null || purgeId.isBlank()) {
+		if (StringUtils.isBlank(sessionId) || StringUtils.isBlank(purgeId)) {
 			return null;
 		}
 		SessionPurgePendingStore.Pending pending = this.pendingStore.current(sessionId);
 		if (pending == null || !purgeId.equals(pending.purgeId())) {
 			return null;
 		}
-		String actor = requestedBy == null || requestedBy.isBlank() ? "unknown" : requestedBy;
+		String actor = StringUtils.defaultIfBlank(requestedBy, "unknown");
 		SessionPurgePendingStore.AcquireResult claim = this.pendingStore.acquire(sessionId, purgeId,
 				UUID.randomUUID().toString(), System.currentTimeMillis(), EXECUTION_LEASE.toMillis());
-		if (!claim.acquired()) {
+		if (!claim.isAcquired()) {
 			return null;
 		}
 		PurgeExecution execution = new PurgeExecution(claim.execution());
@@ -454,7 +469,7 @@ public class AiSessionPurgeService {
 			enumeration = enumerate(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "enumerate: " + safeFailure());
+			isRecordFailureQuietly(execution, "enumerate: " + safeFailure());
 			return aborted(sessionId, purgeId, "enumerate",
 					enumerationForFailure(sessionId, pending.identity()), ex);
 		}
@@ -465,7 +480,7 @@ public class AiSessionPurgeService {
 			dbDeleted = deleteFeedback(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "database: " + safeFailure());
+			isRecordFailureQuietly(execution, "database: " + safeFailure());
 			return aborted(sessionId, purgeId, "database", enumeration, ex);
 		}
 
@@ -478,24 +493,17 @@ public class AiSessionPurgeService {
 			return executeDeletionChecked(execution, purgeId, actor, enumeration, dbDeleted);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "delete: " + safeFailure());
+			isRecordFailureQuietly(execution, "delete: " + safeFailure());
 			return aborted(execution.sessionId(), purgeId, "delete", enumeration, ex);
 		}
 	}
 
-	/** 删除主体（首轮与自动重试共用）；complete 仅在全部删除 + 守卫收尾 + pending 移除都成功时为 true。 */
-	private PurgeResult executeDeletionChecked(PurgeExecution execution, String purgeId, String actor,
-			Enumeration enumeration, SessionPurgeDatabase.Deleted dbDeleted) {
-		String sessionId = execution.sessionId();
-		execution.checkpoint("CANCELLING");
-		// 活跃 run 先取消（已取消不重复取消），并给收尾一个短窗口。
-		List<String> errors = new ArrayList<>();
-		// 枚举阶段已经发现的"跳过非本身份"等结论随结果返回，不能只留在日志里。
-		List<String> warnings = new ArrayList<>(enumeration.warnings());
-		cancelActiveRuns(enumeration.runs(), actor, warnings);
-		awaitTerminal(enumeration.runs(), warnings);
-		Enumeration current = reloadRunStatuses(enumeration, warnings);
+	private record DeletionViews(MemoryView memory, TranscriptView transcriptView, List<RunView> runViews,
+			List<DeferredView> deferred, ContextView context, AttachmentView attachmentView, SessionView session) {
+	}
 
+	private DeletionViews deleteAllTargets(PurgeExecution execution, Enumeration current, List<String> errors,
+			List<String> warnings) {
 		// Redis 面：记忆 → 按 run 删 13 键 → 上下文 → 会话记录/草稿 → 附件文件
 		// → 最后才删 sessionRuns/sessionActive/sessionCurrent 三把发现键（仅当主体无错误且无 defer）。
 		// 状态刷新阶段读到的终态快照随枚举结果带下来：删除阶段对同一把键不再整份重读
@@ -517,64 +525,28 @@ public class AiSessionPurgeService {
 		SessionView session = deleteSessionRecordKeys(execution, errors, warnings);
 		execution.checkpoint("DELETE_ATTACHMENTS");
 		AttachmentView attachmentView = deleteAttachments(execution, current.attachments(), errors, warnings);
-
-		boolean deletionComplete = errors.isEmpty() && deferred.isEmpty();
-		if (deletionComplete) {
-			execution.checkpoint("DELETE_DISCOVERY");
-			// 只有"本次删除主体确实删净"才允许拆掉发现面。提前删会让 deferred/失败的轮次在
-			// 重试时无法再被枚举到，pending/guard 却仍在 —— 会话永久 410 且删不掉。
-			session = deleteDiscoveryKeys(execution, session, errors, warnings);
-			deletionComplete = errors.isEmpty() && deferred.isEmpty();
-		}
-		if (!deletionComplete) {
-			// 保留 pending + 守卫，交给调度/手动 DELETE 续清；失败/延后不是 complete。
-			String reason = !errors.isEmpty() ? errors.get(0)
-					: "deferred runs: " + deferred.stream().map(DeferredView::runId).toList();
-			if (!recordFailureQuietly(execution, reason)) {
-				errors.add("pending: 已被另一轮销毁接管或无法更新（旧重试停止）");
-			}
-		}
-		else {
-			execution.checkpoint("FINALIZE");
-			boolean retained;
-			try {
-				retained = this.guard.retainOrArmIfOwner(sessionId, purgeId, actor, guardTtl());
-			}
-			catch (RuntimeException ex) {
-				retained = false;
-				errors.add("guard: 收尾失败（fail-closed，保留 pending）：" + safeFailure());
-			}
-			if (retained) {
-				try {
-					if (!this.pendingStore.scheduleVerify(execution.claim(),
-							System.currentTimeMillis() + MEMORY_VERIFY_DELAY_MS)) {
-						errors.add("pending: 已被另一轮销毁接管，未排程记忆复核");
-					}
-				}
-				catch (RuntimeException ex) {
-					errors.add("pending: 记忆复核排程失败（保留 pending 以便重试）：" + safeFailure());
-				}
-			}
-			else if (errors.isEmpty()) {
-				errors.add("guard: 未被当前 purgeId 持有（owner 已变更），保留 pending");
-			}
-		}
-
-		boolean complete = errors.isEmpty() && deferred.isEmpty();
-		PurgeResult result = new PurgeResult(sessionId, purgeId, complete, current.found(), null,
-				current.database(), dbDeleted, memory, transcriptView, runViews, deferred, context,
-				attachmentView, session, current.clientCleanup(), errors, warnings);
-		log.info("Session purge completed sessionId={} purgeId={} complete={} runs={} deferred={} errors={} "
-				+ "memoryExisted={} feedbackDeleted={} attachments={}/{}",
-				sessionId, purgeId, complete, runViews.size(), deferred.size(), errors.size(),
-				memory.existed(), dbDeleted.feedbackRows(),
-				attachmentView.registrationsDeleted(), attachmentView.registered());
-		return result;
+		return new DeletionViews(memory, transcriptView, runViews, deferred, context, attachmentView, session);
 	}
 
-	private boolean recordFailureQuietly(PurgeExecution execution, String reason) {
+	/** 删除主体（首轮与自动重试共用）；complete 仅在全部删除 + 守卫收尾 + pending 移除都成功时为 true。 */
+	private PurgeResult executeDeletionChecked(PurgeExecution execution, String purgeId, String actor,
+			Enumeration enumeration, SessionPurgeDatabase.Deleted dbDeleted) {
+		execution.checkpoint("CANCELLING");
+		// 活跃 run 先取消（已取消不重复取消），并给收尾一个短窗口。
+		List<String> errors = new ArrayList<>();
+		// 枚举阶段已经发现的"跳过非本身份"等结论随结果返回，不能只留在日志里。
+		List<String> warnings = new ArrayList<>(enumeration.warnings());
+		cancelActiveRuns(enumeration.runs(), actor, warnings);
+		awaitTerminal(enumeration.runs(), warnings);
+		Enumeration current = reloadRunStatuses(enumeration, warnings);
+
+		DeletionViews views = deleteAllTargets(execution, current, errors, warnings);
+		return finalizeDeletion(execution, purgeId, actor, current, views, errors, warnings, dbDeleted);
+	}
+
+	private boolean isRecordFailureQuietly(PurgeExecution execution, String reason) {
 		try {
-			return this.pendingStore.recordFailure(execution.claim(), reason);
+			return this.pendingStore.isFailureRecorded(execution.claim(), reason);
 		}
 		catch (RuntimeException ex) {
 			log.warn("Session purge: failed to record failure on pending sessionId={} purgeId={} (pending kept, not disarmed)", execution.sessionId(),
@@ -587,17 +559,39 @@ public class AiSessionPurgeService {
 
 	private Enumeration enumerate(String sessionId) {
 		String gateRunId = this.sessionGate.currentRunIdStrict(sessionId);
-		String currentRunId = this.redis.opsForValue().get(this.runStore.sessionCurrentKey(sessionId));
-		List<String> warnings = new ArrayList<>();
-		if (currentRunId != null && currentRunId.trim().startsWith("{")) {
-			// 前缀碰撞：ai:session:current:<sid> 可能是会话 "current:<sid>" 的会话记录（JSON）。
-			// 它不是 runId，不能当候选轮次；会话键删除阶段会按值再判一次并跳过。
-			currentRunId = null;
+		String currentRunId = currentRunId(sessionId);
+		Set<String> candidates = enumerateCandidates(sessionId, gateRunId, currentRunId);
+		RunEnumeration runEnumeration = enumerateRuns(sessionId, gateRunId, currentRunId, candidates);
+		MemoryEnumeration memory = enumerateMemory(sessionId);
+		ExistenceEnumeration existence = enumerateExistence(sessionId);
+		long transcriptEntries = 0L;
+		if (existence.hasTranscriptData()) {
+			Long size = this.redis.opsForZSet().zCard(
+					com.example.configmgr.ai.history.ConversationTranscriptStore.orderKey(sessionId));
+			transcriptEntries = ObjectUtils.defaultIfNull(size, 0L);
 		}
+		List<FormAttachmentStore.Attachment> attachments = this.attachments.findBySessionId(sessionId);
+		SessionPurgeDatabase.Snapshot db = snapshotFeedback(sessionId);
+		boolean found = memory.hasMemory() || existence.hasTranscript() || !runEnumeration.runs().isEmpty()
+				|| existence.context().any() || !attachments.isEmpty() || db.feedbackRows() > 0
+				|| existence.hasSessionCurrent() || existence.hasSessionRecord() || existence.hasDraft();
+		ClientCleanup cleanup = clientCleanup(sessionId, runEnumeration.toolCallIds(), RequestContextUtils.require());
+		return new Enumeration(runEnumeration.runs(), Map.of(), attachments, existence.context(), memory.hasMemory(),
+				memory.messages(), existence.hasTranscript(), transcriptEntries, List.copyOf(memory.staging()), db,
+				existence.hasSessionCurrent(), existence.hasSessionRecord(), found, cleanup,
+				List.copyOf(runEnumeration.warnings()));
+	}
 
+	private String currentRunId(String sessionId) {
+		String currentRunId = this.redis.opsForValue().get(this.runStore.sessionCurrentKey(sessionId));
+		if (currentRunId != null && currentRunId.trim().startsWith("{")) {
+			return null;
+		}
+		return currentRunId;
+	}
+
+	private Set<String> enumerateCandidates(String sessionId, String gateRunId, String currentRunId) {
 		Set<String> candidates = new LinkedHashSet<>();
-		// 会话→run 索引是唯一发现面：读失败整次中止（此刻一个数据键都还没删），
-		// 不能把"读不出来"当成"没有轮次"而报 complete=true。
 		try {
 			candidates.addAll(this.runStore.sessionRunIds(sessionId));
 		}
@@ -605,125 +599,121 @@ public class AiSessionPurgeService {
 			throw new AiStateUnavailableException(
 					"Session purge enumeration: failed to read session->run index (fail-closed; aborted)", ex);
 		}
-		// 会话门/当前轮索引点名：索引可能因历史原因缺成员，但这两个名字本身就是本会话的轮次。
 		if (gateRunId != null) {
 			candidates.add(gateRunId);
 		}
 		if (currentRunId != null) {
 			candidates.add(currentRunId);
 		}
+		return candidates;
+	}
 
+	private RunEnumeration enumerateRuns(String sessionId, String gateRunId, String currentRunId,
+			Set<String> candidates) {
 		List<RunTarget> runs = new ArrayList<>();
 		List<String> toolCallIds = new ArrayList<>();
+		List<String> warnings = new ArrayList<>();
 		for (String runId : candidates) {
-			boolean named = runId.equals(gateRunId) || runId.equals(currentRunId);
-			// 候选来自本身份的会话索引或 gate/current 点名：归属已由键面确定，只需读快照核对
-			// sessionId 与租户身份（防索引成员被污染/旧数据串会话）。
-			RunSnapshot snapshot = this.runStore.get(runId);
-			if (snapshot == null) {
-				// 索引里的死成员无法归属到会话；只有"会话门/当前轮索引"点名的才收进来。
-				if (!named) {
-					continue;
-				}
-				runs.add(new RunTarget(runId, "UNKNOWN", true));
+			RunTarget target = enumerateRun(sessionId, gateRunId, currentRunId, runId, warnings);
+			if (target == null) {
+				continue;
 			}
-			else {
-				if (!sessionId.equals(snapshot.getSessionId())) {
-					continue;
-				}
-				if (!belongsToCurrentIdentity(snapshot)) {
-					// 快照带的是别的身份 / 无身份：sessionId 相同但不是"我的这一轮"，
-					// 绝不删它的 13 键。
-					warnings.add("run[" + runId + "]: 跳过非本身份的快照（snapshotIdentity="
-							+ snapshot.getTenantId() + ":" + snapshot.getUserId() + "，不删）");
-					log.warn("Session purge: skip run of another identity runId={} sessionId={} snapshotIdentity={}:{} (not deleted)",
-							runId, sessionId, snapshot.getTenantId(), snapshot.getUserId());
-					continue;
-				}
-				boolean active = !isTerminal(snapshot.getStatus()) || runId.equals(gateRunId);
-				runs.add(new RunTarget(runId, snapshot.getStatus(), active));
-			}
+			runs.add(target);
 			for (var pending : this.runStore.pendingsLenient(runId)) {
-				if (pending.getToolCallId() != null && !pending.getToolCallId().isBlank()) {
+				if (StringUtils.isNotBlank(pending.getToolCallId())) {
 					toolCallIds.add(pending.getToolCallId());
 				}
 			}
 		}
+		return new RunEnumeration(runs, toolCallIds, warnings);
+	}
 
-		boolean memoryExisted;
-		int memoryMessages = 0;
-		// 在飞写回（saveAll / 按轮合并 upsert）的中间态也是本会话的 AI 数据
-		// （正常路径 RENAME 后消失，清理失败/进程中断时按 TTL 自清）。
-		// 只带 staging 的会话今天会被误报 found=false + complete=true 后残留，故这里一并枚举。
-		// 精确索引成员随枚举结果带到删除阶段复用。
+	private RunTarget enumerateRun(String sessionId, String gateRunId, String currentRunId, String runId,
+			List<String> warnings) {
+		boolean named = runId.equals(gateRunId) || runId.equals(currentRunId);
+		RunSnapshot snapshot = this.runStore.get(runId);
+		if (snapshot == null) {
+			return named ? new RunTarget(runId, "UNKNOWN", true) : null;
+		}
+		if (!sessionId.equals(snapshot.getSessionId())) {
+			return null;
+		}
+		if (!isBelongsToCurrentIdentity(snapshot)) {
+			warnings.add("run[" + runId + "]: 跳过非本身份的快照（snapshotIdentity="
+					+ snapshot.getTenantId() + ":" + snapshot.getUserId() + "，不删）");
+			log.warn("Session purge: skip run of another identity runId={} sessionId={} snapshotIdentity={}:{} (not deleted)",
+					runId, sessionId, snapshot.getTenantId(), snapshot.getUserId());
+			return null;
+		}
+		boolean active = !isTerminal(snapshot.getStatus()) || runId.equals(gateRunId);
+		return new RunTarget(runId, snapshot.getStatus(), active);
+	}
+
+	private MemoryEnumeration enumerateMemory(String sessionId) {
 		List<String> staging = stagingKeys(sessionId);
-		boolean memoryStaged = !staging.isEmpty();
+		boolean staged = !staging.isEmpty();
 		if (this.chatMemoryRepository instanceof RedisChatMemoryRepository redisRepository) {
-			memoryExisted = redisRepository.hasLiveMemory(sessionId) || memoryStaged;
+			return new MemoryEnumeration(redisRepository.hasLiveMemory(sessionId) || staged, 0, staging);
 		}
-		else {
-			List<?> memory = this.chatMemoryRepository.findByConversationId(sessionId);
-			memoryMessages = memory == null ? 0 : memory.size();
-			memoryExisted = memoryMessages > 0 || memoryStaged;
-		}
-		// 只处理当前规范 HASH+:order+:meta，不读取或迁移旧结构。
-		String transcriptKey = com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId);
-		String transcriptOrderKey = com.example.configmgr.ai.history.ConversationTranscriptStore.orderKey(sessionId);
-		String transcriptMetaKey = com.example.configmgr.ai.history.ConversationTranscriptStore.metaKey(sessionId);
-		String transcriptTruncatedKey = com.example.configmgr.ai.history.ConversationTranscriptStore
-				.truncatedKey(sessionId);
-		List<String> existenceKeys = List.of(transcriptKey, transcriptOrderKey, transcriptMetaKey, transcriptTruncatedKey,
+		List<?> memory = this.chatMemoryRepository.findByConversationId(sessionId);
+		int messages = CollectionUtils.size(memory);
+		return new MemoryEnumeration(messages > 0 || staged, messages, staging);
+	}
+
+	private ExistenceEnumeration enumerateExistence(String sessionId) {
+		List<String> keys = existenceKeys(sessionId);
+		List<Boolean> existence = pipelineHasKeys(keys);
+		return existence == null ? readExistenceIndividually(sessionId) : readExistencePipeline(existence);
+	}
+
+	private List<String> existenceKeys(String sessionId) {
+		return List.of(com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId),
+				com.example.configmgr.ai.history.ConversationTranscriptStore.orderKey(sessionId),
+				com.example.configmgr.ai.history.ConversationTranscriptStore.metaKey(sessionId),
+				com.example.configmgr.ai.history.ConversationTranscriptStore.truncatedKey(sessionId),
 				this.runStore.contextKey(sessionId), this.runStore.contextLedgerKey(sessionId),
 				TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId), this.runStore.contextEventsKey(sessionId),
 				this.runStore.sessionCurrentKey(sessionId), AiSessionService.keyFor(sessionId),
 				CreateTaskDraftStore.sessionKey(sessionId));
-		List<Boolean> existence = pipelineHasKeys(existenceKeys);
-		boolean transcriptDataExisted;
-		boolean transcriptExisted;
-		ContextTargets context;
-		boolean sessionCurrentExisted;
-		boolean sessionRecordExisted;
-		boolean draftExisted;
-		if (existence == null) {
-			transcriptDataExisted = Boolean.TRUE.equals(this.redis.hasKey(transcriptKey));
-			transcriptExisted = transcriptDataExisted || Boolean.TRUE.equals(this.redis.hasKey(transcriptOrderKey))
-					|| Boolean.TRUE.equals(this.redis.hasKey(transcriptMetaKey))
-					|| Boolean.TRUE.equals(this.redis.hasKey(transcriptTruncatedKey));
-			context = new ContextTargets(
-					Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextKey(sessionId))),
-					Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))),
-					Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))),
-					Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextEventsKey(sessionId))));
-			sessionCurrentExisted = Boolean.TRUE.equals(
-					this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId)));
-			sessionRecordExisted = Boolean.TRUE.equals(this.redis.hasKey(AiSessionService.keyFor(sessionId)));
-			draftExisted = Boolean.TRUE.equals(this.redis.hasKey(CreateTaskDraftStore.sessionKey(sessionId)));
-		}
-		else {
-			transcriptDataExisted = existence.get(0);
-			transcriptExisted = existence.subList(0, 4).stream().anyMatch(Boolean::booleanValue);
-			context = new ContextTargets(existence.get(4), existence.get(5), existence.get(6), existence.get(7));
-			sessionCurrentExisted = existence.get(8);
-			sessionRecordExisted = existence.get(9);
-			draftExisted = existence.get(10);
-		}
-		long transcriptEntries = 0L;
-		if (transcriptDataExisted) {
-			Long size = this.redis.opsForZSet().zCard(transcriptOrderKey);
-			transcriptEntries = size == null ? 0L : size;
-		}
+	}
 
-		List<FormAttachmentStore.Attachment> attachmentList = this.attachments.findBySessionId(sessionId);
-		SessionPurgeDatabase.Snapshot db = snapshotFeedback(sessionId);
+	private ExistenceEnumeration readExistencePipeline(List<Boolean> existence) {
+		boolean transcriptData = existence.getFirst();
+		boolean transcript = existence.subList(0, 4).stream().anyMatch(Boolean::booleanValue);
+		ContextTargets context = new ContextTargets(existence.get(4), existence.get(5), existence.get(6),
+				existence.get(7));
+		return new ExistenceEnumeration(context, transcriptData, transcript, existence.get(8), existence.get(9),
+				existence.get(10));
+	}
 
-		boolean found = memoryExisted || transcriptExisted || !runs.isEmpty() || context.any()
-				|| !attachmentList.isEmpty() || db.feedbackRows() > 0 || sessionCurrentExisted
-				|| sessionRecordExisted || draftExisted;
+	private ExistenceEnumeration readExistenceIndividually(String sessionId) {
+		String dataKey = com.example.configmgr.ai.history.ConversationTranscriptStore.dataKey(sessionId);
+		String orderKey = com.example.configmgr.ai.history.ConversationTranscriptStore.orderKey(sessionId);
+		String metaKey = com.example.configmgr.ai.history.ConversationTranscriptStore.metaKey(sessionId);
+		String truncatedKey = com.example.configmgr.ai.history.ConversationTranscriptStore.truncatedKey(sessionId);
+		boolean transcriptData = Boolean.TRUE.equals(this.redis.hasKey(dataKey));
+		boolean transcript = transcriptData || Boolean.TRUE.equals(this.redis.hasKey(orderKey))
+				|| Boolean.TRUE.equals(this.redis.hasKey(metaKey)) || Boolean.TRUE.equals(this.redis.hasKey(truncatedKey));
+		ContextTargets context = new ContextTargets(
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextKey(sessionId))),
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextLedgerKey(sessionId))),
+				Boolean.TRUE.equals(this.redis.hasKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId))),
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.contextEventsKey(sessionId))));
+		return new ExistenceEnumeration(context, transcriptData, transcript,
+				Boolean.TRUE.equals(this.redis.hasKey(this.runStore.sessionCurrentKey(sessionId))),
+				Boolean.TRUE.equals(this.redis.hasKey(AiSessionService.keyFor(sessionId))),
+				Boolean.TRUE.equals(this.redis.hasKey(CreateTaskDraftStore.sessionKey(sessionId))));
+	}
 
-		ClientCleanup cleanup = clientCleanup(sessionId, toolCallIds, RequestContextUtils.require());
-		return new Enumeration(runs, Map.of(), attachmentList, context, memoryExisted, memoryMessages,
-				transcriptExisted, transcriptEntries, List.copyOf(staging), db, sessionCurrentExisted,
-				sessionRecordExisted, found, cleanup, List.copyOf(warnings));
+	private record RunEnumeration(List<RunTarget> runs, List<String> toolCallIds, List<String> warnings) {
+	}
+
+	private record MemoryEnumeration(boolean hasMemory, int messages, List<String> staging) {
+	}
+
+	private record ExistenceEnumeration(ContextTargets context, boolean hasTranscriptData,
+			boolean hasTranscript, boolean hasSessionCurrent, boolean hasSessionRecord,
+			boolean hasDraft) {
 	}
 
 	/**
@@ -759,7 +749,7 @@ public class AiSessionPurgeService {
 	 *
 	 * <p>快照身份必须与当前销毁身份完全一致；快照无身份（{@code 0/0}）视为<b>不可证明属于我</b> ⇒ 不删。
 	 */
-	private static boolean belongsToCurrentIdentity(RunSnapshot snapshot) {
+	private static boolean isBelongsToCurrentIdentity(RunSnapshot snapshot) {
 		if (snapshot == null) {
 			return false;
 		}
@@ -792,7 +782,7 @@ public class AiSessionPurgeService {
 			return out;
 		}
 		catch (RuntimeException ex) {
-			log.debug("Session purge existence pipeline failed; using ordered reads", ex);
+			if (log.isDebugEnabled()) log.debug("Session purge existence pipeline failed; using ordered reads", ex);
 			return null;
 		}
 	}
@@ -1079,7 +1069,7 @@ public class AiSessionPurgeService {
 	 * @return null = 台账不存在/已换主/不是复核态（本轮跳过）；否则为复核结论
 	 */
 	public MemoryVerify verifyMemoryOnly(String sessionId, String purgeId) {
-		if (sessionId == null || sessionId.isBlank() || purgeId == null || purgeId.isBlank()) {
+		if (StringUtils.isBlank(sessionId) || StringUtils.isBlank(purgeId)) {
 			return null;
 		}
 		SessionPurgePendingStore.Pending pending = this.pendingStore.current(sessionId);
@@ -1088,7 +1078,7 @@ public class AiSessionPurgeService {
 		}
 		SessionPurgePendingStore.AcquireResult claim = this.pendingStore.acquire(sessionId, purgeId,
 				UUID.randomUUID().toString(), System.currentTimeMillis(), EXECUTION_LEASE.toMillis());
-		if (!claim.acquired()) {
+		if (!claim.isAcquired()) {
 			return null;
 		}
 		PurgeExecution execution = new PurgeExecution(claim.execution());
@@ -1098,11 +1088,11 @@ public class AiSessionPurgeService {
 			armed = this.guard.isArmed(sessionId);
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "verify guard: " + safeFailure());
+			isRecordFailureQuietly(execution, "verify guard: " + safeFailure());
 			return new MemoryVerify(false, List.of("guard: 状态不可知（fail-closed，不删）：" + safeFailure()));
 		}
 		if (!armed) {
-			recordFailureQuietly(execution, "verify guard: not armed");
+			isRecordFailureQuietly(execution, "verify guard: not armed");
 			return new MemoryVerify(false, List.of("guard: 未装（未确认已销毁，不删）"));
 		}
 		List<String> errors = new ArrayList<>();
@@ -1110,16 +1100,16 @@ public class AiSessionPurgeService {
 			execution.checkpoint("VERIFY_MEMORY");
 			MemoryCleanup cleanup = deleteMemoryKeys(execution, null, errors);
 			if (!cleanup.deleted() || !errors.isEmpty()) {
-				recordFailureQuietly(execution, "memory verify: " + String.join("; ", errors));
+				isRecordFailureQuietly(execution, "memory verify: " + String.join("; ", errors));
 				return new MemoryVerify(false, List.copyOf(errors));
 			}
 			execution.checkpoint("VERIFY_COMPLETE");
-			if (!this.pendingStore.complete(execution.claim())) {
+			if (!this.pendingStore.isCompleted(execution.claim())) {
 				return new MemoryVerify(false, List.of("pending: 已被另一轮销毁接管，未移除旧台账"));
 			}
 		}
 		catch (RuntimeException ex) {
-			recordFailureQuietly(execution, "memory verify: " + safeFailure());
+			isRecordFailureQuietly(execution, "memory verify: " + safeFailure());
 			return new MemoryVerify(false, List.of("pending: 复核失败（保留 pending 以便重试）：" + safeFailure()));
 		}
 		log.info("Session purge: memory re-verify completed (crash residue compensation) sessionId={} purgeId={}", sessionId, purgeId);
@@ -1146,7 +1136,7 @@ public class AiSessionPurgeService {
 		String sessionId = execution.sessionId();
 		List<String> targets;
 		try {
-			targets = knownStaging == null ? stagingKeys(sessionId) : knownStaging;
+			targets = ObjectUtils.getIfNull(knownStaging, () -> stagingKeys(sessionId));
 		}
 		catch (RuntimeException ex) {
 			errors.add("memory: staging 索引读取失败（未删净，可重试）：" + safeFailure());
@@ -1217,7 +1207,7 @@ public class AiSessionPurgeService {
 			}
 		}
 		String status = latest == null ? null : latest.getStatus();
-		if (latest != null && !belongsToCurrentIdentity(latest)) {
+		if (latest != null && !isBelongsToCurrentIdentity(latest)) {
 			// 归属复核：别的身份/无身份的 run 一律不动；warning 进结果可取证。
 			warnings.add("run[" + target.runId() + "]: 跳过非本身份（复核，snapshotIdentity="
 					+ latest.getTenantId() + ":" + latest.getUserId() + "）");
@@ -1387,30 +1377,37 @@ public class AiSessionPurgeService {
 				}
 				continue;
 			}
-			for (int index = 0; index < batch.size(); index++) {
-				TypedKey target = batch.get(index);
-				Object raw = results.get(index);
-				if (!(raw instanceof Number number)) {
-					errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 回包不可知（可重试）");
-					continue;
+			deleted += applyTypedKeyOutcomes(batch, results, errors, warnings);
+		}
+		return deleted;
+	}
+
+	private int applyTypedKeyOutcomes(List<TypedKey> batch, List<Object> results, List<String> errors,
+			List<String> warnings) {
+		int deleted = 0;
+		for (int index = 0; index < batch.size(); index++) {
+			TypedKey target = batch.get(index);
+			Object raw = results.get(index);
+			if (!(raw instanceof Number number)) {
+				errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 回包不可知（可重试）");
+				continue;
+			}
+			long outcome = number.longValue();
+			if (outcome == -1L) {
+				if (target.label().startsWith("transcript")) {
+					errors.add(target.label() + "[" + target.key() + "]: 键类型不符（期望 "
+							+ target.expected() + "），历史未删净并可重试");
 				}
-				long outcome = number.longValue();
-				if (outcome == -1L) {
-					if (target.label().startsWith("transcript")) {
-						errors.add(target.label() + "[" + target.key() + "]: 键类型不符（期望 "
-								+ target.expected() + "），历史未删净并可重试");
-					}
-					else {
-						warnings.add(target.label() + "[" + target.key() + "]: 键类型不符（期望 "
-								+ target.expected() + "），判定为前缀碰撞并跳过");
-					}
+				else {
+					warnings.add(target.label() + "[" + target.key() + "]: 键类型不符（期望 "
+							+ target.expected() + "），判定为前缀碰撞并跳过");
 				}
-				else if (outcome > 0L) {
-					deleted += (int) outcome;
-				}
-				else if (outcome < 0L) {
-					errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 失败码=" + outcome);
-				}
+			}
+			else if (outcome > 0L) {
+				deleted += (int) outcome;
+			}
+			else if (outcome < 0L) {
+				errors.add(target.label() + "[" + target.key() + "]: TYPE+DEL 失败码=" + outcome);
 			}
 		}
 		return deleted;
@@ -1469,7 +1466,7 @@ public class AiSessionPurgeService {
 	 *
 	 * <p>调用前提（由 {@link #executeDeletion} 保证）：本次删除主体<b>无 errors 且无 deferred</b>。
 	 * 只要有活跃 run 被 deferred 或任一删除失败，保留它们，重试才能继续枚举剩余轮次；
-	 * 提前删除会让 pending/guard 永久驻留（会话 410 且删不掉）。
+	 * 提前删除会让 pending/guard 在重试窗口内持续驻留（会话 410 且删不掉）。
 	 */
 	private SessionView deleteDiscoveryKeys(PurgeExecution execution, SessionView session, List<String> errors,
 			List<String> warnings) {
@@ -1498,6 +1495,40 @@ public class AiSessionPurgeService {
 		return new SessionView(currentDeleted, session.recordDeleted());
 	}
 
+	private int deleteAttachmentFile(FormAttachmentStore.Attachment attachment, List<String> errors,
+			List<String> failed) {
+		String storagePath = attachment.storagePath();
+		if (StringUtils.isBlank(storagePath)) {
+			return 0;
+		}
+		Path path;
+		try {
+			path = this.fileStorage.resolve(storagePath);
+		}
+		catch (IllegalArgumentException ex) {
+			errors.add("attachment[" + attachment.fileId() + "]: 登记路径非法");
+			failed.add(attachment.fileId());
+			return -1;
+		}
+		boolean existed = Files.exists(path);
+		try {
+			this.fileStorage.delete(storagePath);
+		}
+		catch (RuntimeException ex) {
+			errors.add("attachment[" + attachment.fileId() + "]: 文件删除失败（登记保留以便重试）："
+					+ storagePath);
+			failed.add(attachment.fileId());
+			return -1;
+		}
+		if (Files.exists(path)) {
+			errors.add("attachment[" + attachment.fileId() + "]: 文件删除失败（登记保留以便重试）："
+					+ storagePath);
+			failed.add(attachment.fileId());
+			return -1;
+		}
+		return existed ? 1 : 0;
+	}
+
 	private AttachmentView deleteAttachments(PurgeExecution execution, List<FormAttachmentStore.Attachment> list,
 			List<String> errors, List<String> warnings) {
 		String sessionId = execution.sessionId();
@@ -1512,37 +1543,11 @@ public class AiSessionPurgeService {
 				failed.add(attachment.fileId());
 				continue;
 			}
-			String storagePath = attachment.storagePath();
-			if (storagePath != null && !storagePath.isBlank()) {
-				Path path;
-				try {
-					path = this.fileStorage.resolve(storagePath);
-				}
-				catch (IllegalArgumentException ex) {
-					errors.add("attachment[" + attachment.fileId() + "]: 登记路径非法");
-					failed.add(attachment.fileId());
-					continue;
-				}
-				boolean existed = Files.exists(path);
-				try {
-					this.fileStorage.delete(storagePath);
-				}
-				catch (RuntimeException ex) {
-					errors.add("attachment[" + attachment.fileId() + "]: 文件删除失败（登记保留以便重试）："
-							+ storagePath);
-					failed.add(attachment.fileId());
-					continue;
-				}
-				if (Files.exists(path)) {
-					errors.add("attachment[" + attachment.fileId() + "]: 文件删除失败（登记保留以便重试）："
-							+ storagePath);
-					failed.add(attachment.fileId());
-					continue;
-				}
-				if (existed) {
-					files++;
-				}
+			int fileOutcome = deleteAttachmentFile(attachment, errors, failed);
+			if (fileOutcome < 0) {
+				continue;
 			}
+			files += fileOutcome;
 			try {
 				FormAttachmentStore.Attachment removed = this.attachments.deleteRegistration(attachment);
 				if (removed != null) {
@@ -1565,6 +1570,80 @@ public class AiSessionPurgeService {
 		return new AttachmentView(list.size(), registrations, files, List.copyOf(failed));
 	}
 
+	private PurgeResult finalizeDeletion(PurgeExecution execution, String purgeId, String actor,
+			Enumeration current, DeletionViews views, List<String> errors, List<String> warnings,
+			SessionPurgeDatabase.Deleted dbDeleted) {
+		String sessionId = execution.sessionId();
+		MemoryView memory = views.memory();
+		TranscriptView transcriptView = views.transcriptView();
+		List<RunView> runViews = views.runViews();
+		List<DeferredView> deferred = views.deferred();
+		ContextView context = views.context();
+		AttachmentView attachmentView = views.attachmentView();
+		SessionView session = completeDiscoveryIfReady(execution, views.session(), deferred, errors, warnings);
+		if (!errors.isEmpty() || !deferred.isEmpty()) {
+			recordIncompleteDeletion(execution, deferred, errors);
+		}
+		else {
+			scheduleDeletionVerification(execution, purgeId, actor, errors);
+		}
+		boolean complete = errors.isEmpty() && deferred.isEmpty();
+		PurgeResult result = new PurgeResult(sessionId, purgeId, complete, current.found(), null,
+				current.database(), dbDeleted, memory, transcriptView, runViews, deferred, context,
+				attachmentView, session, current.clientCleanup(), errors, warnings);
+		log.info("Session purge completed sessionId={} purgeId={} complete={} runs={} deferred={} errors={} "
+				+ "memoryExisted={} feedbackDeleted={} attachments={}/{}", sessionId, purgeId, complete, runViews.size(),
+				deferred.size(), errors.size(), memory.existed(), dbDeleted.feedbackRows(),
+				attachmentView.registrationsDeleted(), attachmentView.registered());
+		return result;
+	}
+
+	private SessionView completeDiscoveryIfReady(PurgeExecution execution, SessionView session,
+			List<DeferredView> deferred, List<String> errors, List<String> warnings) {
+		if (!errors.isEmpty() || !deferred.isEmpty()) {
+			return session;
+		}
+		execution.checkpoint("DELETE_DISCOVERY");
+		SessionView deleted = deleteDiscoveryKeys(execution, session, errors, warnings);
+		return deleted;
+	}
+
+	private void recordIncompleteDeletion(PurgeExecution execution, List<DeferredView> deferred, List<String> errors) {
+		String reason = !errors.isEmpty() ? errors.getFirst()
+				: "deferred runs: " + deferred.stream().map(DeferredView::runId).toList();
+		if (!isRecordFailureQuietly(execution, reason)) {
+			errors.add("pending: 已被另一轮销毁接管或无法更新（旧重试停止）");
+		}
+	}
+
+	private void scheduleDeletionVerification(PurgeExecution execution, String purgeId, String actor,
+			List<String> errors) {
+		String sessionId = execution.sessionId();
+		execution.checkpoint("FINALIZE");
+		boolean retained;
+		try {
+			retained = this.guard.isRetainedOrArmedIfOwner(sessionId, purgeId, actor, guardTtl());
+		}
+		catch (RuntimeException ex) {
+			retained = false;
+			errors.add("guard: 收尾失败（fail-closed，保留 pending）：" + safeFailure());
+		}
+		if (retained) {
+			try {
+				if (!this.pendingStore.isVerifyScheduled(execution.claim(),
+						System.currentTimeMillis() + MEMORY_VERIFY_DELAY_MS)) {
+					errors.add("pending: 已被另一轮销毁接管，未排程记忆复核");
+				}
+			}
+			catch (RuntimeException ex) {
+				errors.add("pending: 记忆复核排程失败（保留 pending 以便重试）：" + safeFailure());
+			}
+		}
+		else if (errors.isEmpty()) {
+			errors.add("guard: 未被当前 purgeId 持有（owner 已变更），保留 pending");
+		}
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private PurgeResult inProgress(String sessionId, String purgeId, SessionPurgePendingStore.Pending pending,
@@ -1578,8 +1657,7 @@ public class AiSessionPurgeService {
 	}
 
 	private Duration guardTtl() {
-		Duration ttl = this.properties.getSessionTtl();
-		return ttl == null || ttl.isZero() || ttl.isNegative() ? Duration.ofHours(24) : ttl;
+		return AiSessionService.sessionDataTtl(this.properties);
 	}
 
 	private static boolean isTerminal(String status) {
@@ -1653,7 +1731,7 @@ public class AiSessionPurgeService {
 
 		private void checkpoint(String phase) {
 			checkDeadline();
-			if (!AiSessionPurgeService.this.pendingStore.renew(this.claim, phase, System.currentTimeMillis(),
+			if (!AiSessionPurgeService.this.pendingStore.isRenewed(this.claim, phase, System.currentTimeMillis(),
 					EXECUTION_LEASE.toMillis())) {
 				throw new IllegalStateException("purge execution lease lost at phase " + phase);
 			}

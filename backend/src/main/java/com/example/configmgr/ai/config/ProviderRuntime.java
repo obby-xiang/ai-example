@@ -20,4 +20,10 @@ import org.springframework.ai.openai.api.OpenAiApi;
 public record ProviderRuntime(Long providerId, String providerCode, String modelId, String baseUrl,
         String completionsPath, String runtimeKey, OpenAiChatOptions options, OpenAiApi api, ChatModel chatModel,
         ChatClient chatClient) {
+
+    @Override
+    public String toString() {
+        return "ProviderRuntime[providerId=" + this.providerId + ", providerCode=" + this.providerCode
+                + ", modelId=" + this.modelId + "]";
+    }
 }

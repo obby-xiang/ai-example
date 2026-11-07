@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.kb;
 
 import com.example.configmgr.ai.tool.PromptDelimiters;
+import org.apache.commons.lang3.StringUtils;
 
 import java.text.Normalizer;
 import java.util.ArrayList;
@@ -104,7 +105,7 @@ public final class KbText {
         String lower = text.toLowerCase();
         int hit = -1;
         for (String term : terms) {
-            if (term == null || term.isBlank()) {
+            if (StringUtils.isBlank(term)) {
                 continue;
             }
             int idx = lower.indexOf(term.toLowerCase());
@@ -152,6 +153,10 @@ public final class KbText {
 
     /** 正文是否在 8000 闸内（{@link #wrap} 不会截断它）。 */
     public static boolean fits(String body) {
+        return canFit(body);
+    }
+
+    public static boolean canFit(String body) {
         return sanitize(body).length() <= bodyBudget();
     }
 
@@ -169,10 +174,10 @@ public final class KbText {
     public static List<String> distinctTerms(List<String> terms) {
         List<String> out = new ArrayList<>();
         if (terms == null) {
-            return out;
+            return out.isEmpty() ? List.of() : out;
         }
         for (String term : terms) {
-            if (term == null || term.isBlank()) {
+            if (StringUtils.isBlank(term)) {
                 continue;
             }
             String trimmed = term.strip();
@@ -183,6 +188,6 @@ public final class KbText {
                 break;
             }
         }
-        return out;
+        return out.isEmpty() ? List.of() : out;
     }
 }

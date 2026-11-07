@@ -1,11 +1,16 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.annotation.PreDestroy;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.RedisCallback;
@@ -49,7 +54,7 @@ import java.util.function.BooleanSupplier;
  * 某个 catch；调用方的契约是"拿不到租约 ⇒ 走进程内互斥"（单实例仍然正确）。
  * 不抛异常，是因为租约设施不可用不该把业务动作一起拖垮；</li>
  * <li><b>续租调度</b>（{@link #markDriving}）：内置<b>小型有界调度池</b>（固定 2~4 条线程，
- * {@link java.util.concurrent.ScheduledThreadPoolExecutor} + 守护线程）按 {@code app.ai.lease.renew-interval}（默认 10s）续租，
+ * {@link java.util.concurrent.ScheduledThreadPoolExecutor}，随 Bean 销毁关闭）按 {@code app.ai.lease.renew-interval}（默认 10s）续租，
  * 直到 {@link #release}；单条慢命令只占一条线程，不会让其它轮次的续租跟着过期。
  * 续租<b>确定丢租</b>（脚本判 {@code <epoch>|<owner>} 不匹配）才放弃进程内视图；设施不可确认
  * （{@link RenewOutcome#UNAVAILABLE}）保留视图并转只读，下一拍重试。</li>
@@ -233,6 +238,18 @@ public class LeaseService {
 			return 1
 			""", Long.class);
 
+	private static final RedisScript<Long> NEXT_EPOCH_SCRIPT = new DefaultRedisScript<>("""
+			local epoch = redis.call('INCR', KEYS[1])
+			local now = redis.call('TIME')
+			local floor = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+			if epoch < floor then
+			  epoch = floor
+			  redis.call('SET', KEYS[1], epoch)
+			end
+			redis.call('PEXPIRE', KEYS[1], ARGV[1])
+			return epoch
+			""", Long.class);
+
 	/**
 	 * 抢租的三态结论（I4）：{@code ACQUIRED} 拿到；{@code HELD_ELSEWHERE} 别人持有；
 	 * {@code UNAVAILABLE} 设施不可用（Redis 宕机/超时）。
@@ -263,8 +280,14 @@ public class LeaseService {
 		}
 
 		/** 是否拿到（含可重入）。 */
-		public boolean acquired() {
+		@JsonIgnore
+		public boolean isAcquired() {
 			return this.outcome == AcquireOutcome.ACQUIRED;
+		}
+
+		@JsonIgnore
+		public boolean acquired() {
+			return isAcquired();
 		}
 
 	}
@@ -312,8 +335,14 @@ public class LeaseService {
 		HELD, LOST, UNAVAILABLE, NEVER_HELD;
 
 		/** 是否必须停止推进（丢租或无法确认）。 */
-		public boolean readOnly() {
+		@JsonIgnore
+		public boolean isReadOnly() {
 			return this == LOST || this == UNAVAILABLE;
+		}
+
+		@JsonIgnore
+		public boolean readOnly() {
+			return isReadOnly();
 		}
 
 	}
@@ -371,6 +400,10 @@ public class LeaseService {
 	/** 正在续租的租约句柄（{@code key + "\0" + owner} → 关闭器）。 */
 	private final Map<String, AutoCloseable> driving = new ConcurrentHashMap<>();
 
+	private final Object drivingLock = new Object();
+
+	private static final int MAX_DRIVING_TASKS = 1024;
+
 	/**
 	 * 已结束的租约状态（{@code key + "\0" + owner} → {@link LeaseAuthority#LOST} /
 	 * {@link LeaseAuthority#UNAVAILABLE}）。
@@ -400,7 +433,7 @@ public class LeaseService {
 	 * 租约设施的最近观测健康度（{@link #authority} 的"从未持租"分支用）。
 	 *
 	 * <p>任何一次<b>设施级</b> Redis 异常都会把它置 false；任何一次成功命令置 true。false 时
-	 * {@link #facilityHealthy()} 会做一次有节流的 {@code PING} 自证 —— 正常路径零额外往返。
+	 * {@link #isFacilityHealthy()} 会做一次有节流的 {@code PING} 自证 —— 正常路径零额外往返。
 	 *
 	 * <p><b>本线程被取消/中断</b>引起的失败<b>不</b>动这位：那是线程局部信号，不是"设施坏了"
 	 * （见 {@link #isLocalThreadInterrupt(Throwable)}）。把它记到共享位上，一个被取消的轮次就能
@@ -408,7 +441,7 @@ public class LeaseService {
 	 */
 	private volatile boolean facilityHealthy = true;
 
-	/** 上次 {@code PING} 自证的时刻（毫秒；{@link #facilityHealthy()} 的节流锚点）。 */
+	/** 上次 {@code PING} 自证的时刻（毫秒；{@link #isFacilityHealthy()} 的节流锚点）。 */
 	private final java.util.concurrent.atomic.AtomicLong lastHealthProbeMs = new java.util.concurrent.atomic.AtomicLong();
 
 	/**
@@ -508,7 +541,7 @@ public class LeaseService {
 	 * {@link #acquire(String, Duration, String)} 的全局 token 口径。
 	 */
 	public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
-		if (fenceKey == null || fenceKey.isBlank()) {
+		if (StringUtils.isBlank(fenceKey)) {
 			throw new IllegalArgumentException("Run lease requires a fence: key=" + key);
 		}
 		return acquire(key, fenceKey, ttl, owner);
@@ -546,7 +579,7 @@ public class LeaseService {
 			}
 		}
 		String holder = owner(owner);
-		Duration effective = ttl == null || ttl.isZero() || ttl.isNegative() ? this.properties.getLease().getTtl() : ttl;
+		Duration effective = effectiveLeaseTtl(ttl);
 		String viewKey = viewKey(key, holder);
 		Lease already = this.held.get(viewKey);
 		if (already != null) {
@@ -633,7 +666,7 @@ public class LeaseService {
 		this.held.put(viewKey, current);
 		this.ended.remove(viewKey);
 		this.facilityHealthy = true;
-		return new AcquireResult(AcquireOutcome.ACQUIRED, current, createdFlag(raw));
+		return new AcquireResult(AcquireOutcome.ACQUIRED, current, isCreatedFlag(raw));
 	}
 
 	/**
@@ -694,8 +727,12 @@ public class LeaseService {
 	 * <p>兼容口（既有调用方只关心 true/false）。需要区分"确定丢租"与"设施不可用"的调用方用
 	 * {@link #renewState} —— 两者在布尔面上都是 false，但可写性/恢复路径不同。
 	 */
-	public boolean renew(Lease lease, Duration ttl) {
+	public boolean isRenewed(Lease lease, Duration ttl) {
 		return renewState(lease, ttl) == RenewOutcome.RENEWED;
+	}
+
+	public boolean renew(Lease lease, Duration ttl) {
+		return isRenewed(lease, ttl);
 	}
 
 	/**
@@ -714,7 +751,7 @@ public class LeaseService {
 		if (lease == null) {
 			return RenewOutcome.UNAVAILABLE;
 		}
-		Duration effective = ttl == null || ttl.isZero() || ttl.isNegative() ? this.properties.getLease().getTtl() : ttl;
+		Duration effective = effectiveLeaseTtl(ttl);
 		String viewKey = viewKey(lease.key(), lease.owner());
 		try {
 			Long renewed = this.redis.execute(RENEW_SCRIPT, List.of(lease.key()), lease.token(),
@@ -735,13 +772,15 @@ public class LeaseService {
 			if (hashTagOf(lease.key()) != null) {
 				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			}
-			log.debug("lease renew failed key={} epoch={}", lease.key(), lease.epoch(), ex);
+			if (LogSampling.canAcquire("lease-renew")) {
+				log.warn("lease renew failed key={} epoch={}", lease.key(), lease.epoch(), ex);
+			}
 			return RenewOutcome.UNAVAILABLE;
 		}
 	}
 
 	/** 释放：只有现值仍是自己那一任才删（错 epoch / 错 owner 不删别人的租约）。 */
-	public boolean release(Lease lease) {
+	public boolean isReleased(Lease lease) {
 		if (lease == null) {
 			return false;
 		}
@@ -782,20 +821,34 @@ public class LeaseService {
 			else {
 				markEnded(viewKey, LeaseAuthority.UNAVAILABLE);
 			}
-			log.debug("lease release failed key={} epoch={}", lease.key(), lease.epoch(), ex);
+			if (LogSampling.canAcquire("lease-release")) {
+				log.warn("lease release failed key={} epoch={}", lease.key(), lease.epoch(), ex);
+			}
 			return false;
 		}
 	}
 
-	/** 释放"本进程持有的"租约（未持有返回 false，不触 Redis）。 */
-	public boolean releaseIfHeld(String key) {
-		return releaseIfHeld(key, this.instanceId);
+	public boolean release(Lease lease) {
+		return isReleased(lease);
 	}
 
-	/** 带 owner 的 {@link #releaseIfHeld(String)}（只放这个 owner 那一任）。 */
-	public boolean releaseIfHeld(String key, String owner) {
+	/** 释放"本进程持有的"租约（未持有返回 false，不触 Redis）。 */
+	public boolean isReleasedIfHeld(String key) {
+		return isReleasedIfHeld(key, this.instanceId);
+	}
+
+	/** 带 owner 的 {@link #isReleasedIfHeld(String)}（只放这个 owner 那一任）。 */
+	public boolean isReleasedIfHeld(String key, String owner) {
 		Lease lease = key == null ? null : this.held.get(viewKey(key, owner(owner)));
-		return lease != null && release(lease);
+		return lease != null && isReleased(lease);
+	}
+
+	public boolean releaseIfHeld(String key) {
+		return isReleasedIfHeld(key);
+	}
+
+	public boolean releaseIfHeld(String key, String owner) {
+		return isReleasedIfHeld(key, owner);
 	}
 
 	/** 进程内所有权视图（0 = 未持有）。fencing 写与 {@code ai:claim:} 值都读它。 */
@@ -836,7 +889,7 @@ public class LeaseService {
 	 *     但那一拍不能写；</li>
 	 * <li>视图在 ⇒ HELD；</li>
 	 * <li>没有墓碑也没有视图 ⇒ 从未持租：仅当设施能自证正常时放行普通写
-	 *     （{@link #facilityHealthy()}）。</li>
+	 *     （{@link #isFacilityHealthy()}）。</li>
 	 * </ol>
 	 *
 	 * <p>本方法<b>不抛异常</b>：它被热路径（每帧/每笔写）调用，判定必须总能给出结论。
@@ -856,7 +909,7 @@ public class LeaseService {
 		if (this.held.containsKey(viewKey)) {
 			return LeaseAuthority.HELD;
 		}
-		return facilityHealthy() ? LeaseAuthority.NEVER_HELD : LeaseAuthority.UNAVAILABLE;
+		return isFacilityHealthy() ? LeaseAuthority.NEVER_HELD : LeaseAuthority.UNAVAILABLE;
 	}
 
 	/**
@@ -876,7 +929,7 @@ public class LeaseService {
 	 * 调用方（通常是别的线程）立刻重探，本次仍回答"不可知 ⇒ 只读"。否则一个被取消的线程就能
 	 * 替整个实例宣布"设施坏了"。
 	 */
-	private boolean facilityHealthy() {
+	private boolean isFacilityHealthy() {
 		if (this.facilityHealthy) {
 			return true;
 		}
@@ -915,8 +968,10 @@ public class LeaseService {
 	 */
 	private void markFacilityUnhealthy(Throwable cause) {
 		if (isLocalThreadInterrupt(cause)) {
-			log.debug("facility health flag unchanged: failure caused by "
-					+ "thread interrupt (local signal, not facility fault)", cause);
+			if (LogSampling.canAcquire("lease-local-interrupt-health")) {
+				log.warn("facility health flag unchanged: failure caused by "
+						+ "thread interrupt (local signal, not facility fault)", cause);
+			}
 			return;
 		}
 		this.facilityHealthy = false;
@@ -1016,15 +1071,20 @@ public class LeaseService {
 		if (lease == null) {
 			return;
 		}
-		BooleanSupplier check = alive == null ? ALWAYS_ALIVE : alive;
+		BooleanSupplier check = ObjectUtils.defaultIfNull(alive, ALWAYS_ALIVE);
 		BooleanSupplier throttled = throttled(check);
 		Duration interval = this.properties.getLease().getRenewInterval();
-		// R9：登记用 computeIfAbsent（原子）—— 旧实现是"containsKey 判空 → schedule → put"，
-		// 两个线程同时来到会各自排一个续租任务，后 put 的那个把先前的 handle 覆盖成<b>孤儿任务</b>
-		// （永远取消不掉，release 之后还在续租）。
-		// 批③a：登记键 = (key, owner) —— 同键不同 owner 各有一个续租任务，互不覆盖。
-		this.driving.computeIfAbsent(viewKey(lease.key(), lease.owner()),
-				key -> this.scheduler.schedule(() -> renewTick(lease, throttled, identity, renewTtl), interval));
+		String viewKey = viewKey(lease.key(), lease.owner());
+		synchronized (this.drivingLock) {
+			if (this.driving.containsKey(viewKey)) {
+				return;
+			}
+			if (this.driving.size() >= MAX_DRIVING_TASKS) {
+				throw new IllegalStateException("Renew task capacity exhausted (max=" + MAX_DRIVING_TASKS + ")");
+			}
+			AutoCloseable handle = this.scheduler.schedule(() -> renewTick(lease, throttled, identity, renewTtl), interval);
+			this.driving.put(viewKey, handle);
+		}
 	}
 
 	/**
@@ -1098,15 +1158,19 @@ public class LeaseService {
 	}
 
 	private void stopDrivingExact(String viewKey) {
-		AutoCloseable handle = viewKey == null ? null : this.driving.remove(viewKey);
-		if (handle == null) {
-			return;
-		}
-		try {
-			handle.close();
-		}
-		catch (Exception ex) {
-			log.debug("stop renew task failed key={}", viewKey, ex);
+		synchronized (this.drivingLock) {
+			AutoCloseable handle = viewKey == null ? null : this.driving.remove(viewKey);
+			if (handle == null) {
+				return;
+			}
+			try {
+				handle.close();
+			}
+			catch (Exception ex) {
+				if (LogSampling.canAcquire("lease-stop-renew")) {
+					log.warn("stop renew task failed key={}", viewKey, ex);
+				}
+			}
 		}
 	}
 
@@ -1126,7 +1190,9 @@ public class LeaseService {
 				driving = alive.getAsBoolean();
 			}
 			catch (RuntimeException ex) {
-				log.debug("renew liveness probe failed key={} (assuming alive, renewing as usual)", lease.key(), ex);
+				if (LogSampling.canAcquire("lease-liveness-probe")) {
+					log.warn("renew liveness probe failed key={} (assuming alive, renewing as usual)", lease.key(), ex);
+				}
 				driving = true;
 			}
 			if (!driving) {
@@ -1157,7 +1223,9 @@ public class LeaseService {
 		}
 		catch (Exception ex) {
 			// 续租是后台动作：单拍失败不杀任务，下一拍再试（TTL 三倍于间隔，容忍两拍失败）
-			log.debug("renew task failed key={} epoch={}", lease.key(), lease.epoch(), ex);
+			if (LogSampling.canAcquire("lease-renew-tick")) {
+				log.warn("renew task failed key={} epoch={}", lease.key(), lease.epoch(), ex);
+			}
 		}
 	}
 
@@ -1179,7 +1247,9 @@ public class LeaseService {
 			return Boolean.TRUE.equals(this.redis.hasKey(key));
 		}
 		catch (Exception ex) {
-			log.debug("lease read-only probe failed key={}", key, ex);
+			if (LogSampling.canAcquire("lease-read-only-probe")) {
+				log.warn("lease read-only probe failed key={}", key, ex);
+			}
 			return false;
 		}
 	}
@@ -1221,7 +1291,7 @@ public class LeaseService {
 	 * {@code null} = <b>这次失败只是本线程被中断</b>（局部信号，不作设施结论，见
 	 * {@link #isLocalThreadInterrupt(Throwable)}）。
 	 *
-	 * <p>为什么要三态：探针的结论会被 {@link #facilityHealthy()} 写进 1s 节流的 {@code lastProbeOk}。
+	 * <p>为什么要三态：探针的结论会被 {@link #isFacilityHealthy()} 写进 1s 节流的 {@code lastProbeOk}。
 	 * 把"中断线程上的 PING 失败"当成设施结论，等于让一个被取消的线程替整个实例宣布"设施坏了"。
 	 */
 	private Boolean probeFacility() {
@@ -1235,7 +1305,9 @@ public class LeaseService {
 		}
 		catch (Exception ex) {
 			markFacilityUnhealthy(ex);
-			log.debug("lease probe failed", ex);
+			if (LogSampling.canAcquire("lease-facility-probe")) {
+				log.warn("lease probe failed", ex);
+			}
 			return isLocalThreadInterrupt(ex) ? null : Boolean.FALSE;
 		}
 	}
@@ -1269,7 +1341,7 @@ public class LeaseService {
 
 	/** owner 归一：缺省（null/空白）= 本实例标识（批②的旧行为）。 */
 	private String owner(String owner) {
-		return owner == null || owner.isBlank() ? this.instanceId : owner;
+		return StringUtils.defaultIfBlank(owner, this.instanceId);
 	}
 
 	/**
@@ -1309,29 +1381,32 @@ public class LeaseService {
 		return key.substring(open, close + 1);
 	}
 
-	/**
-	 * 计数器 TTL（毫秒）：与 fence 同寿（{@code app.ai.session-ttl}）。
-	 *
-	 * <p>为什么给 TTL 而不是像旧的全局键那样永久：per-run 计数器是"一轮一个键"，永久留存会随轮次
-	 * 无限增长。它只在 {@code fence} 还活着时才需要活着（fence 比它先死于同一次"无人读"的过期），
-	 * 所以同一 TTL + 同一续期面（{@code SessionKeyRegistry.Renewal.READ}）就够；轮次回收
-	 * （{@code RunStore#deleteRun}）另行显式删除。
-	 */
+	/** 租约 TTL：非法值回退配置或 30 秒默认值，所有租约最长 7 天。 */
+	@NonNull
+	private Duration effectiveLeaseTtl(Duration requested) {
+		Duration configured = requested == null || requested.isZero() || requested.isNegative()
+				? this.properties.getLease().getTtl() : requested;
+		Duration effective = configured == null || configured.isZero() || configured.isNegative()
+				? Duration.ofSeconds(30) : configured;
+		Duration maxTtl = Duration.ofDays(7);
+		return effective.compareTo(maxTtl) > 0 ? maxTtl : effective;
+	}
+
+	/** 计数器 TTL = min(session-ttl, 7 天)，至少 1ms；真实取号时续期。 */
 	private long epochTtlMillis() {
 		Duration sessionTtl = this.properties.getSessionTtl();
 		// 下限 1ms：{@code session-ttl} 被配成 0/负时，{@code PEXPIRE 0} 会当场删掉计数器 ——
 		// 那正是 N-1 要消灭的"计数器比 fence 先死"。与其它 TTL 口径统一为"至少 1ms"。
-		return Math.max(1L, (sessionTtl == null ? Duration.ofHours(24) : sessionTtl).toMillis());
+		long effective = Math.max(1L, ObjectUtils.getIfNull(sessionTtl, () -> Duration.ofHours(24)).toMillis());
+		return Math.min(effective, Duration.ofDays(7).toMillis());
 	}
 
 	/**
-	 * 全局取号（<b>仅资源锁用</b>）：{@code INCR ai:lease:epoch}。
-	 *
-	 * <p><b>不再参与 fencing</b>：FENCED_SET / 认领的比较对象是同 run 的 per-slot 号
-	 * （{@link #EPOCH_PREFIX}）。这里保留"号只增不减"只为资源锁 token 的可读性与运维观测。
+	 * 全局取号（<b>仅资源锁用</b>）：{@code INCR + TIME 下界 + PEXPIRE} 同一原子脚本。
+	 * 计数器到期重建时以当前毫秒防止 token 重用；资源锁 epoch 仍不参与 fencing。
 	 */
 	private long nextEpoch() {
-		Long epoch = this.redis.opsForValue().increment(EPOCH_KEY);
+		Long epoch = this.redis.execute(NEXT_EPOCH_SCRIPT, List.of(EPOCH_KEY), String.valueOf(epochTtlMillis()));
 		if (epoch == null || epoch <= 0L) {
 			throw new IllegalStateException("Failed to obtain epoch (INCR " + EPOCH_KEY + " returned " + epoch + ")");
 		}
@@ -1357,7 +1432,7 @@ public class LeaseService {
 	}
 
 	/** 抢租脚本返回值的"是否由我创建"段（{@code |1} = 创建；缺段/旧形态一律 false）。 */
-	private static boolean createdFlag(String raw) {
+	private static boolean isCreatedFlag(String raw) {
 		if (raw == null) {
 			return false;
 		}
@@ -1367,38 +1442,30 @@ public class LeaseService {
 	}
 
 	/**
-	 * 默认续租调度：<b>小型有界线程池</b>（固定线程数，守护线程，不阻止 JVM 退出），首次续租在
+	 * 默认续租调度：<b>小型有界线程池</b>（固定线程数，随 Bean 销毁关闭），首次续租在
 	 * {@code interval} 之后。
 	 *
 	 * <h2>为什么不是单线程</h2>
 	 * 旧实现是 {@code newSingleThreadScheduledExecutor}：所有租约的续租任务共用一条线程。
 	 * 一个 Redis 命令卡到 {@code spring.data.redis.timeout}（2s）时，<b>其它所有轮次</b>的续租都被
 	 * 排在它后面 —— 一轮的网络抖动会波及其它轮的租约到期（丢租、被接管，双驱动/双跑）。
-	 * 改成固定 2~4 条线程后，单条慢命令只占一条线程，其它租约照常续期。
+	 * 固定 2 条线程后，单条慢命令只占一条线程，其它租约照常续期。
 	 *
 	 * <h2>为什么仍然是"有界"</h2>
-	 * 线程数固定（不随租约数增长）；租约任务本身由 {@code ScheduledThreadPoolExecutor} 的延迟队列承载
-	 * —— 任务数 = 本进程持有的租约数（业务上界），且同一任务不会与自己并发（fixed-rate 的下一次在
-	 * 上一次结束后才排）。{@code setRemoveOnCancelPolicy} 让 {@code release} 后的任务立刻出队，
-	 * 避免短命租约在队列里留垃圾。
+	 * 线程数固定，续租登记在同一监视器内限制为 {@link #MAX_DRIVING_TASKS}，满额拒绝且不产生孤儿任务。
+	 * {@code setRemoveOnCancelPolicy} 让 {@code release} 后的任务立刻出队，避免短命租约留垃圾。
 	 */
 	static final class DefaultRenewScheduler implements RenewScheduler {
 
-		/** 线程数上限：续租是 I/O 等待型，2~4 条足够覆盖"个别命令卡住"的场景。 */
-		private static final int MAX_THREADS = 4;
-
-		private static final java.util.concurrent.atomic.AtomicInteger THREAD_SEQ = new java.util.concurrent.atomic.AtomicInteger();
+		private static final int RENEW_THREADS = 2;
 
 		private final ScheduledExecutorService executor;
 
 		DefaultRenewScheduler() {
-			int threads = Math.max(2, Math.min(MAX_THREADS, Runtime.getRuntime().availableProcessors()));
 			java.util.concurrent.ScheduledThreadPoolExecutor pool = new java.util.concurrent.ScheduledThreadPoolExecutor(
-					threads, runnable -> {
-						Thread thread = new Thread(runnable, "ai-lease-renew-" + THREAD_SEQ.incrementAndGet());
-						thread.setDaemon(true);
-						return thread;
-					});
+					RENEW_THREADS, java.util.concurrent.Executors.defaultThreadFactory());
+			pool.setKeepAliveTime(60L, TimeUnit.SECONDS);
+			pool.allowCoreThreadTimeOut(true);
 			// 取消即出队（否则每次 release 都留下一个空转的已取消任务直到原定触发时刻）。
 			pool.setRemoveOnCancelPolicy(true);
 			// 停机后不再执行剩余延迟任务（与旧实现的 shutdownNow 语义一致）。

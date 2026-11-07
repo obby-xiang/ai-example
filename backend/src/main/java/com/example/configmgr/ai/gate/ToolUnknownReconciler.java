@@ -3,7 +3,11 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -71,18 +75,18 @@ public class ToolUnknownReconciler {
 			return null;
 		}
 		if (PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-			log.debug("UNKNOWN reconciliation skips frontend channel runId={} toolCallId={}", runId, pending.getToolCallId());
+			if (log.isDebugEnabled()) log.debug("UNKNOWN reconciliation skips frontend channel runId={} toolCallId={}", runId, pending.getToolCallId());
 			return null;
 		}
 		String toolCallId = pending.getToolCallId();
 
 		// ① 台账：唯一能给出确定结局的一跳（空表 = 没查到，不是"命中一条空记录"）
 		Map<String, Object> ledger = this.store.idemFor(runId, toolCallId);
-		if (ledger == null || ledger.isEmpty()) {
+		if (MapUtils.isEmpty(ledger)) {
 			// 旧读口兜底：真实 idemFor 内部已回落，这里只覆盖只桩了 ledgerFor 的轻装配面
 			ledger = this.store.ledgerFor(runId, toolCallId);
 		}
-		if (ledger != null && !ledger.isEmpty()) {
+		if (MapUtils.isNotEmpty(ledger)) {
 			String executedBy = textOf(ledger.get("executedBy"));
 			ToolOutcome outcome = ToolOutcome.fromWire(textOf(ledger.get("outcome")));
 			String resultText = textOf(ledger.get("resultText"));
@@ -90,12 +94,11 @@ public class ToolUnknownReconciler {
 				log.info("UNKNOWN reconciliation hit the ledger runId={} toolCallId={} outcome={}", runId, toolCallId,
 						outcome.wire());
 				return new Reconciliation(true, outcome, textOf(ledger.get("code")),
-						resultText == null ? "" : resultText, executedBy);
+						StringUtils.defaultString(resultText), executedBy);
 			}
 			// 台账命中但结局本身就是 unknown：保持 UNKNOWN（不能把"没判定出来"写成成功）
-			String text = resultText == null || resultText.isBlank()
-					? "台账记录存在但结局为 UNKNOWN：无法判定该调用是否已执行，需人工对账。"
-					: resultText;
+			String text = StringUtils.defaultIfBlank(resultText,
+					"台账记录存在但结局为 UNKNOWN：无法判定该调用是否已执行，需人工对账。");
 			log.warn("UNKNOWN reconciliation hit the ledger but the outcome is still unknown (stays UNKNOWN) runId={} toolCallId={}", runId,
 					toolCallId);
 			return new Reconciliation(true, ToolOutcome.UNKNOWN, null, text, executedBy);
@@ -130,7 +133,7 @@ public class ToolUnknownReconciler {
 	}
 
 	private static String textOf(Object value) {
-		return value == null ? null : String.valueOf(value);
+		return ObjectUtils.toString(value, (String) null);
 	}
 
 	/**
@@ -146,8 +149,14 @@ public class ToolUnknownReconciler {
 			String executedBy) {
 
 		/** 是否收敛为确定结局（只有这一种情况允许覆盖条目的 outcome）。 */
-		public boolean adopted() {
+		@JsonIgnore
+		public boolean isAdopted() {
 			return this.ledgerHit && this.outcome != null && this.outcome != ToolOutcome.UNKNOWN;
+		}
+
+		@JsonIgnore
+		public boolean adopted() {
+			return isAdopted();
 		}
 
 	}

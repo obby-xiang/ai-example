@@ -3,6 +3,7 @@ package com.example.configmgr.ai.tool;
 import com.example.configmgr.data.service.ConditionOperators;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -73,7 +74,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
         }
         JsonNode root;
         try {
-            root = mapper.readTree(argumentsJson == null ? "" : argumentsJson);
+            root = mapper.readTree(StringUtils.defaultString(argumentsJson));
         }
         catch (Exception error) {
             return reject("入参不是合法 JSON。");
@@ -95,7 +96,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
     public Verdict inspectArguments(String argumentsJson) {
         JsonNode root;
         try {
-            root = mapper.readTree(argumentsJson == null ? "" : argumentsJson);
+            root = mapper.readTree(StringUtils.defaultString(argumentsJson));
         }
         catch (Exception error) {
             return reject("入参不是合法 JSON。");
@@ -118,25 +119,14 @@ public class SheetWriteGuard implements FrontendToolGuard {
     private Verdict inspectFor(String toolName, JsonNode root) {
         List<String> reasons = new ArrayList<>();
         String defCode = text(root.get("defCode"));
-        if (defCode == null || defCode.isBlank()) {
+        if (StringUtils.isBlank(defCode)) {
             reasons.add("defCode 必填（要操作哪个配置的表格）。");
         }
         if ("undo_last_sheet_edit".equals(toolName)) {
-            // 撤销只认 defCode：带了写工具的参数说明工具名用错（或模型在猜）——
-            // 旧实现会把它当"撤销"静默放行，随后前端才拒，属"闸门放行非法入参"的窄缝。
-            for (String key : List.of("set", "search", "rules", "columnCodes", "commit", "match", "predicate",
-                    "scope", "preview")) {
-                if (root.has(key)) {
-                    reasons.add("undo_last_sheet_edit 只接受 defCode，不接受 `" + key
-                            + "`（本次未下发；要改表格请用 replace_values / update_rows / normalize_column）。");
-                    break;
-                }
-            }
-            return reasons.isEmpty() ? Verdict.accept()
-                    : Verdict.reject("SHEET_ARGUMENTS_REJECTED", "表格写工具入参不合法，未下发前端、未挂起。", reasons);
+            return inspectUndo(root, reasons);
         }
         String scope = text(root.get("scope"));
-        if (scope != null && !scope.isBlank() && !SCOPES.contains(scope)) {
+        if (StringUtils.isNotBlank(scope) && !SCOPES.contains(scope)) {
             reasons.add("scope 只能是 selection/sheet/columns/rows/predicate，实际为 " + scope + "。");
         }
         checkPredicate(root.get("predicate"), reasons);
@@ -144,7 +134,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
             checkColumns(root.get("columnCodes"), reasons);
             checkMatch(root, reasons);
             String search = text(root.get("search"));
-            if (search == null || search.isEmpty()) {
+            if (StringUtils.isEmpty(search)) {
                 reasons.add("search 必填且不能为空。");
             }
             checkPreview(root.get("preview"), reasons);
@@ -152,7 +142,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
         else if ("update_rows".equals(toolName)) {
             checkSet(root.get("set"), reasons);
             boolean predicateScope = "predicate".equals(text(root.get("scope")))
-                    || text(root.get("scope")) == null || text(root.get("scope")).isBlank();
+                    || StringUtils.isBlank(text(root.get("scope")));
             if (predicateScope && !hasFields(root.get("predicate"))) {
                 reasons.add("scope=predicate（默认）时必须给 predicate（字段条件），不猜条件。");
             }
@@ -167,10 +157,24 @@ public class SheetWriteGuard implements FrontendToolGuard {
                 : Verdict.reject("SHEET_ARGUMENTS_REJECTED", "表格写工具入参不合法，未下发前端、未挂起。", reasons);
     }
 
+    private static Verdict inspectUndo(JsonNode root, List<String> reasons) {
+        // 撤销只认 defCode：携带写工具参数说明工具名用错，不得静默放行。
+        for (String key : List.of("set", "search", "rules", "columnCodes", "commit", "match", "predicate",
+                "scope", "preview")) {
+            if (root.has(key)) {
+                reasons.add("undo_last_sheet_edit 只接受 defCode，不接受 `" + key
+                        + "`（本次未下发；要改表格请用 replace_values / update_rows / normalize_column）。");
+                break;
+            }
+        }
+        return reasons.isEmpty() ? Verdict.accept()
+                : Verdict.reject("SHEET_ARGUMENTS_REJECTED", "表格写工具入参不合法，未下发前端、未挂起。", reasons);
+    }
+
     @Override
     public Verdict inspectResult(String argumentsJson, String resultJson) {
-        String result = resultJson == null ? "" : resultJson;
-        if (result.isBlank()) {
+        String result = StringUtils.defaultString(resultJson);
+        if (StringUtils.isBlank(result)) {
             return Verdict.reject("SHEET_RESULT_REJECTED", "回灌结果为空，拒绝消费挂起。",
                     List.of("result 不能为空。"));
         }
@@ -205,11 +209,11 @@ public class SheetWriteGuard implements FrontendToolGuard {
                 continue;
             }
             String fieldCode = text(field.get("fieldCode"));
-            if (fieldCode == null || fieldCode.isBlank()) {
+            if (StringUtils.isBlank(fieldCode)) {
                 reasons.add("predicate.fields[" + index + "].fieldCode 必填。");
             }
             String operator = text(field.get("operator"));
-            if (operator == null || !OPERATORS.contains(operator.toUpperCase())) {
+            if (operator == null || !OPERATORS.contains(StringUtils.upperCase(operator))) {
                 reasons.add("predicate.fields[" + index + "].operator 不在 11 个既有算子内（实际 " + operator + "）。");
                 continue;
             }
@@ -228,7 +232,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
             reasons.add("columnCodes 最多 5 列，实际 " + columns.size() + " 列。");
         }
         for (JsonNode column : columns) {
-            if (text(column) == null || text(column).isBlank()) {
+            if (StringUtils.isBlank(text(column))) {
                 reasons.add("columnCodes 的每一项都必须是非空字段编码。");
                 break;
             }
@@ -253,7 +257,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
                 reasons.add("match 只能给一个匹配方式（数组形态只允许单元素）。");
             }
         }
-        else if (value != null && !value.isBlank() && !MATCH_MODES.contains(value)) {
+        else if (StringUtils.isNotBlank(value) && !MATCH_MODES.contains(value)) {
             reasons.add("match 只支持 wholeCell/contains/prefix/wildcard/regex，实际为 " + value + "。");
         }
         else {
@@ -265,7 +269,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
         }
         if (regex) {
             String search = text(root.get("search"));
-            if (search == null || search.isEmpty()) {
+            if (StringUtils.isEmpty(search)) {
                 reasons.add("match=regex 时 search（正则原文）必填。");
             }
             else {
@@ -295,11 +299,11 @@ public class SheetWriteGuard implements FrontendToolGuard {
                 continue;
             }
             String columnCode = text(item.get("columnCode"));
-            if (columnCode == null || columnCode.isBlank()) {
+            if (StringUtils.isBlank(columnCode)) {
                 reasons.add("set[" + index + "].columnCode 必填。");
             }
             String mode = text(item.get("mode"));
-            if (mode != null && !mode.isBlank() && !WRITE_MODES.contains(mode)) {
+            if (StringUtils.isNotBlank(mode) && !WRITE_MODES.contains(mode)) {
                 reasons.add("set[" + index + "].mode 只能是 literal/fillDown/fillSeries/template，实际为 " + mode + "。");
             }
         }
@@ -340,7 +344,7 @@ public class SheetWriteGuard implements FrontendToolGuard {
 
     private void checkPreview(JsonNode preview, List<String> reasons) {
         String value = text(preview);
-        if (value != null && !value.isBlank() && !PREVIEWS.contains(value)) {
+        if (StringUtils.isNotBlank(value) && !PREVIEWS.contains(value)) {
             reasons.add("preview 只能是 count/sample-diff/full-diff，实际为 " + value + "。");
         }
     }

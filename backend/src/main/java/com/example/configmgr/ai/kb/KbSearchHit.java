@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.kb;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.List;
 
 /**
@@ -15,8 +17,9 @@ import java.util.List;
  * @param updatedAt 更新时间
  * @param match     命中档 high/medium/low
  */
-public record KbSearchHit(String docId, String title, String section, String snippet,
-        String updatedAt, String match) {
+public record KbSearchHit(@JsonProperty("docId") String docId, @JsonProperty("title") String title,
+        @JsonProperty("section") String section, @JsonProperty("snippet") String snippet,
+        @JsonProperty("updatedAt") String updatedAt, @JsonProperty("match") String match) {
 
     public static final String HIGH = "high";
     public static final String MEDIUM = "medium";

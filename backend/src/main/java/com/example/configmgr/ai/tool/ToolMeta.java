@@ -1,6 +1,9 @@
 package com.example.configmgr.ai.tool;
 
-import lombok.Data;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 import org.springframework.ai.tool.ToolCallback;
 
 import java.util.List;
@@ -8,20 +11,36 @@ import java.util.List;
 /**
  * Metadata for a registered tool.
  */
-@Data
+@Getter
+@Setter
+@ToString(onlyExplicitlyIncluded = true)
 public class ToolMeta {
+    @JsonProperty("name")
+    @ToString.Include
     private String name;
+    @JsonProperty("displayName")
     private String displayName; // 兼容字段：不再由 description 截断派生（见 ToolRegistry#applyOverrides）
     /** UI 用 i18n key（`tool.<toolKey>.title`）；前端据此渲染，displayName 只作诊断兜底。 */
+    @JsonProperty("titleKey")
     private String titleKey;
     /** UI 用中文标题（来自 YAML `title`；缺省空 ⇒ 前端回落 i18n / 工具名）。 */
+    @JsonProperty("title")
     private String title;
     /** 模型侧语言标签（zh / en），与用户 locale 无关。 */
+    @JsonProperty("lang")
     private String lang;
+    @JsonProperty("scopePatterns")
     private String[] scopePatterns;
+    @JsonProperty("riskLevel")
+    @ToString.Include
     private RiskLevel riskLevel;
+    @JsonProperty("channel")
+    @ToString.Include
     private Channel channel;
+    @JsonProperty("category")
+    @ToString.Include
     private Category category;
+    @JsonProperty("callback")
     private ToolCallback callback;
 
     public enum RiskLevel {

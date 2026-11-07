@@ -1,11 +1,14 @@
 package com.example.configmgr.ai.slot;
 
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -34,14 +37,14 @@ public class DefinitionSlotCatalog implements DefinitionCatalog {
 	@Override
 	public List<SlotDefinition> list() {
 		List<ConfigDefinition> definitions = this.definitionService.findAll();
-		if (definitions == null || definitions.isEmpty()) {
+		if (CollectionUtils.isEmpty(definitions)) {
 			return List.of();
 		}
 		List<SlotDefinition> out = new ArrayList<>(definitions.size());
 		for (ConfigDefinition definition : definitions) {
 			out.add(toSlot(definition));
 		}
-		return out;
+		return out.isEmpty() ? List.of() : out;
 	}
 
 	private SlotDefinition toSlot(ConfigDefinition definition) {
@@ -56,7 +59,7 @@ public class DefinitionSlotCatalog implements DefinitionCatalog {
 	}
 
 	private List<String> optionValues(String optionsJson) {
-		if (optionsJson == null || optionsJson.isBlank()) {
+		if (StringUtils.isBlank(optionsJson)) {
 			return List.of();
 		}
 		try {
@@ -67,14 +70,16 @@ public class DefinitionSlotCatalog implements DefinitionCatalog {
 			List<String> values = new ArrayList<>();
 			for (JsonNode option : root) {
 				String value = option.path("value").asText(null);
-				if (value != null && !value.isBlank()) {
+				if (StringUtils.isNotBlank(value)) {
 					values.add(value);
 				}
 			}
-			return values;
+			return values.isEmpty() ? List.of() : values;
 		}
 		catch (Exception ex) {
-			log.debug("could not parse options_json; treating options as unenumerable", ex);
+			if (LogSampling.canAcquire("slot-options-parse")) {
+				log.warn("could not parse options_json; treating options as unenumerable", ex);
+			}
 			return List.of();
 		}
 	}

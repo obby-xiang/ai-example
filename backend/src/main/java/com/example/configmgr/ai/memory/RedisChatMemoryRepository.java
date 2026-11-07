@@ -4,10 +4,16 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.function.Function;
 
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -26,6 +32,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.session.SessionPurgeGuard;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 
@@ -259,7 +266,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 
 	private volatile Duration ttl;
 
-	private volatile java.util.function.Function<String, Set<String>> activeRunLookup;
+	private volatile Function<String, Set<String>> activeRunLookup;
 
 	public RedisChatMemoryRepository(StringRedisTemplate redis, MessageJsonCodec codec, Duration ttl) {
 		this(redis, codec, ttl, null);
@@ -271,21 +278,21 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	}
 
 	public RedisChatMemoryRepository(StringRedisTemplate redis, MessageJsonCodec codec, Duration ttl,
-			SessionPurgeGuard purgeGuard, java.util.function.Function<String, Set<String>> activeRunLookup) {
+			SessionPurgeGuard purgeGuard, Function<String, Set<String>> activeRunLookup) {
 		this.redis = redis;
 		this.codec = codec;
-		this.ttl = ttl;
+		this.ttl = AiProperties.effectiveSessionTtl(ttl);
 		this.purgeGuard = purgeGuard;
 		this.activeRunLookup = activeRunLookup;
 	}
 
-	public void setActiveRunLookup(java.util.function.Function<String, Set<String>> activeRunLookup) {
+	public void setActiveRunLookup(Function<String, Set<String>> activeRunLookup) {
 		this.activeRunLookup = activeRunLookup;
 	}
 
 	/** 运行期覆盖默认 TTL（V-c2 短 TTL 实验使用）。 */
 	public void setTtl(Duration ttl) {
-		this.ttl = ttl;
+		this.ttl = AiProperties.effectiveSessionTtl(ttl);
 	}
 
 	public Duration getTtl() {
@@ -332,10 +339,10 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 
 	public List<String> stagingKeys(String conversationId) {
 		Set<String> tokens = this.redis.opsForSet().members(stagingIndexKey(conversationId));
-		if (tokens == null || tokens.isEmpty()) {
+		if (CollectionUtils.isEmpty(tokens)) {
 			return List.of();
 		}
-		return tokens.stream().filter(token -> token != null && !token.isBlank())
+		return tokens.stream().filter(StringUtils::isNotBlank)
 				.map(token -> stagingKey(conversationId, token)).toList();
 	}
 
@@ -497,8 +504,9 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	/** 读会话历史的当前数据键（不回写、不迁移）。 */
 	@Override
 	public List<Message> findByConversationId(String conversationId) {
-		List<String> rawMessages = this.redis.opsForList().range(key(conversationId), 0, -1);
-		if (rawMessages == null || rawMessages.isEmpty()) {
+		String finalKey = key(conversationId);
+		List<String> rawMessages = this.redis.opsForList().range(finalKey, 0, -1);
+		if (CollectionUtils.isEmpty(rawMessages)) {
 			return List.of();
 		}
 		return this.codec.deserializeAll(rawMessages);
@@ -525,7 +533,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 					conversationId, finalKey);
 			return;
 		}
-		if (messages == null || messages.isEmpty()) {
+		if (CollectionUtils.isEmpty(messages)) {
 			deleteByConversationId(conversationId);
 			return;
 		}
@@ -549,7 +557,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			// 那时异常从 try 抛出、renamed 仍是 false，但 final 键已经落地。复检放在 try 之后就会
 			// 被异常整个跳过，正是"销毁已 complete、写回却复活"的那个窗口。
 			// 异常本身照旧向上抛（不吞错误）：这里只负责"若已落地且守卫已装，就撤销它"。
-			if (purgeArmedAfterWrite(conversationId, finalKey)) {
+			if (isPurgeArmedAfterWrite(conversationId, finalKey)) {
 				// 入口检查通过之后销毁流程才装了守卫（并已删过一次记忆）：这一笔落地就是"复活"。
 				discardWrittenMemory(conversationId, finalKey);
 				aborted = true;
@@ -599,48 +607,22 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 		}
 		String versionKey = versionKey(finalKey);
 		String generationKey = generationKey(finalKey);
-		List<Message> incoming = messages == null ? List.of() : messages;
-		Set<String> pinnedRunIds = pinnedRunIds(conversationId);
+		List<Message> incoming = ObjectUtils.defaultIfNull(messages, List.of());
+		Optional<Set<String>> pinnedRunIds = pinnedRunIds(conversationId);
 		// 代次只读一次：本次写回启动之后发生的任何清空，都会让下面每一次 CAS（含重试）作废。
 		String expectedGeneration = readCounter(generationKey);
 		for (int attempt = 1; attempt <= MERGE_ATTEMPTS; attempt++) {
 			String expectedVersion = readCounter(versionKey);
-			List<String> currentRaw = rawWindow(finalKey);
-			List<Message> current = currentRaw.isEmpty() ? List.of() : this.codec.deserializeAll(currentRaw);
-			List<Message> merged = RunMemoryMerge.merge(current, incoming, turn, replaceRunBlock, maxMessages,
-					pinnedRunIds);
-			List<String> payload = this.codec.serializeAll(merged);
-			// 窗口没变 = 逐条"语义相等"（类型/正文/工具调用/结果/metadata 整份相等），
-			// 不拿 JSON 字符串比：metadata 的键序会随构造路径变化，字节比较会让这条早退形同虚设。
-			if (sameWindow(merged, current)) {
-				// 窗口没变：不写、不推进版本（避免无谓 CAS 与把并发写者的版本顶掉）。
-				// 计数器仍要跟着续：否则它们会先于数据键过期，:gen 归 0 会让在飞写回被误判成"被清空"。
-				slideCasCounters(finalKey);
+			MergeAttempt merge = prepareMerge(conversationId, finalKey, turn, incoming, replaceRunBlock, maxMessages,
+					pinnedRunIds.orElse(null));
+			if (isUnchangedWindow(merge, finalKey)) {
 				return true;
 			}
-			String stagingToken = payload.isEmpty() ? "" : UUID.randomUUID().toString();
-			String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, stagingToken);
-			if (stagingKey != null) {
-				stagePayload(conversationId, stagingKey, stagingToken, payload);
-			}
-			Long applied;
-			try {
-				applied = this.redis.execute(MERGE_CAS,
-						List.of(stagingKey == null ? finalKey : stagingKey, finalKey, versionKey, generationKey,
-								stagingIndexKey(conversationId)),
-						expectedVersion, expectedGeneration, payload.isEmpty() ? "delete" : "rename",
-						Long.toString(stagingTtlMillis()), stagingToken);
-			}
-			catch (RuntimeException ex) {
-				if (stagingKey != null) {
-					deleteStagingQuietly(conversationId, stagingKey);
-				}
-				throw ex;
-			}
+			merge = stageMerge(conversationId, merge);
+			Long applied = executeMergeCas(conversationId, finalKey, versionKey, generationKey, expectedVersion,
+					expectedGeneration, merge);
 			if (applied != null && applied == CAS_SUPERSEDED) {
-				if (stagingKey != null) {
-					deleteStagingQuietly(conversationId, stagingKey);
-				}
+				discardStaging(conversationId, merge.stagingKey());
 				// 写回期间历史被清空：放弃这一笔。重试等于把手里那份清空前的历史再写一遍。
 				log.warn("memory cleared during this write-back (generation changed), abandoning write conversationId={} runId={}"
 						+ " (pre-clear turns must not resurrect history)", conversationId, turn == null ? null : turn.runId());
@@ -651,35 +633,89 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 				return true;
 			}
 			// CAS 落空：另一写者在我们读之后动了窗口 ⇒ 清 staging、重读、重算。
-			if (stagingKey != null) {
-				deleteStagingQuietly(conversationId, stagingKey);
+			discardStaging(conversationId, merge.stagingKey());
+			if (log.isDebugEnabled()) {
+				log.debug("memory window merge CAS missed (retry {}/{}) conversationId={} runId={}", attempt, MERGE_ATTEMPTS,
+						conversationId, turn == null ? null : turn.runId());
 			}
-			log.debug("memory window merge CAS missed (retry {}/{}) conversationId={} runId={}", attempt, MERGE_ATTEMPTS,
-					conversationId, turn == null ? null : turn.runId());
 		}
 		throw new IllegalStateException("memory window merge CAS missed " + MERGE_ATTEMPTS
 				+ " times in a row (concurrent writes too dense) conversationId=" + conversationId);
 	}
 
+	private boolean isUnchangedWindow(MergeAttempt merge, String finalKey) {
+		// 逐条比较类型/正文/工具调用/结果/metadata，避免 metadata 键序影响相等判断。
+		if (!isSameWindow(merge.merged(), merge.current())) {
+			return false;
+		}
+		// 窗口没变：不写 staging、不推进版本；计数器仍续期，避免在飞写回误判清空代次。
+		slideCasCounters(finalKey);
+		return true;
+	}
+
+	private MergeAttempt prepareMerge(String conversationId, String finalKey, MemoryTurn turn, List<Message> incoming,
+			boolean replaceRunBlock, int maxMessages, Set<String> pinnedRunIds) {
+		List<String> currentRaw = rawWindow(finalKey);
+		List<Message> current = currentRaw.isEmpty() ? List.of() : this.codec.deserializeAll(currentRaw);
+		List<Message> merged = RunMemoryMerge.merge(current, incoming, turn, replaceRunBlock, maxMessages, pinnedRunIds);
+		List<String> payload = this.codec.serializeAll(merged);
+		return new MergeAttempt(current, merged, payload, "", null);
+	}
+
+	private MergeAttempt stageMerge(String conversationId, MergeAttempt merge) {
+		if (merge.payload().isEmpty()) {
+			return merge;
+		}
+		String stagingToken = UUID.randomUUID().toString();
+		String stagingKey = stagingKey(conversationId, stagingToken);
+		stagePayload(conversationId, stagingKey, stagingToken, merge.payload());
+		return new MergeAttempt(merge.current(), merge.merged(), merge.payload(), stagingToken, stagingKey);
+	}
+
+	private Long executeMergeCas(String conversationId, String finalKey, String versionKey, String generationKey,
+			String expectedVersion, String expectedGeneration, MergeAttempt merge) {
+		try {
+			return this.redis.execute(MERGE_CAS,
+					List.of(merge.stagingKey() == null ? finalKey : merge.stagingKey(), finalKey, versionKey, generationKey,
+							stagingIndexKey(conversationId)),
+					expectedVersion, expectedGeneration, merge.payload().isEmpty() ? "delete" : "rename",
+					Long.toString(stagingTtlMillis()), merge.stagingToken());
+		}
+		catch (RuntimeException ex) {
+			discardStaging(conversationId, merge.stagingKey());
+			throw ex;
+		}
+	}
+
+	private void discardStaging(String conversationId, String stagingKey) {
+		if (stagingKey != null) {
+			deleteStagingQuietly(conversationId, stagingKey);
+		}
+	}
+
+	private record MergeAttempt(List<Message> current, List<Message> merged, List<String> payload, String stagingToken,
+			String stagingKey) {
+	}
+
 	/** 合并结果已落盘：只剩销毁复检（全局索引已退役，不再有索引收尾）。 */
 	private void afterMergeLanded(String conversationId, String finalKey) {
-		if (purgeArmedAfterWrite(conversationId, finalKey)) {
+		if (isPurgeArmedAfterWrite(conversationId, finalKey)) {
 			discardWrittenMemory(conversationId, finalKey);
 		}
 	}
 
-	private Set<String> pinnedRunIds(String conversationId) {
-		java.util.function.Function<String, Set<String>> lookup = this.activeRunLookup;
+	private Optional<Set<String>> pinnedRunIds(String conversationId) {
+		Function<String, Set<String>> lookup = this.activeRunLookup;
 		if (lookup == null) {
-			return Set.of();
+			return Optional.of(Set.of());
 		}
 		try {
 			Set<String> active = lookup.apply(conversationId);
-			return active == null ? Set.of() : active;
+			return Optional.of(ObjectUtils.defaultIfNull(active, Set.of()));
 		}
 		catch (RuntimeException ex) {
 			log.warn("active run lookup failed, skipping message trim in this merge conversationId={}", conversationId, ex);
-			return null;
+			return Optional.empty();
 		}
 	}
 
@@ -692,13 +728,12 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 * 读一次窗口快照（版本 + 清空代次 + 消息）：压缩写回用它当 CAS 基线。
 	 *
 	 * <p>计数器<b>先读</b>、窗口<b>后读</b>：这期间任何写者推进版本，写回时的 CAS 必然落空
-	 * （保守方向：宁可放弃一次压缩写，也不拿旧内容覆盖新消息）。
+	 * （保守方向：宁可放弃一次压缩写，也不拿旧内容覆盖新消息）。本方法是后台压缩纯读口，
+	 * 不触发用户活动续期。
 	 */
 	@Override
 	public MemoryWindowSnapshot readWindow(String conversationId) {
 		String finalKey = key(conversationId);
-		// 基线读出来之后，计数器不能在写回前先过期（:gen 归 0 = 误判"被清空"）：与数据键一起续 TTL。
-		slideCasCounters(finalKey);
 		long version = counterValue(readCounter(versionKey(finalKey)));
 		long generation = counterValue(readCounter(generationKey(finalKey)));
 		List<String> raw = rawWindow(finalKey);
@@ -725,7 +760,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 			log.warn("session purged (purge guard active), refusing whole-window memory write-back conversationId={} key={}", conversationId, finalKey);
 			return false;
 		}
-		List<String> payload = this.codec.serializeAll(messages == null ? List.of() : messages);
+		List<String> payload = this.codec.serializeAll(ObjectUtils.defaultIfNull(messages, List.of()));
 		String stagingToken = payload.isEmpty() ? "" : UUID.randomUUID().toString();
 		String stagingKey = payload.isEmpty() ? null : stagingKey(conversationId, stagingToken);
 		if (stagingKey != null) {
@@ -815,7 +850,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 */
 	private String readCounter(String counterKey) {
 		String current = this.redis.opsForValue().get(counterKey);
-		return current == null || current.isBlank() ? "0" : current;
+		return StringUtils.isBlank(current) ? "0" : current;
 	}
 
 	/**
@@ -825,29 +860,29 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 * 刻意不比较序列化后的 JSON 字符串：metadata 的键序随构造路径（编解码/重建/盖章）变化，
 	 * 字节比较会让早退几乎不成立 —— 每次收敛都白写一次、白推一次版本。
 	 */
-	private static boolean sameWindow(List<Message> left, List<Message> right) {
+	private static boolean isSameWindow(List<Message> left, List<Message> right) {
 		if (left.size() != right.size()) {
 			return false;
 		}
 		for (int index = 0; index < left.size(); index++) {
-			if (!sameMessage(left.get(index), right.get(index))) {
+			if (!isSameMessage(left.get(index), right.get(index))) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	private static boolean sameMessage(Message left, Message right) {
+	private static boolean isSameMessage(Message left, Message right) {
 		if (left == right) {
 			return true;
 		}
 		if (left == null || right == null || left.getMessageType() != right.getMessageType()) {
 			return false;
 		}
-		if (!java.util.Objects.equals(left.getText(), right.getText())) {
+		if (!Objects.equals(left.getText(), right.getText())) {
 			return false;
 		}
-		if (!java.util.Objects.equals(left.getMetadata(), right.getMetadata())) {
+		if (!Objects.equals(left.getMetadata(), right.getMetadata())) {
 			return false;
 		}
 		List<AssistantMessage.ToolCall> leftCalls = left instanceof AssistantMessage assistant
@@ -867,7 +902,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	/** 当前窗口原文（与 {@link #findByConversationId} 同口径）。 */
 	private List<String> rawWindow(String finalKey) {
 		List<String> raw = this.redis.opsForList().range(finalKey, 0, -1);
-		return raw == null ? List.of() : raw;
+		return ObjectUtils.defaultIfNull(raw, List.of());
 	}
 
 	private void stagePayload(String conversationId, String stagingKey, String stagingToken, List<String> payload) {
@@ -890,7 +925,7 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 * <p>读失败按"已装守卫"处理（fail-closed）：与入口检查同一口径 —— 守卫状态不可知时
 	 * 宁可让本次写回作废，也不能把已销毁会话的历史悄悄写回来。
 	 */
-	private boolean purgeArmedAfterWrite(String conversationId, String finalKey) {
+	private boolean isPurgeArmedAfterWrite(String conversationId, String finalKey) {
 		if (this.purgeGuard == null) {
 			return false;
 		}

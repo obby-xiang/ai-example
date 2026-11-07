@@ -3,6 +3,8 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.web.AiChatRequest;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -80,7 +82,7 @@ public class ContextFieldGate {
 	}
 
 	private static String page(String raw, List<String> reasons) {
-		if (raw == null || raw.isBlank()) {
+		if (StringUtils.isBlank(raw)) {
 			return "";
 		}
 		String trimmed = raw.trim();
@@ -92,7 +94,7 @@ public class ContextFieldGate {
 	}
 
 	private static String taskType(String raw, List<String> reasons) {
-		if (raw == null || raw.isBlank()) {
+		if (StringUtils.isBlank(raw)) {
 			return null;
 		}
 		String upper = raw.trim().toUpperCase(java.util.Locale.ROOT);
@@ -104,7 +106,7 @@ public class ContextFieldGate {
 	}
 
 	private static String taskStatus(String raw, List<String> reasons) {
-		if (raw == null || raw.isBlank()) {
+		if (StringUtils.isBlank(raw)) {
 			return null;
 		}
 		String upper = raw.trim().toUpperCase(java.util.Locale.ROOT);
@@ -116,7 +118,7 @@ public class ContextFieldGate {
 	}
 
 	private static String step(String raw, List<String> reasons) {
-		if (raw == null || raw.isBlank()) {
+		if (StringUtils.isBlank(raw)) {
 			return raw == null ? null : raw;
 		}
 		StringBuilder out = new StringBuilder(Math.min(raw.length(), STEP_MAX_CHARS));
@@ -139,7 +141,7 @@ public class ContextFieldGate {
 	}
 
 	private static Map<String, Object> extra(Map<String, Object> raw, List<String> reasons) {
-		if (raw == null || raw.isEmpty()) {
+		if (MapUtils.isEmpty(raw)) {
 			return new LinkedHashMap<>();
 		}
 		Map<String, Object> kept = new LinkedHashMap<>();

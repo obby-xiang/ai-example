@@ -1,6 +1,13 @@
 package com.example.configmgr.ai.web;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * POST /api/ai/frontend-tool-result 请求体（前端工具结果回灌）。
@@ -25,9 +32,40 @@ import java.util.Map;
  * @param context 挂起期的最新工作区上下文（<b>可选</b>；旧客户端不带 = 不更新快照）：
  * 与 {@code /confirm} 同一口径（同一套 {@code ContextFieldGate} 消毒），续跑前据它更新快照并重算槽位。
  */
-public record FrontendToolResultRequest(String runId, String toolCallId, String result, String source,
-		Boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code,
-		AiChatRequest.Context context) {
+public record FrontendToolResultRequest(@JsonProperty("runId") String runId,
+		@JsonProperty("toolCallId") String toolCallId, @JsonProperty("result") String result,
+			@JsonProperty("source") String source, @JsonProperty("cancelled") Boolean cancelled,
+			@JsonProperty("outcome") String outcome,
+			@JsonProperty("sheetMeta") @JsonInclude(JsonInclude.Include.NON_EMPTY) Map<String, Object> sheetMeta,
+			@JsonProperty("code") String code,
+		@JsonProperty("context") AiChatRequest.Context context,
+			@JsonProperty("sheetMetaPresent") boolean sheetMetaPresent) {
+
+	public FrontendToolResultRequest {
+		sheetMeta = sheetMeta == null || sheetMeta.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(sheetMeta));
+	}
+
+	@JsonCreator
+	public FrontendToolResultRequest(@JsonProperty("runId") String runId,
+			@JsonProperty("toolCallId") String toolCallId, @JsonProperty("result") String result,
+			@JsonProperty("source") String source, @JsonProperty("cancelled") Boolean cancelled,
+			@JsonProperty("outcome") String outcome, @JsonProperty("sheetMeta") Map<String, Object> sheetMeta,
+			@JsonProperty("code") String code, @JsonProperty("context") AiChatRequest.Context context,
+			@JsonProperty("sheetMetaPresent") Boolean sheetMetaPresent) {
+		this(runId, toolCallId, result, source, cancelled, outcome, sheetMeta, code, context,
+				isPresent(sheetMetaPresent, sheetMeta != null && !sheetMeta.isEmpty()));
+	}
+
+	private static boolean isPresent(Boolean explicit, boolean nonEmpty) {
+		return Boolean.TRUE.equals(explicit) || (explicit == null && nonEmpty);
+	}
+
+	public FrontendToolResultRequest(String runId, String toolCallId, String result, String source,
+			Boolean cancelled, String outcome, Map<String, Object> sheetMeta, String code,
+			AiChatRequest.Context context) {
+		this(runId, toolCallId, result, source, cancelled, outcome, sheetMeta, code, context, sheetMeta != null);
+	}
 
 	/** 兼容构造器：不带工作区上下文的旧调用点（含既有单测）无需改动。 */
 	public FrontendToolResultRequest(String runId, String toolCallId, String result, String source,
@@ -35,8 +73,16 @@ public record FrontendToolResultRequest(String runId, String toolCallId, String 
 		this(runId, toolCallId, result, source, cancelled, outcome, sheetMeta, code, null);
 	}
 
+	@Override
+	public String toString() {
+		return "FrontendToolResultRequest[runId=" + this.runId + ", toolCallId=" + this.toolCallId
+				+ ", source=" + this.source + ", cancelled=" + this.cancelled + ", outcome=" + this.outcome
+				+ ", code=" + this.code + ", sheetMetaCount=" + this.sheetMeta.size()
+				+ ", sheetMetaPresent=" + this.sheetMetaPresent + "]";
+	}
+
 	/** 机器码白名单形态（批 A / A-14）：{@code UI_*} 闭集形态，长度 2..40。 */
-	private static final java.util.regex.Pattern UI_CODE = java.util.regex.Pattern.compile("^UI_[A-Z_]{2,40}$");
+	private static final Pattern UI_CODE = Pattern.compile("^UI_[A-Z_]{2,40}$");
 
 	/**
 	 * 入口归一：只接受 {@code UI_*} 形态的机器码，其余一律 {@code null}（<b>丢弃不报 400</b>）。

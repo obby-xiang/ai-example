@@ -1,6 +1,8 @@
 package com.example.configmgr.ai.observe;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -103,7 +105,7 @@ public class SettlementObservationStore {
 	/** 显式装配（测试/轻装配）：{@code redis == null} 时退化为进程内表。 */
 	public SettlementObservationStore(StringRedisTemplate redis, AiProperties properties) {
 		this.redis = redis;
-		this.properties = properties == null ? new AiProperties() : properties;
+		this.properties = ObjectUtils.getIfNull(properties, AiProperties::new);
 	}
 
 	/** 纯进程内装配（单测默认）。 */
@@ -119,7 +121,7 @@ public class SettlementObservationStore {
 
 	/** 抢"本次结算的观测位"，并返回后续失败释放所需的所有权 token。 */
 	public ClaimHandle claim(String runId, String toolCallId) {
-		if (runId == null || runId.isBlank() || toolCallId == null || toolCallId.isBlank()) {
+		if (StringUtils.isBlank(runId) || StringUtils.isBlank(toolCallId)) {
 			return new ClaimHandle(true, runId, toolCallId, null);
 		}
 		String token = System.currentTimeMillis() + "|" + InstanceId.get() + "|" + UUID.randomUUID();
@@ -138,15 +140,17 @@ public class SettlementObservationStore {
 		}
 		catch (RuntimeException ex) {
 			RedisDegradation.record(RedisDegradation.O1_OBSERVATION_CLAIM, ex);
-			log.debug("settlement observation slot unavailable (treated as unobserved, this line still emitted) runId={} toolCallId={}", runId, toolCallId,
-					ex);
+			if (LogSampling.canAcquire("settlement-observation-claim")) {
+				log.warn("settlement observation slot unavailable (treated as unobserved, this line still emitted) runId={} toolCallId={}",
+						runId, toolCallId, ex);
+			}
 			return new ClaimHandle(true, runId, toolCallId, token);
 		}
 	}
 
 	/** 仅释放仍属于本次 handle 的占位；旧 owner 不得删除新 owner 的字段。 */
 	public void release(ClaimHandle handle) {
-		if (handle == null || handle.token() == null || handle.token().isBlank()) {
+		if (handle == null || StringUtils.isBlank(handle.token())) {
 			return;
 		}
 		String key = observedKey(handle.runId());
@@ -161,8 +165,10 @@ public class SettlementObservationStore {
 			this.redis.execute(RELEASE_SCRIPT, List.of(key), handle.toolCallId(), handle.token());
 		}
 		catch (RuntimeException ex) {
-			log.warn("release of settlement observation slot failed (this settlement may still be blocked) runId={} toolCallId={}", handle.runId(), handle.toolCallId(),
-					ex);
+			if (LogSampling.canAcquire("settlement-observation-release")) {
+				log.warn("release of settlement observation slot failed (this settlement may still be blocked) runId={} toolCallId={}",
+						handle.runId(), handle.toolCallId(), ex);
+			}
 		}
 	}
 
@@ -175,7 +181,7 @@ public class SettlementObservationStore {
 	 *         调用方应把它记进销毁错误集（走既有重试语义），不要静默
 	 */
 	public boolean purge(String runId) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return true;
 		}
 		String key = observedKey(runId);
@@ -188,7 +194,9 @@ public class SettlementObservationStore {
 			return true;
 		}
 		catch (RuntimeException ex) {
-			log.warn("settlement observation slot purge failed runId={} key={}", runId, key, ex);
+			if (LogSampling.canAcquire("settlement-observation-purge")) {
+				log.warn("settlement observation slot purge failed runId={} key={}", runId, key, ex);
+			}
 			return false;
 		}
 	}
@@ -199,7 +207,9 @@ public class SettlementObservationStore {
 		}
 		catch (RuntimeException ex) {
 			// 自愈失败只降级：脚本本身已（原子地）置过 TTL，这里只是兜底修复旧墓碑
-			log.debug("settlement observation slot TTL self-heal failed key={}", key, ex);
+			if (LogSampling.canAcquire("settlement-observation-ttl")) {
+				log.warn("settlement observation slot TTL self-heal failed key={}", key, ex);
+			}
 		}
 	}
 

@@ -3,6 +3,8 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -126,7 +128,7 @@ public final class FrameSizeLimiter {
 				return null;
 			}
 			if (retry.length <= maxBytes) {
-				logDownsampled(frame, full.length, retry.length, maxBytes, String.join(",", fields), chars[0], chars[1]);
+				logDownsampled(frame, full.length, retry.length, maxBytes, StringUtils.join(fields, ","), chars[0], chars[1]);
 				return retry;
 			}
 			// 复测仍超：按超出量收缩预算再算一轮
@@ -136,7 +138,7 @@ public final class FrameSizeLimiter {
 		markTruncated(frame, fields, originalChars, TruncationContract.NOTICE_CODE_FRAME_LIMIT_UNREACHED);
 		log.warn("SSE frame over limit with non-truncatable fields dominant type={} "
 				+ "original={} limit={} fields={} (marked but still above limit)",
-				frame.get("type"), full.length, maxBytes, String.join(",", fields));
+				frame.get("type"), full.length, maxBytes, StringUtils.join(fields, ","));
 		return serialize(frame, mapper);
 	}
 
@@ -155,7 +157,7 @@ public final class FrameSizeLimiter {
 					returnedChars);
 			return;
 		}
-		log.debug(message, frame.get("type"), originalBytes, actualBytes, maxBytes, fields, originalChars,
+		if (log.isDebugEnabled()) log.debug(message, frame.get("type"), originalBytes, actualBytes, maxBytes, fields, originalChars,
 				returnedChars);
 	}
 
@@ -224,7 +226,7 @@ public final class FrameSizeLimiter {
 		while (offset < value.length()) {
 			String rest = value.substring(offset);
 			chunks.add(fitChunk(rest, frame, field, probe, mapper, maxBytes, budget, empty.length, value.length()));
-			offset += chunks.get(chunks.size() - 1).length();
+			offset += chunks.getLast().length();
 		}
 		return chunks;
 	}
@@ -322,7 +324,7 @@ public final class FrameSizeLimiter {
 		probe.put(TruncationContract.ORIGINAL_CHARS_FIELD, 0);
 		probe.put(TruncationContract.RETURNED_CHARS_FIELD, 0);
 		byte[] bytes = serialize(probe, mapper);
-		return bytes == null ? 0 : bytes.length;
+		return ArrayUtils.getLength(bytes);
 	}
 
 	/** 按各字段原始字节大小为权重分配预算，并把每个字段降采样到自己的预算内（末字段拿余量）。 */
@@ -368,7 +370,7 @@ public final class FrameSizeLimiter {
 	 * <p>两条路径都以"该值在 JSON 里的转义后字节数"为预算，口径与整帧判定一致。
 	 */
 	static String takeValue(String value, int byteBudget, ObjectMapper mapper) {
-		if (value == null || value.isEmpty() || byteBudget <= 0) {
+		if (StringUtils.isEmpty(value) || byteBudget <= 0) {
 			return "";
 		}
 		if (!TruncationContract.looksStructured(value)) {
@@ -396,7 +398,7 @@ public final class FrameSizeLimiter {
 
 	/** 值在 JSON 里的转义后字节数（不含两侧引号）：`"` → `\"`、非 ASCII → 多字节等都被算准。 */
 	static int escapedLength(String value, ObjectMapper mapper) {
-		if (value == null || value.isEmpty()) {
+		if (StringUtils.isEmpty(value)) {
 			return 0;
 		}
 		try {
@@ -417,7 +419,7 @@ public final class FrameSizeLimiter {
 	 * 每片都对<b>整段余串</b>做二分探测（旧上界 = 余串长度）；结果与旧实现逐字相同。
 	 */
 	static String takeChars(String value, int byteBudget, ObjectMapper mapper) {
-		if (value == null || value.isEmpty() || byteBudget <= 0) {
+		if (StringUtils.isEmpty(value) || byteBudget <= 0) {
 			return "";
 		}
 		int lo = 0;

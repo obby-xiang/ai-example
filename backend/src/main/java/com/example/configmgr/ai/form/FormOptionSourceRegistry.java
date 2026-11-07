@@ -37,13 +37,17 @@ public class FormOptionSourceRegistry {
 		return List.copyOf(this.sources.keySet());
 	}
 
-	/** 按 id 解析选项；未注册返回 null（调用方按"未知数据源"处理，绝不回落到任何外部来源）。 */
+	/** 按 id 解析选项；未注册返回空列表（调用方按"未知数据源"处理，绝不回落到任何外部来源）。 */
 	public List<Map<String, String>> options(String sourceId, String parentValue) {
 		FormOptionSource source = this.sources.get(sourceId);
-		return source == null ? null : source.options(parentValue);
+		return source == null ? List.of() : source.options(parentValue);
 	}
 
 	public boolean supports(String sourceId) {
+		return isSupported(sourceId);
+	}
+
+	public boolean isSupported(String sourceId) {
 		return this.sources.containsKey(sourceId);
 	}
 

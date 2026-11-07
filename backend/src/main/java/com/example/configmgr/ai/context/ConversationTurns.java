@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.context;
 
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
@@ -39,7 +41,7 @@ public final class ConversationTurns {
 
 	/** 按"一条 {@code UserMessage} 起、到下一条 {@code UserMessage} 止"切分。 */
 	public static List<Segment> split(List<Message> messages) {
-		if (messages == null || messages.isEmpty()) {
+		if (CollectionUtils.isEmpty(messages)) {
 			return List.of();
 		}
 		List<Segment> segments = new ArrayList<>();
@@ -76,18 +78,18 @@ public final class ConversationTurns {
 
 	public static int firstPinnedTurn(List<Message> messages, List<Segment> segments, int keepRecentTurns,
 			Set<String> protectedToolCallIds, Set<String> protectedRunIds) {
-		if (segments == null || segments.isEmpty()) {
+		if (CollectionUtils.isEmpty(segments)) {
 			return 0;
 		}
 		int cut = Math.max(0, segments.size() - Math.max(0, keepRecentTurns));
 		cut = Math.min(cut, segments.size() - 1);
-		Set<String> activeRuns = protectedRunIds == null ? Set.of() : protectedRunIds;
+		Set<String> activeRuns = ObjectUtils.defaultIfNull(protectedRunIds, Set.of());
 		for (int i = 0; i < cut; i++) {
 			if (containsRun(messages, segments.get(i), activeRuns)) {
 				return i;
 			}
 		}
-		Set<String> protectedIds = protectedToolCallIds == null ? Set.of() : protectedToolCallIds;
+		Set<String> protectedIds = ObjectUtils.defaultIfNull(protectedToolCallIds, Set.of());
 		if (protectedIds.isEmpty()) {
 			return cut;
 		}

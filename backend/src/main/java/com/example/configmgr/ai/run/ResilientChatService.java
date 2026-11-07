@@ -31,6 +31,7 @@ import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
 import com.example.configmgr.ai.observe.AiTrace;
+import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
@@ -46,6 +47,10 @@ import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
 import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -67,7 +72,6 @@ import org.springframework.context.MessageSource;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.stereotype.Service;
-import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
@@ -418,7 +422,7 @@ public class ResilientChatService {
 	 *
 	 * @return 本次是否真的派发了（已有一份在飞 / 未装配交棒器 ⇒ false）
 	 */
-	private boolean handOffDeniedFinalization(String runId) {
+	private boolean isHandOffDeniedFinalization(String runId) {
 		if (this.cancelFinalizer == null) {
 			return false;
 		}
@@ -509,48 +513,80 @@ public class ResilientChatService {
 	// ── 首轮：ChatClient + 记忆 Advisor 路径 ────────────────────────────────
 
 	public void chat(String runId, AiChatRequest request, SseChatEmitter out) {
-		String sessionId = request.sessionId();
-		String transcriptText = request.displayText() == null ? request.message() : request.displayText();
-		// 驱动入口（本批返修 I-2）：先记一次归档下界 —— 失败出口只认"本次驱动"落的终帧。
-		// 必须在任何出帧之前（含 out.start），否则下界会吃掉本次驱动自己的首帧判定依据。
 		out.beginDrive();
-		// 日志链路：本方法可能跑在挂起池线程上（AiController 提交），入口再绑一次保证锚点成立
-		AiTrace.bind(runId, sessionId);
+		AiTrace.bind(runId, request.sessionId());
+		TurnKeepalive keepalive = null;
+		DriveOwnership ownership = DriveOwnership.none();
+		boolean registered = false;
+		try {
+			FirstTurnSetup setup = prepareFirstTurn(runId, request);
+			out.start(setup.sessionId());
+			if (isCancelledBeforeSnapshot(runId, out, setup)) {
+				return;
+			}
+			keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, true);
+			this.cancellations.register(runId);
+			registered = true;
+			FirstTurnExecution execution = prepareFirstTurnExecution(runId, out, setup, keepalive);
+			if (execution.isCancelled()) {
+				return;
+			}
+			ownership = takeDriveOwnership(runId);
+			if (!ownership.owned()) {
+				log.warn("first-turn drive rejected runId={}: resume authority already held by "
+						+ "another instance (avoid double drive; terminal state/frame owned by holder)", runId);
+				return;
+			}
+			driveFirstTurn(runId, out, setup, execution, keepalive);
+		}
+		finally {
+			finishTurn(runId, keepalive, ownership, registered);
+		}
+	}
+
+	private FirstTurnSetup prepareFirstTurn(String runId, AiChatRequest request) {
+		FirstTurnMemory memory = prepareFirstTurnMemory(runId, request);
+		FirstTurnRuntime selected = resolveFirstTurnRuntime(runId, request);
+		String systemText = systemPromptText(memory.context(), selected.isToolsAllowed());
+		List<Message> instructions = List.of(new SystemMessage(systemText), new UserMessage(request.message()));
+		List<ToolCallback> tools = selected.isToolsAllowed() ? this.toolRegistry.forContext(memory.context()) : List.of();
+		if (!selected.isToolsAllowed()) {
+			log.info("model does not support tool calls runId={} provider={} model={}: degrading to plain QA (no tools)",
+					runId, selected.runtime().providerCode(), selected.runtime().modelId());
+		}
+		return new FirstTurnSetup(request, memory.context(), memory.isExistingSession(), memory.turnStartedAtMs(),
+				memory.windowSnapshot(), memory.memory(), selected.runtime(), selected.isToolsAllowed(),
+				selected.isParamsLocked(), systemText, instructions, tools, ContextEstimator.estimate(systemText),
+				ContextEstimator.estimateToolSchemas(tools), ContextEstimator.estimate(request.message()),
+				ObjectUtils.getIfNull(request.displayText(), request::message));
+	}
+
+	private FirstTurnMemory prepareFirstTurnMemory(String runId, AiChatRequest request) {
+		String sessionId = request.sessionId();
 		AiContext context = toContext(request.context());
 		boolean existed = this.sessionService.ensure(sessionId);
 		boolean firstTurn = false;
 		try {
-			// POST /session 已提前登记，首轮的 existed 必为 true；尚无 run 才证明这是新会话第一次对话。
-			// 登记结果不参与清理判据：登记异常不得被误读成"新会话"而删掉既有记忆。
 			firstTurn = this.store.sessionRunIds(sessionId).isEmpty();
 		}
 		catch (RuntimeException ex) {
-			log.warn("session first-turn probe failed; keeping the existing memory window sessionId={}",
-					sessionId, ex);
+			log.warn("session first-turn probe failed; keeping the existing memory window sessionId={}", sessionId, ex);
 		}
 		if (firstTurn) {
-			// 清空会推进记忆代次，旧写者不能在本轮之后把残窗复活；随后读取新的 CAS 基线。
 			this.chatMemory.clear(sessionId);
 		}
-		long turnStartedAtMs = System.currentTimeMillis();
-
-		// 本轮窗口快照（版本 + 代次 + 消息）：压缩/记忆窗口要整窗改写，必须用"读到的那一份"当 CAS 基线
-		// —— 否则压缩期间别人写入的新消息会被旧内容覆盖，或反过来把压缩结果丢掉。
-		MemoryWindowSnapshot windowSnapshot = memoryWindowSnapshot(sessionId);
-		List<Message> memory = windowSnapshot != null ? windowSnapshot.messages() : this.chatMemory.get(sessionId);
-		// 槽位解析（槽位放行批）：任务/工作区 + 用户已明确值 + 历史未修改值 → extra[taskSlots]。
-		// 必须在 systemPromptText 与 forContext 之前完成：前者要把槽位作为数据展示给模型，
-		// 后者（表单放行）在下一批从同一个上下文读它。空槽位不写键（不引入噪声）。
+		long startedAt = System.currentTimeMillis();
+		MemoryWindowSnapshot snapshot = memoryWindowSnapshot(sessionId);
+		List<Message> memory = snapshot != null ? snapshot.messages() : this.chatMemory.get(sessionId);
 		if (this.taskSlotResolver != null) {
 			context = this.taskSlotResolver.enrich(context, request.message(), memory);
 		}
-		// 模型身份 = 本轮固化进快照的那一对（providerId/modelId）；没有可用 provider 时
-		// 控制器早已 503 拦住（这里抛 AiUnavailableException 只是并发改配置的窄窗口兜底）。
-		//
-		// 批③：先做请求级解析（显式 modelId 优先，未指定则退化成默认链），再按"本次模型 + 参数覆盖"
-		// 派生一次性运行态 —— 缓存条目（按 RuntimeKey）不动，故交替选模型不会互相踩踏。
+		return new FirstTurnMemory(context, existed, startedAt, snapshot, memory);
+	}
+
+	private FirstTurnRuntime resolveFirstTurnRuntime(String runId, AiChatRequest request) {
 		AiConfigService.ChatTarget target = null;
-		if (StringUtils.hasText(request.modelId())) {
+		if (StringUtils.isNotBlank(request.modelId())) {
 			if (request.providerId() == null) {
 				throw new ProviderGoneException(runId, null, request.modelId(),
 						"An explicit modelId requires providerId; provider must not be guessed");
@@ -561,222 +597,163 @@ public class ResilientChatService {
 		boolean paramsAllowed = this.providerRegistry.allowUserParams();
 		AiProviderRegistry.Overrides overrides = paramsAllowed ? overridesOf(request.params())
 				: AiProviderRegistry.Overrides.NONE;
-		boolean paramsLocked = !paramsAllowed && request.params() != null
-				&& !overridesOf(request.params()).isEmpty();
+		boolean paramsLocked = !paramsAllowed && request.params() != null && !overridesOf(request.params()).isEmpty();
 		ProviderRuntime runtime = target == null ? this.providerRegistry.current()
 				: this.providerRegistry.forRequest(target.provider(), target.modelId(), overrides);
-		// 默认与显式模型都按实际运行态身份查询能力，不能因走默认链就假定支持工具。
 		boolean toolsAllowed = this.providerRegistry.supportsToolCalling(runtime.providerId(), runtime.modelId());
+		return new FirstTurnRuntime(runtime, toolsAllowed, paramsLocked);
+	}
 
-		// 人设与工作区快照合成"一条"系统消息：官方 ChatClient 的 system 文本是单槽位
-		// （Spec 内部 systemTextParams 只有一个 key），连续两次 .system() 会覆盖前者 ——
-		// 实测：只发第二条时，主提示词整段消失（快照里 system 只剩工作区快照）。
-		// 首轮与续跑重建共用同一构造点，并按本轮真实工具能力决定是否生成工具规则。
-		String systemText = systemPromptText(context, toolsAllowed);
-		List<Message> instructions = List.of(new SystemMessage(systemText), new UserMessage(request.message()));
-
-		// 上下文专项批①：装配点同时给出三个分项锚点（system/tools/input）—— 它们不在历史里，
-		// 端点重建时无从再算，故在本轮起点就随真值一起落进 ai:ctx:。
-		List<ToolCallback> tools = toolsAllowed ? this.toolRegistry.forContext(context) : List.of();
-		if (!toolsAllowed) {
-			log.info("model does not support tool calls runId={} provider={} model={}: degrading to plain QA (no tools)", runId,
-					runtime.providerCode(), runtime.modelId());
+	private boolean isCancelledBeforeSnapshot(String runId, SseChatEmitter out, FirstTurnSetup setup) {
+		if (!cancellationRequested(runId) && !isClientRequestCancelled(setup.sessionId(), setup.request().clientRequestId())) {
+			return false;
 		}
-		int systemTokens = ContextEstimator.estimate(systemText);
-		int toolsTokens = ContextEstimator.estimateToolSchemas(tools);
-		int inputTokens = ContextEstimator.estimate(request.message());
+		log.info("cancel received before first-turn snapshot/compaction/model call runId={} sessionId={}", runId,
+				setup.sessionId());
+		TurnContext early = new TurnContext(setup.systemTokens(), setup.toolsTokens(), setup.inputTokens(),
+				setup.systemTokens() + setup.toolsTokens() + setup.inputTokens(), 0, setup.runtime().modelId(), "none",
+				setup.turnStartedAtMs(), setup.isParamsLocked(), setup.runtime().providerCode(),
+				queueMs(System.currentTimeMillis()), setup.runtime().providerId(), maxOutputTokensOf(setup.runtime()));
+		cancelTerminal(runId, setup.sessionId(), null, 0, null, out, early);
+		return true;
+	}
 
-		// ===== AR-06（批次3）：首帧前移到同步压缩之前 =====
-		// 首轮压缩是最大的零帧窗口（L2 的 N 次串行摘要每次最长 60s）。压缩发生在 store.create
-		// <b>之前</b>、runId 已由控制器生成 ⇒ "帧已经有了、只是位置不对"，前移在技术上可行。
-		// 代价是必须同时定义"已 start、快照未建"这段的语义（不能只挪帧）：
-		// · 读侧：同一窗口里的重挂返回"准备中"（可重试 + 已用时间），<b>不</b>返回 404 / "轮不存在"
-		//   （见 AiController#events 的 preparing 分支）；
-		// · 出帧侧（2026-10-29 压缩阶段信号批）：start 仍是首帧；紧随一条 phase=<b>streaming</b> 的
-		//   心跳阶段帧。普通请求**不**改成任何压缩/准备相位 —— 没有压缩就没有阶段条，只剩"工作中"。
-		//   真实的 L2 模型摘要在 ContextCompactor 里通过 onSummaryStart 把相位切到 compacting
-		//   （见 compactBeforeRequest），L1/L3 本地操作静默；
-		// · 保活侧：压缩期的节拍由 TurnKeepalive 的独立定时器承担（不依赖上游事件）；
-		// · 异常侧：该窗口里抛错仍走控制器的"取消优先"终态守卫（无快照时禁止裸 save / 新建快照）。
-		out.start(sessionId);
-		/**
-		 * 停止闭环：取消可能早于本轮创建（刷新后按 clientRequestId 补取消，或映射里的
-		 * {@code CANCELLED} 墓碑）。必须在<b>压缩/建快照/模型调用/工具副作用之前</b>收敛：
-		 * 只看确定 CANCELLED（旗标或映射），UNKNOWN 按未取消继续（此刻还没有不可逆动作）。
-		 */
-		if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
-			log.info("cancel received before first-turn snapshot/compaction/model call runId={} sessionId={}", runId, sessionId);
-			TurnContext early = new TurnContext(systemTokens, toolsTokens, inputTokens,
-					systemTokens + toolsTokens + inputTokens, 0, runtime.modelId(), "none", turnStartedAtMs,
-					paramsLocked, runtime.providerCode(), queueMs(System.currentTimeMillis()), runtime.providerId(),
-					maxOutputTokensOf(runtime));
-			cancelTerminal(runId, sessionId, null, 0, null, out, early);
+	private FirstTurnExecution prepareFirstTurnExecution(String runId, SseChatEmitter out, FirstTurnSetup setup,
+			TurnKeepalive keepalive) {
+		Compaction compaction = compactBeforeRequest(runId, setup.sessionId(), setup.runtime(), setup.memory(),
+				setup.inputTokens(), setup.systemTokens(), setup.toolsTokens(), 0, keepalive, setup.windowSnapshot());
+		List<Message> memory = compaction.memory();
+		if (keepalive != null) {
+			keepalive.phase(TurnKeepalive.PHASE_STREAMING);
+		}
+		List<Message> full = new ArrayList<>(memory.size() + setup.instructions().size());
+		full.add(setup.instructions().getFirst());
+		full.addAll(memory);
+		full.add(setup.instructions().get(1));
+		if (isCancelledDuringCompaction(runId, out, setup, compaction, memory, full)) {
+			return new FirstTurnExecution(true, null, null, null);
+		}
+		RunSnapshot snapshot = this.store.create(runId, setup.sessionId(), setup.context(), full, this.codec,
+				setup.runtime().providerId(), setup.runtime().modelId(), frozenParams(setup.runtime(), setup.isParamsLocked()),
+				setup.request().clientRequestId(), setup.transcriptText(), setup.turnStartedAtMs());
+		recordTranscriptUser(runId, setup.sessionId(), setup.transcriptText(), setup.turnStartedAtMs());
+		return new FirstTurnExecution(false, compaction, snapshot, full);
+	}
+
+	private boolean isCancelledDuringCompaction(String runId, SseChatEmitter out, FirstTurnSetup setup,
+			Compaction compaction, List<Message> memory, List<Message> full) {
+		if (!cancellationRequested(runId) && !isClientRequestCancelled(setup.sessionId(), setup.request().clientRequestId())) {
+			return false;
+		}
+		log.info("cancel during first-turn compaction runId={} (minimal CANCELLED snapshot saved, no model call)", runId);
+		try {
+			this.store.create(runId, setup.sessionId(), setup.context(), full, this.codec, setup.runtime().providerId(),
+					setup.runtime().modelId(), frozenParams(setup.runtime(), setup.isParamsLocked()),
+					setup.request().clientRequestId(), setup.transcriptText(), setup.turnStartedAtMs());
+			recordTranscriptUser(runId, setup.sessionId(), setup.transcriptText(), setup.turnStartedAtMs());
+		}
+		catch (RuntimeException ex) {
+			log.warn("minimal snapshot for compaction-time cancel failed runId={} "
+					+ "(cancel finalize without snapshot; terminal frame unchanged)", runId, ex);
+		}
+		cancelTerminal(runId, setup.sessionId(), null, 0, null, out,
+				new TurnContext(setup.systemTokens(), setup.toolsTokens(), setup.inputTokens(),
+						setup.systemTokens() + setup.toolsTokens() + ContextEstimator.estimateMessages(memory)
+								+ setup.inputTokens(), compaction.limitTokens(), setup.runtime().modelId(),
+						compaction.levelWire(), setup.turnStartedAtMs(), setup.isParamsLocked(), setup.runtime().providerCode(),
+						queueMs(System.currentTimeMillis()), setup.runtime().providerId(), maxOutputTokensOf(setup.runtime())));
+		return true;
+	}
+
+	private void driveFirstTurn(String runId, SseChatEmitter out, FirstTurnSetup setup,
+			FirstTurnExecution execution, TurnKeepalive keepalive) {
+		execution.compaction().emitIfChanged(out);
+		long queueMs = traceFirstTurn(runId, setup, execution.compaction());
+		this.beacon.markSegmentStart(runId, setup.turnStartedAtMs());
+		TurnContext turn = new TurnContext(setup.systemTokens(), setup.toolsTokens(), setup.inputTokens(),
+				setup.systemTokens() + setup.toolsTokens() + ContextEstimator.estimateMessages(
+						execution.compaction().memory()) + setup.inputTokens(), execution.compaction().limitTokens(),
+				setup.runtime().modelId(), execution.compaction().levelWire(), setup.turnStartedAtMs(),
+				setup.isParamsLocked(), setup.runtime().providerCode(), queueMs, setup.runtime().providerId(),
+				maxOutputTokensOf(setup.runtime()));
+		if (isCancelledBeforeHandoff(runId, out, setup, turn)) {
 			return;
 		}
-		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, true);
-		// 驱动所有权（快照建好之后取得；压缩期还没有快照，接管方也无从判死这一轮）
-		DriveOwnership ownership = DriveOwnership.none();
-		try {
-			// 取消登记放在 <b>try 内第一笔</b>（线程治理·T-06）：登记与 {@code unregister} 必须在同一作用域
-			// —— 旧实现在 try 之前登记，于是"建快照前取消"早退与 out.start/保活抛错都会在
-			// flags/listeners 里留下一条永久条目。压缩期收到的取消同样生效（权威态在 Redis，登记只是
-			// 同进程加速通道），因此登记仍前移到压缩之前。
-			this.cancellations.register(runId);
-			Compaction compaction = compactBeforeRequest(runId, sessionId, runtime, memory, inputTokens, systemTokens,
-					toolsTokens, 0, keepalive, windowSnapshot);
-			memory = compaction.memory();
-			// 摘要结束（或压根没压）：立即回到 streaming，前端阶段条随即退场。
-			// 只在相位真的变过时才公告（L1/L3/未压缩路径的 streaming 是同相位，不重复出帧）。
-			if (keepalive != null) {
-				keepalive.phase(TurnKeepalive.PHASE_STREAMING);
-			}
-
-			// ===== N4（返修）：压缩后、建快照前复查取消 =====
-			// 压缩是首轮最长的零帧窗口（L2 = N 次串行摘要）。这期间用户按下停止时，旧实现仍会接着
-			// store.create + 发起模型调用 —— 一条"用户已停止"的轮被真正跑起来。只认确定的 CANCELLED
-			// （UNKNOWN 按未取消继续：此刻还没有不可逆动作，与 C2 的退避口径同源）。
-			// 与官方 MessageChatMemoryAdvisor.before 的变换逐字对齐（1.1.7 字节码实测）：
-			// [首个 SystemMessage] + 记忆窗口 + 其余指令 —— 快照里存的就是模型真正看到的那串消息。
-			// B2：本轮请求原文与请求起点随首笔快照一起落库（RunStore.create 的 additive 重载），
-			// 终态补写用户条目只读它 —— 不从快照历史里挑"最后一条 USER"（记忆窗口里还有别的轮次），
-			// 也不按消息 metadata 推断归属。历史本身原样，不做任何 metadata 盖章。
-			List<Message> full = new ArrayList<>(memory.size() + instructions.size());
-			full.add(instructions.get(0));
-			full.addAll(memory);
-			full.add(instructions.get(1));
-
-			// 终态与终帧复用既有取消收尾；快照走既有创建路径，内容只到"请求历史 + 上下文/模型身份"：
-			// 模型一次都没被调用，故不写助手正文、不写工具调用/工具结果（不得伪造轮内产出）。
-			// 为什么必须建这份最小快照：没有它，runId 的取消终态只活在帧归档里，重挂/刷新没有持久面。
-			if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
-				log.info("cancel during first-turn compaction runId={} (minimal CANCELLED snapshot saved, no model call)", runId);
-				try {
-					this.store.create(runId, sessionId, context, full, this.codec, runtime.providerId(),
-							runtime.modelId(), frozenParams(runtime, paramsLocked), request.clientRequestId(),
-							transcriptText, turnStartedAtMs);
-					recordTranscriptUser(runId, sessionId, transcriptText, turnStartedAtMs);
-				}
-				catch (RuntimeException ex) {
-					// 快照建不起来（Redis 抖动/写门不可确认）不得让取消失去终帧：
-					// 取消收尾对"无快照"仍按既有口径发唯一 done{cancelled:true}。
-					log.warn("minimal snapshot for compaction-time cancel failed runId={} "
-							+ "(cancel finalize without snapshot; terminal frame unchanged)", runId, ex);
-				}
-				cancelTerminal(runId, sessionId, null, 0, null, out,
-						new TurnContext(systemTokens, toolsTokens, inputTokens,
-								systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
-								compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs,
-								paramsLocked, runtime.providerCode(), queueMs(System.currentTimeMillis()),
-								runtime.providerId(), maxOutputTokensOf(runtime)));
-				return;
-			}
-
-			// 压缩若已发生：快照写的就是压缩后的那一份（快照 === 模型看到的；分叉即 SM-01 同族）
-			// L-26：首轮创建即<b>冻结生效参数</b>（provider/model 走既有身份字段，三值 + paramsLocked 走
-			// FrozenParams）。冻结的是 runtime.options() 里的<b>生效值</b>（全局默认 + 本轮请求覆盖 +
-			// "被策略锁住 ⇒ 没生效"三种情形都已体现），不是请求体原文。
-			// A：请求边界冻结的权威执行信封要用这份刚建好的快照（不是稍后可能被改写的读回值）。
-			RunSnapshot executionSnapshot = this.store.create(runId, sessionId, context, full, this.codec,
-					runtime.providerId(), runtime.modelId(), frozenParams(runtime, paramsLocked),
-					request.clientRequestId(), transcriptText, turnStartedAtMs);
-			recordTranscriptUser(runId, sessionId, transcriptText, turnStartedAtMs);
-
-			// ===== 驱动所有权（2026-10-29）：快照建好之后、模型/预检之前先取得续跑权 =====
-			// 旧实现首轮从不持租：跨实例僵尸扫描看到的证据是"RUNNING + 无租约 + 业务活动超龄" ⇒ 判死接管，
-			// 而本线程还在预检/首包等待里 ⇒ 一轮两个驱动方（重复帧、settle 分叉、历史分叉）。
-			// 取得后按 lease.renew-interval 续租（与续跑同一条心跳），于是"长预检"期间租约始终有效。
-			ownership = takeDriveOwnership(runId);
-			if (!ownership.owned()) {
-				// 另一实例已持有这一轮的续跑权：本线程不得驱动（否则就是双驱动）。终态与终帧由持有方负责，
-				// 本连接留在同一个写出器上照常收流（归档是共享的）。
-				log.warn("first-turn drive rejected runId={}: resume authority already held by "
-						+ "another instance (avoid double drive; terminal state/frame owned by holder)",
-						runId);
-				return;
-			}
-
-			// 压缩即时可见：请求前压的，故必在本轮第一个 delta/tool_start 之前（帧类型 15 → 16 的唯一新增）。
-			// 位置在 store.create 之后：业务帧（含 context）一旦入档，快照就一定已建立 —— 于是
-			// "归档里有业务帧但没有快照"这段只剩 start + 心跳（即"准备中"窗口），读侧判定因此无歧义。
-			compaction.emitIfChanged(out);
-
-			// 格式契约：runId/sessionId/sessionExists/context/disclosedTools 保持此顺序；
-			// provider/model 只能另起一行，不得插进本行字段之间。
-			log.info("AI turn start runId={} sessionId={} sessionExists={} context={} disclosedTools={} "
-					+ "firstPacketTimeout={} interPacketTimeout={} maxAttempts={} totalBudget={}",
-					runId, sessionId, existed, context.getContextKey(), tools.stream().map(t -> t.getToolDefinition().name()).toList(),
-					this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
-					this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
-			log.debug("AI turn model identity runId={} provider={} model={}", runId, runtime.providerCode(), runtime.modelId());
-			// 排队耗时（turn_accepted → turn_start）：在本行<b>发射时</b>取值，窗口与手册字段定义逐字一致
-			long queueMs = queueMs(System.currentTimeMillis());
-			// 日志链路批：结构化 trace（轮次起止另由 INFO 日志行留痕）
-			// AI 日志最小补齐批：resumeReason 一律出现（首轮 = none），续跑四值见手册
-			AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
-					"resumed", false, "resumeReason", "none", "context", context.getContextKey(), "tools", tools.size(),
-					"inputEst", inputTokens, "compact", compaction.levelWire(), "newSession", !existed,
-					"maxAttempts", this.properties.getResilience().getMaxAttempts(),
-					"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
-
-			// 段级预算（决策看板 :14）：本轮第一段的起点 = 轮起点。恢复点由 beacon.endGateWait 前移。
-			this.beacon.markSegmentStart(runId, turnStartedAtMs);
-			TurnContext turn = new TurnContext(systemTokens, toolsTokens, inputTokens,
-					systemTokens + toolsTokens + ContextEstimator.estimateMessages(memory) + inputTokens,
-					compaction.limitTokens(), runtime.modelId(), compaction.levelWire(), turnStartedAtMs, paramsLocked,
-					runtime.providerCode(), queueMs, runtime.providerId(), maxOutputTokensOf(runtime));
-			// N4（返修）：交棒（runAttempts → 上游调用）前再复查一次 —— 覆盖压缩之后、快照建立/
-			// 用户历史落库期间的取消窗口；命中则就地取消收尾（快照已存在，写 CANCELLED + 唯一终帧），
-			// 不发起任何模型调用。
-			if (cancellationRequested(runId) || clientRequestCancelled(sessionId, request.clientRequestId())) {
-				log.info("cancel received before first-turn handoff runId={} (no model call)", runId);
-				cancelTerminal(runId, sessionId, null, 0, null, out, turn);
-				return;
-			}
-			// ===== 宿主确定性类型表单（类型未知）=====
-			// 位置在取消复查之后、驱动模型之前：判据只看用户原话与槽位（不看模型这一拍的输出），
-			// 于是"问什么"不再由模型的自由裁量决定；挂起面与续跑侧同一个组件（HostForm），
-			// 用户的提交/取消走既有回灌与既有续跑，确认卡与 HITL 一字不动。
-			// 筛选条件不在此列：条件写法（大小写/别名/自由文本）必须由模型理解用户原话后再决定，
-			// 宿主抢在模型之前发文本框会把"已知条件"误判成"缺失"，模型这一拍根本没有机会。
-			// 模型不支持工具调用时不下发（它连 create_task 都发不出来，问了也走不下去）。
-			if (toolsAllowed && this.taskTypeForm != null
-					&& this.taskTypeForm.parkIfDue(runId, context, request.message(), full)) {
-				log.info("first turn parked awaiting task type (no model drive this tick) runId={}", runId);
-				return;
-			}
-			AiContext correctionContext = context;
-			// 本轮正文聚合：每个 attempt 重置，consume() 与工具执行点（toolContext）共享同一份。
-			SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
-			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, correctionContext, request.message(),
-					"", "", turnTextBody, attempt -> {
-				log.debug("assembling request for attempt {} runId={} sessionId={} (request rebuilt each turn)", attempt, runId, sessionId);
-				return Flux.defer(() -> {
-					var spec = runtime.chatClient().prompt()
-						.system(systemText)
-						.user(request.message())
-						// 记忆 advisor 的会话键：官方常量（MessageChatMemoryAdvisor 据此读写 Redis）
-						.advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, sessionId))
-						// 显式 runId 通道：ToolCallingManager 由此拿到外置/挂起所需的轮次 id；
-						// A：同一份 toolContext 里带本轮权威执行信封（key = executionEnvelope），runId/sessionId 保留。
-						.toolContext(toolContext(runId, sessionId, executionSnapshot, out.lastIssuedSeq(),
-								turnTextBody));
-					var withTools = tools.isEmpty() ? spec : spec.toolCallbacks(tools);
-					return withTools.stream().chatResponse();
-				});
-			}, (prefix, reasoning, createTaskCorrection) -> correctionStream(runtime, runId, sessionId,
-					correctionContext, List.of(), out, prefix, reasoning, turnTextBody, createTaskCorrection));
+		if (setup.isToolsAllowed() && this.taskTypeForm != null && this.taskTypeForm.parkIfDue(runId, setup.context(),
+				setup.request().message(), execution.fullHistory())) {
+			log.info("first turn parked awaiting task type (no model drive this tick) runId={}", runId);
+			return;
 		}
-		finally {
-			// 终态/异常/取消/park 四条出口统一在这里兜底停表（runAttempts 在发终帧之前已先停一次，
-			// 这里负责"异常穿透"的那条：无论如何不得让定时器活到轮次之外）。
-			closeKeepalive(keepalive);
-			// 驱动所有权同样在这四条出口收尾：停续租心跳，并按"谁创建谁释放"还租
-			// （终态写/park 交棒已经还过时，这里只是幂等的停表）。
-			releaseDriveOwnership(runId, ownership);
-			this.cancellations.unregister(runId);
-			this.beacon.clear(runId);
-			AiTrace.clear();
+		startFirstTurnAttempts(runId, out, setup, execution, keepalive, turn);
+	}
+
+	private long traceFirstTurn(String runId, FirstTurnSetup setup, Compaction compaction) {
+		log.info("AI turn start runId={} sessionId={} sessionExists={} context={} disclosedTools={} "
+				+ "firstPacketTimeout={} interPacketTimeout={} maxAttempts={} totalBudget={}", runId, setup.sessionId(),
+				setup.isExistingSession(), setup.context().getContextKey(),
+				setup.tools().stream().map(t -> t.getToolDefinition().name()).toList(),
+				this.properties.getResilience().getFirstByteTimeout(), this.properties.getResilience().getInterEventTimeout(),
+				this.properties.getResilience().getMaxAttempts(), this.properties.getResilience().getTotalBudget());
+		if (log.isDebugEnabled()) log.debug("AI turn model identity runId={} provider={} model={}", runId,
+				setup.runtime().providerCode(), setup.runtime().modelId());
+		long queueMs = queueMs(System.currentTimeMillis());
+		AiTrace.event("turn_start", "model", setup.runtime().modelId(), "provider", setup.runtime().providerCode(),
+				"attempt", 1, "resumed", false, "resumeReason", "none", "context", setup.context().getContextKey(),
+				"tools", setup.tools().size(), "inputEst", setup.inputTokens(), "compact", compaction.levelWire(),
+				"newSession", !setup.isExistingSession(), "maxAttempts", this.properties.getResilience().getMaxAttempts(),
+				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
+		return queueMs;
+	}
+
+	private boolean isCancelledBeforeHandoff(String runId, SseChatEmitter out, FirstTurnSetup setup, TurnContext turn) {
+		if (!cancellationRequested(runId) && !isClientRequestCancelled(setup.sessionId(), setup.request().clientRequestId())) {
+			return false;
 		}
+		log.info("cancel received before first-turn handoff runId={} (no model call)", runId);
+		cancelTerminal(runId, setup.sessionId(), null, 0, null, out, turn);
+		return true;
+	}
+
+	private void startFirstTurnAttempts(String runId, SseChatEmitter out, FirstTurnSetup setup,
+			FirstTurnExecution execution, TurnKeepalive keepalive, TurnContext turn) {
+		SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
+		runAttempts(runId, setup.sessionId(), setup.turnStartedAtMs(), out, turn, keepalive, setup.context(),
+				setup.request().message(), "", "", turnTextBody, attempt -> {
+			if (log.isDebugEnabled()) log.debug("assembling request for attempt {} runId={} sessionId={} (request rebuilt each turn)", attempt, runId, setup.sessionId());
+			return Flux.defer(() -> {
+				var spec = setup.runtime().chatClient().prompt()
+					.system(setup.systemText())
+					.user(setup.request().message())
+					.advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, setup.sessionId()))
+					.toolContext(toolContext(runId, setup.sessionId(), execution.snapshot(), out.lastIssuedSeq(),
+							turnTextBody));
+				var withTools = setup.tools().isEmpty() ? spec : spec.toolCallbacks(setup.tools());
+				return withTools.stream().chatResponse();
+			});
+		}, (prefix, reasoning, createTaskCorrection) -> correctionStream(setup.runtime(), runId, setup.sessionId(),
+				setup.context(), List.of(), out, prefix, reasoning, turnTextBody, createTaskCorrection));
+	}
+
+	private record FirstTurnMemory(AiContext context, boolean isExistingSession, long turnStartedAtMs,
+			MemoryWindowSnapshot windowSnapshot, List<Message> memory) {
+	}
+
+	private record FirstTurnRuntime(ProviderRuntime runtime, boolean isToolsAllowed, boolean isParamsLocked) {
+	}
+
+	private record FirstTurnSetup(AiChatRequest request, AiContext context, boolean isExistingSession,
+			long turnStartedAtMs, MemoryWindowSnapshot windowSnapshot, List<Message> memory, ProviderRuntime runtime,
+			boolean isToolsAllowed, boolean isParamsLocked, String systemText, List<Message> instructions,
+			List<ToolCallback> tools, int systemTokens, int toolsTokens, int inputTokens, String transcriptText) {
+
+		private String sessionId() {
+			return this.request.sessionId();
+		}
+
+	}
+
+	private record FirstTurnExecution(boolean isCancelled, Compaction compaction, RunSnapshot snapshot,
+			List<Message> fullHistory) {
 	}
 
 	// ── 续跑：重建的完整历史 + 官方 ChatModel 路径（由 ResumeService 驱动） ──
@@ -805,51 +782,54 @@ public class ResilientChatService {
 		long turnStartedAtMs = System.currentTimeMillis();
 		// 日志链路：续跑落在挂起池线程上（ResumeService 提交），入口重绑锚点
 		AiTrace.bind(runId, sessionId);
-		// 续跑读取快照的<b>冻结生效参数</b>；缺失即失败（不允许采用当前默认模型/参数）。
-		RunSnapshot snapshot = resumeSnapshot(runId);
-		// 恢复型入口：身份只从本轮记录恢复（交棒线程即使带着上一位调用者的 TTL 身份也以快照为准）。
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(
-				snapshot.getTenantId(), snapshot.getUserId())) {
-			driveResumedScoped(runId, sessionId, context, history, out, snapshot, turnStartedAtMs);
+		try {
+			// 续跑读取快照的<b>冻结生效参数</b>；缺失即失败（不允许采用当前默认模型/参数）。
+			RunSnapshot snapshot = resumeSnapshot(runId);
+			// 恢复型入口：身份只从本轮记录恢复（交棒线程即使带着上一位调用者的 TTL 身份也以快照为准）。
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(
+					snapshot.getTenantId(), snapshot.getUserId())) {
+				driveResumedScoped(runId, sessionId, context, history, out, snapshot, turnStartedAtMs);
+			}
+		}
+		finally {
+			try {
+				AiTrace.clear();
+			}
+			catch (RuntimeException ex) {
+				if (LogSampling.canAcquire("resume-outer-trace-clear")) log.warn("resumed turn trace cleanup failed runId={}", runId, ex);
+			}
 		}
 	}
 
 	/** 续跑主体（已在<b>本轮身份作用域</b>内；身份来自 {@code ai:run:<runId>} 快照）。 */
 	private void driveResumedScoped(String runId, String sessionId, AiContext context, List<Message> history,
 			SseChatEmitter out, RunSnapshot snapshot, long turnStartedAtMs) {
-		// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）——
-		// 但<b>模型名与生效参数来自快照</b>，不跟随默认变化。
-		ProviderRuntime runtime = runtimeForSnapshot(runId, snapshot);
-		// AR-10 第 3 条（批次2）：**armed 跨 park 持久化** —— 快照里带着"本轮已进入收尾"的事实，
-		// 恢复时必须重新点亮信标（挂起不清零、继续累计），否则模型可以再要一批工具、再清一次结果、
-		// 再追加一条收尾 user 消息，与"本轮预算"（不是会话预算、不是重置式）的口径相反。
-		restoreTurnBudget(runId, snapshot);
-		// 段级预算（决策看板 :14）：续跑 = 一次恢复点 ⇒ 新段从这里起算
-		this.beacon.markSegmentStart(runId, turnStartedAtMs);
-		// 上下文专项批①：续跑侧的分母/分项锚点现算（历史里没有 tools schema，故走披露口径）
-		TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), runtime.providerCode(),
-				turnStartedAtMs, snapshot);
-		AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
-				"resumed", true, "resumeReason", resumeReason(), "context", context.getContextKey(), "history",
-				history.size(), "compact", turn.compactionLevel(), "maxAttempts",
-				this.properties.getResilience().getMaxAttempts(),
-				"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
-		// 独立保活（AR-06 / Task 5 Step 3）：续跑的上游静默与慢工具同样需要保活。这里<b>不发</b>阶段开始帧
-		// —— 续跑的快照早已建立、start 也早已在归档里；请求前压缩的阶段公告（只有真实 L2 才有）由
-		// 调用方 ResumeService 在同一个保活句柄上切相位完成。
-		TurnKeepalive keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
+		TurnKeepalive keepalive = null;
+		boolean registered = false;
 		try {
-			// 取消登记在 try 内第一笔（线程治理·T-06）：续跑准备期（restoreTurnBudget / resumedTurn /
-			// 保活）抛错时不会留下 flags/listeners —— 旧实现在 try 之前登记，早退或抛错就永久残留。
+			// 续跑也要现取一次实例：在飞期间换了 base-url/key 的话，续跑落在新端点上（与首轮同口径）——
+			// 但<b>模型名与生效参数来自快照</b>，不跟随默认变化。
+			ProviderRuntime runtime = runtimeForSnapshot(runId, snapshot);
+			restoreTurnBudget(runId, snapshot);
+			// 段级预算（决策看板 :14）：续跑 = 一次恢复点 ⇒ 新段从这里起算
+			this.beacon.markSegmentStart(runId, turnStartedAtMs);
+			TurnContext turn = resumedTurn(runId, context, history, runtime.modelId(), runtime.providerCode(),
+					turnStartedAtMs, snapshot);
+			AiTrace.event("turn_start", "model", runtime.modelId(), "provider", runtime.providerCode(), "attempt", 1,
+					"resumed", true, "resumeReason", resumeReason(), "context", context.getContextKey(), "history",
+					history.size(), "compact", turn.compactionLevel(), "maxAttempts",
+					this.properties.getResilience().getMaxAttempts(),
+					"budgetMs", this.properties.getResilience().getTotalBudget().toMillis());
+			keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
 			this.cancellations.register(runId);
+			registered = true;
 			// 意图不再由中文/原话关键词判断：只认模型结构化工具调用（run 内回灌/台账事实）。
 			String lastUserText = null;
-			// 纠正前缀是明确的正文段：已随挂起/工具跳落库的部分不再进入待写段。
 			CorrectionResume correctionResume = correctionResume(snapshot, history);
 			SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
 			runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
 					correctionResume.fullText(), correctionResume.pendingSegment(), turnTextBody, attempt -> {
-						log.debug("rebuilding full history for attempt {} runId={} sessionId={} historyEntries={}", attempt, runId,
+						if (log.isDebugEnabled()) log.debug("rebuilding full history for attempt {} runId={} sessionId={} historyEntries={}", attempt, runId,
 								sessionId, history.size());
 						Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history, snapshot,
 								out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
@@ -858,10 +838,7 @@ public class ResilientChatService {
 							context, history, out, prefix, reasoning, turnTextBody, createTaskCorrection));
 		}
 		finally {
-			closeKeepalive(keepalive);
-			this.cancellations.unregister(runId);
-			this.beacon.clear(runId);
-			AiTrace.clear();
+			finishTurn(runId, keepalive, null, registered);
 		}
 	}
 
@@ -890,6 +867,39 @@ public class ResilientChatService {
 	private static void closeKeepalive(TurnKeepalive keepalive) {
 		if (keepalive != null) {
 			keepalive.close();
+		}
+	}
+
+	private void finishTurn(String runId, TurnKeepalive keepalive, DriveOwnership ownership, boolean registered) {
+		try {
+			closeKeepalive(keepalive);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("turn-keepalive-close")) log.warn("turn keepalive close failed runId={}", runId, ex);
+		}
+		try {
+			if (ownership != null) releaseDriveOwnership(runId, ownership);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("turn-drive-release")) log.warn("turn drive ownership release failed runId={}", runId, ex);
+		}
+		try {
+			if (registered) this.cancellations.unregister(runId);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("turn-cancel-unregister")) log.warn("turn cancellation cleanup failed runId={}", runId, ex);
+		}
+		try {
+			this.beacon.clear(runId);
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("turn-beacon-clear")) log.warn("turn beacon cleanup failed runId={}", runId, ex);
+		}
+		try {
+			AiTrace.clear();
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("turn-trace-clear")) log.warn("turn trace cleanup failed runId={}", runId, ex);
 		}
 	}
 
@@ -966,8 +976,8 @@ public class ResilientChatService {
 			TenantUser requestIdentity = RequestContextUtils.currentOrNull();
 			try {
 				leases.markDriving(lease,
-						() -> this.stillDriving(drivingKey, drivingToken)
-								&& snapshotNotTerminal(runId, requestIdentity),
+						() -> this.isStillDriving(drivingKey, drivingToken)
+								&& isSnapshotNotTerminal(runId, requestIdentity),
 						requestIdentity);
 			}
 			catch (RuntimeException ex) {
@@ -977,7 +987,7 @@ public class ResilientChatService {
 				// （created=false）不还，那一任属于别的驱动方。
 				this.drivingRuns.remove(drivingKey, drivingToken);
 				if (acquired.created()) {
-					boolean released = leases.release(lease);
+					boolean released = leases.isReleased(lease);
 					log.warn("first-turn renew registration failed, returning the lease created here runId={} epoch={} released={}",
 							runId, lease.epoch(), released, ex);
 				}
@@ -991,7 +1001,7 @@ public class ResilientChatService {
 	}
 
 	/** 续租存活判据的"本进程仍有<b>本次</b>驱动方"：只认自己写进去的令牌。 */
-	private boolean stillDriving(String drivingKey, Object drivingToken) {
+	private boolean isStillDriving(String drivingKey, Object drivingToken) {
 		return drivingToken != null && this.drivingRuns.get(drivingKey) == drivingToken;
 	}
 
@@ -1025,7 +1035,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("first-turn lease return failed runId={} epoch={} (wait TTL; terminal state unaffected)", runId, lease.epoch(), ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("first-turn lease return failed runId={} epoch={} (wait TTL; terminal state unaffected)", runId, lease.epoch(), ex);
 		}
 	}
 
@@ -1045,14 +1055,14 @@ public class ResilientChatService {
 	 * <p><b>按记录身份显式读，且走轻量状态键</b>（性能专项）：本判据跑在 {@link LeaseService} 的
 	 * 续租线程上（每 {@code renew-interval} 一拍），旧实现
 	 * {@link RunStore#get(String, long, long)} 会把整份快照（含整窗 {@code messageJson}）反序列化成
-	 * 对象图，只为回答"是不是终态"。{@link RunStore#snapshotNotTerminal(String, TenantUser)} 先读
+	 * 对象图，只为回答"是不是终态"。{@link RunStore#isSnapshotNotTerminal(String, TenantUser)} 先读
 	 * 轻量状态键 {@code ai:runstate}，缺失才流式读快照顶层 {@code status} —— 判据逐字不变
 	 * （读失败 ⇒ 仍活着；快照不存在 ⇒ 终态）。
 	 *
 	 * @param identity 本轮记录身份（{@code null} = 记录无身份：按 legacy 口径读）
 	 */
-	private boolean snapshotNotTerminal(String runId, TenantUser identity) {
-		return this.store.snapshotNotTerminal(runId, identity);
+	private boolean isSnapshotNotTerminal(String runId, TenantUser identity) {
+		return this.store.isSnapshotNotTerminal(runId, identity);
 	}
 
 	/**
@@ -1088,7 +1098,7 @@ public class ResilientChatService {
 		}
 		this.beacon.restoreBudgetArmed(runId, snapshot.getBudgetArmedAtMs());
 		this.beacon.restoreBudgetSkippedBatches(runId, snapshot.getBudgetSkippedBatches());
-		log.debug("turn budget re-armed runId={} armedAtMs={} skippedBatches={}", runId,
+		if (log.isDebugEnabled()) log.debug("turn budget re-armed runId={} armedAtMs={} skippedBatches={}", runId,
 				snapshot.getBudgetArmedAtMs(), snapshot.getBudgetSkippedBatches());
 	}
 
@@ -1103,7 +1113,7 @@ public class ResilientChatService {
 			return runtimeForSnapshot(runId, resumeSnapshot(runId));
 		}
 		catch (RuntimeException ex) {
-			log.debug("resume compaction failed to read turn state runId={} "
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("resume compaction failed to read turn state runId={} "
 					+ "(summary unavailable, history unchanged)", runId, ex);
 			return null;
 		}
@@ -1127,7 +1137,7 @@ public class ResilientChatService {
 		}
 		Long providerId = snapshot.getProviderId();
 		String modelId = snapshot.getModelId();
-		if (modelId == null || modelId.isBlank()) {
+		if (StringUtils.isBlank(modelId)) {
 			throw new ProviderGoneException(runId, providerId, modelId,
 					"Snapshot has no frozen model name (the current protocol requires the initial snapshot to freeze provider/model)");
 		}
@@ -1251,315 +1261,403 @@ public class ResilientChatService {
 			TurnContext turn, TurnKeepalive keepalive, AiContext context, String lastUserText,
 			String resumePrefix, String resumePendingSegment, SpToolCallingManager.TurnTextCapture turnTextBody,
 			IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream) {
-		AiProperties.Resilience config = this.properties.getResilience();
-		// Reactor 事件回调跑在上游线程（Netty event loop）上，那里没有请求身份 ——
-		// 在驱动线程抓一次本轮身份，每个上游事件回放一次（消费帧/写归档的路径因此不丢身份）。
-		TenantUser upstreamIdentity = RequestContextUtils.currentOrNull();
-		int maxAttempts = Math.max(1, config.getMaxAttempts());
-		// 上一次失败带来的 429 Retry-After（只对紧接着的这次重试生效；成功/收尾后自然丢弃）
-		Long retryAfterMs = null;
-		// 空回复重试只给一次（AR-05）：本条记录"本轮已经因 EMPTY_REPLY 再试过一次"，
-		// 第二次仍空 ⇒ 直接落 FAILED（不无限重试、不在有产出的情况下重试）。
-		boolean emptyReplyRetried = false;
-		// 导出收尾的一轮内部纠正（Task 1 第 5 项）：<b>run 级</b>最多一次（标记随快照持久化，含续跑），
-		// 且不占失败重试次数。前缀正文属于本轮已上屏内容，成功收尾时必须与纠正后的正文一起落库。
-		boolean exportCorrectionUsed = exportCorrectionAlreadyUsed(runId);
-		boolean createTaskCorrectionUsed = correctionAlreadyUsed(runId, CREATE_TASK_CORRECTION_MARKER);
-		String prefixText = resumePrefix == null ? "" : resumePrefix;
-		// 待写段与完整展示文本分开交接；已落库段不从完整文本里按字符裁出来。
-		String prefixSegment = resumePendingSegment == null ? "" : resumePendingSegment;
-		// finish/cancel 去重要移除的前缀 assistant 文本（= 未落库部分）。
-		String correctionHistoryPrefix = prefixText;
-		String prefixReasoning = "";
-		boolean correcting = false;
-		// 本次 correcting 轮是 create_task 纠正还是 export 纠正（跨续跑时 marker 会同时存在）。
-		boolean createTaskCorrecting = false;
-		int attempt = 0;
-		int budgetedAttempts = 0;
+		AttemptLoopState state = new AttemptLoopState(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context,
+				lastUserText, resumePrefix, resumePendingSegment, turnTextBody, attemptStream, correctionStream);
 		while (true) {
-			if (!correcting && budgetedAttempts >= maxAttempts) {
-				// 兜底：每次预算内尝试都应经 finish 收口；走到这里说明收口被绕过，不得静默退出无终帧
-				stopKeepalive(keepalive);
-				emptyReply(runId, sessionId, new Accumulator(runId), Math.max(1, budgetedAttempts), out, turn);
+			if (isAttemptBudgetExhausted(state)) {
 				return;
 			}
-			attempt++;
-			if (!correcting) {
-				budgetedAttempts++;
+			beginAttempt(state);
+			if (isRetryBackoffCancelled(state)) {
+				return;
 			}
-			// 超时面治理批① 第 1 项：断流重试之间退避（0.5s 起 ×2 + 抖动），且只从"本段剩余预算"里出。
-			// 位置在旧看门狗关闭之后、新看门狗建立之前 ⇒ 退避不占用任何段死线，只消耗本段预算。
-			if (!correcting && budgetedAttempts > 1) {
-				if (awaitRetryBackoff(runId, budgetedAttempts - 1, turnStartedAtMs, config, retryAfterMs)) {
-					// 退避期已收到取消 ⇒ 不得再发一次尝试。W-30（run 40232440965 · runId 816aa484…）：
-					// 第 2 次尝试的请求没有工具结果，桩按"每路由一次"回纯文本，3ms 就正常收尾 ——
-					// 新看门狗一拍都没打（1s 节拍），工具事件边界也不存在，于是取消被吞、finish 写了 DONE。
-					// 这里直接进取消收尾，不赌"下一次尝试会被看门狗收口"。
-					stopKeepalive(keepalive);
-					cancelTerminal(runId, sessionId, null, budgetedAttempts - 1, null, out, turn);
-					return;
-				}
-				retryAfterMs = null;
-			}
-			// 保活上报本次尝试号（节拍仍由同一定时器出，不因重试重排）
-			if (keepalive != null) {
-				keepalive.attempt(attempt);
-			}
-			long attemptStartedAtMs = System.currentTimeMillis();
-			long beaconBefore = this.beacon.startedCount(runId);
-			Accumulator accumulator = new Accumulator(runId, turnTextBody);
-			// 每次 attempt 重置分段捕获：已落库的前缀不再算进待写正文，未落库部分继续参与工具跳/终态。
-			// 工具执行点（SpToolCallingManager）通过 toolContext 读到这份值，补全流式工具跳的 assistant。
-			turnTextBody.reset(prefixSegment);
-			// B1：本轮开始前真的压缩过 ⇒ 更小的 prompt 是压缩后的合法新基线，不是 R4 脏帧
-			if (turn != null && turn.compactionLevel() != null && !"none".equals(turn.compactionLevel())) {
-				accumulator.meter().allowPromptDecline();
-			}
-			if (StringUtils.hasText(prefixText)) {
-				// 纠正轮 / 纠正挂起后的续跑：正文/思考以已保存前缀起算，只用于计数、最终记忆与
-				// textEnd/chars，不重新 emit 前缀（deltas 仍只有本段）。
-				accumulator.seedPrefix(prefixText, prefixReasoning);
-			}
-			CompletableFuture<Void> settled = new CompletableFuture<>();
-			StreamWatchdog watchdog = new StreamWatchdog(runId, this.watchdogExecutor, this.cancelPollExecutor, config,
-					this.beacon, this.cancellations, turnStartedAtMs, settled::completeExceptionally);
-			Disposable subscription = null;
-			try {
-				Flux<ChatResponse> stream = correcting
-						? correctionStream.apply(correctionHistoryPrefix, prefixReasoning, createTaskCorrecting)
-						: attemptStream.apply(attempt);
-				subscription = stream
-					.subscribe(response -> {
-						try (RunIdentityScope.Scope ignored = RunIdentityScope.open(upstreamIdentity)) {
-							watchdog.onUpstreamEvent();
-							// ===== Task 5 Step 3：这里不再补心跳 =====
-							// 旧口径在"每条上游事件"上按 {@value #STREAMING_HEARTBEAT_MILLIS}ms 打一帧心跳 ——
-							// 于是上游不出事件（首包等待、包间静默、慢工具）就没有保活。心跳已交给
-							// {@link TurnKeepalive} 的<b>独立定时器</b>：它只看墙钟，不依赖上游事件，
-							// 因此三类静默与本回调是否被调用无关（心跳仍不占业务 seq、不入归档，见 emitter）。
-							consume(response, out, accumulator, turnTextBody);
-						}
-					}, settled::completeExceptionally, () -> settled.complete(null));
-				watchdog.bind(subscription);
-
-				awaitSettled(runId, settled, turnStartedAtMs, config);
-				emitFirstByte(attempt, attemptStartedAtMs, accumulator);
-
-				// 硬规范②：正常结束必须有终帧（带 finishReason 的响应）；"安静地"结束 = 断流
-				if (!accumulator.sawTerminal()) {
-					throw new StreamViolationException(StreamViolationException.INCOMPLETE,
-							"upstream stream ended without finishReason terminal frame; treating as broken; upstream events "
-									+ watchdog.upstreamEvents());
-				}
-				// 进入 QUERY_COND 后先给模型一次结构化 set_condition 机会；只有模型即将以正文收尾、
-				// 条件仍未决定时，才由宿主直接挂一次条件表单（不经过模型询问/文字追问）。
-				UpstreamErrorClassifier.Finish wrapUpFinish = accumulator.finish();
-				if (!correcting && StringUtils.hasText(accumulator.text())
-						&& (wrapUpFinish == UpstreamErrorClassifier.Finish.STOP
-								|| wrapUpFinish == UpstreamErrorClassifier.Finish.UNKNOWN)
-						&& parkConditionsAtWrapUp(runId, accumulator)) {
-					log.info("conditional still undecided at reply close, host parked one condition form runId={}", runId);
-					stopKeepalive(keepalive);
-					return;
-				}
-				// 导出收尾前的一轮内部纠正：模型把 EXPORT 步的活干完却只回正文时，再问它一次，
-				// 要求发起 start_export 确认卡（不自动执行、不绕过确认）。run 级最多一次、不占失败重试次数；
-				// content_filter / length 优先（明确失败/截断不得被纠正掩盖）。
-				UpstreamErrorClassifier.Finish firstFinish = accumulator.finish();
-				// 纠正是否该触发，只看本轮<b>是否有正文</b>（工具卡承载了全部正文时同样要纠正）；
-				// 未落库余段只用于前缀/落库去重，不能拿它当"有没有答过"的判据。
-				String correctionText = accumulator.unpersistedText();
-				boolean createTaskCorrectable = firstFinish != UpstreamErrorClassifier.Finish.LENGTH
-						&& firstFinish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
-						&& (firstFinish == UpstreamErrorClassifier.Finish.TOOL_CALLS || StringUtils.hasText(accumulator.text()));
-				boolean exportCorrectable = firstFinish != UpstreamErrorClassifier.Finish.LENGTH
-						&& firstFinish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
-						&& firstFinish != UpstreamErrorClassifier.Finish.TOOL_CALLS
-						&& StringUtils.hasText(accumulator.text());
-				if (!createTaskCorrectionUsed && !correcting && createTaskCorrectable
-						&& createTaskWrapUpCorrectionDue(runId, context)
-						&& markCorrectionUsed(runId, correctionText, CREATE_TASK_CORRECTION_MARKER,
-								CREATE_TASK_CORRECTION_PREFIX_KEY)) {
-					createTaskCorrectionUsed = true;
-					correcting = true;
-					createTaskCorrecting = true;
-					prefixText = accumulator.text();
-					prefixSegment = correctionText;
-					correctionHistoryPrefix = correctionText;
-					prefixReasoning = accumulator.reasoningText();
-					log.info("create-task action missing, sending one generic tool correction runId={} chars={}", runId, prefixText.length());
-					if (keepalive != null) {
-						keepalive.rearm();
-					}
-					continue;
-				}
-				if (!exportCorrectionUsed && !correcting && exportCorrectable
-						&& exportWrapUpCorrectionDue(runId, context, lastUserText)
-						&& markExportCorrectionUsed(runId, correctionText)) {
-					exportCorrectionUsed = true;
-					correcting = true;
-					createTaskCorrecting = false;
-					prefixText = accumulator.text();
-					prefixSegment = correctionText;
-					correctionHistoryPrefix = correctionText;
-					prefixReasoning = accumulator.reasoningText();
-					log.info("before export close, sending one internal correction: require "
-							+ "start_export confirmation card (not auto-executed) runId={} chars={}",
-							runId, prefixText.length());
-					if (keepalive != null) {
-						keepalive.rearm();
-					}
-					continue;
-				}
-				// 终态/非终态的分叉在 finish 内部：可再试一次（空回复）时它会发 retry 帧并返回 false。
-				// 先停表再进 finish：finish 若收终帧，终帧之后不得再有心跳（"终帧是本轮最后一帧"）；
-				// 若返回 false（同一轮继续），紧接着重新武装，退避与下一次尝试照样有保活。
-				stopKeepalive(keepalive);
-				boolean handled = finish(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn,
-						attemptStartedAtMs, beaconBefore, emptyReplyRetried, correctionHistoryPrefix);
-				if (handled) {
-					return;
-				}
-				// 空回复的<b>仅模型步</b>再试一次（AR-05）：不追加用户消息、不改历史切片、
-				// 不重跑任何工具（本轮零副作用已由 emptyReplyRetryable 证明），只是再问模型一次。
-				// 纠正轮为空时已在 finish 里用前缀正文成功收尾，不会走到这里把已成功轮写 FAILED。
-				if (keepalive != null) {
-					keepalive.rearm();
-				}
-				emptyReplyRetried = true;
-				correcting = false;
-				createTaskCorrecting = false;
-				prefixText = "";
-				prefixSegment = "";
-				prefixReasoning = "";
-				continue;
-			}
-			catch (Throwable error) {
-				// 人工等待 park（2026-10-25）：不是失败、不是取消 —— 本次执行到此结束，
-				// 不发终帧、不重试、不写失败态；快照保持/回到 SUSPENDED（合法恢复状态）。
-				if (error instanceof RunParkedException parked) {
-					// park 之后这一轮已交还线程：先停表，再（不写任何帧地）交还
-					stopKeepalive(keepalive);
-					parkTurn(runId, sessionId, parked);
-					return;
-				}
-				// 首包可能已经到过（随后才断流）：先把"首包耗时"落在断流日志之前
-				emitFirstByte(attempt, attemptStartedAtMs, accumulator);
-				UpstreamErrorClassifier.Outcome outcome = UpstreamErrorClassifier.classify(error,
-						watchdog.upstreamEvents());
-				StreamViolationException violation = asViolation(error, outcome);
-				if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
-					stopKeepalive(keepalive);
-					// 取消收尾沿用累计正文（纠正轮已含前缀）
-					cancelTerminal(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn);
-					return;
-				}
-				// 普通失败/重试门只认"已持久化的挂起工具轮"（SUSPENDED + in-flight 非空）：
-				// 单纯 SUSPENDED（in-flight 为空）不是挂起现场，普通续跑遇到异常必须走失败/重试 +
-				// error 终帧，否则这一轮会被静默交还（无终帧、不写 FAILED、不重试）。
-				boolean parkedToolRound = isPersistedParkedToolRound(runId);
-				// correcting（导出收尾纠正）例外：SUSPENDED 即已落库的挂起态，纠正兜底不得把它写成 DONE。
-				// 该判据只在纠正收尾参与，不参与普通失败门（见上）。
-				boolean suspendedRound = correcting && suspendedStatus(runId);
-				if (correcting && !parkedToolRound && !suspendedRound) {
-					// 纠正失败不重发同一请求、也不写成 FAILED：清掉纠正态，用"前缀 + 当前段"正常收尾。
-					// run 级"只纠正一次"由持久化标记保证，这里不会回到纠正分支。
-					// 若已 saveSuspended/SUSPENDED/in-flight（parkedToolRound），不得在这里 DONE —— 交给
-					// 下方的挂起轮交还逻辑保留现场，等 resume 物化。仅 SUSPENDED（suspendedRound）同样不 DONE，
-					// 但按普通失败路径收口（无 error 终帧才是真正的缺口）。
-					log.warn("close correction failed, closing with on-screen text runId={} code={}", runId,
-							violation.getCode(), violation);
-					stopKeepalive(keepalive);
-					finishSuccessGuarded(runId, sessionId, accumulator, budgetedAttempts, watchdog, out, turn,
-							prefixText, false);
-					return;
-				}
-				// 用户可见产出（正文或已上屏的思考）：隐藏思考不算，重试不会造成重复内容
-				boolean emitted = accumulator.emittedVisible();
-				// 副作用 = 本次尝试内工具开始执行过，或台账在本次尝试开始后新增了执行记录
-				boolean sideEffect = this.beacon.startedCount(runId) > beaconBefore
-						|| this.store.ledgerCountSince(runId, attemptStartedAtMs) > 0;
-				boolean overBudget = segmentElapsedMs(runId, turnStartedAtMs)
-						>= config.getTotalBudget().toMillis();
-				boolean hasNext = budgetedAttempts < maxAttempts;
-				boolean retryable = outcome.retryable() && !emitted && !sideEffect && hasNext && !overBudget;
-				// ===== W-21 Fix A：挂起工具轮不得被当作"可重试的空轮" =====
-				// saveSuspended 在等待<b>之前</b>就写好 SUSPENDED + inFlightToolCalls，请求帧也已公布。
-				// 此时若按"无产出/无副作用"发起普通重试，请求会从 memory 重建（user 被复制、assistant(tool_calls)
-				// 与 TOOL 段都不在），桩按幂等闸不再给工具 ⇒ finish 用 DONE 把挂着的那一轮抹掉
-				// （W-21 · run 40247120358：boot.log 6265/6282、req-206 `[system,user,user]`）。
-				// 与 RunParkedException 同口径：不是失败、不是取消 —— 不发终帧、不写失败态、不动快照/pending/req，
-				// 只把线程交还，由 resume 物化这一轮。判据只看<b>权威快照</b>（不看 pending 的结算时机），
-				// 且<b>独立于 ordinary-retryable</b>：已产出的挂起轮（emittedVisible=true）或最后一次尝试
-				// （hasNext=false）同样不能被 fail() 写成 FAILED —— 挂起轮一旦落库就只归 resume 收口。
-				if (parkedToolRound) {
-					retryable = false;
-				}
-				// 纠正轮不占失败重试次数（correcting 不增 budgetedAttempts），因此绝不能进失败重试：
-				// 走到这里的纠正失败（SUSPENDED 但 in-flight 为空）必须按失败收口（error 终帧），
-				// 否则会在"纠正 + 重试"之间无限打转（hasNext 恒真）。
-				if (correcting) {
-					retryable = false;
-				}
-				// 429 的 Retry-After 是"重试的最短等待"：剩余预算连它 + 下一次尝试的余量都不够时，
-				// 不做注定超预算的重试（宁可当场如实失败，也不让用户多等一次必然失败的重连）。
-				if (retryable && outcome.retryAfterMillis() != null) {
-					long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
-					if (outcome.retryAfterMillis() + RetryBackoff.BUDGET_MARGIN_MS > remaining) {
-						log.warn("retry skipped runId={} attempt={}/{} code={} Retry-After={}ms exceeds remaining budget {}ms",
-								runId, budgetedAttempts, maxAttempts, violation.getCode(), outcome.retryAfterMillis(),
-								Math.max(0L, remaining));
-						retryable = false;
-					}
-				}
-				long failedAtMs = System.currentTimeMillis();
-				// B：失败日志补"最后一条上游事件到失败"的静默时长与可得的工具活动间隔（都不含正文）。
-				long silenceMs = Math.max(0L, failedAtMs - watchdog.lastUpstreamAtMs());
-				long toolIdleMs = toolActivityIdleMs(runId, failedAtMs);
-				log.warn("attempt failed runId={} attempt={}/{} code={} emitted={} sideEffect={} overBudget={} "
-						+ "retryable={} upstreamEvents={} silence={}ms toolIdle={} lastFrames=[{}]",
-						runId, budgetedAttempts, maxAttempts, violation.getCode(), emitted, sideEffect, overBudget, retryable,
-						watchdog.upstreamEvents(), silenceMs, toolIdleMs, accumulator.tailSummary(), violation);
-				if (!retryable) {
-					stopKeepalive(keepalive);
-					if (parkedToolRound) {
-						handBackParkedToolRound(runId, sessionId, budgetedAttempts, violation);
-						return;
-					}
-					fail(runId, sessionId, violation, budgetedAttempts, emitted, sideEffect, accumulator, out, turn);
-					return;
-				}
-				// 只对紧接着的这次重试生效；下一轮尝试开始后不再沿用
-				retryAfterMs = outcome.retryAfterMillis();
-				Map<String, Object> retryFrame = new LinkedHashMap<>();
-				retryFrame.put("nextAttempt", budgetedAttempts + 1);
-				retryFrame.put("code", violation.getCode());
-				retryFrame.put("reason", describe(violation));
-				retryFrame.put("upstreamEvents", watchdog.upstreamEvents());
-				retryFrame.put("elapsedMs", System.currentTimeMillis() - turnStartedAtMs);
-				if (outcome.retryAfterMillis() != null) {
-					retryFrame.put("retryAfterMs", outcome.retryAfterMillis());
-				}
-				out.retry(retryFrame);
-				// 日志链路批：重试是"这一轮为什么慢/为什么贵"的第一解释项，必须有结构化行
-				// AI 日志最小补齐批：补上"这次尝试本身"的三个数（耗时 / 首包 / token），否则重试只能看整轮汇总
-				Map<String, Object> attemptUsage = accumulator.usage(turn.promptEstimate());
-				AiTrace.event("turn_retry", "attempt", budgetedAttempts, "nextAttempt", budgetedAttempts + 1, "code", violation.getCode(),
-						"reason", violation.getMessage(), "emitted", emitted, "sideEffect", sideEffect,
-						"upstreamEvents", watchdog.upstreamEvents(),
-						"attemptMs", System.currentTimeMillis() - attemptStartedAtMs,
-						"firstByteMs", accumulator.firstByteMs(attemptStartedAtMs),
-						"inputTokens", attemptUsage.getOrDefault("promptTokens", 0),
-						"outputTokens", attemptUsage.getOrDefault("completionTokens", 0),
-						"elapsedMs", System.currentTimeMillis() - turnStartedAtMs);
-			}
-			finally {
-				watchdog.close();
-				if (subscription != null && !subscription.isDisposed()) {
-					subscription.dispose();
-				}
+			AttemptRound round = prepareAttemptRound(state);
+			if (executeAttempt(state, round) == AttemptStep.RETURN) {
+				return;
 			}
 		}
+	}
+
+	private boolean isAttemptBudgetExhausted(AttemptLoopState state) {
+		if (state.correcting || state.budgetedAttempts < state.maxAttempts) {
+			return false;
+		}
+		stopKeepalive(state.keepalive);
+		emptyReply(state.runId, state.sessionId, new Accumulator(state.runId), Math.max(1, state.budgetedAttempts),
+				state.out, state.turn);
+		return true;
+	}
+
+	private void beginAttempt(AttemptLoopState state) {
+		state.attempt++;
+		if (!state.correcting) {
+			state.budgetedAttempts++;
+		}
+	}
+
+	private boolean isRetryBackoffCancelled(AttemptLoopState state) {
+		if (!state.correcting && state.budgetedAttempts > 1) {
+			if (isAwaitRetryBackoff(state.runId, state.budgetedAttempts - 1, state.turnStartedAtMs, state.config,
+					state.retryAfterMs)) {
+				stopKeepalive(state.keepalive);
+				cancelTerminal(state.runId, state.sessionId, null, state.budgetedAttempts - 1, null, state.out, state.turn);
+				return true;
+			}
+			state.retryAfterMs = null;
+		}
+		return false;
+	}
+
+	private AttemptRound prepareAttemptRound(AttemptLoopState state) {
+		if (state.keepalive != null) {
+			state.keepalive.attempt(state.attempt);
+		}
+		long startedAt = System.currentTimeMillis();
+		long beaconBefore = this.beacon.startedCount(state.runId);
+		Accumulator accumulator = new Accumulator(state.runId, state.turnTextBody);
+		state.turnTextBody.reset(state.prefixSegment);
+		if (state.turn != null && state.turn.compactionLevel() != null && !"none".equals(state.turn.compactionLevel())) {
+			accumulator.meter().allowPromptDecline();
+		}
+		if (StringUtils.isNotBlank(state.prefixText)) {
+			accumulator.seedPrefix(state.prefixText, state.prefixReasoning);
+		}
+		CompletableFuture<Void> settled = new CompletableFuture<>();
+		StreamWatchdog watchdog = new StreamWatchdog(state.runId, this.watchdogExecutor, this.cancelPollExecutor,
+				state.config, this.beacon, this.cancellations, state.turnStartedAtMs, settled::completeExceptionally);
+		return new AttemptRound(accumulator, watchdog, settled, startedAt, beaconBefore);
+	}
+
+	private AttemptStep executeAttempt(AttemptLoopState state, AttemptRound round) {
+		try {
+			subscribeAndAwait(state, round);
+			if (isConditionParkAtWrapUp(state, round)) {
+				return AttemptStep.RETURN;
+			}
+			if (isCorrectionDue(state, round)) {
+				return AttemptStep.CONTINUE;
+			}
+			return finishAttempt(state, round);
+		}
+		catch (Throwable error) {
+			return handleAttemptError(state, round, error);
+		}
+		finally {
+			closeAttemptRound(round);
+		}
+	}
+
+	private void subscribeAndAwait(AttemptLoopState state, AttemptRound round) {
+		Flux<ChatResponse> stream = state.correcting
+				? state.correctionStream.apply(state.correctionHistoryPrefix, state.prefixReasoning,
+						state.createTaskCorrecting)
+				: state.attemptStream.apply(state.attempt);
+		round.subscription = stream
+			.subscribe(response -> {
+				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(state.upstreamIdentity)) {
+					round.watchdog.onUpstreamEvent();
+					consume(response, state.out, round.accumulator, state.turnTextBody);
+				}
+			}, round.settled::completeExceptionally, () -> round.settled.complete(null));
+		round.watchdog.bind(round.subscription);
+		awaitSettled(state.runId, round.settled, state.turnStartedAtMs, state.config);
+		emitFirstByte(state.attempt, round.startedAtMs, round.accumulator);
+		if (!round.accumulator.sawTerminal()) {
+			throw new StreamViolationException(StreamViolationException.INCOMPLETE,
+					"upstream stream ended without finishReason terminal frame; treating as broken; upstream events "
+							+ round.watchdog.upstreamEvents());
+		}
+	}
+
+	private boolean isConditionParkAtWrapUp(AttemptLoopState state, AttemptRound round) {
+		UpstreamErrorClassifier.Finish finish = round.accumulator.finish();
+		if (state.correcting || StringUtils.isBlank(round.accumulator.text())
+				|| finish != UpstreamErrorClassifier.Finish.STOP && finish != UpstreamErrorClassifier.Finish.UNKNOWN
+				|| !isParkConditionsAtWrapUp(state.runId, round.accumulator)) {
+			return false;
+		}
+		log.info("conditional still undecided at reply close, host parked one condition form runId={}", state.runId);
+		stopKeepalive(state.keepalive);
+		return true;
+	}
+
+	private boolean isCorrectionDue(AttemptLoopState state, AttemptRound round) {
+		UpstreamErrorClassifier.Finish finish = round.accumulator.finish();
+		String correctionText = round.accumulator.unpersistedText();
+		if (isCreateTaskCorrectionDue(state, round, finish, correctionText)) {
+			startCorrection(state, round, correctionText, true);
+			log.info("create-task action missing, sending one generic tool correction runId={} chars={}", state.runId,
+					state.prefixText.length());
+			rearmKeepalive(state.keepalive);
+			return true;
+		}
+		if (isExportCorrectionDue(state, round, finish, correctionText)) {
+			startCorrection(state, round, correctionText, false);
+			log.info("before export close, sending one internal correction: require "
+					+ "start_export confirmation card (not auto-executed) runId={} chars={}", state.runId,
+					state.prefixText.length());
+			rearmKeepalive(state.keepalive);
+			return true;
+		}
+		return false;
+	}
+
+	private boolean isCreateTaskCorrectionDue(AttemptLoopState state, AttemptRound round,
+			UpstreamErrorClassifier.Finish finish, String correctionText) {
+		boolean correctable = finish != UpstreamErrorClassifier.Finish.LENGTH
+				&& finish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
+				&& (finish == UpstreamErrorClassifier.Finish.TOOL_CALLS || StringUtils.isNotBlank(round.accumulator.text()));
+		return !state.createTaskCorrectionUsed && !state.correcting && correctable
+				&& isCreateTaskWrapUpCorrectionDue(state.runId, state.context)
+				&& isMarkCorrectionUsed(state.runId, correctionText, CREATE_TASK_CORRECTION_MARKER,
+						CREATE_TASK_CORRECTION_PREFIX_KEY);
+	}
+
+	private boolean isExportCorrectionDue(AttemptLoopState state, AttemptRound round,
+			UpstreamErrorClassifier.Finish finish, String correctionText) {
+		boolean correctable = finish != UpstreamErrorClassifier.Finish.LENGTH
+				&& finish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
+				&& finish != UpstreamErrorClassifier.Finish.TOOL_CALLS
+				&& StringUtils.isNotBlank(round.accumulator.text());
+		return !state.exportCorrectionUsed && !state.correcting && correctable
+				&& exportWrapUpCorrectionDue(state.runId, state.context, state.lastUserText)
+				&& isMarkExportCorrectionUsed(state.runId, correctionText);
+	}
+
+	private void startCorrection(AttemptLoopState state, AttemptRound round, String correctionText,
+			boolean createTask) {
+		if (createTask) {
+			state.createTaskCorrectionUsed = true;
+		}
+		else {
+			state.exportCorrectionUsed = true;
+		}
+		state.correcting = true;
+		state.createTaskCorrecting = createTask;
+		state.prefixText = round.accumulator.text();
+		state.prefixSegment = correctionText;
+		state.correctionHistoryPrefix = correctionText;
+		state.prefixReasoning = round.accumulator.reasoningText();
+	}
+
+	private AttemptStep finishAttempt(AttemptLoopState state, AttemptRound round) {
+		stopKeepalive(state.keepalive);
+		boolean handled = isFinish(state.runId, state.sessionId, round.accumulator, state.budgetedAttempts,
+				round.watchdog, state.out, state.turn, round.startedAtMs, round.beaconBefore, state.emptyReplyRetried,
+				state.correctionHistoryPrefix);
+		if (handled) {
+			return AttemptStep.RETURN;
+		}
+		rearmKeepalive(state.keepalive);
+		state.emptyReplyRetried = true;
+		state.correcting = false;
+		state.createTaskCorrecting = false;
+		state.prefixText = "";
+		state.prefixSegment = "";
+		state.prefixReasoning = "";
+		return AttemptStep.CONTINUE;
+	}
+
+	private AttemptStep handleAttemptError(AttemptLoopState state, AttemptRound round, Throwable error) {
+		if (error instanceof RunParkedException parked) {
+			stopKeepalive(state.keepalive);
+			parkTurn(state.runId, state.sessionId, parked);
+			return AttemptStep.RETURN;
+		}
+		emitFirstByte(state.attempt, round.startedAtMs, round.accumulator);
+		UpstreamErrorClassifier.Outcome outcome = UpstreamErrorClassifier.classify(error,
+				round.watchdog.upstreamEvents());
+		StreamViolationException violation = asViolation(error, outcome);
+		if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
+			stopKeepalive(state.keepalive);
+			cancelTerminal(state.runId, state.sessionId, round.accumulator, state.budgetedAttempts, round.watchdog,
+					state.out, state.turn);
+			return AttemptStep.RETURN;
+		}
+		boolean parkedToolRound = isPersistedParkedToolRound(state.runId);
+		boolean suspendedRound = state.correcting && isSuspendedStatus(state.runId);
+		if (state.correcting && !parkedToolRound && !suspendedRound) {
+			log.warn("close correction failed, closing with on-screen text runId={} code={}", state.runId,
+					violation.getCode(), violation);
+			stopKeepalive(state.keepalive);
+			finishSuccessGuarded(state.runId, state.sessionId, round.accumulator, state.budgetedAttempts, round.watchdog,
+					state.out, state.turn, state.prefixText, false);
+			return AttemptStep.RETURN;
+		}
+		AttemptFailure failure = evaluateAttemptFailure(state, round, outcome, violation, parkedToolRound);
+		logAttemptFailure(state, round, failure);
+		if (!failure.isRetryable()) {
+			stopKeepalive(state.keepalive);
+			if (failure.isParkedToolRound()) {
+				handBackParkedToolRound(state.runId, state.sessionId, state.budgetedAttempts, violation);
+			}
+			else {
+				fail(state.runId, state.sessionId, violation, state.budgetedAttempts, failure.hasEmitted(),
+						failure.hasSideEffect(), round.accumulator, state.out, state.turn);
+			}
+			return AttemptStep.RETURN;
+		}
+		state.retryAfterMs = outcome.retryAfterMillis();
+		emitAttemptRetry(state, round, failure);
+		return AttemptStep.CONTINUE;
+	}
+
+	private AttemptFailure evaluateAttemptFailure(AttemptLoopState state, AttemptRound round,
+			UpstreamErrorClassifier.Outcome outcome, StreamViolationException violation, boolean parkedToolRound) {
+		boolean emitted = round.accumulator.emittedVisible();
+		boolean sideEffect = this.beacon.startedCount(state.runId) > round.beaconBefore
+				|| this.store.ledgerCountSince(state.runId, round.startedAtMs) > 0;
+		boolean overBudget = segmentElapsedMs(state.runId, state.turnStartedAtMs) >= state.config.getTotalBudget().toMillis();
+		boolean retryable = outcome.retryable() && !emitted && !sideEffect && state.budgetedAttempts < state.maxAttempts
+				&& !overBudget && !parkedToolRound && !state.correcting;
+		if (retryable && outcome.retryAfterMillis() != null) {
+			long remaining = state.config.getTotalBudget().toMillis() - segmentElapsedMs(state.runId, state.turnStartedAtMs);
+			if (outcome.retryAfterMillis() + RetryBackoff.BUDGET_MARGIN_MS > remaining) {
+				log.warn("retry skipped runId={} attempt={}/{} code={} Retry-After={}ms exceeds remaining budget {}ms",
+						state.runId, state.budgetedAttempts, state.maxAttempts, violation.getCode(), outcome.retryAfterMillis(),
+						Math.max(0L, remaining));
+				retryable = false;
+			}
+		}
+		return new AttemptFailure(outcome, violation, parkedToolRound, emitted, sideEffect, overBudget, retryable);
+	}
+
+	private void logAttemptFailure(AttemptLoopState state, AttemptRound round, AttemptFailure failure) {
+		long failedAtMs = System.currentTimeMillis();
+		long silenceMs = Math.max(0L, failedAtMs - round.watchdog.lastUpstreamAtMs());
+		long toolIdleMs = toolActivityIdleMs(state.runId, failedAtMs);
+		log.warn("attempt failed runId={} attempt={}/{} code={} emitted={} sideEffect={} overBudget={} "
+				+ "retryable={} upstreamEvents={} silence={}ms toolIdle={} lastFrames=[{}]", state.runId,
+				state.budgetedAttempts, state.maxAttempts, failure.violation().getCode(), failure.hasEmitted(),
+				failure.hasSideEffect(), failure.isOverBudget(), failure.isRetryable(), round.watchdog.upstreamEvents(),
+				silenceMs, toolIdleMs, round.accumulator.tailSummary(), failure.violation());
+	}
+
+	private void emitAttemptRetry(AttemptLoopState state, AttemptRound round, AttemptFailure failure) {
+		Map<String, Object> retryFrame = new LinkedHashMap<>();
+		retryFrame.put("nextAttempt", state.budgetedAttempts + 1);
+		retryFrame.put("code", failure.violation().getCode());
+		retryFrame.put("reason", describe(failure.violation()));
+		retryFrame.put("upstreamEvents", round.watchdog.upstreamEvents());
+		retryFrame.put("elapsedMs", System.currentTimeMillis() - state.turnStartedAtMs);
+		if (failure.outcome().retryAfterMillis() != null) {
+			retryFrame.put("retryAfterMs", failure.outcome().retryAfterMillis());
+		}
+		state.out.retry(retryFrame);
+		Map<String, Object> usage = round.accumulator.usage(state.turn.promptEstimate());
+		AiTrace.event("turn_retry", "attempt", state.budgetedAttempts, "nextAttempt", state.budgetedAttempts + 1,
+				"code", failure.violation().getCode(), "reason", failure.violation().getMessage(), "emitted",
+				failure.hasEmitted(), "sideEffect", failure.hasSideEffect(), "upstreamEvents",
+				round.watchdog.upstreamEvents(), "attemptMs", System.currentTimeMillis() - round.startedAtMs,
+				"firstByteMs", round.accumulator.firstByteMs(round.startedAtMs), "inputTokens",
+				usage.getOrDefault("promptTokens", 0), "outputTokens", usage.getOrDefault("completionTokens", 0),
+				"elapsedMs", System.currentTimeMillis() - state.turnStartedAtMs);
+	}
+
+	private static void rearmKeepalive(TurnKeepalive keepalive) {
+		if (keepalive != null) {
+			keepalive.rearm();
+		}
+	}
+
+	private static void closeAttemptRound(AttemptRound round) {
+		try {
+			round.watchdog.close();
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("attempt-watchdog-close")) log.warn("attempt watchdog close failed", ex);
+		}
+		try {
+			if (round.subscription != null && !round.subscription.isDisposed()) {
+				round.subscription.dispose();
+			}
+		}
+		catch (RuntimeException ex) {
+			if (LogSampling.canAcquire("attempt-subscription-dispose")) log.warn("attempt subscription dispose failed", ex);
+		}
+	}
+
+	private enum AttemptStep {
+		RETURN,
+		CONTINUE
+	}
+
+	private record AttemptFailure(UpstreamErrorClassifier.Outcome outcome, StreamViolationException violation,
+			boolean isParkedToolRound, boolean hasEmitted, boolean hasSideEffect, boolean isOverBudget,
+			boolean isRetryable) {
+	}
+
+	private static final class AttemptRound {
+
+		private final Accumulator accumulator;
+		private final StreamWatchdog watchdog;
+		private final CompletableFuture<Void> settled;
+		private final long startedAtMs;
+		private final long beaconBefore;
+		private Disposable subscription;
+
+		private AttemptRound(Accumulator accumulator, StreamWatchdog watchdog, CompletableFuture<Void> settled,
+				long startedAtMs, long beaconBefore) {
+			this.accumulator = accumulator;
+			this.watchdog = watchdog;
+			this.settled = settled;
+			this.startedAtMs = startedAtMs;
+			this.beaconBefore = beaconBefore;
+		}
+
+	}
+
+	private final class AttemptLoopState {
+
+		private final String runId;
+		private final String sessionId;
+		private final long turnStartedAtMs;
+		private final SseChatEmitter out;
+		private final TurnContext turn;
+		private final TurnKeepalive keepalive;
+		private final AiContext context;
+		private final String lastUserText;
+		private final SpToolCallingManager.TurnTextCapture turnTextBody;
+		private final IntFunction<Flux<ChatResponse>> attemptStream;
+		private final CorrectionStreamFactory correctionStream;
+		private final AiProperties.Resilience config = ResilientChatService.this.properties.getResilience();
+		private final TenantUser upstreamIdentity = RequestContextUtils.currentOrNull();
+		private final int maxAttempts = Math.max(1, this.config.getMaxAttempts());
+		private Long retryAfterMs;
+		private boolean emptyReplyRetried;
+		private boolean exportCorrectionUsed;
+		private boolean createTaskCorrectionUsed;
+		private String prefixText;
+		private String prefixSegment;
+		private String correctionHistoryPrefix;
+		private String prefixReasoning = "";
+		private boolean correcting;
+		private boolean createTaskCorrecting;
+		private int attempt;
+		private int budgetedAttempts;
+
+		private AttemptLoopState(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
+				TurnContext turn, TurnKeepalive keepalive, AiContext context, String lastUserText, String resumePrefix,
+				String resumePendingSegment, SpToolCallingManager.TurnTextCapture turnTextBody,
+				IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream) {
+			this.runId = runId;
+			this.sessionId = sessionId;
+			this.turnStartedAtMs = turnStartedAtMs;
+			this.out = out;
+			this.turn = turn;
+			this.keepalive = keepalive;
+			this.context = context;
+			this.lastUserText = lastUserText;
+			this.turnTextBody = turnTextBody;
+			this.attemptStream = attemptStream;
+			this.correctionStream = correctionStream;
+			this.prefixText = StringUtils.defaultString(resumePrefix);
+			this.prefixSegment = StringUtils.defaultString(resumePendingSegment);
+			this.correctionHistoryPrefix = this.prefixText;
+			this.exportCorrectionUsed = exportCorrectionAlreadyUsed(runId);
+			this.createTaskCorrectionUsed = correctionAlreadyUsed(runId, CREATE_TASK_CORRECTION_MARKER);
+		}
+
 	}
 
 	/**
@@ -1581,7 +1679,7 @@ public class ResilientChatService {
 
 	static final String CREATE_TASK_CORRECTION_PREFIX_KEY = "createTaskCorrectionPrefix";
 
-	private boolean createTaskWrapUpCorrectionDue(String runId, AiContext fallback) {
+	private boolean isCreateTaskWrapUpCorrectionDue(String runId, AiContext fallback) {
 		AiContext context = latestContext(runId, fallback);
 		if (context == null || context.getTaskId() != null || !disclosedTool(context, AiToolNames.CREATE_TASK)) {
 			return false;
@@ -1697,7 +1795,7 @@ public class ResilientChatService {
 		}
 		try {
 			List<ToolCallback> tools = this.toolRegistry.forContext(context);
-			for (ToolCallback callback : tools == null ? List.<ToolCallback>of() : tools) {
+			for (ToolCallback callback : ObjectUtils.defaultIfNull(tools, List.<ToolCallback>of())) {
 				if (callback != null && callback.getToolDefinition() != null
 						&& toolName.equals(callback.getToolDefinition().name())) {
 					return true;
@@ -1741,7 +1839,7 @@ public class ResilientChatService {
 	 * 它是本轮工具卡，删除会破坏工具配对。
 	 */
 	static int removeAssistantWithText(List<Message> history, String prefix) {
-		if (prefix == null || prefix.isEmpty() || history == null) {
+		if (StringUtils.isEmpty(prefix) || history == null) {
 			return 0;
 		}
 		int lastRealUser = -1;
@@ -1771,7 +1869,7 @@ public class ResilientChatService {
 	}
 
 	/** create_task 纠正已登记的持久化事实（不看 prefix key —— 空正文时它不会写）。 */
-	private static boolean createTaskCorrectionMarked(RunSnapshot snapshot) {
+	private static boolean isCreateTaskCorrectionMarked(RunSnapshot snapshot) {
 		if (snapshot == null || snapshot.getContext() == null) {
 			return false;
 		}
@@ -1780,7 +1878,7 @@ public class ResilientChatService {
 			return extra != null && Boolean.TRUE.equals(extra.get(CREATE_TASK_CORRECTION_MARKER));
 		}
 		catch (RuntimeException ex) {
-			log.debug("read create_task correction marker failed (treating as not marked)", ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("read create_task correction marker failed (treating as not marked)", ex);
 			return false;
 		}
 	}
@@ -1795,7 +1893,7 @@ public class ResilientChatService {
 			return extra != null && Boolean.TRUE.equals(extra.get(marker));
 		}
 		catch (RuntimeException ex) {
-			log.debug("read close correction marker failed runId={} (treating as not corrected)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("read close correction marker failed runId={} (treating as not corrected)", runId, ex);
 			return false;
 		}
 	}
@@ -1815,10 +1913,10 @@ public class ResilientChatService {
 			if (value == null && extra != null) {
 				value = extra.get(EXPORT_CORRECTION_PREFIX_KEY);
 			}
-			return value == null ? "" : String.valueOf(value);
+			return ObjectUtils.toString(value, "");
 		}
 		catch (RuntimeException ex) {
-			log.debug("read correction prefix failed (treating as none)", ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("read correction prefix failed (treating as none)", ex);
 			return "";
 		}
 	}
@@ -1828,13 +1926,13 @@ public class ResilientChatService {
 	}
 
 	/** 写 run 级"已纠正"标记；写不进去 = 不纠正（宁可少问一次，也不在多实例/续跑里重复纠正）。 */
-	private boolean markExportCorrectionUsed(String runId, String prefixText) {
-		return markCorrectionUsed(runId, prefixText, EXPORT_CORRECTION_MARKER, EXPORT_CORRECTION_PREFIX_KEY);
+	private boolean isMarkExportCorrectionUsed(String runId, String prefixText) {
+		return isMarkCorrectionUsed(runId, prefixText, EXPORT_CORRECTION_MARKER, EXPORT_CORRECTION_PREFIX_KEY);
 	}
 
-	private boolean markCorrectionUsed(String runId, String prefixText, String marker, String prefixKey) {
+	private boolean isMarkCorrectionUsed(String runId, String prefixText, String marker, String prefixKey) {
 		try {
-			if (!persistAllowed(runId, "close correction marker")) {
+			if (!isPersistAllowed(runId, "close correction marker")) {
 				return false;
 			}
 			RunSnapshot snapshot = this.store.get(runId);
@@ -1850,7 +1948,7 @@ public class ResilientChatService {
 			extra.put(marker, Boolean.TRUE);
 			extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
 			extra.remove(CREATE_TASK_CORRECTION_PREFIX_KEY);
-			if (StringUtils.hasText(prefixText)) {
+			if (StringUtils.isNotBlank(prefixText)) {
 				extra.put(prefixKey, prefixText);
 			}
 			snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
@@ -1876,35 +1974,35 @@ public class ResilientChatService {
 			return AiContext.fromMap(snapshot.getContext());
 		}
 		catch (RuntimeException ex) {
-			log.debug("read latest context failed runId={} (falling back to drive context)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("read latest context failed runId={} (falling back to drive context)", runId, ex);
 			return fallback;
 		}
 	}
 
 	/** 模型正文收尾前：仅在当前 run、当前任务已有推进/条件设置证据时挂一次 QUERY_COND 条件表单。 */
-	private boolean parkConditionsAtWrapUp(String runId, Accumulator accumulator) {
+	private boolean isParkConditionsAtWrapUp(String runId, Accumulator accumulator) {
 		if (this.conditionsForm == null || accumulator == null) {
 			return false;
 		}
 		// 是否进入宿主判断只看"本轮有正文"；工具卡可能已经承载全部正文（unpersisted 为空）。
-		if (!StringUtils.hasText(accumulator.text())) {
+		if (!StringUtils.isNotBlank(accumulator.text())) {
 			return false;
 		}
 		RunSnapshot snapshot = this.store.get(runId);
-		if (snapshot == null || !conditionWorkflowEvidence(runId, AiContext.fromMap(snapshot.getContext()).getTaskId())) {
+		if (snapshot == null || !isConditionWorkflowEvidence(runId, AiContext.fromMap(snapshot.getContext()).getTaskId())) {
 			return false;
 		}
 		// 只有确实还有未落库余段时才补 assistant；已由工具卡持久化的正文不重复追加。
 		String segment = accumulator.unpersistedText();
 		AiContext latest = AiContext.fromMap(snapshot.getContext());
 		List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-		if (StringUtils.hasText(segment) && !endsWithAssistantText(history, segment)) {
+		if (StringUtils.isNotBlank(segment) && !isEndsWithAssistantText(history, segment)) {
 			history.add(assistantMessage(segment, storedReasoning(accumulator.reasoningText())));
 		}
 		return this.conditionsForm.parkIfDueAtQueryCond(runId, latest, history);
 	}
 
-	private boolean conditionWorkflowEvidence(String runId, Long currentTaskId) {
+	private boolean isConditionWorkflowEvidence(String runId, Long currentTaskId) {
 		if (currentTaskId == null) {
 			return false;
 		}
@@ -1915,26 +2013,26 @@ public class ResilientChatService {
 				boolean workflowAction = AiToolNames.CONFIRM_STEP.equals(pending.getName())
 						|| AiToolNames.SET_CONDITION.equals(pending.getName());
 				if (workflowAction && pending.resolved() && pending.effectiveOutcome() == ToolOutcome.OK
-						&& conditionEvidenceBelongsToTask(pending, currentTaskId)
+						&& isConditionEvidenceBelongsToTask(pending, currentTaskId)
 						&& (latestTaskBindingAtMs == 0L || conditionEvidenceAtMs(pending) > latestTaskBindingAtMs)) {
 					return true;
 				}
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("condition workflow evidence unavailable; skipping wrap-up form runId={} taskId={}",
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("condition workflow evidence unavailable; skipping wrap-up form runId={} taskId={}",
 					runId, currentTaskId, ex);
 		}
 		return false;
 	}
 
-	private static boolean conditionEvidenceBelongsToTask(PendingToolCall pending, Long currentTaskId) {
+	private static boolean isConditionEvidenceBelongsToTask(PendingToolCall pending, Long currentTaskId) {
 		Long draftTaskId = pending.getDraftTaskId();
 		Long argumentTaskId = ToolTargetResolver.taskIdOf(pending.getArguments());
 		if (draftTaskId != null && argumentTaskId != null && !draftTaskId.equals(argumentTaskId)) {
 			return false;
 		}
-		Long evidenceTaskId = draftTaskId == null ? argumentTaskId : draftTaskId;
+		Long evidenceTaskId = ObjectUtils.defaultIfNull(draftTaskId, argumentTaskId);
 		// 普通 confirm_step 的既有 schema 不带 taskId，保留当前 run 的兼容路径；一旦条目带有
 		// 显式任务归属（宿主草案或扩展入参），不同任务的证据一律不得用于当前任务。
 		return evidenceTaskId == null || currentTaskId.equals(evidenceTaskId);
@@ -1973,7 +2071,7 @@ public class ResilientChatService {
 		List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
 		// 类型由触发分支显式传入；再用持久化 marker 确认 create_task 纠正确实已登记。
 		// 不能看 prefix key：正文全部由工具卡承载时 prefix 为空、prefix key 本就不写。
-		boolean createTaskCorrection = createTaskCorrectionActive && createTaskCorrectionMarked(snapshot);
+		boolean createTaskCorrection = createTaskCorrectionActive && isCreateTaskCorrectionMarked(snapshot);
 		history.add(new UserMessage(createTaskCorrection ? createTaskWrapUpCorrection(latest.getTaskType())
 				: exportWrapUpCorrection(latest.getTaskId())));
 		Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
@@ -1991,23 +2089,23 @@ public class ResilientChatService {
 	List<Message> correctionHistory(RunSnapshot snapshot, List<Message> fallbackHistory, String prefixText,
 			String prefixReasoning) {
 		List<Message> history = new ArrayList<>();
-		if (snapshot != null && snapshot.getMessageJson() != null && !snapshot.getMessageJson().isEmpty()) {
+		if (snapshot != null && StringUtils.isNotEmpty(snapshot.getMessageJson())) {
 			history.addAll(this.codec.deserializeAll(snapshot.getMessageJson()));
 		}
 		else if (fallbackHistory != null) {
 			history.addAll(fallbackHistory);
 		}
-		if (StringUtils.hasText(prefixText) && !endsWithAssistantText(history, prefixText)) {
+		if (StringUtils.isNotBlank(prefixText) && !isEndsWithAssistantText(history, prefixText)) {
 			history.add(assistantMessage(prefixText, storedReasoning(prefixReasoning)));
 		}
 		return history;
 	}
 
-	private static boolean endsWithAssistantText(List<Message> history, String text) {
+	private static boolean isEndsWithAssistantText(List<Message> history, String text) {
 		if (history.isEmpty()) {
 			return false;
 		}
-		Message last = history.get(history.size() - 1);
+		Message last = history.getLast();
 		return last instanceof AssistantMessage assistant && text.equals(assistant.getText());
 	}
 
@@ -2017,7 +2115,7 @@ public class ResilientChatService {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("read pending entries failed, skipping close correction runId={}", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("read pending entries failed, skipping close correction runId={}", runId, ex);
 			return false;
 		}
 		AiContext latest = latestContext(runId, context);
@@ -2038,23 +2136,23 @@ public class ResilientChatService {
 			pendings = this.store.pendingsLenient(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("read pending entries failed, treating as no new export evidence runId={}", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("read pending entries failed, treating as no new export evidence runId={}", runId, ex);
 			return false;
 		}
-		for (PendingToolCall pending : pendings == null ? List.<PendingToolCall>of() : pendings) {
+		for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
 			if (pending == null || !AiToolNames.CREATE_TASK.equals(pending.getName()) || !pending.resolved()
 					|| pending.effectiveOutcome() != ToolOutcome.OK) {
 				continue;
 			}
-			if (createdExportTask(pending.getArguments())) {
+			if (isCreatedExportTask(pending.getArguments())) {
 				return true;
 			}
 		}
 		return false;
 	}
 
-	private static boolean createdExportTask(String argumentsJson) {
-		if (argumentsJson == null || argumentsJson.isBlank()) {
+	private static boolean isCreatedExportTask(String argumentsJson) {
+		if (StringUtils.isBlank(argumentsJson)) {
 			return false;
 		}
 		try {
@@ -2068,16 +2166,16 @@ public class ResilientChatService {
 		}
 	}
 
-	private boolean awaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs,
+	private boolean isAwaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs,
 			AiProperties.Resilience config, Long retryAfterMillis) {
 		long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
 		long delay = RetryBackoff.delayMsWithRetryAfter(retryNo, remaining, retryAfterMillis);
 		if (delay <= 0) {
-			log.debug("retry backoff skipped runId={} retry={} remaining={}ms Retry-After={} (no wait)", runId, retryNo,
+			if (log.isDebugEnabled()) log.debug("retry backoff skipped runId={} retry={} remaining={}ms Retry-After={} (no wait)", runId, retryNo,
 					remaining, retryAfterMillis);
 			return false;
 		}
-		log.debug("retry backoff runId={} retry={} wait={}ms remaining={}ms Retry-After={}", runId, retryNo, delay, remaining,
+		if (log.isDebugEnabled()) log.debug("retry backoff runId={} retry={} wait={}ms remaining={}ms Retry-After={}", runId, retryNo, delay, remaining,
 				retryAfterMillis);
 		long deadline = System.currentTimeMillis() + delay;
 		while (true) {
@@ -2149,7 +2247,7 @@ public class ResilientChatService {
 		long budgetMs = config.getTotalBudget().toMillis();
 		while (true) {
 			// 挂起中（段已结束）：预算暂停，只留一个短切片回来复查 —— 恢复点在另一条线程上重置段起点
-			long remain = this.beacon.inGateWait(runId) ? Math.max(1000L, budgetMs)
+			long remain = this.beacon.isInGateWait(runId) ? Math.max(1000L, budgetMs)
 					: budgetMs + 1000L - segmentElapsedMs(runId, turnStartedAtMs);
 			if (remain <= 0) {
 				throw new StreamViolationException(StreamViolationException.TOTAL_BUDGET,
@@ -2237,7 +2335,7 @@ public class ResilientChatService {
 	 * @return {@code true} = 已终态收尾（调用方 return）；{@code false} = 空回复可再试一次
 	 *         （调用方继续尝试循环，本方法已发 {@code retry} 帧）
 	 */
-	private boolean finish(String runId, String sessionId, Accumulator accumulator, int attempts,
+	private boolean isFinish(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, long attemptStartedAtMs,
 			long beaconBefore, boolean emptyReplyRetried, String correctionPrefix) {
 		UpstreamErrorClassifier.Finish finish = accumulator.finish();
@@ -2249,8 +2347,8 @@ public class ResilientChatService {
 		// 纠正轮的 accumulator 已用第一次正文/思考做前缀（seedPrefix），这里统一按累计正文收口：
 		// message_end.chars、finalText、快照/记忆与前端 delta 拼接完全一致，不再只算第二段。
 		String text = accumulator.text();
-		if (!StringUtils.hasText(text)) {
-			if (emptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(), attemptStartedAtMs,
+		if (!StringUtils.isNotBlank(text)) {
+			if (isEmptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(), attemptStartedAtMs,
 					beaconBefore, emptyReplyRetried)) {
 				emitEmptyReplyRetry(runId, sessionId, attempts, out, turn);
 				return false;
@@ -2284,6 +2382,74 @@ public class ResilientChatService {
 	 *
 	 * <p>锁内重读快照与取消事实，再写历史/快照/终帧 —— 这样"判定 → 落库 → 出帧"对取消收尾是一个原子段。
 	 */
+	private record SuccessPersistence(RunSnapshot snapshot, List<Message> history, boolean unconfirmed) {
+	}
+
+	private SuccessPersistence persistSuccessSnapshot(String runId, String sessionId, Accumulator accumulator,
+			int attempts, StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, String correctionPrefix,
+			boolean lengthTruncated, String finalSegment, String reasoning, String text, RunSnapshot snapshot) {
+		if (snapshot == null) {
+			return new SuccessPersistence(null, List.of(), false);
+		}
+		List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
+		// L-98：思考全文随 assistant 消息一起落记忆（键与 ReasoningAwareOpenAiChatModel 的回填读取同源）
+		// 跨供应方隔离：给模型生成的消息打中性来源标记（快照的冻结身份）—— 请求层据此决定是否回放
+		// reasoningContent。存储面不删任何字（标记是 additive 的，隔离只作用于模型输入）。
+		// 截断专项：length 同时写进 metadata（随 assistant 消息落快照与记忆窗口）—— 与 done.extra 同判据。
+		// 纠正轮的前缀 assistant 可能已随工具批 settle 进快照：先移除旧前缀（它属于工具调用之前），
+		// 再把尚未落库的余下正文按真实时间顺序追加到末尾 —— 已由工具卡承载的正文不再重复。
+		removeAssistantWithText(history, correctionPrefix);
+		// 全部正文都已作为工具卡持久化（工具调用后模型没再产出）时不再追加空气泡；
+		// 工具卡本身已承载那段正文。
+		if (!finalSegment.isEmpty()) {
+			AssistantMessage finalAssistant = ReasoningOrigin.stamp(
+					assistantMessage(finalSegment, storedReasoning(reasoning), lengthTruncated),
+					snapshot.getProviderId(), snapshot.getModelId());
+			history.add(finalAssistant);
+		}
+		snapshot.setMessageJson(this.codec.serializeAll(history));
+		snapshot.setInFlightToolCalls(new ArrayList<>());
+		snapshot.setAssistantContent(null);
+		// finalText 的既有契约是"本轮完整回答"（RunSnapshot#asMap / 失败现场都读它），
+		// 不能因为 messageJson 去重而缩成工具跳之后的余段。
+		snapshot.setFinalText(text);
+		snapshot.setStatus(RunSnapshot.DONE);
+		snapshot.setCancelled(false);
+		snapshot.setAttempts(attempts);
+		clearExportCorrectionPrefix(snapshot);
+		// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
+		// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
+		RunSnapshot persisted = null;
+		if (isPersistAllowed(runId, "terminal snapshot/memory")) {
+			persisted = persistTerminalSnapshot(runId, snapshot);
+		}
+		else {
+			emitUnconfirmedTerminal(runId, sessionId, null, accumulator, attempts, out, turn, snapshot, history);
+			return new SuccessPersistence(null, history, true);
+		}
+		// 只按有界保存/复读后的权威状态决定终帧；取消优先语义不变。
+		if (isCancelledSnapshot(persisted)) {
+			// 只传 null：这条路径的 accumulator 是<b>成功正文</b>，若交给 cancelTerminal，
+			// 它会把它当作"停止半截"合成 stopped 消息写进 chat memory
+			// （chat memory 是整窗覆盖，没有保护）。
+			// null ⇒ cancelTerminal 取权威快照的 assistantContent（另一实例已写入的半截）。
+			// 正常用户取消（attempt 内取消）仍传真实 accumulator，保留半截正文。
+			log.info("cancel found on post-DONE reread, handing to cancel finalize runId={} (no done{cancelled:false})",
+					runId);
+			cancelTerminal(runId, sessionId, null, attempts, watchdog, out, turn);
+			return new SuccessPersistence(null, history, true);
+		}
+		if (persisted == null || !RunSnapshot.DONE.equals(persisted.getStatus())) {
+			emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
+			return new SuccessPersistence(null, history, true);
+		}
+		if (!isRecordTerminalTranscript(runId, sessionId, history)) {
+			emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
+			return new SuccessPersistence(null, history, true);
+		}
+		return new SuccessPersistence(persisted, history, false);
+	}
+
 	private void finishSuccessGuarded(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, String correctionPrefix,
 			boolean lengthTruncated) {
@@ -2322,69 +2488,14 @@ public class ResilientChatService {
 					turn);
 			return;
 		}
-		List<Message> history = new ArrayList<>();
-		// 终态出口已有的权威快照：供收尾时写入 clientRequestId 完成态，避免再次按线程身份复读
-		// （复读在无身份/身份不符的收尾线程上会读不到，从而把 RUN 绑定静默留到会话 TTL）。
-		RunSnapshot terminalSnapshot = null;
-		if (snapshot != null) {
-			history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			// L-98：思考全文随 assistant 消息一起落记忆（键与 ReasoningAwareOpenAiChatModel 的回填读取同源）
-			// 跨供应方隔离：给模型生成的消息打中性来源标记（快照的冻结身份）—— 请求层据此决定是否回放
-			// reasoningContent。存储面不删任何字（标记是 additive 的，隔离只作用于模型输入）。
-			// 截断专项：length 同时写进 metadata（随 assistant 消息落快照与记忆窗口）—— 与 done.extra 同判据。
-			// 纠正轮的前缀 assistant 可能已随工具批 settle 进快照：先移除旧前缀（它属于工具调用之前），
-			// 再把尚未落库的余下正文按真实时间顺序追加到末尾 —— 已由工具卡承载的正文不再重复。
-			removeAssistantWithText(history, correctionPrefix);
-			// 全部正文都已作为工具卡持久化（工具调用后模型没再产出）时不再追加空气泡；
-			// 工具卡本身已承载那段正文。
-			if (!finalSegment.isEmpty()) {
-				AssistantMessage finalAssistant = ReasoningOrigin.stamp(
-						assistantMessage(finalSegment, storedReasoning(reasoning), lengthTruncated),
-						snapshot.getProviderId(), snapshot.getModelId());
-				history.add(finalAssistant);
-			}
-			snapshot.setMessageJson(this.codec.serializeAll(history));
-			snapshot.setInFlightToolCalls(new ArrayList<>());
-			snapshot.setAssistantContent(null);
-			// finalText 的既有契约是"本轮完整回答"（RunSnapshot#asMap / 失败现场都读它），
-			// 不能因为 messageJson 去重而缩成工具跳之后的余段。
-			snapshot.setFinalText(text);
-			snapshot.setStatus(RunSnapshot.DONE);
-			snapshot.setCancelled(false);
-			snapshot.setAttempts(attempts);
-			clearExportCorrectionPrefix(snapshot);
-			// RT-20：快照与记忆窗口共享同一个续跑权判定，且在<b>写之前</b>问一次：
-			// 丢租/不可确认/fence 已被接管时一律不写（旧驱动不得把作废答案写进记忆）。
-			RunSnapshot persisted = null;
-			if (persistAllowed(runId, "terminal snapshot/memory")) {
-				persisted = persistTerminalSnapshot(runId, snapshot);
-			}
-			else {
-				emitUnconfirmedTerminal(runId, sessionId, null, accumulator, attempts, out, turn, snapshot, history);
-				return;
-			}
-				// 只按有界保存/复读后的权威状态决定终帧；取消优先语义不变。
-				if (isCancelledSnapshot(persisted)) {
-					// 只传 null：这条路径的 accumulator 是<b>成功正文</b>，若交给 cancelTerminal，
-					// 它会把它当作"停止半截"合成 stopped 消息写进 chat memory
-					// （chat memory 是整窗覆盖，没有保护）。
-					// null ⇒ cancelTerminal 取权威快照的 assistantContent（另一实例已写入的半截）。
-					// 正常用户取消（attempt 内取消）仍传真实 accumulator，保留半截正文。
-					log.info("cancel found on post-DONE reread, handing to cancel finalize runId={} (no done{cancelled:false})",
-							runId);
-					cancelTerminal(runId, sessionId, null, attempts, watchdog, out, turn);
-					return;
-				}
-				if (persisted == null || !RunSnapshot.DONE.equals(persisted.getStatus())) {
-					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
-					return;
-				}
-				if (!recordTerminalTranscript(runId, sessionId, history)) {
-					emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
-					return;
-				}
-				terminalSnapshot = persisted;
-				convergeMemory(runId, sessionId, history);
+		SuccessPersistence persistence = persistSuccessSnapshot(runId, sessionId, accumulator, attempts, watchdog, out, turn,
+				correctionPrefix, lengthTruncated, finalSegment, reasoning, text, snapshot);
+		if (persistence.unconfirmed()) {
+			return;
+		}
+		terminalSnapshot = persistence.snapshot();
+		List<Message> history = persistence.history();
+		convergeMemory(runId, sessionId, history);
 			log.info("AI turn end runId={} sessionId={} historyEntries={} attempts={} terminal=done lastFrames=[{}]", runId, sessionId,
 					history.size(), attempts, accumulator.tailSummary());
 		}
@@ -2400,7 +2511,7 @@ public class ResilientChatService {
 		}
 		putParamsLocked(extra, turn);
 		// T5：正文段收尾（未开过段则不发 —— 纯工具轮没有正文）
-		out.textEnd(text.length());
+		out.isTextEnded(text.length());
 		// 上下文专项批①：先记账（真值回填 ai:ctx:），再发终帧（done.context 与端点必须同源）
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator.usage(turn.promptEstimate()), doneModel(accumulator, turn), extra, context);
@@ -2442,14 +2553,14 @@ public class ResilientChatService {
 	 * 线程身份重新判定；只有 {@code terminalSnapshot == null} 的兜底路径才复读，并复核终态。
 	 */
 	public void clearTerminalRunState(String runId, RunSnapshot terminalSnapshot) {
-		if (runId == null || runId.isBlank()) {
+		if (StringUtils.isBlank(runId)) {
 			return;
 		}
 		try {
 			this.beacon.clearRun(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("terminal cleanup of tool activity anchor failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("terminal cleanup of tool activity anchor failed runId={}", runId, ex);
 		}
 		try {
 			if (this.parkSettlement != null) {
@@ -2457,7 +2568,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("terminal cleanup of confirmation-gate redispatch counter failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("terminal cleanup of confirmation-gate redispatch counter failed runId={}", runId, ex);
 		}
 		try {
 			if (this.cancelFinalizer != null) {
@@ -2465,7 +2576,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("terminal cleanup of cancel handoff dedup flag failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("terminal cleanup of cancel handoff dedup flag failed runId={}", runId, ex);
 		}
 		completeClientRequest(runId, terminalSnapshot);
 	}
@@ -2498,7 +2609,7 @@ public class ResilientChatService {
 				// 兼容兜底：调用方交不出快照时才复读（键按当前线程身份拼，可能需要身份的收尾线程）。
 				snapshot = readSnapshotQuietly(runId);
 				if (snapshot != null && !RunSnapshot.isTerminal(snapshot.getStatus())) {
-					log.debug("terminal completion skipped: reread snapshot not terminal runId={} status={} (completion not written)", runId,
+					if (log.isDebugEnabled()) log.debug("terminal completion skipped: reread snapshot not terminal runId={} status={} (completion not written)", runId,
 							snapshot.getStatus());
 					return;
 				}
@@ -2510,15 +2621,15 @@ public class ResilientChatService {
 			}
 			String clientRequestId = snapshot.getClientRequestId();
 			String sessionId = snapshot.getSessionId();
-			if (clientRequestId == null || clientRequestId.isBlank() || sessionId == null || sessionId.isBlank()) {
-				log.debug("terminal completion skipped: no clientRequestId/sessionId this turn runId={} status={}", runId,
+			if (StringUtils.isBlank(clientRequestId) || StringUtils.isBlank(sessionId)) {
+				if (log.isDebugEnabled()) log.debug("terminal completion skipped: no clientRequestId/sessionId this turn runId={} status={}", runId,
 						snapshot.getStatus());
 				return;
 			}
-			boolean completed = this.clientRequests.complete(snapshot.getTenantId(), snapshot.getUserId(), sessionId,
+			boolean completed = this.clientRequests.isCompleted(snapshot.getTenantId(), snapshot.getUserId(), sessionId,
 					clientRequestId, runId);
 			if (completed) {
-				log.debug("clientRequestId moved to completed runId={} sessionId={} status={} (snapshot source={})", runId, sessionId,
+				if (log.isDebugEnabled()) log.debug("clientRequestId moved to completed runId={} sessionId={} status={} (snapshot source={})", runId, sessionId,
 						snapshot.getStatus(), fallbackRead ? "reread" : "terminal exit");
 			}
 			else {
@@ -2555,7 +2666,7 @@ public class ResilientChatService {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("cancel check before success terminal unreadable runId={} (continuing as not cancelled)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("cancel check before success terminal unreadable runId={} (continuing as not cancelled)", runId, ex);
 			return false;
 		}
 	}
@@ -2576,7 +2687,7 @@ public class ResilientChatService {
 			return this.cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED;
 		}
 		catch (RuntimeException ex) {
-			log.debug("cancel recheck unreadable runId={} (continuing as not cancelled)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("cancel recheck unreadable runId={} (continuing as not cancelled)", runId, ex);
 			return false;
 		}
 	}
@@ -2588,15 +2699,15 @@ public class ResilientChatService {
 	 * 这里仍能在压缩/建快照/模型调用之前收敛。读失败按未取消继续（此时尚无不可逆动作），
 	 * 由后续 N4 复查/看门狗兜底。
 	 */
-	private boolean clientRequestCancelled(String sessionId, String clientRequestId) {
-		if (this.clientRequests == null || clientRequestId == null || clientRequestId.isBlank()) {
+	private boolean isClientRequestCancelled(String sessionId, String clientRequestId) {
+		if (this.clientRequests == null || StringUtils.isBlank(clientRequestId)) {
 			return false;
 		}
 		try {
 			return this.clientRequests.isCancelled(sessionId, clientRequestId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("clientRequestId cancel recheck unreadable sessionId={} (continuing as not cancelled)", sessionId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("clientRequestId cancel recheck unreadable sessionId={} (continuing as not cancelled)", sessionId, ex);
 			return false;
 		}
 	}
@@ -2610,7 +2721,7 @@ public class ResilientChatService {
 			}
 			catch (RuntimeException ex) {
 				retryableFailure = isRetryableRedisFailure(ex);
-				log.debug("terminal snapshot save attempt failed runId={} attempt={} retryable={}", runId, attempt + 1,
+				if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("terminal snapshot save attempt failed runId={} attempt={} retryable={}", runId, attempt + 1,
 						retryableFailure, ex);
 			}
 			persisted = readSnapshotQuietly(runId);
@@ -2620,17 +2731,17 @@ public class ResilientChatService {
 			if (persisted != null && RunSnapshot.isTerminal(persisted.getStatus())) {
 				return persisted;
 			}
-			if (!retryableFailure || attempt >= 2 || !pauseTerminalRetry(attempt)) {
+			if (!retryableFailure || attempt >= 2 || !isPauseTerminalRetry(attempt)) {
 				break;
 			}
 		}
 		return persisted;
 	}
 
-	private boolean recordTerminalTranscript(String runId, String sessionId, List<Message> history) {
+	private boolean isRecordTerminalTranscript(String runId, String sessionId, List<Message> history) {
 		for (int attempt = 0; attempt < 3; attempt++) {
 			try {
-				if (recordTranscript(runId, sessionId, history, true, null, false, null, true)) {
+				if (isRecordTranscript(runId, sessionId, history, true, null, false, null, true)) {
 					return true;
 				}
 				return false;
@@ -2640,12 +2751,12 @@ public class ResilientChatService {
 			}
 			catch (RuntimeException ex) {
 				if (!isRetryableRedisFailure(ex)) {
-					log.debug("terminal transcript failed permanently runId={}", runId, ex);
+					if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("terminal transcript failed permanently runId={}", runId, ex);
 					return false;
 				}
-				log.debug("terminal transcript attempt failed runId={} attempt={}", runId, attempt + 1, ex);
+				if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("terminal transcript attempt failed runId={} attempt={}", runId, attempt + 1, ex);
 			}
-			if (attempt >= 2 || !pauseTerminalRetry(attempt)) {
+			if (attempt >= 2 || !isPauseTerminalRetry(attempt)) {
 				break;
 			}
 		}
@@ -2667,7 +2778,7 @@ public class ResilientChatService {
 	private static final class NonRetryableTranscriptException extends RuntimeException {
 	}
 
-	private static boolean pauseTerminalRetry(int attempt) {
+	private static boolean isPauseTerminalRetry(int attempt) {
 		try {
 			Thread.sleep(25L * (attempt + 1));
 			return true;
@@ -2687,7 +2798,7 @@ public class ResilientChatService {
 			return this.store.get(runId);
 		}
 		catch (RuntimeException ex) {
-			log.debug("post-write snapshot reread failed runId={} (continuing as unknown)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("post-write snapshot reread failed runId={} (continuing as unknown)", runId, ex);
 			return null;
 		}
 	}
@@ -2721,14 +2832,14 @@ public class ResilientChatService {
 		// additive 明确字段（批次2 / AR-05）：这条 error 的语义是"终态暂不可确认"，不是普通失败。
 		// code 仍是既有的 AI_REDIS_UNAVAILABLE（真实故障码不动）；前端只能凭本键（或 turn_end=unconfirmed）
 		// 进入中性视图，不得自行拿故障码猜"可能成功"。
-		RunSnapshot transcriptSnapshot = persisted == null ? localSnapshot : persisted;
+		RunSnapshot transcriptSnapshot = ObjectUtils.defaultIfNull(persisted, localSnapshot);
 		List<Message> transcriptHistory = persisted != null && persisted.getMessageJson() != null
 				? this.codec.deserializeAll(persisted.getMessageJson()) : localHistory;
 		if (transcriptSnapshot != null && transcriptHistory != null) {
-			recordTranscript(runId, sessionId, transcriptHistory, true, "UNCONFIRMED", true, transcriptSnapshot);
+			isRecordTranscript(runId, sessionId, transcriptHistory, true, "UNCONFIRMED", true, transcriptSnapshot);
 		}
 		// 本批：出口统一走 emitFailureTerminal（发帧前判归档终帧），"恰好一条终帧"由归档而不是本地标记保证。
-		emitFailureTerminal(runId, out, code, messageFor(code), Map.of("unconfirmed", true), partialChars);
+		isEmitFailureTerminal(runId, out, code, messageFor(code), Map.of("unconfirmed", true), partialChars);
 		emitTurnEnd(runId, sessionId, "unconfirmed", code, attempts, accumulator, turn, null);
 	}
 
@@ -2755,20 +2866,20 @@ public class ResilientChatService {
 	 * @param closeTextLength 终帧前要闭合的正文段字符数（{@code <= 0} 时 {@code textEnd} 自身是幂等空操作）
 	 * @return {@code true} = 真的发了 {@code error}；{@code false} = 本次驱动已有终帧，跳过
 	 */
-	private boolean emitFailureTerminal(String runId, SseChatEmitter out, String code, String message,
+	private boolean isEmitFailureTerminal(String runId, SseChatEmitter out, String code, String message,
 			Map<String, Object> extra, int closeTextLength) {
 		Boolean archived = out.terminalFrameArchivedSinceDriveStart();
 		if (Boolean.TRUE.equals(archived)) {
-			log.debug("failure terminal frame already archived for this drive, skipping "
+			if (log.isDebugEnabled()) log.debug("failure terminal frame already archived for this drive, skipping "
 					+ "duplicate error runId={} code={} (at most one per drive)", runId, code);
 			return false;
 		}
 		if (archived == null) {
 			log.warn("terminal frame archive state unreadable runId={} (lower bound unknown => continuing close as not archived)", runId);
 		}
-		out.textEnd(closeTextLength);
+		out.isTextEnded(closeTextLength);
 		// 无 additive 键时走两参重载（与改造前逐字节同形：既有调用方/用例观察的是同一个方法）
-		if (extra == null || extra.isEmpty()) {
+		if (MapUtils.isEmpty(extra)) {
 			out.error(code, message);
 		}
 		else {
@@ -2796,7 +2907,7 @@ public class ResilientChatService {
 		long totalMs = Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs());
 		long gateWaitMs = Math.max(0L, this.beacon.gateWaitMs(runId));
 		Map<String, Object> usage = accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate());
-		AiTrace.event("turn_end", "status", status, "code", code == null ? "none" : code, "attempts", attempts,
+		AiTrace.event("turn_end", "status", status, "code", ObjectUtils.defaultIfNull(code, "none"), "attempts", attempts,
 				// 终态所在尝试序号（与 turn_start/turn_retry 的 attempt 同一口径）
 				"attempt", attempts,
 				"totalMs", totalMs, "activeMs", Math.max(0L, totalMs - gateWaitMs), "gateWaitMs", gateWaitMs,
@@ -2848,7 +2959,7 @@ public class ResilientChatService {
 	 * <li>本段预算还没耗尽（不发起注定撞 {@code TOTAL_BUDGET} 的重试）。</li>
 	 * </ol>
 	 */
-	private boolean emptyReplyRetryable(String runId, Accumulator accumulator, int attempts, long turnStartedAtMs,
+	private boolean isEmptyReplyRetryable(String runId, Accumulator accumulator, int attempts, long turnStartedAtMs,
 			long attemptStartedAtMs, long beaconBefore, boolean emptyReplyRetried) {
 		if (emptyReplyRetried) {
 			return false;
@@ -2913,21 +3024,21 @@ public class ResilientChatService {
 	 * @return {@code true} = 失败态已落库（或本就没有快照可写，沿用旧口径继续发失败终帧）；
 	 *         {@code false} = 取消优先，调用方必须直接返回（交给取消收尾）
 	 */
-	private boolean failRunUnlessCancelled(String runId, RunSnapshot snapshot, String code, String message,
+	private boolean isFailRunUnlessCancelled(String runId, RunSnapshot snapshot, String code, String message,
 			int attempts, java.util.function.Consumer<RunSnapshot> prepare) {
 		// N2：与 {@link #cancelTerminal} 共用同一把 per-run 监视器 —— "读取消事实 → 写 FAILED → 出失败终帧"
 		// 必须对取消收尾是一个原子段，否则取消可以落在"判定未取消"与"写 FAILED"之间，两边各发一条终帧
 		// （error + done{cancelled:true}）。轻装配/直接 new 的单测没有交棒器 ⇒ 维持单线程语义。
 		Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
 		if (monitor == null) {
-			return failRunUnlessCancelledLocked(runId, snapshot, code, message, attempts, prepare);
+			return isFailRunUnlessCancelledLocked(runId, snapshot, code, message, attempts, prepare);
 		}
 		synchronized (monitor) {
-			return failRunUnlessCancelledLocked(runId, snapshot, code, message, attempts, prepare);
+			return isFailRunUnlessCancelledLocked(runId, snapshot, code, message, attempts, prepare);
 		}
 	}
 
-	private boolean failRunUnlessCancelledLocked(String runId, RunSnapshot snapshot, String code, String message,
+	private boolean isFailRunUnlessCancelledLocked(String runId, RunSnapshot snapshot, String code, String message,
 			int attempts, java.util.function.Consumer<RunSnapshot> prepare) {
 		// 读侧先行：取消态一票否决（不写 FAILED）。写侧还有同一判据的原子 CAS（见下），
 		// 两者是"同一口径的两道门"，不是两次不同判定。
@@ -3008,7 +3119,7 @@ public class ResilientChatService {
 		else {
 			List<Message> history = failureHistory(snapshot, accumulator.unpersistedText(), accumulator.reasoningText(),
 					EMPTY_REPLY_CODE, message);
-			boolean written = failRunUnlessCancelled(runId, snapshot, EMPTY_REPLY_CODE, message, attempts,
+			boolean written = isFailRunUnlessCancelled(runId, snapshot, EMPTY_REPLY_CODE, message, attempts,
 					target -> {
 						target.setMessageJson(this.codec.serializeAll(history));
 						target.setInFlightToolCalls(new ArrayList<>());
@@ -3025,7 +3136,7 @@ public class ResilientChatService {
 		}
 		// 本批：失败出口统一走 emitFailureTerminal（发帧前判归档终帧）——
 		// 另一驱动方已落 done/error 时，这里不得把一轮翻成两条终帧。
-		emitFailureTerminal(runId, out, EMPTY_REPLY_CODE, message, null, text.length());
+		isEmitFailureTerminal(runId, out, EMPTY_REPLY_CODE, message, null, text.length());
 		emitTurnEnd(runId, sessionId, "failed", EMPTY_REPLY_CODE, attempts, accumulator, turn, null);
 		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。直接交出手里的快照。
 		clearTerminalRunState(runId, snapshot);
@@ -3076,24 +3187,23 @@ public class ResilientChatService {
 	 */
 	private List<Message> stoppedRoundMessages(List<Message> history, RunSnapshot snapshot, String partial,
 			String reasoning) {
-		List<PendingToolCall> inFlight = snapshot.getInFlightToolCalls() == null ? List.of()
-				: snapshot.getInFlightToolCalls();
+		List<PendingToolCall> inFlight = ObjectUtils.defaultIfNull(snapshot.getInFlightToolCalls(), List.of());
 		List<AssistantMessage.ToolCall> calls = new ArrayList<>(inFlight.size());
 		List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(inFlight.size());
 		for (PendingToolCall item : inFlight) {
-			if (item.getToolCallId() == null || historyHasToolCall(history, item.getToolCallId())) {
+			if (item.getToolCallId() == null || isHistoryHasToolCall(history, item.getToolCallId())) {
 				continue;
 			}
 			calls.add(new AssistantMessage.ToolCall(item.getToolCallId(),
-					item.getType() == null ? "function" : item.getType(), item.getName(), item.getArguments()));
-			String text = StringUtils.hasText(item.getResultText()) ? item.getResultText()
+					ObjectUtils.defaultIfNull(item.getType(), "function"), item.getName(), item.getArguments()));
+			String text = StringUtils.isNotBlank(item.getResultText()) ? item.getResultText()
 					: "本轮对话已被用户取消，该工具未执行。";
 			responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
 					ToolResultEnvelope.of(ToolOutcome.CANCELLED, ToolOutcome.CODE_RUN_CANCELLED, text,
 							item.getArguments()).toJson()));
 		}
 		List<Message> out = new ArrayList<>(2);
-		if (!StringUtils.hasText(partial) && calls.isEmpty()) {
+		if (!StringUtils.isNotBlank(partial) && calls.isEmpty()) {
 			return out;
 		}
 		Map<String, Object> metadata = new LinkedHashMap<>();
@@ -3128,7 +3238,7 @@ public class ResilientChatService {
 	 */
 	private static AssistantMessage assistantMessage(String content, String reasoning, boolean truncated) {
 		Map<String, Object> metadata = new LinkedHashMap<>();
-		if (reasoning != null && !reasoning.isEmpty()) {
+		if (StringUtils.isNotEmpty(reasoning)) {
 			metadata.put(REASONING_METADATA_KEY, reasoning);
 		}
 		if (truncated) {
@@ -3155,7 +3265,7 @@ public class ResilientChatService {
 	private static Map<String, Object> stoppedMetadata(String reasoning) {
 		Map<String, Object> metadata = new LinkedHashMap<>();
 		metadata.put(STOPPED_KEY, true);
-		if (reasoning != null && !reasoning.isEmpty()) {
+		if (StringUtils.isNotEmpty(reasoning)) {
 			metadata.put(REASONING_METADATA_KEY, reasoning);
 		}
 		return metadata;
@@ -3176,7 +3286,7 @@ public class ResilientChatService {
 		if (snapshot != null && snapshot.getInFlightToolCalls() != null
 				&& !snapshot.getInFlightToolCalls().isEmpty()) {
 			String parked = snapshot.getAssistantContent();
-			return new CorrectionResume(parked == null || parked.isEmpty() ? prefix : parked, "");
+			return new CorrectionResume(StringUtils.defaultIfEmpty(parked, prefix), "");
 		}
 		int lastRealUser = -1;
 		for (int i = history.size() - 1; i >= 0; i--) {
@@ -3204,7 +3314,7 @@ public class ResilientChatService {
 	}
 
 	/** 历史里是否已有该 toolCallId 的 assistant 工具调用（防重复造段）。 */
-	private static boolean historyHasToolCall(List<Message> history, String toolCallId) {
+	private static boolean isHistoryHasToolCall(List<Message> history, String toolCallId) {
 		for (Message message : history) {
 			if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()
 					&& assistant.getToolCalls().stream().anyMatch(call -> toolCallId.equals(call.id()))) {
@@ -3225,7 +3335,7 @@ public class ResilientChatService {
 		String sessionId = snapshot.getSessionId();
 		List<Message> history = this.codec.deserializeAll(snapshot.getMessageJson());
 		TurnContext turn = resumedTurn(runId, AiContext.fromMap(snapshot.getContext()), history, snapshot.getModelId(),
-				snapshot.getProviderId() == null ? null : String.valueOf(snapshot.getProviderId()),
+				ObjectUtils.toString(snapshot.getProviderId(), (String) null),
 				System.currentTimeMillis(), snapshot);
 		cancelTerminal(runId, sessionId, null, snapshot.getAttempts(), null, this.registry.of(runId), turn);
 	}
@@ -3247,7 +3357,7 @@ public class ResilientChatService {
 			return this.registry.of(runId).terminalFrameArchived();
 		}
 		catch (RuntimeException ex) {
-			log.debug("cancel terminal archive probe failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("cancel terminal archive probe failed runId={}", runId, ex);
 			return null;
 		}
 	}
@@ -3276,6 +3386,57 @@ public class ResilientChatService {
 		}
 	}
 
+	private record CancelledPersistence(RunSnapshot snapshot, List<Message> history, boolean persisted) {
+	}
+
+	private CancelledPersistence persistCancelledSnapshot(String runId, String sessionId, Accumulator accumulator,
+			int attempts, RunSnapshot snapshot, String partial) {
+		if (snapshot == null) {
+			return new CancelledPersistence(null, List.of(), false);
+		}
+		List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
+		// 纠正前缀已含在 partial 里：先移除旧前缀 assistant，避免取消时历史出现重复前缀；
+		// 合并后的停止消息追加在末尾（真实工具顺序之后）。
+		removeAssistantWithText(history, correctionPrefix(runId));
+		boolean appendedStopped = false;
+		for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
+				storedReasoning(accumulator == null ? "" : accumulator.reasoningText()))) {
+			history.add(stopped);
+			appendedStopped = true;
+		}
+		snapshot.setMessageJson(this.codec.serializeAll(history));
+		snapshot.setInFlightToolCalls(new ArrayList<>());
+		snapshot.setAssistantContent(null);
+		snapshot.setStatus(RunSnapshot.CANCELLED);
+		snapshot.setCancelled(true);
+		snapshot.setAttempts(attempts);
+		clearExportCorrectionPrefix(snapshot);
+		snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
+		// RT-20：取消态快照/记忆同样是答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
+		// 判定必须与写入是同一步：persistAllowed 只回答"这一拍有没有写权限"，它与 void save 之间
+		// 还有一次 Redis 往返（可能被推进后的 fence / 取消优先守卫拒掉），而 save 不返回结果 ⇒
+		// 调用方会把"根本没落库的本地快照"当成终态交给 clearTerminalRunState/completeClientRequest，
+		// 把仍在跑的轮标成"已完成"。故改用 saveStatusUnlessCancelled：与 save 同一条写路径
+		// （租约只读 / fence 陈旧 / 拒写判据逐字不变），但把这一笔到底有没有落库如实返回。
+		boolean persisted = false;
+		try {
+			persisted = this.store.isStatusSavedUnlessCancelled(snapshot);
+		}
+		catch (RuntimeException ex) {
+			// 写入抛异常 = 落库与否不可判定（可能快照已写、也可能只写了轻量状态键）：
+			// 按未落库处理，不交出快照；交棒侧重新取租后幂等补写 CANCELLED + 终帧。
+			log.warn("cancel snapshot write inconclusive runId={} (not treating as persisted)", runId, ex);
+		}
+		if (!persisted) {
+			return new CancelledPersistence(null, history, false);
+		}
+		// 只有这一笔真的落库，快照才是可信的终态事实（completeClientRequest 只读它的身份/绑定）
+		// B2：取消轮的半截正文 + 工具卡（含 CANCELLED 结局）写展示历史；
+		// 没有追加停止消息时不得把上一条旧 assistant 当本轮终稿
+		isRecordTranscript(runId, sessionId, history, appendedStopped);
+		return new CancelledPersistence(snapshot, history, true);
+	}
+
 	private void cancelTerminalLocked(String runId, String sessionId, Accumulator accumulator, int attempts,
 			StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
 		RunSnapshot snapshot = this.store.get(runId);
@@ -3286,13 +3447,13 @@ public class ResilientChatService {
 				: snapshot == null ? "" : snapshot.getAssistantContent();
 		String partial = accumulator != null ? accumulator.unpersistedText()
 				: snapshot == null ? "" : snapshot.getAssistantContent();
-		if ((partial == null || partial.isEmpty()) && snapshot != null) {
+		if ((StringUtils.isEmpty(partial)) && snapshot != null) {
 			// 取消发生在挂起等待中：本段正文已随 saveSuspended 落库，不能再拿空串重建 stopped
 			// assistant（同 entryId 的 last-wins 会把已写好的工具卡正文覆盖成空）。此时快照的
 			// assistantContent 就是那条挂起 assistant 的正文；settle 之后它已被清空，不会误用旧值。
 			partial = snapshot.getAssistantContent();
 		}
-		int partialChars = fullText == null ? 0 : fullText.length();
+		int partialChars = StringUtils.length(fullText);
 		// ===== 幂等判据：归档里有没有终帧（不是快照状态）=====
 		// save(CANCELLED) 与 out.done 是两个存储、两次写：save 成功而终帧被写门/投递丢弃时，
 		// 快照终态并不能证明"终帧已发"（W-30 的 boot.log:6740/6741 就是同一判据同时拒绝了两者）。
@@ -3327,55 +3488,19 @@ public class ResilientChatService {
 		// 不再让 emitCancelOutcomes 重复 cancelPendings / 重复整表读。
 		this.store.cancelPendings(runId);
 		List<PendingToolCall> cancelledPendings = this.store.pendingsLenient(runId);
-		if (snapshot != null) {
-			List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-			// 纠正前缀已含在 partial 里：先移除旧前缀 assistant，避免取消时历史出现重复前缀；
-			// 合并后的停止消息追加在末尾（真实工具顺序之后）。
-			removeAssistantWithText(history, correctionPrefix(runId));
-			boolean appendedStopped = false;
-			for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
-					storedReasoning(accumulator == null ? "" : accumulator.reasoningText()))) {
-				history.add(stopped);
-				appendedStopped = true;
-			}
-			snapshot.setMessageJson(this.codec.serializeAll(history));
-			snapshot.setInFlightToolCalls(new ArrayList<>());
-			snapshot.setAssistantContent(null);
-			snapshot.setStatus(RunSnapshot.CANCELLED);
-			snapshot.setCancelled(true);
-			snapshot.setAttempts(attempts);
-			clearExportCorrectionPrefix(snapshot);
-			snapshot.setError("AI_RUN_CANCELLED：本轮由用户取消（上游连接已断开，工具未再继续）");
-			// RT-20：取消态快照/记忆同样是答案面 —— 旧驱动（丢租/fence 已被接管）不得写入。
-			// 判定必须与写入是同一步：persistAllowed 只回答"这一拍有没有写权限"，它与 void save 之间
-			// 还有一次 Redis 往返（可能被推进后的 fence / 取消优先守卫拒掉），而 save 不返回结果 ⇒
-			// 调用方会把"根本没落库的本地快照"当成终态交给 clearTerminalRunState/completeClientRequest，
-			// 把仍在跑的轮标成"已完成"。故改用 saveStatusUnlessCancelled：与 save 同一条写路径
-			// （租约只读 / fence 陈旧 / 拒写判据逐字不变），但把这一笔到底有没有落库如实返回。
-			boolean persisted = false;
-			try {
-				persisted = this.store.saveStatusUnlessCancelled(snapshot);
-			}
-			catch (RuntimeException ex) {
-				// 写入抛异常 = 落库与否不可判定（可能快照已写、也可能只写了轻量状态键）：
-				// 按未落库处理，不交出快照；交棒侧重新取租后幂等补写 CANCELLED + 终帧。
-				log.warn("cancel snapshot write inconclusive runId={} (not treating as persisted)", runId, ex);
-			}
-			if (persisted) {
-				// 只有这一笔真的落库，快照才是可信的终态事实（completeClientRequest 只读它的身份/绑定）
-				terminalSnapshot = snapshot;
-				// B2：取消轮的半截正文 + 工具卡（含 CANCELLED 结局）写展示历史；
-				// 没有追加停止消息时不得把上一条旧 assistant 当本轮终稿
-				recordTranscript(runId, sessionId, history, appendedStopped);
-				convergeMemory(runId, sessionId, history);
-			}
-			else if (this.cancelFinalizer != null) {
+		CancelledPersistence persistence = persistCancelledSnapshot(runId, sessionId, accumulator, attempts, snapshot, partial);
+		terminalSnapshot = persistence.snapshot();
+		List<Message> history = persistence.history();
+		if (persistence.persisted()) {
+			convergeMemory(runId, sessionId, history);
+		}
+		else if (this.cancelFinalizer != null) {
 				// 这一笔没落库（写权限不可确认：一次在飞的 Redis 命令被打断 ⇒ 全局健康位 + 1s 节流；
 				// 或被接管后推进的 fence / 取消优先守卫拒写）：不能把"取消已确认"留成 SUSPENDED/RUNNING
 				// 且无人管（主 CI run 40211303032 · W-30）。交棒给非驱动执行器：它重新取租
 				// （fencing 不绕过）后只做取消收尾，不发起模型/工具。
 				// 本线程随即退出：不落快照、不出帧（此刻出帧也会被同一判据丢弃），终帧由交棒侧恰发一次。
-				boolean handed = handOffDeniedFinalization(runId);
+				boolean handed = isHandOffDeniedFinalization(runId);
 				log.warn("cancel terminal state not persisted (write authority unconfirmed or refused), handed to a non-driver executor "
 						+ "runId={} handed={} (no frames from this thread; handoff re-acquires the lease and writes CANCELLED + terminal frame)", runId, handed);
 				return;
@@ -3398,7 +3523,7 @@ public class ResilientChatService {
 		extra.put("partialChars", partialChars);
 		putParamsLocked(extra, turn);
 		// T5：取消也收尾正文段（半截正文不写进历史，但"这一段到此为止"必须显式告知前端）
-		out.textEnd(partialChars);
+		out.isTextEnded(partialChars);
 		// 上下文专项批①：取消轮同样如实报占用（半轮的真值仍是真值，est 标注照旧）
 		Map<String, Object> context = contextTelemetry(sessionId, turn, accumulator);
 		out.done(accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate()),
@@ -3489,7 +3614,7 @@ public class ResilientChatService {
 	 */
 	private static String doneModel(Accumulator accumulator, TurnContext turn) {
 		String echoed = accumulator == null ? null : accumulator.model();
-		return StringUtils.hasText(echoed) ? echoed : turn.model();
+		return StringUtils.isNotBlank(echoed) ? echoed : turn.model();
 	}
 
 	/** {@code paramsLocked} 只在其为真时写（"没说"与"锁住"必须可区分；键名 additive，帧型不变）。 */
@@ -3510,10 +3635,10 @@ public class ResilientChatService {
 		failure.put(TranscriptEntries.ERROR_CODE_KEY, code);
 		failure.put(TranscriptEntries.ERROR_MESSAGE_KEY, message);
 		String storedReasoning = storedReasoning(reasoning);
-		if (storedReasoning != null && !storedReasoning.isEmpty()) {
+		if (StringUtils.isNotEmpty(storedReasoning)) {
 			failure.put(REASONING_METADATA_KEY, storedReasoning);
 		}
-		if (segment != null && !segment.isEmpty() && !endsWithAssistantText(history, segment)) {
+		if (StringUtils.isNotEmpty(segment) && !isEndsWithAssistantText(history, segment)) {
 			AssistantMessage failed = AssistantMessage.builder().content(segment).properties(failure).build();
 			history.add(ReasoningOrigin.stamp(failed, snapshot.getProviderId(), snapshot.getModelId()));
 			return history;
@@ -3537,7 +3662,7 @@ public class ResilientChatService {
 			if (existing.hasToolCalls()) {
 				builder.toolCalls(existing.getToolCalls());
 			}
-			if (existing.getMedia() != null && !existing.getMedia().isEmpty()) {
+			if (CollectionUtils.isNotEmpty(existing.getMedia())) {
 				builder.media(existing.getMedia());
 			}
 			history.set(lastAssistant, builder.build());
@@ -3552,7 +3677,7 @@ public class ResilientChatService {
 		if (snapshot == null || history == null) {
 			return;
 		}
-		recordTranscript(snapshot.getRunId(), snapshot.getSessionId(), history, true);
+		isRecordTranscript(snapshot.getRunId(), snapshot.getSessionId(), history, true);
 		convergeMemory(snapshot.getRunId(), snapshot.getSessionId(), history);
 	}
 
@@ -3597,7 +3722,7 @@ public class ResilientChatService {
 		boolean failurePersisted = false;
 		// N2：快照还没建立（请求前压缩窗口）也要先问一次取消 —— 取消侧才是这一轮的终帧。
 		if (snapshot == null || !RunSnapshot.DONE.equals(snapshot.getStatus())) {
-			if (!failRunUnlessCancelled(runId, snapshot, code, message, attempts, target -> {
+			if (!isFailRunUnlessCancelled(runId, snapshot, code, message, attempts, target -> {
 				target.setMessageJson(this.codec.serializeAll(failureHistory));
 				target.setInFlightToolCalls(new ArrayList<>());
 				target.setAssistantContent(null);
@@ -3616,7 +3741,7 @@ public class ResilientChatService {
 		// （ag-ui 的 open-message-at-run-finished 判据：运行关闭前，它打开的一切都必须先关闭）。
 		// 未开过段（纯工具轮 / 未产出正文）时 textEnd 是幂等空操作。
 		// 本批：出口走 emitFailureTerminal —— 归档里已有终帧（另一驱动方已收尾）时连 textEnd 都不发。
-		emitFailureTerminal(runId, out, code, message, null, partialChars);
+		isEmitFailureTerminal(runId, out, code, message, null, partialChars);
 		emitTurnEnd(runId, sessionId, "failed", code, attempts, accumulator, turn, null);
 		// F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。直接交出手里的快照
 		// （failRunUnlessCancelled 已把它改成 FAILED；复读在无身份线程上会因归属不符读不到）。
@@ -3640,12 +3765,12 @@ public class ResilientChatService {
 			return;
 		}
 		try {
-			if (!this.store.permittedToWrite(runId, "transcript")) {
+			if (!this.store.isWritePermitted(runId, "transcript")) {
 				return;
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript write authority check failed runId={} (user entry not written this turn)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("transcript write authority check failed runId={} (user entry not written this turn)", runId, ex);
 			return;
 		}
 		try {
@@ -3668,127 +3793,158 @@ public class ResilientChatService {
 	 * <p>工具原文优先取 {@code pendingsLenient(runId).getResultText()}（用户面原文），不取可能已被
 	 * L1 清成占位符的 history；合成消息（压缩摘要/收尾指令）不写。写失败只 WARN，不影响本轮。
 	 */
-	private boolean recordTranscript(String runId, String sessionId, List<Message> history) {
-		return recordTranscript(runId, sessionId, history, true, null, false);
+	private boolean isRecordTranscript(String runId, String sessionId, List<Message> history) {
+		return isRecordTranscript(runId, sessionId, history, true, null, false);
 	}
 
-	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
+	private boolean isRecordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant) {
-		return recordTranscript(runId, sessionId, history, includeLastAssistant, null, false);
+		return isRecordTranscript(runId, sessionId, history, includeLastAssistant, null, false);
 	}
 
-	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
+	private boolean isRecordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed) {
-		return recordTranscript(runId, sessionId, history, includeLastAssistant, outcomeOverride, unconfirmed, null);
+		return isRecordTranscript(runId, sessionId, history, includeLastAssistant, outcomeOverride, unconfirmed, null);
 	}
 
-	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
+	private boolean isRecordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed, RunSnapshot snapshot) {
-		return recordTranscript(runId, sessionId, history, includeLastAssistant, outcomeOverride, unconfirmed, snapshot,
+		return isRecordTranscript(runId, sessionId, history, includeLastAssistant, outcomeOverride, unconfirmed, snapshot,
 				false);
 	}
 
-	private boolean recordTranscript(String runId, String sessionId, List<Message> history,
+	private List<TranscriptEntry> buildTerminalEntries(String runId, RunSnapshot snapshot, List<Message> history,
+			boolean includeLastAssistant) {
+		Map<String, PendingToolCall> pendings = transcriptPendings(runId);
+		List<Message> withStates = new ArrayList<>(history.size());
+		Map<String, String> resolvedStatuses = new LinkedHashMap<>();
+		Predicate<String> executedInLedger = toolCallId -> MapUtils.isNotEmpty(ledgerEntry(runId, toolCallId));
+		for (Message message : history) {
+			if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
+				ResolvedToolStates resolved = resolveToolStates(runId, assistant, pendings, snapshot.getStatus(),
+						executedInLedger);
+				withStates.add(withToolCallStates(assistant, resolved.states()));
+				resolvedStatuses.putAll(resolved.statuses());
+			}
+			else {
+				withStates.add(message);
+			}
+		}
+		return TranscriptEntries.fromRunTerminal(withStates, pendings, runId,
+				snapshot.transcriptToolTurnStartedAtMs(), includeLastAssistant, resolvedStatuses, executedInLedger);
+	}
+
+	private List<TranscriptEntry> completeTimeline(String runId, RunSnapshot snapshot, List<TranscriptEntry> entries,
+			boolean terminalAttempt) {
+		SseChatEmitter out;
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
+			out = this.registry.find(runId);
+		}
+		boolean requiresTimeline = entries.stream()
+			.anyMatch(entry -> "tool".equals(entry.kind()) || ("assistant".equals(entry.kind())
+					&& CollectionUtils.isNotEmpty(entry.toolCalls())));
+		if (requiresTimeline && out == null) {
+			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
+				out = this.registry.of(runId);
+			}
+		}
+		if (out == null) {
+			return entries;
+		}
+		Map<String, TranscriptEntry.SegmentView> toolSegments = populateAssistantSegments(out, entries);
+		if (toolSegments == null || !isLinkToolSegments(entries, toolSegments)) {
+			return null;
+		}
+		return entries;
+	}
+
+	private Map<String, TranscriptEntry.SegmentView> populateAssistantSegments(SseChatEmitter out,
+			List<TranscriptEntry> entries) {
+		Map<String, TranscriptEntry.SegmentView> toolSegments = new LinkedHashMap<>();
+		for (int i = 0; i < entries.size(); i++) {
+			TranscriptEntry entry = entries.get(i);
+			if (!"assistant".equals(entry.kind())) {
+				continue;
+			}
+			List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
+					entry.text(), entry.reasoning());
+			if (CollectionUtils.isEmpty(segments)) {
+				if (CollectionUtils.isNotEmpty(entry.toolCalls())) {
+					return null;
+				}
+				continue;
+			}
+			entries.set(i, entry.withSegments(segments));
+			for (TranscriptEntry.SegmentView segment : segments) {
+				if ("tool".equals(segment.kind()) && segment.toolCallId() != null) {
+					toolSegments.put(segment.toolCallId(), segment);
+				}
+			}
+		}
+		return toolSegments;
+	}
+
+	private boolean isLinkToolSegments(List<TranscriptEntry> entries,
+			Map<String, TranscriptEntry.SegmentView> toolSegments) {
+		for (int i = 0; i < entries.size(); i++) {
+			TranscriptEntry entry = entries.get(i);
+			if (!"tool".equals(entry.kind())) {
+				continue;
+			}
+			TranscriptEntry.SegmentView anchor = toolSegments.get(entry.toolCallId());
+			if (anchor == null) {
+				return false;
+			}
+			entries.set(i, entry.withSegments(List.of(new TranscriptEntry.SegmentView("tool", entry.result(),
+					entry.toolCallId(), anchor.seq()))));
+		}
+		return true;
+	}
+
+	private boolean appendTerminalEntries(String runId, String sessionId, RunSnapshot snapshot,
+			List<TranscriptEntry> entries, String outcomeOverride, boolean unconfirmed, boolean terminalAttempt) {
+		String outcome = ObjectUtils.getIfNull(outcomeOverride, snapshot::getStatus);
+		for (int i = 0; i < entries.size(); i++) {
+			TranscriptEntry entry = entries.get(i);
+			if (!"assistant".equals(entry.kind())) {
+				continue;
+			}
+			String errorCode = unconfirmed ? ErrorCodes.AI_REDIS_UNAVAILABLE : entry.errorCode();
+			String errorMessage = unconfirmed ? messageFor(errorCode) : entry.errorMessage();
+			String errorCardKey = unconfirmed || errorCode != null ? runId : null;
+			entries.set(i, entry.withOutcome(outcome, errorCardKey, unconfirmed, errorCode, errorMessage));
+		}
+		String userText = snapshot.getRequestText();
+		if (StringUtils.isNotBlank(userText)) {
+			entries.add(0, TranscriptEntries.user(runId, snapshot.transcriptUserTurnStartedAtMs(),
+					snapshot.getTurnStartedAtMs(), userText));
+		}
+		if (entries.isEmpty()) {
+			return isNonRetryableTranscriptFailure(terminalAttempt);
+		}
+		return this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(), entries,
+				snapshot.getRunEpoch()) || isNonRetryableTranscriptFailure(terminalAttempt);
+	}
+
+	private boolean isRecordTranscript(String runId, String sessionId, List<Message> history,
 			boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed, RunSnapshot snapshot,
 			boolean terminalAttempt) {
-		if (this.transcript == null || history == null || history.isEmpty()) {
-			return nonRetryableTranscriptFailure(terminalAttempt);
+		if (this.transcript == null || CollectionUtils.isEmpty(history)) {
+			return isNonRetryableTranscriptFailure(terminalAttempt);
 		}
 		try {
 			if (snapshot == null) {
 				snapshot = this.store.get(runId);
 			}
 			if (snapshot == null || !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
-				return nonRetryableTranscriptFailure(terminalAttempt);
+				return isNonRetryableTranscriptFailure(terminalAttempt);
 			}
-			Map<String, PendingToolCall> pendings = transcriptPendings(runId);
-			List<Message> withStates = new ArrayList<>(history.size());
-			Map<String, String> resolvedStatuses = new LinkedHashMap<>();
-			Predicate<String> executedInLedger = toolCallId -> ledgerEntry(runId, toolCallId) != null;
-			for (Message message : history) {
-				if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-					ResolvedToolStates resolved = resolveToolStates(runId, assistant, pendings, snapshot.getStatus(),
-							executedInLedger);
-					withStates.add(withToolCallStates(assistant, resolved.states()));
-					resolvedStatuses.putAll(resolved.statuses());
-				}
-				else {
-					withStates.add(message);
-				}
+			List<TranscriptEntry> entries = buildTerminalEntries(runId, snapshot, history, includeLastAssistant);
+			entries = completeTimeline(runId, snapshot, entries, terminalAttempt);
+			if (entries == null) {
+				return isNonRetryableTranscriptFailure(terminalAttempt);
 			}
-			List<TranscriptEntry> entries = TranscriptEntries.fromRunTerminal(withStates, pendings, runId,
-					snapshot.transcriptToolTurnStartedAtMs(), includeLastAssistant, resolvedStatuses, executedInLedger);
-			SseChatEmitter out;
-			try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
-				out = this.registry.find(runId);
-			}
-			boolean requiresTimeline = entries.stream()
-				.anyMatch(entry -> "tool".equals(entry.kind()) || ("assistant".equals(entry.kind())
-						&& entry.toolCalls() != null && !entry.toolCalls().isEmpty()));
-			if (requiresTimeline && out == null) {
-				try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
-					out = this.registry.of(runId);
-				}
-			}
-			if (out != null) {
-				Map<String, TranscriptEntry.SegmentView> toolSegments = new LinkedHashMap<>();
-				for (int i = 0; i < entries.size(); i++) {
-					TranscriptEntry entry = entries.get(i);
-					if (!"assistant".equals(entry.kind())) {
-						continue;
-					}
-					List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
-							entry.text(), entry.reasoning());
-					if (segments == null || segments.isEmpty()) {
-						if (entry.toolCalls() != null && !entry.toolCalls().isEmpty()) {
-							return nonRetryableTranscriptFailure(terminalAttempt);
-						}
-						continue;
-					}
-					entries.set(i, entry.withSegments(segments));
-					for (TranscriptEntry.SegmentView segment : segments) {
-						if ("tool".equals(segment.kind()) && segment.toolCallId() != null) {
-							toolSegments.put(segment.toolCallId(), segment);
-						}
-					}
-				}
-				for (int i = 0; i < entries.size(); i++) {
-					TranscriptEntry entry = entries.get(i);
-					if (!"tool".equals(entry.kind())) {
-						continue;
-					}
-					TranscriptEntry.SegmentView anchor = toolSegments.get(entry.toolCallId());
-					if (anchor == null) {
-						return nonRetryableTranscriptFailure(terminalAttempt);
-					}
-					entries.set(i, entry.withSegments(List.of(new TranscriptEntry.SegmentView("tool", entry.result(),
-							entry.toolCallId(), anchor.seq()))));
-				}
-			}
-			String outcome = outcomeOverride == null ? snapshot.getStatus() : outcomeOverride;
-			for (int i = 0; i < entries.size(); i++) {
-				TranscriptEntry entry = entries.get(i);
-				if (!"assistant".equals(entry.kind())) {
-					continue;
-				}
-				String errorCode = unconfirmed ? ErrorCodes.AI_REDIS_UNAVAILABLE : entry.errorCode();
-				String errorMessage = unconfirmed ? messageFor(errorCode) : entry.errorMessage();
-				String errorCardKey = unconfirmed || errorCode != null ? runId : null;
-				entries.set(i, entry.withOutcome(outcome, errorCardKey, unconfirmed, errorCode, errorMessage));
-			}
-			String userText = snapshot.getRequestText();
-			if (userText != null && !userText.isBlank()) {
-				entries.add(0, TranscriptEntries.user(runId, snapshot.transcriptUserTurnStartedAtMs(),
-						snapshot.getTurnStartedAtMs(), userText));
-			}
-			if (entries.isEmpty()) {
-				return nonRetryableTranscriptFailure(terminalAttempt);
-			}
-			if (!this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(), entries,
-					snapshot.getRunEpoch())) {
-				return nonRetryableTranscriptFailure(terminalAttempt);
-			}
-			return true;
+			return appendTerminalEntries(runId, sessionId, snapshot, entries, outcomeOverride, unconfirmed, terminalAttempt);
 		}
 		catch (RuntimeException ex) {
 			if (terminalAttempt) {
@@ -3799,7 +3955,7 @@ public class ResilientChatService {
 		}
 	}
 
-	private static boolean nonRetryableTranscriptFailure(boolean terminalAttempt) {
+	private static boolean isNonRetryableTranscriptFailure(boolean terminalAttempt) {
 		if (terminalAttempt) {
 			throw new NonRetryableTranscriptException();
 		}
@@ -3817,10 +3973,10 @@ public class ResilientChatService {
 				return;
 			}
 			// 这里只补已持久化的工具条目；失败正文与错误事实由 recordFailureTerminal 统一写入。
-			recordTranscript(runId, sessionId, this.codec.deserializeAll(snapshot.getMessageJson()), false);
+			isRecordTranscript(runId, sessionId, this.codec.deserializeAll(snapshot.getMessageJson()), false);
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript terminal history read failed runId={} (close unaffected)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("transcript terminal history read failed runId={} (close unaffected)", runId, ex);
 		}
 	}
 
@@ -3834,7 +3990,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("transcript tool entries read failed runId={} (falling back to raw history)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("transcript tool entries read failed runId={} (falling back to raw history)", runId, ex);
 		}
 		return pendings;
 	}
@@ -3852,7 +4008,7 @@ public class ResilientChatService {
 		// RT-20：旧驱动（丢租/不可确认/续跑权已被接管）不得写回记忆。
 		// 这一条与出帧/台账/认领的拦截同源 —— 否则"新主人答完、旧驱动收尾"会把旧答案写进
 		// chat:mem（刷新后看到作废回答），而快照写早已被 fence 拒绝。
-		if (!persistAllowed(runId, "memory convergence")) {
+		if (!isPersistAllowed(runId, "memory convergence")) {
 			return;
 		}
 		List<Message> memoryPortion = history.stream()
@@ -3922,7 +4078,7 @@ public class ResilientChatService {
 			log.warn("{} got null message window (not treated as empty-window delete) sessionId={}", stage, sessionId);
 			return;
 		}
-		if (!persistAllowed(runId, stage)) {
+		if (!isPersistAllowed(runId, stage)) {
 			return;
 		}
 		try {
@@ -3968,15 +4124,15 @@ public class ResilientChatService {
 	 *
 	 * @param runId 本轮 id；{@code null}/{@code blank} = 调用方没有 run 语义（兼容口），放行
 	 */
-	private boolean persistAllowed(String runId, String stage) {
-		if (runId == null || runId.isBlank() || this.store == null) {
+	private boolean isPersistAllowed(String runId, String stage) {
+		if (StringUtils.isBlank(runId) || this.store == null) {
 			return true;
 		}
 		try {
 			// 与帧/台账/序号共用同一道写门（RunStore#permittedToWrite）：它同时回答
 			// ① 租约视图是否仍属于本实例（LOST/UNAVAILABLE ⇒ 否）与
 			// ② fence 是否已被推进到本实例 epoch 之上（HELD-but-fence-ahead ⇒ 否）。
-			return this.store.permittedToWrite(runId, stage);
+			return this.store.isWritePermitted(runId, stage);
 		}
 		catch (RuntimeException ex) {
 			log.warn("resume authority unreadable: skipping {} runId={} (no snapshot/memory "
@@ -4008,7 +4164,7 @@ public class ResilientChatService {
 	private ResolvedToolStates resolveToolStates(String runId, AssistantMessage assistant,
 			Map<String, PendingToolCall> pendingsById, String snapshotStatus) {
 		return resolveToolStates(runId, assistant, pendingsById, snapshotStatus,
-				id -> ledgerEntry(runId, id) != null);
+				id -> MapUtils.isNotEmpty(ledgerEntry(runId, id)));
 	}
 
 	/** 同上，台账证据由调用方给出：与 tool 条目的 fallback 共用**同一谓词**，不会各查一次。 */
@@ -4021,7 +4177,7 @@ public class ResilientChatService {
 			PendingToolCall pending = call.id() == null ? null : pendingsById.get(call.id());
 			Map<String, Object> state = resolveToolCallState(pending, snapshotStatus, call.id(), runId,
 					executedInLedger);
-			if (state == null) {
+			if (MapUtils.isEmpty(state)) {
 				continue;
 			}
 			states.put(call.id(), state);
@@ -4035,7 +4191,7 @@ public class ResilientChatService {
 
 	/** 用已解析状态重建带 {@code toolCallStates} 的 assistant 消息；空映射 ⇒ 原消息（不产空键）。 */
 	private static Message withToolCallStates(AssistantMessage assistant, Map<String, Object> states) {
-		if (states == null || states.isEmpty()) {
+		if (MapUtils.isEmpty(states)) {
 			return assistant;
 		}
 		Map<String, Object> metadata = new LinkedHashMap<>();
@@ -4052,19 +4208,19 @@ public class ResilientChatService {
 
 	/**
 	 * R-144：单个 toolCallId 的段级状态解析（两状态源定序 + T2 升格判据 + T3 kind 携载）。
-	 * 返回 {@code {status, kind?}}；无 pendings 条目时返回 null（不写该 toolCallId 项）。
+	 * 返回 {@code {status, kind?}}；无 pendings 条目时返回空 Map（不写该 toolCallId 项）。
 	 */
 	Map<String, Object> resolveToolCallState(String runId, PendingToolCall pending,
 			String snapshotStatus, String toolCallId) {
 		return resolveToolCallState(pending, snapshotStatus, toolCallId, runId,
-				id -> ledgerEntry(runId, id) != null);
+				id -> MapUtils.isNotEmpty(ledgerEntry(runId, id)));
 	}
 
 	/** 同上，台账证据由调用方提供（同一次解析里只查一遍，见 {@link #resolveToolStates}）。 */
 	private Map<String, Object> resolveToolCallState(PendingToolCall pending, String snapshotStatus,
 			String toolCallId, String runId, Predicate<String> executedInLedger) {
 		if (pending == null) {
-			return null;
+			return Map.of();
 		}
 		String status = pending.getStatus();
 		if (isTerminalEntryStatus(status)) {
@@ -4101,7 +4257,7 @@ public class ResilientChatService {
 	 */
 	private Map<String, Object> ledgerEntry(String runId, String toolCallId) {
 		Map<String, Object> indexed = this.store.idemFor(runId, toolCallId);
-		if (indexed != null && !indexed.isEmpty()) {
+		if (MapUtils.isNotEmpty(indexed)) {
 			return indexed;
 		}
 		return this.store.ledgerFor(runId, toolCallId);
@@ -4168,7 +4324,7 @@ public class ResilientChatService {
 		// L-98：reasoning 不进正文（不参与 message_end(text).chars、不进 finalText），
 		// 但**全文**由累加器保留，随落定/取消写进 assistant 消息 metadata（下一轮回填）。
 		String reasoning = chunkReasoning(response);
-		if (reasoning != null && !reasoning.isEmpty()) {
+		if (StringUtils.isNotEmpty(reasoning)) {
 			// D：展示开关默认关闭 —— 不发思考帧；思考仍原样累计，供落定/取消时写进记忆回填。
 			boolean shown = this.properties.getReasoning().isDisplayEnabled();
 			if (shown) {
@@ -4180,7 +4336,7 @@ public class ResilientChatService {
 		}
 		String text = chunkText(response);
 		accumulator.accept(response);
-		if (text != null && !text.isEmpty()) {
+		if (StringUtils.isNotEmpty(text)) {
 			// 与 Accumulator 同源同序：工具执行点读到的正文必须与刚落定的 assistant 正文一致。
 			turnTextBody.append(text);
 		}
@@ -4191,10 +4347,10 @@ public class ResilientChatService {
 		// 而 Accumulator 无条件拼接每一个分片。于是模型单独吐一个纯空白分片（空格或换行，
 		// 流式分片边界上很常见）时，message_end.chars 会大于 delta 拼接长度，前端渲染的正文
 		// 与落定正文（finalText）分家。改为"非空即发"：空白也是正文的一部分，三处口径归一。
-		if (text != null && !text.isEmpty()) {
+		if (StringUtils.isNotEmpty(text)) {
 			// C：替换字符只观测（计数/偏移/长度进日志），不改正文、不缓冲、不新增提示。
 			observeReplacementCharacters(out.runId(), text);
-			out.textStart();
+			out.isTextStarted();
 			out.delta(text);
 		}
 	}
@@ -4269,7 +4425,7 @@ public class ResilientChatService {
 	 * （{@link UpstreamErrorClassifier.Finish} 为 null）。</li>
 	 * </ul>
 	 * {@link #lastFinish} 仍覆盖为最后一个非空 finishReason：{@code length}/{@code content_filter}
-	 * 这类<b>最终安全分类</b>必须按最后收到的那一个判（{@link #finish()} 只读它）。
+	 * 这类<b>最终安全分类</b>必须按最后收到的那一个判（{@link #isFinish()} 只读它）。
 	 * {@link #tailSummary()} 留最后几次响应的形态（分片序号 {@code i}、相对首片 {@code dMs}、
 	 * finishReason/文本长度/是否带工具调用/用量），
 	 * 供"为什么判成断流/为什么判成正常"在日志里一眼可查。
@@ -4332,7 +4488,7 @@ public class ResilientChatService {
 		 * 最后一个非空 finishReason 的语义分类（null = 本轮一个 finishReason 都没收到）。
 		 *
 		 * <p>刻意<b>覆盖</b>而不是"见过即记"：{@code length}/{@code content_filter} 这类最终安全
-		 * 分类必须按最后收到的那一个判（见 {@link #finish()}）。完成与否<b>不</b>看这里，见
+		 * 分类必须按最后收到的那一个判（见 {@link #isFinish()}）。完成与否<b>不</b>看这里，见
 		 * {@link #terminalFinish}。
 		 */
 		private volatile UpstreamErrorClassifier.Finish lastFinish;
@@ -4391,7 +4547,7 @@ public class ResilientChatService {
 				// "本片之前终态是否已锁存"：真实工具守卫只看<b>后续</b>分片（本片自己锁存的终态不算）
 				boolean terminalLatchedBefore = this.terminalFinish.get() != null;
 				String finishReason = generation.getMetadata() == null ? null : generation.getMetadata().getFinishReason();
-				if (StringUtils.hasText(finishReason)) {
+				if (StringUtils.isNotBlank(finishReason)) {
 					warnFinishAfterTerminal(finishReason, hasToolCalls, shardIndex, sinceFirstShardMs);
 					this.lastFinish = UpstreamErrorClassifier.finishOf(finishReason);
 					latchTerminal(finishReason, this.lastFinish);
@@ -4451,7 +4607,7 @@ public class ResilientChatService {
 		 * @param shown   本片是否已作为 {@code reasoning} 帧发给客户端（展示开关打开）
 		 */
 		void reasoning(String chunk, boolean shown) {
-			if (chunk != null && !chunk.isEmpty()) {
+			if (StringUtils.isNotEmpty(chunk)) {
 				this.reasoning.append(chunk);
 				if (shown) {
 					this.reasoningShown = true;
@@ -4504,7 +4660,7 @@ public class ResilientChatService {
 		}
 
 		/** 最后一个 finishReason 的语义（null = 一个都没收到；{@code length}/{@code content_filter} 的安全判据）。 */
-		UpstreamErrorClassifier.Finish finish() {
+		UpstreamErrorClassifier.Finish isFinish() {
 			return this.lastFinish;
 		}
 
@@ -4640,12 +4796,51 @@ public class ResilientChatService {
 	 * 窗口就<b>丢弃本次计算结果并重读最新窗口有界重算</b>（WARN + W1），绝不用压缩前的旧内容覆盖新消息；
 	 * 未成功落库的摘要/裁剪不得进入快照或终局收敛。
 	 */
+	private Compaction compactMemoryWindow(String runId, String sessionId, ProviderRuntime runtime,
+			List<Message> currentMemory, MemoryWindowSnapshot baseline, ContextState state, int maxOutput,
+			int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure,
+			TurnKeepalive keepalive, int limit) {
+		MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
+		Set<String> protectedIds = protectedToolCallIds(runId, sessionId);
+		Set<String> activeRunIds = protectedActiveRunIds(runId, sessionId);
+		MemoryWindow.Plan window = MemoryWindow.plan(currentMemory, windowBudget, protectedIds, activeRunIds);
+		MemoryWindow.emit(runId, sessionId, window, windowBudget);
+		List<Message> windowed = window.messages();
+		ContextCompactor.Outcome outcome = null;
+		List<Message> finalMessages = windowed;
+		ContextCompactor.Plan plan = null;
+		ContextCompactor.Request compactionRequest = null;
+		if (this.contextCompactor != null) {
+			Runnable onSummaryStart = keepalive == null ? null
+					: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
+			// B1：MemoryWindow 只做整轮淘汰；它在绝对预算下"淘汰到下限仍越线"时把 l1Due 交给压缩器，
+			// 由压缩器唯一地执行并记账一次 L1（不再有"窗口先清、压缩再判"的重复职责）。
+			compactionRequest = new ContextCompactor.Request(sessionId, runId, runtime.modelId(),
+					runtime.providerId(), windowed, state.usedTokens(),
+					state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
+					protectedIds, runtime, activeRunIds, maxOutput, window.stillOverBudget(), "first_turn",
+					ContextCompactor.lastToolCallId(windowed));
+			plan = this.contextCompactor.plan(compactionRequest, null, onSummaryStart);
+			finalMessages = plan.changed() ? plan.messages() : windowed;
+		}
+		boolean changed = window.changed() || plan != null && plan.changed();
+		String stage = this.contextCompactor == null ? "memory window" : "memory window/compaction";
+		if (!isWriteBackMemory(runId, sessionId, finalMessages, changed, stage, baseline)) {
+			return null;
+		}
+		// B1 / I5：只有整窗 CAS 成功之后才提交压缩状态/台账（失败不留下"状态说压了、模型看原文"）。
+		if (plan != null) {
+			outcome = this.contextCompactor.commit(compactionRequest, plan);
+		}
+		return new Compaction(finalMessages, limit, outcome);
+	}
+
 	private Compaction compactBeforeRequest(String runId, String sessionId, ProviderRuntime runtime,
 			List<Message> memory, int inputTokens, int systemTokens, int toolsTokens, int toolResultsSinceMeasure,
 			TurnKeepalive keepalive, MemoryWindowSnapshot windowSnapshot) {
 		int limit = this.contextCompactor == null ? 0
 				: this.contextCompactor.limitTokens(runtime.providerId(), runtime.modelId());
-		if (memory == null || memory.isEmpty()) {
+		if (CollectionUtils.isEmpty(memory)) {
 			return new Compaction(memory, limit, null);
 		}
 		ContextState state = this.contextCompactor == null ? null : this.contextCompactor.readState(sessionId);
@@ -4653,39 +4848,12 @@ public class ResilientChatService {
 		MemoryWindowSnapshot baseline = windowSnapshot;
 		List<Message> currentMemory = memory;
 		for (int attempt = 1; attempt <= 5; attempt++) {
-			MemoryWindow.Budget windowBudget = MemoryWindow.Budget.from(this.properties);
-			Set<String> protectedIds = protectedToolCallIds(runId, sessionId);
-			Set<String> activeRunIds = protectedActiveRunIds(runId, sessionId);
-			MemoryWindow.Plan window = MemoryWindow.plan(currentMemory, windowBudget, protectedIds, activeRunIds);
-			MemoryWindow.emit(runId, sessionId, window, windowBudget);
-			List<Message> windowed = window.messages();
-			ContextCompactor.Outcome outcome = null;
-			List<Message> finalMessages = windowed;
-			ContextCompactor.Plan plan = null;
-			ContextCompactor.Request compactionRequest = null;
-			if (this.contextCompactor != null) {
-				Runnable onSummaryStart = keepalive == null ? null
-						: () -> keepalive.phase(TurnKeepalive.PHASE_COMPACTING);
-				// B1：MemoryWindow 只做整轮淘汰；它在绝对预算下"淘汰到下限仍越线"时把 l1Due 交给压缩器，
-				// 由压缩器唯一地执行并记账一次 L1（不再有"窗口先清、压缩再判"的重复职责）。
-				compactionRequest = new ContextCompactor.Request(sessionId, runId, runtime.modelId(),
-						runtime.providerId(), windowed, state.usedTokens(),
-						state.completionTokens(), inputTokens, toolResultsSinceMeasure, systemTokens, toolsTokens,
-						protectedIds, runtime, activeRunIds, maxOutput, window.stillOverBudget(), "first_turn",
-						ContextCompactor.lastToolCallId(windowed));
-				plan = this.contextCompactor.plan(compactionRequest, null, onSummaryStart);
-				finalMessages = plan.changed() ? plan.messages() : windowed;
+			Compaction compacted = compactMemoryWindow(runId, sessionId, runtime, currentMemory, baseline, state, maxOutput,
+					inputTokens, systemTokens, toolsTokens, toolResultsSinceMeasure, keepalive, limit);
+			if (compacted != null) {
+				return compacted;
 			}
-			boolean changed = window.changed() || plan != null && plan.changed();
-			String stage = this.contextCompactor == null ? "memory window" : "memory window/compaction";
-			if (writeBackMemory(runId, sessionId, finalMessages, changed, stage, baseline)) {
-				// B1 / I5：只有整窗 CAS 成功之后才提交压缩状态/台账（失败不留下"状态说压了、模型看原文"）。
-				if (plan != null) {
-					outcome = this.contextCompactor.commit(compactionRequest, plan);
-				}
-				return new Compaction(finalMessages, limit, outcome);
-			}
-			// 未落库的压缩结果不得进入快照/终局收敛：以最新窗口重算；持续冲突则如实退回未压缩窗口。
+			// 未落库的压缩结果不得进入快照或终局收敛：以最新窗口重算；持续冲突则如实退回未压缩窗口。
 			baseline = memoryWindowSnapshot(sessionId);
 			if (baseline == null) {
 				return new Compaction(currentMemory, limit, null);
@@ -4727,7 +4895,7 @@ public class ResilientChatService {
 	 * {@link #isPersistedParkedToolRound}（SUSPENDED + in-flight 非空）。否则"单纯 SUSPENDED"的
 	 * 普通续跑异常会被误判成挂起轮而静默交还（无 error 终帧、不写 FAILED、不重试）。
 	 */
-	private boolean suspendedStatus(String runId) {
+	private boolean isSuspendedStatus(String runId) {
 		try {
 			RunSnapshot snapshot = this.store.get(runId);
 			return snapshot != null && RunSnapshot.SUSPENDED.equals(snapshot.getStatus());
@@ -4741,10 +4909,10 @@ public class ResilientChatService {
 		try {
 			RunSnapshot snapshot = this.store.get(runId);
 			return snapshot != null && RunSnapshot.SUSPENDED.equals(snapshot.getStatus())
-					&& snapshot.getInFlightToolCalls() != null && !snapshot.getInFlightToolCalls().isEmpty();
+					&& CollectionUtils.isNotEmpty(snapshot.getInFlightToolCalls());
 		}
 		catch (RuntimeException ex) {
-			log.debug("parked-run predicate snapshot read failed runId={} (continuing as not parked)", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("parked-run predicate snapshot read failed runId={} (continuing as not parked)", runId, ex);
 			return false;
 		}
 	}
@@ -4803,19 +4971,19 @@ public class ResilientChatService {
 	boolean replaceMemoryWindow(String runId, String sessionId, List<Message> messages,
 			MemoryWindowSnapshot windowSnapshot) {
 		if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
-			return persistWindowReplace(runId, sessionId, messages, "post-resume-compaction memory write-back", windowSnapshot, upsert);
+			return isPersistWindowReplace(runId, sessionId, messages, "post-resume-compaction memory write-back", windowSnapshot, upsert);
 		}
 		persistMemory(runId, sessionId, messages, "post-resume-compaction memory write-back");
 		return true;
 	}
 
-	private boolean writeBackMemory(String runId, String sessionId, List<Message> messages, boolean changed, String stage,
+	private boolean isWriteBackMemory(String runId, String sessionId, List<Message> messages, boolean changed, String stage,
 			MemoryWindowSnapshot windowSnapshot) {
 		if (!changed || messages == null) {
 			return true;
 		}
 		if (this.chatMemoryRepository instanceof RunUpsertChatMemoryRepository upsert) {
-			return persistWindowReplace(runId, sessionId, messages, stage + " write-back", windowSnapshot, upsert);
+			return isPersistWindowReplace(runId, sessionId, messages, stage + " write-back", windowSnapshot, upsert);
 		}
 		// 非按轮仓储（测试替身/自定义实现）：保持旧的整窗写语义。
 		persistMemory(runId, sessionId, messages, stage + " write-back");
@@ -4828,9 +4996,9 @@ public class ResilientChatService {
 	 * <p>没有基线（仓储支持整窗写但本轮读快照失败）时<b>不写</b>：此时按 run 合并会静默跳过跨 run 的
 	 * 改写，整窗覆盖又没有并发保护 —— 两者都比"这轮不写、下轮重算"更坏。
 	 */
-	private boolean persistWindowReplace(String runId, String sessionId, List<Message> messages, String stage,
+	private boolean isPersistWindowReplace(String runId, String sessionId, List<Message> messages, String stage,
 			MemoryWindowSnapshot windowSnapshot, RunUpsertChatMemoryRepository upsert) {
-		if (!persistAllowed(runId, stage)) {
+		if (!isPersistAllowed(runId, stage)) {
 			return false;
 		}
 		if (windowSnapshot == null) {
@@ -4895,7 +5063,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("current turn read failed sessionId={}", sessionId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("current turn read failed sessionId={}", sessionId, ex);
 		}
 		// B1 / I6：同会话其他活跃 run 的未决条目同样不得清除（用户可能正在那张卡上复核）
 		for (String active : protectedActiveRunIds(runId, sessionId)) {
@@ -4912,9 +5080,9 @@ public class ResilientChatService {
 			ids.addAll(this.store.activeRunIds(sessionId));
 		}
 		catch (RuntimeException ex) {
-			log.debug("session active run read failed sessionId={}", sessionId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("session active run read failed sessionId={}", sessionId, ex);
 		}
-		if (runId != null && !runId.isBlank()) {
+		if (StringUtils.isNotBlank(runId)) {
 			ids.add(runId);
 		}
 		return ids;
@@ -4931,7 +5099,7 @@ public class ResilientChatService {
 			}
 		}
 		catch (RuntimeException ex) {
-			log.debug("pending entries read failed runId={}", runId, ex);
+			if (LogSampling.canAcquire("resilient-chat-runtime-catch")) log.warn("pending entries read failed runId={}", runId, ex);
 		}
 	}
 
@@ -4955,7 +5123,7 @@ public class ResilientChatService {
 		// 同一会话内 locale 不变 ⇒ 这段文本稳定，prompt 缓存前缀不受影响；它同时进轮次快照的系统消息，
 		// 续跑/回灌因此沿用同一语言。
 		String languageSection = ReplyLanguage.current().directive();
-		AiContext effective = context == null ? AiContext.empty() : context;
+		AiContext effective = ObjectUtils.getIfNull(context, AiContext::empty);
 		String capabilityRules = capabilityRulesText(effective, toolsAllowed);
 		return SYSTEM_PROMPT + (capabilityRules.isEmpty() ? "" : "\n\n" + capabilityRules) + "\n\n"
 				+ (kbSection.isEmpty() ? "" : kbSection + "\n\n")
@@ -4963,8 +5131,12 @@ public class ResilientChatService {
 				+ this.contextBuilder.buildContextMessage(effective);
 	}
 
-	/** 续跑按快照冻结的模型身份读取能力位，不能改用当前默认模型。 */
 	public boolean toolCallingAllowed(String runId) {
+		return isToolCallingAllowed(runId);
+	}
+
+	/** 续跑按快照冻结的模型身份读取能力位，不能改用当前默认模型。 */
+	public boolean isToolCallingAllowed(String runId) {
 		RunSnapshot snapshot = resumeSnapshot(runId);
 		return this.providerRegistry.supportsToolCalling(snapshot.getProviderId(), snapshot.getModelId());
 	}
@@ -4974,7 +5146,7 @@ public class ResilientChatService {
 		if (!toolsAllowed) {
 			return "";
 		}
-		AiContext effective = context == null ? AiContext.empty() : context;
+		AiContext effective = ObjectUtils.getIfNull(context, AiContext::empty);
 		Set<String> disclosedTools = this.toolRegistry.forContext(effective).stream()
 				.map(callback -> callback.getToolDefinition().name())
 				.collect(java.util.stream.Collectors.toSet());
@@ -4986,7 +5158,7 @@ public class ResilientChatService {
 	 * {@code ContextBuilder}，避免不同调用路径的工作区描述分叉。
 	 */
 	public String workspaceStateText(AiContext context) {
-		return this.contextBuilder.buildContextMessage(context == null ? AiContext.empty() : context);
+		return this.contextBuilder.buildContextMessage(ObjectUtils.getIfNull(context, AiContext::empty));
 	}
 
 	/**
@@ -5043,7 +5215,7 @@ public class ResilientChatService {
 	 * @param level 实际级别（{@code none}/{@code L1}/{@code L2}/{@code L3}）；{@code null} 按 {@code none}
 	 */
 	public void noteCompaction(String runId, String level) {
-		this.compactionLevels.put(LocalRunKey.of(runId), level == null ? "none" : level);
+		this.compactionLevels.put(LocalRunKey.of(runId), ObjectUtils.defaultIfNull(level, "none"));
 	}
 
 	/**
@@ -5119,7 +5291,7 @@ public class ResilientChatService {
 	 */
 	private static String resumeReason() {
 		String reason = AiTrace.currentResumeReason();
-		return reason == null || reason.isBlank() ? "reattach" : reason;
+		return StringUtils.defaultIfBlank(reason, "reattach");
 	}
 
 	/**
@@ -5127,12 +5299,12 @@ public class ResilientChatService {
 	 *
 	 * <p>
 	 * 判"本轮压过没"用时刻比较：压缩发生在<b>轮起点</b>，故 {@code state.atMs >= turnStartedAtMs}
-	 * 等价于"本轮压过"；没有压缩设施的进程返回 null（帧里不出现 {@code context} 键，
+	 * 等价于"本轮压过"；没有压缩设施的进程返回空 Map（帧里不出现 {@code context} 键，
 	 * "未装配"与"计量为 0" 因此可区分）。
 	 */
 	private Map<String, Object> contextTelemetry(String sessionId, TurnContext turn, Accumulator accumulator) {
 		if (this.contextCompactor == null || turn == null) {
-			return null;
+			return Map.of();
 		}
 		ContextMeter meter = accumulator == null ? new ContextMeter() : accumulator.meter();
 		boolean est = !meter.measured();
@@ -5141,7 +5313,7 @@ public class ResilientChatService {
 		ContextState before = this.contextCompactor.readState(sessionId);
 		// 级别由压缩方交接（见 TurnContext#compactionLevel）：时刻反推在续跑轮必然误判为 none（I-1）
 		String level = turn.compactionLevel();
-		String model = meter.model() != null ? meter.model() : turn.model();
+		String model = ObjectUtils.getIfNull(meter.model(), turn::model);
 		if (meter.dirty() > 0) {
 			// 脏 usage 要留痕：frames/dirty 是"这个数可信到什么程度"的唯一证据
 			log.warn("usage has fallback frames sessionId={} frames={} dirty={} adoptedPrompt={}", sessionId,
@@ -5156,7 +5328,7 @@ public class ResilientChatService {
 		payload.put("percent", turn.limitTokens() > 0 ? ContextBreakdownService.percent(used, turn.limitTokens()) : null);
 		payload.put("level", level);
 		payload.put("est", est);
-		payload.put("circuit", before.circuit() == null ? "closed" : before.circuit());
+		payload.put("circuit", ObjectUtils.defaultIfNull(before.circuit(), "closed"));
 		return payload;
 	}
 
@@ -5300,7 +5472,7 @@ public class ResilientChatService {
 			return "AI call exceeded segment budget " + this.properties.getResilience().getTotalBudget()
 					+ " (segment-level; dual-timeout thresholds pending load test)";
 		}
-		return error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+		return ObjectUtils.getIfNull(error.getMessage(), () -> error.getClass().getSimpleName());
 	}
 
 	/**
@@ -5310,7 +5482,7 @@ public class ResilientChatService {
 	 * 隐去只保留字符数，正文一个片段都不留。
 	 */
 	private static String loggableBody(String body) {
-		if (body == null || body.isEmpty()) {
+		if (StringUtils.isEmpty(body)) {
 			return "";
 		}
 		if (ExcerptGuard.sensitive(body)) {

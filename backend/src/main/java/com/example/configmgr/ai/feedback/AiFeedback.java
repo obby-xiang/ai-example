@@ -1,7 +1,15 @@
 package com.example.configmgr.ai.feedback;
 
-import jakarta.persistence.*;
-import lombok.Data;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
@@ -21,7 +29,9 @@ import java.time.LocalDateTime;
  * <li>唯一键 {@code (tenant_id, user_id, message_id)}：幂等 upsert 的粒度是"身份内"。</li>
  * </ul>
  */
-@Data
+@Getter
+@Setter
+@ToString(onlyExplicitlyIncluded = true)
 @Entity
 @Table(name = "ai_feedback",
 		uniqueConstraints = @UniqueConstraint(columnNames = { "tenant_id", "user_id", "message_id" }))
@@ -29,24 +39,30 @@ public class AiFeedback {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @ToString.Include
     private Long id;
 
     /** 归属租户（显式身份；写入时固化，非空）。 */
     @Column(name = "tenant_id", nullable = false)
+    @ToString.Include
     private Long tenantId;
 
     /** 归属用户（显式身份；写入时固化，非空）。 */
     @Column(name = "user_id", nullable = false)
+    @ToString.Include
     private Long userId;
 
     @Column(name = "message_id", nullable = false, length = 64)
+    @ToString.Include
     private String messageId;
 
     @Column(name = "session_id", nullable = false, length = 64)
+    @ToString.Include
     private String sessionId;
 
     /** 1=赞 / -1=踩（0=取消不落库）。 */
     @Column(name = "rating", nullable = false)
+    @ToString.Include
     private Integer rating;
 
     @Column(name = "reason", length = 1024)

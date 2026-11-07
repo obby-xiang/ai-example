@@ -3,6 +3,7 @@ package com.example.configmgr.ai.kb;
 import com.example.configmgr.ai.config.AiProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -14,7 +15,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
@@ -51,11 +51,8 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         this.cache = cache;
         this.mapper = mapper;
         this.kb = kb;
-        this.leaseScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "kb-cache-lease");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.leaseScheduler = new KbService.BoundedScheduledExecutor(8,
+                runnable -> Thread.ofPlatform().daemon(true).name("kb-cache-lease").unstarted(runnable));
     }
 
     @Override
@@ -133,7 +130,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             this.reconcileAfterDirect = true;
             return content;
         }
-        if (cached.isPresent() && shaMatches(cached.get().sha(), meta.sha())) {
+        if (cached.isPresent() && isShaMatch(cached.get().sha(), meta.sha())) {
             withComputedSha(meta, cached.get().content());
             return cached.get().content();
         }
@@ -174,37 +171,43 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             return fromCache("Cached manifest is unreadable");
         }
         try (lease) {
-            KbSource.ManifestFetch remote;
-            try {
-                remote = this.delegate.fetchManifest(previousEtag, true, budget);
+            return refreshWithLease(previousEtag, lease, budget);
+        }
+    }
+
+    private KbSource.ManifestFetch refreshWithLease(String previousEtag, Lease lease, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        KbSource.ManifestFetch remote;
+        try {
+            remote = this.delegate.fetchManifest(previousEtag, true, budget);
+        }
+        catch (KbSourceException e) {
+            if (!isHttp() || this.reconcileAfterDirect) {
+                throw e;
             }
-            catch (KbSourceException e) {
-                if (!isHttp() || this.reconcileAfterDirect) {
-                    throw e;
-                }
-                log.warn("KB source refresh failed (stale-if-error; serving stale cache)", e);
-                return fromCache("Cached manifest is unreadable");
-            }
-            if (remote.notModified() && cachedManifestMatches(previousEtag)) {
-                this.lastRemoteCheck = Instant.now();
-                reconcileCachedRemoval(lease, budget);
-                KbSource.ManifestFetch cachedResult = fromCache("Cached manifest is unreadable");
-                this.reconcileAfterDirect = false;
-                return cachedResult;
-            }
-            if (remote.notModified()) {
-                remote = this.delegate.fetchManifest(null, true, budget);
-            }
+            log.warn("KB source refresh failed (stale-if-error; serving stale cache)", e);
+            return fromCache("Cached manifest is unreadable");
+        }
+        if (remote.notModified() && isCachedManifestMatch(previousEtag)) {
             this.lastRemoteCheck = Instant.now();
-            if (remote.notModified() || remote.manifest() == null) {
-                throw new KbSourceException("Knowledge source still returned no manifest after an unconditional reload");
-            }
-            try {
-                return syncToCache(remote.manifest(), remote.etag(), remote.contents(), lease, budget);
-            }
-            catch (KbCacheException e) {
-                throw new KbSourceException("Failed to publish KB cache; keeping the previous index", e);
-            }
+            reconcileCachedRemoval(lease, budget);
+            touchCachedTtl(lease, budget);
+            KbSource.ManifestFetch cachedResult = fromCache("Cached manifest is unreadable");
+            this.reconcileAfterDirect = false;
+            return cachedResult;
+        }
+        if (remote.notModified()) {
+            remote = this.delegate.fetchManifest(null, true, budget);
+        }
+        this.lastRemoteCheck = Instant.now();
+        if (remote.notModified() || remote.manifest() == null) {
+            throw new KbSourceException("Knowledge source still returned no manifest after an unconditional reload");
+        }
+        try {
+            return syncToCache(remote.manifest(), remote.etag(), remote.contents(), lease, budget);
+        }
+        catch (KbCacheException e) {
+            throw new KbSourceException("Failed to publish KB cache; keeping the previous index", e);
         }
     }
 
@@ -242,7 +245,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         throw new KbSourceException("Knowledge cache is empty and another instance is refreshing; retry later");
     }
 
-    private boolean cachedManifestMatches(String previousEtag) {
+    private boolean isCachedManifestMatch(String previousEtag) {
         if (isBlank(previousEtag)) {
             return false;
         }
@@ -290,6 +293,13 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         known.addAll(current);
         putDocIdsBatched(known, generation, lease, budget);
 
+        SyncRound round = collectRound(sourceManifest, sourceContents, generation, lease, budget);
+        writeRound(round, generation, lease, budget);
+        return publishRound(sourceManifest, sourceEtag, round, known, current, generation, lease, budget);
+    }
+
+    private SyncRound collectRound(KbManifest sourceManifest, Map<String, String> sourceContents, long generation,
+            Lease lease, KbSource.RefreshBudget budget) throws KbSourceException {
         List<KbDocMeta> effectiveDocs = new ArrayList<>(sourceManifest.docs().size());
         List<String> fetchedContents = new ArrayList<>(sourceManifest.docs().size());
         Map<String, String> roundContents = new java.util.LinkedHashMap<>();
@@ -302,7 +312,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             }
             Optional<KbCache.DocEntry> existing = this.cache.doc(declared.id());
             if (existing.isPresent() && !isBlank(declared.sha())
-                    && shaMatches(existing.get().sha(), declared.sha())) {
+                    && isShaMatch(existing.get().sha(), declared.sha())) {
                 String content = existing.get().content();
                 effectiveDocs.add(withComputedSha(declared, content));
                 fetchedContents.add(null);
@@ -318,16 +328,20 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                 roundContents.put(declared.id(), content);
             }
         }
+        return new SyncRound(effectiveDocs, fetchedContents, roundContents);
+    }
 
-        sinceLeaseCheck = 0;
-        for (int i = 0; i < effectiveDocs.size(); i++) {
+    private void writeRound(SyncRound round, long generation, Lease lease, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        int sinceLeaseCheck = 0;
+        for (int i = 0; i < round.effectiveDocs().size(); i++) {
             budget.check();
             if (++sinceLeaseCheck >= CACHE_BATCH_SIZE) {
                 lease.requireValid(budget);
                 sinceLeaseCheck = 0;
             }
-            KbDocMeta effective = effectiveDocs.get(i);
-            String content = fetchedContents.get(i);
+            KbDocMeta effective = round.effectiveDocs().get(i);
+            String content = round.fetchedContents().get(i);
             if (content == null) {
                 if (!this.cache.markDocGeneration(effective.id(), generation)) {
                     throw new KbSourceException("Cached KB content was reclaimed before publication; keeping the previous manifest and retrying: " + effective.id());
@@ -337,8 +351,12 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                 cacheDoc(effective, content, generation);
             }
         }
+    }
 
-        List<KbDocMeta> canonicalDocs = effectiveDocs.stream()
+    private KbSource.ManifestFetch publishRound(KbManifest sourceManifest, String sourceEtag, SyncRound round,
+            Set<String> known, Set<String> current, long generation, Lease lease, KbSource.RefreshBudget budget)
+            throws KbSourceException {
+        List<KbDocMeta> canonicalDocs = round.effectiveDocs().stream()
                 .sorted(java.util.Comparator.comparing(KbDocMeta::id))
                 .toList();
         KbManifest effectiveManifest = new KbManifest(sourceManifest.version(), "", canonicalDocs);
@@ -359,7 +377,11 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         this.lastSeenVersion = corpusVersion;
         pruneRemovedDocs(known, current, generation, lease, budget);
         this.reconcileAfterDirect = false;
-        return KbSource.ManifestFetch.modified(effectiveManifest, etag, corpusVersion, roundContents);
+        return KbSource.ManifestFetch.modified(effectiveManifest, etag, corpusVersion, round.roundContents());
+    }
+
+    private record SyncRound(List<KbDocMeta> effectiveDocs, List<String> fetchedContents,
+            Map<String, String> roundContents) {
     }
 
     private void putDocIdsBatched(Set<String> ids, long generation, Lease lease, KbSource.RefreshBudget budget)
@@ -396,6 +418,25 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         }
     }
 
+    private void touchCachedTtl(Lease lease, KbSource.RefreshBudget budget) throws KbSourceException {
+        Optional<KbCache.ManifestEntry> cached = this.cache.manifest();
+        if (cached.isEmpty()) {
+            return;
+        }
+        KbManifest manifest = KbManifest.parse(cached.get().json().getBytes(StandardCharsets.UTF_8), this.mapper);
+        for (int from = 0; from < manifest.docs().size(); from += CACHE_BATCH_SIZE) {
+            lease.requireValid(budget);
+            int to = Math.min(manifest.docs().size(), from + CACHE_BATCH_SIZE);
+            for (KbDocMeta doc : manifest.docs().subList(from, to)) {
+                this.cache.touchDoc(doc.id());
+            }
+        }
+        lease.requireValid(budget);
+        this.cache.touchGeneration();
+        this.cache.touchDocIds();
+        this.cache.touchManifest();
+    }
+
     private void reconcileCachedRemoval(Lease lease, KbSource.RefreshBudget budget) {
         try {
             long generation = this.cache.generation();
@@ -414,7 +455,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             pruneRemovedDocs(known, current, generation, lease, budget);
         }
         catch (Exception e) {
-            log.debug("KB retirement reconcile deferred to the next round", e);
+            // 退休索引协调失败时留待下一轮。
         }
     }
 
@@ -481,7 +522,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         return isBlank(meta.sha()) ? meta.withSha(actualSha) : meta;
     }
 
-    private static boolean shaMatches(String cachedSha, String manifestSha) {
+    private static boolean isShaMatch(String cachedSha, String manifestSha) {
         if (isBlank(manifestSha)) {
             return !isBlank(cachedSha);
         }
@@ -493,7 +534,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
     }
 
     private static boolean isBlank(String value) {
-        return value == null || value.isBlank();
+        return StringUtils.isBlank(value);
     }
 
     private Duration jitteredRefreshInterval() {
@@ -538,7 +579,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
     }
 
     private static String nullSafe(String value) {
-        return value == null ? "" : value;
+        return StringUtils.defaultString(value);
     }
 
     @Override
@@ -571,7 +612,6 @@ public class CachedKbSource implements KbSource, AutoCloseable {
             }
             catch (RuntimeException e) {
                 this.valid.set(false);
-                log.debug("KB refresh lease renewal failed; publishing is disabled for this owner", e);
             }
         }
 
@@ -591,7 +631,7 @@ public class CachedKbSource implements KbSource, AutoCloseable {
                 CachedKbSource.this.cache.unlock(this.token);
             }
             catch (RuntimeException e) {
-                log.debug("Failed to release KB refresh token", e);
+                // 租约已失效，释放失败由服务端 TTL 收口。
             }
         }
     }

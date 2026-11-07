@@ -21,6 +21,14 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
 /**
  * AI Runtime 装配（S4.2 §2：记忆三件；模型侧装配自模型配置专项批① 起归
  * {@link AiProviderRegistry}）。
@@ -105,6 +113,39 @@ public class AiModelConfig {
 	@ConditionalOnMissingBean
 	public BaseChatMemoryAdvisor messageChatMemoryAdvisor(ChatMemory chatMemory) {
 		return new IdentityBoundChatMemoryAdvisor(chatMemory);
+	}
+
+	@Bean("aiToolTimeoutExecutor")
+	@ConditionalOnMissingBean(name = "aiToolTimeoutExecutor")
+	public ExecutorService aiToolTimeoutExecutor(AiProperties properties) {
+		int configured = properties.getSuspend().getPoolSize();
+		int threads = configured > 0 ? configured : 20;
+		return new ThreadPoolExecutor(0, threads, 30L, TimeUnit.SECONDS, new SynchronousQueue<>(),
+				Executors.defaultThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
+	}
+
+	@Bean("aiResumeLeaseRetryScheduler")
+	@ConditionalOnMissingBean(name = "aiResumeLeaseRetryScheduler")
+	public ScheduledExecutorService aiResumeLeaseRetryScheduler() {
+		ScheduledThreadPoolExecutor pool = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+		pool.setKeepAliveTime(60L, TimeUnit.SECONDS);
+		pool.allowCoreThreadTimeOut(true);
+		pool.setRemoveOnCancelPolicy(true);
+		pool.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+		pool.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+		return pool;
+	}
+
+	@Bean("aiCancelFinalizeRetryScheduler")
+	@ConditionalOnMissingBean(name = "aiCancelFinalizeRetryScheduler")
+	public ScheduledExecutorService aiCancelFinalizeRetryScheduler() {
+		ScheduledThreadPoolExecutor pool = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+		pool.setKeepAliveTime(60L, TimeUnit.SECONDS);
+		pool.allowCoreThreadTimeOut(true);
+		pool.setRemoveOnCancelPolicy(true);
+		pool.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+		pool.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+		return pool;
 	}
 
 	// ── 可用性（Q2 → 动态）：无可用 provider 时端点惰性 503 ──────────────────────

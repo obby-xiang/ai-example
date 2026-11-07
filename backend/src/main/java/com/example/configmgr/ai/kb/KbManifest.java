@@ -3,6 +3,8 @@ package com.example.configmgr.ai.kb;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
 import java.util.List;
@@ -16,14 +18,14 @@ import java.util.List;
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record KbManifest(
-        String version,
+        @JsonProperty("version") String version,
         @JsonProperty("generated_at") String generatedAt,
-        List<KbDocMeta> docs) {
+        @JsonProperty("docs") List<KbDocMeta> docs) {
 
     public KbManifest {
-        version = version == null ? "" : version;
-        generatedAt = generatedAt == null ? "" : generatedAt;
-        docs = docs == null ? List.of() : List.copyOf(docs);
+        version = StringUtils.defaultString(version);
+        generatedAt = StringUtils.defaultString(generatedAt);
+        docs = List.copyOf(ObjectUtils.defaultIfNull(docs, List.of()));
     }
 
     public static KbManifest empty() {
@@ -53,13 +55,13 @@ public record KbManifest(
         }
         java.util.Set<String> seen = new java.util.HashSet<>();
         for (KbDocMeta doc : docs) {
-            if (doc == null || doc.id() == null || doc.id().isBlank()) {
+            if (doc == null || StringUtils.isBlank(doc.id())) {
                 throw new KbSourceException("manifest.json contains a document entry without an id");
             }
             if (!seen.add(doc.id())) {
                 throw new KbSourceException("Duplicate document id in manifest.json: " + doc.id());
             }
-            if (doc.title() == null || doc.title().isBlank()) {
+            if (StringUtils.isBlank(doc.title())) {
                 throw new KbSourceException("Document " + doc.id() + " in manifest.json has no title");
             }
         }
