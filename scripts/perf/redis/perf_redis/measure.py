@@ -18,7 +18,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from . import manifest as M
 from .api import ApiClient
 from .envcfg import Config
-from .redisops import RedisOps
+from .redisops import RedisOps, error_detail
 from .stats import summarize
 
 
@@ -107,7 +107,7 @@ def _skipped_entry(scenario: str, copy_name: str, round_no: int, warmup: bool,
         "operation": label,
         "reason": "budget_exhausted",
         "budget_kind": budget.exhausted_kind(),
-        "detail": detail or "预算耗尽，未发送请求",
+        "detail": detail or "budget exhausted; request not sent",
     }
 
 READ_OPERATIONS = {
@@ -177,7 +177,7 @@ def _call(cfg: Config, api: ApiClient, copy: Dict[str, object], operation: str, 
             "status": None,
             "ok": False,
             "duration_ms": 0.0,
-            "transport_error": "copy 没有 run（缺少 runId）",
+            "transport_error": "copy has no run (missing runId)",
             "timed_out": False,
             "request_timeout_s": timeout,
             "server_timing": "",
@@ -194,7 +194,7 @@ def _call(cfg: Config, api: ApiClient, copy: Dict[str, object], operation: str, 
         return api.cancel_status(run_id, timeout=timeout)
     if operation == "pending":
         return api.pending(run_id, timeout=timeout)
-    raise ValueError("未知操作：%s" % operation)
+    raise ValueError("unknown operation: %s" % operation)
 
 
 def _failure_kind(label: str, status: object, transport_error: str) -> str:
@@ -267,7 +267,7 @@ def _execute_concurrent(cfg: Config, api: ApiClient, budget: _Budget, copy: Dict
                     "status": None,
                     "ok": False,
                     "duration_ms": 0.0,
-                    "transport_error": str(exc),
+                    "transport_error": error_detail(exc),
                     "business": {},
                     "body_keys": [],
                     "text_prefix": "",
@@ -297,7 +297,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                 "topology": redis_ops.role_summary(),
             }
         except Exception as exc:
-            environment["redis"] = {"error": str(exc)}
+            environment["redis"] = {"error": error_detail(exc)}
 
         health = api.health(timeout=_health_timeout(cfg, budget))
         environment["app"] = {
@@ -332,7 +332,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                     if len(results) < count:
                         scenario_result["skipped"].append(_skipped_entry(
                             scenario, copy_name, round_no, warmup, label, budget,
-                            "并发请求因预算只执行了 %d/%d" % (len(results), count)))
+                            "budget allowed only %d/%d concurrent requests to execute" % (len(results), count)))
                 else:
                     result = _call(cfg, api, copy, operation, label, timeout=timeout)
                     result = _mark_budget_timeout(cfg, budget, timeout, result)
@@ -349,7 +349,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                 scenario_rows.append({
                     "scenario": scenario,
                     "status": "skipped",
-                    "reason": (entry or {}).get("reason", "未生成/不支持"),
+                    "reason": (entry or {}).get("reason", "not generated or unsupported"),
                 })
                 continue
             if budget.total_exhausted():
@@ -358,7 +358,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                     "status": "skipped",
                     "reason": "budget_exhausted",
                     "budget_kind": "total",
-                    "detail": "measure 总时限 %ss 已用尽，未开始该场景"
+                    "detail": "total measure deadline of %ss exhausted; scenario not started"
                               % cfg.measure_total_timeout,
                 })
                 continue
@@ -382,7 +382,7 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
             if destructive and cfg.warmup > 0:
                 warm_copy = copies.get("warmup")
                 if warm_copy is None:
-                    scenario_result["errors"].append("缺少 warmup copy")
+                    scenario_result["errors"].append("missing warmup copy")
                 else:
                     run_operations(scenario, "warmup", 0, True, warm_copy, operations, scenario_result)
             if not destructive and cfg.warmup > 0:
@@ -394,18 +394,18 @@ def measure(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> Di
                 copy_name = "r%d" % round_no
                 copy = copies.get(copy_name)
                 if copy is None:
-                    scenario_result["errors"].append("缺少测量 copy %s" % copy_name)
+                    scenario_result["errors"].append("missing measurement copy %s" % copy_name)
                     continue
                 if copy.get("errors"):
-                    scenario_result["errors"].append("%s 生成错误：%s" % (copy_name, copy.get("errors")))
+                    scenario_result["errors"].append("%s generation errors: %s" % (copy_name, copy.get("errors")))
                 run_operations(scenario, copy_name, round_no, False, copy, operations, scenario_result)
 
             scenario_result["executed_requests"] = len(rows) - first_row
             if scenario_result["skipped"] or scenario_result["budget_errors"]:
                 scenario_result["status"] = "budget_exhausted"
                 scenario_result["reason"] = (
-                    "measure 预算耗尽（PERF_MEASURE_SCENARIO_TIMEOUT_SECONDS="
-                    "%ss / PERF_MEASURE_TOTAL_TIMEOUT_SECONDS=%ss），已保留已完成结果"
+                    "measure budget exhausted (PERF_MEASURE_SCENARIO_TIMEOUT_SECONDS="
+                    "%ss / PERF_MEASURE_TOTAL_TIMEOUT_SECONDS=%ss); completed results were retained"
                     % (cfg.measure_scenario_timeout, cfg.measure_total_timeout))
                 scenario_result["partial"] = scenario_result["executed_requests"] > 0
             scenario_rows.append(scenario_result)

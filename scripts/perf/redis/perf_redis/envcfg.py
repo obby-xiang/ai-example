@@ -43,10 +43,10 @@ def _int(env: Dict[str, str], name: str, default: int, errors: List[str], minimu
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        errors.append("%s 必须是整数（当前=%r）" % (name, raw))
+        errors.append("%s must be an integer (current=%r)" % (name, raw))
         return default
     if value < minimum:
-        errors.append("%s 必须 >= %d（当前=%d）" % (name, minimum, value))
+        errors.append("%s must be >= %d (current=%d)" % (name, minimum, value))
         return default
     return value
 
@@ -56,10 +56,10 @@ def _float(env: Dict[str, str], name: str, default: float, errors: List[str], mi
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        errors.append("%s 必须是数字（当前=%r）" % (name, raw))
+        errors.append("%s must be a number (current=%r)" % (name, raw))
         return default
     if value < minimum:
-        errors.append("%s 必须 >= %s（当前=%s）" % (name, minimum, value))
+        errors.append("%s must be >= %s (current=%s)" % (name, minimum, value))
         return default
     return value
 
@@ -73,7 +73,7 @@ def _bool(env: Dict[str, str], name: str, default: bool, errors: List[str]) -> b
         return True
     if lowered in FALSE_VALUES:
         return False
-    errors.append("%s 必须是 true/false（当前=%r）" % (name, raw))
+    errors.append("%s must be true/false (current=%r)" % (name, raw))
     return default
 
 
@@ -91,22 +91,22 @@ def parse_cluster_nodes(raw: str, errors: List[str]) -> List[Tuple[str, int]]:
         if not item:
             continue
         if ":" not in item:
-            errors.append("REDIS_CLUSTER_NODES 项缺少端口：%r（应为 host:port）" % item)
+            errors.append("REDIS_CLUSTER_NODES entry is missing a port: %r (expected host:port)" % item)
             continue
         host, port_text = item.rsplit(":", 1)
         try:
             port = int(port_text)
         except ValueError:
-            errors.append("REDIS_CLUSTER_NODES 端口非法：%r" % item)
+            errors.append("REDIS_CLUSTER_NODES has an invalid port: %r" % item)
             continue
         if not host or port <= 0 or port > 65535:
-            errors.append("REDIS_CLUSTER_NODES 项非法：%r" % item)
+            errors.append("REDIS_CLUSTER_NODES has an invalid entry: %r" % item)
             continue
         if host.startswith("[") and host.endswith("]"):
             host = host[1:-1]
         nodes.append((host, port))
     if not nodes:
-        errors.append("cluster 模式必须设置 REDIS_CLUSTER_NODES=host1:port1,host2:port2,...")
+        errors.append("cluster mode requires REDIS_CLUSTER_NODES=host1:port1,host2:port2,...")
     return nodes
 
 
@@ -184,17 +184,17 @@ class Config:
         errors: List[str] = []
         if not self.isolated_env:
             errors.append(
-                "拒绝写入：必须先确认这是隔离环境（PERF_ISOLATED_ENV=true）。"
-                "本工具只应在专用 Redis 与专用应用实例上运行。"
+                "writes refused: confirm an isolated environment with PERF_ISOLATED_ENV=true. "
+                "Run this tool only against dedicated Redis and application instances."
             )
         if self.remote_targets() and not self.confirm_remote:
             errors.append(
-                "目标是远程 Redis（%s），需显式确认 PERF_CONFIRM_REMOTE=true"
+                "remote Redis target(s) (%s) require PERF_CONFIRM_REMOTE=true"
                 % ",".join(self.remote_targets())
             )
         if self.mode == "standalone" and self.db != 0 and not self.confirm_non_default_db:
             errors.append(
-                "standalone Redis 使用非 0 库（db=%d），需显式确认 PERF_CONFIRM_NON_DEFAULT_DB=true" % self.db
+                "standalone Redis uses a non-zero database (db=%d); set PERF_CONFIRM_NON_DEFAULT_DB=true" % self.db
             )
         if errors:
             raise ConfigError(errors)
@@ -271,32 +271,32 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
 
     cfg.mode = _get(source, "REDIS_MODE", _get(source, "PERF_REDIS_MODE", "standalone")).lower()
     if cfg.mode not in ("standalone", "cluster"):
-        errors.append("REDIS_MODE 只能是 standalone 或 cluster（当前=%r）" % cfg.mode)
+        errors.append("REDIS_MODE must be standalone or cluster (current=%r)" % cfg.mode)
 
     cfg.host = _get(source, "REDIS_HOST", "127.0.0.1")
     cfg.port = _int(source, "REDIS_PORT", 6379, errors, 1)
     if cfg.port > 65535:
-        errors.append("REDIS_PORT 必须 <= 65535")
+        errors.append("REDIS_PORT must be <= 65535")
     cfg.db = _int(source, "REDIS_DB", 0, errors, 0)
     if cfg.mode == "cluster":
         cfg.cluster_nodes = parse_cluster_nodes(_get(source, "REDIS_CLUSTER_NODES", ""), errors)
     else:
         cfg.cluster_nodes = []
     if cfg.mode == "cluster" and cfg.db != 0:
-        errors.append("Redis Cluster 只支持 db=0（当前 REDIS_DB=%d）" % cfg.db)
+        errors.append("Redis Cluster supports only db=0 (current REDIS_DB=%d)" % cfg.db)
 
     cfg.username = _get(source, "REDIS_USERNAME", "")
     cfg.password = _get(source, "REDIS_PASSWORD", "")
     cfg.tls = _bool(source, "REDIS_TLS", False, errors)
     cfg.tls_insecure = _bool(source, "REDIS_TLS_INSECURE", False, errors)
     if cfg.tls_insecure and not cfg.tls:
-        errors.append("REDIS_TLS_INSECURE=true 需要同时设置 REDIS_TLS=true")
+        errors.append("REDIS_TLS_INSECURE=true requires REDIS_TLS=true")
     cfg.socket_timeout = _float(source, "REDIS_SOCKET_TIMEOUT_SECONDS", 5.0, errors, 0.1)
     cfg.connect_timeout = _float(source, "REDIS_CONNECT_TIMEOUT_SECONDS", 5.0, errors, 0.1)
 
     base_url = _get(source, "APP_BASE_URL", "http://127.0.0.1:8081").rstrip("/")
     if not (base_url.startswith("http://") or base_url.startswith("https://")):
-        errors.append("APP_BASE_URL 必须以 http:// 或 https:// 开头（当前=%r）" % base_url)
+        errors.append("APP_BASE_URL must start with http:// or https:// (current=%r)" % base_url)
     cfg.app_base_url = base_url
     cfg.tenant_id = _int(source, "APP_TENANT_ID", 1, errors, 1)
     cfg.user_id = _int(source, "APP_USER_ID", 101, errors, 1)
@@ -313,27 +313,27 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
     cfg.namespace = _get(source, "PERF_NAMESPACE", "")
     if cfg.namespace and not NAMESPACE_PATTERN.match(cfg.namespace):
         errors.append(
-            "PERF_NAMESPACE 只允许字母/数字/_.-，长度 2..41（当前=%r）；它会被拼进会话号与清理扫描"
+            "PERF_NAMESPACE allows only letters/digits/_.- and length 2..41 (current=%r); it is used in session IDs and cleanup scans"
             % cfg.namespace
         )
     cfg.profile = _get(source, "PERF_PROFILE", "smoke").lower()
     if cfg.profile not in PROFILES:
-        errors.append("PERF_PROFILE 只能是 %s（当前=%r）" % ("/".join(PROFILES), cfg.profile))
+        errors.append("PERF_PROFILE must be %s (current=%r)" % ("/".join(PROFILES), cfg.profile))
     cfg.scenarios = _csv(source, "PERF_SCENARIOS", "")
     cfg.repeat = _int(source, "PERF_REPEAT", 2, errors, 1)
     cfg.warmup = _int(source, "PERF_WARMUP", 1, errors, 0)
     cfg.concurrency = _int(source, "PERF_CONCURRENCY", 1, errors, 1)
     if cfg.concurrency > 64:
-        errors.append("PERF_CONCURRENCY 上限 64（当前=%d）" % cfg.concurrency)
+        errors.append("PERF_CONCURRENCY maximum is 64 (current=%d)" % cfg.concurrency)
 
     cfg.output_dir = _get(source, "PERF_OUTPUT_DIR", "./perf-redis-out") or "./perf-redis-out"
     cfg.key_ttl_seconds = _int(source, "PERF_KEY_TTL_SECONDS", 43200, errors, 60)
     cfg.batch_size = _int(source, "PERF_BATCH_SIZE", 500, errors, 1)
     if cfg.batch_size > 10000:
-        errors.append("PERF_BATCH_SIZE 上限 10000")
+        errors.append("PERF_BATCH_SIZE maximum is 10000")
     cfg.scan_count = _int(source, "PERF_SCAN_COUNT", 1000, errors, 10)
     if cfg.scan_count > 100000:
-        errors.append("PERF_SCAN_COUNT 上限 100000")
+        errors.append("PERF_SCAN_COUNT maximum is 100000")
     cfg.verify_settle_seconds = _int(source, "PERF_VERIFY_SETTLE_SECONDS", 0, errors, 0)
     cfg.keep_guard = _bool(source, "PERF_KEEP_GUARD", False, errors)
 
@@ -343,7 +343,7 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
     cfg.allow_file_delete = _bool(source, "PERF_ALLOW_FILE_DELETE", False, errors)
     cfg.app_file_storage_path = _get(source, "PERF_APP_FILE_STORAGE_PATH", "")
     if cfg.app_file_storage_path and not os.path.isabs(cfg.app_file_storage_path):
-        errors.append("PERF_APP_FILE_STORAGE_PATH 必须是绝对路径（用于文件残留核对/安全删除）")
+        errors.append("PERF_APP_FILE_STORAGE_PATH must be absolute (used for residual-file checks and safe deletion)")
     cfg.write_global_run_index = _bool(source, "PERF_WRITE_GLOBAL_RUN_INDEX", False, errors)
 
     cfg.allow_large_scale = _bool(source, "PERF_ALLOW_LARGE_SCALE", False, errors)
@@ -374,7 +374,7 @@ def load(env: Optional[Dict[str, str]] = None) -> Config:
     }
     for name, value in cfg.sizes.items():
         if name.startswith("bg_") and value > 5000000:
-            errors.append("%s 上限 5,000,000（当前=%d）" % (name, value))
+            errors.append("%s maximum is 5,000,000 (current=%d)" % (name, value))
 
     cfg.errors = errors
     return cfg

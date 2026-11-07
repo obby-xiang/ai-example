@@ -29,6 +29,12 @@ class ScanBudgetExceeded(Exception):
     pass
 
 
+def error_detail(error: BaseException) -> str:
+    if isinstance(error, (RedisUnavailable, ScanBudgetExceeded)):
+        return str(error)
+    return type(error).__name__
+
+
 class ScanStats:
     def __init__(self) -> None:
         self.keys = 0
@@ -88,8 +94,8 @@ class RedisOps:
                 self.client = redis.Redis(**kwargs)
             self.client.ping()
         except Exception as exc:  # noqa: BLE001 - surfaced with context
-            self.last_error = str(exc)
-            raise RedisUnavailable("Redis 连接失败：%s" % exc)
+            self.last_error = error_detail(exc)
+            raise RedisUnavailable("Redis connection failed") from exc
         self.read_server_facts()
 
     def close(self) -> None:
@@ -132,7 +138,7 @@ class RedisOps:
             self.client.ping()
             return True, (time.perf_counter() - start) * 1000.0, ""
         except Exception as exc:
-            return False, (time.perf_counter() - start) * 1000.0, str(exc)
+            return False, (time.perf_counter() - start) * 1000.0, error_detail(exc)
 
     def keyspace(self) -> Dict[str, object]:
         try:
@@ -154,7 +160,7 @@ class RedisOps:
             if isinstance(info, dict):
                 return info
         except Exception as exc:
-            return {"error": str(exc)}
+            return {"error": error_detail(exc)}
         return {}
 
     def primaries(self, allow_seed_fallback: bool = True) -> List[Tuple[str, int]]:
@@ -247,8 +253,8 @@ class RedisOps:
                 except Exception as exc:
                     if strict:
                         raise RedisUnavailable(
-                            "cluster primary 连接失败 %s:%d：%s" % (host, port, exc)
-                        )
+                            "cluster primary connection failed %s:%d" % (host, port)
+                        ) from exc
                     continue
                 self._node_clients[cache_key] = node_client
             if strict:
@@ -256,12 +262,12 @@ class RedisOps:
                     node_client.ping()
                 except Exception as exc:
                     raise RedisUnavailable(
-                        "cluster primary 连接失败 %s:%d：%s" % (host, port, exc)
-                    )
+                        "cluster primary connection failed %s:%d" % (host, port)
+                    ) from exc
             clients.append(node_client)
         if strict and len(clients) != len(nodes):
             raise RedisUnavailable(
-                "cluster primary 连接不完整：可用 %d/%d" % (len(clients), len(nodes))
+                "incomplete cluster primary connectivity: available %d/%d" % (len(clients), len(nodes))
             )
         return clients
 
@@ -384,15 +390,15 @@ class RedisOps:
             except ScanBudgetExceeded:
                 raise
             except Exception as exc:
-                raise RedisUnavailable("SCAN 失败（standalone）：%s" % exc)
+                raise RedisUnavailable("SCAN failed (standalone)") from exc
             return
         primaries = self.primaries(allow_seed_fallback=False)
         if not primaries:
-            raise RedisUnavailable("SCAN 失败：无法读取 cluster 主节点拓扑（拒绝用种子节点冒充完整扫描）")
+            raise RedisUnavailable("SCAN failed: cluster primary topology unavailable; seed nodes cannot provide a complete scan")
         clients = self.primary_node_clients(strict=True, targets=primaries)
         if len(clients) != len(primaries):
             raise RedisUnavailable(
-                "SCAN 失败：cluster 主节点连接不完整 %d/%d" % (len(clients), len(primaries))
+                "SCAN failed: incomplete cluster primary connectivity %d/%d" % (len(clients), len(primaries))
             )
         for (host, port), node_client in zip(primaries, clients):
             label = "%s:%d" % (host, port)
@@ -404,9 +410,9 @@ class RedisOps:
                 raise
             except Exception as exc:
                 raise RedisUnavailable(
-                    "SCAN 失败：cluster primary %s:%d 中断（扫描结果不完整）：%s"
-                    % (host, port, exc)
-                )
+                    "SCAN failed: cluster primary %s:%d interrupted the scan; results are incomplete"
+                    % (host, port)
+                ) from exc
 
     def _scan_one(self, client, match: str, label: str, stats: Optional[ScanStats],
                   max_pages_per_node: Optional[int] = None,
@@ -415,12 +421,12 @@ class RedisOps:
         pages = 0
         while True:
             if deadline is not None and time.monotonic() >= deadline:
-                raise ScanBudgetExceeded("达到单调时间预算，停止扫描（%s）" % label)
+                raise ScanBudgetExceeded("monotonic time budget reached; scan stopped (%s)" % label)
             cursor, batch = client.scan(cursor=cursor, match=match, count=self.cfg.scan_count)
             pages += 1
             if max_pages_per_node is not None and pages > max_pages_per_node:
                 raise ScanBudgetExceeded(
-                    "达到每节点页数预算 %d，停止扫描（%s）" % (max_pages_per_node, label)
+                    "per-node page budget %d reached; scan stopped (%s)" % (max_pages_per_node, label)
                 )
             if stats is not None:
                 stats.pages += 1
@@ -546,12 +552,12 @@ class RedisOps:
                         if value:
                             deleted += 1
                 except Exception as exc:
-                    errors.append("cluster delete batch: %s" % exc)
+                    errors.append("cluster delete batch: %s" % error_detail(exc))
                     for key in chunk:
                         try:
                             deleted += int(bool(self.client.delete(key)))
                         except Exception as single_exc:
-                            errors.append("%s: %s" % (key, single_exc))
+                            errors.append("%s: %s" % (key, error_detail(single_exc)))
             else:
                 try:
                     deleted += int(self.client.unlink(*chunk))
@@ -559,7 +565,7 @@ class RedisOps:
                     try:
                         deleted += int(self.client.delete(*chunk))
                     except Exception as exc:
-                        errors.append("standalone delete batch: %s" % exc)
+                        errors.append("standalone delete batch: %s" % error_detail(exc))
         return {"requested": len(unique), "deleted": deleted, "errors": errors}
 
     # ------------------------------------------------------------------ probes
@@ -569,10 +575,10 @@ class RedisOps:
             value = self.client.get(key)
             self.client.delete(key)
             if value != "probe":
-                return False, "写入后读回不一致"
+                return False, "read-back value differs from the written probe"
             return True, ""
         except Exception as exc:
-            return False, str(exc)
+            return False, error_detail(exc)
 
     def role_summary(self) -> Dict[str, object]:
         if not self.cfg.is_cluster():

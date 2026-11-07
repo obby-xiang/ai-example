@@ -140,7 +140,7 @@ def cleanup_rows(result: Dict[str, object]) -> List[Dict[str, object]]:
             detail = "http=%s %s" % (item.get("status"), item.get("error") or "")
         else:
             status = "info"
-            detail = "dry-run：仅列出待取消的反馈行"
+            detail = "dry-run: only feedback rows pending cancellation are listed"
         rows.append({
             "kind": "feedback",
             "key": item.get("message_id"),
@@ -163,7 +163,7 @@ def cleanup_rows(result: Dict[str, object]) -> List[Dict[str, object]]:
                 "key": item,
                 "action": "report",
                 "status": "fail",
-                "detail": "清理后仍存在",
+                "detail": "key still exists after cleanup",
             })
     return rows
 
@@ -187,7 +187,12 @@ def write_cleanup_only(workspace: Dict[str, Path], cleanup_result: Dict[str, obj
 
 def write_all(cfg: Config, workspace: Dict[str, Path], measure_result: Optional[Dict[str, object]],
               verify_result: Optional[Dict[str, object]], cleanup_result: Optional[Dict[str, object]],
-              git_info: Dict[str, object], extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+              git_info: Dict[str, object], extra: Optional[Dict[str, object]] = None,
+              verify_phase: str = "precleanup") -> Dict[str, object]:
+    post_cleanup = verify_phase == "postcleanup"
+    existing = M.read_json(workspace["results"]) if post_cleanup else None
+    if not isinstance(existing, dict):
+        existing = {}
     combined: Dict[str, object] = {
         "tool": "ai-redis-perf",
         "version": "1.0.0",
@@ -220,15 +225,51 @@ def write_all(cfg: Config, workspace: Dict[str, Path], measure_result: Optional[
              "min_ms", "max_ms", "http_status", "status_200", "status_503"],
             summary_rows(measure_result),
         )
+    pre_counts: Dict[str, object] = {}
+    post_counts: Dict[str, object] = {}
     if verify_result is not None:
-        combined["verify"] = verify_result
-        combined["verify_counts"] = verify_result.get("counts", {})
-        _write_csv(
-            workspace["verify_csv"],
-            ["scenario", "copy", "check", "status", "detail"],
-            verify_rows(verify_result),
-        )
-        M.atomic_write_json(workspace["verify_json"], verify_result)
+        counts = verify_result.get("counts", {})
+        if post_cleanup:
+            post_counts = counts
+            combined["post_cleanup_verify"] = verify_result
+            combined["post_cleanup_verify_counts"] = counts
+            _write_csv(
+                workspace["verify_postcleanup_csv"],
+                ["scenario", "copy", "check", "status", "detail"],
+                verify_rows(verify_result),
+            )
+            M.atomic_write_json(workspace["verify_postcleanup_json"], verify_result)
+            previous_pre = existing.get("pre_cleanup_verify")
+            if not isinstance(previous_pre, dict):
+                candidate = existing.get("verify")
+                previous_pre = candidate if isinstance(candidate, dict) and candidate.get("phase") != "post_cleanup" else None
+            if previous_pre is not None:
+                pre_counts = existing.get("pre_cleanup_verify_counts") or previous_pre.get("counts", {})
+                combined["pre_cleanup_verify"] = previous_pre
+                combined["pre_cleanup_verify_counts"] = pre_counts
+                combined["verify"] = previous_pre
+                combined["verify_counts"] = pre_counts
+            else:
+                combined["verify"] = verify_result
+                combined["verify_counts"] = counts
+        else:
+            pre_counts = counts
+            combined["pre_cleanup_verify"] = verify_result
+            combined["pre_cleanup_verify_counts"] = counts
+            combined["verify"] = verify_result
+            combined["verify_counts"] = counts
+            _write_csv(
+                workspace["verify_csv"],
+                ["scenario", "copy", "check", "status", "detail"],
+                verify_rows(verify_result),
+            )
+            M.atomic_write_json(workspace["verify_json"], verify_result)
+            _write_csv(
+                workspace["verify_precleanup_csv"],
+                ["scenario", "copy", "check", "status", "detail"],
+                verify_rows(verify_result),
+            )
+            M.atomic_write_json(workspace["verify_precleanup_json"], verify_result)
     if cleanup_result is not None:
         combined["cleanup"] = cleanup_result
         combined["cleanup_complete"] = cleanup_result.get("complete")
@@ -242,7 +283,9 @@ def write_all(cfg: Config, workspace: Dict[str, Path], measure_result: Optional[
         combined["extra"] = extra
     combined["acceptance"] = {
         "note": "响应提前返回 != 最终清理完成；以 verify + cleanup 的实测状态为准",
-        "verify_counts": (verify_result or {}).get("counts", {}),
+        "verify_counts": pre_counts or combined.get("verify_counts", {}),
+        "pre_cleanup_verify_counts": pre_counts,
+        "post_cleanup_verify_counts": post_counts,
         "cleanup_complete": (cleanup_result or {}).get("complete"),
         "failures": {
             "transport": (measure_result or {}).get("transport_failures"),

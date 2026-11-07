@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import derive as D
 from . import keys as K
 from . import manifest as M
 from .api import ApiClient
 from .envcfg import Config
-from .redisops import RedisOps
+from .redisops import RedisOps, RedisUnavailable, error_detail
 
 
 def _check(checks: List[Dict[str, object]], scenario: str, copy: str, name: str,
@@ -152,11 +152,11 @@ def _check_background(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]
     count = background_counts.get(str(bucket))
     if count is None:
         _check(checks, scenario, copy_name, "background_preserved", "unknown",
-               "manifest 未记录 bucket %s 的 planned/count，无法精确抽查" % bucket)
+               "manifest has no planned/count for bucket %s; exact sampling is impossible" % bucket)
         return
     if count <= 0:
         _check(checks, scenario, copy_name, "background_preserved", "info",
-               "bucket %s planned=0，无背景键可抽查" % bucket)
+               "bucket %s planned=0; no background keys to sample" % bucket)
         return
     probes = K.background_probe_keys(cfg.namespace, str(bucket), count)
     existence = ops.exists_many(probes)
@@ -164,13 +164,13 @@ def _check_background(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]
     missing = [key for key in probes if existence.get(key) is False]
     if missing:
         _check(checks, scenario, copy_name, "background_preserved", "fail",
-               "背景键精确抽样缺失 bucket=%s：%s" % (bucket, _sample(missing)))
+               "background keys missing from exact samples bucket=%s: %s" % (bucket, _sample(missing)))
     elif unknown:
         _check(checks, scenario, copy_name, "background_preserved", "unknown",
-               "背景键精确抽样读取失败 bucket=%s：%s" % (bucket, _sample(unknown)))
+               "failed to read exact background samples bucket=%s: %s" % (bucket, _sample(unknown)))
     else:
         _check(checks, scenario, copy_name, "background_preserved", "pass",
-               "背景键首/中/尾抽样仍存在 bucket=%s（%d 个样本，非全键空间证明）"
+               "first/middle/last background samples still exist bucket=%s (%d samples; not proof for the whole keyspace)"
                % (bucket, len(probes)))
 
 
@@ -186,24 +186,24 @@ def _check_files(cfg: Config, checks: List[Dict[str, object]], scenario: str, co
         file_id = str(item.get("file_id") or "")
         if not storage_key:
             _check(checks, scenario, copy_name, "attachment_file_%s" % file_id, "unknown",
-                   "未记录 storageKey（登记读取失败或上传失败），文件存在性不可判")
+                   "storageKey was not recorded (registration read or upload failed); file existence is unknown")
             continue
         if not root:
             _check(checks, scenario, copy_name, "attachment_file_%s" % file_id, "unknown",
-                   "未配置 PERF_APP_FILE_STORAGE_PATH，无法核对文件 key=%s" % storage_key)
+                   "PERF_APP_FILE_STORAGE_PATH is not configured; cannot check file key=%s" % storage_key)
             continue
         candidate = os.path.normpath(os.path.join(root, storage_key))
         root_norm = os.path.normpath(root)
         if not candidate.startswith(root_norm + os.sep) and candidate != root_norm:
             _check(checks, scenario, copy_name, "attachment_file_%s" % file_id, "fail",
-                   "storageKey 越出配置的存储根目录：%s" % storage_key)
+                   "storageKey escapes the configured storage root: %s" % storage_key)
             continue
         if os.path.exists(candidate):
             _check(checks, scenario, copy_name, "attachment_file_%s" % file_id, "fail",
-                   "文件仍存在：%s" % candidate)
+                   "file still exists: %s" % candidate)
         else:
             _check(checks, scenario, copy_name, "attachment_file_%s" % file_id, "pass",
-                   "文件已删除：%s" % storage_key)
+                   "file deleted: %s" % storage_key)
 
 
 def _check_feedback(api: ApiClient, checks: List[Dict[str, object]], scenario: str, copy_name: str,
@@ -214,7 +214,7 @@ def _check_feedback(api: ApiClient, checks: List[Dict[str, object]], scenario: s
     result = api.feedback_list()
     if not result.get("ok"):
         _check(checks, scenario, copy_name, "feedback_rows_deleted", "unknown",
-               "读取 /api/ai/feedback 失败，无法确认 DB 行：status=%s" % result.get("status"))
+               "failed to read /api/ai/feedback; DB rows cannot be confirmed: status=%s" % result.get("status"))
         return
     business = result.get("business") or {}
     message_ids = [str(item) for item in (business.get("messageIds") or [])]
@@ -222,13 +222,13 @@ def _check_feedback(api: ApiClient, checks: List[Dict[str, object]], scenario: s
     remaining = [item for item in expected if item in message_ids]
     if remaining:
         _check(checks, scenario, copy_name, "feedback_rows_deleted", "fail",
-               "反馈行仍可见（最多 100 条列表内）：%s" % _sample(remaining))
+               "feedback rows are still visible (within the list cap of 100): %s" % _sample(remaining))
     elif len(message_ids) >= 100:
         _check(checks, scenario, copy_name, "feedback_rows_deleted", "info",
-               "反馈列表达到 100 条上限，无法证明本会话行不存在；请按 messageId 手工复核")
+               "feedback list reached the 100-row cap; absence for this session is unproven, check messageId manually")
     else:
         _check(checks, scenario, copy_name, "feedback_rows_deleted", "pass",
-               "本会话反馈行未出现在 /api/ai/feedback（列表上限 100，已按 messageId 核对）")
+               "this session's feedback rows are absent from /api/ai/feedback (list cap 100; checked by messageId)")
 
 
 def _check_slots(cfg: Config, checks: List[Dict[str, object]], scenario: str, copy_name: str,
@@ -242,7 +242,7 @@ def _check_slots(cfg: Config, checks: List[Dict[str, object]], scenario: str, co
         if slot_check.get("single_slot") is True:
             continue
         _check(checks, scenario, copy_name, "run_%s_single_slot" % run.get("run_id"), "fail",
-               "13 键不在同一 slot（Cluster 多键 DEL 会失去原子性）：%s" % slot_check.get("slots"))
+               "the 13 keys are not in one slot (Cluster multi-key DEL loses atomicity): %s" % slot_check.get("slots"))
 
 
 def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[str, object]],
@@ -255,50 +255,50 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
     unknown = [key for key in expected if existence.get(key) is None]
     if residue:
         _check(checks, scenario, copy_name, "owned_keys_absent", "fail",
-               "complete=true 但仍有残留 %d 个：%s" % (len(residue), _sample(residue)))
+               "complete=true but %d residual keys remain: %s" % (len(residue), _sample(residue)))
     elif unknown:
         _check(checks, scenario, copy_name, "owned_keys_absent", "unknown",
-               "无法确认 %d 个键是否存在（Redis 读失败）：%s" % (len(unknown), _sample(unknown)))
+               "existence of %d keys cannot be confirmed (Redis reads failed): %s" % (len(unknown), _sample(unknown)))
     else:
         _check(checks, scenario, copy_name, "owned_keys_absent", "pass",
-               "全部 %d 个本会话键已不存在" % len(expected))
+               "all %d session keys are absent" % len(expected))
 
     for run_id in keys["runs"]:
         info = (merged.get("runs") or {}).get(run_id)
         if not isinstance(info, dict):
             _check(checks, scenario, copy_name, "run_%s_reported" % run_id, "unknown",
-                   "响应未列出该 runId（可能被归属复核跳过）")
+                   "response did not list this runId (it may have been skipped by the ownership check)")
             continue
         if info.get("deferred"):
             _check(checks, scenario, copy_name, "run_%s_not_deferred" % run_id, "fail",
-                   "complete=true 但 run 被标记 deferred")
+                   "complete=true but the run is marked deferred")
         else:
             _check(checks, scenario, copy_name, "run_%s_deleted" % run_id, "pass",
-                   "响应标记 deleted=%s" % info.get("deleted"))
+                   "response reports deleted=%s" % info.get("deleted"))
 
     guard = str(keys["guard"])
     pending = str(keys["pending"])
     guard_ttl = ops.ttl(guard)
     if guard_ttl > 0:
         _check(checks, scenario, copy_name, "guard_retained", "pass",
-               "guard 为有意保留（TTL=%ss）" % guard_ttl)
+               "guard is intentionally retained (TTL=%ss)" % guard_ttl)
     elif guard_ttl == -2:
         _check(checks, scenario, copy_name, "guard_retained", "fail",
-               "complete=true 但 guard 不存在（源码应保留）")
+               "complete=true but guard is absent (the source retains it)")
     else:
         _check(checks, scenario, copy_name, "guard_retained", "unknown",
-               "guard TTL 不可读（ttl=%s）" % guard_ttl)
+               "guard TTL is unreadable (ttl=%s)" % guard_ttl)
 
     pending_ttl = ops.ttl(pending)
     if pending_ttl == -2:
         _check(checks, scenario, copy_name, "pending_verify_ledger", "info",
-               "pending 已被 60s 记忆复核移除（或尚未排程前结束）")
+               "pending was removed by the 60s memory review (or ended before scheduling)")
     elif pending_ttl == -3:
         _check(checks, scenario, copy_name, "pending_verify_ledger", "unknown",
-               "pending TTL 不可读")
+               "pending TTL is unreadable")
     elif pending_ttl != -1:
         _check(checks, scenario, copy_name, "pending_verify_ledger", "fail",
-               "pending 存在但 TTL 不是 -1（源码为无 TTL 台账）：ttl=%s" % pending_ttl)
+               "pending exists but TTL is not -1 (the source ledger has no TTL): ttl=%s" % pending_ttl)
     else:
         raw = ops.get_str(pending) or ""
         try:
@@ -307,34 +307,34 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
             parsed = None
         if not isinstance(parsed, dict):
             _check(checks, scenario, copy_name, "pending_verify_ledger", "fail",
-                   "pending JSON 不可解析，无法确认 verifyAtMs")
+                   "pending JSON is invalid; verifyAtMs cannot be confirmed")
         elif parsed.get("verifyAtMs") is None:
             _check(checks, scenario, copy_name, "pending_verify_ledger", "fail",
-                   "complete=true 但 pending 没有 verifyAtMs（应为 60s 记忆复核台账）")
+                   "complete=true but pending has no verifyAtMs (expected a 60s memory-review ledger)")
         else:
             due = ops.zscore(K.PURGE_DUE_KEY, pending)
             if due is None:
                 _check(checks, scenario, copy_name, "pending_verify_ledger", "fail",
-                       "pending 存在但不在 ai:purge:retry:due（复核不会被执行）")
+                       "pending exists but is absent from ai:purge:retry:due (the review will not run)")
             else:
                 _check(checks, scenario, copy_name, "pending_verify_ledger", "pass",
-                       "pending.verifyAtMs=%s 且已排入 due" % parsed.get("verifyAtMs"))
+                       "pending.verifyAtMs=%s and is scheduled in due" % parsed.get("verifyAtMs"))
 
     memory = keys["memory"]
     ttl_ver = ops.ttl(str(memory["ver"]))
     ttl_gen = ops.ttl(str(memory["gen"]))
     if ttl_ver > 0 and ttl_gen > 0:
         _check(checks, scenario, copy_name, "memory_tombstones", "pass",
-               "gen/ver 为有意 tombstone（TTL=%s/%s）" % (ttl_gen, ttl_ver))
+               "gen/ver are intentional tombstones (TTL=%s/%s)" % (ttl_gen, ttl_ver))
     elif ttl_ver == -2 or ttl_gen == -2:
         _check(checks, scenario, copy_name, "memory_tombstones", "fail",
-               "gen/ver 缺失（gen=%s ver=%s；源码 MEMORY_CLEAR 应创建并设 TTL）" % (ttl_gen, ttl_ver))
+               "gen/ver missing (gen=%s ver=%s; MEMORY_CLEAR should create them with TTLs)" % (ttl_gen, ttl_ver))
     elif ttl_ver < 0 or ttl_gen < 0:
         _check(checks, scenario, copy_name, "memory_tombstones", "unknown",
-               "gen/ver TTL 不可读（gen=%s ver=%s）" % (ttl_gen, ttl_ver))
+               "gen/ver TTLs are unreadable (gen=%s ver=%s)" % (ttl_gen, ttl_ver))
     else:
         _check(checks, scenario, copy_name, "memory_tombstones", "fail",
-               "gen/ver 无 TTL（gen=%s ver=%s）" % (ttl_gen, ttl_ver))
+               "gen/ver have no TTL (gen=%s ver=%s)" % (ttl_gen, ttl_ver))
 
     for run_id in list(keys["runs"])[:3]:
         if keys["runs"][run_id].get("status") not in ("RUNNING", "SUSPENDED"):
@@ -342,17 +342,17 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
         # xack keys carry a random token, so enumerating them would require a
         # keyspace SCAN. They are an intentional 120s TTL tombstone; do not scan.
         _check(checks, scenario, copy_name, "xack_ttl_%s" % run_id, "info",
-               "xack 为 120s 有意保留；为避免无匹配全库 SCAN 不枚举随机 token，按 TTL 自清")
+               "xack is intentionally retained for 120s; random tokens are not enumerated to avoid an unmatched full-database SCAN and expire by TTL")
         trim_key = K.run_scoped(K.XTRIM_PREFIX, run_id, cfg.tenant_id, cfg.user_id)
         if ops.exists(trim_key):
             ttl = ops.ttl(trim_key)
             _check(checks, scenario, copy_name, "xtrim_retained_%s" % run_id,
                    "pass" if ttl > 0 else "info",
-                   "xtrim 为有意保留（不在 13 键内，TTL=%s）" % ttl)
+                   "xtrim is intentionally retained (outside the 13 keys, TTL=%s)" % ttl)
     if ops.exists(str(keys["lock"])):
         ttl = ops.ttl(str(keys["lock"]))
         _check(checks, scenario, copy_name, "session_lock_retained", "info",
-               "会话锁由 TTL 收敛（源码有意不删）：TTL=%s" % ttl)
+               "session lock expires by TTL (intentionally not deleted by the source): TTL=%s" % ttl)
 
     refs = keys["run_index_refs"]
     still = []
@@ -366,13 +366,13 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
             unknown_index.append(label)
     if still:
         _check(checks, scenario, copy_name, "run_index_members_removed", "fail",
-               "恢复/列表 ZSET 成员仍在：%s" % _sample(still))
+               "resume/list ZSET members remain: %s" % _sample(still))
     if unknown_index:
         _check(checks, scenario, copy_name, "run_index_members_unknown", "unknown",
-               "恢复/列表 ZSET 读取失败，不能判定成员已清理：%s" % _sample(unknown_index))
+               "failed to read resume/list ZSETs; member cleanup cannot be confirmed: %s" % _sample(unknown_index))
     if not still and not unknown_index:
         _check(checks, scenario, copy_name, "run_index_members_removed", "pass",
-               "全局/身份恢复及身份列表 ZSET 的本 run 成员均不存在（全局写入开关=%s）"
+               "this run's members are absent from global/identity resume and identity-list ZSETs (global write enabled=%s)"
                % cfg.write_global_run_index)
 
     business = merged.get("business") or {}
@@ -382,7 +382,7 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
             _check(checks, scenario, copy_name, "response_memory_deleted", "pass", "memory.deleted=true")
         else:
             _check(checks, scenario, copy_name, "response_memory_deleted", "fail",
-                   "complete=true 但 memory.existed=true/memory.deleted=%s" % memory_business.get("deleted"))
+                   "complete=true but memory.existed=true/memory.deleted=%s" % memory_business.get("deleted"))
     transcript_business = business.get("transcript") if isinstance(business, dict) else None
     if isinstance(transcript_business, dict) and transcript_business.get("existed") is True:
         if transcript_business.get("deleted") is True:
@@ -390,7 +390,7 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
                    "transcript.deleted=true")
         else:
             _check(checks, scenario, copy_name, "response_transcript_deleted", "fail",
-                   "complete=true 但 transcript.existed=true/deleted=%s"
+                   "complete=true but transcript.existed=true/deleted=%s"
                    % transcript_business.get("deleted"))
     attachment_business = business.get("attachments") if isinstance(business, dict) else None
     if isinstance(attachment_business, dict):
@@ -403,7 +403,7 @@ def _check_clean(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dict[s
                    % (registered, deleted_regs, _sample([str(item) for item in failed_ids])))
         elif registered > 0:
             _check(checks, scenario, copy_name, "response_attachments", "pass",
-                   "attachments %s/%s 登记已删" % (deleted_regs, registered))
+                   "attachment registrations deleted %s/%s" % (deleted_regs, registered))
 
     _check_files(cfg, checks, scenario, copy_name, copy)
     _check_feedback(api, checks, scenario, copy_name, copy)
@@ -422,8 +422,8 @@ def _check_measure_budget(checks: List[Dict[str, object]], scenario: str,
         return False
     detail = (scenario_measure or {}).get("detail") or (scenario_measure or {}).get("reason") or ""
     _check(checks, scenario, "-", "measure_budget", "unknown",
-           "measure 预算耗尽（status=%s）%s；该场景不能作为性能通过依据"
-           % (status, ("：" + str(detail)) if detail else ""))
+           "measure budget exhausted (status=%s)%s; this scenario cannot support a performance pass"
+           % (status, (": " + str(detail)) if detail else ""))
     return status == "skipped"
 
 
@@ -440,13 +440,13 @@ def _check_deferred_runs(ops: RedisOps, checks: List[Dict[str, object]], scenari
         info = keys["runs"].get(run_id)
         if not info:
             _check(checks, scenario, copy_name, "deferred_run_%s" % run_id, "unknown",
-                   "deferred run 不在生成清单中")
+                   "deferred run is absent from the generation manifest")
             continue
         generated = info.get("generated_keys") or {}
         unresolved = [str(name) for name in (info.get("generated_unknown") or [])]
         if not generated and not unresolved:
             _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "unknown",
-                   "manifest 未记录该 run 实际生成的键，无法判定保留是否完整")
+                   "manifest does not record the keys actually generated for this run; retention cannot be verified")
             continue
         expected = list(generated.values())
         existence = ops.exists_many(expected) if expected else {}
@@ -454,20 +454,20 @@ def _check_deferred_runs(ops: RedisOps, checks: List[Dict[str, object]], scenari
         unreadable = [key for key in expected if existence.get(key) is None]
         if missing:
             _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "fail",
-                   "deferred run 的已生成键被删了 %d/%d 个（源码不得删活跃 run）：%s"
+                   "%d/%d generated keys for the deferred run were deleted (active runs must not be deleted): %s"
                    % (len(missing), len(expected), _sample(missing)))
         elif unreadable or unresolved:
             parts = []
             if unreadable:
-                parts.append("已生成键读取失败 %d 个：%s" % (len(unreadable), _sample(unreadable)))
+                parts.append("failed to read %d generated keys: %s" % (len(unreadable), _sample(unreadable)))
             if unresolved:
-                parts.append("旧 manifest 未记录 %s，是否生成不可判" % _sample(unresolved))
+                parts.append("old manifest does not record %s; generation is unknown" % _sample(unresolved))
             _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "unknown",
-                   "已生成键 %d 个中已确认 %d 个仍存在；%s"
-                   % (len(expected), len(expected) - len(missing) - len(unreadable), "；".join(parts)))
+                   "%d of %d generated keys are confirmed to remain; %s"
+                   % (len(expected) - len(missing) - len(unreadable), len(expected), "; ".join(parts)))
         else:
             _check(checks, scenario, copy_name, "deferred_run_%s_intact" % run_id, "pass",
-                   "deferred run 的 %d 个已生成键全部保留（按 manifest 清单，非 13 键全量）"
+                   "all %d generated keys for the deferred run remain (manifest list, not all 13 keys)"
                    % len(expected))
 
 
@@ -489,7 +489,7 @@ def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dic
     errors = [str(item) for item in merged.get("errors") or []]
     if not deferred and not errors:
         _check(checks, scenario, copy_name, "incomplete_has_reason", "fail",
-               "complete=false 但既无 deferred 也无 errors（响应语义不一致）")
+               "complete=false but neither deferred nor errors is present (inconsistent response semantics)")
     else:
         _check(checks, scenario, copy_name, "incomplete_has_reason", "pass",
                "deferred=%d errors=%d" % (len(deferred), len(errors)))
@@ -507,33 +507,33 @@ def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dic
         unknown = [key for key in keys13 if existence.get(key) is None]
         if residue:
             _check(checks, scenario, copy_name, "deleted_run_%s_absent" % run_id, "fail",
-                   "响应 deleted=true 但仍有键：%s" % _sample(residue))
+                   "response deleted=true but keys remain: %s" % _sample(residue))
         elif unknown:
             _check(checks, scenario, copy_name, "deleted_run_%s_absent" % run_id, "unknown",
-                   "删除结果不可判：%s" % _sample(unknown))
+                   "deletion result is unknown: %s" % _sample(unknown))
         else:
             _check(checks, scenario, copy_name, "deleted_run_%s_absent" % run_id, "pass",
-                   "已删 run 的 13 键不存在")
+                   "the deleted run's 13 keys are absent")
 
     pending_ttl = ops.ttl(str(keys["pending"]))
     if pending_ttl == -1:
-        _check(checks, scenario, copy_name, "pending_retained", "pass", "durable pending 保留（无 TTL）")
+        _check(checks, scenario, copy_name, "pending_retained", "pass", "durable pending retained (no TTL)")
     elif pending_ttl == -3:
-        _check(checks, scenario, copy_name, "pending_retained", "unknown", "pending TTL 不可读")
+        _check(checks, scenario, copy_name, "pending_retained", "unknown", "pending TTL is unreadable")
     elif pending_ttl == -2 and _all_generated_runs_absent(ops, keys):
         _check(checks, scenario, copy_name, "pending_retained", "info",
-               "pending 已在后续记忆复核完成后移除（全部已生成 run 键已不存在）")
+               "pending was removed after the subsequent memory review (all generated run keys are absent)")
     else:
         _check(checks, scenario, copy_name, "pending_retained", "fail",
-               "失败/延后时 pending 必须保留，ttl=%s" % pending_ttl)
+               "pending must be retained on failure/defer, ttl=%s" % pending_ttl)
     guard_ttl = ops.ttl(str(keys["guard"]))
     if guard_ttl > 0:
-        _check(checks, scenario, copy_name, "guard_retained", "pass", "guard 保留 TTL=%ss" % guard_ttl)
+        _check(checks, scenario, copy_name, "guard_retained", "pass", "guard retained TTL=%ss" % guard_ttl)
     elif guard_ttl == -3:
-        _check(checks, scenario, copy_name, "guard_retained", "unknown", "guard TTL 不可读")
+        _check(checks, scenario, copy_name, "guard_retained", "unknown", "guard TTL is unreadable")
     else:
         _check(checks, scenario, copy_name, "guard_retained", "fail",
-               "失败/延后时 guard 应保留，ttl=%s" % guard_ttl)
+               "guard should be retained on failure/defer, ttl=%s" % guard_ttl)
 
     attachment_keys = list(keys["attachments"]["registrations"])
     if attachment_keys:
@@ -542,13 +542,13 @@ def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dic
         unknown = [key for key in attachment_keys if existence.get(key) is None]
         if alive:
             _check(checks, scenario, copy_name, "attachments_deleted_on_defer", "fail",
-                   "即使 run deferred，附件登记也应在本轮删除；仍有：%s" % _sample(alive))
+                   "attachment registrations should be deleted in this round even for a deferred run; remaining: %s" % _sample(alive))
         elif unknown:
             _check(checks, scenario, copy_name, "attachments_deleted_on_defer", "unknown",
-                   "附件登记存在性不可判：%s" % _sample(unknown))
+                   "attachment registration existence is unknown: %s" % _sample(unknown))
         else:
             _check(checks, scenario, copy_name, "attachments_deleted_on_defer", "pass",
-                   "附件登记已删除（与 run 是否 deferred 无关）")
+                   "attachment registrations deleted regardless of run deferral")
         _check_files(cfg, checks, scenario, copy_name, copy)
     _check_feedback(api, checks, scenario, copy_name, copy)
 
@@ -560,16 +560,16 @@ def _check_retained(cfg: Config, ops: RedisOps, api: ApiClient, checks: List[Dic
     unknown = [key for key in discovery if existence.get(key) is None]
     if present:
         _check(checks, scenario, copy_name, "discovery_kept", "pass",
-               "发现键至少一个保留（重试仍可枚举）")
+               "at least one discovery key remains (retry can still enumerate it)")
     elif unknown:
         _check(checks, scenario, copy_name, "discovery_kept", "unknown",
-               "发现键存在性不可判：%s" % _sample(unknown))
+               "discovery key existence is unknown: %s" % _sample(unknown))
     elif deferred:
         _check(checks, scenario, copy_name, "discovery_kept", "fail",
-               "仍有 deferred run 但 current/runs/active 全部不存在：重试会丢失发现面")
+               "deferred runs remain but current/runs/active are all absent; retry loses discovery")
     else:
         _check(checks, scenario, copy_name, "discovery_kept", "info",
-               "无 deferred run；发现键可能因成员删空而自动消失（非删除动作）")
+               "no deferred runs; discovery keys may disappear automatically when empty (not a deletion action)")
     _check_background(cfg, ops, checks, scenario, copy_name, plan, background_counts)
 
 
@@ -593,13 +593,13 @@ def _check_aborted(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], 
     unknown = [key for key in must_exist if existence.get(key) is None]
     if missing:
         _check(checks, scenario, copy_name, "aborted_nothing_deleted", "fail",
-               "aborted=true 但数据缺失 %d 个：%s" % (len(missing), _sample(missing)))
+               "aborted=true but %d data keys are missing: %s" % (len(missing), _sample(missing)))
     elif unknown:
         _check(checks, scenario, copy_name, "aborted_nothing_deleted", "unknown",
-               "aborted 后数据存在性不可判：%s" % _sample(unknown))
+               "data existence is unknown after abort: %s" % _sample(unknown))
     else:
         _check(checks, scenario, copy_name, "aborted_nothing_deleted", "pass",
-               "枚举/守卫/DB 中止发生在删除之前，数据保持完整")
+               "enumeration/guard/DB abort occurred before deletion; data remains intact")
     _check_background(cfg, ops, checks, scenario, copy_name, plan, background_counts)
 
 
@@ -613,7 +613,7 @@ def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], sc
         status = row.get("status")
         if row.get("budget_error"):
             _check(checks, scenario, copy_name, "read_%s_http" % operation, "unknown",
-                   "预算耗尽，请求未完成：%s" % row.get("transport_error"))
+                   "budget exhausted; request incomplete: %s" % row.get("transport_error"))
             continue
         if operation == "health":
             ok = status in (200, 503)
@@ -644,13 +644,13 @@ def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], sc
         unknown = [key for key in must_exist if existence.get(key) is None]
         if missing:
             _check(checks, scenario, copy_name, "read_data_intact", "fail",
-                   "只读接口不应删除数据，但缺失：%s" % _sample(missing))
+                   "read-only endpoints must not delete data, but keys are missing: %s" % _sample(missing))
         elif unknown:
             _check(checks, scenario, copy_name, "read_data_intact", "unknown",
-                   "只读后数据存在性不可判：%s" % _sample(unknown))
+                   "data existence is unknown after read-only calls: %s" % _sample(unknown))
         else:
             _check(checks, scenario, copy_name, "read_data_intact", "pass",
-                   "只读接口后数据仍完整")
+                   "data remains intact after read-only calls")
 
     history_business = {
         str(row.get("operation")): (row.get("business") or {})
@@ -666,7 +666,7 @@ def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], sc
             has_suspended = any(item.get("status") == "SUSPENDED" for item in (copy.get("runs") or []))
             if has_suspended and business.get("found") is not True:
                 _check(checks, scenario, copy_name, "runs_current_found", "fail",
-                       "存在 SUSPENDED run 但 /runs/current found=%s" % business.get("found"))
+                       "a SUSPENDED run exists but /runs/current found=%s" % business.get("found"))
             elif has_suspended:
                 _check(checks, scenario, copy_name, "runs_current_found", "pass", "found=true")
         if operation == "run_detail" and business.get("exists") is not True:
@@ -718,12 +718,49 @@ def _check_reads(cfg: Config, ops: RedisOps, checks: List[Dict[str, object]], sc
                "latest=%s before=%s" % (latest, before))
 
 
+def _reconcile_delete(api: ApiClient, checks: List[Dict[str, object]], scenario: str,
+                      copy_name: str, copy: Dict[str, object]) -> Tuple[str, Dict[str, object], Dict[str, object]]:
+    result = api.delete_session(str(copy.get("session_id")), operation="delete_verify_reconcile")
+    business = result.get("business") if isinstance(result.get("business"), dict) else {}
+    complete = business.get("complete")
+    merged = _merge([result])
+    evidence = {
+        "scenario": scenario,
+        "copy": copy_name,
+        "status": result.get("status"),
+        "transport_error": result.get("transport_error", ""),
+        "complete": complete,
+    }
+    if result.get("transport_error"):
+        _check(checks, scenario, copy_name, "delete_reconcile", "unknown",
+               "reconcile DELETE transport failed: %s" % result.get("transport_error"))
+        return "unknown", merged, evidence
+    status = result.get("status")
+    if status != 200:
+        outcome = "unknown" if status in (None, 503) else "fail"
+        _check(checks, scenario, copy_name, "delete_reconcile", outcome,
+               "reconcile DELETE returned HTTP %s" % status)
+        return outcome, merged, evidence
+    if complete is True:
+        _check(checks, scenario, copy_name, "delete_reconcile", "pass",
+               "reconcile DELETE complete=true; current response and Redis state use the same purge generation")
+        return "complete", merged, evidence
+    if complete is False:
+        _check(checks, scenario, copy_name, "delete_reconcile", "info",
+               "reconcile DELETE complete=false; retained-state assertions are required")
+        return "incomplete", merged, evidence
+    _check(checks, scenario, copy_name, "delete_reconcile", "unknown",
+           "reconcile DELETE response has no readable boolean complete flag")
+    return "unknown", merged, evidence
+
+
 def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
            selected: List[str]) -> Dict[str, object]:
     started_at = M.utc_now_iso()
     if cfg.verify_settle_seconds > 0:
         time.sleep(cfg.verify_settle_seconds)
     checks: List[Dict[str, object]] = []
+    reconciles: List[Dict[str, object]] = []
     background_counts: Dict[str, int] = {}
     background_manifest = manifest.get("background") or {}
     if not isinstance(background_manifest, dict):
@@ -743,18 +780,20 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
             if cfg.is_cluster():
                 authoritative = ops.primaries(allow_seed_fallback=False)
                 if not authoritative:
-                    raise RuntimeError("无法读取 cluster 主节点拓扑（拒绝用部分节点继续 verify）")
+                    raise RedisUnavailable("cluster primary topology unavailable; verify with partial nodes refused")
                 ops.primary_node_clients(strict=True, targets=authoritative)
         except Exception as exc:
             return {
+                "phase": "pre_cleanup",
                 "started_at": started_at,
                 "finished_at": M.utc_now_iso(),
                 "checks": [{
                     "scenario": "*", "copy": "*", "check": "redis_connectivity",
-                    "status": "unknown", "detail": "无法保证所有目标节点可用，拒绝继续 verify：%s" % exc,
+                    "status": "unknown", "detail": "not all target nodes are available; verify refused: %s" % error_detail(exc),
                 }],
                 "counts": {"pass": 0, "fail": 0, "unknown": 1, "info": 0, "skip": 0},
-                "error": str(exc),
+                "error": error_detail(exc),
+                "reconciles": reconciles,
             }
         measure_scenarios: Dict[str, Dict[str, object]] = {}
         for item in results.get("scenarios", []) or []:
@@ -765,7 +804,7 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
             entry = (manifest.get("scenarios") or {}).get(scenario)
             if not isinstance(entry, dict) or entry.get("status") != "generated":
                 _check(checks, scenario, "-", "scenario_generated", "skip",
-                       (entry or {}).get("reason", "未生成"))
+                       (entry or {}).get("reason", "not generated"))
                 continue
             if _check_measure_budget(checks, scenario, measure_scenarios.get(scenario) or {}):
                 continue
@@ -784,24 +823,24 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
                     continue
                 rows = by_copy.get(copy_name) or []
                 if not rows:
-                    _check(checks, scenario, copy_name, "delete_measured", "skip", "没有测量行")
+                    _check(checks, scenario, copy_name, "delete_measured", "skip", "no measurement rows")
                     continue
                 merged = _merge(rows)
                 _check_slots(cfg, checks, scenario, copy_name, copy)
                 statuses = merged["statuses"]
                 if merged["transport_errors"]:
                     _check(checks, scenario, copy_name, "delete_http", "unknown",
-                           "传输失败：%s" % _sample(merged["transport_errors"], 3))
+                           "transport failures: %s" % _sample(merged["transport_errors"], 3))
                     continue
                 non_200 = [status for status in statuses if status != 200]
                 if non_200:
                     _check(checks, scenario, copy_name, "delete_http",
                            "unknown" if all(item == 503 for item in non_200) else "fail",
-                           "非 200 状态：%s" % non_200)
+                           "non-200 statuses: %s" % non_200)
                     if all(item == 503 for item in non_200):
                         continue
                 else:
-                    _check(checks, scenario, copy_name, "delete_http", "pass", "全部 DELETE 200")
+                    _check(checks, scenario, copy_name, "delete_http", "pass", "all DELETE requests returned 200")
                 successful_delete = any(isinstance(row.get("business"), dict)
                                         and row["business"].get("complete") is True for row in rows)
                 early_abort = str((merged.get("business") or {}).get("phase") or "") in {
@@ -813,12 +852,25 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
                     verify_status = _wait_for_memory_verify(ops, str(D.copy_keys(cfg, scenario, plan, copy)["pending"]))
                     if verify_status != "ready":
                         _check(checks, scenario, copy_name, "memory_verify_wait", "unknown",
-                               "记忆复核未完成（%s）；不把在飞写回误判为删除失败" % verify_status)
+                               "memory review incomplete (%s); an in-flight write-back is not misclassified as a deletion failure" % verify_status)
                     else:
                         _check_clean(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged,
                                      background_counts)
                 else:
-                    _check_retained(cfg, ops, api, checks, scenario, copy_name, plan, copy, merged, background_counts)
+                    outcome, reconcile_merged, evidence = _reconcile_delete(api, checks, scenario, copy_name, copy)
+                    reconciles.append(evidence)
+                    if outcome == "complete":
+                        verify_status = _wait_for_memory_verify(
+                            ops, str(D.copy_keys(cfg, scenario, plan, copy)["pending"]))
+                        if verify_status != "ready":
+                            _check(checks, scenario, copy_name, "memory_verify_wait", "unknown",
+                                   "memory review incomplete (%s); an in-flight write-back is not misclassified as a deletion failure" % verify_status)
+                        else:
+                            _check_clean(cfg, ops, api, checks, scenario, copy_name, plan, copy,
+                                         reconcile_merged, background_counts)
+                    elif outcome == "incomplete":
+                        _check_retained(cfg, ops, api, checks, scenario, copy_name, plan, copy,
+                                        reconcile_merged, background_counts)
 
                 if scenario == "repeat_delete":
                     found_values = []
@@ -829,17 +881,17 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
                     if len(found_values) >= 2:
                         if found_values[-1] is False:
                             _check(checks, scenario, copy_name, "second_delete_idempotent", "pass",
-                                   "第二次 DELETE found=false")
+                                   "second DELETE found=false")
                         else:
                             _check(checks, scenario, copy_name, "second_delete_idempotent", "fail",
-                                   "第二次 DELETE found=%s（首次完成后应为 false）" % found_values[-1])
+                                   "second DELETE found=%s (expected false after the first completion)" % found_values[-1])
                 if scenario == "concurrent_delete":
                     if not merged["complete_any"]:
                         _check(checks, scenario, copy_name, "concurrent_single_success", "fail",
-                               "并发 DELETE 没有任何一次 complete=true")
+                               "no concurrent DELETE returned complete=true")
                     else:
                         _check(checks, scenario, copy_name, "concurrent_single_success", "pass",
-                               "并发 DELETE 至少一次 complete=true")
+                               "at least one concurrent DELETE returned complete=true")
     finally:
         api.close()
         ops.close()
@@ -849,10 +901,12 @@ def verify(cfg: Config, manifest: Dict[str, object], results: Dict[str, object],
         status = str(item.get("status"))
         counts[status] = counts.get(status, 0) + 1
     return {
+        "phase": "pre_cleanup",
         "started_at": started_at,
         "finished_at": M.utc_now_iso(),
         "checks": checks,
         "counts": counts,
+        "reconciles": reconciles,
     }
 
 
@@ -862,13 +916,14 @@ def verify_cleanup(cleanup: Dict[str, object]) -> Dict[str, object]:
     checks: List[Dict[str, object]] = []
     complete = cleanup.get("complete") is True
     remaining = cleanup.get("remaining") or {}
-    detail = "cleanup.complete=true；guard/pending/tombstone/背景键按清理契约删除" if complete else \
-        "cleanup 未完成，remaining=%s；按 cleanup 的实际残留与预算结果验收" % remaining
+    detail = "cleanup.complete=true; guard/pending/tombstone/background keys deleted according to the cleanup contract" if complete else \
+        "cleanup incomplete, remaining=%s; acceptance uses actual cleanup residues and budget results" % remaining
     _check(checks, "cleanup", "-", "cleanup_complete", "pass" if complete else "fail", detail)
     counts = {"pass": 0, "fail": 0, "unknown": 0, "info": 0, "skip": 0}
     for item in checks:
         counts[str(item.get("status"))] = counts.get(str(item.get("status")), 0) + 1
     return {
+        "phase": "post_cleanup",
         "started_at": started_at,
         "finished_at": M.utc_now_iso(),
         "checks": checks,

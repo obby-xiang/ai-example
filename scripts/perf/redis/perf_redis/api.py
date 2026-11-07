@@ -95,14 +95,13 @@ class ApiClient:
             else:
                 body = None
         except Exception as exc:  # transport errors are measurement facts
-            error = str(exc)
+            error = type(exc).__name__
             try:
                 import httpx
 
-                timed_out = isinstance(exc, httpx.TimeoutException)
+                timed_out = isinstance(exc, (httpx.TimeoutException, TimeoutError))
             except Exception:
-                lowered = error.lower()
-                timed_out = "timed out" in lowered or "timeout" in lowered
+                timed_out = isinstance(exc, TimeoutError) or "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
         duration_ms = (time.perf_counter() - start) * 1000.0
         ok = status is not None and 200 <= status < 300 and not error
         result: Dict[str, object] = {
@@ -119,7 +118,7 @@ class ApiClient:
             "content_type": response_headers.get("content-type", ""),
             "business": self._business(operation, body),
             "body_keys": sorted(body.keys()) if isinstance(body, dict) else [],
-            "text_prefix": "" if body is not None else text[:300],
+            "text_prefix": "",
         }
         return result
 

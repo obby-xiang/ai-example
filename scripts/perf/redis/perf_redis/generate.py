@@ -27,7 +27,7 @@ from . import keys as K
 from . import manifest as M
 from .api import ApiClient
 from .envcfg import Config
-from .redisops import RedisOps
+from .redisops import RedisOps, error_detail
 from .scenarios import plan_for
 
 TS = "spikeTimestamp"
@@ -247,7 +247,7 @@ def _write_run(ops: RedisOps, cfg: Config, run_id: str, session_id: str, spec: D
     if frame_entries:
         written = ops.xadd_frames(run_keys["xevents"], frame_entries, ttl)
         if written < len(frame_entries):
-            raise RuntimeError("Stream 归档不完整 runId=%s written=%d/%d"
+            raise RuntimeError("Stream archive incomplete runId=%s written=%d/%d"
                                % (run_id, written, len(frame_entries)))
 
     ops.set_values([
@@ -293,7 +293,8 @@ def _upload_attachments(cfg: Config, api: ApiClient, ops: RedisOps, session_id: 
             uploaded.append({
                 "file_id": "",
                 "field_key": field_key,
-                "error": "upload failed status=%s %s" % (result.get("status"), result.get("text_prefix", "")),
+                "error": "upload failed status=%s transport_error=%s" % (
+                    result.get("status"), result.get("transport_error", "")),
             })
             continue
         storage_key = ""
@@ -415,7 +416,7 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
             try:
                 ops.zadd_mapping(K.RECOVERY_DUE_INDEX, global_recovery_members, None)
             except Exception as exc:
-                copy["errors"].append("ai:recovery:due ZADD failed: %s" % exc)
+                copy["errors"].append("ai:recovery:due ZADD failed: %s" % error_detail(exc))
         else:
             copy["global_run_index"] = "skipped (PERF_WRITE_GLOBAL_RUN_INDEX=false)"
 
@@ -482,7 +483,8 @@ def generate_copy(cfg: Config, ops: RedisOps, api: Optional[ApiClient], scenario
                     "ok": str(bool(result.get("ok"))).lower(),
                 })
                 if not result.get("ok"):
-                    copy["errors"].append("feedback create failed: %s" % result.get("text_prefix", ""))
+                    copy["errors"].append("feedback create failed status=%s transport_error=%s" % (
+                        result.get("status"), result.get("transport_error", "")))
             copy["feedback"] = rows
 
     return copy
@@ -501,7 +503,8 @@ def generate(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> D
         http_ready = bool(reach.get("ok"))
         summary["app_reachable"] = http_ready
         if not http_ready:
-            summary["app_error"] = reach.get("transport_error") or reach.get("text_prefix")
+            summary["app_error"] = reach.get("transport_error") or (
+                "HTTP %s" % reach.get("status") if reach.get("status") is not None else "request failed")
 
         matrix_needed: List[str] = []
         for scenario in selected:
@@ -527,7 +530,7 @@ def generate(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> D
                         unknown = [key for key in probes if existence.get(key) is None]
                         missing = [key for key in probes if existence.get(key) is False]
                         if unknown:
-                            raise RuntimeError("无法确认背景键是否存在 bucket=%s keys=%s"
+                            raise RuntimeError("cannot confirm background key existence bucket=%s keys=%s"
                                                % (bucket, ",".join(unknown[:3])))
                         if not missing:
                             existing["planned"] = count
@@ -548,17 +551,17 @@ def generate(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> D
             background[bucket] = state
             summary["background"][bucket] = state
             if not state.get("done"):
-                raise RuntimeError("背景键生成不完整 bucket=%s written=%s/%s"
+                raise RuntimeError("background key generation incomplete bucket=%s written=%s/%s"
                                    % (bucket, state.get("written"), count))
             probes = K.background_probe_keys(cfg.namespace, bucket, count)
             existence = ops.exists_many(probes)
             unknown = [key for key in probes if existence.get(key) is None]
             missing = [key for key in probes if existence.get(key) is False]
             if unknown:
-                raise RuntimeError("无法确认背景键是否存在 bucket=%s keys=%s"
+                raise RuntimeError("cannot confirm background key existence bucket=%s keys=%s"
                                    % (bucket, ",".join(unknown[:3])))
             if missing:
-                raise RuntimeError("背景键精确抽样缺失 bucket=%s keys=%s"
+                raise RuntimeError("background keys missing from exact samples bucket=%s keys=%s"
                                    % (bucket, ",".join(missing[:3])))
 
         for scenario in selected:
@@ -574,7 +577,7 @@ def generate(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> D
             needs_http = bool(plan.get("attachments")) or bool(plan.get("feedback"))
             if needs_http and not http_ready:
                 entry["status"] = "unsupported"
-                entry["reason"] = "需要真实 HTTP API（附件/反馈）但应用不可达：%s" % (
+                entry["reason"] = "real HTTP API required for attachments/feedback, but the application is unreachable: %s" % (
                     summary.get("app_error") or "unknown")
                 summary["scenarios"][scenario] = {"status": "unsupported", "reason": entry["reason"]}
                 M.save_manifest(cfg, manifest)
@@ -600,7 +603,7 @@ def generate(cfg: Config, manifest: Dict[str, object], selected: List[str]) -> D
                 M.save_manifest(cfg, manifest)
             entry["status"] = "failed" if failed else "generated"
             if failed:
-                entry["reason"] = "部分 copy 生成报错，详见 copies[].errors"
+                entry["reason"] = "some copies failed to generate; see copies[].errors"
             summary["scenarios"][scenario] = {
                 "status": entry["status"],
                 "copies": len(entry["copies"]),
@@ -646,7 +649,7 @@ def _generate_background(cfg: Config, ops: RedisOps, bucket: str, count: int,
             chunk.append((key, "perf-bg-%s-%d" % (bucket, index), cfg.key_ttl_seconds))
         wrote = ops.set_values(chunk)
         if wrote != len(chunk):
-            raise RuntimeError("背景键批次写入不完整 bucket=%s batch=%d..%d wrote=%d/%d"
+            raise RuntimeError("background key batch write incomplete bucket=%s batch=%d..%d wrote=%d/%d"
                                % (bucket, start, end - 1, wrote, len(chunk)))
         written = end
         state["written"] = written

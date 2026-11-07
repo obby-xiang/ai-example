@@ -69,6 +69,10 @@ def workspace(cfg: Config) -> Dict[str, Path]:
         "summary_csv": root / "summary.csv",
         "verify_csv": root / "verify.csv",
         "verify_json": root / "verify.json",
+        "verify_precleanup_csv": root / "verify-precleanup.csv",
+        "verify_precleanup_json": root / "verify-precleanup.json",
+        "verify_postcleanup_csv": root / "verify-postcleanup.csv",
+        "verify_postcleanup_json": root / "verify-postcleanup.json",
         "cleanup_json": root / "cleanup.json",
         "cleanup_csv": root / "cleanup.csv",
         "doctor": root / "doctor.json",
@@ -134,10 +138,10 @@ def load_manifest(cfg: Config) -> Optional[Dict[str, object]]:
     if data is None:
         return None
     if not isinstance(data, dict):
-        raise ValueError("manifest.json 不是对象")
+        raise ValueError("manifest.json must contain an object")
     if data.get("namespace") != cfg.namespace:
         raise ValueError(
-            "manifest 命名空间不匹配：文件=%r 当前=%r（换 PERF_NAMESPACE 或 PERF_OUTPUT_DIR）"
+            "manifest namespace mismatch: file=%r current=%r (change PERF_NAMESPACE or PERF_OUTPUT_DIR)"
             % (data.get("namespace"), cfg.namespace)
         )
     return data

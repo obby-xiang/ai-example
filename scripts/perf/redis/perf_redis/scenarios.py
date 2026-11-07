@@ -277,7 +277,7 @@ def resolve_selection(cfg: Config) -> Tuple[List[str], List[Dict[str, str]]]:
         unknown = [name for name in requested if name not in matrix]
         if unknown:
             raise ValueError(
-                "未知场景：%s；可用：%s" % (",".join(unknown), ",".join(sorted(matrix)))
+                "unknown scenario(s): %s; available: %s" % (",".join(unknown), ",".join(sorted(matrix)))
             )
     else:
         requested = [name for name, item in matrix.items() if cfg.profile in item["profiles"]]
@@ -290,22 +290,22 @@ def resolve_selection(cfg: Config) -> Tuple[List[str], List[Dict[str, str]]]:
         scale = item["scale"]
         reason = ""
         if scale == "unsupported_legacy":
-            reason = "legacy archive 已停止写入；当前功能未上线，不做旧数据/旧协议场景"
+            reason = "legacy archive writes are discontinued; old data/protocol scenarios are not supported"
         if scale == "large" and not cfg.allow_large_scale:
-            reason = "大规模场景需显式允许：PERF_ALLOW_LARGE_SCALE=true"
+            reason = "large scenarios require PERF_ALLOW_LARGE_SCALE=true"
         if scale == "million" and not cfg.allow_background_million:
-            reason = "百万背景键需显式允许：PERF_ALLOW_BACKGROUND_MILLION=true（同时需要 PERF_ALLOW_LARGE_SCALE=true）"
+            reason = "one million background keys require PERF_ALLOW_BACKGROUND_MILLION=true and PERF_ALLOW_LARGE_SCALE=true"
         if scale == "million" and cfg.allow_background_million and not cfg.allow_large_scale:
-            reason = "百万背景键同时需要 PERF_ALLOW_LARGE_SCALE=true"
+            reason = "one million background keys also require PERF_ALLOW_LARGE_SCALE=true"
         if name == "kb_reload" and not cfg.enable_kb_reload:
-            reason = "KB reload 默认关闭：PERF_ENABLE_KB_RELOAD=true"
+            reason = "KB reload is disabled by default; set PERF_ENABLE_KB_RELOAD=true"
         if name.startswith("attachments") and not cfg.enable_attachments:
-            reason = "附件场景已关闭：PERF_ENABLE_ATTACHMENTS=false"
+            reason = "attachment scenarios are disabled by PERF_ENABLE_ATTACHMENTS=false"
         if name == "kb_status_read" and not cfg.enable_kb:
-            reason = "KB 读取已关闭：PERF_ENABLE_KB=false"
+            reason = "KB reads are disabled by PERF_ENABLE_KB=false"
         if reason:
             if explicit:
-                raise ValueError("场景 %s 被阻止：%s" % (name, reason))
+                raise ValueError("scenario %s is blocked: %s" % (name, reason))
             blocked.append({"scenario": name, "reason": reason})
             continue
         selected.append(name)
@@ -315,5 +315,5 @@ def resolve_selection(cfg: Config) -> Tuple[List[str], List[Dict[str, str]]]:
 def plan_for(cfg: Config, name: str) -> Dict[str, object]:
     matrix = build_matrix(cfg)
     if name not in matrix:
-        raise ValueError("未知场景：%s" % name)
+        raise ValueError("unknown scenario: %s" % name)
     return matrix[name]["plan"]

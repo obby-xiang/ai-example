@@ -16,7 +16,7 @@ from . import keys as K
 from . import manifest as M
 from .api import ApiClient
 from .envcfg import Config
-from .redisops import RedisOps, RedisUnavailable
+from .redisops import RedisOps, RedisUnavailable, error_detail
 
 
 def _synthetic_copy(cfg: Config, scenario: str, plan: Dict[str, object], copy: Dict[str, object]) -> Dict[str, object]:
@@ -85,7 +85,7 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
             if members is None:
                 skipped.append({
                     "file_id": "-",
-                    "reason": "附件会话索引读取失败，无法枚举登记（不猜测、不删除文件）：%s" % session_index,
+                    "reason": "failed to read the attachment session index; registrations cannot be enumerated (no guessing or file deletion): %s" % session_index,
                 })
                 unknown_attachment_index.append(session_index)
                 members = []
@@ -105,13 +105,13 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
                         if not registered_session:
                             skipped.append({
                                 "file_id": file_id,
-                                "reason": "登记缺少 sessionId，无法证明归属，跳过（不删文件/登记）",
+                                "reason": "registration has no sessionId; ownership cannot be proven, skipping file and registration deletion",
                             })
                             continue
                         if registered_session != current_session_id:
                             skipped.append({
                                 "file_id": file_id,
-                                "reason": "登记 sessionId=%s 与索引会话=%s 不一致，跳过（不删他会话文件）"
+                                "reason": "registration sessionId=%s does not match indexed session=%s; skipping deletion of another session's files"
                                           % (registered_session, current_session_id),
                             })
                             continue
@@ -121,7 +121,7 @@ def _build_targets(cfg: Config, manifest: Dict[str, object], ops: RedisOps) -> D
                     else:
                         skipped.append({
                             "file_id": file_id,
-                            "reason": "登记 JSON 不可解析，跳过（避免删登记后留下孤儿文件）",
+                            "reason": "registration JSON is invalid; skipping to avoid orphaned files after registration deletion",
                         })
                         continue
                 exact.append(registration)
@@ -222,7 +222,7 @@ def _file_plan(cfg: Config, files: List[Tuple[str, str]]) -> List[Dict[str, obje
             "detail": "",
         }
         if not root:
-            entry["detail"] = "未配置 PERF_APP_FILE_STORAGE_PATH，无法安全定位文件"
+            entry["detail"] = "PERF_APP_FILE_STORAGE_PATH is not configured; the file cannot be located safely"
             entry["exists"] = None
             out.append(entry)
             continue
@@ -234,25 +234,25 @@ def _file_plan(cfg: Config, files: List[Tuple[str, str]]) -> List[Dict[str, obje
         entry["exists"] = os.path.exists(candidate_real)
         if candidate_real == root_real:
             entry["status"] = "fail"
-            entry["detail"] = "storageKey 指向存储根目录本身，拒绝删除"
+            entry["detail"] = "storageKey points to the storage root itself; deletion refused"
             out.append(entry)
             continue
         if not candidate_real.startswith(root_real + os.sep):
             entry["status"] = "fail"
-            entry["detail"] = "storageKey 越出配置的存储根目录（含符号链接解析），拒绝删除"
+            entry["detail"] = "storageKey escapes the configured storage root after symlink resolution; deletion refused"
             out.append(entry)
             continue
         if not entry["exists"]:
-            entry["detail"] = "文件不存在（可能已被应用删除），无需删除"
+            entry["detail"] = "file does not exist (the application may already have deleted it); no deletion needed"
             out.append(entry)
             continue
         if os.path.islink(candidate) or os.path.islink(candidate_real) or not os.path.isfile(candidate_real):
             entry["status"] = "fail"
-            entry["detail"] = "目标不是根目录下的普通文件（目录/符号链接等），拒绝删除"
+            entry["detail"] = "target is not a regular file under the root (directory, symlink, etc.); deletion refused"
             out.append(entry)
             continue
         if not cfg.allow_file_delete:
-            entry["detail"] = "文件存在但 PERF_ALLOW_FILE_DELETE=false（只报告不删除）"
+            entry["detail"] = "file exists but PERF_ALLOW_FILE_DELETE=false; report only, no deletion"
             out.append(entry)
             continue
         entry["action"] = "delete"
@@ -278,7 +278,7 @@ def _delete_background_exact(cfg: Config, ops: RedisOps, bucket: str, count: int
         "complete": False,
     }
     if count <= 0:
-        result["reason"] = "manifest 未记录 planned count，无法精确删除背景键"
+        result["reason"] = "manifest has no planned count; background keys cannot be deleted exactly"
         return result
     for start in range(0, count, cfg.batch_size):
         end = min(count, start + cfg.batch_size)
@@ -308,7 +308,7 @@ def _delete_background_exact(cfg: Config, ops: RedisOps, bucket: str, count: int
                 "key": "%s[%d..%d]" % (bucket, start, end - 1),
                 "action": "delete",
                 "status": "fail",
-                "detail": "批次删除后仍存在 %d 个" % len(remaining),
+                "detail": "%d keys still exist after batch deletion" % len(remaining),
             })
         if unknown:
             rows.append({
@@ -316,7 +316,7 @@ def _delete_background_exact(cfg: Config, ops: RedisOps, bucket: str, count: int
                 "key": "%s[%d..%d]" % (bucket, start, end - 1),
                 "action": "delete",
                 "status": "unknown",
-                "detail": "批次删除后存在性不可判 %d 个" % len(unknown),
+                "detail": "existence of %d keys is unknown after batch deletion" % len(unknown),
             })
     result["complete"] = (
         int(result["remaining"]) == 0
@@ -324,7 +324,7 @@ def _delete_background_exact(cfg: Config, ops: RedisOps, bucket: str, count: int
         and not result["errors"]
     )
     if not result["complete"]:
-        result["reason"] = "背景键仍有剩余或不可判（未伪报干净）"
+        result["reason"] = "background keys remain or have unknown existence; cleanliness is not claimed"
     return result
 
 
@@ -349,12 +349,12 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
             # must be reachable before any cleanup decision is made.
             authoritative = ops.primaries(allow_seed_fallback=False)
             if not authoritative:
-                raise RedisUnavailable("无法读取 cluster 主节点拓扑，拒绝开始清理")
+                raise RedisUnavailable("cluster primary topology unavailable; cleanup refused")
             ops.primary_node_clients(strict=True, targets=authoritative)
         targets = _build_targets(cfg, manifest, ops)
         if not (manifest.get("scenarios") or manifest.get("background")):
             targets["unknown_background"].append(
-                "manifest 为空：无法确认是否存在历史背景键（未做全库 SCAN，不伪报干净）"
+                "manifest is empty: historical background keys cannot be ruled out (no full-database SCAN; cleanliness not claimed)"
             )
         exact = list(targets["exact"])
         background = list(targets["background"])
@@ -439,25 +439,25 @@ def cleanup(cfg: Config, manifest: Dict[str, object], execute: bool) -> Dict[str
                 current_real = os.path.realpath(path)
                 if current_real == root_real or not current_real.startswith(root_real + os.sep):
                     entry["status"] = "fail"
-                    entry["detail"] = "删除前复核失败：路径不在存储根目录之下"
+                    entry["detail"] = "pre-deletion check failed: path is outside the storage root"
                     file_delete_result.append(entry)
                     continue
                 path = current_real
                 entry["path"] = path
                 if os.path.islink(path) or (os.path.exists(path) and not os.path.isfile(path)):
                     entry["status"] = "fail"
-                    entry["detail"] = "删除前复核失败：目标不是普通文件"
+                    entry["detail"] = "pre-deletion check failed: target is not a regular file"
                     file_delete_result.append(entry)
                     continue
                 if os.path.exists(path):
                     os.remove(path)
                 entry["status"] = "pass"
-                entry["detail"] = "已删除" if not os.path.exists(path) else "删除后仍存在"
+                entry["detail"] = "deleted" if not os.path.exists(path) else "file still exists after deletion"
                 if os.path.exists(path):
                     entry["status"] = "fail"
             except OSError as exc:
                 entry["status"] = "fail"
-                entry["detail"] = "删除失败：%s" % exc
+                entry["detail"] = "deletion failed: %s" % error_detail(exc)
             file_delete_result.append(entry)
         summary["files"] = file_delete_result
 

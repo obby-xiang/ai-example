@@ -7,6 +7,7 @@ CLI flags only choose the action mode (dry-run/execute, keep leftovers).
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from typing import Dict, List, Optional
 
@@ -30,10 +31,10 @@ EXIT_UNSUPPORTED = 3
 def _print_config_errors(cfg: Config) -> None:
     if not cfg.errors:
         return
-    print("配置错误：", file=sys.stderr)
+    print("Configuration errors:", file=sys.stderr)
     for item in cfg.errors:
         print("  - " + item, file=sys.stderr)
-    print("提示：复制 .env.example 为 .env 并导出，或直接设置环境变量。", file=sys.stderr)
+    print("Hint: copy .env.example to .env and export it, or set the environment variables directly.", file=sys.stderr)
 
 
 def _print_checks(title: str, result: Dict[str, object]) -> None:
@@ -91,10 +92,10 @@ def _print_cleanup(result: Dict[str, object]) -> None:
     print("exact keys=%s present=%s backgrounds=%s"
           % (plan.get("exact_keys"), plan.get("exact_present"), len(plan.get("background") or [])))
     if plan.get("unknown_background"):
-        print("unknown background buckets（无 planned count，不伪报干净）：%s"
+        print("unknown background buckets (planned count unavailable; cleanliness not claimed): %s"
               % ",".join(plan.get("unknown_background") or []))
     if not result.get("executed"):
-        print("dry-run：未删除任何键。确认清单后使用 cleanup --execute。")
+        print("dry-run: no keys were deleted. Review the plan and run cleanup --execute.")
     remaining = result.get("remaining") or {}
     if remaining:
         print("remaining exact=%s scanned=%s background=%s"
@@ -106,10 +107,10 @@ def _load_manifest_or_fail(cfg: Config) -> Optional[Dict[str, object]]:
     try:
         manifest = M.load_manifest(cfg)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        print(exc, file=sys.stderr)
         return None
     if manifest is None:
-        print("没有 manifest：先执行 generate（或检查 PERF_OUTPUT_DIR / PERF_NAMESPACE）", file=sys.stderr)
+        print("No manifest found: run generate first (or check PERF_OUTPUT_DIR / PERF_NAMESPACE)", file=sys.stderr)
         return None
     return manifest
 
@@ -118,7 +119,7 @@ def _selection(cfg: Config):
     try:
         return scenarios_mod.resolve_selection(cfg)
     except (ValueError, ConfigError) as exc:
-        print(str(exc), file=sys.stderr)
+        print(exc, file=sys.stderr)
         return None
 
 
@@ -180,7 +181,7 @@ def cmd_generate(cfg: Config, args) -> int:
         return EXIT_CONFIG
     selected, blocked = selection
     if not selected:
-        print("没有可执行场景（全部被阻止或未选择）", file=sys.stderr)
+        print("No executable scenarios (all are blocked or unselected)", file=sys.stderr)
         return EXIT_UNSUPPORTED
     try:
         cfg.require_write_safety()
@@ -192,12 +193,12 @@ def cmd_generate(cfg: Config, args) -> int:
     try:
         manifest = M.load_manifest(cfg) or M.new_manifest(cfg)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        print(exc, file=sys.stderr)
         return EXIT_CONFIG
     try:
         summary = generate_mod.generate(cfg, manifest, selected)
     except Exception as exc:
-        print("生成失败：%s" % exc, file=sys.stderr)
+        logging.exception("Generation failed")
         return EXIT_FAIL
     M.save_manifest(cfg, manifest)
     print("== generate ==")
@@ -243,8 +244,8 @@ def cmd_measure(cfg: Config, args) -> int:
     _print_stats(result)
     print("results=%s" % paths["results"])
     if result.get("budget_exhausted_scenarios", 0) > 0 or result.get("skipped_scenarios", 0) > 0:
-        print("measure 预算耗尽：部分场景未跑完或未开始，结果不构成性能通过"
-              "（见 results.json 的 budget / scenarios[].skipped）", file=sys.stderr)
+        print("measure budget exhausted: some scenarios did not finish or start; results are not a performance pass "
+              "(see budget / scenarios[].skipped in results.json)", file=sys.stderr)
         return EXIT_FAIL
     if result.get("measured_requests", 0) == 0:
         return EXIT_UNSUPPORTED
@@ -283,20 +284,31 @@ def cmd_verify(cfg: Config, args) -> int:
         return EXIT_CONFIG
     measure_result = _measure_from_results(cfg)
     if measure_result is None:
-        print("没有测量结果：先执行 measure（或检查 PERF_OUTPUT_DIR）", file=sys.stderr)
+        print("No measurement results found: run measure first (or check PERF_OUTPUT_DIR)", file=sys.stderr)
         return EXIT_CONFIG
     cleanup_result = _cleanup_from_results(cfg)
-    if cleanup_result is not None and cleanup_result.get("executed") is True:
+    post_cleanup = cleanup_result is not None and cleanup_result.get("executed") is True
+    paths = M.workspace(cfg)
+    pre_counts: Dict[str, object] = {}
+    if post_cleanup:
+        existing = M.read_json(paths["results"])
+        if isinstance(existing, dict):
+            previous_pre = existing.get("pre_cleanup_verify")
+            if not isinstance(previous_pre, dict):
+                candidate = existing.get("verify")
+                previous_pre = candidate if isinstance(candidate, dict) and candidate.get("phase") != "post_cleanup" else None
+            if previous_pre is not None:
+                pre_counts = existing.get("pre_cleanup_verify_counts") or previous_pre.get("counts", {})
         result = verify_mod.verify_cleanup(cleanup_result)
     else:
         result = verify_mod.verify(cfg, manifest, measure_result, selected)
-    paths = M.workspace(cfg)
-    report.write_all(cfg, paths, measure_result, result, cleanup_result, compare_git(preflight_mod._repo_root()))
+    report.write_all(cfg, paths, measure_result, result, cleanup_result, compare_git(preflight_mod._repo_root()),
+                     verify_phase="postcleanup" if post_cleanup else "precleanup")
     _print_verify(result)
     counts = result.get("counts", {})
-    if counts.get("fail", 0) > 0:
+    if pre_counts.get("fail", 0) > 0 or counts.get("fail", 0) > 0:
         return EXIT_FAIL
-    if counts.get("unknown", 0) > 0:
+    if pre_counts.get("unknown", 0) > 0 or counts.get("unknown", 0) > 0:
         return EXIT_CONFIG
     if counts.get("pass", 0) == 0 and counts.get("info", 0) == 0 and counts.get("skip", 0) > 0:
         return EXIT_UNSUPPORTED
@@ -311,10 +323,10 @@ def cmd_cleanup(cfg: Config, args) -> int:
     try:
         manifest = M.load_manifest(cfg)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        print(exc, file=sys.stderr)
         return EXIT_CONFIG
     if manifest is None:
-        print("警告：没有 manifest，仅能清理本命名空间的背景键；会话级键无法推导", file=sys.stderr)
+        print("WARN: no manifest found; only namespace background keys can be cleaned, session keys cannot be derived", file=sys.stderr)
         manifest = M.new_manifest(cfg)
     execute = bool(getattr(args, "execute", False))
     try:
@@ -340,7 +352,7 @@ def cmd_all(cfg: Config, args) -> int:
         return EXIT_CONFIG
     selected, blocked = selection
     if not selected:
-        print("没有可执行场景", file=sys.stderr)
+        print("No executable scenarios", file=sys.stderr)
         return EXIT_UNSUPPORTED
     M.resolve_namespace(cfg)
     pre = preflight_mod.preflight(cfg)
@@ -353,14 +365,14 @@ def cmd_all(cfg: Config, args) -> int:
     try:
         manifest = M.load_manifest(cfg)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        print(exc, file=sys.stderr)
         return EXIT_CONFIG
     if manifest is None:
         manifest = M.new_manifest(cfg)
     try:
         generate_summary = generate_mod.generate(cfg, manifest, selected)
     except Exception as exc:
-        print("生成失败：%s" % exc, file=sys.stderr)
+        logging.exception("Generation failed")
         return EXIT_FAIL
     M.save_manifest(cfg, manifest)
     print("== generate ==")
@@ -372,6 +384,10 @@ def cmd_all(cfg: Config, args) -> int:
     _print_stats(measure_result)
     verify_result = verify_mod.verify(cfg, manifest, measure_result, selected)
     _print_verify(verify_result)
+    extra = {"generate": generate_summary, "blocked": blocked}
+    report.write_all(cfg, paths, measure_result, verify_result, None,
+                     compare_git(preflight_mod._repo_root()), extra=extra,
+                     verify_phase="precleanup")
 
     cleanup_result = None
     if not getattr(args, "keep", False):
@@ -379,16 +395,25 @@ def cmd_all(cfg: Config, args) -> int:
         cleanup_result = cleanup_mod.cleanup(cfg, manifest, execute)
         _print_cleanup(cleanup_result)
 
-    report.write_all(cfg, paths, measure_result, verify_result, cleanup_result,
-                     compare_git(preflight_mod._repo_root()),
-                     extra={"generate": generate_summary, "blocked": blocked})
+    post_verify_result = None
+    if cleanup_result is not None and cleanup_result.get("executed") is True:
+        post_verify_result = verify_mod.verify_cleanup(cleanup_result)
+        _print_verify(post_verify_result)
+        report.write_all(cfg, paths, measure_result, post_verify_result, cleanup_result,
+                         compare_git(preflight_mod._repo_root()), extra=extra,
+                         verify_phase="postcleanup")
+    elif cleanup_result is not None:
+        report.write_all(cfg, paths, measure_result, verify_result, cleanup_result,
+                         compare_git(preflight_mod._repo_root()), extra=extra,
+                         verify_phase="precleanup")
     print("results=%s" % paths["results"])
 
     verify_counts = verify_result.get("counts", {})
-    if verify_counts.get("fail", 0) > 0:
+    post_verify_counts = (post_verify_result or {}).get("counts", {})
+    if verify_counts.get("fail", 0) > 0 or post_verify_counts.get("fail", 0) > 0:
         return EXIT_FAIL
     if measure_result.get("budget_exhausted_scenarios", 0) > 0 or measure_result.get("skipped_scenarios", 0) > 0:
-        print("measure 预算耗尽：部分场景未跑完或未开始，结果不构成性能通过", file=sys.stderr)
+        print("measure budget exhausted: some scenarios did not finish or start; results are not a performance pass", file=sys.stderr)
         return EXIT_FAIL
     if measure_result.get("failed_requests", 0) > 0:
         return EXIT_FAIL
@@ -396,7 +421,7 @@ def cmd_all(cfg: Config, args) -> int:
         return EXIT_UNSUPPORTED
     if cleanup_result is not None and cleanup_result.get("executed") and cleanup_result.get("complete") is not True:
         return EXIT_FAIL
-    if verify_counts.get("unknown", 0) > 0:
+    if verify_counts.get("unknown", 0) > 0 or post_verify_counts.get("unknown", 0) > 0:
         return EXIT_CONFIG
     statuses = [item.get("status") for item in (generate_summary.get("scenarios") or {}).values()]
     if "failed" in statuses:
@@ -461,11 +486,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return EXIT_CONFIG
     except KeyboardInterrupt:
-        print("中断：已生成的键都带 TTL；请执行 cleanup 清理本命名空间", file=sys.stderr)
+        print("Interrupted: generated keys have TTLs; run cleanup for this namespace", file=sys.stderr)
         return 130
     except ConfigError as exc:
         _print_config_errors(Config(errors=exc.errors))
         return EXIT_CONFIG
     except Exception as exc:
-        print("命令失败：%s" % exc, file=sys.stderr)
+        logging.exception("Command failed")
         return EXIT_FAIL

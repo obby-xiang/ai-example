@@ -106,6 +106,12 @@ const apiLoad = {
 
 class CoverageError extends Error {}
 
+function errorDetail(error) {
+  if (error instanceof CoverageError) return error.message
+  if (error instanceof Error) return error.name
+  return 'non-Error rejection'
+}
+
 function assert(condition, message) {
   if (!condition) throw new CoverageError(message)
 }
@@ -123,7 +129,7 @@ function headers(json = false) {
 }
 
 function tripModelCircuit(error, phase = 'model-execution') {
-  const failure = error instanceof Error ? error : new CoverageError(String(error))
+  const failure = error instanceof Error ? error : new CoverageError('non-Error rejection')
   if (modelFailure === null) modelFailure = { error: failure, phase }
   for (const waiter of modelWaiters.splice(0)) waiter.reject(modelFailure.error)
 }
@@ -261,7 +267,7 @@ async function call(key, url, options, assertion, recordResult = true) {
         httpStatus,
         latencyMs: response?.latencyMs ?? Date.now() - started,
         assertions: [],
-        error: error instanceof Error ? error.message : String(error)
+        error: errorDetail(error)
       })
     }
     if (httpStatus !== null && error !== null && typeof error === 'object' && error.httpStatus === undefined) {
@@ -272,19 +278,19 @@ async function call(key, url, options, assertion, recordResult = true) {
 }
 
 function ok(response, detail = 'HTTP 2xx') {
-  assert(response.status >= 200 && response.status < 300, `${detail}: got ${response.status}: ${response.text}`)
+  assert(response.status >= 200 && response.status < 300, `${detail}: got ${response.status}`)
   return detail
 }
 
 function dataObject(response) {
   const data = payloadOf(response)
-  assert(data !== null && typeof data === 'object' && !Array.isArray(data), `expected object payload: ${response.text}`)
+  assert(data !== null && typeof data === 'object' && !Array.isArray(data), `expected object payload: HTTP ${response.status}`)
   return data
 }
 
 function dataArray(response) {
   const data = payloadOf(response)
-  assert(Array.isArray(data), `expected array payload: ${response.text}`)
+  assert(Array.isArray(data), `expected array payload: HTTP ${response.status}`)
   return data
 }
 
@@ -309,7 +315,7 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
   try {
     const response = await request(`/api/ai/cancel/${runId}`, { method: 'POST' })
     assert(response.status >= 200 && response.status < 300, `SSE error cancel ${response.status}`)
-    assert(dataObject(response).cancelled === true, `SSE error cancel not accepted: ${response.text}`)
+    assert(dataObject(response).cancelled === true, `SSE error cancel not accepted: HTTP ${response.status}`)
     const terminal = await readSseRaw(runId, lastSeq, (frame) => frame.type === 'done' || frame.type === 'error', false, scopeErrors)
     assert(terminal.matched.type === 'done' && terminal.matched.cancelled === true,
       'SSE error cancel accepted but no cancelled terminal frame')
@@ -321,7 +327,8 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
     return true
   }
   catch (cleanupError) {
-    const detail = `sse-error-cancel:${runId}=${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+    console.error('SSE error cleanup failed:', cleanupError)
+    const detail = `sse-error-cancel:${runId}=${errorDetail(cleanupError)}`
     cleanupLog.push(detail)
     cleanupErrors.push(detail)
     scopeErrors.push(detail)
@@ -432,7 +439,7 @@ async function startChat(sessionId, message, context, predicate, awaitTerminal =
           httpStatus: null,
           latencyMs: Date.now() - started,
           assertions: [],
-          error: error instanceof Error ? error.message : String(error)
+          error: errorDetail(error)
         })
       }
       throw error
@@ -468,7 +475,7 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
     })
     const contentType = response.headers.get('content-type') ?? ''
     if (response.status !== 200 || !contentType.includes('text/event-stream')) {
-      throw new CoverageError(`chat expected SSE, got ${response.status} ${contentType}: ${await response.text()}`)
+      throw new CoverageError(`chat expected SSE, got ${response.status} ${contentType}`)
     }
     reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -535,7 +542,7 @@ async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErro
         httpStatus: error?.httpStatus ?? null,
         latencyMs: Date.now() - started,
         assertions: [],
-        error: `${stage}: ${error instanceof Error ? error.message : String(error)}`,
+        error: `${stage}: ${errorDetail(error)}`,
         stage
       })
     }
@@ -552,7 +559,7 @@ async function waitForCancelStatus(runId, evidence) {
     try {
       response = await request(`/api/ai/events/${runId}?probe=1`, { headers: { Accept: 'application/json' } })
       const data = dataObject(response)
-      assert([200, 202, 503].includes(response.status), `cancel status probe unexpected HTTP ${response.status}: ${response.text}`)
+      assert([200, 202, 503].includes(response.status), `cancel status probe unexpected HTTP ${response.status}`)
       if (response.status === 200) {
         assert(data.ready === true && !response.contentType.includes('text/event-stream'),
           'cancel status probe did not return ready JSON')
@@ -587,7 +594,7 @@ async function waitForCancelStatus(runId, evidence) {
       }
     }
     catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = errorDetail(error)
       probe.error = message
       record('GET /api/ai/events/{runId}', {
         httpStatus: response?.status ?? null,
@@ -603,7 +610,7 @@ async function waitForCancelStatus(runId, evidence) {
   probe.timedOut = true
   probe.outcome = classifyCancelProbe({ ...lastObservation, attemptsExhausted: true })
   if (lastObservation?.status === 'SUSPENDED' && evidence.redisFlagWritten === true) {
-    throw new CoverageError(`取消已受理但未驱动：${CANCEL_STATUS_POLL_ATTEMPTS} 次 events probe 后仍为 SUSPENDED，redisFlagWritten=true，未读取到 done{cancelled:true}`)
+    throw new CoverageError(`cancel accepted but not driven: status remained SUSPENDED after ${CANCEL_STATUS_POLL_ATTEMPTS} events probes with redisFlagWritten=true; done{cancelled:true} was not observed`)
   }
   if (probe.outcome === 'DEGRADED') {
     throw new CoverageError(`cancel status probe degraded after ${CANCEL_STATUS_POLL_ATTEMPTS} attempts; no terminal status confirmed`)
@@ -643,7 +650,8 @@ async function cleanupOne(kind, id, fn, scopeErrors = coreCleanupErrors) {
     cleanupLog.push(`${kind}=${id}:ok`)
   }
   catch (error) {
-    const detail = `${kind}=${id}:${error instanceof Error ? error.message : String(error)}`
+    console.error(`Cleanup failed for ${kind}=${id}:`, error)
+    const detail = `${kind}=${id}:${errorDetail(error)}`
     cleanupLog.push(detail)
     cleanupErrors.push(detail)
     scopeErrors.push(detail)
@@ -733,11 +741,12 @@ async function runLoadScenario(runner, plan, unit, overrides = {}) {
       }
     }
     catch (error) {
+      console.error(`API load attempt failed for ${plan.key} #${index}:`, error)
       return {
         ok: false,
         status: error?.httpStatus ?? null,
         latencyMs: null,
-        message: limitedMessage(error instanceof Error ? error.message : String(error))
+        message: limitedMessage(errorDetail(error))
       }
     }
   })
@@ -759,11 +768,12 @@ async function runLoadScenario(runner, plan, unit, overrides = {}) {
   const samples = []
   attempts.forEach((settled, index) => {
     if (settled.status === 'rejected') {
+      console.error(`API load attempt rejected for ${plan.key} #${index}:`, settled.reason)
       entry.failed += 1
       entry.errors.push({
         index,
         httpStatus: null,
-        message: limitedMessage(settled.reason instanceof Error ? settled.reason.message : String(settled.reason))
+        message: limitedMessage(errorDetail(settled.reason))
       })
       return
     }
@@ -906,7 +916,7 @@ function buildLoadUnits({ sessionId, runId }) {
       ok(response)
       const data = dataObject(response)
       assert(data.resumed === false, 'terminal resume unexpectedly resumed a cancelled run')
-      assert(data.reason === 'ALREADY_CANCELLED', `terminal resume reason was ${data.reason}`)
+      assert(data.reason === 'ALREADY_CANCELLED', 'unexpected terminal resume outcome')
     }))
   units.set('POST /api/ai/cancel/client-request', async (index) => {
     const loadSession = `${runPrefix}-load-client-cancel-${index}-${randomUUID()}`
@@ -987,7 +997,7 @@ function buildLoadUnits({ sessionId, runId }) {
       const deferred = Array.isArray(data.deferred) ? data.deferred : []
       const errors = Array.isArray(data.errors) ? data.errors : []
       assert(data.complete === true && deferred.length === 0 && errors.length === 0,
-        `session purge incomplete: ${response.text}`)
+        `session purge incomplete: HTTP ${response.status}`)
       createdSessions.delete(loadSession)
       loadCreatedSessions.delete(loadSession)
     }
@@ -1029,7 +1039,8 @@ async function runApiLoadStage({ sessionId, runId }) {
     }
   }
   catch (error) {
-    apiLoad.fatalError = limitedMessage(error instanceof Error ? error.message : String(error))
+    console.error('API load stage failed:', error)
+    apiLoad.fatalError = limitedMessage(errorDetail(error))
     apiLoad.notes.push('load stage aborted before every planned entry finished')
   }
   finally {
@@ -1395,7 +1406,8 @@ async function main() {
   await modelCall(() => call('POST /api/ai/runs/{runId}/resume', `/api/ai/runs/${mainRun}/resume`, { method: 'POST' }, async (response) => {
     ok(response)
     const data = dataObject(response)
-    assert(data.reason === 'ALREADY_CANCELLED' && data.resumed === false, `unexpected resume outcome ${response.text}`)
+    assert(data.reason === 'ALREADY_CANCELLED' && data.resumed === false,
+      'unexpected terminal resume outcome')
     return `terminal resume idempotent ${data.reason}`
   }))
   await call('GET /api/ai/startup-resume', '/api/ai/startup-resume', {}, async (response) => {
@@ -1440,7 +1452,7 @@ async function main() {
   await call('DELETE /api/ai/session/{sessionId}', `/api/ai/session/${lifecycleSession}`, { method: 'DELETE' }, async (response) => {
     ok(response)
     const data = dataObject(response)
-    assert(data.complete === true, `session purge incomplete: ${response.text}`)
+    assert(data.complete === true, `session purge incomplete: HTTP ${response.status}`)
     return `session purge complete ${lifecycleSession}`
   })
   createdSessions.delete(lifecycleSession)
@@ -1452,7 +1464,8 @@ try {
   await main()
 }
 catch (error) {
-  fatalError = error instanceof Error ? error.message : String(error)
+  console.error('Core coverage failed:', error)
+  fatalError = errorDetail(error)
 }
 finally {
   if (loadBaselines.captured) {
@@ -1470,7 +1483,7 @@ finally {
         body: JSON.stringify({ messageId: feedbackMessageId, sessionId: mainSession, rating: 0 })
       })
       assert(response.status >= 200 && response.status < 300, `feedback cleanup ${response.status}`)
-      assert(dataObject(response).cancelled === true, `feedback cleanup not cancelled: ${response.text}`)
+      assert(dataObject(response).cancelled === true, `feedback cleanup not cancelled: HTTP ${response.status}`)
     })
   }
   for (const messageId of loadFeedbackMessageIds) {
@@ -1481,8 +1494,8 @@ finally {
       })
       assert(response.status >= 200 && response.status < 300, `load feedback cleanup ${response.status}`)
       const data = dataObject(response)
-      assert(data.saved === false, `load feedback cleanup unexpectedly saved: ${response.text}`)
-      assert(data.cancelled === true, `load feedback cleanup not cancelled: ${response.text}`)
+      assert(data.saved === false, `load feedback cleanup unexpectedly saved: HTTP ${response.status}`)
+      assert(data.cancelled === true, `load feedback cleanup not cancelled: HTTP ${response.status}`)
     }, apiLoad.cleanupErrors)
   }
   for (const runId of activeRuns) {
@@ -1505,7 +1518,7 @@ finally {
       const deferred = Array.isArray(data.deferred) ? data.deferred : []
       const errors = Array.isArray(data.errors) ? data.errors : []
       assert(data.complete === true && deferred.length === 0 && errors.length === 0,
-        `session cleanup incomplete: ${response.text}`)
+        `session cleanup incomplete: complete=${data.complete} deferred=${deferred.length} errors=${errors.length}`)
     }, loadCreatedSessions.has(sessionId) ? apiLoad.cleanupErrors : coreCleanupErrors)
   }
   const loadEntries = Object.values(apiLoad.endpoints)
@@ -1563,7 +1576,7 @@ finally {
     modelCircuitBreaker: {
       failed: modelFailure !== null,
       phase: modelFailure?.phase ?? null,
-      error: modelFailure?.error.message ?? null,
+      error: modelFailure === null ? null : errorDetail(modelFailure.error),
       modelInFlight,
       slotsNotSafelyReleased: modelInFlight
     },
