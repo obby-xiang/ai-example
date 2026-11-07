@@ -239,7 +239,7 @@ public class CancellationRegistry {
 		out.put("runId", runId);
 		out.put("key", slot);
 		RedisRead read = readRedisFlag(runId);
-		out.put("redisFlag", read.value());
+		out.put("redisFlag", read.value() != null);
 		AtomicBoolean flag = this.flags.get(slot);
 		boolean degradedCancel = degradedCancelActive(slot);
 		out.put("localFlag", flag != null && flag.get());

@@ -770,6 +770,13 @@
       "reason": "仅收紧公共异常响应、健康脱敏和SSE异常日志，恢复安全动态业务文案及状态语义，迁移数据与协议形状不变，D6无需更新。",
       "reviewedAt": "2026-11-07",
       "reviewer": "K3.1 Pro施工，K3.1 Pro定向静态复审"
+    },
+    {
+      "fingerprint": "sha256:74c229eb8d7fc62876abf9f06f31e4a91c559ab1b7474fdedbf135c92db7cd0c",
+      "status": "not-affected",
+      "reason": "仅将取消状态接口的redisFlag从实例ID字符串修正为布尔值，Redis写入、TTL、迁移数据和状态机不变，D6无需更新。",
+      "reviewedAt": "2026-11-07",
+      "reviewer": "K3.1 Pro施工，K3.1 Pro独立静态审查"
     }
   ]
 }
