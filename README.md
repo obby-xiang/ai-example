@@ -185,16 +185,25 @@ yarn dev
 
 ### 独立用例与压测导航
 
-1. **当前 AI 真机主用例**：`docs/research/设计-真机E2E用例全集-2026-10-23.md`（24 域 301 条 + 2026-11-07 独立补充）。
-2. **上一版蓝本**：`docs/research/设计-AI对话E2E用例全集-2026-10-22.md`。
-3. **生产测试策略**：`docs/merge/04-测试用例文档.md`，作为全项目生产测试策略参考。
-4. **遗留参考**：`docs/test-cases.md`，不是当前 AI 主用例。
-5. **单元 / API 脚本**：`backend/src/test/java`、`frontend/tests`、`scripts/verify-e2e.ps1`、`scripts/verification/`。
-6. **真实浏览器**：`frontend/e2e`、`frontend/playwright*.config.ts`、`scripts/chat-panel-smoke.mjs`。
-7. **压测**：`scripts/perf/ai-api/`、`scripts/perf/redis/`、`scripts/perf/redis-production/`、`scripts/perf/redis-protocol/`，各目录入口见其 `README.md`。
-8. **多实例 / Cluster**：`scripts/b23l1-dual-instance.ps1`、`scripts/redis5-cluster-smoke.sh`；五个 workflows 为 `.github/workflows/ci.yml`、`nightly.yml`、`cluster-3node.yml`、`e2e-real.yml`、`redis-5-smoke.yml`。
+1. **当前独立复测清单**：`docs/verification/AI对话独立复测清单-2026-11-05.md`。覆盖近期审查问题、导出工作流和独立浏览器/API 复测，明确不使用 `backend/src/test`、`frontend/tests`、`frontend/e2e` 作为本轮载体。
+2. **独立 API 与评估脚本**：`scripts/verification/ai-current-protocol-api.mjs`、`scripts/verification/ai-progressive-disclosure-eval.mjs`；API/桩 E2E 主脚本为 `scripts/verify-e2e.ps1`，说明见 `scripts/README.md`。
+3. **浏览器复测**：当前独立清单使用 Kimi Code Desktop 内置浏览器，不使用 CU；CI 的 Playwright 资产位于 `frontend/e2e`，配置为 `frontend/playwright*.config.ts` 和 `frontend/e2e/playwright.*.config.ts`，冒烟脚本为 `scripts/chat-panel-smoke.mjs`。
+4. **其他测试文档**：`docs/research/设计-真机E2E用例全集-2026-10-23.md` 与 `设计-AI对话E2E用例全集-2026-10-22.md` 是用例设计蓝本；`docs/merge/04-测试用例文档.md` 是生产测试策略参考；`docs/test-cases.md` 是遗留参考，均不替代当前独立复测清单。
+5. **压测入口**：`scripts/perf/ai-api/`、`scripts/perf/redis/`、`scripts/perf/redis-production/`、`scripts/perf/redis-protocol/`，各目录参数、套件和证据规则见其 `README.md`。
+6. **多实例 / Cluster**：`scripts/b23l1-dual-instance.ps1`、`scripts/redis5-cluster-smoke.sh`；五个 workflows 为 `.github/workflows/ci.yml`、`nightly.yml`、`cluster-3node.yml`、`e2e-real.yml`、`redis-5-smoke.yml`。
 
 本轮仅维护独立用例矩阵和压测脚本，不依赖前后端既有测试代码；动态结果默认 `NOT_RUN`，真实执行需另记证据。
+
+### 近期压测场景（当前对话第六至十一轮）
+
+- **A｜Redis 生产直驱**：43 个场景，覆盖生成、measure、verify、cleanup 和 post-cleanup，检查真实键、TTL、索引、pending/due 和残留。
+- **B｜HTTP/Redis API 与 DELETE**：39 个 measure 请求及对应 verify，覆盖空会话、不同 run 数、重复删除和并发删除。
+- **C｜核心接口与协议**：27 项核心 AI 接口，另有 Protocol、渐进披露、SSE 重挂、取消、启动恢复、反馈、附件和 session DELETE。
+- **D｜SSE/API 并发**：chat、export 及读接口并发，检查 HTTP 结果、业务结果、seqGaps、dupSeqs、丢帧、重复和乱序。
+- **E｜DELETE 回归与配置闸**：多场景延迟和清理回归；`EVAL_MODEL_CONCURRENCY` 仅允许 1–10，超过时在发出任何 HTTP 请求前拒绝。
+- **本轮新增预期**：JSON Long 同时兼容旧数值和数字字符串；pending/due 不再永久存储；对话数据按最后真实用户活动起 24 小时滑动过期、60 秒 Redis 跨实例节流；后台读取不续期，purge guard 跳过续期，`dataKey` 必须续期成功；128 run、1024 枚举项、4096 键总量上限。
+
+近期实际环境为 Redis 5.0.14 Cluster（3 主 3 从）、后端 `SPRING_PROFILES_ACTIVE=cluster`、真实 DeepSeek 模型。历史证据按轮次位于 `evidence/out-cl-full-r*`、`evidence/out-http-*`、`evidence/ai-core-coverage-*`、`evidence/verification-results/ai-core-load-*`；仓外 SSE/API 结果文件为 `ai-api-load-results-r*.json`。**这些是历史轮次证据，不代表当前 HEAD 已通过；当前代码必须重新执行并单独记录结果。**
 
 ### 本地跑法
 

@@ -2495,6 +2495,62 @@
           "reason": "README单个文档已静态复核路径和证据口径，明确动态结果默认NOT_RUN且真实执行需另记证据；未执行测试、构建或压测。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:6013c990337ff9b9f7ccf7ac6a6cb6a314b399ea8d92c62e9b674a2c8dee248e",
+      "status": "reviewed",
+      "reason": "README独立复测入口已纠正为docs/verification/AI对话独立复测清单-2026-11-05.md，并补充当前对话第六至十一轮压测的A/B/C/D/E套件、27项接口、43个Redis场景、39个DELETE measure、真实Cluster/模型环境、证据目录和本轮Long/TTL/节流/purge/总量上限预期。历史结果与当前HEAD明确隔离，未把历史PASS写成当前通过。",
+      "reviewedAt": "2026-11-07T22:53:41+08:00",
+      "reviewer": "K3.1 Pro主会话按当前对话记录静态复核",
+      "specChanges": [
+        {
+          "change": "README将当前独立复测主文档改为docs/verification/AI对话独立复测清单-2026-11-05.md，并把研究目录两份文档仅列为设计蓝本。",
+          "reason": "当前对话实际创建和多次补充的是该独立复测清单，先前导航误把设计稿当成实际执行主文档。",
+          "impact": "修正文档导航，不改变测试、压测或生产行为。"
+        },
+        {
+          "change": "README补充近期压测套件、环境、证据路径及本轮Long字符串、24小时滑动TTL、60秒分布式节流、purge隔离和128/1024/4096硬上限预期。",
+          "reason": "使压测导航覆盖当前对话第六至十一轮的真实执行内容与本批新增规格，避免只登记旧压测面。",
+          "impact": "仅更新测试与压测说明；历史轮次不视为当前HEAD证据，当前代码仍需重新执行。"
+        }
+      ],
+      "files": [
+        {
+          "path": "README.md",
+          "status": "checked",
+          "reason": "独立清单、API脚本、Desktop浏览器、压测目录、多实例和workflow入口均已核对；近期A/B/C/D/E套件、证据目录与NOT_RUN边界明确，未将设计稿或历史PASS冒充当前执行结果。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批只修改README导航与压测说明，没有新增依赖、组件或构建配置。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java或通用代码变更，仅文档列示JSON/Long等测试预期，未改变实现。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "README未写入密钥、异常正文或敏感配置，只记录环境类型和证据目录，未修改日志实现。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只调整测试与压测文档导航，未修改用户界面、卡片、交互或文案。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "压测说明覆盖24小时滑动TTL、60秒Redis跨实例节流、purge guard、dataKey成功条件、Cluster同槽/多实例和128 run、1024枚举项、4096键硬上限，未把7天作为对话目标。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "压测场景明确SSE seqGaps、dupSeqs、丢帧、重复、乱序及旧数值/数字字符串兼容检查，未修改流式实现。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "按当前对话实际压测报告和独立复测文件复核，历史证据与当前HEAD隔离，所有新执行结果均保持NOT_RUN，未执行测试、构建或压测。"
+        }
+      }
     }
   ]
 }
