@@ -14,13 +14,12 @@ import org.springframework.ai.tool.definition.DefaultToolDefinition;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 import org.springframework.util.ClassUtils;
-
-import jakarta.annotation.PostConstruct;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -44,7 +43,7 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Component
-public class ToolRegistry {
+public class ToolRegistry implements SmartInitializingSingleton {
 
     @Autowired
     private ApplicationContext applicationContext;
@@ -87,16 +86,15 @@ public class ToolRegistry {
      */
     private static final String TOOL_START_EXPORT = AiToolNames.START_EXPORT;
 
-    @PostConstruct
+    @Override
+    public void afterSingletonsInstantiated() {
+        init();
+    }
+
     public void init() {
         List<String> failedToolBeans = new ArrayList<>();
         List<RuntimeException> failures = new ArrayList<>();
-        ConfigurableListableBeanFactory beanFactory =
-                (ConfigurableListableBeanFactory) applicationContext.getAutowireCapableBeanFactory();
         for (String beanName : applicationContext.getBeanDefinitionNames()) {
-            if (beanFactory.isCurrentlyInCreation(beanName) && !isDeclaredToolBean(beanName)) {
-                continue;
-            }
             Object bean;
             try {
                 bean = applicationContext.getBean(beanName);

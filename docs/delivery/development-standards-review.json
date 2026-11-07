@@ -3187,6 +3187,62 @@
           "reason": "agent-1048确认5行新增无夹带并PASS，IDEA Reformat已执行；mvn -Dmaven.test.skip=true package成功，测试执行与真实启动日志复核将在服务启动后单独记录。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:f95af9a0e90de8d4e0cae20fa7eabfb0d0025dc2b0162ffbb0eff9ac0d145ebf",
+      "status": "reviewed",
+      "reason": "ToolRegistry最终改为SmartInitializingSingleton.afterSingletonsInstantiated()调用public init()，在全部非懒加载单例完成后、WebServer Lifecycle和ApplicationRunner前完成全量工具扫描，关闭ContextRefreshedEvent方案中端口先开放的生命周期窗口。未保留创建中跳过，真实工具失败在端口开放前中止启动。agent-1048最终复审PASS，IDEA Reformat完成，mvn -Dmaven.test.skip=true package成功；真实启动注册37工具，日志无ERROR/WARN/异常堆栈，AI_AVAILABLE且JobWatchdog正常扫描。",
+      "reviewedAt": "2026-11-08T00:46:51+08:00",
+      "reviewer": "K3.1 Pro主会话最终暂存与运行日志复核，agent-1048独立静态复审PASS",
+      "specChanges": [
+        {
+          "change": "工具注册生命周期由@PostConstruct/ContextRefreshedEvent方案调整为SmartInitializingSingleton.afterSingletonsInstantiated()。",
+          "reason": "原@PostConstruct过早实例化导致循环依赖，ContextRefreshedEvent又晚于WebServer启动；必须在单例完成后且端口开放前完成注册。",
+          "impact": "工具扫描和失败启动发生在端口开放前，ApplicationRunner仍随后执行；公开API、工具清单、披露规则和业务协议不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java",
+          "status": "checked",
+          "reason": "实现SmartInitializingSingleton并仅在新回调中委托public init()，删除事件注解和创建中跳过；getBean、失败汇总、applyOverrides和披露断言不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultLimiter.java",
+          "status": "checked",
+          "reason": "注释同步为全部单例实例化完成后、Web服务启动前扫描，延迟注入及业务实现未改。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用Spring现有SmartInitializingSingleton生命周期扩展点，没有新增依赖、并行扫描框架或创建中过滤逻辑。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增接口实现与单一委托回调，保留public init()直接调用兼容，未改变集合、JSON、命名或方法复杂度。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "真实工具创建失败仍保留异常并中止启动且发生在端口开放前，未通过异常跳过、异步或日志采样掩盖问题。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只调整后端启动生命周期，没有用户界面、卡片、文案或交互变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "工具注册在WebServer启动前完成，ApplicationRunner随后执行，避免未注册窗口；37工具注册和披露一致性保持，API/SSE/Redis协议未改。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批没有UTF-8、SSE/JSON帧、代理对或字符截断实现变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "agent-1048确认原端口阻断关闭并PASS，最终两文件暂存diff检查通过；生产package成功，真实启动37工具注册、无ERROR/WARN/异常堆栈、AI_AVAILABLE及JobWatchdog扫描证据已核对，测试执行仍NOT_RUN。"
+        }
+      }
     }
   ]
 }
