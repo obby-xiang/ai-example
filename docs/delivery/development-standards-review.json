@@ -2704,6 +2704,62 @@
           "reason": "agent-1030独立复审PASS且主会话逐hunk核对当前暂存diff；39条执行状态全部NOT_RUN，测试、构建、HTTP/SSE/Redis/浏览器、真实模型与多实例验证均未执行。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:379c047afb54c040bdbc29e717811da3c2f4a5f427c257f2c905e83cec10aadc",
+      "status": "reviewed",
+      "reason": "将非测试代码编译通过明确为提交和推送前置门禁，并同步开发规范正文与AGENTS提交清单。规则要求实际编译命令覆盖本次修改、错误清零并记录命令/范围/结果，明确不执行测试不等于不编译，静态审查、其他模块结果和旧构建产物均不能替代。已逐hunk复核两个暂存文档，本批没有代码修改。",
+      "reviewedAt": "2026-11-07T23:41:52+08:00",
+      "reviewer": "K3.1 Pro主会话按用户明确规格逐hunk复核",
+      "specChanges": [
+        {
+          "change": "新增非测试代码编译门禁：修改相关代码必须实际编译通过，失败时禁止提交和推送，并禁止以静态审查或旧产物替代。",
+          "reason": "此前大范围整改只依赖静态审查且延后编译，导致语法和跨文件类型错误积累，需要从制度上强制每批代码具备编译证据。",
+          "impact": "后续所有非测试代码提交均须记录实际编译命令、覆盖范围和成功结果；测试是否执行仍按各自任务约束，不影响编译门禁。"
+        }
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "status": "checked",
+          "reason": "提交清单新增第4项实际编译要求，原门禁执行和pre-commit要求顺延为第5、6项，内容与开发规范一致。"
+        },
+        {
+          "path": "docs/delivery/development-standards.md",
+          "status": "checked",
+          "reason": "验证与独立审查章节新增编译命令覆盖、零错误、证据记录和旧产物禁令，原最终暂存审查及验证边界条款顺延且正文未改。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批只修改两份Markdown门禁说明，没有新增或升级依赖、组件和构建工具。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "本批没有Java或通用代码变更，未调整集合、JSON、Lombok、命名和import技术规范。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批未修改日志、异常、脱敏或错误响应规则，仅要求编译结果真实记录。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批只增加开发提交门禁，没有用户界面、卡片、交互或文案变化。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本批不修改API、SSE、Redis、TTL、模型并发或多实例规则与实现。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批没有UTF-8、SSE帧、JSON流式解析或字符截断变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "两份暂存文档已逐hunk核对，新增规则明确编译证据不得由静态审查或旧产物冒充；本批纯文档无需代码编译，当前生产修复的编译失败不得据此记为通过。"
+        }
+      }
     }
   ]
 }
