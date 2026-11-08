@@ -10181,7 +10181,7 @@ export const useAiStore = defineStore('ai', {
         }
         return
       }
-      if (outcome.ok || outcome.duplicate) {
+      if (outcome.ok || outcome.duplicate || outcome.accepted === true) {
         // G-B：提交成功 ⇒ 草稿镜像即清（草稿只是"未提交"的浏览器临时态）
         clearFormDraft(form.toolCallId)
         form.values = {}

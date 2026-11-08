@@ -4302,6 +4302,32 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解析或文本截断。"},
         "verification-review": {"status": "checked", "reason": "agent-1149确认规范化匹配及业务边界，spec/quality APPROVE；动态验证NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f51d4bcc466c83efd6aa13e98b60852207de8545faaed93e43090f2c115b4c09",
+      "status": "reviewed",
+      "reason": "复核submitGenerativeForm将accepted=true纳入正常提交成功判据，独立静态审查spec/quality均ACCEPT。",
+      "reviewedAt": "2026-11-09T03:59:25+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1151",
+      "specChanges": [
+        {
+          "change": "正常成功条件由ok/duplicate扩展为ok/duplicate/accepted===true。",
+          "reason": "重挂导致本地轮次变化时，POST已受理会返回accepted=true但ok=false，旧逻辑把活动表单退回filling，使后续表单长期排队。",
+          "impact": "仅确认后端受理并复用promoteNextForm，续跑和业务结局仍由真实结果帧裁决；失败/未受理路径不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "accepted只在POST成功后本地轮次变化时产生，活动表单按toolCallId守卫结算并补位，避免重复提交和旧表单误补。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有accepted契约、activeForm身份守卫和promoteNextForm，无新增状态或依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅TypeScript一行条件变化，无Java修改。"},
+        "logging-exception-safety": {"status": "checked", "reason": "accepted不代表续跑成功，真实失败/网络错误/未受理仍走原失败路径，不掩盖错误。"},
+        "toc-interaction": {"status": "checked", "reason": "已受理表单不再退回填写中，后续条件表可实时补位，用户无需靠刷新恢复。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "accepted仅在POST已受理后出现，submitted后正常入口不再重发，旧run/新run队列清理与toolCallId守卫保留。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解析或文本截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1151确认accepted语义、幂等和身份守卫均正确，spec/quality ACCEPT；最终前端构建28.52s成功，动态验证NOT_RUN。"}
+      }
     }
   ]
 }
