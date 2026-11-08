@@ -7023,15 +7023,32 @@ export const useAiStore = defineStore('ai', {
       awaitingInput = false,
       _onReplaySettled?: () => void
     ): Promise<void> {
+      const entrySessionEpoch = sessionEpoch
+      const entryRoundEpoch = roundEpoch
       // 问题2：同上 —— 首个 await 之前同步登记，stop 同 tick 才能停到这一轮。
       pendingAttachRunId = runId
       await getPageVisible()
-      // Task 4 引导门：续收是对话域 SSE（带身份头），无后端发号会话不建连。
-      if (this.sessionId === '' && (await this.ensureSession()) === '') {
+      if (entrySessionEpoch !== sessionEpoch || entryRoundEpoch !== roundEpoch) {
         if (pendingAttachRunId === runId) {
           pendingAttachRunId = null
         }
         return
+      }
+      // Task 4 引导门：续收是对话域 SSE（带身份头），无后端发号会话不建连。
+      if (this.sessionId === '') {
+        const sessionId = await this.ensureSession()
+        if (entrySessionEpoch !== sessionEpoch || entryRoundEpoch !== roundEpoch) {
+          if (pendingAttachRunId === runId) {
+            pendingAttachRunId = null
+          }
+          return
+        }
+        if (sessionId === '') {
+          if (pendingAttachRunId === runId) {
+            pendingAttachRunId = null
+          }
+          return
+        }
       }
       // 问题3/8：已停止的轮（内存停止态 / run 级墓碑）不得被续收复活 ——
       // 不并入、不清 stopped、不重新锁输入。
@@ -7800,6 +7817,8 @@ export const useAiStore = defineStore('ai', {
       runId?: string,
       options: { hostMessageId?: string; lastSeq?: number; awaitingInput?: boolean } = {}
     ): Promise<void> {
+      const entrySessionEpoch = sessionEpoch
+      const entryRoundEpoch = roundEpoch
       const explicit = typeof runId === 'string' && runId.trim() !== '' ? runId : null
       const targetRunId = explicit ?? this.activeRunId
       // 问题2：在首个 await 之前同步登记"正在接管的 run"—— 同一 tick 的 stop 才停得到它。
@@ -7807,12 +7826,27 @@ export const useAiStore = defineStore('ai', {
         pendingAttachRunId = targetRunId
       }
       await getPageVisible()
-      // Task 4 引导门：SSE 重挂带身份头与会话身份，没有后端发号的会话就不建连。
-      if (this.sessionId === '' && (await this.ensureSession()) === '') {
+      if (entrySessionEpoch !== sessionEpoch || entryRoundEpoch !== roundEpoch) {
         if (pendingAttachRunId === targetRunId) {
           pendingAttachRunId = null
         }
         return
+      }
+      // Task 4 引导门：SSE 重挂带身份头与会话身份，没有后端发号的会话就不建连。
+      if (this.sessionId === '') {
+        const sessionId = await this.ensureSession()
+        if (entrySessionEpoch !== sessionEpoch || entryRoundEpoch !== roundEpoch) {
+          if (pendingAttachRunId === targetRunId) {
+            pendingAttachRunId = null
+          }
+          return
+        }
+        if (sessionId === '') {
+          if (pendingAttachRunId === targetRunId) {
+            pendingAttachRunId = null
+          }
+          return
+        }
       }
       if (!targetRunId) {
         return // 没有可接管的轮：静默（不写任何技术提示）

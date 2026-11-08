@@ -4224,6 +4224,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "无seq非前缀文本在镜像内部按锚点保留，history权威冲突内容不插入，空字符串仅用于精确占位判断而非trim。"},
         "verification-review": {"status": "checked", "reason": "agent-1139五项及空标题回归均ADDRESSED并APPROVE；IDEA格式化成功，Maven BUILD SUCCESS，最终前端构建27.35s成功，动态验收NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:fa1ae3bede8e4c941761308cef369bfdde35001eda6d4969da7f666f9f2666f9",
+      "status": "reviewed",
+      "reason": "复核resumeSnapshotStream/reattachActive在建连前异步窗口的sessionEpoch+roundEpoch守卫，独立静态审查spec/quality均PASS。",
+      "reviewedAt": "2026-11-09T03:20:25+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1144",
+      "specChanges": [
+        {
+          "change": "两个续收连接入口在登记pendingAttachRunId前捕获双代次，在getPageVisible/ensureSession后及任何连接现场写入前复核。",
+          "reason": "resetSession后旧续体可能越代重写loading=true，导致新会话发送继续被禁用。",
+          "impact": "越代立即返回且仅清理本run登记；空会话/stopped/建连后守卫和自身roundEpoch递增顺序不变，动态验证NOT_RUN。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "两个入口双代次捕获和await后复核，reattachActive复核先于自身roundEpoch+=1，仅按本run清理pendingAttachRunId，未改send/composer。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有sessionEpoch/roundEpoch、currentAbort和single-flight守卫，无新增状态或依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅TypeScript两个建连入口，无Java修改，前端无单函数50行限制。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "本批不修改日志/异常协议，越代只返回而不伪造成功或错误。"},
+        "toc-interaction": {"status": "checked", "reason": "新会话不再被旧续收重新禁用发送，空会话和停止等原早退语义保留，无新增用户提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "旧续体不得越过session/round代次写loading/currentAbort/activeRunId/messages/streamDrives，pendingAttachRunId按run所有权清理。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解码、文本截断或parts解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1144确认两个await后及自身roundEpoch递增前均完成复核，spec/quality PASS；最终前端构建29.87s成功，动态验证NOT_RUN。"}
+      }
     }
   ]
 }
