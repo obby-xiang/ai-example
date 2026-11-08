@@ -1,6 +1,9 @@
 import {mkdir, writeFile} from 'node:fs/promises'
 import path from 'node:path'
 import {createHash, randomUUID} from 'node:crypto'
+import {execFile} from 'node:child_process'
+import {promisify} from 'node:util'
+import {fileURLToPath} from 'node:url'
 import {
     classifyCancelProbe,
     createLoadRunner,
@@ -35,7 +38,15 @@ const SSE_EOF_RETRY_ATTEMPTS = 8
 const SSE_EOF_RETRY_DELAY_MS = 200
 const CANCEL_STATUS_POLL_ATTEMPTS = 180
 const CANCEL_STATUS_POLL_INTERVAL_MS = 250
-const outDir = path.resolve(process.env.OUT_DIR ?? 'verification-results/ai-core-coverage')
+const outDirInput = process.env.OUT_DIR?.trim()
+if (!outDirInput) throw new Error('OUT_DIR is required and must be outside the repository')
+const outDir = path.resolve(outDirInput)
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const outDirRelative = path.relative(repoRoot, outDir)
+if (outDirRelative === '' || (!outDirRelative.startsWith(`..${path.sep}`) && outDirRelative !== '..')
+    || path.isAbsolute(outDirRelative)) {
+    throw new Error('OUT_DIR must be outside the repository')
+}
 function boundedId(value, maxLength) {
     return value.length <= maxLength
         ? value
@@ -43,6 +54,28 @@ function boundedId(value, maxLength) {
 }
 const runPrefix = boundedId(process.env.COVERAGE_PREFIX?.trim() || `core-${randomUUID()}`, 16)
 const apiLoadConfig = parseApiLoadConfig(process.env)
+const redisVerificationEnabled = process.env.EVAL_ENABLE_REDIS_VERIFY === 'true'
+const redisCli = process.env.REDIS_CLI?.trim() || process.env.MEMURAI_CLI?.trim() || 'redis-cli'
+const redisHost = process.env.REDIS_HOST?.trim() || '127.0.0.1'
+const redisPort = process.env.REDIS_PORT?.trim() || '6379'
+const redisDb = process.env.REDIS_DB?.trim() || '0'
+if (!/^\d+$/.test(redisPort) || !/^\d+$/.test(redisDb)) throw new Error('REDIS_PORT and REDIS_DB must be non-negative integers')
+const execFileAsync = promisify(execFile)
+const redisConnectionArgs = [
+    '--raw', '-h', redisHost, '-p', redisPort, '-n', redisDb,
+    ...(process.env.REDIS_CLUSTER === 'true' ? ['-c'] : []),
+    ...(process.env.REDIS_TLS === 'true' ? ['--tls'] : [])
+]
+const redisEvidence = {
+    status: 'NOT_RUN',
+    directlyVerifiedByCoreCoverage: false,
+    mode: 'READ_ONLY_REDIS_CLI',
+    preCleanup: {status: 'NOT_RUN', keys: {}, assertions: []},
+    postCleanup: {status: 'NOT_RUN', keys: {}, assertions: []},
+    note: redisVerificationEnabled
+        ? '等待本轮真实 redis-cli 定向只读与清理后复核；静态实现不构成直验。'
+        : 'EVAL_ENABLE_REDIS_VERIFY is not true: real Redis verification NOT_RUN; API coverage cannot become overall PASS.'
+}
 const createdTasks = new Set()
 const createdSessions = new Set()
 const loadCreatedSessions = new Set()
@@ -438,6 +471,540 @@ function dataArray(response) {
     return data
 }
 
+const TRANSCRIPT_FAILURE_CODES = new Set(['AI_TRANSCRIPT_INCOMPLETE', 'AI_TRANSCRIPT_WRITE_FAILED'])
+
+function assertHealthyTranscript(frame) {
+    assert(frame !== null && typeof frame === 'object' && !Array.isArray(frame), 'terminal/history entry must be an object')
+    assert(frame.transcriptDegraded !== true, 'transcriptDegraded=true is never a healthy terminal')
+    assert(frame.historyComplete !== false, 'historyComplete=false is never a healthy terminal')
+    const codes = [frame.code, frame.errorCode, frame.error?.code, frame.turnEnd?.code]
+        .filter((code) => typeof code === 'string')
+        .map((code) => code.toUpperCase())
+    const degradedCode = codes.find((code) => TRANSCRIPT_FAILURE_CODES.has(code))
+    assert(degradedCode === undefined, `transcript failure code is never healthy: ${degradedCode ?? 'unknown'}`)
+}
+
+function assertHealthyTerminal(frame, {runId = null, cancelled = false} = {}) {
+    assertHealthyTranscript(frame)
+    assert(frame.type === 'done', 'ordinary business/model error terminal remains FAIL; expected a healthy done frame')
+    if (runId !== null) assert(frame.runId === runId, 'terminal runId does not belong to the current run')
+    if (cancelled) assert(frame.cancelled === true, 'expected a cancelled done terminal')
+    else assert(frame.cancelled !== true, 'normal model scenario unexpectedly ended cancelled')
+    return cancelled ? 'healthy cancelled done; transcript complete' : 'healthy normal done; transcript complete'
+}
+
+function normalizeTranscriptMessages(messages) {
+    assert(Array.isArray(messages), 'history messages must be an array')
+    return messages.map((message) => {
+        assert(message !== null && typeof message === 'object' && !Array.isArray(message), 'history message must be an object')
+        const kind = String(message.kind ?? message.type ?? '').toLowerCase()
+        const toolResponses = Array.isArray(message.toolResponses)
+            ? message.toolResponses
+            : kind === 'tool' && typeof message.toolCallId === 'string'
+                ? [{id: message.toolCallId, name: message.name ?? null, responseData: message.result ?? ''}]
+                : []
+        return {
+            kind,
+            runId: message.runId ?? null,
+            text: message.text ?? '',
+            stopped: message.stopped === true,
+            outcome: message.outcome ?? null,
+            errorCode: message.errorCode ?? null,
+            errorMessage: message.errorMessage ?? null,
+            unconfirmed: message.unconfirmed === true,
+            toolCalls: Array.isArray(message.toolCalls)
+                ? message.toolCalls.map((call) => ({
+                    id: call?.id ?? null,
+                    type: call?.type ?? null,
+                    name: call?.name ?? null,
+                    arguments: call?.arguments ?? null
+                }))
+                : [],
+            toolCallStates: message.toolCallStates ?? {},
+            segments: Array.isArray(message.segments)
+                ? message.segments.filter((segment) => segment?.kind !== 'reasoning').map((segment) => ({
+                    kind: segment?.kind ?? null,
+                    text: segment?.text ?? null,
+                    toolCallId: segment?.toolCallId ?? null,
+                    seq: typeof segment?.seq === 'number' || typeof segment?.seq === 'string' ? String(segment.seq) : null
+                }))
+                : [],
+            toolResponses: toolResponses.map((response) => ({
+                id: response?.id ?? null,
+                name: response?.name ?? null,
+                responseData: response?.responseData ?? null,
+                createdTaskId: response?.createdTaskId ?? response?.data?.createdTaskId ?? null
+            }))
+        }
+    })
+}
+
+function stableValue(value) {
+    if (Array.isArray(value)) return value.map((item) => stableValue(item))
+    if (value !== null && typeof value === 'object') {
+        return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]))
+    }
+    return value
+}
+
+function transcriptFingerprint(entries) {
+    const comparable = entries.map((entry) => ({
+        ...entry,
+        toolResponses: entry.toolResponses.map((response) => ({
+            id: response.id,
+            name: response.name,
+            responseData: response.responseData
+        }))
+    }))
+    return createHash('sha256').update(JSON.stringify(stableValue(comparable))).digest('hex')
+}
+
+function visibleTextFromFrames(frames) {
+    let previousSeq = null
+    let text = ''
+    for (const frame of frames) {
+        if (typeof frame.seq === 'number' || typeof frame.seq === 'string') {
+            const seq = BigInt(frame.seq)
+            if (previousSeq !== null) assert(seq > previousSeq, 'combined SSE evidence sequence must strictly increase')
+            previousSeq = seq
+        }
+        if (frame.type !== 'delta' || frame.kind === 'reasoning') continue
+        assert(typeof frame.text === 'string', 'text delta must carry string text')
+        text += frame.text
+    }
+    return text
+}
+
+function assertCreateTaskResponse(response, expectedTaskId, source) {
+    assert(response !== null && response !== undefined, `${source}: create_task response is missing`)
+    let structuredId = response.createdTaskId
+    if (structuredId === null && typeof response.responseData === 'string' && response.responseData.trimStart().startsWith('{')) {
+        try {
+            const parsed = JSON.parse(response.responseData)
+            structuredId = parsed?.createdTaskId ?? parsed?.data?.createdTaskId ?? null
+        } catch {
+            structuredId = null
+        }
+    }
+    if (structuredId !== null && structuredId !== undefined) {
+        assert(normalizeTaskId(structuredId) === expectedTaskId,
+            `${source}: structured createdTaskId does not match the created task`)
+        return 'structured-createdTaskId'
+    }
+    assert(typeof response.responseData === 'string', `${source}: create_task response body is missing`)
+    const explicitIds = [...response.responseData.matchAll(/#([1-9]\d*)/g)]
+        .map((match) => normalizeTaskId(match[1]))
+    assert(explicitIds.includes(expectedTaskId), `${source}: create_task response lacks the exact #taskId boundary`)
+    return 'explicit-#taskId-boundary'
+}
+
+function assertMainTerminalHistory(messages, expectation, source = 'HTTP history') {
+    const entries = normalizeTranscriptMessages(messages)
+    assert(entries.length > 0, `${source}: history is empty`)
+    assert(entries.every((entry) => entry.runId === expectation.runId), `${source}: entry belongs to another or unknown run`)
+    for (const entry of entries) assertHealthyTranscript(entry)
+    const users = entries.filter((entry) => entry.kind === 'user')
+    assert(users.length === 1 && users[0].text === expectation.userMessage,
+        `${source}: expected exactly one original USER body`)
+    const assistants = entries.filter((entry) => entry.kind === 'assistant')
+    assert(assistants.length > 0, `${source}: same-run ASSISTANT is missing`)
+    const parts = []
+    for (const assistant of assistants) {
+        if (assistant.segments.length === 0) {
+            assert(assistant.toolCalls.length === 0, `${source}: assistant tool calls have no persisted parts`)
+            if (assistant.text !== '') parts.push({kind: 'text', text: assistant.text, toolCallId: null, seq: null})
+            continue
+        }
+        let previousSeq = null
+        for (const segment of assistant.segments) {
+            assert(segment.seq !== null && /^\d+$/.test(segment.seq), `${source}: part has no valid seq`)
+            const seq = BigInt(segment.seq)
+            if (previousSeq !== null) assert(seq >= previousSeq, `${source}: parts are out of order`)
+            previousSeq = seq
+            if (segment.kind === 'text') {
+                assert(typeof segment.text === 'string', `${source}: text part has no string body`)
+                parts.push({kind: 'text', text: segment.text, toolCallId: null, seq: segment.seq})
+            } else if (segment.kind === 'tool') {
+                assert(typeof segment.toolCallId === 'string' && segment.toolCallId.length > 0,
+                    `${source}: tool part has no stable toolCallId`)
+                parts.push({kind: 'tool', text: null, toolCallId: segment.toolCallId, seq: segment.seq})
+            } else {
+                throw new CoverageError(`${source}: unsupported persisted part kind`)
+            }
+        }
+    }
+    const toolParts = parts.filter((part) => part.kind === 'tool')
+    for (const assistant of assistants) {
+        for (const call of assistant.toolCalls) {
+            assert(typeof call.id === 'string' && toolParts.filter((part) => part.toolCallId === call.id).length === 1,
+                `${source}: assistant tool call must have exactly one ordered part`)
+        }
+    }
+    const createIndex = toolParts.findIndex((part) => part.toolCallId === expectation.createCallId)
+    const navigateIndex = toolParts.findIndex((part) => part.toolCallId === expectation.navigationCallId)
+    assert(createIndex >= 0 && navigateIndex > createIndex,
+        `${source}: create_task part must precede navigate_to part`)
+    const actualText = parts.filter((part) => part.kind === 'text').map((part) => part.text).join('')
+    assert(actualText === expectation.assistantText, `${source}: assistant正文与有序 SSE text deltas 不一致`)
+    const responses = entries.flatMap((entry) => entry.toolResponses)
+    const createResponse = responses.find((response) => response.id === expectation.createCallId)
+    const navigateResponse = responses.find((response) => response.id === expectation.navigationCallId)
+    const createTaskIdSource = assertCreateTaskResponse(createResponse, expectation.taskId, source)
+    assert(navigateResponse?.responseData === expectation.navigationResult,
+        `${source}: navigate_to final response body mismatch`)
+    const createState = assistants.map((assistant) => assistant.toolCallStates?.[expectation.createCallId])
+        .find((state) => state !== undefined)
+    const navigateState = assistants.map((assistant) => assistant.toolCallStates?.[expectation.navigationCallId])
+        .find((state) => state !== undefined)
+    assert(createState?.status === 'EXECUTED' && createState?.outcome === 'ok',
+        `${source}: create_task did not retain its executed/ok outcome`)
+    assert(navigateState?.status === 'FRONTEND_RESULT' && navigateState?.outcome === 'ok',
+        `${source}: navigate_to did not retain its frontend-result/ok outcome`)
+    assert(assistants.every((assistant) => assistant.outcome === 'CANCELLED' && !assistant.unconfirmed),
+        `${source}: final assistant outcome must be confirmed CANCELLED`)
+    assertHealthyTerminal(expectation.terminalFrame, {runId: expectation.runId, cancelled: true})
+    return {
+        entryCount: entries.length,
+        assistantCount: assistants.length,
+        partCount: parts.length,
+        textChars: actualText.length,
+        createTaskIdSource,
+        parts: parts.map((part) => ({
+            kind: part.kind,
+            toolCallId: part.toolCallId,
+            seq: part.seq,
+            textLength: part.text?.length ?? null
+        })),
+        fingerprint: transcriptFingerprint(entries)
+    }
+}
+
+async function redisCommand(...args) {
+    try {
+        const {stdout} = await execFileAsync(redisCli, [...redisConnectionArgs, ...args], {
+            timeout: timeoutMs,
+            maxBuffer: 4 * 1024 * 1024,
+            windowsHide: true
+        })
+        return stdout.replace(/\r?\n$/, '')
+    } catch (error) {
+        throw new CoverageError(`redis-cli ${args[0]} failed: ${errorDetail(error)}`)
+    }
+}
+
+function redisLines(output) {
+    return output === '' ? [] : output.split(/\r?\n/)
+}
+
+function parseRedisJson(raw, label) {
+    assert(typeof raw === 'string' && raw.length > 0, `${label}: Redis value is missing`)
+    try {
+        const value = JSON.parse(raw)
+        assert(value !== null && typeof value === 'object' && !Array.isArray(value), `${label}: expected JSON object`)
+        return value
+    } catch (error) {
+        if (error instanceof CoverageError) throw error
+        throw new CoverageError(`${label}: invalid JSON value`)
+    }
+}
+
+function redisKeysFor({sessionId, runId}) {
+    const runTag = `{${tenantId}:${userId}:run:${runId}}`
+    const escapedSession = sessionId.replaceAll('%', '%25').replaceAll('{', '%7B').replaceAll('}', '%7D')
+    const sessionTag = `{${escapedSession}}`
+    const identity = `${tenantId}:${userId}:`
+    const transcript = `ai:tx:${identity}${sessionTag}`
+    const memory = `chat:mem:${identity}${sessionTag}`
+    return {
+        run: `ai:run:${runTag}`,
+        runstate: `ai:runstate:${runTag}`,
+        pending: `ai:pending:${runTag}`,
+        claim: `ai:claim:${runTag}`,
+        ledger: `ai:ledger:${runTag}`,
+        idem: `ai:idem:${runTag}`,
+        seq: `ai:seq:${runTag}`,
+        xevents: `ai:xevents:${runTag}`,
+        lease: `ai:lease:run:${runTag}`,
+        fence: `ai:fence:run:${runTag}`,
+        req: `ai:req:${runTag}`,
+        decided: `ai:decided:${runTag}`,
+        leaseEpoch: `ai:lease:epoch:${runTag}`,
+        cancel: `ai:cancel:${runTag}`,
+        transcript,
+        transcriptOrder: `${transcript}:order`,
+        transcriptMeta: `${transcript}:meta`,
+        transcriptTruncated: `${transcript}:truncated`,
+        context: `ai:ctx:${identity}${sessionId}`,
+        contextLedger: `ai:ctx:ledger:${identity}${sessionId}`,
+        contextEvents: `ai:ctx:events:${identity}${sessionId}`,
+        memory,
+        memoryVersion: `${memory}:ver`,
+        memoryGeneration: `${memory}:gen`,
+        sessionRecord: `ai:session:${identity}${sessionId}`,
+        sessionCurrent: `ai:session:current:${identity}${sessionId}`,
+        sessionRuns: `ai:session:runs:${identity}${sessionId}`,
+        sessionActive: `ai:session:active:${identity}${sessionId}`,
+        runListIndex: `ai:runs:${tenantId}:${userId}`,
+        recoveryIndex: 'ai:recovery:due',
+        identityRecoveryIndex: `ai:recovery:due:${tenantId}:${userId}`,
+        purgeGuard: `ai:purge:guard:${identity}${sessionId}`,
+        purgePending: `ai:purge:pending:${identity}${sessionId}`,
+        purgeDue: 'ai:purge:retry:due'
+    }
+}
+
+async function readRedisKey(target, name, key, expectedType, required = true, maxTtlMs = 86400000) {
+    const type = (await redisCommand('TYPE', key)).trim()
+    const pttlMs = Number.parseInt(await redisCommand('PTTL', key), 10)
+    if (type === 'none') {
+        assert(!required, `${name}: required Redis key is absent`)
+        target[name] = {key, type, pttlMs, count: 0}
+        return target[name]
+    }
+    assert(type === expectedType, `${name}: expected Redis type ${expectedType}, got ${type}`)
+    assert(Number.isSafeInteger(pttlMs) && pttlMs > 0 && pttlMs <= maxTtlMs,
+        `${name}: TTL must be bounded in (0, ${maxTtlMs}] ms`)
+    const countCommand = {string: 'STRLEN', hash: 'HLEN', list: 'LLEN', stream: 'XLEN', zset: 'ZCARD', set: 'SCARD'}[type]
+    assert(countCommand !== undefined, `${name}: unsupported Redis type ${type}`)
+    const count = Number.parseInt(await redisCommand(countCommand, key), 10)
+    assert(Number.isSafeInteger(count) && count >= 0, `${name}: invalid Redis count`)
+    target[name] = {key, type, pttlMs, count}
+    return target[name]
+}
+
+function parseSingleStreamEntry(raw) {
+    const lines = redisLines(raw)
+    assert(lines.length === 5, 'terminal XRANGE evidence must contain exactly one id and seq/frame field pairs')
+    const fields = {}
+    for (let index = 1; index < lines.length; index += 2) fields[lines[index]] = lines[index + 1]
+    const frame = parseRedisJson(fields.frame, 'events terminal frame')
+    assert(fields.seq === String(frame.seq), 'events stream seq field and frame.seq differ')
+    assert(lines[0] === `${frame.seq}-0`, 'events stream id must be <seq>-0')
+    return {id: lines[0], frame}
+}
+
+async function verifyRedisPreCleanup(expectation) {
+    const keys = redisKeysFor(expectation)
+    const observed = {}
+    const specs = [
+        ['run', keys.run, 'string', true, 86400000],
+        ['runstate', keys.runstate, 'string', true, 86400000],
+        ['pending', keys.pending, 'hash', true, 86400000],
+        ['claim', keys.claim, 'hash', true, 86400000],
+        ['ledger', keys.ledger, 'list', true, 86400000],
+        ['idem', keys.idem, 'hash', true, 86400000],
+        ['seq', keys.seq, 'string', true, 86400000],
+        ['xevents', keys.xevents, 'stream', true, 86400000],
+        ['lease', keys.lease, 'string', false, 30000],
+        ['fence', keys.fence, 'string', true, 86400000],
+        ['req', keys.req, 'hash', true, 86400000],
+        ['decided', keys.decided, 'hash', true, 86400000],
+        ['leaseEpoch', keys.leaseEpoch, 'string', true, 86400000],
+        ['cancel', keys.cancel, 'string', true, 86400000],
+        ['transcript', keys.transcript, 'hash', true, 86400000],
+        ['transcriptOrder', keys.transcriptOrder, 'zset', true, 86400000],
+        ['transcriptMeta', keys.transcriptMeta, 'hash', true, 86400000],
+        ['transcriptTruncated', keys.transcriptTruncated, 'string', false, 86400000],
+        ['context', keys.context, 'hash', true, 86400000],
+        ['contextLedger', keys.contextLedger, 'list', false, 86400000],
+        ['contextEvents', keys.contextEvents, 'list', false, 86400000],
+        ['memory', keys.memory, 'list', true, 86400000],
+        ['memoryVersion', keys.memoryVersion, 'string', false, 86400000],
+        ['memoryGeneration', keys.memoryGeneration, 'string', false, 86400000],
+        ['sessionRecord', keys.sessionRecord, 'string', false, 86400000],
+        ['sessionCurrent', keys.sessionCurrent, 'string', false, 86400000],
+        ['sessionRuns', keys.sessionRuns, 'set', true, 86400000],
+        ['sessionActive', keys.sessionActive, 'zset', false, 86400000],
+        ['runListIndex', keys.runListIndex, 'zset', true, 86400000],
+        ['recoveryIndex', keys.recoveryIndex, 'zset', false, 86400000],
+        ['identityRecoveryIndex', keys.identityRecoveryIndex, 'zset', false, 86400000]
+    ]
+    for (const [name, key, type, required, maxTtl] of specs) {
+        await readRedisKey(observed, name, key, type, required, maxTtl)
+    }
+    assert(observed.sessionCurrent.type === 'none', 'terminal session current index must be absent')
+    assert(await redisCommand('SISMEMBER', keys.sessionRuns, expectation.runId) === '1',
+        'session runs index lacks current run')
+    assert((await redisCommand('ZSCORE', keys.sessionActive, expectation.runId)).trim() === '',
+        'terminal run remains in session active index')
+    assert((await redisCommand('ZSCORE', keys.runListIndex, expectation.runId)).trim() !== '',
+        'identity run list index lacks current run')
+    assert((await redisCommand('ZSCORE', keys.recoveryIndex, `${tenantId}/${userId}/${expectation.runId}`)).trim() === '',
+        'terminal run remains in global recovery index')
+    assert((await redisCommand('ZSCORE', keys.identityRecoveryIndex, expectation.runId)).trim() === '',
+        'terminal run remains in identity recovery index')
+
+    const snapshot = parseRedisJson(await redisCommand('GET', keys.run), 'run snapshot')
+    assert(snapshot.runId === expectation.runId && snapshot.sessionId === expectation.sessionId,
+        'Redis run snapshot ownership mismatch')
+    assert(String(snapshot.tenantId) === tenantId && String(snapshot.userId) === userId,
+        'Redis run snapshot identity mismatch')
+    assert(snapshot.status === 'CANCELLED', 'Redis run snapshot is not CANCELLED')
+    assert((await redisCommand('GET', keys.runstate)).trim() === 'CANCELLED', 'Redis runstate is not CANCELLED')
+    assert((await redisCommand('GET', keys.cancel)).trim() !== '', 'Redis cancel fact is missing')
+
+    const createPending = parseRedisJson(await redisCommand('HGET', keys.pending, expectation.createCallId), 'create_task pending')
+    const navigatePending = parseRedisJson(await redisCommand('HGET', keys.pending, expectation.navigationCallId), 'navigate_to pending')
+    assert(createPending.toolCallId === expectation.createCallId
+        && createPending.status === 'EXECUTED' && createPending.outcome === 'ok'
+        && normalizeTaskId(createPending.createdTaskId) === expectation.taskId,
+        'Redis create_task pending outcome/createdTaskId mismatch')
+    assert(navigatePending.toolCallId === expectation.navigationCallId
+        && navigatePending.status === 'FRONTEND_RESULT' && navigatePending.outcome === 'ok',
+        'Redis navigate_to pending outcome mismatch')
+    assert(observed.pending.count >= 2 && observed.pending.count <= 100, 'pending count is incomplete or exceeds bounded evidence')
+    assert(observed.ledger.count >= 1 && observed.ledger.count <= 100, 'ledger count is incomplete or exceeds bounded evidence')
+    const ledger = redisLines(await redisCommand('LRANGE', keys.ledger, '0', '99'))
+        .map((entry) => parseRedisJson(entry, 'ledger entry'))
+    assert(ledger.some((entry) => entry.toolCallId === expectation.createCallId
+        && entry.name === 'create_task' && entry.outcome === 'ok'), 'Redis ledger lacks executed create_task/ok entry')
+
+    assert(observed.transcript.count > 0 && observed.transcript.count <= 100,
+        'transcript count is empty or exceeds bounded evidence')
+    assert(observed.transcriptOrder.count === observed.transcript.count, 'transcript data/order counts differ')
+    const entryIds = redisLines(await redisCommand('ZRANGE', keys.transcriptOrder, '0', '99'))
+    assert(entryIds.length === observed.transcript.count, 'transcript order read is incomplete')
+    const rawEntries = redisLines(await redisCommand('HMGET', keys.transcript, ...entryIds))
+    assert(rawEntries.length === entryIds.length, 'transcript HMGET count mismatch')
+    const transcriptEntries = rawEntries.map((raw, index) => {
+        const entry = parseRedisJson(raw, `transcript ${entryIds[index]}`)
+        assert(entry.entryId === entryIds[index], 'transcript order entryId mismatch')
+        return entry
+    })
+    const redisHistory = assertMainTerminalHistory(transcriptEntries, expectation, 'Redis transcript')
+    const historyResponse = await request(`/api/ai/history/${encodeURIComponent(expectation.sessionId)}?latest=100`)
+    ok(historyResponse)
+    const historyData = dataObject(historyResponse)
+    assert(historyData.hasMore !== true, 'HTTP history comparison requires the complete bounded page')
+    const httpHistory = assertMainTerminalHistory(historyData.messages, expectation, 'HTTP history for Redis comparison')
+    assert(httpHistory.fingerprint === redisHistory.fingerprint, 'HTTP history and Redis transcript content/order differ')
+
+    const terminalEvent = parseSingleStreamEntry(await redisCommand('XREVRANGE', keys.xevents, '+', '-', 'COUNT', '1'))
+    assertHealthyTerminal(terminalEvent.frame, {runId: expectation.runId, cancelled: true})
+    assert(BigInt((await redisCommand('GET', keys.seq)).trim()) === BigInt(terminalEvent.frame.seq),
+        'Redis seq does not match the final event')
+    return {
+        keys: observed,
+        httpHistory,
+        redisHistory,
+        terminalEvent: {id: terminalEvent.id, seq: terminalEvent.frame.seq, type: terminalEvent.frame.type},
+        assertions: [
+            'run/session/identity ownership and CANCELLED post-state',
+            'transcript HTTP/Redis canonical content and ordered parts are identical',
+            'events terminal frame, pending outcomes, bounded ledger and context are directly read',
+            'all observed keys have expected types and bounded TTL; no KEYS/SCAN/write command used'
+        ]
+    }
+}
+
+async function verifyRedisPostCleanup(expectation) {
+    const keys = redisKeysFor(expectation)
+    const observed = {}
+    const absentSpecs = [
+        ['run', keys.run, 'string'], ['runstate', keys.runstate, 'string'], ['pending', keys.pending, 'hash'],
+        ['claim', keys.claim, 'hash'], ['ledger', keys.ledger, 'list'], ['idem', keys.idem, 'hash'],
+        ['seq', keys.seq, 'string'], ['xevents', keys.xevents, 'stream'], ['lease', keys.lease, 'string'],
+        ['fence', keys.fence, 'string'], ['req', keys.req, 'hash'], ['decided', keys.decided, 'hash'],
+        ['leaseEpoch', keys.leaseEpoch, 'string'], ['cancel', keys.cancel, 'string'],
+        ['transcript', keys.transcript, 'hash'], ['transcriptOrder', keys.transcriptOrder, 'zset'],
+        ['transcriptMeta', keys.transcriptMeta, 'hash'], ['transcriptTruncated', keys.transcriptTruncated, 'string'],
+        ['context', keys.context, 'hash'], ['contextLedger', keys.contextLedger, 'list'],
+        ['contextEvents', keys.contextEvents, 'list'], ['memory', keys.memory, 'list'],
+        ['sessionRecord', keys.sessionRecord, 'string'], ['sessionCurrent', keys.sessionCurrent, 'string']
+    ]
+    for (const [name, key, type] of absentSpecs) {
+        await readRedisKey(observed, name, key, type, false)
+        assert(observed[name].type === 'none', `${name}: session-owned key survived post-cleanup`)
+    }
+    for (const [name, key, type, maxTtl] of [
+        ['sessionRuns', keys.sessionRuns, 'set', 86400000],
+        ['sessionActive', keys.sessionActive, 'zset', 86400000],
+        ['runListIndex', keys.runListIndex, 'zset', 86400000],
+        ['recoveryIndex', keys.recoveryIndex, 'zset', 86400000],
+        ['identityRecoveryIndex', keys.identityRecoveryIndex, 'zset', 86400000],
+        ['memoryVersion', keys.memoryVersion, 'string', 86400000],
+        ['memoryGeneration', keys.memoryGeneration, 'string', 86400000],
+        ['purgeGuard', keys.purgeGuard, 'string', 86400000],
+        ['purgePending', keys.purgePending, 'string', 86400000],
+        ['purgeDue', keys.purgeDue, 'zset', 86400000]
+    ]) {
+        const required = ['purgeGuard', 'purgePending', 'purgeDue'].includes(name)
+        await readRedisKey(observed, name, key, type, required, maxTtl)
+    }
+    assert(await redisCommand('SISMEMBER', keys.sessionRuns, expectation.runId) === '0',
+        'post-cleanup session runs index still contains run')
+    assert((await redisCommand('ZSCORE', keys.sessionActive, expectation.runId)).trim() === '',
+        'post-cleanup session active index still contains run')
+    assert((await redisCommand('ZSCORE', keys.runListIndex, expectation.runId)).trim() === '',
+        'post-cleanup identity run list still contains run')
+    assert((await redisCommand('ZSCORE', keys.recoveryIndex, `${tenantId}/${userId}/${expectation.runId}`)).trim() === '',
+        'post-cleanup global recovery index still contains run')
+    assert((await redisCommand('ZSCORE', keys.identityRecoveryIndex, expectation.runId)).trim() === '',
+        'post-cleanup identity recovery index still contains run')
+    const purgePending = parseRedisJson(await redisCommand('GET', keys.purgePending), 'purge memory-verification pending')
+    assert(purgePending.sessionId === expectation.sessionId
+        && String(purgePending.tenantId) === tenantId && String(purgePending.userId) === userId,
+        'purge memory-verification pending identity mismatch')
+    const isEpochMs = (value) => (typeof value === 'number' && Number.isSafeInteger(value) && value > 0)
+        || (typeof value === 'string' && /^[1-9]\d*$/.test(value))
+    assert(isEpochMs(purgePending.verifyAtMs) && isEpochMs(purgePending.nextAtMs),
+        'purge memory verification requires positive verifyAtMs/nextAtMs')
+    assert(BigInt(purgePending.verifyAtMs) === BigInt(purgePending.nextAtMs),
+        'purge memory verification verifyAtMs must equal nextAtMs')
+    const dueScore = (await redisCommand('ZSCORE', keys.purgeDue, keys.purgePending)).trim()
+    assert(/^[1-9]\d*$/.test(dueScore) && BigInt(dueScore) === BigInt(purgePending.nextAtMs),
+        'purge retry due member/score must match pending key and nextAtMs')
+    return {
+        keys: observed,
+        purgeVerification: {
+            verifyAtMs: String(purgePending.verifyAtMs),
+            nextAtMs: String(purgePending.nextAtMs),
+            dueMember: keys.purgePending,
+            dueScore
+        },
+        assertions: [
+            'current run/transcript/events/pending/ledger/context/memory/session-owned keys are absent post-cleanup',
+            'shared indexes no longer reference the run; guard and memory-verification pending/due retain bounded TTL',
+            'memory verification verifyAtMs=nextAtMs and ai:purge:retry:due member/score are directly confirmed',
+            'post-cleanup evidence is directly read with the same read-only redis-cli boundary'
+        ]
+    }
+}
+
+async function runRedisPreCleanup(expectation) {
+    if (!redisVerificationEnabled) return
+    redisEvidence.status = 'RUNNING'
+    redisEvidence.preCleanup.status = 'RUNNING'
+    try {
+        const result = await verifyRedisPreCleanup(expectation)
+        redisEvidence.preCleanup = {status: 'PASS', ...result}
+        redisEvidence.note = '本轮 pre-cleanup 已直读；等待 post-cleanup 复核后才能声明核心脚本直验完成。'
+    } catch (error) {
+        redisEvidence.status = 'FAIL'
+        redisEvidence.preCleanup.status = 'FAIL'
+        redisEvidence.preCleanup.error = errorDetail(error)
+        throw error
+    }
+}
+
+async function runRedisPostCleanup(expectation) {
+    if (!redisVerificationEnabled || redisEvidence.preCleanup.status !== 'PASS') return
+    redisEvidence.postCleanup.status = 'RUNNING'
+    try {
+        const result = await verifyRedisPostCleanup(expectation)
+        redisEvidence.postCleanup = {status: 'PASS', ...result}
+        redisEvidence.status = 'PASS'
+        redisEvidence.note = '本轮真实 redis-cli 定向只读及 post-cleanup 均已执行；不代表 B 套件或 Cluster/多实例验收。'
+    } catch (error) {
+        redisEvidence.status = 'FAIL'
+        redisEvidence.postCleanup.status = 'FAIL'
+        redisEvidence.postCleanup.error = errorDetail(error)
+        console.error('Redis post-cleanup verification failed:', errorDetail(error))
+    } finally {
+        redisEvidence.directlyVerifiedByCoreCoverage = redisEvidence.status === 'PASS'
+    }
+}
+
 function parseSseBlock(block) {
     const data = block.split(/\r?\n/)
         .filter((line) => line.startsWith('data:'))
@@ -475,8 +1042,7 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
         }
         assert(data.cancelled === true, `SSE error cancel not accepted: HTTP ${response.status}`)
         const terminal = await readSseRaw(runId, lastSeq, (frame) => frame.type === 'done' || frame.type === 'error', false, scopeErrors)
-        assert(terminal.matched.type === 'done' && terminal.matched.cancelled === true,
-            'SSE error cancel accepted but no cancelled terminal frame')
+        assertHealthyTerminal(terminal.matched, {runId, cancelled: true})
         activeRuns.delete(runId)
         cleanupLog.push(`sse-error-cancel:${runId}=ok`)
         if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
@@ -604,8 +1170,7 @@ async function startChat(sessionId, message, context, predicate, awaitTerminal =
         if (!awaitTerminal) return chat
         const terminal = await callSse(chat.runId, chat.lastSeq, (frame) => {
             if (frame.type !== 'done' && frame.type !== 'error') return false
-            assert(frame.type === 'done' && frame.cancelled !== true,
-                `model scenario did not complete normally: ${frame.type}`)
+            assertHealthyTerminal(frame, {runId: chat.runId})
             return true
         }, true, scopeErrors, 'model-terminal')
         return {...chat, terminal: terminal.matched, terminalLatencyMs: terminal.latencyMs}
@@ -647,6 +1212,7 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
                 previousSeq = frame.seq
             }
             trackCreatedTaskFrame(frame)
+            if (frame.type === 'done' || frame.type === 'error') assertHealthyTerminal(frame, {runId})
             frames.push(frame)
             if (predicate(frame)) matched = frame
             recoverySeq = previousSeq
@@ -971,7 +1537,7 @@ async function runLoadScenario(runner, plan, unit, overrides = {}) {
     return entry
 }
 
-function buildLoadUnits({sessionId, runId}) {
+function buildLoadUnits({sessionId, runId, historyExpectation}) {
     const units = new Map()
 
     units.set('GET /api/ai/health', httpUnit('/api/ai/health', {}, (response) => {
@@ -1015,6 +1581,8 @@ function buildLoadUnits({sessionId, runId}) {
         ok(response)
         const data = dataObject(response)
         assert(data.exists === true && data.snapshot?.runId === runId, 'run detail missing for the shared terminal run')
+        assert(data.snapshot.sessionId === sessionId && data.snapshot.status === 'CANCELLED',
+            'shared terminal run ownership/final status mismatch')
     }))
     units.set('GET /api/ai/runs/current',
         httpUnit(`/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`, {}, (response) => {
@@ -1023,10 +1591,11 @@ function buildLoadUnits({sessionId, runId}) {
             assert(data.found === false, 'terminal cancel should clear the session current index')
         }))
     units.set('GET /api/ai/history/{sessionId}',
-        httpUnit(`/api/ai/history/${sessionId}?latest=20`, {}, (response) => {
+        httpUnit(`/api/ai/history/${sessionId}?latest=100`, {}, (response) => {
             ok(response)
             const data = dataObject(response)
-            assert(Array.isArray(data.messages) && data.messages.length > 0, 'history is empty for the shared session')
+            assert(data.sessionId === sessionId && data.hasMore !== true, 'terminal history must be one complete bounded page')
+            assertMainTerminalHistory(data.messages, historyExpectation, 'API load history')
         }))
     units.set('GET /api/ai/context/{sessionId}', httpUnit(`/api/ai/context/${sessionId}`, {}, (response) => {
         ok(response)
@@ -1064,8 +1633,7 @@ function buildLoadUnits({sessionId, runId}) {
         try {
             const result = await readSseRaw(runId, 0, (frame) => {
                 if (frame.type !== 'done' && frame.type !== 'error') return false
-                assert(frame.type === 'done' && frame.cancelled === true,
-                    `SSE replay terminal was not a cancelled done frame: ${frame.type}`)
+                assertHealthyTerminal(frame, {runId, cancelled: true})
                 return true
             }, false)
             return {status: 200, latencyMs: result.latencyMs}
@@ -1176,7 +1744,7 @@ function buildLoadUnits({sessionId, runId}) {
     return units
 }
 
-async function runApiLoadStage({sessionId, runId}) {
+async function runApiLoadStage({sessionId, runId, historyExpectation}) {
     if (!apiLoad.enabled) return
     apiLoad.ran = true
     apiLoad.status = 'RUNNING'
@@ -1185,7 +1753,7 @@ async function runApiLoadStage({sessionId, runId}) {
     loadBaselines.runs = new Set(activeRuns)
     const runner = createLoadRunner({concurrency: apiLoadConfig.concurrency})
     try {
-        const units = buildLoadUnits({sessionId, runId})
+        const units = buildLoadUnits({sessionId, runId, historyExpectation})
         for (const plan of API_LOAD_PLAN) {
             const entry = ensureLoadEntry(plan)
             const unit = units.get(plan.key)
@@ -1305,7 +1873,7 @@ async function attachmentWorkflow(options = {}) {
         }, recordCoverage)
         const terminal = await callSse(attachmentChat.runId, attachmentChat.lastSeq, (frame) => {
             if (frame.type !== 'done' && frame.type !== 'error') return false
-            assert(frame.type === 'done' && frame.cancelled !== true, 'attachment scenario did not complete normally')
+            assertHealthyTerminal(frame, {runId: attachmentChat.runId})
             return true
         }, recordCoverage, cleanupScopeErrors, 'attachment-terminal')
         if (recordCoverage) {
@@ -1366,6 +1934,7 @@ const cancelEvidence = {
     cancelFlag: null
 }
 let feedbackCreated = false
+let redisExpectation = null
 
 async function main() {
     await call('GET /api/ai/health', '/api/ai/health', {}, async (response) => {
@@ -1423,9 +1992,8 @@ async function main() {
     })
 
     createdSessions.add(mainSession)
-    const mainChat = await startChat(mainSession,
-        '请调用 create_task 工具创建导出任务，不要调用 ui_snapshot 或其他工具。',
-        null,
+    const mainUserMessage = '请调用 create_task 工具创建导出任务，不要调用 ui_snapshot 或其他工具。'
+    const mainChat = await startChat(mainSession, mainUserMessage, null,
         (frame) => frame.type === 'confirm_request' && frame.name === 'create_task')
     const mainRun = mainChat.runId
     const createCallId = mainChat.matched.toolCallId
@@ -1569,8 +2137,7 @@ async function main() {
         await waitForCancelStatus(mainRun, cancelEvidence)
         const terminal = await callSse(mainRun, navigationResponse.lastSeq, (frame) => {
             if (frame.type !== 'done' && frame.type !== 'error') return false
-            assert(frame.type === 'done' && frame.cancelled === true,
-                'cancel accepted but terminal frame was not confirmed cancelled')
+            assertHealthyTerminal(frame, {runId: mainRun, cancelled: true})
             return true
         }, true, coreCleanupErrors, 'after-cancel-terminal', false, false)
         cancelEvidence.terminalFrame = terminal.matched
@@ -1647,7 +2214,24 @@ async function main() {
 
     await runIndependentModelScenarios()
 
-    await runApiLoadStage({sessionId: mainSession, runId: mainRun})
+    redisExpectation = {
+        sessionId: mainSession,
+        runId: mainRun,
+        userMessage: mainUserMessage,
+        createCallId,
+        navigationCallId,
+        navigationResult,
+        taskId,
+        terminalFrame: cancelEvidence.terminalFrame,
+        assistantText: visibleTextFromFrames([
+            ...mainChat.frames,
+            ...confirmed.frames,
+            ...navigationResponse.frames,
+            ...cancelEvidence.terminalFrames
+        ])
+    }
+    await runApiLoadStage({sessionId: mainSession, runId: mainRun, historyExpectation: redisExpectation})
+    await runRedisPreCleanup(redisExpectation)
 }
 
 let fatalError = null
@@ -1710,6 +2294,7 @@ try {
                 `session cleanup incomplete: complete=${data.complete} deferred=${deferred.length} errors=${errors.length}`)
         }, loadCreatedSessions.has(sessionId) ? apiLoad.cleanupErrors : coreCleanupErrors)
     }
+    if (redisExpectation !== null) await runRedisPostCleanup(redisExpectation)
     const loadEntries = Object.values(apiLoad.endpoints)
     if (!apiLoad.enabled) {
         apiLoad.complete = null
@@ -1743,8 +2328,16 @@ try {
     }
     const missing = Object.values(coverage).filter((entry) => !entry.covered || entry.assertions.length === 0)
     const loadComplete = apiLoad.enabled ? apiLoad.complete === true : true
-    const complete = missing.length === 0 && cleanupErrors.length === 0 && fatalError === null
+    const httpComplete = missing.length === 0 && cleanupErrors.length === 0 && fatalError === null
         && modelFailure === null && loadComplete
+    const complete = httpComplete && redisEvidence.status === 'PASS'
+    const verificationVerdict = complete
+        ? 'PASS'
+        : !httpComplete || redisEvidence.status === 'FAIL' ? 'FAIL' : 'NOT_RUN'
+    const notRun = [
+        ...missing.map((entry) => `${entry.method} ${entry.path}`),
+        ...(redisEvidence.status === 'NOT_RUN' ? ['READ_ONLY Redis pre/post verification'] : [])
+    ]
     for (const entry of Object.values(coverage)) {
         entry.cleanup = {
             done: coreCleanupErrors.length === 0,
@@ -1768,11 +2361,14 @@ try {
             modelInFlight,
             slotsNotSafelyReleased: modelInFlight
         },
+        verificationVerdict,
+        statusScope: 'PUBLIC_API_SSE_REDIS_ONLY; business database and broader B-suite/Cluster/multi-instance verdicts remain separate',
         coverage: {
             complete,
+            httpComplete,
             expected: Object.keys(coverage).length,
             covered: Object.values(coverage).filter((entry) => entry.covered).length,
-            notRun: missing.map((entry) => `${entry.method} ${entry.path}`)
+            notRun
         },
         endpoints: coverage,
         load: apiLoad,
@@ -1782,16 +2378,22 @@ try {
         fatalError,
         cancelEvidence,
         redisVerification: {
-            directlyVerifiedByCoreCoverage: false,
-            owner: 'B 套件（scripts/perf/redis）',
-            note: 'core-coverage 仅保留 HTTP 业务断言、Run 状态和真实终帧，不直连 Redis，也不伪称自身完成 Redis 直验；以下键面与清理语义由 B 套件负责。',
+            ...redisEvidence,
+            owner: 'core-coverage 本轮定向只读；B 套件（scripts/perf/redis）继续负责其独立验收范围',
             scope: [
-                '13 个 run 键',
-                'session current/runs/active 索引',
+                '13 个 run 键及 cancel',
+                'session current/runs/active 与 run/recovery 索引',
                 'transcript/memory/context/guard/pending',
-                '跨身份不误删',
-                'post-cleanup 残留'
-            ]
+                'HTTP history 与 Redis transcript 同 run/parts/正文/顺序/结局对照',
+                'post-cleanup 残留与有界 TTL'
+            ],
+            notCovered: ['跨身份不误删', '真实 Redis Cluster', '多实例随机路由', 'B 套件全量场景']
+        },
+        businessDatabaseVerification: {
+            status: 'NOT_RUN',
+            directlyVerifiedByCoreCoverage: false,
+            reason: '本脚本没有可行的仓外业务数据库只读连接契约；公开任务/反馈 API 证据不冒充数据库直验。',
+            aiDataBoundary: '未新增数据库访问；AI 会话及运行数据未读取或写入任何数据库表，既有反馈仅走允许的用户反馈 API。'
         },
         deleteEvidenceDependencies: [
             'scripts/perf/redis/perf_redis/scenarios.py:226-233 (repeat_delete and concurrent_delete)',
@@ -1803,11 +2405,18 @@ try {
     await writeFile(path.join(outDir, 'coverage-results.json'), JSON.stringify(report, null, 2) + '\n')
     console.log(JSON.stringify({
         complete,
+        verificationVerdict,
         expected: report.coverage.expected,
         covered: report.coverage.covered,
         notRun: report.coverage.notRun,
         modelConcurrencyConfigured,
         maxObservedInFlight,
+        redis: {
+            status: redisEvidence.status,
+            directlyVerifiedByCoreCoverage: redisEvidence.directlyVerifiedByCoreCoverage,
+            preCleanup: redisEvidence.preCleanup.status,
+            postCleanup: redisEvidence.postCleanup.status
+        },
         load: {
             enabled: apiLoad.enabled,
             status: apiLoad.status,
