@@ -3830,6 +3830,37 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "未修改SSE/UTF-8解码或文本截断，移除的是重复标题呈现而非流式内容。"},
         "verification-review": {"status": "checked", "reason": "agent-1105恢复APPROVE、agent-1107多选及敏感分支APPROVE、agent-1108集成与英文状态APPROVE；最新node scripts/build.mjs实际打包PASS，真实C-127～C-129 NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:54e3882783843158de70d7b4e3d12c5733ab9a92c246d4f9f6a58ca1519ed330",
+      "status": "reviewed",
+      "reason": "逐hunk复核可见reasoning对账、终态transcript分类、DONE与历史降级、重试清理和中英文安全文案；独立关联审查APPROVE，提交门禁要求的证据路径占位替换已复查。",
+      "reviewedAt": "2026-11-08T19:21:42+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1110",
+      "specChanges": [
+        {
+          "change": "run DONE与transcript完整度分离，新增AI_TRANSCRIPT_INCOMPLETE与AI_TRANSCRIPT_WRITE_FAILED；typed error携带transcriptDegraded、historyComplete=false和runStatus=DONE。",
+          "reason": "隐藏reasoning被误要求展示帧导致最终assistant历史缺失，且内容对账失败被误包装成AI_REDIS_UNAVAILABLE/unconfirmed。",
+          "impact": "时间线失败、写入失败和真实Redis故障分类报告；取消与权威快照未知路径不变，不新增数据库表、Redis脚本或跨槽事务。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "工具批assistant仅展示开启时用存储reasoning对账，关闭传空串，entry与metadata不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "可见reasoning分离、三类终态结果、DONE+degraded typed error和turn_end=done一致，保留有界重试、普通路径兼容及既有清理。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/ErrorCodes.java", "status": "checked", "reason": "新增时间线不完整和历史写入失败两码，反射ALL自动覆盖，明确均非Redis专用。"},
+        {"path": "backend/src/main/resources/messages_en.properties", "status": "checked", "reason": "两个新码均说明对话完成但部分历史未保存，不含服务器或异常细节。"},
+        {"path": "backend/src/main/resources/messages_zh.properties", "status": "checked", "reason": "两个新码与SAFE_FAILURE_MESSAGES逐字一致，不再回退通用服务不可用。"},
+        {"path": "docs/superpowers/plans/2026-11-08-terminal-transcript-integrity-recovery.md", "status": "checked", "reason": "记录根因、错误分类、DONE降级协议、文件职责及真实验证边界。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有Emitter、TranscriptStore、ErrorCodes和MessageSource，无新增依赖、数据库表或Redis脚本。"},
+        "java-api-style": {"status": "checked", "reason": "TerminalTranscriptResult提供isSuccess，NonRetryable异常携带稳定错误码，普通路径返回语义与Map/集合处理不变。"},
+        "logging-exception-safety": {"status": "checked", "reason": "WARN保留Throwable最后参数，不记录推理正文；失败按真实域分类，不吞错、不将DONE与历史完整混报。"},
+        "toc-interaction": {"status": "checked", "reason": "用户得到对话完成但部分历史未保存的准确提示，不再被误导为AI服务不可用或生成失败。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "run DONE与transcript degraded分离，真实Redis故障耗尽才用AI_REDIS_UNAVAILABLE；fencing、purge guard、重试与清理保持。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "仅展示reasoning参与可见帧对账，存储原文、正文、toolCallId和严格时间线校验不变。"},
+        "verification-review": {"status": "checked", "reason": "agent-1110关联审查APPROVE；最新Maven实际编译355个主源文件BUILD SUCCESS，真实模型、Redis故障注入和最终history验收NOT_RUN。"}
+      }
     }
   ]
 }

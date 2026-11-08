@@ -103,6 +103,14 @@ public final class ErrorCodes {
      */
     public static final String AI_REDIS_UNAVAILABLE = "AI_REDIS_UNAVAILABLE";
     /**
+     * 对话已完成，但终态历史时间线构造失败；不是 Redis 专用错误码。
+     */
+    public static final String AI_TRANSCRIPT_INCOMPLETE = "AI_TRANSCRIPT_INCOMPLETE";
+    /**
+     * 对话已完成，但历史写入失败；用于写入拒绝或非 Redis 异常，不是 Redis 专用错误码。
+     */
+    public static final String AI_TRANSCRIPT_WRITE_FAILED = "AI_TRANSCRIPT_WRITE_FAILED";
+    /**
      * 200/健康面：AI 可用（不是错误码，但同一健康体用它表达"可用"）。
      */
     public static final String AI_AVAILABLE = "AI_AVAILABLE";

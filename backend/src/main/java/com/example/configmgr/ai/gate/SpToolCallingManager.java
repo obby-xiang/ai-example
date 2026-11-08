@@ -3994,8 +3994,9 @@ public class SpToolCallingManager implements ToolCallingManager {
                 states);
         try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
             SseChatEmitter out = this.registry.find(runId);
+            String visibleReasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
             return out == null ? entry : entry.withSegments(out.transcriptSegments(entry.entryId(), calls, entry.text(),
-                    entry.reasoning()));
+                    visibleReasoning));
         }
     }
 

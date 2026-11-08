@@ -2434,7 +2434,7 @@ public class ResilientChatService {
      *
      * <p>锁内重读快照与取消事实，再写历史/快照/终帧 —— 这样"判定 → 落库 → 出帧"对取消收尾是一个原子段。
      */
-    private record SuccessPersistence(RunSnapshot snapshot, List<Message> history, boolean unconfirmed) {
+    private record SuccessPersistence(RunSnapshot snapshot, List<Message> history, boolean terminalHandled) {
     }
 
     private SuccessPersistence persistSuccessSnapshot(String runId, String sessionId, Accumulator accumulator,
@@ -2494,11 +2494,23 @@ public class ResilientChatService {
             emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
             return new SuccessPersistence(null, history, true);
         }
-        if (!isRecordTerminalTranscript(runId, sessionId, history)) {
-            emitUnconfirmedTerminal(runId, sessionId, persisted, accumulator, attempts, out, turn, snapshot, history);
+        TerminalTranscriptResult transcriptResult = isRecordTerminalTranscript(runId, sessionId, history);
+        if (!transcriptResult.isSuccess()) {
+            emitTranscriptDegradedTerminal(runId, sessionId, accumulator, attempts, out, turn, persisted,
+                    transcriptResult.errorCode());
             return new SuccessPersistence(null, history, true);
         }
         return new SuccessPersistence(persisted, history, false);
+    }
+
+    private void emitTranscriptDegradedTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
+                                                SseChatEmitter out, TurnContext turn, RunSnapshot persisted, String errorCode) {
+        int partialChars = accumulator == null ? 0 : accumulator.text().length();
+        Map<String, Object> extra = Map.of("transcriptDegraded", true, "historyComplete", false,
+                "runStatus", RunSnapshot.DONE);
+        isEmitFailureTerminal(runId, out, errorCode, messageFor(errorCode), extra, partialChars);
+        emitTurnEnd(runId, sessionId, "done", errorCode, attempts, accumulator, turn, null);
+        clearTerminalRunState(runId, persisted);
     }
 
     private void finishSuccessGuarded(String runId, String sessionId, Accumulator accumulator, int attempts,
@@ -2544,7 +2556,7 @@ public class ResilientChatService {
         try {
             SuccessPersistence persistence = persistSuccessSnapshot(runId, sessionId, accumulator, attempts, watchdog, out, turn,
                     correctionPrefix, lengthTruncated, finalSegment, reasoning, text, snapshot);
-            if (persistence.unconfirmed()) {
+            if (persistence.terminalHandled()) {
                 return;
             }
             terminalSnapshot = persistence.snapshot();
@@ -2796,20 +2808,20 @@ public class ResilientChatService {
         return persisted;
     }
 
-    private boolean isRecordTerminalTranscript(String runId, String sessionId, List<Message> history) {
+    private TerminalTranscriptResult isRecordTerminalTranscript(String runId, String sessionId, List<Message> history) {
         for (int attempt = 0; attempt < 3; attempt++) {
             try {
                 if (isRecordTranscript(runId, sessionId, history, true, null, false, null, true)) {
-                    return true;
+                    return TerminalTranscriptResult.SUCCESS;
                 }
-                return false;
+                return new TerminalTranscriptResult(ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
             } catch (NonRetryableTranscriptException ex) {
-                return false;
+                return new TerminalTranscriptResult(ex.errorCode());
             } catch (RuntimeException ex) {
                 if (!isRetryableRedisFailure(ex)) {
                     if (LogSampling.canAcquire("resilient-chat-runtime-catch"))
                         log.warn("terminal transcript failed permanently runId={}", runId, ex);
-                    return false;
+                    return new TerminalTranscriptResult(ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
                 }
                 if (LogSampling.canAcquire("resilient-chat-runtime-catch"))
                     log.warn("terminal transcript attempt failed runId={} attempt={}", runId, attempt + 1, ex);
@@ -2818,7 +2830,15 @@ public class ResilientChatService {
                 break;
             }
         }
-        return false;
+        return new TerminalTranscriptResult(ErrorCodes.AI_REDIS_UNAVAILABLE);
+    }
+
+    private record TerminalTranscriptResult(String errorCode) {
+        private static final TerminalTranscriptResult SUCCESS = new TerminalTranscriptResult(null);
+
+        private boolean isSuccess() {
+            return errorCode == null;
+        }
     }
 
     private static boolean isRetryableRedisFailure(Throwable error) {
@@ -2834,6 +2854,15 @@ public class ResilientChatService {
     }
 
     private static final class NonRetryableTranscriptException extends RuntimeException {
+        private final String errorCode;
+
+        private NonRetryableTranscriptException(String errorCode) {
+            this.errorCode = errorCode;
+        }
+
+        private String errorCode() {
+            return errorCode;
+        }
     }
 
     private static boolean isPauseTerminalRetry(int attempt) {
@@ -3851,7 +3880,8 @@ public class ResilientChatService {
      * B2：把一轮终态历史写进 transcript（成功/取消/空回复/失败共用）。
      *
      * <p>工具原文优先取 {@code pendingsLenient(runId).getResultText()}（用户面原文），不取可能已被
-     * L1 清成占位符的 history；合成消息（压缩摘要/收尾指令）不写。写失败只 WARN，不影响本轮。
+     * L1 清成占位符的 history；合成消息（压缩摘要/收尾指令）不写。普通写点失败只 WARN；
+     * 成功终态由 {@link #isRecordTerminalTranscript} 返回实际错误码，并明确报告历史降级。
      */
     private boolean isRecordTranscript(String runId, String sessionId, List<Message> history) {
         return isRecordTranscript(runId, sessionId, history, true, null, false);
@@ -3925,8 +3955,9 @@ public class ResilientChatService {
             if (!"assistant".equals(entry.kind())) {
                 continue;
             }
+            String visibleReasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
             List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
-                    entry.text(), entry.reasoning());
+                    entry.text(), visibleReasoning);
             if (CollectionUtils.isEmpty(segments)) {
                 if (CollectionUtils.isNotEmpty(entry.toolCalls())) {
                     return null;
@@ -3980,29 +4011,29 @@ public class ResilientChatService {
                     snapshot.getTurnStartedAtMs(), userText));
         }
         if (entries.isEmpty()) {
-            return isNonRetryableTranscriptFailure(terminalAttempt);
+            return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
         }
         return this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(), entries,
-                snapshot.getRunEpoch()) || isNonRetryableTranscriptFailure(terminalAttempt);
+                snapshot.getRunEpoch()) || isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
     }
 
     private boolean isRecordTranscript(String runId, String sessionId, List<Message> history,
                                        boolean includeLastAssistant, String outcomeOverride, boolean unconfirmed, RunSnapshot snapshot,
                                        boolean terminalAttempt) {
         if (this.transcript == null || CollectionUtils.isEmpty(history)) {
-            return isNonRetryableTranscriptFailure(terminalAttempt);
+            return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
         }
         try {
             if (snapshot == null) {
                 snapshot = this.store.get(runId);
             }
             if (snapshot == null || !TenantKeyScope.hasIdentity(snapshot.getTenantId(), snapshot.getUserId())) {
-                return isNonRetryableTranscriptFailure(terminalAttempt);
+                return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
             }
             List<TranscriptEntry> entries = buildTerminalEntries(runId, snapshot, history, includeLastAssistant);
             entries = completeTimeline(runId, snapshot, entries, terminalAttempt);
             if (entries == null) {
-                return isNonRetryableTranscriptFailure(terminalAttempt);
+                return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_INCOMPLETE);
             }
             return appendTerminalEntries(runId, sessionId, snapshot, entries, outcomeOverride, unconfirmed, terminalAttempt);
         } catch (RuntimeException ex) {
@@ -4014,9 +4045,9 @@ public class ResilientChatService {
         }
     }
 
-    private static boolean isNonRetryableTranscriptFailure(boolean terminalAttempt) {
+    private static boolean isNonRetryableTranscriptFailure(boolean terminalAttempt, String errorCode) {
         if (terminalAttempt) {
-            throw new NonRetryableTranscriptException();
+            throw new NonRetryableTranscriptException(errorCode);
         }
         return false;
     }
@@ -5560,6 +5591,8 @@ public class ResilientChatService {
             Map.entry(ErrorCodes.CONTENT_FILTERED, "AI 内容被安全策略拦截，请调整提问后重试。"),
             Map.entry(ErrorCodes.AI_RUN_CANCELLED, "本轮已取消，可重新发送。"),
             Map.entry(ErrorCodes.AI_REDIS_UNAVAILABLE, "AI 服务暂不可用，请稍后重试。"),
+            Map.entry(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "对话已完成，但部分历史记录未能保存"),
+            Map.entry(ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED, "对话已完成，但部分历史记录未能保存"),
             Map.entry(ErrorCodes.EMPTY_REPLY, "本轮未返回内容，请重试。"),
             Map.entry(ErrorCodes.AI_RESUME_FAILED, "续跑失败，请重试。"),
             Map.entry(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
