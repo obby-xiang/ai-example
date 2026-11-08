@@ -3675,6 +3675,34 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "仅修改完整Java文本块和YAML Unicode文本，未改变SSE、UTF-8解码或帧解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1093首轮REQUEST_CHANGES后返修，限定复审APPROVE；实施者IDE build_project实际重建三个Java文件且isSuccess=true；真实模型和YAML启动覆盖NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:37940ed75b8f6f229cbddc6c2e9bfb58b358d8faae452959a65185e70c12c704",
+      "status": "reviewed",
+      "reason": "针对真实C-115失败逐hunk澄清item IMPORTED和任务COMPLETED不等于已发布，统一主提示、start_publish注解与YAML覆盖；独立关联审查APPROVE。",
+      "reviewedAt": "2026-11-08T16:26:43+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1093",
+      "specChanges": [
+        {
+          "change": "模型规则明确item IMPORTED或任务COMPLETED不证明已发布，只有已有成功PUBLISH作业才禁止重复发布。",
+          "reason": "真实复测中模型把暂存导入状态误当发布完成并拒绝合法start_publish，与JobService按成功PUBLISH判断IMPORT最终完成的语义不一致。",
+          "impact": "仅澄清三个发布提示位置；预检查、同类在途、CANCELLED、不可撤销HITL和权威publishMode约束保持。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "SYSTEM_PROMPT区分暂存导入和成功PUBLISH终态，保留EXPORT及PRECHECK既有规则。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "start_publish注解补入真实发布判据，同时保留预检查、无同类在途、DANGER和权威模式。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "实际start_publish覆盖说明与注解一致，版本升至2026-10-27.35并记录语义修复。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "只修改既有提示文本与YAML版本，没有新增或升级依赖。"},
+        "java-api-style": {"status": "checked", "reason": "未改变方法、集合或JSON结构；两个Java文件已IDEA Reformat并清除无关格式噪声，最终仅目标hunk。"},
+        "logging-exception-safety": {"status": "checked", "reason": "未新增日志、异常或敏感响应内容，发布工具说明不含服务器内部信息。"},
+        "toc-interaction": {"status": "checked", "reason": "避免向普通用户错误宣称已发布并中断合法流程，未增加提示或交互步骤。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "IMPORTED不再冒充PUBLISH终态，真实执行守卫、同类在途互斥和HITL不变，未触及Redis。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "修改完整Unicode提示文本，不涉及SSE帧、UTF-8解码或字符串截断。"},
+        "verification-review": {"status": "checked", "reason": "真实RED证据为_otir-r6-replace/rr1/result.json；agent-1093关联JobService、ImportJobRunner和ToolPreflightService后APPROVE；IDE实际编译isSuccess=true，真实修复后复测NOT_RUN。"}
+      }
     }
   ]
 }

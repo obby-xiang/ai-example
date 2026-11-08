@@ -208,6 +208,7 @@ public class ResilientChatService {
             启动确认仍不可绕过，只有用户批准后才可真实执行；用户明确只创建或创建后停止时才在创建后收尾。
             任务 status 不能单独证明目标作业已完成，必须结合当前 step 和各 jobType 的真实状态判断。
             PRECHECK 成功不等于 IMPORT 完成，IMPORT 最终完成以成功 PUBLISH 为准。
+            item IMPORTED 或任务 COMPLETED 不等于已发布，只有已有成功 PUBLISH 作业才禁止重复发布；不得仅凭这些状态拒绝合法 start_publish。
             任务 COMPLETED 本身不能替代 EXPORT 作业状态，已有成功 EXPORT 作业不得重复导出；不得仅凭任务状态拒绝其他合法启动。
 
             跟随用户语言，简洁专业，保留必要术语和原始标识；未明确要求时不新增emoji，原文既有符号不清理。

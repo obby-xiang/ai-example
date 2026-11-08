@@ -613,8 +613,9 @@ public class AiTools {
         return String.format("导入作业已启动（作业 #%d），进度由页面展示；发布前可预览暂存数据", job.getId());
     }
 
-    @Tool(name = AiToolNames.START_PUBLISH, description = "启动发布作业（需要用户确认，不可撤销）。前置：IMPORT 任务、最近一次预检查通过；"
-            + "发布模式由任务设置决定（MERGE/REPLACE），以确认卡上的权威值为准，不以对话文本为准。",
+    @Tool(name = AiToolNames.START_PUBLISH, description = "启动发布作业（需要用户确认，不可撤销）。前置：IMPORT 任务、最近一次预检查通过且无同类在途作业；"
+            + "item IMPORTED 或任务 COMPLETED 不等于已发布，只有已有成功 PUBLISH 作业才禁止重复发布，"
+            + "不得仅凭这些状态拒绝合法 start_publish；发布模式由任务设置决定（MERGE/REPLACE），以确认卡上的权威值为准，不以对话文本为准。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope(AiToolNames.SCOPE_IMPORT_PUBLISH)
     @ToolRisk(ToolMeta.RiskLevel.DANGER)

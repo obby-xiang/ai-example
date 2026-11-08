@@ -89,7 +89,8 @@
 # 2026-10-27.32 → 2026-10-27.33：撤销后续独立启动请求要求；创建、配置、启动确认在同一 run 连续推进，
 # HITL 仍在真实执行前逐次确认，只有用户明确只创建/创建后停止才允许创建后收尾。
 # 2026-10-27.33 → 2026-10-27.34：任务 COMPLETED 不单独作为重复导出判据；只有已有成功 EXPORT 作业才禁止重复导出。
-version: 2026-10-27.34
+# 2026-10-27.34 → 2026-10-27.35：item IMPORTED/任务 COMPLETED 不等于已发布；只有已有成功 PUBLISH 作业才禁止重复发布。
+version: 2026-10-27.35
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -164,8 +165,9 @@ tools:
   - toolKey: start_publish
     title: 启动发布作业
     description: >-
-      启动发布作业（需要用户确认，不可撤销）。前置：IMPORT 任务、最近一次预检查通过；发布模式由任务设置决定
-      （MERGE/REPLACE），以确认卡上的权威值为准，不以对话文本为准。
+      启动发布作业（需要用户确认，不可撤销）。前置：IMPORT 任务、最近一次预检查通过且无同类在途作业；
+      item IMPORTED 或任务 COMPLETED 不等于已发布，只有已有成功 PUBLISH 作业才禁止重复发布，
+      不得仅凭这些状态拒绝合法 start_publish；发布模式由任务设置决定（MERGE/REPLACE），以确认卡上的权威值为准，不以对话文本为准。
   - toolKey: open_export_file_editor
     title: 打开导出文件在线编辑器
     description: >-
