@@ -3646,6 +3646,35 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "长度前缀摘要避免拼接歧义，ui_snapshot与SSE/前端回灌形状不变。"},
         "verification-review": {"status": "checked", "reason": "agent-1091 ui_snapshot复审PASS、agent-1092影响计算与GLOBAL空键复审PASS；生产Maven compile BUILD SUCCESS、node --check通过；动态发布重跑待执行。"}
       }
+    },
+    {
+      "fingerprint": "sha256:e27a6b6a14bfc800c836ac285da56a3d19804b9d69e363a462770b0f3a201043",
+      "status": "reviewed",
+      "reason": "逐hunk复核任务状态与真实作业状态的模型提示，首轮独立审查发现EXPORT规则冲突后已统一主提示、动态规则、工具注解及YAML实际覆盖；限定范围复审APPROVE。",
+      "reviewedAt": "2026-11-08T16:05:31+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1093",
+      "specChanges": [
+        {
+          "change": "模型规则明确任务COMPLETED不能替代EXPORT作业状态，只有已有成功EXPORT作业才禁止重复导出；PRECHECK成功不等于IMPORT完成，IMPORT最终完成以成功PUBLISH为准。",
+          "reason": "原模型提示按任务状态一刀切，与JobService和TaskService权威执行语义冲突，导致PRECHECK后合法start_import被误拒。",
+          "impact": "仅统一四处模型提示和工具说明；CANCELLED任务仍禁止启动，成功EXPORT仍禁止重复，HITL、状态机和执行守卫不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java", "status": "checked", "reason": "start_export动态规则改为按成功EXPORT作业判断，保留确认、页面进度和下载授权边界。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "SYSTEM_PROMPT结合step和jobType判断完成，明确PRECHECK、PUBLISH与EXPORT各自语义，无任务或用例特判。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "start_export注解与权威守卫一致，CANCELLED恒拒且DANGER确认风险不变。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "实际覆盖描述与Java注解一致，版本升至2026-10-27.34并记录语义变化。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "四处仅修改既有Java文本块、注解和YAML说明，未新增或升级依赖。"},
+        "java-api-style": {"status": "checked", "reason": "未改变方法签名、集合、JSON或异常分支；三个Java文件由实施者执行IDEA Reformat并恢复格式噪声，最终diff仅目标文本。"},
+        "logging-exception-safety": {"status": "checked", "reason": "未新增日志或异常消息，模型说明不包含密钥、服务器信息或原始异常。"},
+        "toc-interaction": {"status": "checked", "reason": "避免模型向用户误拒合法启动或重复导出，未增加新提示、按钮或技术交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "任务status不再冒充jobType终态，真实执行守卫、HITL和取消语义不变；未触及Redis或并发结构。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "仅修改完整Java文本块和YAML Unicode文本，未改变SSE、UTF-8解码或帧解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1093首轮REQUEST_CHANGES后返修，限定复审APPROVE；实施者IDE build_project实际重建三个Java文件且isSuccess=true；真实模型和YAML启动覆盖NOT_RUN。"}
+      }
     }
   ]
 }

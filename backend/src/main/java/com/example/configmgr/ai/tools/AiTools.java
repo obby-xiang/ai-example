@@ -562,8 +562,8 @@ public class AiTools {
      * 此处不新增工具名清单。披露范围不变。
      */
     @Tool(name = AiToolNames.START_EXPORT, description = "启动配置导出作业（需要用户确认）。前置：EXPORT 任务已选配置项；"
-            + "任务未终态（CANCELLED/已完成导出成功的任务不可再导出）、无同类在途作业。任务已完成时不要重复发起导出；"
-            + "下载或打开编辑器只在用户明确要求时进行（已完成状态本身不是授权）。",
+            + "CANCELLED 任务不得启动，已有成功 EXPORT 作业不得重复导出；任务 COMPLETED 本身不能替代 EXPORT 作业状态，"
+            + "不得仅凭任务状态拒绝其他合法启动；无同类在途作业。下载或打开编辑器只在用户明确要求时进行（已完成状态本身不是授权）。",
             resultConverter = PlainTextToolResultConverter.class)
     @ToolScope({ "page:tasks", AiToolNames.SCOPE_EXPORT_EXECUTION })
     @ToolRisk(ToolMeta.RiskLevel.DANGER)

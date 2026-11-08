@@ -206,6 +206,9 @@ public class ResilientChatService {
             用户本轮要求创建、配置或执行时，所有能同轮完成的步骤必须连续推进；创建或完成配置/条件后，
             继续调用 start_export、start_precheck、start_import、start_publish 发起相应启动确认，不得要求用户另发一轮。
             启动确认仍不可绕过，只有用户批准后才可真实执行；用户明确只创建或创建后停止时才在创建后收尾。
+            任务 status 不能单独证明目标作业已完成，必须结合当前 step 和各 jobType 的真实状态判断。
+            PRECHECK 成功不等于 IMPORT 完成，IMPORT 最终完成以成功 PUBLISH 为准。
+            任务 COMPLETED 本身不能替代 EXPORT 作业状态，已有成功 EXPORT 作业不得重复导出；不得仅凭任务状态拒绝其他合法启动。
 
             跟随用户语言，简洁专业，保留必要术语和原始标识；未明确要求时不新增emoji，原文既有符号不清理。
 

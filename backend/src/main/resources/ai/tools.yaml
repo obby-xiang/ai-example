@@ -88,7 +88,8 @@
 # 只有用户后续单独明确要求开始/启动/执行，才可调用 start_export/start_precheck/start_import/start_publish。
 # 2026-10-27.32 → 2026-10-27.33：撤销后续独立启动请求要求；创建、配置、启动确认在同一 run 连续推进，
 # HITL 仍在真实执行前逐次确认，只有用户明确只创建/创建后停止才允许创建后收尾。
-version: 2026-10-27.33
+# 2026-10-27.33 → 2026-10-27.34：任务 COMPLETED 不单独作为重复导出判据；只有已有成功 EXPORT 作业才禁止重复导出。
+version: 2026-10-27.34
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -149,9 +150,9 @@ tools:
   - toolKey: start_export
     title: 启动导出作业
     description: >-
-      启动配置导出作业（需要用户确认）。前置：EXPORT 任务已选配置项；任务未终态（CANCELLED/已完成导出成功
-      的任务不可再导出）、无同类在途作业。任务已完成时不要重复发起导出；下载或打开编辑器只在用户明确
-      要求时进行（已完成状态本身不是授权）。
+      启动配置导出作业（需要用户确认）。前置：EXPORT 任务已选配置项；CANCELLED 任务不得启动，
+      已有成功 EXPORT 作业不得重复导出；任务 COMPLETED 本身不能替代 EXPORT 作业状态，
+      不得仅凭任务状态拒绝其他合法启动；无同类在途作业。下载或打开编辑器只在用户明确要求时进行（已完成状态本身不是授权）。
   - toolKey: start_precheck
     title: 启动预检查作业
     description: >-
