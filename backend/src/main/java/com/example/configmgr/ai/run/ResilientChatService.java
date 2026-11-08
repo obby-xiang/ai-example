@@ -3950,6 +3950,7 @@ public class ResilientChatService {
 
     private boolean appendTerminalEntries(String runId, String sessionId, RunSnapshot snapshot,
                                           List<TranscriptEntry> entries, String outcomeOverride, boolean unconfirmed, boolean terminalAttempt) {
+        entries = new ArrayList<>(entries);
         String outcome = ObjectUtils.getIfNull(outcomeOverride, snapshot::getStatus);
         for (int i = 0; i < entries.size(); i++) {
             TranscriptEntry entry = entries.get(i);

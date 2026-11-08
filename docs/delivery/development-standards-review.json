@@ -3381,6 +3381,27 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "流式游标继续使用lastSeq严格递增，空part和非文本有守卫；未改变UTF-8、代理对或字素簇处理。"},
         "verification-review": {"status": "checked", "reason": "生产maven.test.skip package成功；独立复审首轮FAIL三项返修后由原复审者确认PASS；DeepSeek首轮定向3/3及复审返修定向4/4通过，核心单次25 PASS/1 FAIL/1 NOT_RUN且cleanupErrors=0；启动日志的park控制流ERROR、主动断流WARN和lease-less设计WARN已分类备案，多实例、Cluster、C-33及API负载NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:60f468fa0a5d9de28ff7dedcda8fa0e7c3a8617dcd409fdce613c4f651a5299d",
+      "status": "reviewed",
+      "reason": "逐项复核提前取消时终态历史写入的集合所有权修复及证据账本；独立静态审查确认空/非空投影、顺序和append语义不变，DeepSeek命中首个delta后取消的原缺陷路径。",
+      "reviewedAt": "2026-11-08T09:19:41+08:00",
+      "reviewer": "K3.1 Pro主会话及独立静态复审agent-1076",
+      "specChanges": [],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "appendTerminalEntries入口创建ArrayList自有可变副本，assistant替换和用户add(0)不再修改不可变投影，历史顺序和append参数不变。"},
+        {"path": "docs/verification/本轮整改变更账本-2026-11-08.md", "status": "checked", "reason": "新增V-CT真实证据并同步该生产文件目的；r1路径不同未冒充通过，核心25/27及多实例等NOT_RUN边界保持。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用JDK ArrayList防御复制，未新增依赖或手写集合框架。"},
+        "java-api-style": {"status": "checked", "reason": "外部来源列表不默认可修改，空List.of与非空投影均转为自有副本，IDEA Reformat和尾随空格清理后逐hunk核对。"},
+        "logging-exception-safety": {"status": "checked", "reason": "消除UnsupportedOperationException根因，未通过忽略异常、提前返回或日志采样掩盖历史写失败。"},
+        "toc-interaction": {"status": "checked", "reason": "取消后用户原文与部分回复可正常查看，无新增提示或交互变化。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "CANCELLED终态、done(cancelled=true)、runEpoch和transcript追加语义保持，未改变数据库白名单或Redis数据边界。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "首个正文delta后取消仍保留实际部分正文，不改变UTF-8、帧序或字符处理。"},
+        "verification-review": {"status": "checked", "reason": "生产compile/package成功；DeepSeek r2命中首个delta立即取消，CANCELLED、取消终帧、用户及部分历史均通过，UOE与transcript terminal write failed均为0；r1不同路径单独保留，不外推全量通过。"}
+      }
     }
   ]
 }
