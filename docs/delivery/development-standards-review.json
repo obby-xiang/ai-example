@@ -3729,6 +3729,40 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改消息文本、流式解码、Unicode截断或帧解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1095两项finding均ADDRESSED并APPROVE；node scripts/build.mjs实际打包3282模块PASS；标准pnpm build/vue-tsc被未修改frontend/tests既有类型错误阻断，普通测试和真实浏览器NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:689007d86c940348b9761fc02fb8cbd97c6980d49747d22ddb06ff70d709d2a1",
+      "status": "reviewed",
+      "reason": "逐hunk复核OpenAI兼容模型服务通用规范及交互卡选择、表头、状态、动态内容治理文档，测试断言已覆盖新增C-127～C-129并消除恢复场景冲突。",
+      "reviewedAt": "2026-11-08T17:36:50+08:00",
+      "reviewer": "K3.1 Pro主会话、独立文档审查agent-1100",
+      "specChanges": [
+        {
+          "change": "新增6.12 OpenAI兼容模型服务通用性规范，禁止供应商硬编码和专有扩展字段无条件注入。",
+          "reason": "模型服务可配置为任何OpenAI协议实现，当前DeepSeek不能成为产品协议或特殊分支依据。",
+          "impact": "后续模型请求响应遵循官方标准，供应商扩展只能通过中立显式能力配置，真实不兼容不得被吞错或伪造成功。"
+        },
+        {
+          "change": "交互卡等待用户统一待操作，卡头默认取消副标题，交互卡终态与后续执行隔离，长多选增加通用三态全选。",
+          "reason": "现有卡头信息过载、决策与执行状态混合、多选效率低且动态内容恢复不完整。",
+          "impact": "仅新增呈现与验收规格；HITL安全门、业务状态机、API/SSE/Redis契约不变，新增C-127～C-129。"
+        }
+      ],
+      "files": [
+        {"path": "docs/delivery/development-standards.md", "status": "checked", "reason": "6.12明确OpenAI官方协议、供应商中立扩展、错误可观测和证据边界，reasoning_content不冒充标准字段。"},
+        {"path": "docs/research/prompt-tool-toc-copy-remediation/03-decisions.md", "status": "checked", "reason": "追加交互卡最新supersede决策，保持历史D13可追溯并链接完整分析和测试。"},
+        {"path": "docs/research/分析-AI交互卡选择表头状态与内容治理-2026-11-08.md", "status": "checked", "reason": "完整记录多选、短卡头、无副标题、静态交互状态、业务快照、恢复及施工边界。"},
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "新增C-127～C-129并同步C-15/C-42/C-63和C-115～C-126，所有在途断言与待操作口径一致。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "本批仅规范、研究和测试文档，没有新增或升级依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批无Java或前端生产代码变化，仅文档规定后续审查要求。"},
+        "logging-exception-safety": {"status": "checked", "reason": "新规范要求模型不兼容和真实执行失败保持可观测，禁止吞错、伪造成功及敏感异常直出。"},
+        "toc-interaction": {"status": "checked", "reason": "统一待操作、取消低价值副标题、静态用户决定、卡体业务快照及通用多选均形成明确测试口径。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "模型协议必须遵循OpenAI标准，供应商扩展显式配置，确认门和业务状态机不变，未修改实际Redis行为。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "模型流式响应按官方协议和真实帧处理，禁止因专有扩展破坏通用消息、工具调用或后续表单帧。"},
+        "verification-review": {"status": "checked", "reason": "agent-1100首轮发现C-42/C-63冲突，修正后复审APPROVE；git diff --check通过，生产实现和动态验收均NOT_RUN。"}
+      }
     }
   ]
 }
