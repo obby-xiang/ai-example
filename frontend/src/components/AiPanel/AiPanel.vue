@@ -2232,10 +2232,9 @@ const liveForm = computed(() => {
 })
 
 /**
- * T2a-D#3：FormRenderer 的宿主消息 —— 最后一条持该 toolCallId 且**仍在途**的挂起投影的消息。
+ * T2a-D#3：FormRenderer 的宿主消息 —— 最后一条持该 toolCallId 且**仍在途**的待操作工具段的消息。
  * 同一 toolCallId 的挂起可能残留在多条消息上（历史/重挂形态），但表单只渲染一份。
- * T2a 返修（S5）：宿主候选限定 pending/running/approved —— 终态残留消息
- * （cancelled/succeeded/blocked/expired）不作宿主，防表单挂到已决消息上。
+ * 宿主候选限定 requiresAction 且 pending/running —— 终态残留消息不作宿主，防表单挂到已决消息上。
  */
 const formHostMessageId = computed(() => {
   const toolCallId = liveForm.value?.toolCallId
@@ -2243,10 +2242,12 @@ const formHostMessageId = computed(() => {
     return null
   }
   for (let i = ai.messages.length - 1; i >= 0; i -= 1) {
-    const pending = ai.messages[i]?.pendingCall
-    if (pending?.toolCallId === toolCallId
-      && (pending.status === 'pending' || pending.status === 'running' || pending.status === 'approved')) {
-      return ai.messages[i].id
+    const message = ai.messages[i]
+    if (message?.parts.some((part) => part.kind === 'tool'
+      && part.toolCallId === toolCallId
+      && part.requiresAction
+      && (part.status === 'pending' || part.status === 'running'))) {
+      return message.id
     }
   }
   return null
