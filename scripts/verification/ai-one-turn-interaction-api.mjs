@@ -1154,6 +1154,20 @@ async function handleGenerativeForm(context, frame, runId) {
   await submitFrontendResult(context, runId, frame.toolCallId, JSON.stringify(values))
 }
 
+async function handleUiSnapshot(context, frame, runId) {
+  const args = parseArgs(frame.args)
+  const snapshot = {
+    kind: 'api-headless-workspace',
+    workspace: context.workspace.context(),
+    conditionDrafts: context.workspace.conditionDrafts,
+    conditionFeedback: context.workspace.conditionFeedback,
+    domSnapshot: false,
+    note: 'Only the real API-headless workspace is returned; no DOM controls, refs, epochs or write actions are claimed'
+  }
+  await context.evidence.writeJson(`ui-snapshot-${frame.toolCallId}.json`, { args, snapshot })
+  await submitFrontendResult(context, runId, frame.toolCallId, JSON.stringify(snapshot))
+}
+
 async function handleDownloadTool(context, frame, runId) {
   const args = parseArgs(frame.args)
   const taskId = idOf(args.taskId ?? context.targetTaskId)
@@ -1184,6 +1198,7 @@ async function handleFrontend(context, frame, runId) {
     set_condition: handleSetCondition,
     confirm_step: handleConfirmStep,
     generative_form: handleGenerativeForm,
+    ui_snapshot: handleUiSnapshot,
     download_export_files: handleDownloadTool
   }
   const handler = handlers[frame.name]

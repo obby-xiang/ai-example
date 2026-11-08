@@ -3619,6 +3619,33 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "SSE/UTF-8及序列不变，独立脚本语法检查通过，未改变帧处理。"},
         "verification-review": {"status": "checked", "reason": "agent-1089后端复审PASS、agent-1091缺省step复审PASS，生产Maven compile BUILD SUCCESS、node --check通过；动态重跑仍待执行。"}
       }
+    },
+    {
+      "fingerprint": "sha256:0b1b46f72a37a8bfa9c9737e55fe3cee1abb57709935d9c45a2bdf7019338700",
+      "status": "reviewed",
+      "reason": "复核REPLACE发布影响计算与ui_snapshot只读回灌，删除计数采用分页及并发保护，protected版本事实纳入批准指纹，GLOBAL null可正常分组；独立复审全部PASS，生产编译与脚本语法检查通过。",
+      "reviewedAt": "2026-11-08T15:33:09+08:00",
+      "reviewer": "K3.1 Pro主会话、独立复审agent-1091/1092",
+      "specChanges": [
+        {
+          "change": "REPLACE发布影响提示分别展示写入/替换暂存行和范围内删除既有行，protected并发版本事实进入批准指纹。",
+          "reason": "原文案只统计暂存行，低估范围内替换风险，且未复现导入后修改保护。",
+          "impact": "MERGE不变；REPLACE按scope分页计算删除，updatedAt/version变化使旧批准失效，计数异常不低估，GLOBAL null正常处理。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolPreflightService.java", "status": "checked", "reason": "REPLACE按scope分页500计算删除并复现importedAt保护，protected字段以长度前缀SHA-256纳入reportHash，LinkedHashMap支持GLOBAL null，MERGE及异常不低估不变。"},
+        {"path": "scripts/verification/ai-one-turn-interaction-api.mjs", "status": "checked", "reason": "ui_snapshot使用真实workspace/context和条件草案，标记api-headless/domSnapshot=false，无业务写入，允许后续HITL，未知工具仍失败。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有findRowsInScopePaged、deleteRowsOutOfRange语义、SHA-256和真实workspace，无新增依赖或破坏性预检调用。"},
+        "java-api-style": {"status": "checked", "reason": "空键集合、分页终止、方法规模、不可变语义和异常分支逐项核对，无大参数NOT IN或全表读取。"},
+        "logging-exception-safety": {"status": "checked", "reason": "计数失败明确暂不可估，protected事实可审计，未用低估提示、异常忽略或日志采样掩盖风险。"},
+        "toc-interaction": {"status": "checked", "reason": "REPLACE危险提示明确写入与删除范围，未增加技术术语或误报MERGE。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "锁内条件删除与发布并发保护相容，updatedAt/version变化使旧批准失效，未知工具/真实失败不被静默放行。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "长度前缀摘要避免拼接歧义，ui_snapshot与SSE/前端回灌形状不变。"},
+        "verification-review": {"status": "checked", "reason": "agent-1091 ui_snapshot复审PASS、agent-1092影响计算与GLOBAL空键复审PASS；生产Maven compile BUILD SUCCESS、node --check通过；动态发布重跑待执行。"}
+      }
     }
   ]
 }
