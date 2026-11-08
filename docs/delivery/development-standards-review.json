@@ -4076,6 +4076,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "后续验收要求完整正文/parts/卡片顺序对账，不用前缀或归一化掩盖重复。"},
         "verification-review": {"status": "checked", "reason": "agent-1132两项finding均ADDRESSED并APPROVE；本批git diff --check通过，动态根因、测试和构建NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f9cbc227af75d26cc9cae3c6ee3677ad87f5c4f23124026d35a34265a2c3b562",
+      "status": "reviewed",
+      "reason": "逐方法复核预检用户文案、条件摘要、检查名称、公开JSON和reportHash材料；两轮修复指纹/别名和方法规模后独立复审spec/quality均接受。",
+      "reviewedAt": "2026-11-09T01:53:09+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1134",
+      "specChanges": [
+        {
+          "change": "预检用户文案统一自然业务语言和“配置项”，清退宿主、影响面暂不可估、创建≠执行等技术话术，空摘要按既有空字符串规则隐藏。",
+          "reason": "真实卡片暴露实现概念、无价值未知提示和公式化说明，增加普通用户心智负担。",
+          "impact": "仅人读text/name/detail/impact/conditionSummary调整；公开JSON键、检查逻辑、结构化fact及args.reasons保持兼容，生产动态验收NOT_RUN。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolPreflightService.java", "status": "checked", "reason": "新版detail与HEAD args.reasons分离，CheckCode名称自然化且旧双语别名保留，ConditionMessages拆分后主方法50行，fact/reportHash材料未改。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有ReplyLanguage、PreflightReport、ConditionMessages和前端空字符串隐藏规则，未新增依赖或资源体系。"},
+        "java-api-style": {"status": "checked", "reason": "checkCreateConditions扣注释空行50行，新增小型record/追加方法，不改公开JSON形状、集合可变性或字段类型。"},
+        "logging-exception-safety": {"status": "checked", "reason": "技术日志保持英文并保留Throwable；公开错误不再包含宿主、工具调用和内部步骤话术，不记录原始异常体。"},
+        "toc-interaction": {"status": "checked", "reason": "清退影响面暂不可估、创建≠执行和宿主收集，统一配置项，空摘要安全省略，真实REPLACE风险仍具体可理解。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "args.reasons保持HEAD原值/顺序/形状，detail独立，CheckCode枚举值与旧别名兼容，reportHash算法和结构化事实不变。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批仅Java人读文案与小型方法拆分，不涉及流式字节解码、代理对或帧截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1134两轮finding均ADDRESSED并最终接受；IDEA默认Reformat成功，Maven 357源文件BUILD SUCCESS，动态测试NOT_RUN。"}
+      }
     }
   ]
 }

@@ -76,12 +76,13 @@ import java.util.Set;
  * <ul>
  * <li><b>code + args 是协议面</b>：每个检查项带稳定机器码（{@link CheckCode}，如 {@code TASK_EXISTS}）
  * 与结构化参数（{@code args.taskId} 等）。前端/模型按码与参数分支，不解析中文长句；</li>
- * <li><b>人读文案不是协议</b>：{@code name}/{@code detail}/{@code impact}/{@code conditionSummary}/
+ * <li><b>展示文案不直接作为协议</b>：{@code name}/{@code detail}/{@code impact}/{@code conditionSummary}/
  * {@link PreflightReport#failureMessage()} 都按本轮 {@link ReplyLanguage} 渲染（既有语言体系，
- * 不新增翻译框架）；写错语言不会改变任何判定；</li>
- * <li><b>指纹与语言无关</b>：{@code reportHash} 只由 toolName + target + 检查码/参数 + 结构化的
- * 影响面/条件事实 + publishMode 决定。批准发生在请求线程、执行前复核可能发生在另一线程（locale 不同），
- * 若指纹吃人读文本，一次英文请求就会在复核时被判 {@code PRECHECK_STALE}。</li>
+ * 不新增翻译框架）；写错语言不会改变检查判定；</li>
+ * <li><b>指纹不直接吃展示文案</b>：{@code reportHash} 由 toolName + target + 检查码/参数 +
+ * 影响面/条件事实 + publishMode 决定。{@code name}/{@code detail} 不直接参与，既有 {@code checks.args}
+ * 则按协议原样参与，不能为文案治理改值。批准发生在请求线程、执行前复核可能发生在另一线程（locale 不同），
+ * 若把新版人读摘要额外纳入指纹，一次英文请求就会在复核时被判 {@code PRECHECK_STALE}。</li>
  * </ul>
  *
  * <h2>覆盖范围</h2>
@@ -114,17 +115,17 @@ public class ToolPreflightService {
      */
     public enum CheckCode {
         TASK_EXISTS("任务存在", "Task exists"),
-        TYPE_MATCH("类型匹配", "Type matches"),
-        NO_JOB_IN_FLIGHT("无在途作业", "No job in flight"),
-        FRESH_PRECHECK("预检指纹新鲜", "Precheck fingerprint fresh"),
-        HAS_ITEMS("配置项齐备", "Definitions selected"),
+        TYPE_MATCH("任务类型匹配", "Task type matches"),
+        NO_JOB_IN_FLIGHT("没有正在执行的作业", "No running job"),
+        FRESH_PRECHECK("预检结果有效", "Precheck result is current"),
+        HAS_ITEMS("配置项齐备", "Configuration items selected"),
         HAS_UPLOAD("上传文件齐备", "Upload present"),
-        TARGET_CONSISTENT("目标一致", "Target consistent"),
+        TARGET_CONSISTENT("目标任务一致", "Target task matches"),
         STEP_READY("步骤就绪", "Step ready"),
-        CONDITIONS_DECIDED("条件已决定", "Conditions decided"),
-        CREATE_TYPE("创建类型合法", "Create type valid"),
-        CREATE_DEF_CODES("创建配置项合法", "Create definitions valid"),
-        CREATE_CONDITIONS("创建条件合法", "Create conditions valid");
+        CONDITIONS_DECIDED("筛选条件已确认", "Filter conditions confirmed"),
+        CREATE_TYPE("任务类型可用", "Task type valid"),
+        CREATE_DEF_CODES("配置项可用", "Configuration items valid"),
+        CREATE_CONDITIONS("筛选条件可用", "Filter conditions valid");
 
         private final String zh;
 
@@ -208,14 +209,14 @@ public class ToolPreflightService {
     public static final String APPROVED_NOT_EXECUTED = "已批准·未执行";
 
     /**
-     * 取不到条件时的如实措辞。
+     * 旧调用点的默认条件摘要。
      */
     public static final String CONDITION_ALL = "全部数据（无条件）";
 
     /**
-     * 取不到影响面时的如实措辞（不编数字）。
+     * 无有效影响信息时的安全空文案。
      */
-    public static final String IMPACT_UNKNOWN = "影响面暂不可估";
+    public static final String IMPACT_UNKNOWN = "";
 
     private static final String IMPORT_FILE_TYPE = "UPLOAD";
 
@@ -318,14 +319,14 @@ public class ToolPreflightService {
             args.put("taskId", taskId == null ? null : String.valueOf(taskId));
             args.put("jobType", jobType.name());
             checks.add(PreflightReport.check(CheckCode.NO_JOB_IN_FLIGHT, false, args,
-                    english ? "Task not found; in-flight job cannot be checked" : "任务不存在，无法检查在途作业"));
+                    english ? "Task not found; running jobs cannot be checked" : "任务不存在，无法检查正在执行的作业"));
         } else {
             ConflictException inFlight = jobService.inFlightConflict(taskId, jobType);
             Map<String, Object> args = new LinkedHashMap<>();
             args.put("taskId", taskId == null ? null : String.valueOf(taskId));
             args.put("jobType", jobType.name());
             checks.add(PreflightReport.check(CheckCode.NO_JOB_IN_FLIGHT, inFlight == null, args,
-                    inFlight == null ? "" : english ? "Another job is in flight for this task" : "该任务已有在途作业"));
+                    inFlight == null ? "" : english ? "Another job is running for this task" : "该任务已有正在执行的作业"));
         }
 
         checks.add(freshPrecheckCheck(taskId, jobType, exists, english));
@@ -479,8 +480,8 @@ public class ToolPreflightService {
         precheckArgs.put("fingerprint", fingerprint4(precheckBasis == null ? null : precheckBasis.getResultJson()));
         if (!exists) {
             return PreflightReport.check(CheckCode.FRESH_PRECHECK, false, precheckArgs,
-                    english ? "Task not found; precheck fingerprint cannot be checked"
-                            : "任务不存在，无法检查预检指纹");
+                    english ? "Task not found; the precheck result cannot be checked"
+                            : "任务不存在，无法检查预检结果");
         }
         if (jobType != Job.JobType.IMPORT && jobType != Job.JobType.PUBLISH) {
             return PreflightReport.check(CheckCode.FRESH_PRECHECK, true, precheckArgs,
@@ -503,8 +504,8 @@ public class ToolPreflightService {
                 // 少了校验器不得静默跳过校验（直调/测试构造器路径）
                 valid = false;
                 detail = english
-                        ? "Definition validation is unavailable; cannot create a task with defCodes"
-                        : "配置定义校验不可用，不能带 defCodes 创建任务";
+                        ? "Configuration items cannot be verified right now; the task was not created"
+                        : "暂时无法核对配置项，本次未创建";
             } else {
                 for (String defCode : defCodes) {
                     try {
@@ -516,10 +517,9 @@ public class ToolPreflightService {
                 valid = missing.isEmpty();
                 if (!valid) {
                     detail = english
-                            ? "Unknown definitions: " + String.join(", ", missing)
-                            + " (task must not be created; use list_config_defs to look up codes)"
-                            : "配置定义不存在：" + String.join(", ", missing)
-                            + "（不得创建；可用 list_config_defs 查编码）";
+                            ? "Unknown configuration items: " + String.join(", ", missing)
+                            + "; choose existing configuration items before creating the task"
+                            : "配置项不存在：" + String.join(", ", missing) + "；请选择存在的配置项后再创建";
                 }
             }
             return PreflightReport.check(CheckCode.CREATE_DEF_CODES, valid,
@@ -528,10 +528,10 @@ public class ToolPreflightService {
         if (requested.present()) {
             // 形状非法（非字符串数组/含空编码）：同样不得创建
             String invalidDetail = english
-                    ? defCodes.isEmpty() ? "defCodes must be a non-empty array of definition codes"
-                    : "defCodes contains invalid entries; only non-blank definition codes are allowed"
-                    : defCodes.isEmpty() ? "defCodes 必须是配置定义编码组成的非空数组（不得创建）"
-                    : "defCodes 含非法元素：只能是非空配置定义编码（不得创建）";
+                    ? defCodes.isEmpty() ? "The configuration item code list must not be empty (task not created)"
+                    : "Configuration item codes must not be blank or invalid (task not created)"
+                    : defCodes.isEmpty() ? "配置项编码列表不能为空（本次未创建）"
+                    : "配置项编码不能为空或包含无效内容（本次未创建）";
             return PreflightReport.check(CheckCode.CREATE_DEF_CODES, false,
                     argsOf("defCodes", defCodes, "missing", defCodes), invalidDetail);
         }
@@ -546,44 +546,68 @@ public class ToolPreflightService {
         if (!requestedConditions.present() && "EXPORT".equalsIgnoreCase(type)) {
             return PreflightReport.check(CheckCode.CREATE_CONDITIONS, false,
                     argsOf("reason", "missing conditions"),
-                    "导出任务必须显式给出 conditions：已知条件传结构化对象，未决定传 {}（本次未创建）");
+                    english ? "Export tasks require filter conditions; provide an empty condition set when undecided "
+                            + "(task not created)"
+                            : "导出任务必须包含筛选条件；暂不确定时请给出空条件（本次未创建）");
         }
         if (!requestedConditions.present()) {
             return null;
         }
         List<String> conditionIssues = new ArrayList<>();
+        List<String> conditionDetails = new ArrayList<>();
         boolean conditionsValid = true;
-        Map<String, Object> conditionsMap = conditionsMap(conditionsNode);
         if (!"EXPORT".equalsIgnoreCase(type)) {
             conditionsValid = false;
-            conditionIssues.add(english
-                    ? "conditions apply to EXPORT tasks only (import tasks have no filter step)"
-                    : "conditions 仅适用于导出（EXPORT）任务（导入没有筛选步骤）");
+            appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
+                    "conditions apply to EXPORT tasks only (import tasks have no filter step)",
+                    "conditions 仅适用于导出（EXPORT）任务（导入没有筛选步骤）",
+                    "Filter conditions apply to export tasks only; import tasks do not use them",
+                    "筛选条件仅适用于导出任务，导入任务无需设置"));
         } else if (conditionsNode == null || !conditionsNode.isObject()) {
             conditionsValid = false;
-            conditionIssues.add(english
-                    ? "conditions must be an object; use {} when undecided"
-                    : "conditions 必须是对象；条件未决定时传 {}");
+            appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
+                    "conditions must be an object; use {} when undecided", "conditions 必须是对象；条件未决定时传 {}",
+                    "The filter condition format is invalid; provide an empty condition set when undecided",
+                    "筛选条件格式不正确；暂不确定时请给出空条件"));
         } else if (!conditionsNode.isEmpty() && (!requested.present() || requested.invalid() || defCodes.isEmpty())) {
             conditionsValid = false;
-            conditionIssues.add(english
-                    ? "conditions need a valid defCodes array: conditions target specific definitions"
-                    : "conditions 必须与合法的 defCodes 同时给出（条件属于具体配置项）");
+            appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
+                    "conditions need a valid defCodes array: conditions target specific definitions",
+                    "conditions 必须与合法的 defCodes 同时给出（条件属于具体配置项）",
+                    "Filter conditions must be provided together with valid configuration items",
+                    "筛选条件必须与有效的配置项同时给出"));
         } else if (!conditionsNode.isEmpty() && this.definitionService == null) {
             conditionsValid = false;
-            conditionIssues.add(english
-                    ? "Definition validation is unavailable; cannot create a task with conditions"
-                    : "配置定义校验不可用，不能带 conditions 创建任务");
+            appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
+                    "Definition validation is unavailable; cannot create a task with conditions",
+                    "配置定义校验不可用，不能带 conditions 创建任务",
+                    "Configuration items cannot be verified right now; the task was not created", "暂时无法核对配置项，本次未创建"));
         } else if (!conditionsNode.isEmpty()) {
-            conditionsValid = validateConditionDefinitions(defCodes, conditionsNode, conditionIssues, english);
+            conditionsValid = validateConditionDefinitions(defCodes, conditionsNode, conditionIssues, conditionDetails,
+                    english);
         }
         return PreflightReport.check(CheckCode.CREATE_CONDITIONS, conditionsValid,
-                argsOf("conditions", conditionsMap, "reasons", conditionIssues),
-                conditionsValid ? "" : String.join("；", conditionIssues));
+                argsOf("conditions", conditionsMap(conditionsNode), "reasons", conditionIssues),
+                conditionsValid ? "" : String.join("；", conditionDetails));
+    }
+
+    private record ConditionMessages(String issue, String detail) {
+        static ConditionMessages of(boolean english, String issueEnglish, String issueChinese,
+                                    String detailEnglish, String detailChinese) {
+            return new ConditionMessages(english ? issueEnglish : issueChinese,
+                    english ? detailEnglish : detailChinese);
+        }
+    }
+
+    private static void appendConditionMessages(List<String> conditionIssues, List<String> conditionDetails,
+                                                ConditionMessages messages) {
+        conditionIssues.add(messages.issue());
+        conditionDetails.add(messages.detail());
     }
 
     private boolean validateConditionDefinitions(List<String> defCodes, JsonNode conditionsNode,
-                                                 List<String> conditionIssues, boolean english) {
+                                                 List<String> conditionIssues, List<String> conditionDetails,
+                                                 boolean english) {
         boolean conditionsValid = true;
         WizardActionGuard guard = new WizardActionGuard(this.definitionService);
         for (String defCode : defCodes) {
@@ -596,6 +620,7 @@ public class ToolPreflightService {
             } catch (Exception ex) {
                 conditionsValid = false;
                 conditionIssues.add(english ? "conditions could not be serialized or validated" : "conditions 无法序列化或校验");
+                conditionDetails.add(english ? "Filter conditions cannot be validated" : "筛选条件无法校验");
                 if (LogSampling.canAcquire("preflight-condition-serialization")) {
                     log.warn("conditions could not be serialized or validated", ex);
                 }
@@ -607,6 +632,7 @@ public class ToolPreflightService {
                 for (String reason : verdict.reasons()) {
                     if (conditionIssues.size() < 5) {
                         conditionIssues.add(reason);
+                        conditionDetails.add(reason);
                     }
                 }
             }
@@ -620,31 +646,33 @@ public class ToolPreflightService {
     private CreateImpact renderCreateImpact(String argumentsJson, String type, String title, List<String> defCodes,
                                             ConditionsRequest requestedConditions, Task continuationTask, boolean english) {
         ConditionView continued = continuationTask == null ? null : continuationConditionViewOf(continuationTask);
-        String conditionText = createConditionText(requestedConditions, continued, english);
+        String conditionText = createConditionText(requestedConditions, continued, type, english);
         CreateImpact impact = continuationTask != null
                 ? renderContinuationImpact(continuationTask, continued, conditionText, english)
                 : renderNewImpact(type, title, defCodes, requestedConditions, conditionText, english);
         if (RunContextRefresher.openWizard(argumentsJson)) {
             return impact;
         }
-        return new CreateImpact(impact.text() + (english ? " (create only; do not open the wizard automatically)"
-                : "（仅创建，不自动打开向导）"), impact.fact(), impact.conditionText(), impact.conditionFact());
+        return new CreateImpact(impact.text() + (english ? " (the wizard will not open automatically)"
+                : "（不自动打开向导）"), impact.fact(), impact.conditionText(), impact.conditionFact());
     }
 
-    private String createConditionText(ConditionsRequest requested, ConditionView continued, boolean english) {
+    private String createConditionText(ConditionsRequest requested, ConditionView continued, String type,
+                                       boolean english) {
         if (continued != null) {
             return continued.text();
         }
         if (!requested.present()) {
-            return english ? "Filter conditions missing; creation rejected" : "缺少 conditions 决策，不得创建";
+            if (!"EXPORT".equalsIgnoreCase(type)) {
+                return "";
+            }
+            return english ? "Filter conditions not set" : "尚未设置筛选条件";
         }
         JsonNode node = requested.node();
         if (node != null && node.isEmpty()) {
-            return english ? "Filter conditions undecided; host collects once" : "筛选条件未决定，由宿主收集一次";
+            return english ? "Set filter conditions after creation" : "创建后设置筛选条件";
         }
-        return english
-                ? "Structured filter conditions supplied at creation (applied after definitions are selected; no condition form)"
-                : "创建时已给出结构化筛选条件（勾选配置项后落库，不再弹条件表）";
+        return english ? "Filter conditions set" : "已设置筛选条件";
     }
 
     private CreateImpact renderContinuationImpact(Task task, ConditionView continued, String conditionText,
@@ -653,10 +681,8 @@ public class ToolPreflightService {
         String text = english
                 ? "Will reuse " + task.getType() + " task #" + task.getId()
                 + (StringUtils.isBlank(title) ? "" : " \"" + title.trim() + "\"")
-                + " · conditions: " + conditionText + " (reuse is not execute; no job is started)"
                 : "将复用 " + task.getType() + " 任务 #" + task.getId()
-                + (StringUtils.isBlank(title) ? "" : "「" + title.trim() + "」")
-                + " · 条件：" + conditionText + "（复用≠执行，不启动作业）";
+                + (StringUtils.isBlank(title) ? "" : "「" + title.trim() + "」");
         String fact = "continue:" + task.getType() + ":" + task.getId() + ":" + StringUtils.defaultString(title);
         return new CreateImpact(text, fact, conditionText, continued.fact());
     }
@@ -665,13 +691,11 @@ public class ToolPreflightService {
                                          ConditionsRequest requested, String conditionText, boolean english) {
         boolean typeValid = "EXPORT".equalsIgnoreCase(type) || "IMPORT".equalsIgnoreCase(type);
         String label = typeValid ? type.trim().toUpperCase(Locale.ROOT) : english ? "unknown type" : "未知类型";
-        String codesText = defCodes.isEmpty() ? "" : english ? " · definitions: " + String.join(", ", defCodes)
+        String codesText = defCodes.isEmpty() ? "" : english ? " · configuration items: " + String.join(", ", defCodes)
                 : " · 配置项：" + String.join("、", defCodes);
         String text = english ? "Will create a " + label + " task"
                 + (StringUtils.isBlank(title) ? "" : " \"" + title.trim() + "\"") + codesText
-                + " (create is not execute; no job is started)"
-                : "将创建 " + label + " 任务" + (StringUtils.isBlank(title) ? "" : "「" + title.trim() + "」") + codesText
-                + "（创建≠执行，不启动作业）";
+                : "将创建 " + label + " 任务" + (StringUtils.isBlank(title) ? "" : "「" + title.trim() + "」") + codesText;
         String fact = "create:" + (typeValid ? type.trim().toUpperCase(Locale.ROOT) : "-") + ":"
                 + StringUtils.defaultString(title) + ":" + String.join(",", defCodes)
                 + (requested.present() ? ":" + requested.node() : "");
@@ -797,16 +821,15 @@ public class ToolPreflightService {
     private PreflightReport.Check itemsCheck(Long taskId, Task task, boolean english) {
         if (task == null) {
             return PreflightReport.check(CheckCode.HAS_ITEMS, false, argsOf("taskId", taskId),
-                    english ? "Task not found; definitions cannot be checked" : "任务不存在，无法检查配置项");
+                    english ? "Task not found; configuration items cannot be checked" : "任务不存在，无法检查配置项");
         }
         List<TaskItem> items = ObjectUtils.defaultIfNull(task.getItems(), List.of());
         Map<String, Object> args = argsOf("taskId", taskId, "itemCount", items.size());
         if (items.isEmpty()) {
             return PreflightReport.check(CheckCode.HAS_ITEMS, false, args,
                     english
-                            ? "Task #" + taskId + " has no definitions selected; the job would run 0 rows. "
-                            + "Call select_definitions first"
-                            : "任务 #" + taskId + " 尚未选择任何配置项，作业会跑成 0 条目；先 select_definitions 勾选配置项再发起");
+                            ? "Task #" + taskId + " has no configuration items selected; select them before continuing"
+                            : "任务 #" + taskId + " 尚未选择配置项，请先选择配置项再发起");
         }
         return PreflightReport.check(CheckCode.HAS_ITEMS, true, args, "");
     }
@@ -826,8 +849,9 @@ public class ToolPreflightService {
                     .anyMatch(file -> IMPORT_FILE_TYPE.equals(file.getFileType()));
             return PreflightReport.check(CheckCode.HAS_UPLOAD, hasUpload, args,
                     hasUpload ? "" : english
-                            ? "Task #" + taskId + " has no uploaded data file yet; upload it in the import wizard and rerun precheck"
-                            : "任务 #" + taskId + " 尚未上传数据文件；先在导入向导上传文件并重跑预检查");
+                            ? "Task #" + taskId + " has no uploaded data file yet; upload it in the import wizard "
+                            + "and run precheck again"
+                            : "任务 #" + taskId + " 尚未上传数据文件；请先在导入向导上传文件，再重新预检");
         } catch (RuntimeException ex) {
             if (LogSampling.canAcquire("preflight-upload-read")) {
                 log.warn("preflight could not read task file taskId={}", taskId, ex);
@@ -835,7 +859,7 @@ public class ToolPreflightService {
             // 失败开放：查不了 ≠ 没有（与 ToolTargetResolver 同一口径）
             return PreflightReport.check(CheckCode.HAS_UPLOAD, true, args,
                     english ? "Upload state is temporarily unavailable (rechecked before execution)"
-                            : "上传文件状态暂不可查（执行前会再校验）");
+                            : "暂时无法确认上传文件，执行前会再次检查");
         }
     }
 
@@ -883,19 +907,18 @@ public class ToolPreflightService {
             // fail-closed：步骤未知时不能声称"已到 EXPORT"，否则直接 start_export 会同时绕过步骤与条件
             return PreflightReport.check(CheckCode.STEP_READY, false, args,
                     english
-                            ? "Current step of task #" + taskId + " is unknown; cannot confirm the export can start. "
-                            + "Open the export wizard so the step fact is persisted"
-                            : "任务 #" + taskId + " 的当前步骤未知，不能确认可以发起导出；先打开导出向导让步骤事实落库");
+                            ? "Current step of task #" + taskId + " is unknown; open the export wizard and confirm "
+                            + "the export step first"
+                            : "任务 #" + taskId + " 的当前步骤未知；请先打开导出向导并确认导出步骤");
         }
         if (TaskSteps.isExportExecutionStep(step)) {
             return PreflightReport.check(CheckCode.STEP_READY, true, args, "");
         }
         return PreflightReport.check(CheckCode.STEP_READY, false, args,
                 english
-                        ? "Task #" + taskId + " is at step " + step + " and cannot start export directly; "
-                        + "advance with confirm_step to EXPORT first (skipping QUERY_COND is not allowed)"
-                        : "任务 #" + taskId + " 当前步骤 " + step + "，不能直接发起导出；先按步骤链 confirm_step 推进到 EXPORT"
-                        + "（禁止跳过 QUERY_COND 等中间步骤）");
+                        ? "Task #" + taskId + " is not ready for export; complete the preceding steps in the export "
+                        + "wizard first"
+                        : "任务 #" + taskId + " 尚未进入导出步骤；请按导出向导依次完成前置步骤");
     }
 
     /**
@@ -907,16 +930,16 @@ public class ToolPreflightService {
     private static PreflightReport.Check exportConditionCheck(Long taskId, Task task, boolean english) {
         if (task == null) {
             return PreflightReport.check(CheckCode.CONDITIONS_DECIDED, false, argsOf("taskId", taskId),
-                    english ? "Task not found; conditions cannot be checked" : "任务不存在，无法检查条件");
+                    english ? "Task not found; filter conditions cannot be checked" : "任务不存在，无法检查筛选条件");
         }
         String step = StringUtils.trimToEmpty(task.getCurrentStep());
         if (step.isEmpty()) {
             return PreflightReport.check(CheckCode.CONDITIONS_DECIDED, false,
                     argsOf("taskId", taskId, "step", step),
                     english
-                            ? "Current step of task #" + taskId + " is unknown; conditions cannot be checked item by item. "
-                            + "Open the export wizard so the step fact is persisted"
-                            : "任务 #" + taskId + " 的当前步骤未知，条件状态无法逐项核对；先打开导出向导让步骤事实落库");
+                            ? "Current step of task #" + taskId + " is unknown; filter conditions cannot be checked "
+                            + "item by item. Open the export wizard and confirm the current step first"
+                            : "任务 #" + taskId + " 的当前步骤未知，无法逐项核对筛选条件；请先打开导出向导并确认当前步骤");
         }
         boolean atExport = TaskSteps.isExportExecutionStep(step);
         ConditionAssessment.Assessment assessment = ConditionAssessment.of(task);
@@ -935,13 +958,12 @@ public class ToolPreflightService {
             return PreflightReport.check(CheckCode.CONDITIONS_DECIDED, true, args, "");
         }
         String detail = english
-                ? "Conditions are undecided for task #" + taskId + ": " + String.join(", ", undecided)
-                + (assessment.hasUnparseable() ? " (some condition JSON cannot be parsed)" : "")
-                + "; set them with set_condition first, or have the user explicitly leave them empty "
-                + "to confirm the full range — export must not start as an implicit full range"
-                : "任务 #" + taskId + " 的条件未决定：" + String.join(", ", undecided)
-                + (assessment.hasUnparseable() ? "（其中存在无法解析的条件 JSON）" : "")
-                + "；先 set_condition 落库，或由用户明确留空确认全量，不能按全量直接发起导出";
+                ? "Filter conditions are not set for task #" + taskId + ": " + String.join(", ", undecided)
+                + (assessment.hasUnparseable() ? " (some filter conditions are invalid)" : "")
+                + "; set them first, or explicitly leave them empty to export all data"
+                : "任务 #" + taskId + " 的筛选条件尚未设置：" + String.join(", ", undecided)
+                + (assessment.hasUnparseable() ? "（部分筛选条件无效）" : "")
+                + "；请先设置筛选条件，或明确留空以导出全部数据";
         return PreflightReport.check(CheckCode.CONDITIONS_DECIDED, false, args, detail);
     }
 
@@ -971,7 +993,8 @@ public class ToolPreflightService {
 
     private static ConditionView continuationConditionViewOf(Task task) {
         if (task.getType() == Task.TaskType.EXPORT && (CollectionUtils.isEmpty(task.getItems()))) {
-            return new ConditionView(isEnglish() ? "Filter conditions undecided" : "筛选条件未决定", "undecided");
+            return new ConditionView(isEnglish() ? "Select configuration items, then set filter conditions"
+                    : "选择配置项后设置筛选条件", "undecided");
         }
         return conditionViewOf(task, false);
     }
@@ -983,7 +1006,7 @@ public class ToolPreflightService {
     private static ConditionView conditionViewOf(Task task, boolean manualExportBlankAsExplicit) {
         boolean english = isEnglish();
         if (task == null || task.getItems() == null) {
-            return new ConditionView(english ? "All data (no condition)" : CONDITION_ALL, "none");
+            return new ConditionView("", "none");
         }
         ConditionAssessment.Assessment assessment = ConditionAssessment.of(task);
         boolean export = task.getType() == Task.TaskType.EXPORT;
@@ -995,7 +1018,7 @@ public class ToolPreflightService {
             appendConditionView(task, item, export, manualExport, english, parts, fact);
         }
         if (parts.isEmpty()) {
-            return new ConditionView(english ? "All data (no condition)" : CONDITION_ALL, "none");
+            return new ConditionView("", "none");
         }
         String summary = String.join(english ? "; " : "；", parts);
         if (summary.length() > 240) {
@@ -1018,7 +1041,7 @@ public class ToolPreflightService {
         appendConditionFact(item, state, fact);
         switch (state) {
             case SET -> parts.add(prefix + renderFacts(item.facts(), english));
-            case EXPLICIT_UNSET -> parts.add(prefix + (english ? "no filter (all data)" : "未设筛选（全量）"));
+            case EXPLICIT_UNSET -> parts.add(prefix + (english ? "no filter (all data)" : "不筛选（全部数据）"));
             case UNDECIDED -> parts.add(prefix + undecidedConditionText(item, english));
         }
     }
@@ -1036,10 +1059,9 @@ public class ToolPreflightService {
 
     private static String undecidedConditionText(ConditionAssessment.ItemCondition item, boolean english) {
         if (item.unparseable()) {
-            return english ? "condition cannot be parsed (must not be treated as all data)"
-                    : "条件无法解析（不能按全量处理）";
+            return english ? "Filter conditions are invalid; set them again" : "筛选条件无效，请重新设置";
         }
-        return english ? "condition undecided (must not be treated as all data)" : "条件未决定（不能按全量处理）";
+        return english ? "Filter conditions not set" : "尚未设置筛选条件";
     }
 
     private static String renderFacts(List<ConditionAssessment.ConditionFact> facts, boolean english) {
@@ -1101,20 +1123,20 @@ public class ToolPreflightService {
 
     private Impact impactOf(String toolName, Long taskId, Task task, boolean english, String publishMode) {
         if (task == null) {
-            return new Impact(english ? "Impact cannot be estimated" : IMPACT_UNKNOWN, "unknown");
+            return new Impact(IMPACT_UNKNOWN, "unknown");
         }
         List<TaskItem> items = ObjectUtils.defaultIfNull(task.getItems(), List.of());
         int defs = items.size();
         if (defs == 0) {
-            return new Impact(english ? "Impact cannot be estimated" : IMPACT_UNKNOWN, "unknown");
+            return new Impact(IMPACT_UNKNOWN, "unknown");
         }
         return switch (toolName) {
             case TOOL_PUBLISH -> stagingImpact(taskId, items, defs, english, publishMode);
             case TOOL_IMPORT -> uploadImpact(taskId, defs, english);
             case TOOL_EXPORT -> exportImpact(taskId, defs, english);
             default -> new Impact(
-                    english ? "Will validate upload files for " + defs + " definitions"
-                            : "将校验 " + defs + " 个配置定义的上传文件",
+                    english ? "Will validate upload files for " + defs + " configuration items"
+                            : "将校验 " + defs + " 个配置项的上传文件",
                     "validate:" + defs);
         };
     }
@@ -1133,15 +1155,14 @@ public class ToolPreflightService {
                 log.warn("publish impact could not read staged row count (treated as inestimable)", ex);
             }
             return new Impact(
-                    english ? "Will publish " + defs + " definitions · impact cannot be estimated"
-                            : "将发布 " + defs + " 个配置定义 · " + IMPACT_UNKNOWN,
+                    english ? "Will publish " + defs + " configuration items" : "将发布 " + defs + " 个配置项",
                     "publish:" + defs + ":unknown");
         }
         if (!"REPLACE".equals(publishMode)) {
             String formatted = String.format(Locale.ROOT, "%,d", rows);
             return new Impact(
-                    english ? "Will publish " + defs + " definitions · " + formatted + " rows affected"
-                            : "将发布 " + defs + " 个配置定义 · 影响 " + formatted + " 行数据",
+                    english ? "Will publish " + defs + " configuration items · " + formatted + " rows affected"
+                            : "将发布 " + defs + " 个配置项 · 影响 " + formatted + " 行数据",
                     "publish:" + defs + ":" + rows);
         }
         return replaceImpact(taskId, items, defs, rows, english);
@@ -1157,16 +1178,17 @@ public class ToolPreflightService {
                 log.warn("publish replace impact could not count existing rows for deletion (treated as inestimable)", ex);
             }
             return new Impact(
-                    english ? "Will publish " + defs + " definitions · write/replace " + formatted
-                            + " staged rows; existing-row deletion count cannot be estimated"
-                            : "将发布 " + defs + " 个配置定义 · 写入/替换 " + formatted + " 行暂存数据，范围内替换删除行数暂不可估",
+                    english ? "Will publish " + defs + " configuration items · write/replace " + formatted
+                            + " staged rows; the number of existing rows to delete in the replaced scopes is unknown"
+                            : "将发布 " + defs + " 个配置项 · 写入/替换 " + formatted
+                            + " 行暂存数据；范围内删除的既有数据行数未知",
                     "publish-replace:" + defs + ":" + stagedRows + ":unknown");
         }
         String deleted = String.format(Locale.ROOT, "%,d", deletion.deletedRows());
         return new Impact(
-                english ? "Will publish " + defs + " definitions · write/replace " + formatted
+                english ? "Will publish " + defs + " configuration items · write/replace " + formatted
                         + " staged rows and delete " + deleted + " existing rows in the replaced scopes"
-                        : "将发布 " + defs + " 个配置定义 · 写入/替换 " + formatted + " 行暂存数据，范围内替换将删除 "
+                        : "将发布 " + defs + " 个配置项 · 写入/替换 " + formatted + " 行暂存数据，范围内替换将删除 "
                         + deleted + " 行既有数据",
                 "publish-replace:" + defs + ":" + stagedRows + ":" + deletion.deletedRows()
                         + ":" + deletion.protectedFact());
@@ -1275,15 +1297,15 @@ public class ToolPreflightService {
         Long rows = summedRows(taskId, IMPORT_FILE_TYPE);
         if (rows == null) {
             return new Impact(
-                    english
-                            ? "Will write " + defs + " definitions into staging · impact cannot be estimated"
-                            : "将写入 " + defs + " 个配置定义的数据到暂存区 · " + IMPACT_UNKNOWN,
+                    english ? "Will write data for " + defs + " configuration items into staging"
+                            : "将 " + defs + " 个配置项的数据写入暂存区",
                     "import:" + defs + ":unknown");
         }
         String formatted = String.format(Locale.ROOT, "%,d", rows);
         return new Impact(
-                english ? "Will write " + defs + " definitions into staging · " + formatted + " rows involved"
-                        : "将写入 " + defs + " 个配置定义的数据到暂存区 · 涉及 " + formatted + " 行",
+                english ? "Will write data for " + defs + " configuration items into staging · " + formatted
+                        + " rows involved"
+                        : "将 " + defs + " 个配置项的数据写入暂存区 · 涉及 " + formatted + " 行",
                 "import:" + defs + ":" + rows);
     }
 
@@ -1291,14 +1313,13 @@ public class ToolPreflightService {
         Long rows = summedRows(taskId, EXPORT_FILE_TYPE);
         if (rows == null) {
             return new Impact(
-                    english ? "Will export " + defs + " definitions · impact cannot be estimated"
-                            : "将导出 " + defs + " 个配置定义 · " + IMPACT_UNKNOWN,
+                    english ? "Will export " + defs + " configuration items" : "将导出 " + defs + " 个配置项",
                     "export:" + defs + ":unknown");
         }
         String formatted = String.format(Locale.ROOT, "%,d", rows);
         return new Impact(
-                english ? "Will export " + defs + " definitions · " + formatted + " rows involved"
-                        : "将导出 " + defs + " 个配置定义 · 涉及 " + formatted + " 行数据",
+                english ? "Will export " + defs + " configuration items · " + formatted + " rows involved"
+                        : "将导出 " + defs + " 个配置项 · 涉及 " + formatted + " 行数据",
                 "export:" + defs + ":" + rows);
     }
 
@@ -1332,10 +1353,10 @@ public class ToolPreflightService {
      * {@code toolName + target + checks(code/pass/args) + impactFact + conditionFact + publishMode}
      * 的规范串取 sha256 —— 同一份预检结论必然同指纹，任一检查结论/影响面/条件事实变化即变号。
      *
-     * <p><b>不吃人读文本</b>（本批收口）：{@code name}/{@code detail}/{@code impact}/{@code conditionSummary}
-     * 的措辞随 {@link ReplyLanguage} 变；若参与哈希，英文请求在批准后（复核线程 locale 可能为 zh）
-     * 必然被判 {@code PRECHECK_STALE}。故只散列结构化事实，校验方可从 {@code asMap()} 的
-     * {@code checks[].code/args} 重算同一口径。
+     * <p><b>不直接吃展示文案</b>（本批收口）：{@code name}/{@code detail}/{@code impact}/{@code conditionSummary}
+     * 的措辞随 {@link ReplyLanguage} 变，不直接参与哈希；若把新版展示文案额外加入哈希材料，英文请求在批准后
+     * （复核线程 locale 可能为 zh）会被判 {@code PRECHECK_STALE}。既有 {@code checks[].args.reasons}
+     * 仍按协议原样参与，校验方可从 {@code asMap()} 的 {@code checks[].code/args} 重算同一口径。
      */
     private static String reportHash(String toolName, Map<String, Object> target,
                                      List<PreflightReport.Check> checks, String impactFact, String conditionFact, String publishMode) {
@@ -1362,15 +1383,14 @@ public class ToolPreflightService {
     }
 
     /**
-     * 通过时的指纹依据（人读）：有新预检查就锚定它的作业号，没有就说明"该项不依赖既往预检查"。
+     * 通过时的预检依据（人读）：有新预检查就给出它的作业号，没有就说明"该项不依赖既往预检查"。
      */
     private static String describeFingerprint(Job precheck, Job.JobType jobType, boolean english) {
         if (precheck == null) {
             return jobType == Job.JobType.IMPORT || jobType == Job.JobType.PUBLISH
                     ? "" : english ? "This job does not depend on a previous precheck" : "该作业不依赖既往预检查";
         }
-        String basis = precheck.getResultJson();
-        return (english ? "Precheck job #" : "预检作业 #") + precheck.getId() + " · " + fingerprint4(basis);
+        return (english ? "Based on precheck job #" : "依据预检作业 #") + precheck.getId();
     }
 
     /**
@@ -1508,7 +1528,7 @@ public class ToolPreflightService {
         }
 
         /**
-         * 按人读名称反查检查码（兼容构造器用；名称改词不影响已登记的码路径）。
+         * 按当前或旧版中英文名称反查检查码（兼容构造器用；名称改词不影响已登记的码路径）。
          */
         private static String codeOfName(String name) {
             for (CheckCode code : CheckCode.values()) {
@@ -1516,7 +1536,21 @@ public class ToolPreflightService {
                     return code.code();
                 }
             }
-            return name;
+            if (name == null) {
+                return null;
+            }
+            return switch (name) {
+                case "类型匹配", "Type matches" -> CheckCode.TYPE_MATCH.code();
+                case "无在途作业", "No job in flight" -> CheckCode.NO_JOB_IN_FLIGHT.code();
+                case "预检指纹新鲜", "Precheck fingerprint fresh" -> CheckCode.FRESH_PRECHECK.code();
+                case "配置项齐备", "Definitions selected" -> CheckCode.HAS_ITEMS.code();
+                case "目标一致", "Target consistent" -> CheckCode.TARGET_CONSISTENT.code();
+                case "条件已决定", "Conditions decided" -> CheckCode.CONDITIONS_DECIDED.code();
+                case "创建类型合法", "Create type valid" -> CheckCode.CREATE_TYPE.code();
+                case "创建配置项合法", "Create definitions valid" -> CheckCode.CREATE_DEF_CODES.code();
+                case "创建条件合法", "Create conditions valid" -> CheckCode.CREATE_CONDITIONS.code();
+                default -> name;
+            };
         }
 
         /**
