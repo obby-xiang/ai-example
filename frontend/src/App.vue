@@ -1,15 +1,16 @@
 <template>
   <el-config-provider :locale="localeStore.elLocale">
     <div class="h-full flex flex-col">
-      <header class="flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200">
-        <div class="flex items-center gap-4">
-          <span class="text-lg font-medium">{{ t('common.app.title') }}</span>
+      <header class="flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200 max-[1079px]:gap-3">
+        <div class="flex items-center gap-4 max-[1079px]:min-w-0 max-[1079px]:flex-1">
+          <span class="text-lg font-medium whitespace-nowrap max-[1079px]:hidden">{{ t('common.app.title') }}</span>
           <el-menu
             :default-active="activeRoute"
             mode="horizontal"
             :ellipsis="false"
             router
             class="app-nav"
+            :class="'max-[1079px]:min-w-0 max-[1079px]:flex-1'"
           >
             <el-menu-item :index="ROUTE_NAMES.taskCenter" :route="{ name: ROUTE_NAMES.taskCenter }">{{ t('nav.tasks') }}</el-menu-item>
             <el-menu-item :index="ROUTE_NAMES.definitions" :route="{ name: ROUTE_NAMES.definitions }">{{ t('nav.definitions') }}</el-menu-item>
@@ -18,26 +19,29 @@
             <el-menu-item :index="ROUTE_NAMES.aiFeedback" :route="{ name: ROUTE_NAMES.aiFeedback }">{{ t('nav.aiFeedback') }}</el-menu-item>
           </el-menu>
         </div>
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-3 whitespace-nowrap max-[1079px]:shrink-0">
           <el-button link data-test="locale-toggle" @click="localeStore.toggle()">
             {{ localeStore.isEnglish ? t('nav.langZh') : t('nav.langEn') }}
           </el-button>
         </div>
       </header>
 
-      <!-- 左右双栏：左工作区（业务），右 AI 栏（可调宽展开 / 48px 收起） -->
-      <main class="flex-1 flex min-h-0">
+      <!-- 桌面左右双栏；窄屏展开态覆盖业务区，收起态仍保留 48px 侧条。 -->
+      <main class="relative flex-1 flex min-h-0">
         <!-- R-163B G2：业务区只纵滚、横向 hidden 止血（宽表交 el-table 自带横滚），同 demo 裁而不滚口径 -->
-        <section class="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-4">
+        <section class="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-4" :inert="ai.expanded && viewportWidth <= 720">
           <router-view />
         </section>
         <el-aside
           :width="panelWidth"
           class="relative border-l border-solid border-[#e4e7ed] bg-white overflow-hidden"
-          :class="isResizing ? '' : 'transition-[width] duration-200'"
+          :class="[
+            isResizing ? '' : 'transition-[width] duration-200',
+            ai.expanded ? 'max-[1079px]:absolute max-[1079px]:inset-y-0 max-[1079px]:right-0 max-[1079px]:z-20' : '',
+          ]"
         >
           <div
-            v-if="ai.expanded && maxPanelWidth > MIN_AI_PANEL_WIDTH"
+            v-if="canResizePanel"
             role="separator"
             aria-label="AI panel width"
             aria-orientation="vertical"
@@ -68,7 +72,7 @@
 
 <script setup lang="ts">
 /**
- * 应用外壳：左工作区 + 右 AI 栏（AI 栏收起为 48px 竖排条，蓝本同形态）。
+ * 应用外壳：桌面业务区 + 右 AI 双栏；窄屏 AI 展开为覆盖抽屉，收起仍为 48px 竖排条。
  *
  * 裁剪性（ADR-10 回归用例）在这里体现：AiPanel 与业务路由/页面之间只隔
  * stores/workspace 的窄接口；收起 AI 栏（48px 侧条）或整体移除本组件后，
@@ -77,7 +81,7 @@
  * Element Plus 的 locale 走根级 `<el-config-provider>`（不是入口的静态常量）：
  * 切语言时内建文案（分页/日期面板）必须跟着变。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import AiPanel from '@/components/AiPanel/AiPanel.vue'
@@ -116,9 +120,15 @@ const maxPanelWidth = computed(() => Math.max(
   MIN_AI_PANEL_WIDTH,
   Math.min(MAX_AI_PANEL_WIDTH, viewportWidth.value - 720),
 ))
-const expandedPanelWidth = computed(() => Math.min(
-  maxPanelWidth.value,
-  Math.max(MIN_AI_PANEL_WIDTH, preferredPanelWidth.value),
+const expandedPanelWidth = computed(() => {
+  if (viewportWidth.value <= 720) return viewportWidth.value
+  return Math.min(
+    maxPanelWidth.value,
+    Math.max(MIN_AI_PANEL_WIDTH, preferredPanelWidth.value),
+  )
+})
+const canResizePanel = computed(() => (
+  ai.expanded && viewportWidth.value > 720 && maxPanelWidth.value > MIN_AI_PANEL_WIDTH
 ))
 const panelWidth = computed(() => `${ai.expanded ? expandedPanelWidth.value : COLLAPSED_AI_PANEL_WIDTH}px`)
 const isResizing = ref(false)
@@ -177,7 +187,7 @@ function handleStorage(event: StorageEvent) {
 }
 
 function startPanelResize(event: PointerEvent) {
-  if (event.button !== 0 || !ai.expanded || maxPanelWidth.value <= MIN_AI_PANEL_WIDTH) return
+  if (event.button !== 0 || !canResizePanel.value) return
   event.preventDefault()
   const handle = event.currentTarget as HTMLElement
   handle.blur()
@@ -189,7 +199,7 @@ function startPanelResize(event: PointerEvent) {
 }
 
 function resizePanel(event: PointerEvent) {
-  if (!isResizing.value || event.pointerId !== resizePointerId) return
+  if (!isResizing.value || !canResizePanel.value || event.pointerId !== resizePointerId) return
   const nextWidth = resizeStartWidth + resizeStartX - event.clientX
   preferredPanelWidth.value = Math.min(
     maxPanelWidth.value,
@@ -197,15 +207,24 @@ function resizePanel(event: PointerEvent) {
   )
 }
 
-function stopPanelResize(event: PointerEvent) {
-  if (!isResizing.value || event.pointerId !== resizePointerId) return
+function finishPanelResize() {
+  if (!isResizing.value) return
   isResizing.value = false
   resizePointerId = null
   persistPanelWidth()
 }
 
+function stopPanelResize(event: PointerEvent) {
+  if (!isResizing.value || event.pointerId !== resizePointerId) return
+  finishPanelResize()
+}
+
+watch(canResizePanel, (canResize) => {
+  if (!canResize) finishPanelResize()
+})
+
 function handlePanelResizeKeydown(event: KeyboardEvent) {
-  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  if (!canResizePanel.value || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return
   event.preventDefault()
   const offset = event.key === 'ArrowLeft' ? 16 : -16
   preferredPanelWidth.value = Math.min(
@@ -235,5 +254,18 @@ onUnmounted(() => {
    避免 important 后缀与全局覆写。 */
 .app-nav.el-menu--horizontal.el-menu {
   border-bottom-width: 0;
+}
+
+@media (max-width: 1079px) {
+  .app-nav.el-menu--horizontal.el-menu {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .app-nav .el-menu-item {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
 }
 </style>

@@ -3703,6 +3703,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "修改完整Unicode提示文本，不涉及SSE帧、UTF-8解码或字符串截断。"},
         "verification-review": {"status": "checked", "reason": "真实RED证据为_otir-r6-replace/rr1/result.json；agent-1093关联JobService、ImportJobRunner和ToolPreflightService后APPROVE；IDE实际编译isSuccess=true，真实修复后复测NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f561366e4f2f3c9db47e9bad64c41412e8cc7caedde6d69fe77ac6aab166f22d",
+      "status": "reviewed",
+      "reason": "逐hunk复核窄屏AI面板由固定双栏改为覆盖抽屉、全宽焦点隔离、导航横滚及跨断点拖拽清理；独立审查两项finding返修后限定复审APPROVE。",
+      "reviewedAt": "2026-11-08T16:37:53+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1095",
+      "specChanges": [
+        {
+          "change": "视口小于等于1079px时展开的AI面板覆盖业务区，小于等于720px时全宽并inert遮挡业务区；桌面双栏和48px收起条保持。",
+          "reason": "真实480px验收中固定360px侧栏将业务区挤至约120px，造成标题竖排、按钮裁切和双重滚动。",
+          "impact": "仅调整App外壳响应式布局、导航和resize生命周期；不重建AI或业务组件，不改展开偏好、业务协议和桌面交互。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/App.vue", "status": "checked", "reason": "窄屏覆盖宽度与导航使用现有Vue/Tailwind/Element Plus，inert仅隔离全宽遮挡区；watch统一收尾resize并保留app-nav源码护栏。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Vue computed/watch、原生inert、Tailwind响应式类和Element Plus现有组件，无新增依赖或手写框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅Vue外壳，无Java方法、集合、JSON、Lombok或import规则适用变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "未新增日志、异常或敏感信息输出，原logCaughtError路径和持久化异常语义保持。"},
+        "toc-interaction": {"status": "checked", "reason": "消除窄屏标题竖排、按钮裁切和遮挡区Tab可达，保留全部导航与语言入口，不增加提示或操作步骤。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "仅前端视口与焦点布局，未修改API、SSE、Redis、任务状态或跨实例语义。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改消息文本、流式解码、Unicode截断或帧解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1095两项finding均ADDRESSED并APPROVE；node scripts/build.mjs实际打包3282模块PASS；标准pnpm build/vue-tsc被未修改frontend/tests既有类型错误阻断，普通测试和真实浏览器NOT_RUN。"}
+      }
     }
   ]
 }
