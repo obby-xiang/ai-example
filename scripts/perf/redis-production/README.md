@@ -10,6 +10,29 @@ backend/src/test/java/com/example/configmgr/perf/production/
 
 **当前只完成代码集成与 `test-compile`。真实 standalone/Cluster 结果必须由下述隔离设备执行产生，不能用静态编译代替实测 PASS。**
 
+## 终态错误分类与证据边界
+
+本入口只证明生产类直驱场景中实际执行的 Redis 命令、Lua、runner 和业务断言；Mockito 只证明
+所配置替身边界内的交互，不证明真实数据库或 API 集成。`coverageStatus=COMPLETE` 也仅表示下述
+P0–P2 直驱矩阵及必需故障点完整，不表示端到端 API、真实模型或真实业务数据库验收完整。
+
+普通业务/模型 `error` 与 typed transcript error 必须独立分类：
+
+| 类别 | 必须保留的事实 | 禁止的归并 |
+| --- | --- | --- |
+| 普通业务/模型 `error` | 按真实失败记 `runStatus=FAILED`，保留实际业务/模型错误码 | 不得借 transcript 降级名义改写为健康完成 |
+| typed transcript error | 保留实际 `runStatus`（可以是 `DONE`）、帧内具体 `code`（包括 `AI_TRANSCRIPT_INCOMPLETE` 或 `AI_TRANSCRIPT_WRITE_FAILED`）、`transcriptDegraded=true`、`historyComplete=false` | 不得强行映射为普通 `FAILED`，也不得忽略降级字段后按健康 `DONE` 通过 |
+
+正常健康 `done/error` 场景一旦出现 `transcriptDegraded=true`、`historyComplete=false` 或上述两个
+transcript 错误码，一律判 FAIL；只有专用故障场景可以把 typed transcript error 记为预期降级证据，
+且不得混入健康 PASS。`DONE` 只表示 run 的权威状态，不等于 transcript 完整。
+
+本入口无 HTTP、无真实模型，且 DB 候选等依赖使用 Mockito，因此无论直驱场景是否 PASS，都**不能外推证明**
+新的 assistant reasoning 捕获、API history 完整性（同 run 的最终 assistant、reasoning/工具/表单 parts、
+顺序和最终结局）或 `DONE + transcriptDegraded` 契约。上述三项必须取得真实 HTTP/API/SSE、真实 Redis
+键与 TTL、以及真实业务数据库中既有业务结果的对照证据；AI 会话及运行数据仍不得落库，不能用
+Mockito、静态编译或本直驱矩阵替代这些运行证据。
+
 ## 场景清单（43）
 
 ### P0：删除主事故面与核心写协议（6）

@@ -3861,6 +3861,27 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "仅展示reasoning参与可见帧对账，存储原文、正文、toolCallId和严格时间线校验不变。"},
         "verification-review": {"status": "checked", "reason": "agent-1110关联审查APPROVE；最新Maven实际编译355个主源文件BUILD SUCCESS，真实模型、Redis故障注入和最终history验收NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:dd74b7088ff6cb80260433dd2cc7cd3c9856fd516eb514901885b5ce7aa27776",
+      "status": "reviewed",
+      "reason": "逐hunk复核Redis候选协议与生产直驱文档的typed transcript error分类、健康失败门槛及证据外推边界；独立文档审查APPROVE。",
+      "reviewedAt": "2026-11-08T19:51:55+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1117",
+      "specChanges": [],
+      "files": [
+        {"path": "scripts/perf/redis-production/README.md", "status": "checked", "reason": "限定生产类直驱、Mockito和coverageStatus证明范围，DONE不等于历史完整，健康降级必须FAIL。"},
+        {"path": "scripts/perf/redis-protocol/README.md", "status": "checked", "reason": "普通error与typed transcript error分开，§5 C引用准确且明确不新增harness覆盖，冻结性能门槛不变。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "仅压测说明文档，无新增依赖或实现组件。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批无Java或前端生产代码变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "要求保留真实runStatus、错误码和historyComplete，不将真实失败或降级吞成健康完成。"},
+        "toc-interaction": {"status": "checked", "reason": "明确对话完成与部分历史未保存可并存，不把run DONE误作历史完整的用户结果。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "区分普通业务错误、transcript降级和真实Redis证明范围，健康路径降级必须FAIL，禁止无HTTP/Mockito外推。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "要求真实API/SSE、parts和reasoning证据，不以候选帧或静态结果替代流式历史完整性。"},
+        "verification-review": {"status": "checked", "reason": "agent-1117确认分类、引用和性能门槛均正确；真实HTTP/Redis/业务DB和压测均NOT_RUN。"}
+      }
     }
   ]
 }

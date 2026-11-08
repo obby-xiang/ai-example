@@ -265,8 +265,9 @@ PERF_SCENARIOS=b_frame_fence ./run.sh cleanup --execute
 - **生产目标，非当前 Java harness 验收口径**：所有 Redis 键都必须有与生命周期匹配的 TTL，7 天只是绝对上限而不是默认值；对话数据目标为最后真实用户活动起 24h。pending/due 与共享全局/身份恢复、列表索引也不能永久；写入/续期只维护本工具 member 和索引 TTL，清理只 `ZREM` 本工具 member，不 `DEL` 仍有其他 member 的索引键，不 `PERSIST`。真实用户 history 通过 `ai:session:user-activity:<t>:<u>:<sid>` 做 60s 跨实例 Redis 节流并续期全部现存关联键；后台读取不续期，完成后的 purge guard 跳过续期，transcript `dataKey` 必须续期成功，失败必须释放窗口。锁和 run lease 等协调键保持各自更短 TTL。
 - 守卫写回验证：完成前调用 `PURGE_GUARDED_WRITE`，守卫/pending 存在时必须返回 0。
 - 终态收敛：已有终帧（`ai:xterminal` 或 Stream 内 `done/error`）时条件写快照；
-  `done` → DONE、`error` → FAILED、`cancelled:true` → CANCELLED；未知/解析失败不得伪收敛，
+  `done` → DONE、**普通业务/模型 `error`** → FAILED、`cancelled:true` → CANCELLED；未知/解析失败不得伪收敛，
   按 deferred/unknown 处理。无终帧且场景允许收尾时补写终帧；否则 deferred。
+  `transcriptDegraded=true` 的 typed transcript error 不属于上述普通 `error` 映射，按 §5 C 分类。
 - **complete 判定**：只有没有 errors/deferred、`PURGE_COMPLETE` 写成功、`ai:purge:retry:due`
   写入成功才把 dataset 标成 `purged`；有 errors 时绝不写 `COMPLETE`、绝不 zadd due，而是用
   带 owner/epoch 校验的 `PURGE_FAIL` 写 `FAILED_RETRYABLE`，保留 pending/guard 与必要的
@@ -294,6 +295,26 @@ PERF_SCENARIOS=b_frame_fence ./run.sh cleanup --execute
   `ERR invalid stream ID`）。最大 ID 没有后继时直接收尾，不重复最后一页；预算按真实条目数；
   大跳号下终帧/tool_start 不漏；预算耗尽标 `truncated`，未扫到的 tool_start 是 unknown。
 - `b_slot_consistency`：所有多键同槽组本地 CRC16 一致；cluster 下再用 `CLUSTER KEYSLOT` 复核。
+
+### C. 终态错误分类与端到端证据边界（不新增 harness 覆盖）
+
+本 harness 不调用 HTTP，也不生成 API/SSE 终帧；以下是真实端到端验收必须遵守的分类口径，
+不表示候选协议场景已经覆盖这些行为：
+
+| 类别 | 必须保留的事实 | 禁止的归并 |
+| --- | --- | --- |
+| 普通业务/模型 `error` | 按真实失败记 `runStatus=FAILED`，保留实际业务/模型错误码 | 不得借 transcript 降级名义改写为健康完成 |
+| typed transcript error | 保留实际 `runStatus`（可以是 `DONE`）、帧内具体 `code`（包括 `AI_TRANSCRIPT_INCOMPLETE` 或 `AI_TRANSCRIPT_WRITE_FAILED`）、`transcriptDegraded=true`、`historyComplete=false` | 不得强行映射为普通 `FAILED`，也不得只看 `DONE` 就记为健康完成或历史完整 |
+
+正常健康 `done/error` 验收一旦出现 `transcriptDegraded=true`、`historyComplete=false` 或上述两个
+transcript 错误码，一律判 FAIL；只有专用故障场景可以把 typed transcript error 记为预期降级证据，
+且不得混入健康 PASS。`DONE` 只表示 run 的权威状态，不能抵消 transcript 降级。
+
+候选 Lua/键协议、纯逻辑单测和本 harness 的 PASS 只证明各自实际覆盖的 Redis 删除、原子协议、
+状态判定与性能门禁。它们**不能外推证明**新的 assistant reasoning 捕获、API history 完整性
+（同 run 的最终 assistant、reasoning/工具/表单 parts、顺序和最终结局）或 `DONE + transcriptDegraded`
+契约。上述三项必须取得真实 HTTP/API/SSE、真实 Redis 键与 TTL、以及真实业务数据库中既有业务结果的
+对照证据；AI 会话及运行数据仍不得落库，不能用静态审查或本 harness 结果替代这些运行证据。
 
 ---
 
