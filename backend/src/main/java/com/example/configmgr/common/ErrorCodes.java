@@ -334,6 +334,10 @@ public final class ErrorCodes {
      */
     public static final String TASK_FINALIZED = "TASK_FINALIZED";
     /**
+     * 409：条件删除声明的作业集合已与当前任务不一致。
+     */
+    public static final String TASK_JOB_SET_CHANGED = "TASK_JOB_SET_CHANGED";
+    /**
      * 409：配置定义编码重复。
      */
     public static final String DEFINITION_CODE_DUPLICATE = "DEFINITION_CODE_DUPLICATE";

@@ -3542,6 +3542,36 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "Unicode空白按码点处理，实时/历史过滤共用结构化错误码，SSE顺序与字符语义未改。"},
         "verification-review": {"status": "checked", "reason": "后端agent-1089、前端agent-1090及整批agent-1092最终PASS；生产Maven compile和前端Vite build成功，node --check通过；本批未执行测试，C-111～C-126及独立脚本动态验证仍NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:6acfd7b388522d332dd04fbf2953dcf4ad2b7304e1a4997be657b534876987c3",
+      "status": "reviewed",
+      "reason": "逐hunk复核通用条件删除、独立API脚本和证据文档，消除公开API先查后删的非原子级联竞态；生产与脚本联合静态复审PASS，生产编译和脚本语法检查通过，动态场景仍NOT_RUN。",
+      "reviewedAt": "2026-11-08T13:37:28+08:00",
+      "reviewer": "K3.1 Pro主会话、独立联合复审agent-1091/1092",
+      "specChanges": [
+        {
+          "change": "任务删除新增可选expectedJobIds条件参数，后端在任务锁内比较完整作业集合，不匹配返回TASK_JOB_SET_CHANGED且不删除。",
+          "reason": "公开API先GET作业再DELETE任务存在新作业被级联误删的竞态，不能靠脚本重试或旧证据掩盖。",
+          "impact": "未提供参数保持旧行为；expectedJobIds=显式表示空集合；非空集合逐个重复参数；新增、缺失或非法变化均冲突，脚本冲突后INCOMPLETE且不重试。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/task/controller/TaskController.java", "status": "checked", "reason": "expectedJobIds重复参数解析支持省略、显式空集合和非空集合，重复或混合null拒绝，并传入统一条件删除。"},
+        {"path": "backend/src/main/java/com/example/configmgr/task/service/TaskService.java", "status": "checked", "reason": "单参数兼容委托保留，双参数在任务锁内比较全部当前作业ID，集合不一致先于级联抛409，createAndStart共用同锁。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/ErrorCodes.java", "status": "checked", "reason": "新增TASK_JOB_SET_CHANGED冲突码用于锁内集合不匹配，复用既有ConflictException响应路径。"},
+        {"path": "scripts/verification/ai-one-turn-interaction-api.mjs", "status": "checked", "reason": "严格作业ID、实时复核、完整期望集合条件删除及post对账闭环，空集合显式参数、冲突INCOMPLETE且不回退旧删除。"},
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "补充条件删除、数据库白名单、Redis键/TTL/count/post、后端日志及证据要求，全部动态场景仍NOT_RUN。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有任务行锁、事务、JobService同锁、公开API和JSZip，无新增依赖或测试专用生产分支。"},
+        "java-api-style": {"status": "checked", "reason": "兼容委托、集合唯一性、空值和重复参数、方法规模与异常类型逐项核对，普通测试代码未改。"},
+        "logging-exception-safety": {"status": "checked", "reason": "集合冲突与清理失败真实记录，不能靠重试、隐藏异常或INCOMPLETE被NOT_RUN覆盖。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批为后端条件删除和独立验证证据，无新增用户界面或操作文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "任务锁内全集比较关闭GET→DELETE竞态，旧客户端兼容，父任务/作业清理不碰不明资源，Redis与数据库证据不伪造。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "异常read与EOF均按seq有界重挂，archive完整性校验保留，字符和帧序不回退。"},
+        "verification-review": {"status": "checked", "reason": "agent-1091联合复核PASS、agent-1092生产审查PASS；生产Maven compile BUILD SUCCESS、node --check通过；未执行动态API/浏览器/Redis/DB测试。"}
+      }
     }
   ]
 }

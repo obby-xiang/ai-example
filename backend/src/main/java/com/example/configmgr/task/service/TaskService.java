@@ -723,11 +723,17 @@ public class TaskService {
      */
     @Transactional
     public void delete(Long taskId) {
+        delete(taskId, null);
+    }
+
+    @Transactional
+    public void delete(Long taskId, Set<Long> expectedJobIds) {
         // 先锁任务行（与 JobService.createAndStart 同一互斥点）：先建则这里看到 PENDING 返回 409；
         // 先删则建作业拿不到任务行返回 404。锁顺序固定 task → job，不反向等 job 行。
         Task task = lockForUpdate(taskId);
 
         List<Job> jobs = jobRepository.findByTaskId(taskId);
+        assertExpectedJobSet(taskId, jobs, expectedJobIds);
         Job inFlight = IterableUtils.find(jobs, job -> job.getStatus() == Job.JobStatus.PENDING
                 || job.getStatus() == Job.JobStatus.RUNNING);
         if (inFlight != null) {
@@ -778,6 +784,21 @@ public class TaskService {
             });
         } else {
             deletePhysicalFiles(files);
+        }
+    }
+
+    private static void assertExpectedJobSet(Long taskId, List<Job> jobs, Set<Long> expectedJobIds) {
+        if (expectedJobIds == null) {
+            return;
+        }
+        if (expectedJobIds.contains(null)) {
+            throw new CodedIllegalArgumentException(ErrorCodes.ILLEGAL_ARGUMENT,
+                    "expectedJobIds must not contain null or duplicate job IDs");
+        }
+        Set<Long> actualJobIds = Set.copyOf(jobs.stream().map(Job::getId).toList());
+        if (!actualJobIds.equals(expectedJobIds)) {
+            throw new ConflictException(ErrorCodes.TASK_JOB_SET_CHANGED,
+                    "Task #" + taskId + " job set changed; deletion was refused");
         }
     }
 

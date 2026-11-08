@@ -34,8 +34,10 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @RestController
 @RequestMapping("/api/tasks")
@@ -101,9 +103,27 @@ public class TaskController {
     }
 
     @DeleteMapping("/{id}")
-    public ApiResponse<?> delete(@PathVariable Long id) {
-        taskService.delete(id);
+    public ApiResponse<?> delete(@PathVariable Long id,
+                                 @RequestParam(required = false) List<Long> expectedJobIds) {
+        taskService.delete(id, parseExpectedJobIds(expectedJobIds));
         return ApiResponse.ok();
+    }
+
+    private static Set<Long> parseExpectedJobIds(List<Long> rawJobIds) {
+        if (rawJobIds == null) {
+            return null;
+        }
+        Set<Long> expectedJobIds = new LinkedHashSet<>();
+        if (rawJobIds.size() == 1 && rawJobIds.getFirst() == null) {
+            return expectedJobIds;
+        }
+        for (Long jobId : rawJobIds) {
+            if (jobId == null || !expectedJobIds.add(jobId)) {
+                throw new CodedIllegalArgumentException(ErrorCodes.ILLEGAL_ARGUMENT,
+                        "expectedJobIds must not contain null or duplicate job IDs");
+            }
+        }
+        return expectedJobIds;
     }
 
     @PostMapping("/{id}/select-defs")
