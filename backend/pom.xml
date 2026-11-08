@@ -196,8 +196,11 @@
     <build>
         <finalName>config-mgr</finalName>
         <plugins>
-            <!-- 补丁类 ReasoningAwareOpenAiChatModel 冻结了 spring-ai 1.1.7 的 createRequest 语义：
-                 升级不会编译报错，只会静默行为分叉。故在 validate 阶段钉死已评审版本，
+            <!-- 补丁类 ReasoningAwareOpenAiChatModel 冻结了 spring-ai 1.1.7 的 createRequest 语义；
+                 ResponseBoundOpenAiApi 同时冻结 OpenAiApi 的 WebClient 构造/default headers、
+                 additional headers 后的 Bearer 认证、[DONE] takeUntil/filter、ChatCompletionChunk
+                 原始 JSON 解析，以及 OpenAiStreamFunctionCallingHelper 的单 choice 参数合并边界。
+                 升级可能静默行为分叉，故在 validate 阶段钉死已评审版本，
                  任何未经评审的版本变化（改属性或 -D 覆盖）立即 fail-fast。 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

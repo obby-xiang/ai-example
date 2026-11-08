@@ -2152,7 +2152,9 @@ public class ResilientChatService {
             history.addAll(fallbackHistory);
         }
         if (StringUtils.isNotBlank(prefixText) && !isEndsWithAssistantText(history, prefixText)) {
-            history.add(assistantMessage(prefixText, storedReasoning(prefixReasoning)));
+            AssistantMessage prefix = assistantMessage(prefixText, storedReasoning(prefixReasoning));
+            history.add(ReasoningOrigin.stamp(prefix, snapshot == null ? null : snapshot.getProviderId(),
+                    snapshot == null ? null : snapshot.getModelId()));
         }
         return history;
     }

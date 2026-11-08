@@ -10,14 +10,19 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.api.BaseChatMemoryAdvisor;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.model.SimpleApiKey;
 import org.springframework.ai.model.openai.autoconfigure.OpenAiChatProperties;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.ReasoningAwareOpenAiChatModel;
 import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.openai.api.ResponseBoundOpenAiApi;
+import org.springframework.ai.retry.RetryUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.client.reactive.JdkClientHttpConnector;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.web.client.RestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
@@ -382,13 +387,10 @@ public class AiProviderRegistry {
     // ── 内部 ────────────────────────────────────────────────────────────────
 
     private OpenAiApi newApi(AiConfigService.ResolvedProvider resolved) {
-        return OpenAiApi.builder()
-            .baseUrl(resolved.baseUrl())
-            .apiKey(resolved.apiKey())
-            .completionsPath(resolved.completionsPath())
-            // 流式通道专用连接器（见 UPSTREAM_SOCKET_IDLE_TIMEOUT）：非流式走 RestClient，不受影响
-            .webClientBuilder(upstreamWebClientBuilder())
-            .build();
+        return new ResponseBoundOpenAiApi(resolved.baseUrl(), new SimpleApiKey(resolved.apiKey()),
+                new LinkedMultiValueMap<>(), resolved.completionsPath(), "/v1/embeddings", RestClient.builder(),
+                // 流式通道专用连接器（见 UPSTREAM_SOCKET_IDLE_TIMEOUT）：非流式走 RestClient，不受影响
+                upstreamWebClientBuilder(), RetryUtils.DEFAULT_RESPONSE_ERROR_HANDLER);
     }
 
     /**

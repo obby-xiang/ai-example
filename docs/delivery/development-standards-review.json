@@ -3963,6 +3963,37 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "区分frame/model截断，计数必须非负且returned<=original，空白采用Java Character.isWhitespace精确集合。"},
         "verification-review": {"status": "checked", "reason": "agent-1119四轮审查覆盖工具对账、页序、截断、空白和文档歧义，最终APPROVE；node --check通过，真实动态验证NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:47a305d03227e76478e5dc911e381e58f6c234d077f4093e7db1dea9baeb5780",
+      "status": "reviewed",
+      "reason": "逐hunk复核合并前原始chunk管线、正文/reasoning独立聚合、工具helper投影、正常完成释放与第二aggregate拒绝；独立最终复审APPROVE。",
+      "reviewedAt": "2026-11-08T21:42:39+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1124",
+      "specChanges": [
+        {
+          "change": "工具调用从首个分片可执行改为整次response正常完成后执行，deferred携带完整正文、推理、工具参数和最终usage。",
+          "reason": "1.1.7逐片执行会在后置reasoning到达前持久化空assistant，长历史回放触发上游400；父类合并还会丢choice并覆盖正文/reasoning。",
+          "impact": "仅新增合并前API适配器及装配，标准工具递归/HITL继续复用；onError/取消不释放，普通多choice原样通过，第二独立aggregate fail-closed。"
+        }
+      ],
+      "files": [
+        {"path": "backend/pom.xml", "status": "checked", "reason": "冻结说明覆盖WebClient构造、认证顺序、SSE[DONE]、raw JSON解析和helper合并边界，未升级依赖。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java", "status": "checked", "reason": "以父类同值8参数装配ResponseBoundOpenAiApi，保留缓存、热生效、读超时和非流式行为。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "correctionHistory前缀按快照provider/model stamp来源，未知不伪造，空推理不造内容，末条同文不重复。"},
+        {"path": "backend/src/main/java/org/springframework/ai/openai/api/ResponseBoundOpenAiApi.java", "status": "checked", "reason": "合并前原始chunk独立聚合正文/reasoning，helper仅处理单choice工具投影，正常onComplete释放，第二aggregate拒绝且状态全清理。"},
+        {"path": "docs/research/分析-OpenAI响应边界与官方Advisor对比-2026-11-08.md", "status": "checked", "reason": "记录根因、官方2.x工具递归与usage、候选方案比较、最终调用链和NOT_RUN验证边界。"},
+        {"path": "docs/superpowers/plans/2026-11-08-openai-response-boundary-recovery.md", "status": "checked", "reason": "实施计划明确live/deferred职责、订阅状态清理、装配、前缀来源及真实验证矩阵。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Spring WebClient、官方OpenAiStreamFunctionCallingHelper和现有SpToolCallingManager，无新增依赖或供应商分支。"},
+        "java-api-style": {"status": "checked", "reason": "每订阅状态线程封闭且有界清理，无静态池/runMap/new Thread，集合与空值语义明确，保留Apache版权与改编说明。"},
+        "logging-exception-safety": {"status": "checked", "reason": "异常英文且不打印推理正文/API Key，错误和取消不释放，真实上游失败保持可观测。"},
+        "toc-interaction": {"status": "checked", "reason": "正文和reasoning实时且不重复，工具卡延后到完整response，避免后续表单和历史因空推理失败。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "标准role/content/tool_calls/tool_call_id与usage保持，HITL/续跑/correction复用现有路径，未新增Redis脚本或数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "只在完整SSE JSON后解析，原始正文/reasoning独立拼接且空串不覆盖，未引入二次转码或半帧解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1124审查父类丢choice/覆盖后重构，并确认第二aggregate fail-closed，最终APPROVE；最新Maven编译356源文件BUILD SUCCESS，真实运行NOT_RUN。"}
+      }
     }
   ]
 }
