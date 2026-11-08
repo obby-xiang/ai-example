@@ -3882,6 +3882,33 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "要求真实API/SSE、parts和reasoning证据，不以候选帧或静态结果替代流式历史完整性。"},
         "verification-review": {"status": "checked", "reason": "agent-1117确认分类、引用和性能门槛均正确；真实HTTP/Redis/业务DB和压测均NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:fb6cc3f6a5d54696b657b031198cfa3d559dc097261a516c97ef1fac0e825847",
+      "status": "reviewed",
+      "reason": "逐项复核当前协议脚本的隔离/远程/写门禁、健康协议、purge完整性、latest范围、白名单证据和真实路径安全；两轮返修后独立最终复审APPROVE。",
+      "reviewedAt": "2026-11-08T20:20:40+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1118",
+      "specChanges": [
+        {
+          "change": "当前协议脚本明确为通用协议与受控写回归，AI health允许带指定业务码的503但不代表模型可用，新增仓外证据和写操作门禁。",
+          "reason": "原脚本误称只读且缺少写门禁、文件证据和真实路径保护，HTTP200也可能掩盖不完整删除。",
+          "impact": "仅加强独立验证脚本与文档；ready仍须200，purge须complete且deferred/errors为空，latest空会话精确0，不改变生产API。"
+        }
+      ],
+      "files": [
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "明确受控写范围、503语义、门禁命令、白名单证据、空会话latest边界和真实路径要求。"},
+        {"path": "scripts/verification/ai-current-protocol-api.mjs", "status": "checked", "reason": "拒绝重定向，创建前验证最近已存在祖先和目标真实路径，删除核对complete/deferred/errors，证据仅白名单且文件位于仓外。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Node内置fetch/fs/path/crypto，无新增依赖或自写协议框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅Node验证脚本与Markdown文档，无Java生产代码变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "证据仅白名单健康字段、状态、计数和安全断言，不保存原始body、密钥、地址或异常正文。"},
+        "toc-interaction": {"status": "checked", "reason": "健康503只表达协议可判定，不向用户或报告伪称模型可用；删除不完整不得呈现为通过。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "隔离、远程、写操作和仓外真实路径均fail-closed，purge完整性与空历史精确断言加强，未改变Redis行为。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批为HTTP/文件证据门禁，不涉及流式UTF-8或帧解析改动。"},
+        "verification-review": {"status": "checked", "reason": "agent-1118首轮五项finding及复审目录副作用均修正并APPROVE；node --check通过，真实接口、链接探针和压测NOT_RUN。"}
+      }
     }
   ]
 }
