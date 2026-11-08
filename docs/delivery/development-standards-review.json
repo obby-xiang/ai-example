@@ -4276,6 +4276,32 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解析或parts生成，只改变现有parts的宿主选择。"},
         "verification-review": {"status": "checked", "reason": "agent-1145确认GF-A活动/GF-B排队、单宿主和旧终态排除均正确，spec/quality APPROVE；前端构建已成功，动态复测另由DeepSeek执行。"}
       }
+    },
+    {
+      "fingerprint": "sha256:eae6df481b9fd4c48d7b74c3a00cb244b3b29736d306cdecd4a82aee6d95c5fe",
+      "status": "reviewed",
+      "reason": "复核create_task内部编排字段openWizard/independent在卡片展示中的过滤，独立静态审查spec/quality均APPROVE。",
+      "reviewedAt": "2026-11-09T03:44:28+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1149",
+      "specChanges": [
+        {
+          "change": "INTERNAL_FIELDS新增openwizard和independent，隐藏创建任务内部编排参数。",
+          "reason": "原始openWizard会在用户卡片显示为openWizard 是，independent存在同类技术字段泄露风险。",
+          "impact": "仅展示过滤，part.args、后端target、reportHash及其他业务字段不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/utils/card-content.ts", "status": "checked", "reason": "复用canShowCardField忽略大小写并去_/-的精确集合匹配，隐藏openWizard/independent及等价变体，不误伤前缀相似业务字段。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有INTERNAL_FIELDS/canShowCardField，无新增依赖或标签体系。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅TypeScript集合元素，无Java修改。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "本批不修改日志或异常处理。"},
+        "toc-interaction": {"status": "checked", "reason": "创建卡不再向普通用户显示openWizard/independent原始技术参数名，其他业务字段照常展示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "仅过滤展示行，part.args、target、reportHash和创建后续接行为均不变。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解析或文本截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1149确认规范化匹配及业务边界，spec/quality APPROVE；动态验证NOT_RUN。"}
+      }
     }
   ]
 }

@@ -210,7 +210,9 @@ const INTERNAL_FIELDS = new Set([
   'filepath',
   'fileurl',
   'downloadurl',
-  'reporthash'
+  'reporthash',
+  'openwizard',
+  'independent'
 ])
 
 export function canShowCardField(key: string): boolean {
