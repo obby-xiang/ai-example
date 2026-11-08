@@ -60,6 +60,7 @@ public final class ToolResultUserText {
 					"这一步已由其他执行实例接管，本次没有重复执行。"),
 			Map.entry(ErrorCodes.TOOL_EXECUTION_FAILED,
 					"操作未能完成，可能已有部分变化；请核对当前状态后再继续，或联系管理员。"),
+			Map.entry("HOST_FORM_PARK_FAILED", "表单未能打开，本次未执行；请稍后重试。"),
 			Map.entry(WizardActionGuard.REJECTED_CODE,
 					"参数不符合当前向导操作要求，本次未执行；请核对配置项和筛选条件后重试。"),
 			Map.entry("SHEET_ARGUMENTS_REJECTED",

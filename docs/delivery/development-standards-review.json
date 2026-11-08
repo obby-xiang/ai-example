@@ -4191,6 +4191,39 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "完整正文与parts按稳定身份和seq有序对账，非前缀冲突保留history，delta仅处理末尾文本段，避免逐token全parts扫描。"},
         "verification-review": {"status": "checked", "reason": "agent-1135三轮finding均ADDRESSED并最终接受，A10/B20+C30顺序复核通过；Maven BUILD SUCCESS，最终前端构建27.48s成功，动态验收NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:34c62ded91ba5e0332ad72c227a34a4d1c3d29c208b113575649d23820a3f449",
+      "status": "reviewed",
+      "reason": "复核whole-branch五项finding及空标题空值回归的最终修复和验收文档；所有finding经独立scoped复审ADDRESSED并APPROVE。",
+      "reviewedAt": "2026-11-09T02:45:10+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1139",
+      "specChanges": [
+        {
+          "change": "补齐旧镜像无seq非前缀正文保留、工具首开空占位、空白ASSISTANT唯一ID、挂起失败本地化文案及空标题空值安全。",
+          "reason": "最终交叉审查发现旧数据丢正文、伪恢复缺口、重复UI助手、技术话术和确认卡TypeError。",
+          "impact": "新增可选HOST_FORM_PARK_FAILED用户文案映射；其他协议形状、预检fact/reportHash及恢复主语义不变，动态验收NOT_RUN。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java", "status": "checked", "reason": "挂起失败以HOST_FORM_PARK_FAILED保留BLOCKED/FAILED/未执行事实，不再使用宿主技术话术。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultUserText.java", "status": "checked", "reason": "新增HOST_FORM_PARK_FAILED安全用户文案映射，复用实时与history既有userTextCode通道。"},
+        {"path": "docs/verification/AI对话恢复与导出内容验收-2026-11-08.md", "status": "checked", "reason": "记录实施范围、独立审查、实际编译和全部动态NOT_RUN边界，不冒称场景通过。"},
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "C-131补无seq非前缀正文、空白ASSISTANT和工具首开空占位断言，全部保持NOT_RUN。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "title仅保留字符串且trim非空，null/undefined/非字符串不崩溃，非title行不受影响。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "补HOST_FORM_PARK_FAILED英文自然失败文案，与中文语义一致。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "补HOST_FORM_PARK_FAILED中文自然失败文案，不含宿主或异常原文。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "history不可用时保留非前缀旧正文，空占位不误报，空白ASSISTANT不拆同run，entryId仅在前缀匹配后继承。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有userTextCode、镜像parts和locale机制，无新增依赖、事件或第二套恢复协议。"},
+        "java-api-style": {"status": "not-affected", "reason": "Java仅常量/结果文案映射，无新方法或集合语义变化；前端无单函数50行限制。"},
+        "logging-exception-safety": {"status": "checked", "reason": "失败仍FAILED/BLOCKED且未执行，返回自然安全文案，不回填空结果、异常原文或宿主技术话术。"},
+        "toc-interaction": {"status": "checked", "reason": "旧正文不丢、工具首开不误报、空白标题不占位、失败文案自然且中英一致，真实恢复缺口保留。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "新增可选userTextCode映射，history/实时共用；entryId仅匹配后继承，空白条目不产生重复assistant-runId。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "无seq非前缀文本在镜像内部按锚点保留，history权威冲突内容不插入，空字符串仅用于精确占位判断而非trim。"},
+        "verification-review": {"status": "checked", "reason": "agent-1139五项及空标题回归均ADDRESSED并APPROVE；IDEA格式化成功，Maven BUILD SUCCESS，最终前端构建27.35s成功，动态验收NOT_RUN。"}
+      }
     }
   ]
 }

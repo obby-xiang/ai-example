@@ -548,6 +548,7 @@
         "TOOL_TIMEOUT": "This step did not finish in time, and its result is unconfirmed. It may have made partial changes; verify them before continuing.",
         "TOOL_ALREADY_CLAIMED": "This step was already continued elsewhere, so it was not executed again.",
         "TOOL_EXECUTION_FAILED": "The action could not be completed and may have made partial changes. Verify the current state before continuing, or contact an administrator.",
+        "HOST_FORM_PARK_FAILED": "The form could not be opened, so this action was not executed. Please try again.",
         "WIZARD_ARGUMENTS_REJECTED": "The parameters do not meet the current wizard's requirements. No action was executed. Check the selected definitions and filter conditions, then try again.",
         "SHEET_ARGUMENTS_REJECTED": "The spreadsheet parameters are incomplete or outside the allowed range. No action was executed. Adjust them and try again.",
         "UI_PRIMITIVE_ARGUMENTS_REJECTED": "The UI action parameters are invalid. No action was executed. Take a fresh UI snapshot and try again."

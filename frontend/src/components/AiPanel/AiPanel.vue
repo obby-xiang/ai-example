@@ -4407,7 +4407,7 @@ function gateRows(part: ToolPart): FieldRow[] {
       let rows = [...argRows(part, true)]
       const preflight = part.preflight
       if (!preflight) {
-        return rows
+        return rows.filter((row) => row.key !== 'title' || (typeof row.value === 'string' && row.value.trim() !== ''))
       }
       const target = preflight.target
       const targetRows: FieldRow[] = [
@@ -4436,7 +4436,7 @@ function gateRows(part: ToolPart): FieldRow[] {
           value: localizedCardFieldValue('mode', publishMode) ?? publishMode
         })
       }
-      return rows
+      return rows.filter((row) => row.key !== 'title' || (typeof row.value === 'string' && row.value.trim() !== ''))
     }
   )
 }

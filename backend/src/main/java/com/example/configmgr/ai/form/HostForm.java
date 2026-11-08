@@ -254,9 +254,9 @@ abstract class HostForm {
         try {
             pending.setStatus(PendingToolCall.BLOCKED);
             pending.setOutcome(ToolOutcome.FAILED.wire());
-            pending.setCode(ToolOutcome.CODE_TOOL_EXECUTION_FAILED);
-            pending.setReason("宿主表单挂起失败，未下发前端");
-            pending.setResultText("宿主挂起失败，未下发，未执行。");
+            pending.setCode("HOST_FORM_PARK_FAILED");
+            pending.setReason("表单未能打开，本次未执行；请稍后重试。");
+            pending.setResultText("表单未能打开，本次未执行；请稍后重试。");
             pending.setExecuted(false);
             pending.setResolvedAtMs(System.currentTimeMillis());
             this.store.putPending(runId, pending);

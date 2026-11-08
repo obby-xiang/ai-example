@@ -3282,10 +3282,14 @@ function mirrorTextCandidates(pool: MirrorTextPart[], source: MirrorTextPart): M
 }
 
 function mergeMirrorTextPart(target: MirrorTextPart, source: MirrorTextPart): boolean {
+  const sourceExtendsTarget = source.text.startsWith(target.text)
+  if (!sourceExtendsTarget && !target.text.startsWith(source.text)) {
+    return false
+  }
   if (partEntryId(target) === null && partEntryId(source) !== null) {
     target.entryId = source.entryId
   }
-  if (source.text.startsWith(target.text)) {
+  if (sourceExtendsTarget) {
     target.text = source.text
     target.streaming = source.streaming
     if (target.kind === 'reasoning' && source.kind === 'reasoning') {
@@ -3294,9 +3298,8 @@ function mergeMirrorTextPart(target: MirrorTextPart, source: MirrorTextPart): bo
       target.lastFrameAt = source.lastFrameAt ?? target.lastFrameAt
       target.lastFrameLocalAt = source.lastFrameLocalAt ?? target.lastFrameLocalAt
     }
-    return true
   }
-  return target.text.startsWith(source.text)
+  return true
 }
 
 function insertMirrorPart(parts: MessagePart[], addition: MessagePart, previousAnchor: MessagePart | null): void {
@@ -3386,13 +3389,24 @@ function canMergeMirrorRoundParts(target: ChatMessage, source: ChatMessage, hist
       continue
     }
     if (seq === null) {
+      if (sourcePart.text === '') {
+        continue
+      }
       const legacyTargets = textPool.filter((part) => part.kind === sourcePart.kind && partSeq(part) === null)
       if (legacyTargets.length === 1 && sourceLegacyCounts[sourcePart.kind] === 1) {
         const existing = legacyTargets[0] as MirrorTextPart
-        if (!mergeMirrorTextPart(existing, sourcePart)) {
+        const merged = mergeMirrorTextPart(existing, sourcePart)
+        if (!merged) {
           target.recoveryGap = true
         }
-        previousAnchor = existing
+        if (!merged && !historyAuthoritative) {
+          const addition = { ...sourcePart }
+          insertMirrorPart(mergedParts, addition, previousAnchor)
+          textPool.push(addition)
+          previousAnchor = addition
+        } else {
+          previousAnchor = existing
+        }
       } else {
         if (!historyAuthoritative) {
           const addition = { ...sourcePart }
@@ -3408,10 +3422,18 @@ function canMergeMirrorRoundParts(target: ChatMessage, source: ChatMessage, hist
     const candidates = mirrorTextCandidates(textPool, sourcePart)
     if (candidates.length === 1) {
       const existing = candidates[0] as MirrorTextPart
-      if (!mergeMirrorTextPart(existing, sourcePart)) {
+      const merged = mergeMirrorTextPart(existing, sourcePart)
+      if (!merged) {
         target.recoveryGap = true
       }
-      previousAnchor = existing
+      if (!merged && !historyAuthoritative) {
+        const addition = { ...sourcePart }
+        insertMirrorPart(mergedParts, addition, previousAnchor)
+        textPool.push(addition)
+        previousAnchor = addition
+      } else {
+        previousAnchor = existing
+      }
     } else {
       const uncertain = sameFrame.length > 0 || hasLegacyAfterLatestIdentified || seq < latestTargetSeq
       if (!historyAuthoritative || !uncertain) {
@@ -5644,7 +5666,7 @@ export const useAiStore = defineStore('ai', {
       })
       // ── R-150 后置 pass：同一非空 runId 的连续 ASSISTANT 合并（中间仅夹被跳过的 TOOL）──
       // 遇 USER/SYSTEM、runId 缺失或变化即断。parts 保留原条目顺序，工具仍按 toolCallId 对账。
-      // drop：无 toolCalls、text/思考为空且无失败事实的 ASSISTANT 直接丢弃，丢弃同时断窗。
+      // drop：无 toolCalls、text/思考为空且无失败事实的 ASSISTANT 直接丢弃，不额外断窗。
       const mergedMessages: ChatMessage[] = []
       let builtCursor = 0
       let group: ChatMessage[] = []
@@ -5690,8 +5712,7 @@ export const useAiStore = defineStore('ai', {
           || item.reasoningContent.trim().length === 0
         if (calls.length === 0 && (item.text ?? '').trim().length === 0 && blankReasoning
           && message.errorCard == null && message.code == null) {
-          flushGroup() // drop 规则：无正文、无思考、无失败的 ASSISTANT 丢弃且断窗
-          continue
+          continue // 空白条目仅丢弃，不额外断开同 run 合并窗
         }
         const previous = last(group)
         if (previous && (!previous.runId || !message.runId || previous.runId !== message.runId)) {
