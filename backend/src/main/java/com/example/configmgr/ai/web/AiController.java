@@ -2380,6 +2380,9 @@ public class AiController {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("type", type);
         item.put("text", StringUtils.defaultString(entry.text()));
+        if (entry.entryId() != null) {
+            item.put("entryId", entry.entryId());
+        }
         if (entry.runId() != null) {
             item.put("runId", entry.runId());
         }

@@ -2426,6 +2426,7 @@ const MIRROR_MESSAGE_SCALAR_KEYS = [
   'recoveryGap',
   'interrupted',
   'runId',
+  'messageId',
   'timestamp'
 ] as const
 
@@ -2489,7 +2490,7 @@ function isSameMirrorSnapshot(snapshot: MirrorMessageSnapshot, message: ChatMess
   return true
 }
 
-/** 单条消息 → 镜像形态（字段与批次2 逐字一致；新增字段时只加这里 + `MIRROR_MESSAGE_SCALAR_KEYS`）。 */
+/** 单条消息 → 镜像形态（字段与 `AiSessionMirror.messages` 的 Pick 一致）。 */
 function mirrorMessageOf(message: ChatMessage): MirroredMessage {
   return {
     id: message.id,
@@ -2510,6 +2511,7 @@ function mirrorMessageOf(message: ChatMessage): MirroredMessage {
     ...(message.interrupted ? { interrupted: true } : {}),
     // 批次2：run 归属必须活过刷新 —— 断流重挂/恢复链路按它定位后端 run（不得猜 activeRunId）
     ...(message.runId ? { runId: message.runId } : {}),
+    ...(message.messageId ? { messageId: message.messageId } : {}),
     ...(message.timestamp !== undefined ? { timestamp: message.timestamp } : {})
   }
 }
@@ -2733,6 +2735,108 @@ function messageText(message: ChatMessage): string {
     .join('')
 }
 
+function assistantMessageId(runId: string): string {
+  return `assistant-${runId}`
+}
+
+function hasMessageTimestamp(message: ChatMessage): boolean {
+  return message.timestamp !== undefined && message.timestamp !== null && message.timestamp !== ''
+}
+
+function messageTimestampMs(message: ChatMessage): number | null {
+  if (typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)) {
+    return message.timestamp
+  }
+  if (typeof message.timestamp === 'string') {
+    const parsed = Date.parse(message.timestamp)
+    return Number.isNaN(parsed) ? null : parsed
+  }
+  return null
+}
+
+function isMemberOutcomeAuthority(target: ChatMessage, member: ChatMessage, preferTarget: boolean): boolean {
+  if (preferTarget) {
+    return false
+  }
+  if (!hasMessageTimestamp(target) || !hasMessageTimestamp(member)) {
+    return true
+  }
+  const targetMs = messageTimestampMs(target)
+  const memberMs = messageTimestampMs(member)
+  return targetMs === null || memberMs === null || memberMs >= targetMs
+}
+
+function mergeMessageOutcomeFacts(target: ChatMessage, member: ChatMessage, preferTarget = false): void {
+  const memberIsAuthority = isMemberOutcomeAuthority(target, member, preferTarget)
+  if (hasMessageTimestamp(member) && (memberIsAuthority || (preferTarget && !hasMessageTimestamp(target)))) {
+    target.timestamp = member.timestamp
+  }
+  if (member.stopped === true) {
+    target.stopped = true
+  }
+  if (member.truncated === true) {
+    target.truncated = true
+  }
+  if (memberIsAuthority && member.done === true) {
+    if (member.interrupted === true) {
+      target.interrupted = true
+    } else {
+      delete target.interrupted
+    }
+    if (member.unconfirmed === true) {
+      target.unconfirmed = true
+    } else {
+      delete target.unconfirmed
+    }
+    if (member.recoveryGap === true) {
+      target.recoveryGap = true
+    } else {
+      delete target.recoveryGap
+    }
+  }
+  const targetHasError = target.errorCard !== undefined || target.code !== undefined
+  if ((member.errorCard !== undefined || member.code !== undefined)
+    && (memberIsAuthority || (preferTarget && !targetHasError))) {
+    target.errorCard = member.errorCard
+    target.code = member.code
+  }
+}
+
+/** 同 run 镜像成员投影为一个 UI 助手，不按位置丢弃任何唯一 part。 */
+function projectMirrorAssistantsPerRun(messages: ChatMessage[]): ChatMessage[] {
+  const projected: ChatMessage[] = []
+  const assistants = new Map<string, ChatMessage>()
+  const partGaps = new Set<string>()
+  for (const message of messages) {
+    if (message.role !== 'assistant' || !message.runId) {
+      projected.push(message)
+      continue
+    }
+    const runId = message.runId
+    const existing = assistants.get(runId)
+    if (!existing) {
+      const assistant = cloneMessage(message)
+      assistant.messageId = assistantMessageId(runId)
+      assistants.set(runId, assistant)
+      projected.push(assistant)
+      continue
+    }
+    mergeMessageOutcomeFacts(existing, message)
+    const outcomeGap = existing.recoveryGap === true
+    delete existing.recoveryGap
+    canMergeMirrorRoundParts(existing, message, false)
+    if (existing.recoveryGap === true) {
+      partGaps.add(runId)
+    }
+    if (outcomeGap || partGaps.has(runId)) {
+      existing.recoveryGap = true
+    }
+    existing.streaming = existing.streaming || message.streaming
+    existing.done = existing.done && message.done
+  }
+  return projected
+}
+
 /** 批G：跨镜像/历史搬运消息时的浅拷贝（段与投影各复制一层，避免两处共写同一对象）。 */
 function cloneMessage(message: ChatMessage): ChatMessage {
   return {
@@ -2885,9 +2989,51 @@ function isUnprovenLocalTerminal(part: ToolPart): boolean {
  */
 const applyFrameToPartsRaw = applyFrameToParts
 
+function stampFramePartSeq(
+  message: ChatMessage,
+  frame: SseFrame,
+  beforeLast: MessagePart | undefined,
+  beforeLastText: string | undefined,
+  beforeToolCallIds: ReadonlySet<string> | null
+): void {
+  const seq = frameSeq(frame)
+  if (seq === null) {
+    return
+  }
+  if (frame.type === 'delta') {
+    const part = last(message.parts)
+    if (part && (part.kind === 'text' || part.kind === 'reasoning') && part.seq === undefined
+      && (part !== beforeLast || beforeLastText === '')) {
+      part.seq = seq
+    }
+    return
+  }
+  if (beforeToolCallIds === null) {
+    return
+  }
+  for (const part of message.parts) {
+    if (part.kind === 'tool' && !beforeToolCallIds.has(part.toolCallId) && part.seq === undefined) {
+      part.seq = seq
+    }
+  }
+}
+
 function applyFrameToPartsAndClearPlaceholder(message: ChatMessage, frame: SseFrame): void {
+  const beforeLast = last(message.parts)
+  const beforeLastText = beforeLast && (beforeLast.kind === 'text' || beforeLast.kind === 'reasoning')
+    ? beforeLast.text
+    : undefined
+  const tracksToolParts = frame.type === 'suspended'
+    || ('toolCallId' in frame && typeof frame.toolCallId === 'string')
+  const beforeToolCallIds = tracksToolParts
+    ? new Set(message.parts.flatMap((part) => part.kind === 'tool' ? [part.toolCallId] : []))
+    : null
+  if (frame.type === 'delta' && typeof frame.messageId === 'string' && !message.messageId) {
+    message.messageId = frame.messageId
+  }
   if (!('toolCallId' in frame) || typeof frame.toolCallId !== 'string') {
     applyFrameToPartsRaw(message, frame)
+    stampFramePartSeq(message, frame, beforeLast, beforeLastText, beforeToolCallIds)
     return
   }
   const toolCallId = frame.toolCallId
@@ -2907,6 +3053,7 @@ function applyFrameToPartsAndClearPlaceholder(message: ChatMessage, frame: SseFr
     }
   }
   applyFrameToPartsRaw(message, frame)
+  stampFramePartSeq(message, frame, beforeLast, beforeLastText, beforeToolCallIds)
   const after = findToolPart(message, toolCallId)
   if (!after) {
     return
@@ -3111,179 +3258,175 @@ function copyMirrorOutcomeMarkers(target: ChatMessage, tail: ChatMessage): void 
 
 type MirrorTextPart = Extract<MessagePart, { kind: 'text' } | { kind: 'reasoning' }>
 
-function mirrorText(parts: MirrorTextPart[]): string {
-  return parts.map((part) => part.text).join('')
+function partSeq(part: MessagePart): number | null {
+  return typeof part.seq === 'number' && Number.isSafeInteger(part.seq) ? part.seq : null
 }
 
-/** 文本只沿可证明的前缀关系合并；目标多出的独立段留给调用方按原锚点插回。 */
-function mergeMirrorTextSequence(
-  targetParts: MirrorTextPart[],
-  sourceParts: MirrorTextPart[],
-  sourceToMerged: Map<MessagePart, MessagePart>,
-  targetToMerged: Map<MessagePart, MessagePart>,
-  represented: Set<MessagePart>
-): void {
-  const targetText = mirrorText(targetParts)
-  const sourceText = mirrorText(sourceParts)
-  if (!targetText.startsWith(sourceText) && !sourceText.startsWith(targetText)) {
-    return
-  }
-  if (sourceParts.length === 0) {
-    return
-  }
-  if (targetParts.length <= sourceParts.length || sourceText.startsWith(targetText)) {
-    if (targetText.length > sourceText.length) {
-      const delta = targetText.slice(sourceText.length)
-      const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? last(sourceParts)
-      const copy = anchor ? sourceToMerged.get(anchor) : null
-      if (copy?.kind === 'text' || copy?.kind === 'reasoning') {
-        copy.text += delta
-      }
-    }
-    targetParts.forEach((part, index) => {
-      represented.add(part)
-      const sourcePart = sourceParts[Math.min(index, sourceParts.length - 1)]
-      const copy = sourcePart ? sourceToMerged.get(sourcePart) : null
-      if (copy) {
-        targetToMerged.set(part, copy)
-      }
-    })
-    return
-  }
-  let aligned = true
-  const pairs: Array<{ target: MirrorTextPart; source: MirrorTextPart }> = []
-  for (let index = 0; index < sourceParts.length; index += 1) {
-    const sourcePart = sourceParts[index]
-    const targetPart = targetParts[index]
-    if (!sourcePart || !targetPart || (sourcePart.text === '' && targetPart.text !== '')
-      || (!sourcePart.text.startsWith(targetPart.text) && !targetPart.text.startsWith(sourcePart.text))) {
-      aligned = false
-      break
-    }
-    pairs.push({ target: targetPart, source: sourcePart })
-  }
-  if (!aligned) {
-    const anchor = [...sourceParts].reverse().find((part) => part.text !== '') ?? last(sourceParts)
-    const copy = anchor ? sourceToMerged.get(anchor) : null
-    if (copy?.kind === 'text' || copy?.kind === 'reasoning') {
-      copy.text += targetText.slice(sourceText.length)
-    }
-    targetParts.forEach((part, index) => {
-      represented.add(part)
-      const sourcePart = sourceParts[Math.min(index, sourceParts.length - 1)]
-      const mapped = sourcePart ? sourceToMerged.get(sourcePart) : null
-      if (mapped) {
-        targetToMerged.set(part, mapped)
-      }
-    })
-    return
-  }
-  for (const pair of pairs) {
-    const copy = sourceToMerged.get(pair.source)
-    if (copy?.kind !== 'text' && copy?.kind !== 'reasoning') {
-      continue
-    }
-    copy.text = pair.target.text.startsWith(pair.source.text) ? pair.target.text : pair.source.text
-    represented.add(pair.target)
-    targetToMerged.set(pair.target, copy)
-  }
+function partEntryId(part: MessagePart): string | null {
+  return typeof part.entryId === 'string' && part.entryId !== '' ? part.entryId : null
 }
 
-/** 镜像实时段序是骨架；历史状态与历史独有内容按 toolCallId/原段锚点并入。 */
-function canMergeMirrorRoundParts(target: ChatMessage, source: ChatMessage): boolean {
+function isCompatiblePersistentEntry(left: MessagePart, right: MessagePart): boolean {
+  const leftEntryId = partEntryId(left)
+  const rightEntryId = partEntryId(right)
+  return leftEntryId === null || rightEntryId === null || leftEntryId === rightEntryId
+}
+
+function mirrorTextFrameCandidates(pool: MirrorTextPart[], source: MirrorTextPart): MirrorTextPart[] {
+  const seq = partSeq(source)
+  return seq === null ? [] : pool.filter((part) => part.kind === source.kind && partSeq(part) === seq)
+}
+
+function mirrorTextCandidates(pool: MirrorTextPart[], source: MirrorTextPart): MirrorTextPart[] {
+  return mirrorTextFrameCandidates(pool, source).filter((part) => isCompatiblePersistentEntry(part, source))
+}
+
+function mergeMirrorTextPart(target: MirrorTextPart, source: MirrorTextPart): boolean {
+  if (partEntryId(target) === null && partEntryId(source) !== null) {
+    target.entryId = source.entryId
+  }
+  if (source.text.startsWith(target.text)) {
+    target.text = source.text
+    target.streaming = source.streaming
+    if (target.kind === 'reasoning' && source.kind === 'reasoning') {
+      target.startedAt = source.startedAt ?? target.startedAt
+      target.endedAt = source.endedAt ?? target.endedAt
+      target.lastFrameAt = source.lastFrameAt ?? target.lastFrameAt
+      target.lastFrameLocalAt = source.lastFrameLocalAt ?? target.lastFrameLocalAt
+    }
+    return true
+  }
+  return target.text.startsWith(source.text)
+}
+
+function insertMirrorPart(parts: MessagePart[], addition: MessagePart, previousAnchor: MessagePart | null): void {
+  const seq = partSeq(addition)
+  if (seq !== null) {
+    const nextIndex = parts.findIndex((part) => {
+      const candidateSeq = partSeq(part)
+      return candidateSeq !== null && candidateSeq > seq
+    })
+    if (nextIndex >= 0) {
+      parts.splice(nextIndex, 0, addition)
+    } else {
+      parts.push(addition)
+    }
+    return
+  }
+  const previousIndex = previousAnchor === null ? -1 : parts.indexOf(previousAnchor)
+  if (previousIndex >= 0) {
+    parts.splice(previousIndex + 1, 0, addition)
+    return
+  }
+  parts.push(addition)
+}
+
+/** 保留唯一 parts；镜像内部按 seq/锚点插入，history 只吸收顺序可证明的新段。 */
+function canMergeMirrorRoundParts(target: ChatMessage, source: ChatMessage, historyAuthoritative = true): boolean {
   if (target.parts.length === 0 && source.parts.length === 0) {
     return false
   }
   const targetTools = new Map<string, ToolPart>()
-  for (const part of target.parts) {
+  const mergedParts = [...target.parts]
+  const textPool = target.parts.filter((part): part is MirrorTextPart => part.kind === 'text' || part.kind === 'reasoning')
+  let latestTargetSeq = -Infinity
+  let latestIdentifiedPartIndex = -1
+  target.parts.forEach((part, index) => {
+    latestTargetSeq = Math.max(latestTargetSeq, partSeq(part) ?? -Infinity)
     if (part.kind === 'tool' && !targetTools.has(part.toolCallId)) {
       targetTools.set(part.toolCallId, part)
     }
+    if (partSeq(part) !== null) {
+      latestIdentifiedPartIndex = index
+    }
+  })
+  const hasLegacyAfterLatestIdentified = target.parts.some((part, index) => index > latestIdentifiedPartIndex
+    && (part.kind === 'text' || part.kind === 'reasoning') && partSeq(part) === null)
+  const sourceLegacyCounts = {
+    text: source.parts.filter((part) => part.kind === 'text' && partSeq(part) === null).length,
+    reasoning: source.parts.filter((part) => part.kind === 'reasoning' && partSeq(part) === null).length
   }
-  const merged: MessagePart[] = []
-  const mergedTools = new Map<string, ToolPart>()
-  const sourceToMerged = new Map<MessagePart, MessagePart>()
-  const targetToMerged = new Map<MessagePart, MessagePart>()
+  let previousAnchor: MessagePart | null = null
   for (const sourcePart of source.parts) {
     if (sourcePart.kind === 'event') {
-      continue
-    }
-    if (sourcePart.kind !== 'tool') {
-      const clone = { ...sourcePart }
-      merged.push(clone)
-      sourceToMerged.set(sourcePart, clone)
-      continue
-    }
-    const alreadyMerged = mergedTools.get(sourcePart.toolCallId)
-    if (alreadyMerged) {
-      mergeToolPartState(alreadyMerged, sourcePart)
-      sourceToMerged.set(sourcePart, alreadyMerged)
-      continue
-    }
-    const owner = targetTools.get(sourcePart.toolCallId)
-    const tool = owner ?? { ...sourcePart }
-    if (owner) {
-      mergeToolPartState(owner, sourcePart)
-      targetToMerged.set(owner, owner)
-    } else if (tool.kind2 === 'UNKNOWN' && isInheritedPlaceholderLike(tool)) {
-      historyPlaceholderStatusIds.add(tool.toolCallId)
-    } else {
-      historyPlaceholderStatusIds.delete(tool.toolCallId)
-    }
-    merged.push(tool)
-    mergedTools.set(tool.toolCallId, tool)
-    sourceToMerged.set(sourcePart, tool)
-  }
-  const represented = new Set<MessagePart>()
-  for (const kind of ['text', 'reasoning'] as const) {
-    mergeMirrorTextSequence(
-      target.parts.filter((part): part is MirrorTextPart => part.kind === kind),
-      source.parts.filter((part): part is MirrorTextPart => part.kind === kind),
-      sourceToMerged,
-      targetToMerged,
-      represented
-    )
-  }
-  for (let index = 0; index < target.parts.length; index += 1) {
-    const part = target.parts[index]
-    if (!part || represented.has(part) || (part.kind === 'tool' && mergedTools.has(part.toolCallId))) {
-      continue
-    }
-    let insertAt = merged.length
-    if (part.kind === 'event' && part.anchorToolCallId) {
-      const anchor = mergedTools.get(part.anchorToolCallId)
-      const anchorIndex = anchor ? merged.indexOf(anchor) : -1
-      if (anchorIndex >= 0) {
-        insertAt = anchorIndex + 1
+      const existing = mergedParts.find((part) => part.kind === 'event' && part.eventId === sourcePart.eventId)
+      if (existing) {
+        previousAnchor = existing
+      } else {
+        const addition = { ...sourcePart }
+        insertMirrorPart(mergedParts, addition, previousAnchor)
+        previousAnchor = addition
       }
-    } else {
-      let anchored = false
-      for (let next = index + 1; next < target.parts.length; next += 1) {
-        const nextPart = target.parts[next]
-        const copy = nextPart ? targetToMerged.get(nextPart) : null
-        const copyIndex = copy ? merged.indexOf(copy) : -1
-        if (copyIndex >= 0) {
-          insertAt = copyIndex
-          anchored = true
-          break
+      continue
+    }
+    const seq = partSeq(sourcePart)
+    if (sourcePart.kind === 'tool') {
+      const existing = targetTools.get(sourcePart.toolCallId)
+      if (existing) {
+        mergeToolPartState(existing, sourcePart)
+        previousAnchor = existing
+      } else {
+        const addition = { ...sourcePart }
+        if (addition.kind2 === 'UNKNOWN' && isInheritedPlaceholderLike(addition)) {
+          historyPlaceholderStatusIds.add(addition.toolCallId)
+        } else {
+          historyPlaceholderStatusIds.delete(addition.toolCallId)
+        }
+        const uncertain = seq === null || seq < latestTargetSeq
+        if (!historyAuthoritative || !uncertain) {
+          insertMirrorPart(mergedParts, addition, previousAnchor)
+          targetTools.set(addition.toolCallId, addition)
+          previousAnchor = addition
+        }
+        if (uncertain) {
+          target.recoveryGap = true
         }
       }
-      if (!anchored) {
-        for (let previous = index - 1; previous >= 0; previous -= 1) {
-          const previousPart = target.parts[previous]
-          const copy = previousPart ? targetToMerged.get(previousPart) : null
-          const copyIndex = copy ? merged.indexOf(copy) : -1
-          if (copyIndex >= 0) {
-            insertAt = copyIndex + 1
-            break
-          }
+      latestTargetSeq = Math.max(latestTargetSeq, seq ?? -Infinity)
+      continue
+    }
+    if (seq === null) {
+      const legacyTargets = textPool.filter((part) => part.kind === sourcePart.kind && partSeq(part) === null)
+      if (legacyTargets.length === 1 && sourceLegacyCounts[sourcePart.kind] === 1) {
+        const existing = legacyTargets[0] as MirrorTextPart
+        if (!mergeMirrorTextPart(existing, sourcePart)) {
+          target.recoveryGap = true
         }
+        previousAnchor = existing
+      } else {
+        if (!historyAuthoritative) {
+          const addition = { ...sourcePart }
+          insertMirrorPart(mergedParts, addition, previousAnchor)
+          textPool.push(addition)
+          previousAnchor = addition
+        }
+        target.recoveryGap = true
+      }
+      continue
+    }
+    const sameFrame = mirrorTextFrameCandidates(textPool, sourcePart)
+    const candidates = mirrorTextCandidates(textPool, sourcePart)
+    if (candidates.length === 1) {
+      const existing = candidates[0] as MirrorTextPart
+      if (!mergeMirrorTextPart(existing, sourcePart)) {
+        target.recoveryGap = true
+      }
+      previousAnchor = existing
+    } else {
+      const uncertain = sameFrame.length > 0 || hasLegacyAfterLatestIdentified || seq < latestTargetSeq
+      if (!historyAuthoritative || !uncertain) {
+        const addition = { ...sourcePart }
+        insertMirrorPart(mergedParts, addition, previousAnchor)
+        textPool.push(addition)
+        previousAnchor = addition
+      }
+      if (uncertain) {
+        target.recoveryGap = true
       }
     }
-    merged.splice(insertAt, 0, part)
-    targetToMerged.set(part, part)
+    latestTargetSeq = Math.max(latestTargetSeq, seq)
   }
-  target.parts = merged.map((part, seg) => ({ ...part, seg })) as MessagePart[]
+  target.parts = mergedParts.map((part, seg) => ({ ...part, seg })) as MessagePart[]
   deriveProjections(target)
   return true
 }
@@ -3338,15 +3481,28 @@ function hasProgressMessage(message: ChatMessage): boolean {
   })
 }
 
-/** 历史终态覆盖镜像最新内容时，才不采用镜像遗留的在途标记。 */
+/** 新数据按 part 身份判断覆盖；legacy 仅用正文前缀判断版本新旧，不据此创建 part。 */
 function hasHistoryCoveredMirrorRound(target: ChatMessage, mirror: ChatMessage): boolean {
-  if (target.done !== true || target.streaming
-    || !messageText(target).startsWith(messageText(mirror))
-    || !target.reasoning.startsWith(mirror.reasoning)) {
+  if (target.done !== true || target.streaming) {
     return false
   }
   const toolIds = new Set(target.parts.flatMap((part) => part.kind === 'tool' ? [part.toolCallId] : []))
-  return mirror.parts.every((part) => part.kind !== 'tool' || toolIds.has(part.toolCallId))
+  const textPool = target.parts.filter((part): part is MirrorTextPart => part.kind === 'text' || part.kind === 'reasoning')
+  const legacyTextCovered = messageText(target).startsWith(messageText(mirror))
+    && target.reasoning.startsWith(mirror.reasoning)
+  return mirror.parts.every((part) => {
+    if (part.kind === 'event') {
+      return true
+    }
+    if (part.kind === 'tool') {
+      return toolIds.has(part.toolCallId)
+    }
+    if (partSeq(part) === null) {
+      return legacyTextCovered
+    }
+    const candidates = mirrorTextCandidates(textPool, part)
+    return candidates.length === 1 && (candidates[0] as MirrorTextPart).text.startsWith(part.text)
+  })
 }
 
 /** 刷新合并：同一 run 的全部历史助手，保持原消息与段落顺序。 */
@@ -3359,13 +3515,11 @@ function roundAssistantMessages(
   historyUserIndex: number,
   roundRunId: string | null
 ): ChatMessage[] {
-  if (roundRunId !== null) {
-    return historical.filter((message) => isSameRoundAssistant(message, roundRunId))
+  const matched = historical.filter((message) => isSameRoundAssistant(message, roundRunId))
+  if (roundRunId === null || matched.length > 0 || historyUserIndex < 0) {
+    return matched
   }
-  if (historyUserIndex < 0) {
-    return []
-  }
-  const found: ChatMessage[] = []
+  const legacy: ChatMessage[] = []
   for (let index = historyUserIndex + 1; index < historical.length; index += 1) {
     const message = historical[index]
     if (!message) {
@@ -3374,11 +3528,11 @@ function roundAssistantMessages(
     if (message.role === 'user') {
       break
     }
-    if (isSameRoundAssistant(message, roundRunId)) {
-      found.push(message)
+    if (isSameRoundAssistant(message, null)) {
+      legacy.push(message)
     }
   }
-  return found
+  return legacy
 }
 
 /**
@@ -3499,6 +3653,9 @@ function orderedHistoryParts(item: AiHistoryMessage, fallback: MessagePart[]): M
       return null
     }
     previousSeq = segment.seq
+    const persistentIdentity = typeof item.entryId === 'string' && item.entryId !== ''
+      ? { entryId: item.entryId, seq: segment.seq }
+      : {}
     if (segment.kind === 'tool') {
       const id = segment.toolCallId
       const tool = typeof id === 'string' ? tools.get(id) : undefined
@@ -3506,7 +3663,7 @@ function orderedHistoryParts(item: AiHistoryMessage, fallback: MessagePart[]): M
         return null
       }
       usedTools.add(tool.toolCallId)
-      parts.push(tool)
+      parts.push({ ...tool, ...persistentIdentity })
       continue
     }
     if ((segment.kind !== 'text' && segment.kind !== 'reasoning') || typeof segment.text !== 'string') {
@@ -3517,7 +3674,8 @@ function orderedHistoryParts(item: AiHistoryMessage, fallback: MessagePart[]): M
       ...(template ?? { kind: segment.kind, text: '', streaming: false }),
       kind: segment.kind,
       text: segment.text,
-      streaming: false
+      streaming: false,
+      ...persistentIdentity
     } as MessagePart)
   }
   parts.forEach((part, seg) => {
@@ -4958,18 +5116,21 @@ export const useAiStore = defineStore('ai', {
       if (!inFlightAtEntry && mirror && isCurrentMirror(mirror) && mirror.messages.length > 0) {
         // B5 读侧收口：旧镜像可能仍带 `synthetic=true`（压缩摘要等系统提示）—— 与历史侧同口径
         // 逐条丢弃，绝不把摘要正文当普通消息渲染；新镜像已不再写该键。
-        this.messages = mirror.messages
+        this.messages = projectMirrorAssistantsPerRun(mirror.messages
           .filter((message) => (message as { synthetic?: unknown }).synthetic !== true)
           .map((message) => ({
           ...message,
           streaming: false,
           done: true,
+          ...(message.role === 'assistant' && message.runId && !message.messageId
+            ? { messageId: assistantMessageId(message.runId) }
+            : {}),
           // 批3③b D4（R-140①-4）：存量 v2 镜像把 message.parts 原样入镜像（writeMirror 不做
           // 段级归一），段级 streaming=true 假态随镜像存活；消费侧 openStreamPart /
           // sealTrailingStreamPart 读段 streaming（段边界假态）—— 与上一行消息级归一同口径，
           // 读取侧逐段归一。parts 是数组须逐段 map；**不收进** canSanitizeMirrorResidues（防职责扩大）。
           parts: message.parts.map((part) => ('streaming' in part && part.streaming ? { ...part, streaming: false } : part))
-        }))
+        })))
         // 批次6A 返修：思考段计时用**帧接收锚**（服务器 lastFrameAt ↔ 本地收帧时刻）。
         // 镜像不持久化该本地锚（AR-12），读回时用镜像写入时刻 `savedAt` 重播 —— 仍是本地钟，
         // 与 lastFrameAt 成对，刷新/离线的那段计入真实已用时长。
@@ -5204,8 +5365,8 @@ export const useAiStore = defineStore('ai', {
     /**
      * 一页历史条目（旧→新）→ 展示消息：工具响应对账 + 幻影卡过滤 + R-150 同轮 ASSISTANT 合并。
      *
-     * <p>分页（R-154 #16）：`idBase` = 本页首条在服务端条目列表中的下标 —— 消息 id 以它起算，
-     * 保证「加载更早」前后的 id 不撞车且同一页可复现；工具身份只认后端稳定 `toolCallId`，
+     * <p>分页（R-154 #16）：有 run 的助手复用 `assistant-{runId}`；`idBase` 只服务缺 run 的
+     * legacy 展示 ID，不参与跨来源身份推断。工具身份只认后端稳定 `toolCallId`，
      * 缺失 id 的调用不进入可见工具段，也绝不合成 `history-N-*` 身份。
      */
     buildHistoryMessages(
@@ -5279,9 +5440,6 @@ export const useAiStore = defineStore('ai', {
       // 掉了一条而不告诉它，后续每条都会拿到上一条的消息、末尾读到 undefined（合并时直接抛错，
       // 异常被 loadHistory 吞成 historyError，界面表现为历史加载失败 + 内容错位）。
       const suppressedHistoryIndexes = new Set<number>()
-      // 其中属于 synthetic 抑制的下标：**断合并窗**（旧行为里 synthetic 是 SYSTEM 条目，会把
-      // R-150 的连续 ASSISTANT 分组切断）。不断窗会把两条 ASSISTANT 合成一条并丢掉后者的 runId。
-      const syntheticSuppressedIndexes = new Set<number>()
       const builtMessages = entries.flatMap((item, index) => {
         if ((item.type || '').toUpperCase() === 'TOOL') {
           return [] // TOOL 条目：响应已并入 ASSISTANT 工具段，本身不再产生消息
@@ -5292,7 +5450,6 @@ export const useAiStore = defineStore('ai', {
         // 展示历史里也不再保留 `synthetic` 标记（消息级灰条已随之下线）。
         if (item.synthetic === true) {
           suppressedHistoryIndexes.add(index)
-          syntheticSuppressedIndexes.add(index)
           return []
         }
         const role: ChatMessage['role'] = roleOf(item.type)
@@ -5455,10 +5612,11 @@ export const useAiStore = defineStore('ai', {
           suppressedHistoryIndexes.add(index)
           return []
         }
+        const runId = typeof item.runId === 'string' && item.runId !== '' ? item.runId : null
+        const logicalMessageId = role === 'assistant' && runId !== null ? assistantMessageId(runId) : null
         const message: ChatMessage = {
-          // R-149：index 锁死 = 原始数组下标（含被跳过 TOOL 条目的空洞，不用合并后下标）。
-          // 不消费后端 `messageId` 作展示 id（身份只用 runId）。
-          id: `history-${idBase + index}`,
+          // 有 run 的助手与实时协议共用身份；history-数组下标只保留给旧数据展示。
+          id: logicalMessageId ?? `history-${idBase + index}`,
           role,
           content: '',
           parts,
@@ -5469,12 +5627,13 @@ export const useAiStore = defineStore('ai', {
           done: true,
           // R-154 #17：历史路时间戳 = 后端条目 metadata.timestamp（原样透传，仅展示用途）
           timestamp: item.timestamp,
+          ...(logicalMessageId !== null ? { messageId: logicalMessageId } : {}),
           ...(hasHistoryError ? {
             code: historyErrorCode.trim() !== '' ? historyErrorCode : null,
             errorCard: buildErrorCard(historyErrorCode, historyErrorMessage)
           } : {}),
           // 批次2：服务端条目带 runId 时落消息，保留恢复链路的 run 归属（40 条记忆窗口通常无此键）
-          ...(typeof item.runId === 'string' && item.runId !== '' ? { runId: item.runId } : {}),
+          ...(runId !== null ? { runId } : {}),
           // 批G · S4：stopped 元数据或规范 CANCELLED 终态都恢复为「已停止」，不归一成普通完成。
           ...(item.stopped === true || item.outcome === 'CANCELLED' ? { stopped: true } : {}),
           // 截断专项：长度截断（finish_reason=length）的回答不完整 —— 刷新后仍要提示
@@ -5484,24 +5643,8 @@ export const useAiStore = defineStore('ai', {
         return [message]
       })
       // ── R-150 后置 pass：同一非空 runId 的连续 ASSISTANT 合并（中间仅夹被跳过的 TOOL）──
-      // 遇 USER/SYSTEM、runId 缺失或变化即断。位置在 R-149 按 id 配对完成之后。
-      // 闸（结构性判据）：被并条目的每个 toolCall 在原始历史窗口内
-      // 存在可配对 TOOL 条目（id 相等；responseData=null 也算有回应）——与前端配对成败无关。
-      // 悬空 A(T)（无任何可配对 TOOL）不并不吞、也不开窗（纵深防御）。drop：无 toolCalls、
-      // text/思考为空且无失败事实的 ASSISTANT 直接丢弃，丢弃同时断窗。
-      const toolWindowEntries = pairingWindow.filter((item) => (item.type || '').toUpperCase() === 'TOOL')
-      const hasPairableResponse = (call: { id?: string | null }): boolean => {
-        const callId = call.id ?? null
-        if (callId === null || callId === undefined || callId === '') {
-          return false
-        }
-        if (silentSystemRejectIds.has(callId)) {
-          return false
-        }
-        return toolWindowEntries.some((entry) =>
-          (entry.toolResponses ?? []).some((response) => response.id === callId)
-        )
-      }
+      // 遇 USER/SYSTEM、runId 缺失或变化即断。parts 保留原条目顺序，工具仍按 toolCallId 对账。
+      // drop：无 toolCalls、text/思考为空且无失败事实的 ASSISTANT 直接丢弃，丢弃同时断窗。
       const mergedMessages: ChatMessage[] = []
       let builtCursor = 0
       let group: ChatMessage[] = []
@@ -5513,32 +5656,12 @@ export const useAiStore = defineStore('ai', {
           mergedMessages.push(head(group) as ChatMessage)
         } else {
           // 合并：parts 顺次拼接（保留空 text 段），seg 全局单调重排（渲染 key = kind+'-'+seg）；
-          // id 取首条（history-{首条原始 index}，flatMap 时已钉）；被并条目沿用自身 toolCallId
-          // 用其自身原始 index（flatMap 时已钉，此处不触碰）
+          // 同 run 各成员本就共享 assistant-{runId}；工具与持久化 part 身份不因重排 seg 改变。
           const headMessage = head(group) as ChatMessage
           headMessage.parts = group.flatMap((member) => (member as ChatMessage).parts)
             .map((part, seg) => ({ ...part, seg })) as MessagePart[]
-          // 同一轮拆成多条时，最后一个已记录时间才对应整轮结局；空值不覆盖。
-          for (let index = group.length - 1; index >= 0; index -= 1) {
-            const timestamp = group[index]?.timestamp
-            if (timestamp !== undefined && timestamp !== null && timestamp !== '') {
-              headMessage.timestamp = timestamp
-              break
-            }
-          }
-          // ③ 真实终态不得随合并丢失：`stopped` / `truncated` 可能落在**后续**成员上（历史把一轮拆成
-          // 多条 ASSISTANT 条目）。只做单向 OR（缺键 → true），绝不用成员的"未终止"覆盖已终止事实。
-          if (group.some((member) => member.stopped === true)) {
-            headMessage.stopped = true
-          }
-          if (group.some((member) => member.truncated === true)) {
-            headMessage.truncated = true
-          }
           for (const member of group) {
-            if (member.errorCard !== undefined || member.code !== undefined) {
-              headMessage.errorCard = member.errorCard
-              headMessage.code = member.code
-            }
+            mergeMessageOutcomeFacts(headMessage, member as ChatMessage)
           }
           deriveProjections(headMessage) // 拼接 + 重 seg 后重派生投影（content/toolRuns 随 parts）
           mergedMessages.push(headMessage)
@@ -5551,12 +5674,7 @@ export const useAiStore = defineStore('ai', {
           continue // 无消息产出（R-149 已跳过），不断窗
         }
         if (suppressedHistoryIndexes.has(historyIndex)) {
-          // 该条目整条未产出消息（只带槽位放行幻影卡 / synthetic 系统提示）：不推进游标。
-          // synthetic 额外**断开 assistant 合并窗**（它原本是 SYSTEM 条目）—— 否则前后两条
-          // ASSISTANT 会被并成一条、后者 runId 丢失；断窗不会造出任何气泡。
-          if (syntheticSuppressedIndexes.has(historyIndex)) {
-            flushGroup()
-          }
+          // 不产出消息的条目不推进游标，也不另造身份；后续 run 变化仍会断开合并窗。
           continue
         }
         const message = builtMessages[builtCursor] as ChatMessage
@@ -5573,12 +5691,6 @@ export const useAiStore = defineStore('ai', {
         if (calls.length === 0 && (item.text ?? '').trim().length === 0 && blankReasoning
           && message.errorCard == null && message.code == null) {
           flushGroup() // drop 规则：无正文、无思考、无失败的 ASSISTANT 丢弃且断窗
-          continue
-        }
-        // 闸：被并条目的每个 toolCall 须存在可配对 TOOL 条目（无 toolCalls 时恒真）
-        if (!calls.every((call) => hasPairableResponse(call))) {
-          flushGroup() // 悬空 A(T)：不并、不吞、不开窗
-          mergedMessages.push(message)
           continue
         }
         const previous = last(group)
@@ -5699,9 +5811,7 @@ export const useAiStore = defineStore('ai', {
         && headMessage.runId && tail.runId && headMessage.runId === tail.runId) {
         headMessage.parts = [...tail.parts, ...headMessage.parts]
           .map((part, seg) => ({ ...part, seg })) as MessagePart[]
-        if (headMessage.timestamp === undefined && tail.timestamp !== undefined) {
-          headMessage.timestamp = tail.timestamp
-        }
+        mergeMessageOutcomeFacts(headMessage, tail, true)
         deriveProjections(headMessage)
         older = older.slice(0, -1)
       }
@@ -5745,15 +5855,8 @@ export const useAiStore = defineStore('ai', {
     /**
      * 批G · G3 / 刷新回归：把镜像里**仍在途**的那一轮对账进历史。
      *
-     * <p>身份只用 `runId`（不看正文推断轮次）：
-     * <ol>
-     * <li>先按 runId 在整个历史窗口找本轮 USER；未命中时只认"历史末条是未答复 USER、不带别的
-     *     runId、归一正文相同"的窄情形。历史末条是助手或两侧 runId 不同 ⇒ 不合并提问；</li>
-     * <li>助手：按 runId 找本轮历史助手；没有 runId 命中时用 toolCallId 反查（强证据）；</li>
-     * <li>找到本轮助手就按 toolCallId 对账（状态单调、结果/决策字段跟随胜者）；历史终态已覆盖
-     *     镜像最新内容时保持完成，否则交回镜像在途态，权威 run 续收只重开同 runId 宿主；</li>
-     * <li>历史没有本轮助手才补入镜像 tail。</li>
-     * </ol>
+     * <p>runId/messageId 定位唯一 UI 助手，part seq/toolCallId 对账内容。历史已有本轮助手时
+     * 只更新这一条，未匹配的镜像版本不得克隆；历史没有本轮助手时才保留最新的一份镜像 tail。
      */
     mergeMirrorInFlightRound(
       historical: ChatMessage[],
@@ -5764,20 +5867,17 @@ export const useAiStore = defineStore('ai', {
       if ((!inFlight && !preserveStoppedRound) || mirrorMessages.length === 0) {
         return historical
       }
-      const tail = last(mirrorMessages)
-      if (!tail || tail.role !== 'assistant') {
+      const source = last(mirrorMessages)
+      if (!source || source.role !== 'assistant') {
         return historical
       }
       const mirrorUser = [...mirrorMessages].reverse().find((item) => item.role === 'user') ?? null
-      const mirrorUserIndex = mirrorUser ? mirrorMessages.indexOf(mirrorUser) : -1
-      const roundRunId = typeof tail.runId === 'string' && tail.runId !== ''
-        ? tail.runId
+      const roundRunId = typeof source.runId === 'string' && source.runId !== ''
+        ? source.runId
         : (mirrorUser?.runId ?? null)
       if (roundRunId === null) {
         return historical
       }
-      const mirrorAssistants = mirrorMessages.slice(mirrorUserIndex + 1)
-        .filter((message) => isSameRoundAssistant(message, roundRunId))
       const historyUserIndex = mirrorUser
         ? findHistoryRoundUserIndex(historical, mirrorUser, roundRunId)
         : -1
@@ -5788,38 +5888,18 @@ export const useAiStore = defineStore('ai', {
           historyUser.timestamp = mirrorUser.timestamp
         }
       }
-      const seenIds = new Set(merged.map((message) => message.id))
       const roundTargets = roundAssistantMessages(merged, historyUserIndex, roundRunId)
-      const occupiedTargets = new Set<ChatMessage>()
-      const firstTarget = head(roundTargets) ?? null
-      const findAvailableTarget = (
-        source: ChatMessage,
-        unavailable: Set<ChatMessage>
-      ): ChatMessage | null => {
-        const byId = roundTargets.find((message) => message.id === source.id
-          && isSameRoundAssistant(message, roundRunId) && !unavailable.has(message))
-        if (byId) {
-          return byId
-        }
-        const byToolCallId = assistantMessageByToolCallId(roundTargets, source)
-        return byToolCallId && isSameRoundAssistant(byToolCallId, roundRunId)
-          && !unavailable.has(byToolCallId) ? byToolCallId : null
-      }
-      const matchedTargets: (ChatMessage | null)[] = []
-      const reservedTargets = new Set<ChatMessage>()
-      for (const source of mirrorAssistants) {
-        const target = source ? findAvailableTarget(source, reservedTargets) : null
-        matchedTargets.push(target)
+      const logicalMessageId = assistantMessageId(roundRunId)
+      const target = merged.find((message) => message.role === 'assistant'
+        && (message.id === logicalMessageId || message.messageId === logicalMessageId
+          || message.id === source.id
+          || (source.messageId !== undefined && message.messageId === source.messageId)))
+        ?? assistantMessageByToolCallId(roundTargets, source)
+        ?? head(roundTargets)
+        ?? null
+      if (mirrorUser && historyUserIndex < 0 && !merged.some((message) => message.id === mirrorUser.id)) {
         if (target) {
-          reservedTargets.add(target)
-        }
-      }
-
-      // 本轮用户：toolCallId 命中但 target 之前**没有**任何 USER ⇒ 插到 target 之前
-      // （按 id 去重；只看位置，不做文本猜测）。只有历史完全没有同轮助手时才补到尾部。
-      if (mirrorUser && historyUserIndex < 0 && !seenIds.has(mirrorUser.id)) {
-        if (firstTarget) {
-          const targetIndex = merged.indexOf(firstTarget)
+          const targetIndex = merged.indexOf(target)
           let hasPrecedingUser = false
           for (let index = targetIndex - 1; index >= 0; index -= 1) {
             const message = merged[index]
@@ -5831,88 +5911,37 @@ export const useAiStore = defineStore('ai', {
           }
           if (!hasPrecedingUser) {
             merged.splice(targetIndex < 0 ? merged.length : targetIndex, 0, cloneMessage(mirrorUser))
-            seenIds.add(mirrorUser.id)
           }
         } else {
           merged.push(cloneMessage(mirrorUser))
-          seenIds.add(mirrorUser.id)
         }
       }
+      if (!target) {
+        const restored = cloneMessage(source)
+        restored.runId = roundRunId
+        restored.messageId = assistantMessageId(roundRunId)
+        restored.id = restored.messageId
+        merged.push(restored)
+        return merged
+      }
 
-      let previousAnchor: ChatMessage | null = null
-      for (let index = 0; index < mirrorAssistants.length; index += 1) {
-        const source = mirrorAssistants[index]
-        if (!source) {
-          continue
-        }
-        const target = matchedTargets[index] ?? null
-        if (target) {
-          occupiedTargets.add(target)
-          previousAnchor = target
-          if (roundRunId !== null && !target.runId) {
-            target.runId = roundRunId
-          }
-          if (target.timestamp === undefined && source.timestamp !== undefined) {
-            target.timestamp = source.timestamp
-          }
-          const completedByHistory = hasHistoryCoveredMirrorRound(target, source)
-          canMergeMirrorRoundParts(target, source)
-          if (preserveStoppedRound && source === tail) {
-            target.stopped = true
-          }
-          // 只有 target 确实是合并结果的尾部时才交回流式态；历史中部目标不得被伪造成在流式。
-          if (source === tail && last(merged) === target) {
-            target.streaming = completedByHistory
-              ? false
-              : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
-            target.done = completedByHistory
-              ? true
-              : (typeof tail.done === 'boolean' ? tail.done : false)
-          }
-          continue
-        }
-
-        // 历史没有这条助手：同 id 已存在则就地合并，否则按镜像顺序插入，不重复建段。
-        const existing = merged.find((message) => message.id === source.id
-          && isSameRoundAssistant(message, roundRunId) && !occupiedTargets.has(message))
-        if (existing && existing.role === 'assistant') {
-          occupiedTargets.add(existing)
-          previousAnchor = existing
-          if (existing.timestamp === undefined && source.timestamp !== undefined) {
-            existing.timestamp = source.timestamp
-          }
-          const completedByHistory = hasHistoryCoveredMirrorRound(existing, source)
-          canMergeMirrorRoundParts(existing, source)
-          if (preserveStoppedRound && source === tail) {
-            existing.stopped = true
-          }
-          if (source === tail && last(merged) === existing) {
-            existing.streaming = completedByHistory
-              ? false
-              : (typeof tail.streaming === 'boolean' ? tail.streaming : true)
-            existing.done = completedByHistory
-              ? true
-              : (typeof tail.done === 'boolean' ? tail.done : false)
-          }
-          continue
-        }
-        if (!seenIds.has(source.id)) {
-          const clone = cloneMessage(source)
-          const nextTarget = matchedTargets.slice(index + 1)
-            .find((candidate) => candidate !== null) ?? null
-          let insertionIndex = merged.length
-          if (nextTarget) {
-            insertionIndex = merged.indexOf(nextTarget)
-          } else if (previousAnchor) {
-            const previousIndex = merged.indexOf(previousAnchor)
-            if (previousIndex >= 0) {
-              insertionIndex = previousIndex + 1
-            }
-          }
-          merged.splice(insertionIndex >= 0 ? insertionIndex : merged.length, 0, clone)
-          previousAnchor = clone
-          seenIds.add(source.id)
-        }
+      target.runId = roundRunId
+      target.messageId = assistantMessageId(roundRunId)
+      if (target.timestamp === undefined && source.timestamp !== undefined) {
+        target.timestamp = source.timestamp
+      }
+      const completedByHistory = hasHistoryCoveredMirrorRound(target, source)
+      canMergeMirrorRoundParts(target, source)
+      if (preserveStoppedRound) {
+        target.stopped = true
+      }
+      if (last(merged) === target) {
+        target.streaming = completedByHistory
+          ? false
+          : (typeof source.streaming === 'boolean' ? source.streaming : true)
+        target.done = completedByHistory
+          ? true
+          : (typeof source.done === 'boolean' ? source.done : false)
       }
       return merged
     },
@@ -6260,6 +6289,7 @@ export const useAiStore = defineStore('ai', {
           ?? this.messages.find((item) => item.role === 'assistant' && item.runId === runId)
           ?? this.appendAssistantMessage('')
         host.runId = runId
+        host.messageId = assistantMessageId(runId)
         const existing = findToolPart(host, toolCallId)
         if (existing !== null) {
           this.upsertToolPart(host, {
@@ -6317,6 +6347,7 @@ export const useAiStore = defineStore('ai', {
         host = this.appendAssistantMessage('')
       }
       host.runId = runId
+      host.messageId = assistantMessageId(runId)
       host.streaming = true
       host.done = false
       delete host.interrupted
@@ -6511,8 +6542,8 @@ export const useAiStore = defineStore('ai', {
         expireResidueToolParts(message)
         deriveProjections(message)
       }
-      // 本地恢复已失败，交互单例与恢复队列一并清场；不发起任何后端取消/回灌。
-      this.cleanupTerminalInteractionState()
+      // history 可重试：表单先 flush 并保留同 toolCallId 草稿，其他交互单例照常清场。
+      this.cleanupTerminalInteractionState(scope === 'history')
       this.suspended = false
       for (const id of pendingIds) {
         const message = this.messages.find((item) => item.id === id)
@@ -6822,6 +6853,7 @@ export const useAiStore = defineStore('ai', {
       // 批次2：快照重建的宿主由该 run 的待决条目决定归属（恢复链路的 run 归属，不得留空/留旧）。
       // 待决条目证明本轮仍有后续续跑；只恢复这个宿主的活动事实，不把历史助手一律标成流式。
       host.runId = runId
+      host.messageId = assistantMessageId(runId)
       host.streaming = true
       host.done = false
       // 批2：挂起卡不再是"就地写独立投影"，而是**落段再派生** —— 段侧 requiresAction=true
@@ -7827,6 +7859,7 @@ export const useAiStore = defineStore('ai', {
       const assistant = host ?? this.appendAssistantMessage('')
       // 批次2：重挂的宿主就是这一 run 的消息 —— 归属必须钉住（后续重挂/恢复按 message.runId 定位）
       assistant.runId = targetRunId
+      assistant.messageId = assistantMessageId(targetRunId)
       // 接管 = 重新建立活连接：上一段断流事实作废（与 `stopped=false` 同处）
       delete assistant.interrupted
       this.loading = true
@@ -8996,9 +9029,14 @@ export const useAiStore = defineStore('ai', {
      * <p>"在场" = 活动表单 / 排队表单 / 仍 `requiresAction` 的工具段（确认门、前端卡、待填表单）。
      * 终态卡与上一会话留下的 `cm.ai.form.draft.<toolCallId>` 都不在场 ⇒ 删除。换会话时
      * `adoptFreshSession` 先收口活动/排队表单，故白名单为空、全部清掉；接手让渡会话后由
-     * `takeOverSession` 在历史载入后调用，保留新会话仍在场的那几张。
+     * `takeOverSession` 在历史载入后调用，保留新会话仍在场的那几张。history/快照尚不可用时
+     * 不判定孤儿，待权威恢复成功后再按真实在场集合清理。
      */
     pruneOrphanFormDrafts(): void {
+      if (this.historyError !== null || this.recoveryGap?.reason === 'history-unavailable'
+        || this.recoveryGap?.reason === 'snapshot-unavailable') {
+        return
+      }
       const present = new Set<string>()
       if (this.activeForm) {
         present.add(this.activeForm.toolCallId)
@@ -9019,15 +9057,19 @@ export const useAiStore = defineStore('ai', {
     /**
      * 轮终态的"人围栏单例"收口（FE-25）：`done` / `error` 帧到达时调用一次。
      *
-     * <p>收什么：活动表单（连同草稿镜像）、上传交接单例、表格预览计划 + 失效标记、快照恢复的
+     * <p>收什么：活动表单（默认连同草稿；history 可重试时 flush 后保留）、上传交接单例、表格预览计划 + 失效标记、快照恢复的
      * 串行队列、界面播报（`uiAnnouncement`）。为什么要一起收：这些单例一旦残留，就等于
      * "已结束的一轮仍能被界面推动"——上传交接会把 `frontend_tool_result` 打到收口的 run 上、
      * 预览还能再"应用"一次写入、队列会在换轮前把旧卡补进新现场；播报是**一次性的**
      * aria-live 文案，轮已结束还留着，读屏会把它当成这一轮的新事实念出来。
      * 段侧的 `requiresAction` 由 `expireResidueToolParts` 同口径收掉，故这里只清单例、不碰段。
      */
-    cleanupTerminalInteractionState(): void {
-      this.dropActiveForm()
+    cleanupTerminalInteractionState(preserveFormDrafts = false): void {
+      if (preserveFormDrafts) {
+        this.suspendActiveFormDrafts()
+      } else {
+        this.dropActiveForm()
+      }
       this.activeUploadHandoff = null
       this.stalePreviewToolCallId = null
       // reason='stop'：整轮结束，卡面不再需要"预览已失效"提示（同 stop() 口径）
@@ -10552,6 +10594,7 @@ export const useAiStore = defineStore('ai', {
       activeRoundHostId = host.id
       pendingAttachRunId = runId
       host.runId = runId
+      host.messageId = assistantMessageId(runId)
       host.streaming = true
       host.done = false
       // 原 send 的 /chat 传输已经失败；先收掉，避免它继续充当 currentAbort 干扰判活/停止目标。
@@ -11019,8 +11062,9 @@ export const useAiStore = defineStore('ai', {
       if (sessionId === '') {
         return false
       }
+      const feedbackMessageId = this.messages.find((message) => message.id === messageId)?.messageId || messageId
       try {
-        await aiApi.feedbackSubmit({ messageId, sessionId, rating, excerpt })
+        await aiApi.feedbackSubmit({ messageId: feedbackMessageId, sessionId, rating, excerpt })
         return true
       } catch (error) {
         logCaughtError(error, 'ai:feedback')
@@ -12073,6 +12117,10 @@ export const useAiStore = defineStore('ai', {
 
       // T6：按 runId 记录最大帧序号（reattach 时回传，服务端只补增量）
       const seq = frameSeq(frame)
+      const seqRunId = frame.runId ?? message.runId ?? (ownedByActiveRound ? this.activeRunId : null)
+      if (seq !== null && seqRunId && seq <= (this.runSeq[seqRunId] ?? 0)) {
+        return
+      }
 
       if (backendStopOutcome && frame.type === 'tool_result') {
         if (findToolPart(message, frame.toolCallId)?.kind2 !== 'BACKEND'
@@ -12082,9 +12130,8 @@ export const useAiStore = defineStore('ai', {
         applyFrameToPartsAndClearPlaceholder(message, frame)
         deriveProjections(message)
         if (seq !== null) {
-          const frameRunId = frame.runId ?? this.activeRunId
-          if (frameRunId !== null) {
-            this.runSeq = recordRunSeq(this.runSeq, frameRunId, seq)
+          if (seqRunId) {
+            this.runSeq = recordRunSeq(this.runSeq, seqRunId, seq)
           }
           markApplied(message, seq)
         }
@@ -12107,9 +12154,8 @@ export const useAiStore = defineStore('ai', {
         this.clearGateAck(frame.toolCallId)
         deriveProjections(message)
         if (seq !== null) {
-          const frameRunId = frame.runId ?? this.activeRunId
-          if (frameRunId !== null) {
-            this.runSeq = recordRunSeq(this.runSeq, frameRunId, seq)
+          if (seqRunId) {
+            this.runSeq = recordRunSeq(this.runSeq, seqRunId, seq)
           }
           markApplied(message, seq)
         }
@@ -12146,15 +12192,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
-      // 续收锚点之前的帧只可能是重复投递；序号仍只用于展示去重，不用于授权工具执行。
-      if (seq !== null) {
-        const runId = frame.runId ?? this.activeRunId
-        if (runId && seq <= (this.runSeq[runId] ?? 0)) {
-          return
-        }
-        if (runId) {
-          this.runSeq = recordRunSeq(this.runSeq, runId, seq)
-        }
+      // 已通过 lastAppliedSeq 单调闸；序号仍只用于展示去重，不用于授权工具执行。
+      if (seq !== null && seqRunId) {
+        this.runSeq = recordRunSeq(this.runSeq, seqRunId, seq)
       }
 
       // R2-1（批2）：seq 幂等 —— 同一帧被重复投递（reattach 全量回放 / 双连接竞态）时整帧跳过：
@@ -12200,6 +12240,7 @@ export const useAiStore = defineStore('ai', {
           // 批次2：把 run 归属钉在宿主消息上 —— 断流重挂/恢复只认它（刷新后 activeRunId 可能为空/换轮）
           if (typeof frame.runId === 'string' && frame.runId !== '') {
             message.runId = frame.runId
+            message.messageId = assistantMessageId(frame.runId)
             // 刷新回归：只给"列表最后一条 USER 且紧邻宿主之前"的本轮提问补 runId（不改 id）。
             // 旧轮用户消息、带别的 runId 的用户消息一律不动。
             stampRoundUserRunId(this.messages, message, frame.runId)
@@ -12225,6 +12266,7 @@ export const useAiStore = defineStore('ai', {
           // 与轮终态）。批2：写入统一走 applyFrameToParts。
           if (typeof frame.runId === 'string' && frame.runId !== '' && !message.runId) {
             message.runId = frame.runId
+            message.messageId = assistantMessageId(frame.runId)
           }
           applyFrameToPartsAndClearPlaceholder(message, frame)
           break

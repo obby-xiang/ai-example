@@ -267,6 +267,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   /** Spring AI MessageType 名称：USER / ASSISTANT / SYSTEM / TOOL */
   type: string
   text: string
+  /** 持久化条目的稳定身份（additive）；与 segments[].seq 共同定位持久化 part。 */
+  entryId?: string
   /** assistant 的真实展示段序；工具与正文的顺序只认它，缺失时不重建工具顺序。 */
   segments?: Array<{
     kind: 'text' | 'reasoning' | 'tool'
@@ -458,7 +460,7 @@ export interface ToolRun {
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
-  /** DC-14 T5：服务端给的消息身份（message_start/end 与 delta 帧的 messageId） */
+  /** 助手在实时/history/镜像间复用的逻辑身份；当前为 assistant-{runId}。 */
   messageId?: string
   /**
    * 批次2：这条消息所属的 **run**（后端 `start` / `message_start` 帧的 `runId`）。
@@ -570,6 +572,10 @@ export interface ChatMessage {
 /** 消息段序号：同一消息内单调递增（封口后另起的段不复用编号）。 */
 interface MessagePartBase {
   seg: number
+  /** 持久化条目身份；与 seq 成对出现，缺省 = 实时新段或旧数据无跨来源身份。 */
+  entryId?: string
+  /** 该段首个展示帧的 run 内序号；不是本地 seg，也不用于压缩事件。 */
+  seq?: number
 }
 
 /** A10 R-15：正文/思考 delta 的帧级截断字段（与 ToolPart 同形；缺键 = 未截断）。 */
@@ -971,18 +977,18 @@ export interface GateSubmission {
  * 外部读（调试/对账脚本直接看 JSON）不需要自行派生。
  *
  * 批2（本轮整改，schema **additive**）：message 级可选键 `errorCard` / `code` / `unconfirmed` /
- * `recoveryGap` / `interrupted` / `runId` / `timestamp` —— 刷新后失败现场、中性态、断流事实、
- * run 归属与已记录时间仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而恢复到错的轮次。
+ * `recoveryGap` / `interrupted` / `runId` / `messageId` / `timestamp` —— 刷新后失败现场、中性态、
+ * 断流事实、run 归属、实时助手身份与已记录时间仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而恢复到错的轮次。
  * （`synthetic` 自 B5 起不再入镜像；旧镜像读取侧按同一口径过滤。）
  *
- * <p><b>为什么不升 `v`</b>：这些键全是**可选**（缺省 = 没有现场），读写两侧组合自洽
- * （新前端把缺键读成"无现场"），段结构未变。将来若出现**必填**新键或段结构变化，再升 `v`。
+ * <p><b>为什么不升 `v`</b>：新增键全是**可选**（缺省 = 没有现场），读写两侧组合自洽
+ * （新前端把缺键读成"无现场"），段判别结构未变。将来若出现**必填**新键或段结构变化，再升 `v`。
  */
 export interface AiSessionMirror {
   /** 镜像结构版本（当前恒为 {@link MIRROR_VERSION}；不匹配的镜像整份丢弃） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'interrupted' | 'runId' | 'timestamp'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'interrupted' | 'runId' | 'messageId' | 'timestamp'>>
   /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
   /**

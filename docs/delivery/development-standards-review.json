@@ -4163,6 +4163,34 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解析、文本截断或UTF-8处理。"},
         "verification-review": {"status": "checked", "reason": "agent-1138原finding已ADDRESSED并APPROVE；最终node scripts/build.mjs构建27.50s成功，动态验收NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:da915df8df040d788d4d143e68aa3b7e396c63f1dcd96e5c52e3f7c42827b9ab",
+      "status": "reviewed",
+      "reason": "逐函数关联复核实时/history/镜像/分页/停止/快照/表单/反馈身份和恢复；三轮修复序号污染、内容丢失、错误归并、错序和草稿清理后独立终审接受。",
+      "reviewedAt": "2026-11-09T02:04:48+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1135",
+      "specChanges": [
+        {
+          "change": "history以可选entryId字段additive透出持久化身份，同run条目投影为一个assistant-{runId} UI助手，镜像仅作last-good缓存并按entryId+seq/toolCallId对账。",
+          "reason": "实时与历史身份断裂及未匹配镜像克隆可造成整轮重复、版本分叉、内容丢失和错序。",
+          "impact": "history additive兼容；全量恢复以权威历史重建，普通SSE按seq增量，旧数据保留legacy单份展示，动态根因与场景验收NOT_RUN。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "transcriptItem仅additive透出既有entryId，不改存储、事件或其他history字段。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "AiHistoryMessage增加entryId，MessagePartBase增加entryId/seq，镜像保存messageId，未创造partId。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "同run投影唯一UI助手，禁止未匹配克隆；entryId唯一候选匹配、seq有序插入、旧轮seqRunId隔离、草稿保留、反馈messageId映射及跨页结局合并。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有messageId/entryId/segments/toolCallId/seq和公开history，不新增依赖、存储或事件框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅history字段映射和TypeScript恢复逻辑，无Java方法实现变化，前端无单函数50行限制。"},
+        "logging-exception-safety": {"status": "checked", "reason": "history/快照不可用保留真实恢复缺口，不清空草稿或伪造完成，未新增异常文本/敏感日志。"},
+        "toc-interaction": {"status": "checked", "reason": "同run只保留一个有序UI时间线，旧断流不复活，用户输入与表单草稿不因恢复丢失，反馈身份跨刷新一致。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "entryId+segments[].seq、toolCallId、普通SSE seq和压缩eventId分责，旧generation/revision隔离，副作用不重放。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "完整正文与parts按稳定身份和seq有序对账，非前缀冲突保留history，delta仅处理末尾文本段，避免逐token全parts扫描。"},
+        "verification-review": {"status": "checked", "reason": "agent-1135三轮finding均ADDRESSED并最终接受，A10/B20+C30顺序复核通过；Maven BUILD SUCCESS，最终前端构建27.48s成功，动态验收NOT_RUN。"}
+      }
     }
   ]
 }
