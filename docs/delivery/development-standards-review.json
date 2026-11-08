@@ -4020,6 +4020,36 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "完整text/reasoning/toolCallId/首帧seq与原始帧对照，重复/畸形/多余帧均失败，不以子串代替证据。"},
         "verification-review": {"status": "checked", "reason": "agent-1122三轮审查后全部finding ADDRESSED并APPROVE；node --check通过，真实API/Redis/适配器/REPLACE和压测NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:4db7a2004a7000287805e9fb03aa217c78935bee29043008efe89df7deb4a90e",
+      "status": "reviewed",
+      "reason": "逐hunk复核问题证据、代码事实与待证根因、业界调研、方案B设计、分批施工/审查计划及C-130～C-139内容验收矩阵；三轮返修后独立终审APPROVE。",
+      "reviewedAt": "2026-11-08T23:40:00+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1127",
+      "specChanges": [
+        {
+          "change": "新增AI对话恢复与导出内容治理设计及C-130～C-139独立验收场景，修正C-67持久化条目与同run UI投影的歧义。",
+          "reason": "真实界面出现整轮重复、两个版本内容不一致、创建前反复追问、过程卡和技术文案；既有验收未形成完整刷新与内容对账。",
+          "impact": "仅新增/调整文档与未来施工验收口径，生产行为不变；全部新场景NOT_RUN，不宣称全部AI场景已覆盖。"
+        }
+      ],
+      "files": [
+        {"path": "docs/research/README.md", "status": "checked", "reason": "研究索引103→104，链接目标存在，计数与新增调研一致。"},
+        {"path": "docs/research/调研-AI对话重复恢复与导出内容治理-2026-11-08.md", "status": "checked", "reason": "区分界面事实、代码事实和待证根因，记录官方调研、A/B/C方案比较、推荐方案B及未验证边界。"},
+        {"path": "docs/superpowers/specs/2026-11-08-ai-conversation-recovery-content-design.md", "status": "checked", "reason": "固定稳定身份、全量/增量恢复、镜像缓存、宿主闭环、ToC文案和内容审查设计，不重写事件框架。"},
+        {"path": "docs/superpowers/plans/2026-11-08-ai-conversation-recovery-content-remediation.md", "status": "checked", "reason": "明确Task0证据、恢复/宿主/文案/验收批次、现有方法映射及kind=CONFIRM启动确认和预检指纹。"},
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "C-67区分持久化条目与UI投影，新增C-130～C-139确定性刷新、动态文案及逐CASE逐轮完整内容对账，全部NOT_RUN。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "方案复用现有Redis/SSE/history/pending/ledger、ToolPreflightService、HostForm和ConfirmGate，不新增依赖或事件框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅Markdown文档，无Java或前端生产代码变化，未来方法签名仅在计划中登记。"},
+        "logging-exception-safety": {"status": "checked", "reason": "文档不记录密钥、原始异常体或真实敏感会话内容；后续证据要求脱敏、有界和NOT_RUN如实分类。"},
+        "toc-interaction": {"status": "checked", "reason": "清退宿主、影响面暂不可估、创建≠执行和通用表单标题，自动过程静默且同一事实只表达一次。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "UI使用assistant-{runId}，part使用(entryId,segments[].seq)，普通SSE按seq幂等，启动使用kind=CONFIRM并复用预检与台账。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "验收要求完整正文和parts逐值对账，不用trim、去空白或前缀比较掩盖重复、缺字和错序。"},
+        "verification-review": {"status": "checked", "reason": "agent-1127三轮REJECT意见均修正并终审APPROVE；本批git diff --check通过，生产编译和动态测试NOT_RUN。"}
+      }
     }
   ]
 }
