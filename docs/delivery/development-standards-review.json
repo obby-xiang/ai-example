@@ -3572,6 +3572,26 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "异常read与EOF均按seq有界重挂，archive完整性校验保留，字符和帧序不回退。"},
         "verification-review": {"status": "checked", "reason": "agent-1091联合复核PASS、agent-1092生产审查PASS；生产Maven compile BUILD SUCCESS、node --check通过；未执行动态API/浏览器/Redis/DB测试。"}
       }
+    },
+    {
+      "fingerprint": "sha256:bba516fa92a170ec637c53c27bb574b7a6a59219fb46d9ac6783d48c1e3193ef",
+      "status": "reviewed",
+      "reason": "复核独立脚本任务号与真实XLSX元数据解析，修复实测假FAIL；结构化createdTaskId优先、文本格式兼容、meta标签行/编码行和def_code通用偏移均经独立复审PASS。",
+      "reviewedAt": "2026-11-08T14:00:19+08:00",
+      "reviewer": "K3.1 Pro主会话及独立复审agent-1091",
+      "specChanges": [],
+      "files": [
+        {"path": "scripts/verification/ai-one-turn-interaction-api.mjs", "status": "checked", "reason": "createdTaskId兼容任务 #N 已创建及旧格式；_meta第一行读def_code标签、第二行读实际配置编码和业务code映射，按def_code通用偏移定位数据列并校验表头，不硬编码任务号、A列或CURRENCY。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用真实工具结果、ExcelWriter labelRow/codeRow契约及既有JSZip，无新增依赖或生产旁路。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅独立Node验证脚本修改，无Java代码或普通测试代码变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "非法元数据、空配置编码、无表头和未知列均明确失败，不将解析异常吞成空条件或PASS。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批只修验证证据，无用户界面或操作文案变化。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "任务ID仍须新建且不在完整基线中，工作簿真实行内容、条件删除和清理语义不变。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按真实XLSX单元格引用和元数据映射读取，列引用通用计算，不改变SSE/UTF-8处理。"},
+        "verification-review": {"status": "checked", "reason": "agent-1091对任务号和_def_code行结构复核PASS，node --check通过；实测重跑仍待执行，不预写PASS。"}
+      }
     }
   ]
 }

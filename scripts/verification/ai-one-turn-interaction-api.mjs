@@ -862,6 +862,27 @@ function worksheetRows(xml, sharedStrings) {
   return rows
 }
 
+function spreadsheetColumnIndex(reference) {
+  if (typeof reference !== 'string' || !/^[A-Z]+$/.test(reference)) {
+    throw new ScenarioFailure(`invalid spreadsheet column reference: ${reference}`)
+  }
+  let index = 0
+  for (const character of reference) index = index * 26 + character.charCodeAt(0) - 64
+  return index
+}
+
+function spreadsheetColumnName(index) {
+  if (!Number.isSafeInteger(index) || index <= 0) throw new ScenarioFailure(`invalid spreadsheet column index: ${index}`)
+  let remaining = index
+  let name = ''
+  while (remaining > 0) {
+    const digit = (remaining - 1) % 26
+    name = String.fromCharCode(65 + digit) + name
+    remaining = Math.floor((remaining - 1) / 26)
+  }
+  return name
+}
+
 async function inspectXlsx(bytes) {
   let JSZip
   try { JSZip = frontendRequire('jszip') } catch (error) {
@@ -878,15 +899,39 @@ async function inspectXlsx(bytes) {
     [...match[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((text) => xmlDecode(text[1])).join(''))
   const dataRows = worksheetRows(await readXml('xl/worksheets/sheet1.xml'), sharedStrings)
   const metaRows = worksheetRows(await readXml('xl/worksheets/sheet2.xml'), sharedStrings)
+  const labelRow = metaRows.find((row) => row.number === 1) ?? metaRows[0]
   const codeRow = metaRows.find((row) => row.number === 2) ?? metaRows[1]
-  const codeColumn = Object.entries(codeRow?.values ?? {}).find(([, value]) => value === 'code')?.[0] ?? null
-  if (!codeColumn) throw new ScenarioFailure('xlsx _meta sheet has no code field mapping')
+  const labelEntries = Object.entries(labelRow?.values ?? {})
+  const codeEntries = Object.entries(codeRow?.values ?? {})
+  const defCodeColumns = labelEntries.filter(([, value]) => value === 'def_code').map(([column]) => column)
+  const metaCodeColumns = codeEntries.filter(([, value]) => value === 'code').map(([column]) => column)
+  if (defCodeColumns.length !== 1 || metaCodeColumns.length !== 1) {
+    throw new ScenarioFailure('xlsx _meta labelRow/codeRow must contain exactly one def_code label and one business code mapping')
+  }
+  const defCodeColumn = defCodeColumns[0]
+  const metaCodeColumn = metaCodeColumns[0]
+  const defCode = String(codeRow.values[defCodeColumn] ?? '').trim()
+  if (defCode === '') {
+    throw new ScenarioFailure('xlsx _meta codeRow def_code value is empty')
+  }
+  const defCodeIndex = spreadsheetColumnIndex(defCodeColumn)
+  const metaCodeIndex = spreadsheetColumnIndex(metaCodeColumn)
+  const dataCodeColumn = spreadsheetColumnName(metaCodeIndex - defCodeIndex)
+  const headerRow = dataRows.find((row) => row.number === 1)
+  if (!headerRow || !Object.prototype.hasOwnProperty.call(headerRow.values, dataCodeColumn)
+    || String(headerRow.values[dataCodeColumn] ?? '').trim() === '') {
+    throw new ScenarioFailure(`xlsx sheet1 has no valid header at mapped dataCodeColumn ${dataCodeColumn}`)
+  }
   const populated = dataRows.filter((row) => row.number > 1 && Object.values(row.values).some((value) => value !== ''))
-  const codes = populated.map((row) => row.values[codeColumn] ?? '')
+  const codes = populated.map((row) => row.values[dataCodeColumn] ?? '')
   return {
     sheet: 'sheet1',
     metaSheet: 'sheet2',
-    codeColumn,
+    defCode,
+    defCodeColumn,
+    metaCodeColumn,
+    dataCodeColumn,
+    columnOffset: defCodeIndex,
     dataRowCount: populated.length,
     codes,
     rows: populated.slice(0, 100).map((row) => ({ row: row.number, cells: row.values })),
@@ -1150,7 +1195,10 @@ async function handleFrontend(context, frame, runId) {
 function extractCreatedTaskId(frame) {
   const structured = idOf(frame.createdTaskId ?? frame.data?.createdTaskId)
   if (structured !== null) return structured
-  return idOf(/已创建(?:导出|导入)任务\s*#(\d+)/.exec(String(frame.result ?? ''))?.[1])
+  const result = String(frame.result ?? '')
+  const currentFormat = /任务\s*#(\d+)\s*已创建/.exec(result)
+  if (currentFormat) return idOf(currentFormat[1])
+  return idOf(/已创建(?:导出|导入)任务\s*#(\d+)/.exec(result)?.[1])
 }
 
 async function handleConfirm(context, frame, runId) {
