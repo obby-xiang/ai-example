@@ -4050,6 +4050,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "验收要求完整正文和parts逐值对账，不用trim、去空白或前缀比较掩盖重复、缺字和错序。"},
         "verification-review": {"status": "checked", "reason": "agent-1127三轮REJECT意见均修正并终审APPROVE；本批git diff --check通过，生产编译和动态测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f31aed7ef2a0cfc135ae9e887d371f62b3f19a47e492932f5afa8bfd91756cb9",
+      "status": "reviewed",
+      "reason": "逐段复核Task0静态身份缺口、镜像克隆风险、宿主映射与CONFIRM启动复用边界；两处事实表述返修后独立复审spec/quality均APPROVE。",
+      "reviewedAt": "2026-11-09T00:13:04+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1132",
+      "specChanges": [
+        {
+          "change": "Task0动态取证按用户禁止测试验证的要求改为静态代码与宿主映射，动态根因和C-130～C-139继续NOT_RUN。",
+          "reason": "需要在不运行动态验证的前提下给后续施工提供准确的身份和现有调用链边界。",
+          "impact": "仅新增静态分析文档，生产行为不变；不宣称镜像合并是动态唯一根因。"
+        }
+      ],
+      "files": [
+        {"path": "docs/research/分析-AI对话重复恢复根因-2026-11-08.md", "status": "checked", "reason": "记录assistant-{runId}、history未透出entryId、同run合并前置闸、未匹配镜像克隆风险、现有宿主方法及kind=CONFIRM启动要求。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "后续最小方案复用现有TranscriptEntry、ToolPreflightService、HostForm和ConfirmGate，不新增依赖或事件框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅静态Markdown分析，无Java或前端代码修改。"},
+        "logging-exception-safety": {"status": "checked", "reason": "文档无密钥、原始异常体或敏感会话内容，动态证据要求脱敏且未执行。"},
+        "toc-interaction": {"status": "checked", "reason": "后续修复目标是消除重复流程、断轮、过程卡和技术文案，未把静态风险写成用户故障定论。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "身份区分UI assistant-{runId}、(entryId,segments[].seq)、toolCallId、普通SSE seq和压缩eventId，启动必须kind=CONFIRM并携带预检。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "后续验收要求完整正文/parts/卡片顺序对账，不用前缀或归一化掩盖重复。"},
+        "verification-review": {"status": "checked", "reason": "agent-1132两项finding均ADDRESSED并APPROVE；本批git diff --check通过，动态根因、测试和构建NOT_RUN。"}
+      }
     }
   ]
 }
