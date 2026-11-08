@@ -3994,6 +3994,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "只在完整SSE JSON后解析，原始正文/reasoning独立拼接且空串不覆盖，未引入二次转码或半帧解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1124审查父类丢choice/覆盖后重构，并确认第二aggregate fail-closed，最终APPROVE；最新Maven编译356源文件BUILD SUCCESS，真实运行NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:e76ba5fd6c163335e22067e2c8f694df292a1584334ae1335fb1ca0f765937bf",
+      "status": "reviewed",
+      "reason": "逐项复核C-127～C-129登记、健康终态、events/ledger/segments、附件生命周期、Redis凭据和业务快照/REPLACE/适配器执行指纹；三轮返修后独立复审APPROVE。",
+      "reviewedAt": "2026-11-08T22:01:36+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1122",
+      "specChanges": [
+        {
+          "change": "定向验证改为events/ledger精确集合、history完整对账及业务快照声明范围，新增自包含适配器执行指纹和独立审查证据要求。",
+          "reason": "原子集检查、预去重和任意业务快照会掩盖额外副作用、重复终帧和真实历史缺失，外部适配器也可能换入未审查代码。",
+          "impact": "仅加强独立验证，正常DONE/CANCELLED分离，REPLACE只删范围外旧行，缺证据保持NOT_RUN，生产行为不变。"
+        }
+      ],
+      "files": [
+        {"path": "scripts/verification/ai-one-turn-interaction-api.mjs", "status": "checked", "reason": "健康降级拒绝、events双向精确集合、最终帧不预去重、附件used tombstone、密码最小环境、业务预期差异和自包含适配器规范化argv/哈希绑定。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Node内置execFile/crypto/fs及现有redis-cli，无新增依赖或应用内帧伪造。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅Node验证脚本，无Java生产代码变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "REDIS_URL和密码不进入argv，子进程环境最小化，证据仅白名单，外部适配器声明与独立审查边界分开。"},
+        "toc-interaction": {"status": "checked", "reason": "取消与成功分别判定，附件消费不再误报，业务异常变更不会被误报为完成。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "真实events/ledger/pending/history/postCleanup精确对照，REPLACE符合UPSERT保留和差集删除语义，共享/未知资源不误删。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "完整text/reasoning/toolCallId/首帧seq与原始帧对照，重复/畸形/多余帧均失败，不以子串代替证据。"},
+        "verification-review": {"status": "checked", "reason": "agent-1122三轮审查后全部finding ADDRESSED并APPROVE；node --check通过，真实API/Redis/适配器/REPLACE和压测NOT_RUN。"}
+      }
     }
   ]
 }

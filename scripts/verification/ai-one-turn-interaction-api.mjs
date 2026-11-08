@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
@@ -8,7 +8,8 @@ import { createRequire } from 'node:module'
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const frontendRequire = createRequire(new URL('../../frontend/package.json', import.meta.url))
 const supportedScenarios = new Set(['C-111', 'C-112', 'C-113', 'C-114', 'C-115'])
-const knownScenarios = new Set(Array.from({ length: 16 }, (_, index) => `C-${111 + index}`))
+const knownScenarios = new Set(Array.from({ length: 19 }, (_, index) => `C-${111 + index}`))
+const transcriptErrorCodes = new Set(['AI_TRANSCRIPT_INCOMPLETE', 'AI_TRANSCRIPT_WRITE_FAILED'])
 const startTools = new Set(['start_export', 'start_precheck', 'start_import', 'start_publish'])
 const jobTypeByTool = {
   start_export: 'EXPORT',
@@ -39,7 +40,10 @@ const notRunReasons = {
   'C-123': '上游参数偏差、HTTP 500 或 Redis 故障需要仓外真实代理/故障注入；本脚本不伪造故障',
   'C-124': '不是独立执行轮次；请运行 C-111～C-114，派生检查保存在各轮报告的 derivedChecks.C-124',
   'C-125': '焦点光环、键盘/鼠标、裁切矩形、滚动和高对比度只能由浏览器证明',
-  'C-126': '不是独立执行轮次；后端日志、Redis 与数据库对照是附着证据，缺少时保持 NOT_RUN'
+  'C-126': '不是独立执行轮次；后端日志、Redis 与数据库对照是附着证据，缺少时保持 NOT_RUN',
+  'C-127': '长多选三态、动态选项失败/重试、maxItems 和首错聚焦需要真实生成式表单及浏览器；本脚本不伪造选项源或点击',
+  'C-128': '中英 locale、320/360/480px 卡头卡体及刷新恢复需要浏览器布局与 DOM 证据；API 参数不能证明可见内容只出现一次',
+  'C-129': '交互卡在途/受理/执行/恢复状态需要浏览器逐阶段核对，并以公开 history/run/job API 对照真实结局；本脚本不注入应用内帧'
 }
 
 class ScenarioFailure extends Error {}
@@ -54,9 +58,138 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function isTranscriptDegraded(frame) {
+  return frame?.transcriptDegraded === true || frame?.historyComplete === false
+    || transcriptErrorCodes.has(frame?.code) || transcriptErrorCodes.has(frame?.errorCode)
+}
+
+function isCancelledCompletion(context) {
+  return context.terminal?.type === 'done' && context.terminal.cancelled === true
+    && context.runDetail?.snapshot?.status === 'CANCELLED'
+}
+
+function isSuccessfulDone(context) {
+  return context.terminal?.type === 'done' && context.terminal.cancelled !== true
+    && context.runDetail?.snapshot?.status === 'DONE'
+}
+
+function uniqueToolFrames(context, types) {
+  const allowed = new Set(types)
+  const seen = new Set()
+  const out = []
+  for (const entry of context.frames) {
+    const frame = entry.frame
+    if (!allowed.has(frame.type) || !frame.toolCallId || seen.has(frame.toolCallId)) continue
+    seen.add(frame.toolCallId)
+    out.push(frame)
+  }
+  return out
+}
+
+function observedFrameTimeline(context) {
+  const bySeq = new Map()
+  const conflicts = []
+  const malformed = []
+  for (const entry of context.frames) {
+    const frame = entry.frame
+    if (frame.type === 'heartbeat') continue
+    const seq = frame.seq === null || frame.seq === undefined ? null : Number(frame.seq)
+    if (seq === null || !Number.isSafeInteger(seq) || seq <= 0) {
+      malformed.push(frame)
+      continue
+    }
+    const serialized = canonicalJson(frame)
+    if (bySeq.has(seq) && bySeq.get(seq).serialized !== serialized) conflicts.push({ seq, previous: bySeq.get(seq).frame, current: frame })
+    if (!bySeq.has(seq)) bySeq.set(seq, { frame, serialized })
+  }
+  return {
+    bySeq,
+    conflicts,
+    malformed,
+    frames: [...bySeq.entries()].sort((left, right) => left[0] - right[0]).map((entry) => entry[1].frame)
+  }
+}
+
+function streamText(context, reasoning) {
+  return observedFrameTimeline(context).frames.filter((frame) => frame.type === 'delta'
+    && (reasoning ? frame.kind === 'reasoning' : frame.kind !== 'reasoning')).map((frame) => frame.text ?? '').join('')
+}
+
+function expectedTranscriptSegments(context) {
+  const segments = []
+  const toolCallIds = new Set()
+  const toolFrameTypes = new Set(['tool_start', 'tool_result', 'confirm_request', 'confirm_decision',
+    'frontend_tool_request', 'frontend_tool_result'])
+  const addTool = (toolCallId, seq) => {
+    if (typeof toolCallId !== 'string' || toolCallId === '' || toolCallIds.has(toolCallId)) return
+    toolCallIds.add(toolCallId)
+    segments.push({ kind: 'tool', text: null, toolCallId, seq })
+  }
+  for (const frame of observedFrameTimeline(context).frames) {
+    const seq = Number(frame.seq)
+    if (frame.type === 'delta') {
+      const text = frame.text
+      if (typeof text !== 'string' || text === '') continue
+      const kind = frame.kind === 'reasoning' ? 'reasoning' : 'text'
+      const last = segments.at(-1)
+      if (last?.kind === kind) last.text += text
+      else segments.push({ kind, text, toolCallId: null, seq })
+    } else if (frame.type === 'suspended' && Array.isArray(frame.toolCalls)) {
+      for (const call of frame.toolCalls) addTool(call?.toolCallId, seq)
+    } else if (toolFrameTypes.has(frame.type)) {
+      addTool(frame.toolCallId, seq)
+    }
+  }
+  return segments
+}
+
+function assistantPartsMatch(message, expectedSegments) {
+  const segments = (message.segments ?? []).map((segment) => ({
+    kind: segment.kind,
+    text: segment.text ?? null,
+    toolCallId: segment.toolCallId ?? null,
+    seq: Number(segment.seq)
+  }))
+  const text = segments.filter((segment) => segment.kind === 'text').map((segment) => segment.text ?? '').join('')
+  const reasoning = segments.filter((segment) => segment.kind === 'reasoning').map((segment) => segment.text ?? '').join('')
+  const toolIds = segments.filter((segment) => segment.kind === 'tool').map((segment) => segment.toolCallId)
+  const expectedToolIds = (message.toolCalls ?? []).map((call) => call.id)
+  const expectedReasoning = message.reasoningContent
+    ?? (segments.some((segment) => segment.kind === 'reasoning') ? message.reasoning ?? '' : '')
+  if (text !== (message.text ?? '') || reasoning !== expectedReasoning
+    || canonicalJson(toolIds) !== canonicalJson(expectedToolIds)) return false
+  if (segments.length === 0) return text === '' && reasoning === '' && expectedToolIds.length === 0
+  if (segments.length > expectedSegments.length) return false
+  for (let start = 0; start + segments.length <= expectedSegments.length; start += 1) {
+    if (canonicalJson(expectedSegments.slice(start, start + segments.length)) === canonicalJson(segments)) return true
+  }
+  return false
+}
+
 function isInside(parent, candidate) {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate))
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+function minimalChildEnv(optionalNames, extra) {
+  const env = {}
+  const systemNames = ['PATH', 'Path', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT',
+    'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR']
+  for (const name of [...systemNames, ...optionalNames]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name]
+  }
+  for (const [name, value] of Object.entries(extra)) {
+    if (value !== undefined) env[name] = value
+  }
+  return env
 }
 
 function requiredOutsidePath(name, optional = false) {
@@ -964,6 +1097,990 @@ async function downloadAndVerify(context, expected) {
   }
 }
 
+function uniqueById(values, idOfValue) {
+  const seen = new Set()
+  const out = []
+  for (const value of values) {
+    const id = idOfValue(value)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(value)
+  }
+  return out
+}
+
+async function assertRunHistory(context) {
+  const messages = context.history.messages
+  const assistants = messages.filter((message) => message.type === 'ASSISTANT')
+  const requests = uniqueToolFrames(context, ['tool_start', 'confirm_request', 'frontend_tool_request'])
+  const results = context.frames.map((entry) => entry.frame)
+    .filter((frame) => frame.type === 'tool_result' || frame.type === 'frontend_tool_result')
+  const timeline = observedFrameTimeline(context)
+  const frameText = streamText(context, false)
+  const frameReasoning = streamText(context, true)
+  const historyText = assistants.map((message) => message.text ?? '').join('')
+  const historyReasoning = assistants.map((message) => message.reasoningContent ?? '').join('')
+  const historyCalls = uniqueById(assistants.flatMap((message) => message.toolCalls ?? []), (call) => call.id)
+  const historyResponses = uniqueById(messages.flatMap((message) => message.toolResponses ?? []), (response) => response.id)
+  const states = Object.assign({}, ...assistants.map((message) => message.toolCallStates ?? {}))
+  const expectedCallIds = requests.map((frame) => frame.toolCallId)
+  const actualCallIds = historyCalls.map((call) => call.id)
+  const settledStatuses = new Set(['EXECUTED', 'REJECTED', 'REJECTED_ARGUMENTS', 'TIMEOUT', 'FRONTEND_RESULT',
+    'FRONTEND_CANCELLED', 'CANCELLED', 'BLOCKED', 'SKIPPED', 'PRECHECK_FAILED', 'SHEET_DISABLED'])
+  const toolFrameTypes = new Set(['tool_start', 'confirm_request', 'frontend_tool_request', 'tool_result', 'frontend_tool_result'])
+  const allToolFrames = context.frames.map((entry) => entry.frame).filter((frame) => toolFrameTypes.has(frame.type))
+  context.checks.add('history.frames.seq-consistency', timeline.conflicts.length === 0 && timeline.malformed.length === 0,
+    'no missing/invalid seq or conflicting replay', { conflicts: timeline.conflicts, malformed: timeline.malformed })
+  context.checks.add('history.tools.frame-identity', allToolFrames.every((frame) => frame.toolCallId && frame.name),
+    'every tool/form frame has toolCallId and name', allToolFrames.filter((frame) => !frame.toolCallId || !frame.name))
+  context.checks.add('history.tools.frame-results-paired', canonicalJson(expectedCallIds.slice().sort())
+    === canonicalJson(results.map((frame) => frame.toolCallId).sort()),
+    'every tool/form request has exactly one final result frame', { requests: expectedCallIds, results: results.map((frame) => frame.toolCallId) })
+  context.checks.add('history.run.single-scope', messages.length > 0 && messages.every((message) => message.runId === context.runId),
+    `every history entry belongs to ${context.runId}`, messages.map((message) => message.runId ?? null))
+  context.checks.add('history.assistant.present', assistants.length > 0, 'at least one same-run ASSISTANT', assistants.length)
+  context.checks.add('history.user.first', messages[0]?.type === 'USER' && messages[0]?.text === context.message,
+    'original USER is the first history entry', messages[0] ?? null)
+  context.checks.add('history.assistant.final', messages.at(-1)?.type === 'ASSISTANT',
+    'last history entry is the final ASSISTANT', messages.at(-1)?.type ?? null)
+  context.checks.add('history.assistant.no-unconfirmed', assistants.every((message) => message.unconfirmed !== true
+    && !transcriptErrorCodes.has(message.errorCode)), 'no unconfirmed/transcript-degraded assistant',
+    assistants.map((message) => ({ unconfirmed: message.unconfirmed ?? null, errorCode: message.errorCode ?? null })))
+  context.checks.add('history.text.matches-frames', historyText === frameText, frameText, historyText)
+  if (isSuccessfulDone(context)) {
+    context.checks.add('run.final-text.matches-history', (context.runDetail?.snapshot?.finalText ?? '') === historyText,
+      context.runDetail?.snapshot?.finalText ?? '', historyText)
+  }
+  context.checks.add('history.tools.ordered-calls', canonicalJson(actualCallIds) === canonicalJson(expectedCallIds),
+    expectedCallIds, actualCallIds)
+  const expectedSegments = expectedTranscriptSegments(context)
+  context.checks.add('history.parts.frame-content', assistants.every((message) => assistantPartsMatch(message, expectedSegments)),
+    'every assistant part matches complete text/reasoning and its first actual frame seq', {
+      expectedSegments,
+      assistants: assistants.map((message) => ({ text: message.text, reasoning: message.reasoningContent, segments: message.segments ?? [] }))
+    })
+  context.checks.add('history.tools.calls-complete', requests.every((frame) => {
+    const call = historyCalls.find((candidate) => candidate.id === frame.toolCallId)
+    if (!call || call.name !== frame.name) return false
+    if (frame.args === undefined || call.arguments === undefined) return true
+    try { return canonicalJson(parseArgs(frame.args)) === canonicalJson(parseArgs(call.arguments)) } catch { return false }
+  }), 'every frame tool call has the same id/name/arguments in history', requests.map((frame) => ({
+    toolCallId: frame.toolCallId, name: frame.name,
+    history: historyCalls.find((call) => call.id === frame.toolCallId) ?? null
+  })))
+  context.checks.add('history.tools.settled-states', requests.every((frame) => settledStatuses.has(states[frame.toolCallId]?.status)),
+    'every tool/form has a terminal toolCallStates entry', requests.map((frame) => ({
+      toolCallId: frame.toolCallId, state: states[frame.toolCallId] ?? null
+    })))
+  context.checks.add('history.tools.results-complete', results.every((frame) => {
+    const response = historyResponses.find((candidate) => candidate.id === frame.toolCallId)
+    return response && response.name === frame.name && (response.responseData ?? '') === (frame.result ?? '')
+  }), 'every tool result has the same id/name/result in history', results.map((frame) => ({
+    toolCallId: frame.toolCallId, expected: frame.result ?? '',
+    history: historyResponses.find((response) => response.id === frame.toolCallId) ?? null
+  })))
+  const decisions = new Map(context.decisions.map((decision) => [decision.frame.toolCallId, decision.approved]))
+  context.checks.add('history.hitl.outcomes', [...decisions].every(([toolCallId, approved]) => {
+    const expected = approved ? 'EXECUTED' : 'REJECTED'
+    return states[toolCallId]?.status === expected
+  }), 'each HITL decision has its real final history outcome', [...decisions].map(([toolCallId, approved]) => ({
+    toolCallId, approved, state: states[toolCallId] ?? null
+  })))
+  const forms = requests.filter((frame) => frame.name === 'generative_form')
+  context.checks.add('history.forms.submitted-parts', forms.every((frame) => {
+    const result = results.find((candidate) => candidate.toolCallId === frame.toolCallId)
+    return result && states[frame.toolCallId]?.status === 'FRONTEND_RESULT'
+      && states[frame.toolCallId]?.submittedValues === (result.result ?? '')
+  }), 'each generative form preserves its submitted values and terminal outcome', forms.map((frame) => ({
+    toolCallId: frame.toolCallId, state: states[frame.toolCallId] ?? null,
+    result: results.find((candidate) => candidate.toolCallId === frame.toolCallId)?.result ?? null
+  })))
+  const reasoningEvidence = {
+    frameReasoning,
+    historyReasoning,
+    persistence: frameReasoning === '' || historyReasoning !== '' ? 'CHECKED' : 'NOT_RUN',
+    reason: frameReasoning !== '' && historyReasoning === ''
+      ? 'reasoning is hidden by the history display setting; raw Redis transcript comparison is required' : null
+  }
+  if (reasoningEvidence.persistence === 'CHECKED') {
+    context.checks.add('history.reasoning.matches-frames', historyReasoning === frameReasoning, frameReasoning, historyReasoning)
+  }
+  context.historyEvidence = { requests, results, states, reasoning: reasoningEvidence }
+  await context.evidence.writeJson('history-integrity.json', context.historyEvidence)
+}
+
+const businessTableNames = new Set(['tasks', 'jobs', 'task_items', 'task_files', 'job_items', 'validation_issues',
+  'config_definitions', 'config_fields', 'config_data_rows', 'config_staging_rows'])
+
+function isInterpreterAdapter(executable) {
+  const name = path.basename(executable).toLowerCase()
+  if (/\.(?:js|mjs|cjs|py|java|jar|class|sh|ps1|bat|cmd|pl|rb|php)$/.test(name)) return true
+  return /^(?:node|nodejs|python|python3|python3\.\d+|py|java|javaw|perl|ruby|php|pwsh|powershell|cmd|bash|sh|npm|npx|pnpm|yarn|deno|bun)(?:\.exe)?$/.test(name)
+}
+
+function isCodeExecutionArg(arg) {
+  if (/(?:^|\s)-{1,2}(?:eval|execute|script|query|sql|command|code|main|module|jar|classpath|class)(?:=|\s|$)/i.test(arg)
+    || /(?:^|\s)-[ecm](?:=|\s|$)/i.test(arg)) return true
+  return /^\s*(?:select|insert|update|delete|create|drop|alter)\b/i.test(arg)
+    || /\b(?:select|insert|update|delete|create|drop|alter)\b[\s\S]*\b(?:from|into|table|where|set)\b/i.test(arg)
+    || /\b(?:require|eval|exec|import)\s*\(/i.test(arg)
+}
+
+function adapterPathArgument(value) {
+  if (value.startsWith('file://')) return fileURLToPath(value)
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(value) || /^jdbc:/i.test(value)) return null
+  if (path.isAbsolute(value)) return value
+  if (value.startsWith('./') || value.startsWith('../') || value.includes('/') || value.includes('\\')
+    || /\.(?:json|ya?ml|toml|properties|ini|xml|csv|db|sqlite|h2)$/i.test(value)) {
+    return path.resolve(value)
+  }
+  return null
+}
+
+function isAdapterPathOption(value) {
+  return /^--(?:config|out|output|file|snapshot-config|adapter-config|properties)$/i.test(value)
+}
+
+async function hashAdapterFile(candidate, canonicalRepo) {
+  const resolved = await realpath(candidate)
+  if (isInside(canonicalRepo, resolved)) throw new Error('adapter referenced file realpath must be outside the repository')
+  if (/\.(?:js|mjs|cjs|py|java|jar|class|sh|ps1|bat|cmd|pl|rb|php|env)$/i.test(resolved)) {
+    throw new Error('adapter referenced code or secret files are forbidden')
+  }
+  const sha256 = createHash('sha256').update(await readFile(resolved)).digest('hex')
+  return { path: resolved, sha256 }
+}
+
+async function normalizeBusinessArgs(args, canonicalRepo) {
+  const normalizedArgs = []
+  const referencedFiles = new Map()
+  for (const [index, arg] of args.entries()) {
+    if (isCodeExecutionArg(arg)) throw new Error('adapter args must not execute SQL or code')
+    const equals = arg.indexOf('=')
+    const prefix = equals >= 0 ? arg.slice(0, equals + 1) : ''
+    const option = equals >= 0 ? arg.slice(0, equals) : arg
+    const value = equals >= 0 ? arg.slice(equals + 1) : arg
+    if (equals < 0 && isAdapterPathOption(arg)) {
+      normalizedArgs.push(arg)
+      continue
+    }
+    const pathOption = (equals >= 0 && isAdapterPathOption(option))
+      || (index > 0 && isAdapterPathOption(args[index - 1]))
+    const candidate = pathOption ? path.resolve(value) : adapterPathArgument(value)
+    if (candidate === null) normalizedArgs.push(arg)
+    else {
+      const reference = await hashAdapterFile(candidate, canonicalRepo)
+      referencedFiles.set(reference.path, reference)
+      normalizedArgs.push(`${prefix}${reference.path}`)
+    }
+  }
+  return { normalizedArgs, referencedFiles: [...referencedFiles.values()] }
+}
+
+async function businessSnapshotCommand() {
+  const executable = process.env.BUSINESS_DB_SNAPSHOT_CLI?.trim()
+  if (!executable) return null
+  if (!path.isAbsolute(executable)) throw new Error('BUSINESS_DB_SNAPSHOT_CLI must be an absolute executable path')
+  const [resolved, canonicalRepo] = await Promise.all([realpath(executable), realpath(repoRoot)])
+  if (isInside(canonicalRepo, resolved)) throw new Error('BUSINESS_DB_SNAPSHOT_CLI realpath must be outside the repository')
+  if (isInterpreterAdapter(resolved)) throw new Error('BUSINESS_DB_SNAPSHOT_CLI must be a self-contained executable, not an interpreter or script')
+  let args = []
+  const raw = process.env.BUSINESS_DB_SNAPSHOT_ARGS_JSON?.trim()
+  if (raw) {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === 'string')) {
+      throw new Error('BUSINESS_DB_SNAPSHOT_ARGS_JSON must be a JSON string array')
+    }
+    args = parsed
+  }
+  const executableBytes = await readFile(resolved)
+  if (executableBytes.length >= 2 && executableBytes[0] === 0x23 && executableBytes[1] === 0x21) {
+    throw new Error('BUSINESS_DB_SNAPSHOT_CLI must be a self-contained executable, not a shebang script')
+  }
+  const executableSha256 = createHash('sha256').update(executableBytes).digest('hex')
+  const normalized = await normalizeBusinessArgs(args, canonicalRepo)
+  return { executable: resolved, executableSha256, ...normalized }
+}
+
+function adapterExecutionFingerprint(command, referencedFiles) {
+  return createHash('sha256').update(canonicalJson({
+    executable: command.executable,
+    executableSha256: command.executableSha256,
+    normalizedArgs: command.normalizedArgs,
+    referencedFiles
+  })).digest('hex')
+}
+
+async function reviewReferencedFiles(rawFiles, canonicalRepo) {
+  if (!Array.isArray(rawFiles)) throw new Error('adapter review referencedFiles must be an array')
+  const files = new Map()
+  for (const entry of rawFiles) {
+    if (!isRecord(entry) || typeof entry.path !== 'string' || !path.isAbsolute(entry.path)
+      || !/^[a-f\d]{64}$/.test(entry.sha256 ?? '')) {
+      throw new Error('adapter review referenced file requires absolute path and SHA-256')
+    }
+    const hashed = await hashAdapterFile(entry.path, canonicalRepo)
+    if (hashed.path !== entry.path || hashed.sha256 !== entry.sha256) {
+      throw new Error('adapter review referenced file realpath or hash mismatch')
+    }
+    files.set(hashed.path, hashed)
+  }
+  return files
+}
+
+async function reviewBusinessSnapshotAdapter(context, command) {
+  const business = context.external.business
+  business.adapterDeclaration = process.env.EVAL_REVIEWED_BUSINESS_SNAPSHOT_ADAPTER === 'true'
+  business.adapterReview = 'NOT_RUN'
+  business.adapterReviewEvidence = null
+  if (!business.adapterDeclaration) {
+    business.adapterReviewReason = 'executor declaration is absent; independent review evidence cannot enable PASS by itself'
+    await context.evidence.writeJson('business-adapter-review.json', {
+      status: business.adapterReview,
+      reason: business.adapterReviewReason,
+      evidence: null
+    })
+    return
+  }
+  try {
+    const rawPath = process.env.BUSINESS_SNAPSHOT_ADAPTER_REVIEW?.trim()
+    if (!rawPath || !path.isAbsolute(rawPath)) throw new Error('BUSINESS_SNAPSHOT_ADAPTER_REVIEW must be an absolute path')
+    const [reviewPath, canonicalRepo] = await Promise.all([realpath(rawPath), realpath(repoRoot)])
+    if (isInside(canonicalRepo, reviewPath)) throw new Error('adapter review evidence realpath must be outside the repository')
+    const review = JSON.parse(await readFile(reviewPath, 'utf8'))
+    const reviewedFiles = await reviewReferencedFiles(review.referencedFiles, canonicalRepo)
+    const referencedFiles = new Map(command.referencedFiles.map((reference) => [reference.path, reference]))
+    for (const [referencePath, reference] of reviewedFiles) referencedFiles.set(referencePath, reference)
+    for (const reference of command.referencedFiles) {
+      if (!reviewedFiles.has(reference.path)) throw new Error('adapter review omitted a path argument')
+    }
+    const orderedReferences = [...referencedFiles.values()].sort((left, right) => left.path.localeCompare(right.path))
+    const executionFingerprint = adapterExecutionFingerprint(command, orderedReferences)
+    const valid = isRecord(review) && typeof review.reviewer === 'string' && review.reviewer.trim() !== ''
+      && review.reviewer !== context.config.executorIdentity
+      && typeof review.reviewedAt === 'string' && Number.isFinite(Date.parse(review.reviewedAt))
+      && review.verdict === 'PASS' && review.readOnlySql === true && review.aiTablesExcluded === true
+      && review.executableRealpath === command.executable
+      && review.executableSha256 === command.executableSha256
+      && canonicalJson(review.normalizedArgs) === canonicalJson(command.normalizedArgs)
+      && review.executionFingerprint === executionFingerprint
+    if (!valid) throw new Error('adapter review is incomplete, non-independent or not bound to actual execution content')
+    const evidence = {
+      reviewer: review.reviewer,
+      reviewedAt: review.reviewedAt,
+      verdict: review.verdict,
+      declarationOnly: true,
+      readOnlySql: review.readOnlySql,
+      aiTablesExcluded: review.aiTablesExcluded,
+      executableRealpath: review.executableRealpath,
+      executableSha256: review.executableSha256,
+      normalizedArgs: command.normalizedArgs,
+      referencedFiles: orderedReferences,
+      executionFingerprint,
+      sourcePath: reviewPath
+    }
+    business.adapterReview = 'REVIEWED'
+    business.adapterReviewEvidence = evidence
+    business.adapterReviewReason = null
+    await context.evidence.writeJson('business-adapter-review.json', {
+      status: business.adapterReview,
+      reason: null,
+      evidence
+    })
+  } catch (error) {
+    business.adapterReviewReason = `independent adapter review evidence unavailable: ${error?.name ?? 'Error'}`
+    await context.evidence.writeJson('business-adapter-review.json', {
+      status: 'NOT_RUN',
+      reason: business.adapterReviewReason,
+      evidence: null
+    })
+  }
+}
+
+function businessRowId(table, row) {
+  return idOf(table === 'jobs' ? row.id ?? row.jobId : row.id ?? row.taskId)
+}
+
+function assertNoAiSnapshotFields(value) {
+  if (Array.isArray(value)) {
+    for (const entry of value) assertNoAiSnapshotFields(entry)
+    return
+  }
+  if (!isRecord(value)) return
+  const forbidden = new Set(['sessionid', 'runid', 'clientrequestid', 'toolcallid', 'messagejson', 'reasoning',
+    'reasoningcontent', 'transcript', 'pending', 'purge', 'guard', 'lease', 'fence', 'history', 'frames',
+    'events', 'context', 'attachments', 'attachment', 'form', 'sse'])
+  for (const [key, nested] of Object.entries(value)) {
+    if (/^ai[_:]/i.test(key) || /^ai[A-Z]/.test(key) || forbidden.has(key.toLowerCase())) {
+      throw new Error(`business snapshot contains forbidden AI field ${key}`)
+    }
+    assertNoAiSnapshotFields(nested)
+  }
+}
+
+function validateBusinessSnapshot(value) {
+  if (!isRecord(value) || !isRecord(value.tables) || !Array.isArray(value.tables.tasks) || !Array.isArray(value.tables.jobs)) {
+    throw new Error('business snapshot must contain tables.tasks and tables.jobs arrays')
+  }
+  if (Object.keys(value).some((key) => !['capturedAt', 'source', 'tables'].includes(key))
+    || Object.keys(value.tables).some((table) => !businessTableNames.has(table))) {
+    throw new Error('business snapshot contains data outside the task/job/config whitelist')
+  }
+  if (value.source !== undefined && (typeof value.source !== 'string' || value.source.length > 200
+    || /:\/\/|@|password|secret|token/i.test(value.source))) {
+    throw new Error('business snapshot source must be a short non-sensitive label')
+  }
+  if (value.capturedAt !== undefined && (typeof value.capturedAt !== 'string' || value.capturedAt.length > 64)) {
+    throw new Error('business snapshot capturedAt must be a short string')
+  }
+  assertNoAiSnapshotFields(value)
+  if (!['tasks', 'jobs'].every((table) => value.tables[table].every((row) => businessRowId(table, row) !== null))) {
+    throw new Error('every business task/job row must have a positive numeric id')
+  }
+  let rows = 0
+  for (const [table, entries] of Object.entries(value.tables)) {
+    if (!Array.isArray(entries) || !entries.every(isRecord)) throw new Error(`business snapshot ${table} must be an object array`)
+    if (!entries.every((row) => businessRowKey(table, row) !== null)) {
+      throw new Error(`business snapshot ${table} lacks a real id or schema-valid unique key`)
+    }
+    rows += entries.length
+    if (rows > 100_000) throw new Error('business snapshot exceeds 100000 rows')
+  }
+  return value
+}
+
+async function captureBusinessSnapshot(context, phase) {
+  try {
+    const command = await businessSnapshotCommand()
+    if (!command) return { status: 'NOT_RUN', reason: 'BUSINESS_DB_SNAPSHOT_CLI not provided' }
+    await reviewBusinessSnapshotAdapter(context, command)
+    const env = minimalChildEnv(['BUSINESS_DB_URL', 'BUSINESS_DB_USERNAME', 'BUSINESS_DB_PASSWORD'], {
+      EVAL_SNAPSHOT_PHASE: phase,
+      EVAL_TENANT_ID: context.config.tenantId,
+      EVAL_USER_ID: context.config.userId,
+      EVAL_SESSION_ID: context.sessionId ?? '',
+      EVAL_RUN_ID: context.runId ?? '',
+      EVAL_TARGET_TASK_ID: context.targetTaskId === null ? '' : String(context.targetTaskId),
+      EVAL_TARGET_JOB_ID: context.targetJobId === null ? '' : String(context.targetJobId)
+    })
+    const output = execFileSync(command.executable, command.normalizedArgs, {
+      cwd: path.dirname(context.config.outDir), encoding: 'utf8', timeout: context.config.timeoutMs,
+      maxBuffer: 64 * 1024 * 1024, env, stdio: ['ignore', 'pipe', 'ignore']
+    })
+    return { status: 'COLLECTED', capturedAt: new Date().toISOString(), snapshot: validateBusinessSnapshot(JSON.parse(output)) }
+  } catch (error) {
+    return { status: 'NOT_RUN', reason: `external business snapshot unavailable: ${error?.name ?? 'Error'}` }
+  }
+}
+
+function businessCompositeKey(table, parts) {
+  return parts.every((part) => part !== null && part !== undefined && part !== '')
+    ? `${table}:${canonicalJson(parts)}` : null
+}
+
+function configRowScopeKey(row) {
+  const scopeKey = row.scopeKey === null ? ['NULL'] : ['VALUE', row.scopeKey]
+  return businessCompositeKey('config_data_rows', [row.defCode, row.scopeType, scopeKey, row.rowKey])
+}
+
+function businessRowKey(table, row) {
+  if (table === 'tasks' || table === 'jobs') {
+    const id = businessRowId(table, row)
+    return id === null ? null : `id:${id}`
+  }
+  const explicitId = idOf(row.id)
+  if (explicitId !== null) return `id:${explicitId}`
+  const taskId = idOf(row.taskId)
+  const jobId = idOf(row.jobId)
+  if (table === 'task_items') return businessCompositeKey(table, [taskId, row.defCode])
+  if (table === 'task_files') return businessCompositeKey(table, [taskId, row.defCode, row.fileType])
+  if (table === 'job_items') return businessCompositeKey(table, [jobId, row.defCode])
+  if (table === 'config_definitions') return businessCompositeKey(table, [row.code])
+  if (table === 'config_fields') return businessCompositeKey(table, [row.defCode, row.code])
+  if (table === 'config_data_rows') return configRowScopeKey(row)
+  return null
+}
+
+function businessComparison(before, after) {
+  const tables = {}
+  for (const table of new Set([...Object.keys(before.tables), ...Object.keys(after.tables)])) {
+    const beforeRows = before.tables[table] ?? []
+    const afterRows = after.tables[table] ?? []
+    const beforeByKey = new Map()
+    const afterByKey = new Map()
+    let valid = true
+    for (const row of beforeRows) {
+      const key = businessRowKey(table, row)
+      if (key === null || beforeByKey.has(key)) valid = false
+      beforeByKey.set(key, row)
+    }
+    for (const row of afterRows) {
+      const key = businessRowKey(table, row)
+      if (key === null || afterByKey.has(key)) valid = false
+      afterByKey.set(key, row)
+    }
+    const added = []
+    const removed = []
+    const modified = []
+    for (const [key, row] of afterByKey) {
+      if (!beforeByKey.has(key)) added.push(row)
+      else if (canonicalJson(beforeByKey.get(key)) !== canonicalJson(row)) modified.push({ before: beforeByKey.get(key), after: row })
+    }
+    for (const [key, row] of beforeByKey) if (!afterByKey.has(key)) removed.push(row)
+    tables[table] = { valid, before: beforeRows.length, after: afterRows.length, added, removed, modified }
+  }
+  return tables
+}
+
+function hasBusinessRow(snapshot, table, id) {
+  return (snapshot.tables[table] ?? []).some((row) => businessRowId(table, row) === id)
+}
+
+function businessOwnerIds(table, row) {
+  if (table === 'tasks') return { taskId: businessRowId(table, row), jobId: null }
+  if (table === 'jobs') return { taskId: idOf(row.taskId), jobId: businessRowId(table, row) }
+  return { taskId: idOf(row.taskId), jobId: idOf(row.jobId) }
+}
+
+function businessPostRunViolations(context, before, comparison) {
+  const violations = []
+  const taskItemsAllowed = ['C-111', 'C-112', 'C-113'].includes(context.config.scenario)
+    || (context.config.scenario === 'C-114' && context.config.taskPath === 'new')
+    || (context.config.scenario === 'C-115' && context.config.decision === 'approve'
+      && ['export', 'precheck', 'import', 'publish'].includes(context.config.action))
+  const exportJob = context.targetJobId !== null && (context.config.scenario !== 'C-115' || context.config.action === 'export')
+  const importOrPublish = context.targetJobId !== null && context.config.scenario === 'C-115'
+    && ['import', 'publish'].includes(context.config.action)
+  const validationJob = context.config.scenario === 'C-115' && ['precheck', 'import', 'publish'].includes(context.config.action)
+  const publish = context.targetJobId !== null && context.config.scenario === 'C-115' && context.config.action === 'publish'
+  const declaredDefCodes = new Set(context.workspace.selectedDefs)
+  const stagingRows = (before.tables.config_staging_rows ?? [])
+    .filter((row) => idOf(row.taskId) === context.targetTaskId && declaredDefCodes.has(row.defCode))
+  const publishScope = new Set(stagingRows.map(configRowScopeKey))
+  const publishScopes = new Set(stagingRows.map((row) => canonicalJson([row.defCode, row.scopeType, row.scopeKey ?? null])))
+  const retainedPublishRows = new Set(stagingRows.filter((row) => row.opType !== 'DELETE').map(configRowScopeKey))
+  for (const [table, changes] of Object.entries(comparison)) {
+    if (!changes.valid) violations.push({ table, kind: 'duplicate-or-unstable-row-key' })
+    if (table === 'tasks' || table === 'jobs') {
+      const targetId = table === 'tasks' ? context.targetTaskId : context.targetJobId
+      for (const row of changes.added) {
+        if (targetId === null || businessRowId(table, row) !== targetId) violations.push({ table, kind: 'unexpected-add', row })
+      }
+      for (const row of changes.removed) violations.push({ table, kind: 'unexpected-delete', row })
+      for (const change of changes.modified) {
+        const modificationAllowed = table === 'jobs' || context.config.scenario !== 'C-115'
+          || (context.config.decision === 'approve' && context.config.action !== 'create')
+        if (!modificationAllowed || targetId === null || businessRowId(table, change.after) !== targetId) {
+          violations.push({ table, kind: 'unexpected-modify', change })
+        }
+      }
+      continue
+    }
+    for (const [kind, rows] of [['added', changes.added], ['removed', changes.removed], ['modified', changes.modified]]) {
+      for (const value of rows) {
+        const row = kind === 'modified' ? value.after : value
+        const owner = businessOwnerIds(table, row)
+        let allowed = false
+        if (table === 'task_items') {
+          allowed = taskItemsAllowed && owner.taskId === context.targetTaskId
+            && (context.config.scenario === 'C-115'
+              ? kind === 'modified' && declaredDefCodes.has(row.defCode)
+              : kind !== 'removed')
+        } else if (table === 'task_files') {
+          allowed = exportJob && kind === 'added' && owner.taskId === context.targetTaskId
+            && declaredDefCodes.has(row.defCode) && row.fileType === 'EXPORT'
+        } else if (table === 'job_items') {
+          allowed = context.targetJobId !== null && kind !== 'removed' && owner.jobId === context.targetJobId
+        } else if (table === 'validation_issues') {
+          allowed = context.targetJobId !== null && validationJob && kind !== 'removed' && owner.jobId === context.targetJobId
+        } else if (table === 'config_staging_rows' && importOrPublish) {
+          allowed = owner.taskId === context.targetTaskId && declaredDefCodes.has(row.defCode)
+            && (publish || kind !== 'removed')
+        } else if (table === 'config_data_rows' && publish) {
+          const fullKey = configRowScopeKey(row)
+          const scope = canonicalJson([row.defCode, row.scopeType, row.scopeKey ?? null])
+          allowed = declaredDefCodes.has(row.defCode) && (kind === 'removed'
+            ? context.config.publishMode === 'REPLACE' && publishScopes.has(scope) && !retainedPublishRows.has(fullKey)
+            : publishScope.has(fullKey))
+        }
+        if (!allowed) violations.push({ table, kind: `unexpected-${kind}`, row: value })
+      }
+    }
+  }
+  return violations
+}
+
+async function collectBusinessEvidence(context, phase) {
+  const captured = await captureBusinessSnapshot(context, phase)
+  context.external.business[phase] = captured
+  await context.evidence.writeJson(`business-${phase}.json`, captured)
+  if (phase !== 'postRun') return
+  const before = context.external.business.preChat
+  if (before?.status !== 'COLLECTED' || captured.status !== 'COLLECTED') {
+    context.external.business.status = 'NOT_RUN'
+    context.external.business.reason = 'preChat/postRun business snapshots are incomplete'
+    return
+  }
+  const comparison = businessComparison(before.snapshot, captured.snapshot)
+  context.external.business.comparison = comparison
+  const firstCheck = context.checks.items.length
+  const newTask = context.targetTaskId !== null && (context.tracked.taskOrigins.get(context.targetTaskId) ?? '').startsWith(`run:${context.runId}:`)
+  const newJob = context.targetJobId !== null && (context.tracked.jobOrigins.get(context.targetJobId) ?? '').startsWith(`run:${context.runId}:`)
+  context.checks.add('business.task.real-side-effect', context.targetTaskId === null
+    ? comparison.tasks.added.length === 0
+    : hasBusinessRow(captured.snapshot, 'tasks', context.targetTaskId) && (!newTask || !hasBusinessRow(before.snapshot, 'tasks', context.targetTaskId)),
+    'no new task after rejection, or the authoritative target task with correct pre-chat absence', {
+      targetTaskId: context.targetTaskId, newTask, changes: comparison.tasks
+    })
+  context.checks.add('business.job.real-side-effect', context.targetJobId === null
+    ? comparison.jobs.added.length === 0
+    : hasBusinessRow(captured.snapshot, 'jobs', context.targetJobId) && (!newJob || !hasBusinessRow(before.snapshot, 'jobs', context.targetJobId)),
+    'no new job after rejection, or the authoritative target job with correct pre-chat absence', {
+      targetJobId: context.targetJobId, newJob, changes: comparison.jobs
+    })
+  const violations = businessPostRunViolations(context, before.snapshot, comparison)
+  context.external.business.unexpectedDifferences = violations
+  context.checks.add('business.scenario-scoped-differences', violations.length === 0,
+    'only scenario-declared task/job/config additions, modifications and deletions', violations)
+  context.external.business.status = context.checks.items.slice(firstCheck).every((check) => check.pass) ? 'PASS' : 'FAIL'
+  context.external.business.reason = violations.length === 0 ? null : 'unexpected business differences'
+}
+
+function businessCleanupViolations(context, before, after, comparison) {
+  const violations = []
+  for (const table of ['tasks', 'jobs']) {
+    const changes = comparison[table]
+    if (!changes.valid) violations.push({ table, kind: 'duplicate-or-unstable-row-key' })
+    const owned = table === 'tasks' ? context.tracked.tasks : context.tracked.jobs
+    const expectedRemoved = [...owned].filter((id) => hasBusinessRow(before, table, id)).sort((left, right) => left - right)
+    const actualRemoved = changes.removed.map((row) => businessRowId(table, row)).sort((left, right) => left - right)
+    if (canonicalJson(actualRemoved) !== canonicalJson(expectedRemoved)) {
+      violations.push({ table, kind: 'cleanup-delete-set', expectedRemoved, actualRemoved })
+    }
+    for (const row of [...changes.added, ...changes.modified]) violations.push({ table, kind: 'cleanup-add-or-modify', row })
+  }
+  for (const [table, changes] of Object.entries(comparison)) {
+    if (!changes.valid) violations.push({ table, kind: 'duplicate-or-unstable-row-key' })
+    if (table === 'tasks' || table === 'jobs') continue
+    const cascadeTable = ['task_items', 'task_files', 'job_items', 'validation_issues', 'config_staging_rows'].includes(table)
+    for (const row of [...changes.added, ...changes.modified]) violations.push({ table, kind: 'cleanup-add-or-modify', row })
+    for (const row of changes.removed) {
+      const owner = businessOwnerIds(table, row)
+      const owned = context.tracked.tasks.has(owner.taskId) || context.tracked.jobs.has(owner.jobId)
+      if (!cascadeTable || !owned) violations.push({ table, kind: 'cleanup-unexpected-delete', row })
+    }
+    if (cascadeTable) {
+      for (const row of after.tables[table] ?? []) {
+        const owner = businessOwnerIds(table, row)
+        if (context.tracked.tasks.has(owner.taskId) || context.tracked.jobs.has(owner.jobId)) {
+          violations.push({ table, kind: 'cleanup-owned-row-remains', row })
+        }
+      }
+    }
+  }
+  return violations
+}
+
+async function collectBusinessCleanupEvidence(context) {
+  await collectBusinessEvidence(context, 'postCleanup')
+  const business = context.external.business
+  const after = business.postCleanup
+  if (business.status === 'FAIL') return
+  if (business.status !== 'PASS' || after?.status !== 'COLLECTED') {
+    business.status = 'NOT_RUN'
+    business.reason = 'post-cleanup business snapshot is incomplete'
+    return
+  }
+  const before = business.postRun.snapshot
+  const comparison = businessComparison(before, after.snapshot)
+  business.cleanupComparison = comparison
+  const violations = businessCleanupViolations(context, before, after.snapshot, comparison)
+  business.cleanupUnexpectedDifferences = violations
+  const pass = context.cleanupStatus === 'COMPLETE' && violations.length === 0
+  context.checks.add('business.cleanup.post-state', pass,
+    'COMPLETE cleanup with exactly the owned task/job/config-cascade delete set and no other differences', {
+      cleanupStatus: context.cleanupStatus, violations
+    })
+  business.status = pass ? 'PASS' : 'FAIL'
+}
+
+function redisConnection() {
+  const rawUrl = process.env.REDIS_URL?.trim()
+  let host = process.env.REDIS_HOST?.trim() || '127.0.0.1'
+  let port = process.env.REDIS_PORT?.trim() || '6379'
+  let db = process.env.REDIS_DB?.trim() || '0'
+  let username = ''
+  let password = process.env.REDIS_PASSWORD ?? process.env.REDISCLI_AUTH
+  let tls = process.env.REDIS_TLS === 'true'
+  if (rawUrl) {
+    const parsed = new URL(rawUrl)
+    if (!['redis:', 'rediss:'].includes(parsed.protocol) || parsed.search || parsed.hash
+      || !/^\/(?:\d+)?$/.test(parsed.pathname)) {
+      throw new Error('REDIS_URL must be redis:// or rediss:// with only an optional numeric db path')
+    }
+    host = parsed.hostname.replace(/^\[|\]$/g, '')
+    port = parsed.port || '6379'
+    db = parsed.pathname.slice(1) || '0'
+    username = decodeURIComponent(parsed.username)
+    password = parsed.password ? decodeURIComponent(parsed.password) : password
+    tls = parsed.protocol === 'rediss:'
+  }
+  if (!/^\d+$/.test(port) || !/^\d+$/.test(db)) throw new Error('Redis port and db must be numeric')
+  const args = ['-h', host, '-p', port, '-n', db]
+  if (username) args.push('--user', username)
+  if (tls) args.push('--tls')
+  const env = minimalChildEnv([], { REDISCLI_AUTH: password || undefined })
+  return { args, env }
+}
+
+function redisCommand(context, args) {
+  const executable = process.env.REDIS_CLI?.trim() || 'redis-cli'
+  const connection = redisConnection()
+  return execFileSync(executable, [...connection.args, '--raw', ...args], {
+    cwd: path.dirname(context.config.outDir), encoding: 'utf8', timeout: context.config.timeoutMs,
+    maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], env: connection.env
+  })
+}
+
+function redisLines(output) {
+  const text = output.replace(/\r/g, '').replace(/\n+$/, '')
+  return text === '' ? [] : text.split('\n')
+}
+
+function pairs(values) {
+  const out = {}
+  for (let index = 0; index < values.length; index += 2) out[values[index]] = values[index + 1]
+  return out
+}
+
+function readRedisKey(context, key) {
+  const type = redisCommand(context, ['TYPE', key]).trim()
+  const pttl = Number.parseInt(redisCommand(context, ['PTTL', key]).trim(), 10)
+  if (type === 'none') return { key, type, pttl, count: 0, value: null }
+  let count
+  let value
+  if (type === 'hash') {
+    count = Number.parseInt(redisCommand(context, ['HLEN', key]).trim(), 10)
+    if (count > 10_000) throw new Error('hash evidence exceeds 10000 entries')
+    value = pairs(redisLines(redisCommand(context, ['HGETALL', key])))
+  } else if (type === 'list') {
+    count = Number.parseInt(redisCommand(context, ['LLEN', key]).trim(), 10)
+    if (count > 10_000) throw new Error('list evidence exceeds 10000 entries')
+    value = redisLines(redisCommand(context, ['LRANGE', key, '0', '-1']))
+  } else if (type === 'zset') {
+    count = Number.parseInt(redisCommand(context, ['ZCARD', key]).trim(), 10)
+    if (count > 10_000) throw new Error('zset evidence exceeds 10000 entries')
+    const raw = redisLines(redisCommand(context, ['ZRANGE', key, '0', '-1', 'WITHSCORES']))
+    value = []
+    for (let index = 0; index < raw.length; index += 2) value.push({ member: raw[index], score: raw[index + 1] })
+  } else if (type === 'string') {
+    count = 1
+    value = redisCommand(context, ['GET', key]).replace(/\r?\n$/, '')
+  } else if (type === 'stream') {
+    count = Number.parseInt(redisCommand(context, ['XLEN', key]).trim(), 10)
+    if (count > 6_000) throw new Error('stream evidence exceeds 6000 entries')
+    const raw = redisLines(redisCommand(context, ['XRANGE', key, '-', '+', 'COUNT', '6000']))
+    value = []
+    for (let index = 0; index < raw.length;) {
+      const id = raw[index++]
+      const fields = {}
+      while (index < raw.length && !/^\d+-\d+$/.test(raw[index])) {
+        const field = raw[index++]
+        if (index >= raw.length) throw new Error('truncated stream field output')
+        fields[field] = raw[index++]
+      }
+      value.push({ id, fields })
+    }
+  } else if (type === 'set') {
+    count = Number.parseInt(redisCommand(context, ['SCARD', key]).trim(), 10)
+    if (count > 10_000) throw new Error('set evidence exceeds 10000 entries')
+    value = []
+    let cursor = '0'
+    for (let page = 0; page < 50; page += 1) {
+      const raw = redisLines(redisCommand(context, ['SSCAN', key, cursor, 'COUNT', '200']))
+      cursor = raw.shift() ?? ''
+      value.push(...raw)
+      if (cursor === '0') break
+      if (page === 49 || value.length > 10_000) throw new Error('set scan did not finish within its bound')
+    }
+  } else {
+    throw new Error(`unsupported Redis key type ${type}`)
+  }
+  const readCount = type === 'hash' ? Object.keys(value).length
+    : type === 'set' ? new Set(value).size
+      : type === 'string' ? 1 : value.length
+  if (readCount !== count) throw new Error(`Redis ${type} count changed during read: ${count} -> ${readCount}`)
+  return { key, type, pttl, count, value }
+}
+
+function redisKeys(context) {
+  const tenant = context.config.tenantId
+  const user = context.config.userId
+  const identity = `${tenant}:${user}:`
+  const runTag = `{${identity}run:${context.runId}}`
+  const sessionTag = `{${context.sessionId}}`
+  const keys = new Map()
+  for (const prefix of ['ai:run:', 'ai:runstate:', 'ai:pending:', 'ai:claim:', 'ai:ledger:', 'ai:idem:', 'ai:seq:',
+    'ai:xevents:', 'ai:lease:run:', 'ai:fence:run:', 'ai:req:', 'ai:decided:', 'ai:lease:epoch:', 'ai:cancel:',
+    'ai:xack:', 'ai:xtrim:']) {
+    const role = prefix.slice(0, -1)
+    keys.set(role, `${prefix}${runTag}`)
+  }
+  for (const prefix of ['ai:beat:', 'ai:activity:', 'ai:observed:']) keys.set(prefix.slice(0, -1), `${prefix}${identity}${context.runId}`)
+  const sessionKeys = {
+    'ai:session': `ai:session:${identity}${context.sessionId}`,
+    'ai:session:current': `ai:session:current:${identity}${context.sessionId}`,
+    'ai:session:runs': `ai:session:runs:${identity}${context.sessionId}`,
+    'ai:session:active': `ai:session:active:${identity}${context.sessionId}`,
+    'ai:session:user-activity': `ai:session:user-activity:${identity}${context.sessionId}`,
+    'ai:ctx': `ai:ctx:${identity}${context.sessionId}`,
+    'ai:ctx:ledger': `ai:ctx:ledger:${identity}${context.sessionId}`,
+    'ai:ctx:events': `ai:ctx:events:${identity}${context.sessionId}`,
+    'ai:safety': `ai:safety:${identity}${context.sessionId}`,
+    'ai:creq': `ai:creq:${identity}${context.sessionId}`,
+    'ai:form:att:sess': `ai:form:att:sess:${identity}${context.sessionId}`,
+    'ai:ctdraft': `ai:ctdraft:{${identity}session:${context.sessionId}}`,
+    'chat:mem': `chat:mem:${identity}${sessionTag}`,
+    'chat:mem:ver': `chat:mem:${identity}${sessionTag}:ver`,
+    'chat:mem:gen': `chat:mem:${identity}${sessionTag}:gen`,
+    'chat:mem:staging:idx': `chat:mem:staging:idx:${identity}${sessionTag}`,
+    'ai:tx': `ai:tx:${identity}${sessionTag}`,
+    'ai:tx:order': `ai:tx:${identity}${sessionTag}:order`,
+    'ai:tx:meta': `ai:tx:${identity}${sessionTag}:meta`,
+    'ai:tx:truncated': `ai:tx:${identity}${sessionTag}:truncated`
+  }
+  for (const [role, key] of Object.entries(sessionKeys)) keys.set(role, key)
+  for (const frame of uniqueToolFrames(context, ['frontend_tool_request'])) {
+    if (frame.name === 'generative_form') {
+      keys.set(`ai:form:att:form:${frame.toolCallId}`, `ai:form:att:form:${identity}${context.runId}:${frame.toolCallId}`)
+    }
+  }
+  for (const attachment of context.attachments) {
+    keys.set(`ai:form:att:${attachment.fileId}`, `ai:form:att:${identity}${attachment.fileId}`)
+    keys.set(`ai:form:att:used:${attachment.fileId}`, `ai:form:att:used:${identity}${attachment.fileId}`)
+  }
+  return keys
+}
+
+function parseJson(value, description) {
+  try { return JSON.parse(value) } catch { throw new Error(`${description} is not valid JSON`) }
+}
+
+function validateRedisSnapshot(context, snapshot, phase) {
+  const byRole = new Map(snapshot.keys.map((entry) => [entry.role, entry]))
+  const firstCheck = context.checks.items.length
+  const existing = snapshot.keys.filter((entry) => entry.type !== 'none')
+  context.checks.add(`redis.${phase}.ttl`, existing.every((entry) => entry.pttl > 0 && entry.pttl <= 86_400_000),
+    'every existing AI key has a positive TTL no greater than 24h', existing.filter((entry) => entry.pttl <= 0 || entry.pttl > 86_400_000)
+      .map((entry) => ({ role: entry.role, pttl: entry.pttl })))
+  const throttle = byRole.get('ai:session:user-activity')
+  context.checks.add(`redis.${phase}.throttle-ttl`, !throttle || throttle.type === 'none'
+    || (throttle.pttl > 0 && throttle.pttl <= 60_000), 'activity throttle TTL is positive and at most 60s', throttle ?? null)
+  const requiredTypes = { 'ai:run': 'string', 'ai:xevents': 'stream', 'ai:pending': 'hash', 'ai:tx': 'hash', 'ai:tx:order': 'zset' }
+  for (const [role, type] of Object.entries(requiredTypes)) {
+    context.checks.add(`redis.${phase}.${role}.present`, byRole.get(role)?.type === type && (byRole.get(role)?.count ?? 0) > 0,
+      `${role} exists as ${type} with real content`, byRole.get(role) ?? null)
+  }
+  const sessionRuns = byRole.get('ai:session:runs')
+  context.checks.add(`redis.${phase}.session.run-membership`, sessionRuns?.type === 'set'
+    && canonicalJson([...new Set(sessionRuns.value)].sort()) === canonicalJson([context.runId]),
+    'session run index contains exactly this run', sessionRuns ?? null)
+  const sessionCurrent = byRole.get('ai:session:current')
+  context.checks.add(`redis.${phase}.session.no-current`, !sessionCurrent || sessionCurrent.type === 'none',
+    'terminal run is absent from the current suspended-run index', sessionCurrent ?? null)
+  const contextEvents = byRole.get('ai:ctx:events')
+  if (contextEvents?.type === 'list') {
+    const events = contextEvents.value.map((value) => parseJson(value, 'context event'))
+    context.checks.add(`redis.${phase}.context.run-scope`, events.every((event) => event.runId === context.runId),
+      'all context events belong to this run', events.map((event) => event.runId ?? null))
+  }
+  const run = byRole.get('ai:run')
+  if (run?.type === 'string') {
+    const value = parseJson(run.value, 'run snapshot')
+    const expectedStatus = isCancelledCompletion(context) ? 'CANCELLED' : 'DONE'
+    context.checks.add(`redis.${phase}.run.terminal`, value.runId === context.runId && value.sessionId === context.sessionId
+      && value.status === expectedStatus && (!isSuccessfulDone(context)
+        || (value.finalText ?? '') === (context.runDetail?.snapshot?.finalText ?? '')),
+      'Redis run matches DONE success or cancelled/CANCELLED, with finalText compared only for success', {
+        runId: value.runId, sessionId: value.sessionId, status: value.status, expectedStatus,
+        finalText: isSuccessfulDone(context) ? value.finalText ?? '' : 'NOT_COMPARED_FOR_CANCEL'
+      })
+  }
+  const stream = byRole.get('ai:xevents')
+  if (stream?.type === 'stream') {
+    const archivedEntries = stream.value.map((entry) => ({ id: entry.id, frame: parseJson(entry.fields.frame, `event ${entry.id}`) }))
+    const archived = archivedEntries.map((entry) => entry.frame)
+    const timeline = observedFrameTimeline(context)
+    const bySeq = new Map()
+    let sequenceValid = timeline.conflicts.length === 0 && timeline.malformed.length === 0
+    let previousSeq = 0
+    for (const entry of archivedEntries) {
+      const frame = entry.frame
+      const seq = frame.seq === null || frame.seq === undefined ? null : Number(frame.seq)
+      const streamSeq = Number(entry.id.split('-')[0])
+      if (seq === null || !Number.isSafeInteger(seq) || seq <= previousSeq || seq !== streamSeq || bySeq.has(seq)) {
+        sequenceValid = false
+      }
+      if (Number.isSafeInteger(seq)) previousSeq = seq
+      bySeq.set(seq, frame)
+    }
+    const expectedSeqs = [...timeline.bySeq.keys()].sort((left, right) => left - right)
+    const archivedSeqs = [...bySeq.keys()].filter((seq) => Number.isSafeInteger(seq)).sort((left, right) => left - right)
+    context.checks.add(`redis.${phase}.events.sequence`, sequenceValid, 'valid unique strictly increasing seq matching stream ids', {
+      sequenceValid, conflicts: timeline.conflicts, malformed: timeline.malformed
+    })
+    context.checks.add(`redis.${phase}.events.exact-set`, canonicalJson(archivedSeqs) === canonicalJson(expectedSeqs),
+      'observed non-heartbeat frames and archived frames are the exact same seq set', { expectedSeqs, archivedSeqs })
+    context.checks.add(`redis.${phase}.events.content`, archived.every((frame) => timeline.bySeq.get(Number(frame.seq))?.serialized === canonicalJson(frame)),
+      'every archived frame is identical to the observed frame with the same seq', archived.filter((frame) => timeline.bySeq.get(Number(frame.seq))?.serialized !== canonicalJson(frame))
+        .map((frame) => ({ seq: frame.seq, type: frame.type })))
+    context.checks.add(`redis.${phase}.events.terminal`, canonicalJson(archived.at(-1)) === canonicalJson(context.terminal),
+      'last archived frame is the observed terminal frame', archived.at(-1) ?? null)
+  }
+  const transcript = byRole.get('ai:tx')
+  if (transcript?.type === 'hash') {
+    const entries = Object.values(transcript.value).map((value) => parseJson(value, 'transcript entry'))
+    const byEntryId = new Map(entries.map((entry) => [entry.entryId, entry]))
+    const order = byRole.get('ai:tx:order')
+    const orderedIds = order?.type === 'zset' ? order.value.map((entry) => entry.member) : []
+    const own = orderedIds.map((entryId) => byEntryId.get(entryId)).filter((entry) => entry?.runId === context.runId)
+    const expectedOwnCount = entries.filter((entry) => entry.runId === context.runId).length
+    context.checks.add(`redis.${phase}.transcript.order-complete`, new Set(orderedIds).size === orderedIds.length
+      && own.length === expectedOwnCount, 'order ZSET covers every same-run transcript entry exactly once', {
+        orderedIds, expectedOwnCount, actualOwnCount: own.length
+      })
+    const assistants = own.filter((entry) => entry.kind === 'assistant')
+    const users = own.filter((entry) => entry.kind === 'user')
+    const expectedText = streamText(context, false)
+    const expectedReasoning = streamText(context, true)
+    context.checks.add(`redis.${phase}.transcript.user`, users.length === 1 && users[0].text === context.message,
+      'one original same-run Redis USER entry', users)
+    context.checks.add(`redis.${phase}.transcript.text`, assistants.map((entry) => entry.text ?? '').join('') === expectedText,
+      expectedText, assistants.map((entry) => entry.text ?? '').join(''))
+    context.checks.add(`redis.${phase}.transcript.reasoning`, assistants.map((entry) => entry.reasoning ?? '').join('') === expectedReasoning,
+      expectedReasoning, assistants.map((entry) => entry.reasoning ?? '').join(''))
+    const callIds = uniqueById(assistants.flatMap((entry) => entry.toolCalls ?? []), (call) => call.id).map((call) => call.id)
+    const expectedIds = uniqueToolFrames(context, ['tool_start', 'confirm_request', 'frontend_tool_request']).map((frame) => frame.toolCallId)
+    context.checks.add(`redis.${phase}.transcript.tool-order`, canonicalJson(callIds) === canonicalJson(expectedIds), expectedIds, callIds)
+    const expectedSegments = expectedTranscriptSegments(context)
+    context.checks.add(`redis.${phase}.transcript.segments`, assistants.every((entry) => assistantPartsMatch(entry, expectedSegments)),
+      'raw transcript parts match complete content and first frame seq anchors', {
+        expectedSegments,
+        assistants: assistants.map((entry) => ({ entryId: entry.entryId, segments: entry.segments ?? [] }))
+      })
+    context.historyEvidence.reasoning.persistence = 'CHECKED'
+    context.historyEvidence.reasoning.redisCompared = true
+  }
+  const pending = byRole.get('ai:pending')
+  if (pending?.type === 'hash') {
+    const entries = Object.values(pending.value).map((value) => parseJson(value, 'pending entry'))
+    const requests = uniqueToolFrames(context, ['tool_start', 'confirm_request', 'frontend_tool_request'])
+    context.checks.add(`redis.${phase}.pending.identity`, requests.every((frame) => entries.some((entry) =>
+      entry.toolCallId === frame.toolCallId && entry.name === frame.name)),
+      'every tool/form request has its real same-run pending entry', requests.map((frame) => ({
+        toolCallId: frame.toolCallId, name: frame.name,
+        pending: entries.find((entry) => entry.toolCallId === frame.toolCallId) ?? null
+      })))
+    context.checks.add(`redis.${phase}.pending.terminal`, entries.every((entry) => entry.status !== 'PENDING'
+      && (entry.status !== 'APPROVED' || entry.executed === true)),
+      'no unresolved pending entry; APPROVED requires executed=true', entries.map((entry) => ({
+        toolCallId: entry.toolCallId, status: entry.status, executed: entry.executed
+      })))
+  }
+  const ledger = byRole.get('ai:ledger')
+  const approved = context.decisions.filter((decision) => decision.approved).map((decision) => decision.frame.toolCallId)
+  const expectedLedgerIds = context.frames.map((entry) => entry.frame)
+    .filter((frame) => frame.type === 'tool_result' && frame.executed === true && frame.outcome !== 'blocked')
+    .map((frame) => frame.toolCallId)
+  context.checks.add(`redis.${phase}.ledger.required`, expectedLedgerIds.length === 0 || ledger?.type === 'list',
+    'every actually executed tool requires a real LIST execution ledger', ledger ?? null)
+  if (ledger?.type === 'list') {
+    const entries = ledger.value.map((value) => parseJson(value, 'ledger entry'))
+    const ids = entries.map((entry) => entry.toolCallId)
+    context.checks.add(`redis.${phase}.ledger.unique`, new Set(ids).size === ids.length && ids.every(Boolean),
+      'no missing or duplicate toolCallId in the execution ledger', ids)
+    context.checks.add(`redis.${phase}.ledger.once`, approved.every((id) => ids.filter((candidate) => candidate === id).length === 1),
+      'every approved HITL tool has exactly one execution ledger entry', { approved, ledgerIds: ids })
+    context.checks.add(`redis.${phase}.ledger.exact-set`, canonicalJson(ids) === canonicalJson(expectedLedgerIds),
+      'ledger is exactly the ordered executed tool_result set with no unknown execution', { expectedLedgerIds, ledgerIds: ids })
+  }
+  const submittedAttachments = context.attachments.filter((attachment) => attachment.submitted === true)
+  const unsubmittedAttachments = context.attachments.filter((attachment) => attachment.submitted !== true)
+  context.checks.add(`redis.${phase}.attachments.consumed-state`, context.attachments.length <= 100
+    && context.attachments.every((attachment) => {
+      const registration = byRole.get(`ai:form:att:${attachment.fileId}`)
+      const used = byRole.get(`ai:form:att:used:${attachment.fileId}`)
+      return attachment.submitted === true
+        ? registration?.type === 'none' && used?.type === 'string' && used.value === '1'
+        : registration?.type === 'string' && used?.type === 'none'
+    }), 'submitted attachments have only bounded used=1 tombstones; unsubmitted attachments retain registration only',
+    context.attachments.map((attachment) => ({
+      fileId: attachment.fileId,
+      submitted: attachment.submitted,
+      registration: byRole.get(`ai:form:att:${attachment.fileId}`) ?? null,
+      used: byRole.get(`ai:form:att:used:${attachment.fileId}`) ?? null
+    })))
+  const expectedFileIds = unsubmittedAttachments.map((attachment) => attachment.fileId).sort()
+  const attachmentIndex = byRole.get('ai:form:att:sess')
+  const indexedFileIds = attachmentIndex?.type === 'set' ? [...new Set(attachmentIndex.value)].sort() : []
+  context.checks.add(`redis.${phase}.attachments.session-index`, canonicalJson(indexedFileIds) === canonicalJson(expectedFileIds),
+    'session index contains exactly the unsubmitted attachments', { expectedFileIds, indexedFileIds })
+  const formToolCallIds = [...new Set(context.attachments.map((attachment) => attachment.toolCallId))]
+  context.checks.add(`redis.${phase}.attachments.form-indexes`, formToolCallIds.every((toolCallId) => {
+    const expected = unsubmittedAttachments.filter((attachment) => attachment.toolCallId === toolCallId)
+      .map((attachment) => attachment.fileId).sort()
+    const index = byRole.get(`ai:form:att:form:${toolCallId}`)
+    const actual = index?.type === 'set' ? [...new Set(index.value)].sort() : []
+    return canonicalJson(actual) === canonicalJson(expected)
+  }), 'each form index contains exactly its unsubmitted attachments', formToolCallIds.map((toolCallId) => ({
+    toolCallId,
+    index: byRole.get(`ai:form:att:form:${toolCallId}`) ?? null,
+    expected: unsubmittedAttachments.filter((attachment) => attachment.toolCallId === toolCallId)
+      .map((attachment) => attachment.fileId)
+  })))
+  return context.checks.items.slice(firstCheck).every((check) => check.pass)
+}
+
+async function collectRedisEvidence(context, phase) {
+  if (process.env.REDIS_EVIDENCE !== 'true') {
+    context.external.redis.status = 'NOT_RUN'
+    context.external.redis.reason = 'REDIS_EVIDENCE=true not provided'
+    context.external.redis.phaseStatus[phase] = 'NOT_RUN'
+    return
+  }
+  const firstCheck = context.checks.items.length
+  try {
+    const snapshot = {
+      capturedAt: new Date().toISOString(),
+      connection: { mode: process.env.REDIS_URL ? 'REDIS_URL' : 'host/port/db', credentialsRecorded: false },
+      keys: [...redisKeys(context)].map(([role, key]) => ({ role, ...readRedisKey(context, key) }))
+    }
+    const pass = validateRedisSnapshot(context, snapshot, phase)
+      && context.checks.items.slice(firstCheck).every((check) => check.pass)
+    context.external.redis[phase] = snapshot
+    context.external.redis.phaseStatus[phase] = pass ? 'PASS' : 'FAIL'
+    await context.evidence.writeJson(`redis-${phase}.json`, snapshot)
+    if (phase === 'postRun') await context.evidence.writeJson('history-integrity.json', context.historyEvidence)
+  } catch (error) {
+    const comparisonStarted = context.checks.items.length > firstCheck
+    context.external.redis.phaseStatus[phase] = comparisonStarted ? 'FAIL' : 'NOT_RUN'
+    if (comparisonStarted) {
+      context.checks.add(`redis.${phase}.readable`, false, 'complete valid Redis content', error?.name ?? 'Error')
+    }
+    context.external.redis[phase] = {
+      status: context.external.redis.phaseStatus[phase],
+      reason: `read-only Redis evidence unavailable: ${error?.name ?? 'Error'}`
+    }
+    await context.evidence.writeJson(`redis-${phase}.json`, context.external.redis[phase])
+  }
+  const phases = Object.values(context.external.redis.phaseStatus)
+  context.external.redis.status = phases.includes('FAIL') ? 'FAIL'
+    : context.external.redis.phaseStatus.postRun === 'PASS' && context.external.redis.phaseStatus.postCleanup === 'PASS'
+      ? 'PASS' : 'NOT_RUN'
+  context.external.redis.reason = context.external.redis.status === 'FAIL' ? 'real Redis content comparison failed'
+    : context.external.redis.status === 'NOT_RUN' ? 'complete postRun/postCleanup read-only Redis evidence is unavailable' : null
+}
+
 async function fullHistory(context) {
   const pages = []
   let before = null
@@ -1019,6 +2136,7 @@ async function collectRunEvidence(context) {
   context.checks.add('history.user.original-message', userMessages.length === 1
     && (userMessages[0].text ?? userMessages[0].content) === context.message, context.message,
     userMessages[0]?.text ?? userMessages[0]?.content)
+  await assertRunHistory(context)
 }
 
 async function submitFrontendResult(context, runId, toolCallId, result, outcome = 'ok') {
@@ -1145,13 +2263,16 @@ async function handleGenerativeForm(context, frame, runId) {
       const uploaded = await context.api.uploadFormAttachment(runId, frame.toolCallId, context.sessionId, field.key,
         context.config.attachmentFile)
       values[field.key] = uploaded.fileId
-      context.attachments.push(uploaded)
+      context.attachments.push({ ...uploaded, runId, toolCallId: frame.toolCallId, fieldKey: field.key, submitted: false })
     }
   } else {
     throw new ScenarioFailure(`unsupported generative form purpose/schema: ${purpose ?? 'unknown'}`)
   }
   await context.evidence.writeJson(`form-${frame.toolCallId}.json`, { runId, toolCallId: frame.toolCallId, form, values })
   await submitFrontendResult(context, runId, frame.toolCallId, JSON.stringify(values))
+  for (const attachment of context.attachments) {
+    if (attachment.toolCallId === frame.toolCallId) attachment.submitted = true
+  }
 }
 
 async function handleUiSnapshot(context, frame, runId) {
@@ -1316,6 +2437,15 @@ function assertCommonCompletion(context) {
   const terminal = context.terminal
   context.checks.add('run.terminal.done', terminal?.type === 'done', 'done', terminal)
   context.checks.add('run.not-unconfirmed', terminal?.unconfirmed !== true, 'no unconfirmed terminal', terminal?.unconfirmed ?? null)
+  context.checks.add('run.terminal.no-transcript-degradation', !isTranscriptDegraded(terminal),
+    'healthy done rejects transcriptDegraded/historyComplete=false/transcript error codes', terminal)
+  context.checks.add('run.no-transcript-degradation-frame', context.frames.every((entry) => !isTranscriptDegraded(entry.frame)),
+    'no transcript degradation on either done or error frames', context.frames.filter((entry) => isTranscriptDegraded(entry.frame)))
+  context.checks.add('run.authoritative.terminal-consistency', isSuccessfulDone(context) || isCancelledCompletion(context),
+    'successful done=DONE or done{cancelled:true}=CANCELLED', {
+      terminalType: terminal?.type, cancelled: terminal?.cancelled ?? false,
+      snapshotStatus: context.runDetail?.snapshot?.status
+    })
   const userTexts = context.history?.messages.filter((message) => message.type === 'USER') ?? []
   context.checks.add('run.single-user-turn', userTexts.length === 1, 1, userTexts.length)
   const createCalls = scenarioFrames(context, 'confirm_request', 'create_task')
@@ -1487,6 +2617,7 @@ async function runSupportedScenario(context) {
   }
   context.message = messageFor(context.config, context.targetTaskId)
   await context.evidence.writeJson('baseline.json', context.baseline)
+  await collectBusinessEvidence(context, 'preChat')
   const driver = new RunDriver(
     context,
     context.message,
@@ -1519,6 +2650,8 @@ async function runSupportedScenario(context) {
   await collectRunEvidence(context)
   assertCommonCompletion(context)
   await assertScenarioSpecific(context)
+  await collectBusinessEvidence(context, 'postRun')
+  await collectRedisEvidence(context, 'postRun')
 }
 
 function strictCleanupJobIds(jobs) {
@@ -1948,6 +3081,18 @@ const context = {
   terminal: null,
   runDetail: null,
   history: null,
+  historyEvidence: null,
+  cleanupStatus: null,
+  external: {
+    redis: { status: 'NOT_RUN', reason: 'read-only Redis evidence not collected', phaseStatus: {} },
+    business: {
+      status: 'NOT_RUN',
+      reason: 'read-only business evidence not collected',
+      adapterReview: 'NOT_RUN',
+      adapterDeclaration: process.env.EVAL_REVIEWED_BUSINESS_SNAPSHOT_ADAPTER === 'true',
+      adapterReviewEvidence: null
+    }
+  },
   baseline: { tasks: { total: 0, ids: [] }, targetJobs: [] },
   targetTaskId: null,
   targetJobId: null,
@@ -2022,6 +3167,17 @@ try {
   cleanupResult = { status: 'INCOMPLETE', failures: [{ error: safeText(error?.message ?? error) }] }
   await evidence.writeJson('cleanup.json', cleanupResult)
 }
+context.cleanupStatus = cleanupResult.status
+if (supportedScenarios.has(config.scenario) && context.runId && context.historyEvidence) {
+  try { await collectRedisEvidence(context, 'postCleanup') } catch (error) {
+    if (context.external.redis.status !== 'FAIL') context.external.redis.status = 'NOT_RUN'
+    context.external.redis.reason = `post-cleanup Redis evidence unavailable: ${error?.name ?? 'Error'}`
+  }
+  try { await collectBusinessCleanupEvidence(context) } catch (error) {
+    if (context.external.business.status !== 'FAIL') context.external.business.status = 'NOT_RUN'
+    context.external.business.reason = `post-cleanup business evidence unavailable: ${error?.name ?? 'Error'}`
+  }
+}
 if (supportedScenarios.has(config.scenario)) {
   try { backendLog = await collectBackendLog(context) } catch (error) {
     backendLog = { status: 'NOT_RUN', reason: safeText(error?.message ?? error) }
@@ -2032,11 +3188,20 @@ const derivedChecks = ['C-111', 'C-112', 'C-113', 'C-114'].includes(config.scena
   : { 'C-124': { status: 'NOT_RUN', reason: 'requires an executed C-111～C-114 run' } }
 const status = cleanupResult.status === 'INCOMPLETE' || fatal || checks.failures.length > 0
   ? 'FAIL' : notRun ? 'NOT_RUN' : 'PASS'
+const externalStatuses = [context.external.redis.status, context.external.business.status]
+const databaseRedisVerdict = externalStatuses.includes('FAIL')
+  ? 'FAIL; real external content comparison failed'
+  : externalStatuses.every((value) => value === 'PASS') && context.external.business.adapterReview === 'REVIEWED'
+    ? 'PASS; reviewed business adapter plus read-only Redis and business comparisons completed'
+    : externalStatuses.every((value) => value === 'PASS')
+      ? 'NOT_RUN; business snapshot adapter independent review is required'
+      : 'NOT_RUN; complete read-only Redis and business postRun/postCleanup comparisons are required'
+const transcriptDegradationFrames = context.frames.filter((entry) => isTranscriptDegraded(entry.frame))
 const summary = {
   schemaVersion: 1,
   scenario: config.scenario,
   status,
-  statusScope: 'PUBLIC_API_SSE_ONLY; not a browser or full C-111～C-126 acceptance verdict',
+  statusScope: 'PUBLIC_API_SSE_ONLY; external verdicts remain separate; not a browser or full C-111～C-129 acceptance verdict',
   startedAt,
   finishedAt: new Date().toISOString(),
   codeHead: codeHead(),
@@ -2057,12 +3222,40 @@ const summary = {
   archive: context.archiveEvidence ?? { status: 'NOT_RUN' },
   derivedChecks,
   browserVerdict: 'NOT_RUN',
-  databaseRedisVerdict: 'NOT_RUN; read-only external snapshots and comparison are required',
+  databaseRedisVerdict,
+  transcriptDegradation: {
+    observed: transcriptDegradationFrames.length > 0,
+    classification: transcriptDegradationFrames.length === 0 ? 'NONE'
+      : config.scenario === 'C-123' ? 'DEDICATED_TRANSCRIPT_FAULT' : 'UNEXPECTED_HEALTH_FAILURE',
+    frames: transcriptDegradationFrames
+  },
+  externalEvidence: {
+    redis: {
+      status: context.external.redis.status,
+      reason: context.external.redis.reason,
+      phaseStatus: context.external.redis.phaseStatus
+    },
+    business: {
+      status: context.external.business.status,
+      reason: context.external.business.reason,
+      adapterReview: context.external.business.adapterReview,
+      adapterDeclaration: context.external.business.adapterDeclaration,
+      adapterReviewReason: context.external.business.adapterReviewReason
+        ?? (context.external.business.adapterReview === 'REVIEWED' ? null : 'independent review evidence not collected'),
+      adapterReviewEvidence: context.external.business.adapterReviewEvidence,
+      adapterReviewRequirement: 'executor declaration alone never enables PASS; save review declarations bound to actual normalized argv, executable hash, referenced file hashes and execution fingerprint; these declarations are not unforgeable proof',
+      comparison: context.external.business.comparison ?? null,
+      cleanupComparison: context.external.business.cleanupComparison ?? null,
+      unexpectedDifferences: context.external.business.unexpectedDifferences ?? [],
+      cleanupUnexpectedDifferences: context.external.business.cleanupUnexpectedDifferences ?? []
+    }
+  },
+  historyIntegrity: context.historyEvidence ?? { status: 'NOT_RUN' },
   backendLog,
   cleanup: cleanupResult,
   externalEvidenceRequired: {
-    database: 'AI data is forbidden except model configuration and user feedback; business task/job/config tables are compared only as business effects, never as AI session storage',
-    redis: 'read-only actual keys, TTL, counts and post-state for transcript/run/events/pending/ledger/context/forms/attachments; 24h sliding session TTL and shorter lock/lease/fence TTL',
+    database: 'BUSINESS_DB_SNAPSHOT_CLI must be a self-contained executable outside the repository; interpreters/scripts and code/SQL args are forbidden. BUSINESS_SNAPSHOT_ADAPTER_REVIEW must bind normalized argv, executable SHA-256, every referenced config path/SHA-256 and executionFingerprint; readOnlySql/aiTablesExcluded remain declarations, otherwise adapterReview stays NOT_RUN',
+    redis: 'REDIS_EVIDENCE=true parses REDIS_URL into non-sensitive host/port/db args; passwords only use REDISCLI_AUTH in a minimal child environment and are never recorded. Read-only keys/types/TTL/counts/content/post-state use no KEYS or unbounded SCAN',
     logs: 'backend startup and run logs must be compared with HITL, forms, jobs and terminal outcome; HTTP 200 alone is insufficient'
   }
 }
