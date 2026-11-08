@@ -1077,9 +1077,8 @@ async function handleSetCondition(context, frame, runId) {
 
 async function handleConfirmStep(context, frame, runId) {
   const args = parseArgs(frame.args)
-  const taskId = context.workspace.taskId
-  const targetStep = typeof args.step === 'string' ? args.step : ''
-  if (taskId === null || targetStep === '') throw new ScenarioFailure('confirm_step lacks bound task or explicit target step')
+  const taskId = idOf(args.taskId ?? context.workspace.taskId ?? context.targetTaskId)
+  if (taskId === null) throw new ScenarioFailure('confirm_step has no current target task')
   if (taskId !== context.targetTaskId) throw new ScenarioFailure(`confirm_step targets a different task: ${taskId}`)
   const currentStep = context.workspace.step
   const nextStep = {
@@ -1089,6 +1088,10 @@ async function handleConfirmStep(context, frame, runId) {
     PRECHECK: 'IMPORT',
     IMPORT: 'PUBLISH'
   }[currentStep]
+  if (!nextStep) throw new ScenarioFailure(`confirm_step has no next step for ${currentStep}`)
+  const targetStep = args.step === undefined || args.step === null
+    ? nextStep
+    : typeof args.step === 'string' ? args.step.trim() : ''
   if (targetStep !== nextStep) throw new ScenarioFailure(`confirm_step must advance ${currentStep} to ${nextStep}, not ${targetStep}`)
   if (context.workspace.selectedDefs.length === 0) throw new ScenarioFailure('confirm_step refuses to persist an empty definition selection')
   if (currentStep === 'QUERY_COND' && context.workspace.conditionFeedback?.nonEmpty

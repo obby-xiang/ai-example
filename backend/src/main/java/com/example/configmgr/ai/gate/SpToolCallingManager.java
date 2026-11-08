@@ -1053,21 +1053,42 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
     }
 
-    private boolean hasAnyCreateTaskRecord(String runId) {
+    private boolean isCreateTaskAwaitingExecution(String runId) {
+        List<Map<String, Object>> ledger;
         try {
-            List<Map<String, Object>> ledger = this.store.ledger(runId);
-            if (ledger == null) {
-                log.warn("per-turn create_task ledger was null; treating as recorded runId={}", runId);
+            ledger = this.store.ledger(runId);
+        } catch (RuntimeException ex) {
+            log.warn("could not read per-turn create_task ledger; blocking pre-create reads runId={}", runId, ex);
+            return true;
+        }
+        if (ledger == null) {
+            log.warn("per-turn create_task ledger was null; blocking pre-create reads runId={}", runId);
+            return true;
+        }
+        return hasCreateTaskRecord(ledger) ? false : hasUnexecutedCreateTask(runId);
+    }
+
+    private static boolean hasCreateTaskRecord(List<Map<String, Object>> ledger) {
+        for (Map<String, Object> record : ledger) {
+            if (record != null && TOOL_CREATE_TASK.equals(record.get("name"))) {
                 return true;
             }
-            for (Map<String, Object> record : ledger) {
-                if (record != null && TOOL_CREATE_TASK.equals(record.get("name"))) {
+        }
+        return false;
+    }
+
+    private boolean hasUnexecutedCreateTask(String runId) {
+        try {
+            for (PendingToolCall pending : this.store.pendings(runId)) {
+                if (pending != null && TOOL_CREATE_TASK.equals(pending.getName()) && !pending.isExecuted()
+                        && (PendingToolCall.PENDING.equals(pending.getStatus())
+                        || PendingToolCall.APPROVED.equals(pending.getStatus()))) {
                     return true;
                 }
             }
             return false;
         } catch (RuntimeException ex) {
-            log.warn("could not read per-turn create_task ledger; treating as recorded runId={}", runId, ex);
+            log.warn("could not read pending create_task entries; blocking pre-create reads runId={}", runId, ex);
             return true;
         }
     }
@@ -1123,7 +1144,7 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private void executePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
-        if (isCreatePrerequisiteReadTool(pending.getName()) && hasAnyCreateTaskRecord(state.runId)) {
+        if (isCreatePrerequisiteReadTool(pending.getName()) && isCreateTaskAwaitingExecution(state.runId)) {
             emitToolStartOnce(state.runId, state.toolStarted, pending);
             state.responses.add(skipAsReadBeforeCreate(state.runId, pending));
             traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());

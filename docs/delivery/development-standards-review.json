@@ -3592,6 +3592,33 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按真实XLSX单元格引用和元数据映射读取，列引用通用计算，不改变SSE/UTF-8处理。"},
         "verification-review": {"status": "checked", "reason": "agent-1091对任务号和_def_code行结构复核PASS，node --check通过；实测重跑仍待执行，不预写PASS。"}
       }
+    },
+    {
+      "fingerprint": "sha256:49378416d1b8510f91f18a85d7b0080ee205bd4bf47cca5ba60c0f666a19a4bf",
+      "status": "reviewed",
+      "reason": "复核创建前只读保护的真实执行状态与confirm_step缺省契约，修复创建后工作区读取被误跳过及脚本误拒正常空参；独立后端和脚本复审PASS，生产编译与脚本语法检查通过。",
+      "reviewedAt": "2026-11-08T14:24:31+08:00",
+      "reviewer": "K3.1 Pro主会话、独立复审agent-1089/1091",
+      "specChanges": [
+        {
+          "change": "创建前只读保护仅在create_task尚未执行且仍有PENDING或APPROVED未执行条目时生效，真实create_task执行台账后允许工作区读取。",
+          "reason": "旧逻辑把已有创建记录等同于等待创建，导致ui_snapshot等被跳过并出现重复回灌409。",
+          "impact": "创建前保护仍fail-closed，普通查询不阻断，创建后页面、目录和工作区可读取；同轮启动与拒绝/取消语义不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "台账先判定真实创建，未执行pending/approved才阻止，读取异常fail-closed，普通查询及创建后读取不再误跳过。"},
+        {"path": "scripts/verification/ai-one-turn-interaction-api.mjs", "status": "checked", "reason": "confirm_step缺省taskId使用目标任务，缺省step按当前步骤唯一下一步，显式值严格校验，配置/条件/读回断言不放宽。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有create_task台账、PendingToolCall状态与confirm_step后端契约，无新增依赖或场景特判。"},
+        "java-api-style": {"status": "checked", "reason": "状态与Boolean安全、空值和异常分支逐项核对，新增辅助方法保持小规模，IDEA Reformat无空白错误。"},
+        "logging-exception-safety": {"status": "checked", "reason": "台账/pending读取失败仍阻止，未用忽略异常或默认放行掩盖创建状态不明。"},
+        "toc-interaction": {"status": "checked", "reason": "避免内部跳过与重复回灌形成用户可见错误，真实拒绝/取消保持，未增加无意义提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "真实执行台账、pending状态、同轮启动和取消语义保持，脚本缺省步骤映射与后端契约一致。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "SSE/UTF-8及序列不变，独立脚本语法检查通过，未改变帧处理。"},
+        "verification-review": {"status": "checked", "reason": "agent-1089后端复审PASS、agent-1091缺省step复审PASS，生产Maven compile BUILD SUCCESS、node --check通过；动态重跑仍待执行。"}
+      }
     }
   ]
 }
