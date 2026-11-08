@@ -4521,6 +4521,9 @@ public class ResilientChatService {
             }
             if (prefixReasoning != null) {
                 this.reasoning.append(prefixReasoning);
+                if (this.capture != null) {
+                    this.capture.appendReasoning(prefixReasoning);
+                }
             }
         }
 
@@ -4686,12 +4689,13 @@ public class ResilientChatService {
          * <b>L-91/L-98</b>：记下本片思考的全文（<b>不进</b> {@link #text} —— 思考不是正文）。
          *
          * <p>
-         * 两个用途：① {@link #emittedVisible()} —— 只有<b>发过帧</b>的思考才是"用户已经看到的内容"，
+         * 三个用途：① {@link #emittedVisible()} —— 只有<b>发过帧</b>的思考才是"用户已经看到的内容"，
          * 断流重试会把它再吐一遍（前端出现两段重复思考），且 {@code retry} 帧会落在思考 delta
          * 之后（{@link com.example.configmgr.ai.conformance.FrameContract#orderingContract} 明令禁止）；
          * 展示关闭的隐藏思考不上屏，因此不阻断重试、也不该让失败码冒充 {@code _AFTER_PARTIAL}；
          * ② 落定/取消时随 assistant 消息写进记忆（键 {@code reasoningContent}），供下一轮回填
-         * （{@code ReasoningAwareOpenAiChatModel}）。体积口径：不截断，随会话记忆 TTL 走。
+         * （{@code ReasoningAwareOpenAiChatModel}）；③ 同步追加到工具执行点共用的分段捕获器。
+         * 体积口径：不截断，随会话记忆 TTL 走。
          *
          * @param chunk 本片思考原文
          * @param shown 本片是否已作为 {@code reasoning} 帧发给客户端（展示开关打开）
@@ -4699,6 +4703,9 @@ public class ResilientChatService {
         void reasoning(String chunk, boolean shown) {
             if (StringUtils.isNotEmpty(chunk)) {
                 this.reasoning.append(chunk);
+                if (this.capture != null) {
+                    this.capture.appendReasoning(chunk);
+                }
                 if (shown) {
                     this.reasoningShown = true;
                 }

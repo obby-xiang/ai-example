@@ -710,36 +710,39 @@ public class SpToolCallingManager implements ToolCallingManager {
     public static final String TOOL_CONTEXT_REPLY_LOCALE = "replyLocale";
 
     /**
-     * 本轮<b>当前 attempt 已聚合正文</b>的传播键：{@code ResilientChatService} 的累加器每消费一个
-     * 正文分片就追加到同一个 {@link TurnTextCapture}，本类在工具执行点读取，补全流式工具调用跳那条
-     * {@code ChatResponse} 里缺失的正文。
+     * 本轮<b>当前 attempt 已聚合正文与推理段</b>的传播键：{@code ResilientChatService} 的累加器每消费一个
+     * 正文或推理分片就追加到同一个 {@link TurnTextCapture}，本类在工具执行点读取，补全流式工具调用跳那条
+     * {@code ChatResponse} 里缺失的正文与推理元数据。
      *
-     * <p>不用 ThreadLocal：工具执行跑在 Reactor 的工具线程上，而正文分片由消费线程写入；
+     * <p>不用 ThreadLocal：工具执行跑在 Reactor 的工具线程上，而响应分片由消费线程写入；
      * {@code toolContext} 本来就是跨线程携带本轮事实的既有通道（runId/sessionId/信封同路）。
      */
     public static final String TOOL_CONTEXT_TURN_TEXT = "turnText";
 
     /**
-     * 本轮正文与人工等待 park 的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
+     * 本轮正文、推理与人工等待 park 的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
      *
-     * <p>每个工具跳只取走当前这一段，并在该跳聚合消息持久化后清空。终态、取消与失败也只写
-     * 当前段；已经落库的正文由各自的 assistant(tool_calls) 消息承载，不再用字符偏移推算。
+     * <p>每个工具跳只取走当前正文与推理段，并在该跳聚合消息持久化后同时清空。终态、取消与失败的
+     * 正文只写当前段；已经落库的正文由各自的 assistant(tool_calls) 消息承载，不再用字符偏移推算。
      * park 标记把工具循环的正常 returnDirect 收流与真正的上游完成区分开，每次 attempt 重置。
      *
-     * <p>本类方法均同步：正文与 park 标记跨消费、工具执行和尝试收尾线程读写
+     * <p>本类方法均同步：正文、推理与 park 标记跨消费、工具执行和尝试收尾线程读写
      * （{@link StringBuilder} 自身不保证并发）。
      */
     public static final class TurnTextCapture {
 
         private final StringBuilder segment = new StringBuilder();
 
+        private final StringBuilder reasoningSegment = new StringBuilder();
+
         private RunParkedException parked;
 
         /**
-         * 每次 attempt 重置正文与 park 标记，并种入尚未落库的纠正前缀段。
+         * 每次 attempt 重置正文、推理与 park 标记，并种入尚未落库的纠正正文前缀段。
          */
         public synchronized void reset(String segment) {
             this.segment.setLength(0);
+            this.reasoningSegment.setLength(0);
             this.parked = null;
             if (StringUtils.isNotEmpty(segment)) {
                 this.segment.append(segment);
@@ -756,6 +759,15 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
 
         /**
+         * 消费一个推理分片（与 Accumulator 同源同序）。
+         */
+        public synchronized void appendReasoning(String reasoning) {
+            if (StringUtils.isNotEmpty(reasoning)) {
+                this.reasoningSegment.append(reasoning);
+            }
+        }
+
+        /**
          * 当前事件段：上一次已持久化工具跳之后的全部正文。
          */
         public synchronized String segmentText() {
@@ -763,10 +775,18 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
 
         /**
+         * 当前事件段：上一次已持久化工具跳之后的全部推理。
+         */
+        public synchronized String reasoningText() {
+            return this.reasoningSegment.toString();
+        }
+
+        /**
          * 当前段已随本跳聚合消息持久化；重复提交只是幂等清空。
          */
         public synchronized void commitSegment() {
             this.segment.setLength(0);
+            this.reasoningSegment.setLength(0);
         }
 
         public synchronized void markParked(RunParkedException parked) {
@@ -819,11 +839,12 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (assistant == null || !assistant.hasToolCalls()) {
             return this.delegate.executeToolCalls(prompt, chatResponse);
         }
-        // 流式工具调用跳：正文分片早已作为 SSE delta 发出，这个 ChatResponse 只带 tool_calls。
-        // 用本轮累加器经 toolContext 同步过来的正文补全 assistant，后续 saveSuspended / transcript /
-        // 落定历史拿到的就是用户真正看到的正文（不解析帧、不另建第二份聚合）。
+        // 流式工具调用跳：正文与推理分片早已消费，这个 ChatResponse 可能只带 tool_calls 和空推理串。
+        // 用本轮累加器经 toolContext 同步过来的两段内容补全 assistant，后续普通续轮、saveSuspended /
+        // transcript / 宿主表单挂起都消费同一个完整对象（不解析帧、不另建第二份聚合）。
         TurnTextCapture turnText = turnTextOf(prompt);
-        assistant = assistantWithTurnText(assistant, turnText == null ? "" : turnText.segmentText());
+        assistant = assistantWithTurnContent(assistant, turnText == null ? "" : turnText.segmentText(),
+                turnText == null ? "" : turnText.reasoningText());
 
         String runId = runIdOf(prompt);
         // 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
@@ -4165,20 +4186,29 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     /**
-     * 用已聚合正文补全流式工具调用的 assistant。
+     * 用已聚合正文与推理段补全流式工具调用的 assistant。
      *
-     * <p><b>单一来源</b>：当前事件段非空时只使用它，<b>不再拼接</b>当前分片自带的 {@code direct}
-     * （两种来源拼接会让同一跳的正文越过明确段边界）；
-     * 聚合正文为空时保持 assistant 原样（direct 就是它的正文）。
-     * tool_calls / metadata / media 原样保留。
+     * <p><b>单一来源</b>：当前正文段非空时只使用它，<b>不再拼接</b>当前分片自带的 {@code direct}
+     * （两种来源拼接会让同一跳的正文越过明确段边界）；聚合正文为空时保留 direct。
+     * 推理段非空时覆盖工具分片可能携带的空串，即使正文为空也会重建。
+     * tool_calls / media / 其它 metadata 原样保留。
      */
-    private static AssistantMessage assistantWithTurnText(AssistantMessage assistant, String turnText) {
-        if (StringUtils.isEmpty(turnText) || turnText.equals(assistant.getText())) {
+    private static AssistantMessage assistantWithTurnContent(AssistantMessage assistant, String turnText,
+                                                             String turnReasoning) {
+        boolean replaceText = StringUtils.isNotEmpty(turnText) && !turnText.equals(assistant.getText());
+        Object currentReasoning = assistant.getMetadata().get("reasoningContent");
+        boolean replaceReasoning = StringUtils.isNotEmpty(turnReasoning) && !turnReasoning.equals(currentReasoning);
+        if (!replaceText && !replaceReasoning) {
             return assistant;
         }
+        Map<String, Object> metadata = new LinkedHashMap<>(
+                ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()));
+        if (replaceReasoning) {
+            metadata.put("reasoningContent", turnReasoning);
+        }
         AssistantMessage.Builder builder = AssistantMessage.builder()
-                .content(turnText)
-                .properties(ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()));
+                .content(replaceText ? turnText : assistant.getText())
+                .properties(metadata);
         if (assistant.hasToolCalls()) {
             builder.toolCalls(assistant.getToolCalls());
         }

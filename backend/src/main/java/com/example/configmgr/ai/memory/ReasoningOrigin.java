@@ -2,6 +2,7 @@ package com.example.configmgr.ai.memory;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.ObjectUtils;
 import org.springframework.ai.chat.messages.AssistantMessage;
 
@@ -106,7 +107,7 @@ public record ReasoningOrigin(
      *
      * <p>返回值可能是同一实例：已有来源、或身份两值皆空时原样返回 —— 不伪造"当前供应方"，
      * 也不因为重复调用而改变 provenance。其余 metadata（推理/未知/业务键）逐键保留，
-     * 不解析、不截断。
+     * 不解析、不截断；需要重建时 toolCalls 与非空 media 也原样保留。
      *
      * @param message    上游/落定路径产生的 assistant 消息
      * @param providerId 快照冻结的供应方主键（可 null = env 合成行）
@@ -135,6 +136,9 @@ public record ReasoningOrigin(
             .properties(merged);
         if (message.hasToolCalls()) {
             builder.toolCalls(message.getToolCalls());
+        }
+        if (CollectionUtils.isNotEmpty(message.getMedia())) {
+            builder.media(message.getMedia());
         }
         return builder.build();
     }

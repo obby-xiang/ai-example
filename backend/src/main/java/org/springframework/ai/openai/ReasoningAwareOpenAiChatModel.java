@@ -22,27 +22,19 @@ import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 
 /**
- * 对 Spring AI 1.1.7 已知缺口的补丁：{@code OpenAiChatModel.createRequest} 的 ASSISTANT
- * 分支把第 9 组件 reasoningContent 硬编码为 null，而 deepseek-flash（思考模式，OpenAI
- * 兼容协议）要求多轮请求回填 assistant 消息时携带本轮 reasoning_content，缺失会 400。
- * 本类放在同名包下以 Override 包私有的 createRequest，逻辑复制父类（USER 媒体分支
- * 简化为纯文本、TOOL 的 ToolResponseMessage 展开、options 用 ModelOptionsUtils.merge、
- * 工具定义 resolveToolDefinitions + FunctionTool 构造且合并时保留 extraBody、非流式
- * 移除 streamOptions），唯一差异：ASSISTANT 分支第 9 组件从
- * {@code assistantMessage.getMetadata().get("reasoningContent")} 传播。
- * 版本面（2026-10-22）：本类与 {@code ChatCompletionMessage} 在 1.1.7 / 1.1.8 上字节码逐字节
- * 一致（javap 全量比对，见任务看板「批·合规依赖批」），故两版同缺口、补丁副本无需按版本分叉。
- * 升级 Spring AI 版本后应评审官方是否已修复并移除本补丁。
+ * Spring AI 1.1.7 的 OpenAI 兼容扩展适配：父类 {@code OpenAiChatModel.createRequest}
+ * 不传播 assistant 消息 metadata 中的 reasoningContent，而部分兼容服务把非标准的
+ * {@code reasoning_content} 作为逐消息扩展，并要求工具续轮回放实际产生的推理段。
+ * 本类放在同名包下以 Override 包私有的 createRequest，保留父类的标准消息映射、
+ * 工具定义和 extraBody 合并行为，仅增加受来源约束的扩展字段传播。
  *
- * <h2>跨供应方推理元数据隔离（本批）</h2>
- * 第 9 组件不是"无条件的字段"：只有当 assistant 消息的<b>来源标记</b>
- * （{@link ReasoningOrigin}，随 metadata 存）与<b>当前供应方</b>一致时才回放。
- * 于是"用户在 A 上产生的推理"在换到 B 之后不会进入 B 的请求；而<b>存储面不动</b> ——
- * 历史在快照/记忆里仍是原文（切回 A 或同供应方续跑时照常回放）。
- * 本类只清理<b>本协议层真正会外发的那一个字段</b>（reasoningContent），不碰其它 metadata。
- * 来源缺失（无法证明由谁产出）按 {@link ReasoningOrigin#replayAllowed} 的 fail-closed 口径<b>不回放</b>。
+ * <p>{@code reasoning_content} 不是 OpenAI 标准字段。只有
+ * {@link ReasoningOrigin#replayAllowed} 确认消息与当前目标同源，且值是非空白字符串时才回放；
+ * 空白值、来源未知或跨来源消息都不生成该字段。其它 metadata 仍由快照和记忆原样保存，
+ * 不因此进入请求。升级 Spring AI 版本后应评审官方是否已覆盖该扩展点并移除本适配。
  */
 public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 
@@ -109,10 +101,10 @@ public class ReasoningAwareOpenAiChatModel extends OpenAiChatModel {
 				Object reasoning = assistantMessage.getMetadata().get("reasoningContent");
 				boolean replay = ReasoningOrigin.replayAllowed(assistantMessage.getMetadata(),
 						this.currentProviderId);
-				String reasoningContent = replay && reasoning instanceof String s ? s : null;
-				if (!replay && reasoning instanceof String) {
+				String reasoningContent = replay && reasoning instanceof String s && StringUtils.hasText(s) ? s : null;
+				if (logger.isDebugEnabled() && !replay && reasoning instanceof String) {
 					// 只影响请求体；历史原文仍在快照/记忆里（隔离不删字）
-					logger.debug("跨供应方隔离：不回放非本供应方的 reasoningContent（当前 providerId={}）",
+					logger.debug("Skipped reasoning content replay because the message origin does not match the current provider (currentProviderId={})",
 							this.currentProviderId);
 				}
 				return List.of(new ChatCompletionMessage(assistantMessage.getText(),

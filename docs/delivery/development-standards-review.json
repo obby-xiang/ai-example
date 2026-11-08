@@ -3763,6 +3763,36 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "模型流式响应按官方协议和真实帧处理，禁止因专有扩展破坏通用消息、工具调用或后续表单帧。"},
         "verification-review": {"status": "checked", "reason": "agent-1100首轮发现C-42/C-63冲突，修正后复审APPROVE；git diff --check通过，生产实现和动态验收均NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:cb1973ef7920592b7856bf4767d0559f4f5e97c4d3cc59231fe791b67676e51f",
+      "status": "reviewed",
+      "reason": "逐hunk并沿分片捕获、工具执行、来源标记、普通续轮、挂起恢复和请求构造复核完整assistant连续性；媒体与import两轮返修后独立最终复审APPROVE。",
+      "reviewedAt": "2026-11-08T18:24:33+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1106",
+      "specChanges": [
+        {
+          "change": "工具跳分段捕获同时恢复正文与真实推理元数据，非标准reasoning_content仅在同源且非空白时回放。",
+          "reason": "原执行点只补正文，工具分片空推理进入快照和续轮，导致兼容服务HTTP400及后续表单无法产生新帧。",
+          "impact": "OpenAI标准assistant/tool字段与顺序不变；未知、跨来源和空白不注入扩展，旧快照缺失内容不伪造，真实不兼容仍失败可观测。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "TurnTextCapture同步捕获正文和推理并在reset/commit双清理，执行点合并完整assistant且保留toolCalls、media和metadata。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/memory/ReasoningOrigin.java", "status": "checked", "reason": "来源标记重建时保留非空media，原来源只加不改、空媒体和toolCalls语义不变，import按字典序。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "Accumulator真实推理分片同步进入工具跳捕获，纠正前缀只在既有seed条件种入一次，attempt不串值。"},
+        {"path": "backend/src/main/java/org/springframework/ai/openai/ReasoningAwareOpenAiChatModel.java", "status": "checked", "reason": "扩展字段仅同源非空白回放，空白/未知/跨来源不生成，标准消息和extraBody保持，DEBUG英文且有开关。"},
+        {"path": "docs/superpowers/plans/2026-11-08-openai-assistant-continuity-recovery.md", "status": "checked", "reason": "实施计划记录根因、通用协议边界、文件职责、审查重点和真实验收要求。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有toolContext、Spring AI Builder和Apache Commons CollectionUtils，无新增依赖或供应商适配分支。"},
+        "java-api-style": {"status": "checked", "reason": "保留reset(String)兼容入口、可变metadata副本和集合空值语义，新增import非通配非静态且按字典序，未改变JSON实体。"},
+        "logging-exception-safety": {"status": "checked", "reason": "触及DEBUG先判isDebugEnabled并使用英文，不打印推理正文或原始响应，真实HTTP400不被吞没或包装成功。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复后续表单真实产生帧的链路，不伪造pending/完成或增加用户提示，旧缺失快照不伪造补全。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "标准role/content/tool_calls/tool_call_id保持，普通续轮与挂起共用完整assistant；未改变Redis结构、TTL、数据库或状态机。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "推理分片按原序累计并在工具执行点一次合并，不按字节或代理对截断，不重写正文或SSE帧。"},
+        "verification-review": {"status": "checked", "reason": "agent-1106发现media损失及import顺序后两轮复审均ADDRESSED并APPROVE；最新Maven实际编译355源文件BUILD SUCCESS，真实模型/Redis/浏览器NOT_RUN。"}
+      }
     }
   ]
 }
