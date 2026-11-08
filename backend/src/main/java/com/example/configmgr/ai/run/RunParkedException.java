@@ -8,8 +8,10 @@ package com.example.configmgr.ai.run;
  * 在请求帧已投递、订阅已收流之后，<b>本进程不再有任何该做的事</b>：
  * 决策会经 HTTP 落到 Redis，届时由 {@link ResumeService} 重建执行。因此 {@code ConfirmGate#await}
  * 用本异常<b>结束本次执行</b>（而不是返回一个"已决结果"让官方循环继续调模型，
- * 也不是阻塞线程）。调用链（{@code SpToolCallingManager}）<b>不捕获</b>它；
- * {@link ResilientChatService} 在尝试循环里识别它并直接退出（不重试、不发终帧、不写失败态）。
+ * 也不是阻塞线程）。{@code SpToolCallingManager} 在官方工具循环边界只捕获本异常，
+ * 记录 park 标记并转换为不带工具结果的 {@code returnDirect} 正常收流；
+ * {@link ResilientChatService} 在正常收流后识别该标记并直接退出（不重试、不发终帧、不写失败态）。
+ * 没有捕获器的兼容装配仍保留原异常传播。
  *
  * <p>捕获方只允许做三件事：<b>不动</b>快照（保持 SUSPENDED，pending/req/decided/帧归档即恢复状态）、
  * 释放驱动租约（由 await 出口完成）、结束线程。任何"顺手收尾成 done/error"都会把
@@ -17,37 +19,39 @@ package com.example.configmgr.ai.run;
  */
 public class RunParkedException extends RuntimeException {
 
-	private final String runId;
+    private final String runId;
 
-	private final String toolCallId;
+    private final String toolCallId;
 
-	private final String kind;
+    private final String kind;
 
-	public RunParkedException(String runId, String toolCallId, String kind) {
-		super("Run entered human-wait park state: runId=" + runId + " toolCallId=" + toolCallId + " kind=" + kind
-				+ " (thread returned; resume rebuilds execution after the decision)");
-		this.runId = runId;
-		this.toolCallId = toolCallId;
-		this.kind = kind;
-	}
+    public RunParkedException(String runId, String toolCallId, String kind) {
+        super("Run entered human-wait park state: runId=" + runId + " toolCallId=" + toolCallId + " kind=" + kind
+                + " (thread returned; resume rebuilds execution after the decision)");
+        this.runId = runId;
+        this.toolCallId = toolCallId;
+        this.kind = kind;
+    }
 
-	public String runId() {
-		return this.runId;
-	}
+    public String runId() {
+        return this.runId;
+    }
 
-	public String toolCallId() {
-		return this.toolCallId;
-	}
+    public String toolCallId() {
+        return this.toolCallId;
+    }
 
-	/** 挂起种类（{@code CONFIRM} / {@code FRONTEND}；诊断用）。 */
-	public String kind() {
-		return this.kind;
-	}
+    /**
+     * 挂起种类（{@code CONFIRM} / {@code FRONTEND}；诊断用）。
+     */
+    public String kind() {
+        return this.kind;
+    }
 
-	@Override
-	public synchronized Throwable fillInStackTrace() {
-		// park 是控制流而不是异常路径：不需要堆栈（每张卡都会走一次，避免无谓开销与日志噪音）
-		return this;
-	}
+    @Override
+    public synchronized Throwable fillInStackTrace() {
+        // park 是控制流而不是异常路径：不需要堆栈（每张卡都会走一次，避免无谓开销与日志噪音）
+        return this;
+    }
 
 }

@@ -3402,6 +3402,45 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "首个正文delta后取消仍保留实际部分正文，不改变UTF-8、帧序或字符处理。"},
         "verification-review": {"status": "checked", "reason": "生产compile/package成功；DeepSeek r2命中首个delta立即取消，CANCELLED、取消终帧、用户及部分历史均通过，UOE与transcript terminal write failed均为0；r1不同路径单独保留，不外推全量通过。"}
       }
+    },
+    {
+      "fingerprint": "sha256:7e73712f067b93f2880b0ec5fbed1fc2b4da3d8523001998bb1e291891c5037b",
+      "status": "reviewed",
+      "reason": "逐项复核人工等待returnDirect控制流、ChatMemory回写、三份冻结规格、附件有界模型场景重试及证据账本；独立代码与规格复审均通过，DeepSeek单次核心27/27且ERROR为0，重试分支未触发仍NOT_RUN。",
+      "reviewedAt": "2026-11-08T10:03:03+08:00",
+      "reviewer": "K3.1 Pro主会话、独立静态复审agent-1079与agent-1080",
+      "specChanges": [
+        {
+          "change": "已确认人工等待挂起以returnDirect正常收流，作为缺失终帧一律断流的唯一例外。",
+          "reason": "原RunParkedException经过多层Spring AI聚合器被重复记为ERROR，正常人工等待不是上游故障。",
+          "impact": "不请求下一跳模型、不产生成功工具结果或done/error，保留SUSPENDED/pending/req并由真实决策续跑；其他断流和异常仍按原规则处理。"
+        },
+        {
+          "change": "附件模型场景使用低温和完整目标Schema，仅首次正常done纯文本零工具且安全收口后换会话重试一次。",
+          "reason": "模型偶发只回文本导致接口未覆盖并被全局熔断放大。",
+          "impact": "真实表单、上传、回灌和终态断言不变；第二次失败和其他错误仍如实失败，重试次数可观测。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "TurnTextCapture同步传递park并在attempt重置；仅RunParkedException转非空history returnDirect，无capture原样抛出，其他异常不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/memory/IdentityBoundChatMemoryAdvisor.java", "status": "checked", "reason": "复用请求capture，仅跳过park正常收流后的合成assistant回写；官方before用户消息与pending transcript不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "正常收流后优先读取park并复用既有挂起收尾，跳过无finishReason断流判断，不发终帧或伪造成功。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunParkedException.java", "status": "checked", "reason": "注释同步工具边界捕获和returnDirect语义，无capture兼容路径仍传播原异常，字段与控制流不变。"},
+        {"path": "docs/02-需求设计文档-v2.2-冻结版.md", "status": "checked", "reason": "缺终帧规则增加已确认park例外，明确正常收流、无失败态和真实决策续跑。"},
+        {"path": "docs/03-技术方案文档-v2.1.md", "status": "checked", "reason": "明确returnDirect不请求下一跳、不产生成功工具结果或终帧并保留SUSPENDED/pending/req，其他TCP断流规则不变。"},
+        {"path": "docs/adr/DECISION-CARDS.md", "status": "checked", "reason": "ADR-6同步同一park例外，独立规格复审确认三份文档与Spring AI 1.1.7路径一致。"},
+        {"path": "scripts/perf/ai-api/core-coverage.mjs", "status": "checked", "reason": "专用纯文本错误仅限附件首次，安全回收才释放许可，首次其他错误保留诊断，第二次仍失败；上传回灌断言未改。"},
+        {"path": "docs/verification/本轮整改变更账本-2026-11-08.md", "status": "checked", "reason": "登记37个生产文件、三份规格、核心27/27及ERROR=0证据；plainTextRetryCount=0故重试分支NOT_RUN，多实例、Cluster和API负载未外推。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Spring AI returnDirect、现有TurnTextCapture、ChatMemory和压测请求params，无新增依赖或并行协议。"},
+        "java-api-style": {"status": "checked", "reason": "capture读写同步且attempt清空，history使用自有ArrayList，方法规模、空值和集合所有权经逐hunk复核，IDEA Reformat已执行。"},
+        "logging-exception-safety": {"status": "checked", "reason": "在错误通道前消除正常park的误报根因，未改日志级别、采样或忽略异常；真实异常仍进入原分类和ERROR路径。"},
+        "toc-interaction": {"status": "checked", "reason": "人工等待、确认和续跑交互不变，无新增提示；附件仍要求用户实际上传，不伪造结果。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "SUSPENDED/pending/req、续跑、取消、runEpoch和数据库白名单不变；模型许可仅安全回收后释放，第二次失败仍熔断。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "正常收流与缺终帧断流通过明确park标记区分，SSE seq、UTF-8和正文处理未改。"},
+        "verification-review": {"status": "checked", "reason": "生产package与node --check通过；DeepSeek r7单次27/27、complete=true、cleanupErrors=0、plainTextRetryCount=0，挂起聚合ERROR及其他ERROR=0；重试分支、C-33、多实例、Cluster、真实故障注入和API负载NOT_RUN。"}
+      }
     }
   ]
 }

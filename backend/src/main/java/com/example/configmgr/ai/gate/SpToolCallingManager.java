@@ -720,22 +720,27 @@ public class SpToolCallingManager implements ToolCallingManager {
     public static final String TOOL_CONTEXT_TURN_TEXT = "turnText";
 
     /**
-     * 本轮正文的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
+     * 本轮正文与人工等待 park 的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
      *
      * <p>每个工具跳只取走当前这一段，并在该跳聚合消息持久化后清空。终态、取消与失败也只写
      * 当前段；已经落库的正文由各自的 assistant(tool_calls) 消息承载，不再用字符偏移推算。
+     * park 标记把工具循环的正常 returnDirect 收流与真正的上游完成区分开，每次 attempt 重置。
      *
-     * <p>本类方法均同步：写方在消费线程，读/清在工具执行线程（{@link StringBuilder} 自身不保证并发）。
+     * <p>本类方法均同步：正文与 park 标记跨消费、工具执行和尝试收尾线程读写
+     * （{@link StringBuilder} 自身不保证并发）。
      */
     public static final class TurnTextCapture {
 
         private final StringBuilder segment = new StringBuilder();
 
+        private RunParkedException parked;
+
         /**
-         * 每次 attempt 重置，并种入尚未落库的纠正前缀段。
+         * 每次 attempt 重置正文与 park 标记，并种入尚未落库的纠正前缀段。
          */
         public synchronized void reset(String segment) {
             this.segment.setLength(0);
+            this.parked = null;
             if (StringUtils.isNotEmpty(segment)) {
                 this.segment.append(segment);
             }
@@ -764,6 +769,14 @@ public class SpToolCallingManager implements ToolCallingManager {
             this.segment.setLength(0);
         }
 
+        public synchronized void markParked(RunParkedException parked) {
+            this.parked = parked;
+        }
+
+        public synchronized RunParkedException parked() {
+            return this.parked;
+        }
+
     }
 
     @Override
@@ -775,6 +788,15 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
         try {
             return executeToolCallsInLocale(prompt, chatResponse);
+        } catch (RunParkedException parked) {
+            TurnTextCapture capture = turnTextOf(prompt);
+            if (capture == null) {
+                throw parked;
+            }
+            capture.markParked(parked);
+            List<Message> history = new ArrayList<>(prompt.getInstructions());
+            history.add(chatResponse.getResult().getOutput());
+            return ToolExecutionResult.builder().conversationHistory(history).returnDirect(true).build();
         } finally {
             LocaleContextHolder.setLocaleContext(previous);
         }

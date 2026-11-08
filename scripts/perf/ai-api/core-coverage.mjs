@@ -242,6 +242,11 @@ const apiLoad = {
 class CoverageError extends Error {
 }
 
+class PlainTextModelResponseError extends CoverageError {
+}
+
+let plainTextRetryCount = 0
+
 function errorDetail(error) {
     if (error instanceof CoverageError) return error.message
     if (error instanceof Error) return error.name
@@ -292,7 +297,7 @@ function isSafelyRecoveredModelError(error) {
         && safelyRecoveredModelErrors.has(error)
 }
 
-async function modelCall(fn) {
+async function modelCall(fn, allowPlainTextRetry = false) {
     await acquireModel()
     let safeToRelease = false
     try {
@@ -300,8 +305,10 @@ async function modelCall(fn) {
         safeToRelease = true
         return result
     } catch (error) {
-        tripModelCircuit(error)
-        safeToRelease = isSafelyRecoveredModelError(error)
+        const retryPlainText = allowPlainTextRetry && error instanceof PlainTextModelResponseError
+        const safelyRecovered = isSafelyRecoveredModelError(error)
+        if (!retryPlainText || !safelyRecovered) tripModelCircuit(error)
+        safeToRelease = safelyRecovered
         throw error
     } finally {
         if (safeToRelease) releaseModel()
@@ -576,14 +583,15 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
 }
 
 async function startChat(sessionId, message, context, predicate, awaitTerminal = false, recordCoverage = true,
-                         scopeErrors = coreCleanupErrors) {
+                         scopeErrors = coreCleanupErrors, params = null, allowPlainTextRetry = false) {
     const started = Date.now()
     return modelCall(async () => {
         let chat
         try {
-            chat = await readSseChat(sessionId, message, context, predicate, true, scopeErrors)
+            chat = await readSseChat(sessionId, message, context, predicate, true, scopeErrors,
+                params, allowPlainTextRetry)
         } catch (error) {
-            if (recordCoverage) {
+            if (recordCoverage && !(allowPlainTextRetry && error instanceof PlainTextModelResponseError)) {
                 record('POST /api/ai/chat', {
                     httpStatus: null,
                     latencyMs: Date.now() - started,
@@ -601,13 +609,16 @@ async function startChat(sessionId, message, context, predicate, awaitTerminal =
             return true
         }, true, scopeErrors, 'model-terminal')
         return {...chat, terminal: terminal.matched, terminalLatencyMs: terminal.latencyMs}
-    })
+    }, allowPlainTextRetry)
 }
 
 async function readSseChat(sessionId, message, context, predicate, recoverOnError = true,
-                           scopeErrors = coreCleanupErrors) {
+                           scopeErrors = coreCleanupErrors, params = null, allowPlainTextRetry = false) {
     const started = Date.now()
-    const body = {sessionId, message, context, clientRequestId: `${runPrefix}-${randomUUID()}`}
+    const body = {
+        sessionId, message, context, clientRequestId: `${runPrefix}-${randomUUID()}`,
+        ...(params === null ? {} : {params})
+    }
     let reader = null
     let buffer = ''
     let previousSeq = 0
@@ -639,6 +650,10 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
             frames.push(frame)
             if (predicate(frame)) matched = frame
             recoverySeq = previousSeq
+            if (allowPlainTextRetry && matched === null && frame.type === 'done' && frame.cancelled !== true
+                && frames.every((item) => !['tool_start', 'tool_result', 'confirm_request', 'frontend_tool_request'].includes(item.type))) {
+                throw new PlainTextModelResponseError('model returned normal done without tool activity before predicate matched')
+            }
         }
         while (matched === null) {
             const {done, value} = await reader.read()
@@ -658,7 +673,9 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
         return {runId, frames, matched, lastSeq: previousSeq, latencyMs: Date.now() - started}
     } catch (error) {
         if (recoverOnError) {
-            tripModelCircuit(error, runId ? 'sse-failed' : 'sse-unknown')
+            if (!allowPlainTextRetry || !(error instanceof PlainTextModelResponseError)) {
+                tripModelCircuit(error, runId ? 'sse-failed' : 'sse-unknown')
+            }
             await settleRunAfterSseError(runId, recoverySeq, error, scopeErrors)
         }
         throw error
@@ -1211,19 +1228,33 @@ async function knowledgeWorkflow() {
 async function attachmentWorkflow(options = {}) {
     const {recordCoverage = true, onSession = null, onUpload = null} = options
     const cleanupScopeErrors = recordCoverage ? coreCleanupErrors : apiLoad.cleanupErrors
-    const attachmentSession = `${runPrefix}-attachment-${randomUUID()}`
-    createdSessions.add(attachmentSession)
-    onSession?.(attachmentSession)
-    const attachmentChat = await startChat(attachmentSession,
-        '请调用 generative_form，purpose=GENERAL_CLARIFY，只生成一个名为 evidence 的 attachment 字段用于收集一个文本附件，不要调用其它工具。',
-        null,
-        (frame) => {
-            const form = formOf(frame)
-            return form !== null && Array.isArray(form.fields) && form.fields.some((field) => field.type === 'attachment')
-        },
-        false,
-        recordCoverage,
-        cleanupScopeErrors)
+    let attachmentSession = null
+    let attachmentChat = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        const firstAttempt = attempt === 0
+        attachmentSession = `${runPrefix}-attachment-${randomUUID()}`
+        createdSessions.add(attachmentSession)
+        onSession?.(attachmentSession)
+        try {
+            attachmentChat = await startChat(attachmentSession,
+                '请调用 generative_form 工具，不要只回复文字，也不要调用其它工具。工具入参必须且只能是：'
+                + '{"form":{"scenario":"CLARIFY","purpose":"GENERAL_CLARIFY","title":"上传文本附件","fields":[{"key":"evidence","label":"文本附件","type":"attachment","required":true}]}}',
+                null,
+                (frame) => {
+                    const form = formOf(frame)
+                    return form !== null && Array.isArray(form.fields) && form.fields.some((field) => field.type === 'attachment')
+                },
+                false,
+                recordCoverage,
+                cleanupScopeErrors,
+                {temperature: 0},
+                firstAttempt)
+        } catch (error) {
+            if (!firstAttempt || !(error instanceof PlainTextModelResponseError)) throw error
+            plainTextRetryCount += 1
+        }
+        if (attachmentChat !== null) break
+    }
     const form = formOf(attachmentChat.matched)
     const attachmentField = form.fields.find((field) => field.type === 'attachment')
     assert(attachmentField?.key, 'attachment field key missing')
@@ -1729,6 +1760,7 @@ try {
         modelConcurrencyConfigured,
         independentModelWorkers: 6,
         maxObservedInFlight,
+        plainTextRetryCount,
         modelCircuitBreaker: {
             failed: modelFailure !== null,
             phase: modelFailure?.phase ?? null,

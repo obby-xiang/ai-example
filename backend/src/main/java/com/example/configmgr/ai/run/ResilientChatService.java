@@ -113,7 +113,8 @@ import java.util.function.Predicate;
  * 且无副作用"（副作用 = 本次尝试内工具开始执行过 {@link ToolActivityBeacon}，或台账在本次尝试
  * 之后新增了执行记录 —— 后者覆盖"执行完成、结果还没回填"的跨进程窗口）；</li>
  * <li><b>完成帧校验</b>：流"正常"结束却从未出现终帧（带 {@code finishReason} 或 usage 的响应）
- * = 断流（{@code UPSTREAM_STREAM_INCOMPLETE}）—— TCP 静默 FIN 的典型形态。</li>
+ * = 断流（{@code UPSTREAM_STREAM_INCOMPLETE}）—— TCP 静默 FIN 的典型形态；人工等待 park 经
+ * {@code returnDirect} 正常收流时不生成终帧，由捕获器的 park 标记优先进入既有挂起收尾，例外于本判断。</li>
  * </ol>
  *
  * <h2>两条硬规范（本棒的落地方式）</h2>
@@ -1258,7 +1259,7 @@ public class ResilientChatService {
         context.put(PendingToolCall.CREATED_TASK_ID, new AtomicReference<Long>());
         // 回答语言显式传播到工具线程（工具线程不继承请求上下文；与 ConfirmGate#dispatchResume 同口径）
         context.put(SpToolCallingManager.TOOL_CONTEXT_REPLY_LOCALE, ReplyLanguage.current().tag());
-        // 本轮正文聚合的只读通道：流式工具调用跳的 ChatResponse 不带正文，执行点据此补全。
+        // 本轮正文与 park 的跨线程通道：执行点补全流式工具跳正文，并标记人工等待正常收流。
         if (turnTextBody != null) {
             context.put(SpToolCallingManager.TOOL_CONTEXT_TURN_TEXT, turnTextBody);
         }
@@ -1388,6 +1389,10 @@ public class ResilientChatService {
                 }, round.settled::completeExceptionally, () -> round.settled.complete(null));
         round.watchdog.bind(round.subscription);
         awaitSettled(state.runId, round.settled, state.turnStartedAtMs, state.config);
+        RunParkedException parked = state.turnTextBody.parked();
+        if (parked != null) {
+            throw parked;
+        }
         emitFirstByte(state.attempt, round.startedAtMs, round.accumulator);
         if (!round.accumulator.sawTerminal()) {
             throw new StreamViolationException(StreamViolationException.INCOMPLETE,
