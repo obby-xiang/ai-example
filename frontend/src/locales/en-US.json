@@ -397,6 +397,11 @@
         "filter": "Filter criteria",
         "clarify": "Confirm details"
       },
+      "purpose": {
+        "selectDefinitions": "Select configuration items",
+        "setConditions": "Set filter conditions",
+        "taskType": "Select task type"
+      },
       "selectPlaceholder": "Select {label}",
       "multiSelect": {
         "selectAll": "Select all",

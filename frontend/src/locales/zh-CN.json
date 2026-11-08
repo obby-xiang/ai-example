@@ -397,6 +397,11 @@
         "filter": "筛选条件",
         "clarify": "信息确认"
       },
+      "purpose": {
+        "selectDefinitions": "选择配置项",
+        "setConditions": "设置筛选条件",
+        "taskType": "选择任务类型"
+      },
       "selectPlaceholder": "请选择{label}",
       "multiSelect": {
         "selectAll": "全选",

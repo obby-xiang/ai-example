@@ -1346,6 +1346,7 @@ import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type Mess
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
+import { parseToolArgs } from '@/utils/frontend-tools'
 import type { SheetAppliedSummary } from '@/utils/sheet-tools'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCardVariant } from '@/utils/error-card'
@@ -3496,8 +3497,22 @@ function isBlockPartSignatureMatch(part: MessagePart, signature: BlockPartSignat
     && (part.kind !== 'tool' || Object.is(signature.part, part))
 }
 
+const AUTOMATIC_WORKSPACE_PROCESS_TOOLS: ReadonlySet<string> = new Set([
+  'navigate_to',
+  'select_definitions',
+  'confirm_step',
+  'set_condition'
+])
+
 function shouldShowToolPart(part: ToolPart): boolean {
   if (isSystemRejectPhantom(part.name, part.userTextCode)) {
+    return false
+  }
+  if (part.kind2 === 'FRONTEND'
+    && AUTOMATIC_WORKSPACE_PROCESS_TOOLS.has(part.name)
+    && part.status === 'succeeded'
+    && part.requiresAction === false
+    && part.decision === undefined) {
     return false
   }
   if (part.status === 'skipped') {
@@ -3941,22 +3956,66 @@ function cardStatusTestId(part: ToolPart): string {
   return isReadOnlyLike(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
 }
 
+const FORM_PURPOSE_TITLE_KEYS = {
+  SELECT_DEFINITIONS: 'ai.gf.purpose.selectDefinitions',
+  SET_CONDITIONS: 'ai.gf.purpose.setConditions',
+  TASK_TYPE: 'ai.gf.purpose.taskType'
+} as const
+
+type SpecificFormPurpose = keyof typeof FORM_PURPOSE_TITLE_KEYS
+type FormPurpose = SpecificFormPurpose | 'GENERAL_CLARIFY'
+
+function isSpecificFormPurpose(value: string): value is SpecificFormPurpose {
+  return Object.prototype.hasOwnProperty.call(FORM_PURPOSE_TITLE_KEYS, value)
+}
+
+function formPurposeOf(part: ToolPart): FormPurpose | null {
+  const rawForm = parseToolArgs(part.args).form
+  if (rawForm === null || typeof rawForm !== 'object' || Array.isArray(rawForm)) {
+    return null
+  }
+  const rawPurpose = (rawForm as Record<string, unknown>).purpose
+  if (typeof rawPurpose === 'string' && rawPurpose.trim() !== '') {
+    const purpose = rawPurpose.trim()
+    return isSpecificFormPurpose(purpose) || purpose === 'GENERAL_CLARIFY' ? purpose : null
+  }
+  const spec = cardFormSpec(part)
+  if (spec === null) {
+    return null
+  }
+  if (spec.fields.some((field) => field.optionsFrom?.sourceId === 'definitions')) {
+    return 'SELECT_DEFINITIONS'
+  }
+  return spec.scenario === 'FILTER' ? 'SET_CONDITIONS' : 'GENERAL_CLARIFY'
+}
+
+function formCardTitle(part: ToolPart): string {
+  const purpose = formPurposeOf(part)
+  if (purpose === null) {
+    return t('ai.gf.title')
+  }
+  if (purpose !== 'GENERAL_CLARIFY') {
+    return t(FORM_PURPOSE_TITLE_KEYS[purpose])
+  }
+  return cardFormSpec(part)?.title?.trim() || t('ai.gf.scenario.clarify')
+}
+
 /** 卡头只表达短动作或用途；完整业务对象由卡体字段承担。 */
 function cardTitle(part: ToolPart): string {
-  return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2], () => {
+  return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2, part.args], () => {
     if (isSheetPreviewTool(part)) {
       return t('ai.sheetCard.title')
     }
     if (isUploadHandoffTool(part)) {
       return t('ai.uploadHandoff.title')
     }
-    return cardTypeOf(part) === 'form' ? t('ai.gf.title') : toolLabel(part.name)
+    return cardTypeOf(part) === 'form' ? formCardTitle(part) : toolLabel(part.name)
   })
 }
 
 function formBodyTitle(part: ToolPart): string {
   const title = cardFormSpec(part)?.title?.trim() ?? ''
-  return title === t('ai.gf.title') ? '' : title
+  return title === cardTitle(part) || title === t('ai.gf.title') ? '' : title
 }
 
 function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {

@@ -4135,6 +4135,34 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批为Java宿主状态机与pending映射，不涉及UTF-8分片或代理对处理。"},
         "verification-review": {"status": "checked", "reason": "agent-1133两轮finding均ADDRESSED并APPROVED；IDEA默认Reformat成功，Maven 357源文件BUILD SUCCESS，动态验收NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:8f62b3878f5ac2353fd0cfde805c34d2b4b4182ea49658466e3869a50b0449a3",
+      "status": "reviewed",
+      "reason": "逐项复核自动过程卡可见性、表单purpose标题、旧数据缺省和中英文词条；严格requiresAction=false修正后独立复审通过。",
+      "reviewedAt": "2026-11-09T01:58:39+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1138",
+      "specChanges": [
+        {
+          "change": "四个工作区过程工具仅在FRONTEND+succeeded+requiresAction=false+无decision时隐藏成功过程卡，表单按purpose显示明确业务标题。",
+          "reason": "自动成功过程不应重复打扰用户，旧数据缺省不能误判为无需操作。",
+          "impact": "仅呈现和中英文文案变化；parts、执行、HITL/表单状态及恢复语义不变，动态验收NOT_RUN。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "可见性严格限定四个过程工具的真实成功且无决策场景，undefined/null/true均保留；purpose读取真实schema并防缓存陈旧。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "新增选择配置项、设置筛选条件、选择任务类型中文标题，通用澄清与未知purpose保留兼容兜底。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "三个专用purpose英文标题与中文语义一致，无新增中英混用。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用ToolPart状态、FormSpec/purpose、现有locale与schema解析，无新增依赖或第二套状态机。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅Vue/JSON前端呈现，无Java代码变化，前端无单函数50行限制。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "本批不修改日志或异常处理，不新增原始异常/敏感信息展示。"},
+        "toc-interaction": {"status": "checked", "reason": "自动成功过程静默，拒绝/取消/失败/未知/待操作及HITL业务结果保留，表单标题具体且双语一致。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "隐藏仅影响展示和普通复制摘要，不改parts、pending、执行或恢复；旧镜像缺省不会误隐藏。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解析、文本截断或UTF-8处理。"},
+        "verification-review": {"status": "checked", "reason": "agent-1138原finding已ADDRESSED并APPROVE；最终node scripts/build.mjs构建27.50s成功，动态验收NOT_RUN。"}
+      }
     }
   ]
 }
