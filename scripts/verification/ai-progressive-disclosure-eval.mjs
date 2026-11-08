@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 
 const baseInput = process.env.BASE_URL?.trim()
 if (!baseInput) throw new Error('BASE_URL must be set explicitly')
@@ -29,6 +30,11 @@ const allowWrites = process.env.EVAL_ALLOW_WRITES === 'true'
 if (writesRequired && !allowWrites) throw new Error('EVAL_ALLOW_WRITES=true is required for ACTION/MIXED cases and confirm writes')
 const queryCondDefinitions = definitions.filter((definition) => definition.context?.step === 'QUERY_COND')
 const queryCondTaskId = process.env.QUERY_COND_TASK_ID?.trim() ?? ''
+const reasoningDisplaySetting = process.env.REASONING_DISPLAY_ENABLED?.trim()
+if (reasoningDisplaySetting !== undefined && !['true', 'false'].includes(reasoningDisplaySetting)) {
+  throw new Error('REASONING_DISPLAY_ENABLED must be true or false when provided')
+}
+const reasoningDisplayEnabled = reasoningDisplaySetting === undefined ? null : reasoningDisplaySetting === 'true'
 
 function headers(json = false) {
   return {
@@ -124,9 +130,28 @@ function errorInfo(stage, category, details = {}) {
   return { stage, category, ...details }
 }
 
-function terminalCategory(frame) {
+const transcriptErrorCodes = new Set(['AI_TRANSCRIPT_INCOMPLETE', 'AI_TRANSCRIPT_WRITE_FAILED'])
+
+function isTranscriptDegraded(frame) {
   const code = String(frame.code ?? '').toUpperCase()
-  return /MODEL|UPSTREAM|PROVIDER|RATE_LIMIT|EMPTY_REPLY|INCOMPLETE/.test(code) ? 'model' : 'infra'
+  return frame.transcriptDegraded === true || frame.historyComplete === false || transcriptErrorCodes.has(code)
+}
+
+function terminalCategory(frame) {
+  if (isTranscriptDegraded(frame)) return 'transcript'
+  const code = String(frame.code ?? '').toUpperCase()
+  return /MODEL|UPSTREAM|PROVIDER|RATE_LIMIT|EMPTY_REPLY/.test(code) ? 'model' : 'infra'
+}
+
+function terminalError(frame) {
+  return errorInfo('terminal', terminalCategory(frame), {
+    code: frame.code ?? null,
+    message: frame.message ?? null,
+    transcriptDegraded: frame.transcriptDegraded === true,
+    historyComplete: frame.historyComplete ?? null,
+    runStatus: frame.runStatus ?? null,
+    frame
+  })
 }
 
 function notRunCase(definition, round, error) {
@@ -138,13 +163,16 @@ function notRunCase(definition, round, error) {
     runId: null,
     latencyMs: null,
     answer: null,
+    reasoning: '',
+    orderedSegments: [],
     notRun: true,
     error,
     terminal: null,
     toolCalls: [],
     usage: null,
     eof: null,
-    disclosure: { status: 'unknown', reason: 'case was not run because its fixture or HITL precondition failed' }
+    disclosure: { status: 'unknown', reason: 'case was not run because its fixture or HITL precondition failed' },
+    persistenceEvidence: unavailablePersistenceEvidence('case was not run; history/run evidence was not collected')
   }
   return { ...result, mechanical: mechanical(result, definition), manual: manualTemplate() }
 }
@@ -245,18 +273,24 @@ async function executeCase(definition, round) {
       runId: null,
       latencyMs: Date.now() - started,
       answer: null,
+      reasoning: '',
+      orderedSegments: [],
       error: errorInfo('chat_http', 'infra', { httpStatus: response.status, body: payload }),
       terminal: null,
       toolCalls: [],
       usage: null,
       eof: null,
-      disclosure: { status: 'unknown', reason: 'chat did not return SSE' }
+      disclosure: { status: 'unknown', reason: 'chat did not return SSE' },
+      persistenceEvidence: unavailablePersistenceEvidence('chat did not return SSE; history/run evidence was not collected')
     }
   }
 
   const toolCalls = new Map()
   const approvedToolCalls = new Set()
+  const orderedSegments = []
+  const orderedToolCallIds = new Set()
   let answer = ''
+  let reasoning = ''
   let runId = null
   let usage = null
   let terminal = null
@@ -269,12 +303,41 @@ async function executeCase(definition, round) {
   let buffered = ''
   const stopAfterApproval = definition.stopAfter === 'approval'
 
+  function recordOrderedSegment(frame) {
+    if (frame.type === 'delta') {
+      const text = String(frame.text ?? '')
+      if (text === '') return
+      const kind = frame.kind === 'reasoning' ? 'reasoning' : 'text'
+      const messageId = frame.messageId ?? null
+      const previous = orderedSegments.at(-1)
+      if (previous?.kind === kind && previous.messageId === messageId) {
+        previous.text += text
+      } else {
+        orderedSegments.push({ kind, text, toolCallId: null, messageId, seq: frame.seq ?? null })
+      }
+      return
+    }
+    const calls = frame.type === 'suspended' && Array.isArray(frame.toolCalls) ? frame.toolCalls : [frame]
+    const toolFrame = frame.type === 'suspended' || ['tool_start', 'tool_result', 'confirm_request', 'confirm_decision',
+      'frontend_tool_request', 'frontend_tool_result'].includes(frame.type)
+    if (!toolFrame) return
+    for (const call of calls) {
+      const toolCallId = typeof call?.toolCallId === 'string' ? call.toolCallId : ''
+      if (toolCallId === '' || orderedToolCallIds.has(toolCallId)) continue
+      orderedToolCallIds.add(toolCallId)
+      orderedSegments.push({ kind: 'tool', text: null, toolCallId, seq: frame.seq ?? call.seq ?? null })
+    }
+  }
+
   async function processFrame(frame) {
     const atMs = Date.now() - started
+    recordOrderedSegment(frame)
     if (frame.type === 'start') {
       runId = frame.runId ?? runId
     } else if (frame.type === 'delta') {
-      if (frame.kind !== 'reasoning') answer += frame.text ?? ''
+      const text = String(frame.text ?? '')
+      if (frame.kind === 'reasoning') reasoning += text
+      else answer += text
     } else if (frame.type === 'tool_start') {
       toolCalls.set(frame.toolCallId, {
         toolCallId: frame.toolCallId,
@@ -285,9 +348,20 @@ async function executeCase(definition, round) {
         outcome: null,
         code: null,
         status: null,
+        kind: frame.kind ?? null,
+        executed: frame.executed ?? null,
+        decision: null,
+        userTextCode: null,
+        resultView: null,
+        preflight: null,
+        truncated: null,
+        noticeCode: null,
+        strategy: null,
+        originalChars: null,
+        returnedChars: null,
         resultAtMs: null
       })
-    } else if (frame.type === 'tool_result') {
+    } else if (frame.type === 'tool_result' || frame.type === 'frontend_tool_result') {
       const previous = toolCalls.get(frame.toolCallId) ?? {
         toolCallId: frame.toolCallId,
         name: frame.name,
@@ -297,6 +371,17 @@ async function executeCase(definition, round) {
         outcome: null,
         code: null,
         status: null,
+        kind: null,
+        executed: null,
+        decision: null,
+        userTextCode: null,
+        resultView: null,
+        preflight: null,
+        truncated: null,
+        noticeCode: null,
+        strategy: null,
+        originalChars: null,
+        returnedChars: null,
         resultAtMs: null
       }
       previous.name = frame.name ?? previous.name
@@ -304,6 +389,16 @@ async function executeCase(definition, round) {
       previous.outcome = frame.outcome ?? null
       previous.code = frame.code ?? null
       previous.status = frame.status ?? null
+      previous.kind = frame.kind ?? (frame.type === 'frontend_tool_result' ? 'FRONTEND' : previous.kind)
+      previous.executed = frame.executed ?? previous.executed
+      previous.userTextCode = frame.userTextCode ?? null
+      previous.resultView = frame.resultView ?? null
+      previous.preflight = frame.preflight ?? null
+      previous.truncated = frame.truncated ?? null
+      previous.noticeCode = frame.noticeCode ?? null
+      previous.strategy = frame.strategy ?? null
+      previous.originalChars = frame.originalChars ?? null
+      previous.returnedChars = frame.returnedChars ?? null
       previous.resultAtMs = atMs
       toolCalls.set(frame.toolCallId, previous)
       trackCreatedResources(frame, runId)
@@ -319,6 +414,12 @@ async function executeCase(definition, round) {
         } else if (stopAfterApproval) {
           stopRequested = true
         }
+      }
+    } else if (frame.type === 'confirm_decision') {
+      const previous = toolCalls.get(frame.toolCallId)
+      if (previous !== undefined) {
+        previous.decision = frame.decision ?? null
+        previous.status = frame.status ?? previous.status
       }
     } else if (frame.type === 'confirm_request') {
       if (definition.autoApprove === true) {
@@ -341,9 +442,13 @@ async function executeCase(definition, round) {
     } else if (frame.type === 'done') {
       terminal = frame
       usage = frame.usage ?? null
+      if (isTranscriptDegraded(frame)) {
+        streamError = terminalError(frame)
+        stopRequested = true
+      }
     } else if (frame.type === 'error') {
-      streamError = errorInfo('terminal', terminalCategory(frame),
-        { code: frame.code ?? null, message: frame.message ?? null, frame })
+      terminal = frame
+      streamError = terminalError(frame)
       stopRequested = true
     }
   }
@@ -398,7 +503,7 @@ async function executeCase(definition, round) {
       }
     }
   }
-  return {
+  const result = {
     id: definition.id,
     kind: definition.kind,
     round,
@@ -406,6 +511,8 @@ async function executeCase(definition, round) {
     runId,
     latencyMs: Date.now() - started,
     answer,
+    reasoning,
+    orderedSegments,
     notRun: streamError?.notRun === true,
     error: streamError,
     terminal,
@@ -414,6 +521,517 @@ async function executeCase(definition, round) {
     eof: { reached: reachedEof, tail: eofTail },
     disclosure: { status: 'unknown', reason: 'system prompt and disclosed tool set are not exposed by public SSE' }
   }
+  return { ...result, persistenceEvidence: await collectPersistenceEvidence(result) }
+}
+
+function unavailablePersistenceEvidence(reason) {
+  return {
+    history: { observed: false, verdict: 'NOT_RUN', reason, pages: [], messages: [] },
+    run: { observed: false, verdict: 'NOT_RUN', reason, data: null },
+    orderedSegments: { verdict: 'NOT_RUN', reason, public: [], persisted: [], mismatchCount: null, mismatches: [] },
+    tools: { verdict: 'NOT_RUN', applicable: false, reason, public: [], persisted: [], mismatchCount: null, mismatches: [] },
+    reasoning: {
+      verdict: 'NOT_RUN',
+      toolHopVerdict: 'NOT_RUN',
+      visibilityVerdict: 'NOT_RUN',
+      displayEnabled: reasoningDisplayEnabled,
+      reason,
+      publicChars: 0,
+      persistedChars: null,
+      publicSegments: [],
+      persistedSegments: []
+    }
+  }
+}
+
+async function readEvidence(url) {
+  let response
+  try {
+    response = await request(url)
+  } catch (error) {
+    return { observed: false, verdict: 'NOT_RUN', url, error: String(error?.message ?? error) }
+  }
+  const evidence = { url, httpStatus: response.status, contentType: response.contentType }
+  if (response.status !== 200 || response.body?.success !== true || !isRecord(response.body?.data)) {
+    return {
+      observed: false,
+      verdict: 'NOT_RUN',
+      ...evidence,
+      body: response.body ?? response.text,
+      reason: 'expected HTTP 200 with ApiResponse success=true and object data'
+    }
+  }
+  return { observed: true, verdict: 'OBSERVED', ...evidence, data: response.body.data }
+}
+
+async function readRunEvidence(runId, sessionId) {
+  if (!runId) return { observed: false, verdict: 'NOT_RUN', reason: 'no runId was observed on public SSE', data: null }
+  const evidence = await readEvidence(`/api/ai/runs/${encodeURIComponent(runId)}`)
+  if (!evidence.observed) return evidence
+  const snapshot = evidence.data.snapshot
+  const matches = evidence.data.exists === true && isRecord(snapshot)
+    && snapshot.runId === runId && snapshot.sessionId === sessionId
+  return {
+    ...evidence,
+    observed: matches,
+    verdict: matches ? 'OBSERVED' : 'NOT_RUN',
+    reason: matches ? undefined : 'run evidence must exist and match the current runId/sessionId'
+  }
+}
+
+async function readHistoryEvidence(sessionId) {
+  const pages = []
+  const messages = []
+  let before = null
+  for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
+    const query = new URLSearchParams({ latest: '100' })
+    if (before !== null) query.set('before', before)
+    const page = await readEvidence(`/api/ai/history/${encodeURIComponent(sessionId)}?${query}`)
+    pages.push(page)
+    if (!page.observed) {
+      return { observed: false, verdict: 'NOT_RUN', reason: 'history page was not readable', pages, messages }
+    }
+    if (page.data.sessionId !== sessionId || !Array.isArray(page.data.messages)) {
+      return { observed: false, verdict: 'NOT_RUN', reason: 'history page has invalid shape or a different sessionId', pages, messages }
+    }
+    messages.unshift(...page.data.messages)
+    if (page.data.hasMore !== true) return { observed: true, verdict: 'OBSERVED', pages, messages }
+    if (!['string', 'number'].includes(typeof page.data.nextCursor) || String(page.data.nextCursor) === '') {
+      return { observed: false, verdict: 'NOT_RUN', reason: 'history hasMore=true without a usable nextCursor', pages, messages }
+    }
+    before = String(page.data.nextCursor)
+  }
+  return { observed: false, verdict: 'NOT_RUN', reason: 'history pagination exceeded 20 pages', pages, messages }
+}
+
+function segmentView(segment) {
+  return {
+    kind: segment?.kind ?? null,
+    text: segment?.text ?? null,
+    toolCallId: segment?.toolCallId ?? null,
+    messageId: segment?.messageId ?? null,
+    seq: segment?.seq ?? null
+  }
+}
+
+function segmentIdentity(segment) {
+  return { kind: segment.kind, text: segment.text, toolCallId: segment.toolCallId }
+}
+
+function orderedSegmentEvidence(publicSegments, persistedSegments, evidenceReady) {
+  const evidence = {
+    verdict: 'NOT_RUN',
+    reason: 'matching terminal history/run evidence is required',
+    public: publicSegments,
+    persisted: persistedSegments,
+    mismatchCount: null,
+    mismatches: []
+  }
+  if (!evidenceReady) return evidence
+  if (publicSegments.length === 0 && persistedSegments.length === 0) {
+    return { ...evidence, reason: 'no public or persisted ordered segment sample was observed', mismatchCount: 0 }
+  }
+  const mismatches = []
+  let mismatchCount = 0
+  const length = Math.max(publicSegments.length, persistedSegments.length)
+  for (let index = 0; index < length; index += 1) {
+    const publicSegment = publicSegments[index] === undefined ? null : segmentIdentity(publicSegments[index])
+    const persistedSegment = persistedSegments[index] === undefined ? null : segmentIdentity(persistedSegments[index])
+    if (JSON.stringify(publicSegment) === JSON.stringify(persistedSegment)) continue
+    mismatchCount += 1
+    if (mismatches.length < 20) mismatches.push({ index, public: publicSegment, persisted: persistedSegment })
+  }
+  return {
+    ...evidence,
+    verdict: mismatchCount === 0 ? 'PASS' : 'FAIL',
+    reason: mismatchCount === 0 ? 'public and same-run persisted ordered segments match' : 'ordered segment content or sequence differs',
+    mismatchCount,
+    mismatches
+  }
+}
+
+function publicToolResponse(call) {
+  if (call.resultAtMs === null) return null
+  return {
+    name: call.name ?? null,
+    result: call.result ?? null,
+    userTextCode: call.userTextCode ?? null,
+    resultView: call.resultView ?? null,
+    truncated: call.truncated ?? null,
+    noticeCode: call.noticeCode ?? null,
+    strategy: call.strategy ?? null,
+    originalChars: call.originalChars ?? null,
+    returnedChars: call.returnedChars ?? null
+  }
+}
+
+function persistedToolResponse(response) {
+  return {
+    name: response?.name ?? null,
+    result: response?.responseData ?? null,
+    userTextCode: response?.userTextCode ?? null,
+    resultView: response?.resultView ?? null,
+    truncated: response?.truncated ?? null,
+    noticeCode: response?.noticeCode ?? null,
+    strategy: response?.strategy ?? null,
+    originalChars: response?.originalChars ?? null,
+    returnedChars: response?.returnedChars ?? null
+  }
+}
+
+function expectedToolStatus(call, run) {
+  if (!['PENDING', 'APPROVED'].includes(call.status)) return call.status ?? null
+  if (call.outcome === 'blocked') return 'BLOCKED'
+  const ledgerHit = Array.isArray(run.data?.ledger)
+    && run.data.ledger.some((entry) => isRecord(entry) && entry.toolCallId === call.toolCallId)
+  return call.executed === true || ledgerHit ? 'EXECUTED' : call.status
+}
+
+function publicToolState(call, run) {
+  return {
+    status: expectedToolStatus(call, run),
+    outcome: call.outcome ?? null,
+    code: call.code ?? null,
+    kind: call.kind ?? null,
+    decision: call.decision ?? null,
+    submittedValues: call.kind === 'FRONTEND' && call.resultAtMs !== null ? call.result ?? null : null,
+    preflight: call.preflight ?? null
+  }
+}
+
+function persistedToolState(state) {
+  return {
+    status: state?.status ?? null,
+    outcome: state?.outcome ?? null,
+    code: state?.code ?? null,
+    kind: state?.kind ?? null,
+    decision: state?.decision ?? null,
+    submittedValues: state?.submittedValues ?? null,
+    preflight: state?.preflight ?? null
+  }
+}
+
+const frameTruncationCodes = new Set(['frame_truncated', 'frame_limit_unreached'])
+const toolTruncationFields = ['truncated', 'noticeCode', 'strategy', 'originalChars', 'returnedChars']
+
+const toolTruncationStrategies = new Set(['head', 'tail', 'head_tail'])
+
+function hasValidTruncationCounts(value) {
+  return Number.isSafeInteger(value.originalChars) && value.originalChars >= 0
+    && Number.isSafeInteger(value.returnedChars) && value.returnedChars >= 0
+    && value.returnedChars <= value.originalChars
+}
+
+function validateModelViewTruncation(value, side, toolCallId, addMismatch) {
+  if (value.truncated !== true) addMismatch(toolCallId, `response.${side}Truncated`, value.truncated, true)
+  if (!toolTruncationStrategies.has(value.strategy)) {
+    addMismatch(toolCallId, `response.${side}Strategy`, value.strategy, 'head, tail or head_tail')
+  }
+  if (!hasValidTruncationCounts(value)) {
+    addMismatch(toolCallId, `response.${side}TruncationCounts`,
+      { originalChars: value.originalChars, returnedChars: value.returnedChars },
+      'integers with 0 <= returnedChars <= originalChars required')
+  }
+}
+
+function compareToolResponse(publicValue, persistedValue, toolCallId, addMismatch) {
+  for (const field of ['name', 'userTextCode', 'resultView']) {
+    if (!isDeepStrictEqual(publicValue[field], persistedValue[field])) {
+      addMismatch(toolCallId, `response.${field}`, publicValue[field], persistedValue[field])
+    }
+  }
+  if (frameTruncationCodes.has(publicValue.noticeCode)) {
+    if (publicValue.truncated !== true) {
+      addMismatch(toolCallId, 'response.truncated', publicValue.truncated, true)
+    }
+    const countsValid = hasValidTruncationCounts(publicValue)
+    if (!countsValid) {
+      addMismatch(toolCallId, 'response.truncationCounts',
+        { originalChars: publicValue.originalChars, returnedChars: publicValue.returnedChars },
+        'integers with 0 <= returnedChars <= originalChars required by FrameSizeLimiter')
+    }
+    if (typeof publicValue.result === 'string') {
+      if (publicValue.strategy !== 'head') addMismatch(toolCallId, 'response.strategy', publicValue.strategy, 'head')
+      if (countsValid && publicValue.result.length !== publicValue.returnedChars) {
+        addMismatch(toolCallId, 'response.returnedChars', publicValue.returnedChars, publicValue.result.length)
+      }
+      if (typeof persistedValue.result !== 'string') {
+        addMismatch(toolCallId, 'response.result', 'history original string required', persistedValue.result)
+      } else if (countsValid && persistedValue.result.length !== publicValue.originalChars) {
+        addMismatch(toolCallId, 'response.originalChars', publicValue.originalChars, persistedValue.result.length)
+      }
+    } else {
+      if (publicValue.strategy !== null) addMismatch(toolCallId, 'response.strategy', publicValue.strategy, null)
+      if (countsValid && (publicValue.originalChars !== 0 || publicValue.returnedChars !== 0)) {
+        addMismatch(toolCallId, 'response.truncationCounts',
+          { originalChars: publicValue.originalChars, returnedChars: publicValue.returnedChars },
+          'non-string result requires zero counts')
+      }
+      if (!isDeepStrictEqual(publicValue.result, persistedValue.result)) {
+        addMismatch(toolCallId, 'response.result', publicValue.result, persistedValue.result)
+      }
+    }
+    if (persistedValue.noticeCode !== null && persistedValue.noticeCode !== 'model_view_truncated') {
+      addMismatch(toolCallId, 'response.persistedNoticeCode', publicValue.noticeCode, persistedValue.noticeCode)
+    }
+    if (persistedValue.noticeCode === 'model_view_truncated') {
+      validateModelViewTruncation(persistedValue, 'persisted', toolCallId, addMismatch)
+    }
+    if (persistedValue.truncated === true && persistedValue.noticeCode === null) {
+      addMismatch(toolCallId, 'response.persistedNoticeCode', publicValue.noticeCode, null)
+    }
+    return
+  }
+  if (publicValue.noticeCode !== null && publicValue.noticeCode !== 'model_view_truncated') {
+    addMismatch(toolCallId, 'response.noticeCode', publicValue.noticeCode, 'supported truncation noticeCode')
+  }
+  if (publicValue.noticeCode === 'model_view_truncated') {
+    validateModelViewTruncation(publicValue, 'public', toolCallId, addMismatch)
+  }
+  if (persistedValue.noticeCode === 'model_view_truncated') {
+    validateModelViewTruncation(persistedValue, 'persisted', toolCallId, addMismatch)
+  }
+  if (publicValue.truncated === true && publicValue.noticeCode === null) {
+    addMismatch(toolCallId, 'response.noticeCode', null, 'a declared truncation noticeCode')
+  }
+  if (publicValue.truncated !== true && publicValue.noticeCode !== null
+    && publicValue.noticeCode !== 'model_view_truncated') {
+    addMismatch(toolCallId, 'response.noticeCode', publicValue.noticeCode, 'no notice without truncation')
+  }
+  if (!isDeepStrictEqual(publicValue.result, persistedValue.result)) {
+    addMismatch(toolCallId, 'response.result', publicValue.result, persistedValue.result)
+  }
+  for (const field of toolTruncationFields) {
+    if (!isDeepStrictEqual(publicValue[field], persistedValue[field])) {
+      addMismatch(toolCallId, `response.${field}`, publicValue[field], persistedValue[field])
+    }
+  }
+}
+
+const javaWhitespaceOnly = /^[\u0009-\u000D\u001C-\u0020\u1680\u2000-\u2006\u2008-\u200A\u2028\u2029\u205F\u3000]*$/
+
+function submittedValuesMatch(publicValue, persistedValue) {
+  const isBlank = (value) => value === null || (typeof value === 'string' && javaWhitespaceOnly.test(value))
+  if (isBlank(publicValue) || isBlank(persistedValue)) return isBlank(publicValue) && isBlank(persistedValue)
+  return isDeepStrictEqual(publicValue, persistedValue)
+}
+
+function compareToolState(publicValue, persistedValue, publicResponse, persistedResponse, toolCallId, addMismatch) {
+  for (const field of Object.keys(publicValue)) {
+    if (field !== 'submittedValues') {
+      if (!isDeepStrictEqual(publicValue[field], persistedValue[field])) {
+        addMismatch(toolCallId, `state.${field}`, publicValue[field], persistedValue[field])
+      }
+      continue
+    }
+    if (publicValue.submittedValues === null && persistedValue.submittedValues === null) continue
+    if (frameTruncationCodes.has(publicResponse?.noticeCode)) {
+      if (!submittedValuesMatch(persistedResponse?.result ?? null, persistedValue.submittedValues)) {
+        addMismatch(toolCallId, 'state.submittedValues',
+          { historyToolResult: persistedResponse?.result ?? null, frameTruncatedPublicValue: publicValue.submittedValues },
+          persistedValue.submittedValues)
+      }
+    } else if (!submittedValuesMatch(publicValue.submittedValues, persistedValue.submittedValues)) {
+      addMismatch(toolCallId, 'state.submittedValues', publicValue.submittedValues, persistedValue.submittedValues)
+    }
+  }
+}
+
+function toolPersistenceEvidence(caseResult, assistantMessages, historyMessages, run, evidenceReady) {
+  const publicById = new Map(caseResult.toolCalls.map((call) => [call.toolCallId, {
+    toolCallId: call.toolCallId,
+    observedStatus: call.status ?? null,
+    response: publicToolResponse(call),
+    state: publicToolState(call, run)
+  }]))
+  const persistedStateById = new Map()
+  for (const message of assistantMessages) {
+    if (!isRecord(message.toolCallStates)) continue
+    for (const [toolCallId, state] of Object.entries(message.toolCallStates)) {
+      persistedStateById.set(toolCallId, persistedToolState(state))
+    }
+  }
+  const persistedResponseById = new Map()
+  const invalid = []
+  for (const message of historyMessages) {
+    if (!isRecord(message) || message.type !== 'TOOL' || message.runId !== caseResult.runId) continue
+    if (!Array.isArray(message.toolResponses) || message.toolResponses.length === 0) {
+      invalid.push({ toolCallId: null, field: 'toolResponses', reason: 'TOOL entry has no toolResponses array' })
+      continue
+    }
+    for (const response of message.toolResponses) {
+      if (!isRecord(response) || typeof response.id !== 'string' || response.id === '') {
+        invalid.push({ toolCallId: null, field: 'toolResponses.id', reason: 'TOOL response has no toolCallId' })
+        continue
+      }
+      if (persistedResponseById.has(response.id)) {
+        invalid.push({ toolCallId: response.id, field: 'toolResponses', reason: 'duplicate persisted TOOL response' })
+      }
+      persistedResponseById.set(response.id, persistedToolResponse(response))
+    }
+  }
+  const persistedIds = [...new Set([...persistedStateById.keys(), ...persistedResponseById.keys()])]
+  const persistedById = new Map(persistedIds.map((toolCallId) => [toolCallId, {
+    toolCallId,
+    response: persistedResponseById.get(toolCallId) ?? null,
+    state: persistedStateById.get(toolCallId) ?? null
+  }]))
+  const evidence = {
+    verdict: 'NOT_RUN',
+    applicable: publicById.size > 0 || persistedById.size > 0 || invalid.length > 0,
+    reason: 'matching terminal history/run evidence is required',
+    public: [...publicById.values()],
+    persisted: [...persistedById.values()],
+    mismatchCount: null,
+    mismatches: []
+  }
+  if (!evidenceReady) return evidence
+  if (publicById.size === 0 && persistedById.size === 0 && invalid.length === 0) {
+    return { ...evidence, verdict: 'NOT_RUN', reason: 'no public or persisted tool calls; tool comparison is not applicable', mismatchCount: 0 }
+  }
+  const mismatches = []
+  let mismatchCount = invalid.length
+  mismatches.push(...invalid.slice(0, 20))
+  const addMismatch = (toolCallId, field, publicValue, persistedValue) => {
+    mismatchCount += 1
+    if (mismatches.length < 20) mismatches.push({ toolCallId, field, public: publicValue, persisted: persistedValue })
+  }
+  const ids = [...new Set([...publicById.keys(), ...persistedById.keys()])]
+  for (const toolCallId of ids) {
+    const publicTool = publicById.get(toolCallId)
+    const persistedTool = persistedById.get(toolCallId)
+    const publicResponse = publicTool?.response ?? null
+    const persistedResponse = persistedTool?.response ?? null
+    if (publicResponse === null || persistedResponse === null) {
+      if (publicResponse !== persistedResponse) addMismatch(toolCallId, 'response', publicResponse, persistedResponse)
+    } else {
+      compareToolResponse(publicResponse, persistedResponse, toolCallId, addMismatch)
+    }
+    const publicState = publicTool?.state ?? null
+    const persistedState = persistedTool?.state ?? null
+    if (publicState === null || persistedState === null) {
+      if (publicState !== persistedState) addMismatch(toolCallId, 'state', publicState, persistedState)
+    } else {
+      compareToolState(publicState, persistedState, publicResponse, persistedResponse, toolCallId, addMismatch)
+    }
+  }
+  return {
+    ...evidence,
+    verdict: mismatchCount === 0 ? 'PASS' : 'FAIL',
+    reason: mismatchCount === 0
+      ? 'public tool responses, submitted values and toolCallStates match same-run history'
+      : 'tool responses, submitted values or toolCallStates differ from same-run history',
+    mismatchCount,
+    mismatches
+  }
+}
+
+function reasoningEvidence(caseResult, assistantMessages, publicSegments, persistedSegments, evidenceReady, orderedVerdict) {
+  const publicReasoningSegments = publicSegments.filter((segment) => segment.kind === 'reasoning')
+  const persistedReasoningSegments = persistedSegments.filter((segment) => segment.kind === 'reasoning')
+  const publicReasoning = caseResult.reasoning
+  const legacyPersistedReasoning = assistantMessages
+    .map((message) => typeof message.reasoningContent === 'string' ? message.reasoningContent : '')
+    .join('')
+  const persistedReasoning = persistedReasoningSegments.length > 0
+    ? persistedReasoningSegments.map((segment) => String(segment.text ?? '')).join('')
+    : legacyPersistedReasoning
+  let visibilityVerdict = 'NOT_RUN'
+  let visibilityReason = 'matching terminal history/run evidence is required'
+  if (evidenceReady && reasoningDisplayEnabled === false) {
+    visibilityVerdict = publicReasoning === '' && persistedReasoning === '' ? 'PASS' : 'FAIL'
+    visibilityReason = 'display-disabled requires reasoning to be absent from public SSE and history projections'
+  } else if (evidenceReady && (publicReasoning !== '' || persistedReasoning !== '')) {
+    visibilityVerdict = publicReasoning === persistedReasoning ? 'PASS' : 'FAIL'
+    visibilityReason = reasoningDisplayEnabled === true
+      ? 'display-enabled public and persisted reasoning visibility was compared'
+      : 'visible reasoning was compared; REASONING_DISPLAY_ENABLED was not provided'
+  } else if (evidenceReady) {
+    visibilityReason = 'no reasoning sample proves display behavior'
+  }
+
+  let verdict = 'NOT_RUN'
+  let reason = 'matching terminal history/run evidence is required; SSE alone cannot prove persistence'
+  if (evidenceReady && publicReasoning === '') {
+    reason = reasoningDisplayEnabled === false
+      ? 'display-disabled hides reasoning; hidden persistence cannot be inferred from public projections'
+      : 'no public reasoning sample was observed'
+  } else if (evidenceReady && persistedReasoning === '') {
+    verdict = 'FAIL'
+    reason = 'public reasoning is absent from same-run persisted history'
+  } else if (evidenceReady && publicReasoning !== persistedReasoning) {
+    verdict = 'FAIL'
+    reason = 'public and same-run persisted reasoning differ'
+  } else if (evidenceReady) {
+    verdict = 'PASS'
+    reason = 'public and same-run persisted reasoning match'
+  }
+
+  const firstToolIndex = publicSegments.findIndex((segment) => segment.kind === 'tool')
+  const reasoningBeforeTool = firstToolIndex >= 0
+    && publicSegments.slice(0, firstToolIndex).some((segment) => segment.kind === 'reasoning')
+  let toolHopVerdict = 'NOT_RUN'
+  let toolHopReason = 'a reasoning segment before a real tool hop is required'
+  if (reasoningBeforeTool && !evidenceReady) {
+    toolHopReason = 'matching terminal history/run evidence is required'
+  } else if (reasoningBeforeTool && (verdict === 'FAIL' || orderedVerdict === 'FAIL')) {
+    toolHopVerdict = 'FAIL'
+    toolHopReason = 'reasoning or ordered segments were not preserved across the tool hop'
+  } else if (reasoningBeforeTool && verdict === 'PASS' && orderedVerdict === 'PASS' && persistedReasoningSegments.length > 0) {
+    toolHopVerdict = 'PASS'
+    toolHopReason = 'same-run persisted ordered segments preserve reasoning before the tool hop'
+  } else if (reasoningBeforeTool) {
+    toolHopReason = 'ordered persisted reasoning evidence is unavailable'
+  }
+  return {
+    verdict,
+    reason,
+    toolHopVerdict,
+    toolHopReason,
+    visibilityVerdict,
+    visibilityReason,
+    displayEnabled: reasoningDisplayEnabled,
+    publicChars: publicReasoning.length,
+    persistedChars: evidenceReady ? persistedReasoning.length : null,
+    publicSegments: publicReasoningSegments,
+    persistedSegments: persistedReasoningSegments,
+    legacyPersistedChars: persistedReasoningSegments.length === 0 && evidenceReady ? legacyPersistedReasoning.length : null
+  }
+}
+
+async function collectPersistenceEvidence(caseResult) {
+  if (!caseResult.runId) return unavailablePersistenceEvidence('no runId was observed; history/run persistence remains unverified')
+  const [history, run] = await Promise.all([
+    readHistoryEvidence(caseResult.sessionId),
+    readRunEvidence(caseResult.runId, caseResult.sessionId)
+  ])
+  const evidenceReady = history.observed && run.observed && caseResult.terminal !== null
+  const assistantMessages = history.messages.filter((message) => isRecord(message)
+    && message.type === 'ASSISTANT' && message.runId === caseResult.runId)
+  const persistedSegments = assistantMessages.flatMap((message) => Array.isArray(message.segments)
+    ? message.segments.map(segmentView)
+    : [])
+  const publicSegments = caseResult.orderedSegments.map(segmentView)
+  const orderedSegments = orderedSegmentEvidence(publicSegments, persistedSegments, evidenceReady)
+  if (caseResult.terminal === null) orderedSegments.reason = 'no terminal done/error frame was observed'
+  const tools = toolPersistenceEvidence(caseResult, assistantMessages, history.messages, run, evidenceReady)
+  if (tools.verdict === 'FAIL') {
+    orderedSegments.verdict = 'FAIL'
+    orderedSegments.reason = 'tool responses, submitted values or toolCallStates differ from same-run history'
+  } else if (tools.verdict === 'NOT_RUN' && tools.applicable === true && orderedSegments.verdict === 'PASS') {
+    orderedSegments.verdict = 'NOT_RUN'
+    orderedSegments.reason = 'tool persistence evidence is incomplete'
+  }
+  const reasoning = reasoningEvidence(caseResult, assistantMessages, publicSegments, persistedSegments,
+    evidenceReady, orderedSegments.verdict)
+  if (caseResult.terminal === null) {
+    reasoning.verdict = 'NOT_RUN'
+    reasoning.reason = 'no terminal done/error frame was observed'
+    reasoning.toolHopVerdict = 'NOT_RUN'
+    reasoning.toolHopReason = 'no terminal done/error frame was observed'
+    reasoning.persistedChars = null
+  }
+  return { history, run, orderedSegments, tools, reasoning }
 }
 
 function kbOutcome(result) {
@@ -660,12 +1278,15 @@ try {
           runId: null,
           latencyMs: null,
           answer: null,
+          reasoning: '',
+          orderedSegments: [],
           error: errorInfo('execute', 'infra', { message: String(error?.message ?? error) }),
           terminal: null,
           toolCalls: [],
           usage: null,
           eof: null,
           disclosure: { status: 'unknown', reason: 'case execution failed before disclosure evidence' },
+          persistenceEvidence: unavailablePersistenceEvidence('case execution failed; history/run evidence was not collected'),
           mechanical: {
             toolChoice: { pass: false, missing: definition.requiredTools ?? [], forbiddenHits: [] },
             retrieval: { expected: definition.expectRetrieval === true ? 'required' : 'forbidden', pass: false, falseTrigger: false },
@@ -713,7 +1334,8 @@ function scopeMetrics(scope) {
 }
 
 const executable = cases.filter((item) => item.notRun !== true)
-const modelEvaluable = cases.filter((item) => item.notRun !== true && item.error?.category !== 'infra')
+const modelEvaluable = cases.filter((item) => item.notRun !== true
+  && item.error?.category !== 'infra' && item.error?.category !== 'transcript')
 const rawMetrics = scopeMetrics(cases)
 const executableMetrics = scopeMetrics(executable)
 const modelMetrics = scopeMetrics(modelEvaluable)
@@ -732,6 +1354,7 @@ const summary = {
     hitl: cases.filter((item) => item.notRun === true && item.error?.category === 'hitl').length
   },
   infrastructureErrors: cases.filter((item) => item.error?.category === 'infra').length,
+  transcriptErrors: cases.filter((item) => item.error?.category === 'transcript').length,
   modelTerminalErrors: cases.filter((item) => item.error?.category === 'model').length,
   modelBehaviorErrors: cases.filter((item) => item.modelBehaviorFailure === true).length,
   realModelErrors: cases.filter((item) => item.error?.category === 'model' || item.modelBehaviorFailure === true).length,
@@ -753,11 +1376,11 @@ const summary = {
   approximateTitleCases: cases.filter((item) => item.mechanical.kb.approximateTitle).length,
   averageToolCalls: cases.length === 0 ? null : cases.reduce((total, item) => total + item.mechanical.calls.total, 0) / cases.length,
   averageKbSearchCalls: cases.length === 0 ? null : cases.reduce((total, item) => total + item.mechanical.calls.kbSearch, 0) / cases.length,
-  note: 'Raw metrics keep every case. Executable excludes NOT_RUN only. Model-evaluable also excludes infra errors, but keeps model terminal/behavior failures. NOT_RUN and real model errors are reported separately; no error is silently dropped.'
+  note: 'Raw metrics keep every case. Executable excludes NOT_RUN only. Model-evaluable also excludes infra and transcript errors, but keeps model terminal/behavior failures. Transcript, NOT_RUN and real model errors are reported separately; no error is silently dropped.'
 }
 
 const report = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   generatedAt: new Date().toISOString(),
   base,
   tenantId,

@@ -3936,6 +3936,33 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "SSE、history、Redis parts/seq和工具结果按真实顺序对照，不以非空或子串代替完整证据。"},
         "verification-review": {"status": "checked", "reason": "agent-1121四项finding均ADDRESSED并APPROVE；node --check通过，真实HTTP/Redis/后台复核和压测NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a55e8607e340e2621a95b5a79faaa1c90d3383e09ee6085bbb4d5c860e29b7b0",
+      "status": "reviewed",
+      "reason": "逐hunk复核渐进披露的transcript分类、独立reasoning、history/run顺序、TOOL/表单/截断/空白证据及v4文档；四轮返修后独立最终复审APPROVE。",
+      "reviewedAt": "2026-11-08T21:09:26+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1119",
+      "specChanges": [
+        {
+          "change": "渐进披露报告升级schemaVersion=4，新增transcript分类、独立reasoning与persistenceEvidence，并完善TOOL/表单/截断/空白语义。",
+          "reason": "旧版将INCOMPLETE一律归模型错误，reasoning被丢弃，history顺序与工具结果不能证明持久化完整。",
+          "impact": "仅调整验证脚本与评估契约；transcript从modelEvaluable排除，健康路径降级FAIL，空工具集合NOT_RUN，生产行为不变。"
+        }
+      ],
+      "files": [
+        {"path": "docs/verification/AI对话评估体系-2026-11-05.md", "status": "checked", "reason": "同步schemaVersion=4及transcript/reasoning/persistenceEvidence，明确帧截断、混合截断、Java空白和空工具边界。"},
+        {"path": "scripts/verification/ai-progressive-disclosure-eval.mjs", "status": "checked", "reason": "transcript独立分类，history全局顺序与TOOL/表单/状态精确对账，合法截断和空白按协议处理，空工具不再假PASS。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Node内置模块和现有公开SSE/history/run接口，无新增依赖或应用内帧伪造。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅Node验证脚本与评估文档，无Java生产代码变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "transcript与模型/基础设施错误分开且保留raw/executable，不隐藏降级，不记录原始异常或敏感正文。"},
+        "toc-interaction": {"status": "checked", "reason": "报告不再把历史降级误作普通模型失败，真实工具/表单缺失和截断不会被误报为完整。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "同源session/run、ledger升格、TOOL结果、表单状态和顺序按真实契约对账，健康路径降级FAIL。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "区分frame/model截断，计数必须非负且returned<=original，空白采用Java Character.isWhitespace精确集合。"},
+        "verification-review": {"status": "checked", "reason": "agent-1119四轮审查覆盖工具对账、页序、截断、空白和文档歧义，最终APPROVE；node --check通过，真实动态验证NOT_RUN。"}
+      }
     }
   ]
 }
