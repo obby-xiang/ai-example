@@ -1,5 +1,6 @@
 package com.example.configmgr.data.service;
 
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.common.LogThrottler;
@@ -11,6 +12,7 @@ import com.example.configmgr.data.repo.ConfigDataRowRepository;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
@@ -101,12 +103,16 @@ public class ConfigDataService {
      * 也不会被 {@link #filterRows} 的逐行兜底吞掉。
      */
     public QueryCondition parseCondition(String conditions) {
-        if (StringUtils.isBlank(conditions)) {
+        if (BlankText.isBlank(conditions)) {
             return null;
         }
         QueryCondition cond;
         try {
-            cond = objectMapper.readValue(conditions, QueryCondition.class);
+            JsonNode conditionNode = objectMapper.readTree(conditions);
+            ConditionEvaluator.validateShape(conditionNode);
+            cond = objectMapper.treeToValue(conditionNode, QueryCondition.class);
+        } catch (CodedIllegalArgumentException e) {
+            throw e;
         } catch (Exception e) {
             LogThrottler.warn(log, "ConfigDataService.invalidCondition", "Invalid condition JSON", e);
             throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID, "Invalid condition JSON", e);

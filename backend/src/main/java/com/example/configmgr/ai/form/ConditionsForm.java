@@ -14,6 +14,7 @@ import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.WizardActionGuard;
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
@@ -678,7 +679,7 @@ public class ConditionsForm extends HostForm {
                     defCode, runId, taskId);
             return new DraftOutcome(null, true);
         }
-        if (StringUtils.isNotBlank(item.getConditionJson())) {
+        if (!BlankText.isBlank(item.getConditionJson())) {
             // 任务条目已有条件事实（含明确的 "{}"）：不覆盖用户/前端的答案
             return new DraftOutcome(null, false);
         }
@@ -1357,7 +1358,7 @@ public class ConditionsForm extends HostForm {
             }
             String text = conditionTextOf(latest.getArguments(), latest.getResultText());
             Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
-            if (text == null || !text.isBlank() || asked.isEmpty() || undecidedDefCodes == null
+            if (text == null || !BlankText.isBlank(text) || asked.isEmpty() || undecidedDefCodes == null
                     || !asked.containsAll(undecidedDefCodes)) {
                 return -1;
             }
@@ -1434,7 +1435,7 @@ public class ConditionsForm extends HostForm {
         if (text == null) {
             return ConditionFeedback.none();
         }
-        if (text.isBlank()) {
+        if (BlankText.isBlank(text)) {
             Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
             boolean coversCurrentUndecided = !asked.isEmpty()
                     && undecidedDefCodes != null && asked.containsAll(undecidedDefCodes);

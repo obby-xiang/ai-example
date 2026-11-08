@@ -2,6 +2,7 @@ package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.slot.ConditionAssessment;
 import com.example.configmgr.ai.slot.ConditionCommand;
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
@@ -125,7 +126,7 @@ public class ExportConditionWorkflow {
 		}
 		for (TaskItem item : task.getItems()) {
 			if (item != null && defCode.equals(item.getDefCode())) {
-				return StringUtils.isBlank(item.getConditionJson());
+				return BlankText.isBlank(item.getConditionJson());
 			}
 		}
 		return false;

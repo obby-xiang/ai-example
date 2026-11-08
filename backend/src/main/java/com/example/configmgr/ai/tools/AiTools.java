@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tools;
 
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
@@ -510,7 +511,7 @@ public class AiTools {
             return "当前没有任务条目，也没有已提交业务库的条目条件。";
         }
         return task.getItems().stream()
-                .map(item -> item.getDefCode() + (StringUtils.isBlank(item.getConditionJson())
+                .map(item -> item.getDefCode() + (BlankText.isBlank(item.getConditionJson())
                         ? "（条件未提交业务库）" : "（条件已提交业务库：" + item.getConditionJson() + "）"))
                 .collect(Collectors.joining("、", "当前任务条目：", "。"));
     }

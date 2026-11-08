@@ -1,16 +1,8 @@
 /**
- * 批4-D（用户 2026-10-23 裁决）：页面侧「一点即发」缺口收口 —— **不可撤销动作**的确认对话框
- * 统一升级为**复选框版**（勾选才放行「确定」）。
+ * 页面危险操作确认：后果写在正文，并要求用户勾选确认后才放行。
  *
- * <p>
- * 为什么不是普通 `ElMessageBox.confirm`：一次误点就等于执行（取消作业 / 删除任务是终态操作，
- * 没有撤销入口）。复选框把"读一遍后果"变成必须动作，且与 AI 侧不可撤销确认卡的形态同源
- * （同一句「确认{动作}，执行后无法恢复」）。
- *
- * <p>
- * 实现要点：`beforeClose` 是**唯一**放行闸 —— `action='confirm'` 且未勾选时不调 `done()`
- * （对话框不关、什么也不发生）；取消永远放行。调用方必须通过 `confirmText` / `cancelText`
- * 点明动作对象与后果，并提供保留、返回或继续编辑的出口，不回退通用按钮。
+ * beforeClose 是唯一确认闸：未勾选时不关闭对话框，取消和关闭始终放行。
+ * 动作对象与后果保留在标题和正文，按钮使用简洁动作文案。
  */
 import { h, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
@@ -24,16 +16,16 @@ export interface IrreversibleConfirmOptions {
   title: string
   /** 正文说明（须点明动作对象与后果；换行按 `whitespace-pre-line` 还原） */
   message: string
-  /** 复选框文案（如「确认取消作业，执行后无法恢复」） */
+  /** 复选框文案（须点明确认动作与不可恢复后果） */
   ack: string
-  /** 结果型确认按钮（须点明动作对象与后果） */
+  /** 简洁确认按钮 */
   confirmText: string
-  /** 保留、返回或继续编辑按钮 */
+  /** 取消按钮 */
   cancelText: string
   type?: 'warning' | 'error' | 'info'
 }
 
-/** 返回 true = 用户勾选并确认；false = 取消 / 关闭（调用方直接 return）。 */
+/** 返回 true = 用户勾选并确认；false = 取消 / 关闭。 */
 export async function confirmIrreversible(options: IrreversibleConfirmOptions): Promise<boolean> {
   const acked = ref(false)
   try {

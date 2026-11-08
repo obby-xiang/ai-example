@@ -4,6 +4,7 @@ import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
@@ -300,7 +301,7 @@ public class TaskSlotResolver {
     }
 
     /**
-     * 该配置项的任务条件 JSON 是否为空/空白（坏 JSON 不算；只有 null/空串）。
+     * 该配置项的任务条件 JSON 是否为 null 或 Unicode 空白（坏 JSON 不算）。
      */
     private static boolean isConditionBlank(Task task, String defCode) {
         if (task == null || task.getItems() == null || defCode == null) {
@@ -308,7 +309,7 @@ public class TaskSlotResolver {
         }
         for (TaskItem item : task.getItems()) {
             if (item != null && defCode.equals(item.getDefCode())) {
-                return StringUtils.isBlank(item.getConditionJson());
+                return BlankText.isBlank(item.getConditionJson());
             }
         }
         return false;

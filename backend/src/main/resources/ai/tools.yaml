@@ -86,7 +86,9 @@
 # 配置编码待确认也先创建，由宿主继续选择/补充。
 # 2026-10-27.31 → 2026-10-27.32：创建或配置完成不授权自动启动作业；
 # 只有用户后续单独明确要求开始/启动/执行，才可调用 start_export/start_precheck/start_import/start_publish。
-version: 2026-10-27.32
+# 2026-10-27.32 → 2026-10-27.33：撤销后续独立启动请求要求；创建、配置、启动确认在同一 run 连续推进，
+# HITL 仍在真实执行前逐次确认，只有用户明确只创建/创建后停止才允许创建后收尾。
+version: 2026-10-27.33
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -141,9 +143,9 @@ tools:
       只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false；
       宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后明确打开/配置仍可继续。
       原始意图是完整导出/导入时，批准后继续用 navigate_to(page=..., taskId=...) 打开向导，
-      完成所需配置/条件后等待用户后续单独明确启动；SUSPENDED 不得提前 DONE。
-      创建任务或完成配置/条件后，不得因此自动启动任何作业；只有用户在后续请求中单独明确要求开始/启动/执行，
-      才可调用 start_export、start_precheck、start_import、start_publish；禁止把创建或配置完成视为启动授权。
+      在同一 run 连续完成所需配置/条件和启动确认，批准后再真实执行；SUSPENDED 不得提前 DONE。
+      创建或完成配置/条件后继续调用 start_export、start_precheck、start_import、start_publish 发起相应启动确认，
+      不得要求用户另发一轮开始或执行；启动确认不可绕过，只有用户明确只创建/创建后停止时才允许创建后收尾。
   - toolKey: start_export
     title: 启动导出作业
     description: >-

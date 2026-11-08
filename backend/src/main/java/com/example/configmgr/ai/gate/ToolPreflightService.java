@@ -10,6 +10,7 @@ import com.example.configmgr.ai.slot.ConditionAssessment;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.WizardActionGuard;
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.common.ConflictException;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
@@ -910,14 +911,14 @@ public class ToolPreflightService {
 
 	// ── 条件摘要 / 发布模式（AR-02：只三字段，不恢复旧预检区） ────────────────
 
-	/** 该配置项的条件 JSON 是否为空/空白（只有 null/空串；坏 JSON 不算）。 */
+	/** 该配置项的条件 JSON 是否为 null 或 Unicode 空白（坏 JSON 不算）。 */
 	private static boolean isBlankCondition(Task task, String defCode) {
 		if (task == null || task.getItems() == null || defCode == null) {
 			return false;
 		}
 		for (TaskItem item : task.getItems()) {
 			if (item != null && defCode.equals(item.getDefCode())) {
-				return StringUtils.isBlank(item.getConditionJson());
+				return BlankText.isBlank(item.getConditionJson());
 			}
 		}
 		return false;

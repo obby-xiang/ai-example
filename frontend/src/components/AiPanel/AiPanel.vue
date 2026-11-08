@@ -564,13 +564,6 @@
                             </div>
                           </div>
                         </div>
-                        <div
-                          v-if="diagnosticOf(part) === 'skipped'"
-                          class="flex items-start gap-[7px] rounded-[9px] border border-solid border-[#e3e6ea] bg-[#f6f7f9] px-[10px] py-[7px] text-[12.4px] text-[#57606a]"
-                          data-testid="tool-skipped-human"
-                        >
-                          <span class="min-w-0 flex-1 break-words">{{ t('ai.panel.skippedHuman') }}</span>
-                        </div>
                         <div v-if="!isBlankText(toolResultText(part)) && !hasViewOutput(part) && !isOutputSupersededByDiagnostics(part)">
                           <div class="mb-[4px] block text-[11px] uppercase tracking-[.5px] text-[#8b949e]">{{ t('ai.panel.output') }}</div>
                           <div data-testid="tool-output-text" class="whitespace-pre-wrap break-words rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[8px] text-[12.1px] leading-[1.6] text-[#606266] [overflow-wrap:anywhere]">
@@ -692,7 +685,7 @@
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
                                   :disabled="isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
                                   @click="decide(true, part.toolCallId)"
-                                >{{ t('ai.panel.approve', { action: toolLabel(part.name) }) }}</button>
+                                >{{ t('ai.panel.approve') }}</button>
                               </span>
                             </div>
                           </div>
@@ -1329,7 +1322,7 @@ import {
   groupParts,
   type Block
 } from '@/utils/blocks'
-import { deriveCopyText, numericArgOf, partDiagnosticOf, isPartResultInternal, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
+import { deriveCopyText, numericArgOf, partDiagnosticOf, isPartResultInternal, isSystemRejectPhantom, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
 import { projectDisplayText, unicodeCharacterCount } from '@/utils/display-text'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
@@ -3551,6 +3544,19 @@ function isBlockPartSignatureMatch(part: MessagePart, signature: BlockPartSignat
     && (part.kind !== 'tool' || Object.is(signature.part, part))
 }
 
+function shouldShowToolPart(part: ToolPart): boolean {
+  if (isSystemRejectPhantom(part.name, part.userTextCode)) {
+    return false
+  }
+  if (part.status === 'skipped') {
+    return part.decision !== undefined || part.requiresAction
+  }
+  const recoveryText = `${part.userTextCode ?? ''}\n${part.reason ?? ''}\n${part.result ?? ''}`
+  return part.status !== 'blocked'
+    || part.decision !== undefined
+    || !recoveryText.includes('TOOL_ALREADY_CLAIMED')
+}
+
 /** blocksOf 与 messageMemo 共用有界 LRU；仅在 parts 引用或逐段签名变化时重新分块。 */
 function blocksOf(message: ChatMessage): Block[] {
   const cached = blocksCache.get(message)
@@ -3565,10 +3571,11 @@ function blocksOf(message: ChatMessage): Block[] {
     return cached.blocks
   }
 
+  const visibleParts = message.parts.filter((part) => part.kind !== 'tool' || shouldShowToolPart(part))
   const entry: BlocksCacheEntry = {
     parts: message.parts,
     signatures: message.parts.map(blockPartSignature),
-    blocks: groupParts(message.parts, message.id)
+    blocks: groupParts(visibleParts, message.id)
   }
   blocksCache.delete(message)
   blocksCache.set(message, entry)
@@ -4321,6 +4328,9 @@ function isOutputSupersededByDiagnostics(part: ToolPart): boolean {
 
 /** 只读卡原因保留业务说明；机器标记与整段 JSON 不上用户面。 */
 function readOnlyReasonText(part: ToolPart): string {
+  if (diagnosticOf(part) === 'skipped') {
+    return ''
+  }
   const human = diagnosticHumanOf(part)
   if (human !== null) {
     return human
@@ -4822,7 +4832,7 @@ function messageCopyText(message: ChatMessage): string {
     return body
   }
   return message.parts
-    .filter((part): part is ToolPart => part.kind === 'tool')
+    .filter((part): part is ToolPart => part.kind === 'tool' && shouldShowToolPart(part))
     .map((part) => toolSummary(part))
     .join('\n\n')
 }

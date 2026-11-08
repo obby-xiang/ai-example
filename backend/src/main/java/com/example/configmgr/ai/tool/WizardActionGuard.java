@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tool;
 
 import com.example.configmgr.ai.observe.LogSampling;
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.data.service.ConditionOperators;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.definition.entity.ConfigDefinition;
@@ -85,9 +86,6 @@ public class WizardActionGuard implements FrontendToolGuard {
      * （唯一注册定义在 {@link ConditionOperators}，{@link SheetWriteGuard} 与本类共用，不新造 DSL）。
      */
     private static final Set<String> OPERATORS = Set.copyOf(ConditionOperators.NAMES);
-
-    /** 不带取值的算子（带值反而说明模型在猜语义）。 */
-    private static final Set<String> VALUELESS_OPERATORS = ConditionOperators.VALUELESS;
 
     private final DefinitionService definitionService;
 
@@ -358,11 +356,11 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         for (JsonNode item : scopeKeys) {
             String value = item != null && item.isTextual() ? item.asText() : null;
-            if (StringUtils.isBlank(value)) {
-                reasons.add("conditions.scopeKeys 的每一项都必须是非空字符串（实际出现：" + item + "）。");
+            if (BlankText.isBlank(value) || BlankText.hasBoundaryWhitespace(value)) {
+                reasons.add("conditions.scopeKeys 的每一项都必须是非空字符串且首尾不能有空白（实际出现：" + item + "）。");
                 continue;
             }
-            values.add(value.trim());
+            values.add(value);
         }
         return values;
     }
@@ -402,35 +400,36 @@ public class WizardActionGuard implements FrontendToolGuard {
             }
         }
         String fieldCode = text(field.get("fieldCode"));
-        if (StringUtils.isBlank(fieldCode)) {
-            reasons.add("conditions.fields[" + index + "].fieldCode 必填。");
+        if (BlankText.isBlank(fieldCode) || BlankText.hasBoundaryWhitespace(fieldCode)) {
+            reasons.add("conditions.fields[" + index + "].fieldCode 必填且首尾不能有空白。");
             fieldOk = false;
         }
-        else if (!seenFieldCodes.add(fieldCode.trim())) {
-            reasons.add("conditions.fields[" + index + "].fieldCode 重复：" + fieldCode.trim()
+        else if (!seenFieldCodes.add(fieldCode)) {
+            reasons.add("conditions.fields[" + index + "].fieldCode 重复：" + fieldCode
                     + "（同一字段只能有一条条件；单字段区间用 GTE + LTE 两条，不接受重复字段）。");
             fieldOk = false;
         }
-        else if (definition != null && !fieldCodes.contains(fieldCode.trim())) {
+        else if (definition != null && !fieldCodes.contains(fieldCode)) {
             reasons.add("conditions.fields[" + index + "].fieldCode 不属于 " + definition.getCode()
                     + "：" + fieldCode + "（可用字段：" + String.join("、", fieldCodes) + "）。");
             fieldOk = false;
         }
         String operator = text(field.get("operator"));
-        if (operator == null || !OPERATORS.contains(StringUtils.upperCase(StringUtils.trim(operator)))) {
+        if (operator == null || BlankText.hasBoundaryWhitespace(operator)
+                || !OPERATORS.contains(StringUtils.upperCase(operator))) {
             reasons.add("conditions.fields[" + index + "].operator 只能是 "
                     + "EQ/NE/CONTAINS/LIKE/STARTS_WITH/IN/EMPTY/NOT_EMPTY/GT/GTE/LT/LTE"
                     + "（实际 " + operator + "）。");
             fieldOk = false;
         }
-        else if (!isOperatorValueValid(field.get("value"), StringUtils.upperCase(StringUtils.trim(operator)), index, reasons)) {
+        else if (!isOperatorValueValid(field.get("value"), StringUtils.upperCase(operator), index, reasons)) {
             fieldOk = false;
         }
         return fieldOk;
     }
 
     private boolean isOperatorValueValid(JsonNode value, String operator, int index, List<String> reasons) {
-        if (VALUELESS_OPERATORS.contains(operator)) {
+        if (!ConditionOperators.takesValue(operator)) {
             return true;
         }
         if (value == null || value.isNull()) {
@@ -450,7 +449,7 @@ public class WizardActionGuard implements FrontendToolGuard {
                 return false;
             }
             for (JsonNode item : value) {
-                if (item == null || item.isNull() || (item.isTextual() && StringUtils.isBlank(item.asText()))) {
+                if (item == null || item.isNull() || (item.isTextual() && BlankText.isBlank(item.asText()))) {
                     reasons.add("conditions.fields[" + index + "].value 在 operator=IN 时每一项都必须是非空字符串"
                             + "（实际出现：" + item + "）。");
                     return false;
@@ -459,7 +458,7 @@ public class WizardActionGuard implements FrontendToolGuard {
             return true;
         }
         String expect = text(value);
-        if (StringUtils.isBlank(expect)) {
+        if (BlankText.isBlank(expect)) {
             reasons.add("conditions.fields[" + index + "].value 不能是空串或纯空白（operator=" + operator
                     + " 需要真实比较值；空值会被前端压平丢弃并放大成导出全部；判断空值请用 EMPTY / NOT_EMPTY）。");
             return false;

@@ -239,9 +239,9 @@ const statusTone = computed<HeaderTone>(() => {
       return 'blue'
   }
 })
-const statusHint = computed(() => status.value === 'pending' || status.value === 'stale'
-  ? ''
-  : t(`ai.sheetCard.statusHint.${status.value}`))
+const statusHint = computed(() => status.value === 'failed'
+  ? t('ai.sheetCard.statusHint.failed')
+  : '')
 const appliedLine = computed(() => props.appliedSummary
   ? t('sheet.applied.line', {
     cells: props.appliedSummary.cells,

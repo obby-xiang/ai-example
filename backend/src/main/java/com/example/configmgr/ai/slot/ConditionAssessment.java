@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.slot;
 
+import com.example.configmgr.common.BlankText;
+import com.example.configmgr.common.CodedIllegalArgumentException;
+import com.example.configmgr.data.service.ConditionEvaluator;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -199,7 +202,7 @@ public final class ConditionAssessment {
 	 * 按 {@code UNDECIDED + unparseable} 处理（既不能当全量，也不能当已设置）。
 	 */
 	public static ItemCondition assess(String defCode, String conditionJson) {
-		if (StringUtils.isBlank(conditionJson)) {
+		if (BlankText.isBlank(conditionJson)) {
 			return new ItemCondition(defCode, State.UNDECIDED, false, List.of());
 		}
 		JsonNode node;
@@ -210,6 +213,12 @@ public final class ConditionAssessment {
 			return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
 		}
 		if (node == null || !node.isObject()) {
+			return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
+		}
+		try {
+			ConditionEvaluator.validateShape(node);
+		}
+		catch (CodedIllegalArgumentException ex) {
 			return new ItemCondition(defCode, State.UNDECIDED, true, List.of());
 		}
 		// 只有 fields / scopeKeys 两个键是条件契约；未知键说明结构来路不明（未来版本/坏载荷），
@@ -292,11 +301,11 @@ public final class ConditionAssessment {
 		}
 		List<String> out = new ArrayList<>();
 		for (JsonNode key : scopeKeys) {
-			if (key == null || !key.isTextual() || StringUtils.isBlank(key.asText())) {
+			if (key == null || !key.isTextual() || BlankText.isBlank(key.asText())) {
 				out.add(null);
 			}
 			else {
-				out.add(key.asText().trim());
+				out.add(key.asText());
 			}
 		}
 		return out.isEmpty() ? List.of() : out;
@@ -322,7 +331,7 @@ public final class ConditionAssessment {
 	}
 
 	private static String plainText(String raw) {
-		return StringUtils.trimToNull(raw);
+		return BlankText.isBlank(raw) ? null : raw;
 	}
 
 	private static int rank(State state) {

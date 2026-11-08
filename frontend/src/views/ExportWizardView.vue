@@ -1688,12 +1688,11 @@ async function cancelJob(): Promise<void> {
   if (jobId === undefined) {
     return
   }
-  // 批4-D（用户 2026-10-23 裁决）：取消作业不可撤销 —— 由「一点即发」改为复选框确认。
   const confirmed = await confirmIrreversible({
     title: t('views.export.dialog.cancelTitle'),
     message: t('views.export.dialog.cancelMessage'),
     ack: t('views.export.dialog.cancelAck'),
-    confirmText: t('views.export.dialog.cancelConfirm', { jobId }),
+    confirmText: t('views.export.dialog.cancelConfirm'),
     cancelText: t('views.export.dialog.cancelKeep')
   })
   if (!confirmed) {

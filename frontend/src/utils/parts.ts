@@ -598,35 +598,44 @@ export function frontendResultStatus(status: unknown): ToolRunStatus | null {
 }
 
 /**
- * 生成式表单的<b>系统拒绝</b>码（与后端 {@code ErrorCodes} 同值）。
+ * 后端不向用户发帧的<b>系统拒绝</b>码（与后端 {@code ErrorCodes} 同值）。
  *
- * <p>共同点：被判的是<b>模型给的 schema / 槽位</b>，不是用户的动作 —— 零副作用、有明确纠正出口，
+ * <p>共同点：被判的是模型输入或调用顺序，不是用户的动作 —— 零副作用、有明确纠正出口，
  * 后端只把结论回执模型，不对用户发任何卡片帧。
  * <ul>
- * <li>{@code FORM_SLOTS_ALREADY_KNOWN}：表单想收集的东西已经知道（"没有缺口"而不是"出错了"）；</li>
- * <li>{@code FORM_SCHEMA_REJECTED}：schema 未过白名单（顶层 purpose/scenario/title、字段、联动……）。</li>
+ * <li>{@code generative_form}：{@code FORM_SLOTS_ALREADY_KNOWN}（没有信息缺口）与
+ * {@code FORM_SCHEMA_REJECTED}（schema 未过白名单）；</li>
+ * <li>{@code confirm_step}：{@code FORM_SLOTS_ALREADY_KNOWN}（条件已具备）与
+ * {@code CONDITION_OPERATOR_UNKNOWN}（条件操作符需要模型纠正）。</li>
  * </ul>
  */
 export const FORM_SLOTS_ALREADY_KNOWN = 'FORM_SLOTS_ALREADY_KNOWN'
 
-/** 与后端 {@code ErrorCodes.FORM_SCHEMA_REJECTED} 同值（本模块内判据用；对外码表见 {@code ErrorCode}）。 */
 const FORM_SCHEMA_REJECTED = 'FORM_SCHEMA_REJECTED'
+const CONDITION_OPERATOR_UNKNOWN = 'CONDITION_OPERATOR_UNKNOWN'
 
-const SYSTEM_REJECT_FORM_CODES = new Set([FORM_SLOTS_ALREADY_KNOWN, FORM_SCHEMA_REJECTED])
+const SYSTEM_REJECT_GENERATIVE_FORM_CODES = new Set([FORM_SLOTS_ALREADY_KNOWN, FORM_SCHEMA_REJECTED])
+const SYSTEM_REJECT_CONFIRM_STEP_CODES = new Set([FORM_SLOTS_ALREADY_KNOWN, CONDITION_OPERATOR_UNKNOWN])
 
 /**
- * 该 toolCall 是否是<b>系统拒绝的幻影表单卡</b>（历史面唯一判据）。
+ * 该 toolCall 是否是后端未发用户帧的<b>系统拒绝幻影卡</b>。
  *
- * <p>为什么需要：后端对系统拒绝静默了全部用户可见的工具帧（{@code tool_start} /
+ * <p>后端对系统拒绝静默了全部用户可见的工具帧（{@code tool_start} /
  * {@code frontend_tool_request} / {@code frontend_tool_result} 都不发），但条目、日志与模型回执
  * 照旧保留 —— 于是历史载荷里仍有这条调用。前端若照常建段，就会出现"实时流里没有、刷新后多出一张"
- * 的幻影卡（浏览器实测的"已拒绝卡 + 可用卡"正是这两面各说一套）。
+ * 的幻影卡。历史加载与 AiPanel 的实时/镜像展示共用本判据，保持两种来源一致。
  *
- * <p>判据 = 工具名 + 错误码，两者缺一不可：其它拒绝仍要让用户看到"这次为什么没执行"；
- * 别的工具即便带同名码也不隐藏（不借码绕过可见性）。
+ * <p>判据 = 工具名 + 结构化错误码，两者缺一不可，不检查 {@code result} 文本；
+ * 其它拒绝、取消和真实失败仍要让用户看到，别的工具即便带同名码也不隐藏。
  */
 export function isSystemRejectPhantom(name: unknown, code?: string | null): boolean {
-  return name === GENERATIVE_FORM_TOOL && typeof code === 'string' && SYSTEM_REJECT_FORM_CODES.has(code)
+  if (typeof code !== 'string') {
+    return false
+  }
+  if (name === GENERATIVE_FORM_TOOL) {
+    return SYSTEM_REJECT_GENERATIVE_FORM_CODES.has(code)
+  }
+  return name === 'confirm_step' && SYSTEM_REJECT_CONFIRM_STEP_CODES.has(code)
 }
 
 /**

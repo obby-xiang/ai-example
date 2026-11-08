@@ -1,7 +1,9 @@
 package com.example.configmgr.data.service;
 
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -37,24 +39,171 @@ public final class ConditionEvaluator {
     }
 
     /**
+     * 在原始 JSON 上拒绝会被反序列化 coercion 或 trim 掩盖的非法形状。
+     */
+    public static void validateShape(JsonNode cond) {
+        if (cond == null || cond.isNull() || !cond.isObject()) {
+            throw invalidCondition();
+        }
+        var names = cond.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if (!"fields".equals(name) && !"scopeKeys".equals(name)) {
+                throw invalidCondition();
+            }
+        }
+        validateFieldNodes(cond.get("fields"));
+        validateScopeKeyNodes(cond.get("scopeKeys"));
+    }
+
+    private static void validateFieldNodes(JsonNode fields) {
+        if (fields == null) {
+            return;
+        }
+        if (!fields.isArray() || fields.isEmpty()) {
+            throw invalidCondition();
+        }
+        for (JsonNode field : fields) {
+            if (field == null || !field.isObject() || isBlankText(field.get("fieldCode"))
+                    || isBlankText(field.get("operator"))) {
+                throw invalidCondition();
+            }
+            String fieldCode = field.get("fieldCode").asText();
+            String operator = field.get("operator").asText();
+            if (BlankText.hasBoundaryWhitespace(fieldCode) || BlankText.hasBoundaryWhitespace(operator)) {
+                throw invalidCondition();
+            }
+            String op = operator.toUpperCase();
+            if (!OPERATORS.contains(op)) {
+                throw unknownOperator(op, fieldCode);
+            }
+            validateValueNode(field.get("value"), op);
+        }
+    }
+
+    private static void validateValueNode(JsonNode value, String operator) {
+        if (!ConditionOperators.takesValue(operator)) {
+            return;
+        }
+        if (value == null || value.isNull()) {
+            throw invalidCondition();
+        }
+        if ("IN".equals(operator)) {
+            validateInValueNode(value);
+            return;
+        }
+        if (value.isTextual() && BlankText.isBlank(value.asText())) {
+            throw invalidCondition();
+        }
+    }
+
+    private static void validateInValueNode(JsonNode value) {
+        if (!value.isArray() || value.isEmpty()) {
+            throw invalidCondition();
+        }
+        for (JsonNode item : value) {
+            if (item == null || item.isNull() || item.isTextual() && BlankText.isBlank(item.asText())) {
+                throw invalidCondition();
+            }
+        }
+    }
+
+    private static void validateScopeKeyNodes(JsonNode scopeKeys) {
+        if (scopeKeys == null) {
+            return;
+        }
+        if (!scopeKeys.isArray() || scopeKeys.isEmpty()) {
+            throw invalidCondition();
+        }
+        for (JsonNode key : scopeKeys) {
+            if (isBlankText(key) || BlankText.hasBoundaryWhitespace(key.asText())) {
+                throw invalidCondition();
+            }
+        }
+    }
+
+    private static boolean isBlankText(JsonNode value) {
+        return value == null || !value.isTextual() || BlankText.isBlank(value.asText());
+    }
+
+    /**
      * 操作符白名单校验（与行数据无关，故行数为 0 时同样能失败 —— 列表端点对空结果集也必须给 400，
      * 而不是"恰好没行所以没报错"）。
      *
-     * @throws IllegalArgumentException 出现未登记的操作符
+     * @throws IllegalArgumentException 出现未登记的操作符或非法条件结构
      */
     public static void validate(QueryCondition cond) {
-        if (cond == null || cond.getFields() == null) {
+        if (cond == null) {
+            throw invalidCondition();
+        }
+        validateFieldConditions(cond.getFields());
+        validateScopeKeys(cond.getScopeKeys());
+    }
+
+    private static void validateFieldConditions(List<QueryCondition.FieldCondition> fields) {
+        if (fields == null) {
             return;
         }
-        for (QueryCondition.FieldCondition fc : cond.getFields()) {
-            if (StringUtils.isBlank(fc.getOperator())) {
-                continue; // 无操作符 = 该字段不参与过滤（前端"用户未填即忽略"的既有口径）
+        if (fields.isEmpty()) {
+            throw invalidCondition();
+        }
+        for (QueryCondition.FieldCondition fc : fields) {
+            if (fc == null || BlankText.isBlank(fc.getFieldCode()) || BlankText.isBlank(fc.getOperator())
+                    || BlankText.hasBoundaryWhitespace(fc.getFieldCode()) || BlankText.hasBoundaryWhitespace(fc.getOperator())) {
+                throw invalidCondition();
             }
             String op = fc.getOperator().toUpperCase();
             if (!OPERATORS.contains(op)) {
                 throw unknownOperator(op, fc.getFieldCode());
             }
+            validateValue(fc.getValue(), op);
         }
+    }
+
+    private static void validateValue(Object value, String operator) {
+        if (!ConditionOperators.takesValue(operator)) {
+            return;
+        }
+        if (value == null) {
+            throw invalidCondition();
+        }
+        if ("IN".equals(operator)) {
+            validateInValue(value);
+            return;
+        }
+        if (value instanceof String text && BlankText.isBlank(text)) {
+            throw invalidCondition();
+        }
+    }
+
+    private static void validateInValue(Object value) {
+        if (!(value instanceof List<?> items) || items.isEmpty()) {
+            throw invalidCondition();
+        }
+        for (Object item : items) {
+            if (item == null || item instanceof String text && BlankText.isBlank(text)) {
+                throw invalidCondition();
+            }
+        }
+    }
+
+    private static void validateScopeKeys(List<String> scopeKeys) {
+        if (scopeKeys == null) {
+            return;
+        }
+        if (scopeKeys.isEmpty()) {
+            throw invalidCondition();
+        }
+        for (String key : scopeKeys) {
+            if (BlankText.isBlank(key) || BlankText.hasBoundaryWhitespace(key)) {
+                throw invalidCondition();
+            }
+        }
+    }
+
+    private static CodedIllegalArgumentException invalidCondition() {
+        return new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
+                "Invalid query condition structure");
     }
 
     private static IllegalArgumentException unknownOperator(String op, String fieldCode) {

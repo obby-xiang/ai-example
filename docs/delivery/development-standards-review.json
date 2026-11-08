@@ -3474,6 +3474,74 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "要求保存完整有序SSE、历史、用户消息计数和同run终态，覆盖刷新、重连及公开下载证据，不改变协议。"},
         "verification-review": {"status": "checked", "reason": "独立文档复审PASS；新专项全部NOT_RUN，新增脚本明确当前不存在，未执行生产代码、测试、服务或浏览器，未把历史27/27当作本专项证据。"}
       }
+    },
+    {
+      "fingerprint": "sha256:90f508735a61fb2a535a84c2fe938bdadf48ebab3cd2a974cf21c615083b3496",
+      "status": "reviewed",
+      "reason": "对28个生产与规范文件逐hunk及跨层调用链复核，完成同轮创建/配置/启动HITL/执行、条件合法域、简洁按钮、历史过滤与聚焦整改；独立后端/前端/整批审查全部通过，生产编译和前端构建通过，未执行测试验证。",
+      "reviewedAt": "2026-11-08T13:07:42+08:00",
+      "reviewer": "K3.1 Pro主会话、独立关联复审agent-1089/1090/1092",
+      "specChanges": [
+        {
+          "change": "所有能同轮完成的创建、配置、启动确认、批准与执行连续推进，不再要求后续独立启动请求。",
+          "reason": "用户明确创建导出任务也必须一轮完成，HITL和表单属于同轮续跑。",
+          "impact": "tools.yaml升至2026-10-27.33；启动批准前仍零作业，明确只创建例外和拒绝/取消语义不变，READ_BEFORE_CREATE保护保留。"
+        },
+        {
+          "change": "HITL采用拒绝/批准，询问与生成式表单取消/提交，预览取消/应用，危险后果放正文，特别危险操作保留复选框。",
+          "reason": "避免批准xxx和长结果型按钮造成过度设计。",
+          "impact": "中英文按钮及公共弹窗简化，取消作业与删除任务等业务差异保留，既有不可逆ack不得绕过。"
+        },
+        {
+          "change": "空白及Unicode空白按全量处理，非法JSON结构、未知算子、缺失取值和首尾空白字段统一失败关闭。",
+          "reason": "空白曾被当作非空，非法条件和NE+null曾可能放大为全量。",
+          "impact": "统一BlankText与ConditionEvaluator.validateShape，预检、写入、守卫和求值共用合法域，合法{}和EMPTY/NOT_EMPTY语义不变。"
+        },
+        {
+          "change": "新增禁止场景拟合与不合理实现的开发规范。",
+          "reason": "防止特例硬编码、过度设计、绕过检查和掩盖真实问题/性能问题。",
+          "impact": "所有生产、测试、压测、脚本和文档变更均须按通用业务语义审查，禁止降低断言或伪造通过。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java", "status": "checked", "reason": "条件草案与空白反馈统一BlankText，真实条件不覆盖，Unicode空白不视为已有事实。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ExportConditionWorkflow.java", "status": "checked", "reason": "空白归一全量，unparseable仍失败关闭，条件工作流步骤不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "移除独立启动阻断并恢复同轮启动HITL；保留READ_BEFORE_CREATE；系统拒绝静默与前端历史判据一致。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolPreflightService.java", "status": "checked", "reason": "空白条件预检统一BlankText，非法结构继续拒绝。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "系统提示恢复同轮创建/配置/启动确认/执行，明确只创建例外、拒绝取消和内部恢复不解释。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/ConditionAssessment.java", "status": "checked", "reason": "复用统一validateShape，未知算子提前拒绝，不再把trim后的非法值当成事实。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlotResolver.java", "status": "checked", "reason": "任务条件空白判定统一，合法步骤与权威状态保持。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/WizardActionGuard.java", "status": "checked", "reason": "fieldCode/operator/scopeKeys首尾空白拒绝，value统一ConditionOperators.takesValue，IN与文本空白校验一致。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "任务条件摘要空白口径统一，真实作业创建和启动逻辑未改。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/BlankText.java", "status": "checked", "reason": "通用Unicode整串空白和首尾空白判定，无业务编码或用例特判。"},
+        {"path": "backend/src/main/java/com/example/configmgr/data/service/ConditionEvaluator.java", "status": "checked", "reason": "原始树与QueryCondition统一结构、算子、范围和value合法域，NE+null及IN空值不再放大为全量。"},
+        {"path": "backend/src/main/java/com/example/configmgr/data/service/ConfigDataService.java", "status": "checked", "reason": "非空输入先validateShape再反序列化和操作符校验，合法{}与空白全量保持。"},
+        {"path": "backend/src/main/java/com/example/configmgr/task/controller/TaskController.java", "status": "checked", "reason": "持久化前执行统一结构校验，非法条件不再落库，合法{}仍明确全量。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "版本.33撤销后续独立启动要求，HITL与只创建例外保持。"},
+        {"path": "docs/delivery/development-standards.md", "status": "checked", "reason": "新增禁止场景拟合、过度设计、绕过检查和掩盖真实问题/性能问题的通用硬约束。"},
+        {"path": "docs/research/prompt-tool-toc-copy-remediation/03-decisions.md", "status": "checked", "reason": "追加一轮闭环与简洁按钮supersede，保留安全确认和历史决策可追溯性。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "HITL使用简洁批准键，内部过程卡按结构化状态过滤，真实拒绝/失败/未知保留，缓存和复制共用判据。"},
+        {"path": "frontend/src/components/AiPanel/FormRenderer.vue", "status": "checked", "reason": "字段滚动区统一p-1覆盖最大4px焦点外扩，保留唯一滚动区和按钮位置。"},
+        {"path": "frontend/src/components/AiPanel/SheetPreviewCard.vue", "status": "checked", "reason": "仅保留真实失败提示，预览取消/应用及已应用摘要仍完整。"},
+        {"path": "frontend/src/components/AiPanel/UploadHandoffCard.vue", "status": "checked", "reason": "去除重复取消说明，失败原因、取消卡头和重试出口保留。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "英文简洁按钮与中文同构，危险ack保留，无批准xxx或长结果型按钮。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "中文简洁按钮与英文同构，业务动作区分和危险正文保持。"},
+        {"path": "frontend/src/utils/confirm-irreversible.ts", "status": "checked", "reason": "ack必填且未勾选不放行，简洁按钮不降低既有不可逆安全边界。"},
+        {"path": "frontend/src/utils/parts.ts", "status": "checked", "reason": "generative_form与confirm_step内部拒绝按工具名+错误码过滤，与后端静默集合一致，真实失败不隐藏。"},
+        {"path": "frontend/src/utils/tool-summaries.ts", "status": "checked", "reason": "列归一化摘要去重并保留规则数量，复用现有i18n键。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "取消作业及丢弃编辑强确认保留ack，按钮去掉ID/长句插值。"},
+        {"path": "frontend/src/views/ImportWizardView.vue", "status": "checked", "reason": "取消作业和REPLACE发布保持强确认，普通未保存编辑路径不变。"},
+        {"path": "frontend/src/views/TaskCenterView.vue", "status": "checked", "reason": "取消作业与删除任务语义区分且ack保留，按钮不再拼接ID/标题。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用ConditionOperators、ConditionEvaluator、BlankText、现有Spring AI/HITL、Tailwind和i18n，无新增依赖或并行校验框架。"},
+        "java-api-style": {"status": "checked", "reason": "集合所有权、空值、JSON形状、命名、方法规模与import经逐hunk核对，IDEA Reformat后无尾随空白，普通测试代码未改。"},
+        "logging-exception-safety": {"status": "checked", "reason": "非法条件与真实失败保留错误码和日志，内部恢复仅隐藏零副作用用户帧，未以异常忽略或日志采样掩盖问题。"},
+        "toc-interaction": {"status": "checked", "reason": "按钮简洁、危险正文与ack保留、技术卡清退、重复说明收敛、焦点留白合理，中英文一致。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "同轮启动仍需批准，pending/runEpoch/租约/历史/Redis TTL和AI数据库白名单未改，任务作业恰好一次。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "Unicode空白按码点处理，实时/历史过滤共用结构化错误码，SSE顺序与字符语义未改。"},
+        "verification-review": {"status": "checked", "reason": "后端agent-1089、前端agent-1090及整批agent-1092最终PASS；生产Maven compile和前端Vite build成功，node --check通过；本批未执行测试，C-111～C-126及独立脚本动态验证仍NOT_RUN。"}
+      }
     }
   ]
 }

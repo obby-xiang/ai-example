@@ -250,12 +250,12 @@
         "disableConfirm": "停用后该端点的模型不再可选。确认停用？",
         "clearKeyConfirm": "清除后需要重新录入密钥才能使用该端点。确认清除？",
         "removeProviderConfirm": "删除端点「{name}」后，它将不再出现在对话可选模型中。此操作无法恢复。",
-        "removeProviderConfirmAction": "删除端点「{name}」",
+        "removeProviderConfirmAction": "确认",
         "removeModelConfirm": "删除模型「{modelId}」后，它将不再可选。此操作无法恢复。",
-        "removeModelConfirmAction": "删除模型「{modelId}」",
-        "disableConfirmAction": "停用端点「{name}」",
-        "clearKeyConfirmAction": "清除端点「{name}」的 API Key",
-        "keepConfiguration": "保留当前配置",
+        "removeModelConfirmAction": "确认",
+        "disableConfirmAction": "确认",
+        "clearKeyConfirmAction": "确认",
+        "keepConfiguration": "取消",
         "createTitle": "新建端点",
         "create": "新建",
         "code": "标识（code）",
@@ -470,8 +470,8 @@
         "description": "当前对话将被清空，且无法恢复。",
         "runningNote": "当前回答仍在生成，清空后本轮内容将不会保留。",
         "pendingNote": "当前对话还有待确认或填写的操作，清空后这些内容将不会保留。",
-        "cancel": "保留当前对话",
-        "confirm": "清空并新建"
+        "cancel": "取消",
+        "confirm": "确认"
       },
       "identity": "身份",
       "identityUnavailable": "身份不可用：无法加载租户/用户目录，发送已暂停",
@@ -485,7 +485,7 @@
       "gfQueue": {
         "position": "排队中 · 第 {position} / {total} 张",
         "hint": "正在填写另一张表单；这张会在前一张提交或取消后自动出现。",
-        "cancel": "取消这张排队表单"
+        "cancel": "取消"
       },
       "createTaskBusiness": "创建{type}任务『{title}』",
       "createTaskBusinessUntitled": "创建{type}任务",
@@ -557,8 +557,8 @@
       "rowKey": "行键",
       "reason": "原因",
       "submitting": "同步中…",
-      "reject": "不执行",
-      "approve": "批准{action}",
+      "reject": "拒绝",
+      "approve": "批准",
       "resumeChat": "继续本轮对话",
       "editMessage": "编辑该条消息（回填到输入框）",
       "regenerateMessage": "重新生成这条回答",
@@ -645,7 +645,7 @@
     },
     "sheetCard": {
       "title": "写表预览",
-      "discard": "放弃",
+      "discard": "取消",
       "levelCount": "计数",
       "levelSample": "看样例",
       "levelFullDiff": "全量 diff",
@@ -653,9 +653,9 @@
       "noMatches": "没有匹配的单元格。",
       "prevPage": "上一页",
       "nextPage": "下一页",
-      "cancel": "保留当前表格",
-      "apply": "应用 {cells} 格改动",
-      "applying": "正在应用 {cells} 格改动…",
+      "cancel": "取消",
+      "apply": "应用",
+      "applying": "应用中…",
       "status": {
         "pending": "待确认",
         "applying": "应用中",
@@ -711,7 +711,7 @@
       "orClick": "也可使用页面中的「{label}」入口，或拖放文件。",
       "choose": "选择文件",
       "retry": "重试",
-      "discard": "不再上传",
+      "discard": "取消",
       "fallbackEntry": "上传入口",
       "uploadingHint": "正在上传所选文件，请稍候。",
       "hintDegraded": "当前浏览器不支持在对话内直接选择文件，请使用页面中的上传入口。",
@@ -840,7 +840,7 @@
       "title": "配置管理平台"
     },
     "action": {
-      "confirm": "确定",
+      "confirm": "确认",
       "cancel": "取消"
     }
   },
@@ -1551,13 +1551,13 @@
         "cancelTitle": "取消作业",
         "cancelMessage": "作业将立即终止，已处理的部分不会回滚。",
         "cancelAck": "确认取消作业，执行后无法恢复",
-        "cancelConfirm": "取消作业 #{jobId}",
-        "cancelKeep": "保留作业继续运行",
+        "cancelConfirm": "取消作业",
+        "cancelKeep": "取消",
         "dirtyTitle": "重新导出会丢弃未保存的编辑",
         "dirtyMessage": "导出结果表格里有尚未保存到服务端的编辑。\n新作业完成后，服务端导出文件会被替换，这些编辑将无法找回。\n建议先点「保存编辑到服务端」。",
         "dirtyAck": "确认丢弃这些未保存的编辑并重新导出",
-        "dirtyConfirm": "丢弃未保存编辑并重新导出",
-        "dirtyKeep": "保留编辑并返回"
+        "dirtyConfirm": "重新导出",
+        "dirtyKeep": "取消"
       }
     },
     "import": {
@@ -1668,22 +1668,22 @@
         "cancelTitle": "取消作业",
         "cancelMessage": "作业将立即终止，已处理的部分不会回滚。",
         "cancelAck": "确认取消作业，执行后无法恢复",
-        "cancelConfirm": "取消作业 #{jobId}",
-        "cancelKeep": "保留作业继续运行",
+        "cancelConfirm": "取消作业",
+        "cancelKeep": "取消",
         "unsavedSwitchTitle": "切换任务",
-        "unsavedSwitchConfirm": "丢弃未保存编辑并切换任务",
+        "unsavedSwitchConfirm": "确认",
         "unsavedDeselectTitle": "取消勾选配置项",
-        "unsavedDeselectConfirm": "丢弃未保存编辑并取消勾选",
+        "unsavedDeselectConfirm": "确认",
         "unsavedLeaveTitle": "离开导入向导",
-        "unsavedLeaveConfirm": "丢弃未保存编辑并离开",
+        "unsavedLeaveConfirm": "确认",
         "unsavedUploadTitle": "上传文件",
-        "unsavedUploadConfirm": "丢弃未保存编辑并上传",
-        "unsavedEditKeep": "保留编辑并返回",
+        "unsavedUploadConfirm": "确认",
+        "unsavedEditKeep": "取消",
         "publishReplaceTitle": "确认发布（整体替换）",
         "publishReplaceMessage": "发布将按配置项范围内整体替换正式区数据：范围内未被本次导入覆盖的旧行会被删除，执行后无法恢复。",
         "publishReplaceAck": "确认整体替换发布，范围内旧数据将被删除且无法恢复",
-        "publishReplaceConfirm": "发布并替换范围内旧数据",
-        "publishReplaceKeep": "保留旧数据并返回"
+        "publishReplaceConfirm": "发布",
+        "publishReplaceKeep": "取消"
       }
     },
     "tasks": {
@@ -1727,13 +1727,13 @@
         "cancelTitle": "取消作业",
         "cancelMessage": "确定取消任务「{title}」当前运行的作业 #{jobId}？已处理的部分不会回滚。",
         "cancelAck": "确认取消作业，执行后无法恢复",
-        "cancelConfirm": "取消作业 #{jobId}",
-        "cancelKeep": "保留作业继续运行",
+        "cancelConfirm": "取消作业",
+        "cancelKeep": "取消",
         "deleteTitle": "删除任务",
         "deleteMessage": "确定删除任务「{title}」？关联作业、暂存与导出结果将一并删除。",
         "deleteAck": "确认删除任务，执行后无法恢复",
-        "deleteConfirm": "删除任务「{title}」",
-        "deleteKeep": "保留任务"
+        "deleteConfirm": "删除任务",
+        "deleteKeep": "取消"
       },
       "msg": {
         "deleted": "任务已删除",

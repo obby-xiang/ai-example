@@ -1,9 +1,11 @@
 package com.example.configmgr.task.controller;
 
+import com.example.configmgr.common.BlankText;
 import com.example.configmgr.common.CodedIllegalArgumentException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.data.service.ConditionEvaluator;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.repo.JobRepository;
 import com.example.configmgr.task.entity.Task;
@@ -146,10 +148,10 @@ public class TaskController {
         }
         String text;
         if (condition instanceof String raw) {
-            text = StringUtils.trimToEmpty(raw);
-            if (StringUtils.isEmpty(text)) {
+            if (BlankText.isBlank(raw)) {
                 return "{}";
             }
+            text = StringUtils.trimToEmpty(raw);
         }
         else {
             try {
@@ -175,6 +177,7 @@ public class TaskController {
             throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
                     "condition must be a JSON object; use exactly {} to explicitly leave it unset: " + text);
         }
+        ConditionEvaluator.validateShape(parsed);
         if (parsed.size() > 0 && !hasConditionContent(parsed)) {
             throw new CodedIllegalArgumentException(ErrorCodes.CONDITION_JSON_INVALID,
                     "condition cannot use empty-array forms (fields:[] / scopeKeys:[]); "

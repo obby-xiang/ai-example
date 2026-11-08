@@ -100,9 +100,6 @@ const hint = computed(() => {
   if (props.status === 'failed' || (props.status === 'waiting' && hasReason.value)) {
     return hasReason.value ? props.reason : t('ai.uploadHandoff.hintFailed')
   }
-  if (props.status === 'cancelled') {
-    return t('ai.uploadHandoff.hintCancelled')
-  }
   if (props.status === 'uploaded' && displayFileName.value === '') {
     return t('ai.uploadHandoff.hintUploaded')
   }

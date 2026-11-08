@@ -216,11 +216,11 @@ function summaryFor(name: string, args: ToolArgs): string | null {
       const count = Array.isArray(rules) ? rules.length : 0
       const commit = args['commit'] === true
       if (count > 0) {
-        return optional(commit ? 'tool.normalize_column.withRulesPending' : 'tool.normalize_column.withRulesAdvisory', {
+        return optional(commit ? 'tool.normalize_column.withRules' : 'tool.normalize_column.withRulesAdvisory', {
           count
         })
       }
-      return optional(commit ? 'tool.normalize_column.pending' : 'tool.normalize_column.advisory')
+      return optional(commit ? 'tool.normalize_column.summary' : 'tool.normalize_column.advisory')
     }
     case 'replace_values': {
       const search = str(args, 'search')

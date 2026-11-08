@@ -353,7 +353,7 @@ async function cancelTask(row: TaskSummary): Promise<void> {
     title: t('views.tasks.dialog.cancelTitle'),
     message: t('views.tasks.dialog.cancelMessage', { title: row.task.title, jobId }),
     ack: t('views.tasks.dialog.cancelAck'),
-    confirmText: t('views.tasks.dialog.cancelConfirm', { jobId }),
+    confirmText: t('views.tasks.dialog.cancelConfirm'),
     cancelText: t('views.tasks.dialog.cancelKeep')
   })
   if (!confirmed) {
@@ -383,7 +383,7 @@ async function removeTask(row: TaskSummary): Promise<void> {
     title: t('views.tasks.dialog.deleteTitle'),
     message: t('views.tasks.dialog.deleteMessage', { title: row.task.title }),
     ack: t('views.tasks.dialog.deleteAck'),
-    confirmText: t('views.tasks.dialog.deleteConfirm', { title: row.task.title }),
+    confirmText: t('views.tasks.dialog.deleteConfirm'),
     cancelText: t('views.tasks.dialog.deleteKeep'),
     type: 'error'
   })

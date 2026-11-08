@@ -250,12 +250,12 @@
         "disableConfirm": "After disabling, this endpoint's models are no longer selectable. Disable?",
         "clearKeyConfirm": "After clearing, you must re-enter the key before this endpoint can be used. Clear?",
         "removeProviderConfirm": "Deleting endpoint \"{name}\" removes it from the models available in chat. This cannot be undone.",
-        "removeProviderConfirmAction": "Delete endpoint \"{name}\"",
+        "removeProviderConfirmAction": "Confirm",
         "removeModelConfirm": "Deleting model \"{modelId}\" makes it unavailable for selection. This cannot be undone.",
-        "removeModelConfirmAction": "Delete model \"{modelId}\"",
-        "disableConfirmAction": "Disable endpoint \"{name}\"",
-        "clearKeyConfirmAction": "Clear the API Key for endpoint \"{name}\"",
-        "keepConfiguration": "Keep current configuration",
+        "removeModelConfirmAction": "Confirm",
+        "disableConfirmAction": "Confirm",
+        "clearKeyConfirmAction": "Confirm",
+        "keepConfiguration": "Cancel",
         "createTitle": "New endpoint",
         "create": "Create",
         "code": "Identifier (code)",
@@ -470,8 +470,8 @@
         "description": "The current conversation will be cleared and cannot be recovered.",
         "runningNote": "The current response is still being generated. Its contents will not be kept if you clear the conversation.",
         "pendingNote": "There are actions awaiting confirmation or forms awaiting input. These will not be kept if you clear the conversation.",
-        "cancel": "Keep current conversation",
-        "confirm": "Clear and start new"
+        "cancel": "Cancel",
+        "confirm": "Confirm"
       },
       "identity": "Identity",
       "identityUnavailable": "Identity unavailable: the tenant/user directory could not be loaded, sending is paused",
@@ -485,7 +485,7 @@
       "gfQueue": {
         "position": "Queued · {position} of {total}",
         "hint": "Another form is being filled in. This one appears automatically after the previous form is submitted or cancelled.",
-        "cancel": "Cancel this queued form"
+        "cancel": "Cancel"
       },
       "createTaskBusiness": "Create an {type} task “{title}”",
       "createTaskBusinessUntitled": "Create an {type} task",
@@ -557,8 +557,8 @@
       "rowKey": "Row key",
       "reason": "Reason",
       "submitting": "Syncing…",
-      "reject": "Do not execute",
-      "approve": "Approve: {action}",
+      "reject": "Reject",
+      "approve": "Approve",
       "resumeChat": "Continue this turn",
       "editMessage": "Edit this message (copy it into the input box)",
       "regenerateMessage": "Regenerate this answer",
@@ -645,7 +645,7 @@
     },
     "sheetCard": {
       "title": "Spreadsheet write preview",
-      "discard": "Discard",
+      "discard": "Cancel",
       "levelCount": "Count",
       "levelSample": "View samples",
       "levelFullDiff": "Full diff",
@@ -653,9 +653,9 @@
       "noMatches": "No matching cells.",
       "prevPage": "Previous",
       "nextPage": "Next",
-      "cancel": "Keep current sheet",
-      "apply": "Apply changes to {cells} cells",
-      "applying": "Applying changes to {cells} cells…",
+      "cancel": "Cancel",
+      "apply": "Apply",
+      "applying": "Applying…",
       "status": {
         "pending": "Awaiting confirmation",
         "applying": "Applying",
@@ -711,7 +711,7 @@
       "orClick": "You can also use the \"{label}\" entry on the page or drop a file onto it.",
       "choose": "Choose file",
       "retry": "Retry",
-      "discard": "Do not upload",
+      "discard": "Cancel",
       "fallbackEntry": "upload entry",
       "uploadingHint": "Uploading the selected file. Please wait.",
       "hintDegraded": "This browser cannot pick files inside the conversation. Use the upload entry on the page.",
@@ -840,7 +840,7 @@
       "title": "Configuration Manager"
     },
     "action": {
-      "confirm": "OK",
+      "confirm": "Confirm",
       "cancel": "Cancel"
     }
   },
@@ -1272,8 +1272,8 @@
   "task": {
     "readOnly": "View only",
     "failedSuffix": "(failed)",
-    "prev": "Previous",
-    "next": "Next",
+    "prev": "Previous step",
+    "next": "Next step",
     "backToList": "Back to task list"
   },
   "wizard": {
@@ -1551,13 +1551,13 @@
         "cancelTitle": "Cancel job",
         "cancelMessage": "The job stops immediately; processed data will not be rolled back.",
         "cancelAck": "Confirm cancelling the job; this cannot be undone",
-        "cancelConfirm": "Cancel job #{jobId}",
-        "cancelKeep": "Keep job running",
+        "cancelConfirm": "Cancel job",
+        "cancelKeep": "Cancel",
         "dirtyTitle": "Re-exporting discards unsaved edits",
         "dirtyMessage": "The result table has edits that are not saved to the server.\nAfter the new job finishes, the server export file is replaced and these edits cannot be recovered.\nConsider clicking \"Save edits to server\" first.",
         "dirtyAck": "Confirm discarding these unsaved edits and re-exporting",
-        "dirtyConfirm": "Discard unsaved edits and export again",
-        "dirtyKeep": "Keep edits and go back"
+        "dirtyConfirm": "Export again",
+        "dirtyKeep": "Cancel"
       }
     },
     "import": {
@@ -1668,22 +1668,22 @@
         "cancelTitle": "Cancel job",
         "cancelMessage": "The job stops immediately; processed data will not be rolled back.",
         "cancelAck": "Confirm cancelling the job; this cannot be undone",
-        "cancelConfirm": "Cancel job #{jobId}",
-        "cancelKeep": "Keep job running",
+        "cancelConfirm": "Cancel job",
+        "cancelKeep": "Cancel",
         "unsavedSwitchTitle": "Switch task",
-        "unsavedSwitchConfirm": "Discard unsaved edits and switch tasks",
+        "unsavedSwitchConfirm": "Confirm",
         "unsavedDeselectTitle": "Deselect definitions",
-        "unsavedDeselectConfirm": "Discard unsaved edits and deselect",
+        "unsavedDeselectConfirm": "Confirm",
         "unsavedLeaveTitle": "Leave the import wizard",
-        "unsavedLeaveConfirm": "Discard unsaved edits and leave",
+        "unsavedLeaveConfirm": "Confirm",
         "unsavedUploadTitle": "Upload files",
-        "unsavedUploadConfirm": "Discard unsaved edits and upload",
-        "unsavedEditKeep": "Keep edits and go back",
+        "unsavedUploadConfirm": "Confirm",
+        "unsavedEditKeep": "Cancel",
         "publishReplaceTitle": "Confirm publish (replace in scope)",
         "publishReplaceMessage": "Publishing replaces production data within each definition's scope: old rows in scope that are not covered by this import will be deleted. This cannot be undone.",
         "publishReplaceAck": "I understand publishing will delete old data in scope and cannot be undone",
-        "publishReplaceConfirm": "Publish and replace old data in scope",
-        "publishReplaceKeep": "Keep old data and go back"
+        "publishReplaceConfirm": "Publish",
+        "publishReplaceKeep": "Cancel"
       }
     },
     "tasks": {
@@ -1727,13 +1727,13 @@
         "cancelTitle": "Cancel job",
         "cancelMessage": "Cancel job #{jobId} currently running for task \"{title}\"? Processed data will not be rolled back.",
         "cancelAck": "Confirm cancelling the job; this cannot be undone",
-        "cancelConfirm": "Cancel job #{jobId}",
-        "cancelKeep": "Keep job running",
+        "cancelConfirm": "Cancel job",
+        "cancelKeep": "Cancel",
         "deleteTitle": "Delete task",
         "deleteMessage": "Delete task \"{title}\"? Its jobs, staging data and export results will be deleted as well.",
         "deleteAck": "Confirm deleting the task; this cannot be undone",
-        "deleteConfirm": "Delete task \"{title}\"",
-        "deleteKeep": "Keep task"
+        "deleteConfirm": "Delete task",
+        "deleteKeep": "Cancel"
       },
       "msg": {
         "deleted": "Task deleted",

@@ -4,7 +4,7 @@
     :data-testid="`gf-form-${scope}`"
     class="min-w-0"
   >
-    <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto', readonly ? '' : 'pr-[4px]', SCROLLBAR_CLASS]" data-testid="gf-fields">
+    <div :class="['min-w-0 max-h-[min(320px,45vh)] overflow-y-auto p-1', SCROLLBAR_CLASS]" data-testid="gf-fields">
       <div class="flex flex-col gap-[8px]">
         <p v-if="fullTitle" class="m-0 break-words text-[12.6px] font-semibold leading-[1.55] text-[#1f2328] [overflow-wrap:anywhere]" data-testid="gf-full-title">{{ fullTitle }}</p>
         <div v-for="field in visibleFields" :key="field.key">

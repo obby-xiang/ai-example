@@ -1040,7 +1040,6 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (state.budgetArmed) {
             return;
         }
-        blockSameRunStarts(state);
         long suspendedAtMs = System.currentTimeMillis();
         for (PendingToolCall pending : state.suspended) {
             Integer waitSeconds = this.gate.suspendWaitSeconds(pending);
@@ -1052,25 +1051,6 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (!state.suspended.isEmpty()) {
             persistSuspendedBatch(state, pendings);
         }
-    }
-
-    /**
-     * 同轮已有任意 create_task 台账（或台账不可确认）时，启动类调用必须另开请求。
-     */
-    private void blockSameRunStarts(ToolBatchState state) {
-        if (state.suspended.stream().noneMatch(pending -> isStartTool(pending.getName()))
-                || !hasAnyCreateTaskRecord(state.runId)) {
-            return;
-        }
-        state.suspended.removeIf(pending -> {
-            if (!isStartTool(pending.getName())) {
-                return false;
-            }
-            state.startBlocked.add(pending.getToolCallId());
-            emitToolStartOnce(state.runId, state.toolStarted, pending);
-            state.responses.add(skipAsSeparateStartRequest(state.runId, pending));
-            return true;
-        });
     }
 
     private boolean hasAnyCreateTaskRecord(String runId) {
@@ -1092,14 +1072,6 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
     }
 
-    private static boolean isStartTool(String name) {
-        return switch (name) {
-            case AiToolNames.START_EXPORT, AiToolNames.START_PRECHECK, AiToolNames.START_IMPORT,
-                 AiToolNames.START_PUBLISH -> true;
-            default -> false;
-        };
-    }
-
     private static boolean isCreatePrerequisiteReadTool(String name) {
         return switch (name) {
             case AiToolNames.LIST_CONFIG_DEFS, AiToolNames.GET_CONFIG_DEF, AiToolNames.LIST_TASKS,
@@ -1107,22 +1079,6 @@ public class SpToolCallingManager implements ToolCallingManager {
                  "kb_read_doc", "kb_lookup_term" -> true;
             default -> false;
         };
-    }
-
-    private ToolResponseMessage.ToolResponse skipAsSeparateStartRequest(String runId, PendingToolCall pending) {
-        String message = "请在后续单独发起启动请求";
-        pending.setStatus(PendingToolCall.SKIPPED);
-        pending.setOutcome(ToolOutcome.SKIPPED.wire());
-        pending.setCode("START_REQUIRES_SEPARATE_REQUEST");
-        pending.setReason("START_REQUIRES_SEPARATE_REQUEST");
-        pending.setExecuted(false);
-        pending.setExecutedBy(null);
-        pending.setResolvedAtMs(System.currentTimeMillis());
-        pending.setResultText(message);
-        this.store.putPending(runId, pending);
-        this.registry.of(runId).toolResult(pending, false, false, message);
-        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-                modelData(pending, message));
     }
 
     private ToolResponseMessage.ToolResponse skipAsReadBeforeCreate(String runId, PendingToolCall pending) {
@@ -1167,10 +1123,6 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private void executePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
-        if (state.startBlocked.contains(pending.getToolCallId())) {
-            traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
-            return;
-        }
         if (isCreatePrerequisiteReadTool(pending.getName()) && hasAnyCreateTaskRecord(state.runId)) {
             emitToolStartOnce(state.runId, state.toolStarted, pending);
             state.responses.add(skipAsReadBeforeCreate(state.runId, pending));
@@ -1429,7 +1381,6 @@ public class SpToolCallingManager implements ToolCallingManager {
         private final List<PendingToolCall> suspended = new ArrayList<>();
         private final Set<String> preflightBlocked = new HashSet<>();
         private final Set<String> createTaskBlocked = new HashSet<>();
-        private final Set<String> startBlocked = new HashSet<>();
         private final Set<String> frontendRejected = new HashSet<>();
         private final Map<String, String> idempotentReplay = new HashMap<>();
         private final Map<String, String> batchSetConditionSeen = new HashMap<>();
@@ -2640,9 +2591,9 @@ public class SpToolCallingManager implements ToolCallingManager {
      * 回填模型并收敛成终态（不留在 {@code PENDING}，否则续跑会把它当成"等人/等前端"）。
      *
      * <p>帧面分两种：一般入参拒绝给一条 {@code frontend_tool_result}（ok=false，与
-     * "前端超时"同帧型，让用户看见"这次没执行、为什么"）；生成式表单的<b>系统拒绝</b>
-     * （{@link #systemRejectedWithoutUserFrames}）一条都不发 —— 被判的是模型给的 schema，
-     * 用户没有动作可看，发帧只会落一张"已拒绝"的空卡。
+     * "前端超时"同帧型，让用户看见"这次没执行、为什么"）；模型可自行纠正的<b>系统拒绝</b>
+     * （{@link #isSystemRejectedWithoutUserFrames(PendingToolCall)}）一条都不发，
+     * 避免内部恢复落一张"已拒绝"的空卡。
      *
      * <p>正常路径（挂起前的预检）只做 {@link #settleFrontendRejected}（写条目 + 日志），帧由
      * 执行循环按既有帧序发；本方法保留给 {@link #awaitFrontend} 的兜底复查（预检后入参不会变，
@@ -2652,8 +2603,8 @@ public class SpToolCallingManager implements ToolCallingManager {
         String text = settleFrontendRejected(runId, pending, verdict);
         if (isSystemRejectedWithoutUserFrames(pending)) {
             // 兜底复查才发现系统拒绝：此时 tool_start 已随执行循环发出（确定性复核器下不可达），
-            // 但表单本身仍不能下发 —— 不给用户再补一张"已拒绝"的结局卡。
-            log.warn("generative form rejected only at post-park recheck (expected unreachable) runId={} toolCallId={} code={} (no outcome frame sent)",
+            // 不补一张内部恢复的结局卡。
+            log.warn("system rejection found only at post-park recheck (expected unreachable) runId={} toolCallId={} code={} (no outcome frame sent)",
                     runId, pending.getToolCallId(), pending.effectiveCode());
             return text;
         }
@@ -4050,30 +4001,10 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     /**
-     * 该条目的拒绝是否应<b>静默用户可见的工具帧</b>（生成式表单的系统拒绝：schema 白名单 / 槽位放行）。
+     * 模型输入或调用顺序可由其下一拍纠正的零副作用拒绝，不产生用户可见工具帧。
      *
-     * <p>两类拒绝的共同点：<b>被判的是模型给的 schema，不是用户的动作</b>，而且都零副作用、都有明确
-     * 纠正出口。浏览器实测的缺陷正是"先落一张'已拒绝'的表单卡，模型改对后再落一张可用卡"——
-     * 用户看到两张卡，实际只有一次收集意图。
-     *
-     * <ul>
-     * <li>{@code FORM_SCHEMA_REJECTED}：schema 未过白名单（顶层 purpose/scenario/title、字段、联动……）；</li>
-     * <li>{@code FORM_SLOTS_ALREADY_KNOWN}：这张表想收集的槽位已由任务/工作区或用户明确值确定
-     * （"没有缺口"而不是"输错了"）。</li>
-     * </ul>
-     *
-     * <p>静默的是<b>用户面</b>，其余三面一字不改：
-     * <ul>
-     * <li>条目：仍是 {@code REJECTED_ARGUMENTS} + 同名 code（审计/幂等/排障）；</li>
-     * <li>日志：{@code settleFrontendRejected} 的 WARN 照旧；</li>
-     * <li>模型：统一信封回执照旧（含码与逐条"改哪一处"）；</li>
-     * <li>用户：{@code tool_start} / {@code frontend_tool_request} / {@code frontend_tool_result}
-     * <b>一条都不发</b> —— 前端不建段，就不会有卡，也不会更新任何既有的表单状态。</li>
-     * </ul>
-     *
-     * <p>只认<b>生成式表单 + 这两个码</b>：别的工具即便带同名码也不静默（不借码绕过可见性），
-     * 生成式表单的其它拒绝（例如回灌值不合法）走的是回灌闸门、不是这里 —— 那里用户已经填过表，
-     * 必须看见"哪一格要改"。
+     * <p>静默只覆盖生成式表单的 schema/槽位拒绝，以及 {@code confirm_step} 的条件结构纠正；
+     * 条目、日志和模型回执全部保留。表单回灌值不合法、用户拒绝/取消和真实执行失败不在此列。
      */
     private static boolean isSystemRejectedWithoutUserFrames(PendingToolCall pending) {
         String code = pending.effectiveCode();
@@ -4081,10 +4012,9 @@ public class SpToolCallingManager implements ToolCallingManager {
             return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code)
                     || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
         }
-        // confirm_step 的"文本推断未验证"是系统拒绝（模型需改用 set_condition 结构化算子）：
-        // 用户面零卡（实时/历史同口径），模型回执照旧，保留纠正与后续 set_condition 通道。
         return AiToolNames.CONFIRM_STEP.equals(pending.getName())
-                && ErrorCodes.CONDITION_OPERATOR_UNKNOWN.equals(code);
+                && (ErrorCodes.CONDITION_OPERATOR_UNKNOWN.equals(code)
+                || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code));
     }
 
     /**
