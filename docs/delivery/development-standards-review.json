@@ -3441,6 +3441,39 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "正常收流与缺终帧断流通过明确park标记区分，SSE seq、UTF-8和正文处理未改。"},
         "verification-review": {"status": "checked", "reason": "生产package与node --check通过；DeepSeek r7单次27/27、complete=true、cleanupErrors=0、plainTextRetryCount=0，挂起聚合ERROR及其他ERROR=0；重试分支、C-33、多实例、Cluster、真实故障注入和API负载NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:0ff4eb3cb80c873a7a5844eccb934fb22173aa84d61ba3667ec069a9f57d7b3c",
+      "status": "reviewed",
+      "reason": "复核一轮闭环施工计划、交互文案现状与用户最新简洁按钮裁决，以及C-111～C-126测试步骤、公开脚本、浏览器方法和次数；独立文档复审首轮六组问题已返修并确认PASS，本批仅文档无施工。",
+      "reviewedAt": "2026-11-08T11:13:15+08:00",
+      "reviewer": "K3.1 Pro主会话及独立文档复审agent-1082",
+      "specChanges": [
+        {
+          "change": "所有能一轮完成的操作必须同轮走到真实终点，包括创建导出任务；HITL和表单操作属于同轮续跑。",
+          "reason": "旧测试主文档仍要求用户再次发送启动指令，与用户最新一轮闭环裁决冲突。",
+          "impact": "C-09～C-12及PD-03改为同轮创建、配置、启动确认和批准后执行；新增C-111～C-126验证不得要求第二次聊天输入。"
+        },
+        {
+          "change": "按钮采用拒绝/批准、取消/提交、取消/应用及真实多步骤上一步/下一步，特别危险操作才显示复选框，不再使用批准xxx和长结果型按钮。",
+          "reason": "按钮应承担简单动作，风险与后果放正文，避免过度设计和动态文案维护成本。",
+          "impact": "分析文档追加用户最新基线及supersede关系，C-105～C-110与C-115～C-119按新口径验收。"
+        }
+      ],
+      "files": [
+        {"path": "docs/superpowers/plans/2026-11-08-ai-one-turn-interaction-recovery.md", "status": "checked", "reason": "完整记录历史基线、状态机、空白条件、按钮、卡片、聚焦、验证和提交门禁；Task4明确Create定向API脚本，当前未批准施工。"},
+        {"path": "docs/research/分析-AI交互卡操作文案现状-2026-11-08.md", "status": "checked", "reason": "盘点全部交互卡当前及历史文案，补充用户最新简洁按钮基线、例外和旧D11/D12/D13 supersede关系，聚焦裁切仅作静态判断。"},
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "修正旧的再次启动指令与批准具体动作口径，新增16个专项及公开API、浏览器、故障构造、次数、证据和完成门槛，全部NOT_RUN。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用唯一测试主文档、既有核心/只读脚本和内置浏览器；新定向脚本仅登记Create计划，不新增依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批只有Markdown测试与分析文档，没有Java/TypeScript代码、JSON实体、集合或import变化，无需代码格式化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "测试要求保留真实失败、故障日志和用户拒绝，不得以隐藏卡片、日志零告警或提前返回冒充成功。"},
+        "toc-interaction": {"status": "checked", "reason": "明确简洁按钮、真实多步骤、危险复选框、技术黑话清退、重复回复治理和聚焦可访问性，覆盖中英文。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "验收要求同run创建/配置/启动确认/批准/执行，批准前零副作用，拒绝取消不自动重试，任务作业恰好一次。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "要求保存完整有序SSE、历史、用户消息计数和同run终态，覆盖刷新、重连及公开下载证据，不改变协议。"},
+        "verification-review": {"status": "checked", "reason": "独立文档复审PASS；新专项全部NOT_RUN，新增脚本明确当前不存在，未执行生产代码、测试、服务或浏览器，未把历史27/27当作本专项证据。"}
+      }
     }
   ]
 }
