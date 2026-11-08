@@ -343,7 +343,7 @@ public class DefinitionSelectionForm extends HostForm {
 	}
 
 	/** 本批里成功创建任务的那条 {@code create_task}（回执带真实任务号）；没有 = {@code null}。 */
-	private static PendingToolCall settledCreateTask(List<PendingToolCall> settledBatch) {
+	static PendingToolCall settledCreateTask(List<PendingToolCall> settledBatch) {
 		if (settledBatch == null) {
 			return null;
 		}
@@ -485,7 +485,7 @@ public class DefinitionSelectionForm extends HostForm {
 	}
 
 	/** JSON 整数/数字文本 → long；其它形状（小数/布尔/对象/数组/空）= {@code null}。 */
-	private static Long longOf(JsonNode node) {
+	static Long longOf(JsonNode node) {
 		if (node == null || node.isNull() || node.isFloatingPointNumber() || node.isBoolean()) {
 			return null;
 		}

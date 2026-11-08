@@ -243,6 +243,10 @@ public class ConditionsForm extends HostForm {
         return out.isEmpty() ? List.of() : out;
     }
 
+    boolean canStartExport(Task task) {
+        return task != null && CollectionUtils.isNotEmpty(task.getItems()) && this.conditionWorkflow.plan(task).canAdvance();
+    }
+
     /**
      * 判据成立时挂起非必填文本框。
      *

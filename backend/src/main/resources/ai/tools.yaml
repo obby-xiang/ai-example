@@ -90,7 +90,8 @@
 # HITL 仍在真实执行前逐次确认，只有用户明确只创建/创建后停止才允许创建后收尾。
 # 2026-10-27.33 → 2026-10-27.34：任务 COMPLETED 不单独作为重复导出判据；只有已有成功 EXPORT 作业才禁止重复导出。
 # 2026-10-27.34 → 2026-10-27.35：item IMPORTED/任务 COMPLETED 不等于已发布；只有已有成功 PUBLISH 作业才禁止重复发布。
-version: 2026-10-27.35
+# 2026-10-27.35 → 2026-10-27.36：start_export 按本 run 条目去重；旧任务、openWizard=false 后明确启动及 park 未启用等路径保留模型调用。
+version: 2026-10-27.36
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -146,7 +147,8 @@ tools:
       宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后明确打开/配置仍可继续。
       原始意图是完整导出/导入时，批准后继续用 navigate_to(page=..., taskId=...) 打开向导，
       在同一 run 连续完成所需配置/条件和启动确认，批准后再真实执行；SUSPENDED 不得提前 DONE。
-      创建或完成配置/条件后继续调用 start_export、start_precheck、start_import、start_publish 发起相应启动确认，
+      本 run 已有 start_export 条目时不得重复调用；旧任务、openWizard=false 后明确启动、park 未启用或宿主未生成条目时，
+      模型仍按披露调用 start_export；导入仍按披露调用相应启动工具。
       不得要求用户另发一轮开始或执行；启动确认不可绕过，只有用户明确只创建/创建后停止时才允许创建后收尾。
   - toolKey: start_export
     title: 启动导出作业

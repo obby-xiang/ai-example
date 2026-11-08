@@ -97,8 +97,9 @@ final class PromptRulePacks {
 		if (tools.contains(AiToolNames.START_EXPORT)) {
 			sb.append("""
 
-					start_export 必须先发起确认卡，由用户批准后才真正启动；成功启动后结束本轮，进度由页面展示，
-					只有用户明确询问时才查询一次。已有成功 EXPORT 作业的任务不得重复导出，任务 COMPLETED 本身不能替代 EXPORT 作业状态，
+					start_export 必须先发起确认卡，由用户批准后才真正启动；本 run 已有 start_export 条目时不得重复调用。
+					旧任务、openWizard=false 后明确启动、park 未启用或宿主未生成条目时，模型仍按披露调用。
+					成功启动后结束本轮，进度由页面展示，只有用户明确询问时才查询一次。已有成功 EXPORT 作业的任务不得重复导出，任务 COMPLETED 本身不能替代 EXPORT 作业状态，
 					不得仅凭任务状态拒绝其他合法启动；成功后不得自动下载或打开编辑器，任务或作业完成状态本身不是下载授权。
 					""");
 		}

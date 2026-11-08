@@ -304,6 +304,9 @@ public class ResumeService {
     @Autowired(required = false)
     private com.example.configmgr.ai.form.ConditionsForm conditionsForm;
 
+    @Autowired(required = false)
+    private com.example.configmgr.ai.form.ExportStartForm exportStartForm;
+
     /**
      * 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。
      *
@@ -1592,6 +1595,21 @@ public class ResumeService {
                 state.history, !state.enteredQueryCond)) {
             state.body.put("resumed", false);
             state.body.put("reason", conditionParkReason(state.runId));
+            state.body.put("taskId", state.nextHopContext.getTaskId());
+            return new ResumeResult(Outcome.ACCEPTED, state.body);
+        }
+        com.example.configmgr.ai.form.ExportStartForm.ParkResult exportPark = this.exportStartForm == null
+                ? com.example.configmgr.ai.form.ExportStartForm.ParkResult.NOT_DUE
+                : this.exportStartForm.parkIfDueAtExportResult(state.runId, state.nextHopContext, state.history);
+        if (exportPark == com.example.configmgr.ai.form.ExportStartForm.ParkResult.PARK_FAILED) {
+            state.body.put("taskId", state.nextHopContext.getTaskId());
+            log.warn("host start_export park failed; resume will not hand off to the model runId={} taskId={}", state.runId,
+                    state.nextHopContext.getTaskId());
+            return resumeStatusWriteRefused(state.runId, state.body);
+        }
+        if (exportPark == com.example.configmgr.ai.form.ExportStartForm.ParkResult.PARKED) {
+            state.body.put("resumed", false);
+            state.body.put("reason", "EXPORT_START_CONFIRM_PARKED");
             state.body.put("taskId", state.nextHopContext.getTaskId());
             return new ResumeResult(Outcome.ACCEPTED, state.body);
         }

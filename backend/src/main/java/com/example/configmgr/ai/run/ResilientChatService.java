@@ -11,6 +11,7 @@ import com.example.configmgr.ai.context.ContextMeter;
 import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
+import com.example.configmgr.ai.form.ExportStartForm;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.gate.ToolTargetResolver;
@@ -204,7 +205,8 @@ public class ResilientChatService {
             包括 list_config_defs 和 get_config_def；即使需要确认配置编码也先创建任务，由宿主继续选择/补充。
             打开向导默认完整续接，仅用户明确限定创建后停止时传 openWizard=false；创建不等于绕过启动确认。
             用户本轮要求创建、配置或执行时，所有能同轮完成的步骤必须连续推进；创建或完成配置/条件后，
-            继续调用 start_export、start_precheck、start_import、start_publish 发起相应启动确认，不得要求用户另发一轮。
+            继续按披露发起相应启动确认，不得要求用户另发一轮；本 run 已有 start_export 条目时不得重复调用。
+            旧任务、openWizard=false 后明确启动、park 未启用或宿主未生成条目时，模型仍按披露调用 start_export。
             启动确认仍不可绕过，只有用户批准后才可真实执行；用户明确只创建或创建后停止时才在创建后收尾。
             任务 status 不能单独证明目标作业已完成，必须结合当前 step 和各 jobType 的真实状态判断。
             PRECHECK 成功不等于 IMPORT 完成，IMPORT 最终完成以成功 PUBLISH 为准。
@@ -2177,16 +2179,16 @@ public class ResilientChatService {
             return false;
         }
         AiContext latest = latestContext(runId, context);
-        return needsExportWrapUpCorrection(latest, disclosedStartExport(latest), pendings, lastUserText, false,
+        boolean hostOwned = latest != null && this.properties != null && this.properties.getPark().isEnabled()
+                && ExportStartForm.hasContinuationIntent(pendings, latest.getTaskId());
+        return !hostOwned && needsExportWrapUpCorrection(latest, disclosedStartExport(latest), pendings, lastUserText, false,
                 exportProgressionObserved(runId));
     }
 
     /**
-     * 本 run 是否已经有<b>明确新建导出任务</b>的结构化事实（只认 create_task(type=EXPORT)）。
-     *
-     * <p>仅凭 confirm_step/select_definitions/set_condition 不能推导"用户本轮要启动导出"
-     * （可能只是继续旧任务/只推进）；收尾纠正不得据此索要 start_export。
-     * 读取真实待决条目的工具入参（<b>不读 ai:ledger</b>）。
+     * 本 run 是否已经有<b>当前任务完整续接</b>的结构化事实：成功 create_task 的真实 createdTaskId
+     * 与当前任务一致，且原始 openWizard 允许续接。仅凭 confirm_step/select_definitions/set_condition
+     * 不能推导启动意图；openWizard=false 也不由收尾纠正自动启动。
      */
     boolean exportProgressionObserved(String runId) {
         List<PendingToolCall> pendings;
@@ -2197,30 +2199,8 @@ public class ResilientChatService {
                 log.warn("read pending entries failed, treating as no new export evidence runId={}", runId, ex);
             return false;
         }
-        for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
-            if (pending == null || !AiToolNames.CREATE_TASK.equals(pending.getName()) || !pending.resolved()
-                    || pending.effectiveOutcome() != ToolOutcome.OK) {
-                continue;
-            }
-            if (isCreatedExportTask(pending.getArguments())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isCreatedExportTask(String argumentsJson) {
-        if (StringUtils.isBlank(argumentsJson)) {
-            return false;
-        }
-        try {
-            com.fasterxml.jackson.databind.JsonNode node = new com.fasterxml.jackson.databind.ObjectMapper()
-                    .readTree(argumentsJson);
-            com.fasterxml.jackson.databind.JsonNode type = node == null ? null : node.get("type");
-            return type != null && type.isTextual() && "EXPORT".equalsIgnoreCase(type.asText().trim());
-        } catch (Exception ex) {
-            return false;
-        }
+        AiContext latest = latestContext(runId, null);
+        return latest != null && ExportStartForm.hasContinuationIntent(pendings, latest.getTaskId());
     }
 
     private boolean isAwaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs,

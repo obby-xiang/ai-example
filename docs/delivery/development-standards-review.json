@@ -4102,6 +4102,39 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批仅Java人读文案与小型方法拆分，不涉及流式字节解码、代理对或帧截断。"},
         "verification-review": {"status": "checked", "reason": "agent-1134两轮finding均ADDRESSED并最终接受；IDEA默认Reformat成功，Maven 357源文件BUILD SUCCESS，动态测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:3604491835f2260379d6d33bdc9f6439dee2b0075d236e2582df8fb2fff95d33",
+      "status": "reviewed",
+      "reason": "逐hunk关联复核EXPORT宿主启动确认、既有模型启动路径、预检/挂起/恢复/取消和失败回灌；两轮修复归属冲突与空结果恢复后独立复审通过。",
+      "reviewedAt": "2026-11-09T01:55:05+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1133",
+      "specChanges": [
+        {
+          "change": "本run新建任务且openWizard允许续接时，权威EXPORT步骤由宿主发起start_export确认；已有start_export条目才禁止模型重复调用。",
+          "reason": "需要在同一原始意图内闭环，同时保留旧任务、明确仅创建后启动及park未启用等既有模型路径。",
+          "impact": "新增确定性CONFIRM pending及预检摘要，批准前零作业；挂起失败返回真实未知/失败，不再空resultText回灌。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java", "status": "checked", "reason": "canStartExport复用ExportConditionWorkflow.plan(task).canAdvance的权威条件完整性判定。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/DefinitionSelectionForm.java", "status": "checked", "reason": "成功create_task与任务ID解析仅放宽为包内复用，未改判定语义。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ExportStartForm.java", "status": "checked", "reason": "仅在权威EXPORT、续接意图、条件与作业核对及预检通过时创建确定性CONFIRM，PARK_FAILED与NOT_DUE分离。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java", "status": "checked", "reason": "挂起收敛写同时保留非空失败resultText，恢复不再空结果回灌且BLOCKED不执行。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java", "status": "checked", "reason": "只在已有start_export条目时禁止模型重复调用，保留非宿主路径，导入契约不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "exportWrapUpCorrection与宿主复用hasContinuationIntent，避免两个启动指令来源。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "条件链未挂起接入ExportStartForm，PARK_FAILED走resumeStatusWriteRefused并保持取消优先，不进completeResumeHandoff。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "版本升至2026-10-27.36，启动归属与PromptRulePacks一致，未新增供应商/话术特判。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用ToolPreflightService、HostForm.shouldPark、ConfirmGate和既有后端执行/指纹复核/台账，无新增依赖或事件框架。"},
+        "java-api-style": {"status": "checked", "reason": "新公共及辅助方法均不超50行/复杂度20，使用明确CONFIRM枚举和既有集合/空值语义，无静态池或new Thread。"},
+        "logging-exception-safety": {"status": "checked", "reason": "日志只含run/task/检查码且异常作为Throwable保留，失败结果真实非空，不掩盖未知状态。"},
+        "toc-interaction": {"status": "checked", "reason": "同轮启动确认唯一，预检失败/拒绝/取消/未知不启动不下载，不向用户伪造成功或重复确认。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "确定性ID、pending/ledger、续跑租约和原子认领共同防重；AI状态仅在既有Redis，业务Task/Job只读预检与执行。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批为Java宿主状态机与pending映射，不涉及UTF-8分片或代理对处理。"},
+        "verification-review": {"status": "checked", "reason": "agent-1133两轮finding均ADDRESSED并APPROVED；IDEA默认Reformat成功，Maven 357源文件BUILD SUCCESS，动态验收NOT_RUN。"}
+      }
     }
   ]
 }
