@@ -573,7 +573,7 @@ export function insertCompactionEvent(message: ChatMessage, event: CompactionEve
  *   （ai.ts）——同 8 态（succeeded/rejected/blocked/expired/cancelled/unknown/failed/skipped）、
  *   **无共享常量**（parts.ts 不依赖 store 的纯函数层约束），漂移由 D9 表驱动一致性锁兜底。
  * ③ 本表 + `historyToolCallStatus`（下方，R-144 history 载荷面单表）——分叉逐条见
- *   `historyToolCallStatus` 头注（EXECUTED / APPROVED·PENDING→pending / DONE / 不收录 SUCCEEDED 四条），
+ *   `historyToolCallStatus` 头注（EXECUTED / APPROVED→running·PENDING→pending / DONE / 不收录 SUCCEEDED 四条），
  *   有意分叉、禁对齐；两表实发交集（FRONTEND_RESULT/FRONTEND_CANCELLED/CANCELLED/TIMEOUT/
  *   REJECTED_ARGUMENTS/REJECTED/BLOCKED）同映射，漂移由 D9 表驱动一致性锁兜底。
  */
@@ -644,8 +644,9 @@ export function isSystemRejectPhantom(name: unknown, code?: string | null): bool
  * 快照态兜底（CANCELLED/DONE；FAILED 不参与段态推导 ⇒ null，与 A-1-4 判据序同源）。
  * 与 `frontendResultStatus` 的有意分叉（D9 注记第③对逐条点名，禁擅自"对齐"）：
  * ① `EXECUTED → succeeded`（本表独有：T2 升格判据的目标码；帧/响应面无此码）；
- * ② `APPROVED` / `PENDING → pending`（定稿修正：兜底取 pending **不取 expired**；
- *    `frontendResultStatus` 对这两码返回 null —— 响应面它们瞬态不存在，历史面是合法兜底态）；
+ * ② `APPROVED → running` / `PENDING → pending`：批准是用户决定，不是待操作，也不是执行成功；
+ *    与 confirm_decision 的实时形状一致，执行终态仍由 outcome / 后续结果恢复；
+ *    `frontendResultStatus` 对这两码返回 null —— 响应面它们瞬态不存在，历史面是合法兜底态；
  * ③ `DONE → succeeded`（快照态兜底落点；帧/响应面无此码）；
  * ④ 本表**不收录** `SUCCEEDED`（后端 10 码无此值，旧载荷兜底不走本表）。
  * `FRONTEND_RESULT → succeeded` 为**定稿修正**（已回灌结果即成功终码，非瞬态）——
@@ -678,6 +679,7 @@ export function historyToolCallStatus(status: unknown): ToolRunStatus | null {
       // 表格开关关掉的终态（治理批）：缺这条映射会让刷新后的段落成 unknown 占位
       return 'failed'
     case 'APPROVED':
+      return 'running'
     case 'PENDING':
       return 'pending'
     default:

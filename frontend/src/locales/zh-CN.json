@@ -16,6 +16,7 @@
           "hitl": "待确认",
           "form": "待填写"
         },
+        "actionRequired": "待操作",
         "submitting": "提交中",
         "queued": "排队中",
         "running": "执行中",
@@ -31,12 +32,12 @@
         "submissionRejected": "提交未通过"
       },
       "readonly": {
-        "approved": "成功",
-        "rejected": "拒绝",
-        "expired": "失效",
+        "approved": "已批准",
+        "rejected": "已拒绝",
+        "expired": "已失效",
         "failed": "失败",
         "submitted": "已提交",
-        "cancelled": "取消",
+        "cancelled": "已取消",
         "notApproved": "未执行",
         "notExecuted": "未执行",
         "formFailed": "执行失败"
@@ -397,6 +398,16 @@
         "clarify": "信息确认"
       },
       "selectPlaceholder": "请选择{label}",
+      "multiSelect": {
+        "selectAll": "全选",
+        "selectedCount": "已选 {selected}/{total}"
+      },
+      "options": {
+        "loading": "选项加载中…",
+        "loadFailed": "选项加载失败",
+        "empty": "暂无可选项",
+        "retry": "重试"
+      },
       "cancel": "取消",
       "submit": "提交",
       "submitting": "提交中…",

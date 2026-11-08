@@ -3,7 +3,6 @@ import { computed, ref, useId } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
 import { UPLOAD_ACCEPT, UPLOAD_MAX_BYTES } from '@/constants/upload'
-import { unicodeCharacterCount } from '@/utils/display-text'
 
 type UploadHandoffStatus = 'waiting' | 'uploading' | 'uploaded' | 'failed' | 'unsupported' | 'missing' | 'cancelled'
 type HeaderTone = 'neutral' | 'blue' | 'green' | 'amber' | 'red' | 'purple' | 'gray'
@@ -14,14 +13,12 @@ const props = withDefaults(defineProps<{
   label?: string | null
   reason?: string | null
   fileName?: string | null
-  title?: string | null
   interactive?: boolean
 }>(), {
   accept: null,
   label: null,
   reason: null,
   fileName: null,
-  title: null,
   interactive: true
 })
 
@@ -34,16 +31,17 @@ const { t } = useI18n()
 const bodyId = `upload-handoff-body-${useId()}`
 const expandedOverride = ref<boolean | null>(null)
 
-const headerTitle = computed(() => props.title?.trim() || t('ai.uploadHandoff.title'))
-const hasLongTitle = computed(() => unicodeCharacterCount(headerTitle.value) > 32)
+const headerTitle = computed(() => t('ai.uploadHandoff.title'))
 const expanded = computed({
-  get: () => expandedOverride.value ?? (hasLongTitle.value || (props.status !== 'uploaded' && props.status !== 'cancelled')),
+  get: () => expandedOverride.value ?? (props.status !== 'uploaded' && props.status !== 'cancelled'),
   set: (value: boolean) => {
     expandedOverride.value = value
   }
 })
 
-const statusLabel = computed(() => t(`ai.uploadHandoff.status.${props.status}`))
+const statusLabel = computed(() => props.status === 'waiting' || props.status === 'uploading'
+  ? t('ai.card.status.actionRequired')
+  : t(`ai.uploadHandoff.status.${props.status}`))
 const statusTone = computed<HeaderTone>(() => {
   switch (props.status) {
     case 'uploaded':
@@ -55,6 +53,9 @@ const statusTone = computed<HeaderTone>(() => {
       return 'amber'
     case 'cancelled':
       return 'gray'
+    case 'waiting':
+    case 'uploading':
+      return 'amber'
     default:
       return 'blue'
   }
@@ -68,7 +69,6 @@ const displayFileName = computed(() => {
   }
   return raw.split(/[\\/]/).pop() ?? ''
 })
-const subtitle = computed(() => displayFileName.value || undefined)
 
 const acceptText = computed(() => {
   const raw = props.accept
@@ -110,7 +110,13 @@ function onChoose(): void {
   if (!showChoose.value || chooseDisabled.value) {
     return
   }
+  expandedOverride.value = true
   emit('choose')
+}
+
+function onCancel(): void {
+  expandedOverride.value = true
+  emit('cancel')
 }
 
 const PRIMARY_BUTTON = 'min-w-[84px] flex-none whitespace-nowrap rounded-[8px] border border-solid border-transparent bg-[#2563eb] px-[13px] py-[5px] text-[12.6px] font-semibold text-white transition-all duration-[150ms] hover:brightness-[1.08] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb] disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal disabled:opacity-50 motion-reduce:transition-none'
@@ -122,7 +128,6 @@ const SECONDARY_BUTTON = 'min-w-[56px] flex-none whitespace-nowrap rounded-[8px]
     <BusinessCardHeader
       icon="upload"
       :title="headerTitle"
-      :subtitle="subtitle"
       :status="statusLabel"
       :tone="statusTone"
       :expanded="expanded"
@@ -133,13 +138,8 @@ const SECONDARY_BUTTON = 'min-w-[56px] flex-none whitespace-nowrap rounded-[8px]
 
     <div :id="bodyId" v-show="expanded" class="px-[10px] pb-[10px]">
       <div class="flex flex-col gap-[8px]">
-        <p v-if="hasLongTitle" class="m-0 break-words text-[12.6px] font-semibold leading-[1.55] text-[#1f2328] [overflow-wrap:anywhere]">
-          {{ headerTitle }}
-        </p>
-
         <div v-if="displayFileName" class="flex min-w-0 items-center gap-[8px] text-[12.2px] leading-[1.55] text-[#57606a]" data-testid="upload-handoff-file">
           <span class="min-w-0 break-all">{{ displayFileName }}</span>
-          <span v-if="status === 'uploading'" class="shrink-0 text-[#8b949e]">{{ t('ai.uploadHandoff.status.uploading') }}</span>
         </div>
 
         <p v-if="status === 'uploading'" class="m-0 flex items-center gap-[6px] text-[12.2px] leading-[1.55] text-[#57606a]">
@@ -176,7 +176,7 @@ const SECONDARY_BUTTON = 'min-w-[56px] flex-none whitespace-nowrap rounded-[8px]
             type="button"
             :class="SECONDARY_BUTTON"
             data-testid="upload-handoff-cancel"
-            @click="emit('cancel')"
+            @click="onCancel"
           >
             {{ t('ai.uploadHandoff.discard') }}
           </button>

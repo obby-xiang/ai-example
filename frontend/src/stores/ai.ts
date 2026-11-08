@@ -5347,8 +5347,8 @@ export const useAiStore = defineStore('ai', {
               : undefined
             // 治理 P0-1：结局八态 **outcome 优先**（新载荷）—— 有合法 outcome 即用，缺/域外值才
             // 回落 status 旧表（旧载荷 / resume 重建轮 T4 同口径，行为一字不动）。
-            // M1（收口修）：非终态（PENDING/APPROVED ⇒ pending）不得被 outcome='unknown' 覆写成
-            // failed —— 条目仍在等人工，后端也不会对其写 outcome；此处为双保险。
+            // M1（收口修）：PENDING 不得被 outcome='unknown' 覆写成 failed；APPROVED 恢复为
+            // running + approved 决定，后续真实 outcome 仍可恢复执行结果，不冒充成功。
             const statusDerived = state?.status !== undefined ? historyToolCallStatus(state.status) : null
             const mappedStatus = statusDerived === 'pending'
               ? statusDerived
@@ -8382,6 +8382,9 @@ export const useAiStore = defineStore('ai', {
         name: entry.name,
         kind2: entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND',
         status: receipt.status,
+        ...(typeof entry.arguments === 'string' ? { args: entry.arguments } : {}),
+        ...(entry.preflight ? { preflight: entry.preflight } : {}),
+        ...(entry.irreversible === true ? { irreversible: true } : {}),
         ...(receipt.decision !== undefined ? { decision: receipt.decision } : {}),
         decidedAt: Date.now(),
         requiresAction: false

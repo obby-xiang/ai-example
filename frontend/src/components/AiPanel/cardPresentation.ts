@@ -67,38 +67,6 @@ export function cardIconPaths(icon: string): string[] {
   return FAMILY_ICONS.tool
 }
 
-export function businessCardStatusLabelKey(
-  key: string,
-  family: BusinessCardFamily,
-  unrecoverable = false
-): string {
-  if (key === 'pending') {
-    return `ai.card.status.pending.${family}`
-  }
-  if (key === 'syncing') {
-    return family === 'form' ? 'ai.card.status.submitting' : 'ai.card.status.running'
-  }
-  if (key === 'unknown') {
-    return unrecoverable ? 'ai.card.status.unrecoverable' : 'ai.card.status.unknown'
-  }
-  if (key === 'approved') {
-    return 'ai.card.status.succeeded'
-  }
-  if (key === 'failed') {
-    return family === 'form' ? 'ai.card.readonly.formFailed' : 'ai.card.status.failed'
-  }
-  if (key === 'rejected') {
-    return family === 'form' ? 'ai.card.status.submissionRejected' : 'ai.card.status.rejected'
-  }
-  if (key === 'notApproved' || key === 'notExecuted') {
-    return 'ai.card.status.blocked'
-  }
-  if (key === 'submitted') {
-    return 'ai.card.readonly.submitted'
-  }
-  return `ai.card.status.${key}`
-}
-
 export function businessCardStatusTone(key: string, family: BusinessCardFamily): BusinessCardTone {
   if (key === 'succeeded' || key === 'approved' || key === 'submitted') {
     return 'green'
@@ -107,7 +75,7 @@ export function businessCardStatusTone(key: string, family: BusinessCardFamily):
     return 'red'
   }
   if (key === 'pending') {
-    return family === 'hitl' ? 'amber' : 'blue'
+    return family === 'tool' ? 'blue' : 'amber'
   }
   if (key === 'running' || key === 'syncing' || key === 'submitting' || key === 'queued') {
     return 'blue'

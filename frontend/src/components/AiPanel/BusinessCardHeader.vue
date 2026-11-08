@@ -5,13 +5,11 @@ import { cardIconPaths, type BusinessCardTone } from './cardPresentation'
 const props = withDefaults(defineProps<{
   icon: string
   title: string
-  subtitle?: string
   status?: string
   tone?: BusinessCardTone
   expanded: boolean
   controls: string
 }>(), {
-  subtitle: '',
   status: '',
   tone: 'neutral'
 })
@@ -48,17 +46,10 @@ const statusClass = computed(() => ({
       </svg>
     </span>
     <span
-      class="min-w-0 truncate text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]"
-      :class="subtitle ? 'flex-[0_1_auto]' : 'flex-1'"
+      class="min-w-0 flex-1 truncate text-[12px] leading-[1.7] [font-weight:650] text-[#1f2328]"
       :data-testid="$attrs['data-card-title-testid']"
       :title="title"
     >{{ title }}</span>
-    <span
-      v-if="subtitle"
-      class="min-w-0 flex-1 truncate text-[11px] font-normal leading-[1.6] text-[#57606a] @max-[360px]:hidden"
-      :data-testid="$attrs['data-card-subtitle-testid']"
-      :title="subtitle"
-    >{{ subtitle }}</span>
     <span
       v-if="status"
       class="ml-auto max-w-[104px] flex-none truncate whitespace-nowrap rounded-[5px] border border-solid px-[5px] text-[9.5px] leading-[1.7]"

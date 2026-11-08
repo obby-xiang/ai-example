@@ -19,6 +19,7 @@
           </div>
           <template v-if="isFieldOpen(field)">
             <label
+              v-if="field.type !== 'multi_select'"
               :for="controlId(field)"
               class="mb-[4px] block break-words text-[12.2px] [overflow-wrap:anywhere]"
               :class="fieldIssues(field).length > 0 ? 'text-[#c0392b]' : 'text-[#57606a]'"
@@ -27,7 +28,7 @@
             </label>
             <span :id="hintId(field)" class="sr-only">{{ hintOf(field) }}</span>
 
-            <span v-if="readonly && isSensitiveField(field)" class="block text-[13px] leading-[normal] text-[#57606a]">{{ MASKED_VALUE }}</span>
+            <span v-if="readonly && isSensitiveField(field) && field.type !== 'multi_select'" class="block text-[13px] leading-[normal] text-[#57606a]">{{ MASKED_VALUE }}</span>
             <textarea
               v-else-if="field.type === 'text' && field.variant === 'longText'"
               :id="controlId(field)"
@@ -127,35 +128,76 @@
               @change="setValue(field.key, ($event.target as HTMLSelectElement).value)"
             >
               <option value="">{{ t('ai.gf.selectPlaceholder', { label: field.label }) }}</option>
-              <option v-for="option in optionsOf(field)" :key="option.value" :value="option.value">
-                {{ option.label ?? option.value }}
-              </option>
+              <template v-if="optionStatusOf(field) === null">
+                <option v-for="option in optionsOf(field)" :key="option.value" :value="option.value">
+                  {{ option.label ?? option.value }}
+                </option>
+              </template>
             </select>
-            <span v-else-if="field.type === 'multi_select'" class="flex flex-wrap gap-[6px]">
-              <label
-                v-for="option in optionsOf(field)"
-                :key="option.value"
-                :for="`${controlId(field)}-${option.value}`"
-                class="inline-flex items-center gap-[5px] rounded-[999px] border border-solid px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms]"
-                :class="[
-                  isMultiChecked(field, option.value)
-                    ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
-                    : 'border-[#e3e6ea] bg-white text-[#57606a]',
-                  readonly ? 'cursor-default' : 'cursor-pointer'
-                ]"
+            <fieldset
+              v-else-if="field.type === 'multi_select'"
+              :id="controlId(field)"
+              class="m-0 min-w-0 border-0 p-0"
+              tabindex="-1"
+              :aria-invalid="fieldIssues(field).length > 0"
+              :aria-describedby="describedBy(field)"
+            >
+              <legend
+                class="mb-[4px] block break-words text-[12.2px] [overflow-wrap:anywhere]"
+                :class="fieldIssues(field).length > 0 ? 'text-[#c0392b]' : 'text-[#57606a]'"
               >
-                <input
-                  :id="`${controlId(field)}-${option.value}`"
-                  :data-testid="`${controlTestId(field)}-${option.value}`"
-                  type="checkbox"
-                  class="m-0"
-                  :checked="isMultiChecked(field, option.value)"
-                  :disabled="isDisabled(field)"
-                  @change="onMultiToggle(field.key, option.value, ($event.target as HTMLInputElement).checked)"
-                />
-                {{ option.label ?? option.value }}
-              </label>
-            </span>
+                {{ field.label }}<span v-if="isRequired(field)" class="text-[#c0392b]" aria-hidden="true"> *</span>
+              </legend>
+              <div v-if="showMultiTools(field)" class="mb-[6px] flex flex-wrap items-center gap-x-[10px] gap-y-[4px] text-[12px] text-[#57606a]">
+                <label :for="`${controlId(field)}-select-all`" class="inline-flex min-h-[24px] cursor-pointer items-center gap-[5px]">
+                  <input
+                    :id="`${controlId(field)}-select-all`"
+                    :data-testid="`${controlTestId(field)}-select-all`"
+                    type="checkbox"
+                    class="m-0 accent-[#2563eb]"
+                    :checked="isMultiAllSelected(field)"
+                    :indeterminate="isMultiPartiallySelected(field)"
+                    :disabled="isDisabled(field)"
+                    :aria-describedby="describedBy(field)"
+                    @change="onMultiSelectAll(field)"
+                  />
+                  {{ t('ai.gf.multiSelect.selectAll') }}
+                </label>
+                <span :data-testid="`${controlTestId(field)}-selected-count`">
+                  {{ t('ai.gf.multiSelect.selectedCount', { selected: multiSelectedCount(field), total: optionsOf(field).length }) }}
+                </span>
+              </div>
+              <span v-if="readonly && isSensitiveField(field)" class="block text-[13px] leading-[normal] text-[#57606a]">{{ MASKED_VALUE }}</span>
+              <span v-else-if="optionStatusOf(field) === null" class="flex flex-wrap gap-[6px]">
+                <label
+                  v-for="option in optionsOf(field)"
+                  :key="option.value"
+                  :for="`${controlId(field)}-${option.value}`"
+                  class="inline-flex items-center gap-[5px] rounded-[999px] border border-solid px-[11px] py-[4px] text-[12.2px] transition-colors duration-[150ms]"
+                  :class="[
+                    isMultiChecked(field, option.value)
+                      ? 'border-[#cddcff] bg-[#eff4ff] text-[#2563eb]'
+                      : 'border-[#e3e6ea] bg-white text-[#57606a]',
+                    readonly ? 'cursor-default' : 'cursor-pointer'
+                  ]"
+                >
+                  <input
+                    :id="`${controlId(field)}-${option.value}`"
+                    :data-testid="`${controlTestId(field)}-${option.value}`"
+                    data-multi-option
+                    type="checkbox"
+                    class="m-0 accent-[#2563eb]"
+                    :checked="isMultiChecked(field, option.value)"
+                    :disabled="isDisabled(field)"
+                    :aria-invalid="fieldIssues(field).length > 0"
+                    :aria-required="isRequired(field)"
+                    :aria-describedby="describedBy(field)"
+                    @change="onMultiToggle(field.key, option.value, ($event.target as HTMLInputElement).checked)"
+                  />
+                  {{ option.label ?? option.value }}
+                </label>
+              </span>
+            </fieldset>
             <div v-else-if="field.type === 'attachment'" class="min-w-0">
               <input
                 :id="controlId(field)"
@@ -189,6 +231,25 @@
               {{ t('ai.gf.unsupportedType', { label: field.label, type: formFieldTypeText(field.type) }) }}
             </span>
 
+            <div
+              v-if="optionStatusOf(field) !== null"
+              class="mt-[5px] flex flex-wrap items-center gap-[8px] text-[11.8px] leading-[1.5]"
+              :class="optionStatusOf(field) === 'failed' ? 'text-[#c0392b]' : 'text-[#57606a]'"
+            >
+              <span
+                :id="optionStatusId(field)"
+                :role="optionStatusOf(field) === 'failed' ? 'alert' : undefined"
+                :data-testid="`${controlTestId(field)}-options-${optionStatusOf(field)}`"
+              >{{ optionStatusText(field) }}</span>
+              <button
+                v-if="optionStatusOf(field) === 'failed' && !readonly"
+                type="button"
+                :data-testid="`${controlTestId(field)}-options-retry`"
+                :class="['min-h-[24px] rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[8px] py-[2px] text-[11.8px] text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:cursor-default disabled:opacity-50', GF_FOCUS]"
+                :disabled="isDisabled(field) || isSourceLoading(field)"
+                @click="refreshSourceOptions(field)"
+              >{{ t('ai.gf.options.retry') }}</button>
+            </div>
             <span v-if="fieldIssues(field).length > 0" :id="errorId(field)" :class="[FMSG, 'mt-[5px]']">
               {{ fieldIssues(field).map((issue) => issueText(field, issue)).join('；') }}
             </span>
@@ -590,8 +651,19 @@ function hintOf(field: FormFieldSpec): string {
   return parts.join(t('ai.gf.hintSeparator'))
 }
 
+function optionStatusId(field: FormFieldSpec): string {
+  return `${controlId(field)}-options-status`
+}
+
 function describedBy(field: FormFieldSpec): string {
-  return fieldIssues(field).length > 0 ? `${hintId(field)} ${errorId(field)}` : hintId(field)
+  const ids = [hintId(field)]
+  if (optionStatusOf(field) !== null) {
+    ids.push(optionStatusId(field))
+  }
+  if (fieldIssues(field).length > 0) {
+    ids.push(errorId(field))
+  }
+  return ids.join(' ')
 }
 
 function isRequired(field: FormFieldSpec): boolean {
@@ -690,12 +762,88 @@ function onNumberInput(key: string, event: Event): void {
   setValue(key, Number.isFinite(parsed) ? parsed : undefined)
 }
 
+type OptionStatus = 'loading' | 'failed' | 'empty'
+
+const sourceLoading = reactive<Record<string, boolean>>({})
+const sourceFailed = reactive<Record<string, boolean>>({})
+
+function isSourceLoading(field: FormFieldSpec): boolean {
+  return sourceLoading[field.key] === true
+}
+
+function hasSourceFailed(field: FormFieldSpec): boolean {
+  return sourceFailed[field.key] === true
+}
+
+function optionStatusOf(field: FormFieldSpec): OptionStatus | null {
+  if (field.type !== 'enum' && field.type !== 'multi_select') {
+    return null
+  }
+  if (isSourceLoading(field)) {
+    return 'loading'
+  }
+  if (hasSourceFailed(field)) {
+    return 'failed'
+  }
+  return optionsOf(field).length === 0 ? 'empty' : null
+}
+
+function optionStatusText(field: FormFieldSpec): string {
+  const status = optionStatusOf(field)
+  if (status === 'loading') {
+    return t('ai.gf.options.loading')
+  }
+  if (status === 'failed') {
+    return t('ai.gf.options.loadFailed')
+  }
+  if (status === 'empty') {
+    return t('ai.gf.options.empty')
+  }
+  return ''
+}
+
 function isMultiChecked(field: FormFieldSpec, value: string): boolean {
   if (props.readonly === true && isSensitiveField(field)) {
     return false
   }
   const current = model.value[field.key]
   return Array.isArray(current) && current.includes(value)
+}
+
+function multiSelectedCount(field: FormFieldSpec): number {
+  const current = model.value[field.key]
+  if (!Array.isArray(current)) {
+    return 0
+  }
+  const selected = new Set(current)
+  return optionsOf(field).filter((option) => selected.has(option.value)).length
+}
+
+function isMultiAllSelected(field: FormFieldSpec): boolean {
+  const options = optionsOf(field)
+  return options.length > 0 && multiSelectedCount(field) === options.length
+}
+
+function isMultiPartiallySelected(field: FormFieldSpec): boolean {
+  const selected = multiSelectedCount(field)
+  return selected > 0 && selected < optionsOf(field).length
+}
+
+function showMultiTools(field: FormFieldSpec): boolean {
+  const optionCount = optionsOf(field).length
+  return optionCount > 6
+    && (field.maxItems === undefined || field.maxItems >= optionCount)
+    && optionStatusOf(field) === null
+    && props.readonly !== true
+    && !isDisabled(field)
+}
+
+function onMultiSelectAll(field: FormFieldSpec): void {
+  if (!showMultiTools(field)) {
+    return
+  }
+  const values = isMultiAllSelected(field) ? [] : optionsOf(field).map((option) => option.value)
+  setValue(field.key, values)
 }
 
 function onMultiToggle(key: string, value: string, checked: boolean): void {
@@ -726,8 +874,12 @@ async function refreshSourceOptions(field: FormFieldSpec): Promise<void> {
     && model.value[from.dependsOn] === parent
   if (typeof parent !== 'string' || parent === '') {
     externalOptions.value = { ...externalOptions.value, [field.key]: EMPTY_FORM_FIELD_OPTIONS }
+    sourceLoading[field.key] = false
+    sourceFailed[field.key] = false
     return
   }
+  sourceLoading[field.key] = true
+  sourceFailed[field.key] = false
   const failureKey = `${field.key}:${parent}`
   try {
     const resolved = await formOptionSource(from.sourceId, parent)
@@ -735,13 +887,15 @@ async function refreshSourceOptions(field: FormFieldSpec): Promise<void> {
       return
     }
     externalOptions.value = { ...externalOptions.value, [field.key]: resolved.options }
+    sourceLoading[field.key] = false
   } catch (error) {
     if (!isCurrent()) {
       return
     }
     logCaughtError(error, `form-source:${failureKey}`)
-    // 数据源不可用：选项留空（字段自身仍可按"值不在选项内"提示），不阻塞其余字段
     externalOptions.value = { ...externalOptions.value, [field.key]: EMPTY_FORM_FIELD_OPTIONS }
+    sourceLoading[field.key] = false
+    sourceFailed[field.key] = true
   }
 }
 
@@ -1007,7 +1161,16 @@ async function focusFirstIssue(issues: FormValueIssue[]): Promise<void> {
     return
   }
   const element = rootRef.value?.querySelector<HTMLElement>(`[id="${controlIdOfKey(first.key)}"]`)
-  element?.focus()
+  if (!element) {
+    return
+  }
+  const field = props.schema.fields.find((candidate) => candidate.key === first.key)
+  if (field?.type === 'multi_select') {
+    const option = element.querySelector<HTMLInputElement>('input[data-multi-option]:not(:disabled)')
+    ;(option ?? element).focus()
+    return
+  }
+  element.focus()
 }
 
 function onSubmit(): void {

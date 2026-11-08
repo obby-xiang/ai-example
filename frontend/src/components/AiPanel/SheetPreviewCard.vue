@@ -3,7 +3,6 @@
     <BusinessCardHeader
       icon="sheet"
       :title="headerTitle"
-      :subtitle="subtitle"
       :status="statusLabel"
       :tone="statusTone"
       :expanded="expanded"
@@ -13,11 +12,7 @@
     <span class="sr-only" role="status" aria-live="polite">{{ statusLabel }}</span>
 
     <div :id="bodyId" v-show="expanded" class="px-[10px] pb-[10px]">
-      <p v-if="hasLongTitle" class="m-0 mb-[8px] break-words text-[12.6px] font-semibold leading-[1.55] text-[#1f2328] [overflow-wrap:anywhere]">
-        {{ headerTitle }}
-      </p>
-
-      <div v-if="appliedSummary" class="text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-applied-summary">
+      <div v-if="appliedSummary" class="mb-[8px] text-[11.9px] leading-[1.6] text-[#57606a]" data-testid="sheet-applied-summary">
         <div>{{ appliedLine }}</div>
         <div v-if="(appliedSummary.manualChanges ?? 0) > 0" class="mt-[2px] text-[#8b949e]">
           {{ t('sheet.preview.manualChanges', { count: appliedSummary.manualChanges }) }}
@@ -38,7 +33,7 @@
         </div>
       </div>
 
-      <div v-else-if="plan" class="flex flex-col gap-[8px]">
+      <div v-if="status !== 'stale' && plan" class="flex flex-col gap-[8px]">
         <div>
           <div class="text-[12.8px] leading-[1.6] text-[#1f2328]" data-testid="sheet-preview-summary">
             {{ t('ai.sheetCard.impact', { rows: plan.rowsCount, cells: plan.cellsCount }) }}
@@ -148,14 +143,14 @@
             :class="SECONDARY_BUTTON"
             :disabled="isApplying"
             data-testid="sheet-preview-cancel"
-            @click="emit('cancel')"
+            @click="onCancel"
           >{{ t('ai.sheetCard.cancel') }}</button>
           <button
             type="button"
             :class="PRIMARY_BUTTON"
             :disabled="isApplying || (plan.level === 'large' && !acknowledged)"
             data-testid="sheet-preview-apply"
-            @click="emit('apply', acknowledged)"
+            @click="onApply"
           >
             <span v-if="isApplying" class="mr-[6px] inline-block h-[11px] w-[11px] animate-spin rounded-[50%] border-[1.5px] border-solid border-[rgba(255,255,255,.4)] border-t-white align-[-1px] motion-reduce:animate-none" aria-hidden="true"></span>
             {{ isApplying ? t('ai.sheetCard.applying', { cells: plan.cellsCount }) : t('ai.sheetCard.apply', { cells: plan.cellsCount }) }}
@@ -173,7 +168,6 @@ import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
 import type { SheetPreviewLevel, SheetWritePlan } from '@/types/ai'
 import { cellAddress, type SheetAppliedSummary } from '@/utils/sheet-tools'
 import { SCROLLBAR_CLASS } from '@/utils/markdown'
-import { unicodeCharacterCount } from '@/utils/display-text'
 import { sheetPlanPredicateSummary, sheetPlanRulesText, sheetPlanScopeSummary } from '@/utils/card-content'
 
 type SheetCardStatus = 'pending' | 'applying' | 'applied' | 'failed' | 'cancelled' | 'stale'
@@ -182,11 +176,9 @@ type HeaderTone = 'neutral' | 'blue' | 'green' | 'amber' | 'red' | 'purple' | 'g
 const props = withDefaults(defineProps<{
   plan: SheetWritePlan | null
   applying?: boolean
-  title?: string | null
   appliedSummary?: SheetAppliedSummary | null
 }>(), {
   applying: false,
-  title: null,
   appliedSummary: null
 })
 
@@ -212,19 +204,19 @@ const status = computed<SheetCardStatus>(() => {
 })
 const isApplying = computed(() => status.value === 'applying')
 const isInteractive = computed(() => status.value === 'pending' || status.value === 'applying')
-const headerTitle = computed(() => props.title?.trim() || t('ai.sheetCard.title'))
+const headerTitle = computed(() => t('ai.sheetCard.title'))
 const scopeSummary = computed(() => props.plan ? sheetPlanScopeSummary(props.plan) : '')
 const predicateSummary = computed(() => props.plan ? sheetPlanPredicateSummary(props.plan) : '')
 const rulesText = computed(() => props.plan ? sheetPlanRulesText(props.plan) : '')
-const subtitle = computed(() => scopeSummary.value || undefined)
-const hasLongTitle = computed(() => unicodeCharacterCount(headerTitle.value) > 32)
 const expanded = computed({
-  get: () => expandedOverride.value ?? (hasLongTitle.value || !['applied', 'cancelled'].includes(status.value)),
+  get: () => expandedOverride.value ?? !['applied', 'cancelled'].includes(status.value),
   set: (value: boolean) => {
     expandedOverride.value = value
   }
 })
-const statusLabel = computed(() => t(`ai.sheetCard.status.${status.value}`))
+const statusLabel = computed(() => status.value === 'pending' || status.value === 'applying'
+  ? t('ai.card.status.actionRequired')
+  : t(`ai.sheetCard.status.${status.value}`))
 const statusTone = computed<HeaderTone>(() => {
   switch (status.value) {
     case 'applied':
@@ -235,6 +227,9 @@ const statusTone = computed<HeaderTone>(() => {
       return 'amber'
     case 'cancelled':
       return 'gray'
+    case 'pending':
+    case 'applying':
+      return 'amber'
     default:
       return 'blue'
   }
@@ -242,6 +237,17 @@ const statusTone = computed<HeaderTone>(() => {
 const statusHint = computed(() => status.value === 'failed'
   ? t('ai.sheetCard.statusHint.failed')
   : '')
+
+function onApply(): void {
+  expandedOverride.value = true
+  emit('apply', acknowledged.value)
+}
+
+function onCancel(): void {
+  expandedOverride.value = true
+  emit('cancel')
+}
+
 const appliedLine = computed(() => props.appliedSummary
   ? t('sheet.applied.line', {
     cells: props.appliedSummary.cells,

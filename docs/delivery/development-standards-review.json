@@ -3793,6 +3793,43 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "推理分片按原序累计并在工具执行点一次合并，不按字节或代理对截断，不重写正文或SSE帧。"},
         "verification-review": {"status": "checked", "reason": "agent-1106发现media损失及import顺序后两轮复审均ADDRESSED并APPROVE；最新Maven实际编译355源文件BUILD SUCCESS，真实模型/Redis/浏览器NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:9f46bc3294c5d5dc48c177b224a7dd0d0aaf4af59fffc98a5ffd733cf1fb5e6a",
+      "status": "reviewed",
+      "reason": "逐项复核长多选、卡头信息、静态交互状态、动态业务快照和已决恢复，三项任务分别独立审查并完成集成复审；敏感多选和英文批准态返修后全部APPROVE。",
+      "reviewedAt": "2026-11-08T18:43:04+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1105/1107/1108",
+      "specChanges": [
+        {
+          "change": "交互卡等待用户统一待操作，卡头默认无副标题，用户决定与后续执行状态分离，长多选提供通用三态全选。",
+          "reason": "原多选逐项操作低效，卡头信息重复且HITL批准/拒绝被误显示为执行中、已完成或未执行。",
+          "impact": "仅调整前端呈现与恢复；HITL安全门、业务状态机、API/SSE/Redis不变，新增C-127～C-129真实验收口径。"
+        }
+      ],
+      "files": [
+        {"path": "docs/superpowers/plans/2026-11-08-ai-interaction-card-presentation-recovery.md", "status": "checked", "reason": "记录三项文件所有权、通用状态与多选规格、集成审查和真实验收边界。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "直接消费静态交互label，短卡头无副标题，业务快照与preflight条件/模式在卡体去重展示，当前轮保持展开。"},
+        {"path": "frontend/src/components/AiPanel/BusinessCardHeader.vue", "status": "checked", "reason": "移除副标题接口和槽位，保留图标、短标题、真实状态及可访问展开控件。"},
+        {"path": "frontend/src/components/AiPanel/FormRenderer.vue", "status": "checked", "reason": "长多选三态全选、组内计数、fieldset/legend、首错真实聚焦和动态选项失败重试；敏感只读保留标题并掩码。"},
+        {"path": "frontend/src/components/AiPanel/SheetPreviewCard.vue", "status": "checked", "reason": "预览等待统一待操作，已应用/已取消保持静态，范围与规则在卡体保留且不再重复标题。"},
+        {"path": "frontend/src/components/AiPanel/UploadHandoffCard.vue", "status": "checked", "reason": "上传等待统一待操作，已上传/已取消保持静态，文件名只在卡体，删除重复上传中状态。"},
+        {"path": "frontend/src/components/AiPanel/cardPresentation.ts", "status": "checked", "reason": "移除决策到执行文案的二次映射及展开矩阵耦合，真实取消、失败、失效和未知不隐藏。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "补齐Action required、多选与动态选项文案，批准态固定Approved而非Success。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "补齐待操作、多选与动态选项文案，已批准/已拒绝/已取消/已失效与交互决定一致。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "已决卡物化恢复arguments/preflight/irreversible，历史批准保持决定且不伪造执行终态。"},
+        {"path": "frontend/src/utils/blocks.ts", "status": "checked", "reason": "交互决定优先于后续执行status，普通工具仍呈现真实执行结果，表单已提交不被后续结局清空。"},
+        {"path": "frontend/src/utils/parts.ts", "status": "checked", "reason": "历史APPROVED恢复为running+approved而非pending，PENDING保持，真实outcome恢复优先不变。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用原生fieldset/checkbox、Vue computed/watch、Tailwind和现有卡片/store，无新增组件、依赖或业务特判。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅Vue/TypeScript/JSON及计划文档，无Java代码变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "动态选项失败保留安全重试和原日志，未新增原始异常、敏感信息或执行错误隐藏。"},
+        "toc-interaction": {"status": "checked", "reason": "统一待操作、短卡头、无副标题、静态用户决定、卡体业务快照和通用全选，减少窄栏心智负担。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "仅前端呈现和历史映射，批准前副作用、后续执行事实、Redis/API/状态机不变；普通执行结果继续真实展示。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "未修改SSE/UTF-8解码或文本截断，移除的是重复标题呈现而非流式内容。"},
+        "verification-review": {"status": "checked", "reason": "agent-1105恢复APPROVE、agent-1107多选及敏感分支APPROVE、agent-1108集成与英文状态APPROVE；最新node scripts/build.mjs实际打包PASS，真实C-127～C-129 NOT_RUN。"}
+      }
     }
   ]
 }

@@ -455,7 +455,6 @@
                       v-if="!hasIndependentCardHeader(part)"
                       :icon="cardIconName(part)"
                       :title="cardTitle(part)"
-                      :subtitle="cardSummary(part)"
                       :status="cardStatusLabel(part)"
                       :tone="cardStatusTone(part)"
                       :expanded="isBlockExpanded(block)"
@@ -465,7 +464,6 @@
                       :data-icon-type="cardTypeOf(part)"
                       :data-card-icon-testid="'card-icon-' + part.toolCallId"
                       :data-card-title-testid="'card-title-' + part.toolCallId"
-                      :data-card-subtitle-testid="cardSummaryTestId(part)"
                       :data-card-status-testid="cardStatusTestId(part)"
                       :data-card-state="cardPresentationStatusKey(part)"
                       @toggle="onCardHeadClick(block, part)"
@@ -480,7 +478,7 @@
                     >
                       <template v-if="part.name !== GENERATIVE_FORM_TOOL">
                         <div :class="['flex max-h-[min(280px,35vh)] flex-col gap-[8px] overflow-y-auto', SCROLLBAR_CLASS]">
-                          <div v-if="hasLongCardTitle(part)" class="break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
+
                           <div
                             v-if="gateRows(part).length > 0"
                             class="rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
@@ -519,13 +517,13 @@
                             :submitting="false"
                             :error="null"
                             :initial-values="readOnlyFormValues(part)"
-                            :full-title="hasLongCardTitle(part) ? cardTitle(part) : ''"
+                            :full-title="formBodyTitle(part)"
                             :read-only-reason="readOnlyReasonText(part) || null"
                             :read-only-reason-tone="diagnosticOf(part) === 'staleGate' ? 'neutral' : 'error'"
                           />
                         </div>
                         <div v-else :class="['flex max-h-[min(320px,45vh)] flex-col gap-[8px] overflow-y-auto', SCROLLBAR_CLASS]">
-                          <div v-if="hasLongCardTitle(part)" class="break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
+
                           <div class="text-[12.6px] text-[#57606a]">{{ t('ai.panel.formUnavailable') }}</div>
                           <div
                             v-if="readOnlyReasonText(part)"
@@ -550,7 +548,7 @@
                         v-if="!part.requiresAction && !hasIndependentCardHeader(part)"
                         :class="['flex flex-col gap-[8px] overflow-y-auto', toolContentLimitClass(part), SCROLLBAR_CLASS]"
                       >
-                        <div v-if="hasLongCardTitle(part)" class="break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
+
                         <div v-if="paramRows(part).length">
                           <div class="mb-[4px] block text-[11px] uppercase tracking-[.5px] text-[#8b949e]">{{ t('ai.panel.args') }}</div>
                           <div class="rounded-[8px] border border-solid border-[#eef0f3] bg-[#f6f7f9] px-[10px] py-[2px]" :data-testid="'args-rows-' + part.toolCallId">
@@ -624,12 +622,11 @@
                           <div data-testid="hitl-gate">
                             <!-- 字段表在内滚动；后果说明、复选框与操作按钮在外。 -->
                             <div
-                              v-if="hasLongCardTitle(part) || gateRows(part).length > 0"
+                              v-if="gateRows(part).length > 0"
                               class="max-h-[min(280px,35vh)] overflow-y-auto rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
                               :class="SCROLLBAR_CLASS"
                               data-testid="gate-rows"
                             >
-                              <div v-if="hasLongCardTitle(part)" class="mb-[8px] break-words text-[12.6px] leading-[1.6] text-[#1f2328]">{{ cardTitle(part) }}</div>
                               <div
                                 v-for="row in gateRows(part)"
                                 :key="row.key"
@@ -660,19 +657,16 @@
                                 <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
                               </label>
                             </div>
-                            <div class="flex flex-wrap items-center gap-[8px] pt-[10px]" data-testid="gate-actions">
-                              <!-- 批4-D：未勾选时给一行提示（紧邻置灰的「批准」）—— 拒绝永远可用。 -->
+                            <div
+                              class="flex flex-wrap items-center gap-[8px] pt-[10px]"
+                              data-testid="gate-actions"
+                              :aria-busy="isGateSubmitting(part.toolCallId)"
+                            >
                               <span
                                 v-if="hasGateAckRequirement(part)"
                                 class="text-[12.2px] text-[#b45309]"
                                 data-testid="gate-ack-hint"
                               >{{ t('ai.hitl.ackHint') }}</span>
-                              <!-- R-166 口径③：409 幂等拒绝后的「已提交，同步中…」瞬态（不写任何乐观裁决） -->
-                              <span
-                                v-if="isGateSyncing(part.toolCallId)"
-                                class="text-[12.2px] text-[#57606a]"
-                                data-testid="gate-syncing"
-                              >{{ t('ai.panel.submitting') }}</span>
                               <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
                                 <button
                                   type="button"
@@ -685,7 +679,15 @@
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
                                   :disabled="isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
                                   @click="decide(true, part.toolCallId)"
-                                >{{ t('ai.panel.approve') }}</button>
+                                >
+                                  <span
+                                    v-if="isGateSubmitting(part.toolCallId)"
+                                    class="mr-[6px] inline-block h-[11px] w-[11px] animate-spin rounded-[50%] border-[1.5px] border-solid border-[rgba(255,255,255,.4)] border-t-white align-[-1px] motion-reduce:animate-none"
+                                    data-testid="gate-syncing"
+                                    aria-hidden="true"
+                                  ></span>
+                                  {{ isGateSubmitting(part.toolCallId) ? t('ai.panel.submitting') : t('ai.panel.approve') }}
+                                </button>
                               </span>
                             </div>
                           </div>
@@ -706,7 +708,7 @@
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
-                            :full-title="hasLongCardTitle(part) ? cardTitle(part) : ''"
+                            :full-title="formBodyTitle(part)"
                             :upload-context="{ runId: liveForm.runId, toolCallId: liveForm.toolCallId, sessionId: ai.sessionId, signal: formAttachmentAbort.signal }"
                             :show-header="false"
                             flat
@@ -1287,7 +1289,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
 import { useI18n } from 'vue-i18n'
 import { formatProgressiveTs } from '@/utils/format'
-import { cardFieldLabel, localizedCardFieldValue, canShowCardField, taskTypeText } from '@/utils/card-content'
+import { cardFieldLabel, localizedCardFieldValue, canShowCardField } from '@/utils/card-content'
 import {
   COPY_ICON_BTN_CLASS,
   COPY_ICON_SVGS,
@@ -1302,7 +1304,7 @@ import {
   renderMermaidSvg,
   setStreamFlushHandler
 } from '@/utils/markdown'
-import { toolSummary, toolStatusWords } from '@/utils/tool-summaries'
+import { toolSummary } from '@/utils/tool-summaries'
 import {
   argRows,
   cardStatusOf,
@@ -1314,7 +1316,6 @@ import {
   parsePublishConflicts,
   readOnlyStateOf,
   reasonHeadline,
-  submitRows,
   MASKED_VALUE,
   readableValue,
   type ConflictRow,
@@ -1323,7 +1324,7 @@ import {
   type Block
 } from '@/utils/blocks'
 import { deriveCopyText, numericArgOf, partDiagnosticOf, isPartResultInternal, isSystemRejectPhantom, userTextArgsOf, type PartDiagnostic } from '@/utils/parts'
-import { projectDisplayText, unicodeCharacterCount } from '@/utils/display-text'
+import { projectDisplayText } from '@/utils/display-text'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
 import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
@@ -1335,7 +1336,6 @@ import ReasoningHeader from '@/components/AiPanel/ReasoningHeader.vue'
 import BusinessCardHeader from '@/components/AiPanel/BusinessCardHeader.vue'
 import {
   isBusinessCardDefaultExpanded,
-  businessCardStatusLabelKey,
   businessCardStatusTone,
   hasUnknownReviewRequirement,
   isUnknownUnrecoverable,
@@ -1344,7 +1344,6 @@ import {
 } from '@/components/AiPanel/cardPresentation'
 import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type SheetWritePlan, type TextPart, type ToolPart } from '@/types/ai'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
-import type { ToolPreflight } from '@/types/sse'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
 import type { SheetAppliedSummary } from '@/utils/sheet-tools'
@@ -2707,33 +2706,7 @@ function markdownHtml(message: ChatMessage, block: Block): string {
     : historyMarkdownHtml(message, blockKey, text, localeKey)
 }
 
-/**
- * R-163B G5 摘要去重（问题1 偏差修正批项 3「工具卡头重名」：去重判据由「全等」扩为「前缀」）。
- *
- * 背景：卡头 mono 槽渲的是**工具中文名**（`toolLabel`），摘要模板（`utils/tool-summaries.ts`）
- * 的前缀往往与它同义/同形 ⇒ 卡头读作「启动导出作业　启动导出作业（任务 #12）」。原判据只挡
- * 「完全相等」，挡不住「同义打头」。
- *
- * 现判据：摘要以工具名为**前缀**时剥掉该前缀（连同紧随的分隔符 `·、，:：` 与空白）；
- * 剥后为空 ⇒ 返回 null（摘要位不渲，只留工具名一行）；剥后非空 ⇒ 渲剩余部分（信息不丢）。
- * 同义族的模板本身也已按同口径收敛（`list_config_defs` / `list_tasks` / `get_workspace_state`
- * 三个模板的「首词 = 工具名」措辞改由参数部分承载），故这三者的摘要只剩参数信息或为空。
- *
- * 无 summaryFor 映射的工具使用业务化兜底，不暴露内部工具名；
- * 剥后只剩状态词（`STATUS_WORD_SET`，含兜底用的「待确认」）⇒ 同样返回 null，
- * 由右状态标签（普通 tool pending = 「待执行」）唯一承载状态。
- */
-const SUMMARY_PREFIX_SEP = /^[\s·、，,:：\-—]+/
-/** 状态词全集（兜底摘要剥掉工具名后只剩状态词 ⇒ 右状态标签已同屏承担，摘要位不再重复）。 */
-const STATUS_WORD_SET = computed(() => toolStatusWords())
-
-/**
- * 批次 7A：ToolPart 派生值按**段对象**做 WeakMap 复用。
- *
- * 模板里同一张卡的标题 / 摘要 / 状态 / 参数行 / 卡体行数会在一次渲染中被多处调用；原实现每次都
- * `JSON.parse(args)` / 归一化 / i18n 拼装。段更新时 store 会换新对象（`upsertToolPart` 用 spread），
- * WeakMap 因此随段对象自然失效；另记 locale 标记，切语言时重算一次。
- */
+/** 段派生值按对象与 locale 缓存，段替换或切语言时重算。 */
 interface LocaleCacheEntry<T> {
   locale: string
   stamp: readonly unknown[]
@@ -2744,20 +2717,16 @@ const parameterRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
 const gateRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<FieldRow[]>>()
 const conflictRowsCache = new WeakMap<ToolPart, LocaleCacheEntry<ConflictRow[]>>()
 const outputByViewCache = new WeakMap<ToolPart, LocaleCacheEntry<boolean>>()
-const toolSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string | null>>()
 const cardTitleCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
-const cardSummaryCache = new WeakMap<ToolPart, LocaleCacheEntry<string>>()
 const cardStatusCache = new WeakMap<ToolPart, LocaleCacheEntry<ReturnType<typeof cardStatusOf>>>()
 const diagnosticCache = new WeakMap<ToolPart, LocaleCacheEntry<PartDiagnostic | null>>()
 const toolDeriveMisses: Record<string, number> = {
   paramRows: 0,
   gateRows: 0,
-  cardSummary: 0,
   conflictRows: 0,
   hasViewOutput: 0,
   cardTitle: 0,
   cardStatus: 0,
-  summary: 0,
   diagnosis: 0
 }
 
@@ -2793,23 +2762,6 @@ function cachedForLocale<T>(
   const value = compute()
   cache.set(part, { locale: localeKey, stamp, value })
   return value
-}
-
-function toolSummaryOrNull(part: ToolPart): string | null {
-  return cachedForLocale(toolSummaryCache, part, 'summary', [part.name, part.status, part.args], () => {
-    const summary = toolSummary(part)
-    const stripPrefix = (prefix: string): string | null => {
-      if (prefix === '' || !summary.startsWith(prefix)) {
-        return null
-      }
-      return summary.slice(prefix.length).replace(SUMMARY_PREFIX_SEP, '').trim()
-    }
-    const rest = stripPrefix(toolLabel(part.name))
-    if (rest === null) {
-      return summary
-    }
-    return rest === '' || STATUS_WORD_SET.value.has(rest) ? null : rest
-  })
 }
 
 /**
@@ -3602,8 +3554,7 @@ function isBlockExpanded(block: Block): boolean {
   if (part.status === 'unknown') {
     return needsReview
   }
-  return hasLongCardTitle(part)
-    || isBusinessCardDefaultExpanded(cardPresentationStatusKey(part), cardTypeOf(part), needsReview)
+  return isBusinessCardDefaultExpanded(cardPresentationStatusKey(part), cardTypeOf(part), needsReview)
 }
 
 /** 块级间距只由相邻块关系决定，卡片自身不再叠加上下外边距。 */
@@ -3990,83 +3941,22 @@ function cardStatusTestId(part: ToolPart): string {
   return isReadOnlyLike(part) ? `ro-badge-${part.toolCallId}` : `card-status-${part.toolCallId}`
 }
 
-function cardSummaryTestId(part: ToolPart): string {
-  return isReadOnlyLike(part) ? `ro-summary-${part.toolCallId}` : `tool-summary-${part.toolCallId}`
-}
-
-/** 卡头只表达动作与业务对象；待确认等状态仅由右侧 chip 承载。 */
+/** 卡头只表达短动作或用途；完整业务对象由卡体字段承担。 */
 function cardTitle(part: ToolPart): string {
-  return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.preflight, part.preflight?.target, part.args], () => {
+  return cachedForLocale(cardTitleCache, part, 'cardTitle', [part.name, part.kind2], () => {
     if (isSheetPreviewTool(part)) {
       return t('ai.sheetCard.title')
     }
     if (isUploadHandoffTool(part)) {
       return t('ai.uploadHandoff.title')
     }
-    if (cardTypeOf(part) === 'form') {
-      return cardFormSpec(part)?.title?.trim() || t('ai.gf.title')
-    }
-    const target = cardTypeOf(part) === 'hitl' ? part.preflight?.target : undefined
-    if (target) {
-      const createBusiness = createTaskBusinessTitle(target)
-      if (createBusiness !== null) {
-        return createBusiness
-      }
-      const title = (target.title ?? '').trim()
-      const targetText = title === ''
-        ? t('ai.panel.taskTargetUntitled', { type: taskTypeText(target.type), taskId: target.taskId })
-        : t('ai.panel.taskTarget', { type: taskTypeText(target.type), taskId: target.taskId, title })
-      return t('ai.panel.taskActionTarget', { action: toolLabel(part.name), target: targetText })
-    }
-    return toolLabel(part.name)
+    return cardTypeOf(part) === 'form' ? t('ai.gf.title') : toolLabel(part.name)
   })
 }
 
-function hasLongCardTitle(part: ToolPart): boolean {
-  return unicodeCharacterCount(cardTitle(part)) > 32
-}
-
-/** 创建任务的标题使用真实类型与标题；未知类型走安全通用标签。 */
-function createTaskBusinessTitle(target: ToolPreflight['target']): string | null {
-  if (target.taskId !== undefined && target.taskId !== null && `${target.taskId}` !== '') {
-    return null
-  }
-  const type = taskTypeText(target.type).trim()
-  const title = (target.title ?? '').trim()
-  if (type === '') {
-    return title === '' ? null : title
-  }
-  return title === ''
-    ? t('ai.panel.createTaskBusinessUntitled', { type })
-    : t('ai.panel.createTaskBusiness', { type, title })
-}
-
-/** 待填写 GF 摘要：必填项计数（无必填 / 无 schema ⇒ 空串）。 */
-function formRequiredSummary(part: ToolPart): string {
-  const required = cardFormSpec(part)?.fields.filter((field) => field.required).length ?? 0
-  return required > 0 ? t('ai.panel.requiredCount', { count: required }) : ''
-}
-
-/**
- * 卡头摘要（中性色，不承载状态）：
- * - form：待填写 = 必填计数；已提交（含提交在途）= submittedValues；已取消 = 未提交说明（F9 不回读残留值）；
- * - hitl 且已业务化标题（有 preflight.target）⇒ **空**（demo 卡头只有业务标题，标题已说清，
- *   摘要再报「工具名（任务 #N）」= 同屏重复）；
- * - 其余 tool/hitl：沿用工具摘要映射（与待决态同一份，随生命周期不变）。
- */
-function cardSummary(part: ToolPart): string {
-  return cachedForLocale(cardSummaryCache, part, 'cardSummary', [part.name, part.kind2, part.status, part.decision, part.requiresAction, part.submittedValues, part.args, part.preflight], () => {
-    if (cardTypeOf(part) === 'form') {
-      if (!isReadOnlyLike(part)) {
-        return formRequiredSummary(part)
-      }
-      return readOnlyStateOf(part) === 'cancelled' ? t('ai.panel.formCancelledSummary') : generativeFormSummary(part)
-    }
-    if (cardTypeOf(part) === 'hitl' && part.preflight?.target) {
-      return ''
-    }
-    return toolSummaryOrNull(part) ?? ''
-  })
+function formBodyTitle(part: ToolPart): string {
+  const title = cardFormSpec(part)?.title?.trim() ?? ''
+  return title === t('ai.gf.title') ? '' : title
 }
 
 function cardStatusView(part: ToolPart): ReturnType<typeof cardStatusOf> {
@@ -4097,8 +3987,7 @@ function cardFamilyOf(part: ToolPart): BusinessCardFamily {
 }
 
 function cardPresentationStatusKey(part: ToolPart): string {
-  const key = cardStatusView(part).key
-  return key === 'approved' && part.status === 'running' ? 'running' : key
+  return cardStatusView(part).key
 }
 
 function cardStatusLabel(part: ToolPart): string {
@@ -4110,8 +3999,10 @@ function cardStatusLabel(part: ToolPart): string {
   if (uploadStatus) {
     return t(`ai.uploadHandoff.status.${uploadStatus}`)
   }
-  const key = cardPresentationStatusKey(part)
-  return t(businessCardStatusLabelKey(key, cardFamilyOf(part), isUnknownUnrecoverable(part)))
+  if (cardPresentationStatusKey(part) === 'unknown' && isUnknownUnrecoverable(part)) {
+    return t('ai.card.status.unrecoverable')
+  }
+  return cardStatusView(part).label
 }
 
 function cardStatusTone(part: ToolPart): BusinessCardTone {
@@ -4446,16 +4337,48 @@ function gateConsequenceText(part: ToolPart): string | null {
   return impact !== undefined && impact !== '' ? impact : null
 }
 
-/** 创建任务的类型与名称由标题承载；其他门卡只保留必要业务参数。 */
+/** 门卡卡体展示确认时的参数与 preflight 快照；权威快照覆盖同义参数，避免重复。 */
 function gateRows(part: ToolPart): FieldRow[] {
   return cachedForLocale(
     gateRowsCache,
     part,
     'gateRows',
-    [part.args, part.name],
-    () => argRows(part, true).filter((row) => (
-      part.name !== 'create_task' || (row.key !== 'type' && row.key !== 'conditions')
-    ))
+    [part.args, part.preflight],
+    () => {
+      let rows = [...argRows(part, true)]
+      const preflight = part.preflight
+      if (!preflight) {
+        return rows
+      }
+      const target = preflight.target
+      const targetRows: FieldRow[] = [
+        ...(target.taskId !== undefined && target.taskId !== null && `${target.taskId}` !== ''
+          ? [{ key: 'taskId', label: cardFieldLabel('taskId'), value: String(target.taskId) }]
+          : []),
+        { key: 'type', label: cardFieldLabel('type'), value: localizedCardFieldValue('type', target.type) ?? target.type },
+        { key: 'title', label: cardFieldLabel('title'), value: target.title }
+      ]
+      for (const row of targetRows) {
+        if (!rows.some((existing) => existing.key === row.key)) {
+          rows.push(row)
+        }
+      }
+      const conditionSummary = preflight.conditionSummary?.trim()
+      if (conditionSummary) {
+        rows = rows.filter((row) => row.key !== 'conditions')
+        rows.push({ key: 'conditions', label: cardFieldLabel('conditions'), value: conditionSummary })
+      }
+      const publishMode = preflight.publishMode?.trim()
+      if (publishMode) {
+        rows = rows.filter((row) => row.key !== 'mode')
+        rows.push({
+          key: 'mode',
+          label: cardFieldLabel('mode'),
+          value: localizedCardFieldValue('mode', publishMode) ?? publishMode
+        })
+      }
+      return rows
+    }
   )
 }
 
@@ -4673,23 +4596,7 @@ async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
   }
 }
 
-/**
- * 生成式表单已提交摘要（RC-1 → 2A）：**只读 `submittedValues`**（用户这次实际提交的值），
- * 字段名走 schema 的 `label`；无本地提交值（他端提交）⇒ 空串
- * （状态由统一卡头右标签「已提交」唯一承担，摘要位不重复）。
- */
-function generativeFormSummary(part: ToolPart): string {
-  const rows = submitRows(part)
-  if (rows.length === 0) {
-    return ''
-  }
-  const items = rows.slice(0, 3).map((row) => `${row.key} ${row.value}`)
-  return `${items.join('，')}${rows.length > items.length ? '…' : ''}`
-}
-
-/**
- * 卡片表单 schema（待填写 / 已决 GF 共用）：按段缓存，模板里会取多次（标题 / 必填计数 / v-if / :schema）。
- */
+/** 卡片表单 schema（待填写 / 已决 GF 共用）：按段缓存。 */
 const formSpecCache = new WeakMap<ToolPart, FormSpec | null>()
 
 function cardFormSpec(part: ToolPart): FormSpec | null {
@@ -4702,25 +4609,9 @@ function cardFormSpec(part: ToolPart): FormSpec | null {
   return spec
 }
 
-/**
- * GF 只读态的回填值（K1 + F9）：有 `submittedValues` 且不是**取消** ⇒ 一律回填。
- *
- * <p>为什么对全部非取消结局都回填：结局帧可能是 `succeeded`，也可能是 `failed` / `expired` /
- * `rejected` / `notExecuted`（结果回灌丢失时 `expireResidueToolParts` 会把仍 pending 的段收成
- * `expired`）。只要用户**真的提交过**，卡体就该显示那份值 —— 否则结局到达那一刻卡体会回落成
- * schema 默认空表单，而卡头摘要（`generativeFormSummary` 读同一份 `submittedValues`）还写着
- * 「导出范围 华北」：同一张卡自相矛盾，也违背「结局帧到达后形态不变」。
- *
- * <p>`cancelled` 是唯一例外（F9）：取消 = 从未提交，不得把半成品值当"提交过的值"回填。
- */
+/** 已受理的提交值持续回填；后续执行结局不再清空卡体快照。 */
 function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
-  if (part.submittedValues === undefined || part.submittedValues === null) {
-    return null
-  }
-  if (readOnlyStateOf(part) === 'cancelled') {
-    return null
-  }
-  return part.submittedValues
+  return part.submittedValues ?? null
 }
 
 /**
@@ -4975,18 +4866,37 @@ function onGateAckChange(toolCallId: string, event: Event): void {
  * 审批身份（调研 §3.9 ③）：`toolCallId` 由按钮所在卡片逐段传入 —— 多卡并存时不得回落到
  * 全局单槽投影；按钮防重由 `isGateSubmitting(part.toolCallId)` 按卡片承担。
  */
+function keepCurrentCardExpanded(toolCallId: string): void {
+  for (const message of ai.messages) {
+    for (const part of message.parts) {
+      if (part.kind === 'tool' && part.toolCallId === toolCallId) {
+        ai.setBlockExpanded(`${message.id}:${toolCallId}`, true)
+      }
+    }
+  }
+}
+
 async function decide(approved: boolean, toolCallId: string): Promise<void> {
+  keepCurrentCardExpanded(toolCallId)
   const reason = approved ? undefined : '用户拒绝执行'
   await ai.confirm(approved, reason, toolCallId)
 }
 
 /** GF-B：表单提交（值已由 FormRenderer 按 schema 做过客户端复核）。 */
 function onFormSubmit(values: Record<string, unknown>): void {
+  const toolCallId = liveForm.value?.toolCallId
+  if (toolCallId) {
+    keepCurrentCardExpanded(toolCallId)
+  }
   void ai.submitGenerativeForm(values)
 }
 
 /** GF-B：表单显式取消 → store 带 cancelled:true 回灌收敛。 */
 function onFormCancel(): void {
+  const toolCallId = liveForm.value?.toolCallId
+  if (toolCallId) {
+    keepCurrentCardExpanded(toolCallId)
+  }
   void ai.cancelGenerativeForm()
 }
 
@@ -5012,6 +4922,7 @@ function formQueueTotal(): number {
  * 出队清草稿 → 乐观终态 → 记决策时刻 → `cancelled:true` 回灌，失败原因落段可见。
  */
 function onQueuedFormCancel(toolCallId: string): void {
+  keepCurrentCardExpanded(toolCallId)
   void ai.cancelGenerativeForm(toolCallId)
 }
 

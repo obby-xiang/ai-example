@@ -16,6 +16,7 @@
           "hitl": "Awaiting confirmation",
           "form": "Awaiting input"
         },
+        "actionRequired": "Action required",
         "submitting": "Submitting",
         "queued": "Queued",
         "running": "Running",
@@ -31,7 +32,7 @@
         "submissionRejected": "Submission rejected"
       },
       "readonly": {
-        "approved": "Success",
+        "approved": "Approved",
         "rejected": "Rejected",
         "expired": "Expired",
         "failed": "Failed",
@@ -397,6 +398,16 @@
         "clarify": "Confirm details"
       },
       "selectPlaceholder": "Select {label}",
+      "multiSelect": {
+        "selectAll": "Select all",
+        "selectedCount": "{selected}/{total} selected"
+      },
+      "options": {
+        "loading": "Loading options…",
+        "loadFailed": "Options could not be loaded",
+        "empty": "No options available",
+        "retry": "Retry"
+      },
       "cancel": "Cancel",
       "submit": "Submit",
       "submitting": "Submitting…",
