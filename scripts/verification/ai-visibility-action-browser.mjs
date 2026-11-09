@@ -458,6 +458,9 @@ class CdpPage {
     this.requests = []
     this.cdpErrors = []
     this.cdpErrorCount = 0
+    this.phase = 'scenario'
+    this.terminalRunIds = new Set()
+    this.completedExportTaskIds = new Set()
   }
 
   recordCdpError(code) {
@@ -465,18 +468,45 @@ class CdpPage {
     if (this.cdpErrors.length < 64) this.cdpErrors.push({code})
   }
 
+  bindRun(runId) {
+    if (typeof runId !== 'string' || runId === '') return
+    const request = [...this.requests].reverse().find((record) => record.path === '/api/ai/chat' && record.runId === null)
+    if (request) request.runId = runId
+  }
+
+  noteRunStatus(runId, status) {
+    if (typeof runId === 'string' && terminalRuns.has(status)) this.terminalRunIds.add(runId)
+  }
+
+  noteExportComplete(taskId) {
+    if (Number.isSafeInteger(taskId) && taskId > 0) this.completedExportTaskIds.add(taskId)
+  }
+
+  expectedAbort(record) {
+    if (record.sse !== true || record.failed !== true || record.errorName !== 'net::ERR_ABORTED') return null
+    if (record.runId !== null) return this.terminalRunIds.has(record.runId) ? 'RUN_TERMINAL' : null
+    if (record.taskId !== null) return this.completedExportTaskIds.has(record.taskId) ? 'EXPORT_COMPLETE' : null
+    if (record.failurePhase === 'cleanup') return 'CLEANUP_CLOSE'
+    return null
+  }
+
   networkFailureEvidence() {
-    const failures = this.requests.filter((record) => record.failed === true
+    const failures = this.requests.filter((record) => (record.failed === true && this.expectedAbort(record) === null)
       || (Number.isSafeInteger(record.responseStatus) && record.responseStatus >= 400))
+    const expectedAborts = this.requests.filter((record) => this.expectedAbort(record) !== null
+      && !(Number.isSafeInteger(record.responseStatus) && record.responseStatus >= 400))
+    const evidence = (record) => ({
+      method: record.method,
+      path: record.path,
+      responseStatus: record.responseStatus,
+      errorName: record.errorName
+    })
     return {
       count: failures.length,
-      tail: failures.slice(-16).map((record) => ({
-        method: record.method,
-        path: record.path,
-        responseStatus: record.responseStatus,
-        errorName: record.errorName
-      })),
-      truncated: failures.length > 16
+      tail: failures.slice(-16).map(evidence),
+      truncated: failures.length > 16,
+      expectedAbortCount: expectedAborts.length,
+      expectedAbortTail: expectedAborts.slice(-16).map((record) => ({...evidence(record), reason: this.expectedAbort(record)}))
     }
   }
 
@@ -548,8 +578,12 @@ class CdpPage {
     try {
       const url = new URL(params.request.url)
       if (!url.pathname.startsWith('/api/')) return
+      const runMatch = /^\/api\/ai\/events\/([^/]+)$/.exec(url.pathname)
+      const taskMatch = /^\/api\/tasks\/(\d+)\/events$/.exec(url.pathname)
       const record = {requestId: params.requestId, method: params.request.method, path: url.pathname,
-        postData: params.request.postData ?? null, responseStatus: null, finished: false, failed: false, errorName: null}
+        postData: params.request.postData ?? null, responseStatus: null, finished: false, failed: false, errorName: null,
+        runId: runMatch ? decodeURIComponent(runMatch[1]) : null, taskId: taskMatch ? Number(taskMatch[1]) : null,
+        sse: url.pathname === '/api/ai/chat' || runMatch !== null || taskMatch !== null, phase: this.phase, failurePhase: null}
       if (this.requests.length < 4096) this.requests.push(record)
       else this.recordCdpError('NETWORK_LIMIT_EXCEEDED')
     } catch {
@@ -573,6 +607,7 @@ class CdpPage {
       record.finished = true
       record.failed = true
       record.errorName = safeToken(params.errorText, 'NETWORK_LOADING_FAILED')
+      record.failurePhase = this.phase
     }
   }
 
@@ -712,10 +747,11 @@ class CdpPage {
           selectedDefs: [...(workspace.selectedDefs ?? [])],
           queryConditions: workspace.queryConditions ?? {}
         },
-        cards: [...document.querySelectorAll('article[data-testid^="tool-card-"],article[data-testid^="pending-card-"]')]
+        cards: [...document.querySelectorAll('article[data-testid^="tool-card-"],article[data-testid^="pending-card-"],article[data-testid="hitl-receipt"]')]
           .filter((element) => element.getClientRects().length > 0)
           .map((element) => ({
             testId: element.getAttribute('data-testid'),
+            toolCallId: element.querySelector('[data-card-title-testid]')?.getAttribute('data-card-title-testid')?.replace('card-title-', '') ?? null,
             state: element.querySelector('[data-card-state]')?.getAttribute('data-card-state') ?? null
           }))
       }
@@ -766,6 +802,7 @@ class CdpPage {
   }
 
   async close() {
+    this.phase = 'cleanup'
     const result = {status: 'COMPLETE', errors: []}
     if (this.config.scenario === 'C-152' && this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
@@ -825,7 +862,7 @@ function safeSnapshot(snapshot) {
       selectedDefs: snapshot.workspace.selectedDefs.slice(0, 64).map((value) => safeToken(value)).filter(Boolean),
       queryConditions: textEvidence(canonicalJson(snapshot.workspace.queryConditions))
     },
-    cards: snapshot.cards.slice(-256).map((card) => ({testId: safeToken(card.testId), state: safeToken(card.state)})),
+    cards: snapshot.cards.slice(-256).map((card) => ({testId: safeToken(card.testId), toolCallId: safeToken(card.toolCallId), state: safeToken(card.state)})),
     cardsTruncated: snapshot.cards.length > 256
   }
 }
@@ -850,17 +887,51 @@ async function beginTool(context, name, args, epoch = null) {
     }
     return null
   })()`, `TOOL_${name}_NOT_OBSERVED`)
+  browser.bindRun(found.runId)
   return {...found, promptEvidence: textEvidence(prompt)}
 }
 
 async function finishTool(context, begun, name, expectSuccess = true) {
   const {browser, api, checks} = context
-  await browser.waitFor(`(() => {
+  const terminalExpression = `(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     const host = ai.messages.find((message) => message.parts.some((part) => part.toolCallId === '${begun.toolCallId}'))
     const part = host?.parts.find((candidate) => candidate.toolCallId === '${begun.toolCallId}')
     return ai.loading === false && host?.done === true && ${JSON.stringify([...terminalParts])}.includes(part?.status)
-  })()`, `TOOL_${name}_NOT_TERMINAL`)
+  })()`
+  if (name === 'confirm_step') {
+    const followup = await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const host = ai.messages.find((message) => message.parts.some((part) => part.toolCallId === '${begun.toolCallId}'))
+      const part = host?.parts.find((candidate) => candidate.toolCallId === '${begun.toolCallId}')
+      if (ai.loading === false && host?.done === true && ${JSON.stringify([...terminalParts])}.includes(part?.status)) return {done: true}
+      const active = ai.activeForm
+      if (active?.status !== 'filling' || active.runId !== ${JSON.stringify(begun.runId)}
+        || !${JSON.stringify([...terminalParts])}.includes(part?.status)) return null
+      const formPart = ai.messages.flatMap((message) => message.parts).find((candidate) => candidate.toolCallId === active.toolCallId
+        && candidate.name === 'generative_form' && candidate.requiresAction === true)
+      return formPart ? {formToolCallId: active.toolCallId} : null
+    })()`, `TOOL_${name}_NOT_TERMINAL`)
+    if (followup.formToolCallId) {
+      const formToolCallId = followup.formToolCallId
+      const fieldSelector = `[data-testid="gf-field-${formToolCallId}-conditions"]`
+      await browser.waitFor(`document.querySelector(${JSON.stringify(fieldSelector)}) !== null`, 'CONFIRM_STEP_FOLLOWUP_FIELD_MISSING')
+      await browser.evaluate(`document.querySelector(${JSON.stringify(fieldSelector)}).focus()`, false)
+      await browser.send('Input.insertText', {text: 'CNY'})
+      await browser.waitFor(`document.querySelector(${JSON.stringify(fieldSelector)})?.value === 'CNY'`, 'CONFIRM_STEP_FOLLOWUP_INPUT_NOT_WRITTEN')
+      await browser.click(`[data-testid="gf-form-${formToolCallId}"] [data-testid="gf-submit"]`)
+      await browser.waitFor(terminalExpression, `TOOL_${name}_NOT_TERMINAL`)
+      const receipts = browser.receiptRecords(formToolCallId)
+      checks.require(`${name}.followup.receipt.once`, receipts.length === 1 && receipts[0].status === 200 && receipts[0].finished,
+        'one completed automatic condition-form receipt', receipts.map((entry) => ({status: entry.status, finished: entry.finished})))
+      const settled = await browser.snapshot()
+      const formTarget = browser.findPart(settled, formToolCallId)
+      checks.require(`${name}.followup.succeeded`, formTarget?.part.status === 'succeeded' && formTarget.message.runId === begun.runId,
+        'automatic condition form succeeded in the same run', {toolCallId: formToolCallId, runId: formTarget?.message.runId ?? null, status: formTarget?.part.status ?? null})
+    }
+  } else {
+    await browser.waitFor(terminalExpression, `TOOL_${name}_NOT_TERMINAL`)
+  }
   const snapshot = await browser.snapshot()
   const target = browser.findPart(snapshot, begun.toolCallId)
   const runId = begun.runId ?? target?.message.runId
@@ -868,19 +939,22 @@ async function finishTool(context, begun, name, expectSuccess = true) {
   const history = await api.history(snapshot.sessionId)
   const occurrences = historyOccurrences(history, begun.toolCallId)
   const run = await api.run(runId)
-  const cards = snapshot.cards.filter((card) => card.testId === `tool-card-${begun.toolCallId}` || card.testId === `pending-card-${begun.toolCallId}`)
+  browser.noteRunStatus(runId, run.snapshot?.status)
+  const cards = snapshot.cards.filter((card) => card.toolCallId === begun.toolCallId && (name === 'start_export'
+    ? card.testId === 'hitl-receipt' : card.testId === `tool-card-${begun.toolCallId}` || card.testId === `pending-card-${begun.toolCallId}`))
+  const expectedHistoryStatus = name === 'start_export' ? 'EXECUTED' : 'FRONTEND_RESULT'
   checks.require(`${name}.history.once`, occurrences.states.length === 1 && occurrences.responses.length === 1,
     'one history state and one response', occurrences)
-  checks.require(`${name}.dom.once`, cards.length === 1, 'one real DOM tool card', cards)
+  checks.require(`${name}.dom.once`, cards.length === 1, name === 'start_export' ? 'one real DOM HITL receipt' : 'one real DOM tool card', cards)
   checks.require(`${name}.run.terminal`, terminalRuns.has(run.snapshot?.status), [...terminalRuns], run.snapshot?.status ?? null)
   if (expectSuccess) {
     checks.require(`${name}.store.succeeded`, target.part.status === 'succeeded', 'succeeded', target.part.status)
-    checks.require(`${name}.history.executed`, occurrences.states[0]?.status === 'EXECUTED', 'EXECUTED', occurrences.states[0])
+    checks.require(`${name}.history.settled`, occurrences.states[0]?.status === expectedHistoryStatus, expectedHistoryStatus, occurrences.states[0])
     checks.require(`${name}.run.done`, run.snapshot?.status === 'DONE', 'DONE', run.snapshot?.status ?? null)
   } else {
     checks.require(`${name}.store.not-operable`, ['failed', 'rejected', 'blocked'].includes(target.part.status),
       ['failed', 'rejected', 'blocked'], target.part.status)
-    checks.require(`${name}.history.not-executed`, occurrences.states[0]?.status !== 'EXECUTED', 'not EXECUTED', occurrences.states[0])
+    checks.require(`${name}.history.settled`, occurrences.states[0]?.status === expectedHistoryStatus, expectedHistoryStatus, occurrences.states[0])
   }
   if (name !== 'start_export') {
     const receipts = browser.receiptRecords(begun.toolCallId)
@@ -1221,7 +1295,10 @@ async function waitForExport(context) {
     const files = await context.api.files(context.taskId)
     const exportJobs = jobs.filter((job) => job.jobType === 'EXPORT')
     const exportFiles = files.filter((file) => file.fileType === 'EXPORT' && file.defCode === 'CURRENCY')
-    if (exportJobs.length === 1 && exportJobs[0].status === 'COMPLETED' && exportFiles.length === 1) return {jobs, files}
+    if (exportJobs.length === 1 && exportJobs[0].status === 'COMPLETED' && exportFiles.length === 1) {
+      context.browser.noteExportComplete(context.taskId)
+      return {jobs, files}
+    }
     if (exportJobs.some((job) => ['FAILED', 'CANCELLED'].includes(job.status))) throw new VerificationFailure('EXPORT_JOB_FAILED')
     await sleep(context.config.pollMs)
   }
@@ -1276,7 +1353,9 @@ async function runC152(context) {
     context.checks.require(`C-152.recovery.${index}.dom`, ['start_export', 'download_export_files'].every((name) => {
       const id = name === 'start_export' ? started.toolCallId : download.toolCallId
       const target = context.browser.findPart(recovered, id)
-      return target?.part.status === 'succeeded' && recovered.cards.filter((card) => card.testId === `tool-card-${id}`).length === 1
+      const expectedTestId = name === 'start_export' ? 'hitl-receipt' : `tool-card-${id}`
+      return target?.part.status === 'succeeded'
+        && recovered.cards.filter((card) => card.toolCallId === id && card.testId === expectedTestId).length === 1
     }), 'both succeeded cards restored exactly once', recovered.cards)
     const historyAfter = await context.api.history(recovered.sessionId)
     context.checks.require(`C-152.recovery.${index}.history`, canonicalJson(historySummary(historyAfter)) === historyBefore,
@@ -1441,13 +1520,32 @@ for (let round = 1; round <= 3; round += 1) {
     } catch {
       record.browserIdentityCapture = 'UNAVAILABLE'
     }
-    record.networkFailures = context.browser.networkFailureEvidence()
+    for (const runId of context.runIds) {
+      try {
+        const run = await context.api.run(runId)
+        context.browser.noteRunStatus(runId, run.snapshot?.status)
+      } catch {
+        record.networkRunStateCapture = 'UNAVAILABLE'
+      }
+    }
+    if (context.taskId) {
+      try {
+        const [jobs, files] = await Promise.all([context.api.jobs(context.taskId), context.api.files(context.taskId)])
+        if (jobs.filter((job) => job.jobType === 'EXPORT' && job.status === 'COMPLETED').length === 1
+          && files.filter((file) => file.fileType === 'EXPORT' && file.defCode === 'CURRENCY').length === 1) {
+          context.browser.noteExportComplete(context.taskId)
+        }
+      } catch {
+        record.networkTaskStateCapture = 'UNAVAILABLE'
+      }
+    }
     record.cdpErrors = {
       count: context.browser.cdpErrorCount,
       tail: context.browser.cdpErrors.slice(-64),
       truncated: context.browser.cdpErrorCount > context.browser.cdpErrors.length
     }
     record.cleanup = await cleanupRound(context).catch((error) => ({status: 'INCOMPLETE', error: safeError(error, 'CLEANUP_FAILED')}))
+    record.networkFailures = context.browser.networkFailureEvidence()
     try {
       record.log = await log.capture()
       checks.add('logs.no-new-error', record.log.errorCount === 0, 0, record.log.errorCount)
