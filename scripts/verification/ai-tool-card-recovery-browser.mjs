@@ -339,6 +339,12 @@ class ApiClient {
     }, [200])
   }
 
+  async setCondition(taskId, defCode = 'CURRENCY', condition = {}) {
+    return await this.expect('task.condition', `/api/tasks/${taskId}/items/${defCode}/condition`, {
+      method: 'PUT', body: JSON.stringify({condition})
+    }, [200])
+  }
+
   async goToStep(taskId, step) {
     return await this.expect('task.step', `/api/tasks/${taskId}/step`, {
       method: 'PUT', body: JSON.stringify({step})
@@ -4125,15 +4131,40 @@ async function runStreamHistoryRace(context) {
   }
   checks.require('initial-stream.history-prefix-nonempty', prefix.length > 0,
     'history carries the assistant text prefix written at the real tool-jump/suspend write point', textEvidence(prefix))
-  const mirror = await mirrorState(browser, initial.sessionId)
-  if (config.variant === 'mirror-inflight') {
-    checks.require('mirror.inflight-true', mirror.entries.length === 1 && mirror.entries[0].inFlight === true,
-      'the real streaming mirror is inFlight=true', mirror)
-  } else if (config.variant === 'mirror-terminal') {
-    checks.require('mirror.inflight-false', mirror.entries.length === 1 && mirror.entries[0].inFlight === false,
-      'the real completed mirror is inFlight=false', mirror)
+  // mirror-terminal：镜像写入有 300ms 节流 + 300ms idle 的窗口，不能在首个快照直接断言；
+  // 按有界轮询等待“唯一当前镜像 inFlight=false”（约 600ms 窗口），超时才按产品 FAIL。
+  const readMirrorWithBoundedWait = async (timeoutMs = 3_000) => {
+    const startedAt = Date.now()
+    let last = null
+    let lastError = null
+    while (Date.now() - startedAt < timeoutMs) {
+      try {
+        last = await mirrorState(browser, initial.sessionId)
+      } catch (error) {
+        lastError = error
+        last = null
+      }
+      if (last && last.entries.length === 1 && last.entries[0].inFlight === false) {
+        return {mirror: last, waitedMs: Date.now() - startedAt, timedOut: false}
+      }
+      await sleep(100)
+    }
+    return {mirror: last, waitedMs: Date.now() - startedAt, timedOut: true, errorName: lastError ? errorName(lastError) : null}
+  }
+  let mirror = null
+  if (config.variant === 'mirror-terminal') {
+    const waited = await readMirrorWithBoundedWait()
+    mirror = waited.mirror
+    checks.require('mirror.inflight-false', waited.timedOut === false,
+      'the real completed mirror becomes inFlight=false within the bounded 300ms throttle + 300ms idle window', waited)
   } else {
-    await removeCurrentMirror(context)
+    mirror = await mirrorState(browser, initial.sessionId)
+    if (config.variant === 'mirror-inflight') {
+      checks.require('mirror.inflight-true', mirror.entries.length === 1 && mirror.entries[0].inFlight === true,
+        'the real streaming mirror is inFlight=true', mirror)
+    } else {
+      await removeCurrentMirror(context)
+    }
   }
   const initialSignature = recoveryFactsSignature(initial)
 
@@ -4199,11 +4230,11 @@ async function runStreamHistoryRace(context) {
     variant: config.variant
   })
   if (config.variant !== 'mirror-terminal') assertRecoveryDotsThenWorking(context, 'recovered-stream', recovered.messages.find((message) => message.role === 'assistant')?.id)
-  checks.require('recovered-stream.content-stable', recoveryFactsSignature(recovered) === initialSignature
-    || config.variant !== 'mirror-terminal',
-  'terminal mirror content is unchanged; streaming variants are checked against their original prefix', {
-    before: initialSignature,
-    after: recoveryFactsSignature(recovered)
+  checks.require('recovered-stream.content-stable', config.variant !== 'mirror-terminal'
+    || recoveryFactsSignatureWithoutSeq(recovered) === recoveryFactsSignatureWithoutSeq(initial),
+  'terminal mirror content (parts/cards/text, seq excluded as transient metadata) is unchanged', {
+    before: recoveryFactsSignatureWithoutSeq(initial),
+    after: recoveryFactsSignatureWithoutSeq(recovered)
   })
   await context.evidence.json('stream-history-race.json', {variant: config.variant, mirror, held, historyNetwork, runCurrentNetwork})
   // 连续两刷按“内容/顺序/状态/卡片”幂等核对；parts.seq 是恢复重投影元数据，仅留证不比断言。
@@ -4738,16 +4769,41 @@ async function runSheetPreviewScenario(context) {
     overview: {status: overview.status, keys: Object.keys(overviewData ?? {}), sha256: sha256(canonicalJson(overviewData ?? null))}
   })
 
+  let targetTaskId = taskId
+  let targetPage = 'import'
+  let targetStep = null
+  if (config.variant === 'export') {
+    // 导入数据用于形成多页结果行；预览改在 EXPORT/EXPORT 结果编辑区进行。
+    const exportTask = await api.createTaskTyped(`c159-export-${randomUUID()}`, 'EXPORT')
+    targetTaskId = Number(exportTask.id)
+    context.fixtureTaskId = targetTaskId
+    await api.selectDefs(targetTaskId)
+    await api.setCondition(targetTaskId)
+    await api.goToStep(targetTaskId, 'QUERY_COND')
+    await api.goToStep(targetTaskId, 'EXPORT')
+    const exportJob = await api.startJobAndWait(targetTaskId, 'EXPORT')
+    checks.require('fixture.export-completed', exportJob.status === 'COMPLETED',
+      'the real EXPORT job completes over the imported rows', {jobId: exportJob.id, status: exportJob.status})
+    targetPage = 'export'
+    targetStep = 'EXPORT'
+  }
   const url = new URL(config.appUrl)
-  url.pathname = '/import'
-  url.search = `?taskId=${taskId}`
+  url.pathname = `/${targetPage}`
+  url.search = `?taskId=${targetTaskId}`
   await browser.send('Page.navigate', {url: url.toString()})
   await browser.waitFor(`(() => {
     const pinia = document.getElementById('app').__vue_app__.config.globalProperties.$pinia
     const workspace = pinia._s.get('workspace')
     const ai = pinia._s.get('ai')
-    return workspace.taskId === ${taskId} && ai.historyLoaded === true && ai.restoringRecovery === false
+    return workspace.taskId === ${targetTaskId} && ai.historyLoaded === true && ai.restoringRecovery === false
+      ${targetStep ? `&& workspace.step === '${targetStep}'` : ''}
   })()`, 'SHEET_PREVIEW_PAGE_NOT_READY')
+  if (targetPage === 'export') {
+    await browser.waitFor(`(async () => {
+      const {getPageHandler} = await import('/src/stores/workspace.ts')
+      return getPageHandler('export.taskDetailReady')?.({}) === true
+    })()`, 'EXPORT_RESULT_EDITOR_NOT_READY', context.config.timeoutMs, true)
+  }
 
   // 导入页只有“编辑标签页 + SpreadGrid 已挂载”时才交出 sheet.current；
   // 自动化前必须先打开 CURRENCY 标签页，否则预览计划会是 0 处变更。
@@ -4755,7 +4811,12 @@ async function runSheetPreviewScenario(context) {
     const tab = document.querySelector('[data-ai-ref="import.grid.tab.CURRENCY"]')
     return tab ? true : false
   })()`, false)
-  if (tabReady) {
+  if (targetPage === 'export') {
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.historyLoaded === true
+    })()`, 'EXPORT_EDITOR_READY', context.config.timeoutMs)
+  } else if (tabReady) {
     await browser.evaluate(`(() => {
       const tab = document.querySelector('[data-ai-ref="import.grid.tab.CURRENCY"]')
       if (tab && tab.getAttribute('aria-selected') !== 'true') tab.click()
@@ -4768,7 +4829,7 @@ async function runSheetPreviewScenario(context) {
   } else {
     throw new ScenarioNotRun('SHEET_EDITOR_TAB_NOT_FORMED')
   }
-  await browser.sendPrompt(`scenario=SHEET-UPDATE-MULTI verification=${randomUUID()}`)
+  await browser.sendPrompt(`scenario=SHEET-MULTI verification=${randomUUID()}`)
   await browser.waitFor(`(() => {
     const card = document.querySelector('[data-testid="sheet-preview-card"]')
     return card !== null && document.querySelector('[data-testid^="sheet-preview-level-"]') !== null
@@ -5008,8 +5069,8 @@ async function runTimingProxyScenario(context) {
 }
 
 async function runContentMatrix(context) {
-  const {browser, checks, config} = context
-  const variants = new Set(['interleave', 'gf-seven', 'timeline', 'boundary', 'repeat-refresh', 'form-draft', 'composer-draft', 'copy-scan', 'tool-chain'])
+  const {browser, checks, config, api} = context
+  const variants = new Set(['interleave', 'gf-seven', 'timeline', 'boundary', 'repeat-refresh', 'form-draft', 'composer-draft', 'copy-scan', 'tool-chain', 'tool-chain-known'])
   if (!variants.has(config.variant)) throw new ScenarioNotRun('CONTENT_MATRIX_VARIANT_REQUIRED')
   const nonce = randomUUID()
 
@@ -5075,6 +5136,51 @@ async function runContentMatrix(context) {
   const factsOf = (snapshot) => contentFacts(snapshot, {dropEmptyTextParts: config.variant === 'interleave'})
   const seqFacts = (snapshot) => canonicalJson(snapshot.messages.map((message) => message.parts.map((part) => part.seq ?? null)))
 
+  if (config.variant === 'tool-chain-known') {
+    // C-137 已知/非空条件变体：真实 set_condition 调用必须保留自己的工具卡（不强制空调用）。
+    const task = await api.createTask(`c137-known-${randomUUID()}`)
+    const taskId = Number(task.id)
+    context.fixtureTaskId = taskId
+    await api.selectDefs(taskId)
+    await api.goToStep(taskId, 'QUERY_COND')
+    const fixtureUrl = new URL(config.appUrl)
+    fixtureUrl.pathname = '/export'
+    fixtureUrl.search = `?taskId=${taskId}`
+    await browser.send('Page.navigate', {url: fixtureUrl.toString()})
+    await browser.waitFor(`(() => {
+      const pinia = document.getElementById('app').__vue_app__.config.globalProperties.$pinia
+      const workspace = pinia._s.get('workspace')
+      const ai = pinia._s.get('ai')
+      return workspace.taskId === ${taskId} && workspace.step === 'QUERY_COND' && ai.historyLoaded === true
+    })()`, 'CONDITION_FIXTURE_NOT_READY')
+    await browser.sendPrompt(`tool=set_condition&args={"defCode":"CURRENCY","conditions":{"fields":[{"fieldCode":"code","operator":"EQ","value":"CNY"}]}} verification=${randomUUID()}`)
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.loading === false && ai.messages.flatMap((message) => message.parts)
+        .some((part) => part.name === 'set_condition' && part.status === 'succeeded')
+    })()`, 'SET_CONDITION_NOT_SUCCEEDED')
+    const snapshot = await browser.snapshot()
+    const conditionParts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.name === 'set_condition')
+    checks.require('tool-chain-known.real-call-card', conditionParts.length === 1
+      && conditionParts[0].status === 'succeeded'
+      && targetCard(snapshot, conditionParts[0].toolCallId).length === 1,
+    'a non-empty condition request keeps exactly one real set_condition card', conditionParts.map((part) => ({
+      toolCallId: part.toolCallId,
+      status: part.status,
+      cards: targetCard(snapshot, part.toolCallId).map((card) => card.testId)
+    })))
+    checks.require('tool-chain-known.args-recorded', conditionParts[0].args !== null && conditionParts[0].args !== undefined,
+      'the real call carries its own arguments (bounded hash in evidence)', {
+        args: conditionParts[0].args === null ? null : sha256(canonicalJson(conditionParts[0].args))
+      })
+    await context.evidence.json('tool-chain-known.json', {
+      taskId,
+      parts: conditionParts.map((part) => ({toolCallId: part.toolCallId, status: part.status})),
+      queryConditions: canonicalJson(snapshot.workspace?.queryConditions ?? {}) === '{}' ? 'empty' : 'non-empty'
+    })
+    return
+  }
+
   if (config.variant === 'tool-chain') {
     // C-137：完整创建导出链，逐工具一张真实卡，启动确认停在 HITL，业务只 1 个任务 0 作业。
     context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
@@ -5099,8 +5205,15 @@ async function runContentMatrix(context) {
       toolCallId: part.toolCallId,
       cards: targetCard(snapshot, part.toolCallId).map((card) => card.testId)
     })))
-    checks.require('tool-chain.set-condition-card', (byName.set_condition ?? []).length >= 1,
-      'set_condition is retained as its own tool card in the full chain', Object.keys(byName))
+    // 已确认口径：留空条件链不应出现 set_condition 卡，条件由宿主表单 + confirm_step 落地且 queryConditions 为空。
+    checks.require('tool-chain.empty-conditions-no-set-condition', (byName.set_condition ?? []).length === 0,
+      'an empty-condition chain must not fabricate a set_condition call', Object.keys(byName))
+    checks.require('tool-chain.empty-conditions-state', (byName.confirm_step ?? []).length >= 1
+      && canonicalJson(snapshot.workspace?.queryConditions ?? {}) === '{}',
+    'the host condition receipt + confirm_step apply an empty query condition', {
+      confirmStep: byName.confirm_step ?? [],
+      queryConditions: snapshot.workspace?.queryConditions ?? null
+    })
     const business = await businessSnapshot(context.api, relevantTaskIds(context))
     const newTasks = business.allTasks.filter((task) => !context.businessAfterFixture.allTasks.some((before) => before.id === task.id))
     checks.require('tool-chain.single-task-no-jobs', newTasks.length === 1 && newTasks.every((task) => task.jobs.length === 0),

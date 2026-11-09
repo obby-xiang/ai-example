@@ -1069,10 +1069,10 @@
     },
     {
       "id": "SHEET-UPDATE-MULTI",
-      "note": "C-159 多页预览：同一 update_rows 能力，谓词命中导入数据全量行（decimalPlaces >= 0），preview=full-diff，用于真实工作簿多页预览与恢复只读断言；不改 T-14 既有语义。",
+      "note": "C-159 多页预览：同一 update_rows 能力，谓词命中导入/导出结果全量行（decimalPlaces >= 0），preview=full-diff；用具独特标记避免与 T-14 子串冲突，不改 T-14 语义。",
       "match": {
         "messageAny": [
-          "scenario=SHEET-UPDATE-MULTI"
+          "scenario=SHEET-MULTI"
         ],
         "requiresTools": [
           "update_rows"
