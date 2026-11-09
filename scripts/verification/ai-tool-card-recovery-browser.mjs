@@ -339,6 +339,18 @@ class ApiClient {
     }, [200])
   }
 
+  async setImportMode(taskId, mode) {
+    return await this.expect('task.import-mode', `/api/tasks/${taskId}/import-mode`, {
+      method: 'PUT', body: JSON.stringify({mode})
+    }, [200])
+  }
+
+  async dataCount(defCode = 'CURRENCY') {
+    const response = await this.request('data.count', `/api/data/${defCode}/count`)
+    const data = response.body?.data ?? response.body
+    return response.status === 200 && Number.isSafeInteger(data?.count) ? data.count : null
+  }
+
   async setCondition(taskId, defCode = 'CURRENCY', condition = {}) {
     return await this.expect('task.condition', `/api/tasks/${taskId}/items/${defCode}/condition`, {
       method: 'PUT', body: JSON.stringify({condition})
@@ -4753,19 +4765,34 @@ async function runSheetPreviewScenario(context) {
   if (!Number.isSafeInteger(taskId) || taskId <= 0) throw new VerificationFailure('SHEET_FIXTURE_TASK_INVALID')
   context.fixtureTaskId = taskId
   await api.selectDefs(taskId)
+  await api.setImportMode(taskId, 'MERGE')
   await api.uploadTaskFile(taskId, bytes, 'CURRENCY_c159.xlsx', ['CURRENCY'])
   const precheck = await api.startJobAndWait(taskId, 'PRECHECK')
   checks.require('fixture.precheck-completed', precheck.status === 'COMPLETED',
     'public upload passes the real precheck job', {jobId: precheck.id, status: precheck.status})
   const imported = await api.startJobAndWait(taskId, 'IMPORT')
   checks.require('fixture.import-completed', imported.status === 'COMPLETED',
-    'the real IMPORT job completes and leaves multi-row data', {jobId: imported.id, status: imported.status})
+    'the real IMPORT job completes and leaves staged rows', {jobId: imported.id, status: imported.status})
+  // 导入暂存区：IMPORT 后任务仍为 ACTIVE/可编辑，写预览应发生在暂存表；
+  // EXPORT 变体才需要 PUBLISH 落库并确认 >50 行。
+  let published = null
+  let rowCount = null
+  if (config.variant === 'export') {
+    published = await api.startJobAndWait(taskId, 'PUBLISH')
+    checks.require('fixture.publish-completed', published.status === 'COMPLETED',
+      'the real PUBLISH job applies the staged rows to the data table', {jobId: published.id, status: published.status})
+    rowCount = await api.dataCount('CURRENCY')
+    checks.require('fixture.data-rows-over-page', Number.isSafeInteger(rowCount) && rowCount > 50,
+      'the imported data table holds more than one preview page (>50 rows)', {rowCount})
+  }
   const overview = await api.request('task.overview', `/api/tasks/${taskId}/overview`)
   const overviewData = overview.body?.data ?? overview.body
   await evidence.json('sheet-fixture.json', {
     taskId,
     precheck: {id: precheck.id, status: precheck.status},
     import: {id: imported.id, status: imported.status},
+    publish: published ? {id: published.id, status: published.status} : null,
+    rowCount,
     overview: {status: overview.status, keys: Object.keys(overviewData ?? {}), sha256: sha256(canonicalJson(overviewData ?? null))}
   })
 
@@ -4807,10 +4834,13 @@ async function runSheetPreviewScenario(context) {
 
   // 导入页只有“编辑标签页 + SpreadGrid 已挂载”时才交出 sheet.current；
   // 自动化前必须先打开 CURRENCY 标签页，否则预览计划会是 0 处变更。
-  const tabReady = await browser.evaluate(`(() => {
-    const tab = document.querySelector('[data-ai-ref="import.grid.tab.CURRENCY"]')
-    return tab ? true : false
-  })()`, false)
+  let tabReady = true
+  try {
+    await browser.waitFor(`document.querySelector('[data-ai-ref="import.grid.tab.CURRENCY"]') !== null`,
+      'IMPORT_EDITOR_TAB_WAIT', 15_000)
+  } catch {
+    tabReady = false
+  }
   if (targetPage === 'export') {
     await browser.waitFor(`(() => {
       const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
@@ -4830,10 +4860,20 @@ async function runSheetPreviewScenario(context) {
     throw new ScenarioNotRun('SHEET_EDITOR_TAB_NOT_FORMED')
   }
   await browser.sendPrompt(`scenario=SHEET-MULTI verification=${randomUUID()}`)
-  await browser.waitFor(`(() => {
-    const card = document.querySelector('[data-testid="sheet-preview-card"]')
-    return card !== null && document.querySelector('[data-testid^="sheet-preview-level-"]') !== null
-  })()`, 'SHEET_PREVIEW_CARD_NOT_FORMED')
+  try {
+    await browser.waitFor(`(() => {
+      const card = document.querySelector('[data-testid="sheet-preview-card"]')
+      return card !== null && document.querySelector('[data-testid^="sheet-preview-level-"]') !== null
+    })()`, 'SHEET_PREVIEW_CARD_NOT_FORMED')
+  } catch (error) {
+    const failure = await browser.evaluate(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const part = ai.messages.flatMap((message) => message.parts).filter((candidate) => candidate.name === 'update_rows').pop()
+      return part ? {status: part.status ?? null, result: String(part.result ?? '').slice(0, 600), reason: String(part.reason ?? '').slice(0, 600)} : null
+    })()`, false)
+    await evidence.json('sheet-preview-failure.json', failure)
+    throw error
+  }
   // 默认是 sample 档；切到 full-diff 才会渲染分页（>50 条变更时多页）。
   await browser.click('[data-testid="sheet-preview-level-full-diff"]')
   const readPreview = `(() => {
@@ -4862,7 +4902,18 @@ async function runSheetPreviewScenario(context) {
       textLength: text.length
     }
   })()`
-  const preview = await browser.waitFor(readPreview, 'SHEET_PREVIEW_NOT_FORMED')
+  let preview
+  try {
+    preview = await browser.waitFor(readPreview, 'SHEET_PREVIEW_NOT_FORMED')
+  } catch (error) {
+    const failure = await browser.evaluate(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const part = ai.messages.flatMap((message) => message.parts).filter((candidate) => candidate.name === 'update_rows').pop()
+      return part ? {status: part.status ?? null, result: String(part.result ?? '').slice(0, 600), reason: String(part.reason ?? '').slice(0, 600)} : null
+    })()`, false)
+    await evidence.json('sheet-preview-failure.json', failure)
+    throw error
+  }
   const pageMatch = /(\d+)\s*\/\s*(\d+)/.exec(preview.pageLabel)
   const pageTotal = pageMatch ? Number(pageMatch[2]) : 0
   checks.require('preview.multi-page', preview.levelCount > 0 && preview.pagerButtons === 2 && pageTotal >= 2,
