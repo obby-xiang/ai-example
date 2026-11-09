@@ -164,6 +164,7 @@
       "keyUnreadable": "The API key cannot be decrypted. Re-enter it in Settings → AI, or ask the administrator to restore the encryption configuration.",
       "noModelConfigured": "The default AI model is unavailable. Add a model in Settings → AI and select it as the default.",
       "redisUnavailable": "The AI service is temporarily unavailable. Please try again later.",
+      "transcriptDegraded": "The answer was generated, but some history could not be saved",
       "historyEarlierFailed": "Earlier conversation failed to load. Please try again.",
       "healthProbeFailed": "AI availability check failed",
       "decisionPending": "Decision submitted, but the outcome has not synced yet. Reload later to check.",

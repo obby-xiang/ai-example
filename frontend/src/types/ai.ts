@@ -547,6 +547,11 @@ export interface ChatMessage {
    */
   unconfirmed?: boolean
   /**
+   * 本轮业务已完成、但部分历史未能保存（additive，入镜像）。
+   * 与 unconfirmed 互斥；可与其他真实错误码并存，健康 DONE 对账成功前不得归一成历史完整。
+   */
+  transcriptDegraded?: boolean
+  /**
    * 恢复完整性内部标记；镜像合并等不确定性只保留该布尔值，不直接生成用户提示。
    */
   recoveryGap?: boolean
@@ -983,7 +988,7 @@ export interface GateSubmission {
  * 外部读（调试/对账脚本直接看 JSON）不需要自行派生。
  *
  * 批2（本轮整改，schema **additive**）：message 级可选键 `errorCard` / `code` / `unconfirmed` /
- * `recoveryGap` / `recoveryGapReason` / `interrupted` / `interruptedReason` / `runId` / `messageId` / `timestamp` —— 刷新后失败现场、中性态、
+ * `transcriptDegraded` / `recoveryGap` / `recoveryGapReason` / `interrupted` / `interruptedReason` / `runId` / `messageId` / `timestamp` —— 刷新后失败现场、历史降级、中性态、
  * 断流事实、run 归属、实时助手身份与已记录时间仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而恢复到错的轮次。
  * （`synthetic` 自 B5 起不再入镜像；旧镜像读取侧按同一口径过滤。）
  *
@@ -994,7 +999,7 @@ export interface AiSessionMirror {
   /** 镜像结构版本（当前恒为 {@link MIRROR_VERSION}；不匹配的镜像整份丢弃） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'recoveryGapReason' | 'interrupted' | 'interruptedReason' | 'runId' | 'messageId' | 'timestamp'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'transcriptDegraded' | 'recoveryGap' | 'recoveryGapReason' | 'interrupted' | 'interruptedReason' | 'runId' | 'messageId' | 'timestamp'>>
   /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
   /**

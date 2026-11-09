@@ -771,7 +771,7 @@ export type AutoRecoveryKind = 'preparing' | 'first-frame' | 'history' | 'purged
 
 export interface AiManualRecoveryView {
   scope: 'history' | 'current'
-  reason: 'load' | 'unconfirmed' | 'interrupted' | 'first-frame' | 'archive-window'
+  reason: 'load' | 'unconfirmed' | 'interrupted' | 'first-frame' | 'archive-window' | 'transcript-degraded'
   error: AiLoadErrorView | null
 }
 
@@ -1266,6 +1266,11 @@ function isUnconfirmedTerminal(frame: unknown): boolean {
   return raw.code === 'TURN_UNCONFIRMED' || raw.turnEnd === 'unconfirmed' || raw.unconfirmed === true
 }
 
+function isTranscriptErrorCode(code: unknown): boolean {
+  return typeof code === 'string'
+    && (baseErrorCode(code) === 'AI_TRANSCRIPT_INCOMPLETE' || baseErrorCode(code) === 'AI_TRANSCRIPT_WRITE_FAILED')
+}
+
 function isTranscriptDegraded(source: {
   transcriptDegraded?: unknown
   historyComplete?: unknown
@@ -1275,8 +1280,40 @@ function isTranscriptDegraded(source: {
   if (source.transcriptDegraded === true || source.historyComplete === false) {
     return true
   }
-  return [source.code, source.errorCode].some((value) => typeof value === 'string'
-    && (baseErrorCode(value) === 'AI_TRANSCRIPT_INCOMPLETE' || baseErrorCode(value) === 'AI_TRANSCRIPT_WRITE_FAILED'))
+  return [source.code, source.errorCode].some(isTranscriptErrorCode)
+}
+
+function clearTranscriptErrorPresentation(message: ChatMessage): void {
+  if (isTranscriptErrorCode(message.code)) {
+    message.code = null
+  }
+  if (isTranscriptErrorCode(message.errorCard?.baseCode)) {
+    message.errorCard = null
+  }
+}
+
+function hasOtherFailurePresentation(message: ChatMessage): boolean {
+  if (typeof message.code === 'string' && message.code.trim() !== '' && !isTranscriptErrorCode(message.code)) {
+    return true
+  }
+  return message.errorCard != null && !isTranscriptErrorCode(message.errorCard.baseCode)
+}
+
+function isCompletedTranscriptDegraded(source: {
+  type?: unknown
+  outcome?: unknown
+  runStatus?: unknown
+  cancelled?: unknown
+  code?: unknown
+  turnEnd?: unknown
+  unconfirmed?: unknown
+  transcriptDegraded?: unknown
+  historyComplete?: unknown
+  errorCode?: unknown
+}): boolean {
+  const completed = source.runStatus === 'DONE' || source.outcome === 'DONE'
+    || (source.type === 'done' && source.cancelled !== true)
+  return completed && !isUnconfirmedTerminal(source) && isTranscriptDegraded(source)
 }
 
 /**
@@ -2561,6 +2598,7 @@ const MIRROR_MESSAGE_SCALAR_KEYS = [
   'errorCard',
   'code',
   'unconfirmed',
+  'transcriptDegraded',
   'recoveryGap',
   'recoveryGapReason',
   'interrupted',
@@ -2646,6 +2684,7 @@ function mirrorMessageOf(message: ChatMessage): MirroredMessage {
     ...(message.errorCard ? { errorCard: message.errorCard } : {}),
     ...(message.code ? { code: message.code } : {}),
     ...(message.unconfirmed ? { unconfirmed: true } : {}),
+    ...(message.transcriptDegraded ? { transcriptDegraded: true } : {}),
     ...(message.recoveryGap ? { recoveryGap: true } : {}),
     ...(message.recoveryGapReason ? { recoveryGapReason: message.recoveryGapReason } : {}),
     // 断流及具体原因随镜像恢复，供最终提示按原类型重建。
@@ -2938,6 +2977,11 @@ function mergeMessageOutcomeFacts(target: ChatMessage, member: ChatMessage, pref
     if (member.unconfirmed === true) {
       target.unconfirmed = true
     }
+    if (member.transcriptDegraded === true) {
+      target.transcriptDegraded = true
+      target.unconfirmed = false
+      clearTranscriptErrorPresentation(target)
+    }
     if (target.recoveryGapReason === 'archive-window') {
       target.recoveryGap = true
     } else if (member.recoveryGap === true) {
@@ -2950,8 +2994,17 @@ function mergeMessageOutcomeFacts(target: ChatMessage, member: ChatMessage, pref
   const targetHasError = target.errorCard !== undefined || target.code !== undefined
   if ((member.errorCard !== undefined || member.code !== undefined)
     && (memberIsAuthority || (preferTarget && !targetHasError))) {
-    target.errorCard = member.errorCard
-    target.code = member.code
+    if (member.transcriptDegraded === true) {
+      if (member.errorCard != null && !isTranscriptErrorCode(member.errorCard.baseCode)) {
+        target.errorCard = member.errorCard
+      }
+      if (member.code != null && !isTranscriptErrorCode(member.code)) {
+        target.code = member.code
+      }
+    } else {
+      target.errorCard = member.errorCard
+      target.code = member.code
+    }
   }
 }
 
@@ -3367,7 +3420,7 @@ function mergeToolPartState(target: ToolPart, source: ToolPart): void {
 
 function hasOutcomeMarkers(message: ChatMessage): boolean {
   return message.errorCard != null || message.code != null
-    || message.unconfirmed === true || message.recoveryGap === true
+    || message.unconfirmed === true || message.transcriptDegraded === true || message.recoveryGap === true
 }
 
 function isSameUserRound(historical: ChatMessage[], mirrorMessages: ChatMessage[]): boolean {
@@ -3404,15 +3457,36 @@ function copyMirrorOutcomeMarkers(target: ChatMessage, tail: ChatMessage): void 
     target.recoveryGap = true
     target.recoveryGapReason = 'archive-window'
   }
+  if (tail.transcriptDegraded === true) {
+    target.transcriptDegraded = true
+    target.unconfirmed = false
+    clearTranscriptErrorPresentation(target)
+    if (target.errorCard == null && tail.errorCard != null && !isTranscriptErrorCode(tail.errorCard.baseCode)) {
+      target.errorCard = tail.errorCard
+    }
+    if (target.code == null && tail.code != null && !isTranscriptErrorCode(tail.code)) {
+      target.code = tail.code
+    }
+    if (tail.recoveryGap === true) {
+      target.recoveryGap = true
+    }
+    return
+  }
   if (tail.unconfirmed === true) {
     target.unconfirmed = true
   }
   if (hasOutcomeMarkers(target)) {
     return
   }
-  if (tail.errorCard != null) target.errorCard = tail.errorCard
-  if (tail.code != null) target.code = tail.code
-  if (tail.recoveryGap === true) target.recoveryGap = true
+  if (tail.errorCard != null) {
+    target.errorCard = tail.errorCard
+  }
+  if (tail.code != null) {
+    target.code = tail.code
+  }
+  if (tail.recoveryGap === true) {
+    target.recoveryGap = true
+  }
 }
 
 type MirrorTextPart = Extract<MessagePart, { kind: 'text' } | { kind: 'reasoning' }>
@@ -5607,7 +5681,9 @@ export const useAiStore = defineStore('ai', {
         const blankText = (item.text ?? '').trim() === ''
         const historyErrorCode = typeof item.errorCode === 'string' ? item.errorCode : ''
         const historyErrorMessage = typeof item.errorMessage === 'string' ? item.errorMessage : ''
-        const hasHistoryError = historyErrorCode.trim() !== '' || historyErrorMessage.trim() !== ''
+        const transcriptDegraded = role === 'assistant' && isCompletedTranscriptDegraded(item)
+        const hasHistoryError = !(transcriptDegraded && isTranscriptErrorCode(historyErrorCode))
+          && (historyErrorCode.trim() !== '' || historyErrorMessage.trim() !== '')
         // 全部调用都被隐藏（幻影卡 / 缺稳定 id）⇒ 不补空 text 段：那会留下一个空气泡。
         const allCallsHidden = (item.toolCalls ?? []).length > 0 && calls.length === 0
         const hasTextPart = !blankText || (calls.length === 0 && !allCallsHidden)
@@ -5770,6 +5846,7 @@ export const useAiStore = defineStore('ai', {
             code: historyErrorCode.trim() !== '' ? historyErrorCode : null,
             errorCard: buildErrorCard(historyErrorCode, historyErrorMessage)
           } : {}),
+          ...(transcriptDegraded ? { transcriptDegraded: true } : {}),
           // 批次2：服务端条目带 runId 时落消息，保留恢复链路的 run 归属（40 条记忆窗口通常无此键）
           ...(runId !== null ? { runId } : {}),
           // 批G · S4：stopped 元数据或规范 CANCELLED 终态都恢复为「已停止」，不归一成普通完成。
@@ -5827,7 +5904,7 @@ export const useAiStore = defineStore('ai', {
         const blankReasoning = typeof item.reasoningContent !== 'string'
           || item.reasoningContent.trim().length === 0
         if (calls.length === 0 && (item.text ?? '').trim().length === 0 && blankReasoning
-          && message.errorCard == null && message.code == null) {
+          && message.errorCard == null && message.code == null && message.transcriptDegraded !== true) {
           continue // 空白条目仅丢弃，不额外断开同 run 合并窗
         }
         const previous = last(group)
@@ -6790,15 +6867,19 @@ export const useAiStore = defineStore('ai', {
       return false
     },
 
-    /** 手动重试与自动链共用 DONE 请求代次对账；旧响应不得清除新到的 unconfirmed。 */
+    /** 手动重试与自动链共用 DONE 请求代次对账；旧响应不得清除新到的终局标记。 */
     async retryLoadHistory(): Promise<void> {
       const previous = this.manualRecovery
       const sessionId = this.sessionId
       const unconfirmed = previous?.reason === 'unconfirmed'
         ? this.messages.find((item) => item.unconfirmed === true) ?? null
         : null
-      const targetRunId = unconfirmed ? unconfirmed.runId ?? '' : this.activeRunId ?? ''
-      const targetMessageId = unconfirmed?.id ?? activeRoundHostId ?? ''
+      const transcriptDegraded = previous?.reason === 'transcript-degraded'
+        ? this.messages.find((item) => item.transcriptDegraded === true) ?? null
+        : null
+      const pendingAtStart = unconfirmed ?? transcriptDegraded
+      const targetRunId = pendingAtStart ? pendingAtStart.runId ?? '' : this.activeRunId ?? ''
+      const targetMessageId = pendingAtStart?.id ?? activeRoundHostId ?? ''
       this.historyError = null
       if (this.recoveryGap?.reason !== 'archive-window') {
         this.recoveryGap = null
@@ -6806,8 +6887,8 @@ export const useAiStore = defineStore('ai', {
       this.forgetRunStreamDrive()
       clearTerminalHistoryFollowups(sessionId)
       this.resetAutoRecovery('history')
-      if (unconfirmed) {
-        recordUnconfirmedHistoryFloor(sessionId, unconfirmed.runId ?? '')
+      if (pendingAtStart) {
+        recordUnconfirmedHistoryFloor(sessionId, pendingAtStart.runId ?? '')
       }
       await this.loadHistory()
       if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
@@ -6818,7 +6899,9 @@ export const useAiStore = defineStore('ai', {
         this.reconcileArchiveRecovery()
         return
       }
-      const pending = unconfirmed ?? [...this.messages].reverse().find((item) => item.unconfirmed === true)
+      const pending = pendingAtStart ?? [...this.messages].reverse().find(
+        (item) => item.unconfirmed === true || item.transcriptDegraded === true
+      )
       if (pending) {
         const followup: TerminalHistoryFollowup = {
           sessionId,
@@ -6830,11 +6913,23 @@ export const useAiStore = defineStore('ai', {
           return
         }
         if (resolved.kind === 'pending') {
-          this.keepUnconfirmedRecovery(true)
+          if (pending.transcriptDegraded === true) {
+            this.keepTranscriptDegradedRecovery(true)
+          } else {
+            this.keepUnconfirmedRecovery(true)
+          }
           return
         }
         const floor = unconfirmedHistoryFloor(sessionId, resolved.followup.runId)
-        this.reconcileUnconfirmedTerminal(resolved.message, true, floor)
+        if (resolved.message.transcriptDegraded === true) {
+          this.reconcileTranscriptDegradedTerminal(resolved.message, true, floor)
+        } else {
+          this.reconcileUnconfirmedTerminal(resolved.message, true, floor)
+        }
+        return
+      }
+      if (previous?.reason === 'transcript-degraded') {
+        this.keepTranscriptDegradedRecovery(true)
         return
       }
       if (previous?.reason === 'unconfirmed') {
@@ -6889,6 +6984,59 @@ export const useAiStore = defineStore('ai', {
       }
       this.lastRoundOutcome = 'ok'
       this.clearManualRecovery('unconfirmed')
+      return true
+    },
+
+    /** 纯 transcript 降级只出专用通知；存在其他错误码时保留普通失败呈现，不叠加专用提示。 */
+    publishTranscriptDegradedRecovery(): void {
+      this.publishManualRecovery({ scope: 'history', reason: 'transcript-degraded', error: null })
+      const current = [...this.messages].reverse().find((item) => item.transcriptDegraded === true)
+      const hasOtherFailure = current !== undefined && hasOtherFailurePresentation(current)
+      if (this.manualRecovery?.reason === 'transcript-degraded' && !hasOtherFailure) {
+        setNotice(this, 'ai.notice.transcriptDegraded', undefined, 'warning')
+      }
+    },
+
+    keepTranscriptDegradedRecovery(publish: boolean): boolean {
+      if (publish) {
+        this.publishTranscriptDegradedRecovery()
+      }
+      return false
+    },
+
+    reconcileTranscriptDegradedTerminal(message: ChatMessage, publish: boolean, afterGeneration: number): boolean {
+      const runId = message.runId
+      const current = this.messages.find((item) => item.id === message.id)
+        ?? [...this.messages].reverse().find((item) => item.runId === runId)
+        ?? message
+      if (!this.hasRunDone(this.sessionId, runId, afterGeneration)) {
+        current.transcriptDegraded = true
+        current.unconfirmed = false
+        clearTranscriptErrorPresentation(current)
+        this.lastRoundOutcome = hasOtherFailurePresentation(current) ? 'error' : 'ok'
+        if (hasOtherFailurePresentation(current)) {
+          this.followupReady = false
+        }
+        return this.keepTranscriptDegradedRecovery(publish)
+      }
+      for (const item of this.messages) {
+        if (item.runId !== runId) {
+          continue
+        }
+        delete item.transcriptDegraded
+        clearTranscriptErrorPresentation(item)
+      }
+      if (runId !== null && runId !== undefined) {
+        clearUnconfirmedHistoryMarkers(this.sessionId, runId)
+      }
+      this.lastRoundOutcome = hasOtherFailurePresentation(current) ? 'error' : 'ok'
+      if (hasOtherFailurePresentation(current)) {
+        this.followupReady = false
+      }
+      this.clearManualRecovery('transcript-degraded')
+      if (this.noticeCode === 'ai.notice.transcriptDegraded') {
+        clearNotice(this)
+      }
       return true
     },
 
@@ -6958,13 +7106,13 @@ export const useAiStore = defineStore('ai', {
       let runId = followup.runId
       const activeHost = activeRoundHostId === null ? null : this.messages.find((item) => item.id === activeRoundHostId)
       let message = this.messages.find((item) => item.id === followup.messageId)
-      if (!message && activeHost?.unconfirmed === true
+      if (!message && (activeHost?.unconfirmed === true || activeHost?.transcriptDegraded === true)
         && (activeHost.runId ?? '') === runId) {
         message = activeHost
       }
       if (!message && runId !== '') {
-        message = [...this.messages].reverse().find((item) => item.unconfirmed === true
-          && (item.runId ?? '') === runId)
+        message = [...this.messages].reverse().find((item) =>
+          (item.unconfirmed === true || item.transcriptDegraded === true) && (item.runId ?? '') === runId)
       }
       if (!message) {
         return { kind: 'pending' }
@@ -6973,7 +7121,7 @@ export const useAiStore = defineStore('ai', {
       if (messageRunId !== '' && runId !== '' && messageRunId !== runId) {
         return { kind: 'invalid' }
       }
-      if (message.unconfirmed !== true) {
+      if (message.unconfirmed !== true && message.transcriptDegraded !== true) {
         return { kind: 'invalid' }
       }
       if (runId === '') {
@@ -7026,7 +7174,12 @@ export const useAiStore = defineStore('ai', {
           continue
         }
         if (resolved.kind === 'pending') {
-          this.keepUnconfirmedRecovery(true)
+          const pending = this.messages.find((item) => item.id === followup.messageId)
+          if (pending?.transcriptDegraded === true) {
+            this.keepTranscriptDegradedRecovery(true)
+          } else {
+            this.keepUnconfirmedRecovery(true)
+          }
           continue
         }
         if (this.scheduleHistoryRecovery(sessionId, resolved.followup)) {
@@ -7035,11 +7188,12 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    scheduleHistoryRecovery(sessionId = this.sessionId, followup?: TerminalHistoryFollowup): boolean {
+    scheduleHistoryRecovery(requestedSessionId?: string, followup?: TerminalHistoryFollowup): boolean {
+      const sessionId = requestedSessionId ?? this.sessionId
       const targetRunId = followup === undefined ? this.activeRunId ?? '' : followup.runId
       const targetMessageId = followup?.messageId ?? activeRoundHostId ?? ''
       const pendingAtStart = followup === undefined
-        ? [...this.messages].reverse().find((item) => item.unconfirmed === true)
+        ? [...this.messages].reverse().find((item) => item.unconfirmed === true || item.transcriptDegraded === true)
         : undefined
       const chain = followup ?? (pendingAtStart
         ? {
@@ -7062,10 +7216,15 @@ export const useAiStore = defineStore('ai', {
             return true
           }
           if (resolved.kind === 'pending') {
-            return this.keepUnconfirmedRecovery(false)
+            const pending = this.messages.find((item) => item.id === chain.messageId)
+            return pending?.transcriptDegraded === true
+              ? this.keepTranscriptDegradedRecovery(false)
+              : this.keepUnconfirmedRecovery(false)
           }
           const floor = unconfirmedHistoryFloor(sessionId, resolved.followup.runId)
-          return this.reconcileUnconfirmedTerminal(resolved.message, false, floor)
+          return resolved.message.transcriptDegraded === true
+            ? this.reconcileTranscriptDegradedTerminal(resolved.message, false, floor)
+            : this.reconcileUnconfirmedTerminal(resolved.message, false, floor)
         }
         return this.historyError === null && this.currentError === null
       }, () => {
@@ -7078,11 +7237,20 @@ export const useAiStore = defineStore('ai', {
             return
           }
           if (resolved.kind === 'pending') {
-            this.keepUnconfirmedRecovery(true)
+            const pending = this.messages.find((item) => item.id === chain.messageId)
+            if (pending?.transcriptDegraded === true) {
+              this.keepTranscriptDegradedRecovery(true)
+            } else {
+              this.keepUnconfirmedRecovery(true)
+            }
             return
           }
           const floor = unconfirmedHistoryFloor(sessionId, resolved.followup.runId)
-          this.reconcileUnconfirmedTerminal(resolved.message, true, floor)
+          if (resolved.message.transcriptDegraded === true) {
+            this.reconcileTranscriptDegradedTerminal(resolved.message, true, floor)
+          } else {
+            this.reconcileUnconfirmedTerminal(resolved.message, true, floor)
+          }
           return
         }
         const error = this.historyError ?? this.currentError
@@ -7106,11 +7274,27 @@ export const useAiStore = defineStore('ai', {
       this.requestTerminalHistoryRecovery(followup)
     },
 
+    recoverTranscriptDegradedTerminal(message: ChatMessage): void {
+      const sessionId = this.sessionId
+      const followup: TerminalHistoryFollowup = {
+        sessionId,
+        runId: message.runId ?? '',
+        messageId: message.id
+      }
+      recordUnconfirmedHistoryFloor(sessionId, followup.runId)
+      message.transcriptDegraded = true
+      message.unconfirmed = false
+      clearTranscriptErrorPresentation(message)
+      this.lastRoundOutcome = hasOtherFailurePresentation(message) ? 'error' : 'ok'
+      this.followupReady = !hasOtherFailurePresentation(message) && message.recoveryGap !== true
+      this.requestTerminalHistoryRecovery(followup)
+    },
+
     hasRunTerminal(runId: string | null | undefined): boolean {
       return runId !== null && runId !== undefined && this.historyWindowEntries.some((entry) =>
         entry.type.toUpperCase() === 'ASSISTANT' && entry.runId === runId
         && typeof entry.outcome === 'string' && entry.outcome.trim() !== '' && entry.outcome !== 'UNCONFIRMED'
-        && !isTranscriptDegraded(entry))
+        && (!isTranscriptDegraded(entry) || entry.outcome === 'DONE'))
     },
 
     settleInterruptedRecovery(reason: 'interrupted' | 'first-frame'): boolean {
@@ -7169,6 +7353,11 @@ export const useAiStore = defineStore('ai', {
       if (this.recoveryGap?.reason === 'archive-window'
         || this.messages.some((item) => item.recoveryGapReason === 'archive-window')) {
         this.reconcileArchiveRecovery()
+        return
+      }
+      const transcriptDegraded = [...this.messages].reverse().find((item) => item.transcriptDegraded === true)
+      if (transcriptDegraded) {
+        this.recoverTranscriptDegradedTerminal(transcriptDegraded)
         return
       }
       const unconfirmed = [...this.messages].reverse().find((item) => item.unconfirmed === true)
@@ -13067,16 +13256,16 @@ export const useAiStore = defineStore('ai', {
           this.clearPreparingRun()
           message.streaming = false
           message.done = true
-          const transcriptDegraded = !frame.cancelled && isTranscriptDegraded(frame as typeof frame & {
-            code?: unknown
-            errorCode?: unknown
-            transcriptDegraded?: unknown
-            historyComplete?: unknown
-          })
+          const transcriptDegraded = isCompletedTranscriptDegraded(frame)
           if (transcriptDegraded) {
-            this.recoverUnconfirmedTerminal(message)
+            this.recoverTranscriptDegradedTerminal(message)
           } else {
             message.unconfirmed = false
+            delete message.transcriptDegraded
+            this.clearManualRecovery('transcript-degraded')
+            if (this.noticeCode === 'ai.notice.transcriptDegraded') {
+              clearNotice(this)
+            }
             if (message.runId) {
               clearUnconfirmedHistoryMarkers(this.sessionId, message.runId)
             }
@@ -13103,6 +13292,7 @@ export const useAiStore = defineStore('ai', {
           // 而组件声明的 `unavailable`（任务已结束，仅供查看）没有任何生产者。
           this.cleanupTerminalInteractionState()
           this.suspended = false
+          const hasOtherFailure = transcriptDegraded && hasOtherFailurePresentation(message)
           if (frame.cancelled) {
             // 批G · S1/S3：取消轮把仍 pending/running 的**未提交**段一并收敛（后端不会再发
             // tool_result），并在消息尾打「已停止」标记（与「继续」入口互斥）。
@@ -13110,9 +13300,9 @@ export const useAiStore = defineStore('ai', {
             this.cancelRoundParts()
             message.stopped = true
             this.lastRoundOutcome = 'cancelled'
-          } else if (!transcriptDegraded) {
-            // 只有非取消、非降级 done 才按正常完成复位轮次结局。
-            this.lastRoundOutcome = 'ok'
+          } else {
+            // run 的业务完成与 transcript 完整性分开记录；其他真实错误码仍按普通失败处理。
+            this.lastRoundOutcome = hasOtherFailure ? 'error' : 'ok'
           }
           // 截断专项：`done.extra.truncated` 只在 finish_reason=length 时出现（后端口径）。
           // 消息级标记 —— 面板据此显示「已截断」，刷新后由历史/镜像恢复；取消轮不写（cancelled 优先）。
@@ -13121,6 +13311,7 @@ export const useAiStore = defineStore('ai', {
           }
           // 批 E · E2：取消的轮次不算"正常完成"—— 建议条只在非取消的 done 后出现
           this.followupReady = !frame.cancelled && message.unconfirmed !== true && message.recoveryGap !== true
+            && !hasOtherFailure
           // 上下文专项批①：轮末占用（唯一刷新点 —— 流式中不跳动，C-36）
           if (frame.context) {
             this.contextUsage = frame.context
@@ -13186,11 +13377,25 @@ export const useAiStore = defineStore('ai', {
             this.clearGateSubmissions()
             break
           }
+          message.code = frame.code ?? null
+          if (isCompletedTranscriptDegraded(frame)) {
+            const card = buildErrorCard(frame.code, frame.message)
+            message.errorCard = card
+            this.recoverTranscriptDegradedTerminal(message)
+            if (hasOtherFailurePresentation(message)) {
+              if (card !== null) {
+                clearNotice(this)
+              } else {
+                setNotice(this, 'ai.notice.chatRequestFailed', undefined, 'error')
+              }
+            }
+            this.clearGateSubmissions()
+            break
+          }
           // AR-13：关键错误归错误卡（不再进通知条）。卡挂在**本轮这条助手消息**上 ⇒ 面板在
           // 它发生的位置内联渲染（绝不做顶部固定）。判据 = 码优先、文案兜底（utils/error-card.ts）。
           // 只有专属 Alert 码（buildErrorCard 返回 null）才回落到 error 级通知。
           // 批次2：机器码入消息（随镜像持久化）—— 刷新后仍能区分"哪种失败"。
-          message.code = frame.code ?? null
           if (isUnconfirmedTerminal(frame)) {
             message.errorCard = null
             this.followupReady = false

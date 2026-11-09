@@ -164,6 +164,7 @@
       "keyUnreadable": "API Key 无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置。",
       "noModelConfigured": "AI 默认模型不可用：请到「设置 → AI」为供应商添加模型并选择默认模型。",
       "redisUnavailable": "AI 服务暂不可用，请稍后重试。",
+      "transcriptDegraded": "回答已生成，但部分历史记录未能保存",
       "historyEarlierFailed": "更早的对话没有加载成功，请再试一次。",
       "healthProbeFailed": "AI 可用性探测失败",
       "decisionPending": "确认已提交，暂未同步处理结果，可稍后重新载入查看。",

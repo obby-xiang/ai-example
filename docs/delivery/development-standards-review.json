@@ -4595,6 +4595,35 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批调整连接可见性和恢复身份，不修改UTF-8解码、SSE事件解析或文本截断。"},
         "verification-review": {"status": "checked", "reason": "agent-1173整批APPROVE，agent-1162/1169/1163/1168 scoped APPROVE；IDEA Reformat已执行，前端最终构建26.50秒成功，三个脚本node --check通过，动态场景全部NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:63c69e04489e0bd23e6cd3158344ec78026cbd6bee618ca716d4eed0784864e2",
+      "status": "reviewed",
+      "reason": "逐hunk复核转录降级实时/history/镜像/恢复呈现及错误码边界，agent-1169确认专用提示不再落成通用失败且其他真实错误不被清除。",
+      "reviewedAt": "2026-11-09T17:25:11+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1169、施工agent-1177",
+      "specChanges": [
+        {
+          "change": "DONE+transcriptDegraded及两个转录错误码改用『回答已生成，但部分历史记录未能保存』专用提示，不再使用通用『本轮出错/没有正常完成』。",
+          "reason": "业务回答和工具可能已完成，历史保存不完整不能被误导为整轮失败，也不能被隐藏。",
+          "impact": "实时、history、镜像和刷新均按码呈现并复用静默history对账；其他真实错误码继续保留原失败卡、通知和轮次结局，不叠加专用提示。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "按码区分转录与其他错误，新增transcriptDegraded镜像事实及专用恢复链；健康DONE才清除，普通FAILED/取消/other code保持原行为。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "ChatMessage新增可选transcriptDegraded并纳入镜像白名单，注明可与其他真实错误并存，协议为additive。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "新增『回答已生成，但部分历史记录未能保存』，准确区分业务完成与历史不完整。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "新增与中文同义的专用历史保存提示，不使用通用失败措辞。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有manualRecovery、history对账、镜像和i18n能力，无新增依赖或第二套恢复框架。"},
+        "java-api-style": {"status": "checked", "reason": "本批无Java变更；新增/触及TypeScript控制块显式{}，新字段为可选additive并同步镜像白名单。"},
+        "logging-exception-safety": {"status": "checked", "reason": "其他真实错误码和卡面保留，不向用户暴露异常原文或技术标识，专用提示不掩盖失败。"},
+        "toc-interaction": {"status": "checked", "reason": "转录专用中英文提示准确且最多一条，不引导重新执行业务操作，普通错误和取消展示不变。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "镜像字段可选additive，健康DONE证据仍按请求代次/session/run/消息身份对账，未新增AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批仅状态呈现与恢复，不修改UTF-8、SSE解析或文本截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1169两轮审查最终APPROVE；IDEA Reformat完成，前端build 26.44秒成功；实时/history/镜像动态场景NOT_RUN。"}
+      }
     }
   ]
 }
