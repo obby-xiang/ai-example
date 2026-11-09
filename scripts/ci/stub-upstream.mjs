@@ -362,7 +362,7 @@ function numericFault(faults, name) {
  * 不传 `round` 时三个新开关一律不生效 ⇒ 既有调用点与自检的旧断言逐值不变。
  */
 function writePlan(faults, round = {}) {
-  const toolSegment = round.kind === 'tool_call' || round.hasToolResult === true
+  const toolSegment = round.kind === 'tool_call' || round.kind === 'tool_seq' || round.hasToolResult === true
   const tailSegment = round.hasToolResult === true
   return {
     headerDelayMs: faults['stall-headers'] ? numericFault(faults, 'stall-headers') : 0,
@@ -412,8 +412,33 @@ function balancedJson(text, from) {
   return null
 }
 
-function requestToolOf(body) {
+const REQUEST_TOOL_SEQ_MARKER = /\btool-seq=([A-Za-z_][A-Za-z0-9_]{0,63}),([A-Za-z_][A-Za-z0-9_]{0,63})\b/
+
+/**
+ * 请求级逐笔工具序列：`tool-seq=<nameA>,<nameB>`，可选 `&seq-args=<json 对象>`
+ * （只作用于首笔；第二笔固定空参）。解析失败返回 `badArgs`，调用方退化为文本轮。
+ */
+function requestToolSeqOf(body) {
   const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  if (!text) return null
+  const m = REQUEST_TOOL_SEQ_MARKER.exec(text)
+  if (!m) return null
+  const names = [m[1], m[2]]
+  const rest = text.slice(m.index + m[0].length)
+  const argsMark = /^&seq-args=/.exec(rest)
+  if (!argsMark) return { names, args: {} }
+  const from = rest.indexOf('{', argsMark[0].length)
+  if (from < 0) return { names, args: {}, badArgs: '缺少 JSON 对象' }
+  const json = balancedJson(rest, from)
+  if (json === null) return { names, args: {}, badArgs: 'JSON 括号不平衡' }
+  const parsed = safeJson(json)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { names, args: {}, badArgs: 'JSON 不是对象' }
+  }
+  return { names, args: parsed }
+}
+
+function requestToolOf(body) {  const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
   if (!text) return null
   const m = REQUEST_TOOL_MARKER.exec(text)
   if (!m) return null
@@ -797,6 +822,27 @@ function decide(body, routes, turns, overrides = {}) {
     return { kind: 'tool_call', tool: wanted.name, args: wanted.args, route: 'REQUEST-TOOL',
       reason: `请求级工具标记 tool=${wanted.name}` }
   }
+  // 请求级逐笔工具序列（`tool-seq=<nameA>,<nameB>` 可选 `&seq-args=<json>`）：
+  // 一条 assistant 消息里两个**不同** tool_calls（首笔用 seq-args，第二笔空参），
+  // 用于"首笔 W/J/P 失败 → 第二笔普通 UPSTREAM_FAILED skipped"的批策略验收。
+  const sequence = requestToolSeqOf(body)
+  if (sequence) {
+    const productTools = new Set(Array.isArray(routes.productTools) ? routes.productTools : [])
+    const undisclosed = sequence.names.find((name) => !productTools.has(name) || !disclosed.has(name))
+    if (undisclosed) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: `逐笔序列工具 ${undisclosed} 不在产品工具或本轮披露清单` }
+    }
+    if (sequence.badArgs) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: `逐笔序列入参不可解：${sequence.badArgs}` }
+    }
+    const sequenceKey = `tool-seq:${sequence.names.join(',')}`
+    if (bucket.requestToolUsed === sequenceKey) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: '逐笔序列已在本提示词发过（幂等闸）' }
+    }
+    bucket.requestToolUsed = sequenceKey
+    return { kind: 'tool_seq', calls: sequence.names.map((name, index) => ({ name, args: index === 0 ? sequence.args : {} })),
+      route: 'REQUEST-SEQ', reason: `请求级逐笔序列 tool-seq=${sequence.names.join(',')}` }
+  }
   for (const route of routes.routes || []) {
     const requires = Array.isArray(route.match?.requiresTools) ? route.match.requiresTools : []
     // 收敛契约 ①：披露清单先行——未披露的工具不允许发起调用
@@ -913,6 +959,22 @@ function toolRound(tool, args, callId, model) {
         type: 'function',
         function: { name: tool, arguments: JSON.stringify(args) }
       }]
+    }, null, model),
+    chunk({}, 'tool_calls', model),
+    'data: [DONE]\n\n'
+  ]
+}
+
+function multiNamedToolRound(calls, callId, model) {
+  return [
+    chunk({ role: 'assistant', content: '' }, null, model),
+    chunk({
+      tool_calls: calls.map((call, index) => ({
+        index,
+        id: `${callId}-${index + 1}`,
+        type: 'function',
+        function: { name: call.name, arguments: JSON.stringify(call.args) }
+      }))
     }, null, model),
     chunk({}, 'tool_calls', model),
     'data: [DONE]\n\n'
@@ -1342,6 +1404,7 @@ function blueprintDecision(body, faults) {
 function framesFor(decision, faults, index, model, usageShape, responseBoundary = null) {
   const callId = `call-stub-${index}`
   if (responseBoundary === 'multi-choice') return multiChoiceRound(model)
+  if (decision.kind === 'tool_seq') return multiNamedToolRound(decision.calls, callId, model)
   if (decision.kind !== 'tool_call') {
     const base = faults['huge-frame']
       ? hugeTextRound(numericFault(faults, 'huge-frame'), model)

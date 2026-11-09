@@ -2845,6 +2845,62 @@ function assertWriteOperationsDisabled(context, phase, operations) {
     'multi-page read-only preview keeps pagination available during recovery', pages)
 }
 
+/**
+ * 手动恢复失败态的门禁：只禁"发送/继续/未决业务写"，允许新对话、编辑回填、复制赞踩与只读预览。
+ * 与普通恢复（assertWriteOperationsDisabled）分开，避免把两类规格混成一个断言。
+ */
+function assertManualFailureOperations(context, phase, operations) {
+  const disabledNames = ['send', 'stop', 'continueRound', 'gate', 'form', 'upload', 'sheetWrite']
+  const actual = operationEvidence(operations, disabledNames)
+  const enabled = Object.entries(actual).flatMap(([name, entries]) => entries.filter((entry) => !entry.disabled)
+    .map((entry) => ({name, testId: entry.testId, visible: entry.visible})))
+  context.checks.require(`${phase}.manual-writes-disabled`, enabled.length === 0,
+    'manual failure keeps send/continue/pending business writes disabled', {actual, enabled})
+  context.checks.require(`${phase}.send-control-present`, operations.send.length + operations.stop.length > 0,
+    'a real send or stop control exists to prove the disabled state', {
+      send: operations.send,
+      stop: operations.stop
+    })
+  const newChat = operations.newChat.filter((entry) => entry.visible)
+  context.checks.require(`${phase}.manual-new-chat-enabled`, newChat.length === 1 && !newChat[0].disabled,
+    'new-chat stays enabled during manual failure', newChat)
+  const edit = operations.edit.filter((entry) => entry.visible)
+  context.checks.require(`${phase}.manual-edit-enabled`, edit.length > 0 && edit.every((entry) => !entry.disabled),
+    'terminal message edit/refill stays enabled during manual failure', edit)
+  const copy = operations.copy.filter((entry) => entry.visible)
+  const feedback = operations.feedback.filter((entry) => entry.visible)
+  if (copy.length > 0 || feedback.length > 0) {
+    context.checks.require(`${phase}.manual-copy-feedback-enabled`,
+      [...copy, ...feedback].every((entry) => !entry.disabled),
+      'copy and feedback stay enabled during manual failure', {copy, feedback})
+  }
+  const levels = operations.previewLevel.filter((entry) => entry.visible)
+  context.checks.require(`${phase}.readonly-preview-level-unrestricted`, levels.every((entry) => !entry.disabled),
+    'read-only preview level controls are not disabled by manual failure', levels)
+}
+
+/** 先输入非空草稿，再断言发送仍禁用（避免"空输入禁用"假通过）。 */
+async function assertSendDisabledWithDraft(context, phase) {
+  const {browser, checks} = context
+  await browser.evaluate(`document.querySelector('[data-testid="composer-input"]').focus()`, false)
+  await browser.send('Input.insertText', {text: `manual-failure-draft-${Date.now()}`})
+  const state = await browser.waitFor(`(() => {
+    const input = document.querySelector('[data-testid="composer-input"]')
+    const send = document.querySelector('[data-testid="send-btn"]')
+    if (!input || !send || input.value.length === 0) return null
+    return {valueLength: input.value.length, disabled: send.disabled === true || send.getAttribute('aria-disabled') === 'true'}
+  })()`, 'DRAFT_NOT_ENTERED')
+  checks.require(`${phase}.send-disabled-with-draft`, state.disabled === true,
+    'send stays disabled even with a non-empty draft during manual failure', state)
+  await browser.evaluate(`(() => {
+    const input = document.querySelector('[data-testid="composer-input"]')
+    if (!input) return null
+    input.value = ''
+    input.dispatchEvent(new Event('input', {bubbles: true}))
+    return input.value.length
+  })()`, false)
+}
+
 function messagePending(message) {
   return message.parts.some((part) => part.kind === 'tool' && part.requiresAction === true)
 }
@@ -2958,7 +3014,8 @@ async function assertManualRecoveryGate(context, phase, historyEvidence, busines
   checks.require(`${phase}.manual-retry-enabled`, view.snapshot.recoveryRetries.every((retry) => !retry.disabled),
     'manual recovery retry is enabled', view.snapshot.recoveryRetries)
   assertMessagePresentation(context, phase, view, 'terminal')
-  assertWriteOperationsDisabled(context, phase, view.operations)
+  assertManualFailureOperations(context, phase, view.operations)
+  await assertSendDisabledWithDraft(context, phase)
   await assertDraftAndTerminalCopy(context, phase, view)
   await saveRecoveryPhase(context, phase, view, historyEvidence, business)
 }
