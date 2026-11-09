@@ -530,7 +530,7 @@ const TURN_TEXT = '命名轮蓝本：这是一段确定性文本，用于验证�
 const PREFIX_EXPECTATIONS = new Map([
   ['text', {requests: 2, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_SUFFIX_TEXT}`, tools: []}],
   ['tool-suffix', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_SUFFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: ['list_config_defs']}],
-  ['prefix-prefix', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: []}],
+  ['prefix-prefix', {requests: 2, text: CORRECTION_PREFIX_TEXT, tools: []}],
   ['empty-suffix-tool', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: ['list_config_defs']}],
   ['park-resume', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: ['generative_form']}],
   ['other-run-control', {requests: 1, text: TURN_TEXT, tools: []}]
@@ -617,6 +617,25 @@ function assertPrefixUpstream(context, requests) {
       .map((message) => message?.tool_call_id).filter(Boolean)
     checks.require(`prefix.request-${index + 1}-tool-result-pairing`, resultIds.every((id) => assistantIds.includes(id)),
       'every role=tool result has a preceding assistant tool_call with the same ID', {requestId: request.id, assistantIds, resultIds})
+    if (config.variant === 'prefix-prefix' && index === 1) {
+      // 已确认规格：第二响应仍是“无工具的纯文本重复 prefix”，唯一一次纠正已发生，不存在第三次请求。
+      const chunks = request.events.filter((event) => event.type === 'upstream-chunk')
+      const contentChoices = chunks.flatMap((event) => event.choices ?? []).filter((choice) => choice.hasContent === true)
+      const responseCalls = chunks.flatMap((event) => event.choices ?? []).flatMap((choice) => choice.toolCalls ?? [])
+      checks.require('prefix.request-2-repeated-prefix-response', request.decision?.kind === 'text'
+        && request.decision?.text === CORRECTION_PREFIX_TEXT && (request.decision?.tool ?? null) === null
+        && contentChoices.length === 1 && digestMatches(contentChoices[0]?.content, CORRECTION_PREFIX_TEXT)
+        && responseCalls.length === 0,
+      'the second upstream response is exactly one repeated prefix as plain text with no tool calls', {
+        decision: {
+          kind: request.decision?.kind ?? null,
+          text: textEvidence(request.decision?.text ?? ''),
+          tool: request.decision?.tool ?? null
+        },
+        contentChoices: contentChoices.map((choice) => choice.content),
+        responseCalls: responseCalls.map((call) => ({id: call.id ?? null, name: call.name ?? null}))
+      })
+    }
     if (['empty-suffix-tool', 'park-resume'].includes(config.variant)) {
       const toolAssistants = request.body.messages.filter((message) => message?.role === 'assistant' && (message.tool_calls ?? []).length > 0)
       let originalResponse = null
@@ -705,6 +724,17 @@ async function assertPrefixFinalProjection(context, requestEvidence) {
   const historyText = history.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
     .map((message) => message.text ?? message.content ?? '').join('')
   checks.require('prefix.history-text-complete', historyText === uiText, textEvidence(uiText), textEvidence(historyText))
+  if (config.variant !== 'other-run-control') {
+    const countPrefix = (text) => text.split(CORRECTION_PREFIX_TEXT).length - 1
+    const occurrences = {
+      ui: countPrefix(uiText),
+      run: countPrefix(runEvidence.data.snapshot.finalText ?? ''),
+      history: countPrefix(historyText)
+    }
+    checks.require('prefix.single-prefix-in-final-surfaces',
+      occurrences.ui === 1 && occurrences.run === 1 && occurrences.history === 1,
+      'UI, public run finalText and history each carry exactly one correction prefix (no duplicate display)', occurrences)
+  }
   const upstreamIds = requestEvidence.flatMap((request) => request.messages.flatMap((message) => message.toolCalls.map((call) => call.id).filter(Boolean)))
   const resultIds = requestEvidence.flatMap((request) => request.messages.map((message) => message.toolCallId).filter(Boolean))
   checks.require('prefix.all-tool-results-paired', canonicalJson([...new Set(upstreamIds)].sort()) === canonicalJson([...new Set(resultIds)].sort()),
