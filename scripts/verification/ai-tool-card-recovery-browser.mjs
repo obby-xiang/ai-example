@@ -2667,9 +2667,14 @@ async function assertSkippedPhase(context, phase, skippedToolCallId, otherToolCa
   `exactly ${expectedNewTasks} scenario-created task(s) with zero jobs`, newTasks)
   for (const task of newTasks) context.createdTaskIds.add(task.id)
   business.relevantTasks = newTasks
-  const skippedSummary = skippedToolSummary(snapshot, skippedToolCallId, context.config.locale)
-  checks.require(`${phase}.skipped.copy-summary-known`, skippedSummary.trim() !== '',
-    'full toolSummary is generated from the skipped part name and args, never from the other card', skippedSummary)
+  // 单轮上限跳过的第二张卡在上游就没有 args（store 里 args=null），产品也不渲染该卡；
+  // 此时不存在可复述的 toolSummary：只要求该卡零可见，不伪造 locale 文案。
+  const skippedArgsPresent = skippedPart?.args !== null && skippedPart?.args !== undefined
+  const skippedSummary = skippedArgsPresent ? skippedToolSummary(snapshot, skippedToolCallId, context.config.locale) : null
+  checks.require(`${phase}.skipped.copy-summary-known`, skippedArgsPresent
+    ? skippedSummary.trim() !== ''
+    : targetCard(snapshot, skippedToolCallId).length === 0,
+  'skipped toolSummary is generated from its own name and args when args exist; without args the skipped card stays invisible', skippedSummary)
   const target = targetPart(snapshot, skippedToolCallId)
   const requiredTexts = requireBody ? assertMixedBodyInHistory(context, phase, target.message, history) : []
   const requiredTitle = otherCards.length === 1 ? visibleToolSummary(snapshot, otherToolCallId, context.config.locale) : null
@@ -3512,7 +3517,6 @@ async function runStreamRecoveryRefresh(context) {
   context.runId = initial.activeRunId
   const initialHistory = await context.api.history(initial.sessionId)
   await savePhase(context, 'initial-streaming', initial, initialHistory, context.businessAfterFixture)
-  const requestBaseline = browser.requestCounts()
 
   browser.setPhase('restore-stream')
   await browser.setHistoryFault('always')
@@ -3529,13 +3533,21 @@ async function runStreamRecoveryRefresh(context) {
   })()`, 'STREAM_RECOVERY_TERMINAL_NOT_REACHED')
   const recovered = await recoveryPhaseEvidence(context)
   await assertTerminalRecoveryComplete(context, 'recovered-terminal', recovered.historyEvidence, recovered.business)
+  // 恢复中重连活流（GET /api/ai/events/<runId>）是恢复本身的前置动作，不属于刷新副作用；
+  // 副作用基线取“恢复已终态”之后，仍要求 refresh-1 不新增任何 chat/confirm/feedback/events/resume。
+  const settledBaseline = browser.requestCounts()
 
   browser.setPhase('refresh-1')
   await browser.reload()
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false && ai.loading === false && ai.historyLoaded === true
+  })()`, 'REFRESH_RECOVERY_NOT_SETTLED')
   const refreshed = await recoveryPhaseEvidence(context)
   await assertTerminalRecoveryComplete(context, 'refresh-1', refreshed.historyEvidence, refreshed.business)
-  checks.require('refresh.no-repeat-side-effect-requests', canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
-    requestBaseline, browser.requestCounts())
+  await context.evidence.json('network-requests-refresh-1.json', browser.networkRequests)
+  checks.require('refresh.no-repeat-side-effect-requests', canonicalJson(browser.requestCounts()) === canonicalJson(settledBaseline),
+    settledBaseline, browser.requestCounts())
   checks.require('refresh.business-stable', refreshed.business.fingerprint === context.businessAfterFixture.fingerprint,
     context.businessAfterFixture.fingerprint, refreshed.business.fingerprint)
 }
@@ -4198,9 +4210,8 @@ async function runFormQueueRecovery(context) {
     requestBaseline, browser.requestCounts())
 }
 
-function assertHistoryProjectionCommit(context, phase, snapshot, history) {
-  const actual = snapshot.historyProjection
-  const expected = {
+function historyProjectionExpectation(history) {
+  return {
     total: history.total ?? history.messages.length,
     offset: Math.max(0, (history.total ?? history.messages.length) - history.messages.length),
     hasMore: history.hasMore === true,
@@ -4221,8 +4232,32 @@ function assertHistoryProjectionCommit(context, phase, snapshot, history) {
       textHash: {algorithm: 'fnv1a32', value: fnv1a32(message.text ?? message.content ?? '')}
     }))
   }
+}
+
+function assertHistoryProjectionCommit(context, phase, snapshot, history) {
+  const actual = snapshot.historyProjection
+  const expected = historyProjectionExpectation(history)
   context.checks.require(`${phase}.history-only-projection-commit`, canonicalJson(actual) === canonicalJson(expected),
     expected, actual)
+}
+
+/**
+ * 投影提交是异步收敛的：UI 快照与权威 history 各自会被新轮次推进，单次采样会把
+ * “快照之后服务端又多了一条”误判成不提交。这里轮询到两侧一致（真实回退永不收敛 ⇒ 仍失败）。
+ */
+async function waitForHistoryProjectionCommit(context, phase) {
+  const deadline = Date.now() + context.config.timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const snapshot = await context.browser.snapshot()
+    const authoritative = requiredHistory(await context.api.history(context.sessionId))
+    const expected = historyProjectionExpectation(authoritative)
+    if (canonicalJson(snapshot.historyProjection) === canonicalJson(expected)) return {snapshot, authoritative}
+    last = {actual: snapshot.historyProjection, expected}
+    await sleep(context.config.pollMs)
+  }
+  context.checks.require(`${phase}.history-only-projection-commit`, false, last?.expected ?? null, last?.actual ?? null)
+  return null
 }
 
 function assertNoReconnect(context, phase, baseline) {
@@ -4263,9 +4298,9 @@ async function runHistoryGenerationRace(context) {
   const newer = await browser.waitForHistoryPhase('generation-new', {minimumSuccessCount: 1})
   await browser.releaseDelayedHistoryResponse()
   const older = await browser.waitForHistoryPhase('generation-old', {minimumSuccessCount: 1})
-  const after = await browser.snapshot()
-  const authoritativeHistory = requiredHistory(await context.api.history(context.sessionId))
-  assertHistoryProjectionCommit(context, 'history-generation-after-late-old', after, authoritativeHistory)
+  const committed = await waitForHistoryProjectionCommit(context, 'history-generation-after-late-old')
+  const after = committed?.snapshot ?? await browser.snapshot()
+  const authoritativeHistory = committed?.authoritative ?? requiredHistory(await context.api.history(context.sessionId))
   await context.evidence.json('history-generation-projection.json', {
     actual: after.historyProjection,
     authoritative: historySummary(authoritativeHistory)
