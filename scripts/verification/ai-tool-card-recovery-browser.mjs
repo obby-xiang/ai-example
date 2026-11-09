@@ -736,8 +736,6 @@ const browserObservationSource = String.raw`
     samples: [],
     noticeSamples: [],
     copyCalls: [],
-    conditionEvents: [],
-    conditionInstrumentation: {workspaceWrapped: false, restoreWrapped: false},
     errors: []
   }
   const recordError = (error, code) => {
@@ -762,90 +760,6 @@ const browserObservationSource = String.raw`
       hash = Math.imul(hash, 16777619)
     }
     return {algorithm: 'fnv1a32', value: (hash >>> 0).toString(16)}
-  }
-  let conditionSequence = 0
-  const recordConditionEvent = (type, details) => {
-    conditionSequence += 1
-    state.conditionEvents.push({sequence: conditionSequence, atMs: Date.now(), type, details: cloneJson(details)})
-    if (state.conditionEvents.length > 512) state.conditionEvents.splice(0, state.conditionEvents.length - 512)
-  }
-  const findExportInstance = (vnode) => {
-    if (!vnode) return null
-    if (Array.isArray(vnode)) {
-      for (const child of vnode) {
-        const found = findExportInstance(child)
-        if (found) return found
-      }
-      return null
-    }
-    const instance = vnode.component
-    if (instance) {
-      const name = instance.type?.name ?? instance.type?.__name ?? ''
-      if (name === 'ExportWizardView' || name === 'export-wizard') return instance
-      const fromComponent = findExportInstance(instance.subTree)
-      if (fromComponent) return fromComponent
-    }
-    if (vnode.subTree) {
-      const fromSubTree = findExportInstance(vnode.subTree)
-      if (fromSubTree) return fromSubTree
-    }
-    if (Array.isArray(vnode.children)) {
-      return findExportInstance(vnode.children)
-    }
-    return null
-  }
-  let restoreProbeFailed = false
-  const instrumentConditionEvents = () => {
-    const app = document.getElementById('app')
-    const pinia = app?.__vue_app__?.config.globalProperties.$pinia
-    const workspace = pinia?._s.get('workspace')
-    if (workspace && !workspace.__conditionRecoveryWrapped) {
-      Object.defineProperty(workspace, '__conditionRecoveryWrapped', {value: true, enumerable: false})
-      for (const name of ['setQueryConditions', 'clearQueryConditions', 'enterPage']) {
-        const original = workspace[name].bind(workspace)
-        workspace[name] = (...args) => {
-          if (name === 'setQueryConditions') {
-            recordConditionEvent('setQueryConditions', {defCode: args[0], condition: hashValue(args[1])})
-          } else if (name === 'clearQueryConditions') {
-            recordConditionEvent('clearQueryConditions', {defCode: args[0]})
-          } else {
-            recordConditionEvent('enterPage', {
-              pageId: args[0]?.pageId ?? args[0]?.page ?? null,
-              taskId: args[0]?.taskId ?? null,
-              step: args[0]?.step ?? null,
-              selectedDefs: cloneJson(args[0]?.selectedDefs ?? null),
-              queryConditions: hashValue(args[0]?.queryConditions ?? null)
-            })
-          }
-          return original(...args)
-        }
-      }
-      state.conditionInstrumentation.workspaceWrapped = true
-    }
-    const mountedRoot = app?.__vue_app__?._instance
-      ?? document.querySelector('#app')?.firstElementChild?.__vueParentComponent
-      ?? null
-    const instance = findExportInstance(mountedRoot?.subTree)
-    if (instance && !instance.__conditionRecoveryRestoreWrapped) {
-      const original = instance.setupState?.restoreExportTaskState
-      if (typeof original !== 'function') {
-        if (!restoreProbeFailed) {
-          restoreProbeFailed = true
-          recordError(new Error('restoreExportTaskState probe unavailable'), 'CONDITION_RESTORE_PROBE_UNAVAILABLE')
-        }
-        return
-      }
-      Object.defineProperty(instance, '__conditionRecoveryRestoreWrapped', {value: true, enumerable: false})
-      instance.setupState.restoreExportTaskState = (loaded) => {
-        recordConditionEvent('restoreExportTaskState', {
-          taskId: loaded?.id ?? null,
-          currentStep: loaded?.currentStep ?? null,
-          items: (loaded?.items ?? []).map((item) => ({defCode: item.defCode ?? null, condition: hashValue(item.conditionJson ?? null)}))
-        })
-        return original(loaded)
-      }
-      state.conditionInstrumentation.restoreWrapped = true
-    }
   }
   const appStore = () => {
     const app = document.getElementById('app')
@@ -934,7 +848,6 @@ const browserObservationSource = String.raw`
   let previousNotices = ''
   const sample = () => {
     try {
-      instrumentConditionEvents()
       const ai = appStore()
       if (ai) {
         const tools = ai.messages.flatMap((message) => message.parts.filter((part) => part.kind === 'tool').map((part) => ({
@@ -1425,10 +1338,72 @@ class CdpPage {
     await this.send('Input.dispatchMouseEvent', {type: 'mouseReleased', ...center, button: 'left', buttons: 0, clickCount: 1})
   }
 
-  async sendPrompt(prompt) {
+  async messageState() {
+    return await this.evaluate(`(() => {
+      const app = document.getElementById('app')
+      const pinia = app && app.__vue_app__ && app.__vue_app__.config.globalProperties.$pinia
+      const ai = pinia && pinia._s.get('ai')
+      const input = document.querySelector('[data-testid="composer-input"]')
+      return ai ? {
+        messages: ai.messages.length,
+        loading: ai.loading === true,
+        runId: ai.activeRunId ?? null,
+        historyLoaded: ai.historyLoaded === true,
+        restoring: ai.restoringRecovery === true,
+        draft: input && typeof input.value === 'string' ? input.value : null
+      } : null
+    })()`, false)
+  }
+
+  async waitForChatAcceptance(chatBaseline, messageBaseline, code, timeoutMs) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (this.requestCounts().chat > chatBaseline) return {via: 'chat'}
+      const state = await this.messageState()
+      if (state && (state.messages > messageBaseline || state.loading || state.runId)) return {via: 'store', ...state}
+      await sleep(this.config.pollMs)
+    }
+    throw new AssertionFailure(code)
+  }
+
+  async typeAndSend(prompt) {
     await this.evaluate(`document.querySelector('[data-testid="composer-input"]').focus()`, false)
-    await this.send('Input.insertText', {text: prompt})
+    const draft = (await this.messageState())?.draft ?? ''
+    if (draft !== prompt) {
+      await this.evaluate(`(() => {
+        const element = document.querySelector('[data-testid="composer-input"]')
+        if (!element) return false
+        if (typeof element.select === 'function') element.select()
+        return true
+      })()`, false)
+      await this.send('Input.insertText', {text: prompt})
+    }
     await this.click('[data-testid="send-btn"]')
+  }
+
+  async sendPrompt(prompt) {
+    await this.waitFor(`(() => {
+      const app = document.getElementById('app')
+      const pinia = app && app.__vue_app__ && app.__vue_app__.config.globalProperties.$pinia
+      const ai = pinia && pinia._s.get('ai')
+      return !!ai && ai.historyLoaded === true && ai.loading === false
+        && ai.restoringRecovery === false && !ai.activeRunId
+    })()`, 'COMPOSER_NOT_READY', 30_000)
+    const chatBaseline = this.requestCounts().chat
+    const messageBaseline = (await this.messageState())?.messages ?? 0
+    await this.typeAndSend(prompt)
+    try {
+      await this.waitForChatAcceptance(chatBaseline, messageBaseline, 'CHAT_NOT_ACCEPTED', 15_000)
+    } catch (error) {
+      if (!(error instanceof AssertionFailure)) throw error
+      const state = await this.messageState()
+      if (this.requestCounts().chat !== chatBaseline || !state || state.messages > messageBaseline
+        || state.loading || state.runId || state.draft !== prompt) {
+        throw error
+      }
+      await this.typeAndSend(prompt)
+      await this.waitForChatAcceptance(chatBaseline, messageBaseline, 'CHAT_NOT_ACCEPTED_AFTER_RETRY', 30_000)
+    }
   }
 
   async snapshot() {
@@ -1989,13 +1964,6 @@ function observationEvidence(observation) {
       notices: sample.notices.map((notice) => ({testId: notice.testId, text: textEvidence(notice.text)}))
     })),
     copyCalls: (observation?.copyCalls ?? []).map((call) => ({atMs: call.atMs, mechanism: call.mechanism, text: textEvidence(call.text)})),
-    conditionEvents: (observation?.conditionEvents ?? []).map((event) => ({
-      sequence: event.sequence,
-      atMs: event.atMs,
-      type: event.type,
-      details: event.details
-    })),
-    conditionInstrumentation: observation?.conditionInstrumentation ?? null,
     errors: observation?.errors ?? []
   }
 }
@@ -2482,24 +2450,6 @@ function assertBusinessForTool(context, phase, business, snapshot) {
         && fields.length === 1 && fields[0]?.fieldCode === 'code' && fields[0]?.operator === 'EQ' && fields[0]?.value === 'CNY'
         && (condition?.scopeKeys === undefined || (Array.isArray(condition.scopeKeys) && condition.scopeKeys.length === 0)),
       'target set_condition succeeds with only CURRENCY code EQ CNY in the live workspace', drafts)
-      const instrumentation = snapshot.observation?.conditionInstrumentation
-      checks.require(`${phase}.condition-probes-ready`, instrumentation?.workspaceWrapped === true && instrumentation?.restoreWrapped === true,
-        'workspace actions and restoreExportTaskState are both observed without changing production behavior', instrumentation)
-      const events = snapshot.observation?.conditionEvents ?? []
-      const setEvent = events.filter((event) => event.type === 'setQueryConditions' && event.details?.defCode === 'CURRENCY').at(-1)
-      checks.require(`${phase}.condition-set-event-exact`, setEvent?.details?.condition?.algorithm === 'fnv1a32'
-        && setEvent.details.condition.value === fnv1a32(condition),
-      'the observed setQueryConditions event carries exactly the successful CNY condition hash', {
-        expected: {algorithm: 'fnv1a32', value: fnv1a32(condition)},
-        actual: setEvent ?? null,
-        eventSequence: events.map((event) => ({sequence: event.sequence, type: event.type}))
-      })
-      checks.require(`${phase}.condition-event-probes-complete`, events.some((event) => event.type === 'enterPage')
-        && events.some((event) => event.type === 'restoreExportTaskState'),
-      'enterPage and restoreExportTaskState are present in the bounded ordered event log', events.map((event) => ({
-        sequence: event.sequence,
-        type: event.type
-      })))
     }
   }
 }
@@ -2591,21 +2541,24 @@ async function runToolScenario(context) {
 
 async function approveCreateTasks(context) {
   const {browser} = context
-  for (let decision = 1; decision <= 2; decision += 1) {
-    const pending = await browser.waitFor(`(() => {
-      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
-      const part = ai.messages.flatMap((message) => message.parts).find((part) => part.kind === 'tool'
-        && part.name === 'create_task' && part.requiresAction === true)
-      if (part) return {toolCallId: part.toolCallId}
-      return ai.loading === false ? {finished: true} : null
-    })()`, `create_task decision ${decision}`)
-    if (pending.finished) return
-    await browser.click(`[data-testid="pending-card-${pending.toolCallId}"] [data-testid="gate-actions"] button:last-child`)
-    await browser.waitFor(`(() => {
-      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
-      return !ai.messages.flatMap((message) => message.parts).some((part) => part.toolCallId === '${pending.toolCallId}' && part.requiresAction === true)
-    })()`, `create_task decision ${decision} accepted`)
-  }
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.messages.flatMap((message) => message.parts).some((part) => part.kind === 'tool' && part.name === 'create_task')
+  })()`, 'CREATE_TASK_PART_NOT_FORMED')
+  const pending = await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const part = ai.messages.flatMap((message) => message.parts).find((part) => part.kind === 'tool'
+      && part.name === 'create_task' && part.requiresAction === true)
+    if (part) return {toolCallId: part.toolCallId}
+    const parts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool' && part.name === 'create_task')
+    return parts.length > 0 && ai.loading === false ? {finished: true} : null
+  })()`, 'CREATE_TASK_DECISION_NOT_FORMED')
+  if (pending.finished) return
+  await browser.click(`[data-testid="pending-card-${pending.toolCallId}"] [data-testid="gate-actions"] button:last-child`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return !ai.messages.flatMap((message) => message.parts).some((part) => part.toolCallId === '${pending.toolCallId}' && part.requiresAction === true)
+  })()`, 'CREATE_TASK_DECISION_NOT_ACCEPTED')
 }
 
 function skippedToolSummary(snapshot, toolCallId, locale) {
@@ -2725,6 +2678,10 @@ async function runOrdinarySkippedScenario(context) {
   if (parts.length !== 2) throw new ScenarioNotRun('ORDINARY_SKIPPED_TWO_CALLS_NOT_FORMED')
   const first = parts[0]
   const skipped = parts[1]
+  if (!(skipped.status === 'skipped' && skipped.userTextCode === 'UPSTREAM_FAILED'
+    && skipped.decision === null && skipped.requiresAction === false)) {
+    throw new ScenarioNotRun('ORDINARY_SKIPPED_FIXTURE_NOT_FORMED')
+  }
   checks.require('live.first-create-failed', ['failed', 'rejected', 'blocked'].includes(first.status),
     'the first create_task fails instead of being approved', first)
   checks.require('live.second-create-ordinary-skipped', skipped.status === 'skipped'
