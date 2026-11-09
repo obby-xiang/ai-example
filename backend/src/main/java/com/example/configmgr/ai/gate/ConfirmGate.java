@@ -311,7 +311,7 @@ public class ConfirmGate {
     private final LeaseService leaseService;
 
     /**
-     * 抢租失败后的一次性延迟重试调度器（见 {@link RetryScheduler}）。
+     * 租约、续跑与前端到期任务的一次性延迟调度器（见 {@link RetryScheduler}）。
      */
     private final RetryScheduler retryScheduler;
 
@@ -328,7 +328,7 @@ public class ConfirmGate {
     private boolean retryExecutorShutdown;
 
     /**
-     * 抢租失败后的<b>一次性</b>延迟重试调度缝（默认 = 受管单线程调度器）。
+     * 租约、续跑与前端到期任务的<b>一次性</b>延迟调度缝（默认 = 受管单线程调度器）。
      *
      * <p>为什么是接口：用例要断言"35s 后重试一次、holder 还活着就不动作、且不再排下一次"，
      * 真线程只能 sleep 真实时间（慢且不稳）。生产路径就是 {@code schedule(task, 35s)}。
@@ -1288,12 +1288,12 @@ public class ConfirmGate {
             fresh = pending;
         }
         if (!PendingToolCall.PENDING.equals(fresh.getStatus())) {
-            return new ExpiryResult(fresh, false, false);
+            return new ExpiryResult(fresh, false, ExpiryEmission.NOT_ATTEMPTED, ExpiryEmission.NOT_ATTEMPTED);
         }
         PendingToolCall timedOut = applyFrontendTimeout(fresh, timeoutSeconds);
         RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, timedOut);
         if (claim == null) {
-            return new ExpiryResult(writeFrontendTimeout(runId, timedOut, timeoutSeconds), true, true);
+            return writeFrontendTimeout(runId, timedOut, timeoutSeconds);
         }
         if (!claim.won()) {
             PendingToolCall current = this.store.pendingLenient(runId, pending.getToolCallId());
@@ -1304,15 +1304,14 @@ public class ConfirmGate {
                     PendingToolCall repaired = applyFrontendTimeout(raw, timeoutSeconds);
                     RunStore.DecisionClaim repair = this.store.tryRepairDecision(runId, repaired, claim.recorded());
                     if (repair != null && repair.won()) {
-                        return new ExpiryResult(repaired, true, false);
+                        return new ExpiryResult(repaired, true, ExpiryEmission.NOT_ATTEMPTED,
+                                ExpiryEmission.NOT_ATTEMPTED);
                     }
                 }
             }
-            return new ExpiryResult(entry, false, false);
+            return new ExpiryResult(entry, false, ExpiryEmission.NOT_ATTEMPTED, ExpiryEmission.NOT_ATTEMPTED);
         }
-        this.registry.of(runId).frontendToolResult(timedOut, false, timedOut.getResultText());
-        traceDecision(runId, timedOut.getToolCallId(), "timeout", timedOut, "ACCEPTED", "system");
-        return new ExpiryResult(timedOut, true, true);
+        return completeFrontendTimeoutDecision(runId, timedOut);
     }
 
     /**
@@ -1355,12 +1354,38 @@ public class ConfirmGate {
     /**
      * 落库 + 结局帧（调用方必须已经确定"本写者是这张卡的结论持有者"）。
      */
-    private PendingToolCall writeFrontendTimeout(String runId, PendingToolCall fresh, int timeoutSeconds) {
+    private ExpiryResult writeFrontendTimeout(String runId, PendingToolCall fresh, int timeoutSeconds) {
         PendingToolCall timedOut = applyFrontendTimeout(fresh, timeoutSeconds);
         this.store.putPending(runId, timedOut);
-        this.registry.of(runId).frontendToolResult(timedOut, false, timedOut.getResultText());
-        traceDecision(runId, timedOut.getToolCallId(), "timeout", timedOut, "ACCEPTED", "system");
-        return timedOut;
+        return completeFrontendTimeoutDecision(runId, timedOut);
+    }
+
+    private ExpiryResult completeFrontendTimeoutDecision(String runId, PendingToolCall timedOut) {
+        ExpiryEmission frame = emitFrontendTimeoutFrame(runId, timedOut);
+        ExpiryEmission trace = traceFrontendTimeoutDecision(runId, timedOut);
+        return new ExpiryResult(timedOut, true, frame, trace);
+    }
+
+    private ExpiryEmission emitFrontendTimeoutFrame(String runId, PendingToolCall timedOut) {
+        try {
+            this.registry.of(runId).frontendToolResult(timedOut, false, timedOut.getResultText());
+            return ExpiryEmission.EMITTED;
+        } catch (RuntimeException ex) {
+            log.error("frontend timeout result frame emission was not confirmed runId={} toolCallId={} (decision is already TIMEOUT; the frame will not be re-sent and resume compensation continues)",
+                    runId, timedOut.getToolCallId(), ex);
+            return ExpiryEmission.UNCONFIRMED;
+        }
+    }
+
+    private ExpiryEmission traceFrontendTimeoutDecision(String runId, PendingToolCall timedOut) {
+        try {
+            traceDecision(runId, timedOut.getToolCallId(), "timeout", timedOut, "ACCEPTED", "system");
+            return ExpiryEmission.EMITTED;
+        } catch (RuntimeException ex) {
+            log.warn("frontend timeout decision trace emission was not confirmed runId={} toolCallId={} (decision is already TIMEOUT; trace will not be repeated and resume compensation continues)",
+                    runId, timedOut.getToolCallId(), ex);
+            return ExpiryEmission.UNCONFIRMED;
+        }
     }
 
     /**
@@ -1379,13 +1404,21 @@ public class ConfirmGate {
     }
 
     /**
-     * 一次到期收敛的结论。
-     *
-     * @param entry     最终条目视图
-     * @param winner    本次是否由我完成收敛（落库；正常路径也发帧）
-     * @param frameSent 本次是否发出了结局帧（{@code false} 仅出现在"修补已死 guard 持有者"的 WAL 路径）
+     * 一次到期收敛的结论。帧与 trace 只在正常返回时记 {@code EMITTED}；异常后是否部分发出不可知，
+     * 因而记 {@code UNCONFIRMED}，不得伪装成未发送或成功。
      */
-    private record ExpiryResult(PendingToolCall entry, boolean winner, boolean frameSent) {
+    private record ExpiryResult(PendingToolCall entry, boolean winner, ExpiryEmission frameState,
+                                ExpiryEmission traceState) {
+    }
+
+    private enum ExpiryEmission {
+
+        EMITTED,
+
+        NOT_ATTEMPTED,
+
+        UNCONFIRMED
+
     }
 
     /**
@@ -1394,11 +1427,14 @@ public class ConfirmGate {
     private static final long EXPIRY_CLAIM_STALE_MS = 30_000L;
 
     /**
-     * <b>I4：park 之后按 {@code expiresAt} 排一次前端回执到期收敛</b>。
+     * <b>I4：park 之后按 {@code expiresAt} 调度前端回执到期收敛</b>。
      *
      * <p>park 把等待线程交还了，到期判定不能随之消失：即时类前端工具（有
      * {@code app.ai.hitl.frontend-tool-timeout} 上限）到点仍 {@code PENDING} ⇒ 走
      * {@link #expireFrontend}（{@code TIMEOUT} + 结局帧 + 落库），并<b>派发一次续跑</b>。
+     * 未收敛的决策失败按既有 park 重试预算与指数退避做有界重试，每拍重读条目；
+     * 已被其它写者收敛的条目直接结束。winner 后的观测与 trace 各执行一次且独立容错，
+     * 续跑补偿只重试派发，不重做决策、不重复结局帧。
      *
      * <p>为什么必须派发：到期是<b>系统裁决</b>（不是"无人时替用户继续"）—— 条目已收敛，这一轮如果
      * 既不驱动也不终帧，用户只会看到一张超时卡、永远等不到回答（E2E S-09 的契约是"卡收敛为终态、
@@ -1415,40 +1451,154 @@ public class ConfirmGate {
         // 身份随任务携带（提交时刻的记录身份）：到期裁决跑在定时线程上，那里<b>没有</b>请求身份，
         // 而快照/待决条目的键都由身份拼出 —— 在任务体里现读快照只能读到 legacy 键（恒 null ⇒ 永不收敛）。
         TenantUser identity = recordIdentityNow(runId);
+        scheduleParkedFrontendExpiryAttempt(runId, toolCallId, toolName, timeoutSeconds, identity, delayMs, 0);
+    }
+
+    private void scheduleParkedFrontendExpiryAttempt(String runId, String toolCallId, String toolName,
+                                                     int timeoutSeconds, TenantUser identity, long delayMs, int retryAttempt) {
         try {
-            this.retryScheduler.schedule(() -> {
-                try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-                    // 到期裁决：身份来自提交时刻的记录，不来自这一拍线程。
-                    RunSnapshot snapshot = this.store.get(runId);
-                    if (snapshot == null) {
-                        log.warn("frontend receipt expiry after park cannot read run snapshot (treated as unowned/expired, no state change) runId={} toolCallId={} identity={}", runId, toolCallId, identity);
-                        return;
-                    }
-                    PendingToolCall fresh = this.store.pendingLenient(runId, toolCallId);
-                    if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
-                        return;
-                    }
-                    ExpiryResult result = expireFrontendClaimed(runId, fresh, timeoutSeconds);
-                    if (!result.winner()) {
-                        // 结论已由别的写者抢到（人工决策 / 另一实例的到期收敛）：不发第二条结局帧。
-                        if (log.isDebugEnabled())
-                            log.debug("frontend receipt expiry after park was claimed by another writer (no state change this tick) runId={} toolCallId={}", runId, toolCallId);
-                        return;
-                    }
-                    PendingToolCall expired = result.entry();
-                    settleParkedToolCall(runId, expired, expired.getResultText());
-                    AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
-                            toolCallId, "tool", toolName, "timeoutS", timeoutSeconds);
-                    log.info("frontend receipt expired after park; entry converged runId={} toolCallId={} tool={} timeoutS={} frameSent={} (one resume dispatched: the turn must finish, not stop with no driver and no final frame)",
-                            runId, toolCallId, toolName, timeoutSeconds, result.frameSent());
-                    // 到期 = 系统裁决：条目已收敛，这一轮必须继续；与决策/回灌同一条有界派发。
-                    triggerResume(runId, false, true);
-                } catch (RuntimeException ex) {
-                    log.warn("convergence failed for frontend receipt expiry after park runId={} toolCallId={}", runId, toolCallId, ex);
-                }
-            }, Duration.ofMillis(delayMs));
+            this.retryScheduler.schedule(() -> runParkedFrontendExpiry(runId, toolCallId, toolName, timeoutSeconds,
+                    identity, retryAttempt), Duration.ofMillis(delayMs));
         } catch (RuntimeException ex) {
-            log.warn("convergence for frontend receipt expiry after park was not scheduled runId={} toolCallId={}", runId, toolCallId, ex);
+            log.warn("frontend receipt expiry after park was not scheduled runId={} toolCallId={} retryAttempt={} (shared recovery can retry later)",
+                    runId, toolCallId, retryAttempt, ex);
+        }
+    }
+
+    private void runParkedFrontendExpiry(String runId, String toolCallId, String toolName, int timeoutSeconds,
+                                         TenantUser identity, int retryAttempt) {
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+            ExpiryResult result = claimParkedFrontendExpiry(runId, toolCallId, toolName, timeoutSeconds, identity,
+                    retryAttempt);
+            if (result != null) {
+                completeParkedFrontendExpiry(runId, toolCallId, toolName, timeoutSeconds, identity, result);
+            }
+        }
+    }
+
+    private ExpiryResult claimParkedFrontendExpiry(String runId, String toolCallId, String toolName,
+                                                   int timeoutSeconds, TenantUser identity, int retryAttempt) {
+        try {
+            RunSnapshot snapshot = this.store.get(runId);
+            if (snapshot == null) {
+                log.warn("frontend receipt expiry after park cannot read run snapshot (treated as unowned/expired, no state change) runId={} toolCallId={} identity={}", runId, toolCallId, identity);
+                return null;
+            }
+            PendingToolCall fresh = this.store.pendingLenient(runId, toolCallId);
+            if (fresh == null || !PendingToolCall.PENDING.equals(fresh.getStatus())) {
+                return null;
+            }
+            ExpiryResult result = expireFrontendClaimed(runId, fresh, timeoutSeconds);
+            if (!result.winner()) {
+                if (log.isDebugEnabled()) {
+                    log.debug("frontend receipt expiry after park was claimed by another writer (no state change this tick) runId={} toolCallId={}", runId, toolCallId);
+                }
+                return null;
+            }
+            return result;
+        } catch (RuntimeException ex) {
+            retryParkedFrontendExpiryDecision(runId, toolCallId, toolName, timeoutSeconds, identity, retryAttempt + 1,
+                    ex);
+            return null;
+        }
+    }
+
+    private void completeParkedFrontendExpiry(String runId, String toolCallId, String toolName, int timeoutSeconds,
+                                              TenantUser identity, ExpiryResult result) {
+        PendingToolCall expired = result.entry();
+        settleParkedToolCall(runId, expired, expired.getResultText());
+        traceParkedFrontendExpiry(runId, toolCallId, toolName, timeoutSeconds, null);
+        log.info("frontend receipt expired after park; entry converged runId={} toolCallId={} tool={} timeoutS={} frameState={} traceState={} (resume compensation follows; no decision, result frame or decision trace is repeated)",
+                runId, toolCallId, toolName, timeoutSeconds, result.frameState(), result.traceState());
+        dispatchParkedFrontendResume(runId, toolCallId, identity, 0);
+    }
+
+    private void dispatchParkedFrontendResume(String runId, String toolCallId, TenantUser identity, int retryAttempt) {
+        ResumeTrigger trigger;
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
+            trigger = triggerResume(runId, false, retryAttempt == 0);
+        } catch (RuntimeException ex) {
+            retryParkedFrontendResume(runId, toolCallId, identity, retryAttempt + 1, "EXCEPTION", ex);
+            return;
+        }
+        if (!trigger.triggered() && isRetriableParkedFrontendResume(trigger)) {
+            retryParkedFrontendResume(runId, toolCallId, identity, retryAttempt + 1, trigger.outcome(), null);
+        }
+    }
+
+    private static boolean isRetriableParkedFrontendResume(ResumeTrigger trigger) {
+        return "EXECUTOR_SATURATED".equals(trigger.outcome()) || "DISPATCH_FAILED".equals(trigger.outcome());
+    }
+
+    private void retryParkedFrontendExpiryDecision(String runId, String toolCallId, String toolName,
+                                                   int timeoutSeconds, TenantUser identity, int retryAttempt,
+                                                   RuntimeException failure) {
+        int maxRetries = this.properties.getPark().getMaxDispatchRetries();
+        if (retryAttempt > maxRetries) {
+            log.error("frontend receipt expiry decision failed after {} bounded retries runId={} toolCallId={} (this instance did not obtain a converged expiry result; shared recovery can retry later)",
+                    maxRetries, runId, toolCallId, failure);
+            return;
+        }
+        Duration delay = dispatchRetryDelay(retryAttempt);
+        log.warn("frontend receipt expiry decision failed; scheduling bounded retry {}/{} runId={} toolCallId={} delayMs={}",
+                retryAttempt, maxRetries, runId, toolCallId, delay.toMillis(), failure);
+        scheduleParkedFrontendExpiryAttempt(runId, toolCallId, toolName, timeoutSeconds, identity, delay.toMillis(),
+                retryAttempt);
+    }
+
+    private void retryParkedFrontendResume(String runId, String toolCallId, TenantUser identity, int retryAttempt,
+                                           String outcome, RuntimeException failure) {
+        int maxRetries = this.properties.getPark().getMaxDispatchRetries();
+        if (retryAttempt > maxRetries) {
+            logResumeCompensationExhausted(runId, toolCallId, maxRetries, outcome, failure);
+            return;
+        }
+        Duration delay = dispatchRetryDelay(retryAttempt);
+        if (failure == null) {
+            log.warn("frontend expiry resume dispatch was not accepted; scheduling bounded compensation retry {}/{} runId={} toolCallId={} outcome={} delayMs={} (decision already converged; no decision or result frame will be repeated)",
+                    retryAttempt, maxRetries, runId, toolCallId, outcome, delay.toMillis());
+        } else {
+            log.warn("frontend expiry resume dispatch failed; scheduling bounded compensation retry {}/{} runId={} toolCallId={} delayMs={} (decision already converged; no decision or result frame will be repeated)",
+                    retryAttempt, maxRetries, runId, toolCallId, delay.toMillis(), failure);
+        }
+        scheduleParkedFrontendResume(runId, toolCallId, identity, retryAttempt, delay);
+    }
+
+    private void scheduleParkedFrontendResume(String runId, String toolCallId, TenantUser identity, int retryAttempt,
+                                              Duration delay) {
+        try {
+            this.retryScheduler.schedule(() -> dispatchParkedFrontendResume(runId, toolCallId, identity, retryAttempt),
+                    delay);
+        } catch (RuntimeException ex) {
+            log.warn("frontend expiry resume compensation retry was not scheduled runId={} toolCallId={} retryAttempt={} (decision already converged; no decision or result frame was repeated)",
+                    runId, toolCallId, retryAttempt, ex);
+        }
+    }
+
+    private void logResumeCompensationExhausted(String runId, String toolCallId, int maxRetries, String outcome,
+                                                RuntimeException failure) {
+        if (failure == null) {
+            log.error("frontend expiry resume compensation failed after {} bounded retries runId={} toolCallId={} lastOutcome={} (decision is already converged; no decision or result frame was repeated)",
+                    maxRetries, runId, toolCallId, outcome);
+            return;
+        }
+        log.error("frontend expiry resume compensation failed after {} bounded retries runId={} toolCallId={} lastOutcome={} (decision is already converged; no decision or result frame was repeated)",
+                maxRetries, runId, toolCallId, outcome, failure);
+    }
+
+    private void traceParkedFrontendExpiry(String runId, String toolCallId, String toolName, int timeoutSeconds,
+                                           String source) {
+        try {
+            if (source == null) {
+                AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId", toolCallId,
+                        "tool", toolName, "timeoutS", timeoutSeconds);
+            } else {
+                AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId", toolCallId,
+                        "tool", toolName, "timeoutS", timeoutSeconds, "source", source);
+            }
+        } catch (RuntimeException ex) {
+            log.warn("frontend expiry trace failed after decision convergence runId={} toolCallId={} source={} (resume compensation continues)",
+                    runId, toolCallId, source, ex);
         }
     }
 
@@ -1496,9 +1646,9 @@ public class ConfirmGate {
         if (converged > 0) {
             // 到期是系统裁决：条目已收敛，这一轮必须继续。同一轮的多张卡共用一次派发
             // （租约/会话门会挡住重复驱动，但没必要多打几拍）。
-            log.info("park expiry convergence done runId={} entries={} (one resume dispatched: the turn must finish)",
+            log.info("park expiry convergence done runId={} entries={} (resume compensation follows; no decision is repeated)",
                     runId, converged);
-            triggerResume(runId, false, true);
+            dispatchParkedFrontendResume(runId, null, recordIdentityNow(runId), 0);
         }
         return converged;
     }
@@ -1526,13 +1676,13 @@ public class ConfirmGate {
             }
             PendingToolCall expired = result.entry();
             settleParkedToolCall(runId, expired, expired.getResultText());
-            AiTrace.eventOn(runId, snapshotSessionId(runId), "frontend_parked_expired", "toolCallId",
-                    toolCallId, "tool", toolName, "timeoutS", timeoutSeconds, "source", "converge");
-            if (log.isDebugEnabled())
+            traceParkedFrontendExpiry(runId, toolCallId, toolName, timeoutSeconds, "converge");
+            if (log.isDebugEnabled()) {
                 log.debug("park expiry entry converged by this instance runId={} toolCallId={} tool={} timeoutS={}", runId, toolCallId, toolName, timeoutSeconds);
+            }
             return true;
         } catch (RuntimeException ex) {
-            log.warn("park expiry entry convergence failed (no state change; retry next tick) runId={} toolCallId={}", runId,
+            log.warn("park expiry entry convergence was not confirmed (shared recovery can retry next tick) runId={} toolCallId={}", runId,
                     toolCallId, ex);
             return false;
         }

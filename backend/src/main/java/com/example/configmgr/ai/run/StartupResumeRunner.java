@@ -21,8 +21,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -71,9 +73,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * 见 {@link #lastScanForIdentity(TenantUser)}。</li>
  * </ul>
  *
- * <p>启动/手工（{@link #scan(boolean)}）与运行期（{@link #sweep()}）从候选枚举开始共用
- * {@link #runPipeline}：身份门、0/0 硬校验、预算与发现态分类只实现一次；运行期只是多出
- * 取消收尾/到期收敛两条旁路和租约判死，报告字段仍按各自契约组装。
+ * <p>启动/手工（{@link #scan(boolean)}）先用只读 due 页完成 park 到期预收敛，再与运行期
+ * （{@link #sweep()}）从候选枚举开始共用 {@link #runPipeline}：身份门、0/0 硬校验、预算与
+ * 发现态分类只实现一次；运行期另保留取消收尾/到期收敛两条旁路和租约判死，报告字段仍按各自契约组装。
  *
  * <h2>扫描成本：轻量投影 + 单飞 + 轮转（审计 S4 / F-03 的落地点）</h2>
  * <ul>
@@ -317,6 +319,9 @@ public class StartupResumeRunner {
     }
 
     private Map<String, Object> scanCandidates(ScanFlight flight) {
+        PipelineBudget budget = newPipelineBudget();
+        PipelineResult result = newPipelineResult();
+        Set<String> expired = convergeStartupExpiries(budget, result);
         String cursorScope = cursorScope(Mode.STARTUP, RequestContextUtils.currentOrNull());
         RecoveryPageCursor pageCursor = this.scanCursors.get(cursorScope);
         List<Map<String, Object>> candidates;
@@ -336,12 +341,13 @@ public class StartupResumeRunner {
             failed.put("at", Instant.now().toString());
             failed.put("instanceId", this.store.instanceId());
             failed.put("error", "AI_RESUME_FAILED");
-            failed.put("resumed", List.of());
-            failed.put("skipped", List.of());
+            failed.put("resumed", result.resumed());
+            failed.put("expired", result.expired());
+            failed.put("skipped", result.skipped());
             this.lastScan = failed;
             return failed;
         }
-        PipelineResult result = runPipeline(candidates, Mode.STARTUP);
+        runPipeline(candidates, Mode.STARTUP, expired, budget, result);
         rememberCursor(cursorScope, cursorOfLast(candidates));
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("scanned", true);
@@ -349,13 +355,15 @@ public class StartupResumeRunner {
         report.put("instanceId", this.store.instanceId());
         report.put("candidates", candidates.size());
         report.put("resumed", result.resumed());
+        report.put("expired", result.expired());
         report.put("skipped", result.skipped());
         report.put("onStartup", this.properties.getResume().isOnStartup());
         report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
         report.put("scanLease", flight.outcome());
         this.lastScan = report;
-        log.info("startup auto-resume done: candidates={} resumed={} skipped={} (single-flight={}, see GET /api/ai/startup-resume)",
-                candidates.size(), result.resumed().size(), result.skipped().size(), flight.outcome());
+        log.info("startup auto-resume done: candidates={} resumed={} expired={} skipped={} (single-flight={}, see GET /api/ai/startup-resume)",
+                candidates.size(), result.resumed().size(), result.expired().size(), result.skipped().size(),
+                flight.outcome());
         return report;
     }
 
@@ -438,15 +446,19 @@ public class StartupResumeRunner {
         Map<String, Object> report = this.lastScan;
         Map<String, Object> scoped = new LinkedHashMap<>(report);
         List<Map<String, Object>> resumed = ownedItems(report.get("resumed"), identity);
+        List<Map<String, Object>> expired = ownedItems(report.get("expired"), identity);
         List<Map<String, Object>> skipped = ownedItems(report.get("skipped"), identity);
         if (report.containsKey("resumed")) {
             scoped.put("resumed", resumed);
+        }
+        if (report.containsKey("expired")) {
+            scoped.put("expired", expired);
         }
         if (report.containsKey("skipped")) {
             scoped.put("skipped", skipped);
         }
         if (report.containsKey("candidates")) {
-            scoped.put("candidates", resumed.size() + skipped.size());
+            scoped.put("candidates", resumed.size() + expired.size() + skipped.size());
         }
         scoped.put("identityScoped", true);
         return scoped;
@@ -603,6 +615,67 @@ public class StartupResumeRunner {
     }
 
     /**
+     * 启动发现会推迟候选，因此先用同一有界索引的只读页完成到期收敛；尝试与产出和主管线共用预算。
+     */
+    private Set<String> convergeStartupExpiries(PipelineBudget budget, PipelineResult result) {
+        if (this.confirmGate == null) {
+            return Set.of();
+        }
+        List<RunStore.RecoveryCandidate> candidates;
+        try {
+            candidates = this.store.recoveryDueRecordsAfter(System.currentTimeMillis(), 0L, null,
+                    recoveryCandidateLimit());
+        } catch (RuntimeException ex) {
+            log.warn("startup park expiry discovery failed; continuing startup recovery without expiry pre-pass", ex);
+            return Set.of();
+        }
+        Set<String> converged = new LinkedHashSet<>();
+        for (RunStore.RecoveryCandidate candidate : candidates) {
+            RunKeyScope.IndexRef ref = candidate.ref();
+            if (ref == null || !RunIdentityScope.usable(ref.tenantId(), ref.userId())) {
+                continue;
+            }
+            if (!hasStartupExpiryBudget(budget, result)) {
+                log.info("startup park expiry pre-pass stopped: shared scan budget exhausted attempts={}/{} productive={}/{}",
+                        budget.attempts(), budget.attemptLimit(), productive(result.resumed(), result.finalized(),
+                                result.expired()), budget.limit());
+                break;
+            }
+            budget.attempts++;
+            int count = convergeStartupExpiry(ref);
+            if (count > 0) {
+                converged.add(RunKeyScope.indexMember(ref.tenantId(), ref.userId(), ref.runId()));
+                result.expired().add(startupExpiredItem(ref, count));
+            }
+        }
+        return converged;
+    }
+
+    private static boolean hasStartupExpiryBudget(PipelineBudget budget, PipelineResult result) {
+        return budget.attempts() < budget.attemptLimit()
+                && productive(result.resumed(), result.finalized(), result.expired()) < budget.limit();
+    }
+
+    private static Map<String, Object> startupExpiredItem(RunKeyScope.IndexRef ref, int count) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("runId", ref.runId());
+        item.put("tenantId", ref.tenantId());
+        item.put("userId", ref.userId());
+        item.put("expired", count);
+        item.put("reason", "EXPIRED_CONVERGED");
+        return item;
+    }
+
+    private int convergeStartupExpiry(RunKeyScope.IndexRef ref) {
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(ref.tenantId(), ref.userId())) {
+            return this.confirmGate.convergeExpiredParkedFrontend(ref.runId());
+        } catch (RuntimeException ex) {
+            log.warn("startup park expiry convergence failed for one run runId={} (startup recovery continues)", ref.runId(), ex);
+            return 0;
+        }
+    }
+
+    /**
      * 扫描触发面：启动/手工（{@link #scan(boolean)}）与运行期兜底（{@link #sweep()}）。
      */
     private enum Mode {
@@ -624,7 +697,8 @@ public class StartupResumeRunner {
      * <b>扫描/兜底的公共核心管线</b>：候选枚举之后，身份门、0/0 硬校验、预算、发现态分类和
      * "取消收尾 / 到期收敛 / 续跑"都只在这里实现一次。
      *
-     * <p>两种触发只差三处：运行期多两条收敛旁路（F3 取消收尾、F2 park 到期）和租约/活订阅判死
+     * <p>启动/手工已在发现前完成到期预收敛，本管线只跳过其已收敛轮次，避免重复续跑；
+     * 运行期仍有两条收敛旁路（F3 取消收尾、F2 park 到期）和租约/活订阅判死
      * （{@link RunLiveness}），启动/手工则按 {@code zombieRunning}（启动接管时效）给
      * {@code forceTakeover}。请求面（线程有身份）在进入循环时先切片，<b>只处理当前身份</b>；
      * 系统面按每条记录的记录身份推进。
@@ -633,22 +707,31 @@ public class StartupResumeRunner {
      * 真正的裁决仍由 {@link ResumeService#resume} 的真实 outcome 给出 —— 租约、会话门、取消、
      * 终态、待决条目都在那条漏斗里，本类不复制也不绕过。
      */
-    private PipelineResult runPipeline(List<Map<String, Object>> candidates, Mode mode) {
+    private PipelineBudget newPipelineBudget() {
         int limit = Math.max(1, this.properties.getResume().getMaxOnStartup());
         int attemptLimit = Math.max(limit, this.properties.getResume().getScanMaxAttempts());
-        PipelineBudget budget = new PipelineBudget(limit, attemptLimit,
-                this.properties.getResume().getZombieAge().toMillis());
-        PipelineResult result = new PipelineResult(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(),
-                new ArrayList<>());
+        return new PipelineBudget(limit, attemptLimit, this.properties.getResume().getZombieAge().toMillis());
+    }
+
+    private static PipelineResult newPipelineResult() {
+        return new PipelineResult(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
+    }
+
+    private PipelineResult runPipeline(List<Map<String, Object>> candidates, Mode mode) {
+        return runPipeline(candidates, mode, Set.of(), newPipelineBudget(), newPipelineResult());
+    }
+
+    private PipelineResult runPipeline(List<Map<String, Object>> candidates, Mode mode, Set<String> expired,
+                                       PipelineBudget budget, PipelineResult result) {
         TenantUser caller = RequestContextUtils.currentOrNull();
         for (Map<String, Object> run : candidates) {
-            processPipelineCandidate(run, mode, caller, budget, result);
+            processPipelineCandidate(run, mode, caller, budget, result, expired);
         }
         return result;
     }
 
     private void processPipelineCandidate(Map<String, Object> run, Mode mode, TenantUser caller,
-                                          PipelineBudget budget, PipelineResult result) {
+                                          PipelineBudget budget, PipelineResult result, Set<String> expired) {
         String runId = String.valueOf(run.get("runId"));
         String status = ObjectUtils.toString(run.get("status"), (String) null);
         long tenantId = identityField(run, "tenantId");
@@ -664,6 +747,9 @@ public class StartupResumeRunner {
                     : sweepSkipItem(runId, status, LEGACY_NO_IDENTITY));
             log.info("scan skipped run without identity runId={} (reason={}; no model/tool drive)", runId,
                     LEGACY_NO_IDENTITY);
+            return;
+        }
+        if (mode == Mode.STARTUP && expired.contains(RunKeyScope.indexMember(tenantId, userId, runId))) {
             return;
         }
         if (mode == Mode.RUNTIME && processRuntimeCancellation(run, runId, status, tenantId, userId, budget, result)) {
@@ -771,7 +857,7 @@ public class StartupResumeRunner {
 
     private void processStartupResume(Map<String, Object> run, String runId, String status, long tenantId,
                                       long userId, PipelineBudget budget, PipelineResult result) {
-        if (result.resumed().size() >= budget.limit()) {
+        if (productive(result.resumed(), result.finalized(), result.expired()) >= budget.limit()) {
             result.skipped().add(startupBudgetSkipItem(runId, tenantId, userId, "MAX_ON_STARTUP_REACHED"));
             return;
         }
@@ -1212,7 +1298,7 @@ public class StartupResumeRunner {
 
     /**
      * 让位时的启动口径报告：<b>字段契约与正常报告一致</b>（{@code scanned/at/instanceId/candidates/
-     * resumed/skipped/onStartup/zombieAge}），只额外标 {@code deferred=true} 与原因，绝不伪装成"扫了 0 轮"。
+     * resumed/expired/skipped/onStartup/zombieAge}），只额外标 {@code deferred=true} 与原因，绝不伪装成"扫了 0 轮"。
      */
     private Map<String, Object> deferredScanReport() {
         Map<String, Object> report = new LinkedHashMap<>();
@@ -1221,6 +1307,7 @@ public class StartupResumeRunner {
         report.put("instanceId", this.store.instanceId());
         report.put("candidates", 0);
         report.put("resumed", List.of());
+        report.put("expired", List.of());
         report.put("skipped", List.of());
         report.put("onStartup", this.properties.getResume().isOnStartup());
         report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));

@@ -4480,6 +4480,38 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改Unicode或流式解析规范。"},
         "verification-review": {"status": "checked", "reason": "仅规范文档变更，后续提交按新增大括号规则逐hunk审查；无动态验证需求。"}
       }
+    },
+    {
+      "fingerprint": "sha256:850674571d1c255233449cbd4ac89883b540d2b958cc65ae7ed6fbddd9fa736c",
+      "status": "reviewed",
+      "reason": "逐hunk复核前端工具到期winner的结局帧/trace三态、一次性park与共享converge续跑补偿，以及启动预收敛和主管线共享预算；独立审查agent-1167最终APPROVE，主会话补查并闭合两处DEBUG分支大括号。",
+      "reviewedAt": "2026-11-09T12:06:30+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1167、施工agent-1165",
+      "specChanges": [
+        {
+          "change": "前端工具到期winner在结局帧或decision trace异常后以UNCONFIRMED记录发射结局，仍进入本实例有界续跑补偿，且不重做决策或重复结局。",
+          "reason": "决策已原子写成TIMEOUT后，观测动作异常不能阻断续跑，也不能把部分发射伪装成成功或未执行。",
+          "impact": "非park等待线程、一次性park任务和共享到期收敛均按真实winner结果处理；补偿只重试续跑派发，共享周期恢复继续兜底。"
+        },
+        {
+          "change": "启动到期预收敛与主启动管线共用PipelineBudget和PipelineResult，启动报告新增expired结果并按身份切片。",
+          "reason": "发现会defer候选，预扫描必须发生在发现前，且预扫描和主管线不能各消耗一整份预算。",
+          "impact": "尝试数及resumed/finalized/expired总产出共享上限；已收敛轮次不重复续跑或重复计入skipped，报告不跨身份泄漏。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "winner后帧与trace各执行一次并独立容错，UNCONFIRMED保留异常和堆栈；决策重试与续跑补偿分离，两处DEBUG分支均显式大括号。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/StartupResumeRunner.java", "status": "checked", "reason": "只读due页在defer前预收敛，候选尝试和expired产出与主管线共享预算，正常/失败/deferred报告及身份切片一致。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有RetryScheduler、RunIdentityScope、Spring ObjectUtils和JDK集合，无新增依赖或并行工具框架。"},
+        "java-api-style": {"status": "checked", "reason": "新增辅助方法按职责拆分，集合返回和身份字段语义保持；本轮触及控制块均显式{}，未改JSON、Lombok或布尔公开接口。"},
+        "logging-exception-safety": {"status": "checked", "reason": "帧/trace异常使用英文ERROR/WARN并保留Throwable，UNCONFIRMED不掩盖部分发射；DEBUG保留级别开关和大括号。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批仅后端到期与启动恢复逻辑，不修改界面、卡片或用户文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "guard/fence和原子TIMEOUT不变，败方不补偿，winner补偿有界且跨实例共享恢复兜底；未引入AI对话数据库访问。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不处理文本字节、SSE解析或Unicode截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1167第三轮及最终复核APPROVE；IDEA默认Reformat已执行，Maven编译357个生产源文件BUILD SUCCESS；测试、真实Redis、多实例和到期动态场景NOT_RUN。"}
+      }
     }
   ]
 }
