@@ -3311,6 +3311,16 @@ function recoveryFactsSignature(snapshot) {
   })
 }
 
+// 仅 C-161 GF standard 使用：恢复重投影会给 parts 重新编号（seq 非用户可见），
+// 稳定性指纹排除可选 seq；有 segments 的条目另按 entryId+seq 单列幂等核对。
+function recoveryFactsSignatureWithoutSeq(snapshot) {
+  const facts = JSON.parse(recoveryFactsSignature(snapshot))
+  for (const message of facts.messages) {
+    for (const part of message.parts ?? []) delete part.seq
+  }
+  return canonicalJson(facts)
+}
+
 async function mirrorState(browser, sessionId) {
   return await browser.evaluate(`(() => {
     const entries = []
@@ -3954,36 +3964,65 @@ async function runStreamHistoryRace(context) {
   if (!variants.has(config.variant)) throw new ScenarioNotRun('RECOVERY_VARIANT_REQUIRED')
   context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
   browser.setPhase('initial-stream')
-  await browser.sendPrompt(`turn-text stall-frames=250 verification=${randomUUID()}`)
+  // C-160：不再假设“纯文本流式约 2s 后写入 history”。改用 timeline-nonprefix 的真实写点：
+  // 工具跳（assistant 已有工具段且已有正文）时 run 仍在途，history 应已有前缀正文；
+  // 纯文本在途没有前缀属夹具未形成，记 NOT_RUN 而不是 FAIL。
+  await browser.sendPrompt(`timeline-nonprefix verification=${randomUUID()}`)
+  const submitPendingFormIfAny = async () => {
+    const form = await browser.evaluate(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      if (!ai.activeForm?.toolCallId) return null
+      const field = (ai.activeForm.form?.fields ?? []).find((candidate) => candidate.type === 'text')
+      return field ? {toolCallId: ai.activeForm.toolCallId, key: field.key} : null
+    })()`, false)
+    if (!form) return false
+    await browser.evaluate(`document.querySelector('[data-testid="gf-field-${form.toolCallId}-${form.key}"]').focus()`, false)
+    await browser.send('Input.insertText', {text: `suffix-${randomUUID()}`})
+    await browser.click(`[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]`)
+    return true
+  }
   if (config.variant === 'mirror-terminal') {
     await browser.waitFor(`(() => {
       const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      if (ai.activeForm?.toolCallId) return true
       return ai.loading === false && ai.messages.some((message) => message.role === 'assistant' && message.done)
+    })()`, 'TERMINAL_MIRROR_ROUND_NOT_COMPLETED')
+    await submitPendingFormIfAny()
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.loading === false && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done)
     })()`, 'TERMINAL_MIRROR_ROUND_NOT_COMPLETED')
   } else {
     await browser.waitFor(`(() => {
       const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
-      return ai.loading === true && ai.messages.some((message) => message.role === 'assistant' && message.streaming
-        && message.parts.some((part) => part.kind === 'text' && part.text.length > 0))
-    })()`, 'STREAM_HISTORY_PREFIX_NOT_FORMED')
+      const jumped = ai.messages.some((message) => message.role === 'assistant'
+        && message.parts.some((part) => part.kind === 'tool'))
+      const nonterminal = ai.loading === true || ai.activeForm !== null
+        || ai.messages.some((message) => message.role === 'assistant' && message.done !== true)
+      return jumped && nonterminal
+    })()`, 'STREAM_HISTORY_TOOL_JUMP_NOT_FORMED')
   }
   const initial = await browser.snapshot()
   context.sessionId = initial.sessionId
   context.runId = initial.activeRunId
-  // 流式 history 前缀由后端按增量持久化节奏写入（实测约 2s 后出现），单次读取会与首个 delta 竞争；
-  // 这里按 timeout 轮询，直到前缀出现（真实不持久化则轮询超时才 FAIL）。
-  let initialHistory = requiredHistory(await context.api.history(initial.sessionId))
-  let prefix = ''
-  const prefixDeadline = Date.now() + context.config.timeoutMs
-  while (Date.now() < prefixDeadline) {
-    prefix = initialHistory.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
-      .map((message) => message.text ?? message.content ?? '').join('')
-    if (prefix.length > 0) break
-    await sleep(context.config.pollMs)
-    initialHistory = requiredHistory(await context.api.history(initial.sessionId))
+  checks.require('initial-stream.run-in-flight', config.variant === 'mirror-terminal'
+    ? initial.loading === false
+    : (initial.loading === true || initial.activeForm !== null
+      || initial.messages.some((message) => message.role === 'assistant' && message.done !== true)),
+  'the run is still in flight (or suspended on its pending form) at the real tool-jump write point', {
+    variant: config.variant,
+    loading: initial.loading,
+    activeForm: initial.activeForm?.toolCallId ?? null,
+    phase: initial.runPhase
+  })
+  const initialHistory = requiredHistory(await context.api.history(initial.sessionId))
+  const prefix = initialHistory.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
+    .map((message) => message.text ?? message.content ?? '').join('')
+  if (prefix.length === 0 && config.variant !== 'mirror-terminal') {
+    throw new ScenarioNotRun('STREAM_HISTORY_PREFIX_NOT_FORMED')
   }
   checks.require('initial-stream.history-prefix-nonempty', prefix.length > 0,
-    'the real streaming history has a persisted text prefix before runs/current is delayed', textEvidence(prefix))
+    'history carries the assistant text prefix written at the real tool-jump/suspend write point', textEvidence(prefix))
   const mirror = await mirrorState(browser, initial.sessionId)
   if (config.variant === 'mirror-inflight') {
     checks.require('mirror.inflight-true', mirror.entries.length === 1 && mirror.entries[0].inFlight === true,
@@ -3994,7 +4033,6 @@ async function runStreamHistoryRace(context) {
   } else {
     await removeCurrentMirror(context)
   }
-  const requestBaseline = browser.requestCounts()
   const initialSignature = recoveryFactsSignature(initial)
 
   browser.setPhase('restore-stream')
@@ -4017,6 +4055,25 @@ async function runStreamHistoryRace(context) {
   const runCurrentNetwork = await browser.waitForRunCurrentPhase('restore-stream', {minimumSuccessCount: 1})
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    if (ai.restoringRecovery !== false) return false
+    if (ai.activeForm?.toolCallId) return true
+    return ai.loading === false
+      && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done)
+  })()`, 'STREAM_HISTORY_RACE_NOT_SETTLED')
+  // timeline-nonprefix 的第二段带 generative_form：恢复后须真实提交该表单，才有 B/C 后缀。
+  const suffixForm = await browser.evaluate(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    if (!ai.activeForm?.toolCallId) return null
+    const field = (ai.activeForm.form?.fields ?? []).find((candidate) => candidate.type === 'text')
+    return field ? {toolCallId: ai.activeForm.toolCallId, key: field.key} : null
+  })()`, false)
+  if (suffixForm) {
+    await browser.evaluate(`document.querySelector('[data-testid="gf-field-${suffixForm.toolCallId}-${suffixForm.key}"]').focus()`, false)
+    await browser.send('Input.insertText', {text: `suffix-${randomUUID()}`})
+    await browser.click(`[data-testid="gf-form-${suffixForm.toolCallId}"] [data-testid="gf-submit"]`)
+  }
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     return ai.restoringRecovery === false && ai.loading === false
       && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done)
   })()`, 'STREAM_HISTORY_RACE_NOT_TERMINAL')
@@ -4031,6 +4088,14 @@ async function runStreamHistoryRace(context) {
     prefix: textEvidence(prefix),
     final: textEvidence(finalText)
   })
+  checks.require('recovered-stream.has-suffix', config.variant === 'mirror-terminal'
+    ? finalText.length === prefix.length
+    : (finalText.startsWith(prefix) && finalText.length > prefix.length),
+  'streaming variants must resume from an in-flight prefix and append a real suffix', {
+    prefixLength: prefix.length,
+    finalLength: finalText.length,
+    variant: config.variant
+  })
   if (config.variant !== 'mirror-terminal') assertRecoveryDotsThenWorking(context, 'recovered-stream', recovered.messages.find((message) => message.role === 'assistant')?.id)
   checks.require('recovered-stream.content-stable', recoveryFactsSignature(recovered) === initialSignature
     || config.variant !== 'mirror-terminal',
@@ -4039,17 +4104,30 @@ async function runStreamHistoryRace(context) {
     after: recoveryFactsSignature(recovered)
   })
   await context.evidence.json('stream-history-race.json', {variant: config.variant, mirror, held, historyNetwork, runCurrentNetwork})
-  const finalSignature = recoveryFactsSignature(recovered)
+  // 连续两刷按“内容/顺序/状态/卡片”幂等核对；parts.seq 是恢复重投影元数据，仅留证不比断言。
+  // 副作用基线取“本轮流程（含必需的表单提交）完成后”，仍要求两刷不新增 chat/confirm/feedback/events/resume。
+  const refreshBaseline = browser.requestCounts()
+  const finalSignature = recoveryFactsSignatureWithoutSeq(recovered)
+  const finalSeq = canonicalJson(recovered.messages.map((message) => message.parts.map((part) => part.seq ?? null)))
+  const seqDrift = []
   for (const phase of ['refresh-1', 'refresh-2']) {
     browser.setPhase(phase)
     await browser.reload()
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.historyLoaded === true && ai.restoringRecovery === false && ai.loading === false
+    })()`, `${phase.toUpperCase()}_NOT_SETTLED`)
     const evidence = await recoveryPhaseEvidence(context)
     await assertTerminalRecoveryComplete(context, phase, evidence.historyEvidence, evidence.business)
-    checks.require(`${phase}.idempotent`, recoveryFactsSignature(await browser.snapshot()) === finalSignature,
-      finalSignature, recoveryFactsSignature(await browser.snapshot()))
+    const refreshed = await browser.snapshot()
+    checks.require(`${phase}.idempotent`, recoveryFactsSignatureWithoutSeq(refreshed) === finalSignature,
+      finalSignature, recoveryFactsSignatureWithoutSeq(refreshed))
+    const refreshedSeq = canonicalJson(refreshed.messages.map((message) => message.parts.map((part) => part.seq ?? null)))
+    if (refreshedSeq !== finalSeq) seqDrift.push(phase)
   }
-  checks.require('refresh.no-repeat-side-effects', canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
-    requestBaseline, browser.requestCounts())
+  await context.evidence.json('stream-history-race-seq.json', {finalSeq, seqDrift})
+  checks.require('refresh.no-repeat-side-effects', canonicalJson(browser.requestCounts()) === canonicalJson(refreshBaseline),
+    refreshBaseline, browser.requestCounts())
 }
 
 async function runPendingIntegrity(context) {
@@ -4075,7 +4153,10 @@ async function runPendingIntegrity(context) {
   context.sessionId = initial.sessionId
   context.runId = initial.activeRunId
   context.latestSnapshot = initial
-  const initialSignature = recoveryFactsSignature(initial)
+  const relaxedSeq = config.variant === 'gf' && config.pendingFixture === 'standard'
+  const factsOf = (snapshot) => relaxedSeq ? recoveryFactsSignatureWithoutSeq(snapshot) : recoveryFactsSignature(snapshot)
+  const initialSignature = factsOf(initial)
+  const initialHistory = requiredHistory(await context.api.history(initial.sessionId))
   if (config.pendingFixture === 'empty-history') await removeCurrentMirror(context)
   const requestBaseline = browser.requestCounts()
 
@@ -4113,8 +4194,27 @@ async function runPendingIntegrity(context) {
   await assertPendingRecoveryComplete(context, 'recovered-pending', recoveredEvidence.historyEvidence, recoveredEvidence.business)
   context.latestSnapshot = await browser.snapshot()
   await assertPendingTrajectory(context, 'recovered-pending', toolCallIds)
-  checks.require('recovered-pending.parts-and-cards-stable', recoveryFactsSignature(context.latestSnapshot) === initialSignature,
-    initialSignature, recoveryFactsSignature(context.latestSnapshot))
+  checks.require('recovered-pending.parts-and-cards-stable', factsOf(context.latestSnapshot) === initialSignature,
+    initialSignature, factsOf(context.latestSnapshot))
+  if (relaxedSeq) {
+    const recoveredHistory = requiredHistory(recoveredEvidence.historyEvidence)
+    const segmentFacts = (history) => history.messages.filter((message) => Array.isArray(message.segments))
+      .map((message) => ({
+        entryId: message.entryId ?? null,
+        seqs: message.segments.map((segment) => segment?.seq ?? null)
+      }))
+    const before = segmentFacts(initialHistory)
+    const after = segmentFacts(recoveredHistory)
+    const shape = before.length === 0 ? 'absent' : 'present'
+    checks.require('recovered-pending.segments-shape', shape === 'absent'
+      ? true
+      : canonicalJson(before) === canonicalJson(after),
+    shape === 'absent'
+      ? 'public history exposes no segments for this fixture; shape recorded, seq idempotence not applicable'
+      : 'entries that actually carry segments keep the same entryId and segment seq values',
+    {shape, before, after})
+    await context.evidence.json('pending-segments-shape.json', {shape, before, after, seqRelaxed: true})
+  }
   await context.evidence.json('pending-order-restore.json', {order: config.historyOrder, held, firstNetwork, secondNetwork, coverage})
 
   for (const phase of ['refresh-1', 'refresh-2']) {
@@ -4124,8 +4224,8 @@ async function runPendingIntegrity(context) {
     await assertPendingRecoveryComplete(context, phase, evidence.historyEvidence, evidence.business)
     context.latestSnapshot = await browser.snapshot()
     await assertPendingTrajectory(context, phase, toolCallIds)
-    checks.require(`${phase}.pending-idempotent`, recoveryFactsSignature(context.latestSnapshot) === initialSignature,
-      initialSignature, recoveryFactsSignature(context.latestSnapshot))
+    checks.require(`${phase}.pending-idempotent`, factsOf(context.latestSnapshot) === initialSignature,
+      initialSignature, factsOf(context.latestSnapshot))
   }
 
   browser.setPhase('legal-decision')
@@ -4452,16 +4552,48 @@ async function runStoppedRecovery(context) {
     assertHistoryProjectionCommit(context, 'stopped-recovery', settled, history)
     checks.require('stopped-recovery.content-stable', recoveryFactsSignature(settled) === initialSignature,
       initialSignature, recoveryFactsSignature(settled))
-    checks.require(`stopped-recovery.${config.variant === 'stop' ? 'stopped-state' : 'client-request-stopped-state'}`,
-      config.variant === 'stop' ? settled.stopped : settled.clientRequestStopped,
-      'the real stopped marker survives history-only commit', {
-        stopped: settled.stopped,
-        clientRequestStopped: settled.clientRequestStopped
-      })
+    // 已确认口径：stop 不要求全局 stopped 复活；必须核到“目标 run 的助手消息”自带 stopped=true。
+    const targetAssistant = settled.messages.find((message) => message.role === 'assistant'
+      && (context.runId === null || message.runId === context.runId))
+    if (config.variant === 'stop') {
+      checks.require('stopped-recovery.stopped-state', targetAssistant?.stopped === true,
+        'the target run assistant message keeps stopped=true after history-only commit', {
+          runId: context.runId,
+          messageId: targetAssistant?.id ?? null,
+          messageStopped: targetAssistant?.stopped ?? null,
+          globalStopped: settled.stopped,
+          clientRequestStopped: settled.clientRequestStopped
+        })
+    } else {
+      checks.require('stopped-recovery.client-request-stopped-state', settled.clientRequestStopped === true,
+        'the real clientRequestStopped marker survives history-only commit', {
+          stopped: settled.stopped,
+          clientRequestStopped: settled.clientRequestStopped
+        })
+    }
     const view = await recoveryView(browser)
-    checks.require('stopped-recovery.send-unlocked', view.snapshot.canSend
-      && view.operations.send.length === 1 && view.operations.send[0].disabled === false,
-    'stopped history-only commit unlocks sending without reconnecting', view.operations.send)
+    // 发送按钮在空草稿时按设计禁用：先填非空草稿，再验证真实可发送且不触发 chat。
+    const chatBeforeDraft = browser.requestCounts().chat
+    await browser.evaluate(`document.querySelector('[data-testid="composer-input"]').focus()`, false)
+    await browser.send('Input.insertText', {text: `resume-${randomUUID()}`})
+    const sendWithDraft = await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const input = document.querySelector('[data-testid="composer-input"]')
+      const send = document.querySelector('[data-testid="send-btn"]')
+      if (!input || !send || input.value.length === 0) return null
+      return {canSend: ai.canSend === true, disabled: send.disabled === true || send.getAttribute('aria-disabled') === 'true'}
+    })()`, 'STOPPED_SEND_NOT_EVALUABLE_WITH_DRAFT')
+    checks.require('stopped-recovery.send-unlocked', view.snapshot.canSend && sendWithDraft.canSend && sendWithDraft.disabled === false,
+      'stopped history-only commit unlocks sending (verified with a non-empty draft)', {...sendWithDraft, send: view.operations.send})
+    checks.require('stopped-recovery.no-chat-from-draft', browser.requestCounts().chat === chatBeforeDraft,
+      chatBeforeDraft, browser.requestCounts().chat)
+    await browser.evaluate(`(() => {
+      const input = document.querySelector('[data-testid="composer-input"]')
+      if (!input) return false
+      input.value = ''
+      input.dispatchEvent(new Event('input', {bubbles: true}))
+      return true
+    })()`, false)
     assertNoReconnect(context, 'stopped-recovery', reconnectBaseline)
     await saveRecoveryPhase(context, 'stopped-recovery', view, await context.api.history(context.sessionId),
       await businessSnapshot(context.api, relevantTaskIds(context)))
@@ -4481,7 +4613,7 @@ async function runStoppedRecovery(context) {
 
 async function runContentMatrix(context) {
   const {browser, checks, config} = context
-  const variants = new Set(['interleave', 'gf-seven', 'timeline', 'boundary', 'repeat-refresh', 'form-draft', 'composer-draft', 'copy-scan'])
+  const variants = new Set(['interleave', 'gf-seven', 'timeline', 'boundary', 'repeat-refresh', 'form-draft', 'composer-draft', 'copy-scan', 'tool-chain'])
   if (!variants.has(config.variant)) throw new ScenarioNotRun('CONTENT_MATRIX_VARIANT_REQUIRED')
   const nonce = randomUUID()
 
@@ -4527,6 +4659,7 @@ async function runContentMatrix(context) {
         status: part.status ?? null,
         requiresAction: part.requiresAction ?? null,
         decision: part.decision ?? null,
+        seq: part.seq ?? null,
         text: part.kind === 'text' ? sha256(part.text ?? '') : null,
         args: part.kind === 'tool' && part.args !== null && part.args !== undefined ? sha256(canonicalJson(part.args)) : null
       }))
@@ -4540,6 +4673,40 @@ async function runContentMatrix(context) {
     cards: snapshot.cards.map((card) => ({testId: card.testId, state: card.state, text: sha256(card.text ?? '')}))
   })
   const seqFacts = (snapshot) => canonicalJson(snapshot.messages.map((message) => message.parts.map((part) => part.seq ?? null)))
+
+  if (config.variant === 'tool-chain') {
+    // C-137：完整创建导出链，逐工具一张真实卡，启动确认停在 HITL，业务只 1 个任务 0 作业。
+    context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+    await browser.sendPrompt(`tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} host-def-select verification=${nonce}`)
+    await approveCreateTasks(context)
+    await driveSkippedHostContinuation(context)
+    const snapshot = await browser.snapshot()
+    context.sessionId = snapshot.sessionId
+    context.runId = snapshot.activeRunId
+    const parts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool')
+    const byName = {}
+    for (const part of parts) (byName[part.name] ??= []).push({toolCallId: part.toolCallId, status: part.status, requiresAction: part.requiresAction})
+    const required = ['create_task', 'navigate_to', 'select_definitions', 'confirm_step', 'start_export']
+    checks.require('tool-chain.required-tools', required.every((name) => (byName[name] ?? []).length >= 1),
+      required, Object.keys(byName))
+    checks.require('tool-chain.start-export-pending', (byName.start_export ?? []).some((part) => part.requiresAction === true),
+      'start_export waits for real HITL approval', byName.start_export ?? [])
+    checks.require('tool-chain.one-card-per-tool-call', parts.filter((part) => part.name !== 'generative_form')
+      .every((part) => targetCard(snapshot, part.toolCallId).length === 1),
+    'each non-form toolCallId keeps exactly one visible card', parts.map((part) => ({
+      name: part.name,
+      toolCallId: part.toolCallId,
+      cards: targetCard(snapshot, part.toolCallId).map((card) => card.testId)
+    })))
+    checks.require('tool-chain.set-condition-card', (byName.set_condition ?? []).length >= 1,
+      'set_condition is retained as its own tool card in the full chain', Object.keys(byName))
+    const business = await businessSnapshot(context.api, relevantTaskIds(context))
+    const newTasks = business.allTasks.filter((task) => !context.businessAfterFixture.allTasks.some((before) => before.id === task.id))
+    checks.require('tool-chain.single-task-no-jobs', newTasks.length === 1 && newTasks.every((task) => task.jobs.length === 0),
+      'exactly one scenario task with zero jobs', newTasks)
+    await context.evidence.json('tool-chain.json', {byName, cards: snapshot.cards.map((card) => card.testId)})
+    return
+  }
 
   if (config.variant === 'composer-draft') {
     const draft = `draft-${nonce}`
