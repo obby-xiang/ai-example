@@ -863,17 +863,18 @@ public class ResilientChatService {
             registered = true;
             String lastUserText = TaskIntent.lastRealUserText(history);
             CorrectionResume correctionResume = correctionResume(snapshot, history);
+            List<Message> modelHistory = historyWithSingleCorrectionPrefix(history, correctionPrefix(snapshot));
             SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
             runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
                     correctionResume.fullText(), correctionResume.pendingSegment(), turnTextBody, attempt -> {
                         if (log.isDebugEnabled())
                             log.debug("rebuilding full history for attempt {} runId={} sessionId={} historyEntries={}", attempt, runId,
-                                    sessionId, history.size());
-                        Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, history, snapshot,
+                                    sessionId, modelHistory.size());
+                        Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, modelHistory, snapshot,
                                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
                         return runtime.chatModel().stream(prompt);
                     }, (prefix, reasoning, createTaskCorrection) -> correctionStream(runtime, runId, sessionId,
-                            context, history, out, prefix, reasoning, turnTextBody, createTaskCorrection));
+                            context, modelHistory, out, prefix, reasoning, turnTextBody, createTaskCorrection));
         } finally {
             finishTurn(runId, keepalive, null, registered);
         }
@@ -2158,7 +2159,69 @@ public class ResilientChatService {
             history.add(ReasoningOrigin.stamp(prefix, snapshot == null ? null : snapshot.getProviderId(),
                     snapshot == null ? null : snapshot.getModelId()));
         }
-        return history;
+        return historyWithSingleCorrectionPrefix(history, prefixText);
+    }
+
+    /**
+     * 模型输入专用：当前 run 的 correctionPrefix 恰好一份；快照、原 history 与 UI 前缀均不改写。
+     */
+    private static List<Message> historyWithSingleCorrectionPrefix(List<Message> history, String prefix) {
+        if (history == null || history.isEmpty() || StringUtils.isEmpty(prefix)) {
+            return history == null ? List.of() : new ArrayList<>(history);
+        }
+        int lastRealUser = lastRealUserIndex(history);
+        List<Message> sanitized = new ArrayList<>(history.size());
+        boolean prefixRetained = false;
+        for (int i = 0; i < history.size(); i++) {
+            Message message = history.get(i);
+            if (!(message instanceof AssistantMessage assistant) || i <= lastRealUser) {
+                sanitized.add(message);
+                continue;
+            }
+            String text = assistant.getText();
+            if (text == null || !text.startsWith(prefix)) {
+                sanitized.add(assistant);
+                continue;
+            }
+            String suffix = stripLeadingCorrectionPrefix(text, prefix);
+            if (!prefixRetained) {
+                sanitized.add(copyAssistantWithText(assistant, prefix + suffix));
+                prefixRetained = true;
+            } else if (assistant.hasToolCalls() || !suffix.isEmpty()) {
+                sanitized.add(copyAssistantWithText(assistant, suffix));
+            }
+        }
+        return sanitized;
+    }
+
+    private static int lastRealUserIndex(List<Message> history) {
+        for (int i = history.size() - 1; i >= 0; i--) {
+            if (history.get(i) instanceof UserMessage message && !SyntheticMessages.isSynthetic(message)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static String stripLeadingCorrectionPrefix(String text, String prefix) {
+        String suffix = text;
+        while (suffix.startsWith(prefix)) {
+            suffix = suffix.substring(prefix.length());
+        }
+        return suffix;
+    }
+
+    private static AssistantMessage copyAssistantWithText(AssistantMessage source, String text) {
+        Map<String, Object> metadata = source.getMetadata() == null ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(source.getMetadata());
+        AssistantMessage.Builder builder = AssistantMessage.builder().content(text).properties(metadata);
+        if (source.hasToolCalls()) {
+            builder.toolCalls(new ArrayList<>(source.getToolCalls()));
+        }
+        if (CollectionUtils.isNotEmpty(source.getMedia())) {
+            builder.media(new ArrayList<>(source.getMedia()));
+        }
+        return builder.build();
     }
 
     private static boolean isEndsWithAssistantText(List<Message> history, String text) {

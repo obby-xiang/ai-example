@@ -4799,6 +4799,38 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本或流式解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1169与agent-1167最终APPROVE；两文件IDEA Reformat成功；主会话最终构建3281模块、Vite 26.84秒通过；动态验收NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:ebc5635a3c545397321f598cd918923261c08717206c5a192bbacb0cfd8a7259",
+      "status": "reviewed",
+      "reason": "逐hunk及关联调用链复核runs/current严格pending读取与纠正历史单前缀，agent-1169最终APPROVE。",
+      "reviewedAt": "2026-11-09T22:50:25+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1169、施工agent-1176与agent-1167",
+      "specChanges": [
+        {
+          "change": "runs/current使用严格pending读取，读取失败按既有映射返回503，合法空列表保持不变。",
+          "reason": "pendingsLenient会把读取失败折成空列表，使真实挂起被误判awaitingExternal=false并进入running。",
+          "impact": "pendingEntries与unresolvedExternal来自同一严格视图，其他lenient调用和Redis语义不变。"
+        },
+        {
+          "change": "普通续跑和纠正请求使用模型专用单前缀history，当前correctionPrefix恰好一份，后续重复仅移除开头，工具消息完整保留。",
+          "reason": "纠正前缀进入后续模型历史会诱导重复输出，终局清理过晚且不能删除带tool_calls的assistant。",
+          "impact": "prefix+prefix折叠，suffix/toolCallId/metadata/media/tool result保留；快照、UI seedPrefix、finalText和工具结算buildResumedPrompt不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "runs/current改严格pendings，失败503由全局映射处理，合法空列表与其他字段不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "两个模型请求入口共用单前缀净化，Builder复制正文、metadata、toolCalls和media，快照和UI不改。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有严格RunStore、异常映射和Spring AI AssistantMessage.Builder，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "新增辅助方法保持小粒度，控制块显式{}，使用既有JSON实体和Builder，不手写JSON字段或线程池。"},
+        "logging-exception-safety": {"status": "checked", "reason": "pending读取失败真实抛出并映射503，不降级为空或伪造running；无正文/密钥日志新增。"},
+        "toc-interaction": {"status": "checked", "reason": "消除恢复状态误判和纠正正文重复，无新增提示、卡片或用户操作负担。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "严格pending与快照同一视图，模型历史仅新列表净化，toolCallId/tool result配对及跨run边界保持，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "仅按correctionPrefix精确前缀处理Java字符串，不做二次转码、全局文本去重或代理对切分。"},
+        "verification-review": {"status": "checked", "reason": "agent-1169最终APPROVE；两文件IDEA Reformat成功；Maven 357主源编译和package BUILD SUCCESS；动态模型/浏览器/API场景NOT_RUN。"}
+      }
     }
   ]
 }

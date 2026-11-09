@@ -2015,7 +2015,7 @@ public class AiController {
     }
 
     private PendingEntriesProjection pendingEntriesProjection(String runId, RunSnapshot snapshot) {
-        List<PendingToolCall> pendings = this.runStore.pendingsLenient(runId);
+        List<PendingToolCall> pendings = this.runStore.pendings(runId);
         Map<String, Integer> batchIndexes = batchIndexes(snapshot.getInFlightToolCalls());
         List<Map<String, Object>> entries = new ArrayList<>();
         List<String> unresolvedExternal = new ArrayList<>();
