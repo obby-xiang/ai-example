@@ -4512,6 +4512,40 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不处理文本字节、SSE解析或Unicode截断。"},
         "verification-review": {"status": "checked", "reason": "agent-1167第三轮及最终复核APPROVE；IDEA默认Reformat已执行，Maven编译357个生产源文件BUILD SUCCESS；测试、真实Redis、多实例和到期动态场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:5344290e9242b350957d8bee8ca8722fe9e4000e752c0f8e5fbc81e424fc136c",
+      "status": "reviewed",
+      "reason": "逐hunk复核测试代码规范豁免、v3纳管路径与指纹、test-only无记录、混合提交过滤、ledger删除/篡改失败关闭及CI历史v2回退；独立审查agent-1171最终APPROVE。",
+      "reviewedAt": "2026-11-09T12:48:47+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1171、施工agent-1170",
+      "specChanges": [
+        {
+          "change": "开发规范与standards提交记录不再适用于普通测试/E2E、压测、独立验收脚本、测试桩及测试文档/结果；v3指纹和files只覆盖非测试代码与非测试文档，test-only无需记录。",
+          "reason": "用户明确测试代码不需要开发规范，不能继续对其套编码风格、工具库、格式化或编译门禁。",
+          "impact": "生产代码、非测试CI/构建脚本和纳管文档仍须逐hunk审查；测试文档和结果仍须真实，不得伪造PASS或降低产品断言。"
+        },
+        {
+          "change": "pre-commit仅接受development-standards/v3，CI在当前v3无匹配时允许回退历史v2全变更记录；无covered变更且未改ledger时才允许no-covered。",
+          "reason": "新规则不能令既有v2提交无法复核，也不能让测试豁免绕过ledger删除、坏JSON、append-only或防复用。",
+          "impact": "历史混合提交按v2全部非ledger文件校验；v3无效记录、指纹复用、非append和ledger删除不得借回退或no-covered放行。"
+        }
+      ],
+      "files": [
+        {"path": "AGENTS.md", "status": "checked", "reason": "项目约定同步纳管范围、test-only免记录及测试证据真实性，文件读写和AI数据库边界保持不变。"},
+        {"path": "docs/delivery/development-standards.md", "status": "checked", "reason": "规范适用范围、v3路径/指纹、CI兼容、验证边界同步，历史v2单点CLI结果与其余NOT_RUN分开记录。"},
+        {"path": "scripts/ci/check-d6-sync.mjs", "status": "checked", "reason": "v3过滤、指纹、files、describe和模板一致；pre-commit仅v3，CI仅no-confirmation回退v2，ledger变更不得被no-covered绕过。"},
+        {"path": "scripts/githooks/README.md", "status": "checked", "reason": "Git hooks说明同步test-only豁免、v3覆盖和v2兼容，删除矛盾旧边界并记录实际单点CLI证据。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "仅使用既有Node crypto/fs/path与Git读取能力，无新增依赖或第二套门禁。"},
+        "java-api-style": {"status": "checked", "reason": "本批无Java变更；门禁脚本新增及触及控制块均显式{}，导出函数保留legacy默认参数。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "本批不修改业务日志、异常映射或前端错误文案，门禁错误仍失败关闭。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批不修改终端用户界面、卡片或交互文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "仅变更书面门禁覆盖与历史兼容，不访问AI数据库、Redis或模型，append-only和防复用状态约束保留。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不处理文本字节、流式帧或Unicode截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1171多轮复审最终APPROVE；node --check与diff --check通过，57394dec..40398bcc历史v2单点CLI退出0，其余动态门禁场景NOT_RUN。"}
+      }
     }
   ]
 }

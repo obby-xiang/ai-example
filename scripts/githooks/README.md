@@ -70,10 +70,10 @@ git commit --allow-secrets -m "..."
 
 ## 4.2 统一开发规范审查（pre-commit 第二道，强制）
 
-规范正文见 `docs/delivery/development-standards.md`，记录见 `docs/delivery/development-standards-review.json`。它覆盖当前暂存区的**全部**生产、测试、压测、脚本、CI 和文档变更，路径分类和文档白名单按统一规范自身规则判断。
+规范正文见 `docs/delivery/development-standards.md`，记录见 `docs/delivery/development-standards-review.json`。生产代码、非测试 CI/构建脚本及纳管文档仍按 v3 记录；测试代码（普通单元/E2E、压测、独立验收脚本、测试桩）不适用开发规范，test-only 无需 standards 记录。路径分类和文档白名单按统一规范自身规则判断，历史 v2 记录由 CI 兼容复核。
 
 - 每条记录必须有 `fingerprint`、`status`、具体 `reason`、带时区的 `reviewedAt`、`reviewer`、`specChanges`、逐文件 `files` 和七域 `domains`。`specChanges` 每项为 `{change, reason, impact}`，三个字段都必填且具体。
-- standards 指纹版本为 `development-standards/v2`：排序后的 JSON 元组 `[status, mode, fromPath, path, blob]`，Git `-z` 原始路径，禁用 rename detection。ledger 排除全链路使用原始 `String` 严格相等，文档白名单不把反斜杠当目录分隔。
+- standards 当前指纹版本为 `development-standards/v3`，只覆盖纳管的非测试代码和非测试文档：排序后的 JSON 元组 `[status, mode, fromPath, path, blob]`，Git `-z` 原始路径，禁用 rename detection。ledger 排除全链路使用原始 `String` 严格相等，文档白名单不把反斜杠当目录分隔。
 - 父 ledger 的 `reviews` 必须是当前 ledger 的严格前缀，历史不得删改或重排。父 ledger 中已有 fingerprint 不得再次追加，修改其他字段也不能复用。
 - 当前和父 ledger 的 `reviews` 缺失或非数组均返回 `rc=2`。父 ledger 只有经 Git 树确认不存在才视为空历史；pre-commit 的 unborn HEAD 单独视为空父历史，其他 Git/JSON/版本错误失败关闭。
 - `status=reviewed` 适用于代码或混合变更；符合独立白名单的纯文档可用 `not-affected`。docs 下 JS/JSON/HTML 不自动算文档，原 D6 block 路径内纯文本文档可按白名单处理。
@@ -100,8 +100,6 @@ CI 在 `.github/workflows/ci.yml` 的 `docs` job 中执行范围模式：push �
 | 2 | 当前或父 JSON、版本、参数、祖先关系、仓库或提交读取错误 | 失败关闭，先修输入或环境 |
 
 第二道没有敏感信息逃生口；缺少 Node 或检查脚本同样阻断，不得绕过。门禁只保证书面记录的结构、指纹、新鲜度和 append-only，不替代独立语义审查和真实运行验证。
-
-本轮新增的 merge-tree、octopus、PR merge-base、append、组合套话、原始路径、白名单、父读取、reviews 结构和 unborn HEAD 场景只做了独立静态复核，全部 `NOT_RUN`；未修改测试代码，未执行测试、构建、git、pre-commit 或 CI。
 
 ## 5. 全历史扫描
 
@@ -149,4 +147,5 @@ GIT_INDEX_FILE=$IDX sh scripts/githooks/pre-commit   # expected: FAIL, blocked, 
 ```
 
 - 改统一规范域、记录结构或全变更指纹算法：同步规范文档并升 `STANDARDS_RULE_VERSION`，不得修改或删除既有审查记录来制造通过；按项目授权执行相应验证，未执行项保持 `NOT_RUN`；
+- 本批验证边界：已单点执行 `node scripts/ci/check-d6-sync.mjs --standards --base 57394dec --head 40398bcc`，历史 v2 回退及既有指纹匹配退出码 0；该结果不外推 GitHub CI 或其他历史提交。v3 测试路径分类、无 ledger 的 test-only、混合提交、其他 v2 回退及 ledger 删除/篡改均为 `NOT_RUN`；另执行只读 Git status/diff 逐 hunk 自审、`node --check scripts/ci/check-d6-sync.mjs` 和 `git diff --check`，未运行测试、构建或服务；
 - 清理：删除临时索引与测试文件即可，仓库索引与工作树不受影响。

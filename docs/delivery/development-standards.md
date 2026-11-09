@@ -1,8 +1,8 @@
 # 统一开发规范与提交审查门禁
 
-> 适用范围：本仓全部生产代码、测试与压测代码、脚本、CI 配置和文档。开发与审查人员在施工前必须阅读；提交前必须对当前暂存区逐 hunk 审查并留下有效记录。
+> 适用范围：本仓生产代码、非测试脚本、CI 配置和非测试文档。普通单元/E2E、压测、独立验收脚本及测试桩等测试代码不适用本开发规范，包括逐 hunk 规范记录、IDEA Reformat Code、IDEA Inspect Code 和编译等开发规范门禁；不再给测试代码套编码风格、工具库、大括号等规范。开发与审查人员在施工前必须阅读；纳管变更提交前必须对当前暂存区的非测试代码和非测试文档逐 hunk 审查并留下有效记录，测试代码-only 提交无需该记录。
 > 记录文件：`docs/delivery/development-standards-review.json`。D6 迁移指南及其 `d6-review.json` 仅作历史参考，正文和已有记录保留；不再作为提交门禁，不要求更新 D6 或新增 D6 审查记录。
-> 证据口径：本规范中的“已审查”只表示人工逐 hunk 检查，不表示测试、真实接口或真实 Redis 已验证。
+> 证据口径：本规范中的“已审查”只表示人工逐 hunk 检查，不表示测试、真实接口或真实 Redis 已验证。测试文档和测试结果仍须真实，不得伪造 PASS、把 `NOT_RUN` 写成通过或降低产品断言；这属于验收证据真实性要求，不把测试代码重新纳入开发规范。
 
 ## 1. 基本原则与规格变更
 
@@ -37,7 +37,7 @@
 - 禁止编写 Python、Shell、PowerShell、JavaScript 等脚本或内联命令，对源代码进行方法识别、行数统计、圈复杂度计算、语法结构分析、批量替换或自动重构；不得通过正则、字符串切片、括号匹配等方式另造代码解析器。
 - 静态分析必须使用经批准的成熟组件及其规则能力。当前 Java 使用 Checkstyle 与 PMD；组件能力不满足项目口径时，应先审查并扩展其 AST 规则，不得退回自写脚本。
 - 源代码修改必须通过可逐文件、逐 hunk 审查的正常编辑流程完成。确需自动化重构时，只能使用经审查的成熟 AST 重构工具，不得使用自写脚本直接写入源文件。
-- 既有 CI、构建和压测脚本不得承担上述源代码分析或修改职责；发现此类脚本不得以其结果作为开发验收或审查证据。
+- 既有非测试 CI 和构建脚本不得承担上述源代码分析或修改职责；发现此类脚本不得以其结果作为开发验收或审查证据。
 
 ### 2.4 废弃代码直接删除
 
@@ -156,7 +156,7 @@
 
 - 模型调用总并发不得超过 **10**。直接聊天、压缩、摘要、KB、工具内部调用及其他间接模型路径共用同一限流边界，不得每个入口各放 10 个。
 - 新增间接调用时必须沿完整调用图核对限流获取与释放；取消、异常和超时都要释放许可，排队必须有界。
-- 压测代码也必须走同一限流语义，不能通过压测入口绕过生产模型并发上限。
+- 压测验收不得把绕过生产模型并发上限的结果作为产品通过证据；被测产品仍须执行同一限流语义。该证据要求不向压测代码追加编码风格或工具库规范。
 
 ### 6.4 线程池与定时任务池生命周期
 
@@ -239,9 +239,9 @@
 
 1. 静态审查必须明确写“静态审查”，不得冒充实测。没有执行的检查写 `NOT_RUN`，不得写成 `PASS`、`通过`、`已验证` 或绿色结论。
 2. 涉及真实接口、SSE、Redis、状态机或清理的变更，验收应读取真实接口结果和真实 Redis 键/TTL/游标/post 状态。静态阅读只能作为施工审查，不能替代这些运行证据。
-3. 提交前由审查人员对当前暂存区**逐文件、逐 hunk**检查；独立审查应由非施工者或独立审查上下文完成，不得只复述施工结论。审查记录必须覆盖生产、测试、压测、脚本和文档文件。
-4. 代码修改结束后，必须确保修改相关的非测试代码已由实际编译命令覆盖并编译通过；编译不通过不得提交或推送。不执行测试不等于不编译，静态审查、旧构建产物和其他模块的编译结果均不能替代本次修改的编译证据。审查记录必须写明实际编译命令、覆盖范围和结果；编译错误未清零时不得声称修复完成或启动旧产物冒充当前代码。
-5. 代码必须使用 IDEA 能力执行 Reformat Code 格式化；IDEA Inspect Code 及其检查问题处理当前暂缓，不作为提交门禁。不得用人工浏览、其他格式化工具或编译成功代替 IDEA 格式化。审查记录必须写明 IDEA Reformat Code 的实际覆盖文件和结果；格式化导致的后续变化必须重新审查，未执行 Inspect Code 不得写成检查通过。
+3. 提交前由审查人员对当前暂存区的纳管文件**逐文件、逐 hunk**检查；独立审查应由非施工者或独立审查上下文完成，不得只复述施工结论。审查记录只覆盖非测试代码和非测试文档；测试代码-only 提交无需记录。测试文档和测试结果仍须真实，不得伪造 PASS 或降低产品断言。
+4. 代码修改结束后，必须确保修改相关的非测试代码已由实际编译命令覆盖并编译通过；编译不通过不得提交或推送。不执行测试不等于不编译，静态审查、旧构建产物和其他模块的编译结果均不能替代本次修改的编译证据。审查记录必须写明实际编译命令、覆盖范围和结果；编译错误未清零时不得声称修复完成或启动旧产物冒充当前代码。测试代码不适用该开发规范编译门禁。
+5. 纳管代码必须使用 IDEA 能力执行 Reformat Code 格式化；IDEA Inspect Code 及其检查问题处理当前暂缓，不作为提交门禁。不得用人工浏览、其他格式化工具或编译成功代替 IDEA 格式化。审查记录必须写明 IDEA Reformat Code 的实际覆盖文件和结果；格式化导致的后续变化必须重新审查，未执行 Inspect Code 不得写成检查通过。测试代码不适用这些格式化门禁。
 6. 前后端服务启动后必须观测启动及运行日志，不能只凭健康检查、端口可访问或进程存活判定服务正常。对报错、告警和异常堆栈必须逐条分析并记录日志位置、时间和分类依据：确认是问题的必须处理并复验闭环；确认不是问题的必须记录摘要、判断依据和备案位置；无法判定的按问题处理，不得忽略、掩饰或只以健康检查通过代替日志验收。
 7. 不得通过忽略或吞没异常、异步处理、提前返回、降级、重试、日志采样/限频、状态包装或其他手段掩盖错误、性能问题和未知结局。异常忽略与异步处理本身并非禁止：具有明确业务依据时可以采用，但必须保证错误、延迟、失败、残留和未知状态真实可观测、可记录、可追踪；不得把异步受理冒充执行成功、把日志减少冒充问题消失、把提前返回冒充处理完成或把未确认结果包装成确定成功。
 8. 审查以最终暂存内容为准。审查后导致覆盖暂存状态变化的修改、重暂存或文件集合变化都会使指纹失效，必须重新逐 hunk 审查并新增记录。
@@ -251,8 +251,10 @@
 
 ### 9.1 指纹、append-only 与防复用
 
-- pre-commit 执行敏感信息扫描和 `node scripts/ci/check-d6-sync.mjs --standards` 两道检查。统一规范门禁缺少 Node、脚本、有效记录或指纹匹配时均阻断提交；敏感信息逃生口不能豁免它。
-- standards 指纹版本为 `development-standards/v2`，覆盖除 `development-standards-review.json` 自身以外的全部暂存变更。每个条目使用无歧义 JSON 元组 `[status, mode, fromPath, path, blob]` 排序后散列；路径取 Git `-z` 原始字符串，standards 禁用 rename detection，以删除加新增表示。
+- pre-commit 执行敏感信息扫描和 `node scripts/ci/check-d6-sync.mjs --standards` 两道检查。统一规范门禁缺少 Node 或脚本，以及纳管变更缺少有效记录或指纹匹配时均阻断提交；敏感信息逃生口不能豁免它。pre-commit 只接受当前 v3 记录，不允许回退 v2 绕过。
+- standards 当前指纹版本为 `development-standards/v3`，只覆盖除 `development-standards-review.json` 自身以外的非测试代码和非测试文档。每个条目使用无歧义 JSON 元组 `[status, mode, fromPath, path, blob]` 排序后散列；路径取 Git `-z` 原始字符串，standards 禁用 rename detection，以删除加新增表示。
+- v3 测试路径按原始字符串识别，覆盖 `backend/src/test/`；`frontend/test/`、`frontend/tests/`、`frontend/e2e/` 及前端任意 `__tests__/`；全仓 `*.test.*`、`*.spec.*`；`scripts/verification/`、`scripts/perf/`、`scripts/ci/stub-*`；仓内现有的 `scripts/verify-e2e.ps1`、`scripts/b23l1-dual-instance.ps1`、`scripts/chat-panel-smoke.mjs`、`scripts/redis5-cluster-smoke.sh`、`scripts/m2t2a-smoke.mjs`；以及 `docs/verification/` 测试文档和 `test-results/`、`frontend/test-results/` 测试结果。`spike/` 和其他正常 CI、构建脚本不按名称整体排除。
+- 测试代码-only 或测试文档/结果-only 提交没有 covered 变更，无需 standards 记录，应与真正无暂存变更区分。混合提交的指纹和 `files` 只纳入非测试代码、非测试 CI/构建脚本及非测试文档，测试变更不进入记录。
 - 审查记录必须在同一提交**仅追加**。父 ledger 的 `reviews` 必须是当前 `reviews` 的严格前缀，历史条目不得删除、修改或重排。
 - 父 ledger 中已经出现过的 fingerprint 不得再次使用，即使修改理由、时间或其他字段也不视为新记录。审查后导致覆盖暂存状态变化的修改必须重新审查并生成新指纹。
 - 当前和父 ledger 的 `reviews` 都必须存在且为数组，缺失或非数组均为 `rc=2`。父 ledger 只有经 Git 树读取确认不存在时才按空历史处理；pre-commit 的 unborn HEAD 单独视为 `parentReviewText=null`，其他 Git 错误、非法 JSON、版本或结构不符均失败关闭。
@@ -260,6 +262,7 @@
 ### 9.2 merge 与 CI 范围
 
 - CI 使用 `--standards --base <base> --head <head>` 验证范围内的**所有引入提交**，包括普通提交和 merge，不无条件跳过 merge，也不依赖修改分支保护。
+- CI 逐提交先按 v3 复核；有 covered 变更但当前 v3 指纹无匹配时，可回退 `development-standards/v2` 的全变更指纹和旧 `files` 规则验证历史记录，混合历史提交仍按 v2 的全部非 ledger 文件校验。测试代码-only 历史提交在 v3 无 covered 变更时自然通过，不强迫补旧记录。v3 已有匹配但记录无效、指纹复用、ledger 非 append-only 或 JSON/结构错误不得借 v2 回退放行。
 - 两父 merge 先以 `git merge-tree --write-tree parent1 parent2` 计算自动合并预期 tree。merge tree 等于任一父 tree 仍可豁免；仅 merge-tree 状态 0 且 merge tree 等于该预期 tree 时才也可豁免，状态 1 必须追加 merge 自身记录。非法 tree 输出、其他退出状态和 octopus 继续失败关闭，所有引入提交仍逐笔验证。
 - 需要 merge 自身记录时，以第一父提交的 diff 和 ledger 为本次指纹及 append 基线，其他引入提交仍分别验证。
 - push 的 before 必须有效且是 head 祖先，全零、非祖先或异常空范围失败关闭。PR workflow 先执行 `git merge-base PR_BASE_SHA PR_HEAD_SHA` 求实际分叉点，再交给检查器，不能要求原始 `base.sha` 是 head 祖先。仅 base/head 解析为同一 commit 时允许空范围。
@@ -268,13 +271,13 @@
 
 每条记录至少包含：
 
-- `fingerprint`：当前 v2 变更指纹；
+- `fingerprint`：当前 v3 纳管变更指纹；
 - `status`：`reviewed`，或符合下方白名单的纯文档变更使用 `not-affected`；
 - `reason`：本批逐 hunk 审查范围和结论的具体理由；
 - `reviewedAt`：带时区的 ISO 8601 时间；
 - `reviewer`：实际审查人员或审查上下文；
 - `specChanges`：规格变化数组，无变化为 `[]`；每项必须是 `{change, reason, impact}`，分别写清变化、原因和影响面，三个字段都逐项校验；
-- `files`：除记录文件自身外每个变更文件一项，含 `path`、`status` 和具体 `reason`；
+- `files`：除记录文件自身外每个纳管的非测试代码或非测试文档一项，含 `path`、`status` 和具体 `reason`；
 - `domains`：以下七个域全部必填，每域含 `status` 和具体 `reason`。
 
 | 域 ID | 审查内容 |
@@ -337,4 +340,6 @@ standards 全链路的 ledger 排除都使用原始 `String` 严格相等，不�
 
 ## 10. 本轮门禁实现的验证边界
 
-以下场景仅做独立静态实现复核，均为 `NOT_RUN`：两父 merge-tree 预期 tree、父 tree 复用、evil merge、octopus、PR merge-base、push 祖先与空范围、全零 before、append 历史删改、父 fingerprint 防复用、组合套话及具体理由防误伤、mode/fromPath/原始 String 路径、rename 禁用、文档白名单、当前和父 `reviews` 缺失/非数组、父 ledger 读取/JSON/版本错误、unborn HEAD、`specChanges` 三字段。未修改任何测试代码，未执行测试、构建、git、pre-commit 或 CI，不得据此主张这些场景已经动态通过。
+已执行一次历史 v2 只读 CLI 单点复核：`node scripts/ci/check-d6-sync.mjs --standards --base 57394dec --head 40398bcc`，新脚本回退 `development-standards/v2`，两个纳管文件的既有指纹与记录匹配，退出码 0。该结果只证明这一历史提交的兼容回退，不是 GitHub CI、pre-commit 或其他 v2/v3 场景通过证据。
+
+以下场景仅做静态实现复核，均为 `NOT_RUN`：v3 测试路径分类、混合提交排除、测试-only `no-covered`、pre-commit 拒绝 v2、其他历史提交的 v2 回退及混合历史 `files` 校验、exported 纯函数 legacy 默认行为；以及两父 merge-tree 预期 tree、父 tree 复用、evil merge、octopus、PR merge-base、push 祖先与空范围、全零 before、append 历史删改、父 fingerprint 防复用、组合套话及具体理由防误伤、mode/fromPath/原始 String 路径、rename 禁用、文档白名单、当前和父 `reviews` 缺失/非数组、父 ledger 读取/JSON/版本错误、unborn HEAD、`specChanges` 三字段。本次未修改普通测试代码、独立验收脚本或生产业务代码，未执行动态测试、普通测试、构建、pre-commit 或 GitHub CI；其余验证仅执行 `node --check scripts/ci/check-d6-sync.mjs` 和 `git diff --check`，另以只读 Git status/diff 逐 hunk 自审。不得据此主张上述场景已经动态通过。

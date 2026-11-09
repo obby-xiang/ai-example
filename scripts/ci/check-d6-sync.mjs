@@ -3,9 +3,10 @@
  * check-d6-sync.mjs —— D6 历史检查 + 统一开发规范审查门禁
  *
  * 默认 D6 实现保留为历史工具，不再由 pre-commit 或 CI 调用；D6 正文与既有 d6-review.json
- * 仅作历史参考，不要求随提交更新或新增记录。--standards 模式覆盖全部暂存变更，并要求逐文件、
- * 七规范域、规格变化和真实证据边界的当次记录。--standards --base <sha> --head <sha> 用于 CI 逐提交复核。
- * 统一规范模式在 pre-commit 中缺少 Node 或脚本时失败关闭。
+ * 仅作历史参考，不要求随提交更新或新增记录。--standards 的 v3 暂存门禁只覆盖非测试代码和非测试文档，
+ * 并要求逐文件、七规范域、规格变化和真实证据边界的当次记录；测试代码和测试文档-only 无需记录。
+ * --standards --base <sha> --head <sha> 用于 CI 逐提交复核，v3 无匹配时可回退历史 v2 全变更记录。
+ * 统一规范模式在 pre-commit 中缺少 Node 或脚本时失败关闭，且不接受 v2 绕过。
  *
  * 目标（轻量，只证明"有人工确认"，不证明语义正确）：
  *   本次暂存区出现 **AI 对话生产代码与核心契约**（block 面）时，要求同一笔提交里
@@ -44,7 +45,8 @@ export const RULE_VERSION = 'd6-sync/v1'
 export const REVIEW_VERSION = 1
 export const REVIEW_PATH = 'docs/delivery/d6-review.json'
 export const D6_DOC_PATH = 'docs/delivery/06-新项目复用与落地指南.md'
-export const STANDARDS_RULE_VERSION = 'development-standards/v2'
+export const STANDARDS_RULE_VERSION = 'development-standards/v3'
+export const STANDARDS_V2_RULE_VERSION = 'development-standards/v2'
 export const STANDARDS_REVIEW_VERSION = 1
 export const STANDARDS_REVIEW_PATH = 'docs/delivery/development-standards-review.json'
 export const STANDARDS_DOC_PATH = 'docs/delivery/development-standards.md'
@@ -274,9 +276,45 @@ export function computeFingerprint(blockChanges = []) {
   return computeChangeFingerprint(blockChanges, RULE_VERSION)
 }
 
-export function computeStandardsFingerprint(changes = []) {
-  const tuples = changes
-    .filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH)
+const STANDARDS_TEST_SCRIPT_PATHS = new Set([
+  'scripts/verify-e2e.ps1',
+  'scripts/b23l1-dual-instance.ps1',
+  'scripts/chat-panel-smoke.mjs',
+  'scripts/redis5-cluster-smoke.sh',
+  'scripts/m2t2a-smoke.mjs',
+])
+
+export function isStandardsTestPath(filePath) {
+  const p = String(filePath)
+  if (p.startsWith('backend/src/test/')) {
+    return true
+  }
+  if (/^frontend\/(?:tests?|e2e)\//.test(p)) {
+    return true
+  }
+  if (p.startsWith('frontend/') && /(?:^|\/)__tests__\//.test(p)) {
+    return true
+  }
+  if (/\.(?:test|spec)\.[^/]+$/.test(p)) {
+    return true
+  }
+  if (p.startsWith('scripts/verification/') || p.startsWith('scripts/perf/') || p.startsWith('scripts/ci/stub-')) {
+    return true
+  }
+  return STANDARDS_TEST_SCRIPT_PATHS.has(p) ||
+    p.startsWith('docs/verification/') ||
+    p.startsWith('test-results/') ||
+    p.startsWith('frontend/test-results/')
+}
+
+function standardsCoveredChanges(changes, ruleVersion) {
+  return changes.filter((c) =>
+    String(c.path) !== STANDARDS_REVIEW_PATH &&
+    (ruleVersion !== STANDARDS_RULE_VERSION || !isStandardsTestPath(c.path)))
+}
+
+export function computeStandardsFingerprint(changes = [], ruleVersion = STANDARDS_V2_RULE_VERSION) {
+  const tuples = standardsCoveredChanges(changes, ruleVersion)
     .map((c) => JSON.stringify([
       c.status || 'M',
       c.mode || ZERO_MODE,
@@ -286,8 +324,10 @@ export function computeStandardsFingerprint(changes = []) {
     ]))
     .sort()
   const hash = createHash('sha256')
-  hash.update(`${STANDARDS_RULE_VERSION}\n`)
-  for (const tuple of tuples) hash.update(`${tuple}\n`)
+  hash.update(`${ruleVersion}\n`)
+  for (const tuple of tuples) {
+    hash.update(`${tuple}\n`)
+  }
   return `sha256:${hash.digest('hex')}`
 }
 
@@ -585,8 +625,8 @@ function validateStandardsDomains(entry) {
   return problems
 }
 
-export function validateStandardsEntry(entry, changes = []) {
-  const covered = changes.filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH)
+export function validateStandardsEntry(entry, changes = [], ruleVersion = STANDARDS_V2_RULE_VERSION) {
+  const covered = standardsCoveredChanges(changes, ruleVersion)
   return [
     ...validateStandardsBase(entry, covered),
     ...validateSpecChanges(entry, covered),
@@ -638,7 +678,7 @@ function freshStandardsEntries(result, reviewText, parentReviewText) {
   if (matching.length === 0) {
     result.exitCode = 1
     result.kind = 'no-confirmation'
-    result.problems.push('no standards review record matches the current all-change fingerprint')
+    result.problems.push('no standards review record matches the current fingerprint')
     return []
   }
   const fresh = current.slice(parentEntries.length).filter((entry) =>
@@ -651,17 +691,35 @@ function freshStandardsEntries(result, reviewText, parentReviewText) {
   return fresh
 }
 
-export function evaluateStandards({ changes = [], reviewText = '', parentReviewText = null } = {}) {
+export function evaluateStandards({
+  changes = [],
+  reviewText = '',
+  parentReviewText = null,
+  ruleVersion = STANDARDS_V2_RULE_VERSION,
+} = {}) {
+  const covered = standardsCoveredChanges(changes, ruleVersion)
+  const excluded = ruleVersion === STANDARDS_RULE_VERSION
+    ? changes.filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH && isStandardsTestPath(c.path))
+    : []
+  const ledgerChanged = changes.some((c) => String(c.path) === STANDARDS_REVIEW_PATH)
   const result = {
     exitCode: 0,
-    kind: 'no-changes',
-    fingerprint: computeStandardsFingerprint(changes),
+    kind: changes.length === 0 ? 'no-changes' : 'no-covered',
+    fingerprint: computeStandardsFingerprint(changes, ruleVersion),
+    ruleVersion,
     changes,
+    covered,
+    excluded,
     reviewStaged: false,
     problems: [],
     entry: null,
   }
-  if (changes.length === 0) return result
+  if (changes.length === 0) {
+    return result
+  }
+  if (ruleVersion === STANDARDS_RULE_VERSION && covered.length === 0 && !ledgerChanged) {
+    return result
+  }
   result.reviewStaged = changes.some((c) => String(c.path) === STANDARDS_REVIEW_PATH && (c.status || 'M') !== 'D')
   if (!result.reviewStaged) {
     result.exitCode = 1
@@ -670,9 +728,11 @@ export function evaluateStandards({ changes = [], reviewText = '', parentReviewT
     return result
   }
   const fresh = freshStandardsEntries(result, reviewText, parentReviewText)
-  if (result.exitCode !== 0) return result
+  if (result.exitCode !== 0) {
+    return result
+  }
   for (const entry of fresh) {
-    const problems = validateStandardsEntry(entry, changes)
+    const problems = validateStandardsEntry(entry, changes, ruleVersion)
     if (problems.length === 0) {
       result.kind = 'ok'
       result.entry = entry
@@ -961,7 +1021,8 @@ export function describe(result) {
 }
 
 function standardsConfirmationTemplate(result) {
-  const covered = result.changes.filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH)
+  const ruleVersion = result.ruleVersion || STANDARDS_V2_RULE_VERSION
+  const covered = result.covered || standardsCoveredChanges(result.changes, ruleVersion)
   return {
     fingerprint: result.fingerprint,
     status: 'reviewed',
@@ -982,15 +1043,33 @@ function standardsConfirmationTemplate(result) {
 }
 
 export function describeStandards(result) {
-  const lines = [`Development standards review gate (rule version ${STANDARDS_RULE_VERSION})`, '']
+  const ruleVersion = result.ruleVersion || STANDARDS_V2_RULE_VERSION
+  const lines = [`Development standards review gate (rule version ${ruleVersion})`, '']
   if (result.kind === 'no-changes') {
     lines.push('OK no staged changes; no standards review confirmation needed')
     return lines
   }
-  const coveredCount = result.changes.filter((c) => String(c.path) !== STANDARDS_REVIEW_PATH).length
-  lines.push(`Covered changes: ${coveredCount} (production, test/stress, scripts, CI and docs all included)`)
+  const excluded = result.excluded || []
+  if (result.kind === 'no-covered') {
+    lines.push('OK no covered changes; test code/documents are excluded and need no standards review confirmation')
+    for (const file of sorted(excluded)) {
+      lines.push(`    ${file.status || 'M'} ${file.path}   <- test code/document excluded`)
+    }
+    return lines
+  }
+  const covered = result.covered || standardsCoveredChanges(result.changes, ruleVersion)
+  const coverage = ruleVersion === STANDARDS_RULE_VERSION
+    ? 'non-test code and non-test documentation only; test code/documents excluded'
+    : 'all non-ledger changes included by the legacy v2 files rule'
+  lines.push(`Covered changes: ${covered.length} (${coverage})`)
+  if (excluded.length > 0) {
+    lines.push(`Excluded test code/documents: ${excluded.length} (not in fingerprint or files)`)
+    for (const file of sorted(excluded)) {
+      lines.push(`    ${file.status || 'M'} ${file.path}`)
+    }
+  }
   lines.push(`fingerprint: ${result.fingerprint}`)
-  lines.push(`      = all changes except ${STANDARDS_REVIEW_PATH} itself`, '')
+  lines.push(`      = ${ruleVersion} covered changes except ${STANDARDS_REVIEW_PATH} itself`, '')
   if (result.kind === 'ok') {
     lines.push(`OK new standards review is valid: status=${result.entry.status}, reviewer=${result.entry.reviewer}`)
     lines.push('Note: checked means human review only; it is not a test, real-interface or Redis PASS.')
@@ -1006,12 +1085,14 @@ export function describeStandards(result) {
     'invalid-confirmation': 'FAIL the standards review record does not meet the requirements',
   }
   lines.push(headlines[result.kind] || 'FAIL standards review did not pass')
-  for (const problem of result.problems) lines.push(`    - ${problem}`)
+  for (const problem of result.problems) {
+    lines.push(`    - ${problem}`)
+  }
   lines.push('', `How to fix: ADD and complete the record below in ${STANDARDS_REVIEW_PATH}, then stage it:`)
   for (const line of JSON.stringify(standardsConfirmationTemplate(result), null, 2).split('\n')) {
     lines.push(`  ${line}`)
   }
-  lines.push('', 'Every changed file and all seven domains need concrete reasons. Any change to the covered staged state needs a new review.')
+  lines.push('', 'Every covered file and all seven domains need concrete reasons. Any change to the covered staged state needs a new review.')
   return lines
 }
 
@@ -1025,15 +1106,17 @@ usage:
   node scripts/ci/check-d6-sync.mjs --help
 
 D6 default mode (historical manual tool only): staged AI block files need a fresh matching ${REVIEW_PATH} record when this mode is explicitly run.
-standards mode: every staged change needs an appended matching ${STANDARDS_REVIEW_PATH} record,
-  including production, test/stress, scripts, CI and docs. All seven domains and every file need reasons.
-  Parent reviews must be a strict prefix; a parent fingerprint cannot be reused.
+standards mode: covered non-test code/documents need an appended matching ${STANDARDS_REVIEW_PATH} record.
+  Test code/documents are excluded from v3 fingerprints and files; test-only changes need no record.
+  All seven domains and every covered file need reasons. Parent reviews must be a strict prefix;
+  a parent fingerprint cannot be reused. Pre-commit accepts v3 only.
   --base/--head validates ancestry and checks every introduced commit; only equal commits allow an empty range.
+  CI retries with the legacy v2 all-change fingerprint/files rule only when no v3 record matches.
   A two-parent merge reusing a parent tree or the automatic merge-tree result needs no merge-specific record;
   octopus merges fail closed; all other merges need their own appended record.
 
-standards fingerprint: sha256(v2 + sorted JSON [status,mode,fromPath,path,blob]); D6 v1 is unchanged.
-The corresponding review ledger is excluded.
+standards fingerprint: sha256(v3 + sorted JSON [status,mode,fromPath,path,blob] of covered changes).
+The corresponding review ledger and test code/documents are excluded; D6 v1 is unchanged.
 exit code: 0 pass / 1 required confirmation missing or invalid / 2 input or environment error.
 D6 default mode is not invoked by pre-commit or CI; the standards hook fails closed without Node.
 A confirmation proves written review only, not semantic correctness or real test/interface/Redis execution.`)
@@ -1060,8 +1143,10 @@ function runStandardsStaged(repo) {
   const reviewStaged = changes.some((c) => c.path === STANDARDS_REVIEW_PATH && c.status !== 'D')
   const reviewText = reviewStaged ? showFromIndex(repo, STANDARDS_REVIEW_PATH) : ''
   const parentReviewText = readStagedParentReview(repo)
-  const result = evaluateStandards({ changes, reviewText, parentReviewText })
-  for (const line of describeStandards(result)) console.log(line)
+  const result = evaluateStandards({ changes, reviewText, parentReviewText, ruleVersion: STANDARDS_RULE_VERSION })
+  for (const line of describeStandards(result)) {
+    console.log(line)
+  }
   return result.exitCode
 }
 
@@ -1074,9 +1159,16 @@ function runStandardsCommits(repo, base, head) {
       console.log('OK merge tree reuses a parent tree or the automatic merge-tree result; no merge-specific record required, all introduced commits are still checked')
       continue
     }
-    const result = evaluateStandards(input)
-    for (const line of describeStandards(result)) console.log(line)
-    if (result.exitCode !== 0) return result.exitCode
+    const current = evaluateStandards({ ...input, ruleVersion: STANDARDS_RULE_VERSION })
+    const result = current.kind === 'no-confirmation'
+      ? evaluateStandards({ ...input, ruleVersion: STANDARDS_V2_RULE_VERSION })
+      : current
+    for (const line of describeStandards(result)) {
+      console.log(line)
+    }
+    if (result.exitCode !== 0) {
+      return result.exitCode
+    }
   }
   console.log(`OK standards review passed for ${commits.length} introduced commit(s)`)
   return 0
