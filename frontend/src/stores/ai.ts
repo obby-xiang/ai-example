@@ -807,13 +807,39 @@ function clearRecoveryOperations(store: { restoringRecovery: boolean }): void {
   store.restoringRecovery = false
 }
 
+interface AutoRecoveryOperation {
+  store: { restoringRecovery: boolean }
+  token: number
+  epoch: number
+}
+
+const autoRecoveryOperations = new Map<AutoRecoveryKind, AutoRecoveryOperation>()
+
 function autoRecoveryEpoch(kind: AutoRecoveryKind): number {
   return autoRecoveryEpochs.get(kind) ?? 0
 }
 
+function beginAutoRecoveryOperation(
+  store: { restoringRecovery: boolean },
+  kind: AutoRecoveryKind,
+  epoch: number
+): AutoRecoveryOperation {
+  const operation = { store, token: beginRecoveryOperation(store), epoch }
+  autoRecoveryOperations.set(kind, operation)
+  return operation
+}
+
+function endAutoRecoveryOperation(kind: AutoRecoveryKind, operation: AutoRecoveryOperation): void {
+  if (autoRecoveryOperations.get(kind) !== operation) {
+    return
+  }
+  autoRecoveryOperations.delete(kind)
+  endRecoveryOperation(operation.store, operation.token)
+}
+
 /**
- * 作废自动恢复：清计时器、放行等待中的链路、推进版本号。缺省 = 全部作废
- * （换会话 / 停止 / 新发送这类"现场整体作废"的出口）。
+ * 作废自动恢复：清计时器、放行等待中的链路、推进版本号并释放整链 operation。
+ * 缺省 = 全部作废（换会话 / 停止 / 新发送这类"现场整体作废"的出口）。
  */
 function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
   const kinds = kind === undefined
@@ -821,7 +847,8 @@ function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
       ...autoRecoveryEpochs.keys(),
       ...autoRecoveryTimers.keys(),
       ...autoRecoveryWaiters.keys(),
-      ...autoRecoveryInFlight
+      ...autoRecoveryInFlight,
+      ...autoRecoveryOperations.keys()
     ])
     : [kind]
   for (const item of kinds) {
@@ -836,15 +863,24 @@ function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
       autoRecoveryWaiters.delete(item)
       waiter()
     }
+    const operation = autoRecoveryOperations.get(item)
+    if (operation !== undefined) {
+      endAutoRecoveryOperation(item, operation)
+    }
   }
 }
 
 function canWaitAutoRecoveryDelay(kind: AutoRecoveryKind): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    autoRecoveryWaiters.set(kind, () => resolve(false))
+    const waiter = (): void => resolve(false)
+    autoRecoveryWaiters.set(kind, waiter)
     const timer = setTimeout(() => {
-      autoRecoveryTimers.delete(kind)
-      autoRecoveryWaiters.delete(kind)
+      if (autoRecoveryTimers.get(kind) === timer) {
+        autoRecoveryTimers.delete(kind)
+      }
+      if (autoRecoveryWaiters.get(kind) === waiter) {
+        autoRecoveryWaiters.delete(kind)
+      }
       resolve(true)
     }, AUTO_RECOVERY_DELAY_MS)
     autoRecoveryTimers.set(kind, timer)
@@ -4725,9 +4761,9 @@ export const useAiStore = defineStore('ai', {
       }
       return state.notice
     },
-    /** 输入区是否可用（执行中/挂起等待中一律禁发）。 */
+    /** 输入区是否可用（执行中/挂起等待中/恢复对账中一律禁发）。 */
     canSend(state): boolean {
-      return !state.loading
+      return !state.loading && !state.restoringRecovery
     },
     /**
      * 批次2：本轮的**视图阶段**（四态，单一判据）。
@@ -4741,14 +4777,15 @@ export const useAiStore = defineStore('ai', {
      * <li>`running` = 有连接在收流且无人工等待；</li>
      * <li>`idle` = 没有在途轮。</li>
      * </ul>
-     * 优先级：parked > recovering > running > idle（挂起时"有没有连接"不再是用户的关注点）。
+     * 优先级：recovering > parked > running > idle。恢复对账完成前不提前发布镜像里的挂起态；
+     * 完成后才按权威快照显示等待或继续工作。
      */
     runPhase(state): 'idle' | 'running' | 'parked' | 'recovering' {
-      if (state.suspended) {
-        return 'parked'
-      }
       if (state.restoringRecovery) {
         return 'recovering'
+      }
+      if (state.suspended) {
+        return 'parked'
       }
       return state.loading ? 'running' : 'idle'
     },
@@ -4898,16 +4935,28 @@ export const useAiStore = defineStore('ai', {
     async canAutoRecoverBounded(
       kind: AutoRecoveryKind,
       attempt: () => Promise<boolean>,
-      onExhausted?: () => void
+      onExhausted?: () => void,
+      scheduledOperation?: AutoRecoveryOperation
     ): Promise<boolean> {
       const chainSessionId = this.sessionId
-      const epoch = autoRecoveryEpoch(kind)
-      if (autoRecoveryEpoch(kind) !== epoch || autoRecoveryInFlight.has(kind)) {
+      if (scheduledOperation === undefined && autoRecoveryOperations.has(kind)) {
+        return false
+      }
+      const epoch = scheduledOperation?.epoch ?? autoRecoveryEpoch(kind)
+      const operation = scheduledOperation ?? beginAutoRecoveryOperation(this, kind, epoch)
+      if (autoRecoveryOperations.get(kind) !== operation
+        || autoRecoveryEpoch(kind) !== epoch
+        || autoRecoveryInFlight.has(kind)) {
+        endAutoRecoveryOperation(kind, operation)
         return false
       }
       let used = this.autoRecoveryUsed[kind] ?? 0
       if (used >= AUTO_RECOVERY_MAX_ATTEMPTS) {
-        onExhausted?.()
+        try {
+          onExhausted?.()
+        } finally {
+          endAutoRecoveryOperation(kind, operation)
+        }
         return false
       }
       autoRecoveryInFlight.add(kind)
@@ -4937,6 +4986,7 @@ export const useAiStore = defineStore('ai', {
         return false
       } finally {
         autoRecoveryInFlight.delete(kind)
+        endAutoRecoveryOperation(kind, operation)
         if (kind === 'history') {
           this.flushTerminalHistoryFollowup(chainSessionId)
         }
@@ -4945,6 +4995,7 @@ export const useAiStore = defineStore('ai', {
 
     /**
      * 排一次自动恢复（**延时启动**：先给人 / 其它入口让路，自动动作不抢先）。
+     * 排期即取得整链 operation，直到成功、耗尽或取消才释放；单次 attempt 与退避不中断门禁。
      *
      * @returns 是否排上（false = 同类已在跑 / 已排 / 预算用尽 —— 调用方据此保留既有手动出口；
      *   注意 false 不区分"在跑"与"用尽"，只有用尽时才回调 `onExhausted`）
@@ -4954,7 +5005,7 @@ export const useAiStore = defineStore('ai', {
       attempt: () => Promise<boolean>,
       onExhausted?: () => void
     ): boolean {
-      if (autoRecoveryInFlight.has(kind) || autoRecoveryTimers.has(kind)) {
+      if (autoRecoveryInFlight.has(kind) || autoRecoveryTimers.has(kind) || autoRecoveryOperations.has(kind)) {
         return false
       }
       if ((this.autoRecoveryUsed[kind] ?? 0) >= AUTO_RECOVERY_MAX_ATTEMPTS) {
@@ -4962,15 +5013,24 @@ export const useAiStore = defineStore('ai', {
         return false
       }
       const epoch = autoRecoveryEpoch(kind)
-      const timer = setTimeout(() => {
-        autoRecoveryTimers.delete(kind)
-        if (autoRecoveryEpoch(kind) !== epoch) {
-          return
-        }
-        void this.canAutoRecoverBounded(kind, attempt, onExhausted)
-      }, AUTO_RECOVERY_DELAY_MS)
-      autoRecoveryTimers.set(kind, timer)
-      return true
+      const operation = beginAutoRecoveryOperation(this, kind, epoch)
+      try {
+        const timer = setTimeout(() => {
+          if (autoRecoveryTimers.get(kind) === timer) {
+            autoRecoveryTimers.delete(kind)
+          }
+          if (autoRecoveryOperations.get(kind) !== operation || autoRecoveryEpoch(kind) !== epoch) {
+            endAutoRecoveryOperation(kind, operation)
+            return
+          }
+          void this.canAutoRecoverBounded(kind, attempt, onExhausted, operation)
+        }, AUTO_RECOVERY_DELAY_MS)
+        autoRecoveryTimers.set(kind, timer)
+        return true
+      } catch (error) {
+        endAutoRecoveryOperation(kind, operation)
+        throw error
+      }
     },
 
     toggleExpand(): void {
@@ -7964,17 +8024,15 @@ export const useAiStore = defineStore('ai', {
       if (this.stopping) {
         await waitForStopSettlement()
       }
-      if (this.loading) {
-        // 批G · G6（用户直裁 2026-10-22）：在途轮里输入框可输入，但回车/发送**不响应且零提示**
-        // —— 不弹 notice、不写占位气泡、不清草稿。用户要发就自己点停止、再点发送。
-        // 仓内同一口径的既有规格：AiPanel.vue 的 onComposerKeydown 注释「流式中 preventDefault
-        // 后静默返回（不发送 / 不停止 / 不提示 / 不换行）」与 composerHardDisabled 注释。
+      if (this.loading || this.restoringRecovery) {
+        // 在途轮或恢复对账期间输入框可输入，但回车/发送**不响应且零提示**：
+        // 不弹 notice、不写占位气泡、不清草稿。恢复完成后才按权威状态重新开放发送。
         return { outcome: 'not-sent', userMessageId: null }
       }
       // Task 4 引导门：会话必须由后端发号；拿不到号（身份未就绪/发号失败）就**不发请求**，
       // 也绝不把空 id 交给后端（前端已在入口处拒绝，服务端 identity/session 校验才有意义）。
       const sessionId = await this.ensureSession()
-      if (sessionId === '') {
+      if (sessionId === '' || this.loading || this.restoringRecovery) {
         return { outcome: 'not-sent', userMessageId: null }
       }
       const workspace = useWorkspaceStore()

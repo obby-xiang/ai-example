@@ -29,6 +29,7 @@
         class="inline-flex h-6 items-center justify-center whitespace-nowrap rounded-[3px] border-0 bg-transparent px-[11px] py-[5px] text-xs font-medium leading-none text-[#606266] shadow-none transition-colors duration-100 hover:text-[#2563eb] active:text-[#1d4ed8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563eb]/40"
         data-testid="new-chat"
         :title="t('ai.panel.newChat')"
+        :disabled="ai.restoringRecovery"
         @click="newChat"
       >
         {{ t('ai.panel.newChat') }}
@@ -91,6 +92,7 @@
         type="button"
         data-testid="retry-history"
         class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+        :disabled="ai.restoringRecovery"
         @click="retryRecoveryLoad()"
       >
         {{ t('ai.panel.retryRecovery') }}
@@ -546,6 +548,7 @@
                           type="button"
                           class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
                           data-testid="ui-undo-button"
+                          :disabled="ai.restoringRecovery"
                           @click="onUiUndo"
                         >
                           {{ t('ai.panel.undo') }}
@@ -589,13 +592,14 @@
                                   class="mt-[2px] flex-none cursor-pointer accent-[#2563eb]"
                                   data-testid="gate-ack-box"
                                   :checked="isGateAcked(part.toolCallId)"
-                                  :disabled="isGateSubmitting(part.toolCallId)"
+                                  :disabled="ai.restoringRecovery || isGateSubmitting(part.toolCallId)"
                                   @change="onGateAckChange(part.toolCallId, $event)"
                                 />
                                 <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
                               </label>
                             </div>
                             <div
+                              v-if="!ai.restoringRecovery"
                               class="flex flex-wrap items-center gap-[8px] pt-[10px]"
                               data-testid="gate-actions"
                               :aria-busy="isGateSubmitting(part.toolCallId)"
@@ -643,6 +647,7 @@
                             :key="liveForm.toolCallId"
                             :schema="liveForm.form"
                             :submitting="liveForm.status === 'submitting'"
+                            :readonly="ai.restoringRecovery"
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
@@ -678,6 +683,7 @@
                                 type="button"
                                 class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
                                 data-testid="gf-queue-cancel"
+                                :disabled="ai.restoringRecovery"
                                 @click="onQueuedFormCancel(part.toolCallId)"
                               >{{ t('ai.panel.gfQueue.cancel') }}</button>
                             </div>
@@ -691,10 +697,12 @@
                             :plan="sheetPreviewFor(part)"
                             :applying="isSheetPreviewApplying(part)"
                             :applied-summary="appliedSummaryFor(part)"
+                            :inert="ai.restoringRecovery"
+                            :aria-disabled="ai.restoringRecovery"
                             @apply="onSheetPreviewApply"
                             @cancel="onSheetPreviewCancel"
                             @abandon="onSheetPreviewAbandon(part.toolCallId)"
-                            @level="ai.setPreviewLevel"
+                            @level="onSheetPreviewLevel"
                           />
                         </div>
 
@@ -708,9 +716,9 @@
                             :label="uploadHandoffLabel(part)"
                             :reason="uploadHandoffReason(part)"
                             :file-name="uploadHandoffFileName(part)"
-                            :interactive="part.requiresAction"
-                            @choose="ai.chooseUploadFile()"
-                            @cancel="ai.cancelUploadHandoff(part.toolCallId)"
+                            :interactive="part.requiresAction && !ai.restoringRecovery"
+                            @choose="onUploadHandoffChoose"
+                            @cancel="onUploadHandoffCancel(part.toolCallId)"
                           />
                         </div>
                       </template>
@@ -796,7 +804,7 @@
           </span>
           <div
             class="flex items-center gap-2"
-            :class="m.streaming && m.role === 'assistant' ? 'invisible' : ''"
+            :class="ai.restoringRecovery || (m.streaming && m.role === 'assistant') ? 'invisible' : ''"
           >
             <span
               v-if="copyState && copyState.id === m.id && !copyState.ok"
@@ -883,7 +891,7 @@
             </button>
             <button
               type="button"
-              :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, isMsgCopied(m.id) ? 'is-copied' : '']"
+              :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, isMsgCopied(m.id) ? 'is-copied' : '', ai.restoringRecovery ? 'visible' : '']"
               :data-testid="'copy-msg-' + m.id"
               :aria-label="t('ai.panel.copyMessage')"
               @click="copyMessage(m)"
@@ -1270,7 +1278,7 @@ import {
   type BusinessCardFamily,
   type BusinessCardTone
 } from '@/components/AiPanel/cardPresentation'
-import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type SheetWritePlan, type TextPart, type ToolPart } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type SheetPreviewLevel, type SheetWritePlan, type TextPart, type ToolPart } from '@/types/ai'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
@@ -1345,6 +1353,7 @@ function resetFormAttachmentAbort(): void {
  * 读屏据此延后播报，不把半截内容当最终结果念。
  */
 const logBusy = computed(() => !ai.historyLoaded
+  || ai.restoringRecovery
   || ai.loading
   || ai.messages.some((message) => message.streaming))
 
@@ -1510,6 +1519,9 @@ function recoveryErrorText(): string | null {
 }
 
 function retryRecoveryLoad(): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   if (recoveryLoadError()?.scope === 'current') {
     void ai.retryRestoreSnapshot()
     return
@@ -1526,15 +1538,21 @@ function busyRunId(): string | null {
 }
 
 function canReturnToActiveRun(): boolean {
-  return busyRunId() !== null
+  return !ai.restoringRecovery && busyRunId() !== null
 }
 
 function returnToActiveRun(): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   void ai.reattachBusyRun()
 }
 
 /** 继续：以用户身份正常发送「继续」，与手动输入一样立即显示并进入对话历史。 */
 function continueTurn(_message: ChatMessage): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   clearStreamMdCache()
   void ai.send(t('ai.panel.continue'))
 }
@@ -1736,13 +1754,14 @@ const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; gly
  */
 function isErrorCardContinueVisible(message: ChatMessage): boolean {
   const card = message.errorCard
-  return card != null && card.variant === 'quota'
+  return !ai.restoringRecovery
+    && card != null && card.variant === 'quota'
     && Boolean(card.action)
     && isFailedLastAssistant(message)
 }
 
 function errorCardGuide(message: ChatMessage): string {
-  if (message.errorCard?.variant === 'quota' && !isErrorCardActionVisible(message)) {
+  if (!ai.restoringRecovery && message.errorCard?.variant === 'quota' && !isErrorCardActionVisible(message)) {
     return t('ai.card.error.quota.guideUnavailable')
   }
   return message.errorCard?.guide ?? ''
@@ -1761,7 +1780,7 @@ function errorCardActionLabel(message: ChatMessage): string {
  */
 function isErrorCardActionVisible(message: ChatMessage): boolean {
   const card = message.errorCard
-  if (!card?.action) {
+  if (ai.restoringRecovery || !card?.action) {
     return false
   }
   if (card.variant === 'quota') {
@@ -2173,7 +2192,7 @@ function isLastAssistantMessage(message: ChatMessage): boolean {
  * （卡头是「已提交」、卡体是只读表单），该窗口归**既有的工作中语义**（呼吸点），不新增状态。
  */
 function isWaitingForAction(message: ChatMessage): boolean {
-  if (message.role !== 'assistant' || message.done || ai.runPhase !== 'parked' || false) {
+  if (message.role !== 'assistant' || message.done || ai.restoringRecovery || ai.runPhase !== 'parked') {
     return false
   }
   return message.parts.some((part) => part.kind === 'tool'
@@ -2193,17 +2212,18 @@ function isCompacting(message: ChatMessage): boolean {
     && !message.done
     && message.compactingStartedAtMs !== undefined
     && !isWaitingForAction(message)
-    && !false
+    && !ai.restoringRecovery
 }
 
 function isBreathing(message: ChatMessage): boolean {
-  const active = message.streaming || (isLastAssistantMessage(message) && ai.loading && !message.done)
+  const active = ai.restoringRecovery
+    ? isLastAssistantMessage(message)
+    : message.streaming || (isLastAssistantMessage(message) && ai.loading && !message.done)
   return message.role === 'assistant'
     && active
-    && !message.done
+    && (ai.restoringRecovery || !message.done)
     && !isWaitingForAction(message)
     && !isCompacting(message)
-    && !false
 }
 
 type MessageActivityState = 'working' | 'waiting' | 'compacting' | 'idle'
@@ -2219,6 +2239,9 @@ function activityStateOf(message: ChatMessage): MessageActivityState {
 }
 
 const collapsedActivityState = computed<MessageActivityState>(() => {
+  if (ai.restoringRecovery) {
+    return 'working'
+  }
   for (let i = ai.messages.length - 1; i >= 0; i -= 1) {
     const message = ai.messages[i]
     if (message === undefined || message.role !== 'assistant') {
@@ -2254,7 +2277,7 @@ const COLLAPSED_ACTIVITY_STYLES = {
 const collapsedActivityStyle = computed(() => COLLAPSED_ACTIVITY_STYLES[collapsedActivityState.value])
 
 function canShowTimestamp(message: ChatMessage): boolean {
-  if (formatProgressiveTs(message.timestamp) === '') {
+  if (ai.restoringRecovery || formatProgressiveTs(message.timestamp) === '') {
     return false
   }
   return message.role !== 'assistant' || (message.done && !message.streaming)
@@ -2274,7 +2297,7 @@ function canShowTimestamp(message: ChatMessage): boolean {
 function canShowMetaRow(message: ChatMessage): boolean {
   return message.parts.some((part) => part.kind === 'text' && part.text)
     || activityStateOf(message) !== 'idle'
-    || false
+    || ai.restoringRecovery
     || canShowContinue(message)
     || isErrorCardContinueVisible(message)
     || message.stopped === true
@@ -2328,7 +2351,7 @@ function setFading(id: string, on: boolean): void {
 }
 
 function isFading(message: ChatMessage): boolean {
-  return fadingIds.value.has(message.id)
+  return !ai.restoringRecovery && fadingIds.value.has(message.id)
 }
 
 watch(
@@ -3572,7 +3595,8 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     ai.uiUndoToolCallId,
     ai.uiUndoEntry,
     ai.sheetApplied,
-    ai.sessionId
+    ai.sessionId,
+    ai.restoringRecovery
   )
   if (part.name === GENERATIVE_FORM_TOOL) {
     // 队列面只入**标量**（本卡位次 + 队列总数）：整条 `queuedForms` 数组身份入 memo，
@@ -3640,7 +3664,7 @@ function messageBaseDeps(message: ChatMessage, index: number): unknown[] {
     index,
     msgGapClass(index),
     locale.value,
-    false,
+    ai.restoringRecovery,
     canShowMetaRow(message),
     canShowTimestamp(message),
     activityStateOf(message),
@@ -3786,6 +3810,9 @@ const uiOperatingText = computed(() => (ai.uiAnnouncement === null
   : t('ai.panel.uiOperating', { text: ai.uiAnnouncement })))
 
 function onUiUndo(): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   void ai.undoLastUiAction()
 }
 
@@ -3819,15 +3846,45 @@ function isSheetPreviewApplying(part: ToolPart): boolean {
 }
 
 function onSheetPreviewApply(acknowledged: boolean): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   void ai.confirmWritePreview(acknowledged)
 }
 
 function onSheetPreviewCancel(): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   void ai.cancelWritePreview()
 }
 
 function onSheetPreviewAbandon(toolCallId: string): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   void ai.abandonStalePreview(toolCallId)
+}
+
+function onSheetPreviewLevel(level: SheetPreviewLevel): void {
+  if (ai.restoringRecovery) {
+    return
+  }
+  void ai.setPreviewLevel(level)
+}
+
+function onUploadHandoffChoose(): void {
+  if (ai.restoringRecovery) {
+    return
+  }
+  void ai.chooseUploadFile()
+}
+
+function onUploadHandoffCancel(toolCallId: string): void {
+  if (ai.restoringRecovery) {
+    return
+  }
+  void ai.cancelUploadHandoff(toolCallId)
 }
 
 function cardShellClass(part: ToolPart): string {
@@ -4438,6 +4495,9 @@ async function loadEarlierHistory(): Promise<void> {
  * 空 / 全空白字符不打扰，直接复制聚焦。确认只决定"敢不敢覆盖草稿"，与发送/重跑无关。
  */
 function editMessage(m: ChatMessage): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   if (inputText.value.trim() !== '' && !window.confirm(t('ai.panel.overwriteConfirm'))) {
     return
   }
@@ -4480,7 +4540,7 @@ function isFailedLastAssistant(message: ChatMessage): boolean {
  * 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
  */
 function canShowContinue(message: ChatMessage): boolean {
-  return !recoveryErrorVisible.value && isFailedLastAssistant(message) && !isErrorCardContinueVisible(message)
+  return !ai.restoringRecovery && !recoveryErrorVisible.value && isFailedLastAssistant(message) && !isErrorCardContinueVisible(message)
 }
 
 /** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的
@@ -4513,6 +4573,9 @@ function feedbackOf(messageId: string): 1 | -1 | 0 {
 }
 
 async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
+  if (ai.restoringRecovery) {
+    return
+  }
   const before = new Map(feedbackState.value)
   const next = new Map(feedbackState.value)
   const current = next.get(m.id)
@@ -4717,6 +4780,9 @@ const newChatNote = computed(() => {
 })
 
 function newChat(): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   if (!newChatNeedsConfirmation.value) {
     void ai.resetSession()
     return
@@ -4731,7 +4797,7 @@ function onNewChatDialogClose(): void {
   }
   const choice = dialog.returnValue
   dialog.returnValue = ''
-  if (choice === 'confirm') {
+  if (choice === 'confirm' && !ai.restoringRecovery) {
     void ai.resetSession()
   }
 }
@@ -4784,6 +4850,9 @@ function gateAckText(part: ToolPart): string {
 
 /** 复选框变更即写回 store（用户取消勾选同样要落库 —— 勾选不是单向开关）。 */
 function onGateAckChange(toolCallId: string, event: Event): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   const checked = (event.target as HTMLInputElement | null)?.checked === true
   if (checked) {
     ai.ackGate(toolCallId)
@@ -4812,6 +4881,9 @@ function keepCurrentCardExpanded(toolCallId: string): void {
 }
 
 async function decide(approved: boolean, toolCallId: string): Promise<void> {
+  if (ai.restoringRecovery) {
+    return
+  }
   keepCurrentCardExpanded(toolCallId)
   const reason = approved ? undefined : '用户拒绝执行'
   await ai.confirm(approved, reason, toolCallId)
@@ -4819,6 +4891,9 @@ async function decide(approved: boolean, toolCallId: string): Promise<void> {
 
 /** GF-B：表单提交（值已由 FormRenderer 按 schema 做过客户端复核）。 */
 function onFormSubmit(values: Record<string, unknown>): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   const toolCallId = liveForm.value?.toolCallId
   if (toolCallId) {
     keepCurrentCardExpanded(toolCallId)
@@ -4828,6 +4903,9 @@ function onFormSubmit(values: Record<string, unknown>): void {
 
 /** GF-B：表单显式取消 → store 带 cancelled:true 回灌收敛。 */
 function onFormCancel(): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   const toolCallId = liveForm.value?.toolCallId
   if (toolCallId) {
     keepCurrentCardExpanded(toolCallId)
@@ -4857,6 +4935,9 @@ function formQueueTotal(): number {
  * 出队清草稿 → 乐观终态 → 记决策时刻 → `cancelled:true` 回灌，失败原因落段可见。
  */
 function onQueuedFormCancel(toolCallId: string): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   keepCurrentCardExpanded(toolCallId)
   void ai.cancelGenerativeForm(toolCallId)
 }
@@ -4866,6 +4947,9 @@ function onQueuedFormCancel(toolCallId: string): void {
  * 不进模型上下文、不写服务器；提交/取消/终态由 store 清理。
  */
 function onFormDraft(values: Record<string, unknown>): void {
+  if (ai.restoringRecovery) {
+    return
+  }
   ai.updateFormDraft(values)
 }
 

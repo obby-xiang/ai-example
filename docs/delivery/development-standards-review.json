@@ -4687,6 +4687,43 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按完整帧段与正文精确匹配，不进行二次转码、前缀匹配或代理对切分。"},
         "verification-review": {"status": "checked", "reason": "agent-1167最终APPROVE；RED为207 segments=[]，GREEN为207 seq7、表单seq18、推进seq20、99 seq25；隔离357主源BUILD SUCCESS，真实供应商NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:1ced3ae237c1349214d1b19f31c439b365d41c5a5bbbbb7d075ae815e2d83bf9",
+      "status": "reviewed",
+      "reason": "逐hunk及关联调用链复核恢复期只读门禁、真实状态呈现和完整自动恢复链token生命周期；agent-1169发现排期/退避空窗后返修并最终APPROVE。",
+      "reviewedAt": "2026-11-09T19:38:51+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1169、施工agent-1181",
+      "specChanges": [
+        {
+          "change": "恢复对账完成前统一只读，发送、继续、HITL/表单、预览、上传、赞踩、编辑、新会话及恢复重试等副作用入口关闭；草稿编辑和复制保持可用。",
+          "reason": "镜像中的done、挂起和时间戳可能早于权威恢复结果，旧行为会闪跳状态并允许恢复未完成时的副作用。",
+          "impact": "恢复完成后才按真实 parked/running/done/manualRecovery 显示等待中、工作中、终态或失败；停止与只读操作不受新增门禁影响。"
+        },
+        {
+          "change": "自动恢复operation覆盖排期、全部attempt及退避，成功、耗尽、异常和取消按代次释放，旧回调不得清理新链。",
+          "reason": "单次请求token会在自动恢复计时器和退避期间提前清除，造成门禁空窗和阶段闪烁。",
+          "impact": "整链恢复期间restoringRecovery持续有效，嵌套operation计数、history followup及manualRecovery真实失败语义保持。"
+        },
+        {
+          "change": "canSend增加restoringRecovery限制，send在入口及ensureSession后复查loading/restoringRecovery并静默not-sent。",
+          "reason": "异步发号期间恢复状态可能变化，只做DOM禁用不能阻止事件或调用链竞争。",
+          "impact": "恢复中不清草稿、不创建用户气泡、不发请求；恢复结束后按真实状态重新开放。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "恢复状态统一驱动活动态、时间戳和操作入口；DOM与事件级门禁、v-memo依赖及复制/输入/停止边界均已复核。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "runPhase恢复优先、发送双重门禁及整链自动恢复operation的取得、释放、取消与迟到回调隔离均已沿调用链复核。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有恢复operation、epoch、计时器和组件交互机制，未新增依赖或第二套恢复框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅TypeScript/Vue前端代码，无Java、JSON实体、Lombok或集合API变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复成功、耗尽、异常和取消均真实释放并保留manualRecovery，不吞错、不伪造完成或隐藏失败。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复中只读且状态不闪跳，完成后才显示真实等待/工作/终态；复制与草稿可用，无新增提示或技术话术。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "按operation对象身份和epoch隔离旧链，嵌套计数、取消、换会话及history followup均复核；无AI数据库或Redis交互变化。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改流式文本解码、工具参数解析或Unicode处理。"},
+        "verification-review": {"status": "checked", "reason": "agent-1169最终APPROVE；两文件IDEA Reformat成功；主会话node scripts/build.mjs通过，3280模块、Vite 27.15秒；动态浏览器/接口场景NOT_RUN，留待独立复测。"}
+      }
     }
   ]
 }
