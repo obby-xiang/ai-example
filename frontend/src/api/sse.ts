@@ -126,7 +126,7 @@ export const SSE_PATHS = {
 /** 批次3：重挂探测得到的"准备中"事实（后端 202 + `preparing=true`）。 */
 export interface PreparingProbe {
   runId: string
-  /** 服务端钟的真实已用毫秒（只用于显示"已用 N 秒"，不是进度百分比）。 */
+  /** 服务端钟的真实已用毫秒（只用于内部恢复计时与对账，不是进度百分比或独立阶段展示）。 */
   elapsedMs: number
   /** 后端建议的下一次重试间隔（毫秒；缺省 = null，调用方自行决定）。 */
   retryAfterMs: number | null
@@ -220,7 +220,7 @@ export interface SseFrameHandlers {
   onError?: (error: ApiError) => void
   /**
    * 批次3：重挂命中了"已 start、快照未建"（HTTP 202 + `preparing=true`）。
-   * 不是错误，也不触发自动轮询 —— 由调用方显示可重试的准备中阶段。
+   * 不是错误；准备中事实仅供内部恢复对账，由有界自动恢复接管，耗尽后进入统一恢复条。
    */
   onPreparing?: (probe: PreparingProbe) => void
   /** 批次3：探测确认该 runId 在服务端不存在（404）——调用方应封口镜像里的在途轮。 */
@@ -230,38 +230,6 @@ export interface SseFrameHandlers {
    * 每条连接最多回调一次；没有头 ⇒ 不回调（正常跳号不报缺口）。
    */
   onArchiveTrim?: (signal: ArchiveTrimSignal) => void
-}
-
-export function isPageHidden(): boolean {
-  return typeof document !== 'undefined'
-    && (document.hidden || document.visibilityState === 'hidden')
-}
-
-export function getPageVisible(signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) {
-    return Promise.resolve(false)
-  }
-  if (!isPageHidden()) {
-    return Promise.resolve(true)
-  }
-  return new Promise((resolve) => {
-    const cleanup = (): void => {
-      document.removeEventListener('visibilitychange', onVisibility)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    const settle = (visible: boolean): void => {
-      cleanup()
-      resolve(visible)
-    }
-    const onVisibility = (): void => {
-      if (!isPageHidden()) {
-        settle(true)
-      }
-    }
-    const onAbort = (): void => settle(false)
-    document.addEventListener('visibilitychange', onVisibility)
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 /** 流选项。 */
@@ -696,16 +664,13 @@ async function readStream(
  * 一半是它）。探测端点只读状态，因此这条路径不再占用任何真实连接。
  *
  * <ul>
- * <li>202 + `preparing=true` ⇒ 返回准备中事实（调用方显示"准备中 · 已用 N 秒"）；</li>
+ * <li>202 + `preparing=true` ⇒ 返回准备中事实（供内部恢复计时与对账，由有界自动恢复接管，耗尽后进入统一恢复条）；</li>
  * <li>200 + `ready=true` ⇒ 快照已建/归档有终帧，立即 cancel 这条请求（调用方会走正式的 EventSource 重挂）；</li>
  * <li>404 / 503（`degraded`）等原样返回，由调用方决定封口或按时重试。</li>
  * </ul>
  * 本函数**不**消费流，也不重试；调用方**不得**在退避之前 await 它（探测慢不能推迟重连）。
  */
 export async function probeReattach(runId: string, signal?: AbortSignal): Promise<ReattachProbe> {
-  if (!await getPageVisible(signal)) {
-    return { status: 0, preparing: null }
-  }
   const controller = new AbortController()
   const unlink = linkAbort(signal, controller)
   const timer = setTimeout(() => controller.abort(), DEFAULT_CONNECT_TIMEOUT_MS)
@@ -1101,32 +1066,6 @@ export async function reattach(
      * 上一代的慢 202 不得替下一代（或退役后的空窗）做决定。
      */
     let generation = 0
-    let pendingReconnect: { attempt: number; delay: number } | null = null
-    let openWhenVisible = false
-
-    const onVisibility = (): void => {
-      if (isPageHidden()) {
-        if (retryTimer !== null) {
-          clearRetry()
-        }
-        return
-      }
-      if (settled || options.signal?.aborted || source !== null) {
-        return
-      }
-      const pending = pendingReconnect
-      if (pending !== null) {
-        pendingReconnect = null
-        openWhenVisible = false
-        handlers.onReconnect?.(pending.attempt, pending.delay)
-        open()
-        return
-      }
-      if (openWhenVisible) {
-        openWhenVisible = false
-        open()
-      }
-    }
 
     const clearIdle = (): void => {
       if (idleTimer !== null) {
@@ -1165,14 +1104,9 @@ export async function reattach(
       clearIdle()
       clearConnect()
       clearRetry()
-      pendingReconnect = null
-      openWhenVisible = false
       source?.close()
       source = null
       options.signal?.removeEventListener('abort', onAbort)
-      if (typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', onVisibility)
-      }
       // 调用方主动中止 = 停止的正常收尾（不是传输失败）；终帧已到则仍按终态收口。
       resolve(finish(
         state,
@@ -1259,20 +1193,12 @@ export async function reattach(
       state.reconnects = attempts
       const attempt = attempts
       const delay = reconnectDelayMs(attempt, random)
-      pendingReconnect = { attempt, delay }
       clearRetry()
-      if (isPageHidden()) {
-        return
-      }
       retryTimer = setTimeout(() => {
         retryTimer = null
         if (settled || options.signal?.aborted) {
           return
         }
-        if (isPageHidden()) {
-          return
-        }
-        pendingReconnect = null
         // C1：`onReconnect` 是**用户通告**，只随"确实要开新连接"发出 ——
         // 排期在断流当刻就已开始，但探测命中 202/404 会把排期连同这句通告一起撤销，
         // 用户因此不会看到一条不会发生的重试（旧行为在 arm 时就通告，notice 会残留）。
@@ -1285,12 +1211,6 @@ export async function reattach(
       if (settled || options.signal?.aborted || source !== null) {
         return
       }
-      if (isPageHidden()) {
-        openWhenVisible = true
-        return
-      }
-      openWhenVisible = false
-      pendingReconnect = null
       // T6：优先用"本连接已收到的最大序号"（增量重连），退回调用方给的 lastSeq
       const since = state.lastSeq ?? options.lastSeq
       generation += 1
@@ -1358,15 +1278,14 @@ export async function reattach(
       if (!connectionEstablished && !probedThisConnection) {
         probedThisConnection = true
         scheduleReconnect(reason)
-        if (settled || isPageHidden()) {
-          // 已收尾 / 后台暂停：不再发探测；visible 只恢复已排期的重连
+        if (settled) {
           return
         }
         const probeGeneration = generation
         const probeAttempt = attempts
         void probeReattach(runId, options.signal).then((probe) => {
-          if (settled || isPageHidden() || generation !== probeGeneration || attempts !== probeAttempt) {
-            // 已收尾 / 后台暂停 / 世代已换代 / 尝试已推进：本探测结果不得改写当前现场
+          if (settled || generation !== probeGeneration || attempts !== probeAttempt) {
+            // 已收尾 / 世代已换代 / 尝试已推进：本探测结果不得改写当前现场
             return
           }
           if (probe.preparing) {
@@ -1391,9 +1310,6 @@ export async function reattach(
       return
     }
     options.signal?.addEventListener('abort', onAbort, { once: true })
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', onVisibility)
-    }
     open()
   })
 }

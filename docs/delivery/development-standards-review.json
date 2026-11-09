@@ -4546,6 +4546,55 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不处理文本字节、流式帧或Unicode截断。"},
         "verification-review": {"status": "checked", "reason": "agent-1171多轮复审最终APPROVE；node --check与diff --check通过，57394dec..40398bcc历史v2单点CLI退出0，其余动态门禁场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c90d76c3a7cdf98e91cc9d16bc6b8f2cfbb48a46feb96fd220491e4b5603bb2b",
+      "status": "reviewed",
+      "reason": "逐hunk复核工具卡/复制、恢复提示、SSE可见性、DOM预算、history请求证据、恢复身份与快照所有权及四套设计施工文档；agent-1173整批最终APPROVE，恢复/复制/验收scoped审查均通过。",
+      "reviewedAt": "2026-11-09T14:54:46+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1173、agent-1162、agent-1169、agent-1163、agent-1168",
+      "specChanges": [
+        {
+          "change": "普通工具卡、HITL和表单在实时、history、刷新及复制中保留，普通skipped继续过滤；自动恢复静默，最终人工处理最多一条提示和一个重试入口，archive-window不被DONE清除。",
+          "reason": "成功后删卡和多重技术提示增加用户心智负担，永久缺帧又不能被正常完成伪装覆盖。",
+          "impact": "渲染与复制共用shouldShowToolPart过滤，混合正文与可见摘要组合；恢复使用manualRecovery统一呈现，内部archive/unconfirmed/interrupted事实继续保留。"
+        },
+        {
+          "change": "document.hidden和焦点不再作为SSE、history、恢复及后台业务执行许可；DOM操作按路由/挂载/元素/CSS/视窗/裁剪判断，expiresAt统一绝对预算。",
+          "reason": "后台页签不等于业务不可见，隐藏页计时器也不可靠，旧工具需要按真实元素和时限执行。",
+          "impact": "隐藏页继续传输与允许的工具执行；fixed按真实包含块、滚动后复核选项，副作用后到期为unknown，去重缓存与结算共用settledAt。"
+        },
+        {
+          "change": "unconfirmed只接受终端后新首屏history的DONE，恢复绑定session/run/原消息并允许同run重挂和权威runId补齐；恢复操作使用token集合且快照内部逐段验权。",
+          "reason": "旧history响应、跨轮借runId、重入推进floor及旧快照收尾会伪造完成或污染新会话。",
+          "impact": "分页不作新鲜证据，floor首次登记且迁移不降低；缺映射/缺DONE保持未确认，A→B/新发送/停止不发布旧提示或覆盖新现场。"
+        }
+      ],
+      "files": [
+        {"path": "docs/superpowers/plans/2026-11-09-ai-tool-card-recovery-notice-remediation.md", "status": "checked", "reason": "工具卡、恢复提示、独立验收和DeepSeek后续步骤与最终施工范围一致。"},
+        {"path": "docs/superpowers/plans/2026-11-09-ai-visibility-background-execution-remediation.md", "status": "checked", "reason": "SSE/DOM/预算、后端到期及C-147～C-152验收步骤和静态/动态边界明确。"},
+        {"path": "docs/superpowers/specs/2026-11-09-ai-tool-card-recovery-notice-design.md", "status": "checked", "reason": "记录成功删卡根因、普通skipped保留、自动静默与最终单提示裁决。"},
+        {"path": "docs/superpowers/specs/2026-11-09-ai-visibility-background-execution-design.md", "status": "checked", "reason": "记录浏览器可见性与业务可操作性分离、expiresAt和跨实例到期设计。"},
+        {"path": "frontend/src/api/sse.ts", "status": "checked", "reason": "删除隐藏页建连/重连/探测总门，generation/attempt/settled代次保护和准备中内部计时注释保留。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "删除四类成功工具过滤与重复提示，复制组合正文和可见摘要，manualRecovery仅单条单动作，普通skipped过滤不变。"},
+        {"path": "frontend/src/components/AiPanel/CompactionStatus.vue", "status": "checked", "reason": "准备中独立UI已废弃，组件及模板/import/词条引用同步删除，自动恢复入口保留。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "英文最终恢复、缺口和重试文案与统一提示边界一致，删除无消费者旧词条。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "中文最终恢复、缺口和重试文案与英文同义，无技术话术或新增过程提示。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "请求代次DONE证据、floor首次/max迁移、原消息/run身份、token集合和快照内部验权闭合；移除可见性等待与废弃字段。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "镜像/历史原因字段可选additive，expiresAt和准备中/transcript注释与当前实现一致。"},
+        {"path": "frontend/src/utils/ai-dom-tools.ts", "status": "checked", "reason": "真实路由/挂载/ref/视窗/裁剪/包含块围栏，滚动后重新解析选项并防止虚拟列表误点。"},
+        {"path": "frontend/src/utils/error-card.ts", "status": "checked", "reason": "错误卡注释与统一断流恢复出口一致，未改变既有错误分类逻辑。"},
+        {"path": "frontend/src/utils/frontend-tools.ts", "status": "checked", "reason": "expiresAt优先、预算0不启动、副作用后unknown及同一settledAt缓存/结算闭环，晚到结局不写成功缓存。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有Vue/Pinia/SSE/DOM/lodash相关能力与Node验收设施，无新增依赖或另造框架。"},
+        "java-api-style": {"status": "checked", "reason": "本批无Java生产文件；新增/触及TypeScript/Vue控制块显式{}，废弃组件、字段和旧引用直接删除。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复错误继续保留内部code/status和既有日志，不向用户暴露异常原文、runId或技术标识，未掩盖unknown。"},
+        "toc-interaction": {"status": "checked", "reason": "工具卡与混合复制保留、普通skipped过滤、自动过程静默及最终单提示单动作均有中英文和独立场景约束。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "新增字段可选additive，session/run/message身份与请求代次防止越代；无AI数据库访问、供应商特判或重复副作用伪造。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批调整连接可见性和恢复身份，不修改UTF-8解码、SSE事件解析或文本截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1173整批APPROVE，agent-1162/1169/1163/1168 scoped APPROVE；IDEA Reformat已执行，前端最终构建26.50秒成功，三个脚本node --check通过，动态场景全部NOT_RUN。"}
+      }
     }
   ]
 }

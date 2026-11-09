@@ -281,6 +281,9 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   errorMessage?: string
   /** assistant 所属 run 的权威终态；CANCELLED 用于恢复消息级停止事实。 */
   outcome?: string
+  /** transcript 降级标记；DONE 不能抵消这些字段或 code/errorCode 中的 AI_TRANSCRIPT_INCOMPLETE、AI_TRANSCRIPT_WRITE_FAILED。 */
+  transcriptDegraded?: boolean
+  historyComplete?: boolean
   /** assistant 的 toolCalls（Spring AI AssistantMessage.ToolCall 列表，字段结构由上游协议决定） */
   toolCalls?: Array<{ id?: string; type?: string; name?: string; arguments?: string }>
   /** tool 消息的响应（ToolResponseMessage.ToolResponse 列表） */
@@ -505,6 +508,8 @@ export interface ChatMessage {
    * 必须以消息级事实为准。续收拿到 `start`/终帧后清除（成功轮不再算断流）。
    */
   interrupted?: boolean
+  /** 断流原因（additive，入镜像）；缺省为普通 interrupted，首帧超时才写 first-frame。 */
+  interruptedReason?: 'interrupted' | 'first-frame'
   /**
    * R-154 #17：消息时间戳（epoch 毫秒或 ISO 字符串，载荷原样透传）。历史路 = 后端历史条目
    * metadata 的 timestamp（AiHistoryMessage.timestamp，后端已回传）；实时 AI 路先以
@@ -538,14 +543,15 @@ export interface ChatMessage {
    *
    * <p>后端收尾 = `error` 终帧携带 additive `unconfirmed=true`（code 仍是既有的
    * `AI_REDIS_UNAVAILABLE`，**不能**靠该故障码判断"可能成功"）+ `turn_end=unconfirmed`。
-   * 不是失败、也不是完整答案：不挂错误卡、不进错误通知，由面板给"重新载入 / 新开一轮"这类手动入口。
+   * 不是失败、也不是完整答案：自动对账期间静默，耗尽后才进入统一恢复错误条。
    */
   unconfirmed?: boolean
   /**
-   * 批2 / 归档缺口：这一条来自镜像或差量回放，但**无法确认完整**（恢复失败 / 归档窗口裁掉了
-   * 中间帧）。中性事实（"不可完整恢复"），不是轮失败 —— 不挂错误卡、不改 `lastRoundOutcome`。
+   * 恢复完整性内部标记；镜像合并等不确定性只保留该布尔值，不直接生成用户提示。
    */
   recoveryGap?: boolean
+  /** 权威永久缺帧原因（additive，入镜像）；只由后端 archive-window 信号写入。 */
+  recoveryGapReason?: 'archive-window'
   /**
    * 批G · S3：本轮被用户**手工停止**（消息尾出「已停止」标识）。
    *
@@ -704,8 +710,8 @@ export interface ToolPart extends MessagePartBase {
    * 为什么落在段上（批2 起）：`message.pendingCall` 已改为由段派生，若这几个字段不随段持久化，
    * 派生的挂起卡就丢了原始等待口径。
    *
-   * 2026-10-20 去超时裁决后：前端**不再**据此折算任何倒计时/本地超时，本组字段只作**原始帧口径的
-   * 对账/回滚依据**（镜像与快照重建仍照原样携带）。确认门（`confirm_request`）不再携带这两字段。
+   * 即时前端工具优先按 `expiresAt` 的绝对剩余期限计算执行预算，缺失时保留 `timeoutSeconds`
+   * 兼容折算；镜像与快照重建照原样携带。确认门（`confirm_request`）不再携带这两字段。
    */
   timeoutSeconds?: number
   expiresAt?: number
@@ -977,7 +983,7 @@ export interface GateSubmission {
  * 外部读（调试/对账脚本直接看 JSON）不需要自行派生。
  *
  * 批2（本轮整改，schema **additive**）：message 级可选键 `errorCard` / `code` / `unconfirmed` /
- * `recoveryGap` / `interrupted` / `runId` / `messageId` / `timestamp` —— 刷新后失败现场、中性态、
+ * `recoveryGap` / `recoveryGapReason` / `interrupted` / `interruptedReason` / `runId` / `messageId` / `timestamp` —— 刷新后失败现场、中性态、
  * 断流事实、run 归属、实时助手身份与已记录时间仍在，不会被归一成完整答案或用户气泡，也不会因缺归属而恢复到错的轮次。
  * （`synthetic` 自 B5 起不再入镜像；旧镜像读取侧按同一口径过滤。）
  *
@@ -988,7 +994,7 @@ export interface AiSessionMirror {
   /** 镜像结构版本（当前恒为 {@link MIRROR_VERSION}；不匹配的镜像整份丢弃） */
   v?: number
   savedAt: number
-  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'interrupted' | 'runId' | 'messageId' | 'timestamp'>>
+  messages: Array<Pick<ChatMessage, 'id' | 'role' | 'content' | 'parts' | 'reasoning' | 'toolRuns' | 'pendingCall' | 'stopped' | 'truncated' | 'errorCard' | 'code' | 'unconfirmed' | 'recoveryGap' | 'recoveryGapReason' | 'interrupted' | 'interruptedReason' | 'runId' | 'messageId' | 'timestamp'>>
   /** 最近一轮的 runId（刷新后据此静默续收在途轮） */
   lastRunId?: string | null
   /**
@@ -1230,14 +1236,14 @@ export interface AiRunCurrent {
   /**
    * 批次3 / AR-06：`true` = 本轮**已 start（runId 已知）但快照尚未建立**（首轮压缩窗口）。
    *
-   * 语义不是"轮不存在"，也不是"失败"：这是可重试的**准备中**。前端据此显示"准备中 · 已用 N 秒"
-   * 并提供手动重试，**不得**封口镜像里的在途轮、**不得**落 `currentError`。
+   * 语义不是"轮不存在"，也不是"失败"：自动探活与恢复过程保持静默，**不得**封口镜像里的在途轮；
+   * 自动预算耗尽后才落 `currentError`，由统一恢复条提供重试入口。
    * 判定只认显式 `preparing=true`；`snapshotStatus` 是快照状态（RUNNING/SUSPENDED/终态）。
    */
   preparing?: boolean
   /** 准备开始时刻（epoch 毫秒，服务端钟）；缺省 = 用 `preparingElapsedMs` 反推或本地收到时刻。 */
   preparingSinceMs?: number | null
-  /** 已准备毫秒数（服务端钟；存在时优先于 `preparingSinceMs` 用于显示）。 */
+  /** 已准备毫秒数（服务端钟；存在时优先于 `preparingSinceMs` 用于内部恢复计时与对账）。 */
   preparingElapsedMs?: number | null
   /**
    * AR-10（批次3 补齐）：本轮运行态键的**权威**剩余毫秒 —— 后端对 `ai:run:<runId>` 做
@@ -1250,15 +1256,16 @@ export interface AiRunCurrent {
 }
 
 /**
- * 批次3：快照未建时的"准备中"现场（可重试，不是错误）。
+ * 批次3：快照未建时的"准备中"现场。自动探活与恢复过程静默，不单独展示手动恢复 UI；
+ * 自动预算耗尽后由 `currentError` 驱动统一恢复条及唯一重试入口。
  *
- * `runId` **绝不出现在用户可见文本**：只用于内部重试与动作入参。
+ * `runId` **绝不出现在用户可见文本**：只用于内部恢复与动作入参。
  */
 export interface AiPreparingRun {
   runId: string
   /** 准备开始时刻（客户端锚点：收到服务端 elapsed 时按"此刻 − elapsed"折算）。 */
   startedAtMs: number
-  /** 最近一次服务端已用毫秒（缺省 = null，界面回落本地 elapsed）。 */
+  /** 最近一次服务端已用毫秒（缺省 = null，内部恢复计时回落本地 elapsed）。 */
   elapsedMs: number | null
 }
 

@@ -81,31 +81,11 @@
       </button>
     </div>
 
-    <div v-if="ai.streamInterrupted" :class="alertBox('error')" data-testid="alert-interrupted">
-      <span :class="alertIcon('error')" aria-hidden="true">!</span>
-      <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.interrupted') }}</b>
-        <span class="text-[11.8px] text-[#57606a]">{{ t('ai.panel.noDoneFrame') }}</span>
-      </div>
-    </div>
-
-    <!-- 批次2（N3）：历史/快照恢复失败不再静默 —— 错误条 + 重试出口。
-         只读 store 适配器（historyError/currentError，见 recoveryBridge 注释），不在此处自造错误态。
-         2026-10-29 返修（同一事实只留一个提示面）：`sealRecovery` 那一类失败在 store 里同时写
-         `historyError` 与 `recoveryGap`，旧版并排出两条横幅、两个按钮最终都落 `retryLoadHistory`。
-         现在错误条就地合并「内容可能不完整」这条中性事实，缺口专属条只在**没有**恢复错误时出现。
-         但**不是所有恢复错误都伴随缺口**（`restoreSuspendedSnapshot` 的 preparingRun 分支只写
-         `currentError`）⇒ 那行事实只在 `ai.recoveryGap !== null` 时渲染，否则就是凭空的不完整声明。 -->
     <div v-if="recoveryErrorVisible" :class="alertBox('error')" data-testid="alert-history-error">
       <span :class="alertIcon('error')" aria-hidden="true">!</span>
       <div class="flex-1 min-w-0">
         <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ recoveryErrorLabel() }}</b>
         <span class="block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ recoveryErrorText() }}</span>
-        <!-- 中性事实（不是第二条错误）：真登记过缺口才说"可能不完整"，见上方注释 -->
-        <span
-          v-if="ai.recoveryGap !== null"
-          class="mt-[2px] block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]"
-        >{{ t('ai.panel.recoveryGap') }}</span>
       </div>
       <button
         type="button"
@@ -117,29 +97,9 @@
       </button>
     </div>
 
-    <!-- 批次2：**不可完整恢复**（recoveryGap）——中性事实，不是轮失败、不是错误卡。
-         只有"本地镜像/差量回放不能保证完整"这一条信息 + 重新载入出口；不显示内部区间/原因码。
-         真正的缺帧（archive-window）没有恢复错误可归并 ⇒ 本条照常单独出现。 -->
-    <div v-if="recoveryGapBarVisible" :class="alertBox('gray')" data-testid="alert-recovery-gap">
-      <span :class="alertIcon('gray')" aria-hidden="true">i</span>
-      <div class="flex-1 min-w-0">
-        <b class="block text-[12.6px] [font-weight:650] text-[#1f2328]">{{ t('ai.panel.recoveryGap') }}</b>
-        <span class="text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ t('ai.panel.recoveryGapHint') }}</span>
-      </div>
-      <button
-        type="button"
-        data-testid="retry-recovery-gap"
-        class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
-        @click="reloadTurnState()"
-      >
-        {{ t('ai.panel.reloadTurn') }}
-      </button>
-    </div>
-
     <!-- 单行通知槽——普通通知 = demo v7 `.notice`（虚线灰底 + — 描边圆），取消 / 重试 / 幂等等通知的承载位；
          R-165 S3a（R11 指挥官裁决）：error 级通知改走 v7 `.enotice` 红族（浅红底 + 浅红描边 + 圆角 9 + ! 圆标）。
-         2026-10-29 ToC 呈现减负批（同一事实只留一个提示面）：`noticeBarVisible` —— 上方已有**专属 Alert**
-         承担同一件事（挂起池饱和 / 断流）时，本槽不再叠一遍同义文案。 -->
+         上方已有池饱和专属 Alert 时，本槽不再叠一遍同义文案。 -->
     <div
       v-if="noticeBarVisible"
       class="m-2 flex items-center gap-[8px] border px-[11px] py-[8px] text-[12.6px]"
@@ -193,16 +153,6 @@
         @click="ai.dismissUiEventReceipt()"
       >×</button>
     </div>
-
-    <!-- B4：顶部阶段条只保留「准备中」（挂载准备期，组件内部自带秒表，runId 不上屏）。
-         压缩过程态已下沉到消息元信息行；顶部不再出现压缩提示。 -->
-    <CompactionStatus
-      v-if="stageBar !== null"
-      :mode="stageBar.mode"
-      :started-at-ms="stageBar.startedAtMs"
-      :elapsed-ms="stageBar.elapsedMs"
-      @retry="ai.retryPreparing()"
-    />
 
     <!-- AI 可视可操作专项（设计稿 §3.10）：操作条落在**消息流之上、panel header 之下** ——
          不进 composer 底栏（那是模型配置批③ 的 model-picker 落点）。停止复用既有停止语义
@@ -309,8 +259,7 @@
         </div>
       </article>
 
-      <!-- 分页（R-154 #16）：本机还留着更早的展示历史 ⇒ 消息流内**单个**「加载更早」入口。
-           与下方 truncated 标记语义分开：本入口 = 还能向前取；标记 = 更早已被容量裁掉。 -->
+      <!-- 分页（R-154 #16）：本机还留着更早的展示历史 ⇒ 消息流内**单个**「加载更早」入口。 -->
       <div v-if="ai.historyHasMore" class="mb-2 flex justify-center">
         <button
           type="button"
@@ -321,17 +270,6 @@
         >
           {{ ai.historyPageLoading ? t('ai.panel.loadEarlierHistoryLoading') : t('ai.panel.loadEarlierHistory') }}
         </button>
-      </div>
-
-      <!-- B5：更早的展示历史因容量上限未在本机保留 —— 消息流内单条中性标记。
-           不是压缩事件、不提供按钮、不加顶部提示。 -->
-      <div
-        v-if="ai.historyTruncated"
-        role="note"
-        data-testid="history-truncated"
-        class="my-2 text-center text-[11.5px] leading-[1.6] text-[#8b949e]"
-      >
-        {{ t('ai.panel.historyTruncated') }}
       </div>
 
       <!-- 消息间距由元信息行承担；无元信息行的纯卡片消息由消息容器承担。 -->
@@ -961,8 +899,8 @@
              的位置插入，绝不做顶部固定**（位置 static，非 fixed/sticky）——故挂在「出错那一轮」的
              消息上（store 写 `m.errorCard`），紧随该轮元信息行渲染，与顶部 Alert 族互不替代：
              409 SESSION_BUSY / 503 挂起池饱和 / 503 AI 不可用走各自的顶部 Alert（不重复出卡），
-             断流走 alert-interrupted，本卡只承载「本轮出错」的三变体分派（429 红 / 内容过滤灰 /
-             上下文超限蓝）+ 未分类故障的通用红卡。分类与文案见 utils/error-card.ts。 -->
+             本卡只承载「本轮出错」的三变体分派（429 红 / 内容过滤灰 / 上下文超限蓝）+
+             未分类故障的通用红卡。分类与文案见 utils/error-card.ts。 -->
         <div
           v-if="m.errorCard"
           class="w-full flex items-start gap-[8px] border border-solid rounded-[10px] px-[10px] py-[8px] mb-2.5"
@@ -991,16 +929,6 @@
             :data-testid="'error-card-action-' + m.id"
             @click="runErrorCardAction(m)"
           ><span class="border-b border-[#e3e6ea]">{{ errorCardActionLabel(m) }}</span></button>
-        </div>
-        <!-- 批次2：这条消息来自镜像/差量回放但不能确认完整 —— 中性局部标记（全局提示条另有重载出口）。
-             2026-10-29 返修：全局条已在说同一件事时消息级不再叠一遍（同一事实只留一个提示面）。 -->
-        <div
-          v-if="m.recoveryGap === true && !recoveryNoticeVisible"
-          class="w-full flex items-start gap-[8px] border border-dashed border-solid border-[#e3e6ea] bg-[#f6f7f9] rounded-[10px] px-[10px] py-[6px] mb-2.5 text-[11.6px] leading-[1.6] text-[#57606a]"
-          :data-testid="'recovery-gap-msg-' + m.id"
-        >
-          <span class="flex-[0_0_15px] w-[15px] h-[15px] rounded-[50%] border-solid border-[1.2px] border-[#8b949e] text-[9px] mt-[1px] flex items-center justify-center" aria-hidden="true">i</span>
-          <span class="min-w-0 flex-1 break-words">{{ t('ai.panel.recoveryGapHint') }}</span>
         </div>
         </div>
       </div>
@@ -1226,16 +1154,17 @@
  * 本仓功能增量（逐条理由，均属"功能差异"）：
  * - **消息体按段渲染（对话时序包 批2 权威翻转）**：`parts` 段序列（text / reasoning / tool）
  *   是渲染唯一真值，按真实时序自上而下排列 —— "正文 → 工具卡 → 正文"夹心轮次才显出真实顺序；
- *   挂起卡跟随其工具段位置（③b 把两者并成一卡前的过渡形态）；复制的显示判据同取 parts，
- *   复制内容仍取 `m.content`（text 段 join 的派生投影，同源）；
+ *   挂起卡跟随其工具段位置（③b 把两者并成一卡前的过渡形态）；复制按同一 parts 契约组合
+ *   `deriveCopyText` 正文与 `shouldShowToolPart` 过滤后的 `toolSummary`，段间空行；
  * - 工具卡四态（调用中/成功/失败/待执行·待确认按通道）并展示参数与结果 —— 蓝本是"已执行工具 X"单标签；
  * - 生成式表单挂起卡（GF-B）：generative_form 帧渲染 FormRenderer 等用户填写，取消/超时带
  *   cancelled:true 回灌 —— 蓝本无此前端工具通道；
  * - HITL 卡片：确认/拒绝双路径（无原因输入、无倒计时 —— 2026-10-20 去超时裁决与 H1 口径）；
- * - 409/503/断流三类降级提示（批G 起不再有「一键重挂」：在途轮刷新即静默续收）；
+ * - 409/503 降级提示与恢复最终失败提示（自动重试、对账与续收过程静默）；
  * - 头部「新建对话」文字按钮 + 空态页签语义小字（苞 A 项 1）：确认后清空当前会话并换新 sessionId
  *   （旧会话由 `DELETE /api/ai/session/{sessionId}` 完整销毁）—— 蓝本无"重开"入口；
- * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文纯文本（不含思考链与工具卡）；
+ * - 逐条复制（苞 B 项 2）：消息 hover/聚焦时显现「复制」，复制正文与可见工具卡摘要；
+ *   不含思考链、工具原始参数/结果诊断及普通 skipped 卡；
  *   因 `vite.config.ts` 的 `host: '0.0.0.0'` 存在经内网 http 访问的**非安全上下文**面
  *   （`navigator.clipboard` 为 undefined），保留 `document.execCommand('copy')` 回退；
  * - 历史对账期骨架屏（苞 B 项 4）：消费 store 的 `historyLoaded`，与空态互斥 —— 蓝本无骨架屏。
@@ -1327,7 +1256,6 @@ import { deriveCopyText, numericArgOf, partDiagnosticOf, isPartResultInternal, i
 import { projectDisplayText } from '@/utils/display-text'
 import { isRenderableView } from '@/utils/resultview'
 import FormRenderer from '@/components/AiPanel/FormRenderer.vue'
-import CompactionStatus from '@/components/AiPanel/CompactionStatus.vue'
 import ResultViewRenderer from '@/components/AiPanel/resultview/ResultViewRenderer.vue'
 import SheetPreviewCard from '@/components/AiPanel/SheetPreviewCard.vue'
 import UploadHandoffCard from '@/components/AiPanel/UploadHandoffCard.vue'
@@ -1419,19 +1347,6 @@ function resetFormAttachmentAbort(): void {
 const logBusy = computed(() => !ai.historyLoaded
   || ai.loading
   || ai.messages.some((message) => message.streaming))
-
-/**
- * 顶部阶段条现场（B4）：**只剩准备中**。
- *
- * <p>压缩过程态已下沉到消息元信息行（紫色「压缩中…」，见 `isCompacting`）；顶部不再出现
- * 任何压缩提示，`preparing` 的既有交互（立即重试）原样保留。
- */
-const stageBar = computed<{ mode: 'preparing'; startedAtMs: number | null; elapsedMs: number | null } | null>(() => {
-  const preparing = ai.preparingRun
-  return preparing === null
-    ? null
-    : { mode: 'preparing', startedAtMs: preparing.startedAtMs, elapsedMs: preparing.elapsedMs }
-})
 
 /**
  * B4：消息级压缩秒表 —— 只在本轮真实处于压缩中时每秒推进，组件卸载/压缩结束即停。
@@ -1527,34 +1442,28 @@ watch(
  * 继续隔离字段/动作名的变化，避免模板直接拼状态）。
  *
  * <p>面板只经下面这组函数读状态 / 调动作；store 侧字段或 action 名变化时**只改这里**。
- * 已对齐 store 的实际契约（类型化直读，不再按候选名嗅探）：
- * `historyError` / `currentError`（`AiLoadErrorView`，只有 code/status，不含文案）、
+ * 已对齐 store 的实际契约（类型化直读，不再按候选名嗅探）：`manualRecovery`、
  * `retryLoadHistory()` / `retryRestoreSnapshot()`、`busyRun`（`AiBusyRunRef`）+ `reattachBusyRun()`、
  * `message.unconfirmed` 与 `lastRoundOutcome='unconfirmed'`。
  * <ul>
- * <li>历史/快照恢复错误：`historyError` / `currentError`；重试
+ * <li>最终恢复错误：`manualRecovery`；按 scope 重试
  *     `retryLoadHistory`（history）/ `retryRestoreSnapshot`（current）。</li>
  * <li>409 在途轮：`busyRun.runId`；动作 `reattachBusyRun()`（一次性对账 + 静默续收）。
  *     runId 不进任何用户可见文本；没有 `busyRun` 就不出入口（不拿 `activeRunId` 猜）。</li>
- * <li>unconfirmed：`message.unconfirmed=true`，或最后一轮的 `lastRoundOutcome='unconfirmed'`；
- *     重新载入走 `retryLoadHistory()`。</li>
- * <li>继续（唯一恢复动作）：失败/断流的最后一条助手消息，无论有无正文/思考，都走正常
+ * <li>继续：失败/断流的最后一条助手消息，无论有无正文/思考，都走正常
  *     `send('继续')`，立即显示用户消息并新建普通轮次；停止/取消、unconfirmed、非末轮不出。
  *     配额错误卡带「继续」时，元信息行不重复该入口。
  *     普通 regenerate = **本批不做、入口整体隐藏**（无禁用 / unsupported 死 UI，也不本地截断重发）。</li>
  * </ul>
  */
 
-/** 恢复失败的视图（scope 决定标签与重试动作；detail 是本地化人话，code/status 只作分档）。 */
+/** 最终恢复失败的视图（scope 决定重试动作；内部恢复台账不直接上屏）。 */
 interface RecoveryLoadError {
   scope: 'history' | 'current'
+  label: string
   detail: string
 }
 
-/**
- * store 只落机器可读现场（`AiLoadErrorView`：scope/code/status/at），**不落用户文案** ——
- * 这里按 code/status 选一条本地化短句；机器码本身不进用户可见文本。
- */
 function loadErrorDetail(view: AiLoadErrorView): string {
   if (view.code === 'NETWORK_ERROR' || view.status === 0) {
     return t('ai.panel.loadErrorNetwork')
@@ -1566,19 +1475,34 @@ function loadErrorDetail(view: AiLoadErrorView): string {
 }
 
 function recoveryLoadError(): RecoveryLoadError | null {
-  if (ai.historyError !== null) {
-    return { scope: 'history', detail: loadErrorDetail(ai.historyError) }
+  const recovery = ai.manualRecovery
+  if (recovery === null) {
+    return null
   }
-  if (ai.currentError !== null) {
-    return { scope: 'current', detail: loadErrorDetail(ai.currentError) }
+  if (recovery.reason === 'archive-window') {
+    return { scope: 'history', label: t('ai.panel.recoveryGap'), detail: t('ai.panel.recoveryGapHint') }
   }
-  return null
+  if (recovery.reason === 'unconfirmed') {
+    return { scope: 'history', label: t('ai.panel.turnUnconfirmed'), detail: t('ai.panel.turnUnconfirmedHint') }
+  }
+  if (recovery.reason === 'first-frame') {
+    return { scope: 'current', label: t('ai.panel.recoveryFailed'), detail: t('ai.notice.firstFrameTimeout') }
+  }
+  if (recovery.reason === 'interrupted') {
+    return { scope: 'current', label: t('ai.panel.recoveryFailed'), detail: t('ai.notice.interruptedKeepShort') }
+  }
+  if (recovery.error === null) {
+    return null
+  }
+  return {
+    scope: recovery.scope,
+    label: recovery.scope === 'current' ? t('ai.panel.recoveryFailed') : t('ai.panel.historyLoadFailed'),
+    detail: loadErrorDetail(recovery.error)
+  }
 }
 
 function recoveryErrorLabel(): string {
-  return recoveryLoadError()?.scope === 'current'
-    ? t('ai.panel.recoveryFailed')
-    : t('ai.panel.historyLoadFailed')
+  return recoveryLoadError()?.label ?? ''
 }
 
 function recoveryErrorText(): string | null {
@@ -1593,18 +1517,7 @@ function retryRecoveryLoad(): void {
   void ai.retryLoadHistory()
 }
 
-/**
- * 恢复提示面的**唯一去重口径**（2026-10-29 返修）：`sealRecovery` 那一路失败在 store 里
- * 同时写 `historyError` 与 `recoveryGap`，两者是同一个事实 —— 但 `restoreSuspendedSnapshot`
- * 的 preparingRun 分支只写 `currentError`（不登记缺口），故「错误」与「缺口」不能互相假定：
- * - 有恢复错误 ⇒ 只出错误条；条内「内容可能不完整」那行**另看 `ai.recoveryGap !== null`**
- *   （有缺口才说，没有就只说错误本身）；
- * - 无恢复错误但有缺口（archive-window 真缺帧）⇒ 只出中性缺口条；
- * - 任一全局条在显示 ⇒ 消息级 `recoveryGap` 局部标记不再重复。
- */
 const recoveryErrorVisible = computed(() => recoveryErrorText() !== null)
-const recoveryGapBarVisible = computed(() => !recoveryErrorVisible.value && ai.recoveryGap !== null)
-const recoveryNoticeVisible = computed(() => recoveryErrorVisible.value || ai.recoveryGap !== null)
 
 /** 409 回执里的进行中轮（`busyRun.runId`）；null = 后端没给可信 runId ⇒ 不出入口（不拿 activeRunId 猜）。 */
 function busyRunId(): string | null {
@@ -1618,10 +1531,6 @@ function canReturnToActiveRun(): boolean {
 
 function returnToActiveRun(): void {
   void ai.reattachBusyRun()
-}
-
-function reloadTurnState(): void {
-  void ai.retryLoadHistory()
 }
 
 /** 继续：以用户身份正常发送「继续」，与手动输入一样立即显示并进入对话历史。 */
@@ -2392,9 +2301,7 @@ function msgGapClass(index: number): string {
 
 function cardOnlyMessageGapClass(message: ChatMessage, index: number): string {
   const blocks = blocksOf(message)
-  const hasIndependentBottomSpacing = message.errorCard != null
-    || (message.recoveryGap === true && !recoveryNoticeVisible.value)
-  return !hasIndependentBottomSpacing && !canShowMetaRow(message)
+  return message.errorCard == null && !canShowMetaRow(message)
     && blocks.length > 0 && blocks.every((block) => block.kind === 'activity')
     ? msgGapClass(index)
     : ''
@@ -3498,22 +3405,8 @@ function isBlockPartSignatureMatch(part: MessagePart, signature: BlockPartSignat
     && (part.kind !== 'tool' || Object.is(signature.part, part))
 }
 
-const AUTOMATIC_WORKSPACE_PROCESS_TOOLS: ReadonlySet<string> = new Set([
-  'navigate_to',
-  'select_definitions',
-  'confirm_step',
-  'set_condition'
-])
-
 function shouldShowToolPart(part: ToolPart): boolean {
   if (isSystemRejectPhantom(part.name, part.userTextCode)) {
-    return false
-  }
-  if (part.kind2 === 'FRONTEND'
-    && AUTOMATIC_WORKSPACE_PROCESS_TOOLS.has(part.name)
-    && part.status === 'succeeded'
-    && part.requiresAction === false
-    && part.decision === undefined) {
     return false
   }
   if (part.status === 'skipped') {
@@ -3734,8 +3627,6 @@ function messageBaseDeps(message: ChatMessage, index: number): unknown[] {
     message.timestamp,
     message.pendingCall,
     message.pendingCall?.status,
-    message.recoveryGap,
-    recoveryNoticeVisible.value,
     message.errorCard,
     message.errorCard?.variant,
     message.errorCard?.title,
@@ -3755,6 +3646,7 @@ function messageBaseDeps(message: ChatMessage, index: number): unknown[] {
     activityStateOf(message),
     activityStateOf(message) === 'compacting' ? compactingLabel(message) : '',
     isFading(message),
+    recoveryErrorVisible.value,
     canShowContinue(message),
     isErrorCardContinueVisible(message),
     feedbackOf(message.id),
@@ -4338,27 +4230,11 @@ const ALERT_TONE: Record<'error' | 'primary' | 'success' | 'gray', { box: string
  */
 const noticeIsError = computed(() => ai.notice !== null && ai.noticeSeverity === 'error')
 
-/**
- * 2026-10-29 ToC 呈现减负批（同一事实只留一个提示面）：**专属 Alert 已经在报的那条事实**，
- * 通知槽不再叠一遍。映射刻意只收两组"同义重复"：
- * - 池饱和 ⇒ `alert-pool-saturated` 已在同屏（含 503 无 body 的回落通知）；
- * - 断流 ⇒ `alert-interrupted`（"结果可能不完整 + 已生成内容保留"）已在同屏
- *   —— 收流路径写 `interruptedKeep`、**接管耗尽路径写 `interruptedKeepShort`**，两条同义，都要收。
- * 其余通知（取消 / 重试 / 幂等 / 反馈失败 …）没有专属 Alert，照旧走通知槽。
- */
-const noticeCoveredByAlert = computed(() => {
-  const code = ai.noticeCode
-  if (code === null) {
-    return false
-  }
-  if (ai.poolSaturated !== null && (code === 'ai.notice.poolSaturated' || code === 'ai.notice.poolSaturatedWithSize')) {
-    return true
-  }
-  return ai.streamInterrupted
-    && (code === 'ai.notice.interruptedKeep' || code === 'ai.notice.interruptedKeepShort')
-})
+/** 池饱和已有专属 Alert 时，通知槽不再重复同一事实。 */
+const noticeCoveredByAlert = computed(() => ai.poolSaturated !== null
+  && (ai.noticeCode === 'ai.notice.poolSaturated' || ai.noticeCode === 'ai.notice.poolSaturatedWithSize'))
 
-/** 通知槽是否渲染（专属 Alert 覆盖时不重复叙事）。 */
+/** 自动恢复通知静默；最终恢复失败由 recoveryErrorVisible 单独呈现。 */
 const noticeBarVisible = computed(() => ai.notice !== null
   && ai.noticeCode !== 'ai.notice.upstreamRetry'
   && !noticeCoveredByAlert.value)
@@ -4600,11 +4476,11 @@ function isFailedLastAssistant(message: ChatMessage): boolean {
 /**
  * 继续：失败/断流的最后一条助手消息，无论有无正文/思考都可出（正常发送一条用户可见的
  * 「继续」，不删历史）；停止/取消、unconfirmed、非末轮不出。
- * 配额错误卡已带「继续」时，元信息行不重复该入口。
+ * 配额错误卡或统一恢复错误条已带动作时，元信息行不重复该入口。
  * 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
  */
 function canShowContinue(message: ChatMessage): boolean {
-  return isFailedLastAssistant(message) && !isErrorCardContinueVisible(message)
+  return !recoveryErrorVisible.value && isFailedLastAssistant(message) && !isErrorCardContinueVisible(message)
 }
 
 /** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的
@@ -4778,14 +4654,13 @@ function canLegacyCopy(text: string): boolean {
 }
 
 function messageCopyText(message: ChatMessage): string {
-  const body = deriveCopyText(message)
-  if (body.trim() !== '') {
-    return body
-  }
-  return message.parts
-    .filter((part): part is ToolPart => part.kind === 'tool' && shouldShowToolPart(part))
-    .map((part) => toolSummary(part))
-    .join('\n\n')
+  const sections = [
+    deriveCopyText(message),
+    ...message.parts
+      .filter((part): part is ToolPart => part.kind === 'tool' && shouldShowToolPart(part))
+      .map((part) => toolSummary(part))
+  ]
+  return sections.filter((section) => section.trim() !== '').join('\n\n')
 }
 
 function setCopyFeedback(id: string, ok: boolean, empty = false): void {
@@ -4799,7 +4674,7 @@ function setCopyFeedback(id: string, ok: boolean, empty = false): void {
   }, 2000)
 }
 
-/** 普通复制只接收正文或工具摘要，不读取工具原始参数、结果与诊断详情。 */
+/** 普通复制只接收正文与可见工具摘要，不读取工具原始参数、结果与诊断详情。 */
 async function copyText(id: string, text: string): Promise<void> {
   if (text.trim() === '') {
     setCopyFeedback(id, false, true)

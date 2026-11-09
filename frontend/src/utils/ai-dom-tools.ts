@@ -479,7 +479,7 @@ function parentAcrossShadow(node: HTMLElement): HTMLElement | null {
 }
 
 /**
- * 该元素是否**当前真的显示在界面上**（可见性围栏的唯一判据）。
+ * 该元素是否通过 CSS / 挂载可见性围栏；写操作另由几何围栏复核视窗与裁剪。
  *
  * <p>判据按"能不能看见"取最保守的交集，全部来自标准语义，不按类名猜：
  * `hidden` 属性 / `aria-hidden="true"` / `inert` 的祖先、`display:none`、
@@ -532,6 +532,145 @@ export function isElementVisibleForAi(el: HTMLElement): boolean {
     }
   }
   return true
+}
+
+type UiGeometryFailure = 'not-rendered' | 'outside-viewport' | 'clipped'
+
+interface UiRect {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+function hasVisibleArea(rect: UiRect): boolean {
+  return rect.right > rect.left && rect.bottom > rect.top
+}
+
+function intersectRect(left: UiRect, right: UiRect): UiRect {
+  return {
+    left: Math.max(left.left, right.left),
+    top: Math.max(left.top, right.top),
+    right: Math.min(left.right, right.right),
+    bottom: Math.min(left.bottom, right.bottom)
+  }
+}
+
+function clipsOnAxis(value: string): boolean {
+  return value !== '' && value !== 'visible'
+}
+
+function hasPaintContainment(style: CSSStyleDeclaration): boolean {
+  const contain = style.getPropertyValue('contain').trim()
+  return /(^|\s)(paint|strict|content)(\s|$)/.test(contain)
+}
+
+function establishesFixedContainingBlock(style: CSSStyleDeclaration): boolean {
+  const transformProperties = ['transform', 'perspective', 'filter', 'backdrop-filter', 'rotate', 'scale', 'translate']
+  if (transformProperties.some((name) => {
+    const value = style.getPropertyValue(name).trim()
+    return value !== '' && value !== 'none'
+  })) {
+    return true
+  }
+  const contain = style.getPropertyValue('contain').trim()
+  if (/(^|\s)(layout|paint|strict|content)(\s|$)/.test(contain)) {
+    return true
+  }
+  const willChange = style.getPropertyValue('will-change').split(',').map((item) => item.trim())
+  if (willChange.some((item) => transformProperties.includes(item) || item === 'contain' || item === 'content-visibility')) {
+    return true
+  }
+  if (style.getPropertyValue('content-visibility').trim() === 'auto') {
+    return true
+  }
+  const containerType = style.getPropertyValue('container-type').trim()
+  return containerType !== '' && containerType !== 'normal'
+}
+
+/**
+ * 写操作的几何可操作性。CSS 可见不代表能落到视窗内：零尺寸、视窗外、
+ * overflow 裁剪都必须另行判定。非布局 DOM 没有可靠几何事实，保留上面的 CSS 围栏。
+ */
+function geometryFailureForAi(el: HTMLElement): UiGeometryFailure | null {
+  const check = (el as unknown as { checkVisibility?: () => boolean }).checkVisibility
+  const view = el.ownerDocument?.defaultView
+  if (typeof check !== 'function' || !view || typeof view.getComputedStyle !== 'function') {
+    return null
+  }
+  let rect: UiRect
+  try {
+    rect = el.getBoundingClientRect()
+  } catch (error) {
+    logCaughtError(error, 'utils/ai-dom-tools.ts:geometry')
+    return 'not-rendered'
+  }
+  if (!hasVisibleArea(rect)) {
+    return 'not-rendered'
+  }
+  let visible = rect
+  let node = parentAcrossShadow(el)
+  try {
+    // 视窗包含块的 fixed 不被普通 overflow 祖先裁剪；遇到 fixed 包含块后，
+    // 该祖先及其外侧裁剪链才作用于元素。非 fixed 保持原有祖先裁剪语义。
+    let inContainingBlockClipChain = view.getComputedStyle(el).position !== 'fixed'
+    while (node) {
+      const style = view.getComputedStyle(node)
+      if (!inContainingBlockClipChain && establishesFixedContainingBlock(style)) {
+        inContainingBlockClipChain = true
+      }
+      const paintContained = hasPaintContainment(style)
+      const clipX = clipsOnAxis(style.overflowX) || paintContained
+      const clipY = clipsOnAxis(style.overflowY) || paintContained
+      if (inContainingBlockClipChain && (clipX || clipY)) {
+        const container = node.getBoundingClientRect()
+        visible = intersectRect(visible, {
+          left: clipX ? container.left : visible.left,
+          top: clipY ? container.top : visible.top,
+          right: clipX ? container.right : visible.right,
+          bottom: clipY ? container.bottom : visible.bottom
+        })
+        if (!hasVisibleArea(visible)) {
+          return 'clipped'
+        }
+      }
+      node = parentAcrossShadow(node)
+    }
+  } catch (error) {
+    logCaughtError(error, 'utils/ai-dom-tools.ts:clipping')
+    return 'clipped'
+  }
+  const viewport = {
+    left: 0,
+    top: 0,
+    right: view.innerWidth,
+    bottom: view.innerHeight
+  }
+  return hasVisibleArea(intersectRect(visible, viewport)) ? null : 'outside-viewport'
+}
+
+function scrollForAiOperation(el: HTMLElement): boolean {
+  if (typeof el.scrollIntoView !== 'function') {
+    return false
+  }
+  try {
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' as ScrollBehavior })
+    return true
+  } catch (error) {
+    logCaughtError(error, 'utils/ai-dom-tools.ts:scroll')
+    return false
+  }
+}
+
+function isWithinRegion(el: HTMLElement, root: HTMLElement): boolean {
+  let node: HTMLElement | null = el
+  while (node) {
+    if (node === root) {
+      return true
+    }
+    node = parentAcrossShadow(node)
+  }
+  return false
 }
 
 /** `fill=allow` 的输入框才回显值，且 ≤24 字符。 */
@@ -1041,7 +1180,7 @@ function isDisabledTarget(el: HTMLElement): boolean {
     if (node.getAttribute('aria-disabled') === 'true') {
       return true
     }
-    node = node.parentElement
+    node = parentAcrossShadow(node)
   }
   return false
 }
@@ -1073,16 +1212,42 @@ function disabledTargetOutcome(verb: AiVerb, ref: string): UiToolOutcome {
  * （`el.click()` 对隐藏元素照样派发事件，但用户既看不到也没法感知），回 `ok` + "界面已同步"
  * 就是谎报。归因给 `UI_TARGET_HIDDEN`，下一步是"切到那个步骤/展开面板"而不是"再点一次"。
  */
-function hiddenTargetOutcome(verb: AiVerb, ref: string): UiToolOutcome {
+function hiddenTargetOutcome(
+  verb: AiVerb,
+  ref: string,
+  geometry: UiGeometryFailure | null = null
+): UiToolOutcome {
+  const conclusion = geometry === 'outside-viewport'
+    ? '未执行（目标控件不在视窗内）'
+    : geometry === 'clipped'
+      ? '未执行（目标控件被滚动容器或祖先裁剪）'
+      : geometry === 'not-rendered'
+        ? '未执行（目标控件没有可操作的几何区域）'
+        : '未执行（目标控件当前未显示）'
+  const reason = geometry === null
+    ? '该控件在非当前步骤 / 已折叠面板 / 隐藏区域里，屏幕上没有它，写入不会产生任何可见变化'
+    : '已按当前路由、挂载和 UI 代次复核；目标没有可见且可命中的区域，本次没有执行写入'
+  const next = geometry === null
+    ? '先切到该控件所在的步骤或展开面板，再 ui_snapshot 取当前可见控件；不要把隐藏步骤的写入当成已生效'
+    : '重新 ui_snapshot 核对当前页面与控件；若目标仍被裁剪或没有尺寸，请由用户调整页面后再操作'
   return fail(
     formatUiReceipt({
       tool: WRITE_VERB_TOOL_NAMES[verb] ?? '界面操作',
-      conclusion: '未执行（目标控件当前未显示）',
-      reason: '该控件在非当前步骤 / 已折叠面板 / 隐藏区域里，屏幕上没有它，写入不会产生任何可见变化',
-      next: '先切到该控件所在的步骤或展开面板，再 ui_snapshot 取当前可见控件；不要把隐藏步骤的写入当成已生效'
+      conclusion,
+      reason,
+      next
     }) + ` ref=${ref}`,
     'degraded',
     'UI_TARGET_HIDDEN',
+    'rejected'
+  )
+}
+
+function staleTargetOutcome(verb: AiVerb, ref: string): UiToolOutcome {
+  return fail(
+    `${verb} 未执行：目标元素已被替换或不再属于当前注册区域，旧元素不会执行。请重新 ui_snapshot。ref=${ref}`,
+    'degraded',
+    undefined,
     'rejected'
   )
 }
@@ -1122,12 +1287,12 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
       outcome: fail(`该 ref 不在当前页面（可能已切页或刷新），请重新 ui_snapshot。ref=${ref}`)
     }
   }
-  // ④ 上下文围栏（page / step / task 三段，与 WORKSPACE_ACTIONS 同口径）
+  // ④ 路由与挂载围栏：路由不明或区域根已卸载时，旧 ref 一律不得执行。
   const ctx = currentUiContext()
-  if (ctx.pageId && hit.region.page !== ctx.pageId) {
+  if (!ctx.pageId || hit.region.page !== ctx.pageId) {
     return {
       ok: false,
-      outcome: fail(`当前页面为「${ctx.pageId}」，该控件属于「${hit.region.page}」。`
+      outcome: fail(`当前页面为「${ctx.pageId ?? '未知'}」，该控件属于「${hit.region.page}」。`
         + `请先导航到「${hit.region.page}」再操作（ref=${ref}）。`)
     }
   }
@@ -1141,7 +1306,11 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
   if (hit.region.needsTask && ctx.taskId === null) {
     return { ok: false, outcome: fail('当前没有进行中的任务，该控件需要绑定任务后使用。') }
   }
-  // ⑤ 元素围栏（epoch / detached / deny / verbs）
+  if (hit.region.root.isConnected !== true
+    || (typeof document !== 'undefined' && hit.region.root.ownerDocument !== document)) {
+    return { ok: false, outcome: fail(`控件所在区域已卸载，${verb} 未执行。请重新 ui_snapshot。ref=${ref}`) }
+  }
+  // ⑤ UI 代次与元素围栏（epoch / live ref / detached / deny / verbs）
   const epoch = asString(args.epoch)
   if (!epoch) {
     return { ok: false, outcome: fail('缺少 epoch 参数：该 ref 可能已过期，请重新 ui_snapshot。') }
@@ -1155,6 +1324,9 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
   }
   if (hit.el.isConnected !== true) {
     return { ok: false, outcome: fail(`元素已不在页面上（可能已被卸载），请重新 ui_snapshot。ref=${ref}`) }
+  }
+  if (hit.el.getAttribute('data-ai-ref') !== ref || !isWithinRegion(hit.el, hit.region.root)) {
+    return { ok: false, outcome: staleTargetOutcome(verb, ref) }
   }
   if (hit.el.hasAttribute('data-ai-deny')) {
     return { ok: false, outcome: fail(`该元素声明了 data-ai-deny（禁止 AI 操作），本次未执行。ref=${ref}`) }
@@ -1174,6 +1346,43 @@ function checkFences(args: Record<string, unknown>, verb: AiVerb): FenceResult |
     return { ok: false, outcome: hiddenTargetOutcome(verb, ref) }
   }
   return { ok: true, hit, label: labelTextOf(hit.el), risk: riskOfElement(hit.el, hit.region) }
+}
+
+/** 节流 await 之后重走完整围栏；仅视窗/裁剪问题允许 instant 滚动，随后同步复核再执行。 */
+function prepareWriteTarget(
+  args: Record<string, unknown>,
+  verb: AiVerb,
+  expected: AiRegionHit,
+  onBrowserSideEffect?: () => void
+): FenceResult | FenceFailure {
+  const ref = String(args.ref)
+  const current = checkFences(args, verb)
+  if (!current.ok) {
+    return current
+  }
+  if (current.hit.el !== expected.el) {
+    return { ok: false, outcome: staleTargetOutcome(verb, ref) }
+  }
+  const failure = geometryFailureForAi(current.hit.el)
+  if (failure === null) {
+    return current
+  }
+  if (failure === 'not-rendered'
+    || !scrollForAiOperation(current.hit.el)) {
+    return { ok: false, outcome: hiddenTargetOutcome(verb, ref, failure) }
+  }
+  onBrowserSideEffect?.()
+  const scrolled = checkFences(args, verb)
+  if (!scrolled.ok) {
+    return scrolled
+  }
+  if (scrolled.hit.el !== expected.el) {
+    return { ok: false, outcome: staleTargetOutcome(verb, ref) }
+  }
+  const remaining = geometryFailureForAi(scrolled.hit.el)
+  return remaining === null
+    ? scrolled
+    : { ok: false, outcome: hiddenTargetOutcome(verb, ref, remaining) }
 }
 
 /** 写动词底座：配额 + 停止 + 串行节流（返回 null = 可执行）。 */
@@ -1401,16 +1610,18 @@ function consequentialText(ref: string): string {
 }
 
 /** `ui_click`：区域 → 上下文 → 元素 → 风险四段链；consequential **零点击**。 */
-export async function aiClick(args: Record<string, unknown> = {}): Promise<UiToolOutcome> {
-  const fenced = checkFences(args, 'click')
-  if (!fenced.ok) {
-    return fenced.outcome
+export async function aiClick(
+  args: Record<string, unknown> = {},
+  onBrowserSideEffect?: () => void
+): Promise<UiToolOutcome> {
+  const initial = checkFences(args, 'click')
+  if (!initial.ok) {
+    return initial.outcome
   }
-  const { hit, label, risk } = fenced
   const ref = String(args.ref)
   const epoch = String(args.epoch)
 
-  if (risk === 'consequential') {
+  if (initial.risk === 'consequential') {
     // 安全性质：一次不点。这里绝不调用 el.click()。
     return fail(consequentialText(ref))
   }
@@ -1419,9 +1630,15 @@ export async function aiClick(args: Record<string, unknown> = {}): Promise<UiToo
   if (slot) {
     return slot
   }
-  if (!hit.el.isConnected) {
-    return fail(`元素已不在页面上（可能已被卸载），请重新 ui_snapshot。ref=${ref}`)
+  const fenced = prepareWriteTarget(args, 'click', initial.hit, onBrowserSideEffect)
+  if (!fenced.ok) {
+    return fenced.outcome
   }
+  const { hit, label, risk } = fenced
+  if (risk === 'consequential') {
+    return fail(consequentialText(ref))
+  }
+  onBrowserSideEffect?.()
   highlightElement(hit.el, label)
   const popupBefore = isPopupTrigger(hit.el) ? popupSurfaceCount() : -1
   hit.el.click()
@@ -1502,7 +1719,10 @@ function rememberWrite(ref: string, value: string, epoch: string): void {
 }
 
 /** `ui_fill`：只对原生 input/textarea/contenteditable 且 `data-ai-fill="allow"` 生效。 */
-export async function aiFill(args: Record<string, unknown> = {}): Promise<UiToolOutcome> {
+export async function aiFill(
+  args: Record<string, unknown> = {},
+  onBrowserSideEffect?: () => void
+): Promise<UiToolOutcome> {
   const value = typeof args.value === 'string' ? args.value : null
   if (value === null) {
     return fail('参数不合法，填写未执行：缺少 value。', 'unavailable')
@@ -1510,13 +1730,31 @@ export async function aiFill(args: Record<string, unknown> = {}): Promise<UiTool
   if (value.length > UI_FILL_VALUE_MAX_CHARS) {
     return fail(`参数不合法，填写未执行：value 超过 ${UI_FILL_VALUE_MAX_CHARS} 字符（共 ${value.length} 字符）。`, 'unavailable')
   }
-  const fenced = checkFences(args, 'fill')
+  const initial = checkFences(args, 'fill')
+  if (!initial.ok) {
+    return initial.outcome
+  }
+  const ref = String(args.ref)
+  const epoch = String(args.epoch)
+  if (!canFill(initial.hit.el)) {
+    return fail(`该输入框未声明可填写（data-ai-fill="allow"），拒绝填写。ref=${ref}`)
+  }
+  if (initial.risk !== 'mutate-local') {
+    return fail(`该元素风险为 ${initial.risk}，填写属于本地写动作，只在 mutate-local 元素上允许（ref=${ref}）。`)
+  }
+  const initialPrecondition = checkWritePrecondition(ref, readValueOf(initial.hit.el), epoch)
+  if (initialPrecondition) {
+    return initialPrecondition.outcome
+  }
+  const slot = await acquireWriteSlot()
+  if (slot) {
+    return slot
+  }
+  const fenced = prepareWriteTarget(args, 'fill', initial.hit, onBrowserSideEffect)
   if (!fenced.ok) {
     return fenced.outcome
   }
   const { hit, label, risk } = fenced
-  const ref = String(args.ref)
-  const epoch = String(args.epoch)
   if (!canFill(hit.el)) {
     return fail(`该输入框未声明可填写（data-ai-fill="allow"），拒绝填写。ref=${ref}`)
   }
@@ -1527,11 +1765,8 @@ export async function aiFill(args: Record<string, unknown> = {}): Promise<UiTool
   if (precondition) {
     return precondition.outcome
   }
-  const slot = await acquireWriteSlot()
-  if (slot) {
-    return slot
-  }
   const previous = readValueOf(hit.el)
+  onBrowserSideEffect?.()
   nativeSetValue(hit.el, value)
   hit.el.dispatchEvent(new Event('input', { bubbles: true }))
   hit.el.dispatchEvent(new Event('change', { bubbles: true }))
@@ -1593,19 +1828,42 @@ function readSelectedOption(hit: AiRegionHit): string {
   return ''
 }
 
+function isRequestedOption(node: HTMLElement, option: string): boolean {
+  return optionOf(node) === option || optionOf(node).trim() === option.trim()
+}
+
+function findRequestedOption(region: AiRegion, option: string): HTMLElement | null {
+  const candidates = optionNodes(region)
+  const exact = candidates.find((node) => optionOf(node) === option)
+  return exact ?? candidates.find((node) => optionOf(node).trim() === option.trim()) ?? null
+}
+
 /** `ui_select`：setter 优先（Element Plus 自绘弹层只能靠它），回退「点开→精确匹配→点选→回读」。 */
 async function applySelectOption(
+  args: Record<string, unknown>,
   hit: AiRegionHit,
-  ref: string,
   option: string,
-  label: string
+  label: string,
+  onBrowserSideEffect?: () => void
 ): Promise<UiToolOutcome | null> {
+  const ref = String(args.ref)
   const setter = hit.region.setters?.[ref]
   if (setter) {
+    onBrowserSideEffect?.()
     const applied = await setter(option)
     return applied ? null : fail(`未选择：setter 未能把「${label}」设为「${option}」。ref=${ref}`)
   }
+  onBrowserSideEffect?.()
   hit.el.click()
+  const opened = checkFences(args, 'select')
+  if (!opened.ok || opened.hit.el !== hit.el) {
+    return fail(
+      `下拉触发器已点击，但页面或 UI 代次随后发生变化，未继续选择。请重新 ui_snapshot。ref=${ref}`,
+      'degraded',
+      undefined,
+      'unknown'
+    )
+  }
   await canWaitUntil(() => optionNodes(hit.region).length > 0)
   const candidates = optionNodes(hit.region)
   const exact = candidates.find((node) => optionOf(node) === option)
@@ -1615,22 +1873,76 @@ async function applySelectOption(
     const list = available.length > 0 ? available.join('、') : `（${UI_ACTION_SETTLE_MS}ms 内未见下拉选项）`
     return fail(`未选择：下拉选项里没有「${option}」。可选：${list}。ref=${ref}`)
   }
+  const fenced = prepareWriteTarget(args, 'select', hit, onBrowserSideEffect)
+  if (!fenced.ok) {
+    return fenced.outcome
+  }
+  if (trimmed.isConnected !== true || !isElementVisibleForAi(trimmed)) {
+    return hiddenTargetOutcome('select', ref)
+  }
+  if (isDisabledTarget(trimmed)) {
+    return disabledTargetOutcome('select', ref)
+  }
+  let geometry = geometryFailureForAi(trimmed)
+  if (geometry !== null) {
+    if (geometry === 'not-rendered' || !scrollForAiOperation(trimmed)) {
+      return hiddenTargetOutcome('select', ref, geometry)
+    }
+    onBrowserSideEffect?.()
+    const scrolled = prepareWriteTarget(args, 'select', hit, onBrowserSideEffect)
+    if (!scrolled.ok) {
+      return scrolled.outcome
+    }
+    if (trimmed.isConnected !== true || !isElementVisibleForAi(trimmed)) {
+      return hiddenTargetOutcome('select', ref)
+    }
+    if (isDisabledTarget(trimmed)) {
+      return disabledTargetOutcome('select', ref)
+    }
+    geometry = geometryFailureForAi(trimmed)
+    if (geometry !== null) {
+      return hiddenTargetOutcome('select', ref, geometry)
+    }
+  }
+  const currentOption = findRequestedOption(hit.region, option)
+  if (currentOption !== trimmed || !isRequestedOption(trimmed, option)) {
+    return fail(`未选择：滚动后选项节点已被复用或目标值已变化，未点击旧节点。请重新 ui_snapshot。ref=${ref}`)
+  }
+  onBrowserSideEffect?.()
   trimmed.click()
   return null
 }
 
-export async function aiSelect(args: Record<string, unknown> = {}): Promise<UiToolOutcome> {
+export async function aiSelect(
+  args: Record<string, unknown> = {},
+  onBrowserSideEffect?: () => void
+): Promise<UiToolOutcome> {
   const option = asString(args.option)
   if (!option) {
     return fail('参数不合法，选择未执行：缺少 option（选项的语义值，不是索引）。', 'unavailable')
   }
-  const fenced = checkFences(args, 'select')
+  const initial = checkFences(args, 'select')
+  if (!initial.ok) {
+    return initial.outcome
+  }
+  const ref = String(args.ref)
+  const epoch = String(args.epoch)
+  if (initial.risk !== 'mutate-local') {
+    return fail(`该元素风险为 ${initial.risk}，选择属于本地写动作，只在 mutate-local 元素上允许（ref=${ref}）。`)
+  }
+  const initialPrecondition = checkWritePrecondition(ref, readSelectedOption(initial.hit), epoch)
+  if (initialPrecondition) {
+    return initialPrecondition.outcome
+  }
+  const slot = await acquireWriteSlot()
+  if (slot) {
+    return slot
+  }
+  const fenced = prepareWriteTarget(args, 'select', initial.hit, onBrowserSideEffect)
   if (!fenced.ok) {
     return fenced.outcome
   }
   const { hit, label, risk } = fenced
-  const ref = String(args.ref)
-  const epoch = String(args.epoch)
   if (risk !== 'mutate-local') {
     return fail(`该元素风险为 ${risk}，选择属于本地写动作，只在 mutate-local 元素上允许（ref=${ref}）。`)
   }
@@ -1638,14 +1950,19 @@ export async function aiSelect(args: Record<string, unknown> = {}): Promise<UiTo
   if (precondition) {
     return precondition.outcome
   }
-  const slot = await acquireWriteSlot()
-  if (slot) {
-    return slot
-  }
   const previous = readSelectedOption(hit)
-  const applied = await applySelectOption(hit, ref, option, label)
+  const applied = await applySelectOption(args, hit, option, label, onBrowserSideEffect)
   if (applied) {
     return applied
+  }
+  const current = checkFences(args, 'select')
+  if (!current.ok || current.hit.el !== hit.el) {
+    return fail(
+      `选择动作已提交，但页面或 UI 代次随后发生变化，无法核对最终状态。请重新 ui_snapshot 并检查实际选择。ref=${ref}`,
+      'degraded',
+      undefined,
+      'unknown'
+    )
   }
   const readback = readSelectedOption(hit)
   if (readback !== '' && readback !== option) {

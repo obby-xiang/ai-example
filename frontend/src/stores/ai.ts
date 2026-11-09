@@ -7,7 +7,7 @@
  * - 刷新恢复走"镜像即时恢复 + `GET /api/ai/history/{sessionId}` 对账"两步；
  * - 409 SESSION_BUSY 不当作普通失败：回收乐观气泡（不出现幻影双份），提示里不暴露 runId；
  *   在途轮由刷新恢复**静默续收**（批G，用户看不到「重挂」概念）；
- * - 断流（缺 done/error 终帧）按 ADR-6 置 `streamInterrupted` 提示"结果可能不完整"；
+ * - 断流与恢复失败先记内部事实，自动续接耗尽后才发布唯一手动恢复提示；
  * - 契约联动：工作区动作由 workspace store 记入 `recentActions`（随下一轮请求进入
  *   `buildContext().extra.recentActions`）；AI store 只订阅 `ui_event_result` 维护面板回执位。
  */
@@ -38,7 +38,6 @@ import {
 import {
   SSE_TIMEOUT_CODES,
   probeReattach,
-  getPageVisible,
   type ArchiveTrimSignal,
   type SseFrameHandlers,
   type SseStreamOptions
@@ -180,6 +179,106 @@ let currentAbort: AbortController | null = null
  */
 let pendingAttachRunId: string | null = null
 const historyRequestGenerations = new Map<string, number>()
+const historyDoneRequestGenerations = new Map<string, number>()
+const unconfirmedHistoryRequestFloors = new Map<string, number>()
+const historyRequestsInFlight = new Map<string, number>()
+
+interface TerminalHistoryFollowup {
+  sessionId: string
+  runId: string
+  messageId: string
+}
+
+type TerminalHistoryResolution =
+  | { kind: 'invalid' }
+  | { kind: 'pending' }
+  | { kind: 'ready'; followup: TerminalHistoryFollowup; message: ChatMessage }
+
+const terminalHistoryFollowups = new Map<string, TerminalHistoryFollowup>()
+
+function historyRunKey(sessionId: string, runId: string): string {
+  return `${sessionId}\0${runId}`
+}
+
+function clearTerminalHistoryFollowups(sessionId: string): void {
+  const prefix = `${sessionId}\0`
+  for (const key of [...terminalHistoryFollowups.keys()]) {
+    if (key.startsWith(prefix)) {
+      terminalHistoryFollowups.delete(key)
+    }
+  }
+}
+
+function clearUnconfirmedHistoryMarkers(sessionId: string, runId: string): void {
+  const key = historyRunKey(sessionId, runId)
+  terminalHistoryFollowups.delete(key)
+  unconfirmedHistoryRequestFloors.delete(key)
+}
+
+function clearTerminalHistoryState(sessionId: string, runId?: string): void {
+  if (runId !== undefined) {
+    clearUnconfirmedHistoryMarkers(sessionId, runId)
+    const key = historyRunKey(sessionId, runId)
+    historyDoneRequestGenerations.delete(key)
+    return
+  }
+  clearTerminalHistoryFollowups(sessionId)
+  const prefix = `${sessionId}\0`
+  for (const [key] of unconfirmedHistoryRequestFloors) {
+    if (key.startsWith(prefix)) {
+      unconfirmedHistoryRequestFloors.delete(key)
+    }
+  }
+  for (const [key] of historyDoneRequestGenerations) {
+    if (key.startsWith(prefix)) {
+      historyDoneRequestGenerations.delete(key)
+    }
+  }
+}
+
+function recordUnconfirmedHistoryFloor(sessionId: string, runId: string | null | undefined): void {
+  const key = historyRunKey(sessionId, runId ?? '')
+  if (unconfirmedHistoryRequestFloors.has(key)) {
+    return
+  }
+  unconfirmedHistoryRequestFloors.set(key, historyRequestGenerations.get(sessionId) ?? 0)
+}
+
+function unconfirmedHistoryFloor(sessionId: string, runId: string | null | undefined): number {
+  return unconfirmedHistoryRequestFloors.get(historyRunKey(sessionId, runId ?? '')) ?? 0
+}
+
+function moveUnconfirmedHistoryFloor(sessionId: string, previousRunId: string, nextRunId: string): void {
+  if (previousRunId === nextRunId) {
+    return
+  }
+  const previousKey = historyRunKey(sessionId, previousRunId)
+  const floor = unconfirmedHistoryRequestFloors.get(previousKey)
+  if (floor === undefined) {
+    return
+  }
+  const nextKey = historyRunKey(sessionId, nextRunId)
+  const nextFloor = Math.max(floor, unconfirmedHistoryRequestFloors.get(nextKey) ?? 0)
+  unconfirmedHistoryRequestFloors.set(nextKey, nextFloor)
+  unconfirmedHistoryRequestFloors.delete(previousKey)
+}
+
+function noteHistoryDoneEvidence(
+  sessionId: string,
+  requestGeneration: number,
+  entries: readonly AiHistoryMessage[]
+): void {
+  for (const entry of entries) {
+    if (entry.type.toUpperCase() !== 'ASSISTANT' || !entry.runId
+      || entry.outcome !== 'DONE' || isTranscriptDegraded(entry)) {
+      continue
+    }
+    const key = historyRunKey(sessionId, entry.runId)
+    const applied = Math.max(historyDoneRequestGenerations.get(key) ?? 0, requestGeneration)
+    historyDoneRequestGenerations.set(key, applied)
+  }
+}
+
 /**
  * Task 4：会话发号引导门（模块级）。
  *
@@ -302,7 +401,7 @@ function sheetWriteBudgetMs(messages: ChatMessage[], toolCallId: string): number
   for (const message of messages) {
     const part = findToolPart(message, toolCallId)
     if (part) {
-      return deriveFrontendToolBudgetMs(part.timeoutSeconds)
+      return deriveFrontendToolBudgetMs(part.timeoutSeconds, part.expiresAt)
     }
   }
   return deriveFrontendToolBudgetMs()
@@ -598,9 +697,6 @@ function disarmAllGateSync(): void {
   gateSyncTimers.clear()
   gateSyncAttempts.clear()
 }
-/** 批次3："准备中"手动重试的单飞令牌（防双击重复探测）。 */
-let preparingRetryInFlight = false
-
 /** 会话镜像是否已启动（防止重复 $subscribe）。 */
 let mirrorStarted = false
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
@@ -673,6 +769,12 @@ export const AUTO_RECOVERY_DELAY_MS = 400
 /** 自动恢复的四类触发面（预算与调度按类共享；同类同时只有一条恢复链）。 */
 export type AutoRecoveryKind = 'preparing' | 'first-frame' | 'history' | 'purged'
 
+export interface AiManualRecoveryView {
+  scope: 'history' | 'current'
+  reason: 'load' | 'unconfirmed' | 'interrupted' | 'first-frame' | 'archive-window'
+  error: AiLoadErrorView | null
+}
+
 /** 已排上的自动恢复计时器（按类唯一）。 */
 const autoRecoveryTimers = new Map<AutoRecoveryKind, ReturnType<typeof setTimeout>>()
 /** 正在等下一次尝试的解析函数（作废时立刻放行，避免悬空 await）。 */
@@ -681,6 +783,29 @@ const autoRecoveryWaiters = new Map<AutoRecoveryKind, () => void>()
 const autoRecoveryInFlight = new Set<AutoRecoveryKind>()
 /** 每类一个版本号：换会话 / 停止 / 新轮 / 用户手动重试都推进它，链路每步之后对版。 */
 const autoRecoveryEpochs = new Map<AutoRecoveryKind, number>()
+
+let recoveryOperationSequence = 0
+const activeRecoveryOperations = new Set<number>()
+
+function beginRecoveryOperation(store: { restoringRecovery: boolean }): number {
+  recoveryOperationSequence += 1
+  const token = recoveryOperationSequence
+  activeRecoveryOperations.add(token)
+  store.restoringRecovery = true
+  return token
+}
+
+function endRecoveryOperation(store: { restoringRecovery: boolean }, token: number): void {
+  activeRecoveryOperations.delete(token)
+  if (activeRecoveryOperations.size === 0) {
+    store.restoringRecovery = false
+  }
+}
+
+function clearRecoveryOperations(store: { restoringRecovery: boolean }): void {
+  activeRecoveryOperations.clear()
+  store.restoringRecovery = false
+}
 
 function autoRecoveryEpoch(kind: AutoRecoveryKind): number {
   return autoRecoveryEpochs.get(kind) ?? 0
@@ -1139,6 +1264,19 @@ function readBusyRunRef(error: ApiError): AiBusyRunRef | null {
 function isUnconfirmedTerminal(frame: unknown): boolean {
   const raw = frame as { code?: unknown; turnEnd?: unknown; unconfirmed?: unknown }
   return raw.code === 'TURN_UNCONFIRMED' || raw.turnEnd === 'unconfirmed' || raw.unconfirmed === true
+}
+
+function isTranscriptDegraded(source: {
+  transcriptDegraded?: unknown
+  historyComplete?: unknown
+  code?: unknown
+  errorCode?: unknown
+}): boolean {
+  if (source.transcriptDegraded === true || source.historyComplete === false) {
+    return true
+  }
+  return [source.code, source.errorCode].some((value) => typeof value === 'string'
+    && (baseErrorCode(value) === 'AI_TRANSCRIPT_INCOMPLETE' || baseErrorCode(value) === 'AI_TRANSCRIPT_WRITE_FAILED'))
 }
 
 /**
@@ -2424,7 +2562,9 @@ const MIRROR_MESSAGE_SCALAR_KEYS = [
   'code',
   'unconfirmed',
   'recoveryGap',
+  'recoveryGapReason',
   'interrupted',
+  'interruptedReason',
   'runId',
   'messageId',
   'timestamp'
@@ -2507,8 +2647,10 @@ function mirrorMessageOf(message: ChatMessage): MirroredMessage {
     ...(message.code ? { code: message.code } : {}),
     ...(message.unconfirmed ? { unconfirmed: true } : {}),
     ...(message.recoveryGap ? { recoveryGap: true } : {}),
-    // 断流是消息级事实：刷新后仍要能出「继续」（轮次级 lastRoundOutcome 不落盘）
+    ...(message.recoveryGapReason ? { recoveryGapReason: message.recoveryGapReason } : {}),
+    // 断流及具体原因随镜像恢复，供最终提示按原类型重建。
     ...(message.interrupted ? { interrupted: true } : {}),
+    ...(message.interruptedReason ? { interruptedReason: message.interruptedReason } : {}),
     // 批次2：run 归属必须活过刷新 —— 断流重挂/恢复链路按它定位后端 run（不得猜 activeRunId）
     ...(message.runId ? { runId: message.runId } : {}),
     ...(message.messageId ? { messageId: message.messageId } : {}),
@@ -2777,19 +2919,30 @@ function mergeMessageOutcomeFacts(target: ChatMessage, member: ChatMessage, pref
   if (member.truncated === true) {
     target.truncated = true
   }
+  if (member.recoveryGapReason === 'archive-window') {
+    target.recoveryGap = true
+    target.recoveryGapReason = 'archive-window'
+  }
   if (memberIsAuthority && member.done === true) {
     if (member.interrupted === true) {
       target.interrupted = true
+      if (member.interruptedReason !== undefined) {
+        target.interruptedReason = member.interruptedReason
+      } else {
+        delete target.interruptedReason
+      }
     } else {
       delete target.interrupted
+      delete target.interruptedReason
     }
     if (member.unconfirmed === true) {
       target.unconfirmed = true
-    } else {
-      delete target.unconfirmed
     }
-    if (member.recoveryGap === true) {
+    if (target.recoveryGapReason === 'archive-window') {
       target.recoveryGap = true
+    } else if (member.recoveryGap === true) {
+      target.recoveryGap = true
+      delete target.recoveryGapReason
     } else {
       delete target.recoveryGap
     }
@@ -3247,12 +3400,18 @@ function mirrorOutcomePair(
 }
 
 function copyMirrorOutcomeMarkers(target: ChatMessage, tail: ChatMessage): void {
+  if (tail.recoveryGapReason === 'archive-window') {
+    target.recoveryGap = true
+    target.recoveryGapReason = 'archive-window'
+  }
+  if (tail.unconfirmed === true) {
+    target.unconfirmed = true
+  }
   if (hasOutcomeMarkers(target)) {
     return
   }
   if (tail.errorCard != null) target.errorCard = tail.errorCard
   if (tail.code != null) target.code = tail.code
-  if (tail.unconfirmed === true) target.unconfirmed = true
   if (tail.recoveryGap === true) target.recoveryGap = true
 }
 
@@ -3904,9 +4063,6 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.uploadReceiveFailed': 'error',
   'ai.notice.networkError': 'error',
   'ai.notice.historyEarlierFailed': 'error',
-  'ai.notice.interruptedSuspended': 'warning',
-  'ai.notice.interruptedKeep': 'warning',
-  'ai.notice.interruptedKeepShort': 'warning',
   'ai.notice.healthProbeFailed': 'warning',
   'ai.notice.sessionPurged': 'warning',
   'ai.notice.decisionPending': 'warning',
@@ -4161,15 +4317,7 @@ export const useAiStore = defineStore('ai', {
     healthError: null as string | null,
     /** 历史对账是否完成（UI 可用它做骨架屏） */
     historyLoaded: false,
-    /**
-     * B5：`/history.truncated=true` —— 更早的展示历史因容量上限未在本机保留。
-     * 只在消息流顶部显示一条中性标记；不是压缩事件、不入镜像、不提供按钮。
-     */
-    historyTruncated: false,
-    /**
-     * 分页：本页已加载窗口之前还有更早的展示历史（`/history.hasMore`）。
-     * 与 {@link historyTruncated} 语义分开：本项 = 还能向前取；后者 = 已被容量裁掉。
-     */
+    /** 分页：本页已加载窗口之前还有更早的展示历史（`/history.hasMore`）。 */
     historyHasMore: false,
     /** 分页：当前窗口在服务端条目列表中的起始下标（0 = 已到最早）。 */
     historyOffset: 0,
@@ -4203,17 +4351,11 @@ export const useAiStore = defineStore('ai', {
      * 那是停止的正常收尾而非断流。新增调用方直接改写它会稀释该语义，请勿在其它地方置位。
      */
     stopped: false,
-    /**
-     * 断流标志（ADR-6）：本轮结束时没收到 done/error 终帧 → 提示"连接中断，结果可能不完整"。
-     * 与 notice 分开，便于面板用不同级别的 Alert 呈现（notice 覆盖更多降级场景）。
-     */
+    /** 缺 done/error 终帧的内部事实；仅最终收尾发布到 manualRecovery。 */
     streamInterrupted: false,
     /**
-     * R-163 T4：最近一轮结局（内存态，不进镜像/持久化）——error/断流/取消后最后一条助手消息
-     * 出「继续」入口；新轮发送时复位 'ok'。
-     *
-     * <p>批次2：新增 `'unconfirmed'`（中性「状态未确认」，AR-05）——它**不是**普通失败：
-     * 面板据此给"重新载入 / 新开一轮"而不是错误卡/报错通知。
+     * 最近一轮结局（内存态，不进镜像/持久化）；unconfirmed 在自动对账期间同样只作内部事实，
+     * 用于抑制继续入口，耗尽后才发布手动恢复。
      */
     lastRoundOutcome: 'ok' as 'ok' | 'error' | 'interrupted' | 'cancelled' | 'unconfirmed',
     /**
@@ -4324,21 +4466,13 @@ export const useAiStore = defineStore('ai', {
      * `null` = 当前没有该阶段。
      */
     preparingRun: null as AiPreparingRun | null,
-    /**
-     * 批次2：历史对账失败现场（`GET /api/ai/history` 的失败）。`null` = 无失败。
-     *
-     * <p>只有机器码/状态/时刻 —— 文案由面板按 `scope` 选词条（store 不落用户可见串）。
-     * 失败时同时做**统一封口**（{@link sealRecovery}）并置 `recoveryGap`（不可完整恢复），
-     * 所以界面不会永久停在"正在加载/正在生成"。
-     */
+    /** 历史/快照失败的内部台账；自动恢复期间不直接用于用户提示。 */
     historyError: null as AiLoadErrorView | null,
-    /** 批次2：`GET /api/ai/runs/current`（恢复快照）失败现场。 */
     currentError: null as AiLoadErrorView | null,
-    /**
-     * 批次2：恢复完整性缺口（不可完整恢复）。中性事实：不是轮失败。
-     * 值只在"能说清为什么/缺哪段"时才有；无缺口 = null。
-     */
+    /** 恢复完整性内部台账；仅 archive-window 永久缺帧可发布到 manualRecovery。 */
     recoveryGap: null as AiRecoveryGap | null,
+    /** 自动恢复耗尽或永久缺口确定后，发布给面板唯一错误条的视图。 */
+    manualRecovery: null as AiManualRecoveryView | null,
     /**
      * 批次2：恢复/续收进行中（面板据此显示中性的"正在恢复"而不是普通生成中，
      * 也用于 `runPhase` 四态判定）。只由 loadHistory 与"回到进行中的回答"置位。
@@ -4614,36 +4748,7 @@ export const useAiStore = defineStore('ai', {
       this.preparingRun = null
     },
 
-    /**
-     * 批次3 / AR-06：准备中的**一次性手动重试**（不轮询、不自动重挂）。
-     *
-     * 重跑既有 `runs/current → 恢复` 路径：快照已建成则按批次2 的静默续收接着走；
-     * 仍准备中则重新落准备中（不封口、不报"轮不存在"）；真正空态才交给既有封口逻辑。
-     */
-    async retryPreparing(): Promise<void> {
-      if (!this.preparingRun || preparingRetryInFlight) {
-        return
-      }
-      // 手动出口接管：本类自动恢复的排期与预算一并作废（用户已经自己动手，自动链让位）
-      this.resetAutoRecovery('preparing')
-      preparingRetryInFlight = true
-      this.currentError = null
-      this.restoringRecovery = true
-      try {
-        await this.restoreSnapshotGuarded()
-      } finally {
-        this.restoringRecovery = false
-        preparingRetryInFlight = false
-      }
-    },
-
-    /**
-     * 2026-10-29 ToC 收口批：进入"准备中"现场（三处入口共用）—— **同时排一次有界自动恢复**。
-     *
-     * <p>为什么不能只留手动重试：面板里没有"立即重试"的调用点（`CompactionStatus.vue` 连同
-     * `retryPreparing` 都没有 UI 入口），只靠它就是一条**不可达**的出口 —— 快照一直没建好时
-     * 界面会永远停在"准备中"。自动恢复只做零副作用的探活：`runs/current → 恢复` 既有路径。
-     */
+    /** 准备中只走有界自动探活，耗尽后由统一恢复错误条提供重试。 */
     notePreparingState(runId: string, elapsedMs: number | null): void {
       // 问题3/8：已停止的轮不进入"准备中"（否则 loading 重新锁输入、自动恢复再把它接回来）。
       if (this.stopped || this.stoppedRunId === runId
@@ -4666,32 +4771,30 @@ export const useAiStore = defineStore('ai', {
           // 2026-10-29 返修（复审 I-1）：自动恢复的 attempt 与手动包装层同款 —— 恢复在途期间
           // `restoringRecovery` 必须为真，否则呈现层（`turnStillOpen`）会把"恢复期"当成
           // "本轮未终态"，末条已决只读卡照旧先展开、快照回来再折。
-          this.restoringRecovery = true
+          const operation = beginRecoveryOperation(this)
           try {
             await this.restoreSnapshotGuarded()
             return this.preparingRun === null
           } finally {
-            this.restoringRecovery = false
+            endRecoveryOperation(this, operation)
           }
         },
         () => this.notePreparingExhausted()
       )
     },
 
-    /**
-     * 准备中的自动恢复**耗尽**：停止自动探活，回到既有手动出口 ——
-     * 面板的恢复错误条（`currentError` + 「重试恢复」→ {@link retryRestoreSnapshot}）。
-     * 不封口、不报"轮不存在"：准备中仍是可恢复阶段。
-     */
+    /** 准备中自动恢复耗尽后才发布唯一错误条；准备中本身不伪造终态。 */
     notePreparingExhausted(): void {
-      if (this.preparingRun === null || this.currentError !== null) {
+      if (this.preparingRun === null) {
         return
       }
-      this.currentError = toLoadErrorView(
-        'current',
-        // 诊断串（不进用户可见面：`toLoadErrorView` 只留 code/status；文案由面板按 scope 选词条）
-        new ApiError('preparing: auto recovery exhausted', 202, 'PREPARING_TIMEOUT', null)
-      )
+      if (this.currentError === null) {
+        this.currentError = toLoadErrorView(
+          'current',
+          new ApiError('preparing: auto recovery exhausted', 202, 'PREPARING_TIMEOUT', null)
+        )
+      }
+      this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
     },
 
     /** 手动出口接管：清掉该类自动恢复的排期与预算（用户/其它入口已经自己动手了）。 */
@@ -4723,8 +4826,8 @@ export const useAiStore = defineStore('ai', {
       attempt: () => Promise<boolean>,
       onExhausted?: () => void
     ): Promise<boolean> {
+      const chainSessionId = this.sessionId
       const epoch = autoRecoveryEpoch(kind)
-      await getPageVisible()
       if (autoRecoveryEpoch(kind) !== epoch || autoRecoveryInFlight.has(kind)) {
         return false
       }
@@ -4736,7 +4839,6 @@ export const useAiStore = defineStore('ai', {
       autoRecoveryInFlight.add(kind)
       try {
         while (used < AUTO_RECOVERY_MAX_ATTEMPTS) {
-          await getPageVisible()
           if (autoRecoveryEpoch(kind) !== epoch) {
             return false
           }
@@ -4761,6 +4863,9 @@ export const useAiStore = defineStore('ai', {
         return false
       } finally {
         autoRecoveryInFlight.delete(kind)
+        if (kind === 'history') {
+          this.flushTerminalHistoryFollowup(chainSessionId)
+        }
       }
     },
 
@@ -4955,7 +5060,6 @@ export const useAiStore = defineStore('ai', {
       let task = healthProbe
       if (task === null) {
         const request = (async (): Promise<HealthProbeResult> => {
-          await getPageVisible()
           try {
             return { health: await aiApi.health(), error: null }
           } catch (error) {
@@ -5021,7 +5125,6 @@ export const useAiStore = defineStore('ai', {
      * </ul>
      */
     async loadContext(): Promise<void> {
-      await getPageVisible()
       const ownership = this.ensureTabOwnership()
       if (ownership !== null) {
         await ownership
@@ -5057,13 +5160,12 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 批次2：历史对账入口（`restoringRecovery` 的唯一置位点 + 必达复位）。
+     * 批次2：历史对账入口（活动恢复操作登记与必达释放）。
      *
-     * <p>把 `restoringRecovery` 放在**包装层**而不是内层各 return 上：恢复路径有 5+ 个早退
-     * 分支，逐个补复位必然会漏一个（漏掉就是"永久恢复中"）。`loadHistoryInner` 只管取数与落盘。
+     * <p>每次调用登记独立 token，finally 只释放本次操作；活动集合为空时才复位
+     * `restoringRecovery`，嵌套或 A→B 的旧调用不会误清另一调用的在途标记。
      */
     async loadHistory(): Promise<void> {
-      await getPageVisible()
       const ownership = this.ensureTabOwnership()
       if (ownership !== null) {
         await ownership
@@ -5076,7 +5178,8 @@ export const useAiStore = defineStore('ai', {
       const sid = this.sessionId
       const requestGeneration = (historyRequestGenerations.get(sid) ?? 0) + 1
       historyRequestGenerations.set(sid, requestGeneration)
-      this.restoringRecovery = true
+      historyRequestsInFlight.set(sid, (historyRequestsInFlight.get(sid) ?? 0) + 1)
+      const operation = beginRecoveryOperation(this)
       try {
         await this.loadHistoryInner(requestGeneration)
       } catch (error) {
@@ -5089,22 +5192,32 @@ export const useAiStore = defineStore('ai', {
           this.historyLoaded = true
           return
         }
-        // 兜底：未预期异常同样必须可见 + 封口（按"历史是否已落定"选择归属，不误报历史失败）
+        // 兜底异常同样先记账并走有界恢复，避免自动尝试期间提前发布错误。
         if (!this.historyLoaded) {
           this.sealRecovery('history', error)
         } else if (this.currentError === null) {
           this.sealRecovery('current', error)
         }
+        this.scheduleHistoryRecovery()
       } finally {
-        this.restoringRecovery = false
+        endRecoveryOperation(this, operation)
+        const remaining = (historyRequestsInFlight.get(sid) ?? 1) - 1
+        if (remaining > 0) {
+          historyRequestsInFlight.set(sid, remaining)
+        } else {
+          historyRequestsInFlight.delete(sid)
+        }
+        this.flushTerminalHistoryFollowup(sid)
       }
     },
 
     async loadHistoryInner(requestedGeneration?: number): Promise<void> {
-      await getPageVisible()
       const sid = this.sessionId
       const requestGeneration = requestedGeneration ?? (historyRequestGenerations.get(sid) ?? 0) + 1
       historyRequestGenerations.set(sid, requestGeneration)
+      const historyHost = activeRoundHostId === null ? null : this.messages.find((item) => item.id === activeRoundHostId)
+      const historyRunIdAtEntry = historyHost?.runId ?? ''
+      const historyHostIdAtEntry = activeRoundHostId ?? ''
       // M-17（2026-10-29）：取历史期间用户可能已发出新一轮。历史回来时会整体替换 `messages`
       // —— 在途轮的宿主与半截正文被顶掉，后续帧只能新建第二条助手气泡（同一轮两条气泡）。
       // 判据见下方"真轮是否占场"（R04 起不再用轮次纪元，理由在那里）。
@@ -5214,15 +5327,9 @@ export const useAiStore = defineStore('ai', {
         if (this.stopped) {
           return
         }
-        // 批次2：失败必须**可见 + 可重试**，且当场统一封口（不留在流式假态 / 不永久 loading）。
-        // 镜像内容只是"现场"，不是可确认完整的答案 ⇒ 同步置 recoveryGap（中性，不是轮失败）。
         this.sealRecovery('history', error)
-        // 2026-10-29 收口（共用有界自动恢复）：历史是**纯 GET**（零副作用）⇒ 自动重读有界；
-        // 耗尽后回到既有手动出口（错误条 + 「重新载入历史」钮 + 恢复缺口入口）。
-        this.canStartAutoRecovery('history', async () => {
-          await this.loadHistory()
-          return this.historyError === null
-        })
+        // 历史是纯 GET：自动重读期间保留内部台账，耗尽后才发布手动恢复入口。
+        this.scheduleHistoryRecovery()
         return
       }
 
@@ -5251,19 +5358,26 @@ export const useAiStore = defineStore('ai', {
         || (currentAbort !== null && !this.stopped)
         || roundStartedDuringFetch
       if (inFlightAtEntry || newRoundOccupies) {
+        if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
+          noteHistoryDoneEvidence(sid, requestGeneration, history.messages ?? [])
+        }
         this.historyLoaded = true
         this.historyError = null
-        this.recoveryGap = null
+        if (this.recoveryGap?.reason !== 'archive-window') {
+          this.recoveryGap = null
+        }
         return
       }
-      // 批次2：历史拿到了 ⇒ 历史错误与"历史不可用"类缺口一并作废（归档缺口可能在续收时另行检出）
       this.historyError = null
-      this.recoveryGap = null
+      if (this.recoveryGap?.reason !== 'archive-window') {
+        this.recoveryGap = null
+      }
       const pageEntries = [...(history.messages ?? [])]
+      if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
+        noteHistoryDoneEvidence(sid, requestGeneration, pageEntries)
+      }
       const total = history.total ?? pageEntries.length
       const pageOffset = Math.max(0, total - pageEntries.length)
-      // B5：容量裁剪标记来自服务端；只在消息流顶部渲染中性提示，不伪造压缩事件
-      this.historyTruncated = history.truncated === true
       this.historyTotal = total
       this.historyOffset = pageOffset
       this.historyHasMore = history.hasMore === true
@@ -5290,6 +5404,7 @@ export const useAiStore = defineStore('ai', {
         // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
         // 消除镜像/历史写入与挂起重建之间的写后写竞态）；后端不可达的 catch 分支不重建
         await this.restoreSnapshotGuarded()
+        this.restoreManualRecovery()
         // ④⑦ 快捷动作必须在快照恢复**之后**判定：此时 `loading` / `suspended` /
         // `pendingAttachRunId` 才反映"当前轮是否仍在跑 / 挂起"。且必须有镜像的"正常收尾"证据
         // （`mirrorProvesCompleted`）—— 镜像/历史里的 `done` 本身不构成完成证据。
@@ -5316,6 +5431,7 @@ export const useAiStore = defineStore('ai', {
       // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
       // 消除历史整体替换与挂起重建之间的写后写竞态）
       await this.restoreSnapshotGuarded()
+      this.restoreManualRecovery()
       // ④⑦ 快捷动作（followupReady）是纯内存轮次态，刷新即丢：**在快照恢复之后**按最后一轮的
       // 真实终态 + 镜像的"正常收尾"证据恢复 —— 挂起/运行中的当前轮此时已由 `suspended` /
       // `loading` / `pendingAttachRunId` 表达，不会被"历史末条 done"误判成可出建议。
@@ -5773,6 +5889,7 @@ export const useAiStore = defineStore('ai', {
      *
      * <p>只**前插**，不重跑首屏链路：不替换整表、不重做镜像在途轮合并、不碰滚动跟随；
      * 视图位置由面板在 DOM 更新后补偿（见 AiPanel `loadEarlierHistory`）。
+     * 较早分页不写 DONE 请求代次证据，也不推进 unconfirmed 的新鲜度；当前轮终局只认首屏响应。
      * `truncated`（容量裁掉）与本入口的 `hasMore`（还能向前取）是两件事，互不替代。
      */
     async loadEarlierHistory(): Promise<void> {
@@ -5847,14 +5964,29 @@ export const useAiStore = defineStore('ai', {
      * 也没有封口。这里把这两类失败合成同一个出口（不重复处理已登记的 `currentError`）。
      */
     async restoreSnapshotGuarded(): Promise<void> {
-      await getPageVisible()
+      const sessionId = this.sessionId
+      const targetHost = activeRoundHostId === null ? null : this.messages.find((item) => item.id === activeRoundHostId)
+      const targetRunId = targetHost ? targetHost.runId ?? '' : this.activeRunId ?? ''
+      const targetMessageId = activeRoundHostId ?? ''
+      const isOwner = (): boolean => this.isSnapshotRecoveryOwned(sessionId, targetRunId, targetMessageId)
+      const operation = beginRecoveryOperation(this)
       try {
-        await this.restoreSuspendedSnapshot()
+        await this.restoreSuspendedSnapshot(isOwner)
       } catch (error) {
           logCaughtError(error, 'stores/ai.ts:5463')
         // 问题3：停止后的恢复异常不写恢复失败现场（本轮已被放弃，不该再被恢复面收口）。
-        if (!this.stopped && this.currentError === null) {
+        if (isOwner() && !this.stopped && this.currentError === null) {
           this.sealRecovery('current', error)
+        }
+      } finally {
+        endRecoveryOperation(this, operation)
+        if (!isOwner()) {
+          return
+        }
+        const autoRecovering = autoRecoveryInFlight.size > 0 || autoRecoveryTimers.size > 0
+        if (this.currentError !== null && this.preparingRun === null && !autoRecovering
+          && this.manualRecovery?.reason !== 'interrupted' && this.manualRecovery?.reason !== 'first-frame') {
+          this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
         }
       }
     },
@@ -5980,7 +6112,8 @@ export const useAiStore = defineStore('ai', {
      * <li>历史末条 assistant 未带同类标记（历史口径优先，已有就不覆盖）；</li>
      * <li>两侧最后一条用户消息**归一后同句**（同一轮才补；对不上即放弃）。</li>
      * </ol>
-     * 只补标记，不改正文/段/状态。
+     * 只补标记，不改正文/段/状态。archive-window 原因优先于普通去重；unconfirmed 先保留，
+     * 后续只由同 runId 的 ASSISTANT DONE 清除。
      *
      * <p>`interrupted` 是断流（没有终态）的事实，与"历史里已有该轮完整 assistant"互斥：
      * 后者证明该轮正常完成，不能把断流标记搬到完成回答上。
@@ -6026,7 +6159,10 @@ export const useAiStore = defineStore('ai', {
      * 连接语义的 `awaitingInput` 另算：无卡的自动前端工具（`navigate_to` 等）同样是 park
      * （见 {@link isAwaitingClientEntry}），但**不**据此锁输入（`suspended` 仍只认待人卡）。
      */
-    async restoreSuspendedSnapshot(): Promise<void> {
+    async restoreSuspendedSnapshot(isOwner: () => boolean): Promise<void> {
+      if (!isOwner()) {
+        return
+      }
       // R4（2026-10-29）：**停止态不接受后端快照的挂起重建**。用户在 start 帧之前/之后停止后，
       // 后端那一轮可能仍是 SUSPENDED + awaitingExternal（cancel 尚未落地/未传播）；照旧重建就会
       // 把一张可点卡摆回屏上、`suspended` 置回 true —— 输入区被重新锁住，与用户"已经停了"的认知相反。
@@ -6051,7 +6187,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // 问题3：发号 await 期间用户可能已停止 —— 任何 await 之后写回前都要重判，旧现场一律不落。
-      if (this.stopped) {
+      if (!isOwner() || this.stopped) {
         return
       }
       const sid = this.sessionId
@@ -6061,23 +6197,21 @@ export const useAiStore = defineStore('ai', {
         current = await aiApi.runsCurrent(sid)
       } catch (error) {
           logCaughtError(error, 'stores/ai.ts:5804')
-        if (this.sessionId !== sid) {
+        if (!isOwner() || this.sessionId !== sid) {
           return // 会话已换：过期失败不落进新会话
         }
-        // 批次3：准备中阶段的读失败**不封口** —— 它仍是可重试的准备中，不是"轮不存在"。
-        // 错误现场照样可见（面板给重试），但镜像里的在途轮保持原状。
+        // 准备中读失败只记内部台账，保持现场并等待有界恢复收尾。
         if (this.preparingRun) {
           this.currentError = toLoadErrorView('current', error)
           return
         }
-        // 批次2：快照读不到同样必须**可见 + 可重试**，且当场统一封口（镜像里的在途轮不能永久"在流"）。
-        // 缺口原因 = 快照不可用（中性事实，不是把这一轮判失败）。
+        // 非准备中的快照失败统一封口；直接失败立即发布，自动链失败由耗尽回调发布。
         this.sealRecovery('current', error)
         return
       }
       // 取数窗口内的身份对账（R-130/R-132）：sid 不等 = 会话已换；abort 句柄已换 = 同会话已起
       // 新轮 —— 两种都说明这份快照属于过期的现场，整体丢弃（含续收连接的建立）
-      if (this.sessionId !== sid || currentAbort !== abortAtEntry) {
+      if (!isOwner() || this.sessionId !== sid || currentAbort !== abortAtEntry) {
         return
       }
       // 问题3：取数窗口内已停止 ⇒ 不重建挂起卡、不重连、不锁输入（停止是本地已落地的决定）。
@@ -6151,7 +6285,7 @@ export const useAiStore = defineStore('ai', {
         if (recoveryRunId && inFlightHost) {
           const probe = await probeReattach(recoveryRunId)
           // 探测窗口内的身份对账（与上面同口径；任何 await 之后写回前必须重比）
-          if (this.sessionId !== sid || currentAbort !== abortAtEntry) {
+          if (!isOwner() || this.sessionId !== sid || currentAbort !== abortAtEntry) {
             return
           }
           // 问题3：探测窗口内已停止 ⇒ 旧现场整体丢弃（不排准备中、不重挂）。
@@ -6176,7 +6310,7 @@ export const useAiStore = defineStore('ai', {
             return
           }
           if (probe.status >= 500) {
-            // 服务端明确不可用：按批次2 的快照失败出口（可见 + 可重试 + 统一封口）。
+            // 服务端明确不可用：记录快照失败并统一封口，发布时机由恢复链收尾决定。
             this.sealRecovery('current', new ApiError('Reattach probe failed', probe.status, String(probe.status), null))
             return
           }
@@ -6201,6 +6335,9 @@ export const useAiStore = defineStore('ai', {
         }
       }
 
+      if (!isOwner()) {
+        return
+      }
       if (!current.awaitingExternal) {
         // 批G · G2：**在途轮静默续收**。covers RUNNING（纯文本/工具执行中）与 SUSPENDED 但条目
         // 全决的中间态。用户看不到任何"重挂"概念：不弹横幅、不写占位文案、不出现 runId。
@@ -6209,6 +6346,9 @@ export const useAiStore = defineStore('ai', {
         return
       }
 
+      if (!isOwner()) {
+        return
+      }
       // 重建（M-2b）：PENDING + 真实待人卡 + req !== false（缺键 = 孤儿轮，可建）。
       // - PENDING：已决条目不重建挂起卡（勘误 4 同口径：hasDecidedPendingResidue / isFrameDecidedPendingStatus）；
       // - kind：BACKEND 与自动 FRONTEND 工具不弹卡；表单、表格预览、上传交接与 CONFIRM 才等人；
@@ -6251,6 +6391,9 @@ export const useAiStore = defineStore('ai', {
       if (appliedSeq === 0 && inFlightHost !== null && current.archiveMaxSeq > 0) {
         inFlightHost.recoveryGap = true
 
+      }
+      if (!isOwner()) {
+        return
       }
       const host = first ? this.rebuildPendingCard(first, current.runId) : null
       this.restoredPendingQueue = restorable.filter((entry) => entry !== first)
@@ -6372,6 +6515,7 @@ export const useAiStore = defineStore('ai', {
       host.streaming = true
       host.done = false
       delete host.interrupted
+      delete host.interruptedReason
       rememberRecoveryEntries(runId, current.pendingEntries)
       const appliedSeq = appliedSeqOfRun(this.runSeq, this.messages, runId)
       const lastSeq = appliedSeq > 0 ? appliedSeq : current.archiveMaxSeq
@@ -6524,7 +6668,7 @@ export const useAiStore = defineStore('ai', {
       this.recoveryGap = null
       let changed = false
       for (const message of this.messages) {
-        if (message.recoveryGap === true) {
+        if (message.recoveryGap === true && message.recoveryGapReason !== 'archive-window') {
           delete message.recoveryGap
           changed = true
         }
@@ -6534,23 +6678,51 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /**
-     * 批次2：**统一的恢复失败出口** —— 错误可见 + 统一封口 + 缺口可表示。
-     *
-     * <p>历史/快照读取失败时，"屏上那半截"既不能继续装作在流（永久 loading/光标常驻），
-     * 也不能被当成完整答案。本方法一次做完四件事：
-     * <ol>
-     * <li>按 scope 落机器可读错误现场（`historyError` / `currentError`），供面板出"失败 + 重试"；</li>
-     * <li>封口所有未收尾的助手消息，并把它们标成 `recoveryGap`（**中性**：不是轮失败、不出错误卡）；</li>
-     * <li>落 `recoveryGap` 全局态（原因 = 历史不可用 / 快照不可用），表示"不可完整恢复"。</li>
-     * <li>清掉本地待决段与交互单例，避免恢复失败留下 suspended/pendingToolCall 假等待；
-     *   只做过期降级，不伪造后端取消或成功。</li>
-     * </ol>
-     */
+    clearManualRecovery(reason?: AiManualRecoveryView['reason']): void {
+      if (this.recoveryGap?.reason === 'archive-window'
+        || this.messages.some((item) => item.recoveryGapReason === 'archive-window')) {
+        this.publishManualRecovery({ scope: 'history', reason: 'archive-window', error: null })
+        return
+      }
+      if (reason !== undefined && this.manualRecovery?.reason !== reason) {
+        return
+      }
+      this.manualRecovery = null
+    },
+
+    publishManualRecovery(view: AiManualRecoveryView): void {
+      if (this.manualRecovery?.reason === 'archive-window') {
+        return
+      }
+      if (this.recoveryGap?.reason === 'archive-window'
+        || this.messages.some((item) => item.recoveryGapReason === 'archive-window')) {
+        this.manualRecovery = { scope: 'history', reason: 'archive-window', error: null }
+        return
+      }
+      this.manualRecovery = view
+    },
+
+    publishInterruptedRecovery(reason: 'interrupted' | 'first-frame'): void {
+      const firstFrame = reason === 'first-frame'
+      const error = toLoadErrorView('current', new ApiError(
+        firstFrame ? 'first frame recovery exhausted' : 'stream recovery exhausted',
+        firstFrame ? 408 : 0,
+        firstFrame ? 'FIRST_FRAME_TIMEOUT' : 'STREAM_INTERRUPTED',
+        null
+      ))
+      this.currentError = error
+      const host = this.messages.find((item) => item.id === activeRoundHostId)
+        ?? [...this.messages].reverse().find((item) => item.interrupted === true)
+      if (host) {
+        host.interrupted = true
+        host.interruptedReason = reason
+        this.writeMirrorNow()
+      }
+      this.publishManualRecovery({ scope: 'current', reason, error })
+    },
+
+    /** 记录恢复失败并统一封口；是否发布用户提示由最终恢复出口决定。 */
     sealRecovery(scope: Exclude<AiLoadErrorScope, 'context'>, error: unknown): void {
-      const pendingIds = this.messages
-        .filter((message) => message.role === 'assistant' && !message.done)
-        .map((message) => message.id)
       const view = toLoadErrorView(scope, error)
       if (scope === 'history') {
         this.historyError = view
@@ -6566,35 +6738,23 @@ export const useAiStore = defineStore('ai', {
       // history 可重试：表单先 flush 并保留同 toolCallId 草稿，其他交互单例照常清场。
       this.cleanupTerminalInteractionState(scope === 'history')
       this.suspended = false
-      for (const id of pendingIds) {
-        const message = this.messages.find((item) => item.id === id)
-        if (message) {
-          message.recoveryGap = true
-        }
-      }
       // 没有连接在跑才复位 loading（别的轮正在收流时不得把它标成空闲）
       if (currentAbort === null) {
         this.loading = false
       }
-      this.markRecoveryGap(scope === 'history' ? 'history-unavailable' : 'snapshot-unavailable')
       if (this.messages.length > 0) {
         this.writeMirrorNow()
       }
     },
 
-    /**
-     * 批次2：显式登记"不可完整恢复"（中性事实）。
-     *
-     * <p>`archive-window` 只由后端**明确**的裁剪标记登记（见 {@link canNoteArchiveTrim}）；
-     * 历史/快照不可用由 {@link sealRecovery} 登记。缺口**不是**轮失败：不改 `lastRoundOutcome`、
-     * 不挂错误卡。
-     *
-     * @param span 已知缺口区间（含端点）；省略 = 区间不可知（不臆造）
-     */
+    /** 登记恢复完整性内部台账；archive-window 一旦存在即保持最高优先级。 */
     markRecoveryGap(
       reason: AiRecoveryGapReason,
       span: { fromSeq: number | null; toSeq: number | null } = { fromSeq: null, toSeq: null }
     ): void {
+      if (reason !== 'archive-window' && this.recoveryGap?.reason === 'archive-window') {
+        return
+      }
       this.recoveryGap = { reason, fromSeq: span.fromSeq, toSeq: span.toSeq, at: Date.now() }
     },
 
@@ -6617,77 +6777,408 @@ export const useAiStore = defineStore('ai', {
         ?? [...this.messages].reverse().find((item) => item.role === 'assistant')
       if (host) {
         host.recoveryGap = true
+        host.recoveryGapReason = 'archive-window'
+        this.writeMirrorNow()
+      }
+      this.publishManualRecovery({ scope: 'history', reason: 'archive-window', error: null })
+      return true
+    },
+
+    /** 当前没有覆盖缺失区间且未降级的完整证据；永久 archive 一律保留。 */
+    reconcileArchiveRecovery(): boolean {
+      this.publishManualRecovery({ scope: 'history', reason: 'archive-window', error: null })
+      return false
+    },
+
+    /** 手动重试与自动链共用 DONE 请求代次对账；旧响应不得清除新到的 unconfirmed。 */
+    async retryLoadHistory(): Promise<void> {
+      const previous = this.manualRecovery
+      const sessionId = this.sessionId
+      const unconfirmed = previous?.reason === 'unconfirmed'
+        ? this.messages.find((item) => item.unconfirmed === true) ?? null
+        : null
+      const targetRunId = unconfirmed ? unconfirmed.runId ?? '' : this.activeRunId ?? ''
+      const targetMessageId = unconfirmed?.id ?? activeRoundHostId ?? ''
+      this.historyError = null
+      if (this.recoveryGap?.reason !== 'archive-window') {
+        this.recoveryGap = null
+      }
+      this.forgetRunStreamDrive()
+      clearTerminalHistoryFollowups(sessionId)
+      this.resetAutoRecovery('history')
+      if (unconfirmed) {
+        recordUnconfirmedHistoryFloor(sessionId, unconfirmed.runId ?? '')
+      }
+      await this.loadHistory()
+      if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
+        return
+      }
+      if (this.manualRecovery?.reason === 'archive-window' || this.recoveryGap?.reason === 'archive-window'
+        || this.messages.some((item) => item.recoveryGapReason === 'archive-window')) {
+        this.reconcileArchiveRecovery()
+        return
+      }
+      const pending = unconfirmed ?? [...this.messages].reverse().find((item) => item.unconfirmed === true)
+      if (pending) {
+        const followup: TerminalHistoryFollowup = {
+          sessionId,
+          runId: pending.runId ?? '',
+          messageId: pending.id
+        }
+        const resolved = this.resolveTerminalHistoryFollowup(followup)
+        if (resolved.kind === 'invalid') {
+          return
+        }
+        if (resolved.kind === 'pending') {
+          this.keepUnconfirmedRecovery(true)
+          return
+        }
+        const floor = unconfirmedHistoryFloor(sessionId, resolved.followup.runId)
+        this.reconcileUnconfirmedTerminal(resolved.message, true, floor)
+        return
+      }
+      if (previous?.reason === 'unconfirmed') {
+        this.keepUnconfirmedRecovery(true)
+        return
+      }
+      const error = this.historyError ?? this.currentError
+      if (error !== null) {
+        this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
+        return
+      }
+      if (previous?.reason === 'interrupted' || previous?.reason === 'first-frame') {
+        this.settleInterruptedRecovery(previous.reason)
+        return
+      }
+      this.clearManualRecovery()
+    },
+
+    hasRunDone(sessionId: string, runId: string | null | undefined, afterGeneration: number): boolean {
+      if (runId === null || runId === undefined) {
+        return false
+      }
+      return (historyDoneRequestGenerations.get(historyRunKey(sessionId, runId)) ?? 0) > afterGeneration
+    },
+
+    reconcileUnconfirmedTerminal(message: ChatMessage, publish: boolean, afterGeneration: number): boolean {
+      const runId = message.runId
+      const current = this.messages.find((item) => item.id === message.id)
+        ?? [...this.messages].reverse().find((item) => item.runId === runId)
+        ?? message
+      if (!this.hasRunDone(this.sessionId, runId, afterGeneration)) {
+        current.unconfirmed = true
+        this.lastRoundOutcome = 'unconfirmed'
+        this.followupReady = false
+        if (publish) {
+          this.publishManualRecovery({ scope: 'history', reason: 'unconfirmed', error: null })
+        }
+        return false
+      }
+      for (const item of this.messages) {
+        if (item.runId !== runId) {
+          continue
+        }
+        item.unconfirmed = false
+        if (item.code === 'AI_REDIS_UNAVAILABLE') {
+          item.code = null
+        }
+      }
+      current.unconfirmed = false
+      if (runId !== null && runId !== undefined) {
+        clearUnconfirmedHistoryMarkers(this.sessionId, runId)
+      }
+      this.lastRoundOutcome = 'ok'
+      this.clearManualRecovery('unconfirmed')
+      return true
+    },
+
+    isHistoryRecoveryIdentityCurrent(sessionId: string, targetRunId: string, targetMessageId: string): boolean {
+      if (this.sessionId !== sessionId || this.stopped) {
+        return false
+      }
+      const activeRunId = this.activeRunId ?? ''
+      if (targetRunId !== '' && activeRunId !== '' && targetRunId !== activeRunId) {
+        return false
+      }
+      const targetMessage = targetMessageId === ''
+        ? undefined
+        : this.messages.find((item) => item.id === targetMessageId)
+      if (targetMessage) {
+        const messageRunId = targetMessage.runId ?? ''
+        if (targetRunId !== '' && messageRunId !== '' && targetRunId !== messageRunId) {
+          return false
+        }
+        if (messageRunId !== '' && activeRunId !== '' && messageRunId !== activeRunId) {
+          return false
+        }
+        if (activeRoundHostId !== null && activeRoundHostId !== targetMessageId) {
+          const activeHost = this.messages.find((item) => item.id === activeRoundHostId)
+          if (activeHost && !activeHost.runId) {
+            return false
+          }
+        }
+        return true
+      }
+      if (activeRoundHostId !== null && activeRoundHostId !== targetMessageId) {
+        const activeHost = this.messages.find((item) => item.id === activeRoundHostId)
+        if (!activeHost?.runId) {
+          return false
+        }
+        if (targetRunId === '' && targetMessageId !== '' && activeHost.unconfirmed !== true) {
+          return false
+        }
+        if (targetRunId !== '' && activeHost.runId !== targetRunId) {
+          return false
+        }
+        if (targetRunId === '' && activeRunId !== '' && activeHost.runId !== activeRunId) {
+          return false
+        }
+      }
+      return true
+    },
+
+    isSnapshotRecoveryOwned(sessionId: string, targetRunId: string, targetMessageId: string): boolean {
+      if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
+        return false
+      }
+      if (targetMessageId === '') {
+        return true
+      }
+      const targetMessage = this.messages.find((item) => item.id === targetMessageId)
+      return !targetMessage
+        || (targetMessage.runId !== undefined && targetMessage.runId !== '')
+        || activeRoundHostId === targetMessageId
+    },
+
+    resolveTerminalHistoryFollowup(followup: TerminalHistoryFollowup): TerminalHistoryResolution {
+      if (!this.isHistoryRecoveryIdentityCurrent(followup.sessionId, followup.runId, followup.messageId)) {
+        return { kind: 'invalid' }
+      }
+      const activeRunId = this.activeRunId ?? ''
+      let runId = followup.runId
+      const activeHost = activeRoundHostId === null ? null : this.messages.find((item) => item.id === activeRoundHostId)
+      let message = this.messages.find((item) => item.id === followup.messageId)
+      if (!message && activeHost?.unconfirmed === true
+        && (activeHost.runId ?? '') === runId) {
+        message = activeHost
+      }
+      if (!message && runId !== '') {
+        message = [...this.messages].reverse().find((item) => item.unconfirmed === true
+          && (item.runId ?? '') === runId)
+      }
+      if (!message) {
+        return { kind: 'pending' }
+      }
+      const messageRunId = message.runId ?? ''
+      if (messageRunId !== '' && runId !== '' && messageRunId !== runId) {
+        return { kind: 'invalid' }
+      }
+      if (message.unconfirmed !== true) {
+        return { kind: 'invalid' }
+      }
+      if (runId === '') {
+        runId = messageRunId
+      }
+      if (runId !== '' && activeRunId !== '' && runId !== activeRunId) {
+        return { kind: 'invalid' }
+      }
+      const resolved = { ...followup, runId, messageId: message.id }
+      moveUnconfirmedHistoryFloor(followup.sessionId, followup.runId, runId)
+      return { kind: 'ready', followup: resolved, message }
+    },
+
+    keepUnconfirmedRecovery(publish: boolean): boolean {
+      this.lastRoundOutcome = 'unconfirmed'
+      this.followupReady = false
+      if (publish) {
+        this.publishManualRecovery({ scope: 'history', reason: 'unconfirmed', error: null })
+      }
+      return false
+    },
+
+    requestTerminalHistoryRecovery(followup: TerminalHistoryFollowup): void {
+      if (!this.isHistoryRecoveryIdentityCurrent(followup.sessionId, followup.runId, followup.messageId)) {
+        return
+      }
+      const key = historyRunKey(followup.sessionId, followup.runId)
+      if ((historyRequestsInFlight.get(followup.sessionId) ?? 0) > 0
+        || autoRecoveryInFlight.has('history') || autoRecoveryTimers.has('history')) {
+        terminalHistoryFollowups.set(key, followup)
+        return
+      }
+      terminalHistoryFollowups.delete(key)
+      this.scheduleHistoryRecovery(followup.sessionId, followup)
+    },
+
+    flushTerminalHistoryFollowup(sessionId: string): void {
+      if ((historyRequestsInFlight.get(sessionId) ?? 0) > 0
+        || autoRecoveryInFlight.has('history') || autoRecoveryTimers.has('history')) {
+        return
+      }
+      const prefix = `${sessionId}\0`
+      for (const [key, followup] of [...terminalHistoryFollowups]) {
+        if (!key.startsWith(prefix)) {
+          continue
+        }
+        terminalHistoryFollowups.delete(key)
+        const resolved = this.resolveTerminalHistoryFollowup(followup)
+        if (resolved.kind === 'invalid') {
+          continue
+        }
+        if (resolved.kind === 'pending') {
+          this.keepUnconfirmedRecovery(true)
+          continue
+        }
+        if (this.scheduleHistoryRecovery(sessionId, resolved.followup)) {
+          break
+        }
+      }
+    },
+
+    scheduleHistoryRecovery(sessionId = this.sessionId, followup?: TerminalHistoryFollowup): boolean {
+      const targetRunId = followup === undefined ? this.activeRunId ?? '' : followup.runId
+      const targetMessageId = followup?.messageId ?? activeRoundHostId ?? ''
+      const pendingAtStart = followup === undefined
+        ? [...this.messages].reverse().find((item) => item.unconfirmed === true)
+        : undefined
+      const chain = followup ?? (pendingAtStart
+        ? {
+            sessionId,
+            runId: pendingAtStart.runId ?? '',
+            messageId: pendingAtStart.id
+          }
+        : undefined)
+      if (chain) {
+        recordUnconfirmedHistoryFloor(sessionId, chain.runId)
+      }
+      return this.canStartAutoRecovery('history', async () => {
+        await this.loadHistory()
+        if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
+          return true
+        }
+        if (chain) {
+          const resolved = this.resolveTerminalHistoryFollowup(chain)
+          if (resolved.kind === 'invalid') {
+            return true
+          }
+          if (resolved.kind === 'pending') {
+            return this.keepUnconfirmedRecovery(false)
+          }
+          const floor = unconfirmedHistoryFloor(sessionId, resolved.followup.runId)
+          return this.reconcileUnconfirmedTerminal(resolved.message, false, floor)
+        }
+        return this.historyError === null && this.currentError === null
+      }, () => {
+        if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
+          return
+        }
+        if (chain) {
+          const resolved = this.resolveTerminalHistoryFollowup(chain)
+          if (resolved.kind === 'invalid') {
+            return
+          }
+          if (resolved.kind === 'pending') {
+            this.keepUnconfirmedRecovery(true)
+            return
+          }
+          const floor = unconfirmedHistoryFloor(sessionId, resolved.followup.runId)
+          this.reconcileUnconfirmedTerminal(resolved.message, true, floor)
+          return
+        }
+        const error = this.historyError ?? this.currentError
+        if (error !== null) {
+          this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
+        }
+      })
+    },
+
+    recoverUnconfirmedTerminal(message: ChatMessage): void {
+      const sessionId = this.sessionId
+      const followup: TerminalHistoryFollowup = {
+        sessionId,
+        runId: message.runId ?? '',
+        messageId: message.id
+      }
+      recordUnconfirmedHistoryFloor(sessionId, followup.runId)
+      message.unconfirmed = true
+      this.lastRoundOutcome = 'unconfirmed'
+      this.followupReady = false
+      this.requestTerminalHistoryRecovery(followup)
+    },
+
+    hasRunTerminal(runId: string | null | undefined): boolean {
+      return runId !== null && runId !== undefined && this.historyWindowEntries.some((entry) =>
+        entry.type.toUpperCase() === 'ASSISTANT' && entry.runId === runId
+        && typeof entry.outcome === 'string' && entry.outcome.trim() !== '' && entry.outcome !== 'UNCONFIRMED'
+        && !isTranscriptDegraded(entry))
+    },
+
+    settleInterruptedRecovery(reason: 'interrupted' | 'first-frame'): boolean {
+      const host = [...this.messages].reverse().find((item) => item.interrupted === true)
+      const runId = host?.runId ?? this.activeRunId
+      const attached = runId !== null && runId !== undefined
+        ? this.activeStreamRunId === runId || (this.activeStreamParked && this.activeRunId === runId)
+        : this.activeStreamRunId !== null || this.activeStreamParked
+      const terminal = this.hasRunTerminal(runId)
+      if (!attached && !terminal) {
+        this.publishInterruptedRecovery(reason)
+        return false
+      }
+      this.clearManualRecovery(reason)
+      if (terminal && host) {
+        delete host.interrupted
+        delete host.interruptedReason
         this.writeMirrorNow()
       }
       return true
     },
 
-    /** 批次2：历史失败后的重试（一次性；面板错误条的重试钮入口）。 */
-    async retryLoadHistory(): Promise<void> {
-      this.historyError = null
-      this.recoveryGap = null
-      // M08-R2：用户显式重试 ⇒ 重新给驱动一份预算（否则"自动重连已用尽"会把重试钮锁死）
-      this.forgetRunStreamDrive()
-      // 2026-10-29 收口：手动出口接管 ⇒ 本类自动恢复的排期与预算作废（重复劳动没有意义）
-      this.resetAutoRecovery('history')
-      await this.loadHistory()
-    },
-
-    recoverUnconfirmedTerminal(message: ChatMessage): void {
-      const sessionId = this.sessionId
-      const runId = message.runId
-      const showManualRecovery = (): void => {
-        if (this.sessionId !== sessionId || message.runId !== runId) {
-          return
-        }
-        const current = this.messages.find((item) => item.id === message.id) ?? message
-        current.unconfirmed = true
-        this.lastRoundOutcome = 'unconfirmed'
-        this.followupReady = false
-      }
-      showManualRecovery()
-      const scheduled = this.canStartAutoRecovery('history', async () => {
-        await this.loadHistory()
-        if (this.sessionId !== sessionId || message.runId !== runId) {
-          return true
-        }
-        const confirmed = runId !== null && runId !== undefined && this.historyWindowEntries.some((entry) =>
-          entry.type.toUpperCase() === 'ASSISTANT' && entry.runId === runId && entry.outcome === 'DONE')
-        if (confirmed) {
-          message.unconfirmed = false
-          if (message.code === 'AI_REDIS_UNAVAILABLE') {
-            message.code = null
-          }
-          const current = [...this.messages].reverse().find((item) =>
-            item.role === 'assistant' && item.runId === runId)
-          if (current) {
-            current.unconfirmed = false
-            if (current.code === 'AI_REDIS_UNAVAILABLE') {
-              current.code = null
-            }
-          }
-          this.lastRoundOutcome = 'ok'
-          return true
-        }
-        return false
-      }, showManualRecovery)
-      if (!scheduled) {
-        showManualRecovery()
-      }
-    },
-
-    /** 批次2：恢复快照失败后的重试（只重跑 runs/current 那一步，不重新拉历史）。 */
+    /** 手动重试保留断流原因；只有实际接回或确定终局才清除。 */
     async retryRestoreSnapshot(): Promise<void> {
+      const previous = this.manualRecovery
+      const sessionId = this.sessionId
+      const targetHost = activeRoundHostId === null ? null : this.messages.find((item) => item.id === activeRoundHostId)
+      const targetRunId = targetHost ? targetHost.runId ?? '' : this.activeRunId ?? ''
+      const targetMessageId = activeRoundHostId ?? ''
+      const isOwner = (): boolean => this.isSnapshotRecoveryOwned(sessionId, targetRunId, targetMessageId)
       this.currentError = null
-      this.restoringRecovery = true
-      // M08-R2：同上 —— 显式重试重置驱动预算
+      const operation = beginRecoveryOperation(this)
       this.forgetRunStreamDrive()
-      // 2026-10-29 收口：手动出口接管 ⇒ 准备中的自动恢复让位（用户已经自己重试了）
       this.resetAutoRecovery('preparing')
       try {
         await this.restoreSnapshotGuarded()
       } finally {
-        this.restoringRecovery = false
+        endRecoveryOperation(this, operation)
+        if (!isOwner()) {
+          return
+        }
+        if (previous?.reason === 'interrupted' || previous?.reason === 'first-frame') {
+          this.settleInterruptedRecovery(previous.reason)
+        } else if (this.manualRecovery?.reason === 'archive-window') {
+          this.publishManualRecovery({ scope: 'history', reason: 'archive-window', error: null })
+        } else if (this.currentError !== null) {
+          this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
+        } else {
+          this.clearManualRecovery('load')
+        }
+      }
+    },
+
+    /** 刷新后按消息原因标记重建最终提示；没有完整证据时不得静默丢弃。 */
+    restoreManualRecovery(): void {
+      if (this.recoveryGap?.reason === 'archive-window'
+        || this.messages.some((item) => item.recoveryGapReason === 'archive-window')) {
+        this.reconcileArchiveRecovery()
+        return
+      }
+      const unconfirmed = [...this.messages].reverse().find((item) => item.unconfirmed === true)
+      if (unconfirmed) {
+        this.recoverUnconfirmedTerminal(unconfirmed)
+        return
+      }
+      const interrupted = [...this.messages].reverse().find((item) => item.interrupted === true)
+      if (interrupted) {
+        this.settleInterruptedRecovery(interrupted.interruptedReason ?? 'interrupted')
       }
     },
 
@@ -6790,9 +7281,13 @@ export const useAiStore = defineStore('ai', {
       if (drive === undefined || drive.token !== token) {
         return // 已被终态 / 停止 / 新驱动接管：不动别人的现场
       }
+      const used = drive.used + (interrupted ? 1 : 0)
       this.streamDrives = {
         ...this.streamDrives,
-        [runId]: { ...drive, active: false, used: drive.used + (interrupted ? 1 : 0) }
+        [runId]: { ...drive, active: false, used }
+      }
+      if (interrupted && used >= RUN_STREAM_DRIVE_BUDGET && this.streamInterrupted) {
+        this.publishInterruptedRecovery('interrupted')
       }
     },
 
@@ -6846,11 +7341,11 @@ export const useAiStore = defineStore('ai', {
       this.activeRunId = busy.runId
       // M08-R2：用户显式"回到进行中的回答" ⇒ 重置该 run 的驱动所有权与预算
       this.restartRunStreamDrive(busy.runId)
-      this.restoringRecovery = true
+      const operation = beginRecoveryOperation(this)
       try {
-        await this.loadHistoryInner()
+        await this.loadHistory()
       } finally {
-        this.restoringRecovery = false
+        endRecoveryOperation(this, operation)
       }
     },
 
@@ -7027,7 +7522,6 @@ export const useAiStore = defineStore('ai', {
       const entryRoundEpoch = roundEpoch
       // 问题2：同上 —— 首个 await 之前同步登记，stop 同 tick 才能停到这一轮。
       pendingAttachRunId = runId
-      await getPageVisible()
       if (entrySessionEpoch !== sessionEpoch || entryRoundEpoch !== roundEpoch) {
         if (pendingAttachRunId === runId) {
           pendingAttachRunId = null
@@ -7116,6 +7610,7 @@ export const useAiStore = defineStore('ai', {
         host.done = false
         // 续收 = 这一轮又有活的驱动：上一段断流事实作废
         delete host.interrupted
+        delete host.interruptedReason
       }
       /**
        * R6（issue#5）：续收连接是否仍是"当前轮"（旧连接的断流提示不写进新轮）。
@@ -7170,9 +7665,6 @@ export const useAiStore = defineStore('ai', {
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
-                setNotice(this, 'ai.notice.interruptedSuspended', {
-                  reason: info.reason ?? translate('ai.notice.reasonInterrupted')
-                })
                 // 2026-10-29 收口：续收耗尽同样要封口（断流 ≠ 仍在生成）。
                 // 复审返修（M-4）：把本连接的 runId 一并给出 —— 无宿主 id 的"无卡挂流"
                 // 只能封本 run 的宿主，不得回落到别的未收尾助手消息。
@@ -7311,6 +7803,7 @@ export const useAiStore = defineStore('ai', {
       this.loading = true
       this.stopped = false
       clearNotice(this)
+      this.clearManualRecovery()
       this.streamInterrupted = false
       // 批次3：新轮不继承上一轮的压缩/准备中阶段（首帧到达前也不残留旧提示）
       this.clearCompactingMessages()
@@ -7329,6 +7822,7 @@ export const useAiStore = defineStore('ai', {
       // 2026-10-29 收口：新发送 = 新的轮次现场 —— 上一轮排着的自动恢复一律作废
       // （否则刷新后的首帧超时恢复可能把旧轮接回来盖到新轮上）。
       cancelAutoRecovery()
+      clearTerminalHistoryState(sessionId)
       this.autoRecoveryUsed = {}
       // 界面播报（aria-live 的一次性文案）按轮收口：上一轮的"已选择…"不带到新轮
       this.uiAnnouncement = null
@@ -7368,23 +7862,17 @@ export const useAiStore = defineStore('ai', {
           }
           // 2026-10-29 返修（复审 I-1）：同 `notePreparingState` —— 恢复在途期间置位恢复期标志，
           // 否则这条自动恢复路径的呈现层判据（`turnStillOpen`）仍会把恢复当成"本轮未终态"。
-          this.restoringRecovery = true
+          const operation = beginRecoveryOperation(this)
           try {
             await this.restoreSnapshotGuarded()
           } finally {
-            this.restoringRecovery = false
+            endRecoveryOperation(this, operation)
           }
-          // 复审返修（M-2）：判据是**真的接回了一条连接**，不是笼统的 `loading` ——
-          // `restoreInFlightRound` 会先置 `loading=true` 再因驱动预算不足直接返回；
-          // 准备中现场同样可能已是 `preparingRun + loading`。
-          // 两种都在"工作中却没有连接"，认成功会把首帧超时提示清掉、宿主继续挂在流式态。
+          // 成功只认真的接回连接、挂起或准备中现场，不用笼统 loading 冒充恢复成功。
           const attached = this.activeStreamRunId !== null
             || this.activeStreamParked
             || this.preparingRun !== null
           if (attached) {
-            if (this.noticeCode === 'ai.notice.firstFrameTimeout') {
-              clearNotice(this)
-            }
             return true
           }
           // 没有可接回的轮：**不在这里**动连接登记 —— 那会把 `isCurrentRound()` 提前判假，
@@ -7406,6 +7894,7 @@ export const useAiStore = defineStore('ai', {
             this.activeStreamParked = false
           }
           this.sealInterruptedHost(assistant.id)
+          this.publishInterruptedRecovery('first-frame')
         }
       )
       const handlers: SseFrameHandlers = {
@@ -7458,22 +7947,15 @@ export const useAiStore = defineStore('ai', {
             return
           }
           if (!info.terminal && !this.stopped) {
-            // ADR-6：缺 done/error 终帧 = 断流，必须显式提示"结果可能不完整"
+            // 断流先只记内部事实；最终是否提示由恢复收尾决定。
             this.streamInterrupted = true
             this.lastRoundOutcome = 'interrupted'
-            // 批次3：首帧超时（连 start 都没到）与帧间静默分开说 —— 前者重发通常就能恢复，
-            // 后者要提示"已生成内容保留"。45s 帧间口径本身不变。
             if (info.timeoutStage === 'first-frame') {
-              setNotice(this, 'ai.notice.firstFrameTimeout')
-              // 2026-10-29 收口（共用有界自动恢复）：**一个业务帧都没收到**是本轮唯一
-              // 可证明"零副作用"的失败面 —— 但**不重发**同一条请求（后端可能已建轮，
-              // 重发就是第二次真实副作用）；恢复只做"按 /runs/current 把既有轮接回来"。
-              // 耗尽后回到既有手动出口（首帧超时提示 + 面板回稿）。
-              firstFrameRecovery = !sawAnyFrame && canStartFirstFrameRecovery()
-            } else {
-              setNotice(this, 'ai.notice.interruptedKeep', {
-                reason: info.reason ?? translate('ai.notice.reasonNoDone')
-              })
+              // 零帧时只接回既有轮，绝不重发；已有恢复链时也让它继续接管。
+              firstFrameRecovery = !sawAnyFrame
+              if (firstFrameRecovery) {
+                canStartFirstFrameRecovery()
+              }
             }
             // 断流不是结局：确认卡/表单仍在等用户动作，activeForm 与待决段必须原样保留
             //（重挂或刷新后由 restoreSuspendedSnapshot 按后端快照续上），只认终帧/取消才收口。
@@ -7620,7 +8102,12 @@ export const useAiStore = defineStore('ai', {
             // 绝不把用户那句话再发一遍（那是第二次真实副作用，且与面板的失败回稿叠成重复文本）。
             this.canStartAutoRecovery('purged', async () => {
               await this.loadHistory()
-              return this.historyError === null
+              return this.historyError === null && this.currentError === null
+            }, () => {
+              const error = this.historyError ?? this.currentError
+              if (error !== null) {
+                this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
+              }
             })
           }
         } else if (isCurrentRound()) {
@@ -7654,6 +8141,9 @@ export const useAiStore = defineStore('ai', {
             // 清掉会让停止按钮消失、输入区解禁（"这一轮其实没结束"被谎报成空闲）。
             if (!suspendedClose) {
               this.suspended = false
+            }
+            if (this.streamInterrupted && !this.stopped) {
+              this.publishInterruptedRecovery('interrupted')
             }
             currentAbort = null
             activeRoundHostId = null
@@ -7825,7 +8315,6 @@ export const useAiStore = defineStore('ai', {
       if (targetRunId) {
         pendingAttachRunId = targetRunId
       }
-      await getPageVisible()
       if (entrySessionEpoch !== sessionEpoch || entryRoundEpoch !== roundEpoch) {
         if (pendingAttachRunId === targetRunId) {
           pendingAttachRunId = null
@@ -7917,6 +8406,7 @@ export const useAiStore = defineStore('ai', {
       assistant.messageId = assistantMessageId(targetRunId)
       // 接管 = 重新建立活连接：上一段断流事实作废（与 `stopped=false` 同处）
       delete assistant.interrupted
+      delete assistant.interruptedReason
       this.loading = true
       this.streamInterrupted = false
       // 红队 MINOR-1 收口：新连接 ≠ 被停止的那条连接 —— `stop()` 留下的 stopped 置位只该
@@ -8026,9 +8516,6 @@ export const useAiStore = defineStore('ai', {
               if (!info.terminal && !this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
-                setNotice(this, 'ai.notice.interruptedKeepShort', {
-                  reason: info.reason ?? translate('ai.notice.reasonInterrupted')
-                })
                 // 2026-10-29 收口：断流 ≠ 仍在生成 —— 旧实现只提示不封口，宿主会一直
                 // `done=false + streaming=true`（光标永远在闪、界面说"还在跑"）。
                 // 表单/确认卡与待决段照旧保留（那仍是用户的动作面）。
@@ -8226,7 +8713,6 @@ export const useAiStore = defineStore('ai', {
      * 但也不无限等待：走 {@link retryOrGiveUpGateSync} 有界重试，用尽即解锁（FE-17）。
      */
     async syncGateFromAuthority(toolCallId: string): Promise<void> {
-      await getPageVisible()
       // Task 4 返修 I1：409 校正计时器可能落在身份切换/发号失败窗口 —— 空号一律早退，
       // 绝不给 `/runs/current?sessionId=` 发空 id 请求。
       const sid = await this.ensureSession()
@@ -9197,7 +9683,7 @@ export const useAiStore = defineStore('ai', {
       }
       // 工具名 → 确定性计划函数（唯一分发点，切档重算也走它 —— 两条路径不可能算出不同的计划）
       const plannedPhase = await runSheetWritePhase(
-        deriveFrontendToolBudgetMs(frame.timeoutSeconds),
+        deriveFrontendToolBudgetMs(frame.timeoutSeconds, frame.expiresAt),
         (lifetime) => planSheetWithLevelAsync(resolved.ctx, frame.name, args, toolCallId, lifetime)
       )
       if (!isStillSameRound(roundAtOpen, this.sessionId, this.activeRunId ?? null)) {
@@ -10899,6 +11385,7 @@ export const useAiStore = defineStore('ai', {
       // 2026-10-29 收口：停止 = 现场作废 ⇒ 所有自动恢复排期与预算一并作废
       // （否则首帧超时/准备中的恢复链会在停止之后把这一轮接回来）
       cancelAutoRecovery()
+      clearTerminalHistoryState(this.sessionId, runId ?? undefined)
       this.autoRecoveryUsed = {}
       // B1 收口修（C-1）：停止 = 本轮被放弃 —— 在途前端工具结局不得再写段/回灌
       roundEpoch += 1
@@ -10944,7 +11431,7 @@ export const useAiStore = defineStore('ai', {
       this.clearCompactingMessages()
       this.clearPreparingRun()
       // 问题9：停止收敛本轮残留的恢复期与提示（不新增提示；已停止内容照旧保留）。
-      this.restoringRecovery = false
+      clearRecoveryOperations(this)
       clearNotice(this)
       // 问题5：表单 POST 已发出（status='submitting'）⇒ 把用户提交的值快照到段上，
       // 让这一段保持既有「✓ 已提交 / 结果待确认」只读态，而不是被下面伪记成取消。
@@ -11098,6 +11585,7 @@ export const useAiStore = defineStore('ai', {
       last.errorCard = null
       // 停止是终态决定：上一段断流事实作废（「继续」入口由 stopped 统一排除）
       delete last.interrupted
+      delete last.interruptedReason
     },
 
     /**
@@ -11595,6 +12083,7 @@ export const useAiStore = defineStore('ai', {
       this.poolSaturated = null
       this.suspended = false
       // 批次2：恢复失败现场 / 恢复缺口 / 409 手动入口都属于旧会话 —— 一律不带走
+      this.manualRecovery = null
       this.historyError = null
       this.currentError = null
       this.recoveryGap = null
@@ -11612,8 +12101,9 @@ export const useAiStore = defineStore('ai', {
       this.forgetRunStreamDrive()
       // 2026-10-29 收口：自动恢复的排期与预算同属旧会话现场（不得把旧会话的轮接进新会话）
       cancelAutoRecovery()
+      clearTerminalHistoryState(oldSessionId)
       this.autoRecoveryUsed = {}
-      this.restoringRecovery = false
+      clearRecoveryOperations(this)
       // 批次6B（N7）：ui_event 回执 / 上一轮结局都是**上一会话的现场** ——
       // 不清会让新会话第一条无害通知被旧轮 error 染红（通知级别本身已随写入落 `noticeSeverity`）。
       this.lastUiEventResult = null
@@ -11637,7 +12127,6 @@ export const useAiStore = defineStore('ai', {
       this.followupReady = false
       // 上下文专项批①：占用摘要随会话清空（跨会话串味 = 拿上一会话的 84k 配新会话）
       this.contextUsage = null
-      this.historyTruncated = false
       // 分页：窗口/事件/在途标记随会话清空（新会话的首屏由它自己的 /history 建立）
       this.historyHasMore = false
       this.historyOffset = 0
@@ -12279,6 +12768,9 @@ export const useAiStore = defineStore('ai', {
       if (frame.type !== 'heartbeat' && this.preparingRun) {
         this.clearPreparingRun()
       }
+      if (frame.type === 'done' || frame.type === 'error') {
+        this.clearManualRecovery()
+      }
 
       switch (frame.type) {
         case 'start':
@@ -12306,6 +12798,7 @@ export const useAiStore = defineStore('ai', {
           this.clearPreparingRun()
           // 续收/重连拿到 start ⇒ 上一段断流事实作废（成功续跑不再算断流）
           delete message.interrupted
+          delete message.interruptedReason
           // 批次3 / AR-06：runId 一到就落一次镜像。否则刷新落在节流窗口（300ms）内时，
           // 本地没有 runId 可探测，压缩窗口会被误判成空态。
           // 只在本轮历史已就绪时写：loadHistory/回放期间的空态无权覆盖更完整的现场。
@@ -12574,8 +13067,25 @@ export const useAiStore = defineStore('ai', {
           this.clearPreparingRun()
           message.streaming = false
           message.done = true
-          // 终帧到达 = 本轮有确定结局，上一段断流事实作废
-          delete message.interrupted
+          const transcriptDegraded = !frame.cancelled && isTranscriptDegraded(frame as typeof frame & {
+            code?: unknown
+            errorCode?: unknown
+            transcriptDegraded?: unknown
+            historyComplete?: unknown
+          })
+          if (transcriptDegraded) {
+            this.recoverUnconfirmedTerminal(message)
+          } else {
+            message.unconfirmed = false
+            if (message.runId) {
+              clearUnconfirmedHistoryMarkers(this.sessionId, message.runId)
+            }
+            if (this.lastRoundOutcome === 'unconfirmed') {
+              this.lastRoundOutcome = 'ok'
+            }
+            delete message.interrupted
+            delete message.interruptedReason
+          }
           // o-R1：轮终态封口末尾流式段（否则已完成的消息里仍留着 streaming 段的假态，且会被
           // 镜像持久化）+ 批2 前置：仍在等动作的工具段一并过期降级（与空历史 expired 降级惯例一致）。
           // 旧口径的 `message.pendingCall = pendingCall?.status === 'pending' ? null : ...` 直写
@@ -12600,9 +13110,8 @@ export const useAiStore = defineStore('ai', {
             this.cancelRoundParts()
             message.stopped = true
             this.lastRoundOutcome = 'cancelled'
-          } else {
-            // 非取消 done = 本轮正常收尾：复位轮次结局，避免断流后续跑成功仍带着
-            // `interrupted` 的旧轮次态在已完成回答上冒出「继续」。
+          } else if (!transcriptDegraded) {
+            // 只有非取消、非降级 done 才按正常完成复位轮次结局。
             this.lastRoundOutcome = 'ok'
           }
           // 截断专项：`done.extra.truncated` 只在 finish_reason=length 时出现（后端口径）。
@@ -12647,6 +13156,7 @@ export const useAiStore = defineStore('ai', {
           message.done = true
           // 出错收尾与 done 同口径：封口末尾流式段 + 待决工具段过期降级
           delete message.interrupted
+          delete message.interruptedReason
           sealTrailingStreamPart(message)
           expireResidueToolParts(message)
           // FE-25：与 done 同口径 —— 人围栏单例全部收口（轮已经结束，卡不能再推动它）
@@ -12663,6 +13173,9 @@ export const useAiStore = defineStore('ai', {
            */
           if (isCancelledTerminalError(frame)) {
             this.cancelRoundParts()
+            if (message.runId) {
+              clearUnconfirmedHistoryMarkers(this.sessionId, message.runId)
+            }
             message.stopped = true
             message.errorCard = null
             // 取消不是断流、不是错误：本轮残留的断流提示一并收口（不新增提示）。
@@ -12686,6 +13199,9 @@ export const useAiStore = defineStore('ai', {
             break
           }
           message.unconfirmed = false
+          if (message.runId) {
+            clearUnconfirmedHistoryMarkers(this.sessionId, message.runId)
+          }
           const card = buildErrorCard(frame.code, frame.message)
           message.errorCard = card
           if (card !== null) {
@@ -13094,9 +13610,8 @@ export const useAiStore = defineStore('ai', {
     /**
      * 执行前端工具并把结果回灌（三级可用性兜底 + **统一超时预算**在 utils/frontend-tools.ts）。
      *
-     * 预算由帧里的**服务端**挂起上限折算（`timeoutSeconds`，默认 120s → 60s = 上限 −
-     * 回灌 POST 的 axios 上限 60s），理由与取值见 `FRONTEND_TOOL_TIMEOUT_BUDGET_MS` /
-     * `deriveFrontendToolBudgetMs`：本函数必须等 `executeFrontendTool`
+     * 预算优先按帧里的 `expiresAt` 绝对剩余期限折算并预留回灌 POST 上限；缺失时保留
+     * `timeoutSeconds` 兼容路径（默认 120s → 60s）。本函数必须等 `executeFrontendTool`
      * 返回才发 POST，因此预算是"回灌一定发出"的保障（issue#6）。
      * `generative_form` 不走本函数（帧 handler 特判 `openGenerativeForm`），其挂起等的是
      * 用户填写，不受本预算影响。
@@ -13274,7 +13789,8 @@ export const useAiStore = defineStore('ai', {
             toolCallId: frame.toolCallId,
             runId,
             args: parseToolArgs(frame.args),
-            budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds)
+            budgetMs: deriveFrontendToolBudgetMs(frame.timeoutSeconds),
+            expiresAt: frame.expiresAt
           })
         } catch (error) {
             logCaughtError(error, 'stores/ai.ts:13021')
@@ -13342,8 +13858,8 @@ export const useAiStore = defineStore('ai', {
         this.settleAbandonedToolPart(message, frame.toolCallId)
         return false
       }
-      // 批3③a A8 → 批 A：8 态落卡（unknown 只在下载类白名单出现；rejected/blocked/
-      // cancelled/skipped 各有落点，不再一律折成 failed）。
+      // 批3③a A8 → 批 A：8 态落卡（下载类或已发生浏览器副作用的到期可落 unknown；
+      // rejected/blocked/cancelled/skipped 各有落点，不再一律折成 failed）。
       const status: ToolRunStatus = toolStatusOfOutcome(execution.outcome)
       // 治理 P0-1 / P03：**先回灌受理，再写最终状态**。回灌是一段真实 await 窗口（最坏 60s）：
       // 这段里用户仍可点「停止」，而 `cancelRoundParts` 只收 pending/running 的**未提交**段 —— 先把段写成

@@ -6,15 +6,15 @@
  * （`ChatMessage.errorCard`），面板在该消息元信息行之后原样渲染，不参与任何 sticky/fixed 定位。
  *
  * 判据（demo 原文）：**按错误码分派** —— 429 → 红族；content_filter → 灰族；
- * context_length_exceeded → 蓝族；其余（断流 / 未分类故障）沿用红卡。
+ * context_length_exceeded → 蓝族；其余未分类故障沿用红卡。
  *
  * 现实化（本仓 store 实际错误产生点，见施工报告 §错误卡映射表）：
  * - SSE `error` 帧：`frame.code` + `frame.message`（后端 16 类帧里唯一的错误终帧，
  *   实测上游 503 走 `UPSTREAM_STREAM_ERROR`）—— 三变体分派在此路生效；
  * - 开流前失败（`handleChatError`）：ApiError 的 `code` = 响应体 `code`，缺省为 HTTP 状态码字符串
  *   （429 配额即走这一形态）；
- * - 断流（ADR-6，缺终帧）/ 超时 / 取消：非错误卡族（前者已有 `alert-interrupted` 顶部 Alert，
- *   后两者属通知槽），本模块不产出卡片；
+ * - 断流（ADR-6，缺终帧）/ 超时 / 取消：非错误卡族；断流在最终恢复收尾后走统一错误条，
+ *   后两者属通知槽，本模块不产出卡片；
  * - 409 SESSION_BUSY / 503 SUSPEND_POOL_SATURATED / 503 AI_UNAVAILABLE / AI_REDIS_UNAVAILABLE
  *   已有**专属 Alert**（alert-busy-conflict / alert-pool-saturated / alert-degraded），
  *   不重复出卡（见 `DEDICATED_ALERT_CODES`）。
@@ -29,7 +29,7 @@
 import { ErrorCode } from '@/types/api'
 import { translate } from '@/composables/useCopy'
 
-/** 三变体 + 通用红卡（demo 判据里的「其余 = 断流/未分类」）。 */
+/** 三变体 + 通用红卡（demo 判据里的「其余 = 未分类」）。 */
 export type ErrorCardVariant = 'quota' | 'filter' | 'context' | 'generic'
 
 /** 终局失败派生后缀的现场语义（缺省 = 无派生后缀）。 */
