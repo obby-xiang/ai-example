@@ -30,6 +30,7 @@ import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.CorrectionPrefixes;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
@@ -727,8 +728,8 @@ public class SpToolCallingManager implements ToolCallingManager {
      * 正文只写当前段；已经落库的正文由各自的 assistant(tool_calls) 消息承载，不再用字符偏移推算。
      * park 标记把工具循环的正常 returnDirect 收流与真正的上游完成区分开，每次 attempt 重置。
      *
-     * <p>本类方法均同步：正文、推理与 park 标记跨消费、工具执行和尝试收尾线程读写
-     * （{@link StringBuilder} 自身不保证并发）。
+     * <p>正文、推理与 park 标记跨消费、工具执行和尝试收尾线程读写均同步
+     * （{@link StringBuilder} 自身不保证并发）；pending flush 回调在锁外执行，保持与消费端一致的锁序。
      */
     public static final class TurnTextCapture {
 
@@ -738,6 +739,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 
         private RunParkedException parked;
 
+        private Runnable pendingSegmentFlush;
+
         /**
          * 每次 attempt 重置正文、推理与 park 标记，并种入尚未落库的纠正正文前缀段。
          */
@@ -745,8 +748,23 @@ public class SpToolCallingManager implements ToolCallingManager {
             this.segment.setLength(0);
             this.reasoningSegment.setLength(0);
             this.parked = null;
+            this.pendingSegmentFlush = null;
             if (StringUtils.isNotEmpty(segment)) {
                 this.segment.append(segment);
+            }
+        }
+
+        public synchronized void setPendingSegmentFlush(Runnable pendingSegmentFlush) {
+            this.pendingSegmentFlush = pendingSegmentFlush;
+        }
+
+        public void flushPendingSegment() {
+            Runnable flush;
+            synchronized (this) {
+                flush = this.pendingSegmentFlush;
+            }
+            if (flush != null) {
+                flush.run();
             }
         }
 
@@ -844,6 +862,9 @@ public class SpToolCallingManager implements ToolCallingManager {
         // 用本轮累加器经 toolContext 同步过来的两段内容补全 assistant，后续普通续轮、saveSuspended /
         // transcript / 宿主表单挂起都消费同一个完整对象（不解析帧、不另建第二份聚合）。
         TurnTextCapture turnText = turnTextOf(prompt);
+        if (turnText != null) {
+            turnText.flushPendingSegment();
+        }
         assistant = assistantWithTurnContent(assistant, turnText == null ? "" : turnText.segmentText(),
                 turnText == null ? "" : turnText.reasoningText());
 
@@ -1406,7 +1427,9 @@ public class SpToolCallingManager implements ToolCallingManager {
                             + budget.decision().nextEst() + " >= limit=" + budget.decision().limitTokens() + ", reason="
                             + budget.decision().reason() + "): executed records were settled before terminating the run");
         }
-        return ToolExecutionResult.builder().conversationHistory(history).build();
+        List<Message> modelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(history,
+                CorrectionPrefixes.correctionPrefix(state.snapshot));
+        return ToolExecutionResult.builder().conversationHistory(modelHistory).build();
     }
 
     private final class ToolBatchState {

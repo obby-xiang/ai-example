@@ -863,7 +863,7 @@ public class ResilientChatService {
             registered = true;
             String lastUserText = TaskIntent.lastRealUserText(history);
             CorrectionResume correctionResume = correctionResume(snapshot, history);
-            List<Message> modelHistory = historyWithSingleCorrectionPrefix(history, correctionPrefix(snapshot));
+            List<Message> modelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(history, correctionPrefix(snapshot));
             SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
             runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
                     correctionResume.fullText(), correctionResume.pendingSegment(), turnTextBody, attempt -> {
@@ -1360,8 +1360,9 @@ public class ResilientChatService {
             accumulator.meter().allowPromptDecline();
         }
         if (StringUtils.isNotBlank(state.prefixText)) {
-            accumulator.seedPrefix(state.prefixText, state.prefixReasoning, state.prefixReasoningSegment);
+            accumulator.seedPrefix(state.prefixText, state.prefixSegment, state.prefixReasoning, state.prefixReasoningSegment);
         }
+        state.turnTextBody.setPendingSegmentFlush(() -> flushCorrectionPrefix(state.out, accumulator, state.turnTextBody));
         CompletableFuture<Void> settled = new CompletableFuture<>();
         StreamWatchdog watchdog = new StreamWatchdog(state.runId, this.watchdogExecutor, this.cancelPollExecutor,
                 state.config, this.beacon, this.cancellations, state.turnStartedAtMs, settled::completeExceptionally);
@@ -1399,6 +1400,7 @@ public class ResilientChatService {
                 }, round.settled::completeExceptionally, () -> round.settled.complete(null));
         round.watchdog.bind(round.subscription);
         awaitSettled(state.runId, round.settled, state.turnStartedAtMs, state.config);
+        flushCorrectionPrefix(state.out, round.accumulator, state.turnTextBody);
         RunParkedException parked = state.turnTextBody.parked();
         if (parked != null) {
             throw parked;
@@ -1502,6 +1504,7 @@ public class ResilientChatService {
     }
 
     private AttemptStep handleAttemptError(AttemptLoopState state, AttemptRound round, Throwable error) {
+        boolean correctionFlushFailed = isCorrectionPrefixFlushFailed(state, round, error);
         if (error instanceof RunParkedException parked) {
             stopKeepalive(state.keepalive);
             parkTurn(state.runId, state.sessionId, parked);
@@ -1517,9 +1520,10 @@ public class ResilientChatService {
                     state.out, state.turn);
             return AttemptStep.RETURN;
         }
+        boolean correctionPrefixFailure = correctionFlushFailed || violation instanceof CorrectionPrefixes.CorrectionPrefixException;
         boolean parkedToolRound = isPersistedParkedToolRound(state.runId);
         boolean suspendedRound = state.correcting && isSuspendedStatus(state.runId);
-        if (state.correcting && !parkedToolRound && !suspendedRound) {
+        if (state.correcting && !correctionPrefixFailure && !parkedToolRound && !suspendedRound) {
             log.warn("close correction failed, closing with on-screen text runId={} code={}", state.runId,
                     violation.getCode(), violation);
             stopKeepalive(state.keepalive);
@@ -1542,6 +1546,19 @@ public class ResilientChatService {
         state.retryAfterMs = outcome.retryAfterMillis();
         emitAttemptRetry(state, round, failure);
         return AttemptStep.CONTINUE;
+    }
+
+    private boolean isCorrectionPrefixFlushFailed(AttemptLoopState state, AttemptRound round, Throwable error) {
+        try {
+            flushCorrectionPrefix(state.out, round.accumulator, state.turnTextBody);
+            return false;
+        } catch (Throwable flushError) {
+            if (flushError != error) {
+                error.addSuppressed(flushError);
+            }
+            log.warn("correction prefix flush failed; preserving primary attempt error runId={}", state.runId, error);
+            return true;
+        }
     }
 
     private AttemptFailure evaluateAttemptFailure(AttemptLoopState state, AttemptRound round,
@@ -1720,7 +1737,7 @@ public class ResilientChatService {
      */
     static final String CREATE_TASK_CORRECTION_MARKER = "createTaskCorrectionUsed";
 
-    static final String CREATE_TASK_CORRECTION_PREFIX_KEY = "createTaskCorrectionPrefix";
+    static final String CREATE_TASK_CORRECTION_PREFIX_KEY = CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY;
 
     private boolean isCreateTaskWrapUpCorrectionDue(String runId, AiContext fallback, String lastUserText) {
         AiContext context = latestContext(runId, fallback);
@@ -1863,7 +1880,7 @@ public class ResilientChatService {
     /**
      * 纠正轮已上屏前缀（随快照持久化：挂起后续跑用它 seed，最终成功/取消时去重）。
      */
-    static final String EXPORT_CORRECTION_PREFIX_KEY = "exportCorrectionPrefix";
+    static final String EXPORT_CORRECTION_PREFIX_KEY = CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY;
 
     /**
      * 终态后清掉"待合并前缀"：run 级"已纠正"标记保留（含续跑只纠正一次），前缀不再 seed。
@@ -1962,20 +1979,13 @@ public class ResilientChatService {
     }
 
     String correctionPrefix(RunSnapshot snapshot) {
-        if (snapshot == null) {
-            return "";
-        }
         try {
-            Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
-            Object value = extra == null ? null : extra.get(CREATE_TASK_CORRECTION_PREFIX_KEY);
-            if (value == null && extra != null) {
-                value = extra.get(EXPORT_CORRECTION_PREFIX_KEY);
+            return CorrectionPrefixes.correctionPrefix(snapshot);
+        } catch (CorrectionPrefixes.CorrectionPrefixException ex) {
+            if (LogSampling.canAcquire("resilient-chat-runtime-catch")) {
+                log.warn("read correction prefix failed", ex);
             }
-            return ObjectUtils.toString(value, "");
-        } catch (RuntimeException ex) {
-            if (LogSampling.canAcquire("resilient-chat-runtime-catch"))
-                log.warn("read correction prefix failed (treating as none)", ex);
-            return "";
+            throw ex;
         }
     }
 
@@ -2162,69 +2172,7 @@ public class ResilientChatService {
             history.add(ReasoningOrigin.stamp(prefix, snapshot == null ? null : snapshot.getProviderId(),
                     snapshot == null ? null : snapshot.getModelId()));
         }
-        return historyWithSingleCorrectionPrefix(history, prefixText);
-    }
-
-    /**
-     * 模型输入专用：当前 run 的 correctionPrefix 恰好一份；快照、原 history 与 UI 前缀均不改写。
-     */
-    private static List<Message> historyWithSingleCorrectionPrefix(List<Message> history, String prefix) {
-        if (history == null || history.isEmpty() || StringUtils.isEmpty(prefix)) {
-            return history == null ? List.of() : new ArrayList<>(history);
-        }
-        int lastRealUser = lastRealUserIndex(history);
-        List<Message> sanitized = new ArrayList<>(history.size());
-        boolean prefixRetained = false;
-        for (int i = 0; i < history.size(); i++) {
-            Message message = history.get(i);
-            if (!(message instanceof AssistantMessage assistant) || i <= lastRealUser) {
-                sanitized.add(message);
-                continue;
-            }
-            String text = assistant.getText();
-            if (text == null || !text.startsWith(prefix)) {
-                sanitized.add(assistant);
-                continue;
-            }
-            String suffix = stripLeadingCorrectionPrefix(text, prefix);
-            if (!prefixRetained) {
-                sanitized.add(copyAssistantWithText(assistant, prefix + suffix));
-                prefixRetained = true;
-            } else if (assistant.hasToolCalls() || !suffix.isEmpty()) {
-                sanitized.add(copyAssistantWithText(assistant, suffix));
-            }
-        }
-        return sanitized;
-    }
-
-    private static int lastRealUserIndex(List<Message> history) {
-        for (int i = history.size() - 1; i >= 0; i--) {
-            if (history.get(i) instanceof UserMessage message && !SyntheticMessages.isSynthetic(message)) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private static String stripLeadingCorrectionPrefix(String text, String prefix) {
-        String suffix = text;
-        while (suffix.startsWith(prefix)) {
-            suffix = suffix.substring(prefix.length());
-        }
-        return suffix;
-    }
-
-    private static AssistantMessage copyAssistantWithText(AssistantMessage source, String text) {
-        Map<String, Object> metadata = source.getMetadata() == null ? new LinkedHashMap<>()
-                : new LinkedHashMap<>(source.getMetadata());
-        AssistantMessage.Builder builder = AssistantMessage.builder().content(text).properties(metadata);
-        if (source.hasToolCalls()) {
-            builder.toolCalls(new ArrayList<>(source.getToolCalls()));
-        }
-        if (CollectionUtils.isNotEmpty(source.getMedia())) {
-            builder.media(new ArrayList<>(source.getMedia()));
-        }
-        return builder.build();
+        return CorrectionPrefixes.historyWithSingleCorrectionPrefix(history, prefixText);
     }
 
     private static boolean isEndsWithAssistantText(List<Message> history, String text) {
@@ -3412,7 +3360,7 @@ public class ResilientChatService {
 
     /**
      * 续跑纠正段交接：挂起快照的 assistantContent 是已经外置的完整段；已结算时则认当前轮
-     * 工具跳聚合消息。只有历史里尚未承载的前缀才进入新的待写段。
+     * 工具跳聚合消息。只有历史里尚未承载的前缀才进入新的待写段，重复前导 prefix 只保留一份。
      */
     private CorrectionResume correctionResume(RunSnapshot snapshot, List<Message> history) {
         String prefix = correctionPrefix(snapshot);
@@ -3421,8 +3369,8 @@ public class ResilientChatService {
         }
         if (snapshot != null && snapshot.getInFlightToolCalls() != null
                 && !snapshot.getInFlightToolCalls().isEmpty()) {
-            String parked = snapshot.getAssistantContent();
-            return new CorrectionResume(StringUtils.defaultIfEmpty(parked, prefix), "");
+            String parked = StringUtils.defaultIfEmpty(snapshot.getAssistantContent(), prefix);
+            return new CorrectionResume(CorrectionPrefixes.withSingleCorrectionPrefix(parked, prefix), "");
         }
         int lastRealUser = -1;
         for (int i = history.size() - 1; i >= 0; i--) {
@@ -3439,7 +3387,7 @@ public class ResilientChatService {
                 continue;
             }
             if (assistant.hasToolCalls() && assistant.getText().startsWith(prefix)) {
-                fullText = assistant.getText();
+                fullText = CorrectionPrefixes.withSingleCorrectionPrefix(assistant.getText(), prefix);
                 persisted = true;
             } else if (!assistant.hasToolCalls() && prefix.equals(assistant.getText())) {
                 persisted = true;
@@ -4462,11 +4410,12 @@ public class ResilientChatService {
     // ── 流式消费 ────────────────────────────────────────────────────────────
 
     /**
-     * 消费一个上游分片：思考段先发帧（并累全文），随后正文原样进累计器并发 delta。
+     * 消费一个上游分片：思考段先发帧（并累全文），随后正文进累计器并发 delta。
+     * correction 新输出起点重复已 seed 的前导 prefix 时，三个消费面共用去掉重复副本后的文本。
      *
-     * <p><b>L-99</b>：输出侧 DLP 已删除 —— 正文<b>原样</b>发帧与落记忆，不再有脱敏、尾部保留窗口
-     * 或"阻断终态"。{@code message_end.chars == Σ delta 长度} 的同源判据因此更直接：
-     * 累计器与 delta 吃的是同一份上游文本。
+     * <p><b>L-99</b>：输出侧 DLP 已删除 —— 除上述 correction 重复前缀外，正文<b>原样</b>发帧与落记忆，
+     * 不再有脱敏、尾部保留窗口或"阻断终态"。{@code message_end.chars == Σ delta 长度} 的同源判据因此更直接：
+     * 累计器与 delta 吃的是同一份文本。
      */
     private void consume(ChatResponse response, SseChatEmitter out, Accumulator accumulator, SpToolCallingManager.TurnTextCapture turnTextBody) {
         // L-91：先发思考段（模型"先想再答"；同一分片也可能同带 reasoning 与正文）。
@@ -4483,25 +4432,28 @@ public class ResilientChatService {
             // 也不会让 retry 帧落在思考 delta 之后（展示关闭时根本没有思考 delta）。
             accumulator.reasoning(reasoning, shown);
         }
-        String text = chunkText(response);
-        accumulator.accept(response);
-        if (StringUtils.isNotEmpty(text)) {
-            // 与 Accumulator 同源同序：工具执行点读到的正文必须与刚落定的 assistant 正文一致。
-            turnTextBody.append(text);
+        emitText(accumulator.accept(response, chunkText(response)), out, turnTextBody);
+    }
+
+    private void flushCorrectionPrefix(SseChatEmitter out, Accumulator accumulator,
+                                       SpToolCallingManager.TurnTextCapture turnTextBody) {
+        try {
+            emitText(accumulator.closeCorrectionPrefix(), out, turnTextBody);
+        } catch (RuntimeException ex) {
+            throw CorrectionPrefixes.normalizationFailure(ex);
         }
-        // T5：正文消息边界三段式（start/content/end）——start 只在首段前补一次，
-        // 后续每一片文本都是 content（delta）；end 在轮终态补（见 finish / cancelTerminal / fail）。
-        //
-        // S5c-4：发帧判据与累计判据必须同源 —— 这里此前用 StringUtils.hasText（"非空白才算内容"），
-        // 而 Accumulator 无条件拼接每一个分片。于是模型单独吐一个纯空白分片（空格或换行，
-        // 流式分片边界上很常见）时，message_end.chars 会大于 delta 拼接长度，前端渲染的正文
-        // 与落定正文（finalText）分家。改为"非空即发"：空白也是正文的一部分，三处口径归一。
-        if (StringUtils.isNotEmpty(text)) {
-            // C：替换字符只观测（计数/偏移/长度进日志），不改正文、不缓冲、不新增提示。
-            observeReplacementCharacters(out.runId(), text);
-            out.isTextStarted();
-            out.delta(text);
+    }
+
+    private void emitText(String text, SseChatEmitter out, SpToolCallingManager.TurnTextCapture turnTextBody) {
+        if (StringUtils.isEmpty(text)) {
+            return;
         }
+        // T5：start 只在首段前补一次，后续每一片文本都是 content；end 在轮终态补。
+        // Accumulator、工具执行点和 delta 共用同一文本，空白也按真实正文保留。
+        turnTextBody.append(text);
+        observeReplacementCharacters(out.runId(), text);
+        out.isTextStarted();
+        out.delta(text);
     }
 
     /**
@@ -4619,7 +4571,9 @@ public class ResilientChatService {
          * <p>不置 {@code reasoningShown}（那不是本次上屏的），也不发新的帧；此后所有出口都按
          * "前缀 + 本次增量"统计与落库，与前端 delta 拼接一致。
          */
-        private void seedPrefix(String prefixText, String prefixReasoning, String prefixReasoningSegment) {
+        private void seedPrefix(String prefixText, String prefixSegment, String prefixReasoning,
+                                String prefixReasoningSegment) {
+            this.correctionPrefix = new CorrectionPrefixes.StreamState(prefixSegment);
             if (prefixText != null) {
                 this.text.append(prefixText);
                 this.seededBodyChars += prefixText.length();
@@ -4636,6 +4590,8 @@ public class ResilientChatService {
          * seed 进来的前缀字符数（不算本次尝试的新产出；用于 emittedVisible/重试判据）。
          */
         private int seededBodyChars;
+
+        private CorrectionPrefixes.StreamState correctionPrefix = new CorrectionPrefixes.StreamState("");
 
         /**
          * <b>L-91/L-98</b>：本尝试累计的思考全文（不进 {@link #text} —— 思考不是正文；原样进记忆元数据）。
@@ -4727,9 +4683,9 @@ public class ResilientChatService {
         }
 
         /**
-         * 累计一个上游分片：思考不入正文（见 {@link #reasoning(String)}），正文原样拼接。
+         * 累计一个上游分片：思考不入正文（见 {@link #reasoning(String)}），返回三个消费面共用的正文。
          */
-        void accept(ChatResponse response) {
+        synchronized String accept(ChatResponse response, String chunk) {
             long atMs = System.currentTimeMillis();
             if (this.firstByteAtMs == 0L) {
                 this.firstByteAtMs = atMs;
@@ -4754,11 +4710,30 @@ public class ResilientChatService {
                     this.realToolCallAfterTerminal.set(true);
                 }
             }
-            String chunk = chunkText(response);
-            if (chunk != null) {
-                this.text.append(chunk);
+            String acceptedChunk;
+            try {
+                acceptedChunk = this.correctionPrefix.accept(chunk);
+            } catch (RuntimeException ex) {
+                throw CorrectionPrefixes.normalizationFailure(ex);
+            }
+            if (acceptedChunk != null) {
+                this.text.append(acceptedChunk);
             }
             record(response, generation, shardIndex, sinceFirstShardMs, hasToolCalls);
+            return acceptedChunk;
+        }
+
+        synchronized String closeCorrectionPrefix() {
+            String pending;
+            try {
+                pending = this.correctionPrefix.close();
+            } catch (RuntimeException ex) {
+                throw CorrectionPrefixes.normalizationFailure(ex);
+            }
+            if (!pending.isEmpty()) {
+                this.text.append(pending);
+            }
+            return pending;
         }
 
         /**

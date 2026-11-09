@@ -5002,6 +5002,44 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "直接复用已解码推理段，不做偏移切分、二次转码或供应商特判。"},
         "verification-review": {"status": "checked", "reason": "agent-1198最终APPROVE；两文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译357个主源BUILD SUCCESS；动态响应边界NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f5a6c2ff54f8813f6338e4e65e0e156e949f42da1fb41774f092d5a6d4c6cf96",
+      "status": "reviewed",
+      "reason": "逐hunk及全调用链复核纠正前缀流式状态机、普通工具续轮、双路resume与异常终局；独立审查agent-1205多轮返修后最终APPROVE。",
+      "reviewedAt": "2026-11-10T04:20:24+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1205、施工agent-1201",
+      "specChanges": [
+        {
+          "change": "correction重复前导prefix采用一次性有界流状态机归一，Accumulator、TurnTextCapture与SSE delta消费同一文本。",
+          "reason": "单chunk归一无法覆盖跨分片，空输出未关闭状态还会误删后续合法正文。",
+          "impact": "重复prefix跨chunk仅去一份，空输出也CLOSED，失配与流末释放合法半截，工具跳后不再归一。"
+        },
+        {
+          "change": "普通工具续轮模型history及in-flight/settled-history resume统一使用单前缀，持久化原始history不改写。",
+          "reason": "原清洗只覆盖correction/resume模型输入，普通续轮和UI fullText仍保留重复前缀。",
+          "impact": "tool_calls、toolCallId、metadata、media与tool result完整保留，合法suffix不删除。"
+        },
+        {
+          "change": "归一和flush失败使用CorrectionPrefixException/STATE_UNAVAILABLE，排除correction成功兜底；二次flush异常作为原始异常suppressed。",
+          "reason": "原异常可能写成正常DONE或覆盖上游原始异常。",
+          "impact": "失败真实分类，park保持可恢复，不重复工具或模型，原始异常与资源释放顺序保持。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/CorrectionPrefixes.java", "status": "checked", "reason": "复核有界StreamState、一次性副本压缩、history保真与统一异常分类，pending上界为|P|-1。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "复核seed口径、emitText、flush/close、双路resume、异常主从及correction成功兜底排除。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "工具跳先flush pending段再取正文，普通续轮仅归一模型副本且不再吞异常。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用TurnTextCapture、StreamViolationException和既有history投影，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "辅助方法职责清晰，控制块显式{}，集合并保留metadata/media，不修改JSON字段。"},
+        "logging-exception-safety": {"status": "checked", "reason": "归一失败不伪装DONE，原始异常为主、flush异常suppressed，保留堆栈与既有错误映射。"},
+        "toc-interaction": {"status": "checked", "reason": "消除重复正文且保留合法suffix，不新增提示或改变卡片操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "模型副本与持久化history分离，工具不重复执行，无AI数据库访问或Redis结构变化。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按UTF-16 code unit有界跨chunk匹配，不切割代理对，不做全局文本去重。"},
+        "verification-review": {"status": "checked", "reason": "agent-1205最终APPROVE；三文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译358个主源BUILD SUCCESS；动态纠正变体NOT_RUN。"}
+      }
     }
   ]
 }
