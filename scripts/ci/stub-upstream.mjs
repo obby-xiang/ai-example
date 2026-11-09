@@ -438,7 +438,7 @@ function requestToolSeqOf(body) {
   return { names, args: parsed }
 }
 
-const HOST_DEF_SELECT_MARKER = /host-def-select/
+const HOST_DEF_SELECT_MARKER = /(?:^|\s)host-def-select(?:\s|$)/
 
 /**
  * 请求级宿主定义表单衔接（`host-def-select`）：本轮已收到宿主定义表单（host-def-form-*）
@@ -2772,7 +2772,27 @@ function selfCheck() {
     if (!decision || decision.tool !== 'select_definitions' || decision.args.codes.join(',') !== 'CURRENCY,DOC_TYPE') {
       bad(`hostDefSelectDecision 未生成正确的 select_definitions：${JSON.stringify(decision)}`)
     }
-    ok('host-def-select 自证通过（前缀+tool_result+字符串化 message 解析 / 直对象 / 决策 args）')
+    const markerBody = { messages: [{ role: 'user', content: 'tool=create_task&args={} host-def-select verification=x' }] }
+    if (!hostDefSelectMarker(markerBody)) bad('host-def-select 标记未被整词识别（正则边界漂移，续轮会退化为纯文本）')
+    if (hostDefSelectMarker({ messages: [{ role: 'user', content: 'tool=create_task&args={} host-def-select-x' }] })) {
+      bad('host-def-select 标记必须整词匹配，不得命中 host-def-select-x')
+    }
+    const decided = decide({
+      model: 'stub',
+      messages: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'tool=create_task&args={"type":"EXPORT"} host-def-select verification=x' },
+        { role: 'assistant', content: '', tool_calls: [{ id: 'call-stub-1', function: { name: 'create_task' } }] },
+        { role: 'tool', tool_call_id: 'call-stub-1', content: '{"ok":true}' },
+        { role: 'assistant', content: '', tool_calls: [{ id: 'host-def-form-1', function: { name: 'generative_form' } }] },
+        { role: 'tool', tool_call_id: 'host-def-form-1', content: real }
+      ],
+      tools: [{ type: 'function', function: { name: 'select_definitions' } }]
+    }, { productTools: ['select_definitions'], convergence: {maxCallsPerTurn: 6} }, new Map())
+    if (decided?.route !== 'HOST-DEF-SELECT' || decided?.tool !== 'select_definitions') {
+      bad(`host-def-select 未在续轮判定中命中（标记→决策链路漂移）：${JSON.stringify(decided)}`)
+    }
+    ok('host-def-select 自证通过（前缀+tool_result+字符串化 message 解析 / 直对象 / 标记整词 / 续轮决策链路）')
   }
 
   section()
