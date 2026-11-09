@@ -1655,11 +1655,17 @@ async function assertConfirmStepTimeline(context) {
   const plainText = assistants.filter((message) => (message.toolCalls ?? []).length === 0)
   checks.require('timeline.pure-text-entry-count', plainText.length === 2, 'exactly two no-tool ASSISTANT entries in one run',
     plainText.map((message) => ({entryId: message.entryId, text: textEvidence(messageText(message))})))
-  checks.require('timeline.pure-text-lengths', canonicalJson(plainText.map((message) => Array.from(messageText(message)).length)) === '[207,99]',
-    '207-char text before the blank host form, then 99-char final text', plainText.map((message) => ({
-      entryId: message.entryId,
-      length: Array.from(messageText(message)).length
-    })))
+  // 不再硬编码任何长度：按 upstream.requests 中 decision.kind=text 的顺序逐条对账纯文本 ASSISTANT 全文。
+  const upstreamTexts = (context.upstream?.requests ?? [])
+    .filter((request) => request.decision?.kind === 'text')
+    .map((request) => String(request.decision.text ?? ''))
+  checks.require('timeline.pure-text-upstream-order-match',
+    upstreamTexts.length === plainText.length
+    && upstreamTexts.every((text, index) => text === messageText(plainText[index])),
+  'each pure-text assistant body equals the corresponding upstream text decision in order', {
+    upstream: upstreamTexts.map((text) => textEvidence(text)),
+    history: plainText.map((message) => ({entryId: message.entryId, text: textEvidence(messageText(message))}))
+  })
   const distinctTexts = new Set(plainText.map(messageText))
   checks.require('timeline.pure-text-nonprefix', distinctTexts.size >= 2 && plainText.every((message, index) =>
     plainText.slice(index + 1).every((later) => {

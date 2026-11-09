@@ -451,6 +451,24 @@ function hostDefSelectMarker(body) {
   return !!text && HOST_DEF_SELECT_MARKER.test(text)
 }
 
+/** 从宿主定义表单的工具结果里取 defCodes：兼容前缀文字 + tool_result 信封 + 字符串化 message。 */
+function defCodesFromToolResult(content) {
+  const outer = extractJsonObject(content)
+  if (!outer) return []
+  const pick = (value) => Array.isArray(value?.defCodes)
+    ? value.defCodes.filter((code) => typeof code === 'string')
+    : []
+  const direct = pick(outer)
+  if (direct.length > 0) return direct
+  for (const key of ['message', 'result', 'data']) {
+    const value = outer[key]
+    const parsed = typeof value === 'string' ? extractJsonObject(value) : (value && typeof value === 'object' ? value : null)
+    const codes = pick(parsed)
+    if (codes.length > 0) return codes
+  }
+  return []
+}
+
 function hostDefSelectDecision(messages, disclosed, routes, bucket) {
   const start = messages.map((m) => m?.role).lastIndexOf('user')
   const round = messages.slice(start + 1)
@@ -462,13 +480,7 @@ function hostDefSelectDecision(messages, disclosed, routes, bucket) {
   if (!disclosed.has('select_definitions')) return null
   const productTools = new Set(Array.isArray(routes.productTools) ? routes.productTools : [])
   if (!productTools.has('select_definitions')) return null
-  let defCodes = []
-  try {
-    const parsed = JSON.parse(String(defResult.content ?? '{}'))
-    defCodes = Array.isArray(parsed.defCodes) ? parsed.defCodes.filter((code) => typeof code === 'string') : []
-  } catch {
-    defCodes = []
-  }
+  const defCodes = defCodesFromToolResult(defResult.content)
   if (defCodes.length === 0) return null
   bucket.hostDefSelected = true
   return { kind: 'tool_call', tool: 'select_definitions', args: { codes: defCodes }, route: 'HOST-DEF-SELECT',
@@ -2740,6 +2752,28 @@ function selfCheck() {
     if (!parsed?.choices?.[0]?.delta?.content) bad('迟到帧必须携带 delta.content（否则客户端丢弃面无从观测）')
   }
   ok('迟到帧自证通过（done 之后推 / 数量与内容可判 / 正常轮末帧不变）')
+
+  section()
+  // ⑩-e host-def-select：真实工具结果形状 = 前缀文字 + tool_result 信封 + 字符串化 message
+  {
+    const real = '已提交表单 tool_result' + JSON.stringify({
+      type: 'tool_result',
+      message: JSON.stringify({defCodes: ['CURRENCY', 'DOC_TYPE']})
+    })
+    const codes = defCodesFromToolResult(real)
+    if (codes.join(',') !== 'CURRENCY,DOC_TYPE') bad(`host-def-select 未从前缀+tool_result+字符串化 message 解析出 defCodes：${JSON.stringify(codes)}`)
+    const direct = defCodesFromToolResult('{"defCodes":["CURRENCY"]}')
+    if (direct.join(',') !== 'CURRENCY') bad(`host-def-select 直接对象解析失败：${JSON.stringify(direct)}`)
+    const decision = hostDefSelectDecision([
+      { role: 'user', content: 'tool=create_task host-def-select' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'host-def-form-1', function: { name: 'generative_form' } }] },
+      { role: 'tool', tool_call_id: 'host-def-form-1', content: real }
+    ], new Set(['select_definitions']), { productTools: ['select_definitions'] }, {})
+    if (!decision || decision.tool !== 'select_definitions' || decision.args.codes.join(',') !== 'CURRENCY,DOC_TYPE') {
+      bad(`hostDefSelectDecision 未生成正确的 select_definitions：${JSON.stringify(decision)}`)
+    }
+    ok('host-def-select 自证通过（前缀+tool_result+字符串化 message 解析 / 直对象 / 决策 args）')
+  }
 
   section()
   // ⑪ 独立响应边界：只断言上游 chunk 形态，不伪造产品 SSE，也不启动服务。
