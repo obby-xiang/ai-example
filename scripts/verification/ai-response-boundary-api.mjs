@@ -1893,20 +1893,24 @@ async function cancellationAssociations(backendLines, stubLines, context) {
 }
 
 async function expectedLogAssociations(logLines, context) {
-  const expected = {backend: new Set(), stub: new Set()}
+  const expected = {backend: new Set(), stub: new Set(), labels: {}}
   if (context.config.caseName === 'cancel-before-complete') {
     const association = await cancellationAssociations(logLines.backend, logLines.stub, context)
     expected.backend = association.expectedBackend
     expected.stub = association.expectedStub
   }
-  if (['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate'].includes(context.config.caseName)) {
-    const expectedMessage = `lease-less write runId=${context.runId}: fence advanced to epoch=1 (write allowed without lease; no resume-authority semantics; check lease view if this is a stale write after owner change)`
-    const warnLevel = /^\d{4}-\d{2}-\d{2}T\S+\s+WARN\s+/
-    const indexes = logLines.backend.flatMap((line, index) => warnLevel.test(line) && line.endsWith(expectedMessage) ? [index] : [])
-    for (const index of indexes) expected.backend.add(index)
-    context.checks.add(`${context.config.caseName}.direct-drive-warning-observed`, indexes.length === 1,
-      'one explicit lease-less direct-drive warning for this run', {count: indexes.length, lines: indexes.map((index) => index + 1)})
-  }
+  // 隔离单实例没有 lease 设施时，本 run 首次写状态会固定出现一条 RunStore lease-less WARN。
+  // 只备案"本 runId + 完整固定文案 + WARN 级别"的这一条，其他 WARN/ERROR 一律仍是 UNEXPECTED。
+  const directDriveCases = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate']
+  const expectedMessage = `lease-less write runId=${context.runId}: fence advanced to epoch=1 (write allowed without lease; no resume-authority semantics; check lease view if this is a stale write after owner change)`
+  const warnLevel = /^\d{4}-\d{2}-\d{2}T\S+\s+WARN\s+/
+  const indexes = logLines.backend.flatMap((line, index) => warnLevel.test(line) && line.endsWith(expectedMessage) ? [index] : [])
+  for (const index of indexes) expected.backend.add(index)
+  const label = directDriveCases.includes(context.config.caseName) ? 'EXPECTED_DIRECT_DRIVE' : 'EXPECTED_ISOLATED_NO_LEASE'
+  if (indexes.length > 0) expected.labels.backend = label
+  context.checks.add(`${context.config.caseName}.lease-less-warning-observed`, indexes.length === 1,
+    'exactly one explicit lease-less warning for this run in the no-lease isolated instance',
+    {count: indexes.length, lines: indexes.map((index) => index + 1), classification: label})
   return expected
 }
 
@@ -1926,7 +1930,8 @@ async function collectLogEvidence(context) {
     const findings = []
     logLines[name].forEach((line, index) => {
       if (!/\b(ERROR|WARN)\b|\[FATAL\]|Exception\b/.test(line)) return
-      const classification = expected[name].has(index) ? expectedClassification : 'UNEXPECTED'
+      const expectedLabel = expected.labels?.[name] ?? expectedClassification
+      const classification = expected[name].has(index) ? expectedLabel : 'UNEXPECTED'
       const finding = {file: name, line: index + 1, classification, lineSha256: sha256(line)}
       findings.push(finding)
       if (classification === 'UNEXPECTED') result.unexpected.push(finding)
