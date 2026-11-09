@@ -4970,6 +4970,38 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、Unicode、SSE解码或内容截断。"},
         "verification-review": {"status": "checked", "reason": "agent-1189与agent-1197最终APPROVE；三文件IDEA Reformat；frontend/node scripts/build.mjs多次构建3281模块成功，最终28.08秒；动态浏览器/API场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:5722ebed2fd66c9b28b2912619cee9c8862f9cb5e32cfb1b5a0ce3aa685d26ae",
+      "status": "reviewed",
+      "reason": "逐hunk复核工具跳与最终assistant的推理分段、纠正capture种子、空回复/失败载体及取消日志级别；独立审查agent-1198返修后最终APPROVE。",
+      "reviewedAt": "2026-11-10T02:52:53+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1198、施工agent-1195",
+      "specChanges": [
+        {
+          "change": "正文与推理统一按事件段持久化，最终assistant仅携带尚未持久化的推理，纠正轮capture只seed未持久化推理段。",
+          "reason": "整轮reasoningText会把工具跳已保存的推理重复附到最终assistant，纠正轮也会再次seed旧推理。",
+          "impact": "多跳、成功、条件表单和取消各段只归属对应assistant；模型纠正请求的整轮前缀语义不变。"
+        },
+        {
+          "change": "空回复/失败在无新正文且无新推理时仅补错误事实，仅有新推理时新增当前段失败assistant；正常取消日志由WARN调整为INFO。",
+          "reason": "整轮推理覆盖旧assistant会跨段重复和错归；用户主动取消是预期终局，不应与真实异常同级告警。",
+          "impact": "旧工具段metadata不被覆盖，新推理不丢失；其他异常和超时继续WARN，取消终帧、快照及INFO仍可观测。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "复核prefixReasoning与prefixReasoningSegment分离、unpersistedReasoning、failureHistory及无capture兼容路径。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/StreamWatchdog.java", "status": "checked", "reason": "仅CANCELLED使用INFO，其余异常/超时WARN，CAS、dispose与terminal通知未改。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用TurnTextCapture分段和既有日志/收尾路径，无新增依赖或内容去重逻辑。"},
+        "java-api-style": {"status": "checked", "reason": "新增unpersistedReasoning小粒度复用capture，控制块显式{}，未改JSON字段或公开签名。"},
+        "logging-exception-safety": {"status": "checked", "reason": "正常取消INFO，真实异常和超时继续WARN，保留runId/code/count安全标量与终态通知。"},
+        "toc-interaction": {"status": "checked", "reason": "历史思考不重复且各段归属正确，不新增用户提示或改变卡片交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "按事件段保存metadata，纠正和快照语义保持，无AI数据库访问或Redis状态变化。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "直接复用已解码推理段，不做偏移切分、二次转码或供应商特判。"},
+        "verification-review": {"status": "checked", "reason": "agent-1198最终APPROVE；两文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译357个主源BUILD SUCCESS；动态响应边界NOT_RUN。"}
+      }
     }
   ]
 }

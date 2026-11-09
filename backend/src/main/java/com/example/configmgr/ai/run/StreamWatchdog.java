@@ -305,8 +305,14 @@ public class StreamWatchdog implements AutoCloseable {
 			return;
 		}
 		this.firedCode.set(code);
-		log.warn("turn judged terminal runId={} code={} upstreamEvents={} ticks={}: {}", this.runId, code,
-				this.upstreamEvents.get(), this.ticks.get(), message);
+		if (StreamViolationException.CANCELLED.equals(code)) {
+			log.info("turn judged terminal runId={} code={} upstreamEvents={} ticks={}: {}", this.runId, code,
+					this.upstreamEvents.get(), this.ticks.get(), message);
+		}
+		else {
+			log.warn("turn judged terminal runId={} code={} upstreamEvents={} ticks={}: {}", this.runId, code,
+					this.upstreamEvents.get(), this.ticks.get(), message);
+		}
 		Disposable current = this.subscription.get();
 		if (current != null && !current.isDisposed()) {
 			try {

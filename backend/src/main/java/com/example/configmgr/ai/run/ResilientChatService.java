@@ -1360,7 +1360,7 @@ public class ResilientChatService {
             accumulator.meter().allowPromptDecline();
         }
         if (StringUtils.isNotBlank(state.prefixText)) {
-            accumulator.seedPrefix(state.prefixText, state.prefixReasoning);
+            accumulator.seedPrefix(state.prefixText, state.prefixReasoning, state.prefixReasoningSegment);
         }
         CompletableFuture<Void> settled = new CompletableFuture<>();
         StreamWatchdog watchdog = new StreamWatchdog(state.runId, this.watchdogExecutor, this.cancelPollExecutor,
@@ -1479,6 +1479,7 @@ public class ResilientChatService {
         state.prefixSegment = correctionText;
         state.correctionHistoryPrefix = correctionText;
         state.prefixReasoning = round.accumulator.reasoningText();
+        state.prefixReasoningSegment = round.accumulator.unpersistedReasoning();
     }
 
     private AttemptStep finishAttempt(AttemptLoopState state, AttemptRound round) {
@@ -1496,6 +1497,7 @@ public class ResilientChatService {
         state.prefixText = "";
         state.prefixSegment = "";
         state.prefixReasoning = "";
+        state.prefixReasoningSegment = "";
         return AttemptStep.CONTINUE;
     }
 
@@ -1671,6 +1673,7 @@ public class ResilientChatService {
         private String prefixSegment;
         private String correctionHistoryPrefix;
         private String prefixReasoning = "";
+        private String prefixReasoningSegment = "";
         private boolean correcting;
         private boolean createTaskCorrecting;
         private int attempt;
@@ -2057,7 +2060,7 @@ public class ResilientChatService {
         AiContext latest = AiContext.fromMap(snapshot.getContext());
         List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
         if (StringUtils.isNotBlank(segment) && !isEndsWithAssistantText(history, segment)) {
-            history.add(assistantMessage(segment, storedReasoning(accumulator.reasoningText())));
+            history.add(assistantMessage(segment, storedReasoning(accumulator.unpersistedReasoning())));
         }
         return this.conditionsForm.parkIfDueAtQueryCond(runId, latest, history);
     }
@@ -2489,12 +2492,12 @@ public class ResilientChatService {
             return new SuccessPersistence(null, List.of(), false);
         }
         List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-        // L-98：思考全文随 assistant 消息一起落记忆（键与 ReasoningAwareOpenAiChatModel 的回填读取同源）
+        // L-98：各事件段的思考随对应 assistant 消息落记忆（键与 ReasoningAwareOpenAiChatModel 的回填读取同源）
         // 跨供应方隔离：给模型生成的消息打中性来源标记（快照的冻结身份）—— 请求层据此决定是否回放
         // reasoningContent。存储面不删任何字（标记是 additive 的，隔离只作用于模型输入）。
         // 截断专项：length 同时写进 metadata（随 assistant 消息落快照与记忆窗口）—— 与 done.extra 同判据。
         // 纠正轮的前缀 assistant 可能已随工具批 settle 进快照：先移除旧前缀（它属于工具调用之前），
-        // 再把尚未落库的余下正文按真实时间顺序追加到末尾 —— 已由工具卡承载的正文不再重复。
+        // 再把尚未落库的余下正文与推理按真实时间顺序追加到末尾 —— 已由工具卡承载的内容不再重复。
         removeAssistantWithText(history, correctionPrefix);
         // 全部正文都已作为工具卡持久化（工具调用后模型没再产出）时不再追加空气泡；
         // 工具卡本身已承载那段正文。
@@ -2578,10 +2581,10 @@ public class ResilientChatService {
                                StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, String correctionPrefix,
                                boolean lengthTruncated) {
         String text = accumulator.text();
-        // 工具卡 assistant 已持久化的前缀不再进"最终 assistant 消息"：同一段正文只落一次。
+        // 工具卡 assistant 已持久化的正文与推理不再进"最终 assistant 消息"：同一段内容只落一次。
         // 但快照的 finalText 字段仍保留完整回答（对外/诊断契约不变）。
         String finalSegment = accumulator.unpersistedText();
-        String reasoning = accumulator.reasoningText();
+        String reasoning = accumulator.unpersistedReasoning();
         RunSnapshot snapshot = this.store.get(runId);
         // ===== 取消优先（I-1 的反向）：成功终局绝不改写 CANCELLED =====
         // RunStore#save 对 DONE 有"当前快照是取消态 ⇒ 拒写"的原子守卫（plain / fenced 两路，见 RunStore），
@@ -3246,8 +3249,8 @@ public class ResilientChatService {
                 return;
             }
         } else {
-            List<Message> history = failureHistory(snapshot, accumulator.unpersistedText(), accumulator.reasoningText(),
-                    EMPTY_REPLY_CODE, message);
+            List<Message> history = failureHistory(snapshot, accumulator.unpersistedText(),
+                    accumulator.unpersistedReasoning(), EMPTY_REPLY_CODE, message);
             boolean written = isFailRunUnlessCancelled(runId, snapshot, EMPTY_REPLY_CODE, message, attempts,
                     target -> {
                         target.setMessageJson(this.codec.serializeAll(history));
@@ -3534,7 +3537,7 @@ public class ResilientChatService {
         removeAssistantWithText(history, correctionPrefix(runId));
         boolean appendedStopped = false;
         for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
-                storedReasoning(accumulator == null ? "" : accumulator.reasoningText()))) {
+                storedReasoning(accumulator == null ? "" : accumulator.unpersistedReasoning()))) {
             history.add(stopped);
             appendedStopped = true;
         }
@@ -3759,8 +3762,8 @@ public class ResilientChatService {
     }
 
     /**
-     * 失败现场进入本轮真实历史：未落库段追加为失败 assistant；若正文已全部由工具跳承载，
-     * 只给该跳补错误事实。这样刷新保留半截与错误，普通“继续”新轮也能从记忆拿到原轮上下文。
+     * 失败现场进入本轮真实历史：未落库正文或推理段追加为失败 assistant；没有当前段时
+     * 只给既有 assistant 补错误事实。这样刷新保留半截与错误，普通“继续”新轮也能从记忆拿到原轮上下文。
      */
     public List<Message> failureHistory(RunSnapshot snapshot, String segment, String reasoning, String code, String message) {
         List<Message> history = snapshot == null ? new ArrayList<>()
@@ -3772,7 +3775,8 @@ public class ResilientChatService {
         if (StringUtils.isNotEmpty(storedReasoning)) {
             failure.put(REASONING_METADATA_KEY, storedReasoning);
         }
-        if (StringUtils.isNotEmpty(segment) && !isEndsWithAssistantText(history, segment)) {
+        if (StringUtils.isNotEmpty(storedReasoning)
+                || StringUtils.isNotEmpty(segment) && !isEndsWithAssistantText(history, segment)) {
             AssistantMessage failed = AssistantMessage.builder().content(segment).properties(failure).build();
             history.add(ReasoningOrigin.stamp(failed, snapshot.getProviderId(), snapshot.getModelId()));
             return history;
@@ -3852,7 +3856,7 @@ public class ResilientChatService {
                 describeForLog(violation));
         RunSnapshot snapshot = this.store.get(runId);
         List<Message> failureHistory = snapshot == null ? null
-                : failureHistory(snapshot, accumulator.unpersistedText(), accumulator.reasoningText(), code, message);
+                : failureHistory(snapshot, accumulator.unpersistedText(), accumulator.unpersistedReasoning(), code, message);
         boolean failurePersisted = false;
         // N2：快照还没建立（请求前压缩窗口）也要先问一次取消 —— 取消侧才是这一轮的终帧。
         if (snapshot == null || !RunSnapshot.DONE.equals(snapshot.getStatus())) {
@@ -4610,21 +4614,21 @@ public class ResilientChatService {
         private final StringBuilder text = new StringBuilder();
 
         /**
-         * 收尾纠正轮：把第一次已上屏正文/思考作为前缀种入本累加器。
+         * 收尾纠正轮：整轮正文与推理用于累计值，capture 只接收尚未持久化的推理段。
          *
          * <p>不置 {@code reasoningShown}（那不是本次上屏的），也不发新的帧；此后所有出口都按
          * "前缀 + 本次增量"统计与落库，与前端 delta 拼接一致。
          */
-        private void seedPrefix(String prefixText, String prefixReasoning) {
+        private void seedPrefix(String prefixText, String prefixReasoning, String prefixReasoningSegment) {
             if (prefixText != null) {
                 this.text.append(prefixText);
                 this.seededBodyChars += prefixText.length();
             }
             if (prefixReasoning != null) {
                 this.reasoning.append(prefixReasoning);
-                if (this.capture != null) {
-                    this.capture.appendReasoning(prefixReasoning);
-                }
+            }
+            if (this.capture != null && prefixReasoningSegment != null) {
+                this.capture.appendReasoning(prefixReasoningSegment);
             }
         }
 
@@ -4897,6 +4901,13 @@ public class ResilientChatService {
          */
         String unpersistedText() {
             return this.capture == null ? text() : this.capture.segmentText();
+        }
+
+        /**
+         * 当前尚未落库的推理段；与正文共用工具跳切段，不从整轮推理全文推算偏移。
+         */
+        String unpersistedReasoning() {
+            return this.capture == null ? reasoningText() : this.capture.reasoningText();
         }
 
         Map<String, Object> usage(int fallbackEstimate) {
