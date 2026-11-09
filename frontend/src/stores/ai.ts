@@ -179,6 +179,7 @@ let currentAbort: AbortController | null = null
  */
 let pendingAttachRunId: string | null = null
 const historyRequestGenerations = new Map<string, number>()
+const contextRequestGenerations = new Map<string, number>()
 const historyDoneRequestGenerations = new Map<string, number>()
 const unconfirmedHistoryRequestFloors = new Map<string, number>()
 const historyRequestsInFlight = new Map<string, number>()
@@ -5277,10 +5278,12 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const sid = this.sessionId
+      const requestGeneration = (contextRequestGenerations.get(sid) ?? 0) + 1
+      contextRequestGenerations.set(sid, requestGeneration)
       try {
         const snapshot = await aiApi.getContext(sid)
-        // 会话身份守卫（同 loadHistory 的红队 MAJOR-1 口径）：跨 await 期间换了会话即整体丢弃
-        if (this.sessionId !== sid) {
+        // 会话身份与请求代次对账：换会话或同会话已有更新请求时，旧响应整体丢弃。
+        if (this.sessionId !== sid || contextRequestGenerations.get(sid) !== requestGeneration) {
           return
         }
         if (snapshot.source === 'none') {

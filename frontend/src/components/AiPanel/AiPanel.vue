@@ -14,7 +14,7 @@
         <span
           v-for="delay in RECOVERY_DOT_DELAYS"
           :key="delay"
-          class="h-[4px] w-[4px] rounded-full bg-[#2563eb] animate-pulse motion-reduce:animate-none"
+          class="h-[4px] w-[4px] rounded-full bg-[#2563eb] recovery-loading-dot"
           :style="{ animationDelay: delay }"
         ></span>
       </span>
@@ -788,7 +788,7 @@
               <span
                 v-for="delay in RECOVERY_DOT_DELAYS"
                 :key="delay"
-                class="h-[4px] w-[4px] rounded-full bg-[#2563eb] animate-pulse motion-reduce:animate-none"
+                class="h-[4px] w-[4px] rounded-full bg-[#2563eb] recovery-loading-dot"
                 :style="{ animationDelay: delay }"
                 aria-hidden="true"
               ></span>
@@ -5370,5 +5370,26 @@ defineExpose({
 })
 </script>
 
-<!-- 本组件不持有 scoped 样式块：正文由渲染层注入工具类，呼吸与 chevron 使用模板类串，
-     动画归 tailwind.config.js，平滑回底使用内置 scroll-smooth。 -->
+<style scoped>
+.recovery-loading-dot {
+  animation: recovery-loading-pulse 1s ease-in-out infinite;
+}
+
+@keyframes recovery-loading-pulse {
+  0%, 70%, 100% {
+    opacity: .25;
+    transform: translateY(0);
+  }
+
+  35% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .recovery-loading-dot {
+    animation: none;
+  }
+}
+</style>

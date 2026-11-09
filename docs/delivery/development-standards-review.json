@@ -4767,6 +4767,38 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改流式文本、工具参数或Unicode解析。"},
         "verification-review": {"status": "checked", "reason": "施工文件IDEA Reformat成功；主会话最终node scripts/build.mjs通过，3280模块、Vite 25.47秒；动态场景和独立审查在推送后执行，当前NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:675e96c99b8ad18ee7388944277e3550ba024e65b267b605174eda3e90c3f499",
+      "status": "reviewed",
+      "reason": "逐hunk复核独立审查后的三点动效对齐及同会话context响应代次，agent-1169与agent-1167分别最终APPROVE。",
+      "reviewedAt": "2026-11-09T21:15:44+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1169与agent-1167、施工agent-1181与agent-1176",
+      "specChanges": [
+        {
+          "change": "三点恢复动效使用组件局部1秒透明度与上下位移关键帧，替代仅透明度的默认animate-pulse。",
+          "reason": "默认动画节奏与视觉表现不符合用户选定的demo。",
+          "impact": "展开与收起状态共用同一局部动画，0/150/300ms依次延迟，减少动态效果时停止，不改消息互斥逻辑。"
+        },
+        {
+          "change": "loadContext按sessionId登记请求代次，响应和镜像写入前同时校验会话与代次。",
+          "reason": "独立审查发现同会话慢旧响应可能覆盖快新结果，旧none也可能误清新占用。",
+          "impact": "仅最新请求可落值和写镜像，换会话及旧响应直接丢弃；失败保留旧值，最新权威none仍清空。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "两处恢复点共用scoped三点动画，节奏、位移、延迟和减少动态效果均与demo一致。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "新增context请求代次并与sessionId共同守卫赋值和writeMirrorNow，其他恢复逻辑不变。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用组件scoped样式和既有会话代次模式，无新增依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅前端Vue/TypeScript，无Java或JSON实体变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "旧响应和旧none直接丢弃，失败保留旧值，不掩盖或伪造服务端状态。"},
+        "toc-interaction": {"status": "checked", "reason": "三点动效与demo一致且不改变活动中/终态互斥，减少动态效果可用。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "同session请求按代次最新胜出，响应与镜像同步守卫，跨会话不串，无AI数据库交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本或流式解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1169与agent-1167最终APPROVE；两文件IDEA Reformat成功；主会话最终构建3281模块、Vite 26.84秒通过；动态验收NOT_RUN。"}
+      }
     }
   ]
 }
