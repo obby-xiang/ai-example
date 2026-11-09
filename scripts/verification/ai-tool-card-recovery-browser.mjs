@@ -1387,7 +1387,7 @@ class CdpPage {
       const pinia = app && app.__vue_app__ && app.__vue_app__.config.globalProperties.$pinia
       const ai = pinia && pinia._s.get('ai')
       return !!ai && ai.historyLoaded === true && ai.loading === false
-        && ai.restoringRecovery === false && !ai.activeRunId
+        && ai.restoringRecovery === false
     })()`, 'COMPOSER_NOT_READY', 30_000)
     const chatBaseline = this.requestCounts().chat
     const messageBaseline = (await this.messageState())?.messages ?? 0
