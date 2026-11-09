@@ -782,8 +782,17 @@ const browserObservationSource = String.raw`
     if (instance) {
       const name = instance.type?.name ?? instance.type?.__name ?? ''
       if (name === 'ExportWizardView' || name === 'export-wizard') return instance
+      const fromComponent = findExportInstance(instance.subTree)
+      if (fromComponent) return fromComponent
     }
-    return findExportInstance(vnode.subTree)
+    if (vnode.subTree) {
+      const fromSubTree = findExportInstance(vnode.subTree)
+      if (fromSubTree) return fromSubTree
+    }
+    if (Array.isArray(vnode.children)) {
+      return findExportInstance(vnode.children)
+    }
+    return null
   }
   let restoreProbeFailed = false
   const instrumentConditionEvents = () => {
@@ -813,7 +822,10 @@ const browserObservationSource = String.raw`
       }
       state.conditionInstrumentation.workspaceWrapped = true
     }
-    const instance = findExportInstance(app?.__vue_app__?._instance?.subTree)
+    const mountedRoot = app?.__vue_app__?._instance
+      ?? document.querySelector('#app')?.firstElementChild?.__vueParentComponent
+      ?? null
+    const instance = findExportInstance(mountedRoot?.subTree)
     if (instance && !instance.__conditionRecoveryRestoreWrapped) {
       const original = instance.setupState?.restoreExportTaskState
       if (typeof original !== 'function') {
@@ -2021,8 +2033,8 @@ async function recoveryView(browser) {
           if (rule.type === 7 && rule.name === 'recovery-loading-pulse') keyframeText = rule.cssText
         }
       }
-      const keyframesOpacity = /opacity\s*:/.test(keyframeText)
-      const keyframesTranslateY = /translateY\(/.test(keyframeText)
+      const keyframesOpacity = /opacity\\s*:/.test(keyframeText)
+      const keyframesTranslateY = /translateY\\(/.test(keyframeText)
       const first = getComputedStyle(spans[0])
       const customClassDots = spans.filter((element) => {
         const style = getComputedStyle(element)
