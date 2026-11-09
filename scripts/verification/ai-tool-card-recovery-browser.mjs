@@ -2276,9 +2276,12 @@ async function driveSkippedHostContinuation(context) {
       const createParts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool' && part.name === 'create_task')
       const terminal = ['succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
       const currentRunId = '${context.runId ?? ''}' || ai.activeRunId || null
+      const lastSubmitted = '${context.lastSubmittedFormToolCallId ?? ''}'
       const host = ai.messages.find((message) => message.role === 'assistant'
         && message.parts.some((part) => part.kind === 'tool' && part.name === 'create_task'))
       const hostRunMatches = !currentRunId || (host && host.runId === currentRunId)
+      const assistants = ai.messages.filter((message) => message.role === 'assistant')
+      const latest = assistants[assistants.length - 1] ?? null
       if (ai.loading === false && !active && ai.queuedForms.length === 0 && createParts.length > 0
         && createParts.every((part) => terminal.includes(part.status) && part.requiresAction === false)
         && host && host.done === true && hostRunMatches) return {terminal: true}
@@ -2312,11 +2315,25 @@ async function driveSkippedHostContinuation(context) {
     }
     await browser.click(`[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]`)
     submitted.push({toolCallId: form.toolCallId, purpose})
+    context.lastSubmittedFormToolCallId = form.toolCallId
     await browser.waitFor(`(() => {
       const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
       const part = ai.messages.flatMap((message) => message.parts).find((candidate) => candidate.toolCallId === '${form.toolCallId}')
       return part?.requiresAction === false && ai.activeForm?.toolCallId !== '${form.toolCallId}'
     })()`, 'SKIPPED_HOST_FORM_SUBMISSION_NOT_ACCEPTED')
+    // 提交后必须观察到续接轮真的开始（loading=true、新的宿主表单或 start_export 待决），
+    // 否则两段宿主表单之间的空档会被 terminal 分支误判为整轮结束。
+    try {
+      await browser.waitFor(`(() => {
+        const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+        const startPending = ai.messages.flatMap((message) => message.parts).some((part) => part.kind === 'tool'
+          && part.name === 'start_export' && part.status === 'pending' && part.requiresAction === true)
+        const nextForm = ai.activeForm?.toolCallId && ai.activeForm.toolCallId !== '${form.toolCallId}'
+        return ai.loading === true || startPending || !!nextForm || ai.queuedForms.length > 0
+      })()`, 'HOST_CONTINUATION_NOT_STARTED', 10_000)
+    } catch (error) {
+      if (!(error instanceof AssertionFailure)) throw error
+    }
   }
   throw new AssertionFailure('SKIPPED_HOST_FORM_DRIVE_LIMIT_EXCEEDED')
 }
