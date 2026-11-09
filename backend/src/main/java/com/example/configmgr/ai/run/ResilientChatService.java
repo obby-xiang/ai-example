@@ -2069,10 +2069,25 @@ public class ResilientChatService {
         String segment = accumulator.unpersistedText();
         AiContext latest = AiContext.fromMap(snapshot.getContext());
         List<Message> history = new ArrayList<>(this.codec.deserializeAll(snapshot.getMessageJson()));
-        if (StringUtils.isNotBlank(segment) && !isEndsWithAssistantText(history, segment)) {
-            history.add(assistantMessage(segment, storedReasoning(accumulator.unpersistedReasoning())));
+        int textIndex = -1;
+        if (StringUtils.isNotBlank(segment)) {
+            if (isEndsWithAssistantText(history, segment)) {
+                AssistantMessage existing = (AssistantMessage) history.getLast();
+                textIndex = existing.getMetadata().get(TranscriptEntries.TRANSCRIPT_TEXT_ID_KEY) == null ? -1
+                        : history.size() - 1;
+            } else {
+                textIndex = history.size();
+                AssistantMessage text = assistantMessage(segment, storedReasoning(accumulator.unpersistedReasoning()));
+                Map<String, Object> metadata = new LinkedHashMap<>(text.getMetadata());
+                metadata.put(TranscriptEntries.TRANSCRIPT_TEXT_ID_KEY, java.util.UUID.randomUUID().toString());
+                history.add(AssistantMessage.builder().content(text.getText()).properties(metadata).build());
+            }
         }
-        return this.conditionsForm.parkIfDueAtQueryCond(runId, latest, history);
+        boolean parked = this.conditionsForm.parkIfDueAtQueryCond(runId, latest, history);
+        if (parked && textIndex >= 0) {
+            recordParkedWrapUpText(runId, snapshot, history, textIndex);
+        }
+        return parked;
     }
 
     private boolean isConditionWorkflowEvidence(String runId, Long currentTaskId) {
@@ -3871,6 +3886,30 @@ public class ResilientChatService {
                     snapshot.getRunEpoch());
         } catch (RuntimeException ex) {
             log.warn("transcript user entry write failed runId={} (turn unaffected)", runId, ex);
+        }
+    }
+
+    private void recordParkedWrapUpText(String runId, RunSnapshot snapshot, List<Message> history, int textIndex) {
+        if (this.transcript == null) {
+            throw new StreamViolationException(ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED,
+                    "Transcript store unavailable for parked wrap-up text runId=" + runId);
+        }
+        String entryId = TranscriptEntries.textEntryId(runId, (AssistantMessage) history.get(textIndex), textIndex);
+        List<TranscriptEntry> entries = new ArrayList<>(buildTerminalEntries(runId, snapshot, history, false).stream()
+                .filter(entry -> entryId.equals(entry.entryId())).toList());
+        if (entries.size() != 1) {
+            throw new StreamViolationException(ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED,
+                    "Parked wrap-up text projection missing runId=" + runId + " entryId=" + entryId);
+        }
+        entries = completeTimeline(runId, snapshot, entries, false);
+        if (entries == null) {
+            throw new StreamViolationException(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE,
+                    "Parked wrap-up text timeline incomplete runId=" + runId + " entryId=" + entryId);
+        }
+        if (!this.transcript.append(snapshot.getSessionId(), snapshot.getTenantId(), snapshot.getUserId(), entries,
+                snapshot.getRunEpoch())) {
+            throw new StreamViolationException(ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED,
+                    "Parked wrap-up text append rejected runId=" + runId + " entryId=" + entryId);
         }
     }
 

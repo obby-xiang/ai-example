@@ -5076,6 +5076,38 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "仅恢复队列和表单状态，未修改文本或流式解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；ai.ts IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，最终32.39秒；动态GF矩阵NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:fa482583d015ba52f222168c97d722ede4bc4f6015bbc71354f0dbb9cdd25384",
+      "status": "reviewed",
+      "reason": "逐hunk复核挂起纯文本transcript写点、真实seq映射和跨resume稳定身份；独立审查agent-1198两轮后最终APPROVE。",
+      "reviewedAt": "2026-11-10T07:33:12+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1198、施工agent-1200",
+      "specChanges": [
+        {
+          "change": "模型正文收尾并成功挂起条件表后，立即将独立纯文本assistant追加到transcript，保持非终态。",
+          "reason": "原实现只写messageJson，未批准start_export时成功终态写点不会执行，权威history永久缺正文。",
+          "impact": "挂起、resume、pending与刷新均保留正文，不重放或改写既有工具条目，append失败保持SUSPENDED可恢复。"
+        },
+        {
+          "change": "新挂起纯文本assistant使用additive transcriptTextId作为entryId后缀，旧快照仍回退history index。",
+          "reason": "压缩裁旧轮和前缀移除会使text-index漂移，终态可能重复正文或身份错归。",
+          "impact": "公开runId:assistant:text-suffix形态不变，批准/取消/失败及Redis未知重试均按同entryId幂等更新。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "复核park成功后的写点、稳定ID生成、buildTerminalEntries/completeTimeline和append失败路径。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntries.java", "status": "checked", "reason": "统一textEntryId优先transcriptTextId并回退index，旧条目和公开ID格式保持兼容。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用buildTerminalEntries、completeTimeline和ConversationTranscriptStore.append，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "新增textEntryId统一映射，metadata defensive copy，控制块显式{}，未改JSON实体字段。"},
+        "logging-exception-safety": {"status": "checked", "reason": "装配/投影/时间线/append失败均抛真实AI_TRANSCRIPT错误并保留挂起，不伪装成功。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复后正文不再消失，未批准卡保持原交互，不新增提示或正文副本。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "稳定entryId保证跨resume和终态幂等，Redis未知结果可重试，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "复用真实文本段和seq映射，不重新切分或转码正文。"},
+        "verification-review": {"status": "checked", "reason": "agent-1198最终APPROVE；两文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译358个主源BUILD SUCCESS；动态挂起场景NOT_RUN。"}
+      }
     }
   ]
 }

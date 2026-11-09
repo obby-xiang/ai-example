@@ -156,6 +156,15 @@ public final class TranscriptEntries {
         return currentRunStart;
     }
 
+    public static final String TRANSCRIPT_TEXT_ID_KEY = "transcriptTextId";
+
+    public static String textEntryId(String runId, AssistantMessage assistant, int index) {
+        Object stableId = assistant.getMetadata() == null ? null : assistant.getMetadata().get(TRANSCRIPT_TEXT_ID_KEY);
+        String suffix = stableId == null || StringUtils.isBlank(String.valueOf(stableId))
+                ? String.valueOf(index) : String.valueOf(stableId);
+        return entryId(runId, "assistant", "text-" + suffix);
+    }
+
     private static TranscriptEntry assistantEntry(AssistantMessage assistant, int index, int currentRunStart,
                                                   int lastAssistant, boolean includeLastAssistant, Map<String, PendingToolCall> pendings, String runId,
                                                   long turnStartedAtMs, long atMs) {
@@ -174,8 +183,7 @@ public final class TranscriptEntries {
         }
         List<TranscriptEntry.ToolCallView> calls = toolCalls(assistant);
         Map<String, Object> states = mapOf(metadata, TOOL_CALL_STATES_KEY);
-        String entryId = calls.isEmpty() ? entryId(runId, "assistant", "text-" + index)
-                : assistantEntryId(runId, calls);
+        String entryId = calls.isEmpty() ? textEntryId(runId, assistant, index) : assistantEntryId(runId, calls);
         return new TranscriptEntry(entryId, "assistant", runId, turnStartedAtMs, atMs, assistant.getText(),
                 stringOf(metadata, REASONING_KEY),
                 metadata != null && Boolean.TRUE.equals(metadata.get(STOPPED_KEY)) ? Boolean.TRUE : null,
