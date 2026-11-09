@@ -159,6 +159,8 @@ export interface AiSendResult {
   outcome: AiSendOutcome
   /** 本轮新记录的用户消息 id；发送前早退时为 null。 */
   userMessageId: string | null
+  /** 410 本地换号后允许回稿的目标身份/会话键；其他失败或后续再换会话不得回稿。 */
+  composerRestoreSessionKey?: string
 }
 
 /**
@@ -2219,6 +2221,53 @@ function isCurrentMirror(mirror: AiSessionMirror): boolean {
     && mirror.messages.every((message) => Array.isArray(message?.parts))
 }
 
+interface ComposerDraftOwnerState {
+  sessionId: string
+  sessionIdentity: AiIdentity | null
+  composerDraft: string
+  composerDraftOwnerKey: string | null
+  composerDraftHydrated: boolean
+  composerDraftMirrorRead: boolean
+  composerDraftDirty: boolean
+}
+
+function composerDraftOwnerKeyOf(state: Pick<ComposerDraftOwnerState, 'sessionId' | 'sessionIdentity'>): string {
+  return `${state.sessionId}\0${identityFingerprint(state.sessionIdentity)}`
+}
+
+function ensureComposerDraftOwner(state: ComposerDraftOwnerState): void {
+  const ownerKey = composerDraftOwnerKeyOf(state)
+  if (state.composerDraftOwnerKey === ownerKey) {
+    return
+  }
+  state.composerDraftOwnerKey = ownerKey
+  state.composerDraft = ''
+  state.composerDraftHydrated = false
+  state.composerDraftMirrorRead = false
+  state.composerDraftDirty = false
+}
+
+function inheritPendingComposerDraftOnFirstIssue(state: ComposerDraftOwnerState, issuedSessionId: string): void {
+  if (!state.composerDraftDirty || state.sessionId !== '') {
+    return
+  }
+  const identityKey = identityFingerprint(state.sessionIdentity)
+  if (state.composerDraftOwnerKey !== `\0${identityKey}`) {
+    return
+  }
+  state.composerDraftOwnerKey = `${issuedSessionId}\0${identityKey}`
+  state.composerDraftHydrated = false
+  state.composerDraftMirrorRead = false
+}
+
+function mirrorMessagesForWrite(mirror: AiSessionMirror): ChatMessage[] {
+  return mirror.messages.map((message) => ({
+    ...message,
+    streaming: false,
+    done: true
+  }) as ChatMessage)
+}
+
 /**
  * 对话时序包 批2 前置（GLM o1）：镜像读取侧的 requiresAction 残留收口。
  *
@@ -2635,7 +2684,7 @@ function isStepAlreadyReached(
  *   {@link MIRROR_MAX_CHARS}（从最旧开始丢；更早内容只剩服务端 Redis 记忆窗口，不再落库补齐）。最后一条助手 /
  *   最后一条用户 / 最新一条不受字符预算约束（`mirrorBoundedMessages`），保证在途轮
  *   「提问 + 半截回答」不被拆散；
- * - **不重复写**：现场（消息 + lastRunId + inFlight + runSeq）与上次落盘一致时**整次 no-op**，
+ * - **不重复写**：现场（消息 + lastRunId + inFlight + runSeq + composerDraft）与上次落盘一致时**整次 no-op**，
  *   `savedAt` 不前进（与既有"无改动不回写"的幂等断言同口径）；
  * - **配额失败一次性可见**：写失败落一次通知（同一故障段不刷屏，成功写盘后再次失败可重新提示）。
  * 消息字段映射（含 errorCard/code/runId/思考 timing 剔除本地锚）与旧镜像逐字一致，读侧零改动。
@@ -2857,6 +2906,7 @@ interface MirrorWriteMemo {
   clientRequestId: string | null
   clientRequestStopped: boolean
   contextUsageJson: string
+  composerDraft: string
 }
 
 /** 每个 store 实例一份"上次落盘现场"（WeakMap：新 store / 换会话自然失效）。 */
@@ -2875,7 +2925,8 @@ function mirrorMemoOf(owner: object): MirrorWriteMemo {
       stoppedRunId: null,
       clientRequestId: null,
       clientRequestStopped: false,
-      contextUsageJson: 'null'
+      contextUsageJson: 'null',
+      composerDraft: ''
     }
     mirrorWriteMemos.set(owner, memo)
   }
@@ -2912,6 +2963,7 @@ function writeMirror(
     clientRequestId?: string | null
     clientRequestStopped?: boolean
     contextUsage?: ContextUsage | null
+    composerDraft?: string
   } = {}
 ): MirrorWriteOutcome {
   const inFlight = extra.inFlight === true
@@ -2919,6 +2971,7 @@ function writeMirror(
   const clientRequestId = extra.clientRequestId ?? null
   const clientRequestStopped = extra.clientRequestStopped === true
   const contextUsageJson = JSON.stringify(extra.contextUsage ?? null)
+  const composerDraft = extra.composerDraft ?? ''
   const memo = mirrorMemoOf(sink)
   let messageJsons: string[] = []
   let runSeqJson = 'null'
@@ -2936,13 +2989,14 @@ function writeMirror(
       && memo.clientRequestId === clientRequestId
       && memo.clientRequestStopped === clientRequestStopped
       && memo.contextUsageJson === contextUsageJson
+      && memo.composerDraft === composerDraft
       && memo.messages.length === messageJsons.length
       && memo.messages.every((json, index) => json === messageJsons[index])
     ) {
       return 'unchanged'
     }
 
-    // 信封照旧（v/savedAt/lastRunId/inFlight/runSeq + additive 停止闭环键），messages 直接拼
+    // 信封携带版本、运行现场与可选草稿；messages 直接拼
     // **已序列化**的单条 JSON，不再把整棵镜像对象交给一次全量 stringify。
     const envelope = JSON.stringify({
       v: MIRROR_VERSION,
@@ -2953,7 +3007,8 @@ function writeMirror(
       ...(stoppedRunId !== null ? { stoppedRunId } : {}),
       ...(clientRequestId !== null ? { clientRequestId } : {}),
       ...(clientRequestStopped ? { clientRequestStopped: true } : {}),
-      ...(extra.contextUsage !== undefined ? { contextUsage: extra.contextUsage } : {})
+      ...(extra.contextUsage !== undefined ? { contextUsage: extra.contextUsage } : {}),
+      ...(composerDraft !== '' ? { composerDraft } : {})
     })
     payload = `${envelope.slice(0, -1)},"messages":[${messageJsons.join(',')}]}`
   } catch (error) {
@@ -2974,6 +3029,7 @@ function writeMirror(
     memo.clientRequestId = clientRequestId
     memo.clientRequestStopped = clientRequestStopped
     memo.contextUsageJson = contextUsageJson
+    memo.composerDraft = composerDraft
     mirrorFailureNotified.delete(sink)
     // 故障恢复后清掉**自己留下的**降级提示（不误清别的通知）。
     if (sink.noticeCode === MIRROR_STORAGE_NOTICE) {
@@ -4429,6 +4485,11 @@ export const useAiStore = defineStore('ai', {
     /** AI 面板是否展开（裁剪性：收起后业务照常；同源布局偏好，刷新及其他页签保持用户选择） */
     expanded: canInitExpanded(),
     messages: [] as ChatMessage[],
+    composerDraft: '',
+    composerDraftOwnerKey: null as string | null,
+    composerDraftHydrated: false,
+    composerDraftMirrorRead: false,
+    composerDraftDirty: false,
     /** 是否有轮次在进行 */
     loading: false,
     /** 当前轮 runId（来自 start 帧） */
@@ -5108,7 +5169,7 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 启动会话镜像：messages 任何变化（含流式 token）**节流**写入 sessionStorage。
+     * 启动会话镜像：messages / composerDraft 任何变化（含流式 token）**节流**写入 sessionStorage。
      *
      * <p>
      * 批G · G4：原先是**防抖**（每个 token 都 clearTimeout 重排 300ms）—— 只要帧间间隔 < 300ms，
@@ -5163,22 +5224,22 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
+    setComposerDraft(value: string): void {
+      ensureComposerDraftOwner(this)
+      this.composerDraft = value
+      this.composerDraftDirty = true
+    },
+
     /**
      * 立即落盘（throttle 的 leading / trailing、pagehide、stop() 共用唯一写口）。
-     *
-     * <p>
-     * 批G · R2（真机回归）：**启动期空态不是"确实为空"，而是"还没读"** —— 面板挂载时
-     * `startMirror()` 先装订阅，`ensureTabOwnership()` 的任何 state 变更（写 `tabOwnership` 就会
-     * 触发）都会以此刻的 `messages=[]` 立即落盘，把上一页签留下的持久化镜像清空；紧接着
-     * `loadHistory()` 的 `readMirror` 读到空镜像，G3 合并在途轮空转（真机打点顺序
-     * `SET n=0 → GET n=0 → SET n=3`）。故 `historyLoaded` 之前的空态一律不写：
-     * 那时镜像里若有内容，只能来自另一次更完整的现场，任何本地空态都无权覆盖它。
+     * 未初始化且没有本地修改时不写，防止空内存覆盖旧镜像；已有修改时允许只合并草稿，
+     * 慢 history / 恢复期和 pagehide 都沿用镜像里的消息与运行元数据，不另建持久化。
      */
     writeMirrorNow(): void {
-      if (this.restoringRecovery) {
-        return
-      }
-      if (!this.historyLoaded && this.messages.length === 0) {
+      ensureComposerDraftOwner(this)
+      const preserveMirror = this.restoringRecovery || (this.messages.length === 0
+        && (!this.composerDraftMirrorRead || !this.historyLoaded || this.historyError !== null))
+      if (preserveMirror && !this.composerDraftDirty) {
         return
       }
       // Task 4：没有后端发号的会话、或会话归属身份已与当前身份不一致（切换在途）⇒ 不落盘，
@@ -5186,7 +5247,11 @@ export const useAiStore = defineStore('ai', {
       if (this.sessionId === '' || !isSameIdentity(this.identity, this.sessionIdentity)) {
         return
       }
-      const outcome = writeMirror(this, this.sessionId, this.messages, this.activeRunId, {
+      const mirror = preserveMirror ? readMirror(this.sessionId) : null
+      const preserved = mirror !== null && isCurrentMirror(mirror) ? mirror : null
+      const outcome = writeMirror(this, this.sessionId,
+        preserved === null ? this.messages : mirrorMessagesForWrite(preserved),
+        preserved === null ? this.activeRunId : preserved.lastRunId ?? null, {
         // 批G · R4（真机回归）：**挂起态也是在途** —— B1「挂起即断」把挂起轮写成
         // `loading=false && suspended=true`（收流了，但这一轮还在等人决策）。只看 loading 会把
         // "还在等决策的一轮"标成不在途，刷新后 `mergeMirrorInFlightRound` 首行直接返回，
@@ -5196,17 +5261,23 @@ export const useAiStore = defineStore('ai', {
         // interrupted，若只看 loading，镜像会把断流轮的半截回答标成"不在途"，刷新后被历史
         // 整体替换且不出现「继续」。只认**末条** assistant（新轮一开始就不再命中）。
         // 表单填写/提交/已受理与续跑建连也是在途；已取消表单不算。
-        inFlight: (this.loading || this.suspended || isLastAssistantInterrupted(this.messages)
-          || (this.activeForm !== null && this.activeForm.status !== 'cancelled')
-          || pendingAttachRunId !== null) && !this.stopped,
-        runSeq: this.runSeq,
+        inFlight: preserved !== null ? preserved.inFlight === true
+          : (this.loading || this.suspended || isLastAssistantInterrupted(this.messages)
+            || (this.activeForm !== null && this.activeForm.status !== 'cancelled')
+            || pendingAttachRunId !== null) && !this.stopped,
+        runSeq: preserved === null ? this.runSeq : preserved.runSeq,
         // run 级停止墓碑：cancel 可能失败（后端不可达），刷新后靠它拒绝自动接回这一轮。
-        stoppedRunId: this.stoppedRunId,
+        stoppedRunId: preserved === null ? this.stoppedRunId : preserved.stoppedRunId,
         // 停止闭环：发送前生成的 clientRequestId 与"本端已停止"事实（即使 runId 未知）。
-        clientRequestId: this.pendingClientRequestId,
-        clientRequestStopped: this.clientRequestStopped,
-        contextUsage: this.contextUsage
+        clientRequestId: preserved === null ? this.pendingClientRequestId : preserved.clientRequestId,
+        clientRequestStopped: preserved === null ? this.clientRequestStopped : preserved.clientRequestStopped,
+        contextUsage: preserved === null ? this.contextUsage : preserved.contextUsage,
+        composerDraft: this.composerDraft
       })
+      if (outcome !== 'error') {
+        this.composerDraftMirrorRead = true
+        this.composerDraftDirty = false
+      }
       // 批次7B：去重命中（现场未变）不推进节流锚 —— 下一次真实变化应尽快落盘。
       if (outcome !== 'unchanged') {
         mirrorLastWriteAt = Date.now()
@@ -5440,7 +5511,15 @@ export const useAiStore = defineStore('ai', {
       // 三个现场判据（loading/suspended/currentAbort）都已复位，只有它还能证明"真轮占过场"。
       const roundStartAtEntry = roundStartSeq
       this.startMirror()
+      ensureComposerDraftOwner(this)
       const mirror = readMirror(this.sessionId)
+      this.composerDraftMirrorRead = true
+      if (!inFlightAtEntry && !this.composerDraftHydrated) {
+        if (!this.composerDraftDirty) {
+          this.composerDraft = mirror?.composerDraft ?? ''
+        }
+        this.composerDraftHydrated = true
+      }
       if (mirror?.contextUsage !== undefined) {
         this.contextUsage = mirror.contextUsage
       }
@@ -5521,7 +5600,8 @@ export const useAiStore = defineStore('ai', {
             stoppedRunId: this.stoppedRunId,
             clientRequestId: this.pendingClientRequestId,
             clientRequestStopped: this.clientRequestStopped,
-            contextUsage: this.contextUsage
+            contextUsage: this.contextUsage,
+            composerDraft: this.composerDraft
           })
         }
       }
@@ -8315,6 +8395,8 @@ export const useAiStore = defineStore('ai', {
 
       /** error 终帧会让 `aiApi.chat` 正常 resolve（不是 reject）；用本轮局部标记与开流前 catch 区分。 */
       let sawErrorTerminal = false
+      /** 410 是否由本处完成了本地换号；最终结果只允许回到这个目标会话。 */
+      let purgedRecovered = false
       /** 批次2（F6）：本轮是否已收到**任何**帧 —— 有产出后一律不重试（非零副作用）。 */
       let sawAnyFrame = false
       /** B1：本轮收尾是否为"挂起导致的服务端收流"（正常收尾）—— finally 据此保留 suspended。 */
@@ -8555,8 +8637,6 @@ export const useAiStore = defineStore('ai', {
           // 因此这里照旧：能证明是本端已停的轮（stoppedRunId）或已终态的轮才不算"仍在进行中"。
           this.busyRun = this.isAuthoritativeBusyRun(busy) ? busy : null
         }
-        /** 410 是否由本处做了本地恢复（决定收尾口径与乐观气泡的去向）。 */
-        let purgedRecovered = false
         if (sessionPurged) {
           // 410 SESSION_PURGED = 服务端已销毁该 sessionId（`/chat` 开新轮前的销毁守卫）。
           // 唯一出路是**本地**换新 id：复用 adoptFreshSession（换 id + 清现场：镜像/乐观气泡/在途轮），
@@ -8640,7 +8720,13 @@ export const useAiStore = defineStore('ai', {
           }
         }
       }
-      return { outcome, userMessageId }
+      return {
+        outcome,
+        userMessageId,
+        ...(purgedRecovered
+          ? { composerRestoreSessionKey: `${this.sessionId}\0${identityFingerprint(this.sessionIdentity)}` }
+          : {})
+      }
     },
 
     /**
@@ -12466,8 +12552,9 @@ export const useAiStore = defineStore('ai', {
         if (this.noticeCode === 'ai.notice.sessionIssueFailed') {
           clearNotice(this)
         }
-        this.sessionId = issued
         this.sessionIdentity = identity
+        inheritPendingComposerDraftOnFirstIssue(this, issued)
+        this.sessionId = issued
         try {
           sessionStorage.setItem(sessionIdStorageKey(identity), issued)
         } catch (error) {
@@ -12596,6 +12683,8 @@ export const useAiStore = defineStore('ai', {
       // 换会话/换身份 ⇒ 上一次发号失败的结论不带走（新窗口重新判定）。
       this.sessionIssueFailed = false
       this.messages = []
+      this.composerDraftOwnerKey = null
+      ensureComposerDraftOwner(this)
       this.activeRunId = null
       // B2：帧序号锚点属于旧会话的旧 run —— 换会话即清（否则长会话里 runId→seq 只增不减）
       this.runSeq = {}

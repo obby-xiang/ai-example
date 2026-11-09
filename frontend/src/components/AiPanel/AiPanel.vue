@@ -1301,6 +1301,7 @@ import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type Mess
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
+import { identityFingerprint } from '@/utils/ai-identity'
 import { parseToolArgs } from '@/utils/frontend-tools'
 import type { SheetAppliedSummary } from '@/utils/sheet-tools'
 import type { FormSpec } from '@/types/form-schema'
@@ -1576,7 +1577,12 @@ function continueTurn(_message: ChatMessage): void {
   void ai.send(t('ai.panel.continue'))
 }
 
-const inputText = ref('')
+const inputText = computed({
+  get: () => ai.composerDraft,
+  set: (value: string) => {
+    ai.setComposerDraft(value)
+  }
+})
 /**
  * 安全防护专项批①：单条消息的字符上限——与后端 {@code app.ai.input.max-chars}（2000）**同值同尺**
  * （判据 = UTF-16 码元数，即 JS `String#length` / `<textarea maxlength>` 的计数口径，中文按 1 字算）。
@@ -4631,15 +4637,23 @@ function readOnlyFormValues(part: ToolPart): Record<string, unknown> | null {
 }
 
 /**
- * 发送代次（L-83）：每次 `send()` 领一个自增号，收尾只有**仍是当代**时才可写输入框。
+ * 发送/会话代次（L-83）：每次 `send()` 领一个自增号，收尾只有**仍是当代**时才可写输入框；
+ * 会话或身份变化同步作废旧发送，防止迟到回稿进入新会话。
  *
  * <p>为什么需要：停止与回车同 tick 的竞态里，"被停止的旧轮"与"刚发出的新轮"两个 `send()`
  * 同时在飞。旧轮的 `ai.send()` 因轮次身份被换掉而收尾为 `interrupted`（不是 `cancelled`），
  * 于是走失败还原把**旧轮自己的草稿**（= 上一条用户消息）写回输入框；新轮随后被 409 拒，
  * 其还原又被 `inputText !== ''`（误判成"用户刚输入了新内容"）挡掉 ⇒ 用户刚打的草稿被
- * 上一条用户消息静默覆盖。代次判定把"输入框的主人"收窄成**最后一次发送**。
+ * 上一条用户消息静默覆盖。代次判定把"输入框的主人"收窄成**最后一次发送与当前会话**。
  */
 let sendGeneration = 0
+watch(
+  () => [ai.sessionId, ai.identity?.tenantId, ai.identity?.userId],
+  () => {
+    sendGeneration += 1
+  },
+  { flush: 'sync' }
+)
 
 async function send(): Promise<void> {
   const draft = inputText.value
@@ -4663,9 +4677,11 @@ async function send(): Promise<void> {
   inputText.value = ''
   composerRef.value?.focus({ preventScroll: true })
   const result = await ai.send(text)
-  // 已被更晚的发送取代：这一轮不再拥有输入框 —— 草稿一律不写（L-83：否则旧轮的
-  // 还原会把上一条用户消息盖到新轮草稿上，新轮再因"输入框非空"放弃还原）。
-  if (generation !== sendGeneration) {
+  // 已被更晚的发送或外部换会话取代：这一轮不再拥有输入框。410 本地换号只放行
+  // 结果明确绑定、且仍是当前身份/会话的回稿；其后再次换会话同样不得回稿。
+  const canRestoreRecoveredDraft = result.composerRestoreSessionKey !== undefined
+    && result.composerRestoreSessionKey === `${ai.sessionId}\0${identityFingerprint(ai.identity)}`
+  if (generation !== sendGeneration && !canRestoreRecoveredDraft) {
     return
   }
   // 成功 / 主动停止：草稿保持已清空（既有口径：停止不是失败，不把刚发出去的文本塞回输入框）。

@@ -5108,6 +5108,44 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "复用真实文本段和seq映射，不重新切分或转码正文。"},
         "verification-review": {"status": "checked", "reason": "agent-1198最终APPROVE；两文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译358个主源BUILD SUCCESS；动态挂起场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:d50ebcd1bcae6cc14cf636fe04ed3f4234bcf0f4bfcc4fd51b1b4d093ac61468",
+      "status": "reviewed",
+      "reason": "逐hunk复核composer草稿镜像、单次水合、慢history合并写、发送代次及首次发号继承；独立审查agent-1189多轮后最终APPROVE。",
+      "reviewedAt": "2026-11-10T07:54:41+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1189、施工agent-1207",
+      "specChanges": [
+        {
+          "change": "composerDraft纳入既有身份隔离的sessionStorage镜像，消息不变时也保存草稿，空消息会话同样恢复。",
+          "reason": "原草稿仅在组件本地，刷新即丢，空消息和慢history下pagehide也无法保存。",
+          "impact": "旧镜像缺字段按空草稿兼容，不写数据库或Redis，镜像净化回写和memo均保留草稿。"
+        },
+        {
+          "change": "草稿按身份+会话只水合一次并记录dirty，慢history只合并草稿字段，保留旧镜像消息与运行元数据。",
+          "reason": "重复history会用旧镜像回滚节流窗口内的新输入或主动清空，空内存也可能覆盖旧消息。",
+          "impact": "重复history不回滚，写失败保留dirty可重试，恢复完成后仍按真实完整现场回写。"
+        },
+        {
+          "change": "发送代次同时绑定会话身份，410回稿绑定目标会话；空sessionId首次发号时仅继承pending dirty草稿。",
+          "reason": "外部切换或首次发号可能让迟到大回包覆盖新输入，或清空等待发号期间的草稿。",
+          "impact": "新建/切换/复制页签保持隔离，410后新输入不被旧稿覆盖，发号失败或过期不继承。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "inputText统一setComposerDraft，发送/会话代次与410回稿身份校验完整。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "复核草稿owner/hydration/dirty、镜像合并、发送结果和首次发号继承全生命周期。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "AiSessionMirror仅新增可选composerDraft，旧镜像兼容且未引入敏感字段。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有sessionStorage镜像、发送代次和身份机制，无新增依赖或持久化通道。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript/Vue和镜像类型additive变化，无Java或后端JSON实体变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "镜像写失败保留dirty并可重试，不记录草稿内容，不伪造保存成功。"},
+        "toc-interaction": {"status": "checked", "reason": "未发送草稿跨刷新保留，用户主动清空和新输入不被旧值覆盖，无新增提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "草稿按身份/会话/代次隔离，旧history与回包不得覆盖新输入，无AI数据库或Redis交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "仅保存完整字符串草稿，未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；三文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，最终30.07秒；动态草稿场景NOT_RUN。"}
+      }
     }
   ]
 }

@@ -1036,6 +1036,8 @@ export interface AiSessionMirror {
   clientRequestStopped?: boolean
   /** 最后一次已知的上下文占用摘要（additive 可选键；缺省 = 旧镜像/未知）。 */
   contextUsage?: ContextUsage | null
+  /** 当前会话尚未发送的输入草稿（additive 可选键；缺省 = 旧镜像/空草稿）。 */
+  composerDraft?: string
 }
 
 /**
