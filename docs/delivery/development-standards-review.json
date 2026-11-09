@@ -4454,6 +4454,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "原始chunk只在内存按完整SSE事件解析，文本使用UTF-8 SHA-256与Unicode码点长度，不做二次转码。"},
         "verification-review": {"status": "checked", "reason": "agent-1158与agent-1159最终APPROVE；两个脚本node --check及diff --check通过，五CASE和self-check均NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:72a6b58165c37ba7ce6b60c950efa993f830a368d674832f8bc357d7a66e626a",
+      "status": "reviewed",
+      "reason": "复核新增控制语句大括号规则，明确适用语言、控制结构和单行语句边界，并纳入后续逐hunk提交审查。",
+      "reviewedAt": "2026-11-09T11:10:02+08:00",
+      "reviewer": "K3.1 Pro主会话",
+      "specChanges": [
+        {
+          "change": "所有if/else/for/while/do-while等判断或循环控制语句的代码块必须显式使用{}，单语句和同行写法也不例外。",
+          "reason": "用户新增统一开发规范，避免无大括号单语句分支造成逻辑归属不清和审查遗漏。",
+          "impact": "适用于Java、TypeScript、JavaScript、Vue及其他代码文件；后续新增和修改代码均按此门禁审查。"
+        }
+      ],
+      "files": [
+        {"path": "docs/delivery/development-standards.md", "status": "checked", "reason": "在Java与通用代码形态中新增控制语句大括号规则及跨语言适用范围，未改变其他规范。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "本批仅开发规范文本，无依赖变化。"},
+        "java-api-style": {"status": "checked", "reason": "新增判断与循环代码块必须显式使用大括号的规则，覆盖单行和单语句场景。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "本批不修改日志或异常规范。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批不修改ToC设计或交互规范。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "本批不修改协议、Redis或并发规范。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改Unicode或流式解析规范。"},
+        "verification-review": {"status": "checked", "reason": "仅规范文档变更，后续提交按新增大括号规则逐hunk审查；无动态验证需求。"}
+      }
     }
   ]
 }

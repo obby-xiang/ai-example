@@ -69,6 +69,7 @@
 
 ### 3.3 命名、集合访问与 import
 
+- 所有 `if/else/for/while/do-while` 等判断或循环控制语句的代码块必须显式使用 `{}`，即使块内只有一条语句、可以与条件写在同一行，也不得省略。禁止 `if (condition) return`、`else return`、`for (...) action()` 等无大括号写法；不得通过无大括号单语句分支规避逻辑审查。该规则适用于 Java、TypeScript、JavaScript、Vue 及其他代码文件。
 - 布尔方法使用 `is`、`has`、`can`、`should`、`get`、`contains`、`lock` 之一作为前缀。使用 `get` 或 `lock` 时必须确认语义确为布尔读取或锁状态获取，不得为了迎合名单制造误导名称。
 - 布尔 getter 改名或新增时，必须检查 JavaBean、Jackson、JSON 字段、Map 序列化、前端类型及持久化投影，避免 `isX`/`getX` 被序列化成不同字段或重复字段。
 - JDK 21 顺序集合首尾元素使用 `getFirst()` / `getLast()`，不再写 `get(0)` / `get(size() - 1)`；调用前仍须处理空集合。
