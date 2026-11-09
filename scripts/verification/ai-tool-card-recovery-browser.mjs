@@ -786,7 +786,7 @@ const browserObservationSource = String.raw`
       let rules
       try { rules = sheet.cssRules } catch { continue }
       for (const rule of rules) {
-        if (rule.type === 7 && rule.name === 'recovery-loading-pulse') keyframeText = rule.cssText
+        if (rule.type === 7 && (rule.name === 'recovery-loading-pulse' || rule.name.startsWith('recovery-loading-pulse-'))) keyframeText = rule.cssText
       }
     }
     const keyframesOpacity = /opacity\s*:/.test(keyframeText)
@@ -795,7 +795,7 @@ const browserObservationSource = String.raw`
     const customClassDots = spans.filter((element) => {
       const style = getComputedStyle(element)
       return element.classList.contains('recovery-loading-dot') && (element.textContent ?? '').trim() === ''
-        && style.animationName === 'recovery-loading-pulse' && style.animationDuration === '1s'
+        && /^recovery-loading-pulse(-[0-9a-f]{6,8})?$/.test(style.animationName) && style.animationDuration === '1s'
     }).length
     return {
       customClassDots,
@@ -1031,6 +1031,9 @@ class CdpPage {
     this.runCurrentRequests = []
     this.cdpErrors = []
     this.evidenceLimitExceeded = false
+    // Fetch 在 Network.requestWillBeSent 之前暂停时还没有跟踪记录；注入的 503 必须暂存，
+    // 等 Network 事件建记录后回填，否则证据面会出现"503 但 injectedStatus=null"的漏记。
+    this.pendingInjectedFaults = new Map()
     this.historySequence = 0
     this.contextSequence = 0
     this.runCurrentSequence = 0
@@ -1162,7 +1165,7 @@ class CdpPage {
           return
         }
         this.historySequence += 1
-        this.historyRequests.push({
+        this.historyRequests.push(this.attachInjectedFault({
           sequence: this.historySequence,
           requestId: params.requestId,
           phase: this.phase,
@@ -1173,7 +1176,7 @@ class CdpPage {
           responseStatus: null,
           finished: false,
           errorName: null
-        })
+        }))
       }
       if (url.pathname.startsWith('/api/ai/context/')) {
         if (this.contextRequests.length >= HISTORY_REQUEST_LIMIT) {
@@ -1182,7 +1185,7 @@ class CdpPage {
           return
         }
         this.contextSequence += 1
-        this.contextRequests.push({
+        this.contextRequests.push(this.attachInjectedFault({
           sequence: this.contextSequence,
           requestId: params.requestId,
           phase: this.phase,
@@ -1193,7 +1196,7 @@ class CdpPage {
           responseStatus: null,
           finished: false,
           errorName: null
-        })
+        }))
       }
       if (url.pathname === '/api/ai/runs/current') {
         if (this.runCurrentRequests.length >= HISTORY_REQUEST_LIMIT) {
@@ -1202,7 +1205,7 @@ class CdpPage {
           return
         }
         this.runCurrentSequence += 1
-        this.runCurrentRequests.push({
+        this.runCurrentRequests.push(this.attachInjectedFault({
           sequence: this.runCurrentSequence,
           requestId: params.requestId,
           phase: this.phase,
@@ -1213,11 +1216,20 @@ class CdpPage {
           responseStatus: null,
           finished: false,
           errorName: null
-        })
+        }))
       }
     } catch (error) {
       this.recordCdpError(error, 'NETWORK_REQUEST_EVIDENCE_FAILED')
     }
+  }
+
+  attachInjectedFault(record) {
+    const pendingFault = this.pendingInjectedFaults.get(record.requestId) ?? null
+    if (!pendingFault) return record
+    this.pendingInjectedFaults.delete(record.requestId)
+    record.action = pendingFault.action
+    record.injectedStatus = pendingFault.injectedStatus
+    return record
   }
 
   historyRecord(requestId) {
@@ -1756,6 +1768,10 @@ class CdpPage {
         if (record) {
           record.action = 'HTTP_503'
           record.injectedStatus = 503
+        } else {
+          // Fetch 先于 Network.requestWillBeSent 暂停：记录尚不存在，按 networkId 暂存，
+          // 由 attachInjectedFault 在建记录时回填（否则 503 会以 injectedStatus=null 落证据）。
+          this.pendingInjectedFaults.set(requestId, {action: 'HTTP_503', injectedStatus: 503})
         }
         await this.send('Fetch.fulfillRequest', {
           requestId: params.requestId,
@@ -2006,7 +2022,7 @@ async function recoveryView(browser) {
         let rules
         try { rules = sheet.cssRules } catch { continue }
         for (const rule of rules) {
-          if (rule.type === 7 && rule.name === 'recovery-loading-pulse') keyframeText = rule.cssText
+          if (rule.type === 7 && (rule.name === 'recovery-loading-pulse' || rule.name.startsWith('recovery-loading-pulse-'))) keyframeText = rule.cssText
         }
       }
       const keyframesOpacity = /opacity\\s*:/.test(keyframeText)
@@ -2015,7 +2031,7 @@ async function recoveryView(browser) {
       const customClassDots = spans.filter((element) => {
         const style = getComputedStyle(element)
         return element.classList.contains('recovery-loading-dot') && (element.textContent ?? '').trim() === ''
-          && style.animationName === 'recovery-loading-pulse' && style.animationDuration === '1s'
+          && /^recovery-loading-pulse(-[0-9a-f]{6,8})?$/.test(style.animationName) && style.animationDuration === '1s'
       }).length
       return {
         customClassDots,
@@ -2243,9 +2259,13 @@ async function driveHostFormsToTerminal(context, toolCallId) {
       return null
     })()`, 'HOST_CONTINUATION_TERMINAL_NOT_REACHED')
     if (state.terminal) {
-      const expected = HOST_FORM_SCENARIOS.has(config.scenario) ? 1 : 0
-      checks.require('live.host-form.terminal-count', submitted.length === expected,
-        `exactly ${expected} host condition form(s) submitted before terminal`, submitted)
+      // 这三个场景的宿主续接都要求先选配置项、再提交空白条件，二者各恰一次。
+      const hostChainScenarios = new Set(['tool-select-definitions', 'tool-confirm-step', 'tool-skipped', 'recovery-hitl-gate', 'recovery-mixed-messages'])
+      const expectedForms = hostChainScenarios.has(config.scenario) ? 1 : 0
+      const definitions = submitted.filter((entry) => entry.purpose === 'SELECT_DEFINITIONS').length
+      const conditions = submitted.filter((entry) => entry.purpose === 'SET_CONDITIONS').length
+      checks.require('live.host-form.terminal-count', definitions === expectedForms && conditions === expectedForms,
+        `exactly ${expectedForms} host definition form(s) and ${expectedForms} host condition form(s) submitted before terminal`, submitted)
       return
     }
     const form = state.form
@@ -2310,8 +2330,11 @@ async function driveSkippedHostContinuation(context) {
       return
     }
     const form = state.form
+    // 条件表单 id 形如 host-cond-form-<runId(UUID)>-<taskId>；本轮 runId 在宿主续接前尚未采集，
+    // 故按 id 形状 + 任务号判定，不依赖 context.runId（其值由驱动后的 activeRunId 回填）。
+    const conditionFormId = new RegExp(`^host-cond-form-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-${form.taskId}$`)
     const purpose = form.toolCallId === `host-def-form-${form.taskId}` ? 'SELECT_DEFINITIONS'
-      : form.toolCallId.startsWith(`host-cond-form-${context.runId}-${form.taskId}`) ? 'SET_CONDITIONS' : null
+      : conditionFormId.test(form.toolCallId) ? 'SET_CONDITIONS' : null
     checks.require('live.host-form.supported-purpose', purpose !== null, 'only deterministic host definition/condition forms are driven', form)
     if (purpose === 'SELECT_DEFINITIONS') {
       checks.require('live.host-form.definition-field', form.fields.length === 1 && form.fields[0].key === 'defCodes'
