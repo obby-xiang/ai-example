@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 const cases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'standard-no-reasoning', 'confirm-step-timeline'])
-const healthyCases = new Set(['late-reasoning', 'multi-choice', 'standard-no-reasoning', 'confirm-step-timeline'])
+const healthyCases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'standard-no-reasoning', 'confirm-step-timeline'])
 const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const transcriptErrorCodes = new Set(['AI_TRANSCRIPT_INCOMPLETE', 'AI_TRANSCRIPT_WRITE_FAILED'])
 const toolFrameTypes = new Set(['tool_start', 'tool_result', 'confirm_request', 'confirm_decision', 'frontend_tool_request', 'frontend_tool_result'])
@@ -1433,36 +1433,69 @@ function assertLateReasoning(context) {
   second.body.messages.map((message) => ({role: message?.role, toolCallId: message?.tool_call_id ?? null})))
 }
 
-function hasNoHistoryToolExecution(context) {
-  return historyTools(context).length === 0 && historyAssistants(context).every((message) =>
-    (message.toolCalls ?? []).length === 0 && Object.keys(message.toolCallStates ?? {}).length === 0)
-}
-
 function assertSecondToolAggregate(context) {
-  const {checks, driver, terminal, runDetail, upstream} = context
-  const first = upstream.requests[0]
+  const {checks, driver, terminal, upstream} = context
+  const [first, continuation] = upstream.requests
+  checks.require('second.continuation-request', upstream.requestCount === 2 && Boolean(continuation),
+    'one continuation request after both independent tools', upstream.requestCount)
   const calls = upstreamToolCalls(first)
+  const ids = calls.map((call) => call.id)
   const finishAt = first.chunks.findIndex((chunk) => (chunk.choices ?? [])
     .some((choice) => choice?.finishReason === 'tool_calls'))
   const secondAt = first.chunks.findIndex((chunk) => (chunk.choices ?? [])
     .some((choice) => (choice?.toolCalls ?? []).some((call) => call.id?.endsWith('-second'))))
   checks.require('second.event-independent-call-after-finish', calls.length === 2
-    && new Set(calls.map((call) => call.id)).size === 2 && finishAt >= 0 && secondAt > finishAt,
-  'second independent tool call after first finish', {calls, finishAt, secondAt})
-  checks.require('second.expected-stream-error', terminal?.type === 'error' && terminal.code === 'UPSTREAM_STREAM_ERROR',
-    'error UPSTREAM_STREAM_ERROR', terminal)
-  checks.require('second.run-failed', runDetail?.snapshot?.status === 'FAILED', 'FAILED', runDetail?.snapshot?.status)
-  checks.require('second.zero-public-tools', toolFrames(driver).length === 0, 'zero tool/helper execution frames', toolFrames(driver))
-  checks.require('second.zero-history-tools', hasNoHistoryToolExecution(context),
-    'zero history tool results, toolCalls, or toolCallStates', {
-      toolMessages: historyTools(context),
-      assistants: historyAssistants(context).map((message) => ({
-        entryId: message.entryId,
-        toolCallCount: (message.toolCalls ?? []).length,
-        toolCallStateCount: Object.keys(message.toolCallStates ?? {}).length
-      }))
+    && new Set(ids).size === 2 && finishAt >= 0 && secondAt > finishAt,
+  'two independent tool calls in upstream order after the first finish', {calls, finishAt, secondAt})
+  const starts = toolFrames(driver, new Set(['tool_start']))
+  const results = toolFrames(driver, new Set(['tool_result']))
+  checks.require('second.public-two-tools-in-order', canonicalJson(starts.map((frame) => frame.toolCallId)) === canonicalJson(ids)
+    && canonicalJson(results.map((frame) => frame.toolCallId)) === canonicalJson(ids)
+    && results.every((frame) => frame.name === 'list_config_defs' && frame.executed === true),
+  'both IDs execute exactly once in upstream order', {ids, starts, results})
+  const continuationToolIds = continuation.body.messages.filter((message) => message?.role === 'tool')
+    .map((message) => message.tool_call_id)
+  const continuationAssistantIds = continuation.body.messages.filter((message) => message?.role === 'assistant')
+    .flatMap((message) => message.tool_calls ?? []).map((call) => call.id)
+  checks.require('second.continuation-ids-in-order', canonicalJson(continuationToolIds) === canonicalJson(ids)
+    && canonicalJson(continuationAssistantIds) === canonicalJson(ids),
+  'continuation replays both assistant calls and tool results with identical IDs in order', {
+      ids,
+      continuationToolIds,
+      continuationAssistantIds
     })
-  checks.require('second.no-continuation-request', upstream.requestCount === 1, 1, upstream.requestCount)
+  const responses = historyTools(context).flatMap((message) => message.toolResponses ?? [])
+  const historyIds = responses.map((response) => response.id)
+  const assistants = historyAssistants(context)
+  const historyCallIds = assistants.flatMap((message) => message.toolCalls ?? []).map((call) => call.id)
+  checks.require('second.history-two-tools-in-order', canonicalJson(historyIds) === canonicalJson(ids)
+    && canonicalJson(historyCallIds) === canonicalJson(ids)
+    && ids.every((id) => assistants.some((message) => message.toolCallStates?.[id]?.status === 'EXECUTED')),
+  'history preserves both tool responses and EXECUTED states in order', {
+      ids,
+      historyIds,
+      historyCallIds,
+      states: assistants.map((message) => message.toolCallStates)
+    })
+  const usageChunk = upstream.requests.flatMap((request) => request.chunks).findLast((chunk) => chunk.usage)
+  const upstreamUsage = usageChunk?.usage
+  const actualUsage = terminal.usage
+  const expected = isRecord(upstreamUsage) ? expectedUsage(upstreamUsage) : null
+  if (expected) {
+    for (const key of ['cachedTokens', 'reasoningTokens']) {
+      expected[key] = isRecord(actualUsage) && Object.hasOwn(actualUsage, key) ? upstreamUsage[key] : 'ABSENT'
+    }
+  }
+  const validInteger = (value) => Number.isSafeInteger(value) && value >= 0
+  const coreUsageMatches = isRecord(upstreamUsage) && isRecord(actualUsage)
+    && ['promptTokens', 'completionTokens', 'totalTokens'].every((key) => validInteger(upstreamUsage[key])
+      && validInteger(actualUsage[key]) && actualUsage[key] === upstreamUsage[key])
+  const optionalUsageMatches = isRecord(upstreamUsage) && isRecord(actualUsage)
+    && ['cachedTokens', 'reasoningTokens'].every((key) => !Object.hasOwn(actualUsage, key)
+      || (Object.hasOwn(upstreamUsage, key) && validInteger(upstreamUsage[key])
+        && validInteger(actualUsage[key]) && actualUsage[key] === upstreamUsage[key]))
+  checks.require('second.done-usage-truth', coreUsageMatches && optionalUsageMatches
+    && actualUsage.est === false && actualUsage.source === 'stream', expected, actualUsage)
 }
 
 function assertCancelBeforeComplete(context) {
@@ -1658,7 +1691,8 @@ async function runCase(context) {
   context.businessAfter = await taskBaseline(context.api)
   await context.evidence.json('business-after.json', context.businessAfter)
   await collectUpstreamEvidence(context)
-  const expectedRequests = context.config.caseName === 'confirm-step-timeline' ? 3 : context.config.caseName === 'late-reasoning' ? 2 : 1
+  const expectedRequests = context.config.caseName === 'confirm-step-timeline' ? 3
+    : ['late-reasoning', 'second-tool-aggregate'].includes(context.config.caseName) ? 2 : 1
   assertCommon(context, expectedRequests)
   switch (context.config.caseName) {
     case 'late-reasoning':
@@ -1809,30 +1843,6 @@ function addStackLines(target, lines, start) {
   for (let index = start; index < stackEnd(lines, start); index += 1) target.add(index)
 }
 
-function secondRejectionAssociations(lines, context) {
-  const expectedLines = new Set()
-  const pairs = []
-  const marker = 'Tool calls after the tool aggregate finish are not supported'
-  lines.forEach((line, attemptIndex) => {
-    if (!line.includes('attempt failed') || !line.includes(context.runId) || !line.includes('UPSTREAM_STREAM_ERROR')) return
-    const end = stackEnd(lines, attemptIndex)
-    for (let markerIndex = attemptIndex + 1; markerIndex < end; markerIndex += 1) {
-      if (!lines[markerIndex].includes('IllegalStateException') || !lines[markerIndex].includes(marker)) continue
-      for (let index = attemptIndex; index < end; index += 1) expectedLines.add(index)
-      pairs.push({
-        attemptLine: attemptIndex + 1,
-        markerLine: markerIndex + 1,
-        attemptSha256: sha256(line),
-        markerSha256: sha256(lines[markerIndex])
-      })
-      break
-    }
-  })
-  context.checks.add('second.helper-rejected-before-execution', pairs.length > 0,
-    'current-run attempt failure with adjacent IllegalStateException marker', pairs)
-  return {expectedLines, pairs, marker}
-}
-
 function stubWriteFailureRequestId(line) {
   const match = /\bupstream response write failed req-(\d+) errorName=[A-Za-z][A-Za-z0-9]*\b/.exec(line)
   return match ? `req-${match[1].padStart(3, '0')}` : null
@@ -1884,30 +1894,17 @@ async function cancellationAssociations(backendLines, stubLines, context) {
 
 async function expectedLogAssociations(logLines, context) {
   const expected = {backend: new Set(), stub: new Set()}
-  if (context.config.caseName === 'second-tool-aggregate') {
-    const association = secondRejectionAssociations(logLines.backend, context)
-    expected.backend = association.expectedLines
-    await context.evidence.json('expected-rejection.json', {
-      classification: 'EXPECTED_PROTOCOL_REJECTION',
-      terminalCode: context.terminal?.code ?? null,
-      helperLogMarker: association.marker,
-      currentRunId: context.runId,
-      pairs: association.pairs,
-      zeroToolExecution: Boolean(context.driver && context.history)
-        && toolFrames(context.driver).length === 0 && hasNoHistoryToolExecution(context),
-      upstreamContinuationCount: context.upstream ? Math.max(0, context.upstream.requestCount - 1) : null
-    })
-  }
   if (context.config.caseName === 'cancel-before-complete') {
     const association = await cancellationAssociations(logLines.backend, logLines.stub, context)
     expected.backend = association.expectedBackend
     expected.stub = association.expectedStub
   }
-  if (context.config.caseName === 'confirm-step-timeline') {
-    const indexes = logLines.backend.flatMap((line, index) => line.includes('lease-less write')
-      && line.includes(context.runId) && line.includes('write allowed without lease; no resume-authority semantics') ? [index] : [])
+  if (['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate'].includes(context.config.caseName)) {
+    const expectedMessage = `lease-less write runId=${context.runId}: fence advanced to epoch=1 (write allowed without lease; no resume-authority semantics; check lease view if this is a stale write after owner change)`
+    const warnLevel = /^\d{4}-\d{2}-\d{2}T\S+\s+WARN\s+/
+    const indexes = logLines.backend.flatMap((line, index) => warnLevel.test(line) && line.endsWith(expectedMessage) ? [index] : [])
     for (const index of indexes) expected.backend.add(index)
-    context.checks.add('timeline.direct-drive-warning-observed', indexes.length === 1,
+    context.checks.add(`${context.config.caseName}.direct-drive-warning-observed`, indexes.length === 1,
       'one explicit lease-less direct-drive warning for this run', {count: indexes.length, lines: indexes.map((index) => index + 1)})
   }
   return expected
@@ -1922,9 +1919,9 @@ async function collectLogEvidence(context) {
     logLines[name] = logs[name].text.split(/\r?\n/)
   }
   const expected = await expectedLogAssociations(logLines, context)
-  const expectedClassification = context.config.caseName === 'second-tool-aggregate'
-    ? 'EXPECTED_PROTOCOL_REJECTION'
-    : context.config.caseName === 'confirm-step-timeline' ? 'EXPECTED_DIRECT_DRIVE' : 'EXPECTED_CANCELLATION'
+  const expectedClassification = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate'].includes(context.config.caseName)
+    ? 'EXPECTED_DIRECT_DRIVE'
+    : 'EXPECTED_CANCELLATION'
   for (const name of ['backend', 'stub']) {
     const findings = []
     logLines[name].forEach((line, index) => {
@@ -2082,11 +2079,9 @@ const status = fatal || checks.failures.length > 0 || cleanup.status === 'INCOMP
   || managedCleanup.status === 'INCOMPLETE' || sanitization.status === 'INCOMPLETE'
   ? 'FAIL'
   : 'PASS'
-const expectedOutcome = config.caseName === 'second-tool-aggregate'
-  ? 'EXPECTED_PROTOCOL_REJECTION'
-  : config.caseName === 'cancel-before-complete'
-    ? 'EXPECTED_CANCELLATION'
-    : 'HEALTHY_PASS'
+const expectedOutcome = config.caseName === 'cancel-before-complete'
+  ? 'EXPECTED_CANCELLATION'
+  : 'HEALTHY_PASS'
 const summary = {
   schemaVersion: 1,
   case: config.caseName,
