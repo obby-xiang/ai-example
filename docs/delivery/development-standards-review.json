@@ -4382,6 +4382,39 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按既有完整ChatResponse文本片段顺序拼接，不进行字节转码、代理对切分或字素截断。"},
         "verification-review": {"status": "checked", "reason": "独立静态审查无发现；IDEA Reformat已执行，Maven生产编译357源文件BUILD SUCCESS，测试和真实multi-choice复测NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a0fe657acde44a93947c6d0a9d796f7baaf359bae9a979e6fcb551cc74819cf6",
+      "status": "reviewed",
+      "reason": "逐行复核首次history延迟、透明转发、断连与日志关闭路径；独立复审agent-1157确认Date头、证据白名单、统一停止和日志结算四项问题全部关闭。",
+      "reviewedAt": "2026-11-09T08:18:49+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1157",
+      "specChanges": [
+        {
+          "change": "新增C-138只读history时序代理，首个history响应体默认延迟800ms，后续及其他路径不延迟。",
+          "reason": "需要确定性构造旧revision后返回的恢复边界，不能手改应用状态或伪造应用内SSE。",
+          "impact": "仅新增独立验证脚本与文档，不改生产服务；代理仅改时序，不改方法、body、状态或端到端响应头。"
+        },
+        {
+          "change": "C-139证据改为有界白名单摘要、序号、长度和哈希，明确禁止保存原始SSE/history响应体。",
+          "reason": "原始响应和异常文本不符合开发规范的证据安全边界。",
+          "impact": "完整内容仍逐CASE逐轮对账，证据保留形式收敛为白名单字段与哈希。"
+        }
+      ],
+      "files": [
+        {"path": "scripts/verification/history-timing-proxy.mjs", "status": "checked", "reason": "数字loopback与仓外OUT_DIR硬校验，首次history延迟，sendDate=false，SSE逐chunk转发，日志错误统一停止并有界结算。"},
+        {"path": "docs/verification/AI对话时序代理与恢复场景.md", "status": "checked", "reason": "记录拓扑、单变体操作、透明转发、失败清理和白名单证据口径，未宣称动态场景通过。"},
+        {"path": "docs/verification/AI对话独立复测清单-2026-11-05.md", "status": "checked", "reason": "仅调整C-139证据保存形式，完整内容、业务副作用和清理审查门槛不降低，状态继续NOT_RUN。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "仅使用Node内置http/fs/path/url模块，无新增依赖或另造应用帧协议。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批为Node独立脚本和Markdown，无Java修改。"},
+        "logging-exception-safety": {"status": "checked", "reason": "代理日志仅保留路径、序号、状态、时延和错误名，不含body、敏感头或原始异常；日志错误非零退出并统一清理。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批不修改生产界面、卡片或用户文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "代理只延迟第一次history响应体，不伪造状态或业务副作用，多实例和Cluster仍按独立证据判定。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "请求与响应按Node流逐chunk转发，不解析或重组SSE文本，不做二次转码。"},
+        "verification-review": {"status": "checked", "reason": "独立复审APPROVE，node --check与diff --check通过；代理网络、浏览器和C-138动态验证NOT_RUN。"}
+      }
     }
   ]
 }
