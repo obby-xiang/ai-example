@@ -5040,6 +5040,42 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按UTF-16 code unit有界跨chunk匹配，不切割代理对，不做全局文本去重。"},
         "verification-review": {"status": "checked", "reason": "agent-1205最终APPROVE；三文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译358个主源BUILD SUCCESS；动态纠正变体NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f2f9c3e84abcf3c125d3377a066aa32b6b4cd003f0d3825b267245bfc5c8d370",
+      "status": "reviewed",
+      "reason": "逐hunk及完整GF恢复状态流复核排队回填、统一决策推进、帧/POST去重和取消tombstone；独立审查agent-1189多轮关联返修后最终APPROVE。",
+      "reviewedAt": "2026-11-10T04:27:48+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1189、施工agent-1202",
+      "specChanges": [
+        {
+          "change": "恢复时首张GF保持活动交互，后续GF按restoredPendingQueue顺序回填queuedForms，工具part仍逐张reveal。",
+          "reason": "原实现只重建第一张，后续GF的排队位次与取消出口在刷新后消失。",
+          "impact": "活动/排队表单、草稿与取消入口完整恢复，不提前重建后续工具段。"
+        },
+        {
+          "change": "frontend_tool_result、confirm_decision、权威裁决、POST成功/DUPLICATE及活动取消普通失败统一经advanceRestoredDecision推进。",
+          "reason": "分散reveal导致frame-only永久挂起、帧与POST重复推进及混合卡越序。",
+          "impact": "runId+toolCallId去重后一次reveal再promote，连续GF和GF→CONFIRM→GF均先建段再激活。"
+        },
+        {
+          "change": "取消排队GF时同步移除restoredPendingQueue目标；advancedDecisions随recoveryEntriesByRun在批次完成、停止、换会话和终态清理。",
+          "reason": "仅出queuedForms会在回包后复活，永久去重记录又会造成内存残留。",
+          "impact": "成功、重复和失败回包均不复活，失败reason保留，去重集合大小受恢复批次限制。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "复核backfill、advance统一出口、promote队首守卫、帧/POST全入口及recoveryEntries生命周期。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用presentGenerativeForm、restoredPendingQueue与recoveryEntries，无新增依赖或并行队列。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript前端恢复逻辑，无Java或JSON实体变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "取消失败原因继续写入form/part，身份失效不推进，不把失败包装为成功。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复排队位次、草稿和取消操作，避免不可见活动表单与越序，不新增提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "runId+toolCallId决策去重覆盖帧/POST任意顺序，记录按run清理，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "仅恢复队列和表单状态，未修改文本或流式解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；ai.ts IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，最终32.39秒；动态GF矩阵NOT_RUN。"}
+      }
     }
   ]
 }

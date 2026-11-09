@@ -2502,6 +2502,7 @@ function clearFrontendToolJournals(sessionId: string, identity: AiIdentity | nul
 interface RecoveryEntries {
   trusted: boolean
   byToolCallId: Map<string, AiRunCurrentEntry>
+  advancedDecisions: Set<string>
 }
 
 const recoveryEntriesByRun = new Map<string, RecoveryEntries>()
@@ -2509,7 +2510,8 @@ const recoveryEntriesByRun = new Map<string, RecoveryEntries>()
 function rememberRecoveryEntries(runId: string, entries: AiRunCurrentEntry[] | undefined): void {
   recoveryEntriesByRun.set(runId, {
     trusted: Array.isArray(entries),
-    byToolCallId: new Map((entries ?? []).map((entry) => [entry.toolCallId, entry]))
+    byToolCallId: new Map((entries ?? []).map((entry) => [entry.toolCallId, entry])),
+    advancedDecisions: recoveryEntriesByRun.get(runId)?.advancedDecisions ?? new Set<string>()
   })
 }
 
@@ -6672,6 +6674,7 @@ export const useAiStore = defineStore('ai', {
       }
       const host = first ? this.rebuildPendingCard(first, current.runId) : null
       this.restoredPendingQueue = restorable.filter((entry) => entry !== first)
+      this.backfillRestoredGenerativeForms(current.runId)
       if (pendingEntries.length > 0) {
         this.drivePendingFrontendTools(current.runId, pendingEntries, host?.id ?? inFlightHost?.id)
       }
@@ -7918,6 +7921,42 @@ export const useAiStore = defineStore('ai', {
       return host
     },
 
+    backfillRestoredGenerativeForms(runId: string): void {
+      for (const entry of this.restoredPendingQueue) {
+        if (entry.name !== GENERATIVE_FORM_TOOL || !this.hasLiveForm()
+          || this.hasDecidedPendingResidue(entry.toolCallId)) {
+          continue
+        }
+        const spec = parseFormSchema(parseToolArgs(entry.arguments)?.form)
+        if (spec) {
+          this.presentGenerativeForm(entry.toolCallId, runId, spec)
+        }
+      }
+    },
+
+    advanceRestoredDecision(runId: string, toolCallId: string): void {
+      if (this.activeRunId !== runId) {
+        return
+      }
+      if (this.restoredPendingQueue.length === 0) {
+        clearRecoveryEntries(runId)
+        return
+      }
+      if (!this.suspended) {
+        return
+      }
+      const recovery = recoveryEntriesByRun.get(runId)
+      if (!recovery || recovery.advancedDecisions.has(toolCallId)) {
+        return
+      }
+      recovery.advancedDecisions.add(toolCallId)
+      this.revealNextRestoredPendingCard(runId)
+      this.promoteNextForm()
+      if (this.restoredPendingQueue.length === 0) {
+        clearRecoveryEntries(runId)
+      }
+    },
+
     /**
      * M-2b（2026-10-22 用户直裁「无感恢复」）：串行呈现 —— 当前卡决完后把快照里下一张补上。
      *
@@ -7943,6 +7982,7 @@ export const useAiStore = defineStore('ai', {
       // 命中的这张出队；跳过的已决条目留在队里（下次扫描仍会跳过），不会复活
       this.restoredPendingQueue = this.restoredPendingQueue.filter((entry) => entry !== next)
       this.rebuildPendingCard(next, runId)
+      this.backfillRestoredGenerativeForms(runId)
     },
 
     /** 同轮续收：保留持久历史/镜像，只应用连接交付的有序帧。 */
@@ -9313,7 +9353,7 @@ export const useAiStore = defineStore('ai', {
       // 人等人期间本来就没有连接（park 非阻塞语义）。
       const runId = this.activeRunId
       if (runId) {
-        this.revealNextRestoredPendingCard(runId)
+        this.advanceRestoredDecision(runId, toolCallId)
       }
       // 段已落终态后才计数：仅当无其它待决卡（含尚未建段的队列）时才撤挂起态
       this.clearSuspendedIfNoOtherConfirms(toolCallId)
@@ -9526,7 +9566,7 @@ export const useAiStore = defineStore('ai', {
         // 由 `parkedAtDecision` + 轮次身份补回这条连接（终态/已停/已有连接一律不连）。
         this.reconnectSuspendedRun(runId, toolCallId, parkedAtDecision, terminalSeqAtDecision)
         // M-2b：快照恢复的多卡批次串行呈现 —— 先补下一张，再按"是否还有待决卡"决定挂起收口
-        this.revealNextRestoredPendingCard(runId)
+        this.advanceRestoredDecision(runId, toolCallId)
         // 多卡并存：本轮还有别的确认门待决时保持挂起态（只清自己这张）
         this.clearSuspendedIfNoOtherConfirms(toolCallId)
       } catch (error) {
@@ -9692,7 +9732,7 @@ export const useAiStore = defineStore('ai', {
         // inline 执行（流还开着）与终态/已停一律不连。
         this.reconnectSuspendedRun(targetRunId, toolCallId, parkedAtDecision, terminalSeqAtDecision)
         // M-2b：GF / 上传 / 表格预览（放弃）等同族决策 — 快照批次里下一张接着出现
-        this.revealNextRestoredPendingCard(targetRunId)
+        this.advanceRestoredDecision(targetRunId, toolCallId)
         return { ok: true }
       } catch (error) {
         // Task 3：换身份/换轮之后的旧回灌包 —— 整段作废（不写通知、不改新身份的卡/挂起态）。
@@ -9713,7 +9753,7 @@ export const useAiStore = defineStore('ai', {
           // 这张卡：恢复队列里的下一张永不出现、`suspended` 也不按真实待决重算 ⇒ 输入区锁死且
           // 屏上无可点卡（只能刷新）。与成功路径同口径补出下一张，再只按**真实待决**（段 + 队列）
           // 决定挂起收口；**不重连**（本轮仍在挂起时由那张卡的决策续流，人等人期间没有连接）。
-          this.revealNextRestoredPendingCard(targetRunId)
+          this.advanceRestoredDecision(targetRunId, toolCallId)
           this.clearSuspendedIfNoOtherConfirms(toolCallId)
           setNotice(this, cancelled ? 'ai.notice.toolTerminal' : 'ai.notice.toolAlreadySubmitted')
           return { ok: false, duplicate: true }
@@ -9900,6 +9940,10 @@ export const useAiStore = defineStore('ai', {
      */
     promoteNextForm(): void {
       if (this.hasLiveForm()) {
+        return
+      }
+      const next = head(this.queuedForms)
+      if (next && this.restoredPendingQueue.some((entry) => entry.toolCallId === next.toolCallId)) {
         return
       }
       while (this.queuedForms.length > 0) {
@@ -11229,6 +11273,9 @@ export const useAiStore = defineStore('ai', {
         // AR-07：结算完成 ⇒ 收掉这一张（同批下一张由此接上）；结局帧后到时与它无关（段已终态）
         this.activeForm = null
       }
+      if (!outcome.ok && !outcome.duplicate && this.activeForm === null && this.activeRunId === form.runId) {
+        this.advanceRestoredDecision(form.runId, form.toolCallId)
+      }
       this.promoteNextForm()
     },
 
@@ -11250,6 +11297,7 @@ export const useAiStore = defineStore('ai', {
       if (!entry) {
         return
       }
+      this.restoredPendingQueue = this.restoredPendingQueue.filter((item) => item.toolCallId !== toolCallId)
       this.discardQueuedForm(toolCallId)
       this.applyPendingTerminal(toolCallId, 'cancelled')
       this.markFormDecided(toolCallId)
@@ -13346,6 +13394,9 @@ export const useAiStore = defineStore('ai', {
           this.clearGateSubmission(frame.toolCallId)
           // 批4-D：结局落定 ⇒ 勾选态复位（变更即复位：这一版卡的同意不外溢）
           this.clearGateAck(frame.toolCallId)
+          if (seqRunId) {
+            this.advanceRestoredDecision(seqRunId, frame.toolCallId)
+          }
           // M2：段已落终态后才计数 —— 多卡并存时另一张仍待决 ⇒ 保持挂起态
           this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
           break
@@ -13427,6 +13478,9 @@ export const useAiStore = defineStore('ai', {
           // AR-07：只结算**这一张**（活动表单一结局帧就收掉并按到达序补下一张；打给排队中的
           // 那张则出队清草稿）—— 这里不能用 `dropActiveForm`，它会把整队一起清掉。
           this.settleActiveForm(frame.toolCallId)
+          if (seqRunId) {
+            this.advanceRestoredDecision(seqRunId, frame.toolCallId)
+          }
           // M2 / FE-22：只清**这张卡**的挂起语义 —— 同轮还有别的待人卡（确认门 / 另一张前端卡）
           // 时保持挂起，否则那一张的提交将失去重连判据（`reconnectSuspendedRun` 认 suspended）。
           this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
