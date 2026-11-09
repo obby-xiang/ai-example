@@ -4578,7 +4578,11 @@ async function cleanupCancel(context) {
     const response = await context.api.request('cleanup.cancel', `/api/ai/cancel/${encodeURIComponent(context.runId)}`, {method: 'POST'})
     result.httpStatus = response.status
     result.businessCode = businessCode(response.body)
-    accepted = response.status === 200 || response.status === 409
+    // 404 UNKNOWN_RUN 表示该 run 已不存在（会话清理/终态后已删除），等同于“无活跃 run 残留”，
+    // 仍以公开读接口的 404 作为证据，不把“运行已消失”当成清理失败或产品取消成功。
+    const runAbsent = response.status === 404 && result.businessCode === 'UNKNOWN_RUN'
+    accepted = response.status === 200 || response.status === 409 || runAbsent
+    if (runAbsent) result.finalStatus = 'ABSENT'
     if (!accepted) result.errors.push({errorName: 'HTTP_ERROR', code: 'CANCEL_NOT_ACCEPTED', httpStatus: response.status, businessCode: result.businessCode})
   } catch (error) {
     result.errors.push(safeError(error, 'CANCEL_REQUEST_FAILED'))
@@ -4589,7 +4593,13 @@ async function cleanupCancel(context) {
     try {
       const response = await context.api.request('cleanup.run', `/api/ai/runs/${encodeURIComponent(context.runId)}`)
       result.finalHttpStatus = response.status
-      const status = response.body?.data?.snapshot?.status ?? response.body?.snapshot?.status
+      const payload = response.body?.data ?? response.body
+      if (response.status === 404 || payload?.exists === false) {
+        result.finalStatus = 'ABSENT'
+        result.status = accepted ? 'COMPLETE' : 'INCOMPLETE'
+        return result
+      }
+      const status = payload?.snapshot?.status ?? response.body?.snapshot?.status
       result.finalStatus = safeToken(status)
       if (['DONE', 'FAILED', 'CANCELLED'].includes(status)) {
         result.status = accepted ? 'COMPLETE' : 'INCOMPLETE'

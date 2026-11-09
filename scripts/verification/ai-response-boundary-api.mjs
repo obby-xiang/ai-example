@@ -1027,6 +1027,30 @@ function upstreamRequestEvidence(request) {
 
 async function collectUpstreamEvidence(context) {
   const source = context.config.stubDumpDir
+  // cancel-before-complete：桩在停顿结束后才写唯一 outcome，必须在采集前有界等待它真正落地，
+  // 且 finishedAtMs 不早于取消请求时间；超时记 FAIL，不用固定 sleep 冒充。
+  if (context.config.caseName === 'cancel-before-complete' && context.cancelEvidence?.upstreamRequestId) {
+    const requestId = String(context.cancelEvidence.upstreamRequestId).replace(/^req-/, '')
+    const deadline = Date.now() + context.config.timeoutMs
+    let ready = false
+    let observed = {count: 0, finishedAtMs: null}
+    while (Date.now() < deadline) {
+      try {
+        const events = await readJsonLines(path.join(source, `req-${requestId}.events.jsonl`))
+        const outcomes = events.filter((event) => event.type === 'outcome')
+        observed = {count: outcomes.length, finishedAtMs: outcomes[0]?.finishedAtMs ?? null}
+        ready = outcomes.length === 1 && Number.isSafeInteger(observed.finishedAtMs)
+          && observed.finishedAtMs >= context.cancelEvidence.cancelRequestedAtMs
+      } catch {
+        ready = false
+      }
+      if (ready) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    context.checks.add('upstream.outcome-ready-before-evidence', ready,
+      'bound req-NNN.events.jsonl has exactly one outcome finished at/after the cancel request',
+      {...observed, cancelRequestedAtMs: context.cancelEvidence.cancelRequestedAtMs})
+  }
   const allowed = /^req-\d{3}(?:\.events\.jsonl|\.decision\.json|\.json)$/
   const names = (await readdir(source)).filter((name) => allowed.test(name)).sort()
   const ids = [...new Set(names.map((name) => /^req-(\d{3})/.exec(name)?.[1]).filter(Boolean))].sort()
