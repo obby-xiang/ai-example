@@ -438,6 +438,43 @@ function requestToolSeqOf(body) {
   return { names, args: parsed }
 }
 
+const HOST_DEF_SELECT_MARKER = /host-def-select/
+
+/**
+ * 请求级宿主定义表单衔接（`host-def-select`）：本轮已收到宿主定义表单（host-def-form-*）
+ * 的提交结果、但还没有 select_definitions 结果时，代替通用“续轮只文本”短路，恰好补发一次
+ * select_definitions，入参取表单真实提交的 defCodes。成功选择后的下一轮恢复文本。
+ * 仍受产品工具清单与披露闸约束。
+ */
+function hostDefSelectMarker(body) {
+  const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  return !!text && HOST_DEF_SELECT_MARKER.test(text)
+}
+
+function hostDefSelectDecision(messages, disclosed, routes, bucket) {
+  const start = messages.map((m) => m?.role).lastIndexOf('user')
+  const round = messages.slice(start + 1)
+  const calls = round.flatMap((m) => (m?.tool_calls ?? []).map((call) => ({ id: call.id, name: call.function?.name })))
+  if (calls.some((call) => call.name === 'select_definitions')) return null
+  const results = round.filter((m) => m?.role === 'tool')
+  const defResult = results.find((m) => String(m.tool_call_id || '').startsWith('host-def-form-'))
+  if (!defResult) return null
+  if (!disclosed.has('select_definitions')) return null
+  const productTools = new Set(Array.isArray(routes.productTools) ? routes.productTools : [])
+  if (!productTools.has('select_definitions')) return null
+  let defCodes = []
+  try {
+    const parsed = JSON.parse(String(defResult.content ?? '{}'))
+    defCodes = Array.isArray(parsed.defCodes) ? parsed.defCodes.filter((code) => typeof code === 'string') : []
+  } catch {
+    defCodes = []
+  }
+  if (defCodes.length === 0) return null
+  bucket.hostDefSelected = true
+  return { kind: 'tool_call', tool: 'select_definitions', args: { codes: defCodes }, route: 'HOST-DEF-SELECT',
+    reason: `宿主定义表单提交后补发 select_definitions（${defCodes.join(',')}）` }
+}
+
 function requestToolOf(body) {  const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
   if (!text) return null
   const m = REQUEST_TOOL_MARKER.exec(text)
@@ -778,6 +815,10 @@ function decide(body, routes, turns, overrides = {}) {
   bucket.lastLen = messages.length
   bucket.calls += 1
 
+  if (hostDefSelectMarker(body) && !bucket.hostDefSelected) {
+    const hostDecision = hostDefSelectDecision(messages, disclosed, routes, bucket)
+    if (hostDecision) return hostDecision
+  }
   if (roundToolResults(messages).length > 0) {
     // 收敛契约 ③：本轮已出现工具结果 = 续轮，只发文本。
     // 回显策略按本提示词的轮次台账（`bucket.used` = 本轮已命中的路由，即发起那几次工具调用的路由）：

@@ -2194,7 +2194,7 @@ function promptFor(context) {
   const nonce = randomUUID()
   if (toolCases.has(context.config.scenario)) return `${toolCases.get(context.config.scenario).prompt} verification=${nonce}`
   if (['tool-skipped', 'recovery-hitl-gate'].includes(context.config.scenario)) {
-    return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} verification=${nonce}`
+    return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} host-def-select verification=${nonce}`
   }
   if (context.config.scenario === 'ordinary-skipped') {
     return `tool-seq=start_export,list_tasks&seq-args={"taskId":${context.fixtureTaskId}} verification=${nonce}`
@@ -3550,7 +3550,7 @@ async function runMixedMessagesRecovery(context) {
   context.runId = first.activeRunId
 
   browser.setPhase('mixed-pending')
-  await browser.sendPrompt(`tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} verification=${randomUUID()}`)
+  await browser.sendPrompt(`tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} host-def-select verification=${randomUUID()}`)
   await approveCreateTasks(context)
   context.runId = (await browser.snapshot()).activeRunId ?? context.runId
   await driveSkippedHostContinuation(context)
