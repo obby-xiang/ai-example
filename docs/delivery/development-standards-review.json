@@ -4872,6 +4872,32 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流解析、编码或Unicode处理，legacy仅按身份合并。"},
         "verification-review": {"status": "checked", "reason": "agent-1169最终APPROVE；IDEA Reformat成功；主会话最终node scripts/build.mjs通过，3281模块、Vite 30.21秒；动态浏览器/API场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:af5c7fc717d9ab956fd44519c3a8b12485f98c60ddb43a2aa688cda4e13a812d",
+      "status": "reviewed",
+      "reason": "按用户指令补充后端序列与发号的数据库禁用边界，明确共享序号使用Redis原子机制，局部序号仅在局部作用域生成。",
+      "reviewedAt": "2026-11-10T00:22:46+08:00",
+      "reviewer": "K3.1 Pro主会话",
+      "specChanges": [
+        {
+          "change": "后端禁止通过数据库序列、自增列、序列表、序列函数、存储过程或专用发号表生成序列号、发号或代次。",
+          "reason": "统一后端序号实现的存储边界，避免引入数据库发号能力。",
+          "impact": "跨实例共享序号使用Redis原子递增/CAS，局部序号仅在局部作用域生成，不因发号访问数据库。"
+        }
+      ],
+      "files": [
+        {"path": "docs/delivery/development-standards.md", "status": "checked", "reason": "在6.7多服务实例与Redis Cluster章节新增后端序列和发号禁用规则及适用边界。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有Redis原子递增/CAS规则，无新增依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅开发规范文档，无Java或JSON代码变化。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "仅规范存储边界，无日志或异常处理代码变化。"},
+        "toc-interaction": {"status": "not-affected", "reason": "不涉及前端交互或用户文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "明确跨实例序号使用Redis原子机制，局部序号不访问数据库，符合多实例约束。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "不涉及文本或流式解析。"},
+        "verification-review": {"status": "checked", "reason": "仅规范新增，未修改生产代码，编译和动态验证均NOT_RUN。"}
+      }
     }
   ]
 }
