@@ -3748,16 +3748,31 @@ async function runContextUsageRecovery(context) {
   browser.setPhase('history-independent')
   await browser.setHistoryFault('always')
   await browser.reload({waitForHistory: false})
+  // 刷新后先证明 history 真的 503，再等恢复现场；否则先做外部采集会错过 29ms 的恢复窗口。
+  let historyFaulted
+  try {
+    historyFaulted = await browser.waitForHistoryPhase('history-independent', {minimumFaultCount: 1})
+  } catch (error) {
+    if (!(error instanceof AssertionFailure)) throw error
+    const observed = await browser.waitForContextPhase('history-independent', {allowPending: true, minimumSuccessCount: 1})
+      .catch(() => null)
+    await context.evidence.json('history-independent-fault-missed.json', observed
+      ?? {note: 'history phase did not observe a 503 for this reload', networkFaults: browser.networkFaults?.() ?? null})
+    throw new ScenarioNotRun('HISTORY_INDEPENDENT_FAULT_WINDOW_MISSED')
+  }
+  checks.require('history-independent.history-503-observed', historyFaulted.faultCount >= 1,
+    'the browser history request really failed with 503 before any external evidence step', historyFaulted)
+  await context.evidence.json('history-network-history-independent-503.json', historyFaulted)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === true && ai.contextUsage?.usedTokens === ${expected.usedTokens}
+  })()`, 'CONTEXT_NOT_RESTORED_DURING_HISTORY_FAILURE')
   const independentContext = await browser.waitForContextPhase('history-independent', {minimumSuccessCount: 1})
   checks.require('history-independent.context-real-200', independentContext.successCount >= 1
     && independentContext.faultCount === 0 && independentContext.pendingCount === 0,
   'context recovery completes independently while browser history remains faulted', independentContext)
   await context.evidence.json('context-network-history-independent.json', independentContext)
   const independent = await recoveryPhaseEvidence(context)
-  await browser.waitFor(`(() => {
-    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
-    return ai.restoringRecovery === true && ai.contextUsage?.usedTokens === ${expected.usedTokens}
-  })()`, 'CONTEXT_NOT_RESTORED_DURING_HISTORY_FAILURE')
   const independentView = await recoveryView(browser)
   checks.require('history-independent.usage-preserved', canonicalJson(independentView.snapshot.contextUsage) === canonicalJson(expected),
     expected, independentView.snapshot.contextUsage)
