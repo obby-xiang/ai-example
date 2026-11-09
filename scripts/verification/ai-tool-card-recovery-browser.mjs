@@ -2275,9 +2275,13 @@ async function driveSkippedHostContinuation(context) {
       if (startPending) return {startPending: true}
       const createParts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool' && part.name === 'create_task')
       const terminal = ['succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
+      const currentRunId = '${context.runId ?? ''}' || ai.activeRunId || null
+      const host = ai.messages.find((message) => message.role === 'assistant'
+        && message.parts.some((part) => part.kind === 'tool' && part.name === 'create_task'))
+      const hostRunMatches = !currentRunId || (host && host.runId === currentRunId)
       if (ai.loading === false && !active && ai.queuedForms.length === 0 && createParts.length > 0
         && createParts.every((part) => terminal.includes(part.status) && part.requiresAction === false)
-        && ai.messages.some((message) => message.role === 'assistant' && message.done === true)) return {terminal: true}
+        && host && host.done === true && hostRunMatches) return {terminal: true}
       return null
     })()`, 'SKIPPED_HOST_CONTINUATION_NOT_READY')
     if (state.terminal || state.startPending) {
@@ -3010,8 +3014,16 @@ async function saveRecoveryPhase(context, phase, view, historyEvidence, business
 
 async function assertRestoringGate(context, phase, historyEvidence, business) {
   const {browser, checks} = context
-  await browser.waitFor(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').restoringRecovery === true`,
-    'RESTORING_RECOVERY_NOT_ACTIVE')
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    if (ai.restoringRecovery !== true) return false
+    const runId = ai.activeRunId ?? ai.runId ?? null
+    return ai.messages.some((message) => {
+      if (message.role !== 'assistant') return false
+      if (runId && message.runId !== runId) return false
+      return message.done !== true || message.parts.some((part) => part.kind === 'tool' && part.requiresAction === true)
+    })
+  })()`, 'RESTORING_RECOVERY_NOT_ACTIVE')
   const view = await recoveryView(browser)
   checks.require(`${phase}.store-recovering`, view.snapshot.restoringRecovery && view.snapshot.runPhase === 'recovering',
     'Pinia is in restoringRecovery/recovering', {
@@ -3639,7 +3651,7 @@ async function runContextUsageRecovery(context) {
   checks.require('stale-value-a.real-old-response-held', staleValueHeld.responseStatus === 200 && staleValueHeld.delayedResponse,
     'the real previous non-zero context response is held at the CDP response boundary', staleValueHeld)
   browser.setPhase('fresh-value-b')
-  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.sendPrompt(`turn-text verification=${randomUUID()} padding=${'上'.repeat(1500)}`)
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     return ai.loading === false && ai.contextUsage?.usedTokens > ${expected.usedTokens}
