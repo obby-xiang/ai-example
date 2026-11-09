@@ -2142,6 +2142,13 @@ function visibleToolSummary(snapshot, toolCallId, locale) {
       return zh ? '创建导出配置任务' : 'Create Export task'
     case 'generative_form':
       return zh ? '生成式表单（待填写）' : 'Generated form (pending)'
+    case 'list_tasks':
+      return zh ? '列出任务' : 'List tasks'
+    case 'start_export': {
+      const taskId = args?.taskId
+      if (taskId === undefined || taskId === null) return zh ? '启动导出作业' : 'Start export job'
+      return zh ? `启动导出作业（任务 #${taskId}）` : `Start export job (task #${taskId})`
+    }
     default:
       throw new AssertionFailure('VISIBLE_TOOL_SUMMARY_UNAVAILABLE')
   }
@@ -2182,7 +2189,7 @@ function promptFor(context) {
     return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} multi-card=2 verification=${nonce}`
   }
   if (context.config.scenario === 'ordinary-skipped') {
-    return `tool=create_task&args={"type":"EXPORT","defCodes":["__UNKNOWN_DEF__"],"conditions":{},"openWizard":false} multi-card=2 verification=${nonce}`
+    return `tool-seq=start_export,list_tasks&seq-args={"taskId":${context.fixtureTaskId}} verification=${nonce}`
   }
   if (context.config.scenario === 'form-mixed-copy') return `timeline-nonprefix verification=${nonce}`
   if (context.config.scenario === 'recovery-stream-refresh') return `turn-text stall-frames=250 verification=${nonce}`
@@ -2563,24 +2570,21 @@ async function approveCreateTasks(context) {
 
 function skippedToolSummary(snapshot, toolCallId, locale) {
   const target = targetPart(snapshot, toolCallId)
-  if (target?.part.name !== 'create_task' || target.part.status !== 'skipped') {
+  if (!target || target.part.status !== 'skipped') {
     throw new AssertionFailure('SKIPPED_PART_REQUIRED_FOR_SUMMARY')
   }
-  let args
-  try {
-    args = typeof target.part.args === 'string' ? JSON.parse(target.part.args) : target.part.args
-  } catch {
-    throw new AssertionFailure('SKIPPED_TOOL_ARGS_INVALID')
-  }
-  if (args?.type !== 'EXPORT' || (typeof args.title === 'string' && args.title.trim() !== '')) {
-    throw new AssertionFailure('SKIPPED_TOOL_SUMMARY_UNAVAILABLE')
-  }
-  return locale === 'zh-CN' ? '创建导出配置任务' : 'Create Export task'
+  return visibleToolSummary(snapshot, toolCallId, locale)
 }
 
 async function assertSkippedPhase(context, phase, skippedToolCallId, otherToolCallId,
-  {expectedCode, expectedNewTasks, requireOtherVisible = null}) {
+  {expectedCode, expectedNewTasks, requireOtherVisible = null, requireBody = true}) {
   const {browser, api, checks} = context
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const part = ai.messages.flatMap((message) => message.parts).find((part) => part.toolCallId === '${skippedToolCallId}')
+    const terminal = ['succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
+    return !!part && terminal.includes(part.status) && ai.loading === false
+  })()`, 'SKIPPED_PART_NOT_PROJECTED')
   const snapshot = await browser.snapshot()
   const historyEvidence = await api.history(snapshot.sessionId)
   const history = requiredHistory(historyEvidence)
@@ -2610,7 +2614,7 @@ async function assertSkippedPhase(context, phase, skippedToolCallId, otherToolCa
   checks.require(`${phase}.skipped.copy-summary-known`, skippedSummary.trim() !== '',
     'full toolSummary is generated from the skipped part name and args, never from the other card', skippedSummary)
   const target = targetPart(snapshot, skippedToolCallId)
-  const requiredTexts = assertMixedBodyInHistory(context, phase, target.message, history)
+  const requiredTexts = requireBody ? assertMixedBodyInHistory(context, phase, target.message, history) : []
   const requiredTitle = otherCards.length === 1 ? visibleToolSummary(snapshot, otherToolCallId, context.config.locale) : null
   const expectedText = [...requiredTexts, ...(requiredTitle === null ? [] : [requiredTitle])].filter((text) => text.trim() !== '').join('\n\n')
   await copyMessageAndAssert(context, phase, target.message.id, {requiredTitle, forbiddenTitle: skippedSummary, requiredTexts, expectedText})
@@ -2663,36 +2667,63 @@ async function runSkippedScenario(context) {
 }
 
 async function runOrdinarySkippedScenario(context) {
-  const {browser, checks} = context
+  const {browser, api, checks, config} = context
+  const task = await api.createTask(`verification-ordinary-skipped-${randomUUID()}`)
+  context.fixtureTaskId = Number(task.id)
+  if (!Number.isSafeInteger(context.fixtureTaskId) || context.fixtureTaskId <= 0) {
+    throw new Error('ordinary-skipped fixture task id invalid')
+  }
+  await api.selectDefs(context.fixtureTaskId)
+  await api.goToStep(context.fixtureTaskId, 'EXPORT')
+  const fixtureUrl = new URL(config.appUrl)
+  fixtureUrl.pathname = '/export'
+  fixtureUrl.search = `?taskId=${context.fixtureTaskId}`
+  await browser.send('Page.navigate', {url: fixtureUrl.toString()})
+  await browser.waitFor(`(() => {
+    const pinia = document.getElementById('app').__vue_app__.config.globalProperties.$pinia
+    const workspace = pinia._s.get('workspace')
+    return workspace.taskId === ${context.fixtureTaskId} && workspace.step === 'EXPORT'
+  })()`, 'ORDINARY_SKIPPED_FIXTURE_NOT_READY')
   context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
   browser.setPhase('live')
   await browser.sendPrompt(promptFor(context))
+  const pending = await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const part = ai.messages.flatMap((message) => message.parts).find((part) => part.kind === 'tool'
+      && part.name === 'start_export' && part.requiresAction === true)
+    return part ? {toolCallId: part.toolCallId} : null
+  })()`, 'ORDINARY_SKIPPED_FIRST_CONFIRM_NOT_FORMED')
+  await browser.click(`[data-testid="pending-card-${pending.toolCallId}"] [data-testid="gate-actions"] button:first-child`)
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
-    const parts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool' && part.name === 'create_task')
+    const parts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool'
+      && (part.name === 'start_export' || part.name === 'list_tasks'))
     const terminal = ['succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
-    return parts.length > 0 && parts.every((part) => terminal.includes(part.status) && part.requiresAction === false)
+    return parts.length === 2 && parts.every((part) => terminal.includes(part.status) && part.requiresAction === false)
   })()`, 'ORDINARY_SKIPPED_TERMINAL_NOT_REACHED')
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const host = ai.messages.find((message) => message.parts.some((part) => ['start_export', 'list_tasks'].includes(part.name)))
+    return ai.loading === false && host?.done === true
+  })()`, 'ORDINARY_SKIPPED_TURN_NOT_DONE')
   const snapshot = await browser.snapshot()
-  const parts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.name === 'create_task')
-  if (parts.length !== 2) throw new ScenarioNotRun('ORDINARY_SKIPPED_TWO_CALLS_NOT_FORMED')
-  const first = parts[0]
-  const skipped = parts[1]
+  const parts = snapshot.messages.flatMap((message) => message.parts)
+    .filter((part) => part.name === 'start_export' || part.name === 'list_tasks')
+  const first = parts.find((part) => part.name === 'start_export')
+  const skipped = parts.find((part) => part.name === 'list_tasks')
+  if (!first || !skipped) throw new ScenarioNotRun('ORDINARY_SKIPPED_TWO_CALLS_NOT_FORMED')
   if (!(skipped.status === 'skipped' && skipped.userTextCode === 'UPSTREAM_FAILED'
     && skipped.decision === null && skipped.requiresAction === false)) {
     throw new ScenarioNotRun('ORDINARY_SKIPPED_FIXTURE_NOT_FORMED')
   }
-  checks.require('live.first-create-failed', ['failed', 'rejected', 'blocked'].includes(first.status),
-    'the first create_task fails instead of being approved', first)
-  checks.require('live.second-create-ordinary-skipped', skipped.status === 'skipped'
-    && skipped.userTextCode === 'UPSTREAM_FAILED' && skipped.decision === null && skipped.requiresAction === false,
-  'the second create_task is an ordinary UPSTREAM_FAILED skip after the first failure', skipped)
+  checks.require('live.first-halts-batch', ['rejected', 'failed', 'blocked'].includes(first.status),
+    'the first W/J/P call halts the batch through a real decision', first)
   context.toolCallId = skipped.toolCallId
   context.runId = snapshot.activeRunId
   const phases = [await assertSkippedPhase(context, 'live', skipped.toolCallId, first.toolCallId,
     {expectedCode: 'UPSTREAM_FAILED', expectedNewTasks: 0, requireOtherVisible: null})]
   const requestBaseline = browser.requestCounts()
-  checks.require('live.no-create-confirm', requestBaseline.confirm === 0, 0, requestBaseline)
+  checks.require('live.single-reject-confirm', requestBaseline.confirm === 1, 1, requestBaseline)
   checks.require('live.single-chat', requestBaseline.chat === 1, 1, requestBaseline)
   for (const phase of ['history', 'refresh-1', 'refresh-2']) {
     browser.setPhase(phase)

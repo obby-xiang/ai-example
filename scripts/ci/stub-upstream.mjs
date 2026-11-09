@@ -968,6 +968,7 @@ function toolRound(tool, args, callId, model) {
 function multiNamedToolRound(calls, callId, model) {
   return [
     chunk({ role: 'assistant', content: '' }, null, model),
+    chunk({ content: '序列验收：首笔确认被拒绝，后续调用应按上游失败跳过。' }, null, model),
     chunk({
       tool_calls: calls.map((call, index) => ({
         index,
