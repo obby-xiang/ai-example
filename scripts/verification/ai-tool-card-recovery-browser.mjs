@@ -210,6 +210,7 @@ function loadConfig() {
     stubDumpDir: process.env.STUB_DUMP_DIR?.trim() ? outsidePath('STUB_DUMP_DIR') : null,
     proxyLogDir: process.env.PROXY_LOG_DIR?.trim() ? outsidePath('PROXY_LOG_DIR') : null,
     xlsxFixture: process.env.XLSX_FIXTURE?.trim() ? outsidePath('XLSX_FIXTURE') : null,
+    contentVariant: (process.env.CONTENT_VARIANT ?? 'timeline').trim(),
     timeoutMs: integerEnv('TIMEOUT_MS', 120_000, 5_000, 600_000),
     pollMs: integerEnv('POLL_MS', 50, 10, 1_000)
   }
@@ -5006,7 +5007,29 @@ async function runTimingProxyScenario(context) {
     return ai.historyLoaded === true && ai.restoringRecovery === false && ai.loading === false
   })()`, 'TIMING_PROXY_APP_NOT_READY')
 
-  await browser.sendPrompt(`timeline-nonprefix verification=${randomUUID()}`)
+  const contentVariant = config.contentVariant ?? 'timeline'
+  const contentPrompts = {
+    timeline: `timeline-nonprefix verification=${randomUUID()}`,
+    interleave: `turn-interleave multi-card=2 reasoning=120 stall-frames=250 verification=${randomUUID()}`,
+    'gf-seven': `gf-seven-types multi-card=2 stall-frames=250 verification=${randomUUID()}`
+  }
+  if (!contentPrompts[contentVariant]) throw new ScenarioNotRun('CONTENT_VARIANT_INVALID')
+  await browser.sendPrompt(contentPrompts[contentVariant])
+  // 增量锚点：轮次仍在途时读取公开 runSeq（不等终态），作为 `?lastSeq=` 锚点。
+  let anchorState = {runId: null, lastSeq: 0}
+  const anchorDeadline = Date.now() + 8_000
+  while (Date.now() < anchorDeadline) {
+    anchorState = await browser.evaluate(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const runId = ai.activeRunId ?? null
+      const value = runId ? (ai.runSeq ?? {})[runId] : null
+      return {runId, lastSeq: Number.isSafeInteger(value) ? value : 0}
+    })()`, false)
+    if (anchorState?.runId && anchorState.lastSeq > 0) break
+    await sleep(100)
+  }
+  if (anchorState?.runId) context.runId = anchorState.runId
+  const incrementalAnchor = Number(anchorState?.lastSeq ?? 0)
   const submitPendingForm = async () => {
     const form = await browser.evaluate(`(() => {
       const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
@@ -5017,24 +5040,29 @@ async function runTimingProxyScenario(context) {
     if (!form) return false
     await browser.evaluate(`document.querySelector('[data-testid="gf-field-${form.toolCallId}-${form.key}"]').focus()`, false)
     await browser.send('Input.insertText', {text: `proxy-${randomUUID()}`})
-    await browser.click(`[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]`)
-    return true
+    const clicked = await browser.evaluate(`(() => {
+      const submit = document.querySelector('[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]')
+      if (!submit || submit.disabled) return false
+      submit.click()
+      return true
+    })()`, false)
+    if (!clicked) return false
+    return form.toolCallId
   }
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     return ai.activeForm?.toolCallId || (ai.loading === false
       && ai.messages.some((message) => message.role === 'assistant' && message.done))
   })()`, 'TIMING_PROXY_RUN_NOT_FORMED')
-  await submitPendingForm()
-  // 增量锚点：在续跑后缀尚未收齐时读取公开 runSeq，作为 `?lastSeq=` 锚点。
-  const anchorState = await browser.evaluate(`(() => {
-    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
-    const runId = ai.activeRunId ?? null
-    const value = runId ? (ai.runSeq ?? {})[runId] : null
-    return {runId, lastSeq: Number.isSafeInteger(value) ? value : 0}
-  })()`, false)
-  if (anchorState?.runId) context.runId = anchorState.runId
-  const incrementalAnchor = Number(anchorState?.lastSeq ?? 0)
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const submittedId = await submitPendingForm()
+    if (!submittedId) break
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.activeForm?.toolCallId !== ${JSON.stringify(submittedId)} || ai.loading === false
+    })()`, 'TIMING_PROXY_FORM_NOT_SUBMITTED')
+  }
+
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     return ai.restoringRecovery === false && ai.loading === false
@@ -5046,12 +5074,35 @@ async function runTimingProxyScenario(context) {
   context.runId = snapshot.activeRunId
   const parts = snapshot.messages.filter((message) => message.role === 'assistant').flatMap((message) => message.parts)
   const kinds = parts.map((part) => part.kind === 'tool' ? `tool:${part.name}` : part.kind)
-  checks.require('proxy.part-order', canonicalJson(kinds) === canonicalJson(['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text']),
-    ['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text'], kinds)
   const texts = parts.filter((part) => part.kind === 'text').map((part) => part.text ?? '')
-  checks.require('proxy.three-non-prefix-texts', texts.length === 3
-    && texts.every((text, index) => texts.slice(index + 1).every((later) => !text.startsWith(later) && !later.startsWith(text))),
-  'three non-prefix text bodies', texts.map((text) => textEvidence(text)))
+  const toolParts = parts.filter((part) => part.kind === 'tool')
+  if (contentVariant === 'timeline') {
+    checks.require('proxy.part-order', canonicalJson(kinds) === canonicalJson(['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text']),
+      ['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text'], kinds)
+    checks.require('proxy.three-non-prefix-texts', texts.length === 3
+      && texts.every((text, index) => texts.slice(index + 1).every((later) => !text.startsWith(later) && !later.startsWith(text))),
+    'three non-prefix text bodies', texts.map((text) => textEvidence(text)))
+  } else if (contentVariant === 'interleave') {
+    // 产品会在首部生成空字符串 text 占位；按 C-131A 口径只忽略“空字符串 text”，保留其余顺序。
+    const nonEmptyKinds = parts
+      .filter((part) => !(part.kind === 'text' && (part.text ?? '') === ''))
+      .map((part) => part.kind === 'tool' ? `tool:${part.name}` : part.kind)
+    checks.require('proxy.interleave-order', canonicalJson(nonEmptyKinds) === canonicalJson(['tool:list_config_defs', 'tool:list_config_defs', 'text']),
+      ['tool:list_config_defs', 'tool:list_config_defs', 'text'], {kinds, nonEmptyKinds})
+    checks.require('proxy.interleave-two-distinct-tools', toolParts.length === 2
+      && new Set(toolParts.map((part) => part.toolCallId)).size === 2
+      && texts.some((text) => text.trim() !== ''),
+    'two distinct tool calls followed by closing text', {
+      tools: toolParts.map((part) => part.toolCallId),
+      texts: texts.map((text) => textEvidence(text))
+    })
+  } else {
+    checks.require('proxy.gf-seven-two-forms', toolParts.filter((part) => part.name === 'generative_form').length === 2
+      && new Set(toolParts.map((part) => part.toolCallId)).size === toolParts.length,
+    'two distinct generative forms are driven to terminal without duplicate toolCallId', toolParts.map((part) => ({
+      name: part.name, toolCallId: part.toolCallId, status: part.status
+    })))
+  }
 
   // historyProjection 由 loadHistory 提交；实时轮次只推进 messages，这里强制一次公开 loadHistory 再核对。
   await browser.evaluate(`(async () => {
@@ -5080,7 +5131,27 @@ async function runTimingProxyScenario(context) {
     histories: histories.slice(0, 8)
   })
 
-  const before = recoveryFactsSignatureWithoutSeq(snapshot)
+  const proxyFacts = (value) => {
+    const facts = JSON.parse(recoveryFactsSignatureWithoutSeq(value))
+    if (contentVariant === 'interleave') {
+      for (const message of facts.messages) {
+        message.parts = (message.parts ?? [])
+          .filter((part) => !(part.kind === 'text' && part.text && part.text.length === 0))
+          .map((part) => {
+            const {seg, ...rest} = part
+            return rest
+          })
+      }
+    }
+    if (contentVariant === 'gf-seven') {
+      // C-138 B 只核对 history 时序下的正文/parts/卡片；活动/排队表单的队列稳定性由 C-131B/C-163 单独跟踪。
+      delete facts.activeForm
+      delete facts.queuedForms
+      for (const message of facts.messages) delete message.done
+    }
+    return canonicalJson(facts)
+  }
+  const before = proxyFacts(snapshot)
   browser.setPhase('full-replay')
   await browser.reload()
   await browser.waitFor(`(() => {
@@ -5088,10 +5159,10 @@ async function runTimingProxyScenario(context) {
     return ai.historyLoaded === true && ai.restoringRecovery === false && ai.loading === false
   })()`, 'TIMING_PROXY_FULL_REPLAY_NOT_SETTLED')
   const replayed = await browser.snapshot()
-  checks.require('full.content-stable', recoveryFactsSignatureWithoutSeq(replayed) === before,
+  checks.require('full.content-stable', proxyFacts(replayed) === before,
     'full history replay reproduces the same ordered content/parts/cards', {
       before,
-      after: recoveryFactsSignatureWithoutSeq(replayed)
+      after: proxyFacts(replayed)
     })
   const replayCommitted = await waitForHistoryProjectionCommit(context, 'full-replay-history')
   checks.require('full.history-converged', replayCommitted !== null,
@@ -5109,8 +5180,13 @@ async function runTimingProxyScenario(context) {
     'incremental reattach only returns frames with seq > lastSeq', {lastSeq, seqs: seqs.slice(0, 32)})
   checks.require('incremental.seq-unique-ascending', seqs.every((seq, index) => index === 0 || seq > seqs[index - 1]),
     'replayed seq values are unique and strictly ascending', seqs)
-  checks.require('incremental.terminal-present', replay.frames.some((frame) => ['done', 'error'].includes(frame.type)),
-    'incremental replay includes the terminal frame', replay.frames.slice(-8))
+  if (contentVariant !== 'gf-seven') {
+    checks.require('incremental.terminal-present', replay.frames.some((frame) => ['done', 'error'].includes(frame.type)),
+      'incremental replay includes the terminal frame', replay.frames.slice(-8))
+  } else {
+    checks.require('incremental.gf-frames-present', replay.frames.length > 0,
+      'incremental replay exposes the suspended-run frames for the GF variant', replay.frames.slice(-8))
+  }
   await evidence.json('timing-proxy-incremental.json', {
     variant: config.variant,
     lastSeq,
