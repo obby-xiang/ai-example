@@ -10,7 +10,15 @@
       :class="[collapsedActivityStyle.shell, collapsedActivityStyle.motion]"
       aria-hidden="true"
     >
-      <svg class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
+      <span v-if="collapsedActivityState === 'recovering'" class="flex items-center gap-[3px]" data-testid="collapsed-recovery-loading">
+        <span
+          v-for="delay in RECOVERY_DOT_DELAYS"
+          :key="delay"
+          class="h-[4px] w-[4px] rounded-full bg-[#2563eb] animate-pulse motion-reduce:animate-none"
+          :style="{ animationDelay: delay }"
+        ></span>
+      </span>
+      <svg v-else class="h-[17px] w-[17px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l1.6 4.4 4.4 1.6-4.4 1.6L12 15.5l-1.6-4.4L6 9.5l4.4-1.6L12 3.5Z"></path><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z"></path></svg>
     </span>
     <span class="writing-vertical text-[13px]">{{ t('ai.panel.assistant') }}</span>
   </div>
@@ -127,6 +135,7 @@
         data-testid="return-active-run"
         :aria-label="t('ai.panel.returnToActiveRunHint')"
         class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[9px] py-[3px] text-[11.8px] text-[#2563eb] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
+        :disabled="ai.restoringRecovery"
         @click="returnToActiveRun()"
       >
         {{ t('ai.panel.returnToActiveRun') }}
@@ -599,7 +608,6 @@
                               </label>
                             </div>
                             <div
-                              v-if="!ai.restoringRecovery"
                               class="flex flex-wrap items-center gap-[8px] pt-[10px]"
                               data-testid="gate-actions"
                               :aria-busy="isGateSubmitting(part.toolCallId)"
@@ -613,13 +621,13 @@
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                  :disabled="isGateSubmitting(part.toolCallId)"
+                                  :disabled="ai.restoringRecovery || isGateSubmitting(part.toolCallId)"
                                   @click="decide(false, part.toolCallId)"
                                 >{{ t('ai.panel.reject') }}</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
+                                  :disabled="ai.restoringRecovery || isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
                                   @click="decide(true, part.toolCallId)"
                                 >
                                   <span
@@ -647,7 +655,7 @@
                             :key="liveForm.toolCallId"
                             :schema="liveForm.form"
                             :submitting="liveForm.status === 'submitting'"
-                            :readonly="ai.restoringRecovery"
+                            :disabled="ai.restoringRecovery"
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
@@ -697,8 +705,7 @@
                             :plan="sheetPreviewFor(part)"
                             :applying="isSheetPreviewApplying(part)"
                             :applied-summary="appliedSummaryFor(part)"
-                            :inert="ai.restoringRecovery"
-                            :aria-disabled="ai.restoringRecovery"
+                            :disabled="ai.restoringRecovery"
                             @apply="onSheetPreviewApply"
                             @cancel="onSheetPreviewCancel"
                             @abandon="onSheetPreviewAbandon(part.toolCallId)"
@@ -716,7 +723,8 @@
                             :label="uploadHandoffLabel(part)"
                             :reason="uploadHandoffReason(part)"
                             :file-name="uploadHandoffFileName(part)"
-                            :interactive="part.requiresAction && !ai.restoringRecovery"
+                            :interactive="part.requiresAction"
+                            :disabled="ai.restoringRecovery"
                             @choose="onUploadHandoffChoose"
                             @cancel="onUploadHandoffCancel(part.toolCallId)"
                           />
@@ -761,15 +769,8 @@
           </button>
         </div>
 
-        <!-- R-159 #2/#3/#4：单一元信息行（demo aiShell(fix) 结构）——左位 = 流式期「工作中…」呼吸
-             常驻（发出即现，首字符不消失；完成时淡出换时间戳）/ 完成后时间戳；按钮组紧邻时间戳
-             （R-162 M1：删 justify-between 两端分置改左对齐紧邻 —— AI 行 [呼吸/时间戳|按钮] 左起左排；
-             用户行 row-reverse 容器内同 DOM 序，渲染为按钮贴时间戳左侧、整簇靠右内聚，行尾无孤立按钮；
-             R-159 语义全保留：流式期 visibility:hidden 占位、互斥换入、淡出）。
-             R-165 S4 项 1（用户直裁）：操作按钮**常驻**——撤 opacity-0/group-hover/focus-within 浮出机制，
-             按钮组恒可见（hover 高亮保留在各按钮自身的 hover:* 里）。撤 `transition-opacity` 随之，
-             按钮组的 `visibility:hidden`（助手流式期占位不显）是 R-159 独立语义，不属浮出机制，保留。
-             行判据：有正文 或 助手消息流式中（发出即现，无正文也要能呼吸）。 -->
+        <!-- 单条消息的活动态与终态组严格互斥：活动态只显示工作/等待/压缩或恢复三点；
+             用户消息与已终态助手消息显示时间戳、终态标识、复制提示及消息操作按钮。 -->
         <div
           v-if="canShowMetaRow(m)"
           class="flex items-center gap-2 text-xs text-[#8b949e] w-full max-w-[82%]"
@@ -778,7 +779,22 @@
         >
           <span class="flex items-center gap-1 min-h-[18px]">
             <span
-              v-if="activityStateOf(m) === 'waiting'"
+              v-if="activityStateOf(m) === 'recovering'"
+              class="flex items-center gap-[3px] px-[3px]"
+              data-testid="recovery-loading"
+              role="status"
+              :aria-label="t('ai.panel.recoveryLoading')"
+            >
+              <span
+                v-for="delay in RECOVERY_DOT_DELAYS"
+                :key="delay"
+                class="h-[4px] w-[4px] rounded-full bg-[#2563eb] animate-pulse motion-reduce:animate-none"
+                :style="{ animationDelay: delay }"
+                aria-hidden="true"
+              ></span>
+            </span>
+            <span
+              v-else-if="activityStateOf(m) === 'waiting'"
               data-testid="park-waiting"
               class="inline-flex items-center gap-[5px] text-[12.2px] text-[#b45309] tracking-[.3px]"
             >
@@ -803,8 +819,8 @@
             <span v-else-if="canShowTimestamp(m)" class="text-[#8b949e]" data-testid="msg-timestamp">{{ formatProgressiveTs(m.timestamp) }}</span>
           </span>
           <div
+            v-if="isTerminalMessage(m)"
             class="flex items-center gap-2"
-            :class="ai.restoringRecovery || (m.streaming && m.role === 'assistant') ? 'invisible' : ''"
           >
             <span
               v-if="copyState && copyState.id === m.id && !copyState.ok"
@@ -844,6 +860,7 @@
               data-testid="continue-round"
               :aria-label="t('ai.panel.resumeChat')"
               class="group/tip relative inline-flex items-center justify-center h-7 rounded-[8px] border-0 bg-transparent px-[6px] text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
+              :disabled="ai.restoringRecovery"
               @click="continueTurn(m)"
             >
               {{ t('ai.panel.continue') }}
@@ -891,7 +908,7 @@
             </button>
             <button
               type="button"
-              :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, isMsgCopied(m.id) ? 'is-copied' : '', ai.restoringRecovery ? 'visible' : '']"
+              :class="[ICON_BTN_CLASS, ICON_BTN_IDLE, COPY_STATE_CLASS, isMsgCopied(m.id) ? 'is-copied' : '']"
               :data-testid="'copy-msg-' + m.id"
               :aria-label="t('ai.panel.copyMessage')"
               @click="copyMessage(m)"
@@ -935,6 +952,7 @@
             class="flex-none border-0 bg-transparent p-0 text-[11.5px]"
             :class="ERROR_CARD_TONE[m.errorCard.variant].action"
             :data-testid="'error-card-action-' + m.id"
+            :disabled="ai.restoringRecovery"
             @click="runErrorCardAction(m)"
           ><span class="border-b border-[#e3e6ea]">{{ errorCardActionLabel(m) }}</span></button>
         </div>
@@ -1538,7 +1556,7 @@ function busyRunId(): string | null {
 }
 
 function canReturnToActiveRun(): boolean {
-  return !ai.restoringRecovery && busyRunId() !== null
+  return busyRunId() !== null
 }
 
 function returnToActiveRun(): void {
@@ -1754,8 +1772,7 @@ const ERROR_CARD_TONE: Record<ErrorCardVariant, { box: string; icon: string; gly
  */
 function isErrorCardContinueVisible(message: ChatMessage): boolean {
   const card = message.errorCard
-  return !ai.restoringRecovery
-    && card != null && card.variant === 'quota'
+  return card != null && card.variant === 'quota'
     && Boolean(card.action)
     && isFailedLastAssistant(message)
 }
@@ -1780,7 +1797,7 @@ function errorCardActionLabel(message: ChatMessage): string {
  */
 function isErrorCardActionVisible(message: ChatMessage): boolean {
   const card = message.errorCard
-  if (ai.restoringRecovery || !card?.action) {
+  if (!card?.action) {
     return false
   }
   if (card.variant === 'quota') {
@@ -2185,6 +2202,20 @@ function isLastAssistantMessage(message: ChatMessage): boolean {
   return message.role === 'assistant' && ai.messages[ai.messages.length - 1] === message
 }
 
+function isTerminalMessage(message: ChatMessage): boolean {
+  if (message.role === 'user') {
+    return true
+  }
+  return (message.done && !message.streaming)
+    || message.stopped === true
+    || message.interrupted === true
+    || message.truncated === true
+}
+
+function isRecoveryLoading(message: ChatMessage): boolean {
+  return message.role === 'assistant' && ai.restoringRecovery && !isTerminalMessage(message)
+}
+
 /**
  * 只有当前消息里真实存在**等人**的可操作卡时才显示「等待你操作」；自动前端工具与其余运行阶段都算工作。
  *
@@ -2192,7 +2223,7 @@ function isLastAssistantMessage(message: ChatMessage): boolean {
  * （卡头是「已提交」、卡体是只读表单），该窗口归**既有的工作中语义**（呼吸点），不新增状态。
  */
 function isWaitingForAction(message: ChatMessage): boolean {
-  if (message.role !== 'assistant' || message.done || ai.restoringRecovery || ai.runPhase !== 'parked') {
+  if (message.role !== 'assistant' || isTerminalMessage(message) || ai.restoringRecovery || ai.runPhase !== 'parked') {
     return false
   }
   return message.parts.some((part) => part.kind === 'tool'
@@ -2209,26 +2240,31 @@ function isWaitingForAction(message: ChatMessage): boolean {
  */
 function isCompacting(message: ChatMessage): boolean {
   return message.role === 'assistant'
-    && !message.done
+    && !isTerminalMessage(message)
     && message.compactingStartedAtMs !== undefined
     && !isWaitingForAction(message)
     && !ai.restoringRecovery
 }
 
 function isBreathing(message: ChatMessage): boolean {
-  const active = ai.restoringRecovery
-    ? isLastAssistantMessage(message)
-    : message.streaming || (isLastAssistantMessage(message) && ai.loading && !message.done)
+  const active = message.streaming || (isLastAssistantMessage(message) && ai.loading && !message.done)
   return message.role === 'assistant'
     && active
-    && (ai.restoringRecovery || !message.done)
+    && !isTerminalMessage(message)
     && !isWaitingForAction(message)
     && !isCompacting(message)
 }
 
-type MessageActivityState = 'working' | 'waiting' | 'compacting' | 'idle'
+type MessageActivityState = 'working' | 'waiting' | 'compacting' | 'recovering' | 'idle'
+const RECOVERY_DOT_DELAYS = ['0ms', '150ms', '300ms']
 
 function activityStateOf(message: ChatMessage): MessageActivityState {
+  if (isRecoveryLoading(message)) {
+    return 'recovering'
+  }
+  if (isTerminalMessage(message)) {
+    return 'idle'
+  }
   if (isWaitingForAction(message)) {
     return 'waiting'
   }
@@ -2239,9 +2275,6 @@ function activityStateOf(message: ChatMessage): MessageActivityState {
 }
 
 const collapsedActivityState = computed<MessageActivityState>(() => {
-  if (ai.restoringRecovery) {
-    return 'working'
-  }
   for (let i = ai.messages.length - 1; i >= 0; i -= 1) {
     const message = ai.messages[i]
     if (message === undefined || message.role !== 'assistant') {
@@ -2271,37 +2304,24 @@ const COLLAPSED_ACTIVITY_STYLES = {
   compacting: {
     shell: 'bg-[#f5f3ff] text-[#7c3aed]',
     motion: 'animate-breathe-text motion-reduce:animate-none'
+  },
+  recovering: {
+    shell: 'bg-[#eff4ff] text-[#2563eb]',
+    motion: ''
   }
 } as const
 
 const collapsedActivityStyle = computed(() => COLLAPSED_ACTIVITY_STYLES[collapsedActivityState.value])
 
 function canShowTimestamp(message: ChatMessage): boolean {
-  if (ai.restoringRecovery || formatProgressiveTs(message.timestamp) === '') {
-    return false
-  }
-  return message.role !== 'assistant' || (message.done && !message.streaming)
+  return isTerminalMessage(message) && formatProgressiveTs(message.timestamp) !== ''
 }
 
 /**
- * R-159 #2/#3：元信息行判据 = 有正文（N10 操作行判据沿用）或助手流式中（无正文也要能呼吸）。
- *
- * <p>
- * 批G · S14（真机回归）：「已停止」chip 住在这一行里，所以**被停掉的轮必须有位置** ——
- * GF/确认卡轮的宿主可能只有卡、没有正文段（`streaming` 也已收口），按"有正文或流式中"就会
- * 把 chip 一起藏掉（真机 4/4 缺）。停止是消息级事实，与有没有正文无关。
- * 截断专项：「已截断」chip 同理，`truncated` 是消息级事实（长度截断必有正文，但仍按消息级
- * 判据给位置，避免正文被清空/渲染失败时标记消失）。
- * 批次2：park 等待态 / unconfirmed 中性视图同样自带位置。
+ * 单条消息只显示活动态或完整终态组；恢复中的未终态助手消息以三点加载占位。
  */
 function canShowMetaRow(message: ChatMessage): boolean {
-  return message.parts.some((part) => part.kind === 'text' && part.text)
-    || activityStateOf(message) !== 'idle'
-    || ai.restoringRecovery
-    || canShowContinue(message)
-    || isErrorCardContinueVisible(message)
-    || message.stopped === true
-    || message.truncated === true
+  return isTerminalMessage(message) || activityStateOf(message) !== 'idle'
 }
 
 /**
@@ -2351,7 +2371,7 @@ function setFading(id: string, on: boolean): void {
 }
 
 function isFading(message: ChatMessage): boolean {
-  return !ai.restoringRecovery && fadingIds.value.has(message.id)
+  return !isTerminalMessage(message) && !ai.restoringRecovery && fadingIds.value.has(message.id)
 }
 
 watch(
@@ -3867,9 +3887,6 @@ function onSheetPreviewAbandon(toolCallId: string): void {
 }
 
 function onSheetPreviewLevel(level: SheetPreviewLevel): void {
-  if (ai.restoringRecovery) {
-    return
-  }
   void ai.setPreviewLevel(level)
 }
 
@@ -4495,9 +4512,6 @@ async function loadEarlierHistory(): Promise<void> {
  * 空 / 全空白字符不打扰，直接复制聚焦。确认只决定"敢不敢覆盖草稿"，与发送/重跑无关。
  */
 function editMessage(m: ChatMessage): void {
-  if (ai.restoringRecovery) {
-    return
-  }
   if (inputText.value.trim() !== '' && !window.confirm(t('ai.panel.overwriteConfirm'))) {
     return
   }
@@ -4537,10 +4551,10 @@ function isFailedLastAssistant(message: ChatMessage): boolean {
  * 继续：失败/断流的最后一条助手消息，无论有无正文/思考都可出（正常发送一条用户可见的
  * 「继续」，不删历史）；停止/取消、unconfirmed、非末轮不出。
  * 配额错误卡或统一恢复错误条已带动作时，元信息行不重复该入口。
- * 普通 regenerate：本批不做，**不渲染按钮**（不做禁用 / unsupported 假入口）。
+ * 普通 regenerate：本批不做；恢复期间继续入口保留但禁用，不发起新轮。
  */
 function canShowContinue(message: ChatMessage): boolean {
-  return !ai.restoringRecovery && !recoveryErrorVisible.value && isFailedLastAssistant(message) && !isErrorCardContinueVisible(message)
+  return !recoveryErrorVisible.value && isFailedLastAssistant(message) && !isErrorCardContinueVisible(message)
 }
 
 /** R-165 S1：操作行图标按钮配方 —— demo v7 `.icon-btn` 工具类逐条照搬（含 preflight 关闭下的
@@ -4573,9 +4587,6 @@ function feedbackOf(messageId: string): 1 | -1 | 0 {
 }
 
 async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
-  if (ai.restoringRecovery) {
-    return
-  }
   const before = new Map(feedbackState.value)
   const next = new Map(feedbackState.value)
   const current = next.get(m.id)

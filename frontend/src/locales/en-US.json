@@ -493,6 +493,7 @@
       "identityRetry": "Retry",
       "collapse": "Collapse",
       "breathing": "Working…",
+      "recoveryLoading": "Loading…",
       "uploadFallbackLabel": "Upload xlsx / zip",
       "requiredCount": "{count} required",
       "formCancelledSummary": "Not submitted; entries are not recorded",

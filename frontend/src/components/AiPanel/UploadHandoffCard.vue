@@ -14,12 +14,14 @@ const props = withDefaults(defineProps<{
   reason?: string | null
   fileName?: string | null
   interactive?: boolean
+  disabled?: boolean
 }>(), {
   accept: null,
   label: null,
   reason: null,
   fileName: null,
-  interactive: true
+  interactive: true,
+  disabled: false
 })
 
 const emit = defineEmits<{
@@ -85,7 +87,7 @@ const maxFilesPerSelection = 1
 
 const hasReason = computed(() => Boolean(props.reason?.trim()))
 const isRetry = computed(() => props.status === 'failed' || (props.status === 'waiting' && hasReason.value))
-const chooseDisabled = computed(() => props.status === 'unsupported' || props.status === 'missing')
+const chooseDisabled = computed(() => props.disabled === true || props.status === 'unsupported' || props.status === 'missing')
 const showChoose = computed(() => props.interactive && ['waiting', 'failed', 'unsupported', 'missing'].includes(props.status))
 const showCancel = computed(() => props.interactive && props.status !== 'uploaded' && props.status !== 'cancelled')
 const showEntryHint = computed(() => props.interactive && ['waiting', 'failed', 'unsupported'].includes(props.status))
@@ -115,6 +117,9 @@ function onChoose(): void {
 }
 
 function onCancel(): void {
+  if (props.disabled === true) {
+    return
+  }
   expandedOverride.value = true
   emit('cancel')
 }
@@ -176,6 +181,7 @@ const SECONDARY_BUTTON = 'min-w-[56px] flex-none whitespace-nowrap rounded-[8px]
             type="button"
             :class="SECONDARY_BUTTON"
             data-testid="upload-handoff-cancel"
+            :disabled="disabled"
             @click="onCancel"
           >
             {{ t('ai.uploadHandoff.discard') }}

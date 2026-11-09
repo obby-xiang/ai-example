@@ -2819,6 +2819,7 @@ interface MirrorWriteMemo {
   stoppedRunId: string | null
   clientRequestId: string | null
   clientRequestStopped: boolean
+  contextUsageJson: string
 }
 
 /** 每个 store 实例一份"上次落盘现场"（WeakMap：新 store / 换会话自然失效）。 */
@@ -2836,7 +2837,8 @@ function mirrorMemoOf(owner: object): MirrorWriteMemo {
       runSeq: 'null',
       stoppedRunId: null,
       clientRequestId: null,
-      clientRequestStopped: false
+      clientRequestStopped: false,
+      contextUsageJson: 'null'
     }
     mirrorWriteMemos.set(owner, memo)
   }
@@ -2872,12 +2874,14 @@ function writeMirror(
     /** 当前轮客户端请求 id + 是否已被本端停止（停止闭环，见 AiSessionMirror）。 */
     clientRequestId?: string | null
     clientRequestStopped?: boolean
+    contextUsage?: ContextUsage | null
   } = {}
 ): MirrorWriteOutcome {
   const inFlight = extra.inFlight === true
   const stoppedRunId = extra.stoppedRunId ?? null
   const clientRequestId = extra.clientRequestId ?? null
   const clientRequestStopped = extra.clientRequestStopped === true
+  const contextUsageJson = JSON.stringify(extra.contextUsage ?? null)
   const memo = mirrorMemoOf(sink)
   let messageJsons: string[] = []
   let runSeqJson = 'null'
@@ -2894,6 +2898,7 @@ function writeMirror(
       && memo.stoppedRunId === stoppedRunId
       && memo.clientRequestId === clientRequestId
       && memo.clientRequestStopped === clientRequestStopped
+      && memo.contextUsageJson === contextUsageJson
       && memo.messages.length === messageJsons.length
       && memo.messages.every((json, index) => json === messageJsons[index])
     ) {
@@ -2910,7 +2915,8 @@ function writeMirror(
       ...(extra.runSeq ? { runSeq: { ...extra.runSeq } } : {}),
       ...(stoppedRunId !== null ? { stoppedRunId } : {}),
       ...(clientRequestId !== null ? { clientRequestId } : {}),
-      ...(clientRequestStopped ? { clientRequestStopped: true } : {})
+      ...(clientRequestStopped ? { clientRequestStopped: true } : {}),
+      ...(extra.contextUsage !== undefined ? { contextUsage: extra.contextUsage } : {})
     })
     payload = `${envelope.slice(0, -1)},"messages":[${messageJsons.join(',')}]}`
   } catch (error) {
@@ -2930,6 +2936,7 @@ function writeMirror(
     memo.stoppedRunId = stoppedRunId
     memo.clientRequestId = clientRequestId
     memo.clientRequestStopped = clientRequestStopped
+    memo.contextUsageJson = contextUsageJson
     mirrorFailureNotified.delete(sink)
     // 故障恢复后清掉**自己留下的**降级提示（不误清别的通知）。
     if (sink.noticeCode === MIRROR_STORAGE_NOTICE) {
@@ -5135,7 +5142,8 @@ export const useAiStore = defineStore('ai', {
         stoppedRunId: this.stoppedRunId,
         // 停止闭环：发送前生成的 clientRequestId 与"本端已停止"事实（即使 runId 未知）。
         clientRequestId: this.pendingClientRequestId,
-        clientRequestStopped: this.clientRequestStopped
+        clientRequestStopped: this.clientRequestStopped,
+        contextUsage: this.contextUsage
       })
       // 批次7B：去重命中（现场未变）不推进节流锚 —— 下一次真实变化应尽快落盘。
       if (outcome !== 'unchanged') {
@@ -5277,16 +5285,17 @@ export const useAiStore = defineStore('ai', {
         }
         if (snapshot.source === 'none') {
           this.contextUsage = null
-          return
+        } else {
+          this.contextUsage = {
+            usedTokens: snapshot.usedTokens,
+            limitTokens: snapshot.limitTokens,
+            percent: snapshot.percent,
+            level: snapshot.compaction?.level ?? 'none',
+            est: snapshot.estimated,
+            circuit: snapshot.compaction?.circuit ?? 'closed'
+          }
         }
-        this.contextUsage = {
-          usedTokens: snapshot.usedTokens,
-          limitTokens: snapshot.limitTokens,
-          percent: snapshot.percent,
-          level: snapshot.compaction?.level ?? 'none',
-          est: snapshot.estimated,
-          circuit: snapshot.compaction?.circuit ?? 'closed'
-        }
+        this.writeMirrorNow()
       } catch (error) {
           logCaughtError(error, 'stores/ai.ts:4592')
         // 读不到就不动数据：ContextPill 继续显示最近一次已知摘要（没有则保持空轨）。
@@ -5310,6 +5319,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       const sid = this.sessionId
+      void this.loadContext()
       const requestGeneration = (historyRequestGenerations.get(sid) ?? 0) + 1
       historyRequestGenerations.set(sid, requestGeneration)
       historyRequestsInFlight.set(sid, (historyRequestsInFlight.get(sid) ?? 0) + 1)
@@ -5367,6 +5377,9 @@ export const useAiStore = defineStore('ai', {
       const roundStartAtEntry = roundStartSeq
       this.startMirror()
       const mirror = readMirror(this.sessionId)
+      if (mirror?.contextUsage !== undefined) {
+        this.contextUsage = mirror.contextUsage
+      }
       // 批G · G4：镜像里的在途标记与帧序号在**归一之前**取出 —— 归一会把消息一律标成 done
       const mirrorInFlight = !inFlightAtEntry && mirror?.inFlight === true
       const mirrorRunSeq = mirror?.runSeq ?? {}
@@ -5443,7 +5456,8 @@ export const useAiStore = defineStore('ai', {
             runSeq: this.runSeq,
             stoppedRunId: this.stoppedRunId,
             clientRequestId: this.pendingClientRequestId,
-            clientRequestStopped: this.clientRequestStopped
+            clientRequestStopped: this.clientRequestStopped,
+            contextUsage: this.contextUsage
           })
         }
       }
@@ -5519,10 +5533,6 @@ export const useAiStore = defineStore('ai', {
       this.historyRevision = history.revision ?? 0
       this.historyEvents = history.events ?? []
       this.historyWindowEntries = markRaw(pageEntries)
-
-      // 上下文专项批①：占用条在刷新后必须由服务端重建（本地 store 是内存态，刷新即丢）。
-      // 与历史并行拉，不阻塞历史渲染（pill 慢一拍可接受，历史渲染慢一拍不可接受）。
-      void this.loadContext()
 
       if (!history.messages || history.messages.length === 0) {
         // 后端历史为空（重启/TTL 过期）：镜像里的挂起已无法回灌续跑 —— 待决工具段过期降级

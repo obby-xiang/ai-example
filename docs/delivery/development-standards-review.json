@@ -4724,6 +4724,49 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改流式文本解码、工具参数解析或Unicode处理。"},
         "verification-review": {"status": "checked", "reason": "agent-1169最终APPROVE；两文件IDEA Reformat成功；主会话node scripts/build.mjs通过，3280模块、Vite 27.15秒；动态浏览器/接口场景NOT_RUN，留待独立复测。"}
       }
+    },
+    {
+      "fingerprint": "sha256:14b096e4b064e8b4084b7cc36ce305e0720bd23c165fc9a96311c5bb5a883eab",
+      "status": "reviewed",
+      "reason": "按用户最终裁决逐hunk检查消息粒度互斥、三点恢复动效、终态操作、未决卡门禁及上下文镜像恢复；本次按用户要求先提交，独立审查在推送后进行。",
+      "reviewedAt": "2026-11-09T21:00:58+08:00",
+      "reviewer": "K3.1 Pro主会话提交门禁检查、施工agent-1181与agent-1176；独立审查待推送后",
+      "specChanges": [
+        {
+          "change": "活动中与完整终态信息组按单条消息严格互斥；未终态恢复中只显示三点脉冲，终态用户/助手消息保留时间和正常操作。",
+          "reason": "全局restoringRecovery曾伪造工作中并拆分已停止/中断/截断、时间和操作，且错误禁用历史终态消息。",
+          "impact": "恢复三点不显示工作中文字或消息操作；真实活动中只显示活动状态，终态组同现同隐，发送/继续新轮仍受恢复门禁。"
+        },
+        {
+          "change": "未决HITL/表单/上传/预览保留按钮并禁用副作用，表单disabled与终态readonly分离，预览只读查看不受限。",
+          "reason": "隐藏按钮、整卡inert和readonly切换造成界面缺失并误封只读能力。",
+          "impact": "已决回执不变，未决卡恢复期间可见禁用，复制、翻页和level查看保持原能力。"
+        },
+        {
+          "change": "contextUsage作为可选字段进入同会话浏览器镜像并独立调用/context对账，失败保留旧值，权威none才清空。",
+          "reason": "占用原先仅存内存且依赖history成功，刷新会短暂或持续空态。",
+          "impact": "镜像写入memo覆盖占用变化，空消息镜像也可恢复；Redis仍是权威来源，新会话继续隔离清空。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "逐hunk检查消息活动/终态互斥、三点脉冲、终态组、消息操作及未决卡门禁。"},
+        {"path": "frontend/src/components/AiPanel/FormRenderer.vue", "status": "checked", "reason": "过程disabled与终态readonly独立，字段、附件和提交取消保留并统一禁用。"},
+        {"path": "frontend/src/components/AiPanel/UploadHandoffCard.vue", "status": "checked", "reason": "选择与取消保留，disabled只阻断未决副作用。"},
+        {"path": "frontend/src/components/AiPanel/SheetPreviewCard.vue", "status": "checked", "reason": "副作用原生disabled，level和翻页未封锁。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "镜像memo、读写、消毒回写和独立/context对账均纳入占用；恢复token和发送逻辑未改。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "AiSessionMirror仅新增可选contextUsage，旧镜像兼容。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "新增恢复动效无障碍加载中文案，不显示工作中。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "新增对应英文Loading无障碍文案。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有组件、Tailwind、镜像和/context机制，无新增依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅前端TypeScript/Vue和locale，无Java实体、Lombok或集合API变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复失败仍走manualRecovery，context失败保留旧值，权威none明确清空，不伪造成功。"},
+        "toc-interaction": {"status": "checked", "reason": "三点恢复动效无工作中文字，活动中与终态组互斥，终态操作不被全局恢复误禁。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "context按sessionId镜像和防串守卫对账，Redis权威及既有TTL不变，无AI数据库交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改流式文本、工具参数或Unicode解析。"},
+        "verification-review": {"status": "checked", "reason": "施工文件IDEA Reformat成功；主会话最终node scripts/build.mjs通过，3280模块、Vite 25.47秒；动态场景和独立审查在推送后执行，当前NOT_RUN。"}
+      }
     }
   ]
 }

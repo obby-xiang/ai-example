@@ -493,6 +493,7 @@
       "identityRetry": "重试",
       "collapse": "收起",
       "breathing": "工作中…",
+      "recoveryLoading": "加载中…",
       "uploadFallbackLabel": "上传 xlsx / zip",
       "requiredCount": "{count} 项必填",
       "formCancelledSummary": "未提交，填写内容不作记录",

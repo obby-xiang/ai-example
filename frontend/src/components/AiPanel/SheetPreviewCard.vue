@@ -28,6 +28,7 @@
             type="button"
             :class="SECONDARY_BUTTON"
             data-testid="sheet-preview-abandon"
+            :disabled="disabled"
             @click="emit('abandon')"
           >{{ t('ai.sheetCard.discard') }}</button>
         </div>
@@ -133,7 +134,7 @@
         >{{ warning }}</div>
 
         <label v-if="plan.level === 'large' && isInteractive" class="flex items-center gap-[6px] text-[11.9px] text-[#57606a]" data-testid="sheet-preview-ack">
-          <input v-model="acknowledged" type="checkbox" :disabled="isApplying" data-testid="sheet-preview-ack-box" />
+          <input v-model="acknowledged" type="checkbox" :disabled="isApplying || disabled" data-testid="sheet-preview-ack-box" />
           {{ t('ai.sheetCard.ackLarge', { rows: plan.rowsCount, cells: plan.cellsCount }) }}
         </label>
 
@@ -141,14 +142,14 @@
           <button
             type="button"
             :class="SECONDARY_BUTTON"
-            :disabled="isApplying"
+            :disabled="isApplying || disabled"
             data-testid="sheet-preview-cancel"
             @click="onCancel"
           >{{ t('ai.sheetCard.cancel') }}</button>
           <button
             type="button"
             :class="PRIMARY_BUTTON"
-            :disabled="isApplying || (plan.level === 'large' && !acknowledged)"
+            :disabled="isApplying || disabled || (plan.level === 'large' && !acknowledged)"
             data-testid="sheet-preview-apply"
             @click="onApply"
           >
@@ -177,9 +178,11 @@ const props = withDefaults(defineProps<{
   plan: SheetWritePlan | null
   applying?: boolean
   appliedSummary?: SheetAppliedSummary | null
+  disabled?: boolean
 }>(), {
   applying: false,
-  appliedSummary: null
+  appliedSummary: null,
+  disabled: false
 })
 
 const emit = defineEmits<{
@@ -239,11 +242,17 @@ const statusHint = computed(() => status.value === 'failed'
   : '')
 
 function onApply(): void {
+  if (props.disabled === true) {
+    return
+  }
   expandedOverride.value = true
   emit('apply', acknowledged.value)
 }
 
 function onCancel(): void {
+  if (props.disabled === true) {
+    return
+  }
   expandedOverride.value = true
   emit('cancel')
 }

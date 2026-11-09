@@ -1034,6 +1034,8 @@ export interface AiSessionMirror {
    * 正常运行的轮次为缺省（false），行为与改造前一致。
    */
   clientRequestStopped?: boolean
+  /** 最后一次已知的上下文占用摘要（additive 可选键；缺省 = 旧镜像/未知）。 */
+  contextUsage?: ContextUsage | null
 }
 
 /**

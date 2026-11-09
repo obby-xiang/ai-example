@@ -220,6 +220,7 @@
                   type="button"
                   :data-testid="`gf-attach-remove-${field.key}`"
                   class="rounded-[6px] border border-solid border-[#e3e6ea] bg-white px-[7px] py-[2px] text-[11.8px] text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2563eb]"
+                  :disabled="disabled"
                   @click="removeAttachment(field.key)"
                 >{{ t('ai.gf.attachment.remove') }}</button>
               </span>
@@ -281,7 +282,7 @@
         type="button"
         data-testid="gf-cancel"
         :class="GF_CANCEL"
-        :disabled="submitting"
+        :disabled="disabled"
         @click="emit('cancel')"
       >{{ t('ai.gf.cancel') }}</button>
       <button
@@ -375,6 +376,8 @@ const props = withDefaults(defineProps<{
   error: string | null
   /** 已决只读态：控件原生禁用并回填真实值，不渲染操作区或卡级错误。 */
   readonly?: boolean
+  /** 未决表单的过程性禁用：保留字段与操作区，不改变只读回填语义。 */
+  disabled?: boolean
   /** 只读态回填值 / 待填态草稿值（形状不符的键回落初始态，不把脏数据塞进受控控件）。 */
   initialValues?: Record<string, unknown> | null
   /** 兼容旧调用；业务卡头始终由宿主承担。 */
@@ -392,6 +395,7 @@ const props = withDefaults(defineProps<{
   uploadContext?: UploadContext | null
 }>(), {
   showHeader: false,
+  disabled: false,
   initialValues: null,
   fullTitle: '',
   readOnlyReason: null,
@@ -539,7 +543,7 @@ watch(
   { immediate: true }
 )
 
-const disabled = computed(() => props.readonly === true || props.submitting)
+const disabled = computed(() => props.readonly === true || props.submitting || props.disabled === true)
 const visibleFields = computed(() => props.schema.fields.filter((field) => isFieldVisible(field, model.value)))
 
 /**
@@ -1174,6 +1178,9 @@ async function focusFirstIssue(issues: FormValueIssue[]): Promise<void> {
 }
 
 function onSubmit(): void {
+  if (disabled.value) {
+    return
+  }
   const issues = checkFormIssues(props.schema, model.value)
   localIssues.value = issues
   if (issues.length > 0) {
