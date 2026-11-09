@@ -9,8 +9,8 @@ import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
-const cases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'standard-no-reasoning'])
-const healthyCases = new Set(['late-reasoning', 'multi-choice', 'standard-no-reasoning'])
+const cases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'standard-no-reasoning', 'confirm-step-timeline'])
+const healthyCases = new Set(['late-reasoning', 'multi-choice', 'standard-no-reasoning', 'confirm-step-timeline'])
 const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const transcriptErrorCodes = new Set(['AI_TRANSCRIPT_INCOMPLETE', 'AI_TRANSCRIPT_WRITE_FAILED'])
 const toolFrameTypes = new Set(['tool_start', 'tool_result', 'confirm_request', 'confirm_decision', 'frontend_tool_request', 'frontend_tool_result'])
@@ -154,6 +154,7 @@ function loadConfig() {
     executorIdentity: process.env.EXECUTOR_IDENTITY.trim(),
     outDir: requiredOutsidePath('OUT_DIR'),
     backendJar: managed ? path.resolve(process.env.BACKEND_JAR ?? '') : null,
+    stubScript: requiredOutsidePath('STUB_SCRIPT', true),
     javaBin: process.env.JAVA_BIN?.trim() || 'java',
     redisHost: process.env.REDIS_HOST?.trim() || '127.0.0.1',
     redisPort: integerEnv('REDIS_PORT', 6379, 1, 65535),
@@ -493,6 +494,7 @@ class RunDriver {
     this.lastSeq = 0
     this.terminal = null
     this.frames = []
+    this.drivenToolCalls = new Set()
   }
 
   async processBlock(block, channel) {
@@ -526,6 +528,11 @@ class RunDriver {
         blockSha256: entry.blockSha256
       })
       return
+    }
+    if (this.context.config.caseName === 'confirm-step-timeline' && frame.type === 'frontend_tool_request'
+      && !this.drivenToolCalls.has(frame.toolCallId)) {
+      this.drivenToolCalls.add(frame.toolCallId)
+      await driveConfirmStepFrontendTool(this.context, {...frame, runId: frame.runId ?? this.runId})
     }
     if (this.terminal) {
       this.context.checks.add('sse.no-data-after-terminal', false,
@@ -567,7 +574,10 @@ class RunDriver {
   }
 
   async start(message) {
-    const publicBody = {sessionId: this.context.sessionId, message, context: null, clientRequestId: this.context.clientRequestId}
+    const context = this.context.config.caseName === 'confirm-step-timeline'
+      ? {taskType: 'EXPORT', step: 'SELECT_DEFS', taskId: String(this.context.fixtureTaskId)}
+      : null
+    const publicBody = {sessionId: this.context.sessionId, message, context, clientRequestId: this.context.clientRequestId}
     let response = await this.context.api.openSse('ai.chat', '/api/ai/chat', {
       method: 'POST', json: true, body: JSON.stringify(publicBody), publicBody
     })
@@ -582,6 +592,40 @@ class RunDriver {
     if (!this.terminal) throw new VerificationFailure('public SSE did not reach a terminal frame within 32 reads')
     return this.terminal
   }
+}
+
+function frontendToolArguments(frame) {
+  try {
+    const args = typeof frame.args === 'string' ? JSON.parse(frame.args) : frame.args
+    if (!isRecord(args)) throw new VerificationFailure('confirm-step.frontend-args-invalid')
+    return args
+  } catch (error) {
+    if (error instanceof VerificationFailure) throw error
+    throw new VerificationFailure('confirm-step.frontend-args-invalid')
+  }
+}
+
+async function driveConfirmStepFrontendTool(context, frame) {
+  const args = frontendToolArguments(frame)
+  let result
+  if (frame.name === 'confirm_step') {
+    const step = typeof args.step === 'string' && args.step ? args.step : 'EXPORT'
+    await context.api.request('task.confirm-step', `/api/tasks/${context.fixtureTaskId}/step`, {
+      method: 'PUT', json: true, body: JSON.stringify({step}), expected: [200]
+    })
+    result = JSON.stringify({step, defCode: 'CURRENCY', conditions: {fields: []}, remaining: 0, jobs: [], state: 'ACTIVE'})
+  } else if (frame.name === 'generative_form' && args.form?.purpose === 'SET_CONDITIONS') {
+    result = JSON.stringify({conditions: ''})
+  } else {
+    throw new VerificationFailure(`confirm-step.unsupported-frontend-tool-${frame.name}`)
+  }
+  const response = await context.api.request('ai.frontend-tool-result', '/api/ai/frontend-tool-result', {
+    method: 'POST',
+    json: true,
+    body: JSON.stringify({runId: frame.runId, toolCallId: frame.toolCallId, result, source: 'api-verification', outcome: 'OK'}),
+    expected: [200]
+  })
+  context.frontendResults.push({name: frame.name, toolCallId: frame.toolCallId, accepted: dataOf(response)?.accepted === true})
 }
 
 async function readJsonLines(file) {
@@ -733,7 +777,7 @@ class ServiceManager {
     config.backendLogFile = path.join(this.context.runDirectory, 'backend.log')
     this.context.logOffsets = {backend: 0, stub: 0}
     this.directories = directories
-    const stubScript = path.join(repoRoot, 'scripts', 'ci', 'stub-upstream.mjs')
+    const stubScript = config.stubScript ?? path.join(repoRoot, 'scripts', 'ci', 'stub-upstream.mjs')
     const routes = path.join(repoRoot, 'scripts', 'ci', 'stub-routes.json')
     this.spawnTracked('stub', process.execPath,
       [stubScript, '--port', String(config.stubPort), '--dir', config.stubDumpDir, '--routes', routes],
@@ -1249,7 +1293,10 @@ function assertHealthyTerminal(context) {
     'done without cancelled=true', terminal)
   checks.require('run.done', runDetail?.snapshot?.status === 'DONE', 'DONE', runDetail?.snapshot?.status)
   const text = publicText(context.driver)
-  checks.require('run.final-text', runDetail?.snapshot?.finalText === text, text, runDetail?.snapshot?.finalText)
+  const expectedFinalText = context.config.caseName === 'confirm-step-timeline'
+    ? messageText(historyAssistants(context).at(-1))
+    : text
+  checks.require('run.final-text', runDetail?.snapshot?.finalText === expectedFinalText, expectedFinalText, runDetail?.snapshot?.finalText)
   const historyText = historyAssistants(context).map(messageText).join('')
   checks.require('history.public-text-exact', historyText === text, text, historyText)
 }
@@ -1303,8 +1350,10 @@ function assertCommon(context, expectedUpstreamCount) {
     expectedUpstreamCount, context.upstream.requestCount)
   assertUpstreamEventInvariant(context)
   const after = context.businessAfter
-  checks.require('business.no-public-side-effects', sameBusinessSnapshot(context.businessBefore, after),
-    context.businessBefore, after)
+  if (context.config.caseName !== 'confirm-step-timeline') {
+    checks.require('business.no-public-side-effects', sameBusinessSnapshot(context.businessBefore, after),
+      context.businessBefore, after)
+  }
   if (healthyCases.has(context.config.caseName)) assertHealthyTerminal(context)
 }
 
@@ -1513,9 +1562,75 @@ function messageForCase(caseName) {
       return 'response-boundary=cancel-before-complete tool=list_config_defs&args={} stall-frames=5000'
     case 'standard-no-reasoning':
       return 'turn-text'
+    case 'confirm-step-timeline':
+      return 'tool=confirm_step&args={"step":"QUERY_COND"}'
     default:
       throw new VerificationFailure(`unsupported CASE ${caseName}`)
   }
+}
+
+async function prepareConfirmStepFixture(context) {
+  const created = await context.api.request('task.create', '/api/tasks', {
+    method: 'POST', json: true, body: JSON.stringify({type: 'EXPORT', title: `response-boundary-${randomUUID()}`}), expected: [201]
+  })
+  context.fixtureTaskId = Number(dataOf(created)?.id)
+  if (!Number.isSafeInteger(context.fixtureTaskId) || context.fixtureTaskId <= 0) {
+    throw new VerificationFailure('confirm-step.fixture-id-invalid')
+  }
+  await context.api.request('task.select-defs', `/api/tasks/${context.fixtureTaskId}/select-defs`, {
+    method: 'POST', json: true, body: JSON.stringify({defCodes: ['CURRENCY']}), expected: [200]
+  })
+}
+
+function assistantSegmentFacts(message) {
+  const segments = Array.isArray(message?.segments) ? message.segments : []
+  return {
+    count: segments.length,
+    text: segments.filter((segment) => segment?.kind === 'text').map((segment) => segment.text ?? '').join(''),
+    reasoning: segments.filter((segment) => segment?.kind === 'reasoning').map((segment) => segment.text ?? '').join(''),
+    toolCallIds: segments.filter((segment) => segment?.kind === 'tool').map((segment) => segment.toolCallId ?? null)
+  }
+}
+
+async function assertConfirmStepTimeline(context) {
+  const {checks, history} = context
+  const assistants = historyAssistants(context)
+  const plainText = assistants.filter((message) => (message.toolCalls ?? []).length === 0)
+  checks.require('timeline.pure-text-entry-count', plainText.length === 2, 'exactly two no-tool ASSISTANT entries in one run',
+    plainText.map((message) => ({entryId: message.entryId, text: textEvidence(messageText(message))})))
+  checks.require('timeline.pure-text-lengths', canonicalJson(plainText.map((message) => Array.from(messageText(message)).length)) === '[207,99]',
+    '207-char text before the blank host form, then 99-char final text', plainText.map((message) => ({
+      entryId: message.entryId,
+      length: Array.from(messageText(message)).length
+    })))
+  const distinctTexts = new Set(plainText.map(messageText))
+  checks.require('timeline.pure-text-nonprefix', distinctTexts.size >= 2 && plainText.every((message, index) =>
+    plainText.slice(index + 1).every((later) => {
+      const left = messageText(message)
+      const right = messageText(later)
+      return !left.startsWith(right) && !right.startsWith(left)
+    })), 'multiple distinct non-prefix pure-text bodies', plainText.map(messageText))
+  checks.require('timeline.every-entry-segments-self-contained', assistants.every((message) => {
+    const actual = assistantSegmentFacts(message)
+    return actual.count > 0 && actual.text === messageText(message) && actual.reasoning === messageReasoning(message)
+      && canonicalJson(actual.toolCallIds) === canonicalJson((message.toolCalls ?? []).map((call) => call.id))
+  }), 'every ASSISTANT has non-empty segments containing only its own text/reasoning/tool anchors', assistants.map((message) => ({
+      entryId: message.entryId,
+      expected: {text: messageText(message), reasoning: messageReasoning(message), toolCallIds: (message.toolCalls ?? []).map((call) => call.id)},
+      actual: assistantSegmentFacts(message)
+    })))
+  checks.require('timeline.frontend-results-accepted', context.frontendResults.length >= 2
+    && context.frontendResults.every((result) => result.accepted), 'real frontend results accepted', context.frontendResults)
+  const task = await context.api.request('task.get', `/api/tasks/${context.fixtureTaskId}`, {expected: [200]})
+  const currentStep = dataOf(task)?.currentStep
+  checks.require('timeline.business-bounded', ['QUERY_COND', 'EXPORT'].includes(currentStep)
+    && context.businessAfter.taskTotal === context.businessBefore.taskTotal
+    && canonicalJson(context.businessAfter.jobIds) === canonicalJson(context.businessBefore.jobIds),
+  'only the fixture advances without new tasks or jobs', {
+      currentStep,
+      before: {taskTotal: context.businessBefore.taskTotal, jobIds: context.businessBefore.jobIds},
+      after: {taskTotal: context.businessAfter.taskTotal, jobIds: context.businessAfter.jobIds}
+    })
 }
 
 async function runCase(context) {
@@ -1523,6 +1638,10 @@ async function runCase(context) {
   const sessionId = created.body?.sessionIdText ?? created.body?.data?.sessionIdText
   if (typeof sessionId !== 'string' || !/^[1-9]\d*$/.test(sessionId)) throw new VerificationFailure('session.create returned no string sessionIdText')
   context.sessionId = sessionId
+  if (context.config.caseName === 'confirm-step-timeline') {
+    context.cleanupBusinessBaseline = await taskBaseline(context.api)
+    await prepareConfirmStepFixture(context)
+  }
   context.businessBefore = await taskBaseline(context.api)
   await context.evidence.json('business-before.json', context.businessBefore)
   context.message = messageForCase(context.config.caseName)
@@ -1539,7 +1658,7 @@ async function runCase(context) {
   context.businessAfter = await taskBaseline(context.api)
   await context.evidence.json('business-after.json', context.businessAfter)
   await collectUpstreamEvidence(context)
-  const expectedRequests = context.config.caseName === 'late-reasoning' ? 2 : 1
+  const expectedRequests = context.config.caseName === 'confirm-step-timeline' ? 3 : context.config.caseName === 'late-reasoning' ? 2 : 1
   assertCommon(context, expectedRequests)
   switch (context.config.caseName) {
     case 'late-reasoning':
@@ -1556,6 +1675,9 @@ async function runCase(context) {
       break
     case 'standard-no-reasoning':
       assertStandardNoReasoning(context)
+      break
+    case 'confirm-step-timeline':
+      await assertConfirmStepTimeline(context)
       break
     default:
       throw new VerificationFailure(`unsupported CASE ${context.config.caseName}`)
@@ -1613,11 +1735,24 @@ async function cleanupSession(context) {
     result.afterHistory = {error: errorName(error)}
     context.checks.add('cleanup.history-absent', false, 'post-delete history read', errorName(error))
   }
+  if (context.fixtureTaskId) {
+    try {
+      const deleted = await context.api.request('cleanup.fixture-task', `/api/tasks/${context.fixtureTaskId}`, {
+        method: 'DELETE', expected: [200, 404]
+      })
+      result.fixtureTask = {taskId: context.fixtureTaskId, httpStatus: deleted.status}
+      context.checks.add('cleanup.fixture-task-removed', [200, 404].includes(deleted.status), 'fixture task deleted or already absent', result.fixtureTask)
+    } catch (error) {
+      result.fixtureTask = {taskId: context.fixtureTaskId, error: errorName(error)}
+      context.checks.add('cleanup.fixture-task-removed', false, 'fixture task deleted or already absent', result.fixtureTask)
+    }
+  }
   if (context.businessBefore) {
+    const baseline = context.cleanupBusinessBaseline ?? context.businessBefore
     try {
       result.businessAfterCleanup = await taskBaseline(context.api)
-      context.checks.add('cleanup.business-no-side-effects', sameBusinessSnapshot(context.businessBefore, result.businessAfterCleanup),
-        context.businessBefore, result.businessAfterCleanup)
+      context.checks.add('cleanup.business-no-side-effects', sameBusinessSnapshot(baseline, result.businessAfterCleanup),
+        baseline, result.businessAfterCleanup)
     } catch (error) {
       result.businessAfterCleanup = {error: errorName(error)}
       context.checks.add('cleanup.business-no-side-effects', false, 'post-cleanup business snapshot', errorName(error))
@@ -1768,6 +1903,13 @@ async function expectedLogAssociations(logLines, context) {
     expected.backend = association.expectedBackend
     expected.stub = association.expectedStub
   }
+  if (context.config.caseName === 'confirm-step-timeline') {
+    const indexes = logLines.backend.flatMap((line, index) => line.includes('lease-less write')
+      && line.includes(context.runId) && line.includes('write allowed without lease; no resume-authority semantics') ? [index] : [])
+    for (const index of indexes) expected.backend.add(index)
+    context.checks.add('timeline.direct-drive-warning-observed', indexes.length === 1,
+      'one explicit lease-less direct-drive warning for this run', {count: indexes.length, lines: indexes.map((index) => index + 1)})
+  }
   return expected
 }
 
@@ -1782,7 +1924,7 @@ async function collectLogEvidence(context) {
   const expected = await expectedLogAssociations(logLines, context)
   const expectedClassification = context.config.caseName === 'second-tool-aggregate'
     ? 'EXPECTED_PROTOCOL_REJECTION'
-    : 'EXPECTED_CANCELLATION'
+    : context.config.caseName === 'confirm-step-timeline' ? 'EXPECTED_DIRECT_DRIVE' : 'EXPECTED_CANCELLATION'
   for (const name of ['backend', 'stub']) {
     const findings = []
     logLines[name].forEach((line, index) => {
@@ -1861,6 +2003,7 @@ const context = {
   config,
   checks,
   evidence,
+  api: new ApiClient(config, evidence),
   runDirectory,
   sessionId: null,
   clientRequestId: `response-boundary-${randomUUID()}`,
@@ -1873,8 +2016,11 @@ const context = {
   upstream: null,
   businessBefore: null,
   businessAfter: null,
+  cleanupBusinessBaseline: null,
   cancelEvidence: null,
-  logOffsets: null
+  logOffsets: null,
+  fixtureTaskId: null,
+  frontendResults: []
 }
 const services = new ServiceManager(context)
 let fatal = null

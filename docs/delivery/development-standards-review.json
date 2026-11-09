@@ -4655,6 +4655,38 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按完整ChatCompletionChunk和工具参数分片合并，不进行二次转码或代理对切分。"},
         "verification-review": {"status": "checked", "reason": "agent-1167最终APPROVE；Maven 357主源BUILD SUCCESS；second-tool/multi-card及后到ID/index均RED/GREEN，真实供应商和额外交错分片NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:2daf97a33e8246c8138ae854ab46bec2a8aab72fe2fae146812a5c838fa22aca",
+      "status": "reviewed",
+      "reason": "逐hunk复核纯文本与工具条目候选边界、空正文宿主表单、归档回退及转录失败WARN，agent-1167确认207前段与99终答均按原顺序恢复且不再吞并相邻文本。",
+      "reviewedAt": "2026-11-09T17:48:39+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1167、施工agent-1176",
+      "specChanges": [
+        {
+          "change": "纯文本与工具条目按entryId/工具锚点划分连续未归属区域并逐区域精确匹配，空正文工具条目只取工具锚点，不再把后续全部时间线归给当前条目。",
+          "reason": "旧候选区会混入后续正文，宿主空文本表单吸收前置纯文本后使completeTimeline中止，导致历史缺条。",
+          "impact": "207前段、宿主表单、推进工具与99终答均保留自身segments和顺序；不匹配、截断或读取降级仍返回null，不伪造成功。"
+        },
+        {
+          "change": "NonRetryableTranscriptException捕获点新增带runId和实际errorCode的WARN并保留异常堆栈。",
+          "reason": "原转录失败完全静默，只能从终帧和局部日志反推，无法满足故障可观测要求。",
+          "impact": "每次终局失败可定位实际转录错误码和因果链，不输出正文、原始响应或敏感信息。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "纯文本与工具条目均可归档重建，按连续区域匹配，空正文工具不吞前段，entryId只回写命中区域且返回不可变视图。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "转录专用异常捕获新增WARN，含runId、errorCode和Throwable堆栈，其他终态逻辑不变。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有TranscriptSegment、归档时间线和日志体系，无新增依赖或另一套归因框架。"},
+        "java-api-style": {"status": "checked", "reason": "新增/修改方法均低于50行且复杂度低于20，控制块显式{}；候选为自有副本且返回不可变视图，不改输入集合。"},
+        "logging-exception-safety": {"status": "checked", "reason": "WARN使用英文技术消息并含runId、errorCode和Throwable堆栈，不输出正文、原始响应或敏感信息，失败不被隐藏。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批为后端转录归因和日志，不修改前端文案或交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "entryId只归属命中区域，工具锚点和历史顺序保持，归档降级仍失败关闭，未新增AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按完整帧段与正文精确匹配，不进行二次转码、前缀匹配或代理对切分。"},
+        "verification-review": {"status": "checked", "reason": "agent-1167最终APPROVE；RED为207 segments=[]，GREEN为207 seq7、表单seq18、推进seq20、99 seq25；隔离357主源BUILD SUCCESS，真实供应商NOT_RUN。"}
+      }
     }
   ]
 }

@@ -3473,7 +3473,7 @@ public class SseChatEmitter {
 
     /**
      * 返回该 transcript 条目的完整帧段序。挂起续跑会换掉进程内 emitter，本地时间线不完整时，
-     * 工具条目从同一份归档帧重建；读降级、归档截断或内容对不上仍返回 null。
+     * 从同一份归档帧重建；读降级、归档截断或内容对不上仍返回 null。
      */
     public List<TranscriptEntry.SegmentView> transcriptSegments(String entryId,
                                                                 List<TranscriptEntry.ToolCallView> calls, String text, String reasoning) {
@@ -3481,7 +3481,7 @@ public class SseChatEmitter {
         synchronized (this.emitLock) {
             List<TranscriptEntry.SegmentView> local = transcriptSegments(this.transcriptTimeline, entryId,
                     expectedCalls, text, reasoning);
-            if (local != null || expectedCalls.isEmpty()) {
+            if (local != null) {
                 return local;
             }
         }
@@ -3542,42 +3542,57 @@ public class SseChatEmitter {
             return isCompleteTranscriptSegments(existing, expectedCalls, text, reasoning, entryId)
                     ? transcriptSegmentViews(existing) : null;
         }
-        List<TranscriptSegment> candidate = new ArrayList<>();
-        if (expectedCalls.isEmpty()) {
-            int start = 0;
-            for (int i = 0; i < timeline.size(); i++) {
-                if (timeline.get(i).entryId != null) {
-                    start = i + 1;
-                }
-            }
-            candidate.addAll(timeline.subList(start, timeline.size()));
-        } else {
-            int first = -1;
-            int last = -1;
-            for (TranscriptEntry.ToolCallView call : expectedCalls) {
-                int found = transcriptToolSegment(timeline, call == null ? null : call.id());
-                if (found < 0) {
-                    return null;
-                }
-                first = first < 0 ? found : Math.min(first, found);
-                last = Math.max(last, found);
-            }
-            int start = 0;
-            for (int i = 0; i < first; i++) {
-                TranscriptSegment segment = timeline.get(i);
-                if (segment.entryId != null || "tool".equals(segment.kind)) {
-                    start = i + 1;
-                }
-            }
-            candidate.addAll(timeline.subList(start, last + 1));
-        }
-        if (!isCompleteTranscriptSegments(candidate, expectedCalls, text, reasoning, null)) {
+        List<TranscriptSegment> candidate = expectedCalls.isEmpty()
+                ? transcriptPlainTextCandidate(timeline, expectedCalls, text, reasoning)
+                : transcriptToolCandidate(timeline, expectedCalls, text, reasoning);
+        if (candidate == null || !isCompleteTranscriptSegments(candidate, expectedCalls, text, reasoning, null)) {
             return null;
         }
         for (TranscriptSegment segment : candidate) {
             segment.entryId = entryId;
         }
         return transcriptSegmentViews(candidate);
+    }
+
+    private static List<TranscriptSegment> transcriptPlainTextCandidate(List<TranscriptSegment> timeline,
+                                                                        List<TranscriptEntry.ToolCallView> calls, String text, String reasoning) {
+        List<TranscriptSegment> candidate = new ArrayList<>();
+        for (TranscriptSegment segment : timeline) {
+            if (segment.entryId != null || "tool".equals(segment.kind)) {
+                if (isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
+                    return candidate;
+                }
+                candidate.clear();
+            } else {
+                candidate.add(segment);
+            }
+        }
+        return isCompleteTranscriptSegments(candidate, calls, text, reasoning, null) ? candidate : null;
+    }
+
+    private static List<TranscriptSegment> transcriptToolCandidate(List<TranscriptSegment> timeline,
+                                                                   List<TranscriptEntry.ToolCallView> calls, String text, String reasoning) {
+        int first = -1;
+        int last = -1;
+        for (TranscriptEntry.ToolCallView call : calls) {
+            int found = transcriptToolSegment(timeline, call == null ? null : call.id());
+            if (found < 0) {
+                return null;
+            }
+            first = first < 0 ? found : Math.min(first, found);
+            last = Math.max(last, found);
+        }
+        if (StringUtils.isEmpty(text) && StringUtils.isEmpty(reasoning)) {
+            return new ArrayList<>(timeline.subList(first, last + 1));
+        }
+        int start = 0;
+        for (int i = 0; i < first; i++) {
+            TranscriptSegment segment = timeline.get(i);
+            if (segment.entryId != null || "tool".equals(segment.kind)) {
+                start = i + 1;
+            }
+        }
+        return new ArrayList<>(timeline.subList(start, last + 1));
     }
 
     private static boolean isCompleteTranscriptSegments(List<TranscriptSegment> candidate,

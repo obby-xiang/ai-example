@@ -2798,6 +2798,7 @@ public class ResilientChatService {
                 }
                 return new TerminalTranscriptResult(ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
             } catch (NonRetryableTranscriptException ex) {
+                log.warn("terminal transcript rejected runId={} errorCode={}", runId, ex.errorCode(), ex);
                 return new TerminalTranscriptResult(ex.errorCode());
             } catch (RuntimeException ex) {
                 if (!isRetryableRedisFailure(ex)) {
