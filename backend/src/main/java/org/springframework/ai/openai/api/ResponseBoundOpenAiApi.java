@@ -20,16 +20,19 @@ import org.springframework.ai.model.ApiKey;
 import org.springframework.ai.model.ModelOptionsUtils;
 import org.springframework.ai.model.NoopApiKey;
 import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionChunk.ChunkChoice;
+import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionMessage.ToolCall;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
 import org.springframework.web.client.ResponseErrorHandler;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -113,17 +116,18 @@ public final class ResponseBoundOpenAiApi extends OpenAiApi {
         return new ChunkChoice(source.finishReason(), source.index(), delta, source.logprobs());
     }
 
-    private static ChatCompletionChunk toolOnlyChunk(ChatCompletionChunk source, ChunkChoice choice) {
+    private static ChatCompletionChunk toolOnlyChunk(ChatCompletionChunk source, ChunkChoice choice,
+                                                     List<ToolCall> toolCalls) {
         List<ChunkChoice> choices = choice == null ? List.of()
-                : List.of(copyChoice(choice, toolOnlyDelta(choice.delta())));
+                : List.of(copyChoice(choice, toolOnlyDelta(choice.delta(), toolCalls)));
         return copyChunk(source, choices, source.usage());
     }
 
-    private static ChatCompletionMessage toolOnlyDelta(ChatCompletionMessage source) {
+    private static ChatCompletionMessage toolOnlyDelta(ChatCompletionMessage source, List<ToolCall> toolCalls) {
         if (source == null) {
             return new ChatCompletionMessage(null, null, null, null, null, null, null, null, null);
         }
-        return new ChatCompletionMessage(null, source.role(), source.name(), source.toolCallId(), source.toolCalls(),
+        return new ChatCompletionMessage(null, source.role(), source.name(), source.toolCallId(), toolCalls,
                 source.refusal(), source.audioOutput(), source.annotations(), null);
     }
 
@@ -141,6 +145,11 @@ public final class ResponseBoundOpenAiApi extends OpenAiApi {
         return copyChoice(source, new ChatCompletionMessage(delta.rawContent(), delta.role(), delta.name(),
                 delta.toolCallId(), null, delta.refusal(), delta.audioOutput(), delta.annotations(),
                 delta.reasoningContent()));
+    }
+
+    private static ChatCompletionMessage withToolCalls(ChatCompletionMessage source, List<ToolCall> toolCalls) {
+        return new ChatCompletionMessage(source.rawContent(), source.role(), source.name(), source.toolCallId(),
+                toolCalls, source.refusal(), source.audioOutput(), source.annotations(), source.reasoningContent());
     }
 
     private static ChatCompletionMessage withResponseText(ChatCompletionMessage source, ChoiceText text) {
@@ -164,7 +173,15 @@ public final class ResponseBoundOpenAiApi extends OpenAiApi {
 
         private final OpenAiStreamFunctionCallingHelper helper = new OpenAiStreamFunctionCallingHelper();
 
+        private final List<ToolCallAggregate> toolCallAggregates = new ArrayList<>();
+
+        private final Map<Integer, ToolCallAggregate> currentToolCallsByIndex = new HashMap<>();
+
+        private final Map<String, ToolCallAggregate> currentToolCallsById = new HashMap<>();
+
         private ChatCompletionChunk toolAggregate;
+
+        private ToolCallAggregate lastToolCall;
 
         private Integer toolChoiceIndex;
 
@@ -184,7 +201,9 @@ public final class ResponseBoundOpenAiApi extends OpenAiApi {
             }
             validateToolBoundary(scan);
             ChunkChoice projectionChoice = scan.validChoices() == 1 ? scan.choice() : null;
-            this.toolAggregate = this.helper.merge(this.toolAggregate, toolOnlyChunk(chunk, projectionChoice));
+            this.toolAggregate = this.helper.merge(this.toolAggregate,
+                    toolOnlyChunk(chunk, projectionChoice, List.of()));
+            mergeToolCalls(chunk, scan);
             if (scan.validChoices() == 1
                     && scan.choice().finishReason() == OpenAiApi.ChatCompletionFinishReason.TOOL_CALLS) {
                 this.toolAggregateFinished = true;
@@ -216,16 +235,10 @@ public final class ResponseBoundOpenAiApi extends OpenAiApi {
                 return toolChoice;
             }
             this.choiceTexts.computeIfAbsent(choice.index(), ignored -> new ChoiceText()).append(choice.delta());
-            if (choice.delta().toolCalls() != null && choice.delta().toolCalls().size() > 1) {
-                throw new IllegalStateException("Multiple tool calls in one raw choice are not supported");
-            }
             return CollectionUtils.isEmpty(choice.delta().toolCalls()) ? toolChoice : choice;
         }
 
         private void validateToolBoundary(ChunkScan scan) {
-            if (this.toolAggregateFinished && scan.hasToolCalls()) {
-                throw new IllegalStateException("Tool calls after the tool aggregate finish are not supported");
-            }
             if (this.toolAggregate == null) {
                 if (this.seenMultipleChoices || scan.validChoices() != 1 || this.seenChoiceIndexes.size() != 1) {
                     throw new IllegalStateException("Tool calls require one choice and one choice index");
@@ -241,6 +254,67 @@ public final class ResponseBoundOpenAiApi extends OpenAiApi {
             }
         }
 
+        private void mergeToolCalls(ChatCompletionChunk chunk, ChunkScan scan) {
+            if (!scan.hasToolCalls()) {
+                return;
+            }
+            if (this.toolAggregateFinished) {
+                startIndependentToolCalls();
+            }
+            for (ToolCall call : scan.toolChoice().delta().toolCalls()) {
+                if (call == null) {
+                    throw new IllegalStateException("Tool call aggregate contains a null call");
+                }
+                ToolCallAggregate aggregate = resolveToolCall(call);
+                aggregate.merge(this.helper, chunk, scan.toolChoice(), call);
+                registerToolCall(aggregate, call.id());
+                this.lastToolCall = aggregate;
+            }
+        }
+
+        private void startIndependentToolCalls() {
+            this.currentToolCallsByIndex.clear();
+            this.currentToolCallsById.clear();
+            this.lastToolCall = null;
+            this.toolAggregateFinished = false;
+        }
+
+        private ToolCallAggregate resolveToolCall(ToolCall call) {
+            ToolCallAggregate byId = StringUtils.hasText(call.id()) ? this.currentToolCallsById.get(call.id()) : null;
+            if (byId != null) {
+                byId.validateIndex(call.index());
+                return byId;
+            }
+            ToolCallAggregate byIndex = call.index() == null ? null : this.currentToolCallsByIndex.get(call.index());
+            if (byIndex != null) {
+                byIndex.validateId(call.id());
+                return byIndex;
+            }
+            if (!StringUtils.hasText(call.id()) && this.lastToolCall != null
+                    && (call.index() == null || this.lastToolCall.index == null)) {
+                return this.lastToolCall;
+            }
+            if (!StringUtils.hasText(call.id()) && call.index() == null) {
+                throw new IllegalStateException("Tool call continuation has no id or index");
+            }
+            ToolCallAggregate created = new ToolCallAggregate(call.index());
+            this.toolCallAggregates.add(created);
+            return created;
+        }
+
+        private void registerToolCall(ToolCallAggregate aggregate, String id) {
+            if (aggregate.index != null) {
+                ToolCallAggregate existing = this.currentToolCallsByIndex.get(aggregate.index);
+                if (existing != null && existing != aggregate) {
+                    throw new IllegalStateException("Conflicting tool call indexes for one response");
+                }
+                this.currentToolCallsByIndex.put(aggregate.index, aggregate);
+            }
+            if (StringUtils.hasText(id)) {
+                this.currentToolCallsById.put(id, aggregate);
+            }
+        }
+
         private Flux<ChatCompletionChunk> finish() {
             if (this.toolAggregate == null) {
                 return Flux.empty();
@@ -250,23 +324,114 @@ public final class ResponseBoundOpenAiApi extends OpenAiApi {
             }
             ChunkChoice toolChoice = this.toolAggregate.choices().getFirst();
             ChoiceText text = this.choiceTexts.get(this.toolChoiceIndex);
-            if (toolChoice == null || toolChoice.delta() == null || text == null) {
+            if (toolChoice == null || toolChoice.delta() == null || text == null || this.toolCallAggregates.isEmpty()) {
                 return Flux.error(new IllegalStateException("Tool aggregate state is incomplete"));
             }
-            ChunkChoice deferredChoice = copyChoice(toolChoice, withResponseText(toolChoice.delta(), text));
+            ChatCompletionMessage delta = withToolCalls(toolChoice.delta(), completedToolCalls());
+            ChunkChoice deferredChoice = copyChoice(toolChoice, withResponseText(delta, text));
             ChatCompletionChunk deferred = copyChunk(this.toolAggregate, List.of(deferredChoice), this.latestUsage);
             this.toolAggregate = null;
             return Flux.just(deferred);
         }
 
+        private List<ToolCall> completedToolCalls() {
+            return this.toolCallAggregates.stream().map(ToolCallAggregate::toolCall).toList();
+        }
+
         private void clear() {
             this.toolAggregate = null;
+            this.lastToolCall = null;
             this.toolChoiceIndex = null;
             this.latestUsage = null;
             this.choiceTexts.clear();
             this.seenChoiceIndexes.clear();
+            this.toolCallAggregates.clear();
+            this.currentToolCallsByIndex.clear();
+            this.currentToolCallsById.clear();
             this.seenMultipleChoices = false;
             this.toolAggregateFinished = false;
+        }
+
+    }
+
+    private static final class ToolCallAggregate {
+
+        private Integer index;
+
+        private String id;
+
+        private ChatCompletionChunk chunk;
+
+        private ToolCallAggregate(Integer index) {
+            this.index = index;
+        }
+
+        private void merge(OpenAiStreamFunctionCallingHelper helper, ChatCompletionChunk source, ChunkChoice choice,
+                           ToolCall call) {
+            validateId(call.id());
+            validateIndex(call.index());
+            if (this.chunk != null && !StringUtils.hasText(this.id) && StringUtils.hasText(call.id())) {
+                introduceId(helper, call.id());
+            }
+            String mergedId = StringUtils.hasText(this.id) ? null : call.id();
+            ToolCall current = new ToolCall(call.index(), mergedId, call.type(), call.function());
+            this.chunk = helper.merge(this.chunk, toolOnlyChunk(source, choice, List.of(current)));
+            if (StringUtils.hasText(call.id())) {
+                this.id = call.id();
+            }
+            if (this.index == null) {
+                this.index = call.index();
+            }
+        }
+
+        private void introduceId(OpenAiStreamFunctionCallingHelper helper, String id) {
+            ToolCall previous = currentToolCall();
+            ToolCall identified = new ToolCall(this.index, id, previous.type(), previous.function());
+            ChunkChoice aggregateChoice = this.chunk.choices().getFirst();
+            this.chunk = helper.merge(null, toolOnlyChunk(this.chunk, aggregateChoice, List.of(identified)));
+            this.id = id;
+        }
+
+        private ToolCall toolCall() {
+            ToolCall merged = currentToolCall();
+            validateCompletion(merged);
+            return new ToolCall(this.index, merged.id(), merged.type(), merged.function());
+        }
+
+        private ToolCall currentToolCall() {
+            if (this.chunk == null || this.chunk.choices() == null || this.chunk.choices().size() != 1) {
+                throw new IllegalStateException("Tool call aggregate choice is incomplete");
+            }
+            ChatCompletionMessage delta = this.chunk.choices().getFirst().delta();
+            if (delta == null || delta.toolCalls() == null || delta.toolCalls().size() != 1) {
+                throw new IllegalStateException("Tool call aggregate delta is incomplete");
+            }
+            return delta.toolCalls().getFirst();
+        }
+
+        private void validateCompletion(ToolCall merged) {
+            if (!StringUtils.hasText(merged.id())) {
+                throw new IllegalStateException("Tool call aggregate id is incomplete");
+            }
+            if (!StringUtils.hasText(merged.type())) {
+                throw new IllegalStateException("Tool call aggregate type is incomplete");
+            }
+            if (merged.function() == null || !StringUtils.hasText(merged.function().name())
+                    || merged.function().arguments() == null) {
+                throw new IllegalStateException("Tool call aggregate function is incomplete");
+            }
+        }
+
+        private void validateId(String candidate) {
+            if (StringUtils.hasText(this.id) && StringUtils.hasText(candidate) && !this.id.equals(candidate)) {
+                throw new IllegalStateException("Conflicting tool call ids for one tool call index");
+            }
+        }
+
+        private void validateIndex(Integer candidate) {
+            if (this.index != null && candidate != null && !this.index.equals(candidate)) {
+                throw new IllegalStateException("Conflicting tool call indexes for one tool call id");
+            }
         }
 
     }

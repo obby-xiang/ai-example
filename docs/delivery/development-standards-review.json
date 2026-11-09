@@ -4624,6 +4624,37 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批仅状态呈现与恢复，不修改UTF-8、SSE解析或文本截断。"},
         "verification-review": {"status": "checked", "reason": "agent-1169两轮审查最终APPROVE；IDEA Reformat完成，前端build 26.44秒成功；实时/history/镜像动态场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:18658a4cc004eef663744435985cd82731f14da41ca1ef826883225a8dd053c8",
+      "status": "reviewed",
+      "reason": "逐hunk复核多工具调用聚合、顺序、后到ID/index补齐及deferred完成校验，agent-1167最终APPROVE；常规多调用和后到元数据RED/GREEN与主源编译结果一致。",
+      "reviewedAt": "2026-11-09T17:31:42+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1167、施工agent-1175",
+      "specChanges": [
+        {
+          "change": "同一raw choice的多个tool_calls及finish后独立新ID均按首次出现顺序聚合并执行，不再以协议拒绝代替支持。",
+          "reason": "OpenAI允许单条assistant消息包含多个工具调用，旧实现会使合法响应失败并阻断HITL/skipped/执行链。",
+          "impact": "各调用独立合并参数并在响应完成后统一恢复，正文/reasoning/usage/完成边界和普通无工具多choice保持原语义。"
+        },
+        {
+          "change": "分片后才出现的ID/index允许补齐并注册，缺失ID/index且无法归属的首片及不完整deferred明确失败。",
+          "reason": "旧实现会释放id=null或index=null的不完整ToolCall，破坏续轮工具结果关联。",
+          "impact": "首个有效ID/index进入最终聚合，冲突仍失败；deferred强制校验ID/type/function/name/arguments。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/org/springframework/ai/openai/api/ResponseBoundOpenAiApi.java", "status": "checked", "reason": "按index和ID独立聚合多个调用，后补元数据并保留首次顺序，完成时统一恢复；无键首片和不完整调用失败关闭，普通多choice直通不变。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Spring AI既有OpenAiStreamFunctionCallingHelper和ToolCall模型，无新增依赖、升级或第二套协议实现。"},
+        "java-api-style": {"status": "checked", "reason": "新增方法均低于50行且复杂度低于20，控制块显式{}；沿既有@JsonProperty和ToolCall字段，未改JSON结构。"},
+        "logging-exception-safety": {"status": "checked", "reason": "冲突、无键首片和不完整聚合均显式失败，不吞异常或伪造完成，不记录正文、密钥或原始响应。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批仅上游协议聚合，不修改卡片、用户文案或交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "面向OpenAI通用多工具协议，按ID/index/顺序关联续轮，未做供应商特判或AI数据库交互。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按完整ChatCompletionChunk和工具参数分片合并，不进行二次转码或代理对切分。"},
+        "verification-review": {"status": "checked", "reason": "agent-1167最终APPROVE；Maven 357主源BUILD SUCCESS；second-tool/multi-card及后到ID/index均RED/GREEN，真实供应商和额外交错分片NOT_RUN。"}
+      }
     }
   ]
 }
