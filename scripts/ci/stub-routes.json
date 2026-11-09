@@ -1068,6 +1068,41 @@
       }
     },
     {
+      "id": "SHEET-UPDATE-MULTI",
+      "note": "C-159 多页预览：同一 update_rows 能力，谓词命中导入数据全量行（decimalPlaces >= 0），preview=full-diff，用于真实工作簿多页预览与恢复只读断言；不改 T-14 既有语义。",
+      "match": {
+        "messageAny": [
+          "scenario=SHEET-UPDATE-MULTI"
+        ],
+        "requiresTools": [
+          "update_rows"
+        ]
+      },
+      "tool": "update_rows",
+      "arguments": {
+        "defCode": "CURRENCY",
+        "scope": "predicate",
+        "predicate": {
+          "scopeKeys": [],
+          "fields": [
+            {
+              "fieldCode": "decimalPlaces",
+              "operator": "GTE",
+              "value": 0
+            }
+          ]
+        },
+        "set": [
+          {
+            "columnCode": "decimalPlaces",
+            "mode": "literal",
+            "value": 3
+          }
+        ],
+        "preview": "full-diff"
+      }
+    },
+    {
       "id": "SHEET-UNDO",
       "note": "V5 B13/D7：预览→应用→撤销链的协议半段（W-40）。上一轮已由 SHEET-UPDATE 走完「挂起→应用回灌→frontend_tool_result ok」，本轮让模型调 undo_last_sheet_edit —— 它同样是 WRITE 面工具，写闸关时不披露（桩按披露清单退化为文本轮）。arguments 只有 defCode，不含任何单元格值。",
       "match": {

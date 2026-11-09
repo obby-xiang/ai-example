@@ -34,7 +34,7 @@ const toolCases = new Map([
 const scenarios = new Set([...toolCases.keys(), 'tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-success', 'recovery-final-failure',
   'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage',
   'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue',
-  'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix', 'recovery-timing-proxy'])
+  'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix', 'recovery-timing-proxy', 'sheet-preview'])
 const recoverySurfaceSelector = [
   '[data-testid="alert-history-error"]',
   '[data-testid="alert-recovery-gap"]',
@@ -209,6 +209,7 @@ function loadConfig() {
     outDir: outsidePath('OUT_DIR'),
     stubDumpDir: process.env.STUB_DUMP_DIR?.trim() ? outsidePath('STUB_DUMP_DIR') : null,
     proxyLogDir: process.env.PROXY_LOG_DIR?.trim() ? outsidePath('PROXY_LOG_DIR') : null,
+    xlsxFixture: process.env.XLSX_FIXTURE?.trim() ? outsidePath('XLSX_FIXTURE') : null,
     timeoutMs: integerEnv('TIMEOUT_MS', 120_000, 5_000, 600_000),
     pollMs: integerEnv('POLL_MS', 50, 10, 1_000)
   }
@@ -352,6 +353,43 @@ class ApiClient {
   async jobs(taskId) {
     return await this.expect('task.jobs', `/api/tasks/${taskId}/jobs`, {}, [200])
   }
+
+  async createTaskTyped(title, type) {
+    return await this.expect('task.create', '/api/tasks', {
+      method: 'POST', body: JSON.stringify({type, title})
+    }, [201])
+  }
+
+  async uploadTaskFile(taskId, bytes, filename, defCodes) {
+    const form = new FormData()
+    form.append('file', new Blob([bytes]), filename)
+    for (const code of defCodes) form.append('defCodes', code)
+    const response = await fetch(`${this.config.baseUrl}/api/tasks/${taskId}/files/upload`, {
+      method: 'POST',
+      headers: {'X-Tenant-Id': this.config.tenantId, 'X-User-Id': this.config.userId},
+      body: form,
+      redirect: 'error',
+      signal: AbortSignal.timeout(60_000)
+    })
+    if (response.status !== 200) throw new VerificationFailure('TASK_FILE_UPLOAD_FAILED', response.status, businessCode(null))
+    return response.json()
+  }
+
+  async startJobAndWait(taskId, jobType, timeoutMs = 120_000) {
+    const created = await this.expect('task.job-start', `/api/tasks/${taskId}/jobs`, {
+      method: 'POST', body: JSON.stringify({jobType})
+    }, [201])
+    const jobId = Number(created?.id)
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const jobs = await this.jobs(taskId)
+      const job = (Array.isArray(jobs) ? jobs : []).find((entry) => Number(entry.id) === jobId)
+      if (job && ['COMPLETED', 'FAILED', 'CANCELLED'].includes(job.status)) return job
+      await sleep(250)
+    }
+    throw new VerificationFailure('TASK_JOB_TIMEOUT', null, jobType)
+  }
+
 
   async history(sessionId) {
     const response = await this.request('ai.history', `/api/ai/history/${encodeURIComponent(sessionId)}?latest=100`)
@@ -1629,6 +1667,8 @@ class CdpPage {
           bodyTestId: element.querySelector('[data-testid^="ro-body-"],[data-testid^="ro-form-"]')?.getAttribute('data-testid') ?? null,
           state: element.querySelector('[data-card-state]')?.getAttribute('data-card-state') ?? null,
           title: element.querySelector('[data-testid^="card-title-"]')?.innerText ?? null,
+          // contentText 取 textContent（含折叠/隐藏文案），用于内容散列；text 取 innerText，仅用于可见文案扫描。
+          contentText: element.textContent ?? '',
           text: element.innerText
         })),
         recoverySurfaces: [...document.querySelectorAll(${JSON.stringify(recoverySurfaceSelector)})].filter(visible)
@@ -4673,6 +4713,177 @@ async function runStoppedRecovery(context) {
   if (config.variant === 'current-failure') await browser.setRunCurrentFault('off')
 }
 
+async function runSheetPreviewScenario(context) {
+  const {browser, checks, config, api, evidence} = context
+  if (!config.xlsxFixture) throw new VerificationFailure('XLSX_FIXTURE_REQUIRED')
+  const bytes = await readFile(config.xlsxFixture)
+  const task = await api.createTaskTyped(`c159-${randomUUID()}`, 'IMPORT')
+  const taskId = Number(task.id)
+  if (!Number.isSafeInteger(taskId) || taskId <= 0) throw new VerificationFailure('SHEET_FIXTURE_TASK_INVALID')
+  context.fixtureTaskId = taskId
+  await api.selectDefs(taskId)
+  await api.uploadTaskFile(taskId, bytes, 'CURRENCY_c159.xlsx', ['CURRENCY'])
+  const precheck = await api.startJobAndWait(taskId, 'PRECHECK')
+  checks.require('fixture.precheck-completed', precheck.status === 'COMPLETED',
+    'public upload passes the real precheck job', {jobId: precheck.id, status: precheck.status})
+  const imported = await api.startJobAndWait(taskId, 'IMPORT')
+  checks.require('fixture.import-completed', imported.status === 'COMPLETED',
+    'the real IMPORT job completes and leaves multi-row data', {jobId: imported.id, status: imported.status})
+  const overview = await api.request('task.overview', `/api/tasks/${taskId}/overview`)
+  const overviewData = overview.body?.data ?? overview.body
+  await evidence.json('sheet-fixture.json', {
+    taskId,
+    precheck: {id: precheck.id, status: precheck.status},
+    import: {id: imported.id, status: imported.status},
+    overview: {status: overview.status, keys: Object.keys(overviewData ?? {}), sha256: sha256(canonicalJson(overviewData ?? null))}
+  })
+
+  const url = new URL(config.appUrl)
+  url.pathname = '/import'
+  url.search = `?taskId=${taskId}`
+  await browser.send('Page.navigate', {url: url.toString()})
+  await browser.waitFor(`(() => {
+    const pinia = document.getElementById('app').__vue_app__.config.globalProperties.$pinia
+    const workspace = pinia._s.get('workspace')
+    const ai = pinia._s.get('ai')
+    return workspace.taskId === ${taskId} && ai.historyLoaded === true && ai.restoringRecovery === false
+  })()`, 'SHEET_PREVIEW_PAGE_NOT_READY')
+
+  // 导入页只有“编辑标签页 + SpreadGrid 已挂载”时才交出 sheet.current；
+  // 自动化前必须先打开 CURRENCY 标签页，否则预览计划会是 0 处变更。
+  const tabReady = await browser.evaluate(`(() => {
+    const tab = document.querySelector('[data-ai-ref="import.grid.tab.CURRENCY"]')
+    return tab ? true : false
+  })()`, false)
+  if (tabReady) {
+    await browser.evaluate(`(() => {
+      const tab = document.querySelector('[data-ai-ref="import.grid.tab.CURRENCY"]')
+      if (tab && tab.getAttribute('aria-selected') !== 'true') tab.click()
+      return true
+    })()`, false)
+    await browser.waitFor(`(() => {
+      const tab = document.querySelector('[data-ai-ref="import.grid.tab.CURRENCY"]')
+      return tab !== null && tab.getAttribute('aria-selected') === 'true'
+    })()`, 'SHEET_EDITOR_TAB_NOT_ACTIVE', 10_000)
+  } else {
+    throw new ScenarioNotRun('SHEET_EDITOR_TAB_NOT_FORMED')
+  }
+  await browser.sendPrompt(`scenario=SHEET-UPDATE-MULTI verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const card = document.querySelector('[data-testid="sheet-preview-card"]')
+    return card !== null && document.querySelector('[data-testid^="sheet-preview-level-"]') !== null
+  })()`, 'SHEET_PREVIEW_CARD_NOT_FORMED')
+  // 默认是 sample 档；切到 full-diff 才会渲染分页（>50 条变更时多页）。
+  await browser.click('[data-testid="sheet-preview-level-full-diff"]')
+  const readPreview = `(() => {
+    const card = document.querySelector('[data-testid="sheet-preview-card"]')
+    const levels = [...document.querySelectorAll('[data-testid^="sheet-preview-level-"]')]
+    const pager = document.querySelector('[data-testid="sheet-preview-full"]')
+    const apply = document.querySelector('[data-testid="sheet-preview-apply"]')
+    if (!card || levels.length === 0 || !pager) return null
+    const buttons = [...pager.querySelectorAll('button')]
+    const text = card.textContent ?? ''
+    let hash = 2166136261
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index)
+      hash = Math.imul(hash, 16777619)
+    }
+    return {
+      levelCount: levels.length,
+      levelsDisabled: levels.some((level) => level.disabled === true),
+      pagerButtons: buttons.length,
+      pageLabel: (pager.querySelector(':scope > div:last-child > span')?.textContent ?? '').trim(),
+      prevDisabled: buttons[0]?.disabled === true,
+      nextDisabled: buttons[1]?.disabled === true,
+      applyPresent: apply !== null,
+      applyDisabled: apply === null ? null : apply.disabled === true,
+      contentHash: hash >>> 0,
+      textLength: text.length
+    }
+  })()`
+  const preview = await browser.waitFor(readPreview, 'SHEET_PREVIEW_NOT_FORMED')
+  const pageMatch = /(\d+)\s*\/\s*(\d+)/.exec(preview.pageLabel)
+  const pageTotal = pageMatch ? Number(pageMatch[2]) : 0
+  checks.require('preview.multi-page', preview.levelCount > 0 && preview.pagerButtons === 2 && pageTotal >= 2,
+  'a real multi-page preview renders levels and prev/next pagination', {...preview, pageTotal})
+  checks.require('preview.write-requires-approval', preview.applyPresent && preview.applyDisabled === false,
+    'preview exposes a clickable apply only after approval is allowed', preview)
+  const pagedClick = await browser.evaluate(`(() => {
+    const pager = document.querySelector('[data-testid="sheet-preview-full"]')
+    const buttons = pager ? [...pager.querySelectorAll('button')] : []
+    const next = buttons[buttons.length - 1]
+    const before = (pager?.querySelector(':scope > div:last-child > span')?.textContent ?? '').trim()
+    const clicked = !!(next && !next.disabled)
+    if (clicked) next.click()
+    const after = (pager?.querySelector(':scope > div:last-child > span')?.textContent ?? '').trim()
+    return {clicked, before, after}
+  })()`, false)
+  checks.require('preview.pagination-readonly-works', preview.pageLabel !== ''
+    && preview.nextDisabled === false && preview.prevDisabled === true,
+  'multi-page preview exposes usable prev/next (page 1: prev disabled, next enabled) without submitting writes',
+  {pageLabel: preview.pageLabel, prevDisabled: preview.prevDisabled, nextDisabled: preview.nextDisabled, click: pagedClick})
+
+  const baseline = browser.requestCounts()
+  browser.setPhase('sheet-restore')
+  await browser.setHistoryFault('always')
+  await browser.reload({waitForHistory: false})
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === true
+  })()`, 'SHEET_RESTORE_NOT_ACTIVE')
+  const fullLevel = await browser.evaluate(`(() => {
+    const level = document.querySelector('[data-testid="sheet-preview-level-full-diff"]')
+    if (!level || level.disabled) return false
+    if (level.getAttribute('aria-pressed') !== 'true') level.click()
+    return true
+  })()`, false)
+  const during = await browser.waitFor(`(() => {
+    const card = document.querySelector('[data-testid="sheet-preview-card"]')
+    const levels = [...document.querySelectorAll('[data-testid^="sheet-preview-level-"]')]
+    const pager = document.querySelector('[data-testid="sheet-preview-full"]')
+    const apply = document.querySelector('[data-testid="sheet-preview-apply"]')
+    if (!card || levels.length === 0) return null
+    const text = card.textContent ?? ''
+    let hash = 2166136261
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index)
+      hash = Math.imul(hash, 16777619)
+    }
+    return {
+      levelCount: levels.length,
+      levelsDisabled: levels.some((level) => level.disabled === true),
+      pagerButtons: pager ? [...pager.querySelectorAll('button')].length : 0,
+      applyPresent: apply !== null,
+      applyDisabled: apply === null ? null : apply.disabled === true,
+      contentHash: hash >>> 0
+    }
+  })()`, 'SHEET_PREVIEW_DURING_RECOVERY_NOT_READABLE')
+  checks.require('restore.level-toggle-enabled', fullLevel === true,
+    'the read-only preview level switch stays clickable during recovery', {fullLevel})
+  checks.require('restore.levels-and-pagination-usable', during.levelCount === preview.levelCount
+    && during.levelsDisabled === false && during.pagerButtons === 2,
+  'read-only level/pagination controls stay usable during history-503 recovery', during)
+  checks.require('restore.write-blocked', during.applyPresent === false || during.applyDisabled === true,
+    'write/apply stays blocked while recovery has not committed', during)
+  checks.require('restore.content-unchanged', during.contentHash === preview.contentHash,
+    'card content hash is unchanged during recovery', {before: preview.contentHash, during: during.contentHash})
+
+  await browser.setHistoryFault('off')
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false
+  })()`, 'SHEET_RESTORE_NOT_COMPLETED')
+  const after = await browser.waitFor(readPreview, 'SHEET_PREVIEW_NOT_RESTORED')
+  checks.require('restore.preview-stable', after.contentHash === preview.contentHash
+    && after.levelCount === preview.levelCount && after.applyPresent === true,
+  'preview content/summary is reproduced exactly after recovery', {before: preview, after})
+  const finalCounts = browser.requestCounts()
+  checks.require('restore.zero-duplicate-submits', finalCounts.frontendToolResult === baseline.frontendToolResult
+    && finalCounts.confirm === baseline.confirm && finalCounts.chat === baseline.chat,
+  'recovery/refresh never re-submits a preview write or re-opens a chat', {baseline, after: finalCounts})
+  await evidence.json('sheet-preview.json', {taskId, preview, during, after, requests: finalCounts})
+}
+
 async function runTimingProxyScenario(context) {
   const {browser, checks, config, api, evidence} = context
   const variants = new Set(['full', 'incremental'])
@@ -4831,23 +5042,26 @@ async function runContentMatrix(context) {
 
   // C-131 文档要求核对正文、parts 与顺序；`seq`/eventId 是恢复重投影的瞬态元数据
   // （C-161 的 seq 差异已单列交主会话），这里比较内容/顺序/状态/卡片，并把 seq 单独留证。
-  const contentFacts = (snapshot) => canonicalJson({
+  // interleave：只过滤“空字符串 text part”（模型首部空占位），空白非空 text 保留并保持正文顺序。
+  const contentFacts = (snapshot, {dropEmptyTextParts = false} = {}) => canonicalJson({
     messages: snapshot.messages.map((message) => ({
       role: message.role,
       runId: message.runId,
       done: message.done,
       content: sha256(message.content ?? ''),
-      parts: message.parts.map((part) => ({
-        kind: part.kind,
-        name: part.name ?? null,
-        toolCallId: part.toolCallId ?? null,
-        status: part.status ?? null,
-        requiresAction: part.requiresAction ?? null,
-        decision: part.decision ?? null,
-        seq: part.seq ?? null,
-        text: part.kind === 'text' ? sha256(part.text ?? '') : null,
-        args: part.kind === 'tool' && part.args !== null && part.args !== undefined ? sha256(canonicalJson(part.args)) : null
-      }))
+      parts: message.parts
+        .filter((part) => !(dropEmptyTextParts && part.kind === 'text' && (part.text ?? '') === ''))
+        .map((part) => ({
+          kind: part.kind,
+          name: part.name ?? null,
+          toolCallId: part.toolCallId ?? null,
+          status: part.status ?? null,
+          requiresAction: part.requiresAction ?? null,
+          decision: part.decision ?? null,
+          seq: part.seq ?? null,
+          text: part.kind === 'text' ? sha256(part.text ?? '') : null,
+          args: part.kind === 'tool' && part.args !== null && part.args !== undefined ? sha256(canonicalJson(part.args)) : null
+        }))
     })),
     activeForm: snapshot.activeForm ? {
       toolCallId: snapshot.activeForm.toolCallId,
@@ -4855,8 +5069,10 @@ async function runContentMatrix(context) {
       fields: (snapshot.activeForm.fields ?? []).map((field) => `${field.key}:${field.type}`)
     } : null,
     queuedForms: snapshot.queuedForms.map((entry) => entry.toolCallId),
-    cards: snapshot.cards.map((card) => ({testId: card.testId, state: card.state, text: sha256(card.text ?? '')}))
+    // 卡片内容散列用 textContent（展开/折叠不改变内容）；innerText 仍用于可见文案扫描。
+    cards: snapshot.cards.map((card) => ({testId: card.testId, state: card.state, text: sha256(card.contentText ?? card.text ?? '')}))
   })
+  const factsOf = (snapshot) => contentFacts(snapshot, {dropEmptyTextParts: config.variant === 'interleave'})
   const seqFacts = (snapshot) => canonicalJson(snapshot.messages.map((message) => message.parts.map((part) => part.seq ?? null)))
 
   if (config.variant === 'tool-chain') {
@@ -5057,7 +5273,7 @@ async function runContentMatrix(context) {
 
   if (config.variant === 'repeat-refresh') {
     const baseline = browser.requestCounts().chat
-    const initialSignature = contentFacts(snapshot)
+    const initialSignature = factsOf(snapshot)
     const initialSeq = seqFacts(snapshot)
     const seqDrift = []
     for (const phase of ['refresh-1', 'refresh-2', 'refresh-3']) {
@@ -5066,8 +5282,8 @@ async function runContentMatrix(context) {
       await waitSettled(`${phase.toUpperCase()}_NOT_SETTLED`)
       const refreshed = await browser.snapshot()
       assertBase(phase, refreshed)
-      checks.require(`${phase}.content-stable`, contentFacts(refreshed) === initialSignature,
-        initialSignature, contentFacts(refreshed))
+      checks.require(`${phase}.content-stable`, factsOf(refreshed) === initialSignature,
+        initialSignature, factsOf(refreshed))
       if (seqFacts(refreshed) !== initialSeq) seqDrift.push(phase)
     }
     checks.require('repeat-refresh.no-new-chat', browser.requestCounts().chat === baseline, baseline, browser.requestCounts().chat)
@@ -5076,15 +5292,15 @@ async function runContentMatrix(context) {
   }
 
   // C-131A/B/C 的刷新稳定性：内容与卡片签名、run/history 正文一致。
-  const initialSignature = contentFacts(snapshot)
+  const initialSignature = factsOf(snapshot)
   const initialSeq = seqFacts(snapshot)
   browser.setPhase('refresh-1')
   await browser.reload()
   await waitSettled('CONTENT_MATRIX_REFRESH_NOT_SETTLED', {allowPendingForm: config.variant === 'gf-seven'})
   const refreshed = await browser.snapshot()
   assertBase('refresh-1', refreshed)
-  checks.require('refresh-1.content-stable', contentFacts(refreshed) === initialSignature,
-    initialSignature, contentFacts(refreshed))
+  checks.require('refresh-1.content-stable', factsOf(refreshed) === initialSignature,
+    initialSignature, factsOf(refreshed))
   await context.evidence.json('content-matrix.json', {
     variant: config.variant,
     initial: shape,
@@ -5476,6 +5692,7 @@ try {
   else if (config.scenario === 'correction-prefix') await runCorrectionPrefixScenario(context)
   else if (config.scenario === 'content-matrix') await runContentMatrix(context)
   else if (config.scenario === 'recovery-timing-proxy') await runTimingProxyScenario(context)
+  else if (config.scenario === 'sheet-preview') await runSheetPreviewScenario(context)
   else if (config.scenario === 'correction-prefix-preflight') await runCorrectionPrefixPreflight(context)
   else if (config.scenario === 'recovery-history-generation') await runHistoryGenerationRace(context)
   else if (config.scenario === 'recovery-stopped') await runStoppedRecovery(context)
@@ -5553,7 +5770,7 @@ const summary = {
   historyOrder: config.historyOrder || null,
   pendingFixture: config.pendingFixture,
   status,
-  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage', 'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue', 'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix', 'recovery-timing-proxy'].includes(config.scenario)
+  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage', 'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue', 'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix', 'recovery-timing-proxy', 'sheet-preview'].includes(config.scenario)
     ? 'REAL_BROWSER_DOM_STORE_PUBLIC_HISTORY_CONTEXT_CLIPBOARD_AND_PUBLIC_BUSINESS_API; configured upstream evidence only; REAL_PROVIDER_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN'
     : 'REAL_BROWSER_DOM_AND_PUBLIC_API_WITH_CDP_HISTORY_HTTP_FAULT; no application SSE fabrication; BACKEND_INTERNAL_FAILURE_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN',
   startedAt,
