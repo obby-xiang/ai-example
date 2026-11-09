@@ -1711,11 +1711,19 @@ class CdpPage {
     const runCurrent = this.runCurrentRecord(requestId)
     const record = history ?? context ?? runCurrent
     if (record) record.interceptionEnabledAtPause = this.interceptionEnabled
-    const shouldFault = history
+    // Fetch 在 Request 阶段可能先于 Network.requestWillBeSent 暂停；此时没有跟踪记录，
+    // 必须按 URL 归类，否则刷新后的第一条 history 会漏注入 503（表现为 OBSERVED 200）。
+    const requestUrl = params.request?.url ?? ''
+    const historyKind = !!history || /\/api\/ai\/history\//.test(requestUrl)
+    const contextKind = !!context || /\/api\/ai\/context\//.test(requestUrl)
+    const runCurrentKind = !!runCurrent || /\/api\/ai\/runs\/current/.test(requestUrl)
+    const shouldFault = historyKind
       ? this.faultMode === 'always' || (this.faultMode === 'once' && this.historyFaultsRemaining > 0)
-      : runCurrent
+      : runCurrentKind
         ? this.runCurrentFaultMode === 'always' || (this.runCurrentFaultMode === 'once' && this.runCurrentFaultsRemaining > 0)
-        : this.contextFaultMode === 'always' || (this.contextFaultMode === 'once' && this.contextFaultsRemaining > 0)
+        : contextKind
+          ? this.contextFaultMode === 'always' || (this.contextFaultMode === 'once' && this.contextFaultsRemaining > 0)
+          : false
     try {
       if (context && params.responseStatusCode !== undefined && this.contextResponseDelayRemaining > 0) {
         this.contextResponseDelayRemaining -= 1
@@ -1742,9 +1750,9 @@ class CdpPage {
         return
       }
       if (shouldFault) {
-        if (history && this.historyFaultsRemaining > 0) this.historyFaultsRemaining -= 1
-        if (context && this.contextFaultsRemaining > 0) this.contextFaultsRemaining -= 1
-        if (runCurrent && this.runCurrentFaultsRemaining > 0) this.runCurrentFaultsRemaining -= 1
+        if (historyKind && this.historyFaultsRemaining > 0) this.historyFaultsRemaining -= 1
+        if (contextKind && this.contextFaultsRemaining > 0) this.contextFaultsRemaining -= 1
+        if (runCurrentKind && this.runCurrentFaultsRemaining > 0) this.runCurrentFaultsRemaining -= 1
         if (record) {
           record.action = 'HTTP_503'
           record.injectedStatus = 503
@@ -1753,7 +1761,7 @@ class CdpPage {
           requestId: params.requestId,
           responseCode: 503,
           responseHeaders: [{name: 'Content-Type', value: 'application/json; charset=utf-8'}],
-          body: Buffer.from(JSON.stringify({code: runCurrent ? 'AI_CURRENT_UNAVAILABLE' : context ? 'AI_CONTEXT_UNAVAILABLE' : 'AI_HISTORY_UNAVAILABLE', data: null})).toString('base64')
+          body: Buffer.from(JSON.stringify({code: runCurrentKind ? 'AI_CURRENT_UNAVAILABLE' : contextKind ? 'AI_CONTEXT_UNAVAILABLE' : 'AI_HISTORY_UNAVAILABLE', data: null})).toString('base64')
         })
       } else {
         if (record) record.action = 'CONTINUE_UNCHANGED'
@@ -2882,8 +2890,8 @@ function operationEvidence(operations, names) {
     .filter((entry) => entry[1] !== undefined && entry[1].length > 0))
 }
 
-function assertWriteOperationsDisabled(context, phase, operations) {
-  const names = ['send', 'stop', 'continueRound', 'newChat', 'edit', 'gate', 'form', 'upload', 'sheetWrite']
+function assertWriteOperationsDisabled(context, phase, operations, messages = null) {
+  const names = ['send', 'stop', 'continueRound', 'newChat', 'gate', 'form', 'upload', 'sheetWrite']
   const actual = operationEvidence(operations, names)
   const enabled = Object.entries(actual).flatMap(([name, entries]) => entries.filter((entry) => !entry.disabled)
     .map((entry) => ({name, testId: entry.testId, visible: entry.visible})))
@@ -2894,6 +2902,15 @@ function assertWriteOperationsDisabled(context, phase, operations) {
       send: operations.send,
       stop: operations.stop
     })
+  // 终态历史消息的“编辑回填”与复制/赞踩同属消息级只读操作（C-146 规格已确认允许）；
+  // 只禁止编辑当前未决/未终态消息。
+  const pendingIds = new Set((messages ?? []).filter((message) => messagePending(message) || message.done !== true)
+    .map((message) => message.id))
+  const enabledEdits = operations.edit.filter((entry) => entry.visible && !entry.disabled)
+  const forbiddenEdits = enabledEdits.filter((entry) => pendingIds.has(String(entry.testId).replace(/^edit-msg-/, '')))
+  context.checks.require(`${phase}.edit-only-terminal-messages`, forbiddenEdits.length === 0,
+    'edit/refill is allowed only on terminal messages, never on the unresolved current message',
+    {enabledEdits, forbiddenEdits, pendingIds: [...pendingIds]})
   const levels = operations.previewLevel.filter((entry) => entry.visible)
   context.checks.require(`${phase}.readonly-preview-level-unrestricted`, levels.every((entry) => !entry.disabled),
     'read-only preview level controls are not disabled by recovery', levels)
@@ -3061,7 +3078,7 @@ async function assertRestoringGate(context, phase, historyEvidence, business) {
   checks.require(`${phase}.no-manual-failure-yet`, view.snapshot.manualRecovery === null,
     'automatic recovery has not published a manual failure', view.snapshot.manualRecovery)
   assertMessagePresentation(context, phase, view, 'recovering')
-  assertWriteOperationsDisabled(context, phase, view.operations)
+  assertWriteOperationsDisabled(context, phase, view.operations, view.snapshot.messages)
   await assertDraftAndTerminalCopy(context, phase, view)
   await saveRecoveryPhase(context, phase, view, historyEvidence, business)
 }
@@ -3777,7 +3794,7 @@ async function runContextUsageRecovery(context) {
   checks.require('history-independent.usage-preserved', canonicalJson(independentView.snapshot.contextUsage) === canonicalJson(expected),
     expected, independentView.snapshot.contextUsage)
   assertMessagePresentation(context, 'history-independent', independentView, 'terminal')
-  assertWriteOperationsDisabled(context, 'history-independent', independentView.operations)
+  assertWriteOperationsDisabled(context, 'history-independent', independentView.operations, independentView.snapshot.messages)
   await assertDraftAndTerminalCopy(context, 'history-independent', independentView)
   await saveRecoveryPhase(context, 'history-independent', independentView, independent.historyEvidence, independent.business)
   await browser.setHistoryFault('off')
@@ -3889,7 +3906,7 @@ async function runStreamHistoryRace(context) {
     checks.require('restore-stream.terminal-mirror-recovering', view.snapshot.restoringRecovery,
       'terminal mirror waits for the delayed run snapshot', held)
     assertMessagePresentation(context, 'restore-stream-terminal', view, 'terminal')
-    assertWriteOperationsDisabled(context, 'restore-stream-terminal', view.operations)
+    assertWriteOperationsDisabled(context, 'restore-stream-terminal', view.operations, view.snapshot.messages)
     await saveRecoveryPhase(context, 'restore-stream-terminal', view, restoringEvidence.historyEvidence, restoringEvidence.business)
   } else {
     await assertRestoringGate(context, 'restore-stream', restoringEvidence.historyEvidence, restoringEvidence.business)
