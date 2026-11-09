@@ -2,7 +2,7 @@
 
 import {execFileSync} from 'node:child_process'
 import {createHash, randomUUID} from 'node:crypto'
-import {lstat, mkdir, realpath, writeFile} from 'node:fs/promises'
+import {lstat, mkdir, readdir, readFile, realpath, stat, writeFile} from 'node:fs/promises'
 import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {setTimeout as sleep} from 'node:timers/promises'
@@ -31,7 +31,10 @@ const toolCases = new Map([
     prompt: 'tool=set_condition&args={"defCode":"CURRENCY","conditions":{"fields":[{"fieldCode":"code","operator":"EQ","value":"CNY"}]}}'
   }]
 ])
-const scenarios = new Set([...toolCases.keys(), 'tool-skipped', 'form-mixed-copy', 'recovery-success', 'recovery-final-failure'])
+const scenarios = new Set([...toolCases.keys(), 'tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-success', 'recovery-final-failure',
+  'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage',
+  'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue',
+  'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped'])
 const recoverySurfaceSelector = [
   '[data-testid="alert-history-error"]',
   '[data-testid="alert-recovery-gap"]',
@@ -125,6 +128,16 @@ function sha256(value) {
   return createHash('sha256').update(typeof value === 'string' ? value : canonicalJson(value)).digest('hex')
 }
 
+function fnv1a32(value) {
+  const text = canonicalJson(value)
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16)
+}
+
 function textEvidence(value) {
   return {length: Array.from(value ?? '').length, sha256: sha256(value ?? '')}
 }
@@ -184,6 +197,9 @@ function loadConfig() {
   return {
     scenario,
     locale,
+    variant: process.env.RECOVERY_VARIANT?.trim() ?? '',
+    historyOrder: process.env.HISTORY_ORDER?.trim() ?? '',
+    pendingFixture: process.env.PENDING_FIXTURE?.trim() ?? 'standard',
     appUrl: httpUrl('APP_URL'),
     baseUrl: httpUrl('BASE_URL'),
     cdpUrl: httpUrl('CDP_URL', {loopbackOnly: true}),
@@ -191,6 +207,7 @@ function loadConfig() {
     userId: process.env.USER_ID.trim(),
     executorIdentity: process.env.EXECUTOR_IDENTITY.trim(),
     outDir: outsidePath('OUT_DIR'),
+    stubDumpDir: process.env.STUB_DUMP_DIR?.trim() ? outsidePath('STUB_DUMP_DIR') : null,
     timeoutMs: integerEnv('TIMEOUT_MS', 120_000, 5_000, 600_000),
     pollMs: integerEnv('POLL_MS', 50, 10, 1_000)
   }
@@ -219,7 +236,7 @@ async function prepareEvidenceDirectory(config) {
   const target = path.resolve(resolvedAncestor, path.relative(ancestor, config.outDir))
   if (isInside(resolvedRepo, target)) throw new Error('OUT_DIR target resolves inside the repository')
   const directory = path.join(target, 'ai-tool-card-recovery', config.scenario, config.locale,
-    `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`)
+    `${safeToken(config.variant, 'default')}-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`)
   await mkdir(directory, {recursive: true})
   const resolved = await realpath(directory)
   if (isInside(resolvedRepo, resolved)) throw new Error('evidence directory resolves inside the repository')
@@ -347,6 +364,69 @@ class ApiClient {
     if (data.hasMore === true || data.truncated === true) throw new ScenarioNotRun('COMPLETE_SINGLE_PAGE_HISTORY_REQUIRED')
     return {status: 'AVAILABLE', httpStatus: 200, errorName: null, businessCode: null, data}
   }
+
+  async context(sessionId) {
+    const response = await this.request('ai.context', `/api/ai/context/${encodeURIComponent(sessionId)}`)
+    const data = response.body?.data ?? response.body
+    if (response.status !== 200) {
+      return {status: 'UNAVAILABLE', httpStatus: response.status, errorName: 'HTTP_ERROR', businessCode: businessCode(response.body)}
+    }
+    if (!isRecord(data) || typeof data.source !== 'string' || !Number.isSafeInteger(data.usedTokens) || data.usedTokens < 0) {
+      return {status: 'UNAVAILABLE', httpStatus: 200, errorName: 'INVALID_CONTEXT_PAYLOAD', businessCode: businessCode(response.body)}
+    }
+    return {status: 'AVAILABLE', httpStatus: 200, errorName: null, businessCode: null, data}
+  }
+
+  async runCurrent(sessionId) {
+    const response = await this.request('ai.run-current', `/api/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
+    const data = response.body?.data ?? response.body
+    if (response.status !== 200 || !isRecord(data)) {
+      return {status: 'UNAVAILABLE', httpStatus: response.status, errorName: 'INVALID_RUN_CURRENT_PAYLOAD', businessCode: businessCode(response.body)}
+    }
+    return {status: 'AVAILABLE', httpStatus: 200, errorName: null, businessCode: null, data}
+  }
+
+  async run(runId) {
+    const response = await this.request('ai.run', `/api/ai/runs/${encodeURIComponent(runId)}`)
+    const data = response.body?.data ?? response.body
+    if (response.status !== 200 || !isRecord(data?.snapshot)) {
+      return {status: 'UNAVAILABLE', httpStatus: response.status, errorName: 'INVALID_RUN_PAYLOAD', businessCode: businessCode(response.body)}
+    }
+    return {status: 'AVAILABLE', httpStatus: 200, errorName: null, businessCode: null, data}
+  }
+
+  async startChat(sessionId, message) {
+    const clientRequestId = `recovery-${randomUUID()}`
+    const response = await fetch(`${this.config.baseUrl}/api/ai/chat`, {
+      method: 'POST',
+      headers: {
+        'X-Tenant-Id': this.config.tenantId,
+        'X-User-Id': this.config.userId,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream'
+      },
+      body: JSON.stringify({sessionId, message, context: null, clientRequestId}),
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000)
+    })
+    if (response.status !== 200 || !response.body) throw new VerificationFailure('PUBLIC_CHAT_START_FAILED', response.status, businessCode(null))
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffered = ''
+    try {
+      while (buffered.length <= 256 * 1024) {
+        const {done, value} = await reader.read()
+        if (done) break
+        buffered += decoder.decode(value, {stream: true})
+        const start = /"type"\s*:\s*"start"[\s\S]*?"runId"\s*:\s*"([A-Za-z0-9_.:-]+)"/.exec(buffered)
+          ?? /"runId"\s*:\s*"([A-Za-z0-9_.:-]+)"[\s\S]*?"type"\s*:\s*"start"/.exec(buffered)
+        if (start) return {runId: start[1], clientRequestId, httpStatus: response.status}
+      }
+    } finally {
+      await reader.cancel().catch(() => {})
+    }
+    throw new ScenarioNotRun('PUBLIC_CHAT_START_NOT_FORMED')
+  }
 }
 
 function requiredHistory(evidence) {
@@ -415,7 +495,10 @@ function historySummary(history) {
       entryId: message.entryId ?? null,
       runId: message.runId ?? null,
       text: textEvidence(message.text ?? message.content ?? ''),
-      toolCallStates: Object.fromEntries(Object.entries(message.toolCallStates ?? {}).map(([id, state]) => [id, {status: state?.status ?? null}])),
+      toolCallStates: Object.fromEntries(Object.entries(message.toolCallStates ?? {}).map(([id, state]) => [id, {
+        status: state?.status ?? null,
+        code: state?.code ?? state?.userTextCode ?? null
+      }])),
       toolResponses: (message.toolResponses ?? []).map((response) => ({id: response.id ?? null, name: response.name ?? null}))
     }))
   }
@@ -423,38 +506,423 @@ function historySummary(history) {
 
 function historyToolOccurrences(history, toolCallId) {
   const states = []
+  const codes = []
   const responses = []
   for (const message of history.messages) {
-    if (message.toolCallStates?.[toolCallId]) states.push(message.toolCallStates[toolCallId].status ?? null)
+    const state = message.toolCallStates?.[toolCallId]
+    if (state) {
+      states.push(state.status ?? null)
+      codes.push(state.code ?? state.userTextCode ?? null)
+    }
     for (const response of message.toolResponses ?? []) {
       if (response.id === toolCallId) responses.push(response.name ?? null)
     }
   }
-  return {states, responses}
+  return {states, codes, responses}
+}
+
+const CORRECTION_PREFIX_TEXT = '纠正前缀：先保留这段已经展示的回答。'
+const CORRECTION_SUFFIX_TEXT = '纠正后缀：补齐剩余回答且不得重复前缀。'
+const CORRECTION_FINAL_TEXT = '最终收尾：工具结果与正文顺序完整。'
+const INTERNAL_CORRECTION_MARKER = '（内部纠正，不要向用户复述本段）'
+const TURN_TEXT = '命名轮蓝本：这是一段确定性文本，用于验证纯文本流的帧序完整性（start 恰 1 / delta ≥ 1 / done 恰 1），'
+  + '以及 done 之后零帧的迟到帧闸门。文本按 24 字符切片发送，切片数由本串长度决定，不依赖模型。'
+const PREFIX_EXPECTATIONS = new Map([
+  ['text', {requests: 2, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_SUFFIX_TEXT}`, tools: []}],
+  ['tool-suffix', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_SUFFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: ['list_config_defs']}],
+  ['prefix-prefix', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: []}],
+  ['empty-suffix-tool', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: ['list_config_defs']}],
+  ['park-resume', {requests: 3, text: `${CORRECTION_PREFIX_TEXT}${CORRECTION_FINAL_TEXT}`, tools: ['generative_form']}],
+  ['other-run-control', {requests: 1, text: TURN_TEXT, tools: []}]
+])
+
+function upstreamText(message) {
+  if (typeof message?.content === 'string') return message.content
+  if (Array.isArray(message?.content)) return message.content.map((part) => part?.text ?? '').join('')
+  return ''
+}
+
+function upstreamMessageEvidence(message) {
+  return {
+    role: message?.role ?? null,
+    toolCallId: message?.tool_call_id ?? null,
+    content: textEvidence(upstreamText(message)),
+    toolCalls: (message?.tool_calls ?? []).map((call) => ({id: call?.id ?? null, name: call?.function?.name ?? null}))
+  }
+}
+
+async function readJsonEvidenceFile(file, maximumBytes) {
+  const info = await stat(file)
+  if (info.size > maximumBytes) throw new VerificationFailure('UPSTREAM_EVIDENCE_FILE_TOO_LARGE')
+  return JSON.parse(await readFile(file, 'utf8'))
+}
+
+async function assertStubDirectoryEmpty(config) {
+  if (!config.stubDumpDir) throw new Error('STUB_DUMP_DIR is required for correction-prefix')
+  const existing = (await readdir(config.stubDumpDir)).filter((name) => name.startsWith('req-')).sort()
+  if (existing.length > 0) throw new VerificationFailure('STUB_DUMP_DIR_NOT_EMPTY')
+}
+
+async function readUpstreamRequests(config) {
+  if (!config.stubDumpDir) throw new Error('STUB_DUMP_DIR is required for correction-prefix')
+  const names = (await readdir(config.stubDumpDir)).filter((name) => /^req-\d{3}\.json$/.test(name)).sort()
+  if (names.length === 0) throw new ScenarioNotRun('UPSTREAM_REQUESTS_NOT_FORMED')
+  if (names.length > 16) throw new VerificationFailure('UPSTREAM_REQUEST_LIMIT_EXCEEDED')
+  const requests = []
+  for (const name of names) {
+    const id = name.slice(0, -5)
+    const body = await readJsonEvidenceFile(path.join(config.stubDumpDir, name), 1024 * 1024)
+    const decision = await readJsonEvidenceFile(path.join(config.stubDumpDir, `${id}.decision.json`), 1024 * 1024)
+    const eventsFile = path.join(config.stubDumpDir, `${id}.events.jsonl`)
+    if ((await stat(eventsFile)).size > 8 * 1024 * 1024) throw new VerificationFailure('UPSTREAM_EVENT_LIMIT_EXCEEDED')
+    const eventsText = await readFile(eventsFile, 'utf8')
+    const events = eventsText.split(/\r?\n/).filter((line) => line.trim() !== '').map((line) => JSON.parse(line))
+    if (events.length > 4098) throw new VerificationFailure('UPSTREAM_EVENT_COUNT_EXCEEDED')
+    requests.push({id, body, decision, events})
+  }
+  return requests
+}
+
+function prefixCount(request, prefix) {
+  return request.body.messages.filter((message) => message?.role === 'assistant')
+    .reduce((count, message) => count + upstreamText(message).split(prefix).length - 1, 0)
+}
+
+function correctionDirectiveCount(request) {
+  return request.body.messages.filter((message) => message?.role === 'user')
+    .reduce((count, message) => count + upstreamText(message).split(INTERNAL_CORRECTION_MARKER).length - 1, 0)
+}
+
+function digestMatches(value, text) {
+  return value?.sha256 === sha256(text) && value?.length === Array.from(text).length
+}
+
+function assertPrefixUpstream(context, requests) {
+  const {checks, config} = context
+  const expected = PREFIX_EXPECTATIONS.get(config.variant)
+  checks.require('prefix.upstream-request-count', requests.length === expected.requests, expected.requests, requests.map((request) => request.id))
+  const requestEvidence = []
+  for (const [index, request] of requests.entries()) {
+    const prefixes = prefixCount(request, CORRECTION_PREFIX_TEXT)
+    const directives = correctionDirectiveCount(request)
+    const isControl = config.variant === 'other-run-control'
+    checks.require(`prefix.request-${index + 1}-count`, isControl ? prefixes === 0 : index === 0 ? prefixes === 0 : prefixes === 1,
+      isControl ? 'control has no correction prefix' : index === 0 ? 'initial request has no prior prefix' : 'each later model request has exactly one current prefix',
+      {requestId: request.id, prefixes})
+    checks.require(`prefix.request-${index + 1}-directive-count`, isControl ? directives === 0 : directives <= 1,
+      'no internal correction directive is duplicated', {requestId: request.id, directives})
+    const assistantIds = request.body.messages.filter((message) => message?.role === 'assistant')
+      .flatMap((message) => message.tool_calls ?? []).map((call) => call?.id).filter(Boolean)
+    const resultIds = request.body.messages.filter((message) => message?.role === 'tool')
+      .map((message) => message?.tool_call_id).filter(Boolean)
+    checks.require(`prefix.request-${index + 1}-tool-result-pairing`, resultIds.every((id) => assistantIds.includes(id)),
+      'every role=tool result has a preceding assistant tool_call with the same ID', {requestId: request.id, assistantIds, resultIds})
+    if (['empty-suffix-tool', 'park-resume'].includes(config.variant)) {
+      const toolAssistants = request.body.messages.filter((message) => message?.role === 'assistant' && (message.tool_calls ?? []).length > 0)
+      let originalResponse = null
+      if (index === 1) {
+        const chunks = request.events.filter((event) => event.type === 'upstream-chunk')
+        const contentChoices = chunks.flatMap((event) => event.choices ?? []).filter((choice) => choice.hasContent === true)
+        const responseCalls = chunks.flatMap((event) => event.choices ?? []).flatMap((choice) => choice.toolCalls ?? [])
+        const expectedTool = config.variant === 'park-resume' ? 'generative_form' : 'list_config_defs'
+        checks.require(`prefix.request-${index + 1}-prefix-only-tool-assistant`, request.decision?.kind === 'tool_call'
+          && request.decision?.prefixText === CORRECTION_PREFIX_TEXT && request.decision?.tool === expectedTool
+          && contentChoices.length === 1 && digestMatches(contentChoices[0]?.content, CORRECTION_PREFIX_TEXT)
+          && responseCalls.length === 1 && responseCalls[0]?.id && responseCalls[0]?.name === expectedTool,
+        'the original second response has exactly one prefix, no suffix and one tool_call', {
+          decision: {
+            kind: request.decision?.kind ?? null,
+            tool: request.decision?.tool ?? null,
+            prefixText: textEvidence(request.decision?.prefixText ?? '')
+          },
+          contentChoices: contentChoices.map((choice) => choice.content),
+          responseCalls: responseCalls.map((call) => ({id: call.id, name: call.name}))
+        })
+        originalResponse = {
+          content: contentChoices.map((choice) => choice.content),
+          toolCalls: responseCalls.map((call) => ({id: call.id, name: call.name}))
+        }
+      }
+      if (index >= 2) {
+        checks.require(`prefix.request-${index + 1}-sanitized-tool-assistant-empty`, toolAssistants.length > 0
+          && toolAssistants.every((message) => upstreamText(message) === ''),
+        'later model history sanitizes tool assistant text to empty while preserving tool_calls', toolAssistants.map((message) => ({
+          toolCallIds: (message.tool_calls ?? []).map((call) => call?.id ?? null),
+          text: textEvidence(upstreamText(message))
+        })))
+        const originalCalls = requests[1].events.filter((event) => event.type === 'upstream-chunk')
+          .flatMap((event) => event.choices ?? []).flatMap((choice) => choice.toolCalls ?? []).map((call) => call.id).filter(Boolean)
+        checks.require(`prefix.request-${index + 1}-sanitized-tool-id-preserved`, originalCalls.length === 1
+          && assistantIds.includes(originalCalls[0]) && resultIds.includes(originalCalls[0]),
+        'the original response toolCallId survives in the sanitized assistant and tool result metadata', {
+          originalCalls,
+          assistantIds,
+          resultIds
+        })
+      }
+      request.originalResponse = originalResponse
+    }
+    const outcomes = request.events.filter((event) => event.type === 'outcome')
+    checks.require(`prefix.request-${index + 1}-healthy-outcome`, outcomes.length === 1 && outcomes[0].outcome === 'ok',
+      'each upstream request has one successful outcome', {requestId: request.id, outcomes: outcomes.map((event) => event.outcome)})
+    requestEvidence.push({
+      requestId: request.id,
+      variant: request.decision?.correctionVariant ?? null,
+      prefixes,
+      directives,
+      outcome: outcomes[0]?.outcome ?? null,
+      originalResponse: request.originalResponse ?? null,
+      messages: request.body.messages.map(upstreamMessageEvidence)
+    })
+  }
+  if (config.variant !== 'other-run-control') {
+    checks.require('prefix.correction-directive-formed', requests.some((request) => correctionDirectiveCount(request) === 1),
+      'the deterministic prefix actually triggers one internal correction request', requests.map((request) => ({
+        requestId: request.id,
+        directives: correctionDirectiveCount(request)
+      })))
+  }
+  return requestEvidence
+}
+
+async function assertPrefixFinalProjection(context, requestEvidence) {
+  const {checks, config} = context
+  const expected = PREFIX_EXPECTATIONS.get(config.variant)
+  const snapshot = await context.browser.snapshot()
+  const uiText = snapshot.messages.filter((message) => message.role === 'assistant').map((message) => message.content).join('')
+  if (expected.text !== null) {
+    checks.require('prefix.ui-text-complete', uiText === expected.text, textEvidence(expected.text), textEvidence(uiText))
+  }
+  checks.require('prefix.ui-terminal', snapshot.loading === false
+    && snapshot.messages.filter((message) => message.role === 'assistant').every((message) => message.done),
+  'the correction run is terminal in the real browser', snapshot.messages.map((message) => ({id: message.id, done: message.done})))
+  const runEvidence = await context.api.run(context.runId)
+  checks.require('prefix.run-available', runEvidence.status === 'AVAILABLE', 'public run snapshot is available', runEvidence)
+  if (runEvidence.status !== 'AVAILABLE') throw new AssertionFailure('PREFIX_RUN_UNAVAILABLE')
+  checks.require('prefix.run-final-text-complete', runEvidence.data.snapshot.finalText === uiText,
+    textEvidence(uiText), textEvidence(runEvidence.data.snapshot.finalText))
+  const history = requiredHistory(await context.api.history(context.sessionId))
+  const historyText = history.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
+    .map((message) => message.text ?? message.content ?? '').join('')
+  checks.require('prefix.history-text-complete', historyText === uiText, textEvidence(uiText), textEvidence(historyText))
+  const upstreamIds = requestEvidence.flatMap((request) => request.messages.flatMap((message) => message.toolCalls.map((call) => call.id).filter(Boolean)))
+  const resultIds = requestEvidence.flatMap((request) => request.messages.map((message) => message.toolCallId).filter(Boolean))
+  checks.require('prefix.all-tool-results-paired', canonicalJson([...new Set(upstreamIds)].sort()) === canonicalJson([...new Set(resultIds)].sort()),
+    [...new Set(upstreamIds)].sort(), [...new Set(resultIds)].sort())
+  const toolNameById = new Map(requestEvidence.flatMap((request) => request.messages.flatMap((message) => message.toolCalls
+    .map((call) => [call.id, call.name]))))
+  for (const [index, toolCallId] of [...new Set(upstreamIds)].entries()) {
+    const occurrences = historyToolOccurrences(history, toolCallId)
+    const toolName = toolNameById.get(toolCallId)
+    const expectedStatus = toolName === 'generative_form' ? 'FRONTEND_RESULT' : 'EXECUTED'
+    checks.require(`prefix.history-tool-pair-${index + 1}`, occurrences.states.length === 1 && occurrences.responses.length === 1
+      && occurrences.states[0] === expectedStatus && occurrences.responses[0] === toolName,
+    'public history metadata pairs each toolCallId with its exact name, terminal state and response', {
+      toolCallId,
+      toolName,
+      expectedStatus,
+      occurrences
+    })
+  }
+  await context.evidence.json('prefix-upstream.json', requestEvidence)
+  return snapshot
 }
 
 const browserObservationSource = String.raw`
 (() => {
   const state = window.__toolCardRecoveryVerification = {
+    observerId: crypto.randomUUID(),
+    sampleSequence: 0,
     samples: [],
     noticeSamples: [],
     copyCalls: [],
+    conditionEvents: [],
+    conditionInstrumentation: {workspaceWrapped: false, restoreWrapped: false},
     errors: []
   }
   const recordError = (error, code) => {
     state.errors.push({code, errorName: typeof error?.name === 'string' ? error.name : 'Error'})
     if (state.errors.length > 64) state.errors.splice(0, state.errors.length - 64)
   }
-  const visible = (element) => !!(element && (element.offsetParent !== null || element.getClientRects().length > 0))
+  const visible = (element) => !!(element && element.getClientRects().length > 0
+    && getComputedStyle(element).display !== 'none' && getComputedStyle(element).visibility === 'visible')
+  const cloneJson = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value))
+  const canonicalJson = (value) => {
+    if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']'
+    if (value !== null && typeof value === 'object') {
+      return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + canonicalJson(value[key])).join(',') + '}'
+    }
+    return JSON.stringify(value) ?? 'null'
+  }
+  const hashValue = (value) => {
+    const text = canonicalJson(value)
+    let hash = 2166136261
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index)
+      hash = Math.imul(hash, 16777619)
+    }
+    return {algorithm: 'fnv1a32', value: (hash >>> 0).toString(16)}
+  }
+  let conditionSequence = 0
+  const recordConditionEvent = (type, details) => {
+    conditionSequence += 1
+    state.conditionEvents.push({sequence: conditionSequence, atMs: Date.now(), type, details: cloneJson(details)})
+    if (state.conditionEvents.length > 512) state.conditionEvents.splice(0, state.conditionEvents.length - 512)
+  }
+  const findExportInstance = (vnode) => {
+    if (!vnode) return null
+    if (Array.isArray(vnode)) {
+      for (const child of vnode) {
+        const found = findExportInstance(child)
+        if (found) return found
+      }
+      return null
+    }
+    const instance = vnode.component
+    if (instance) {
+      const name = instance.type?.name ?? instance.type?.__name ?? ''
+      if (name === 'ExportWizardView' || name === 'export-wizard') return instance
+    }
+    return findExportInstance(vnode.subTree)
+  }
+  let restoreProbeFailed = false
+  const instrumentConditionEvents = () => {
+    const app = document.getElementById('app')
+    const pinia = app?.__vue_app__?.config.globalProperties.$pinia
+    const workspace = pinia?._s.get('workspace')
+    if (workspace && !workspace.__conditionRecoveryWrapped) {
+      Object.defineProperty(workspace, '__conditionRecoveryWrapped', {value: true, enumerable: false})
+      for (const name of ['setQueryConditions', 'clearQueryConditions', 'enterPage']) {
+        const original = workspace[name].bind(workspace)
+        workspace[name] = (...args) => {
+          if (name === 'setQueryConditions') {
+            recordConditionEvent('setQueryConditions', {defCode: args[0], condition: hashValue(args[1])})
+          } else if (name === 'clearQueryConditions') {
+            recordConditionEvent('clearQueryConditions', {defCode: args[0]})
+          } else {
+            recordConditionEvent('enterPage', {
+              pageId: args[0]?.pageId ?? args[0]?.page ?? null,
+              taskId: args[0]?.taskId ?? null,
+              step: args[0]?.step ?? null,
+              selectedDefs: cloneJson(args[0]?.selectedDefs ?? null),
+              queryConditions: hashValue(args[0]?.queryConditions ?? null)
+            })
+          }
+          return original(...args)
+        }
+      }
+      state.conditionInstrumentation.workspaceWrapped = true
+    }
+    const instance = findExportInstance(app?.__vue_app__?._instance?.subTree)
+    if (instance && !instance.__conditionRecoveryRestoreWrapped) {
+      const original = instance.setupState?.restoreExportTaskState
+      if (typeof original !== 'function') {
+        if (!restoreProbeFailed) {
+          restoreProbeFailed = true
+          recordError(new Error('restoreExportTaskState probe unavailable'), 'CONDITION_RESTORE_PROBE_UNAVAILABLE')
+        }
+        return
+      }
+      Object.defineProperty(instance, '__conditionRecoveryRestoreWrapped', {value: true, enumerable: false})
+      instance.setupState.restoreExportTaskState = (loaded) => {
+        recordConditionEvent('restoreExportTaskState', {
+          taskId: loaded?.id ?? null,
+          currentStep: loaded?.currentStep ?? null,
+          items: (loaded?.items ?? []).map((item) => ({defCode: item.defCode ?? null, condition: hashValue(item.conditionJson ?? null)}))
+        })
+        return original(loaded)
+      }
+      state.conditionInstrumentation.restoreWrapped = true
+    }
+  }
   const appStore = () => {
     const app = document.getElementById('app')
     const pinia = app && app.__vue_app__ && app.__vue_app__.config.globalProperties.$pinia
     return pinia ? pinia._s.get('ai') : null
   }
+  const operation = (selector, root = document) => [...root.querySelectorAll(selector)].map((element) => ({
+    testId: element.getAttribute('data-testid'),
+    disabled: element.disabled === true || element.getAttribute('aria-disabled') === 'true',
+    visible: visible(element)
+  }))
+  const contextUsageOf = (ai) => ai.contextUsage ? {
+    usedTokens: ai.contextUsage.usedTokens,
+    limitTokens: ai.contextUsage.limitTokens,
+    percent: ai.contextUsage.percent,
+    level: ai.contextUsage.level,
+    est: ai.contextUsage.est === true,
+    circuit: ai.contextUsage.circuit
+  } : null
+  const recoveryAnimationSemantics = (spans) => {
+    if (spans.length === 0) return {customClassDots: 0, animationName: null, duration: null, keyframesOpacity: false, keyframesTranslateY: false, valid: false}
+    let keyframeText = ''
+    for (const sheet of document.styleSheets) {
+      let rules
+      try { rules = sheet.cssRules } catch { continue }
+      for (const rule of rules) {
+        if (rule.type === 7 && rule.name === 'recovery-loading-pulse') keyframeText = rule.cssText
+      }
+    }
+    const keyframesOpacity = /opacity\s*:/.test(keyframeText)
+    const keyframesTranslateY = /translateY\(/.test(keyframeText)
+    const first = getComputedStyle(spans[0])
+    const customClassDots = spans.filter((element) => {
+      const style = getComputedStyle(element)
+      return element.classList.contains('recovery-loading-dot') && (element.textContent ?? '').trim() === ''
+        && style.animationName === 'recovery-loading-pulse' && style.animationDuration === '1s'
+    }).length
+    return {
+      customClassDots,
+      animationName: first.animationName,
+      duration: first.animationDuration,
+      keyframesOpacity,
+      keyframesTranslateY,
+      valid: customClassDots === 3 && keyframesOpacity && keyframesTranslateY
+    }
+  }
+  const messageDom = (message) => {
+    const row = document.querySelector('[data-msg-id="' + CSS.escape(message.id) + '"]')
+    const meta = row?.querySelector('[data-testid^="msg-ops-"]') ?? null
+    const count = (selector) => meta ? [...meta.querySelectorAll(selector)].filter(visible).length : 0
+    const breath = meta?.querySelector('[data-testid="recovery-loading"]') ?? null
+    const breathVisible = visible(breath)
+    const pulseSpans = breathVisible && (breath.innerText ?? '').trim() === '' ? [...breath.querySelectorAll(':scope > span')] : []
+    const recoveryAnimation = recoveryAnimationSemantics(pulseSpans)
+    const working = meta?.querySelector('[data-testid="loading-breath"]') ?? null
+    const terminalMarkers = meta ? [...meta.querySelectorAll('[data-testid]')].filter((element) => {
+      const id = element.getAttribute('data-testid') ?? ''
+      return /^msg-(stopped|interrupted|truncated|cancelled|failed)-/.test(id) && visible(element)
+    }).map((element) => element.getAttribute('data-testid')) : []
+    const copyButtons = operation('[data-testid^="copy-msg-"]', meta ?? document.createElement('div'))
+    return {
+      messageId: message.id,
+      metaPresent: meta !== null,
+      waitingCount: count('[data-testid="park-waiting"]'),
+      compactingCount: count('[data-testid="compaction-message"]'),
+      timestampCount: count('[data-testid="msg-timestamp"]'),
+      activityTextPresent: (breathVisible && (breath.innerText ?? '').trim().length > 0)
+        || (visible(working) && (working.innerText ?? '').trim().length > 0),
+      workingTextPresent: visible(working) && (working.innerText ?? '').trim().length > 0,
+      pulseDotTotal: pulseSpans.length,
+      recoveryAnimation,
+      terminalMarkers,
+      copyHintCount: count('[data-testid^="copy-hint-"]'),
+      copySuccess: copyButtons.some((entry) => entry.visible && entry.testId
+        && meta.querySelector('[data-testid="' + CSS.escape(entry.testId) + '"]')?.classList.contains('is-copied')),
+      actionGroupVisible: visible(meta?.querySelector(':scope > div')),
+      actions: {
+        copy: copyButtons,
+        feedback: operation('[data-testid^="feedback-up-"],[data-testid^="feedback-down-"]', meta ?? document.createElement('div')),
+        edit: operation('[data-testid^="edit-msg-"]', meta ?? document.createElement('div')),
+        continueRound: operation('[data-testid="continue-round"]', meta ?? document.createElement('div'))
+      }
+    }
+  }
   let previousTools = ''
   let previousNotices = ''
   const sample = () => {
     try {
+      instrumentConditionEvents()
       const ai = appStore()
       if (ai) {
         const tools = ai.messages.flatMap((message) => message.parts.filter((part) => part.kind === 'tool').map((part) => ({
@@ -473,17 +941,96 @@ const browserObservationSource = String.raw`
         const app = document.getElementById('app')
         const pinia = app?.__vue_app__?.config.globalProperties.$pinia
         const workspace = pinia?._s.get('workspace')
-        const workspaceState = workspace ? {
+        const workspaceState = workspace ? cloneJson({
           pageId: workspace.pageId,
+          taskType: workspace.taskType,
           taskId: workspace.taskId,
+          taskStatus: workspace.taskStatus,
           step: workspace.step,
-          selectedDefs: [...(workspace.selectedDefs ?? [])],
-          queryConditions: {...(workspace.queryConditions ?? {})}
-        } : null
-        const serialized = JSON.stringify({tools, cards, workspace: workspaceState})
+          selectedDefs: workspace.selectedDefs,
+          queryConditions: workspace.queryConditions,
+          importMode: workspace.importMode,
+          dataVersion: workspace.dataVersion
+        }) : null
+        const recovery = {
+          restoringRecovery: ai.restoringRecovery === true,
+          runPhase: ai.runPhase,
+          loading: ai.loading === true,
+          suspended: ai.suspended === true,
+          canSend: ai.canSend === true,
+          historyLoaded: ai.historyLoaded === true,
+          stopped: ai.stopped === true,
+          clientRequestStopped: ai.clientRequestStopped === true,
+          historyProjection: {
+            total: ai.historyTotal,
+            offset: ai.historyOffset,
+            hasMore: ai.historyHasMore === true,
+            nextCursor: ai.historyNextCursor ?? null,
+            revision: ai.historyRevision ?? 0,
+            eventCount: (ai.historyEvents ?? []).length,
+            windowEntryCount: (ai.historyWindowEntries ?? []).length,
+            events: (ai.historyEvents ?? []).map((event) => ({
+              eventId: event.eventId ?? null,
+              runId: event.runId ?? null,
+              anchorToolCallId: event.anchorToolCallId ?? null,
+              atMs: event.atMs ?? null
+            })),
+            windowEntries: (ai.historyWindowEntries ?? []).map((entry) => ({
+              entryId: entry.entryId ?? null,
+              runId: entry.runId ?? null,
+              type: String(entry.type ?? entry.role ?? '').toUpperCase(),
+              textHash: hashValue(entry.text ?? entry.content ?? '')
+            }))
+          },
+          manualRecovery: ai.manualRecovery ? {scope: ai.manualRecovery.scope ?? null, reason: ai.manualRecovery.reason ?? null} : null,
+          contextUsage: contextUsageOf(ai),
+          activeForm: ai.activeForm ? {
+            toolCallId: ai.activeForm.toolCallId,
+            runId: ai.activeForm.runId,
+            status: ai.activeForm.status,
+            values: hashValue(ai.activeForm.values ?? {}),
+            fields: (ai.activeForm.form?.fields ?? []).map((field) => ({key: field.key, type: field.type}))
+          } : null,
+          queuedForms: (ai.queuedForms ?? []).map((entry) => ({toolCallId: entry.toolCallId, runId: entry.runId})),
+          messages: ai.messages.map((message) => ({
+            id: message.id,
+            messageId: message.messageId ?? null,
+            role: message.role,
+            runId: message.runId ?? null,
+            streaming: message.streaming === true,
+            done: message.done === true,
+            stopped: message.stopped === true,
+            truncated: message.truncated === true,
+            timestampPresent: message.timestamp !== undefined && message.timestamp !== null && message.timestamp !== ''
+          }))
+        }
+        const operations = {
+          send: operation('[data-testid="send-btn"]'),
+          stop: operation('[data-testid="stop-btn"]'),
+          continueRound: operation('[data-testid="continue-round"]'),
+          newChat: operation('[data-testid="new-chat"]'),
+          feedback: operation('[data-testid^="feedback-up-"],[data-testid^="feedback-down-"]'),
+          edit: operation('[data-testid^="edit-msg-"]'),
+          copy: operation('[data-testid^="copy-msg-"]'),
+          gate: operation('[data-testid="gate-actions"] button'),
+          form: operation('[data-testid="gf-submit"],[data-testid="gf-cancel"],[data-testid="gf-queue-cancel"]'),
+          upload: operation('[data-testid="upload-handoff-choose"],[data-testid="upload-handoff-cancel"]'),
+          sheetWrite: operation('[data-testid="sheet-preview-apply"],[data-testid="sheet-preview-cancel"],[data-testid="sheet-preview-abandon"],[data-testid="sheet-preview-ack-box"]'),
+          previewLevel: operation('[data-testid^="sheet-preview-level-"]'),
+          previewPagination: operation('[data-testid="sheet-preview-full"] button'),
+          composer: operation('[data-testid="composer-input"]'),
+          waitingCount: [...document.querySelectorAll('[data-testid="park-waiting"]')].filter(visible).length,
+          workingCount: [...document.querySelectorAll('[data-testid="loading-breath"]')].filter(visible).length,
+          compactingCount: [...document.querySelectorAll('[data-testid="compaction-message"]')].filter(visible).length,
+          timestampCount: [...document.querySelectorAll('[data-testid="msg-timestamp"]')].filter(visible).length,
+          messages: ai.messages.map(messageDom)
+        }
+        const serialized = JSON.stringify({tools, cards, workspace: workspaceState, recovery, operations})
         if (serialized !== previousTools) {
           previousTools = serialized
-          state.samples.push({atMs: Date.now(), tools, cards, workspace: workspaceState})
+          state.sampleSequence += 1
+          state.samples.push({observerId: state.observerId, sequence: state.sampleSequence,
+            atMs: Date.now(), tools, cards, workspace: workspaceState, recovery, operations})
           if (state.samples.length > 2048) state.samples.splice(0, state.samples.length - 2048)
         }
       }
@@ -555,13 +1102,28 @@ class CdpPage {
     this.ws = null
     this.networkRequests = []
     this.historyRequests = []
+    this.contextRequests = []
+    this.runCurrentRequests = []
     this.cdpErrors = []
     this.evidenceLimitExceeded = false
     this.historySequence = 0
+    this.contextSequence = 0
+    this.runCurrentSequence = 0
     this.interceptionEnabled = false
     this.interceptionTransitions = []
     this.faultMode = 'off'
     this.historyFaultsRemaining = 0
+    this.contextFaultMode = 'off'
+    this.contextFaultsRemaining = 0
+    this.contextResponseDelayRemaining = 0
+    this.delayedContextResponses = []
+    this.historyResponseDelayRemaining = 0
+    this.delayedHistoryResponses = []
+    this.runCurrentResponseDelayRemaining = 0
+    this.delayedRunCurrentResponses = []
+    this.runCurrentFaultMode = 'off'
+    this.runCurrentFaultsRemaining = 0
+    this.chatRequestIdentities = []
     this.phase = 'initial'
   }
 
@@ -659,6 +1221,15 @@ class CdpPage {
       } else {
         this.networkRequests.push({requestId: params.requestId, method: params.request.method, path: url.pathname, phase: this.phase})
       }
+      if (url.pathname === '/api/ai/chat' && params.request.method === 'POST' && this.chatRequestIdentities.length < 64) {
+        try {
+          const body = JSON.parse(params.request.postData ?? 'null')
+          const clientRequestId = safeToken(body?.clientRequestId)
+          if (clientRequestId) this.chatRequestIdentities.push({clientRequestId, phase: this.phase})
+        } catch {
+          this.recordCdpError(new VerificationFailure('CHAT_CLIENT_REQUEST_ID_INVALID'), 'CHAT_CLIENT_REQUEST_ID_INVALID')
+        }
+      }
       if (url.pathname.startsWith('/api/ai/history/')) {
         if (this.historyRequests.length >= HISTORY_REQUEST_LIMIT) {
           this.evidenceLimitExceeded = true
@@ -679,6 +1250,46 @@ class CdpPage {
           errorName: null
         })
       }
+      if (url.pathname.startsWith('/api/ai/context/')) {
+        if (this.contextRequests.length >= HISTORY_REQUEST_LIMIT) {
+          this.evidenceLimitExceeded = true
+          this.recordCdpError(new VerificationFailure('CONTEXT_EVIDENCE_LIMIT_EXCEEDED'), 'CONTEXT_EVIDENCE_LIMIT_EXCEEDED')
+          return
+        }
+        this.contextSequence += 1
+        this.contextRequests.push({
+          sequence: this.contextSequence,
+          requestId: params.requestId,
+          phase: this.phase,
+          path: url.pathname,
+          action: 'OBSERVED',
+          interceptionEnabledAtRequest: this.interceptionEnabled,
+          injectedStatus: null,
+          responseStatus: null,
+          finished: false,
+          errorName: null
+        })
+      }
+      if (url.pathname === '/api/ai/runs/current') {
+        if (this.runCurrentRequests.length >= HISTORY_REQUEST_LIMIT) {
+          this.evidenceLimitExceeded = true
+          this.recordCdpError(new VerificationFailure('RUN_CURRENT_EVIDENCE_LIMIT_EXCEEDED'), 'RUN_CURRENT_EVIDENCE_LIMIT_EXCEEDED')
+          return
+        }
+        this.runCurrentSequence += 1
+        this.runCurrentRequests.push({
+          sequence: this.runCurrentSequence,
+          requestId: params.requestId,
+          phase: this.phase,
+          path: url.pathname,
+          action: 'OBSERVED',
+          interceptionEnabledAtRequest: this.interceptionEnabled,
+          injectedStatus: null,
+          responseStatus: null,
+          finished: false,
+          errorName: null
+        })
+      }
     } catch (error) {
       this.recordCdpError(error, 'NETWORK_REQUEST_EVIDENCE_FAILED')
     }
@@ -688,18 +1299,30 @@ class CdpPage {
     return this.historyRequests.find((record) => record.requestId === requestId) ?? null
   }
 
+  contextRecord(requestId) {
+    return this.contextRequests.find((record) => record.requestId === requestId) ?? null
+  }
+
+  runCurrentRecord(requestId) {
+    return this.runCurrentRequests.find((record) => record.requestId === requestId) ?? null
+  }
+
+  apiRecord(requestId) {
+    return this.historyRecord(requestId) ?? this.contextRecord(requestId) ?? this.runCurrentRecord(requestId)
+  }
+
   onResponseReceived(params) {
-    const record = this.historyRecord(params.requestId)
+    const record = this.apiRecord(params.requestId)
     if (record) record.responseStatus = params.response.status
   }
 
   onLoadingFinished(params) {
-    const record = this.historyRecord(params.requestId)
+    const record = this.apiRecord(params.requestId)
     if (record) record.finished = true
   }
 
   onLoadingFailed(params) {
-    const record = this.historyRecord(params.requestId)
+    const record = this.apiRecord(params.requestId)
     if (record) {
       record.finished = true
       record.errorName = safeToken(params.errorText, 'NETWORK_LOADING_FAILED')
@@ -804,11 +1427,64 @@ class CdpPage {
       const workspace = pinia?._s.get('workspace')
       if (!ai || !workspace) return null
       const visible = (element) => !!(element && (element.offsetParent !== null || element.getClientRects().length > 0))
+      const hashValue = (value) => {
+        const text = JSON.stringify(value ?? null)
+        let hash = 2166136261
+        for (let index = 0; index < text.length; index += 1) {
+          hash ^= text.charCodeAt(index)
+          hash = Math.imul(hash, 16777619)
+        }
+        return {algorithm: 'fnv1a32', value: (hash >>> 0).toString(16)}
+      }
       return {
         sessionId: ai.sessionId,
         activeRunId: ai.activeRunId,
         loading: ai.loading === true,
+        restoringRecovery: ai.restoringRecovery === true,
+        runPhase: ai.runPhase,
+        suspended: ai.suspended === true,
+        canSend: ai.canSend === true,
         historyLoaded: ai.historyLoaded === true,
+        stopped: ai.stopped === true,
+        clientRequestStopped: ai.clientRequestStopped === true,
+        historyProjection: {
+          total: ai.historyTotal,
+          offset: ai.historyOffset,
+          hasMore: ai.historyHasMore === true,
+          nextCursor: ai.historyNextCursor ?? null,
+          revision: ai.historyRevision ?? 0,
+          eventCount: (ai.historyEvents ?? []).length,
+          windowEntryCount: (ai.historyWindowEntries ?? []).length,
+          events: (ai.historyEvents ?? []).map((event) => ({
+            eventId: event.eventId ?? null,
+            runId: event.runId ?? null,
+            anchorToolCallId: event.anchorToolCallId ?? null,
+            atMs: event.atMs ?? null
+          })),
+          windowEntries: (ai.historyWindowEntries ?? []).map((entry) => ({
+            entryId: entry.entryId ?? null,
+            runId: entry.runId ?? null,
+            type: String(entry.type ?? entry.role ?? '').toUpperCase(),
+            textHash: hashValue(entry.text ?? entry.content ?? '')
+          }))
+        },
+        manualRecovery: ai.manualRecovery ? {scope: ai.manualRecovery.scope ?? null, reason: ai.manualRecovery.reason ?? null} : null,
+        contextUsage: ai.contextUsage ? {
+          usedTokens: ai.contextUsage.usedTokens,
+          limitTokens: ai.contextUsage.limitTokens,
+          percent: ai.contextUsage.percent,
+          level: ai.contextUsage.level,
+          est: ai.contextUsage.est === true,
+          circuit: ai.contextUsage.circuit
+        } : null,
+        activeForm: ai.activeForm ? {
+          toolCallId: ai.activeForm.toolCallId,
+          runId: ai.activeForm.runId,
+          status: ai.activeForm.status,
+          values: ai.activeForm.values ?? {},
+          fields: (ai.activeForm.form?.fields ?? []).map((field) => ({key: field.key, type: field.type}))
+        } : null,
+        queuedForms: (ai.queuedForms ?? []).map((entry) => ({toolCallId: entry.toolCallId, runId: entry.runId})),
         locale: document.documentElement.lang,
         messages: ai.messages.map((message) => ({
           id: message.id,
@@ -816,7 +1492,11 @@ class CdpPage {
           role: message.role,
           runId: message.runId ?? null,
           content: message.content ?? '',
+          streaming: message.streaming === true,
           done: message.done === true,
+          stopped: message.stopped === true,
+          truncated: message.truncated === true,
+          timestampPresent: message.timestamp !== undefined && message.timestamp !== null && message.timestamp !== '',
           parts: message.parts.map((part) => part.kind === 'tool' ? {
             kind: part.kind,
             entryId: part.entryId ?? null,
@@ -826,6 +1506,7 @@ class CdpPage {
             name: part.name,
             kind2: part.kind2 ?? null,
             status: part.status,
+            userTextCode: part.userTextCode ?? null,
             args: part.args ?? null,
             result: part.result ?? null,
             reason: part.reason ?? null,
@@ -862,7 +1543,11 @@ class CdpPage {
         recoverySurfaces: [...document.querySelectorAll(${JSON.stringify(recoverySurfaceSelector)})].filter(visible)
           .map((element) => ({testId: element.getAttribute('data-testid'), text: element.innerText})),
         recoveryRetries: [...document.querySelectorAll(${JSON.stringify(recoveryRetrySelector)})].filter(visible)
-          .map((element) => ({testId: element.getAttribute('data-testid'), text: element.innerText})),
+          .map((element) => ({
+            testId: element.getAttribute('data-testid'),
+            text: element.innerText,
+            disabled: element.disabled === true || element.getAttribute('aria-disabled') === 'true'
+          })),
         observation: window.__toolCardRecoveryVerification ?? null
       }
     })()`, 'SNAPSHOT_NOT_READY')
@@ -876,27 +1561,203 @@ class CdpPage {
     this.interceptionTransitions.push({phase: this.phase, enabled, proof})
   }
 
-  async setHistoryFault(mode) {
-    this.faultMode = mode
-    this.historyFaultsRemaining = mode === 'once' ? 1 : mode === 'always' ? -1 : 0
-    if (mode === 'off') {
+  async syncFaultInterception() {
+    const patterns = []
+    if (this.faultMode !== 'off') patterns.push({urlPattern: '*/api/ai/history/*', requestStage: 'Request'})
+    if (this.contextFaultMode !== 'off') patterns.push({urlPattern: '*/api/ai/context/*', requestStage: 'Request'})
+    if (this.runCurrentFaultMode !== 'off') patterns.push({urlPattern: '*/api/ai/runs/current*', requestStage: 'Request'})
+    if (this.contextResponseDelayRemaining > 0 || this.delayedContextResponses.length > 0) {
+      patterns.push({urlPattern: '*/api/ai/context/*', requestStage: 'Response'})
+    }
+    if (this.historyResponseDelayRemaining > 0 || this.delayedHistoryResponses.length > 0) {
+      patterns.push({urlPattern: '*/api/ai/history/*', requestStage: 'Response'})
+    }
+    if (this.runCurrentResponseDelayRemaining > 0 || this.delayedRunCurrentResponses.length > 0) {
+      patterns.push({urlPattern: '*/api/ai/runs/current*', requestStage: 'Response'})
+    }
+    if (patterns.length === 0) {
       await this.send('Fetch.disable')
       this.interceptionEnabled = false
       this.recordInterceptionTransition(false, 'FETCH_DISABLE_COMPLETED')
       return
     }
-    await this.send('Fetch.enable', {patterns: [{urlPattern: '*/api/ai/history/*', requestStage: 'Request'}]})
+    await this.send('Fetch.enable', {patterns})
     this.interceptionEnabled = true
     this.recordInterceptionTransition(true, 'FETCH_ENABLE_COMPLETED')
   }
 
-  async handlePaused(params) {
-    const record = this.historyRecord(params.networkId ?? params.requestId)
-    if (record) record.interceptionEnabledAtPause = this.interceptionEnabled
-    const shouldFault = this.faultMode === 'always' || (this.faultMode === 'once' && this.historyFaultsRemaining > 0)
+  async delayNextContextResponse() {
+    if (this.contextResponseDelayRemaining > 0 || this.delayedContextResponses.length > 0) {
+      throw new AssertionFailure('CONTEXT_RESPONSE_DELAY_ALREADY_ACTIVE')
+    }
+    this.contextResponseDelayRemaining = 1
     try {
+      await this.syncFaultInterception()
+    } catch {
+      this.contextResponseDelayRemaining = 0
+      throw new ScenarioNotRun('CONTEXT_RESPONSE_DELAY_UNSUPPORTED')
+    }
+  }
+
+  async waitForContextResponseHeld(phase) {
+    const deadline = Date.now() + this.config.timeoutMs
+    while (Date.now() < deadline) {
+      const held = this.contextRequests.find((record) => record.phase === phase && record.delayedResponse === true && !record.finished)
+      if (held) {
+        return {
+          phase,
+          sequence: held.sequence,
+          responseStatus: held.responseStatus,
+          action: held.action,
+          delayedResponse: true
+        }
+      }
+      await sleep(this.config.pollMs)
+    }
+    throw new ScenarioNotRun('CONTEXT_RESPONSE_DELAY_NOT_FORMED')
+  }
+
+  async releaseDelayedContextResponse() {
+    const held = this.delayedContextResponses.shift()
+    if (!held) throw new AssertionFailure('CONTEXT_DELAYED_RESPONSE_NOT_HELD')
+    await this.send('Fetch.continueRequest', {requestId: held.pauseId})
+    const record = this.contextRecord(held.requestId)
+    if (record) {
+      record.action = 'CONTINUE_UNCHANGED'
+      record.delayedResponseReleased = true
+    }
+    await this.syncFaultInterception()
+  }
+
+  async delayNextHistoryResponse() {
+    if (this.historyResponseDelayRemaining > 0 || this.delayedHistoryResponses.length > 0) {
+      throw new AssertionFailure('HISTORY_RESPONSE_DELAY_ALREADY_ACTIVE')
+    }
+    this.historyResponseDelayRemaining = 1
+    try {
+      await this.syncFaultInterception()
+    } catch {
+      this.historyResponseDelayRemaining = 0
+      throw new ScenarioNotRun('HISTORY_RESPONSE_DELAY_UNSUPPORTED')
+    }
+  }
+
+  async waitForHistoryResponseHeld(phase) {
+    const deadline = Date.now() + this.config.timeoutMs
+    while (Date.now() < deadline) {
+      const held = this.historyRequests.find((record) => record.phase === phase && record.delayedResponse === true && !record.finished)
+      if (held) return {phase, sequence: held.sequence, responseStatus: held.responseStatus, action: held.action, delayedResponse: true}
+      await sleep(this.config.pollMs)
+    }
+    throw new ScenarioNotRun('HISTORY_RESPONSE_DELAY_NOT_FORMED')
+  }
+
+  async releaseDelayedHistoryResponse() {
+    const held = this.delayedHistoryResponses.shift()
+    if (!held) throw new AssertionFailure('HISTORY_DELAYED_RESPONSE_NOT_HELD')
+    await this.send('Fetch.continueRequest', {requestId: held.pauseId})
+    const record = this.historyRecord(held.requestId)
+    if (record) {
+      record.action = 'CONTINUE_UNCHANGED'
+      record.delayedResponseReleased = true
+    }
+    await this.syncFaultInterception()
+  }
+
+  async delayNextRunCurrentResponse() {
+    if (this.runCurrentResponseDelayRemaining > 0 || this.delayedRunCurrentResponses.length > 0) {
+      throw new AssertionFailure('RUN_CURRENT_RESPONSE_DELAY_ALREADY_ACTIVE')
+    }
+    this.runCurrentResponseDelayRemaining = 1
+    try {
+      await this.syncFaultInterception()
+    } catch {
+      this.runCurrentResponseDelayRemaining = 0
+      throw new ScenarioNotRun('RUN_CURRENT_RESPONSE_DELAY_UNSUPPORTED')
+    }
+  }
+
+  async waitForRunCurrentResponseHeld(phase) {
+    const deadline = Date.now() + this.config.timeoutMs
+    while (Date.now() < deadline) {
+      const held = this.runCurrentRequests.find((record) => record.phase === phase && record.delayedResponse === true && !record.finished)
+      if (held) return {phase, sequence: held.sequence, responseStatus: held.responseStatus, action: held.action, delayedResponse: true}
+      await sleep(this.config.pollMs)
+    }
+    throw new ScenarioNotRun('RUN_CURRENT_RESPONSE_DELAY_NOT_FORMED')
+  }
+
+  async releaseDelayedRunCurrentResponse() {
+    const held = this.delayedRunCurrentResponses.shift()
+    if (!held) throw new AssertionFailure('RUN_CURRENT_DELAYED_RESPONSE_NOT_HELD')
+    await this.send('Fetch.continueRequest', {requestId: held.pauseId})
+    const record = this.runCurrentRecord(held.requestId)
+    if (record) {
+      record.action = 'CONTINUE_UNCHANGED'
+      record.delayedResponseReleased = true
+    }
+    await this.syncFaultInterception()
+  }
+
+  async setHistoryFault(mode) {
+    this.faultMode = mode
+    this.historyFaultsRemaining = mode === 'once' ? 1 : mode === 'always' ? -1 : 0
+    await this.syncFaultInterception()
+  }
+
+  async setContextFault(mode) {
+    this.contextFaultMode = mode
+    this.contextFaultsRemaining = mode === 'once' ? 1 : mode === 'always' ? -1 : 0
+    await this.syncFaultInterception()
+  }
+
+  async setRunCurrentFault(mode) {
+    this.runCurrentFaultMode = mode
+    this.runCurrentFaultsRemaining = mode === 'once' ? 1 : mode === 'always' ? -1 : 0
+    await this.syncFaultInterception()
+  }
+
+  async handlePaused(params) {
+    const requestId = params.networkId ?? params.requestId
+    const history = this.historyRecord(requestId)
+    const context = this.contextRecord(requestId)
+    const runCurrent = this.runCurrentRecord(requestId)
+    const record = history ?? context ?? runCurrent
+    if (record) record.interceptionEnabledAtPause = this.interceptionEnabled
+    const shouldFault = history
+      ? this.faultMode === 'always' || (this.faultMode === 'once' && this.historyFaultsRemaining > 0)
+      : runCurrent
+        ? this.runCurrentFaultMode === 'always' || (this.runCurrentFaultMode === 'once' && this.runCurrentFaultsRemaining > 0)
+        : this.contextFaultMode === 'always' || (this.contextFaultMode === 'once' && this.contextFaultsRemaining > 0)
+    try {
+      if (context && params.responseStatusCode !== undefined && this.contextResponseDelayRemaining > 0) {
+        this.contextResponseDelayRemaining -= 1
+        context.action = 'DELAYED_RESPONSE'
+        context.delayedResponse = true
+        context.responseStatus = params.responseStatusCode
+        this.delayedContextResponses.push({pauseId: params.requestId, requestId, phase: context.phase})
+        return
+      }
+      if (history && params.responseStatusCode !== undefined && this.historyResponseDelayRemaining > 0) {
+        this.historyResponseDelayRemaining -= 1
+        history.action = 'DELAYED_RESPONSE'
+        history.delayedResponse = true
+        history.responseStatus = params.responseStatusCode
+        this.delayedHistoryResponses.push({pauseId: params.requestId, requestId, phase: history.phase})
+        return
+      }
+      if (runCurrent && params.responseStatusCode !== undefined && this.runCurrentResponseDelayRemaining > 0) {
+        this.runCurrentResponseDelayRemaining -= 1
+        runCurrent.action = 'DELAYED_RESPONSE'
+        runCurrent.delayedResponse = true
+        runCurrent.responseStatus = params.responseStatusCode
+        this.delayedRunCurrentResponses.push({pauseId: params.requestId, requestId, phase: runCurrent.phase})
+        return
+      }
       if (shouldFault) {
-        if (this.historyFaultsRemaining > 0) this.historyFaultsRemaining -= 1
+        if (history && this.historyFaultsRemaining > 0) this.historyFaultsRemaining -= 1
+        if (context && this.contextFaultsRemaining > 0) this.contextFaultsRemaining -= 1
+        if (runCurrent && this.runCurrentFaultsRemaining > 0) this.runCurrentFaultsRemaining -= 1
         if (record) {
           record.action = 'HTTP_503'
           record.injectedStatus = 503
@@ -905,7 +1766,7 @@ class CdpPage {
           requestId: params.requestId,
           responseCode: 503,
           responseHeaders: [{name: 'Content-Type', value: 'application/json; charset=utf-8'}],
-          body: Buffer.from('{"code":"AI_HISTORY_UNAVAILABLE","data":null}').toString('base64')
+          body: Buffer.from(JSON.stringify({code: runCurrent ? 'AI_CURRENT_UNAVAILABLE' : context ? 'AI_CONTEXT_UNAVAILABLE' : 'AI_HISTORY_UNAVAILABLE', data: null})).toString('base64')
         })
       } else {
         if (record) record.action = 'CONTINUE_UNCHANGED'
@@ -913,28 +1774,42 @@ class CdpPage {
       }
     } catch (error) {
       if (record) record.errorName = safeErrorName(error)
-      this.recordCdpError(error, 'HISTORY_FAULT_INTERCEPTION_FAILED')
+      this.recordCdpError(error, context ? 'CONTEXT_FAULT_INTERCEPTION_FAILED' : 'HISTORY_FAULT_INTERCEPTION_FAILED')
     }
   }
 
-  historyPhase(phase) {
-    const records = this.historyRequests.filter((record) => record.phase === phase)
+  requestPhase(records, phase) {
+    const selected = records.filter((record) => record.phase === phase)
     const isSuccess = (record) => ['CONTINUE_UNCHANGED', 'OBSERVED'].includes(record.action)
       && record.responseStatus === 200 && record.finished && record.errorName === null
     return {
       phase,
-      count: records.length,
-      faultCount: records.filter((record) => record.injectedStatus === 503).length,
-      successCount: records.filter(isSuccess).length,
-      uninterceptedSuccessCount: records.filter((record) => isSuccess(record)
+      count: selected.length,
+      faultCount: selected.filter((record) => record.injectedStatus === 503).length,
+      successCount: selected.filter(isSuccess).length,
+      uninterceptedSuccessCount: selected.filter((record) => isSuccess(record)
         && record.action === 'OBSERVED' && record.interceptionEnabledAtRequest === false).length,
-      pendingCount: records.filter((record) => !record.finished).length,
-      statuses: [...new Set(records.map((record) => record.responseStatus))],
-      first503Sequence: records.find((record) => record.responseStatus === 503)?.sequence ?? null,
-      firstReal200Sequence: records.find(isSuccess)?.sequence ?? null,
+      pendingCount: selected.filter((record) => !record.finished).length,
+      delayedResponseCount: selected.filter((record) => record.delayedResponse === true).length,
+      delayedResponseReleasedCount: selected.filter((record) => record.delayedResponseReleased === true).length,
+      statuses: [...new Set(selected.map((record) => record.responseStatus))],
+      first503Sequence: selected.find((record) => record.responseStatus === 503)?.sequence ?? null,
+      firstReal200Sequence: selected.find(isSuccess)?.sequence ?? null,
       interceptionEnabled: this.interceptionEnabled,
-      records: records.slice(-EVIDENCE_TAIL_LIMIT)
+      records: selected.slice(-EVIDENCE_TAIL_LIMIT)
     }
+  }
+
+  historyPhase(phase) {
+    return this.requestPhase(this.historyRequests, phase)
+  }
+
+  contextPhase(phase) {
+    return this.requestPhase(this.contextRequests, phase)
+  }
+
+  runCurrentPhase(phase) {
+    return this.requestPhase(this.runCurrentRequests, phase)
   }
 
   interceptionEvidence() {
@@ -956,19 +1831,62 @@ class CdpPage {
     throw new AssertionFailure('HISTORY_NETWORK_TERMINAL_EVIDENCE_MISSING')
   }
 
+  async waitForContextPhase(phase, {exactFaultCount = null, minimumSuccessCount = 0, minimumFaultCount = 0, allowPending = false} = {}) {
+    const deadline = Date.now() + this.config.timeoutMs
+    let summary = this.contextPhase(phase)
+    while (Date.now() < deadline) {
+      summary = this.contextPhase(phase)
+      const faultReady = exactFaultCount === null ? summary.faultCount >= minimumFaultCount : summary.faultCount === exactFaultCount
+      if (summary.count > 0 && faultReady && summary.successCount >= minimumSuccessCount
+        && (allowPending || summary.pendingCount === 0)) return summary
+      await sleep(this.config.pollMs)
+    }
+    throw new AssertionFailure('CONTEXT_NETWORK_TERMINAL_EVIDENCE_MISSING')
+  }
+
+  async waitForRunCurrentPhase(phase, {exactFaultCount = null, minimumFaultCount = 0, minimumSuccessCount = 0, allowPending = false} = {}) {
+    const deadline = Date.now() + this.config.timeoutMs
+    let summary = this.runCurrentPhase(phase)
+    while (Date.now() < deadline) {
+      summary = this.runCurrentPhase(phase)
+      const faultReady = exactFaultCount === null ? summary.faultCount >= minimumFaultCount : summary.faultCount === exactFaultCount
+      if (summary.count > 0 && faultReady && summary.successCount >= minimumSuccessCount
+        && (allowPending || summary.pendingCount === 0)) return summary
+      await sleep(this.config.pollMs)
+    }
+    throw new AssertionFailure('RUN_CURRENT_NETWORK_TERMINAL_EVIDENCE_MISSING')
+  }
+
+  async waitForChatClientIdentity() {
+    const deadline = Date.now() + this.config.timeoutMs
+    while (Date.now() < deadline) {
+      const identity = this.chatRequestIdentities.at(-1)
+      if (identity) return identity
+      await sleep(this.config.pollMs)
+    }
+    throw new ScenarioNotRun('CHAT_CLIENT_REQUEST_ID_NOT_CAPTURED')
+  }
+
   requestCounts() {
     const count = (method, suffix) => this.networkRequests.filter((request) => request.method === method && request.path === suffix).length
+    const countPrefix = (method, prefix) => this.networkRequests.filter((request) => request.method === method && request.path.startsWith(prefix)).length
     return {
       chat: count('POST', '/api/ai/chat'),
       frontendToolResult: count('POST', '/api/ai/frontend-tool-result'),
-      confirm: count('POST', '/api/ai/confirm')
+      confirm: count('POST', '/api/ai/confirm'),
+      feedback: count('POST', '/api/ai/feedback'),
+      events: countPrefix('GET', '/api/ai/events/'),
+      resume: this.networkRequests.filter((request) => request.method === 'POST' && request.path.endsWith('/resume')).length
     }
   }
 
   async close() {
     const result = {status: 'COMPLETE', targetId: this.targetId, closeHttpStatus: null,
       targetAbsent: this.targetId === null, webSocketClosed: false, errors: []}
-    if (this.faultMode !== 'off') {
+    if (this.faultMode !== 'off' || this.contextFaultMode !== 'off' || this.runCurrentFaultMode !== 'off'
+      || this.contextResponseDelayRemaining > 0 || this.delayedContextResponses.length > 0
+      || this.historyResponseDelayRemaining > 0 || this.delayedHistoryResponses.length > 0
+      || this.runCurrentResponseDelayRemaining > 0 || this.delayedRunCurrentResponses.length > 0) {
       try {
         await this.send('Fetch.disable')
       } catch (error) {
@@ -1031,11 +1949,156 @@ function messageContentSignature(snapshot) {
       delete stablePart.entryId
       return part.kind === 'tool' ? {
         ...stablePart,
+        args: part.args === null ? null : textEvidence(part.args),
         result: part.result === null ? null : textEvidence(part.result),
-        reason: part.reason === null ? null : textEvidence(part.reason)
+        reason: part.reason === null ? null : textEvidence(part.reason),
+        submittedValues: part.submittedValues === null ? null : sha256(part.submittedValues)
       } : {...stablePart, text: textEvidence(part.text)}
     })
   }))
+}
+
+function observationEvidence(observation) {
+  return {
+    observerId: observation?.observerId ?? null,
+    sampleSequence: observation?.sampleSequence ?? null,
+    samples: (observation?.samples ?? []).map((sample) => ({
+      observerId: sample.observerId,
+      sequence: sample.sequence,
+      atMs: sample.atMs,
+      tools: sample.tools,
+      cards: sample.cards,
+      workspace: sample.workspace,
+      recovery: sample.recovery ?? null,
+      operations: sample.operations ?? null
+    })),
+    noticeSamples: (observation?.noticeSamples ?? []).map((sample) => ({
+      atMs: sample.atMs,
+      notices: sample.notices.map((notice) => ({testId: notice.testId, text: textEvidence(notice.text)}))
+    })),
+    copyCalls: (observation?.copyCalls ?? []).map((call) => ({atMs: call.atMs, mechanism: call.mechanism, text: textEvidence(call.text)})),
+    conditionEvents: (observation?.conditionEvents ?? []).map((event) => ({
+      sequence: event.sequence,
+      atMs: event.atMs,
+      type: event.type,
+      details: event.details
+    })),
+    conditionInstrumentation: observation?.conditionInstrumentation ?? null,
+    errors: observation?.errors ?? []
+  }
+}
+
+function snapshotEvidence(snapshot) {
+  return {
+    ...snapshot,
+    activeForm: snapshot.activeForm ? {...snapshot.activeForm, values: sha256(snapshot.activeForm.values)} : null,
+    messages: messageContentSignature(snapshot),
+    cards: snapshot.cards.map((card) => ({...card, text: textEvidence(card.text)})),
+    recoverySurfaces: snapshot.recoverySurfaces.map((surface) => ({testId: surface.testId, text: textEvidence(surface.text)})),
+    recoveryRetries: snapshot.recoveryRetries.map((retry) => ({testId: retry.testId, text: textEvidence(retry.text)})),
+    observation: observationEvidence(snapshot.observation)
+  }
+}
+
+async function recoveryView(browser) {
+  const snapshot = await browser.snapshot()
+  const operations = await browser.evaluate(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const visible = (element) => !!(element && element.getClientRects().length > 0
+      && getComputedStyle(element).display !== 'none' && getComputedStyle(element).visibility === 'visible')
+    const operation = (selector, root = document) => [...root.querySelectorAll(selector)].map((element) => ({
+      testId: element.getAttribute('data-testid'),
+      disabled: element.disabled === true || element.getAttribute('aria-disabled') === 'true',
+      visible: visible(element)
+    }))
+    const recoveryAnimationSemantics = (spans) => {
+      if (spans.length === 0) return {customClassDots: 0, animationName: null, duration: null, keyframesOpacity: false, keyframesTranslateY: false, valid: false}
+      let keyframeText = ''
+      for (const sheet of document.styleSheets) {
+        let rules
+        try { rules = sheet.cssRules } catch { continue }
+        for (const rule of rules) {
+          if (rule.type === 7 && rule.name === 'recovery-loading-pulse') keyframeText = rule.cssText
+        }
+      }
+      const keyframesOpacity = /opacity\s*:/.test(keyframeText)
+      const keyframesTranslateY = /translateY\(/.test(keyframeText)
+      const first = getComputedStyle(spans[0])
+      const customClassDots = spans.filter((element) => {
+        const style = getComputedStyle(element)
+        return element.classList.contains('recovery-loading-dot') && (element.textContent ?? '').trim() === ''
+          && style.animationName === 'recovery-loading-pulse' && style.animationDuration === '1s'
+      }).length
+      return {
+        customClassDots,
+        animationName: first.animationName,
+        duration: first.animationDuration,
+        keyframesOpacity,
+        keyframesTranslateY,
+        valid: customClassDots === 3 && keyframesOpacity && keyframesTranslateY
+      }
+    }
+    const messageDom = (message) => {
+      const row = document.querySelector('[data-msg-id="' + CSS.escape(message.id) + '"]')
+      const meta = row?.querySelector('[data-testid^="msg-ops-"]') ?? null
+      const empty = document.createElement('div')
+      const count = (selector) => meta ? [...meta.querySelectorAll(selector)].filter(visible).length : 0
+      const breath = meta?.querySelector('[data-testid="recovery-loading"]') ?? null
+      const breathVisible = visible(breath)
+      const pulseSpans = breathVisible && (breath.innerText ?? '').trim() === '' ? [...breath.querySelectorAll(':scope > span')] : []
+      const recoveryAnimation = recoveryAnimationSemantics(pulseSpans)
+      const working = meta?.querySelector('[data-testid="loading-breath"]') ?? null
+      const copy = operation('[data-testid^="copy-msg-"]', meta ?? empty)
+      return {
+        messageId: message.id,
+        metaPresent: meta !== null,
+        waitingCount: count('[data-testid="park-waiting"]'),
+        compactingCount: count('[data-testid="compaction-message"]'),
+        timestampCount: count('[data-testid="msg-timestamp"]'),
+        activityTextPresent: (breathVisible && (breath.innerText ?? '').trim().length > 0)
+          || (visible(working) && (working.innerText ?? '').trim().length > 0),
+        workingTextPresent: visible(working) && (working.innerText ?? '').trim().length > 0,
+        pulseDotTotal: pulseSpans.length,
+        recoveryAnimation,
+        terminalMarkers: meta ? [...meta.querySelectorAll('[data-testid]')].filter((element) => {
+          const id = element.getAttribute('data-testid') ?? ''
+          return /^msg-(stopped|interrupted|truncated|cancelled|failed)-/.test(id) && visible(element)
+        }).map((element) => element.getAttribute('data-testid')) : [],
+        copyHintCount: count('[data-testid^="copy-hint-"]'),
+        copySuccess: copy.some((entry) => entry.visible && entry.testId
+          && meta.querySelector('[data-testid="' + CSS.escape(entry.testId) + '"]')?.classList.contains('is-copied')),
+        actionGroupVisible: visible(meta?.querySelector(':scope > div')),
+        actions: {
+          copy,
+          feedback: operation('[data-testid^="feedback-up-"],[data-testid^="feedback-down-"]', meta ?? empty),
+          edit: operation('[data-testid^="edit-msg-"]', meta ?? empty),
+          continueRound: operation('[data-testid="continue-round"]', meta ?? empty)
+        }
+      }
+    }
+    return {
+      send: operation('[data-testid="send-btn"]'),
+      stop: operation('[data-testid="stop-btn"]'),
+      continueRound: operation('[data-testid="continue-round"]'),
+      newChat: operation('[data-testid="new-chat"]'),
+      feedback: operation('[data-testid^="feedback-up-"],[data-testid^="feedback-down-"]'),
+      edit: operation('[data-testid^="edit-msg-"]'),
+      copy: operation('[data-testid^="copy-msg-"]'),
+      gate: operation('[data-testid="gate-actions"] button'),
+      form: operation('[data-testid="gf-submit"],[data-testid="gf-cancel"],[data-testid="gf-queue-cancel"]'),
+      upload: operation('[data-testid="upload-handoff-choose"],[data-testid="upload-handoff-cancel"]'),
+      sheetWrite: operation('[data-testid="sheet-preview-apply"],[data-testid="sheet-preview-cancel"],[data-testid="sheet-preview-abandon"],[data-testid="sheet-preview-ack-box"]'),
+      previewLevel: operation('[data-testid^="sheet-preview-level-"]'),
+      previewPagination: operation('[data-testid="sheet-preview-full"] button'),
+      composer: operation('[data-testid="composer-input"]'),
+      waitingCount: [...document.querySelectorAll('[data-testid="park-waiting"]')].filter(visible).length,
+      workingCount: [...document.querySelectorAll('[data-testid="loading-breath"]')].filter(visible).length,
+      compactingCount: [...document.querySelectorAll('[data-testid="compaction-message"]')].filter(visible).length,
+      timestampCount: [...document.querySelectorAll('[data-testid="msg-timestamp"]')].filter(visible).length,
+      messages: ai.messages.map(messageDom)
+    }
+  })()`, false)
+  return {snapshot, operations}
 }
 
 function targetPart(snapshot, toolCallId) {
@@ -1135,10 +2198,14 @@ async function prepareFixture(context) {
 function promptFor(context) {
   const nonce = randomUUID()
   if (toolCases.has(context.config.scenario)) return `${toolCases.get(context.config.scenario).prompt} verification=${nonce}`
-  if (context.config.scenario === 'tool-skipped') {
+  if (['tool-skipped', 'recovery-hitl-gate'].includes(context.config.scenario)) {
     return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} multi-card=2 verification=${nonce}`
   }
+  if (context.config.scenario === 'ordinary-skipped') {
+    return `tool=create_task&args={"type":"EXPORT","defCodes":["__UNKNOWN_DEF__"],"conditions":{},"openWizard":false} multi-card=2 verification=${nonce}`
+  }
   if (context.config.scenario === 'form-mixed-copy') return `timeline-nonprefix verification=${nonce}`
+  if (context.config.scenario === 'recovery-stream-refresh') return `turn-text stall-frames=250 verification=${nonce}`
   return `turn-text verification=${nonce}`
 }
 
@@ -1304,10 +2371,9 @@ async function copyMessageAndAssert(context, phase, messageId, {requiredTitle = 
     mechanism: copy.mechanism,
     requiredTitle,
     forbiddenTitle,
-    requiredTexts,
-    expectedText,
-    text: copy.text,
-    sha256: sha256(copy.text)
+    requiredTexts: requiredTexts.map(textEvidence),
+    expectedText: expectedText === null ? null : textEvidence(expectedText),
+    text: textEvidence(copy.text)
   })
   return copy
 }
@@ -1315,11 +2381,7 @@ async function copyMessageAndAssert(context, phase, messageId, {requiredTitle = 
 async function savePhase(context, phase, snapshot, historyEvidence, business) {
   context.checks.require(`${phase}.observer-no-errors`, (snapshot.observation?.errors ?? []).length === 0,
     'page observation and clipboard hooks report no errors', snapshot.observation?.errors ?? [])
-  await context.evidence.json(`dom-${phase}.json`, {
-    ...snapshot,
-    messages: messageContentSignature(snapshot),
-    observation: snapshot.observation
-  })
+  await context.evidence.json(`dom-${phase}.json`, snapshotEvidence(snapshot))
   await context.evidence.json(`history-${phase}.json`, historyEvidence.status === 'AVAILABLE'
     ? {status: 'AVAILABLE', httpStatus: historyEvidence.httpStatus, ...historySummary(historyEvidence.data)}
     : {status: 'UNAVAILABLE', httpStatus: historyEvidence.httpStatus,
@@ -1408,6 +2470,24 @@ function assertBusinessForTool(context, phase, business, snapshot) {
         && fields.length === 1 && fields[0]?.fieldCode === 'code' && fields[0]?.operator === 'EQ' && fields[0]?.value === 'CNY'
         && (condition?.scopeKeys === undefined || (Array.isArray(condition.scopeKeys) && condition.scopeKeys.length === 0)),
       'target set_condition succeeds with only CURRENCY code EQ CNY in the live workspace', drafts)
+      const instrumentation = snapshot.observation?.conditionInstrumentation
+      checks.require(`${phase}.condition-probes-ready`, instrumentation?.workspaceWrapped === true && instrumentation?.restoreWrapped === true,
+        'workspace actions and restoreExportTaskState are both observed without changing production behavior', instrumentation)
+      const events = snapshot.observation?.conditionEvents ?? []
+      const setEvent = events.filter((event) => event.type === 'setQueryConditions' && event.details?.defCode === 'CURRENCY').at(-1)
+      checks.require(`${phase}.condition-set-event-exact`, setEvent?.details?.condition?.algorithm === 'fnv1a32'
+        && setEvent.details.condition.value === fnv1a32(condition),
+      'the observed setQueryConditions event carries exactly the successful CNY condition hash', {
+        expected: {algorithm: 'fnv1a32', value: fnv1a32(condition)},
+        actual: setEvent ?? null,
+        eventSequence: events.map((event) => ({sequence: event.sequence, type: event.type}))
+      })
+      checks.require(`${phase}.condition-event-probes-complete`, events.some((event) => event.type === 'enterPage')
+        && events.some((event) => event.type === 'restoreExportTaskState'),
+      'enterPage and restoreExportTaskState are present in the bounded ordered event log', events.map((event) => ({
+        sequence: event.sequence,
+        type: event.type
+      })))
     }
   }
 }
@@ -1533,34 +2613,41 @@ function skippedToolSummary(snapshot, toolCallId, locale) {
   return locale === 'zh-CN' ? '创建导出配置任务' : 'Create Export task'
 }
 
-async function assertSkippedPhase(context, phase, skippedToolCallId, approvedToolCallId) {
+async function assertSkippedPhase(context, phase, skippedToolCallId, otherToolCallId,
+  {expectedCode, expectedNewTasks, requireOtherVisible = null}) {
   const {browser, api, checks} = context
   const snapshot = await browser.snapshot()
   const historyEvidence = await api.history(snapshot.sessionId)
   const history = requiredHistory(historyEvidence)
   const business = await businessSnapshot(api, relevantTaskIds(context))
   context.sessionId = snapshot.sessionId
-  checks.require(`${phase}.skipped.store-present`, targetPart(snapshot, skippedToolCallId)?.part.status === 'skipped',
-    'ordinary skipped remains in store/history projection input', targetPart(snapshot, skippedToolCallId))
+  const skippedPart = targetPart(snapshot, skippedToolCallId)?.part
+  checks.require(`${phase}.skipped.store-present`, skippedPart?.status === 'skipped' && skippedPart.userTextCode === expectedCode,
+    `skipped remains in store with exact ${expectedCode}`, skippedPart)
   checks.require(`${phase}.skipped.dom-filtered`, targetCard(snapshot, skippedToolCallId).length === 0,
-    'zero visible cards for ordinary skipped toolCallId', targetCard(snapshot, skippedToolCallId))
-  checks.require(`${phase}.approved.single-visible-card`, targetCard(snapshot, approvedToolCallId).length === 1,
-    'exactly one visible approved create_task card', targetCard(snapshot, approvedToolCallId))
+    'zero visible cards for skipped toolCallId', targetCard(snapshot, skippedToolCallId))
+  const otherCards = targetCard(snapshot, otherToolCallId)
+  if (requireOtherVisible !== null) {
+    checks.require(`${phase}.other.visible-card-count`, otherCards.length === (requireOtherVisible ? 1 : 0),
+      requireOtherVisible ? 'exactly one visible create_task card' : 'no visible create_task card', otherCards)
+  }
   const occurrences = historyToolOccurrences(history, skippedToolCallId)
-  checks.require(`${phase}.skipped.history-preserved`, occurrences.states.length === 1 && occurrences.states[0] === 'SKIPPED',
-    ['SKIPPED'], occurrences)
+  checks.require(`${phase}.skipped.history-preserved`, occurrences.states.length === 1 && occurrences.states[0] === 'SKIPPED'
+    && occurrences.codes.length === 1 && occurrences.codes[0] === expectedCode,
+  {states: ['SKIPPED'], code: expectedCode}, occurrences)
   const newTasks = business.allTasks.filter((task) => !context.businessAfterFixture.allTasks.some((before) => before.id === task.id))
-  checks.require(`${phase}.business.exactly-one-new-task`, newTasks.length === 1 && newTasks[0].jobs.length === 0,
-    'one scenario-created task with zero jobs', newTasks)
-  context.createdTaskIds.add(newTasks[0].id)
+  checks.require(`${phase}.business.exact-new-task-count`, newTasks.length === expectedNewTasks
+    && newTasks.every((task) => task.jobs.length === 0),
+  `exactly ${expectedNewTasks} scenario-created task(s) with zero jobs`, newTasks)
+  for (const task of newTasks) context.createdTaskIds.add(task.id)
   business.relevantTasks = newTasks
   const skippedSummary = skippedToolSummary(snapshot, skippedToolCallId, context.config.locale)
   checks.require(`${phase}.skipped.copy-summary-known`, skippedSummary.trim() !== '',
-    'full toolSummary is generated from the skipped part name and args, never from the approved card', skippedSummary)
+    'full toolSummary is generated from the skipped part name and args, never from the other card', skippedSummary)
   const target = targetPart(snapshot, skippedToolCallId)
   const requiredTexts = assertMixedBodyInHistory(context, phase, target.message, history)
-  const requiredTitle = visibleToolSummary(snapshot, approvedToolCallId, context.config.locale)
-  const expectedText = [...requiredTexts, requiredTitle].filter((text) => text.trim() !== '').join('\n\n')
+  const requiredTitle = otherCards.length === 1 ? visibleToolSummary(snapshot, otherToolCallId, context.config.locale) : null
+  const expectedText = [...requiredTexts, ...(requiredTitle === null ? [] : [requiredTitle])].filter((text) => text.trim() !== '').join('\n\n')
   await copyMessageAndAssert(context, phase, target.message.id, {requiredTitle, forbiddenTitle: skippedSummary, requiredTexts, expectedText})
   await savePhase(context, phase, snapshot, historyEvidence, business)
   return {historySignature: canonicalJson(historySummary(history)), business}
@@ -1583,21 +2670,24 @@ async function runSkippedScenario(context) {
   const parts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.name === 'create_task')
   checks.require('live.two-create-task-parts', parts.length === 2, 'multi-card=2 yields exactly two create_task parts', parts)
   const skipped = parts.filter((part) => part.status === 'skipped' && part.decision === null && part.requiresAction === false)
-  checks.require('live.one-ordinary-skipped', skipped.length === 1,
-    'the second legal create_task becomes one ordinary skipped part after backend protocol settlement', parts)
+  checks.require('live.one-turn-limit-skipped', skipped.length === 1 && skipped[0].userTextCode === 'CREATE_TASK_TURN_LIMIT',
+    'the second create_task is skipped with the dedicated single-turn creation limit code', parts)
   context.toolCallId = skipped[0].toolCallId
   context.runId = snapshot.activeRunId
   const approved = parts.find((part) => part.status === 'succeeded')
   checks.require('skipped.one-approved-create', !!approved, 'one approved create_task', parts)
   const visibleApprovedCards = targetCard(snapshot, approved.toolCallId)
   checks.require('live.approved-card-visible', visibleApprovedCards.length === 1, 1, visibleApprovedCards)
-  const live = await assertSkippedPhase(context, 'live', context.toolCallId, approved.toolCallId)
+  const live = await assertSkippedPhase(context, 'live', context.toolCallId, approved.toolCallId,
+    {expectedCode: 'CREATE_TASK_TURN_LIMIT', expectedNewTasks: 1, requireOtherVisible: true})
   const requestBaseline = browser.requestCounts()
+  checks.require('live.single-create-confirm', requestBaseline.confirm === 1, 1, requestBaseline)
   const phases = [live]
   for (const phase of ['history', 'refresh-1', 'refresh-2']) {
     browser.setPhase(phase)
     await browser.reload()
-    phases.push(await assertSkippedPhase(context, phase, context.toolCallId, approved.toolCallId))
+    phases.push(await assertSkippedPhase(context, phase, context.toolCallId, approved.toolCallId,
+      {expectedCode: 'CREATE_TASK_TURN_LIMIT', expectedNewTasks: 1, requireOtherVisible: true}))
     checks.require(`${phase}.no-repeat-decision-or-side-effect`, canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
       requestBaseline, browser.requestCounts())
   }
@@ -1605,6 +2695,48 @@ async function runSkippedScenario(context) {
     phases[0].historySignature, phases.map((phase) => phase.historySignature))
   checks.require('refresh.skipped-business-stable', phases.every((phase) => phase.business.fingerprint === live.business.fingerprint),
     live.business.fingerprint, phases.map((phase) => phase.business.fingerprint))
+}
+
+async function runOrdinarySkippedScenario(context) {
+  const {browser, checks} = context
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('live')
+  await browser.sendPrompt(promptFor(context))
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const parts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool' && part.name === 'create_task')
+    const terminal = ['succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
+    return parts.length > 0 && parts.every((part) => terminal.includes(part.status) && part.requiresAction === false)
+  })()`, 'ORDINARY_SKIPPED_TERMINAL_NOT_REACHED')
+  const snapshot = await browser.snapshot()
+  const parts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.name === 'create_task')
+  if (parts.length !== 2) throw new ScenarioNotRun('ORDINARY_SKIPPED_TWO_CALLS_NOT_FORMED')
+  const first = parts[0]
+  const skipped = parts[1]
+  checks.require('live.first-create-failed', ['failed', 'rejected', 'blocked'].includes(first.status),
+    'the first create_task fails instead of being approved', first)
+  checks.require('live.second-create-ordinary-skipped', skipped.status === 'skipped'
+    && skipped.userTextCode === 'UPSTREAM_FAILED' && skipped.decision === null && skipped.requiresAction === false,
+  'the second create_task is an ordinary UPSTREAM_FAILED skip after the first failure', skipped)
+  context.toolCallId = skipped.toolCallId
+  context.runId = snapshot.activeRunId
+  const phases = [await assertSkippedPhase(context, 'live', skipped.toolCallId, first.toolCallId,
+    {expectedCode: 'UPSTREAM_FAILED', expectedNewTasks: 0, requireOtherVisible: null})]
+  const requestBaseline = browser.requestCounts()
+  checks.require('live.no-create-confirm', requestBaseline.confirm === 0, 0, requestBaseline)
+  checks.require('live.single-chat', requestBaseline.chat === 1, 1, requestBaseline)
+  for (const phase of ['history', 'refresh-1', 'refresh-2']) {
+    browser.setPhase(phase)
+    await browser.reload()
+    phases.push(await assertSkippedPhase(context, phase, skipped.toolCallId, first.toolCallId,
+      {expectedCode: 'UPSTREAM_FAILED', expectedNewTasks: 0, requireOtherVisible: null}))
+    checks.require(`${phase}.no-repeat-decision-or-side-effect`, canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
+      requestBaseline, browser.requestCounts())
+  }
+  checks.require('refresh.skipped-history-stable', phases.every((phase) => phase.historySignature === phases[0].historySignature),
+    phases[0].historySignature, phases.map((phase) => phase.historySignature))
+  checks.require('refresh.skipped-business-stable', phases.every((phase) => phase.business.fingerprint === phases[0].business.fingerprint),
+    phases[0].business.fingerprint, phases.map((phase) => phase.business.fingerprint))
 }
 
 const FORM_BODY_PARTS = ['甲段独立内容', '乙段不是甲段前缀', '丙段收尾且不同于前两段']
@@ -1719,6 +2851,202 @@ async function waitRecoveryMessageProjection(browser, expectedCount) {
   })()`, 'RECOVERY_MESSAGE_PROJECTION_NOT_READY')
 }
 
+function operationEvidence(operations, names) {
+  return Object.fromEntries(names.map((name) => [name, operations[name]])
+    .filter((entry) => entry[1] !== undefined && entry[1].length > 0))
+}
+
+function assertWriteOperationsDisabled(context, phase, operations) {
+  const names = ['send', 'stop', 'continueRound', 'newChat', 'edit', 'gate', 'form', 'upload', 'sheetWrite']
+  const actual = operationEvidence(operations, names)
+  const enabled = Object.entries(actual).flatMap(([name, entries]) => entries.filter((entry) => !entry.disabled)
+    .map((entry) => ({name, testId: entry.testId, visible: entry.visible})))
+  context.checks.require(`${phase}.write-operations-disabled`, enabled.length === 0,
+    'new-round and pending business writes are disabled without disabling terminal message copy/feedback', {actual, enabled})
+  context.checks.require(`${phase}.send-control-present`, operations.send.length + operations.stop.length > 0,
+    'a real send or stop control exists to prove the disabled state', {
+      send: operations.send,
+      stop: operations.stop
+    })
+  const levels = operations.previewLevel.filter((entry) => entry.visible)
+  context.checks.require(`${phase}.readonly-preview-level-unrestricted`, levels.every((entry) => !entry.disabled),
+    'read-only preview level controls are not disabled by recovery', levels)
+  const pages = operations.previewPagination.filter((entry) => entry.visible)
+  context.checks.require(`${phase}.readonly-preview-pagination-unrestricted`, pages.length === 0 || pages.some((entry) => !entry.disabled),
+    'multi-page read-only preview keeps pagination available during recovery', pages)
+}
+
+function messagePending(message) {
+  return message.parts.some((part) => part.kind === 'tool' && part.requiresAction === true)
+}
+
+function visibleEnabled(entries) {
+  return entries.filter((entry) => entry.visible && !entry.disabled)
+}
+
+function assertMessagePresentation(context, phase, view, mode) {
+  const domById = new Map(view.operations.messages.map((message) => [message.messageId, message]))
+  context.checks.require(`${phase}.message-dom-complete`, domById.size === view.snapshot.messages.length,
+    'every store message has exactly one DOM projection', {
+      store: view.snapshot.messages.map((message) => ({id: message.id, role: message.role})),
+      dom: view.operations.messages.map((message) => message.messageId)
+    })
+  for (const message of view.snapshot.messages) {
+    const dom = domById.get(message.id)
+    if (!dom) throw new AssertionFailure(`${phase}.message-dom-missing`)
+    const id = `${phase}.${message.id}`
+    const activity = dom.waitingCount + dom.compactingCount + dom.pulseDotTotal + (dom.activityTextPresent ? 1 : 0)
+    if (message.role === 'user') {
+      context.checks.require(`${id}.user-always-terminal`, message.done === true && !message.streaming
+        && dom.waitingCount === 0 && dom.compactingCount === 0 && dom.pulseDotTotal === 0 && !dom.activityTextPresent,
+      'user messages never acquire assistant activity state', {message: {done: message.done, streaming: message.streaming}, dom})
+      context.checks.require(`${id}.user-terminal-copy`, dom.timestampCount === 1 && visibleEnabled(dom.actions.copy).length === 1,
+        'terminal user timestamp and copy remain available', dom)
+      continue
+    }
+    const pending = messagePending(message)
+    if (!message.done || pending) {
+      const expectedActivity = mode === 'recovering' ? 'three-dot-pulse' : mode === 'pending' ? 'waiting' : 'none'
+      const pulseValid = mode === 'recovering' && dom.pulseDotTotal === 3 && dom.recoveryAnimation.valid && !dom.activityTextPresent
+      const waitingValid = mode === 'pending' && dom.waitingCount === 1
+      context.checks.require(`${id}.nonterminal-activity-exclusive`, (pulseValid || waitingValid)
+        && dom.compactingCount === 0 && dom.timestampCount === 0 && dom.terminalMarkers.length === 0
+        && dom.copyHintCount === 0 && !dom.copySuccess,
+      expectedActivity,
+      {mode, pending, done: message.done, activity, dom})
+      const actions = [...dom.actions.copy, ...dom.actions.feedback, ...dom.actions.edit, ...dom.actions.continueRound]
+      context.checks.require(`${id}.nonterminal-message-actions-hidden`, !dom.actionGroupVisible
+        && actions.every((entry) => !entry.visible),
+      'the entire message action group is hidden; no copy or feedback click is attempted', {actionGroupVisible: dom.actionGroupVisible, actions})
+      continue
+    }
+    context.checks.require(`${id}.terminal-no-activity`, dom.waitingCount === 0 && dom.compactingCount === 0
+      && dom.pulseDotTotal === 0 && !dom.activityTextPresent,
+    'terminal assistant has no working/waiting/compacting indicator', dom)
+    context.checks.require(`${id}.terminal-actions-normal`, dom.timestampCount === 1 && dom.actionGroupVisible
+      && visibleEnabled(dom.actions.copy).length === 1 && visibleEnabled(dom.actions.feedback).length === 2,
+    'terminal assistant timestamp, copy and both feedback actions remain enabled during unrelated recovery', dom)
+  }
+}
+
+async function assertDraftAndTerminalCopy(context, phase, view) {
+  const {browser, checks} = context
+  const before = browser.requestCounts()
+  const terminal = view.snapshot.messages.find((message) => message.role === 'assistant' && message.done && !messagePending(message))
+  if (terminal) await copyMessageAndAssert(context, `${phase}-terminal`, terminal.id)
+  const draft = `draft-${randomUUID()}`
+  await browser.evaluate(`document.querySelector('[data-testid="composer-input"]').focus()`, false)
+  await browser.send('Input.insertText', {text: draft})
+  const composer = await browser.evaluate(`(() => {
+    const input = document.querySelector('[data-testid="composer-input"]')
+    return {length: input.value.length, disabled: input.disabled === true}
+  })()`, false)
+  checks.require(`${phase}.composer-remains-editable`, composer.length > 0 && composer.disabled === false,
+    'draft text can be edited while new-round actions remain disabled', composer)
+  checks.require(`${phase}.no-send-side-effect`, browser.requestCounts().chat === before.chat,
+    before.chat, browser.requestCounts())
+}
+
+async function saveRecoveryPhase(context, phase, view, historyEvidence, business) {
+  await context.evidence.json(`operations-${phase}.json`, view.operations)
+  await savePhase(context, phase, view.snapshot, historyEvidence, business)
+}
+
+async function assertRestoringGate(context, phase, historyEvidence, business) {
+  const {browser, checks} = context
+  await browser.waitFor(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').restoringRecovery === true`,
+    'RESTORING_RECOVERY_NOT_ACTIVE')
+  const view = await recoveryView(browser)
+  checks.require(`${phase}.store-recovering`, view.snapshot.restoringRecovery && view.snapshot.runPhase === 'recovering',
+    'Pinia is in restoringRecovery/recovering', {
+      restoringRecovery: view.snapshot.restoringRecovery,
+      runPhase: view.snapshot.runPhase
+    })
+  const nonterminal = view.snapshot.messages.filter((message) => message.role === 'assistant' && (!message.done || messagePending(message)))
+  checks.require(`${phase}.nonterminal-assistant-present`, nonterminal.length > 0,
+    'at least one genuinely nonterminal or pending assistant is restored', nonterminal.map((message) => ({id: message.id, done: message.done})))
+  checks.require(`${phase}.no-waiting-or-compacting-during-recovery`, view.operations.waitingCount === 0
+    && view.operations.compactingCount === 0,
+  'recovery uses only per-message three-dot pulses, never working/waiting/compacting text', view.operations)
+  checks.require(`${phase}.no-manual-failure-yet`, view.snapshot.manualRecovery === null,
+    'automatic recovery has not published a manual failure', view.snapshot.manualRecovery)
+  assertMessagePresentation(context, phase, view, 'recovering')
+  assertWriteOperationsDisabled(context, phase, view.operations)
+  await assertDraftAndTerminalCopy(context, phase, view)
+  await saveRecoveryPhase(context, phase, view, historyEvidence, business)
+}
+
+async function assertManualRecoveryGate(context, phase, historyEvidence, business) {
+  const {checks} = context
+  const view = await recoveryView(context.browser)
+  checks.require(`${phase}.manual-recovery-real-failure`, view.snapshot.restoringRecovery === false
+    && view.snapshot.manualRecovery !== null && view.snapshot.recoveryRetries.length === 1,
+  'manualRecovery exposes the real failure and exactly one retry', {
+    restoringRecovery: view.snapshot.restoringRecovery,
+    manualRecovery: view.snapshot.manualRecovery,
+    retries: view.snapshot.recoveryRetries
+  })
+  checks.require(`${phase}.manual-retry-enabled`, view.snapshot.recoveryRetries.every((retry) => !retry.disabled),
+    'manual recovery retry is enabled', view.snapshot.recoveryRetries)
+  assertMessagePresentation(context, phase, view, 'terminal')
+  assertWriteOperationsDisabled(context, phase, view.operations)
+  await assertDraftAndTerminalCopy(context, phase, view)
+  await saveRecoveryPhase(context, phase, view, historyEvidence, business)
+}
+
+async function assertPendingRecoveryComplete(context, phase, historyEvidence, business) {
+  const {checks} = context
+  await context.browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const pending = ai.messages.some((message) => message.parts.some((part) => part.kind === 'tool' && part.requiresAction === true))
+    const controls = [...document.querySelectorAll('[data-testid="gate-actions"] button,[data-testid="gf-submit"],[data-testid="gf-cancel"],[data-testid="gf-queue-cancel"],[data-testid="upload-handoff-choose"],[data-testid="upload-handoff-cancel"]')]
+    return ai.restoringRecovery === false && ai.manualRecovery === null && pending && controls.length > 0
+      && controls.every((element) => !element.disabled && element.getAttribute('aria-disabled') !== 'true')
+  })()`, 'PENDING_ACTIONS_NOT_READY_AFTER_RECOVERY')
+  const view = await recoveryView(context.browser)
+  checks.require(`${phase}.recovery-complete`, view.snapshot.restoringRecovery === false && view.snapshot.manualRecovery === null,
+    'recovery completed without a manual failure', {
+      restoringRecovery: view.snapshot.restoringRecovery,
+      manualRecovery: view.snapshot.manualRecovery
+    })
+  const pending = view.snapshot.messages.filter((message) => message.role === 'assistant' && messagePending(message))
+  checks.require(`${phase}.pending-message-present`, pending.length > 0,
+    'the actual pending HITL/form host is still pending after recovery', pending.map((message) => message.id))
+  const pendingControls = [...view.operations.gate, ...view.operations.form, ...view.operations.upload]
+  checks.require(`${phase}.pending-actions-enabled`, pendingControls.length > 0
+    && pendingControls.every((entry) => !entry.disabled),
+  'the actual pending HITL/form/upload actions are enabled after recovery', pendingControls)
+  assertMessagePresentation(context, phase, view, 'pending')
+  await assertDraftAndTerminalCopy(context, phase, view)
+  await saveRecoveryPhase(context, phase, view, historyEvidence, business)
+}
+
+async function assertTerminalRecoveryComplete(context, phase, historyEvidence, business) {
+  const {checks} = context
+  const view = await recoveryView(context.browser)
+  checks.require(`${phase}.terminal-real-state`, view.snapshot.restoringRecovery === false
+    && view.snapshot.manualRecovery === null && view.snapshot.loading === false
+    && view.snapshot.messages.filter((message) => message.role === 'assistant').every((message) => message.done && !messagePending(message)),
+  'all assistant messages are really terminal after recovery', {
+    restoringRecovery: view.snapshot.restoringRecovery,
+    manualRecovery: view.snapshot.manualRecovery,
+    loading: view.snapshot.loading,
+    messages: view.snapshot.messages.map((message) => ({role: message.role, done: message.done}))
+  })
+  checks.require(`${phase}.terminal-timestamp-no-activity`, view.operations.timestampCount > 0
+    && view.operations.waitingCount === 0 && view.operations.workingCount === 0 && view.operations.compactingCount === 0,
+  'terminal timestamps are visible with no working/waiting/compacting indicator', view.operations)
+  checks.require(`${phase}.send-reopened-by-real-state`, view.snapshot.canSend === true
+    && view.operations.send.length === 1 && view.operations.send[0].disabled === false,
+  'send is enabled only after the real terminal state', {
+    canSend: view.snapshot.canSend,
+    send: view.operations.send
+  })
+  assertMessagePresentation(context, phase, view, 'terminal')
+  await assertDraftAndTerminalCopy(context, phase, view)
+  await saveRecoveryPhase(context, phase, view, historyEvidence, business)
+}
+
 function assertNoRecoveryNotices(context, phase, snapshot) {
   const observed = snapshot.observation?.noticeSamples?.flatMap((sample) => sample.notices) ?? []
   context.checks.require(`${phase}.automatic-recovery-no-extra-notice`, snapshot.recoverySurfaces.length === 0 && observed.length === 0,
@@ -1776,6 +3104,1181 @@ async function assertFinalRecoveryFailure(context, phase, initialSignature, init
   return snapshot
 }
 
+async function recoveryPhaseEvidence(context) {
+  const snapshot = await context.browser.snapshot()
+  const historyEvidence = await context.api.history(snapshot.sessionId)
+  const business = await businessSnapshot(context.api, relevantTaskIds(context))
+  context.sessionId = snapshot.sessionId
+  context.runId ??= snapshot.activeRunId
+  return {historyEvidence, business}
+}
+
+function recoveryFactsSignature(snapshot) {
+  return canonicalJson({
+    messages: messageContentSignature(snapshot),
+    activeForm: snapshot.activeForm ? {
+      toolCallId: snapshot.activeForm.toolCallId,
+      runId: snapshot.activeForm.runId,
+      status: snapshot.activeForm.status,
+      values: sha256(snapshot.activeForm.values)
+    } : null,
+    queuedForms: snapshot.queuedForms,
+    cards: snapshot.cards.map((card) => ({testId: card.testId, bodyTestId: card.bodyTestId, state: card.state}))
+  })
+}
+
+async function mirrorState(browser, sessionId) {
+  return await browser.evaluate(`(() => {
+    const entries = []
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index)
+      if (!key || !key.startsWith('ai-mirror:') || !(key === 'ai-mirror:${sessionId}' || key.endsWith(':${sessionId}'))) continue
+      try {
+        const value = JSON.parse(sessionStorage.getItem(key) ?? 'null')
+        entries.push({
+          inFlight: value?.inFlight === true,
+          lastRunId: value?.lastRunId ?? null,
+          messageCount: Array.isArray(value?.messages) ? value.messages.length : null
+        })
+      } catch {
+        entries.push({inFlight: null, lastRunId: null, messageCount: null})
+      }
+    }
+    return {sessionId: document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').sessionId, entries}
+  })()`, false)
+}
+
+async function removeCurrentMirror(context) {
+  const sessionId = context.sessionId
+  const before = await mirrorState(context.browser, sessionId)
+  const removed = await context.browser.evaluate(`(() => {
+    const keys = []
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index)
+      if (key && key.startsWith('ai-mirror:') && (key === 'ai-mirror:${sessionId}' || key.endsWith(':${sessionId}'))) keys.push(key)
+    }
+    for (const key of keys) sessionStorage.removeItem(key)
+    return keys.length
+  })()`, false)
+  const after = await mirrorState(context.browser, sessionId)
+  context.checks.require('mirror.removed-without-changing-session', removed > 0 && after.entries.length === 0 && after.sessionId === sessionId,
+    'only the current session mirror is removed; identity is preserved', {before, removed, after})
+  return {before, removed, after}
+}
+
+function pendingHistoryCoverage(history, toolCallIds) {
+  const assistants = history.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
+  const states = assistants.flatMap((message) => Object.entries(message.toolCallStates ?? {})
+    .filter(([id]) => toolCallIds.includes(id)).map(([id, state]) => ({id, status: state?.status ?? null, code: state?.code ?? null})))
+  const running = states.some((state) => state.status === 'RUNNING') || assistants.some((message) =>
+    (message.segments ?? []).some((segment) => toolCallIds.includes(segment?.toolCallId) && segment?.status === 'running'))
+  return {
+    messageCount: history.messages.length,
+    emptyHistory: history.messages.length === 0,
+    missingSegments: assistants.length > 0 && assistants.some((message) => !Array.isArray(message.segments)),
+    missingToolCallStates: assistants.length > 0 && assistants.some((message) => !isRecord(message.toolCallStates)),
+    oldRunning: running,
+    states,
+    assistantText: assistants.map((message) => textEvidence(message.text ?? message.content ?? ''))
+  }
+}
+
+function requirePendingFixture(config, coverage) {
+  const expected = config.pendingFixture
+  const valid = new Set(['standard', 'missing-segments', 'missing-states', 'empty-history', 'old-running'])
+  if (!valid.has(expected)) throw new Error(`PENDING_FIXTURE must select exactly one of ${[...valid].join(', ')}`)
+  const formed = expected === 'standard'
+    || (expected === 'missing-segments' && coverage.missingSegments)
+    || (expected === 'missing-states' && coverage.missingToolCallStates)
+    || (expected === 'empty-history' && coverage.emptyHistory)
+    || (expected === 'old-running' && coverage.oldRunning)
+  if (!formed) throw new ScenarioNotRun(`PENDING_${expected.replaceAll('-', '_').toUpperCase()}_NOT_FORMED`)
+}
+
+async function assertPendingTrajectory(context, phase, toolCallIds, {requireDecision = false} = {}) {
+  const samples = context.latestSnapshot?.observation?.samples ?? []
+  const violations = []
+  const legalTransitions = []
+  const presenceTransitions = []
+  context.pendingPresenceTracks ??= new Map()
+  for (const toolCallId of toolCallIds) {
+    const track = context.pendingPresenceTracks.get(toolCallId) ?? {
+      observerId: null,
+      lastSequence: 0,
+      previousPart: null,
+      previousPartPresent: null,
+      previousDomPresent: null,
+      partSeen: false,
+      domSeen: false
+    }
+    for (const sample of samples) {
+      if (typeof sample.observerId !== 'string' || !Number.isSafeInteger(sample.sequence) || sample.sequence <= 0) {
+        throw new AssertionFailure('OBSERVER_SEQUENCE_MISSING')
+      }
+      if (track.observerId === sample.observerId && sample.sequence <= track.lastSequence) continue
+      const part = sample.tools.find((candidate) => candidate.toolCallId === toolCallId) ?? null
+      const partPresent = part !== null
+      const domPresent = sample.cards.some((card) => card.testId === `tool-card-${toolCallId}` || card.testId === `pending-card-${toolCallId}`)
+      track.partSeen ||= partPresent
+      track.domSeen ||= domPresent
+      if (track.previousPartPresent === false && partPresent) {
+        violations.push({atMs: sample.atMs, toolCallId, code: 'STORE_PART_ONE_ZERO_ONE'})
+      }
+      if (track.previousDomPresent === false && domPresent) {
+        violations.push({atMs: sample.atMs, toolCallId, code: 'DOM_ONE_ZERO_ONE'})
+      }
+      presenceTransitions.push({
+        observerId: sample.observerId,
+        sequence: sample.sequence,
+        atMs: sample.atMs,
+        toolCallId,
+        partPresent,
+        domPresent,
+        requiresAction: part?.requiresAction ?? null,
+        status: part?.status ?? null
+      })
+      if (part) {
+        if (part.requiresAction && part.status === 'running') {
+          violations.push({atMs: sample.atMs, toolCallId, code: 'PENDING_RUNNING'})
+        }
+        if (track.previousPart?.requiresAction === false && part.requiresAction) {
+          const decided = track.previousPart.decision !== null
+            || ['succeeded', 'rejected', 'cancelled', 'submitted', 'skipped', 'failed', 'expired', 'blocked', 'unknown'].includes(track.previousPart.status)
+          if (decided) violations.push({atMs: sample.atMs, toolCallId, code: 'REQUIRES_ACTION_RESURRECTED'})
+          else legalTransitions.push({atMs: sample.atMs, toolCallId, kind: 'INCOMPLETE_TO_PENDING', status: part.status, decision: part.decision})
+        }
+        if (track.previousPart?.requiresAction === true && !part.requiresAction) {
+          legalTransitions.push({atMs: sample.atMs, toolCallId, kind: 'DECIDED', status: part.status, decision: part.decision})
+        }
+        const message = sample.recovery?.messages?.find((candidate) => candidate.id === part.messageId)
+        const dom = sample.operations?.messages?.find((candidate) => candidate.messageId === part.messageId)
+        if (part.requiresAction && message && dom?.workingTextPresent) {
+          violations.push({atMs: sample.atMs, toolCallId, code: 'WORKING_INSERTED_WHILE_PENDING'})
+        }
+      }
+      track.observerId = sample.observerId
+      track.lastSequence = sample.sequence
+      track.previousPart = part
+      track.previousPartPresent = partPresent
+      track.previousDomPresent = domPresent
+    }
+    if (!track.partSeen) violations.push({toolCallId, code: 'STORE_PART_NEVER_FORMED'})
+    if (!track.domSeen) violations.push({toolCallId, code: 'DOM_NEVER_FORMED'})
+    context.pendingPresenceTracks.set(toolCallId, track)
+  }
+  const evidence = {toolCallIds, violations, legalTransitions, presenceTransitions: presenceTransitions.slice(-128)}
+  await context.evidence.json(`pending-trajectory-${phase}.json`, evidence)
+  context.checks.require(`${phase}.pending-trajectory-stable`, violations.length === 0,
+    'no store part/DOM 1→0→1, pending running, requiresAction resurrection or inserted working state', violations)
+  if (requireDecision) {
+    context.checks.require(`${phase}.legal-requires-action-false-transition`, legalTransitions.some((entry) => entry.kind === 'DECIDED'),
+      'a real reject/cancel transition is distinguished from later stable history', legalTransitions)
+  }
+  return evidence
+}
+
+function assertRecoveryDotsThenWorking(context, phase, messageId) {
+  const samples = context.latestSnapshot?.observation?.samples ?? []
+  const recovering = samples.find((sample) => sample.recovery?.restoringRecovery
+    && sample.operations?.messages?.find((message) => message.messageId === messageId)?.recoveryAnimation?.valid)
+  const working = samples.find((sample) => !sample.recovery?.restoringRecovery && sample.recovery?.loading
+    && sample.operations?.messages?.find((message) => message.messageId === messageId)?.workingTextPresent)
+  context.checks.require(`${phase}.recovery-dots-then-real-working`, recovering && working && working.atMs > recovering.atMs,
+    'custom recovery dots finish before the real streaming working indicator', {
+      recoveringAtMs: recovering?.atMs ?? null,
+      workingAtMs: working?.atMs ?? null
+    })
+}
+
+async function triggerPublicRunCurrentRead(browser, sessionId) {
+  await browser.evaluate(`(async () => {
+    const {aiApi} = await import('/src/api/ai.ts')
+    void aiApi.runsCurrent('${sessionId}')
+    return true
+  })()`, true)
+}
+
+async function runHitlRecoveryGate(context) {
+  const {browser, checks} = context
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial')
+  await browser.sendPrompt(promptFor(context))
+  await approveCreateTasks(context)
+  await driveSkippedHostContinuation(context)
+  const initial = await browser.snapshot()
+  const startPending = initial.messages.flatMap((message) => message.parts).some((part) => part.kind === 'tool'
+    && part.name === 'start_export' && part.status === 'pending' && part.requiresAction === true)
+  if (!startPending) throw new ScenarioNotRun('START_EXPORT_PENDING_NOT_FORMED')
+  context.sessionId = initial.sessionId
+  context.runId = initial.activeRunId
+  const afterHost = await businessSnapshot(context.api, relevantTaskIds(context))
+  for (const task of afterHost.allTasks) {
+    if (!context.businessAfterFixture.allTasks.some((before) => before.id === task.id)) context.createdTaskIds.add(task.id)
+  }
+  const initialHistory = await context.api.history(initial.sessionId)
+  const initialSignature = canonicalJson(messageContentSignature(initial))
+  await savePhase(context, 'initial', initial, initialHistory, afterHost)
+  const requestBaseline = browser.requestCounts()
+
+  browser.setPhase('restore-gate')
+  await browser.setHistoryFault('always')
+  await browser.reload({waitForHistory: false})
+  const restoring = await recoveryPhaseEvidence(context)
+  await assertRestoringGate(context, 'restore-gate', restoring.historyEvidence, restoring.business)
+  await browser.setHistoryFault('off')
+  const network = await browser.waitForHistoryPhase('restore-gate', {minimumFaultCount: 1, minimumSuccessCount: 1})
+  await context.evidence.json('history-network-restore-gate.json', network)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false && ai.manualRecovery === null
+  })()`, 'HITL_RECOVERY_NOT_COMPLETED')
+  const recovered = await recoveryPhaseEvidence(context)
+  await assertPendingRecoveryComplete(context, 'recovered-pending', recovered.historyEvidence, recovered.business)
+  checks.require('recovered-pending.decided-receipts-unchanged', canonicalJson(messageContentSignature(await browser.snapshot())) === initialSignature,
+    initialSignature, canonicalJson(messageContentSignature(await browser.snapshot())))
+
+  browser.setPhase('refresh-1')
+  await browser.reload()
+  const refreshed = await recoveryPhaseEvidence(context)
+  await assertPendingRecoveryComplete(context, 'refresh-1', refreshed.historyEvidence, refreshed.business)
+  checks.require('refresh-1.decided-receipts-unchanged', canonicalJson(messageContentSignature(await browser.snapshot())) === initialSignature,
+    initialSignature, canonicalJson(messageContentSignature(await browser.snapshot())))
+  checks.require('refresh.no-repeat-side-effect-requests', canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
+    requestBaseline, browser.requestCounts())
+  checks.require('refresh.business-stable', refreshed.business.fingerprint === afterHost.fingerprint,
+    afterHost.fingerprint, refreshed.business.fingerprint)
+}
+
+async function runStreamRecoveryRefresh(context) {
+  const {browser, checks} = context
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial')
+  await browser.sendPrompt(promptFor(context))
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === true && ai.messages.some((message) => message.role === 'assistant' && message.streaming === true)
+  })()`, 'STREAMING_REFRESH_WINDOW_NOT_FORMED')
+  const initial = await browser.snapshot()
+  context.sessionId = initial.sessionId
+  context.runId = initial.activeRunId
+  const initialHistory = await context.api.history(initial.sessionId)
+  await savePhase(context, 'initial-streaming', initial, initialHistory, context.businessAfterFixture)
+  const requestBaseline = browser.requestCounts()
+
+  browser.setPhase('restore-stream')
+  await browser.setHistoryFault('always')
+  await browser.reload({waitForHistory: false})
+  const restoring = await recoveryPhaseEvidence(context)
+  await assertRestoringGate(context, 'restore-stream', restoring.historyEvidence, restoring.business)
+  await browser.setHistoryFault('off')
+  const network = await browser.waitForHistoryPhase('restore-stream', {minimumFaultCount: 1, minimumSuccessCount: 1})
+  await context.evidence.json('history-network-restore-stream.json', network)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false && ai.loading === false
+      && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done === true)
+  })()`, 'STREAM_RECOVERY_TERMINAL_NOT_REACHED')
+  const recovered = await recoveryPhaseEvidence(context)
+  await assertTerminalRecoveryComplete(context, 'recovered-terminal', recovered.historyEvidence, recovered.business)
+
+  browser.setPhase('refresh-1')
+  await browser.reload()
+  const refreshed = await recoveryPhaseEvidence(context)
+  await assertTerminalRecoveryComplete(context, 'refresh-1', refreshed.historyEvidence, refreshed.business)
+  checks.require('refresh.no-repeat-side-effect-requests', canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
+    requestBaseline, browser.requestCounts())
+  checks.require('refresh.business-stable', refreshed.business.fingerprint === context.businessAfterFixture.fingerprint,
+    context.businessAfterFixture.fingerprint, refreshed.business.fingerprint)
+}
+
+async function exerciseTerminalFeedback(context, phase, messageId) {
+  const {browser, checks} = context
+  const before = browser.requestCounts().feedback
+  await browser.click(`[data-testid="feedback-up-${messageId}"]`)
+  await browser.waitFor(`document.querySelector('[data-testid="feedback-up-${messageId}"]')?.getAttribute('aria-pressed') === 'true'`,
+    'TERMINAL_FEEDBACK_UP_NOT_ACCEPTED')
+  await browser.click(`[data-testid="feedback-down-${messageId}"]`)
+  await browser.waitFor(`document.querySelector('[data-testid="feedback-down-${messageId}"]')?.getAttribute('aria-pressed') === 'true'
+    && document.querySelector('[data-testid="feedback-up-${messageId}"]')?.getAttribute('aria-pressed') === 'false'`,
+  'TERMINAL_FEEDBACK_DOWN_NOT_ACCEPTED')
+  await browser.click(`[data-testid="feedback-down-${messageId}"]`)
+  await browser.waitFor(`document.querySelector('[data-testid="feedback-down-${messageId}"]')?.getAttribute('aria-pressed') === 'false'`,
+    'TERMINAL_FEEDBACK_CLEAR_NOT_ACCEPTED')
+  checks.require(`${phase}.terminal-feedback-real-requests`, browser.requestCounts().feedback === before + 3,
+    'up/down/clear feedback each issues one real request while another round is recovering', {
+      before,
+      after: browser.requestCounts().feedback
+    })
+}
+
+async function runMixedMessagesRecovery(context) {
+  const {browser, checks} = context
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial-terminal')
+  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.messages.some((message) => message.role === 'assistant' && message.done === true)
+  })()`, 'MIXED_FIRST_TERMINAL_ROUND_NOT_COMPLETED')
+  const first = await browser.snapshot()
+  const historical = first.messages.find((message) => message.role === 'assistant' && message.done)
+  checks.require('initial-terminal.historical-assistant-present', typeof historical?.id === 'string', historical?.id ?? null, null)
+  context.sessionId = first.sessionId
+  context.runId = first.activeRunId
+
+  browser.setPhase('mixed-pending')
+  await browser.sendPrompt(`tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} multi-card=2 verification=${randomUUID()}`)
+  await approveCreateTasks(context)
+  context.runId = (await browser.snapshot()).activeRunId ?? context.runId
+  await driveSkippedHostContinuation(context)
+  const initial = await browser.snapshot()
+  const pending = initial.messages.find((message) => message.role === 'assistant' && messagePending(message))
+  checks.require('mixed-pending.two-distinct-assistant-states', initial.messages.some((message) => message.id === historical.id && message.done)
+    && pending && pending.id !== historical.id,
+  'one historical terminal assistant and one distinct currently pending assistant coexist', initial.messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    done: message.done,
+    pending: messagePending(message)
+  })))
+  context.sessionId = initial.sessionId
+  const afterHost = await businessSnapshot(context.api, relevantTaskIds(context))
+  for (const task of afterHost.allTasks) {
+    if (!context.businessAfterFixture.allTasks.some((before) => before.id === task.id)) context.createdTaskIds.add(task.id)
+  }
+  const initialHistory = await context.api.history(initial.sessionId)
+  await savePhase(context, 'mixed-pending', initial, initialHistory, afterHost)
+  const initialSignature = canonicalJson(messageContentSignature(initial))
+  const requestBaseline = browser.requestCounts()
+
+  browser.setPhase('restore-mixed')
+  await browser.setHistoryFault('always')
+  await browser.reload({waitForHistory: false})
+  const restoring = await recoveryPhaseEvidence(context)
+  await assertRestoringGate(context, 'restore-mixed', restoring.historyEvidence, restoring.business)
+  await exerciseTerminalFeedback(context, 'restore-mixed', historical.id)
+  await browser.setHistoryFault('off')
+  const network = await browser.waitForHistoryPhase('restore-mixed', {minimumFaultCount: 1, minimumSuccessCount: 1})
+  await context.evidence.json('history-network-restore-mixed.json', network)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false && ai.manualRecovery === null
+  })()`, 'MIXED_RECOVERY_NOT_COMPLETED')
+  const recovered = await recoveryPhaseEvidence(context)
+  await assertPendingRecoveryComplete(context, 'recovered-mixed', recovered.historyEvidence, recovered.business)
+  checks.require('recovered-mixed.per-message-content-and-receipts-stable', canonicalJson(messageContentSignature(await browser.snapshot())) === initialSignature,
+    initialSignature, canonicalJson(messageContentSignature(await browser.snapshot())))
+  const expectedRequests = {...requestBaseline, feedback: requestBaseline.feedback + 3}
+  checks.require('recovered-mixed.only-terminal-feedback-added', canonicalJson(browser.requestCounts()) === canonicalJson(expectedRequests),
+    expectedRequests, browser.requestCounts())
+
+  browser.setPhase('refresh-1')
+  await browser.reload()
+  const refreshed = await recoveryPhaseEvidence(context)
+  await assertPendingRecoveryComplete(context, 'refresh-1', refreshed.historyEvidence, refreshed.business)
+  checks.require('refresh-1.mixed-content-and-receipts-stable', canonicalJson(messageContentSignature(await browser.snapshot())) === initialSignature,
+    initialSignature, canonicalJson(messageContentSignature(await browser.snapshot())))
+  checks.require('refresh-1.no-repeat-side-effects', canonicalJson(browser.requestCounts()) === canonicalJson(expectedRequests),
+    expectedRequests, browser.requestCounts())
+  checks.require('refresh-1.business-stable', refreshed.business.fingerprint === afterHost.fingerprint,
+    afterHost.fingerprint, refreshed.business.fingerprint)
+}
+
+async function assertContextUsageMatches(context, phase, expected) {
+  const snapshot = await context.browser.snapshot()
+  context.checks.require(`${phase}.context-store-exact`, canonicalJson(snapshot.contextUsage) === canonicalJson(expected),
+    expected, snapshot.contextUsage)
+  const evidence = await context.api.context(snapshot.sessionId)
+  context.checks.require(`${phase}.context-public-api-available`, evidence.status === 'AVAILABLE',
+    'authoritative context endpoint is available', evidence)
+  if (evidence.status !== 'AVAILABLE') throw new AssertionFailure(`${phase}.context-public-api-available`)
+  const data = evidence.data
+  if (expected === null) {
+    context.checks.require(`${phase}.context-source-none-exact`, data.source === 'none' && data.usedTokens === 0 && data.percent === null,
+      'real source=none response clears usage instead of fabricating zero percent', {
+        source: data.source,
+        usedTokens: data.usedTokens,
+        percent: data.percent
+      })
+  } else {
+    const actual = {
+      usedTokens: data.usedTokens,
+      limitTokens: data.limitTokens,
+      percent: data.percent,
+      level: data.compaction?.level ?? 'none',
+      est: data.estimated === true,
+      circuit: data.compaction?.circuit ?? 'closed'
+    }
+    context.checks.require(`${phase}.context-public-api-exact`, canonicalJson(actual) === canonicalJson(expected),
+      expected, actual)
+  }
+  await context.evidence.json(`context-${phase}.json`, {
+    status: evidence.status,
+    httpStatus: evidence.httpStatus,
+    source: data.source,
+    turnNo: data.turnNo ?? null,
+    measuredAtMs: data.measuredAtMs ?? null,
+    usage: expected
+  })
+  return snapshot
+}
+
+async function triggerPublicContextLoad(browser) {
+  await browser.evaluate(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    void ai.loadContext()
+    return true
+  })()`, false)
+}
+
+async function runContextUsageRecovery(context) {
+  const {browser, checks} = context
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial-none-baseline')
+  await browser.evaluate(`(async () => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    await ai.loadContext()
+    return true
+  })()`, true)
+  await browser.waitForContextPhase('initial-none-baseline', {minimumSuccessCount: 1})
+  const emptyInitial = await assertContextUsageMatches(context, 'initial-none-baseline', null)
+  context.sessionId = emptyInitial.sessionId
+
+  browser.setPhase('stale-none-a')
+  await browser.delayNextContextResponse()
+  await triggerPublicContextLoad(browser)
+  const staleNoneHeld = await browser.waitForContextResponseHeld('stale-none-a')
+  checks.require('stale-none-a.real-old-response-held', staleNoneHeld.responseStatus === 200 && staleNoneHeld.delayedResponse,
+    'the real pre-turn source=none response is held at the CDP response boundary', staleNoneHeld)
+  browser.setPhase('fresh-after-none-b')
+  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.contextUsage?.usedTokens > 0
+      && ai.messages.some((message) => message.role === 'assistant' && message.done === true)
+  })()`, 'NONZERO_CONTEXT_USAGE_NOT_FORMED')
+  await triggerPublicContextLoad(browser)
+  const freshAfterNone = await browser.waitForContextPhase('fresh-after-none-b', {minimumSuccessCount: 1, allowPending: true})
+  checks.require('fresh-after-none-b.fast-real-new-response', freshAfterNone.count === 1 && freshAfterNone.successCount === 1
+    && freshAfterNone.faultCount === 0 && freshAfterNone.pendingCount === 0,
+  'the real post-turn context response completes while the old none response is still held', freshAfterNone)
+  let expected = (await browser.snapshot()).contextUsage
+  checks.require('fresh-after-none-b.nonzero-new-usage', expected?.usedTokens > 0, 'new context usage is non-zero', expected)
+  const freshAfterNoneSnapshot = await assertContextUsageMatches(context, 'fresh-after-none-b', expected)
+  checks.require('fresh-after-none-b.same-session', freshAfterNoneSnapshot.sessionId === context.sessionId,
+    context.sessionId, freshAfterNoneSnapshot.sessionId)
+  await browser.releaseDelayedContextResponse()
+  const staleNoneLate = await browser.waitForContextPhase('stale-none-a', {minimumSuccessCount: 1})
+  checks.require('stale-none-a.late-response-released', staleNoneLate.count === 1 && staleNoneLate.successCount === 1
+    && staleNoneLate.pendingCount === 0 && staleNoneLate.records[0]?.delayedResponseReleased === true,
+  'the delayed old none response completes only after the new response', staleNoneLate)
+  await assertContextUsageMatches(context, 'stale-none-late-preserved', expected)
+  await context.evidence.json('context-race-none.json', {held: staleNoneHeld, fresh: freshAfterNone, late: staleNoneLate})
+
+  browser.setPhase('stale-value-a')
+  await browser.delayNextContextResponse()
+  await triggerPublicContextLoad(browser)
+  const staleValueHeld = await browser.waitForContextResponseHeld('stale-value-a')
+  checks.require('stale-value-a.real-old-response-held', staleValueHeld.responseStatus === 200 && staleValueHeld.delayedResponse,
+    'the real previous non-zero context response is held at the CDP response boundary', staleValueHeld)
+  browser.setPhase('fresh-value-b')
+  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.contextUsage?.usedTokens > ${expected.usedTokens}
+      && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done === true)
+  })()`, 'GROWING_CONTEXT_USAGE_NOT_FORMED')
+  await triggerPublicContextLoad(browser)
+  const freshValue = await browser.waitForContextPhase('fresh-value-b', {minimumSuccessCount: 1, allowPending: true})
+  checks.require('fresh-value-b.fast-real-new-response', freshValue.count === 1 && freshValue.successCount === 1
+    && freshValue.faultCount === 0 && freshValue.pendingCount === 0,
+  'the newer non-zero context response completes while the previous value is still held', freshValue)
+  const newer = (await browser.snapshot()).contextUsage
+  checks.require('fresh-value-b.usage-increased', newer?.usedTokens > expected.usedTokens,
+    'the second real round increases context usage', {before: expected, after: newer})
+  const freshValueSnapshot = await assertContextUsageMatches(context, 'fresh-value-b', newer)
+  checks.require('fresh-value-b.same-session', freshValueSnapshot.sessionId === context.sessionId,
+    context.sessionId, freshValueSnapshot.sessionId)
+  await browser.releaseDelayedContextResponse()
+  const staleValueLate = await browser.waitForContextPhase('stale-value-a', {minimumSuccessCount: 1})
+  checks.require('stale-value-a.late-response-released', staleValueLate.count === 1 && staleValueLate.successCount === 1
+    && staleValueLate.pendingCount === 0 && staleValueLate.records[0]?.delayedResponseReleased === true,
+  'the delayed previous value completes only after the newer value', staleValueLate)
+  await assertContextUsageMatches(context, 'stale-value-late-preserved', newer)
+  await context.evidence.json('context-race-value.json', {held: staleValueHeld, fresh: freshValue, late: staleValueLate})
+  expected = newer
+
+  const initial = await browser.snapshot()
+  context.runId = initial.activeRunId
+  const initialSignature = canonicalJson(messageContentSignature(initial))
+  const initialEvidence = await recoveryPhaseEvidence(context)
+  await savePhase(context, 'initial-context', initial, initialEvidence.historyEvidence, initialEvidence.business)
+
+  browser.setPhase('refresh-context')
+  await browser.reload()
+  await browser.waitForContextPhase('refresh-context', {minimumSuccessCount: 1})
+  const refreshed = await assertContextUsageMatches(context, 'refresh-context', expected)
+  checks.require('refresh-context.content-stable', canonicalJson(messageContentSignature(refreshed)) === initialSignature,
+    initialSignature, canonicalJson(messageContentSignature(refreshed)))
+
+  browser.setPhase('context-failure')
+  await browser.setContextFault('once')
+  await browser.evaluate(`(async () => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    await ai.loadContext()
+    return true
+  })()`, true)
+  const failure = await browser.waitForContextPhase('context-failure', {exactFaultCount: 1})
+  checks.require('context-failure.real-503-terminal', failure.faultCount === 1 && failure.successCount === 0
+    && failure.pendingCount === 0 && failure.statuses.every((status) => status === 503),
+  'the public loadContext action actually received the injected HTTP 503', failure)
+  await context.evidence.json('context-network-context-failure.json', failure)
+  await browser.setContextFault('off')
+  await assertContextUsageMatches(context, 'context-failure-preserved', expected)
+
+  browser.setPhase('history-independent')
+  await browser.setHistoryFault('always')
+  await browser.reload({waitForHistory: false})
+  const independentContext = await browser.waitForContextPhase('history-independent', {minimumSuccessCount: 1})
+  checks.require('history-independent.context-real-200', independentContext.successCount >= 1
+    && independentContext.faultCount === 0 && independentContext.pendingCount === 0,
+  'context recovery completes independently while browser history remains faulted', independentContext)
+  await context.evidence.json('context-network-history-independent.json', independentContext)
+  const independent = await recoveryPhaseEvidence(context)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === true && ai.contextUsage?.usedTokens === ${expected.usedTokens}
+  })()`, 'CONTEXT_NOT_RESTORED_DURING_HISTORY_FAILURE')
+  const independentView = await recoveryView(browser)
+  checks.require('history-independent.usage-preserved', canonicalJson(independentView.snapshot.contextUsage) === canonicalJson(expected),
+    expected, independentView.snapshot.contextUsage)
+  assertMessagePresentation(context, 'history-independent', independentView, 'terminal')
+  assertWriteOperationsDisabled(context, 'history-independent', independentView.operations)
+  await assertDraftAndTerminalCopy(context, 'history-independent', independentView)
+  await saveRecoveryPhase(context, 'history-independent', independentView, independent.historyEvidence, independent.business)
+  await browser.setHistoryFault('off')
+  const historyNetwork = await browser.waitForHistoryPhase('history-independent', {minimumFaultCount: 1, minimumSuccessCount: 1})
+  await context.evidence.json('history-network-history-independent.json', historyNetwork)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false && ai.manualRecovery === null
+  })()`, 'HISTORY_INDEPENDENT_RECOVERY_NOT_COMPLETED')
+  const recovered = await recoveryPhaseEvidence(context)
+  await assertTerminalRecoveryComplete(context, 'history-independent-recovered', recovered.historyEvidence, recovered.business)
+  await assertContextUsageMatches(context, 'history-independent-recovered', expected)
+
+  const oldSessionId = context.sessionId
+  context.additionalSessionIds.add(oldSessionId)
+  browser.setPhase('new-session-none')
+  await browser.click('[data-testid="new-chat"]')
+  await browser.waitFor(`document.querySelector('[data-testid="new-chat-dialog"]')?.open === true`, 'NEW_CHAT_CONFIRMATION_NOT_OPEN')
+  await browser.click('[data-testid="new-chat-dialog"] button[value="confirm"]')
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.sessionId !== '' && ai.sessionId !== '${oldSessionId}' && ai.messages.length === 0 && ai.contextUsage === null
+  })()`, 'NEW_SESSION_CONTEXT_ISOLATION_NOT_READY')
+  await browser.evaluate(`(async () => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    await ai.loadContext()
+    return true
+  })()`, true)
+  await browser.waitForContextPhase('new-session-none', {minimumSuccessCount: 1})
+  const empty = await assertContextUsageMatches(context, 'new-session-none', null)
+  context.sessionId = empty.sessionId
+  const pill = await browser.evaluate(`(() => {
+    const element = document.querySelector('[data-testid="context-pill"]')
+    return {
+      present: element !== null,
+      hasValue: element?.hasAttribute('value') === true,
+      label: element?.getAttribute('aria-label') ?? ''
+    }
+  })()`, false)
+  checks.require('new-session-none.neutral-pill-not-zero-percent', pill.present && !pill.hasValue
+    && pill.label.trim() !== '' && !/(?:^|\D)0\s*%/.test(pill.label),
+  'source=none keeps a neutral pill with no value and no fabricated 0%', pill)
+  let oldHistory = null
+  const deleteDeadline = Date.now() + context.config.timeoutMs
+  while (Date.now() < deleteDeadline) {
+    oldHistory = await context.api.history(oldSessionId)
+    if (oldHistory.httpStatus === 410 || (oldHistory.status === 'AVAILABLE' && oldHistory.data.messages.length === 0)) break
+    await sleep(context.config.pollMs)
+  }
+  checks.require('new-session-none.old-history-isolated', oldHistory?.httpStatus === 410
+    || (oldHistory?.status === 'AVAILABLE' && oldHistory.data.messages.length === 0),
+  'new chat destroys or empties the old session without carrying messages or usage forward', {
+    httpStatus: oldHistory?.httpStatus ?? null,
+    status: oldHistory?.status ?? null,
+    messageCount: oldHistory?.data?.messages?.length ?? null
+  })
+  const emptyHistory = await context.api.history(context.sessionId)
+  await savePhase(context, 'new-session-none', empty, emptyHistory, await businessSnapshot(context.api, relevantTaskIds(context)))
+}
+
+async function runStreamHistoryRace(context) {
+  const {browser, checks, config} = context
+  const variants = new Set(['mirror-inflight', 'no-mirror', 'mirror-terminal'])
+  if (!variants.has(config.variant)) throw new Error(`RECOVERY_VARIANT must select exactly one of ${[...variants].join(', ')}`)
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial-stream')
+  await browser.sendPrompt(`turn-text stall-frames=250 verification=${randomUUID()}`)
+  if (config.variant === 'mirror-terminal') {
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.loading === false && ai.messages.some((message) => message.role === 'assistant' && message.done)
+    })()`, 'TERMINAL_MIRROR_ROUND_NOT_COMPLETED')
+  } else {
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.loading === true && ai.messages.some((message) => message.role === 'assistant' && message.streaming
+        && message.parts.some((part) => part.kind === 'text' && part.text.length > 0))
+    })()`, 'STREAM_HISTORY_PREFIX_NOT_FORMED')
+  }
+  const initial = await browser.snapshot()
+  context.sessionId = initial.sessionId
+  context.runId = initial.activeRunId
+  const initialHistory = requiredHistory(await context.api.history(initial.sessionId))
+  const prefix = initialHistory.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
+    .map((message) => message.text ?? message.content ?? '').join('')
+  checks.require('initial-stream.history-prefix-nonempty', prefix.length > 0,
+    'the real streaming history has a persisted text prefix before runs/current is delayed', textEvidence(prefix))
+  const mirror = await mirrorState(browser, initial.sessionId)
+  if (config.variant === 'mirror-inflight') {
+    checks.require('mirror.inflight-true', mirror.entries.length === 1 && mirror.entries[0].inFlight === true,
+      'the real streaming mirror is inFlight=true', mirror)
+  } else if (config.variant === 'mirror-terminal') {
+    checks.require('mirror.inflight-false', mirror.entries.length === 1 && mirror.entries[0].inFlight === false,
+      'the real completed mirror is inFlight=false', mirror)
+  } else {
+    await removeCurrentMirror(context)
+  }
+  const requestBaseline = browser.requestCounts()
+  const initialSignature = recoveryFactsSignature(initial)
+
+  browser.setPhase('restore-stream')
+  await browser.delayNextRunCurrentResponse()
+  await browser.reload({waitForHistory: false})
+  const held = await browser.waitForRunCurrentResponseHeld('restore-stream')
+  const historyNetwork = await browser.waitForHistoryPhase('restore-stream', {minimumSuccessCount: 1})
+  const restoringEvidence = await recoveryPhaseEvidence(context)
+  if (config.variant === 'mirror-terminal') {
+    const view = await recoveryView(browser)
+    checks.require('restore-stream.terminal-mirror-recovering', view.snapshot.restoringRecovery,
+      'terminal mirror waits for the delayed run snapshot', held)
+    assertMessagePresentation(context, 'restore-stream-terminal', view, 'terminal')
+    assertWriteOperationsDisabled(context, 'restore-stream-terminal', view.operations)
+    await saveRecoveryPhase(context, 'restore-stream-terminal', view, restoringEvidence.historyEvidence, restoringEvidence.business)
+  } else {
+    await assertRestoringGate(context, 'restore-stream', restoringEvidence.historyEvidence, restoringEvidence.business)
+  }
+  await browser.releaseDelayedRunCurrentResponse()
+  const runCurrentNetwork = await browser.waitForRunCurrentPhase('restore-stream', {minimumSuccessCount: 1})
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false && ai.loading === false
+      && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done)
+  })()`, 'STREAM_HISTORY_RACE_NOT_TERMINAL')
+  const recoveredEvidence = await recoveryPhaseEvidence(context)
+  await assertTerminalRecoveryComplete(context, 'recovered-stream', recoveredEvidence.historyEvidence, recoveredEvidence.business)
+  const recovered = await browser.snapshot()
+  context.latestSnapshot = recovered
+  const finalText = recovered.messages.filter((message) => message.role === 'assistant').map((message) => message.content).join('')
+  checks.require('recovered-stream.history-prefix-complete', finalText.startsWith(prefix)
+    && (config.variant === 'mirror-terminal' ? finalText.length === prefix.length : finalText.length > prefix.length),
+  'the resumed response retains the history prefix and only appends the real suffix', {
+    prefix: textEvidence(prefix),
+    final: textEvidence(finalText)
+  })
+  if (config.variant !== 'mirror-terminal') assertRecoveryDotsThenWorking(context, 'recovered-stream', recovered.messages.find((message) => message.role === 'assistant')?.id)
+  checks.require('recovered-stream.content-stable', recoveryFactsSignature(recovered) === initialSignature
+    || config.variant !== 'mirror-terminal',
+  'terminal mirror content is unchanged; streaming variants are checked against their original prefix', {
+    before: initialSignature,
+    after: recoveryFactsSignature(recovered)
+  })
+  await context.evidence.json('stream-history-race.json', {variant: config.variant, mirror, held, historyNetwork, runCurrentNetwork})
+  const finalSignature = recoveryFactsSignature(recovered)
+  for (const phase of ['refresh-1', 'refresh-2']) {
+    browser.setPhase(phase)
+    await browser.reload()
+    const evidence = await recoveryPhaseEvidence(context)
+    await assertTerminalRecoveryComplete(context, phase, evidence.historyEvidence, evidence.business)
+    checks.require(`${phase}.idempotent`, recoveryFactsSignature(await browser.snapshot()) === finalSignature,
+      finalSignature, recoveryFactsSignature(await browser.snapshot()))
+  }
+  checks.require('refresh.no-repeat-side-effects', canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
+    requestBaseline, browser.requestCounts())
+}
+
+async function runPendingIntegrity(context) {
+  const {browser, checks, config} = context
+  if (!['hitl', 'gf'].includes(config.variant)) throw new Error('RECOVERY_VARIANT must be hitl or gf')
+  if (!['history-first', 'current-first'].includes(config.historyOrder)) {
+    throw new Error('HISTORY_ORDER must be history-first or current-first')
+  }
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial-pending')
+  const prompt = config.variant === 'hitl'
+    ? `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} verification=${randomUUID()}`
+    : `timeline-nonprefix verification=${randomUUID()}`
+  await browser.sendPrompt(prompt)
+  const pending = await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const part = ai.messages.flatMap((message) => message.parts).find((candidate) => candidate.kind === 'tool'
+      && candidate.name === '${config.variant === 'hitl' ? 'create_task' : 'generative_form'}' && candidate.requiresAction === true)
+    return part ? {toolCallId: part.toolCallId} : null
+  })()`, 'PENDING_INTEGRITY_NOT_FORMED')
+  const toolCallIds = [pending.toolCallId]
+  const initial = await browser.snapshot()
+  context.sessionId = initial.sessionId
+  context.runId = initial.activeRunId
+  context.latestSnapshot = initial
+  const initialSignature = recoveryFactsSignature(initial)
+  if (config.pendingFixture === 'empty-history') await removeCurrentMirror(context)
+  const requestBaseline = browser.requestCounts()
+
+  browser.setPhase('restore-pending')
+  if (config.historyOrder === 'history-first') await browser.delayNextRunCurrentResponse()
+  else await browser.delayNextHistoryResponse()
+  await browser.reload({waitForHistory: false})
+  let held
+  let firstNetwork
+  if (config.historyOrder === 'history-first') {
+    held = await browser.waitForRunCurrentResponseHeld('restore-pending')
+    firstNetwork = await browser.waitForHistoryPhase('restore-pending', {minimumSuccessCount: 1})
+  } else {
+    held = await browser.waitForHistoryResponseHeld('restore-pending')
+    firstNetwork = await browser.waitForRunCurrentPhase('restore-pending', {minimumSuccessCount: 1})
+  }
+  const historyEvidence = await context.api.history(context.sessionId)
+  const history = requiredHistory(historyEvidence)
+  const coverage = pendingHistoryCoverage(history, toolCallIds)
+  requirePendingFixture(config, coverage)
+  await context.evidence.json('pending-history-restore.json', coverage)
+  const restoringEvidence = await recoveryPhaseEvidence(context)
+  await assertRestoringGate(context, 'restore-pending', restoringEvidence.historyEvidence, restoringEvidence.business)
+  context.latestSnapshot = await browser.snapshot()
+  await assertPendingTrajectory(context, 'restore-pending', toolCallIds)
+
+  if (config.historyOrder === 'history-first') await browser.releaseDelayedRunCurrentResponse()
+  else await browser.releaseDelayedHistoryResponse()
+  const secondNetwork = config.historyOrder === 'history-first'
+    ? await browser.waitForRunCurrentPhase('restore-pending', {minimumSuccessCount: 1})
+    : await browser.waitForHistoryPhase('restore-pending', {minimumSuccessCount: 1})
+  await browser.waitFor(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').restoringRecovery === false`,
+    'PENDING_RECOVERY_NOT_COMPLETED')
+  const recoveredEvidence = await recoveryPhaseEvidence(context)
+  await assertPendingRecoveryComplete(context, 'recovered-pending', recoveredEvidence.historyEvidence, recoveredEvidence.business)
+  context.latestSnapshot = await browser.snapshot()
+  await assertPendingTrajectory(context, 'recovered-pending', toolCallIds)
+  checks.require('recovered-pending.parts-and-cards-stable', recoveryFactsSignature(context.latestSnapshot) === initialSignature,
+    initialSignature, recoveryFactsSignature(context.latestSnapshot))
+  await context.evidence.json('pending-order-restore.json', {order: config.historyOrder, held, firstNetwork, secondNetwork, coverage})
+
+  for (const phase of ['refresh-1', 'refresh-2']) {
+    browser.setPhase(phase)
+    await browser.reload()
+    const evidence = await recoveryPhaseEvidence(context)
+    await assertPendingRecoveryComplete(context, phase, evidence.historyEvidence, evidence.business)
+    context.latestSnapshot = await browser.snapshot()
+    await assertPendingTrajectory(context, phase, toolCallIds)
+    checks.require(`${phase}.pending-idempotent`, recoveryFactsSignature(context.latestSnapshot) === initialSignature,
+      initialSignature, recoveryFactsSignature(context.latestSnapshot))
+  }
+
+  browser.setPhase('legal-decision')
+  if (config.variant === 'hitl') {
+    await browser.click(`[data-testid="pending-card-${pending.toolCallId}"] [data-testid="gate-actions"] button:first-child`)
+  } else {
+    await browser.click(`[data-testid="gf-form-${pending.toolCallId}"] [data-testid="gf-cancel"]`)
+  }
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const part = ai.messages.flatMap((message) => message.parts).find((candidate) => candidate.toolCallId === '${pending.toolCallId}')
+    return part && !part.requiresAction && ai.loading === false
+  })()`, 'LEGAL_PENDING_DECISION_NOT_ACCEPTED')
+  context.latestSnapshot = await browser.snapshot()
+  const decision = await assertPendingTrajectory(context, 'legal-decision', toolCallIds, {requireDecision: true})
+  await context.evidence.json('pending-legal-decision.json', decision)
+  browser.setPhase('decided-refresh')
+  await browser.reload()
+  context.latestSnapshot = await browser.snapshot()
+  await assertPendingTrajectory(context, 'decided-refresh', toolCallIds, {requireDecision: true})
+  checks.require('decided-refresh.no-repeat-chat', browser.requestCounts().chat === requestBaseline.chat,
+    requestBaseline.chat, browser.requestCounts().chat)
+}
+
+async function runCrossRunOrder(context) {
+  const {browser, checks} = context
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('run-1')
+  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.messages.some((message) => message.role === 'assistant' && message.done)
+  })()`, 'CROSS_RUN_FIRST_NOT_TERMINAL')
+  const first = await browser.snapshot()
+  const firstRunId = first.activeRunId
+  context.sessionId = first.sessionId
+  context.runId = firstRunId
+
+  browser.setPhase('late-old-run')
+  await browser.delayNextRunCurrentResponse()
+  await triggerPublicRunCurrentRead(browser, first.sessionId)
+  const held = await browser.waitForRunCurrentResponseHeld('late-old-run')
+  browser.setPhase('run-2')
+  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.activeRunId && ai.activeRunId !== '${firstRunId}'
+      && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done)
+  })()`, 'CROSS_RUN_SECOND_NOT_TERMINAL')
+  const second = await browser.snapshot()
+  const secondRunId = second.activeRunId
+  context.runId = secondRunId
+  await browser.releaseDelayedRunCurrentResponse()
+  const late = await browser.waitForRunCurrentPhase('late-old-run', {minimumSuccessCount: 1})
+  const afterLate = await browser.snapshot()
+  checks.require('late-old-run.no-cross-run-overwrite', afterLate.activeRunId === secondRunId
+    && afterLate.messages.every((message) => !message.runId || [firstRunId, secondRunId].includes(message.runId)),
+  'late previous-run snapshot cannot overwrite the newer run identity or messages', {
+    firstRunId,
+    secondRunId,
+    actualRunId: afterLate.activeRunId,
+    messages: afterLate.messages.map((message) => ({id: message.id, runId: message.runId, done: message.done}))
+  })
+  const finalSignature = recoveryFactsSignature(afterLate)
+  const requestBaseline = browser.requestCounts()
+  await context.evidence.json('cross-run-late.json', {held, late, firstRunId, secondRunId})
+
+  for (const phase of ['history-first', 'current-first']) {
+    browser.setPhase(phase)
+    if (phase === 'history-first') await browser.delayNextRunCurrentResponse()
+    else await browser.delayNextHistoryResponse()
+    await browser.reload({waitForHistory: false})
+    if (phase === 'history-first') {
+      await browser.waitForRunCurrentResponseHeld(phase)
+      await browser.waitForHistoryPhase(phase, {minimumSuccessCount: 1})
+      await browser.releaseDelayedRunCurrentResponse()
+      await browser.waitForRunCurrentPhase(phase, {minimumSuccessCount: 1})
+    } else {
+      await browser.waitForHistoryResponseHeld(phase)
+      await browser.waitForRunCurrentPhase(phase, {minimumSuccessCount: 1})
+      await browser.releaseDelayedHistoryResponse()
+      await browser.waitForHistoryPhase(phase, {minimumSuccessCount: 1})
+    }
+    const evidence = await recoveryPhaseEvidence(context)
+    await assertTerminalRecoveryComplete(context, phase, evidence.historyEvidence, evidence.business)
+    checks.require(`${phase}.two-refresh-idempotent`, recoveryFactsSignature(await browser.snapshot()) === finalSignature,
+      finalSignature, recoveryFactsSignature(await browser.snapshot()))
+  }
+  checks.require('cross-run.no-repeat-chat', browser.requestCounts().chat === requestBaseline.chat,
+    requestBaseline.chat, browser.requestCounts().chat)
+}
+
+async function runFormQueueRecovery(context) {
+  const {browser, checks, config} = context
+  if (!['with-mirror', 'no-mirror'].includes(config.variant)) throw new Error('RECOVERY_VARIANT must be with-mirror or no-mirror')
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial-terminal')
+  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.messages.some((message) => message.role === 'assistant' && message.done)
+  })()`, 'FORM_QUEUE_HISTORICAL_ROUND_NOT_COMPLETED')
+  browser.setPhase('form-queue')
+  await browser.sendPrompt(`gf-seven-types multi-card=2 verification=${randomUUID()}`)
+  const queued = await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.activeForm && ai.queuedForms.length === 1 ? {active: ai.activeForm.toolCallId, queued: ai.queuedForms[0].toolCallId} : null
+  })()`, 'FORM_SINGLE_ACTIVE_AND_ONE_QUEUED_NOT_FORMED')
+  const initial = await browser.snapshot()
+  context.sessionId = initial.sessionId
+  context.runId = initial.activeRunId
+  const textField = initial.activeForm?.fields.find((field) => field.type === 'text')
+  if (!textField) throw new ScenarioNotRun('FORM_QUEUE_TEXT_FIELD_NOT_FORMED')
+  const draft = `queue-draft-${randomUUID()}`
+  await browser.evaluate(`document.querySelector('[data-testid="gf-field-${queued.active}-${textField.key}"]').focus()`, false)
+  await browser.send('Input.insertText', {text: draft})
+  await browser.waitFor(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').activeForm?.values?.['${textField.key}'] === '${draft}'`,
+    'FORM_QUEUE_DRAFT_NOT_WRITTEN')
+  const withDraft = await browser.snapshot()
+  const initialSignature = recoveryFactsSignature(withDraft)
+  const toolCallIds = [queued.active, queued.queued]
+  context.latestSnapshot = withDraft
+  await assertPendingTrajectory(context, 'form-queue', toolCallIds)
+  if (config.variant === 'no-mirror') await removeCurrentMirror(context)
+  const requestBaseline = browser.requestCounts()
+
+  for (const phase of ['refresh-1', 'refresh-2']) {
+    browser.setPhase(phase)
+    await browser.reload()
+    const evidence = await recoveryPhaseEvidence(context)
+    await assertPendingRecoveryComplete(context, phase, evidence.historyEvidence, evidence.business)
+    const current = await browser.snapshot()
+    context.latestSnapshot = current
+    checks.require(`${phase}.single-active-draft-queue-stable`, current.activeForm?.toolCallId === queued.active
+      && current.queuedForms.length === 1 && current.queuedForms[0].toolCallId === queued.queued
+      && recoveryFactsSignature(current) === initialSignature,
+    'one active form, one queued form and the same draft survive without duplicate parts/cards', {
+      expected: initialSignature,
+      actual: recoveryFactsSignature(current),
+      activeForm: current.activeForm ? {toolCallId: current.activeForm.toolCallId, status: current.activeForm.status} : null,
+      queuedForms: current.queuedForms
+    })
+    await assertPendingTrajectory(context, phase, toolCallIds)
+  }
+  checks.require('form-queue.no-repeat-side-effects', canonicalJson(browser.requestCounts()) === canonicalJson(requestBaseline),
+    requestBaseline, browser.requestCounts())
+}
+
+function assertHistoryProjectionCommit(context, phase, snapshot, history) {
+  const actual = snapshot.historyProjection
+  const expected = {
+    total: history.total ?? history.messages.length,
+    offset: Math.max(0, (history.total ?? history.messages.length) - history.messages.length),
+    hasMore: history.hasMore === true,
+    nextCursor: history.nextCursor ?? null,
+    revision: history.revision ?? 0,
+    eventCount: (history.events ?? []).length,
+    windowEntryCount: history.messages.length,
+    events: (history.events ?? []).map((event) => ({
+      eventId: event.eventId ?? null,
+      runId: event.runId ?? null,
+      anchorToolCallId: event.anchorToolCallId ?? null,
+      atMs: event.atMs ?? null
+    })),
+    windowEntries: history.messages.map((message) => ({
+      entryId: message.entryId ?? null,
+      runId: message.runId ?? null,
+      type: String(message.type ?? message.role ?? '').toUpperCase(),
+      textHash: fnv1a32(message.text ?? message.content ?? '')
+    }))
+  }
+  context.checks.require(`${phase}.history-only-projection-commit`, canonicalJson(actual) === canonicalJson(expected),
+    expected, actual)
+}
+
+function assertNoReconnect(context, phase, baseline) {
+  const current = context.browser.requestCounts()
+  context.checks.require(`${phase}.no-events-or-resume`, current.events === baseline.events && current.resume === baseline.resume,
+    {events: baseline.events, resume: baseline.resume}, {events: current.events, resume: current.resume})
+}
+
+async function runHistoryGenerationRace(context) {
+  const {browser, checks} = context
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('initial')
+  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.messages.some((message) => message.role === 'assistant' && message.done)
+  })()`, 'HISTORY_GENERATION_INITIAL_NOT_TERMINAL')
+  const initial = await browser.snapshot()
+  const firstRunId = initial.activeRunId
+  context.sessionId = initial.sessionId
+  context.runId = firstRunId
+
+  browser.setPhase('generation-old')
+  await browser.delayNextHistoryResponse()
+  await browser.reload({waitForHistory: false})
+  const held = await browser.waitForHistoryResponseHeld('generation-old')
+  browser.setPhase('new-occupancy')
+  const started = await context.api.startChat(context.sessionId, `turn-text stall-frames=2000 verification=${randomUUID()}`)
+  checks.require('new-occupancy.public-chat-started', started.runId && started.runId !== firstRunId,
+    'a new run occupies the session while the first history response is still held', {firstRunId, secondRunId: started.runId})
+  context.runId = started.runId
+  browser.setPhase('generation-new')
+  await browser.evaluate(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    void ai.loadHistory()
+    return true
+  })()`, false)
+  const newer = await browser.waitForHistoryPhase('generation-new', {minimumSuccessCount: 1})
+  await browser.releaseDelayedHistoryResponse()
+  const older = await browser.waitForHistoryPhase('generation-old', {minimumSuccessCount: 1})
+  const after = await browser.snapshot()
+  const authoritativeHistory = requiredHistory(await context.api.history(context.sessionId))
+  assertHistoryProjectionCommit(context, 'history-generation-after-late-old', after, authoritativeHistory)
+  await context.evidence.json('history-generation-projection.json', {
+    actual: after.historyProjection,
+    authoritative: historySummary(authoritativeHistory)
+  })
+  checks.require('history-generation.newer-arrived-first', after.messages.some((message) => message.runId === started.runId)
+    && after.messages.some((message) => message.runId === firstRunId),
+  'the second loadHistory completes first and the late old history cannot remove either run', {
+    firstRunId,
+    secondRunId: started.runId,
+    messages: after.messages.map((message) => ({id: message.id, runId: message.runId, done: message.done}))
+  })
+  await context.evidence.json('history-generation-race.json', {held, newer, older, firstRunId, secondRunId: started.runId})
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done)
+  })()`, 'HISTORY_GENERATION_NEW_RUN_NOT_TERMINAL')
+  const evidence = await recoveryPhaseEvidence(context)
+  await assertTerminalRecoveryComplete(context, 'history-generation-terminal', evidence.historyEvidence, evidence.business)
+}
+
+async function runStoppedRecovery(context) {
+  const {browser, checks, config} = context
+  const variants = new Set(['stop', 'client-request-stopped', 'current-failure', 'expired', 'incomplete'])
+  if (!variants.has(config.variant)) throw new Error(`RECOVERY_VARIANT must select exactly one of ${[...variants].join(', ')}`)
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  context.sessionId = (await browser.snapshot()).sessionId
+  browser.setPhase('before-stop')
+  await browser.sendPrompt(`turn-text stall-frames=2000 verification=${randomUUID()}`)
+  if (config.variant === 'client-request-stopped') {
+    const request = await browser.waitForChatClientIdentity()
+    const cancellation = await browser.evaluate(`(async () => {
+      const {aiApi} = await import('/src/api/ai.ts')
+      const result = await aiApi.cancelClientRequest({sessionId: '${context.sessionId}', clientRequestId: '${request.clientRequestId}'})
+      return {cancelled: result.cancelled === true, alreadyCancelled: result.alreadyCancelled === true}
+    })()`, true)
+    checks.require('client-request-stopped.cancel-accepted', cancellation.cancelled || cancellation.alreadyCancelled,
+      'the public cancel/client-request endpoint accepts the real clientRequestId', cancellation)
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.clientRequestStopped === true && ai.loading === false
+    })()`, 'CLIENT_REQUEST_STOP_NOT_APPLIED')
+  } else {
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.loading === true && ai.messages.some((message) => message.role === 'assistant' && message.streaming === true)
+    })()`, 'STOP_WINDOW_NOT_FORMED')
+    await browser.click('[data-testid="stop-btn"]')
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.stopped === true && ai.loading === false
+    })()`, 'STOP_NOT_APPLIED')
+  }
+  const stopped = await browser.snapshot()
+  context.sessionId = stopped.sessionId
+  context.runId = stopped.activeRunId ?? [...stopped.messages].reverse().find((message) => message.runId)?.runId ?? null
+  const initialSignature = recoveryFactsSignature(stopped)
+  const reconnectBaseline = browser.requestCounts()
+  if (config.variant === 'current-failure') await browser.setRunCurrentFault('always')
+  if (config.variant === 'expired' || config.variant === 'incomplete') {
+    const current = await context.api.runCurrent(context.sessionId)
+    if (current.status !== 'AVAILABLE') throw new ScenarioNotRun('STOPPED_CURRENT_FIXTURE_NOT_FORMED')
+    if (config.variant === 'expired' && current.data.found !== false) throw new ScenarioNotRun('STOPPED_EXPIRED_FIXTURE_NOT_FORMED')
+    if (config.variant === 'incomplete' && !(current.data.found === true
+      && (!Array.isArray(current.data.pendingEntries) || typeof current.data.awaitingExternal !== 'boolean'))) {
+      throw new ScenarioNotRun('STOPPED_INCOMPLETE_CURRENT_NOT_FORMED')
+    }
+  }
+
+  browser.setPhase('stopped-recovery')
+  await browser.reload({waitForHistory: false})
+  if (config.variant === 'current-failure') {
+    const network = await browser.waitForRunCurrentPhase('stopped-recovery', {minimumFaultCount: 1})
+    await context.evidence.json('stopped-current-failure-network.json', network)
+  } else {
+    await browser.waitForHistoryPhase('stopped-recovery', {minimumSuccessCount: 1})
+  }
+  const recovered = await browser.snapshot()
+  if (config.variant === 'stop' || config.variant === 'client-request-stopped') {
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.restoringRecovery === false && ai.historyLoaded && ai.canSend === true
+    })()`, 'STOPPED_HISTORY_ONLY_RECOVERY_NOT_COMPLETED')
+    const settled = await browser.snapshot()
+    const history = requiredHistory(await context.api.history(context.sessionId))
+    assertHistoryProjectionCommit(context, 'stopped-recovery', settled, history)
+    checks.require('stopped-recovery.content-stable', recoveryFactsSignature(settled) === initialSignature,
+      initialSignature, recoveryFactsSignature(settled))
+    checks.require(`stopped-recovery.${config.variant === 'stop' ? 'stopped-state' : 'client-request-stopped-state'}`,
+      config.variant === 'stop' ? settled.stopped : settled.clientRequestStopped,
+      'the real stopped marker survives history-only commit', {
+        stopped: settled.stopped,
+        clientRequestStopped: settled.clientRequestStopped
+      })
+    const view = await recoveryView(browser)
+    checks.require('stopped-recovery.send-unlocked', view.snapshot.canSend
+      && view.operations.send.length === 1 && view.operations.send[0].disabled === false,
+    'stopped history-only commit unlocks sending without reconnecting', view.operations.send)
+    assertNoReconnect(context, 'stopped-recovery', reconnectBaseline)
+    await saveRecoveryPhase(context, 'stopped-recovery', view, await context.api.history(context.sessionId),
+      await businessSnapshot(context.api, relevantTaskIds(context)))
+  } else {
+    checks.require('stopped-recovery.no-history-commit', recovered.historyProjection.windowEntryCount === 0
+      && recovered.historyProjection.eventCount === 0,
+    'expired/failed/incomplete current cannot commit history messages/events', recovered.historyProjection)
+    assertNoReconnect(context, 'stopped-recovery', reconnectBaseline)
+    checks.require('stopped-recovery.no-new-chat', browser.requestCounts().chat === reconnectBaseline.chat,
+      reconnectBaseline.chat, browser.requestCounts().chat)
+    await savePhase(context, 'stopped-recovery-negative', recovered, await context.api.history(context.sessionId),
+      await businessSnapshot(context.api, relevantTaskIds(context)))
+  }
+  await context.evidence.json('stopped-recovery.json', {variant: config.variant, initialSignature, recovered: recovered.historyProjection})
+  if (config.variant === 'current-failure') await browser.setRunCurrentFault('off')
+}
+
+async function runCorrectionPrefixScenario(context) {
+  const {browser, checks, config} = context
+  if (!PREFIX_EXPECTATIONS.has(config.variant)) {
+    throw new Error(`RECOVERY_VARIANT must select exactly one of ${[...PREFIX_EXPECTATIONS.keys()].join(', ')}`)
+  }
+  await assertStubDirectoryEmpty(config)
+  context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
+  browser.setPhase('correction-prefix')
+  const prompt = config.variant === 'other-run-control'
+    ? `turn-text verification=${randomUUID()}`
+    : `创建导出任务 correction=${config.variant} verification=${randomUUID()}`
+  await browser.sendPrompt(prompt)
+  if (config.variant === 'park-resume') {
+    const pending = await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.activeForm?.toolCallId ? {toolCallId: ai.activeForm.toolCallId} : null
+    })()`, 'PREFIX_PARK_FORM_NOT_FORMED')
+    await browser.waitFor(`document.querySelector('[data-testid="gf-field-${pending.toolCallId}-keyword"]') !== null`,
+      'PREFIX_PARK_FIELD_NOT_READY')
+    await browser.evaluate(`document.querySelector('[data-testid="gf-field-${pending.toolCallId}-keyword"]').focus()`, false)
+    await browser.send('Input.insertText', {text: `prefix-${randomUUID()}`})
+    await browser.click(`[data-testid="gf-form-${pending.toolCallId}"] [data-testid="gf-submit"]`)
+  }
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.loading === false && ai.messages.some((message) => message.role === 'assistant' && message.done === true)
+  })()`, 'PREFIX_RUN_NOT_TERMINAL')
+  const snapshot = await browser.snapshot()
+  context.sessionId = snapshot.sessionId
+  context.runId = snapshot.activeRunId ?? [...snapshot.messages].reverse().find((message) => message.runId)?.runId ?? null
+  const requests = await readUpstreamRequests(config)
+  const requestEvidence = assertPrefixUpstream(context, requests)
+  await assertPrefixFinalProjection(context, requestEvidence)
+  const business = await businessSnapshot(context.api, relevantTaskIds(context))
+  checks.require('prefix.business-no-side-effects', business.fingerprint === context.businessAfterFixture.fingerprint,
+    context.businessAfterFixture.fingerprint, business.fingerprint)
+  await savePhase(context, 'correction-prefix', snapshot, await context.api.history(context.sessionId), business)
+}
+
+async function runCorrectionPrefixPreflight(context) {
+  const {config, checks, browser} = context
+  if (!config.stubDumpDir) throw new Error('STUB_DUMP_DIR is required for correction-prefix-preflight')
+  const existing = (await readdir(config.stubDumpDir)).filter((name) => name.startsWith('req-')).sort()
+  if (existing.length === 0) throw new ScenarioNotRun('NONEMPTY_STUB_FIXTURE_REQUIRED')
+  let rejected = null
+  try {
+    await assertStubDirectoryEmpty(config)
+  } catch (error) {
+    rejected = error
+  }
+  checks.require('preflight.nonempty-rejected-before-actions', rejected?.code === 'STUB_DUMP_DIR_NOT_EMPTY',
+    'existing req-* evidence is rejected before sendPrompt or business actions', {
+      code: rejected?.code ?? null,
+      existing
+    })
+  checks.require('preflight.zero-chat-and-business-actions', browser.requestCounts().chat === 0 && context.businessAfterFixture === null,
+    'no scenario chat or business snapshot was executed', {
+      chat: browser.requestCounts().chat,
+      businessAfterFixture: context.businessAfterFixture
+    })
+  const after = (await readdir(config.stubDumpDir)).filter((name) => name.startsWith('req-')).sort()
+  checks.require('preflight.no-new-upstream-evidence', canonicalJson(after) === canonicalJson(existing),
+    'the rejected preflight does not create upstream requests', {before: existing, after})
+  await context.evidence.json('stub-dir-preflight.json', {status: 'REJECTED', code: rejected.code, existing, chat: 0})
+}
+
 async function runRecoveryScenario(context) {
   const {config, browser, checks} = context
   browser.setPhase('initial')
@@ -1831,6 +4334,8 @@ async function runRecoveryScenario(context) {
     await browser.setHistoryFault('always')
     await browser.reload({waitForHistory: false})
     const firstFailure = await waitAutomaticFinalFailure(context, 'persistent-failure-1')
+    const manualGateHistory = await context.api.history(context.sessionId)
+    await assertManualRecoveryGate(context, 'persistent-failure-gate', manualGateHistory, initialBusiness)
     await assertFinalRecoveryFailure(context, 'persistent-failure-1', initialSignature, initialBusiness, firstFailure)
 
     browser.setPhase('persistent-failure-refresh')
@@ -1862,6 +4367,8 @@ async function runRecoveryScenario(context) {
         && ![...document.querySelectorAll(${JSON.stringify(recoveryRetrySelector)})]
           .some((element) => element.offsetParent !== null || element.getClientRects().length > 0)
     })()`, 'MANUAL_RETRY_NOT_COMPLETED')
+    const manualTerminal = await recoveryPhaseEvidence(context)
+    await assertTerminalRecoveryComplete(context, 'manual-retry-success', manualTerminal.historyEvidence, manualTerminal.business)
     await context.evidence.json('history-network-manual-retry-success.json', {
       ...browser.historyPhase('manual-retry-success'),
       interception: interceptionOff
@@ -1957,7 +4464,7 @@ async function cleanupCancel(context) {
 }
 
 async function cleanup(context) {
-  const result = {status: 'COMPLETE', sessionDeletes: [], historyAfter: null, cancel: null, tasks: [], failures: []}
+  const result = {status: 'COMPLETE', sessionDeletes: [], historyAfter: [], cancel: null, tasks: [], failures: []}
   if (context.config.scenario === 'tool-skipped' && context.businessAfterFixture) {
     try {
       const current = await businessSnapshot(context.api, relevantTaskIds(context))
@@ -1972,12 +4479,13 @@ async function cleanup(context) {
   if (result.cancel.status !== 'COMPLETE' && result.cancel.status !== 'NOT_REQUIRED') {
     result.failures.push({errorName: 'CLEANUP_INCOMPLETE', code: 'CANCEL_CLEANUP_INCOMPLETE', httpStatus: result.cancel.httpStatus, businessCode: result.cancel.businessCode})
   }
-  if (context.sessionId) {
+  const sessionIds = [...new Set([context.sessionId, ...context.additionalSessionIds].filter((id) => typeof id === 'string' && id !== ''))]
+  for (const sessionId of sessionIds) {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        const response = await context.api.request(`cleanup.session.delete.${attempt}`, `/api/ai/session/${encodeURIComponent(context.sessionId)}`, {method: 'DELETE'})
+        const response = await context.api.request(`cleanup.session.delete.${attempt}`, `/api/ai/session/${encodeURIComponent(sessionId)}`, {method: 'DELETE'})
         const body = response.body?.data ?? response.body
-        result.sessionDeletes.push({attempt, httpStatus: response.status, businessCode: businessCode(response.body), complete: body?.complete === true,
+        result.sessionDeletes.push({sessionId, attempt, httpStatus: response.status, businessCode: businessCode(response.body), complete: body?.complete === true,
           deferredCount: Array.isArray(body?.deferred) ? body.deferred.length : null,
           errorCount: Array.isArray(body?.errors) ? body.errors.length : null})
         if (response.status !== 200 || body?.complete !== true || body?.deferred?.length || body?.errors?.length) {
@@ -1988,9 +4496,9 @@ async function cleanup(context) {
       }
     }
     try {
-      const history = await context.api.request('cleanup.history', `/api/ai/history/${encodeURIComponent(context.sessionId)}?latest=1`)
+      const history = await context.api.request('cleanup.history', `/api/ai/history/${encodeURIComponent(sessionId)}?latest=1`)
       const messages = history.body?.data?.messages ?? history.body?.messages
-      result.historyAfter = {httpStatus: history.status, businessCode: businessCode(history.body), messageCount: Array.isArray(messages) ? messages.length : null}
+      result.historyAfter.push({sessionId, httpStatus: history.status, businessCode: businessCode(history.body), messageCount: Array.isArray(messages) ? messages.length : null})
       if (history.status !== 410 && !(history.status === 200 && Array.isArray(messages) && messages.length === 0)) {
         result.failures.push({errorName: 'CLEANUP_INCOMPLETE', code: 'HISTORY_REMAINS_AFTER_DELETE', httpStatus: history.status, businessCode: businessCode(history.body)})
       }
@@ -2028,6 +4536,7 @@ const context = {
   toolCallId: null,
   fixtureTaskId: null,
   createdTaskIds: new Set(),
+  additionalSessionIds: new Set(),
   businessAfterFixture: null,
   auxiliaryErrors: []
 }
@@ -2039,6 +4548,9 @@ try {
   await evidence.json('input.json', {
     scenario: config.scenario,
     locale: config.locale,
+    variant: config.variant || null,
+    historyOrder: config.historyOrder || null,
+    pendingFixture: config.pendingFixture,
     appUrl: config.appUrl,
     baseUrl: config.baseUrl,
     tenantId: config.tenantId,
@@ -2048,23 +4560,38 @@ try {
     executorIdentity: config.executorIdentity,
     codeHead: codeHead(),
     startedAt,
-    faultBoundary: config.scenario.startsWith('recovery-')
-      ? 'CDP history HTTP 503 injection only; no application SSE, store frame, history body or business result is fabricated'
-      : 'real UI prompt through the configured upstream; public history and business APIs; no application SSE injection'
+    faultBoundary: config.scenario === 'recovery-context-usage'
+      ? 'CDP history/context HTTP 503 injection, response-stage delay of real context responses, and existing public loadContext action; no store writes, SSE frames, response bodies or business results are fabricated'
+      : config.scenario.startsWith('recovery-')
+        ? 'scenario-scoped CDP HTTP faults or response-stage delays on public history, runs/current or context plus public API reads; no application SSE, store frame, history body or business result is fabricated'
+        : 'real UI prompt through the configured upstream; public history and business APIs; no application SSE injection'
   })
   await context.browser.open()
   await prepareFixture(context)
   if (config.scenario === 'tool-skipped') context.createdTaskIds.add(context.fixtureTaskId)
   if (toolCases.has(config.scenario)) await runToolScenario(context)
   else if (config.scenario === 'tool-skipped') await runSkippedScenario(context)
+  else if (config.scenario === 'ordinary-skipped') await runOrdinarySkippedScenario(context)
   else if (config.scenario === 'form-mixed-copy') await runFormScenario(context)
+  else if (config.scenario === 'recovery-hitl-gate') await runHitlRecoveryGate(context)
+  else if (config.scenario === 'recovery-stream-refresh') await runStreamRecoveryRefresh(context)
+  else if (config.scenario === 'recovery-mixed-messages') await runMixedMessagesRecovery(context)
+  else if (config.scenario === 'recovery-context-usage') await runContextUsageRecovery(context)
+  else if (config.scenario === 'recovery-stream-history-race') await runStreamHistoryRace(context)
+  else if (config.scenario === 'recovery-pending-integrity') await runPendingIntegrity(context)
+  else if (config.scenario === 'recovery-cross-run-order') await runCrossRunOrder(context)
+  else if (config.scenario === 'recovery-form-queue') await runFormQueueRecovery(context)
+  else if (config.scenario === 'correction-prefix') await runCorrectionPrefixScenario(context)
+  else if (config.scenario === 'correction-prefix-preflight') await runCorrectionPrefixPreflight(context)
+  else if (config.scenario === 'recovery-history-generation') await runHistoryGenerationRace(context)
+  else if (config.scenario === 'recovery-stopped') await runStoppedRecovery(context)
   else await runRecoveryScenario(context)
 } catch (error) {
   if (error instanceof ScenarioNotRun) notRun = {code: safeToken(error.code, 'SCENARIO_NOT_RUN')}
   else fatal = safeError(error)
   try {
     const failedSnapshot = await context.browser.snapshot()
-    await evidence.json('dom-fatal.json', {...failedSnapshot, messages: messageContentSignature(failedSnapshot)})
+    await evidence.json('dom-fatal.json', snapshotEvidence(failedSnapshot))
   } catch (snapshotError) {
     context.auxiliaryErrors.push(safeError(snapshotError, 'FATAL_DOM_CAPTURE_FAILED'))
   }
@@ -2090,7 +4617,7 @@ const cleanupResult = await cleanup(context).catch((error) => ({status: 'INCOMPL
 checks.add('cdp.no-async-errors', context.browser.cdpErrors.length === 0, [], context.browser.cdpErrors)
 checks.add('cdp.no-auxiliary-errors', context.auxiliaryErrors.length === 0, [], context.auxiliaryErrors)
 checks.add('evidence.no-hard-limit-exceeded', context.browser.evidenceLimitExceeded === false,
-  'historyRequests/cdpErrors/networkRequests stay within their independent hard limits', context.browser.evidenceLimitExceeded)
+  'history/context Requests, cdpErrors and networkRequests stay within their independent hard limits', context.browser.evidenceLimitExceeded)
 await evidence.json('network-faults.json', {
   history: {
     count: context.browser.historyRequests.length,
@@ -2099,6 +4626,23 @@ await evidence.json('network-faults.json', {
       && record.responseStatus === 200 && record.finished && record.errorName === null).length,
     limitExceeded: context.browser.evidenceLimitExceeded,
     tail: context.browser.historyRequests.slice(-EVIDENCE_TAIL_LIMIT)
+  },
+  context: {
+    count: context.browser.contextRequests.length,
+    faultCount: context.browser.contextRequests.filter((record) => record.injectedStatus === 503).length,
+    successCount: context.browser.contextRequests.filter((record) => ['CONTINUE_UNCHANGED', 'OBSERVED'].includes(record.action)
+      && record.responseStatus === 200 && record.finished && record.errorName === null).length,
+    limitExceeded: context.browser.evidenceLimitExceeded,
+    tail: context.browser.contextRequests.slice(-EVIDENCE_TAIL_LIMIT)
+  },
+  runCurrent: {
+    count: context.browser.runCurrentRequests.length,
+    successCount: context.browser.runCurrentRequests.filter((record) => ['CONTINUE_UNCHANGED', 'OBSERVED'].includes(record.action)
+      && record.responseStatus === 200 && record.finished && record.errorName === null).length,
+    delayedCount: context.browser.runCurrentRequests.filter((record) => record.delayedResponse === true).length,
+    delayedReleasedCount: context.browser.runCurrentRequests.filter((record) => record.delayedResponseReleased === true).length,
+    limitExceeded: context.browser.evidenceLimitExceeded,
+    tail: context.browser.runCurrentRequests.slice(-EVIDENCE_TAIL_LIMIT)
   },
   publicApiRequestCounts: context.browser.requestCounts(),
   interception: context.browser.interceptionEvidence(),
@@ -2111,9 +4655,12 @@ const summary = {
   schemaVersion: 1,
   scenario: config.scenario,
   locale: config.locale,
+  variant: config.variant || null,
+  historyOrder: config.historyOrder || null,
+  pendingFixture: config.pendingFixture,
   status,
-  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'form-mixed-copy'].includes(config.scenario)
-    ? 'REAL_BROWSER_DOM_STORE_PUBLIC_HISTORY_CLIPBOARD_AND_PUBLIC_BUSINESS_API; configured upstream evidence only; REAL_PROVIDER_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN'
+  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage', 'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue', 'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped'].includes(config.scenario)
+    ? 'REAL_BROWSER_DOM_STORE_PUBLIC_HISTORY_CONTEXT_CLIPBOARD_AND_PUBLIC_BUSINESS_API; configured upstream evidence only; REAL_PROVIDER_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN'
     : 'REAL_BROWSER_DOM_AND_PUBLIC_API_WITH_CDP_HISTORY_HTTP_FAULT; no application SSE fabrication; BACKEND_INTERNAL_FAILURE_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN',
   startedAt,
   finishedAt: new Date().toISOString(),
@@ -2128,8 +4675,14 @@ const summary = {
   notRun,
   assertions: checks.items,
   failedAssertions: checks.failures,
-  networkFaultCount: context.browser.historyRequests.filter((record) => record.injectedStatus === 503).length,
+  networkFaultCount: [...context.browser.historyRequests, ...context.browser.contextRequests, ...context.browser.runCurrentRequests].filter((record) => record.injectedStatus === 503).length,
   historyHttpStatuses: [...new Set(context.browser.historyRequests.map((record) => record.responseStatus))],
+  contextHttpStatuses: [...new Set(context.browser.contextRequests.map((record) => record.responseStatus))],
+  runCurrentHttpStatuses: [...new Set(context.browser.runCurrentRequests.map((record) => record.responseStatus))],
+  delayedResponseCount: [...context.browser.historyRequests, ...context.browser.contextRequests, ...context.browser.runCurrentRequests]
+    .filter((record) => record.delayedResponse === true).length,
+  delayedResponseReleasedCount: [...context.browser.historyRequests, ...context.browser.contextRequests, ...context.browser.runCurrentRequests]
+    .filter((record) => record.delayedResponseReleased === true).length,
   evidenceLimitExceeded: context.browser.evidenceLimitExceeded,
   interception: context.browser.interceptionEvidence(),
   browserClose,

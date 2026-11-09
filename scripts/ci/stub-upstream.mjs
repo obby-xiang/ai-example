@@ -1227,6 +1227,78 @@ function timelineNonprefixDecision(body) {
   return { kind: 'text', text: CLOSING_TEXT, reason: 'timeline-nonprefix 工具结果序列不符（退化为文本）' }
 }
 
+const CORRECTION_MARKER = /\bcorrection=(text|tool-suffix|prefix-prefix|empty-suffix-tool|park-resume)\b/
+const CORRECTION_PREFIX_TEXT = '纠正前缀：先保留这段已经展示的回答。'
+const CORRECTION_SUFFIX_TEXT = '纠正后缀：补齐剩余回答且不得重复前缀。'
+const CORRECTION_FINAL_TEXT = '最终收尾：工具结果与正文顺序完整。'
+const correctionRequestCounts = new Map()
+
+function correctionOf(messages) {
+  const owner = messages.find((message) => message?.role === 'user' && CORRECTION_MARKER.test(textOf(message)))
+  if (!owner) return null
+  const key = textOf(owner)
+  const variant = CORRECTION_MARKER.exec(key)?.[1] ?? null
+  if (!variant) return null
+  const round = (correctionRequestCounts.get(key) ?? 0) + 1
+  correctionRequestCounts.set(key, round)
+  return {variant, round, userText: key}
+}
+
+function correctionToolDecision(body, variant, userText) {
+  const disclosed = new Set(toolNames(body))
+  const tool = variant === 'park-resume' ? 'generative_form' : 'list_config_defs'
+  if (!disclosed.has(tool)) return { kind: 'text', text: CLOSING_TEXT, reason: `correction=${variant} 的工具未披露` }
+  if (variant !== 'park-resume') return { kind: 'tool_call', tool, args: {}, correctionVariant: variant, prefixText: CORRECTION_PREFIX_TEXT, reason: `correction=${variant} 空 suffix 工具 assistant` }
+  const route = (ROUTES.routes || []).find((entry) => entry.id === 'GF-FILTER' && entry.tool === tool)
+  if (!route) return { kind: 'text', text: CLOSING_TEXT, reason: 'correction=park-resume 的 GF-FILTER 路由不存在' }
+  try {
+    return {
+      kind: 'tool_call',
+      tool,
+      args: resolveArguments(route.arguments ?? {}, { taskId: extractTaskId(userText) }),
+      route: route.id,
+      correctionVariant: variant,
+      prefixText: CORRECTION_PREFIX_TEXT,
+      reason: 'correction=park-resume 空 suffix 表单 assistant，等待真实回灌'
+    }
+  } catch {
+    return { kind: 'text', text: CLOSING_TEXT, errorName: 'CORRECTION_FORM_ARGUMENTS_INVALID', reason: 'correction=park-resume 表单参数不可解' }
+  }
+}
+
+function correctionDecision(body) {
+  const messages = messagesOf(body)
+  const selected = correctionOf(messages)
+  if (!selected) return null
+  const {variant, round, userText} = selected
+  if (round === 1) {
+    if (variant === 'tool-suffix') {
+      return {
+        kind: 'tool_call',
+        tool: 'list_config_defs',
+        args: {},
+        correctionVariant: variant,
+        prefixText: CORRECTION_PREFIX_TEXT,
+        reason: 'correction=tool-suffix 带 tool_calls 的 prefix'
+      }
+    }
+    return { kind: 'text', text: CORRECTION_PREFIX_TEXT, correctionVariant: variant, reason: `correction=${variant} 纯文本 prefix` }
+  }
+  if (variant === 'prefix-prefix' && round === 2) {
+    return { kind: 'text', text: CORRECTION_PREFIX_TEXT, correctionVariant: variant, reason: 'correction=prefix-prefix 第二次重复 prefix' }
+  }
+  if (variant === 'empty-suffix-tool' && round === 2) return correctionToolDecision(body, variant, userText)
+  if (variant === 'park-resume' && round === 2) return correctionToolDecision(body, variant, userText)
+  if (round === 2) return { kind: 'text', text: CORRECTION_SUFFIX_TEXT, correctionVariant: variant, reason: `correction=${variant} 第二段 suffix` }
+  return { kind: 'text', text: CORRECTION_FINAL_TEXT, correctionVariant: variant, reason: `correction=${variant} 最终收尾` }
+}
+
+function correctionToolRound(decision, callId, model) {
+  const base = toolRound(decision.tool, decision.args, callId, model)
+  if (!decision.prefixText) return base
+  return [base[0], chunk({ content: decision.prefixText }, null, model), ...base.slice(1)]
+}
+
 /**
  * 命名轮蓝本 / 步数上限的判定覆盖（返回 `null` = 不覆盖，走 `decide` 的路由表）。
  * 纯函数：`--self-check` 用合成 messages 直接断言段序与步数。
@@ -1237,6 +1309,8 @@ function blueprintDecision(body, faults) {
   const toolMessages = messages.filter((m) => m?.role === 'tool').length
   const safetyProbe = safetyProbeDecision(body)
   if (safetyProbe) return safetyProbe
+  const correction = correctionDecision(body)
+  if (correction) return correction
   if (responseBoundaryOf(body) === 'timeline-nonprefix') return timelineNonprefixDecision(body)
   if (faults['turn-text']) {
     return { kind: 'text', text: TURN_TEXT, reason: '命名轮蓝本 turn-text（确定性文本）' }
@@ -1274,6 +1348,7 @@ function framesFor(decision, faults, index, model, usageShape, responseBoundary 
       : textRound(decision.text, model, usageShape)
     return withReasoning(base, faults, model)
   }
+  if (decision.correctionVariant) return correctionToolRound(decision, callId, model)
   if (responseBoundary === 'timeline-nonprefix') {
     return timelineNonprefixToolRound(decision.timelineText, decision.tool, decision.args, callId, model)
   }
