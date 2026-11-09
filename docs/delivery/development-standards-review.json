@@ -4898,6 +4898,40 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "不涉及文本或流式解析。"},
         "verification-review": {"status": "checked", "reason": "仅规范新增，未修改生产代码，编译和动态验证均NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:2592d921bf83253549f1ee6de35b31117548e73c07524d6bd7535d7f51c7508e",
+      "status": "reviewed",
+      "reason": "逐hunk复核创建上限 skipped 的实时结局补发、三态归档探测、裁剪低水位可读性和恢复交棒边界；独立审查agent-1191多轮返修后最终APPROVE。",
+      "reviewedAt": "2026-11-10T02:43:57+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1191、施工agent-1185",
+      "specChanges": [
+        {
+          "change": "续跑结算 CREATE_TASK_TURN_LIMIT 前核对归档中的 tool_result，确认缺失时复用既有帧补发，已存在则不重复。",
+          "reason": "原续跑只回填模型结果和history，实时store缺第二笔工具段并导致完整段序校验失败。",
+          "impact": "第一笔成功创建和第二笔skipped均保留在store/history；普通skipped继续不显示DOM卡，公开帧结构不变。"
+        },
+        {
+          "change": "归档探测区分PRESENT、MISSING、UNKNOWN，读取降级或裁剪不可判时保留SUSPENDED/inFlight并返回既有503，不完成模型交棒。",
+          "reason": "未知或裁剪被误判为缺失会重复发射；误判为已存在又会永久丢失恢复依据。",
+          "impact": "异常保持可重试和WARN可观测，补发仅在确认归档成功后记录INFO，普通工具路径及void toolResult兼容签名不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "复核普通skip与续跑补发共用帧语义，仅创建上限特判，归档失败真实抛出。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RedisFrameStore.java", "status": "checked", "reason": "TrimWatermark区分缺键和读取失败，两个消费方均在读取值前检查readable，TTL与Redis键形未改。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "UNKNOWN映射STATE_UNKNOWN并保留挂起和inFlight，非目标异常继续原路径抛出。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "三态扫描覆盖裁剪、类型化回退和分页预算；保留void toolResult/emit兼容入口，特殊路径确认真实归档。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有scanArchive、replayMeta、skipAsCreateTaskLimit和AiStateUnavailableException，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "新增布尔方法使用is前缀，控制块显式{}，TrimWatermark为不可变record，未改JSON实体或方法规模口径。"},
+        "logging-exception-safety": {"status": "checked", "reason": "未知和归档失败不伪装成功，WARN含runId/toolCallId且独立采样，异常对象保留堆栈。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复完整工具段，普通skipped仍按规格隐藏，不新增用户提示或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "归档判重覆盖重挂和崩溃接管，读取失败/裁剪保持UNKNOWN，无AI数据库访问或Redis TTL变化。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "仅工具结局归档与状态恢复，未修改文本、编码或流式解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1191最终APPROVE；四文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译357个主源BUILD SUCCESS；动态SSE/Redis场景NOT_RUN。"}
+      }
     }
   ]
 }

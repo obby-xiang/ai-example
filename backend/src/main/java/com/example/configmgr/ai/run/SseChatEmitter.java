@@ -744,6 +744,7 @@ public class SseChatEmitter {
     private final AtomicBoolean replayFrameDropWarned = new AtomicBoolean();
 
     private final AtomicBoolean replayReadFailureWarned = new AtomicBoolean();
+    private final AtomicBoolean replayToolResultReadFailureWarned = new AtomicBoolean();
     private final AtomicBoolean replayDegradedWarned = new AtomicBoolean();
     private final AtomicBoolean wakeSubscriptionWarned = new AtomicBoolean();
     private final AtomicBoolean wakeReadFailureWarned = new AtomicBoolean();
@@ -1074,7 +1075,7 @@ public class SseChatEmitter {
      *
      * <h2>缺陷形态</h2>
      * 驱动在 A、客户端重挂到 B（非粘滞代理下任意实例都可 serve reattach）。心跳<b>不发布唤醒、不入档</b>
-     * （见 {@code emitInternal} 的心跳分支），于是 A 处于请求前压缩（L2 摘要单次最长 60s）、慢工具或
+     * （见 {@code isFrameArchivedInternal} 的心跳分支），于是 A 处于请求前压缩（L2 摘要单次最长 60s）、慢工具或
      * 上游静默时，B 的 attach 连接<b>一个帧都收不到</b>：回放是空的（A 还没产出新帧），实时帧在 A 上。
      * 前端 40s 首帧 / 45s 帧间看门狗因此把正常的一轮判死，重连 4 次后报错。
      *
@@ -1159,7 +1160,7 @@ public class SseChatEmitter {
      * {@link #heartbeat(Map)} + 本节的保活节拍），而"心跳序号随到达顺序单调"是可观测面的事实。
      * 旧实现把 {@code heartbeatSeq.incrementAndGet()} 留在锁外，取号与入队之间就有一段窗口 ——
      * 另一个生产者能在这段窗口里拿到更大的号并先入队，订阅者收到的号因此<b>回退</b>（2 之后再来 1）。
-     * 与业务帧同一口径（{@code emitInternal} 的取号也在锁内），这条窗口就不存在了。
+     * 与业务帧同一口径（{@code isFrameArchivedInternal} 的取号也在锁内），这条窗口就不存在了。
      *
      * <p>顺带保留既有的两条不变量：① 心跳与业务帧共享同一把出帧锁 ⇒ "终帧之后再入队一帧心跳"的
      * 窗口不存在（终帧的落档/入队会先把 {@link #terminalFrameSeen} 置位，本节拍看到即停）；
@@ -2522,7 +2523,7 @@ public class SseChatEmitter {
                 log.warn("archive probe compat reader failed runId={} cursor={}", this.runId, cursor, ex);
             return new ArchivePage(ArchiveScan.UNKNOWN, cursor, 0);
         }
-        if (typed == null || typed.degraded()) {
+        if (typed == null || typed.degraded() || typed.truncated()) {
             return new ArchivePage(ArchiveScan.UNKNOWN, cursor, 0);
         }
         List<Map<String, Object>> page = firstReplayPage(typed.frames());
@@ -2531,7 +2532,8 @@ public class SseChatEmitter {
             if (last == null || last.isEmpty()) {
                 return new ArchivePage(ArchiveScan.UNKNOWN, cursor, 0);
             }
-            return new ArchivePage(last.getAsLong() <= cursor ? ArchiveScan.NOT_FOUND : ArchiveScan.UNKNOWN, cursor, 0);
+            return new ArchivePage(last.getAsLong() <= cursor && !isArchiveUnavailableOrTruncated(cursor)
+                    ? ArchiveScan.NOT_FOUND : ArchiveScan.UNKNOWN, cursor, 0);
         }
         long next = cursor;
         for (Map<String, Object> frame : page) {
@@ -2548,14 +2550,23 @@ public class SseChatEmitter {
         }
         if (page.size() < pageLimit) {
             OptionalLong last = lastSeqIfKnownQuietly();
-            if (last != null && last.isPresent() && last.getAsLong() <= next) {
+            if (last != null && last.isPresent() && last.getAsLong() <= next && !isArchiveUnavailableOrTruncated(cursor)) {
                 return new ArchivePage(ArchiveScan.NOT_FOUND, next, page.size());
             }
-            if (last == null || last.isEmpty()) {
+            if (last == null || last.isEmpty() || isArchiveUnavailableOrTruncated(cursor)) {
                 return new ArchivePage(ArchiveScan.UNKNOWN, next, page.size());
             }
         }
         return new ArchivePage(null, next, page.size());
+    }
+
+    private boolean isArchiveUnavailableOrTruncated(long afterSeq) {
+        try {
+            FrameStore.ReadResult meta = this.frames.replayMeta(this.runId, afterSeq);
+            return meta == null || meta.degraded() || meta.truncated();
+        } catch (RuntimeException ex) {
+            return true;
+        }
     }
 
     private ArchiveScan scanArchiveScoped(long afterSeq, int maxFrames,
@@ -2589,9 +2600,9 @@ public class SseChatEmitter {
             scanned += page.readCount();
             cursor = page.cursor();
         }
-        // 预算耗尽：只有末号确认已到尾部才能说"确实没有"。
+        // 预算耗尽：只有末号确认已到尾部且没有不可判裁剪才能说"确实没有"。
         OptionalLong last = lastSeqIfKnownQuietly();
-        if (last != null && last.isPresent() && last.getAsLong() <= cursor) {
+        if (last != null && last.isPresent() && last.getAsLong() <= cursor && !isArchiveUnavailableOrTruncated(cursor)) {
             return ArchiveScan.NOT_FOUND;
         }
         return ArchiveScan.UNKNOWN;
@@ -2622,7 +2633,7 @@ public class SseChatEmitter {
             }
             List<FrameStore.RawEntryFrame> entries = ObjectUtils.getIfNull(page.frames(), List::of);
             if (entries.isEmpty()) {
-                return ArchiveScan.NOT_FOUND;
+                return isArchiveUnavailableOrTruncated(afterSeq) ? ArchiveScan.UNKNOWN : ArchiveScan.NOT_FOUND;
             }
             String previous = cursor;
             for (FrameStore.RawEntryFrame item : entries) {
@@ -2637,7 +2648,7 @@ public class SseChatEmitter {
                 return ArchiveScan.UNKNOWN;
             }
             if (entries.size() < pageLimit) {
-                return ArchiveScan.NOT_FOUND;
+                return isArchiveUnavailableOrTruncated(afterSeq) ? ArchiveScan.UNKNOWN : ArchiveScan.NOT_FOUND;
             }
         }
         return ArchiveScan.UNKNOWN;
@@ -3077,6 +3088,32 @@ public class SseChatEmitter {
         return true;
     }
 
+    public enum ToolResultPresence {
+        PRESENT, MISSING, UNKNOWN
+    }
+
+    /**
+     * 工具结局帧的三态归档判据；读降级或裁剪不可判时绝不宣称缺失。
+     */
+    public ToolResultPresence toolResultPresence(PendingToolCall pending) {
+        String toolCallId = pending == null ? null : pending.getToolCallId();
+        if (toolCallId == null) {
+            return ToolResultPresence.UNKNOWN;
+        }
+        ArchiveScan scan = scanArchive(terminalScanStart(0L), ARCHIVE_SCAN_BUDGET, frame -> "tool_result"
+                .equals(String.valueOf(frame.get("type"))) && toolCallId.equals(frame.get("toolCallId")));
+        if (scan == ArchiveScan.UNKNOWN) {
+            warnOnce(this.replayToolResultReadFailureWarned, "resume tool_result probe incomplete/degraded "
+                            + "runId={} toolCallId={} (incomplete read != absent, not replaying)",
+                    this.runId, toolCallId);
+        }
+        return switch (scan) {
+            case FOUND -> ToolResultPresence.PRESENT;
+            case NOT_FOUND -> ToolResultPresence.MISSING;
+            case UNKNOWN -> ToolResultPresence.UNKNOWN;
+        };
+    }
+
     /**
      * 工具结局帧（P0-1 统一信封的帧面）：既有 {@code ok/result/status} 原样保留，
      * 新增 {@code outcome/code/retryable/target} 四字段。
@@ -3093,7 +3130,7 @@ public class SseChatEmitter {
      * 不传（= null）时帧的键集合与基线逐字一致 —— 旧客户端/旧归档零影响。
      */
     public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result) {
-        toolResult(pending, ok, reused, result, null);
+        isToolResultArchivedInternal(pending, ok, reused, result, null, null);
     }
 
     /**
@@ -3105,7 +3142,7 @@ public class SseChatEmitter {
      */
     public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result,
                            ResultView resultView) {
-        toolResult(pending, ok, reused, result, resultView, null);
+        isToolResultArchivedInternal(pending, ok, reused, result, resultView, null);
     }
 
     /**
@@ -3116,6 +3153,11 @@ public class SseChatEmitter {
      */
     public void toolResult(PendingToolCall pending, boolean ok, boolean reused, String result,
                            ResultView resultView, java.util.Map<String, Object> userTextArgs) {
+        isToolResultArchivedInternal(pending, ok, reused, result, resultView, userTextArgs);
+    }
+
+    public boolean isToolResultArchivedInternal(PendingToolCall pending, boolean ok, boolean reused, String result,
+                                                ResultView resultView, java.util.Map<String, Object> userTextArgs) {
         ToolOutcome outcome = pending.effectiveOutcome();
         // M4：ok 保留在签名里（不改调用面），但契约上它只能是 outcome 的派生值。
         // 传错即 fail-fast —— 否则"帧 ok 与信封 outcome 互相矛盾"会被前端按任一字段误读。
@@ -3160,7 +3202,7 @@ public class SseChatEmitter {
             frame.put("preflight", preflight);
         }
         markModelView(frame, pending.getName(), result);
-        emit(frame);
+        return isFrameArchived(frame);
     }
 
     /**
@@ -3831,7 +3873,7 @@ public class SseChatEmitter {
      * <p>
      * 递增早于 {@link #emitLock}：等锁的 emit 也算在飞，收尾持锁判空时必须能看到它。
      *
-     * <p><b>出帧身份 = 本轮记录身份</b>（{@link #deliveryIdentity()}）：{@link #emitInternal} 下游的
+     * <p><b>出帧身份 = 本轮记录身份</b>（{@link #deliveryIdentity()}）：{@link #isFrameArchivedInternal} 下游的
      * 取号/事件日志/活动锚点（以及锁外发布前的累计）全都按<b>调用线程身份</b>拼键。调用方不一定开过
      * 作用域（定时线程、池化线程、未来新增入口都没有请求身份），漏开就会把帧写进错误键形。
      * 这里统一兜底：与投递路径同源、同一份已解析身份，嵌套时由作用域关闭还原调用方原身份
@@ -3847,6 +3889,10 @@ public class SseChatEmitter {
      * 补一帧 typed error 并收流，让客户端拿到明确失败、按既有路径重挂/停止等待。
      */
     private void emit(Map<String, Object> frame) {
+        isFrameArchived(frame);
+    }
+
+    private boolean isFrameArchived(Map<String, Object> frame) {
         this.emitting.incrementAndGet();
         try {
             TenantUser identity = deliveryIdentity();
@@ -3867,10 +3913,10 @@ public class SseChatEmitter {
                     extra.put("identityUnconfirmed", true);
                     closeSubscribersAfterUnarchivedTerminal(extra, "terminal frame not archived: delivery identity unconfirmed");
                 }
-                return;
+                return false;
             }
             try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-                emitInternal(frame);
+                return isFrameArchivedInternal(frame);
             }
         } finally {
             this.emitting.decrementAndGet();
@@ -4027,18 +4073,18 @@ public class SseChatEmitter {
                 archived.touchHeartbeatActivity(), archived.touchBusinessActivity(), archived.businessActivityStamp());
     }
 
-    private void emitInternal(Map<String, Object> frame) {
+    private boolean isFrameArchivedInternal(Map<String, Object> frame) {
         frame.putIfAbsent("runId", this.runId);
         String frameType = String.valueOf(frame.get("type"));
         if (!RunStore.HEARTBEAT_TYPE.equals(frameType) && !canEmitBusinessFrame(frameType)) {
-            return;
+            return false;
         }
         EmissionOutcome outcome;
         try {
             synchronized (this.emitLock) {
                 if (RunStore.HEARTBEAT_TYPE.equals(frameType)
                         && (this.terminalFrameSeen.get() || this.terminating.get())) {
-                    return;
+                    return false;
                 }
                 outcome = archiveAndFanOut(frame, frameType);
             }
@@ -4046,7 +4092,7 @@ public class SseChatEmitter {
             flushWakeSyncIfUnlocked();
         }
         if (RunStore.HEARTBEAT_TYPE.equals(frameType) && !outcome.archivedOk()) {
-            return;
+            return false;
         }
         scheduleActivityTouch(outcome.touchHeartbeatActivity(), outcome.touchBusinessActivity(),
                 outcome.businessActivityStamp());
@@ -4058,6 +4104,7 @@ public class SseChatEmitter {
             stopAttachKeepalive();
         }
         requestWakePublish(outcome.wakeSeq(), terminal);
+        return outcome.archivedOk();
     }
 
     /**
@@ -4279,7 +4326,7 @@ public class SseChatEmitter {
     /**
      * 把本帧入队给全部订阅者（调用方持 {@code emitLock}），返回该帧的业务号（心跳 = 0）。
      *
-     * <p>从 {@link #emitInternal} 拆出来只为让"锁内"与"锁外发布"的边界在源码上可见：
+     * <p>从 {@link #isFrameArchivedInternal} 拆出来只为让"锁内"与"锁外发布"的边界在源码上可见：
      * 入队必须与取号/落档同锁（FIFO 与 seq 同序），PUBLISH 不必。
      */
     private long fanOutToSubscribers(byte[] payloadBytes, long liveSeq) {

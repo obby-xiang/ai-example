@@ -1483,6 +1483,16 @@ public class ResumeService {
         String text;
         try {
             text = this.toolCallingManager.resolvePending(state.runId, prompt, effective);
+        } catch (AiStateUnavailableException ex) {
+            if (!com.example.configmgr.ai.tool.ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT.equals(effective.effectiveCode())) {
+                throw ex;
+            }
+            log.warn("resume tool result emission unconfirmed; preserving suspended batch for retry runId={} toolCallId={}",
+                    state.runId, effective.getToolCallId(), ex);
+            state.body.put("resumed", false);
+            state.body.put("reason", "TOOL_RESULT_EMISSION_UNAVAILABLE");
+            state.body.put("code", ErrorCodes.AI_REDIS_UNAVAILABLE);
+            return new RebuildItem(new ResumeResult(Outcome.STATE_UNKNOWN, state.body), null, null, null);
         } catch (StreamViolationException ex) {
             if (!StreamViolationException.STATE_UNAVAILABLE.equals(ex.getCode())) throw ex;
             log.warn("cancel state unknown during resume rebuild, closing with UNKNOWN outcome runId={} toolCallId={}",

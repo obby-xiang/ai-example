@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
@@ -1576,13 +1577,17 @@ public class SpToolCallingManager implements ToolCallingManager {
     public ToolResponseMessage.ToolResponse skipAsCreateTaskLimit(String runId, PendingToolCall pending,
                                                                   CreateTaskInRun prior) {
         String message = markCreateTaskLimit(runId, pending, prior);
+        isCreateTaskLimitResultArchived(runId, pending, prior, message);
+        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                modelData(pending, message));
+    }
+
+    private boolean isCreateTaskLimitResultArchived(String runId, PendingToolCall pending, CreateTaskInRun prior, String message) {
         // 前端插值契约（additive）：单轮上限命中时把"本轮已创建的任务号"以结构化形式带上，
         // 与 userTextCode 同一帧；没有 taskId（idUnknown/同批未结算）时不发该键。
         java.util.Map<String, Object> userTextArgs = prior.taskId() == null ? null
                 : java.util.Map.of("taskId", String.valueOf(prior.taskId()));
-        this.registry.of(runId).toolResult(pending, false, false, message, null, userTextArgs);
-        return new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
-                modelData(pending, message));
+        return this.registry.of(runId).isToolResultArchivedInternal(pending, false, false, message, null, userTextArgs);
     }
 
     /**
@@ -3638,6 +3643,10 @@ public class SpToolCallingManager implements ToolCallingManager {
                 && !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
             return applyReconciliation(runId, pending);
         }
+        if (PendingToolCall.SKIPPED.equals(status)
+                && ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT.equals(pending.effectiveCode())) {
+            ensureCreateTaskLimitResultBeforeSettlement(runId, pending);
+        }
         String text = StringUtils.defaultString(pending.getResultText());
         if (log.isDebugEnabled())
             log.debug("resume settlement reuses result runId={} toolCallId={} status={} executedBy={}", runId, pending.getToolCallId(),
@@ -3671,6 +3680,25 @@ public class SpToolCallingManager implements ToolCallingManager {
                         pending.getToolCallId(), ex);
             }
         }
+    }
+
+    private void ensureCreateTaskLimitResultBeforeSettlement(String runId, PendingToolCall pending) {
+        SseChatEmitter.ToolResultPresence presence = this.registry.of(runId).toolResultPresence(pending);
+        if (presence == SseChatEmitter.ToolResultPresence.PRESENT) {
+            return;
+        }
+        if (presence == SseChatEmitter.ToolResultPresence.UNKNOWN) {
+            throw new AiStateUnavailableException("Cannot confirm whether the create_task limit tool_result is archived: "
+                    + pending.getToolCallId());
+        }
+        CreateTaskInRun prior = createTaskAlreadyInRun(runId);
+        String message = markCreateTaskLimit(runId, pending, prior);
+        if (!isCreateTaskLimitResultArchived(runId, pending, prior, message)) {
+            throw new AiStateUnavailableException("Failed to archive the create_task limit tool_result: "
+                    + pending.getToolCallId());
+        }
+        log.info("resume re-sent missing create_task limit tool_result runId={} toolCallId={}", runId,
+                pending.getToolCallId());
     }
 
     /**

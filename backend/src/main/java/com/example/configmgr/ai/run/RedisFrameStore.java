@@ -1307,10 +1307,13 @@ public class RedisFrameStore implements FrameStore {
 	@Override
 	public FrameStore.ReadResult replayMeta(String runId, long afterSeq) {
 		StreamTail tail = streamTailSeq(runId);
-		Long watermark = trimWatermark(runId);
-		boolean truncated = watermark != null && afterSeq + 1L < watermark;
+		TrimWatermark watermark = trimWatermark(runId);
+		if (!watermark.readable()) {
+			return new FrameStore.ReadResult(List.of(), true, false, 0L, 0L);
+		}
+		boolean truncated = watermark.value() != null && afterSeq + 1L < watermark.value();
 		long gapFrom = truncated ? afterSeq + 1L : 0L;
-		long gapTo = truncated ? watermark - 1L : 0L;
+		long gapTo = truncated ? watermark.value() - 1L : 0L;
 		if (!tail.ok()) {
 			return new FrameStore.ReadResult(List.of(), true, truncated, gapFrom, gapTo);
 		}
@@ -1347,10 +1350,13 @@ public class RedisFrameStore implements FrameStore {
 		StreamTail tail = streamTailSeq(runId);
 		int window = effectiveWindow(runId);
 		// 截断只由<b>真实裁剪低水位</b>决定（见 {@link #XTRIM_PREFIX}）：没有水位 ⇒ 不下结论。
-		Long watermark = trimWatermark(runId);
-		boolean truncated = watermark != null && afterSeq + 1L < watermark;
+		TrimWatermark watermark = trimWatermark(runId);
+		if (!watermark.readable()) {
+			return new FrameStore.ReadResult(List.of(), true, false, 0L, 0L);
+		}
+		boolean truncated = watermark.value() != null && afterSeq + 1L < watermark.value();
 		long gapFrom = truncated ? afterSeq + 1L : 0L;
-		long gapTo = truncated ? watermark - 1L : 0L;
+		long gapTo = truncated ? watermark.value() - 1L : 0L;
 		if (!tail.ok()) {
 			if (afterSeq <= 0L) {
 				// I-1：全量回放时末号未知且没有可读帧 —— 不能用"最旧窗口"冒充最新帧，宁可这一拍不回放。
@@ -1501,27 +1507,27 @@ public class RedisFrameStore implements FrameStore {
 		return millis.compareTo(max) < 0 ? millis.add(java.math.BigInteger.ONE) + "-0" : null;
 	}
 
+	private record TrimWatermark(Long value, boolean readable) {
+	}
+
 	/**
-	 * 归档裁剪低水位（{@code ai:xtrim}）：返回幸存首条序号，{@code null} = 从未裁剪过/读不出。
-	 *
-	 * <p>读不出（抖动/键类型错）按"没有水位"处理：<b>不</b>把"读不到"说成"被裁过"，
-	 * 也不据此报截断（宁可不报，也不误报）。
+	 * 归档裁剪低水位（{@code ai:xtrim}）：区分从未裁剪与读取失败。
 	 */
-	private Long trimWatermark(String runId) {
+	private TrimWatermark trimWatermark(String runId) {
 		try {
 			String raw = this.redis.opsForValue().get(trimKey(runId));
 			if (StringUtils.isBlank(raw)) {
-				return null;
+				return new TrimWatermark(null, true);
 			}
 			long value = Long.parseLong(raw.trim());
-			return value > 0L ? value : null;
+			return new TrimWatermark(value > 0L ? value : null, true);
 		}
 		catch (Exception ex) {
 			if (LogSampling.canAcquire("frame-archive-trim-read")) {
 				log.warn("archive trim low-watermark read failed runId={} "
-						+ "(treating as never trimmed, no truncation guess)", runId, ex);
+						+ "(treating as unreadable, not as never trimmed)", runId, ex);
 			}
-			return null;
+			return new TrimWatermark(null, false);
 		}
 	}
 
