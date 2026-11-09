@@ -53,6 +53,14 @@ const HISTORY_REQUEST_LIMIT = 512
 const CDP_ERROR_LIMIT = 64
 const NETWORK_REQUEST_LIMIT = 4096
 const EVIDENCE_TAIL_LIMIT = 16
+const FRONTEND_TOOL_NAMES = new Set(['navigate_to', 'select_definitions', 'confirm_step', 'set_condition', 'generative_form'])
+const HOST_FORM_SCENARIOS = new Set(['tool-select-definitions', 'tool-confirm-step'])
+const EXPECTED_FRONTEND_RESULT_COUNTS = new Map([
+  ['tool-navigate', 1],
+  ['tool-select-definitions', 4],
+  ['tool-confirm-step', 3],
+  ['tool-set-condition', 1]
+])
 
 class ScenarioNotRun extends Error {
   constructor(code) {
@@ -462,10 +470,20 @@ const browserObservationSource = String.raw`
             testId: element.getAttribute('data-testid'),
             state: element.querySelector('[data-card-state]')?.getAttribute('data-card-state') ?? null
           }))
-        const serialized = JSON.stringify({tools, cards})
+        const app = document.getElementById('app')
+        const pinia = app?.__vue_app__?.config.globalProperties.$pinia
+        const workspace = pinia?._s.get('workspace')
+        const workspaceState = workspace ? {
+          pageId: workspace.pageId,
+          taskId: workspace.taskId,
+          step: workspace.step,
+          selectedDefs: [...(workspace.selectedDefs ?? [])],
+          queryConditions: {...(workspace.queryConditions ?? {})}
+        } : null
+        const serialized = JSON.stringify({tools, cards, workspace: workspaceState})
         if (serialized !== previousTools) {
           previousTools = serialized
-          state.samples.push({atMs: Date.now(), tools, cards})
+          state.samples.push({atMs: Date.now(), tools, cards, workspace: workspaceState})
           if (state.samples.length > 2048) state.samples.splice(0, state.samples.length - 2048)
         }
       }
@@ -713,16 +731,19 @@ class CdpPage {
       awaitPromise,
       userGesture: true
     })
-    if (result.exceptionDetails) throw new VerificationFailure('BROWSER_EVALUATION_FAILED')
+    if (result.exceptionDetails) {
+      const exceptionName = safeToken(result.exceptionDetails.exception?.name ?? result.exceptionDetails.exception?.className, 'BrowserException')
+      throw new VerificationFailure('BROWSER_EVALUATION_FAILED', null, exceptionName)
+    }
     return result.result.value
   }
 
-  async waitFor(expression, code, timeoutMs = this.config.timeoutMs) {
+  async waitFor(expression, code, timeoutMs = this.config.timeoutMs, awaitPromise = false) {
     const deadline = Date.now() + timeoutMs
     let lastError = null
     while (Date.now() < deadline) {
       try {
-        const value = await this.evaluate(expression, false)
+        const value = await this.evaluate(expression, awaitPromise)
         if (value) return value
       } catch (error) {
         lastError = error
@@ -744,18 +765,27 @@ class CdpPage {
       const recoveryFailed = ${allowRecoveryFailure} && (ai.historyError != null || ai.currentError != null)
       return (ai.historyLoaded && !ai.loading) || recoveryFailed
     })()`, 'RELOAD_NOT_READY')
-    await this.evaluate(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').expanded = true`, false)
+    await this.waitFor(`(() => {
+      const app = document.getElementById('app')
+      const ai = app?.__vue_app__?.config.globalProperties.$pinia?._s.get('ai')
+      if (!ai) return false
+      ai.expanded = true
+      return true
+    })()`, 'AI_PANEL_EXPAND_NOT_READY')
   }
 
   async click(selector) {
-    const center = await this.evaluate(`(() => {
+    const center = await this.waitFor(`(() => {
       const element = document.querySelector(${JSON.stringify(selector)})
-      if (!element) return null
+      if (!element || element.disabled || element.getAttribute('aria-disabled') === 'true') return null
       element.scrollIntoView({block: 'center', inline: 'center'})
       const rect = element.getBoundingClientRect()
-      return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}
-    })()`, false)
-    if (!center) throw new AssertionFailure('CLICK_TARGET_MISSING')
+      if (rect.width <= 0 || rect.height <= 0) return null
+      const x = rect.x + rect.width / 2
+      const y = rect.y + rect.height / 2
+      const hit = document.elementFromPoint(x, y)
+      return hit && (hit === element || element.contains(hit)) ? {x, y} : null
+    })()`, 'CLICK_TARGET_NOT_INTERACTABLE')
     await this.send('Input.dispatchMouseEvent', {type: 'mousePressed', ...center, button: 'left', buttons: 1, clickCount: 1})
     await this.send('Input.dispatchMouseEvent', {type: 'mouseReleased', ...center, button: 'left', buttons: 0, clickCount: 1})
   }
@@ -767,10 +797,12 @@ class CdpPage {
   }
 
   async snapshot() {
-    return await this.evaluate(`(() => {
-      const pinia = document.getElementById('app').__vue_app__.config.globalProperties.$pinia
-      const ai = pinia._s.get('ai')
-      const workspace = pinia._s.get('workspace')
+    return await this.waitFor(`(() => {
+      const app = document.getElementById('app')
+      const pinia = app?.__vue_app__?.config.globalProperties.$pinia
+      const ai = pinia?._s.get('ai')
+      const workspace = pinia?._s.get('workspace')
+      if (!ai || !workspace) return null
       const visible = (element) => !!(element && (element.offsetParent !== null || element.getClientRects().length > 0))
       return {
         sessionId: ai.sessionId,
@@ -780,19 +812,35 @@ class CdpPage {
         locale: document.documentElement.lang,
         messages: ai.messages.map((message) => ({
           id: message.id,
+          messageId: message.messageId ?? null,
           role: message.role,
           runId: message.runId ?? null,
           content: message.content ?? '',
           done: message.done === true,
           parts: message.parts.map((part) => part.kind === 'tool' ? {
             kind: part.kind,
+            entryId: part.entryId ?? null,
+            seq: part.seq ?? null,
+            seg: part.seg,
             toolCallId: part.toolCallId,
             name: part.name,
+            kind2: part.kind2 ?? null,
             status: part.status,
             args: part.args ?? null,
+            result: part.result ?? null,
+            reason: part.reason ?? null,
+            submittedValues: part.submittedValues ?? null,
             requiresAction: part.requiresAction === true,
             decision: part.decision ?? null
-          } : {kind: part.kind, text: part.text ?? ''})
+          } : {
+            kind: part.kind,
+            entryId: part.entryId ?? null,
+            seq: part.seq ?? null,
+            seg: part.seg,
+            text: part.text ?? '',
+            eventType: part.eventType ?? null,
+            eventId: part.eventId ?? null
+          })
         })),
         workspace: {
           pageId: workspace.pageId,
@@ -806,6 +854,7 @@ class CdpPage {
           return visible(element) && (id.startsWith('tool-card-') || id.startsWith('pending-card-') || id === 'hitl-receipt')
         }).map((element) => ({
           testId: element.getAttribute('data-testid'),
+          bodyTestId: element.querySelector('[data-testid^="ro-body-"],[data-testid^="ro-form-"]')?.getAttribute('data-testid') ?? null,
           state: element.querySelector('[data-card-state]')?.getAttribute('data-card-state') ?? null,
           title: element.querySelector('[data-testid^="card-title-"]')?.innerText ?? null,
           text: element.innerText
@@ -816,7 +865,7 @@ class CdpPage {
           .map((element) => ({testId: element.getAttribute('data-testid'), text: element.innerText})),
         observation: window.__toolCardRecoveryVerification ?? null
       }
-    })()`, false)
+    })()`, 'SNAPSHOT_NOT_READY')
   }
 
   recordInterceptionTransition(enabled, proof) {
@@ -948,10 +997,17 @@ class CdpPage {
         const response = await boundedFetch(`${this.config.cdpUrl}/json/close/${this.targetId}`)
         result.closeHttpStatus = response.status
         if (!response.ok) result.errors.push({errorName: 'HTTP_ERROR', code: 'CDP_TARGET_CLOSE_HTTP_ERROR', httpStatus: response.status, businessCode: null})
-        const listResponse = await boundedFetch(`${this.config.cdpUrl}/json/list`)
-        const targets = await listResponse.json()
-        result.targetAbsent = listResponse.ok && !targets.some((target) => target.id === this.targetId)
-        if (!result.targetAbsent) result.errors.push({errorName: 'TARGET_STILL_PRESENT', code: 'CDP_TARGET_CLOSE_UNVERIFIED', httpStatus: listResponse.status, businessCode: null})
+        let listStatus = null
+        const deadline = Date.now() + 5_000
+        do {
+          const listResponse = await boundedFetch(`${this.config.cdpUrl}/json/list`)
+          listStatus = listResponse.status
+          const targets = await listResponse.json()
+          result.targetAbsent = listResponse.ok && !targets.some((target) => target.id === this.targetId)
+          if (result.targetAbsent) break
+          await sleep(this.config.pollMs)
+        } while (Date.now() < deadline)
+        if (!result.targetAbsent) result.errors.push({errorName: 'TARGET_STILL_PRESENT', code: 'CDP_TARGET_CLOSE_UNVERIFIED', httpStatus: listStatus, businessCode: null})
       } catch (error) {
         result.errors.push(safeError(error, 'CDP_TARGET_CLOSE_FAILED'))
       }
@@ -965,12 +1021,20 @@ class CdpPage {
 
 function messageContentSignature(snapshot) {
   return snapshot.messages.map((message) => ({
-    id: message.id,
+    messageId: message.messageId,
     role: message.role,
     runId: message.runId,
     done: message.done,
     content: textEvidence(message.content),
-    parts: message.parts.map((part) => part.kind === 'tool' ? part : {kind: part.kind, text: textEvidence(part.text)})
+    parts: message.parts.map((part) => {
+      const stablePart = {...part}
+      delete stablePart.entryId
+      return part.kind === 'tool' ? {
+        ...stablePart,
+        result: part.result === null ? null : textEvidence(part.result),
+        reason: part.reason === null ? null : textEvidence(part.reason)
+      } : {...stablePart, text: textEvidence(part.text)}
+    })
   }))
 }
 
@@ -983,7 +1047,8 @@ function targetPart(snapshot, toolCallId) {
 }
 
 function targetCard(snapshot, toolCallId) {
-  return snapshot.cards.filter((card) => card.testId === `tool-card-${toolCallId}` || card.testId === `pending-card-${toolCallId}`)
+  return snapshot.cards.filter((card) => card.testId === `tool-card-${toolCallId}` || card.testId === `pending-card-${toolCallId}`
+    || (card.testId === 'hitl-receipt' && [`ro-body-${toolCallId}`, `ro-form-${toolCallId}`].includes(card.bodyTestId)))
 }
 
 function bodyPartsForCopy(message) {
@@ -1061,6 +1126,10 @@ async function prepareFixture(context) {
     const ai = pinia._s.get('ai')
     return workspace.taskId === ${context.fixtureTaskId} && workspace.step === '${expectedStep}' && ai.historyLoaded
   })()`, 'public export fixture page readiness')
+  await context.browser.waitFor(`(async () => {
+    const {getPageHandler} = await import('/src/stores/workspace.ts')
+    return getPageHandler('export.taskDetailReady')?.({}) === true
+  })()`, 'EXPORT_TASK_DETAIL_NOT_READY', context.config.timeoutMs, true)
 }
 
 function promptFor(context) {
@@ -1086,6 +1155,112 @@ async function waitForSucceededTool(context, toolName) {
   if (snapshot.failed) throw new AssertionFailure(`${toolName} did not succeed: ${JSON.stringify(snapshot.failed)}`)
   context.runId = (await context.browser.snapshot()).activeRunId
   return snapshot.toolCallId
+}
+
+async function driveHostFormsToTerminal(context, toolCallId) {
+  const {browser, config, checks} = context
+  const submitted = []
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const state = await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const host = ai.messages.find((message) => message.parts.some((part) => part.toolCallId === '${toolCallId}'))
+      const active = ai.activeForm
+      if (active?.toolCallId && ai.messages.some((message) => message.parts.some((part) => part.toolCallId === active.toolCallId
+        && part.name === 'generative_form' && part.requiresAction === true))) {
+        const fields = Array.isArray(active.form?.fields) ? active.form.fields.map((field) => ({
+          key: field.key, type: field.type, required: field.required === true
+        })) : []
+        return {form: {toolCallId: active.toolCallId, fields}}
+      }
+      if (ai.loading === false && !active && ai.queuedForms.length === 0 && host?.done === true) return {terminal: true}
+      return null
+    })()`, 'HOST_CONTINUATION_TERMINAL_NOT_REACHED')
+    if (state.terminal) {
+      const expected = HOST_FORM_SCENARIOS.has(config.scenario) ? 1 : 0
+      checks.require('live.host-form.terminal-count', submitted.length === expected,
+        `exactly ${expected} host condition form(s) submitted before terminal`, submitted)
+      return
+    }
+    const form = state.form
+    const expectedFormId = `host-cond-form-${context.runId}-${context.fixtureTaskId}`
+    checks.require('live.host-form.expected-purpose', HOST_FORM_SCENARIOS.has(config.scenario)
+      && form.toolCallId === expectedFormId && form.fields.length === 1
+      && form.fields[0].key === 'conditions' && form.fields[0].type === 'text' && form.fields[0].required === false,
+    'only the deterministic blank host condition form is driven for select_definitions/confirm_step', {expectedFormId, form})
+    await browser.waitFor(`document.querySelector('[data-testid="gf-field-${form.toolCallId}-conditions"]')?.value === ''`,
+      'HOST_CONDITION_BLANK_FIELD_NOT_READY')
+    await browser.click(`[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]`)
+    submitted.push(form.toolCallId)
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const part = ai.messages.flatMap((message) => message.parts).find((candidate) => candidate.toolCallId === '${form.toolCallId}')
+      return part?.requiresAction === false && ai.activeForm?.toolCallId !== '${form.toolCallId}'
+    })()`, 'HOST_CONDITION_SUBMISSION_NOT_ACCEPTED')
+  }
+  throw new AssertionFailure('HOST_FORM_DRIVE_LIMIT_EXCEEDED')
+}
+
+async function driveSkippedHostContinuation(context) {
+  const {browser, checks} = context
+  const submitted = []
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const state = await browser.waitFor(`(() => {
+      const pinia = document.getElementById('app').__vue_app__.config.globalProperties.$pinia
+      const ai = pinia._s.get('ai')
+      const workspace = pinia._s.get('workspace')
+      const active = ai.activeForm
+      if (active?.toolCallId && ai.messages.some((message) => message.parts.some((part) => part.toolCallId === active.toolCallId
+        && part.name === 'generative_form' && part.requiresAction === true))) {
+        const fields = Array.isArray(active.form?.fields) ? active.form.fields.map((field) => ({
+          key: field.key, type: field.type, required: field.required === true
+        })) : []
+        return {form: {toolCallId: active.toolCallId, taskId: workspace.taskId, fields}}
+      }
+      const startPending = ai.messages.flatMap((message) => message.parts).some((part) => part.kind === 'tool'
+        && part.name === 'start_export' && part.status === 'pending' && part.requiresAction === true)
+      if (startPending) return {startPending: true}
+      const createParts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool' && part.name === 'create_task')
+      const terminal = ['succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
+      if (ai.loading === false && !active && ai.queuedForms.length === 0 && createParts.length > 0
+        && createParts.every((part) => terminal.includes(part.status) && part.requiresAction === false)
+        && ai.messages.some((message) => message.role === 'assistant' && message.done === true)) return {terminal: true}
+      return null
+    })()`, 'SKIPPED_HOST_CONTINUATION_NOT_READY')
+    if (state.terminal || state.startPending) {
+      if (state.startPending) {
+        checks.require('live.host-forms.before-start-confirmation', submitted.filter((form) => form.purpose === 'SELECT_DEFINITIONS').length === 1
+          && submitted.filter((form) => form.purpose === 'SET_CONDITIONS').length === 1,
+        'the full host chain submits one CURRENCY selection and one blank condition before start_export waits unapproved', submitted)
+      }
+      await context.evidence.json('host-form-submissions.json', {startPending: state.startPending === true, submitted})
+      return
+    }
+    const form = state.form
+    const purpose = form.toolCallId === `host-def-form-${form.taskId}` ? 'SELECT_DEFINITIONS'
+      : form.toolCallId.startsWith(`host-cond-form-${context.runId}-${form.taskId}`) ? 'SET_CONDITIONS' : null
+    checks.require('live.host-form.supported-purpose', purpose !== null, 'only deterministic host definition/condition forms are driven', form)
+    if (purpose === 'SELECT_DEFINITIONS') {
+      checks.require('live.host-form.definition-field', form.fields.length === 1 && form.fields[0].key === 'defCodes'
+        && form.fields[0].type === 'multi_select' && form.fields[0].required === true, 'required flat defCodes multi_select', form)
+      const option = `[data-testid="gf-field-${form.toolCallId}-defCodes-CURRENCY"]`
+      await browser.waitFor(`document.querySelector('${option}')?.disabled === false`, 'HOST_DEFINITION_CURRENCY_NOT_READY')
+      if (await browser.evaluate(`document.querySelector('${option}').checked === false`, false)) await browser.click(option)
+      await browser.waitFor(`document.querySelector('${option}')?.checked === true`, 'HOST_DEFINITION_CURRENCY_NOT_SELECTED')
+    } else {
+      checks.require('live.host-form.condition-field', form.fields.length === 1 && form.fields[0].key === 'conditions'
+        && form.fields[0].type === 'text' && form.fields[0].required === false, 'optional blank conditions text field', form)
+      await browser.waitFor(`document.querySelector('[data-testid="gf-field-${form.toolCallId}-conditions"]')?.value === ''`,
+        'HOST_CONDITION_BLANK_FIELD_NOT_READY')
+    }
+    await browser.click(`[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]`)
+    submitted.push({toolCallId: form.toolCallId, purpose})
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      const part = ai.messages.flatMap((message) => message.parts).find((candidate) => candidate.toolCallId === '${form.toolCallId}')
+      return part?.requiresAction === false && ai.activeForm?.toolCallId !== '${form.toolCallId}'
+    })()`, 'SKIPPED_HOST_FORM_SUBMISSION_NOT_ACCEPTED')
+  }
+  throw new AssertionFailure('SKIPPED_HOST_FORM_DRIVE_LIMIT_EXCEEDED')
 }
 
 async function copyMessageAndAssert(context, phase, messageId, {requiredTitle = null, forbiddenTitle = null, requiredTexts = [], expectedText = null} = {}) {
@@ -1197,35 +1372,42 @@ function assertBusinessForTool(context, phase, business, snapshot) {
   })
   const task = business.allTasks.find((entry) => entry.id === context.fixtureTaskId)
   const before = baseline.allTasks.find((entry) => entry.id === context.fixtureTaskId)
+  const liveWorkspace = phase === 'live-succeeded' && context.targetLiveWorkspace
+    ? context.targetLiveWorkspace : snapshot.workspace
   checks.require(`${phase}.fixture-task.present`, !!task && !!before, context.fixtureTaskId, task ?? null)
   checks.require(`${phase}.fixture.zero-jobs`, task.jobs.length === 0, 0, task.jobs)
   if (selected.tool === 'select_definitions') {
-    checks.require(`${phase}.business.public-selection-unchanged`, canonicalJson(task) === canonicalJson(before),
-      'public task unchanged by draft-only select_definitions', {before, task})
+    const item = task.items.find((entry) => entry.defCode === 'CURRENCY')
+    checks.require(`${phase}.business.host-selection-and-blank-condition-complete`, task.currentStep === 'EXPORT'
+      && before.currentStep === 'SELECT_DEFS' && before.items.length === 0 && task.items.length === 1
+      && canonicalJson(item?.condition) === canonicalJson(textEvidence('{}')),
+    'host continuation persists CURRENCY and the submitted blank condition, then advances the fixture to EXPORT', {before, task})
     if (phase === 'live-succeeded') {
-      checks.require(`${phase}.workspace.selection-draft-only-live`, snapshot.workspace.selectedDefs.length === 1
-        && snapshot.workspace.selectedDefs[0] === 'CURRENCY',
-      'live workspace contains exactly the CURRENCY draft; no cross-refresh draft requirement', snapshot.workspace.selectedDefs)
+      checks.require(`${phase}.workspace.selection-draft-only-live`, liveWorkspace.selectedDefs.length === 1
+        && liveWorkspace.selectedDefs[0] === 'CURRENCY',
+      'target select_definitions succeeds with exactly CURRENCY in the live workspace', liveWorkspace.selectedDefs)
     }
   }
   if (selected.tool === 'confirm_step') {
-    checks.require(`${phase}.business.step-advanced-with-preselected-fixture`, task.currentStep === 'QUERY_COND'
+    const item = task.items.find((entry) => entry.defCode === 'CURRENCY')
+    checks.require(`${phase}.business.host-blank-condition-and-export-complete`, task.currentStep === 'EXPORT'
       && before.currentStep === 'SELECT_DEFS'
-      && before.items.filter((item) => item.defCode === 'CURRENCY').length === 1
-      && task.items.filter((item) => item.defCode === 'CURRENCY').length === 1,
-    'preselected CURRENCY remains while confirm_step advances SELECT_DEFS to QUERY_COND exactly once', {before, task})
+      && before.items.filter((entry) => entry.defCode === 'CURRENCY').length === 1
+      && task.items.filter((entry) => entry.defCode === 'CURRENCY').length === 1
+      && canonicalJson(item?.condition) === canonicalJson(textEvidence('{}')),
+    'confirm_step reaches QUERY_COND, then the real blank host form is submitted and the fixture advances to EXPORT', {before, task})
   }
   if (selected.tool === 'set_condition') {
     checks.require(`${phase}.business.public-condition-unchanged`, canonicalJson(task) === canonicalJson(before),
       'public task unchanged by draft-only set_condition', {before, task})
     if (phase === 'live-succeeded') {
-      const drafts = snapshot.workspace.queryConditions
+      const drafts = liveWorkspace.queryConditions
       const condition = drafts.CURRENCY
       const fields = Array.isArray(condition?.fields) ? condition.fields : []
       checks.require(`${phase}.workspace.exact-cny-condition-only-live`, Object.keys(drafts).length === 1
         && fields.length === 1 && fields[0]?.fieldCode === 'code' && fields[0]?.operator === 'EQ' && fields[0]?.value === 'CNY'
         && (condition?.scopeKeys === undefined || (Array.isArray(condition.scopeKeys) && condition.scopeKeys.length === 0)),
-      'live workspace has only CURRENCY code EQ CNY and no additional condition draft', drafts)
+      'target set_condition succeeds with only CURRENCY code EQ CNY in the live workspace', drafts)
     }
   }
 }
@@ -1248,9 +1430,10 @@ async function assertToolPhase(context, phase, toolName, toolCallId) {
   checks.require(`${phase}.dom.single-succeeded-card`, cards.length === 1 && cards[0].state === 'succeeded',
     'one visible succeeded DOM card', cards)
   const occurrences = historyToolOccurrences(history, toolCallId)
-  checks.require(`${phase}.history.executed-once`, occurrences.states.length === 1 && occurrences.states[0] === 'EXECUTED'
+  const expectedStatus = FRONTEND_TOOL_NAMES.has(toolName) ? 'FRONTEND_RESULT' : 'EXECUTED'
+  checks.require(`${phase}.history.tool-channel-result-once`, occurrences.states.length === 1 && occurrences.states[0] === expectedStatus
     && occurrences.responses.length === 1 && occurrences.responses[0] === toolName,
-  {states: ['EXECUTED'], responses: [toolName]}, occurrences)
+  {states: [expectedStatus], responses: [toolName]}, occurrences)
   checks.require(`${phase}.locale`, snapshot.locale === context.config.locale, context.config.locale, snapshot.locale)
   assertBusinessForTool(context, phase, business, snapshot)
   const requiredTexts = assertMixedBodyInHistory(context, phase, target.message, history)
@@ -1277,11 +1460,30 @@ async function runToolScenario(context) {
   })()`, false)
   checks.require('live.running.store-and-dom-state-observed', runningEvidence.length > 0,
     'store status=running and visible DOM card state=running captured before succeeded', runningEvidence)
+  const targetLiveWorkspaceSamples = await browser.evaluate(`(() => {
+    const samples = window.__toolCardRecoveryVerification?.samples ?? []
+    return samples.filter((sample) => sample.workspace && sample.tools.some((part) => part.toolCallId === '${toolCallId}'
+      && ['running', 'succeeded'].includes(part.status))).map((sample) => ({
+      atMs: sample.atMs,
+      tools: sample.tools.filter((part) => part.toolCallId === '${toolCallId}'),
+      workspace: sample.workspace
+    }))
+  })()`, false)
+  const targetSucceededWorkspaceSamples = targetLiveWorkspaceSamples.filter((sample) => sample.tools.some((part) => part.status === 'succeeded'))
+  const targetLiveWorkspace = (targetSucceededWorkspaceSamples.find((sample) => Object.keys(sample.workspace.queryConditions ?? {}).length > 0)
+    ?? targetSucceededWorkspaceSamples[0])?.workspace ?? null
+  checks.require('live.tool-succeeded.workspace-observed', targetLiveWorkspace !== null,
+    'a real observation sample contains the running/succeeded target and its live workspace', targetLiveWorkspaceSamples)
+  context.targetLiveWorkspace = targetLiveWorkspace
+  await context.evidence.json('workspace-live.json', targetLiveWorkspaceSamples)
+  await driveHostFormsToTerminal(context, toolCallId)
   const phases = []
   phases.push(await assertToolPhase(context, 'live-succeeded', selected.tool, toolCallId))
   const requestBaseline = browser.requestCounts()
   checks.require('live.single-chat', requestBaseline.chat === 1, 1, requestBaseline)
-  checks.require('live.single-frontend-result', requestBaseline.frontendToolResult === 1, 1, requestBaseline)
+  const expectedFrontendResults = EXPECTED_FRONTEND_RESULT_COUNTS.get(config.scenario)
+  checks.require('live.exact-frontend-results', requestBaseline.frontendToolResult === expectedFrontendResults,
+    expectedFrontendResults, requestBaseline)
   for (const phase of ['history', 'refresh-1', 'refresh-2']) {
     browser.setPhase(phase)
     await browser.reload()
@@ -1372,12 +1574,17 @@ async function runSkippedScenario(context) {
   await approveCreateTasks(context)
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
-    return ai.loading === false && ai.messages.some((message) => message.done === true)
+    const parts = ai.messages.flatMap((message) => message.parts).filter((part) => part.kind === 'tool' && part.name === 'create_task')
+    const terminal = ['succeeded', 'rejected', 'blocked', 'expired', 'cancelled', 'unknown', 'failed', 'skipped']
+    return parts.length > 0 && parts.every((part) => terminal.includes(part.status) && part.requiresAction === false)
   })()`, 'SKIPPED_TERMINAL_NOT_REACHED')
+  await driveSkippedHostContinuation(context)
   const snapshot = await browser.snapshot()
   const parts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.name === 'create_task')
+  checks.require('live.two-create-task-parts', parts.length === 2, 'multi-card=2 yields exactly two create_task parts', parts)
   const skipped = parts.filter((part) => part.status === 'skipped' && part.decision === null && part.requiresAction === false)
-  if (skipped.length !== 1) throw new ScenarioNotRun('ORDINARY_SKIPPED_NOT_FORMED')
+  checks.require('live.one-ordinary-skipped', skipped.length === 1,
+    'the second legal create_task becomes one ordinary skipped part after backend protocol settlement', parts)
   context.toolCallId = skipped[0].toolCallId
   context.runId = snapshot.activeRunId
   const approved = parts.find((part) => part.status === 'succeeded')
@@ -1410,6 +1617,17 @@ function hasCompleteFormBody(message) {
 
 async function assertFormPhase(context, phase, toolCallId) {
   const {browser, api, checks} = context
+  await browser.waitFor(`(() => {
+    const visible = (element) => !!(element && (element.offsetParent !== null || element.getClientRects().length > 0))
+    const cards = [...document.querySelectorAll('article[data-testid]')].filter((element) => {
+      const id = element.getAttribute('data-testid')
+      const receipt = id === 'hitl-receipt' && element.querySelector('[data-testid="ro-body-${toolCallId}"],[data-testid="ro-form-${toolCallId}"]')
+      return id === 'tool-card-${toolCallId}' || id === 'pending-card-${toolCallId}' || receipt
+    }).filter(visible)
+    const state = cards[0]?.querySelector('[data-card-state]')?.getAttribute('data-card-state')
+    const testId = cards[0]?.getAttribute('data-testid')
+    return cards.length === 1 && (state === 'succeeded' || (testId === 'hitl-receipt' && state === 'submitted'))
+  })()`, 'FORM_SUCCEEDED_CARD_NOT_VISIBLE')
   const snapshot = await browser.snapshot()
   const historyEvidence = await api.history(snapshot.sessionId)
   const history = requiredHistory(historyEvidence)
@@ -1426,8 +1644,9 @@ async function assertFormPhase(context, phase, toolCallId) {
   checks.require(`${phase}.form.store-succeeded`, target?.part.status === 'succeeded' && target.message.done,
     'submitted generative form succeeded in a terminal assistant message', target ?? null)
   const cards = targetCard(snapshot, toolCallId)
-  checks.require(`${phase}.form.single-succeeded-card`, cards.length === 1 && cards[0].state === 'succeeded',
-    'one visible succeeded generative form card', cards)
+  checks.require(`${phase}.form.single-succeeded-card`, cards.length === 1
+    && (cards[0].state === 'succeeded' || (cards[0].testId === 'hitl-receipt' && cards[0].state === 'submitted')),
+  'one visible succeeded tool card or submitted generative form receipt', cards)
   const occurrences = historyToolOccurrences(history, toolCallId)
   checks.require(`${phase}.form.history-frontend-result-once`, occurrences.states.length === 1
     && occurrences.states[0] === 'FRONTEND_RESULT' && occurrences.responses.length === 1
@@ -1472,9 +1691,9 @@ async function runFormScenario(context) {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     const host = ai.messages.find((message) => message.parts.some((part) => part.toolCallId === '${pending.toolCallId}'))
     if (!host) return false
-    const body = host.parts.filter((part) => part.kind === 'text').map((part) => part.text).join('\n\n')
+    const bodyParts = host.parts.filter((part) => part.kind === 'text').map((part) => part.text)
     return ai.loading === false && host.done === true
-      && ${JSON.stringify(FORM_BODY_PARTS)}.every((expected) => body.includes(expected))
+      && ${JSON.stringify(FORM_BODY_PARTS)}.every((expected) => bodyParts.some((text) => text.includes(expected)))
   })()`, 'FORM_MIXED_TERMINAL_AND_BODY_NOT_COMPLETE')
   const phases = [await assertFormPhase(context, 'live', pending.toolCallId)]
   const requestBaseline = browser.requestCounts()
@@ -1491,6 +1710,13 @@ async function runFormScenario(context) {
     phases[0].historySignature, phases.map((phase) => phase.historySignature))
   checks.require('refresh.form-business-stable', phases.every((phase) => phase.business.fingerprint === phases[0].business.fingerprint),
     phases[0].business.fingerprint, phases.map((phase) => phase.business.fingerprint))
+}
+
+async function waitRecoveryMessageProjection(browser, expectedCount) {
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.messages.length === ${expectedCount} && ai.messages.every((message) => message.done === true)
+  })()`, 'RECOVERY_MESSAGE_PROJECTION_NOT_READY')
 }
 
 function assertNoRecoveryNotices(context, phase, snapshot) {
@@ -1523,6 +1749,7 @@ async function waitAutomaticFinalFailure(context, phase) {
 }
 
 async function assertFinalRecoveryFailure(context, phase, initialSignature, initialBusiness, network) {
+  await waitRecoveryMessageProjection(context.browser, JSON.parse(initialSignature).length)
   const snapshot = await context.browser.snapshot()
   context.checks.require(`${phase}.final-failure.single-notice`, snapshot.recoverySurfaces.length <= 1,
     'at most one concise recovery notice', snapshot.recoverySurfaces)
@@ -1586,6 +1813,7 @@ async function runRecoveryScenario(context) {
     checks.require('automatic-success.no-pending-after-recovery', settledNetwork.pendingCount === 0
       && settledNetwork.faultCount === 1 && settledNetwork.successCount >= 1,
     'automatic recovery settled with no pending history request and exactly one 503', settledNetwork)
+    await waitRecoveryMessageProjection(browser, completed.messages.length)
     const recovered = await browser.snapshot()
     assertNoRecoveryNotices(context, 'automatic-success-attempt', recovered)
     checks.require('automatic-success.content-stable', canonicalJson(messageContentSignature(recovered)) === initialSignature,
@@ -1643,6 +1871,7 @@ async function runRecoveryScenario(context) {
   for (const phase of ['refresh-1', 'refresh-2']) {
     browser.setPhase(phase)
     await browser.reload()
+    await waitRecoveryMessageProjection(browser, completed.messages.length)
     const snapshot = await browser.snapshot()
     assertNoRecoveryNotices(context, phase, snapshot)
     checks.require(`${phase}.content-stable`, canonicalJson(messageContentSignature(snapshot)) === initialSignature,
@@ -1833,6 +2062,12 @@ try {
 } catch (error) {
   if (error instanceof ScenarioNotRun) notRun = {code: safeToken(error.code, 'SCENARIO_NOT_RUN')}
   else fatal = safeError(error)
+  try {
+    const failedSnapshot = await context.browser.snapshot()
+    await evidence.json('dom-fatal.json', {...failedSnapshot, messages: messageContentSignature(failedSnapshot)})
+  } catch (snapshotError) {
+    context.auxiliaryErrors.push(safeError(snapshotError, 'FATAL_DOM_CAPTURE_FAILED'))
+  }
 } finally {
   if (context.fixtureTaskId) context.createdTaskIds.add(context.fixtureTaskId)
   try {
