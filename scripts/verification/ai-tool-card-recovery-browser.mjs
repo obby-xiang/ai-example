@@ -3363,22 +3363,36 @@ async function assertPendingTrajectory(context, phase, toolCallIds, {requireDeci
       previousPartPresent: null,
       previousDomPresent: null,
       partSeen: false,
-      domSeen: false
+      domSeen: false,
+      partVanished: false,
+      domVanished: false
     }
     for (const sample of samples) {
       if (typeof sample.observerId !== 'string' || !Number.isSafeInteger(sample.sequence) || sample.sequence <= 0) {
         throw new AssertionFailure('OBSERVER_SEQUENCE_MISSING')
       }
       if (track.observerId === sample.observerId && sample.sequence <= track.lastSequence) continue
+      // 刷新会换页/换 observer：新页首帧的“不在场”是页面重建过程，不是同页 1→0；
+      // 因此换 observer 时只重置在场基线与消失标记，保留 previousPart 以便跨刷新的
+      // “已决不再复活”“批准/提交转已决”事实仍可判定。
+      if (track.observerId !== null && track.observerId !== sample.observerId) {
+        track.previousPartPresent = null
+        track.previousDomPresent = null
+        track.partVanished = false
+        track.domVanished = false
+      }
       const part = sample.tools.find((candidate) => candidate.toolCallId === toolCallId) ?? null
       const partPresent = part !== null
       const domPresent = sample.cards.some((card) => card.testId === `tool-card-${toolCallId}` || card.testId === `pending-card-${toolCallId}`)
       track.partSeen ||= partPresent
       track.domSeen ||= domPresent
-      if (track.previousPartPresent === false && partPresent) {
+      // 只在“确实出现过之后又消失、随后再次出现”时判 1→0→1；单纯迟到出现不是违规。
+      if (track.previousPartPresent === true && !partPresent) track.partVanished = true
+      if (track.partVanished && partPresent) {
         violations.push({atMs: sample.atMs, toolCallId, code: 'STORE_PART_ONE_ZERO_ONE'})
       }
-      if (track.previousDomPresent === false && domPresent) {
+      if (track.previousDomPresent === true && !domPresent) track.domVanished = true
+      if (track.domVanished && domPresent) {
         violations.push({atMs: sample.atMs, toolCallId, code: 'DOM_ONE_ZERO_ONE'})
       }
       presenceTransitions.push({
@@ -3403,6 +3417,8 @@ async function assertPendingTrajectory(context, phase, toolCallIds, {requireDeci
         }
         if (track.previousPart?.requiresAction === true && !part.requiresAction) {
           legalTransitions.push({atMs: sample.atMs, toolCallId, kind: 'DECIDED', status: part.status, decision: part.decision})
+          context.pendingDecidedToolCalls ??= new Set()
+          context.pendingDecidedToolCalls.add(toolCallId)
         }
         const message = sample.recovery?.messages?.find((candidate) => candidate.id === part.messageId)
         const dom = sample.operations?.messages?.find((candidate) => candidate.messageId === part.messageId)
@@ -3425,8 +3441,17 @@ async function assertPendingTrajectory(context, phase, toolCallIds, {requireDeci
   context.checks.require(`${phase}.pending-trajectory-stable`, violations.length === 0,
     'no store part/DOM 1→0→1, pending running, requiresAction resurrection or inserted working state', violations)
   if (requireDecision) {
-    context.checks.require(`${phase}.legal-requires-action-false-transition`, legalTransitions.some((entry) => entry.kind === 'DECIDED'),
-      'a real reject/cancel transition is distinguished from later stable history', legalTransitions)
+    // 决定发生在上一阶段，刷新后的阶段只能看到“已决稳定态”；判定必须跨阶段累计。
+    context.pendingDecidedToolCalls ??= new Set()
+    for (const entry of legalTransitions) {
+      if (entry.kind === 'DECIDED') context.pendingDecidedToolCalls.add(entry.toolCallId)
+    }
+    context.checks.require(`${phase}.legal-requires-action-false-transition`,
+      toolCallIds.every((id) => context.pendingDecidedToolCalls.has(id)),
+      'a real reject/cancel transition is distinguished from later stable history', {
+        legalTransitions,
+        decidedToolCalls: [...context.pendingDecidedToolCalls]
+      })
   }
   return evidence
 }
@@ -3915,9 +3940,18 @@ async function runStreamHistoryRace(context) {
   const initial = await browser.snapshot()
   context.sessionId = initial.sessionId
   context.runId = initial.activeRunId
-  const initialHistory = requiredHistory(await context.api.history(initial.sessionId))
-  const prefix = initialHistory.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
-    .map((message) => message.text ?? message.content ?? '').join('')
+  // 流式 history 前缀由后端按增量持久化节奏写入（实测约 2s 后出现），单次读取会与首个 delta 竞争；
+  // 这里按 timeout 轮询，直到前缀出现（真实不持久化则轮询超时才 FAIL）。
+  let initialHistory = requiredHistory(await context.api.history(initial.sessionId))
+  let prefix = ''
+  const prefixDeadline = Date.now() + context.config.timeoutMs
+  while (Date.now() < prefixDeadline) {
+    prefix = initialHistory.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
+      .map((message) => message.text ?? message.content ?? '').join('')
+    if (prefix.length > 0) break
+    await sleep(context.config.pollMs)
+    initialHistory = requiredHistory(await context.api.history(initial.sessionId))
+  }
   checks.require('initial-stream.history-prefix-nonempty', prefix.length > 0,
     'the real streaming history has a persisted text prefix before runs/current is delayed', textEvidence(prefix))
   const mirror = await mirrorState(browser, initial.sessionId)
