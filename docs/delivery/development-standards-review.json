@@ -4415,6 +4415,45 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "请求与响应按Node流逐chunk转发，不解析或重组SSE文本，不做二次转码。"},
         "verification-review": {"status": "checked", "reason": "独立复审APPROVE，node --check与diff --check通过；代理网络、浏览器和C-138动态验证NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:27aa57e4743b24949e6e115f8014035fb44c2618f9367f70b64f7dbbef0f8f4a",
+      "status": "reviewed",
+      "reason": "逐hunk复核结构化上游事件、五场景独立驱动、固定蓝本、history/run/API/日志/清理证据；桩独立复审agent-1158与驱动最终复审agent-1159均APPROVE。",
+      "reviewedAt": "2026-11-09T09:42:39+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1158、agent-1159",
+      "specChanges": [
+        {
+          "change": "上游事件由原始chunk/raw改为白名单choices/toolCalls/usage及文本SHA-256与码点长度，outcome严格为实际帧数N+1。",
+          "reason": "原始响应和异常消息不得进入证据，且写异常、late帧和异步结束必须保持序号与结局真实。",
+          "impact": "仅独立桩和验证证据契约变化，实际发往产品的OpenAI帧不变，默认业务路径不保存原始正文。"
+        },
+        {
+          "change": "新增late-reasoning、second-tool-aggregate、multi-choice、cancel-before-complete、standard-no-reasoning五类独立公开API/SSE验证。",
+          "reason": "需要分别验证工具完整响应后执行、协议拒绝、普通多choice正文、取消和标准无reasoning路径。",
+          "impact": "每进程仅一个CASE，健康、预期协议拒绝和预期取消独立分类，不伪造应用内帧，不外推真实供应商或浏览器结论。"
+        },
+        {
+          "change": "history.truncated按缺省false、显式非boolean失败、显式true不完整处理。",
+          "reason": "现行公开API仅截断时输出true，强制字段存在会误判全部正常历史。",
+          "impact": "正常history不再假FAIL，真实截断仍不能冒充完整。"
+        }
+      ],
+      "files": [
+        {"path": "scripts/ci/stub-upstream.mjs", "status": "checked", "reason": "结构化摘要、披露闸、timeline-nonprefix、实际写帧计数、late帧和finished异步结算均复核，原始OpenAI响应帧未改。"},
+        {"path": "scripts/verification/ai-response-boundary-api.mjs", "status": "checked", "reason": "无raw依赖，固定文本哈希与公开精确对账，history降级、EOF终帧后数据、日志偏移、受管清理及外部证据隔离完整。"},
+        {"path": "scripts/README.md", "status": "checked", "reason": "同步结构化事件字段、数量上限、响应边界标记和单CASE独立驱动说明。"},
+        {"path": "docs/verification/AI响应边界独立验证.md", "status": "checked", "reason": "五案步骤、配置闸、证据白名单、取消两种结局及全部动态NOT_RUN边界明确。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "仅使用Node内置http/crypto/stream/fs等模块和既有桩/公开API，无新增依赖或第二套应用帧实现。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批为Node独立脚本与Markdown，无Java生产代码修改。"},
+        "logging-exception-safety": {"status": "checked", "reason": "原始响应、异常message和日志附件不落证据；写失败仅英文req序号与errorName，日志按本轮偏移和请求关联。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批不修改生产界面、卡片或用户文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "五案使用真实公开API/SSE及业务公开查询，协议拒绝/取消/取消清理真实分类，直接Redis和直接数据库仍NOT_RUN。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "原始chunk只在内存按完整SSE事件解析，文本使用UTF-8 SHA-256与Unicode码点长度，不做二次转码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1158与agent-1159最终APPROVE；两个脚本node --check及diff --check通过，五CASE和self-check均NOT_RUN。"}
+      }
     }
   ]
 }

@@ -25,7 +25,13 @@
  *
  * 记录契约（可归因性，设计草案 §5.2.4）：每请求落 `<dir>/req-NN.json`（请求原文）、
  * `.tools.txt`（本请求实际披露的工具名清单）、`.head.txt`（模型可见消息摘要）、
- * `.decision.json`（桩本轮的判定：路由 id / 工具名 / 理由）——"桩坏 / 产品坏"的区分依据。
+ * `.decision.json`（桩本轮的判定：路由 id / 工具名 / 理由）——"桩坏 / 产品坏"的区分依据；
+ * `.events.jsonl` 记录请求、每个成功 res.write 的结构化 chunk 摘要（含 late 帧）与唯一结局，
+ * 不保存原始 chunk/raw 字段。摘要仅含 done、choice 索引/finishReason/content/reasoning 标志、
+ * 工具 id/type/name、正文/reasoning/arguments 的 sha256+Unicode 码点 length 及数值 usage；
+ * choices 上限 32、单 chunk toolCalls 总上限 64，超限失败。序号为 request=0、成功记录
+ * chunks=1..N、outcome=N+1；正常 res.end 等待 finished 结算，异步写错误同样只记 write-error，
+ * broken/killed 分类不变（只新增落盘，不改默认帧）。
  *
  * usage 形状（上下文统计与压缩专项 §5.8；E2E-CTX-1..4 的确定性底座）：
  *   提示词里带 `usage-shape=<last|repeat|zero-last|none>` 即按该形状发 usage（**请求级**开关，
@@ -55,6 +61,9 @@
  *   huge-frame=<bytes> / tool-loop=<n>   单帧字节数 / 连续 n 次工具调用
  *   reasoning=<chars>                思考分片：正文分片之前插 1–2 个 `reasoning_content` 分片
  *                                   （L-91 的上游侧形态；0/缺省 = 关闭，帧逐字节不变）
+ *   response-boundary=<case>         独立响应边界验证：late-reasoning / second-tool-aggregate /
+ *                                   multi-choice / cancel-before-complete / timeline-nonprefix；
+ *                                   只发上游 chunk，应用帧仍由产品生成
  *   context-overflow / summary-500   越窗 400（措辞取产品 ContextOverflow.MARKERS）/ 摘要请求 500
  *   gf-seven-types / gf-linkage / gf-expr-linkage / gf-deep-linkage / gf-options-from /
  *   gf-attachment / gf-longtext      GF 新能力面的路由开关（stub-routes.json 的 GF-* 路由）
@@ -69,6 +78,8 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { finished } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -305,6 +316,18 @@ function faultsOf(body) {
     out[name] = FAULT_VALUE_SWITCHES.includes(name) && value !== undefined ? Number(value) : true
   }
   return out
+}
+
+const RESPONSE_BOUNDARY_MARKER = /\bresponse-boundary=(late-reasoning|second-tool-aggregate|multi-choice|cancel-before-complete|timeline-nonprefix)\b/
+const RESPONSE_BOUNDARY_NAMES = ['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'timeline-nonprefix']
+const TIMELINE_NONPREFIX_MARKER = /\btimeline-nonprefix\b/
+
+/** 独立响应边界用例的请求级标记；无标记或未知值一律走既有路径。 */
+function responseBoundaryOf(body) {
+  const text = textOf(lastMessageWithRole(messagesOf(body), 'user'))
+  const hit = text ? RESPONSE_BOUNDARY_MARKER.exec(text) : null
+  if (hit) return hit[1]
+  return text && TIMELINE_NONPREFIX_MARKER.test(text) ? 'timeline-nonprefix' : null
 }
 
 /** 开关默认值（`stub-routes.json` 的 `faults.switches[*].default`；缺失回落内建同值）。 */
@@ -896,6 +919,91 @@ function toolRound(tool, args, callId, model) {
   ]
 }
 
+const TIMELINE_NONPREFIX_TEXT = ['甲段独立内容', '乙段不是甲段前缀', '丙段收尾且不同于前两段']
+
+/** C-131C 的正文→工具半段；正文 B 在下一轮工具结果之后由同一蓝本生成。 */
+function timelineNonprefixToolRound(text, tool, args, callId, model) {
+  const base = toolRound(tool, args, callId, model)
+  return [base[0], chunk({ content: text }, null, model), ...base.slice(1)]
+}
+
+const LATE_REASONING_PARTS = [
+  '迟到思考甲：工具 finish 已到达，但完整响应尚未结束；',
+  '迟到思考乙：这两片与末尾 usage 必须先收齐，再释放工具聚合。'
+]
+const LATE_REASONING_USAGE = {
+  prompt_tokens: 7311,
+  completion_tokens: 119,
+  total_tokens: 7430,
+  prompt_tokens_details: { cached_tokens: 1024 },
+  completion_tokens_details: { reasoning_tokens: 37 }
+}
+
+/** finish(tool_calls) 之后仍属同一响应的 reasoning 与 usage；[DONE] 才是工具释放点。 */
+function lateReasoningToolRound(tool, args, callId, model) {
+  const base = toolRound(tool, args, callId, model)
+  return [
+    ...base.slice(0, -1),
+    ...LATE_REASONING_PARTS.map((text) => chunk({ reasoning_content: text }, null, model)),
+    usageChunk(LATE_REASONING_USAGE, model),
+    base[base.length - 1]
+  ]
+}
+
+/** 首个工具聚合已 finish 后又出现独立 tool call；产品必须在 helper/执行前拒绝。 */
+function secondToolAggregateRound(tool, args, callId, model) {
+  const base = toolRound(tool, args, callId, model)
+  return [
+    ...base.slice(0, -1),
+    chunk({
+      tool_calls: [{
+        index: 0,
+        id: `${callId}-second`,
+        type: 'function',
+        function: { name: tool, arguments: JSON.stringify(args) }
+      }]
+    }, null, model),
+    chunk({}, 'tool_calls', model),
+    base[base.length - 1]
+  ]
+}
+
+function choiceChunk(choices, model) {
+  return `data: ${JSON.stringify({
+    id: `chatcmpl-stub-${++frameSeq}`,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices
+  })}\n\n`
+}
+
+const MULTI_CHOICE_PIECES = [
+  ['多选甲-A：', '多选乙-A：'],
+  ['甲-B；', '乙-B；'],
+  ['甲-C。', '乙-C。']
+]
+
+/** 普通无工具双 choice：所有 choice 原样经过响应边界，不得重排、重复或丢项。 */
+function multiChoiceRound(model) {
+  const frames = [choiceChunk([
+    { index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null },
+    { index: 1, delta: { role: 'assistant', content: '' }, finish_reason: null }
+  ], model)]
+  for (const [first, second] of MULTI_CHOICE_PIECES) {
+    frames.push(choiceChunk([
+      { index: 0, delta: { content: first }, finish_reason: null },
+      { index: 1, delta: { content: second }, finish_reason: null }
+    ], model))
+  }
+  frames.push(choiceChunk([
+    { index: 0, delta: {}, finish_reason: 'stop' },
+    { index: 1, delta: {}, finish_reason: 'stop' }
+  ], model))
+  frames.push(usageChunk(usageOf(usageShapes().last), model), 'data: [DONE]\n\n')
+  return frames
+}
+
 /** 迟到帧（S-12）：`[DONE]` 之后继续推的帧，客户端必须整帧丢弃（不入 parts、不改卡、不进镜像）。 */
 function lateFrameChunks(n, model) {
   const out = []
@@ -932,6 +1040,110 @@ function record(index, raw, body, decision) {
   fs.writeFileSync(path.join(DIR, `req-${tag}.head.txt`), headLines(messagesOf(body)), 'utf8')
   fs.writeFileSync(path.join(DIR, `req-${tag}.decision.json`),
     JSON.stringify(decision, null, 2), 'utf8')
+}
+
+function upstreamEventPath(index) {
+  return path.join(DIR, `req-${String(index).padStart(3, '0')}.events.jsonl`)
+}
+
+function appendUpstreamEvent(index, event) {
+  fs.appendFileSync(upstreamEventPath(index), `${JSON.stringify(event)}\n`, 'utf8')
+}
+
+function recordUpstreamRequest(index, responseBoundary, receivedAtMs) {
+  fs.writeFileSync(upstreamEventPath(index), `${JSON.stringify({
+    sequence: 0, type: 'request', responseBoundary, receivedAtMs
+  })}\n`, 'utf8')
+}
+
+const UPSTREAM_EVENT_CHOICE_LIMIT = 32
+const UPSTREAM_EVENT_TOOL_CALL_LIMIT = 64
+
+function textSummary(text) {
+  return {
+    sha256: createHash('sha256').update(text, 'utf8').digest('hex'),
+    length: Array.from(text).length
+  }
+}
+
+function usageSummary(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null
+  const fields = [
+    ['promptTokens', usage.prompt_tokens],
+    ['completionTokens', usage.completion_tokens],
+    ['totalTokens', usage.total_tokens],
+    ['cachedTokens', usage.prompt_tokens_details?.cached_tokens],
+    ['reasoningTokens', usage.completion_tokens_details?.reasoning_tokens]
+  ]
+  const out = {}
+  for (const [name, value] of fields) {
+    if (typeof value === 'number' && Number.isFinite(value)) out[name] = value
+  }
+  return out
+}
+
+function toolCallSummary(call) {
+  const args = call?.function?.arguments
+  if (typeof args !== 'string') throw new TypeError('Upstream tool call arguments must be text')
+  return {
+    id: call?.id ?? null,
+    type: call?.type ?? null,
+    name: call?.function?.name ?? null,
+    arguments: textSummary(args)
+  }
+}
+
+function upstreamChoiceSummary(choice) {
+  const delta = choice?.delta && typeof choice.delta === 'object' ? choice.delta : {}
+  const hasContent = typeof delta.content === 'string' && delta.content.length > 0
+  const hasReasoningContent = Object.hasOwn(delta, 'reasoning_content')
+  const calls = delta.tool_calls === undefined ? [] : delta.tool_calls
+  if (!Array.isArray(calls)) throw new TypeError('Upstream tool calls must be an array')
+  const out = {
+    index: choice?.index ?? null,
+    finishReason: choice?.finish_reason ?? null,
+    hasContent,
+    hasReasoningContent
+  }
+  if (hasContent) out.content = textSummary(delta.content)
+  if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+    out.reasoningContent = textSummary(delta.reasoning_content)
+  }
+  out.toolCalls = calls.map(toolCallSummary)
+  return out
+}
+
+function upstreamChunkSummary(raw) {
+  if (raw === 'data: [DONE]\n\n') return { done: true, choices: [] }
+  if (typeof raw !== 'string' || !raw.startsWith('data: ') || !raw.endsWith('\n\n')) {
+    throw new TypeError('Upstream chunk must be one complete SSE data event')
+  }
+  const body = JSON.parse(raw.slice('data: '.length))
+  if (!Array.isArray(body?.choices)) throw new TypeError('Upstream chunk choices must be an array')
+  if (body.choices.length > UPSTREAM_EVENT_CHOICE_LIMIT) {
+    throw new RangeError('Upstream chunk choice limit exceeded')
+  }
+  const toolCallCount = body.choices.reduce((count, choice) => {
+    const calls = choice?.delta?.tool_calls
+    return count + (Array.isArray(calls) ? calls.length : 0)
+  }, 0)
+  if (toolCallCount > UPSTREAM_EVENT_TOOL_CALL_LIMIT) {
+    throw new RangeError('Upstream chunk tool call limit exceeded')
+  }
+  const out = { done: false, choices: body.choices.map(upstreamChoiceSummary) }
+  const usage = usageSummary(body.usage)
+  if (usage) out.usage = usage
+  return out
+}
+
+function recordUpstreamFrame(index, sequence, raw) {
+  appendUpstreamEvent(index, {
+    sequence, type: 'upstream-chunk', writtenAtMs: Date.now(), ...upstreamChunkSummary(raw)
+  })
+}
+
+function recordUpstreamOutcome(index, sequence, outcome, errorName = null) {
+  appendUpstreamEvent(index, { sequence, type: 'outcome', finishedAtMs: Date.now(), outcome, errorName })
 }
 
 /** 全部消息文本（摘要请求识别用：摘要请求不带对话提示词标记）。 */
@@ -979,6 +1191,42 @@ function safetyProbeDecision(body) {
   return null
 }
 
+/** C-131C：三个真实上游响应依次产生 A→工具、B→表单、C；每轮仍独立核对工具披露。 */
+function timelineNonprefixDecision(body) {
+  const messages = messagesOf(body)
+  const disclosed = new Set(toolNames(body))
+  const results = roundToolResults(messages)
+  const userText = textOf(lastMessageWithRole(messages, 'user'))
+  if (results.length === 0) {
+    const productTools = new Set(Array.isArray(ROUTES.productTools) ? ROUTES.productTools : [])
+    if (!productTools.has('list_config_defs') || !disclosed.has('list_config_defs')) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: 'timeline-nonprefix 的 list_config_defs 未披露（退化为文本）' }
+    }
+    return { kind: 'tool_call', tool: 'list_config_defs', args: {}, route: 'TIMELINE-NONPREFIX',
+      timelineText: TIMELINE_NONPREFIX_TEXT[0], reason: 'timeline-nonprefix 第 1 段（正文 A→list_config_defs）' }
+  }
+  if (results.length === 1 && results[0]?.name === 'list_config_defs') {
+    const route = (ROUTES.routes || []).find((r) => r.id === 'GF-FILTER' && r.tool === 'generative_form')
+    const requires = Array.isArray(route?.match?.requiresTools) ? route.match.requiresTools : []
+    if (!route || requires.length === 0 || !requires.every((tool) => disclosed.has(tool))) {
+      return { kind: 'text', text: CLOSING_TEXT, reason: 'timeline-nonprefix 的 generative_form 路由未披露（退化为文本）' }
+    }
+    let args
+    try {
+      args = resolveArguments(route.arguments ?? {}, { taskId: extractTaskId(userText) })
+    } catch {
+      return { kind: 'text', text: CLOSING_TEXT, errorName: 'TIMELINE_NONPREFIX_ARGUMENTS_INVALID',
+        reason: 'timeline-nonprefix 表单参数解析失败（不保留异常详情）' }
+    }
+    return { kind: 'tool_call', tool: route.tool, args, route: route.id,
+      timelineText: TIMELINE_NONPREFIX_TEXT[1], reason: 'timeline-nonprefix 第 2 段（正文 B→generative_form）' }
+  }
+  if (results.length === 2 && results[0]?.name === 'list_config_defs' && results[1]?.name === 'generative_form') {
+    return { kind: 'text', text: TIMELINE_NONPREFIX_TEXT[2], reason: 'timeline-nonprefix 第 3 段（正文 C 收尾）' }
+  }
+  return { kind: 'text', text: CLOSING_TEXT, reason: 'timeline-nonprefix 工具结果序列不符（退化为文本）' }
+}
+
 /**
  * 命名轮蓝本 / 步数上限的判定覆盖（返回 `null` = 不覆盖，走 `decide` 的路由表）。
  * 纯函数：`--self-check` 用合成 messages 直接断言段序与步数。
@@ -989,6 +1237,7 @@ function blueprintDecision(body, faults) {
   const toolMessages = messages.filter((m) => m?.role === 'tool').length
   const safetyProbe = safetyProbeDecision(body)
   if (safetyProbe) return safetyProbe
+  if (responseBoundaryOf(body) === 'timeline-nonprefix') return timelineNonprefixDecision(body)
   if (faults['turn-text']) {
     return { kind: 'text', text: TURN_TEXT, reason: '命名轮蓝本 turn-text（确定性文本）' }
   }
@@ -1016,13 +1265,21 @@ function blueprintDecision(body, faults) {
 }
 
 /** 本轮帧序列（纯函数）：故障开关只改"帧怎么发"，不改路由判定。 */
-function framesFor(decision, faults, index, model, usageShape) {
+function framesFor(decision, faults, index, model, usageShape, responseBoundary = null) {
   const callId = `call-stub-${index}`
+  if (responseBoundary === 'multi-choice') return multiChoiceRound(model)
   if (decision.kind !== 'tool_call') {
     const base = faults['huge-frame']
       ? hugeTextRound(numericFault(faults, 'huge-frame'), model)
       : textRound(decision.text, model, usageShape)
     return withReasoning(base, faults, model)
+  }
+  if (responseBoundary === 'timeline-nonprefix') {
+    return timelineNonprefixToolRound(decision.timelineText, decision.tool, decision.args, callId, model)
+  }
+  if (responseBoundary === 'late-reasoning') return lateReasoningToolRound(decision.tool, decision.args, callId, model)
+  if (responseBoundary === 'second-tool-aggregate') {
+    return secondToolAggregateRound(decision.tool, decision.args, callId, model)
   }
   const n = faults['multi-card'] ? numericFault(faults, 'multi-card') : 1
   if (n > 1) return multiToolRound(decision.tool, decision.args, callId, model, n)
@@ -1047,7 +1304,7 @@ function withReasoning(frames, faults, model) {
  * 按写出计划发帧（`--self-check` 只断言 {@link writePlan} 的纯结果，本函数不在自检里跑）。
  * 返回 `ok` / `broken`（break-at-seq 断流）/ `killed`（kill-stream 到点）。
  */
-async function writeFrames(res, frames, plan) {
+async function writeFrames(res, frames, plan, onFrame = null) {
   let killed = false
   let timer = null
   if (plan.killAfterMs > 0) {
@@ -1071,6 +1328,7 @@ async function writeFrames(res, frames, plan) {
         if (gap > 0) await sleep(gap)
       }
       res.write(frames[i])
+      if (onFrame) onFrame(frames[i])
     }
     if (plan.breakAtFrame > 0 && plan.breakAtFrame < frames.length) {
       // 断流形态：不发 [DONE]、不 res.end，直接销毁 socket（客户端看到 EOF/reset）
@@ -1082,11 +1340,19 @@ async function writeFrames(res, frames, plan) {
       for (const late of lateFrameChunks(plan.lateFrames, plan.model)) {
         if (killed) break
         res.write(late)
+        if (onFrame) onFrame(late)
         await sleep(20)
       }
     }
-    if (!killed) res.end()
+    if (!killed) {
+      const completion = finished(res)
+      res.end()
+      await completion
+    }
     return killed ? 'killed' : 'ok'
+  } catch (err) {
+    if (killed) return 'killed'
+    throw err
   } finally {
     if (timer) clearTimeout(timer)
   }
@@ -1094,11 +1360,13 @@ async function writeFrames(res, frames, plan) {
 
 async function handleChat(req, res, raw) {
   const index = ++requestSeq
+  const receivedAtMs = Date.now()
   const body = safeJson(raw)
   const model = typeof body?.model === 'string' && body.model ? body.model : 'ci-stub'
   // 形状与故障都是**请求级**开关（与 --violate-form-type 同族）：未带标记的请求帧逐字节不变
   const usageShape = usageShapeOf(body ?? {})
   const faults = body ? faultsOf(body) : {}
+  const responseBoundary = responseBoundaryOf(body ?? {})
   const summaryRequest = SUMMARY_REQUEST.test(allText(body ?? {}))
   // summary-500：arm 后**下一条**摘要请求 500（一次性；armed 标记随标记请求写入）
   if (faults['summary-500']) summaryFault.armedUntilMs = Date.now() + 300000
@@ -1154,7 +1422,12 @@ async function handleChat(req, res, raw) {
   // 是注入前的合法 schema，与 SSE 实际回帧（注入后的 html）相反，会把排查方向引偏。
   const violationNote = applyRequestViolation(decision, body ?? {})
   if (violationNote) console.log(`[违规模式] ${violationNote}`)
+  if (responseBoundary) {
+    decision.responseBoundary = responseBoundary
+    decision.receivedAtMs = receivedAtMs
+  }
   record(index, raw, body ?? {}, decision)
+  recordUpstreamRequest(index, responseBoundary, receivedAtMs)
 
   // 段身份（细分延迟注入的判定依据）：本请求既可能是工具轮（要发 tool_calls），
   // 也可能是工具续轮（上下文里已有 role=tool ⇒ 收尾文本段）。
@@ -1170,14 +1443,22 @@ async function handleChat(req, res, raw) {
     'cache-control': 'no-cache',
     connection: 'keep-alive'
   })
-  const frames = framesFor(decision, faults, index, model, usageShape)
+  const frames = framesFor(decision, faults, index, model, usageShape, responseBoundary)
+  let recordedFrameCount = 0
   let outcome = 'ok'
+  let outcomeErrorName = null
   try {
-    outcome = await writeFrames(res, frames, plan)
+    outcome = await writeFrames(res, frames, plan, (frame) => {
+      recordUpstreamFrame(index, recordedFrameCount + 1, frame)
+      recordedFrameCount += 1
+    })
   } catch (err) {
     // 客户端在响应写出过程中断开（socket destroyed）属正常现象，不许升级为进程级异常
-    fs.writeSync(2, `[WARN] 响应写出失败（客户端可能已断开）req-${index}：${err?.message ?? err}\n`)
+    outcome = 'write-error'
+    outcomeErrorName = err?.name ?? 'Error'
+    fs.writeSync(2, `upstream response write failed req-${index} errorName=${outcomeErrorName}\n`)
   }
+  recordUpstreamOutcome(index, recordedFrameCount + 1, outcome, outcomeErrorName)
   console.log(`[req-${String(index).padStart(3, '0')}] ${decision.kind}${decision.tool ? ` tool=${decision.tool}` : ''} route=${decision.route ?? '-'} outcome=${outcome}${faultNames.length ? ` faults=${faultNames.join('+')}` : ''} —— ${decision.reason}`)
 }
 
@@ -1271,7 +1552,10 @@ function startServer() {
   const server = http.createServer((req, res) => {
     // 连接级兜底：客户端中途断开/重置属正常攻击面，只记日志，绝不升级为进程级异常
     req.on('error', (err) => fs.writeSync(2, `[WARN] 请求流错误：${err?.message ?? err}\n`))
-    res.on('error', (err) => fs.writeSync(2, `[WARN] 响应流错误：${err?.message ?? err}\n`))
+    res.on('error', (err) => {
+      if ((req.url ?? '').includes('/chat/completions')) return
+      fs.writeSync(2, `[WARN] 响应流错误：${err?.message ?? err}\n`)
+    })
     // 模型配置专项批②：GET /models（OpenAI 兼容端点列表）—— 设置页「测试连接」与「拉取模型」的上游。
     // 故障注入口径与 AiConnectionProbe 的测试同形：?models=401|403|404|405|500|empty|notarray。
     if ((req.url ?? '').split('?')[0].endsWith('/models')) {
@@ -2269,13 +2553,153 @@ function selfCheck() {
   }
   ok('迟到帧自证通过（done 之后推 / 数量与内容可判 / 正常轮末帧不变）')
 
+  section()
+  // ⑪ 独立响应边界：只断言上游 chunk 形态，不伪造产品 SSE，也不启动服务。
+  for (const name of RESPONSE_BOUNDARY_NAMES) {
+    const got = responseBoundaryOf({ messages: [{ role: 'user', content: `response-boundary=${name}` }] })
+    if (got !== name) bad(`响应边界标记解析失败：${name} -> ${got}`)
+  }
+  if (responseBoundaryOf({ messages: [{ role: 'user', content: '普通无标记请求' }] }) !== null) {
+    bad('标准无标记请求不得命中响应边界扩展')
+  }
+  if (responseBoundaryOf({ messages: [{ role: 'user', content: 'response-boundary=unknown' }] }) !== null) {
+    bad('未知响应边界标记必须回落既有路径')
+  }
+
+  const boundaryTool = { kind: 'tool_call', tool: 'list_config_defs', args: {} }
+  const lateBoundary = parseFrames(lateReasoningToolRound(boundaryTool.tool, {}, 'call-late', 'ci-stub'))
+  const lateFinish = lateBoundary.findIndex((f) => f.choices?.[0]?.finish_reason === 'tool_calls')
+  const lateReasoning = lateBoundary.filter((f) => f.choices?.[0]?.delta?.reasoning_content !== undefined)
+  const lateUsage = lateBoundary.find((f) => f.usage)
+  const lateReasoningIndexes = lateReasoning.map((f) => lateBoundary.indexOf(f))
+  if (lateFinish < 0 || lateReasoningIndexes.some((at) => at <= lateFinish)) {
+    bad('late-reasoning 的 reasoning 必须全部位于 finish(tool_calls) 之后')
+  }
+  if (lateReasoning.map((f) => f.choices[0].delta.reasoning_content).join('') !== LATE_REASONING_PARTS.join('')) {
+    bad('late-reasoning 的 reasoning 分片拼接不完整或顺序漂移')
+  }
+  if (!lateUsage || lateBoundary.indexOf(lateUsage) <= lateFinish
+    || lateUsage.usage.total_tokens !== LATE_REASONING_USAGE.total_tokens
+    || lateUsage.usage.completion_tokens_details?.reasoning_tokens !== 37) {
+    bad('late-reasoning 的末尾 usage 缺失、位置错误或真值漂移')
+  }
+  if (parseFrames(textRound('无后续 usage', 'ci-stub', 'none')).some((f) => f.usage)) {
+    bad('late-reasoning 驱动所用续轮 usage-shape=none 不得覆盖首个响应的真值')
+  }
+
+  const secondBoundary = parseFrames(secondToolAggregateRound(boundaryTool.tool, {}, 'call-first', 'ci-stub'))
+  const secondCalls = secondBoundary.flatMap((f) => f.choices?.[0]?.delta?.tool_calls || [])
+  const firstFinishAt = secondBoundary.findIndex((f) => f.choices?.[0]?.finish_reason === 'tool_calls')
+  const secondCallAt = secondBoundary.findIndex((f) => f.choices?.[0]?.delta?.tool_calls?.[0]?.id === 'call-first-second')
+  if (secondCalls.length !== 2 || new Set(secondCalls.map((c) => c.id)).size !== 2
+    || firstFinishAt < 0 || secondCallAt <= firstFinishAt) {
+    bad('second-tool-aggregate 必须在首个 finish 后给出第二个独立 toolCallId')
+  }
+
+  const multiBoundary = parseFrames(multiChoiceRound('ci-stub'))
+  const multiPieces = multiBoundary.flatMap((f) => (f.choices || [])
+    .map((choice) => choice?.delta?.content).filter((text) => typeof text === 'string' && text.length > 0))
+  if (JSON.stringify(multiPieces) !== JSON.stringify(MULTI_CHOICE_PIECES.flat())) {
+    bad(`multi-choice 正文顺序/集合漂移：${JSON.stringify(multiPieces)}`)
+  }
+  if (multiBoundary.some((f) => (f.choices || []).some((choice) => choice?.delta?.tool_calls
+    || choice?.delta?.reasoning_content !== undefined))) {
+    bad('multi-choice 不得夹带工具或 reasoning 扩展')
+  }
+
+  const noDisclosureBody = {
+    messages: [{ role: 'user', content: 'response-boundary=late-reasoning tool=list_config_defs&args={}' }],
+    tools: []
+  }
+  const noDisclosureDecision = decide(noDisclosureBody, ROUTES, new Map())
+  if (noDisclosureDecision.kind !== 'text'
+    || parseFrames(framesFor(noDisclosureDecision, {}, 0, 'ci-stub', 'last', 'late-reasoning'))
+      .some((f) => f.choices?.[0]?.delta?.tool_calls)) {
+    bad('响应边界标记不得绕过既有工具披露闸')
+  }
+  const cancelMarker = responseBoundaryOf({ messages: [{ role: 'user', content: 'response-boundary=cancel-before-complete stall-frames=5000' }] })
+  const cancelPlan = writePlan({ 'stall-frames': 5000 }, { kind: 'tool_call', hasToolResult: false })
+  if (cancelMarker !== 'cancel-before-complete' || cancelPlan.frameGapMs !== 5000) {
+    bad('cancel-before-complete 必须复用既有帧间延迟形成公开取消窗口')
+  }
+  if (!sameAsPlain({}) || shapeOf(textRound('标准文本', 'ci-stub', 'last')).includes('reasoning_content')) {
+    bad('标准无 reasoning 请求的帧形状发生扩展注入')
+  }
+  ok('响应边界自证通过（finish 后 reasoning+usage / 第二工具拒绝形态 / 双 choice 完整 / 取消窗口 / 默认零注入与披露闸）')
+
+  section()
+  // ⑫ C-131C：跨三个真实 OpenAI 响应构造多 ASSISTANT / 工具 / 表单 / 非前缀正文。
+  const timelineUser = { role: 'user', content: 'timeline-nonprefix' }
+  if (responseBoundaryOf({ messages: [timelineUser] }) !== 'timeline-nonprefix'
+    || responseBoundaryOf({ messages: [{ role: 'user', content: 'response-boundary=timeline-nonprefix' }] }) !== 'timeline-nonprefix') {
+    bad('timeline-nonprefix 裸标记与 response-boundary 写法必须等价')
+  }
+  const timelineTools = ['list_config_defs', 'generative_form'].map((name) => ({ function: { name } }))
+  const timelineMessages = [timelineUser]
+  const timelineRawRounds = []
+  const timelineDecisions = []
+  for (let round = 0; round < 3; round++) {
+    const decision = blueprintDecision({ messages: timelineMessages, tools: timelineTools }, {})
+    const rawFrames = framesFor(decision, {}, round + 1, 'ci-stub', 'last', 'timeline-nonprefix')
+    timelineDecisions.push(decision)
+    timelineRawRounds.push(rawFrames)
+    if (decision.kind !== 'tool_call') continue
+    const callId = `call-stub-${round + 1}`
+    timelineMessages.push({
+      role: 'assistant',
+      content: decision.timelineText,
+      tool_calls: [{ id: callId, type: 'function', function: { name: decision.tool, arguments: JSON.stringify(decision.args) } }]
+    }, {
+      role: 'tool', tool_call_id: callId, name: decision.tool, content: '{}'
+    })
+  }
+  const timelineEvents = timelineRawRounds.flatMap((rawFrames) => parseFrames(rawFrames).flatMap((frame) =>
+    (frame.choices || []).flatMap((choice) => {
+      const events = []
+      if (choice?.delta?.content) events.push(choice.delta.content)
+      for (const call of choice?.delta?.tool_calls || []) events.push(call.function?.name)
+      return events
+    })))
+  const expectedTimeline = [TIMELINE_NONPREFIX_TEXT[0], 'list_config_defs',
+    TIMELINE_NONPREFIX_TEXT[1], 'generative_form', TIMELINE_NONPREFIX_TEXT[2]]
+  if (JSON.stringify(timelineEvents) !== JSON.stringify(expectedTimeline)) {
+    bad(`timeline-nonprefix 正文/工具/表单顺序漂移：${JSON.stringify(timelineEvents)}`)
+  }
+  if (timelineDecisions[0]?.tool !== 'list_config_defs' || timelineDecisions[1]?.tool !== 'generative_form'
+    || timelineDecisions[1]?.route !== 'GF-FILTER' || timelineDecisions[2]?.text !== TIMELINE_NONPREFIX_TEXT[2]) {
+    bad('timeline-nonprefix 必须依次复用 list_config_defs、GF-FILTER 表单路由和正文 C 收尾')
+  }
+  if (TIMELINE_NONPREFIX_TEXT[1].startsWith(TIMELINE_NONPREFIX_TEXT[0])
+    || TIMELINE_NONPREFIX_TEXT[2].startsWith(TIMELINE_NONPREFIX_TEXT[0])
+    || TIMELINE_NONPREFIX_TEXT[2].startsWith(TIMELINE_NONPREFIX_TEXT[1])) {
+    bad('timeline-nonprefix 的后段正文不得以前段正文为前缀')
+  }
+  if (timelineRawRounds.some((rawFrames) => rawFrames[rawFrames.length - 1] !== 'data: [DONE]\n\n')) {
+    bad('timeline-nonprefix 的每个上游响应都必须以 [DONE] 完整结束')
+  }
+  const timelineNoTools = blueprintDecision({ messages: [timelineUser], tools: [] }, {})
+  if (timelineNoTools.kind !== 'text'
+    || parseFrames(framesFor(timelineNoTools, {}, 0, 'ci-stub', 'last', 'timeline-nonprefix'))
+      .some((frame) => frame.choices?.[0]?.delta?.tool_calls)) {
+    bad('timeline-nonprefix 首轮不得绕过 list_config_defs 披露闸')
+  }
+  const timelineNoForm = blueprintDecision({
+    messages: timelineMessages.slice(0, 3), tools: [{ function: { name: 'list_config_defs' } }]
+  }, {})
+  if (timelineNoForm.kind !== 'text'
+    || parseFrames(framesFor(timelineNoForm, {}, 0, 'ci-stub', 'last', 'timeline-nonprefix'))
+      .some((frame) => frame.choices?.[0]?.delta?.tool_calls)) {
+    bad('timeline-nonprefix 续轮不得绕过 generative_form 披露闸')
+  }
+  ok('timeline-nonprefix 自证通过（A→list_config_defs→B→generative_form→C / 非前缀 / 双披露闸 / 完整终帧）')
+
   console.log('------------------------------------------------------------')
   if (problems.length) {
     console.log(`SELF-CHECK FAIL：${problems.length} 项`)
     for (const p of problems) console.log(`  - ${p}`)
     process.exit(1)
   }
-  console.log('SELF-CHECK PASS：路由表契约、白名单对账、收敛自证、披露驱动、帧形态、反解、usage 形状、§4.6 故障开关全部通过')
+  console.log('SELF-CHECK PASS：路由表契约、白名单对账、收敛自证、披露驱动、帧形态、反解、usage 形状、§4.6 故障开关、响应边界与 timeline-nonprefix 形态全部通过')
   process.exit(0)
 }
 

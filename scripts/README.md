@@ -9,7 +9,8 @@
 | `scripts/b23l1-dual-instance.ps1` | **双实例 harness**（B23L1 批①）：8081/8082 共享同一 Redis + 桩上游，脚本自己起/等/收（也可 `-NoStart` 接已就绪实例）。AI 请求统一带身份头。只交付、施工期不运行 |
 | `scripts/redis5-cluster-smoke.sh` | **Redis 5.0.14 真集群冒烟网**（3 主 3 从、Docker）。`--static` 只做静态检查（**不连 Redis，不得当"5.0.14 已验证"**）；真集群模式才产出环境级证据，且**不替代**产品链路断言 |
 | `scripts/ci/forbid-redis-cluster-unsafe.mjs` | **Cluster / 5.0 兼容面 grep 守卫**：禁多库、禁 `KEYS`/`FLUSHDB`/跨键 `SCAN`、禁 6.2+ 的排他流 ID。`--self-check` 自证规则（命中/不命中/命中数），CI 两步均跑 |
-| `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过 |
+| `scripts/ci/stub-upstream.mjs` | CI E2E 用的**上游替身**（OpenAI 兼容桩），让用例在零密钥、零外网下确定性通过；另提供响应边界请求级标记与结构化写帧事件 |
+| `scripts/verification/ai-response-boundary-api.mjs` | 响应边界独立驱动：每次一个 CASE，支持仓外临时 H2 + 后端 + 桩受管起停，核对公开 SSE/history/run、业务副作用与清理；用法见 `docs/verification/AI响应边界独立验证.md` |
 | `scripts/ci/stub-routes.json` | 桩的路由表（提示词 → 工具调用/表单）+ `usageShapes` + `faults.switches`（§4.6 桩开关清单的唯一取数点），与 `GenerativeFormRules` 白名单**事实源逐值对账** |
 | `scripts/githooks/` | 提交前两道检查：敏感信息扫描（DC-08）+ **统一开发规范审查**，详见 `scripts/githooks/README.md` |
 | `scripts/ci/check-d6-sync.mjs` | **统一开发规范门禁**：`--standards` 覆盖全部暂存变更并要求 `development-standards-review.json`，CI 可逐提交检查；默认 D6 模式仅保留为历史工具，不由 pre-commit 或 CI 调用 |
@@ -185,9 +186,23 @@ node scripts/ci/stub-upstream.mjs --self-check [--routes scripts/ci/stub-routes.
 越窗错误体命中产品 `MARKERS`（读事实源）、摘要识别式与 `RollingSummarizer` 同源；
 段 ⑩ 断言请求级工具路由（嵌套 args / 披露闸 / 产品清单闸 / 幂等）、epoch 注入（只改既有键）与迟到帧。
 
+### 2.3d 响应边界请求级标记（独立验证）
+
+`response-boundary=late-reasoning|second-tool-aggregate|multi-choice|cancel-before-complete` 只服务 `scripts/verification/ai-response-boundary-api.mjs`：分别构造 finish 后 reasoning+usage、finish 后第二独立工具、普通双 choice 和公开取消窗口。工具用例复用 `tool=list_config_defs&args={}` 披露闸；取消复用 `stall-frames=5000`，不新增应用内帧。无标记/未知值走既有路径，`standard-no-reasoning` 不用该扩展标记。`--self-check` 段 ⑪ 只断言上游 chunk 形态、顺序、完整性和默认零注入，不启动服务。
+
+独立上游桩标记 `timeline-nonprefix`（等价于 `response-boundary=timeline-nonprefix`）服务 C-131C，跨三个真实 OpenAI 上游响应固定形成 `甲段独立内容→list_config_defs→乙段不是甲段前缀→generative_form→丙段收尾且不同于前两段`：前两轮分别在 `toolRound` 的 role chunk 后插入正文 A/B，第三轮以正文 C 收尾。`list_config_defs` 逐请求检查披露清单，`generative_form` 复用 `GF-FILTER` 路由参数及其 `requiresTools` 披露闸；任一披露缺失即退化为文本，不伪造应用内 SSE。`--self-check` 段 ⑫ 断言两种标记写法、精确序列、非前缀正文、双披露闸和每轮完整 `[DONE]`。
+
+独立驱动每次只接受一个 `CASE`，强制隔离/写/桩/执行者/身份/仓外 `OUT_DIR` 配置闸；支持仓外临时 H2 + 后端 + 桩受管起停，也支持接专用空 stub dump 的已启动隔离环境。完整命令、证据文件和 NOT_RUN 边界见 `docs/verification/AI响应边界独立验证.md`。
+
 ### 2.4 记录契约（可归因性）
 
-每请求落 `<dir>/req-NN.json`（请求原文）、`.tools.txt`（本请求实际披露的工具名清单）、`.head.txt`（模型可见消息摘要）、`.decision.json`（桩本轮的判定：路由 id / 工具名 / 理由）——这是"桩坏 / 产品坏"的区分依据。
+每请求落 `<dir>/req-NN.json`（请求原文）、`.tools.txt`（本请求实际披露的工具名清单）、`.head.txt`（模型可见消息摘要）、`.decision.json`（桩本轮的判定：路由 id / 工具名 / 理由）——这是"桩坏 / 产品坏"的区分依据。另落 `.events.jsonl`，**不保存原始 chunk 或 raw 兼容字段**，默认请求也只写以下白名单结构：
+
+- 每个成功 `res.write` 的 chunk 都记录结构化摘要，包括 `lateFrameChunks`；`done` 标记 `[DONE]`，`choices[]` 仅含 `index`、`finishReason`、`hasContent`、`hasReasoningContent` 及工具/内容摘要。`standard-no-reasoning` 以 `hasReasoningContent=false` 排除扩展。
+- 非空正文与 reasoning 分别保存 `content` / `reasoningContent = {sha256, length}`；`toolCalls[]` 仅含 `id`、`type`、`name` 和 `arguments = {sha256, length}`。哈希使用 UTF-8 内容的 SHA-256，`length` 使用 Unicode 码点数，不保存原文。
+- `usage` 仅保留 `promptTokens`、`completionTokens`、`totalTokens`、`cachedTokens`、`reasoningTokens` 中的有限数值。每 chunk 的 `choices` 上限 32、`toolCalls` 总上限 64，超限直接失败，不静默截断。
+
+事件序号为 `request=0`、成功记录的 `upstream-chunk=1..N`、唯一 `outcome=N+1`；记录失败不增加 N，也不使用计划帧数冒充实际记录数。正常 `res.end` 通过 Node `stream/promises.finished` 等待结算，同步或异步写错误均只记 `write-error`；`broken` / `killed` 分类保留。chat 写失败日志仅含英文请求序号和安全 `errorName`，不打印异常 message/stack。默认响应帧不变，只新增归因文件。
 
 ### 2.5 与产品侧白名单的对账（已改为事实源逐值对账，T4-5 落地）
 
