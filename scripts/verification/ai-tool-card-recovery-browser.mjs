@@ -34,7 +34,7 @@ const toolCases = new Map([
 const scenarios = new Set([...toolCases.keys(), 'tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-success', 'recovery-final-failure',
   'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage',
   'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue',
-  'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix'])
+  'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix', 'recovery-timing-proxy'])
 const recoverySurfaceSelector = [
   '[data-testid="alert-history-error"]',
   '[data-testid="alert-recovery-gap"]',
@@ -208,6 +208,7 @@ function loadConfig() {
     executorIdentity: process.env.EXECUTOR_IDENTITY.trim(),
     outDir: outsidePath('OUT_DIR'),
     stubDumpDir: process.env.STUB_DUMP_DIR?.trim() ? outsidePath('STUB_DUMP_DIR') : null,
+    proxyLogDir: process.env.PROXY_LOG_DIR?.trim() ? outsidePath('PROXY_LOG_DIR') : null,
     timeoutMs: integerEnv('TIMEOUT_MS', 120_000, 5_000, 600_000),
     pollMs: integerEnv('POLL_MS', 50, 10, 1_000)
   }
@@ -393,6 +394,67 @@ class ApiClient {
       return {status: 'UNAVAILABLE', httpStatus: response.status, errorName: 'INVALID_RUN_PAYLOAD', businessCode: businessCode(response.body)}
     }
     return {status: 'AVAILABLE', httpStatus: 200, errorName: null, businessCode: null, data}
+  }
+
+  /**
+   * C-138：以公开 `?lastSeq=N` 做增量续传，只读取有界帧摘要（type/seq），不保存原始 SSE。
+   */
+  async eventsReplay(runId, lastSeq, timeoutMs = 8_000) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const frames = []
+    const consume = (chunk) => {
+      const dataLines = chunk.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim())
+      for (const line of dataLines) {
+        if (line === '[DONE]') {
+          frames.push({type: 'done', seq: null})
+          continue
+        }
+        try {
+          const parsed = JSON.parse(line)
+          frames.push({type: typeof parsed?.type === 'string' ? parsed.type : null,
+            seq: Number.isSafeInteger(parsed?.seq) ? parsed.seq : null})
+        } catch {
+          frames.push({type: null, seq: null})
+        }
+      }
+    }
+    try {
+      const response = await fetch(`${this.config.baseUrl}/api/ai/events/${encodeURIComponent(runId)}?lastSeq=${lastSeq}`, {
+        headers: {'X-Tenant-Id': this.config.tenantId, 'X-User-Id': this.config.userId, Accept: 'text/event-stream'},
+        redirect: 'error',
+        signal: controller.signal
+      })
+      if (response.status !== 200 || !response.body) {
+        return {status: 'UNAVAILABLE', httpStatus: response.status, frames}
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      try {
+        while (true) {
+          const {done, value} = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, {stream: true})
+          let index
+          while ((index = buffer.indexOf('\n\n')) >= 0) {
+            consume(buffer.slice(0, index))
+            buffer = buffer.slice(index + 2)
+          }
+          if (frames.some((frame) => ['done', 'error', 'cancelled'].includes(frame.type))) {
+            await reader.cancel().catch(() => {})
+            return {status: 'AVAILABLE', httpStatus: 200, frames}
+          }
+        }
+      } finally {
+        await reader.cancel().catch(() => {})
+      }
+      return {status: 'AVAILABLE', httpStatus: 200, frames}
+    } catch (error) {
+      return {status: 'ABORTED_OR_ERROR', errorName: errorName(error), frames}
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   async startChat(sessionId, message) {
@@ -4611,6 +4673,129 @@ async function runStoppedRecovery(context) {
   if (config.variant === 'current-failure') await browser.setRunCurrentFault('off')
 }
 
+async function runTimingProxyScenario(context) {
+  const {browser, checks, config, api, evidence} = context
+  const variants = new Set(['full', 'incremental'])
+  if (!variants.has(config.variant)) throw new ScenarioNotRun('RECOVERY_VARIANT_REQUIRED')
+  if (!config.proxyLogDir) throw new VerificationFailure('PROXY_LOG_DIR_REQUIRED')
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.historyLoaded === true && ai.restoringRecovery === false && ai.loading === false
+  })()`, 'TIMING_PROXY_APP_NOT_READY')
+
+  await browser.sendPrompt(`timeline-nonprefix verification=${randomUUID()}`)
+  const submitPendingForm = async () => {
+    const form = await browser.evaluate(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      if (!ai.activeForm?.toolCallId) return null
+      const field = (ai.activeForm.form?.fields ?? []).find((candidate) => candidate.type === 'text')
+      return field ? {toolCallId: ai.activeForm.toolCallId, key: field.key} : null
+    })()`, false)
+    if (!form) return false
+    await browser.evaluate(`document.querySelector('[data-testid="gf-field-${form.toolCallId}-${form.key}"]').focus()`, false)
+    await browser.send('Input.insertText', {text: `proxy-${randomUUID()}`})
+    await browser.click(`[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]`)
+    return true
+  }
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.activeForm?.toolCallId || (ai.loading === false
+      && ai.messages.some((message) => message.role === 'assistant' && message.done))
+  })()`, 'TIMING_PROXY_RUN_NOT_FORMED')
+  await submitPendingForm()
+  // 增量锚点：在续跑后缀尚未收齐时读取公开 runSeq，作为 `?lastSeq=` 锚点。
+  const anchorState = await browser.evaluate(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const runId = ai.activeRunId ?? null
+    const value = runId ? (ai.runSeq ?? {})[runId] : null
+    return {runId, lastSeq: Number.isSafeInteger(value) ? value : 0}
+  })()`, false)
+  if (anchorState?.runId) context.runId = anchorState.runId
+  const incrementalAnchor = Number(anchorState?.lastSeq ?? 0)
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.restoringRecovery === false && ai.loading === false
+      && ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done)
+  })()`, 'TIMING_PROXY_RUN_NOT_TERMINAL')
+
+  const snapshot = await browser.snapshot()
+  context.sessionId = snapshot.sessionId
+  context.runId = snapshot.activeRunId
+  const parts = snapshot.messages.filter((message) => message.role === 'assistant').flatMap((message) => message.parts)
+  const kinds = parts.map((part) => part.kind === 'tool' ? `tool:${part.name}` : part.kind)
+  checks.require('proxy.part-order', canonicalJson(kinds) === canonicalJson(['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text']),
+    ['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text'], kinds)
+  const texts = parts.filter((part) => part.kind === 'text').map((part) => part.text ?? '')
+  checks.require('proxy.three-non-prefix-texts', texts.length === 3
+    && texts.every((text, index) => texts.slice(index + 1).every((later) => !text.startsWith(later) && !later.startsWith(text))),
+  'three non-prefix text bodies', texts.map((text) => textEvidence(text)))
+
+  // historyProjection 由 loadHistory 提交；实时轮次只推进 messages，这里强制一次公开 loadHistory 再核对。
+  await browser.evaluate(`(async () => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    await ai.loadHistory()
+    return true
+  })()`, true)
+  const committed = await waitForHistoryProjectionCommit(context, 'proxy-history')
+  checks.require('proxy.history-converged', committed !== null, 'UI projection converges to authoritative history',
+    committed === null ? null : committed.authoritative)
+
+  const logFiles = (await readdir(config.proxyLogDir)).filter((name) => name.startsWith('history-timing-proxy-') && name.endsWith('.jsonl')).sort()
+  if (logFiles.length === 0) throw new VerificationFailure('PROXY_LOG_NOT_FOUND')
+  const logPath = path.join(config.proxyLogDir, logFiles[logFiles.length - 1])
+  const records = (await readFile(logPath, 'utf8')).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+  const histories = records.filter((record) => String(record.path ?? record.pathname ?? '').startsWith('/api/ai/history/'))
+  checks.require('proxy.first-history-delayed', histories.length >= 1 && histories[0].delayMs === 800,
+    'the first history response is delayed by 800ms', histories.slice(0, 3))
+  checks.require('proxy.later-history-not-delayed', histories.slice(1).every((record) => record.delayMs === 0),
+    'every later history response is forwarded without delay', histories.slice(0, 6))
+  checks.require('proxy.history-status-200', histories.every((record) => record.status === 200),
+    'proxy forwards real 200 responses unchanged', histories.map((record) => record.status))
+  await evidence.json('timing-proxy-log.json', {
+    logFile: logFiles[logFiles.length - 1],
+    historyCount: histories.length,
+    histories: histories.slice(0, 8)
+  })
+
+  const before = recoveryFactsSignatureWithoutSeq(snapshot)
+  browser.setPhase('full-replay')
+  await browser.reload()
+  await browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    return ai.historyLoaded === true && ai.restoringRecovery === false && ai.loading === false
+  })()`, 'TIMING_PROXY_FULL_REPLAY_NOT_SETTLED')
+  const replayed = await browser.snapshot()
+  checks.require('full.content-stable', recoveryFactsSignatureWithoutSeq(replayed) === before,
+    'full history replay reproduces the same ordered content/parts/cards', {
+      before,
+      after: recoveryFactsSignatureWithoutSeq(replayed)
+    })
+  const replayCommitted = await waitForHistoryProjectionCommit(context, 'full-replay-history')
+  checks.require('full.history-converged', replayCommitted !== null,
+    'full replay also converges to the authoritative history', replayCommitted === null ? null : replayCommitted.authoritative)
+
+  // 增量锚点取“后缀尚未收齐时”的公开 runSeq（incrementalAnchor），刷新后仍用它回放；
+  // 这样回放必然包含后缀帧与终帧，而不是 lastSeq=archiveMax 时的空回放。
+  const lastSeq = incrementalAnchor
+  checks.require('incremental.last-seq-known', lastSeq > 0, 'store exposed a positive lastSeq while the suffix was in flight', {lastSeq, runId: context.runId})
+  const replay = await api.eventsReplay(context.runId, lastSeq)
+  checks.require('incremental.replay-available', replay.status === 'AVAILABLE' && replay.frames.length > 0,
+    'public events?lastSeq replays frames', {status: replay.status, frameCount: replay.frames.length})
+  const seqs = replay.frames.map((frame) => frame.seq).filter((seq) => Number.isSafeInteger(seq))
+  checks.require('incremental.only-newer-frames', seqs.every((seq) => seq > lastSeq),
+    'incremental reattach only returns frames with seq > lastSeq', {lastSeq, seqs: seqs.slice(0, 32)})
+  checks.require('incremental.seq-unique-ascending', seqs.every((seq, index) => index === 0 || seq > seqs[index - 1]),
+    'replayed seq values are unique and strictly ascending', seqs)
+  checks.require('incremental.terminal-present', replay.frames.some((frame) => ['done', 'error'].includes(frame.type)),
+    'incremental replay includes the terminal frame', replay.frames.slice(-8))
+  await evidence.json('timing-proxy-incremental.json', {
+    variant: config.variant,
+    lastSeq,
+    frameCount: replay.frames.length,
+    frames: replay.frames.slice(0, 64)
+  })
+}
+
 async function runContentMatrix(context) {
   const {browser, checks, config} = context
   const variants = new Set(['interleave', 'gf-seven', 'timeline', 'boundary', 'repeat-refresh', 'form-draft', 'composer-draft', 'copy-scan', 'tool-chain'])
@@ -5290,6 +5475,7 @@ try {
   else if (config.scenario === 'recovery-form-queue') await runFormQueueRecovery(context)
   else if (config.scenario === 'correction-prefix') await runCorrectionPrefixScenario(context)
   else if (config.scenario === 'content-matrix') await runContentMatrix(context)
+  else if (config.scenario === 'recovery-timing-proxy') await runTimingProxyScenario(context)
   else if (config.scenario === 'correction-prefix-preflight') await runCorrectionPrefixPreflight(context)
   else if (config.scenario === 'recovery-history-generation') await runHistoryGenerationRace(context)
   else if (config.scenario === 'recovery-stopped') await runStoppedRecovery(context)
@@ -5367,7 +5553,7 @@ const summary = {
   historyOrder: config.historyOrder || null,
   pendingFixture: config.pendingFixture,
   status,
-  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage', 'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue', 'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix'].includes(config.scenario)
+  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage', 'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue', 'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix', 'recovery-timing-proxy'].includes(config.scenario)
     ? 'REAL_BROWSER_DOM_STORE_PUBLIC_HISTORY_CONTEXT_CLIPBOARD_AND_PUBLIC_BUSINESS_API; configured upstream evidence only; REAL_PROVIDER_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN'
     : 'REAL_BROWSER_DOM_AND_PUBLIC_API_WITH_CDP_HISTORY_HTTP_FAULT; no application SSE fabrication; BACKEND_INTERNAL_FAILURE_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN',
   startedAt,
