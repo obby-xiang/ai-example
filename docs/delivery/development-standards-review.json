@@ -4355,6 +4355,33 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批不修改流式解析，仅记录完整正文和卡片内容对账结果。"},
         "verification-review": {"status": "checked", "reason": "DeepSeek agent-297第三轮C-130 3/3和同页签新建会话PASS；C-131～C-139继续NOT_RUN，不把部分覆盖写成全部通过。"}
       }
+    },
+    {
+      "fingerprint": "sha256:8b98573a779f24dcb0b6e85a0e1defc56312af62f832284b43c8b1e90b739b18",
+      "status": "reviewed",
+      "reason": "逐hunk复核普通无工具多choice正文提取与Accumulator同源累计，关联检查实时delta、TurnTextCapture、最终history、finalText、transcript及工具/终态/usage边界；独立审查agent-1156无发现。",
+      "reviewedAt": "2026-11-09T08:03:46+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1156",
+      "specChanges": [
+        {
+          "change": "普通无工具多choice由仅消费首个Generation改为按上游getResults顺序拼接全部正文。",
+          "reason": "原实现会丢弃同分片后续choice，导致实时正文、最终history和finalText缺失。",
+          "impact": "仅普通无工具多choice正文补全；单choice、空响应、任一choice含工具调用、终态和usage语义不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "chunkText保留全部普通choice正文，Accumulator复用相同提取结果，不重复追加，工具分支仍回退首个Generation。"},
+        {"path": "docs/verification/AI普通多choice消费修复-2026-11-09.md", "status": "checked", "reason": "记录根因、关联审查、IDEA格式化、实际生产编译及动态multi-choice场景NOT_RUN边界。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Spring CollectionUtils、现有Generation/ChatResponse及StringBuilder，无新增依赖或供应商特判。"},
+        "java-api-style": {"status": "checked", "reason": "新增私有方法低于50行且复杂度低于20，使用JDK21 getFirst并处理null，不修改JSON、Lombok或布尔接口。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "本批不修改日志、异常消息或前端错误映射，原文本消费不生成异常体证据。"},
+        "toc-interaction": {"status": "not-affected", "reason": "本批不修改卡片、文案或交互，仅补齐后端实际输出正文。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "仅普通choice正文聚合变化，工具边界、完成锁存、usage、取消和Redis持久化结构保持原语义，无数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按既有完整ChatResponse文本片段顺序拼接，不进行字节转码、代理对切分或字素截断。"},
+        "verification-review": {"status": "checked", "reason": "独立静态审查无发现；IDEA Reformat已执行，Maven生产编译357源文件BUILD SUCCESS，测试和真实multi-choice复测NOT_RUN。"}
+      }
     }
   ]
 }

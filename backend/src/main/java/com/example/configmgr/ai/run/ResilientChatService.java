@@ -4454,14 +4454,38 @@ public class ResilientChatService {
     }
 
     /**
-     * 上游分片的正文（{@code null} = 该分片没有文本）。
+     * 上游分片的正文（{@code null} = 该分片没有文本）。普通多 choice 按上游顺序拼接；
+     * 任一 choice 带工具调用时保持首个 choice 的既有工具路径口径，不做跨 choice 合并。
      */
     private static String chunkText(ChatResponse response) {
-        Generation generation = response == null ? null : response.getResult();
-        if (generation == null || generation.getOutput() == null) {
+        List<Generation> generations = response == null ? null : response.getResults();
+        if (CollectionUtils.isEmpty(generations)) {
             return null;
         }
-        return generation.getOutput().getText();
+        Generation first = generations.getFirst();
+        if (generations.size() == 1) {
+            return generationText(first);
+        }
+        StringBuilder text = new StringBuilder();
+        boolean contentPresent = false;
+        for (Generation generation : generations) {
+            if (generation == null || generation.getOutput() == null) {
+                continue;
+            }
+            if (generation.getOutput().hasToolCalls()) {
+                return generationText(first);
+            }
+            String delta = generation.getOutput().getText();
+            if (delta != null) {
+                text.append(delta);
+                contentPresent = true;
+            }
+        }
+        return contentPresent ? text.toString() : null;
+    }
+
+    private static String generationText(Generation generation) {
+        return generation == null || generation.getOutput() == null ? null : generation.getOutput().getText();
     }
 
     /**
@@ -4661,12 +4685,10 @@ public class ResilientChatService {
                 if (terminalLatchedBefore && hasToolCalls) {
                     this.realToolCallAfterTerminal.set(true);
                 }
-                if (generation.getOutput() != null) {
-                    String chunk = generation.getOutput().getText();
-                    if (chunk != null) {
-                        this.text.append(chunk);
-                    }
-                }
+            }
+            String chunk = chunkText(response);
+            if (chunk != null) {
+                this.text.append(chunk);
             }
             record(response, generation, shardIndex, sinceFirstShardMs, hasToolCalls);
         }
