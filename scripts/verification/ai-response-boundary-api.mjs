@@ -1919,7 +1919,13 @@ async function collectLogEvidence(context) {
   const logs = {}
   const logLines = {}
   for (const [name, source] of [['backend', context.config.backendLogFile], ['stub', context.config.stubLogFile]]) {
-    logs[name] = await readLogSince(source, context.logOffsets?.[name])
+    try {
+      logs[name] = await readLogSince(source, context.logOffsets?.[name])
+    } catch (error) {
+      logs[name] = {text: '', size: 0, offset: context.logOffsets?.[name] ?? 0, readOffset: 0, truncated: false}
+      context.checks.add(`logs.${name}-readable`, false, 'current-run log window must be readable',
+        {file: name, errorName: errorName(error)})
+    }
     logLines[name] = logs[name].text.split(/\r?\n/)
   }
   const expected = await expectedLogAssociations(logLines, context)

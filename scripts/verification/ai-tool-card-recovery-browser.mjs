@@ -2186,7 +2186,7 @@ function promptFor(context) {
   const nonce = randomUUID()
   if (toolCases.has(context.config.scenario)) return `${toolCases.get(context.config.scenario).prompt} verification=${nonce}`
   if (['tool-skipped', 'recovery-hitl-gate'].includes(context.config.scenario)) {
-    return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} multi-card=2 verification=${nonce}`
+    return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} verification=${nonce}`
   }
   if (context.config.scenario === 'ordinary-skipped') {
     return `tool-seq=start_export,list_tasks&seq-args={"taskId":${context.fixtureTaskId}} verification=${nonce}`
@@ -2640,6 +2640,11 @@ async function runSkippedScenario(context) {
   })()`, 'SKIPPED_TERMINAL_NOT_REACHED')
   await driveSkippedHostContinuation(context)
   const snapshot = await browser.snapshot()
+  const startPending = snapshot.messages.flatMap((message) => message.parts).some((part) => part.kind === 'tool'
+    && part.name === 'start_export' && part.status === 'pending' && part.requiresAction === true)
+  checks.require('live.start-export-pending', startPending,
+    'host continuation ends with an unapproved start_export pending', snapshot.messages.flatMap((message) => message.parts)
+      .filter((part) => part.kind === 'tool').map((part) => ({name: part.name, status: part.status, requiresAction: part.requiresAction})))
   const parts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.name === 'create_task')
   checks.require('live.two-create-task-parts', parts.length === 2, 'multi-card=2 yields exactly two create_task parts', parts)
   const skipped = parts.filter((part) => part.status === 'skipped' && part.decision === null && part.requiresAction === false)
@@ -3105,12 +3110,27 @@ async function assertTerminalRecoveryComplete(context, phase, historyEvidence, b
   checks.require(`${phase}.terminal-timestamp-no-activity`, view.operations.timestampCount > 0
     && view.operations.waitingCount === 0 && view.operations.workingCount === 0 && view.operations.compactingCount === 0,
   'terminal timestamps are visible with no working/waiting/compacting indicator', view.operations)
-  checks.require(`${phase}.send-reopened-by-real-state`, view.snapshot.canSend === true
-    && view.operations.send.length === 1 && view.operations.send[0].disabled === false,
-  'send is enabled only after the real terminal state', {
-    canSend: view.snapshot.canSend,
-    send: view.operations.send
-  })
+  const chatBeforeDraft = context.browser.requestCounts().chat
+  await context.browser.evaluate(`document.querySelector('[data-testid="composer-input"]').focus()`, false)
+  await context.browser.send('Input.insertText', {text: `recovery-draft-${Date.now()}`})
+  const sendWithDraft = await context.browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const input = document.querySelector('[data-testid="composer-input"]')
+    const send = document.querySelector('[data-testid="send-btn"]')
+    if (!input || !send || input.value.length === 0) return null
+    return {canSend: ai.canSend === true, disabled: send.disabled === true || send.getAttribute('aria-disabled') === 'true', valueLength: input.value.length}
+  })()`, 'SEND_NOT_EVALUABLE_WITH_DRAFT')
+  checks.require(`${phase}.send-reopened-by-real-state`, sendWithDraft.canSend === true && sendWithDraft.disabled === false,
+    'send is enabled only after the real terminal state, verified with a non-empty draft', sendWithDraft)
+  checks.require(`${phase}.no-chat-from-draft`, context.browser.requestCounts().chat === chatBeforeDraft,
+    'typing a draft never sends a chat request', {before: chatBeforeDraft, after: context.browser.requestCounts().chat})
+  await context.browser.evaluate(`(() => {
+    const input = document.querySelector('[data-testid="composer-input"]')
+    if (!input) return null
+    input.value = ''
+    input.dispatchEvent(new Event('input', {bubbles: true}))
+    return input.value.length
+  })()`, false)
   assertMessagePresentation(context, phase, view, 'terminal')
   await assertDraftAndTerminalCopy(context, phase, view)
   await saveRecoveryPhase(context, phase, view, historyEvidence, business)
@@ -3496,11 +3516,14 @@ async function runMixedMessagesRecovery(context) {
   context.runId = first.activeRunId
 
   browser.setPhase('mixed-pending')
-  await browser.sendPrompt(`tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} multi-card=2 verification=${randomUUID()}`)
+  await browser.sendPrompt(`tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} verification=${randomUUID()}`)
   await approveCreateTasks(context)
   context.runId = (await browser.snapshot()).activeRunId ?? context.runId
   await driveSkippedHostContinuation(context)
   const initial = await browser.snapshot()
+  const startPending = initial.messages.flatMap((message) => message.parts).some((part) => part.kind === 'tool'
+    && part.name === 'start_export' && part.status === 'pending' && part.requiresAction === true)
+  if (!startPending) throw new ScenarioNotRun('START_EXPORT_PENDING_NOT_FORMED')
   const pending = initial.messages.find((message) => message.role === 'assistant' && messagePending(message))
   checks.require('mixed-pending.two-distinct-assistant-states', initial.messages.some((message) => message.id === historical.id && message.done)
     && pending && pending.id !== historical.id,
@@ -3786,7 +3809,7 @@ async function runContextUsageRecovery(context) {
 async function runStreamHistoryRace(context) {
   const {browser, checks, config} = context
   const variants = new Set(['mirror-inflight', 'no-mirror', 'mirror-terminal'])
-  if (!variants.has(config.variant)) throw new Error(`RECOVERY_VARIANT must select exactly one of ${[...variants].join(', ')}`)
+  if (!variants.has(config.variant)) throw new ScenarioNotRun('RECOVERY_VARIANT_REQUIRED')
   context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
   browser.setPhase('initial-stream')
   await browser.sendPrompt(`turn-text stall-frames=250 verification=${randomUUID()}`)
@@ -4046,7 +4069,7 @@ async function runCrossRunOrder(context) {
 
 async function runFormQueueRecovery(context) {
   const {browser, checks, config} = context
-  if (!['with-mirror', 'no-mirror'].includes(config.variant)) throw new Error('RECOVERY_VARIANT must be with-mirror or no-mirror')
+  if (!['with-mirror', 'no-mirror'].includes(config.variant)) throw new ScenarioNotRun('RECOVERY_VARIANT_REQUIRED')
   context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
   browser.setPhase('initial-terminal')
   await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
@@ -4120,7 +4143,7 @@ function assertHistoryProjectionCommit(context, phase, snapshot, history) {
       entryId: message.entryId ?? null,
       runId: message.runId ?? null,
       type: String(message.type ?? message.role ?? '').toUpperCase(),
-      textHash: fnv1a32(message.text ?? message.content ?? '')
+      textHash: {algorithm: 'fnv1a32', value: fnv1a32(message.text ?? message.content ?? '')}
     }))
   }
   context.checks.require(`${phase}.history-only-projection-commit`, canonicalJson(actual) === canonicalJson(expected),
@@ -4191,7 +4214,7 @@ async function runHistoryGenerationRace(context) {
 async function runStoppedRecovery(context) {
   const {browser, checks, config} = context
   const variants = new Set(['stop', 'client-request-stopped', 'current-failure', 'expired', 'incomplete'])
-  if (!variants.has(config.variant)) throw new Error(`RECOVERY_VARIANT must select exactly one of ${[...variants].join(', ')}`)
+  if (!variants.has(config.variant)) throw new ScenarioNotRun('RECOVERY_VARIANT_REQUIRED')
   context.businessAfterFixture = await businessSnapshot(context.api, relevantTaskIds(context))
   context.sessionId = (await browser.snapshot()).sessionId
   browser.setPhase('before-stop')
