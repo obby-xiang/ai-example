@@ -5189,6 +5189,7 @@ async function runTimingProxyScenario(context) {
   }
   await evidence.json('timing-proxy-incremental.json', {
     variant: config.variant,
+    contentVariant,
     lastSeq,
     frameCount: replay.frames.length,
     frames: replay.frames.slice(0, 64)
@@ -5899,6 +5900,7 @@ try {
     variant: config.variant || null,
     historyOrder: config.historyOrder || null,
     pendingFixture: config.pendingFixture,
+    contentVariant: config.contentVariant ?? null,
     appUrl: config.appUrl,
     baseUrl: config.baseUrl,
     tenantId: config.tenantId,
