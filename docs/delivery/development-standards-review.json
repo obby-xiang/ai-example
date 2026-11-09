@@ -4932,6 +4932,44 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "仅工具结局归档与状态恢复，未修改文本、编码或流式解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1191最终APPROVE；四文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译357个主源BUILD SUCCESS；动态SSE/Redis场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:b8cdf39101ebf852d48f428130019d7dd1a3f041bcc48cacfc54ee733b39b724",
+      "status": "reviewed",
+      "reason": "逐hunk及关联调用链复核持久恢复业务写门禁、自动恢复跨代次所有权与followup移交、新轮占场历史投影；独立审查agent-1189和agent-1197最终APPROVE。",
+      "reviewedAt": "2026-11-10T02:47:50+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1189/agent-1197、施工agent-1188/agent-1190/agent-1192",
+      "specChanges": [
+        {
+          "change": "manualRecovery持久失败仅禁止发送、继续及未决业务写，新建会话、草稿编辑、复制赞踩、只读预览和手动重试保持可用。",
+          "reason": "原发送与业务action只检查restoringRecovery，持久失败后仍可能发起新写；整表禁用又会误伤本地草稿。",
+          "impact": "按钮、handler和store action同步门禁；上传完成及内部结算不被截断，附件本地移除仍可用。"
+        },
+        {
+          "change": "自动恢复只记录错误，最终失败或权威run消失才封口；恢复operation按session/代次持有所有权并支持旧尝试结束后的新代次接管。",
+          "reason": "首次history失败提前封死非终态助手，旧inFlight又可能阻断新链和followup，造成无自动链也无人工出口。",
+          "impact": "重试中保留三点和pending，旧finally不清新链，followup由新代次校验后接管且不会并行重复。"
+        },
+        {
+          "change": "新轮占场时最新history仅提交分页、revision、events和windowEntries投影，不整替实时messages。",
+          "reason": "旧分支只写加载标志，权威历史已更新但前端投影停留旧revision。",
+          "impact": "旧代次响应仍拒绝，当前新轮与在途连接不受影响，完整history提交复用同一投影helper。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "逐hunk复核业务写按钮、handler、v-memo及错误卡动作分流，新建/编辑/复制/赞踩未加门禁。"},
+        {"path": "frontend/src/components/AiPanel/FormRenderer.vue", "status": "checked", "reason": "拆分为普通恢复整表禁用与持久失败业务动作禁用，附件上传异步前后复查，本地字段和附件移除保留。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "复核businessWriteBlocked、恢复operation/ended/inFlight/followup全链及projection-only提交，内部上传和HITL收尾不受阻。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有store门禁、恢复operation、followup和history提交流程，无新增依赖或第二套状态机。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript/Vue前端变化，无Java、JSON实体或后端API签名变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复错误持续保留，自动重试不伪装终态，无接管时显式封口并发布人工出口，不吞上传收尾。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复期保留三点与真实状态，终态复制编辑和本地草稿不受持久业务写门禁影响，不新增提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "恢复链按session/代次和operation identity防重，旧followup不驱动新现场，history旧代次拒绝，无AI数据库交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、Unicode、SSE解码或内容截断。"},
+        "verification-review": {"status": "checked", "reason": "agent-1189与agent-1197最终APPROVE；三文件IDEA Reformat；frontend/node scripts/build.mjs多次构建3281模块成功，最终28.08秒；动态浏览器/API场景NOT_RUN。"}
+      }
     }
   ]
 }

@@ -206,6 +206,7 @@ interface HistoryCommitGuard {
 }
 
 const terminalHistoryFollowups = new Map<string, TerminalHistoryFollowup>()
+const terminalHistoryFollowupWaiters = new WeakMap<AutoRecoveryOperation, string>()
 
 function historyRunKey(sessionId: string, runId: string): string {
   return `${sessionId}\0${runId}`
@@ -790,10 +791,24 @@ export interface AiManualRecoveryView {
 const autoRecoveryTimers = new Map<AutoRecoveryKind, ReturnType<typeof setTimeout>>()
 /** 正在等下一次尝试的解析函数（作废时立刻放行，避免悬空 await）。 */
 const autoRecoveryWaiters = new Map<AutoRecoveryKind, () => void>()
-/** 正在执行恢复尝试的类别（防重入）。 */
-const autoRecoveryInFlight = new Set<AutoRecoveryKind>()
+/** 正在执行的恢复尝试；旧 finally 只释放自己持有的 operation。 */
+const autoRecoveryInFlight = new Map<AutoRecoveryKind, AutoRecoveryOperation>()
 /** 每类一个版本号：换会话 / 停止 / 新轮 / 用户手动重试都推进它，链路每步之后对版。 */
 const autoRecoveryEpochs = new Map<AutoRecoveryKind, number>()
+
+function hasActiveAutoRecovery(store: { sessionId: string }): boolean {
+  return [...autoRecoveryOperations].some(([kind, operation]) => operation.sessionId === store.sessionId
+    && operation.epoch === autoRecoveryEpoch(kind))
+}
+
+function currentAutoRecoveryOperation(
+  store: { sessionId: string },
+  kind: AutoRecoveryKind
+): AutoRecoveryOperation | undefined {
+  const operation = autoRecoveryOperations.get(kind)
+  return operation !== undefined && operation.sessionId === store.sessionId
+    && operation.epoch === autoRecoveryEpoch(kind) ? operation : undefined
+}
 
 let recoveryOperationSequence = 0
 const activeRecoveryOperations = new Set<number>()
@@ -819,9 +834,12 @@ function clearRecoveryOperations(store: { restoringRecovery: boolean }): void {
 }
 
 interface AutoRecoveryOperation {
-  store: { restoringRecovery: boolean }
+  store: { restoringRecovery: boolean; sessionId: string }
   token: number
   epoch: number
+  sessionId: string
+  ended: Promise<void>
+  settle: () => void
 }
 
 const autoRecoveryOperations = new Map<AutoRecoveryKind, AutoRecoveryOperation>()
@@ -831,21 +849,27 @@ function autoRecoveryEpoch(kind: AutoRecoveryKind): number {
 }
 
 function beginAutoRecoveryOperation(
-  store: { restoringRecovery: boolean },
+  store: { restoringRecovery: boolean; sessionId: string },
   kind: AutoRecoveryKind,
   epoch: number
 ): AutoRecoveryOperation {
-  const operation = { store, token: beginRecoveryOperation(store), epoch }
+  let settle = (): void => {}
+  const ended = new Promise<void>((resolve) => {
+    settle = resolve
+  })
+  const operation = { store, token: beginRecoveryOperation(store), epoch, sessionId: store.sessionId, ended, settle }
   autoRecoveryOperations.set(kind, operation)
   return operation
 }
 
 function endAutoRecoveryOperation(kind: AutoRecoveryKind, operation: AutoRecoveryOperation): void {
-  if (autoRecoveryOperations.get(kind) !== operation) {
-    return
+  if (autoRecoveryOperations.get(kind) === operation) {
+    autoRecoveryOperations.delete(kind)
+    endRecoveryOperation(operation.store, operation.token)
   }
-  autoRecoveryOperations.delete(kind)
-  endRecoveryOperation(operation.store, operation.token)
+  if (autoRecoveryInFlight.get(kind) !== operation) {
+    operation.settle()
+  }
 }
 
 /**
@@ -858,7 +882,7 @@ function cancelAutoRecovery(kind?: AutoRecoveryKind): void {
       ...autoRecoveryEpochs.keys(),
       ...autoRecoveryTimers.keys(),
       ...autoRecoveryWaiters.keys(),
-      ...autoRecoveryInFlight,
+      ...autoRecoveryInFlight.keys(),
       ...autoRecoveryOperations.keys()
     ])
     : [kind]
@@ -4779,9 +4803,13 @@ export const useAiStore = defineStore('ai', {
       }
       return state.notice
     },
-    /** 输入区是否可用（执行中/挂起等待中/恢复对账中一律禁发）。 */
+    /** 恢复在途或持久恢复失败时，禁止会话内业务写；新建会话、草稿与只读动作不受此判定约束。 */
+    businessWriteBlocked(state): boolean {
+      return state.restoringRecovery || state.manualRecovery !== null
+    },
+    /** 输入区是否可用（执行中/恢复在途/持久恢复失败一律禁发）。 */
     canSend(state): boolean {
-      return !state.loading && !state.restoringRecovery
+      return !state.loading && !this.businessWriteBlocked
     },
     /**
      * 批次2：本轮的**视图阶段**（四态，单一判据）。
@@ -4923,6 +4951,7 @@ export const useAiStore = defineStore('ai', {
           new ApiError('preparing: auto recovery exhausted', 202, 'PREPARING_TIMEOUT', null)
         )
       }
+      this.sealRecordedRecovery('current')
       this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
     },
 
@@ -4962,9 +4991,21 @@ export const useAiStore = defineStore('ai', {
       }
       const epoch = scheduledOperation?.epoch ?? autoRecoveryEpoch(kind)
       const operation = scheduledOperation ?? beginAutoRecoveryOperation(this, kind, epoch)
-      if (autoRecoveryOperations.get(kind) !== operation
-        || autoRecoveryEpoch(kind) !== epoch
-        || autoRecoveryInFlight.has(kind)) {
+      const isCurrent = (): boolean => autoRecoveryOperations.get(kind) === operation
+        && autoRecoveryEpoch(kind) === epoch && operation.sessionId === this.sessionId
+      if (!isCurrent()) {
+        endAutoRecoveryOperation(kind, operation)
+        return false
+      }
+      const previousAttempt = autoRecoveryInFlight.get(kind)
+      if (previousAttempt !== undefined && previousAttempt !== operation) {
+        await previousAttempt.ended
+        if (!isCurrent()) {
+          endAutoRecoveryOperation(kind, operation)
+          return false
+        }
+      }
+      if (autoRecoveryInFlight.has(kind)) {
         endAutoRecoveryOperation(kind, operation)
         return false
       }
@@ -4977,10 +5018,10 @@ export const useAiStore = defineStore('ai', {
         }
         return false
       }
-      autoRecoveryInFlight.add(kind)
+      autoRecoveryInFlight.set(kind, operation)
       try {
         while (used < AUTO_RECOVERY_MAX_ATTEMPTS) {
-          if (autoRecoveryEpoch(kind) !== epoch) {
+          if (!isCurrent()) {
             return false
           }
           used += 1
@@ -4989,23 +5030,26 @@ export const useAiStore = defineStore('ai', {
             this.autoRecoveryUsed = { ...this.autoRecoveryUsed, [kind]: 0 }
             return true
           }
-          if (autoRecoveryEpoch(kind) !== epoch) {
+          if (!isCurrent()) {
             return false
           }
           if (used >= AUTO_RECOVERY_MAX_ATTEMPTS) {
             break
           }
           const keepGoing = await canWaitAutoRecoveryDelay(kind)
-          if (!keepGoing || autoRecoveryEpoch(kind) !== epoch) {
+          if (!keepGoing || !isCurrent()) {
             return false
           }
         }
         onExhausted?.()
         return false
       } finally {
-        autoRecoveryInFlight.delete(kind)
+        const flushHistoryFollowup = kind === 'history' && isCurrent()
+        if (autoRecoveryInFlight.get(kind) === operation) {
+          autoRecoveryInFlight.delete(kind)
+        }
         endAutoRecoveryOperation(kind, operation)
-        if (kind === 'history') {
+        if (flushHistoryFollowup) {
           this.flushTerminalHistoryFollowup(chainSessionId)
         }
       }
@@ -5023,21 +5067,26 @@ export const useAiStore = defineStore('ai', {
       attempt: () => Promise<boolean>,
       onExhausted?: () => void
     ): boolean {
-      if (autoRecoveryInFlight.has(kind) || autoRecoveryTimers.has(kind) || autoRecoveryOperations.has(kind)) {
+      const epoch = autoRecoveryEpoch(kind)
+      const active = autoRecoveryOperations.get(kind)
+      if (active !== undefined && active.epoch === epoch && active.sessionId === this.sessionId) {
         return false
+      }
+      if (active !== undefined) {
+        endAutoRecoveryOperation(kind, active)
       }
       if ((this.autoRecoveryUsed[kind] ?? 0) >= AUTO_RECOVERY_MAX_ATTEMPTS) {
         onExhausted?.()
         return false
       }
-      const epoch = autoRecoveryEpoch(kind)
       const operation = beginAutoRecoveryOperation(this, kind, epoch)
       try {
         const timer = setTimeout(() => {
           if (autoRecoveryTimers.get(kind) === timer) {
             autoRecoveryTimers.delete(kind)
           }
-          if (autoRecoveryOperations.get(kind) !== operation || autoRecoveryEpoch(kind) !== epoch) {
+          if (autoRecoveryOperations.get(kind) !== operation || autoRecoveryEpoch(kind) !== epoch
+            || operation.sessionId !== this.sessionId) {
             endAutoRecoveryOperation(kind, operation)
             return
           }
@@ -5351,9 +5400,9 @@ export const useAiStore = defineStore('ai', {
         }
         // 兜底异常同样先记账并走有界恢复，避免自动尝试期间提前发布错误。
         if (!this.historyLoaded) {
-          this.sealRecovery('history', error)
+          this.sealRecovery('history', error, true)
         } else if (this.currentError === null) {
-          this.sealRecovery('current', error)
+          this.sealRecovery('current', error, true)
         }
         this.scheduleHistoryRecovery()
       } finally {
@@ -5493,8 +5542,8 @@ export const useAiStore = defineStore('ai', {
         if (this.stopped) {
           return
         }
-        this.sealRecovery('history', error)
-        // 历史是纯 GET：自动重读期间保留内部台账，耗尽后才发布手动恢复入口。
+        this.sealRecovery('history', error, true)
+        // 历史是纯 GET：自动重读期间保留内部台账和非终态现场，耗尽后才封口并发布手动恢复入口。
         this.scheduleHistoryRecovery()
         return
       }
@@ -5504,7 +5553,7 @@ export const useAiStore = defineStore('ai', {
         return
       }
       // M-17 / I4：取数窗口内**真轮占场**，或**入口时本端就在途** ⇒ 这份历史属于过期现场，
-      // 只对账不替换。保留屏上的在途现场（镜像 + 实时帧），本次历史整体丢弃；`historyLoaded` 仍落定
+      // 只提交历史分页/投影，不替换实时 messages。保留屏上的在途现场（镜像 + 实时帧），`historyLoaded` 仍落定
       // （对账已结束，镜像写入恢复正常），后续帧继续写原来的宿主。历史这一路**成功**了，故历史错误与
       // "历史不可用"缺口一并作废（否则重试成功后错误条还挂着）。
       // R04（2026-10-31）：判据从"轮次纪元变没变"改成"现场里有没有一条真轮" —— `send()` 在
@@ -5522,10 +5571,23 @@ export const useAiStore = defineStore('ai', {
       const newRoundOccupies = (): boolean => this.loading || this.suspended
         || (currentAbort !== null && !this.stopped)
         || roundStartSeq !== roundStartAtEntry
-      const completeHistoryWithoutCommit = (): void => {
+      const pageEntries = [...(history.messages ?? [])]
+      const total = history.total ?? pageEntries.length
+      const pageOffset = Math.max(0, total - pageEntries.length)
+      const commitHistoryProjection = (): void => {
+        this.historyTotal = total
+        this.historyOffset = pageOffset
+        this.historyHasMore = history.hasMore === true
+        this.historyNextCursor = history.nextCursor ?? null
+        this.historyRevision = history.revision ?? 0
+        this.historyEvents = history.events ?? []
+        this.historyWindowEntries = markRaw(pageEntries)
+      }
+      const completeHistoryWithoutMessageCommit = (): void => {
         if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
           return
         }
+        commitHistoryProjection()
         if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
           noteHistoryDoneEvidence(sid, requestGeneration, history.messages ?? [])
         }
@@ -5536,7 +5598,7 @@ export const useAiStore = defineStore('ai', {
         }
       }
       if (inFlightAtEntry || newRoundOccupies()) {
-        completeHistoryWithoutCommit()
+        completeHistoryWithoutMessageCommit()
         return
       }
       let settled = false
@@ -5564,15 +5626,12 @@ export const useAiStore = defineStore('ai', {
       }
       const preloaded = await currentPreload
       if (!historyGuard.isValid()) {
-        completeHistoryWithoutCommit()
+        completeHistoryWithoutMessageCommit()
         return
       }
-      const pageEntries = [...(history.messages ?? [])]
       if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
         noteHistoryDoneEvidence(sid, requestGeneration, pageEntries)
       }
-      const total = history.total ?? pageEntries.length
-      const pageOffset = Math.max(0, total - pageEntries.length)
       let committed = false
       const commitHistory = (): void => {
         if (committed || !historyGuard.isValid()) {
@@ -5583,13 +5642,7 @@ export const useAiStore = defineStore('ai', {
         if (this.recoveryGap?.reason !== 'archive-window') {
           this.recoveryGap = null
         }
-        this.historyTotal = total
-        this.historyOffset = pageOffset
-        this.historyHasMore = history.hasMore === true
-        this.historyNextCursor = history.nextCursor ?? null
-        this.historyRevision = history.revision ?? 0
-        this.historyEvents = history.events ?? []
-        this.historyWindowEntries = markRaw(pageEntries)
+        commitHistoryProjection()
         this.historyLoaded = true
         if (!history.messages || history.messages.length === 0) {
           const current = preloaded.current
@@ -5614,7 +5667,7 @@ export const useAiStore = defineStore('ai', {
       }
       await this.restoreSnapshotGuarded(preloaded, commitHistory, historyGuard)
       if (!historyGuard.isValid()) {
-        completeHistoryWithoutCommit()
+        completeHistoryWithoutMessageCommit()
         return
       }
       if (!committed) {
@@ -6180,10 +6233,11 @@ export const useAiStore = defineStore('ai', {
         if (!isOwner()) {
           return
         }
-        const autoRecovering = autoRecoveryInFlight.size > 0 || autoRecoveryTimers.size > 0
+        const autoRecovering = hasActiveAutoRecovery(this)
         if (this.currentError !== null && this.preparingRun === null && !autoRecovering
           && (historyGuard?.isValid() ?? true)
           && this.manualRecovery?.reason !== 'interrupted' && this.manualRecovery?.reason !== 'first-frame') {
+          this.sealRecordedRecovery('current')
           this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
         }
       }
@@ -6947,14 +7001,25 @@ export const useAiStore = defineStore('ai', {
       this.publishManualRecovery({ scope: 'current', reason, error })
     },
 
-    /** 记录恢复失败并统一封口；是否发布用户提示由最终恢复出口决定。 */
-    sealRecovery(scope: Exclude<AiLoadErrorScope, 'context'>, error: unknown): void {
+    /** 自动重试只记录错误；最终失败才执行既有终态封口与交互清理。 */
+    sealRecovery(
+      scope: Exclude<AiLoadErrorScope, 'context'>,
+      error: unknown,
+      deferCleanup = hasActiveAutoRecovery(this)
+    ): void {
       const view = toLoadErrorView(scope, error)
       if (scope === 'history') {
         this.historyError = view
       } else {
         this.currentError = view
       }
+      if (deferCleanup) {
+        return
+      }
+      this.sealRecordedRecovery(scope)
+    },
+
+    sealRecordedRecovery(scope: Exclude<AiLoadErrorScope, 'context'>): void {
       this.sealLeftoverInFlight()
       // pendingToolCall 是段投影：先清段的待决事实，再派生，不能直接给 computed 赋值。
       for (const message of this.messages) {
@@ -7087,7 +7152,10 @@ export const useAiStore = defineStore('ai', {
       }
       const error = this.historyError ?? this.currentError
       if (error !== null) {
-        this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
+        if (!hasActiveAutoRecovery(this)) {
+          this.sealRecordedRecovery(error.scope)
+          this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
+        }
         return
       }
       if (previous?.reason === 'interrupted' || previous?.reason === 'first-frame') {
@@ -7297,19 +7365,32 @@ export const useAiStore = defineStore('ai', {
       if (!this.isHistoryRecoveryIdentityCurrent(followup.sessionId, followup.runId, followup.messageId)) {
         return
       }
-      const key = historyRunKey(followup.sessionId, followup.runId)
-      if ((historyRequestsInFlight.get(followup.sessionId) ?? 0) > 0
-        || autoRecoveryInFlight.has('history') || autoRecoveryTimers.has('history')) {
-        terminalHistoryFollowups.set(key, followup)
+      terminalHistoryFollowups.set(historyRunKey(followup.sessionId, followup.runId), followup)
+      this.flushTerminalHistoryFollowup(followup.sessionId)
+    },
+
+    deferTerminalHistoryFollowupFlush(sessionId: string, operation: AutoRecoveryOperation): void {
+      const waiting = terminalHistoryFollowupWaiters.has(operation)
+      terminalHistoryFollowupWaiters.set(operation, sessionId)
+      if (waiting) {
         return
       }
-      terminalHistoryFollowups.delete(key)
-      this.scheduleHistoryRecovery(followup.sessionId, followup)
+      void operation.ended.then(() => {
+        const deferredSessionId = terminalHistoryFollowupWaiters.get(operation)
+        if (deferredSessionId !== undefined && this.sessionId === deferredSessionId) {
+          this.flushTerminalHistoryFollowup(deferredSessionId)
+        }
+      })
     },
 
     flushTerminalHistoryFollowup(sessionId: string): void {
-      if ((historyRequestsInFlight.get(sessionId) ?? 0) > 0
-        || autoRecoveryInFlight.has('history') || autoRecoveryTimers.has('history')) {
+      const active = currentAutoRecoveryOperation(this, 'history')
+      if ((historyRequestsInFlight.get(sessionId) ?? 0) > 0 || active !== undefined) {
+        return
+      }
+      const previousAttempt = autoRecoveryInFlight.get('history')
+      if (previousAttempt !== undefined) {
+        this.deferTerminalHistoryFollowupFlush(sessionId, previousAttempt)
         return
       }
       const prefix = `${sessionId}\0`
@@ -7354,7 +7435,8 @@ export const useAiStore = defineStore('ai', {
       if (chain) {
         recordUnconfirmedHistoryFloor(sessionId, chain.runId)
       }
-      return this.canStartAutoRecovery('history', async () => {
+      let finalFailurePublished = false
+      const scheduled = this.canStartAutoRecovery('history', async () => {
         await this.loadHistory()
         if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
           return true
@@ -7404,9 +7486,19 @@ export const useAiStore = defineStore('ai', {
         }
         const error = this.historyError ?? this.currentError
         if (error !== null) {
+          finalFailurePublished = true
+          this.sealRecordedRecovery(error.scope)
           this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
         }
       })
+      if (!scheduled && !finalFailurePublished && !hasActiveAutoRecovery(this)) {
+        const error = this.historyError ?? this.currentError
+        if (error !== null) {
+          this.sealRecordedRecovery(error.scope)
+          this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
+        }
+      }
+      return scheduled
     },
 
     recoverUnconfirmedTerminal(message: ChatMessage): void {
@@ -7490,7 +7582,10 @@ export const useAiStore = defineStore('ai', {
         } else if (this.manualRecovery?.reason === 'archive-window') {
           this.publishManualRecovery({ scope: 'history', reason: 'archive-window', error: null })
         } else if (this.currentError !== null) {
-          this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
+          if (!hasActiveAutoRecovery(this)) {
+            this.sealRecordedRecovery('current')
+            this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
+          }
         } else {
           this.clearManualRecovery('load')
         }
@@ -8115,7 +8210,7 @@ export const useAiStore = defineStore('ai', {
       if (this.stopping) {
         await waitForStopSettlement()
       }
-      if (this.loading || this.restoringRecovery) {
+      if (this.loading || this.businessWriteBlocked) {
         // 在途轮或恢复对账期间输入框可输入，但回车/发送**不响应且零提示**：
         // 不弹 notice、不写占位气泡、不清草稿。恢复完成后才按权威状态重新开放发送。
         return { outcome: 'not-sent', userMessageId: null }
@@ -8123,7 +8218,7 @@ export const useAiStore = defineStore('ai', {
       // Task 4 引导门：会话必须由后端发号；拿不到号（身份未就绪/发号失败）就**不发请求**，
       // 也绝不把空 id 交给后端（前端已在入口处拒绝，服务端 identity/session 校验才有意义）。
       const sessionId = await this.ensureSession()
-      if (sessionId === '' || this.loading || this.restoringRecovery) {
+      if (sessionId === '' || this.loading || this.businessWriteBlocked) {
         return { outcome: 'not-sent', userMessageId: null }
       }
       const workspace = useWorkspaceStore()
@@ -8444,6 +8539,7 @@ export const useAiStore = defineStore('ai', {
             }, () => {
               const error = this.historyError ?? this.currentError
               if (error !== null) {
+                this.sealRecordedRecovery(error.scope)
                 this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
               }
             })
@@ -8965,13 +9061,24 @@ export const useAiStore = defineStore('ai', {
 
     /** 勾选（面板 checkbox 的 checked=true）。 */
     ackGate(toolCallId: string): void {
+      if (this.businessWriteBlocked) {
+        return
+      }
       if (this.gateAcks[toolCallId] === true) {
         return
       }
       this.gateAcks = { ...this.gateAcks, [toolCallId]: true }
     },
 
-    /** 撤某张卡的勾选（用户取消勾选 / 变更即复位）。 */
+    /** 用户取消勾选；内部成功、失败与帧收尾仍走不受业务写门禁约束的清理入口。 */
+    clearGateAckFromUser(toolCallId: string): void {
+      if (this.businessWriteBlocked) {
+        return
+      }
+      this.clearGateAck(toolCallId)
+    },
+
+    /** 撤某张卡的勾选（决策与帧变更的内部清理）。 */
     clearGateAck(toolCallId: string): void {
       if (this.gateAcks[toolCallId] === undefined) {
         return
@@ -9312,6 +9419,9 @@ export const useAiStore = defineStore('ai', {
      * （既有调用方的兼容路径）。
      */
     async confirm(approved: boolean, reason?: string, toolCallId?: string): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       const runId = this.activeRunId
       let host: ChatMessage | null = null
       let name: string
@@ -10203,6 +10313,9 @@ export const useAiStore = defineStore('ai', {
      * `succeeded` 回灌「已交给导入向导」= 谎报上传成功。
      */
     async chooseUploadFile(): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       const handoff = this.activeUploadHandoff
       if (!handoff || handoff.status === 'uploading') {
         return
@@ -10313,6 +10426,9 @@ export const useAiStore = defineStore('ai', {
      *   不带身份会"点了这张、断的是那张"（PK-12）；身份不匹配 ⇒ 空操作，绝不误杀另一张。
      */
     async cancelUploadHandoff(toolCallId?: string): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       const handoff = this.activeUploadHandoff
       if (!handoff) {
         return
@@ -10444,6 +10560,9 @@ export const useAiStore = defineStore('ai', {
 
     /** 面板「撤销」：取撤销栈顶并应用（深度 1）。 */
     async undoLastUiAction(): Promise<string> {
+      if (this.businessWriteBlocked) {
+        return ''
+      }
       const entry = takeUiUndo()
       this.uiUndoEntry = null
       this.uiUndoToolCallId = null
@@ -10592,6 +10711,9 @@ export const useAiStore = defineStore('ai', {
 
     /** 用户点“应用”：大批量必须先勾选二次确认；应用前复核行指纹。 */
     async confirmWritePreview(acknowledged = false): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       const plan = this.activePreview
       if (!plan) {
         return
@@ -10734,6 +10856,9 @@ export const useAiStore = defineStore('ai', {
 
     /** 用户点“取消”：零写 + `cancelled=true` ⇒ 后端 `FRONTEND_CANCELLED`。 */
     async cancelWritePreview(): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       const plan = this.activePreview
       if (!plan) {
         return
@@ -10868,6 +10993,9 @@ export const useAiStore = defineStore('ai', {
      *   旧卡会变成"plan=null、放弃键点不动"的死键 —— 而写工具等的是人（无超时），一挂就是永久。
      */
     async abandonStalePreview(toolCallId?: string): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       const id = toolCallId && toolCallId !== '' ? toolCallId : this.stalePreviewToolCallId
       if (!id) {
         return
@@ -10953,6 +11081,9 @@ export const useAiStore = defineStore('ai', {
 
     /** GF-B：提交表单值 —— result 为字段 key→值的 JSON 字符串；客户端复核不过就地提示不发出。 */
     async submitGenerativeForm(values: Record<string, unknown>): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       const form = this.activeForm
       // 问题7：停止后表单已收起（且可能已被标记取消）—— 不再发起提交请求。
       if (!form || form.status !== 'filling' || this.stopped || this.stoppedRunId === form.runId) {
@@ -11063,6 +11194,9 @@ export const useAiStore = defineStore('ai', {
      * 取消是用户已经做完的决定，故本地结算后立即按到达序补下一张，不干等结局帧。
      */
     async cancelGenerativeForm(toolCallId?: string): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       // 问题7：停止已经收口了表单卡与回灌，不再补发取消请求。
       if (this.stopped) {
         return
@@ -11105,6 +11239,9 @@ export const useAiStore = defineStore('ai', {
      * 回灌失败的原因落段（卡面可见），不吞。
      */
     async cancelQueuedForm(toolCallId: string): Promise<void> {
+      if (this.businessWriteBlocked) {
+        return
+      }
       // 问题7：停止已整队作废并以本地取消收口，不再补发回灌。
       if (this.stopped) {
         return

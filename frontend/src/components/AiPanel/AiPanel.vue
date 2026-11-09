@@ -557,7 +557,7 @@
                           type="button"
                           class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
                           data-testid="ui-undo-button"
-                          :disabled="ai.restoringRecovery"
+                          :disabled="ai.businessWriteBlocked"
                           @click="onUiUndo"
                         >
                           {{ t('ai.panel.undo') }}
@@ -601,7 +601,7 @@
                                   class="mt-[2px] flex-none cursor-pointer accent-[#2563eb]"
                                   data-testid="gate-ack-box"
                                   :checked="isGateAcked(part.toolCallId)"
-                                  :disabled="ai.restoringRecovery || isGateSubmitting(part.toolCallId)"
+                                  :disabled="ai.businessWriteBlocked || isGateSubmitting(part.toolCallId)"
                                   @change="onGateAckChange(part.toolCallId, $event)"
                                 />
                                 <span class="min-w-0 break-words">{{ gateAckText(part) }}</span>
@@ -621,13 +621,13 @@
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                  :disabled="ai.restoringRecovery || isGateSubmitting(part.toolCallId)"
+                                  :disabled="ai.businessWriteBlocked || isGateSubmitting(part.toolCallId)"
                                   @click="decide(false, part.toolCallId)"
                                 >{{ t('ai.panel.reject') }}</button>
                                 <button
                                   type="button"
                                   class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                  :disabled="ai.restoringRecovery || isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
+                                  :disabled="ai.businessWriteBlocked || isGateSubmitting(part.toolCallId) || hasGateAckRequirement(part)"
                                   @click="decide(true, part.toolCallId)"
                                 >
                                   <span
@@ -656,6 +656,7 @@
                             :schema="liveForm.form"
                             :submitting="liveForm.status === 'submitting'"
                             :disabled="ai.restoringRecovery"
+                            :business-write-blocked="ai.businessWriteBlocked"
                             :error="liveForm.error"
                             :field-errors="liveForm.fieldErrors"
                             :initial-values="liveForm.values"
@@ -691,7 +692,7 @@
                                 type="button"
                                 class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-colors duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
                                 data-testid="gf-queue-cancel"
-                                :disabled="ai.restoringRecovery"
+                                :disabled="ai.businessWriteBlocked"
                                 @click="onQueuedFormCancel(part.toolCallId)"
                               >{{ t('ai.panel.gfQueue.cancel') }}</button>
                             </div>
@@ -705,7 +706,7 @@
                             :plan="sheetPreviewFor(part)"
                             :applying="isSheetPreviewApplying(part)"
                             :applied-summary="appliedSummaryFor(part)"
-                            :disabled="ai.restoringRecovery"
+                            :disabled="ai.businessWriteBlocked"
                             @apply="onSheetPreviewApply"
                             @cancel="onSheetPreviewCancel"
                             @abandon="onSheetPreviewAbandon(part.toolCallId)"
@@ -724,7 +725,7 @@
                             :reason="uploadHandoffReason(part)"
                             :file-name="uploadHandoffFileName(part)"
                             :interactive="part.requiresAction"
-                            :disabled="ai.restoringRecovery"
+                            :disabled="ai.businessWriteBlocked"
                             @choose="onUploadHandoffChoose"
                             @cancel="onUploadHandoffCancel(part.toolCallId)"
                           />
@@ -860,7 +861,7 @@
               data-testid="continue-round"
               :aria-label="t('ai.panel.resumeChat')"
               class="group/tip relative inline-flex items-center justify-center h-7 rounded-[8px] border-0 bg-transparent px-[6px] text-xs text-[#2563eb] transition hover:bg-[#eff4ff]"
-              :disabled="ai.restoringRecovery"
+              :disabled="ai.businessWriteBlocked"
               @click="continueTurn(m)"
             >
               {{ t('ai.panel.continue') }}
@@ -952,7 +953,7 @@
             class="flex-none border-0 bg-transparent p-0 text-[11.5px]"
             :class="ERROR_CARD_TONE[m.errorCard.variant].action"
             :data-testid="'error-card-action-' + m.id"
-            :disabled="ai.restoringRecovery"
+            :disabled="isErrorCardActionDisabled(m)"
             @click="runErrorCardAction(m)"
           ><span class="border-b border-[#e3e6ea]">{{ errorCardActionLabel(m) }}</span></button>
         </div>
@@ -1568,7 +1569,7 @@ function returnToActiveRun(): void {
 
 /** 继续：以用户身份正常发送「继续」，与手动输入一样立即显示并进入对话历史。 */
 function continueTurn(_message: ChatMessage): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   clearStreamMdCache()
@@ -1804,6 +1805,10 @@ function isErrorCardActionVisible(message: ChatMessage): boolean {
     return isErrorCardContinueVisible(message)
   }
   return true
+}
+
+function isErrorCardActionDisabled(message: ChatMessage): boolean {
+  return message.errorCard?.variant === 'quota' ? ai.businessWriteBlocked : ai.restoringRecovery
 }
 
 /** 错误卡动作（= 三变体各自引导语的落点，全部复用本组件既有动作，不新增 store 出口）：
@@ -3616,7 +3621,7 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     ai.uiUndoEntry,
     ai.sheetApplied,
     ai.sessionId,
-    ai.restoringRecovery
+    ai.businessWriteBlocked
   )
   if (part.name === GENERATIVE_FORM_TOOL) {
     // 队列面只入**标量**（本卡位次 + 队列总数）：整条 `queuedForms` 数组身份入 memo，
@@ -3685,6 +3690,7 @@ function messageBaseDeps(message: ChatMessage, index: number): unknown[] {
     msgGapClass(index),
     locale.value,
     ai.restoringRecovery,
+    ai.businessWriteBlocked,
     canShowMetaRow(message),
     canShowTimestamp(message),
     activityStateOf(message),
@@ -3830,7 +3836,7 @@ const uiOperatingText = computed(() => (ai.uiAnnouncement === null
   : t('ai.panel.uiOperating', { text: ai.uiAnnouncement })))
 
 function onUiUndo(): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   void ai.undoLastUiAction()
@@ -3866,21 +3872,21 @@ function isSheetPreviewApplying(part: ToolPart): boolean {
 }
 
 function onSheetPreviewApply(acknowledged: boolean): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   void ai.confirmWritePreview(acknowledged)
 }
 
 function onSheetPreviewCancel(): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   void ai.cancelWritePreview()
 }
 
 function onSheetPreviewAbandon(toolCallId: string): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   void ai.abandonStalePreview(toolCallId)
@@ -3891,14 +3897,14 @@ function onSheetPreviewLevel(level: SheetPreviewLevel): void {
 }
 
 function onUploadHandoffChoose(): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   void ai.chooseUploadFile()
 }
 
 function onUploadHandoffCancel(toolCallId: string): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   void ai.cancelUploadHandoff(toolCallId)
@@ -4861,7 +4867,7 @@ function gateAckText(part: ToolPart): string {
 
 /** 复选框变更即写回 store（用户取消勾选同样要落库 —— 勾选不是单向开关）。 */
 function onGateAckChange(toolCallId: string, event: Event): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   const checked = (event.target as HTMLInputElement | null)?.checked === true
@@ -4869,7 +4875,7 @@ function onGateAckChange(toolCallId: string, event: Event): void {
     ai.ackGate(toolCallId)
     return
   }
-  ai.clearGateAck(toolCallId)
+  ai.clearGateAckFromUser(toolCallId)
 }
 
 /**
@@ -4892,7 +4898,7 @@ function keepCurrentCardExpanded(toolCallId: string): void {
 }
 
 async function decide(approved: boolean, toolCallId: string): Promise<void> {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   keepCurrentCardExpanded(toolCallId)
@@ -4902,7 +4908,7 @@ async function decide(approved: boolean, toolCallId: string): Promise<void> {
 
 /** GF-B：表单提交（值已由 FormRenderer 按 schema 做过客户端复核）。 */
 function onFormSubmit(values: Record<string, unknown>): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   const toolCallId = liveForm.value?.toolCallId
@@ -4914,7 +4920,7 @@ function onFormSubmit(values: Record<string, unknown>): void {
 
 /** GF-B：表单显式取消 → store 带 cancelled:true 回灌收敛。 */
 function onFormCancel(): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   const toolCallId = liveForm.value?.toolCallId
@@ -4946,7 +4952,7 @@ function formQueueTotal(): number {
  * 出队清草稿 → 乐观终态 → 记决策时刻 → `cancelled:true` 回灌，失败原因落段可见。
  */
 function onQueuedFormCancel(toolCallId: string): void {
-  if (ai.restoringRecovery) {
+  if (ai.businessWriteBlocked) {
     return
   }
   keepCurrentCardExpanded(toolCallId)

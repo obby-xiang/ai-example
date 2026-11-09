@@ -205,7 +205,7 @@
                 type="file"
                 :accept="ATTACHMENT_ACCEPT"
                 :class="['block w-full text-[12.2px] text-[#57606a] file:mr-[8px] file:rounded-[6px] file:border file:border-solid file:border-[#e3e6ea] file:bg-white file:px-[9px] file:py-[3px] file:text-[12px] file:text-[#57606a] disabled:cursor-default', fieldIssues(field).length > 0 ? 'rounded-[6px] border border-solid border-[#c0392b] p-[4px]' : '']"
-                :disabled="isDisabled(field) || !uploadContext || uploading[field.key] === true"
+                :disabled="isDisabled(field) || businessWriteBlocked || !uploadContext || uploading[field.key] === true"
                 :aria-invalid="fieldIssues(field).length > 0"
                 :aria-required="isRequired(field)"
                 :aria-describedby="describedBy(field)"
@@ -282,15 +282,15 @@
         type="button"
         data-testid="gf-cancel"
         :class="GF_CANCEL"
-        :disabled="disabled"
-        @click="emit('cancel')"
+        :disabled="disabled || businessWriteBlocked"
+        @click="onCancel"
       >{{ t('ai.gf.cancel') }}</button>
       <button
         v-if="canRetry"
         type="button"
         data-testid="gf-submit"
         :class="GF_SUBMIT"
-        :disabled="disabled"
+        :disabled="disabled || businessWriteBlocked"
         @click="onSubmit"
       >
         <span
@@ -378,6 +378,8 @@ const props = withDefaults(defineProps<{
   readonly?: boolean
   /** 未决表单的过程性禁用：保留字段与操作区，不改变只读回填语义。 */
   disabled?: boolean
+  /** 只禁用提交、取消和附件业务动作；本地字段与草稿仍可编辑。 */
+  businessWriteBlocked?: boolean
   /** 只读态回填值 / 待填态草稿值（形状不符的键回落初始态，不把脏数据塞进受控控件）。 */
   initialValues?: Record<string, unknown> | null
   /** 兼容旧调用；业务卡头始终由宿主承担。 */
@@ -396,6 +398,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   showHeader: false,
   disabled: false,
+  businessWriteBlocked: false,
   initialValues: null,
   fullTitle: '',
   readOnlyReason: null,
@@ -994,7 +997,7 @@ async function uploadAttachment(
   controller: AbortController
 ): Promise<void> {
   const sessionId = await ensuredUploadSessionId()
-  if (!isCurrent() || uploadContext.signal?.aborted) {
+  if (!isCurrent() || uploadContext.signal?.aborted || props.businessWriteBlocked === true) {
     return
   }
   if (sessionId === '') {
@@ -1015,6 +1018,9 @@ async function uploadAttachment(
 }
 
 async function onAttachmentChange(field: FormFieldSpec, event: Event): Promise<void> {
+  if (props.businessWriteBlocked === true) {
+    return
+  }
   const seq = invalidateAttachment(field.key)
   const input = event.target as HTMLInputElement
   const file = head(input.files)
@@ -1177,8 +1183,15 @@ async function focusFirstIssue(issues: FormValueIssue[]): Promise<void> {
   element.focus()
 }
 
+function onCancel(): void {
+  if (disabled.value || props.businessWriteBlocked === true) {
+    return
+  }
+  emit('cancel')
+}
+
 function onSubmit(): void {
-  if (disabled.value) {
+  if (disabled.value || props.businessWriteBlocked === true) {
     return
   }
   const issues = checkFormIssues(props.schema, model.value)
