@@ -34,7 +34,7 @@ const toolCases = new Map([
 const scenarios = new Set([...toolCases.keys(), 'tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-success', 'recovery-final-failure',
   'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage',
   'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue',
-  'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped'])
+  'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix'])
 const recoverySurfaceSelector = [
   '[data-testid="alert-history-error"]',
   '[data-testid="alert-recovery-gap"]',
@@ -4479,6 +4479,270 @@ async function runStoppedRecovery(context) {
   if (config.variant === 'current-failure') await browser.setRunCurrentFault('off')
 }
 
+async function runContentMatrix(context) {
+  const {browser, checks, config} = context
+  const variants = new Set(['interleave', 'gf-seven', 'timeline', 'boundary', 'repeat-refresh', 'form-draft', 'composer-draft', 'copy-scan'])
+  if (!variants.has(config.variant)) throw new ScenarioNotRun('CONTENT_MATRIX_VARIANT_REQUIRED')
+  const nonce = randomUUID()
+
+  const waitSettled = (code, {allowPendingForm = false} = {}) => browser.waitFor(`(() => {
+    const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+    const done = ai.messages.filter((message) => message.role === 'assistant').every((message) => message.done === true)
+    return ai.historyLoaded === true && ai.restoringRecovery === false && ai.loading === false
+      && (done || (${allowPendingForm} && ai.activeForm !== null))
+  })()`, code)
+
+  const shapeOf = (snapshot) => {
+    const assistants = snapshot.messages.filter((message) => message.role === 'assistant')
+    return {
+      userCount: snapshot.messages.filter((message) => message.role === 'user').length,
+      assistantCount: assistants.length,
+      toolCallIds: assistants.flatMap((message) => message.parts.filter((part) => part.kind === 'tool').map((part) => part.toolCallId)),
+      textParts: assistants.flatMap((message) => message.parts.filter((part) => part.kind === 'text').map((part) => part.text ?? '')),
+      cardCount: snapshot.cards.length
+    }
+  }
+
+  const assertBase = (phase, snapshot) => {
+    const shape = shapeOf(snapshot)
+    checks.require(`${phase}.single-user-message`, shape.userCount === 1, 1, shape.userCount)
+    checks.require(`${phase}.assistant-present`, shape.assistantCount >= 1, 'at least one assistant message', shape.assistantCount)
+    checks.require(`${phase}.no-duplicate-tool-calls`,
+      new Set(shape.toolCallIds).size === shape.toolCallIds.length, 'unique toolCallId across the run', shape.toolCallIds)
+    return shape
+  }
+
+  // C-131 文档要求核对正文、parts 与顺序；`seq`/eventId 是恢复重投影的瞬态元数据
+  // （C-161 的 seq 差异已单列交主会话），这里比较内容/顺序/状态/卡片，并把 seq 单独留证。
+  const contentFacts = (snapshot) => canonicalJson({
+    messages: snapshot.messages.map((message) => ({
+      role: message.role,
+      runId: message.runId,
+      done: message.done,
+      content: sha256(message.content ?? ''),
+      parts: message.parts.map((part) => ({
+        kind: part.kind,
+        name: part.name ?? null,
+        toolCallId: part.toolCallId ?? null,
+        status: part.status ?? null,
+        requiresAction: part.requiresAction ?? null,
+        decision: part.decision ?? null,
+        text: part.kind === 'text' ? sha256(part.text ?? '') : null,
+        args: part.kind === 'tool' && part.args !== null && part.args !== undefined ? sha256(canonicalJson(part.args)) : null
+      }))
+    })),
+    activeForm: snapshot.activeForm ? {
+      toolCallId: snapshot.activeForm.toolCallId,
+      status: snapshot.activeForm.status,
+      fields: (snapshot.activeForm.fields ?? []).map((field) => `${field.key}:${field.type}`)
+    } : null,
+    queuedForms: snapshot.queuedForms.map((entry) => entry.toolCallId),
+    cards: snapshot.cards.map((card) => ({testId: card.testId, state: card.state, text: sha256(card.text ?? '')}))
+  })
+  const seqFacts = (snapshot) => canonicalJson(snapshot.messages.map((message) => message.parts.map((part) => part.seq ?? null)))
+
+  if (config.variant === 'composer-draft') {
+    const draft = `draft-${nonce}`
+    await browser.evaluate(`document.querySelector('[data-testid="composer-input"]').focus()`, false)
+    await browser.send('Input.insertText', {text: draft})
+    const before = await browser.messageState()
+    checks.require('composer-draft.typed', before?.draft === draft, draft, before?.draft ?? null)
+    await sleep(400)
+    checks.require('composer-draft.still-typed-before-reload', (await browser.messageState())?.draft === draft, draft, null)
+    browser.setPhase('refresh-1')
+    await browser.reload()
+    await browser.waitFor(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').historyLoaded === true`,
+      'COMPOSER_DRAFT_HISTORY_NOT_LOADED')
+    const after = await browser.messageState()
+    checks.require('composer-draft.preserved-after-refresh', after?.draft === draft, draft, after?.draft ?? null)
+    checks.require('composer-draft.not-a-message', after?.messages === before?.messages, before?.messages ?? null, after?.messages ?? null)
+    checks.require('composer-draft.no-chat-open', browser.requestCounts().chat === 0, 0, browser.requestCounts().chat)
+    const baseline = browser.requestCounts().chat
+    await browser.click('[data-testid="send-btn"]')
+    await waitSettled('COMPOSER_DRAFT_SEND_NOT_TERMINAL')
+    checks.require('composer-draft.sent-exactly-once', browser.requestCounts().chat === baseline + 1, baseline + 1, browser.requestCounts().chat)
+    return
+  }
+
+  if (config.variant === 'form-draft') {
+    await browser.sendPrompt(`gf-seven-types multi-card=2 verification=${nonce}`)
+    const formed = await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      if (!ai.activeForm?.toolCallId || ai.queuedForms.length !== 1) return null
+      const field = (ai.activeForm.form?.fields ?? []).find((candidate) => candidate.type === 'text')
+      return field ? {toolCallId: ai.activeForm.toolCallId, queued: ai.queuedForms[0].toolCallId, key: field.key} : null
+    })()`, 'FORM_DRAFT_NOT_FORMED')
+    const draft = `queue-draft-${nonce}`
+    await browser.evaluate(`document.querySelector('[data-testid="gf-field-${formed.toolCallId}-${formed.key}"]').focus()`, false)
+    await browser.send('Input.insertText', {text: draft})
+    const baseline = browser.requestCounts()
+    browser.setPhase('refresh-1')
+    await browser.reload()
+    await waitSettled('FORM_DRAFT_REFRESH_NOT_SETTLED', {allowPendingForm: true})
+    const snapshot = await browser.snapshot()
+    checks.require('form-draft.active-preserved', snapshot.activeForm?.toolCallId === formed.toolCallId,
+      formed.toolCallId, snapshot.activeForm?.toolCallId ?? null)
+    const restored = await browser.evaluate(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.activeForm?.values?.['${formed.key}'] ?? null
+    })()`, false)
+    checks.require('form-draft.value-preserved', restored === draft, draft, restored)
+    checks.require('form-draft.queued-preserved', snapshot.queuedForms.some((entry) => entry.toolCallId === formed.queued),
+      formed.queued, snapshot.queuedForms)
+    checks.require('form-draft.no-auto-submit', browser.requestCounts().frontendToolResult === baseline.frontendToolResult
+      && browser.requestCounts().confirm === baseline.confirm, baseline, browser.requestCounts())
+    return
+  }
+
+  const prompt = config.variant === 'interleave' || config.variant === 'boundary'
+    ? `turn-interleave multi-card=2${config.variant === 'interleave' ? ' reasoning=120' : ''} stall-frames=${config.variant === 'boundary' ? 600 : 250} verification=${nonce}`
+    : config.variant === 'gf-seven' ? `gf-seven-types multi-card=2 stall-frames=250 verification=${nonce}`
+      : config.variant === 'timeline' || config.variant === 'copy-scan' ? `timeline-nonprefix verification=${nonce}`
+        : `turn-text verification=${nonce}`
+
+  if (config.variant === 'boundary') {
+    await browser.sendPrompt(prompt)
+    const samples = []
+    const conditions = [
+      `(() => {const ai=document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai'); return ai.messages.some((m)=>m.parts.some((p)=>p.kind==='tool'))})()`,
+      `(() => {const ai=document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai'); return ai.messages.some((m)=>m.parts.some((p)=>p.kind==='tool' && ['succeeded','failed','rejected','blocked'].includes(p.status)))})()`,
+      `(() => {const ai=document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai'); return ai.loading===false && ai.messages.filter((m)=>m.role==='assistant').every((m)=>m.done===true)})()`
+    ]
+    for (const [index, condition] of conditions.entries()) {
+      await browser.waitFor(condition, `CONTENT_BOUNDARY_${index + 1}_NOT_REACHED`)
+      const before = shapeOf(await browser.snapshot())
+      browser.setPhase(`boundary-${index + 1}`)
+      await browser.reload({waitForHistory: false})
+      await waitSettled('CONTENT_BOUNDARY_REFRESH_NOT_SETTLED')
+      const after = await browser.snapshot()
+      assertBase(`boundary-${index + 1}`, after)
+      checks.require(`boundary-${index + 1}.message-count-monotonic`,
+        after.messages.length <= (index === 0 ? before.userCount + 2 : before.userCount + before.assistantCount + 2),
+        'no duplicated user/assistant messages after boundary refresh', {
+          before: {messages: before.userCount + before.assistantCount, tools: before.toolCallIds},
+          afterMessages: after.messages.length
+        })
+      samples.push({index, before, after: shapeOf(after)})
+    }
+    await context.evidence.json('content-boundary-refreshes.json', samples)
+    const final = await browser.snapshot()
+    assertBase('final', final)
+    const finalShape = shapeOf(final)
+    checks.require('final.text-present', finalShape.textParts.some((text) => text.trim() !== ''), 'non-empty assistant text', finalShape.textParts)
+    checks.require('final.chat-not-repeated', browser.requestCounts().chat === 1, 1, browser.requestCounts().chat)
+    return
+  }
+
+  await browser.sendPrompt(prompt)
+  if (config.variant === 'timeline' || config.variant === 'copy-scan') {
+    // timeline-nonprefix 的 C 段在表单提交后才到达；先驱动真实表单再等终态。
+    const form = await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      if (!ai.activeForm?.toolCallId) return null
+      const field = (ai.activeForm.form?.fields ?? []).find((candidate) => candidate.type === 'text')
+      return field ? {toolCallId: ai.activeForm.toolCallId, key: field.key} : null
+    })()`, 'TIMELINE_FORM_NOT_FORMED')
+    await browser.evaluate(`document.querySelector('[data-testid="gf-field-${form.toolCallId}-${form.key}"]').focus()`, false)
+    await browser.send('Input.insertText', {text: `content-${nonce}`})
+    await browser.click(`[data-testid="gf-form-${form.toolCallId}"] [data-testid="gf-submit"]`)
+  }
+  await waitSettled('CONTENT_MATRIX_NOT_TERMINAL', {allowPendingForm: config.variant === 'gf-seven'})
+  const snapshot = await browser.snapshot()
+  context.sessionId = snapshot.sessionId
+  context.runId = snapshot.activeRunId
+  const shape = assertBase('terminal', snapshot)
+
+  if (config.variant === 'interleave') {
+    checks.require('interleave.two-distinct-tools', shape.toolCallIds.length === 2, 2, shape.toolCallIds)
+    checks.require('interleave.trailing-text', shape.textParts.some((text) => text.trim() !== ''), 'non-empty closing text', shape.textParts)
+    checks.require('interleave.cards', snapshot.cards.length >= 2, '>= 2 tool cards', snapshot.cards.map((card) => card.testId))
+    const history = requiredHistory(await context.api.history(snapshot.sessionId))
+    const historyText = history.messages.filter((message) => String(message.type ?? message.role ?? '').toUpperCase() === 'ASSISTANT')
+      .map((message) => message.text ?? message.content ?? '').join('')
+    const uiText = snapshot.messages.filter((message) => message.role === 'assistant').map((message) => message.content).join('')
+    checks.require('interleave.history-text-equal', historyText === uiText, textEvidence(uiText), textEvidence(historyText))
+    const run = await context.api.run(context.runId)
+    checks.require('interleave.run-final-text-equal', run.status === 'AVAILABLE' && run.data.snapshot.finalText === uiText,
+      textEvidence(uiText), run.status === 'AVAILABLE' ? textEvidence(run.data.snapshot.finalText) : run)
+  }
+
+  if (config.variant === 'gf-seven') {
+    await browser.waitFor(`(() => {
+      const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+      return ai.activeForm?.toolCallId && ai.queuedForms.length === 1
+    })()`, 'GF_SEVEN_ACTIVE_AND_QUEUED_NOT_FORMED')
+    const formed = await browser.snapshot()
+    checks.require('gf-seven.active-and-queued', formed.activeForm !== null && formed.queuedForms.length === 1,
+      'one active and one queued form', {activeForm: formed.activeForm?.toolCallId ?? null, queuedForms: formed.queuedForms})
+    checks.require('gf-seven.distinct-form-ids', formed.activeForm && formed.queuedForms[0]
+      && formed.activeForm.toolCallId !== formed.queuedForms[0].toolCallId,
+    'active and queued forms have distinct toolCallId', {active: formed.activeForm?.toolCallId ?? null, queued: formed.queuedForms[0]?.toolCallId ?? null})
+    checks.require('gf-seven.seven-field-types', (formed.activeForm?.fields ?? []).length === 7,
+      7, (formed.activeForm?.fields ?? []).map((field) => field.type))
+  }
+
+  if (config.variant === 'timeline' || config.variant === 'copy-scan') {
+    const parts = snapshot.messages.filter((message) => message.role === 'assistant').flatMap((message) => message.parts)
+    const kinds = parts.map((part) => part.kind === 'tool' ? `tool:${part.name}` : part.kind)
+    checks.require('timeline.part-order', canonicalJson(kinds) === canonicalJson(['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text']),
+      ['text', 'tool:list_config_defs', 'text', 'tool:generative_form', 'text'], kinds)
+    checks.require('timeline.three-non-prefix-texts',
+      shape.textParts.length === 3 && shape.textParts.every((text, index) => shape.textParts.slice(index + 1)
+        .every((later) => !text.startsWith(later) && !later.startsWith(text))),
+      'three non-prefix text bodies', shape.textParts.map((text) => textEvidence(text)))
+  }
+
+  if (config.variant === 'copy-scan') {
+    const forbidden = ['宿主', '影响面暂不可估', '创建≠执行', '请填写以下信息']
+    const visibleText = [snapshot.messages.filter((message) => message.role === 'assistant').map((message) => message.content).join('\n'),
+      ...snapshot.cards.map((card) => card.text ?? '')].join('\n')
+    const hits = forbidden.filter((phrase) => visibleText.includes(phrase))
+    checks.require('copy.no-technical-phrases', hits.length === 0, 'no forbidden technical copy in visible assistant text/cards', hits)
+    checks.require('copy.non-empty-card-text', snapshot.cards.some((card) => (card.text ?? '').trim() !== ''),
+      'at least one visible card carries user-facing text', snapshot.cards.map((card) => card.testId))
+    return
+  }
+
+  if (config.variant === 'repeat-refresh') {
+    const baseline = browser.requestCounts().chat
+    const initialSignature = contentFacts(snapshot)
+    const initialSeq = seqFacts(snapshot)
+    const seqDrift = []
+    for (const phase of ['refresh-1', 'refresh-2', 'refresh-3']) {
+      browser.setPhase(phase)
+      await browser.reload()
+      await waitSettled(`${phase.toUpperCase()}_NOT_SETTLED`)
+      const refreshed = await browser.snapshot()
+      assertBase(phase, refreshed)
+      checks.require(`${phase}.content-stable`, contentFacts(refreshed) === initialSignature,
+        initialSignature, contentFacts(refreshed))
+      if (seqFacts(refreshed) !== initialSeq) seqDrift.push(phase)
+    }
+    checks.require('repeat-refresh.no-new-chat', browser.requestCounts().chat === baseline, baseline, browser.requestCounts().chat)
+    await context.evidence.json('content-matrix-seq.json', {variant: config.variant, initialSeq, seqDrift})
+    return
+  }
+
+  // C-131A/B/C 的刷新稳定性：内容与卡片签名、run/history 正文一致。
+  const initialSignature = contentFacts(snapshot)
+  const initialSeq = seqFacts(snapshot)
+  browser.setPhase('refresh-1')
+  await browser.reload()
+  await waitSettled('CONTENT_MATRIX_REFRESH_NOT_SETTLED', {allowPendingForm: config.variant === 'gf-seven'})
+  const refreshed = await browser.snapshot()
+  assertBase('refresh-1', refreshed)
+  checks.require('refresh-1.content-stable', contentFacts(refreshed) === initialSignature,
+    initialSignature, contentFacts(refreshed))
+  await context.evidence.json('content-matrix.json', {
+    variant: config.variant,
+    initial: shape,
+    refreshed: shapeOf(refreshed),
+    seqStable: seqFacts(refreshed) === initialSeq,
+    initialSeq,
+    refreshedSeq: seqFacts(refreshed)
+  })
+}
+
 async function runCorrectionPrefixScenario(context) {
   const {browser, checks, config} = context
   if (!PREFIX_EXPECTATIONS.has(config.variant)) {
@@ -4858,6 +5122,7 @@ try {
   else if (config.scenario === 'recovery-cross-run-order') await runCrossRunOrder(context)
   else if (config.scenario === 'recovery-form-queue') await runFormQueueRecovery(context)
   else if (config.scenario === 'correction-prefix') await runCorrectionPrefixScenario(context)
+  else if (config.scenario === 'content-matrix') await runContentMatrix(context)
   else if (config.scenario === 'correction-prefix-preflight') await runCorrectionPrefixPreflight(context)
   else if (config.scenario === 'recovery-history-generation') await runHistoryGenerationRace(context)
   else if (config.scenario === 'recovery-stopped') await runStoppedRecovery(context)
@@ -4935,7 +5200,7 @@ const summary = {
   historyOrder: config.historyOrder || null,
   pendingFixture: config.pendingFixture,
   status,
-  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage', 'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue', 'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped'].includes(config.scenario)
+  statusScope: toolCases.has(config.scenario) || ['tool-skipped', 'ordinary-skipped', 'form-mixed-copy', 'recovery-hitl-gate', 'recovery-stream-refresh', 'recovery-mixed-messages', 'recovery-context-usage', 'recovery-stream-history-race', 'recovery-pending-integrity', 'recovery-cross-run-order', 'recovery-form-queue', 'correction-prefix', 'correction-prefix-preflight', 'recovery-history-generation', 'recovery-stopped', 'content-matrix'].includes(config.scenario)
     ? 'REAL_BROWSER_DOM_STORE_PUBLIC_HISTORY_CONTEXT_CLIPBOARD_AND_PUBLIC_BUSINESS_API; configured upstream evidence only; REAL_PROVIDER_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN'
     : 'REAL_BROWSER_DOM_AND_PUBLIC_API_WITH_CDP_HISTORY_HTTP_FAULT; no application SSE fabrication; BACKEND_INTERNAL_FAILURE_VERDICT=NOT_RUN; DIRECT_REDIS_VERDICT=NOT_RUN; DIRECT_DATABASE_VERDICT=NOT_RUN',
   startedAt,
