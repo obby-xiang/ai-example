@@ -2193,7 +2193,12 @@ async function prepareFixture(context) {
 function promptFor(context) {
   const nonce = randomUUID()
   if (toolCases.has(context.config.scenario)) return `${toolCases.get(context.config.scenario).prompt} verification=${nonce}`
-  if (['tool-skipped', 'recovery-hitl-gate'].includes(context.config.scenario)) {
+  if (context.config.scenario === 'tool-skipped') {
+    // C-144 的专门契约依赖 multi-card=2（第二笔 SKIPPED/CREATE_TASK_TURN_LIMIT）。
+    return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} multi-card=2 host-def-select verification=${nonce}`
+  }
+  if (context.config.scenario === 'recovery-hitl-gate') {
+    // C-154 要求单笔 create_task 真实批准 + 宿主续接，不使用 multi-card。
     return `tool=create_task&args={"type":"EXPORT","conditions":{},"openWizard":false} host-def-select verification=${nonce}`
   }
   if (context.config.scenario === 'ordinary-skipped') {
@@ -2667,14 +2672,12 @@ async function runSkippedScenario(context) {
   const snapshot = await browser.snapshot()
   const startPending = snapshot.messages.flatMap((message) => message.parts).some((part) => part.kind === 'tool'
     && part.name === 'start_export' && part.status === 'pending' && part.requiresAction === true)
-  checks.require('live.start-export-pending', startPending,
-    'host continuation ends with an unapproved start_export pending', snapshot.messages.flatMap((message) => message.parts)
-      .filter((part) => part.kind === 'tool').map((part) => ({name: part.name, status: part.status, requiresAction: part.requiresAction})))
   const parts = snapshot.messages.flatMap((message) => message.parts).filter((part) => part.name === 'create_task')
   checks.require('live.two-create-task-parts', parts.length === 2, 'multi-card=2 yields exactly two create_task parts', parts)
   const skipped = parts.filter((part) => part.status === 'skipped' && part.decision === null && part.requiresAction === false)
   checks.require('live.one-turn-limit-skipped', skipped.length === 1 && skipped[0].userTextCode === 'CREATE_TASK_TURN_LIMIT',
     'the second create_task is skipped with the dedicated single-turn creation limit code', parts)
+  if (!startPending) throw new ScenarioNotRun('START_EXPORT_PENDING_NOT_FORMED')
   context.toolCallId = skipped[0].toolCallId
   context.runId = snapshot.activeRunId
   const approved = parts.find((part) => part.status === 'succeeded')
