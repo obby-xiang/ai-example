@@ -195,6 +195,16 @@ type TerminalHistoryResolution =
   | { kind: 'pending' }
   | { kind: 'ready'; followup: TerminalHistoryFollowup; message: ChatMessage }
 
+interface SnapshotRecoveryPreload {
+  current: AiRunCurrent | null
+  error: unknown | null
+}
+
+interface HistoryCommitGuard {
+  isValid(): boolean
+  settle(): void
+}
+
 const terminalHistoryFollowups = new Map<string, TerminalHistoryFollowup>()
 
 function historyRunKey(sessionId: string, runId: string): string {
@@ -5465,10 +5475,15 @@ export const useAiStore = defineStore('ai', {
         }
       }
 
+      const currentPreload: Promise<SnapshotRecoveryPreload> = aiApi.runsCurrent(sid).then(
+        (current) => ({ current, error: null }),
+        (error: unknown) => ({ current: null, error })
+      )
       let history: AiHistoryPage
       try {
         history = await aiApi.history(this.sessionId, { latest: HISTORY_PAGE_SIZE })
       } catch (error) {
+        await currentPreload
           logCaughtError(error, 'stores/ai.ts:4741')
         if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
           return // 会话已换或已有更新请求：过期失败不落任何状态
@@ -5504,11 +5519,13 @@ export const useAiStore = defineStore('ai', {
       // 只要窗口内真的开过流，这份历史就是过期现场，不得整替掉刚完成的问答/错误卡。
       // `stopped` 之后的残留句柄不算（C2 特意保留的 pre-start 传输是"被放弃的那一轮"的收尾，
       // N-1/R3 口径）；409 未起轮的发送不产生 start 帧，故仍不会误判（R04 口径不变）。
-      const roundStartedDuringFetch = roundStartSeq !== roundStartAtEntry
-      const newRoundOccupies = this.loading || this.suspended
+      const newRoundOccupies = (): boolean => this.loading || this.suspended
         || (currentAbort !== null && !this.stopped)
-        || roundStartedDuringFetch
-      if (inFlightAtEntry || newRoundOccupies) {
+        || roundStartSeq !== roundStartAtEntry
+      const completeHistoryWithoutCommit = (): void => {
+        if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
+          return
+        }
         if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
           noteHistoryDoneEvidence(sid, requestGeneration, history.messages ?? [])
         }
@@ -5517,11 +5534,38 @@ export const useAiStore = defineStore('ai', {
         if (this.recoveryGap?.reason !== 'archive-window') {
           this.recoveryGap = null
         }
+      }
+      if (inFlightAtEntry || newRoundOccupies()) {
+        completeHistoryWithoutCommit()
         return
       }
-      this.historyError = null
-      if (this.recoveryGap?.reason !== 'archive-window') {
-        this.recoveryGap = null
+      let settled = false
+      let settledRoundEpoch = roundEpoch
+      let settledRoundStart = roundStartSeq
+      let settledAbort = currentAbort
+      const historyGuard: HistoryCommitGuard = {
+        isValid: (): boolean => {
+          if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
+            return false
+          }
+          if (settled) {
+            return roundEpoch === settledRoundEpoch
+              && roundStartSeq === settledRoundStart
+              && currentAbort === settledAbort
+          }
+          return !newRoundOccupies()
+        },
+        settle: (): void => {
+          settled = true
+          settledRoundEpoch = roundEpoch
+          settledRoundStart = roundStartSeq
+          settledAbort = currentAbort
+        }
+      }
+      const preloaded = await currentPreload
+      if (!historyGuard.isValid()) {
+        completeHistoryWithoutCommit()
+        return
       }
       const pageEntries = [...(history.messages ?? [])]
       if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
@@ -5529,59 +5573,58 @@ export const useAiStore = defineStore('ai', {
       }
       const total = history.total ?? pageEntries.length
       const pageOffset = Math.max(0, total - pageEntries.length)
-      this.historyTotal = total
-      this.historyOffset = pageOffset
-      this.historyHasMore = history.hasMore === true
-      this.historyNextCursor = history.nextCursor ?? null
-      this.historyRevision = history.revision ?? 0
-      this.historyEvents = history.events ?? []
-      this.historyWindowEntries = markRaw(pageEntries)
-
-      if (!history.messages || history.messages.length === 0) {
-        // 后端历史为空（重启/TTL 过期）：镜像里的挂起已无法回灌续跑 —— 待决工具段过期降级
-        // （与 loadHistory 空历史的 expired 降级惯例一致）。批2：降级写**段**，投影随之派生。
-        for (const message of this.messages) {
-          if (!message.parts.some((part) => part.kind === 'tool' && part.requiresAction)) {
-            continue
-          }
-          expireResidueToolParts(message)
-          deriveProjections(message)
+      let committed = false
+      const commitHistory = (): void => {
+        if (committed || !historyGuard.isValid()) {
+          return
         }
+        committed = true
+        this.historyError = null
+        if (this.recoveryGap?.reason !== 'archive-window') {
+          this.recoveryGap = null
+        }
+        this.historyTotal = total
+        this.historyOffset = pageOffset
+        this.historyHasMore = history.hasMore === true
+        this.historyNextCursor = history.nextCursor ?? null
+        this.historyRevision = history.revision ?? 0
+        this.historyEvents = history.events ?? []
+        this.historyWindowEntries = markRaw(pageEntries)
         this.historyLoaded = true
-        // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
-        // 消除镜像/历史写入与挂起重建之间的写后写竞态）；后端不可达的 catch 分支不重建
-        await this.restoreSnapshotGuarded()
-        this.restoreManualRecovery()
-        // ④⑦ 快捷动作必须在快照恢复**之后**判定：此时 `loading` / `suspended` /
-        // `pendingAttachRunId` 才反映"当前轮是否仍在跑 / 挂起"。且必须有镜像的"正常收尾"证据
-        // （`mirrorProvesCompleted`）—— 镜像/历史里的 `done` 本身不构成完成证据。
-        this.restoreFollowupFromHistory(mirrorProvesCompleted, mirror?.lastRunId ?? null, mirrorMessages)
+        if (!history.messages || history.messages.length === 0) {
+          const current = preloaded.current
+          const hasActiveSnapshot = current?.found === true && current.runId !== null
+            && !isTerminalRunStatus(current.snapshotStatus)
+          if (!hasActiveSnapshot) {
+            for (const message of this.messages) {
+              if (!message.parts.some((part) => part.kind === 'tool' && part.requiresAction)) {
+                continue
+              }
+              expireResidueToolParts(message)
+              deriveProjections(message)
+            }
+          }
+          return
+        }
+        const mergedMessages = this.buildHistoryMessages(pageEntries, pageOffset)
+        this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight,
+          this.shouldPreserveStoppedRound(pageEntries, mirrorMessages))
+        this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
+        this.applyHistoryCompactionEvents(history.events)
+      }
+      await this.restoreSnapshotGuarded(preloaded, commitHistory, historyGuard)
+      if (!historyGuard.isValid()) {
+        completeHistoryWithoutCommit()
         return
       }
-
-      // 分页：本页条目 → 展示消息（工具对账 / 幻影卡过滤 / 同轮 ASSISTANT 合并）。
-      const mergedMessages = this.buildHistoryMessages(pageEntries, pageOffset)
-      // 批G · G3：历史 + **未被历史覆盖的镜像在途轮** —— 用户消息在开轮即写入 ChatMemory
-      // （实测流式中 /history 已有 USER），若整体替换就会把镜像里还在途的助手消息（正文 +
-      // 已执行卡）抹掉（实证 C：整轮卡与说明文字丢失）。
-      this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight,
-        this.shouldPreserveStoppedRound(pageEntries, mirrorMessages))
-      // errorCard/code 可由历史 errorCode/errorMessage 直接重建；镜像再补回同一轮的其它结局标记，
-      // 避免刷新后一次失败被"历史整体替换"归一成一条完整回答（看起来像成功）。
-      this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
-      // B3：已提交压缩事实按 runId/anchor 恢复到 parts 时序（与实时帧同一 eventId 幂等）。
-      // **必须在 runId 补写之后**：历史通道通常不带 runId，旧 `chat:mem` 数据更没有归属；
-      // 先补 runId 再按它找宿主，否则事件会因 `hosts=[]` 被静默跳过。
-      this.applyHistoryCompactionEvents(history.events)
-      // 历史里若存在未决挂起，补一张待处理卡片（前端工具/确认门都可能出现在这里）
-      this.historyLoaded = true
-      // T2b-D#3：historyLoaded 先行置位后再触发快照重建（loadHistory 先行完成，
-      // 消除历史整体替换与挂起重建之间的写后写竞态）
-      await this.restoreSnapshotGuarded()
+      if (!committed) {
+        this.historyError = null
+        if (this.recoveryGap?.reason !== 'archive-window') {
+          this.recoveryGap = null
+        }
+        this.historyLoaded = true
+      }
       this.restoreManualRecovery()
-      // ④⑦ 快捷动作（followupReady）是纯内存轮次态，刷新即丢：**在快照恢复之后**按最后一轮的
-      // 真实终态 + 镜像的"正常收尾"证据恢复 —— 挂起/运行中的当前轮此时已由 `suspended` /
-      // `loading` / `pendingAttachRunId` 表达，不会被"历史末条 done"误判成可出建议。
       this.restoreFollowupFromHistory(mirrorProvesCompleted, mirror?.lastRunId ?? null, mirrorMessages)
     },
 
@@ -6113,7 +6156,11 @@ export const useAiStore = defineStore('ai', {
      * 未预期异常（例如载荷形态异常），不接住就会以 rejected promise 结束 —— 既没有可见错误、
      * 也没有封口。这里把这两类失败合成同一个出口（不重复处理已登记的 `currentError`）。
      */
-    async restoreSnapshotGuarded(): Promise<void> {
+    async restoreSnapshotGuarded(
+      preloaded?: SnapshotRecoveryPreload,
+      commitHistory?: () => void,
+      historyGuard?: HistoryCommitGuard
+    ): Promise<void> {
       const sessionId = this.sessionId
       const targetHost = activeRoundHostId === null ? null : this.messages.find((item) => item.id === activeRoundHostId)
       const targetRunId = targetHost ? targetHost.runId ?? '' : this.activeRunId ?? ''
@@ -6121,7 +6168,7 @@ export const useAiStore = defineStore('ai', {
       const isOwner = (): boolean => this.isSnapshotRecoveryOwned(sessionId, targetRunId, targetMessageId)
       const operation = beginRecoveryOperation(this)
       try {
-        await this.restoreSuspendedSnapshot(isOwner)
+        await this.restoreSuspendedSnapshot(isOwner, preloaded, commitHistory, historyGuard)
       } catch (error) {
           logCaughtError(error, 'stores/ai.ts:5463')
         // 问题3：停止后的恢复异常不写恢复失败现场（本轮已被放弃，不该再被恢复面收口）。
@@ -6135,6 +6182,7 @@ export const useAiStore = defineStore('ai', {
         }
         const autoRecovering = autoRecoveryInFlight.size > 0 || autoRecoveryTimers.size > 0
         if (this.currentError !== null && this.preparingRun === null && !autoRecovering
+          && (historyGuard?.isValid() ?? true)
           && this.manualRecovery?.reason !== 'interrupted' && this.manualRecovery?.reason !== 'first-frame') {
           this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
         }
@@ -6234,17 +6282,15 @@ export const useAiStore = defineStore('ai', {
         target.timestamp = source.timestamp
       }
       const completedByHistory = hasHistoryCoveredMirrorRound(target, source)
-      canMergeMirrorRoundParts(target, source)
+      if (!completedByHistory) {
+        canMergeMirrorRoundParts(target, source)
+      }
       if (preserveStoppedRound) {
         target.stopped = true
       }
       if (last(merged) === target) {
-        target.streaming = completedByHistory
-          ? false
-          : (typeof source.streaming === 'boolean' ? source.streaming : true)
-        target.done = completedByHistory
-          ? true
-          : (typeof source.done === 'boolean' ? source.done : false)
+        target.streaming = typeof source.streaming === 'boolean' ? source.streaming : true
+        target.done = typeof source.done === 'boolean' ? source.done : false
       }
       return merged
     },
@@ -6309,44 +6355,63 @@ export const useAiStore = defineStore('ai', {
      * 连接语义的 `awaitingInput` 另算：无卡的自动前端工具（`navigate_to` 等）同样是 park
      * （见 {@link isAwaitingClientEntry}），但**不**据此锁输入（`suspended` 仍只认待人卡）。
      */
-    async restoreSuspendedSnapshot(isOwner: () => boolean): Promise<void> {
-      if (!isOwner()) {
-        return
+    async restoreSuspendedSnapshot(
+      isOwner: () => boolean,
+      preloaded?: SnapshotRecoveryPreload,
+      commitHistory?: () => void,
+      historyGuard?: HistoryCommitGuard
+    ): Promise<void> {
+      let historyGuardRejected = false
+      const canCommitHistory = (): boolean => {
+        const valid = historyGuard?.isValid() ?? true
+        if (!valid) {
+          historyGuardRejected = true
+        }
+        return valid
       }
-      // R4（2026-10-29）：**停止态不接受后端快照的挂起重建**。用户在 start 帧之前/之后停止后，
-      // 后端那一轮可能仍是 SUSPENDED + awaitingExternal（cancel 尚未落地/未传播）；照旧重建就会
-      // 把一张可点卡摆回屏上、`suspended` 置回 true —— 输入区被重新锁住，与用户"已经停了"的认知相反。
-      // 停止是**本地已落地**的决策：保持"已停止"展示，不恢复外部待决/挂起卡、不重连；
-      // 刷新（内存态 `stopped` 复位）后才会按服务端真实状态恢复。
-      if (this.stopped) {
-        return
-      }
-      /**
-       * 停止闭环（刷新后的 pre-start 停止）：镜像里记着"本端已停止 + 当前轮 clientRequestId"，
-       * 但本端从未拿到 runId（没有 run 级墓碑）。此时不得按 runs/current 自动重挂：
-       * 用 clientRequestId 让后端精确取消/落墓碑（幂等、静默），本地只封口已停止内容。
-       * 正常运行的轮次（clientRequestStopped=false）不走这里，恢复行为与改造前一致。
-       */
-      if (this.clientRequestStopped && this.stoppedRunId === null) {
-        void this.cancelStoppedClientRequest()
-        this.sealLeftoverInFlight()
-        return
-      }
+      try {
+        if (!canCommitHistory()) {
+          return
+        }
+        if (!isOwner() && commitHistory === undefined) {
+          return
+        }
+        // 停止只跳过快照重建；history 在 current 成功且完整后仍按独立提交权收口。
+        if (this.stopped && commitHistory === undefined) {
+          return
+        }
+        if (this.clientRequestStopped && this.stoppedRunId === null && commitHistory === undefined) {
+          void this.cancelStoppedClientRequest()
+          this.sealLeftoverInFlight()
+          return
+        }
       // Task 4 引导门：runs/current 属于对话域，必须带后端发号的会话。
       if (this.sessionId === '' && (await this.ensureSession()) === '') {
         return
       }
       // 问题3：发号 await 期间用户可能已停止 —— 任何 await 之后写回前都要重判，旧现场一律不落。
-      if (!isOwner() || this.stopped) {
+      if (!canCommitHistory()) {
+        return
+      }
+      if (!isOwner() && commitHistory === undefined) {
+        return
+      }
+      if (this.stopped && commitHistory === undefined) {
         return
       }
       const sid = this.sessionId
       const abortAtEntry = currentAbort
       let current: AiRunCurrent
       try {
-        current = await aiApi.runsCurrent(sid)
+        if (preloaded?.error != null) {
+          throw preloaded.error
+        }
+        current = preloaded?.current ?? await aiApi.runsCurrent(sid)
       } catch (error) {
           logCaughtError(error, 'stores/ai.ts:5804')
+        if (!canCommitHistory()) {
+          return
+        }
         if (!isOwner() || this.sessionId !== sid) {
           return // 会话已换：过期失败不落进新会话
         }
@@ -6361,112 +6426,118 @@ export const useAiStore = defineStore('ai', {
       }
       // 取数窗口内的身份对账（R-130/R-132）：sid 不等 = 会话已换；abort 句柄已换 = 同会话已起
       // 新轮 —— 两种都说明这份快照属于过期的现场，整体丢弃（含续收连接的建立）
-      if (!isOwner() || this.sessionId !== sid || currentAbort !== abortAtEntry) {
+      if (!canCommitHistory() || this.sessionId !== sid || currentAbort !== abortAtEntry) {
         return
       }
-      // 问题3：取数窗口内已停止 ⇒ 不重建挂起卡、不重连、不锁输入（停止是本地已落地的决定）。
-      if (this.stopped) {
+      if (!isOwner() && !this.stopped && !this.clientRequestStopped) {
         return
       }
-      /**
-       * 问题8：run 级停止墓碑。刷新后权威快照仍指向本端停掉的那一轮：
-       * - 已取消 / 已不存在 ⇒ 正常收口（封口镜像里的在途宿主，不重连）；
-       * - 仍在运行（cancel 之前没送达）⇒ **不自动接回**，只在既有取消通道上有界静默补一次。
-       */
-      const sharedStop = current.found && current.runId !== null
-        && hasStoppedRun(sid, current.runId, this.sessionIdentity)
-      if (sharedStop && current.runId) {
-        this.stoppedRunId = current.runId
+      if (current.found && current.runId
+        && (!Array.isArray(current.pendingEntries) || typeof current.awaitingExternal !== 'boolean')) {
+        this.sealRecovery('current', new ApiError('Run snapshot incomplete', 500, 'RUN_SNAPSHOT_INCOMPLETE', null))
+        return
       }
-      const tombstoneRunId = this.stoppedRunId
-      if (tombstoneRunId !== null && current.found && current.runId === tombstoneRunId) {
-        this.sealLeftoverInFlight()
-        if (!isTerminalRunStatus(current.snapshotStatus) && canBeginTombstoneRecancel(tombstoneRunId)) {
-          void this.cancelStoppedRun(tombstoneRunId, this.sessionIdentity)
+      if (this.stopped || this.clientRequestStopped) {
+        if (canCommitHistory()) {
+          commitHistory?.()
         }
         return
       }
-      this.clearPreparingRun()
-      // M-2b：本次快照是当前会话的权威口径 —— 先作废旧队列，空态/已决态不得残留可补的旧卡
-      this.restoredPendingQueue = []
-      // AR-07：同批排队的表单同样以快照为权威口径（不在快照里的表单不该再被补出来）
-      this.clearQueuedForms()
-      // 批次2：快照读到了 ⇒ 上一轮的"快照不可用"错误作废（归档缺口只认后端明确标记，另行登记）
-      this.currentError = null
-      // 2026-10-29 收口：权威快照读到**在途轮** ⇒ 上一轮的"快照不可用"缺口作废。
-      // 复审返修（I-1）：`found=false`（轮已消失/保留期到期）**不是**"已解决"——
-      // 那一刻紧接着的 `sealLeftoverInFlight()` 只会封口，不会补缺口；在这里清掉就把
-      // 一条从未被确认完整的半截回答洗成了完整回答。可解决的类别判据见 `clearRecoveryGap`。
-      if (current.found && current.runId) {
-        this.clearRecoveryGap()
+      const applySnapshotFacts = (): boolean => {
+        if (!canCommitHistory()) {
+          return false
+        }
+        const sharedStop = current.found && current.runId !== null
+          && hasStoppedRun(sid, current.runId, this.sessionIdentity)
+        if (sharedStop && current.runId) {
+          this.stoppedRunId = current.runId
+        }
+        const tombstoneRunId = this.stoppedRunId
+        if (tombstoneRunId !== null && current.found && current.runId === tombstoneRunId) {
+          this.sealLeftoverInFlight()
+          if (!isTerminalRunStatus(current.snapshotStatus) && canBeginTombstoneRecancel(tombstoneRunId)) {
+            void this.cancelStoppedRun(tombstoneRunId, this.sessionIdentity)
+          }
+          return false
+        }
+        this.clearPreparingRun()
+        this.restoredPendingQueue = []
+        this.clearQueuedForms()
+        this.currentError = null
+        if (current.found && current.runId) {
+          this.clearRecoveryGap()
+        }
+        const expiryAnchor = runExpiryAnchorOf(current, Date.now())
+        if (expiryAnchor === null && this.runExpiry !== null
+          && runExpiryRemainingMs(this.runExpiry, Date.now()) <= 0) {
+          setNotice(this, 'ai.notice.runExpired')
+          this.runExpiry = { ...this.runExpiry, remainingMs: 0, receivedAtMs: Date.now() }
+        } else {
+          this.runExpiry = expiryAnchor
+        }
+        return true
       }
-      // AR-10（批次3 补齐）：寿命锚点只认后端 PTTL 的只读推导 —— 有就落、没有就清（不猜 24h）。
-      // 若"上一次已知的锚点已经到期"且这次已拿不到运行态，说明它按保留期消失了：
-      // ① 落一条**可见**通知（不是卡悄悄没了）；② 保留这个"已到期"锚点，让仍在屏上的挂起卡
-      // 继续显示「已失效 + 刷新 / 新会话出口」，而不是变成一张可点却无解释的死卡。
-      const expiryAnchor = runExpiryAnchorOf(current, Date.now())
-      if (expiryAnchor === null && this.runExpiry !== null
-        && runExpiryRemainingMs(this.runExpiry, Date.now()) <= 0) {
-        setNotice(this, 'ai.notice.runExpired')
-        this.runExpiry = { ...this.runExpiry, remainingMs: 0, receivedAtMs: Date.now() }
-      } else {
-        this.runExpiry = expiryAnchor
+      if (preloaded === undefined && !applySnapshotFacts()) {
+        return
       }
-      if (!current.found || !current.runId) {
-        // 批次3 / AR-06：`/runs/current` 在"已 start、快照未建"期间同样是 found=false
-        // （索引要等 store.create 才写）。若镜像还留着在途轮与 runId，先探一次重挂端点：
-        // 202+preparing ⇒ 准备中（可重试，不封口）；200 ⇒ 快照已建，转正式重挂；
-        // 404 ⇒ 确实没有这一轮，才走既有封口。
-        // 归属必须可证明：镜像里的在途助手消息带着**同一 runId**（start 帧已落镜像）。
-        // 只有 lastRunId、没有消息归属时不猜 —— 旧镜像的悬空轮仍走既有封口，避免把
-        // 一个说不清归属的轮次探测成"准备中"。
-        const inFlightHost = [...this.messages].reverse().find((item) => item.role === 'assistant'
+      let probe: Awaited<ReturnType<typeof probeReattach>> | null = null
+      const preloadedInFlightHost = !current.found || !current.runId
+        ? [...this.messages].reverse().find((item) => item.role === 'assistant'
           && !item.done
           && item.runId !== undefined
-          && item.runId !== '')
-        const recoveryRunId = inFlightHost?.runId ?? this.activeRunId
-        // 问题8：墓碑指向本端已停的轮 ⇒ 不探测、不重挂；权威已找不到它，正常收口即可。
+          && item.runId !== '') ?? null
+        : null
+      const recoveryRunId = preloadedInFlightHost?.runId ?? this.activeRunId
+      if ((!current.found || !current.runId) && recoveryRunId && preloadedInFlightHost) {
+        const recoveryStopped = (this.stoppedRunId !== null && recoveryRunId === this.stoppedRunId)
+          || hasStoppedRun(sid, recoveryRunId, this.sessionIdentity)
+        if (!recoveryStopped) {
+          probe = await probeReattach(recoveryRunId)
+          if (!canCommitHistory() || this.sessionId !== sid || currentAbort !== abortAtEntry) {
+            return
+          }
+          if (this.stopped || this.clientRequestStopped) {
+            if (canCommitHistory()) {
+              commitHistory?.()
+            }
+            return
+          }
+          if (!isOwner() || this.stoppedRunId === recoveryRunId
+            || hasStoppedRun(sid, recoveryRunId, this.sessionIdentity)) {
+            return
+          }
+        }
+      }
+      if (canCommitHistory()) {
+        commitHistory?.()
+      }
+      if (preloaded !== undefined && !applySnapshotFacts()) {
+        return
+      }
+      if (!current.found || !current.runId) {
         if (recoveryRunId && ((this.stoppedRunId !== null && recoveryRunId === this.stoppedRunId)
           || hasStoppedRun(sid, recoveryRunId, this.sessionIdentity))) {
           this.stoppedRunId = recoveryRunId
           this.sealLeftoverInFlight()
           return
         }
-        if (recoveryRunId && inFlightHost) {
-          const probe = await probeReattach(recoveryRunId)
-          // 探测窗口内的身份对账（与上面同口径；任何 await 之后写回前必须重比）
-          if (!isOwner() || this.sessionId !== sid || currentAbort !== abortAtEntry) {
-            return
-          }
-          // 问题3：探测窗口内已停止 ⇒ 旧现场整体丢弃（不排准备中、不重挂）。
-          if (this.stopped || this.stoppedRunId === recoveryRunId
-            || hasStoppedRun(sid, recoveryRunId, this.sessionIdentity)) {
-            return
-          }
-          if (probe.preparing) {
-            this.notePreparingState(probe.preparing.runId, probe.preparing.elapsedMs)
-            return
-          }
-          if (probe.status === 200) {
-            // 探测期间快照已建立：交给正式重挂（全量回放最稳；镜像正文本就滞后）。
-            // probe 的 200 体带快照状态，但它**不**带待决条目：按 park 建连必须再加屏上证据
-            // （宿主确实挂着待人卡），否则无卡轮会被永久 park、静默收流（⑤）。
-            void this.reattachActive(recoveryRunId, {
-              hostMessageId: inFlightHost.id,
-              lastSeq: this.runSeq[recoveryRunId] ?? 0,
-              awaitingInput: probe.snapshotStatus === 'SUSPENDED'
-                && this.hasHostPendingCard(inFlightHost.id)
-            })
-            return
-          }
-          if (probe.status >= 500) {
-            // 服务端明确不可用：记录快照失败并统一封口，发布时机由恢复链收尾决定。
-            this.sealRecovery('current', new ApiError('Reattach probe failed', probe.status, String(probe.status), null))
-            return
-          }
+        if (probe?.preparing) {
+          this.notePreparingState(probe.preparing.runId, probe.preparing.elapsedMs)
+          return
         }
-        // 空态：没有在途轮 —— 镜像若留下"未收尾"的助手消息，就地封口（否则光标永远在流）。
-        // 既有历史渲染与空历史 expired 降级规则兜底。
+        if (probe?.status === 200 && recoveryRunId && preloadedInFlightHost) {
+          void this.reattachActive(recoveryRunId, {
+            hostMessageId: preloadedInFlightHost.id,
+            lastSeq: this.runSeq[recoveryRunId] ?? 0,
+            awaitingInput: probe.snapshotStatus === 'SUSPENDED'
+              && this.hasHostPendingCard(preloadedInFlightHost.id)
+          })
+          return
+        }
+        if (probe !== null && probe.status >= 500) {
+          this.sealRecovery('current', new ApiError('Reattach probe failed', probe.status, String(probe.status), null))
+          return
+        }
         this.sealLeftoverInFlight()
         return
       }
@@ -6558,6 +6629,11 @@ export const useAiStore = defineStore('ai', {
         return
       }
       void this.resumeSnapshotStream(current.runId, resumeAnchor, inFlightHost?.id, awaitingInput)
+      } finally {
+        if (!historyGuardRejected) {
+          historyGuard?.settle()
+        }
+      }
     },
 
     /** 快照中的自动前端工具只按可证明事实恢复；没有“按名称补跑”的通道。 */
@@ -7640,16 +7716,18 @@ export const useAiStore = defineStore('ai', {
       //（其 `frontend_tool_request` 仍可能带等待上限）；确认门不再携带这两字段，也不据此折算倒计时。
       const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
       const existing = findToolPart(host, entry.toolCallId)
-      const restoredStatus = existing && isHistoryPlaceholderStatus(entry.toolCallId, existing.status)
-        ? 'pending'
-        : existing?.status ?? 'pending'
+      const hasSubmittedEvidence = existing?.submittedValues !== undefined
+        || this.gateSubmissions[entry.toolCallId] !== undefined
+      const restoredStatus = hasSubmittedEvidence && existing && !isHistoryPlaceholderStatus(entry.toolCallId, existing.status)
+        ? existing.status
+        : 'pending'
       this.upsertToolPart(host, {
         toolCallId: entry.toolCallId,
         name: entry.name,
         kind2: kind,
         status: restoredStatus,
         args: entry.arguments ?? existing?.args,
-        requiresAction: existing?.status === 'running' ? false : true,
+        requiresAction: !hasSubmittedEvidence,
         ...(kind === 'FRONTEND' && entry.expiresAt != null
           ? { expiresAt: entry.expiresAt, atMs: entry.atMs ?? undefined }
           : {}),

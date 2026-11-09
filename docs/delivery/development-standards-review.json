@@ -4831,6 +4831,47 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "仅按correctionPrefix精确前缀处理Java字符串，不做二次转码、全局文本去重或代理对切分。"},
         "verification-review": {"status": "checked", "reason": "agent-1169最终APPROVE；两文件IDEA Reformat成功；Maven 357主源编译和package BUILD SUCCESS；动态模型/浏览器/API场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:d277f403236d0e2f0333e028d16bbe1a14e3595a0c073af6df8b808fd4633346",
+      "status": "reviewed",
+      "reason": "逐hunk及完整恢复调用链复核并行预取、镜像last-good、单次同步提交和全部代次守卫；agent-1169两轮发现竞争与停止提交问题，返修后最终APPROVE。",
+      "reviewedAt": "2026-11-09T23:22:42+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1169、施工agent-1181",
+      "specChanges": [
+        {
+          "change": "history与runs/current并行预取，history先在局部合并，结果齐备并守卫有效后在同一同步调用栈提交消息、卡片、表单和运行状态。",
+          "reason": "镜像、history和快照分阶段发布会制造假终态、工作中/等待跳变及卡片消失重建。",
+          "impact": "镜像last-good在恢复期间不被中间history撤掉，预加载current不重复请求，current失败或载荷不完整不进入running。"
+        },
+        {
+          "change": "HistoryCommitGuard统一session、history generation、roundStartAtEntry和新轮占场判据，覆盖current/probe、提交、快照、manualRecovery和followup。",
+          "reason": "延迟提交使旧history可能覆盖新轮或新generation，旧currentError也可能越过发布窗口。",
+          "impact": "旧结果整体丢弃，新轮实时现场保留；恢复自建loading/suspended通过新基线复核，不被误判为新轮。"
+        },
+        {
+          "change": "history提交权与snapshot恢复权分离，停止或clientRequestStopped时仅提交history，不重建、重连或锁输入。",
+          "reason": "原子化初版会在停止时连带丢弃已成功history，违背停止后历史照常落盘语义。",
+          "impact": "有效history正常提交，停止路径不产生新副作用；过期、失败或不完整仍不提交。"
+        },
+        {
+          "change": "history内容覆盖不再决定done/streaming，权威PENDING默认恢复requiresAction=true，旧running本身不是提交证据。",
+          "reason": "内容覆盖不等于轮次终态，旧tool_start running会撤销真实待人语义。",
+          "impact": "completedByHistory只阻止旧镜像重复拼入，legacy不盲插；仅明确submittedValues或gateSubmissions可保留提交后待结局。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "并行预取、原子提交、镜像合并、PENDING、统一代次守卫、停止history-only和manualRecovery全链复核；contextUsage代次未改。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有history/run快照恢复函数和operation机制，预加载值传递，无新增依赖或第二套恢复框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript前端恢复逻辑，无Java/JSON实体变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "current失败、不完整、过期与旧generation均不伪造状态，manualRecovery仅当前有效恢复发布，无异常掩盖。"},
+        "toc-interaction": {"status": "checked", "reason": "消除时间戳/工作/等待跳变和卡片空窗，不隐藏内容、不新增提示或改变正常实时交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "提交前统一session/generation/轮次守卫，跨run旧结果丢弃，PENDING与context各自权威边界清晰，无AI数据库交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流解析、编码或Unicode处理，legacy仅按身份合并。"},
+        "verification-review": {"status": "checked", "reason": "agent-1169最终APPROVE；IDEA Reformat成功；主会话最终node scripts/build.mjs通过，3281模块、Vite 30.21秒；动态浏览器/API场景NOT_RUN。"}
+      }
     }
   ]
 }
