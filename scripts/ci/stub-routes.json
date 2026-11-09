@@ -413,6 +413,15 @@
         "cases": [
           "H-06"
         ]
+      },
+      "usage-grow": {
+        "layer": "stub",
+        "value": "tokens",
+        "default": 800,
+        "note": "按真实上游调用序号合法递增 prompt_tokens（每次文本轮 +step×n），供上下文占用增长场景使用",
+        "cases": [
+          "C-158"
+        ]
       }
     }
   },

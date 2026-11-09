@@ -3620,7 +3620,7 @@ async function runContextUsageRecovery(context) {
   checks.require('stale-none-a.real-old-response-held', staleNoneHeld.responseStatus === 200 && staleNoneHeld.delayedResponse,
     'the real pre-turn source=none response is held at the CDP response boundary', staleNoneHeld)
   browser.setPhase('fresh-after-none-b')
-  await browser.sendPrompt(`turn-text verification=${randomUUID()}`)
+  await browser.sendPrompt(`turn-text usage-grow=800 verification=${randomUUID()}`)
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     return ai.loading === false && ai.contextUsage?.usedTokens > 0
@@ -3651,7 +3651,7 @@ async function runContextUsageRecovery(context) {
   checks.require('stale-value-a.real-old-response-held', staleValueHeld.responseStatus === 200 && staleValueHeld.delayedResponse,
     'the real previous non-zero context response is held at the CDP response boundary', staleValueHeld)
   browser.setPhase('fresh-value-b')
-  await browser.sendPrompt(`turn-text verification=${randomUUID()} padding=${'上'.repeat(1500)}`)
+  await browser.sendPrompt(`turn-text usage-grow=800 verification=${randomUUID()} padding=${'上'.repeat(1500)}`)
   await browser.waitFor(`(() => {
     const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
     return ai.loading === false && ai.contextUsage?.usedTokens > ${expected.usedTokens}

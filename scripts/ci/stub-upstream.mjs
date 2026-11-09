@@ -297,7 +297,7 @@ function usageOf(shape) {
 // 桩只为它们提供触发面（下发工具/表单），不在桩里伪造业务结果 —— 否则"桩绿=产品绿"的假象。
 const FAULT_VALUE_SWITCHES = ['break-at-seq', 'stall-frames', 'stall-headers', 'kill-stream', 'slow-tool',
   'multi-card', 'huge-frame', 'tool-loop', 'slow-first-byte', 'slow-tool-exec', 'slow-tail-frames',
-  'late-frames', 'reasoning']
+  'late-frames', 'reasoning', 'usage-grow']
 const FAULT_FLAG_SWITCHES = ['turn-text', 'turn-interleave', 'context-overflow', 'summary-500', 'slow-reader',
   'fail-503-once']
 const FAULT_SWITCHES = [...FAULT_VALUE_SWITCHES, ...FAULT_FLAG_SWITCHES]
@@ -336,7 +336,7 @@ const FAULT_DEFAULTS = { 'break-at-seq': 2, 'stall-frames': 95000, 'stall-header
   'slow-first-byte': 8000, 'slow-tool-exec': 8000, 'slow-tail-frames': 1200, 'late-frames': 2,
   // reasoning：数值空间以 0 起，0 = 关闭；裸标记（无 `=<chars>`）因此也是关闭，
   // 这是刻意的 —— 既有用例的精确帧数断言只在"开关关闭"这一种状态下有意义。
-  reasoning: 0 }
+  reasoning: 0, 'usage-grow': 800 }
 
 /** 命名轮蓝本的确定性文本（段序基线与"迟到帧不写"用例共用；长度 > 120 字以覆盖多个 delta）。 */
 const TURN_TEXT = '命名轮蓝本：这是一段确定性文本，用于验证纯文本流的帧序完整性（start 恰 1 / delta ≥ 1 / done 恰 1），'
@@ -932,10 +932,18 @@ function reasoningChunks(chars, model) {
  *   - `zero-last`：首个 content 分片挂真值，末个 usage-only 帧挂 0/0/0；
  *   - `none`：整轮不发 usage（产品必须回退估算）。
  */
-function textRound(text, model, shapeName = 'last') {
+let usageGrowCalls = 0
+
+function textRound(text, model, shapeName = 'last', grow = 0) {
   const shapes = usageShapes()
   const name = USAGE_SHAPE_NAMES.includes(shapeName) ? shapeName : 'last'
   const usage = name === 'none' ? null : usageOf(shapes[name])
+  if (usage && grow) {
+    const step = typeof grow === 'number' ? grow : FAULT_DEFAULTS['usage-grow']
+    usageGrowCalls += 1
+    usage.prompt_tokens += step * usageGrowCalls
+    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
+  }
   const out = [chunk({ role: 'assistant', content: '' }, null, model)]
   const pieces = String(text).match(/[\s\S]{1,24}/g) || [String(text)]
   pieces.forEach((piece, index) => {
@@ -1409,7 +1417,7 @@ function framesFor(decision, faults, index, model, usageShape, responseBoundary 
   if (decision.kind !== 'tool_call') {
     const base = faults['huge-frame']
       ? hugeTextRound(numericFault(faults, 'huge-frame'), model)
-      : textRound(decision.text, model, usageShape)
+      : textRound(decision.text, model, usageShape, faults['usage-grow'] ?? 0)
     return withReasoning(base, faults, model)
   }
   if (decision.correctionVariant) return correctionToolRound(decision, callId, model)
