@@ -31,14 +31,26 @@ def _repo_root() -> str:
     return str(Path(__file__).resolve().parents[4])
 
 
+def _as_int(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit():
+            return int(text)
+    return None
+
+
 def _identity_exists(tenants: Dict[str, object], tenant_id: int, user_id: int) -> bool:
     business = tenants.get("business") or {}
     if not isinstance(business, dict):
         return False
     for tenant in business.get("tenants") or []:
-        if not isinstance(tenant, dict) or tenant.get("tenantId") != tenant_id:
+        if not isinstance(tenant, dict) or _as_int(tenant.get("tenantId")) != tenant_id:
             continue
-        return user_id in [int(item) for item in tenant.get("users") or []]
+        return user_id in [_as_int(item) for item in tenant.get("users") or []]
     return False
 
 

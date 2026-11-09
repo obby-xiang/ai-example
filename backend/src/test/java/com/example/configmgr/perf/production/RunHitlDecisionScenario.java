@@ -78,7 +78,7 @@ final class RunHitlDecisionScenario implements ProductionScenario {
 				}
 				RunStore.ClaimResult claim = support.identity(() -> fixture.store.tryClaimExecution(runId,
 						"call-" + runId, fixture.lease.instanceId()));
-				support.require(dataset, kind + "_single_claim_winner", claim.won(),
+				support.require(dataset, kind + "_single_claim_winner", claim.isWon(),
 						"outcome=" + claim.outcome() + " epoch=" + claim.epoch() + " fence=" + claim.fence());
 				dataset.attributes.put(kind + "ClaimEpoch", claim.epoch());
 			});
