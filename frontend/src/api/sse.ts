@@ -216,14 +216,14 @@ export interface SseFrameHandlers {
    * 无倒计时表述（"正在第 N 次重连"），不再对用户承诺未来时。
    */
   onReconnect?: (attempt: number, delayMs: number) => void
-  /** 连接层面的错误（HTTP 非 2xx、网络异常） */
+  /** 连接层面或处理器回调的错误（HTTP 非 2xx、网络异常、回调异常） */
   onError?: (error: ApiError) => void
   /**
    * 批次3：重挂命中了"已 start、快照未建"（HTTP 202 + `preparing=true`）。
    * 不是错误；准备中事实仅供内部恢复对账，由有界自动恢复接管，耗尽后进入统一恢复条。
    */
   onPreparing?: (probe: PreparingProbe) => void
-  /** 批次3：探测确认该 runId 在服务端不存在（404）——调用方应封口镜像里的在途轮。 */
+  /** 任一连接或探测确认该 runId 在服务端不存在（404）——调用方应封口镜像里的在途轮。 */
   onUnavailable?: () => void
   /**
    * Task 3：reattach 响应头携带**后端明确**的归档裁剪状态（见 {@link ArchiveTrimSignal}）。
@@ -492,6 +492,24 @@ async function toResponseError(response: Response): Promise<ApiError> {
   return new ApiError(message, response.status, code, body)
 }
 
+function notifyError(handlers: SseFrameHandlers, error: ApiError): void {
+  try {
+    handlers.onError?.(error)
+  } catch (callbackError) {
+    logCaughtError(callbackError, 'api/sse.ts:onError')
+  }
+}
+
+function reportCallbackError(handlers: SseFrameHandlers, error: unknown, callback: string): void {
+  logCaughtError(error, `api/sse.ts:${callback}`)
+  notifyError(handlers, new ApiError(
+    `SSE ${callback} callback failed`,
+    0,
+    FRONTEND_ERROR_CODES.UNKNOWN_ERROR,
+    null
+  ))
+}
+
 function finish(
   state: StreamState,
   handlers: SseFrameHandlers,
@@ -511,7 +529,11 @@ function finish(
     ...(timeoutStage === undefined ? {} : { timeoutStage }),
     ...(cancelled ? { cancelled: true } : {})
   }
-  handlers.onClose?.(info)
+  try {
+    handlers.onClose?.(info)
+  } catch (error) {
+    reportCallbackError(handlers, error, 'onClose')
+  }
   return info
 }
 
@@ -567,6 +589,7 @@ async function readStream(
     if (!frame) {
       return
     }
+    resetIdle()
     clearFirstFrame()
     consumeFrame(frame, state, handlers)
   }
@@ -595,7 +618,6 @@ async function readStream(
         // 读返回与 abort 同一 tick：这块帧属于"停止之后"，一律不落地
         return abortedResult('连接被中止')
       }
-      resetIdle()
       const text = decoder.decode(value, { stream: true })
       for (const payload of parser.push(text)) {
         consumePayload(payload)
@@ -756,7 +778,7 @@ function openLiveStream(
   handlers: {
     onOpen: (headers: Headers) => void
     onData: (payload: string) => void
-    onFailure: (reason: string) => void
+    onFailure: (reason: string, httpStatus?: number) => void
   }
 ): LiveStream {
   const controller = new AbortController()
@@ -796,7 +818,7 @@ function openLiveStream(
       }
       if (!response.ok) {
         // 用户可见原因保持既有口径（技术细节/HTTP 码不上屏）。
-        handlers.onFailure('重挂连接中断')
+        handlers.onFailure('重挂连接中断', response.status)
         return
       }
       /**
@@ -933,7 +955,7 @@ export async function streamChat(
       // 批次3：建连阶段超时与"网络没发出去"必须可区分（两者文案与后续动作不同）。
       if (connectTimedOut && !options.signal?.aborted) {
         const apiError = new ApiError('Connection timeout', 0, SSE_TIMEOUT_CODES.connect, null)
-        handlers.onError?.(apiError)
+        notifyError(handlers, apiError)
         throw apiError
       }
       logCaughtError(error, 'api/sse.ts:959')
@@ -943,7 +965,7 @@ export async function streamChat(
         FRONTEND_ERROR_CODES.NETWORK_ERROR,
         null
       )
-      handlers.onError?.(apiError)
+      notifyError(handlers, apiError)
       throw apiError
     } finally {
       if (connectTimer !== null) {
@@ -954,7 +976,7 @@ export async function streamChat(
 
     if (!response.ok) {
       const apiError = await toResponseError(response)
-      handlers.onError?.(apiError)
+      notifyError(handlers, apiError)
       throw apiError
     }
 
@@ -1238,11 +1260,11 @@ export async function reattach(
           if (settled) {
             return
           }
-          startIdle()
           const frame = parseSseFrame(payload)
           if (!frame) {
             return
           }
+          startIdle()
           consumeFrame(frame, state, handlers)
           if (state.terminal) {
             settle(true)
@@ -1252,15 +1274,24 @@ export async function reattach(
       })
     }
 
+    const settleUnavailable = (): void => {
+      try {
+        handlers.onUnavailable?.()
+      } catch (error) {
+        reportCallbackError(handlers, error, 'onUnavailable')
+      } finally {
+        settle(false)
+      }
+    }
+
     /**
      * 连接失败/干净收尾（原 `EventSource.onerror` 的等价物）。
      *
      * <p>Task 4 起 reattach 走 `fetch` + `ReadableStream`（原生 `EventSource` 不能设身份头），
-     * 失败事件不再带 `event`/`readyState`，其余判定原样保留：终态轮次直接收尾；否则先收流，
-     * 未确认连接时并行做一次 `?probe=1` 探测（命中 202/404 就按"准备中/不存在"收口），
-     * 退避照旧先行。
+     * 失败事件不再带 `event`/`readyState`，其余判定原样保留：终态轮次直接收尾；任何连接的
+     * 404 都按不存在收口；其他失败在未确认连接时并行做一次 `?probe=1` 探测，退避照旧先行。
      */
-    function onConnectionLost(reason: string): void {
+    function onConnectionLost(reason: string, httpStatus?: number): void {
       if (settled) {
         return
       }
@@ -1271,6 +1302,10 @@ export async function reattach(
       }
       source?.close()
       source = null
+      if (httpStatus === 404) {
+        settleUnavailable()
+        return
+      }
       // 探测**不得**推迟退避 —— 退避先起算，探测只作为"并行的事实来源"：
       // ① 探测走 `?probe=1`（服务端只读状态，不建订阅/不回放/不续期），② 探测挂起或失败
       // 都不影响 1/2/4/8s 时间线，③ 结果只在**本世代、本尝试**下才可应用（I1）——
@@ -1294,9 +1329,7 @@ export async function reattach(
             return
           }
           if (probe.status === 404) {
-            // 真不存在：交给调用方封口镜像里的在途轮（不显示"轮不存在"技术文案）
-            handlers.onUnavailable?.()
-            settle(false)
+            settleUnavailable()
           }
           // 其余（200 就绪 / 5xx / 网络失败）：退避已排期，按时重连即可
         })

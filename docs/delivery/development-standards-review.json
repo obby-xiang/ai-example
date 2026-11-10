@@ -5268,6 +5268,42 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "仅身份键计算，未修改文本或流式解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；两文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，25.72秒；真实首装浏览器复测NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c355a606a09e8241366ec4be180c1848215f9c9a4ebaaf585d99c9dd5488f5d4",
+      "status": "reviewed",
+      "reason": "逐hunk复核SSE任一连接404、回调异常必收尾及非法帧idle门禁；独立审查agent-1213两轮后最终APPROVE。",
+      "reviewedAt": "2026-11-10T10:21:54+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1213、施工agent-1212",
+      "specChanges": [
+        {
+          "change": "reattach在任意已建连状态下收到404均调用onUnavailable并settle，其他4xx/5xx保留原探测与重连。",
+          "reason": "原实现只有首次未成功建连才识别run missing，成功后的404会按普通断流反复重连。",
+          "impact": "run missing不再产生额外重连，非终态空EOF仍按断流处理，不被猜成DONE。"
+        },
+        {
+          "change": "onClose/onUnavailable/onError回调异常经安全通知和日志处理后仍保证resolve与计时器清理。",
+          "reason": "原回调异常可替代原始错误并阻止Promise收尾，造成恢复状态永久悬挂。",
+          "impact": "原始ApiError继续抛出，回调异常不覆盖原错误，POST与reattach全路径统一。"
+        },
+        {
+          "change": "只有成功解析且通过协议白名单的帧才刷新idle，非法JSON不再延长连接。",
+          "reason": "原实现先刷新idle再解析，持续坏帧可无限阻止超时与有界重连。",
+          "impact": "POST和reattach均进入既有有界超时/重连，DONE/error终帧语义不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/api/sse.ts", "status": "checked", "reason": "复核404 settleUnavailable、notifyError/reportCallbackError、POST/reattach idle与全部清理路径。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有ApiError、logCaughtError和settle/idle机制，无新增依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript SSE客户端，无Java变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "原始错误与回调异常分别记录，异常不吞、不覆盖、不阻断收尾，无正文日志新增。"},
+        "toc-interaction": {"status": "checked", "reason": "阻断run missing和坏帧造成的无限恢复，不新增用户提示或改变终帧文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "404在任何连接阶段一致收口，回调必settle，非法帧有界失败，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "沿用增量UTF-8解码和完整SSE帧解析，仅合法帧刷新idle。"},
+        "verification-review": {"status": "checked", "reason": "agent-1213最终APPROVE；sse.ts IDEA Reformat；node scripts/build.mjs构建3281模块成功，26.37秒；npm run build因其他文件/既有测试类型错误未通过，动态SSE场景NOT_RUN。"}
+      }
     }
   ]
 }
