@@ -667,9 +667,10 @@ public class ResilientChatService {
         if (isCancelledDuringCompaction(runId, out, setup, compaction, memory, full)) {
             return new FirstTurnExecution(true, null, null, null);
         }
-        RunSnapshot snapshot = this.store.create(runId, setup.sessionId(), setup.context(), full, this.codec,
+        RunSnapshot snapshot = this.store.createWithRequestExtraBody(runId, setup.sessionId(), setup.context(), full, this.codec,
                 setup.runtime().providerId(), setup.runtime().modelId(), frozenParams(setup.runtime(), setup.isParamsLocked()),
-                setup.request().clientRequestId(), setup.transcriptText(), setup.turnStartedAtMs());
+                setup.runtime().options().getExtraBody(), setup.request().clientRequestId(), setup.transcriptText(),
+                setup.turnStartedAtMs());
         recordTranscriptUser(runId, setup.sessionId(), setup.transcriptText(), setup.turnStartedAtMs());
         return new FirstTurnExecution(false, compaction, snapshot, full);
     }
@@ -1167,7 +1168,7 @@ public class ResilientChatService {
      *     失败 ⇒ {@link ProviderGoneException}，<b>不</b>回落当前默认；</li>
      * <li>{@code providerId} 为空（env 合成行）：按快照的模型名解析，模型不可用同样
      *     {@link ProviderGoneException}；解析实现返回别家也算失败；</li>
-     * <li>生效参数一律取快照冻结值（null 就是当时的值），不再读当前默认。</li>
+     * <li>生效参数一律取快照冻结值（null 就是当时的值），不再读当前默认；请求扩展 presence=true 时也只应用冻结值。</li>
      * </ul>
      */
     private ProviderRuntime runtimeForSnapshot(String runId, RunSnapshot snapshot) {
@@ -1191,7 +1192,8 @@ public class ResilientChatService {
         }
         return this.providerRegistry.forFrozenRequest(target.provider(), modelId,
                 new AiProviderRegistry.Overrides(snapshot.getTemperature(), snapshot.getTopP(),
-                        snapshot.getMaxTokens()));
+                        snapshot.getMaxTokens()),
+                snapshot.getRequestExtraBody(), snapshot.isRequestExtraBodyPresent());
     }
 
     /**

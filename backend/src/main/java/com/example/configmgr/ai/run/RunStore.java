@@ -1329,6 +1329,10 @@ public class RunStore {
      *     失败只 WARN，不升级成请求失败（下一次创建/恢复会再补）。</li>
      * </ul>
      *
+     * <p>旧 {@code create} 签名也用于<b>新建</b>快照：冻结 null 扩展并写 presence=true，不表示 legacy。
+     * 只有反序列化旧数据缺少 presence 字段时才为 false；新首跑路径统一经
+     * {@link #createWithRequestExtraBody} 显式冻结（null/空 Map 同样 present=true）。</p>
+     *
      * @param providerId      库内 provider id；{@code null} = env 合成行（种子尚未落库/无 DB 行）
      * @param modelId         本轮使用的模型名（请求体 {@code model} 的原值）
      * @param frozen          生效参数（必须非 null；字段可为 null = 当时没有值）
@@ -1341,10 +1345,18 @@ public class RunStore {
     public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
                               MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
                               String clientRequestId, String requestText, long turnStartedAtMs) {
+        return createWithRequestExtraBody(runId, sessionId, context, history, codec, providerId, modelId, frozen, null,
+                clientRequestId, requestText, turnStartedAtMs);
+    }
+
+    public RunSnapshot createWithRequestExtraBody(String runId, String sessionId, AiContext context, List<Message> history,
+                              MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+                              Map<String, Object> requestExtraBody, String clientRequestId, String requestText,
+                              long turnStartedAtMs) {
         validateInitialSnapshot(runId, modelId, requestText, turnStartedAtMs, frozen);
         TenantUser identity = RequestContextUtils.require();
         RunSnapshot snapshot = newInitialSnapshot(runId, sessionId, context, history, codec, providerId, modelId,
-                frozen, clientRequestId, requestText, turnStartedAtMs, identity);
+                frozen, requestExtraBody, clientRequestId, requestText, turnStartedAtMs, identity);
         registerSessionRun(runId, sessionId, identity);
         primeRunIndexRepair(snapshot, runId);
         if (!isPersist(snapshot)) {
@@ -1373,7 +1385,8 @@ public class RunStore {
 
     private RunSnapshot newInitialSnapshot(String runId, String sessionId, AiContext context, List<Message> history,
                                            MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
-                                           String clientRequestId, String requestText, long turnStartedAtMs, TenantUser identity) {
+                                           Map<String, Object> requestExtraBody, String clientRequestId, String requestText,
+                                           long turnStartedAtMs, TenantUser identity) {
         RunSnapshot snapshot = new RunSnapshot();
         snapshot.setRunId(runId);
         snapshot.setSessionId(sessionId);
@@ -1388,6 +1401,7 @@ public class RunStore {
         snapshot.setProviderId(providerId);
         snapshot.setModelId(modelId);
         snapshot.freezeParams(frozen);
+        snapshot.freezeRequestExtraBody(requestExtraBody);
         snapshot.setCreatedBy(this.instanceId);
         snapshot.setCreatedAtMs(System.currentTimeMillis());
         return snapshot;

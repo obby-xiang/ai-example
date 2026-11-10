@@ -245,7 +245,15 @@ public class AiConfigWriter {
                                @JsonProperty("supportsReasoning") Boolean supportsReasoning,
                                @JsonProperty("enabled") Boolean enabled,
                                @JsonProperty("isDefault") Boolean isDefault,
-                               @JsonProperty("sortOrder") Integer sortOrder) {
+                               @JsonProperty("sortOrder") Integer sortOrder,
+                               @JsonProperty("requestExtraBody") Map<String, Object> requestExtraBody) {
+
+        public ModelCommand(String modelId, String displayName, Integer maxContext, Integer maxOutput,
+                            Boolean supportsToolCalling, Boolean supportsVision, Boolean supportsReasoning,
+                            Boolean enabled, Boolean isDefault, Integer sortOrder) {
+            this(modelId, displayName, maxContext, maxOutput, supportsToolCalling, supportsVision, supportsReasoning,
+                    enabled, isDefault, sortOrder, null);
+        }
     }
 
     /**
@@ -449,6 +457,7 @@ public class AiConfigWriter {
             model.setSupportsToolCalling(BooleanUtils.isNotFalse(command.supportsToolCalling()));
             model.setSupportsVision(Boolean.TRUE.equals(command.supportsVision()));
             model.setSupportsReasoning(Boolean.TRUE.equals(command.supportsReasoning()));
+            model.setRequestExtraBody(requestExtraBodyJson(command.requestExtraBody()));
             model.setEnabled(BooleanUtils.isNotFalse(command.enabled()));
             model.setDefault(Boolean.TRUE.equals(command.isDefault()));
             model.setSortOrder(ObjectUtils.defaultIfNull(command.sortOrder(), 0));
@@ -487,6 +496,18 @@ public class AiConfigWriter {
         return updated;
     }
 
+    private String requestExtraBodyJson(Map<String, Object> requestExtraBody) {
+        if (requestExtraBody == null) {
+            return null;
+        }
+        try {
+            return this.objectMapper.writeValueAsString(requestExtraBody);
+        }
+        catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+            throw invalidParam("requestExtraBody must be serializable as a JSON object");
+        }
+    }
+
     private AiProviderModel applyModelUpdate(AiProviderModel existing, ModelCommand command, Long providerId) {
         if (command.displayName() != null) {
             existing.setDisplayName(StringUtils.isNotBlank(command.displayName()) ? command.displayName().trim()
@@ -506,6 +527,9 @@ public class AiConfigWriter {
         }
         if (command.supportsReasoning() != null) {
             existing.setSupportsReasoning(command.supportsReasoning());
+        }
+        if (command.requestExtraBody() != null) {
+            existing.setRequestExtraBody(requestExtraBodyJson(command.requestExtraBody()));
         }
         if (command.enabled() != null) {
             existing.setEnabled(command.enabled());

@@ -11,6 +11,8 @@ import com.example.configmgr.ai.config.db.AiSettingRepository;
 import com.example.configmgr.ai.observe.LogSampling;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
@@ -120,6 +122,12 @@ public class AiConfigService {
             "AI 默认供应商不存在：请在「设置 → AI」重新选择默认模型";
 
     private static final String DEFAULT_MODEL_FALLBACK = "deepseek-flash";
+
+    private static final ObjectMapper REQUEST_EXTRA_BODY_MAPPER = new ObjectMapper()
+            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    private static final TypeReference<LinkedHashMap<String, Object>> REQUEST_EXTRA_BODY_TYPE = new TypeReference<>() {
+    };
 
     private final AiProviderRepository providerRepository;
 
@@ -546,9 +554,31 @@ public class AiConfigService {
         // 直打 /chat/completions 确实返回 reasoning_content）。它是能力描述位，不参与运行闸门：
         // 后端是否发思考帧只看上游本片有没有 reasoning_content（有则发，无则不发明）。
         model.setSupportsReasoning(true);
+        model.setRequestExtraBody(this.properties.getConfig().getSeedRequestExtraBody());
         model.setEnabled(true);
         model.setDefault(true);
         return model;
+    }
+
+    /**
+     * 当前目标的请求扩展。未配置返回空 Map；非法 JSON 或非对象输入直接失败，不静默忽略配置。
+     */
+    public Map<String, Object> requestExtraBody(Long providerId, String modelId) {
+        String raw = providerId == null ? envSeedModel().getRequestExtraBody()
+                : model(providerId, modelId).map(AiProviderModel::getRequestExtraBody).orElse(null);
+        if (!StringUtils.hasText(raw)) {
+            return Map.of();
+        }
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = REQUEST_EXTRA_BODY_MAPPER.readTree(raw);
+            if (root == null || !root.isObject()) {
+                throw new IllegalArgumentException("Configured requestExtraBody must be a JSON object");
+            }
+            return REQUEST_EXTRA_BODY_MAPPER.convertValue(root, REQUEST_EXTRA_BODY_TYPE);
+        }
+        catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+            throw new IllegalArgumentException("Configured requestExtraBody must be a JSON object", ex);
+        }
     }
 
     // ── 解析：默认 provider / 模型 ────────────────────────────────────────────

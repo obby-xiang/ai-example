@@ -26,6 +26,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -302,7 +303,8 @@ public class AiProviderRegistry {
         if (effectiveModel.equals(base.modelId()) && effectiveOverrides.isEmpty()) {
             return base;
         }
-        OpenAiChatOptions options = buildOptions(effectiveModel, effectiveOverrides);
+        OpenAiChatOptions options = buildOptions(effectiveModel, effectiveOverrides,
+                this.configService.requestExtraBody(base.providerId(), effectiveModel));
         ChatModel model = newModel(base.api(), options, base.providerId());
         ChatClient client = ChatClient.builder(model).defaultAdvisors(this.memoryAdvisor).build();
         return new ProviderRuntime(base.providerId(), base.providerCode(), effectiveModel, base.baseUrl(),
@@ -319,27 +321,44 @@ public class AiProviderRegistry {
      * 因此这里先按当前默认装配 options，再用冻结值<b>逐项覆写（含清空）</b>：
      * 冻结 null ⇒ set 成 null，冻结值 ⇒ 照抄（不再做范围校验 —— 它已经是首轮生效过的值）。
      *
-     * <p>其余项（{@code streamUsage} 等）仍取当前默认：本批冻结的是 L-26 裁决点名的五项
-     * （provider/model/temperature/topP/maxTokens/paramsLocked），不是整份 options 快照。
+     * <p>{@code requestExtraBodyPresent=true} 时先清空当前 global/target 扩展，再只应用冻结值；
+     * 取得或复用 {@link OpenAiApi} 不经过当前 options 构建，因此当前目标扩展坏 JSON 不会阻断有效快照续跑。
+     * 旧快照缺少 presence（false）才走修改前 legacy 行为，不与新建快照的 null/空冻结混同。
      *
-     * <p>与 {@code forRequest} 同一条纪律：<b>不读写缓存</b>（一次性运行态，复用 base 的 HTTP 客户端），
+     * <p>与 {@code forRequest} 同一条纪律：<b>不读写运行态 options 缓存</b>（一次性运行态，复用 HTTP 客户端），
      * 因此续跑轮的模型/参数不会污染默认路径，也不会让缓存条目数随轮次增长。
      *
      * @param frozen 冻结的生效参数；null = 三值全空（等价于全 null 冻结，而不是"不冻结"）
+     * @param requestExtraBody 冻结的目标扩展；presence=true 时 null/空 Map 同样是有效冻结值
+     * @param requestExtraBodyPresent 是否存在冻结扩展字段；旧快照/旧信封缺字段为 false
      */
     public ProviderRuntime forFrozenRequest(AiConfigService.ResolvedProvider resolved, String modelId,
             Overrides frozen) {
+        return forFrozenRequest(resolved, modelId, frozen, null, false);
+    }
+
+    public ProviderRuntime forFrozenRequest(AiConfigService.ResolvedProvider resolved, String modelId,
+            Overrides frozen, Map<String, Object> requestExtraBody) {
+        return forFrozenRequest(resolved, modelId, frozen, requestExtraBody, requestExtraBody != null);
+    }
+
+    public ProviderRuntime forFrozenRequest(AiConfigService.ResolvedProvider resolved, String modelId,
+            Overrides frozen, Map<String, Object> requestExtraBody, boolean requestExtraBodyPresent) {
         ensureConfigVersion();
-        ProviderRuntime base = runtimeFor(resolved);
-        String effectiveModel = StringUtils.isNotBlank(modelId) ? modelId.trim() : base.modelId();
+        OpenAiApi api = apiForFrozenRequest(resolved);
+        String effectiveModel = StringUtils.isNotBlank(modelId) ? modelId.trim() : resolved.modelId();
         OpenAiChatOptions options = buildOptions(effectiveModel, Overrides.NONE);
+        if (requestExtraBodyPresent) {
+            options.setExtraBody(null);
+        }
+        mergeRequestExtraBody(options, requestExtraBody);
         options.setTemperature(frozen == null ? null : frozen.temperature());
         options.setTopP(frozen == null ? null : frozen.topP());
         options.setMaxTokens(frozen == null ? null : frozen.maxTokens());
-        ChatModel model = newModel(base.api(), options, base.providerId());
+        ChatModel model = newModel(api, options, resolved.providerId());
         ChatClient client = ChatClient.builder(model).defaultAdvisors(this.memoryAdvisor).build();
-        return new ProviderRuntime(base.providerId(), base.providerCode(), effectiveModel, base.baseUrl(),
-                base.completionsPath(), base.runtimeKey(), options, base.api(), model, client);
+        return new ProviderRuntime(resolved.providerId(), resolved.providerCode(), effectiveModel, resolved.baseUrl(),
+                resolved.completionsPath(), resolved.runtimeKey(), options, api, model, client);
     }
 
 
@@ -386,6 +405,21 @@ public class AiProviderRegistry {
 
     // ── 内部 ────────────────────────────────────────────────────────────────
 
+    /** 只取得 HTTP 客户端，不构建当前 options，也不解析当前目标扩展。 */
+    private OpenAiApi apiForFrozenRequest(AiConfigService.ResolvedProvider resolved) {
+        String key = resolved.runtimeKey();
+        synchronized (this.buildLock) {
+            ProviderRuntime cached = this.runtimes.get(key);
+            OpenAiApi api = cached != null ? cached.api() : this.apis.get(key);
+            if (api == null) {
+                api = newApi(resolved);
+            }
+            this.apis.keySet().removeIf(existing -> !existing.equals(key));
+            this.apis.put(key, api);
+            return api;
+        }
+    }
+
     private OpenAiApi newApi(AiConfigService.ResolvedProvider resolved) {
         return new ResponseBoundOpenAiApi(resolved.baseUrl(), new SimpleApiKey(resolved.apiKey()),
                 new LinkedMultiValueMap<>(), resolved.completionsPath(), "/v1/embeddings", RestClient.builder(),
@@ -406,7 +440,8 @@ public class AiProviderRegistry {
     }
 
     private ProviderRuntime newRuntime(AiConfigService.ResolvedProvider resolved, String key, OpenAiApi api) {
-        OpenAiChatOptions options = buildOptions(resolved.modelId());
+        OpenAiChatOptions options = buildOptions(resolved.modelId(), Overrides.NONE,
+                this.configService.requestExtraBody(resolved.providerId(), resolved.modelId()));
         ChatModel model = newModel(api, options, resolved.providerId());
         ChatClient client = ChatClient.builder(model).defaultAdvisors(this.memoryAdvisor).build();
         return new ProviderRuntime(resolved.providerId(), resolved.providerCode(), resolved.modelId(),
@@ -486,6 +521,42 @@ public class AiProviderRegistry {
             }
         }
         return options;
+    }
+
+    OpenAiChatOptions buildOptions(String modelId, Overrides overrides, Map<String, Object> requestExtraBody) {
+        OpenAiChatOptions options = buildOptions(modelId, overrides);
+        mergeRequestExtraBody(options, requestExtraBody);
+        return options;
+    }
+
+    private static void mergeRequestExtraBody(OpenAiChatOptions options, Map<String, Object> requestExtraBody) {
+        if (requestExtraBody == null || requestExtraBody.isEmpty()) {
+            return;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>(ObjectUtils.defaultIfNull(options.getExtraBody(), Map.of()));
+        deepMerge(merged, requestExtraBody);
+        options.setExtraBody(merged);
+    }
+
+    private static void deepMerge(Map<String, Object> target, Map<String, Object> source) {
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof Map<?, ?> sourceMap) {
+                Map<String, Object> nested = target.get(entry.getKey()) instanceof Map<?, ?> existingMap
+                        ? copyMap(existingMap) : new LinkedHashMap<>();
+                deepMerge(nested, copyMap(sourceMap));
+                target.put(entry.getKey(), nested);
+            }
+            else {
+                target.put(entry.getKey(), value);
+            }
+        }
+    }
+
+    private static Map<String, Object> copyMap(Map<?, ?> source) {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        source.forEach((key, value) -> copy.put(String.valueOf(key), value));
+        return copy;
     }
 
     private void applyRange(String label, double value, double min, double max,

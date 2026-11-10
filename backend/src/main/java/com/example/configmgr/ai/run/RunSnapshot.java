@@ -32,8 +32,8 @@ import java.util.Map;
  * <li>{@link #context}：披露上下文（页面/任务/步骤），续跑据此重建同一份工具子集；</li>
  * <li>{@link #assistantMetadata}：挂起中那条 assistant 的<b>完整 metadata</b>（不透明；
  * 推理相关键与厂商私有未知键一并保真，续跑原样挂回）；</li>
- * <li>{@link #temperature}/{@link #topP}/{@link #maxTokens}/{@link #paramsLocked}：
- * <b>生效参数冻结</b>（首笔快照写死；同一 run 续跑不移志，新 run 才读新全局默认）；</li>
+ * <li>{@link #temperature}/{@link #topP}/{@link #maxTokens}/{@link #paramsLocked}/{@link #requestExtraBody}：
+ * <b>生效参数与目标请求扩展冻结</b>（首笔快照写死；同一 run 续跑不移志，新 run 才读新配置）；</li>
  * <li>{@link #status}：RUNNING / SUSPENDED / DONE / FAILED / CANCELLED —— 供重启后的发现与幂等判定。
  *     <b>取消是吸收态</b>：快照写入路径的原子守卫保证任何非取消状态都不得从 CANCELLED 转出
  *     （见 {@code RunStore#saveStatusUnlessCancelled}）。</li>
@@ -228,6 +228,14 @@ public class RunSnapshot {
 	@JsonProperty("paramsLocked")
 	private Boolean paramsLocked;
 
+	/** 首轮生效的目标请求扩展；旧快照无此字段时不追加扩展。 */
+	@JsonProperty("requestExtraBody")
+	@JsonInclude(JsonInclude.Include.NON_EMPTY)
+	private Map<String, Object> requestExtraBody;
+
+	@JsonProperty("requestExtraBodyPresent")
+	private boolean requestExtraBodyPresent;
+
 	/**
 	 * 冻结的生效参数（L-26）。三值可为 null —— 那是"当时该项没有值"，不是"没冻结"。
 	 */
@@ -319,6 +327,28 @@ public class RunSnapshot {
 	public FrozenParams frozenParams() {
 		return new FrozenParams(this.temperature, this.topP, this.maxTokens,
 				Boolean.TRUE.equals(this.paramsLocked));
+	}
+
+	/** 新建快照显式冻结：null/空 Map 也必须 present=true。 */
+	public void freezeRequestExtraBody(Map<String, Object> requestExtraBody) {
+		setRequestExtraBody(requestExtraBody);
+		this.requestExtraBodyPresent = true;
+	}
+
+	@JsonProperty("requestExtraBodyPresent")
+	public boolean isRequestExtraBodyPresent() {
+		return this.requestExtraBodyPresent;
+	}
+
+	public Map<String, Object> getRequestExtraBody() {
+		return this.requestExtraBody == null || this.requestExtraBody.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(this.requestExtraBody));
+	}
+
+	/** Jackson 恢复入口：presence 只由同名 additive 字段决定，旧数据缺字段保持 false。 */
+	public void setRequestExtraBody(Map<String, Object> requestExtraBody) {
+		this.requestExtraBody = requestExtraBody == null || requestExtraBody.isEmpty() ? Map.of()
+				: Collections.unmodifiableMap(new LinkedHashMap<>(requestExtraBody));
 	}
 
 	/**

@@ -78,6 +78,12 @@ public class AiProviderModel {
     @JsonProperty("supportsReasoning")
     private Boolean supportsReasoning = Boolean.FALSE;
 
+    /** 目标级 OpenAI 兼容请求扩展（JSON 对象；null = 不追加扩展）。 */
+    @ToString.Exclude
+    @Column(name = "request_extra_body", columnDefinition = "TEXT")
+    @JsonProperty("requestExtraBody")
+    private String requestExtraBody;
+
     @Column(name = "enabled", nullable = false)
     @JsonProperty("enabled")
     private boolean enabled = true;

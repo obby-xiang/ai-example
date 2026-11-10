@@ -20,8 +20,9 @@ import java.util.Map;
  * <b>唯一绑定</b>：{@code app.ai} 前缀只由本类绑定。第一棒时期基座
  * {@code AppProperties.Ai}（max-iterations / session-ttl-minutes / hitl-timeout-minutes /
  * thinking-disabled）与本类并列绑定同一前缀（P1 §5 遗留 N4 双绑定），本棒已删除基座那套：
- * {@code thinking-disabled} 在新运行时早已失效（新路径走"官方循环 + reasoning 补丁"，
- * 不设 {@code extraBody.thinking}），{@code max-iterations} 由官方循环的退出条件取代，
+ * {@code thinking-disabled} 在新运行时早已失效；当前仅 env 种子目标通过
+ * {@code seedRequestExtraBody} 显式设置 {@code thinking.type=disabled}，不全局发送该扩展，
+ * {@code max-iterations} 由官方循环的退出条件取代，
  * 两个 ttl/timeout 键则被本类的 Duration 形态取代。
  *
  * <p>
@@ -131,14 +132,20 @@ public class AiProperties {
 	public static class Config {
 
 		/**
-		 * 强制重灌 env 种子（默认 false = strict seed：表非空时 env 完全不参与）。
+		 * 强制重灌 env 种子（默认 false = strict seed：只允许后增列仍为 NULL 的旧模型 extra-only 回填）。
 		 *
 		 * <p>
-		 * 默认 false 是<b>刻意</b>的：表非空后改 env 不再改变线上行为（否则运维改 env 会静默
-		 * 改掉 DB 真源，与"DB 为真源"自相矛盾）。需要重灌时显式打开本键并重启 —— 动作本身
-		 * 就是"我知道会覆盖 seed 行的 base-url/model"。
+		 * 非 NULL（含空对象）视为用户配置，不得覆盖；extra-only 不改 provider、enabled/default 或其他模型字段。
+		 * 需要完整重灌时显式打开本键并重启 —— 动作本身就是"我知道会覆盖 seed 行"。
 		 */
 		private boolean seedForce = false;
+
+		/**
+		 * env 种子模型的目标级请求扩展（JSON 对象字符串；{@code null}/空白 = 不追加）。
+		 *
+		 * <p>只写入 env 种子模型，不是全局 OpenAI options，也不覆盖其他 provider/model 的配置。
+		 */
+		private String seedRequestExtraBody;
 
 		/**
 		 * 读路径版本比对的最小间隔（缺省 1s）。

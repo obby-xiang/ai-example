@@ -5589,6 +5589,60 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "按用户指令执行git revert并逐hunk核对；回退后由DeepSeek复测核心导出场景，当前动态验证NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:41810db3873344b034fe44c78833f1bc5003d632c00e60708aa8b39ab9ba0b23",
+      "status": "reviewed",
+      "reason": "逐hunk复核目标级请求扩展、严格种子回填、冻结续跑、执行信封和additive迁移；独立审查agent-1226两轮返修后最终APPROVE。",
+      "reviewedAt": "2026-11-10T20:59:26+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1226、施工agent-1224",
+      "specChanges": [
+        {
+          "change": "按providerId+modelId保存并深合并OpenAI兼容请求扩展，当前env种子目标显式thinking.type=disabled。",
+          "reason": "目标模型默认thinking会在工具续跳要求reasoning_content回填，方案B通过通用目标配置关闭该目标思考，不扩散到其他供应商或模型。",
+          "impact": "未配置目标不追加扩展；已有顶层和嵌套兄弟键保留，目标值只覆盖同一叶子。"
+        },
+        {
+          "change": "strict seed仅给后增列仍为NULL的旧ENV_SEED模型回填扩展，非NULL及空对象均视为用户配置。",
+          "reason": "避免seed-force=false重启覆盖用户修改或连带重写provider、enabled/default。",
+          "impact": "extra-only事务只能回填并递增版本或no-op；seed-force=true才走完整重灌。"
+        },
+        {
+          "change": "新建run及执行信封冻结extraBody和presence，续跑只恢复快照值，旧快照缺字段保持legacy。",
+          "reason": "同一run不得因配置编辑、当前坏JSON或信封恢复而中途切换思考行为。",
+          "impact": "新建快照null/空Map也present=true；frozen HTTP客户端复用不解析当前目标options，apis保持单条目。"
+        },
+        {
+          "change": "H2与PostgreSQL增加V2 additive request_extra_body列，扩展JSON严格拒绝非对象和尾随内容。",
+          "reason": "保持既有库可迁移并避免坏配置被静默接受。",
+          "impact": "不改写V1；env在事务写入前校验，模型配置数据库白名单边界不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigSeeder.java", "status": "checked", "reason": "strict extra-only、事务内并发no-op、版本发布和事务前校验。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigService.java", "status": "checked", "reason": "目标扩展读取、严格JSON对象及尾随token拒绝。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigWriter.java", "status": "checked", "reason": "模型新增/更新可选扩展及旧构造签名兼容。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java", "status": "checked", "reason": "种子扩展配置及当前注释。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java", "status": "checked", "reason": "深合并、frozen options、API复用及单条目缓存。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiProviderModel.java", "status": "checked", "reason": "additive模型字段及toString排除。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolExecutionEnvelope.java", "status": "checked", "reason": "快照、Map和恢复链保存扩展与presence，旧信封legacy。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "首跑冻结及续跑presence传递。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunSnapshot.java", "status": "checked", "reason": "新建null/空扩展present及Jackson旧数据兼容。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "新旧create签名统一初始化并显式冻结扩展。"},
+        {"path": "backend/src/main/resources/application.yml", "status": "checked", "reason": "仅当前env种子目标thinking.type=disabled及迁移注释。"},
+        {"path": "backend/src/main/resources/db/migration/V2__ai_model_request_extra_body.sql", "status": "checked", "reason": "H2 additive TEXT列。"},
+        {"path": "backend/src/main/resources/db/postgresql/V2__ai_model_request_extra_body.sql", "status": "checked", "reason": "PostgreSQL additive TEXT列。"},
+        {"path": "docs/03-技术方案文档-v2.1.md", "status": "checked", "reason": "同步目标扩展、strict/frozen、信封和三类开关边界。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用OpenAiChatOptions.extraBody、既有配置版本、RunSnapshot和执行信封，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "集合防御复制、显式JSON、控制块、布尔presence和方法规模已审查；生产Java已IDEA Reformat。"},
+        "logging-exception-safety": {"status": "checked", "reason": "非法JSON失败关闭，种子异常沿用既有可见降级，不记录扩展正文或密钥。"},
+        "toc-interaction": {"status": "not-affected", "reason": "未修改前端、工具卡或用户交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "配置版本、事务锁、快照presence、执行信封和API缓存容量已关联审查；AI数据库访问仍限模型配置。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、reasoning回放或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1226静态终审APPROVE；后端Maven -Dmaven.test.skip=true compile BUILD SUCCESS；真实请求、迁移、Redis及续跳运行时验证NOT_RUN。"}
+      }
     }
   ]
 }

@@ -50,13 +50,23 @@ public record ToolExecutionEnvelope(@JsonProperty("runId") String runId,
 		@JsonProperty("budgetSkippedBatches") int budgetSkippedBatches,
 		@JsonProperty("createdAtMs") @JsonFormat(shape = JsonFormat.Shape.STRING) long createdAtMs,
 		@JsonProperty("createdBy") String createdBy,
-		@JsonProperty("seqFloor") @JsonFormat(shape = JsonFormat.Shape.STRING) long seqFloor) {
+		@JsonProperty("seqFloor") @JsonFormat(shape = JsonFormat.Shape.STRING) long seqFloor,
+		@JsonProperty("requestExtraBody") @JsonInclude(JsonInclude.Include.NON_EMPTY) Map<String, Object> requestExtraBody,
+		@JsonProperty("requestExtraBodyPresent") boolean requestExtraBodyPresent) {
 
 	/** {@code toolContext} 里的键名（写入方与读取方共用这一个常量）。 */
 	public static final String TOOL_CONTEXT_KEY = "executionEnvelope";
 
 	public ToolExecutionEnvelope {
 		context = copyOf(context);
+		requestExtraBody = copyOf(requestExtraBody);
+	}
+
+	public ToolExecutionEnvelope(String runId, String sessionId, long tenantId, long userId, Long providerId,
+			String modelId, Map<String, Object> context, RunSnapshot.FrozenParams frozen, int round, int toolSteps,
+			long budgetArmedAtMs, int budgetSkippedBatches, long createdAtMs, String createdBy, long seqFloor) {
+		this(runId, sessionId, tenantId, userId, providerId, modelId, context, frozen, round, toolSteps,
+				budgetArmedAtMs, budgetSkippedBatches, createdAtMs, createdBy, seqFloor, null, false);
 	}
 
 	/**
@@ -73,7 +83,8 @@ public record ToolExecutionEnvelope(@JsonProperty("runId") String runId,
 				snapshot.getUserId(), snapshot.getProviderId(), snapshot.getModelId(),
 				copyOf(snapshot.getContext()), snapshot.frozenParams(), snapshot.getRound(),
 				snapshot.getToolSteps(), snapshot.getBudgetArmedAtMs(), snapshot.getBudgetSkippedBatches(),
-				snapshot.getCreatedAtMs(), snapshot.getCreatedBy(), Math.max(0L, ObjectUtils.defaultIfNull(seqFloor, 0L)));
+				snapshot.getCreatedAtMs(), snapshot.getCreatedBy(), Math.max(0L, ObjectUtils.defaultIfNull(seqFloor, 0L)),
+				snapshot.getRequestExtraBody(), snapshot.isRequestExtraBodyPresent());
 	}
 
 	/**
@@ -116,13 +127,16 @@ public record ToolExecutionEnvelope(@JsonProperty("runId") String runId,
 		int budgetSkippedBatches = intOrZero(map.get("budgetSkippedBatches"));
 		long createdAtMs = longOrZero(map.get("createdAtMs"));
 		long seqFloor = longOrZero(map.get("seqFloor"));
+		Map<String, Object> requestExtraBody = copyOf(asMap(map.get("requestExtraBody")));
+		boolean requestExtraBodyPresent = Boolean.TRUE.equals(map.get("requestExtraBodyPresent"));
 		return new ToolExecutionEnvelope(runId, sessionId, tenantId, userId, providerId, modelId, context, frozen,
 				round, toolSteps, budgetArmedAtMs, budgetSkippedBatches, createdAtMs, createdBy,
-				Math.max(0L, seqFloor));
+				Math.max(0L, seqFloor), requestExtraBody, requestExtraBodyPresent);
 	}
 
 	/**
-	 * 恢复成一份轮次快照（只含运行事实：身份/上下文/冻结参数/轮次/步数/预算/创建者/创建时刻）。
+	 * 恢复成一份轮次快照（只含运行事实：身份/上下文/冻结参数与可选请求扩展/轮次/步数/预算/创建者/创建时刻）。
+	 * 旧信封缺少 requestExtraBodyPresent 时按 legacy 处理，不冒充新建冻结。
 	 *
 	 * <p>{@code createdAtMs}（以及 identity）原值带回 —— 恢复不是"新建一轮"，不能拿当前钟冒充；
 	 * {@code updatedAtMs} 才是本次落库时刻。
@@ -152,6 +166,9 @@ public record ToolExecutionEnvelope(@JsonProperty("runId") String runId,
 		snapshot.setUpdatedAtMs(now);
 		if (this.frozen != null) {
 			snapshot.freezeParams(this.frozen);
+		}
+		if (this.requestExtraBodyPresent) {
+			snapshot.freezeRequestExtraBody(this.requestExtraBody);
 		}
 		return snapshot;
 	}

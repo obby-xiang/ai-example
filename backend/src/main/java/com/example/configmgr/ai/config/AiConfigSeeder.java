@@ -35,8 +35,9 @@ import java.util.Optional;
  * 只有<b>真的写了数据</b>才推进版本（no-op / 并发冲突里输掉的那一方不制造版本抖动）。
  *
  * <h2>strict seed</h2>
- * 表非空 ⇒ env <b>完全不参与</b>（不覆盖、不追加、不做 env 兜底）；需要重灌时显式
- * {@code app.ai.config.seed-force=true}，且只刷新 {@code source=ENV_SEED} 的行。
+ * 表非空 ⇒ env 不覆盖既有配置；仅后增列仍为 {@code NULL} 的旧 ENV_SEED 模型允许 extra-only 回填，
+ * 非 NULL（含空对象）一律视为用户配置。回填不改 provider、enabled/default 或其他模型字段。
+ * 完整重灌只在显式 {@code app.ai.config.seed-force=true} 时进行，且只刷新 {@code source=ENV_SEED} 的行。
  *
  * <h2>并发双启动</h2>
  * {@code count==0} 判据 + {@code code} 唯一约束兜底：两个实例同时启动时，后提交的一方拿到
@@ -94,7 +95,7 @@ public class AiConfigSeeder implements ApplicationRunner {
         String envKey = this.configService.envApiKey();
         boolean force = this.properties.getConfig().isSeedForce();
         long existing = this.providerRepository.count();
-        if (existing > 0 && !force) {
+        if (existing > 0 && !force && !isSeedRequestExtraBodyBackfillDue()) {
             if (log.isDebugEnabled()) {
                 log.debug("AI config seeding skipped: ai_provider already has {} rows (strict seed: env not applied)", existing);
             }
@@ -111,8 +112,10 @@ public class AiConfigSeeder implements ApplicationRunner {
             return false;
         }
         try {
+            this.configService.requestExtraBody(null, this.configService.resolveEnvModelId());
+            boolean extraOnlyAttempt = existing > 0 && !force;
             boolean[] wrote = new boolean[1];
-            this.transactionTemplate.executeWithoutResult(status -> wrote[0] = isSeedWritten(force));
+            this.transactionTemplate.executeWithoutResult(status -> wrote[0] = isSeedWritten(force, extraOnlyAttempt));
             if (!wrote[0]) {
                 // 没写数据就不发版本：no-op 种子（表非空 / seed-force 只撞到用户改过的行）不得让版本抖动，
                 // 否则每个实例都会为一次"什么都没改"白重载一次全表。
@@ -144,11 +147,19 @@ public class AiConfigSeeder implements ApplicationRunner {
      * （provider 的四个 env 派生字段 + 目标模型行 enabled/is_default + 没有第二个默认行）。
      * 完全一致 = 真 no-op：不写、不递增版本；只要有一项不一致就修好并递增 <b>一次</b>。
      *
+     * @param extraOnlyAttempt 事务外确定的 extra-only 尝试；锁内失去回填条件时只能 no-op，不得完整重灌
      * @return true = 本次真的写了数据行（调用方据此决定要不要发布版本）
      */
-    private boolean isSeedWritten(boolean force) {
+    private boolean isSeedWritten(boolean force, boolean extraOnlyAttempt) {
         // 与人工写路径同一锁顺序；no-op 种子只锁定、不递增版本。
         this.versions.lockInTransaction();
+        if (extraOnlyAttempt) {
+            if (!backfillSeedRequestExtraBody()) {
+                return false;
+            }
+            this.versions.bumpInTransaction();
+            return true;
+        }
         AiProvider provider = saveSeedProvider(force);
         if (provider == null) {
             return false;
@@ -163,6 +174,7 @@ public class AiConfigSeeder implements ApplicationRunner {
             });
         model.setDefault(true);
         model.setEnabled(true);
+        model.setRequestExtraBody(this.configService.envSeedModel().getRequestExtraBody());
         this.modelRepository.saveAndFlush(model);
         // 重灌时换过模型名：旧行必须让出 is_default，否则"两个默认"会让解析落到旧模型
         for (AiProviderModel other : this.modelRepository.findByProviderId(providerId)) {
@@ -206,6 +218,38 @@ public class AiConfigSeeder implements ApplicationRunner {
     }
 
     /**
+     * strict seed 只允许后增列仍为 NULL 的旧 ENV_SEED 模型进入 extra-only 回填。
+     */
+    private boolean isSeedRequestExtraBodyBackfillDue() {
+        AiProvider provider = this.providerRepository.findByCode(AiConfigService.ENV_PROVIDER_CODE).orElse(null);
+        if (provider == null || !AiProvider.SOURCE_ENV_SEED.equals(provider.getSource())) {
+            return false;
+        }
+        AiProviderModel model = this.modelRepository.findByProviderIdAndModelId(provider.getId(),
+                this.configService.resolveEnvModelId()).orElse(null);
+        return model != null && model.getRequestExtraBody() == null
+                && StringUtils.hasText(this.configService.envSeedModel().getRequestExtraBody());
+    }
+
+    /**
+     * extra-only 回填：不得调用 saveSeedProvider，也不得改 enabled/default 或其他模型字段。
+     */
+    private boolean backfillSeedRequestExtraBody() {
+        AiProvider provider = this.providerRepository.findByCode(AiConfigService.ENV_PROVIDER_CODE).orElse(null);
+        if (provider == null || !AiProvider.SOURCE_ENV_SEED.equals(provider.getSource())) {
+            return false;
+        }
+        AiProviderModel model = this.modelRepository.findByProviderIdAndModelId(provider.getId(),
+                this.configService.resolveEnvModelId()).orElse(null);
+        if (model == null || model.getRequestExtraBody() != null) {
+            return false;
+        }
+        model.setRequestExtraBody(this.configService.envSeedModel().getRequestExtraBody());
+        this.modelRepository.saveAndFlush(model);
+        return true;
+    }
+
+    /**
      * 这一版种子是否<b>已经完整落地</b>（no-op 判据）：只比"种子会写的那些字段"，不看用户可改的其它列。
      *
      * <p>
@@ -224,8 +268,10 @@ public class AiConfigSeeder implements ApplicationRunner {
         Long providerId = provider.getId();
         String modelId = this.configService.resolveEnvModelId();
         AiProviderModel model = this.modelRepository.findByProviderIdAndModelId(providerId, modelId).orElse(null);
-        if (model == null || !model.isEnabled() || !model.isDefault()) {
-            // 目标模型行缺失/停用/非默认 ⇒ 数据不齐，仍要补（并 bump）
+        if (model == null || !model.isEnabled() || !model.isDefault()
+                || !java.util.Objects.equals(model.getRequestExtraBody(),
+                        this.configService.envSeedModel().getRequestExtraBody())) {
+            // 目标模型行缺失/停用/非默认/扩展不一致 ⇒ 数据不齐，仍要补（并 bump）
             return false;
         }
         for (AiProviderModel other : this.modelRepository.findByProviderId(providerId)) {
