@@ -2232,8 +2232,12 @@ interface ComposerDraftOwnerState {
   composerDraftDirty: boolean
 }
 
+function composerIdentityKey(identity: AiIdentity | null): string {
+  return identity === null ? '' : identityFingerprint(identity)
+}
+
 function composerDraftOwnerKeyOf(state: Pick<ComposerDraftOwnerState, 'sessionId' | 'sessionIdentity'>): string {
-  return `${state.sessionId}\0${identityFingerprint(state.sessionIdentity)}`
+  return `${state.sessionId}\0${composerIdentityKey(state.sessionIdentity)}`
 }
 
 function ensureComposerDraftOwner(state: ComposerDraftOwnerState): void {
@@ -2252,7 +2256,7 @@ function inheritPendingComposerDraftOnFirstIssue(state: ComposerDraftOwnerState,
   if (!state.composerDraftDirty || state.sessionId !== '') {
     return
   }
-  const identityKey = identityFingerprint(state.sessionIdentity)
+  const identityKey = composerIdentityKey(state.sessionIdentity)
   if (state.composerDraftOwnerKey !== `\0${identityKey}`) {
     return
   }
@@ -8918,7 +8922,7 @@ export const useAiStore = defineStore('ai', {
         outcome,
         userMessageId,
         ...(purgedRecovered
-          ? { composerRestoreSessionKey: `${this.sessionId}\0${identityFingerprint(this.sessionIdentity)}` }
+          ? { composerRestoreSessionKey: `${this.sessionId}\0${composerIdentityKey(this.sessionIdentity)}` }
           : {})
       }
     },

@@ -5241,6 +5241,33 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "仅预览状态持久化，未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；两文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，26.44秒；动态预览恢复场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:d59250231c0579c147c02673ae52c319637b3d3720cabdc8530c3086a16dd10c",
+      "status": "reviewed",
+      "reason": "逐hunk复核composer新增身份调用的空身份兼容，修复首装初始化异常；独立审查agent-1189最终APPROVE。",
+      "reviewedAt": "2026-11-10T09:13:00+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1189、施工agent-1207",
+      "specChanges": [
+        {
+          "change": "composer身份键通过composerIdentityKey兼容null为空身份段，有身份继续使用tenant:user。",
+          "reason": "原实现直接identityFingerprint(null)，导致无ai-identity首装在adoptFreshSession阶段TypeError并中断历史加载。",
+          "impact": "无身份键形与既有AI identity回退一致，owner/首次发号/410回稿统一，真实会话和身份切换隔离不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "全部composer身份调用统一空身份兼容，首次发号与回稿隔离条件不变。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "410回稿比较使用同一空身份键形，真实身份切换仍阻止旧稿。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有identityFingerprint非空路径，无新增依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript/Vue空身份兼容，无Java变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "首装不再抛TypeError或中断history，不隐藏其他身份异常。"},
+        "toc-interaction": {"status": "checked", "reason": "全新浏览器可正常初始化和使用草稿，不改变会话隔离或新增提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "无身份回退与既有键形一致，有身份继续tenant/user隔离，无AI数据库或Redis交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "仅身份键计算，未修改文本或流式解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；两文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，25.72秒；真实首装浏览器复测NOT_RUN。"}
+      }
     }
   ]
 }

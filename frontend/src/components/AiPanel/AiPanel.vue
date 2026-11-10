@@ -4680,7 +4680,7 @@ async function send(): Promise<void> {
   // 已被更晚的发送或外部换会话取代：这一轮不再拥有输入框。410 本地换号只放行
   // 结果明确绑定、且仍是当前身份/会话的回稿；其后再次换会话同样不得回稿。
   const canRestoreRecoveredDraft = result.composerRestoreSessionKey !== undefined
-    && result.composerRestoreSessionKey === `${ai.sessionId}\0${identityFingerprint(ai.identity)}`
+    && result.composerRestoreSessionKey === `${ai.sessionId}\0${ai.identity === null ? '' : identityFingerprint(ai.identity)}`
   if (generation !== sendGeneration && !canRestoreRecoveredDraft) {
     return
   }
