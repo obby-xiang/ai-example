@@ -659,11 +659,11 @@ public class AiTools {
      * <li>码不在当前可导出清单里 ⇒ 整体失败并回执可用码清单，不静默丢弃。</li>
      * </ul>
      */
-    @Tool(name = AiToolNames.DOWNLOAD_EXPORT_FILES, description = "下载指定配置项的既有导出文件（前端执行，需要用户确认）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。"
+    @Tool(name = AiToolNames.DOWNLOAD_EXPORT_FILES, description = "下载指定配置项的既有导出文件（前端执行）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。"
             + "前置：EXPORT 任务已有成功导出作业/导出文件。只在用户明确提出下载/获取文件意图时调用；查看/编辑时改用 open_export_file_editor。"
             + "任务已完成（COMPLETED）本身不是授权，不要用它替代 start_export，也不要仅凭状态自动下载。浏览器下载结局未确认时如实说明，不把已发起当作已保存。")
     @ToolScope(AiToolNames.SCOPE_EXPORT_EXECUTION)
-    @ToolRisk(ToolMeta.RiskLevel.DANGER)
+    @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.F)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
     public String downloadExportFiles(
@@ -696,8 +696,8 @@ public class AiTools {
      * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：本工具改的是任务的
      * 工作选择 —— 勾选结果决定后续导出/导入处理哪些配置项。它<b>可逆、可见、可重选</b>，且真正的数据出口
      * （{@code start_export}/{@code start_import}/{@code start_publish}）各有 DANGER 确认门，
-     * 因此按实际后果分级为 {@code WRITE}、<b>不进确认门</b>（多弹一次卡只是无意义打扰）。
-     * 只有显式声明为 DANGER 的 FRONTEND 工具才进入独立审批与原执行记录的两阶段链路。
+     * 因此按实际后果分级为 {@code WRITE}、<b>不进确认门</b>（多弹一次卡只是无意义打扰；
+     * 且 FRONTEND 通道优先，DANGER 在这里也只会变成"标注了却不生效"的失真）。
      *
      * <p><b>草案口径（2026-10-30 条件草案与提交边界裁决）</b>：勾选只形成<b>前端草案</b>
      * （AI 对话候选存 Redis 会话），不在调用时写业务条目；业务数据库由前端在下一步

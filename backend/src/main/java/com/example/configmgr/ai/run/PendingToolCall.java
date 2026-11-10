@@ -135,16 +135,6 @@ public class PendingToolCall {
 	@ToString.Include
 	private String kind;
 
-	/** E 指向独立执行前审批 A；普通 FRONTEND 条目与旧快照为 null。 */
-	@JsonProperty("preExecutionApprovalId")
-	@JsonInclude(JsonInclude.Include.NON_EMPTY)
-	private String preExecutionApprovalId;
-
-	/** A 指向原 FRONTEND 执行记录 E；普通 CONFIRM 条目与旧快照为 null。 */
-	@JsonProperty("executionToolCallId")
-	@JsonInclude(JsonInclude.Include.NON_EMPTY)
-	private String executionToolCallId;
-
 	@JsonProperty("arguments")
 	private String arguments;
 
@@ -403,12 +393,6 @@ public class PendingToolCall {
 		out.put("name", this.name);
 		out.put("type", this.type);
 		out.put("kind", this.kind);
-		if (StringUtils.isNotBlank(this.preExecutionApprovalId)) {
-			out.put("preExecutionApprovalId", this.preExecutionApprovalId);
-		}
-		if (StringUtils.isNotBlank(this.executionToolCallId)) {
-			out.put("executionToolCallId", this.executionToolCallId);
-		}
 		out.put("arguments", this.arguments);
 		out.put("status", this.status);
 		out.put("outcome", effectiveOutcome().wire());

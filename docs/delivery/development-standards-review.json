@@ -5556,6 +5556,39 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "按用户指令执行git revert并逐hunk核对；回退后由DeepSeek复测核心导出场景，当前动态验证NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f18613d1f2305975166a9b3147bf1cfbd683a85037d4025f311aadff002d5781",
+      "status": "reviewed",
+      "reason": "按用户确认的止血方案继续回退1f9f29c8的A/E链接模型、DANGER声明和设计/计划文档，保留Task3独立清退与其他已提交修复。",
+      "reviewedAt": "2026-11-10T18:47:02+08:00",
+      "reviewer": "K3.1 Pro主会话",
+      "specChanges": [
+        {
+          "change": "回退1f9f29c8的PreExecutionApprovalService、pending链接字段、下载DANGER声明及A/E设计/计划文档。",
+          "reason": "A/E整体方案已被完整影响面审查和用户共同否决，避免留下不可恢复的半套审批模型。",
+          "impact": "下载恢复原READ+FRONTEND语义，A/E审批模型及文档全部移除，普通UI撤销清退不受影响。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/PreExecutionApprovalService.java", "status": "checked", "reason": "删除A/E链接协作者，避免半套模型残留。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java", "status": "checked", "reason": "仅回退两个链接字段及asMap透出。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java", "status": "checked", "reason": "仅回退A/E启动不变量变化，恢复原风险防线。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "下载风险恢复READ，描述同步。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "仅回退该提交的下载描述变化。"},
+        {"path": "docs/superpowers/plans/2026-11-10-download-pre-execution-approval.md", "status": "checked", "reason": "删除被否决的A/E实施计划。"},
+        {"path": "docs/superpowers/specs/2026-11-10-download-pre-execution-approval-design.md", "status": "checked", "reason": "删除被否决的A/E设计文档。"},
+        {"path": "frontend/src/types/tools.ts", "status": "checked", "reason": "下载风险恢复READ，保留Task3普通UI撤销清理。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "恢复原工具链，不引入新依赖。"},
+        "java-api-style": {"status": "checked", "reason": "仅逆向移除该提交变化，不引入新代码形态。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复原错误处理，不新增异常掩盖。"},
+        "toc-interaction": {"status": "checked", "reason": "撤销A/E卡片模型，恢复原下载工具卡只读职责。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "撤销A/E链接与启动模型，其他状态机不变。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "按用户指令执行git revert并逐hunk核对；回退后由DeepSeek复测核心导出场景，当前动态验证NOT_RUN。"}
+      }
     }
   ]
 }

@@ -217,14 +217,16 @@ public class ToolRegistry implements SmartInitializingSingleton {
     /**
      * <b>风险 / 通道不变量（启动期 fail-fast）</b>：
      * <ul>
-     * <li>{@code DANGER ⇒ BACKEND}：在 Task 2 接入独立审批分发前，仍拒绝 DANGER+FRONTEND，
-     *     防止旧 SpToolCallingManager 把下载等高危前端调用直接下发；</li>
+     * <li>{@code DANGER ⇒ BACKEND}：需要人工确认的高危工具只能是后端可执行通道。
+     *     {@code DANGER + FRONTEND} 会让后端按 {@code kind=CONFIRM} 挂起等确认，前端却按通道把同一次
+     *     调用当 {@code FRONTEND} 等回灌 —— 两条路径互相等，直接死卡；</li>
      * <li>{@code BACKEND ⇒ READ 或 DANGER}：后端直执行只承载"纯读"与"确认门之后才跑"的工具。
-     *     {@code WRITE + BACKEND} 会被 {@code kindOf} 判成 {@code BACKEND} 直接执行并绕过人工确认。</li>
+     *     {@code WRITE + BACKEND} 会被 {@code kindOf} 判成 {@code BACKEND} 直接执行 —— 一次可逆写
+     *     静默绕过人工确认，与"写操作要确认"的口径相反（可逆写一律走前端通道）。</li>
      * </ul>
      *
-     * <p>两类配置都没有安全的运行期默认，因此启动时点名并失败。Task 2 完整接入 A/E 后，
-     * 才能移除第一项对合法两阶段声明的临时防线。
+     * <p>为什么必须启动失败：运行期只能二选一（要么死卡、要么绕过确认），没有安全的默认。
+     * 启动时点名到工具，比上线后在确认卡上发现"点了没反应"或"没点就写了"容易查得多。
      */
     private void assertRiskChannelInvariant() {
         List<String> dangerousFrontend = new ArrayList<>();
@@ -245,14 +247,14 @@ public class ToolRegistry implements SmartInitializingSingleton {
         }
         StringBuilder message = new StringBuilder("Tool risk/channel invariant violated (DANGER => BACKEND; BACKEND => READ/DANGER)");
         if (!dangerousFrontend.isEmpty()) {
-            message.append(": DANGER+FRONTEND tools require the Task 2 approval dispatcher ")
+            message.append(": DANGER+FRONTEND tools would deadlock ")
                     .append(dangerousFrontend.stream().sorted().toList());
         }
         if (!backendWrite.isEmpty()) {
             message.append(": backend write tools would bypass confirmation ")
                     .append(backendWrite.stream().sorted().toList());
         }
-        throw new IllegalStateException(message + "; startup aborted because runtime behavior would bypass confirmation");
+        throw new IllegalStateException(message + "; startup aborted because runtime behavior would deadlock or bypass confirmation");
     }
 
     /**

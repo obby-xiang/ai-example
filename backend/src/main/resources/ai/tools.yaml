@@ -91,8 +91,7 @@
 # 2026-10-27.33 → 2026-10-27.34：任务 COMPLETED 不单独作为重复导出判据；只有已有成功 EXPORT 作业才禁止重复导出。
 # 2026-10-27.34 → 2026-10-27.35：item IMPORTED/任务 COMPLETED 不等于已发布；只有已有成功 PUBLISH 作业才禁止重复发布。
 # 2026-10-27.35 → 2026-10-27.36：start_export 按本 run 条目去重；旧任务、openWizard=false 后明确启动及 park 未启用等路径保留模型调用。
-# 2026-10-27.36 → 2026-10-27.37：download_export_files 升为 DANGER，前端下载执行前增加独立用户确认。
-version: 2026-10-27.37
+version: 2026-10-27.36
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -181,7 +180,7 @@ tools:
   - toolKey: download_export_files
     title: 下载导出文件
     description: >-
-      下载指定配置项的既有导出文件（前端执行，需要用户确认）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；
+      下载指定配置项的既有导出文件（前端执行）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；
       不打开在线编辑器，也不启动新的导出。前置：EXPORT 任务已有成功导出作业/导出文件。
       只在用户明确提出下载/获取文件意图时调用；查看/编辑时改用 open_export_file_editor。
       任务已完成（COMPLETED）本身不是授权，不要用它替代 start_export，也不要仅凭状态自动下载。
