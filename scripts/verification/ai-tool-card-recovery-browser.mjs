@@ -5437,10 +5437,29 @@ async function runContentMatrix(context) {
     checks.require('composer-draft.typed', before?.draft === draft, draft, before?.draft ?? null)
     await sleep(400)
     checks.require('composer-draft.still-typed-before-reload', (await browser.messageState())?.draft === draft, draft, null)
+    let storeDraft = null
+    try {
+      storeDraft = await browser.waitFor(`(() => {
+        const ai = document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai')
+        return ai.composerDraft === ${JSON.stringify(draft)} ? ai.composerDraft : null
+      })()`, 'COMPOSER_DRAFT_STORE_WAIT', 5_000)
+    } catch {
+      storeDraft = await browser.evaluate(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').composerDraft ?? ''`, false)
+    }
+    checks.require('composer-draft.store-captured', storeDraft === draft, draft, storeDraft)
     browser.setPhase('refresh-1')
     await browser.reload()
     await browser.waitFor(`document.getElementById('app').__vue_app__.config.globalProperties.$pinia._s.get('ai').historyLoaded === true`,
       'COMPOSER_DRAFT_HISTORY_NOT_LOADED')
+    let restoredDraft = null
+    try {
+      restoredDraft = await browser.waitFor(`(() => {
+        const input = document.querySelector('[data-testid="composer-input"]')
+        return input && input.value === ${JSON.stringify(draft)} ? input.value : null
+      })()`, 'COMPOSER_DRAFT_RESTORE_WAIT', 10_000)
+    } catch {
+      restoredDraft = (await browser.messageState())?.draft ?? null
+    }
     const after = await browser.messageState()
     checks.require('composer-draft.preserved-after-refresh', after?.draft === draft, draft, after?.draft ?? null)
     checks.require('composer-draft.not-a-message', after?.messages === before?.messages, before?.messages ?? null, after?.messages ?? null)
