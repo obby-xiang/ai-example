@@ -51,11 +51,13 @@ final class FrameWakeScenario {
 				for (int i = 0; i < 128; i++) {
 					if (fault && i == 64) {
 						support.faults.failNext("AI_FRAME_APPEND", runId);
+						support.faults.failNext("AI_FRAME_APPEND", runId);
 					}
 					FrameStore.AppendResult result = store.appendAndAllocateSeq(runId,
 							new java.util.LinkedHashMap<>(Map.of("type", "delta", "text", "hot-" + i)),
 							FrameScenarioSupport.payload(support.mapper));
 					if (fault && i == 64) {
+						support.requireFaultsDrained(dataset, "frame_injected_append_consumed");
 						support.faults.clear();
 						support.require(dataset, "frame_injected_append_not_delivered", result.seq() <= 0L,
 								"injected append failure returns no deliverable seq");
@@ -93,12 +95,16 @@ final class FrameWakeScenario {
 		public void measure(ProductionSupport support, Manifest.Dataset dataset) {
 			String runId = dataset.sessionId + "-run";
 			RedisFrameStore store = FrameScenarioStore.smallWindow(support, 16);
-			support.stage(dataset, "frame_trim_seed_40", () -> support.identity(() -> {
-				for (int i = 0; i < 40; i++) {
+			support.stage(dataset, "frame_trim_seed_256", () -> support.identity(() -> {
+				for (int i = 0; i < 256; i++) {
 					store.appendAndAllocateSeq(runId, new java.util.LinkedHashMap<>(Map.of("type", "delta", "text", "trim-" + i)),
 							FrameScenarioSupport.payload(support.mapper));
 				}
 			}));
+			support.stage(dataset, "frame_exact_window_fixture", () -> support.identity(() ->
+				support.redis.execute((RedisCallback<Object>) connection -> connection.execute("XTRIM",
+						store.streamKey(runId).getBytes(StandardCharsets.UTF_8), "MAXLEN".getBytes(StandardCharsets.UTF_8),
+						"16".getBytes(StandardCharsets.UTF_8)))));
 			support.require(dataset, "frame_trim_watermark_exists", support.redis.hasKey(support.identity(() -> store.trimKey(runId))),
 					"real MAXLEN trimming records the low watermark");
 			support.require(dataset, "frame_replay_reports_trim", support.identity(() -> store.replayMeta(runId, 0L)).truncated(),

@@ -624,6 +624,7 @@ public final class ProductionHarnessMain {
 			Manifest manifest, int exit, Map<String, Object> verify, Map<String, Object> cleanup) {
 		Map<String, Object> body = new LinkedHashMap<>();
 		body.put("generatedAt", Instant.now().toString());
+		body.put("provenance", ProductionProvenance.capture(manifest));
 		body.put("config", support.cfg.redactedSummary());
 		body.put("summaries", metrics.allSummaries());
 		body.put("stages", metrics.stages());

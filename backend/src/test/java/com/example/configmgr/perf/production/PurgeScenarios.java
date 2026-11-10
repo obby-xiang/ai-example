@@ -262,14 +262,16 @@ final class PurgeScenarios {
 					support.cfg.tenantId, support.cfg.userId, dataset.sessionId));
 			support.own(dataset, "ai:session:lock:" + support.cfg.tenantId + ":" + support.cfg.userId + ":"
 					+ dataset.sessionId);
-			support.own(dataset, fixture.guard.keyFor(dataset.sessionId));
 			support.own(dataset, SessionPurgePendingStore.pendingKey(dataset.sessionId, support.cfg.tenantId,
 					support.cfg.userId));
-			String memory = fixture.memory.keyFor(dataset.sessionId);
-			support.own(dataset, memory);
-			support.own(dataset, memory + ":ver");
-			support.own(dataset, memory + ":gen");
-			support.own(dataset, RedisChatMemoryRepository.stagingIndexKey(dataset.sessionId));
+			support.identity(() -> {
+				support.own(dataset, fixture.guard.keyFor(dataset.sessionId));
+				String memory = fixture.memory.keyFor(dataset.sessionId);
+				support.own(dataset, memory);
+				support.own(dataset, memory + ":ver");
+				support.own(dataset, memory + ":gen");
+				support.own(dataset, RedisChatMemoryRepository.stagingIndexKey(dataset.sessionId));
+			});
 			return dataset;
 		}
 	}

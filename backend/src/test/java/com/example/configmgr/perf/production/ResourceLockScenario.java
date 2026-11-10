@@ -207,8 +207,15 @@ final class ScanLeaseLongAndStalledScenario implements ProductionScenario {
 			StartupResumeRunner peer = new StartupResumeRunner(P1ScenarioSupport.resumeService(support, peerStore, properties),
 					peerStore, properties, P1ScenarioSupport.available());
 			Future<Map<String, Object>> longReport = pool.submit(() -> first.scan(true));
-			P1ScenarioSupport.await(() -> resumeEntered.getCount() == 0L, 2_000L,
-					"the first scan must own the lease before the peer probes");
+			try {
+				P1ScenarioSupport.await(() -> resumeEntered.getCount() == 0L, 2_000L,
+						"the first scan must own the lease before the peer probes");
+			}
+			catch (RuntimeException ex) {
+				dataset.attributes.put("longScanResumeEntered", false);
+				dataset.attributes.put("longScanReport", longReport.isDone() ? get(longReport) : "not completed");
+				throw ex;
+			}
 			long pttl = support.redis.getExpire(SCAN_KEY, TimeUnit.MILLISECONDS);
 			Map<String, Object> deferred = peer.sweep();
 			support.require(dataset, "long_scan_peer_defers", Boolean.TRUE.equals(deferred.get("deferred"))

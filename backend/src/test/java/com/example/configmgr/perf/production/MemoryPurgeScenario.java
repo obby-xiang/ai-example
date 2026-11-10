@@ -85,9 +85,10 @@ final class MemoryPurgeScenario {
 				support.faultSkipped(dataset, "scan");
 			}
 			else {
-				support.faults.failNext("scan", "chat:mem:");
+				support.faults.failNext("scan", "");
 				List<String> degraded = support.stage(dataset, "memory_spi_scan_fault",
 						() -> isolatedIdentity(support, repository::findConversationIds));
+				support.requireFaultsDrained(dataset, "memory_spi_scan_rule_consumed");
 				support.faults.clear();
 				dataset.attributes.put("memorySpiFaultResultCount", degraded.size());
 				dataset.attributes.put("memorySpiFaultConsumed", degraded.size() < expected.size());

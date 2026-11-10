@@ -179,6 +179,12 @@ final class ProductionSupport implements AutoCloseable {
 		skipped.add(operation);
 	}
 
+	void requireFaultsDrained(Manifest.Dataset dataset, String name) {
+		List<String> pending = this.faults.pendingRules();
+		dataset.attributes.put(name + "Pending", pending);
+		require(dataset, name, pending.isEmpty(), "unconsumed fault rules=" + pending);
+	}
+
 	Duration ttl() {
 		return Duration.ofSeconds(this.cfg.keyTtlSeconds);
 	}

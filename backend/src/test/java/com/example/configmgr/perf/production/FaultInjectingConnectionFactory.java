@@ -5,6 +5,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -19,11 +20,51 @@ import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactor
 /** A transport proxy that fails selected real commands once; production classes and scripts stay unchanged. */
 final class FaultInjectingConnectionFactory extends LettuceConnectionFactory {
 
-	private record Rule(String operation, String keyPart) {
-		boolean matches(String method, String commandText) {
+	private record Rule(String operation, String keyPart, java.util.concurrent.atomic.AtomicInteger evalMatches) {
+
+		boolean matches(String method, String commandText, Object[] args) {
+			if (!this.keyPart.isBlank() && !commandText.contains(this.keyPart)) {
+				return false;
+			}
 			String operation = this.operation.toLowerCase(Locale.ROOT);
-			return (method.contains(operation) || commandText.toLowerCase(Locale.ROOT).contains(operation))
-					&& (this.keyPart.isBlank() || commandText.contains(this.keyPart));
+			if (method.contains("eval")) {
+				int expectedKeys = expectedKeys();
+				if (expectedKeys < 0) {
+					return "eval".equals(operation) || commandText.toLowerCase(Locale.ROOT).contains(operation);
+				}
+				return numKeys(args) == expectedKeys && this.evalMatches.incrementAndGet() == evalOrdinal();
+			}
+			return method.contains(operation) || commandText.toLowerCase(Locale.ROOT).contains(operation);
+		}
+
+		private int evalOrdinal() {
+			return "staging_discard".equals(this.operation) ? 2 : 1;
+		}
+
+		private int expectedKeys() {
+			return switch (this.operation) {
+				case "hdel", "zrem", "lpush", "pexpire" -> 1;
+				case "staging_discard" -> 2;
+				case "rpush", "sadd" -> 2;
+				case "rename", "memory_clear" -> 3;
+				case "cas", "ai_frame_append" -> 5;
+				default -> -1;
+			};
+		}
+
+		private static int numKeys(Object[] args) {
+			if (args != null) {
+				for (Object arg : args) {
+					if (arg instanceof Number number) {
+						return number.intValue();
+					}
+				}
+			}
+			return -2;
+		}
+
+		String evidence() {
+			return this.operation + " " + this.keyPart;
 		}
 	}
 
@@ -36,11 +77,16 @@ final class FaultInjectingConnectionFactory extends LettuceConnectionFactory {
 	}
 
 	void failNext(String operation, String keyPart) {
-		this.rules.add(new Rule(operation.toLowerCase(Locale.ROOT), keyPart == null ? "" : keyPart));
+		this.rules.add(new Rule(operation.toLowerCase(Locale.ROOT), keyPart == null ? "" : keyPart,
+				new java.util.concurrent.atomic.AtomicInteger()));
 	}
 
 	void clear() {
 		this.rules.clear();
+	}
+
+	List<String> pendingRules() {
+		return this.rules.stream().map(Rule::evidence).toList();
 	}
 
 	@Override
@@ -77,7 +123,7 @@ final class FaultInjectingConnectionFactory extends LettuceConnectionFactory {
 		String methodName = method.getName().toLowerCase(Locale.ROOT);
 		String commandText = commandText(args);
 		for (Rule rule : this.rules) {
-			if (rule.matches(methodName, commandText) && this.rules.remove(rule)) {
+			if (rule.matches(methodName, commandText, args) && this.rules.remove(rule)) {
 				throw new IllegalStateException("PERF_INJECTED " + rule.operation + " " + rule.keyPart);
 			}
 		}

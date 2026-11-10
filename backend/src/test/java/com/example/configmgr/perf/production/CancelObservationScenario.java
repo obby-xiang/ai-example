@@ -52,8 +52,9 @@ final class CancelObservationScenario implements ProductionScenario {
 								&& cancellations.cancelState(runId) == CancellationRegistry.CancelState.CANCELLED
 								&& support.redis.hasKey(CancellationRegistry.cancelKey(runId)),
 						"cancel writes the authoritative Redis flag and wakes the registered listener once");
+				dataset.attributes.put("cancelActualKey", CancellationRegistry.cancelKey(runId));
 				current &= support.check(dataset, "cancel_key_identity",
-						CancellationRegistry.cancelKey(runId).contains(":" + support.cfg.tenantId + ":"
+						CancellationRegistry.cancelKey(runId).contains("{" + support.cfg.tenantId + ":"
 								+ support.cfg.userId + ":run:"),
 						"cancel key carries tenant/user/run identity");
 				try {

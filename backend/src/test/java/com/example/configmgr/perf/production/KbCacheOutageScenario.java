@@ -45,6 +45,7 @@ final class KbCacheOutageScenario implements ProductionScenario {
         ScriptedSource source = new ScriptedSource(String.valueOf(dataset.attributes.get("outageId")),
                 String.valueOf(dataset.attributes.get("writeId")));
         CachedKbSource cached = new CachedKbSource(source, cache, support.mapper, support.aiProperties.getKb());
+        long scanBefore = support.commandMetrics.keyspaceScanPages();
         try {
             stage(support, dataset, "kb_missing_sha_single_source_fetch", () -> {
                 KbSource.ManifestFetch initial = cached.fetchManifest(null, true,
@@ -135,7 +136,8 @@ final class KbCacheOutageScenario implements ProductionScenario {
                         "after reconciliation, a source failure may retain the matching V2 cache");
                 source.failManifest = false;
             });
-            support.require(dataset, "kb_outage_zero_keyspace_scan", support.commandMetrics.keyspaceScanPages() == 0L,
+            support.require(dataset, "kb_outage_zero_keyspace_scan",
+                    support.commandMetrics.keyspaceScanPages() == scanBefore,
                     "fallback and recovery use exact keys only");
             dataset.state = "measured";
         }

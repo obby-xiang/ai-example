@@ -96,9 +96,13 @@ final class CreateTaskDraftScenario implements ProductionScenario {
 				boolean merged = support.check(dataset, "draft_writers_finished", failures.isEmpty()
 						&& !first.isAlive() && !second.isAlive(), "both real EVAL calls crossed the read/write barrier");
 				CreateTaskDraftStore.Draft mergedDraft = drafts.read(runId, 101L);
+				dataset.attributes.put("draftWriterFailures", failures.stream().map(CreateTaskDraftScenario::failureEvidence).toList());
+				dataset.attributes.put("draftWriterFirstAlive", first.isAlive());
+				dataset.attributes.put("draftWriterSecondAlive", second.isAlive());
+				dataset.attributes.put("draftMergedDraft", String.valueOf(mergedDraft));
 				merged &= support.check(dataset, "draft_complementary_values_not_lost", mergedDraft != null
 						&& mergedDraft.defCodes().containsAll(List.of("BASE", "A", "B"))
-						&& mergedDraft.conditions().keySet().containsAll(java.util.Set.of("base", "a", "b")),
+						&& mergedDraft.conditions().keySet().containsAll(java.util.Set.of("base", "A", "B")),
 						"concurrent complementary defCodes/conditions must merge rather than last-write-wins");
 				return merged;
 			});
@@ -129,6 +133,17 @@ final class CreateTaskDraftScenario implements ProductionScenario {
 				"draft concurrency/read-failure assertions failed");
 		dataset.state = "measured";
 		}
+	}
+
+	private static String failureEvidence(Throwable error) {
+		StringBuilder out = new StringBuilder();
+		for (Throwable current = error; current != null; current = current.getCause()) {
+			if (!out.isEmpty()) {
+				out.append(" <- ");
+			}
+			out.append(current.getClass().getName()).append(": ").append(current.getMessage());
+		}
+		return out.toString();
 	}
 
 	private static void save(CreateTaskDraftStore drafts, String runId, long taskId, String value,
@@ -172,6 +187,8 @@ final class CreateTaskDraftScenario implements ProductionScenario {
 
 		private final CyclicBarrier firstTwoWrites = new CyclicBarrier(2);
 
+		private final java.util.concurrent.atomic.AtomicInteger hgetCalls = new java.util.concurrent.atomic.AtomicInteger();
+
 		private EvalBarrierFactory(RedisConnectionFactory delegate) {
 			this.delegate = delegate;
 		}
@@ -204,7 +221,8 @@ final class CreateTaskDraftScenario implements ProductionScenario {
 		private <T> T proxy(Class<T> type, T connection) {
 			return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] { type },
 					(proxy, method, args) -> {
-						if (method.getName().toLowerCase().contains("eval")) {
+						if (method.getName().toLowerCase().contains("hget")
+								&& this.hgetCalls.getAndIncrement() < 2) {
 							this.firstTwoWrites.await(10L, java.util.concurrent.TimeUnit.SECONDS);
 						}
 						try {

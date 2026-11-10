@@ -185,9 +185,9 @@ final class TaskEventScenario {
 							&& dispatch.getPoolSize() <= 1 && dispatch.getQueue().remainingCapacity() >= 0,
 							"slow emitter cannot create an unbounded dispatch pool");
 				});
-				releaseSlowWrite.countDown();
 				ProductionDomainSupport.await(() -> ((Number) receiver.metrics().get("subscribedTasks")).longValue() == 0L,
 						5_000L, "timed-out emitter removed and remote channel unsubscribed");
+				releaseSlowWrite.countDown();
 				support.require(dataset, "slow_emitter_removed_and_unsubscribed",
 						((Number) receiver.metrics().get("subscribedTasks")).longValue() == 0L,
 						"write-budget timeout removed the slow emitter and its remote subscription");
@@ -324,7 +324,9 @@ final class TaskEventScenario {
 		private static void boundedRetries(ProductionSupport support, Manifest.Dataset dataset, long taskId) {
 			RedisTaskEventBus bus = TaskEventScenarioSupport.bus(support, null);
 			TaskEventScenarioSupport.ManualScheduler scheduler = new TaskEventScenarioSupport.ManualScheduler();
-			TaskSseService service = new TaskSseService(support.mapper, new AppProperties(), bus, scheduler);
+			java.util.concurrent.atomic.AtomicLong retryClock = new java.util.concurrent.atomic.AtomicLong();
+			TaskSseService service = TaskEventScenarioSupport.serviceWithRetryClock(support, bus, retryClock::get,
+					scheduler);
 			try {
 				SseEmitter emitter = support.stage(dataset, "task_event_bounded_real_subscribe_retries", () -> {
 					String channel = com.example.configmgr.task.service.TaskEventBus.CHANNEL_PREFIX + taskId;
@@ -336,6 +338,7 @@ final class TaskEventScenario {
 							subscribed = service.subscribe(taskId);
 						}
 						else {
+							retryClock.addAndGet(expectedDelays[attempt - 2] * 1_000_000_000L);
 							scheduler.runNext();
 						}
 						long failures = ((Number) bus.metrics().get("subscribeFailures")).longValue();
@@ -460,6 +463,21 @@ final class TaskEventScenarioSupport {
 
 	static RedisTaskEventBus bus(ProductionSupport support, RedisAvailability availability) {
 		return new RedisTaskEventBus(support.redis, support.mapper, "redis", availability);
+	}
+
+	static TaskSseService serviceWithRetryClock(ProductionSupport support, RedisTaskEventBus bus,
+			java.util.function.LongSupplier clock, java.util.concurrent.ScheduledExecutorService scheduler) {
+		try {
+			java.lang.reflect.Constructor<TaskSseService> constructor = TaskSseService.class.getDeclaredConstructor(
+					com.fasterxml.jackson.databind.ObjectMapper.class, AppProperties.class,
+					com.example.configmgr.task.service.TaskEventBus.class, java.util.function.LongSupplier.class,
+					java.util.concurrent.ScheduledExecutorService.class);
+			constructor.setAccessible(true);
+			return constructor.newInstance(support.mapper, new AppProperties(), bus, clock, scheduler);
+		}
+		catch (ReflectiveOperationException ex) {
+			throw new IllegalStateException("unable to inject the retry clock", ex);
+		}
 	}
 
 	static ThreadPoolExecutor executor(String prefix, int threads, int queueCapacity) {

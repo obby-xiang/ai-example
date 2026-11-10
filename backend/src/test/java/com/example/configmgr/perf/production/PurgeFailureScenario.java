@@ -1,7 +1,6 @@
 package com.example.configmgr.perf.production;
 
 import java.time.Duration;
-import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -121,15 +120,18 @@ final class PurgeFailureScenario {
 
 		@Override
 		public void measure(ProductionSupport support, Manifest.Dataset dataset) throws Exception {
-			RedisChatMemoryRepository repository = PurgeScenarioSupport.repository(support);
+			CasBarrier barrier = new CasBarrier(support.harness.connectionFactory(), 2);
 			SessionPurgeGuard guard = new SessionPurgeGuard(support.redis);
+			RedisChatMemoryRepository repository = new RedisChatMemoryRepository(barrier.template(),
+					new MessageJsonCodec(support.mapper), support.ttl(), guard);
 			support.stage(dataset, "memory_writeback_crash_race", () -> {
 				ExecutorService pool = Executors.newSingleThreadExecutor();
 				try {
 					Future<?> write = pool.submit(() -> support.identity(() -> repository.saveAll(dataset.sessionId,
 							List.of(new UserMessage("writeback-must-be-undone")))));
-					support.identity(() -> PurgeScenarioSupport.awaitStaging(repository, dataset.sessionId));
+					barrier.awaitCas();
 					support.identity(() -> guard.arm(dataset.sessionId, "purge-" + dataset.sessionId, support.ttl()));
+					barrier.release();
 					write.get();
 					support.require(dataset, "memory_writeback_guard_reclaims_final",
 							!support.identity(() -> repository.hasLiveMemory(dataset.sessionId)), "guard after RENAME revokes the late writeback");
@@ -140,6 +142,7 @@ final class PurgeFailureScenario {
 					throw new IllegalStateException(ex);
 				}
 				finally {
+					barrier.release();
 					pool.shutdownNow();
 				}
 			});
@@ -188,6 +191,7 @@ final class PurgeFailureScenario {
 					support.faults.failNext("MEMORY_CLEAR", badMemory);
 				}
 				support.stage(dataset, "purge_targeted_failure", () -> runner.runOnce(System.currentTimeMillis()));
+				support.requireFaultsDrained(dataset, "purge_targeted_failure_rule_consumed");
 				support.faults.clear();
 				SessionPurgePendingStore.Pending badPending = support.identity(() -> fixture.pending.current(bad));
 				if (fault) {
@@ -226,12 +230,18 @@ final class PurgeFailureScenario {
 
 	private static final class CasBarrier implements RedisConnectionFactory {
 		private final RedisConnectionFactory delegate;
+		private final int expectedKeys;
 		private final CountDownLatch casReached = new CountDownLatch(1);
 		private final CountDownLatch release = new CountDownLatch(1);
 		private final AtomicBoolean armed = new AtomicBoolean(true);
 
 		CasBarrier(RedisConnectionFactory delegate) {
+			this(delegate, 5);
+		}
+
+		CasBarrier(RedisConnectionFactory delegate, int expectedKeys) {
 			this.delegate = delegate;
+			this.expectedKeys = expectedKeys;
 		}
 
 		StringRedisTemplate template() {
@@ -287,8 +297,8 @@ final class PurgeFailureScenario {
 		}
 
 		private Object invoke(Object connection, Method method, Object[] args) throws Throwable {
-			if ("eval".equals(method.getName()) && this.armed.get()
-					&& commandText(args).contains("MERGE_CAS") && this.armed.compareAndSet(true, false)) {
+			if (method.getName().toLowerCase().contains("eval") && this.armed.get()
+					&& numKeys(args) == this.expectedKeys && this.armed.compareAndSet(true, false)) {
 				this.casReached.countDown();
 				if (!this.release.await(3L, TimeUnit.SECONDS)) {
 					throw new IllegalStateException("MERGE_CAS release timed out");
@@ -302,45 +312,15 @@ final class PurgeFailureScenario {
 			}
 		}
 
-		private static String commandText(Object[] args) {
-			if (args == null) {
-				return "";
-			}
-			StringBuilder out = new StringBuilder();
-			for (Object arg : args) {
-				append(out, arg);
-			}
-			return out.toString();
-		}
-
-		private static void append(StringBuilder out, Object value) {
-			if (value == null) {
-				return;
-			}
-			if (value instanceof byte[] bytes) {
-				out.append(' ').append(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
-				return;
-			}
-			if (value instanceof byte[][] many) {
-				for (byte[] item : many) {
-					append(out, item);
+		private static int numKeys(Object[] args) {
+			if (args != null) {
+				for (Object arg : args) {
+					if (arg instanceof Number number) {
+						return number.intValue();
+					}
 				}
-				return;
 			}
-			if (value instanceof Collection<?> collection) {
-				for (Object item : collection) {
-					append(out, item);
-				}
-				return;
-			}
-			if (value.getClass().isArray()) {
-				int length = java.lang.reflect.Array.getLength(value);
-				for (int i = 0; i < length; i++) {
-					append(out, java.lang.reflect.Array.get(value, i));
-				}
-				return;
-			}
-			out.append(' ').append(value);
+			return -1;
 		}
 	}
 

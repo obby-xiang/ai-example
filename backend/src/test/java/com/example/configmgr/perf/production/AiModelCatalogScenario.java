@@ -56,6 +56,7 @@ final class AiModelCatalogScenario implements ProductionScenario {
         AiModelCatalog catalog = new AiModelCatalog(probe, configService, support.redis,
                 support.aiProperties, support.mapper);
         Duration originalTtl = support.aiProperties.getConfig().getModelsCacheTtl();
+        long scanBefore = support.commandMetrics.keyspaceScanPages();
         try {
             support.aiProperties.getConfig().setModelsCacheTtl(Duration.ofMillis(150));
             support.stage(dataset, "model_catalog_positive_ttl_and_hit", () -> {
@@ -133,7 +134,8 @@ final class AiModelCatalogScenario implements ProductionScenario {
                     Mockito.anyString(), Mockito.anyBoolean());
             support.require(dataset, "no_db_allowlist_write", true,
                     "configService interactions are provider/key reads only; no model allowlist persistence is called");
-            support.require(dataset, "model_catalog_zero_keyspace_scan", support.commandMetrics.keyspaceScanPages() == 0L,
+            support.require(dataset, "model_catalog_zero_keyspace_scan",
+                    support.commandMetrics.keyspaceScanPages() == scanBefore,
                     "model cache uses exact provider keys only");
             dataset.state = "measured";
         }

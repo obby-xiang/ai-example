@@ -133,6 +133,7 @@ final class KbGenerationPruneScenario implements ProductionScenario {
 				catch (RuntimeException ex) {
 					failed = true;
 				}
+				support.requireFaultsDrained(dataset, "index_delete_fault_consumed");
 				support.faults.clear();
 				support.require(dataset, "index_delete_fault_observed", failed, "real HDEL was interrupted once");
 			});

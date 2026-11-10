@@ -26,20 +26,22 @@ final class MemoryConcurrentCasScenario implements ProductionScenario {
 	@Override
 	public Manifest.Dataset generate(ProductionSupport support, Manifest.Dataset dataset) {
 		RedisChatMemoryRepository repository = repository(support);
-		String finalKey = repository.keyFor(dataset.sessionId);
-		String indexKey = RedisChatMemoryRepository.stagingIndexKey(dataset.sessionId);
-		String stagingPattern = RedisChatMemoryRepository.stagingKeyPrefix(dataset.sessionId) + "slot-probe";
-		support.own(dataset, finalKey);
-		support.own(dataset, finalKey + ":ver");
-		support.own(dataset, finalKey + ":gen");
-		support.own(dataset, indexKey);
-		dataset.attributes.put("finalKey", finalKey);
-		dataset.attributes.put("stagingIndexKey", indexKey);
-		dataset.attributes.put("messageBytes", support.intEnv("PERF_MEMORY_MESSAGE_BYTES", 16_384));
-		dataset.attributes.put("concurrentRuns", support.intEnv("PERF_MEMORY_CONCURRENT_RUNS", 4));
-		support.require(dataset, "memory_final_staging_index_same_slot",
-				RedisSlots.sameSlot(List.of(finalKey, indexKey, stagingPattern)),
-				"final/staging/index share the session hash tag");
+		support.identity(() -> {
+			String finalKey = repository.keyFor(dataset.sessionId);
+			String indexKey = RedisChatMemoryRepository.stagingIndexKey(dataset.sessionId);
+			String stagingPattern = RedisChatMemoryRepository.stagingKeyPrefix(dataset.sessionId) + "slot-probe";
+			support.own(dataset, finalKey);
+			support.own(dataset, finalKey + ":ver");
+			support.own(dataset, finalKey + ":gen");
+			support.own(dataset, indexKey);
+			dataset.attributes.put("finalKey", finalKey);
+			dataset.attributes.put("stagingIndexKey", indexKey);
+			dataset.attributes.put("messageBytes", support.intEnv("PERF_MEMORY_MESSAGE_BYTES", 16_384));
+			dataset.attributes.put("concurrentRuns", support.intEnv("PERF_MEMORY_CONCURRENT_RUNS", 4));
+			support.require(dataset, "memory_final_staging_index_same_slot",
+					RedisSlots.sameSlot(List.of(finalKey, indexKey, stagingPattern)),
+					"final/staging/index share the session hash tag");
+		});
 		support.stage(dataset, "memory_seed_old_history", () -> support.identity(() -> {
 			repository.saveAll(dataset.sessionId, List.of(new UserMessage("legacy-history"),
 					new AssistantMessage("legacy-answer")));
@@ -51,13 +53,14 @@ final class MemoryConcurrentCasScenario implements ProductionScenario {
 	public void measure(ProductionSupport support, Manifest.Dataset dataset) throws Exception {
 		RedisChatMemoryRepository repository = repository(support);
 		String finalKey = String.valueOf(dataset.attributes.get("finalKey"));
+		String stagingPrefix = support.identity(() -> RedisChatMemoryRepository.stagingKeyPrefix(dataset.sessionId));
 		for (String operation : List.of("rpush", "sadd", "rename")) {
 			if (!support.faultEnabled(operation)) {
 				support.faultSkipped(dataset, operation);
 				continue;
 			}
 			support.stage(dataset, "memory_failure_" + operation, () -> {
-				support.faults.failNext(operation, RedisChatMemoryRepository.stagingKeyPrefix(dataset.sessionId));
+				support.faults.failNext(operation, stagingPrefix);
 				boolean failed = expectFailure(() -> support.identity(() -> repository.saveAll(dataset.sessionId,
 						List.of(new UserMessage("must-not-replace-old-history")))));
 				support.faults.clear();
@@ -86,8 +89,8 @@ final class MemoryConcurrentCasScenario implements ProductionScenario {
 		}
 		else {
 			support.stage(dataset, "memory_failure_del_and_exact_recovery", () -> {
-			support.faults.failNext("rename", RedisChatMemoryRepository.stagingKeyPrefix(dataset.sessionId));
-			support.faults.failNext("staging_discard", RedisChatMemoryRepository.stagingKeyPrefix(dataset.sessionId));
+			support.faults.failNext("rename", stagingPrefix);
+			support.faults.failNext("staging_discard", stagingPrefix);
 			boolean failed = expectFailure(() -> support.identity(() -> repository.saveAll(dataset.sessionId,
 					List.of(new UserMessage("del-failure-must-not-land")))));
 			support.faults.clear();
@@ -119,6 +122,7 @@ final class MemoryConcurrentCasScenario implements ProductionScenario {
 					dataset.runIds.add(runId);
 					futures.add(pool.submit(() -> {
 						barrier.await();
+						Thread.sleep((run + 1L) * 20L);
 						for (int retry = 0; retry < 3; retry++) {
 							String text = runId + "-retry-" + retry + "-" + "x".repeat(messageBytes);
 							int currentRetry = retry;

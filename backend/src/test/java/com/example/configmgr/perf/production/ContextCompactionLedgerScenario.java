@@ -37,8 +37,8 @@ final class ContextCompactionLedgerScenario implements ProductionScenario {
 	@Override
 	public void measure(ProductionSupport support, Manifest.Dataset dataset) {
 		String sessionId = String.valueOf(dataset.attributes.get("sessionId"));
-		String contextKey = TenantKeyScope.scoped("ai:ctx:", sessionId);
-		String eventsKey = TenantKeyScope.scoped("ai:ctx:events:", sessionId);
+		String contextKey = support.identity(() -> TenantKeyScope.scoped("ai:ctx:", sessionId));
+		String eventsKey = support.identity(() -> TenantKeyScope.scoped("ai:ctx:events:", sessionId));
 		RedisContextStateStore store = new RedisContextStateStore(support.redis, support.mapper, support.aiProperties);
 		long scanBefore = support.commandMetrics.keyspaceScanPages();
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(support.cfg.tenantId,

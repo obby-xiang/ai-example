@@ -181,9 +181,11 @@ final class StartupRunnerActiveScenario implements ProductionScenario {
 				"startup cleanup/recovery emitted zero SCAN commands");
 		support.require(dataset, "host_hscan_was_not_empty", support.commandMetrics.hashScanPages() > hashScansBefore,
 				"real beginRunner populated the index later read by HSCAN");
-		support.require(dataset, "local_dead_key_removed",
-				!support.redis.hasKey(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + localDead),
-				"only a dead PID on this host is removed");
+		String localDeadValue = support.redis.opsForValue().get(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + localDead);
+		dataset.attributes.put("localDeadValueAfterRecovery", localDeadValue);
+		support.require(dataset, "local_dead_runner_revoked",
+				!heartbeat.isRunnerAlive(localDead) && (localDeadValue == null || localDeadValue.startsWith("REVOKED|")),
+				"cleanup removes the live anchor and stale recovery leaves only a revocation tombstone");
 		support.require(dataset, "local_dead_index_removed",
 				!support.redis.opsForHash().hasKey(hostIndex, String.valueOf(localDead)),
 				"the dead local member is removed from the host index");

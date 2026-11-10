@@ -168,13 +168,16 @@ final class AttachmentScenarioSupport {
 					this.support.cfg.tenantId, this.support.cfg.userId, this.sessionId));
 			this.support.own(dataset, "ai:session:lock:" + this.support.cfg.tenantId + ":" + this.support.cfg.userId
 					+ ":" + this.sessionId);
-			this.support.own(dataset, this.purgeGuard.keyFor(this.sessionId));
 			this.support.own(dataset, SessionPurgePendingStore.pendingKey(this.sessionId, this.support.cfg.tenantId,
 					this.support.cfg.userId));
-			this.support.own(dataset, this.memory.keyFor(this.sessionId));
-			this.support.own(dataset, this.memory.keyFor(this.sessionId) + ":ver");
-			this.support.own(dataset, this.memory.keyFor(this.sessionId) + ":gen");
-			this.support.own(dataset, RedisChatMemoryRepository.stagingIndexKey(this.sessionId));
+			this.support.identity(() -> {
+				this.support.own(dataset, this.purgeGuard.keyFor(this.sessionId));
+				String memoryKey = this.memory.keyFor(this.sessionId);
+				this.support.own(dataset, memoryKey);
+				this.support.own(dataset, memoryKey + ":ver");
+				this.support.own(dataset, memoryKey + ":gen");
+				this.support.own(dataset, RedisChatMemoryRepository.stagingIndexKey(this.sessionId));
+			});
 		}
 
 		void seedAdditionalForm(Manifest.Dataset dataset, String runId, String toolCallId) {

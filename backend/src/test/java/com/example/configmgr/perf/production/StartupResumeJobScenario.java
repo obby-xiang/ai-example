@@ -92,8 +92,8 @@ final class StartupResumeCandidateStormScenario implements ProductionScenario {
 	public void measure(ProductionSupport support, Manifest.Dataset dataset) {
 		long scansBefore = support.commandMetrics.keyspaceScanPages();
 		AiProperties properties = recoveryProperties(2, 2);
-		LeaseService leasesA = P1ScenarioSupport.lease(support, properties, dataset.sessionId + "-scan-a");
-		LeaseService leasesB = P1ScenarioSupport.lease(support, properties, dataset.sessionId + "-scan-b");
+		LeaseService leasesA = P1ScenarioSupport.renewingLease(support, properties, dataset.sessionId + "-scan-a");
+		LeaseService leasesB = P1ScenarioSupport.renewingLease(support, properties, dataset.sessionId + "-scan-b");
 		RunStore storeA = P1ScenarioSupport.runStore(support, properties, leasesA);
 		RunStore storeB = P1ScenarioSupport.runStore(support, properties, leasesB);
 		ResumeService serviceA = spy(P1ScenarioSupport.resumeService(support, storeA, properties));
@@ -245,6 +245,7 @@ final class StartupResumeCandidateStormScenario implements ProductionScenario {
 		properties.getResume().setMaxOnStartup(maxOnStartup);
 		properties.getResume().setScanMaxAttempts(scanMaxAttempts);
 		properties.getResume().setScanLeaseTtl(Duration.ofMillis(500L));
+		properties.getLease().setRenewInterval(Duration.ofMillis(30L));
 		properties.getStream().setIndexPruneInterval(Duration.ZERO);
 		return properties;
 	}

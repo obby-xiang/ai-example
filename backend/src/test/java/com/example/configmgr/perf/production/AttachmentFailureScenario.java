@@ -128,11 +128,11 @@ final class AttachmentFailureScenario implements ProductionScenario {
 				FormAttachmentStore.Attachment other = fixture.register(dataset, "other-run", "other-call",
 						"other-session", "other.txt", 8);
 				fixture.addIndexMember(dataset, fixture.sessionIndexKey(fixture.sessionId), "stale-only");
-				fixture.addIndexMember(dataset, fixture.sessionIndexKey(fixture.sessionId), other.fileId());
-				fixture.addIndexMember(dataset, fixture.formIndexKey(fixture.runId, fixture.toolCallId), other.fileId());
 				support.require(dataset, "stale_index_member_filtered",
 						fixture.store.findByForm(fixture.runId, fixture.toolCallId).size() == 1,
 						"accepted-result closeout reclaimed the rollback leftover; only other.txt remains readable");
+				fixture.addIndexMember(dataset, fixture.sessionIndexKey(fixture.sessionId), other.fileId());
+				fixture.addIndexMember(dataset, fixture.formIndexKey(fixture.runId, fixture.toolCallId), other.fileId());
 				boolean sessionPollution = false;
 				try {
 					fixture.store.findBySessionId(fixture.sessionId);

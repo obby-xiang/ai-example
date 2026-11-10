@@ -183,19 +183,33 @@ final class RunHitlDecisionScenario implements ProductionScenario {
 	}
 
 	private void oldEpochCannotAdvance(ProductionSupport support, Manifest.Dataset dataset, Fixture fixture) {
-		String runId = fixture.runId;
-		LeaseService newService = lease(support, "new-owner-" + fixture.runId);
+		String runId = fixture.runId + "-uncancelled-old-epoch";
+		Fixture old = fixture(support, dataset, runId);
+		dataset.runIds.add(runId);
+		support.identity(() -> {
+			old.store.save(snapshot(support, dataset, runId));
+			old.store.putPending(runId, pending(runId, PendingToolCall.PENDING));
+		});
+		for (String prefix : RUN_KEY_PREFIXES) {
+			support.own(dataset, RunStore.runScopedKey(prefix, support.cfg.tenantId, support.cfg.userId, runId));
+		}
+		support.own(dataset, RunStore.runScopedKey(CancellationRegistry.CANCEL_PREFIX,
+				support.cfg.tenantId, support.cfg.userId, runId));
+		LeaseService newService = lease(support, "new-owner-" + runId);
 		RunStore newStore = new RunStore(support.redis, support.mapper, support.aiProperties, newService);
-		support.stage(dataset, fixture.runId + "_old_epoch_fence", () -> support.identity(() -> {
-			long oldEpoch = fixture.acquisition.lease().epoch();
-			fixture.lease.release(fixture.acquisition.lease());
-			LeaseService.AcquireResult newer = newService.acquireFenced(fixture.store.runLeaseKey(runId),
-					fixture.store.fenceKey(runId), Duration.ofSeconds(30));
-			support.require(dataset, fixture.runId + "_new_epoch_acquired",
+		support.stage(dataset, runId + "_old_epoch_fence", () -> support.identity(() -> {
+			long oldEpoch = old.acquisition.lease().epoch();
+			old.lease.release(old.acquisition.lease());
+			LeaseService.AcquireResult newer = newService.acquireFenced(newStore.runLeaseKey(runId),
+					newStore.fenceKey(runId), Duration.ofSeconds(30));
+			support.require(dataset, runId + "_new_epoch_acquired",
 					newer.acquired() && newer.lease().epoch() > oldEpoch, "new owner advances the epoch");
-			RunStore.ClaimResult stale = fixture.store.tryClaimExecution(runId, "call-" + runId,
-					fixture.lease.instanceId());
-			support.require(dataset, fixture.runId + "_old_epoch_claim_rejected",
+			support.require(dataset, runId + "_old_owner_marked_lost",
+					!old.lease.renew(old.acquisition.lease(), Duration.ofSeconds(30)),
+					"the old owner observes LOST before the stale claim");
+			RunStore.ClaimResult stale = old.store.tryClaimExecution(runId, "call-" + runId,
+					old.lease.instanceId());
+			support.require(dataset, runId + "_old_epoch_claim_rejected",
 					stale.outcome() == RunStore.ClaimOutcome.STALE_FENCE,
 					"old epoch cannot advance claim/fence: " + stale.outcome());
 			newService.release(newer.lease());

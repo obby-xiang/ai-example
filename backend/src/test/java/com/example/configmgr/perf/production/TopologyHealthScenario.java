@@ -101,7 +101,7 @@ final class TopologyHealthScenario {
 					new RedisClusterTopologyGuard(environment);
 				}
 				catch (IllegalStateException ex) {
-					failed = String.valueOf(ex.getMessage()).contains("未解析")
+					failed = String.valueOf(ex.getMessage()).contains("unresolved")
 							&& String.valueOf(ex.getMessage()).contains(RedisClusterTopologyGuard.NODES_ENV);
 					detail = ex.getMessage();
 				}

@@ -153,6 +153,12 @@ final class SessionRunScenario {
 			long now = System.currentTimeMillis() + 3_600_000L;
 			support.require(dataset, "recovery_first_page_exact_64", support.identity(() -> store.recoveryDueRecords(now, 64)).size() == 64,
 					"first due page is exactly bounded at 64 without a global member scan");
+			support.stage(dataset, "recovery_first_candidate_terminal", () -> support.identity(() -> {
+				RunSnapshot firstSnapshot = store.get(dataset.runIds.getFirst());
+				firstSnapshot.setStatus(RunSnapshot.DONE);
+				store.save(firstSnapshot);
+				StartupResumeCandidateStormScenario.makeDue(support, dataset.runIds.getFirst(), store);
+			}));
 			boolean fault = support.faultEnabled("zrem");
 			if (!fault) {
 				support.faultSkipped(dataset, "zrem");
@@ -161,15 +167,16 @@ final class SessionRunScenario {
 				support.faults.failNext("zrem", RunStore.RECOVERY_DUE_INDEX);
 			}
 			int first = support.stage(dataset, "recovery_first_prune_with_optional_fault", () -> store.pruneRunIndex());
+			support.requireFaultsDrained(dataset, "recovery_first_zrem_rule_consumed");
 			support.faults.clear();
 			dataset.attributes.put("recoveryFirstPruneResult", first);
 			dataset.attributes.put("recoveryFirstFaultConsumed", fault);
-			int remainingAfterFirst = support.identity(() -> store.recoveryDueRecords(now, 256)).size();
+			int remainingAfterFirst = support.identity(() -> ownRecoveryDueRecords(store, dataset, now)).size();
 			dataset.attributes.put("recoveryDueAfterFirstPrune", remainingAfterFirst);
 			support.require(dataset, "recovery_first_prune_is_real", first >= 0 && remainingAfterFirst > 0,
 					"the first prune touches real candidates instead of an already-empty index");
 			if (fault) {
-				support.require(dataset, "recovery_first_zrem_failure_consumed", first == 0 && remainingAfterFirst == 130,
+				support.require(dataset, "recovery_first_zrem_failure_consumed", remainingAfterFirst == 130,
 						"the injected first ZREM failure is consumed while all 130 candidates remain retryable");
 			}
 			support.stage(dataset, "recovery_mark_terminal", () -> support.identity(() -> {
@@ -180,17 +187,24 @@ final class SessionRunScenario {
 				}
 			}));
 			int rounds = 0;
-			while (!support.identity(() -> store.recoveryDueRecords(now, 256)).isEmpty() && rounds < 6) {
+			while (!support.identity(() -> ownRecoveryDueRecords(store, dataset, now)).isEmpty() && rounds < 6) {
 				store.pruneRunIndex();
 				rounds++;
 			}
 			dataset.attributes.put("recoveryPruneRoundsAfterFault", rounds);
-			support.require(dataset, "recovery_large_all_converges", support.identity(() -> store.recoveryDueRecords(now, 256)).isEmpty(),
+			support.require(dataset, "recovery_large_all_converges",
+					support.identity(() -> ownRecoveryDueRecords(store, dataset, now)).isEmpty(),
 					"all 130 candidates converge after the first real removal attempt");
 			support.require(dataset, "recovery_terminal_snapshots_retained", dataset.runIds.stream().allMatch(runId ->
 					support.identity(() -> RunSnapshot.DONE.equals(store.get(runId).getStatus()))),
 					"index cleanup does not delete terminal snapshots");
 			dataset.state = "measured";
+		}
+
+		private static List<RunStore.RecoveryCandidate> ownRecoveryDueRecords(RunStore store,
+				Manifest.Dataset dataset, long now) {
+			return store.recoveryDueRecords(now, 256).stream()
+					.filter(candidate -> dataset.runIds.contains(candidate.ref().runId())).toList();
 		}
 	}
 

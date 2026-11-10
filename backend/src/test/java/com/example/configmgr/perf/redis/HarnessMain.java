@@ -288,13 +288,17 @@ public final class HarnessMain {
 			Deadline deadline = budget.startScenario(scenario.id());
 			try {
 				if (scenario.protocol()) {
-					ensureCopy(ctx, generator, scenario, 0);
-					protocol.run(scenario, 0, deadline);
-					boolean pass = ctx.metrics.protocols().stream()
+					int total = ctx.cfg.warmup + ctx.cfg.repeat;
+					boolean pass = true;
+					for (int copy = 0; copy < total; copy++) {
+						ensureCopy(ctx, generator, scenario, copy);
+						protocol.run(scenario, copy, deadline);
+						ctx.manifest.require(scenario.id(), copy).state = "protocol";
+					}
+					pass = ctx.metrics.protocols().stream()
 							.filter(p -> p.scenario().equals(scenario.id())).allMatch(p -> p.pass());
 					ctx.metrics.scenarioStatus(scenario.id(), pass ? EXIT_OK : EXIT_FAIL,
 							pass ? "protocol pass" : "protocol fail");
-					ctx.manifest.require(scenario.id(), 0).state = "protocol";
 					if (protocol.unsafeForCleanup()) {
 						ctx.unsafeForCleanup = true;
 					}

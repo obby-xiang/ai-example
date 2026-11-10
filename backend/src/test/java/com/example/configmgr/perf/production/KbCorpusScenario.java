@@ -81,6 +81,7 @@ final class KbCorpusScenario implements ProductionScenario {
         CachedKbSource cached = new CachedKbSource(local, cache, support.mapper, support.aiProperties.getKb());
         KbService service = new KbService(support.aiProperties, support.mapper, cached);
         String retired = String.valueOf(dataset.attributes.get("retiredDoc"));
+        long scanBefore = support.commandMetrics.keyspaceScanPages();
         try {
             support.stage(dataset, "kb_large_corpus_initial_reload", () -> {
                 service.start();
@@ -135,10 +136,41 @@ final class KbCorpusScenario implements ProductionScenario {
 
             support.stage(dataset, "kb_reload_wait_budget_keeps_current_snapshot", () -> {
                 support.aiProperties.getKb().setRefreshWaitBudget(Duration.ofNanos(1));
-                support.require(dataset, "expired_wait_budget_returns_unconfirmed", !service.refreshNow(true),
-                        "expired refresh wait budget returns false");
-                support.require(dataset, "budget_error_uses_wait_semantics", service.status().lastError().contains("预算"),
-                        "cooperative budget failure is visible in status");
+                java.util.concurrent.atomic.AtomicReference<String> waitError = new java.util.concurrent.atomic.AtomicReference<>();
+                java.util.concurrent.CountDownLatch watcherStarted = new java.util.concurrent.CountDownLatch(1);
+                java.util.concurrent.ExecutorService watcher = java.util.concurrent.Executors.newSingleThreadExecutor();
+                try {
+                    java.util.concurrent.Future<?> observed = watcher.submit(() -> {
+                        watcherStarted.countDown();
+                        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+                        while (System.nanoTime() < deadline && waitError.get() == null) {
+                            String current = service.status().lastError();
+                            if (current != null && current.contains("wait exceeded budget")) {
+                                waitError.set(current);
+                            }
+                            try {
+                                Thread.sleep(1L);
+                            }
+                            catch (InterruptedException ex) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(ex);
+                            }
+                        }
+                    });
+                    watcherStarted.await();
+                    support.require(dataset, "expired_wait_budget_returns_unconfirmed", !service.refreshNow(true),
+                            "expired refresh wait budget returns false");
+                    observed.get(6L, java.util.concurrent.TimeUnit.SECONDS);
+                    dataset.attributes.put("budgetLastError", waitError.get());
+                    support.require(dataset, "budget_error_uses_wait_semantics", waitError.get() != null,
+                            "cooperative budget failure is visible in status");
+                }
+                catch (Exception ex) {
+                    throw new IllegalStateException(ex);
+                }
+                finally {
+                    watcher.shutdownNow();
+                }
                 support.require(dataset, "current_snapshot_retained_after_budget_failure",
                         "corpus-v2".equals(service.status().version()), "budget failure keeps the current index");
                 support.aiProperties.getKb().setRefreshWaitBudget(Duration.ofSeconds(10));
@@ -164,6 +196,7 @@ final class KbCorpusScenario implements ProductionScenario {
                         failed = true;
                     }
                     finally {
+                        support.requireFaultsDrained(dataset, "index_fault_consumed");
                         support.faults.clear();
                     }
                     support.require(dataset, "index_fault_observed", failed, "real HDEL failure after body deletion");
@@ -180,7 +213,8 @@ final class KbCorpusScenario implements ProductionScenario {
                         && !cache.docIds().contains(retired), "body and exact index field converge without SCAN");
             });
 
-            support.require(dataset, "kb_zero_keyspace_scan", support.commandMetrics.keyspaceScanPages() == 0L,
+            support.require(dataset, "kb_zero_keyspace_scan",
+                        support.commandMetrics.keyspaceScanPages() == scanBefore,
                     "large corpus, publish and prune must not use keyspace SCAN");
             dataset.state = "measured";
         }
