@@ -42,21 +42,13 @@ import {
   type SseFrameHandlers,
   type SseStreamOptions
 } from '@/api/sse'
-import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore, type UiEventLifetime } from '@/stores/workspace'
+import { getPageHandler, onWorkspaceEvent, reportUiEventResult, useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
 import { TaskSteps } from '@/types/task'
 import { aiConfigErrorKey } from '@/constants/ai-settings-copy'
 import { deriveFrontendToolBudgetMs, abandonInFlightFrontendTools, executeFrontendTool, parseToolArgs, resolveSheetContext } from '@/utils/frontend-tools'
 import { toolStatusOfOutcome } from '@/utils/ui-receipt'
-import {
-  DOWNLOAD_CONFIRMATION_HANDLER,
-  DOWNLOAD_CONFIRMATION_RESOLVER,
-  DOWNLOAD_EXPORT_FILES_TOOL,
-  FRONTEND_TOOLS,
-  UI_HANDOFF_TOOLS,
-  type DownloadConfirmation,
-  type DownloadConfirmationSource
-} from '@/types/tools'
+import { FRONTEND_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import {
   abortUiOperations,
@@ -4313,69 +4305,6 @@ function isFrameDecidedPendingStatus(status: PendingToolCall['status'] | ToolRun
     || status === 'unknown' || status === 'failed' || status === 'skipped'
 }
 
-function unknownDownloadSources(defCodes: readonly string[]): DownloadConfirmationSource[] {
-  return defCodes.map((defCode) => ({ defCode, kind: 'unknown' }))
-}
-
-function downloadSourcesOf(
-  snapshot: unknown,
-  taskId: number | null,
-  defCodes: readonly string[]
-): DownloadConfirmationSource[] {
-  if (!snapshot || typeof snapshot !== 'object' || !('taskId' in snapshot)
-    || !('ready' in snapshot) || !('sources' in snapshot)) {
-    return unknownDownloadSources(defCodes)
-  }
-  const authoritative = snapshot as { taskId: unknown; ready: unknown; sources: unknown }
-  if (authoritative.taskId !== taskId || authoritative.ready !== true || !Array.isArray(authoritative.sources)) {
-    return unknownDownloadSources(defCodes)
-  }
-  const sourceByCode = new Map<string, DownloadConfirmationSource['kind']>()
-  for (const item of authoritative.sources) {
-    if (item && typeof item === 'object' && 'defCode' in item && 'kind' in item) {
-      const source = item as { defCode: unknown; kind: unknown }
-      if (typeof source.defCode === 'string'
-        && (source.kind === 'grid' || source.kind === 'server' || source.kind === 'unknown')) {
-        sourceByCode.set(source.defCode, source.kind)
-      }
-    }
-  }
-  return defCodes.map((defCode) => ({ defCode, kind: sourceByCode.get(defCode) ?? 'unknown' }))
-}
-
-function readDownloadSources(
-  handler: ((payload: Record<string, unknown>) => unknown) | null,
-  taskId: number | null,
-  defCodes: readonly string[]
-): DownloadConfirmationSource[] {
-  if (!handler) {
-    return unknownDownloadSources(defCodes)
-  }
-  try {
-    return downloadSourcesOf(handler({ taskId, defCodes }), taskId, defCodes)
-  } catch (error) {
-    logCaughtError(error, 'stores/ai.ts:download-confirmation')
-    return unknownDownloadSources(defCodes)
-  }
-}
-
-/** 下载确认卡展示用的只读快照，不执行任务绑定、切页、原下载预检或浏览器下载。 */
-function downloadConfirmationOf(argsJson: string | null | undefined, runId: string | null): DownloadConfirmation {
-  const args = parseToolArgs(argsJson)
-  const defCodes = uniq(Array.isArray(args.defCodes)
-    ? args.defCodes.map((item) => String(item)).filter((item) => item !== '')
-    : [])
-  const parsedTaskId = Number(args.taskId)
-  const taskId = Number.isFinite(parsedTaskId) && parsedTaskId > 0 ? Math.trunc(parsedTaskId) : null
-  return {
-    runId,
-    taskId,
-    defCodes,
-    fileKind: defCodes.length > 1 ? 'zip' : 'xlsx',
-    sources: readDownloadSources(getPageHandler(DOWNLOAD_CONFIRMATION_HANDLER), taskId, defCodes)
-  }
-}
-
 /**
  * M-2b（2026-10-22 用户直裁「无感恢复」）：快照条目是否可重建为挂起卡。
  *
@@ -4385,7 +4314,7 @@ function downloadConfirmationOf(argsJson: string | null | undefined, runId: stri
  *   还没轮到）保持 L0 不建卡，等实时帧到达（活轮行为不变）。
  * 自动前端工具不走挂起卡恢复：它们的后续请求帧仍由续收路径处理，不伪造等待确认。
  */
-function isRestorableNonDownloadPendingEntry(entry: AiRunCurrentEntry): boolean {
+function isRestorablePendingEntry(entry: AiRunCurrentEntry): boolean {
   if (entry.entryStatus !== 'PENDING' || entry.req === false) {
     return false
   }
@@ -4852,8 +4781,6 @@ export const useAiStore = defineStore('ai', {
      * 不进镜像：`toolCallId/runId/ref` 足够重建，卡渲染时再判区域。
      */
     activeUploadHandoff: null as ActiveUploadHandoff | null,
-    /** 下载确认卡展示快照；真实待决状态仍由后端 FRONTEND 条目与工具段承载。 */
-    downloadConfirmations: {} as Record<string, DownloadConfirmation>,
     /**
      * 最近一次界面原语留下的撤销点（深度 1；与表格的 `undo_last_sheet_edit` 互不共享状态）。
      * 只给用户（面板摘要行的「撤销」按钮），**不提供** `ui_undo` 工具。
@@ -6949,7 +6876,7 @@ export const useAiStore = defineStore('ai', {
           }
           return leftKnown ? -1 : rightKnown ? 1 : 0
         })
-      const restorable = pendingEntries.filter((entry) => this.isRestorablePendingEntry(entry, current.runId!))
+      const restorable = pendingEntries.filter(isRestorablePendingEntry)
       const first = restorable.find((entry) => !this.hasDecidedPendingResidue(entry.toolCallId)) ?? null
       // 连接语义与"能不能建卡"分开：自动前端工具（`navigate_to` 等）没有可重建的卡，但请求帧已发、
       // 后端正等这一条的回灌 —— 仍属 park。少算它，服务端的正常收流会被判成断流并误报"结果可能不完整"。
@@ -7001,18 +6928,6 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    isRestorablePendingEntry(entry: AiRunCurrentEntry, runId: string): boolean {
-      if (entry.name !== DOWNLOAD_EXPORT_FILES_TOOL) {
-        return isRestorableNonDownloadPendingEntry(entry)
-      }
-      const journal = readFrontendToolJournal(this.sessionIdentity, this.sessionId, runId, entry.toolCallId)
-      if (journal) {
-        return false
-      }
-      const part = this.messages.map((item) => findToolPart(item, entry.toolCallId)).find((value) => value !== null)
-      return part?.decision !== 'approved'
-    },
-
     /** 快照中的自动前端工具只按可证明事实恢复；没有“按名称补跑”的通道。 */
     drivePendingFrontendTools(
       runId: string,
@@ -7026,7 +6941,7 @@ export const useAiStore = defineStore('ai', {
       let driven = 0
       for (const entry of entries) {
         if (entry.entryStatus !== 'PENDING' || entry.kind !== 'FRONTEND'
-          || entry.req !== true || this.isRestorablePendingEntry(entry, runId)) {
+          || entry.req !== true || isRestorablePendingEntry(entry)) {
           continue
         }
         const toolCallId = entry.toolCallId
@@ -7035,12 +6950,6 @@ export const useAiStore = defineStore('ai', {
         }
         const journal = readFrontendToolJournal(this.sessionIdentity, this.sessionId, runId, toolCallId)
         const fact = snapshotExecutionFact(entry)
-        if (entry.name === DOWNLOAD_EXPORT_FILES_TOOL && this.downloadConfirmations[toolCallId] === undefined) {
-          this.downloadConfirmations = {
-            ...this.downloadConfirmations,
-            [toolCallId]: downloadConfirmationOf(entry.arguments, runId)
-          }
-        }
         const frame = {
           type: 'frontend_tool_request',
           runId,
@@ -8174,7 +8083,7 @@ export const useAiStore = defineStore('ai', {
       const kind = entry.kind === 'CONFIRM' ? 'CONFIRM' : 'FRONTEND'
       const existing = findToolPart(host, entry.toolCallId)
       const hasSubmittedEvidence = existing?.submittedValues !== undefined
-        || (entry.name !== DOWNLOAD_EXPORT_FILES_TOOL && this.gateSubmissions[entry.toolCallId] !== undefined)
+        || this.gateSubmissions[entry.toolCallId] !== undefined
       const restoredStatus = hasSubmittedEvidence && existing && !isHistoryPlaceholderStatus(entry.toolCallId, existing.status)
         ? existing.status
         : 'pending'
@@ -8274,12 +8183,6 @@ export const useAiStore = defineStore('ai', {
             reason: status === 'missing' ? translate('ai.notice.uploadNoRegion') : null,
             filename: null
           }
-        }
-      }
-      if (entry.name === DOWNLOAD_EXPORT_FILES_TOOL) {
-        this.downloadConfirmations = {
-          ...this.downloadConfirmations,
-          [entry.toolCallId]: downloadConfirmationOf(entry.arguments, runId)
         }
       }
       if (entry.name === GENERATIVE_FORM_TOOL) {
@@ -10502,196 +10405,6 @@ export const useAiStore = defineStore('ai', {
       this.uiAnnouncement = null
     },
 
-    downloadConfirmationSources(toolCallId: string): DownloadConfirmationSource[] {
-      const detail = this.downloadConfirmations[toolCallId]
-      if (!detail) {
-        return []
-      }
-      return readDownloadSources(getPageHandler(DOWNLOAD_CONFIRMATION_HANDLER), detail.taskId, detail.defCodes)
-    },
-
-    async refreshDownloadConfirmation(toolCallId: string, lifetime?: UiEventLifetime): Promise<boolean> {
-      if (lifetime === undefined) {
-        return false
-      }
-      const detail = this.downloadConfirmations[toolCallId]
-      if (!detail) {
-        return false
-      }
-      const roundAtRefresh = captureRound(this.sessionId, detail.runId)
-      const canApply = (): boolean => lifetime.abandoned !== true
-        && isStillSameRound(roundAtRefresh, this.sessionId, this.activeRunId)
-        && !this.stopped && this.stoppedRunId !== detail.runId
-        && (detail.runId === null || !hasStoppedRun(this.sessionId, detail.runId, this.sessionIdentity))
-        && !this.hasDecidedPendingResidue(toolCallId, detail.runId ?? undefined)
-      let sources = unknownDownloadSources(detail.defCodes)
-      const handler = getPageHandler(DOWNLOAD_CONFIRMATION_RESOLVER)
-      if (handler) {
-        try {
-          const snapshot = await handler({ taskId: detail.taskId, defCodes: detail.defCodes }, lifetime)
-          if (!canApply()) {
-            return false
-          }
-          sources = downloadSourcesOf(snapshot, detail.taskId, detail.defCodes)
-        } catch (error) {
-          logCaughtError(error, 'stores/ai.ts:download-confirmation-refresh')
-        }
-      }
-      if (!canApply()) {
-        return false
-      }
-      this.downloadConfirmations = {
-        ...this.downloadConfirmations,
-        [toolCallId]: { ...detail, sources }
-      }
-      return true
-    },
-
-    applyDownloadDecision(
-      toolCallId: string,
-      decision: 'approved' | 'rejected',
-      status: ToolRunStatus
-    ): void {
-      for (const item of this.messages) {
-        const part = findToolPart(item, toolCallId)
-        if (!part) {
-          continue
-        }
-        this.upsertToolPart(item, {
-          toolCallId,
-          name: part.name,
-          kind2: 'FRONTEND',
-          status,
-          decision,
-          decidedAt: part.decidedAt ?? Date.now(),
-          requiresAction: false
-        }, false)
-        deriveProjections(item)
-      }
-    },
-
-    openDownloadConfirmation(
-      message: ChatMessage,
-      frame: Extract<SseFrame, { type: 'frontend_tool_request' }>
-    ): void {
-      const toolCallId = frame.toolCallId
-      const runId = frame.runId ?? this.activeRunId ?? null
-      this.downloadConfirmations = {
-        ...this.downloadConfirmations,
-        [toolCallId]: downloadConfirmationOf(frame.args, runId)
-      }
-      this.upsertToolPart(message, {
-        toolCallId,
-        name: frame.name,
-        kind2: 'FRONTEND',
-        status: 'pending',
-        args: frame.args,
-        requiresAction: true
-      }, false)
-      deriveProjections(message)
-    },
-
-    claimDownloadDecision(toolCallId: string, approved: boolean): boolean {
-      if (this.gateSubmissions[toolCallId] !== undefined) {
-        return false
-      }
-      this.gateSubmissions = {
-        ...this.gateSubmissions,
-        [toolCallId]: {
-          decision: approved ? 'approved' : 'rejected',
-          submittedAt: Date.now(),
-          syncing: false
-        }
-      }
-      return true
-    },
-
-    async approveDownloadConfirmation(toolCallId: string): Promise<void> {
-      if (this.businessWriteBlocked) {
-        return
-      }
-      const host = this.messages.find((item) => item.parts.some(
-        (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
-      ))
-      const part = host ? findToolPart(host, toolCallId) : null
-      if (!host || !part || part.status !== 'pending' || !part.requiresAction) {
-        return
-      }
-      const runId = host.runId ?? this.activeRunId ?? this.downloadConfirmations[toolCallId]?.runId
-      if (!runId || this.stopped || this.stoppedRunId === runId
-        || !this.claimDownloadDecision(toolCallId, true)) {
-        return
-      }
-      const frame = {
-        type: 'frontend_tool_request',
-        toolCallId,
-        name: part.name,
-        runId,
-        args: part.args,
-        ...(part.expiresAt !== undefined ? { expiresAt: part.expiresAt } : {}),
-        ...(part.atMs !== undefined ? { atMs: part.atMs } : {})
-      } as Extract<SseFrame, { type: 'frontend_tool_request' }>
-      try {
-        if (this.stopped || this.stoppedRunId === runId || this.hasDecidedPendingResidue(toolCallId, runId)) {
-          return
-        }
-        this.applyDownloadDecision(toolCallId, 'approved', 'running')
-        await this.runFrontendTool(host, frame)
-      } finally {
-        this.clearGateSubmission(toolCallId)
-      }
-    },
-
-    async rejectDownloadConfirmation(toolCallId: string): Promise<void> {
-      if (this.businessWriteBlocked) {
-        return
-      }
-      const host = this.messages.find((item) => item.parts.some(
-        (part): boolean => part.kind === 'tool' && part.toolCallId === toolCallId
-      ))
-      const part = host ? findToolPart(host, toolCallId) : null
-      const runId = host?.runId ?? this.activeRunId ?? this.downloadConfirmations[toolCallId]?.runId
-      if (!host || !part || part.status !== 'pending' || !part.requiresAction || !runId
-        || this.stopped || this.stoppedRunId === runId
-        || !this.claimDownloadDecision(toolCallId, false)) {
-        return
-      }
-      const roundAtDecision = captureRound(this.sessionId, runId)
-      try {
-        this.applyDownloadDecision(toolCallId, 'rejected', 'pending')
-        const outcome = await this.submitFrontendToolResult(toolCallId, '', 'http-post', true, runId)
-        if (!outcome.ok && !outcome.duplicate && outcome.accepted !== true) {
-          const livePart = findToolPart(host, toolCallId)
-          const mayRevive = livePart !== null && livePart.status !== 'cancelled'
-            && isStillSameRound(roundAtDecision, this.sessionId, this.activeRunId)
-            && !this.stopped && this.stoppedRunId !== runId
-            && !hasStoppedRun(this.sessionId, runId, this.sessionIdentity)
-            && !this.hasDecidedPendingResidue(toolCallId, runId)
-          if (mayRevive) {
-            for (const item of this.messages) {
-              const pending = findToolPart(item, toolCallId)
-              if (!pending || isFrameDecidedPendingStatus(pending.status)) {
-                continue
-              }
-              this.upsertToolPart(item, {
-                toolCallId,
-                name: pending.name,
-                kind2: 'FRONTEND',
-                status: 'pending',
-                reason: outcome.message ?? outcome.rejected ?? null,
-                decision: undefined,
-                decidedAt: undefined,
-                requiresAction: true
-              }, false)
-              deriveProjections(item)
-            }
-          }
-        }
-      } finally {
-        this.clearGateSubmission(toolCallId)
-      }
-    },
-
     /**
      * AI 表格操作专项：写工具预览（设计稿 §3.4 选项 A —— 确认落在前端）。
      *
@@ -11217,7 +10930,6 @@ export const useAiStore = defineStore('ai', {
       this.uiUndoToolCallId = null
       this.uiAnnouncement = null
       this.activeUploadHandoff = null
-      this.downloadConfirmations = {}
     },
 
     /**
@@ -12504,7 +12216,6 @@ export const useAiStore = defineStore('ai', {
       // 读到 `abandoned` 即不再写工作区/步骤/选中集（预算到点是同一条判据的另一触发面）。
       abandonInFlightFrontendTools()
       this.activeUploadHandoff = null
-      this.downloadConfirmations = {}
       this.stopped = true
       this.lastRoundOutcome = 'cancelled'
       this.followupReady = false
@@ -14014,11 +13725,6 @@ export const useAiStore = defineStore('ai', {
           // showOpenFilePicker 只认用户手势的同步调用栈）。建卡后**不回灌**，等用户选文件/放弃。
           if (UI_HANDOFF_TOOLS.has(frame.name)) {
             void this.openUploadHandoff(message, frame)
-            break
-          }
-          // 下载沿用同一真实 FRONTEND 待决条目：先等人批准，拒绝/取消才回灌，绝不直接执行。
-          if (frame.name === DOWNLOAD_EXPORT_FILES_TOOL) {
-            this.openDownloadConfirmation(message, frame)
             break
           }
           // 其余即时执行类前端工具：立即在浏览器执行并回灌结果

@@ -5357,6 +5357,44 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、编码或SSE解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1213最终APPROVE；生产文件IDEA Reformat；Maven 358主源BUILD SUCCESS，前端3281模块构建成功；全量typecheck仍有既有错误，动态下载场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:32412ec1d7858253ac2ab0644294941e19607c7621b8c7ad2df5a6ed89ae7bca",
+      "status": "reviewed",
+      "reason": "按用户明确指令完整回退3c502099，不基于其混合卡片模型继续修补；逐hunk核对仅移除该提交内容，保留其他已提交修复。",
+      "reviewedAt": "2026-11-10T11:57:28+08:00",
+      "reviewer": "K3.1 Pro主会话",
+      "specChanges": [
+        {
+          "change": "完整回退下载HITL、工具卡决策、来源快照及关联规格改动，恢复3c502099之前的下载与工具卡实现。",
+          "reason": "该实现把普通工具卡与用户决策混合，用户明确要求直接回退且禁止基于该设计继续修改。",
+          "impact": "普通工具卡恢复只读职责，其他恢复、SSE、草稿、预览和压测修复不受影响；下载新HITL需求后续另行按独立卡片模型设计。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java", "status": "checked", "reason": "仅回退该下载提交的配置注释变化。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "仅回退下载加入人工等待集合的变化。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "仅回退下载工具描述变化。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "仅回退下载HITL及恢复协议元数据变化。"},
+        {"path": "docs/03-技术方案文档-v2.1.md", "status": "checked", "reason": "仅回退该下载协议文档变化。"},
+        {"path": "docs/requirements.md", "status": "checked", "reason": "仅回退该下载需求变化。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "移除下载确认卡混合模型，恢复原工具卡只读展示。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "仅回退下载确认文案。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "仅回退下载确认文案。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "移除下载decision/确认Map/journal恢复等本提交内容，保留此前已提交恢复逻辑。"},
+        {"path": "frontend/src/types/tools.ts", "status": "checked", "reason": "仅回退下载确认类型。"},
+        {"path": "frontend/src/utils/blocks.ts", "status": "checked", "reason": "仅回退下载已决卡展示变化。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "仅回退下载来源resolver和lifetime改动，恢复原执行器。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "回退至既有下载执行链，不引入新依赖或模型。"},
+        "java-api-style": {"status": "checked", "reason": "仅逆向移除该提交Java变化，未引入新代码形态。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复原下载错误处理，不新增异常掩盖。"},
+        "toc-interaction": {"status": "checked", "reason": "移除普通工具卡的用户操作与决策混用，恢复只读工具卡职责。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "恢复原FRONTEND下载协议和去重，不涉及其他状态或AI数据库。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "按用户指令执行git revert --no-commit并逐文件核对；恢复既有已编译代码，未执行动态测试。"}
+      }
     }
   ]
 }

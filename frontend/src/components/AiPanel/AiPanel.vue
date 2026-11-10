@@ -643,41 +643,6 @@
                           </div>
                         </template>
 
-                        <div v-else-if="isDownloadConfirmationPart(part)" data-testid="download-hitl">
-                          <div
-                            class="max-h-[min(280px,35vh)] overflow-y-auto rounded-[8px] border border-solid border-[#eef0f3] bg-white px-[10px] py-[2px]"
-                            :class="SCROLLBAR_CLASS"
-                            data-testid="download-hitl-rows"
-                          >
-                            <div
-                              v-for="row in downloadConfirmationRows(part)"
-                              :key="row.key"
-                              class="flex gap-[10px] border-0 border-b border-solid border-[#eef0f3] py-[7px] text-[13px] leading-[1.5] last:border-b-0"
-                            >
-                              <span class="min-w-0 max-w-[40%] flex-[0_1_auto] truncate text-[12.4px] text-[#8b949e]" :title="row.label ?? row.key">{{ row.label ?? row.key }}</span>
-                              <span class="min-w-0 flex-1 break-words">{{ row.value }}</span>
-                            </div>
-                          </div>
-                          <div class="flex flex-wrap items-center gap-[8px] pt-[10px]" data-testid="download-hitl-actions">
-                            <span class="ml-auto flex flex-none items-center gap-[8px] whitespace-nowrap">
-                              <button
-                                type="button"
-                                class="flex-none whitespace-nowrap min-w-[56px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-[#e3e6ea] transition-all duration-[150ms] bg-white text-[#57606a] hover:border-[#8b949e] hover:text-[#1f2328] disabled:opacity-50 disabled:cursor-default"
-                                :disabled="ai.businessWriteBlocked || isGateSubmitting(part.toolCallId)"
-                                data-testid="download-hitl-reject"
-                                @click="decideDownload(false, part.toolCallId)"
-                              >{{ t('ai.panel.reject') }}</button>
-                              <button
-                                type="button"
-                                class="flex-none whitespace-nowrap min-w-[72px] rounded-[8px] px-[13px] py-[5px] text-[12.6px] border border-solid border-transparent transition-all duration-[150ms] bg-[#2563eb] text-white font-semibold hover:brightness-[1.08] disabled:opacity-50 disabled:cursor-default disabled:bg-[#8b949e] disabled:font-normal"
-                                :disabled="ai.businessWriteBlocked || isGateSubmitting(part.toolCallId)"
-                                data-testid="download-hitl-approve"
-                                @click="decideDownload(true, part.toolCallId)"
-                              >{{ isGateSubmitting(part.toolCallId) ? t('ai.panel.submitting') : t('ai.panel.approve') }}</button>
-                            </span>
-                          </div>
-                        </div>
-
                         <div v-else-if="part.kind2 === 'FRONTEND' && part.name === GENERATIVE_FORM_TOOL" class="min-w-0">
                           <!-- GF-B：生成式表单挂起 —— 渲染 FormRenderer 等用户填写（同 toolCallId 可重发/取消） -->
                           <!-- T2a-D#3（D10 不扩判据）：同 toolCallId 至多一个 FormRenderer —— 只渲染在宿主
@@ -1278,7 +1243,6 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { head } from 'lodash'
 import { ArrowRight } from '@element-plus/icons-vue'
 import { useAiStore } from '@/stores/ai'
-import { useWorkspaceStore } from '@/stores/workspace'
 import { useI18n } from 'vue-i18n'
 import { formatProgressiveTs } from '@/utils/format'
 import { cardFieldLabel, localizedCardFieldValue, canShowCardField } from '@/utils/card-content'
@@ -1335,7 +1299,7 @@ import {
 } from '@/components/AiPanel/cardPresentation'
 import { GENERATIVE_FORM_TOOL, type AiLoadErrorView, type ChatMessage, type MessagePart, type SheetPreviewLevel, type SheetWritePlan, type TextPart, type ToolPart } from '@/types/ai'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
-import { DOWNLOAD_EXPORT_FILES_TOOL, SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
+import { SHEET_PREVIEW_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import { resolveAiRef } from '@/utils/ai-regions'
 import { identityFingerprint } from '@/utils/ai-identity'
 import { parseToolArgs } from '@/utils/frontend-tools'
@@ -1347,7 +1311,6 @@ import { logCaughtError } from '@/utils/log-caught-error'
 
 const { t, locale } = useI18n()
 const ai = useAiStore()
-const workspace = useWorkspaceStore()
 const formAttachmentAbort = ref(new AbortController())
 const sheetPreviewSnapshots = ref<Record<string, SheetWritePlan>>({})
 const uploadHandoffSnapshots = ref<Record<string, ActiveUploadHandoff>>({})
@@ -3679,9 +3642,6 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
       deps.push(liveForm.value, liveForm.value?.status, liveForm.value?.error, liveForm.value?.fieldErrors, liveForm.value?.values)
     }
   }
-  if (isDownloadConfirmationPart(part)) {
-    deps.push(ai.downloadConfirmations[part.toolCallId], workspace.taskId, workspace.dataVersion)
-  }
   if (isUploadHandoffPart(part)) {
     deps.push(ai.activeUploadHandoff, uploadHandoffStatus(part), uploadHandoffAccept(part), uploadHandoffLabel(part), uploadHandoffReason(part), uploadHandoffFileName(part))
   }
@@ -4444,47 +4404,6 @@ function gateRows(part: ToolPart): FieldRow[] {
   )
 }
 
-function isDownloadConfirmationPart(part: ToolPart): boolean {
-  return part.kind2 === 'FRONTEND' && part.name === DOWNLOAD_EXPORT_FILES_TOOL
-    && part.status === 'pending' && part.requiresAction
-}
-
-function downloadConfirmationRows(part: ToolPart): FieldRow[] {
-  const detail = ai.downloadConfirmations[part.toolCallId]
-  const args = parseToolArgs(part.args)
-  const defCodes = detail?.defCodes ?? (Array.isArray(args.defCodes) ? args.defCodes.map(String) : [])
-  const fileKind = detail?.fileKind ?? (defCodes.length > 1 ? 'zip' : 'xlsx')
-  const sources = ai.downloadConfirmationSources(part.toolCallId)
-  return [
-    {
-      key: 'taskId',
-      label: cardFieldLabel('taskId'),
-      value: String(detail?.taskId ?? args.taskId ?? '—')
-    },
-    {
-      key: 'defCodes',
-      label: cardFieldLabel('defCodes'),
-      value: defCodes.join(t('ai.hitl.downloadConfirmation.listSeparator'))
-    },
-    {
-      key: 'format',
-      label: cardFieldLabel('format'),
-      value: t(`ai.hitl.downloadConfirmation.${fileKind}`)
-    },
-    {
-      key: 'source',
-      label: t('ai.hitl.downloadConfirmation.sourceLabel'),
-      value: sources.map((source) => {
-        const kind = source.kind === 'grid' ? 'sourceGrid' : source.kind === 'server' ? 'sourceServer' : 'sourceUnknown'
-        return t('ai.hitl.downloadConfirmation.sourceItem', {
-          code: source.defCode,
-          source: t(`ai.hitl.downloadConfirmation.${kind}`)
-        })
-      }).join(t('ai.hitl.downloadConfirmation.sourceSeparator'))
-    }
-  ]
-}
-
 /**
  * R-165 S2：操作行 tip 气泡（demo v7 `.tip`：黑底 #1f2328 / 白字 11px / 圆角 6 / padding 3px 8px /
  * bottom calc(100%+7px) / 居中）。触发用 Tailwind **具名组** `group/tip`（按钮自身声明，不与消息行
@@ -5001,18 +4920,6 @@ async function decide(approved: boolean, toolCallId: string): Promise<void> {
   keepCurrentCardExpanded(toolCallId)
   const reason = approved ? undefined : '用户拒绝执行'
   await ai.confirm(approved, reason, toolCallId)
-}
-
-async function decideDownload(approved: boolean, toolCallId: string): Promise<void> {
-  if (ai.businessWriteBlocked) {
-    return
-  }
-  keepCurrentCardExpanded(toolCallId)
-  if (approved) {
-    await ai.approveDownloadConfirmation(toolCallId)
-  } else {
-    await ai.rejectDownloadConfirmation(toolCallId)
-  }
 }
 
 /** GF-B：表单提交（值已由 FormRenderer 按 schema 做过客户端复核）。 */

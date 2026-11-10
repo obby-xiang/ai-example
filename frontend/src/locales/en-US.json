@@ -376,17 +376,6 @@
       },
       "action": {
         "start_publish": "starting the publish job"
-      },
-      "downloadConfirmation": {
-        "xlsx": "Single XLSX file",
-        "zip": "ZIP archive",
-        "sourceLabel": "Content source",
-        "sourceGrid": "Current online-edited sheet",
-        "sourceServer": "Server export file (tab not loaded)",
-        "sourceUnknown": "Online-edited content or server export file (verified after approval)",
-        "listSeparator": ", ",
-        "sourceSeparator": "; ",
-        "sourceItem": "{code} = {source}"
       }
     },
     "gf": {

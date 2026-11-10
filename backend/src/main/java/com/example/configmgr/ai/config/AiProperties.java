@@ -760,22 +760,22 @@ public class AiProperties {
 		 * 即时执行类前端工具（{@code navigate_to} 等）的回执等待上限（<b>等机器</b>，默认 120s）。
 		 *
 		 * <p><b>哪些工具读本键</b>（用户裁决 2026-10-20 第 2 条）：只有"下发了就等一个机器回执"的
-		 * 即时执行类前端工具 —— 共 <b>5 个</b>：
+		 * 即时执行类前端工具 —— 共 <b>6 个</b>：
 		 * <ul>
 		 * <li>{@code navigate_to}（页面导航）</li>
 		 * <li>{@code select_definitions}（选择配置项）</li>
 		 * <li>{@code set_condition}（设置查询条件）</li>
 		 * <li>{@code confirm_step}（推进向导步骤）</li>
 		 * <li>{@code open_export_file_editor}（打开在线编辑器）</li>
+		 * <li>{@code download_export_files}（触发浏览器下载）</li>
 		 * </ul>
 		 * 这些工具都是"请求前端做一件事、等它回一个回执"，回执没回来是<b>机器故障</b>而非人的决定，
 		 * 不能无限悬置。
 		 *
 		 * <p><b>哪些工具不读本键</b>（等的是人 ⇒ 无上限）：{@code generative_form}（人填表）、
 		 * 三个表格写工具 {@code replace_values}/{@code update_rows}/{@code normalize_column}、
-		 * {@code undo_last_sheet_edit}、{@code ui_request_upload}（等用户手势给文件句柄）、
-		 * {@code download_export_files}（等用户拒绝/批准，批准后才预检和下载）——
-		 * 共 <b>7 个</b>，按工具名集合 {@code ConfirmGate#HUMAN_WAIT_FRONTEND_TOOLS} 区分。
+		 * {@code undo_last_sheet_edit}、{@code ui_request_upload}（等用户手势给文件句柄）——
+		 * 共 <b>6 个</b>，按工具名集合 {@code ConfirmGate#HUMAN_WAIT_FRONTEND_TOOLS} 区分。
 		 * 确认门（等人决策）同样<b>没有上限</b>。
 		 * 区分点只有一个：{@code ConfirmGate#suspendWaitSeconds}（返回 null = 不设上限）。
 		 *

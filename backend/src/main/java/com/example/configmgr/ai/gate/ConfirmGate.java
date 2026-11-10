@@ -72,7 +72,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * </ul>
  *
  * <h2>等待没有时限（用户裁决 2026-10-20 第 1/2 条）</h2>
- * 确定性操作（确认门）与等**人**的前端工具（{@code generative_form}、表格写工具与下载确认，见
+ * 确定性操作（确认门）与等**人**的前端工具（{@code generative_form} 与表格写工具，见
  * {@link #HUMAN_WAIT_FRONTEND_TOOLS}）的等待<b>不再有超时</b>：不再有 240s/120s 的死线，
  * 一直等到用户批准 / 拒绝 / 取消（前端另可 {@code cancelled=true} 放弃）。只有<b>其他前端工具</b>
  * （{@code navigate_to} 等即时执行类）保留 {@code app.ai.hitl.frontend-tool-timeout}（默认 120s）
@@ -158,8 +158,7 @@ public class ConfirmGate {
      * <li>{@code generative_form}：等用户填表（DC-15 既有先例）；</li>
      * <li>{@code replace_values} / {@code update_rows} / {@code normalize_column}：等用户在预览卡上
      * 点“应用/取消”（AI 表格操作专项）；</li>
-     * <li>{@code undo_last_sheet_edit}：撤销同样走前端、可能等待用户确认上下文（无时限）；</li>
-     * <li>{@code download_export_files}：等用户在下载确认卡上点“拒绝/批准”，批准后才切页、预检和下载。</li>
+     * <li>{@code undo_last_sheet_edit}：撤销同样走前端、可能等待用户确认上下文（无时限）。</li>
      * </ul>
      * <p>
      * 其余前端工具（{@code navigate_to} 等即时执行类）仍用
@@ -170,7 +169,7 @@ public class ConfirmGate {
             "replace_values", "update_rows", "normalize_column", "undo_last_sheet_edit",
             // AI 可视可操作专项：上传交接等的是**用户手势**（浏览器只在 transient activation 里
             // 给文件句柄），既不能判超时，也不能让 120s 机器回执兜底把它掐掉。
-            "ui_request_upload", AiToolNames.DOWNLOAD_EXPORT_FILES);
+            "ui_request_upload");
 
     private final RunStore store;
 
@@ -551,8 +550,8 @@ public class ConfirmGate {
      *
      * <ul>
      * <li>确认门（{@link PendingToolCall#KIND_CONFIRM}）：等的是人的决策 ⇒ 无上限；</li>
-     * <li>{@code generative_form}、三个表格写工具（{@code replace_values}/{@code update_rows}/
-     * {@code normalize_column}）、{@code undo_last_sheet_edit} 与 {@code download_export_files}：等的是人 ⇒ 无上限
+     * <li>{@code generative_form} 与三个表格写工具（{@code replace_values}/{@code update_rows}/
+     * {@code normalize_column}）及 {@code undo_last_sheet_edit}：等的是人 ⇒ 无上限
      * （与确认门同一路径，按<b>工具名</b>集合 {@link #HUMAN_WAIT_FRONTEND_TOOLS} 区分）；</li>
      * <li>其余前端工具：{@link #frontendToolTimeoutSeconds()}（默认 120s，等机器回执的兜底）。</li>
      * </ul>
