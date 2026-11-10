@@ -598,58 +598,19 @@ public class RunStore {
 
     private static final RedisScript<List> DECIDE_PENDING_SCRIPT = new DefaultRedisScript<>("""
             -- DECIDE_PENDING: decided guard 与完整 pending 同槽原子写
-            -- KEYS: pending, decided, claim, req, fence
-            -- ARGV: field, fullPendingJson, decidedValue, ttlMs, expectedGuard, expectedEpoch
+            -- KEYS: pending, decided, claim
+            -- ARGV: field, fullPendingJson, decidedValue, ttlMs, expectedGuard
             local field = ARGV[1]
             local raw = redis.call('HGET', KEYS[1], field)
             if not raw then return {0, '', 'MISSING'} end
             local ok, obj = pcall(cjson.decode, raw)
-            local okNew, newObj = pcall(cjson.decode, ARGV[2])
-            if not ok or type(obj) ~= 'table' or not okNew or type(newObj) ~= 'table' then
-              return {0, '', 'BAD_PENDING'}
-            end
+            if not ok or type(obj) ~= 'table' then return {0, '', 'BAD_PENDING'} end
             if obj['status'] ~= 'PENDING' then return {0, '', 'CONFLICT_STATUS'} end
             local requested = ARGV[3]:match('^([^|]+)') or ''
             local prev = redis.call('HGET', KEYS[2], field)
             local repair = ARGV[5] ~= '' and prev == ARGV[5] and requested == (prev:match('^([^|]+)') or '')
             if prev and not repair then return {0, prev, 'CONFLICT_DECIDED'} end
             if not prev and ARGV[5] ~= '' then return {0, '', 'CONFLICT_DECIDED'} end
-            local approvalId = obj['preExecutionApprovalId']
-            local executionId = obj['executionToolCallId']
-            local linked = (approvalId and approvalId ~= cjson.null and approvalId ~= '')
-                or (executionId and executionId ~= cjson.null and executionId ~= '')
-            if linked then
-              local epoch = tonumber(ARGV[6]) or 0
-              local fence = tonumber(redis.call('GET', KEYS[5]) or '0') or 0
-              if epoch > 0 and fence > epoch then return {0, prev or '', 'STALE_EPOCH'} end
-            end
-            if approvalId and approvalId ~= cjson.null and approvalId ~= '' then
-              local rawApproval = redis.call('HGET', KEYS[1], approvalId)
-              if not rawApproval then return {0, prev or '', 'BAD_LINK'} end
-              local okA, approval = pcall(cjson.decode, rawApproval)
-              if not okA or approval['kind'] ~= 'CONFIRM' or approval['executionToolCallId'] ~= field
-                  or obj['kind'] ~= 'FRONTEND' or newObj['preExecutionApprovalId'] ~= approvalId then
-                return {0, prev or '', 'BAD_LINK'}
-              end
-              local approvalGuard = redis.call('HGET', KEYS[2], approvalId)
-              if requested == 'REJECTED' then
-                if approval['status'] ~= 'REJECTED' or not approvalGuard
-                    or approvalGuard:match('^([^|]+)') ~= 'REJECTED' then
-                  return {0, prev or '', 'CONFLICT_APPROVAL'}
-                end
-                if redis.call('HEXISTS', KEYS[4], field) == 1 then
-                  return {0, prev or '', 'REQUEST_ALREADY_EMITTED'}
-                end
-              elseif requested ~= 'CANCELLED' then
-                if approval['status'] ~= 'APPROVED' or not approvalGuard
-                    or approvalGuard:match('^([^|]+)') ~= 'APPROVED' then
-                  return {0, prev or '', 'CONFLICT_APPROVAL'}
-                end
-                if redis.call('HEXISTS', KEYS[4], field) == 0 then
-                  return {0, prev or '', 'REQUEST_NOT_EMITTED'}
-                end
-              end
-            end
             local evidence = obj['executed'] == true or (tonumber(obj['claimedAtMs']) or 0) > 0
                 or (tonumber(obj['claimedEpoch']) or 0) > 0 or (tonumber(obj['executedAtMs']) or 0) > 0
             if obj['executedBy'] and obj['executedBy'] ~= cjson.null then evidence = true end
@@ -661,143 +622,7 @@ public class RunStore {
             redis.call('PEXPIRE', KEYS[1], ARGV[4])
             redis.call('PEXPIRE', KEYS[2], ARGV[4])
             redis.call('PEXPIRE', KEYS[3], ARGV[4])
-            redis.call('PEXPIRE', KEYS[4], ARGV[4])
             return {1, repair and prev or ARGV[3], repair and 'REPAIRED' or 'APPLIED'}
-            """, List.class);
-
-    private static final RedisScript<List> APPROVED_FRONTEND_REQUEST_SCRIPT = new DefaultRedisScript<>("""
-            -- APPROVED_FRONTEND_REQUEST: A/E 原值、批准 guard 与 req 首写原子复核
-            -- KEYS: pending, req, decided, claim, cancel, fence
-            -- ARGV: approvalField, executionField, expectedApprovalJson, expectedExecutionJson, atMs, ttlMs, expectedEpoch
-            local epoch = tonumber(ARGV[7]) or 0
-            local fence = tonumber(redis.call('GET', KEYS[6]) or '0') or 0
-            if epoch > 0 and fence > epoch then return {0, 'STALE_EPOCH'} end
-            if redis.call('EXISTS', KEYS[5]) == 1 then return {0, 'CANCELLED'} end
-            local approvalField = ARGV[1]
-            local executionField = ARGV[2]
-            local rawApproval = redis.call('HGET', KEYS[1], approvalField)
-            local rawExecution = redis.call('HGET', KEYS[1], executionField)
-            if rawApproval ~= ARGV[3] or rawExecution ~= ARGV[4] then return {0, 'CONFLICT_PENDING'} end
-            local okA, approval = pcall(cjson.decode, rawApproval)
-            local okE, execution = pcall(cjson.decode, rawExecution)
-            if not okA or not okE then return {0, 'BAD_PENDING'} end
-            if approval['kind'] ~= 'CONFIRM' or execution['kind'] ~= 'FRONTEND'
-                or approval['executionToolCallId'] ~= executionField
-                or execution['preExecutionApprovalId'] ~= approvalField then
-              return {0, 'BAD_LINK'}
-            end
-            local approvalType = approval['type']
-            local executionType = execution['type']
-            if not approvalType or approvalType == cjson.null or approvalType == '' then approvalType = 'function' end
-            if not executionType or executionType == cjson.null or executionType == '' then executionType = 'function' end
-            if approval['name'] ~= execution['name'] or approval['arguments'] ~= execution['arguments']
-                or approvalType ~= executionType or approval['irreversible'] ~= execution['irreversible']
-                or approval['preflightPresent'] ~= execution['preflightPresent']
-                or cjson.encode(approval['preflight']) ~= cjson.encode(execution['preflight']) then
-              return {0, 'BAD_PAYLOAD'}
-            end
-            if approval['status'] ~= 'APPROVED' or execution['status'] ~= 'PENDING' then
-              return {0, 'CONFLICT_STATUS'}
-            end
-            local guard = redis.call('HGET', KEYS[3], approvalField)
-            if not guard or guard:match('^([^|]+)') ~= 'APPROVED' then return {0, 'CONFLICT_DECIDED'} end
-            local evidence = execution['executed'] == true or (tonumber(execution['claimedAtMs']) or 0) > 0
-                or (tonumber(execution['claimedEpoch']) or 0) > 0 or (tonumber(execution['executedAtMs']) or 0) > 0
-            if execution['executedBy'] and execution['executedBy'] ~= cjson.null then evidence = true end
-            if evidence or redis.call('HEXISTS', KEYS[4], executionField) == 1 then
-              return {0, 'CONFLICT_CLAIMED'}
-            end
-            if redis.call('HEXISTS', KEYS[2], executionField) == 1 then return {0, 'ALREADY_REQUESTED'} end
-            if redis.call('HSETNX', KEYS[2], executionField, ARGV[5]) == 0 then
-              return {0, 'ALREADY_REQUESTED'}
-            end
-            redis.call('PEXPIRE', KEYS[1], ARGV[6])
-            redis.call('PEXPIRE', KEYS[2], ARGV[6])
-            redis.call('PEXPIRE', KEYS[3], ARGV[6])
-            redis.call('PEXPIRE', KEYS[4], ARGV[6])
-            return {1, 'EMITTED'}
-            """, List.class);
-
-    private static final RedisScript<List> CONVERGE_PRE_EXECUTION_APPROVAL_SCRIPT = new DefaultRedisScript<>("""
-            -- CONVERGE_PRE_EXECUTION_APPROVAL: APPROVED A 投影真实 FRONTEND E 终局
-            -- KEYS: pending, decided, claim, cancel, req, fence
-            -- ARGV: approvalField, executionField, expectedApprovalJson, expectedExecutionJson,
-            --       projectedApprovalJson, ttlMs, expectedEpoch
-            local approvalField = ARGV[1]
-            local executionField = ARGV[2]
-            local rawApproval = redis.call('HGET', KEYS[1], approvalField)
-            local rawExecution = redis.call('HGET', KEYS[1], executionField)
-            if not rawApproval or not rawExecution then return {0, 'MISSING'} end
-            local okA, approval = pcall(cjson.decode, rawApproval)
-            local okE, execution = pcall(cjson.decode, rawExecution)
-            local okP, projected = pcall(cjson.decode, ARGV[5])
-            if not okA or not okE or not okP then return {0, 'BAD_PENDING'} end
-            local terminal = execution['status'] == 'FRONTEND_RESULT' or execution['status'] == 'FRONTEND_CANCELLED'
-                or execution['status'] == 'CANCELLED' or execution['status'] == 'REJECTED'
-                or execution['status'] == 'TIMEOUT' or execution['status'] == 'REJECTED_ARGUMENTS'
-                or execution['status'] == 'BLOCKED' or execution['status'] == 'SKIPPED'
-                or execution['status'] == 'PRECHECK_FAILED' or execution['status'] == 'SHEET_DISABLED'
-            if not terminal or execution['status'] == 'REJECTED' then return {0, 'CONFLICT_STATUS'} end
-            if (execution['status'] == 'FRONTEND_RESULT' or execution['status'] == 'FRONTEND_CANCELLED'
-                or execution['status'] == 'TIMEOUT') and redis.call('HEXISTS', KEYS[5], executionField) == 0 then
-              return {0, 'REQUEST_NOT_EMITTED'}
-            end
-            if not execution['outcome'] or execution['outcome'] == cjson.null
-                or (tonumber(execution['resolvedAtMs']) or 0) <= 0 then
-              return {0, 'BAD_TERMINAL'}
-            end
-            if approval['kind'] ~= 'CONFIRM' or execution['kind'] ~= 'FRONTEND'
-                or approval['executionToolCallId'] ~= executionField
-                or execution['preExecutionApprovalId'] ~= approvalField then
-              return {0, 'BAD_LINK'}
-            end
-            local approvalType = approval['type']
-            local executionType = execution['type']
-            if not approvalType or approvalType == cjson.null or approvalType == '' then approvalType = 'function' end
-            if not executionType or executionType == cjson.null or executionType == '' then executionType = 'function' end
-            if approval['name'] ~= execution['name'] or approval['arguments'] ~= execution['arguments']
-                or approvalType ~= executionType or approval['irreversible'] ~= execution['irreversible']
-                or approval['preflightPresent'] ~= execution['preflightPresent']
-                or cjson.encode(approval['preflight']) ~= cjson.encode(execution['preflight']) then
-              return {0, 'BAD_PAYLOAD'}
-            end
-            local evidence = approval['executed'] == true or (tonumber(approval['claimedAtMs']) or 0) > 0
-                or (tonumber(approval['claimedEpoch']) or 0) > 0 or (tonumber(approval['executedAtMs']) or 0) > 0
-            if approval['executedBy'] and approval['executedBy'] ~= cjson.null then evidence = true end
-            if evidence or redis.call('HEXISTS', KEYS[3], approvalField) == 1 then
-              return {0, 'CONFLICT_CLAIMED'}
-            end
-            local guard = redis.call('HGET', KEYS[2], approvalField)
-            if not guard or guard:match('^([^|]+)') ~= 'APPROVED' then return {0, 'CONFLICT_DECIDED'} end
-            if rawApproval == ARGV[3] and rawExecution == ARGV[4] then
-              local projectedEvidence = projected['executed'] == true
-                  or (tonumber(projected['claimedAtMs']) or 0) > 0 or (tonumber(projected['claimedEpoch']) or 0) > 0
-                  or (tonumber(projected['executedAtMs']) or 0) > 0
-              if projected['executedBy'] and projected['executedBy'] ~= cjson.null then projectedEvidence = true end
-              if projectedEvidence or projected['status'] ~= execution['status']
-                  or projected['outcome'] ~= execution['outcome'] or projected['code'] ~= execution['code']
-                  or projected['reason'] ~= execution['reason'] or projected['resultText'] ~= execution['resultText']
-                  or tonumber(projected['resolvedAtMs']) ~= tonumber(execution['resolvedAtMs']) then
-                return {0, 'BAD_PROJECTION'}
-              end
-              local epoch = tonumber(ARGV[7]) or 0
-              local fence = tonumber(redis.call('GET', KEYS[6]) or '0') or 0
-              if epoch > 0 and fence > epoch then return {0, 'STALE_EPOCH'} end
-              if redis.call('EXISTS', KEYS[4]) == 1 then return {0, 'CANCELLED'} end
-              redis.call('HSET', KEYS[1], approvalField, ARGV[5])
-              redis.call('PEXPIRE', KEYS[1], ARGV[6])
-              redis.call('PEXPIRE', KEYS[2], ARGV[6])
-              redis.call('PEXPIRE', KEYS[3], ARGV[6])
-              return {1, 'APPLIED'}
-            end
-            if rawApproval == ARGV[5] and rawExecution == ARGV[4]
-                and approval['status'] == execution['status'] and approval['outcome'] == execution['outcome']
-                and approval['code'] == execution['code'] and approval['reason'] == execution['reason']
-                and approval['resultText'] == execution['resultText']
-                and tonumber(approval['resolvedAtMs']) == tonumber(execution['resolvedAtMs']) then
-              return {1, 'IDEMPOTENT'}
-            end
-            return {0, 'CONFLICT_PENDING'}
             """, List.class);
 
     private static final RedisScript<List> CLAIM_EXECUTION_SCRIPT = new DefaultRedisScript<>("""
@@ -3875,15 +3700,6 @@ public class RunStore {
      */
     public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
                               List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
-        saveSuspended(runId, assistantContent, pendings, pendings, history, codec, assistantMetadata);
-    }
-
-    /**
-     * 分离展示/待决持久化清单与模型在飞清单：独立审批 A 可持久化出卡，但不进入模型恢复历史。
-     */
-    public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
-                              List<PendingToolCall> inFlightToolCalls, List<Message> history, MessageJsonCodec codec,
-                              Map<String, Object> assistantMetadata) {
         if (!isWritePermitted(runId, "suspended snapshot")) {
             throw new AiStateUnavailableException("Cannot confirm resume authority; refusing to write parked state " + runId);
         }
@@ -3902,7 +3718,7 @@ public class RunStore {
         }
         snapshot.setAssistantContent(assistantContent);
         snapshot.setAssistantMetadata(assistantMetadata == null ? null : new LinkedHashMap<>(assistantMetadata));
-        snapshot.setInFlightToolCalls(inFlightToolCalls);
+        snapshot.setInFlightToolCalls(pendings);
         snapshot.setMessageJson(codec.serializeAll(history));
         snapshot.setStatus(RunSnapshot.SUSPENDED);
         save(snapshot);
@@ -4324,65 +4140,6 @@ public class RunStore {
             log.warn("post-set request frame recheck failed runId={} toolCallId={} "
                     + "(keeping known entry, not blocking this turn)", runId, toolCallId, ex);
             return pending;
-        }
-    }
-
-    public record RequestClaim(boolean won, String outcome) {
-    }
-
-    /**
-     * 仅为已批准的 A/E 写入 E 的 req 首标记；原值、guard、链接和执行证据在 Lua 内复核。
-     */
-    public RequestClaim tryEmitApprovedFrontendRequest(String runId, PendingToolCall approval,
-                                                       PendingToolCall execution, long atMs) {
-        if (!isWritePermitted(runId, "approved frontend request")) {
-            throw new AiStateUnavailableException("Cannot reserve approved frontend request without run authority "
-                    + execution.getToolCallId());
-        }
-        try {
-            List<?> result = this.redis.execute(APPROVED_FRONTEND_REQUEST_SCRIPT,
-                    List.of(pendingKey(runId), reqKey(runId), decidedKey(runId), claimKey(runId),
-                            CancellationRegistry.cancelKey(runId), fenceKey(runId)),
-                    approval.getToolCallId(), execution.getToolCallId(), this.mapper.writeValueAsString(approval),
-                    this.mapper.writeValueAsString(execution), String.valueOf(atMs), String.valueOf(ttlFor(runId).toMillis()),
-                    String.valueOf(heldRunEpoch(runId)));
-            if (result == null || result.size() < 2) {
-                throw new AiStateUnavailableException("Approved frontend request script returned no result " + runId);
-            }
-            return new RequestClaim(((Number) result.getFirst()).longValue() == 1L, String.valueOf(result.get(1)));
-        } catch (AiStateUnavailableException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            throw new AiStateUnavailableException("Failed to reserve approved frontend request " + execution.getToolCallId(), ex);
-        }
-    }
-
-    /**
-     * 将真实 FRONTEND E 终局原子投影到 APPROVED A；仅完整同值重放按幂等接受。
-     */
-    public boolean isPreExecutionApprovalConverged(String runId, PendingToolCall expectedApproval,
-                                                   PendingToolCall expectedExecution, PendingToolCall projectedApproval) {
-        if (!isWritePermitted(runId, "pre-execution approval completion")) {
-            throw new AiStateUnavailableException("Cannot converge pre-execution approval without run authority "
-                    + expectedApproval.getToolCallId());
-        }
-        try {
-            List<?> result = this.redis.execute(CONVERGE_PRE_EXECUTION_APPROVAL_SCRIPT,
-                    List.of(pendingKey(runId), decidedKey(runId), claimKey(runId), CancellationRegistry.cancelKey(runId),
-                            reqKey(runId), fenceKey(runId)),
-                    expectedApproval.getToolCallId(),
-                    expectedExecution.getToolCallId(), this.mapper.writeValueAsString(expectedApproval),
-                    this.mapper.writeValueAsString(expectedExecution), this.mapper.writeValueAsString(projectedApproval),
-                    String.valueOf(ttlFor(runId).toMillis()), String.valueOf(heldRunEpoch(runId)));
-            if (result == null || result.size() < 2) {
-                throw new AiStateUnavailableException("Approval completion script returned no result " + runId);
-            }
-            return ((Number) result.getFirst()).longValue() == 1L;
-        } catch (AiStateUnavailableException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            throw new AiStateUnavailableException("Failed to converge pre-execution approval "
-                    + expectedApproval.getToolCallId(), ex);
         }
     }
 
@@ -5230,17 +4987,6 @@ public class RunStore {
     }
 
     /**
-     * 取消键的权威读口；读取失败按基础设施异常抛出，调用方不得按未取消放行。
-     */
-    public boolean hasCancellationSignal(String runId) {
-        try {
-            return Boolean.TRUE.equals(this.redis.hasKey(CancellationRegistry.cancelKey(runId)));
-        } catch (Exception ex) {
-            throw new AiStateUnavailableException("Failed to read cancellation signal " + runId, ex);
-        }
-    }
-
-    /**
      * 取消落地：把该轮**可证明未执行**的挂起条目一次性标为 {@link PendingToolCall#CANCELLED}
      * 且 {@code executed=false}。
      *
@@ -5858,18 +5604,12 @@ public class RunStore {
     }
 
     private DecisionClaim applyDecision(String runId, PendingToolCall pending, String expectedGuard) {
-        if ((StringUtils.isNotBlank(pending.getPreExecutionApprovalId())
-                || StringUtils.isNotBlank(pending.getExecutionToolCallId()))
-                && !isWritePermitted(runId, "linked frontend decision")) {
-            throw new AiStateUnavailableException("Cannot write linked frontend decision without run authority "
-                    + pending.getToolCallId());
-        }
         String value = pending.getStatus() + "|" + System.currentTimeMillis() + "|" + this.instanceId;
         try {
             List<?> result = this.redis.execute(DECIDE_PENDING_SCRIPT,
-                    List.of(pendingKey(runId), decidedKey(runId), claimKey(runId), reqKey(runId), fenceKey(runId)),
-                    pending.getToolCallId(), this.mapper.writeValueAsString(pending), value,
-                    String.valueOf(ttlFor(runId).toMillis()), expectedGuard, String.valueOf(heldRunEpoch(runId)));
+                    List.of(pendingKey(runId), decidedKey(runId), claimKey(runId)), pending.getToolCallId(),
+                    this.mapper.writeValueAsString(pending), value, String.valueOf(ttlFor(runId).toMillis()),
+                    expectedGuard);
             if (result == null || result.size() < 2) {
                 throw new AiStateUnavailableException("Decision script returned null " + pending.getToolCallId());
             }

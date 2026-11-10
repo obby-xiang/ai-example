@@ -178,7 +178,7 @@ public class PreExecutionApprovalService {
                 || PendingToolCall.REJECTED.equals(executionStatus)) {
             throw invalidLink("approval state is inconsistent with execution completion");
         }
-        throw invalidLink("completion requires the RunStore APPROVED expected-status CAS with req, fence and full projection checks");
+        throw invalidLink("completion requires an APPROVED expected-status CAS, which RunStore does not expose");
     }
 
     private static boolean isCompletionProjection(PendingToolCall approval, PendingToolCall execution) {

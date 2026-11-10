@@ -1244,38 +1244,20 @@ public class ResumeService {
 
     private ResumeResult checkResumeAdmission(ResumeState state, boolean forceTakeover) {
         ResumeResult result = cancelStateOutcome(state.runId, state.body);
-        if (result != null) {
-            return result;
-        }
+        if (result != null) return result;
         result = terminalResumeResult(state);
-        if (result != null) {
-            return result;
-        }
+        if (result != null) return result;
         result = liveDriverResumeResult(state);
-        if (result != null) {
-            return result;
-        }
+        if (result != null) return result;
         result = runningResumeResult(state, forceTakeover);
-        if (result != null) {
-            return result;
-        }
+        if (result != null) return result;
         result = providerResumeResult(state);
-        if (result != null) {
-            return result;
-        }
+        if (result != null) return result;
         result = unresolvedResumeResult(state);
-        if (result != null) {
-            return result;
-        }
+        if (result != null) return result;
         result = sessionGateResumeResult(state);
-        if (result != null) {
-            return result;
-        }
-        result = authorityResumeResult(state);
-        if (result != null) {
-            return result;
-        }
-        return advancePreExecutionResumeResult(state);
+        if (result != null) return result;
+        return authorityResumeResult(state);
     }
 
     private ResumeResult terminalResumeResult(ResumeState state) {
@@ -1394,27 +1376,7 @@ public class ResumeService {
         List<PendingToolCall> unresolved = state.pendings.stream()
                 .filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
                 .filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-                .filter(pending -> !this.toolCallingManager.isPreExecutionDecisionFinal(state.runId, pending))
                 .toList();
-        return pendingResumeResult(state, unresolved);
-    }
-
-    private ResumeResult advancePreExecutionResumeResult(ResumeState state) {
-        boolean hasLinkedEntries = state.pendings.stream()
-                .anyMatch(pending -> StringUtils.isNotBlank(pending.getPreExecutionApprovalId()));
-        if (!hasLinkedEntries) {
-            return null;
-        }
-        this.toolCallingManager.advancePreExecutionApprovals(state.runId, state.pendings);
-        state.pendings = this.store.pendings(state.runId);
-        List<PendingToolCall> unresolved = state.pendings.stream()
-                .filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
-                .filter(pending -> !PendingToolCall.KIND_BACKEND.equals(pending.getKind()))
-                .toList();
-        return pendingResumeResult(state, unresolved);
-    }
-
-    private ResumeResult pendingResumeResult(ResumeState state, List<PendingToolCall> unresolved) {
         if (unresolved.isEmpty()) {
             return null;
         }
@@ -1422,16 +1384,6 @@ public class ResumeService {
         state.body.put("reason", "PENDING_UNRESOLVED");
         state.body.put("unresolved", unresolved.stream().map(PendingToolCall::asMap).toList());
         return new ResumeResult(Outcome.PENDING_UNRESOLVED, state.body);
-    }
-
-    public boolean hasPreExecutionRecoveryDue(String runId) {
-        return this.store.pendings(runId).stream()
-                .anyMatch(pending -> isPreExecutionRecoveryDue(runId, pending));
-    }
-
-    public boolean isPreExecutionRecoveryDue(String runId, PendingToolCall pending) {
-        return PendingToolCall.PENDING.equals(pending.getStatus()) && !Boolean.TRUE.equals(pending.getReq())
-                && this.toolCallingManager.isPreExecutionDecisionFinal(runId, pending);
     }
 
     private ResumeResult sessionGateResumeResult(ResumeState state) {

@@ -5521,6 +5521,41 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1221最终APPROVE；生产文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，24.90秒；动态UI/表格场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a0f3bf3e2651719067b8b8b1e4a70ac48a2eb3b12651bd134f82cebaf2930b18",
+      "status": "reviewed",
+      "reason": "按用户确认的止血方案回退97ec890c的A/E分发、CAS、恢复和只读切页变化，保留Task1模型提交与Task3独立清退；逐hunk核对回退范围。",
+      "reviewedAt": "2026-11-10T18:45:18+08:00",
+      "reviewer": "K3.1 Pro主会话",
+      "specChanges": [
+        {
+          "change": "回退97ec890c的执行前审批分发、首次完成CAS、恢复和下载/编辑器viewStep改动。",
+          "reason": "完整影响面审查确认当前A/E接入风险不可接受，用户决定先恢复核心导出流程。",
+          "impact": "该提交特有的A/E运行态全部撤销，Task1链接模型提交仍保留，普通UI撤销清退不受影响。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "仅回退97ec890c的批准/回灌变化。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/PreExecutionApprovalService.java", "status": "checked", "reason": "仅回退该提交的异常文案变化。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "仅回退A/E分发与完成投影变化。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "仅回退A/E恢复判据变化。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "仅回退首次完成CAS及写权变化。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "仅回退该提交新增的取消写门。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java", "status": "checked", "reason": "仅回退临时启动防线移除。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "仅回退该提交的恢复字段变化。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "仅回退preExecutionRecoveryDue类型字段。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "仅回退该提交的viewStep变化。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "回退至既有工具链，不引入新依赖。"},
+        "java-api-style": {"status": "checked", "reason": "仅逆向移除该提交变化，不引入新代码形态。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复原错误处理，不新增异常掩盖。"},
+        "toc-interaction": {"status": "checked", "reason": "撤销A/E接入，恢复原下载与工具卡职责。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "撤销A/E CAS与恢复实现，其他已提交状态机不变。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "按用户指令执行git revert并逐hunk核对；回退后由DeepSeek复测核心导出场景，当前动态验证NOT_RUN。"}
+      }
     }
   ]
 }

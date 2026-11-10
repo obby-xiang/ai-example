@@ -3979,10 +3979,6 @@ public class SseChatEmitter {
     private boolean canEmitBusinessFrame(String frameType) {
         LeaseService.LeaseAuthority authority;
         try {
-            if ("frontend_tool_request".equals(frameType) && this.store.hasCancellationSignal(this.runId)) {
-                log.info("dropping frontend tool request after cancellation runId={}", this.runId);
-                return false;
-            }
             authority = this.store.runLeaseAuthority(this.runId);
         } catch (RuntimeException ex) {
             authority = LeaseService.LeaseAuthority.UNAVAILABLE;
