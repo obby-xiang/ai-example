@@ -1,7 +1,6 @@
 package com.example.configmgr.ai.form;
 
 import com.example.configmgr.ai.tool.AiToolNames;
-import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.task.service.TaskSteps;
 
@@ -130,15 +129,6 @@ public final class GenerativeFormRules {
 	/** 缺省用途：兼容既有 {@code generative_form} 调用（它们没有 purpose 字段）。 */
 	public static final String DEFAULT_PURPOSE = FormPurposes.DEFAULT;
 
-	/** 通用澄清（显式声明时不再按结构推断；创建入口页由闸门另行判定）。 */
-	public static final String PURPOSE_GENERAL_CLARIFY = FormPurposes.GENERAL_CLARIFY;
-
-	/**
-	 * 配置项选择表单的协议字段键：与宿主选择表单同一字段
-	 * （{@link DefinitionSelectionForm#FIELD_KEY}）。
-	 */
-	public static final String FIELD_KEY_DEF_CODES = DefinitionSelectionForm.FIELD_KEY;
-
 	public static final List<String> FORM_PURPOSES = FormPurposes.ALL;
 
 	/** 任务类型表单的选项闭集（与 {@code Task.TaskType} 同名）。 */
@@ -223,63 +213,6 @@ public final class GenerativeFormRules {
 
 	public static boolean isConditionsStepAllowed(String step) {
 		return TaskSteps.allowsConditionCollection(step);
-	}
-
-	/**
-	 * 表单是否在收集<b>配置项</b>：以 {@code definitions} 为数据源，或直接声明宿主选择表单的
-	 * {@code defCodes} 键。
-	 *
-	 * <p>
-	 * 只认<b>无歧义</b>的配置项判据：{@code level}/{@code conditions} 等通用字段名可能属于真实非配置
-	 * 缺口（如“熟练程度”），不参与判断；标题/label 与用户话术同样不参与。结构判据与用途推断共用
-	 * {@link FormPurposes#hasDefinitionsSelection}，不另写一套。
-	 */
-	public static boolean hasCreateSlotCollection(JsonNode form) {
-		if (form == null || !form.isObject()) {
-			return false;
-		}
-		if (FormPurposes.hasDefinitionsSelection(form)) {
-			return true;
-		}
-		for (JsonNode field : form.path("fields")) {
-			if (FIELD_KEY_DEF_CODES.equals(field.path("key").asText())) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * <b>创建入口优先</b>：尚未绑定任务的创建入口页上，创建前置表单不得代替创建。
-	 *
-	 * <p>
-	 * 判据全部来自系统状态（任务号、页面、用途、表单结构），不看用户话术、不看模型名：
-	 * <ul>
-	 * <li>已绑定任务（{@code taskId != null}）⇒ 不拦截，创建后的澄清与槽位规则照旧；</li>
-	 * <li>页面不属于创建入口（{@link ContextBuilder#CREATE_ENTRY_PAGE_IDS}）⇒ 不拦截，
-	 * 只读问答页面的澄清表单不受影响；</li>
-	 * <li>{@code SELECT_DEFINITIONS}：<b>显式用途本身即命中</b>，不要求字段叫 {@code defCodes}
-	 * 或使用动态数据源（静态选项、{@code defs} 等非标准键同样拦截）；</li>
-	 * <li>{@code GENERAL_CLARIFY}：只在结构命中无歧义配置项判据（{@code definitions} 数据源或
-	 * {@code defCodes} 键）时拦截；{@code level}/{@code conditions} 等通用字段名不放行猜测，
-	 * 真实非配置项缺口仍可用表单；</li>
-	 * <li>其它用途不拦截（{@code TASK_TYPE} 类型未知时仍由宿主类型表单收集）。</li>
-	 * </ul>
-	 *
-	 * <p>
-	 * 创建后的配置项收集方式按任务类型不同：EXPORT 有宿主一次性选择表单；IMPORT 没有该宿主表单，
-	 * 由导入向导 UPLOAD 页的配置选择控件收集（{@code ImportWizardView} 的 {@code DefSelector}，
-	 * 提交点在「下一步」）。拦截理由必须分别表述，不得承诺 IMPORT 有同样的宿主表单。
-	 */
-	public static boolean isCreateEntryRequired(String purpose, boolean hasCreateSlotCollection, String page,
-			Long taskId) {
-		if (taskId != null || page == null || !ContextBuilder.CREATE_ENTRY_PAGE_IDS.contains(page)) {
-			return false;
-		}
-		if (PURPOSE_SELECT_DEFINITIONS.equals(purpose)) {
-			return true;
-		}
-		return PURPOSE_GENERAL_CLARIFY.equals(purpose) && hasCreateSlotCollection;
 	}
 
 	/** 普通 text 的硬顶（保留；前端同源）。 */

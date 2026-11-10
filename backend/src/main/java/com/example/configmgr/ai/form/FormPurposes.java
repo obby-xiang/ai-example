@@ -106,14 +106,8 @@ public final class FormPurposes {
 		return purpose != null && purpose.equals(resolve(form));
 	}
 
-	/**
-	 * 表单里是否有"配置定义选择"的明确结构：{@code optionsFrom.sourceId=definitions}。
-	 *
-	 * <p>
-	 * 既是缺省 purpose 的结构推断依据，也是 {@code GenerativeFormGuard} 判定"这张表在收集配置项"的
-	 * 唯一实现（创建入口优先与用途推断共用，不另写一套）。
-	 */
-	public static boolean hasDefinitionsSelection(JsonNode form) {
+	/** 表单里是否有"配置定义选择"的明确结构：{@code optionsFrom.sourceId=definitions}。 */
+	private static boolean hasDefinitionsSelection(JsonNode form) {
 		for (JsonNode field : form.path("fields")) {
 			if (SOURCE_DEFINITIONS.equals(field.path("optionsFrom").path("sourceId").asText())) {
 				return true;

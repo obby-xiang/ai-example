@@ -1743,23 +1743,11 @@ public class ResilientChatService {
 
     private boolean isCreateTaskWrapUpCorrectionDue(String runId, AiContext fallback, String lastUserText) {
         AiContext context = latestContext(runId, fallback);
-        if (context == null || context.getTaskId() != null || !disclosedTool(context, AiToolNames.CREATE_TASK)) {
+        if (!TaskIntent.isNewTaskIntent(lastUserText)
+                || context == null || context.getTaskId() != null || !disclosedTool(context, AiToolNames.CREATE_TASK)) {
             return false;
         }
         try {
-            // 步数已到顶（本轮已追加 STEP_LIMIT_WRAP_UP）时不得再要求模型调用工具：
-            // 第二次“请调用 create_task”会与步数收尾矛盾，并可能产生被步数跳过的可见创建卡。
-            RunSnapshot snapshot = this.store.get(runId);
-            int maxToolSteps = Math.max(1, this.properties.getResilience().getMaxToolSteps());
-            if (snapshot == null || snapshot.getToolSteps() >= maxToolSteps) {
-                return false;
-            }
-            // 拒绝后的文字收尾不再依赖用户原文正则：本 run 发生过创建入口专用拒绝（结构化事实）
-            // 即可触发；非拒绝路径仍沿用既有新任务意图判据。
-            boolean createEntryRejected = hasCreateEntryRejection(runId);
-            if (!createEntryRejected && !TaskIntent.isNewTaskIntent(lastUserText)) {
-                return false;
-            }
             for (PendingToolCall pending : this.store.pendings(runId)) {
                 if (pending != null && AiToolNames.CREATE_TASK.equals(pending.getName())) {
                     return false;
@@ -1777,22 +1765,6 @@ public class ResilientChatService {
         }
     }
 
-    /**
-     * 本 run 是否发生过“创建入口优先”零副作用拒绝（{@code FORM_CREATE_ENTRY_REQUIRED}）。
-     *
-     * <p>pending 条目自带 name/code，拒绝已结算并持久化，因此这是可复核的结构化事实，
-     * 不需要再解析用户原话。只读：不写任何条目。
-     */
-    private boolean hasCreateEntryRejection(String runId) {
-        for (PendingToolCall pending : this.store.pendings(runId)) {
-            if (pending != null && AiToolNames.GENERATIVE_FORM.equals(pending.getName())
-                    && ErrorCodes.FORM_CREATE_ENTRY_REQUIRED.equals(pending.getCode())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static String creationTaskType(AiContext context) {
         return context == null ? null : creationTaskType(context.getTaskType());
     }
@@ -1807,29 +1779,11 @@ public class ResilientChatService {
 
     static String createTaskWrapUpCorrection() {
         return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
-                + "如果用户本轮是在要求新建任务，请调用一次 create_task；不要只列配置、用文字反问，"
-                + "也不要用表单收集配置项、层级或筛选条件。"
+                + "如果用户本轮是在要求新建任务，请调用一次 create_task；不要只列配置或用文字反问。"
                 + "按当前结构化创建上下文传 type=EXPORT 或 IMPORT；类型无法证明时不要猜测。"
                 + "EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；"
                 + "IMPORT 不得附加导出条件。defCodes 未知时省略，不得先查目录或追问。"
                 + "如果用户只是查询、普通问答或闲聊而不要求新建，直接回答，不得重复已经执行的工具，也不得自动批准创建。";
-    }
-
-    /**
-     * 纠正文案的类型提示：显式 taskType 优先；缺失时由创建入口页推断（import/export）。
-     * 未知类型沿用通用文案（EXPORT/IMPORT 两种调用分别描述）。
-     */
-    private static String createTaskWrapUpCorrection(AiContext context) {
-        String taskType = creationTaskType(context);
-        if (taskType == null && context != null) {
-            if ("import".equals(context.getPage())) {
-                taskType = "IMPORT";
-            }
-            else if ("export".equals(context.getPage())) {
-                taskType = "EXPORT";
-            }
-        }
-        return createTaskWrapUpCorrection(taskType);
     }
 
     private static String createTaskWrapUpCorrection(String taskType) {
@@ -2208,7 +2162,7 @@ public class ResilientChatService {
         // 类型由触发分支显式传入；再用持久化 marker 确认 create_task 纠正确实已登记。
         // 不能看 prefix key：正文全部由工具卡承载时 prefix 为空、prefix key 本就不写。
         boolean createTaskCorrection = createTaskCorrectionActive && isCreateTaskCorrectionMarked(snapshot);
-        history.add(new UserMessage(createTaskCorrection ? createTaskWrapUpCorrection(latest)
+        history.add(new UserMessage(createTaskCorrection ? createTaskWrapUpCorrection(latest.getTaskType())
                 : exportWrapUpCorrection(latest.getTaskId())));
         Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
@@ -3988,91 +3942,13 @@ public class ResilientChatService {
                 false);
     }
 
-    /**
-     * 终态 transcript 过滤：创建入口专用零副作用拒绝（{@code FORM_CREATE_ENTRY_REQUIRED}）没有用户帧，
-     * 时间线里也就没有对应工具段。若原样保留，{@code completeTimeline} 会因“有 toolCalls 无 segment”
-     * 判 {@code AI_TRANSCRIPT_INCOMPLETE}，把一次正常收尾变成错误。
-     *
-     * <p>这里只删除<b>专用码</b>的 toolCall 及其 TOOL 响应（assistant 正文保留），其它码/正常工具不动。
-     * 与前端历史幻影卡的过滤口径一致：模型回执与条目仍有码可查，用户面不再出现该调用。
-     */
-    private static List<Message> withoutCreateEntryRejections(Map<String, PendingToolCall> pendings,
-                                                              List<Message> history) {
-        Set<String> rejectedIds = createEntryRejectedIds(pendings);
-        if (rejectedIds.isEmpty()) {
-            return history;
-        }
-        List<Message> out = new ArrayList<>(history.size());
-        for (Message message : history) {
-            Message filtered = null;
-            if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-                filtered = withoutRejectedToolCalls(assistant, rejectedIds);
-            }
-            else if (message instanceof ToolResponseMessage tool && CollectionUtils.isNotEmpty(tool.getResponses())) {
-                filtered = withoutRejectedToolResponses(tool, rejectedIds);
-            }
-            else {
-                filtered = message;
-            }
-            if (filtered != null) {
-                out.add(filtered);
-            }
-        }
-        return out;
-    }
-
-    /** 专用码拒绝的 toolCallId 集合（只读 pendings；其它码/工具不进集合）。 */
-    private static Set<String> createEntryRejectedIds(Map<String, PendingToolCall> pendings) {
-        Set<String> rejectedIds = new LinkedHashSet<>();
-        for (PendingToolCall pending : pendings.values()) {
-            if (pending != null && AiToolNames.GENERATIVE_FORM.equals(pending.getName())
-                    && ErrorCodes.FORM_CREATE_ENTRY_REQUIRED.equals(pending.getCode())) {
-                rejectedIds.add(pending.getToolCallId());
-            }
-        }
-        return rejectedIds;
-    }
-
-    /** 去掉专用码拒绝的 toolCall（正文保留）；没有可删的返回原消息。 */
-    private static Message withoutRejectedToolCalls(AssistantMessage assistant, Set<String> rejectedIds) {
-        List<AssistantMessage.ToolCall> kept = new ArrayList<>();
-        for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
-            if (!rejectedIds.contains(call.id())) {
-                kept.add(call);
-            }
-        }
-        if (kept.size() == assistant.getToolCalls().size()) {
-            return assistant;
-        }
-        return AssistantMessage.builder()
-                .content(assistant.getText())
-                .properties(assistant.getMetadata() == null ? Map.of() : assistant.getMetadata())
-                .toolCalls(kept)
-                .build();
-    }
-
-    /** 去掉专用码拒绝的 TOOL 响应；全被删时整条消息移除（返回 null）。 */
-    private static Message withoutRejectedToolResponses(ToolResponseMessage tool, Set<String> rejectedIds) {
-        List<ToolResponseMessage.ToolResponse> kept = new ArrayList<>();
-        for (ToolResponseMessage.ToolResponse response : tool.getResponses()) {
-            if (!rejectedIds.contains(response.id())) {
-                kept.add(response);
-            }
-        }
-        if (kept.size() == tool.getResponses().size()) {
-            return tool;
-        }
-        return kept.isEmpty() ? null : ToolResponseMessage.builder().responses(kept).build();
-    }
-
     private List<TranscriptEntry> buildTerminalEntries(String runId, RunSnapshot snapshot, List<Message> history,
                                                        boolean includeLastAssistant) {
         Map<String, PendingToolCall> pendings = transcriptPendings(runId);
-        List<Message> effectiveHistory = withoutCreateEntryRejections(pendings, history);
-        List<Message> withStates = new ArrayList<>(effectiveHistory.size());
+        List<Message> withStates = new ArrayList<>(history.size());
         Map<String, String> resolvedStatuses = new LinkedHashMap<>();
         Predicate<String> executedInLedger = toolCallId -> MapUtils.isNotEmpty(ledgerEntry(runId, toolCallId));
-        for (Message message : effectiveHistory) {
+        for (Message message : history) {
             if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
                 ResolvedToolStates resolved = resolveToolStates(runId, assistant, pendings, snapshot.getStatus(),
                         executedInLedger);

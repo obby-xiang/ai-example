@@ -91,8 +91,7 @@
 # 2026-10-27.33 → 2026-10-27.34：任务 COMPLETED 不单独作为重复导出判据；只有已有成功 EXPORT 作业才禁止重复导出。
 # 2026-10-27.34 → 2026-10-27.35：item IMPORTED/任务 COMPLETED 不等于已发布；只有已有成功 PUBLISH 作业才禁止重复发布。
 # 2026-10-27.35 → 2026-10-27.36：start_export 按本 run 条目去重；旧任务、openWizard=false 后明确启动及 park 未启用等路径保留模型调用。
-# 2026-10-27.36 → 2026-10-27.37：create_task 的 defCodes 收集说明按类型拆分——EXPORT 宿主一次性选择表单，IMPORT 由导入向导 UPLOAD 页选择。
-version: 2026-10-27.37
+version: 2026-10-27.36
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -138,7 +137,7 @@ tools:
       已知条件传与 set_condition 相同的结构并同时给 defCodes，未决定传 {}（这里的 {} 只表示条件未决定，
       不是 set_condition 的“明确不设”），不得省略。
       defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。
-      只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略。创建后的配置项收集按类型：EXPORT 由宿主一次性选择表单；IMPORT 由导入向导 UPLOAD 页选择配置项。
+      只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。
       条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次
       非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用
       SET_CONDITIONS 表单。标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。

@@ -426,7 +426,7 @@ public class AiTools {
      */
     @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。"
             + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：已知条件传与 set_condition 相同的结构并同时给 defCodes，未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。"
-            + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略。创建后的配置项收集按类型：EXPORT 由宿主一次性选择表单；IMPORT 由导入向导 UPLOAD 页选择配置项。"
+            + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。"
             + "条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
             + "标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。"
             + "“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。"
@@ -439,7 +439,7 @@ public class AiTools {
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
-            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；未明确就不传；EXPORT 创建后由宿主弹一次配置项选择表单，IMPORT 由导入向导 UPLOAD 页选择配置项。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
+            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
             @ToolParam(description = "导出任务必传：已知筛选条件传与 set_condition 相同的 FieldQueryCondition 结构（同时给 defCodes），未决定传 {}（表示条件未决定，不是“明确不设”）；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
             @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
             @ToolParam(description = "是否让宿主创建后自动打开向导并续接配置。“创建任务”只是流程入口，不等于“只创建”；默认完整续接，省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false（宿主不得自动导航、代选或发配置表单，以后用户明确打开/配置仍可继续）", required = false) Boolean openWizard,
@@ -896,12 +896,7 @@ public class AiTools {
      * 或 {@code purpose=SET_CONDITIONS} 且条件已覆盖全部配置项 ⇒ {@code FORM_SLOTS_ALREADY_KNOWN}
      * 且<b>不挂起、不下发</b>（零副作用），把模型引回 select_definitions / set_condition；缺槽位、
      * 歧义与 {@code GENERAL_CLARIFY} 放行（2026-10-29 追加：{@code TASK_TYPE} 且任务类型已确定、
-     * {@code SET_CONDITIONS} 且当前步骤已在 {@code EXPORT}/之后，同样零副作用拒绝）；
-     * 2026-11-10 追加创建入口优先：尚未绑定任务的创建入口页上，{@code SELECT_DEFINITIONS} 显式用途
-     * 本身即拒绝，{@code GENERAL_CLARIFY} 收集 {@code defCodes} 或 {@code definitions} 数据源时拒绝
-     * （{@code level}/{@code conditions} 等通用字段名不参与判断），统一指回 {@code create_task}；
-     * 创建后 EXPORT 由宿主选择表单、
-     * IMPORT 由导入向导 UPLOAD 页收集配置项；</li>
+     * {@code SET_CONDITIONS} 且当前步骤已在 {@code EXPORT}/之后，同样零副作用拒绝）；</li>
      * <li><b>回灌类型复核</b>（回灌时）：值必须与 schema 的类型逐字段相符（number 是数、date 是
      * {@code yyyy-MM-dd} 合法日期、enum/multi_select 的值必须在选项内、未知字段拒绝、必填缺失拒绝），
      * 不符即 400 {@code FORM_RESULT_REJECTED} 且<b>挂起保持未决</b>（可修正后重试）；</li>

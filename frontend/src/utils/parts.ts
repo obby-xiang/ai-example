@@ -603,25 +603,18 @@ export function frontendResultStatus(status: unknown): ToolRunStatus | null {
  * <p>共同点：被判的是模型输入或调用顺序，不是用户的动作 —— 零副作用、有明确纠正出口，
  * 后端只把结论回执模型，不对用户发任何卡片帧。
  * <ul>
- * <li>{@code generative_form}：{@code FORM_SLOTS_ALREADY_KNOWN}（没有信息缺口）、
- * {@code FORM_SCHEMA_REJECTED}（schema 未过白名单）与 {@code FORM_CREATE_ENTRY_REQUIRED}
- * （创建入口优先：创建前不收集配置项/层级/条件）；</li>
+ * <li>{@code generative_form}：{@code FORM_SLOTS_ALREADY_KNOWN}（没有信息缺口）与
+ * {@code FORM_SCHEMA_REJECTED}（schema 未过白名单）；</li>
  * <li>{@code confirm_step}：{@code FORM_SLOTS_ALREADY_KNOWN}（条件已具备）与
  * {@code CONDITION_OPERATOR_UNKNOWN}（条件操作符需要模型纠正）。</li>
  * </ul>
  */
 export const FORM_SLOTS_ALREADY_KNOWN = 'FORM_SLOTS_ALREADY_KNOWN'
 
-export const FORM_CREATE_ENTRY_REQUIRED = 'FORM_CREATE_ENTRY_REQUIRED'
-
 const FORM_SCHEMA_REJECTED = 'FORM_SCHEMA_REJECTED'
 const CONDITION_OPERATOR_UNKNOWN = 'CONDITION_OPERATOR_UNKNOWN'
 
-const SYSTEM_REJECT_GENERATIVE_FORM_CODES = new Set([
-  FORM_SLOTS_ALREADY_KNOWN,
-  FORM_SCHEMA_REJECTED,
-  FORM_CREATE_ENTRY_REQUIRED
-])
+const SYSTEM_REJECT_GENERATIVE_FORM_CODES = new Set([FORM_SLOTS_ALREADY_KNOWN, FORM_SCHEMA_REJECTED])
 const SYSTEM_REJECT_CONFIRM_STEP_CODES = new Set([FORM_SLOTS_ALREADY_KNOWN, CONDITION_OPERATOR_UNKNOWN])
 
 /**
