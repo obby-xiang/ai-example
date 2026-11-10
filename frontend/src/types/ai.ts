@@ -1128,9 +1128,22 @@ export interface AiBusyRunRef {
   reattach: string | null
 }
 
+/** 权威 probe 从快照或真实归档末帧读到的终态事实；缺字段 = 未证明。 */
+export interface AuthoritativeTerminalFacts {
+  snapshotStatus?: string | null
+  runStatus?: string | null
+  code?: string | null
+  message?: string | null
+  transcriptDegraded?: boolean
+  historyComplete?: boolean
+  unconfirmed?: boolean
+  /** 权威取消终态，或调用方主动中止连接的正常收尾。 */
+  cancelled?: boolean
+}
+
 /** SSE 一轮的收尾判定结果。 */
-export interface StreamCloseInfo {
-  /** 是否收到终帧（done/error）；false = 断流，按 ADR-6 提示 */
+export interface StreamCloseInfo extends AuthoritativeTerminalFacts {
+  /** 是否收到终帧或经权威探测确认终态；false = 断流，按 ADR-6 提示 */
   terminal: boolean
   lastFrame?: SseFrame | null
   /** 已尝试过的重连次数 */
@@ -1148,11 +1161,6 @@ export interface StreamCloseInfo {
    * 建连超时走 `ApiError.code`（`CHAT_CONNECT_TIMEOUT`），不落本字段。
    */
   timeoutStage?: SseTimeoutStage
-  /**
-   * 调用方主动中止（`SseStreamOptions.signal` 被 abort）：这是**停止**的正常收尾，
-   * 不是网络/传输失败。调用方据此不写 NETWORK_ERROR、不出错误卡、不改轮次结局。
-   */
-  cancelled?: boolean
 }
 
 /** 前端开发期读取 Spring AI 历史时使用的宽松消息快照（供对账比较）。 */

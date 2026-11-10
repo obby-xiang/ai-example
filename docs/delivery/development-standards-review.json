@@ -5669,6 +5669,51 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "核对207/415正文和segments精确归属，未按长度拟合生产算法。"},
         "verification-review": {"status": "checked", "reason": "独立脚本node --check通过；check-docs仅因4个既有11-06研究文档禁用路径命中失败，本批无新增命中；生产修改为零，真实复发run证据仍缺失。"}
       }
+    },
+    {
+      "fingerprint": "sha256:02a219357cb326f64c32c91653b4e1d9cf61007ab6e05fee6a8090806ebf9826",
+      "status": "reviewed",
+      "reason": "逐hunk复核终态刷新恢复、归档probe、单次onClose、unconfirmed专用恢复及duplicate结局；独立审查agent-1234多轮返修后最终APPROVE。",
+      "reviewedAt": "2026-11-11T02:22:08+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1234、施工agent-1225",
+      "specChanges": [
+        {
+          "change": "权威运行终态与历史完整性解耦，终态不再重建在途宿主或无限reattach。",
+          "reason": "刷新后恢复动效、工作中和日期时间操作区交替源于DONE仍被恢复成在途轮。",
+          "impact": "同run宿主按真实DONE/FAILED/CANCELLED/REJECTED封口，正文、卡片、降级标记和其他run状态保留。"
+        },
+        {
+          "change": "probe additive读取归档终帧并传递必要终态语义，awaitsInput和末代连接也允许一次有界probe。",
+          "reason": "lastSeq越过终帧或快照TTL缺失时不能只靠回放终帧判终态。",
+          "impact": "真实终帧优先于陈旧快照；historyComplete仅显式透传，不由DONE推导，不新增AI数据库访问。"
+        },
+        {
+          "change": "主/chat只发布一次onClose，duplicate首次权威probe后按真实结局返回，终态清理与恢复登记按run幂等。",
+          "reason": "重复onClose会取消并重启恢复，duplicate提前ok会掩盖失败或取消。",
+          "impact": "unconfirmed只由同run专用operation/排队/已发布去重，普通history在途不再阻断专用followup。"
+        },
+        {
+          "change": "transcript降级保留唯一专用警告和人工重读，DONE可发新轮，其他恢复原因继续禁发。",
+          "reason": "转录降级是历史保存不完整，不是仍在运行，也不能无限自动重读。",
+          "impact": "snapshot-only不删除transcriptDegraded/unconfirmed，只有新历史非降级DONE证据可reconcile清除。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "probe读取既有Redis归档末帧，additive终态字段及historyComplete缺省语义，无数据库扩张。"},
+        {"path": "frontend/src/api/sse.ts", "status": "checked", "reason": "每代一次有界probe、单次onClose、awaitsInput/末代收尾及权威终态传递。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "终态清理、duplicate结局、恢复幂等、同run followup和transcript人工恢复。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "StreamCloseInfo additive终态语义类型。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "专用恢复alert与人工重读入口，无重复notice按钮。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有probe、归档、终帧、恢复operation和alert，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "生产文件已IDEA Reformat，控制块、集合、JSON additive及布尔语义已审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "真实失败、取消、unconfirmed和transcript降级不掩盖，非终态/404/preparing/网络失败语义保留。"},
+        "toc-interaction": {"status": "checked", "reason": "终态后恢复动效和工作中停止，日期时间操作区稳定，真实警告与人工重试保留。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "probe归档优先、单次onClose、同run恢复去重、跨run隔离及duplicate时序已关联审查，无AI数据库扩张。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "正文和历史完整性不因终态封口被伪造，不由DONE推导historyComplete。"},
+        "verification-review": {"status": "checked", "reason": "agent-1234终审APPROVE；C-170~184按场景独立验证并绑定生产diff；后端358源BUILD SUCCESS，前端3281模块构建成功；DeepSeek复测NOT_RUN。"}
+      }
     }
   ]
 }

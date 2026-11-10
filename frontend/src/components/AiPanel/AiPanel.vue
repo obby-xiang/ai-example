@@ -1497,6 +1497,9 @@ function recoveryLoadError(): RecoveryLoadError | null {
   if (recovery.reason === 'unconfirmed') {
     return { scope: 'history', label: t('ai.panel.turnUnconfirmed'), detail: t('ai.panel.turnUnconfirmedHint') }
   }
+  if (recovery.reason === 'transcript-degraded') {
+    return { scope: 'history', label: t('ai.notice.transcriptDegraded'), detail: t('ai.panel.recoveryGapHint') }
+  }
   if (recovery.reason === 'first-frame') {
     return { scope: 'current', label: t('ai.panel.recoveryFailed'), detail: t('ai.notice.firstFrameTimeout') }
   }

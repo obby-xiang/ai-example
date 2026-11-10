@@ -22,7 +22,7 @@ import { identityHeaders } from '@/utils/ai-identity'
 import { logCaughtError } from '@/utils/log-caught-error'
 import { frameSeq, isTerminalFrame, toSseFrame } from '@/types/sse'
 import type { SseDoneFrame, SseErrorFrame, SseFrame } from '@/types/sse'
-import type { AiChatRequest, StreamCloseInfo } from '@/types/ai'
+import type { AiChatRequest, AuthoritativeTerminalFacts, StreamCloseInfo } from '@/types/ai'
 
 /**
  * 帧间静默上限：超过即判断流（后端挂起期有 heartbeat，正常不会触发）。
@@ -133,19 +133,11 @@ export interface PreparingProbe {
 }
 
 /** 批次3：重挂探测结果（只读状态，不消费响应体里的流）。 */
-export interface ReattachProbe {
+export interface ReattachProbe extends AuthoritativeTerminalFacts {
   /** HTTP 状态；0 = 请求未到达 */
   status: number
   /** 202 且 `preparing=true` 时非 null */
   preparing: PreparingProbe | null
-  /**
-   * 200 探测体里的服务端快照状态（{@code RUNNING} / {@code SUSPENDED} / 终态…）。
-   *
-   * <p>只用于让调用方判断"本轮是否仍在 park"：`SUSPENDED` ⇒ 正式重挂应按 park 语义建连
-   * （服务端收流属正常收尾，不误报断流）。缺省/null = 未知（非 JSON 应答 / 旧端点），
-   * 调用方不得据此猜测。
-   */
-  snapshotStatus?: string | null
 }
 
 /**
@@ -253,6 +245,7 @@ export interface SseStreamOptions {
 interface StreamState {
   runId: string | null
   terminal: boolean
+  terminalFacts: AuthoritativeTerminalFacts | null
   lastFrame: SseFrame | null
   reconnects: number
   /** 已收到的最大帧序号（T6：重挂时回传，服务端只补增量）。 */
@@ -269,7 +262,33 @@ interface StreamState {
 }
 
 function newState(): StreamState {
-  return { runId: null, terminal: false, lastFrame: null, reconnects: 0, lastSeq: null, awaitsInput: false }
+  return {
+    runId: null,
+    terminal: false,
+    terminalFacts: null,
+    lastFrame: null,
+    reconnects: 0,
+    lastSeq: null,
+    awaitsInput: false
+  }
+}
+
+function isTerminalSnapshotStatus(status: string | null | undefined): boolean {
+  const normalized = (status ?? '').toUpperCase()
+  return normalized === 'DONE' || normalized === 'FAILED' || normalized === 'CANCELLED' || normalized === 'REJECTED'
+}
+
+function terminalFactsOfProbe(probe: ReattachProbe): AuthoritativeTerminalFacts {
+  return {
+    snapshotStatus: probe.runStatus ?? probe.snapshotStatus ?? null,
+    runStatus: probe.runStatus ?? null,
+    code: probe.code ?? null,
+    message: probe.message ?? null,
+    transcriptDegraded: probe.transcriptDegraded,
+    historyComplete: probe.historyComplete,
+    unconfirmed: probe.unconfirmed,
+    cancelled: probe.cancelled
+  }
 }
 
 /** B1：挂起类请求帧 —— 服务端发出它们之后会主动收流（挂起即断）。 */
@@ -522,6 +541,7 @@ function finish(
   const suspended = !terminal && !cancelled && state.awaitsInput
   const info: StreamCloseInfo = {
     terminal,
+    ...(state.terminalFacts ?? {}),
     lastFrame: state.lastFrame,
     reconnects: state.reconnects,
     ...(reason === undefined ? {} : { reason }),
@@ -690,7 +710,7 @@ async function readStream(
  * <li>200 + `ready=true` ⇒ 快照已建/归档有终帧，立即 cancel 这条请求（调用方会走正式的 EventSource 重挂）；</li>
  * <li>404 / 503（`degraded`）等原样返回，由调用方决定封口或按时重试。</li>
  * </ul>
- * 本函数**不**消费流，也不重试；调用方**不得**在退避之前 await 它（探测慢不能推迟重连）。
+ * 本函数**不**消费流，也不自行重试。普通世代与已排退避并行；挂起或末代收尾前必须等待这一次有界结果。
  */
 export async function probeReattach(runId: string, signal?: AbortSignal): Promise<ReattachProbe> {
   const controller = new AbortController()
@@ -731,17 +751,28 @@ export async function probeReattach(runId: string, signal?: AbortSignal): Promis
     // 200 = 就绪（`ready=true` 的轻量 JSON）：读 `status` 判 park（SUSPENDED ⇒ 服务端会 park 收流），
     // 读完即收流，不留挂起的响应体。非 JSON 应答（中间层 / 旧端点 / 无 content-type）一律按
     // "未证明 park" 处理 —— 绝不为了一个可选判据去读一条可能是事件流的响应体。
-    let snapshotStatus: string | null = null
+    let terminalFacts: AuthoritativeTerminalFacts = {}
     const contentType = response.headers.get('content-type') ?? ''
     if (contentType.includes('application/json')) {
       try {
-        const body = await response.json() as { status?: unknown } | null
-        if (body && typeof body.status === 'string' && body.status !== '') {
-          snapshotStatus = body.status
+        const body = await response.json() as Record<string, unknown> | null
+        if (body) {
+          const text = (key: string): string | null => typeof body[key] === 'string' && body[key] !== '' ? body[key] as string : null
+          const flag = (key: string): boolean | undefined => typeof body[key] === 'boolean' ? body[key] as boolean : undefined
+          terminalFacts = {
+            snapshotStatus: text('status'),
+            runStatus: text('runStatus'),
+            code: text('code'),
+            message: typeof body.message === 'string' ? body.message : null,
+            transcriptDegraded: flag('transcriptDegraded'),
+            historyComplete: flag('historyComplete'),
+            unconfirmed: flag('unconfirmed'),
+            cancelled: flag('cancelled')
+          }
         }
       } catch (error) {
           logCaughtError(error, 'api/sse.ts:750')
-        snapshotStatus = null
+        terminalFacts = {}
       }
     }
     try {
@@ -750,7 +781,7 @@ export async function probeReattach(runId: string, signal?: AbortSignal): Promis
         logCaughtError(error, 'api/sse.ts:756')
       // 已关闭 / 不可取消：忽略
     }
-    return { status: response.status, preparing: null, snapshotStatus }
+    return { status: response.status, preparing: null, ...terminalFacts }
   } catch (error) {
       logCaughtError(error, 'api/sse.ts:760')
     return { status: 0, preparing: null }
@@ -1039,7 +1070,8 @@ async function tryReattach(
   if (options.signal?.aborted) {
     return { terminal: false, reason: '连接已取消' }
   }
-  const info = await reattach(state.runId, handlers, options, state)
+  // 主 /chat 由外层 finish 统一发布一次 onClose；内部 reattach 只返回事实，不重复通知。
+  const info = await reattach(state.runId, { ...handlers, onClose: undefined }, options, state)
   return info.terminal ? { terminal: true } : { terminal: false, reason: info.reason ?? '重挂未能收到终帧' }
 }
 
@@ -1289,7 +1321,7 @@ export async function reattach(
      *
      * <p>Task 4 起 reattach 走 `fetch` + `ReadableStream`（原生 `EventSource` 不能设身份头），
      * 失败事件不再带 `event`/`readyState`，其余判定原样保留：终态轮次直接收尾；任何连接的
-     * 404 都按不存在收口；其他失败在未确认连接时并行做一次 `?probe=1` 探测，退避照旧先行。
+     * 404 都按不存在收口；其他失败每代连接并行做一次 `?probe=1` 探测，退避照旧先行。
      */
     function onConnectionLost(reason: string, httpStatus?: number): void {
       if (settled) {
@@ -1306,21 +1338,28 @@ export async function reattach(
         settleUnavailable()
         return
       }
-      // 探测**不得**推迟退避 —— 退避先起算，探测只作为"并行的事实来源"：
-      // ① 探测走 `?probe=1`（服务端只读状态，不建订阅/不回放/不续期），② 探测挂起或失败
-      // 都不影响 1/2/4/8s 时间线，③ 结果只在**本世代、本尝试**下才可应用（I1）——
-      // 否则一条慢探测会关掉刚建立的新连接，或把上一代的"准备中"误判到下一代头上。
-      if (!connectionEstablished && !probedThisConnection) {
+      // 普通世代先排退避，probe 并行补充事实；挂起/末代则等本代唯一一次有界 probe 再按原语义收尾。
+      // 结果只在**本世代、本尝试**下才可应用（I1），防止慢探测关掉新连接或把旧状态写到下一代。
+      // 已建连后的干净 EOF/丢包同样探测：lastSeq 已越过终帧时不会回放终帧，运行终态由 probe 独立确认。
+      if (!probedThisConnection) {
         probedThisConnection = true
-        scheduleReconnect(reason)
-        if (settled) {
-          return
+        const waitForProbe = (state.awaitsInput && connectionEstablished) || attempts >= maxReconnects
+        if (!waitForProbe) {
+          scheduleReconnect(reason)
+          if (settled) {
+            return
+          }
         }
         const probeGeneration = generation
         const probeAttempt = attempts
         void probeReattach(runId, options.signal).then((probe) => {
           if (settled || generation !== probeGeneration || attempts !== probeAttempt) {
             // 已收尾 / 世代已换代 / 尝试已推进：本探测结果不得改写当前现场
+            return
+          }
+          if (probe.status === 200 && isTerminalSnapshotStatus(probe.runStatus ?? probe.snapshotStatus)) {
+            state.terminalFacts = terminalFactsOfProbe(probe)
+            settle(true)
             return
           }
           if (probe.preparing) {
@@ -1330,8 +1369,13 @@ export async function reattach(
           }
           if (probe.status === 404) {
             settleUnavailable()
+            return
           }
-          // 其余（200 就绪 / 5xx / 网络失败）：退避已排期，按时重连即可
+          if (waitForProbe) {
+            // 挂起/末代只是推迟原收尾等这一次有界事实；非终态仍按各自原语义结束。
+            scheduleReconnect(reason)
+          }
+          // 其余世代：RUNNING/SUSPENDED / 5xx / 网络失败不影响已排退避。
         })
         return
       }

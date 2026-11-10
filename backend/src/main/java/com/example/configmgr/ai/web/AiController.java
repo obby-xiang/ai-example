@@ -1282,8 +1282,8 @@ public class AiController {
      * {@code probe=1 + Accept: text/event-stream} 与 {@code 无 probe + Accept: application/json}
      * 都是 <b>406</b>，不会"顺手"进入一条真实订阅。
      *
-     * <p>本方法因此<b>只做三件只读的事</b>：读快照、按 AR-06 复用 {@link #preparingOrUnknown}
-     * 判"准备中/不存在/降级"、读归档末号。响应形态：
+     * <p>本方法因此<b>只做只读对账</b>：读快照、按 AR-06 复用 {@link #preparingOrUnknown}
+     * 判"准备中/不存在/降级"，并读取归档末号与真实末帧；终帧比旧快照新时以终帧事实为准。响应形态：
      * <ul>
      * <li>202 {@code preparing=true}（已 start、快照未建；带 {@code elapsedMs}/{@code retryAfterMs}）；</li>
      * <li>404 {@code UNKNOWN_RUN}（归档一帧都没有）；</li>
@@ -1328,11 +1328,10 @@ public class AiController {
             if (early != null) {
                 return early;
             }
-            // early == null ⇒ 归档里已有终帧（快照被 TTL 先回收）：正式通道会回放终态 ⇒ 探测报就绪
         }
-        // 与正式通道的 503 同口径：末号读不出来时不冒充"就绪"（下一拍再探）
         FrameStore frames = this.frameStore;
-        if (frames.lastSeqIfKnown(runId).isEmpty()) {
+        OptionalLong last = frames.lastSeqIfKnown(runId);
+        if (last.isEmpty()) {
             Map<String, Object> body = new LinkedHashMap<>(errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE,
                     "AI 运行时依赖的 Redis 暂不可用，请稍后重试。"));
             body.put("degraded", true);
@@ -1344,9 +1343,63 @@ public class AiController {
         body.put("runId", runId);
         if (snapshot != null) {
             body.put("status", snapshot.getStatus());
+            body.put("runStatus", snapshot.getStatus());
+            body.put("cancelled", snapshot.isCancelled());
+        }
+        Map<String, Object> terminal = this.terminalArchiveEnd(frames, runId, last.getAsLong());
+        if (!terminal.isEmpty()) {
+            String terminalStatus = terminalRunStatus(terminal);
+            body.put("status", terminalStatus);
+            body.put("runStatus", terminalStatus);
+            putTerminalFacts(body, terminal);
         }
         body.put("degraded", false);
         return json(HttpStatus.OK, body);
+    }
+
+    private static String terminalRunStatus(Map<String, Object> frame) {
+        Object explicit = frame.get("runStatus");
+        if (explicit instanceof String status && !status.isBlank()) {
+            return status;
+        }
+        String code = stringField(frame, "code");
+        if (isCancellationCode(code) || Boolean.TRUE.equals(frame.get("cancelled"))) {
+            return RunSnapshot.CANCELLED;
+        }
+        return "done".equals(frame.get("type")) ? RunSnapshot.DONE : RunSnapshot.FAILED;
+    }
+
+    private static String stringField(Map<String, Object> frame, String key) {
+        Object value = frame.get(key);
+        return value instanceof String text && !text.isBlank() ? text : null;
+    }
+
+    private static boolean isCancellationCode(String code) {
+        return ErrorCodes.AI_RUN_CANCELLED.equals(code)
+                || code != null && code.startsWith(ErrorCodes.AI_RUN_CANCELLED + "_");
+    }
+
+    private static void putTerminalFacts(Map<String, Object> body, Map<String, Object> frame) {
+        String code = stringField(frame, "code");
+        String message = stringField(frame, "message");
+        boolean unconfirmed = Boolean.TRUE.equals(frame.get("unconfirmed"))
+                || "TURN_UNCONFIRMED".equals(code) || "unconfirmed".equals(frame.get("turnEnd"));
+        boolean transcriptDegraded = Boolean.TRUE.equals(frame.get("transcriptDegraded"))
+                || "AI_TRANSCRIPT_INCOMPLETE".equals(code) || "AI_TRANSCRIPT_WRITE_FAILED".equals(code);
+        boolean cancelled = isCancellationCode(code) || Boolean.TRUE.equals(frame.get("cancelled"));
+        Object complete = frame.get("historyComplete");
+        if (code != null) {
+            body.put("code", code);
+        }
+        if (message != null) {
+            body.put("message", message);
+        }
+        body.put("transcriptDegraded", transcriptDegraded);
+        if (complete instanceof Boolean) {
+            body.put("historyComplete", complete);
+        }
+        body.put("unconfirmed", unconfirmed);
+        body.put("cancelled", cancelled);
     }
 
     /**
@@ -1471,18 +1524,23 @@ public class AiController {
      * 业务帧是帧序不变量，所以"末帧不是终帧"就等于"没有终帧"。
      */
     private boolean hasTerminalArchiveEnd(FrameStore frames, String runId, long lastSeq) {
+        return !this.terminalArchiveEnd(frames, runId, lastSeq).isEmpty();
+    }
+
+    private Map<String, Object> terminalArchiveEnd(FrameStore frames, String runId, long lastSeq) {
         try {
             List<Map<String, Object>> tail = frames.readFrom(runId, lastSeq - 1L, 1);
             if (CollectionUtils.isEmpty(tail)) {
-                return false;
+                return Map.of();
             }
-            String type = String.valueOf(tail.getLast().get("type"));
-            return "done".equals(type) || "error".equals(type);
+            Map<String, Object> frame = tail.getLast();
+            String type = String.valueOf(frame.get("type"));
+            return "done".equals(type) || "error".equals(type) ? new LinkedHashMap<>(frame) : Map.of();
         } catch (RuntimeException ex) {
             if (LogSampling.canAcquire("archive-tail-read")) {
                 log.warn("reading last archived frame failed runId={} (treating as non-terminal, still preparing)", runId, ex);
             }
-            return false;
+            return Map.of();
         }
     }
 

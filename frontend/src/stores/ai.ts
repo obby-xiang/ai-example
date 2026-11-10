@@ -114,7 +114,7 @@ import {
   type ToolOutcome,
   type TruncationNoticeCode
 } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryCompactionEvent, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type ChatMessage, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryCompactionEvent, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type AuthoritativeTerminalFacts, type ChatMessage, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
 import { FORM_DRAFT_PREFIX, clearFormDraft, flushFormDraft, loadFormDraft, pruneFormDrafts, scheduleFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
@@ -561,6 +561,7 @@ function releaseProbedSessionLock(verdict: Awaited<ReturnType<typeof probeSessio
  * `activeRunId` 仍是上一轮的值，而宿主消息 id 在 send / reattachActive / 续收入口即已就位。
  */
 let activeRoundHostId: string | null = null
+let authoritativeTerminalSealedRunId: string | null = null
 
 /**
  * 轮次纪元（B1 收口修 C-1）：**真正换轮**才递增 —— `send()` 起新轮、`reattachActive()` 重挂到
@@ -782,6 +783,7 @@ export type AutoRecoveryKind = 'preparing' | 'first-frame' | 'history' | 'purged
 export interface AiManualRecoveryView {
   scope: 'history' | 'current'
   reason: 'load' | 'unconfirmed' | 'interrupted' | 'first-frame' | 'archive-window' | 'transcript-degraded'
+  runId?: string
   error: AiLoadErrorView | null
 }
 
@@ -806,6 +808,16 @@ function currentAutoRecoveryOperation(
   const operation = autoRecoveryOperations.get(kind)
   return operation !== undefined && operation.sessionId === store.sessionId
     && operation.epoch === autoRecoveryEpoch(kind) ? operation : undefined
+}
+
+function hasTerminalFollowupRecovery(
+  store: { sessionId: string; manualRecovery: AiManualRecoveryView | null },
+  runId: string
+): boolean {
+  const active = currentAutoRecoveryOperation(store, 'history')
+  return active?.terminalFollowupRunId === runId
+    || terminalHistoryFollowups.has(historyRunKey(store.sessionId, runId))
+    || store.manualRecovery?.reason === 'unconfirmed' && store.manualRecovery.runId === runId
 }
 
 let recoveryOperationSequence = 0
@@ -836,6 +848,7 @@ interface AutoRecoveryOperation {
   token: number
   epoch: number
   sessionId: string
+  terminalFollowupRunId: string | null
   ended: Promise<void>
   settle: () => void
 }
@@ -849,13 +862,22 @@ function autoRecoveryEpoch(kind: AutoRecoveryKind): number {
 function beginAutoRecoveryOperation(
   store: { restoringRecovery: boolean; sessionId: string },
   kind: AutoRecoveryKind,
-  epoch: number
+  epoch: number,
+  terminalFollowupRunId: string | null = null
 ): AutoRecoveryOperation {
   let settle = (): void => {}
   const ended = new Promise<void>((resolve) => {
     settle = resolve
   })
-  const operation = { store, token: beginRecoveryOperation(store), epoch, sessionId: store.sessionId, ended, settle }
+  const operation = {
+    store,
+    token: beginRecoveryOperation(store),
+    epoch,
+    sessionId: store.sessionId,
+    terminalFollowupRunId,
+    ended,
+    settle
+  }
   autoRecoveryOperations.set(kind, operation)
   return operation
 }
@@ -5000,11 +5022,12 @@ export const useAiStore = defineStore('ai', {
       }
       return state.notice
     },
-    /** 恢复在途或持久恢复失败时，禁止会话内业务写；新建会话、草稿与只读动作不受此判定约束。 */
+    /** 恢复在途或持久恢复失败时禁写；已确认终态的 transcript 降级只保留人工重读，不锁新轮。 */
     businessWriteBlocked(state): boolean {
       return state.restoringRecovery || state.manualRecovery !== null
+        && state.manualRecovery.reason !== 'transcript-degraded'
     },
-    /** 输入区是否可用（执行中/恢复在途/持久恢复失败一律禁发）。 */
+    /** 输入区是否可用（执行中/恢复在途禁发；transcript 降级不锁新轮）。 */
     canSend(state): boolean {
       return !state.loading && !this.businessWriteBlocked
     },
@@ -5262,7 +5285,8 @@ export const useAiStore = defineStore('ai', {
     canStartAutoRecovery(
       kind: AutoRecoveryKind,
       attempt: () => Promise<boolean>,
-      onExhausted?: () => void
+      onExhausted?: () => void,
+      terminalFollowupRunId: string | null = null
     ): boolean {
       const epoch = autoRecoveryEpoch(kind)
       const active = autoRecoveryOperations.get(kind)
@@ -5276,7 +5300,7 @@ export const useAiStore = defineStore('ai', {
         onExhausted?.()
         return false
       }
-      const operation = beginAutoRecoveryOperation(this, kind, epoch)
+      const operation = beginAutoRecoveryOperation(this, kind, epoch, terminalFollowupRunId)
       try {
         const timer = setTimeout(() => {
           if (autoRecoveryTimers.get(kind) === timer) {
@@ -5371,8 +5395,10 @@ export const useAiStore = defineStore('ai', {
      */
     writeMirrorNow(): void {
       ensureComposerDraftOwner(this)
-      const preserveMirror = this.restoringRecovery || (this.messages.length === 0
-        && (!this.composerDraftMirrorRead || !this.historyLoaded || this.historyError !== null))
+      const hasTerminalRecoveryMarker = this.messages.some((message) => message.unconfirmed === true
+        || message.transcriptDegraded === true)
+      const preserveMirror = !hasTerminalRecoveryMarker && (this.restoringRecovery || (this.messages.length === 0
+        && (!this.composerDraftMirrorRead || !this.historyLoaded || this.historyError !== null)))
       if (preserveMirror && !this.composerDraftDirty) {
         return
       }
@@ -5381,8 +5407,8 @@ export const useAiStore = defineStore('ai', {
       if (this.sessionId === '' || !isSameIdentity(this.identity, this.sessionIdentity)) {
         return
       }
-      const mirror = preserveMirror ? readMirror(this.sessionId) : null
-      const preserved = mirror !== null && isCurrentMirror(mirror) ? mirror : null
+      const mirror = readMirror(this.sessionId)
+      const preserved = preserveMirror && mirror !== null && isCurrentMirror(mirror) ? mirror : null
       const outcome = writeMirror(this, this.sessionId,
         preserved === null ? this.messages : mirrorMessagesForWrite(preserved),
         preserved === null ? this.activeRunId : preserved.lastRunId ?? null, {
@@ -5396,6 +5422,8 @@ export const useAiStore = defineStore('ai', {
         // 整体替换且不出现「继续」。只认**末条** assistant（新轮一开始就不再命中）。
         // 表单填写/提交/已受理与续跑建连也是在途；已取消表单不算。
         inFlight: preserved !== null ? preserved.inFlight === true
+          : hasTerminalRecoveryMarker && mirror?.inFlight === true
+            && authoritativeTerminalSealedRunId !== this.activeRunId ? true
           : (this.loading || this.suspended || isLastAssistantInterrupted(this.messages)
             || (this.activeForm !== null && this.activeForm.status !== 'cancelled')
             || pendingAttachRunId !== null) && !this.stopped,
@@ -5884,7 +5912,9 @@ export const useAiStore = defineStore('ai', {
         }
         const mergedMessages = this.buildHistoryMessages(pageEntries, pageOffset)
         this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight,
-          this.shouldPreserveStoppedRound(pageEntries, mirrorMessages))
+          this.shouldPreserveStoppedRound(pageEntries, mirrorMessages)
+            || this.shouldPreserveUnconfirmedRound(pageEntries, mirrorMessages)
+            || this.shouldPreserveTranscriptRound(pageEntries, mirrorMessages))
         this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
         this.applyHistoryCompactionEvents(history.events)
       }
@@ -6240,6 +6270,7 @@ export const useAiStore = defineStore('ai', {
             errorCard: buildErrorCard(historyErrorCode, historyErrorMessage)
           } : {}),
           ...(transcriptDegraded ? { transcriptDegraded: true } : {}),
+          ...(item.unconfirmed === true || item.outcome === 'UNCONFIRMED' ? { unconfirmed: true } : {}),
           // 批次2：服务端条目带 runId 时落消息，保留恢复链路的 run 归属（40 条记忆窗口通常无此键）
           ...(runId !== null ? { runId } : {}),
           // 批G · S4：stopped 元数据或规范 CANCELLED 终态都恢复为「已停止」，不归一成普通完成。
@@ -6479,6 +6510,26 @@ export const useAiStore = defineStore('ai', {
       }
       return !entries.some((item) => item.type.toUpperCase() === 'ASSISTANT' && item.runId === runId
         && typeof item.outcome === 'string' && item.outcome.trim() !== '')
+    },
+
+    /** 没有新的非降级 DONE 证据时保留 unconfirmed 宿主；后续只能由该证据 reconcile 清除。 */
+    shouldPreserveUnconfirmedRound(entries: AiHistoryMessage[], mirrorMessages: ChatMessage[]): boolean {
+      const tail = last(mirrorMessages)
+      if (!tail || tail.role !== 'assistant' || tail.unconfirmed !== true || !tail.runId) {
+        return false
+      }
+      return !entries.some((item) => item.type.toUpperCase() === 'ASSISTANT' && item.runId === tail.runId
+        && item.outcome === 'DONE' && !isTranscriptDegraded(item))
+    },
+
+    /** transcript 同样只由新的非降级 DONE 证据清除，空历史不删除宿主。 */
+    shouldPreserveTranscriptRound(entries: AiHistoryMessage[], mirrorMessages: ChatMessage[]): boolean {
+      const tail = last(mirrorMessages)
+      if (!tail || tail.role !== 'assistant' || tail.transcriptDegraded !== true || !tail.runId) {
+        return false
+      }
+      return !entries.some((item) => item.type.toUpperCase() === 'ASSISTANT' && item.runId === tail.runId
+        && item.outcome === 'DONE' && !isTranscriptDegraded(item))
     },
 
     /**
@@ -6803,6 +6854,10 @@ export const useAiStore = defineStore('ai', {
           this.notePreparingState(probe.preparing.runId, probe.preparing.elapsedMs)
           return
         }
+        if (probe?.status === 200 && isTerminalRunStatus(probe.runStatus ?? probe.snapshotStatus) && recoveryRunId && preloadedInFlightHost) {
+          this.sealAuthoritativeTerminal(recoveryRunId, probe, preloadedInFlightHost.id)
+          return
+        }
         if (probe?.status === 200 && recoveryRunId && preloadedInFlightHost) {
           void this.reattachActive(recoveryRunId, {
             hostMessageId: preloadedInFlightHost.id,
@@ -6984,6 +7039,110 @@ export const useAiStore = defineStore('ai', {
       return driven
     },
 
+    /** 权威运行终态按事实封宿主并复用正常终帧清理；不伪造 terminal frame。 */
+    sealAuthoritativeTerminal(
+      runId: string,
+      facts: AuthoritativeTerminalFacts & { lastFrame?: SseFrame | null },
+      hostMessageId?: string | null
+    ): void {
+      authoritativeTerminalSealedRunId = runId
+      const frame = facts.lastFrame ?? null
+      const code = facts.code ?? (frame?.type === 'error' ? frame.code : null)
+      const message = facts.message ?? (frame?.type === 'error' ? frame.message : null)
+      const unconfirmed = facts.unconfirmed === true || code === 'TURN_UNCONFIRMED'
+        || (frame !== null && isUnconfirmedTerminal(frame))
+      const cancelled = facts.cancelled === true || isCancelledTerminalError({ code })
+        || (frame?.type === 'done' && frame.cancelled === true)
+      const transcriptDegraded = facts.transcriptDegraded === true
+        || (frame !== null && isCompletedTranscriptDegraded(frame))
+      const explicitStatus = (facts.runStatus ?? facts.snapshotStatus ?? '').toUpperCase()
+      const normalized = cancelled ? 'CANCELLED' : explicitStatus !== '' ? explicitStatus
+        : frame?.type === 'done' ? 'DONE' : 'FAILED'
+      const hosts = this.messages.filter((item) => item.role === 'assistant' && item.runId === runId
+        && (hostMessageId === undefined || hostMessageId === null || item.id === hostMessageId))
+      const hasUnconfirmed = unconfirmed || hosts.some((host) => host.unconfirmed === true)
+      const hasTranscriptDegraded = transcriptDegraded || hosts.some((host) => host.transcriptDegraded === true)
+      const failed = normalized === 'FAILED' || normalized === 'REJECTED' || hasUnconfirmed
+      const unconfirmedRecoveryRegistered = hasUnconfirmed && hasTerminalFollowupRecovery(this, runId)
+      const transcriptRecoveryRegistered = hasTranscriptDegraded
+        && this.manualRecovery?.reason === 'transcript-degraded'
+      roundTerminalSeq += 1
+      this.clearClientRequestRound()
+      this.clearCompactingMessages()
+      this.clearPreparingRun()
+      this.streamInterrupted = false
+      this.currentError = null
+      if (!unconfirmedRecoveryRegistered && !transcriptRecoveryRegistered) {
+        this.clearManualRecovery()
+        if (!hasUnconfirmed && !hasTranscriptDegraded) {
+          cancelAutoRecovery()
+          clearRecoveryOperations(this)
+          clearTerminalHistoryFollowups(this.sessionId)
+        }
+      }
+      for (const host of hosts) {
+        host.streaming = false
+        host.done = true
+        delete host.interrupted
+        delete host.interruptedReason
+        sealTrailingStreamPart(host)
+        expireResidueToolParts(host)
+        if (cancelled) {
+          host.stopped = true
+        } else if (hasUnconfirmed) {
+          host.code = code ?? host.code ?? null
+          host.errorCard = null
+          if (!unconfirmedRecoveryRegistered) {
+            this.recoverUnconfirmedTerminal(host)
+          }
+        } else {
+          if (code !== null) {
+            host.code = code
+            host.errorCard = buildErrorCard(code, message)
+          } else if (failed && !hasOtherFailurePresentation(host)) {
+            host.code = ErrorCode.AI_RUN_FAILED
+            host.errorCard = buildErrorCard(ErrorCode.AI_RUN_FAILED, translate('ai.notice.chatRequestFailed'))
+          }
+          if (hasTranscriptDegraded) {
+            if (!transcriptRecoveryRegistered) {
+              this.recoverTranscriptDegradedTerminal(host)
+            }
+          } else {
+            host.unconfirmed = false
+            if (normalized === 'DONE') {
+              delete host.transcriptDegraded
+              clearTranscriptErrorPresentation(host)
+            }
+          }
+        }
+        deriveProjections(host)
+      }
+      if (cancelled) {
+        this.cancelRoundParts(runId)
+        this.lastRoundOutcome = 'cancelled'
+        this.followupReady = false
+      } else if (hasUnconfirmed) {
+        this.lastRoundOutcome = 'unconfirmed'
+        this.followupReady = false
+      } else if (failed) {
+        this.lastRoundOutcome = 'error'
+        this.followupReady = false
+      } else if (normalized === 'DONE' || hasTranscriptDegraded) {
+        const otherFailure = hosts.some((host) => hasOtherFailurePresentation(host))
+        this.lastRoundOutcome = otherFailure ? 'error' : 'ok'
+        this.followupReady = !otherFailure && !hosts.some((host) => host.recoveryGap === true)
+      }
+      this.cleanupTerminalInteractionState()
+      this.clearGateSubmissions()
+      this.clearBusyRunOnTerminal(runId)
+      clearPendingToolPartSeqs(runId)
+      this.forgetRunStreamDrive(runId)
+      clearRecoveryEntries(runId)
+      this.loading = false
+      this.suspended = false
+      this.writeMirrorNow()
+    },
+
     /** 在途轮续收只补有序差量；既有历史/镜像段永不清空后重放。 */
     async restoreInFlightRound(current: AiRunCurrent): Promise<void> {
       const runId = current.runId
@@ -6996,9 +7155,15 @@ export const useAiStore = defineStore('ai', {
         this.sealLeftoverInFlight()
         return
       }
-      if (isTerminalRunStatus(current.snapshotStatus) && !this.findInFlightHost()) {
-        this.loading = false
-        this.suspended = false
+      const unconfirmedHost = [...this.messages].reverse().find((item) => item.role === 'assistant'
+        && item.runId === runId && item.unconfirmed === true)
+      if (unconfirmedHost) {
+        this.activeRunId = runId
+        this.sealAuthoritativeTerminal(runId, { unconfirmed: true, code: unconfirmedHost.code }, unconfirmedHost.id)
+        return
+      }
+      if (isTerminalRunStatus(current.snapshotStatus)) {
+        this.sealAuthoritativeTerminal(runId, { snapshotStatus: current.snapshotStatus })
         return
       }
       this.activeRunId = runId
@@ -7408,7 +7573,7 @@ export const useAiStore = defineStore('ai', {
         this.lastRoundOutcome = 'unconfirmed'
         this.followupReady = false
         if (publish) {
-          this.publishManualRecovery({ scope: 'history', reason: 'unconfirmed', error: null })
+          this.publishManualRecovery({ scope: 'history', reason: 'unconfirmed', error: null, runId: runId ?? undefined })
         }
         return false
       }
@@ -7430,14 +7595,9 @@ export const useAiStore = defineStore('ai', {
       return true
     },
 
-    /** 纯 transcript 降级只出专用通知；存在其他错误码时保留普通失败呈现，不叠加专用提示。 */
+    /** transcript 降级统一走恢复 alert；其他错误卡各自保留，不占用 notice 槽。 */
     publishTranscriptDegradedRecovery(): void {
       this.publishManualRecovery({ scope: 'history', reason: 'transcript-degraded', error: null })
-      const current = [...this.messages].reverse().find((item) => item.transcriptDegraded === true)
-      const hasOtherFailure = current !== undefined && hasOtherFailurePresentation(current)
-      if (this.manualRecovery?.reason === 'transcript-degraded' && !hasOtherFailure) {
-        setNotice(this, 'ai.notice.transcriptDegraded', undefined, 'warning')
-      }
     },
 
     keepTranscriptDegradedRecovery(publish: boolean): boolean {
@@ -7582,7 +7742,7 @@ export const useAiStore = defineStore('ai', {
       this.lastRoundOutcome = 'unconfirmed'
       this.followupReady = false
       if (publish) {
-        this.publishManualRecovery({ scope: 'history', reason: 'unconfirmed', error: null })
+        this.publishManualRecovery({ scope: 'history', reason: 'unconfirmed', runId: this.activeRunId ?? undefined, error: null })
       }
       return false
     },
@@ -7716,7 +7876,7 @@ export const useAiStore = defineStore('ai', {
           this.sealRecordedRecovery(error.scope)
           this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
         }
-      })
+      }, chain?.runId ?? null)
       if (!scheduled && !finalFailurePublished && !hasActiveAutoRecovery(this)) {
         const error = this.historyError ?? this.currentError
         if (error !== null) {
@@ -7738,23 +7898,20 @@ export const useAiStore = defineStore('ai', {
       message.unconfirmed = true
       this.lastRoundOutcome = 'unconfirmed'
       this.followupReady = false
+      if (hasTerminalFollowupRecovery(this, followup.runId)) {
+        return
+      }
       this.requestTerminalHistoryRecovery(followup)
     },
 
     recoverTranscriptDegradedTerminal(message: ChatMessage): void {
-      const sessionId = this.sessionId
-      const followup: TerminalHistoryFollowup = {
-        sessionId,
-        runId: message.runId ?? '',
-        messageId: message.id
-      }
-      recordUnconfirmedHistoryFloor(sessionId, followup.runId)
       message.transcriptDegraded = true
       message.unconfirmed = false
       clearTranscriptErrorPresentation(message)
       this.lastRoundOutcome = hasOtherFailurePresentation(message) ? 'error' : 'ok'
       this.followupReady = !hasOtherFailurePresentation(message) && message.recoveryGap !== true
-      this.requestTerminalHistoryRecovery(followup)
+      // 运行已终态但历史不完整不是可自动收敛的在途故障；保留专用警告和人工重读出口。
+      this.publishTranscriptDegradedRecovery()
     },
 
     hasRunTerminal(runId: string | null | undefined): boolean {
@@ -8401,7 +8558,11 @@ export const useAiStore = defineStore('ai', {
               if (this.preparingRun) {
                 return
               }
-              if (!info.terminal && !this.stopped) {
+              if (info.terminal) {
+                this.sealAuthoritativeTerminal(runId, info, hostMessageId)
+                return
+              }
+              if (!this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
                 // 2026-10-29 收口：续收耗尽同样要封口（断流 ≠ 仍在生成）。
@@ -8528,6 +8689,7 @@ export const useAiStore = defineStore('ai', {
       const workspace = useWorkspaceStore()
       // 新消息 = 真正换轮：上一轮"正在接管但未登记"的 run 不再属于当前轮（问题2）。
       pendingAttachRunId = null
+      authoritativeTerminalSealedRunId = null
       clearPendingToolPartSeqs()
       // B1 收口修（C-1）：新消息 = 真正换轮 —— 上一轮在途的前端工具结局自此一律丢弃
       roundEpoch += 1
@@ -8580,6 +8742,7 @@ export const useAiStore = defineStore('ai', {
 
       /** error 终帧会让 `aiApi.chat` 正常 resolve（不是 reject）；用本轮局部标记与开流前 catch 区分。 */
       let sawErrorTerminal = false
+      let sealedTerminalOutcome: AiSendOutcome | null = null
       /** 410 是否由本处完成了本地换号；最终结果只允许回到这个目标会话。 */
       let purgedRecovered = false
       /** 批次2（F6）：本轮是否已收到**任何**帧 —— 有产出后一律不重试（非零副作用）。 */
@@ -8686,7 +8849,16 @@ export const useAiStore = defineStore('ai', {
             suspendedClose = true
             return
           }
-          if (!info.terminal && !this.stopped) {
+          if (info.terminal) {
+            const terminalRunId = assistant.runId ?? this.activeRunId
+            if (terminalRunId) {
+              this.sealAuthoritativeTerminal(terminalRunId, info, assistant.id)
+              sealedTerminalOutcome = this.lastRoundOutcome === 'ok' ? 'ok'
+                : this.lastRoundOutcome === 'cancelled' ? 'cancelled' : 'error'
+            }
+            return
+          }
+          if (!this.stopped) {
             // 断流先只记内部事实；最终是否提示由恢复收尾决定。
             this.streamInterrupted = true
             this.lastRoundOutcome = 'interrupted'
@@ -8722,6 +8894,9 @@ export const useAiStore = defineStore('ai', {
         }
         if (this.stopped) {
           return 'cancelled'
+        }
+        if (sealedTerminalOutcome !== null) {
+          return sealedTerminalOutcome
         }
         if (this.streamInterrupted) {
           return 'interrupted'
@@ -8778,10 +8953,12 @@ export const useAiStore = defineStore('ai', {
                 outcome = 'cancelled'
                 return { outcome, userMessageId }
               }
-              if (this.canAdoptDuplicateClientRequest(duplicateRunId, assistant.id)) {
-                // 同步接管已完成登记（pendingAttachRunId/loading/host）；原 send 的 finally 让位。
+              const duplicate = this.canAdoptDuplicateClientRequest(duplicateRunId, assistant.id)
+              if (duplicate !== null) {
+                // 同步接管已登记；send 等首次权威 probe，终态不得提前包装成 ok。
                 delegatedToDuplicate = true
-                outcome = 'ok'
+                const duplicateOutcome = await duplicate.completion
+                outcome = duplicateOutcome ?? 'ok'
                 return { outcome, userMessageId }
               }
               // 接管未成立（宿主缺失/现场已换）：同样不回稿（避免用户把同一条消息再发一次）。
@@ -9258,7 +9435,11 @@ export const useAiStore = defineStore('ai', {
               if (unavailableNotified) {
                 return
               }
-              if (!info.terminal && !this.stopped) {
+              if (info.terminal) {
+                this.sealAuthoritativeTerminal(targetRunId, info, assistant.id)
+                return
+              }
+              if (!this.stopped) {
                 this.streamInterrupted = true
                 this.lastRoundOutcome = 'interrupted'
                 // 2026-10-29 收口：断流 ≠ 仍在生成 —— 旧实现只提示不封口，宿主会一直
@@ -11875,29 +12056,28 @@ export const useAiStore = defineStore('ai', {
     /**
      * 同一 `clientRequestId` 的重复回执接管（停止闭环兼容批）。
      *
-     * <p>同步登记本轮现场后立即返回 true（**不 await 整条 SSE**）：`pendingAttachRunId` 让
-     * stop/其它判据立刻能认到这一轮；原 send 的 finally 由调用方跳过，不会再封口宿主或清掉
-     * 接管现场。随后的 probe 在后台完成：
+     * <p>同步登记本轮现场后返回首次 probe 的完成 Promise（不 await 整条 SSE）：`pendingAttachRunId`
+     * 让 stop/其它判据立刻能认到这一轮；原 send 的 finally 由调用方跳过。首次 probe 完成前 send 不返回：
      * <ul>
-     * <li>run 已就绪（200）⇒ 走既有 `reattachActive` 全量/增量接回；</li>
+     * <li>run 已就绪（200）⇒ 权威终态先 seal；仅 RUNNING/SUSPENDED 走 `reattachActive` 接回；</li>
      * <li>已有 start 但快照未建（202）⇒ 交给既有 `notePreparingState` 的 preparing 有界自动恢复；</li>
      * <li>连 start/归档都还没有（404/503/0）⇒ 本类的有界 readiness 链继续 probe，等 run 可读后接回；
      * 耗尽统一走 `notePreparingExhausted`（既有手动恢复出口），不无限等待。</li>
      * </ul>
      *
-     * @returns false = 已停/墓碑/宿主缺失/会话已换 —— 调用方必须按取消/中断结局收尾，不能返回 ok
+     * @returns null = 已停/墓碑/宿主缺失/会话已换；否则 completion 给出首次终态结局或 null（仍在途）
      */
-    canAdoptDuplicateClientRequest(runId: string, hostMessageId: string): boolean {
+    canAdoptDuplicateClientRequest(runId: string, hostMessageId: string): { completion: Promise<AiSendOutcome | null> } | null {
       if (this.stopped || this.stoppedRunId === runId
         || hasStoppedRun(this.sessionId, runId, this.sessionIdentity)) {
-        return false
+        return null
       }
       if (this.activeStreamRunId === runId) {
-        return true // 已有同一 run 的活动驱动：直接并入既有收帧
+        return { completion: Promise.resolve(null) } // 已有同一 run 的活动驱动：直接并入既有收帧
       }
       const host = this.messages.find((item) => item.id === hostMessageId && item.role === 'assistant')
       if (!host) {
-        return false
+        return null
       }
       const sessionId = this.sessionId
       const epoch = roundEpoch
@@ -11925,8 +12105,7 @@ export const useAiStore = defineStore('ai', {
           logCaughtError(error, 'stores/ai.ts:10356')
         // 忽略：传输已失败，abort 仅清理句柄
       }
-      void this.probeAndAttachDuplicateRun(runId, host.id, sessionId, epoch)
-      return true
+      return { completion: this.probeAndAttachDuplicateRun(runId, host.id, sessionId, epoch) }
     },
 
     /** 重复轮次的现场是否仍属于本次接管（停止/换轮/换会话/节点消失 ⇒ false）。 */
@@ -11957,22 +12136,29 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /** 首次 probe：就绪接回 / 202 交给 notePreparingState / 尚无帧则进入有界 readiness。 */
+    /** 首次 probe：终态返回真实结局；非终态返回 null 并把在途轮交给既有续收/恢复。 */
     async probeAndAttachDuplicateRun(
       runId: string,
       hostMessageId: string,
       sessionId: string,
       epoch: number
-    ): Promise<void> {
+    ): Promise<AiSendOutcome | null> {
       const probe = await probeReattach(runId)
       if (this.stopped || this.stoppedRunId === runId) {
         this.releaseDuplicateScene(hostMessageId, runId)
-        return
+        return 'cancelled'
       }
       if (!this.isDuplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
         // 现场已被停止/新轮/其它同 run 接管：不在这里清 pendingAttachRunId（它可能已是
         // 另一条同 run 接管入口的同步登记）；停止路径由 releaseDuplicateScene 精确清理。
-        return
+        return 'cancelled'
+      }
+      if (probe.status === 200 && isTerminalRunStatus(probe.runStatus ?? probe.snapshotStatus)) {
+        if (pendingAttachRunId === runId) {
+          pendingAttachRunId = null
+        }
+        this.sealAuthoritativeTerminal(runId, probe, hostMessageId)
+        return this.lastRoundOutcome === 'ok' ? 'ok' : this.lastRoundOutcome === 'cancelled' ? 'cancelled' : 'error'
       }
       if (probe.status === 200) {
         // 探测体带快照状态，但不带待决条目：只有"宿主上确实挂着待人卡"才按 park 建连
@@ -11985,7 +12171,7 @@ export const useAiStore = defineStore('ai', {
         })
         if (this.activeStreamRunId === runId || pendingAttachRunId === runId || this.activeStreamParked) {
           this.clearPreparingRun()
-          return
+          return null
         }
       }
       if (pendingAttachRunId === runId) {
@@ -11994,10 +12180,11 @@ export const useAiStore = defineStore('ai', {
       if (probe.status === 202 && probe.preparing !== null) {
         // 已有 start/归档帧：复用既有 preparing 有界自动恢复（快照建成后走 restoreInFlightRound）。
         this.notePreparingState(runId, probe.preparing?.elapsedMs ?? 0)
-        return
+        return null
       }
       // 连 start/归档都还没有：保持"同一轮待就绪"，由有界 readiness 链继续 probe。
       this.beginDuplicateReadiness(runId, hostMessageId, sessionId, epoch, probe.preparing?.elapsedMs ?? 0)
+      return null
     },
 
     /**
@@ -12036,6 +12223,13 @@ export const useAiStore = defineStore('ai', {
             return true
           }
           if (!this.isDuplicateRoundStillCurrent(runId, hostMessageId, sessionId, epoch)) {
+            return true
+          }
+          if (probe.status === 200 && isTerminalRunStatus(probe.runStatus ?? probe.snapshotStatus)) {
+            if (pendingAttachRunId === runId) {
+              pendingAttachRunId = null
+            }
+            this.sealAuthoritativeTerminal(runId, probe, hostMessageId)
             return true
           }
           if (probe.status === 200) {
@@ -12284,8 +12478,11 @@ export const useAiStore = defineStore('ai', {
      * 或段已落 approved/running），表单 POST 已发出（`submittedValues` 已回写）。它们保留
      * 「已提交/结果待确认」，只收 `requiresAction`（不停掉它唯一的结局通道）。
      */
-    cancelRoundParts(): void {
+    cancelRoundParts(runId?: string): void {
       for (const message of this.messages) {
+        if (runId !== undefined && message.runId !== runId) {
+          continue
+        }
         let touched = false
         message.parts.forEach((part, index) => {
           if (part.kind !== 'tool') {
@@ -13305,6 +13502,7 @@ export const useAiStore = defineStore('ai', {
         return active.task
       }
       const task = (async (): Promise<void> => {
+        authoritativeTerminalSealedRunId = null
         // N09/M07：用户主动新建对话 = 本页签自己的会话意图 ⇒ 复制来源的接手资格作废
         // （此后原会话让渡也不接手，防"新建完之后又被换回原会话"的串会话）。
         clearHandoffOrigin()
@@ -13895,7 +14093,7 @@ export const useAiStore = defineStore('ai', {
             // 批G · S1/S3：取消轮把仍 pending/running 的**未提交**段一并收敛（后端不会再发
             // tool_result），并在消息尾打「已停止」标记（与「继续」入口互斥）。
             // 问题1：零产出轮同样要打停止事实 —— 否则面板会把这次取消读成可重试的失败轮。
-            this.cancelRoundParts()
+            this.cancelRoundParts(message.runId)
             message.stopped = true
             this.lastRoundOutcome = 'cancelled'
           } else {
@@ -13961,7 +14159,7 @@ export const useAiStore = defineStore('ai', {
            * 只处理基础码 `AI_RUN_CANCELLED`，其它错误码行为不变。
            */
           if (isCancelledTerminalError(frame)) {
-            this.cancelRoundParts()
+            this.cancelRoundParts(message.runId)
             if (message.runId) {
               clearUnconfirmedHistoryMarkers(this.sessionId, message.runId)
             }
