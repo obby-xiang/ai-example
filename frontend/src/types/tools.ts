@@ -19,7 +19,7 @@
  * | start_import | `task:IMPORT/IMPORT` | **DANGER**（确认门） | BACKEND |
  * | start_publish | `task:IMPORT/PUBLISH` | **DANGER**（确认门） | BACKEND |
  * | open_export_file_editor | `task:EXPORT/EXPORT` | READ | FRONTEND |
- * | download_export_files | `task:EXPORT/EXPORT` | READ | FRONTEND |
+ * | download_export_files | `task:EXPORT/EXPORT` | **DANGER**（独立执行前确认） | FRONTEND |
  * | navigate_to | `*` | READ | FRONTEND |
  * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（勾选即改任务项；不进确认门） | FRONTEND |
  * | set_condition | `page:tasks`, `task:EXPORT` | **WRITE**（条件只形成前端草案，后续步骤或启动前提交；不进确认门） | FRONTEND |
@@ -174,11 +174,11 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'download_export_files',
     displayName: '下载导出文件',
-    description: '下载指定配置项的既有导出文件（前端执行）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。'
+    description: '下载指定配置项的既有导出文件（前端执行，需要用户确认）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。'
       + '前置：EXPORT 任务已有成功导出作业/导出文件。只在用户明确提出下载/获取文件意图时调用；查看/编辑时改用 open_export_file_editor。'
       + '任务已完成（COMPLETED）本身不是授权，不要用它替代 start_export，也不要仅凭状态自动下载。浏览器下载结局未确认时如实说明，不把已发起当作已保存。',
     channel: 'FRONTEND',
-    riskLevel: 'READ',
+    riskLevel: 'DANGER',
     scopePatterns: ['task:EXPORT/EXPORT'],
     args: [
       { name: 'taskId', type: 'number', required: true, description: '任务ID' },
