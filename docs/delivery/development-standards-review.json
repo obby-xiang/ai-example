@@ -5669,6 +5669,61 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "核对207/415正文和segments精确归属，未按长度拟合生产算法。"},
         "verification-review": {"status": "checked", "reason": "独立脚本node --check通过；check-docs仅因4个既有11-06研究文档禁用路径命中失败，本批无新增命中；生产修改为零，真实复发run证据仍缺失。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c839ccf11a6ecc7d2421078adadaafc8858109e0478320a0a17d890afb0559a6",
+      "status": "reviewed",
+      "reason": "逐hunk复核创建入口优先、专用错误码、结构化纠正、工具步预算和终端历史过滤；独立审查agent-1235多轮返修后最终APPROVE。",
+      "reviewedAt": "2026-11-10T23:06:41+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1235、施工DeepSeek agent-301",
+      "specChanges": [
+        {
+          "change": "无taskId的tasks/export/import创建入口不得先用GENERAL_CLARIFY或SELECT_DEFINITIONS收集配置项，命中后零副作用拒绝并引导create_task。",
+          "reason": "明确创建意图应先出现创建确认，配置项由创建后的现有向导链收集；模型采样不能绕过宿主闭环。",
+          "impact": "SELECT_DEFINITIONS显式用途直接命中；GENERAL_CLARIFY仅按defCodes或definitions数据源判断，其他真实信息缺口、TASK_TYPE、已有任务及只读页不变。"
+        },
+        {
+          "change": "新增FORM_CREATE_ENTRY_REQUIRED及模型可读分型指引，EXPORT携带conditions={}，IMPORT省略conditions。",
+          "reason": "专用码准确表达创建入口拒绝，避免复用槽位已知错误语义及IMPORT预检失败。",
+          "impact": "后端静默结算与前端历史幻影过滤仅覆盖专用码和generative_form；模型仍获得真实reasons，不产生多余用户卡。"
+        },
+        {
+          "change": "专用拒绝事实可触发既有一次性create_task纠正，专用拒绝计入既有工具步预算，到顶后不再纠正。",
+          "reason": "拒绝后文字收尾不能依赖用户话术正则，也不能与步数收尾矛盾或无限重复。",
+          "impact": "不自动创建；模型仍不创建时真实done；步数到顶直接按STEP_LIMIT_WRAP_UP结束，无可见skipped创建卡。"
+        },
+        {
+          "change": "终态transcript仅过滤当前run专用拒绝的精确toolCall/TOOL响应，create_task模型契约按EXPORT/IMPORT拆分。",
+          "reason": "零用户帧的专用拒绝不能破坏历史完整性，IMPORT也不能等待不存在的宿主选择表单。",
+          "impact": "兄弟工具、正文、metadata和其他历史错误保留；tools.yaml升至2026-10-27.37，IMPORT走UPLOAD页选择。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/FormIssueCodes.java", "status": "checked", "reason": "新增创建入口专用issue码。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/FormPurposes.java", "status": "checked", "reason": "复用definitions结构识别，不另造用途判断。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java", "status": "checked", "reason": "创建入口拒绝、分型reasons及真实缺口边界。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java", "status": "checked", "reason": "无歧义结构判据；level/conditions不误伤。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "专用拒绝计入既有步数预算并走既有收尾。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java", "status": "checked", "reason": "创建入口模型规则与实际闸门一致。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "结构化拒绝驱动一次纠正、步数到顶抑制纠正、专用终态过滤。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ContextBuilder.java", "status": "checked", "reason": "创建入口页面枚举与页面标签同源。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "EXPORT/IMPORT模型契约拆分，运行逻辑不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/ErrorCodes.java", "status": "checked", "reason": "新增FORM_CREATE_ENTRY_REQUIRED统一业务码。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "实际生效create_task描述同步并升至2026-10-27.37。"},
+        {"path": "backend/src/main/resources/messages_en.properties", "status": "checked", "reason": "专用错误码英文映射。"},
+        {"path": "backend/src/main/resources/messages_zh.properties", "status": "checked", "reason": "专用错误码中文映射。"},
+        {"path": "frontend/src/types/api.ts", "status": "checked", "reason": "前端专用错误码类型登记。"},
+        {"path": "frontend/src/utils/parts.ts", "status": "checked", "reason": "仅generative_form专用码的历史幻影过滤，其他工具和错误保留。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有表单闸门、错误映射、correction、工具步预算和前端过滤，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "生产Java已IDEA Reformat；方法规模、控制块、集合复制、JSON及布尔语义已审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "拒绝对模型可观测，专用静默仅限零用户帧场景；其他错误、兄弟工具和混合历史不丢。"},
+        "toc-interaction": {"status": "checked", "reason": "首张开用户操作卡回到创建确认，真实缺口表单保留，无多余skipped或幻影卡。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "专用pending驱动纠正、跨挂起步数、一次性marker及当前run精确toolCall过滤已关联审查，无AI数据库扩张。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "assistant正文保留，专用toolCall/TOOL响应精确过滤，不拟合文本长度或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1235终审APPROVE；15个独立确定性场景GREEN；后端358源BUILD SUCCESS，前端3281模块构建成功；真实模型与浏览器复测NOT_RUN。"}
+      }
     }
   ]
 }

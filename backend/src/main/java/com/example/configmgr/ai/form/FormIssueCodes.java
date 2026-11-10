@@ -28,6 +28,8 @@ public final class FormIssueCodes {
 	public static final String FORM_SCENARIO_INVALID = "FORM_SCENARIO_INVALID";
 	public static final String FORM_PURPOSE_INVALID = "FORM_PURPOSE_INVALID";
 	public static final String FORM_SLOT_ALREADY_KNOWN = "FORM_SLOT_ALREADY_KNOWN";
+	/** 创建入口优先：创建前提交的配置项/层级/条件表单被零副作用拒绝（槽位未知，不是“已确定”）。 */
+	public static final String FORM_CREATE_ENTRY_REQUIRED = "FORM_CREATE_ENTRY_REQUIRED";
 	public static final String FORM_TITLE_INVALID = "FORM_TITLE_INVALID";
 	public static final String FORM_TITLE_TOO_LONG = "FORM_TITLE_TOO_LONG";
 	public static final String FORM_FIELDS_MISSING = "FORM_FIELDS_MISSING";

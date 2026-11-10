@@ -279,6 +279,11 @@ public final class ErrorCodes {
      */
     public static final String FORM_SLOTS_ALREADY_KNOWN = "FORM_SLOTS_ALREADY_KNOWN";
     /**
+     * 创建入口优先：尚未绑定任务的创建入口页上，配置项/创建前置表单被零副作用拒绝
+     * （不下发、不挂起；先创建任务，配置项由创建后的对应向导收集）。
+     */
+    public static final String FORM_CREATE_ENTRY_REQUIRED = "FORM_CREATE_ENTRY_REQUIRED";
+    /**
      * 400：预检查未通过。
      */
     public static final String PRECHECK_NOT_PASSED = "PRECHECK_NOT_PASSED";

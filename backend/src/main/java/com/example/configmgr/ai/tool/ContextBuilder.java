@@ -122,6 +122,17 @@ public class ContextBuilder {
      */
     public static final List<String> SELECTION_PAGE_IDS = List.of("export", "import");
 
+    /**
+     * 创建入口页 id（{@link #PAGE_LABELS} 中能发起新建任务的页面）：
+     * 任务中心、导出向导、导入向导。
+     *
+     * <p>
+     * 未绑定任务时，配置项与筛选条件由创建后的对应向导收集：EXPORT 由宿主一次性选择表单发放，
+     * IMPORT 没有该宿主表单、由导入向导 UPLOAD 页的配置选择控件收集。模型在创建前用
+     * {@code generative_form} 收集它们属于抢跑（{@code GenerativeFormGuard} 按此集合拦截）。
+     */
+    public static final List<String> CREATE_ENTRY_PAGE_IDS = List.of("tasks", "export", "import");
+
     private static final List<String> UNSYNCED_SELECTION = Collections.singletonList(null);
 
     /**

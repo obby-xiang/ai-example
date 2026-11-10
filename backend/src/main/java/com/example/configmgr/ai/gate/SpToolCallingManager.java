@@ -1054,6 +1054,11 @@ public class SpToolCallingManager implements ToolCallingManager {
         FrontendToolGuard.Verdict verdict = inspectFrontendArguments(pending, state.context);
         if (verdict != null && !verdict.accepted()) {
             settleFrontendRejected(state.runId, pending, verdict);
+            if (ErrorCodes.FORM_CREATE_ENTRY_REQUIRED.equals(verdict.code())) {
+                // 创建入口专用拒绝也占用既有工具步预算：反复提交同类表单不能绕过 max-tool-steps，
+                // 到顶后由既有步数收尾（STEP_LIMIT_WRAP_UP）让模型用已有信息作答，不新造状态机。
+                state.stepsUsed++;
+            }
             state.frontendRejected.add(pending.getToolCallId());
             return true;
         }
@@ -4097,14 +4102,16 @@ public class SpToolCallingManager implements ToolCallingManager {
     /**
      * 模型输入或调用顺序可由其下一拍纠正的零副作用拒绝，不产生用户可见工具帧。
      *
-     * <p>静默只覆盖生成式表单的 schema/槽位拒绝，以及 {@code confirm_step} 的条件结构纠正；
-     * 条目、日志和模型回执全部保留。表单回灌值不合法、用户拒绝/取消和真实执行失败不在此列。
+     * <p>静默只覆盖生成式表单的 schema/槽位拒绝、创建入口优先拒绝，以及 {@code confirm_step}
+     * 的条件结构纠正；条目、日志和模型回执全部保留。表单回灌值不合法、用户拒绝/取消和真实执行失败不在此列。
+     * 创建入口拒绝同时占用既有工具步预算（见 {@code isFrontendSkipped}），重复提交不能绕过步数上限。
      */
     private static boolean isSystemRejectedWithoutUserFrames(PendingToolCall pending) {
         String code = pending.effectiveCode();
         if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
             return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code)
-                    || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);
+                    || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code)
+                    || ErrorCodes.FORM_CREATE_ENTRY_REQUIRED.equals(code);
         }
         return AiToolNames.CONFIRM_STEP.equals(pending.getName())
                 && (ErrorCodes.CONDITION_OPERATOR_UNKNOWN.equals(code)

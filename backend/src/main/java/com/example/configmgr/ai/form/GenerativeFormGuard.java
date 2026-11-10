@@ -4,6 +4,7 @@ import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorCodes;
@@ -55,6 +56,15 @@ import java.util.Set;
  * 上下文由
  * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 传入；没有上下文时
  * （既有单测/兼容调用）槽位与步骤规则整体跳过。
+ *
+ * <h2>创建入口优先（2026-11-10 批）</h2>
+ * 尚未绑定任务的创建入口页（{@link ContextBuilder#CREATE_ENTRY_PAGE_IDS}）上：
+ * {@code SELECT_DEFINITIONS} 显式用途本身即零副作用拒绝；{@code GENERAL_CLARIFY} 在收集无歧义
+ * 配置项判据（{@code definitions} 数据源或 {@code defCodes} 键）时同样拒绝；{@code level}/
+ * {@code conditions} 等通用字段名可能属于真实非配置缺口，不参与判断。
+ * 拒绝只回执模型（{@code FORM_CREATE_ENTRY_REQUIRED}），不挂起、不下发。创建后的配置项收集方式
+ * 按类型不同：EXPORT 由宿主一次性选择表单发放；IMPORT 没有该宿主表单，由导入向导 UPLOAD 页收集。
+ * 真实非配置项缺口、{@code TASK_TYPE} 类型未知、已有任务的表单与只读问答页面不受影响。
  *
  * <h2>两条补充判据（2026-10-29 闭环批）</h2>
  * <ul>
@@ -143,18 +153,22 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return Verdict.rejectIssues(GenerativeFormRules.SCHEMA_REJECTED,
 					"表单 schema 未通过白名单校验，工具未执行（未向前端下发表单）", issues);
 		}
-		return inspectSlots(FormPurposes.resolve(arguments.get("form")),
+		JsonNode form = arguments.get("form");
+		return inspectSlots(FormPurposes.resolve(form), GenerativeFormRules.hasCreateSlotCollection(form),
 				TaskSlots.fromExtra(context == null ? null : context.getExtra()),
 				context == null ? null : context.getStep(),
 				context == null ? null : context.getExtra(),
-				context == null ? null : context.getTaskId());
+				context == null ? null : context.getTaskId(),
+				context == null ? null : context.getPage(),
+				context == null ? null : context.getTaskType());
 	}
 
 	/**
 	 * 槽位放行：purpose 与已解析槽位（以及当前步骤）的组合决定"这张表还有没有真实缺口"。
 	 *
 	 * <p>拒绝是<b>零副作用</b>的（调用方不挂起、不下发、不认领、不记台账），模型收到可读码与
-	 * 下一步指引后可按规则 29 做一次不同的纠正；槽位缺失/歧义与 {@code GENERAL_CLARIFY} 一律放行。
+	 * 下一步指引后可按规则 29 做一次不同的纠正；槽位缺失/歧义与 {@code GENERAL_CLARIFY} 放行
+	 * （创建入口页收集配置项的例外见 {@link #preCreateVerdict}）。
 	 *
 	 * <p>本批（2026-10-29 闭环批）新增两条：
 	 * <ul>
@@ -164,8 +178,12 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 * 拒绝并指引按既有步骤链继续；步骤未知时按槽位规则兼容放行（未知 ≠ 关闭）。</li>
 	 * </ul>
 	 */
-	private Verdict inspectSlots(String purpose, TaskSlots slots, String step, Map<String, Object> extra,
-			Long taskId) {
+	private Verdict inspectSlots(String purpose, boolean hasCreateSlotCollection, TaskSlots slots, String step,
+			Map<String, Object> extra, Long taskId, String page, String taskType) {
+		Verdict preCreate = preCreateVerdict(purpose, hasCreateSlotCollection, page, taskId, taskType);
+		if (preCreate != null) {
+			return preCreate;
+		}
 		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose)) {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"条件表单由宿主统一发放，本次模型表单未下发（零副作用）",
@@ -204,6 +222,76 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return conditionStep;
 		}
 		return Verdict.accept();
+	}
+
+	/**
+	 * 创建入口优先的零副作用拒绝：配置项由创建后的对应向导收集，模型不得在创建前用表单收集。
+	 *
+	 * <p>
+	 * 判据全部来自系统状态（见 {@link GenerativeFormRules#isCreateEntryRequired}），不看用户话术与模型名；
+	 * 拒绝后调用方不挂起、不向前端下发，模型在同一 run 内按 {@code reasons} 改为调用 {@code create_task}。
+	 * 指引按已知任务类型分开：EXPORT 显式 {@code conditions={}}，IMPORT 省略 {@code conditions}；
+	 * 类型未知时两种调用分别描述，不给统一示例。创建后的配置项收集方式同样分类型表述：
+	 * EXPORT 有宿主一次性选择表单，IMPORT 由导入向导 UPLOAD 页的配置选择控件收集。
+	 */
+	private static Verdict preCreateVerdict(String purpose, boolean hasCreateSlotCollection, String page, Long taskId,
+			String taskType) {
+		if (!GenerativeFormRules.isCreateEntryRequired(purpose, hasCreateSlotCollection, page, taskId)) {
+			return null;
+		}
+		String creationType = creationTypeHint(taskType, page);
+		List<FormIssue> issues = List.of(FormIssue.form(FormIssueCodes.FORM_CREATE_ENTRY_REQUIRED,
+				"创建前不收集配置项：先创建任务，配置项由创建后的向导收集"));
+		log.warn("generative_form pre-create slot form rejected (not parked, not sent) code={} purpose={} page={} type={}",
+				ErrorCodes.FORM_CREATE_ENTRY_REQUIRED, purpose, page, creationType);
+		return new Verdict(false, ErrorCodes.FORM_CREATE_ENTRY_REQUIRED,
+				"创建前不收集配置项，表单未下发（工具未执行、未向前端下发表单）",
+				createEntryReasons(creationType), issues, null);
+	}
+
+	/**
+	 * 创建类型提示：显式 {@code taskType} 优先；未给时由创建入口页推断（export/import）。
+	 * {@code tasks} 页与其它页面返回 null（未知类型，两种调用分别描述）。
+	 */
+	private static String creationTypeHint(String taskType, String page) {
+		String normalized = StringUtils.upperCase(StringUtils.trimToEmpty(taskType));
+		if ("EXPORT".equals(normalized) || "IMPORT".equals(normalized)) {
+			return normalized;
+		}
+		if ("import".equals(page)) {
+			return "IMPORT";
+		}
+		if ("export".equals(page)) {
+			return "EXPORT";
+		}
+		return null;
+	}
+
+	/**
+	 * 创建入口拒绝的模型指引（按类型分开；未知类型分别描述两种调用，不给统一示例）。
+	 */
+	private static List<String> createEntryReasons(String creationType) {
+		List<String> reasons = new ArrayList<>();
+		if ("EXPORT".equals(creationType)) {
+			reasons.add("当前还没有任务：配置项不是模型要补的缺口，创建后由导出向导的宿主选择表单统一发放");
+			reasons.add("下一步：调用 create_task（type=EXPORT，conditions={}）；defCodes 未知就省略，"
+					+ "不要再用表单或文字追问");
+		}
+		else if ("IMPORT".equals(creationType)) {
+			reasons.add("当前还没有任务：配置项不是模型要补的缺口，创建后由导入向导的 UPLOAD 页选择配置项/上传文件");
+			reasons.add("下一步：调用 create_task（type=IMPORT）；不要传 conditions，defCodes 未知就省略，"
+					+ "不要再用表单或文字追问");
+		}
+		else {
+			reasons.add("当前还没有任务：配置项不是模型要补的缺口，创建后由对应向导收集"
+					+ "（EXPORT 为宿主一次性选择表单，IMPORT 由 UPLOAD 页选择）");
+			reasons.add("创建 EXPORT：调用 create_task（type=EXPORT，conditions={}）；defCodes 未知就省略，"
+					+ "不要再用表单或文字追问");
+			reasons.add("创建 IMPORT：调用 create_task（type=IMPORT），不要传 conditions；defCodes 未知就省略，"
+					+ "不要再用表单或文字追问");
+		}
+		reasons.add("用户已明确配置项时，把它作为 create_task 的 defCodes 传入，不要另发表单");
+		return reasons;
 	}
 
 	private static Verdict conditionFactsVerdict(String purpose, TaskSlots slots, Map<String, Object> extra, Long taskId) {
