@@ -219,6 +219,8 @@ import { userFacingErrorText } from '@/utils/ui-error'
 import { logCaughtError } from '@/utils/log-caught-error'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
 import { uiAbandonGuard, isUiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
+import type { UiEventLifetime } from '@/types/workspace'
+import type { FrontendToolExecution } from '@/types/tools'
 
 const { t, locale } = useI18n()
 
@@ -2018,6 +2020,8 @@ class DownloadSuperseded extends Error {
   }
 }
 
+class DownloadAbandoned extends Error {}
+
 /**
  * 「发起」一次下载（**不吞异常**）：取该配置项的当前内容并交给浏览器下载链路。
  *
@@ -2025,12 +2029,18 @@ class DownloadSuperseded extends Error {
  * 未绑定任务一律向调用方传播），页面态与 toast 由调用方决定 —— 因此既能支撑用户点击侧的
  * 结局 toast，也能支撑 AI 侧「即发即回」（{@link startDownloadInBackground}）。
  */
-async function startDownload(code: string): Promise<XlsxSource> {
+async function startDownload(code: string, lifetime?: UiEventLifetime): Promise<XlsxSource> {
+  if (isUiAbandoned(lifetime)) {
+    throw new DownloadAbandoned()
+  }
   // 发起时绑定结果批次：`buildXlsx` 的 await 期间新一批结果可能已经铺开 ⇒ 作废本次下载
   const binding = captureDownloadBinding()
   const built = await buildXlsx(code)
   if (isDownloadBindingBroken(binding)) {
     throw new DownloadSuperseded()
+  }
+  if (isUiAbandoned(lifetime)) {
+    throw new DownloadAbandoned()
   }
   downloadBlob(built.blob, built.fileName)
   return built
@@ -2085,15 +2095,21 @@ async function downloadOne(code: string): Promise<DownloadOutcome> {
  * "迟到结局二次回灌"通道**（`ConfirmGate#submitFrontendResult` 对已决条目一律 409 幂等丢弃），
  * 故下面的 `.catch` 只把真实原因 toast 给用户，绝不再产出一份回执。
  */
-function startDownloadInBackground(code: string): void {
+function startDownloadInBackground(code: string, lifetime?: UiEventLifetime): void {
+  if (isUiAbandoned(lifetime)) {
+    return
+  }
   inFlightDownloads.add(code)
   const slot = defSlot(code)
   downloading.value = slot
-  startDownload(code)
+  startDownload(code, lifetime)
     .then((built) => {
       ElMessage.success(downloadedText(built))
     })
     .catch((error: unknown) => {
+      if (isUiAbandoned(lifetime) || error instanceof DownloadAbandoned) {
+        return
+      }
       if (error instanceof DownloadSuperseded) {
         // 换批作废：一句提示即可（不弹错误、也不产出回执）
         ElMessage.info(error.message)
@@ -2116,7 +2132,10 @@ function startDownloadInBackground(code: string): void {
  * 一次下载，绕过浏览器对"自动连续下载"的拦截（issue #9 的根因）。打包链路与用户侧
  * 「全部打包 zip」完全同源（`buildXlsx` 取在线编辑后的表格 + `zipBlobs`），未保存的编辑不丢。
  */
-function startBatchDownloadInBackground(codes: readonly string[]): void {
+function startBatchDownloadInBackground(codes: readonly string[], lifetime?: UiEventLifetime): void {
+  if (isUiAbandoned(lifetime)) {
+    return
+  }
   const batch = [...codes]
   const task = taskId.value ?? 0
   // 同 `startDownload`：逐码取字节与 `zipBlobs` 都是 await，期间换批即作废整包
@@ -2135,6 +2154,9 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
       if (isDownloadBindingBroken(binding)) {
         throw new DownloadSuperseded()
       }
+      if (isUiAbandoned(lifetime)) {
+        throw new DownloadAbandoned()
+      }
       return zipBlobs(entries)
     })
     .then((zipped) => {
@@ -2142,10 +2164,16 @@ function startBatchDownloadInBackground(codes: readonly string[]): void {
       if (isDownloadBindingBroken(binding)) {
         throw new DownloadSuperseded()
       }
+      if (isUiAbandoned(lifetime)) {
+        throw new DownloadAbandoned()
+      }
       downloadBlob(zipped, `export-${task}.zip`)
       ElMessage.success(t('views.export.msg.zipDownloaded', { count: batch.length }))
     })
     .catch((error: unknown) => {
+      if (isUiAbandoned(lifetime) || error instanceof DownloadAbandoned) {
+        return
+      }
       if (error instanceof DownloadSuperseded) {
         // 换批作废 ≠ 打包失败：一句提示，且确实一个字节都没交给浏览器
         ElMessage.info(error.message)
@@ -2361,6 +2389,8 @@ const HANDLER_NAMES = [
   'export.start',
   'export.nextStep',
   PAGE_HANDLER_OPEN_EXPORT_EDITOR,
+  'export.downloadConfirmation',
+  'export.downloadConfirmationResolve',
   'sheet.current',
   // 批 D · D3（问题 6）：AI 触发 start_export 后把作业绑进本页跟踪面
   'export.syncJob',
@@ -2393,13 +2423,31 @@ type ToolTaskGate = { ok: true; isSwitched: boolean } | { ok: false; message: st
  * 由 watch（`navigate_to`）刚发起的、仍在途；此处先 `await` 那次在途绑定再放行。
  * 异 id 的在途绑定按既有竞态口径处理（本批不新增序号守卫，R5 已合并 issue #1 遗留排期）。
  */
-async function ensureTaskBoundForTool(rawTaskId: unknown): Promise<ToolTaskGate> {
+function downloadAbandonedFailure(): { ok: false; message: string } {
+  return { ok: false, message: uiAbandonedReply('触发下载').reason }
+}
+
+function downloadAbandonedExecution(): FrontendToolExecution {
+  return makeExecution({
+    outcome: 'failed',
+    availability: 'degraded',
+    result: uiAbandonedReply('触发下载').reason
+  })
+}
+
+async function ensureTaskBoundForTool(rawTaskId: unknown, lifetime?: UiEventLifetime): Promise<ToolTaskGate> {
+  if (isUiAbandoned(lifetime)) {
+    return downloadAbandonedFailure()
+  }
   const parsed = typeof rawTaskId === 'number' ? rawTaskId : Number(rawTaskId)
   const target = Number.isFinite(parsed) && Math.trunc(parsed) > 0 ? Math.trunc(parsed) : null
   if (target === null || target === taskId.value) {
     const pending = inFlightBinding
     if (pending !== null && pending.taskId === target) {
       const outcome = await pending.promise
+      if (isUiAbandoned(lifetime)) {
+        return downloadAbandonedFailure()
+      }
       if (!outcome.taskOk) {
         return {
           ok: false,
@@ -2425,7 +2473,13 @@ async function ensureTaskBoundForTool(rawTaskId: unknown): Promise<ToolTaskGate>
         + `请用 list_tasks 核对任务号后重试，或提示用户在任务中心打开目标任务`
     }
   }
+  if (isUiAbandoned(lifetime)) {
+    return downloadAbandonedFailure()
+  }
   const outcome = await applyTaskBinding(target, preloaded)
+  if (isUiAbandoned(lifetime)) {
+    return downloadAbandonedFailure()
+  }
   if (!outcome.filesOk) {
     return { ok: false, message: filesLoadFailedMessage(target) }
   }
@@ -2465,9 +2519,8 @@ function downloadingLabel(slot: DownloadSlot): string {
 }
 
 /**
- * `download_export_files` 的前置校验（方案 A 的"AI 真正该等的那一段"，**逐码**）：参数 →
- * 任务绑定闸门 → 结果存在性，外加切页（让用户看到下载发生的位置；只读态走零写的 `viewStep`，
- * 非只读态 `goStep` —— 见 §S3e）。
+ * `download_export_files` 批准后的前置校验（方案 A 的"AI 真正该等的那一段"，**逐码**）：参数 →
+ * 任务绑定闸门 → 结果存在性，外加只读切页（让用户看到下载发生的位置）。
  *
  * 为什么这一段必须 `await` 且必须失败即回灌失败：三者任一不成立都**确定"未触发下载"**，
  * 可以如实回灌 `failed`（卡片显示原因）；而浏览器侧下载链路的结局是"可能已发生但不可知"，
@@ -2476,8 +2529,6 @@ function downloadingLabel(slot: DownloadSlot): string {
  * 无效码**整体失败**（R-156 会审 DS-6）：只要有一个码不在当前可导出清单里就整批不下，
  * 回执点名无效码并给出可用码清单 —— 只下"能下的那几个"会让模型以为整批都已完成，
  * 而用户拿到的文件不全（静默丢弃）。
- *
- * 切页（非只读态 `goStep(2)`）同步失败的面（W-06/W-07）属批次 C，本批不改。
  */
 function downloadCodesProblem(defCodes: readonly string[]): string | null {
   const available = exportResults.value.map((item) => item.defCode)
@@ -2499,21 +2550,24 @@ function downloadCodesProblem(defCodes: readonly string[]): string | null {
   return null
 }
 
-async function ensureDownloadStep(): Promise<string | null> {
+async function ensureDownloadStep(lifetime?: UiEventLifetime): Promise<string | null> {
   if (stepIndex.value === 2) {
     return null
   }
-  if (isReadOnly.value) {
-    await viewStep(2)
-    return null
+  if (isUiAbandoned(lifetime)) {
+    return downloadAbandonedFailure().message
   }
-  const advanced = await goStep(2)
-  return advanced.ok ? null : `已预检通过，但无法切换到导出结果步骤：${advanced.reason}。本次未触发下载`
+  await viewStep(2)
+  return isUiAbandoned(lifetime) ? downloadAbandonedFailure().message : null
 }
 
 async function preflightDownload(
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  lifetime?: UiEventLifetime
 ): Promise<{ ok: true; defCodes: string[] } | { ok: false; message: string }> {
+  if (isUiAbandoned(lifetime)) {
+    return downloadAbandonedFailure()
+  }
   const rawCodes = Array.isArray(args.defCodes)
     ? args.defCodes.map((item) => String(item)).filter((item) => item !== '')
     : []
@@ -2524,9 +2578,12 @@ async function preflightDownload(
     return { ok: false, message: '缺少 defCodes（本工具必填非空）：请传入至少一个配置定义编码' }
   }
   // issue #2：与 open 执行器同因同修 —— 否则会拿**当前任务**（或当前任务里同名配置）的文件去下载
-  const gate = await ensureTaskBoundForTool(args.taskId)
+  const gate = await ensureTaskBoundForTool(args.taskId, lifetime)
   if (!gate.ok) {
     return { ok: false, message: `${gate.message}。${defCodes.join('、')} 的导出文件未下载` }
+  }
+  if (isUiAbandoned(lifetime)) {
+    return downloadAbandonedFailure()
   }
   if (jobRunning.value) {
     return { ok: false, message: `导出作业 #${exportJob.value?.id ?? ''} 尚未完成，本次未触发下载；请等待完成后再试` }
@@ -2535,11 +2592,11 @@ async function preflightDownload(
   if (problem !== null) {
     return { ok: false, message: problem }
   }
-  const stepProblem = await ensureDownloadStep()
+  const stepProblem = await ensureDownloadStep(lifetime)
   if (stepProblem !== null) {
     return { ok: false, message: stepProblem }
   }
-  return { ok: true, defCodes }
+  return isUiAbandoned(lifetime) ? downloadAbandonedFailure() : { ok: true, defCodes }
 }
 
 /** 前置校验的结局（L-82）：正常落地 vs 显式上限到点。 */
@@ -2558,14 +2615,14 @@ type GatedPreflight =
  * <p>上限取 {@link DOWNLOAD_PREFLIGHT_TIMEOUT_MS}（30s）：先于外层默认预算收口，又给"前置通过后
  * 真正发起下载"留足余量。计时器是唯一判定源（不依赖 preflight 是否 settle）。
  */
-async function preflightWithDeadline(args: Record<string, unknown>): Promise<GatedPreflight> {
+async function preflightWithDeadline(args: Record<string, unknown>, lifetime?: UiEventLifetime): Promise<GatedPreflight> {
   let timer: ReturnType<typeof setTimeout> | null = null
   const expired = new Promise<GatedPreflight>((resolve) => {
     timer = setTimeout(() => resolve({ kind: 'timeout' }), DOWNLOAD_PREFLIGHT_TIMEOUT_MS)
   })
   try {
     return await Promise.race([
-      preflightDownload(args).then((result): GatedPreflight => ({ kind: 'settled', result })),
+      preflightDownload(args, lifetime).then((result): GatedPreflight => ({ kind: 'settled', result })),
       expired
     ])
   } finally {
@@ -2831,6 +2888,42 @@ function registerHandlers(): void {
     }
   })
 
+  function downloadConfirmationSnapshot(defCodes: readonly string[]): {
+    taskId: number | null
+    ready: boolean
+    sources: Array<{ defCode: string; kind: 'grid' | 'server' }>
+  } {
+    return {
+      taskId: taskId.value,
+      ready: taskDetailReady.value,
+      sources: defCodes.map((defCode) => ({
+        defCode,
+        kind: gridRefs[defCode] && loadedGrids.has(defCode) ? 'grid' : 'server'
+      }))
+    }
+  }
+
+  registerPageHandler('export.downloadConfirmation', (payload) => {
+    const defCodes = uniq(Array.isArray(payload.defCodes)
+      ? payload.defCodes.map((item) => String(item)).filter((item) => item !== '')
+      : [])
+    return downloadConfirmationSnapshot(defCodes)
+  })
+
+  registerPageHandler('export.downloadConfirmationResolve', async (payload, lifetime) => {
+    const gate = await ensureTaskBoundForTool(payload.taskId, lifetime)
+    if (!gate.ok) {
+      throw new Error(gate.message)
+    }
+    if (isUiAbandoned(lifetime)) {
+      throw new Error(downloadAbandonedFailure().message)
+    }
+    const defCodes = uniq(Array.isArray(payload.defCodes)
+      ? payload.defCodes.map((item) => String(item)).filter((item) => item !== '')
+      : [])
+    return downloadConfirmationSnapshot(defCodes)
+  })
+
   registerPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR, async (payload, lifetime) => {
     const defCode = String(payload.defCode ?? '')
     // 预算到点 / 停止 ⇒ 不切步骤、不切标签页（本次执行已回灌为超时/已停止）
@@ -2843,7 +2936,7 @@ function registerHandlers(): void {
       return { ok: false, reason: '缺少 defCode，无法打开在线编辑器（未执行）' }
     }
     // issue #2：payload.taskId 可能不是当前绑定的任务，先把目标任务绑定好再读 exportResults
-    const gate = await ensureTaskBoundForTool(payload.taskId)
+    const gate = await ensureTaskBoundForTool(payload.taskId, lifetime)
     if (!gate.ok) {
       throw new Error(`${gate.message}。${defCode} 的在线编辑器未打开`)
     }
@@ -2855,20 +2948,11 @@ function registerHandlers(): void {
     if (!exportResults.value.some((item) => item.defCode === defCode)) {
       throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未打开在线编辑器`)
     }
-    // 施工卡 §S3e：切页同 `preflightDownload` —— 只读态走零写的 `viewStep`，非只读态取 goStep 结局
+    // 只读切页：不提交选中集、条件或当前步骤。
     if (stepIndex.value !== 2) {
-      if (isReadOnly.value) {
-        await viewStep(2)
-      } else {
-        // 批3③a D7：W-06 残余入口收口 —— persist 失败阻断推进时结构化如实上报（A3 解读支），
-        // 不得谎报"已打开在线编辑器"。
-        const advanced = await goStep(2, uiAbandonGuard(lifetime))
-        if (!advanced.ok) {
-          return {
-            ok: false,
-            reason: `无法推进到导出结果步骤：${advanced.reason}。${defCode} 的在线编辑器未打开。`
-          }
-        }
+      await viewStep(2)
+      if (isUiAbandoned(lifetime)) {
+        return uiAbandonedReply('打开在线编辑器')
       }
     }
     activeTab.value = defCode
@@ -2893,9 +2977,10 @@ function registerHandlers(): void {
 
   // 前端工具 download_export_files：副作用在浏览器，必须由页面执行器完成（R-156 单工具按数量分流）
   //
-  // 即发即回（批 A = W-01 + W-02，方案 A）：AI 侧只等**前置校验**（{@link preflightDownload}：
-  // 参数 / 任务绑定 / 结果存在性 / 切页）—— 校验失败 ⇒ 抛错（回灌确定性失败、卡片 failed）；
-  // 校验通过 ⇒ **发起下载后立即返回**，不再 `await` 浏览器下载链路。旧写法
+  // 先经真实 FRONTEND 待决条目上的拒绝/批准确认；批准后 AI 侧只等**前置校验**
+  // （{@link preflightDownload}：参数 / 任务绑定 / 结果存在性 / 只读切页）——
+  // 校验失败 ⇒ 抛错（回灌确定性失败、卡片 failed）；校验通过 ⇒ **发起下载后立即返回**，
+  // 不再 `await` 浏览器下载链路。旧写法
   // `await downloadOne(defCode)` 的代价：宿主浏览器拖住链路时回灌迟到 ⇒ 后端按超时收尾并回
   // "本次调用未获得数据"（假失败，而文件其实已落盘，issue#6 实测 120,004ms）。
   //
@@ -2909,8 +2994,21 @@ function registerHandlers(): void {
   // ③ 在途目标是**别的**文件/打包 ⇒ 本次从未发起，必须如实说「本次未发起 <编码> 的下载」并允许
   // 「可稍后重试本项」—— 否则模型会以为该文件已在下载、不再补发，而用户实际拿不到它（复核 N-1）。
   // 三处共同纪律：**禁止失败暗示**（不得读作「下载成功」或「下载失败」）。
-  registerFrontendToolExecutor('download_export_files', async (call) => {
-    const gated = await preflightWithDeadline(call.args)
+  registerFrontendToolExecutor('download_export_files', async (call, lifetime) => {
+    if (isUiAbandoned(lifetime)) {
+      return downloadAbandonedExecution()
+    }
+    if (call.toolCallId === undefined) {
+      return makeExecution({
+        outcome: 'failed',
+        availability: 'unavailable',
+        result: '缺少工具调用标识，本次未触发下载'
+      })
+    }
+    if (!await useAiStore().refreshDownloadConfirmation(call.toolCallId, lifetime)) {
+      return downloadAbandonedExecution()
+    }
+    const gated = await preflightWithDeadline(call.args, lifetime)
     if (gated.kind === 'timeout') {
       // L-82：前置校验在显式上限内没落地 ⇒ 确定性 timeout 结局（8 态回执 + 三段式人话），
       // 不再把"卡住"留给外层预算（真机实测 >90s 回执悬空）。此时**未发起任何下载**，
@@ -2926,6 +3024,9 @@ function registerHandlers(): void {
           next: '提示用户核对任务与导出结果是否就绪后重试；本次未触发下载，不需要去下载目录确认'
         })
       })
+    }
+    if (isUiAbandoned(lifetime)) {
+      return downloadAbandonedExecution()
     }
     const preflight = gated.result
     if (!preflight.ok) {
@@ -2948,7 +3049,10 @@ function registerHandlers(): void {
         return `任务 #${taskId.value} 的 ${defCode} 导出文件：本次未发起 ${defCode} 的下载`
           + `（页面正有 ${downloadingLabel(busy)}在进行中），可稍后重试本项。`
       }
-      startDownloadInBackground(defCode)
+      if (isUiAbandoned(lifetime)) {
+        return downloadAbandonedExecution()
+      }
+      startDownloadInBackground(defCode, lifetime)
       return `已发起下载：任务 #${taskId.value} 的 ${defCode} 导出文件（${sources}）。`
         + '下载由浏览器执行 —— 若弹出保存位置选择框或提示被拦截，请让用户在浏览器侧放行并确认；'
         + '文件落盘以浏览器下载目录为准。本次调用到此结束，无需重试。'
@@ -2967,7 +3071,10 @@ function registerHandlers(): void {
       return `任务 #${taskId.value} 的 ${codeList} 导出文件（共 ${defCodes.length} 个）：本次未发起这笔打包下载`
         + `（页面正有 ${downloadingLabel(busy)}在进行中），可稍后重试本项。`
     }
-    startBatchDownloadInBackground(defCodes)
+    if (isUiAbandoned(lifetime)) {
+      return downloadAbandonedExecution()
+    }
+    startBatchDownloadInBackground(defCodes, lifetime)
     return `已发起打包下载：任务 #${taskId.value} 的 ${defCodes.length} 个导出文件（${codeList}）`
       + `将合并为单个 zip（内容来源：${sources}）。`
       + '下载由浏览器执行 —— 若弹出保存位置选择框或提示被拦截，请让用户在浏览器侧放行并确认；'

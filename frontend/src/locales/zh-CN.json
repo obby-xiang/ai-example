@@ -376,6 +376,17 @@
       },
       "action": {
         "start_publish": "启动发布作业"
+      },
+      "downloadConfirmation": {
+        "xlsx": "单文件 xlsx",
+        "zip": "打包 zip",
+        "sourceLabel": "内容来源",
+        "sourceGrid": "在线编辑后的当前表格",
+        "sourceServer": "服务端导出文件（标签未载入）",
+        "sourceUnknown": "在线编辑内容或服务端导出文件（批准后核对）",
+        "listSeparator": "、",
+        "sourceSeparator": "；",
+        "sourceItem": "{code} = {source}"
       }
     },
     "gf": {

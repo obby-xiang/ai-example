@@ -5304,6 +5304,59 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "沿用增量UTF-8解码和完整SSE帧解析，仅合法帧刷新idle。"},
         "verification-review": {"status": "checked", "reason": "agent-1213最终APPROVE；sse.ts IDEA Reformat；node scripts/build.mjs构建3281模块成功，26.37秒；npm run build因其他文件/既有测试类型错误未通过，动态SSE场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:963e2f3fc03a3625e67c8e04083702208f2455d6fca3e124bd2dc8a6f200c9f8",
+      "status": "reviewed",
+      "reason": "逐hunk及完整下载协议复核HITL、只读切页、生命周期、决策恢复和来源重核；独立审查agent-1213多轮返修后最终APPROVE。",
+      "reviewedAt": "2026-11-10T11:39:12+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1213、施工agent-1210",
+      "specChanges": [
+        {
+          "change": "download_export_files批准前展示真实拒绝/批准卡，批准后才执行原预检和下载，拒绝仅cancelled回灌。",
+          "reason": "用户明确要求下载前确认，原READ+FRONTEND即发即回属于旧规格。",
+          "impact": "批准前零切页/预检/浏览器下载/业务写，ConfirmGate人工等待不受120秒机器超时，保留READ+FRONTEND合法组合。"
+        },
+        {
+          "change": "下载与打开编辑器由goStep改为只读viewStep，并在绑定、预检、后台启动和downloadBlob前统一检查lifetime。",
+          "reason": "原切页会暗中提交选中集/条件/步骤，批准后停止也可能继续下载。",
+          "impact": "不再隐写业务数据，停止后不得改绑、路由、启动后台任务或下载。"
+        },
+        {
+          "change": "decision仅表示本地批准/拒绝，执行证据由journal和权威终态提供；批准无journal可首次drive，claimed不重试，completed仅重放结果。",
+          "reason": "本地decision被误当后端受理会造成永久失联，重复执行又可能重复下载。",
+          "impact": "刷新后有确认/人工/自动恢复出口，卡面保留已批准/已拒绝，运行结果与决策分离。"
+        },
+        {
+          "change": "来源快照绑定taskId/ready并在原执行器内按同一lifetime重核，缺失时按entry.arguments/runId补建。",
+          "reason": "当前页同名配置可能误导批准内容，独立resolver生命周期和确认Map会失效。",
+          "impact": "不可靠来源降级为通用说明，停止后不改绑或写快照，中英文分隔符统一i18n。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java", "status": "checked", "reason": "人工等待与即时工具集合注释同步下载新协议。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "下载纳入人工等待集合，真实pending/cancelled路径保持。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "工具描述同步批准前确认，READ+FRONTEND元数据未非法改组。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "版本升至2026-10-27.41，记录HITL、生命周期、journal恢复和来源边界。"},
+        {"path": "docs/03-技术方案文档-v2.1.md", "status": "checked", "reason": "记录下载两阶段协议、恢复和同类工具审查边界。"},
+        {"path": "docs/requirements.md", "status": "checked", "reason": "明确2026-11-10起下载需用户批准，旧即发即回仅限批准后。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "真实拒绝/批准卡、决策状态、来源和i18n分隔符复核。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "下载确认及来源文案英文键完整，无中文标点硬编码。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "下载确认及来源文案中文键与英文一致。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "复核确认/拒绝、journal恢复、生命周期、来源重核、终态吸收和严格类型。"},
+        {"path": "frontend/src/types/tools.ts", "status": "checked", "reason": "下载确认快照和执行结果类型additive，taskId/ready/source结构明确。"},
+        {"path": "frontend/src/utils/blocks.ts", "status": "checked", "reason": "已决下载进入既有只读卡体系，拒绝与停止可区分。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "viewStep无隐写，下载全阶段lifetime和来源重核复用原执行器。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用ConfirmGate、runFrontendTool、journal、viewStep和只读卡，无新增依赖或禁止的风险通道组合。"},
+        "java-api-style": {"status": "checked", "reason": "Java仅小范围集合和描述，控制块显式{}；前端严格空值和返回类型已复核，未改JSON实体。"},
+        "logging-exception-safety": {"status": "checked", "reason": "拒绝/执行失败不伪造受理或下载成功，停止和终态不复活，异常不驱动额外下载。"},
+        "toc-interaction": {"status": "checked", "reason": "用户先批准后下载，拒绝不打扰，来源真实，已决卡状态清晰，中英文一致且无隐藏写。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "run/toolCallId/journal幂等覆盖刷新与帧POST顺序，lifetime联动停止，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、编码或SSE解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1213最终APPROVE；生产文件IDEA Reformat；Maven 358主源BUILD SUCCESS，前端3281模块构建成功；全量typecheck仍有既有错误，动态下载场景NOT_RUN。"}
+      }
     }
   ]
 }

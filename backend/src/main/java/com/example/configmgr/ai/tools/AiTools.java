@@ -658,10 +658,13 @@ public class AiTools {
      * <li>≥2 个码 ⇒ 客户端打包，**单次 zip 浏览器下载**；</li>
      * <li>码不在当前可导出清单里 ⇒ 整体失败并回执可用码清单，不静默丢弃。</li>
      * </ul>
+     * <p>下载前必须经真实 FRONTEND 待决条目上的拒绝/批准确认；批准前不切页、不预检、不下载，
+     * 拒绝/取消仅回灌 {@code cancelled=true}，人工等待不设机器超时。</p>
      */
-    @Tool(name = AiToolNames.DOWNLOAD_EXPORT_FILES, description = "下载指定配置项的既有导出文件（前端执行）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。"
+    @Tool(name = AiToolNames.DOWNLOAD_EXPORT_FILES, description = "下载指定配置项的既有导出文件（前端执行，需要用户拒绝/批准确认）：1 个编码直出单文件 xlsx，2 个及以上编码打包为单个 zip；不打开在线编辑器，也不启动新的导出。"
+            + "确认卡先于切页、前置校验和下载执行器，展示任务、编码、单文件/zip 和内容来源；批准后才执行，拒绝/取消只回灌 cancelled，不写业务数据也不触发浏览器下载，等待确认无 120 秒上限。"
             + "前置：EXPORT 任务已有成功导出作业/导出文件。只在用户明确提出下载/获取文件意图时调用；查看/编辑时改用 open_export_file_editor。"
-            + "任务已完成（COMPLETED）本身不是授权，不要用它替代 start_export，也不要仅凭状态自动下载。浏览器下载结局未确认时如实说明，不把已发起当作已保存。")
+            + "任务已完成（COMPLETED）本身不是授权，不要用它替代 start_export，也不要仅凭状态自动下载。切页只读，不提交选中集、条件或步骤。浏览器下载结局未确认时如实说明，不把已发起当作已保存。")
     @ToolScope(AiToolNames.SCOPE_EXPORT_EXECUTION)
     @ToolRisk(ToolMeta.RiskLevel.READ)
     @ToolCategory(ToolMeta.Category.F)

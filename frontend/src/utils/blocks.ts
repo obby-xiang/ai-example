@@ -548,7 +548,7 @@ export function isReadOnlyCard(part: ToolPart): boolean {
   if (part.requiresAction) {
     return false
   }
-  if (part.kind2 === 'CONFIRM' && part.decision !== undefined) {
+  if ((part.kind2 === 'CONFIRM' || part.name === 'download_export_files') && part.decision !== undefined) {
     return true
   }
   if (part.name === GENERATIVE_FORM_TOOL) {
