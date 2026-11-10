@@ -2269,6 +2269,76 @@ function mirrorMessagesForWrite(mirror: AiSessionMirror): ChatMessage[] {
   }) as ChatMessage)
 }
 
+const SHEET_PREVIEW_LEVELS: ReadonlySet<unknown> = new Set(['count', 'sample-diff', 'full-diff'])
+
+function isSheetChangeArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((change) => {
+    if (typeof change !== 'object' || change === null) {
+      return false
+    }
+    const candidate = change as { row?: unknown; col?: unknown }
+    return typeof candidate.row === 'number' && Number.isFinite(candidate.row)
+      && typeof candidate.col === 'number' && Number.isFinite(candidate.col)
+  })
+}
+
+function isRecoverableSheetWritePlan(value: unknown): value is SheetWritePlan {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const plan = value as Partial<SheetWritePlan>
+  return typeof plan.planId === 'string' && plan.planId !== ''
+    && typeof plan.toolCallId === 'string' && plan.toolCallId !== ''
+    && typeof plan.defCode === 'string' && plan.defCode !== ''
+    && typeof plan.tool === 'string' && plan.tool !== ''
+    && (plan.level === 'small' || plan.level === 'large')
+    && SHEET_PREVIEW_LEVELS.has(plan.preview)
+    && (plan.detail === 'none' || plan.detail === 'full')
+    && plan.status === 'pending'
+    && typeof plan.scopeSummary === 'string'
+    && typeof plan.predicateSummary === 'string'
+    && typeof plan.rulesText === 'string'
+    && typeof plan.rowsCount === 'number' && Number.isFinite(plan.rowsCount)
+    && typeof plan.cellsCount === 'number' && Number.isFinite(plan.cellsCount)
+    && typeof plan.skippedCount === 'number' && Number.isFinite(plan.skippedCount)
+    && isSheetChangeArray(plan.samples)
+    && isSheetChangeArray(plan.changes)
+    && Array.isArray(plan.targetRows)
+    && plan.targetRows.every((row) => typeof row === 'number' && Number.isFinite(row))
+    && Array.isArray(plan.fingerprint)
+    && plan.fingerprint.every((fingerprint) => typeof fingerprint === 'string')
+    && Array.isArray(plan.warnings)
+    && plan.warnings.every((warning) => typeof warning === 'string')
+}
+
+function mirrorPreviewPlansForWrite(
+  plans: Record<string, SheetWritePlan> | undefined
+): Record<string, SheetWritePlan> {
+  const plan = plans === undefined ? undefined : Object.values(plans)[0]
+  return isRecoverableSheetWritePlan(plan) ? { [plan.toolCallId]: plan } : {}
+}
+
+function mirrorPreviewPlanFor(
+  mirror: AiSessionMirror | null,
+  toolCallId: string,
+  runId: string
+): SheetWritePlan | null {
+  if (mirror === null || !isCurrentMirror(mirror)) {
+    return null
+  }
+  const plan = mirror.previewPlans?.[toolCallId]
+  if (!isRecoverableSheetWritePlan(plan) || plan.toolCallId !== toolCallId
+    || (plan.runId !== undefined && plan.runId !== runId)) {
+    return null
+  }
+  return { ...plan }
+}
+
+function isSheetPreviewToolPart(part: MessagePart): boolean {
+  return part.kind === 'tool' && part.status === 'pending' && part.requiresAction
+    && needsSheetPreview(part.name, parseToolArgs(part.args))
+}
+
 /**
  * 对话时序包 批2 前置（GLM o1）：镜像读取侧的 requiresAction 残留收口。
  *
@@ -2276,6 +2346,7 @@ function mirrorMessagesForWrite(mirror: AiSessionMirror): ChatMessage[] {
  * 故在读取侧（loadHistory 镜像分支）收口，且必须发生在 writeMirror 回写**之前**：
  * 仅对 done 的消息，把仍挂 requiresAction 的工具段降级（requiresAction=false；段 status
  * 仍 pending 的一并降为 expired，与 loadHistory 空历史的 expired 降级惯例一致）。
+ * sheet preview 由权威 pending 快照与页签 plan 镜像另行恢复，不在镜像读取侧一刀切。
  * 幂等（二次执行无变化）；返回是否有改动（供调用方决定是否需要回写镜像）。
  *
  * 批3③b D3（R-139①）死码清除：**入参契约 = 调用方须已归一 `done`**（loadHistory 镜像分支在
@@ -2288,7 +2359,7 @@ function canSanitizeMirrorResidues(messages: ChatMessage[]): boolean {
   let changed = false
   for (const message of messages) {
     message.parts.forEach((part, index) => {
-      if (part.kind === 'tool' && part.requiresAction) {
+      if (part.kind === 'tool' && part.requiresAction && !isSheetPreviewToolPart(part)) {
         message.parts.splice(index, 1, {
           ...part,
           requiresAction: false,
@@ -2302,10 +2373,12 @@ function canSanitizeMirrorResidues(messages: ChatMessage[]): boolean {
 }
 
 /** 批2 前置 + 批3③a D5③：轮次收尾（done / error 帧）时，消息上仍在等动作的工具段收口——
- * pending 段落 `expired`；非 pending 段（含 unknown 违例段）保持原终态、只收 requiresAction。 */
-function expireResidueToolParts(message: ChatMessage): void {
+ * pending 段落 `expired`；非 pending 段（含 unknown 违例段）保持原终态、只收 requiresAction。
+ * history 读取失败不是业务终态，该路径保留 sheet preview 的只读待决段。 */
+function expireResidueToolParts(message: ChatMessage, preserveSheetPreview = false): void {
   message.parts.forEach((part, index) => {
-    if (part.kind === 'tool' && part.requiresAction) {
+    if (part.kind === 'tool' && part.requiresAction
+      && !(preserveSheetPreview && isSheetPreviewToolPart(part))) {
       // 批3③a D5③：与 :233 对齐 —— 非 pending 的残留段（含 unknown 违例段）保持原终态，
       // 只收 requiresAction；不得把 unknown 翻成 expired。
       message.parts.splice(index, 1, {
@@ -2908,6 +2981,7 @@ interface MirrorWriteMemo {
   clientRequestStopped: boolean
   contextUsageJson: string
   composerDraft: string
+  previewPlansJson: string
 }
 
 /** 每个 store 实例一份"上次落盘现场"（WeakMap：新 store / 换会话自然失效）。 */
@@ -2927,7 +3001,8 @@ function mirrorMemoOf(owner: object): MirrorWriteMemo {
       clientRequestId: null,
       clientRequestStopped: false,
       contextUsageJson: 'null',
-      composerDraft: ''
+      composerDraft: '',
+      previewPlansJson: '{}'
     }
     mirrorWriteMemos.set(owner, memo)
   }
@@ -2965,6 +3040,7 @@ function writeMirror(
     clientRequestStopped?: boolean
     contextUsage?: ContextUsage | null
     composerDraft?: string
+    previewPlans?: Record<string, SheetWritePlan>
   } = {}
 ): MirrorWriteOutcome {
   const inFlight = extra.inFlight === true
@@ -2973,13 +3049,21 @@ function writeMirror(
   const clientRequestStopped = extra.clientRequestStopped === true
   const contextUsageJson = JSON.stringify(extra.contextUsage ?? null)
   const composerDraft = extra.composerDraft ?? ''
+  const previewPlans = mirrorPreviewPlansForWrite(extra.previewPlans)
   const memo = mirrorMemoOf(sink)
   let messageJsons: string[] = []
   let runSeqJson = 'null'
+  let previewPlansJson = '{}'
   let payload = ''
   try {
     runSeqJson = JSON.stringify(extra.runSeq ?? null)
     messageJsons = mirrorBoundedMessages(messages)
+    previewPlansJson = JSON.stringify(previewPlans)
+    // 单活动 plan 与消息分别使用同一字符预算；超预算保留旧镜像并复用既有配额提示，不静默截断 diff。
+    if (previewPlansJson.length > MIRROR_MAX_CHARS) {
+      noteMirrorFailure(sink, sessionId)
+      return 'error'
+    }
     if (
       memo.sessionId === sessionId
       && memo.messageCount === messages.length
@@ -2991,13 +3075,14 @@ function writeMirror(
       && memo.clientRequestStopped === clientRequestStopped
       && memo.contextUsageJson === contextUsageJson
       && memo.composerDraft === composerDraft
+      && memo.previewPlansJson === previewPlansJson
       && memo.messages.length === messageJsons.length
       && memo.messages.every((json, index) => json === messageJsons[index])
     ) {
       return 'unchanged'
     }
 
-    // 信封携带版本、运行现场与可选草稿；messages 直接拼
+    // 信封携带版本、运行现场、可选草稿与单活动预览；messages 直接拼
     // **已序列化**的单条 JSON，不再把整棵镜像对象交给一次全量 stringify。
     const envelope = JSON.stringify({
       v: MIRROR_VERSION,
@@ -3009,7 +3094,8 @@ function writeMirror(
       ...(clientRequestId !== null ? { clientRequestId } : {}),
       ...(clientRequestStopped ? { clientRequestStopped: true } : {}),
       ...(extra.contextUsage !== undefined ? { contextUsage: extra.contextUsage } : {}),
-      ...(composerDraft !== '' ? { composerDraft } : {})
+      ...(composerDraft !== '' ? { composerDraft } : {}),
+      ...(Object.keys(previewPlans).length > 0 ? { previewPlans } : {})
     })
     payload = `${envelope.slice(0, -1)},"messages":[${messageJsons.join(',')}]}`
   } catch (error) {
@@ -3031,6 +3117,7 @@ function writeMirror(
     memo.clientRequestStopped = clientRequestStopped
     memo.contextUsageJson = contextUsageJson
     memo.composerDraft = composerDraft
+    memo.previewPlansJson = previewPlansJson
     mirrorFailureNotified.delete(sink)
     // 故障恢复后清掉**自己留下的**降级提示（不误清别的通知）。
     if (sink.noticeCode === MIRROR_STORAGE_NOTICE) {
@@ -4658,11 +4745,11 @@ export const useAiStore = defineStore('ai', {
     queuedForms: [] as QueuedGenerativeForm[],
     /**
      * AI 表格操作专项：当前待确认的写预览（设计稿 §3.3bis / §3.4）。
-     * 只活在浏览器内存（业务行值不外送）；刷新即丢 ⇒ 恢复路径转 {@link stalePreviewToolCallId}。
+     * 业务行值只留浏览器；活动 plan 进入页签镜像，权威 pending 恢复时按 run/toolCallId 取回。
      */
     activePreview: null as SheetWritePlan | null,
     /**
-     * 刷新后失去本地 plan 的待决写工具（L0 恢复路径会为 PENDING 条目建卡）：
+     * 旧镜像或缺 plan 的待决写工具（L0 恢复路径会为 PENDING 条目建卡）：
      * 写工具无超时，若不收口会渲染一张点不动的“应用”卡 —— 面板据此改渲染“预览已失效 + 放弃”。
      */
     stalePreviewToolCallId: null as string | null,
@@ -4685,7 +4772,7 @@ export const useAiStore = defineStore('ai', {
     /**
      * AI 可视可操作专项：上传交接的活动态（设计稿 §3.9）。
      *
-     * 与表格预览是**两种形态**：预览依赖浏览器里算出的 diff（刷新必死 → stalePreviewToolCallId）；
+     * 与表格预览是**两种形态**：预览 diff 可从页签镜像恢复，缺 plan 才转 stalePreviewToolCallId；
      * 交接只依赖「页面入口是否还在」，刷新后仍可继续（`status` 由区域是否仍注册决定）。
      * 不进镜像：`toolCallId/runId/ref` 足够重建，卡渲染时再判区域。
      */
@@ -5328,7 +5415,10 @@ export const useAiStore = defineStore('ai', {
         clientRequestId: preserved === null ? this.pendingClientRequestId : preserved.clientRequestId,
         clientRequestStopped: preserved === null ? this.clientRequestStopped : preserved.clientRequestStopped,
         contextUsage: preserved === null ? this.contextUsage : preserved.contextUsage,
-        composerDraft: this.composerDraft
+        composerDraft: this.composerDraft,
+        previewPlans: preserved === null
+          ? this.activePreview ? { [this.activePreview.toolCallId]: this.activePreview } : undefined
+          : preserved.previewPlans
       })
       if (outcome !== 'error') {
         this.composerDraftMirrorRead = true
@@ -5647,6 +5737,7 @@ export const useAiStore = defineStore('ai', {
         // 镜像里的投影一律按段重算（历史双写期的镜像可能仍留着旧口径的投影）
         this.messages.forEach((message) => deriveProjections(message))
         mirrorMessages = this.messages
+        this.reconcileMirrorSheetPreview()
         if (sanitized) {
           // 只在"收口过"时回写：无变化时回写会让每次刷新都写盘
           // （既有幂等断言 `savedAt` 不变即锁这一口径），派生本身是幂等纯函数
@@ -5657,7 +5748,10 @@ export const useAiStore = defineStore('ai', {
             clientRequestId: this.pendingClientRequestId,
             clientRequestStopped: this.clientRequestStopped,
             contextUsage: this.contextUsage,
-            composerDraft: this.composerDraft
+            composerDraft: this.composerDraft,
+            previewPlans: this.activePreview
+              ? { [this.activePreview.toolCallId]: this.activePreview }
+              : mirror.previewPlans
           })
         }
       }
@@ -5815,6 +5909,7 @@ export const useAiStore = defineStore('ai', {
         }
         this.historyLoaded = true
       }
+      this.reconcileMirrorSheetPreview()
       this.restoreManualRecovery()
       this.restoreFollowupFromHistory(mirrorProvesCompleted, mirror?.lastRunId ?? null, mirrorMessages)
     },
@@ -7161,12 +7256,13 @@ export const useAiStore = defineStore('ai', {
     sealRecordedRecovery(scope: Exclude<AiLoadErrorScope, 'context'>): void {
       this.sealLeftoverInFlight()
       // pendingToolCall 是段投影：先清段的待决事实，再派生，不能直接给 computed 赋值。
+      // history 只是读取失败，sheet preview 段与 plan 留作只读复核；其他待决段照旧收口。
       for (const message of this.messages) {
-        expireResidueToolParts(message)
+        expireResidueToolParts(message, scope === 'history')
         deriveProjections(message)
       }
-      // history 可重试：表单先 flush 并保留同 toolCallId 草稿，其他交互单例照常清场。
-      this.cleanupTerminalInteractionState(scope === 'history')
+      // history 可重试：表单先 flush 并保留同 toolCallId 草稿，预览 plan 也只读保留。
+      this.cleanupTerminalInteractionState(scope === 'history', scope === 'history')
       this.suspended = false
       // 没有连接在跑才复位 loading（别的轮正在收流时不得把它标成空闲）
       if (currentAbort === null) {
@@ -7921,6 +8017,38 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
+    /** 镜像与权威段对账：frame-only 也能恢复 pending plan，已决段不得复活预览。 */
+    reconcileMirrorSheetPreview(): void {
+      const active = this.activePreview
+      if (active) {
+        const pending = this.messages.some((message) => message.parts.some((part) => part.kind === 'tool'
+          && part.toolCallId === active.toolCallId && isSheetPreviewToolPart(part)
+          && (active.runId === undefined || message.runId === active.runId)))
+        if (pending) {
+          return
+        }
+        this.dropSheetPreview('stop')
+      }
+      for (const message of [...this.messages].reverse()) {
+        if (!message.runId) {
+          continue
+        }
+        const part = [...message.parts].reverse().find((candidate) => candidate.kind === 'tool'
+          && candidate.requiresAction && isSheetPreviewToolPart(candidate))
+        if (!part || part.kind !== 'tool') {
+          continue
+        }
+        const plan = mirrorPreviewPlanFor(readMirror(this.sessionId), part.toolCallId, message.runId)
+        if (plan) {
+          this.activePreview = plan
+          if (this.stalePreviewToolCallId === part.toolCallId) {
+            this.stalePreviewToolCallId = null
+          }
+        }
+        return
+      }
+    },
+
     /**
      * M-2b（2026-10-22）：把一条快照待决条目重建为挂起卡（刷新恢复与「串行补下一张」共用）。
      *
@@ -8018,10 +8146,19 @@ export const useAiStore = defineStore('ai', {
         }
       }
       deriveProjections(host)
-      // AI 表格操作专项 §3.5：刷新后本地 plan 已丢 —— 写工具无超时，必须收口成
-      // “预览已失效 + 放弃”，否则会出现一张点不动的“应用”卡。
-      if (needsSheetPreview(entry.name, parseToolArgs(entry.arguments)) && this.activePreview?.toolCallId !== entry.toolCallId) {
-        this.stalePreviewToolCallId = entry.toolCallId
+      // 只有 pending + requiresAction 的权威段允许恢复 plan；已决残留不恢复也不转 stale。
+      const previewPart = findToolPart(host, entry.toolCallId)
+      if (previewPart && isSheetPreviewToolPart(previewPart)) {
+        if (this.activePreview?.toolCallId !== entry.toolCallId) {
+          this.activePreview = mirrorPreviewPlanFor(readMirror(this.sessionId), entry.toolCallId, runId)
+        }
+        if (this.activePreview?.toolCallId === entry.toolCallId) {
+          if (this.stalePreviewToolCallId === entry.toolCallId) {
+            this.stalePreviewToolCallId = null
+          }
+        } else {
+          this.stalePreviewToolCallId = entry.toolCallId
+        }
       }
       // AI 可视可操作专项：上传交接**天然可恢复**（不依赖浏览器中间态）—— 区域仍注册即可继续，
       // 区域不在该页则落 missing（主按钮禁用、只能放弃）。与上面"预览已失效"是两种形态。
@@ -10240,16 +10377,22 @@ export const useAiStore = defineStore('ai', {
      * aria-live 文案，轮已结束还留着，读屏会把它当成这一轮的新事实念出来。
      * 段侧的 `requiresAction` 由 `expireResidueToolParts` 同口径收掉，故这里只清单例、不碰段。
      */
-    cleanupTerminalInteractionState(preserveFormDrafts = false): void {
+    cleanupTerminalInteractionState(preserveFormDrafts = false, preserveSheetPreview = false): void {
       if (preserveFormDrafts) {
         this.suspendActiveFormDrafts()
       } else {
         this.dropActiveForm()
       }
       this.activeUploadHandoff = null
-      this.stalePreviewToolCallId = null
-      // reason='stop'：整轮结束，卡面不再需要"预览已失效"提示（同 stop() 口径）
-      this.dropSheetPreview('stop')
+      const previewToolCallId = this.activePreview?.toolCallId ?? this.stalePreviewToolCallId
+      const keepPendingPreview = preserveSheetPreview && previewToolCallId !== null && previewToolCallId !== undefined
+        && this.messages.some((message) => message.parts.some((part) => part.kind === 'tool'
+          && part.toolCallId === previewToolCallId && isSheetPreviewToolPart(part)))
+      if (!keepPendingPreview) {
+        this.stalePreviewToolCallId = null
+        // reason='stop'：整轮结束，卡面不再需要"预览已失效"提示（同 stop() 口径）
+        this.dropSheetPreview('stop')
+      }
       this.restoredPendingQueue = []
       this.lastUiEventResult = null
       // 2026-10-29 收口：界面播报按轮收口（模块侧与 state 侧同清，否则下一轮 `syncUiRuntimeState`
@@ -13634,6 +13777,9 @@ export const useAiStore = defineStore('ai', {
           // M2 / FE-22：只清**这张卡**的挂起语义 —— 同轮还有别的待人卡（确认门 / 另一张前端卡）
           // 时保持挂起，否则那一张的提交将失去重连判据（`reconnectSuspendedRun` 认 suspended）。
           this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
+          // 结局帧后清除已决旧 plan；同 ID 后续 pending plan 已由上面的补卡路径形成时保留。
+          this.reconcileMirrorSheetPreview()
+          this.writeMirrorNow()
           break
         }
         case 'suspended': {
@@ -14017,6 +14163,8 @@ export const useAiStore = defineStore('ai', {
         // 只有真的写了状态才清占位；占位 unknown 的空写不得先删账。
         historyPlaceholderStatusIds.delete(toolCallId)
       }
+      this.reconcileMirrorSheetPreview()
+      this.writeMirrorNow()
     },
 
     /**

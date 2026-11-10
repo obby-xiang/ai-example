@@ -5209,6 +5209,38 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "仅分页索引和租约状态，未修改文本或流式解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1191最终APPROVE；两文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译358个主源BUILD SUCCESS；动态压测场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:8d5ea563e5b3626881c3d1f25f27879354392e7277394160177a52637e044b77",
+      "status": "reviewed",
+      "reason": "逐hunk复核表格预览plan镜像、pending恢复、已决清理和只读保留；独立审查agent-1189两轮后最终APPROVE。",
+      "reviewedAt": "2026-11-10T08:48:27+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1189、施工agent-1209",
+      "specChanges": [
+        {
+          "change": "当前活动SheetWritePlan按toolCallId加入身份隔离的sessionStorage镜像，权威pending重建和frame-only对账时恢复。",
+          "reason": "预览plan原只在内存，刷新后只能转stale，无法按规格继续只读查看。",
+          "impact": "旧镜像无plan才stale；业务行值不上送后端、不写数据库/Redis、不重放写工具，单plan受字符预算和结构校验。"
+        },
+        {
+          "change": "history恢复失败仅保留真正pending+requiresAction的预览段和plan，实时及权威终态后统一reconcile清理已决plan。",
+          "reason": "通用清理会把预览标expired，而已决残留又可能复活并阻断后续新预览。",
+          "impact": "恢复中/manualRecovery只读level和分页保留，apply/cancel/discard继续禁用；真实done/error/stop和其他卡清理不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "复核plan校验/预算/memo、pending判据、镜像reconcile、历史豁免及终态清理全链路。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "AiSessionMirror仅新增可选previewPlans，SheetWritePlan注释明确只留浏览器。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有镜像、SheetWritePlan和reconcile/清理路径，无新增依赖或后端存储。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript前端镜像类型和恢复逻辑，无Java变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "超预算保留旧镜像并复用配额提示，不截断diff或伪造保存成功，不记录业务行值。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复中预览只读查看/翻页保留，业务写继续禁用，已决不复活，不新增提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "plan按run/toolCallId和会话身份对账，帧/POST/权威终态均清理，无AI数据库或Redis交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "仅预览状态持久化，未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；两文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，26.44秒；动态预览恢复场景NOT_RUN。"}
+      }
     }
   ]
 }

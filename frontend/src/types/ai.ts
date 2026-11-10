@@ -851,7 +851,7 @@ export interface SheetWritePlan {
    * 本计划的入参快照（切档重算用）：`setPreviewLevel` 用它把同一份计划重跑成另一档，
    * `planId` 保持不变（撤销补丁按 planId 绑定，换 id 会让撤销指向不存在的计划）。
    *
-   * <p><b>只在浏览器内存</b>：可能含 predicate 的取值，绝不进回灌、不进日志。
+   * <p><b>只留浏览器</b>：内存与页签级 sessionStorage 镜像可持有，但绝不进回灌、后端或日志。
    */
   args?: Record<string, unknown>
   /** 计划生成时的**表内内容版本**（元数据/诊断；预览硬闸只看 previewId 与行指纹，不比对它）。 */
@@ -1038,6 +1038,8 @@ export interface AiSessionMirror {
   contextUsage?: ContextUsage | null
   /** 当前会话尚未发送的输入草稿（additive 可选键；缺省 = 旧镜像/空草稿）。 */
   composerDraft?: string
+  /** 当前活动写预览，按 toolCallId 索引；至多一张且受镜像字符预算约束（additive 可选键）。 */
+  previewPlans?: Record<string, SheetWritePlan>
 }
 
 /**
