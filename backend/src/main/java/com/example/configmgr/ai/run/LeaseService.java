@@ -22,6 +22,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
@@ -274,6 +275,12 @@ public class LeaseService {
 	 */
 	public record AcquireResult(AcquireOutcome outcome, Lease lease, boolean created) {
 
+		public AcquireResult {
+			if (lease != null) {
+				lease = lease.withCreated(created);
+			}
+		}
+
 		/** 兼容构造（不关心创建者身份的场景：{@code created=false}，即"没有释放权"）。 */
 		public AcquireResult(AcquireOutcome outcome, Lease lease) {
 			this(outcome, lease, false);
@@ -361,12 +368,38 @@ public class LeaseService {
 	 */
 	private static final int ALIVE_CHECK_EVERY_TICKS = 3;
 
-	/** 一份已到手的租约：{@code key} + 号 + 主人。 */
-	public record Lease(String key, long epoch, String owner) {
+	/**
+	 * 一份已到手的租约：{@code key} + 号 + 主人；{@code created} 只绑定本句柄的释放权，
+	 * 不进入 Redis token、值相等性或 JSON。
+	 */
+	public record Lease(String key, long epoch, String owner, @JsonIgnore boolean created) {
+
+		/** 兼容既有直接构造和普通 token 调用。 */
+		public Lease(String key, long epoch, String owner) {
+			this(key, epoch, owner, true);
+		}
+
+		private Lease withCreated(boolean created) {
+			return this.created == created ? this : new Lease(this.key, this.epoch, this.owner, created);
+		}
 
 		/** Redis 里的值形态（续/放/比对都用它）。 */
 		public String token() {
 			return this.epoch + "|" + this.owner;
+		}
+
+		@Override
+		public boolean equals(Object other) {
+			if (this == other) {
+				return true;
+			}
+			return other instanceof Lease that && this.epoch == that.epoch && Objects.equals(this.key, that.key)
+					&& Objects.equals(this.owner, that.owner);
+		}
+
+		@Override
+		public int hashCode() {
+			return Objects.hash(this.key, this.epoch, this.owner);
 		}
 
 	}
@@ -779,9 +812,9 @@ public class LeaseService {
 		}
 	}
 
-	/** 释放：只有现值仍是自己那一任才删（错 epoch / 错 owner 不删别人的租约）。 */
+	/** 释放：句柄必须有创建权，且现值仍是自己那一任才删（错 epoch / 错 owner 不删别人的租约）。 */
 	public boolean isReleased(Lease lease) {
-		if (lease == null) {
+		if (lease == null || !lease.created()) {
 			return false;
 		}
 		try {

@@ -214,7 +214,7 @@ public class ConversationTranscriptStore {
 			    flat = redis.call('ZREVRANGEBYSCORE', KEYS[2], '(' .. ARGV[3], '-inf',
 			      'WITHSCORES', 'LIMIT', 0, limit)
 			  else
-			    flat = redis.call('ZREVRANGE', KEYS[2], -limit, -1, 'WITHSCORES')
+			    flat = redis.call('ZREVRANGE', KEYS[2], 0, limit - 1, 'WITHSCORES')
 			  end
 			end
 			local ids = {}

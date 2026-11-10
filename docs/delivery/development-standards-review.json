@@ -5177,6 +5177,38 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "仅序号映射，未修改文本或流式解析。"},
         "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；ai.ts IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，28.81秒；动态C-131场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:bc9119e262aa376367a8117faa670116f5258a0a8f81499d5d1d7665ca9f4ce4",
+      "status": "reviewed",
+      "reason": "按用户批准逐hunk复核transcript最新页范围和租约句柄创建权；独立审查agent-1191最终APPROVE。",
+      "reviewedAt": "2026-11-10T08:45:37+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1191、施工agent-1206",
+      "specChanges": [
+        {
+          "change": "transcript latest改为ZREVRANGE 0 limit-1读取最新N条，再按原逻辑反转为升序。",
+          "reason": "负数排名实际读取最旧N条，导致历史窗口和nextCursor错误。",
+          "impact": "before排他游标、hasMore、nextCursor、limit=0和空集行为不变。"
+        },
+        {
+          "change": "Lease句柄绑定AcquireResult.created，created=false时不执行Redis释放或本地清理。",
+          "reason": "同主重入者原来可以误删创建者租约，违反谁创建谁释放契约。",
+          "impact": "创建者仍按epoch/owner token条件删除，重入close不影响续租/authority；普通三参Lease直接调用保持兼容。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/ConversationTranscriptStore.java", "status": "checked", "reason": "仅修latest排名范围，反转、游标和before逻辑未改。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/LeaseService.java", "status": "checked", "reason": "created绑定句柄且不入token/JSON/equals，创建者与重入close顺序、兼容构造和本地视图保持。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有Lua分页和token条件删除，无新增依赖或第二套锁机制。"},
+        "java-api-style": {"status": "checked", "reason": "record手动equals/hashCode排除created以保持值语义，@JsonIgnore避免新增JSON字段，控制块显式{}。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "未新增日志或异常分支，原释放失败与分页错误语义保持。"},
+        "toc-interaction": {"status": "checked", "reason": "历史窗口恢复正确，锁所有权不暴露新用户交互或提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "最新页游标正确，释放同时校验创建权与token，重入不破坏创建者续租/fence，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "仅分页索引和租约状态，未修改文本或流式解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1191最终APPROVE；两文件IDEA Reformat；Maven -Dmaven.test.skip=true compile编译358个主源BUILD SUCCESS；动态压测场景NOT_RUN。"}
+      }
     }
   ]
 }
