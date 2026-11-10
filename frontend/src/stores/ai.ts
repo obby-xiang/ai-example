@@ -114,6 +114,7 @@ import {
   type SseConfirmDecisionFrame,
   type SseFrame,
   type SseFrontendToolResultFrame,
+  type SseSuspendedFrame,
   type SseToolResultFrame,
   type ToolOutcome,
   type TruncationNoticeCode
@@ -3331,6 +3332,60 @@ function isUnprovenLocalTerminal(part: ToolPart): boolean {
  */
 const applyFrameToPartsRaw = applyFrameToParts
 
+const PENDING_TOOL_PART_SEQ_MAX_ENTRIES = 256
+const pendingToolPartSeqs = new Map<string, number>()
+
+function pendingToolPartSeqKey(runId: string, toolCallId: string): string {
+  return `${runId}\0${toolCallId}`
+}
+
+function reserveSuspendedToolPartSeqs(runId: string | null, seq: number | null, frame: SseSuspendedFrame): void {
+  if (runId === null || seq === null) {
+    return
+  }
+  for (const call of frame.toolCalls) {
+    if (!call.toolCallId) {
+      continue
+    }
+    const key = pendingToolPartSeqKey(runId, call.toolCallId)
+    if (pendingToolPartSeqs.has(key)) {
+      continue
+    }
+    pendingToolPartSeqs.set(key, seq)
+    if (pendingToolPartSeqs.size > PENDING_TOOL_PART_SEQ_MAX_ENTRIES) {
+      const oldest = pendingToolPartSeqs.keys().next().value
+      if (oldest !== undefined) {
+        pendingToolPartSeqs.delete(oldest)
+      }
+    }
+  }
+}
+
+function consumeReservedToolPartSeq(runId: string | null, toolCallId: string): number | null {
+  if (runId === null) {
+    return null
+  }
+  const key = pendingToolPartSeqKey(runId, toolCallId)
+  const seq = pendingToolPartSeqs.get(key) ?? null
+  if (seq !== null) {
+    pendingToolPartSeqs.delete(key)
+  }
+  return seq
+}
+
+function clearPendingToolPartSeqs(runId?: string): void {
+  if (runId === undefined) {
+    pendingToolPartSeqs.clear()
+    return
+  }
+  const prefix = `${runId}\0`
+  for (const key of pendingToolPartSeqs.keys()) {
+    if (key.startsWith(prefix)) {
+      pendingToolPartSeqs.delete(key)
+    }
+  }
+}
+
 function stampFramePartSeq(
   message: ChatMessage,
   frame: SseFrame,
@@ -3353,9 +3408,10 @@ function stampFramePartSeq(
   if (beforeToolCallIds === null) {
     return
   }
+  const runId = frame.runId ?? message.runId ?? null
   for (const part of message.parts) {
     if (part.kind === 'tool' && !beforeToolCallIds.has(part.toolCallId) && part.seq === undefined) {
-      part.seq = seq
+      part.seq = consumeReservedToolPartSeq(runId, part.toolCallId) ?? seq
     }
   }
 }
@@ -8344,6 +8400,7 @@ export const useAiStore = defineStore('ai', {
       const workspace = useWorkspaceStore()
       // 新消息 = 真正换轮：上一轮"正在接管但未登记"的 run 不再属于当前轮（问题2）。
       pendingAttachRunId = null
+      clearPendingToolPartSeqs()
       // B1 收口修（C-1）：新消息 = 真正换轮 —— 上一轮在途的前端工具结局自此一律丢弃
       roundEpoch += 1
       // M-2b：上一轮快照恢复留下的串行队列随换轮作废（不得把旧卡补进新轮）
@@ -12002,6 +12059,7 @@ export const useAiStore = defineStore('ai', {
       // 轮到它们时零执行；这里只丢掉链表，不把新会话的新动作排到旧链尾。
       clearFrontendToolChains()
       clearRecoveryEntries(runId ?? undefined)
+      clearPendingToolPartSeqs(runId ?? undefined)
       // M-2b：停止后不得再把快照队列里的旧卡补出来
       this.restoredPendingQueue = []
       // AI 可视可操作专项：停止后**后续界面动词立即拒绝**（已执行的不回滚）；
@@ -12688,6 +12746,7 @@ export const useAiStore = defineStore('ai', {
       this.activeRunId = null
       // B2：帧序号锚点属于旧会话的旧 run —— 换会话即清（否则长会话里 runId→seq 只增不减）
       this.runSeq = {}
+      clearPendingToolPartSeqs()
       // AR-10：运行态寿命锚点属于旧会话/旧轮 —— 不带走（卡面寿命只对本轮成立）
       this.runExpiry = null
       clearNotice(this)
@@ -13343,6 +13402,7 @@ export const useAiStore = defineStore('ai', {
           //（runId 缺失时**不得**当作"释放全部"——那会误伤其它在途轮）
           if (frame.runId !== undefined) {
             this.forgetRunStreamDrive(frame.runId)
+            clearPendingToolPartSeqs(frame.runId)
           }
         }
         return
@@ -13386,6 +13446,7 @@ export const useAiStore = defineStore('ai', {
 
       switch (frame.type) {
         case 'start':
+          clearPendingToolPartSeqs()
           // F3：`start` 帧 = "这一轮真的开始了"的**单调**证据（409 的未起轮没有它）。
           // 刷新恢复的取数窗口用它区分"真轮在窗口内开流并收尾"与"只是撞了 409"。
           roundStartSeq += 1
@@ -13576,6 +13637,7 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'suspended': {
+          reserveSuspendedToolPartSeqs(seqRunId, seq, frame)
           // 后端对**每一批工具调用**都会先发 suspended（把挂起态外置，见 SpToolCallingManager），
           // 其中只有 CONFIRM/FRONTEND 两类需要人工或浏览器介入：BACKEND 工具随即执行完毕，
           // 不该被判成"挂起等待"（否则运行状态与输入区提示会误报）。
@@ -13877,6 +13939,7 @@ export const useAiStore = defineStore('ai', {
         // M08-R2：终态 = 该 run 的驱动使命结束（所有权与预算一并释放）；
         // runId 与 activeRunId 都缺时保持不动（`forgetRunStreamDrive(undefined)` = 释放全部）
         const terminalRunId = frame.runId ?? this.activeRunId
+        clearPendingToolPartSeqs(terminalRunId ?? undefined)
         if (terminalRunId !== null) {
           this.forgetRunStreamDrive(terminalRunId)
         }

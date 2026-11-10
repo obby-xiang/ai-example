@@ -5146,6 +5146,37 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "仅保存完整字符串草稿，未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；三文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，最终30.07秒；动态草稿场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:8f7b87dc6ff94e5ea39aebb40167040a6bab1f2e2900dc19f911e039c72f71e5",
+      "status": "reviewed",
+      "reason": "逐hunk复核实时suspended首seq预留、实际建段消费及跨run清理；独立审查agent-1189最终APPROVE。",
+      "reviewedAt": "2026-11-10T08:08:55+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1189、施工agent-1203",
+      "specChanges": [
+        {
+          "change": "实时suspended按runId+toolCallId以first-wins预留首个展示seq，后续实际建段优先消费。",
+          "reason": "后端在suspended记录首段seq，实时却等tool_start才编号，刷新前后同一工具段身份不一致。",
+          "impact": "同一suspended多工具可合法共享seq，普通BACKEND不提前显示，tool_result不改首seq，history仍为恢复权威。"
+        },
+        {
+          "change": "预留表消费即删，在新轮、停止、换会话和终态清理，并限制最多256项。",
+          "reason": "序号预留属于临时恢复辅助状态，不能跨run污染或无界增长。",
+          "impact": "过期/重复帧不重新预留，淘汰仅回退真实建段帧号，不会错配其他工具或run。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "复核预留key/first-wins、建段消费、单调去重、卡片展示不变及所有清理路径。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有frame.seq/runSeq与part序号盖写点，无新增依赖或身份体系。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript前端实时投影，无Java或后端JSON实体变化。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "仅序号映射与清理，无新增异常处理或日志。"},
+        "toc-interaction": {"status": "checked", "reason": "刷新前后工具内容身份稳定，不提前显示卡片或改变单活动/排队交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "runId+toolCallId隔离且first-wins，旧帧不污染新轮，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "仅序号映射，未修改文本或流式解析。"},
+        "verification-review": {"status": "checked", "reason": "agent-1189最终APPROVE；ai.ts IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，28.81秒；动态C-131场景NOT_RUN。"}
+      }
     }
   ]
 }
