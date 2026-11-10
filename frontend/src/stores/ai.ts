@@ -52,16 +52,12 @@ import { FRONTEND_TOOLS, UI_HANDOFF_TOOLS } from '@/types/tools'
 import type { ActiveUploadHandoff } from '@/types/ui-handoff'
 import {
   abortUiOperations,
-  applyUiUndo,
   beginUiTurn,
   clearUiAnnouncement,
-  clearUiUndo,
   peekUiAnnouncement,
-  peekUiUndo,
   isRefSnapshotted,
   requestFilePicker,
   canUseFilePicker,
-  takeUiUndo,
   uploadFileNameOf,
   validateUploadArgs
 } from '@/utils/ai-dom-tools'
@@ -72,7 +68,6 @@ import {
   type AiRegion
 } from '@/utils/ai-regions'
 import { aiHighlight, clearUiHighlights } from '@/utils/ai-dom-tools'
-import type { UiUndoEntry } from '@/utils/ai-dom-tools'
 import {
   applySheetPlanAsync,
   applyUndoPlanAsync,
@@ -4440,7 +4435,6 @@ const NOTICE_SEVERITY: Readonly<Record<string, NoticeSeverity>> = {
   'ai.notice.noPendingDecision': 'warning',
   'ai.notice.toolTerminal': 'warning',
   'ai.notice.toolAlreadySubmitted': 'warning',
-  'ai.notice.noUiUndo': 'warning',
   // 批次7B：镜像写盘失败（配额已满 / 隐私模式）是刷新恢复的降级事实，按 warning 提示一次。
   [MIRROR_STORAGE_NOTICE]: 'warning'
 }
@@ -4781,13 +4775,6 @@ export const useAiStore = defineStore('ai', {
      * 不进镜像：`toolCallId/runId/ref` 足够重建，卡渲染时再判区域。
      */
     activeUploadHandoff: null as ActiveUploadHandoff | null,
-    /**
-     * 最近一次界面原语留下的撤销点（深度 1；与表格的 `undo_last_sheet_edit` 互不共享状态）。
-     * 只给用户（面板摘要行的「撤销」按钮），**不提供** `ui_undo` 工具。
-     */
-    uiUndoEntry: null as UiUndoEntry | null,
-    /** 撤销点归属的工具段（面板只在那一张卡上出「撤销」按钮）。 */
-    uiUndoToolCallId: null as string | null,
     /** 界面原语的一次性播报（面板 `aria-live` 区消费）。 */
     uiAnnouncement: null as string | null,
     /**
@@ -10890,28 +10877,8 @@ export const useAiStore = defineStore('ai', {
       )
     },
 
-    // ── AI 可视可操作专项：撤销（只给用户） ────────────────────────────────────
-
-    /** 面板「撤销」：取撤销栈顶并应用（深度 1）。 */
-    async undoLastUiAction(): Promise<string> {
-      if (this.businessWriteBlocked) {
-        return ''
-      }
-      const entry = takeUiUndo()
-      this.uiUndoEntry = null
-      this.uiUndoToolCallId = null
-      if (!entry) {
-        setNotice(this, 'ai.notice.noUiUndo')
-        return translate('ai.notice.noUiUndo')
-      }
-      const outcome = applyUiUndo(entry)
-      setRawNotice(this, outcome.result)
-      return outcome.result
-    },
-
-    /** 把原语运行时的一次性状态同步进 store（面板渲染用）。 */
+    /** 把原语运行时的一次性播报同步进 store（面板渲染用）。 */
     syncUiRuntimeState(): void {
-      this.uiUndoEntry = peekUiUndo()
       this.uiAnnouncement = peekUiAnnouncement()
     },
 
@@ -10921,13 +10888,10 @@ export const useAiStore = defineStore('ai', {
       this.uiAnnouncement = null
     },
 
-    /** 换轮/换页收口：清撤销点与高亮（撤销栈不持久化，刷新即失效）。 */
+    /** 换轮/换页收口：清高亮、播报与上传交接。 */
     resetUiSurfaces(): void {
-      clearUiUndo()
       clearUiHighlights()
       clearUiAnnouncement()
-      this.uiUndoEntry = null
-      this.uiUndoToolCallId = null
       this.uiAnnouncement = null
       this.activeUploadHandoff = null
     },
@@ -12260,13 +12224,6 @@ export const useAiStore = defineStore('ai', {
       // 用建卡时留的上下文引用同步清色 —— 表格可能在别的页签，异步解析不保证拿得到。
       this.dropSheetPreview('stop')
       this.stalePreviewToolCallId = null
-      // L-79（停止即收敛）：界面撤销点随本轮作废 —— 撤销栈是内存态、按轮归属，本轮已被放弃，
-      // 留着它等于让用户去撤一条"本轮已放弃"的操作（面板那段撤销行也会一直挂在旧卡上）。
-      // 与换会话 / 换页两处出口同一收口函数（`resetUiSurfaces` 会一并清播报与上传交接，
-      // 那两件不该被一次停止带走）⇒ 这里只清撤销点两件。
-      clearUiUndo()
-      this.uiUndoEntry = null
-      this.uiUndoToolCallId = null
       // S1：段级就地收敛（输入框解禁的直接前提：pendingToolCall 由段派生）——
       // 已提交/结果在途的段由该方法跳过（问题5）。
       this.cancelRoundParts()
@@ -12929,7 +12886,7 @@ export const useAiStore = defineStore('ai', {
       this.dropActiveForm()
       // B12：预览属于旧会话 —— 计划与预览色一起丢弃（"新建对话"不是换个盒子继续改这张表）
       this.dropSheetPreview('session')
-      // AI 可视可操作：界面撤销点 / 高亮 / 播报 / 上传交接随会话收口
+      // AI 可视可操作：高亮 / 播报 / 上传交接随会话收口
       // （resetUiSurfaces 此前无调用点 = 死代码，本批接到会话与页面两个出口）
       this.resetUiSurfaces()
       // R-166（口径③）：提交在途态随会话清空（防跨会话串味）
@@ -14616,7 +14573,6 @@ export const useAiStore = defineStore('ai', {
         requiresAction: false
       }, false)
       deriveProjections(message)
-      const undoBefore = peekUiUndo()
       // F6 残留（2026-11-01）：`confirm_step` 幂等 —— 目标步骤**已经到达**（刷新回放 / 重复投递 /
       // 回灌 409 后的重放）就不再 goStep / persistStepData：那会真的把向导再推进一次（导入向导
       // 离开第 1 步还会整表写回服务端文件）。仍停在原步骤时才真正执行。
@@ -14770,11 +14726,8 @@ export const useAiStore = defineStore('ai', {
       if (execution.availability === 'degraded' || execution.availability === 'unavailable') {
         setRawNotice(this, execution.result)
       }
-      // AI 可视可操作专项：把原语运行时的一次性状态（撤销点 / 播报）同步给面板
+      // AI 可视可操作专项：把原语运行时的一次性播报同步给面板
       this.syncUiRuntimeState()
-      this.uiUndoToolCallId = this.uiUndoEntry !== null && this.uiUndoEntry !== undoBefore
-        ? frame.toolCallId
-        : null
       return true
     }
   }

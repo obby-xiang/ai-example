@@ -547,23 +547,6 @@
                           </div>
                         </div>
                       </div>
-                      <div
-                        v-if="part.toolCallId === ai.uiUndoToolCallId && ai.uiUndoEntry"
-                        class="mt-[8px] flex items-center gap-[8px]"
-                        data-testid="ui-undo-row"
-                      >
-                        <span class="text-[12.2px] text-[#57606a]">{{ t('ai.panel.undoHint') }}</span>
-                        <button
-                          type="button"
-                          class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
-                          data-testid="ui-undo-button"
-                          :disabled="ai.businessWriteBlocked"
-                          @click="onUiUndo"
-                        >
-                          {{ t('ai.panel.undo') }}
-                        </button>
-                      </div>
-
                       <template v-if="part.requiresAction || hasIndependentCardHeader(part)">
                         <template v-if="part.kind2 === 'CONFIRM' && part.status === 'pending'">
                           <!-- 确认卡保持单层：标题直接表达动作，字段表只保留必要业务参数，
@@ -3623,8 +3606,6 @@ function partMemo(part: MessagePart, block: Block): unknown[] {
     cardTypeOf(part),
     ai.gateSubmissionOf(part.toolCallId),
     ai.gateAckOf(part.toolCallId),
-    ai.uiUndoToolCallId,
-    ai.uiUndoEntry,
     ai.sheetApplied,
     ai.sessionId,
     ai.businessWriteBlocked
@@ -3840,13 +3821,6 @@ const aiOperating = computed(() => ai.uiAnnouncement !== null && (ai.loading || 
 const uiOperatingText = computed(() => (ai.uiAnnouncement === null
   ? ''
   : t('ai.panel.uiOperating', { text: ai.uiAnnouncement })))
-
-function onUiUndo(): void {
-  if (ai.businessWriteBlocked) {
-    return
-  }
-  void ai.undoLastUiAction()
-}
 
 /**
  * 已应用的表格写工具段 → 改动摘要（治理批 §5.4 的卡面一行）。

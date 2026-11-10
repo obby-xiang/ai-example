@@ -126,7 +126,7 @@ const SHEET_SCOPE_PATTERNS: string[] = ['task:EXPORT/EXPORT', 'task:IMPORT/UPLOA
 /**
  * AI 可视可操作专项的 7 个通用原语（1 看 + 6 做；与后端 `@Tool(name=...)` 严格同名）。
  *
- * `ui_snapshot` 看界面；`ui_click/fill/select/scroll/highlight` 做本地可逆动作；
+ * `ui_snapshot` 看界面；`ui_click/fill/select/scroll/highlight` 做本地动作；
  * `ui_request_upload` 是唯一的「等人」工具（用户手势选文件，永不经手路径）。
  */
 export const UI_TOOL_NAMES = [
@@ -350,7 +350,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'ui_click',
     displayName: '点击界面元素',
-    description: '点击快照里的一个元素（按风险分级）：read 直接点、mutate-local 点后记撤销点；'
+    description: '点击快照里的一个元素（按风险分级）；'
       + 'data-ai-risk=consequential 的后果性动作一律拒绝执行并指路注册动作（不会先点再提示）。',
     channel: 'FRONTEND',
     riskLevel: 'WRITE',
@@ -363,8 +363,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'ui_fill',
     displayName: '填写输入框',
-    description: '给声明了 data-ai-fill="allow" 的原生输入框写值（≤200 字符），写后回读不一致就如实报失败；'
-      + '原值记入撤销栈（深度 1，只有用户能撤销）。',
+    description: '给声明了 data-ai-fill="allow" 的原生输入框写值（≤200 字符），写后回读不一致就如实报失败。',
     channel: 'FRONTEND',
     riskLevel: 'WRITE',
     scopePatterns: UI_TOOL_SCOPE_PATTERNS,
@@ -391,7 +390,7 @@ export const FRONTEND_TOOLS: readonly FrontendToolDescriptor[] = [
   {
     name: 'ui_scroll',
     displayName: '滚动界面',
-    description: '滚动到某元素或按像素滚动容器（±2000）；只改视口，不改任何数据、不记撤销点。',
+    description: '滚动到某元素或按像素滚动容器（±2000）；只改视口，不改任何数据。',
     channel: 'FRONTEND',
     riskLevel: 'READ',
     scopePatterns: UI_TOOL_SCOPE_PATTERNS,

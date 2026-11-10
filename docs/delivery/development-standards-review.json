@@ -5483,6 +5483,44 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1219最终APPROVE；生产文件IDEA Reformat；Maven 359主源BUILD SUCCESS，前端3281模块构建成功；动态Redis/SSE/浏览器验收NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c8569ae56dc9f3e2a92566ba4c034805d9d93e5df71d2dd51173659155febbd4",
+      "status": "reviewed",
+      "reason": "逐hunk复核普通UI撤销入口、状态、静态标记和提示清退，保留表格业务撤销及原UI动作；独立审查agent-1221复审后APPROVE。",
+      "reviewedAt": "2026-11-10T17:34:31+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1221、施工agent-1220",
+      "specChanges": [
+        {
+          "change": "删除普通UI撤销按钮、撤销提示、undoLastUiAction、uiUndoEntry/uiUndoToolCallId及DOM撤销栈。",
+          "reason": "普通UI操作撤销收益低且增加用户心智和恢复复杂度，按用户决定直接清退而非换位置。",
+          "impact": "ui_click/fill/select/scroll/highlight保留原业务动作，不再记录原值撤销点或提示可撤销，不提供ui_undo工具。"
+        },
+        {
+          "change": "清理ui_undo图标、data-ai-undo静态标记及中英文撤销文案，保留undo_last_sheet_edit和表格预览确认。",
+          "reason": "普通UI撤销与表格业务回滚是不同能力，不能一起删除。",
+          "impact": "普通UI无残留交互或失效状态，表格写预览和最多3层AI表格修改撤销保持独立。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "删除撤销行/按钮/onUiUndo及memo依赖，其他卡片和上传预览不变。"},
+        {"path": "frontend/src/components/AiPanel/cardPresentation.ts", "status": "checked", "reason": "删除废弃ui_undo图标映射，其他图标映射不变。"},
+        {"path": "frontend/src/components/wizard/DefSelector.vue", "status": "checked", "reason": "删除无读取方data-ai-undo，勾选行为与风险标记不变。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "删除普通撤销状态/动作/清理和引用，保留表格撤销、上传、停止及恢复逻辑。"},
+        {"path": "frontend/src/types/tools.ts", "status": "checked", "reason": "普通UI描述改为本地动作，撤销表格工具声明保留，下载DANGER声明不受影响。"},
+        {"path": "frontend/src/utils/ai-dom-tools.ts", "status": "checked", "reason": "删除普通UI撤销栈、旧值回执和注释，实际点击/填写/选择/高亮不变。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "删除普通UI撤销中文提示和按钮文案。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "删除普通UI撤销英文提示和按钮文案。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "直接删除废弃普通UI撤销，不新增依赖或另一套操作区。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅TypeScript/Vue和locale变更，无Java变化。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "未新增异常处理或日志。"},
+        "toc-interaction": {"status": "checked", "reason": "普通工具卡保持只读，减少无价值操作和心智负担，表格写预览交互保持。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "删除本地普通撤销栈，不改变业务防重/恢复/停止语义，无AI数据库交互。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1221最终APPROVE；生产文件IDEA Reformat；frontend/node scripts/build.mjs构建3281模块成功，24.90秒；动态UI/表格场景NOT_RUN。"}
+      }
     }
   ]
 }

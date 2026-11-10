@@ -49,7 +49,6 @@
               role: 'checkbox',
               'aria-checked': isSelected(row) ? 'true' : 'false',
               'data-ai-risk': 'mutate-local',
-              'data-ai-undo': 'retoggle',
               'data-ai-verbs': 'click,highlight',
               'data-ai-label': `${row.name}（${row.code}）`
             })"

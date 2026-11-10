@@ -63,8 +63,6 @@ export const UI_SNAPSHOT_LINE_MAX_CHARS = 120
 export const UI_SNAPSHOT_VALUE_MAX_CHARS = 24
 /** 单轮写动词配额。 */
 export const UI_WRITE_VERBS_PER_TURN = 12
-/** 撤销深度（与表格专项 SHEET_UNDO_DEPTH 同口径）。 */
-export const UI_UNDO_DEPTH = 1
 /** 写动词最小间隔（毫秒）。 */
 export const UI_WRITE_THROTTLE_MS = 80
 /** 标签截断长度（快照里的 "label"）。 */
@@ -104,20 +102,13 @@ export interface UiToolOutcome {
   code?: string
 }
 
-/** 撤销条目（深度 1；`retoggle` 只对声明 `data-ai-undo` 的元素记）。 */
-export type UiUndoEntry =
-  | { kind: 'fill'; ref: string; label: string; previous: string }
-  | { kind: 'select'; ref: string; label: string; previous: string }
-  | { kind: 'retoggle'; ref: string; label: string }
-
-// ── 运行时状态（单轮配额 / 停止 / 撤销 / 高亮 / 播报） ────────────────────────
+// ── 运行时状态（单轮配额 / 停止 / 高亮 / 播报） ───────────────────────────────
 
 let turnToken = 'default'
 let writeVerbCount = 0
 let aborted = false
 let lastWriteAt = 0
 let writeChain: Promise<void> = Promise.resolve()
-let undoEntry: UiUndoEntry | null = null
 let announcement: string | null = null
 let snapshotCache: { key: string; text: string } | null = null
 /**
@@ -137,7 +128,7 @@ export function currentUiDomVersion(): number {
   return domVersion
 }
 
-/** 界面已被改写：推进版本并丢掉快照缓存（写动词成功路径 / 撤销的唯一调用口）。 */
+/** 界面已被改写：推进版本并丢掉快照缓存（写动词成功路径的唯一调用口）。 */
 function markUiMutation(): void {
   domVersion += 1
   snapshotCache = null
@@ -192,23 +183,6 @@ export function uiWriteVerbCount(): number {
   return writeVerbCount
 }
 
-/** 撤销栈顶（只读；面板据此显示「撤销」）。 */
-export function peekUiUndo(): UiUndoEntry | null {
-  return undoEntry
-}
-
-/** 取走撤销栈顶（深度 1：取走即清空）。 */
-export function takeUiUndo(): UiUndoEntry | null {
-  const entry = undoEntry
-  undoEntry = null
-  return entry
-}
-
-/** 清空撤销栈（新轮/换页时收口）。 */
-export function clearUiUndo(): void {
-  undoEntry = null
-}
-
 /** 最近一次播报（面板的 aria-live 区据此播报）。 */
 export function peekUiAnnouncement(): string | null {
   return announcement
@@ -227,7 +201,6 @@ export function resetUiRuntime(): void {
   aborted = false
   lastWriteAt = 0
   writeChain = Promise.resolve()
-  undoEntry = null
   announcement = null
   snapshotCache = null
   domVersion += 1
@@ -1644,20 +1617,13 @@ export async function aiClick(
   hit.el.click()
   // 批 C / D11-②：点开/弹层型动作后补 ≤500ms 短等待再回执（"动作后页面已稳定"语义）
   const settled = popupBefore >= 0 ? await waitForPopupAfterClick(popupBefore) : null
-  if (risk === 'mutate-local') {
-    const undoable = hit.el.getAttribute('data-ai-undo') === 'retoggle'
-    if (undoable) {
-      undoEntry = { kind: 'retoggle', ref, label }
-    }
-  }
   const version = touchWorkspace(`AI 点击：${label}（ref=${ref}，epoch=${epoch}）`)
   // FE-33 层①：真的点完了 ⇒ 界面可能已变，同参重拍不得再拿动作前缓存
   markUiMutation()
   const base = `已点击「${label}」（ref=${ref}，verb=click，risk=${risk}，epoch=${epoch}）。`
     + `界面已同步（数据版本 #${version}）。`
   const settlePart = settled === null ? '' : settleNote(settled)
-  const undoHint = undoEntry && undoEntry.ref === ref ? '可撤销：对话内「撤销」或让用户再点一次。' : ''
-  return ok(`${base}${settlePart}${undoHint}`)
+  return ok(`${base}${settlePart}`)
 }
 
 // ── ui_fill ──────────────────────────────────────────────────────────────────
@@ -1765,7 +1731,6 @@ export async function aiFill(
   if (precondition) {
     return precondition.outcome
   }
-  const previous = readValueOf(hit.el)
   onBrowserSideEffect?.()
   nativeSetValue(hit.el, value)
   hit.el.dispatchEvent(new Event('input', { bubbles: true }))
@@ -1776,12 +1741,10 @@ export async function aiFill(
       + `与目标「${truncate(value, UI_SNAPSHOT_VALUE_MAX_CHARS)}」不一致，请确认后重试。ref=${ref}`)
   }
   highlightElement(hit.el, label)
-  undoEntry = { kind: 'fill', ref, label, previous }
   rememberWrite(ref, value, epoch)
   markUiMutation()
   const version = touchWorkspace(`AI 填写：${label}（ref=${ref}，epoch=${epoch}）`)
-  return ok(`已填写「${label}」= ${truncate(value, UI_SNAPSHOT_VALUE_MAX_CHARS)}（ref=${ref}，数据版本 #${version}）。`
-    + `原值「${truncate(previous, UI_SNAPSHOT_VALUE_MAX_CHARS)}」已记录，可撤销。`)
+  return ok(`已填写「${label}」= ${truncate(value, UI_SNAPSHOT_VALUE_MAX_CHARS)}（ref=${ref}，数据版本 #${version}）。`)
 }
 
 // ── ui_select ────────────────────────────────────────────────────────────────
@@ -1950,7 +1913,6 @@ export async function aiSelect(
   if (precondition) {
     return precondition.outcome
   }
-  const previous = readSelectedOption(hit)
   const applied = await applySelectOption(args, hit, option, label, onBrowserSideEffect)
   if (applied) {
     return applied
@@ -1969,17 +1931,15 @@ export async function aiSelect(
     return fail(`选择未生效：当前选中「${readback}」，目标是「${option}」，请确认后重试。ref=${ref}`)
   }
   highlightElement(hit.el, label)
-  undoEntry = { kind: 'select', ref, label, previous }
   rememberWrite(ref, option, epoch)
   markUiMutation()
   const version = touchWorkspace(`AI 选择：${label}=${option}（ref=${ref}，epoch=${epoch}）`)
-  return ok(`已选择「${label}」= ${option}（ref=${ref}，数据版本 #${version}）。`
-    + `原选择「${previous || '（空）'}」已记录，可撤销。`)
+  return ok(`已选择「${label}」= ${option}（ref=${ref}，数据版本 #${version}）。`)
 }
 
 // ── ui_scroll / ui_highlight ─────────────────────────────────────────────────
 
-/** `ui_scroll`：只改视口 —— 不改 dataVersion、不记撤销点。 */
+/** `ui_scroll`：只改视口，不改 dataVersion。 */
 export function aiScroll(args: Record<string, unknown> = {}): UiToolOutcome {
   const ref = asString(args.ref)
   if (!ref) {
@@ -2082,46 +2042,6 @@ export function clearUiHighlights(): void {
     badge.remove()
   }
   highlights = []
-}
-
-// ── 撤销（只给用户） ─────────────────────────────────────────────────────────
-
-/** 应用一条撤销（深度 1；ref 失效如实说"没有可撤销的界面操作"）。 */
-export function applyUiUndo(entry: UiUndoEntry): UiToolOutcome {
-  const hit = resolveAiRef(entry.ref)
-  if (!hit || hit.el.isConnected !== true) {
-    return fail(`没有可撤销的界面操作：${entry.ref} 已不在页面上（刷新或切页后撤销失效）。`)
-  }
-  if (entry.kind === 'retoggle') {
-    hit.el.click()
-    touchWorkspace(`已撤销：${entry.label}`)
-    markUiMutation()
-    return ok(`已撤销「${entry.label}」（ref=${entry.ref}），界面回到点击前的状态。`)
-  }
-  if (entry.kind === 'fill') {
-    nativeSetValue(hit.el, entry.previous)
-    hit.el.dispatchEvent(new Event('input', { bubbles: true }))
-    hit.el.dispatchEvent(new Event('change', { bubbles: true }))
-    const readback = readValueOf(hit.el)
-    if (readback !== entry.previous) {
-      return fail(`撤销未生效：「${entry.label}」当前值是「${truncate(readback, UI_SNAPSHOT_VALUE_MAX_CHARS)}」，`
-        + `目标是「${truncate(entry.previous, UI_SNAPSHOT_VALUE_MAX_CHARS)}」。`)
-    }
-    touchWorkspace(`已撤销：填写「${entry.label}」`)
-    writePreconditions.delete(entry.ref)
-    markUiMutation()
-    return ok(`已撤销「${entry.label}」，值已回到「${truncate(entry.previous, UI_SNAPSHOT_VALUE_MAX_CHARS) || '（空）'}」。`)
-  }
-    const setter = hit.region.setters?.[entry.ref]
-    if (setter) {
-      const applied = setter(entry.previous)
-      void applied
-      touchWorkspace(`已撤销：选择「${entry.label}」`)
-      writePreconditions.delete(entry.ref)
-      markUiMutation()
-      return ok(`已撤销「${entry.label}」，选项已回到「${entry.previous || '（空）'}」。`)
-    }
-  return fail(`撤销未生效：「${entry.label}」没有可用于回退的 setter，请提示用户手动改回。`)
 }
 
 // ── 上传交接（唯一「等人」工具） ──────────────────────────────────────────────
