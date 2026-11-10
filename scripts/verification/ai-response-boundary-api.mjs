@@ -152,6 +152,9 @@ function loadConfig() {
     tenantId: process.env.TENANT_ID.trim(),
     userId: process.env.USER_ID.trim(),
     executorIdentity: process.env.EXECUTOR_IDENTITY.trim(),
+    finalTextLength: process.env.FINAL_TEXT_LENGTH
+      ? integerEnv('FINAL_TEXT_LENGTH', 415, 32, 4096)
+      : null,
     outDir: requiredOutsidePath('OUT_DIR'),
     backendJar: managed ? path.resolve(process.env.BACKEND_JAR ?? '') : null,
     stubScript: requiredOutsidePath('STUB_SCRIPT', true),
@@ -1666,6 +1669,11 @@ async function assertConfirmStepTimeline(context) {
     upstream: upstreamTexts.map((text) => textEvidence(text)),
     history: plainText.map((message) => ({entryId: message.entryId, text: textEvidence(messageText(message))}))
   })
+  if (context.config.finalTextLength !== null) {
+    checks.require('timeline.final-text-length', upstreamTexts.length > 0
+      && Array.from(upstreamTexts.at(-1)).length === context.config.finalTextLength,
+    context.config.finalTextLength, upstreamTexts.map((text) => Array.from(text).length))
+  }
   const distinctTexts = new Set(plainText.map(messageText))
   checks.require('timeline.pure-text-nonprefix', distinctTexts.size >= 2 && plainText.every((message, index) =>
     plainText.slice(index + 1).every((later) => {

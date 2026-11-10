@@ -5643,6 +5643,32 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、reasoning回放或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1226静态终审APPROVE；后端Maven -Dmaven.test.skip=true compile BUILD SUCCESS；真实请求、迁移、Redis及续跳运行时验证NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:8f2c93657097489ff5fd0f467bfc6ad33221d4eaa8aacf6a65a3beeeb6b3da0e",
+      "status": "reviewed",
+      "reason": "逐hunk核对低优先级下载候选登记及转录207/415独立复核证据；生产转录算法零改动，未将GREEN同族场景外推为复发根因已定位。",
+      "reviewedAt": "2026-11-10T21:02:52+08:00",
+      "reviewer": "K3.1 Pro主会话、独立验收agent-1227",
+      "specChanges": [
+        {
+          "change": "下载导出文件HITL确认仅登记为低优先级候选，本轮不施工。",
+          "reason": "用户明确降低优先级，此前两套审批实现已回退，避免把候选需求误记为当前生产承诺。",
+          "impact": "当前下载行为不变；后续立项须重新评审通用确认边界、刷新幂等和单次下载证据。"
+        }
+      ],
+      "files": [
+        {"path": "docs/任务看板.md", "status": "checked", "reason": "新增11-10低优先级下载HITL候选，标明回退事实和本轮不施工；同批独立验证文档按测试文档门禁排除，已另行逐hunk核对。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有独立响应边界脚本和看板，无新增依赖或生产旁路。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅独立验收脚本和文档，无生产Java变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "明确环境失败与产品RED边界，不掩盖端口、Redis或桩构造失败。"},
+        "toc-interaction": {"status": "checked", "reason": "下载候选保持普通工具卡只读和后续确认门方向，不新增当前交互。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "未修改运行、Redis、数据库或恢复协议。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "核对207/415正文和segments精确归属，未按长度拟合生产算法。"},
+        "verification-review": {"status": "checked", "reason": "独立脚本node --check通过；check-docs仅因4个既有11-06研究文档禁用路径命中失败，本批无新增命中；生产修改为零，真实复发run证据仍缺失。"}
+      }
     }
   ]
 }

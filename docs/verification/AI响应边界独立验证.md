@@ -2,7 +2,7 @@
 
 > 载体：`scripts/ci/stub-upstream.mjs` + `scripts/verification/ai-response-boundary-api.mjs`。
 > 定位：压测/独立脚本，使用公开 HTTP/SSE 与真实上游桩 chunk；不是普通单元测试，不修改或伪造应用内帧。
-> 当前状态：仅完成静态实现与 Node.js 语法检查。五个场景、真实服务起停、API/SSE、history/run、Redis、业务副作用和清理均为 **NOT_RUN**。
+> 当前状态：2026-11-10 已单独执行 `confirm-step-timeline` 的“中间纯文本 207 + 宿主表单 + 最终纯文本 415”变体，旧生产算法 **GREEN**；未形成真实 RED，故未修改生产算法。其余场景仍为 **NOT_RUN**。历史施工记录、环境失败和本轮证据边界见第 7 节。
 
 ## 1. 请求级公开标记
 
@@ -94,3 +94,57 @@ node scripts/verification/ai-response-boundary-api.mjs
 - `node --check scripts/ci/stub-upstream.mjs`：NOT_RUN（本轮未重复执行；既有施工记录不作为本轮动态证据）。
 - 桩 `--self-check`：NOT_RUN，按施工要求未执行。
 - 五个真实 CASE、服务起停、测试、压测、普通测试、Maven 构建、真实 API/SSE、业务与清理：全部 NOT_RUN；本文不声明任何动态 PASS。
+
+## 7. 2026-11-10：宿主表单后的 415 字最终纯文本复核
+
+### 7.1 调用链与当前算法（只读审查）
+
+`ResilientChatService.completeTimeline` 按终态历史条目顺序调用 `populateAssistantSegments`，后者逐条调用 `SseChatEmitter.transcriptSegments(entryId, toolCalls, text, visibleReasoning)`。当前 `SseChatEmitter` 的边界是：
+
+- 已认领 `entryId` 的段必须再次通过全文、reasoning 和工具 ID 精确对账；
+- 空正文/空 reasoning 的工具条目只取首个至末个工具锚点，不向前吸收未认领纯文本；
+- 纯文本候选在工具锚点或已认领条目处断开，候选全文必须精确等于当前条目正文，不能模糊匹配；
+- 本地时间线不完整时从归档帧重建；归档读降级、截断或精确对账失败仍返回 `null`，不得伪报 `historyComplete=true`。
+
+这意味着 c258851e 针对“空工具条目吸收前段纯文本”的修复在当前源码中确实存在，但仅凭错误码不能证明另一设备的 task609/task737 与当前复现形态相同。
+
+### 7.2 独立变体与参数
+
+复用 `confirm-step-timeline` 的公开 API/SSE、真实宿主表单和公开回灌，不直接写 Redis、数据库或 history。验收脚本新增可选 `FINAL_TEXT_LENGTH`（32..4096），仅在显式设置时增加 `timeline.final-text-length` 精确断言；默认行为不变。
+
+本案使用仓外独立桩，蓝本与既有 `[207,99]` 能力同族：
+
+- 中间纯文本：`前段正文：` + 202 个 `甲`，合计 207 字符；
+- 最终纯文本：`终段正文：` + 足够数量的 `乙`，总长度由 `FINAL_TEXT_LENGTH=415` 决定；
+- 两次纯文本非空前缀关系；三次上游请求、宿主条件表单和宿主步骤确认均由产品真实生成。
+
+仓外桩路径为 `<仓外独立桩>/stub-upstream.mjs`；它不是仓内生产文件或新增依赖。执行器为 Kimi Code，CASE 单进程只运行一次，未批量或循环普通测试。
+
+### 7.3 RED / GREEN 事实
+
+**真实 RED：NOT_OBSERVED。** 旧 `SseChatEmitter.java` 未做任何修改，目标变体直接 GREEN，因此本轮没有修改生产算法，也没有把环境或桩构造失败伪装成 RED。
+
+有效 GREEN 证据目录：
+
+`<仓外证据根>/ai-response-boundary/confirm-step-timeline/2026-11-10T12-38-23-188Z-d767ad35-98fd-450c-a1d4-6c2131ccbfa7/`
+
+- `summary.json`：`status=PASS`、`failedAssertions=0`、终帧 `done`、`seq=44`，无 `AI_TRANSCRIPT_INCOMPLETE` / `AI_TRANSCRIPT_WRITE_FAILED`，无 `transcriptDegraded` 或 `historyComplete=false`；
+- 公开帧序：初始步骤工具 `seq=2..5` → 中间纯文本 delta `seq=7..15` → 宿主表单 `seq=17..19` → 宿主步骤确认 `seq=21..23` → 最终纯文本 `message_start/delta/message_end` `seq=24..43` → `done seq=44`；
+- `history.json`：共 9 条消息；中间纯文本条目正文 207、其 text segment 也为 207（`seq=7`）；宿主表单与宿主步骤 ASSISTANT 均只有各自工具锚点；最终纯文本条目正文 415、其 text segment 也为 415（`seq=25`）；没有工具条目吸收前段正文；
+- `run.json`：运行状态 `DONE`，`archiveReadable=true`、`archiveTrimmed=false`、`recoverable=complete`，`finalText` 为同一 415 字正文；
+- 上游请求数、公开回灌接受、业务夹具清理、会话清理和本轮日志分类均通过。
+
+以下执行不作为产品 RED：
+
+1. 受管首次运行因 `6379` 无 Redis 监听而停在创建会话前，`sessionId/runId` 均未产生；后续改用本案专用 Memurai 和仓外日志。
+2. 外部模式切换时，前一后端未退出导致新后端端口冲突，另一请求得到 `SESSION_ID_UNAVAILABLE`；换新端口并确认 Redis 可用后重新执行。
+3. 使用仓内默认桩时，蓝本实际是中间 18、最终 562，不是目标形状；该轮产品仍为健康 `DONE` 且无转录降级，失败仅因新增 415 长度断言不匹配。随后恢复原有公开工具结果，改用上述仓外 207/415 蓝本。
+
+### 7.4 构建、格式化与未覆盖边界
+
+- `node --check scripts/verification/ai-response-boundary-api.mjs`：PASS。
+- IDEA 内置 Maven：`<IDEA Maven 可执行文件> -Dmaven.test.skip=true compile`（工作目录 `backend/`）：**BUILD SUCCESS**，358 个源文件编译完成；编译覆盖当前工作区，含其他并行 agent 的未提交后端改动。
+- 初次 `package` 曾因正在运行的旧 jar 在 Windows 上无法重命名而失败；没有停止他人进程，改为仓外启动产物。该失败不作为编译通过证据，最终成功证据仅取上述 `compile`。
+- 生产 `SseChatEmitter.java` **零改动**，故未对其执行 Reformat，也不存在生产 diff。
+- 本轮只证明同进程、公开 API/SSE、独立桩下的 207→宿主表单→415 形态；task609/task737 的另一设备原始归档帧与终态条目尚未取得，不能断言其当前根因已经定位或修复。
+- **NOT_RUN**：挂起期间进程重启/跨实例驱动后的归档重建、归档截断或读降级、真实模型、真实浏览器、多实例/Cluster、普通批量测试、直接 Redis/DB 验证，以及其他 CASE。需要后续证据时，优先取得复发 run 的完整帧序、每条 history 的 expected/actual 文本归属及是否发生 emitter 更换；不得仅凭 415 长度或相同错误码继续拟合。
