@@ -5433,6 +5433,56 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1217最终APPROVE；生产文件IDEA Reformat；Maven 359主源BUILD SUCCESS，前端3281模块构建成功；动态审批/下载场景NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a744119edb72349128bd0283572b08a138e81bd4cdf33c863b49491f6edb913c",
+      "status": "reviewed",
+      "reason": "逐hunk及完整A/E分发、结果回灌、首次完成CAS、恢复和只读切页复核；独立审查agent-1219多轮后最终APPROVE。",
+      "reviewedAt": "2026-11-10T17:03:53+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1219、施工agent-1218",
+      "specChanges": [
+        {
+          "change": "DANGER+FRONTEND统一先创建A/E，待审批只发confirm_request(A)，批准后才补发一次frontend_tool_request(E)。",
+          "reason": "旧FRONTEND通道会直达执行，无法提供独立HITL且保持普通工具卡只读。",
+          "impact": "批准前零切页/预检/下载/业务写，A零claim/零执行证据，E保留原模型调用与一次结果，临时启动防线按条件移除。"
+        },
+        {
+          "change": "RunStore新增APPROVED→FRONTEND终局CAS，完整复核A批准guard、E终局、链接载荷、写权fence和完整投影。",
+          "reason": "首次完成不能裸写覆盖其他实例终态，防御复制避免expected-A被投影污染。",
+          "impact": "冲突仅完整同值幂等，禁止putPending回退，伪造回灌400且保持待决，A完成不执行后端哨兵。"
+        },
+        {
+          "change": "恢复区分A未决、E.req=false补发与E.req=true前端执行恢复；runs/current保留非后端PENDING等待语义。",
+          "reason": "统一排除A已决会让已批准下载在刷新后停滞，req首写后取消也可能迟发请求。",
+          "impact": "req首写前后/重读/SSE写门均复核取消终态，drivePending/journal与后端重挂各司其职，审批等待不计机器超时。"
+        },
+        {
+          "change": "下载和打开编辑器统一只读viewStep，不再调用goStep隐写配置、条件或步骤。",
+          "reason": "原切页可能在批准前或只读预览时产生业务写入。",
+          "impact": "不提交选中集、筛选条件、AI工作区步骤或后端任务步骤，下载仍只声称已发起。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "createPair接入、批准补发、结果与完成投影、A/E展示及模型历史分离。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "批准/拒绝/回灌入口A/req校验、req首写与取消竞争复核。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/PreExecutionApprovalService.java", "status": "checked", "reason": "异常文案同步真实CAS接口，Task1链接校验继续复用。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "首次完成CAS、写权fence、载荷/投影/幂等与取消写门复核。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "A未决、req=false补发、req=true等待及完成续跑判据统一。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "frontend_tool_request写门补充取消与终态拦截。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java", "status": "checked", "reason": "全链接入后移除临时启动防线，BACKEND风险约束保持。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "runs/current保留非后端PENDING等待，preExecutionRecoveryDue语义准确。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "新增optional preExecutionRecoveryDue字段及恢复注释。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "下载和编辑器只读viewStep，无隐写，原下载执行器结果口径保持。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用ConfirmGate、RunStore Lua、journal、viewStep和现有ToolPart分派，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "防御复制、显式JSON链接字段、布尔is/has前缀、方法规模和控制块已审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "伪造回灌/链接损坏/CAS冲突/取消均失败关闭，不伪造完成或吞异常。"},
+        "toc-interaction": {"status": "checked", "reason": "独立HITL与只读工具卡，批准前无动作，拒绝不复活，无隐写或多余提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "req首写与完成CAS同槽，写权fence、取消吸收、跨实例恢复和journal防重，无AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1219最终APPROVE；生产文件IDEA Reformat；Maven 359主源BUILD SUCCESS，前端3281模块构建成功；动态Redis/SSE/浏览器验收NOT_RUN。"}
+      }
     }
   ]
 }

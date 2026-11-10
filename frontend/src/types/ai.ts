@@ -1242,6 +1242,8 @@ export interface AiRunCurrent {
   pendingEntries: AiRunCurrentEntry[]
   unresolvedExternal: string[]
   awaitingExternal: boolean
+  /** A 已决且 linked E 仍 PENDING、req=false：重挂时由后端补发/结算；不用于跳过 pending 恢复。 */
+  preExecutionRecoveryDue?: boolean
   /** 归档流最大帧序号：增量续收（lastSeq）的锚点 */
   archiveMaxSeq: number
   /**

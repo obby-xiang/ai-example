@@ -202,6 +202,16 @@ public class SpToolCallingManager implements ToolCallingManager {
      */
     public static final String SCOPE_VIOLATION_CODE = ErrorCodes.SCOPE_NOT_DISCLOSED;
 
+    private static final Set<String> FRONTEND_TERMINAL_STATUSES = Set.of(
+            PendingToolCall.FRONTEND_RESULT, PendingToolCall.FRONTEND_CANCELLED, PendingToolCall.CANCELLED,
+            PendingToolCall.REJECTED, PendingToolCall.TIMEOUT, PendingToolCall.REJECTED_ARGUMENTS,
+            PendingToolCall.BLOCKED, PendingToolCall.SKIPPED, PendingToolCall.PRECHECK_FAILED,
+            PendingToolCall.SHEET_DISABLED);
+
+    private static final Set<String> PRE_APPROVAL_TERMINAL_STATUSES = Set.of(PendingToolCall.CANCELLED,
+            PendingToolCall.REJECTED_ARGUMENTS, PendingToolCall.BLOCKED, PendingToolCall.SKIPPED,
+            PendingToolCall.PRECHECK_FAILED, PendingToolCall.SHEET_DISABLED);
+
     /**
      * 工具执行段抛错时 {@code tool_call_end.code} 的取值（AI 日志最小补齐批）。
      *
@@ -287,6 +297,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private final ConfirmGate gate;
 
+    private PreExecutionApprovalService preExecutionApprovals;
+
     private final ToolRegistry toolRegistry;
 
     private final MessageJsonCodec codec;
@@ -362,6 +374,11 @@ public class SpToolCallingManager implements ToolCallingManager {
     @Autowired(required = false)
     public void setContextStateStore(ContextStateStore store) {
         this.contextStateStore = store;
+    }
+
+    @Autowired(required = false)
+    public void setPreExecutionApprovalService(PreExecutionApprovalService service) {
+        this.preExecutionApprovals = service;
     }
 
     /**
@@ -919,17 +936,43 @@ public class SpToolCallingManager implements ToolCallingManager {
         ToolBatchState state = new ToolBatchState(runId, snapshot, prompt, assistant, context, out, modelBudget,
                 budgetArmed);
         state.pendings = pendings;
+        expandPreExecutionApprovals(state, pendings);
         prepareBatch(state, pendings);
         prepareSuspension(state, pendings);
         List<String> gateWaitIds = budgetArmed ? List.of() : gateWaitToolCallIds(state.suspended);
         this.gate.arm(runId, gateWaitIds);
         try {
             executeBatch(state, pendings);
-            recordSettledBatchTranscript(runId, snapshot, assistant, pendings);
+            recordSettledBatchTranscript(runId, snapshot, assistant, state.displayPendings);
             return settleBatch(state, chatResponse, pendings);
         } finally {
             this.gate.disarm(runId, gateWaitIds);
         }
+    }
+
+    private void expandPreExecutionApprovals(ToolBatchState state, List<PendingToolCall> pendings) {
+        state.displayPendings = new ArrayList<>(pendings.size() * 2);
+        if (state.budgetArmed) {
+            state.displayPendings.addAll(pendings);
+            return;
+        }
+        for (PendingToolCall pending : pendings) {
+            if (isPreExecutionApprovalRequired(pending)) {
+                if (this.preExecutionApprovals == null) {
+                    throw new IllegalStateException("Pre-execution approval service is not configured");
+                }
+                PreExecutionApprovalService.ApprovalPair pair = this.preExecutionApprovals.createPair(state.runId, pending);
+                state.approvalPairs.put(pending.getToolCallId(), pair);
+                state.displayPendings.add(pair.approval());
+            }
+            state.displayPendings.add(pending);
+        }
+    }
+
+    private boolean isPreExecutionApprovalRequired(PendingToolCall pending) {
+        return PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
+                && this.toolRegistry.riskOf(pending.getName()) == ToolMeta.RiskLevel.DANGER
+                && this.toolRegistry.channelOf(pending.getName()) == ToolMeta.Channel.FRONTEND;
     }
 
     private void bindPendingArguments(String runId, AiContext context, Prompt prompt, AssistantMessage assistant,
@@ -951,9 +994,18 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
         parkTaskTypeIfDue(state, pending, batchSize);
+        PreExecutionApprovalService.ApprovalPair pair = state.approvalPairs.get(pending.getToolCallId());
         if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
                 || isCreateTaskBlocked(state, pending) || isFrontendSkipped(state, pending)) {
+            if (pair != null) {
+                state.displayPendings.remove(pair.approval());
+                state.approvalPairs.remove(pending.getToolCallId());
+                pending.setPreExecutionApprovalId(null);
+            }
             return;
+        }
+        if (pair != null) {
+            state.suspended.add(pair.approval());
         }
         state.suspended.add(pending);
     }
@@ -1164,12 +1216,12 @@ public class SpToolCallingManager implements ToolCallingManager {
     private void persistSuspendedBatch(ToolBatchState state, List<PendingToolCall> pendings) {
         persistToolSteps(state.runId, state.stepsUsed);
         List<Message> suspendedHistory = SyntheticMessages.withoutCorrectionInstruction(state.prompt.getInstructions());
-        this.store.saveSuspended(state.runId, state.assistant.getText(), pendings, suspendedHistory, this.codec,
-                state.assistant.getMetadata());
+        this.store.saveSuspended(state.runId, state.assistant.getText(), state.displayPendings, pendings,
+                suspendedHistory, this.codec, state.assistant.getMetadata());
         if (isSuspendedHopPersisted(state.runId, state.assistant)) {
             commitTurnText(state.prompt);
         }
-        recordPendingTranscript(state.runId, state.snapshot, state.prompt, state.assistant, pendings);
+        recordPendingTranscript(state.runId, state.snapshot, state.prompt, state.assistant, state.displayPendings);
         state.out.suspended(state.suspended, this.store.runKey(state.runId), this.store.pendingKey(state.runId),
                 this.store.instanceId());
         if (this.gate.canPublishRequestsAheadOfLoop()) {
@@ -1183,6 +1235,17 @@ public class SpToolCallingManager implements ToolCallingManager {
     private void executeBatch(ToolBatchState state, List<PendingToolCall> pendings) {
         for (PendingToolCall pending : pendings) {
             executePending(state, pending, pendings.size());
+            convergeSettledPreExecution(state.runId, pending);
+        }
+    }
+
+    private void convergeSettledPreExecution(String runId, PendingToolCall pending) {
+        if (StringUtils.isBlank(pending.getPreExecutionApprovalId())) {
+            return;
+        }
+        PendingToolCall current = this.store.pending(runId, pending.getToolCallId());
+        if (current != null && current.resolved()) {
+            convergePreExecutionCompletion(runId, current.getToolCallId());
         }
     }
 
@@ -1336,7 +1399,7 @@ public class SpToolCallingManager implements ToolCallingManager {
                 AiTrace.eventOn(state.runId, state.snapshot.getSessionId(), "tool_call_park", "toolCallId",
                         pending.getToolCallId(), "tool", pending.getName(), "kind", pending.getKind(), "parkKind",
                         parked.kind());
-                recordSettledBatchTranscript(state.runId, state.snapshot, state.assistant, state.pendings);
+                recordSettledBatchTranscript(state.runId, state.snapshot, state.assistant, state.displayPendings);
                 throw ex;
             }
             traceToolAborted(state.runId, state.snapshot.getSessionId(), pending, startedAt, ex);
@@ -1458,6 +1521,8 @@ public class SpToolCallingManager implements ToolCallingManager {
         private final List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
         private PendingToolCall haltedBy;
         private List<PendingToolCall> pendings;
+        private List<PendingToolCall> displayPendings = List.of();
+        private final Map<String, PreExecutionApprovalService.ApprovalPair> approvalPairs = new LinkedHashMap<>();
 
         private ToolBatchState(String runId, RunSnapshot snapshot, Prompt prompt, AssistantMessage assistant,
                                AiContext context, SseChatEmitter out, ModelWriteBudget modelBudget, boolean budgetArmed) {
@@ -2633,8 +2698,168 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (verdict != null && !verdict.accepted()) {
             return rejectFrontendArguments(runId, pending, verdict);
         }
+        if (StringUtils.isNotBlank(pending.getPreExecutionApprovalId())) {
+            return awaitPreApprovedFrontend(runId, pending);
+        }
         PendingToolCall resolved = this.gate.awaitFrontendResult(runId, pending);
         return StringUtils.defaultString(resolved.getResultText());
+    }
+
+    private String awaitPreApprovedFrontend(String runId, PendingToolCall pending) {
+        PreExecutionApprovalService.ApprovalPair pair = requirePreExecutionPair(runId, pending);
+        if (pair.execution().resolved()) {
+            return StringUtils.defaultString(
+                    convergePreExecutionCompletion(runId, pair.execution().getToolCallId()).execution().getResultText());
+        }
+        if (PendingToolCall.PENDING.equals(pair.approval().getStatus())) {
+            PendingToolCall decided = this.gate.awaitDecision(runId, pair.approval());
+            pair = requirePreExecutionPair(runId, decided);
+        }
+        if (PendingToolCall.APPROVED.equals(pair.approval().getStatus())) {
+            PendingToolCall dispatched = this.gate.publishApprovedPreExecution(runId, pair.approval());
+            PendingToolCall resolved = this.gate.awaitFrontendResult(runId, dispatched);
+            return StringUtils.defaultString(
+                    convergePreExecutionCompletion(runId, resolved.getToolCallId()).execution().getResultText());
+        }
+        if (PendingToolCall.REJECTED.equals(pair.approval().getStatus())) {
+            return StringUtils.defaultString(this.preExecutionApprovals.settleRejection(runId,
+                    pair.approval().getToolCallId(), pair.approval().getReason()).execution().getResultText());
+        }
+        throw new IllegalStateException("Pre-execution approval finished without an execution outcome");
+    }
+
+    public boolean isPreExecutionDecisionFinal(String runId, PendingToolCall pending) {
+        if (StringUtils.isBlank(pending.getPreExecutionApprovalId())) {
+            return false;
+        }
+        String status = requirePreExecutionPair(runId, pending).approval().getStatus();
+        return PendingToolCall.APPROVED.equals(status) || PendingToolCall.REJECTED.equals(status);
+    }
+
+    /**
+     * 恢复扫描推进已批准的 E；仍待外部回执的条目由 ResumeService 继续按未决处理。
+     */
+    public void advancePreExecutionApprovals(String runId, List<PendingToolCall> pendings) {
+        for (PendingToolCall pending : pendings) {
+            if (StringUtils.isBlank(pending.getPreExecutionApprovalId())) {
+                continue;
+            }
+            PreExecutionApprovalService.ApprovalPair pair = requirePreExecutionPair(runId, pending);
+            if (pair.execution().resolved()) {
+                convergePreExecutionCompletion(runId, pair.execution().getToolCallId());
+            } else if (PendingToolCall.APPROVED.equals(pair.approval().getStatus())) {
+                this.gate.publishApprovedPreExecution(runId, pair.approval());
+            } else if (PendingToolCall.REJECTED.equals(pair.approval().getStatus())) {
+                this.preExecutionApprovals.settleRejection(runId, pair.approval().getToolCallId(),
+                        pair.approval().getReason());
+            }
+        }
+    }
+
+    private PreExecutionApprovalService.ApprovalPair requirePreExecutionPair(String runId, PendingToolCall source) {
+        if (this.preExecutionApprovals == null) {
+            throw new IllegalStateException("Pre-execution approval service is not configured");
+        }
+        return this.preExecutionApprovals.requireLinked(runId, source);
+    }
+
+    private PreExecutionApprovalService.ApprovalPair convergePreExecutionCompletion(String runId, String executionId) {
+        PreExecutionApprovalService.ApprovalPair pair = requirePreExecutionPair(runId,
+                this.store.pending(runId, executionId));
+        String executionStatus = pair.execution().getStatus();
+        if (executionStatus == null || !FRONTEND_TERMINAL_STATUSES.contains(executionStatus)) {
+            throw new IllegalStateException("Frontend execution has no terminal outcome");
+        }
+        if (PendingToolCall.REJECTED.equals(executionStatus)) {
+            return this.preExecutionApprovals.settleRejection(runId, pair.approval().getToolCallId(),
+                    pair.approval().getReason());
+        }
+        if (PendingToolCall.CANCELLED.equals(executionStatus) && executionStatus.equals(pair.approval().getStatus())) {
+            return pair;
+        }
+        if (executionStatus.equals(pair.approval().getStatus())) {
+            return this.preExecutionApprovals.convergeCompletion(runId, executionId);
+        }
+        if (PendingToolCall.PENDING.equals(pair.approval().getStatus())
+                && PRE_APPROVAL_TERMINAL_STATUSES.contains(executionStatus)) {
+            return settleUnapprovedPreExecution(runId, pair);
+        }
+        if (!PendingToolCall.APPROVED.equals(pair.approval().getStatus())) {
+            throw new IllegalStateException("Approval and execution terminal states are inconsistent");
+        }
+        PendingToolCall approval = this.store.pendingRaw(runId, pair.approval().getToolCallId());
+        PendingToolCall execution = this.store.pendingRaw(runId, executionId);
+        this.preExecutionApprovals.validateLinked(runId, approval, execution);
+        PendingToolCall projected = projectApprovalCompletion(approval, execution);
+        if (!this.store.isPreExecutionApprovalConverged(runId, approval, execution, projected)) {
+            throw new IllegalStateException("Approval completion CAS conflict");
+        }
+        return new PreExecutionApprovalService.ApprovalPair(projected, execution);
+    }
+
+    private PreExecutionApprovalService.ApprovalPair settleUnapprovedPreExecution(
+            String runId, PreExecutionApprovalService.ApprovalPair pair) {
+        PendingToolCall projected = projectApprovalCompletion(pair.approval(), pair.execution());
+        RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, projected);
+        if (claim == null) {
+            throw new IllegalStateException("Unapproved completion CAS returned no result");
+        }
+        if (claim.won()) {
+            return new PreExecutionApprovalService.ApprovalPair(projected, pair.execution());
+        }
+        PreExecutionApprovalService.ApprovalPair current = requirePreExecutionPair(runId, pair.approval());
+        return this.preExecutionApprovals.convergeCompletion(runId, current.execution().getToolCallId());
+    }
+
+    private static PendingToolCall projectApprovalCompletion(PendingToolCall approval, PendingToolCall execution) {
+        PendingToolCall projected = copyApproval(approval);
+        projected.setStatus(execution.getStatus());
+        projected.setOutcome(execution.getOutcome());
+        projected.setCode(execution.getCode());
+        projected.setReason(execution.getReason());
+        projected.setResultText(execution.getResultText());
+        projected.setResolvedAtMs(execution.getResolvedAtMs());
+        projected.setExecuted(false);
+        projected.setExecutedBy(null);
+        projected.setClaimedAtMs(0L);
+        projected.setClaimedEpoch(0L);
+        projected.setExecutedAtMs(0L);
+        return projected;
+    }
+
+    private static PendingToolCall copyApproval(PendingToolCall source) {
+        PendingToolCall copy = new PendingToolCall();
+        copy.setToolCallId(source.getToolCallId());
+        copy.setName(source.getName());
+        copy.setType(source.getType());
+        copy.setKind(source.getKind());
+        copy.setPreExecutionApprovalId(source.getPreExecutionApprovalId());
+        copy.setExecutionToolCallId(source.getExecutionToolCallId());
+        copy.setArguments(source.getArguments());
+        copy.setDraftRunId(source.getDraftRunId());
+        copy.setDraftTaskId(source.getDraftTaskId());
+        copy.setDraftDefCode(source.getDraftDefCode());
+        copy.setStatus(source.getStatus());
+        copy.setOutcome(source.getOutcome());
+        copy.setCode(source.getCode());
+        copy.setReason(source.getReason());
+        copy.setResultText(source.getResultText());
+        copy.setCreatedTaskId(source.getCreatedTaskId());
+        copy.setExecuted(source.isExecuted());
+        copy.setExecutedBy(source.getExecutedBy());
+        copy.setClaimedAtMs(source.getClaimedAtMs());
+        copy.setExecutedAtMs(source.getExecutedAtMs());
+        copy.setClaimedEpoch(source.getClaimedEpoch());
+        copy.setRequestedAtMs(source.getRequestedAtMs());
+        copy.setResolvedAtMs(source.getResolvedAtMs());
+        copy.setExpiresAt(source.getExpiresAt());
+        copy.setAtMs(source.getAtMs());
+        copy.setReq(source.getReq());
+        copy.setReqAtMs(source.getReqAtMs());
+        copy.setPreflight(source.isPreflightPresent() ? source.getPreflight() : null);
+        copy.setSheetMeta(source.isSheetMetaPresent() ? source.getSheetMeta() : null);
+        copy.setIrreversible(source.isIrreversible());
+        return copy;
     }
 
     /**
@@ -3629,6 +3854,9 @@ public class SpToolCallingManager implements ToolCallingManager {
      * @return 该条目对应的工具结果文本（用于重建 {@code role:tool} 消息）
      */
     public String resolvePending(String runId, Prompt prompt, PendingToolCall pending) {
+        if (StringUtils.isNotBlank(pending.getPreExecutionApprovalId())) {
+            return resolvePreExecutionPending(runId, pending);
+        }
         String status = pending.getStatus();
         // kind 缺失硬闸：无法证明该走哪条通道 ⇒ 不执行（也不说成"失败"或"成功"）。
         // 只拦"本来会执行"的三种态（APPROVED / PENDING / EXECUTED 但 executed=false）；
@@ -3675,6 +3903,22 @@ public class SpToolCallingManager implements ToolCallingManager {
             log.debug("resume settlement reuses result runId={} toolCallId={} status={} executedBy={}", runId, pending.getToolCallId(),
                     status, pending.getExecutedBy());
         return text;
+    }
+
+    private String resolvePreExecutionPending(String runId, PendingToolCall pending) {
+        PreExecutionApprovalService.ApprovalPair pair = requirePreExecutionPair(runId, pending);
+        if (pair.execution().resolved()) {
+            return StringUtils.defaultString(
+                    convergePreExecutionCompletion(runId, pair.execution().getToolCallId()).execution().getResultText());
+        }
+        if (PendingToolCall.REJECTED.equals(pair.approval().getStatus())) {
+            return StringUtils.defaultString(this.preExecutionApprovals.settleRejection(runId,
+                    pair.approval().getToolCallId(), pair.approval().getReason()).execution().getResultText());
+        }
+        if (PendingToolCall.APPROVED.equals(pair.approval().getStatus())) {
+            this.gate.publishApprovedPreExecution(runId, pair.approval());
+        }
+        throw new RunParkedException(runId, pair.execution().getToolCallId(), PendingToolCall.KIND_FRONTEND);
     }
 
     /**
@@ -3902,7 +4146,18 @@ public class SpToolCallingManager implements ToolCallingManager {
             }
             return;
         }
-        recordSettledBatchTranscript(runId, snapshot, assistant, batch);
+        recordSettledBatchTranscript(runId, snapshot, assistant, displayBatch(runId, batch));
+    }
+
+    private List<PendingToolCall> displayBatch(String runId, List<PendingToolCall> batch) {
+        List<PendingToolCall> display = new ArrayList<>(batch.size() * 2);
+        for (PendingToolCall pending : batch) {
+            if (StringUtils.isNotBlank(pending.getPreExecutionApprovalId())) {
+                display.add(requirePreExecutionPair(runId, pending).approval());
+            }
+            display.add(pending);
+        }
+        return display;
     }
 
     /**

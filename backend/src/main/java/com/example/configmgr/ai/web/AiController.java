@@ -1205,16 +1205,22 @@ public class AiController {
             handOffCancelledPending(runId);
         }
         int expired = cancelledPending ? 0 : convergeExpiredParkedFrontend(runId);
+        boolean preExecutionRecoveryDue = !cancelledPending && hasPreExecutionRecoveryDue(runId);
         if (cancelledPending) {
             out.completeSubscriptions();
         } else if (expired > 0 && !isWaitingForInput(runId)) {
             log.info("reattach consumed {} expired frontend entries runId={} (resume dispatched, keeping connection for terminal frame)",
                     expired, runId);
-        } else if (isWaitingForInput(runId)) {
+        } else if (isWaitingForInput(runId) && !preExecutionRecoveryDue) {
             out.completeSubscriptions();
         } else {
             selfHealParkedRun(runId, out);
         }
+    }
+
+    private boolean hasPreExecutionRecoveryDue(String runId) {
+        ResumeService service = this.resumeService.getIfAvailable();
+        return service != null && service.hasPreExecutionRecoveryDue(runId);
     }
 
     private void handOffCancelledPending(String runId) {
@@ -2009,6 +2015,7 @@ public class AiController {
         PendingEntriesProjection projection = pendingEntriesProjection(runId, snapshot);
         body.put("pendingEntries", projection.entries());
         body.put("unresolvedExternal", projection.unresolvedExternal());
+        body.put("preExecutionRecoveryDue", hasPreExecutionRecoveryDue(runId));
         body.put("awaitingExternal",
                 RunSnapshot.SUSPENDED.equals(snapshot.getStatus()) && !projection.unresolvedExternal().isEmpty());
         return currentRunArchiveResponse(runId, body);
@@ -2060,6 +2067,12 @@ public class AiController {
         entry.put("claimedAtMs", pending.getClaimedAtMs() > 0L ? pending.getClaimedAtMs() : null);
         entry.put("claimedEpoch", pending.getClaimedEpoch() > 0L ? pending.getClaimedEpoch() : null);
         entry.put("kind", pending.getKind());
+        if (StringUtils.isNotBlank(pending.getPreExecutionApprovalId())) {
+            entry.put("preExecutionApprovalId", pending.getPreExecutionApprovalId());
+        }
+        if (StringUtils.isNotBlank(pending.getExecutionToolCallId())) {
+            entry.put("executionToolCallId", pending.getExecutionToolCallId());
+        }
         entry.put("name", pending.getName());
         entry.put("arguments", pending.getArguments());
         entry.put("req", Boolean.TRUE.equals(pending.getReq()));

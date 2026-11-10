@@ -173,6 +173,8 @@ public class ConfirmGate {
 
     private final RunStore store;
 
+    private PreExecutionApprovalService preExecutionApprovals;
+
     private final RunRegistry registry;
 
     private final AiProperties properties;
@@ -487,6 +489,11 @@ public class ConfirmGate {
         this.settlementObservations = observations;
     }
 
+    @Autowired(required = false)
+    public void setPreExecutionApprovalService(PreExecutionApprovalService service) {
+        this.preExecutionApprovals = service;
+    }
+
     /**
      * 取消收尾的交棒执行体（park 退出时"取消事实已成立、但本线程已无写权限"的接管者）。
      *
@@ -554,6 +561,7 @@ public class ConfirmGate {
      * {@code normalize_column}）及 {@code undo_last_sheet_edit}：等的是人 ⇒ 无上限
      * （与确认门同一路径，按<b>工具名</b>集合 {@link #HUMAN_WAIT_FRONTEND_TOOLS} 区分）；</li>
      * <li>其余前端工具：{@link #frontendToolTimeoutSeconds()}（默认 120s，等机器回执的兜底）。</li>
+     * <li>带独立执行前审批的 E 在 req=false 时仍等人审批，无机器超时；req=true 后才启用上述回执上限。</li>
      * </ul>
      *
      * <p>等待上限只影响"什么时候系统收摊"，不影响"人还能不能提交"：无上限时唯一出口是人决策、
@@ -564,6 +572,9 @@ public class ConfirmGate {
             return null;
         }
         if (HUMAN_WAIT_FRONTEND_TOOLS.contains(pending.getName())) {
+            return null;
+        }
+        if (StringUtils.isNotBlank(pending.getPreExecutionApprovalId()) && !Boolean.TRUE.equals(pending.getReq())) {
             return null;
         }
         return frontendToolTimeoutSeconds();
@@ -642,15 +653,16 @@ public class ConfirmGate {
     }
 
     /**
-     * <b>C1：park 前把本批每张卡的请求帧都公布出去</b>。
+     * <b>C1：park 前把本批每个可公开请求的条目公布出去；独立审批的 E 不在批准前公开</b>。
      *
      * <p>缺陷形态：帧原本是在各卡的 {@code await} 里<b>逐条</b>发的，而 park 让第一张卡的
      * {@code await} 直接结束本次执行 —— 第二张卡既没发过请求帧、也没置 {@code req}，
      * 前端永远看不到它，即便它被决策也无从驱动（"批准了却卡死"）。
      *
      * <p>因此 {@code SpToolCallingManager} 在 {@code suspended} 帧之后、执行循环之前调用本方法：
-     * 对每个仍 {@code PENDING} 的 {@code CONFIRM}/{@code FRONTEND} 条目<b>先置 {@code req} 再发帧</b>
-     * （与 {@link #reserveRequestSlot} 同序、同一把提交锁），并在内存副本上置 {@code req}
+     * 对每个仍 {@code PENDING} 的普通 {@code CONFIRM}/{@code FRONTEND} 条目<b>先置 {@code req} 再发帧</b>
+     * （与 {@link #reserveRequestSlot} 同序、同一把提交锁），并在内存副本上置 {@code req}；带
+     * {@code preExecutionApprovalId} 的 E 统一跳过，只能由批准链经 {@link #publishApprovedPreExecution} 补发。
      * —— 随后 {@code await} 看到 {@code req} 已置就不再重复发帧（见 {@code await} 的 {@code prePublished}）。
      *
      * <p>已决条目<b>不补发</b>：{@code markRequestEmitted} 之前的重判与 {@code await} 的 L0 口径一致，
@@ -665,6 +677,9 @@ public class ConfirmGate {
         for (PendingToolCall pending : pendings) {
             boolean confirm = PendingToolCall.KIND_CONFIRM.equals(pending.getKind());
             if (!confirm && !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
+                continue;
+            }
+            if (!confirm && StringUtils.isNotBlank(pending.getPreExecutionApprovalId())) {
                 continue;
             }
             if (Boolean.TRUE.equals(pending.getReq())) {
@@ -691,6 +706,78 @@ public class ConfirmGate {
     }
 
     /**
+     * A 已批准时为 E 补发唯一一次前端请求；req 已存在或 E 已有终局时只返回权威条目。
+     */
+    public PendingToolCall publishApprovedPreExecution(String runId, PendingToolCall approvalSource) {
+        PreExecutionApprovalService.ApprovalPair pair = requirePreExecutionPair(runId, approvalSource);
+        PendingToolCall execution = pair.execution();
+        if (execution.resolved()) {
+            return execution;
+        }
+        if (!PendingToolCall.APPROVED.equals(pair.approval().getStatus())
+                || !PendingToolCall.PENDING.equals(execution.getStatus())) {
+            throw new IllegalStateException("Approved pre-execution pair is not dispatchable");
+        }
+        if (Boolean.TRUE.equals(execution.getReq())) {
+            scheduleApprovedPreExecutionExpiry(runId, execution);
+            return execution;
+        }
+        requirePreExecutionFrameAllowed(runId);
+        PreExecutionApprovalService.ApprovalPair raw = rawPreExecutionPair(runId, pair);
+        long atMs = System.currentTimeMillis();
+        RunStore.RequestClaim claim = this.store.tryEmitApprovedFrontendRequest(runId, raw.approval(), raw.execution(), atMs);
+        if (!claim.won() && !"ALREADY_REQUESTED".equals(claim.outcome())) {
+            throw new IllegalStateException("Approved frontend request reservation failed: " + claim.outcome());
+        }
+        PreExecutionApprovalService.ApprovalPair currentPair = requirePreExecutionPair(runId, pair.approval());
+        PendingToolCall current = currentPair.execution();
+        if (!claim.won() || current.resolved()) {
+            if (!current.resolved()) {
+                scheduleApprovedPreExecutionExpiry(runId, current);
+            }
+            return current;
+        }
+        if (!PendingToolCall.APPROVED.equals(currentPair.approval().getStatus())
+                || !PendingToolCall.PENDING.equals(current.getStatus()) || !Boolean.TRUE.equals(current.getReq())) {
+            throw new IllegalStateException("Approved frontend request state changed before emission");
+        }
+        requirePreExecutionFrameAllowed(runId);
+        this.registry.of(runId).frontendToolRequest(current, suspendWaitSeconds(current));
+        scheduleApprovedPreExecutionExpiry(runId, current);
+        return current;
+    }
+
+    private void requirePreExecutionFrameAllowed(String runId) {
+        if (this.cancellations.cancelState(runId) != CancellationRegistry.CancelState.NOT_CANCELLED) {
+            throw new IllegalStateException("Approved frontend request cannot be emitted while cancellation is not excluded");
+        }
+        if (!this.store.isWritePermitted(runId, "approved frontend request frame")) {
+            throw new IllegalStateException("Approved frontend request cannot be emitted without run authority");
+        }
+    }
+
+    private void scheduleApprovedPreExecutionExpiry(String runId, PendingToolCall execution) {
+        Integer timeoutSeconds = suspendWaitSeconds(execution);
+        if (this.properties.getPark().isEnabled() && timeoutSeconds != null) {
+            scheduleParkedFrontendExpiry(runId, execution, timeoutSeconds);
+        }
+    }
+
+    private PreExecutionApprovalService.ApprovalPair requirePreExecutionPair(String runId, PendingToolCall source) {
+        if (this.preExecutionApprovals == null) {
+            throw new IllegalStateException("Pre-execution approval service is not configured");
+        }
+        return this.preExecutionApprovals.requireLinked(runId, source);
+    }
+
+    private PreExecutionApprovalService.ApprovalPair rawPreExecutionPair(String runId,
+                                                                         PreExecutionApprovalService.ApprovalPair pair) {
+        PendingToolCall approval = this.store.pendingRaw(runId, pair.approval().getToolCallId());
+        PendingToolCall execution = this.store.pendingRaw(runId, pair.execution().getToolCallId());
+        return this.preExecutionApprovals.validateLinked(runId, approval, execution);
+    }
+
+    /**
      * 确认门：阻塞等人工决策，返回 Redis 里的<b>最终条目</b>（调用方据此决定执行与否）。
      *
      * <p><b>无上限</b>：一直等到批准 / 拒绝 / 取消（用户裁决 2026-10-20 第 1 条）。
@@ -708,20 +795,27 @@ public class ConfirmGate {
     }
 
     private PendingToolCall await(String runId, PendingToolCall pending, boolean confirm) {
-        boolean prePublished = this.properties.getPark().isEnabled() && Boolean.TRUE.equals(pending.getReq());
+        boolean prePublished = Boolean.TRUE.equals(pending.getReq());
         PendingToolCall decided = reserveRequestSlot(runId, pending);
         if (decided != null) {
             return decided;
         }
         AwaitPreparation preparation = prepareAwait(runId, pending, confirm, prePublished);
         preparation.out().completeSubscriptions();
-        long startedAt = System.currentTimeMillis();
+        long startedAt = awaitStartedAt(pending, prePublished);
         String sessionId = snapshotSessionId(runId);
         AwaitState state = new AwaitState(runId, pending, confirm, preparation, startedAt, sessionId);
         if (this.properties.getPark().isEnabled()) {
             return parkAwait(state);
         }
         return waitForDecision(state);
+    }
+
+    private static long awaitStartedAt(PendingToolCall pending, boolean prePublished) {
+        if (prePublished && StringUtils.isNotBlank(pending.getPreExecutionApprovalId()) && pending.getReqAtMs() > 0L) {
+            return pending.getReqAtMs();
+        }
+        return System.currentTimeMillis();
     }
 
     private AwaitPreparation prepareAwait(String runId, PendingToolCall pending, boolean confirm,
@@ -1443,6 +1537,9 @@ public class ConfirmGate {
      */
     private void scheduleParkedFrontendExpiry(String runId, PendingToolCall pending, int timeoutSeconds) {
         long atMs = pending.getAtMs() == null || pending.getAtMs() <= 0 ? System.currentTimeMillis() : pending.getAtMs();
+        if (StringUtils.isNotBlank(pending.getPreExecutionApprovalId()) && pending.getReqAtMs() > 0L) {
+            atMs = pending.getReqAtMs();
+        }
         Long expiresAt = pending.getExpiresAt();
         long deadlineMs = expiresAt == null || expiresAt <= 0 ? atMs + timeoutSeconds * 1000L : expiresAt;
         long delayMs = Math.max(0L, deadlineMs - System.currentTimeMillis());
@@ -1658,13 +1755,16 @@ public class ConfirmGate {
                 || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
             return false;
         }
-        Long expiresAt = pending.getExpiresAt();
-        if (expiresAt == null || expiresAt <= 0L || expiresAt > now) {
-            return false;
-        }
         Integer timeoutSeconds = suspendWaitSeconds(pending);
         if (timeoutSeconds == null) {
             // 确认门 / 表单 / 表格写工具：等的是人，没有上限 —— 到期字段（若有）不作数。
+            return false;
+        }
+        long expiresAt = pending.getExpiresAt() == null ? 0L : pending.getExpiresAt();
+        if (StringUtils.isNotBlank(pending.getPreExecutionApprovalId()) && pending.getReqAtMs() > 0L) {
+            expiresAt = pending.getReqAtMs() + timeoutSeconds * 1000L;
+        }
+        if (expiresAt <= 0L || expiresAt > now) {
             return false;
         }
         String toolCallId = pending.getToolCallId();
@@ -1787,7 +1887,35 @@ public class ConfirmGate {
         Submission submission = doSubmitDecision(runId, toolCallId, approved, reason);
         traceDecision(runId, toolCallId, approved ? "approve" : "reject", submission.pending(),
                 String.valueOf(submission.outcome()), "user");
-        return submission;
+        return convergePreExecutionDecision(runId, submission, reason);
+    }
+
+    private Submission convergePreExecutionDecision(String runId, Submission submission, String reason) {
+        PendingToolCall approval = submission.pending();
+        if (approval == null || StringUtils.isBlank(approval.getExecutionToolCallId())) {
+            return submission;
+        }
+        PendingToolCall execution;
+        if (PendingToolCall.APPROVED.equals(approval.getStatus())) {
+            execution = publishApprovedPreExecution(runId, approval);
+        } else if (PendingToolCall.REJECTED.equals(approval.getStatus())) {
+            PreExecutionApprovalService.ApprovalPair pair = this.preExecutionApprovals.settleRejection(runId,
+                    approval.getToolCallId(), reason);
+            execution = pair.execution();
+            if (submission.outcome() == Outcome.ACCEPTED) {
+                this.registry.of(runId).frontendToolResult(execution, false, execution.getResultText());
+                if (canPublishRequestsAheadOfLoop()) {
+                    settleParkedToolCall(runId, execution, execution.getResultText());
+                }
+            }
+        } else {
+            return submission;
+        }
+        ResumeTrigger trigger = submission.resumeTrigger();
+        if (execution.resolved() && (trigger == null || "NOT_APPLICABLE".equals(trigger.outcome()))) {
+            trigger = maybeTriggerResume(runId, submission.woke());
+        }
+        return new Submission(submission.outcome(), approval, submission.woke(), submission.verdict(), trigger);
     }
 
     /**
@@ -2093,6 +2221,23 @@ public class ConfirmGate {
         }
     }
 
+    private Submission rejectUnauthorizedPreExecutionResult(String runId, PendingToolCall pending) {
+        if (StringUtils.isBlank(pending.getPreExecutionApprovalId())) {
+            return null;
+        }
+        PreExecutionApprovalService.ApprovalPair pair = requirePreExecutionPair(runId, pending);
+        if (PendingToolCall.APPROVED.equals(pair.approval().getStatus())
+                && Boolean.TRUE.equals(pair.execution().getReq())) {
+            return null;
+        }
+        log.warn("linked frontend result refused before approval/request; entry left pending runId={} toolCallId={}", runId,
+                pending.getToolCallId());
+        FrontendToolGuard.Verdict verdict = FrontendToolGuard.Verdict.reject("PRE_EXECUTION_RESULT_REJECTED",
+                "该操作尚未获得执行批准或执行请求尚未发出，本次回灌未被受理",
+                List.of("请等待用户批准并收到执行请求后再提交结果"));
+        return new Submission(Outcome.REJECTED, pending, false, verdict);
+    }
+
     /**
      * 回灌的写入本体（{@link #submitFrontendResult} 去掉结构化留痕的那一层）。
      */
@@ -2109,6 +2254,10 @@ public class ConfirmGate {
         }
         if (!PendingToolCall.PENDING.equals(pending.getStatus())) {
             return new Submission(Outcome.DUPLICATE, pending, false, null);
+        }
+        Submission preExecutionRejection = rejectUnauthorizedPreExecutionResult(runId, pending);
+        if (preExecutionRejection != null) {
+            return preExecutionRejection;
         }
         // AI 表格工具治理批：采样元数据只写过白名单（入口即丢业务值），且不参与任何判定。
         // 位置刻意在"幂等判定之后、取消分支之前"—— 取消分支也要它（写侧取消计数按 planId 走台账），

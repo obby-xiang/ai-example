@@ -215,43 +215,25 @@ public class ToolRegistry implements SmartInitializingSingleton {
     }
 
     /**
-     * <b>风险 / 通道不变量（启动期 fail-fast）</b>：
-     * <ul>
-     * <li>{@code DANGER ⇒ BACKEND}：在 Task 2 接入独立审批分发前，仍拒绝 DANGER+FRONTEND，
-     *     防止旧 SpToolCallingManager 把下载等高危前端调用直接下发；</li>
-     * <li>{@code BACKEND ⇒ READ 或 DANGER}：后端直执行只承载"纯读"与"确认门之后才跑"的工具。
-     *     {@code WRITE + BACKEND} 会被 {@code kindOf} 判成 {@code BACKEND} 直接执行并绕过人工确认。</li>
-     * </ul>
-     *
-     * <p>两类配置都没有安全的运行期默认，因此启动时点名并失败。Task 2 完整接入 A/E 后，
-     * 才能移除第一项对合法两阶段声明的临时防线。
+     * <b>风险 / 通道不变量（启动期 fail-fast）</b>：后端直执行只承载纯读与确认门之后才跑的工具；
+     * {@code WRITE + BACKEND} 会被 {@code kindOf} 判成 {@code BACKEND} 直接执行并绕过人工确认。
+     * 合法 {@code DANGER + FRONTEND} 由独立 A/E 审批链处理，不再按非法声明拒绝。
      */
     private void assertRiskChannelInvariant() {
-        List<String> dangerousFrontend = new ArrayList<>();
         List<String> backendWrite = new ArrayList<>();
         for (ToolMeta meta : metaMap.values()) {
             ToolMeta.RiskLevel risk = meta.getRiskLevel();
             ToolMeta.Channel channel = meta.getChannel();
-            if (risk == ToolMeta.RiskLevel.DANGER && channel != ToolMeta.Channel.BACKEND) {
-                dangerousFrontend.add(meta.getName());
-            }
             if (channel == ToolMeta.Channel.BACKEND && risk != ToolMeta.RiskLevel.READ
                     && risk != ToolMeta.RiskLevel.DANGER) {
                 backendWrite.add(meta.getName());
             }
         }
-        if (dangerousFrontend.isEmpty() && backendWrite.isEmpty()) {
+        if (backendWrite.isEmpty()) {
             return;
         }
-        StringBuilder message = new StringBuilder("Tool risk/channel invariant violated (DANGER => BACKEND; BACKEND => READ/DANGER)");
-        if (!dangerousFrontend.isEmpty()) {
-            message.append(": DANGER+FRONTEND tools require the Task 2 approval dispatcher ")
-                    .append(dangerousFrontend.stream().sorted().toList());
-        }
-        if (!backendWrite.isEmpty()) {
-            message.append(": backend write tools would bypass confirmation ")
-                    .append(backendWrite.stream().sorted().toList());
-        }
+        String message = "Tool risk/channel invariant violated (BACKEND => READ/DANGER): "
+                + "backend write tools would bypass confirmation " + backendWrite.stream().sorted().toList();
         throw new IllegalStateException(message + "; startup aborted because runtime behavior would bypass confirmation");
     }
 

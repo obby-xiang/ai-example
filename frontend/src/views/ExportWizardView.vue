@@ -2466,8 +2466,8 @@ function downloadingLabel(slot: DownloadSlot): string {
 
 /**
  * `download_export_files` 的前置校验（方案 A 的"AI 真正该等的那一段"，**逐码**）：参数 →
- * 任务绑定闸门 → 结果存在性，外加切页（让用户看到下载发生的位置；只读态走零写的 `viewStep`，
- * 非只读态 `goStep` —— 见 §S3e）。
+ * 任务绑定闸门 → 结果存在性，外加只读切页（让用户看到下载发生的位置，统一走零写的 `viewStep`，
+ * 不保存配置、条件或任务步骤）。
  *
  * 为什么这一段必须 `await` 且必须失败即回灌失败：三者任一不成立都**确定"未触发下载"**，
  * 可以如实回灌 `failed`（卡片显示原因）；而浏览器侧下载链路的结局是"可能已发生但不可知"，
@@ -2476,8 +2476,6 @@ function downloadingLabel(slot: DownloadSlot): string {
  * 无效码**整体失败**（R-156 会审 DS-6）：只要有一个码不在当前可导出清单里就整批不下，
  * 回执点名无效码并给出可用码清单 —— 只下"能下的那几个"会让模型以为整批都已完成，
  * 而用户拿到的文件不全（静默丢弃）。
- *
- * 切页（非只读态 `goStep(2)`）同步失败的面（W-06/W-07）属批次 C，本批不改。
  */
 function downloadCodesProblem(defCodes: readonly string[]): string | null {
   const available = exportResults.value.map((item) => item.defCode)
@@ -2500,15 +2498,10 @@ function downloadCodesProblem(defCodes: readonly string[]): string | null {
 }
 
 async function ensureDownloadStep(): Promise<string | null> {
-  if (stepIndex.value === 2) {
-    return null
-  }
-  if (isReadOnly.value) {
+  if (stepIndex.value !== 2) {
     await viewStep(2)
-    return null
   }
-  const advanced = await goStep(2)
-  return advanced.ok ? null : `已预检通过，但无法切换到导出结果步骤：${advanced.reason}。本次未触发下载`
+  return null
 }
 
 async function preflightDownload(
@@ -2855,21 +2848,9 @@ function registerHandlers(): void {
     if (!exportResults.value.some((item) => item.defCode === defCode)) {
       throw new Error(`${noResultMessage(defCode)}。请在任务 #${taskId.value} 上完成 ${defCode} 的导出后重试，或核对传入的 taskId 与 defCode；本次未打开在线编辑器`)
     }
-    // 施工卡 §S3e：切页同 `preflightDownload` —— 只读态走零写的 `viewStep`，非只读态取 goStep 结局
+    // 与下载一致：打开编辑器只改变本地查看位置，不保存配置、条件或任务步骤。
     if (stepIndex.value !== 2) {
-      if (isReadOnly.value) {
-        await viewStep(2)
-      } else {
-        // 批3③a D7：W-06 残余入口收口 —— persist 失败阻断推进时结构化如实上报（A3 解读支），
-        // 不得谎报"已打开在线编辑器"。
-        const advanced = await goStep(2, uiAbandonGuard(lifetime))
-        if (!advanced.ok) {
-          return {
-            ok: false,
-            reason: `无法推进到导出结果步骤：${advanced.reason}。${defCode} 的在线编辑器未打开。`
-          }
-        }
-      }
+      await viewStep(2)
     }
     activeTab.value = defCode
     await nextTick()
