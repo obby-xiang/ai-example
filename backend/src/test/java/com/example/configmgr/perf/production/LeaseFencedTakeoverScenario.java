@@ -10,6 +10,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import com.example.configmgr.ai.run.LeaseService;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.perf.redis.Manifest;
 import com.example.configmgr.perf.redis.RedisSlots;
@@ -118,9 +119,27 @@ final class LeaseFencedTakeoverScenario implements ProductionScenario {
 			support.redis.delete(fenceKey);
 			LeaseService fourthService = service(support, "fourth-owner");
 			LeaseService.AcquireResult fourth = fourthService.acquireFenced(leaseKey, fenceKey, ttl, "fourth-owner");
+			String fenceBeforeSave = support.redis.opsForValue().get(fenceKey);
+			dataset.attributes.put("fenceBeforeSave", fenceBeforeSave);
+			dataset.attributes.put("fenceMissingBeforeSave", fenceBeforeSave == null);
+			RunStore fourthStore = new RunStore(support.redis, support.mapper, support.aiProperties, fourthService);
+			LeaseService.LeaseAuthority authorityBeforeSave = support.identity(() -> fourthStore.runLeaseAuthority(runId));
+			long heldEpochBeforeSave = support.identity(() -> fourthStore.heldRunEpoch(runId));
+			dataset.attributes.put("fenceSaveAuthority", authorityBeforeSave.name());
+			dataset.attributes.put("fenceSaveHeldEpoch", heldEpochBeforeSave);
+			support.require(dataset, "missing_fence_save_uses_held_lease",
+					authorityBeforeSave == LeaseService.LeaseAuthority.HELD && heldEpochBeforeSave == fourth.lease().epoch(),
+					"real RunStore save must use the fourth owner's HELD lease");
+			ProductionDomainSupport.ownRun(support, dataset, runId);
+			RunSnapshot fourthSnapshot = ProductionDomainSupport.snapshot(support, dataset, runId, "RUNNING");
+			support.identity(() -> fourthStore.save(fourthSnapshot));
+			String fenceAfterSave = support.redis.opsForValue().get(fenceKey);
+			dataset.attributes.put("fenceAfterSave", fenceAfterSave);
+			dataset.attributes.put("fenceSaveRunEpoch", fourthSnapshot.getRunEpoch());
 			support.require(dataset, "missing_fence_rebuilt_monotonic",
-					fourth.acquired() && fourth.lease().epoch() > beforeMissingFence
-							&& Long.parseLong(support.redis.opsForValue().get(fenceKey)) > beforeMissingFence,
+					fourth.acquired() && fourth.lease().epoch() > beforeMissingFence && fenceBeforeSave == null
+							&& fourthSnapshot.getRunEpoch() == fourth.lease().epoch() && fenceAfterSave != null
+							&& Long.parseLong(fenceAfterSave) > beforeMissingFence,
 					"before=" + beforeMissingFence + " fourth=" + fourth.lease().epoch());
 
 			fourthService.release(fourth.lease());

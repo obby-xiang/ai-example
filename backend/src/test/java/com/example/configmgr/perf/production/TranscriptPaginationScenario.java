@@ -9,8 +9,10 @@ import com.example.configmgr.ai.tenant.RequestContextUtils;
 import java.lang.reflect.Constructor;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Scaled proof of the real 5000-entry/8MiB trimming and cursor-pagination scripts. */
@@ -41,29 +43,34 @@ final class TranscriptPaginationScenario implements ProductionScenario {
 			try {
 			valid &= support.stage(dataset, "transcript_count_trim_and_pagination", () -> {
 				ConversationTranscriptStore store = store(support, 7, 1_000_000L);
+				List<Boolean> appendResults = new ArrayList<>();
 				for (int i = 0; i < 9; i++) {
 					final int entryIndex = i;
-					support.identity(() -> store.append(dataset.sessionId, support.cfg.tenantId, support.cfg.userId,
-							List.of(entry("count", entryIndex, 32)), 1L));
+					appendResults.add(support.identity(() -> store.append(dataset.sessionId, support.cfg.tenantId,
+							support.cfg.userId, List.of(entry("count", entryIndex, 32)), 1L)));
 				}
 				ConversationTranscriptStore.ReadPage latest = store.readPage(dataset.sessionId, support.cfg.tenantId,
 						support.cfg.userId, null, 3);
 				ConversationTranscriptStore.ReadPage middle = store.readPage(dataset.sessionId, support.cfg.tenantId,
-						support.cfg.userId, 6L, 3);
+						support.cfg.userId, 7L, 3);
 				ConversationTranscriptStore.ReadPage last = store.readPage(dataset.sessionId, support.cfg.tenantId,
-						support.cfg.userId, 3L, 3);
+						support.cfg.userId, 4L, 3);
+				dataset.attributes.put("transcriptCountAppendResults", appendResults);
+				recordPage(dataset, "transcriptLatestPage", latest);
+				recordPage(dataset, "transcriptMiddlePage", middle);
+				recordPage(dataset, "transcriptLastPage", last);
 				boolean pages = support.check(dataset, "transcript_count_trim_boundary",
-						latest.total() == 7 && latest.truncated() && ids(latest).equals(List.of(6, 7, 8)),
+						latest.total() == 7 && latest.truncated() && ids(latest).equals(List.of("6", "7", "8")),
 						"9 entries at maxEntries=7 retain entries 2..8 and expose the truncation marker");
 				pages &= support.check(dataset, "transcript_latest_cursor",
-						latest.hasMore() && "6".equals(latest.nextCursor()),
-						"latest page 6,7,8 points to cursor 6");
+						latest.hasMore() && "7".equals(latest.nextCursor()),
+						"latest page 6,7,8 points to cursor 7");
 				pages &= support.check(dataset, "transcript_before_cursor",
-						ids(middle).equals(List.of(3, 4, 5)) && middle.hasMore() && "3".equals(middle.nextCursor()),
-						"before=6 returns 3,4,5 and cursor 3");
+						ids(middle).equals(List.of("3", "4", "5")) && middle.hasMore() && "4".equals(middle.nextCursor()),
+						"before=7 returns 3,4,5 and cursor 4");
 				pages &= support.check(dataset, "transcript_last_page",
-						ids(last).equals(List.of(2)) && !last.hasMore() && last.nextCursor() == null,
-						"before=3 returns only retained entry 2 and closes pagination");
+						ids(last).equals(List.of("2")) && !last.hasMore() && last.nextCursor() == null,
+						"before=4 returns only retained entry 2 and closes pagination");
 				Set<String> union = new LinkedHashSet<>();
 				union.addAll(ids(latest));
 				union.addAll(ids(middle));
@@ -122,6 +129,16 @@ final class TranscriptPaginationScenario implements ProductionScenario {
 	private static TranscriptEntry entry(String runPrefix, int index, int payloadChars) {
 		long now = System.currentTimeMillis();
 		return TranscriptEntries.user(runPrefix + "-" + index, now, now, "x".repeat(payloadChars));
+	}
+
+	private static void recordPage(Manifest.Dataset dataset, String name, ConversationTranscriptStore.ReadPage page) {
+		Map<String, Object> evidence = new LinkedHashMap<>();
+		evidence.put("ids", ids(page));
+		evidence.put("total", page.total());
+		evidence.put("nextCursor", page.nextCursor());
+		evidence.put("hasMore", page.hasMore());
+		evidence.put("truncated", page.truncated());
+		dataset.attributes.put(name, evidence);
 	}
 
 	private static List<String> ids(ConversationTranscriptStore.ReadPage page) {
