@@ -8,6 +8,7 @@
 import type {
   SseFrame,
   SseTimeoutStage,
+  ContextUsage,
   PendingToolCallSnapshot,
   PendingStatus,
   ToolKind,
@@ -281,6 +282,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
   errorMessage?: string
   /** assistant 所属 run 的权威终态；CANCELLED 用于恢复消息级停止事实。 */
   outcome?: string
+  /** 状态未确认标记（additive）；与 outcome=UNCONFIRMED 等价，缺省 = 旧载荷/无未确认事实。 */
+  unconfirmed?: boolean
   /** transcript 降级标记；DONE 不能抵消这些字段或 code/errorCode 中的 AI_TRANSCRIPT_INCOMPLETE、AI_TRANSCRIPT_WRITE_FAILED。 */
   transcriptDegraded?: boolean
   historyComplete?: boolean

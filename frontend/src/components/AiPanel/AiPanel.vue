@@ -1253,7 +1253,6 @@ import {
   isFormAwaitingOutcome,
   isReadOnlyCard,
   parsePublishConflicts,
-  readOnlyStateOf,
   reasonHeadline,
   MASKED_VALUE,
   readableValue,

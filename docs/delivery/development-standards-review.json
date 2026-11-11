@@ -5793,6 +5793,28 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文、reasoning、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1239代码复审通过；相关后端单点RED/GREEN、前端Vitest和D08真实浏览器通过，O04及旧API失配测试NOT_RUN；后端Maven BUILD SUCCESS，前端node scripts/build.mjs 3281模块26.48秒成功；npm run typecheck/build基线失败已独立复现且未伪装通过。"}
       }
+    },
+    {
+      "fingerprint": "sha256:37ee686f8c9e737649ee14dea073f928494fa41ed9c185d2d3b5fe9c92a9e057",
+      "status": "reviewed",
+      "reason": "逐hunk复核五项前端生产类型修复，独立审查agent-1244确认契约与行为无阻塞，测试树旧错误不在本批扩散。",
+      "reviewedAt": "2026-11-11T15:29:47+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1244、施工agent-1241",
+      "specChanges": [],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "仅删除无消费者readOnlyStateOf导入，工具函数及其他消费保留。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "空错误文案使用既有i18n回退，Pinia默认参数显式this类型，非空文案和运行调用不变。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "AiHistoryMessage补additive unconfirmed可选字段，ContextUsage复用./sse类型导入且保留再导出。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有翻译、ContextUsage类型和Pinia store类型，无新增依赖或重复类型。"},
+        "java-api-style": {"status": "checked", "reason": "三个生产文件已IDEA Reformat，未使用非空断言、any泛化、tsconfig豁免或行为扩散。"},
+        "logging-exception-safety": {"status": "checked", "reason": "仅null/undefined错误文案回退到既有通用请求失败提示，非空错误原文、取消和unconfirmed分支不变。"},
+        "toc-interaction": {"status": "checked", "reason": "不改变恢复、提示、卡片或用户操作，仅补类型与死导入清理。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "unconfirmed与后端仅在true时透出的additive历史契约一致，未修改Redis或数据库。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1244可提交；同一npm run typecheck确认5项src生产错误全部消失、src零错误，247项tests旧错误原样保留；node scripts/build.mjs 3281模块26.72秒成功；全量typecheck仍受测试树阻断，未宣称通过。"}
+      }
     }
   ]
 }

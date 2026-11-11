@@ -7089,7 +7089,7 @@ export const useAiStore = defineStore('ai', {
         } else {
           if (code !== null) {
             host.code = code
-            host.errorCard = buildErrorCard(code, message)
+            host.errorCard = buildErrorCard(code, message ?? translate('ai.notice.chatRequestFailed'))
           } else if (failed && !hasOtherFailurePresentation(host)) {
             host.code = ErrorCode.AI_RUN_FAILED
             host.errorCard = buildErrorCard(ErrorCode.AI_RUN_FAILED, translate('ai.notice.chatRequestFailed'))
@@ -7384,6 +7384,7 @@ export const useAiStore = defineStore('ai', {
 
     /** 自动重试只记录错误；最终失败才执行既有终态封口与交互清理。 */
     sealRecovery(
+      this: ReturnType<typeof useAiStore>,
       scope: Exclude<AiLoadErrorScope, 'context'>,
       error: unknown,
       deferCleanup = hasActiveAutoRecovery(this)
