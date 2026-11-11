@@ -7,12 +7,21 @@ import {fileURLToPath} from 'node:url'
 import {
     classifyCancelProbe,
     createLoadRunner,
+    diffRedisCommandStats,
     formatSseFrames,
     parseApiLoadConfig,
     planPairedDeletes,
     shouldRetrySseEof,
     summarizeLatencies
 } from './load-support.mjs'
+import {
+    attachmentEvidenceReport,
+    createAttachmentEvidence,
+    frameEvidence,
+    observeAttachmentFrame,
+    persistAttachmentEvidence,
+    recordAttachmentPhase
+} from './attachment-evidence.mjs'
 
 const baseInput = process.env.BASE_URL?.trim()
 if (!baseInput) throw new Error('BASE_URL is required')
@@ -76,6 +85,16 @@ const redisEvidence = {
         ? '等待本轮真实 redis-cli 定向只读与清理后复核；静态实现不构成直验。'
         : 'EVAL_ENABLE_REDIS_VERIFY is not true: real Redis verification NOT_RUN; API coverage cannot become overall PASS.'
 }
+const redisClusterEnabled = process.env.REDIS_CLUSTER === 'true'
+const clusterCommandStats = {
+    status: redisClusterEnabled && apiLoadConfig.enabled ? 'PENDING' : 'NOT_RUN',
+    mode: 'PER_MASTER_INFO_COMMANDSTATS_DELTA',
+    before: {status: 'NOT_RUN', nodes: {}},
+    after: {status: 'NOT_RUN', nodes: {}},
+    deltas: {},
+    error: null,
+    note: 'Cumulative counters are snapshots only; this run uses after-before increments for every master.'
+}
 const createdTasks = new Set()
 const createdSessions = new Set()
 const loadCreatedSessions = new Set()
@@ -85,6 +104,7 @@ const loadFeedbackMessageIds = new Set()
 const loadSessionIds = []
 const loadBaselines = {captured: false, tasks: new Set(), runs: new Set()}
 const activeRuns = new Set()
+const attachmentEvidenceAttempts = []
 const cleanupLog = []
 const cleanupErrors = []
 const coreCleanupErrors = []
@@ -261,9 +281,11 @@ const apiLoad = {
     },
     maxObservedApiInFlight: 0,
     skipped: 0,
+    scriptTimeoutCancelled: 0,
     complete: null,
     planned: API_LOAD_PLAN.map((plan) => plan.key),
     endpoints: {},
+    clusterCommandStats,
     cleanup: {done: true, detail: 'no load-created resources'},
     cleanupErrors: [],
     fatalError: null,
@@ -276,6 +298,34 @@ class CoverageError extends Error {
 }
 
 class PlainTextModelResponseError extends CoverageError {
+}
+
+class ScriptTimeoutCancelError extends CoverageError {
+    constructor(runId, lastSeq, waitKind, realCode, recovered, httpStatus = null) {
+        super(`SCRIPT_TIMEOUT_CANCEL waitKind=${waitKind} runId=${runId ?? 'unknown'} lastSeq=${lastSeq ?? 0} `
+            + `realCode=${realCode ?? 'unknown'} cancelRecovered=${recovered}`)
+        this.classification = 'SCRIPT_TIMEOUT_CANCEL'
+        this.runId = runId
+        this.lastSeq = lastSeq
+        this.waitKind = waitKind
+        this.realCode = realCode
+        this.cancelRecovered = recovered
+        this.httpStatus = httpStatus
+    }
+}
+
+function isScriptTimeout(error) {
+    return error instanceof Error && error.name === 'TimeoutError'
+}
+
+function scriptTimeoutCancelError(error, runId, lastSeq, waitKind, recovered) {
+    const wrapped = new ScriptTimeoutCancelError(runId, lastSeq, waitKind, error.realCode ?? null,
+        recovered, error.httpStatus ?? null)
+    wrapped.terminalEvidence = error.terminalEvidence ?? null
+    wrapped.lastSseEvidence = error.lastSseEvidence ?? null
+    wrapped.pendingEvidence = error.pendingEvidence ?? null
+    wrapped.cancelResponse = error.cancelResponse ?? null
+    return wrapped
 }
 
 let plainTextRetryCount = 0
@@ -330,7 +380,7 @@ function isSafelyRecoveredModelError(error) {
         && safelyRecoveredModelErrors.has(error)
 }
 
-async function modelCall(fn, allowPlainTextRetry = false) {
+async function modelCall(fn, allowPlainTextRetry = false, runEvidence = null, scopeErrors = coreCleanupErrors) {
     await acquireModel()
     let safeToRelease = false
     try {
@@ -338,11 +388,24 @@ async function modelCall(fn, allowPlainTextRetry = false) {
         safeToRelease = true
         return result
     } catch (error) {
-        const retryPlainText = allowPlainTextRetry && error instanceof PlainTextModelResponseError
-        const safelyRecovered = isSafelyRecoveredModelError(error)
-        if (!retryPlainText || !safelyRecovered) tripModelCircuit(error)
-        safeToRelease = safelyRecovered
-        throw error
+        let finalError = error
+        if (isScriptTimeout(error) && runEvidence !== null) {
+            const recovered = await settleRunAfterSseError(runEvidence.runId, runEvidence.lastSeq, error,
+                scopeErrors, runEvidence)
+            finalError = scriptTimeoutCancelError(error, runEvidence.runId, runEvidence.lastSeq,
+                'HITL_RECEIPT', recovered)
+        }
+        const retryPlainText = allowPlainTextRetry && finalError instanceof PlainTextModelResponseError
+        const scriptTimeout = finalError instanceof ScriptTimeoutCancelError
+        const safelyRecovered = isSafelyRecoveredModelError(finalError)
+        if (scriptTimeout) {
+            safeToRelease = finalError.cancelRecovered === true
+            if (!safeToRelease) tripModelCircuit(new CoverageError('SCRIPT_TIMEOUT_CANCEL recovery failed'), 'script-cancel-recovery')
+        } else {
+            if (!retryPlainText || !safelyRecovered) tripModelCircuit(finalError)
+            safeToRelease = safelyRecovered
+        }
+        throw finalError
     } finally {
         if (safeToRelease) releaseModel()
     }
@@ -692,6 +755,55 @@ async function redisCommand(...args) {
     }
 }
 
+function redisClusterNodes() {
+    const raw = process.env.REDIS_CLUSTER_NODES?.trim() ?? ''
+    if (raw === '') throw new CoverageError('REDIS_CLUSTER_NODES is required for Cluster load commandstats evidence')
+    return raw.split(',').map((entry, index) => {
+        const value = entry.trim()
+        const match = /^\[([0-9A-Fa-f:]+)]:(\d+)$/.exec(value) ?? /^([^:]+):(\d+)$/.exec(value)
+        if (!match) throw new CoverageError('REDIS_CLUSTER_NODES entries must be host:port or [IPv6]:port')
+        return {id: `master-${index + 1}`, host: match[1], port: match[2], endpoint: value}
+    })
+}
+
+async function captureClusterCommandStats(phase) {
+    const target = clusterCommandStats[phase]
+    target.status = 'RUNNING'
+    clusterCommandStats.status = 'RUNNING'
+    try {
+        for (const node of redisClusterNodes()) {
+            const {stdout} = await execFileAsync(redisCli, [
+                '--raw', '-h', node.host, '-p', node.port, '-n', '0',
+                ...(process.env.REDIS_TLS === 'true' ? ['--tls'] : []), 'INFO', 'commandstats'
+            ], {timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true})
+            target.nodes[node.id] = {
+                endpoint: node.endpoint,
+                status: 'PASS',
+                ...diffRedisCommandStats('', stdout)
+            }
+        }
+        target.status = 'PASS'
+        if (phase === 'after') {
+            for (const [nodeId, after] of Object.entries(target.nodes)) {
+                const before = clusterCommandStats.before.nodes[nodeId]
+                assert(before?.status === 'PASS', `missing before commandstats for ${nodeId}`)
+                clusterCommandStats.deltas[nodeId] = {
+                    endpoint: after.endpoint,
+                    ...diffRedisCommandStats(
+                        Object.entries(before.commands).map(([name, calls]) => `cmdstat_${name}:calls=${calls}`).join('\n'),
+                        Object.entries(after.commands).map(([name, calls]) => `cmdstat_${name}:calls=${calls}`).join('\n'))
+                }
+            }
+            clusterCommandStats.status = 'PASS'
+        }
+    } catch (error) {
+        target.status = 'FAIL'
+        clusterCommandStats.status = 'FAIL'
+        clusterCommandStats.error = limitedMessage(errorDetail(error))
+        throw error
+    }
+}
+
 function redisLines(output) {
     return output === '' ? [] : output.split(/\r?\n/)
 }
@@ -1018,8 +1130,79 @@ function parseSseBlock(block) {
     }
 }
 
-async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreCleanupErrors) {
+function terminalRealCode(frame) {
+    return frame?.code ?? frame?.errorCode ?? frame?.turnEnd?.code ?? null
+}
+
+async function pendingRunEvidence(runId) {
+    try {
+        const response = await request(`/api/ai/pending/${runId}`)
+        ok(response)
+        return {
+            httpStatus: response.status,
+            entries: dataArray(response).map((entry) => ({
+                toolCallId: entry.toolCallId ?? null,
+                name: entry.name ?? null,
+                kind: entry.kind ?? null,
+                status: entry.status ?? null,
+                outcome: entry.outcome ?? null
+            })),
+            error: null
+        }
+    } catch (error) {
+        return {httpStatus: error?.httpStatus ?? null, entries: null, error: errorDetail(error)}
+    }
+}
+
+function assignPendingEvidence(error, phase, observation) {
+    error.pendingEvidence = {
+        ...(error.pendingEvidence ?? {}),
+        [phase]: observation.entries,
+        [`${phase}HttpStatus`]: observation.httpStatus,
+        [`${phase}Error`]: observation.error
+    }
+}
+
+class RealTerminalFailureError extends CoverageError {
+}
+
+function copySettlementEvidence(target, source, runId) {
+    target.runId = runId
+    target.realCode = source.realCode ?? null
+    target.terminalEvidence = source.terminalEvidence ?? null
+    target.lastSseEvidence = source.lastSseEvidence ?? null
+    target.pendingEvidence = source.pendingEvidence ?? null
+    target.cancelResponse = source.cancelResponse ?? null
+    target.cancellationSource = source.cancellationSource ?? null
+    target.httpStatus = source.httpStatus ?? null
+    return target
+}
+
+async function captureRequiredPending(runId, phase, error) {
+    const observation = await pendingRunEvidence(runId)
+    assert(observation.error === null && Array.isArray(observation.entries), `${phase} pending evidence unavailable`)
+    assignPendingEvidence(error, phase, observation)
+}
+
+async function withholdAttachmentCleanup(runEvidence, runId, error, cleanupError) {
+    if (runEvidence === null) return
+    const failure = copySettlementEvidence(new CoverageError(`SETTLEMENT_FAILED: ${errorDetail(cleanupError)}`),
+        error, runId)
+    failure.cancellationSource = 'SETTLEMENT_FAILED'
+    runEvidence.cleanupWithheld = true
+    runEvidence.evidenceComplete = false
+    try {
+        await persistAttachmentEvidence(outDir, runEvidence, 'FAILURE', failure)
+    } catch {
+        runEvidence.cleanupWithheld = true
+        runEvidence.evidenceComplete = false
+    }
+}
+
+async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreCleanupErrors, runEvidence = null) {
     if (!runId) {
+        const cleanupError = new CoverageError('runId=unknown:SSE cleanup ownership unknown')
+        await withholdAttachmentCleanup(runEvidence, runId ?? null, error, cleanupError)
         const detail = 'runId=unknown:SSE cleanup ownership unknown'
         cleanupLog.push(detail)
         cleanupErrors.push(detail)
@@ -1028,29 +1211,64 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
     }
     activeRuns.add(runId)
     try {
+        if (runEvidence !== null) {
+            await captureRequiredPending(runId, 'beforeCancel', error)
+            recordAttachmentPhase(runEvidence, 'CANCEL_REQUESTED', {runId, lastSeq})
+            await persistAttachmentEvidence(outDir, runEvidence, 'BEFORE_CANCEL', error)
+        }
         const response = await request(`/api/ai/cancel/${runId}`, {method: 'POST'})
         assert(response.status >= 200 && response.status < 300, `SSE error cancel ${response.status}`)
         const data = dataObject(response)
+        error.cancelResponse = {
+            httpStatus: response.status,
+            cancelled: data.cancelled ?? null,
+            alreadyCancelled: data.alreadyCancelled ?? null,
+            alreadyTerminal: data.alreadyTerminal ?? null,
+            statusBeforeCancel: data.statusBeforeCancel ?? null
+        }
         if (data.alreadyTerminal === true && data.cancelled === false
             && ['DONE', 'FAILED'].includes(data.statusBeforeCancel)) {
+            const terminal = await readSseRaw(runId, null, (frame) => frame.type === 'done' || frame.type === 'error', false, scopeErrors)
+            error.terminalEvidence = frameEvidence(terminal.matched)
+            error.lastSseEvidence = error.terminalEvidence
+            error.realCode = terminalRealCode(terminal.matched)
+            if (runEvidence !== null) await captureRequiredPending(runId, 'afterCancel', error)
+            const realFailure = data.statusBeforeCancel === 'FAILED' || terminal.matched.type === 'error'
+                || error.realCode !== null
+            if (realFailure) {
+                const failure = copySettlementEvidence(new RealTerminalFailureError(
+                    `REAL_TERMINAL_FAILURE runId=${runId} realCode=${error.realCode ?? 'unknown'}`), error, runId)
+                failure.attachmentEvidencePath = runEvidence?.evidencePath ?? null
+                tripModelCircuit(failure, 'real-terminal-failed')
+                if (runEvidence !== null) await persistAttachmentEvidence(outDir, runEvidence, 'FINAL', failure)
+                activeRuns.delete(runId)
+                throw failure
+            }
+            assertHealthyTerminal(terminal.matched, {runId, cancelled: false})
+            if (runEvidence !== null) await persistAttachmentEvidence(outDir, runEvidence, 'FINAL', error)
             activeRuns.delete(runId)
             cleanupLog.push(`sse-error-cancel:${runId}=ok`)
-            if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
-                safelyRecoveredModelErrors.add(error)
-            }
+            safelyRecoveredModelErrors.add(error)
             return true
         }
         assert(data.cancelled === true, `SSE error cancel not accepted: HTTP ${response.status}`)
         const terminal = await readSseRaw(runId, lastSeq, (frame) => frame.type === 'done' || frame.type === 'error', false, scopeErrors)
         assertHealthyTerminal(terminal.matched, {runId, cancelled: true})
+        error.terminalEvidence = frameEvidence(terminal.matched)
+        error.lastSseEvidence = error.terminalEvidence
+        error.realCode = terminalRealCode(terminal.matched)
+        if (runEvidence !== null) {
+            await captureRequiredPending(runId, 'afterCancel', error)
+            await persistAttachmentEvidence(outDir, runEvidence, 'FINAL', error)
+        }
         activeRuns.delete(runId)
         cleanupLog.push(`sse-error-cancel:${runId}=ok`)
-        if (error !== null && (typeof error === 'object' || typeof error === 'function')) {
-            safelyRecoveredModelErrors.add(error)
-        }
+        safelyRecoveredModelErrors.add(error)
         return true
     } catch (cleanupError) {
+        if (cleanupError instanceof RealTerminalFailureError) throw cleanupError
         console.error('SSE error cleanup failed:', cleanupError)
+        await withholdAttachmentCleanup(runEvidence, runId, error, cleanupError)
         const detail = `sse-error-cancel:${runId}=${errorDetail(cleanupError)}`
         cleanupLog.push(detail)
         cleanupErrors.push(detail)
@@ -1060,7 +1278,7 @@ async function settleRunAfterSseError(runId, lastSeq, error, scopeErrors = coreC
 }
 
 async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scopeErrors = coreCleanupErrors,
-                          eofRetry = 0, drainToEof = false) {
+                          eofRetry = 0, drainToEof = false, runEvidence = null) {
     const started = Date.now()
     let reader = null
     let previousSeq = lastSeq ?? 0
@@ -1095,6 +1313,7 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
                 }
                 if (recoverOnError) trackCreatedTaskFrame(frame)
                 frames.push(frame)
+                if (runEvidence !== null) observeAttachmentFrame(runEvidence, runId, previousSeq, frame)
                 if (matched === null && predicate(frame)) matched = frame
                 recoverySeq = previousSeq
             }
@@ -1137,9 +1356,12 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
             && error.httpStatus === undefined) {
             error.httpStatus = httpStatus
         }
+        error.lastSseEvidence = frameEvidence(frames.at(-1))
         if (recoverOnError) {
-            tripModelCircuit(error, runId ? 'sse-failed' : 'sse-unknown')
-            await settleRunAfterSseError(runId, recoverySeq, error, scopeErrors)
+            const scriptTimeout = isScriptTimeout(error)
+            if (!scriptTimeout) tripModelCircuit(error, runId ? 'sse-failed' : 'sse-unknown')
+            const recovered = await settleRunAfterSseError(runId, recoverySeq, error, scopeErrors, runEvidence)
+            if (scriptTimeout) throw scriptTimeoutCancelError(error, runId, recoverySeq, 'MODEL_RESPONSE', recovered)
         }
         throw error
     } finally {
@@ -1149,13 +1371,13 @@ async function readSseRaw(runId, lastSeq, predicate, recoverOnError = true, scop
 }
 
 async function startChat(sessionId, message, context, predicate, awaitTerminal = false, recordCoverage = true,
-                         scopeErrors = coreCleanupErrors, params = null, allowPlainTextRetry = false) {
+                         scopeErrors = coreCleanupErrors, params = null, allowPlainTextRetry = false, runEvidence = null) {
     const started = Date.now()
     return modelCall(async () => {
         let chat
         try {
             chat = await readSseChat(sessionId, message, context, predicate, true, scopeErrors,
-                params, allowPlainTextRetry)
+                params, allowPlainTextRetry, runEvidence)
         } catch (error) {
             if (recordCoverage && !(allowPlainTextRetry && error instanceof PlainTextModelResponseError)) {
                 record('POST /api/ai/chat', {
@@ -1172,13 +1394,13 @@ async function startChat(sessionId, message, context, predicate, awaitTerminal =
             if (frame.type !== 'done' && frame.type !== 'error') return false
             assertHealthyTerminal(frame, {runId: chat.runId})
             return true
-        }, true, scopeErrors, 'model-terminal')
+        }, true, scopeErrors, 'model-terminal', false, true, runEvidence)
         return {...chat, terminal: terminal.matched, terminalLatencyMs: terminal.latencyMs}
     }, allowPlainTextRetry)
 }
 
 async function readSseChat(sessionId, message, context, predicate, recoverOnError = true,
-                           scopeErrors = coreCleanupErrors, params = null, allowPlainTextRetry = false) {
+                           scopeErrors = coreCleanupErrors, params = null, allowPlainTextRetry = false, runEvidence = null) {
     const started = Date.now()
     const body = {
         sessionId, message, context, clientRequestId: `${runPrefix}-${randomUUID()}`,
@@ -1214,6 +1436,7 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
             trackCreatedTaskFrame(frame)
             if (frame.type === 'done' || frame.type === 'error') assertHealthyTerminal(frame, {runId})
             frames.push(frame)
+            if (runEvidence !== null) observeAttachmentFrame(runEvidence, runId, previousSeq, frame)
             if (predicate(frame)) matched = frame
             recoverySeq = previousSeq
             if (allowPlainTextRetry && matched === null && frame.type === 'done' && frame.cancelled !== true
@@ -1238,11 +1461,14 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
         assert(matched !== null, `chat predicate not reached; frames=${frames.map((frame) => `${frame.type}:${frame.name ?? ''}`).join(',')}`)
         return {runId, frames, matched, lastSeq: previousSeq, latencyMs: Date.now() - started}
     } catch (error) {
+        error.lastSseEvidence = frameEvidence(frames.at(-1))
         if (recoverOnError) {
-            if (!allowPlainTextRetry || !(error instanceof PlainTextModelResponseError)) {
+            const scriptTimeout = isScriptTimeout(error)
+            if (!scriptTimeout && (!allowPlainTextRetry || !(error instanceof PlainTextModelResponseError))) {
                 tripModelCircuit(error, runId ? 'sse-failed' : 'sse-unknown')
             }
-            await settleRunAfterSseError(runId, recoverySeq, error, scopeErrors)
+            const recovered = await settleRunAfterSseError(runId, recoverySeq, error, scopeErrors, runEvidence)
+            if (scriptTimeout) throw scriptTimeoutCancelError(error, runId, recoverySeq, 'MODEL_RESPONSE', recovered)
         }
         throw error
     } finally {
@@ -1252,11 +1478,11 @@ async function readSseChat(sessionId, message, context, predicate, recoverOnErro
 }
 
 async function callSse(runId, lastSeq, predicate, recordResult = true, scopeErrors = coreCleanupErrors,
-                       stage = 'unspecified', drainToEof = false, recoverOnError = true) {
+                       stage = 'unspecified', drainToEof = false, recoverOnError = true, runEvidence = null) {
     const started = Date.now()
     try {
         const result = await readSseRaw(runId, lastSeq, predicate, recoverOnError, scopeErrors,
-            SSE_EOF_RETRY_ATTEMPTS, drainToEof)
+            SSE_EOF_RETRY_ATTEMPTS, drainToEof, runEvidence)
         if (recordResult) {
             record('GET /api/ai/events/{runId}', {
                 httpStatus: 200,
@@ -1386,6 +1612,11 @@ function taskIdFrom(frames) {
     return null
 }
 
+function attachmentCleanupWithheld({runId = null, sessionId = null}) {
+    return attachmentEvidenceAttempts.some((evidence) => !evidence.evidenceComplete
+        && ((runId !== null && evidence.runId === runId) || (sessionId !== null && evidence.sessionId === sessionId)))
+}
+
 async function cleanupOne(kind, id, fn, scopeErrors = coreCleanupErrors) {
     try {
         await fn()
@@ -1412,6 +1643,7 @@ function ensureLoadEntry(plan) {
         requested: 0,
         completed: 0,
         failed: 0,
+        scriptTimeoutCancelled: 0,
         skipped: 0,
         status: 'PENDING',
         latencyMs: null,
@@ -1462,6 +1694,7 @@ async function runLoadScenario(runner, plan, unit, overrides = {}) {
     entry.requested = 0
     entry.completed = 0
     entry.failed = 0
+    entry.scriptTimeoutCancelled = 0
     entry.latencyMs = summarizeLatencies([])
     entry.httpStatuses = {}
     entry.errors = []
@@ -1485,7 +1718,11 @@ async function runLoadScenario(runner, plan, unit, overrides = {}) {
                 ok: false,
                 status: error?.httpStatus ?? null,
                 latencyMs: null,
-                message: limitedMessage(errorDetail(error))
+                message: limitedMessage(errorDetail(error)),
+                classification: error?.classification ?? 'FAIL',
+                realCode: error?.realCode ?? null,
+                runId: error?.runId ?? null,
+                evidencePath: error?.attachmentEvidencePath ?? null
             }
         }
     })
@@ -1507,10 +1744,15 @@ async function runLoadScenario(runner, plan, unit, overrides = {}) {
         if (settled.status === 'rejected') {
             console.error(`API load attempt rejected for ${plan.key} #${index}:`, settled.reason)
             entry.failed += 1
+            if (settled.reason?.classification === 'SCRIPT_TIMEOUT_CANCEL') entry.scriptTimeoutCancelled += 1
             entry.errors.push({
                 index,
                 httpStatus: null,
-                message: limitedMessage(errorDetail(settled.reason))
+                message: limitedMessage(errorDetail(settled.reason)),
+                classification: settled.reason?.classification ?? 'FAIL',
+                realCode: settled.reason?.realCode ?? null,
+                runId: settled.reason?.runId ?? null,
+                evidencePath: settled.reason?.attachmentEvidencePath ?? null
             })
             return
         }
@@ -1524,7 +1766,16 @@ async function runLoadScenario(runner, plan, unit, overrides = {}) {
             if (attempt.latencyMs !== null) samples.push(attempt.latencyMs)
         } else {
             entry.failed += 1
-            entry.errors.push({index, httpStatus: attempt.status, message: attempt.message})
+            if (attempt.classification === 'SCRIPT_TIMEOUT_CANCEL') entry.scriptTimeoutCancelled += 1
+            entry.errors.push({
+                index,
+                httpStatus: attempt.status,
+                message: attempt.message,
+                classification: attempt.classification,
+                realCode: attempt.realCode,
+                runId: attempt.runId,
+                evidencePath: attempt.evidencePath
+            })
         }
     })
     entry.latencyMs = summarizeLatencies(samples)
@@ -1753,6 +2004,7 @@ async function runApiLoadStage({sessionId, runId, historyExpectation}) {
     loadBaselines.runs = new Set(activeRuns)
     const runner = createLoadRunner({concurrency: apiLoadConfig.concurrency})
     try {
+        if (redisClusterEnabled) await captureClusterCommandStats('before')
         const units = buildLoadUnits({sessionId, runId, historyExpectation})
         for (const plan of API_LOAD_PLAN) {
             const entry = ensureLoadEntry(plan)
@@ -1776,6 +2028,14 @@ async function runApiLoadStage({sessionId, runId, historyExpectation}) {
         apiLoad.fatalError = limitedMessage(errorDetail(error))
         apiLoad.notes.push('load stage aborted before every planned entry finished')
     } finally {
+        if (redisClusterEnabled && clusterCommandStats.before.status === 'PASS') {
+            try {
+                await captureClusterCommandStats('after')
+            } catch (error) {
+                apiLoad.fatalError = limitedMessage(errorDetail(error))
+                apiLoad.notes.push('Cluster after commandstats capture failed; cumulative counters cannot prove this run')
+            }
+        }
         apiLoad.maxObservedApiInFlight = runner.snapshot().maxObserved
     }
 }
@@ -1794,15 +2054,60 @@ async function knowledgeWorkflow() {
 }
 
 async function attachmentWorkflow(options = {}) {
+    let currentEvidence = null
+    const beginAttempt = (sessionId) => {
+        currentEvidence = createAttachmentEvidence(sessionId, options.recordCoverage === false ? 'load' : 'core')
+        attachmentEvidenceAttempts.push(currentEvidence)
+        return currentEvidence
+    }
+    try {
+        await performAttachmentWorkflow(options, beginAttempt)
+        if (currentEvidence !== null && !currentEvidence.evidenceComplete) {
+            currentEvidence.status = 'PASS'
+            currentEvidence.classification = 'PASS'
+            await persistAttachmentEvidence(outDir, currentEvidence, 'FINAL')
+        }
+    } catch (error) {
+        let finalError = error
+        if (currentEvidence !== null) {
+            if (isScriptTimeout(error) && !(error instanceof ScriptTimeoutCancelError)) {
+                let recovered = false
+                if (!currentEvidence.cleanupWithheld) {
+                    recovered = await settleRunAfterSseError(currentEvidence.runId, currentEvidence.lastSeq, error,
+                        options.recordCoverage === false ? apiLoad.cleanupErrors : coreCleanupErrors, currentEvidence)
+                }
+                finalError = scriptTimeoutCancelError(error, currentEvidence.runId, currentEvidence.lastSeq,
+                    'HITL_RECEIPT', recovered)
+            } else if (!(error instanceof ScriptTimeoutCancelError) && !currentEvidence.evidenceComplete
+                && !currentEvidence.cleanupWithheld) {
+                error.cancellationSource = 'ATTACHMENT_FAILURE_CLEANUP'
+                await settleRunAfterSseError(currentEvidence.runId, currentEvidence.lastSeq, error,
+                    options.recordCoverage === false ? apiLoad.cleanupErrors : coreCleanupErrors, currentEvidence)
+            }
+            finalError.runId = finalError.runId ?? currentEvidence.runId
+            finalError.attachmentEvidencePath = currentEvidence.evidencePath
+            if (!currentEvidence.evidenceComplete && !currentEvidence.cleanupWithheld) {
+                await persistAttachmentEvidence(outDir, currentEvidence, 'FINAL', finalError)
+                finalError.attachmentEvidencePath = currentEvidence.evidencePath
+            }
+        }
+        throw finalError
+    }
+}
+
+async function performAttachmentWorkflow(options, beginAttempt) {
     const {recordCoverage = true, onSession = null, onUpload = null} = options
     const cleanupScopeErrors = recordCoverage ? coreCleanupErrors : apiLoad.cleanupErrors
     let attachmentSession = null
     let attachmentChat = null
+    let runEvidence = null
     for (let attempt = 0; attempt < 2; attempt += 1) {
         const firstAttempt = attempt === 0
         attachmentSession = `${runPrefix}-attachment-${randomUUID()}`
         createdSessions.add(attachmentSession)
         onSession?.(attachmentSession)
+        runEvidence = beginAttempt(attachmentSession)
+        recordAttachmentPhase(runEvidence, 'CHAT_STARTED')
         try {
             attachmentChat = await startChat(attachmentSession,
                 '请调用 generative_form 工具，不要只回复文字，也不要调用其它工具。工具入参必须且只能是：'
@@ -1816,13 +2121,19 @@ async function attachmentWorkflow(options = {}) {
                 recordCoverage,
                 cleanupScopeErrors,
                 {temperature: 0},
-                firstAttempt)
+                firstAttempt,
+                runEvidence)
         } catch (error) {
             if (!firstAttempt || !(error instanceof PlainTextModelResponseError)) throw error
             plainTextRetryCount += 1
         }
         if (attachmentChat !== null) break
     }
+    recordAttachmentPhase(runEvidence, 'HITL_RECEIPT_PENDING', {
+        runId: attachmentChat.runId,
+        lastSeq: attachmentChat.lastSeq,
+        frame: attachmentChat.matched
+    })
     const form = formOf(attachmentChat.matched)
     const attachmentField = form.fields.find((field) => field.type === 'attachment')
     assert(attachmentField?.key, 'attachment field key missing')
@@ -1840,6 +2151,7 @@ async function attachmentWorkflow(options = {}) {
     formData.append('sessionId', attachmentSession)
     formData.append('fieldKey', attachmentField.key)
     let uploaded
+    recordAttachmentPhase(runEvidence, 'UPLOADING_ATTACHMENT')
     try {
         uploaded = await call('POST /api/ai/form/attachments', '/api/ai/form/attachments', {
             method: 'POST',
@@ -1854,28 +2166,32 @@ async function attachmentWorkflow(options = {}) {
         onUpload?.({ok: false, status: error?.httpStatus ?? null, latencyMs: null})
         throw error
     }
+    recordAttachmentPhase(runEvidence, 'ATTACHMENT_UPLOADED')
     onUpload?.({ok: true, status: uploaded.status, latencyMs: uploaded.latencyMs})
     const fileId = dataObject(uploaded).fileId
+    recordAttachmentPhase(runEvidence, 'SUBMITTING_HITL_RECEIPT')
+    await call('POST /api/ai/frontend-tool-result', '/api/ai/frontend-tool-result', {
+        method: 'POST',
+        json: true,
+        body: JSON.stringify({
+            runId: attachmentChat.runId,
+            toolCallId: attachmentChat.matched.toolCallId,
+            result: JSON.stringify({[attachmentField.key]: fileId}),
+            source: 'http-post', outcome: 'ok'
+        })
+    }, async (response) => {
+        ok(response)
+        assert(dataObject(response).accepted === true, 'attachment form result not accepted')
+        return 'real attachment form result accepted'
+    }, recordCoverage)
+    recordAttachmentPhase(runEvidence, 'HITL_RECEIPT_ACCEPTED')
     const {terminal} = await modelCall(async () => {
-        const submitted = await call('POST /api/ai/frontend-tool-result', '/api/ai/frontend-tool-result', {
-            method: 'POST',
-            json: true,
-            body: JSON.stringify({
-                runId: attachmentChat.runId,
-                toolCallId: attachmentChat.matched.toolCallId,
-                result: JSON.stringify({[attachmentField.key]: fileId}),
-                source: 'http-post', outcome: 'ok'
-            })
-        }, async (response) => {
-            ok(response)
-            assert(dataObject(response).accepted === true, 'attachment form result not accepted')
-            return 'real attachment form result accepted'
-        }, recordCoverage)
+        recordAttachmentPhase(runEvidence, 'WAITING_FOR_MODEL_TERMINAL')
         const terminal = await callSse(attachmentChat.runId, attachmentChat.lastSeq, (frame) => {
             if (frame.type !== 'done' && frame.type !== 'error') return false
             assertHealthyTerminal(frame, {runId: attachmentChat.runId})
             return true
-        }, recordCoverage, cleanupScopeErrors, 'attachment-terminal')
+        }, recordCoverage, cleanupScopeErrors, 'attachment-terminal', false, true, runEvidence)
         if (recordCoverage) {
             record('POST /api/ai/chat', {
                 httpStatus: 200,
@@ -1883,8 +2199,9 @@ async function attachmentWorkflow(options = {}) {
                 assertions: ['attachment scenario done terminal confirmed']
             })
         }
-        return {submitted, terminal}
-    })
+        return {terminal}
+    }, false, runEvidence, cleanupScopeErrors)
+    recordAttachmentPhase(runEvidence, 'MODEL_TERMINAL_OBSERVED', {frame: terminal.matched})
     activeRuns.delete(attachmentChat.runId)
 }
 
@@ -1892,7 +2209,7 @@ async function independentModelWorker(workflow) {
     try {
         return await workflow()
     } catch (error) {
-        tripModelCircuit(error, 'model-worker')
+        if (!(error instanceof ScriptTimeoutCancelError)) tripModelCircuit(error, 'model-worker')
         throw error
     }
 }
@@ -1937,6 +2254,24 @@ let feedbackCreated = false
 let redisExpectation = null
 
 async function main() {
+    if (process.env.EVAL_ATTACHMENT_PROBE === 'true') {
+        const probeCount = Number.parseInt(process.env.EVAL_ATTACHMENT_PROBE_COUNT ?? '1', 10)
+        if (!Number.isInteger(probeCount) || probeCount < 1 || probeCount > 2) {
+            throw new CoverageError('EVAL_ATTACHMENT_PROBE_COUNT must be 1 or 2')
+        }
+        if (process.env.EVAL_ATTACHMENT_PROBE_LOAD === 'true') {
+            const plan = API_LOAD_PLAN.find((candidate) => candidate.key === 'POST /api/ai/form/attachments')
+            const runner = createLoadRunner({concurrency: apiLoadConfig.concurrency})
+            await runLoadScenario(runner, plan, () => attachmentWorkflow({recordCoverage: false}), {configured: probeCount})
+            return
+        }
+        const results = await Promise.allSettled(Array.from({length: probeCount}, () =>
+            independentModelWorker(() => attachmentWorkflow({recordCoverage: false}))))
+        if (modelFailure !== null) throw modelFailure.error
+        const failed = results.find((result) => result.status === 'rejected')
+        if (failed) throw failed.reason
+        return
+    }
     await call('GET /api/ai/health', '/api/ai/health', {}, async (response) => {
         const data = dataObject(response)
         assert([200, 503].includes(response.status), `health unexpected ${response.status}`)
@@ -2249,6 +2584,15 @@ try {
             if (!loadBaselines.runs.has(runId)) loadActiveRuns.add(runId)
         }
     }
+    for (const evidence of attachmentEvidenceAttempts) {
+        if (evidence.evidenceComplete) continue
+        const detail = `attachment-evidence-cleanup-withheld:${evidence.runId ?? evidence.sessionId}:`
+            + `${evidence.persistError ?? 'final evidence was not written'}`
+        cleanupLog.push(detail)
+        cleanupErrors.push(detail)
+        const scopeErrors = evidence.scope === 'load' ? apiLoad.cleanupErrors : coreCleanupErrors
+        scopeErrors.push(detail)
+    }
     if (feedbackCreated) {
         await cleanupOne('feedback-rating-zero', feedbackMessageId, async () => {
             const response = await request('/api/ai/feedback', {
@@ -2272,6 +2616,7 @@ try {
         }, apiLoad.cleanupErrors)
     }
     for (const runId of activeRuns) {
+        if (attachmentCleanupWithheld({runId})) continue
         await cleanupOne(`cancel-run:${runId}`, runId, async () => {
             const response = await request(`/api/ai/cancel/${runId}`, {method: 'POST'})
             assert(response.status >= 200 && response.status < 300, `cancel cleanup ${response.status}`)
@@ -2284,6 +2629,7 @@ try {
         }, loadCreatedTasks.has(taskId) ? apiLoad.cleanupErrors : coreCleanupErrors)
     }
     for (const sessionId of createdSessions) {
+        if (attachmentCleanupWithheld({sessionId})) continue
         await cleanupOne(`delete-session:${sessionId}`, sessionId, async () => {
             const response = await request(`/api/ai/session/${sessionId}`, {method: 'DELETE'})
             assert(response.status >= 200 && response.status < 300, `session cleanup ${response.status}`)
@@ -2315,9 +2661,11 @@ try {
                 && entry.failed === 0
         })
         apiLoad.complete = everyEntryPassed && apiLoad.fatalError === null && apiLoad.cleanupErrors.length === 0
+            && (!redisClusterEnabled || clusterCommandStats.status === 'PASS')
         apiLoad.status = apiLoad.complete ? 'PASS' : 'FAIL'
     }
     apiLoad.skipped = loadEntries.reduce((total, entry) => total + (entry.skipped ?? 0), 0)
+    apiLoad.scriptTimeoutCancelled = loadEntries.reduce((total, entry) => total + entry.scriptTimeoutCancelled, 0)
     apiLoad.cleanup = {
         done: apiLoad.cleanupErrors.length === 0,
         detail: !apiLoad.enabled || !apiLoad.ran
@@ -2327,15 +2675,17 @@ try {
                 : apiLoad.cleanupErrors.join('; ')
     }
     const missing = Object.values(coverage).filter((entry) => !entry.covered || entry.assertions.length === 0)
+    const attachmentEvidence = attachmentEvidenceReport(attachmentEvidenceAttempts)
     const loadComplete = apiLoad.enabled ? apiLoad.complete === true : true
     const httpComplete = missing.length === 0 && cleanupErrors.length === 0 && fatalError === null
-        && modelFailure === null && loadComplete
+        && modelFailure === null && loadComplete && attachmentEvidence.complete
     const complete = httpComplete && redisEvidence.status === 'PASS'
     const verificationVerdict = complete
         ? 'PASS'
         : !httpComplete || redisEvidence.status === 'FAIL' ? 'FAIL' : 'NOT_RUN'
     const notRun = [
         ...missing.map((entry) => `${entry.method} ${entry.path}`),
+        ...attachmentEvidence.missing.map((entry) => `ATTACHMENT_EVIDENCE ${entry.runId ?? entry.sessionId} ${entry.status}`),
         ...(redisEvidence.status === 'NOT_RUN' ? ['READ_ONLY Redis pre/post verification'] : [])
     ]
     for (const entry of Object.values(coverage)) {
@@ -2372,6 +2722,7 @@ try {
         },
         endpoints: coverage,
         load: apiLoad,
+        attachmentEvidence,
         cleanup: cleanupLog,
         cleanupErrors,
         coreCleanupErrors,

@@ -162,3 +162,34 @@ export function summarizeLatencies(values) {
     p95: nearestRank(95)
   }
 }
+
+function parseRedisCommandStats(info) {
+  if (info === null || info === undefined) throw new Error('Redis commandstats snapshot missing')
+  const commands = new Map()
+  for (const line of String(info).split(/\r?\n/)) {
+    if (!line.startsWith('cmdstat_')) continue
+    const match = /^cmdstat_([^:]+):calls=(\d+)(?:,|$)/.exec(line)
+    if (!match) throw new Error('invalid Redis commandstats row')
+    const calls = Number(match[2])
+    if (!Number.isSafeInteger(calls) || commands.has(match[1])) throw new Error('invalid Redis commandstats counter')
+    commands.set(match[1], calls)
+  }
+  return commands
+}
+
+export function diffRedisCommandStats(beforeInfo, afterInfo) {
+  const before = parseRedisCommandStats(beforeInfo)
+  const after = parseRedisCommandStats(afterInfo)
+  for (const name of before.keys()) {
+    if (!after.has(name)) throw new Error('Redis commandstats reset or incomplete after snapshot')
+  }
+  const commands = {}
+  let totalCalls = 0
+  for (const name of [...after.keys()].sort()) {
+    const delta = after.get(name) - (before.get(name) ?? 0)
+    if (!Number.isSafeInteger(delta) || delta < 0) throw new Error('Redis commandstats counter moved backwards')
+    commands[name] = delta
+    totalCalls += delta
+  }
+  return {commands, totalCalls}
+}
