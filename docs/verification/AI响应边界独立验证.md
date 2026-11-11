@@ -2,7 +2,7 @@
 
 > 载体：`scripts/ci/stub-upstream.mjs` + `scripts/verification/ai-response-boundary-api.mjs`。
 > 定位：压测/独立脚本，使用公开 HTTP/SSE 与真实上游桩 chunk；不是普通单元测试，不修改或伪造应用内帧。
-> 当前状态：2026-11-11 已精确复现并修复 correction prefix 被后续工具批 settle 回写导致的 `AI_TRANSCRIPT_INCOMPLETE`。原始持久 history 与模型 history 共享同一预算决策，且全部双视图转换和映射校验均在任何预算提交前完成；无 usage/usage delta、真实 L1、HardTrim→wrap-up、L1 后 trim 失配原子性均完成独立进程 RED→GREEN。最终 `correction-prefix-transcript` 与普通 `late-reasoning` 均为 PASS。历史施工记录和其他场景边界见第 7、8 节。
+> 当前状态：2026-11-11 创建入口、correction、挂起续跑与 transcript 所有权返修已完成。创建前错误表单被结构拒绝且无用户帧；真实 messageJson 保持工具配对；挂起直接保存真实 SSE 全文，终态按 runId + text 段 seq 对账并真实删除被接管旧条目。最终主故障、四请求 correction、完整批准宿主链和 multi-park 均为 PASS。证据与未覆盖边界见第 9 节，历史施工记录见第 7、8 节。
 
 ## 1. 请求级公开标记
 
@@ -298,3 +298,60 @@ RED 证据目录：
 - 最终生产 diff：`SpToolCallingManager.java` **+117/-34**、`ResilientChatService.java` **+1/-1**，合计 **118 行新增、35 行删除**。此次新增仅为 `forValidation`、`commit` 开关及提交前完整 passes。
 
 **NOT_RUN**：真实模型、真实浏览器、多实例/Cluster、直接 Redis/DB、批量普通测试、其他 CASE、审批通过 create_task 的完整宿主链、overflow shrink 双视图专项触发、其他映射失配组合及外部 Redis 写入失败矩阵。此次证明的是映射失配发生前不提交预算状态，不声称所有基础设施失败都能事务回滚。
+
+## 9. 2026-11-11：创建入口、系统拒绝与 correction prefix 返修
+
+### 9.1 范围与最终生产语义
+
+本节覆盖独立上游桩 + 公开 HTTP/SSE + 当前真实后端，不声称真实模型或真实浏览器通过。
+
+- `GenerativeFormGuard` 在 `tasks/export/import` 且未绑定 `taskId` 时，按 `purpose` 与明确结构拒绝创建前配置收集：`SELECT_DEFINITIONS`、`SET_CONDITIONS`，以及 `GENERAL_CLARIFY` 的 `defCodes`、`conditions` 或 `optionsFrom.sourceId=definitions`。不推断用户文本、标题、label 或供应商。
+- 系统拒绝继续使用 `FORM_SLOTS_ALREADY_KNOWN` 与 `create_task` HITL。`SpToolCallingManager` 和 `ResilientChatService` 仅在公开 transcript 投影过滤无用户帧的系统拒绝，真实 `messageJson` 不删除、合并或移动 assistant(tool_calls)，也不产生孤儿 ToolResponse。
+- 挂起时由 `SseChatEmitter.transcriptFullText()` 直接汇总真实 SSE 正文帧并传给 `RunStore`，不再按 correction 触发时的旧 pendingSegment 长度切全文；兼容截取路径必须先验证 current segment 以 pending segment 开头。新 correction 清除旧 parked/pending 值，空 prefix + 非空 parkedFullText 可恢复，非 correction 续跑从归档全文 seed accumulator。
+- transcript 从真实 SSE 段恢复正文/reasoning，保留 entryId 和工具配对；认领必须读完整同一 entryId 的连续段。已知 correction 才允许正文组认领和唯一尾段投影，其他 unresolved plain 以 `AI_TRANSCRIPT_INCOMPLETE` 终止。终态按 `runId + kind=text 段 seq` 对账：tool assistant 接管共享段，当前 plain 不再 append；旧持久 plain 通过 `ConversationTranscriptStore.remove` 真实删除，不能只过滤展示或按 seq 去重。`AiTools.java` 仅同步说明。
+
+最终生产 diff 为 10 个 Java 文件，合计 **696 行新增、58 行删除**。
+
+### 9.2 已观察的 RED
+
+- 创建入口单测在旧实现分别失败；公开首故障旧证据为 `<仓外证据根目录>/red-api/ai-response-boundary/create-entry-form/2026-11-11T07-57-41-994Z-60bce91d-be09-43b6-b7fc-75e06b4f8ff4/`，创建前错误表单进入真实前端请求。
+- `SuccessSnapshotToolPairingTest` 在危险 prefix 改写下得到 5 条消息而非 6 条：GF assistant 被删但 ToolResponse 保留，直接证明孤儿回执。`CorrectionPrefixResumeTest` 在 `prefix=P+S、parked=S` 时得到 `P+S+S`。
+- `SystemRejectedTranscriptTest` 先后证明 create 条目只剩后缀、重复 correction 片段、终段被两个条目复用，以及不同 entryId 的内容被错误拼接认领。
+- 公开返修过程中实际出现过 history 69 字（重复 correction）、`finalText=541`（丢 49 字 suffix）、history 982 字（重复终段）和 739 字（独立 prefix 重复）。这些运行均未记为 PASS。
+- 后续五个反例均有独立 RED：`emptyPrefixStillUsesParkedFullText` 期望完整正文却得到空串；多段挂起把“第一段”错取成“触一段”；新 correction 继承旧 parkedFullText；未知尾段被错误复用；同 entry 的“前”在完整“前后”未读完时被误认领。所有权写点还实际追加了重复 plain，且没有调用旧持久条目的 remove。
+- 公开批准链 RED 为 `<仓外证据根目录>/review14-approved-red2/ai-response-boundary/create-entry-form/2026-11-11T12-58-02-865Z-b2055bbf-9632-43cf-954d-0590926c59d7/`：期望 31 字，实际只有末段 13 字。返修中还先隔离出非 correction 续跑缺全文 seed（恢复 31 但 transcript 仍 incomplete）与 tool 已认领段缺少只读 seq 投影两个独立问题，均保留失败证据，未放宽断言。
+
+标准 Maven 全量 testCompile 仍有基线已有的 11 个 `AiRateLimiter/ClientIpResolver` 缺失引用错误，未修无关测试。受影响类使用定向 `javac`，各场景在独立 Surefire 进程执行。
+
+### 9.3 当前 GREEN
+
+以下均为 `status=PASS`、`failedAssertions=0`：
+
+| 场景 | 证据目录 |
+| --- | --- |
+| 最终主故障 export + prefix | `<仓外证据根目录>/review2-evidence/ai-response-boundary/create-entry-form/2026-11-11T15-07-33-063Z-0226f451-f14c-4e29-9a1a-30c8502de72c/` |
+| 最终 correction-prefix 四请求 | `<仓外证据根目录>/review2-evidence/ai-response-boundary/correction-prefix-transcript/2026-11-11T15-08-01-220Z-1b76fda0-b372-4af8-b21d-8d28a68a4486/` |
+| 最终批准宿主链 | `<仓外证据根目录>/review2-evidence/ai-response-boundary/create-entry-form/2026-11-11T15-08-28-885Z-6acb1d26-f88b-4e72-8795-ff8b73a05fa3/` |
+| 最终 multi-park | `<仓外证据根目录>/review2-evidence/ai-response-boundary/create-entry-form/2026-11-11T15-08-58-792Z-1dd1bf3e-e957-4002-947c-9e023feaad25/` |
+
+主故障为 4 次请求、零创建前表单帧、一次 create_task 拒绝、业务零副作用，prefix 在 SSE/finalText/history 各一次。correction 为 149 字 prefix → create_task(149+49) → list_config_defs → 392 字终答；原始工具段 198 字、下一跳规范化输入 49 字、全文 590 字，工具调用与响应配对。
+
+独立 Maven Surefire 进程逐类复跑均为 `BUILD SUCCESS`：`CorrectionPrefixResumeTest` 7/7、`SystemRejectedTranscriptTest` 7/7、`SuccessSnapshotToolPairingTest` 1/1、`GenerativeFormGuardSlotsTest` 15/15、`GenerativeFormCreateEntryGuardTest` 7/7；`TranscriptWritePointsTest` 的两个所有权单点合计 2/2。成功快照 6 条消息、GF/create 两组 toolCall/ToolResponse 完整、reasoning/entryId 不变；P+S/parked=S 不重复；0/1/2 个普通工具 assistant 不被 prepend；独立正文和跨 entryId 内容不被误删；当前重复 plain 被排除，旧持久 ID 在 append 前真实 remove。独立复审新增单点也分别通过：HostForm 第二挂起 fullText 1/1、未知尾段 1/1、超过 500 条对账 1/1、混合段保留 1/1，以及真实 Memurai 的同 fence/旧 fence/重复 remove 与新 epoch 3/3。
+
+### 9.4 批准链与下一次模型请求
+
+最终批准链恰有 5 次上游请求：错误 GF、create_task、list_config_defs、文本回退、唯一终答。第四次实际披露面不含 `get_workspace_state`，因此桩按真实披露回退文本，没有强迫未披露调用。
+
+- 公开 `create_task` 与 `start_export` 各批准一次且被接受；宿主导航、CURRENCY 选择、两次步骤推进和空条件均真实回答。
+- 业务基线差集恰好 1 个 taskId、1 个 jobId，公开轮询 job 为 `COMPLETED`；清理后业务基线恢复。
+- 第五请求含 10 个 assistant toolCallId 与对应 10 个 tool response id，顺序一致，证明下一次模型请求可用且无孤儿回执。
+- SSE、finalText、history 均为完整 31 字；旧 plain 已被真实 remove，没有两个 entryId 持有同一 text 段。运行日志 `unexpected=[]`。
+- `multi-park` 复用同一批准链和披露回退，共 6 次上游请求：非空 correction + 创建段在首次 confirm 前为 28 字，普通 `list_config_defs` 工具批及第二次 HostForm confirm 前累计 56 字，最终 SSE/finalText/history 均为 69 字。下一模型请求保留规范化 create 正文和后续全部正文，toolCall/ToolResponse 配对，无重复 entryId，也没有两个 entryId 持有同一 text 段。
+
+### 9.5 格式化、构建与未覆盖边界
+
+- 最终生产 Java 均执行 IDEA Reformat；未执行 Inspect Code。
+- `mvn -Dmaven.test.skip=true compile` 与 `mvn -Dmaven.test.skip=true package` 均为 **BUILD SUCCESS**。
+- 两个 `.mjs` 的 `node --check` 和 `git diff --check` 通过。隔离后端、桩与 Memurai 已停止。
+- **真实 DeepSeek/真实模型、真实浏览器、直接 Redis/DB、多实例/Cluster、完整 C-130 门槛、全量普通测试：NOT_RUN。** 独立桩结果不得外推为这些环境通过。
+- 未提交，未更新 ledger。

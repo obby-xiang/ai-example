@@ -54,6 +54,44 @@ public final class CorrectionPrefixes {
         }
     }
 
+    static final String PARKED_FULL_TEXT_KEY = "correctionParkedFullText";
+
+    static final String PENDING_SEGMENT_KEY = "correctionPendingSegment";
+
+    public static void recordParkedFullText(RunSnapshot snapshot, String fullText) {
+        try {
+            if (snapshot == null) {
+                return;
+            }
+            AiContext current = AiContext.fromMap(snapshot.getContext());
+            Map<String, Object> extra = current.getExtra() == null ? Map.of() : current.getExtra();
+            if (!extra.containsKey(CREATE_TASK_CORRECTION_PREFIX_KEY)
+                    && !extra.containsKey(EXPORT_CORRECTION_PREFIX_KEY)) {
+                return;
+            }
+            Map<String, Object> updated = new LinkedHashMap<>(extra);
+            if (StringUtils.isNotEmpty(fullText)) {
+                updated.put(PARKED_FULL_TEXT_KEY, fullText);
+            }
+            snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
+                    current.getTaskId(), current.getTaskStatus(), updated).toMap());
+        } catch (RuntimeException ex) {
+            throw normalizationFailure(ex);
+        }
+    }
+
+    public static String parkedFullText(RunSnapshot snapshot) {
+        try {
+            if (snapshot == null) {
+                return "";
+            }
+            Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
+            return extra == null ? "" : ObjectUtils.toString(extra.get(PARKED_FULL_TEXT_KEY), "");
+        } catch (RuntimeException ex) {
+            throw normalizationFailure(ex);
+        }
+    }
+
     /** 模型输入专用：当前 run 的 correctionPrefix 恰好一份；快照、原 history 与 UI 前缀均不改写。 */
     public static List<Message> historyWithSingleCorrectionPrefix(List<Message> history, String prefix) {
         try {

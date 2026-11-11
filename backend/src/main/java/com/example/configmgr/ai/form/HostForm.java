@@ -136,7 +136,7 @@ abstract class HostForm {
      *
      * <p><b>正文/推理元数据沿用当前快照</b>：{@code saveSuspended} 会把 {@code assistantContent} 与
      * {@code assistantMetadata} 一起覆盖写 —— 这里传 {@code ""}/{@code null} 等于抹掉模型刚产出的那一轮。
-     * 挂起只该换"谁在等"，因此先读快照再原样带上（6 参重载）。
+     * 挂起只该换"谁在等"，因此先读快照再原样带上，并用当前 emitter 的完整正文更新 parked fullText。
      *
      * @return {@code true} = 已挂起：调用方本拍<b>不得</b>再驱动模型（这一轮在等人填表）
      */
@@ -224,7 +224,8 @@ abstract class HostForm {
             // 合成内部指令（尤其 condition handoff 的一次性 USER）只属于当前请求视图，
             // 不得随宿主表单挂起进入 messageJson/chat memory。
             List<Message> persistedHistory = SyntheticMessages.withoutCorrectionInstruction(history);
-            this.store.saveSuspended(runId, content, pendings, persistedHistory, this.codec, metadata);
+            String fullText = this.registry.of(runId).transcriptFullText();
+            this.store.saveSuspended(runId, content, fullText, pendings, persistedHistory, this.codec, metadata);
             return true;
         } catch (RuntimeException ex) {
             // 写挂起态失败：<b>不得留下一条看不见的待决条目</b>（saveSuspended 先写条目再写快照，

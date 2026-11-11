@@ -1165,8 +1165,8 @@ public class SpToolCallingManager implements ToolCallingManager {
     private void persistSuspendedBatch(ToolBatchState state, List<PendingToolCall> pendings) {
         persistToolSteps(state.runId, state.stepsUsed);
         List<Message> suspendedHistory = SyntheticMessages.withoutCorrectionInstruction(state.prompt.getInstructions());
-        this.store.saveSuspended(state.runId, state.assistant.getText(), pendings, suspendedHistory, this.codec,
-                state.assistant.getMetadata());
+        this.store.saveSuspended(state.runId, state.assistant.getText(), state.out.transcriptFullText(), pendings,
+                suspendedHistory, this.codec, state.assistant.getMetadata());
         if (isSuspendedHopPersisted(state.runId, state.assistant)) {
             commitTurnText(state.prompt);
         }
@@ -4107,7 +4107,11 @@ public class SpToolCallingManager implements ToolCallingManager {
             if (!read.isComplete()) {
                 return;
             }
-            List<PendingToolCall> settledBatch = read.entries();
+            List<PendingToolCall> settledBatch = read.entries().stream()
+                    .filter(pending -> !isSystemRejectedWithoutUserFrames(pending)).toList();
+            if (settledBatch.isEmpty()) {
+                return;
+            }
             // 本批一张都还没结算（park 在首张卡就穿出）⇒ 挂起写点那份就是真值，不重复追加同内容。
             boolean anySettled = settledBatch.stream()
                     .anyMatch(pending -> !PendingToolCall.PENDING.equals(pending.getStatus()));

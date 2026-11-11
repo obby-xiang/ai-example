@@ -5,6 +5,7 @@ import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
+import com.example.configmgr.ai.history.TranscriptEntries;
 import com.example.configmgr.ai.history.TranscriptEntry;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
@@ -23,11 +24,13 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -84,7 +87,7 @@ class TranscriptWritePointsTest {
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), anyLong());
 		assertThat(entries.getValue()).singleElement()
 			.extracting(TranscriptEntry::entryId, TranscriptEntry::kind, TranscriptEntry::text)
 			.containsExactly(RUN_ID + ":user", "user", "原话");
@@ -95,7 +98,7 @@ class TranscriptWritePointsTest {
 		ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptUser", RUN_ID, SESSION_ID, "原话", 1000L,
 				List.of(new UserMessage("原话")));
 
-		verify(this.transcript, never()).append(anyString(), anyLong(), anyLong(), any());
+		verify(this.transcript, never()).append(anyString(), anyLong(), anyLong(), any(), anyLong());
 	}
 
 	@Test
@@ -108,7 +111,7 @@ class TranscriptWritePointsTest {
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), anyLong());
 		assertThat(entries.getValue()).extracting(TranscriptEntry::kind)
 			.containsExactly("user", "assistant");
 		assertThat(entries.getValue().get(0).entryId()).isEqualTo(RUN_ID + ":user");
@@ -127,7 +130,7 @@ class TranscriptWritePointsTest {
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), anyLong());
 		assertThat(entries.getValue()).extracting(TranscriptEntry::text).containsExactly("原话", "半截");
 	}
 
@@ -141,7 +144,7 @@ class TranscriptWritePointsTest {
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), anyLong());
 		assertThat(entries.getValue()).extracting(TranscriptEntry::kind, TranscriptEntry::text)
 			.containsExactly(org.assertj.core.groups.Tuple.tuple("user", "原话"));
 	}
@@ -156,8 +159,94 @@ class TranscriptWritePointsTest {
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), anyLong());
 		assertThat(entries.getValue()).extracting(TranscriptEntry::text).containsExactly("原话");
+	}
+
+	@Test
+	void terminalWriteKeepsOnlyTheToolOwnerForASharedTextSegment() {
+		TranscriptEntry plain = assistantWithTextSegment(RUN_ID, "同一正文", null, 27L);
+		TranscriptEntry tool = assistantWithTextSegment(RUN_ID, "同一正文", "create-1", 27L);
+		when(this.transcript.readPage(SESSION_ID, TENANT, USER, null, 500))
+			.thenReturn(ConversationTranscriptStore.ReadPage.EMPTY);
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+
+		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
+				List.of(plain, tool), null, false, false);
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), eq(0L));
+		assertThat(entries.getValue()).extracting(TranscriptEntry::entryId).containsExactly(tool.entryId());
+	}
+
+	@Test
+	void terminalWriteRemovesOnlyTheSupersededPersistedPlainEntryBeforeAppending() {
+		TranscriptEntry oldPlain = assistantWithTextSegment(RUN_ID, "同一正文", null, 27L);
+		TranscriptEntry tool = assistantWithTextSegment(RUN_ID, "同一正文", "create-1", 27L);
+		when(this.transcript.readPage(SESSION_ID, TENANT, USER, null, 500)).thenReturn(
+				new ConversationTranscriptStore.ReadPage(List.of(oldPlain, tool), 2L, 1L, null, false, false));
+		when(this.transcript.remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L)).thenReturn(true);
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+
+		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
+				List.of(tool), null, false, false);
+
+		org.mockito.InOrder order = org.mockito.Mockito.inOrder(this.transcript);
+		order.verify(this.transcript).remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L);
+		order.verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L));
+	}
+
+	@Test
+	void terminalWriteFindsSupersededPlainAfterTheFirstFiveHundredEntries() {
+		TranscriptEntry oldPlain = assistantWithTextSegment(RUN_ID, "同一正文", null, 27L);
+		TranscriptEntry tool = assistantWithTextSegment(RUN_ID, "同一正文", "create-1", 27L);
+		List<TranscriptEntry> firstPage = new ArrayList<>();
+		for (int i = 0; i < 500; i++) {
+			firstPage.add(TranscriptEntries.user("run-old-" + i, i, i, "旧问题" + i));
+		}
+		when(this.transcript.readPage(SESSION_ID, TENANT, USER, null, 500)).thenReturn(
+				new ConversationTranscriptStore.ReadPage(firstPage, 501L, 1L, "500", true, false));
+		when(this.transcript.readPage(SESSION_ID, TENANT, USER, 500L, 500)).thenReturn(
+				new ConversationTranscriptStore.ReadPage(List.of(oldPlain, tool), 501L, 2L, null, false, false));
+		when(this.transcript.remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L)).thenReturn(true);
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+
+		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
+				List.of(tool), null, false, false);
+
+		verify(this.transcript).remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L);
+	}
+
+	@Test
+	void terminalWriteKeepsPlainWithSegmentsNotOwnedByTheTool() {
+		TranscriptEntry plain = assistantWithTextSegment(RUN_ID, "共享", null, 27L)
+			.withContent("共享独立", "独立推理")
+			.withSegments(List.of(
+					new TranscriptEntry.SegmentView("text", "共享", null, 27L),
+					new TranscriptEntry.SegmentView("text", "独立", null, 28L),
+					new TranscriptEntry.SegmentView("reasoning", "独立推理", null, 29L)));
+		TranscriptEntry tool = assistantWithTextSegment(RUN_ID, "共享", "create-1", 27L);
+		when(this.transcript.readPage(SESSION_ID, TENANT, USER, null, 500)).thenReturn(
+				new ConversationTranscriptStore.ReadPage(List.of(plain, tool), 2L, 1L, null, false, false));
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+
+		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
+				List.of(plain, tool), null, false, false);
+
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), eq(0L));
+		assertThat(entries.getValue()).extracting(TranscriptEntry::entryId)
+			.containsExactly(plain.entryId(), tool.entryId());
+		verify(this.transcript, never()).remove(anyString(), anyLong(), anyLong(), any(), anyLong());
+	}
+
+	private static TranscriptEntry assistantWithTextSegment(String runId, String text, String toolCallId, long seq) {
+		List<TranscriptEntry.ToolCallView> calls = toolCallId == null ? List.of()
+				: List.of(new TranscriptEntry.ToolCallView(toolCallId, "function", "create_task", "{}"));
+		return TranscriptEntries.assistant(runId, 0L, 1L, text, calls, null)
+			.withSegments(List.of(new TranscriptEntry.SegmentView("text", text, null, seq)));
 	}
 
 	@Test
@@ -182,7 +271,7 @@ class TranscriptWritePointsTest {
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture());
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), anyLong());
 		assertThat(entries.getValue()).extracting(TranscriptEntry::kind)
 			.containsExactly("assistant", "tool");
 		assertThat(entries.getValue().get(1).toolCallId()).isEqualTo("c-1");

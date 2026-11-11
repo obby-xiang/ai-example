@@ -1351,10 +1351,96 @@ function timelineNonprefixDecision(body) {
   return { kind: 'text', text: CLOSING_TEXT, reason: 'timeline-nonprefix 工具结果序列不符（退化为文本）' }
 }
 
+const CREATE_ENTRY_MARKER = /\bcreate-entry=(export-defcodes|import-defcodes|import-conditions|select-definitions|definitions-source|bound-task|unrelated|approved-chain|multi-park)\b/
+const CREATE_ENTRY_PREFIX_TEXT = '我需要先确认一些信息才能创建导出任务。'
+const CREATE_ENTRY_SUFFIX_TEXT = '仍需先确认配置项。'
+const CREATE_ENTRY_FINAL_TEXT = '创建流程已按确认结果收尾。'
+const MULTI_PARK_CORRECTION_PREFIX_TEXT = '非空纠正前缀：保留首次展示。'
+const MULTI_PARK_CREATE_TEXT = '首段创建正文：等待创建确认。'
+const MULTI_PARK_ORDINARY_TEXT = '普通工具间正文：继续核对配置。'
+const MULTI_PARK_EXPORT_TEXT = '第四段收尾：等待导出确认。'
+const createEntryRequestCounts = new Map()
+
+function createEntryForm(variant) {
+  if (variant === 'select-definitions' || variant === 'bound-task') {
+    return { purpose: 'SELECT_DEFINITIONS', scenario: 'CLARIFY', fields: [
+      { key: 'chosen', label: '配置项', type: 'multi_select', required: true,
+        options: [{ value: 'CURRENCY', label: '货币' }] }
+    ] }
+  }
+  if (variant === 'definitions-source') {
+    return { purpose: 'GENERAL_CLARIFY', scenario: 'CLARIFY', fields: [
+      { key: 'level', label: '层级', type: 'enum', options: [{ value: 'GLOBAL', label: '全局' }] },
+      { key: 'chosen', label: '配置项', type: 'multi_select',
+        optionsFrom: { dependsOn: 'level', sourceId: 'definitions' } }
+    ] }
+  }
+  const key = variant === 'import-conditions' ? 'conditions' : variant === 'unrelated' ? 'note' : 'defCodes'
+  return { purpose: 'GENERAL_CLARIFY', scenario: 'CLARIFY',
+    title: variant === 'unrelated' ? '选择配置项和筛选条件' : undefined,
+    fields: [{ key, label: variant === 'unrelated' ? '配置项条件' : '值', type: 'text', required: true }] }
+}
+
+function createEntryDecision(body) {
+  const messages = messagesOf(body)
+  const owner = messages.find((message) => message?.role === 'user' && CREATE_ENTRY_MARKER.test(textOf(message)))
+  if (!owner) return null
+  const userText = textOf(owner)
+  const variant = CREATE_ENTRY_MARKER.exec(userText)?.[1]
+  const approvedChain = ['approved-chain', 'multi-park'].includes(variant)
+  const round = (createEntryRequestCounts.get(userText) ?? 0) + 1
+  createEntryRequestCounts.set(userText, round)
+  const disclosed = new Set(toolNames(body))
+  if (round === 1) {
+    if (!disclosed.has('generative_form')) return { kind: 'text', text: CLOSING_TEXT, reason: 'create-entry 表单未披露' }
+    return { kind: 'tool_call', tool: 'generative_form', args: { form: createEntryForm(variant) },
+      correctionVariant: ['export-defcodes', 'multi-park'].includes(variant) ? 'create-entry' : undefined,
+      prefixText: variant === 'multi-park' ? MULTI_PARK_CORRECTION_PREFIX_TEXT
+        : variant === 'export-defcodes' ? CREATE_ENTRY_PREFIX_TEXT : undefined,
+      createEntryVariant: variant, reason: `create-entry=${variant} 首个表单` }
+  }
+  if (variant === 'bound-task' || variant === 'unrelated') {
+    return { kind: 'text', text: CREATE_ENTRY_FINAL_TEXT, createEntryVariant: variant, reason: '真实表单提交后收尾' }
+  }
+  if (variant === 'multi-park' && round === 2) {
+    return { kind: 'text', text: MULTI_PARK_CREATE_TEXT, createEntryVariant: variant, reason: '非空 correction 创建段' }
+  }
+  if (variant === 'export-defcodes' && round === 2) {
+    return { kind: 'text', text: CREATE_ENTRY_SUFFIX_TEXT, createEntryVariant: variant, reason: '表单拒绝后的文字收尾' }
+  }
+  const createRound = ['export-defcodes', 'multi-park'].includes(variant) ? 3 : 2
+  if (round === createRound) {
+    if (!disclosed.has('create_task')) return { kind: 'text', text: CLOSING_TEXT, reason: 'create_task 未披露' }
+    const type = variant.startsWith('import-') ? 'IMPORT' : 'EXPORT'
+    const args = type === 'EXPORT' ? { type, conditions: {} } : { type }
+    return { kind: 'tool_call', tool: 'create_task', args, createEntryVariant: variant,
+      prefixText: variant === 'multi-park' ? MULTI_PARK_CREATE_TEXT : undefined, reason: '改为创建任务确认' }
+  }
+  const ordinaryRound = variant === 'multi-park' ? 4 : 3
+  if (approvedChain && round === ordinaryRound) {
+    if (!disclosed.has('list_config_defs')) return { kind: 'text', text: CLOSING_TEXT, reason: 'approved-chain 的 list_config_defs 未披露' }
+    return { kind: 'tool_call', tool: 'list_config_defs', args: {}, createEntryVariant: variant,
+      prefixText: variant === 'multi-park' ? MULTI_PARK_ORDINARY_TEXT : undefined, reason: 'approved-chain 创建后的只读核对' }
+  }
+  const beforeExportRound = variant === 'multi-park' ? 5 : 4
+  if (approvedChain && round === beforeExportRound) {
+    if (!disclosed.has('get_workspace_state')) {
+      return { kind: 'text', text: variant === 'multi-park' ? MULTI_PARK_EXPORT_TEXT : CLOSING_TEXT,
+        createEntryVariant: variant, reason: 'approved-chain 的 get_workspace_state 未披露，按文本回落' }
+    }
+    return { kind: 'tool_call', tool: 'get_workspace_state', args: {}, createEntryVariant: variant,
+      prefixText: variant === 'multi-park' ? MULTI_PARK_EXPORT_TEXT : undefined, reason: 'approved-chain 导出后的工作区核对' }
+  }
+  return { kind: 'text', text: CREATE_ENTRY_FINAL_TEXT, createEntryVariant: variant, reason: '创建确认拒绝后收尾' }
+}
+
 const CORRECTION_MARKER = /\bcorrection=(text|tool-suffix|prefix-prefix|empty-suffix-tool|park-resume)\b/
 const CORRECTION_PREFIX_TEXT = '纠正前缀：先保留这段已经展示的回答。'
 const CORRECTION_SUFFIX_TEXT = '纠正后缀：补齐剩余回答且不得重复前缀。'
 const CORRECTION_FINAL_TEXT = '最终收尾：工具结果与正文顺序完整。'
+const CORRECTION_TRANSCRIPT_PREFIX = '前'.repeat(149)
+const CORRECTION_TRANSCRIPT_SUFFIX = '后'.repeat(49)
+const CORRECTION_TRANSCRIPT_FINAL = '终'.repeat(392)
 const correctionRequestCounts = new Map()
 
 function correctionOf(messages) {
@@ -1370,9 +1456,8 @@ function correctionOf(messages) {
 
 function correctionToolDecision(body, variant, userText) {
   const disclosed = new Set(toolNames(body))
-  const tool = variant === 'park-resume' ? 'generative_form' : 'list_config_defs'
+  const tool = 'generative_form'
   if (!disclosed.has(tool)) return { kind: 'text', text: CLOSING_TEXT, reason: `correction=${variant} 的工具未披露` }
-  if (variant !== 'park-resume') return { kind: 'tool_call', tool, args: {}, correctionVariant: variant, prefixText: CORRECTION_PREFIX_TEXT, reason: `correction=${variant} 空 suffix 工具 assistant` }
   const route = (ROUTES.routes || []).find((entry) => entry.id === 'GF-FILTER' && entry.tool === tool)
   if (!route) return { kind: 'text', text: CLOSING_TEXT, reason: 'correction=park-resume 的 GF-FILTER 路由不存在' }
   try {
@@ -1390,11 +1475,32 @@ function correctionToolDecision(body, variant, userText) {
   }
 }
 
+function correctionTranscriptDecision(body, round) {
+  const disclosed = new Set(toolNames(body))
+  if (round === 1) {
+    return { kind: 'text', text: CORRECTION_TRANSCRIPT_PREFIX, correctionVariant: 'empty-suffix-tool', reason: 'correction transcript 149 字 prefix' }
+  }
+  if (round === 2) {
+    if (!disclosed.has('create_task')) return { kind: 'text', text: CLOSING_TEXT, reason: 'correction transcript 的 create_task 未披露' }
+    return {
+      kind: 'tool_call', tool: 'create_task', args: { type: 'EXPORT', conditions: {} },
+      correctionVariant: 'empty-suffix-tool', prefixText: `${CORRECTION_TRANSCRIPT_PREFIX}${CORRECTION_TRANSCRIPT_SUFFIX}`,
+      reason: 'correction transcript 的 create_task 与 49 字 suffix'
+    }
+  }
+  if (round === 3) {
+    if (!disclosed.has('list_config_defs')) return { kind: 'text', text: CLOSING_TEXT, reason: 'correction transcript 的只读工具未披露' }
+    return { kind: 'tool_call', tool: 'list_config_defs', args: {}, correctionVariant: 'empty-suffix-tool', reason: 'correction transcript 的后续工具批' }
+  }
+  return { kind: 'text', text: CORRECTION_TRANSCRIPT_FINAL, correctionVariant: 'empty-suffix-tool', reason: 'correction transcript 的 392 字终答' }
+}
+
 function correctionDecision(body) {
   const messages = messagesOf(body)
   const selected = correctionOf(messages)
   if (!selected) return null
   const {variant, round, userText} = selected
+  if (variant === 'empty-suffix-tool') return correctionTranscriptDecision(body, round)
   if (round === 1) {
     if (variant === 'tool-suffix') {
       return {
@@ -1411,7 +1517,6 @@ function correctionDecision(body) {
   if (variant === 'prefix-prefix' && round === 2) {
     return { kind: 'text', text: CORRECTION_PREFIX_TEXT, correctionVariant: variant, reason: 'correction=prefix-prefix 第二次重复 prefix' }
   }
-  if (variant === 'empty-suffix-tool' && round === 2) return correctionToolDecision(body, variant, userText)
   if (variant === 'park-resume' && round === 2) return correctionToolDecision(body, variant, userText)
   if (round === 2) return { kind: 'text', text: CORRECTION_SUFFIX_TEXT, correctionVariant: variant, reason: `correction=${variant} 第二段 suffix` }
   return { kind: 'text', text: CORRECTION_FINAL_TEXT, correctionVariant: variant, reason: `correction=${variant} 最终收尾` }
@@ -1433,6 +1538,8 @@ function blueprintDecision(body, faults) {
   const toolMessages = messages.filter((m) => m?.role === 'tool').length
   const safetyProbe = safetyProbeDecision(body)
   if (safetyProbe) return safetyProbe
+  const createEntry = createEntryDecision(body)
+  if (createEntry) return createEntry
   const correction = correctionDecision(body)
   if (correction) return correction
   if (responseBoundaryOf(body) === 'timeline-nonprefix') return timelineNonprefixDecision(body)
@@ -1473,7 +1580,7 @@ function framesFor(decision, faults, index, model, usageShape, responseBoundary 
       : textRound(decision.text, model, usageShape, faults['usage-grow'] ?? 0)
     return withReasoning(base, faults, model)
   }
-  if (decision.correctionVariant) return correctionToolRound(decision, callId, model)
+  if (decision.correctionVariant || decision.prefixText) return correctionToolRound(decision, callId, model)
   if (responseBoundary === 'timeline-nonprefix') {
     return timelineNonprefixToolRound(decision.timelineText, decision.tool, decision.args, callId, model)
   }

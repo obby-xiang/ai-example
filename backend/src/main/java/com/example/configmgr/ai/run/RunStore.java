@@ -3697,7 +3697,7 @@ public class RunStore {
      */
     public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
                               List<Message> history, MessageJsonCodec codec) {
-        saveSuspended(runId, assistantContent, pendings, history, codec, null);
+        saveSuspended(runId, assistantContent, null, pendings, history, codec, null);
     }
 
     /**
@@ -3713,6 +3713,11 @@ public class RunStore {
      * @param assistantMetadata 上游 assistant 的 metadata（null = 没有；空 map 与 null 不混同）
      */
     public void saveSuspended(String runId, String assistantContent, List<PendingToolCall> pendings,
+                              List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
+        saveSuspended(runId, assistantContent, null, pendings, history, codec, assistantMetadata);
+    }
+
+    public void saveSuspended(String runId, String assistantContent, String fullText, List<PendingToolCall> pendings,
                               List<Message> history, MessageJsonCodec codec, Map<String, Object> assistantMetadata) {
         if (!isWritePermitted(runId, "suspended snapshot")) {
             throw new AiStateUnavailableException("Cannot confirm resume authority; refusing to write parked state " + runId);
@@ -3730,6 +3735,7 @@ public class RunStore {
         if (snapshot == null) {
             throw new IllegalStateException("Run snapshot not found before parking " + runId);
         }
+        CorrectionPrefixes.recordParkedFullText(snapshot, fullText);
         snapshot.setAssistantContent(assistantContent);
         snapshot.setAssistantMetadata(assistantMetadata == null ? null : new LinkedHashMap<>(assistantMetadata));
         snapshot.setInFlightToolCalls(pendings);

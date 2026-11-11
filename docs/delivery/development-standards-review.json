@@ -5842,6 +5842,56 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、reasoning或编码。"},
         "verification-review": {"status": "checked", "reason": "独立复核agent-1250可提交；check-docs仅四个既有11-06研究文档命中，本批无新增绝对路径或虚构PASS，未运行产品测试。"}
       }
+    },
+    {
+      "fingerprint": "sha256:ba87cd69f177103838eddea64e6393e0b85b99dba63b4fa5e9f4f3f5a190ded2",
+      "status": "reviewed",
+      "reason": "逐hunk复核创建入口结构守卫、多次挂起全文恢复、终态转录所有权与持久删除fence；独立审查agent-1248两轮返修后APPROVED，主会话完成生产diff代码验收，DeepSeek真实模型三场景完成业务闭环。",
+      "reviewedAt": "2026-11-11T23:36:21+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1248、施工agent-1245、DeepSeek复测agent-301",
+      "specChanges": [
+        {
+          "change": "未绑定任务的创建入口不再向用户下发配置项或筛选条件澄清表，系统拒绝的generative_form不形成公开卡片、请求帧或终态工具段。",
+          "reason": "创建前收集应由创建后的任务向导承接，模型错误尝试必须零用户副作用；真实模型仍可能先尝试澄清，不能将其伪述为从未尝试。",
+          "impact": "用户首张可见卡为create_task，后续仍经导航、必要配置/条件收集和start_export HITL；内部REJECTED_ARGUMENTS事实保留供审计。"
+        },
+        {
+          "change": "模型工具批与HostForm挂起统一保存当前SSE完整正文，新correction清除旧parked值，续跑优先恢复最新挂起全文。",
+          "reason": "旧pendingSegment和首次挂起全文会在第二次挂起后截断普通工具批及后续正文。",
+          "impact": "非空correction、普通工具批和第二次HostForm挂起后的下一模型请求保持完整正文及工具配对，空prefix也可恢复。"
+        },
+        {
+          "change": "终态转录按runId与正文段seq统一entry所有权，未知plain失败关闭，旧plain仅在全部正文和推理段均被工具接管时删除。",
+          "reason": "单一seq共享、尾段冒领、最新500条限制和混合段整条删除会造成重复、丢段或错误历史。",
+          "impact": "候选以10页×500有界覆盖5000容量，游标/截断/超界失败关闭；独立段保留，工具配对不删除、不合并、不移动。"
+        },
+        {
+          "change": "ConversationTranscriptStore新增fence化remove，实际删除写removed tombstone并提升fence，append/remove预检失败真实返回false。",
+          "reason": "旧实现跳过删除仍报告成功，且同epoch迟到park/write可复活已被接管条目。",
+          "impact": "同epoch复活被拒绝，重复remove幂等，新epoch可合法写入；tombstone随会话TTL过期并随容量裁剪清理。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java", "status": "checked", "reason": "创建入口只按purpose、字段键和definitions数据源拒绝配置/条件收集，未绑定任务判断不看标题或固定话术；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java", "status": "checked", "reason": "宿主挂起改用与工具批相同fullText重载，保存当前emitter完整正文并保留历史与推理元数据；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "挂起写点传当前SSE全文，系统拒绝且无用户帧的条目不进入公开批结算投影；messageJson工具配对保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/ConversationTranscriptStore.java", "status": "checked", "reason": "append/remove增加fence预检与真实结果传播，remove写tombstone并推进fence，TTL、容量裁剪、purgeGuard和同槽脚本保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntry.java", "status": "checked", "reason": "withContent保留entryId、工具、状态、结果和presence字段，仅替换精确匹配后的正文与推理；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/CorrectionPrefixes.java", "status": "checked", "reason": "parkedFullText只在correction上下文记录，空写不覆盖既有全文，模型输入单前缀规范化不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "续跑全文选择、未知plain精确匹配、系统拒绝公开投影、10页候选读取、全段所有权和remove失败传播逐hunk审查；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "saveSuspended新增fullText重载并复用既有pending、history、metadata和快照写点，旧重载委托保持兼容；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "真实帧时间线提供全文、工具正文、已认领段和尾段证据，消息边界阻止跨消息合并，归档降级保持失败关闭；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "generative_form契约注释同步创建前不收集配置/条件，工具签名、schema与执行边界不变；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有HostForm、CorrectionPrefixes、RunStore、SseChatEmitter、TranscriptEntry和Redis Lua，无新增依赖或第二套存储。"},
+        "java-api-style": {"status": "checked", "reason": "十个生产Java均经IDEA Reformat；方法规模、控制块、集合空值与防御复制、record字段保留及布尔语义逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "游标、归档、所有权和fence失败真实返回false或AI_TRANSCRIPT_INCOMPLETE/WRITE_FAILED，不以降级、忽略返回值或旧异常文本制造成功。"},
+        "toc-interaction": {"status": "checked", "reason": "创建前澄清不形成用户卡片、请求帧或文字追问；必要HITL和宿主配置/条件流程保持，真实模型内部拒绝尝试不包装为用户可见事件。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "fullText跨挂起一致、runId+seq所有权、fence tombstone与同epoch防复活保持幂等；Redis键随会话TTL过期，未新增AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "正文按真实完整帧和消息边界聚合，不按相似前缀猜归属；正文与reasoning精确匹配，未知或截断保持失败。"},
+        "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；新增回归和四个公开场景均独立验证；DeepSeek真实浏览器/模型C-130、C-09、C-10完成创建到作业闭环并记录C-130内部澄清尝试 caveat；主会话Maven编译358源BUILD SUCCESS；Cluster、多实例、全量普通测试NOT_RUN。"}
+      }
     }
   ]
 }

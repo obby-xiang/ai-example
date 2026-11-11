@@ -864,10 +864,12 @@ public class ResilientChatService {
             registered = true;
             String lastUserText = TaskIntent.lastRealUserText(history);
             CorrectionResume correctionResume = correctionResume(snapshot, history);
+            String archivedFullText = out == null ? "" : out.transcriptFullText();
+            String resumeFullText = StringUtils.defaultIfEmpty(correctionResume.fullText(), archivedFullText);
             List<Message> modelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(history, correctionPrefix(snapshot));
             SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
             runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
-                    correctionResume.fullText(), correctionResume.pendingSegment(), turnTextBody, attempt -> {
+                    resumeFullText, correctionResume.pendingSegment(), turnTextBody, attempt -> {
                         if (log.isDebugEnabled())
                             log.debug("rebuilding full history for attempt {} runId={} sessionId={} historyEntries={}", attempt, runId,
                                     sessionId, modelHistory.size());
@@ -1430,7 +1432,7 @@ public class ResilientChatService {
     private boolean isCorrectionDue(AttemptLoopState state, AttemptRound round) {
         UpstreamErrorClassifier.Finish finish = round.accumulator.isFinish();
         String correctionText = round.accumulator.unpersistedText();
-        if (isCreateTaskCorrectionDue(state, round, finish, correctionText)) {
+        if (isCreateTaskCorrectionDue(state, round, finish)) {
             startCorrection(state, round, correctionText, true);
             log.info("create-task action missing, sending one generic tool correction runId={} chars={}", state.runId,
                     state.prefixText.length());
@@ -1449,13 +1451,13 @@ public class ResilientChatService {
     }
 
     private boolean isCreateTaskCorrectionDue(AttemptLoopState state, AttemptRound round,
-                                              UpstreamErrorClassifier.Finish finish, String correctionText) {
+                                              UpstreamErrorClassifier.Finish finish) {
         boolean correctable = finish != UpstreamErrorClassifier.Finish.LENGTH
                 && finish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
                 && (finish == UpstreamErrorClassifier.Finish.TOOL_CALLS || StringUtils.isNotBlank(round.accumulator.text()));
         return !state.createTaskCorrectionUsed && !state.correcting && correctable
                 && isCreateTaskWrapUpCorrectionDue(state.runId, state.context, state.lastUserText)
-                && isMarkCorrectionUsed(state.runId, correctionText, CREATE_TASK_CORRECTION_MARKER,
+                && isMarkCorrectionUsed(state.runId, round.accumulator.text(), CREATE_TASK_CORRECTION_MARKER,
                 CREATE_TASK_CORRECTION_PREFIX_KEY);
     }
 
@@ -1898,6 +1900,8 @@ public class ResilientChatService {
         Map<String, Object> extra = new LinkedHashMap<>(current.getExtra());
         extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
         extra.remove(CREATE_TASK_CORRECTION_PREFIX_KEY);
+        extra.remove(CorrectionPrefixes.PARKED_FULL_TEXT_KEY);
+        extra.remove(CorrectionPrefixes.PENDING_SEGMENT_KEY);
         snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
                 current.getTaskId(), current.getTaskStatus(), extra).toMap());
     }
@@ -1945,15 +1949,20 @@ public class ResilientChatService {
      * create_task 纠正已登记的持久化事实（不看 prefix key —— 空正文时它不会写）。
      */
     private static boolean isCreateTaskCorrectionMarked(RunSnapshot snapshot) {
+        return isCorrectionMarked(snapshot, CREATE_TASK_CORRECTION_MARKER);
+    }
+
+    private static boolean isCorrectionMarked(RunSnapshot snapshot, String marker) {
         if (snapshot == null || snapshot.getContext() == null) {
             return false;
         }
         try {
             Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
-            return extra != null && Boolean.TRUE.equals(extra.get(CREATE_TASK_CORRECTION_MARKER));
+            return extra != null && Boolean.TRUE.equals(extra.get(marker));
         } catch (RuntimeException ex) {
-            if (LogSampling.canAcquire("resilient-chat-runtime-catch"))
-                log.warn("read create_task correction marker failed (treating as not marked)", ex);
+            if (LogSampling.canAcquire("resilient-chat-runtime-catch")) {
+                log.warn("read correction marker failed (treating as not marked)", ex);
+            }
             return false;
         }
     }
@@ -2018,6 +2027,8 @@ public class ResilientChatService {
                 return false;
             }
             extra.put(marker, Boolean.TRUE);
+            extra.remove(CorrectionPrefixes.PENDING_SEGMENT_KEY);
+            extra.remove(CorrectionPrefixes.PARKED_FULL_TEXT_KEY);
             extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
             extra.remove(CREATE_TASK_CORRECTION_PREFIX_KEY);
             if (StringUtils.isNotBlank(prefixText)) {
@@ -3381,13 +3392,13 @@ public class ResilientChatService {
      */
     private CorrectionResume correctionResume(RunSnapshot snapshot, List<Message> history) {
         String prefix = correctionPrefix(snapshot);
-        if (prefix.isEmpty()) {
+        String parkedFullText = CorrectionPrefixes.parkedFullText(snapshot);
+        if (prefix.isEmpty() && parkedFullText.isEmpty()) {
             return new CorrectionResume("", "");
         }
         if (snapshot != null && snapshot.getInFlightToolCalls() != null
                 && !snapshot.getInFlightToolCalls().isEmpty()) {
-            String parked = StringUtils.defaultIfEmpty(snapshot.getAssistantContent(), prefix);
-            return new CorrectionResume(CorrectionPrefixes.withSingleCorrectionPrefix(parked, prefix), "");
+            return new CorrectionResume(StringUtils.defaultIfEmpty(parkedFullText, prefix), "");
         }
         int lastRealUser = -1;
         for (int i = history.size() - 1; i >= 0; i--) {
@@ -3397,20 +3408,16 @@ public class ResilientChatService {
                 break;
             }
         }
-        String fullText = prefix;
         boolean persisted = false;
         for (int i = lastRealUser + 1; i < history.size(); i++) {
             if (!(history.get(i) instanceof AssistantMessage assistant) || assistant.getText() == null) {
                 continue;
             }
-            if (assistant.hasToolCalls() && assistant.getText().startsWith(prefix)) {
-                fullText = CorrectionPrefixes.withSingleCorrectionPrefix(assistant.getText(), prefix);
-                persisted = true;
-            } else if (!assistant.hasToolCalls() && prefix.equals(assistant.getText())) {
+            if (assistant.hasToolCalls() || prefix.equals(assistant.getText())) {
                 persisted = true;
             }
         }
-        return new CorrectionResume(fullText, persisted ? "" : prefix);
+        return new CorrectionResume(StringUtils.defaultIfEmpty(parkedFullText, prefix), persisted ? "" : prefix);
     }
 
     /**
@@ -3945,10 +3952,11 @@ public class ResilientChatService {
     private List<TranscriptEntry> buildTerminalEntries(String runId, RunSnapshot snapshot, List<Message> history,
                                                        boolean includeLastAssistant) {
         Map<String, PendingToolCall> pendings = transcriptPendings(runId);
-        List<Message> withStates = new ArrayList<>(history.size());
+        List<Message> effectiveHistory = withoutSystemRejectedForms(pendings, history);
+        List<Message> withStates = new ArrayList<>(effectiveHistory.size());
         Map<String, String> resolvedStatuses = new LinkedHashMap<>();
         Predicate<String> executedInLedger = toolCallId -> MapUtils.isNotEmpty(ledgerEntry(runId, toolCallId));
-        for (Message message : history) {
+        for (Message message : effectiveHistory) {
             if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
                 ResolvedToolStates resolved = resolveToolStates(runId, assistant, pendings, snapshot.getStatus(),
                         executedInLedger);
@@ -3960,6 +3968,69 @@ public class ResilientChatService {
         }
         return TranscriptEntries.fromRunTerminal(withStates, pendings, runId,
                 snapshot.transcriptToolTurnStartedAtMs(), includeLastAssistant, resolvedStatuses, executedInLedger);
+    }
+
+    /**
+     * 生成式表单的系统拒绝没有用户帧，终态时间线也不能保留对应的工具段。模型历史与 pending 仍保留
+     * 拒绝事实；这里只投影公开 transcript，正文和其它工具调用不变。
+     */
+    private static List<Message> withoutSystemRejectedForms(Map<String, PendingToolCall> pendings, List<Message> history) {
+        Set<String> rejectedIds = new LinkedHashSet<>();
+        for (PendingToolCall pending : pendings.values()) {
+            if (pending != null && AiToolNames.GENERATIVE_FORM.equals(pending.getName())
+                    && (ErrorCodes.FORM_SCHEMA_REJECTED.equals(pending.effectiveCode())
+                    || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(pending.effectiveCode()))) {
+                rejectedIds.add(pending.getToolCallId());
+            }
+        }
+        if (rejectedIds.isEmpty()) {
+            return history;
+        }
+        List<Message> out = new ArrayList<>(history.size());
+        for (Message message : history) {
+            if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
+                out.add(withoutRejectedToolCalls(assistant, rejectedIds));
+            } else if (message instanceof ToolResponseMessage tool) {
+                ToolResponseMessage kept = withoutRejectedToolResponses(tool, rejectedIds);
+                if (kept != null) {
+                    out.add(kept);
+                }
+            } else {
+                out.add(message);
+            }
+        }
+        return out;
+    }
+
+    private static AssistantMessage withoutRejectedToolCalls(AssistantMessage assistant, Set<String> rejectedIds) {
+        List<AssistantMessage.ToolCall> kept = new ArrayList<>();
+        for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
+            if (!rejectedIds.contains(call.id())) {
+                kept.add(call);
+            }
+        }
+        if (kept.size() == assistant.getToolCalls().size()) {
+            return assistant;
+        }
+        AssistantMessage.Builder builder = AssistantMessage.builder().content(assistant.getText())
+                .properties(assistant.getMetadata() == null ? Map.of() : assistant.getMetadata()).toolCalls(kept);
+        if (CollectionUtils.isNotEmpty(assistant.getMedia())) {
+            builder.media(new ArrayList<>(assistant.getMedia()));
+        }
+        return builder.build();
+    }
+
+    private static ToolResponseMessage withoutRejectedToolResponses(ToolResponseMessage tool, Set<String> rejectedIds) {
+        List<ToolResponseMessage.ToolResponse> kept = new ArrayList<>();
+        for (ToolResponseMessage.ToolResponse response : tool.getResponses()) {
+            if (!rejectedIds.contains(response.id())) {
+                kept.add(response);
+            }
+        }
+        if (kept.size() == tool.getResponses().size()) {
+            return tool;
+        }
+        return kept.isEmpty() ? null : ToolResponseMessage.builder().responses(kept).build();
     }
 
     private List<TranscriptEntry> completeTimeline(String runId, RunSnapshot snapshot, List<TranscriptEntry> entries,
@@ -3979,7 +4050,11 @@ public class ResilientChatService {
         if (out == null) {
             return entries;
         }
-        Map<String, TranscriptEntry.SegmentView> toolSegments = populateAssistantSegments(out, entries);
+        boolean correctionActive = isCreateTaskCorrectionMarked(snapshot)
+                || isCorrectionMarked(snapshot, EXPORT_CORRECTION_MARKER)
+                || StringUtils.isNotEmpty(correctionPrefix(snapshot))
+                || StringUtils.isNotEmpty(CorrectionPrefixes.parkedFullText(snapshot));
+        Map<String, TranscriptEntry.SegmentView> toolSegments = populateAssistantSegments(out, entries, correctionActive);
         if (toolSegments == null || !isLinkToolSegments(entries, toolSegments)) {
             return null;
         }
@@ -3987,30 +4062,119 @@ public class ResilientChatService {
     }
 
     private Map<String, TranscriptEntry.SegmentView> populateAssistantSegments(SseChatEmitter out,
-                                                                               List<TranscriptEntry> entries) {
+                                                                               List<TranscriptEntry> entries,
+                                                                               boolean correctionActive) {
         Map<String, TranscriptEntry.SegmentView> toolSegments = new LinkedHashMap<>();
         for (int i = 0; i < entries.size(); i++) {
             TranscriptEntry entry = entries.get(i);
-            if (!"assistant".equals(entry.kind())) {
-                continue;
-            }
-            String visibleReasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
-            List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
-                    entry.text(), visibleReasoning);
-            if (CollectionUtils.isEmpty(segments)) {
-                if (CollectionUtils.isNotEmpty(entry.toolCalls())) {
-                    return null;
-                }
-                continue;
-            }
-            entries.set(i, entry.withSegments(segments));
-            for (TranscriptEntry.SegmentView segment : segments) {
-                if ("tool".equals(segment.kind()) && segment.toolCallId() != null) {
-                    toolSegments.put(segment.toolCallId(), segment);
-                }
+            if ("assistant".equals(entry.kind()) && CollectionUtils.isNotEmpty(entry.toolCalls())
+                    && !isToolAssistantPopulated(out, entries, i, toolSegments)) {
+                return null;
             }
         }
+        List<Integer> claimedPlainEntries = new ArrayList<>();
+        List<Integer> unresolvedPlainEntries = new ArrayList<>();
+        for (int i = 0; i < entries.size(); i++) {
+            populatePlainAssistant(out, entries, i, correctionActive, claimedPlainEntries, unresolvedPlainEntries);
+        }
+        if (correctionActive) {
+            claimPlainEntryGroups(out, entries, unresolvedPlainEntries, claimedPlainEntries);
+            unresolvedPlainEntries.removeAll(claimedPlainEntries);
+            if (unresolvedPlainEntries.size() == 1
+                    && isTrailingPlainAssistantPopulated(out, entries, unresolvedPlainEntries.getFirst())) {
+                unresolvedPlainEntries.clear();
+            }
+        }
+        if (!unresolvedPlainEntries.isEmpty()) {
+            return null;
+        }
+        for (int i = claimedPlainEntries.size() - 1; i >= 0; i--) {
+            entries.remove((int) claimedPlainEntries.get(i));
+        }
         return toolSegments;
+    }
+
+    private boolean isToolAssistantPopulated(SseChatEmitter out, List<TranscriptEntry> entries, int index,
+                                             Map<String, TranscriptEntry.SegmentView> toolSegments) {
+        TranscriptEntry entry = entries.get(index);
+        SseChatEmitter.TranscriptContent actual = out.transcriptToolContent(entry.toolCalls());
+        String text = actual == null ? entry.text() : actual.text();
+        String reasoning = actual == null ? entry.reasoning() : actual.reasoning();
+        List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
+                text, reasoning);
+        if (CollectionUtils.isEmpty(segments)) {
+            return false;
+        }
+        entries.set(index, entry.withContent(text, reasoning).withSegments(segments));
+        for (TranscriptEntry.SegmentView segment : segments) {
+            if ("tool".equals(segment.kind()) && segment.toolCallId() != null) {
+                toolSegments.put(segment.toolCallId(), segment);
+            }
+        }
+        return true;
+    }
+
+    private void populatePlainAssistant(SseChatEmitter out, List<TranscriptEntry> entries, int index,
+                                        boolean correctionActive, List<Integer> claimedPlainEntries,
+                                        List<Integer> unresolvedPlainEntries) {
+        TranscriptEntry entry = entries.get(index);
+        if (!"assistant".equals(entry.kind()) || CollectionUtils.isNotEmpty(entry.toolCalls())) {
+            return;
+        }
+        String reasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
+        List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
+                entry.text(), reasoning);
+        if (CollectionUtils.isEmpty(segments)) {
+            segments = out.transcriptClaimedToolTextSegments(entry.text(), reasoning);
+        }
+        if (CollectionUtils.isNotEmpty(segments)) {
+            entries.set(index, entry.withSegments(segments));
+        } else if (correctionActive && out.isTranscriptContentClaimed(entry.text(), reasoning)) {
+            claimedPlainEntries.add(index);
+        } else {
+            unresolvedPlainEntries.add(index);
+        }
+    }
+
+    private void claimPlainEntryGroups(SseChatEmitter out, List<TranscriptEntry> entries,
+                                       List<Integer> unresolved, List<Integer> claimed) {
+        for (int start = 0; start < unresolved.size(); start++) {
+            StringBuilder text = new StringBuilder();
+            StringBuilder reasoning = new StringBuilder();
+            int matchedEnd = -1;
+            for (int end = start; end < unresolved.size()
+                    && (end == start || unresolved.get(end) == unresolved.get(end - 1) + 1); end++) {
+                TranscriptEntry entry = entries.get(unresolved.get(end));
+                text.append(StringUtils.defaultString(entry.text()));
+                if (this.properties.getReasoning().isDisplayEnabled()) {
+                    reasoning.append(StringUtils.defaultString(entry.reasoning()));
+                }
+                if (out.isTranscriptContentClaimed(text.toString(), reasoning.toString())) {
+                    matchedEnd = end;
+                }
+            }
+            if (matchedEnd >= start) {
+                claimed.addAll(unresolved.subList(start, matchedEnd + 1));
+                start = matchedEnd;
+            }
+        }
+    }
+
+    private boolean isTrailingPlainAssistantPopulated(SseChatEmitter out, List<TranscriptEntry> entries, int index) {
+        TranscriptEntry entry = entries.get(index);
+        SseChatEmitter.TranscriptContent actual = out.transcriptTrailingContent();
+        String reasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
+        if (actual == null || !StringUtils.equals(entry.text(), actual.text())
+                || !StringUtils.equals(reasoning, actual.reasoning())) {
+            return false;
+        }
+        List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
+                actual.text(), actual.reasoning());
+        if (CollectionUtils.isEmpty(segments)) {
+            return false;
+        }
+        entries.set(index, entry.withContent(actual.text(), actual.reasoning()).withSegments(segments));
+        return true;
     }
 
     private boolean isLinkToolSegments(List<TranscriptEntry> entries,
@@ -4032,7 +4196,11 @@ public class ResilientChatService {
 
     private boolean appendTerminalEntries(String runId, String sessionId, RunSnapshot snapshot,
                                           List<TranscriptEntry> entries, String outcomeOverride, boolean unconfirmed, boolean terminalAttempt) {
-        entries = new ArrayList<>(entries);
+        EntryReconciliation reconciliation = reconcileTerminalEntries(sessionId, snapshot, entries);
+        if (reconciliation == null) {
+            return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_INCOMPLETE);
+        }
+        entries = new ArrayList<>(reconciliation.entries());
         String outcome = ObjectUtils.getIfNull(outcomeOverride, snapshot::getStatus);
         for (int i = 0; i < entries.size(); i++) {
             TranscriptEntry entry = entries.get(i);
@@ -4052,8 +4220,94 @@ public class ResilientChatService {
         if (entries.isEmpty()) {
             return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
         }
+        if (!reconciliation.supersededEntryIds().isEmpty()
+                && !this.transcript.remove(sessionId, snapshot.getTenantId(), snapshot.getUserId(),
+                reconciliation.supersededEntryIds(), snapshot.getRunEpoch())) {
+            return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
+        }
         return this.transcript.append(sessionId, snapshot.getTenantId(), snapshot.getUserId(), entries,
                 snapshot.getRunEpoch()) || isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
+    }
+
+    private EntryReconciliation reconcileTerminalEntries(String sessionId, RunSnapshot snapshot,
+                                                         List<TranscriptEntry> entries) {
+        List<TranscriptEntry> persistedEntries = readPersistedEntries(sessionId, snapshot);
+        if (persistedEntries == null) {
+            return null;
+        }
+        Set<TextSegmentKey> toolContentSegments = new LinkedHashSet<>();
+        Set<String> toolEntryIds = new LinkedHashSet<>();
+        for (TranscriptEntry entry : entries) {
+            if ("assistant".equals(entry.kind()) && CollectionUtils.isNotEmpty(entry.toolCalls())) {
+                toolEntryIds.add(entry.entryId());
+                toolContentSegments.addAll(contentSegmentKeys(entry));
+            }
+        }
+        List<TranscriptEntry> kept = new ArrayList<>(entries.size());
+        for (TranscriptEntry entry : entries) {
+            if (!isPlainAssistant(entry) || !isPlainFullyOwnedByTool(entry, toolContentSegments)) {
+                kept.add(entry);
+            }
+        }
+        Set<String> supersededEntryIds = new LinkedHashSet<>();
+        for (TranscriptEntry entry : persistedEntries) {
+            if (isPlainAssistant(entry) && !toolEntryIds.contains(entry.entryId())
+                    && isPlainFullyOwnedByTool(entry, toolContentSegments)) {
+                supersededEntryIds.add(entry.entryId());
+            }
+        }
+        return new EntryReconciliation(List.copyOf(kept), Set.copyOf(supersededEntryIds));
+    }
+
+    private List<TranscriptEntry> readPersistedEntries(String sessionId, RunSnapshot snapshot) {
+        List<TranscriptEntry> entries = new ArrayList<>();
+        Long before = null;
+        for (int page = 0; page < ConversationTranscriptStore.MAX_ENTRIES / 500; page++) {
+            ConversationTranscriptStore.ReadPage persisted = this.transcript.readPage(sessionId, snapshot.getTenantId(),
+                    snapshot.getUserId(), before, 500);
+            if (persisted == null || persisted.entries() == null || persisted.truncated()) {
+                return null;
+            }
+            entries.addAll(persisted.entries());
+            if (!persisted.hasMore()) {
+                return entries;
+            }
+            if (StringUtils.isBlank(persisted.nextCursor())) {
+                return null;
+            }
+            try {
+                before = Long.valueOf(persisted.nextCursor());
+            } catch (NumberFormatException ex) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static Set<TextSegmentKey> contentSegmentKeys(TranscriptEntry entry) {
+        Set<TextSegmentKey> keys = new LinkedHashSet<>();
+        for (TranscriptEntry.SegmentView segment : entry.segments()) {
+            if (("text".equals(segment.kind()) || "reasoning".equals(segment.kind())) && segment.seq() > 0L) {
+                keys.add(new TextSegmentKey(entry.runId(), segment.seq()));
+            }
+        }
+        return keys;
+    }
+
+    private static boolean isPlainFullyOwnedByTool(TranscriptEntry entry, Set<TextSegmentKey> toolContentSegments) {
+        Set<TextSegmentKey> plainSegments = contentSegmentKeys(entry);
+        return !plainSegments.isEmpty() && plainSegments.size() == entry.segments().size()
+                && toolContentSegments.containsAll(plainSegments);
+    }
+
+    private static boolean isPlainAssistant(TranscriptEntry entry) {
+        return "assistant".equals(entry.kind()) && CollectionUtils.isEmpty(entry.toolCalls());
+    }
+
+    private record EntryReconciliation(List<TranscriptEntry> entries, Set<String> supersededEntryIds) {
+    }
+
+    private record TextSegmentKey(String runId, long seq) {
     }
 
     private boolean isRecordTranscript(String runId, String sessionId, List<Message> history,

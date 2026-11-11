@@ -133,6 +133,12 @@ public class ConversationTranscriptStore {
 			  end
 			  return newer
 			end
+			for i = 4, #ARGV, 3 do
+			  local id = ARGV[i]
+			  local fence = tonumber(ARGV[i + 2])
+			  local previousFence = tonumber(redis.call('HGET', KEYS[3], 'fence:' .. id)) or 0
+			  if fence < previousFence then return 0 end
+			end
 			local seq = tonumber(redis.call('HGET', KEYS[3], 'seq'))
 			if not seq then
 			  local last = redis.call('ZREVRANGE', KEYS[2], 0, 0, 'WITHSCORES')
@@ -177,6 +183,7 @@ public class ConversationTranscriptStore {
 			    if raw then bytes = bytes - #raw end
 			    redis.call('HDEL', KEYS[1], id)
 			    redis.call('HDEL', KEYS[3], 'fence:' .. id)
+			    redis.call('HDEL', KEYS[3], 'removed:' .. id)
 			    redis.call('ZREM', KEYS[2], id)
 			  end
 			  if #ids > 0 then redis.call('HINCRBY', KEYS[3], 'rev', #ids) end
@@ -198,6 +205,54 @@ public class ConversationTranscriptStore {
 			if bytes < 0 then bytes = 0 end
 			redis.call('HSET', KEYS[3], 'bytes', bytes, 'seq', seq)
 			if truncated then redis.call('SET', KEYS[4], '1', 'PX', ttl) end
+			for _, key in ipairs(KEYS) do redis.call('PEXPIRE', key, ttl) end
+			return 1
+			""", Long.class);
+
+	private static final RedisScript<Long> REMOVE_SCRIPT = new DefaultRedisScript<>("""
+			-- TRANSCRIPT_REMOVE_FENCED
+			local ttl = tonumber(ARGV[1])
+			local fence = tonumber(ARGV[2])
+			local function removeAllowed(id)
+			  local previousFence = tonumber(redis.call('HGET', KEYS[3], 'fence:' .. id)) or 0
+			  local removedFence = redis.call('HGET', KEYS[3], 'removed:' .. id)
+			  local raw = redis.call('HGET', KEYS[1], id)
+			  if not raw and removedFence and fence >= tonumber(removedFence) then return 1 end
+			  if fence < previousFence then return 0 end
+			  return 1
+			end
+			for i = 3, #ARGV do
+			  if removeAllowed(ARGV[i]) == 0 then return 0 end
+			end
+			local bytes = tonumber(redis.call('HGET', KEYS[3], 'bytes'))
+			if not bytes then
+			  bytes = 0
+			  local values = redis.call('HVALS', KEYS[1])
+			  for _, value in ipairs(values) do bytes = bytes + #value end
+			end
+			local removed = 0
+			for i = 3, #ARGV do
+			  local id = ARGV[i]
+			  local previousFence = tonumber(redis.call('HGET', KEYS[3], 'fence:' .. id)) or 0
+			  local removedFence = redis.call('HGET', KEYS[3], 'removed:' .. id)
+			  local raw = redis.call('HGET', KEYS[1], id)
+			  if raw then
+			    bytes = bytes - #raw
+			    removed = removed + 1
+			    redis.call('HDEL', KEYS[1], id)
+			    redis.call('ZREM', KEYS[2], id)
+			    if not removedFence or fence > tonumber(removedFence) then
+			      redis.call('HSET', KEYS[3], 'removed:' .. id, fence)
+			    end
+			    local tombstoneFence = math.max(previousFence, fence) + 1
+			    if tombstoneFence > previousFence then
+			      redis.call('HSET', KEYS[3], 'fence:' .. id, tombstoneFence)
+			    end
+			  end
+			end
+			if bytes < 0 then bytes = 0 end
+			redis.call('HSET', KEYS[3], 'bytes', bytes)
+			if removed > 0 then redis.call('HINCRBY', KEYS[3], 'rev', removed) end
 			for _, key in ipairs(KEYS) do redis.call('PEXPIRE', key, ttl) end
 			return 1
 			""", Long.class);
@@ -320,6 +375,42 @@ public class ConversationTranscriptStore {
 		}
 	}
 
+	public boolean remove(String sessionId, long tenantId, long userId, Collection<String> entryIds, long runEpoch) {
+		if (!TenantKeyScope.hasIdentity(tenantId, userId)) {
+			return false;
+		}
+		List<String> ids = new ArrayList<>();
+		for (String entryId : entryIds) {
+			if (StringUtils.isNotBlank(entryId) && !ids.contains(entryId)) {
+				ids.add(entryId);
+			}
+		}
+		if (ids.isEmpty()) {
+			return true;
+		}
+		try {
+			if (this.purgeGuard != null && this.purgeGuard.isArmed(sessionId, tenantId, userId)) {
+				return false;
+			}
+			List<String> args = new ArrayList<>(ids.size() + 2);
+			args.add(String.valueOf(this.ttl.toMillis()));
+			args.add(String.valueOf(Math.max(0L, runEpoch)));
+			args.addAll(ids);
+			Long result = this.redis.execute(REMOVE_SCRIPT,
+					List.of(dataKey(sessionId, tenantId, userId), orderKey(sessionId, tenantId, userId),
+							metaKey(sessionId, tenantId, userId), truncatedKey(sessionId, tenantId, userId)), args.toArray());
+			return Long.valueOf(1L).equals(result);
+		} catch (RuntimeException ex) {
+			if (isTransientResourceFailure(ex)) {
+				throw ex;
+			}
+			if (LogSampling.canAcquire("transcript-remove")) {
+				log.warn("transcript remove failed sessionId={} (display history does not affect this turn)", sessionId, ex);
+			}
+			return false;
+		}
+	}
+
 	private static boolean isTransientResourceFailure(Throwable error) {
 		for (Throwable current = error; current != null; current = current.getCause()) {
 			if (current instanceof DataAccessResourceFailureException || current instanceof QueryTimeoutException) {
@@ -406,7 +497,7 @@ public class ConversationTranscriptStore {
 			log.warn("transcript append skipped: app.ai.session-ttl not configured sessionId={}", sessionId);
 			return false;
 		}
-		this.redis.execute(APPEND_SCRIPT,
+		Long result = this.redis.execute(APPEND_SCRIPT,
 				List.of(dataKey(sessionId, tenantId, userId), orderKey(sessionId, tenantId, userId),
 						metaKey(sessionId, tenantId, userId), truncatedKey(sessionId, tenantId, userId)), args.toArray());
 		if (this.purgeGuard != null && this.purgeGuard.isArmed(sessionId, tenantId, userId)) {
@@ -414,7 +505,7 @@ public class ConversationTranscriptStore {
 					metaKey(sessionId, tenantId, userId), truncatedKey(sessionId, tenantId, userId)));
 			return false;
 		}
-		return true;
+		return Long.valueOf(1L).equals(result);
 	}
 
 	private String json(TranscriptEntry entry) {

@@ -9,14 +9,24 @@ import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
-const cases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'standard-no-reasoning', 'confirm-step-timeline', 'correction-prefix-transcript'])
-const healthyCases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'standard-no-reasoning', 'confirm-step-timeline', 'correction-prefix-transcript'])
+const cases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'standard-no-reasoning', 'confirm-step-timeline', 'correction-prefix-transcript', 'create-entry-form'])
+const healthyCases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'standard-no-reasoning', 'confirm-step-timeline', 'correction-prefix-transcript', 'create-entry-form'])
+const createEntryVariants = new Set(['export-defcodes', 'import-defcodes', 'import-conditions', 'select-definitions', 'definitions-source', 'bound-task', 'unrelated', 'approved-chain', 'multi-park'])
 const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const transcriptErrorCodes = new Set(['AI_TRANSCRIPT_INCOMPLETE', 'AI_TRANSCRIPT_WRITE_FAILED'])
 const toolFrameTypes = new Set(['tool_start', 'tool_result', 'confirm_request', 'confirm_decision', 'frontend_tool_request', 'frontend_tool_result'])
 const correctionPrefixBlueprint = '前'.repeat(149)
 const correctionSuffixBlueprint = '后'.repeat(49)
 const correctionFinalBlueprint = '终'.repeat(392)
+const CREATE_ENTRY_FINAL_TEXT = '创建流程已按确认结果收尾。'
+const MULTI_PARK_CORRECTION_PREFIX_TEXT = '非空纠正前缀：保留首次展示。'
+const MULTI_PARK_CREATE_TEXT = '首段创建正文：等待创建确认。'
+const MULTI_PARK_ORDINARY_TEXT = '普通工具间正文：继续核对配置。'
+const MULTI_PARK_EXPORT_TEXT = '第四段收尾：等待导出确认。'
+const MULTI_PARK_BEFORE_CREATE_TEXT = `${MULTI_PARK_CORRECTION_PREFIX_TEXT}${MULTI_PARK_CREATE_TEXT}`
+const MULTI_PARK_BEFORE_EXPORT_TEXT = `${MULTI_PARK_BEFORE_CREATE_TEXT}${MULTI_PARK_ORDINARY_TEXT}${MULTI_PARK_EXPORT_TEXT}`
+const MULTI_PARK_FULL_TEXT = `${MULTI_PARK_BEFORE_EXPORT_TEXT}${CREATE_ENTRY_FINAL_TEXT}`
+const isApprovedChainVariant = (variant) => ['approved-chain', 'multi-park'].includes(variant)
 const lateReasoningPieces = [
   '迟到思考甲：工具 finish 已到达，但完整响应尚未结束；',
   '迟到思考乙：这两片与末尾 usage 必须先收齐，再释放工具聚合。'
@@ -143,11 +153,17 @@ function loadConfig() {
   const managedInput = process.env.START_SERVICES
   if (!['true', 'false'].includes(managedInput)) throw new Error('START_SERVICES=true|false is required')
   const managed = managedInput === 'true'
+  const createEntryVariant = (process.env.CREATE_ENTRY_VARIANT ?? '').trim()
+  if (caseName === 'create-entry-form' && !createEntryVariants.has(createEntryVariant)) {
+    throw new Error(`CREATE_ENTRY_VARIANT must select exactly one of ${[...createEntryVariants].join(', ')}`)
+  }
+  if (caseName !== 'create-entry-form' && createEntryVariant) throw new Error('CREATE_ENTRY_VARIANT requires CASE=create-entry-form')
   const base = managed
     ? `http://127.0.0.1:${integerEnv('BACKEND_PORT', 18530, 1024, 65535)}`
     : parseHttpUrl('BASE_URL', process.env.BASE_URL ?? '')
   return {
     caseName,
+    createEntryVariant,
     managed,
     base,
     backendPort: integerEnv('BACKEND_PORT', 18530, 1024, 65535),
@@ -550,6 +566,37 @@ class RunDriver {
           'one rejected create_task with no business task created', {executed: frame.executed === true, status: frame.status})
       }
     }
+    if (this.context.config.caseName === 'create-entry-form') {
+      const allowedForm = ['bound-task', 'unrelated'].includes(this.context.config.createEntryVariant)
+      const approvedChain = isApprovedChainVariant(this.context.config.createEntryVariant)
+      if (frame.type === 'frontend_tool_request' && !this.drivenToolCalls.has(frame.toolCallId)) {
+        this.drivenToolCalls.add(frame.toolCallId)
+        this.context.checks.require('create-entry.form-visibility', allowedForm || (approvedChain && frame.toolCallId !== 'call-stub-1'),
+          allowedForm ? 'bound/unrelated form is visible' : 'pre-create form must have zero user frames', {
+            variant: this.context.config.createEntryVariant,
+            name: frame.name,
+            toolCallId: frame.toolCallId
+          })
+        if (approvedChain) await driveApprovedChainFrontend(this.context, {...frame, runId: frame.runId ?? this.runId})
+        else await driveCreateEntryForm(this.context, {...frame, runId: frame.runId ?? this.runId})
+      }
+      if (frame.type === 'confirm_request' && !this.drivenToolCalls.has(frame.toolCallId)) {
+        this.drivenToolCalls.add(frame.toolCallId)
+        const expectedConfirm = approvedChain ? ['create_task', 'start_export'].includes(frame.name)
+          : frame.name === 'create_task' && !allowedForm
+        this.context.checks.require('create-entry.confirm-is-create-task', expectedConfirm,
+          approvedChain ? 'create_task and start_export reach HITL once each' : 'only corrected create_task reaches HITL',
+          {name: frame.name, variant: this.context.config.createEntryVariant})
+        await driveCreateEntryConfirmDecision(this.context, {...frame, runId: frame.runId ?? this.runId})
+      }
+      if (approvedChain && frame.type === 'tool_result' && frame.name === 'create_task') {
+        await captureCreatedTaskId(this.context)
+      }
+      if (approvedChain && frame.type === 'tool_result' && frame.name === 'start_export') {
+        await captureCreatedJobId(this.context)
+        await waitForApprovedChainJob(this.context)
+      }
+    }
     if (this.terminal) {
       this.context.checks.add('sse.no-data-after-terminal', false,
         'no data frames after the first terminal frame', publicFrameEvidence(frame))
@@ -592,7 +639,7 @@ class RunDriver {
   async start(message) {
     const context = this.context.config.caseName === 'confirm-step-timeline'
       ? {taskType: 'EXPORT', step: 'SELECT_DEFS', taskId: String(this.context.fixtureTaskId)}
-      : null
+      : this.context.config.caseName === 'create-entry-form' ? createEntryContext(this.context) : null
     const publicBody = {sessionId: this.context.sessionId, message, context, clientRequestId: this.context.clientRequestId}
     let response = await this.context.api.openSse('ai.chat', '/api/ai/chat', {
       method: 'POST', json: true, body: JSON.stringify(publicBody), publicBody
@@ -648,6 +695,16 @@ async function driveCorrectionConfirm(context, frame) {
   if (frame.name !== 'create_task') {
     throw new VerificationFailure(`correction.unsupported-confirm-${frame.name}`)
   }
+  if (['create-entry-form', 'correction-prefix-transcript'].includes(context.config.caseName)) {
+    const before = await context.api.request('ai.run.before-confirm', `/api/ai/runs/${encodeURIComponent(frame.runId)}`, {expected: [200]})
+    const detail = dataOf(before)
+    await context.evidence.json(`${context.config.caseName}-before-confirm.json`, {
+      context: checkValueEvidence(detail?.snapshot?.context),
+      assistantContent: textEvidence(detail?.snapshot?.assistantContent),
+      finalText: textEvidence(detail?.snapshot?.finalText),
+      inFlightToolCallIds: (detail?.snapshot?.inFlightToolCalls ?? []).map((call) => call.toolCallId)
+    })
+  }
   const response = await context.api.request('ai.confirm', '/api/ai/confirm', {
     method: 'POST',
     json: true,
@@ -656,6 +713,121 @@ async function driveCorrectionConfirm(context, frame) {
   })
   const body = dataOf(response)
   context.confirmResults.push({toolCallId: frame.toolCallId, accepted: body?.accepted === true, approved: body?.approved === true})
+}
+
+async function driveCreateEntryConfirmDecision(context, frame) {
+  if (!isApprovedChainVariant(context.config.createEntryVariant)) {
+    await driveCorrectionConfirm(context, frame)
+    return
+  }
+  const before = await context.api.request('approved-chain.before-confirm', `/api/ai/runs/${encodeURIComponent(frame.runId)}`,
+    {expected: [200]})
+  const snapshot = dataOf(before)?.snapshot
+  const park = {name: frame.name, visibleText: publicText(context.driver),
+    assistantContent: snapshot?.assistantContent ?? null, finalText: snapshot?.finalText ?? null,
+    context: snapshot?.context ?? null}
+  context.parkEvidence.push(park)
+  await context.evidence.json(`approved-chain-before-${context.parkEvidence.length}.json`, {
+    name: park.name,
+    visibleText: textEvidence(park.visibleText),
+    assistantContent: textEvidence(park.assistantContent),
+    finalText: textEvidence(park.finalText),
+    context: checkValueEvidence(park.context)
+  })
+  const response = await context.api.request('ai.confirm', '/api/ai/confirm', {
+    method: 'POST', json: true,
+    body: JSON.stringify({runId: frame.runId, toolCallId: frame.toolCallId, approved: true, reason: 'approved-chain HITL'}),
+    expected: [200]
+  })
+  const body = dataOf(response)
+  context.confirmResults.push({name: frame.name, toolCallId: frame.toolCallId,
+    accepted: body?.accepted === true, approved: body?.approved === true})
+}
+
+async function captureCreatedTaskId(context) {
+  const baseline = await taskBaseline(context.api)
+  const created = baseline.taskIds.filter((id) => !context.businessBefore.taskIds.includes(id))
+  if (created.length !== 1) throw new VerificationFailure('approved-chain.created-task-id-invalid')
+  context.fixtureTaskId = created[0]
+}
+
+async function captureCreatedJobId(context) {
+  const baseline = await taskBaseline(context.api)
+  const created = baseline.jobIds.filter((id) => !context.businessBefore.jobIds.includes(id))
+  if (created.length !== 1) throw new VerificationFailure('approved-chain.created-job-id-invalid')
+  context.createdJobId = created[0]
+}
+
+async function driveApprovedChainFrontend(context, frame) {
+  const args = frontendToolArguments(frame)
+  const purpose = args.form?.purpose
+  let result
+  if (frame.name === 'navigate_to') {
+    result = JSON.stringify({page: args.page ?? 'export', taskId: context.fixtureTaskId})
+  } else if (frame.name === 'generative_form' && purpose === 'SELECT_DEFINITIONS') {
+    await context.api.request('approved-chain.host-select', `/api/tasks/${context.fixtureTaskId}/select-defs`, {
+      method: 'POST', json: true, body: JSON.stringify({defCodes: ['CURRENCY']}), expected: [200]
+    })
+    result = JSON.stringify({defCodes: ['CURRENCY']})
+  } else if (frame.name === 'select_definitions') {
+    await context.api.request('approved-chain.select', `/api/tasks/${context.fixtureTaskId}/select-defs`, {
+      method: 'POST', json: true, body: JSON.stringify({defCodes: ['CURRENCY']}), expected: [200]
+    })
+    result = JSON.stringify({defCodes: ['CURRENCY'], remaining: 0})
+  } else if (frame.name === 'confirm_step') {
+    const step = typeof args.step === 'string' && args.step ? args.step : 'EXPORT'
+    await context.api.request('approved-chain.confirm-step', `/api/tasks/${context.fixtureTaskId}/step`, {
+      method: 'PUT', json: true, body: JSON.stringify({step}), expected: [200]
+    })
+    result = JSON.stringify({step, defCode: 'CURRENCY', conditions: {fields: []}, remaining: 0, jobs: [], state: 'ACTIVE'})
+  } else if (frame.name === 'generative_form' && purpose === 'SET_CONDITIONS') {
+    result = JSON.stringify({conditions: ''})
+  } else {
+    throw new VerificationFailure(`approved-chain.unsupported-frontend-${frame.name}-${purpose}`)
+  }
+  const response = await context.api.request('ai.frontend-tool-result', '/api/ai/frontend-tool-result', {
+    method: 'POST', json: true,
+    body: JSON.stringify({runId: frame.runId, toolCallId: frame.toolCallId, result, source: 'api-verification', outcome: 'OK'}),
+    expected: [200]
+  })
+  context.frontendResults.push({name: frame.name, toolCallId: frame.toolCallId, accepted: dataOf(response)?.accepted === true})
+}
+
+async function waitForApprovedChainJob(context) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await context.api.request('approved-chain.job', `/api/jobs/${context.createdJobId}`, {expected: [200]})
+    const status = dataOf(response)?.status
+    if (status === 'COMPLETED') {
+      context.approvedJobStatus = status
+      return
+    }
+    if (['FAILED', 'CANCELLED'].includes(status)) throw new VerificationFailure(`approved-chain.job-${status}`)
+    await new Promise((resolve) => setTimeout(resolve, context.config.pollMs))
+  }
+  throw new VerificationFailure('approved-chain.job-timeout')
+}
+
+function createEntryContext(context) {
+  const variant = context.config.createEntryVariant
+  if (variant === 'bound-task') {
+    return {page: 'export', taskType: 'EXPORT', step: 'SELECT_DEFS', taskId: String(context.fixtureTaskId)}
+  }
+  if (variant === 'unrelated') return {page: 'tasks'}
+  const type = variant.startsWith('import-') ? 'IMPORT' : 'EXPORT'
+  return {page: type === 'IMPORT' ? 'import' : variant === 'select-definitions' ? 'tasks' : 'export', taskType: type}
+}
+
+async function driveCreateEntryForm(context, frame) {
+  const variant = context.config.createEntryVariant
+  const values = variant === 'bound-task' ? {chosen: ['CURRENCY']} : {note: '项目说明'}
+  const response = await context.api.request('ai.frontend-tool-result', '/api/ai/frontend-tool-result', {
+    method: 'POST',
+    json: true,
+    body: JSON.stringify({runId: frame.runId, toolCallId: frame.toolCallId,
+      result: JSON.stringify(values), source: 'api-verification', outcome: 'OK'}),
+    expected: [200]
+  })
+  context.frontendResults.push({name: frame.name, toolCallId: frame.toolCallId, accepted: dataOf(response)?.accepted === true})
 }
 
 async function readJsonLines(file) {
@@ -1404,7 +1576,7 @@ function assertCommon(context, expectedUpstreamCount) {
     expectedUpstreamCount, context.upstream.requestCount)
   assertUpstreamEventInvariant(context)
   const after = context.businessAfter
-  if (context.config.caseName !== 'confirm-step-timeline') {
+  if (context.config.caseName !== 'confirm-step-timeline' && !isApprovedChainVariant(context.config.createEntryVariant)) {
     checks.require('business.no-public-side-effects', sameBusinessSnapshot(context.businessBefore, after),
       context.businessBefore, after)
   }
@@ -1653,6 +1825,13 @@ function messageForCase(caseName) {
       return 'tool=confirm_step&args={"step":"QUERY_COND"}'
     case 'correction-prefix-transcript':
       return `创建导出任务 correction=empty-suffix-tool verification=${randomUUID()}`
+    case 'create-entry-form': {
+      const variant = process.env.CREATE_ENTRY_VARIANT
+      if (variant === 'bound-task') return `请选择配置项 create-entry=${variant} verification=${randomUUID()}`
+      if (variant === 'unrelated') return `请补充项目说明 create-entry=${variant} verification=${randomUUID()}`
+      const type = variant.startsWith('import-') ? '导入' : '导出'
+      return `创建${type}配置任务 create-entry=${variant} verification=${randomUUID()}`
+    }
     default:
       throw new VerificationFailure(`unsupported CASE ${caseName}`)
   }
@@ -1669,6 +1848,16 @@ async function prepareConfirmStepFixture(context) {
   await context.api.request('task.select-defs', `/api/tasks/${context.fixtureTaskId}/select-defs`, {
     method: 'POST', json: true, body: JSON.stringify({defCodes: ['CURRENCY']}), expected: [200]
   })
+}
+
+async function prepareBoundTaskFixture(context) {
+  const created = await context.api.request('task.create', '/api/tasks', {
+    method: 'POST', json: true, body: JSON.stringify({type: 'EXPORT', title: `create-entry-bound-${randomUUID()}`}), expected: [201]
+  })
+  context.fixtureTaskId = Number(dataOf(created)?.id)
+  if (!Number.isSafeInteger(context.fixtureTaskId) || context.fixtureTaskId <= 0) {
+    throw new VerificationFailure('create-entry.fixture-id-invalid')
+  }
 }
 
 function assistantSegmentFacts(message) {
@@ -1808,6 +1997,166 @@ function assertCorrectionPrefixTimeline(context) {
     'zero business tasks, jobs or other side effects', context.businessAfter)
 }
 
+function assertCreateEntryForm(context) {
+  const {checks, driver, upstream, runDetail, history} = context
+  const variant = context.config.createEntryVariant
+  const allowed = ['bound-task', 'unrelated'].includes(variant)
+  const expectedRequests = allowed ? 2 : variant === 'multi-park' ? 6 : isApprovedChainVariant(variant) ? 5 : variant === 'export-defcodes' ? 4 : 3
+  checks.require('create-entry.upstream-count', upstream.requestCount === expectedRequests,
+    expectedRequests, upstream.requestCount)
+  checks.require('create-entry.first-form', upstream.requests[0]?.decision?.kind === 'tool_call'
+    && upstream.requests[0].decision.tool === 'generative_form', 'first response attempts generative_form',
+  upstream.requests[0]?.decision)
+  const createDecisions = upstream.requests.filter((request) => request.decision?.kind === 'tool_call'
+    && request.decision.tool === 'create_task')
+  const publicForms = toolFrames(driver).filter((frame) => frame.name === 'generative_form')
+  if (isApprovedChainVariant(variant)) {
+    const multiPark = variant === 'multi-park'
+    const [first, second, third, fourth, fifth, sixth] = upstream.requests
+    const beforeExport = multiPark ? fifth : fourth
+    const beforeExportDisclosed = new Set((beforeExport?.body?.tools ?? []).map((tool) => tool?.function?.name))
+    const beforeExportAccepted = beforeExport?.decision?.tool === 'get_workspace_state'
+      || (beforeExport?.decision?.kind === 'text' && !beforeExportDisclosed.has('get_workspace_state'))
+    const upstreamShape = multiPark ? first?.decision?.tool === 'generative_form'
+      && second?.decision?.kind === 'text' && second.decision.text === MULTI_PARK_CREATE_TEXT
+      && third?.decision?.tool === 'create_task' && fourth?.decision?.tool === 'list_config_defs'
+      && beforeExportAccepted && sixth?.decision?.kind === 'text' && sixth.decision.text === CREATE_ENTRY_FINAL_TEXT
+      : first?.decision?.tool === 'generative_form' && second?.decision?.tool === 'create_task'
+      && third?.decision?.tool === 'list_config_defs' && beforeExportAccepted
+      && fifth?.decision?.kind === 'text' && fifth.decision.text === CREATE_ENTRY_FINAL_TEXT
+    checks.require('approved-chain.upstream-shape', upstreamShape,
+    'the approved chain follows disclosed tools and text fallbacks to one final response', upstream.requests.map((request) => request.decision))
+    checks.require('approved-chain.pre-create-form-zero-frames', !publicForms.some((frame) => frame.toolCallId === 'call-stub-1'),
+      'the rejected pre-create form has zero user frames', publicForms)
+    checks.require('approved-chain.two-approved-hitl', createDecisions.length === 1 && context.confirmResults.length === 2
+      && context.confirmResults.every((result) => result.accepted && result.approved)
+      && context.confirmResults[0].name === 'create_task' && context.confirmResults[1].name === 'start_export',
+    'one create_task and one start_export, each approved exactly once', context.confirmResults)
+    checks.require('approved-chain.host-chain-accepted', context.frontendResults.some((result) => result.name === 'navigate_to')
+      && context.frontendResults.filter((result) => result.name === 'generative_form').length === 2
+      && context.frontendResults.every((result) => result.accepted),
+    'host navigation, CURRENCY selection and empty conditions accepted', context.frontendResults)
+    const newTasks = context.businessAfter.taskIds.filter((id) => !context.businessBefore.taskIds.includes(id))
+    const newJobs = context.businessAfter.jobIds.filter((id) => !context.businessBefore.jobIds.includes(id))
+    checks.require('approved-chain.business-completed', context.businessAfter.taskTotal === context.businessBefore.taskTotal + 1
+      && newTasks.length === 1 && newTasks[0] === context.fixtureTaskId
+      && newJobs.length === 1 && newJobs[0] === context.createdJobId && context.approvedJobStatus === 'COMPLETED',
+    'exactly one task and one completed job from the public baseline diff', {
+      before: context.businessBefore, after: context.businessAfter, newTasks, newJobs,
+      taskId: context.fixtureTaskId, jobId: context.createdJobId, jobStatus: context.approvedJobStatus
+    })
+    const finalMessages = (multiPark ? sixth : fifth).body.messages
+    const assistantCallIds = finalMessages.filter((message) => message?.role === 'assistant')
+      .flatMap((message) => (message.tool_calls ?? []).map((call) => call.id))
+    const toolResponseIds = finalMessages.filter((message) => message?.role === 'tool')
+      .map((message) => message.tool_call_id)
+    checks.require('approved-chain.fifth-request-tool-pairs', canonicalJson(assistantCallIds) === canonicalJson(toolResponseIds),
+      'the fifth model request preserves assistant/tool-response pairing', {assistantCallIds, toolResponseIds})
+    const finalCount = (text) => text.split(CREATE_ENTRY_FINAL_TEXT).length - 1
+    checks.require('approved-chain.single-final', finalCount(publicText(driver)) === 1
+      && finalCount(runDetail?.snapshot?.finalText ?? '') === 1
+      && finalCount(historyAssistants(context).map(messageText).join('')) === 1,
+    'no duplicate final response in SSE, finalText or history')
+    if (variant === 'multi-park') assertMultiPark(context)
+    return
+  }
+  if (allowed) {
+    checks.require('create-entry.allowed-form-submitted', publicForms.some((frame) => frame.type === 'frontend_tool_request')
+      && context.frontendResults.length === 1 && context.frontendResults[0].accepted
+      && createDecisions.length === 0 && context.confirmResults.length === 0,
+    'bound/unrelated form is submitted without create_task', {publicForms, frontendResults: context.frontendResults})
+    return
+  }
+  checks.require('create-entry.zero-form-frames', publicForms.length === 0,
+    'pre-create form has no tool/start/result/frontend frames', publicForms)
+  checks.require('create-entry.one-create-hitl-rejected', createDecisions.length === 1
+    && context.confirmResults.length === 1 && context.confirmResults[0].accepted && !context.confirmResults[0].approved,
+  'exactly one create_task HITL, rejected without business creation', {
+    createDecisions: createDecisions.map((request) => request.decision),
+    confirmResults: context.confirmResults
+  })
+  const rejectionRequest = upstream.requests[1]
+  const toolResults = rejectionRequest.body.messages.filter((message) => message?.role === 'tool')
+  checks.require('create-entry.structured-rejection-guides-create', toolResults.some((message) =>
+    String(message.content ?? '').includes('FORM_SLOTS_ALREADY_KNOWN')
+    && String(message.content ?? '').includes('create_task')),
+  'model receives existing zero-side-effect rejection with create_task guidance', toolResults.map((message) => ({
+    toolCallId: message.tool_call_id,
+    content: textEvidence(String(message.content ?? ''))
+  })))
+  if (variant === 'export-defcodes') {
+    const correctionRequest = upstream.requests[2]
+    const correctionMessages = correctionRequest.body.messages.filter((message) => message?.role === 'user'
+      && String(message.content ?? '').includes('请调用一次 create_task'))
+    const prefix = '我需要先确认一些信息才能创建导出任务。'
+    const historyBody = historyAssistants(context).map(messageText).join('')
+    const count = (text) => text.split(prefix).length - 1
+    checks.require('create-entry.correction-prefix-once', correctionMessages.length === 1
+      && count(publicText(driver)) === 1 && count(runDetail?.snapshot?.finalText ?? '') === 1 && count(historyBody) === 1,
+    'one existing create_task correction and one prefix in SSE/finalText/history', {
+      correctionCount: correctionMessages.length,
+      publicPrefixCount: count(publicText(driver)),
+      runPrefixCount: count(runDetail?.snapshot?.finalText ?? ''),
+      historyPrefixCount: count(historyBody)
+    })
+  }
+}
+
+function assertMultiPark(context) {
+  const {checks, driver, upstream, runDetail} = context
+  checks.require('multi-park.two-nonempty-parks', context.parkEvidence.length === 2
+    && context.parkEvidence[0].name === 'create_task' && context.parkEvidence[0].visibleText === MULTI_PARK_BEFORE_CREATE_TEXT
+    && context.parkEvidence[1].name === 'start_export' && context.parkEvidence[1].visibleText === MULTI_PARK_BEFORE_EXPORT_TEXT,
+  'create_task and start_export each observe the complete non-empty text emitted before that park', context.parkEvidence)
+  const pairEvidence = upstream.requests.slice(1).map((request) => {
+    const assistantCallIds = request.body.messages.filter((message) => message?.role === 'assistant')
+      .flatMap((message) => (message.tool_calls ?? []).map((call) => call.id))
+    const toolResponseIds = request.body.messages.filter((message) => message?.role === 'tool')
+      .map((message) => message.tool_call_id)
+    return {id: request.id, assistantCallIds, toolResponseIds, paired: canonicalJson(assistantCallIds) === canonicalJson(toolResponseIds)}
+  })
+  checks.require('multi-park.every-resume-tool-pairs', pairEvidence.every((request) => request.paired),
+    'every request after a suspension preserves all assistant/tool-response pairs', pairEvidence)
+  const createTexts = (messages) => messages.filter((message) => message?.role === 'assistant'
+    && (message.tool_calls ?? []).some((call) => call.function?.name === 'create_task')).map((message) => message.content)
+  const fourthCreateTexts = createTexts(upstream.requests[3].body.messages)
+  const sixthMessages = upstream.requests[5].body.messages
+  const sixthCreateTexts = createTexts(sixthMessages)
+  const sixthOrdinaryTexts = sixthMessages.filter((message) => message?.role === 'assistant'
+    && (message.tool_calls ?? []).some((call) => call.function?.name === 'list_config_defs')).map((message) => message.content)
+  const sixthPlainTexts = sixthMessages.filter((message) => message?.role === 'assistant'
+    && (message.tool_calls ?? []).length === 0).map((message) => message.content)
+  const prefixCount = sixthMessages.filter((message) => message?.role === 'assistant')
+    .reduce((total, message) => total + String(message.content ?? '').split(MULTI_PARK_CORRECTION_PREFIX_TEXT).length - 1, 0)
+  checks.require('multi-park.resume-text-not-truncated', canonicalJson(fourthCreateTexts) === canonicalJson([MULTI_PARK_CREATE_TEXT])
+    && canonicalJson(sixthCreateTexts) === canonicalJson([MULTI_PARK_CREATE_TEXT])
+    && canonicalJson(sixthOrdinaryTexts) === canonicalJson([MULTI_PARK_ORDINARY_TEXT])
+    && sixthPlainTexts.filter((text) => text === MULTI_PARK_EXPORT_TEXT).length === 1 && prefixCount === 1,
+  'the next model requests retain normalized create text and every later segment without stale parked fullText', {
+    fourthCreateTexts, sixthCreateTexts, sixthOrdinaryTexts, sixthPlainTexts, prefixCount
+  })
+  const historyBody = historyAssistants(context).map(messageText).join('')
+  checks.require('multi-park.full-text-exact', publicText(driver) === MULTI_PARK_FULL_TEXT
+    && runDetail?.snapshot?.finalText === MULTI_PARK_FULL_TEXT && historyBody === MULTI_PARK_FULL_TEXT,
+  MULTI_PARK_FULL_TEXT, {public: publicText(driver), run: runDetail?.snapshot?.finalText, history: historyBody})
+  const entryIds = historyAssistants(context).map((message) => message.entryId)
+  checks.require('multi-park.no-duplicate-entry-ids', new Set(entryIds).size === entryIds.length,
+    'no duplicate ASSISTANT entryId', entryIds)
+  const ownersBySeq = new Map()
+  for (const message of historyAssistants(context)) {
+    for (const segment of message.segments ?? []) {
+      if (segment.kind !== 'text') continue
+      const owners = ownersBySeq.get(segment.seq) ?? new Set()
+      owners.add(message.entryId)
+      ownersBySeq.set(segment.seq, owners)
+    }
+  }
+  const shared = [...ownersBySeq].filter(([, owners]) => owners.size > 1)
+    .map(([seq, owners]) => ({seq, entryIds: [...owners]}))
+  checks.require('multi-park.no-shared-text-entry-owner', shared.length === 0,
+    'no text segment is owned by two different persisted ASSISTANT entries', shared)
+}
+
 async function runCase(context) {
   const created = await context.api.request('session.create', '/api/ai/session', {method: 'POST', json: true, expected: [200]})
   const sessionId = created.body?.sessionIdText ?? created.body?.data?.sessionIdText
@@ -1816,6 +2165,10 @@ async function runCase(context) {
   if (context.config.caseName === 'confirm-step-timeline') {
     context.cleanupBusinessBaseline = await taskBaseline(context.api)
     await prepareConfirmStepFixture(context)
+  }
+  if (context.config.caseName === 'create-entry-form' && context.config.createEntryVariant === 'bound-task') {
+    context.cleanupBusinessBaseline = await taskBaseline(context.api)
+    await prepareBoundTaskFixture(context)
   }
   context.businessBefore = await taskBaseline(context.api)
   await context.evidence.json('business-before.json', context.businessBefore)
@@ -1835,6 +2188,11 @@ async function runCase(context) {
   await collectUpstreamEvidence(context)
   const expectedRequests = context.config.caseName === 'correction-prefix-transcript' ? 4
     : context.config.caseName === 'confirm-step-timeline' ? 3
+    : context.config.caseName === 'create-entry-form'
+      ? ['bound-task', 'unrelated'].includes(context.config.createEntryVariant) ? 2
+        : context.config.createEntryVariant === 'multi-park' ? 6
+        : isApprovedChainVariant(context.config.createEntryVariant) ? 5
+        : context.config.createEntryVariant === 'export-defcodes' ? 4 : 3
     : ['late-reasoning', 'second-tool-aggregate'].includes(context.config.caseName) ? 2 : 1
   assertCommon(context, expectedRequests)
   switch (context.config.caseName) {
@@ -1858,6 +2216,9 @@ async function runCase(context) {
       break
     case 'correction-prefix-transcript':
       assertCorrectionPrefixTimeline(context)
+      break
+    case 'create-entry-form':
+      assertCreateEntryForm(context)
       break
     default:
       throw new VerificationFailure(`unsupported CASE ${context.config.caseName}`)
@@ -2045,16 +2406,26 @@ async function expectedLogAssociations(logLines, context) {
     expected.backend = association.expectedBackend
     expected.stub = association.expectedStub
   }
-  if (context.config.caseName === 'correction-prefix-transcript') {
+  if (context.config.caseName === 'correction-prefix-transcript'
+    || (context.config.caseName === 'create-entry-form'
+      && !['bound-task', 'unrelated'].includes(context.config.createEntryVariant)
+      && !isApprovedChainVariant(context.config.createEntryVariant))) {
     const message = `resume batch stops on first error runId=${context.runId} upstream tool=create_task outcome=rejected code=null; remaining entries become SKIPPED`
     const indexes = logLines.backend.flatMap((line, index) => line.endsWith(message) ? [index] : [])
     for (const index of indexes) expected.backend.add(index)
     context.checks.add('correction.rejection-warning-observed', indexes.length === 1,
       'one expected warning for the deliberate create_task rejection', {count: indexes.length, lines: indexes.map((index) => index + 1)})
   }
+  if (context.config.caseName === 'create-entry-form' && !['bound-task', 'unrelated'].includes(context.config.createEntryVariant)) {
+    const message = `frontend tool arguments rejected by the condition loop [contract=frontend tool arguments rejected by condition loop] runId=${context.runId} tool=generative_form code=FORM_SLOTS_ALREADY_KNOWN reasonCount=2 (not parked, not sent, not executed)`
+    const indexes = logLines.backend.flatMap((line, index) => line.endsWith(message) ? [index] : [])
+    for (const index of indexes) expected.backend.add(index)
+    context.checks.add('create-entry.rejection-warning-observed', indexes.length === 1,
+      'one expected warning for the deterministic pre-create form rejection', {count: indexes.length, lines: indexes.map((index) => index + 1)})
+  }
   // 隔离单实例没有 lease 设施时，本 run 首次写状态会固定出现一条 RunStore lease-less WARN。
   // 只备案"本 runId + 完整固定文案 + WARN 级别"的这一条，其他 WARN/ERROR 一律仍是 UNEXPECTED。
-  const directDriveCases = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate', 'correction-prefix-transcript']
+  const directDriveCases = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate', 'correction-prefix-transcript', 'create-entry-form']
   const expectedMessage = `lease-less write runId=${context.runId}: fence advanced to epoch=1 (write allowed without lease; no resume-authority semantics; check lease view if this is a stale write after owner change)`
   const warnLevel = /^\d{4}-\d{2}-\d{2}T\S+\s+WARN\s+/
   const indexes = logLines.backend.flatMap((line, index) => warnLevel.test(line) && line.endsWith(expectedMessage) ? [index] : [])
@@ -2082,7 +2453,7 @@ async function collectLogEvidence(context) {
     logLines[name] = logs[name].text.split(/\r?\n/)
   }
   const expected = await expectedLogAssociations(logLines, context)
-  const expectedClassification = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate', 'correction-prefix-transcript'].includes(context.config.caseName)
+  const expectedClassification = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate', 'correction-prefix-transcript', 'create-entry-form'].includes(context.config.caseName)
     ? 'EXPECTED_DIRECT_DRIVE'
     : 'EXPECTED_CANCELLATION'
   for (const name of ['backend', 'stub']) {
@@ -2182,7 +2553,8 @@ const context = {
   logOffsets: null,
   fixtureTaskId: null,
   frontendResults: [],
-  confirmResults: []
+  confirmResults: [],
+  parkEvidence: []
 }
 const services = new ServiceManager(context)
 let fatal = null

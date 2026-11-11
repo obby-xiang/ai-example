@@ -167,10 +167,11 @@ class GenerativeFormGuardSlotsTest {
 	@Test
 	void explicitGeneralClarifyIsNotOverriddenByShape() {
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
-				definitionSelectionForm("GENERAL_CLARIFY"), context(List.of("CURRENCY"), List.of()));
+				definitionSelectionForm("GENERAL_CLARIFY"),
+				AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, Map.of()));
 
 		assertThat(verdict.accepted())
-			.as("显式 GENERAL_CLARIFY 不因形状被改判为选择表单")
+			.as("已绑定任务时，显式 GENERAL_CLARIFY 不因形状被改判为选择表单")
 			.isTrue();
 	}
 
@@ -202,13 +203,13 @@ class GenerativeFormGuardSlotsTest {
 		TaskSlots slots = new TaskSlots(null, defCodes, conditions);
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(TaskSlots.EXTRA_KEY, slots.toMap());
-		return AiContext.of("tasks", null, null, null, extra);
+		return AiContext.of("tasks", null, null, 42L, extra);
 	}
 
 	private static AiContext context(Map<String, Object> slots) {
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(TaskSlots.EXTRA_KEY, slots);
-		return AiContext.of("tasks", null, null, null, extra);
+		return AiContext.of("tasks", null, null, 42L, extra);
 	}
 
 	private String form(String purpose, String fieldKey) {

@@ -151,6 +151,15 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 				this.toolCallsPresent, toolCallStates != null, this.segmentsPresent);
 	}
 
+	public TranscriptEntry withContent(String text, String reasoning) {
+		return new TranscriptEntry(this.entryId, this.kind, this.runId, this.turnStartedAtMs, this.atMs,
+				text, reasoning, this.stopped, this.truncated, this.toolCalls, this.toolCallStates,
+				this.toolCallId, this.name, this.kind2, this.status, this.result, this.code,
+				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
+				this.errorCode, this.errorMessage, this.outcome, this.errorCardKey, this.unconfirmed, this.segments,
+				this.toolCallsPresent, this.toolCallStatesPresent, this.segmentsPresent);
+	}
+
 	public TranscriptEntry withSegments(List<SegmentView> segments) {
 		return new TranscriptEntry(this.entryId, this.kind, this.runId, this.turnStartedAtMs, this.atMs,
 				this.text, this.reasoning, this.stopped, this.truncated, this.toolCalls, this.toolCallStates,

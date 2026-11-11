@@ -48,10 +48,11 @@ import java.util.Set;
  * <h2>槽位放行（2026-10-28，任务槽位批）</h2>
  * 下发前在<b>原 schema 校验之后</b>再看 {@code purpose} 与 {@code AiContext.extra[taskSlots]}：
  * 槽位已确定的收集表单没有真实缺口 ⇒ 拒绝下发（{@code FORM_SLOTS_ALREADY_KNOWN}，零副作用），
- * 把模型引回 {@code select_definitions} / {@code set_condition}。缺槽位、歧义与
- * {@code GENERAL_CLARIFY} 一律放行 —— 未知配置仍可用表单。
+ * 把模型引回 {@code select_definitions} / {@code set_condition}。缺槽位、歧义与真实
+ * {@code GENERAL_CLARIFY} 放行 —— 但未绑定任务的创建入口不先收集配置项/条件。
  * <p><b>缺省 purpose 只在结构明确时推断</b>（{@code optionsFrom.sourceId=definitions} → 选择，
  * {@code scenario=FILTER} → 条件），显式 {@code GENERAL_CLARIFY} 不被形状覆盖；标题/label 不参与判断。
+ * 创建入口例外只认 purpose、defCodes/conditions 字段键与 definitions 数据源。
  * 上下文由
  * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 传入；没有上下文时
  * （既有单测/兼容调用）槽位与步骤规则整体跳过。
@@ -143,18 +144,20 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return Verdict.rejectIssues(GenerativeFormRules.SCHEMA_REJECTED,
 					"表单 schema 未通过白名单校验，工具未执行（未向前端下发表单）", issues);
 		}
-		return inspectSlots(FormPurposes.resolve(arguments.get("form")),
+		JsonNode form = arguments.get("form");
+		return inspectSlots(FormPurposes.resolve(form), form,
 				TaskSlots.fromExtra(context == null ? null : context.getExtra()),
 				context == null ? null : context.getStep(),
 				context == null ? null : context.getExtra(),
-				context == null ? null : context.getTaskId());
+				context == null ? null : context.getTaskId(),
+				context == null ? null : context.getPage());
 	}
 
 	/**
 	 * 槽位放行：purpose 与已解析槽位（以及当前步骤）的组合决定"这张表还有没有真实缺口"。
 	 *
 	 * <p>拒绝是<b>零副作用</b>的（调用方不挂起、不下发、不认领、不记台账），模型收到可读码与
-	 * 下一步指引后可按规则 29 做一次不同的纠正；槽位缺失/歧义与 {@code GENERAL_CLARIFY} 一律放行。
+	 * 下一步指引后可按规则 29 做一次不同的纠正；创建入口的配置收集例外见 {@link #preCreateVerdict}。
 	 *
 	 * <p>本批（2026-10-29 闭环批）新增两条：
 	 * <ul>
@@ -164,8 +167,12 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 * 拒绝并指引按既有步骤链继续；步骤未知时按槽位规则兼容放行（未知 ≠ 关闭）。</li>
 	 * </ul>
 	 */
-	private Verdict inspectSlots(String purpose, TaskSlots slots, String step, Map<String, Object> extra,
-			Long taskId) {
+	private Verdict inspectSlots(String purpose, JsonNode form, TaskSlots slots, String step, Map<String, Object> extra,
+			Long taskId, String page) {
+		Verdict preCreate = preCreateVerdict(purpose, form, taskId, page);
+		if (preCreate != null) {
+			return preCreate;
+		}
 		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose)) {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"条件表单由宿主统一发放，本次模型表单未下发（零副作用）",
@@ -204,6 +211,37 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return conditionStep;
 		}
 		return Verdict.accept();
+	}
+
+	private static Verdict preCreateVerdict(String purpose, JsonNode form, Long taskId, String page) {
+		if (taskId != null || !Set.of("tasks", "export", "import").contains(page) || !isCreationCollection(purpose, form)) {
+			return null;
+		}
+		List<String> reasons = List.of(
+				"当前尚未绑定任务，配置项和筛选条件由创建后的任务向导收集，不是创建前的缺口",
+				"下一步：EXPORT 调用 create_task(type=EXPORT, conditions={})；IMPORT 调用 create_task(type=IMPORT)；"
+						+ "defCodes 未知时省略，不要再用表单或文字追问");
+		return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
+				"创建任务前不收集配置项或筛选条件，表单未下发（工具未执行、未向前端下发表单）", reasons,
+				List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN, "请先创建任务，再在任务向导中收集配置")), null);
+	}
+
+	private static boolean isCreationCollection(String purpose, JsonNode form) {
+		if (GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS.equals(purpose)
+				|| GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose)) {
+			return true;
+		}
+		if (!FormPurposes.GENERAL_CLARIFY.equals(purpose)) {
+			return false;
+		}
+		for (JsonNode field : form.path("fields")) {
+			String key = field.path("key").asText();
+			if ("defCodes".equals(key) || "conditions".equals(key)
+					|| "definitions".equals(field.path("optionsFrom").path("sourceId").asText())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static Verdict conditionFactsVerdict(String purpose, TaskSlots slots, Map<String, Object> extra, Long taskId) {

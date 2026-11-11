@@ -895,7 +895,8 @@ public class AiTools {
      * <li><b>槽位放行</b>（下发前，2026-10-28）：{@code purpose=SELECT_DEFINITIONS} 且配置项已确定、
      * 或 {@code purpose=SET_CONDITIONS} 且条件已覆盖全部配置项 ⇒ {@code FORM_SLOTS_ALREADY_KNOWN}
      * 且<b>不挂起、不下发</b>（零副作用），把模型引回 select_definitions / set_condition；缺槽位、
-     * 歧义与 {@code GENERAL_CLARIFY} 放行（2026-10-29 追加：{@code TASK_TYPE} 且任务类型已确定、
+     * 歧义与真实 {@code GENERAL_CLARIFY} 放行，但未绑定任务的创建入口不先收集配置项/条件
+     * （2026-10-29 追加：{@code TASK_TYPE} 且任务类型已确定、
      * {@code SET_CONDITIONS} 且当前步骤已在 {@code EXPORT}/之后，同样零副作用拒绝）；</li>
      * <li><b>回灌类型复核</b>（回灌时）：值必须与 schema 的类型逐字段相符（number 是数、date 是
      * {@code yyyy-MM-dd} 合法日期、enum/multi_select 的值必须在选项内、未知字段拒绝、必填缺失拒绝），
