@@ -101,8 +101,6 @@ export interface TaskFile {
   defCode: string
   /** TEMPLATE / UPLOAD / EXPORT */
   fileType: 'TEMPLATE' | 'UPLOAD' | 'EXPORT' | string
-  storagePath: string
-  originalPath?: string | null
   fileName?: string | null
   rowCount?: number | null
   version?: number

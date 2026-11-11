@@ -683,13 +683,13 @@ test.describe('@stub R 刷新恢复', () => {
 
   /**
    * R-04 刷新后立刻发新消息 → 409 收敛：幻影气泡回收、草稿只留 1 份、提示只 1 条、
-   * 409 载荷带 runId + reattach 线索。
+   * 409 载荷只带恢复所需的 runId，不重复返回 reattach 路径。
    *
    * 复现面 = 蓝本原话「刷新后 1s 内发送」：真 reload 后把恢复请求（history / runs/current）
    * 延迟 2.5s，发送抢先到达后端 ⇒ 必得 409。这是同一页签内的真实竞态，不靠第二个页签
    * （第二页签会因页签所有权切到新会话，那是 M 域口径）。
    */
-  test('E2E-R04 刷新后抢发：409 带 runId/reattach，零幻影气泡，提示与草稿各 1 份', async ({ page, request }) => {
+  test('E2E-R04 刷新后抢发：409 只有 runId，零幻影气泡，提示与草稿各 1 份', async ({ page, request }) => {
     await openApp(page)
     await sendMessage(page, P('turn-text stall-frames=2500 R04-在途'))
     await expect.poll(async () => (await assistantText(page)).length, { timeout: 20_000 }).toBeGreaterThan(10)
@@ -716,11 +716,11 @@ test.describe('@stub R 刷新恢复', () => {
     await page.click('[data-testid="send-btn"]')
     const response = await conflict
 
-    // ① 409 载荷：runId + reattach 线索（前端据此可改走 /events/{runId}）
+    // ① 409 载荷：runId 足以经既有 events 客户端重挂，不再重复返回路径
     const body = (await response.json()) as Record<string, unknown>
     expect(String(body.code)).toBe('SESSION_BUSY')
     expect(String(body.runId ?? '').length).toBeGreaterThan(0)
-    expect(String(body.reattach ?? '')).toContain('/api/ai/events/')
+    expect(body).not.toHaveProperty('reattach')
     const heldRunId = String(body.runId)
 
     // ② 用户气泡不新增（幻影回收）：历史 1 条 user + 在途 1 条 assistant = 2 条气泡

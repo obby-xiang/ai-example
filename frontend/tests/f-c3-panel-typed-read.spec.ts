@@ -194,7 +194,7 @@ describe('F-C3 · 409 回执只认 busyRun', () => {
     const wrapper = await mountPanel([textMessage()], {
       notice: '这条消息没有发出去，请稍后再试。',
       noticeCode: 'ai.notice.sendFailed',
-      busyRun: { runId: 'run-busy', reattach: null }
+      busyRun: { runId: 'run-busy' }
     })
     const button = wrapper.find('[data-testid="return-active-run"]')
     expect(button.exists()).toBe(true)

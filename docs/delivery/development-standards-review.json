@@ -5746,6 +5746,53 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "真实单次correction prefix、49字后缀、392字终答、工具调用与segments精确对账，不按长度或话术做生产特判。"},
         "verification-review": {"status": "checked", "reason": "agent-1236最终可提交；精确转录、普通late-reasoning及无usage/usage delta/L1/HardTrim-wrap-up/映射失配原子性均有独立进程RED/GREEN；主会话IDEA内置Maven编译BUILD SUCCESS；真实模型、浏览器、Cluster和其他场景NOT_RUN，待DeepSeek独立复测。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c30298a4e184565a75b00f82e2ca0ece16c4a466f1b52d769c63e55f91787708",
+      "status": "reviewed",
+      "reason": "逐hunk复核内部API路径、存储路径和readiness绝对目录清理；独立审查agent-1239两轮返修后代码通过，生产构建由主会话实际复验。",
+      "reviewedAt": "2026-11-11T14:37:41+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1239、施工agent-1238",
+      "specChanges": [
+        {
+          "change": "409/202及两类SSE请求不再下发reattach/callback内部API路径，恢复与回灌统一凭runId/toolCallId和既有API client完成。",
+          "reason": "后端无需感知前端可推导的内部路由，删除重复契约但不删除恢复、确认和工具回灌能力。",
+          "impact": "手动/自动重挂、HITL确认和前端工具结果路径不变，相关类型与测试同步断言字段缺失及业务标识保留。"
+        },
+        {
+          "change": "TaskFile存储键不再通过JSON API输出，readiness仅返回状态和安全固定诊断文本。",
+          "reason": "客户端不需要服务端存储实现细节或绝对目录，异常类名和消息也不应成为诊断响应。",
+          "impact": "数据库列、文件读写和taskId+defCode下载不变；非法路径、IO及运行时异常真实DOWN且不泄露路径。"
+        },
+        {
+          "change": "navigate_to/page、context.page/pageId、ProblemDetail.instance和诊断页面上下文仅登记低优先级候选项。",
+          "reason": "这些事项涉及导航协议、业务上下文和诊断契约，不能按简单删字段处理，用户未批准施工。",
+          "impact": "本批不修改其生产行为；任务看板明确暂不施工、可能不修改。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "仅删除两类SSE callback说明字段，业务帧和流程不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "三处响应删除reattach，保留runId、状态码及恢复字段；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/health/StorageReadinessProbe.java", "status": "checked", "reason": "统一路径与异常边界，真实UP/DOWN和固定安全文本，不返回绝对目录或异常细节；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/task/entity/TaskFile.java", "status": "checked", "reason": "Jackson隐藏两个存储路径，JPA列和服务端读写保留；已IDEA Reformat。"},
+        {"path": "frontend/src/api/http.ts", "status": "checked", "reason": "响应契约注释不再包含reattach，运行行为不变。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "删除冗余路径校验和保存，手动/自动恢复仍只凭runId调用既有reattachRun。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "AiBusyRunRef删除未消费路径属性，runId身份保留。"},
+        {"path": "frontend/src/types/api.ts", "status": "checked", "reason": "SESSION_BUSY契约删除reattach并保留runId/unknown/degraded约束。"},
+        {"path": "frontend/src/types/sse.ts", "status": "checked", "reason": "两类请求帧删除无消费者callback可选属性。"},
+        {"path": "frontend/src/types/task.ts", "status": "checked", "reason": "文件元数据类型移除服务端存储路径，下载所需ID字段不变。"},
+        {"path": "docs/research/设计-后端路径耦合收敛-2026-11-11.md", "status": "checked", "reason": "记录已清理契约、真实RED/GREEN、生产构建及基线失败边界，剩余四项仅低优先登记。"},
+        {"path": "docs/任务看板.md", "status": "checked", "reason": "四项后续设计议题统一低优先级、暂不施工、可能不修改，未形成新施工授权。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有SSE_PATHS、reattachRun、AI API client、Jackson和readiness探针，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "十个生产源码文件均经IDEA Reformat，删除字段、注解与异常边界逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "readiness异常真实DOWN，不返回异常类名/消息/路径，不包装UP；既有受控日志和失败可观测性保留。"},
+        "toc-interaction": {"status": "checked", "reason": "只收敛技术路径输出，恢复、确认、工具回灌、下载及用户提示不变，无新增心智负担。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "runId/toolCallId身份和既有恢复协议保持，未修改Redis、数据库或并发控制；TaskFile仅JSON序列化隐藏。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文、reasoning、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1239代码复审通过；相关后端单点RED/GREEN、前端Vitest和D08真实浏览器通过，O04及旧API失配测试NOT_RUN；后端Maven BUILD SUCCESS，前端node scripts/build.mjs 3281模块26.48秒成功；npm run typecheck/build基线失败已独立复现且未伪装通过。"}
+      }
     }
   ]
 }

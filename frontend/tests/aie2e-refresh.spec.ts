@@ -232,7 +232,7 @@ describe('R-04（P0）：刷新后立刻发新消息（409）不得留幻影', (
 
     api.chat.mockRejectedValue(new ApiError(
       '该会话已有一轮对话在进行中', 409, 'SESSION_BUSY', {
-        code: 'SESSION_BUSY', runId: 'run-busy', reattach: '/api/ai/events/run-busy'
+        code: 'SESSION_BUSY', runId: 'run-busy'
       }
     ))
     const result = await store.send('刷新后立刻再问一句')

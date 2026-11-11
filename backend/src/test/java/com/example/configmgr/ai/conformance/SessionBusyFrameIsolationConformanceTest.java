@@ -3,9 +3,7 @@ package com.example.configmgr.ai.conformance;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -108,11 +106,7 @@ class SessionBusyFrameIsolationConformanceTest {
 				mock(ChatMemoryRepository.class), this.sessionGate, mock(ConfirmGate.class), this.store, this.registry,
 				mock(CancellationRegistry.class), redisAvailability, this.aiRunExecutor, this.mapper, this.properties,
 				mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
-		// 批① 入口闸门是字段注入（构造器签名不变）：本类真的调 chat()，故必须灌入两个组件，
-		// 否则闸门字段为 null。计数走 FakeRateRedis（单测不起真 Redis），额度远大于本类调用次数。
 		ReflectionTestUtils.setField(this.controller, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(this.controller, "aiRateLimiter",
-				new AiRateLimiter(new FakeRateRedis().redis, this.properties));
 	}
 
 	@AfterEach
@@ -128,22 +122,22 @@ class SessionBusyFrameIsolationConformanceTest {
 		CountDownLatch releaseFirstTurn = new CountDownLatch(1);
 		scriptTurns(firstTurnStarted, releaseFirstTurn);
 
-		ResponseEntity<?> first = this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null), null);
+		ResponseEntity<?> first = this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null));
 		assertThat(first.getStatusCode()).isEqualTo(HttpStatus.OK);
 		assertThat(firstTurnStarted.await(5, TimeUnit.SECONDS)).as("第一轮已开跑（start 帧已出）").isTrue();
 		FrameWire running = awaitWire(1);
 		String runningRunId = this.lastStartedRunId;
 		assertThat(running.types()).containsExactly("start");
 
-		// 同一 sessionId 的第二轮：必须被拒，且回体要能让前端改走重挂（ADR-5）
-		ResponseEntity<?> second = this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null), null);
+		// 同一 sessionId 的第二轮：必须被拒，runId 足以让前端经既有 events 客户端重挂
+		ResponseEntity<?> second = this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null));
 		assertThat(second.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
 		assertThat(second.getBody()).isInstanceOf(Map.class);
 		Map<String, Object> busy = bodyOf(second);
 		assertThat(busy).containsEntry("code", "SESSION_BUSY")
 				.containsEntry("sessionId", SESSION_ID)
 				.containsEntry("runId", runningRunId)
-				.containsEntry("reattach", "/api/ai/events/" + runningRunId);
+				.doesNotContainKey("reattach");
 
 		// 干扰为零：第一轮帧线未多一帧、归档未多一帧、轮次索引未多一条、会话门仍在第一轮手里
 		assertThat(running.types()).as("被拒的请求不得往正在运行的帧流里写任何帧（含第二个 start）")
@@ -169,14 +163,14 @@ class SessionBusyFrameIsolationConformanceTest {
 		CountDownLatch noWait = new CountDownLatch(0);
 		scriptTurns(noWait, noWait);
 
-		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null), null).getStatusCode())
+		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第一轮", null)).getStatusCode())
 				.isEqualTo(HttpStatus.OK);
 		FrameWire firstWire = awaitWire(1);
 		firstWire.awaitType("done", 5000L);
 		String firstRunId = this.lastStartedRunId;
 		awaitSessionRelease();
 
-		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null), null).getStatusCode())
+		assertThat(this.controller.chat(new AiChatRequest(SESSION_ID, "第二轮", null)).getStatusCode())
 				.isEqualTo(HttpStatus.OK);
 		FrameWire secondWire = theWireOfANewRun(firstRunId);
 		secondWire.awaitType("done", 5000L);

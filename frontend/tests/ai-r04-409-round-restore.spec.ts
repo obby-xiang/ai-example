@@ -54,8 +54,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 function sessionBusy(runId: string): ApiError {
   return new ApiError('该会话已有一轮对话在进行中', 409, ErrorCode.SESSION_BUSY, {
     code: 'SESSION_BUSY',
-    runId,
-    reattach: `/api/ai/events/${runId}`
+    runId
   })
 }
 

@@ -359,8 +359,7 @@ describe('批G · G6：在途轮发送零响应 / 409 乐观气泡回收', () =>
     const { ApiError: FreshApiError } = await import('@/api/http')
     api.chat.mockRejectedValue(new FreshApiError('该会话已有一轮对话在进行中', 409, 'SESSION_BUSY', {
       code: 'SESSION_BUSY',
-      runId: 'run-busy',
-      reattach: '/api/ai/events/run-busy'
+      runId: 'run-busy'
     }))
 
     const result = await store.send('再发一条')

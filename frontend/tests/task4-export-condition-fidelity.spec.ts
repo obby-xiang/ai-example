@@ -225,7 +225,7 @@ beforeEach(() => {
   routeHolder.route.query.taskId = '7'
   api.getTask.mockResolvedValue(exportTask())
   api.getFiles.mockResolvedValue([
-    { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', storagePath: '/srv/DEMO.xlsx', fileName: 'DEMO.xlsx', rowCount: 3 }
+    { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 3 }
   ])
   api.downloadFile.mockImplementation((_taskId: number, defCode: string) => Promise.resolve(new Blob([`${defCode}-BYTES`])))
   api.selectDefs.mockResolvedValue({})
@@ -278,8 +278,8 @@ describe('Task 4⑤：条件正常落库时照常启动，且落库的就是界�
 describe('Task 4⑥：保存编辑时只写"内容确实载入过"的结果表格（不得拿空工作簿覆盖导出文件）', () => {
   it('只载入过一个标签页 ⇒ 只写该配置项；未载入的表格不 PUT', async () => {
     api.getFiles.mockResolvedValue([
-      { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', storagePath: '/srv/DEMO.xlsx', fileName: 'DEMO.xlsx', rowCount: 3 },
-      { taskId: 7, defCode: 'OTHER', fileType: 'EXPORT', storagePath: '/srv/OTHER.xlsx', fileName: 'OTHER.xlsx', rowCount: 2 }
+      { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 3 },
+      { taskId: 7, defCode: 'OTHER', fileType: 'EXPORT', fileName: 'OTHER.xlsx', rowCount: 2 }
     ])
     await mountWizard()
     // 前提：只有首个标签页的表格被载入过（导出结果只懒加载 activeTab）

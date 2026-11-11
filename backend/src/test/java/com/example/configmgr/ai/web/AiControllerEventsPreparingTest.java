@@ -4,11 +4,11 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.conformance.FrameContract;
-import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.job.service.JobWatchdog;
@@ -64,10 +64,10 @@ class AiControllerEventsPreparingTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	/** 没有快照的 Store：正是"已 start、快照未建"这段。 */
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	/** 默认没有快照：正是"已 start、快照未建"这段。 */
+	private final RunStore store = mock(RunStore.class);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = mock(RunRegistry.class);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -103,9 +103,9 @@ class AiControllerEventsPreparingTest {
 			.containsEntry("runId", RUN_ID)
 			.containsEntry("degraded", false)
 			.containsEntry("retryAfterMs", 1000L)
-			.containsEntry("reattach", "/api/ai/events/" + RUN_ID)
 			.as("不是错误码：客户端按 preparing 判定")
-			.doesNotContainKey("code");
+			.doesNotContainKey("code")
+			.doesNotContainKey("reattach");
 		assertThat(((Number) body.get("elapsedMs")).longValue()).as("带已用时间（服务端钟）")
 			.isGreaterThanOrEqualTo(10_000L);
 		assertThat(String.valueOf(body.get("message"))).isNotBlank();

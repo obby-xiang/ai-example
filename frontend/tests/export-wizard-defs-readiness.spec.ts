@@ -111,7 +111,7 @@ const DEMO_DEF: ConfigDefinition = {
 }
 
 const FILES = [
-  { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', storagePath: '/srv/DEMO.xlsx', fileName: 'DEMO.xlsx', rowCount: 3 }
+  { taskId: 7, defCode: 'DEMO', fileType: 'EXPORT', fileName: 'DEMO.xlsx', rowCount: 3 }
 ]
 
 function task() {

@@ -363,8 +363,6 @@ export interface SseConfirmRequestFrame extends SseFrameBase {
   args?: string
   /** 与 args 同值（后端同时放了两份，供展示摘要用） */
   summary?: string
-  /** 回调端点说明文本：POST /api/ai/confirm {runId, toolCallId, approved, reason} */
-  callback?: string
   /** H1 确认门预检摘要（可选增量；缺省 = 旧帧，门卡不渲染预检区） */
   preflight?: ToolPreflight | null
   /**
@@ -410,8 +408,6 @@ export interface SseFrontendToolRequestFrame extends SseFrameBase {
   timeoutSeconds?: number
   /** DC-14 T4 同口径：绝对到期时刻（epoch 毫秒）；与 `timeoutSeconds` 成对出现（无上限时缺省）。 */
   expiresAt?: number
-  /** 回调端点说明文本：POST /api/ai/frontend-tool-result {runId, toolCallId, result} */
-  callback?: string
 }
 
 /** 前端工具结果回执。 */

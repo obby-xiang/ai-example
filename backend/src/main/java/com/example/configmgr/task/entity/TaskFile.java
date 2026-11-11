@@ -1,5 +1,6 @@
 package com.example.configmgr.task.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -32,9 +33,11 @@ public class TaskFile {
     @Column(name = "file_type", nullable = false, length = 32)
     private String fileType; // TEMPLATE / UPLOAD / EXPORT
 
+    @JsonIgnore
     @Column(name = "storage_path", nullable = false, length = 512)
     private String storagePath;
 
+    @JsonIgnore
     @Column(name = "original_path", length = 512)
     private String originalPath;
 

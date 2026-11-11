@@ -53,21 +53,24 @@ class StorageReadinessProbe implements ReadinessProbe {
         if (StringUtils.isBlank(configured)) {
             return ProbeResult.down("app.file.storage-path 未配置");
         }
-        Path dir = Path.of(configured);
         try {
+            Path dir = Path.of(configured);
+            if (Files.exists(dir) && !Files.isDirectory(dir)) {
+                return ProbeResult.down("不是目录");
+            }
             if (!Files.isDirectory(dir)) {
                 Files.createDirectories(dir);
             }
             if (!Files.isDirectory(dir)) {
-                return ProbeResult.down(dir.toAbsolutePath() + " 不是目录");
+                return ProbeResult.down("不是目录");
             }
             if (!Files.isWritable(dir)) {
-                return ProbeResult.down(dir.toAbsolutePath() + " 不可写");
+                return ProbeResult.down("不可写");
             }
-            return ProbeResult.up(dir.toAbsolutePath().toString());
+            return ProbeResult.up("可写");
         } catch (IOException | RuntimeException ex) {
             LogThrottler.warn(log, "StorageReadinessProbe.failed", "Storage readiness probe failed", ex);
-            return ProbeResult.down(ex.getClass().getSimpleName());
+            return ProbeResult.down("存储路径不可用");
         }
     }
 

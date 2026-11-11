@@ -1124,8 +1124,6 @@ export interface AiRecoveryGap {
  */
 export interface AiBusyRunRef {
   runId: string
-  /** 后端给的 `/api/ai/events/{runId}`；与 `runId` 不一致时置 null（不指向编造地址） */
-  reattach: string | null
 }
 
 /** 权威 probe 从快照或真实归档末帧读到的终态事实；缺字段 = 未证明。 */

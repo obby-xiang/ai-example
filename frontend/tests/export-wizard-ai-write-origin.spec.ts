@@ -108,7 +108,6 @@ function exportFile() {
     taskId: 7,
     defCode: 'CURRENCY',
     fileType: 'EXPORT',
-    storagePath: 'x',
     fileName: 'CURRENCY.xlsx',
     rowCount: 2
   }

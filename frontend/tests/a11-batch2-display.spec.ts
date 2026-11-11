@@ -305,7 +305,7 @@ describe('批次2 · 409 回到进行中的回答', () => {
     const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '上一轮', streaming: false }])], {
       notice: '这条消息没有发出去，请稍后再试。',
       noticeCode: 'ai.notice.sendFailed',
-      busyRun: { runId: 'run-busy', reattach: null }
+      busyRun: { runId: 'run-busy' }
     })
     const button = wrapper.find('[data-testid="return-active-run"]')
     expect(button.exists()).toBe(true)

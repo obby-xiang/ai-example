@@ -110,6 +110,31 @@ class FileDownloadByteIdentityTest {
     }
 
     @Test
+    void fileListHidesStoragePathsWithoutChangingMetadataOrDownload() throws Exception {
+        long taskId = taskWithDefs("CURRENCY");
+        byte[] uploaded = payload("CURRENCY", 512);
+        upload(taskId, "CURRENCY.xlsx", uploaded);
+
+        String json = this.mockMvc.perform(get("/api/tasks/{taskId}/files", taskId))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        com.fasterxml.jackson.databind.JsonNode file = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(json).path("data").path(0);
+        assertThat(file.path("storagePath").isMissingNode()).isTrue();
+        assertThat(file.path("originalPath").isMissingNode()).isTrue();
+        assertThat(file.path("taskId").asLong()).isEqualTo(taskId);
+        assertThat(file.path("defCode").asText()).isEqualTo("CURRENCY");
+        assertThat(file.path("fileType").asText()).isEqualTo("UPLOAD");
+        assertThat(file.path("fileName").asText()).isEqualTo("CURRENCY.xlsx");
+
+        byte[] downloaded = this.mockMvc
+                .perform(get("/api/tasks/{taskId}/files/download", taskId).param("codes", "CURRENCY"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray();
+        assertThat(sha256(downloaded)).isEqualTo(sha256(uploaded));
+    }
+
+    @Test
     void multipleCodesStillReturnAZipWithOneEntryPerCode() throws Exception {
         long taskId = taskWithDefs("CURRENCY", "DOC_TYPE");
         upload(taskId, "CURRENCY.xlsx", payload("CURRENCY", 300));

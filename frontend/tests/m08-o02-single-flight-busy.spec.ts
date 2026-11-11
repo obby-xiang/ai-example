@@ -60,7 +60,6 @@ function sessionBusy(runId: string): ApiError {
     message: 'busy',
     sessionId: 'sess',
     runId,
-    reattach: `/api/ai/events/${runId}`,
     degraded: false
   })
 }
@@ -196,7 +195,7 @@ describe('O02 · 停止 + 发送（同 tick）与忙提示', () => {
 
     await store.send('继续')
 
-    expect(store.busyRun).toMatchObject({ runId: 'run-live', reattach: '/api/ai/events/run-live' })
+    expect(store.busyRun).toEqual({ runId: 'run-live' })
     expect(store.noticeCode).toBe('ai.notice.sendFailed')
 
     // 停止过 A 轮之后，指回**另一**活动轮的 409 仍是权威忙态
@@ -217,7 +216,7 @@ describe('O02 · 停止 + 发送（同 tick）与忙提示', () => {
     const store = fresh()
     store.messages = [assistantHost()]
     store.activeRunId = 'run-1'
-    store.busyRun = { runId: 'run-1', reattach: null }
+    store.busyRun = { runId: 'run-1' }
 
     store.handleFrame({ type: 'done', runId: 'run-1', seq: 12 } as SseFrame)
 
@@ -228,7 +227,7 @@ describe('O02 · 停止 + 发送（同 tick）与忙提示', () => {
     const store = fresh()
     store.messages = [assistantHost()]
     store.activeRunId = 'run-1'
-    store.busyRun = { runId: 'run-1', reattach: null }
+    store.busyRun = { runId: 'run-1' }
 
     store.handleFrame({ type: 'done', runId: 'run-1', seq: 12, cancelled: true } as SseFrame)
 
@@ -239,7 +238,7 @@ describe('O02 · 停止 + 发送（同 tick）与忙提示', () => {
     const store = fresh()
     store.messages = [assistantHost()]
     store.activeRunId = 'run-1'
-    store.busyRun = { runId: 'run-1', reattach: null }
+    store.busyRun = { runId: 'run-1' }
 
     store.handleFrame({ type: 'error', runId: 'run-1', seq: 12, code: 'UPSTREAM_ERROR', message: 'boom' } as SseFrame)
 

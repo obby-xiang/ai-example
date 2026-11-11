@@ -155,7 +155,7 @@ class AiControllerEventsProbeTest {
 			.andExpect(jsonPath("$.preparing").value(true))
 			.andExpect(jsonPath("$.runId").value(RUN_ID))
 			.andExpect(jsonPath("$.retryAfterMs").value(1000))
-			.andExpect(jsonPath("$.reattach").value("/api/ai/events/" + RUN_ID))
+			.andExpect(jsonPath("$.reattach").doesNotExist())
 			.andExpect(jsonPath("$.degraded").value(false))
 			.andExpect(jsonPath("$.code").doesNotExist());
 

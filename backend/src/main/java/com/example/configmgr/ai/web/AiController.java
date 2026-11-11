@@ -537,7 +537,6 @@ public class AiController {
             body.put("unknown", true);
         } else {
             body.put("runId", busy.runId());
-            body.put("reattach", "/api/ai/events/" + busy.runId());
         }
         body.put("degraded", busy.degraded());
         deny(HttpStatus.CONFLICT, ErrorCodes.SESSION_BUSY, sessionId, busy.runId(), "heldBy",
@@ -1463,7 +1462,6 @@ public class AiController {
         // 已用时间（服务端钟，自归档首帧的 atMs 起算）：客户端只显示真实已用，不伪造进度
         body.put("elapsedMs", elapsedMs);
         body.put("retryAfterMs", PREPARING_RETRY_AFTER_MS);
-        body.put("reattach", "/api/ai/events/" + runId);
         body.put("message", preparingMessage());
         body.put("degraded", false);
         if (isCancelledFlag(runId)) {
@@ -1731,7 +1729,6 @@ public class AiController {
         body.put("message", localize(ErrorCodes.SESSION_BUSY, "该会话已有一轮对话在进行中，请先处理或重挂该轮"));
         body.put("sessionId", sessionId);
         body.put("runId", runId);
-        body.put("reattach", "/api/ai/events/" + runId);
         body.put("duplicateRequest", true);
         body.put("clientRequestId", clientRequestId);
         body.put("degraded", false);

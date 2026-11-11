@@ -3,9 +3,7 @@ package com.example.configmgr.ai.web;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -64,8 +62,6 @@ class ChatSessionBusyUnknownHolderTest {
 
 	private final RunRegistry runRegistry = mock(RunRegistry.class);
 
-	private final FakeRateRedis redis = new FakeRateRedis();
-
 	private final SessionGate sessionGate = mock(SessionGate.class);
 
 	private final AiAvailability availability = mock(AiAvailability.class);
@@ -89,7 +85,7 @@ class ChatSessionBusyUnknownHolderTest {
 	void unknownHolderYieldsNoFabricatedStreamPointer() {
 		when(this.sessionGate.acquire(any(), any())).thenReturn(new SessionGate.Busy(null, true, true));
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		assertThat(response.getStatusCode()).as("状态码不变：仍是「被占用」").isEqualTo(HttpStatus.CONFLICT);
 		Map<String, Object> body = (Map<String, Object>) response.getBody();
@@ -103,20 +99,20 @@ class ChatSessionBusyUnknownHolderTest {
 		verifyNoInteractions(this.runStore);
 	}
 
-	/** 反例（防"一律去掉 reattach"式过度修复）：持有者可知时 ADR-5 的线索必须照旧。 */
+	/** 持有者可知时只返回恢复所需的 runId，不重复返回可推导的路径。 */
 	@Test
 	@SuppressWarnings("unchecked")
-	void knownHolderStillCarriesTheReattachPointer() {
+	void knownHolderStillCarriesOnlyTheRunId() {
 		when(this.sessionGate.acquire(any(), any())).thenReturn(new SessionGate.Busy("run-holder", true));
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
 		Map<String, Object> body = (Map<String, Object>) response.getBody();
 		assertThat(body).isNotNull();
 		assertThat(body).containsEntry("runId", "run-holder")
-			.containsEntry("reattach", "/api/ai/events/run-holder")
-			.containsEntry("degraded", true);
+			.containsEntry("degraded", true)
+			.doesNotContainKey("reattach");
 		assertThat(body).as("持有者可知时不得带 unknown 键").doesNotContainKey("unknown");
 	}
 
@@ -135,7 +131,6 @@ class ChatSessionBusyUnknownHolderTest {
 				new ObjectMapper(), this.properties, mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
 		ReflectionTestUtils.setField(built, "contextFieldGate", new com.example.configmgr.ai.gate.ContextFieldGate());
 		ReflectionTestUtils.setField(built, "securityEvents", new com.example.configmgr.ai.run.SecurityEvents());
 		return built;

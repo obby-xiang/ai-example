@@ -247,11 +247,11 @@ export const STRUCTURED_RESULT_MAX_CHARS = 8000
 /**
  * 409 SESSION_BUSY 的响应体形态。
  *
- * 契约（ADR-5）：**持有者可知时**必须携进行中轮的 `runId` 与 `reattach`。
- * **批次2 口径**：这两个字段只作面板「回到进行中的回答」**手动入口**的入参 —— 用户点击后由
+ * 契约（ADR-5）：**持有者可知时**必须携进行中轮的 `runId`，前端经既有 events 客户端重挂。
+ * **批次2 口径**：该字段只作面板「回到进行中的回答」**手动入口**的入参 —— 用户点击后由
  * store 做**一次**历史对账 + 静默续收（`reattachBusyRun`），**不自动重挂、不轮询**。
- * **持有者不可知**时（会话锁诊断读失败 / 锁已消失、无法给出 runId）后端**不编造**这两个字段：
- * 它们缺省、`unknown` 为 true，其余不变（仍是 409 + `SESSION_BUSY` + `degraded`）。
+ * **持有者不可知**时（会话锁诊断读失败 / 锁已消失、无法给出 runId）后端**不编造**该字段：
+ * `runId` 缺省、`unknown` 为 true，其余不变（仍是 409 + `SESSION_BUSY` + `degraded`）。
  * 此时**不得**自行拼接重挂路径（如 `/api/ai/events/null`），按既有重试/退避恢复即可（无粘滞）。
  */
 export interface SessionBusyConflict {
@@ -261,9 +261,7 @@ export interface SessionBusyConflict {
   /** 进行中那一轮的 runId；持有者可知时必在，不可知时缺省 */
   runId?: string
   degraded?: boolean
-  /** 重挂路径 `/api/ai/events/{runId}`；与 `runId` 同进同缺 */
-  reattach?: string
-  /** 持有者不可知（没有可指向的轮）；与 `runId`/`reattach` 互斥 */
+  /** 持有者不可知（没有可指向的轮）；与 `runId` 互斥 */
   unknown?: boolean
 }
 

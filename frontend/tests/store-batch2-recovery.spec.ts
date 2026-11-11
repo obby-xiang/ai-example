@@ -175,7 +175,7 @@ describe('批次2 · 恢复失败出口（history/current）', () => {
 })
 
 describe('批次2 · 409 回到进行中的回答', () => {
-  it('409：读 runId/reattach 只登记手动入口，不自动重挂、不把 ID 写进用户可见文本', async () => {
+  it('409 只有 runId：登记手动入口且可重挂，不自动重挂、不把 ID 写进用户可见文本', async () => {
     const store = freshStore()
     store.sessionId = 'sess-busy'
     api.chat.mockRejectedValue(new ApiError('busy', 409, 'SESSION_BUSY', {
@@ -183,13 +183,12 @@ describe('批次2 · 409 回到进行中的回答', () => {
       message: 'busy',
       sessionId: 'sess-busy',
       runId: 'run-live',
-      reattach: '/api/ai/events/run-live',
       degraded: false
     }))
 
     await store.send('继续')
 
-    expect(store.busyRun).toMatchObject({ runId: 'run-live', reattach: '/api/ai/events/run-live' })
+    expect(store.busyRun).toEqual({ runId: 'run-live' })
     // 手动入口存在，但**没有**任何自动重挂
     expect(api.reattachRun).not.toHaveBeenCalled()
     // 乐观气泡回收（与既有口径一致：不出现幻影双份）

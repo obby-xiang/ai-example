@@ -94,14 +94,27 @@ class SseChatEmitterFramesTest {
         assertThat(archived).extracting(frame -> frame.get("type"))
                 .containsExactly("confirm_request", "frontend_tool_request", "frontend_tool_request");
         assertThat(archived.get(0)).as("确认卡没有到期时刻（一直等人）")
+                .containsKeys("type", "seq", "atMs", "preflight")
+                .containsEntry("toolCallId", "call-1")
+                .containsEntry("name", "start_import")
+                .containsEntry("args", "{\"taskId\":7}")
+                .containsEntry("summary", "{\"taskId\":7}")
+                .containsEntry("irreversible", false)
                 .doesNotContainKey("expiresAt")
-                .doesNotContainKey("timeoutSeconds");
+                .doesNotContainKey("timeoutSeconds")
+                .doesNotContainKey("callback");
         assertThat((Long) archived.get(1).get("expiresAt"))
                 .isBetween(before + 30_000L, after + 30_000L);
-        assertThat(archived.get(1)).containsEntry("timeoutSeconds", 30);
+        assertThat(archived.get(1)).containsKeys("type", "seq", "atMs")
+                .containsEntry("toolCallId", "call-2")
+                .containsEntry("name", "start_import")
+                .containsEntry("args", "{\"taskId\":7}")
+                .containsEntry("timeoutSeconds", 30)
+                .doesNotContainKey("callback");
         assertThat(archived.get(2)).as("generative_form 无上限：键不出现（与 confirm_request 同口径）")
                 .doesNotContainKey("timeoutSeconds")
-                .doesNotContainKey("expiresAt");
+                .doesNotContainKey("expiresAt")
+                .doesNotContainKey("callback");
     }
 
     /**

@@ -370,7 +370,7 @@ describe('L-83（P1）：409 竞态停止时输入框 == 用户原草稿（不�
       }))
       .mockImplementationOnce(() => new Promise((_resolve, reject) => {
         releaseBusy = () => reject(new ApiError('该会话已有一轮对话在进行中', 409, 'SESSION_BUSY', {
-          code: 'SESSION_BUSY', runId: 'run-l83', reattach: '/api/ai/events/run-l83'
+          code: 'SESSION_BUSY', runId: 'run-l83'
         }))
       }))
 

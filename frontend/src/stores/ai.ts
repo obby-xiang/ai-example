@@ -1327,22 +1327,13 @@ function heartbeatElapsedMs(frame: { elapsedMs?: unknown }): number | null {
   return null
 }
 
-/** 409 回执里的 `reattach` 必须与 `runId` 推出的事件路径一致，否则视为不可信（不指向编造地址）。 */
-function trustedReattachPath(runId: string, reattach: unknown): string | null {
-  if (typeof reattach !== 'string' || reattach === '') {
-    return null
-  }
-  return reattach === `/api/ai/events/${encodeURIComponent(runId)}` ? reattach : null
-}
-
-/** 批次2：409 回执 → 可手动指回的进行中轮（runId 不可用/不可信时返回 null）。 */
+/** 批次2：409 回执 → 可手动指回的进行中轮（runId 不可用时返回 null）。 */
 function readBusyRunRef(error: ApiError): AiBusyRunRef | null {
-  const body = error.bodyAs<{ runId?: unknown; reattach?: unknown; unknown?: unknown }>()
+  const body = error.bodyAs<{ runId?: unknown; unknown?: unknown }>()
   if (!body || body.unknown === true || typeof body.runId !== 'string' || body.runId.trim() === '') {
     return null
   }
-  const runId = body.runId
-  return { runId, reattach: trustedReattachPath(runId, body.reattach) }
+  return { runId: body.runId }
 }
 
 /**
@@ -8987,7 +8978,7 @@ export const useAiStore = defineStore('ai', {
           logCaughtError(error, 'stores/ai.ts:7307')
         const busyConflict = error instanceof ApiError && error.code === ErrorCode.SESSION_BUSY
         const sessionPurged = error instanceof ApiError && error.code === ErrorCode.SESSION_PURGED
-        // 批次2（ADR-5）：409 回执里的 runId/reattach 只作**手动**"回到进行中的回答"入口。
+        // 批次2（ADR-5）：409 回执里的 runId 只作**手动**"回到进行中的回答"入口。
         // 不自动重挂、不轮询；持有者不可知（unknown=true / 无 runId）时不登记，绝不编造地址。
         // O02：还必须是**权威活动运行** —— 本端刚停止的那一轮、已收到终态的轮都不是
         // "上一轮仍在进行中"（那是停止尚未传播的残影 / 已结束的轮），此时只留"没发出去"的提示。

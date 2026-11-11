@@ -3222,7 +3222,6 @@ public class SseChatEmitter {
         // 批4-D（用户 2026-10-23 裁决）：不可撤销位随帧下发（additive；false 也显式给，
         // 前端据此决定是否在卡上叠加复选框 —— 普通确认卡因此一字不动）。
         frame.put("irreversible", pending.isIrreversible());
-        frame.put("callback", "POST /api/ai/confirm {runId, toolCallId, approved, reason}");
         emit(frame);
     }
 
@@ -3259,7 +3258,6 @@ public class SseChatEmitter {
             // T4 同口径（纯增量）：有时限的前端工具一并给出绝对时钟，前端不必用本地常量推断到期时刻。
             frame.put("expiresAt", expiresAtEpochMs(frame, timeoutSeconds));
         }
-        frame.put("callback", "POST /api/ai/frontend-tool-result {runId, toolCallId, result}");
         emit(frame);
     }
 

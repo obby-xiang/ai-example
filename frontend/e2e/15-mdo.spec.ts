@@ -519,7 +519,7 @@ test.describe('@stub D 降级与错误码', () => {
     expect(busy.status).toBe(409)
     expect(busy.body.code).toBe('SESSION_BUSY')
     expect(busy.body.runId).toBe(inFlight)
-    expect(String(busy.body.reattach)).toBe(`/api/ai/events/${inFlight}`)
+    expect(busy.body).not.toHaveProperty('reattach')
     expect(busy.body.degraded).toBe(false)
 
     // 前端零幻影：这条 409 不是页面发的，页面必须仍只有一条轮、且能自己收尾
@@ -787,7 +787,7 @@ test.describe('@stub O 并发与同 tick 竞态', () => {
     expect(busy.status).toBe(409)
     expect(busy.body.code).toBe('SESSION_BUSY')
     expect(String(busy.body.runId ?? '').length).toBeGreaterThan(0)
-    expect(String(busy.body.reattach)).toContain('/api/ai/events/')
+    expect(busy.body).not.toHaveProperty('reattach')
 
     // 页面侧零幻影：仍是一条 user 气泡，收尾正常，无错误红条
     await waitRoundSettled(page, 90_000)

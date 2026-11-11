@@ -191,7 +191,7 @@ function task(id: number, defCodes: string[]) {
 }
 
 function uploadFile(taskId: number, defCode: string) {
-  return { taskId, defCode, fileType: 'UPLOAD', storagePath: `/srv/${defCode}.xlsx`, fileName: `${defCode}.xlsx` }
+  return { taskId, defCode, fileType: 'UPLOAD', fileName: `${defCode}.xlsx` }
 }
 
 /** mount 必须 attachTo：区域注册要求 root 已挂载在当前文档（detached 会被 assertRegionOptions 拒绝）。 */

@@ -355,8 +355,11 @@ class ToolFrameSequenceConformanceTest {
 				.containsEntry("ok", true)
 				.containsEntry("status", PendingToolCall.FRONTEND_RESULT)
 				.containsEntry("messageId", "tool-" + CALL_ID);
-		assertThat(FrameContract.oneOfType(frames, "frontend_tool_request")).containsEntry("callback",
-				"POST /api/ai/frontend-tool-result {runId, toolCallId, result}");
+		assertThat(FrameContract.oneOfType(frames, "frontend_tool_request"))
+				.containsEntry("toolCallId", CALL_ID)
+				.containsEntry("name", "navigate_to")
+				.containsEntry("args", "{\"page\":\"export\"}")
+				.doesNotContainKey("callback");
 		// 前端工具绝不由后端执行：不认领、不记台账、也不产 tool_result 帧
 		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
 		assertThat(this.store.ledger(RUN_ID)).isEmpty();
