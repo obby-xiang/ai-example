@@ -5815,6 +5815,33 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1244可提交；同一npm run typecheck确认5项src生产错误全部消失、src零错误，247项tests旧错误原样保留；node scripts/build.mjs 3281模块26.72秒成功；全量typecheck仍受测试树阻断，未宣称通过。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a3af274eb189eb3677caa194fa729c4e013117692df1eb22fad7230490f8623e",
+      "status": "reviewed",
+      "reason": "逐hunk复核近期遗漏与暂缓事项登记，独立复核agent-1250确认生产归因、测试资产、验证缺口和低优暂缓边界一致。",
+      "reviewedAt": "2026-11-11T21:04:04+08:00",
+      "reviewer": "K3.1 Pro主会话、独立复核agent-1250、登记agent-1251",
+      "specChanges": [
+        {
+          "change": "近期遗漏与暂缓事项形成统一登记，高优生产问题必须待用户明确指令后施工。",
+          "reason": "避免复测稳定失败、转录自动补写未施工和测试资产问题被遗忘或误分类。",
+          "impact": "仅记录事实、证据和状态，不修改生产行为，不形成施工授权。"
+        }
+      ],
+      "files": [
+        {"path": "docs/research/盘点-近期遗漏与暂缓事项-2026-11-11.md", "status": "checked", "reason": "完整登记生产归因、测试资产、验证缺口和低优暂缓，宿主续接先归因，转录自动补写与已交付修复明确区分。"},
+        {"path": "docs/任务看板.md", "status": "checked", "reason": "高优生产统一待用户指令，宿主续接列入高优先归因待确认，不重复登记低优事项。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有研究文档和任务看板，无新增依赖。"},
+        "java-api-style": {"status": "not-affected", "reason": "仅文档变更，无生产代码。"},
+        "logging-exception-safety": {"status": "checked", "reason": "真实保留失败、NOT_RUN、归因未知和证据边界，不把失败或降级包装为成功。"},
+        "toc-interaction": {"status": "checked", "reason": "高优生产统一待用户指令，低优事项保持暂缓，不新增用户提示或交互。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "未修改Redis、数据库或运行协议。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流、reasoning或编码。"},
+        "verification-review": {"status": "checked", "reason": "独立复核agent-1250可提交；check-docs仅四个既有11-06研究文档命中，本批无新增绝对路径或虚构PASS，未运行产品测试。"}
+      }
     }
   ]
 }
