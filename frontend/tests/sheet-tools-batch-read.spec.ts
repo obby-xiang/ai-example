@@ -7,7 +7,7 @@
  * - 输出带列字母与单元格地址（`A2` / `C5` 形态），供模型与用户共同核对。
  */
 import { describe, expect, it } from 'vitest'
-import { aggregateSheet, findRows, readSheetSummary, reviewCells } from '@/utils/sheet-tools'
+import { aggregateSheetAsync as aggregateSheet, findRowsAsync as findRows, readSheetSummaryAsync as readSheetSummary, reviewCellsAsync as reviewCells } from '@/utils/sheet-tools'
 import { field, makeFakeSheet } from './sheet-fixtures'
 
 const fields = [
@@ -23,19 +23,19 @@ function wideSheet(count: number) {
   return makeFakeSheet({ fields, rows })
 }
 
-describe('B④ 批量读：读工具不再逐格 getCell', () => {
-  it('read_sheet_summary（含空值统计/重复主键/采样）⇒ getCell 0 次', () => {
+describe('B④ 批量读：读工具不再逐格 getCell', async () => {
+  it('read_sheet_summary（含空值统计/重复主键/采样）⇒ getCell 0 次', async () => {
     const sheet = wideSheet(1200)
-    const result = readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
+    const result = await readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
     expect(result.ok).toBe(true)
     expect(sheet.calls.getCell).toBe(0)
     expect(sheet.calls.getArray).toBeGreaterThan(0)
     expect(sheet.calls.getArray).toBeLessThan(1200)
   })
 
-  it('read_sheet_summary + predicate ⇒ 条件求值也走批量', () => {
+  it('read_sheet_summary + predicate ⇒ 条件求值也走批量', async () => {
     const sheet = wideSheet(300)
-    const result = readSheetSummary(sheet.ctx, {
+    const result = await readSheetSummary(sheet.ctx, {
       defCode: 'DEMO',
       scope: 'sheet',
       predicate: { scopeKeys: [], fields: [{ fieldCode: 'name', operator: 'CONTAINS', value: '名称1' }] }
@@ -44,7 +44,7 @@ describe('B④ 批量读：读工具不再逐格 getCell', () => {
     expect(sheet.calls.getCell).toBe(0)
   })
 
-  it('review_cells ⇒ getCell 0 次，且明细带单元格地址', () => {
+  it('review_cells ⇒ getCell 0 次，且明细带单元格地址', async () => {
     const sheet = makeFakeSheet({
       fields,
       rows: [
@@ -52,53 +52,53 @@ describe('B④ 批量读：读工具不再逐格 getCell', () => {
         { code: 'C2', name: '乙' }
       ]
     })
-    const result = reviewCells(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
+    const result = await reviewCells(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(sheet.calls.getCell).toBe(0)
     expect(result.text).toContain('第 2 行 A2 code')
   })
 
-  it('aggregate_sheet ⇒ getCell 0 次（分组与度量一次批量扫完）', () => {
+  it('aggregate_sheet ⇒ getCell 0 次（分组与度量一次批量扫完）', async () => {
     const sheet = wideSheet(400)
-    const result = aggregateSheet(sheet.ctx, { defCode: 'DEMO', groupBy: 'name' })
+    const result = await aggregateSheet(sheet.ctx, { defCode: 'DEMO', groupBy: 'name' })
     expect(result.ok).toBe(true)
     expect(sheet.calls.getCell).toBe(0)
   })
 
-  it('find_rows ⇒ getCell 0 次', () => {
+  it('find_rows ⇒ getCell 0 次', async () => {
     const sheet = wideSheet(400)
-    const result = findRows(sheet.ctx, { defCode: 'DEMO', search: '名称1' })
+    const result = await findRows(sheet.ctx, { defCode: 'DEMO', search: '名称1' })
     expect(result.ok).toBe(true)
     expect(sheet.calls.getCell).toBe(0)
   })
 })
 
-describe('B③ A1 地址：列字母 + Excel 行号（表头为第 1 行）', () => {
-  it('read_sheet_summary 列清单带列字母（A=code / B=name）', () => {
+describe('B③ A1 地址：列字母 + Excel 行号（表头为第 1 行）', async () => {
+  it('read_sheet_summary 列清单带列字母（A=code / B=name）', async () => {
     const sheet = makeFakeSheet({ fields, rows: [{ code: 'CNY', name: '人民币' }] })
-    const result = readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
+    const result = await readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.text).toContain('A=code(编码)')
     expect(result.text).toContain('B=name(名称)')
   })
 
-  it('read_sheet_summary 采样逐值带单元格地址（A2 code=CNY）', () => {
+  it('read_sheet_summary 采样逐值带单元格地址（A2 code=CNY）', async () => {
     const sheet = makeFakeSheet({ fields, rows: [{ code: 'CNY', name: '人民币' }] })
-    const result = readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
+    const result = await readSheetSummary(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 5 })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.text).toContain('A2 code=CNY')
     expect(result.text).toContain('B2 name=人民币')
   })
 
-  it('列字母口径：第 27 列 = AA（与 utils/excel 的 columnLetter 同源）', () => {
+  it('列字母口径：第 27 列 = AA（与 utils/excel 的 columnLetter 同源）', async () => {
     const wideFields = Array.from({ length: 27 }, (_, index) => field(`c${index}`, `列${index}`))
     const row: Record<string, unknown> = {}
     for (let index = 0; index < 27; index += 1) row[`c${index}`] = `v${index}`
     const sheet = makeFakeSheet({ fields: wideFields, rows: [row] })
-    const result = readSheetSummary(sheet.ctx, {
+    const result = await readSheetSummary(sheet.ctx, {
       defCode: 'DEMO',
       scope: 'sheet',
       columnCodes: ['c0', 'c1', 'c26'],

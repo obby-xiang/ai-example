@@ -13,7 +13,7 @@ import {
   SHEET_TOOL_MAX_COLUMNS,
   SHEET_TOOL_MAX_SAMPLE_ROWS,
   effectiveSheetPolicy,
-  readSheetSummary,
+  readSheetSummaryAsync as readSheetSummary,
   setSheetPolicy
 } from '@/utils/sheet-tools'
 import { field, makeFakeSheet } from './sheet-fixtures'
@@ -32,19 +32,19 @@ afterEach(() => {
   setSheetPolicy(null)
 })
 
-describe('策略缺省与兜底', () => {
-  it('缺省 = 硬顶 20 / 5（与治理批之前的行为逐字等价）', () => {
+describe('策略缺省与兜底', async () => {
+  it('缺省 = 硬顶 20 / 5（与治理批之前的行为逐字等价）', async () => {
     expect(DEFAULT_SHEET_POLICY).toEqual({ sampleMaxRows: SHEET_TOOL_MAX_SAMPLE_ROWS, projectionMaxColumns: SHEET_TOOL_MAX_COLUMNS })
     expect(effectiveSheetPolicy()).toEqual(DEFAULT_SHEET_POLICY)
   })
 
-  it('传入 null / 非法值 ⇒ 回到硬顶（不信任外部输入）', () => {
+  it('传入 null / 非法值 ⇒ 回到硬顶（不信任外部输入）', async () => {
     expect(setSheetPolicy({ sampleMaxRows: 10, projectionMaxColumns: 3 })).toEqual({ sampleMaxRows: 10, projectionMaxColumns: 3 })
     expect(setSheetPolicy(null)).toEqual(DEFAULT_SHEET_POLICY)
     expect(setSheetPolicy({ sampleMaxRows: 0, projectionMaxColumns: -2 })).toEqual(DEFAULT_SHEET_POLICY)
   })
 
-  it('配置放大不生效：报 200 行 / 9 列 ⇒ 仍是 20 / 5', () => {
+  it('配置放大不生效：报 200 行 / 9 列 ⇒ 仍是 20 / 5', async () => {
     expect(setSheetPolicy({ sampleMaxRows: 200, projectionMaxColumns: 9 })).toEqual({
       sampleMaxRows: SHEET_TOOL_MAX_SAMPLE_ROWS,
       projectionMaxColumns: SHEET_TOOL_MAX_COLUMNS
@@ -52,14 +52,14 @@ describe('策略缺省与兜底', () => {
   })
 })
 
-describe('读侧采样上界随策略收紧', () => {
+describe('读侧采样上界随策略收紧', async () => {
   const rows = Array.from({ length: 20 }, (_, index) => ({ code: `C${index}`, name: `n${index}`, status: '启用' }))
 
-  it('策略 10 行 + 请求 20 行 ⇒ 只回 10 行采样（min 生效）', () => {
+  it('策略 10 行 + 请求 20 行 ⇒ 只回 10 行采样（min 生效）', async () => {
     setSheetPolicy({ sampleMaxRows: 10 })
     const ctx = sheetOf(rows).ctx
 
-    const outcome = readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', limit: 20 })
+    const outcome = await readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', limit: 20 })
 
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
@@ -67,33 +67,33 @@ describe('读侧采样上界随策略收紧', () => {
     expect(outcome.text).toContain('采样（前 10 行')
   })
 
-  it('策略 5 行且未给 limit ⇒ 缺省也按 5 取（缺省值不得超过有效上界）', () => {
+  it('策略 5 行且未给 limit ⇒ 缺省也按 5 取（缺省值不得超过有效上界）', async () => {
     setSheetPolicy({ sampleMaxRows: 5 })
     const ctx = sheetOf(rows).ctx
 
-    const outcome = readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet' })
+    const outcome = await readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet' })
 
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
     expect(outcome.meta?.sampleRows).toBe(5)
   })
 
-  it('请求超过硬顶仍是人话拒绝（既有口径不回退）', () => {
+  it('请求超过硬顶仍是人话拒绝（既有口径不回退）', async () => {
     setSheetPolicy({ sampleMaxRows: 5 })
     const ctx = sheetOf(rows).ctx
 
-    const outcome = readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', limit: 50 })
+    const outcome = await readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', limit: 50 })
 
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
     expect(outcome.reason).toContain('1 到 20')
   })
 
-  it('投影列超过有效上限 ⇒ 具名拒绝并点出配置键（不静默截断）', () => {
+  it('投影列超过有效上限 ⇒ 具名拒绝并点出配置键（不静默截断）', async () => {
     setSheetPolicy({ projectionMaxColumns: 2 })
     const ctx = sheetOf(rows).ctx
 
-    const outcome = readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', columnCodes: ['code', 'name', 'status'] })
+    const outcome = await readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', columnCodes: ['code', 'name', 'status'] })
 
     expect(outcome.ok).toBe(false)
     if (outcome.ok) return
@@ -101,11 +101,11 @@ describe('读侧采样上界随策略收紧', () => {
     expect(outcome.reason).toContain('app.ai.sheet.projection-max-columns')
   })
 
-  it('投影列在有效上限内（3 ≤ 5）⇒ 正常读', () => {
+  it('投影列在有效上限内（3 ≤ 5）⇒ 正常读', async () => {
     setSheetPolicy({ projectionMaxColumns: 3 })
     const ctx = sheetOf(rows).ctx
 
-    const outcome = readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', columnCodes: ['code', 'name', 'status'] })
+    const outcome = await readSheetSummary(ctx, { defCode: 'DEMO', scope: 'sheet', columnCodes: ['code', 'name', 'status'] })
 
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
@@ -113,13 +113,13 @@ describe('读侧采样上界随策略收紧', () => {
   })
 })
 
-describe('选区不收窄（2026-10-22 裁决，§8 K-11 / §10 O-9）', () => {
-  it('选区 6 列 + 策略 2 列 ⇒ 选区仍按 6 列投影进采样（列面不设上限）', () => {
+describe('选区不收窄（2026-10-22 裁决，§8 K-11 / §10 O-9）', async () => {
+  it('选区 6 列 + 策略 2 列 ⇒ 选区仍按 6 列投影进采样（列面不设上限）', async () => {
     const fake = sheetOf([{ code: 'C1', name: 'n1', status: '启用' }])
     fake.setSelection({ row: 0, col: 0, rowCount: 1, colCount: 3 })
     setSheetPolicy({ projectionMaxColumns: 2 })
 
-    const outcome = readSheetSummary(fake.ctx, { defCode: 'DEMO', scope: 'selection' })
+    const outcome = await readSheetSummary(fake.ctx, { defCode: 'DEMO', scope: 'selection' })
 
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return
@@ -127,12 +127,12 @@ describe('选区不收窄（2026-10-22 裁决，§8 K-11 / §10 O-9）', () => {
     expect(outcome.meta?.projCols).toBe(3)
   })
 
-  it('选区路径仍受行数硬闸约束（≤20）', () => {
+  it('选区路径仍受行数硬闸约束（≤20）', async () => {
     const rows = Array.from({ length: 30 }, (_, index) => ({ code: `C${index}`, name: `n${index}`, status: '启用' }))
     const fake = sheetOf(rows)
     fake.setSelection({ row: 0, col: 0, rowCount: 30, colCount: 3 })
 
-    const outcome = readSheetSummary(fake.ctx, { defCode: 'DEMO', scope: 'selection', limit: 20 })
+    const outcome = await readSheetSummary(fake.ctx, { defCode: 'DEMO', scope: 'selection', limit: 20 })
 
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) return

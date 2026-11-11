@@ -216,12 +216,12 @@ describe('R-06 HTTP 兜底走 api.error.*，技术细节只进 console', () => {
   })
 })
 
-describe('R-07 不可撤销确认框交回根级 Element Plus locale', () => {
-  it('不覆盖 confirmButtonText / cancelButtonText', async () => {
-    await confirmIrreversible({ title: 'Cancel job', message: 'm', ack: 'ack' })
+describe('R-07 不可撤销确认框的按钮文案由调用方按当前 locale 传入', () => {
+  it('confirmButtonText / cancelButtonText 原样透传给 Element Plus', async () => {
+    await confirmIrreversible({ title: 'Cancel job', message: 'm', ack: 'ack', confirmText: 'Confirm', cancelText: 'Keep' })
     const options = confirmMock.mock.calls.at(-1)?.[2] as Record<string, unknown>
-    expect(options).not.toHaveProperty('confirmButtonText')
-    expect(options).not.toHaveProperty('cancelButtonText')
+    expect(options.confirmButtonText).toBe('Confirm')
+    expect(options.cancelButtonText).toBe('Keep')
   })
 
   it('发布确认函数保留：REPLACE 才弹确认，MERGE 直接放行', async () => {

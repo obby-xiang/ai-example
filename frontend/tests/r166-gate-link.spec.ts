@@ -21,11 +21,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import type { ChatMessage } from '@/types/ai'
+import type { ChatMessage, ToolPart } from '@/types/ai'
 import { useAiStore } from '@/stores/ai'
 import { sessionIdStorageKey } from '@/utils/ai-identity'
 import { installIdentityFixture } from './ai-identity-fixture'
 import { nextTick } from 'vue'
+import { deriveProjections } from '@/utils/parts'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -80,25 +81,42 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-/** 造一条确认门挂起（真实帧路：appendAssistantMessage + confirm_request 帧）。 */
+/** 造一条确认门挂起（真实帧路：前一张门卡先走 confirm_decision 收口，再发 confirm_request）。 */
+let gateSeq = 100
 function armGate(
   store: ReturnType<typeof useAiStore>,
   toolCallId = 'c1',
-  options: { atMs?: number; timeoutSeconds?: number; expiresAt?: number } = {}
+  options: { atMs?: number; runId?: string } = {}
 ): ChatMessage {
   const atMs = options.atMs ?? Date.now()
-  const timeoutSeconds = options.timeoutSeconds ?? 240
+  const runId = options.runId ?? 'run-1'
+  // 真实帧路收口此前仍待决的门卡（合法用户批准），不直接改 store 造不可达现场
+  const open = store.messages
+    .flatMap((message) => message.parts)
+    .filter((part): part is ToolPart => part.kind === 'tool' && part.kind2 === 'CONFIRM' && part.requiresAction)
+  for (const part of open) {
+    store.handleFrame({
+      type: 'confirm_decision',
+      toolCallId: part.toolCallId,
+      name: part.name,
+      decision: 'approve',
+      status: 'APPROVED',
+      runId
+    })
+  }
+  // 换轮场景：先走真实 start 帧，后续帧才会落到新宿主
+  if (options.runId !== undefined && store.activeRunId !== runId) {
+    store.handleFrame({ type: 'start', runId, sessionId: store.sessionId, seq: gateSeq++ })
+  }
   const assistant = store.appendAssistantMessage()
   store.handleFrame({
     type: 'confirm_request',
     toolCallId,
     name: 'start_export',
     args: '{"taskId":291}',
-    timeoutSeconds,
-    expiresAt: options.expiresAt ?? atMs + timeoutSeconds * 1000,
     atMs,
-    runId: 'run-1',
-    seq: 2
+    runId,
+    seq: gateSeq++
   })
   return assistant
 }
@@ -116,7 +134,7 @@ async function mountPanel(messages: ChatMessage[]): Promise<ReturnType<typeof mo
 describe('2026-10-20 去超时裁决：确认卡无倒计时（口径① 整段退役）', () => {
   it('挂起门卡无倒计时环 / 无剩余时间读数 / 无静态兜底文案', async () => {
     const store = useAiStore()
-    armGate(store, 'c1', { timeoutSeconds: 240 })
+    armGate(store, 'c1')
     const wrapper = await mountPanel(store.messages)
     const gate = wrapper.find('[data-testid="hitl-gate"]')
     expect(gate.exists()).toBe(true)
@@ -129,16 +147,17 @@ describe('2026-10-20 去超时裁决：确认卡无倒计时（口径① 整段�
 
   it('心跳帧只剩保活语义：不写门卡状态，DOM 逐帧重投前后一字不动', async () => {
     const store = useAiStore()
-    armGate(store, 'c1', { timeoutSeconds: 240 })
+    armGate(store, 'c1')
     const wrapper = await mountPanel(store.messages)
     const before = wrapper.find('[data-testid="hitl-gate"]').html()
     store.handleFrame({ type: 'heartbeat', runId: 'run-1', toolCallId: 'c1', suspendKind: 'confirm', timeoutSeconds: 240, waitedSeconds: 60, heartbeatSeq: 1 })
     store.handleFrame({ type: 'heartbeat', runId: 'run-1', toolCallId: 'g9', suspendKind: 'frontend-tool', timeoutSeconds: 120, waitedSeconds: 5, heartbeatSeq: 2 })
     await nextTick()
     expect(wrapper.find('[data-testid="hitl-gate"]').html()).toBe(before)
-    // 原始帧口径仍随段保留（对账用），只是不再被折算成任何倒计时
+    // 原始帧口径：去超时裁决后确认门帧不再携带 timeoutSeconds/expiresAt（口径整段退役）
     const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1')
-    expect(part).toMatchObject({ status: 'pending', requiresAction: true, timeoutSeconds: 240 })
+    expect(part).toMatchObject({ status: 'pending', requiresAction: true })
+    expect(part).not.toHaveProperty('timeoutSeconds')
     // 段上没有「本地判超时」标记位（整段退役）
     expect(part && 'expiredLocally' in part).toBe(false)
     wrapper.unmount()
@@ -148,14 +167,14 @@ describe('2026-10-20 去超时裁决：确认卡无倒计时（口径① 整段�
 describe('R-166 口径② + 2A 缺陷④：拒绝原因输入框已删除（H1 无理由框）', () => {
   it('门卡无拒因输入框；帧重投 / 重派生 / 换门卡都不会复活它', async () => {
     const store = useAiStore()
-    const first = armGate(store, 'c1')
+    armGate(store, 'c1')
     const wrapper = await mountPanel(store.messages)
     expect(wrapper.find('[data-testid="hitl-gate"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="reject-reason"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="hitl-gate"] textarea').exists()).toBe(false)
 
     // 重派生①：另起一个工具段（tool_start 帧 ⇒ DERIVE_FRAME_TYPES ⇒ 全量重算派生投影）
-    store.handleFrame({ type: 'tool_start', toolCallId: 'x9', name: 'list_tasks', kind: 'BACKEND', runId: 'run-1', seq: 3 })
+    store.handleFrame({ type: 'tool_start', toolCallId: 'x9', name: 'list_tasks', kind: 'BACKEND', runId: 'run-1' })
     await nextTick()
     expect(wrapper.find('[data-testid="reject-reason"]').exists()).toBe(false)
 
@@ -165,17 +184,14 @@ describe('R-166 口径② + 2A 缺陷④：拒绝原因输入框已删除（H1 �
       toolCallId: 'c1',
       name: 'start_export',
       args: '{"taskId":291}',
-      timeoutSeconds: 240,
-      expiresAt: 1_700_000_240_000,
       atMs: Date.now(),
-      runId: 'run-1',
-      seq: 4
+      runId: 'run-1'
     })
     await nextTick()
     expect(wrapper.find('[data-testid="reject-reason"]').exists()).toBe(false)
 
     // 换人（新门卡 toolCallId=c2）同样不宣回输入框
-    first.done = true
+    // 换门卡：上一张由 armGate 内的真实 confirm_decision 收口，再发新 confirm_request
     armGate(store, 'c2')
     await nextTick()
     expect(store.pendingConfirm?.toolCallId).toBe('c2')
@@ -188,7 +204,7 @@ describe('2026-10-20 去超时裁决：本地不再判超时作废（口径④ �
   it('挂起卡一直待决：到点后不拉 runs/current、不落「已超时」（表单/确认一直可操作）', async () => {
     vi.useFakeTimers({ now: 1_700_000_000_000 })
     const store = useAiStore()
-    armGate(store, 'c1', { atMs: 1_700_000_000_000, timeoutSeconds: 2 })
+    armGate(store, 'c1', { atMs: 1_700_000_000_000 })
     const wrapper = await mountPanel(store.messages)
     await vi.advanceTimersByTimeAsync(3000)
     await flushPromises()
@@ -206,14 +222,19 @@ describe('2026-10-20 去超时裁决：本地不再判超时作废（口径④ �
     wrapper.unmount()
   })
 
-  it('历史 TIMEOUT 卡（TIMEOUT 帧落段）仍只读展示「! 已超时」（历史展示保留）', async () => {
+  it('历史 expired 卡（历史快照 status=expired）仍只读展示「已失效」（历史展示保留）', async () => {
     const store = useAiStore()
-    armGate(store, 'c1')
-    store.handleFrame({ type: 'confirm_decision', toolCallId: 'c1', name: 'start_export', decision: 'timeout', approved: false, status: 'TIMEOUT', reason: 'CONFIRM_TIMEOUT', runId: 'run-1', seq: 9 })
+    const assistant = armGate(store, 'c1')
+    // 历史快照形态：段已落 expired、requiresAction=false（不再经由实时 TIMEOUT 帧 —— 该帧已退役）
+    const part = assistant.parts.find((p) => p.kind === 'tool' && p.toolCallId === 'c1')
+    if (!part || part.kind !== 'tool') throw new Error('gate part missing')
+    part.status = 'expired'
+    part.requiresAction = false
+    deriveProjections(assistant)
     const wrapper = await mountPanel(store.messages)
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
     expect(receipt.exists()).toBe(true)
-    expect(receipt.text()).toContain('! 已超时')
+    expect(receipt.text()).toContain('已失效')
     expect(wrapper.find('[data-testid="hitl-gate"]').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -231,7 +252,7 @@ describe('R-166 口径③：409 之后的瞬态与结局帧收敛', () => {
     expect(assistant.pendingCall?.status).toBe('pending')
 
     // 真实裁决是"被拒"（旧口径会硬写 approved ⇒ 假「已确认」）
-    store.handleFrame({ type: 'confirm_decision', toolCallId: 'c1', name: 'start_export', decision: 'reject', approved: false, status: 'REJECTED', reason: '参数越权', runId: 'run-1', seq: 9 })
+    store.handleFrame({ type: 'confirm_decision', toolCallId: 'c1', name: 'start_export', decision: 'reject', status: 'REJECTED', reason: '参数越权', runId: 'run-1' })
     expect(store.gateSubmissionOf('c1')).toBeNull()
     const part = assistant.parts.find((p) => p.kind === 'tool' && p.toolCallId === 'c1')
     expect(part).toMatchObject({ status: 'rejected', requiresAction: false })
@@ -261,11 +282,11 @@ describe('R-166 口径③（store 侧）：提交态清收口', () => {
     const store = useAiStore()
     const assistant = armGate(store, 'c1')
     store.gateSubmissions = { c1: { decision: 'approved', submittedAt: Date.now(), syncing: true } }
-    store.handleFrame({ type: 'done', runId: 'run-1', seq: 9 })
+    store.handleFrame({ type: 'done', runId: 'run-1' })
     expect(store.gateSubmissions).toEqual({})
     expect(assistant.pendingCall).toBeNull()
 
-    const second = armGate(store, 'c2')
+    const second = armGate(store, 'c2', { runId: 'run-2' })
     store.gateSubmissions = { c2: { decision: 'rejected', submittedAt: Date.now(), syncing: true } }
     await store.resetSession()
     expect(store.gateSubmissions).toEqual({})

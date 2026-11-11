@@ -14,7 +14,7 @@ import {
   SHEET_AGGREGATE_MAX_GROUPS,
   SHEET_DISTRIBUTION_SHOW_GROUPS,
   SHEET_WRITE_HARD_MAX_CELLS,
-  aggregateSheet,
+  aggregateSheetAsync as aggregateSheet,
   planAppliedText,
   planNormalize,
   planPreviewText,
@@ -150,7 +150,7 @@ describe('P-05 分布与聚合器逐组一致', () => {
     expect(plan.distribution?.by).toBe('status')
   })
 
-  it('replace 的分布（按 region）与 aggregate_sheet(groupBy=region, metrics=count) 逐组相等', () => {
+  it('replace 的分布（按 region）与 aggregate_sheet(groupBy=region, metrics=count) 逐组相等', async () => {
     const plan = replacePlan('count', { distributionBy: 'region' })
     const distribution = plan.distribution
     expect(distribution).toBeDefined()
@@ -158,7 +158,7 @@ describe('P-05 分布与聚合器逐组一致', () => {
 
     expect(distribution.by).toBe('region')
     // 与聚合器对同一条谓词（这里用 scope=columns + 全表）的结果比
-    const aggregated = aggregateSheet(ctx, {
+    const aggregated = await aggregateSheet(ctx, {
       defCode: 'DEMO',
       scope: 'sheet',
       groupBy: 'region',

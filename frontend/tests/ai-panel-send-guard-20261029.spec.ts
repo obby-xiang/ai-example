@@ -322,7 +322,7 @@ describe('R4 停止态不恢复挂起卡 + 探针原文零出口', { timeout: 20
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(store.suspended).toBe(true)
     expect(store.pendingConfirms).toHaveLength(1)

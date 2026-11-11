@@ -20,7 +20,6 @@ import { registerPageHandler } from '@/stores/workspace'
 import { APPLIED_SEQ_WINDOW, alreadyApplied, markApplied } from '@/utils/parts'
 import { field, makeFakeSheet } from './sheet-fixtures'
 import { resetAiTestState } from './ai-fixtures'
-import { installIdentityFixture } from './ai-identity-fixture'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),

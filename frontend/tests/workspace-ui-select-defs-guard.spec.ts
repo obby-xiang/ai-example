@@ -27,7 +27,6 @@ vi.mock('@/api/jobs', () => ({ jobsApi: { listJobs: api.listJobs, getIssues: api
 
 import {
   dispatchUiEvent,
-  onWorkspaceEvent,
   registerPageHandler,
   unregisterPageHandler,
   useWorkspaceStore
@@ -66,11 +65,8 @@ afterEach(() => {
 describe('页面 handler 未注册：select_defs 零业务写入、零假成功', () => {
   it('合法编码 ⇒ handled=false「页面未就绪」，零 selectDefs、选中集不变、零 workspace_changed', async () => {
     const workspace = bindTask()
-    const changed: unknown[] = []
-    const off = onWorkspaceEvent('workspace_changed', (payload) => changed.push(payload))
 
     const result = await dispatchUiEvent({ type: 'select_defs', task: 'export', defCodes: ['REGION'] })
-    off()
 
     // 修复前（RED）：兜底分支直接 tasksApi.selectDefs(7, ['REGION']) + setSelectedDefs
     expect(result.handled).toBe(false)
@@ -78,8 +74,7 @@ describe('页面 handler 未注册：select_defs 零业务写入、零假成功'
     expect(result.message).toContain('未变更所选配置项')
     expect(api.selectDefs).not.toHaveBeenCalled()
     expect(workspace.selectedDefs).toEqual(['CURRENCY'])
-    // 不得假成功：「工作区已同步」的数据源一次都不许发
-    expect(changed).toEqual([])
+    // 「工作区已同步」事件随界面反馈条一起退役，不再有可发的假成功事件
     // 被拒事实仍留在时间线（模型下一轮要看到这一手没落地）
     expect(workspace.recentActions.at(-1)).toMatchObject({ source: 'AI' })
     expect(workspace.recentActions.at(-1)?.summary).toContain('页面未就绪')

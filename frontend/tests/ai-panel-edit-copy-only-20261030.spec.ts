@@ -212,7 +212,7 @@ describe('2026-10-30 直裁：编辑 = 只回填正文（不重跑）', { timeou
     expect(api.chat).toHaveBeenCalledTimes(1)
     expect((api.chat.mock.calls[0][0] as Record<string, unknown>).message).toBe('改写后的提问')
     // 普通新消息：send 只有正文一个参数（旧重跑通道已删除）
-    expect(sendSpy.mock.calls[0]?.[1]).toBeUndefined()
+    expect(sendSpy.mock.calls[0]).toHaveLength(1)
 
     // 不截断：原三条按原序仍在，原文本未被改写
     expect(store.messages.slice(0, 3).map((message) => message.id)).toEqual(['u-1', 'a-1', 'u-2'])

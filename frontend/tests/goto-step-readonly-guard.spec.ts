@@ -30,7 +30,6 @@ vi.mock('@/stores/task', () => ({
 
 import {
   dispatchUiEvent,
-  onWorkspaceEvent,
   registerPageHandler,
   unregisterPageHandler,
   useWorkspaceStore
@@ -98,18 +97,14 @@ describe('页面 handler 未注册：goto_step 不得直推步骤（不绕 persi
     setTask(workspace, 'COMPLETED', 'IMPORT')
     api.listJobs.mockResolvedValue([{ jobId: 2, jobType: 'PUBLISH', status: 'FAILED' }])
     const stepBefore = workspace.step
-    const changed: unknown[] = []
-    const off = onWorkspaceEvent('workspace_changed', (payload) => changed.push(payload))
 
     const result = await dispatchUiEvent({ type: 'goto_step', step: 'IMPORT' })
-    off()
 
     // 修复前（RED）：只读守卫放行后直接 tasksApi.goToStep(1, 'IMPORT') + setStep
     expect(result.handled).toBe(false)
     expect(result.message).toContain('页面未就绪')
     expect(api.goToStep).not.toHaveBeenCalled()
     expect(workspace.step).toBe(stepBefore)
-    expect(changed).toEqual([])
     expect(workspace.recentActions.at(-1)).toMatchObject({ source: 'AI' })
   })
 

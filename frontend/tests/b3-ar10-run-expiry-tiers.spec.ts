@@ -9,7 +9,7 @@
  * 3. 读秒分档：<10 分钟 mm:ss、<1 小时按分钟、更长按小时；到 0 走「已失效」。
  */
 import { describe, expect, it } from 'vitest'
-import { runExpiryAnchorOf, runExpiryLabel, runExpiryRemainingMs } from '@/utils/run-expiry'
+import { runExpiryAnchorOf, runExpiryRemainingMs } from '@/utils/run-expiry'
 import type { AiRunCurrent } from '@/types/ai'
 
 function current(overrides: Partial<AiRunCurrent> = {}): AiRunCurrent {
@@ -51,25 +51,8 @@ describe('AR-10 · 运行态寿命（只读推导）', () => {
     expect(runExpiryRemainingMs(anchor, 99_000)).toBe(0)
   })
 
-  it('读秒分档：<10min 读秒、<1h 按分钟、更长按小时、0 已失效', () => {
-    expect(runExpiryLabel(120_000)).toEqual({
-      key: 'ai.panel.runExpiry.countdown',
-      params: { time: '02:00' },
-      expired: false
-    })
-    expect(runExpiryLabel(599_999).params).toEqual({ time: '10:00' })
-    expect(runExpiryLabel(600_000)).toEqual({
-      key: 'ai.panel.runExpiry.minutes',
-      params: { minutes: 10 },
-      expired: false
-    })
-    expect(runExpiryLabel(3_599_999).params).toEqual({ minutes: 60 })
-    expect(runExpiryLabel(3_600_000)).toEqual({
-      key: 'ai.panel.runExpiry.hours',
-      params: { hours: 1 },
-      expired: false
-    })
-    expect(runExpiryLabel(0)).toEqual({ key: 'ai.panel.runExpiry.expired', params: {}, expired: true })
-    expect(runExpiryLabel(-1).expired).toBe(true)
+  it('C 端不再展示保留期倒计时：runExpiryLabel 已随界面退场', async () => {
+    const mod = await import('@/utils/run-expiry')
+    expect('runExpiryLabel' in mod).toBe(false)
   })
 })

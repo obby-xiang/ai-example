@@ -45,7 +45,9 @@ describe('confirmIrreversible：复选框确认对话框', () => {
     const promise = confirmIrreversible({
       title: '取消作业',
       message: '作业将立即终止，已处理的部分不会回滚。',
-      ack: '确认取消作业，执行后无法恢复'
+      ack: '确认取消作业，执行后无法恢复',
+      confirmText: '确认取消',
+      cancelText: '保留作业'
     })
     expect(await promise).toBe(true)
 
@@ -63,7 +65,9 @@ describe('confirmIrreversible：复选框确认对话框', () => {
     void confirmIrreversible({
       title: '取消作业',
       message: '作业将立即终止，已处理的部分不会回滚。',
-      ack: '确认取消作业，执行后无法恢复'
+      ack: '确认取消作业，执行后无法恢复',
+      confirmText: '确认取消',
+      cancelText: '保留作业'
     })
     const { message, title, options } = lastCall()
     expect(title).toBe('取消作业')
@@ -92,7 +96,7 @@ describe('confirmIrreversible：复选框确认对话框', () => {
 
   it('用户取消/关闭对话框 ⇒ 返回 false（调用方据此不发请求）', async () => {
     confirmMock.mockRejectedValueOnce('cancel')
-    const ok = await confirmIrreversible({ title: '取消作业', message: 'm', ack: '确认取消作业，执行后无法恢复' })
+    const ok = await confirmIrreversible({ title: '取消作业', message: 'm', ack: '确认取消作业，执行后无法恢复', confirmText: '确认', cancelText: '取消' })
     expect(ok).toBe(false)
   })
 })

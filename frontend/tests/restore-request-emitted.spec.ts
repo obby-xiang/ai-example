@@ -110,7 +110,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
       confirmEntry('c3', { kind: 'BACKEND', name: 'read_tasks', req: true }) // 后端直接执行，从不弹卡
     ]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     const ids = toolSegments(store.messages).map((part) => part.toolCallId)
     expect(ids).toEqual(['c1'])
@@ -131,7 +131,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
       confirmEntry('b1', { kind: 'BACKEND', name: 'read_tasks', req: true })
     ]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     // 后端条目不是挂起卡：只有 CONFIRM 那一张
     expect(toolSegments(store.messages).map((part) => part.toolCallId)).toEqual(['c1'])
@@ -150,15 +150,15 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
       confirmEntry('b2', { kind: 'BACKEND', name: 'read_jobs', req: true })
     ], { awaitingExternal: false, unresolvedExternal: [] }))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     // 旧口径「不挂流」把这类轮判成死局（实证 C2：后端继续跑完、UI 12s 仍空）；
-    // 新口径 = 与 RUNNING 同路：无卡、无横幅、无占位文案，lastSeq=0 全量重放后继续收流。
+    // 新口径 = 与 RUNNING 同路：无卡、无横幅、无占位文案，appliedSeq=0 ⇒ 回落 archiveMaxSeq(5) 续收。
     expect(toolSegments(store.messages)).toHaveLength(0)
     expect(store.suspended).toBe(false)
     expect(store.notice).toBeNull()
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
-    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 0 })
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 5 })
     expect(api.reattachRun.mock.calls[0]?.[2]?.awaitingInput ?? false).toBe(false)
   }, 15000)
 
@@ -171,7 +171,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
       confirmEntry('c2', { req: false })
     ]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(store.suspended).toBe(false)
     expect(store.activeRunId).toBe('run-l0')
@@ -190,7 +190,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
       confirmEntry('c2', { req: false }) // 卡 2 的请求帧还没发：这一窗口的真实形态
     ]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     // 刷新瞬间：无卡、无假等待锁，但连接已经挂上（旧行为 = 直接返回、无连接 ⇒ 死胡同）
     expect(toolSegments(store.messages)).toHaveLength(0)
@@ -223,7 +223,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     notRequested.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([gfEntry('g1', { req: false })]))
 
-    await notRequested.restoreSuspendedSnapshot()
+    await notRequested.restoreSuspendedSnapshot(() => true)
     expect(notRequested.activeForm).toBeNull()
     expect(toolSegments(notRequested.messages)).toHaveLength(0)
     expect(notRequested.suspended).toBe(false)
@@ -233,7 +233,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     requested.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([gfEntry('g2', { req: true })]))
 
-    await requested.restoreSuspendedSnapshot()
+    await requested.restoreSuspendedSnapshot(() => true)
     expect(requested.activeForm).toMatchObject({ toolCallId: 'g2', runId: 'run-l0', status: 'filling' })
     expect(toolSegments(requested.messages)).toHaveLength(1)
   }, 15000)
@@ -245,12 +245,30 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
     // 不带 req / reqAtMs：本口径引入前的载荷（升级前遗留的挂起轮）
     api.runsCurrent.mockResolvedValue(snapshot([confirmEntry('legacy')]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(toolSegments(store.messages).map((part) => part.toolCallId)).toEqual(['legacy'])
     expect(pendingCallHosts(store.messages)).toHaveLength(1)
     expect(store.messages[0]?.pendingCall).toMatchObject({ toolCallId: 'legacy', kind: 'CONFIRM', status: 'pending' })
     expect(store.suspended).toBe(true)
+  }, 15000)
+
+  it('isOwner=false：非本页签不落快照事实（不建卡、不挂流、不覆盖 activeRunId）', async () => {
+    const store = await freshStore()
+    store.sessionId = 'sess-not-owner'
+    store.historyLoaded = true
+    store.activeRunId = 'run-owner-elsewhere'
+    const beforeMessages = store.messages.length
+    api.runsCurrent.mockResolvedValue(snapshot([confirmEntry('c1')]))
+
+    await store.restoreSuspendedSnapshot(() => false)
+
+    expect(store.activeRunId).toBe('run-owner-elsewhere')
+    expect(toolSegments(store.messages)).toHaveLength(0)
+    expect(store.messages).toHaveLength(beforeMessages)
+    expect(store.suspended).toBe(false)
+    expect(api.reattachRun).not.toHaveBeenCalled()
+    expect(api.runsCurrent).not.toHaveBeenCalled()
   }, 15000)
 
   it('已决条目与 req=true 并存：只重建未决那张，已决条目走既有的残留收敛', async () => {
@@ -262,7 +280,7 @@ describe('restoreSuspendedSnapshot：只重建请求帧已发的待决卡', () =
       confirmEntry('live', { req: true })
     ]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(toolSegments(store.messages).map((part) => part.toolCallId)).toEqual(['live'])
     expect(store.suspended).toBe(true)

@@ -23,22 +23,17 @@ describe('批次5A ui_event 回执：失败不报「已同步」，回执仍可�
     const workspace = useWorkspaceStore()
     workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
 
-    const synced: unknown[] = []
     const receipts: Array<Record<string, unknown>> = []
-    const offSynced = onWorkspaceEvent('workspace_changed', (payload) => synced.push(payload))
     const offReceipt = onWorkspaceEvent('ui_event_result', (payload) => {
       receipts.push(payload as Record<string, unknown>)
     })
 
     // 无任务上下文时 select_defs 必拒（fail 分支，零 API 调用）
     const result = await dispatchUiEvent({ type: 'select_defs', task: 'export', defCodes: ['A'] })
-    offSynced()
     offReceipt()
 
     expect(result.handled).toBe(false)
-    // ① 「已同步」chip 的数据源（workspace_changed）一次都不许发
-    expect(synced).toEqual([])
-    // ② 失败回执仍可展示：handled=false + 原因文案
+    // 失败回执仍可展示：handled=false + 原因文案
     expect(receipts).toHaveLength(1)
     expect(receipts[0]).toMatchObject({ event: 'select_defs', handled: false })
     expect(String(receipts[0].message)).toContain('当前没有进行中的任务')

@@ -204,14 +204,14 @@ describe('F1 ① reducer 级：后端实发 status 全集 → 段终态', () => 
     expect(soleToolPart(message).status).toBe('failed')
   })
 
-  it('status 未知值 + ok=false → failed；未知值 + ok=true → succeeded（前向兼容）', () => {
+  it('status 未知值 + ok=false/true 均 → failed（ok 三元回退已退场，只认 status/outcome）', () => {
     const failed = messageWithToolPart('r1', 'running')
     applyFrameToParts(failed, resultFrame({ ok: false, status: 'SOMETHING_NEW' }))
     expect(soleToolPart(failed).status).toBe('failed')
 
     const succeeded = messageWithToolPart('r2', 'running')
     applyFrameToParts(succeeded, resultFrame({ toolCallId: 'r2', ok: true, status: 'SOMETHING_NEW' }))
-    expect(soleToolPart(succeeded).status).toBe('succeeded')
+    expect(soleToolPart(succeeded).status).toBe('failed')
   })
 
   it('localTerminal 保护：本地已 cancelled 段不被"缺省 status + ok=false"帧改成 failed', () => {
@@ -537,7 +537,7 @@ describe('批3③b D8：已决 toolCallId 的重投帧闸（R-141③，通用 FR
 
     store.handleFrame({
       type: 'confirm_request', toolCallId: 'c1', name: 'danger_tool',
-      args: '{}', timeoutSeconds: 120, seq: 2
+      args: '{}', seq: 2
     })
     expect(soleToolPart(assistant)).toMatchObject({ status: 'cancelled', requiresAction: false })
     expect(assistant.pendingCall).toBeNull()

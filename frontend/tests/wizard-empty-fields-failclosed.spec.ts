@@ -220,7 +220,7 @@ describe('定义字段为空：不得按 0 字段成功载入', () => {
     await flushPromises()
 
     // 修复前（RED）：回落支照样 downloadFile + downloadBlob，用户拿到空文件且回执说"已发起"
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('字段')
     expect(String(execution.result)).toContain('未触发下载')
     expect(api.downloadFile).not.toHaveBeenCalled()
@@ -313,7 +313,7 @@ describe('相邻正向：字段齐全时行为不变', () => {
     })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(String(execution.result)).toContain('已发起下载')
     // 真载入（1 列）后取表格字节，下载一次
     expect(grids.loadCalls).toContain('DEMO:1')

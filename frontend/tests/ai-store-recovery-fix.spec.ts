@@ -120,7 +120,7 @@ describe('AI store 恢复与重试收口', () => {
       pendingEntry('later-1', 'CONFIRM', 'start_export', false)
     ]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(store.suspended).toBe(false)
     expect(store.pendingToolCall).toBeNull()

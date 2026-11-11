@@ -27,7 +27,6 @@ vi.mock('@/api/jobs', () => ({ jobsApi: { listJobs: api.listJobs, getIssues: api
 
 import {
   dispatchUiEvent,
-  onWorkspaceEvent,
   registerPageHandler,
   unregisterPageHandler,
   useWorkspaceStore
@@ -65,12 +64,9 @@ afterEach(() => {
 describe('页面 handler 未注册：set_conditions 零 PUT、零工作区写、零假成功', () => {
   it('合法条件 ⇒ handled=false「页面未就绪」，零 setCondition、条件未写入', async () => {
     const workspace = bindTask()
-    const changed: unknown[] = []
-    const off = onWorkspaceEvent('workspace_changed', (payload) => changed.push(payload))
     const condition = { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] }
 
     const result = await dispatchUiEvent({ type: 'set_conditions', defCode: 'CURRENCY', conditions: condition })
-    off()
 
     // 修复前（RED）：直接 PUT 条件 + setQueryConditions + handled=true
     expect(result.handled).toBe(false)
@@ -78,7 +74,6 @@ describe('页面 handler 未注册：set_conditions 零 PUT、零工作区写、
     expect(result.message).toContain('未设置查询条件')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
-    expect(changed).toEqual([])
     expect(workspace.recentActions.at(-1)).toMatchObject({ source: 'AI' })
     expect(workspace.recentActions.at(-1)?.summary).toContain('页面未就绪')
   })

@@ -140,7 +140,7 @@ describe('②/③ 刷新恢复：无本地 plan ⇒ stale + 放弃回灌 cancell
       awaitingExternal: true,
       archiveMaxSeq: 3
     })
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.activePreview).toBeNull()
     expect(store.stalePreviewToolCallId).toBe('t1')
 

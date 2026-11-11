@@ -391,7 +391,7 @@ describe('R-09 发布模式以服务端权威值为准（fail-closed）', () => 
 
     expect(workspace.importMode).toBe('REPLACE')
     const appended = workspace.recentActions.slice(before)
-    expect(appended.some((action) => action.display?.code === 'ai.workspace.importMode')).toBe(false)
+    expect(appended.some((action) => action.summary.includes('导入模式'))).toBe(false)
   })
 })
 
@@ -527,7 +527,7 @@ describe('R3-02 confirm_step：失败必须落 failed 结局并带真实原因',
     })
 
     expect(execution.outcome).toBe('failed')
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.result).toContain('步骤未推进')
     expect(execution.result).toContain('磁盘写入失败')
   })

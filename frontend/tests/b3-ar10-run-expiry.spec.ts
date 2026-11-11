@@ -79,8 +79,8 @@ beforeEach(() => {
   installIdentityFixture()
 })
 
-describe('AR-10 · 运行态 24h 只可见化', () => {
-  it('挂起确认卡显示剩余时间；到期后转「已失效」并保留刷新 / 新会话出口；计时不在 live region', async () => {
+describe('AR-10 · 运行态保留期（界面倒计时已退役，只留 store 锚点与到期通知）', () => {
+  it('恢复快照落入 runExpiry 锚点；到期由权威对账发 runExpired 通知，卡不静默消失', async () => {
     vi.useFakeTimers()
     try {
       vi.setSystemTime(new Date('2026-10-26T08:00:00Z'))
@@ -108,26 +108,28 @@ describe('AR-10 · 运行态 24h 只可见化', () => {
         snapshotRemainingMs: 120_000,
         snapshotExpiresAt: Date.now() + 120_000
       })
-      await ai.restoreSuspendedSnapshot()
+      await ai.restoreSuspendedSnapshot(() => true)
+
+      // 计数只落在 store 的 runExpiry 锚点（界面倒计时整段退役）
+      expect(ai.runExpiry).not.toBeNull()
+      expect(ai.runExpiry?.remainingMs).toBe(120_000)
+      expect(ai.runExpiry?.expiresAt).toBe(Date.now() + 120_000)
 
       const wrapper = await mountPanel()
-      const hint = wrapper.find('[data-testid="run-expiry-hint"]')
-      expect(hint.exists()).toBe(true)
-      const text = wrapper.find('[data-testid="run-expiry-text"]')
-      expect(text.text()).toContain('剩余')
-      expect(text.text()).toContain('02:00')
-      expect(text.attributes('aria-live')).toBe('off')
-      expect(text.element.closest('[aria-live="polite"], [aria-live="assertive"]')).toBeNull()
+      // 当前 UI 不再渲染保留期读秒/已失效提示/刷新出口
+      expect(wrapper.find('[data-testid="run-expiry-hint"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="run-expiry-text"]').exists()).toBe(false)
       expect(wrapper.find('[data-testid="run-expiry-expired"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="run-expiry-reload"]').exists()).toBe(false)
+      // 挂起卡本身仍在（卡不因保留期口径退役而消失）
+      expect(wrapper.find('[data-testid="hitl-gate"]').exists()).toBe(true)
 
+      // 到期：下一次权威对账给 found=false ⇒ 只发一次 runExpired 通知，锚点归零；卡不静默消失
       vi.advanceTimersByTime(121_000)
-      await nextTick()
-
-      expect(wrapper.find('[data-testid="run-expiry-expired"]').exists()).toBe(true)
-      expect(wrapper.find('[data-testid="run-expiry-expired"]').text()).toContain('已失效')
-      expect(wrapper.find('[data-testid="run-expiry-reload"]').exists()).toBe(true)
-      expect(wrapper.find('[data-testid="run-expiry-new-chat"]').exists()).toBe(true)
-      // 不得静默消失：到期后卡体仍在，只是给出了明确出口
+      api.runsCurrent.mockResolvedValue({ found: false })
+      await ai.restoreSuspendedSnapshot(() => true)
+      expect(ai.noticeCode).toBe('ai.notice.runExpired')
+      expect(ai.runExpiry?.remainingMs).toBe(0)
       expect(wrapper.find('[data-testid="hitl-gate"]').exists()).toBe(true)
       wrapper.unmount()
     } finally {

@@ -79,8 +79,6 @@ function armConfirm(store: ReturnType<typeof useAiStore>, toolCallId = 'c1'): Ch
     toolCallId,
     name: 'danger_tool',
     args: '{"x":1}',
-    timeoutSeconds: 120,
-    expiresAt: 1_700_000_120_000,
     atMs: 1_700_000_000_000,
     seq: 2
   })
@@ -125,7 +123,6 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
       toolCallId: 'c2',
       name: 'danger_tool',
       args: '{"y":2}',
-      timeoutSeconds: 120,
       seq: 3
     })
     expect(toolPartsOf(assistant).map((part) => part.requiresAction)).toEqual([true, true])
@@ -200,7 +197,6 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
       toolCallId: 'c2',
       name: 'danger_tool',
       args: '{"y":2}',
-      timeoutSeconds: 120,
       seq: 3
     })
     api.confirm.mockResolvedValue({})
@@ -559,7 +555,6 @@ describe('施工项3：m-R2 六写点回归锁', () => {
       toolCallId: 's1',
       name: 'danger_tool',
       args: '{"x":1}',
-      timeoutSeconds: 120,
       seq: 1
     })
     // 模拟段曾被清理过的现场：requiresAction=false，status 仍 pending

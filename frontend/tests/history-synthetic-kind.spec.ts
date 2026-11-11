@@ -57,7 +57,7 @@ describe('B5 syntheticKind / truncated', () => {
     expect(store.messages.some((message) => message.content.includes('压缩摘要正文'))).toBe(false)
   })
 
-  it('history.truncated=true 落到消息流中性标记字段', async () => {
+  it('history.truncated=true 不再落 store 字段（容量裁剪由分页窗口表达）', async () => {
     api.history.mockResolvedValue({
       sessionId: 'sess-trunc',
       count: 1,
@@ -69,6 +69,7 @@ describe('B5 syntheticKind / truncated', () => {
 
     await store.loadHistory()
 
-    expect(store.historyTruncated).toBe(true)
+    expect(store.messages).toHaveLength(1)
+    expect(store).not.toHaveProperty('historyTruncated')
   })
 })

@@ -178,7 +178,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
           { kind: 'tool', seg: 1, toolCallId: 'c1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":1}', timeoutSeconds: 120, requiresAction: true },
           { kind: 'tool', seg: 2, toolCallId: 'c2', name: 'list_tasks', kind2: 'BACKEND', status: 'succeeded', requiresAction: false }
         ],
-        { toolCallId: 'c1', name: 'start_export', kind: 'CONFIRM', args: { taskId: 1 }, rawArgs: '{"taskId":1}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'c1', name: 'start_export', kind: 'CONFIRM', args: { taskId: 1 }, rawArgs: '{"taskId":1}', status: 'pending' }
       )
     ])
     const html = wrapper.html()
@@ -262,7 +262,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         [
           { kind: 'tool', seg: 0, toolCallId: 'lock1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args: '{"taskId":7,"scope":"DOC_TYPE","format":"xlsx"}', timeoutSeconds: 120, requiresAction: true }
         ],
-        { toolCallId: 'lock1', name: 'start_export', kind: 'CONFIRM', args: { taskId: 7 }, rawArgs: '{"taskId":7}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'lock1', name: 'start_export', kind: 'CONFIRM', args: { taskId: 7 }, rawArgs: '{"taskId":7}', status: 'pending' }
       )
     ])
     const card = wrapper.find('[data-testid="pending-card-lock1"]')
@@ -426,7 +426,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     wrapper.unmount()
   })
 
-  it('B4：固定摘要不展示；未批准·未执行 / 已批准·未执行 / 已批准·执行失败三态可辨', async () => {
+  it('B4：固定摘要不展示；未批准失败 / 批准后 blocked / 批准后 failed 的当前只读态可辨', async () => {
     // ① 即使后端带 preflight，普通确认卡也不展示固定三字段摘要。
     const facts = {
       ...PREFLIGHT,
@@ -461,7 +461,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     expect(g2.text()).not.toContain('整体替换')
     w2.unmount()
 
-    // ③ 预检未通过（未进确认门、无决策）⇒ 未批准·未执行，绝不含「已批准」
+    // ③ 预检未通过（未进确认门、无决策）⇒ status=failed 只读态「失败」，绝不含「已批准」
     const preFailedMsg = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'b4pre', name: 'start_export', kind2: 'CONFIRM', status: 'failed', args: '{"taskId":7}', result: '预检未通过，本次未进入确认门、未执行', requiresAction: false }
     ])
@@ -469,12 +469,12 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const w3 = await mountPanel([preFailedMsg])
     const notApproved = w3.find('[data-testid="ro-badge-b4pre"]')
     expect(notApproved.exists()).toBe(true)
-    expect(notApproved.attributes('data-state')).toBe('notApproved')
-    expect(notApproved.text()).toBe('! 未批准 · 未执行')
+    expect(notApproved.attributes('data-state')).toBe('failed')
+    expect(notApproved.text()).toBe('失败')
     expect(notApproved.text()).not.toContain('已批准')
     w3.unmount()
 
-    // ④ 已批准但执行前未执行（blocked）⇒ 已批准·未执行；真执行失败仍是「已批准·执行失败」
+    // ④ 已批准但执行前未执行（blocked）/ 已批准后执行失败（failed）：decision 优先 ⇒ 均读「已批准」
     const approvedNotRunMsg = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'b4post', name: 'start_export', kind2: 'CONFIRM', status: 'blocked', decision: 'approved', args: '{"taskId":7}', reason: '目标任务已终态，本次未执行', requiresAction: false }
     ])
@@ -482,8 +482,8 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     const w4 = await mountPanel([approvedNotRunMsg])
     const approvedNotRun = w4.find('[data-testid="ro-badge-b4post"]')
     expect(approvedNotRun.exists()).toBe(true)
-    expect(approvedNotRun.attributes('data-state')).toBe('notExecuted')
-    expect(approvedNotRun.text()).toBe('! 已批准 · 未执行')
+    expect(approvedNotRun.attributes('data-state')).toBe('approved')
+    expect(approvedNotRun.text()).toBe('已批准')
     w4.unmount()
 
     const execFailedMsg = buildMessage([
@@ -492,8 +492,8 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
     execFailedMsg.id = 'b4-fail'
     const w5 = await mountPanel([execFailedMsg])
     const execFailed = w5.find('[data-testid="ro-badge-b4fail"]')
-    expect(execFailed.attributes('data-state')).toBe('failed')
-    expect(execFailed.text()).toBe('! 已批准 · 执行失败')
+    expect(execFailed.attributes('data-state')).toBe('approved')
+    expect(execFailed.text()).toBe('已批准')
     w5.unmount()
   })
 
@@ -523,7 +523,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
           { kind: 'tool', seg: 2, toolCallId: 'p2', name: 'delete_job', kind2: 'CONFIRM', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
         ],
         // 旧单槽投影 = 末段（p2）：点 p1 时旧实现会误提 p2
-        { toolCallId: 'p2', name: 'delete_job', kind: 'CONFIRM', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'p2', name: 'delete_job', kind: 'CONFIRM', args: {}, rawArgs: '{}', status: 'pending' }
       )
     ])
     const store = useAiStore()
@@ -550,7 +550,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
           { kind: 'tool', seg: 1, toolCallId: 'f1', name: 'probe.tool', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
         ],
         // 最近 requiresAction 段是 FRONTEND：旧 confirm() 取 pendingToolCall 会把 f1 发到 /api/ai/confirm
-        { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', status: 'pending' }
       )
     ])
     const store = useAiStore()
@@ -577,7 +577,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         [
           { kind: 'tool', seg: 0, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
         ],
-        { toolCallId: 'g1', name: 'generative_form', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'g1', name: 'generative_form', kind: 'FRONTEND', args: {}, rawArgs: '{}', status: 'pending' }
       )
     ])
     const text = wrapper.text()
@@ -594,7 +594,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         [
           { kind: 'tool', seg: 0, toolCallId: 'g1', name: 'generative_form', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
         ],
-        { toolCallId: 'g1', name: 'generative_form', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'g1', name: 'generative_form', kind: 'FRONTEND', args: {}, rawArgs: '{}', status: 'pending' }
       )
     ]
     store.historyLoaded = true
@@ -613,7 +613,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         [
           { kind: 'tool', seg: 0, toolCallId: 'f1', name: 'probe.tool', kind2: 'FRONTEND', status: 'pending', args: '{}', timeoutSeconds: 120, requiresAction: true }
         ],
-        { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'f1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', status: 'pending' }
       )
     ])
     // R-163 T2 口径：无映射工具的摘要兜底 = 「工具名 · 状态」；问题1 偏差修正批项 3 起，
@@ -630,7 +630,7 @@ describe('AiPanel 按 parts 渲染（批2 权威翻转 → 批4④ 块分派）'
         [
           { kind: 'tool', seg: 0, toolCallId: 'e1', name: 'probe.tool', kind2: 'FRONTEND', status: 'expired', args: '{}', requiresAction: true }
         ],
-        { toolCallId: 'e1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'e1', name: 'probe.tool', kind: 'FRONTEND', args: {}, rawArgs: '{}', status: 'pending' }
       )
     ])
     expect(wrapper.text()).toContain('会话已失效')
@@ -1009,13 +1009,13 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
   it('#2：工具段 truncated ⇒ 「已截断」角标（hover 带原因）+ 输出区纯限高内滚（R-165 S5a 无展开钮）', async () => {
     const wrapper = await mountPanel([
       buildMessage([
-        { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: '前 64KB 内容…', truncated: true, truncatedReason: '单帧 64KB 预算超限，结果字段被截断', requiresAction: false }
+        { kind: 'tool', seg: 0, toolCallId: 'c1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded', args: '{}', result: '前 64KB 内容…', truncated: true, requiresAction: false }
       ])
     ])
     const badge = wrapper.find('[data-testid="truncated-badge"]')
     expect(badge.exists()).toBe(true)
     expect(badge.text()).toContain('已截断')
-    expect(badge.attributes('title')).toContain('单帧 64KB 预算超限')
+    expect(badge.attributes('title')).toBe('结果被截断')
     // R-165 S5a 项 4（demo v7 终裁）：输出区改**纯限高内滚 160px** —— 原 CollapsibleText 的渐隐 +
     // 「显示更多」钮整退役（限高族统一「纯限高内滚、无展开钮」）；截断角标继续由段标记派生。
     expect(wrapper.find('[data-testid="show-more-c1"]').exists()).toBe(false)
@@ -1040,13 +1040,12 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     wrapper.unmount()
   })
 
-  it('#2 noticeCode：zh 按码+数字拼装；旧帧无 code 回退 truncatedReason', async () => {
+  it('#2 noticeCode：zh 按码+数字拼装；无 code 的旧帧走 locale 固定兜底（旧 truncatedReason 已退役）', async () => {
     const wrapper = await mountPanelWith([
       buildMessage([
         {
           kind: 'tool', seg: 0, toolCallId: 'nc1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
           args: '{}', result: '前 64KB…', truncated: true,
-          truncatedReason: 'Result truncated because it exceeded the frame size limit.',
           noticeCode: 'frame_truncated', originalChars: 9_000, returnedChars: 3_195, strategy: 'head',
           requiresAction: false
         }
@@ -1056,14 +1055,13 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     expect(title).toContain('已压缩显示')
     expect(title).toContain('3195')
     expect(title).toContain('9000')
-    expect(title).not.toContain('Result truncated because')
     wrapper.unmount()
 
     const modelView = await mountPanelWith([
       buildMessage([
         {
           kind: 'tool', seg: 0, toolCallId: 'nc2', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
-          args: '{}', result: '全文', truncated: true, truncatedReason: 'legacy',
+          args: '{}', result: '全文', truncated: true,
           noticeCode: 'model_view_truncated', originalChars: 25_000, returnedChars: 19_000, strategy: 'head',
           requiresAction: false
         }
@@ -1082,7 +1080,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
       buildMessage([
         {
           kind: 'tool', seg: 0, toolCallId: 'nc4', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
-          args: '{}', result: '超大结果', truncated: true, truncatedReason: 'legacy',
+          args: '{}', result: '超大结果', truncated: true,
           noticeCode: 'frame_limit_unreached', originalChars: 9_000, returnedChars: 0,
           requiresAction: false
         }
@@ -1097,11 +1095,11 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
       buildMessage([
         {
           kind: 'tool', seg: 0, toolCallId: 'nc3', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
-          args: '{}', result: '旧结果', truncated: true, truncatedReason: '旧帧原因', requiresAction: false
+          args: '{}', result: '旧结果', truncated: true, requiresAction: false
         }
       ])
     ])
-    expect(legacy.find('[data-testid="truncated-badge"]').attributes('title')).toBe('旧帧原因')
+    expect(legacy.find('[data-testid="truncated-badge"]').attributes('title')).toBe('结果被截断')
     legacy.unmount()
   })
 
@@ -1114,7 +1112,6 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
           {
             kind: 'tool', seg: 0, toolCallId: 'ne1', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
             args: '{}', result: '前 64KB…', truncated: true,
-            truncatedReason: 'Result truncated because it exceeded the frame size limit.',
             noticeCode: 'frame_truncated', originalChars: 9_000, returnedChars: 3_195, strategy: 'head',
             requiresAction: false
           }
@@ -1131,7 +1128,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
         buildMessage([
           {
             kind: 'tool', seg: 0, toolCallId: 'ne-model', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
-            args: '{}', result: '全文', truncated: true, truncatedReason: 'legacy',
+            args: '{}', result: '全文', truncated: true,
             noticeCode: 'model_view_truncated', originalChars: 25_000, returnedChars: 19_000, strategy: 'head',
             requiresAction: false
           }
@@ -1149,7 +1146,6 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
           {
             kind: 'tool', seg: 0, toolCallId: 'ne2', name: 'get_row_count', kind2: 'BACKEND', status: 'succeeded',
             args: '{}', result: '超大结果', truncated: true,
-            truncatedReason: 'Result exceeds the frame size limit and could not be compressed further.',
             noticeCode: 'frame_limit_unreached', originalChars: 9_000, returnedChars: 0,
             requiresAction: false
           }
@@ -1170,8 +1166,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
       buildMessage([
         {
           kind: 'text', seg: 0, text: '被截断的正文', streaming: false, truncated: true,
-          noticeCode: 'frame_truncated', originalChars: 20_000, returnedChars: 3_400, strategy: 'head',
-          truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+          noticeCode: 'frame_truncated', originalChars: 20_000, returnedChars: 3_400, strategy: 'head'
         }
       ])
     ])
@@ -1185,8 +1180,7 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
       buildMessage([
         {
           kind: 'reasoning', seg: 0, text: '被截断的思考', streaming: false, truncated: true,
-          noticeCode: 'frame_truncated', originalChars: 9_000, returnedChars: 2_000, strategy: 'head',
-          truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+          noticeCode: 'frame_truncated', originalChars: 9_000, returnedChars: 2_000, strategy: 'head'
         }
       ])
     ])
@@ -1197,15 +1191,13 @@ describe('R-154：截断角标 / 跟随暂停 / 生成中 / 编辑回填 / 建�
     reasoning.unmount()
   })
 
-  it('#2 旧帧：zh 保留旧中文；en 遇中文原因改用 locale 兜底', async () => {
+  it('#2 旧帧：无 noticeCode 时按 locale 固定兜底（旧 truncatedReason 文案不再透出）', async () => {
     const legacyPart = {
       kind: 'tool' as const, seg: 0, toolCallId: 'old1', name: 'get_row_count', kind2: 'BACKEND' as const,
-      status: 'succeeded' as const, args: '{}', result: '旧结果', truncated: true,
-      truncatedReason: '单帧 64KB 预算超限，结果字段被截断', requiresAction: false
+      status: 'succeeded' as const, args: '{}', result: '旧结果', truncated: true, requiresAction: false
     }
     const zh = await mountPanelWith([buildMessage([legacyPart])])
-    expect(zh.find('[data-testid="truncated-badge"]').attributes('title'))
-      .toBe('单帧 64KB 预算超限，结果字段被截断')
+    expect(zh.find('[data-testid="truncated-badge"]').attributes('title')).toBe('结果被截断')
     zh.unmount()
 
     const { default: i18n } = await import('@/locales')
@@ -1651,7 +1643,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     // 单一元素 = 工具段自己的卡（不再有独立的第二张回执卡 / 也不再是 tool-card-*）
     expect(wrapper.find('[data-testid="tool-card-p1"]').exists()).toBe(false)
     // 卡头：左类型图标 + 中性标题/摘要 + 右状态标签（成功终态默认折叠 ⇒ 摘要可见）；**时间不上卡面**（M1）
-    expect(receipt.text()).toContain('✓ 已批准')
+    expect(receipt.text()).toContain('已批准')
     expect(receipt.find('[data-testid="card-title-p1"]').text()).toBe('启动发布作业')
     expect(receipt.find('[data-testid="ro-summary-p1"]').text()).toBe('（任务 #3）')
     expect(receipt.text()).not.toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/)
@@ -1720,7 +1712,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     expect(wrapper.find('[data-testid="ro-rows-e9"]').text()).toContain('操作')
     expect(wrapper.find('[data-testid="ro-rows-e9"]').text()).toContain('确认步骤')
     // 成功终态摘要仍在（折叠 / 展开都不改摘要文本）；状态文本只由右标签承担
-    expect(wrapper.find('[data-testid="ro-badge-e9"]').text()).toBe('✓ 已批准')
+    expect(wrapper.find('[data-testid="ro-badge-e9"]').text()).toBe('已批准')
     expect(wrapper.find('[data-testid="ro-summary-e9"]').text()).toContain('确认当前步骤')
     wrapper.unmount()
   })
@@ -1753,7 +1745,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
 
     const wrapper = await mountPanel([gf, plain], { realForm: true })
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
-    expect(receipt.text()).toContain('✓ 已提交')
+    expect(receipt.text()).toContain('已提交')
     expect(receipt.find('[data-testid="card-title-g1"]').text()).toBe('导出参数')
     expect(receipt.find('[data-testid="ro-summary-g1"]').text()).toContain('导出范围 华北')
     const head = wrapper.find('[data-testid="ro-toggle-g1"]')
@@ -1851,7 +1843,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     store.loading = false
     await wrapper.vm.$nextTick()
     const keywords: Record<string, string> = {
-      't-ok': '已批准', 't-no': '已拒绝', 't-exp': '已超时', 't-bad': '已批准 · 执行失败',
+      't-ok': '已批准', 't-no': '已拒绝', 't-exp': '已失效', 't-bad': '已批准',
       'g-ok': '已提交', 'g-no': '已取消'
     }
     for (const id of ids) {
@@ -1918,12 +1910,12 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
       }
     ])
     const wrapper = await mountPanel([msg], { realForm: true })
-    expect(wrapper.find('[data-testid="ro-badge-g9"]').text()).toBe('✗ 已取消')
+    expect(wrapper.find('[data-testid="ro-badge-g9"]').text()).toBe('已取消')
     // r15：取消终态同样默认折叠（回合已结束）；摘要非空且不拼接任何未提交值
     expect(wrapper.find('[data-testid="ro-body-g9"]').attributes('style') ?? '').toContain('display: none')
     expect(wrapper.find('[data-testid="ro-toggle-g9"]').attributes('aria-expanded')).toBe('false')
     // 未提交不记录：状态只在右标签；摘要明确「未提交」且不拼接任何残留值
-    expect(wrapper.find('[data-testid="ro-badge-g9"]').text()).toBe('✗ 已取消')
+    expect(wrapper.find('[data-testid="ro-badge-g9"]').text()).toBe('已取消')
     const summary = wrapper.find('[data-testid="ro-summary-g9"]').text().trim()
     expect(summary).toBe('未提交，填写内容不作记录')
     expect(summary).not.toContain('半成品内容')
@@ -2020,7 +2012,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     const wrapper = await mountPanel([
       buildMessage(
         [{ kind: 'tool', seg: 0, toolCallId: 'g1', name: 'start_export', kind2: 'CONFIRM', status: 'pending', args, timeoutSeconds: 120, requiresAction: true }],
-        { toolCallId: 'g1', name: 'start_export', kind: 'CONFIRM', args: JSON.parse(args), rawArgs: args, timeoutSeconds: 120, status: 'pending' }
+        { toolCallId: 'g1', name: 'start_export', kind: 'CONFIRM', args: JSON.parse(args), rawArgs: args, status: 'pending' }
       )
     ])
     const rows = wrapper.find('[data-testid="gate-rows"]').findAll(':scope > div')
@@ -2107,7 +2099,7 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     wrapper.unmount()
   })
 
-  it('2A/r15：门卡四态徽标（已批准 / 已拒绝 / 已超时 / 已批准·执行失败；无已取消）+ 六态一律折叠', async () => {
+  it('2A/r15：门卡只读态徽标（已批准 / 已拒绝 / 已失效 / 已取消）+ 六态一律折叠', async () => {
     const expired = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'e1', name: 'start_export', kind2: 'CONFIRM', status: 'expired', args: '{}', requiresAction: false }
     ])
@@ -2135,19 +2127,18 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
 
     const wrapper = await mountPanel([expired, expiredLocal, cancelled, rejected, failed, approved])
     const cardText = (id: string): string => wrapper.find(`[data-testid="msg-bubble-${id}"]`).find('[data-testid="hitl-receipt"]').text()
-    // 徽标字形前缀保留（✓ / ✗ / !，均文本字形）
-    expect(cardText('a-expired')).toContain('! 已超时')
+    // 徽标不再带 ✓ / ✗ / ! 字形前缀（文案由 locale 直接给）
+    expect(cardText('a-expired')).toContain('已失效')
     expect(cardText('a-expired')).not.toContain('已过期')
-    // 去超时裁决后不再有「本地作废」变体；历史 expired 段一律「已超时」（F6 口径不变）
-    expect(cardText('a-expired-local')).toContain('! 已超时')
+    // 去超时裁决后不再有「本地作废」变体；历史 expired 段一律「已失效」
+    expect(cardText('a-expired-local')).toContain('已失效')
     expect(cardText('a-expired-local')).not.toContain('作废')
-    // 门卡没有「已取消」（K2）：cancelled 归未批准收尾 —— 已取消字样零残留
-    expect(cardText('a-cancelled')).toContain('! 已超时')
-    expect(cardText('a-cancelled')).not.toContain('已取消')
-    expect(cardText('a-rejected')).toContain('✗ 已拒绝')
+    // 无决策元数据的 cancelled 段按 status 落「已取消」
+    expect(cardText('a-cancelled')).toContain('已取消')
+    expect(cardText('a-rejected')).toContain('已拒绝')
     // 执行失败 = 已批准之后工具失败（K3）：复合终态徽标
-    expect(cardText('a-failed')).toContain('! 已批准 · 执行失败')
-    expect(cardText('a-approved')).toContain('✓ 已批准')
+    expect(cardText('a-failed')).toContain('已批准')
+    expect(cardText('a-approved')).toContain('已批准')
     // 旧字样零残留（全 DOM）
     for (const old of ['已不执行', '不批准', '已确认']) {
       expect(wrapper.text()).not.toContain(old)
@@ -2156,10 +2147,10 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     expect(wrapper.find('[data-testid="ro-reason-e5"]').text()).toContain('发布失败：目标库不可写')
     // r15：六态一律默认折叠（回合已结束），卡头摘要非空可辨识
     for (const [prefix, id, keyword] of [
-      ['e1', 'a-expired', '已超时'],
+      ['e1', 'a-expired', '已失效'],
       ['e4', 'a-rejected', '已拒绝'],
-      ['e5', 'a-failed', '已批准 · 执行失败'],
-      ['e3', 'a-cancelled', '已超时']
+      ['e5', 'a-failed', '已批准'],
+      ['e3', 'a-cancelled', '已取消']
     ] as const) {
       const card = wrapper.find(`[data-testid="msg-bubble-${id}"]`)
       expect(card.find(`[data-testid="ro-body-${prefix}"]`).attributes('style') ?? '').toContain('display: none')
@@ -2224,14 +2215,14 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     expect(summary).not.toContain('=')
 
     // 无本地提交值（他端提交/超时收口）⇒ 摘要为空、状态只由右标签「已提交」承担；卡体仍为原样只读（可展开）
-    expect(receipts[1]!.find('[data-testid="ro-badge-g2"]').text()).toBe('✓ 已提交')
+    expect(receipts[1]!.find('[data-testid="ro-badge-g2"]').text()).toBe('已提交')
     expect(receipts[1]!.find('[data-testid="ro-summary-g2"]').text()).toBe('')
     expect(wrapper.find('[data-testid="ro-toggle-g2"]').attributes('disabled')).toBeUndefined()
     expect(wrapper.find('[data-testid="ro-body-g2"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
-  it('2A：徽标系决策态——approve 即显「已批准」；失败落复合终态；缺省回退 status', async () => {
+  it('2A：徽标系决策态——approve 即显「已批准」；批准后失败仍读决策态；缺省回退 status', async () => {
     const running = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'r1', name: 'start_publish', kind2: 'CONFIRM', status: 'running', args: '{"taskId":3}', requiresAction: false, decision: 'approved', decidedAt: 1_700_000_000_000 }
     ])
@@ -2252,12 +2243,12 @@ describe('2A 批：已决原样 UI 只读态 / 折叠时序 / 冲突表格（R-1
     const wrapper = await mountPanel([running, failedAfterApprove, rejected, legacyExpired])
     const cardText = (id: string): string => wrapper.find(`[data-testid="msg-bubble-${id}"]`).find('[data-testid="hitl-receipt"]').text()
     // approve 即显「已批准」——running 期间不等 succeeded
-    expect(cardText('a-running')).toContain('✓ 已批准')
+    expect(cardText('a-running')).toContain('已批准')
     // 已批准后执行失败：复合终态徽标（K3）
-    expect(cardText('a-failed')).toContain('! 已批准 · 执行失败')
-    expect(cardText('a-rejected')).toContain('✗ 已拒绝')
-    // decision 缺省（历史/超时）回退 status 派生（`! 已超时`，不带「作废」）
-    expect(cardText('a-legacy')).toContain('! 已超时')
+    expect(cardText('a-failed')).toContain('已批准')
+    expect(cardText('a-rejected')).toContain('已拒绝')
+    // decision 缺省（历史/超时）回退 status 派生（「已失效」，不带「作废」）
+    expect(cardText('a-legacy')).toContain('已失效')
     expect(cardText('a-legacy')).not.toContain('作废')
     wrapper.unmount()
   })
@@ -2431,15 +2422,15 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
     const wrapper = await mountPanel([toolMsg, hitlMsg, formMsg])
     const cases: Array<{ testid: string; label: string; tone: string; state: string }> = [
       { testid: 'card-status-st-tool-pending', label: '待执行', tone: 'text-[#2563eb]', state: 'pending' },
-      { testid: 'card-status-st-tool-ok', label: '已成功', tone: 'text-[#1a7f45]', state: 'succeeded' },
-      { testid: 'card-status-st-tool-bad', label: '执行失败', tone: 'text-[#c0392b]', state: 'failed' },
-      { testid: 'card-status-st-hitl-pending', label: '待确认', tone: 'text-[#b45309]', state: 'pending' },
-      { testid: 'ro-badge-st-hitl-ok', label: '✓ 已批准', tone: 'text-[#1a7f45]', state: 'approved' },
-      { testid: 'ro-badge-st-hitl-exp', label: '! 已超时', tone: 'text-[#b45309]', state: 'expired' },
-      { testid: 'ro-badge-st-hitl-failed', label: '! 已批准 · 执行失败', tone: 'text-[#c0392b]', state: 'failed' },
-      { testid: 'card-status-st-form-pending', label: '待填写', tone: 'text-[#2563eb]', state: 'pending' },
-      { testid: 'ro-badge-st-form-ok', label: '✓ 已提交', tone: 'text-[#1a7f45]', state: 'submitted' },
-      { testid: 'ro-badge-st-form-cancel', label: '✗ 已取消', tone: 'text-[#c0392b]', state: 'cancelled' }
+      { testid: 'card-status-st-tool-ok', label: '已完成', tone: 'text-[#1a7f45]', state: 'succeeded' },
+      { testid: 'card-status-st-tool-bad', label: '失败', tone: 'text-[#c0392b]', state: 'failed' },
+      { testid: 'card-status-st-hitl-pending', label: '待操作', tone: 'text-[#b45309]', state: 'pending' },
+      { testid: 'ro-badge-st-hitl-ok', label: '已批准', tone: 'text-[#1a7f45]', state: 'approved' },
+      { testid: 'ro-badge-st-hitl-exp', label: '已失效', tone: 'text-[#b45309]', state: 'expired' },
+      { testid: 'ro-badge-st-hitl-failed', label: '已批准', tone: 'text-[#1a7f45]', state: 'approved' },
+      { testid: 'card-status-st-form-pending', label: '待操作', tone: 'text-[#b45309]', state: 'pending' },
+      { testid: 'ro-badge-st-form-ok', label: '已提交', tone: 'text-[#1a7f45]', state: 'submitted' },
+      { testid: 'ro-badge-st-form-cancel', label: '已取消', tone: 'text-[#c0392b]', state: 'cancelled' }
     ]
     for (const item of cases) {
       const status = wrapper.find(`[data-testid="${item.testid}"]`)
@@ -2518,7 +2509,7 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
   it('GF 一卡一头：AiPanel 待填写 GF 传 showHeader=false；独立 FormRenderer 默认头保留', async () => {
     const msg = buildMessage(
       [mk('gf1', { name: 'generative_form', kind2: 'FRONTEND', status: 'pending', args: GF_ARGS, result: '', requiresAction: true, timeoutSeconds: 120 })],
-      { toolCallId: 'gf1', name: 'generative_form', kind: 'FRONTEND', args: { form: GF_FORM }, rawArgs: GF_ARGS, timeoutSeconds: 120, status: 'pending' }
+      { toolCallId: 'gf1', name: 'generative_form', kind: 'FRONTEND', args: { form: GF_FORM }, rawArgs: GF_ARGS, status: 'pending' }
     )
     msg.id = 'a-gf-head'
     const store = useAiStore()
@@ -2566,8 +2557,8 @@ describe('卡片通道统一：三类型卡头（左裸 SVG / 中标题摘要 / 
     msg.id = 'm-a11y'
     const wrapper = await mountPanel([msg])
     const cases = [
-      { id: 'a11y-ok', title: '启动发布作业', status: '✓ 已批准' },
-      { id: 'a11y-cancel', title: '税务配置差异导出表单', status: '✗ 已取消' }
+      { id: 'a11y-ok', title: '启动发布作业', status: '已批准' },
+      { id: 'a11y-cancel', title: '税务配置差异导出表单', status: '已取消' }
     ]
     for (const item of cases) {
       const head = wrapper.find(`[data-testid="ro-toggle-${item.id}"]`)
@@ -2877,7 +2868,7 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     })
     // 确认门帧到达（工具段插入 = 卡体增高前兆；指纹 watch 只盯末段，RO 接管钉底）
     store.handleFrame(
-      { type: 'confirm_request', toolCallId: 'c1', name: 'start_export', args: '{"taskId":1}', timeoutSeconds: 120, runId: 'run-1', seq: 2 },
+      { type: 'confirm_request', toolCallId: 'c1', name: 'start_export', args: '{"taskId":1}', runId: 'run-1', seq: 2 },
       message.id
     )
     await wrapper.vm.$nextTick()
@@ -2903,7 +2894,7 @@ describe('R-161：阈值拆分滞回 / RO 内容重钉 / 平滑回底 / reduced-
     Object.defineProperty(wrap, 'clientHeight', { value: 500, configurable: true })
     scrollToDist(wrap, 100, wrapper) // 用户上滑：followBottom=false
     store.handleFrame(
-      { type: 'confirm_request', toolCallId: 'c1', name: 'start_export', args: '{"taskId":1}', timeoutSeconds: 120, runId: 'run-1', seq: 2 },
+      { type: 'confirm_request', toolCallId: 'c1', name: 'start_export', args: '{"taskId":1}', runId: 'run-1', seq: 2 },
       message.id
     )
     await wrapper.vm.$nextTick()
@@ -2970,7 +2961,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
     // 原卡只读态：卡头恒显行（徽标 + 摘要）即可见 —— R-160 兼容条件；**卡面不渲染 decidedAt**（M1）
     const receipt = wrapper.find('[data-testid="hitl-receipt"]')
     expect(receipt.exists()).toBe(true)
-    expect(receipt.text()).toContain('✓ 已批准')
+    expect(receipt.text()).toContain('已批准')
     expect(receipt.text()).not.toMatch(/\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/)
     expect(receipt.text()).not.toMatch(/\d{2}:\d{2}/)
     expect(wrapper.find('[data-testid="ro-summary-tc-1"]').exists()).toBe(true)
@@ -3044,7 +3035,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
       unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1') as ToolPart
     expect(part).toMatchObject({ requiresAction: true, status: 'pending', expiresAt, atMs })
     expect(store.pendingConfirm).toMatchObject({ toolCallId: 'c1', expiresAt, atMs })
@@ -3067,7 +3058,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
       unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     const wrapper = await mountPanel(store.messages)
     const before = wrapper.find('[data-testid="pending-card-c1"]').html()
@@ -3087,7 +3078,7 @@ describe('R-160：HITL 三缺陷（回读恢复 / 回执独立块 / 倒计时续
       unresolvedExternal: ['c1'], awaitingExternal: true, archiveMaxSeq: 0
     })
     api.reattachRun.mockImplementation(() => new Promise(() => {}))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     const part = store.messages.flatMap((m) => m.parts).find((p) => p.kind === 'tool' && p.toolCallId === 'c1') as ToolPart
     expect(part.requiresAction).toBe(true)
     expect(part.expiresAt).toBeUndefined() // 旧数据：不写入口径
@@ -5800,7 +5791,7 @@ describe('问题1 偏差修正批：7 项走样补齐', () => {
     wrapper.unmount()
   })
 
-  it('2A：只读卡徽标规格（9.5px / leading 1.7 / px-5 / 圆角 5，与工具卡胶囊同档）+ 复合终态文案', async () => {
+  it('2A：只读卡徽标规格（9.5px / leading 1.7 / px-5 / 圆角 5，与工具卡胶囊同档）+ 决策态优先', async () => {
     const msg = buildMessage([
       {
         kind: 'tool', seg: 0, toolCallId: 'u1', name: 'start_publish', kind2: 'CONFIRM',
@@ -5809,12 +5800,12 @@ describe('问题1 偏差修正批：7 项走样补齐', () => {
     ])
     const wrapper = await mountPanel([msg])
     const badge = wrapper.find('[data-testid="ro-badge-u1"]')
-    expect(badge.text()).toBe('! 已批准 · 执行失败')
+    expect(badge.text()).toBe('已批准')
     // 统一右标签底座（与工具卡同档；描边承载状态色，不再用只读专用 semibold 皮肤）
     expect(badge.classes()).toEqual(expect.arrayContaining(['text-[9.5px]', 'leading-[1.7]', 'px-[5px]', 'rounded-[5px]', 'border', 'border-solid', 'flex-none']))
     expect(badge.classes()).not.toContain('font-semibold')
-    expect(badge.attributes('data-state')).toBe('failed')
-    expect(badge.classes()).toContain('text-[#c0392b]')
+    expect(badge.attributes('data-state')).toBe('approved')
+    expect(badge.classes()).toContain('text-[#1a7f45]')
     // 非决策态（unknown）不进审批只读卡 —— 不渲染 ro 徽标（改由普通工具卡状态胶囊承接）
     const unknown = buildMessage([
       { kind: 'tool', seg: 0, toolCallId: 'u2', name: 'start_publish', kind2: 'CONFIRM', status: 'unknown', args: '{"taskId":3}', requiresAction: false }

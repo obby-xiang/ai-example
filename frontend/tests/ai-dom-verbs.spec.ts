@@ -13,8 +13,7 @@ import {
   abortUiOperations,
   aiClick,
   aiSnapshot,
-  beginUiTurn,
-  peekUiUndo
+  beginUiTurn
 } from '@/utils/ai-dom-tools'
 import { currentAiEpoch } from '@/utils/ai-regions'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -172,10 +171,10 @@ describe('T-29 / T-30：风险分级', () => {
     expect(spy).toHaveBeenCalledTimes(1)
     expect(out.result).toContain('risk=read')
     expect(out.result).not.toContain('可撤销')
-    expect(peekUiUndo()).toBeNull()
+    expect('peekUiUndo' in await import('@/utils/ai-dom-tools')).toBe(false)
   })
 
-  it('T-30 mutate-local：click 1 次 + 高亮 + 撤销点 + touch(source=AI)', async () => {
+  it('T-30 mutate-local：click 1 次 + 高亮 + touch(source=AI)，撤销能力已退役', async () => {
     enterImportPage()
     registerRegion(makeRoot(
       '<input type="checkbox" data-ai-ref="import.selectDefs.CURRENCY" data-ai-risk="mutate-local" data-ai-undo="retoggle" />'
@@ -188,10 +187,10 @@ describe('T-29 / T-30：风险分级', () => {
     expect(out.outcome).toBe('ok')
     expect(spy).toHaveBeenCalledTimes(1)
     expect(el('import.selectDefs.CURRENCY').getAttribute('data-ai-highlighted')).toBe('true')
-    expect(peekUiUndo()).toMatchObject({ kind: 'retoggle', ref: 'import.selectDefs.CURRENCY' })
+    expect('peekUiUndo' in await import('@/utils/ai-dom-tools')).toBe(false)
     expect(workspace.dataVersion).toBeGreaterThan(before)
     expect(workspace.recentActions.at(-1)?.source).toBe('AI')
-    expect(out.result).toContain('可撤销')
+    expect(out.result).not.toContain('可撤销')
   })
 })
 

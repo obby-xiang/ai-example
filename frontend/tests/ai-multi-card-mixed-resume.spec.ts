@@ -115,7 +115,7 @@ describe('混合卡（CONFIRM + FRONTEND）恢复：决掉一张后其余仍可�
     store.sessionId = 'sess'
     api.runsCurrent.mockResolvedValue(suspendedSnapshot([confirmEntry('c1'), formEntry('g1')]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.suspended).toBe(true)
     // 串行呈现：只补第一张（CONFIRM），表单卡在队列里
     expect(store.activeForm).toBeNull()
@@ -141,7 +141,7 @@ describe('混合卡（CONFIRM + FRONTEND）恢复：决掉一张后其余仍可�
     store.sessionId = 'sess'
     api.runsCurrent.mockResolvedValue(suspendedSnapshot([confirmEntry('c1'), formEntry('g1')]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.suspended).toBe(true)
     // 串行呈现：第二张还在 `restoredPendingQueue` 里、**尚未建段**
     expect(store.activeForm).toBeNull()
@@ -155,7 +155,6 @@ describe('混合卡（CONFIRM + FRONTEND）恢复：决掉一张后其余仍可�
         toolCallId: 'c1',
         name: 'danger_tool',
         decision: 'APPROVED',
-        approved: true,
         status: 'APPROVED',
         runId: 'run-1',
         seq: 5
@@ -181,7 +180,7 @@ describe('混合卡（CONFIRM + FRONTEND）恢复：决掉一张后其余仍可�
       suspendedSnapshot([confirmEntry('c1'), confirmEntry('c2'), confirmEntry('c3')])
     )
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.suspended).toBe(true)
     expect(partOf(store.messages, 'c1')).not.toBeNull()
     api.reattachRun.mockClear()
@@ -213,7 +212,6 @@ describe('409 幂等拒绝后的恢复（不止一次权威校正，且用尽后
       toolCallId,
       name: 'danger_tool',
       args: '{"x":1}',
-      timeoutSeconds: 120,
       seq: 2
     })
     return toolCallId
@@ -275,7 +273,7 @@ describe('409 幂等拒绝后的恢复（不止一次权威校正，且用尽后
       .mockResolvedValue(suspendedSnapshot(
         [{ ...confirmEntry('c1'), entryStatus: 'APPROVED' }, formEntry('g1')]
       ))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.restoredPendingQueue).toHaveLength(1)
 
     api.confirm.mockRejectedValue(new ApiError('Conflict', 409, ErrorCode.DUPLICATE_TOOL_CALL_ID, null))
@@ -304,7 +302,7 @@ describe('M-a（fix2）：409 校正必须消费同一份权威 pendingEntries �
         { ...confirmEntry('c1'), entryStatus: 'APPROVED' },
         { ...confirmEntry('c2'), entryStatus: 'APPROVED' }
       ]))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.restoredPendingQueue).toHaveLength(1)
 
     api.confirm.mockRejectedValue(new ApiError('Conflict', 409, ErrorCode.DUPLICATE_TOOL_CALL_ID, null))
@@ -332,7 +330,7 @@ describe('M-a（fix2）：409 校正必须消费同一份权威 pendingEntries �
         { ...confirmEntry('c1'), entryStatus: 'APPROVED' },
         { ...confirmEntry('c2'), entryStatus: 'EXECUTED' }
       ]))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.restoredPendingQueue).toHaveLength(1)
 
     api.confirm.mockRejectedValue(new ApiError('Conflict', 409, ErrorCode.DUPLICATE_TOOL_CALL_ID, null))
@@ -351,7 +349,7 @@ describe('M-b（fix2）：前端工具 409（他端已决）后不得丢卡 / �
     const store = useAiStore()
     store.sessionId = 'sess'
     api.runsCurrent.mockResolvedValue(suspendedSnapshot([formEntry('g1'), formEntry('g2')]))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.activeForm?.toolCallId).toBe('g1')
     expect(store.restoredPendingQueue).toHaveLength(1)
 
@@ -379,7 +377,7 @@ describe('M-b（fix2）：前端工具 409（他端已决）后不得丢卡 / �
     const store = useAiStore()
     store.sessionId = 'sess'
     api.runsCurrent.mockResolvedValue(suspendedSnapshot([formEntry('g1')]))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.suspended).toBe(true)
     api.reattachRun.mockClear()
 
@@ -405,7 +403,7 @@ describe('M-d（fix2）：结局帧先于 POST 时不得丢续收（含 req=fals
     ]))
     // 真实时序：恢复那条连接在 park 时被服务端收掉（loading 归 false），决策帧已在该连接上到达
     api.reattachRun.mockResolvedValue(undefined)
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     await Promise.resolve()
     await Promise.resolve()
     expect(store.restoredPendingQueue).toHaveLength(0)
@@ -418,7 +416,6 @@ describe('M-d（fix2）：结局帧先于 POST 时不得丢续收（含 req=fals
         toolCallId: 'c1',
         name: 'danger_tool',
         decision: 'APPROVED',
-        approved: true,
         status: 'APPROVED',
         runId: 'run-1',
         seq: 5
@@ -450,7 +447,7 @@ describe('M-d（fix2）：结局帧先于 POST 时不得丢续收（含 req=fals
       { ...formEntry('g2'), req: false }
     ]))
     api.reattachRun.mockResolvedValue(undefined)
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     await Promise.resolve()
     await Promise.resolve()
     api.reattachRun.mockClear()
@@ -470,7 +467,7 @@ describe('M-d（fix2）：结局帧先于 POST 时不得丢续收（含 req=fals
     store.sessionId = 'sess'
     // 恢复那条连接还没收（never-resolving）：帧由它送达，后续帧也由它送达 ⇒ 不需要新连接
     api.runsCurrent.mockResolvedValue(suspendedSnapshot([confirmEntry('c1')]))
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(store.loading).toBe(true)
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     api.reattachRun.mockClear()
@@ -481,7 +478,6 @@ describe('M-d（fix2）：结局帧先于 POST 时不得丢续收（含 req=fals
         toolCallId: 'c1',
         name: 'danger_tool',
         decision: 'APPROVED',
-        approved: true,
         status: 'APPROVED',
         runId: 'run-1',
         seq: 5

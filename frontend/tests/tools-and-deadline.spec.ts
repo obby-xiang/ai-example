@@ -57,7 +57,7 @@ describe('executeFrontendTool 统一超时预算（包⑤）', () => {
     const pending = executeFrontendTool({ name: 'probe.never-returns', args: {}, budgetMs: 1_000 })
     await vi.advanceTimersByTimeAsync(1_000)
     const execution = await pending
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.availability).toBe('degraded')
     // 批 A（A-08）语义变更：非下载类超时 = 确定性收口（timeout + UI_BUDGET_EXHAUSTED），
     // 不再报「结局未知」（unknown 只留给下载类白名单）。

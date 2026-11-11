@@ -5,7 +5,7 @@
  * （"哪个地区最多"必须一次可答）。`sort:none` 保留出现顺序作为逃生口。
  */
 import { describe, expect, it } from 'vitest'
-import { aggregateSheet } from '@/utils/sheet-tools'
+import { aggregateSheetAsync as aggregateSheet } from '@/utils/sheet-tools'
 import { field, makeFakeSheet } from './sheet-fixtures'
 
 const fields = [
@@ -34,79 +34,79 @@ function groupLabels(text: string): string[] {
     .map((line) => line.trim().replace(/^([^：]+)：.*$/, '$1'))
 }
 
-function aggregate(args: Record<string, unknown>) {
+async function aggregate(args: Record<string, unknown>) {
   const sheet = makeFakeSheet({ fields, rows })
-  const result = aggregateSheet(sheet.ctx, { defCode: 'DEMO', groupBy: 'region', ...args })
+  const result = await aggregateSheet(sheet.ctx, { defCode: 'DEMO', groupBy: 'region', ...args })
   expect(result.ok).toBe(true)
   if (!result.ok) throw new Error(result.reason)
   return result.text
 }
 
-describe('B①-1 默认排序：不传 sort 也按首个度量（count）降序', () => {
-  it('默认输出 Mid(3) → Zeta(2) → Alpha(1)', () => {
-    const text = aggregate({})
+describe('B①-1 默认排序：不传 sort 也按首个度量（count）降序', async () => {
+  it('默认输出 Mid(3) → Zeta(2) → Alpha(1)', async () => {
+    const text = await aggregate({})
     expect(groupLabels(text)).toEqual(['Mid', 'Zeta', 'Alpha'])
     expect(text).toContain('排序：按 count 降序（取前 20 组）')
   })
 
-  it('sort=count 与默认同序（显式写法）', () => {
-    expect(groupLabels(aggregate({ sort: 'count' }))).toEqual(['Mid', 'Zeta', 'Alpha'])
+  it('sort=count 与默认同序（显式写法）', async () => {
+    expect(groupLabels(await aggregate({ sort: 'count' }))).toEqual(['Mid', 'Zeta', 'Alpha'])
   })
 
-  it('sort=metricAsc ⇒ Alpha(1) → Zeta(2) → Mid(3)', () => {
-    const text = aggregate({ sort: 'metricAsc' })
+  it('sort=metricAsc ⇒ Alpha(1) → Zeta(2) → Mid(3)', async () => {
+    const text = await aggregate({ sort: 'metricAsc' })
     expect(groupLabels(text)).toEqual(['Alpha', 'Zeta', 'Mid'])
     expect(text).toContain('排序：按 count 升序')
   })
 })
 
-describe('B①-2 标签排序与逃生口', () => {
-  it('sort=labelAsc ⇒ Alpha → Mid → Zeta（按标签而非计数）', () => {
-    expect(groupLabels(aggregate({ sort: 'labelAsc' }))).toEqual(['Alpha', 'Mid', 'Zeta'])
+describe('B①-2 标签排序与逃生口', async () => {
+  it('sort=labelAsc ⇒ Alpha → Mid → Zeta（按标签而非计数）', async () => {
+    expect(groupLabels(await aggregate({ sort: 'labelAsc' }))).toEqual(['Alpha', 'Mid', 'Zeta'])
   })
 
-  it('sort=labelDesc ⇒ Zeta → Mid → Alpha', () => {
-    expect(groupLabels(aggregate({ sort: 'labelDesc' }))).toEqual(['Zeta', 'Mid', 'Alpha'])
+  it('sort=labelDesc ⇒ Zeta → Mid → Alpha', async () => {
+    expect(groupLabels(await aggregate({ sort: 'labelDesc' }))).toEqual(['Zeta', 'Mid', 'Alpha'])
   })
 
-  it('sort=none ⇒ 保留出现顺序 Zeta → Mid → Alpha', () => {
-    const text = aggregate({ sort: 'none' })
+  it('sort=none ⇒ 保留出现顺序 Zeta → Mid → Alpha', async () => {
+    const text = await aggregate({ sort: 'none' })
     expect(groupLabels(text)).toEqual(['Zeta', 'Mid', 'Alpha'])
     expect(text).toContain('排序：保持原顺序')
   })
 })
 
-describe('B①-3 按指定度量排序（sum 与 count 序不同，证明真的按该度量）', () => {
-  it('sort=sum + metrics=[sum] ⇒ Alpha(1000) → Mid(32) → Zeta(3)', () => {
-    const text = aggregate({ metrics: ['sum'], columnCode: 'amount', sort: 'sum' })
+describe('B①-3 按指定度量排序（sum 与 count 序不同，证明真的按该度量）', async () => {
+  it('sort=sum + metrics=[sum] ⇒ Alpha(1000) → Mid(32) → Zeta(3)', async () => {
+    const text = await aggregate({ metrics: ['sum'], columnCode: 'amount', sort: 'sum' })
     expect(groupLabels(text)).toEqual(['Alpha', 'Mid', 'Zeta'])
     expect(text).toContain('sum=1000')
     expect(text).toContain('排序：按 sum 降序')
   })
 
-  it('sort=metric 取首个度量（metrics=[sum] ⇒ 按 sum 降序）', () => {
-    expect(groupLabels(aggregate({ metrics: ['sum'], columnCode: 'amount', sort: 'metric' })))
+  it('sort=metric 取首个度量（metrics=[sum] ⇒ 按 sum 降序）', async () => {
+    expect(groupLabels(await aggregate({ metrics: ['sum'], columnCode: 'amount', sort: 'metric' })))
       .toEqual(['Alpha', 'Mid', 'Zeta'])
   })
 })
 
-describe('B①-4 Top-N：排序在截断之前，limit 取的是前 N 名', () => {
-  it('limit=2 ⇒ 回 Mid、Zeta（前二名），共 3 组本次回 2 组', () => {
-    const text = aggregate({ limit: 2 })
+describe('B①-4 Top-N：排序在截断之前，limit 取的是前 N 名', async () => {
+  it('limit=2 ⇒ 回 Mid、Zeta（前二名），共 3 组本次回 2 组', async () => {
+    const text = await aggregate({ limit: 2 })
     expect(groupLabels(text)).toEqual(['Mid', 'Zeta'])
     expect(text).toContain('共 3 组，本次回 2 组')
     expect(text).toContain('排序：按 count 降序（取前 2 组）')
   })
 
-  it('limit=2 + labelAsc ⇒ 取标签序前二（Alpha、Mid），证明截断发生在排序之后', () => {
-    expect(groupLabels(aggregate({ sort: 'labelAsc', limit: 2 }))).toEqual(['Alpha', 'Mid'])
+  it('limit=2 + labelAsc ⇒ 取标签序前二（Alpha、Mid），证明截断发生在排序之后', async () => {
+    expect(groupLabels(await aggregate({ sort: 'labelAsc', limit: 2 }))).toEqual(['Alpha', 'Mid'])
   })
 })
 
-describe('B①-5 参数闸：排序口径不认识就拒，不静默回退', () => {
-  it('sort=median ⇒ ok:false 且列出支持的口径', () => {
+describe('B①-5 参数闸：排序口径不认识就拒，不静默回退', async () => {
+  it('sort=median ⇒ ok:false 且列出支持的口径', async () => {
     const sheet = makeFakeSheet({ fields, rows })
-    const result = aggregateSheet(sheet.ctx, { defCode: 'DEMO', groupBy: 'region', sort: 'median' })
+    const result = await aggregateSheet(sheet.ctx, { defCode: 'DEMO', groupBy: 'region', sort: 'median' })
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.reason).toContain('sort')
@@ -114,9 +114,9 @@ describe('B①-5 参数闸：排序口径不认识就拒，不静默回退', () 
     expect(result.reason).not.toContain('{')
   })
 
-  it('sort=sum 但 metrics 不含 sum ⇒ 明确要求把 sum 列进 metrics', () => {
+  it('sort=sum 但 metrics 不含 sum ⇒ 明确要求把 sum 列进 metrics', async () => {
     const sheet = makeFakeSheet({ fields, rows })
-    const result = aggregateSheet(sheet.ctx, {
+    const result = await aggregateSheet(sheet.ctx, {
       defCode: 'DEMO',
       groupBy: 'region',
       metrics: ['count'],
@@ -129,9 +129,9 @@ describe('B①-5 参数闸：排序口径不认识就拒，不静默回退', () 
     expect(result.reason).toContain('sum')
   })
 
-  it('不带 groupBy 时 sort 不影响总计（输出仍只有总计行）', () => {
+  it('不带 groupBy 时 sort 不影响总计（输出仍只有总计行）', async () => {
     const sheet = makeFakeSheet({ fields, rows })
-    const result = aggregateSheet(sheet.ctx, { defCode: 'DEMO', sort: 'count' })
+    const result = await aggregateSheet(sheet.ctx, { defCode: 'DEMO', sort: 'count' })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.text).toContain('总计：6 行')
@@ -139,12 +139,12 @@ describe('B①-5 参数闸：排序口径不认识就拒，不静默回退', () 
   })
 })
 
-describe('B①-6 语义变更断言（单列）：分组输出顺序由“出现顺序”改为“度量降序”', () => {
-  it('同一份数据：旧口径首组是 Zeta（先出现），新口径首组是 Mid（计数最多）', () => {
-    const text = aggregate({})
+describe('B①-6 语义变更断言（单列）：分组输出顺序由“出现顺序”改为“度量降序”', async () => {
+  it('同一份数据：旧口径首组是 Zeta（先出现），新口径首组是 Mid（计数最多）', async () => {
+    const text = await aggregate({})
     expect(groupLabels(text)[0]).toBe('Mid')
     expect(groupLabels(text)).not.toContain('Zeta（出现顺序残留）')
     // 逃生口可回到旧口径，证明变更不是“无法回退”
-    expect(groupLabels(aggregate({ sort: 'none' }))[0]).toBe('Zeta')
+    expect(groupLabels(await aggregate({ sort: 'none' }))[0]).toBe('Zeta')
   })
 })

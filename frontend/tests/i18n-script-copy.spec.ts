@@ -46,13 +46,13 @@ beforeEach(() => {
 describe('L-69-① 工具卡状态词（blocks.ts）随语言', () => {
   it('普通段状态：zh 逐字不变，en 为英文', () => {
     const cases: Array<[ToolRunStatus, string, string]> = [
-      ['running', '调用中…', 'Running…'],
-      ['succeeded', '已成功', 'Succeeded'],
-      ['failed', '执行失败', 'Failed'],
-      ['rejected', '已拒绝', 'Rejected'],
-      ['expired', '会话已失效', 'Session expired'],
+      ['running', '执行中', 'Running'],
+      ['succeeded', '已完成', 'Completed'],
+      ['failed', '失败', 'Failed'],
+      ['rejected', '未执行', 'Not executed'],
+      ['expired', '已失效', 'Expired'],
       ['cancelled', '已取消', 'Cancelled'],
-      ['unknown', '结局未知（未确认成功/失败）', 'Outcome unknown (not confirmed)'],
+      ['unknown', '需人工核对', 'Manual review'],
       ['skipped', '已跳过', 'Skipped']
     ]
     for (const [status, zh, en] of cases) {
@@ -64,19 +64,19 @@ describe('L-69-① 工具卡状态词（blocks.ts）随语言', () => {
     }
   })
 
-  it('blocked 的 en 文案是「超出可展示范围」而非 out of scope（语义修正）', () => {
+  it('blocked 的 en 文案是「未执行」（与 zh 同表，不再使用 out of scope）', () => {
     applyLocale('en-US')
-    expect(cardStatusOf(makeTool({ status: 'blocked' })).label).toBe('Out of presentable scope')
-    expect(translate('tool.status.blocked')).toBe('beyond the presentable range')
+    expect(cardStatusOf(makeTool({ status: 'blocked' })).label).toBe('Not executed')
+    expect(translate('tool.status.blocked')).toBe('Not executed')
   })
 
   it('pending 按类型分工 + 已决只读六态', () => {
     applyLocale('en-US')
     expect(cardStatusOf(makeTool({ status: 'pending' })).label).toBe('Pending')
     expect(cardStatusOf(makeTool({ status: 'pending', kind2: 'CONFIRM', requiresAction: true })).label)
-      .toBe('Awaiting confirmation')
-    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', decision: 'approved' })).label).toBe('✓ Approved')
-    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', decision: 'timeout' })).label).toBe('! Timed out')
+      .toBe('Action required')
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', decision: 'approved' })).label).toBe('Approved')
+    expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'expired' })).label).toBe('Expired')
   })
 
   it('值可读化（是/否/空/复杂值/顿号）随语言', () => {
@@ -148,12 +148,13 @@ describe('L-69-③ notice：code + args 结构化，渲染按当前语言重译'
     expect(card?.detail).toBe('Service is too busy')
   })
 
-  it('后端 message 原文（数据不是文案）不翻译、不带 code', () => {
+  it('后端 message 原文（数据不是文案）不回显：失败走稳定 code 词条', () => {
     const store = useAiStore()
     applyLocale('en-US')
     store.handleChatError(new ApiError('后端原文：服务暂不可用', 503, 'SOME_BACKEND_CODE', null))
-    expect(store.noticeCode).toBeNull()
-    expect(store.noticeText).toBe('后端原文：服务暂不可用')
+    expect(store.noticeCode).toBe('ai.notice.chatRequestFailed')
+    expect(store.noticeText).toBe('Chat request failed')
+    expect(store.noticeText).not.toContain('后端原文')
   })
 
   it('清空通知槽同时清 code（否则 getter 会把旧模板重新翻出来）', () => {
@@ -165,36 +166,28 @@ describe('L-69-③ notice：code + args 结构化，渲染按当前语言重译'
   })
 })
 
-describe('L-69-④ 工作区事件：summary 送模型（中文），display 给界面（随语言）', () => {
-  it('enterPage：recentActions 仍中文，display 渲染英文；contextSummary 随语言', () => {
+describe('L-69-④ 工作区事件：summary 固定中文（display 镜像已移除）', () => {
+  it('enterPage：recentActions 仍中文；contextSummary 随语言', () => {
     const workspace = useWorkspaceStore()
     applyLocale('en-US')
     workspace.enterPage({ pageId: 'tasks', page: 'tasks' })
     const record = workspace.recentActions.at(-1)
-    // C5：送模型那一份不随 UI 语言变
+    // C5：送模型那一份不随 UI 语言变；display 镜像已从记录形态移除
     expect(record?.summary).toBe('进入任务中心')
-    expect(translate(record?.display?.code ?? '', record?.display?.args)).toBe('Entered Task Center')
+    expect(record).not.toHaveProperty('display')
     expect(workspace.contextSummary).toBe('Task Center')
     applyLocale('zh-CN')
     expect(workspace.contextSummary).toBe('任务中心')
   })
 
-  it('选中集 / 绑定任务 / 导入模式的 display 插值', () => {
+  it('选中集 / 绑定任务 / 导入模式的 summary 文案', () => {
     const workspace = useWorkspaceStore()
     applyLocale('en-US')
     workspace.setTaskId(12)
     workspace.setSelectedDefs(['CURRENCY', 'TAX_RATE'])
     workspace.setImportMode('MERGE')
-    const last = (): string => {
-      const record = workspace.recentActions.at(-1)
-      return translate(record?.display?.code ?? '', record?.display?.args)
-    }
-    expect(last()).toBe('Import mode set to merge (incremental)')
+    expect(workspace.recentActions.at(-1)?.summary).toBe('导入模式设为 增量合并')
     expect(workspace.recentActions.at(-2)?.summary).toBe('已选择配置项：CURRENCY、TAX_RATE')
-    expect(translate(
-      workspace.recentActions.at(-2)?.display?.code ?? '',
-      workspace.recentActions.at(-2)?.display?.args
-    )).toBe('Selected definitions: CURRENCY、TAX_RATE')
     expect(workspace.recentActions.at(-3)?.summary).toBe('绑定任务 #12')
   })
 })
@@ -213,8 +206,8 @@ describe('L-69-⑤ AI 设置文案键表（ai-settings-copy）随语言', () => 
     expect(describeAiConfigError({ code: 'KEY_EMPTY' })).toBe('API Key 为空：请填写密钥，或用「清除密钥」。')
     applyLocale('en-US')
     expect(describeAiConfigError({ code: 'KEY_EMPTY' })).toBe('API Key is empty: enter a key, or use "Clear key".')
-    expect(describeAiConfigError({ code: 'NO_SUCH_CODE', message: '后端细节' })).toBe('Operation failed; please retry.')
-    expect(describeAiConfigError(new Error('后端细节'))).toBe('Operation failed; please retry.')
+    expect(describeAiConfigError({ code: 'NO_SUCH_CODE', message: '后端细节' })).toBe('The action did not complete. Your entries are preserved; retry, or contact an administrator if this happens again.')
+    expect(describeAiConfigError(new Error('后端细节'))).toBe('The action did not complete. Your entries are preserved; retry, or contact an administrator if this happens again.')
   })
 
   /**

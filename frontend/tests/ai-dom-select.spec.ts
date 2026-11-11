@@ -4,7 +4,7 @@
  * 覆盖：T-20（setter 优先、DOM 零点击）、T-21（回退路径精确匹配）、T-22（选项不存在如实失败）。
  */
 import { describe, expect, it, beforeEach, vi } from 'vitest'
-import { aiSelect, aiSnapshot, beginUiTurn, peekUiUndo } from '@/utils/ai-dom-tools'
+import { aiSelect, aiSnapshot, beginUiTurn } from '@/utils/ai-dom-tools'
 import { currentAiEpoch } from '@/utils/ai-regions'
 import { enterImportPage, makeRoot, registerRegion, resetAiTestState } from './ai-fixtures'
 
@@ -38,7 +38,7 @@ describe('T-20：路径 1 —— 区域 setter（Element Plus 自绘弹层的唯
     expect(spy).toHaveBeenCalledTimes(0)
     expect(out.result).toContain('已选择')
     expect(out.result).toContain('REPLACE')
-    expect(peekUiUndo()).toMatchObject({ kind: 'select', previous: 'REPLACE' })
+    expect('peekUiUndo' in await import('@/utils/ai-dom-tools')).toBe(false)
   })
 
   it('setter 返回 false ⇒ failed（不谎报成功）', async () => {

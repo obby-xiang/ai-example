@@ -32,14 +32,10 @@ import {
   CONTEXT_TIER_DANGER,
   CONTEXT_TIER_HIGH,
   CONTEXT_TIER_WARN,
-  contextPillText,
   contextTier,
-  formatPartTokens,
   formatPercent,
   formatTokens,
-  partLabel,
-  tierClass,
-  tierTitle
+  tierClass
 } from '@/utils/context-usage'
 
 const measured = (used: number, limit: number | null, est = false): ContextUsage => ({
@@ -93,70 +89,9 @@ describe('contextTier（C-32：三档边界逐点）', () => {
   })
 })
 
-describe('contextPillText（C-31 / C-33）', () => {
-  it('有上限：百分比 · 已用/上限', () => {
-    expect(contextPillText(measured(84213, 128000))).toBe('65.8% · 84.2k/128k')
-  })
-
+describe('formatPercent（C-31）', () => {
   it('整数百分比不带小数', () => {
-    expect(contextPillText(measured(70400, 128000))).toBe('55% · 70.4k/128k')
     expect(formatPercent(66)).toBe('66')
-  })
-
-  it('估算态前缀 ≈（C-33）', () => {
-    expect(contextPillText(measured(84213, 128000, true))).toBe('≈65.8% · 84.2k/128k')
-  })
-
-  it('上限未知：只显示已用，不给百分比（C-33）', () => {
-    expect(contextPillText(measured(84213, null))).toBe('已用 84.2k')
-    expect(contextPillText(measured(84213, null, true))).toBe('≈已用 84.2k')
-  })
-
-  it('未测/无数据：空串（调用方据此不渲染）', () => {
-    expect(contextPillText(null)).toBe('')
-    expect(contextPillText(measured(0, 128000))).toBe('0% · 0/128k')
-    expect(contextPillText({ ...measured(0, null), percent: null })).toBe('')
-  })
-})
-
-describe('分项展示（C-34）', () => {
-  it('七项名与未知键兜底', () => {
-    expect(partLabel('toolResults')).toBe('工具结果')
-    expect(partLabel('free')).toBe('剩余可用')
-    expect(partLabel('byTool')).toBe('byTool')
-  })
-
-  it('free 为负显示"已超 +N"，不为负显示剩余', () => {
-    expect(formatPartTokens('free', -1200)).toBe('已超 1.2k')
-    expect(formatPartTokens('free', 43787)).toBe('43.8k tokens')
-    expect(formatPartTokens('history', 41000)).toBe('41k tokens')
-  })
-
-  it('tierTitle 说清"会发生什么"，不做行情式承诺', () => {
-    // 档位越高，措辞越具体（75% ⇒ 轻量清理线；90% ⇒ 压缩区）
-    expect(tierTitle(measured(90000, 128000))).toContain('90k / 128k')
-    expect(tierTitle(measured(110000, 128000))).toContain('压缩区')
-    expect(tierTitle(measured(123000, 128000))).toContain('清理历史工具结果')
-    expect(tierTitle(measured(84213, null))).toContain('已用 84.2k')
-    expect(tierTitle(measured(84213, 128000, true))).toContain('估算')
-  })
-})
-
-describe('E3 整体占用口径（百分比 = 整体占用，不是每轮增量）', () => {
-  it('tooltip 同时给出 已用 / 上限 / 占比，且措辞是"上下文"而非"本轮"', () => {
-    const title = tierTitle(measured(84213, 128000))
-
-    expect(title).toContain('已用 84.2k')
-    expect(title).toContain('128k')
-    expect(title).toContain('占比 65.8%')
-    expect(title).not.toContain('本轮')
-  })
-
-  it('上限未知：不给占比（没有分母就没有百分比），仍说已用', () => {
-    const title = tierTitle(measured(84213, null))
-
-    expect(title).toContain('已用 84.2k')
-    expect(title).not.toContain('占比')
   })
 })
 

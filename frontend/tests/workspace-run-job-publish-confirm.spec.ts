@@ -94,7 +94,7 @@ describe('R-09 run_job PUBLISH：REPLACE 复用同一份确认', () => {
 
     expect(workspace.importMode).toBe('REPLACE')
     const appended = workspace.recentActions.slice(before)
-    expect(appended.some((action) => action.display?.code === 'ai.workspace.importMode')).toBe(false)
+    expect(appended.some((action) => action.summary.includes('导入模式'))).toBe(false)
   })
 
   it('确认接受 ⇒ createJob(PUBLISH) 并建立发布跟踪', async () => {

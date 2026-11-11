@@ -143,7 +143,7 @@ describe('K3.1 store/SSE 冻结回归', () => {
     api.runsCurrent.mockResolvedValue(current([automaticEntry()]))
     const reconnect = vi.spyOn(store, 'reconnectSuspendedRun')
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     await vi.waitFor(() => expect(api.frontendToolResult).toHaveBeenCalledTimes(1))
 
     expect(store.suspended).toBe(false)
@@ -228,7 +228,7 @@ describe('K3.1 store/SSE 冻结回归', () => {
       outcome: 'skipped'
     } as AiRunCurrentEntry], { awaitingExternal: false, unresolvedExternal: [] }))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(toolPart(host, 'tool-skipped')).toMatchObject({ status: 'skipped', requiresAction: false })
   })

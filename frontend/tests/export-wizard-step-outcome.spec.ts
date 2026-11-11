@@ -128,7 +128,7 @@ describe('批3③a T7①：export.nextStep + persistStepData 失败注入 ⇒ �
     // 复核 I1 锁：失败支必须落结构化 failed —— 字符串支会让卡面 tag 显示「已成功」、
     // 卡内文却写「步骤未推进」（卡面与回灌自相矛盾，正是本包根治的谎报面）。
     expect(execution.outcome).toBe('failed')
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
   })
 })
 
@@ -175,7 +175,7 @@ describe('批3③a T7③：download_export_files 执行器（preflight 残余入
       budgetMs: 5_000
     })
     expect(execution.result).toContain('无法切换')
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     // 复核 I2 锁：下载必须经 utils/excel#downloadBlob 发起（ExportWizard 不 import
     // api/http#saveBlob —— spy 错对象会让"未发起下载"断言空转）。
     expect(api.downloadBlob).not.toHaveBeenCalled()
@@ -193,7 +193,7 @@ describe('批3③a T7④：export.openEditor handler（残余入口）+ persist 
       args: { taskId: 7, defCode: 'DEMO' },
       budgetMs: 5_000
     })
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.result).toContain('selectDefs 注入失败')
   })
 })
@@ -212,7 +212,7 @@ describe('批次1B：清单读取失败 ⇒ 下载预检 fail-closed（不得回
     })
     await flushPromises()
 
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('导出文件清单读取失败')
     expect(String(execution.result)).toContain('未触发下载')
     expect(api.downloadBlob).not.toHaveBeenCalled()

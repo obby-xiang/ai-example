@@ -24,7 +24,6 @@ import {
   AUTO_RECOVERY_DELAY_MS,
   AUTO_RECOVERY_MAX_ATTEMPTS,
   RUN_STREAM_DRIVE_BUDGET,
-  readActionRecord,
   useAiStore
 } from '@/stores/ai'
 import { installIdentityFixture } from './ai-identity-fixture'
@@ -227,12 +226,12 @@ describe('1 · 准备中自动有界恢复（不靠不存在的按钮）', () =>
       api.runsCurrent.mockResolvedValue(runningRun('run-prep', 2))
       const reattach = vi.spyOn(store, 'reattachActive').mockResolvedValue(undefined)
       // 手动重试动作不得被调用（面板没有这个按钮）
-      const retryPreparing = vi.spyOn(store, 'retryPreparing')
+      const retryPreparing = vi.spyOn(store, 'retryRestoreSnapshot')
 
       await vi.advanceTimersByTimeAsync(AUTO_RECOVERY_DELAY_MS)
 
       expect(retryPreparing).not.toHaveBeenCalled()
-      expect(reattach).toHaveBeenCalledWith('run-prep', expect.objectContaining({ lastSeq: 0 }))
+      expect(reattach).toHaveBeenCalledWith('run-prep', expect.objectContaining({ lastSeq: 2 }))
       expect(store.preparingRun).toBeNull()
       expect(store.currentError).toBeNull()
     } finally {
@@ -460,27 +459,10 @@ describe('6 · uiAnnouncement 按轮收口', () => {
   })
 })
 
-describe('7 · readActionRecord 保留 display，source 不丢', () => {
-  it('结构化展示面随记录保留；两值 source 原样保留', () => {
-    const record = readActionRecord({
-      version: 7,
-      summary: '绑定任务 #9',
-      at: 1_700_000_000_000,
-      source: 'AI',
-      display: { code: 'ai.workspace.bindTask', args: { taskId: 9 } }
-    })
-    expect(record).toMatchObject({
-      version: 7,
-      summary: '绑定任务 #9',
-      source: 'AI',
-      display: { code: 'ai.workspace.bindTask', args: { taskId: 9 } }
-    })
-    // 旧数据码 '界面' 仍被读入侧接受：归一为数据码 'UI'（兼容面，不丢已知值）
-    expect(readActionRecord({ version: 8, summary: '选配置项', source: '界面' }))
-      .toMatchObject({ source: 'UI' })
-    // 非法 display 不塞给面板（不臆造 code），记录本身仍可用
-    expect(readActionRecord({ version: 9, summary: 'x', source: '界面', display: { args: { a: 1 } } }))
-      .toMatchObject({ summary: 'x', source: 'UI' })
+describe('7 · readActionRecord 已退场（display 镜像随界面文案移除）', () => {
+  it('stores/ai 不再导出 readActionRecord', async () => {
+    const mod = await import('@/stores/ai')
+    expect('readActionRecord' in mod).toBe(false)
   })
 })
 

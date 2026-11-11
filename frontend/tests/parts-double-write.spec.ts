@@ -19,6 +19,7 @@ import { installIdentityFixture } from './ai-identity-fixture'
 const api = vi.hoisted(() => ({
   history: vi.fn(),
   runsCurrent: vi.fn(),
+  getContext: vi.fn(async () => ({ source: 'none' })),
   reattachRun: vi.fn(() => new Promise(() => {}))
 }))
 
@@ -109,6 +110,7 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
       ok: true,
       executed: true,
       status: 'EXECUTED',
+      outcome: 'ok',
       messageId: 'tool-c1',
       result: 'ok',
       seq: 4
@@ -164,8 +166,6 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
       toolCallId: 'c2',
       name: 'danger_tool',
       args: '{"x":1}',
-      timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000,
       atMs: 1_700_000_000_000,
       seq: 1
     })
@@ -189,7 +189,6 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
       toolCallId: 'c2',
       name: 'danger_tool',
       decision: 'REJECTED',
-      approved: false,
       status: 'REJECTED',
       reason: '用户拒绝',
       seq: 2
@@ -209,14 +208,14 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     expect(toolRunsOf(assistant)).toEqual(toolPartsOf(assistant.parts))
   })
 
-  it('思考段（reasoning 帧）：另起段、与正文段互不覆盖，旧投影 reasoning 同步拼接', () => {
+  it('思考段（delta{kind:reasoning}）：另起段、与正文段互不覆盖，旧投影 reasoning 同步拼接', () => {
     const store = useAiStore()
     const assistant = store.appendAssistantMessage()
 
-    store.handleFrame({ type: 'reasoning', text: '想' })
+    store.handleFrame({ type: 'delta', kind: 'reasoning', text: '想' })
     store.handleFrame({ type: 'delta', text: '答', seq: 2 })
     store.handleFrame({ type: 'delta', text: '案', seq: 3 })
-    store.handleFrame({ type: 'reasoning', text: '再想' })
+    store.handleFrame({ type: 'delta', kind: 'reasoning', text: '再想' })
 
     // 段序：工厂的空文本段(0) → 思考段(1) → 正文段(2) → 思考段(3)：段间不串写
     expect(assistant.parts.map((part) => part.kind)).toEqual(['text', 'reasoning', 'text', 'reasoning'])
@@ -239,7 +238,7 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
     expect(assistant.parts).toEqual([{ kind: 'text', seg: 0, text: '', streaming: true }])
   })
 
-  it('镜像迁移（§6.4）：v1 旧镜像补出 parts 并立即回写 v2，待决条目并入工具段，迁移幂等', async () => {
+  it('镜像协议：v1 旧镜像不再迁移（形状闸只收当前协议）', async () => {
     const store = useAiStore()
     const sid = store.sessionId
     // v1 镜像（无 v、无 parts）：正文 + 一条工具卡 + 一条与之同 toolCallId 的待决条目
@@ -271,39 +270,10 @@ describe('parts 双写：文本 / 工具段的顺序与封口', () => {
 
     await store.loadHistory()
 
-    expect(store.messages[0]?.parts).toEqual([{ kind: 'text', seg: 0, text: '你好', streaming: false }])
-    expect(store.messages[1]?.parts.map((part) => part.kind)).toEqual(['text', 'tool'])
-    expect(store.messages[1]?.parts[1]).toMatchObject({
-      kind: 'tool',
-      seg: 1,
-      toolCallId: 'k1',
-      name: 'probe_tool',
-      // 待决条目并入：kind→kind2；status 以 toolRun 为权威（存量 v1 镜像 toolRun 已终态时
-      // 不得被待决口径覆盖）；requiresAction 并入时为真，但批2 前置（GLM o1）的镜像读取侧
-      // 残留收口会在回写前降级为 false（done 消息 + 段已终态 → 只收 requiresAction）
-      kind2: 'CONFIRM',
-      status: 'succeeded',
-      requiresAction: false,
-      // 原工具卡的字段保留（合并是就地 spread）
-      args: '{"a":1}',
-      result: 'ok',
-      messageId: 'tool-k1'
-    })
-
-    // 立即回写：镜像已是 v2 且带 parts（不回写则下次刷新又迁一遍）
-    const written = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
-    expect(written.v).toBe(2)
-    expect(written.messages[1].parts).toHaveLength(2)
-    // 批2：appliedSeqs（seq 幂等记账）是内部字段，writeMirror 的 Pick 不含它 —— 不入镜像
-    expect(written.messages[1].appliedSeqs).toBeUndefined()
-    const savedAt = written.savedAt
-    expect(typeof savedAt).toBe('number')
-
-    // 幂等：再走一次读取侧，v2 完整镜像直接放行（不再回写 —— savedAt 不变）
-    store.messages = []
-    await store.loadHistory()
-    expect(store.messages[1]?.parts).toHaveLength(2)
-    const again = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
-    expect(again.savedAt).toBe(savedAt)
+    // 当前协议只接受 v2（每条消息带 parts）；v1 镜像整份忽略，随后按空现场回写 v2
+    expect(store.messages).toEqual([])
+    const stored = JSON.parse(sessionStorage.getItem(mirrorStorageKey(sid)) ?? '{}')
+    expect(stored.v).toBe(2)
+    expect(stored.messages).toEqual([])
   })
 })

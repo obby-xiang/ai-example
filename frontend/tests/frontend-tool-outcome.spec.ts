@@ -1,9 +1,9 @@
 /**
- * 对话时序包 批3③a：前端工具执行结局三态（outcome: ok / failed / unknown）。
+ * 对话时序包 批3③a：前端工具执行结局（outcome 八态；本文件覆盖 ok / failed / unknown 主路径）。
  *
  * 覆盖测试锁：T4（动作表等待上界耗尽 → unknown+degraded）、T5（handler 结构化失败 /
  * 字符串兼容 / defaultExecutor 透传）、T6（执行器结构化返回三路解读）、T8（makeExecution
- * 工厂 = ok/outcome 一致性唯一断言点，D1）。
+ * 工厂 = outcome 单一权威（ok 布尔镜像已退场），D1）。
  *
  * 风格照抄 tools-and-deadline.spec.ts：只驱动真实模块，不挂载面板。
  */
@@ -37,14 +37,14 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('批3③a T8：makeExecution 工厂 —— ok/outcome 一致性唯一断言点（D1）', () => {
-  it("outcome 'ok' ⇒ ok:true；'failed' / 'unknown' ⇒ ok:false（ok === (outcome === 'ok')）", () => {
+describe('批3③a T8：makeExecution 工厂 —— outcome 单一权威（D1）', () => {
+  it("outcome 'ok' ⇒ outcome ok；'failed' / 'unknown' ⇒ 非 ok（ok 布尔镜像已退场）", () => {
     expect(makeExecution({ outcome: 'ok', availability: 'available', result: 'r' }))
-      .toMatchObject({ ok: true, outcome: 'ok', availability: 'available', result: 'r' })
+      .toMatchObject({ outcome: 'ok', availability: 'available', result: 'r' })
     expect(makeExecution({ outcome: 'failed', availability: 'degraded', result: 'r' }))
-      .toMatchObject({ ok: false, outcome: 'failed' })
+      .toMatchObject({ outcome: 'failed' })
     expect(makeExecution({ outcome: 'unknown', availability: 'degraded', result: 'r' }))
-      .toMatchObject({ ok: false, outcome: 'unknown' })
+      .toMatchObject({ outcome: 'unknown' })
   })
 
   it('reason 透传；缺省不产 reason 键', () => {
@@ -58,7 +58,7 @@ describe('批3③a T5：runPageHandler 结局解读（A3）+ defaultExecutor 结
   it('handler 返回结构化 {ok:false, reason} ⇒ outcome failed（确定性失败，D2）', async () => {
     registerPageHandler('probe.structured-fail', () => ({ ok: false, reason: '表格引擎加载失败' }))
     const execution = await executeFrontendTool({ name: 'probe.structured-fail', args: {}, budgetMs: 5_000 })
-    expect(execution).toMatchObject({ ok: false, outcome: 'failed', availability: 'degraded' })
+    expect(execution).toMatchObject({ outcome: 'failed', availability: 'degraded' })
     expect(execution.result).toContain('表格引擎加载失败')
     unregisterPageHandler('probe.structured-fail')
   })
@@ -66,7 +66,7 @@ describe('批3③a T5：runPageHandler 结局解读（A3）+ defaultExecutor 结
   it('handler 返回字符串 ⇒ outcome ok（兼容解读不变，D3(iii)）', async () => {
     registerPageHandler('probe.string-ok', () => '已完成某事')
     const execution = await executeFrontendTool({ name: 'probe.string-ok', args: {}, budgetMs: 5_000 })
-    expect(execution).toMatchObject({ ok: true, outcome: 'ok', availability: 'available' })
+    expect(execution).toMatchObject({ outcome: 'ok', availability: 'available' })
     expect(execution.result).toBe('已完成某事')
     unregisterPageHandler('probe.string-ok')
   })
@@ -82,7 +82,7 @@ describe('批3③a T5：runPageHandler 结局解读（A3）+ defaultExecutor 结
       args: { taskId: 7, defCode: 'DEMO' },
       budgetMs: 5_000
     })
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.outcome).toBe('failed')
     expect(execution.result).toContain('表格未就绪')
     unregisterPageHandler('export.openEditor')
@@ -90,9 +90,8 @@ describe('批3③a T5：runPageHandler 结局解读（A3）+ defaultExecutor 结
 })
 
 describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读（A4）', () => {
-  it('执行器返回结构化失败 ⇒ 按结构化落 failed（不被成功支包成 ok:true）', async () => {
+  it('执行器返回结构化失败 ⇒ 按结构化落 failed（不被成功支包）', async () => {
     registerFrontendToolExecutor('download_export_files', () => ({
-      ok: false,
       availability: 'degraded',
       outcome: 'failed',
       result: '前置校验失败：结果不存在'
@@ -104,7 +103,7 @@ describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读
       args: { taskId: 7, defCodes: ['DEMO'] },
       budgetMs: 5_000
     })
-    expect(execution).toMatchObject({ ok: false, outcome: 'failed', availability: 'degraded' })
+    expect(execution).toMatchObject({ outcome: 'failed', availability: 'degraded' })
     unregisterFrontendToolExecutor('download_export_files')
   })
 
@@ -117,7 +116,7 @@ describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读
       args: { taskId: 7, defCodes: ['DEMO'] },
       budgetMs: 5_000
     })
-    expect(execution).toMatchObject({ ok: true, outcome: 'ok' })
+    expect(execution).toMatchObject({ outcome: 'ok' })
     unregisterFrontendToolExecutor('download_export_files')
   })
 
@@ -132,7 +131,7 @@ describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读
       args: { taskId: 7, defCodes: ['DEMO'] },
       budgetMs: 5_000
     })
-    expect(execution).toMatchObject({ ok: false, outcome: 'failed', availability: 'degraded' })
+    expect(execution).toMatchObject({ outcome: 'failed', availability: 'degraded' })
     unregisterFrontendToolExecutor('download_export_files')
   })
 
@@ -144,7 +143,7 @@ describe('批3③a T6：执行器返回 FrontendToolExecution 的结构化解读
       args: { taskId: 7, defCodes: [] },
       budgetMs: 5_000
     })
-    expect(execution).toMatchObject({ ok: false, outcome: 'failed', availability: 'unavailable' })
+    expect(execution).toMatchObject({ outcome: 'failed', availability: 'unavailable' })
     expect(execution.result).toContain('defCodes')
     expect(call).not.toHaveBeenCalled()
     unregisterFrontendToolExecutor('download_export_files')
@@ -162,7 +161,7 @@ describe('批3③a T4 → 批 A A-04：动作表等待上界耗尽 ⇒ failed + 
     const pending = executeFrontendTool({ name: 'navigate_to', args: { page: 'export' }, budgetMs: 30_000 })
     await vi.advanceTimersByTimeAsync(PAGE_READY_TIMEOUT_MS + 500)
     const execution = await pending
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.outcome).toBe('failed')
     expect(execution.code).toBe('UI_PAGE_NOT_READY')
     expect(execution.availability).toBe('degraded')

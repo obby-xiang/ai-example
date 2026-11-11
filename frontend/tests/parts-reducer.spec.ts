@@ -113,6 +113,7 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
       ok: true,
       executed: true,
       status: 'EXECUTED',
+      outcome: 'ok',
       messageId: 'tool-c1',
       result: 'ok'
     })
@@ -160,13 +161,12 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
 
     // 人工拒绝（confirm_decision）保持「已拒绝」，不被紧随其后的 tool_result(ok=false) 覆盖
     const rejected = makeMessage()
-    applyFrameToParts(rejected, { type: 'confirm_request', toolCallId: 'c2', name: 'danger_tool', args: '{"x":1}', timeoutSeconds: 120, expiresAt: 1_700_000_120_000, atMs: 1_700_000_000_000 })
+    applyFrameToParts(rejected, { type: 'confirm_request', toolCallId: 'c2', name: 'danger_tool', args: '{"x":1}', atMs: 1_700_000_000_000 })
     applyFrameToParts(rejected, {
       type: 'confirm_decision',
       toolCallId: 'c2',
       name: 'danger_tool',
       decision: 'REJECTED',
-      approved: false,
       status: 'REJECTED',
       reason: '用户拒绝'
     })
@@ -198,7 +198,7 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
 
   it('suspended 帧：已存在段更新（requiresAction 复位、status/seg 不变）；未知 toolCallId 建段（批3③b D5：status=pending）', () => {
     const message = makeMessage()
-    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 's1', name: 'danger_tool', args: '{"x":1}', timeoutSeconds: 120 })
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 's1', name: 'danger_tool', args: '{"x":1}' })
     // 模拟段曾被收口过的现场
     upsertToolPart(message, { toolCallId: 's1', name: 'danger_tool', kind2: 'CONFIRM', requiresAction: false })
 
@@ -243,7 +243,7 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
       reportHash: '3a9f'
     }
 
-    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'pf1', name: 'start_publish', args: '{}', timeoutSeconds: 120, preflight })
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'pf1', name: 'start_publish', args: '{}', preflight })
     expect(toolPart(message, 'pf1').preflight).toEqual(preflight)
 
     // 紧随其后的无 preflight 帧（真实顺序：suspended 先发、confirm_request 后到，反之亦然）
@@ -264,7 +264,7 @@ describe('①③④⑤ applyFrameToParts：段写入（纯函数层）', () => {
     expect(toolPart(message, 'pf2').preflight).toEqual(preflight)
 
     // 旧帧（无该字段）：段上不产生 preflight 键 —— 旧帧口径逐字不变
-    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'old1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'old1', name: 'danger_tool', args: '{}' })
     expect(toolPart(message, 'old1')).not.toHaveProperty('preflight')
   })
 })
@@ -299,16 +299,15 @@ describe('⑧ deriveProjections：唯一派生写口（全量映射）', () => {
       rawArgs: '{"y":2}',
       status: 'pending'
     })
-    // 确认门倒计时口径随段持久化：元数据由段派生进 pendingCall（T4/T4-3 倒计时不回退）
+    // 确认门去超时后 pendingCall 不再携带倒计时元数据；atMs 仍由段派生保留用于对账
     upsertToolPart(message, { toolCallId: 'c3', name: 'probe.unknown', kind2: 'FRONTEND', requiresAction: false })
     deriveProjections(message)
     expect(message.pendingCall).toMatchObject({
       toolCallId: 'c2',
       kind: 'CONFIRM',
-      timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000,
       atMs: 1_700_000_000_000
     })
+    expect(message.pendingCall).not.toHaveProperty('timeoutSeconds')
 
     // 无任何 requiresAction 段 → null
     upsertToolPart(message, { toolCallId: 'c2', name: 'danger_tool', kind2: 'CONFIRM', requiresAction: false })
@@ -316,7 +315,7 @@ describe('⑧ deriveProjections：唯一派生写口（全量映射）', () => {
     expect(message.pendingCall).toBeNull()
   })
 
-  it('确认门倒计时口径随段持久化：帧 → 段 → 派生 pendingCall 全程带 timeoutSeconds/expiresAt/atMs', () => {
+  it('确认门去超时：帧 → 段 → 派生 pendingCall 均不携带 timeoutSeconds/expiresAt', () => {
     const store = useAiStore()
     const assistant = store.appendAssistantMessage()
 
@@ -325,26 +324,21 @@ describe('⑧ deriveProjections：唯一派生写口（全量映射）', () => {
       toolCallId: 'c9',
       name: 'danger_tool',
       args: '{"x":1}',
-      timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000,
       atMs: 1_700_000_000_000,
       seq: 1
     })
 
-    // 段侧持久化（pendingCall 已由段派生，元数据不落段就会丢倒计时口径）
-    expect(toolPart(assistant, 'c9')).toMatchObject({
-      timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000,
-      atMs: 1_700_000_000_000
-    })
+    // 段侧不再落倒计时字段（确认门超时口径整段退役），atMs 仍保留用于对账
+    expect(toolPart(assistant, 'c9')).toMatchObject({ atMs: 1_700_000_000_000 })
+    expect(toolPart(assistant, 'c9')).not.toHaveProperty('timeoutSeconds')
+    expect(toolPart(assistant, 'c9')).not.toHaveProperty('expiresAt')
     expect(assistant.pendingCall).toMatchObject({
       toolCallId: 'c9',
       kind: 'CONFIRM',
       status: 'pending',
-      timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000,
       atMs: 1_700_000_000_000
     })
+    expect(assistant.pendingCall).not.toHaveProperty('timeoutSeconds')
   })
 })
 
@@ -527,15 +521,15 @@ describe('handleFrame 集成：seq 幂等 / 乱序兜底 / derive 时机', () =>
     const store = useAiStore()
     const assistant = store.appendAssistantMessage()
 
-    store.handleFrame({ type: 'confirm_request', toolCallId: 'c1', name: 'danger_a', args: '{}', timeoutSeconds: 120, seq: 1 })
-    store.handleFrame({ type: 'confirm_request', toolCallId: 'c2', name: 'danger_b', args: '{}', timeoutSeconds: 120, seq: 2 })
+    store.handleFrame({ type: 'confirm_request', toolCallId: 'c1', name: 'danger_a', args: '{}', seq: 1 })
+    store.handleFrame({ type: 'confirm_request', toolCallId: 'c2', name: 'danger_b', args: '{}', seq: 2 })
     expect(store.pendingConfirms.map((part) => part.toolCallId)).toEqual(['c1', 'c2'])
     expect(store.suspended).toBe(true)
 
     // 第一张卡落终态：另一张仍待决 ⇒ 挂起态不得被误导清
     store.handleFrame({
       type: 'confirm_decision', toolCallId: 'c1', name: 'danger_a',
-      decision: 'APPROVED', approved: true, status: 'APPROVED', seq: 3
+      decision: 'APPROVED', status: 'APPROVED', seq: 3
     })
     expect(toolPart(assistant, 'c1')).toMatchObject({ status: 'running', requiresAction: false })
     expect(store.pendingConfirms.map((part) => part.toolCallId)).toEqual(['c2'])
@@ -544,7 +538,7 @@ describe('handleFrame 集成：seq 幂等 / 乱序兜底 / derive 时机', () =>
     // 最后一张也落终态：无其它待决确认段 ⇒ 挂起态收口
     store.handleFrame({
       type: 'confirm_decision', toolCallId: 'c2', name: 'danger_b',
-      decision: 'REJECTED', approved: false, status: 'REJECTED', reason: '用户拒绝', seq: 4
+      decision: 'REJECTED', status: 'REJECTED', reason: '用户拒绝', seq: 4
     })
     expect(toolPart(assistant, 'c2')).toMatchObject({ status: 'rejected', requiresAction: false })
     expect(store.pendingConfirms).toEqual([])
@@ -568,9 +562,9 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       kind: 'BACKEND',
       ok: true,
       executed: true,
+      outcome: 'ok',
       result: '前 64KB…',
       truncated: true,
-      truncatedReason: 'Result truncated because it exceeded the frame size limit.',
       noticeCode: 'frame_truncated',
       originalChars: 9_000,
       returnedChars: 3_195,
@@ -581,7 +575,6 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       status: 'succeeded',
       result: '前 64KB…',
       truncated: true,
-      truncatedReason: 'Result truncated because it exceeded the frame size limit.',
       noticeCode: 'frame_truncated',
       originalChars: 9_000,
       returnedChars: 3_195,
@@ -600,7 +593,8 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       executed: true,
       result: '全文'
     })
-    expect(toolPart(plain, 'c2')).toMatchObject({ truncated: false, truncatedReason: null })
+    expect(toolPart(plain, 'c2')).toMatchObject({ truncated: false })
+    expect(toolPart(plain, 'c2')).not.toHaveProperty('truncatedReason')
     expect(toolPart(plain, 'c2').noticeCode).toBeUndefined()
     expect(toolPart(plain, 'c2').originalChars).toBeUndefined()
   })
@@ -648,8 +642,7 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       noticeCode: 'model_view_truncated',
       originalChars: 12_000,
       returnedChars: 8_000,
-      strategy: 'head',
-      truncatedReason: 'Result truncated for the model; this frame shows the full result.'
+      strategy: 'head'
     })
 
     expect(toolPart(message, 'f1')).toMatchObject({
@@ -658,8 +651,7 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       noticeCode: 'model_view_truncated',
       originalChars: 12_000,
       returnedChars: 8_000,
-      strategy: 'head',
-      truncatedReason: 'Result truncated for the model; this frame shows the full result.'
+      strategy: 'head'
     })
 
     const plain = makeMessage()
@@ -685,7 +677,6 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
     expect(plainPart.originalChars).toBeUndefined()
     expect(plainPart.returnedChars).toBeUndefined()
     expect(plainPart.strategy).toBeUndefined()
-    expect(plainPart.truncatedReason).toBeUndefined()
   })
 
   it('⑨″ delta 正文/思考同样透传截断字段（旧帧不产生新键）', () => {
@@ -697,8 +688,7 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       noticeCode: 'frame_truncated',
       originalChars: 20_000,
       returnedChars: 3_400,
-      strategy: 'head',
-      truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+      strategy: 'head'
     })
     const textPart = textMessage.parts.find((part) => part.kind === 'text') as TextPart
     expect(textPart).toMatchObject({
@@ -707,8 +697,7 @@ describe('R-154 ⑨⑩：截断标记落段 + message_start 时间戳（纯函�
       noticeCode: 'frame_truncated',
       originalChars: 20_000,
       returnedChars: 3_400,
-      strategy: 'head',
-      truncatedReason: 'Result truncated because it exceeded the frame size limit.'
+      strategy: 'head'
     })
 
     const reasoningMessage = makeMessage()
@@ -786,18 +775,16 @@ describe('R-158 ⑪：deriveCopyText 复制口径（段间换行）', () => {
  * ① 实时 confirm_decision 帧原只看 `approved`，后端超时帧（decision=timeout + approved=false +
  *   status=TIMEOUT）被一律落成 rejected，卡面实时显示「✗ 已拒绝」（刷新后历史表才显示「! 已超时」）；
  * ② 本地倒计时已落 expired 后，晚到的 TIMEOUT 帧把段覆盖回 rejected（无 first-wins）。
- * ③ 确认卡批准后工具执行失败（tool_result outcome=failed）→ readOnlyStateOf 的 failed 分支可达。
+ * ③ 确认卡批准后工具执行失败（tool_result outcome=failed）→ decision 优先读只读态 approved。
  */
-describe('2A 挂账修复：①超时口径（decision/status 优先 + first-wins）与 ③已批准·执行失败', () => {
-  it('①a confirm_decision TIMEOUT 帧（decision=timeout / status=TIMEOUT / approved=false）⇒ 段 expired（「! 已超时」），不是 rejected', () => {
+describe('2A 挂账修复：①超时口径（decision/status 优先 + first-wins）与 ③批准后决策态', () => {
+  it('①a 确认门去超时：实时 TIMEOUT 帧不再落 expired，段保持 pending（历史 expired 快照另测）', () => {
     const message = makeMessage()
     applyFrameToParts(message, {
       type: 'confirm_request',
       toolCallId: 't1',
       name: 'danger_tool',
       args: '{"x":1}',
-      timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000,
       atMs: 1_700_000_000_000
     })
     applyFrameToParts(message, {
@@ -805,85 +792,84 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
       toolCallId: 't1',
       name: 'danger_tool',
       decision: 'timeout',
-      approved: false,
       status: 'TIMEOUT',
       reason: 'CONFIRM_TIMEOUT'
     })
 
     const part = toolPart(message, 't1')
-    expect(part).toMatchObject({ status: 'expired', decision: 'timeout', requiresAction: false })
-    expect(readOnlyStateOf(part)).toBe('expired')
-    expect(cardStatusOf(part)).toMatchObject({ key: 'expired', label: '! 已超时', tone: 'warning' })
+    expect(part).toMatchObject({ status: 'pending', requiresAction: true })
+    expect(part.decision).toBeUndefined()
+    expect(cardStatusOf(part).key).not.toBe('expired')
   })
 
   it('①a 负控制：REJECTED 帧仍落 rejected；APPROVED 帧仍落 running（既有口径不动）', () => {
     const rejected = makeMessage()
-    applyFrameToParts(rejected, { type: 'confirm_request', toolCallId: 'r1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(rejected, { type: 'confirm_request', toolCallId: 'r1', name: 'danger_tool', args: '{}' })
     applyFrameToParts(rejected, {
-      type: 'confirm_decision', toolCallId: 'r1', name: 'danger_tool', decision: 'reject', approved: false, status: 'REJECTED', reason: '用户拒绝'
+      type: 'confirm_decision', toolCallId: 'r1', name: 'danger_tool', decision: 'reject', status: 'REJECTED', reason: '用户拒绝'
     })
     expect(toolPart(rejected, 'r1')).toMatchObject({ status: 'rejected', decision: 'rejected', reason: '用户拒绝' })
-    expect(cardStatusOf(toolPart(rejected, 'r1')).label).toBe('✗ 已拒绝')
+    expect(cardStatusOf(toolPart(rejected, 'r1')).label).toBe('已拒绝')
 
     const approved = makeMessage()
-    applyFrameToParts(approved, { type: 'confirm_request', toolCallId: 'a1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(approved, { type: 'confirm_request', toolCallId: 'a1', name: 'danger_tool', args: '{}' })
     applyFrameToParts(approved, {
-      type: 'confirm_decision', toolCallId: 'a1', name: 'danger_tool', decision: 'approve', approved: true, status: 'APPROVED'
+      type: 'confirm_decision', toolCallId: 'a1', name: 'danger_tool', decision: 'approve', status: 'APPROVED'
     })
     expect(toolPart(approved, 'a1')).toMatchObject({ status: 'running', decision: 'approved', requiresAction: false })
-    expect(cardStatusOf(toolPart(approved, 'a1')).label).toBe('✓ 已批准')
+    expect(cardStatusOf(toolPart(approved, 'a1')).label).toBe('已批准')
   })
 
   it('①a CANCELLED 分支（批G · S13 改判）：decision=cancel / status=CANCELLED ⇒ 段 cancelled + 决策元数据、卡面「✗ 已取消」', () => {
     const byDecision = makeMessage()
-    applyFrameToParts(byDecision, { type: 'confirm_request', toolCallId: 'c1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(byDecision, { type: 'confirm_request', toolCallId: 'c1', name: 'danger_tool', args: '{}' })
     applyFrameToParts(byDecision, {
-      type: 'confirm_decision', toolCallId: 'c1', name: 'danger_tool', decision: 'cancel', approved: false
+      type: 'confirm_decision', toolCallId: 'c1', name: 'danger_tool', decision: 'cancel'
     } as never)
     const cancelled = toolPart(byDecision, 'c1')
     // 批G · S13（用户直裁 2026-10-22）：取消 = 用户决策（decision='cancel'）⇒ 门卡「✗ 已取消」，
     // 不再被 status 兜底读成系统超时（旧 K2「门卡无已取消」由此作废，断言按新口径上抬）。
     expect(cancelled).toMatchObject({ status: 'cancelled', requiresAction: false, decision: 'cancel' })
     expect(readOnlyStateOf(cancelled)).toBe('cancelled')
-    expect(cardStatusOf(cancelled)).toMatchObject({ key: 'cancelled', label: '✗ 已取消', tone: 'danger' })
+    expect(cardStatusOf(cancelled)).toMatchObject({ key: 'cancelled', label: '已取消', tone: 'danger' })
 
     const byStatus = makeMessage()
-    applyFrameToParts(byStatus, { type: 'confirm_request', toolCallId: 'c2', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(byStatus, { type: 'confirm_request', toolCallId: 'c2', name: 'danger_tool', args: '{}' })
     applyFrameToParts(byStatus, {
-      type: 'confirm_decision', toolCallId: 'c2', name: 'danger_tool', decision: 'cancel', approved: false, status: 'CANCELLED'
+      type: 'confirm_decision', toolCallId: 'c2', name: 'danger_tool', decision: 'cancel', status: 'CANCELLED'
     })
     expect(toolPart(byStatus, 'c2')).toMatchObject({ status: 'cancelled', requiresAction: false, decision: 'cancel' })
-    expect(cardStatusOf(toolPart(byStatus, 'c2')).label).toBe('✗ 已取消')
+    expect(cardStatusOf(toolPart(byStatus, 'c2')).label).toBe('已取消')
   })
 
   it('MINOR-1 优先序：decision=cancel + status=APPROVED ⇒ 按 approved 归并，不落 cancelled', () => {
     const message = makeMessage()
-    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'p1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'p1', name: 'danger_tool', args: '{}' })
     // 后端 cancel 对非 PENDING 条目仍发 decision='cancel' + 真实 status 的帧
     applyFrameToParts(message, {
-      type: 'confirm_decision', toolCallId: 'p1', name: 'danger_tool', decision: 'cancel', approved: false, status: 'APPROVED'
+      type: 'confirm_decision', toolCallId: 'p1', name: 'danger_tool', decision: 'cancel', status: 'APPROVED'
     })
     const part = toolPart(message, 'p1')
     expect(part).toMatchObject({ status: 'running', decision: 'approved', requiresAction: false })
     expect(readOnlyStateOf(part)).toBe('approved')
-    expect(cardStatusOf(part)).toMatchObject({ key: 'approved', label: '✓ 已批准' })
+    expect(cardStatusOf(part)).toMatchObject({ key: 'approved', label: '已批准' })
   })
 
-  it('①a 旧帧兼容：decision/status 皆缺时仍按 approved 布尔（true→running、false→rejected，旧口径不动）', () => {
+  it('①a 旧帧兼容已退役：decision/status 皆缺的 approved-only 帧不再改写段（保持 pending）', () => {
     const legacyApprove = makeMessage()
-    applyFrameToParts(legacyApprove, { type: 'confirm_request', toolCallId: 'l1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(legacyApprove, { type: 'confirm_request', toolCallId: 'l1', name: 'danger_tool', args: '{}' })
     applyFrameToParts(legacyApprove, { type: 'confirm_decision', toolCallId: 'l1', name: 'danger_tool', approved: true } as never)
-    expect(toolPart(legacyApprove, 'l1')).toMatchObject({ status: 'running', decision: 'approved' })
+    expect(toolPart(legacyApprove, 'l1')).toMatchObject({ status: 'pending', requiresAction: true })
 
     const legacyReject = makeMessage()
-    applyFrameToParts(legacyReject, { type: 'confirm_request', toolCallId: 'l2', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(legacyReject, { type: 'confirm_request', toolCallId: 'l2', name: 'danger_tool', args: '{}' })
     applyFrameToParts(legacyReject, { type: 'confirm_decision', toolCallId: 'l2', name: 'danger_tool', approved: false } as never)
-    expect(toolPart(legacyReject, 'l2')).toMatchObject({ status: 'rejected', decision: 'rejected' })
+    expect(toolPart(legacyReject, 'l2')).toMatchObject({ status: 'pending', requiresAction: true })
   })
 
   it('①b first-wins：段已落 expired 后晚到的 TIMEOUT 帧不改写已落定结局（保持「! 已超时」）', () => {
     const message = makeMessage()
-    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'x1', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'x1', name: 'danger_tool', args: '{}' })
     // 已落定形态：status=expired、无决策元数据（旧版本地判超时 / 历史快照都可能长这样）
     upsertToolPart(message, {
       toolCallId: 'x1',
@@ -898,7 +884,6 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
       toolCallId: 'x1',
       name: 'danger_tool',
       decision: 'timeout',
-      approved: false,
       status: 'TIMEOUT',
       reason: 'CONFIRM_TIMEOUT'
     })
@@ -906,18 +891,16 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
     const part = toolPart(message, 'x1')
     expect(part.status).toBe('expired')
     expect(part.decision).toBeUndefined()
-    expect(cardStatusOf(part)).toMatchObject({ key: 'expired', label: '! 已超时' })
+    expect(cardStatusOf(part)).toMatchObject({ key: 'expired', label: '已失效' })
   })
 
-  it('③ 确认卡批准（乐观写 decision=approved）→ tool_result outcome=failed 同 toolCallId ⇒ 卡面「已批准 · 执行失败」', () => {
+  it('③ 确认卡批准（乐观写 decision=approved）→ tool_result outcome=failed 同 toolCallId ⇒ 只读态仍为「已批准」', () => {
     const message = makeMessage()
     applyFrameToParts(message, {
       type: 'confirm_request',
       toolCallId: 'f1',
       name: 'danger_tool',
       args: '{"x":1}',
-      timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000,
       atMs: 1_700_000_000_000
     })
     // store.confirm(true) 的乐观置位（点击即写，先于 confirm_decision 帧）
@@ -935,10 +918,9 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
       toolCallId: 'f1',
       name: 'danger_tool',
       decision: 'approve',
-      approved: true,
       status: 'APPROVED'
     })
-    expect(cardStatusOf(toolPart(message, 'f1')).label).toBe('✓ 已批准')
+    expect(cardStatusOf(toolPart(message, 'f1')).label).toBe('已批准')
 
     // 后端执行失败：CONFIRM 条目的 status 仍是 APPROVED，结局由 outcome=failed 承载
     applyFrameToParts(message, {
@@ -956,15 +938,15 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
 
     const part = toolPart(message, 'f1')
     expect(part).toMatchObject({ status: 'failed', kind2: 'CONFIRM', decision: 'approved', requiresAction: false })
-    expect(readOnlyStateOf(part)).toBe('failed')
-    expect(cardStatusOf(part)).toMatchObject({ key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' })
+    expect(readOnlyStateOf(part)).toBe('approved')
+    expect(cardStatusOf(part)).toMatchObject({ key: 'approved', label: '已批准', tone: 'success' })
   })
 
   it('③ 无乐观写（另一端批准 / 重挂回放）也成立：帧序 confirm_decision(approved) → tool_result(outcome=failed)', () => {
     const message = makeMessage()
-    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'f2', name: 'danger_tool', args: '{}', timeoutSeconds: 120 })
+    applyFrameToParts(message, { type: 'confirm_request', toolCallId: 'f2', name: 'danger_tool', args: '{}' })
     applyFrameToParts(message, {
-      type: 'confirm_decision', toolCallId: 'f2', name: 'danger_tool', decision: 'approve', approved: true, status: 'APPROVED'
+      type: 'confirm_decision', toolCallId: 'f2', name: 'danger_tool', decision: 'approve', status: 'APPROVED'
     })
     applyFrameToParts(message, {
       type: 'tool_result', toolCallId: 'f2', name: 'danger_tool', kind: 'CONFIRM', ok: false, executed: true,
@@ -972,19 +954,19 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
     })
     const part = toolPart(message, 'f2')
     expect(part.status).toBe('failed')
-    expect(cardStatusOf(part).label).toBe('! 已批准 · 执行失败')
+    expect(cardStatusOf(part)).toMatchObject({ key: 'approved', label: '已批准' })
   })
 
-  it('③ store 集成：handleFrame 帧序 confirm_request → confirm_decision(APPROVED) → tool_result(failed) 卡面第四态可达', () => {
+  it('③ store 集成：handleFrame 帧序 confirm_request → confirm_decision(APPROVED) → tool_result(failed) 决策态优先', () => {
     const store = useAiStore()
     const assistant = store.appendAssistantMessage()
     store.handleFrame({
-      type: 'confirm_request', toolCallId: 's1', name: 'danger_tool', args: '{"x":1}', timeoutSeconds: 120,
-      expiresAt: 1_700_000_120_000, atMs: 1_700_000_000_000, seq: 1
+      type: 'confirm_request', toolCallId: 's1', name: 'danger_tool', args: '{"x":1}',
+      atMs: 1_700_000_000_000, seq: 1
     })
     // 无乐观写：本页签只是收到另一端批准 / 重挂回放的帧
     store.handleFrame({
-      type: 'confirm_decision', toolCallId: 's1', name: 'danger_tool', decision: 'approve', approved: true,
+      type: 'confirm_decision', toolCallId: 's1', name: 'danger_tool', decision: 'approve',
       status: 'APPROVED', seq: 2
     })
     store.handleFrame({
@@ -995,10 +977,10 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
     const part = toolPart(assistant, 's1')
     expect(part).toMatchObject({ status: 'failed', kind2: 'CONFIRM', requiresAction: false })
     expect(assistant.pendingCall).toBeNull()
-    expect(cardStatusOf(part)).toMatchObject({ key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' })
+    expect(cardStatusOf(part)).toMatchObject({ key: 'approved', label: '已批准', tone: 'success' })
   })
 
-  it('④ 历史恢复（NIT-4 + MINOR-2）：outcome=failed + decision=approved ⇒「已批准 · 执行失败」；decision=timeout 回读 ⇒「已超时」', async () => {
+  it('④ 历史恢复（NIT-4 + MINOR-2）：outcome=failed + decision=approved ⇒「已批准」；decision=timeout 回读 ⇒「已失效」', async () => {
     // Task 4：/history 是对话域请求，带后端发号的会话；无号则整段跳过 ⇒ 历史回读现场不成立
     installIdentityFixture()
     const store = useAiStore()
@@ -1017,7 +999,12 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
           toolCallStates: {
             'hist-f1': { status: 'EXECUTED', kind: 'CONFIRM', decision: 'approved', outcome: 'failed', code: 'TOOL_EXECUTION_FAILED' },
             'hist-t1': { status: 'TIMEOUT', kind: 'CONFIRM', decision: 'timeout' }
-          }
+          },
+          segments: [
+            { seq: 0, kind: 'text', text: '历史确认轮' },
+            { seq: 1, kind: 'tool', toolCallId: 'hist-f1' },
+            { seq: 2, kind: 'tool', toolCallId: 'hist-t1' }
+          ]
         }
       ]
     })
@@ -1036,14 +1023,16 @@ describe('2A 挂账修复：①超时口径（decision/status 优先 + first-win
     const message = store.messages[0] as ChatMessage
     // MINOR-2：timeout 决策元数据历史回读（刷新后不丢「已超时」的决策口径）
     expect(toolPart(message, 'hist-t1')).toMatchObject({
-      status: 'expired', kind2: 'CONFIRM', decision: 'timeout', requiresAction: false
+      status: 'expired', kind2: 'CONFIRM', requiresAction: false
     })
-    expect(cardStatusOf(toolPart(message, 'hist-t1')).label).toBe('! 已超时')
-    // NIT-4：批准 + 执行失败 = 卡面第四态（decision 从历史载荷回读，status 由 outcome 覆写为 failed）
+    // decision 词表只收 approved/rejected/cancel；历史 TIMEOUT 不带决策元数据（展示由 status 派生）
+    expect(toolPart(message, 'hist-t1').decision).toBeUndefined()
+    expect(cardStatusOf(toolPart(message, 'hist-t1')).label).toBe('已失效')
+    // NIT-4：decision 从历史载荷回读，approved 决策优先于执行结果；status 仍由 outcome 覆写为 failed
     const failed = toolPart(message, 'hist-f1')
     expect(failed).toMatchObject({ status: 'failed', kind2: 'CONFIRM', decision: 'approved', requiresAction: false })
-    expect(readOnlyStateOf(failed)).toBe('failed')
-    expect(cardStatusOf(failed)).toMatchObject({ key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' })
+    expect(readOnlyStateOf(failed)).toBe('approved')
+    expect(cardStatusOf(failed)).toMatchObject({ key: 'approved', label: '已批准', tone: 'success' })
   })
 })
 

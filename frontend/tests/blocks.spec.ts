@@ -277,40 +277,35 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
   })
 
   it('2A/r15：已决只读态全集与默认展开（门卡四态 / 表单两态；六态一律折叠）', () => {
-    // 门卡：decision 优先，failed 落「已批准·执行失败」
+    // 门卡：decision 优先；批准后的执行失败仍显示「已批准」（失败由段 status 承载）
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'running', decision: 'approved' }))).toBe('approved')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }))).toBe('approved')
-    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }))).toBe('failed')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }))).toBe('approved')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }))).toBe('rejected')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'expired' }))).toBe('expired')
-    // 2A 挂账①：超时决策（decision='timeout'）与无决策元数据的 TIMEOUT 历史段同落「已超时」，
-    // 绝不落「已拒绝」—— decision 是决策元数据，不是 approved/rejected 二元。
-    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'expired', decision: 'timeout' }))).toBe('expired')
-    // 2A 挂账③：批准 + 执行失败 = 第四态（失败是执行结果，不是决策结果；已由上方 failed+approved 行覆盖）
-    // 批G · S13（用户直裁 2026-10-22）：**用户停止 = 一次决策**（decision='cancel'）⇒ 卡面「已取消」，
-    // 不再读成系统超时；无决策元数据的 cancelled 段（旧载荷）仍按 K2 归未批准收尾（已超时）。
+    // 批G · S13：**用户停止 = 一次决策**（decision='cancel'）⇒「已取消」；无决策元数据的
+    // cancelled 段按 status 同样落 cancelled（当前状态机不再折算成超时）。
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }))).toBe('cancelled')
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }))).toMatchObject({
-      key: 'cancelled', label: '✗ 已取消', tone: 'danger'
+      key: 'cancelled', label: '已取消', tone: 'danger'
     })
-    // 旧口径保持：cancelled 但无决策元数据 ⇒ 已超时
-    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled' }))).toBe('expired')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'cancelled' }))).toBe('cancelled')
     // blocked / unknown / pending 不是决策态 ⇒ 不进只读卡（继续走普通工具卡）
     for (const status of ['blocked', 'unknown', 'pending'] as const) {
       expect(isReadOnlyCard(makeTool({ kind2: 'CONFIRM', status, requiresAction: false }))).toBe(false)
     }
     // 无 decision 的历史段回退 status：没有批准证据的失败/未执行 ⇒ 未批准·未执行（批4）
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'succeeded' }))).toBe('approved')
-    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed' }))).toBe('notApproved')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'failed' }))).toBe('failed')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'blocked' }))).toBe('notApproved')
     expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'skipped' }))).toBe('notApproved')
-    // 有 approved 决策的 blocked / skipped = 已批准但未执行（进只读卡，不冒充执行失败）
-    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved' }))).toBe('notExecuted')
-    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'skipped', decision: 'approved' }))).toBe('notExecuted')
+    // 有 approved 决策的 blocked / skipped：决策优先 ⇒ 只读态 approved（已批准）
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved' }))).toBe('approved')
+    expect(readOnlyStateOf(makeTool({ kind2: 'CONFIRM', status: 'skipped', decision: 'approved' }))).toBe('approved')
     expect(isReadOnlyCard(makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved', requiresAction: false }))).toBe(true)
     // 表单系的已决态按<b>真实结局</b>分列（批：只有真实用户取消才是「已取消」）：
-    // 提交成功 = 已提交；用户放弃 = 已取消；被拒 = 已拒绝；超时 = 已超时；执行失败 = 执行失败；
-    // 未执行（越界/上游跳过）= 未批准·未执行。旧口径把除 succeeded 外的一律画成「✗ 已取消」，
+    // 提交成功 = 已提交；用户放弃 = 已取消；被拒 = 已拒绝；过期 = 已失效；执行失败 = 失败；
+    // 无批准证据的失败 = failed；skipped/blocked 才落未执行。旧口径把非成功一律画成「已取消」，
     // 于是"表单被安全闸拒绝""等表单超时"都被说成用户主动取消 —— 事实相反。
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe('submitted')
     expect(readOnlyStateOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toBe('cancelled')
@@ -338,23 +333,23 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
    * GF 段在 `tool_start` 之后、回执之前是 `running` + `requiresAction=false`（还没有待填动作）。
    *
    * <p>旧口径把这种段也判进只读已决卡，而 `readOnlyStateOf` 的 GF 分支只认五个已决态，`running`
-   * 落到 default ⇒ 「! 已超时」—— 一张**还在跑**的表单被说成"会话已失效"，用户会以为要重发。
-   * 判据修正：`running`（以及任何未决态）不进只读已决卡，走普通状态标签「调用中…」；
+   * 落到 default ⇒ 「已失效」—— 一张**还在跑**的表单被说成"会话已失效"，用户会以为要重发。
+   * 判据修正：`running`（以及任何未决态）不进只读已决卡，走普通状态标签「执行中」；
    * 不新增文案态、不改已决态的映射。
    */
-  it('GF 段 running（tool_start 后、回执前）不得进只读已决卡：显示「调用中…」而不是「已超时」', () => {
+  it('GF 段 running（tool_start 后、回执前）不得进只读已决卡：显示「执行中」而不是「已失效」', () => {
     const runningForm = makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'running' })
     expect(isReadOnlyCard(runningForm)).toBe(false)
-    expect(cardStatusOf(runningForm)).toMatchObject({ key: 'running', label: '调用中…', tone: 'primary' })
+    expect(cardStatusOf(runningForm)).toMatchObject({ key: 'running', label: '执行中', tone: 'primary' })
     // 未决待填（requiresAction=true）仍是"待填写"卡，不受本条影响
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'pending', requiresAction: true })))
-      .toMatchObject({ key: 'pending', label: '待填写' })
+      .toMatchObject({ key: 'pending', label: '待操作' })
     // 已决态回归锚：状态机与文案不变
     expect(isReadOnlyCard(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toBe(true)
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })))
-      .toMatchObject({ key: 'cancelled', label: '✗ 已取消' })
+      .toMatchObject({ key: 'cancelled', label: '已取消' })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'rejected' })))
-      .toMatchObject({ key: 'rejected', label: '✗ 已拒绝' })
+      .toMatchObject({ key: 'rejected', label: '提交未通过' })
   })
 
   it('r15：六态矩阵 —— 每态只读卡 groupParts 默认折叠，手动展开 / 收起优先', () => {
@@ -362,7 +357,7 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
       ['approved', makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' })],
       ['rejected', makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' })],
       ['expired', makeTool({ kind2: 'CONFIRM', status: 'expired' })],
-      ['failed', makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' })],
+      ['approved', makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' })],
       ['submitted', makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' })],
       ['cancelled', makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' })]
     ]
@@ -426,11 +421,11 @@ describe('S6 批1：回执独立块退役（groupParts 不再派生第二块）+
     expect(readableValue({ a: 1 })).toBe('（复杂值）')
     // 门卡：敏感键掩码（定长圆点，不泄值不泄长度）；普通键照常
     expect(argRows('{"password":"p@ss","apiKey":"k-123","taskId":7}', true)).toEqual([
-      { key: 'password', value: MASKED_VALUE },
-      { key: 'apiKey', value: MASKED_VALUE },
-      { key: 'taskId', value: '7' }
+      { key: 'password', label: 'password', value: MASKED_VALUE },
+      { key: 'apiKey', label: 'apiKey', value: MASKED_VALUE },
+      { key: 'taskId', label: '任务', value: '7' }
     ])
-    expect(argRows('{"password":"p@ss"}', false)).toEqual([{ key: 'password', value: 'p@ss' }])
+    expect(argRows('{"password":"p@ss"}', false)).toEqual([{ key: 'password', label: 'password', value: 'p@ss' }])
   })
 
   it('parsePublishConflicts / reasonHeadline：明细行解析成表格数据，首行为摘要', () => {
@@ -477,29 +472,29 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
     }
   })
 
-  it('cardStatusOf：pending 文案按类型分工（tool 待执行 / hitl 等待确认 / form 待填写），同取 primary', () => {
+  it('cardStatusOf：pending 文案按类型分工（tool 待执行 / hitl 待操作 / form 待填写）', () => {
     expect(cardStatusOf(makeTool({ status: 'pending', requiresAction: false }))).toEqual({
       key: 'pending', label: '待执行', tone: 'primary'
     })
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'pending', requiresAction: true }))).toEqual({
-      key: 'pending', label: '待确认', tone: 'warning'
+      key: 'pending', label: '待操作', tone: 'warning'
     })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'pending', requiresAction: true }))).toEqual({
-      key: 'pending', label: '待填写', tone: 'primary'
+      key: 'pending', label: '待操作', tone: 'warning'
     })
   })
 
   it('cardStatusOf：普通工具十态文案 / 色族（仅 pending 改「待执行」，其余保持）', () => {
     const matrix: Array<[ToolRunStatus, string, CardTone]> = [
       ['pending', '待执行', 'primary'],
-      ['running', '调用中…', 'primary'],
-      ['succeeded', '已成功', 'success'],
-      ['failed', '执行失败', 'danger'],
-      ['rejected', '已拒绝', 'neutral'],
-      ['blocked', '超出当前范围', 'neutral'],
-      ['expired', '会话已失效', 'neutral'],
+      ['running', '执行中', 'primary'],
+      ['succeeded', '已完成', 'success'],
+      ['failed', '失败', 'danger'],
+      ['rejected', '未执行', 'neutral'],
+      ['blocked', '未执行', 'neutral'],
+      ['expired', '已失效', 'neutral'],
       ['cancelled', '已取消', 'neutral'],
-      ['unknown', '结局未知（未确认成功/失败）', 'neutral'],
+      ['unknown', '需人工核对', 'neutral'],
       ['skipped', '已跳过', 'neutral']
     ]
     for (const [status, label, tone] of matrix) {
@@ -509,17 +504,17 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
 
   it('cardStatusOf：HITL 六态 = readOnlyStateOf 单一状态机（key / label / tone）', () => {
     const matrix: Array<[ToolPart, { key: string; label: string; tone: CardTone }]> = [
-      [makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }), { key: 'approved', label: '✓ 已批准', tone: 'success' }],
-      [makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }), { key: 'rejected', label: '✗ 已拒绝', tone: 'danger' }],
-      [makeTool({ kind2: 'CONFIRM', status: 'expired' }), { key: 'expired', label: '! 已超时', tone: 'warning' }],
-      [makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }), { key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger' }],
-      // 批4 / AR-02：无批准证据的失败（预检未通过 / 预检不可用）⇒「未批准 · 未执行」，绝不显示已批准
-      [makeTool({ kind2: 'CONFIRM', status: 'failed' }), { key: 'notApproved', label: '! 未批准 · 未执行', tone: 'neutral' }],
-      [makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved' }), { key: 'notExecuted', label: '! 已批准 · 未执行', tone: 'warning' }],
-      // 批G · S13：用户停止（decision='cancel'）是第五种门结局 ⇒ 「✗ 已取消」
-      [makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }), { key: 'cancelled', label: '✗ 已取消', tone: 'danger' }],
-      // 无决策元数据的 cancelled 段（旧载荷）仍归未批准收尾（已超时）
-      [makeTool({ kind2: 'CONFIRM', status: 'cancelled' }), { key: 'expired', label: '! 已超时', tone: 'warning' }]
+      [makeTool({ kind2: 'CONFIRM', status: 'succeeded', decision: 'approved' }), { key: 'approved', label: '已批准', tone: 'success' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'rejected', decision: 'rejected' }), { key: 'rejected', label: '已拒绝', tone: 'danger' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'expired' }), { key: 'expired', label: '已失效', tone: 'warning' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }), { key: 'approved', label: '已批准', tone: 'success' }],
+      // 无批准证据的失败：status=failed 落「失败」（不是未批准未执行）
+      [makeTool({ kind2: 'CONFIRM', status: 'failed' }), { key: 'failed', label: '失败', tone: 'danger' }],
+      [makeTool({ kind2: 'CONFIRM', status: 'blocked', decision: 'approved' }), { key: 'approved', label: '已批准', tone: 'success' }],
+      // 用户停止（decision='cancel'）⇒ 「已取消」
+      [makeTool({ kind2: 'CONFIRM', status: 'cancelled', decision: 'cancel' }), { key: 'cancelled', label: '已取消', tone: 'danger' }],
+      // 无决策元数据的 cancelled 段按 status 落 cancelled
+      [makeTool({ kind2: 'CONFIRM', status: 'cancelled' }), { key: 'cancelled', label: '已取消', tone: 'danger' }]
     ]
     for (const [part, expected] of matrix) {
       expect(isReadOnlyCard(part)).toBe(true)
@@ -531,10 +526,10 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
 
   it('cardStatusOf：GF 已决态各读真态（提交 / 取消 / 执行失败）；待填写走 pending', () => {
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'succeeded' }))).toEqual({
-      key: 'submitted', label: '✓ 已提交', tone: 'success'
+      key: 'submitted', label: '已提交', tone: 'success'
     })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'cancelled' }))).toEqual({
-      key: 'cancelled', label: '✗ 已取消', tone: 'danger'
+      key: 'cancelled', label: '已取消', tone: 'danger'
     })
     // 2026-10-29 批（utils/blocks readOnlyStateOf）：只有真取消画「已取消」；
     // 执行失败如实落 failed（旧口径把它也说成"用户自己取消了"，与事实相反）
@@ -543,26 +538,26 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
     })
   })
 
-  it('GF 无批准步骤：failed 只说「执行失败」；门卡 CONFIRM 的 failed 仍是「已批准 · 执行失败」', () => {
+  it('GF 无批准步骤：failed 只说「执行失败」；门卡 CONFIRM 的批准后失败仍读决策态「已批准」', () => {
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'failed' }))).toEqual({
       key: 'failed', label: '执行失败', tone: 'danger'
     })
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'failed', decision: 'approved' }))).toEqual({
-      key: 'failed', label: '! 已批准 · 执行失败', tone: 'danger'
+      key: 'approved', label: '已批准', tone: 'success'
     })
   })
 
-  it('负控制：blocked / unknown / 非决策 pending 不落只读六态（继续普通状态文案）', () => {
+  it('负控制：blocked / unknown / 非决策 pending 继续走普通状态文案', () => {
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'blocked' }))).toEqual({
-      key: 'blocked', label: '超出当前范围', tone: 'neutral'
+      key: 'blocked', label: '未执行', tone: 'neutral'
     })
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'unknown' }))).toEqual({
-      key: 'unknown', label: '结局未知（未确认成功/失败）', tone: 'neutral'
+      key: 'unknown', label: '需人工核对', tone: 'neutral'
     })
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'pending' }))).toEqual({
-      key: 'pending', label: '待确认', tone: 'warning'
+      key: 'pending', label: '待操作', tone: 'warning'
     })
-    // 契约增量：skipped 不是决策态 —— 门卡/表单卡同样显示「已跳过」，不被只读状态机折成「已超时」
+    // 契约增量：skipped 不是决策态 —— 门卡/表单卡同样显示「已跳过」，不被只读状态机折成「已失效」
     expect(cardStatusOf(makeTool({ kind2: 'CONFIRM', status: 'skipped' }))).toEqual({
       key: 'skipped', label: '已跳过', tone: 'neutral'
     })
@@ -570,10 +565,10 @@ describe('卡片三类型统一判据（tool / hitl / form）', () => {
       key: 'skipped', label: '已跳过', tone: 'neutral'
     })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'blocked' }))).toEqual({
-      key: 'blocked', label: '超出当前范围', tone: 'neutral'
+      key: 'blocked', label: '未执行', tone: 'neutral'
     })
     expect(cardStatusOf(makeTool({ name: 'generative_form', kind2: 'FRONTEND', status: 'unknown' }))).toEqual({
-      key: 'unknown', label: '结局未知（未确认成功/失败）', tone: 'neutral'
+      key: 'unknown', label: '需人工核对', tone: 'neutral'
     })
   })
 })

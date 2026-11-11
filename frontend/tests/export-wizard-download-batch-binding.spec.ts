@@ -167,7 +167,7 @@ describe('S3：构建/打包期间换批 ⇒ 取消本次下载（不触发浏�
 
     // ① 单文件入口（AI 侧 startDownloadInBackground → startDownload）
     const single = await runTool({ taskId: 7, defCodes: ['DEMO'] })
-    expect(single.ok).toBe(true)
+    expect(single.outcome).toBe('ok')
     expect(pending).toHaveLength(1)
 
     // 构建在途期间作业跑完、新一批结果铺开
@@ -183,7 +183,7 @@ describe('S3：构建/打包期间换批 ⇒ 取消本次下载（不触发浏�
     // ② 批量入口（AI 侧 startBatchDownloadInBackground）
     pending = []
     const batched = await runTool({ taskId: 7, defCodes: ['DEMO', 'CURR'] })
-    expect(batched.ok).toBe(true)
+    expect(batched.outcome).toBe('ok')
     expect(pending).toHaveLength(2)
 
     await completeExportRun(13)
@@ -202,7 +202,7 @@ describe('S3：构建/打包期间换批 ⇒ 取消本次下载（不触发浏�
     const fresh = await runTool({ taskId: 7, defCodes: ['DEMO'] })
     await flushPromises()
 
-    expect(fresh.ok).toBe(true)
+    expect(fresh.outcome).toBe('ok')
     expect(api.downloadBlob).toHaveBeenCalledTimes(1)
     expect(api.downloadBlob.mock.calls[0]?.[1]).toBe('DEMO.xlsx')
 

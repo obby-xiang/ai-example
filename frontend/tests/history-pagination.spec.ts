@@ -98,7 +98,6 @@ describe('分页 · 首屏只取最近一页', () => {
     expect(store.historyOffset).toBe(500 - HISTORY_PAGE_SIZE)
     expect(store.historyTotal).toBe(500)
     expect(store.historyHasMore).toBe(true)
-    expect(store.historyTruncated).toBe(false)
   })
 
   it('短历史（≤ 一页）：探测 1 条 + 取一页，hasMore=false', async () => {
@@ -138,15 +137,16 @@ describe('分页 · 首屏只取最近一页', () => {
     expect(store.historyHasMore).toBe(false)
   })
 
-  it('容量裁剪（truncated）与 hasMore 分开：裁掉 ≠ 还能向前取', async () => {
+  it('容量裁剪（truncated）与 hasMore 分开：裁掉 ≠ 还能向前取（不再设 store 字段）', async () => {
     api.history.mockResolvedValue({ sessionId: 's', count: 2, total: 2, truncated: true, messages: [entry(0), entry(1)] })
     const store = useAiStore()
     store.sessionId = 'sess-trunc'
 
     await store.loadHistory()
 
-    expect(store.historyTruncated).toBe(true)
+    expect(store.messages).toHaveLength(2)
     expect(store.historyHasMore).toBe(false)
+    expect(store).not.toHaveProperty('historyTruncated')
   })
 })
 

@@ -13,10 +13,10 @@ import {
   aiSnapshot,
   beginUiTurn,
   clearUiHighlights,
-  peekUiAnnouncement,
-  peekUiUndo
+  peekUiAnnouncement
 } from '@/utils/ai-dom-tools'
 import { currentAiEpoch } from '@/utils/ai-regions'
+import { useAiStore } from '@/stores/ai'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { enterImportPage, makeRoot, registerRegion, resetAiTestState } from './ai-fixtures'
 
@@ -109,7 +109,7 @@ describe('T-23：三重冗余高亮', () => {
     aiSnapshot({})
     await aiHighlight({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(workspace.dataVersion).toBe(before)
-    expect(peekUiUndo()).toBeNull()
+    expect('undoLastUiAction' in useAiStore()).toBe(false)
   })
 })
 
@@ -126,7 +126,7 @@ describe('T-24：ui_scroll 只改视口', () => {
     expect(out.outcome).toBe('ok')
     expect(viewport.scrollTop).toBe(120)
     expect(workspace.dataVersion).toBe(before)
-    expect(peekUiUndo()).toBeNull()
+    expect('undoLastUiAction' in useAiStore()).toBe(false)
     expect(out.result).toContain('已滚动')
   })
 

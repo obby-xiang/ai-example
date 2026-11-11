@@ -186,7 +186,7 @@ describe('T-34 / T-34b：picker 主路径', () => {
     await pending
   })
 
-  it('用户取消选择 ⇒ degraded + 卡保留（可重试），不回灌', async () => {
+  it('用户取消选择 ⇒ 回到 waiting（可重试），不回灌', async () => {
     enterImportPage()
     installRegion()
     installPicker(aborted())
@@ -194,19 +194,20 @@ describe('T-34 / T-34b：picker 主路径', () => {
     const { message, frame } = armFrame(store)
     await store.openUploadHandoff(message, frame)
     await store.chooseUploadFile()
-    expect(store.activeUploadHandoff?.status).toBe('degraded')
+    expect(store.activeUploadHandoff?.status).toBe('waiting')
+    expect(store.activeUploadHandoff?.reason).toContain('取消')
     expect(api.frontendToolResult).not.toHaveBeenCalled()
   })
 })
 
 describe('T-35：浏览器无 showOpenFilePicker ⇒ 回退', () => {
-  it('degraded + 高亮上传入口 + 指路左侧按钮', async () => {
+  it('unsupported + 高亮上传入口 + 指路左侧按钮', async () => {
     enterImportPage()
     const root = installRegion()
     const store = useAiStore()
     const { message, frame } = armFrame(store)
     await store.openUploadHandoff(message, frame)
-    expect(store.activeUploadHandoff?.status).toBe('degraded')
+    expect(store.activeUploadHandoff?.status).toBe('unsupported')
     expect(store.activeUploadHandoff?.reason).toContain('不支持在对话内直接选择文件')
     expect((root.querySelector('[data-ai-ref="import.upload.choose"]') as HTMLElement)
       .getAttribute('data-ai-highlighted')).toBe('true')
@@ -344,7 +345,7 @@ describe('L-85：区域消失后的 choose（不谎报、不留死卡）', () =>
     const submitted = lastSubmitted()
     expect(submitted.result).not.toContain('并交给导入向导') // 不谎报
     expect(submitted.result).toContain('导入向导')            // 指路
-    expect(submitted.result).toContain('本次未执行上传')
+    expect(submitted.result).toContain('第 1 步')
     expect(submitted.outcome).toBe('failed')
     expect(store.activeUploadHandoff).toBeNull() // 死卡收口（不悬挂等人）
     const segment = store.messages
@@ -379,7 +380,7 @@ describe('L-85：区域消失后的 choose（不谎报、不留死卡）', () =>
 })
 
 describe('交接卡组件（三态渲染）', () => {
-  function mountCard(status: 'waiting' | 'degraded' | 'missing' | 'unavailable', reason: string | null = null) {
+  function mountCard(status: 'waiting' | 'unsupported' | 'missing', reason: string | null = null) {
     return mount(UploadHandoffCard, {
       props: {
         status,
@@ -401,25 +402,27 @@ describe('交接卡组件（三态渲染）', () => {
     wrapper.unmount()
   })
 
-  it('degraded：给回退话术（点左侧高亮按钮 / 拖到高亮区），主按钮禁用', () => {
-    const wrapper = mountCard('degraded', '当前浏览器不支持在对话内直接选择文件')
-    expect(wrapper.text()).toContain('点左侧高亮按钮')
-    expect(wrapper.text()).toContain('拖到高亮区域')
+  it('unsupported：给回退话术（页面中的上传入口），主按钮禁用', () => {
+    const wrapper = mountCard('unsupported')
+    expect(wrapper.text()).toContain('当前浏览器不支持在对话内直接选择文件')
+    expect(wrapper.text()).toContain('页面中的上传入口')
     expect(wrapper.get('[data-testid="upload-handoff-choose"]').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
-  it('missing：禁用主按钮 + 「请先打开导入向导」+ 只有放弃可用', () => {
+  it('missing：禁用主按钮 + 「重新打开导入向导」+ 只有放弃可用', () => {
     const wrapper = mountCard('missing')
     expect(wrapper.get('[data-testid="upload-handoff-choose"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('请先打开导入向导')
+    expect(wrapper.text()).toContain('重新打开导入向导')
     expect(wrapper.get('[data-testid="upload-handoff-cancel"]').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 
-  it('unavailable：不渲染可点按钮（零「选择文件」）', () => {
-    const wrapper = mountCard('unavailable')
-    expect(wrapper.find('[data-testid="upload-handoff-choose"]').exists()).toBe(false)
+  it('missing：主按钮保留但不可点（零可执行入口）', () => {
+    const wrapper = mountCard('missing')
+    const choose = wrapper.find('[data-testid="upload-handoff-choose"]')
+    expect(choose.exists()).toBe(true)
+    expect(choose.attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="upload-handoff-cancel"]').exists()).toBe(true)
     wrapper.unmount()
   })

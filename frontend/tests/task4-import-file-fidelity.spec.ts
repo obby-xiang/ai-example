@@ -224,7 +224,7 @@ function writtenText(call: unknown[]): string {
 /** 走页面自己的能力入口（用户点「下一步」的同一条链）。 */
 async function nextStep(): Promise<{ ok: boolean; result: string }> {
   const execution = await executeFrontendTool({ name: 'import.nextStep', args: {}, budgetMs: 5_000 })
-  return { ok: execution.ok === true, result: String(execution.result ?? '') }
+  return { ok: execution.outcome === 'ok', result: String(execution.result ?? '') }
 }
 
 /**
@@ -582,7 +582,7 @@ describe('Fix2 N2：建作业在途换任务 ⇒ A 的作业不得挂到 B 的�
     expect(api.openTaskEvents).not.toHaveBeenCalled()
     // 作业**已建**（在任务 1 上）：回执必须是成功/信息形，且点明归属与"请勿重复发起"，
     // 不能是 failed（review ①：failed 会诱导模型重发一个已经在跑的作业）
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(String(execution.result)).toContain('#99')
     expect(String(execution.result)).toContain('任务 #1')
     expect(String(execution.result)).toContain('请勿重复发起')
@@ -635,7 +635,7 @@ describe('Fix3 ③：发布确认窗口在途换任务 ⇒ A 的确认不得在 
 
     // 修复前（RED）：确认之后 startJob 捕获的是**当前**任务 ⇒ createJob(2, 'PUBLISH')
     expect(api.createJob).not.toHaveBeenCalled()
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     const text = String(execution.result)
     expect(text).toContain('任务已切换')
     expect(text).toContain('未发起任何发布作业')
@@ -656,7 +656,7 @@ describe('Fix3 ①：作业已建但本页挂接抛错 ⇒ 回执不得说"未�
     // 修复前（RED）：外层 catch 把"已建作业 + 挂接失败"折成 {job:null} ⇒ 回执"预检查未启动"（诱使重发）
     const text = String(execution.result)
     expect(api.createJob).toHaveBeenCalledTimes(1)
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(text).toContain('#77')
     expect(text).toContain('请勿重复发起')
     expect(text).not.toContain('未启动')
@@ -672,7 +672,7 @@ describe('作业未创建时回执必须是失败', () => {
     const execution = await executeFrontendTool({ name: 'import.startPrecheck', args: {}, budgetMs: 5_000 })
 
     expect(api.createJob).toHaveBeenCalledTimes(1)
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('创建作业连接失败')
   })
 
@@ -683,7 +683,7 @@ describe('作业未创建时回执必须是失败', () => {
     const execution = await executeFrontendTool({ name: 'import.startImport', args: {}, budgetMs: 5_000 })
 
     expect(api.createJob).not.toHaveBeenCalled()
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('未启动导入作业')
   })
 })

@@ -30,8 +30,8 @@ import {
   type AiIdentity,
   type TenantUsersEntry,
   identityFingerprint,
-  isPositiveId,
   mirrorStorageKey,
+  normalizePositiveId,
   normalizeSessionId,
   readAiIdentity,
   resetAiIdentityCache,
@@ -173,8 +173,8 @@ function patchApi(options: IdentityFixtureOptions): void {
  */
 export function installIdentityFixture(options: IdentityFixtureOptions = {}): InstalledIdentityFixture {
   const identity: AiIdentity = {
-    tenantId: isPositiveId(options.tenantId) ? options.tenantId : FIXTURE_TENANT_ID,
-    userId: isPositiveId(options.userId) ? options.userId : FIXTURE_USER_ID
+    tenantId: normalizePositiveId(options.tenantId) ?? FIXTURE_TENANT_ID,
+    userId: normalizePositiveId(options.userId) ?? FIXTURE_USER_ID
   }
   const noSession = options.sessionId === '' || options.sessionId === 0
   const explicit = noSession ? '' : toSessionId(options.sessionId)

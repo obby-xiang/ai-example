@@ -281,7 +281,7 @@ describe('set_condition 缺 defCode：结构化失败（字符串会被当成功
       budgetMs: 5_000
     })
 
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.outcome).toBe('failed')
     expect(String(execution.result)).toContain('缺少 defCode')
   })

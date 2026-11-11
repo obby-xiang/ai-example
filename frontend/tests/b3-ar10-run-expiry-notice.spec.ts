@@ -62,7 +62,7 @@ describe('AR-10 · 到期后不静默', () => {
     }
     api.runsCurrent.mockResolvedValue(emptyCurrent)
 
-    await ai.restoreSuspendedSnapshot()
+    await ai.restoreSuspendedSnapshot(() => true)
 
     // 锚点保留为"已到期"（卡面继续显示已失效 + 出口），并落可见通知
     expect(ai.runExpiry?.runId).toBe('run-old')
@@ -78,7 +78,7 @@ describe('AR-10 · 到期后不静默', () => {
     ai.historyLoaded = true
     api.runsCurrent.mockResolvedValue(emptyCurrent)
 
-    await ai.restoreSuspendedSnapshot()
+    await ai.restoreSuspendedSnapshot(() => true)
 
     expect(ai.runExpiry).toBeNull()
     expect(ai.noticeCode).toBeNull()

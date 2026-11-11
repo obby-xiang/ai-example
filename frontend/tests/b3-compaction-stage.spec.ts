@@ -160,7 +160,7 @@ describe('批次3 · 压缩阶段', () => {
     expect(host.streaming).toBe(true)
   })
 
-  it('准备中手动重试：快照建好后按既有恢复路径续收并清掉准备中', async () => {
+  it('准备中恢复重跑：快照建好后按既有恢复路径续收并清掉准备中', async () => {
     const store = freshStore()
     store.sessionId = 'sess-preparing-2'
     const host = store.appendAssistantMessage('半截')
@@ -184,10 +184,10 @@ describe('批次3 · 压缩阶段', () => {
       archiveMaxSeq: 2
     })
     const reattach = vi.spyOn(store, 'reattachActive').mockResolvedValue(undefined)
-    await store.retryPreparing()
+    await store.restoreSnapshotGuarded()
 
     expect(store.preparingRun).toBeNull()
-    expect(reattach).toHaveBeenCalledWith('run-p2', expect.objectContaining({ lastSeq: 0 }))
+    expect(reattach).toHaveBeenCalledWith('run-p2', expect.objectContaining({ lastSeq: 2 }))
   })
 
   it('done 后压缩完成提示不覆盖 unconfirmed / 错误卡（批次2 中性视图优先）', () => {

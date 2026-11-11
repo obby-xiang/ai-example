@@ -252,7 +252,7 @@ describe('Task 4④：条件落库失败 ⇒ 不得启动导出作业（否则�
 
     // 修复前（RED）：persistStepData 的结局被丢弃 ⇒ 照样 POST /jobs（按旧条件/空条件导出全量）
     expect(api.createJob).not.toHaveBeenCalled()
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('未启动')
   })
 })
@@ -271,7 +271,7 @@ describe('Task 4⑤：条件正常落库时照常启动，且落库的就是界�
     expect(conditionText).toContain('100')
     expect(api.createJob).toHaveBeenCalledTimes(1)
     expect(api.createJob.mock.calls[0]?.slice(0, 2)).toEqual([7, 'EXPORT'])
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
   })
 })
 
@@ -375,7 +375,7 @@ describe('Fix1 I2b：落库途中换任务 ⇒ 不得在 B 上建导出作业', 
 
     expect(api.setCondition.mock.calls.filter((call) => call[0] === 8)).toEqual([])
     expect(api.createJob).not.toHaveBeenCalled()
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
   })
 })
 
@@ -470,7 +470,7 @@ describe('Fix3 ①：导出 detached 回执是成功形，且不得出现"重试
 
     // 修复前（RED）：ok:false ⇒ outcome 'failed'，且回执追加"请提示用户核对网络后重试"（邀请重复导出）
     const text = String(execution.result)
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(text).toContain('#31')
     expect(text).toContain('任务 #7')
     expect(text).toContain('请勿重复发起')
@@ -486,7 +486,7 @@ describe('导出作业未创建时回执必须是失败', () => {
     const execution = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
 
     expect(api.createJob).not.toHaveBeenCalled()
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('未启动导出作业')
   })
 })
@@ -528,7 +528,7 @@ describe('批次1B①：下载未载入标签不得静默出空文件（先 ensu
     })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     // 浏览器侧只发生一次 zip 下载
     expect(downloads.downloadBlob).toHaveBeenCalledTimes(1)
     const entries = downloads.zipBlobs.mock.calls[0]?.[0] as Array<{ name: string; blob: Blob }>
@@ -577,7 +577,7 @@ describe('批次1B②：真实 0 行 / 未载入 / 失败三态可区分', () =>
     })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(String(execution.result)).toContain('在线编辑后的当前表格')
     expect(String(execution.result)).toContain('真实空结果')
     expect(String(execution.result)).toContain('0 行')
@@ -599,7 +599,7 @@ describe('批次1B②：真实 0 行 / 未载入 / 失败三态可区分', () =>
     })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     const text = String(execution.result)
     expect(text).toContain('标签未载入')
     expect(text).toContain('回落服务端导出文件字节')
@@ -620,7 +620,7 @@ describe('批次1B③：保存校验失败计失败且不清脏', () => {
     // 修复前（RED）：校验失败只 continue，最后仍 gridDirty=false + 成功 toast
     const blocked = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
     await flushPromises()
-    expect(blocked.ok).toBe(false)
+    expect(blocked.outcome).not.toBe('ok')
     expect(api.createJob).not.toHaveBeenCalled()
     expect(String(blocked.result)).toContain('未保存')
   })
@@ -636,7 +636,7 @@ describe('批次1B④：作业/文件清单读取失败 ⇒ fail-closed 禁写 +
 
     const blocked = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
     await flushPromises()
-    expect(blocked.ok).toBe(false)
+    expect(blocked.outcome).not.toBe('ok')
     expect(api.createJob).not.toHaveBeenCalled()
     expect(String(blocked.result)).toContain('未启动导出作业')
 
@@ -654,7 +654,7 @@ describe('批次1B④：作业/文件清单读取失败 ⇒ fail-closed 禁写 +
 
     const allowed = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
     await flushPromises()
-    expect(allowed.ok).toBe(true)
+    expect(allowed.outcome).toBe('ok')
     expect(api.createJob).toHaveBeenCalledTimes(1)
   })
 })
@@ -667,7 +667,7 @@ describe('批次1B⑤：重导出前判脏，新作业成功前保留旧结果�
     const execution = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
     await flushPromises()
 
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(api.createJob).not.toHaveBeenCalled()
     expect(String(execution.result)).toContain('未保存')
   })
@@ -677,7 +677,7 @@ describe('批次1B⑤：重导出前判脏，新作业成功前保留旧结果�
     const execution = await executeFrontendTool({ name: 'export.start', args: {}, budgetMs: 5_000 })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(api.createJob).toHaveBeenCalledTimes(1)
     // 修复前（RED）：建作业成功即清空 exportResults/loadedGrids ⇒ 作业跑完前页面无旧结果
     expect(mounted[0]?.text()).toContain('旧结果')
@@ -698,7 +698,7 @@ describe('批次1B⑥：草案未改不得用 {} 覆盖 AI 条件', () => {
     const emptyWrites = api.setCondition.mock.calls.filter((call) => String(call[2]) === '{}')
     expect(emptyWrites).toEqual([])
     expect(api.createJob).toHaveBeenCalledTimes(1)
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
   })
 
   it('草案里有"选了算子却没填值"（1A 判 invalid）⇒ 阻断建作业，不发 {} 当无条件', async () => {
@@ -718,7 +718,7 @@ describe('批次1B⑥：草案未改不得用 {} 覆盖 AI 条件', () => {
     // 1A 接口（buildConditionOutcome/assertConditionBuildable）把"非法空输入"与"显式清空"分开：
     // 导出侧必须按 invalid 阻断，绝不能把 {} 写进去当"无条件 = 全部数据"。
     expect(api.createJob).not.toHaveBeenCalled()
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     // 回执原文由 1A 的错误映射生成：`InvalidConditionInputError.issues`（fieldCode + issue code）
     // 经 `views.export.conditionInput.*` 本地化，错误对象本身不再带用户文案。
     expect(String(execution.result)).toContain('monthlyFee')

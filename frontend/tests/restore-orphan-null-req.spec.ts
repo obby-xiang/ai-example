@@ -116,7 +116,7 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([orphanConfirm('c1')]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(visiblePendingIds(store.messages)).toEqual(['c1'])
     expect(store.messages[0]?.pendingCall).toMatchObject({ toolCallId: 'c1', kind: 'CONFIRM', status: 'pending' })
@@ -140,7 +140,7 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([orphanConfirm('c1'), orphanConfirm('c2'), orphanConfirm('c3')]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(visiblePendingIds(store.messages)).toEqual(['c1'])
     const bubbleCount = store.messages.length
 
@@ -169,7 +169,7 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([orphanSheet('p1'), orphanConfirm('c2')]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(visiblePendingIds(store.messages)).toEqual(['p1'])
     expect(store.activePreview).toBeNull()
@@ -192,7 +192,7 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
     store.historyLoaded = true
     api.runsCurrent.mockResolvedValue(snapshot([orphanGf('g1'), orphanGf('g2')]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(visiblePendingIds(store.messages)).toEqual(['g1'])
     expect(store.activeForm).toMatchObject({ toolCallId: 'g1', runId: 'run-m2b', status: 'filling' })
@@ -217,7 +217,7 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
       arguments: JSON.stringify({ ref: 'import.upload', accept: ['.xlsx'] })
     }]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     expect(visiblePendingIds(store.messages)).toEqual(['u1'])
     // 区域未注册（刷新后不在导入页）⇒ 只能放弃；卡与交接态仍照常重建
@@ -233,7 +233,7 @@ describe('M-2b：req 缺键（孤儿轮）无感恢复', () => {
       orphanConfirm('c2', { req: false })
     ]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
     expect(visiblePendingIds(store.messages)).toEqual(['c1'])
 
     await store.confirm(true, undefined, 'c1')

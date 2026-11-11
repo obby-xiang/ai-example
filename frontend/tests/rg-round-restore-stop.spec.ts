@@ -139,7 +139,7 @@ afterEach(() => {
 })
 
 describe('批G · G2：在途轮刷新 ⇒ 静默全量重放续收', () => {
-  it('RUNNING 快照 + 镜像在途：复用宿主消息、清空其段、lastSeq=0 重放，全程无提示', async () => {
+  it('RUNNING 快照 + 镜像在途：复用宿主消息、清空其段、appliedSeq=0 ⇒ archiveMaxSeq 重放，全程无提示', async () => {
     const store = await freshStore()
     store.sessionId = 's-g2'
     sessionStorage.setItem(mirrorStorageKey('s-g2'), JSON.stringify({
@@ -170,7 +170,7 @@ describe('批G · G2：在途轮刷新 ⇒ 静默全量重放续收', () => {
     expect(api.reattachRun).toHaveBeenCalledTimes(1)
     expect(api.reattachRun.mock.calls[0]?.[0]).toBe('run-g2')
     // 全量重放：镜像正文本就滞后，增量续收必有缺口
-    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 0 })
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 12 })
 
     const assistants = store.messages.filter((message) => message.role === 'assistant')
     expect(assistants).toHaveLength(1) // 不新起气泡
@@ -207,7 +207,7 @@ describe('批G · G2：在途轮刷新 ⇒ 静默全量重放续收', () => {
       return new Promise(() => {})
     })
 
-    void store.restoreSuspendedSnapshot()
+    void store.restoreSuspendedSnapshot(() => true)
     await Promise.resolve()
     await Promise.resolve()
     await Promise.resolve()

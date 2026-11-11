@@ -162,23 +162,16 @@ describe('1 · 同一事实只留一个提示面', () => {
     wrapper.unmount()
   })
 
-  it('工作区同步反馈只让成功回执让位；失败回执始终显示', async () => {
+  it('工作区同步反馈条已退役：UI 事件回执是唯一提示面', async () => {
     const store = useAiStore()
-    store.contextSync = { version: 3, summary: '选择了 2 个配置定义', at: 1, source: '界面' } as never
-    // ① 失败回执（handled=false）是**另一件事**：不得被无关的「工作区已同步」压掉
+    // ① 失败回执（handled=false）
     store.lastUiEventResult = { event: 'select_defs', handled: false, message: '当前没有进行中的任务' }
     const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])])
-    // 2026-10-30 结构化批：无 display 的旧记录不再把送模型的 summary 当 UI 文案，改走本地化兜底词条
-    expect(wrapper.find('[data-testid="panel-context-bar"]').text()).toContain('工作区状态已更新')
+    expect(wrapper.find('[data-testid="panel-context-bar"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="alert-ui-event"]').exists()).toBe(true)
 
-    // ② 成功回执（handled=true）：同步反馈已在报同一件事 ⇒ 回执位让位
+    // ② 成功回执（handled=true）：无同步反馈可让位，回执位照常显示
     store.lastUiEventResult = { event: 'set_conditions', handled: true, message: '已设置筛选条件' }
-    await nextTick()
-    expect(wrapper.find('[data-testid="alert-ui-event"]').exists()).toBe(false)
-
-    // ③ 同步反馈退场后，回执位仍是唯一提示面
-    store.contextSync = null
     await nextTick()
     expect(wrapper.find('[data-testid="alert-ui-event"]').exists()).toBe(true)
     wrapper.unmount()
@@ -200,25 +193,18 @@ describe('1 · 同一事实只留一个提示面', () => {
   })
 })
 
-describe('2 · 挂载准备中出阶段条', () => {
-  it('preparing 阶段条显示已用秒数与重试出口，且不露 runId', async () => {
+describe('2 · 准备中阶段条已退役', () => {
+  it('preparing 现场不再渲染阶段条/重试出口，且不露 runId', async () => {
     const store = useAiStore()
     store.loading = true
     store.sessionId = 'sess-toc'
     store.activeRunId = 'secret-run-id'
     store.preparingRun = { runId: 'secret-run-id', startedAtMs: Date.now() - 4_000, elapsedMs: 4_000 }
-    const retry = vi.spyOn(store, 'retryPreparing').mockResolvedValue(undefined)
 
     const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '', streaming: true }], null, true)])
-    const bar = wrapper.find('[data-testid="compaction-status"]')
-    expect(bar.exists()).toBe(true)
-    expect(bar.attributes('data-stage')).toBe('preparing')
-    expect(bar.text()).toContain('准备')
-    expect(bar.text()).toMatch(/已用 [45] 秒/)
+    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="compaction-retry"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('secret-run-id')
-
-    await wrapper.find('[data-testid="compaction-retry"]').trigger('click')
-    expect(retry).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 
@@ -526,29 +512,21 @@ describe('6 · 不可提交表单字段只读', () => {
   })
 })
 
-describe('7 · 技术词只进诊断', () => {
-  it('首屏不出现会话 id / 数据版本；两者收进诊断详情', async () => {
+describe('7 · 技术词不上首屏（诊断载体已退役）', () => {
+  it('首屏不出现会话 id / 数据版本；panel-diagnostics / 上下文条 / 已同步条均不存在', async () => {
     const store = useAiStore()
     const workspace = useWorkspaceStore()
     store.sessionId = 'abcdef1234567890'
     workspace.dataVersion = 7
-    store.contextSync = { version: 7, summary: '选择了 2 个配置定义', at: 1, source: '界面' } as never
 
     const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: '回答', streaming: false }])])
-    // 首屏 = 可见那一行（`panel-context-line`）；诊断详情是折叠区，不算首屏
-    const line = wrapper.find('[data-testid="panel-context-line"]')
-    expect(line.text()).not.toContain('abcdef12')
-    expect(line.text()).not.toContain('数据版本')
-    const synced = wrapper.find('[data-testid="context-synced"]')
-    // 「已同步」只留人话摘要（不带版本号 / 来源机读词）
-    expect(synced.text()).toContain('工作区状态已更新')
-    expect(synced.text()).not.toContain('v7')
-    expect(synced.text()).not.toContain('界面')
-
-    const diagnostics = wrapper.find('[data-testid="panel-diagnostics"]')
-    expect(diagnostics.exists()).toBe(true)
-    expect(diagnostics.text()).toContain('abcdef12')
-    expect(diagnostics.text()).toContain('7')
+    const text = wrapper.text()
+    expect(text).not.toContain('abcdef12')
+    expect(text).not.toContain('数据版本')
+    // 当前真实载体 = 无：旧的诊断详情 / 上下文条 /「已同步」反馈条都已退役
+    expect(wrapper.find('[data-testid="panel-diagnostics"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="panel-context-line"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="context-synced"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -617,7 +595,7 @@ describe('8 · 硬编码走 locale', () => {
     expect(text).toContain('import')
     wrapper.unmount()
 
-    const degraded = mount(UploadHandoffCard, { props: { status: 'degraded' } })
+    const degraded = mount(UploadHandoffCard, { props: { status: 'unsupported' } })
     expect(degraded.find('[data-testid="upload-handoff"]').text()).not.toMatch(/[\u4e00-\u9fa5]/)
     degraded.unmount()
   })

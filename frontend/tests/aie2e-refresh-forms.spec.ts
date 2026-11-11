@@ -22,7 +22,6 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import type { ChatMessage } from '@/types/ai'
-import { contextPillText } from '@/utils/context-usage'
 import { formDraftKey } from '@/utils/form-draft'
 import {
   frame,
@@ -143,7 +142,6 @@ async function freshStoreClean(): Promise<Store> {
   store.stalePreviewToolCallId = null
   store.activeUploadHandoff = null
   store.contextUsage = null
-  store.contextBreakdown = null
   store.gateSubmissions = {}
   store.gateAcks = {}
   return store
@@ -914,7 +912,7 @@ describe('A8（R-15 · P2）：刷新后上下文 pill 与轮末 done.context �
       usedTokens: 64000, limitTokens: 128000, percent: 50, level: 'soft', circuit: 'closed'
     })
     expect(reloaded.contextUsage?.level).toBe(doneLevel) // 压缩级别与轮末一致
-    expect(contextPillText(reloaded.contextUsage)).toBe('50% · 64k/128k')
+    expect(reloaded.contextUsage).toMatchObject({ usedTokens: 64000, limitTokens: 128000, percent: 50 })
   }, 20_000)
 
   it('端点带估算与熔断：level/circuit/est 三字段原样恢复，pill 文案带 ≈', async () => {
@@ -937,8 +935,7 @@ describe('A8（R-15 · P2）：刷新后上下文 pill 与轮末 done.context �
     await store.loadHistory()
     await vi.waitFor(() => expect(store.contextUsage).not.toBeNull())
 
-    expect(store.contextUsage).toMatchObject({ level: 'hard', circuit: 'open', est: true })
-    expect(contextPillText(store.contextUsage)).toBe('≈70.3% · 90k/128k')
+    expect(store.contextUsage).toMatchObject({ level: 'hard', circuit: 'open', est: true, percent: 70.3, usedTokens: 90000 })
   }, 20_000)
 })
 
@@ -1122,7 +1119,7 @@ describe('R-01 三件套：镜像滞后的半截 + 快照 RUNNING + 全量重放
 
     await store.loadHistory()
 
-    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 0 }) // 全量重放
+    expect(api.reattachRun.mock.calls[0]?.[2]).toMatchObject({ lastSeq: 3 }) // appliedSeq=0 ⇒ archiveMaxSeq
     expect(store.messages).toHaveLength(2)
     expect(store.messages[1]?.id).toBe('a-sp1')
     expect(store.messages[1]?.content).toBe('完整正文') // 不含"旧半截"

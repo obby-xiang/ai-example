@@ -132,7 +132,7 @@ describe('export.openEditor 缺 defCode：结构化失败，零执行（R7）', 
 
     // 工具层 REQUIRED_PARAMS 先拦（文案不同），handler 的缺参分支只在直调时可达 ——
     // 本用例锁"路由侧不会因本次改动变成成功"，缺陷本体由上面那条直调用例锁住。
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.outcome).toBe('failed')
     expect(String(execution.result)).toContain('defCode')
   })

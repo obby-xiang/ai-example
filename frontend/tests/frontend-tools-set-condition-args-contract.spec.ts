@@ -64,7 +64,7 @@ describe('契约层路由：漏传 conditions 不得当清空（R5）', () => {
     })
 
     // 修复前（RED）：toUiEvent 补 {} ⇒ 契约层当"显式清空" ⇒ PUT "{}" 且回成功
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('conditions')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
@@ -79,7 +79,7 @@ describe('契约层路由：漏传 conditions 不得当清空（R5）', () => {
       budgetMs: 5_000
     })
 
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('conditions')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
@@ -94,7 +94,7 @@ describe('契约层路由：漏传 conditions 不得当清空（R5）', () => {
       budgetMs: 5_000
     })
 
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
@@ -111,7 +111,7 @@ describe('契约层兜底不再直写：页面 handler 未注册 ⇒ 确定性�
     })
 
     // 修复前（RED）：落到 dispatchUiEvent 的兜底分支 ⇒ PUT "{}" 并回成功（假同步）
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('页面未就绪')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
@@ -127,7 +127,7 @@ describe('契约层兜底不再直写：页面 handler 未注册 ⇒ 确定性�
       budgetMs: 5_000
     })
 
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('页面未就绪')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')

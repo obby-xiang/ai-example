@@ -142,7 +142,7 @@ describe('R-156 ①：1 码 ⇒ 既有单文件 xlsx 路径（数量分流不改
     const execution = await runTool({ taskId: 7, defCodes: ['DEMO'] })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(execution.result).toContain('已发起下载')
     expect(execution.result).toContain('DEMO')
     // 单码分支不产 zip：zipBlobs 一次都不该被调用，浏览器侧只发生一次下载
@@ -158,7 +158,7 @@ describe('R-156 ②：N 码 ⇒ 逐码取字节 + 单次 zip 下载（issue #9 �
     const execution = await runTool({ taskId: 7, defCodes: ['DEMO', 'CURR'] })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(execution.result).toContain('已发起打包下载')
     // 逐码取字节：两个码各一次（buildXlsx 调两次，本夹具固定走 downloadFile 回落支）
     expect(api.downloadFile).toHaveBeenCalledTimes(2)
@@ -182,7 +182,7 @@ describe('R-156 ③：即发即回 —— 字节链路未结算也照常回灌"�
     const execution = await runTool({ taskId: 7, defCodes: ['DEMO', 'CURR'] })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(execution.result).toContain('已发起打包下载')
     expect(execution.result).toContain('无需重试')
     // 回执已到而下载还没发起 —— 证明回灌不等落盘
@@ -196,7 +196,7 @@ describe('R-156 ④：无效码 ⇒ 整体显式失败（点名无效码 + 可�
     const execution = await runTool({ taskId: 7, defCodes: ['DEMO', 'NOPE'] })
     await flushPromises()
 
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(execution.outcome).toBe('failed')
     expect(execution.result).toContain('无效码 NOPE')
     expect(execution.result).toContain('可用码清单 = DEMO、CURR')
@@ -243,7 +243,7 @@ describe('L-82：前置校验悬挂 ⇒ 显式超时结局（不能再无结局�
 
       expect(execution.outcome).toBe('timeout')
       expect(execution.code).toBe('UI_DOWNLOAD_TIMEOUT')
-      expect(execution.ok).toBe(false)
+      expect(execution.outcome).not.toBe('ok')
       expect(execution.result).toContain('超时')
       expect(execution.result).toContain('未触发下载') // 诚实：前置没过，下载没发起
       expect(api.downloadBlob).not.toHaveBeenCalled()
@@ -268,7 +268,7 @@ describe('批次1B：回执必须交代字节来源（未载入回落服务端 /
     const execution = await runTool({ taskId: 7, defCodes: ['DEMO'] })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     // 本夹具没有表格组件 ⇒ 字节源是服务端文件（不是在线编辑表格），且 0 行是真实空结果
     expect(execution.result).toContain('回落服务端导出文件字节')
     expect(execution.result).toContain('真实空结果')
@@ -286,7 +286,7 @@ describe('批次1B：打包链路上任一码取字节失败 ⇒ 整批显式失
     await flushPromises()
 
     // 回执仍是"已发起"（即发即回），但浏览器侧一个文件都没落下
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(api.zipBlobs).not.toHaveBeenCalled()
     expect(api.downloadBlob).not.toHaveBeenCalled()
     expect(ElMessage.error).toHaveBeenCalled()

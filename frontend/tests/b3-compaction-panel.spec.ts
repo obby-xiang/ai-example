@@ -237,24 +237,24 @@ describe('批次3 · 阶段条口径（2026-10-29 ToC 呈现减负批改写）',
     wrapper.unmount()
   })
 
-  it('history.truncated 在消息流内只显示一条中性标记（无按钮/非压缩事件）', async () => {
+  it('消息级 truncated 在消息流内只显示一条中性标记（无按钮/非压缩事件）', async () => {
     const ai = useAiStore()
     ai.expanded = true
     ai.historyLoaded = true
-    ai.historyTruncated = true
-    ai.messages = [host()]
+    const message = host()
+    message.truncated = true
+    ai.messages = [message]
 
     const wrapper = await mountPanel()
-    const marker = wrapper.find('[data-testid="history-truncated"]')
+    const marker = wrapper.find('[data-testid="msg-truncated-a-b3"]')
     expect(marker.exists()).toBe(true)
-    expect(marker.attributes('role')).toBe('note')
-    expect(marker.text()).toContain('更早的对话未在本机保留')
+    expect(marker.text()).toContain('已截断')
     expect(marker.find('button').exists()).toBe(false)
     expect(wrapper.find('[data-testid="compaction-message"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('准备中出阶段条（带重试出口），runId 不上屏', async () => {
+  it('准备中不再渲染阶段条/重试出口：只留「工作中」呼吸且 runId 不上屏', async () => {
     const ai = useAiStore()
     ai.expanded = true
     ai.historyLoaded = true
@@ -263,10 +263,8 @@ describe('批次3 · 阶段条口径（2026-10-29 ToC 呈现减负批改写）',
     ai.preparingRun = { runId: 'secret-run-id', startedAtMs: Date.now() - 5_000, elapsedMs: null }
 
     const wrapper = await mountPanel()
-    const bar = wrapper.find('[data-testid="compaction-status"]')
-    expect(bar.exists()).toBe(true)
-    expect(bar.attributes('data-stage')).toBe('preparing')
-    expect(bar.find('[data-testid="compaction-retry"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="compaction-retry"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="loading-breath"]').text()).toContain('工作中')
     expect(wrapper.text()).not.toContain('secret-run-id')
     wrapper.unmount()
@@ -291,7 +289,7 @@ describe('批次3 · 阶段条口径（2026-10-29 ToC 呈现减负批改写）',
     wrapper.unmount()
   })
 
-  it('准备中阶段条随 streaming 心跳退场（摘要结束立即恢复工作中）', async () => {
+  it('准备中现场随 streaming 心跳退场（无阶段条可退，internal state 清空）', async () => {
     const ai = useAiStore()
     ai.expanded = true
     ai.historyLoaded = true
@@ -301,7 +299,7 @@ describe('批次3 · 阶段条口径（2026-10-29 ToC 呈现减负批改写）',
     ai.notePreparingHeartbeat('run-prep', 1_000)
 
     const wrapper = await mountPanel()
-    expect(wrapper.find('[data-testid="compaction-status"]').attributes('data-stage')).toBe('preparing')
+    expect(wrapper.find('[data-testid="compaction-status"]').exists()).toBe(false)
 
     ai.handleFrame(asFrame({ type: 'heartbeat', phase: 'streaming', elapsedMs: 0 }))
     await nextTick()

@@ -216,7 +216,7 @@ describe('AR-07 单活动表单 + 同批排队', () => {
     store.sessionId = 'sess'
     api.runsCurrent.mockResolvedValue(suspendedSnapshot([formEntry('g1'), formEntry('g2', FORM_B)]))
 
-    await store.restoreSuspendedSnapshot()
+    await store.restoreSuspendedSnapshot(() => true)
 
     // 串行呈现：只重建第一张，第二张排队（不多建一张活动表单）
     expect(store.activeForm?.toolCallId).toBe('g1')

@@ -126,7 +126,6 @@ describe('复制页签：静默换新会话，不接回原会话', () => {
 
     const store = useAiStore()
     store.lastRoundOutcome = 'error'
-    store.contextSync = { kind: 'workspace_changed', at: 1 } as never
     store.lastUiEventResult = { event: 'open', handled: false, message: 'old' }
 
     await store.ensureTabOwnership()
@@ -137,7 +136,6 @@ describe('复制页签：静默换新会话，不接回原会话', () => {
     expect(store.noticeCode).toBeNull()
     expect(store.noticeSeverity).toBe('info')
     expect(store.lastRoundOutcome).toBe('ok')
-    expect(store.contextSync).toBeNull()
     expect(store.lastUiEventResult).toBeNull()
     // 不接回原会话：不读原历史、不把旧 id 写回本页签
     expect(api.history.mock.calls.map((call) => call[0])).not.toContain('9301')
@@ -146,18 +144,16 @@ describe('复制页签：静默换新会话，不接回原会话', () => {
 })
 
 describe('新会话清场：工作区 chip / ui_event 回执 / 轮次结局不跨会话', () => {
-  it('adoptFreshSession ⇒ contextSync、lastUiEventResult、lastRoundOutcome 复位，notice 级别自成', () => {
+  it('adoptFreshSession ⇒ lastUiEventResult、lastRoundOutcome 复位，notice 级别自成', () => {
     seedTab('9302')
     const store = useAiStore()
     store.lastRoundOutcome = 'error'
-    store.contextSync = { kind: 'workspace_changed', at: 1 } as never
     store.lastUiEventResult = { event: 'open', handled: true, message: 'done' }
     store.noticeSeverity = 'error'
     store.showRawNotice('old error')
 
     store.adoptFreshSession()
 
-    expect(store.contextSync).toBeNull()
     expect(store.lastUiEventResult).toBeNull()
     expect(store.lastRoundOutcome).toBe('ok')
     expect(store.notice).toBeNull()
@@ -257,16 +253,16 @@ describe('批次2/4/5 既有语义不回退（本批只写不跑）', () => {
     sessionStorage.setItem(formDraftKey('gf-1'), '{}')
     sessionStorage.setItem(formDraftKey('gf-2'), '{}')
     store.historyError = { scope: 'history', status: 503, code: 'X' } as never
-    store.contextError = { scope: 'context', status: 503, code: 'Y' } as never
-    store.contextStatus = 'error'
+    store.currentError = { scope: 'current', status: 503, code: 'Y' } as never
+    store.manualRecovery = { scope: 'current', reason: 'load', error: null } as never
 
     store.adoptFreshSession()
 
     expect(store.activeForm).toBeNull()
     expect(store.queuedForms).toEqual([])
     expect(store.historyError).toBeNull()
-    expect(store.contextError).toBeNull()
-    expect(store.contextStatus).toBe('idle')
+    expect(store.currentError).toBeNull()
+    expect(store.manualRecovery).toBeNull()
     expect(sessionStorage.getItem(formDraftKey('gf-1'))).toBeNull()
     expect(sessionStorage.getItem(formDraftKey('gf-2'))).toBeNull()
   })

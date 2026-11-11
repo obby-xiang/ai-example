@@ -120,7 +120,7 @@ describe('页面 handler 路由：漏传 conditions 不得当清空（R5）', ()
     await flushPromises()
 
     // 修复前（RED）：normalizeActionArgs 把空参补成 {} ⇒ handler 当"显式清空" ⇒ PUT "{}" 且回成功
-    expect(execution.ok).toBe(false)
+    expect(execution.outcome).not.toBe('ok')
     expect(String(execution.result)).toContain('conditions')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
@@ -134,8 +134,8 @@ describe('页面 handler 路由：漏传 conditions 不得当清空（R5）', ()
     const withUndefined = await runSetCondition({ defCode: 'CURRENCY', conditions: undefined })
     await flushPromises()
 
-    expect(withNull.ok).toBe(false)
-    expect(withUndefined.ok).toBe(false)
+    expect(withNull.outcome).not.toBe('ok')
+    expect(withUndefined.outcome).not.toBe('ok')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
@@ -164,7 +164,7 @@ describe('页面 handler 路由：显式 {} 与合法条件仍正常（相邻正
     const execution = await runSetCondition({ defCode: 'CURRENCY', conditions: {} })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     // 修复前（RED）：设置条件当场 PUT "{}"（"设置即落库"），confirm_step 再写一次
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
@@ -183,7 +183,7 @@ describe('页面 handler 路由：显式 {} 与合法条件仍正常（相邻正
     const execution = await runSetCondition({ defCode: 'CURRENCY', conditions: condition })
     await flushPromises()
 
-    expect(execution.ok).toBe(true)
+    expect(execution.outcome).toBe('ok')
     expect(api.setCondition).not.toHaveBeenCalled()
     expect(workspace.queryConditions.CURRENCY).toEqual(condition)
 
