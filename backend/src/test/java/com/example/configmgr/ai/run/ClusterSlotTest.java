@@ -149,7 +149,7 @@ class ClusterSlotTest {
 	void thirteenRunKeysShareOneSlot() {
 		Set<String> keys = new LinkedHashSet<>(List.of(this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
 				this.store.claimKey(RUN_ID), this.store.ledgerKey(RUN_ID), this.store.idemKey(RUN_ID),
-				this.store.eventsKey(RUN_ID), this.store.seqKey(RUN_ID), this.store.xeventsKey(RUN_ID),
+				this.store.runStateKey(RUN_ID), this.store.seqKey(RUN_ID), this.store.xeventsKey(RUN_ID),
 				this.store.runLeaseKey(RUN_ID), this.store.fenceKey(RUN_ID), this.store.reqKey(RUN_ID),
 				this.store.decidedKey(RUN_ID), this.store.runLeaseEpochKey(RUN_ID)));
 
@@ -163,7 +163,7 @@ class ClusterSlotTest {
 		// 改造前 deleteRun 的那条多键 DEL 正是跨这四个槽。
 		Set<Integer> legacySlots = new LinkedHashSet<>(List.of(
 				FakeLeaseRedis.slot(RunStore.LEASE_RUN_PREFIX + RUN_ID),
-				FakeLeaseRedis.slot(RunStore.EVENTS_PREFIX + RUN_ID),
+				FakeLeaseRedis.slot(RunStore.PENDING_PREFIX + RUN_ID),
 				FakeLeaseRedis.slot(RunStore.SEQ_PREFIX + RUN_ID),
 				FakeLeaseRedis.slot(RunStore.XEVENTS_PREFIX + RUN_ID)));
 		assertThat(legacySlots).as("旧键形不在同一槽 ⇒ 13 键 DEL 曾经跨槽").hasSizeGreaterThan(1);
@@ -189,7 +189,6 @@ class ClusterSlotTest {
 
 		assertThat(frames.streamKey(RUN_ID)).isEqualTo(this.store.xeventsKey(RUN_ID));
 		assertThat(frames.seqKey(RUN_ID)).isEqualTo(this.store.seqKey(RUN_ID));
-		assertThat(frames.legacyListKey(RUN_ID)).isEqualTo(this.store.eventsKey(RUN_ID));
 	}
 
 	/**
@@ -232,7 +231,7 @@ class ClusterSlotTest {
 		RedisFrameStore frames = new RedisFrameStore(this.fake.redis, this.mapper, this.properties);
 		this.fake.strings.put(frames.streamKey(RUN_ID), "stream-placeholder");
 		this.fake.strings.put(frames.seqKey(RUN_ID), "7");
-		this.fake.lists.put(frames.legacyListKey(RUN_ID), new java.util.concurrent.CopyOnWriteArrayList<>());
+		this.fake.strings.put(this.store.runStateKey(RUN_ID), "state-placeholder");
 
 		// 读路径：全部读得回来（键形一致 ⇒ 读方看到写方）
 		assertThat(this.store.pending(RUN_ID, "call-1")).isNotNull();
@@ -248,7 +247,7 @@ class ClusterSlotTest {
 		assertThat(this.fake.lastDeletedKeys).as("一条命令恰好带 13 个键").hasSize(13);
 		Set<String> expected = new LinkedHashSet<>(List.of(this.store.runKey(RUN_ID),
 				this.store.pendingKey(RUN_ID), this.store.claimKey(RUN_ID), this.store.ledgerKey(RUN_ID),
-				this.store.idemKey(RUN_ID), this.store.eventsKey(RUN_ID), this.store.seqKey(RUN_ID),
+				this.store.idemKey(RUN_ID), this.store.runStateKey(RUN_ID), this.store.seqKey(RUN_ID),
 				this.store.xeventsKey(RUN_ID), this.store.runLeaseKey(RUN_ID), this.store.fenceKey(RUN_ID),
 				this.store.reqKey(RUN_ID), this.store.decidedKey(RUN_ID), this.store.runLeaseEpochKey(RUN_ID)));
 		assertThat(new LinkedHashSet<>(this.fake.lastDeletedKeys)).isEqualTo(expected);
@@ -258,7 +257,7 @@ class ClusterSlotTest {
 		assertThat(this.fake.table(this.store.claimKey(RUN_ID))).as("认领已删").isEmpty();
 		assertThat(this.fake.lists.get(this.store.ledgerKey(RUN_ID))).as("台账已删").isNull();
 		assertThat(this.fake.hashTables.get(this.store.idemKey(RUN_ID))).as("索引已删").isNull();
-		assertThat(this.fake.lists.get(this.store.eventsKey(RUN_ID))).as("兼容 LIST 已删").isNull();
+		assertThat(this.fake.string(this.store.runStateKey(RUN_ID))).as("轻量状态键已删").isNull();
 		assertThat(this.fake.string(this.store.seqKey(RUN_ID))).as("seq 已删").isNull();
 		assertThat(this.fake.string(frames.streamKey(RUN_ID))).as("事件 Stream 已删").isNull();
 		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).as("租约已删").isNull();

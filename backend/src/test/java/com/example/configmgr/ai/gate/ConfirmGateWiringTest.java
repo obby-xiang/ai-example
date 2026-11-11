@@ -103,7 +103,7 @@ class ConfirmGateWiringTest {
             when(this.toolRegistry.channelOf(tool)).thenReturn(ToolMeta.Channel.BACKEND);
             when(this.toolRegistry.riskOf(tool)).thenReturn(ToolMeta.RiskLevel.DANGER);
         }
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.store.get(RUN_ID)).thenReturn(snapshot());
         when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
         when(this.store.pendingKey(RUN_ID)).thenReturn("ai:pending:" + RUN_ID);
@@ -138,7 +138,7 @@ class ConfirmGateWiringTest {
 
     @Test
     void readToolsExecuteDirectly() {
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.store.get(RUN_ID)).thenReturn(snapshot());
         when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
         when(this.store.pendingKey(RUN_ID)).thenReturn("ai:pending:" + RUN_ID);
@@ -295,7 +295,7 @@ class ConfirmGateWiringTest {
 
     /** 三种结局共用的桩（外置状态/帧出口/取消标志）。 */
     private void stubCommon() {
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.store.get(RUN_ID)).thenReturn(snapshot());
         when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
         when(this.store.pendingKey(RUN_ID)).thenReturn("ai:pending:" + RUN_ID);

@@ -345,13 +345,13 @@ class AiDefaultTargetBindingTest {
 		AiConfigService service = this.fixture.service();
 		AiConfigWriter writer = writer(service, null);
 
-		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("b-only", null, null, null, null));
+		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("b-only", null, null, null, null, null));
 		assertThat(this.fixture.settings).containsEntry(AiSetting.DEFAULT_PROVIDER_ID,
 				String.valueOf(providerB.getId()));
 
 		assertThatThrownBy(
 				() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand("shared-model", null, null, null,
-						null)))
+						null, null)))
 			.isInstanceOf(AiConfigException.class)
 			.hasMessageContaining("providerId")
 			.hasMessageContaining("设置")
@@ -362,7 +362,7 @@ class AiDefaultTargetBindingTest {
 		this.fixture.settings.put(AiSetting.DEFAULT_MODEL_ID, "shared-model");
 		this.fixture.settings.remove(AiSetting.DEFAULT_PROVIDER_ID);
 		this.fixture.bumpVersion();
-		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("shared-model", 0.55d, null, null, null));
+		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("shared-model", 0.55d, null, null, null, null));
 		assertThat(this.fixture.settings).containsEntry(AiSetting.DEFAULT_MODEL_ID, "shared-model")
 			.containsEntry(AiSetting.DEFAULT_TEMPERATURE, "0.55")
 			.doesNotContainKey(AiSetting.DEFAULT_PROVIDER_ID);
@@ -390,7 +390,7 @@ class AiDefaultTargetBindingTest {
 
 		AiConfigWriter writer = writer(service, null);
 		// 旧客户端只改温度：不带 providerId
-		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("a-model", 0.55d, null, null, null));
+		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("a-model", 0.55d, null, null, null, null));
 
 		assertThat(this.fixture.settings)
 			.as("自动归属不得把默认目标硬绑到已停用的供应商")
@@ -411,7 +411,7 @@ class AiDefaultTargetBindingTest {
 		this.fixture.settings.remove(AiSetting.DEFAULT_MODEL_ID);
 		this.fixture.bumpVersion();
 		assertThatThrownBy(
-				() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand("a-model", null, null, null, null)))
+				() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand("a-model", null, null, null, null, null)))
 			.isInstanceOf(AiConfigException.class)
 			.extracting(ex -> ((AiConfigException) ex).getCode())
 			.isEqualTo(AiConfigWriter.CODE_MODEL_NOT_FOUND);
@@ -459,12 +459,12 @@ class AiDefaultTargetBindingTest {
 
 		// 未绑定时按所有者的最小值（2048）校验，不能因为"没绑定"放宽到 8192
 		assertThatThrownBy(() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand("shared-model", null,
-				null, 4096, null)))
+				null, 4096, null, null)))
 			.isInstanceOf(AiConfigException.class)
 			.extracting(ex -> ((AiConfigException) ex).getCode())
 			.isEqualTo(AiConfigWriter.CODE_INVALID_PARAM);
 
-		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("shared-model", null, null, 1024, null));
+		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("shared-model", null, null, 1024, null, null));
 		assertThat(this.fixture.settings).containsEntry(AiSetting.DEFAULT_MAX_TOKENS, "1024")
 			.doesNotContainKey(AiSetting.DEFAULT_PROVIDER_ID);
 	}
@@ -478,7 +478,7 @@ class AiDefaultTargetBindingTest {
 		return new AiConfigWriter(this.fixture.providerRepository, this.fixture.modelRepository,
 				this.fixture.settingRepository, this.fixture.auditRepository,
 				new AiKeyCipher(AiConfigTestFixture.KEK_A), new AiEndpointGuard(this.fixture.properties),
-				(StringRedisTemplate) null, transactionManager, service, new com.fasterxml.jackson.databind.ObjectMapper(),
+				transactionManager, service, new com.fasterxml.jackson.databind.ObjectMapper(),
 				registry);
 	}
 

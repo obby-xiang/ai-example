@@ -50,7 +50,7 @@ class FrontendToolResultCodeTest {
 	@Test
 	void illegalCodesAreDroppedWithHttp200() throws Exception {
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "ok", "http-post", false, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "ok", "http-post", false, null, java.util.Map.of(), null))
 			.thenReturn(accepted());
 
 		for (String illegal : new String[] { "ui_lower", "UI HAS SPACE", "UI_" + "A".repeat(41), "ERROR_CODE" }) {
@@ -60,8 +60,7 @@ class FrontendToolResultCodeTest {
 		}
 
 		// 全部按"没有 code"处理：非法值不进确认门、不进台账
-		verify(this.gate, org.mockito.Mockito.times(4))
-			.submitFrontendResult("r-1", "c-1", "ok", "http-post", false, null);
+		verify(this.gate, org.mockito.Mockito.times(4)).submitFrontendResult("r-1", "c-1", "ok", "http-post", false, null, java.util.Map.of(), null);
 	}
 
 	@Test

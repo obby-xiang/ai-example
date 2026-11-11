@@ -54,10 +54,16 @@ class RunStoreTenantIsolationTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
+	/** 当前身份下建一轮（首笔快照必须冻结 model/frozen/请求三件套）。 */
+	private RunSnapshot create(String sessionId) {
+		return this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(), this.codec, 7L, "model-x",
+				new RunSnapshot.FrozenParams(null, null, null, false), "client-test", "请求文本", 1_000L);
+	}
+
 	@Test
 	void sameRunIdInTwoTenantsNeverSharesSnapshotKeysOrDelete() {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
-			RunSnapshot created = this.store.create(RUN_ID, SESSION_A, AiContext.empty(), List.of(), this.codec);
+			RunSnapshot created = create(SESSION_A);
 			assertThat(created.getTenantId()).isEqualTo(TENANT_A);
 			assertThat(this.store.runKey(RUN_ID))
 				.as("run 级 tag 必须同时含租户、用户与 runId")
@@ -69,7 +75,7 @@ class RunStoreTenantIsolationTest {
 			assertThat(this.store.get(RUN_ID)).as("另一个租户的同名 runId 不得读到别人的快照").isNull();
 			assertThat(this.store.allRunIds()).as("列表只看当前归属").isEmpty();
 
-			RunSnapshot created = this.store.create(RUN_ID, SESSION_B, AiContext.empty(), List.of(), this.codec);
+			RunSnapshot created = create(SESSION_B);
 			assertThat(created.getTenantId()).isEqualTo(TENANT_B);
 			assertThat(this.store.get(RUN_ID).getSessionId()).isEqualTo(SESSION_B);
 
@@ -88,9 +94,11 @@ class RunStoreTenantIsolationTest {
 			assertThat(this.store.allRunIds()).containsExactly(RUN_ID);
 		}
 
-		Set<String> members = this.fake.setsByKey.getOrDefault(RunStore.RUN_INDEX, Set.of());
-		assertThat(members).as("全局索引成员必须带身份（租户/用户/runId）")
-			.containsExactly(TENANT_A + "/" + USER_A + "/" + RUN_ID);
+		assertThat(this.fake.zsetsByKey.getOrDefault(RunStore.RUN_LIST_INDEX_PREFIX + "1:101",
+				java.util.Map.of()))
+			.as("本人身份的 run 列表索引仍在").containsKey(RUN_ID);
+		assertThat(this.fake.zsetsByKey)
+			.as("B 删除只摘自己的索引键").doesNotContainKey(RunStore.RUN_LIST_INDEX_PREFIX + "2:202");
 	}
 
 	/**
@@ -100,14 +108,13 @@ class RunStoreTenantIsolationTest {
 	@Test
 	void createWithoutIdentityFailsClosed() {
 		org.assertj.core.api.Assertions
-			.assertThatThrownBy(() -> this.store.create(RUN_ID, SESSION_A, AiContext.empty(), List.of(),
-					this.codec))
+			.assertThatThrownBy(() -> create(SESSION_A))
 			.as("没有身份上下文 ⇒ 不建轮次")
 			.isInstanceOf(IllegalStateException.class)
-			.hasMessageContaining("缺少租户/用户身份上下文");
+			.hasMessageContaining("identity context is required");
 
 		assertThat(this.fake.strings).as("失败不得留下任何快照").isEmpty();
-		assertThat(this.fake.setsByKey).as("失败不得登记索引").doesNotContainKey(RunStore.RUN_INDEX);
+		assertThat(this.fake.zsetsByKey).as("失败不得登记任何索引").isEmpty();
 	}
 
 	/**
@@ -151,11 +158,13 @@ class RunStoreTenantIsolationTest {
 	@Test
 	void globalIndexRecordsCarryIdentitySoRestoreNeedsNoTenantScan() {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
-			this.store.create(RUN_ID, SESSION_A, AiContext.empty(), List.of(), this.codec);
+			create(SESSION_A);
 		}
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B, USER_B)) {
-			this.store.create(RUN_ID, SESSION_B, AiContext.empty(), List.of(), this.codec);
+			create(SESSION_B);
 		}
+		// 恢复面按"到期"取候选：把两条恢复索引的分数拨到过去，模拟已到期。
+		this.fake.zsetsByKey.get(RunStore.RECOVERY_DUE_INDEX).replaceAll((member, score) -> 0.0);
 
 		var records = this.store.allRunRecords();
 		assertThat(records).as("两个身份的同名轮次都要能被恢复面看见").hasSize(2);
@@ -175,13 +184,13 @@ class RunStoreTenantIsolationTest {
 	@Test
 	void everyRunLevelKeyOfOneTurnSharesTheIdentityScopedSlot() {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B, USER_B)) {
-			this.store.create(RUN_ID, SESSION_B, AiContext.empty(), List.of(), this.codec);
+			create(SESSION_B);
 		}
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B, USER_B)) {
 			Set<Integer> slots = new java.util.LinkedHashSet<>();
-			for (String key : List.of(this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
-					this.store.claimKey(RUN_ID), this.store.ledgerKey(RUN_ID), this.store.idemKey(RUN_ID),
-					this.store.eventsKey(RUN_ID), this.store.seqKey(RUN_ID), this.store.xeventsKey(RUN_ID),
+			for (String key : List.of(this.store.runKey(RUN_ID), this.store.runStateKey(RUN_ID),
+					this.store.pendingKey(RUN_ID), this.store.claimKey(RUN_ID), this.store.ledgerKey(RUN_ID),
+					this.store.idemKey(RUN_ID), this.store.seqKey(RUN_ID), this.store.xeventsKey(RUN_ID),
 					this.store.runLeaseKey(RUN_ID), this.store.fenceKey(RUN_ID), this.store.reqKey(RUN_ID),
 					this.store.decidedKey(RUN_ID), this.store.runLeaseEpochKey(RUN_ID))) {
 				slots.add(FakeLeaseRedis.slot(key));

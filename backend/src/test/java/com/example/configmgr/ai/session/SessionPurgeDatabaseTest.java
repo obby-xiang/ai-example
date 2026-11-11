@@ -38,14 +38,14 @@ class SessionPurgeDatabaseTest {
 	@Test
 	void deletesOnlyTheRequestedSessionFeedback() {
 		setUp();
-		insertFeedback("m-a1", "sess-a");
-		insertFeedback("m-a2", "sess-a");
-		insertFeedback("m-b1", "sess-b");
+		insertScopedFeedback("m-a1", "sess-a", 1L, 101L);
+		insertScopedFeedback("m-a2", "sess-a", 1L, 101L);
+		insertScopedFeedback("m-b1", "sess-b", 1L, 101L);
 
-		SessionPurgeDatabase.Snapshot snapshot = this.database.snapshot("sess-a");
+		SessionPurgeDatabase.Snapshot snapshot = this.database.snapshot("sess-a", 1L, 101L);
 		assertThat(snapshot.feedbackRows()).isEqualTo(2);
 
-		SessionPurgeDatabase.Deleted deleted = this.database.delete("sess-a");
+		SessionPurgeDatabase.Deleted deleted = this.database.delete("sess-a", 1L, 101L);
 
 		assertThat(deleted.feedbackRows()).isEqualTo(2);
 		assertThat(count("ai_feedback", "sess-a")).isZero();
@@ -55,11 +55,11 @@ class SessionPurgeDatabaseTest {
 	@Test
 	void repeatDeleteIsIdempotent() {
 		setUp();
-		insertFeedback("m-a1", "sess-a");
+		insertScopedFeedback("m-a1", "sess-a", 1L, 101L);
 
-		assertThat(this.database.snapshot("sess-a").feedbackRows()).isEqualTo(1);
-		assertThat(this.database.delete("sess-a").feedbackRows()).isEqualTo(1);
-		assertThat(this.database.delete("sess-a").feedbackRows()).as("重复删除影响 0 行").isZero();
+		assertThat(this.database.snapshot("sess-a", 1L, 101L).feedbackRows()).isEqualTo(1);
+		assertThat(this.database.delete("sess-a", 1L, 101L).feedbackRows()).isEqualTo(1);
+		assertThat(this.database.delete("sess-a", 1L, 101L).feedbackRows()).as("重复删除影响 0 行").isZero();
 	}
 
 	/**
@@ -72,10 +72,10 @@ class SessionPurgeDatabaseTest {
 				+ "session_id VARCHAR(128) NOT NULL, run_id VARCHAR(64) NOT NULL, seq BIGINT NOT NULL)");
 		this.jdbc.update("INSERT INTO ai_chat_message (session_id, run_id, seq) VALUES (?, ?, ?)", "sess-a",
 				"run-a", 1L);
-		insertFeedback("m-a1", "sess-a");
+		insertScopedFeedback("m-a1", "sess-a", 1L, 101L);
 
-		SessionPurgeDatabase.Snapshot snapshot = this.database.snapshot("sess-a");
-		SessionPurgeDatabase.Deleted deleted = this.database.delete("sess-a");
+		SessionPurgeDatabase.Snapshot snapshot = this.database.snapshot("sess-a", 1L, 101L);
+		SessionPurgeDatabase.Deleted deleted = this.database.delete("sess-a", 1L, 101L);
 
 		assertThat(snapshot.feedbackRows()).isEqualTo(1);
 		assertThat(deleted.feedbackRows()).isEqualTo(1);
@@ -110,20 +110,20 @@ class SessionPurgeDatabaseTest {
 	}
 
 	/**
-	 * <b>无身份 = legacy 命名空间</b>：旧调用（无身份上下文）只能看到/删除 {@code (0,0)} 的行，
-	 * 绝不落到任何真实租户的反馈上（不猜默认身份）。
+	 * <b>无归属（0,0）行不属于任何真实身份</b>：按 (1,101) 枚举/删除时既不计入、也不会被带走
+	 * （不猜默认身份、不借用调用者身份）。
 	 */
 	@Test
-	void legacyOverloadsTouchOnlyTheUnattributedNamingSpace() {
+	void unattributedRowsAreNeitherCountedNorDeletedForARealIdentity() {
 		setUp();
 		insertFeedback("m-legacy", "sess-a");
 		insertScopedFeedback("m-real", "sess-a", 1L, 101L);
 
-		assertThat(this.database.snapshot("sess-a").feedbackRows()).as("只数无归属行").isEqualTo(1);
-		assertThat(this.database.delete("sess-a").feedbackRows()).isEqualTo(1);
+		assertThat(this.database.snapshot("sess-a", 1L, 101L).feedbackRows()).as("只数本身份的行").isEqualTo(1);
+		assertThat(this.database.delete("sess-a", 1L, 101L).feedbackRows()).isEqualTo(1);
 
-		assertThat(count("ai_feedback", "sess-a")).as("真实租户的行必须原样保留").isEqualTo(1);
-		assertThat(countScoped("sess-a", 1L, 101L)).isEqualTo(1);
+		assertThat(countScoped("sess-a", 1L, 101L)).as("本身份的行已删").isZero();
+		assertThat(count("ai_feedback", "sess-a")).as("无归属行必须原样保留").isEqualTo(1);
 	}
 
 	private void insertFeedback(String messageId, String sessionId) {

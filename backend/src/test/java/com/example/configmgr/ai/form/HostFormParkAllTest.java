@@ -102,7 +102,7 @@ class HostFormParkAllTest {
 
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.PENDING_UNRESOLVED);
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
-		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any(), any(), any());
+		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
 	}
 
 	@Test
@@ -203,7 +203,7 @@ class HostFormParkAllTest {
 		}
 
 		private boolean parkBatch(String runId, List<Message> history, List<PendingToolCall> pendings) {
-			return parkAll(runId, history, pendings);
+			return shouldParkAll(runId, history, pendings);
 		}
 
 		private static PendingToolCall call(String toolCallId, String defCode) {

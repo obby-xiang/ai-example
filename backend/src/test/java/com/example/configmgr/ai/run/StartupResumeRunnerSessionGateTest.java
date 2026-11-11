@@ -78,12 +78,23 @@ class StartupResumeRunnerSessionGateTest {
 
 	private final AiAvailability availability = mock(AiAvailability.class);
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(TENANT_ID, USER_ID);
 		ReflectionTestUtils.setField(this.service, "sessionGate", this.gate);
 		when(this.availability.isAvailable()).thenReturn(true);
 		this.properties.getResume().setOnStartup(true);
-		when(this.chatService.systemPromptText(any(AiContext.class))).thenReturn("SYSTEM");
+		when(this.chatService.systemPromptText(any(AiContext.class),
+				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn("SYSTEM");
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	@Test
@@ -91,6 +102,7 @@ class StartupResumeRunnerSessionGateTest {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setTenantId(TENANT_ID);
 		snapshot.setUserId(USER_ID);
+		snapshot.setModelId("test-model");
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));

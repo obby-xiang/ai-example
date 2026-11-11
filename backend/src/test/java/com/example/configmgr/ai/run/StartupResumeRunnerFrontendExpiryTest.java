@@ -62,9 +62,9 @@ class StartupResumeRunnerFrontendExpiryTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	private final InMemoryRunStore store = new InMemoryRunStore(true);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
 
@@ -129,34 +129,38 @@ class StartupResumeRunnerFrontendExpiryTest {
 
 	/** SUSPENDED、业务活动超龄、一个到期前端工具 + 一个仍在等人（无上限）的确认门。 */
 	private void seedSuspendedRunWithExpiredFrontendAndWaitingConfirm() {
-		RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec);
-		snapshot.setTenantId(TENANT_ID);
-		snapshot.setUserId(USER_ID);
-		snapshot.setStatus(RunSnapshot.SUSPENDED);
-		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
-		this.store.save(snapshot);
-		long atMs = System.currentTimeMillis() - Duration.ofMinutes(10).toMillis();
-		snapshot.setUpdatedAtMs(atMs);
-		this.store.appendEvent(RUN_ID, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
+			RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec, null,
+					null, new RunSnapshot.FrozenParams(null, null, 4096, false));
+			snapshot.setTenantId(TENANT_ID);
+			snapshot.setUserId(USER_ID);
+			snapshot.setStatus(RunSnapshot.SUSPENDED);
+			snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
+			this.store.save(snapshot);
+			long atMs = System.currentTimeMillis() - Duration.ofMinutes(10).toMillis();
+			snapshot.setUpdatedAtMs(atMs);
+			this.store.appendEvent(RUN_ID, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
 
-		PendingToolCall frontend = new PendingToolCall();
-		frontend.setToolCallId(FRONTEND_CALL);
-		frontend.setName("navigate_to");
-		frontend.setKind(PendingToolCall.KIND_FRONTEND);
-		frontend.setStatus(PendingToolCall.PENDING);
-		frontend.setAtMs(atMs);
-		frontend.setExpiresAt(atMs + 120_000L);
-		frontend.setReq(Boolean.TRUE);
-		this.store.putPending(RUN_ID, frontend);
+			PendingToolCall frontend = new PendingToolCall();
+			frontend.setToolCallId(FRONTEND_CALL);
+			frontend.setName("navigate_to");
+			frontend.setKind(PendingToolCall.KIND_FRONTEND);
+			frontend.setStatus(PendingToolCall.PENDING);
+			frontend.setAtMs(atMs);
+			frontend.setExpiresAt(atMs + 120_000L);
+			frontend.setReq(Boolean.TRUE);
+			this.store.putPending(RUN_ID, frontend);
 
-		PendingToolCall confirm = new PendingToolCall();
-		confirm.setToolCallId(CONFIRM_CALL);
-		confirm.setName("start_publish");
-		confirm.setKind(PendingToolCall.KIND_CONFIRM);
-		confirm.setStatus(PendingToolCall.PENDING);
-		confirm.setAtMs(atMs);
-		confirm.setReq(Boolean.TRUE);
-		this.store.putPending(RUN_ID, confirm);
+			PendingToolCall confirm = new PendingToolCall();
+			confirm.setToolCallId(CONFIRM_CALL);
+			confirm.setName("start_publish");
+			confirm.setKind(PendingToolCall.KIND_CONFIRM);
+			confirm.setStatus(PendingToolCall.PENDING);
+			confirm.setAtMs(atMs);
+			confirm.setReq(Boolean.TRUE);
+			this.store.putPending(RUN_ID, confirm);
+		}
 	}
 
 	/** 装配确认门；旧实现没有这条接线时保持未注入 —— 本用例随后必须因"到期条目没人消费"而红。 */

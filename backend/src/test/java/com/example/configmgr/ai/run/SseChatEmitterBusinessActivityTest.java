@@ -46,7 +46,30 @@ class SseChatEmitterBusinessActivityTest {
 
 	private final InMemoryFrameStore frames = new InMemoryFrameStore();
 
-	private final SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.frames, MAPPER);
+	private SseChatEmitter out;
+
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+		com.example.configmgr.ai.run.RunSnapshot snapshot = new com.example.configmgr.ai.run.RunSnapshot();
+		snapshot.setRunId(RUN_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		org.mockito.Mockito.when(this.store.get(RUN_ID, 1L, 101L)).thenReturn(snapshot);
+		this.out = new SseChatEmitter(RUN_ID, this.store, this.frames, MAPPER, Runnable::run,
+				com.example.configmgr.ai.config.AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+				com.example.configmgr.ai.config.AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void tearDown() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	static Stream<Arguments> businessFrames() {
 		PendingToolCall executed = pending(PendingToolCall.EXECUTED, PendingToolCall.KIND_BACKEND);
@@ -106,6 +129,7 @@ class SseChatEmitterBusinessActivityTest {
 		pending.setName("list_tasks");
 		pending.setKind(kind);
 		pending.setStatus(status);
+		pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
 		return pending;
 	}
 

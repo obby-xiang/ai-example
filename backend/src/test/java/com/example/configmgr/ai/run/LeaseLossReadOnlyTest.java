@@ -60,6 +60,9 @@ class LeaseLossReadOnlyTest {
 
 	private final RunStore noFacility = new RunStore(this.fake.redis, this.mapper, this.properties);
 
+	/** 事件日志替身：当前归档由 FrameStore 拥有（RunStore 不再持有 events），写门仍读真实 RunStore。 */
+	private final InMemoryFrameStore frames = new InMemoryFrameStore();
+
 	/**
 	 * run 级键在租户改造后由<b>身份</b>拼出（{@code ai:run:{1:101:run:<id>}}）：本组用例直调真实
 	 * {@link RunStore}，必须显式进入身份作用域 —— 否则 {@code create} 缺身份 fail-closed，
@@ -111,9 +114,11 @@ class LeaseLossReadOnlyTest {
 		assertThat(this.storeA.claimedBy(RUN_ID, "call-lost")).isNull();
 
 		// ③ 取号落档：终帧不落档、不占业务号
-		SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.storeA, this.mapper);
+		SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.storeA, this.frames, this.mapper, Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, com.example.configmgr.common.sse.SseWriteBudget.direct(),
+				null, null, null);
 		emitter.done(Map.of(), "test-model", Map.of());
-		assertThat(this.storeA.events(RUN_ID)).as("丢租后不得再落任何业务帧").isEmpty();
+		assertThat(this.frames.readFrom(RUN_ID, 0L, 0)).as("丢租后不得再落任何业务帧").isEmpty();
 		assertThat(this.storeA.lastIssuedSeq(RUN_ID)).as("丢租后不得再取业务号").isZero();
 
 		// ④ 台账落档：不得追加（B 的台账才是判据）
@@ -164,7 +169,7 @@ class LeaseLossReadOnlyTest {
 	@Test
 	void neverHeldStillUsesPlainWritesButOnlyWhileTheFacilityIsHealthy() {
 		this.storeA.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("hi")), this.codec,
-				null, null);
+				1L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1000L);
 		assertThat(this.storeA.runLeaseAuthority(RUN_ID)).as("从未持租 ⇒ 原普通写")
 			.isEqualTo(LeaseService.LeaseAuthority.NEVER_HELD);
 		RunSnapshot first = this.storeA.get(RUN_ID);
@@ -194,7 +199,7 @@ class LeaseLossReadOnlyTest {
 	@Test
 	void storeWithoutLeaseFacilityKeepsTheExistingPlainWritePath() {
 		this.noFacility.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("hi")), this.codec,
-				null, null);
+				1L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1000L);
 
 		assertThat(this.noFacility.runLeaseAuthority(RUN_ID))
 			.as("无租约设施（单测/降级装配）没有租约语义 ⇒ 普通写").isEqualTo(LeaseService.LeaseAuthority.NEVER_HELD);
@@ -262,7 +267,7 @@ class LeaseLossReadOnlyTest {
 		assertThat(this.storeA.fenceEpoch(RUN_ID)).isGreaterThan(a.epoch());
 		assertThat(this.storeA.runLeaseAuthority(RUN_ID)).isEqualTo(LeaseService.LeaseAuthority.HELD);
 		RedisFrameStore productionFrames = new RedisFrameStore(this.fake.redis, this.mapper, this.properties);
-		SseChatEmitter oldDriver = new RunRegistry(this.storeA, this.mapper, null, productionFrames, null, null)
+		SseChatEmitter oldDriver = new RunRegistry(this.storeA, this.mapper, null, productionFrames, null, null, null)
 			.of(RUN_ID);
 
 		oldDriver.delta("stale");
@@ -272,8 +277,8 @@ class LeaseLossReadOnlyTest {
 	}
 
 	private void seedRun() {
-		this.storeA.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("hi")), this.codec, null,
-				null);
+		this.storeA.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("hi")), this.codec,
+				1L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1000L);
 	}
 
 	private Duration ttl() {

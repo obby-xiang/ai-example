@@ -78,10 +78,11 @@ class RedisChatMemoryTenantIsolationTest {
 				.containsExactly("A 的历史");
 		}
 
-		assertThat(this.fake.sets.get(RedisChatMemoryRepository.CONVERSATION_IDS_KEY))
-			.as("全局会话索引成员必须带身份")
-			.contains("1/101/" + CONVERSATION)
-			.doesNotContain("2/202/" + CONVERSATION);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B, USER_B)) {
+			assertThat(texts(this.repository.findByConversationId(CONVERSATION)))
+				.as("另一租户读不到 1/101 的历史")
+				.doesNotContain("A 的历史");
+		}
 	}
 
 	/**

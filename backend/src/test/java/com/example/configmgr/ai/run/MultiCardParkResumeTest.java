@@ -71,6 +71,22 @@ class MultiCardParkResumeTest {
 	private final ResumeService service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 			this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+		when(this.chatService.systemPromptText(org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn("SYSTEM");
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
 	void bothApprovedCardsExecuteExactlyOnceEach() {
 		seedSuspendedRun(PendingToolCall.APPROVED, PendingToolCall.APPROVED);
@@ -118,14 +134,16 @@ class MultiCardParkResumeTest {
 
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.PENDING_UNRESOLVED);
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
-		verify(this.chatService, org.mockito.Mockito.never()).driveResumed(any(), any(), any(), any(), any(), any(),
-				any());
+		verify(this.chatService, org.mockito.Mockito.never()).driveResumed(any(), any(), any(), any(), any());
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private void seedSuspendedRun(String firstStatus, String secondStatus) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("启动两个导入"))));

@@ -83,7 +83,7 @@ class StartupResumeRunnerCanceledRunTest {
 	void setUp() {
 		when(this.availability.isAvailable()).thenReturn(true);
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(true);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.CANCELLED);
 		// 取消收尾的"落终态 + 终帧"由驱动侧的 cancelParked 完成：这里用桩复刻它的可判定后果
 		// （快照 CANCELLED、归档一条 done）。用例断言的是扫描侧"该不该调用它、调用几次"。
 		when(this.chatService.cancelTerminalArchived(RUN_ID)).thenAnswer(invocation -> this.archived.get());
@@ -129,15 +129,19 @@ class StartupResumeRunnerCanceledRunTest {
 
 	/** 取消旗标已写、驱动已死：RUNNING 超龄、无租约、无活订阅。 */
 	private void seedZombieRunning() {
-		RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec);
-		snapshot.setTenantId(TENANT_ID);
-		snapshot.setUserId(USER_ID);
-		snapshot.setStatus(RunSnapshot.RUNNING);
-		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
-		this.store.save(snapshot);
-		long atMs = System.currentTimeMillis() - STALE.toMillis();
-		snapshot.setUpdatedAtMs(atMs);
-		this.store.appendEvent(RUN_ID, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
+			RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec, null,
+					null, new RunSnapshot.FrozenParams(null, null, 4096, false));
+			snapshot.setTenantId(TENANT_ID);
+			snapshot.setUserId(USER_ID);
+			snapshot.setStatus(RunSnapshot.RUNNING);
+			snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
+			this.store.save(snapshot);
+			long atMs = System.currentTimeMillis() - STALE.toMillis();
+			snapshot.setUpdatedAtMs(atMs);
+			this.store.appendEvent(RUN_ID, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
+		}
 	}
 
 	@SuppressWarnings("unchecked")

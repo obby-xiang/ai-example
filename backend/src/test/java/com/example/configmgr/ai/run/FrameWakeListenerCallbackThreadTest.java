@@ -29,21 +29,38 @@ class FrameWakeListenerCallbackThreadTest {
 
 	private final GenerationWakeBus bus = new GenerationWakeBus();
 
+	private static final com.example.configmgr.ai.tenant.TenantUser TENANT =
+			new com.example.configmgr.ai.tenant.TenantUser(1L, 101L);
+
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
+
+	private boolean register(String runId, FrameWakeListener.WakeTarget target) {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.isRegistered(runId, target);
+		}
+	}
+
+	private int targetCount() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.targetCount(TENANT, RUN_ID);
+		}
+	}
 
 	@Test
 	void registeringFromARedisCallbackThreadNeverBlocksOnAnInFlightSubscribe() throws Exception {
 		this.bus.blockSubscribeCall = 1;
 		RecordingTarget owner = new RecordingTarget();
 		AtomicBoolean ownerResult = new AtomicBoolean();
-		Thread submitting = new Thread(() -> ownerResult.set(this.listener.register(RUN_ID, owner)),
+		Thread submitting = new Thread(() -> ownerResult.set(register(RUN_ID, owner)),
 				"subscribe-owner");
 		submitting.start();
 		assertThat(this.bus.subscribeEntered.await(5, TimeUnit.SECONDS)).as("发起方订阅必须在途").isTrue();
 
 		RecordingTarget late = new RecordingTarget();
 		AtomicBoolean lateResult = new AtomicBoolean();
-		Thread callback = new Thread(() -> lateResult.set(this.listener.register(RUN_ID, late)), "redis-callback");
+		Thread callback = new Thread(() -> lateResult.set(register(RUN_ID, late)), "redis-callback");
 		long startedAt = System.nanoTime();
 		callback.start();
 		callback.join(500L);
@@ -52,7 +69,7 @@ class FrameWakeListenerCallbackThreadTest {
 		assertThat(callback.isAlive()).as("Redis 回调线程不得被在途订阅阻塞").isFalse();
 		assertThat(elapsedMillis).as("回调线程上的登记必须立即返回（旧实现要等 2s 超时）").isLessThan(500L);
 		assertThat(lateResult.get()).as("未确认 ⇒ 不报已订阅").isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).as("目标必须保留在桶里（不得丢弃）").isEqualTo(2);
+		assertThat(targetCount()).as("目标必须保留在桶里（不得丢弃）").isEqualTo(2);
 
 		this.bus.releaseSubscribe();
 		submitting.join(TimeUnit.SECONDS.toMillis(5));

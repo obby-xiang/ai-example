@@ -92,7 +92,7 @@ class TurnBudgetPlanTest {
 	void realUsageBeatsTheEstimate() {
 		// 真值 4000 + 0 + 0，估算却报 9000：判据取真值 ⇒ 未触发
 		TurnBudgetPlan.Request request = new TurnBudgetPlan.Request(LIMIT, 0, 70, 95, true, 4000, 0, 9000, 0, false,
-				0);
+				0, 0);
 
 		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(request);
 
@@ -104,7 +104,7 @@ class TurnBudgetPlanTest {
 	void realUsageCountsTheBatchDelta() {
 		// 9000 + 100 + 500 = 9600 ⇒ 95 档（本批新增工具结果必须计入，否则晚一跳才发现）
 		TurnBudgetPlan.Request request = new TurnBudgetPlan.Request(LIMIT, 0, 70, 95, true, 9000, 100, 1200, 500,
-				false, 0);
+				false, 0, 0);
 
 		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(request);
 
@@ -114,7 +114,7 @@ class TurnBudgetPlanTest {
 
 	@Test
 	void withoutUsageTheEstimateDecides() {
-		TurnBudgetPlan.Request request = new TurnBudgetPlan.Request(LIMIT, 0, 70, 95, false, 0, 0, 7200, 0, false, 0);
+		TurnBudgetPlan.Request request = new TurnBudgetPlan.Request(LIMIT, 0, 70, 95, false, 0, 0, 7200, 0, false, 0, 0);
 
 		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(request);
 
@@ -125,7 +125,7 @@ class TurnBudgetPlanTest {
 	@Test
 	void completionOnlyUsageFallsBackToTheEstimate() {
 		// 只有 completion 的 usage 帧（prompt=0）不能当"空请求"：否则越窗被误判成未触发
-		TurnBudgetPlan.Request request = new TurnBudgetPlan.Request(LIMIT, 0, 70, 95, true, 0, 500, 7200, 0, false, 0);
+		TurnBudgetPlan.Request request = new TurnBudgetPlan.Request(LIMIT, 0, 70, 95, true, 0, 500, 7200, 0, false, 0, 0);
 
 		TurnBudgetPlan.Decision decision = TurnBudgetPlan.plan(request);
 
@@ -199,7 +199,7 @@ class TurnBudgetPlanTest {
 
 	private static TurnBudgetPlan.Request request(int nextEst, int reserve, boolean armed, int armedBatches,
 			int limit) {
-		return new TurnBudgetPlan.Request(limit, reserve, 70, 95, false, 0, 0, nextEst, 0, armed, armedBatches);
+		return new TurnBudgetPlan.Request(limit, reserve, 70, 95, false, 0, 0, nextEst, 0, armed, armedBatches, 0);
 	}
 
 }

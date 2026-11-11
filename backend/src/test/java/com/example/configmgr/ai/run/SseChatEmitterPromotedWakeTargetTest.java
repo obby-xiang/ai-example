@@ -3,8 +3,12 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CountDownLatch;
@@ -35,6 +39,8 @@ class SseChatEmitterPromotedWakeTargetTest {
 
 	private static final String RUN_ID = "run-promoted-wake-target";
 
+	private static final TenantUser IDENTITY = new TenantUser(1L, 101L);
+
 	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private final GenerationWakeBus bus = new GenerationWakeBus();
@@ -42,6 +48,21 @@ class SseChatEmitterPromotedWakeTargetTest {
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
 
 	private final AiProperties properties = new AiProperties();
+
+	/** 投递身份作用域：唤醒目标按 (身份, runId) 入桶，写出器须能解析出同一身份。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(IDENTITY.tenantId(), IDENTITY.userId());
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	@Test
 	void aPromotedGuestIsRemovedAndReleasesTheSubscriptionWhenItsOwnConnectionCloses() throws Exception {
@@ -53,7 +74,7 @@ class SseChatEmitterPromotedWakeTargetTest {
 
 		SseChatEmitter guest = emitter();
 		guest.attach(new FrameWire().emitter());
-		assertThat(this.listener.targetCount(RUN_ID)).as("客人在途登记：两个目标都在桶里").isEqualTo(2);
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).as("客人在途登记：两个目标都在桶里").isEqualTo(2);
 
 		this.bus.releaseSubscribe();
 		attachingOwner.join(TimeUnit.SECONDS.toMillis(5));
@@ -61,13 +82,13 @@ class SseChatEmitterPromotedWakeTargetTest {
 
 		// 所有者离开：监听器把客人提升为确认者并保留订阅（返修第 3 条）。
 		owner.completeSubscriptions();
-		assertThat(this.listener.targetCount(RUN_ID)).as("客人被提升后仍在桶里").isEqualTo(1);
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).as("客人被提升后仍在桶里").isEqualTo(1);
 		assertThat(this.bus.journal).as("此时不得退订").noneMatch(entry -> entry.startsWith("unsubscribe:"));
 
 		// 客人自己的连接关闭：必须把它从桶里摘掉，并在桶空后退订。
 		guest.completeSubscriptions();
 
-		assertThat(this.listener.targetCount(RUN_ID)).as("被提升的客人关闭后必须被移除").isZero();
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).as("被提升的客人关闭后必须被移除").isZero();
 		assertThat(this.listener.registrationCount()).as("登记句柄也必须清空（否则写出器被 map 引用）").isZero();
 		assertThat(this.bus.journal.stream().filter(entry -> entry.startsWith("unsubscribe:")).count())
 			.as("最后一个目标离开 ⇒ 恰好退订一次").isEqualTo(1);
@@ -78,11 +99,11 @@ class SseChatEmitterPromotedWakeTargetTest {
 	void closingAnEmitterThatNeverRegisteredIsANoOp() {
 		SseChatEmitter lonely = emitter();
 		lonely.attach(new FrameWire().emitter());
-		assertThat(this.listener.targetCount(RUN_ID)).isEqualTo(1);
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).isEqualTo(1);
 
 		lonely.completeSubscriptions();
 
-		assertThat(this.listener.targetCount(RUN_ID)).isZero();
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).isZero();
 		assertThat(this.listener.registrationCount()).isZero();
 	}
 
@@ -91,7 +112,8 @@ class SseChatEmitterPromotedWakeTargetTest {
 	private SseChatEmitter emitter() {
 		return new SseChatEmitter(RUN_ID, new InMemoryRunStore(), new InMemoryFrameStore(), MAPPER, Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), this.bus, this.listener);
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), this.bus, this.listener,
+				null);
 	}
 
 }

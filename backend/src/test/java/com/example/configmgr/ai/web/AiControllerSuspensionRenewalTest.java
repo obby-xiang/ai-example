@@ -54,6 +54,10 @@ class AiControllerSuspensionRenewalTest {
 
 	private final ObjectMapper objectMapper = new ObjectMapper();
 
+	/** 事件末号唯一来源（RunStore 不再持有事件面）。 */
+	private final com.example.configmgr.ai.run.FrameStore frameStore =
+			mock(com.example.configmgr.ai.run.FrameStore.class);
+
 	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(controller()).build();
 
 	@Test
@@ -66,7 +70,7 @@ class AiControllerSuspensionRenewalTest {
 		when(this.runStore.get("r-1")).thenReturn(snapshot);
 		when(this.runStore.runKeyTtlRemainingMs("r-1")).thenReturn(1_000L);
 		when(this.runStore.pendingsLenient("r-1")).thenReturn(List.of());
-		when(this.runStore.lastEventSeq("r-1")).thenReturn(0L);
+		when(this.frameStore.lastSeqIfKnown("r-1")).thenReturn(java.util.OptionalLong.of(0L));
 
 		this.mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1")).andExpect(status().isOk());
 
@@ -80,7 +84,7 @@ class AiControllerSuspensionRenewalTest {
 		PendingToolCall pending = pending();
 		when(this.runStore.instanceId()).thenReturn("test-instance");
 		when(this.runStore.pendingLenient("r-1", "c-1")).thenReturn(pending);
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 
 		this.mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
@@ -127,6 +131,7 @@ class AiControllerSuspensionRenewalTest {
 		// @Autowired 字段注入：standalone 装配里手工补上（/confirm 的 reason 归一化要用）
 		org.springframework.test.util.ReflectionTestUtils.setField(controller, "inputSanitizer",
 				new com.example.configmgr.ai.gate.InputSanitizer());
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "frameStore", this.frameStore);
 		return controller;
 	}
 

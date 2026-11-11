@@ -27,27 +27,44 @@ class FrameWakeListenerInFlightRegistrationTest {
 
 	private final GenerationWakeBus bus = new GenerationWakeBus();
 
+	private static final com.example.configmgr.ai.tenant.TenantUser TENANT =
+			new com.example.configmgr.ai.tenant.TenantUser(1L, 101L);
+
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
+
+	private boolean register(String runId, FrameWakeListener.WakeTarget target) {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.isRegistered(runId, target);
+		}
+	}
+
+	private int targetCount() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.targetCount(TENANT, RUN_ID);
+		}
+	}
 
 	@Test
 	void aTargetRegisteredWhileSubscribingIsKeptAndReceivesWakesOnceTheSubscriptionSucceeds() throws Exception {
 		this.bus.blockSubscribeCall = 1;
 		RecordingTarget owner = new RecordingTarget();
 		AtomicBoolean ownerResult = new AtomicBoolean();
-		Thread submitting = new Thread(() -> ownerResult.set(this.listener.register(RUN_ID, owner)),
+		Thread submitting = new Thread(() -> ownerResult.set(register(RUN_ID, owner)),
 				"subscribe-owner");
 		submitting.start();
 		assertThat(this.bus.subscribeEntered.await(5, TimeUnit.SECONDS)).as("发起方订阅必须在途").isTrue();
 
 		RecordingTarget late = new RecordingTarget();
 		AtomicBoolean lateResult = new AtomicBoolean();
-		Thread joining = new Thread(() -> lateResult.set(this.listener.register(RUN_ID, late)), "subscribe-late");
+		Thread joining = new Thread(() -> lateResult.set(register(RUN_ID, late)), "subscribe-late");
 		joining.start();
 		joining.join(TimeUnit.SECONDS.toMillis(1));
 
 		assertThat(joining.isAlive()).as("在途登记不得阻塞").isFalse();
 		assertThat(lateResult.get()).as("在途 ⇒ 未确认（false），但目标已保留").isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).as("两个目标都必须在桶里").isEqualTo(2);
+		assertThat(targetCount()).as("两个目标都必须在桶里").isEqualTo(2);
 
 		this.bus.releaseSubscribe();
 		submitting.join(TimeUnit.SECONDS.toMillis(5));
@@ -57,8 +74,8 @@ class FrameWakeListenerInFlightRegistrationTest {
 		assertThat(owner.wakes).containsExactly(11L);
 		assertThat(late.wakes).as("在途登记的目标必须真实收到唤醒（不得丢目标）").containsExactly(11L);
 
-		assertThat(this.listener.register(RUN_ID, late)).as("订阅建立后再登记 ⇒ 已确认").isTrue();
-		assertThat(this.listener.targetCount(RUN_ID)).as("重复登记不产生第二个条目").isEqualTo(2);
+		assertThat(register(RUN_ID, late)).as("订阅建立后再登记 ⇒ 已确认").isTrue();
+		assertThat(targetCount()).as("重复登记不产生第二个条目").isEqualTo(2);
 	}
 
 	private static final class RecordingTarget implements FrameWakeListener.WakeTarget {

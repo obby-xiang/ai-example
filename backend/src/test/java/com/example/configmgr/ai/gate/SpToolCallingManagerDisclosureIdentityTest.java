@@ -73,7 +73,7 @@ class SpToolCallingManagerDisclosureIdentityTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = mock(RunRegistry.class);
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
@@ -129,7 +129,8 @@ class SpToolCallingManagerDisclosureIdentityTest {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(identity.tenantId(),
 				identity.userId())) {
 			return this.store.create(RUN_ID, SESSION_ID, context, List.of(new UserMessage("看下一批工具")),
-					this.codec);
+					this.codec, null, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), null,
+					"看下一批工具", System.currentTimeMillis());
 		}
 	}
 

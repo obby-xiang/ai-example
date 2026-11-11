@@ -327,7 +327,6 @@ class RedisChatMemoryRunUpsertTest {
 		assertThat(texts(this.repository.findByConversationId(CID))).as("空窗收敛不得清掉 B 的成功轮")
 			.containsExactly("B问", "B答");
 		assertThat(this.repository.hasLiveMemory(CID)).isTrue();
-		assertThat(this.repository.isConversationIndexed(CID)).as("会话仍在索引里").isTrue();
 	}
 
 	@Test
@@ -337,7 +336,6 @@ class RedisChatMemoryRunUpsertTest {
 		this.repository.upsertRun(CID, A, List.of(), WINDOW, true);
 
 		assertThat(this.repository.hasLiveMemory(CID)).isFalse();
-		assertThat(this.repository.isConversationIndexed(CID)).isFalse();
 	}
 
 	@Test
@@ -385,8 +383,11 @@ class RedisChatMemoryRunUpsertTest {
 		}
 		assertThat(texts(this.repository.findByConversationId(CID))).as("另一身份写的是另一份窗口")
 			.containsExactly("A问", "A答", "B问", "B答");
-		assertThat(this.fake.sets.get(RedisChatMemoryRepository.CONVERSATION_IDS_KEY))
-			.contains("1/101/" + CID, "2/202/" + CID);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(2L, 202L)) {
+			assertThat(texts(new RedisChatMemoryRepository(this.fake.redis, this.codec, Duration.ofHours(6))
+					.findByConversationId(CID))).as("另一身份读到自己的窗口，不串到 1/101")
+				.containsExactly("别人的问", "别人的答");
+		}
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────

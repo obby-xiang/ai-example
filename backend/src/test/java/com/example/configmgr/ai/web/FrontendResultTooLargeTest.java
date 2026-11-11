@@ -93,7 +93,7 @@ class FrontendResultTooLargeTest {
 
 		// 闸门从未被调用：不消费挂起、不落任何条目（没有"部分落库"）
 		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
-				any());
+				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 		verify(this.runStore, never()).putPending(anyString(), any());
 		assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PENDING);
 		assertThat(pending.getResultText()).isNull();
@@ -119,7 +119,7 @@ class FrontendResultTooLargeTest {
 			.andExpect(jsonPath("$.originalChars").value(sheetResult.length()));
 
 		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
-				any());
+				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 		// 尾行没有被"切一半"落库：条目从未被写过
 		verify(this.runStore, never()).putPending(anyString(), any());
 	}
@@ -130,7 +130,7 @@ class FrontendResultTooLargeTest {
 				PendingToolCall.PENDING);
 		when(this.runStore.pendingLenient("r-1", "c-1")).thenReturn(pending);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED,
 					settled(PendingToolCall.FRONTEND_RESULT), true, null));
 
@@ -140,7 +140,7 @@ class FrontendResultTooLargeTest {
 			.andExpect(jsonPath("$.accepted").value(true))
 			.andExpect(jsonPath("$.truncated").value(false));
 
-		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false, null);
+		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false, null, java.util.Map.of(), null);
 	}
 
 	@Test
@@ -148,7 +148,7 @@ class FrontendResultTooLargeTest {
 		PendingToolCall pending = pending("ui_snapshot", PendingToolCall.KIND_FRONTEND, PendingToolCall.PENDING);
 		when(this.runStore.pendingLenient("r-1", "c-1")).thenReturn(pending);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any()))
+		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull()))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED,
 					settled(PendingToolCall.FRONTEND_RESULT), true, null));
 		String huge = "行内容".repeat(3000);
@@ -161,7 +161,7 @@ class FrontendResultTooLargeTest {
 
 		org.mockito.ArgumentCaptor<String> captor = org.mockito.ArgumentCaptor.forClass(String.class);
 		verify(this.gate).submitFrontendResult(anyString(), anyString(), captor.capture(), any(), anyBoolean(),
-				any());
+				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 		assertThat(captor.getValue()).hasSizeLessThanOrEqualTo(this.limit).contains("结果过长已截断");
 	}
 
@@ -171,7 +171,7 @@ class FrontendResultTooLargeTest {
 		PendingToolCall pending = pending("ui_snapshot", PendingToolCall.KIND_FRONTEND, PendingToolCall.PENDING);
 		when(this.runStore.pendingLenient("r-1", "c-1")).thenReturn(pending);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any()))
+		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull()))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED,
 					settled(PendingToolCall.FRONTEND_RESULT), true, null));
 		String text = "{" + "页面结构说明".repeat(2000);
@@ -196,7 +196,7 @@ class FrontendResultTooLargeTest {
 			.andExpect(jsonPath("$.code").value("FRONTEND_RESULT_TOO_LARGE"));
 
 		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
-				any());
+				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 	}
 
 	@Test
@@ -205,7 +205,7 @@ class FrontendResultTooLargeTest {
 				PendingToolCall.FRONTEND_RESULT);
 		when(this.runStore.pendingLenient("r-1", "c-1")).thenReturn(pending);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any()))
+		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull()))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.DUPLICATE, pending, false, null));
 		String formJson = "{\"keyword\":\"" + "A".repeat(9000) + "\"}";
 
@@ -214,14 +214,14 @@ class FrontendResultTooLargeTest {
 			.andExpect(status().isConflict())
 			.andExpect(jsonPath("$.code").value("DUPLICATE_TOOL_CALL_ID"));
 
-		verify(this.gate).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(), any());
+		verify(this.gate).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 	}
 
 	@Test
 	void unknownEntryKeepsUnknownToolCallSemantics() throws Exception {
 		when(this.runStore.pendingLenient("r-1", "c-1")).thenReturn(null);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any()))
+		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull()))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.NOT_FOUND, null, false, null));
 		String formJson = "{\"keyword\":\"" + "A".repeat(9000) + "\"}";
 
@@ -230,7 +230,7 @@ class FrontendResultTooLargeTest {
 			.andExpect(status().isConflict())
 			.andExpect(jsonPath("$.code").value("UNKNOWN_TOOL_CALL"));
 
-		verify(this.gate).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(), any());
+		verify(this.gate).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 	}
 
 	/**
@@ -250,7 +250,7 @@ class FrontendResultTooLargeTest {
 			.andExpect(jsonPath("$.code").value("TOOL_KIND_MISMATCH"));
 
 		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
-				any());
+				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 	}
 
 	/**
@@ -264,7 +264,7 @@ class FrontendResultTooLargeTest {
 		when(this.runStore.pendingLenient("r-1", "c-1"))
 			.thenReturn(pending("generative_form", PendingToolCall.KIND_FRONTEND, PendingToolCall.PENDING));
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "ok", null, false, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "ok", null, false, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED,
 					settled(PendingToolCall.FRONTEND_RESULT), true, null));
 
@@ -284,7 +284,7 @@ class FrontendResultTooLargeTest {
 	void cancelledSubmissionBypassesTheSizeGate() throws Exception {
 		when(this.runStore.instanceId()).thenReturn("test-instance");
 		when(this.gate.submitFrontendResult(anyString(), anyString(), any(), any(), org.mockito.ArgumentMatchers.eq(true),
-				any())).thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED,
+				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull())).thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED,
 						settled(PendingToolCall.FRONTEND_CANCELLED), true, null));
 		String formJson = "{\"keyword\":\"" + "A".repeat(9000) + "\"}";
 
@@ -293,7 +293,7 @@ class FrontendResultTooLargeTest {
 			.andExpect(status().isOk());
 
 		verify(this.gate).submitFrontendResult(anyString(), anyString(), any(), any(),
-				org.mockito.ArgumentMatchers.eq(true), any());
+				org.mockito.ArgumentMatchers.eq(true), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 	}
 
 	/** 非中文 locale 取 {@code messages_en} 的码级文案（双语补齐的可执行证据）。 */

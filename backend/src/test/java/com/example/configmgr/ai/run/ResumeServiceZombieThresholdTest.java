@@ -8,6 +8,9 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -44,6 +47,21 @@ class ResumeServiceZombieThresholdTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
+	/** run 级键/帧面按身份拼：种子快照与活动锚点都要处在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
 	private final ResumeService service = new ResumeService(this.store, mock(RunRegistry.class),
@@ -52,7 +70,7 @@ class ResumeServiceZombieThresholdTest {
 			mock(ToolResultLimiter.class));
 
 	ResumeServiceZombieThresholdTest() {
-		when(this.cancellations.isCancelled(any())).thenReturn(false);
+		when(this.cancellations.cancelState(any())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 	}
 
 	@Test
@@ -65,7 +83,7 @@ class ResumeServiceZombieThresholdTest {
 		assertThat(item.get("zombieRunning"))
 			.as("工具还在 exec-timeout(120s) 的合法执行窗口内，不得判僵尸")
 			.isEqualTo(false);
-		assertThat(item.get("resumeable")).as("活轮不可被接管").isEqualTo(false);
+		assertThat(item.get("cancelled")).as("活轮不可被接管：未取消且未超龄").isEqualTo(false);
 	}
 
 	@Test
@@ -77,7 +95,7 @@ class ResumeServiceZombieThresholdTest {
 		assertThat(item.get("zombieRunning"))
 			.as("上下游事件间静默 90s 仍在 inter-event-timeout 的合法窗口内")
 			.isEqualTo(false);
-		assertThat(item.get("resumeable")).isEqualTo(false);
+		assertThat(item.get("cancelled")).isEqualTo(false);
 	}
 
 	@Test
@@ -103,7 +121,7 @@ class ResumeServiceZombieThresholdTest {
 		Map<String, Object> item = onlyItem();
 
 		assertThat(item.get("zombieRunning")).as("超过僵尸窗口 ⇒ 真僵尸").isEqualTo(true);
-		assertThat(item.get("resumeable")).as("无未决外部输入 ⇒ 可接管").isEqualTo(true);
+		assertThat((List<?>) item.get("unresolvedExternal")).as("无未决外部输入 ⇒ 可接管").isEmpty();
 	}
 
 	/**
@@ -115,7 +133,8 @@ class ResumeServiceZombieThresholdTest {
 	@Test
 	void suspendedRunReportsHeartbeatAgeNotBusinessAge() {
 		RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(),
-				mock(MessageJsonCodec.class));
+				mock(MessageJsonCodec.class), 7L, "test-model",
+				new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "问题", 1000L);
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setMessageJson(List.of());
 		snapshot.setUpdatedAtMs(System.currentTimeMillis() - Duration.ofDays(3).toMillis());
@@ -134,7 +153,8 @@ class ResumeServiceZombieThresholdTest {
 
 	private RunSnapshot seedRunningWithLastBusinessFrame(Duration businessAge) {
 		RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(),
-				mock(MessageJsonCodec.class));
+				mock(MessageJsonCodec.class), 7L, "test-model",
+				new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "问题", 1000L);
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setMessageJson(List.of());
 		snapshot.setUpdatedAtMs(System.currentTimeMillis() - Duration.ofMinutes(10).toMillis());

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.context;
 
 import com.example.configmgr.ai.config.ProviderRuntime;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.tool.PromptDelimiters;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -281,6 +282,7 @@ public final class RollingSummarizer {
 		int digestTokens = ContextEstimator.estimate(digestText);
 		int lost = Math.max(0, prefixTokens - digestTokens);
 		Map<String, Object> metadata = new LinkedHashMap<>();
+		metadata.put(SyntheticMessages.ORIGIN, SyntheticMessages.ORIGIN_COMPACTION_SUMMARY);
 		metadata.put(ContextEstimator.COMPACTED_KEY, true);
 		metadata.put(META_TURNS, cut);
 		metadata.put(META_LOST, lost);

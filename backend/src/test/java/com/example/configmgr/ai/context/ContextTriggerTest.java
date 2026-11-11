@@ -51,7 +51,6 @@ class ContextTriggerTest {
 	@Test
 	void denominatorIsInjectedAndTheTransitionalKeyIsNotConsulted() {
 		AiProperties properties = new AiProperties();
-		properties.getContext().setLimitTokens(1500);
 
 		ContextTrigger.Decision decision = new ContextTrigger(properties.getContext()).decide(128000, 1000, 0, 0, 0,
 				true);

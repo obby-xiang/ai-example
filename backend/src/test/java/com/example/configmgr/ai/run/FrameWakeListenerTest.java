@@ -20,18 +20,35 @@ class FrameWakeListenerTest {
 
 	private final FakeWakeBus bus = new FakeWakeBus();
 
+	private static final com.example.configmgr.ai.tenant.TenantUser TENANT =
+			new com.example.configmgr.ai.tenant.TenantUser(1L, 101L);
+
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
+
+	private boolean register(String runId, FrameWakeListener.WakeTarget target) {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.isRegistered(runId, target);
+		}
+	}
+
+	private int targetCount() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.targetCount(TENANT, RUN_ID);
+		}
+	}
 
 	@Test
 	void firstTargetSubscribesAndLastTargetUnsubscribes() {
 		RecordingTarget first = new RecordingTarget("first");
 		RecordingTarget second = new RecordingTarget("second");
 
-		this.listener.register(RUN_ID, first);
+		register(RUN_ID, first);
 		assertThat(this.bus.subscribes).as("首个目标 ⇒ 建订阅").isEqualTo(1);
-		this.listener.register(RUN_ID, second);
+		register(RUN_ID, second);
 		assertThat(this.bus.subscribes).as("第二个目标不重复订阅（按 run 一条订阅）").isEqualTo(1);
-		assertThat(this.listener.targetCount(RUN_ID)).isEqualTo(2);
+		assertThat(targetCount()).isEqualTo(2);
 
 		this.listener.unregister(RUN_ID, first);
 		assertThat(this.bus.unsubscribes).as("还有目标在 ⇒ 不退订").isZero();
@@ -40,16 +57,16 @@ class FrameWakeListenerTest {
 		this.listener.unregister(RUN_ID, second);
 		assertThat(this.bus.unsubscribes).as("最后一个目标 ⇒ 退订").isEqualTo(1);
 		assertThat(this.bus.subscribed(RUN_ID)).isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).isZero();
+		assertThat(targetCount()).isZero();
 	}
 
 	@Test
 	void duplicateRegistrationIsIdempotent() {
 		RecordingTarget target = new RecordingTarget("t");
-		this.listener.register(RUN_ID, target);
-		this.listener.register(RUN_ID, target);
+		register(RUN_ID, target);
+		register(RUN_ID, target);
 
-		assertThat(this.listener.targetCount(RUN_ID)).isEqualTo(1);
+		assertThat(targetCount()).isEqualTo(1);
 		this.listener.unregister(RUN_ID, target);
 		assertThat(this.bus.subscribed(RUN_ID)).as("注销一次即释放（目标集按引用去重）").isFalse();
 	}
@@ -58,10 +75,10 @@ class FrameWakeListenerTest {
 	void wakeIsDispatchedToEveryRegisteredTarget() {
 		RecordingTarget first = new RecordingTarget("first");
 		RecordingTarget second = new RecordingTarget("second");
-		this.listener.register(RUN_ID, first);
-		this.listener.register(RUN_ID, second);
+		register(RUN_ID, first);
+		register(RUN_ID, second);
 
-		this.bus.publish(RUN_ID, 7L);
+		this.bus.publish(RUN_ID, 7L, false);
 
 		assertThat(first.wakes).containsExactly(7L);
 		assertThat(second.wakes).containsExactly(7L);
@@ -76,10 +93,10 @@ class FrameWakeListenerTest {
 			}
 		};
 		RecordingTarget healthy = new RecordingTarget("healthy");
-		this.listener.register(RUN_ID, broken);
-		this.listener.register(RUN_ID, healthy);
+		register(RUN_ID, broken);
+		register(RUN_ID, healthy);
 
-		this.bus.publish(RUN_ID, 3L);
+		this.bus.publish(RUN_ID, 3L, false);
 
 		assertThat(healthy.wakes).as("一个目标抛异常不影响其他目标").containsExactly(3L);
 	}

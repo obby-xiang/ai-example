@@ -53,8 +53,6 @@ class RedisChatMemoryWriteBackRaceTest {
 
 		assertFalse(this.fake.hasKey(this.repository.keyFor(CID)),
 				"RENAME 落地后必须复检守卫并撤销写回（销毁后不得复活）");
-		assertTrue(this.fake.set(RedisChatMemoryRepository.CONVERSATION_IDS_KEY).isEmpty(),
-				"被撤销的写回不得把自己加回索引（否则索引指向一份已删除的历史）");
 	}
 
 	@Test
@@ -85,8 +83,6 @@ class RedisChatMemoryWriteBackRaceTest {
 		assertTrue(thrown.getMessage().contains("回包丢失"), "错误必须照旧抛给调用方（不吞）");
 		assertFalse(this.fake.hasKey(this.repository.keyFor(CID)),
 				"服务端已生效的落地必须被 finally 里的复检撤销（销毁后不得复活）");
-		assertTrue(this.fake.set(RedisChatMemoryRepository.CONVERSATION_IDS_KEY).isEmpty(),
-				"被撤销的写回不得进索引");
 	}
 
 	/**
@@ -112,8 +108,6 @@ class RedisChatMemoryWriteBackRaceTest {
 
 		assertTrue(this.fake.hasKey(this.repository.keyFor(CID)),
 				"RENAME 已生效、复检未完成 ⇒ 残留存在（fix4 的有界复核要清的正是它）");
-		assertTrue(this.fake.set(RedisChatMemoryRepository.CONVERSATION_IDS_KEY).isEmpty(),
-				"崩溃发生在写索引之前：索引里没有这条残留");
 	}
 
 	@Test
@@ -131,7 +125,6 @@ class RedisChatMemoryWriteBackRaceTest {
 		this.repository.saveAll(CID, List.of(new UserMessage("正常收敛")));
 
 		assertFalse(this.fake.list(this.repository.keyFor(CID)).isEmpty(), "没有守卫时写回照常");
-		assertTrue(this.fake.set(RedisChatMemoryRepository.CONVERSATION_IDS_KEY).contains(CID), "索引照常更新");
 	}
 
 	/** 可编程的销毁守卫：只替换 {@code isArmed}（Redis 侧不参与本用例）。 */

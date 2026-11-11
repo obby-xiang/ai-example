@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -70,9 +71,9 @@ class ConfirmGateParkExitRaceTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	private final InMemoryRunStore store = new InMemoryRunStore(true);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -83,6 +84,20 @@ class ConfirmGateParkExitRaceTest {
 	private final ResumeService resumeService = mock(ResumeService.class);
 
 	private final AiProperties properties = new AiProperties();
+
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	/** 实际被派发的续跑次数（缺省 0）。 */
 	private final AtomicInteger resumes = new AtomicInteger();
@@ -95,11 +110,12 @@ class ConfirmGateParkExitRaceTest {
 	@SuppressWarnings("unchecked")
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf("generative_form")).thenReturn(ToolMeta.Channel.FRONTEND);
 		when(this.toolRegistry.riskOf("generative_form")).thenReturn(ToolMeta.RiskLevel.WRITE);
 		when(this.resumeService.resume(anyString())).thenAnswer(invocation -> {
@@ -109,11 +125,15 @@ class ConfirmGateParkExitRaceTest {
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		when(provider.getIfAvailable()).thenReturn(this.resumeService);
 		this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
-				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
+				List.of(), provider, Runnable::run, null, ToolExecutionExecutors.retryScheduler());
 		this.manager = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry,
 				mock(MessageJsonCodec.class), this.beacon, this.cancellations,
-				new ToolResultLimiter(this.properties), List.of());
+				new ToolResultLimiter(this.properties), List.of(), null, null, null, null, this.properties,
+				ToolExecutionExecutors.identityPropagating());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
 	}
@@ -158,7 +178,7 @@ class ConfirmGateParkExitRaceTest {
 		assertThat(this.gate.hasActiveLatch(RUN_ID))
 			.as("复现前提：窗口内本 run 的等待闸门仍登记在表里（没有人 await 它）")
 			.isTrue();
-		ConfirmGate.Submission decision = this.gate.submitFrontendResult(RUN_ID, CALL_ID,
+		ConfirmGate.Submission decision = GateCalls.submit(this.gate, RUN_ID, CALL_ID,
 				"{\"keyword\":\"E2E\"}", "park-exit-race");
 		assertThat(decision.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 		assertThat(decision.woke()).as("决策命中了这个没人等待的闸门（H-01 的形态）").isTrue();
@@ -190,7 +210,7 @@ class ConfirmGateParkExitRaceTest {
 			.isInstanceOf(RunParkedException.class);
 		assertThat(this.gate.hasActiveLatch(RUN_ID)).as("park 之后不得留下任何等待闸门").isFalse();
 
-		ConfirmGate.Submission decision = this.gate.submitFrontendResult(RUN_ID, CALL_ID,
+		ConfirmGate.Submission decision = GateCalls.submit(this.gate, RUN_ID, CALL_ID,
 				"{\"keyword\":\"E2E\"}", "after-park");
 
 		assertThat(decision.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
@@ -233,7 +253,7 @@ class ConfirmGateParkExitRaceTest {
 		assertThat(enteredLoop.await(5, TimeUnit.SECONDS)).as("非 park 路径应进入等待循环").isTrue();
 		assertThat(this.gate.hasActiveLatch(RUN_ID)).isTrue();
 
-		ConfirmGate.Submission decision = this.gate.submitFrontendResult(RUN_ID, CALL_ID,
+		ConfirmGate.Submission decision = GateCalls.submit(this.gate, RUN_ID, CALL_ID,
 				"{\"keyword\":\"E2E\"}", "non-park");
 		releaseLoop.countDown();
 		waitThread.join(5000);

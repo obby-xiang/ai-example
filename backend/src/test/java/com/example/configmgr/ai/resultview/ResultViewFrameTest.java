@@ -15,7 +15,10 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * 帧载体（设计稿 §6）：{@code resultView} 是 {@code tool_result} 的 <b>additive 可选键</b>。
@@ -36,7 +39,23 @@ class ResultViewFrameTest {
 
 	private final RunStore store = mock(RunStore.class);
 
-	private final SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+	private final com.example.configmgr.ai.run.FrameStore frames =
+			mock(com.example.configmgr.ai.run.FrameStore.class);
+
+	private final java.util.concurrent.atomic.AtomicLong seq = new java.util.concurrent.atomic.AtomicLong();
+
+	private final SseChatEmitter emitter;
+
+	{
+		when(this.frames.appendAndAllocateSeq(anyString(), anyMap(), any())).thenAnswer(invocation -> {
+			Map<String, Object> frame = invocation.getArgument(1);
+			long value = this.seq.incrementAndGet();
+			frame.put("seq", value);
+			return new com.example.configmgr.ai.run.FrameStore.AppendResult(value, null);
+		});
+		this.emitter = new SseChatEmitter(RUN_ID, this.store, this.frames, new ObjectMapper(), Runnable::run, 256,
+				1024 * 1024, com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null);
+	}
 
 	@Test
 	void toolResultWithoutViewKeepsTheBaselineKeySet() {
@@ -103,7 +122,7 @@ class ResultViewFrameTest {
 	@SuppressWarnings("unchecked")
 	private Map<String, Object> lastFrame() {
 		ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
-		verify(this.store, atLeastOnce()).appendEvent(eq(RUN_ID), captor.capture());
+		verify(this.frames, atLeastOnce()).appendAndAllocateSeq(eq(RUN_ID), captor.capture(), any());
 		List<Map<String, Object>> all = captor.getAllValues();
 		return all.getLast();
 	}

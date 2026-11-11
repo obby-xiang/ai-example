@@ -43,6 +43,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -87,7 +90,7 @@ class RunParamsFreezeTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -117,8 +120,12 @@ class RunParamsFreezeTest {
 
 	private ResilientChatService service;
 
+	/** run 级键由身份拼出：直调存储/续跑必须显式进入身份作用域。 */
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable tenantScope;
+
 	@BeforeEach
 	void setUp() {
+		this.tenantScope = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(this.runtime));
 		when(this.providerRegistry.target(any())).thenAnswer(invocation -> {
@@ -131,6 +138,8 @@ class RunParamsFreezeTest {
 			return Optional.of(new AiConfigService.ChatTarget(resolved, requested, true));
 		});
 		when(this.providerRegistry.forFrozenRequest(any(), any(), any())).thenReturn(this.runtime);
+		when(this.providerRegistry.forFrozenRequest(any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn(this.runtime);
 		when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(this.runtime);
 		// I3：带 providerId 的精确绑定（续跑不再按模型名猜第一家）
 		when(this.providerRegistry.target(any(), any())).thenAnswer(invocation -> {
@@ -148,7 +157,13 @@ class RunParamsFreezeTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		// 终态 transcript 写点已进入生产路径：轻装配用例注入一个永远接受的替身，
+		// 避免"未注入 ⇒ 降级成 error 终帧"掩盖本轮要断言的 done 帧。
+		com.example.configmgr.ai.history.ConversationTranscriptStore transcript = mock(
+				com.example.configmgr.ai.history.ConversationTranscriptStore.class);
+		when(transcript.append(any(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "transcript", transcript);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
@@ -157,6 +172,9 @@ class RunParamsFreezeTest {
 	@AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		if (this.tenantScope != null) {
+			this.tenantScope.close();
+		}
 	}
 
 	// ── 冻结面（快照/存储） ──────────────────────────────────────────────────
@@ -166,9 +184,8 @@ class RunParamsFreezeTest {
 		RunSnapshot frozen = this.store.create("run-frozen", SESSION_ID, AiContext.empty(), List.of(),
 				this.codec, 7L, "model-x", new RunSnapshot.FrozenParams(0.1d, 0.3d, 256, true));
 
-		assertThat(frozen.getParamsVersion()).as("版本号 = '这四个值是冻结的'，含 null")
-			.isEqualTo(RunSnapshot.PARAMS_VERSION_FROZEN);
-		assertThat(frozen.paramsFrozen()).isTrue();
+		assertThat(frozen.frozenParams()).as("首笔快照冻结这四个值（含 null 语义）")
+			.isEqualTo(new RunSnapshot.FrozenParams(0.1d, 0.3d, 256, true));
 		assertThat(frozen.getTemperature()).isEqualTo(0.1d);
 		assertThat(frozen.getTopP()).isEqualTo(0.3d);
 		assertThat(frozen.getMaxTokens()).isEqualTo(256);
@@ -176,42 +193,38 @@ class RunParamsFreezeTest {
 
 		RunSnapshot nullFrozen = this.store.create("run-frozen-null", SESSION_ID, AiContext.empty(), List.of(),
 				this.codec, 7L, "model-x", new RunSnapshot.FrozenParams(null, null, null, false));
-		assertThat(nullFrozen.getParamsVersion()).as("全 null 也是一次冻结").isEqualTo(RunSnapshot.PARAMS_VERSION_FROZEN);
+		assertThat(nullFrozen.frozenParams()).as("全 null 也是一次冻结（不是'没冻结'）")
+			.isEqualTo(new RunSnapshot.FrozenParams(null, null, null, false));
 		assertThat(nullFrozen.getTemperature()).isNull();
 		assertThat(nullFrozen.getTopP()).isNull();
 		assertThat(nullFrozen.getMaxTokens()).isNull();
 		assertThat(nullFrozen.getParamsLocked()).isFalse();
 	}
 
+	/** 首笔快照必须冻结参数（当前契约：{@code frozen == null} 直接拒绝，不再有"未冻结旧签名"）。 */
 	@Test
-	void oldCreateSignatureLeavesTheSnapshotUnfrozen() {
-		RunSnapshot legacy = this.store.create("run-legacy", SESSION_ID, AiContext.empty(), List.of(),
-				this.codec, 7L, "model-x");
-
-		assertThat(legacy.getParamsVersion()).as("旧签名 = 未冻结（续跑走旧行为 + WARN）").isZero();
-		assertThat(legacy.paramsFrozen()).isFalse();
-		assertThat(legacy.getTemperature()).isNull();
+	void createWithoutFrozenParamsIsRejected() {
+		assertThatThrownBy(() -> this.store.create("run-legacy", SESSION_ID, AiContext.empty(), List.of(),
+				this.codec, 7L, "model-x", null, "client-legacy", "请求文本", 1_000L))
+			.isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining("frozen params");
 	}
 
 	/**
 	 * 落库口径：全局 Jackson 是 {@code non_null}，冻结的 null 值会被省略 ——
-	 * 因此"冻结过"只能由 {@code paramsVersion} 表达；旧快照（无该字段）反序列化为 0。
+	 * 但快照里剩下的非 null 冻结值必须逐字段保留；读取侧不再靠"版本标记"区分（产品已删除该字段）。
 	 */
 	@Test
-	void jsonKeepsFrozenNullsDistinctFromOldSnapshots() throws Exception {
+	void jsonRoundTripKeepsFrozenValues() throws Exception {
 		RunSnapshot frozen = this.store.create("run-json", SESSION_ID, AiContext.empty(), List.of(),
 				this.codec, 7L, "model-x", new RunSnapshot.FrozenParams(null, 0.4d, null, true));
 		String json = MAPPER.writeValueAsString(frozen);
 		RunSnapshot readBack = MAPPER.readValue(json, RunSnapshot.class);
 
-		assertThat(readBack.getParamsVersion()).isEqualTo(RunSnapshot.PARAMS_VERSION_FROZEN);
-		assertThat(readBack.getTemperature()).as("冻结的 null 不得因为 non_null 省略而变成'没冻结过'").isNull();
+		assertThat(readBack.getTemperature()).as("冻结的 null 读回仍是 null").isNull();
 		assertThat(readBack.getTopP()).isEqualTo(0.4d);
+		assertThat(readBack.getMaxTokens()).isNull();
 		assertThat(readBack.getParamsLocked()).isTrue();
-
-		RunSnapshot old = MAPPER.readValue("{\"runId\":\"run-old\",\"sessionId\":\"s-old\"}", RunSnapshot.class);
-		assertThat(old.getParamsVersion()).as("旧 JSON 没有该字段 ⇒ 0（未冻结）").isZero();
-		assertThat(old.paramsFrozen()).isFalse();
 	}
 
 	// ── 续跑面：冻结值真的被用上（不是只看快照） ───────────────────────────────
@@ -246,28 +259,26 @@ class RunParamsFreezeTest {
 		verify(this.providerRegistry, never()).forRequest(any(), any(), any());
 	}
 
-	/** 旧快照（{@code paramsVersion=0}）：走旧行为（{@code Overrides.NONE}）+ 一行 WARN。 */
+	/** 快照没有冻结模型名 ⇒ 续跑必须失败（不得拿当前默认顶上）。 */
 	@Test
-	void oldSnapshotResumeKeepsLegacyBehaviorAndWarns(CapturedOutput output) throws Exception {
+	void snapshotWithoutFrozenModelFailsInsteadOfUsingCurrentDefaults() throws Exception {
 		RunSnapshot snapshot = this.store.create("run-old-resume", SESSION_ID, AiContext.empty(), List.of(),
-				this.codec, 7L, "model-x");
+				this.codec, 7L, "model-x", new RunSnapshot.FrozenParams(0.1d, null, null, false));
 		snapshot.setContext(AiContext.empty().toMap());
+		snapshot.setModelId(null);
 		this.store.save(snapshot);
 		this.store.seedArchive("run-old-resume",
 				FrameContract.fixture("start", 1L, "runId", "run-old-resume", "sessionId", SESSION_ID));
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("答案"), terminal("stop")));
 
-		// 生产路径：ResumeService 对有 providerId 的快照走六参（按快照身份驱动）
 		SseChatEmitter out = this.registry.of("run-old-resume");
-		this.service.driveResumed("run-old-resume", SESSION_ID, AiContext.empty(),
-				List.of(new UserMessage("第一轮问题")), 7L, "model-x", out);
 
-		ArgumentCaptor<AiProviderRegistry.Overrides> overrides = ArgumentCaptor
-			.forClass(AiProviderRegistry.Overrides.class);
-		verify(this.providerRegistry).forRequest(any(), eq("model-x"), overrides.capture());
-		assertThat(overrides.getValue().isEmpty()).as("旧行为 = 不覆盖（按当前默认）").isTrue();
-		verify(this.providerRegistry, never()).forFrozenRequest(any(), any(), any());
-		assertThat(output.getAll()).contains("未冻结生效参数").contains("run-old-resume");
+		assertThatThrownBy(() -> this.service.driveResumed("run-old-resume", SESSION_ID, AiContext.empty(),
+				List.of(new UserMessage("第一轮问题")), out))
+			.isInstanceOf(ProviderGoneException.class)
+			.hasMessageContaining("no frozen model name");
+		verify(this.providerRegistry, never()).current();
+		verify(this.providerRegistry, never()).forRequest(any(), any(), any());
 	}
 
 	/** 多 run 不串：各自冻结、各自续跑。 */
@@ -308,9 +319,10 @@ class RunParamsFreezeTest {
 		when(this.providerRegistry.target(eq(7L), eq("model-x"))).thenReturn(Optional.empty());
 
 		assertThatThrownBy(() -> driveTurn("run-gone"))
-			.isInstanceOf(IllegalStateException.class)
-			.hasMessageContaining("精确绑定失败");
+			.isInstanceOf(ProviderGoneException.class)
+			.hasMessageContaining("Failed to bind resume to the exact provider");
 		verify(this.providerRegistry, never()).current();
+		verify(this.providerRegistry, never()).forRequest(any(), any(), any());
 	}
 
 	/** 冻结的 {@code paramsLocked} 必须跟到终帧（续跑轮的 {@code done.paramsLocked} 不许改口）。 */	@Test
@@ -370,7 +382,8 @@ class RunParamsFreezeTest {
 		this.service.chat("run-chat-freeze", request, this.registry.of("run-chat-freeze"));
 
 		RunSnapshot snapshot = this.store.get("run-chat-freeze");
-		assertThat(snapshot.paramsFrozen()).as("首轮创建即冻结（profile: chat 路径）").isTrue();
+		assertThat(snapshot.frozenParams()).as("首轮创建即冻结（profile: chat 路径）")
+			.isEqualTo(new RunSnapshot.FrozenParams(0.4d, null, 300, true));
 		assertThat(snapshot.getTemperature()).as("冻结的是生效值：params 被策略锁住 ⇒ 未生效")
 			.isEqualTo(0.4d);
 		assertThat(snapshot.getTopP()).as("全局没有 top_p ⇒ 冻结 null（不是省略）").isNull();
@@ -417,7 +430,7 @@ class RunParamsFreezeTest {
 	private AiProviderRegistry.Overrides capturedFrozenOverrides(String modelId) {
 		ArgumentCaptor<AiProviderRegistry.Overrides> overrides = ArgumentCaptor
 			.forClass(AiProviderRegistry.Overrides.class);
-		verify(this.providerRegistry).forFrozenRequest(any(), eq(modelId), overrides.capture());
+		verify(this.providerRegistry).forFrozenRequest(any(), eq(modelId), overrides.capture(), any(), anyBoolean());
 		return overrides.getValue();
 	}
 

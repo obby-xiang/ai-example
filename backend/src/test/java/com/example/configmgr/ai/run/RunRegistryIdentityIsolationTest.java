@@ -33,7 +33,7 @@ class RunRegistryIdentityIsolationTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final RunRegistry registry = new RunRegistry(this.store, new ObjectMapper(), null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, new ObjectMapper(), null);
 
 	@Test
 	void sameRunIdUnderDifferentIdentitiesGetsDistinctEmitters() {

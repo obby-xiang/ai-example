@@ -113,7 +113,6 @@ class RedisChatMemoryRepositorySaveAllEmptyTest {
 		assertNotNull(ttl);
 		assertTrue(ttl > 0 && ttl <= TTL.toSeconds(), "RENAME 后 final TTL 应为配置值，实际 " + ttl);
 		assertFalse(Boolean.TRUE.equals(this.template.hasKey(legacyKey)), "新写入不应产生 legacy 键");
-		assertTrue(repository.isConversationIndexed(this.conversationId));
 
 		// 再铺一条 legacy，验证空列表会把两种键形一起清掉
 		this.template.opsForList().rightPushAll(legacyKey, codec.serializeAll(List.of(new UserMessage("legacy"))));
@@ -141,7 +140,6 @@ class RedisChatMemoryRepositorySaveAllEmptyTest {
 
 		assertEquals(List.of("legacy"), texts(repository.findByConversationId(this.conversationId)),
 				"tagged 缺失时应回落 legacy");
-		assertTrue(repository.isConversationIndexed(this.conversationId), "legacy 存活应判为在索引");
 
 		repository.saveAll(this.conversationId, List.of(new UserMessage("新")));
 		assertTrue(Boolean.TRUE.equals(this.template.hasKey(taggedKey)));

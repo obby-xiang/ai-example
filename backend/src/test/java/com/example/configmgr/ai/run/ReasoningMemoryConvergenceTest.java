@@ -3,11 +3,14 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
@@ -26,6 +29,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
@@ -35,6 +39,9 @@ import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -60,13 +67,19 @@ class ReasoningMemoryConvergenceTest {
 
 	private static final String SESSION_ID = "s-reasoning-memory";
 
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
+	private RequestContextUtils.SafeCloseable identityScope;
+
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -79,6 +92,8 @@ class ReasoningMemoryConvergenceTest {
 			mock(ChatClient.class));
 
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
+
+	private final ConversationTranscriptStore transcript = mock(ConversationTranscriptStore.class);
 
 	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
 
@@ -96,8 +111,18 @@ class ReasoningMemoryConvergenceTest {
 
 	@BeforeEach
 	void setUp() {
+		// 运行期键/进程内注册表一律按身份拼键：整条用例在本轮身份作用域内跑（与生产驱动线程一致）。
+		this.identityScope = RequestContextUtils.useContext(TENANT_ID, USER_ID);
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(this.runtime));
+		// 续跑按快照冻结的 provider/model 精确绑定：target + forFrozenRequest 两条读口。
+		AiConfigService.ChatTarget target = new AiConfigService.ChatTarget(
+				new AiConfigService.ResolvedProvider(1L, "test-provider", "http://localhost", "/chat/completions",
+						"test-model", "k", "fp", false),
+				"test-model", true);
+		when(this.providerRegistry.target(any(), anyString())).thenReturn(java.util.Optional.of(target));
+		when(this.providerRegistry.forFrozenRequest(any(), anyString(), any(), any(), anyBoolean()))
+			.thenReturn(this.runtime);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "l98-reasoning-watchdog");
 			thread.setDaemon(true);
@@ -106,11 +131,25 @@ class ReasoningMemoryConvergenceTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		// 终态 transcript 写点已进入生产路径：注入永远接受的替身，否则终帧会被转录写失败拒绝，
+		// 连带跳过记忆收敛（本类断言的是记忆/快照里的思考，不是 transcript 的持久化实现）。
+		when(this.transcript.readPage(anyString(), anyLong(), anyLong(), any(), any()))
+			.thenReturn(ConversationTranscriptStore.ReadPage.EMPTY);
+		when(this.transcript.append(anyString(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
+		when(this.transcript.remove(anyString(), anyLong(), anyLong(), any(), anyLong())).thenReturn(true);
+		ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		// 归属显式铺：写出器/续跑/记忆写回一律按记录身份定键（0/0 记录会被判身份不可确认）。
+		snapshot.setTenantId(TENANT_ID);
+		snapshot.setUserId(USER_ID);
+		// 首笔快照必须冻结模型身份：续跑只按快照的 provider/model 精确绑定。
+		snapshot.setModelId("test-model");
+		// 按轮记忆写回要求本轮起点：0 会被当成"无归属"而跳过写回。
+		snapshot.setCreatedAtMs(1_000L);
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
 	}
@@ -118,6 +157,9 @@ class ReasoningMemoryConvergenceTest {
 	@AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
 	}
 
 	// ── ① 落定路径 ────────────────────────────────────────────────────────────
@@ -221,11 +263,14 @@ class ReasoningMemoryConvergenceTest {
 	@Test
 	void convergeMemoryKeepsPreviousRoundsReasoningWhileAppendingTheNewOne() {
 		RunSnapshot seeded = this.store.get(RUN_ID);
+		// 续跑快照 = 完整历史，含本轮用户消息：终态投影按"最后一个真实 user"划出本轮边界，
+		// 上一轮的 assistant 不属于本轮 transcript（本轮 emitter 里没有它的段落）。
 		seeded.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("上一轮的问题"),
 				AssistantMessage.builder()
 					.content("上一轮的回答")
 					.properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "上一轮的思考"))
-					.build())));
+					.build(),
+				new UserMessage("1+1 为什么等于 2？"))));
 		this.store.save(seeded);
 
 		when(this.chatModel.stream(any(Prompt.class)))
@@ -234,10 +279,10 @@ class ReasoningMemoryConvergenceTest {
 		runTurn();
 
 		List<Message> written = memoryWrite();
-		assertThat(written).hasSize(3);
+		assertThat(written).hasSize(4);
 		assertThat(written.get(1).getMetadata()).as("历史轮次的思考不因整体覆盖写而丢失")
 			.containsEntry(ResilientChatService.REASONING_METADATA_KEY, "上一轮的思考");
-		assertThat(written.get(2).getMetadata()).containsEntry(ResilientChatService.REASONING_METADATA_KEY,
+		assertThat(written.get(3).getMetadata()).containsEntry(ResilientChatService.REASONING_METADATA_KEY,
 				"这一轮的思考");
 	}
 

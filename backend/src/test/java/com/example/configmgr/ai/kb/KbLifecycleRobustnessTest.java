@@ -145,10 +145,10 @@ class KbLifecycleRobustnessTest {
             Thread.sleep(300L);   // ≈15 个轮询周期：预算用完 ⇒ 一拍都不再回源/重建
             assertThat(source.attempts()).isEqualTo(afterBudgetExhausted);
 
-            // WARN 节流：首条失败 + "暂停自动重试" 各一条；后续失败不刷 WARN
+            // WARN 节流：首条失败 + "auto-retry paused" 各一条；后续失败不刷 WARN
             assertThat(logs.messages(Level.WARN))
                     .hasSize(2)
-                    .anySatisfy(message -> assertThat(message).contains("暂停自动重试"));
+                    .anySatisfy(message -> assertThat(message).contains("auto-retry paused"));
         }
         finally {
             service.stop();
@@ -233,7 +233,7 @@ class KbLifecycleRobustnessTest {
         }
 
         private FlakyCachedSource(LocalDirKbSource delegate, ObjectMapper mapper, AiProperties.Kb kb) {
-            super(delegate, null, mapper, kb);
+            super(delegate, new KbCache(new InMemoryKbCacheStore()), mapper, kb);
             this.delegate = delegate;
         }
 
@@ -249,14 +249,22 @@ class KbLifecycleRobustnessTest {
             this.version = version;
         }
 
+        /**
+         * 轮询实际读取的共享缓存版本：必须与成功回源返回的 {@code corpusVersion} 同值，
+         * 否则失败重试不会发生（恒早退），成功后也停不下轮询。
+         */
         @Override
-        public String kind() {
-            return "local";
+        public String cachedCorpusVersion() {
+            return corpusVersion();
+        }
+
+        private String corpusVersion() {
+            return "test-cv-" + this.version;
         }
 
         @Override
-        public long cachedVersion() {
-            return this.version;
+        public String kind() {
+            return "local";
         }
 
         @Override
@@ -265,7 +273,29 @@ class KbLifecycleRobustnessTest {
             if (this.fail) {
                 throw new KbSourceException("注入的重建失败（磁盘/Lucene 异常模拟）");
             }
-            return this.delegate.fetchManifest(previousEtag, force);
+            return withCorpusVersion(this.delegate.fetchManifest(previousEtag, force));
+        }
+
+        @Override
+        public KbSource.ManifestFetch fetchManifest(String previousEtag, boolean force, KbSource.RefreshBudget budget)
+                throws KbSourceException {
+            // CachedKbSource 的现行调用链走三参重载；不覆写它，attempts 永远为 0（故障注入失效）。
+            budget.check();
+            this.attempts.incrementAndGet();
+            if (this.fail) {
+                throw new KbSourceException("注入的重建失败（磁盘/Lucene 异常模拟）");
+            }
+            KbSource.ManifestFetch fetched = this.delegate.fetchManifest(previousEtag, force, budget);
+            budget.check();
+            return withCorpusVersion(fetched);
+        }
+
+        private KbSource.ManifestFetch withCorpusVersion(KbSource.ManifestFetch fetched) {
+            if (fetched.notModified()) {
+                return new KbSource.ManifestFetch(null, fetched.etag(), true, corpusVersion());
+            }
+            return KbSource.ManifestFetch.modified(fetched.manifest(), fetched.etag(), corpusVersion(),
+                    fetched.contents());
         }
 
         @Override

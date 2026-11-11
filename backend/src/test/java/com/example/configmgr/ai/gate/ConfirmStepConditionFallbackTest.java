@@ -581,7 +581,6 @@ class ConfirmStepConditionFallbackTest {
 		this.taskState.set(task("QUERY_COND", null));
 		Map<String, Object> extra = new java.util.LinkedHashMap<>();
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID + 1);
-		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L);
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"));
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS,
 				Map.of("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY"))));
@@ -690,7 +689,6 @@ class ConfirmStepConditionFallbackTest {
 	private static Map<String, Object> candidateExtra(Map<String, Object> conditions) {
 		Map<String, Object> extra = new java.util.LinkedHashMap<>();
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID);
-		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L);
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"));
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions);
 		return extra;

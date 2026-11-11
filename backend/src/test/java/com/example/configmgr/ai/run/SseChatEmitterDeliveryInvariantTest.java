@@ -3,11 +3,14 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.common.ErrorCodes;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -52,6 +55,24 @@ class SseChatEmitterDeliveryInvariantTest {
 	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private final AiProperties properties = new AiProperties();
+
+	/**
+	 * 投递身份作用域：写出器按"记录身份优先、请求身份兜底"解析，缺身份时整帧不归档不投递
+	 * （本类多数用例验的是归档/投递不变量，必须先有身份）。
+	 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	/**
 	 * <b>归档失败 ⇒ 不交付、不发唤醒</b>（Task 2 第 2 条）。
@@ -327,7 +348,7 @@ class SseChatEmitterDeliveryInvariantTest {
 		// 生产在同一短语上刻意有两级：首帧 WARN（"后续同类失败只计数不再重复告警"），其后每帧 DEBUG。
 		// 本用例的口径是"每轮只<b>吼</b>一次"，所以只数 WARN 行 —— 把 DEBUG 也算进来，
 		// 断言就变成"不许有降噪日志"，与 kill 描述（每帧都 WARN）不符。
-		assertThat(warnLines(output.getAll(), "事件日志原子落档失败")).as("日志每轮只吼一次（计数负责量级）")
+		assertThat(warnLines(output.getAll(), "event log archive failed")).as("日志每轮只吼一次（计数负责量级）")
 			.isEqualTo(1);
 	}
 
@@ -359,7 +380,7 @@ class SseChatEmitterDeliveryInvariantTest {
 		List<Runnable> deferred = new CopyOnWriteArrayList<>();
 		SseChatEmitter instanceB = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), framesB, MAPPER,
 				deferred::add, queueCapacity, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.direct(), null, null);
+				SseWriteBudget.direct(), null, null, null);
 		FrameWire wireB = FrameWire.attachTo(instanceB);
 
 		instanceB.delta("B-1");                 // seq 1：实时入队 1 条（liveQueued = 1，游标 = 1）
@@ -376,7 +397,7 @@ class SseChatEmitterDeliveryInvariantTest {
 	}
 
 	/**
-	 * <b>返修第 4 条</b>：投递线程发现"身份不可确认且没有可校验提示"时，<b>不得静默把队列停住</b>。
+	 * <b>返修第 4 条</b>：投递线程发现"身份不可确认"时，<b>不得静默把队列停住</b>。
 	 *
 	 * <h2>缺陷形态（返修前）</h2>
 	 * {@code submitDrain} 里遇到这种身份就直接 {@code return}（帧留在队列）—— 队列再没有被排空过：
@@ -386,9 +407,10 @@ class SseChatEmitterDeliveryInvariantTest {
 	 * <p><b>本批口径</b>：主动<b>摘除订阅者</b>（{@code evict}）—— 前端带 lastSeq 重挂，
 	 * 重挂会重新解析身份并回放归档（既有恢复链），既不会停队列，也不会有忙环。
 	 *
-	 * <p>构造：策略分支要求"身份解析因<b>读异常</b>失败且没有可校验提示"，它在生产上极难自然命中
-	 * （有提示时读异常会退回已校验提示），因此这里用子类把解析结果固定成"不可确认"，
-	 * 只验证 drain 的<b>处置</b>（摘除 vs 静默停摆）。回放已把帧暂存进队列 ⇒ 投递线程必然被触发。
+	 * <p>构造：测试口 {@code deliveryIdentityOutcome()/IdentityOutcome} 已随契约演进而删除；
+	 * 现在直接命中<b>真实的失败关闭分支</b> —— 构造写出器时线程没有身份上下文 ⇒
+	 * {@code requestIdentityHint == null} ⇒ {@code deliveryIdentity()} 恒为 {@code null}。
+	 * 回放已把帧暂存进队列 ⇒ 投递线程必然被触发。
 	 *
 	 * <p>kill：退回"直接 return"⇒ 订阅者仍在（{@code subscriberCount()} 非 0）、连接永不 complete，两条红。
 	 */
@@ -396,21 +418,26 @@ class SseChatEmitterDeliveryInvariantTest {
 	void drainWithAnUnconfirmableIdentityEvictsInsteadOfStallingTheQueue() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		frames.seed(RUN_ID, frameOf("delta", 1L, "一"), frameOf("delta", 2L, "二"));
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), frames, MAPPER, Runnable::run,
-				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null) {
-			@Override
-			IdentityOutcome deliveryIdentityOutcome() {
-				return new IdentityOutcome(null, true);
-			}
-		};
+
+		// 构造线程无身份上下文 ⇒ 写出器的请求身份提示为 null（不可确认）。
+		this.identity.close();
+		SseChatEmitter out;
+		try {
+			out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), frames, MAPPER, Runnable::run,
+					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
+		}
+		finally {
+			this.identity = RequestContextUtils.useContext(1L, 101L);
+		}
 		FrameWire wire = new FrameWire();
 
 		SseChatEmitter.ReplayResult plan = out.replayAndAttachWithStatus(wire.emitter(), null, false);
 
-		assertThat(plan.staged()).as("回放确实暂存了帧（否则测不到投递线程的身份分支）").isEqualTo(2);
+		assertThat(plan.staged()).as("身份不可确认 ⇒ 回放读口同样失败关闭，不会先暂存再投递").isZero();
+		assertThat(plan.degraded()).as("回放必须明确报降级（typed error + 收流），不得冒充'空回放'").isTrue();
 		assertThat(out.subscriberCount()).as("身份不可确认 ⇒ 主动摘除（重挂补帧），不得把队列停住").isZero();
-		assertThat(wire.size()).as("不得带着 null 身份（legacy 键形）继续投递").isZero();
+		assertThat(wire.size()).as("不得带着 null 身份（无身份键形）继续投递").isZero();
 		org.mockito.Mockito.verify(wire.emitter()).complete();
 	}
 
@@ -508,7 +535,8 @@ class SseChatEmitterDeliveryInvariantTest {
 
 	private SseChatEmitter emitter(FrameStore frames, FrameWakeBus bus, int maxFrameBytes) {
 		return new SseChatEmitter(RUN_ID, new InMemoryRunStore(), frames, MAPPER, Runnable::run,
-				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, maxFrameBytes, SseWriteBudget.direct(), bus, null);
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, maxFrameBytes, SseWriteBudget.direct(), bus, null,
+				null);
 	}
 
 	private static void emitMany(SseChatEmitter out, String marker, int count, CountDownLatch start,

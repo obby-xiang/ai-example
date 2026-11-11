@@ -9,6 +9,7 @@ import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.RedisScript;
 
 import java.time.Duration;
@@ -112,6 +113,12 @@ public final class FakeLeaseRedis {
 	/** 认领回滚的值匹配 CAS（Minor3）。 */
 	static final String CLAIM_ROLLBACK_MARK = "CLAIM_ROLLBACK";
 
+	/** 决策 guard 与完整 pending 的同槽原子写（与 {@code RunStore#DECIDE_PENDING_SCRIPT} 注释一致）。 */
+	static final String DECIDE_PENDING_MARK = "DECIDE_PENDING";
+
+	/** 取消收敛：原 epoch 内未认领未执行的 PENDING/APPROVED 同槽写取消结局。 */
+	static final String CANCEL_PENDING_MARK = "CANCEL_PENDING";
+
 	/** 业务活动锚点的单键原子 max + 续期（R1-09 / I-3）。 */
 	static final String ACTIVITY_TOUCH_MARK = "ACTIVITY_TOUCH";
 
@@ -147,6 +154,9 @@ public final class FakeLeaseRedis {
 	/** LIST 键面（台账 {@code ai:ledger:}；批③a）。 */
 	final Map<String, List<String>> lists = new ConcurrentHashMap<>();
 
+	/** ZSET 键面（run 列表索引 {@code ai:runs:<t>:<u>} / 恢复到期索引 {@code ai:recovery:due}）。 */
+	final Map<String, Map<String, Double>> zsetsByKey = new ConcurrentHashMap<>();
+
 	/** 键 → 最近一次设置的 TTL（{@code SET PX} / {@code EXPIRE} 共用）。 */
 	final Map<String, Duration> expiries = new ConcurrentHashMap<>();
 
@@ -167,6 +177,9 @@ public final class FakeLeaseRedis {
 
 	/** 产品代码走过的 Lua 脚本次数（L7：写路径只能走脚本）。 */
 	public final AtomicInteger scriptCalls = new AtomicInteger();
+
+	/** 每次脚本执行的正文（按调用顺序），用于区分同一次写里的守卫/索引等多条 Lua。 */
+	public final java.util.List<String> scriptBodies = new java.util.concurrent.CopyOnWriteArrayList<>();
 
 	/** 脚本内 {@code SET} 次数（L3：可重入只能有一次 SET）。 */
 	final AtomicInteger sets = new AtomicInteger();
@@ -278,6 +291,36 @@ public final class FakeLeaseRedis {
 		this.beforeSnapshotWrite = hook;
 	}
 
+	/** 模拟会话→run 索引登记脚本失败（fail-closed 用例）。 */
+	volatile boolean failSessionRunsRegister;
+
+	/**
+	 * 认领脚本内部的受控故障点（A1/A6 的当前原子写口径）：
+	 * <ul>
+	 * <li>{@link #failClaimFenceRead()}：{@code EVAL} 在 fence 读处抛错（<b>尚未写</b>）；</li>
+	 * <li>{@link #failClaimPendingRead()}：{@code EVAL} 在 raw pending 读处抛错（<b>尚未写</b>）；</li>
+	 * <li>{@link #failClaimTtlWrite()}：claim/pending 两笔 HSET 之后、TTL 写之前抛错 ——
+	 *     真实 Redis 的脚本错误<b>不回滚</b>已写内容，用例据此只断言脚本写序可保证的状态。</li>
+	 * </ul>
+	 */
+	volatile boolean claimFenceReadFails;
+
+	volatile boolean claimPendingReadFails;
+
+	volatile boolean claimTtlWriteFails;
+
+	public void failClaimFenceRead() {
+		this.claimFenceReadFails = true;
+	}
+
+	public void failClaimPendingRead() {
+		this.claimPendingReadFails = true;
+	}
+
+	public void failClaimTtlWrite() {
+		this.claimTtlWriteFails = true;
+	}
+
 	/**
 	 * 读 HASH 字段的并发注入点（读到之后、返回之前调用一次）。
 	 * 参数 = (hash 键, field)。仅 M-2/R1、R6 两条用例使用。
@@ -294,6 +337,8 @@ public final class FakeLeaseRedis {
 
 	private final ListOperations<String, String> listOps = mock(ListOperations.class);
 
+	private final ZSetOperations<String, String> zsetOps = mock(ZSetOperations.class);
+
 	private final RedisConnection connection = mock(RedisConnection.class);
 
 	public FakeLeaseRedis() {
@@ -301,6 +346,89 @@ public final class FakeLeaseRedis {
 		when(this.redis.opsForHash()).thenReturn(this.hashOps);
 		when(this.redis.opsForSet()).thenReturn(this.setOps);
 		when(this.redis.opsForList()).thenReturn(this.listOps);
+		when(this.redis.opsForZSet()).thenReturn(this.zsetOps);
+		when(this.zsetOps.add(anyString(), anyString(), org.mockito.ArgumentMatchers.anyDouble()))
+			.thenAnswer(invocation -> {
+				checkAlive();
+				return zadd((String) invocation.getArgument(0), (String) invocation.getArgument(1),
+						(Double) invocation.getArgument(2));
+			});
+		when(this.zsetOps.remove(anyString(), any(Object[].class))).thenAnswer(invocation -> {
+			checkAlive();
+			String key = invocation.getArgument(0);
+			Map<String, Double> members = this.zsetsByKey.get(key);
+			long removed = 0L;
+			if (members != null) {
+				for (Object value : varargs(invocation.getArguments(), 1)) {
+					if (members.remove(String.valueOf(value)) != null) {
+						removed++;
+					}
+				}
+				if (members.isEmpty()) {
+					this.zsetsByKey.remove(key);
+				}
+			}
+			return removed;
+		});
+		when(this.zsetOps.range(anyString(), anyLong(), anyLong())).thenAnswer(invocation -> {
+			checkAlive();
+			List<String> ordered = orderedMembers((String) invocation.getArgument(0));
+			int size = ordered.size();
+			long start = (Long) invocation.getArgument(1);
+			long stop = (Long) invocation.getArgument(2);
+			int from = (int) (start < 0 ? Math.max(0, size + start) : Math.min(start, size));
+			int to = (int) (stop < 0 ? size + stop : Math.min(stop, size - 1));
+			if (from > to || from >= size) {
+				return Set.of();
+			}
+			return new java.util.LinkedHashSet<>(ordered.subList(from, to + 1));
+		});
+		when(this.zsetOps.rangeWithScores(anyString(), anyLong(), anyLong())).thenAnswer(invocation -> {
+			checkAlive();
+			List<String> ordered = orderedMembers((String) invocation.getArgument(0));
+			int size = ordered.size();
+			long start = (Long) invocation.getArgument(1);
+			long stop = (Long) invocation.getArgument(2);
+			int from = (int) (start < 0 ? Math.max(0, size + start) : Math.min(start, size));
+			int to = (int) (stop < 0 ? size + stop : Math.min(stop, size - 1));
+			if (from > to || from >= size) {
+				return Set.of();
+			}
+			Set<ZSetOperations.TypedTuple<String>> out = new java.util.LinkedHashSet<>();
+			for (String member : ordered.subList(from, to + 1)) {
+				out.add(new org.springframework.data.redis.core.DefaultTypedTuple<>(member,
+						this.zsetsByKey.get((String) invocation.getArgument(0)).get(member)));
+			}
+			return out;
+		});
+		when(this.zsetOps.rangeByScoreWithScores(anyString(), org.mockito.ArgumentMatchers.anyDouble(),
+				org.mockito.ArgumentMatchers.anyDouble(), anyLong(), anyLong())).thenAnswer(invocation -> {
+			checkAlive();
+			Map<String, Double> members = this.zsetsByKey.get(invocation.getArgument(0));
+			if (members == null) {
+				return Set.of();
+			}
+			double min = invocation.getArgument(1);
+			double max = invocation.getArgument(2);
+			long limit = invocation.getArgument(4);
+			Set<ZSetOperations.TypedTuple<String>> out = new java.util.LinkedHashSet<>();
+			for (Map.Entry<String, Double> entry : members.entrySet()) {
+				if (entry.getValue() >= min && entry.getValue() <= max && out.size() < limit) {
+					out.add(new org.springframework.data.redis.core.DefaultTypedTuple<>(entry.getKey(), entry.getValue()));
+				}
+			}
+			return out;
+		});
+		when(this.zsetOps.zCard(anyString())).thenAnswer(invocation -> {
+			checkAlive();
+			Map<String, Double> members = this.zsetsByKey.get(invocation.getArgument(0));
+			return members == null ? 0L : (long) members.size();
+		});
+		when(this.zsetOps.score(anyString(), any())).thenAnswer(invocation -> {
+			checkAlive();
+			Map<String, Double> members = this.zsetsByKey.get(invocation.getArgument(0));
+			return members == null ? null : members.get(String.valueOf((Object) invocation.getArgument(1)));
+		});
 		when(this.listOps.rightPush(anyString(), any())).thenAnswer(invocation -> {
 			checkAlive();
 			List<String> list = list((String) invocation.getArgument(0));
@@ -396,7 +524,8 @@ public final class FakeLeaseRedis {
 				.thenAnswer(invocation -> this.strings.containsKey((String) invocation.getArgument(0))
 						|| this.hashTables.containsKey((String) invocation.getArgument(0))
 						|| this.lists.containsKey((String) invocation.getArgument(0))
-						|| this.setsByKey.containsKey((String) invocation.getArgument(0)));
+						|| this.setsByKey.containsKey((String) invocation.getArgument(0))
+						|| this.zsetsByKey.containsKey((String) invocation.getArgument(0)));
 		when(this.redis.delete(anyString())).thenAnswer(invocation -> {
 			this.templateDeletes.incrementAndGet();
 			String key = invocation.getArgument(0);
@@ -595,6 +724,7 @@ public final class FakeLeaseRedis {
 		assertSameSlot(keys);
 		String body = script.getScriptAsString();
 		this.lastScriptBody = body;
+		this.scriptBodies.add(body);
 		this.lastScriptKeys = new ArrayList<>(keys);
 		if (body.contains(CREATE_IF_ABSENT_MARK) || body.contains(FENCED_CREATE_IF_ABSENT_MARK)
 				|| body.contains(TERMINAL_SET_IF_NOT_CANCELLED_MARK) || body.contains(FENCED_TERMINAL_SET_MARK)) {
@@ -687,6 +817,9 @@ public final class FakeLeaseRedis {
 			return 1L;
 		}
 		if (body.contains(SESSION_RUNS_REGISTER_MARK)) {
+			if (this.failSessionRunsRegister) {
+				throw new IllegalStateException("会话→run 索引不可用（模拟）");
+			}
 			String key = str(keys.get(0));
 			this.setsByKey.computeIfAbsent(key, ignored -> ConcurrentHashMap.newKeySet()).add(str(args.get(0)));
 			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(1)))));
@@ -703,7 +836,290 @@ public final class FakeLeaseRedis {
 			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(2)))));
 			return 1L;
 		}
+		if (body.contains("SESSION_ACTIVE_TOUCH")) {
+			String key = str(keys.get(0));
+			zadd(key, str(args.get(0)), Double.parseDouble(str(args.get(1))));
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+			return 1L;
+		}
+		if (body.contains("ZSCORE") && body.contains("ZREM")) {
+			String key = str(keys.get(0));
+			long expected = Long.parseLong(str(args.get(0)));
+			String member = str(args.get(1));
+			return casRemoveZMember(key, member, expected);
+		}
+		if (body.contains("ZSCORE") && body.contains("ZADD")) {
+			String key = str(keys.get(0));
+			long expected = Long.parseLong(str(args.get(0)));
+			double next = Double.parseDouble(str(args.get(1)));
+			String member = str(args.get(2));
+			Double current = zscore(key, member);
+			if (current == null || current.longValue() != expected) {
+				return 0L;
+			}
+			zadd(key, member, next);
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(3)))));
+			return 1L;
+		}
+		if (body.contains("ZSCORE") && body.contains("PEXPIRE")) {
+			String key = str(keys.get(0));
+			String member = str(args.get(0));
+			if (zscore(key, member) == null) {
+				return 0L;
+			}
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+			return 1L;
+		}
+		if (body.contains("ZADD") && body.contains("PEXPIRE")) {
+			String key = str(keys.get(0));
+			zadd(key, str(args.get(1)), Double.parseDouble(str(args.get(0))));
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(2)))));
+			return 1L;
+		}
+		if (body.contains(CANCEL_PENDING_MARK)) {
+			// 取消脚本（{@code RunStore.CANCEL_PENDING_SCRIPT}）：fence(epoch) → pending 状态/证据
+			// → claim 位 → decided 前置；成功才同槽写 pending/decided 并续三键 TTL。
+			return cancelPending(str(keys.get(0)), str(keys.get(1)), str(keys.get(2)), str(keys.get(3)),
+					str(args.get(0)), str(args.get(1)), str(args.get(2)),
+					Duration.ofMillis(Long.parseLong(str(args.get(3)))), parseOrZero(str(args.get(4))));
+		}
+		if (body.contains(DECIDE_PENDING_MARK)) {
+			// 决策脚本（{@code RunStore.DECIDE_PENDING_SCRIPT}）：pending 必须仍为 PENDING 且无执行证据，
+			// decided guard 同槽落档；repair 只补"guard 已在、pending 未改"的半状态。
+			return decidePending(str(keys.get(0)), str(keys.get(1)), str(keys.get(2)), str(args.get(0)),
+					str(args.get(1)), str(args.get(2)), Duration.ofMillis(Long.parseLong(str(args.get(3)))),
+					str(args.get(4)));
+		}
+		if (body.contains("CLAIM_EXECUTION")) {
+			// 认领脚本（{@code RunStore.CLAIM_EXECUTION_SCRIPT}）：fence → 取消 → pending 状态/证据
+			// → HSET claim + 推进 pending（同一原子步）。
+			String claimKey = str(keys.get(0));
+			String pendingKey = str(keys.get(1));
+			String fenceKey = str(keys.get(2));
+			String cancelKey = str(keys.get(3));
+			String field = str(args.get(0));
+			long epoch = Long.parseLong(str(args.get(1)));
+			String instance = str(args.get(2));
+			long claimedAtMs = Long.parseLong(str(args.get(3)));
+			Duration ttl = Duration.ofMillis(Long.parseLong(str(args.get(4))));
+			if (this.claimFenceReadFails) {
+				throw new IllegalStateException("模拟 CLAIM_EXECUTION fence 读失败");
+			}
+			long fence = Long.parseLong(this.strings.getOrDefault(fenceKey, "0"));
+			if (epoch > 0L && fence > epoch) {
+				return List.of(0L, "STALE_EPOCH", fence);
+			}
+			if (this.strings.containsKey(cancelKey) || this.setsByKey.containsKey(cancelKey)
+					|| this.hashTables.containsKey(cancelKey)) {
+				return List.of(0L, "CANCELLED", fence);
+			}
+			if (this.claimPendingReadFails) {
+				throw new IllegalStateException("模拟 CLAIM_EXECUTION pending 读失败");
+			}
+			Map<String, String> pending = table(pendingKey);
+			String raw = pending.get(field);
+			if (raw == null) {
+				return List.of(0L, "MISSING", fence);
+			}
+			Map<String, Object> obj;
+			try {
+				obj = MAPPER.readValue(raw, Map.class);
+			}
+			catch (Exception ex) {
+				return List.of(0L, "BAD_PENDING", fence);
+			}
+			String status = String.valueOf(obj.get("status"));
+			if (!"APPROVED".equals(status) && !"PENDING".equals(status) && !"EXECUTED".equals(status)) {
+				return List.of(0L, "CONFLICT_STATUS", fence);
+			}
+			boolean evidence = Boolean.TRUE.equals(obj.get("executed")) || number(obj.get("claimedAtMs")) > 0L
+					|| number(obj.get("claimedEpoch")) > 0L || number(obj.get("executedAtMs")) > 0L
+					|| obj.get("executedBy") != null;
+			if (evidence || table(claimKey).containsKey(field)) {
+				return List.of(0L, "ALREADY_CLAIMED", fence);
+			}
+			obj.put("claimedAtMs", claimedAtMs);
+			obj.put("claimedEpoch", epoch);
+			obj.put("executed", true);
+			obj.put("executedBy", instance);
+			table(claimKey).put(field, epoch + "|" + instance);
+			try {
+				pending.put(field, MAPPER.writeValueAsString(obj));
+			}
+			catch (Exception ex) {
+				throw new IllegalStateException(ex);
+			}
+			if (this.claimTtlWriteFails) {
+				throw new IllegalStateException("模拟 CLAIM_EXECUTION TTL 写失败（HSET 已生效、不回滚）");
+			}
+			touchTtl(claimKey, ttl);
+			touchTtl(pendingKey, ttl);
+			return List.of(1L, "WON", fence);
+		}
+		if (body.contains("RAISE_SEQ")) {
+			String key = str(keys.get(0));
+			long floor = Long.parseLong(str(args.get(0)));
+			long current = Long.parseLong(this.strings.getOrDefault(key, "0"));
+			if (floor > current) {
+				this.strings.put(key, Long.toString(floor));
+			}
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(1)))));
+			return 1L;
+		}
 		throw new UnsupportedOperationException("未建模的脚本：" + body);
+	}
+
+	private Boolean zadd(String key, String member, double score) {
+		Map<String, Double> members = this.zsetsByKey.computeIfAbsent(key, ignored -> new ConcurrentHashMap<>());
+		Double previous = members.put(member, score);
+		return previous == null;
+	}
+
+	/**
+	 * {@code -- CANCEL_PENDING}：逐行复刻 {@code RunStore#CANCEL_PENDING_SCRIPT}。
+	 *
+	 * <p>返回形状与 Lua 一致：{@code {written, code}}（{@code STALE_EPOCH/MISSING/BAD_PENDING/
+	 * CONFLICT_STATUS/CONFLICT_CLAIMED/CONFLICT_DECIDED/CANCELLED}）。
+	 */
+	private List<Object> cancelPending(String pendingKey, String decidedKey, String claimKey, String fenceKey,
+			String field, String fullPendingJson, String decidedValue, Duration ttl, long epoch) {
+		long fence = parseOrZero(this.strings.get(fenceKey));
+		if (epoch > 0L && fence > epoch) {
+			return List.of(0L, "STALE_EPOCH");
+		}
+		Map<String, String> pending = table(pendingKey);
+		String raw = pending.get(field);
+		if (raw == null) {
+			return List.of(0L, "MISSING");
+		}
+		Map<String, Object> obj;
+		try {
+			obj = MAPPER.readValue(raw, Map.class);
+		}
+		catch (Exception ex) {
+			return List.of(0L, "BAD_PENDING");
+		}
+		String status = String.valueOf(obj.get("status"));
+		if (!"PENDING".equals(status) && !"APPROVED".equals(status)) {
+			return List.of(0L, "CONFLICT_STATUS");
+		}
+		Map<String, String> claim = this.hashTables.get(claimKey);
+		if (claim != null && claim.containsKey(field)) {
+			return List.of(0L, "CONFLICT_CLAIMED");
+		}
+		boolean evidence = Boolean.TRUE.equals(obj.get("executed")) || number(obj.get("claimedAtMs")) > 0L
+				|| number(obj.get("claimedEpoch")) > 0L || number(obj.get("executedAtMs")) > 0L
+				|| obj.get("executedBy") != null;
+		if (evidence) {
+			return List.of(0L, "CONFLICT_CLAIMED");
+		}
+		String prev = table(decidedKey).get(field);
+		if (prev != null && ("PENDING".equals(status) || !"APPROVED".equals(guardStatus(prev)))) {
+			return List.of(0L, "CONFLICT_DECIDED");
+		}
+		pending.put(field, fullPendingJson);
+		table(decidedKey).put(field, decidedValue);
+		touchTtl(pendingKey, ttl);
+		touchTtl(decidedKey, ttl);
+		if (claim != null) {
+			touchTtl(claimKey, ttl);
+		}
+		return List.of(1L, "CANCELLED");
+	}
+
+	/**
+	 * {@code -- DECIDE_PENDING}：逐行复刻 {@code RunStore#DECIDE_PENDING_SCRIPT}。
+	 *
+	 * <p>返回与 Lua 相同：{@code {written, guardOrEmpty, code}}；{@code repair}（仅补齐
+	 * "decided 已在、pending 未改"的旧版半状态）时不覆盖 decided，也不重复返回新 guard。
+	 */
+	private List<Object> decidePending(String pendingKey, String decidedKey, String claimKey, String field,
+			String fullPendingJson, String decidedValue, Duration ttl, String expectedGuard) {
+		Map<String, String> pending = table(pendingKey);
+		String raw = pending.get(field);
+		if (raw == null) {
+			return List.of(0L, "", "MISSING");
+		}
+		Map<String, Object> obj;
+		try {
+			obj = MAPPER.readValue(raw, Map.class);
+		}
+		catch (Exception ex) {
+			return List.of(0L, "", "BAD_PENDING");
+		}
+		if (!"PENDING".equals(String.valueOf(obj.get("status")))) {
+			return List.of(0L, "", "CONFLICT_STATUS");
+		}
+		String requested = guardStatus(decidedValue);
+		String prev = table(decidedKey).get(field);
+		boolean repair = !expectedGuard.isEmpty() && expectedGuard.equals(prev)
+				&& requested.equals(guardStatus(prev));
+		if (prev != null && !repair) {
+			return List.of(0L, prev, "CONFLICT_DECIDED");
+		}
+		if (prev == null && !expectedGuard.isEmpty()) {
+			return List.of(0L, "", "CONFLICT_DECIDED");
+		}
+		boolean evidence = Boolean.TRUE.equals(obj.get("executed")) || number(obj.get("claimedAtMs")) > 0L
+				|| number(obj.get("claimedEpoch")) > 0L || number(obj.get("executedAtMs")) > 0L
+				|| obj.get("executedBy") != null;
+		Map<String, String> claim = this.hashTables.get(claimKey);
+		boolean claimed = claim != null && claim.containsKey(field);
+		if (claimed || evidence) {
+			return List.of(0L, prev == null ? "" : prev, "CONFLICT_CLAIMED");
+		}
+		pending.put(field, fullPendingJson);
+		if (!repair) {
+			table(decidedKey).put(field, decidedValue);
+		}
+		touchTtl(pendingKey, ttl);
+		touchTtl(decidedKey, ttl);
+		if (claim != null) {
+			// 真 Redis：PEXPIRE 对不存在的 claim 键是 no-op。
+			touchTtl(claimKey, ttl);
+		}
+		return List.of(1L, repair ? prev : decidedValue, repair ? "REPAIRED" : "APPLIED");
+	}
+
+	/** Lua {@code x:match('^([^|]+)') or ''}：取第一个 {@code |} 之前的状态段。 */
+	private static String guardStatus(String guard) {
+		if (guard == null || guard.isEmpty()) {
+			return "";
+		}
+		int sep = guard.indexOf('|');
+		return sep < 0 ? guard : guard.substring(0, sep);
+	}
+
+	private Double zscore(String key, String member) {
+		Map<String, Double> members = this.zsetsByKey.get(key);
+		return members == null ? null : members.get(member);
+	}
+
+	private Long casRemoveZMember(String key, String member, long expectedScore) {
+		Map<String, Double> members = this.zsetsByKey.get(key);
+		if (members == null) {
+			return 0L;
+		}
+		Double current = members.get(member);
+		if (current == null || current.longValue() != expectedScore) {
+			return 0L;
+		}
+		members.remove(member);
+		if (members.isEmpty()) {
+			this.zsetsByKey.remove(key);
+		}
+		return 1L;
+	}
+
+	private List<String> orderedMembers(String key) {
+		Map<String, Double> members = this.zsetsByKey.get(key);
+		if (members == null) {
+			return List.of();
+		}
+		return members.entrySet().stream()
+			.sorted(Map.Entry.<String, Double>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
+			.map(Map.Entry::getKey)
+			.toList();
 	}
 
 	/** 抢租脚本执行前的一次性注入（I-2 的确定性交错缝；单线程用例，取走即置空）。 */
@@ -1074,6 +1490,7 @@ public final class FakeLeaseRedis {
 		this.hashTables.remove(key);
 		this.lists.remove(key);
 		this.setsByKey.remove(key);
+		this.zsetsByKey.remove(key);
 		this.expiries.remove(key);
 		this.deadlines.remove(key);
 	}
@@ -1161,6 +1578,7 @@ public final class FakeLeaseRedis {
 		existed = this.hashTables.remove(key) != null || existed;
 		existed = this.lists.remove(key) != null || existed;
 		existed = this.setsByKey.remove(key) != null || existed;
+		existed = this.zsetsByKey.remove(key) != null || existed;
 		this.expiries.remove(key);
 		this.deadlines.remove(key);
 		return existed;
@@ -1202,6 +1620,11 @@ public final class FakeLeaseRedis {
 
 	private static String str(Object value) {
 		return String.valueOf(value);
+	}
+
+	/** 记录里的数值（缺字段/坏值 ⇒ 0）。 */
+	private static long number(Object value) {
+		return value instanceof Number number ? number.longValue() : 0L;
 	}
 
 	/** 数字串 → long（缺失/坏值按 0，{@code INCR} 的起点口径）。 */

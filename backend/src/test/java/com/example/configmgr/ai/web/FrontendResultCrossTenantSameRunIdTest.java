@@ -230,7 +230,9 @@ class FrontendResultCrossTenantSameRunIdTest {
 	private void seedSuspended(long tenantId, long userId, String sessionId) {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(tenantId, userId)) {
 			this.store.create(RUN_ID, sessionId, AiContext.empty(),
-					List.of(new org.springframework.ai.chat.messages.UserMessage("请填写条件")), this.codec);
+					List.of(new org.springframework.ai.chat.messages.UserMessage("请填写条件")), this.codec, null,
+					"test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), null, "请填写条件",
+					System.currentTimeMillis());
 			RunSnapshot snapshot = this.store.get(RUN_ID);
 			snapshot.setStatus(RunSnapshot.SUSPENDED);
 			this.store.save(snapshot);

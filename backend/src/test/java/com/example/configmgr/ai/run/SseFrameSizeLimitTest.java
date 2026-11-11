@@ -6,10 +6,14 @@ import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.TruncationContract;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
@@ -26,10 +30,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ol>
  * <li>超限帧被<b>字段级</b>截断后仍是合法 JSON，且 {@code RunStore#events} 回放读不丢帧
  *     （R5 的反例防线：坏 JSON 会被静默忽略 = seq 洞）；</li>
- * <li>{@code truncated}/数字/{@code noticeCode} 标记字段存在且可被读取（{@code truncatedReason}
- *     仅作旧客户端兼容别名）；</li>
+ * <li>{@code truncated}/数字/{@code noticeCode} 标记字段存在且可被读取；旧兼容别名
+ *     {@code truncatedReason}/{@code notice} 已下线（帧面只写 {@code noticeCode}，展示侧本地化）；</li>
  * <li>未超限帧<b>一字不改</b>（不误伤：无标记、值原样）；</li>
- * <li>边界：恰好等于上限不截断、上限 + 1 触发截断且落地 ≤ 上限（截后复测）；</li>
+ * <li>边界：恰好等于上限不拆分；上限 + 1 的 {@code delta} 拆成多片且每片 ≤ 上限（正文不截断，
+ *     拼接 = 原文），{@code tool_result} 超限则走字段级降采样且落地 ≤ 上限（截后复测）；</li>
  * <li>回放 seq 无洞（超限帧照旧占号）。</li>
  * </ol>
  *
@@ -52,7 +57,24 @@ class SseFrameSizeLimitTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.mapper, Runnable::run, 256, LIMIT);
+	/** 投递身份作用域：写出器按"记录身份优先、请求身份兜底"解析，缺身份则帧不归档不投递。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	private SseChatEmitter out;
+
+	@BeforeEach
+	void bindIdentityAndEmitter() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+		this.out = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store),
+				this.mapper, Runnable::run, 256, LIMIT, SseWriteBudget.direct(), null, null, null);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	// ── ① 超限帧字段级截断 + 回放不丢帧（result 通道，入归档） ──
 
@@ -113,16 +135,9 @@ class SseFrameSizeLimitTest {
 		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
 		assertThat(frame).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true)
 				.containsEntry("noticeCode", "frame_truncated");
-		String legacyNotice = String.valueOf(frame.get(FrameSizeLimiter.TRUNCATED_REASON_FIELD));
-		assertThat(legacyNotice)
-				.as("旧客户端兼容字段：英文降级短句，不含机器前缀/数字/中文")
-				.isEqualTo("Result truncated because it exceeded the frame size limit.")
-				.doesNotContain("frame-bytes-exceeded")
-				.doesNotContain("limit=")
-				.doesNotContain("truncatedFields")
-				.doesNotContainPattern("\\d")
-				.doesNotContainPattern("[\\u4e00-\\u9fff]");
-		assertThat(frame.get(TruncationContract.NOTICE_FIELD)).isEqualTo(legacyNotice);
+		assertThat(frame).as("旧兼容别名已下线：帧面只写 noticeCode + 数字，不再写 truncatedReason/notice")
+				.doesNotContainKey("truncatedReason")
+				.doesNotContainKey(TruncationContract.NOTICE_FIELD);
 		assertThat(frame.get("toolCallId")).as("其余字段原样保留").isEqualTo("call-1");
 		assertThat(frame.get("name")).isEqualTo("list_config_defs");
 	}
@@ -142,13 +157,9 @@ class SseFrameSizeLimitTest {
 				.containsEntry("noticeCode", "frame_limit_unreached")
 				.containsEntry(TruncationContract.ORIGINAL_CHARS_FIELD, 0)
 				.containsEntry(TruncationContract.RETURNED_CHARS_FIELD, 0);
-		assertThat(frame).doesNotContainKey(TruncationContract.STRATEGY_FIELD);
-		String legacyNotice = String.valueOf(frame.get(TruncationContract.NOTICE_FIELD));
-		assertThat(legacyNotice)
-				.isEqualTo("Result exceeds the frame size limit and could not be compressed further.")
-				.doesNotContain("truncated because")
-				.doesNotContainPattern("[\\u4e00-\\u9fff]");
-		assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD)).isEqualTo(legacyNotice);
+		assertThat(frame).doesNotContainKey(TruncationContract.STRATEGY_FIELD)
+				.doesNotContainKey("truncatedReason")
+				.doesNotContainKey(TruncationContract.NOTICE_FIELD);
 	}
 
 	/** I-3 / Minor 6：模型侧先裁、帧字节再裁时，帧码必须覆盖模型码（不能留下“此处仍为全文”的假话）。 */
@@ -164,11 +175,9 @@ class SseFrameSizeLimitTest {
 		Map<String, Object> frame = this.store.events(RUN_ID).get(0);
 		assertThat(frame).containsEntry(FrameSizeLimiter.TRUNCATED_FIELD, true)
 				.containsEntry("noticeCode", "frame_truncated")
-				.containsEntry(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD);
-		assertThat(String.valueOf(frame.get(TruncationContract.NOTICE_FIELD)))
-				.isEqualTo("Result truncated because it exceeded the frame size limit.")
-				.doesNotContain("full result")
-				.doesNotContainPattern("[\\u4e00-\\u9fff]");
+				.containsEntry(TruncationContract.STRATEGY_FIELD, TruncationContract.STRATEGY_HEAD)
+				.doesNotContainKey("truncatedReason")
+				.doesNotContainKey(TruncationContract.NOTICE_FIELD);
 		assertThat((String) frame.get("result")).as("帧字节超限后 result 已不是全文").hasSizeLessThan(full.length());
 		assertThat((Integer) frame.get(TruncationContract.ORIGINAL_CHARS_FIELD)).isEqualTo(25_000);
 		assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isPositive()
@@ -194,17 +203,19 @@ class SseFrameSizeLimitTest {
 		assertThat((Integer) frame.get(TruncationContract.ORIGINAL_CHARS_FIELD)).isEqualTo(25_000);
 		assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isPositive()
 				.isLessThan(25_000);
-		String legacyNotice = String.valueOf(frame.get(TruncationContract.NOTICE_FIELD));
-		assertThat(legacyNotice)
-				.isEqualTo("Result truncated for the model; this frame shows the full result.")
-				.doesNotContainPattern("\\d")
-				.doesNotContainPattern("[\\u4e00-\\u9fff]");
-		assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD)).isEqualTo(legacyNotice);
+		assertThat(frame).as("模型侧裁断只写 noticeCode，不再写 notice/truncatedReason 别名")
+				.doesNotContainKey(TruncationContract.NOTICE_FIELD)
+				.doesNotContainKey("truncatedReason");
 	}
 
 	/** A10 R-15：诊断数字与字段名进 warn 日志（用户 notice 不再承载）。 */
 	@Test
-	void truncationDiagnosticsGoToWarnLog() {
+	void truncationDiagnosticsGoToWarnLog() throws Exception {
+		// 逐帧 WARN 每 JVM 每分钟最多一条（其余降 debug）：先复位节流锚点，让本用例的 WARN 必定落一条。
+		java.lang.reflect.Field throttle = FrameSizeLimiter.class.getDeclaredField("DOWNSAMPLE_WARN_AT_MS");
+		throttle.setAccessible(true);
+		((java.util.concurrent.atomic.AtomicLong) throttle.get(null)).set(0L);
+
 		Logger logger = (Logger) LoggerFactory.getLogger(FrameSizeLimiter.class);
 		ListAppender<ILoggingEvent> appender = new ListAppender<>();
 		appender.start();
@@ -237,7 +248,7 @@ class SseFrameSizeLimitTest {
 		assertThat(archived.get("result")).as("值原样").isEqualTo("{\"ok\":true}");
 		assertThat(archived).as("不挂标记（没有截断发生）")
 				.doesNotContainKey(FrameSizeLimiter.TRUNCATED_FIELD)
-				.doesNotContainKey(FrameSizeLimiter.TRUNCATED_REASON_FIELD);
+				.doesNotContainKey("truncatedReason");
 
 		Map<String, Object> payload = this.mapper.readValue(wire.payloads().get(0), Map.class);
 		assertThat(payload.get("text")).as("投递负载里的值也原样").isEqualTo(text);
@@ -303,10 +314,9 @@ class SseFrameSizeLimitTest {
 		assertThat(frame.get(TruncationContract.ORIGINAL_CHARS_FIELD)).isEqualTo(9_000);
 		assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isPositive()
 				.isLessThan(9_000);
-		assertThat(String.valueOf(frame.get(TruncationContract.NOTICE_FIELD)))
-				.isEqualTo("Result truncated because it exceeded the frame size limit.");
-		assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD))
-				.as("truncatedReason 保留为 notice 的兼容别名").isEqualTo(frame.get(TruncationContract.NOTICE_FIELD));
+		assertThat(frame).as("G5：两侧共用字段名，帧面不再写 notice/truncatedReason 旧别名")
+				.doesNotContainKey(TruncationContract.NOTICE_FIELD)
+				.doesNotContainKey("truncatedReason");
 	}
 
 	@Test
@@ -368,6 +378,7 @@ class SseFrameSizeLimitTest {
 		pending.setName("list_config_defs");
 		pending.setKind(PendingToolCall.KIND_BACKEND);
 		pending.setStatus(PendingToolCall.EXECUTED);
+		pending.setOutcome(ToolOutcome.OK.wire());
 		return pending;
 	}
 }

@@ -15,9 +15,13 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -67,18 +71,18 @@ class CancelledRunFinalizerIdentityTest {
 		when(provider.getIfAvailable()).thenReturn(resumeService);
 
 		List<Runnable> scheduled = new ArrayList<>();
-		CancelledRunFinalizer.Scheduler immediate = (task, delay) -> {
-			scheduled.add(task);
-			return () -> {
-			};
-		};
+		ScheduledExecutorService retryExecutor = mock(ScheduledExecutorService.class);
+		when(retryExecutor.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class))).thenAnswer(invocation -> {
+			scheduled.add(invocation.getArgument(0));
+			return mock(ScheduledFuture.class);
+		});
 		ExecutorService triggerPool = Executors.newSingleThreadExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "cancel-finalizer-identity-test");
 			thread.setDaemon(true);
 			return thread;
 		});
-		CancelledRunFinalizer finalizer = new CancelledRunFinalizer(provider, triggerPool, this.properties, this.store,
-				immediate);
+		CancelledRunFinalizer finalizer = new CancelledRunFinalizer(provider, triggerPool, this.properties,
+				retryExecutor);
 		try {
 			// 交棒发生在还有身份的线程上（驱动线程 / HTTP 线程）
 			boolean handed;
@@ -93,20 +97,24 @@ class CancelledRunFinalizerIdentityTest {
 			assertThat(scheduled).as("首次未落定 ⇒ 排一次有界重试").hasSize(1);
 			assertThat(RequestContextUtils.currentOrNull()).isNull();
 			scheduled.get(0).run();
+			assertThat(awaitSize(observed, 2)).as("重试收尾必须已执行").isTrue();
 		}
 		finally {
 			triggerPool.shutdownNow();
 		}
 
-		assertThat(observed).as("首拍与重试都必须按记录身份执行取消收尾")
-			.containsExactly(RECORD_IDENTITY, RECORD_IDENTITY);
+		assertThat(observed).as("首拍与重试都必须按记录身份执行取消收尾").hasSize(2).containsOnly(RECORD_IDENTITY);
 		assertThat(RequestContextUtils.currentOrNull()).as("重试结束不得在执行线程残留身份").isNull();
 	}
 
 	private boolean awaitAttempt(List<TenantUser> observed) throws InterruptedException {
+		return awaitSize(observed, 1);
+	}
+
+	private boolean awaitSize(List<TenantUser> observed, int size) throws InterruptedException {
 		long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
 		while (System.nanoTime() < deadline) {
-			if (!observed.isEmpty()) {
+			if (observed.size() >= size) {
 				return true;
 			}
 			Thread.sleep(10L);
@@ -117,7 +125,8 @@ class CancelledRunFinalizerIdentityTest {
 	private void seedSuspendedRun() {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec);
+			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec, 1L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-finalize", "请求文本", 1_000L);
 			RunSnapshot snapshot = this.store.get(RUN_ID);
 			snapshot.setStatus(RunSnapshot.SUSPENDED);
 			this.store.save(snapshot);

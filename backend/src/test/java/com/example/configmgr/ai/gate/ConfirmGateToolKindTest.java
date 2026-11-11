@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -46,7 +47,7 @@ class ConfirmGateToolKindTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -55,7 +56,7 @@ class ConfirmGateToolKindTest {
 
 	@BeforeEach
 	void setUp() {
-		when(this.cancellations.isCancelled(RUN)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		RunSnapshot snapshot = this.store.seedRun(RUN, SESSION);
@@ -87,7 +88,7 @@ class ConfirmGateToolKindTest {
 	void frontendResultOnAConfirmEntryIsRejectedWithoutTouchingIt() {
 		this.store.putPending(RUN, entry(PendingToolCall.KIND_CONFIRM, PendingToolCall.PENDING));
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN, CALL, "ok", "http-post", false,
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN, CALL, "ok", "http-post", false,
 				null);
 
 		assertThat(submission.outcome().name()).isEqualTo("TOOL_KIND_MISMATCH");
@@ -102,7 +103,7 @@ class ConfirmGateToolKindTest {
 	void cancelledFrontendResultOnAConfirmEntryIsRejectedToo() {
 		this.store.putPending(RUN, entry(PendingToolCall.KIND_CONFIRM, PendingToolCall.PENDING));
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN, CALL, null, "http-post", true,
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN, CALL, null, "http-post", true,
 				null);
 
 		assertThat(submission.outcome().name()).isEqualTo("TOOL_KIND_MISMATCH");
@@ -119,7 +120,7 @@ class ConfirmGateToolKindTest {
 		assertThat(this.store.pending(RUN, CALL).getStatus()).isEqualTo(PendingToolCall.PENDING);
 
 		this.store.putPending(RUN, entry(CALL2, null, PendingToolCall.PENDING));
-		ConfirmGate.Submission result = this.gate.submitFrontendResult(RUN, CALL2, "ok", "http-post", false, null);
+		ConfirmGate.Submission result = GateCalls.submit(this.gate, RUN, CALL2, "ok", "http-post", false, null);
 		assertThat(result.outcome()).as("kind=null 也不得被回灌改写").isEqualTo(ConfirmGate.Outcome.TOOL_KIND_MISMATCH);
 		assertThat(this.store.pending(RUN, CALL2).getStatus()).isEqualTo(PendingToolCall.PENDING);
 	}
@@ -133,7 +134,7 @@ class ConfirmGateToolKindTest {
 			.isEqualTo(ConfirmGate.Outcome.DUPLICATE);
 
 		this.store.putPending(RUN, entry(CALL2, PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_RESULT));
-		assertThat(this.gate.submitFrontendResult(RUN, CALL2, "ok", "http-post", false, null).outcome())
+		assertThat(GateCalls.submit(this.gate, RUN, CALL2, "ok", "http-post", false, null).outcome())
 			.isEqualTo(ConfirmGate.Outcome.DUPLICATE);
 	}
 
@@ -145,7 +146,7 @@ class ConfirmGateToolKindTest {
 		assertThat(this.store.pending(RUN, CALL).getStatus()).isEqualTo(PendingToolCall.REJECTED);
 
 		this.store.putPending(RUN, entry(CALL2, PendingToolCall.KIND_FRONTEND, PendingToolCall.PENDING));
-		assertThat(this.gate.submitFrontendResult(RUN, CALL2, null, "http-post", true, null).outcome())
+		assertThat(GateCalls.submit(this.gate, RUN, CALL2, null, "http-post", true, null).outcome())
 			.isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 		assertThat(this.store.pending(RUN, CALL2).getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
 		assertThat(this.store.pending(RUN, CALL2).isExecuted()).isFalse();
@@ -163,7 +164,7 @@ class ConfirmGateToolKindTest {
 	void unknownEntryStillReportsNotFound() {
 		assertThat(this.gate.submitDecision("no-such-run", CALL, true, null).outcome())
 			.isEqualTo(ConfirmGate.Outcome.NOT_FOUND);
-		assertThat(this.gate.submitFrontendResult("no-such-run", CALL, "ok", "http-post", false, null).outcome())
+		assertThat(GateCalls.submit(this.gate, "no-such-run", CALL, "ok", "http-post", false, null).outcome())
 			.isEqualTo(ConfirmGate.Outcome.NOT_FOUND);
 	}
 

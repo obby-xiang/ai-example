@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.observe;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -79,7 +80,7 @@ class AiTurnLogTraceTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -129,7 +130,7 @@ class AiTurnLogTraceTest {
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(this.runtime));
 		when(this.providerRegistry.target(any())).thenReturn(Optional.empty());
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.chatClient.prompt()).thenReturn(this.requestSpec);

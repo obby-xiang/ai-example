@@ -3,6 +3,7 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ch.qos.logback.classic.Logger;
@@ -67,10 +68,16 @@ class SseChatEmitterWriteBudgetTest {
 	private final ExecutorService writerPool = new ThreadPoolExecutor(0, 8, 60L, TimeUnit.SECONDS,
 			new SynchronousQueue<>(), daemon("budget-writer"));
 
+	/** 投递身份作用域：写出器按"记录身份优先、请求身份兜底"解析，缺身份则帧不归档不投递。 */
+	private RequestContextUtils.SafeCloseable identity;
+
 	@AfterEach
 	void tearDown() {
 		this.deliveryPool.shutdownNow();
 		this.writerPool.shutdownNow();
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	/**
@@ -84,6 +91,7 @@ class SseChatEmitterWriteBudgetTest {
 	 */
 	@BeforeEach
 	void warmUpWriterPool() throws Exception {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
 		CountDownLatch ready = new CountDownLatch(2);
 		CountDownLatch hold = new CountDownLatch(1);
 		for (int i = 0; i < 2; i++) {
@@ -190,42 +198,39 @@ class SseChatEmitterWriteBudgetTest {
 		assertThat(slow.payloads()).as("已摘除的订阅者不再收帧").hasSize(1);
 	}
 
-	// ── S3-② 收口：调用线程被中断也不静默丢帧（与 TIMED_OUT 同出口 = 摘除断连） ──
+	// ── S3-② 收口：调用线程被中断也不静默丢帧（帧边界消费中断 ⇒ 与 TIMED_OUT 同出口 = 摘除断连） ──
 
+	/**
+	 * 异步写路径的中断契约（迁移说明）：中断<b>不</b>由在飞写的 {@code future.get} 消费
+	 * （异步写没有阻塞 get），而是在 drain 的<b>帧边界</b>由 {@code isConsumeInterruptAndEvict}
+	 * 消费 —— 命中即与写超时同出口：摘除订阅者 + complete（前端带 lastSeq 重挂），
+	 * 该帧只落档、不写连接，因此不是"静默丢帧且不断连"。
+	 */
 	@Test
-	void interruptedWriteEvictsTheSubscriberInsteadOfSilentlyDroppingTheFrame() throws Exception {
+	void interruptAtFrameBoundaryEvictsTheSubscriberInsteadOfSilentlyDroppingTheFrame() throws Exception {
 		InMemoryRunStore store = new InMemoryRunStore();
-		// 投递走本用例线程（Runnable::run）⇒ drain 在本线程里等 future.get，可由辅助线程精确打断它；
-		// 写预算给到 30s ⇒ 唯一能让 write 提前返回的就是中断本身（不是超时）。
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, Runnable::run, 256,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(this.writerPool, 30_000L));
-		MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
-		out.attach(slow.emitter());
+		// 投递走本用例线程（Runnable::run）：下一帧的 drain 入口就在本线程，中断位由它消费。
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), MAPPER, Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(this.writerPool, 30_000L),
+				null, null, null);
+		MonitorFaithfulEmitter wire = new MonitorFaithfulEmitter(false, false);
+		out.attach(wire.emitter());
 
-		Thread caller = Thread.currentThread();
-		Thread interrupter = new Thread(() -> {
-			try {
-				if (slow.awaitFirstSend(5L)) {
-					caller.interrupt();
-				}
-			}
-			catch (InterruptedException ex) {
-				Thread.currentThread().interrupt();
-			}
-		}, "budget-interrupter");
-		interrupter.setDaemon(true);
-		interrupter.start();
+		out.delta("中断前的帧");
+		assertThat(wire.awaitFrames(1, 5L)).as("首帧已写出").isTrue();
+		assertThat(awaitWriterIdle((ThreadPoolExecutor) this.writerPool, 5L))
+				.as("首帧写出已归还（drain 独占权已释放，下一帧必定走本线程的 drain 入口）").isTrue();
 
-		out.delta("中断落在这一帧的写出里");
+		Thread.currentThread().interrupt();
+		out.delta("中断后的帧");
 
-		assertThat(Thread.interrupted()).as("中断位已由 SseWriteBudget.write 复位（读后即清除）").isTrue();
+		assertThat(Thread.interrupted()).as("中断位已在帧边界被消费（读后即清除）").isFalse();
 		assertThat(out.subscriberCount())
 				.as("中断 ⇒ 与写超时同出口摘除订阅者（主动断连让前端重挂对账），而非丢帧且不断连")
 				.isZero();
-		assertThat(slow.completes()).as("写出仍在飞 ⇒ 不在调用线程 complete，交接给写出线程").isZero();
-
-		slow.release();
-		assertThat(slow.awaitCompletes(1, 5L)).as("写出返回后由写出线程补做收尾").isTrue();
+		assertThat(wire.completes()).as("摘除即 complete（前端据此重挂）").isEqualTo(1);
+		assertThat(wire.payloads()).as("被中断的那一帧不写连接").hasSize(1);
+		assertThat(store.events(RUN_ID)).as("帧仍在归档里，重挂差量可补（不是静默丢失）").hasSize(2);
 	}
 
 	// ── 写在飞期间的收尾请求：不得阻塞出帧线程 ───────────────────────────────
@@ -290,9 +295,9 @@ class SseChatEmitterWriteBudgetTest {
 			// 订阅者先被摘、首帧 send 永不进入（CI 实证：5.006s 卡在 awaitFirstSend，本用例偶发红）。
 			// 预热后预算只衡量"写出被卡住"的时长，本用例"饱和（而非超时）摘除"的判据才成立。
 			warmUpWriter(singleWriter);
-			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
+			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), MAPPER, this.deliveryPool,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-					SseWriteBudget.on(singleWriter, 300L));
+					SseWriteBudget.on(singleWriter, 300L), null, null, null);
 			MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
 			// ① 只挂慢订阅者：没有竞争者 ⇒ 唯一的写线程必然被它的首帧写出占住（顺序可判定）
 			out.attach(slow.emitter());
@@ -345,9 +350,10 @@ class SseChatEmitterWriteBudgetTest {
 			// 同 writerPoolSaturation* 的预热：300ms 预算不得被"现场建唯一写线程"的时延吃掉，
 			// 否则慢订阅者的首帧写还没进入就被判超时，本用例"先超时、后饱和各摘一条"的判据不成立。
 			warmUpWriter(singleWriter);
-			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
+			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), MAPPER, this.deliveryPool,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(singleWriter, 300L));
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(singleWriter, 300L),
+					null, null, null);
 			MonitorFaithfulEmitter slow = new MonitorFaithfulEmitter(true, false);
 			MonitorFaithfulEmitter healthy = new MonitorFaithfulEmitter(false, false);
 			out.attach(slow.emitter());
@@ -421,9 +427,10 @@ class SseChatEmitterWriteBudgetTest {
 			});
 			assertThat(blockerStarted.await(5, TimeUnit.SECONDS)).as("唯一的工作线程已被占住").isTrue();
 
-			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool,
+			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), MAPPER, this.deliveryPool,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(queuedWriter, 300L));
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.on(queuedWriter, 300L),
+					null, null, null);
 			MonitorFaithfulEmitter sub = new MonitorFaithfulEmitter(false, false);
 			out.attach(sub.emitter());
 
@@ -494,8 +501,8 @@ class SseChatEmitterWriteBudgetTest {
 	@Test
 	void directBudgetKeepsTheInlineSendPath() throws Exception {
 		InMemoryRunStore store = new InMemoryRunStore();
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool, 256,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES);
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), MAPPER, this.deliveryPool, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		MonitorFaithfulEmitter wire = new MonitorFaithfulEmitter(false, false);
 		out.attach(wire.emitter());
 
@@ -509,9 +516,9 @@ class SseChatEmitterWriteBudgetTest {
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private SseChatEmitter budgeted(InMemoryRunStore store, int queueCapacity, long writeTimeoutMillis) {
-		return new SseChatEmitter(RUN_ID, store, MAPPER, this.deliveryPool, queueCapacity,
+		return new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), MAPPER, this.deliveryPool, queueCapacity,
 				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.on(this.writerPool, writeTimeoutMillis));
+				SseWriteBudget.on(this.writerPool, writeTimeoutMillis), null, null, null);
 	}
 
 	/**

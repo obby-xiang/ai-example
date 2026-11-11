@@ -138,8 +138,11 @@ class ModelDrivenConditionCollectionResumeTest {
 
 	private ResumeService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		this.registryContext = new AnnotationConfigApplicationContext();
 		this.registryContext.registerBean(WizardTools.class);
@@ -155,10 +158,11 @@ class ModelDrivenConditionCollectionResumeTest {
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenAnswer(invocation -> invocation.<PendingToolCall>getArgument(2).getResultText());
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
-		when(this.chatService.systemPromptText(any())).thenReturn(SYSTEM_TEXT);
+		when(this.chatService.systemPromptText(any(), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn(SYSTEM_TEXT);
 		when(this.chatService.workspaceStateText(any())).thenAnswer(invocation -> {
 			AiContext context = invocation.getArgument(0);
 			return "## 当前工作区状态\n<workspace_state>\n任务: #" + context.getTaskId()
@@ -186,6 +190,9 @@ class ModelDrivenConditionCollectionResumeTest {
 	void tearDown() {
 		if (this.registryContext != null) {
 			this.registryContext.close();
+		}
+		if (this.identity != null) {
+			this.identity.close();
 		}
 	}
 
@@ -341,12 +348,16 @@ class ModelDrivenConditionCollectionResumeTest {
 		PendingToolCall createTask = entry(CALL_CREATE, RunContextRefresher.TOOL_CREATE_TASK,
 				"{\"type\":\"EXPORT\"}", PendingToolCall.KIND_CONFIRM, PendingToolCall.EXECUTED,
 				ToolOutcome.OK.wire());
+		createTask.setCreatedTaskId(TASK_ID);
 		createTask.setResultText("已创建导出任务 #" + TASK_ID + "（当前步骤：SELECT_DEFS）");
 		this.store.appendLedger(RUN_ID, createTask, createTask.getResultText());
 	}
 
 	private void seedSuspendedRun(List<PendingToolCall> inFlight, List<String> userMessages, AiContext context) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(context.toMap());
 		List<Message> history = new ArrayList<>();

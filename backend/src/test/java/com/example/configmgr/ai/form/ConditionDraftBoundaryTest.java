@@ -60,6 +60,20 @@ import static org.mockito.Mockito.when;
 })
 class ConditionDraftBoundaryTest {
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private static final String RUN_ID = "run-cond-draft-boundary";
 
 	private static final String SESSION_ID = "s-cond-draft-boundary";
@@ -195,7 +209,7 @@ class ConditionDraftBoundaryTest {
 		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, this.taskId);
-		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L);
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_RUN_ID, RUN_ID);
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of(DEF));
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions);
 		return AiContext.of("export", "EXPORT", TaskSteps.QUERY_COND, this.taskId, "ACTIVE", extra);
@@ -203,6 +217,9 @@ class ConditionDraftBoundaryTest {
 
 	private void seedRun(AiContext context) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setContext(context.toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(history()));
 		this.store.save(snapshot);

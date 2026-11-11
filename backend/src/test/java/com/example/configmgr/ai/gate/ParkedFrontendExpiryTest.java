@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -57,6 +58,20 @@ import static org.mockito.Mockito.when;
  */
 class ParkedFrontendExpiryTest {
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private static final String RUN_ID = "run-parked-expiry";
 
 	private static final String SESSION_ID = "s-parked-expiry";
@@ -65,9 +80,9 @@ class ParkedFrontendExpiryTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	private final InMemoryRunStore store = new InMemoryRunStore(true);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -84,20 +99,25 @@ class ParkedFrontendExpiryTest {
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
 		this.properties.getHitl().setFrontendToolTimeout(Duration.ofSeconds(1));
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf("navigate_to")).thenReturn(ToolMeta.Channel.FRONTEND);
 		when(this.toolRegistry.riskOf("navigate_to")).thenReturn(ToolMeta.RiskLevel.READ);
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		when(provider.getIfAvailable()).thenReturn(this.resumeService);
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
-				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
+				List.of(), provider, Runnable::run, null, ToolExecutionExecutors.retryScheduler());
 		SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry,
 				mock(MessageJsonCodec.class), this.beacon, this.cancellations, new ToolResultLimiter(this.properties),
-				List.of());
+				List.of(), null, null, null, null, this.properties,
+				ToolExecutionExecutors.identityPropagating());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
 

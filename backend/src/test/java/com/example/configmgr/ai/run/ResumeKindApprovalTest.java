@@ -83,7 +83,7 @@ class ResumeKindApprovalTest {
 
 	@BeforeEach
 	void setUp() {
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.registry.of(RUN)).thenReturn(this.emitter);
 		when(this.chatService.buildResumedPrompt(eq(RUN), eq(SESSION), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));

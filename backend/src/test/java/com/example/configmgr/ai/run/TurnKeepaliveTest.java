@@ -50,9 +50,20 @@ class TurnKeepaliveTest {
 
 	private ScheduledExecutorService scheduler;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
-		this.out = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+		com.example.configmgr.ai.run.RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
+		this.store.save(snapshot);
+		this.out = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper,
+				Runnable::run, com.example.configmgr.ai.config.AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+				com.example.configmgr.ai.config.AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null);
 		this.wire = FrameWire.attachTo(this.out);
 		this.out.start(SESSION_ID);
 		this.scheduler = Executors.newScheduledThreadPool(1, runnable -> {
@@ -65,6 +76,9 @@ class TurnKeepaliveTest {
 	@AfterEach
 	void tearDown() {
 		this.scheduler.shutdownNow();
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	/** 上游全程无事件也照样保活：节拍只取决于墙钟。 */

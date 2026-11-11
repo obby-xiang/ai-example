@@ -86,7 +86,7 @@ class AiApprovalLogTraceTest {
 		this.appender.start();
 		this.traceLogger.addAppender(this.appender);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 	}

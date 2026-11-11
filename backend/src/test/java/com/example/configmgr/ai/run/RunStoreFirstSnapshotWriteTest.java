@@ -92,7 +92,8 @@ class RunStoreFirstSnapshotWriteTest {
 		this.store.save(cancelled);
 
 		assertThatThrownBy(() -> this.store.create(RUN_ID, SESSION_ID, AiContext.empty(),
-				List.of(new UserMessage("问题")), this.codec))
+				List.of(new UserMessage("问题")), this.codec, 7L, "test-model",
+				new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "问题", 1000L))
 			.as("首笔快照被拒写 ⇒ 必须失败，不得返回一个 Redis 里并不存在的快照")
 			.isInstanceOf(AiStateUnavailableException.class);
 
@@ -113,9 +114,12 @@ class RunStoreFirstSnapshotWriteTest {
 		cancelled.setMessageJson(this.codec.serializeAll(List.of()));
 		this.store.save(cancelled);
 		this.fake.setsByKey.clear();
+		// 身份列表索引现在是 ZSET（ai:runs:<t>:<u>）：种子 save 会登记它，先清空，才测得到"失败创建不得补登记"。
+		this.fake.zsetsByKey.clear();
 
 		assertThatThrownBy(() -> this.store.create(RUN_ID, SESSION_ID, AiContext.empty(),
-				List.of(new UserMessage("问题")), this.codec))
+				List.of(new UserMessage("问题")), this.codec, 7L, "test-model",
+				new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "问题", 1000L))
 			.isInstanceOf(AiStateUnavailableException.class);
 
 		assertThat(this.store.allRunIds()).as("没有持久面的轮不得登记进 ai:runs 索引").doesNotContain(RUN_ID);
@@ -127,7 +131,17 @@ class RunStoreFirstSnapshotWriteTest {
 
 		@Override
 		public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
-				MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
+				MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+				String clientRequestId, String requestText, long turnStartedAtMs) {
+			throw new AiStateUnavailableException("模拟首笔快照写失败 runId=" + runId);
+		}
+
+		/** 首轮实际走的是带请求扩展体的写口（extraBody 来自 runtime.options()）。 */
+		@Override
+		public RunSnapshot createWithRequestExtraBody(String runId, String sessionId, AiContext context,
+				List<Message> history, MessageJsonCodec codec, Long providerId, String modelId,
+				RunSnapshot.FrozenParams frozen, Map<String, Object> requestExtraBody, String clientRequestId,
+				String requestText, long turnStartedAtMs) {
 			throw new AiStateUnavailableException("模拟首笔快照写失败 runId=" + runId);
 		}
 
@@ -158,7 +172,7 @@ class RunStoreFirstSnapshotWriteTest {
 	void setUpChatHarness() {
 		this.tenantScope = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.chatStore = new FailingCreateStore();
-		this.chatRegistry = new RunRegistry(this.chatStore, this.mapper, null);
+		this.chatRegistry = TestRunRegistryFactory.create(this.chatStore, this.mapper, null);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "first-snapshot-watchdog");
 			thread.setDaemon(true);
@@ -170,7 +184,8 @@ class RunStoreFirstSnapshotWriteTest {
 		this.streamSpec = mock(ChatClient.StreamResponseSpec.class);
 		this.providerRegistry = mock(AiProviderRegistry.class);
 		ProviderRuntime runtime = new ProviderRuntime(null, "prov", "model", "http://localhost", "/chat/completions",
-				"k", null, null, this.chatModel, this.chatClient);
+				"k", org.springframework.ai.openai.OpenAiChatOptions.builder().build(), null, this.chatModel,
+				this.chatClient);
 		when(this.providerRegistry.current()).thenReturn(runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(runtime));
 		ChatMemory chatMemory = mock(ChatMemory.class);

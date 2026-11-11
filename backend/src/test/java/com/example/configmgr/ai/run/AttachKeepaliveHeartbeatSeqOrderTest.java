@@ -54,8 +54,10 @@ class AttachKeepaliveHeartbeatSeqOrderTest {
 	@Test
 	void heartbeatSequenceIsMonotonicInArrivalOrderAcrossBothProducers() throws Exception {
 		HeartbeatGate gate = new HeartbeatGate();
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), new BlockingMapper(gate),
-				Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY);
+		InMemoryRunStore store = new InMemoryRunStore();
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), new BlockingMapper(gate),
+				Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, 1024 * 1024,
+				com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null);
 		List<String> delivered = new CopyOnWriteArrayList<>();
 		ScheduledExecutorService keepalive = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "test-attach-keepalive");

@@ -43,6 +43,10 @@ class AiControllerRunsCurrentTest {
 
 	private final RunStore runStore = mock(RunStore.class);
 
+	/** 事件日志末号唯一来源（RunStore 不再持有事件面）。 */
+	private final com.example.configmgr.ai.run.FrameStore frameStore =
+			mock(com.example.configmgr.ai.run.FrameStore.class);
+
 	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(controller()).build();
 
 	@Test
@@ -86,7 +90,7 @@ class AiControllerRunsCurrentTest {
 	void suspendedWithPendingFrontendEntryIsAwaitingExternal() throws Exception {
 		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(pending("c-1", PendingToolCall.PENDING,
 				PendingToolCall.KIND_FRONTEND)));
-		when(this.runStore.lastEventSeq("r-1")).thenReturn(42L);
+		when(this.frameStore.lastSeqIfKnown("r-1")).thenReturn(java.util.OptionalLong.of(42L));
 
 		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
 			.andExpect(status().isOk())
@@ -181,13 +185,15 @@ class AiControllerRunsCurrentTest {
 	}
 
 	@Test
-	void pendingEntryWithoutPreflightReportsNullInsteadOfInventingOne() throws Exception {
+	void pendingEntryWithoutPreflightReportsAnEmptyObjectInsteadOfInventingFacts() throws Exception {
 		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(pending("c-1", PendingToolCall.PENDING,
 				PendingToolCall.KIND_FRONTEND)));
 
 		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.pendingEntries[0].preflight").doesNotExist());
+			// 形状固定：没有预检时给空对象（不省略键、也不编造 reportHash/impact/checks）
+			.andExpect(jsonPath("$.data.pendingEntries[0].preflight").isMap())
+			.andExpect(jsonPath("$.data.pendingEntries[0].preflight").isEmpty());
 	}
 
 	@Test
@@ -240,7 +246,7 @@ class AiControllerRunsCurrentTest {
 		when(this.runStore.get(runId)).thenReturn(snapshot);
 		when(this.runStore.pendings(runId)).thenReturn(pendings);
 		when(this.runStore.pendingsLenient(runId)).thenReturn(pendings);
-		when(this.runStore.lastEventSeq(runId)).thenReturn(0L);
+		when(this.frameStore.lastSeqIfKnown(runId)).thenReturn(java.util.OptionalLong.of(0L));
 	}
 
 	/**
@@ -290,7 +296,7 @@ class AiControllerRunsCurrentTest {
 		MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
 
 		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of());
-		when(this.runStore.lastEventSeq("r-1")).thenReturn(42L);
+		when(this.frameStore.lastSeqIfKnown("r-1")).thenReturn(java.util.OptionalLong.of(42L));
 
 		mvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
 			.andExpect(status().isOk())
@@ -325,11 +331,13 @@ class AiControllerRunsCurrentTest {
 
 	/** 只装配被测端点用得到的依赖（其余为桩：本用例不发模型请求、不读 Redis）。 */
 	private AiController controller() {
-		return new AiController(mock(AiAvailability.class), provider(), provider(), provider(), mock(ChatMemory.class),
+		AiController built = new AiController(mock(AiAvailability.class), provider(), provider(), provider(), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), mock(SessionGate.class), mock(ConfirmGate.class), this.runStore,
 				mock(RunRegistry.class), mock(CancellationRegistry.class), mock(RedisAvailability.class),
 				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), new AiProperties(), mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
+		org.springframework.test.util.ReflectionTestUtils.setField(built, "frameStore", this.frameStore);
+		return built;
 	}
 
 	@SuppressWarnings("unchecked")

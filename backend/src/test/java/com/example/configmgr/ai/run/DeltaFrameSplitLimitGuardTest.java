@@ -118,14 +118,14 @@ class DeltaFrameSplitLimitGuardTest {
 	@Test
 	void emitterRejectsMaxFrameBytesBelowRuntimeFloor() {
 		for (int limit : new int[] { 1, 60, 100, 110, 128, 130, MIN_ALLOWED - 1 }) {
-			assertThatThrownBy(() -> new SseChatEmitter(RUN_ID, this.store, this.mapper, Runnable::run, 256, limit))
+			assertThatThrownBy(() -> new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper, Runnable::run, 256, limit, com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null))
 					.as("maxFrameBytes=%s 必须在装配期失败", limit)
 					.isInstanceOf(IllegalStateException.class)
 					.hasMessageContaining("max-frame-bytes")
 					.hasMessageContaining("1024")
 					.hasMessageContaining(String.valueOf(limit));
 		}
-		assertThat(new SseChatEmitter(RUN_ID, this.store, this.mapper, Runnable::run, 256, MIN_ALLOWED).maxFrameBytes())
+		assertThat(new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper, Runnable::run, 256, MIN_ALLOWED, com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null).maxFrameBytes())
 				.as("下限本身必须可用")
 				.isEqualTo(MIN_ALLOWED);
 	}
@@ -134,7 +134,7 @@ class DeltaFrameSplitLimitGuardTest {
 
 	@Test
 	void minimumAllowedLimitStillSplitsWithoutTruncation() {
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.mapper, Runnable::run, 256, MIN_ALLOWED);
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper, Runnable::run, 256, MIN_ALLOWED, com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null);
 		FrameWire wire = FrameWire.attachTo(out);
 		String original = "字😀".repeat(500);   // 每组 3 + 12 = 15 字节 ⇒ 7500 字节 > 1024
 

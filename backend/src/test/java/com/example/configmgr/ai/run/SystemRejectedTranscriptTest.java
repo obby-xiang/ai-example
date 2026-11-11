@@ -41,7 +41,7 @@ class SystemRejectedTranscriptTest {
 				assistant("后缀", "", "create-entry", toolCall("create-1", AiToolNames.CREATE_TASK)),
 				toolResponse("gf-1", AiToolNames.GENERATIVE_FORM, "rejected"),
 				toolResponse("create-1", AiToolNames.CREATE_TASK, "waiting"),
-				assistant("前缀后缀独立正文", "独立推理", "independent-entry"));
+				assistant("独立正文", "独立推理", "independent-entry"));
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		SseChatEmitter parked = emitter(frames);
 		parked.textStart();
@@ -75,6 +75,41 @@ class SystemRejectedTranscriptTest {
 		assertThat(independent.entryId()).endsWith("independent-entry");
 		assertThat(independent.reasoning()).isEqualTo("独立推理");
 		assertThat(independent.segments()).isNotEmpty();
+	}
+
+	@Test
+	void compactionSummaryDoesNotRequirePublicSseSegmentsButOrdinaryPlainStillDoes() {
+		PendingToolCall create = pending("create-1", AiToolNames.CREATE_TASK, null);
+		AssistantMessage summary = AssistantMessage.builder()
+			.content("内部压缩摘要正文")
+			.properties(Map.of("origin", "COMPACTION_SUMMARY",
+					TranscriptEntries.TRANSCRIPT_TEXT_ID_KEY, "summary-entry",
+					ResilientChatService.REASONING_METADATA_KEY, "摘要内部推理"))
+			.build();
+		List<Message> history = List.of(summary,
+				assistant("真实正文", "真实推理", "plain-entry"),
+				assistant("工具正文", "", "create-entry", toolCall("create-1", AiToolNames.CREATE_TASK)),
+				toolResponse("create-1", AiToolNames.CREATE_TASK, "waiting"));
+		SseChatEmitter out = emitter();
+		out.toolStart(create);
+		emitText(out, "真实正文");
+		out.reasoningDelta("真实推理");
+		out.reasoningEnd();
+		List<TranscriptEntry> entries = buildEntries(history, List.of(create));
+
+		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false);
+
+		assertThat(populated).isNotNull();
+		TranscriptEntry projected = entries.stream()
+			.filter(entry -> "COMPACTION_SUMMARY".equals(entry.origin())).findFirst().orElseThrow();
+		assertThat(projected.text()).isEqualTo("内部压缩摘要正文");
+		assertThat(projected.origin()).isEqualTo("COMPACTION_SUMMARY");
+		assertThat(projected.segments()).isEmpty();
+		List<TranscriptEntry> unresolved = buildEntries(
+				List.of(assistant("没有公开帧的普通正文", "", "ordinary-missing-entry")), List.of());
+		Object ordinaryPopulated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out,
+				unresolved, false);
+		assertThat(ordinaryPopulated).isNull();
 	}
 
 	@Test

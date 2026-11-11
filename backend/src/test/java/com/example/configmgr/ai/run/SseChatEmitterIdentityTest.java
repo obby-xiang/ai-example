@@ -14,8 +14,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -23,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongConsumer;
 
@@ -63,6 +66,9 @@ class SseChatEmitterIdentityTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
+	/** 身份分桶的 FrameStore（键由当前线程身份算出，与生产 {@code RedisFrameStore} 同口径）。 */
+	private final IdentityFrameStore frames = new IdentityFrameStore(this.fake, this.store);
+
 	@Test
 	void deliveryUsesTheRecordIdentityNotTheIdentityLeftOnThePoolThread() throws Exception {
 		seedRun();
@@ -73,7 +79,9 @@ class SseChatEmitterIdentityTest {
 			SseChatEmitter out;
 			try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 					RECORD_IDENTITY.userId())) {
-				out = new SseChatEmitter(RUN_ID, this.store, this.mapper, deliveryPool, 256);
+				out = new SseChatEmitter(RUN_ID, this.store, this.frames, this.mapper,
+						deliveryPool, 256, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+						SseWriteBudget.direct(), new NoopWakeBus(), null, null);
 			}
 			out.attach(sseEmitter(observed, sent));
 			out.delta("第一段");
@@ -88,21 +96,29 @@ class SseChatEmitterIdentityTest {
 	}
 
 	@Test
-	void withoutARecordIdentityThePoolIdentityIsNotAdopted() throws Exception {
+	void withoutARecordIdentityTheFrameIsNotArchivedOrDeliveredUnderAnyIdentity() throws Exception {
 		// 记录存在但写出器创建时没有任何身份（跨实例唤醒路径）：没有"取键提示"就读不到记录，
-		// 于这一轮没有可恢复的身份 —— 投递线程上的残留身份不得被沿用（也不伪造默认租户）。
+		// 这一轮没有可恢复的身份 ⇒ fail-closed：既不用投递线程上的残留身份，也不写 legacy 键族。
 		seedRun();
 		ExecutorService deliveryPool = poolThreadCarrying(STALE_POOL_IDENTITY);
 		try {
 			AtomicReference<TenantUser> observed = new AtomicReference<>();
 			CountDownLatch sent = new CountDownLatch(1);
-			SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.mapper, deliveryPool, 256);
+			ChannelRecordingBus bus = new ChannelRecordingBus();
+			SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.frames,
+					this.mapper, deliveryPool, 256, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+					SseWriteBudget.direct(), bus, null, null);
 			SseEmitter emitter = sseEmitter(observed, sent);
 			out.attach(emitter);
 			out.delta("第一段");
 
-			assertThat(sent.await(5, TimeUnit.SECONDS)).as("投递池应写出该帧").isTrue();
-			assertThat(observed.get()).as("没有记录身份 ⇒ 不得沿用投递线程上的残留身份").isNull();
+			assertThat(sent.await(1, TimeUnit.SECONDS)).as("身份不可确认 ⇒ 不投递（fail-closed）").isFalse();
+			assertThat(observed.get()).as("不得沿用投递线程上的残留身份").isNull();
+			assertThat(readFrames(RECORD_IDENTITY)).as("不得写记录身份的事件面").isEmpty();
+			assertThat(readFrames(STALE_POOL_IDENTITY)).as("不得写残留身份的事件面").isEmpty();
+			assertThat(readFrames(null)).as("不得写 legacy 事件面").isEmpty();
+			assertThat(issuedSeq(null)).as("legacy 序号键不得被写").isZero();
+			assertThat(bus.publishedChannels).as("没有身份就没有可发布的频道").isEmpty();
 		}
 		finally {
 			deliveryPool.shutdownNow();
@@ -144,7 +160,9 @@ class SseChatEmitterIdentityTest {
 		SseChatEmitter out;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			out = new SseChatEmitter(RUN_ID, blockingStore, this.mapper, Runnable::run, 256);
+			out = new SseChatEmitter(RUN_ID, blockingStore, this.frames, this.mapper,
+					Runnable::run, 256, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+					SseWriteBudget.direct(), new NoopWakeBus(), null, null);
 		}
 
 		Method deliveryIdentity = SseChatEmitter.class.getDeclaredMethod("deliveryIdentity");
@@ -208,9 +226,10 @@ class SseChatEmitterIdentityTest {
 		SseChatEmitter out;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			out = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper, Runnable::run,
+			out = new SseChatEmitter(RUN_ID, this.store, this.frames, this.mapper, Runnable::run,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, listener);
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, listener,
+					null);
 		}
 
 		// 订阅降级：两次登记都失败 ⇒ wakeRegistered 回退为 false，而两个订阅者仍然挂着
@@ -247,9 +266,10 @@ class SseChatEmitterIdentityTest {
 		SseChatEmitter out;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			out = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper, Runnable::run,
+			out = new SseChatEmitter(RUN_ID, this.store, this.frames, this.mapper, Runnable::run,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, null);
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, null,
+					null);
 		}
 
 		// 漏开作用域的调用方：没有请求身份
@@ -274,10 +294,9 @@ class SseChatEmitterIdentityTest {
 	/** 按给定身份读事件日志（{@code null} = 显式无身份 ⇒ legacy 键）。 */
 	private List<Map<String, Object>> readFrames(TenantUser identity) {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-			return RunStoreFrameStore.of(this.store).readFrom(RUN_ID, 0L, 0);
+			return this.frames.readFrom(RUN_ID, 0L, 0);
 		}
 	}
-
 	// ── Task 2：身份读取失败 ⇒ 不缓存 null、不写 legacy、下一拍重试 ───────────────
 
 	/**
@@ -316,31 +335,52 @@ class SseChatEmitterIdentityTest {
 		SseChatEmitter out;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			out = new SseChatEmitter(RUN_ID, flaky, RunStoreFrameStore.of(flaky), this.mapper, Runnable::run,
+			out = new SseChatEmitter(RUN_ID, flaky, this.frames, this.mapper, Runnable::run,
 					AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, null);
+					AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), bus, null,
+					null);
 		}
 		FrameWire wire = FrameWire.attachTo(out);
 
 		out.delta("第一拍：身份读取失败");
-		out.delta("第二拍：Redis 已恢复");
+		out.delta("第二拍：退避窗口内（用已校验 hint 继续写本轮键）");
+
+		assertThat(reads.get()).as("读失败不是'无身份'：不缓存 null；退避窗口内不重复打 Redis").isEqualTo(1);
+		clearIdentityBackoff(out);
+		out.delta("第三拍：退避到期后重试");
 
 		SoftAssertions softly = new SoftAssertions();
-		softly.assertThat(reads.get()).as("身份读取失败不得被缓存：下一拍必须重试").isEqualTo(2);
+		softly.assertThat(reads.get()).as("退避到期后必须重新解析（失败不被缓存）").isEqualTo(2);
 		softly.assertThat(readFrames(RECORD_IDENTITY))
-			.as("两帧都必须落在本轮记录身份的事件键上（失败那一拍用已校验 hint）")
+			.as("三帧都必须落在本轮记录身份的事件键上（失败那一拍用已校验 hint）")
 			.extracting(frame -> String.valueOf(frame.get("type")))
-			.containsExactly("delta", "delta");
+			.containsExactly("delta", "delta", "delta");
 		softly.assertThat(readFrames(null)).as("身份读取失败不得写 legacy 事件键").isEmpty();
 		softly.assertThat(issuedSeq(null)).as("legacy 序号键不得被写").isZero();
 		softly.assertThat(issuedSeq(RECORD_IDENTITY)).as("序号仍登记在本轮身份上").isPositive();
-		softly.assertThat(wire.frames()).as("两帧都要实时投递（不因一次读抖动整段静音）").hasSize(2);
+		softly.assertThat(wire.frames()).as("三帧都要实时投递（不因一次读抖动整段静音）").hasSize(3);
 		softly.assertThat(bus.publishedChannels).as("唤醒仍发布到本轮身份的频道")
 			.containsOnly(channelOf(RECORD_IDENTITY));
 		softly.assertAll();
 	}
 
+	/** 清掉身份解析的有界退避（确定性验证"下一拍重试"，不 sleep）。 */
+	private static void clearIdentityBackoff(SseChatEmitter out) {
+		try {
+			java.lang.reflect.Field retryAt = SseChatEmitter.class.getDeclaredField("identityRetryAtMs");
+			retryAt.setAccessible(true);
+			((AtomicLong) retryAt.get(out)).set(0L);
+		}
+		catch (ReflectiveOperationException ex) {
+			throw new IllegalStateException("清除身份解析退避失败", ex);
+		}
+	}
+
 	private long issuedSeq(TenantUser identity) {
+		if (identity == null) {
+			String legacyKey = RunStore.SEQ_PREFIX + "{run:" + RUN_ID + "}";
+			return Long.parseLong(this.fake.strings.getOrDefault(legacyKey, "0"));
+		}
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			return this.store.lastIssuedSeq(RUN_ID);
 		}
@@ -362,10 +402,7 @@ class SseChatEmitterIdentityTest {
 	}
 
 	private static String channelOf(TenantUser identity) {
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(identity.tenantId(),
-				identity.userId())) {
-			return RedisFrameWakeBus.channel(RUN_ID);
-		}
+		return RedisFrameWakeBus.channel(identity, RUN_ID);
 	}
 
 	private static SseEmitter capturingEmitter(List<Runnable> completions) {
@@ -375,6 +412,80 @@ class SseChatEmitterIdentityTest {
 			return null;
 		}).when(emitter).onCompletion(any(Runnable.class));
 		return emitter;
+	}
+
+	/**
+	 * 身份分桶的 {@link FrameStore}：桶键由<b>当前线程身份</b>算出（与生产 {@code RedisFrameStore}
+	 * 的 {@code ai:xevents:{run:<runId>}} 同口径），因此"写出器是否在记录身份下出帧"可直接由桶内容判定。
+	 * 序号同时写到身份的 {@code ai:seq} 键（本替身的 {@code opsForValue}），供 {@code lastIssuedSeq} 读。
+	 */
+	private static final class IdentityFrameStore implements FrameStore {
+
+		private final FakeLeaseRedis fake;
+
+		private final RunStore store;
+
+		private final Map<String, AtomicLong> seqs = new ConcurrentHashMap<>();
+
+		private final Map<String, List<Map<String, Object>>> logs = new ConcurrentHashMap<>();
+
+		IdentityFrameStore(FakeLeaseRedis fake, RunStore store) {
+			this.fake = fake;
+			this.store = store;
+		}
+
+		private static String bucket(String runId) {
+			TenantUser identity = RequestContextUtils.currentOrNull();
+			return (identity == null ? "legacy" : identity.tenantId() + ":" + identity.userId()) + "|" + runId;
+		}
+
+		@Override
+		public long nextSeq(String runId) {
+			long seq = this.seqs.computeIfAbsent(bucket(runId), ignored -> new AtomicLong()).incrementAndGet();
+			TenantUser identity = RequestContextUtils.currentOrNull();
+			if (identity != null) {
+				this.fake.strings.put(this.store.seqKey(runId), Long.toString(seq));
+			}
+			return seq;
+		}
+
+		@Override
+		public void append(String runId, Map<String, Object> frame) {
+			if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+				return;
+			}
+			this.logs.computeIfAbsent(bucket(runId), ignored -> new CopyOnWriteArrayList<>())
+				.add(new LinkedHashMap<>(frame));
+		}
+
+		@Override
+		public List<Map<String, Object>> readFrom(String runId, long afterSeq, int limit) {
+			List<Map<String, Object>> out = new ArrayList<>();
+			int max = limit <= 0 ? Integer.MAX_VALUE : limit;
+			for (Map<String, Object> frame : this.logs.getOrDefault(bucket(runId), List.of())) {
+				long seq = frame.get("seq") instanceof Number number ? number.longValue() : 0L;
+				if (seq <= afterSeq) {
+					continue;
+				}
+				out.add(frame);
+				if (out.size() >= max) {
+					break;
+				}
+			}
+			return out;
+		}
+
+		@Override
+		public long lastSeq(String runId) {
+			long last = 0L;
+			for (Map<String, Object> frame : this.logs.getOrDefault(bucket(runId), List.of())) {
+				if (frame.get("seq") instanceof Number number) {
+					last = Math.max(last, number.longValue());
+				}
+			}
+			return last;
+		}
+
 	}
 
 	/** 按频道名记录订阅/发布的总线替身（频道名由当前线程身份算出，与生产实现同一拼法）。 */
@@ -387,21 +498,18 @@ class SseChatEmitterIdentityTest {
 		private volatile boolean subscribeSucceeds = true;
 
 		@Override
-		public void publish(String runId, long upperBoundSeq) {
-			this.publishedChannels.add(RedisFrameWakeBus.channel(runId));
+		public void publish(String runId, long upperBoundSeq, boolean terminal) {
+			this.publishedChannels.add(RedisFrameWakeBus.channel(RequestContextUtils.require(), runId));
 		}
 
 		@Override
-		public boolean subscribe(String runId, LongConsumer onWake) {
+		public FrameWakeBus.Subscription subscribeHandle(String runId, long generation, LongConsumer onWake) {
 			if (!this.subscribeSucceeds) {
-				return false;
+				return null;
 			}
-			this.subscribedChannels.add(RedisFrameWakeBus.channel(runId));
-			return true;
-		}
-
-		@Override
-		public void unsubscribe(String runId) {
+			this.subscribedChannels.add(RedisFrameWakeBus.channel(RequestContextUtils.require(), runId));
+			return () -> {
+			};
 		}
 
 	}
@@ -411,7 +519,8 @@ class SseChatEmitterIdentityTest {
 				this.mapper);
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), codec);
+			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), codec, 1L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1_000L);
 		}
 	}
 

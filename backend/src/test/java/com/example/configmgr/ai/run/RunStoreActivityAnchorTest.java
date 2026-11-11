@@ -2,8 +2,11 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -30,8 +33,6 @@ class RunStoreActivityAnchorTest {
 
 	private static final String RUN_ID = "run-anchor";
 
-	private static final String LEGACY_KEY = RunStore.runScopedKey(RunStore.EVENTS_PREFIX, RUN_ID);
-
 	private final FakeFrameRedis fake = new FakeFrameRedis();
 
 	private final ObjectMapper mapper = new ObjectMapper();
@@ -42,20 +43,35 @@ class RunStoreActivityAnchorTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
+	/** 活动锚点/Stream 键按身份拼：读写都必须处在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	/** 新写口（Stream）里的业务帧必须被业务活动锚点看见。 */
 	@Test
 	void streamFramesAreVisibleToTheActivityAnchor() {
 		appendToStream("delta", 7L, 5_000L);
 
 		assertThat(this.store.lastActivityAtMs(RUN_ID))
-			.as("业务活动锚点仍只读已冻结的旧 LIST ⇒ 新业务帧不可见（R1-09）")
+			.as("活动锚点必须看见事件日志 Stream 尾部的业务帧（R1-09）")
 			.isEqualTo(5_000L);
 	}
 
-	/** 旧 LIST 与 Stream 混合：锚点取两者的最新时刻，不假设写口。 */
+	/** 活动锚点键与 Stream 尾部：取两者的最新时刻，不假设哪一边是当前写口。 */
 	@Test
-	void mixedLegacyListAndStreamAnchorTakesNewest() {
-		seedLegacyList("delta", 3L, 1_000L);
+	void anchorKeyAndStreamTailTakeTheNewest() {
+		this.store.touchBusinessActivity(RUN_ID, 1_000L);
 		appendToStream("delta", 7L, 5_000L);
 
 		assertThat(this.store.lastActivityAtMs(RUN_ID))
@@ -63,11 +79,11 @@ class RunStoreActivityAnchorTest {
 			.isEqualTo(5_000L);
 
 		String otherRun = "run-anchor-legacy-newer";
-		seedLegacyList(otherRun, "tool_start", 2L, 9_000L);
+		this.store.touchBusinessActivity(otherRun, 9_000L);
 		appendToStream(otherRun, "delta", 4L, 5_000L);
 
 		assertThat(this.store.lastActivityAtMs(otherRun))
-			.as("兼容期 LIST 更新时取 LIST 的时刻（两侧取 max，而不是只认一个写口）")
+			.as("锚点键更新时取锚点的时刻（两侧取 max，而不是只认一个写口）")
 			.isEqualTo(9_000L);
 	}
 
@@ -170,20 +186,6 @@ class RunStoreActivityAnchorTest {
 		frame.put("seq", seq);
 		frame.put("atMs", atMs);
 		this.frames.append(runId, frame);
-	}
-
-	private void seedLegacyList(String type, long seq, long atMs) {
-		seedLegacyList(RUN_ID, type, seq, atMs);
-	}
-
-	private void seedLegacyList(String runId, String type, long seq, long atMs) {
-		try {
-			this.fake.seedList(RunStore.runScopedKey(RunStore.EVENTS_PREFIX, runId), this.mapper,
-					java.util.List.of(Map.of("type", type, "seq", seq, "atMs", atMs)));
-		}
-		catch (Exception ex) {
-			throw new IllegalStateException(ex);
-		}
 	}
 
 }

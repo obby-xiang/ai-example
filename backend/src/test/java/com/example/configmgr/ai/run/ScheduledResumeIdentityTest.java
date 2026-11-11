@@ -84,12 +84,24 @@ class ScheduledResumeIdentityTest {
 		MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 		long agedAt = System.currentTimeMillis() - 600_000L;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
-			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), codec);
+			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), codec, null, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), null, "定时恢复",
+					System.currentTimeMillis());
 			RunSnapshot snapshot = this.store.get(RUN_ID);
 			snapshot.setStatus(RunSnapshot.SUSPENDED);
 			snapshot.setUpdatedAtMs(agedAt);
 			snapshot.setCreatedAtMs(agedAt);
 			this.fake.strings.put(this.store.runKey(RUN_ID), this.mapper.writeValueAsString(snapshot));
+			// 恢复候选从 due 索引取（due = updatedAt + zombie-age）。本用例为绕开 save() 的时间戳刷新
+			// 直接写键面，因此把 create() 登记的"未来 due"下压到超龄时刻，复刻"进程已死、索引仍指向它"的现场。
+			String member = com.example.configmgr.ai.tenant.RunKeyScope.indexMember(TENANT_ID, USER_ID, RUN_ID);
+			this.fake.zsetsByKey
+				.computeIfAbsent(RunStore.RECOVERY_DUE_INDEX, key -> new java.util.concurrent.ConcurrentHashMap<>())
+				.put(member, (double) agedAt);
+			this.fake.zsetsByKey
+				.computeIfAbsent(RunStore.RECOVERY_DUE_IDENTITY_PREFIX + TENANT_ID + ":" + USER_ID,
+						key -> new java.util.concurrent.ConcurrentHashMap<>())
+				.put(RUN_ID, (double) agedAt);
 		}
 	}
 

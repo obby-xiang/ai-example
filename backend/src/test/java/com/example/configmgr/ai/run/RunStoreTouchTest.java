@@ -23,6 +23,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class RunStoreTouchTest {
 
+	static {
+		// 类初始化即计算 run 键：先建立身份作用域，避免静态初始化阶段被 fail-closed 拒绝。
+		com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
 	private static final String RUN_ID = "run-touch";
 
 	private static final String SESSION_ID = "s-touch";
@@ -47,6 +52,9 @@ class RunStoreTouchTest {
 	@BeforeEach
 	void seed() {
 		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setRunId(RUN_ID);
 		snapshot.setSessionId(SESSION_ID);
 		snapshot.setStatus(RunSnapshot.RUNNING);
@@ -75,10 +83,9 @@ class RunStoreTouchTest {
 
 		assertThat(this.fake.expiry(RUN_KEY)).as("快照").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.pendingKey(RUN_ID))).as("待决条目").isEqualTo(SESSION_TTL);
-		assertThat(this.fake.expiry(this.store.eventsKey(RUN_ID))).as("帧归档（兼容期）").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.seqKey(RUN_ID))).as("已发放序号").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.xeventsKey(RUN_ID))).as("事件日志 Stream").isEqualTo(SESSION_TTL);
-		assertThat(this.fake.expiry(SESSION_KEY)).as("session → current 索引").isEqualTo(SESSION_TTL);
+		assertThat(this.fake.expiry(this.store.sessionCurrentKey(SESSION_ID))).as("session → current 索引").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.reqKey(RUN_ID))).as("req 位（L0 契约位）").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.decidedKey(RUN_ID))).as("decided guard").isEqualTo(SESSION_TTL);
 		assertThat(this.fake.expiry(this.store.runLeaseEpochKey(RUN_ID)))
@@ -150,7 +157,7 @@ class RunStoreTouchTest {
 
 		assertThat(this.store.touchActiveRun(RUN_ID)).isTrue();
 
-		assertThat(this.fake.expiry(CancellationRegistry.CANCEL_PREFIX + RUN_ID))
+		assertThat(this.fake.expiry(CancellationRegistry.cancelKey(RUN_ID)))
 			.as("取消标志与会话同寿（原 600s、且不在续期面）")
 			.isEqualTo(SESSION_TTL);
 	}
@@ -196,6 +203,9 @@ class RunStoreTouchTest {
 		this.store.putPending(RUN_ID, pending);
 		// 对照轮：同样的 40 分钟寿命，但没有任何实例读它
 		RunSnapshot control = new RunSnapshot();
+		control.setTenantId(1L);
+		control.setUserId(101L);
+		control.setModelId("test-model");
 		control.setRunId(controlRunId);
 		control.setSessionId("s-touch-control");
 		control.setStatus(RunSnapshot.SUSPENDED);

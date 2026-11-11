@@ -139,7 +139,7 @@ class OrphanResumePendingUnresolvedExperimentTest {
 	void stubCommon() {
 		when(this.provider.getIfAvailable()).thenReturn(this.recordingResume);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))

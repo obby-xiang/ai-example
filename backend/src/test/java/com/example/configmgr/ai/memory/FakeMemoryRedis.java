@@ -40,10 +40,11 @@ import static org.mockito.Mockito.when;
  * <li><b>hash slot</b>：逐字复刻 Redis 的 CRC16-XMODEM mod 16384 + hash tag 优先规则；
  * {@link #enableClusterMode()} 打开后，多键脚本与多键命令（本类只有 RENAME）跨槽即抛
  * {@link CrossSlotException}，单键脚本/命令照常；</li>
- * <li><b>{@code STAGE_WRITE} 单键脚本</b>：{@code RPUSH ... + PEXPIRE} 的原子语义替身 ——
- * staging 在写入的同时就带 TTL，finally 的 DEL 再失败也不会留下无 TTL 的孤儿；</li>
- * <li><b>失败注入</b>：{@link #failPush}（staging 写入）、{@link #failExpire}（staging TTL）、
- * {@link #failRename}、{@link #failIndexAdd}、{@link #failDelete} 分别在对应阶段抛错；</li>
+ * <li><b>{@code STAGE_WRITE} 两键脚本</b>：{@code RPUSH staging + SADD 索引 token + PEXPIRE 两键}
+ * 的原子语义替身 —— staging 与索引 token 同时落库并带同一 TTL；失败注入按真实脚本写序
+ * （SADD/PEXPIRE 报错不回滚已写内容，调用方 finally 的 {@code STAGING_DISCARD} 负责清理）；</li>
+ * <li><b>失败注入</b>：{@link #failPush}（staging RPUSH）、{@link #failIndexAdd}（staging 索引 SADD）、
+ * {@link #failExpire}（两键 PEXPIRE）、{@link #failRename}、{@link #failDelete} 分别在对应阶段抛错；</li>
  * <li><b>并发注入点</b>：{@link #afterStageWrite} 在 staging 写完后、RENAME 前执行，
  * 用来把两次保存的交错窗口固定下来。</li>
  * </ul>
@@ -55,6 +56,12 @@ import static org.mockito.Mockito.when;
 final class FakeMemoryRedis {
 
 	static final String STAGE_WRITE_MARK = "STAGE_WRITE";
+
+	/** staging 丢弃脚本标记（DEL staging + SREM token + 索引 TTL/空集合清理）。 */
+	static final String STAGING_DISCARD_MARK = "STAGING_DISCARD";
+
+	/** staging→final 提交脚本标记（与仓储脚本正文一致）。 */
+	static final String STAGING_COMMIT_MARK = "STAGING_COMMIT";
 
 	/** 按轮合并 CAS 脚本标记（与仓储脚本正文一致）。 */
 	static final String MERGE_CAS_MARK = "MERGE_CAS";
@@ -294,8 +301,16 @@ final class FakeMemoryRedis {
 			String body = ((RedisScript<?>) invocation.getArgument(0)).getScriptAsString();
 			this.lastScriptBody = body;
 			this.lastScriptKeys = List.of(String.valueOf(keys.get(0)));
+			if (body.contains(STAGING_COMMIT_MARK)) {
+				return stagingCommit(keys.stream().map(String::valueOf).toList(), tail(invocation.getArguments(), 2));
+			}
+			if (body.contains(STAGING_DISCARD_MARK)) {
+				return stagingDiscard(keys.stream().map(String::valueOf).toList(),
+						tail(invocation.getArguments(), 2));
+			}
 			if (body.contains(STAGE_WRITE_MARK)) {
-				return stageWrite(String.valueOf(keys.get(0)), tail(invocation.getArguments(), 2));
+				return stageWrite(keys.stream().map(String::valueOf).toList(),
+						tail(invocation.getArguments(), 2));
 			}
 			if (body.contains(MERGE_CAS_MARK)) {
 				return mergeCas(keys.stream().map(String::valueOf).toList(), tail(invocation.getArguments(), 2));
@@ -309,33 +324,131 @@ final class FakeMemoryRedis {
 
 	// ── 脚本语义：STAGE_WRITE（单键 RPUSH + PEXPIRE） ─────────────────────
 
-	private Long stageWrite(String key, Object[] args) {
+	/**
+	 * {@code STAGE_WRITE}（两键）：{@code RPUSH staging + SADD 索引 token + PEXPIRE 两键}。
+	 *
+	 * <p>失败注入按真实脚本写序：{@code failPush} 在任何写之前；{@code failIndexAdd} 在 RPUSH
+	 * 之后、SADD 之前（真实 Lua 错误不回滚已写的 LIST）；{@code failExpire} 在两笔写之后、
+	 * PEXPIRE 之前。调用方 finally 的 {@code STAGING_DISCARD} 负责清理残留。
+	 */
+	private Long stageWrite(List<String> keys, Object[] args) {
+		String key = keys.get(0);
+		String indexKey = keys.get(1);
 		this.lastStageKey = key;
+		this.stageWrites.incrementAndGet();
 		if (this.failPush) {
 			throw new IllegalStateException("RPUSH 失败（模拟 Redis 抖动）");
 		}
-		if (this.failExpire) {
-			// 真脚本里 RPUSH 与 PEXPIRE 同一条 EVAL；PEXPIRE 参数错误会整条失败。
-			// 替身选择“失败即无数据”，用来证明不会留下无 TTL 的孤儿。
-			throw new IllegalStateException("PEXPIRE 失败（模拟 Redis 抖动）");
-		}
+		// 脚本 ARGV：1=ttl，2=staging token，3..=消息 JSON（token 不能进 LIST，否则会被当消息反序列化）。
 		List<String> values = new ArrayList<>();
-		for (int i = 1; i < args.length; i++) {
+		for (int i = 2; i < args.length; i++) {
 			values.add(String.valueOf(args[i]));
 		}
 		List<String> list = mutableList(key);
 		synchronized (list) {
 			list.addAll(values);
 		}
+		this.pushes.incrementAndGet();
+		if (this.failIndexAdd) {
+			// 真实脚本顺序：RPUSH 已生效，SADD 报错后整条 EVAL 失败（不回滚 LIST）。
+			throw new IllegalStateException("SADD 失败（模拟 staging 索引写抖动）");
+		}
+		Set<String> index = mutableSet(indexKey);
+		index.add(String.valueOf(args[1]));
+		this.indexAdds.incrementAndGet();
 		long ttlMillis = args.length == 0 ? 0L : Long.parseLong(String.valueOf(args[0]));
 		if (ttlMillis > 0L) {
+			if (this.failExpire) {
+				// 真实脚本顺序：LIST/SADD 已生效，PEXPIRE 报错后整条 EVAL 失败（不回滚已写内容）。
+				throw new IllegalStateException("PEXPIRE 失败（模拟 Redis 抖动）");
+			}
 			this.expiries.put(key, Duration.ofMillis(ttlMillis));
+			this.expiries.put(indexKey, Duration.ofMillis(ttlMillis));
+			this.expires.incrementAndGet();
 			this.expires.incrementAndGet();
 		}
-		this.pushes.incrementAndGet();
-		this.stageWrites.incrementAndGet();
 		afterStageWritten();
 		return (long) values.size();
+	}
+
+	/** {@code STAGING_DISCARD}：DEL staging + SREM token + 索引 TTL/空集合清理。 */
+	private Long stagingDiscard(List<String> keys, Object[] args) {
+		String staging = keys.get(0);
+		String indexKey = keys.get(1);
+		String token = String.valueOf(args[0]);
+		long ttlMillis = Long.parseLong(String.valueOf(args[1]));
+		if (this.failDelete) {
+			throw new IllegalStateException("DEL 失败（模拟 Redis 抖动）");
+		}
+		boolean deleted = this.lists.remove(staging) != null;
+		if (deleted) {
+			this.deletes.incrementAndGet();
+			this.deletedKeys.add(staging);
+			this.lastDeletedKeys = List.of(staging);
+		}
+		this.expiries.remove(staging);
+		Set<String> index = this.sets.get(indexKey);
+		if (index != null) {
+			index.remove(token);
+		}
+		this.indexRemoves.incrementAndGet();
+		if (index != null) {
+			if (ttlMillis > 0L) {
+				this.expiries.put(indexKey, Duration.ofMillis(ttlMillis));
+			}
+			if (index.isEmpty()) {
+				this.sets.remove(indexKey);
+				this.expiries.remove(indexKey);
+			}
+		}
+		return deleted ? 1L : 0L;
+	}
+
+
+	/**
+	 * {@code STAGING_COMMIT} 的逐行复刻：RENAME staging→final（源缺失即失败）、SREM token、
+	 * 索引键 TTL 续期与空集合清理，返回 1。
+	 */
+	private Long stagingCommit(List<String> keys, Object[] args) {
+		String staging = keys.get(0);
+		String finalKey = keys.get(1);
+		String indexKey = keys.get(2);
+		String token = String.valueOf(args[0]);
+		long ttlMillis = Long.parseLong(String.valueOf(args[1]));
+		List<String> source = this.lists.get(staging);
+		if (source == null) {
+			throw new RedisSystemException("ERR no such key（STAGING_COMMIT source 不存在：" + staging + "）", null);
+		}
+		if (this.failRename) {
+			throw new IllegalStateException("RENAME 失败（模拟 Redis 抖动）");
+		}
+		List<String> copy;
+		synchronized (source) {
+			copy = new ArrayList<>(source);
+		}
+		this.lists.put(finalKey, new CopyOnWriteArrayList<>(copy));
+		this.lists.remove(staging);
+		Duration ttl = this.expiries.remove(staging);
+		if (ttl != null) {
+			this.expiries.put(finalKey, ttl);
+		}
+		this.renames.incrementAndGet();
+		this.renameSources.add(staging);
+		this.lastRenameSource = staging;
+		this.lastRenameTarget = finalKey;
+		Set<String> index = this.sets.get(indexKey);
+		this.indexRemoves.incrementAndGet();
+		if (index != null) {
+			index.remove(token);
+			if (ttlMillis > 0L) {
+				this.expiries.put(indexKey, Duration.ofMillis(ttlMillis));
+			}
+			if (index.isEmpty()) {
+				this.sets.remove(indexKey);
+				this.expiries.remove(indexKey);
+			}
+		}
+		return 1L;
 	}
 
 	// ── 脚本语义：MERGE_CAS（会话级 CAS + RENAME/DEL） ─────────────────────
@@ -388,6 +501,22 @@ final class FakeMemoryRedis {
 			this.renameSources.add(staging);
 			this.lastRenameSource = staging;
 			this.lastRenameTarget = keys.get(1);
+		}
+		if (keys.size() > 4) {
+			String indexKey = keys.get(4);
+			String token = String.valueOf(args[4]);
+			Set<String> index = this.sets.get(indexKey);
+			this.indexRemoves.incrementAndGet();
+			if (index != null) {
+				index.remove(token);
+				if (ttlMillis > 0L) {
+					this.expiries.put(indexKey, Duration.ofMillis(ttlMillis));
+				}
+				if (index.isEmpty()) {
+					this.sets.remove(indexKey);
+					this.expiries.remove(indexKey);
+				}
+			}
 		}
 		if (ttlMillis > 0L) {
 			this.expiries.put(versionKey, Duration.ofMillis(ttlMillis));

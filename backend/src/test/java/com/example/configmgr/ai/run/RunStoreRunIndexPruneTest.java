@@ -1,51 +1,44 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
-import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunKeyScope;
-import com.example.configmgr.ai.tool.AiContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.time.Duration;
-import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 
 /**
- * {@code ai:runs} 索引的<b>惰性清理</b>（Redis 容量专项 A 的第二半）。
+ * 恢复到期索引（{@code ai:recovery:due}）的<b>有界核对</b>：每拍最多 64 项、按偏移轮转，
+ * 死成员（快照不存在）从到期索引与本人身份 run 索引一起摘除；终态成员只摘到期索引。
  *
- * <h2>问题</h2>
- * {@code ai:runs} 是 SET，<b>没有 TTL</b>；轮次回收（{@code deleteRun}）之外的路径（进程崩溃、
- * 快照 24h 自然过期）都会留下成员，索引只增不减。
- *
- * <h2>为什么不做"整键 TTL"</h2>
- * SET 无法按成员过期；对整键 {@code EXPIRE} 会把<b>活跃</b>轮次的发现面一起删掉 ——
- * 挂起等人没有上限，一个挂起 3 天的活轮在"索引不再被写"的窗口里就会消失，重启后无法自动续跑。
- * 故本批只做<b>按成员的惰性清理</b>：快照键已不在的成员才剔除；索引键变成空 SET 时由 Redis
- * 自己删除（不会出现"空索引键"）。
- *
- * <p>清理入口两处：启动扫描（{@code allRunIds} 已有，本批抽成同一条实现）与
- * {@link RunStore#create} 的<b>节流</b>机会式清理（默认 10min 一次，{@code 0} = 关闭）。
+ * <p>证红：去掉 score 条件 CAS ⇒ 并发更新会被旧读者误删；去掉"按成员身份读快照"⇒ 系统线程
+ * 读不到任何带身份的轮次、全部误删；去掉批大小/偏移 ⇒ 一次全量扫描（无界）。
  */
 @ExtendWith(OutputCaptureExtension.class)
 class RunStoreRunIndexPruneTest {
 
+	private static final long TENANT_A = 1L;
+
+	private static final long USER_A = 101L;
+
+	private static final long TENANT_B = 2L;
+
+	private static final long USER_B = 202L;
+
 	private static final String LIVE = "run-live";
 
 	private static final String STALE = "run-stale";
+
+	private static final String SESSION_ID = "s-prune";
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -53,167 +46,120 @@ class RunStoreRunIndexPruneTest {
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 
-	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
-
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
-	/** 直调存储的用例显式建立身份（RunStore.create 缺身份 fail-closed；索引成员带身份）。 */
-	private RequestContextUtils.SafeCloseable tenantScope;
+	// ── 死成员收敛 / 活成员保留 ──────────────────────────────────────────────
 
-	@BeforeEach
-	void enterTenantIdentity() {
-		this.tenantScope = RequestContextUtils.useContext(1L, 101L);
+	@Test
+	void deadCandidateLeavesBothIndexesWhileLiveOnesStay() throws Exception {
+		seedDue(TENANT_A, USER_A, LIVE, 500L);
+		seedDue(TENANT_A, USER_A, STALE, 500L);
+		seedRunList(TENANT_A, USER_A, LIVE);
+		seedRunList(TENANT_A, USER_A, STALE);
+		seedSnapshot(TENANT_A, USER_A, LIVE, RunSnapshot.RUNNING);
+
+		int removed = this.store.pruneRunIndex();
+
+		assertThat(removed).as("只有快照不存在的死成员被剔除").isEqualTo(1);
+		assertThat(dueMembers()).as("到期索引只剩活轮").containsExactly(member(TENANT_A, USER_A, LIVE));
+		assertThat(runList(TENANT_A, USER_A)).as("死成员同时从本人身份的 run 索引摘除").containsExactly(LIVE);
+		assertThat(this.fake.strings).as("活轮快照不得被清理顺手删掉")
+			.containsKey(RunStore.runScopedKey(RunStore.RUN_PREFIX, TENANT_A, USER_A, LIVE));
 	}
 
-	@AfterEach
-	void leaveTenantIdentity() {
-		if (this.tenantScope != null) {
-			this.tenantScope.close();
+	@Test
+	void terminalRunLeavesTheDueIndexButKeepsItsHistoryIndexMember() throws Exception {
+		seedDue(TENANT_A, USER_A, LIVE, 500L);
+		seedRunList(TENANT_A, USER_A, LIVE);
+		seedSnapshot(TENANT_A, USER_A, LIVE, RunSnapshot.DONE);
+
+		assertThat(this.store.pruneRunIndex()).as("终态轮不再需要恢复对账").isEqualTo(1);
+
+		assertThat(dueMembers()).isEmpty();
+		assertThat(runList(TENANT_A, USER_A)).as("run 列表索引是历史发现面，终态不摘").containsExactly(LIVE);
+	}
+
+	/** score 已变化 = 有更新写者：旧读者不得删除该成员（CAS 语义）。 */
+	@Test
+	void staleReaderCannotRemoveACandidateWhoseScoreMoved() {
+		seedDue(TENANT_A, USER_A, LIVE, 500L);
+
+		assertThat(this.store.isRecoveryCandidateRemoved(LIVE, TENANT_A, USER_A, 999L))
+			.as("score 不符 ⇒ 不摘").isFalse();
+		assertThat(dueMembers()).containsExactly(member(TENANT_A, USER_A, LIVE));
+
+		assertThat(this.store.isRecoveryCandidateRemoved(LIVE, TENANT_A, USER_A, 500L)).isTrue();
+		assertThat(dueMembers()).isEmpty();
+	}
+
+	@Test
+	void emptyDueIndexDisappearsWithItsLastMember() {
+		seedDue(TENANT_A, USER_A, STALE, 500L);
+
+		assertThat(this.store.pruneRunIndex()).isEqualTo(1);
+		assertThat(this.fake.zsetsByKey).doesNotContainKey(RunStore.RECOVERY_DUE_INDEX);
+		assertThat(this.store.pruneRunIndex()).as("空索引 ⇒ 无事可做").isZero();
+	}
+
+	// ── 身份：成员自带身份决定判活键（不是调用线程） ─────────────────────────
+
+	/**
+	 * 系统线程（无请求身份）同样按<b>成员自带身份</b>读快照：A 的活轮保留、B 的同名死轮剔除。
+	 * 若按调用线程身份读，A 的活轮会被误判为"快照不存在"而删掉。
+	 */
+	@Test
+	void livenessIsJudgedWithTheMembersOwnIdentityNotTheCallerThread() throws Exception {
+		seedDue(TENANT_A, USER_A, LIVE, 500L);
+		seedSnapshot(TENANT_A, USER_A, LIVE, RunSnapshot.RUNNING);
+		seedDue(TENANT_B, USER_B, LIVE, 500L);
+		assertThat(RequestContextUtils.currentOrNull()).as("前置：无请求身份（系统线程视图）").isNull();
+
+		int removed = this.store.pruneRunIndex();
+
+		assertThat(removed).as("只剔除 B 的死成员；A 的同名活轮保留").isEqualTo(1);
+		assertThat(dueMembers()).containsExactly(member(TENANT_A, USER_A, LIVE));
+	}
+
+	/** 无身份段的 legacy 成员：无法判归属 ⇒ 按 score CAS 摘除，不猜身份。 */
+	@Test
+	void legacyBareMemberIsRemovedWithoutGuessingAnIdentity() {
+		seedDueMember("run-legacy", 500L);
+
+		assertThat(this.store.pruneRunIndex()).isEqualTo(1);
+		assertThat(dueMembers()).isEmpty();
+	}
+
+	// ── 有界 + 轮转 ─────────────────────────────────────────────────────────
+
+	@Test
+	void reconciliationIsBoundedTo64PerTickAndRotatesThroughTheRest() {
+		for (int i = 0; i < 70; i++) {
+			seedDue(TENANT_A, USER_A, "run-dead-" + i, 500L);
 		}
+
+		assertThat(this.store.pruneRunIndex()).as("单拍最多 64 项").isEqualTo(64);
+		assertThat(dueMembers()).hasSize(6);
+		assertThat(this.store.pruneRunIndex()).as("下一拍处理剩余 6 项（偏移轮转）").isEqualTo(6);
+		assertThat(dueMembers()).isEmpty();
 	}
 
-	// ── stale index 可收敛 ───────────────────────────────────────────────────
+	// ── run 列表索引的读口：只读本身份、不探快照 ─────────────────────────────
 
-	/** 快照已不在的成员被剔除；活着的成员一个都不动。 */
 	@Test
-	void staleMembersConvergeWhileLiveOnesStay() {
-		seedIndex(STALE, LIVE);
-		seedSnapshot(LIVE);
+	void allRunIdsReadsOnlyTheCallersIdentityRunListWithoutTouchingSnapshots() {
+		seedRunList(TENANT_A, USER_A, LIVE);
+		seedRunList(TENANT_A, USER_A, STALE);
+		seedRunList(TENANT_B, USER_B, "run-foreign");
+		this.fake.getCounts.clear();
 
-		int removed = this.store.pruneRunIndex();
-
-		assertThat(removed).isEqualTo(1);
-		assertThat(members()).containsExactly(LIVE);
-		assertThat(this.fake.strings).as("活轮的快照不得被清理顺手删掉").containsKey(this.store.runKey(LIVE));
-	}
-
-	/** 索引键本身不设 TTL、不被整键 DEL —— 只有"变成空 SET"时靠 Redis 自己消失。 */
-	@Test
-	void pruneNeverExpiresOrDeletesTheIndexOfLiveRuns() {
-		seedIndex(STALE, LIVE);
-		seedSnapshot(LIVE);
-		this.fake.enableClusterMode();
-
-		assertThatCode(() -> this.store.pruneRunIndex()).doesNotThrowAnyException();
-
-		assertThat(this.fake.expiry(RunStore.RUN_INDEX)).as("整键 TTL 会删掉活跃轮的发现面").isNull();
-		assertThat(this.fake.templateDeletes).as("不得对索引键发 DEL（单键剔成员即可）").hasValue(0);
-		assertThat(this.fake.lastDeletedKeys).isEmpty();
-		assertThat(members()).containsExactly(LIVE);
-	}
-
-	/**
-	 * <b>带身份的请求线程只清理自己的成员</b>：别的身份的成员（无论死活）既不做 {@code EXISTS}
-	 * 探测，也不得 {@code SREM} —— 即使按"快照键还在不在"看它确实是死的。legacy 成员同样不归
-	 * 请求线程判（那是系统线程的视图）。无身份系统线程仍可全表清理（见
-	 * {@link #systemThreadWithoutIdentityStillPrunesTheWholeIndexAndKeepsLegacyLiveness()}）。
-	 */
-	@Test
-	void identityRequestPrunesOnlyItsOwnMembersAndNeverProbesForeignOnes() {
-		seedIndex(STALE, LIVE);
-		seedSnapshot(LIVE);
-		this.fake.setsByKey.get(RunStore.RUN_INDEX)
-			.add(RunKeyScope.indexMember(2L, 202L, "run-foreign"));
-		this.fake.setsByKey.get(RunStore.RUN_INDEX).add("run-legacy");
-
-		int removed = this.store.pruneRunIndex();
-
-		assertThat(removed).as("只剔除本身份的死成员").isEqualTo(1);
-		assertThat(members()).as("别的身份的成员与 legacy 成员原样保留")
-			.containsExactlyInAnyOrder(LIVE, "run-foreign", "run-legacy");
-		verify(this.fake.redis, never())
-			.hasKey(RunKeyScope.scoped(RunStore.RUN_PREFIX, 2L, 202L, "run-foreign"));
-		verify(this.fake.redis, never()).hasKey(RunStore.legacyRunKey(RunStore.RUN_PREFIX, "run-legacy"));
-	}
-
-	/**
-	 * 对照：<b>无身份的系统线程</b>仍全表清理 —— 成员自带的身份段决定判活键，legacy 成员按旧键形
-	 * 判活（活 legacy 保留、死 legacy 剔除）。修复"请求线程不越界"不得把系统收敛一起关掉。
-	 */
-	@Test
-	void systemThreadWithoutIdentityStillPrunesTheWholeIndexAndKeepsLegacyLiveness() {
-		seedIndex(LIVE);
-		seedSnapshot(LIVE);
-		this.fake.setsByKey.get(RunStore.RUN_INDEX)
-			.add(RunKeyScope.indexMember(2L, 202L, "run-foreign"));
-		this.fake.setsByKey.get(RunStore.RUN_INDEX).add("run-legacy-live");
-		this.fake.setsByKey.get(RunStore.RUN_INDEX).add("run-legacy-dead");
-		this.fake.strings.put(RunStore.legacyRunKey(RunStore.RUN_PREFIX, "run-legacy-live"), "{}");
-		this.tenantScope.close();
-		this.tenantScope = null;
-		assertThat(RequestContextUtils.currentOrNull()).as("前置：无身份（系统线程视图）").isNull();
-
-		int removed = this.store.pruneRunIndex();
-
-		assertThat(removed).as("死成员跨身份全表剔除；活 legacy 不误杀").isEqualTo(2);
-		assertThat(members()).containsExactlyInAnyOrder(LIVE, "run-legacy-live");
-	}
-
-	/** 最后一个 stale 成员被剔除后，空 SET 由 Redis 自动消失（不留空键）。 */
-	@Test
-	void emptyIndexKeyDisappearsWithItsLastMember() {
-		seedIndex(STALE);
-
-		assertThat(this.store.pruneRunIndex()).isEqualTo(1);
-
-		assertThat(this.fake.setsByKey).doesNotContainKey(RunStore.RUN_INDEX);
-		assertThat(members()).isEmpty();
-	}
-
-	/** 启动扫描（{@code allRunIds}）与显式清理是同一条实现：返回活轮并顺手收敛索引。 */
-	@Test
-	void allRunIdsReturnsLiveRunsAndPrunesDeadOnes() {
-		seedIndex(STALE, LIVE);
-		seedSnapshot(LIVE);
-
-		assertThat(this.store.allRunIds()).containsExactly(LIVE);
-		assertThat(members()).as("读口也要收敛（启动扫描后索引与快照一致）").containsExactly(LIVE);
-	}
-
-	// ── 活跃 run 不误清 / 机会式清理与节流 ───────────────────────────────────
-
-	/**
-	 * {@code create} 触发机会式清理：进程起来后的第一次创建会把历史残留剔掉，
-	 * <b>但刚创建的活轮必须留着</b>（SADD 在应用快照之后，清理读到的索引里它是活成员）。
-	 */
-	@Test
-	void firstCreateAfterStartupDropsLeftoversAndKeepsTheNewRun() {
-		seedIndex(STALE);
-
-		this.store.create(LIVE, "s-live", AiContext.empty(), List.of(), this.codec);
-
-		assertThat(members()).containsExactly(LIVE);
-		assertThat(this.fake.strings).containsKey(this.store.runKey(LIVE));
-	}
-
-	/** 节流：默认间隔内不再扫索引（避免每次 /chat 都 SMEMBERS + 逐成员 EXISTS）。 */
-	@Test
-	void opportunisticPruneIsThrottledByTheConfiguredInterval() {
-		this.store.create(LIVE, "s-live", AiContext.empty(), List.of(), this.codec);
-		seedIndex(STALE);
-
-		this.store.create("run-second", "s-second", AiContext.empty(), List.of(), this.codec);
-
-		assertThat(members()).as("间隔内不清理：残留留到下一拍（不是丢数据，只是迟收敛）")
-			.contains(STALE, LIVE, "run-second");
-	}
-
-	/** {@code index-prune-interval = 0} = 关闭机会式清理（显式逃生门）；显式调用仍然可用。 */
-	@Test
-	void zeroIntervalDisablesTheOpportunisticPruneOnly() {
-		this.properties.getStream().setIndexPruneInterval(Duration.ZERO);
-		seedIndex(STALE);
-
-		this.store.create(LIVE, "s-live", AiContext.empty(), List.of(), this.codec);
-		assertThat(members()).contains(STALE, LIVE);
-
-		assertThat(this.store.pruneRunIndex()).isEqualTo(1);
-		assertThat(members()).containsExactly(LIVE);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A, USER_A)) {
+			assertThat(this.store.allRunIds()).containsExactly(LIVE, STALE);
+		}
+		assertThat(this.fake.getCounts).as("读发现面不得逐个反序列化快照").isEmpty();
 	}
 
 	// ── 失败可观测（不抛、不猜） ──────────────────────────────────────────────
 
-	/** Redis 不可用：清理跳过并计数（WARN 留痕），<b>不抛给调用方</b>（create 不能因清理失败而失败）。 */
 	@Test
 	void pruneFailureIsCountedAndNeverBreaksTheCaller(CapturedOutput output) {
 		this.fake.goDown();
@@ -223,31 +169,79 @@ class RunStoreRunIndexPruneTest {
 		assertThat(this.store.pruneRunIndex()).isZero();
 
 		assertThat(RedisDegradation.count(RedisDegradation.C1_RUN_INDEX_PRUNE)).isGreaterThan(before);
-		assertThat(output.getAll()).contains("ai:runs 索引惰性清理失败");
+		assertThat(output.getAll()).contains("recovery due index bounded reconcile failed");
+	}
+
+	// ── 节流（由恢复扫描触发；create 路径不再做清理） ─────────────────────────
+
+	@Test
+	void reconcileThrottleHonoursTheConfiguredInterval() {
+		this.properties.getStream().setIndexPruneInterval(Duration.ofMinutes(10));
+		seedDue(TENANT_A, USER_A, STALE, 500L);
+
+		this.store.reconcileRecoveryIndexThrottled();
+		assertThat(dueMembers()).as("首次调用执行核对").isEmpty();
+
+		seedDue(TENANT_A, USER_A, "run-stale-2", 500L);
+		this.store.reconcileRecoveryIndexThrottled();
+		assertThat(dueMembers()).as("间隔内不再清理（留到下一拍）")
+			.containsExactly(member(TENANT_A, USER_A, "run-stale-2"));
+	}
+
+	@Test
+	void zeroIntervalDisablesTheThrottledReconcileOnly() {
+		this.properties.getStream().setIndexPruneInterval(Duration.ZERO);
+		seedDue(TENANT_A, USER_A, STALE, 500L);
+
+		this.store.reconcileRecoveryIndexThrottled();
+		assertThat(dueMembers()).as("0 = 关闭机会式核对").containsExactly(member(TENANT_A, USER_A, STALE));
+
+		assertThat(this.store.pruneRunIndex()).isEqualTo(1);
+		assertThat(dueMembers()).isEmpty();
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
-	private void seedIndex(String... runIds) {
-		Set<String> members = this.fake.setsByKey.computeIfAbsent(RunStore.RUN_INDEX,
-				key -> ConcurrentHashMap.newKeySet());
-		for (String runId : runIds) {
-			members.add(RunKeyScope.indexMember(1L, 101L, runId));
-		}
+	private static String member(long tenantId, long userId, String runId) {
+		return RunKeyScope.indexMember(tenantId, userId, runId);
 	}
 
-	private void seedSnapshot(String runId) {
-		this.fake.strings.put(this.store.runKey(runId), "{}");
+	private void seedDue(long tenantId, long userId, String runId, long score) {
+		seedDueMember(member(tenantId, userId, runId), score);
 	}
 
-	/** 索引成员（归一成 runId：断言面仍是"哪些轮在索引里"）。 */
-	private Set<String> members() {
-		Set<String> out = new java.util.LinkedHashSet<>();
-		for (String member : this.fake.setsByKey.getOrDefault(RunStore.RUN_INDEX, Set.of())) {
-			RunKeyScope.IndexRef ref = RunKeyScope.parseIndexMember(member);
-			out.add(ref == null ? member : ref.runId());
-		}
-		return out;
+	private void seedDueMember(String member, long score) {
+		this.fake.zsetsByKey
+			.computeIfAbsent(RunStore.RECOVERY_DUE_INDEX, ignored -> new ConcurrentHashMap<>())
+			.put(member, (double) score);
+	}
+
+	private void seedRunList(long tenantId, long userId, String runId) {
+		this.fake.zsetsByKey
+			.computeIfAbsent(RunStore.RUN_LIST_INDEX_PREFIX + tenantId + ":" + userId,
+					ignored -> new ConcurrentHashMap<>())
+			.put(runId, 0.0);
+	}
+
+	private void seedSnapshot(long tenantId, long userId, String runId, String status) throws Exception {
+		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setRunId(runId);
+		snapshot.setSessionId(SESSION_ID);
+		snapshot.setStatus(status);
+		snapshot.setTenantId(tenantId);
+		snapshot.setUserId(userId);
+		this.fake.strings.put(RunStore.runScopedKey(RunStore.RUN_PREFIX, tenantId, userId, runId),
+				this.mapper.writeValueAsString(snapshot));
+	}
+
+	private java.util.Set<String> dueMembers() {
+		return this.fake.zsetsByKey.getOrDefault(RunStore.RECOVERY_DUE_INDEX, java.util.Map.of()).keySet();
+	}
+
+	private java.util.Set<String> runList(long tenantId, long userId) {
+		return this.fake.zsetsByKey
+			.getOrDefault(RunStore.RUN_LIST_INDEX_PREFIX + tenantId + ":" + userId, java.util.Map.of())
+			.keySet();
 	}
 
 }

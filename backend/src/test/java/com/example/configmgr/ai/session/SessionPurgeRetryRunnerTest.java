@@ -2,6 +2,8 @@ package com.example.configmgr.ai.session;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.LeaseService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantUser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.bind.Bindable;
@@ -13,6 +15,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -25,10 +28,13 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * 自动重试闭环的<b>耗尽项</b>语义（直接单测：替身 Redis + 真台账 + mock 删除主体，不拉 H2/真 RunStore）。
+ * 自动重试闭环的<b>耗尽项</b>语义（替身 Redis + 真台账 + mock 删除主体）。
  *
- * <p>证红：把 {@code SessionPurgeRetryRunner#deferExhausted} 改成"原地 skip"（不推 nextAt、不重排），
- * 本例会红 —— 耗尽项永久 due 且压在队头窗口，正常候选永远进不了本轮候选预算。
+ * <p>证红：把 runner 的耗尽分支改回"原地 skip"（不摘 due 成员、不推 nextAt）⇒ 耗尽项永久 due，
+ * 正常候选永远进不了本轮候选预算。
+ *
+ * <p>当前口径：到期 ZSET 是唯一发现面；耗尽项<b>退役</b>—— durable 台账与 attempts 保留、
+ * 到期成员摘除（不再占全局发现面），手动 DELETE 才能重开；正常项照常 retry。
  */
 class SessionPurgeRetryRunnerTest {
 
@@ -36,53 +42,67 @@ class SessionPurgeRetryRunnerTest {
 
 	private static final int MAX_ATTEMPTS = 10;
 
+	private static final TenantUser OWNER = new TenantUser(1L, 101L);
+
 	private final PurgeFakeRedis fake = new PurgeFakeRedis();
 
 	private final SessionPurgePendingStore store = new SessionPurgePendingStore(this.fake.redis,
 			new ObjectMapper(), new AiProperties());
 
 	@Test
-	void exhaustedPendingsAreDeferredAndDoNotStarveDueSessions() {
-		long now = 1_000L;
-		for (int i = 0; i < 10; i++) {
-			String zombie = zombie(i);
-			this.store.register(zombie, "purge-zombie-" + i, "tester", now);
-			for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-				assertThat(this.store.recordFailure(zombie, "purge-zombie-" + i, "boom")).isTrue();
+	void exhaustedPendingsAreRetiredAndDoNotStarveDueSessions() {
+		long now = System.currentTimeMillis();
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(OWNER.tenantId(),
+				OWNER.userId())) {
+			for (int i = 0; i < 10; i++) {
+				String zombie = zombie(i);
+				this.store.register(OWNER, zombie, "purge-zombie-" + i, "tester", now);
+				for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+					assertThat(this.store.isFailureRecorded(zombie, "purge-zombie-" + i, "boom")).isTrue();
+				}
 			}
+			// 第 11 条是正常待重试。
+			this.store.register(OWNER, SESSION, "purge-real", "tester", now);
 		}
-		// 第 11 条是正常待重试；耗尽项排在它前面（模拟"僵尸占满队头窗口"）。
-		this.store.register(SESSION, "purge-real", "tester", now);
-		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).hasSize(11)
-			.startsWith(this.store.pendingKey(zombie(0)), this.store.pendingKey(zombie(1)));
+		assertThat(this.fake.zsets.get(SessionPurgePendingStore.DUE_KEY)).hasSize(11);
 
 		AiSessionPurgeService purgeService = mock(AiSessionPurgeService.class);
 		when(purgeService.retry(anyString(), anyString(), anyString())).thenReturn(completedPurge());
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.store, purgeService, grantedLease());
-		long later = System.currentTimeMillis() + 3_600_000L;
+		long later = now + 3_600_000L;
 
 		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(later);
 
-		assertThat(report.attempted()).as("耗尽项不得占满本轮候选预算").isEqualTo(1);
+		assertThat(report.attempted()).as("耗尽项不得占本轮候选预算：只有正常项被执行").isEqualTo(1);
 		assertThat(report.completed()).isEqualTo(1);
-		assertThat(report.skipped()).isEqualTo(10);
+		assertThat(report.skipped()).as("每轮候选上限 %d：本轮退役 9 条耗尽项", SessionPurgeRetryRunner.MAX_CANDIDATES)
+			.isEqualTo(SessionPurgeRetryRunner.MAX_CANDIDATES - 1);
 		verify(purgeService).retry(SESSION, "purge-real", "purge-retry");
 		verify(purgeService, never()).retry(startsWith("sess-zombie-"), anyString(), anyString());
-		for (int i = 0; i < 10; i++) {
-			SessionPurgePendingStore.Pending pending = this.store.current(zombie(i));
-			assertThat(pending).as("耗尽项仍是有主的 durable 台账（手动 DELETE 可续）").isNotNull();
-			assertThat(pending.attempts()).as("defer 不得重置 attempts（不得强行第 11 次）").isEqualTo(MAX_ATTEMPTS);
-			assertThat(pending.nextAtMs()).as("nextAt 必须推到有界未来").isGreaterThan(later);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(OWNER.tenantId(),
+				OWNER.userId())) {
+			// 真实删除主体成功后会移除 pending（这里用台账 API 等价模拟已完成）。
+			assertThat(this.store.complete(SESSION, "purge-real")).isTrue();
+			// 剩余 1 条耗尽项在下一拍退役（有界候选，不在一轮内无限拉长）。
+			SessionPurgeRetryRunner.RetryReport second = runner.runOnce(later + 1_000L);
+			assertThat(second.attempted()).isZero();
+			assertThat(second.skipped()).as("第 %d 条耗尽项在下一拍退役",
+					SessionPurgeRetryRunner.MAX_CANDIDATES).isEqualTo(1);
+			for (int i = 0; i < 10; i++) {
+				SessionPurgePendingStore.Pending pending = this.store.current(zombie(i));
+				assertThat(pending).as("退役不删 durable 台账（手动 DELETE 可续）").isNotNull();
+				assertThat(pending.attempts()).as("退役不得重置 attempts（不得强行第 11 次）")
+					.isEqualTo(MAX_ATTEMPTS);
+				assertThat(pending.nextAtMs()).as("nextAt 必须推到有界未来").isGreaterThan(later);
+				assertThat(this.fake.zsets.getOrDefault(SessionPurgePendingStore.DUE_KEY, Map.of()))
+					.as("退役项不再占全局发现面")
+					.doesNotContainKey(SessionPurgePendingStore.pendingKey(zombie(i), OWNER.tenantId(),
+							OWNER.userId()));
+			}
 		}
-		assertThat(this.fake.lists.get(SessionPurgePendingStore.QUEUE_KEY)).as("耗尽项必须移到队尾")
-			.endsWith(this.store.pendingKey(zombie(7)), this.store.pendingKey(zombie(8)),
-					this.store.pendingKey(zombie(9)));
-
-		// 真实删除主体成功后会移除 pending（这里用台账 API 等价模拟已完成）。
-		assertThat(this.store.complete(SESSION, "purge-real")).isTrue();
-		SessionPurgeRetryRunner.RetryReport next = runner.runOnce(later + 1_000L);
-		assertThat(next.attempted()).as("未到 nextAt 前不得再执行").isZero();
-		assertThat(next.skipped()).as("耗尽项已不在 due 窗口里").isZero();
+		SessionPurgeRetryRunner.RetryReport next = runner.runOnce(later + 2_000L);
+		assertThat(next.attempted()).as("未到 nextAt / 已退役 ⇒ 不得再执行").isZero();
+		assertThat(next.skipped()).isZero();
 		verify(purgeService, never()).retry(startsWith("sess-zombie-"), anyString(), anyString());
 	}
 
@@ -96,15 +116,14 @@ class SessionPurgeRetryRunnerTest {
 	 */
 	@Test
 	void runOnceRestoresTheRecordedIdentityBeforeRetrying() {
-		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable scope =
-				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
-			this.store.register(SESSION, "purge-tenant", "tester", 1_000L);
+		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(OWNER.tenantId(),
+				OWNER.userId())) {
+			this.store.register(OWNER, SESSION, "purge-tenant", "tester", System.currentTimeMillis());
 		}
 		AiSessionPurgeService purgeService = mock(AiSessionPurgeService.class);
-		java.util.concurrent.atomic.AtomicReference<com.example.configmgr.ai.tenant.TenantUser> seen =
-				new java.util.concurrent.atomic.AtomicReference<>();
+		AtomicReference<TenantUser> seen = new AtomicReference<>();
 		when(purgeService.retry(anyString(), anyString(), anyString())).thenAnswer(invocation -> {
-			seen.set(com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull());
+			seen.set(RequestContextUtils.currentOrNull());
 			return completedPurge();
 		});
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.store, purgeService, grantedLease());
@@ -112,21 +131,12 @@ class SessionPurgeRetryRunnerTest {
 		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(System.currentTimeMillis() + 3_600_000L);
 
 		assertThat(report.completed()).isEqualTo(1);
-		assertThat(seen.get()).as("删除主体必须在记录身份的作用域里执行")
-			.isEqualTo(new com.example.configmgr.ai.tenant.TenantUser(1L, 101L));
-		assertThat(com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull())
-			.as("作用域关闭后不得把身份留在调度线程上")
-			.isNull();
+		assertThat(seen.get()).as("删除主体必须在记录身份的作用域里执行").isEqualTo(OWNER);
+		assertThat(RequestContextUtils.currentOrNull())
+			.as("作用域关闭后不得把身份留在调度线程上").isNull();
 	}
 
 	// ── 周期注册开关（app.ai.session.purge-retry.periodic-enabled）────────────────
-	//
-	// 背景：周期线程在 Spring 上下文缓存后跨测试类续跑，倒排录制按"测试类墙钟窗口"归因
-	// （线程无关）⇒ 清理触达会被记到邻类窗口（nightly 40219310874，diff=58）。单测把周期注册
-	// 关掉，只保留同步入口。下面三条锁住"关掉的只是周期注册"与"生产缺省仍是开"。
-	//
-	// 调度是否真的注册，只能看 `scheduler` 字段本身（首拍在 10s 之后，用例早已结束）——
-	// 故用 ReflectionTestUtils 直接断言：关 ⇒ 未注册（null），开 ⇒ 真的注册（非 null）。
 
 	@Test
 	void periodicRegistrationIsOnByProductionDefaultAndBindableOff() {
@@ -141,9 +151,8 @@ class SessionPurgeRetryRunnerTest {
 	}
 
 	@Test
-	void periodicRegistrationOffStillRecoversOrphansOnReady() {
+	void periodicRegistrationOffDoesNotRegisterAScheduler() {
 		SessionPurgePendingStore pending = mock(SessionPurgePendingStore.class);
-		when(pending.recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS)).thenReturn(0);
 		AiSessionPurgeService purgeService = mock(AiSessionPurgeService.class);
 		AiProperties properties = new AiProperties();
 		properties.getSession().getPurgeRetry().setPeriodicEnabled(false);
@@ -151,22 +160,20 @@ class SessionPurgeRetryRunnerTest {
 
 		runner.onReady();
 
-		verify(pending).recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS);
-		verifyNoInteractions(purgeService);
 		assertThat(schedulerOf(runner)).as("关闭后调度器不得被注册（不只是日志/不打首拍）").isNull();
+		verifyNoInteractions(pending);
+		verifyNoInteractions(purgeService);
 		runner.shutdown();
 	}
 
 	@Test
-	void periodicRegistrationOnKeepsRecoveringOrphansOnReady() {
+	void periodicRegistrationOnRegistersTheScheduler() {
 		SessionPurgePendingStore pending = mock(SessionPurgePendingStore.class);
-		when(pending.recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS)).thenReturn(0);
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(pending,
 				mock(AiSessionPurgeService.class), null, new AiProperties());
 
 		runner.onReady();
 
-		verify(pending).recoverOrphans(SessionPurgeRetryRunner.MAX_RECOVERY_KEYS);
 		Object scheduler = schedulerOf(runner);
 		assertThat(scheduler).as("缺省（开）必须真的注册调度器").isInstanceOf(ScheduledExecutorService.class);
 		assertThat(((ScheduledExecutorService) scheduler).isShutdown())
@@ -180,16 +187,19 @@ class SessionPurgeRetryRunnerTest {
 
 	private static AiSessionPurgeService.PurgeResult completedPurge() {
 		return new AiSessionPurgeService.PurgeResult(SESSION, "purge-real", true, false, null, null, null,
-				new AiSessionPurgeService.MemoryView(false, 0, true), "chat:mem:" + SESSION, List.of(), List.of(),
-				new AiSessionPurgeService.ContextView(false, false, 0, false, 0),
+				new AiSessionPurgeService.MemoryView(false, 0, true),
+				new AiSessionPurgeService.TranscriptView(false, 0L, false),
+				List.of(), List.of(),
+				new AiSessionPurgeService.ContextView(false, false, false, 0),
 				new AiSessionPurgeService.AttachmentView(0, 0, 0, List.of()),
-				new AiSessionPurgeService.SessionView(false, false), false,
+				new AiSessionPurgeService.SessionView(false, false),
 				new AiSessionPurgeService.ClientCleanup("mirror", "draft", List.of()), List.of(), List.of());
 	}
 
 	private static LeaseService grantedLease() {
 		LeaseService leases = mock(LeaseService.class);
-		when(leases.acquire(anyString(), any(Duration.class))).thenReturn(new LeaseService.AcquireResult(
+		when(leases.instanceId()).thenReturn("test-instance");
+		when(leases.acquire(anyString(), any(Duration.class), anyString())).thenReturn(new LeaseService.AcquireResult(
 				LeaseService.AcquireOutcome.ACQUIRED, new LeaseService.Lease("ai:purge:retry:lock", 1L, "test"),
 				true));
 		when(leases.release(any())).thenReturn(true);

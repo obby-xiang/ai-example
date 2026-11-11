@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -230,6 +231,27 @@ final class FakeFrameRedis {
 			}
 			throw new UnsupportedOperationException("未建模的原始命令：" + command);
 		});
+		// 精确落档脚本（生产 {@code RedisFrameStore.EXACT_APPEND_BODY}）：
+		// EVAL <XADD KEYS[1] MAXLEN ~ ARGV[1] ARGV[2] seq ARGV[3] frame ARGV[4]> + EXPIRE。
+		when(this.connection.eval(any(byte[].class), any(org.springframework.data.redis.connection.ReturnType.class),
+				anyInt(), any(byte[][].class))).thenAnswer(invocation -> {
+					Object[] raw = invocation.getArguments();
+					byte[][] parts;
+					if (raw.length == 4 && raw[3] instanceof byte[][] packed) {
+						parts = packed;
+					}
+					else {
+						parts = new byte[raw.length - 3][];
+						for (int i = 3; i < raw.length; i++) {
+							parts[i - 3] = (byte[]) raw[i];
+						}
+					}
+					byte[] key = parts[0];
+					handleXadd(new byte[][] { key, utf8("MAXLEN"), utf8("~"), parts[1], parts[2], utf8("seq"),
+							parts[3], utf8("frame"), parts[4] });
+					this.expiries.put(str(key), Duration.ofSeconds(Long.parseLong(str(parts[5]))));
+					return 1L;
+				});
 		when(this.connection.xRange(any(byte[].class), any(Range.class), any(Limit.class)))
 				.thenAnswer(invocation -> {
 					if (this.failRangeRead) {
@@ -808,6 +830,10 @@ final class FakeFrameRedis {
 
 	private static String str(byte[] value) {
 		return new String(value, StandardCharsets.UTF_8);
+	}
+
+	private static byte[] utf8(String value) {
+		return value.getBytes(StandardCharsets.UTF_8);
 	}
 
 	private List<String> sliceList(String key, long start, long stop) {

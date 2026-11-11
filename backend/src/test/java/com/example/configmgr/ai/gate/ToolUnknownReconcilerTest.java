@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -61,7 +62,7 @@ class ToolUnknownReconcilerTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final RunRegistry registry = new RunRegistry(this.store, new ObjectMapper(), null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, new ObjectMapper(), null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -86,7 +87,7 @@ class ToolUnknownReconcilerTest {
 
 	@BeforeEach
 	void setUp() {
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf(anyString())).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf(anyString())).thenReturn(ToolMeta.RiskLevel.READ);

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -72,7 +73,7 @@ class FrontendGuardPreSuspendTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -88,7 +89,7 @@ class FrontendGuardPreSuspendTest {
 	@SuppressWarnings("unchecked")
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
@@ -96,7 +97,7 @@ class FrontendGuardPreSuspendTest {
 		when(this.toolRegistry.riskOf("generative_form")).thenReturn(ToolMeta.RiskLevel.WRITE);
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
-				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
+				List.of(), provider, Runnable::run, null, (ConfirmGate.RetryScheduler) null);
 		this.manager = newManager(rejectingGuard());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setContext(AiContext.empty().toMap());
@@ -106,7 +107,7 @@ class FrontendGuardPreSuspendTest {
 	private SpToolCallingManager newManager(FrontendToolGuard guard) {
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
-				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
+				List.of(), provider, Runnable::run, null, (ConfirmGate.RetryScheduler) null);
 		return new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry,
 				mock(MessageJsonCodec.class), this.beacon, this.cancellations,
 				new ToolResultLimiter(this.properties), List.of(guard));

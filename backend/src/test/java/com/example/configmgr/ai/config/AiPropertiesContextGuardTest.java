@@ -49,14 +49,15 @@ class AiPropertiesContextGuardTest {
 		assertThatCode(properties::verifyContext).doesNotThrowAnyException();
 	}
 
-	/** reserve ≥ limit：分母被钳到 1 ⇒ 每轮都判已满。 */
+	/** 过渡键 limit 已退役：预留按窗口一半收口（不再靠"reserve ≥ limit 启动失败"防退化分母）。 */
 	@Test
-	void reserveMustBeSmallerThanLimit() {
+	void reserveIsClampedToHalfTheWindowByTheTrigger() {
 		AiProperties properties = props();
-		properties.getContext().setReserveTokens(properties.getContext().getLimitTokens());
-
-		assertThatThrownBy(properties::verifyContext).isInstanceOf(IllegalStateException.class)
-			.hasMessageContaining("reserve-tokens");
+		int reserve = properties.getContext().getReserveTokens();
+		org.assertj.core.api.Assertions.assertThat(com.example.configmgr.ai.context.ContextTrigger.effectiveReserve(15_000, reserve, 0))
+			.as("小窗口下预留收口到窗口/2，分母不会被压成 1").isEqualTo(7_500);
+		org.assertj.core.api.Assertions.assertThat(com.example.configmgr.ai.context.ContextTrigger.effectiveReserve(128_000, reserve, 0))
+			.isEqualTo(reserve);
 	}
 
 	/** 阈值倒挂：L2 比 L1 先到 ⇒ 最轻的一级永远不触发。 */

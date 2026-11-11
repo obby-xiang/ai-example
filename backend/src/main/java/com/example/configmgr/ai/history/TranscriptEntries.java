@@ -28,8 +28,9 @@ import java.util.function.Predicate;
  * 只有拿不到时才回落到历史里的 {@code responseData}，且<b>绝不</b>把 L1 占位符写进 transcript。
  * 这样即使 {@code chat:mem} 已被压缩/窗口改写成占位符，用户展示原文也不会被污染。
  *
- * <p><b>合成消息一律不写</b>：压缩摘要、步数/预算收尾、纠正指令都不是用户原话/助手答复，
- * 由 {@link SyntheticMessages#isSynthetic(Message)} 统一过滤。
+ * <p><b>压缩摘要按内部来源保留</b>：只有 metadata 明确标记 {@code origin=COMPACTION_SUMMARY}
+ * 才投影为 assistant，其他合成提示仍由 {@link SyntheticMessages#isSynthetic(Message)} 过滤。
+ * 来源只存于转录条目，公开历史载荷不透出该来源或摘要的内部 reasoning。
  */
 public final class TranscriptEntries {
 
@@ -120,7 +121,14 @@ public final class TranscriptEntries {
         long atMs = System.currentTimeMillis();
         for (int i = 0; i < messages.size(); i++) {
             Message message = messages.get(i);
-            if (message == null || SyntheticMessages.isSynthetic(message)) {
+            if (message == null) {
+                continue;
+            }
+            if (SyntheticMessages.isCompactionSummary(message)) {
+                out.add(compactionSummaryEntry(message, i, runId, turnStartedAtMs, atMs));
+                continue;
+            }
+            if (SyntheticMessages.isSynthetic(message)) {
                 continue;
             }
             if (message instanceof AssistantMessage assistant) {
@@ -163,6 +171,14 @@ public final class TranscriptEntries {
         String suffix = stableId == null || StringUtils.isBlank(String.valueOf(stableId))
                 ? String.valueOf(index) : String.valueOf(stableId);
         return entryId(runId, "assistant", "text-" + suffix);
+    }
+
+    private static TranscriptEntry compactionSummaryEntry(Message message, int index, String runId,
+                                                          long turnStartedAtMs, long atMs) {
+        return new TranscriptEntry(entryId(runId, "assistant", "text-" + index), "assistant", runId,
+                turnStartedAtMs, atMs, message.getText(), null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, null, null, null)
+                .withOrigin(SyntheticMessages.ORIGIN_COMPACTION_SUMMARY);
     }
 
     private static TranscriptEntry assistantEntry(AssistantMessage assistant, int index, int currentRunStart,

@@ -31,7 +31,24 @@ class FrameWakeListenerSubscribeRollbackTest {
 
 	private final GenerationWakeBus bus = new GenerationWakeBus();
 
+	private static final com.example.configmgr.ai.tenant.TenantUser TENANT =
+			new com.example.configmgr.ai.tenant.TenantUser(1L, 101L);
+
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
+
+	private boolean register(String runId, FrameWakeListener.WakeTarget target) {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.isRegistered(runId, target);
+		}
+	}
+
+	private int targetCount() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.targetCount(TENANT, RUN_ID);
+		}
+	}
 
 	@Test
 	void aFailedSubscribeRollsBackTheBucketIncludingTargetsRegisteredWhileSubscribing() throws Exception {
@@ -39,32 +56,32 @@ class FrameWakeListenerSubscribeRollbackTest {
 		this.bus.blockedSubscribeSucceeds = false;
 		RecordingTarget owner = new RecordingTarget();
 		AtomicBoolean ownerResult = new AtomicBoolean();
-		Thread submitting = new Thread(() -> ownerResult.set(this.listener.register(RUN_ID, owner)),
+		Thread submitting = new Thread(() -> ownerResult.set(register(RUN_ID, owner)),
 				"subscribe-owner");
 		submitting.start();
 		assertThat(this.bus.subscribeEntered.await(5, TimeUnit.SECONDS)).as("订阅必须已经进入总线").isTrue();
 
 		RecordingTarget late = new RecordingTarget();
 		AtomicBoolean lateResult = new AtomicBoolean();
-		Thread joining = new Thread(() -> lateResult.set(this.listener.register(RUN_ID, late)), "subscribe-late");
+		Thread joining = new Thread(() -> lateResult.set(register(RUN_ID, late)), "subscribe-late");
 		joining.start();
 		joining.join(TimeUnit.SECONDS.toMillis(1));
 
 		assertThat(joining.isAlive()).as("在途登记不得阻塞").isFalse();
 		assertThat(lateResult.get()).as("未确认 ⇒ false").isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).as("在途目标已保留（失败时才一起回滚）").isEqualTo(2);
+		assertThat(targetCount()).as("在途目标已保留（失败时才一起回滚）").isEqualTo(2);
 
 		this.bus.releaseSubscribe();
 		submitting.join(TimeUnit.SECONDS.toMillis(5));
 
 		assertThat(ownerResult.get()).as("订阅失败 ⇒ 发起方拿到 false 以便重试").isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).as("失败后桶必须完整回滚（含在途期间的目标）").isZero();
+		assertThat(targetCount()).as("失败后桶必须完整回滚（含在途期间的目标）").isZero();
 		assertThat(this.listener.subscribedRuns()).as("不得留一条没人订阅的登记").isZero();
 		assertThat(this.bus.subscribed(RUN_ID)).as("总线上也不得有订阅").isFalse();
 
 		// 后续目标必须重新建订阅，而不是被当成"已有订阅"
 		RecordingTarget later = new RecordingTarget();
-		assertThat(this.listener.register(RUN_ID, later)).as("回滚后新目标必须真正建立订阅").isTrue();
+		assertThat(register(RUN_ID, later)).as("回滚后新目标必须真正建立订阅").isTrue();
 		assertThat(this.bus.subscribeCalls.get()).as("首次失败 + 回滚后重建 = 两次订阅尝试").isEqualTo(2);
 		this.bus.inject(RUN_ID, 42L);
 		assertThat(later.wakes).as("新订阅必须能收到唤醒").containsExactly(42L);

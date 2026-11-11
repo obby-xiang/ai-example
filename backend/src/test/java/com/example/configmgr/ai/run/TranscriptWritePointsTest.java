@@ -75,14 +75,17 @@ class TranscriptWritePointsTest {
 				mock(AiSessionService.class), this.properties, mock(CancellationRegistry.class),
 				mock(ToolActivityBeacon.class), mock(ScheduledExecutorService.class));
 		ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
-		when(this.store.permittedToWrite(anyString(), eq("transcript"))).thenReturn(true);
+		when(this.store.isWritePermitted(anyString(), eq("transcript"))).thenReturn(true);
+		when(this.store.get(RUN_ID)).thenReturn(snapshot());
+		// create-entry 起终态写点先读持久化页做 superseded 对账；默认返回完整空页，让 append 可发生。
+		when(this.transcript.readPage(anyString(), anyLong(), anyLong(), any(), any()))
+			.thenReturn(ConversationTranscriptStore.ReadPage.EMPTY);
 	}
 
 	@Test
 	void turnStartWritesTheUserEntryWithStableEntryId() {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT, USER)) {
-			ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptUser", RUN_ID, SESSION_ID, "原话", 1000L,
-					List.of(new UserMessage("原话")));
+			ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptUser", RUN_ID, SESSION_ID, "原话", 1000L);
 		}
 
 		@SuppressWarnings("unchecked")
@@ -95,8 +98,7 @@ class TranscriptWritePointsTest {
 
 	@Test
 	void turnStartWithoutIdentitySkipsWrite() {
-		ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptUser", RUN_ID, SESSION_ID, "原话", 1000L,
-				List.of(new UserMessage("原话")));
+		ReflectionTestUtils.invokeMethod(this.service, "recordTranscriptUser", RUN_ID, SESSION_ID, "原话", 1000L);
 
 		verify(this.transcript, never()).append(anyString(), anyLong(), anyLong(), any(), anyLong());
 	}
@@ -107,7 +109,7 @@ class TranscriptWritePointsTest {
 		when(this.store.get(RUN_ID)).thenReturn(snapshot);
 		List<Message> history = List.of(new UserMessage("原话"), new AssistantMessage("答"));
 
-		ReflectionTestUtils.invokeMethod(this.service, "recordTranscript", RUN_ID, SESSION_ID, history, true);
+		ReflectionTestUtils.invokeMethod(this.service, "isRecordTranscript", RUN_ID, SESSION_ID, history, true);
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
@@ -116,7 +118,9 @@ class TranscriptWritePointsTest {
 			.containsExactly("user", "assistant");
 		assertThat(entries.getValue().get(0).entryId()).isEqualTo(RUN_ID + ":user");
 		assertThat(entries.getValue().get(0).text()).isEqualTo("原话");
-		assertThat(entries.getValue().get(0).turnStartedAtMs()).isEqualTo(snapshot.getCreatedAtMs());
+		assertThat(entries.getValue().get(0).turnStartedAtMs())
+			.as("用户条目排序键早于建快照时刻（终态补写不排到工具卡之后）")
+			.isEqualTo(snapshot.transcriptUserTurnStartedAtMs());
 	}
 
 	@Test
@@ -126,7 +130,7 @@ class TranscriptWritePointsTest {
 		AssistantMessage stopped = AssistantMessage.builder().content("半截").build();
 		List<Message> history = List.of(new UserMessage("原话"), stopped);
 
-		ReflectionTestUtils.invokeMethod(this.service, "recordTranscript", RUN_ID, SESSION_ID, history, true);
+		ReflectionTestUtils.invokeMethod(this.service, "isRecordTranscript", RUN_ID, SESSION_ID, history, true);
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
@@ -134,19 +138,24 @@ class TranscriptWritePointsTest {
 		assertThat(entries.getValue()).extracting(TranscriptEntry::text).containsExactly("原话", "半截");
 	}
 
+	/**
+	 * 失败终态：用户原文必须补写；<b>可见正文</b>的历史 assistant 也保留（当前契约：
+	 * {@code includeLastAssistant} 只决定"无正文/无失败事实的空 assistant"是否写入，不裁可见历史）。
+	 */
 	@Test
-	void failureTerminalStillBackfillsTheUserTextWithoutAppendingTheLastAssistant() {
+	void failureTerminalBackfillsTheUserTextAndKeepsVisibleHistory() {
 		RunSnapshot snapshot = snapshot();
 		when(this.store.get(RUN_ID)).thenReturn(snapshot);
 
-		ReflectionTestUtils.invokeMethod(this.service, "recordTranscript", RUN_ID, SESSION_ID,
+		ReflectionTestUtils.invokeMethod(this.service, "isRecordTranscript", RUN_ID, SESSION_ID,
 				List.of(new UserMessage("原话"), new AssistantMessage("上一轮终稿")), false);
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
 		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), anyLong());
 		assertThat(entries.getValue()).extracting(TranscriptEntry::kind, TranscriptEntry::text)
-			.containsExactly(org.assertj.core.groups.Tuple.tuple("user", "原话"));
+			.containsExactly(org.assertj.core.groups.Tuple.tuple("user", "原话"),
+					org.assertj.core.groups.Tuple.tuple("assistant", "上一轮终稿"));
 	}
 
 	@Test
@@ -169,15 +178,18 @@ class TranscriptWritePointsTest {
 		TranscriptEntry tool = assistantWithTextSegment(RUN_ID, "同一正文", "create-1", 27L);
 		when(this.transcript.readPage(SESSION_ID, TENANT, USER, null, 500))
 			.thenReturn(ConversationTranscriptStore.ReadPage.EMPTY);
-		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(1L))).thenReturn(true);
 
 		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
 				List.of(plain, tool), null, false, false);
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), eq(0L));
-		assertThat(entries.getValue()).extracting(TranscriptEntry::entryId).containsExactly(tool.entryId());
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), eq(1L));
+		assertThat(entries.getValue()).extracting(TranscriptEntry::entryId)
+			.containsExactly(RUN_ID + ":user", tool.entryId());
+		assertThat(entries.getValue().get(0).kind()).isEqualTo("user");
+		assertThat(entries.getValue().get(0).text()).isEqualTo("原话");
 	}
 
 	@Test
@@ -186,15 +198,15 @@ class TranscriptWritePointsTest {
 		TranscriptEntry tool = assistantWithTextSegment(RUN_ID, "同一正文", "create-1", 27L);
 		when(this.transcript.readPage(SESSION_ID, TENANT, USER, null, 500)).thenReturn(
 				new ConversationTranscriptStore.ReadPage(List.of(oldPlain, tool), 2L, 1L, null, false, false));
-		when(this.transcript.remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L)).thenReturn(true);
-		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+		when(this.transcript.remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 1L)).thenReturn(true);
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(1L))).thenReturn(true);
 
 		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
 				List.of(tool), null, false, false);
 
 		org.mockito.InOrder order = org.mockito.Mockito.inOrder(this.transcript);
-		order.verify(this.transcript).remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L);
-		order.verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L));
+		order.verify(this.transcript).remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 1L);
+		order.verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(1L));
 	}
 
 	@Test
@@ -209,13 +221,13 @@ class TranscriptWritePointsTest {
 				new ConversationTranscriptStore.ReadPage(firstPage, 501L, 1L, "500", true, false));
 		when(this.transcript.readPage(SESSION_ID, TENANT, USER, 500L, 500)).thenReturn(
 				new ConversationTranscriptStore.ReadPage(List.of(oldPlain, tool), 501L, 2L, null, false, false));
-		when(this.transcript.remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L)).thenReturn(true);
-		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+		when(this.transcript.remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 1L)).thenReturn(true);
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(1L))).thenReturn(true);
 
 		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
 				List.of(tool), null, false, false);
 
-		verify(this.transcript).remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 0L);
+		verify(this.transcript).remove(SESSION_ID, TENANT, USER, java.util.Set.of(oldPlain.entryId()), 1L);
 	}
 
 	@Test
@@ -229,16 +241,16 @@ class TranscriptWritePointsTest {
 		TranscriptEntry tool = assistantWithTextSegment(RUN_ID, "共享", "create-1", 27L);
 		when(this.transcript.readPage(SESSION_ID, TENANT, USER, null, 500)).thenReturn(
 				new ConversationTranscriptStore.ReadPage(List.of(plain, tool), 2L, 1L, null, false, false));
-		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(0L))).thenReturn(true);
+		when(this.transcript.append(eq(SESSION_ID), eq(TENANT), eq(USER), anyList(), eq(1L))).thenReturn(true);
 
 		ReflectionTestUtils.invokeMethod(this.service, "appendTerminalEntries", RUN_ID, SESSION_ID, snapshot(),
 				List.of(plain, tool), null, false, false);
 
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<TranscriptEntry>> entries = ArgumentCaptor.forClass(List.class);
-		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), eq(0L));
+		verify(this.transcript).append(eq(SESSION_ID), eq(TENANT), eq(USER), entries.capture(), eq(1L));
 		assertThat(entries.getValue()).extracting(TranscriptEntry::entryId)
-			.containsExactly(plain.entryId(), tool.entryId());
+			.containsExactly(RUN_ID + ":user", plain.entryId(), tool.entryId());
 		verify(this.transcript, never()).remove(anyString(), anyLong(), anyLong(), any(), anyLong());
 	}
 
@@ -279,10 +291,15 @@ class TranscriptWritePointsTest {
 
 	private RunSnapshot snapshot() {
 		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setRunId(RUN_ID);
 		snapshot.setSessionId(SESSION_ID);
 		snapshot.setTenantId(TENANT);
 		snapshot.setUserId(USER);
 		snapshot.setCreatedAtMs(500L);
+		// 终态补写用户原文的当前判据：快照里必须有请求原文与轮首时刻。
+		snapshot.setRequestText("原话");
+		snapshot.setTurnStartedAtMs(600L);
+		snapshot.setRunEpoch(1L);
 		return snapshot;
 	}
 

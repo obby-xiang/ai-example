@@ -114,7 +114,7 @@ class ConfirmGateSheetMetaPersistTest {
 		this.store.seedPending(RUN_ID, pending);
 		when(this.provider.getIfAvailable()).thenReturn(this.resumeService);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.resumeService.resume(RUN_ID)).thenReturn(new ResumeService.ResumeResult(
 				ResumeService.Outcome.NOT_FOUND, Map.of("runId", RUN_ID)));
 	}

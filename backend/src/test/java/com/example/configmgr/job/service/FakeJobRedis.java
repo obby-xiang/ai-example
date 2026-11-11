@@ -2,6 +2,7 @@ package com.example.configmgr.job.service;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -102,6 +103,38 @@ final class FakeJobRedis {
                 }
             }
             return removed;
+        });
+        // 产品脚本统一走 RedisScript：替身按脚本正文区分「删除」与「代次围栏写」
+        when(this.redis.execute(any(RedisScript.class), anyList(), any(Object[].class))).thenAnswer(invocation -> {
+            RedisScript<?> script = invocation.getArgument(0);
+            String text = script.getScriptAsString();
+            String key = ((List<String>) invocation.getArgument(1)).get(0);
+            Object[] rawArgs = invocation.getArguments();
+            Object[] args = java.util.Arrays.copyOfRange(rawArgs, 2, rawArgs.length);
+            checkAlive();
+            if (text != null && text.contains("HDEL")) {
+                return 1L;
+            }
+            if (text != null && text.contains("DEL")) {
+                this.deleteAttempts.add(key);
+                if (this.failingDeletes.contains(key)) {
+                    throw new IllegalStateException("DEL 失败（模拟单键半失败）：" + key);
+                }
+                boolean removed = remove(key);
+                if (removed) {
+                    this.successfulDeletes.add(key);
+                }
+                return removed ? 1L : 0L;
+            }
+            if (args == null || args.length < 3) {
+                return null;
+            }
+            if (String.valueOf(args[0]).startsWith("REVOKED")
+                    || String.valueOf(args[0]).contains("REVOKED")) {
+                return null;
+            }
+            put(key, String.valueOf(args[1]), Duration.ofMillis(Long.parseLong(String.valueOf(args[2]))));
+            return 1L;
         });
     }
 

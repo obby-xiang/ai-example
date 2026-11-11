@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -59,6 +60,20 @@ import static org.mockito.Mockito.when;
  */
 class FormSlotSilenceTest {
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private static final String RUN_ID = "run-form-slot-silence";
 
 	private static final String SESSION_ID = "s-form-slot-silence";
@@ -69,7 +84,7 @@ class FormSlotSilenceTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -84,13 +99,17 @@ class FormSlotSilenceTest {
 	void setUp() {
 		// 生产形态：park=true（帧前移/挂起与前移的先后顺序都按生产走）
 		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf("generative_form")).thenReturn(ToolMeta.Channel.FRONTEND);
 		when(this.toolRegistry.riskOf("generative_form")).thenReturn(ToolMeta.RiskLevel.WRITE);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
 	}
@@ -143,10 +162,11 @@ class FormSlotSilenceTest {
 	private SpToolCallingManager manager(FrontendToolGuard guard) {
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
-				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
+				List.of(), provider, Runnable::run, null, ToolExecutionExecutors.retryScheduler());
 		return new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry,
 				mock(MessageJsonCodec.class), this.beacon, this.cancellations,
-				new ToolResultLimiter(this.properties), List.of(guard));
+				new ToolResultLimiter(this.properties), List.of(guard),
+				null, null, null, null, this.properties, ToolExecutionExecutors.identityPropagating());
 	}
 
 	private static FrontendToolGuard accepting() {

@@ -122,8 +122,12 @@ class ResumeContextRefreshTest {
 
 	private ResumeService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		// 键空间按身份分段：本轮记录的身份作为用例的生命周期作用域。
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		// 本用例精确模拟 park 开启后的**续跑**（首轮已在挂起处结束，刷新点从未走到）：
 		// 因此不需要 park 开关本身（ResumeService 不读它）；开关行为由 FormSlotSilenceTest 覆盖。
 		this.registryContext = new AnnotationConfigApplicationContext();
@@ -135,10 +139,16 @@ class ResumeContextRefreshTest {
 		when(this.taskService.findByIdRaw(any())).thenAnswer(invocation -> Optional.ofNullable(this.taskState.get())
 			.filter(task -> task.getId() != null && task.getId().equals(invocation.getArgument(0))));
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
-		when(this.chatService.systemPromptText(any())).thenReturn(SYSTEM_TEXT);
+		when(this.chatService.systemPromptText(any(), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenAnswer(invocation -> {
+				AiContext refreshed = invocation.getArgument(0);
+				return "PERSONA 行\n\n## 当前工作区状态\n<workspace_state>\n页面：" + refreshed.getPage()
+						+ "\n任务: #" + refreshed.getTaskId() + "\n当前步骤: " + refreshed.getStep()
+						+ "\n</workspace_state>\n";
+			});
 		// 刷新后的工作区段（真实实现在 ContextBuilder；本例只验"哪一段被换成刷新后的那一份"）
 		when(this.chatService.workspaceStateText(any())).thenAnswer(invocation -> {
 			AiContext refreshed = invocation.getArgument(0);
@@ -174,6 +184,9 @@ class ResumeContextRefreshTest {
 	void tearDown() {
 		if (this.registryContext != null) {
 			this.registryContext.close();
+		}
+		if (this.identity != null) {
+			this.identity.close();
 		}
 	}
 
@@ -492,6 +505,9 @@ class ResumeContextRefreshTest {
 
 	private void seedSuspendedRun(List<PendingToolCall> inFlight) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.of("tasks", null, null, null, null).toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("做一个导出"))));

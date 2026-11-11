@@ -5,6 +5,7 @@ import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.ResumeService;
@@ -77,7 +78,8 @@ class FrontendResultToolStartConformanceTest {
 	/** 模拟"补发 start 之后、结局帧之前"的进程死亡：让下一次结局帧抛出。 */
 	private final AtomicInteger resultCrashes = new AtomicInteger();
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	// 与生产存储同语义：pending 读出的是副本；否则 submit 的就地改写会先污染存储态，决策口误判 DUPLICATE。
+	private final InMemoryRunStore store = new InMemoryRunStore(true);
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
@@ -85,7 +87,91 @@ class FrontendResultToolStartConformanceTest {
 
 	private final AiProperties properties = new AiProperties();
 
-	private final SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, this.mapper) {
+	/** 轻装配帧存储：归档直接落到同一份 InMemoryRunStore，断言面仍是 {@code store.events(...)}。 */
+	private final FrameStore frames = new FrameStore() {
+		private final java.util.concurrent.atomic.AtomicLong seq = new java.util.concurrent.atomic.AtomicLong();
+
+		@Override
+		public long nextSeq(String runId) {
+			return this.seq.incrementAndGet();
+		}
+
+		@Override
+		public void append(String runId, java.util.Map<String, Object> frame) {
+			FrontendResultToolStartConformanceTest.this.store.appendEvent(runId, frame);
+		}
+
+		@Override
+		public long lastSeq(String runId) {
+			return readFrom(runId, 0L, 0).stream()
+				.mapToLong(frame -> frame.get("seq") instanceof Number number ? number.longValue() : 0L)
+				.max()
+				.orElse(0L);
+		}
+
+		@Override
+		public java.util.List<java.util.Map<String, Object>> readFrom(String runId, long afterSeq, int limit) {
+			java.util.List<java.util.Map<String, Object>> out = new java.util.ArrayList<>();
+			for (java.util.Map<String, Object> frame : FrontendResultToolStartConformanceTest.this.store
+				.events(runId)) {
+				Object raw = frame.get("seq");
+				long seqNo = raw instanceof Number number ? number.longValue() : 0L;
+				if (seqNo > afterSeq && (limit <= 0 || out.size() < limit)) {
+					out.add(frame);
+				}
+			}
+			return out;
+		}
+	};
+
+	private SseChatEmitter emitter;
+
+	private RunRegistry registry;
+
+
+
+	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
+
+	private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
+
+	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
+
+	private final ResilientChatService chatService = mock(ResilientChatService.class);
+
+	private final ThreadPoolTaskExecutor taskExecutor = mock(ThreadPoolTaskExecutor.class);
+
+	private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
+
+	private ConfirmGate gate;
+
+	private SpToolCallingManager manager;
+
+	private ResumeService service;
+
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+		this.properties.getPark().setEnabled(true);
+		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
+		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
+		});
+		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(org.mockito.ArgumentMatchers.eq("generative_form"),
+				any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.channelOf("generative_form")).thenReturn(ToolMeta.Channel.FRONTEND);
+		when(this.toolRegistry.riskOf("generative_form")).thenReturn(ToolMeta.RiskLevel.WRITE);
+		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
+		snapshot.setContext(AiContext.of("tasks", null, null, null, null).toMap());
+		this.store.save(snapshot);
+		this.emitter = new SseChatEmitter(RUN_ID, this.store, this.frames, this.mapper,
+			Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+			AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+			com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null) {
 		@Override
 		public void toolStart(PendingToolCall pending) {
 			if (FrontendResultToolStartConformanceTest.this.suppressedStarts
@@ -106,45 +192,13 @@ class FrontendResultToolStartConformanceTest {
 		}
 	};
 
-	/** 单写出器替身：决策侧与续跑侧拿到的必须是同一个写出器（身份一致性）。 */
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null) {
+		this.registry = new RunRegistry(this.store, this.mapper, null, this.frames, null, null,
+			null) {
 		@Override
 		public SseChatEmitter of(String runId) {
 			return FrontendResultToolStartConformanceTest.this.emitter;
 		}
 	};
-
-	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
-
-	private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
-
-	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
-
-	private final ResilientChatService chatService = mock(ResilientChatService.class);
-
-	private final ThreadPoolTaskExecutor taskExecutor = mock(ThreadPoolTaskExecutor.class);
-
-	private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
-
-	private ConfirmGate gate;
-
-	private SpToolCallingManager manager;
-
-	private ResumeService service;
-
-	@BeforeEach
-	void setUp() {
-		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
-		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
-		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
-		});
-		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
-		when(this.toolRegistry.channelOf("generative_form")).thenReturn(ToolMeta.Channel.FRONTEND);
-		when(this.toolRegistry.riskOf("generative_form")).thenReturn(ToolMeta.RiskLevel.WRITE);
-		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
-		snapshot.setContext(AiContext.empty().toMap());
-		this.store.save(snapshot);
 		this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
 				List.of());
 		this.manager = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
@@ -156,8 +210,17 @@ class FrontendResultToolStartConformanceTest {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;
 		}).when(this.taskExecutor).execute(any(Runnable.class));
+		when(this.chatService.systemPromptText(any(AiContext.class),
+				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn("SYSTEM");
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(prompt());
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	/**
@@ -257,7 +320,8 @@ class FrontendResultToolStartConformanceTest {
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private ConfirmGate.Submission submitResult() {
-		return this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{\"keyword\":\"E2E\"}", "http-post", false, null);
+		return this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{\"keyword\":\"E2E\"}", "http-post", false, null,
+				java.util.Map.of(), null);
 	}
 
 	/** 首轮 park，且原实例死在 {@code tool_start} 落档之前（归档里只有 suspended + frontend_tool_request）。 */

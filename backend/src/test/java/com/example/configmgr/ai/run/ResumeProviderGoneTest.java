@@ -8,7 +8,9 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -62,6 +64,21 @@ class ResumeProviderGoneTest {
 
 	private ResumeService service;
 
+	/** run 级键/帧面按身份拼：种子快照必须在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@BeforeEach
 	void setUp() {
 		ThreadPoolTaskExecutor executor = mock(ThreadPoolTaskExecutor.class);
@@ -76,9 +93,12 @@ class ResumeProviderGoneTest {
 		ReflectionTestUtils.setField(this.service, "aiConfigService", this.configService);
 		// 复核 Critical-1 之后的默认口径：刷新成功 + 行级声明也没有（= "确定不可用"）才判死
 		when(this.configService.reloadWithOutcome())
-			.thenReturn(new AiConfigService.ReloadResult(AiConfigService.ConfigSnapshot.empty(), true));
+			.thenReturn(new AiConfigService.ReloadResult(
+					new AiConfigService.ConfigSnapshot(0L, List.of(), List.of(), Map.of()), true));
 		when(this.configService.bindingState(any(Long.class), anyString()))
 			.thenReturn(AiConfigService.BindingState.ABSENT);
+		// 续跑会重建权威 SYSTEM：轻装配替身给出非空文本（否则 fail-closed 成 503）。
+		when(this.chatService.systemPromptText(any(AiContext.class), anyBoolean())).thenReturn("SYSTEM");
 	}
 
 	@Test
@@ -92,8 +112,7 @@ class ResumeProviderGoneTest {
 		assertThat(result.body()).containsEntry("reason", "PROVIDER_GONE")
 			.containsEntry("providerId", 7L)
 			.containsEntry("modelId", "deepseek-flash");
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any(), any(),
-				any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
 		assertThat(result.outcome().releasesLease()).as("没有人会接手 ⇒ 归还续跑权").isTrue();
 	}
 
@@ -107,26 +126,23 @@ class ResumeProviderGoneTest {
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
-		ArgumentCaptor<Long> providerId = ArgumentCaptor.forClass(Long.class);
-		ArgumentCaptor<String> modelId = ArgumentCaptor.forClass(String.class);
 		verify(this.chatService).driveResumed(anyString(), anyString(), any(AiContext.class),
-				org.mockito.ArgumentMatchers.<List<Message>>any(), providerId.capture(), modelId.capture(), any());
-		assertThat(providerId.getValue()).isEqualTo(7L);
-		assertThat(modelId.getValue()).as("续跑用的是快照模型，不是此刻的默认模型").isEqualTo("deepseek-flash");
+				org.mockito.ArgumentMatchers.<List<Message>>any(), any());
+		verify(this.configService).resolveChatTarget(7L, "deepseek-flash");
 		verify(this.configService, never()).resolveChatTarget(anyString());
 	}
 
 	@Test
-	void legacySnapshotWithoutProviderFallsBackWithWarn() {
+	void legacySnapshotWithoutFrozenModelIsProviderGoneInsteadOfGuessingTheDefault() {
 		seedSnapshot(null, null);
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
-		assertThat(result.outcome()).as("旧快照没有身份可校验 ⇒ 不拦").isEqualTo(ResumeService.Outcome.ACCEPTED);
-		verify(this.configService, never()).resolveChatTarget(any());
-		// 旧快照走<b>五参旧签名</b>（语义等价，既有用例零改动）
-		verify(this.chatService).driveResumed(anyString(), anyString(), any(AiContext.class),
-				org.mockito.ArgumentMatchers.<List<Message>>any(), any());
+		assertThat(result.outcome())
+			.as("当前协议要求首笔快照冻结 provider/model：缺模型名 ⇒ 明确 GONE，不采用当前默认")
+			.isEqualTo(ResumeService.Outcome.PROVIDER_GONE);
+		verify(this.configService, never()).resolveChatTarget(any(Long.class), anyString());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
 	}
 
 	@Test
@@ -154,6 +170,8 @@ class ResumeProviderGoneTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setProviderId(providerId);
 		snapshot.setModelId(modelId);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(
 				new org.springframework.ai.chat.messages.UserMessage("你好"))));

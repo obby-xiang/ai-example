@@ -68,6 +68,10 @@ class AiControllerSuspendedTouchTest {
 
 	private final RunStore runStore = mock(RunStore.class);
 
+	/** 事件末号唯一来源（RunStore 不再持有事件面）。 */
+	private final com.example.configmgr.ai.run.FrameStore frameStore =
+			mock(com.example.configmgr.ai.run.FrameStore.class);
+
 	private final ConfirmGate confirmGate = mock(ConfirmGate.class);
 
 	private final RunRegistry runRegistry = mock(RunRegistry.class);
@@ -82,6 +86,9 @@ class AiControllerSuspendedTouchTest {
 	void openIdentityScope() {
 		// 这些端点都是 HTTP 数据面入口：生产里必然带身份，测试同样先建立身份作用域
 		this.identityScope = RequestContextUtils.useContext(1L, 101L);
+		// 事件末号默认"已知为 0"：未知轮次走 404 分支（读失败才是 503，另有定点用例）。
+		when(this.frameStore.lastSeqIfKnown(org.mockito.ArgumentMatchers.anyString()))
+			.thenReturn(java.util.OptionalLong.of(0L));
 	}
 
 	@AfterEach
@@ -100,7 +107,7 @@ class AiControllerSuspendedTouchTest {
 		when(this.runStore.get(RUN_ID)).thenReturn(snapshot);
 		when(this.runStore.pendings(RUN_ID)).thenReturn(List.of());
         when(this.runStore.pendingsLenient(RUN_ID)).thenReturn(List.of());
-		when(this.runStore.lastEventSeq(RUN_ID)).thenReturn(0L);
+		when(this.frameStore.lastSeqIfKnown(RUN_ID)).thenReturn(java.util.OptionalLong.of(0L));
 
 		this.mockMvc.perform(get("/api/ai/runs/current").param("sessionId", SESSION_ID))
 			.andExpect(status().isOk());
@@ -181,7 +188,7 @@ class AiControllerSuspendedTouchTest {
 		ConfirmGate.Submission accepted = new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, false,
 				null, ConfirmGate.ResumeTrigger.notApplicable());
 		when(this.confirmGate.submitDecision(any(), any(), any(Boolean.class), any())).thenReturn(accepted);
-		when(this.confirmGate.submitFrontendResult(any(), any(), any(), any(), any(Boolean.class), any()))
+		when(this.confirmGate.submitFrontendResult(any(), any(), any(), any(), any(Boolean.class), any(), any(), any()))
 			.thenReturn(accepted);
 		when(this.runStore.instanceId()).thenReturn("inst-test");
 	}
@@ -204,6 +211,7 @@ class AiControllerSuspendedTouchTest {
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		// N5：/confirm 的 reason 归一化复用与 /chat 同一个 InputSanitizer（字段注入，standalone 需手填）
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
+		ReflectionTestUtils.setField(built, "frameStore", this.frameStore);
 		return built;
 	}
 

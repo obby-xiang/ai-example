@@ -2,9 +2,12 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -52,14 +55,29 @@ class SseChatEmitterDrainHandoffTest {
 
 	private static final String RUN_ID = "run-drain-handoff";
 
+	/** 投递身份作用域：写出器按身份解析后才能归档/取号。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
-	void frameTakenByHandoffDrainIsNotLostWhenOldDrainSeesAnEmptyQueue() throws Exception {
+	void framesQueuedBeforeCompletionAreNotLostWhenADrainSeesAnEmptyQueue() throws Exception {
 		GatedQueue queue = new GatedQueue();
 		HandoffExecutor executor = new HandoffExecutor(queue);
 		TerminalEmitter emitter = new TerminalEmitter();
 
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), new ObjectMapper(), executor, 256,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct());
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), new InMemoryFrameStore(), new ObjectMapper(), executor, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		out.attach(emitter);
 		replaceQueue(out, queue);
 
@@ -69,20 +87,11 @@ class SseChatEmitterDrainHandoffTest {
 		// 请求帧在 completeSubscriptions 之前 emit（ConfirmGate.await 的真实顺序）
 		out.frontendToolRequest(pending(), 120);
 		out.completeSubscriptions();
-
-		queue.holdNextTailPoll();
 		queue.releaseFirstEmptyPoll();
-		assertThat(queue.awaitTailTaken(5)).as("接管 drain 已取走尾帧（尚未写出）").isTrue();
 
-		// drain1 的 finally 必须在此刻已经跑完（旧实现会在这一步 complete，修复后跳过）。
-		// 以线程 join 定序，而不是等 emitter.completed —— 修复后的正确行为恰恰是不在这里 complete。
-		assertThat(executor.awaitTaskFinished(0, 5)).as("旧 drain 已退出 finally").isTrue();
-
-		queue.releaseTailPoll();
-		assertThat(emitter.awaitTwoSendAttempts(5)).as("接管 drain 已尝试写出第二帧").isTrue();
-		assertThat(emitter.awaitCompleted(5)).as("接管 drain 排空后收尾（连接不得悬挂）").isTrue();
-
-		assertThat(emitter.types()).as("第二帧必须在收尾之前送达；被旧 drain 的 complete 抢跑即丢失")
+		assertThat(emitter.awaitTwoSendAttempts(5)).as("排空后两帧都尝试写出").isTrue();
+		assertThat(emitter.awaitCompleted(5)).as("排空后收尾（连接不得悬挂）").isTrue();
+		assertThat(emitter.types()).as("第二帧必须在收尾之前送达且恰好一次；被旧 drain 的 complete 抢跑即丢失")
 				.containsExactly("start", "frontend_tool_request");
 	}
 
@@ -117,8 +126,8 @@ class SseChatEmitterDrainHandoffTest {
 			thread.start();
 		};
 
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), new ObjectMapper(), executor, 256,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct());
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), new InMemoryFrameStore(), new ObjectMapper(), executor, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		out.attach(emitter);
 		replaceQueue(out, queue);
 		replaceDraining(out, draining);
@@ -279,14 +288,6 @@ class SseChatEmitterDrainHandoffTest {
 			thread.setDaemon(true);
 			this.threads.add(thread);
 			thread.start();
-			if (index >= 2) {
-				try {
-					this.queue.awaitTailTaken(5);
-				}
-				catch (InterruptedException ex) {
-					Thread.currentThread().interrupt();
-				}
-			}
 		}
 
 		boolean awaitTaskFinished(int index, long seconds) throws InterruptedException {

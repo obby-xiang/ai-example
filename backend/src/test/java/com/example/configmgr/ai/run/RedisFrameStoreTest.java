@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>
  * 断言对象是<b>存储语义</b>而不是"某方法被调用过"：取号单调不重、按号回读的四个边界、
- * 窗口近似裁剪、TTL 滑动、LIST/Stream 兼容拼接去重。Redis 用进程内替身
+ * 窗口近似裁剪、TTL 滑动、同号追加去重与差量边界。Redis 用进程内替身
  * （{@link FakeFrameRedis}，按 INCR/XADD/XRANGE 的语义实现，<b>且按目标部署 5.0.14
  * 拒绝排他区间</b>），不起真实 Redis。
  */
@@ -362,20 +362,6 @@ class RedisFrameStoreTest {
 		assertThat(seqs(store.readFrom(RUN_ID, 4L, 0))).containsExactly(5L, 6L, 7L, 8L, 9L, 10L, 11L, 12L);
 	}
 
-	/** G3（复审补）：跨源边界 —— LIST 末号 3、Stream 4..5，{@code afterSeq=3} 只应拿到 Stream 的 4、5。 */
-	@Test
-	void afterSeqBetweenListTailAndStreamTailReadsOnlyTheStreamPart() {
-		FakeFrameRedis redis = new FakeFrameRedis();
-		RedisFrameStore store = store(redis);
-		redis.seedList(store.legacyListKey(RUN_ID), MAPPER,
-				List.of(frame("start", 1L), frame("delta", 2L), frame("suspended", 3L)));
-		appendRaw(store, frame("tool_start", 4L));
-		appendRaw(store, frame("done", 5L));
-
-		assertThat(seqs(store.readFrom(RUN_ID, 3L, 0))).containsExactly(4L, 5L);
-		assertThat(seqs(store.readFrom(RUN_ID, 2L, 0))).containsExactly(3L, 4L, 5L);
-	}
-
 	// ── M-4：降级路径（取号/落档失败不中断出帧） ────────────────────────────
 
 	/** {@code INCR} 失败 ⇒ 进程内单调计数兜底，不抛异常；恢复后不得回退到降级号之下。 */
@@ -423,65 +409,6 @@ class RedisFrameStoreTest {
 				.isEqualTo(Duration.ofHours(24));
 		assertThat(redis.expiry(store.seqKey(RUN_ID)))
 				.as("序号键同口径续期").isEqualTo(Duration.ofHours(24));
-	}
-
-	// ── M5 + M13 + M14：LIST 兼容读与拼接去重 ───────────────────────────────
-
-	/** M13：迁移前的 LIST 数据（新写已不进 LIST）仍能完整回放。 */
-	@Test
-	void legacyListFramesRemainReplayable() {
-		FakeFrameRedis redis = new FakeFrameRedis();
-		RedisFrameStore store = store(redis);
-		redis.seedList(store.legacyListKey(RUN_ID), MAPPER,
-				List.of(frame("start", 1L), frame("suspended", 2L), frame("done", 3L)));
-
-		assertThat(seqs(store.readFrom(RUN_ID, 0L, 0))).containsExactly(1L, 2L, 3L);
-		assertThat(store.lastSeq(RUN_ID)).as("末号取自 LIST 尾巴（兼容期）").isEqualTo(3L);
-	}
-
-	/**
-	 * M14：混合期（LIST 1..3 + Stream 4..5）拼接正确 —— 升序、不重、不丢；同号以 Stream 为准。
-	 */
-	@Test
-	void readFromMergesLegacyListAndStreamBySeq() {
-		FakeFrameRedis redis = new FakeFrameRedis();
-		RedisFrameStore store = store(redis);
-		redis.seedList(store.legacyListKey(RUN_ID), MAPPER,
-				List.of(frame("start", 1L), frame("suspended", 2L), frame("delta", 3L, "text", "LIST 副本")));
-		// 新写只进 Stream：seq 3 是同号的"新副本"（LIST 里那条是迁移前的旧副本）
-		appendRaw(store, frame("delta", 3L, "text", "Stream 副本"));
-		appendRaw(store, frame("done", 4L));
-
-		List<Map<String, Object>> merged = store.readFrom(RUN_ID, 0L, 0);
-		assertThat(seqs(merged)).containsExactly(1L, 2L, 3L, 4L);
-		assertThat(merged.get(2)).as("同号以 Stream 为准").containsEntry("text", "Stream 副本");
-		assertThat(seqs(store.readFrom(RUN_ID, 2L, 0))).containsExactly(3L, 4L);
-		assertThat(store.lastSeq(RUN_ID)).isEqualTo(4L);
-	}
-
-	/** 没有 seq 的老帧（升级期）无法判孤儿 ⇒ 一律保留，且排在有序帧之前。 */
-	@Test
-	void legacyFramesWithoutSeqAreKeptAtTheHead() {
-		FakeFrameRedis redis = new FakeFrameRedis();
-		RedisFrameStore store = store(redis);
-		Map<String, Object> legacy = new LinkedHashMap<>();
-		legacy.put("type", "suspended");
-		redis.seedList(store.legacyListKey(RUN_ID), MAPPER, List.of(legacy, frame("start", 1L)));
-		appendRaw(store, frame("delta", 2L));
-
-		List<Map<String, Object>> frames = store.readFrom(RUN_ID, 5L, 0);
-		assertThat(frames).as("afterSeq 再大也不能丢无 seq 的老帧（宁可不发，不可丢帧）").hasSize(1);
-		assertThat(frames.get(0)).containsEntry("type", "suspended");
-	}
-
-	/** 序号锚定：遗留 LIST 已经发到 41 号 ⇒ 新实例从 42 起号（不回退、不重号）。 */
-	@Test
-	void seqAnchorSeedsFromLegacyListTail() {
-		FakeFrameRedis redis = new FakeFrameRedis();
-		RedisFrameStore store = store(redis);
-		redis.seedList(store.legacyListKey(RUN_ID), MAPPER, List.of(frame("delta", 41L)));
-
-		assertThat(store.nextSeq(RUN_ID)).isEqualTo(42L);
 	}
 
 	// ── 目标部署 Redis 5.0.14：排他区间（`(id`）不可用 ──────────────────────
@@ -601,37 +528,6 @@ class RedisFrameStoreTest {
 		FrameStore.ReadResult delta = store.readFromWithStatus(RUN_ID, 2L, 0);
 		assertThat(seqs(delta.frames())).containsExactly(3L);
 		assertThat(delta.degraded()).isTrue();
-	}
-
-	/** 兼容期 LIST 末帧探测失败：整批老帧会被跳过 ⇒ 必须 WARN（不许伪装成空表）。 */
-	@Test
-	void legacyListTailProbeFailureIsReportedInsteadOfSilentlyEmpty(CapturedOutput output) {
-		FakeFrameRedis redis = new FakeFrameRedis();
-		RedisFrameStore store = store(redis);
-		redis.seedList(store.legacyListKey(RUN_ID), MAPPER, List.of(frame("start", 1L)));
-
-		redis.failListTailProbe = true;
-		assertThat(store.readFrom(RUN_ID, 0L, 0)).as("末帧探测失败 ⇒ 整段 LIST 分支被跳过").isEmpty();
-		assertThat(output.getAll()).as("末帧探测失败必须 WARN，且文案与整段读可区分")
-				.contains("末帧探测")
-				.doesNotContain("本批 LIST 帧缺失");
-	}
-
-	/**
-	 * 兼容期 LIST <b>整段读</b>失败：末帧探测成功、{@code readLegacyList} 才抛 —— 这是另一条独立路径
-	 * （I1：老用例用"全挂"开关只命中末帧探测，把 {@code :409} 那条 WARN 改回 debug 仍全绿）。
-	 */
-	@Test
-	void legacyListFullReadFailureIsReportedInsteadOfSilentlyEmpty(CapturedOutput output) {
-		FakeFrameRedis redis = new FakeFrameRedis();
-		RedisFrameStore store = store(redis);
-		redis.seedList(store.legacyListKey(RUN_ID), MAPPER, List.of(frame("start", 1L)));
-
-		redis.failListFullRead = true;
-		assertThat(store.readFrom(RUN_ID, 0L, 0)).as("整段读失败 ⇒ 本批 LIST 帧缺失，返回空").isEmpty();
-		assertThat(output.getAll()).as("整段 LIST 读取失败必须 WARN，且不是靠末帧探测兜住")
-				.contains("本批 LIST 帧缺失")
-				.doesNotContain("末帧探测");
 	}
 
 	// ── M7（存储侧）：心跳不进事件日志 ───────────────────────────────────────

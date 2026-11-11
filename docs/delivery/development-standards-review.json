@@ -5924,6 +5924,44 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文流、编码、reasoning生成或解析，仅记录读侧暴露事实。"},
         "verification-review": {"status": "checked", "reason": "两条synthetic RED保持真实，测试树不写批量全绿；C-130以独立复审和真实模型结果更正状态；本批未运行产品测试，未改生产。"}
       }
+    },
+    {
+      "fingerprint": "sha256:18c5658ea2920fa40a3b7e94c91571576114ceb448efc8a72d830646b4547df3",
+      "status": "reviewed",
+      "reason": "逐hunk复核压缩摘要内部origin、公开history白名单及无公开SSE段的时间线豁免；独立审查agent-1248最终APPROVED，DeepSeek逐类复测相关90个用例全部通过。",
+      "reviewedAt": "2026-11-12T01:09:58+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1248、施工agent-1238、DeepSeek复测agent-301",
+      "specChanges": [
+        {
+          "change": "压缩摘要写入统一携带内部origin=COMPACTION_SUMMARY，公开history仅投影摘要正文和ASSISTANT类型，不输出内部reasoning、origin或其他技术metadata。",
+          "reason": "原读侧无法区分摘要与普通assistant，导致内部reasoningContent泄露；系统未上线，用户明确不做旧数据迁移或文本猜测兼容。",
+          "impact": "摘要正常展示且内部信息不上屏，普通assistant reasoning与其他synthetic过滤保持，无C端新增提示或技术字段。"
+        },
+        {
+          "change": "无公开SSE段的压缩摘要不再按unresolved plain导致AI_TRANSCRIPT_INCOMPLETE，也不要求或伪造segments/seq。",
+          "reason": "摘要由内部模型调用生成，没有公开正文帧，普通时间线规则会误杀整轮转录。",
+          "impact": "豁免仅认明确origin，普通assistant和correction未知正文仍失败关闭，entry所有权、工具配对及持久append/read不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/context/RollingSummarizer.java", "status": "checked", "reason": "真实buildSummaryPlan写入origin元数据，其他摘要预算、分组和正文逻辑不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/SyntheticMessages.java", "status": "checked", "reason": "新增内部origin常量及精确来源判断，不读取正文、标题或固定话术，既有synthetic分类保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntries.java", "status": "checked", "reason": "仅明确origin的摘要投影为assistant正文且内部reasoning为空，其他synthetic继续过滤，entryId稳定；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntry.java", "status": "checked", "reason": "additive origin在JSON、旧构造和所有with*复制路径中保留，普通条目null不新增字段；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "仅摘要豁免公开SSE段要求，不伪造segments/seq，普通plain、correction和entry所有权不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "公开assistant facts对摘要屏蔽reasoningContent，普通assistant reasoning原逻辑不变，origin不进入DTO；已IDEA Reformat。"},
+        {"path": "docs/research/盘点-近期遗漏与暂缓事项-2026-11-11.md", "status": "checked", "reason": "synthetic从待办移除并记录origin设计、无帧豁免及90个相关用例，其他高优待办保持。"},
+        {"path": "docs/任务看板.md", "status": "checked", "reason": "synthetic条目更新为已交付及真实验证边界，不宣称全量批量测试、真实模型或Cluster通过。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用RollingSummarizer、SyntheticMessages、TranscriptEntries/Entry及既有history DTO，无新增依赖或平行摘要存储。"},
+        "java-api-style": {"status": "checked", "reason": "六个生产Java均经IDEA Reformat；record构造、集合、布尔来源判断、with*复制和JSON显式字段逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "普通unresolved仍失败关闭，摘要无公开段不伪造完成或seq，内部reasoning和异常细节不进入公开history。"},
+        "toc-interaction": {"status": "checked", "reason": "摘要仅正文以ASSISTANT展示，无synthetic/origin/compactedFrom等C端技术信息，普通assistant reasoning不被误伤。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "origin随既有transcript Redis JSON和TTL持久化，append/readPage/withOutcome保留，未新增AI数据库访问或状态通道。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "摘要不按文本识别、不伪造公开帧，真实正文与reasoning分离，普通流式及correction失败语义保持。"},
+        "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；DeepSeek逐类复测AiControllerHistoryPayload 24、HistoryTranscript 7、TranscriptEntries 8、ConversationTranscriptStore 14、TranscriptWritePoints 11、MemoryCompaction 10、ReasoningConvergence 7、SystemRejected 9，共90项全绿；726测试源javac零错误，后端编译BUILD SUCCESS；真实模型、Cluster和全量批量测试NOT_RUN。"}
+      }
     }
   ]
 }

@@ -60,7 +60,7 @@ final class GenerationWakeBus implements FrameWakeBus {
 	final List<String> journal = new CopyOnWriteArrayList<>();
 
 	@Override
-	public void publish(String runId, long upperBoundSeq) {
+	public void publish(String runId, long upperBoundSeq, boolean terminal) {
 		Sub sub = this.subscriptions.get(runId);
 		if (sub != null) {
 			sub.onWake().accept(upperBoundSeq);
@@ -68,12 +68,7 @@ final class GenerationWakeBus implements FrameWakeBus {
 	}
 
 	@Override
-	public boolean subscribe(String runId, LongConsumer onWake) {
-		return subscribe(runId, LEGACY_GENERATION_BASE + this.legacyGenerations.incrementAndGet(), onWake);
-	}
-
-	@Override
-	public boolean subscribe(String runId, long generation, LongConsumer onWake) {
+	public Subscription subscribeHandle(String runId, long generation, LongConsumer onWake) {
 		int call = this.subscribeCalls.incrementAndGet();
 		this.journal.add("subscribe:" + generation);
 		if (this.blockSubscribeCall == call) {
@@ -81,40 +76,39 @@ final class GenerationWakeBus implements FrameWakeBus {
 			await(this.subscribeGate);
 			if (!this.blockedSubscribeSucceeds) {
 				this.journal.add("failed:" + generation);
-				return false;
+				return null;
 			}
 		}
 		synchronized (this.subscriptions) {
 			Sub current = this.subscriptions.get(runId);
 			if (current != null && current.generation() > generation) {
 				this.journal.add("rejected:" + generation);
-				return false;
+				return null;
 			}
 			this.subscriptions.put(runId, new Sub(generation, onWake));
 		}
-		return true;
-	}
-
-	@Override
-	public void unsubscribe(String runId) {
-		this.subscriptions.remove(runId);
-	}
-
-	@Override
-	public void unsubscribe(String runId, long generation) {
-		this.journal.add("unsubscribe:" + generation);
-		if (this.blockUnsubscribe) {
-			this.blockUnsubscribe = false;
-			this.unsubscribeEntered.countDown();
-			await(this.unsubscribeGate);
-		}
-		synchronized (this.subscriptions) {
-			Sub current = this.subscriptions.get(runId);
-			if (current == null || current.generation() != generation) {
-				this.journal.add("unsubscribe-noop:" + generation);
-				return;
+		return () -> {
+			if (this.blockUnsubscribe) {
+				this.unsubscribeEntered.countDown();
+				await(this.unsubscribeGate);
 			}
-			this.subscriptions.remove(runId);
+			synchronized (this.subscriptions) {
+				Sub current = this.subscriptions.get(runId);
+				if (current == null || current.generation() != generation) {
+					this.journal.add("unsubscribe-noop:" + generation);
+					return;
+				}
+				this.subscriptions.remove(runId);
+				this.journal.add("unsubscribe:" + generation);
+			}
+		};
+	}
+
+	/** 兼容旧测试的裸退订助手（不属于当前接口）。 */
+	void unsubscribe(String runId) {
+		Sub removed = this.subscriptions.remove(runId);
+		if (removed != null) {
+			this.journal.add("unsubscribe:" + removed.generation());
 		}
 	}
 

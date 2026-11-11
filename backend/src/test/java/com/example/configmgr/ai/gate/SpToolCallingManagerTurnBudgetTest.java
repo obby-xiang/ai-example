@@ -124,17 +124,16 @@ class SpToolCallingManagerTurnBudgetTest {
 
 	@BeforeEach
 	void setUp() {
-		this.properties.getContext().setLimitTokens(LIMIT);
 		this.properties.getContext().setReserveTokens(0);
 		this.properties.getContext().setL1Percent(70);
 		this.properties.getContext().setL3Percent(95);
 		// pin 最近 1 对：旧结果可清、本批结果留存（与生产默认 keep=5 同语义，只是窗口更小）
 		this.properties.getContext().setKeepToolPairs(1);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> LIMIT));
 		this.manager.setContextStateStore(this.contextStore);
 
 		this.store.seedRun(RUN_ID, SESSION_ID);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf(TOOL)).thenReturn(ToolMeta.Channel.BACKEND);
@@ -239,7 +238,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		List<Message> history = result.conversationHistory();
 		assertThat(history.get(history.size() - 1).getText()).contains("上下文已接近模型窗口上限")
 			.contains("不要再次调用工具");
-		assertThat(this.beacon.budgetArmed(RUN_ID)).isTrue();
+		assertThat(this.beacon.isBudgetArmed(RUN_ID)).isTrue();
 		assertThat(this.executed).containsExactly("c-1");
 	}
 
@@ -326,9 +325,8 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void smallWindowShrinksEachToolResultToTheRemainingWindow() {
-		this.properties.getContext().setLimitTokens(15000);
 		this.properties.getContext().setReserveTokens(3000);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 15000));
 		SpToolCallingManager big = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry,
 				this.codec, this.beacon, this.cancellations, this.limiter, List.of(), null, null, null, null,
 				this.properties) {
@@ -339,7 +337,7 @@ class SpToolCallingManagerTurnBudgetTest {
 				return "大结果 " + pending.getToolCallId() + "：" + "大".repeat(19_990);
 			}
 		};
-		big.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		big.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 15000));
 		big.setContextStateStore(this.contextStore);
 
 		ToolExecutionResult result = big.executeToolCalls(prompt(historyWithOldResults()),
@@ -377,11 +375,10 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void overflowClearsOldResultsBeforeShrinkingTheNewest() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(0);
 		// pin 最近 2 条（本批结果 + old-3）⇒ old-1/old-2 可清、old-3 清不掉（不属于"旧结果"）
 		this.properties.getContext().setKeepToolPairs(2);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		List<Message> pinned = historyWithClearableOldResults();
 
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt(pinned),
@@ -409,10 +406,9 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void pinnedResultsAreShrunkInRoundWhileHitlEntriesStayIntact() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(1_000);
 		this.properties.getContext().setKeepToolPairs(5);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		PendingToolCall hitl = new PendingToolCall();
 		hitl.setToolCallId("old-3");
 		hitl.setName(TOOL);
@@ -437,7 +433,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(history).as("只收窄 + 一条收尾指令，不丢轮次").hasSize(pinned.size() + 3);
 		assertThat(history.get(history.size() - 1).getText())
 			.as("收尾指令是本轮最后一条（模型据此停止要工具）").contains("上下文已接近模型窗口上限");
-		assertThat(this.beacon.budgetArmed(RUN_ID)).as("收窄到 95% 线之上 ⇒ 武装本轮").isTrue();
+		assertThat(this.beacon.isBudgetArmed(RUN_ID)).as("收窄到 95% 线之上 ⇒ 武装本轮").isTrue();
 		assertPairing(history);
 	}
 
@@ -447,10 +443,9 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void overflowRecoveryTrimsFixedHistoryAndContinuesWithoutReRunningTools() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(0);
 		this.properties.getContext().setKeepToolPairs(5);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		List<Message> longHistory = historyWithLongTurns();
 
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt(longHistory),
@@ -479,9 +474,8 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void inRoundTrimArchivesAndRecordsTheCompactionLedger() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(0);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		List<Message> longHistory = historyWithLongTurns();
 
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt(longHistory),
@@ -528,9 +522,8 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void inRoundTrimCapsTheLineageAtL2SoTheNextRoundCanStillSummarize() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(0);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		List<Message> longHistory = historyWithLongTurns();
 
 		this.manager.executeToolCalls(prompt(longHistory),
@@ -546,12 +539,12 @@ class SpToolCallingManagerTurnBudgetTest {
 		// 下一轮：真实 usage 会远小于"截断前那份估算"，把基线降到滞回线以下；目标 L2
 		this.contextStore.write(SESSION_ID, afterTrim.withUsage(5_000, 0, afterTrim.turnNo(), false,
 				System.currentTimeMillis(), "deepseek-flash", 0, 0, 0));
-		ContextCompactor compactor = new ContextCompactor(this.properties, new ContextLimitResolver(this.properties),
+		ContextCompactor compactor = new ContextCompactor(this.properties, new ContextLimitResolver((providerId, modelId) -> 10_000),
 				this.contextStore, (system, user, runtime) -> "摘要正文");
 		List<Message> nextRound = historyWithLongTurns();
-		ContextCompactor.Outcome next = compactor.compact(new ContextCompactor.Request(SESSION_ID, RUN_ID,
-				"deepseek-flash", 1L, nextRound, this.codec.serializeAll(nextRound), 8_000, 0, 0, 0, 0, 0, Set.of(),
-				TestProviderRuntime.runtime()));
+		ContextCompactor.Outcome next = compact(compactor, new ContextCompactor.Request(SESSION_ID, RUN_ID,
+				"deepseek-flash", 1L, nextRound, 8_000, 0, 0, 0, 0, 0, Set.of(),
+				TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null));
 
 		assertThat(next.level()).as("从 L2 出发、目标 L2 ⇒ 走摘要（旧行为写死 L3，这里会变成再次硬截断）")
 			.isEqualTo(ContextTrigger.Level.L2);
@@ -568,10 +561,9 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void failedL1AccountingIsAttemptedOnlyOncePerBatch() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(0);
 		this.properties.getContext().setKeepToolPairs(2);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		java.util.concurrent.atomic.AtomicInteger ledgerAttempts = new java.util.concurrent.atomic.AtomicInteger();
 		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
 			@Override
@@ -603,10 +595,9 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void inRoundTrimThatStillDoesNotFitIsNotApplied() {
-		this.properties.getContext().setLimitTokens(10_000);
 		// 预留 6000（< 窗口/2=5000? 不：min(6000, 5000) = 5000）⇒ 有效预留 5000
 		this.properties.getContext().setReserveTokens(6_000);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		List<Message> longHistory = historyWithLongTurns();
 
 		assertThatThrownBy(() -> this.manager.executeToolCalls(prompt(longHistory),
@@ -631,9 +622,8 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void inRoundTrimKeepsAnAlreadyL3LineageInsteadOfDowngradingToL2() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(0);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		this.contextStore.write(SESSION_ID, ContextState.EMPTY
 			.withCompaction(ContextTrigger.Level.L3, 2, 900, "hard_trim", 1_000L)
 			.withUsage(5_000, 0, 3, false, 1_000L, "m", 0, 0, 0));
@@ -656,9 +646,8 @@ class SpToolCallingManagerTurnBudgetTest {
 	 */
 	@Test
 	void inRoundTrimIsNotAppliedWhenTheLedgerWriteFails() {
-		this.properties.getContext().setLimitTokens(10_000);
 		this.properties.getContext().setReserveTokens(0);
-		this.manager.setContextLimitResolver(new ContextLimitResolver(this.properties));
+		this.manager.setContextLimitResolver(new ContextLimitResolver((providerId, modelId) -> 10_000));
 		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
 			@Override
 			public void appendLedger(String sessionId, Map<String, Object> event) {
@@ -854,7 +843,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(oldResultText(history, "old-1")).isEqualTo("旧结果一：任务列表 A");
 		assertThat(history).noneMatch(message -> message.getText() != null
 				&& message.getText().contains("上下文已接近模型窗口上限"));
-		assertThat(bareBeacon.budgetArmed(RUN_ID)).isFalse();
+		assertThat(bareBeacon.isBudgetArmed(RUN_ID)).isFalse();
 	}
 
 	// ── 轮内 L1 与轮首同账（台账 / 归档 / 状态，产品一致性批）──────────────────
@@ -1028,7 +1017,7 @@ class SpToolCallingManagerTurnBudgetTest {
 		assertThat(this.contextStore.ledgerCount()).isZero();
 		assertThat(this.contextStore.archiveCount()).isZero();
 		assertThat(this.contextStore.read(SESSION_ID).level()).isEqualTo("none");
-		assertThat(this.beacon.budgetArmed(RUN_ID)).as("收尾分支确实跑到了（不是空过）").isTrue();
+		assertThat(this.beacon.isBudgetArmed(RUN_ID)).as("收尾分支确实跑到了（不是空过）").isTrue();
 	}
 
 	/**
@@ -1223,6 +1212,10 @@ class SpToolCallingManagerTurnBudgetTest {
 		return out;
 	}
 
+	private static ContextCompactor.Outcome compact(ContextCompactor compactor, ContextCompactor.Request request) {
+		return compactor.commit(request, compactor.plan(request, null, null));
+	}
+
 	private static long countPlaceholders(List<Message> history) {
 		return responsesOf(history).stream()
 			.filter(response -> ToolResultClearing.isAlreadyCleared(response.responseData()))
@@ -1232,9 +1225,9 @@ class SpToolCallingManagerTurnBudgetTest {
 	/** 用真实 ContextCompactor（同一份 AiProperties/分母/resolver）跑一次"下一轮的轮首压缩"。 */
 	private ContextCompactor.Outcome roundStart(String sessionId, List<Message> history, int used, int completion) {
 		ContextCompactor compactor = new ContextCompactor(this.properties,
-				new ContextLimitResolver(this.properties), this.contextStore);
-		return compactor.compact(new ContextCompactor.Request(sessionId, RUN_ID, "test-model", 1L, history,
-				this.codec.serializeAll(history), used, completion, 0, 0, 0, 0, Set.of(), null));
+				new ContextLimitResolver((providerId, modelId) -> 10_000), this.contextStore, null);
+		return compact(compactor, new ContextCompactor.Request(sessionId, RUN_ID, "test-model", 1L, history,
+				used, completion, 0, 0, 0, 0, Set.of(), null, Set.of(), 4096, false, null, null));
 	}
 
 	/** 台账事件里的 clearedToolCallIds（JSON 反序列化形态不固定，统一成字符串列表再断言）。 */

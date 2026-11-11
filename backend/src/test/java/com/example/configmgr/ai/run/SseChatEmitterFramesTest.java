@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.conformance.FrameWire;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -47,7 +48,32 @@ class SseChatEmitterFramesTest {
 
     private final RunStore store = mock(RunStore.class);
 
-    private final SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+    private final InMemoryFrameStore frames = new InMemoryFrameStore();
+
+    private RequestContextUtils.SafeCloseable identity;
+
+    private SseChatEmitter emitter;
+
+    @org.junit.jupiter.api.BeforeEach
+    void setUp() {
+        this.identity = RequestContextUtils.useContext(1L, 101L);
+        this.emitter = newEmitter(new ObjectMapper());
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() {
+        if (this.identity != null) {
+            this.identity.close();
+        }
+    }
+
+    /** 11 参装配：帧面独立（FrameStore），写出器身份取构造线程的显式身份。 */
+    private SseChatEmitter newEmitter(ObjectMapper mapper) {
+        return new SseChatEmitter(RUN_ID, this.store, this.frames, mapper, Runnable::run,
+                com.example.configmgr.ai.config.AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+                com.example.configmgr.ai.config.AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+                com.example.configmgr.common.sse.SseWriteBudget.direct(), new NoopWakeBus(), null, null);
+    }
 
     // ── T6：单调 seq ─────────────────────────────────────────────────────────
 
@@ -68,11 +94,12 @@ class SseChatEmitterFramesTest {
     @Test
     void seqContinuesAcrossProcessRestart() {
         // 归档里已有 41 帧（续跑的新写出器）：序号必须接着 42 走，否则 lastSeq 差量补发会漏帧
-        when(this.store.lastEventSeq(RUN_ID)).thenReturn(41L);
+        this.frames.seed(RUN_ID, frame("done", 41L));
 
         this.emitter.toolStart(pending("call-9"));
 
-        assertThat(archivedFrames().get(0)).containsEntry("seq", 42L);
+        List<Map<String, Object>> archived = archivedFrames();
+        assertThat(archived.get(archived.size() - 1)).containsEntry("seq", 42L);
     }
 
     // ── T4：expiresAt ────────────────────────────────────────────────────────
@@ -207,7 +234,7 @@ class SseChatEmitterFramesTest {
         // 防御未来改动的 no-op —— 不是"生产装配就是 NON_NULL"。
         ObjectMapper nonNull = new ObjectMapper()
                 .setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL);
-        SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, nonNull);
+        SseChatEmitter out = newEmitter(nonNull);
         FrameWire wire = FrameWire.attachTo(out);
 
         out.toolResult(executed("call-x"), true, false, "查看中");
@@ -218,7 +245,7 @@ class SseChatEmitterFramesTest {
                 .containsEntry("outcome", "ok")
                 .containsEntry("retryable", false);
         assertThat(payload.get("code")).isNull();
-        assertThat(payload.get("target")).isEqualTo(Map.of("taskId", 7));
+        assertThat(payload.get("target")).isEqualTo(Map.of("taskId", "7"));
     }
 
     @Test
@@ -237,11 +264,11 @@ class SseChatEmitterFramesTest {
         assertThat(archived.get(0)).containsEntry("outcome", "ok")
                 .containsEntry("code", null)
                 .containsEntry("retryable", false)
-                .containsEntry("target", Map.of("taskId", 7));
+                .containsEntry("target", Map.of("taskId", "7"));
         assertThat(archived.get(1)).containsEntry("outcome", "cancelled")
                 .containsEntry("code", "FRONTEND_CANCELLED")
                 .containsEntry("retryable", false)
-                .containsEntry("target", Map.of("taskId", 7));
+                .containsEntry("target", Map.of("taskId", "7"));
     }
 
     @Test
@@ -249,10 +276,10 @@ class SseChatEmitterFramesTest {
         // M4：ok 保留在签名里，但只能等于 outcome.ok() —— 传错即 fail-fast，不产出自相矛盾的帧。
         assertThatThrownBy(() -> this.emitter.toolResult(executed("call-bad"), false, false, "成功"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("ok 与 outcome 推导不一致");
+                .hasMessageContaining("inconsistent with the derived outcome");
 
         // fail-fast 发生在组帧之前：归档里一帧都不该有
-        verify(this.store, never()).appendEvent(eq(RUN_ID), anyMap());
+        assertThat(archivedFrames()).isEmpty();
     }
 
     @Test
@@ -289,7 +316,7 @@ class SseChatEmitterFramesTest {
         // ①′ S5c-1：心跳在独立序号空间里计数，不带业务 seq
         assertThat(sent.getValue()).contains("\"heartbeatSeq\":1").doesNotContain("\"seq\"");
         // ② 归档里没有它（回放瘦身），但活动戳留下了
-        verify(this.store, never()).appendEvent(eq(RUN_ID), anyMap());
+        assertThat(archivedFrames()).isEmpty();
         verify(this.store).touchActivity(RUN_ID);
         // ③ 非心跳帧照旧归档，且序号是 1（心跳没有偷走一个业务号）
         this.emitter.delta("正文");
@@ -366,28 +393,32 @@ class SseChatEmitterFramesTest {
 
     @Test
     void replayWithLastSeqSendsOnlyNewFrames() throws Exception {
-        when(this.store.events(RUN_ID)).thenAnswer(invocation -> archived());
+        seedReplayArchive();
         SseEmitter subscriber = mock(SseEmitter.class);
 
         int sent = this.emitter.replayTo(subscriber, 3L);
 
-        // 归档共 5 帧：seq 1..5（其中 seq 1 是 delta，默认不回放；seq 2 是历史遗留的无 seq 帧）
-        // ⇒ 补发 = 无 seq 的遗留帧 + seq 4、5；seq ≤ 3 的孤儿（前端本地已有）不重发
-        assertThat(sent).isEqualTo(3);
+        // 归档 seq 1..5：lastSeq=3 ⇒ 只补 4、5（seq ≤ 3 的孤儿前端本地已有，不重发）
+        assertThat(sent).isEqualTo(2);
         ArgumentCaptor<String> payloads = ArgumentCaptor.forClass(String.class);
-        verify(subscriber, org.mockito.Mockito.times(3)).send(payloads.capture());
-        assertThat(payloads.getAllValues().get(0)).contains("suspended");
-        assertThat(payloads.getAllValues().get(1)).contains("\"seq\":4");
-        assertThat(payloads.getAllValues().get(2)).contains("\"seq\":5");
+        verify(subscriber, org.mockito.Mockito.times(2)).send(payloads.capture());
+        assertThat(payloads.getAllValues().get(0)).contains("\"seq\":4");
+        assertThat(payloads.getAllValues().get(1)).contains("\"seq\":5");
     }
 
     @Test
     void replayWithoutLastSeqStaysFull() throws Exception {
-        when(this.store.events(RUN_ID)).thenAnswer(invocation -> archived());
+        seedReplayArchive();
         SseEmitter subscriber = mock(SseEmitter.class);
 
-        // 不传 lastSeq = 老客户端口径：全量回放归档全部帧（B1 起 delta 也回放 ⇒ 不再跳过）
+        // 不传 lastSeq = 老客户端口径：全量回放归档全部帧
         assertThat(this.emitter.replayTo(subscriber, null)).isEqualTo(5);
+    }
+
+    private void seedReplayArchive() {
+        for (Map<String, Object> frame : archived()) {
+            this.frames.seed(RUN_ID, frame);
+        }
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────
@@ -401,18 +432,20 @@ class SseChatEmitterFramesTest {
         return pending;
     }
 
-    /** 已执行的后端条目（信封 ok；tool_result 的 ok=true 只能配这个结局）。 */
+    /** 已执行的后端条目（持久化 outcome=ok；tool_result 的 ok=true 只能配这个结局）。 */
     private static PendingToolCall executed(String toolCallId) {
         PendingToolCall pending = pending(toolCallId);
         pending.setStatus(PendingToolCall.EXECUTED);
+        pending.setOutcome(ToolOutcome.OK.wire());
         return pending;
     }
 
-    /** 前端回灌成功的条目（status=FRONTEND_RESULT ⇒ 旧数据推导也是 ok）。 */
+    /** 前端回灌成功的条目（持久化 outcome=ok）。 */
     private static PendingToolCall frontendResult(String toolCallId) {
         PendingToolCall pending = pending(toolCallId);
         pending.setKind(PendingToolCall.KIND_FRONTEND);
         pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+        pending.setOutcome(ToolOutcome.OK.wire());
         return pending;
     }
 
@@ -424,19 +457,16 @@ class SseChatEmitterFramesTest {
         return pending;
     }
 
-    /** 捕获本次测试里 {@code appendEvent} 收到的帧（按调用顺序）。 */
-    @SuppressWarnings("unchecked")
+    /** 本次测试里 FrameStore 归档的帧（按 seq 升序；心跳不入档）。 */
     private List<Map<String, Object>> archivedFrames() {
-        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
-        verify(this.store, org.mockito.Mockito.atLeastOnce()).appendEvent(eq(RUN_ID), captor.capture());
-        return captor.getAllValues();
+        return this.frames.readFrom(RUN_ID, 0L, 0);
     }
 
-    /** 回放用例的固定归档语料（含一帧历史遗留的"没有 seq"帧）。 */
+    /** 回放用例的固定归档语料（seq 1..5）。 */
     private static List<Map<String, Object>> archived() {
         List<Map<String, Object>> frames = new ArrayList<>();
         frames.add(frame("delta", 1L));
-        frames.add(frame("suspended", null));
+        frames.add(frame("suspended", 2L));
         frames.add(frame("confirm_request", 3L));
         frames.add(frame("tool_result", 4L));
         frames.add(frame("done", 5L));
@@ -469,7 +499,6 @@ class SseChatEmitterFramesTest {
     /** 静默未用到的桩（避免 IDE 提示）：本测试类不校验最后一个订阅者的摘除行为。 */
     @Test
     void subscriberCountTracksAttachment() {
-        when(this.store.lastEventSeq(anyString())).thenReturn(0L);
         assertThat(this.emitter.subscriberCount()).isZero();
         this.emitter.attach(mock(SseEmitter.class));
         assertThat(this.emitter.subscriberCount()).isEqualTo(1);

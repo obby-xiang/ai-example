@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -101,13 +102,13 @@ class SheetSampleTraceTest {
 		AiTrace.clear();
 		this.appender.start();
 		this.traceLogger.addAppender(this.appender);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.sheetDisabled(anyString())).thenReturn(false);
 		when(this.toolRegistry.channelOf(anyString())).thenReturn(ToolMeta.Channel.FRONTEND);
 		when(this.toolRegistry.riskOf(anyString())).thenReturn(ToolMeta.RiskLevel.READ);
 		this.store = new InMemoryRunStore();
-		RunRegistry registry = new RunRegistry(this.store, new ObjectMapper(), null);
+		RunRegistry registry = TestRunRegistryFactory.create(this.store, new ObjectMapper(), null);
 		this.audit = new SheetAudit(new SheetSwitches(this.properties), this.store);
 		this.manager = new SpToolCallingManager(this.store, registry, this.gate, this.toolRegistry, this.codec,
 				this.beacon, this.cancellations, new ToolResultLimiter(this.properties), List.of(), null, null, null,

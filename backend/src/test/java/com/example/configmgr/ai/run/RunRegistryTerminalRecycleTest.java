@@ -3,7 +3,12 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.TenantUser;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -26,13 +31,41 @@ class RunRegistryTerminalRecycleTest {
 
 	private static final String RUN_ID = "run-terminal-recycle";
 
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
+	private static final TenantUser TENANT = new TenantUser(TENANT_ID, USER_ID);
+
 	private static final ObjectMapper MAPPER = new ObjectMapper();
+
+	private final AiProperties properties = new AiProperties();
+
+	private final ToolResultLimiter limiter = new ToolResultLimiter(this.properties);
+
+	private RequestContextUtils.SafeCloseable identityScope;
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
 	private final FakeWakeBus bus = new FakeWakeBus();
 
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
+
+	/**
+	 * 进程内注册表/唤醒目标/事件日志簿记一律按<b>身份 + runId</b> 定键：整条用例都在本轮身份作用域内跑，
+	 * 与生产写出器一致（无身份直接拒绝拼键）。
+	 */
+	@BeforeEach
+	void enterIdentity() {
+		this.identityScope = RequestContextUtils.useContext(TENANT_ID, USER_ID);
+	}
+
+	@AfterEach
+	void leaveIdentity() {
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
+	}
 
 	/**
 	 * 终态排空后条目<b>自动</b>回收：不需要外部再调 {@code close}。
@@ -43,7 +76,7 @@ class RunRegistryTerminalRecycleTest {
 	@Test
 	void terminalCompletionReleasesTheRegistryEntryAndTheWakeSubscription() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry registry = new RunRegistry(this.store, MAPPER, null, frames, this.bus, this.listener);
+		RunRegistry registry = new RunRegistry(this.store, MAPPER, null, frames, this.bus, this.listener, null);
 		SseChatEmitter out = registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
 
@@ -58,7 +91,7 @@ class RunRegistryTerminalRecycleTest {
 		assertThat(registry.find(RUN_ID)).as("终态排空后注册表条目自动回收（无需外部 close）").isNull();
 		assertThat(registry.hasLiveSubscriber(RUN_ID)).isFalse();
 		assertThat(this.bus.subscribed(RUN_ID)).as("最后一个订阅者离开 ⇒ 唤醒订阅已释放").isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).isZero();
+		assertThat(this.listener.targetCount(TENANT, RUN_ID)).isZero();
 
 		// 相邻路径：回收之后的重挂拿到的是新写出器，仍能从事件日志回放同一轮
 		SseChatEmitter reattached = registry.of(RUN_ID);
@@ -76,7 +109,7 @@ class RunRegistryTerminalRecycleTest {
 	@Test
 	void subscriberDetachWithoutTerminalKeepsTheEmitterForReattach() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry registry = new RunRegistry(this.store, MAPPER, null, frames, this.bus, this.listener);
+		RunRegistry registry = new RunRegistry(this.store, MAPPER, null, frames, this.bus, this.listener, null);
 		SseChatEmitter out = registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
 
@@ -98,7 +131,7 @@ class RunRegistryTerminalRecycleTest {
 	void closingARunReleasesItsFrameStorePerRunBookkeeping() {
 		FakeFrameRedis redis = new FakeFrameRedis();
 		RedisFrameStore frames = new RedisFrameStore(redis.redis, MAPPER, new AiProperties(), 6000);
-		RunRegistry registry = new RunRegistry(this.store, MAPPER, null, frames, null, null);
+		RunRegistry registry = new RunRegistry(this.store, MAPPER, null, frames, null, null, null);
 
 		SseChatEmitter out = registry.of(RUN_ID);
 		out.start("s-1");
@@ -126,7 +159,7 @@ class RunRegistryTerminalRecycleTest {
 		SseChatEmitter late = new SseChatEmitter(RUN_ID, this.store, frames, MAPPER, Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
 				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				com.example.configmgr.common.sse.SseWriteBudget.direct(), this.bus, this.listener);
+				com.example.configmgr.common.sse.SseWriteBudget.direct(), this.bus, this.listener, this.limiter);
 		FrameWire wire = FrameWire.attachTo(late);
 		late.start("s-1");
 		late.complete();

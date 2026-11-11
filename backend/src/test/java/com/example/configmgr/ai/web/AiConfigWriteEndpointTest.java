@@ -363,7 +363,7 @@ class AiConfigWriteEndpointTest {
 	@Test
 	void defaultsReadReturnsTheStoredValues() throws Exception {
 		when(this.configService.defaults())
-			.thenReturn(new AiConfigService.Defaults("m-1", 0.3d, 0.9d, 1024, Boolean.TRUE, 4L));
+			.thenReturn(new AiConfigService.Defaults("m-1", 0.3d, 0.9d, 1024, Boolean.TRUE, 4L, 1L));
 
 		this.mockMvc.perform(get("/api/ai/settings/defaults"))
 			.andExpect(status().isOk())
@@ -378,7 +378,7 @@ class AiConfigWriteEndpointTest {
 	@Test
 	void defaultsWriteReturnsTheFreshValuesAndMapsRangeErrors() throws Exception {
 		when(this.writer.updateDefaults(any()))
-			.thenReturn(new AiConfigService.Defaults(null, 2.5d, null, null, null, 5L));
+			.thenReturn(new AiConfigService.Defaults(null, 2.5d, null, null, null, 5L, null));
 
 		this.mockMvc
 			.perform(put("/api/ai/settings/defaults").contentType(MediaType.APPLICATION_JSON)

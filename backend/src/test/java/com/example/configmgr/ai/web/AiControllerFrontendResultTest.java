@@ -64,7 +64,7 @@ class AiControllerFrontendResultTest {
 				"回灌的表单结果未通过类型复核，本次回灌被拒（挂起仍在等待，可修正后重试）",
 				List.of("字段 keyword 期望 text（字符串），实际是数字"));
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":7}", "frontend-form", false, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":7}", "frontend-form", false, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.REJECTED, pending, false, verdict));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result")
@@ -84,7 +84,7 @@ class AiControllerFrontendResultTest {
 	void cancellationIsForwardedAndReportedAsTerminalState() throws Exception {
 		PendingToolCall pending = pending(PendingToolCall.FRONTEND_CANCELLED);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", null, "frontend-form", true, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", null, "frontend-form", true, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result")
@@ -100,10 +100,10 @@ class AiControllerFrontendResultTest {
 	@Test
 	void unknownAndDuplicateSubmissionsKeepThe409Semantics() throws Exception {
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"keyword\":\"CNY\"}", null, false, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.DUPLICATE,
 					pending(PendingToolCall.FRONTEND_RESULT), false, null));
-		when(this.gate.submitFrontendResult("r-2", "c-2", "{\"keyword\":\"CNY\"}", null, false, null))
+		when(this.gate.submitFrontendResult("r-2", "c-2", "{\"keyword\":\"CNY\"}", null, false, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.NOT_FOUND, null, false, null));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
@@ -121,7 +121,7 @@ class AiControllerFrontendResultTest {
 	void outcomeIsForwardedToTheGate() throws Exception {
 		PendingToolCall pending = pending(PendingToolCall.FRONTEND_RESULT);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"error\":\"下载被拦截\"}", "frontend", false, "failed"))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"error\":\"下载被拦截\"}", "frontend", false, "failed", java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result")
@@ -131,7 +131,7 @@ class AiControllerFrontendResultTest {
 			.andExpect(jsonPath("$.accepted").value(true));
 
 		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"error\":\"下载被拦截\"}", "frontend", false,
-				"failed");
+				"failed", java.util.Map.of(), null);
 	}
 
 	/**
@@ -147,7 +147,7 @@ class AiControllerFrontendResultTest {
 	void overlongResultIsTruncatedAndMarkedInsteadOfRejected() throws Exception {
 		PendingToolCall pending = pending(PendingToolCall.FRONTEND_RESULT);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any()))
+		when(this.gate.submitFrontendResult(anyString(), anyString(), anyString(), any(), anyBoolean(), any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull()))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 		String huge = "行内容".repeat(3000);
 
@@ -159,11 +159,12 @@ class AiControllerFrontendResultTest {
 			.andExpect(jsonPath("$.strategy").value("head"))
 			.andExpect(jsonPath("$.originalChars").value(huge.length()))
 			.andExpect(jsonPath("$.returnedChars").isNumber())
-			.andExpect(jsonPath("$.notice").value(org.hamcrest.Matchers.containsString("结果过长已截断")));
+			.andExpect(jsonPath("$.noticeCode")
+				.value(com.example.configmgr.ai.tool.TruncationContract.NOTICE_CODE_FRAME_TRUNCATED));
 
 		org.mockito.ArgumentCaptor<String> captor = org.mockito.ArgumentCaptor.forClass(String.class);
 		verify(this.gate).submitFrontendResult(anyString(), anyString(), captor.capture(), any(), anyBoolean(),
-				any());
+				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
 		int budget = new AiProperties().getResultBudget().getCallback().getMaxChars();
 		assertThat(captor.getValue()).as("G5：标记计入回调上限（不再是 上限 + 标记）")
 			.hasSizeLessThanOrEqualTo(budget)
@@ -175,7 +176,7 @@ class AiControllerFrontendResultTest {
 	void shortResultIsPassedThroughUntruncated() throws Exception {
 		PendingToolCall pending = pending(PendingToolCall.FRONTEND_RESULT);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null))
+		when(this.gate.submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null, java.util.Map.of(), null))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
@@ -183,7 +184,7 @@ class AiControllerFrontendResultTest {
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.truncated").value(false));
 
-		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null);
+		verify(this.gate).submitFrontendResult("r-1", "c-1", "{\"ok\":true}", "frontend", false, null, java.util.Map.of(), null);
 	}
 
 	@Test

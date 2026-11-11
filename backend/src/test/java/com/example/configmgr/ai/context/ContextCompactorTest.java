@@ -37,9 +37,31 @@ class ContextCompactorTest {
 
 	private final InMemoryContextStateStore store = new InMemoryContextStateStore();
 
-	private final ContextLimitResolver resolver = new ContextLimitResolver(this.properties);
+	private final ContextLimitResolver resolver = new ContextLimitResolver((providerId, modelId) -> 128000);
 
-	private final ContextCompactor compactor = new ContextCompactor(this.properties, this.resolver, this.store);
+	private final ContextCompactor compactor = new ContextCompactor(this.properties, this.resolver, this.store, null);
+
+	private static ContextCompactor.Outcome run(ContextCompactor target, ContextCompactor.Request request) {
+		return target.commit(request, target.plan(request, null, null));
+	}
+
+	/** 测试适配：旧用例按 {@code compact(request[, progress])} 编排；当前生产契约为 plan + commit 两步。 */
+	private static final class CompactorFacade {
+
+		private final ContextCompactor delegate;
+
+		private CompactorFacade(ContextCompactor delegate) {
+			this.delegate = delegate;
+		}
+
+		ContextCompactor.Outcome compact(ContextCompactor.Request request) {
+			return this.delegate.commit(request, this.delegate.plan(request, null, null));
+		}
+
+		ContextCompactor.Outcome compact(ContextCompactor.Request request, Runnable onSummaryProgress) {
+			return this.delegate.commit(request, this.delegate.plan(request, onSummaryProgress, null));
+		}
+	}
 
 	private static List<Message> turns(int pairs) {
 		List<Message> messages = new ArrayList<>();
@@ -58,15 +80,16 @@ class ContextCompactorTest {
 	}
 
 	private ContextCompactor.Request request(List<Message> messages, int usedTokens, List<String> messageJsonBefore) {
-		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L, messages, messageJsonBefore,
-				usedTokens, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L, messages,
+				usedTokens, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(),
+				4096, false, null, null);
 	}
 
 	/** 越线 ⇒ L1 执行：台账 + 真值重置为估算基线（B5 起不再写 archive）。 */
 	@Test
 	void overThresholdClearsToolResultsArchivesAndRecords() {
 		List<Message> messages = turns(6);
-		ContextCompactor.Outcome outcome = this.compactor.compact(request(messages, 81000, List.of("{\"m\":1}")));
+		ContextCompactor.Outcome outcome = run(this.compactor, request(messages, 81000, List.of("{\"m\":1}")));
 
 		assertThat(outcome.changed()).isTrue();
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L1);
@@ -74,7 +97,6 @@ class ContextCompactorTest {
 		assertThat(outcome.clearedToolCallIds()).containsExactly("c-1");
 		assertThat(outcome.messages()).hasSameSizeAs(messages);
 		assertThat(outcome.after()).isLessThan(outcome.before());
-		assertThat(this.store.archiveCount()).as("B5：不再写只写不读的 archive").isZero();
 		assertThat(this.store.ledgerCount()).isEqualTo(1);
 
 		ContextState state = this.store.read(SESSION_ID);
@@ -95,7 +117,7 @@ class ContextCompactorTest {
 	 */
 	@Test
 	void c13CompactionBaselineIncludesSystemAndTools() {
-		ContextCompactor.Outcome outcome = this.compactor.compact(request(turns(6), 81000, List.of("{\"m\":1}")));
+		ContextCompactor.Outcome outcome = run(this.compactor, request(turns(6), 81000, List.of("{\"m\":1}")));
 
 		assertThat(outcome.changed()).isTrue();
 		assertThat(outcome.usedTokens()).isEqualTo(outcome.after() + 3000 + 4000);
@@ -109,12 +131,12 @@ class ContextCompactorTest {
 	@Test
 	void c13TurnStartWithoutTruthCountsSystemToolsAndHistory() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow), this.store);
+		ContextLimitResolver smallResolver = new ContextLimitResolver((providerId, modelId) -> 15000);
+		ContextCompactor service = new ContextCompactor(smallWindow, smallResolver, this.store, null);
 
-		ContextCompactor.Outcome outcome = service.compact(new ContextCompactor.Request(SESSION_ID, RUN_ID,
-				"deepseek-flash", 1L, turns(6), List.of("{}"), 0, 0, 0, 0, 3000, 4000, Set.of(),
-				TestProviderRuntime.runtime()));
+		ContextCompactor.Outcome outcome = run(service, new ContextCompactor.Request(SESSION_ID, RUN_ID,
+				"deepseek-flash", 1L, turns(6), 0, 0, 0, 0, 3000, 4000, Set.of(),
+				TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null));
 
 		// 整包 = 历史估算 + system 3000 + tools 4000 + 本轮输入 0（逐项相加，不是"大约大于 7000"）
 		assertThat(outcome.nextEst())
@@ -130,12 +152,11 @@ class ContextCompactorTest {
 	@Test
 	void underThresholdIsANoOp() {
 		List<Message> messages = turns(6);
-		ContextCompactor.Outcome outcome = this.compactor.compact(request(messages, 1000, List.of("{}")));
+		ContextCompactor.Outcome outcome = run(this.compactor, request(messages, 1000, List.of("{}")));
 
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_UNDER_THRESHOLD);
 		assertThat(outcome.messages()).isSameAs(messages);
-		assertThat(this.store.archiveCount()).isZero();
 		assertThat(this.store.ledgerCount()).isZero();
 	}
 
@@ -150,11 +171,10 @@ class ContextCompactorTest {
 	@Test
 	void triggerDenominatorFollowsResolverNotTheTransitionalKey() {
 		AiProperties drifted = new AiProperties();
-		drifted.getContext().setLimitTokens(1500);
-		ContextLimitResolver dbBacked = new ContextLimitResolver(drifted, (providerId, modelId) -> 128000);
-		ContextCompactor service = new ContextCompactor(drifted, dbBacked, this.store);
+		ContextLimitResolver dbBacked = new ContextLimitResolver((providerId, modelId) -> 128000);
+		ContextCompactor service = new ContextCompactor(drifted, dbBacked, this.store, null);
 
-		ContextCompactor.Outcome outcome = service.compact(request(turns(6), 1000, List.of("{}")));
+		ContextCompactor.Outcome outcome = run(service, request(turns(6), 1000, List.of("{}")));
 
 		assertThat(outcome.limitTokens()).as("压缩结局里的分母 = DB 值").isEqualTo(128000);
 		assertThat(outcome.changed()).as("1000/115000 远未到 L1，不该压").isFalse();
@@ -162,7 +182,7 @@ class ContextCompactorTest {
 		assertThat(outcome.ratio()).isCloseTo(1000d / 115000d, org.assertj.core.data.Offset.offset(1e-9));
 		// 展示面同一分母（/context 的 limitTokens 走同一个 resolver）。端点重建分母需要模型身份 ⇒ 先记账一次
 		ContextBreakdownService display = new ContextBreakdownService(service, this.store);
-		service.recordTurn(SESSION_ID, "deepseek-flash", 1000, 0, 1, false, 0, 0, 0);
+		service.recordTurn(SESSION_ID, 1L, "deepseek-flash", 1000, 0, 1, false, 0, 0, 0);
 		Map<String, Object> snapshot = display.snapshot(SESSION_ID, turns(2), false);
 		assertThat(snapshot).containsEntry("limitTokens", 128000);
 		assertThat(snapshot).containsEntry("percent", 0.8d);
@@ -172,10 +192,10 @@ class ContextCompactorTest {
 	@Test
 	void unknownLimitSkipsCompactionEntirely() {
 		AiProperties degraded = new AiProperties();
-		degraded.getContext().setLimitTokens(0);
-		ContextCompactor service = new ContextCompactor(degraded, new ContextLimitResolver(degraded), this.store);
+		ContextCompactor service = new ContextCompactor(degraded,
+				new ContextLimitResolver((providerId, modelId) -> null), this.store, null);
 
-		ContextCompactor.Outcome outcome = service.compact(request(turns(6), 500_000, List.of("{}")));
+		ContextCompactor.Outcome outcome = run(service, request(turns(6), 500_000, List.of("{}")));
 
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_LIMIT_UNKNOWN);
@@ -189,36 +209,35 @@ class ContextCompactorTest {
 						System.currentTimeMillis());
 		this.store.write(SESSION_ID, compacted);
 
-		ContextCompactor.Outcome outcome = this.compactor.compact(request(turns(6), 79360, List.of("{}")));
+		ContextCompactor.Outcome outcome = run(this.compactor, request(turns(6), 79360, List.of("{}")));
 
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_HYSTERESIS_LOCKED);
-		assertThat(this.store.archiveCount()).isZero();
 	}
 
 	/** 没有可清的结果（全在 pin 窗口内）⇒ reason=nothing_to_clear，不归档。 */
 	@Test
 	void nothingToClearIsReportedAndNotArchived() {
-		ContextCompactor.Outcome outcome = this.compactor.compact(request(turns(2), 90000, List.of("{}")));
+		ContextCompactor.Outcome outcome = run(this.compactor, request(turns(2), 90000, List.of("{}")));
 
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_NOTHING_TO_CLEAR);
-		assertThat(this.store.archiveCount()).isZero();
 	}
 
-	/** 状态写失败 ⇒ 返回原消息（本轮照常发请求），reason=compaction_failed。 */
+	/** 提交失败 ⇒ 返回原消息（本轮照常发请求），reason=compaction_failed；台账不落。 */
 	@Test
-	void archiveFailureKeepsHistoryUntouched() {
+	void commitFailureKeepsHistoryUntouched() {
 		InMemoryContextStateStore broken = new InMemoryContextStateStore() {
 			@Override
-			public void write(String sessionId, ContextState state) {
+			public CompactionCommitStatus commitCompaction(String sessionId, String compactionId,
+					ContextState compacted, List<Map<String, Object>> ledgerEvents, Map<String, Object> event) {
 				throw new IllegalStateException("Redis 不可用");
 			}
 		};
-		ContextCompactor service = new ContextCompactor(this.properties, this.resolver, broken);
+		ContextCompactor service = new ContextCompactor(this.properties, this.resolver, broken, null);
 		List<Message> messages = turns(6);
 
-		ContextCompactor.Outcome outcome = service.compact(request(messages, 81000, List.of("{}")));
+		ContextCompactor.Outcome outcome = run(service, request(messages, 81000, List.of("{}")));
 
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_FAILED);
@@ -229,7 +248,7 @@ class ContextCompactorTest {
 	/** 每次最多升一级 + 批① 封顶 L1：占比到 L3 也只做 L1（不许报没有实现的级别）。 */
 	@Test
 	void batchOneNeverReportsAboveL1() {
-		ContextCompactor.Outcome outcome = this.compactor.compact(request(turns(6), 120000, List.of("{}")));
+		ContextCompactor.Outcome outcome = run(this.compactor, request(turns(6), 120000, List.of("{}")));
 
 		assertThat(outcome.changed()).isTrue();
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L1);
@@ -263,9 +282,9 @@ class ContextCompactorTest {
 				throw new IllegalStateException("Redis 不可用");
 			}
 		};
-		ContextCompactor service = new ContextCompactor(this.properties, this.resolver, broken);
+		ContextCompactor service = new ContextCompactor(this.properties, this.resolver, broken, null);
 
-		service.recordTurn(SESSION_ID, "m", 1, 0, 1, false, 0, 0, 0);
+		service.recordTurn(SESSION_ID, 1L, "m", 1, 0, 1, false, 0, 0, 0);
 		// 不抛即通过；读回落空态
 		assertThat(service.readState(SESSION_ID).measured()).isFalse();
 	}
@@ -273,7 +292,7 @@ class ContextCompactorTest {
 	/** 分项锚点写入后，端点装配能给出七项（compaction 形状固定）。 */
 	@Test
 	void breakdownServiceBuildsTheSevenPartPayload() {
-		this.compactor.recordTurn(SESSION_ID, "deepseek-flash", 5000, 100, 1, false, 1000, 2000, 50);
+		this.compactor.recordTurn(SESSION_ID, 1L, "deepseek-flash", 5000, 100, 1, false, 1000, 2000, 50);
 		ContextBreakdownService service = new ContextBreakdownService(this.compactor, this.store);
 
 		Map<String, Object> snapshot = service.snapshot(SESSION_ID, turns(2), false);
@@ -313,8 +332,9 @@ class ContextCompactorTest {
 
 	private ContextCompactor.Request requestWith(List<Message> messages, int usedTokens, int completionTokens,
 			Set<String> protectedIds) {
-		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L, messages, List.of("{}"),
-				usedTokens, completionTokens, 0, 0, 3000, 4000, protectedIds, TestProviderRuntime.runtime());
+		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L, messages,
+				usedTokens, completionTokens, 0, 0, 3000, 4000, protectedIds, TestProviderRuntime.runtime(), Set.of(),
+				4096, false, null, null);
 	}
 
 	/** N-C 语料：9 轮、每轮 ≈4K token —— 丢最旧 3 轮能换出 ≈12K，够覆盖"输出预留放不下"的缺口。 */
@@ -327,8 +347,8 @@ class ContextCompactorTest {
 		return messages;
 	}
 
-	private ContextCompactor compactorWith(RollingSummarizer.Summarizer summarizer) {
-		return new ContextCompactor(this.properties, this.resolver, this.store, summarizer);
+	private CompactorFacade compactorWith(RollingSummarizer.Summarizer summarizer) {
+		return new CompactorFacade(new ContextCompactor(this.properties, this.resolver, this.store, summarizer));
 	}
 
 	private void seed(String level, int usedTokens) {
@@ -349,27 +369,24 @@ class ContextCompactorTest {
 	@Test
 	void c13PrefixDominatedRoundDoesNotRepeatedlyHardTrim() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		// 15000 窗口、预留 13000 ⇒ 有效预留 7500；本轮 prefix 7000（requestWith 固定）⇒ 93% ≥ L2 线。
 		// 真值 7000 ⇒ 7000 + 7500 = 14500 ≤ 15000：**连输出预留都放得下**（N-A 之后守卫的前置条件），
 		// 这个局面才是"压了也没用、但不压也不会 400"的那一档。
 		seed("L2", 7000);
 
-		ContextCompactor.Outcome first = service.compact(requestWith(longTurns(), 7000, 0, Set.of()));
+		ContextCompactor.Outcome first = run(service, requestWith(longTurns(), 7000, 0, Set.of()));
 
 		assertThat(first.level()).as("前缀主导 ⇒ 不得做 L2/L3").isEqualTo(ContextTrigger.Level.NONE);
 		assertThat(first.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
 		assertThat(first.turns()).isZero();
-		assertThat(this.store.archiveCount()).as("不做压缩就不归档").isZero();
 		assertThat(this.store.read(SESSION_ID).level()).as("谱系不得被空操作推进").isEqualTo("L2");
 
-		ContextCompactor.Outcome second = service.compact(requestWith(longTurns(), 7000, 0, Set.of()));
+		ContextCompactor.Outcome second = run(service, requestWith(longTurns(), 7000, 0, Set.of()));
 
 		assertThat(second.level()).as("第二轮同样不做（不是'每轮再截一次'）").isEqualTo(ContextTrigger.Level.NONE);
 		assertThat(second.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
-		assertThat(this.store.archiveCount()).isZero();
 	}
 
 	/**
@@ -383,25 +400,23 @@ class ContextCompactorTest {
 	@Test
 	void c13PrefixDominatedOverflowStillHardTrimsInsteadOfSendingAnOverflowingRequest() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		// 谱系已到 L2（这一步的目标是 L3）；真值 5000 让滞回解锁，但续跑重建的工具结果 +12000
 		// ⇒ nextEst = 17000 >= 15000：这一发注定 400（真实入口 = ResumeService 的 rebuiltToolTokens）。
 		// 语料用"可丢的 3 轮足够大"（每轮 ≈4K token）：N-C 只允许在"裁后能放下"时裁 ——
 		// 17000 − 12000 + 7500 = 12500 ≤ 15000，这一刀真的换得出空间。
 		seed("L2", 5000);
 		ContextCompactor.Request overflow = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				hugeTurns(), List.of("{}"), 5000, 0, 0, 12000, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				hugeTurns(), 5000, 0, 0, 12000, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null);
 
-		ContextCompactor.Outcome outcome = service.compact(overflow);
+		ContextCompactor.Outcome outcome = run(service, overflow);
 
 		assertThat(outcome.changed()).as("真越窗必须真的压一次，不能 noop 就发出去").isTrue();
 		assertThat(outcome.level()).as("prefix 主导 + 真越窗 ⇒ 仍做 L3 硬截断").isEqualTo(ContextTrigger.Level.L3);
 		assertThat(outcome.turns()).isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
 		assertThat(this.store.read(SESSION_ID).level()).isEqualTo("L3");
-		assertThat(this.store.archiveCount()).as("B5：硬截断也不再写 archive").isZero();
 	}
 
 	/**
@@ -411,20 +426,18 @@ class ContextCompactorTest {
 	@Test
 	void c13PrefixDominatedAtTheCompletionReserveBoundaryStillDowngrades() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		// 有效预留 = min(13000, 15000/2) = 7500；nextEst 7500 ⇒ 7500 + 7500 == 15000（刚好）
 		seed("L2", 7500);
 		ContextCompactor.Request boundary = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				longTurns(), List.of("{}"), 7500, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				longTurns(), 7500, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null);
 
-		ContextCompactor.Outcome outcome = service.compact(boundary);
+		ContextCompactor.Outcome outcome = run(service, boundary);
 
 		assertThat(outcome.level()).as("放得下输出预留 ⇒ 不必截断").isEqualTo(ContextTrigger.Level.NONE);
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
 		assertThat(outcome.turns()).isZero();
-		assertThat(this.store.archiveCount()).isZero();
 	}
 
 	/**
@@ -441,17 +454,16 @@ class ContextCompactorTest {
 	@Test
 	void c13PrefixDominatedTrimThatStillDoesNotFitIsNotApplied() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		// nextEst 8000（> limit − reserve 7500 ⇒ 输出预留放不下），可丢的 3 轮只有 ~165 token ⇒
 		// 裁后 7835 + 7500 = 15335 > 15000：裁完仍放不下
 		seed("L2", 8000);
 		List<Message> history = longTurns();
 		ContextCompactor.Request impossible = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				history, List.of("{}"), 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				history, 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null);
 
-		ContextCompactor.Outcome outcome = service.compact(impossible);
+		ContextCompactor.Outcome outcome = run(service, impossible);
 
 		assertThat(outcome.changed()).as("裁完仍装不下 ⇒ 不许丢历史").isFalse();
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.NONE);
@@ -459,7 +471,6 @@ class ContextCompactorTest {
 		assertThat(outcome.turns()).isZero();
 		assertThat(outcome.lostTokens()).isZero();
 		assertThat(outcome.messages()).as("历史原样返回（同一份列表）").isSameAs(history);
-		assertThat(this.store.archiveCount()).as("不裁剪就不归档").isZero();
 		assertThat(this.store.contextLedger(SESSION_ID)).isEmpty();
 		assertThat(this.store.read(SESSION_ID).level()).as("谱系不动").isEqualTo("L2");
 	}
@@ -473,21 +484,19 @@ class ContextCompactorTest {
 	@Test
 	void c13PrefixDominatedAboveTheCompletionReserveKeepsL3() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		// nextEst 8000 < limit 15000，8000 + 7500 = 15500 > 15000（输出预留放不下）；
 		// 但可丢的 3 轮 ≈12K ⇒ after ≈ -4000 ⇒ 裁后放得下 ⇒ L3 必须照做
 		seed("L2", 8000);
 		ContextCompactor.Request tight = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				hugeTurns(), List.of("{}"), 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				hugeTurns(), 8000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null);
 
-		ContextCompactor.Outcome outcome = service.compact(tight);
+		ContextCompactor.Outcome outcome = run(service, tight);
 
 		assertThat(outcome.level()).as("裁后能放下 ⇒ 保留 L3").isEqualTo(ContextTrigger.Level.L3);
 		assertThat(outcome.turns()).isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
-		assertThat(this.store.archiveCount()).as("B5：不再写 archive").isZero();
 	}
 
 	/**
@@ -501,27 +510,25 @@ class ContextCompactorTest {
 	@Test
 	void trimmingToFitCountsThePlannedL1Clear() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
 		// 只 pin 最近 1 条工具结果 ⇒ 首轮那条"大结果"是零代价可清的
 		smallWindow.getContext().setKeepToolPairs(1);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		// nextEst 20000（真值 5000 让滞回解锁，completion 15000 把它顶上去）；有效预留 7500：
 		//   只裁：20000 − 7956 + 7500 = 19544 > 15000 ⇒ 裁不动
 		//   清 + 裁：20000 − 4990 − 7956 + 7500 = 14554 ≤ 15000 ⇒ 刚好救得回来
 		seed("L2", 5000);
 		List<Message> history = roundsWithClearableResult(8_500);
 		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				history, List.of("{}"), 5000, 15000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				history, 5000, 15000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null);
 
-		ContextCompactor.Outcome outcome = service.compact(request);
+		ContextCompactor.Outcome outcome = run(service, request);
 
 		assertThat(outcome.changed()).as("清 + 裁能救 ⇒ 必须真的压").isTrue();
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.L3);
 		assertThat(outcome.clearedPairs()).as("旧结果必须被清掉（不是只丢轮）").isEqualTo(1);
 		assertThat(outcome.turns()).as("丢最旧 3 轮").isEqualTo(3);
 		assertThat(outcome.reason()).isEqualTo(HardTrim.REASON_HARD_TRIM);
-		assertThat(this.store.archiveCount()).as("B5：不再写 archive").isZero();
 		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
 		assertThat(event.get("level")).isEqualTo("L3");
 		assertThat(event.get("clearedPairs")).isEqualTo(1);
@@ -534,17 +541,16 @@ class ContextCompactorTest {
 	@Test
 	void clearingThatAlreadyFitsIsKeptAndDropsNoTurns() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
 		smallWindow.getContext().setKeepToolPairs(1);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		// 大结果 ≈13K token ⇒ 清完 20000 − 13000 = 7000，+7500 = 14500 ≤ 15000：清除已经够了
 		seed("L2", 5000);
 		List<Message> history = roundsWithClearableResult(22_100);
 		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				history, List.of("{}"), 5000, 15000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				history, 5000, 15000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false, null, null);
 
-		ContextCompactor.Outcome outcome = service.compact(request);
+		ContextCompactor.Outcome outcome = run(service, request);
 
 		assertThat(outcome.level()).as("清除已够 ⇒ 落 L1，不升到 L3").isEqualTo(ContextTrigger.Level.L1);
 		assertThat(outcome.clearedPairs()).as("零代价清理必须落地").isEqualTo(1);
@@ -552,7 +558,6 @@ class ContextCompactorTest {
 		assertThat(outcome.lostTokens()).isZero();
 		assertThat(outcome.reason()).isEqualTo("l1_tool_result_clearing");
 		assertThat(outcome.messages()).as("历史一条没少").hasSameSizeAs(history);
-		assertThat(this.store.archiveCount()).as("B5：L1 清除不再写 archive").isZero();
 		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
 		assertThat(event.get("level")).as("台账记 L1（本次动作），不写硬裁事件").isEqualTo("L1");
 		assertThat(event.get("reason")).isEqualTo("l1_tool_result_clearing");
@@ -592,12 +597,11 @@ class ContextCompactorTest {
 	@Test
 	void c13PrefixDominatedRoundStillAllowsL1Clearing() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
-		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
-				this.store);
+		ContextCompactor service = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
+				this.store, null);
 		seed("L2", 7000);
 
-		ContextCompactor.Outcome outcome = service.compact(requestWith(turns(8), 7000, 0, Set.of()));
+		ContextCompactor.Outcome outcome = run(service, requestWith(turns(8), 7000, 0, Set.of()));
 
 		assertThat(outcome.level()).as("L1 不受 prefix 守卫影响").isEqualTo(ContextTrigger.Level.L1);
 		assertThat(outcome.reason()).isEqualTo("l1_tool_result_clearing");
@@ -609,7 +613,7 @@ class ContextCompactorTest {
 	@Test
 	void advancesOneLevelPerCompaction() {
 		// 第一棒：none + 70.4% ⇒ L1
-		ContextCompactor.Outcome first = this.compactor.compact(request(turns(6), 81000, List.of("{}")));
+		ContextCompactor.Outcome first = run(this.compactor, request(turns(6), 81000, List.of("{}")));
 		assertThat(first.level()).isEqualTo(ContextTrigger.Level.L1);
 
 		// 第二棒：L1 + 82.6% ⇒ L2（摘要 3 轮）
@@ -705,7 +709,6 @@ class ContextCompactorTest {
 		assertThat(outcome.lostTokens()).isEqualTo(outcome.before() - outcome.after());
 		assertThat(outcome.lostTokens()).isPositive();
 		assertThat(outcome.summaryChars()).isEqualTo("摘要正文".length());
-		assertThat(this.store.archiveCount()).as("B5：不再写 archive").isZero();
 		Map<String, Object> event = this.store.contextLedger(SESSION_ID).get(0);
 		assertThat(event).containsEntry("level", "L2")
 			.containsEntry("turns", 3)
@@ -734,7 +737,6 @@ class ContextCompactorTest {
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_SUMMARY_FAILED);
 		assertThat(outcome.messages()).isSameAs(messages);
-		assertThat(this.store.archiveCount()).isZero();
 		assertThat(this.store.read(SESSION_ID).fuseFails()).isEqualTo(1);
 	}
 
@@ -748,14 +750,13 @@ class ContextCompactorTest {
 		seed("L1", 70000);
 		List<Message> messages = longTurns();
 		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				messages, List.of("{}"), 70000, 25000, 0, 0, 3000, 4000, Set.of(), null);
+				messages, 70000, 25000, 0, 0, 3000, 4000, Set.of(), null, Set.of(), 4096, false, null, null);
 
 		ContextCompactor.Outcome outcome = compactorWith((system, user, runtime) -> "不该被调用").compact(request);
 
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_SUMMARY_UNAVAILABLE);
 		assertThat(outcome.messages()).isSameAs(messages);
-		assertThat(this.store.archiveCount()).isZero();
 		// B1：没有发生摘要尝试（摘要器/runtime 缺失是配置问题），不计入熔断失败
 		assertThat(this.store.read(SESSION_ID).fuseFails()).isZero();
 	}
@@ -790,7 +791,7 @@ class ContextCompactorTest {
 	@Test
 	void l1NoopDoesNotSkipLevelBelowL2Line() {
 		java.util.concurrent.atomic.AtomicInteger summaryCalls = new java.util.concurrent.atomic.AtomicInteger();
-		ContextCompactor service = compactorWith((system, user, runtime) -> {
+		CompactorFacade service = compactorWith((system, user, runtime) -> {
 			summaryCalls.incrementAndGet();
 			return "摘要正文";
 		});
@@ -801,7 +802,6 @@ class ContextCompactorTest {
 		assertThat(outcome.level()).isEqualTo(ContextTrigger.Level.NONE);
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_NOTHING_TO_CLEAR);
 		assertThat(summaryCalls.get()).as("L1 空操作不得升级为 L2 摘要").isZero();
-		assertThat(this.store.archiveCount()).isZero();
 	}
 
 	/**
@@ -836,16 +836,15 @@ class ContextCompactorTest {
 	@Test
 	void l2LineageDoesNotSummarizeBelowL2Line() {
 		AiProperties smallWindow = new AiProperties();
-		smallWindow.getContext().setLimitTokens(15000);
 		seed("L2", 5500);
 		java.util.concurrent.atomic.AtomicInteger summaryCalls = new java.util.concurrent.atomic.AtomicInteger();
-		ContextCompactor withSummary = new ContextCompactor(smallWindow, new ContextLimitResolver(smallWindow),
+		ContextCompactor withSummary = new ContextCompactor(smallWindow, new ContextLimitResolver((providerId, modelId) -> 15000),
 				this.store, (system, user, runtime) -> {
 					summaryCalls.incrementAndGet();
 					return "摘要正文";
 				});
 
-		ContextCompactor.Outcome outcome = withSummary.compact(requestWith(longTurns(), 5500, 0, Set.of()));
+		ContextCompactor.Outcome outcome = run(withSummary, requestWith(longTurns(), 5500, 0, Set.of()));
 
 		assertThat(outcome.changed()).isFalse();
 		assertThat(outcome.reason()).isEqualTo(ContextCompactor.REASON_PREFIX_DOMINATED);
@@ -909,15 +908,16 @@ class ContextCompactorTest {
 			}
 
 			@Override
-			public void archive(String sessionId, int turnNo, List<String> messageJson) {
+			public CompactionCommitStatus commitCompaction(String sessionId, String compactionId,
+					ContextState compacted, List<Map<String, Object>> ledgerEvents, Map<String, Object> event) {
 				writes.incrementAndGet();
-				super.archive(sessionId, turnNo, messageJson);
+				return super.commitCompaction(sessionId, compactionId, compacted, ledgerEvents, event);
 			}
 		};
-		ContextCompactor service = new ContextCompactor(this.properties, this.resolver, counting);
+		ContextCompactor service = new ContextCompactor(this.properties, this.resolver, counting, null);
 		ContextCompactor.Request request = request(turns(6), 81000, List.of("{}"));
 
-		ContextCompactor.Plan plan = service.plan(request);
+		ContextCompactor.Plan plan = service.plan(request, null, null);
 
 		assertThat(plan.changed()).isTrue();
 		assertThat(writes.get()).as("CAS 之前不得归档/写状态/写台账").isZero();
@@ -933,35 +933,36 @@ class ContextCompactorTest {
 	@Test
 	void eventIdAllocatedOnlyOnCommit() {
 		ContextCompactor.Request request = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				turns(6), List.of("{}"), 81000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(),
-				Set.of(), 0, false, "first_turn", "c-9");
+				turns(6), 81000, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false,
+				"first_turn", "c-9");
 
-		ContextCompactor.Plan plan = this.compactor.plan(request);
+		ContextCompactor.Plan plan = this.compactor.plan(request, null, null);
 
 		assertThat(this.store.events(SESSION_ID)).as("plan 不写事件").isEmpty();
 		ContextCompactor.Outcome first = this.compactor.commit(request, plan);
 		assertThat(first.committed()).isTrue();
-		assertThat(first.eventId()).isEqualTo(RUN_ID + ":c1");
+		assertThat(first.eventId()).as("压缩事件 id 是 runId:c:<atMs>:<hash>")
+			.startsWith(RUN_ID + ":c:");
 		assertThat(this.store.events(SESSION_ID)).hasSize(1);
 		Map<String, Object> event = this.store.events(SESSION_ID).get(0);
-		assertThat(event).containsEntry("eventId", RUN_ID + ":c1")
-			.containsEntry("cause", "first_turn")
-			.containsEntry("anchorToolCallId", "c-9");
+		assertThat(String.valueOf(event.get("eventId"))).startsWith(RUN_ID + ":c:");
+		assertThat(event).containsEntry("cause", "first_turn").containsEntry("anchorToolCallId", "c-9");
 
 		seed("L1", 60000);
 		ContextCompactor.Request second = new ContextCompactor.Request(SESSION_ID, RUN_ID, "deepseek-flash", 1L,
-				turns(6), List.of("{}"), 60000, 25000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(),
-				Set.of(), 0, false, "resume", null);
-		ContextCompactor.Outcome secondOutcome = this.compactor.commit(second, this.compactor.plan(second));
+				turns(6), 60000, 25000, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(), 4096, false,
+				"resume", null);
+		ContextCompactor.Outcome secondOutcome = this.compactor.commit(second, this.compactor.plan(second, null, null));
 
-		assertThat(secondOutcome.eventId()).isEqualTo(RUN_ID + ":c2");
+		assertThat(secondOutcome.eventId()).startsWith(RUN_ID + ":c:");
+		assertThat(secondOutcome.eventId()).isNotEqualTo(first.eventId());
 		assertThat(this.store.events(SESSION_ID)).extracting(item -> item.get("eventId"))
-			.containsExactly(RUN_ID + ":c2", RUN_ID + ":c1");
+			.hasSize(2);
 	}
 
 	@Test
 	void noEventForNoopOrSummaryFailure() {
-		ContextCompactor.Outcome noop = this.compactor.compact(request(turns(2), 1000, List.of("{}")));
+		ContextCompactor.Outcome noop = run(this.compactor, request(turns(2), 1000, List.of("{}")));
 		assertThat(noop.committed()).isTrue();
 		assertThat(noop.eventId()).isNull();
 		assertThat(this.store.events(SESSION_ID)).isEmpty();

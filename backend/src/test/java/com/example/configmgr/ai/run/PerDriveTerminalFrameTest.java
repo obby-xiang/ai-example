@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -33,6 +34,9 @@ import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -57,8 +61,9 @@ import static org.mockito.Mockito.when;
  * <b>seq &gt; 下界</b>的 done/error —— "上一次驱动"的终帧不属于本次驱动；同一驱动内已落的终帧仍然算数
  * （不重复发）。下界读不出来 = 不可知 ⇒ 照发（宁可多一条，也不吞掉本次失败）。
  *
- * <p>本类<b>全程走真实 {@link RunStore} + 真实归档</b>（{@code ai:events:} LIST 兼容口径），
- * 不用内存替身，避免"替身语义掩盖真实写门/取号路径"。
+ * <p>本类走<b>真实 {@link RunStore}</b>（租约/写门/取号路径）与统一事件日志替身
+ * {@link InMemoryFrameStore}（当前归档由 FrameStore 拥有、RunStore 不再持有 events）；
+ * 写入面与断言面是同一实例，既不改写门真实性，也不让断言与真实写入分叉。
  */
 class PerDriveTerminalFrameTest {
 
@@ -76,7 +81,10 @@ class PerDriveTerminalFrameTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	/** 事件日志替身：当前归档由 FrameStore 拥有（RunStore 不再持有 events），断言读同一实例。 */
+	private final InMemoryFrameStore frames = new InMemoryFrameStore();
+
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null, this.frames);
 
 	private final ChatModel chatModel = mock(ChatModel.class);
 
@@ -108,8 +116,16 @@ class PerDriveTerminalFrameTest {
 				"k", null, null, this.chatModel, mock(ChatClient.class));
 		when(this.providerRegistry.current()).thenReturn(runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(runtime));
+		// 续跑按快照冻结的 provider/model 精确绑定（不再走 current()）：target + forFrozenRequest 两条读口。
+		AiConfigService.ChatTarget target = new AiConfigService.ChatTarget(
+				new AiConfigService.ResolvedProvider(1L, "prov", "http://localhost", "/chat/completions",
+						"test-model", "k", "fp", false),
+				"test-model", true);
+		when(this.providerRegistry.target(any(), anyString())).thenReturn(Optional.of(target));
+		when(this.providerRegistry.forFrozenRequest(any(), anyString(), any(), any(), anyBoolean()))
+			.thenReturn(runtime);
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
@@ -121,8 +137,15 @@ class PerDriveTerminalFrameTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
+		// 终态 transcript 写点已进入生产路径：注入永远接受的替身，避免"未注入 ⇒ 降级成 error 终帧"
+		// 掩盖本类要断言的 done/error 终帧判据（与 RunParamsFreezeTest 同一装配口径）。
+		com.example.configmgr.ai.history.ConversationTranscriptStore transcript = mock(
+				com.example.configmgr.ai.history.ConversationTranscriptStore.class);
+		when(transcript.append(any(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "transcript", transcript);
 		// 真实 create（顺带走一遍本批的首笔快照显式判定路径）
-		this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("问题")), this.codec);
+		this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("问题")), this.codec,
+				1L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "问题", 1000L);
 	}
 
 	@AfterEach
@@ -142,7 +165,7 @@ class PerDriveTerminalFrameTest {
 		when(this.chatModel.stream(any(Prompt.class)))
 			.thenReturn(Flux.error(new IllegalStateException("第一次驱动失败（模拟）")));
 		drive();
-		List<Map<String, Object>> afterFirst = this.store.events(RUN_ID);
+		List<Map<String, Object>> afterFirst = this.frames.readFrom(RUN_ID, 0L, 0);
 		assertThat(terminalTypes(afterFirst)).as("第一次驱动恰好一条终帧").containsExactly("error");
 		String firstCode = terminalCode(afterFirst.get(afterFirst.size() - 1));
 
@@ -154,7 +177,7 @@ class PerDriveTerminalFrameTest {
 			.thenReturn(Flux.concat(Flux.just(chunk("半截正文")), Flux.just(terminal("content_filter"))));
 		drive();
 
-		List<Map<String, Object>> afterSecond = this.store.events(RUN_ID);
+		List<Map<String, Object>> afterSecond = this.frames.readFrom(RUN_ID, 0L, 0);
 		List<Map<String, Object>> secondDrive = afterSecond.subList(afterFirst.size(), afterSecond.size());
 		assertThat(secondDrive).as("第二次驱动必须真的落了帧（取证前提）").isNotEmpty();
 		assertThat(terminalTypes(secondDrive))
@@ -180,7 +203,7 @@ class PerDriveTerminalFrameTest {
 		when(this.chatModel.stream(any(Prompt.class)))
 			.thenReturn(Flux.error(new IllegalStateException("第一次驱动失败（模拟）")));
 		drive();
-		List<Map<String, Object>> afterFirst = this.store.events(RUN_ID);
+		List<Map<String, Object>> afterFirst = this.frames.readFrom(RUN_ID, 0L, 0);
 		assertThat(terminalTypes(afterFirst)).containsExactly("error");
 
 		RunSnapshot running = this.store.get(RUN_ID);
@@ -189,7 +212,7 @@ class PerDriveTerminalFrameTest {
 		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chunk("重试成功"), terminal("stop")));
 		drive();
 
-		List<Map<String, Object>> afterSecond = this.store.events(RUN_ID);
+		List<Map<String, Object>> afterSecond = this.frames.readFrom(RUN_ID, 0L, 0);
 		List<Map<String, Object>> secondDrive = afterSecond.subList(afterFirst.size(), afterSecond.size());
 		assertThat(terminalTypes(secondDrive)).as("重试成功必须落自己的 done").containsExactly("done");
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);

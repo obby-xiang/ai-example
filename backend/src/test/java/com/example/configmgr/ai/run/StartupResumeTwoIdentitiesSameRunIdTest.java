@@ -127,9 +127,21 @@ class StartupResumeTwoIdentitiesSameRunIdTest {
 	private void seedSuspendedRun(TenantUser identity, String sessionId) {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
 			RunSnapshot snapshot = this.store.create(RUN_ID, sessionId, AiContext.empty(),
-					List.of(new UserMessage("继续这一轮")), this.codec);
+					List.of(new UserMessage("继续这一轮")), this.codec, null, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), null, "继续这一轮",
+					System.currentTimeMillis());
 			snapshot.setStatus(RunSnapshot.SUSPENDED);
 			this.store.save(snapshot);
+			// 启动扫描的发现面是恢复 due 索引（due = updatedAt + zombie-age）；本用例要的是"两条都已到期"的现场。
+			String member = com.example.configmgr.ai.tenant.RunKeyScope.indexMember(identity.tenantId(),
+					identity.userId(), RUN_ID);
+			this.fake.zsetsByKey
+				.computeIfAbsent(RunStore.RECOVERY_DUE_INDEX, key -> new java.util.concurrent.ConcurrentHashMap<>())
+				.put(member, 0.0);
+			this.fake.zsetsByKey
+				.computeIfAbsent(RunStore.RECOVERY_DUE_IDENTITY_PREFIX + identity.tenantId() + ":"
+						+ identity.userId(), key -> new java.util.concurrent.ConcurrentHashMap<>())
+				.put(RUN_ID, 0.0);
 		}
 	}
 

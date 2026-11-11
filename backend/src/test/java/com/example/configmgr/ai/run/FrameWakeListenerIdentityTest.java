@@ -44,17 +44,17 @@ class FrameWakeListenerIdentityTest {
 
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A.tenantId(),
 				TENANT_A.userId())) {
-			assertThat(this.listener.register(RUN_ID, targetA)).isTrue();
+			assertThat(this.listener.isRegistered(RUN_ID, targetA)).isTrue();
 		}
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B.tenantId(),
 				TENANT_B.userId())) {
-			assertThat(this.listener.register(RUN_ID, targetB)).isTrue();
+			assertThat(this.listener.isRegistered(RUN_ID, targetB)).isTrue();
 		}
 
 		assertThat(this.bus.channels()).as("两个身份必须各自订阅自己的频道")
 			.containsExactlyInAnyOrder(channelOf(TENANT_A), channelOf(TENANT_B));
 		assertThat(this.listener.subscribedRuns()).as("两个身份桶各一条订阅").isEqualTo(2);
-		assertThat(this.listener.targetCount(RUN_ID)).as("同一 runId 的目标数按身份桶汇总").isEqualTo(2);
+		assertThat((this.listener.targetCount(TENANT_A, RUN_ID) + this.listener.targetCount(TENANT_B, RUN_ID))).as("同一 runId 的目标数按身份桶汇总").isEqualTo(2);
 	}
 
 	@Test
@@ -63,11 +63,11 @@ class FrameWakeListenerIdentityTest {
 		RecordingTarget targetB = new RecordingTarget();
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A.tenantId(),
 				TENANT_A.userId())) {
-			this.listener.register(RUN_ID, targetA);
+			this.listener.isRegistered(RUN_ID, targetA);
 		}
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B.tenantId(),
 				TENANT_B.userId())) {
-			this.listener.register(RUN_ID, targetB);
+			this.listener.isRegistered(RUN_ID, targetB);
 		}
 
 		// 断连回调/投递池线程：没有请求身份
@@ -86,11 +86,11 @@ class FrameWakeListenerIdentityTest {
 		RecordingTarget targetB = new RecordingTarget();
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A.tenantId(),
 				TENANT_A.userId())) {
-			this.listener.register(RUN_ID, targetA);
+			this.listener.isRegistered(RUN_ID, targetA);
 		}
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B.tenantId(),
 				TENANT_B.userId())) {
-			this.listener.register(RUN_ID, targetB);
+			this.listener.isRegistered(RUN_ID, targetB);
 		}
 
 		this.bus.inject(channelOf(TENANT_A), RUN_ID, 7L);
@@ -100,10 +100,7 @@ class FrameWakeListenerIdentityTest {
 	}
 
 	private static String channelOf(TenantUser identity) {
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(identity.tenantId(),
-				identity.userId())) {
-			return RedisFrameWakeBus.channel(RUN_ID);
-		}
+		return RedisFrameWakeBus.channel(identity, RUN_ID);
 	}
 
 	/** 按<b>频道名</b>键控的总线替身（频道名由当前线程身份算出，与生产实现同一拼法）。 */
@@ -114,24 +111,20 @@ class FrameWakeListenerIdentityTest {
 		private final List<String> subscribeJournal = new CopyOnWriteArrayList<>();
 
 		@Override
-		public void publish(String runId, long upperBoundSeq) {
-			LongConsumer listener = this.subscribers.get(RedisFrameWakeBus.channel(runId));
+		public void publish(String runId, long upperBoundSeq, boolean terminal) {
+			LongConsumer listener = this.subscribers.get(RedisFrameWakeBus.channel(
+					RequestContextUtils.require(), runId));
 			if (listener != null) {
 				listener.accept(upperBoundSeq);
 			}
 		}
 
 		@Override
-		public boolean subscribe(String runId, LongConsumer onWake) {
-			String channel = RedisFrameWakeBus.channel(runId);
+		public Subscription subscribeHandle(String runId, long generation, LongConsumer onWake) {
+			String channel = RedisFrameWakeBus.channel(RequestContextUtils.require(), runId);
 			this.subscribeJournal.add(channel);
 			this.subscribers.put(channel, onWake);
-			return true;
-		}
-
-		@Override
-		public void unsubscribe(String runId) {
-			this.subscribers.remove(RedisFrameWakeBus.channel(runId));
+			return () -> this.subscribers.remove(channel);
 		}
 
 		void inject(String channel, String runId, long upperBoundSeq) {

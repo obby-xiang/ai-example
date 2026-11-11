@@ -96,7 +96,7 @@ class AiControllerToolKindEntryTest {
 		PendingToolCall pending = pending(PendingToolCall.KIND_FRONTEND, PendingToolCall.PENDING);
 		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
 		when(this.runStore.instanceId()).thenReturn("inst-a");
-		when(this.gate.submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any()))
+		when(this.gate.submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any(), any(), any()))
 			.thenReturn(accepted(pending));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
@@ -104,7 +104,7 @@ class AiControllerToolKindEntryTest {
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.accepted").value(true));
 
-		verify(this.gate).submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any());
+		verify(this.gate).submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any(), any(), any());
 	}
 
 	// ── 四格矩阵：两格错入口 ──────────────────────────────────────────────
@@ -144,7 +144,7 @@ class AiControllerToolKindEntryTest {
 			.andExpect(jsonPath("$.expectedKind").value(PendingToolCall.KIND_FRONTEND));
 
 		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
-				any());
+				any(), any(), any());
 		verify(this.runStore, never()).putPending(anyString(), any());
 	}
 
@@ -161,30 +161,33 @@ class AiControllerToolKindEntryTest {
 			.andExpect(jsonPath("$.code").value("TOOL_KIND_MISMATCH"));
 
 		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
-				any());
+				any(), any(), any());
 	}
 
 	// ── 兼容口径 ──────────────────────────────────────────────────────────
 
-	/** 旧数据（kind 字段引入前写入）：不在入口拒绝，交给闸门的兼容口径（放行 + WARN）。 */
+	/**
+	 * 旧数据（kind 字段引入前写入）：<b>缺 kind 不授权</b> —— 两个入口都按 409
+	 * {@code TOOL_KIND_MISMATCH} 拒绝（不猜它属于哪个入口），闸门因而从不被调用。
+	 */
 	@Test
-	void legacyEntryWithoutKindPassesBothEntrypoints() throws Exception {
+	void legacyEntryWithoutKindIsRejectedOnBothEntrypoints() throws Exception {
 		PendingToolCall legacy = pending(null, PendingToolCall.PENDING);
 		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(legacy);
 		when(this.runStore.instanceId()).thenReturn("inst-a");
-		when(this.gate.submitDecision(eq(RUN), eq(CALL), eq(true), any())).thenReturn(accepted(legacy));
-		when(this.gate.submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any()))
-			.thenReturn(accepted(legacy));
 
 		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
 			.content(confirmBody(true)))
-			.andExpect(status().isOk());
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TOOL_KIND_MISMATCH"));
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
 			.content(frontendBody("ok", false)))
-			.andExpect(status().isOk());
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TOOL_KIND_MISMATCH"));
 
-		verify(this.gate).submitDecision(eq(RUN), eq(CALL), eq(true), any());
-		verify(this.gate).submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any());
+		verify(this.gate, never()).submitDecision(anyString(), anyString(), anyBoolean(), any());
+		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
+				any(), any(), any());
 	}
 
 	/** 正确 kind 的重复提交：kind 闸先放行，幂等口径照旧（409 DUPLICATE_TOOL_CALL_ID）。 */
@@ -203,7 +206,7 @@ class AiControllerToolKindEntryTest {
 
 		PendingToolCall frontendDecided = pending(PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_RESULT);
 		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(frontendDecided);
-		when(this.gate.submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any()))
+		when(this.gate.submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any(), any(), any()))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.DUPLICATE, frontendDecided, false, null));
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)

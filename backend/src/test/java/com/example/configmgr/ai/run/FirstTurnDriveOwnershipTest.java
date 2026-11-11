@@ -95,7 +95,7 @@ class FirstTurnDriveOwnershipTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final ChatModel chatModel = mock(ChatModel.class);
 

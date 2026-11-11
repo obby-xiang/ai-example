@@ -10,13 +10,16 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.file.FileStorageService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -44,6 +47,9 @@ class AiSessionPurgeMemoryResidueTest {
 	private static final String SESSION_A = "sess-a";
 
 	private static final String SESSION_B = "sess-b";
+
+	/** 本类统一身份 1:101 的键段（{@code tenantId:userId:}）。 */
+	private static final String STAGING_SEGMENT = "1:101:";
 
 	private final PurgeFakeRedis fake = new PurgeFakeRedis();
 
@@ -74,16 +80,28 @@ class AiSessionPurgeMemoryResidueTest {
 
 	private AiSessionPurgeService service;
 
+	/** 销毁是身份内的操作：键族与反馈行都按身份段/三元组处理。 */
+	private RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
 		this.memory = new RedisChatMemoryRepository(this.fake.redis, this.codec, Duration.ofHours(24), this.guard);
 		when(this.gate.currentRunId(anyString())).thenReturn(null);
 		when(this.cancellations.keyFor(anyString())).thenAnswer(invocation -> "ai:cancel:" + invocation.getArgument(0));
 		when(this.attachments.findBySessionId(anyString())).thenReturn(List.of());
-		when(this.database.snapshot(anyString())).thenReturn(new SessionPurgeDatabase.Snapshot(0));
-		when(this.database.delete(anyString()))
+		when(this.database.snapshot(anyString(), anyLong(), anyLong()))
+			.thenReturn(new SessionPurgeDatabase.Snapshot(0));
+		when(this.database.delete(anyString(), anyLong(), anyLong()))
 			.thenReturn(new SessionPurgeDatabase.Deleted(0));
 		this.service = serviceWith(this.memory);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	@Test
@@ -139,7 +157,7 @@ class AiSessionPurgeMemoryResidueTest {
 		assertThat(result.memory().deleted()).as("记忆面未删净").isFalse();
 		assertThat(result.errors()).as("残留必须如实列出（可重试）").anyMatch(error -> error.startsWith("memory"));
 		assertThat(this.fake.strings).as("pending 保留 ⇒ 由调度补删").containsKey(
-				SessionPurgeGuard.PENDING_PREFIX + SESSION_A);
+				SessionPurgeGuard.PENDING_PREFIX + STAGING_SEGMENT + SESSION_A);
 	}
 
 	/**
@@ -184,22 +202,21 @@ class AiSessionPurgeMemoryResidueTest {
 	}
 
 	/**
-	 * <b>I3（review）：删后复核的 SCAN 失败不得被当成"没有残留"</b>。
+	 * <b>I3（review）：删后复核的判活读失败不得被当成"没有残留"</b>。
 	 *
-	 * <p>复核扫描抛错时 {@code memory.deleted} 必须为假（"查不出来"≠"确认删净"），
+	 * <p>复核（{@code HASKEY} 数据键）抛错时 {@code memory.deleted} 必须为假（"查不出来"≠"确认删净"），
 	 * 且 {@code complete=false}（可重试）。旧实现把异常吞成空列表，于是 deleted=true。
 	 */
 	@Test
 	void residueScanFailureIsNotTreatedAsDeleted() {
 		seedMemory(SESSION_A);
-		// 枚举阶段的扫描必须成功（否则会按"枚举失败不半删"中止）⇒ 在删除阶段才打开 failScan：
-		// 枚举（含 staging 扫描）已跑完，删除后的复核扫描才会撞上故障。
+		// 枚举阶段必须成功（否则按"枚举失败不半删"中止）⇒ 删除完成后才打开判活读故障。
 		this.memory = new RedisChatMemoryRepository(this.fake.redis, this.codec, Duration.ofHours(24), this.guard) {
 
 			@Override
 			public void deleteByConversationId(String conversationId) {
 				super.deleteByConversationId(conversationId);
-				AiSessionPurgeMemoryResidueTest.this.fake.failScan = true;
+				AiSessionPurgeMemoryResidueTest.this.fake.failHasKey = true;
 			}
 
 		};
@@ -207,7 +224,7 @@ class AiSessionPurgeMemoryResidueTest {
 
 		AiSessionPurgeService.PurgeResult result = this.service.purge(SESSION_A, "test");
 
-		this.fake.failScan = false;
+		this.fake.failHasKey = false;
 		assertThat(result.complete()).as("复核不可知 ⇒ 不得报 complete").isFalse();
 		assertThat(result.memory().deleted()).as("复核不可知 ≠ 已删净").isFalse();
 		assertThat(result.errors()).anyMatch(error -> error.startsWith("memory"));
@@ -236,7 +253,7 @@ class AiSessionPurgeMemoryResidueTest {
 
 		AiSessionPurgeService.PurgeResult result = this.service.purge(SESSION_A, "test");
 
-		assertThat(result.removedFromIndex()).as("索引里本来就没成员 ⇒ 该字段为真（正是掩膜来源）").isTrue();
+		// 索引结论（旧 removedFromIndex）不再作为“已删净”的依据：数据键残留必须由 memory.deleted=false 如实暴露。
 		assertThat(this.fake.lists).as("数据键确实还在").containsKey(this.memory.keyFor(SESSION_A));
 		assertThat(result.memory().deleted()).as("I4：不得用索引结论掩盖'数据还在'").isFalse();
 		assertThat(result.complete()).as("有残留 ⇒ complete=false（可重试）").isFalse();
@@ -256,11 +273,20 @@ class AiSessionPurgeMemoryResidueTest {
 
 	private void seedStaging(String sessionId, String token) {
 		this.fake.lists.put(stagingKey(sessionId, token), new CopyOnWriteArrayList<>(List.of("{}")));
+		// 当前发现面 = 会话精确的 staging 索引 SET（不再 SCAN 前缀）；枚举只认索引里的 token。
+		this.fake.sets.computeIfAbsent(stagingIndexKey(sessionId),
+				ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet())
+			.add(token);
 	}
 
-	/** staging 键形（{@code chat:mem:staging:{<escapedId>}:<uuid>}）。 */
+	/** staging 键形（{@code chat:mem:staging:<t>:<u>:{<sid>}:<uuid>}；身份段来自当前作用域）。 */
 	private static String stagingKey(String sessionId, String token) {
-		return "chat:mem:staging:{" + sessionId + "}:" + token;
+		return "chat:mem:staging:" + STAGING_SEGMENT + "{" + sessionId + "}:" + token;
+	}
+
+	/** staging 索引键（{@code chat:mem:staging:idx:<t>:<u>:{<sid>}}）。 */
+	private static String stagingIndexKey(String sessionId) {
+		return "chat:mem:staging:idx:" + STAGING_SEGMENT + "{" + sessionId + "}";
 	}
 
 }

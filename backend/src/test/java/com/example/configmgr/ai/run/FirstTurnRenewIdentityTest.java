@@ -87,7 +87,7 @@ class FirstTurnRenewIdentityTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties, this.leases);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
@@ -133,7 +133,7 @@ class FirstTurnRenewIdentityTest {
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(this.runtime));
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());

@@ -16,7 +16,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -62,7 +61,14 @@ class ChatMemoryAdvisorIdentityBindingTest {
 
 	private static final String OLD_IDENTITY_TEXT = "身份旧历史";
 
+	private static final String OLD_RUN_ID = "run-identity-old";
+
 	private static final Duration TTL = Duration.ofHours(24);
+
+	/** 本轮起点：按轮合并要求非零（{@link MemoryTurn#of} 对 {@code createdAt<=0} 返回 null）。 */
+	private static final long TURN_STARTED_AT_MS = 1_760_000_000_000L;
+
+	private static final int WINDOW = 40;
 
 	private final FakeMemoryRedis fake = new FakeMemoryRedis();
 
@@ -70,7 +76,8 @@ class ChatMemoryAdvisorIdentityBindingTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final ChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis, this.codec, TTL);
+	private final RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis, this.codec,
+			TTL);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -82,9 +89,12 @@ class ChatMemoryAdvisorIdentityBindingTest {
 	@Test
 	void streamingCallbacksOnIdentityLessThreadsUseTheTurnRecordIdentityForReadAndWrite() throws Exception {
 		// 身份键上先有一份旧历史：读路径必须命中它（而不是 legacy 键，也不是空窗）。
+		// 旧历史必须经按轮写入口盖章：直插裸消息属于"无归属"，合并按契约跳过、绝不收养。
 		String identityKey = "chat:mem:" + TENANT + ":" + USER + ":{" + SESSION + "}";
-		this.fake.lists.put(identityKey,
-				new CopyOnWriteArrayList<>(this.codec.serializeAll(List.of(new UserMessage(OLD_IDENTITY_TEXT)))));
+		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(TENANT, USER)) {
+			this.repository.upsertRun(SESSION, new MemoryTurn(OLD_RUN_ID, TURN_STARTED_AT_MS - 60_000L),
+					List.of(new UserMessage(OLD_IDENTITY_TEXT)), WINDOW, true);
+		}
 
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId("run-identity-binding");
@@ -92,6 +102,9 @@ class ChatMemoryAdvisorIdentityBindingTest {
 		snapshot.setTenantId(TENANT);
 		snapshot.setUserId(USER);
 		snapshot.setCreatedBy("test-instance");
+		// 当前轮的 run 归属需要非零起点（MemoryTurn.of 对 createdAt<=0 返回 null，写侧会按"无主"拒绝）。
+		snapshot.setCreatedAtMs(TURN_STARTED_AT_MS);
+		snapshot.setUpdatedAtMs(TURN_STARTED_AT_MS);
 		ToolExecutionEnvelope envelope = ToolExecutionEnvelope.fromSnapshot(snapshot, 0L);
 
 		ChatClient client = ChatClient.builder(this.model)
@@ -118,10 +131,8 @@ class ChatMemoryAdvisorIdentityBindingTest {
 		String legacyNamespaceKey = "chat:mem:{" + SESSION + "}";
 		assertThat(this.fake.lists).as("无线程身份的上游回调不得写无归属 legacy 键")
 			.doesNotContainKeys(legacyKey, legacyNamespaceKey);
-		assertThat(this.fake.sets.get(RedisChatMemoryRepository.CONVERSATION_IDS_KEY))
-			.as("全局索引成员必须带本轮身份，不得出现裸索引")
-			.contains(TENANT + "/" + USER + "/" + SESSION)
-			.doesNotContain(SESSION);
+		assertThat(this.fake.sets).as("全局会话索引已退役：不得写裸索引")
+			.doesNotContainKey("chat:mem:__ids__");
 
 		assertThat(this.fake.lists).as("身份键必须存在").containsKey(identityKey);
 		assertThat(this.fake.lists.get(identityKey)).as("本轮用户消息与助手回答都写在身份键上")

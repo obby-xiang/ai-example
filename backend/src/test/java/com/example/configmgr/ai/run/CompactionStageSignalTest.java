@@ -77,7 +77,7 @@ class CompactionStageSignalTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -241,8 +241,8 @@ class CompactionStageSignalTest {
 
 	private void useCompactor(RollingSummarizer.Summarizer summarizer) {
 		ContextCompactor compactor = summarizer == null
-				? new ContextCompactor(this.properties, new ContextLimitResolver(this.properties), this.contextStore)
-				: new ContextCompactor(this.properties, new ContextLimitResolver(this.properties), this.contextStore,
+				? new ContextCompactor(this.properties, new ContextLimitResolver((providerId, modelId) -> 128000), this.contextStore, null)
+				: new ContextCompactor(this.properties, new ContextLimitResolver((providerId, modelId) -> 128000), this.contextStore,
 						summarizer);
 		ReflectionTestUtils.setField(this.service, "contextCompactor", compactor);
 	}

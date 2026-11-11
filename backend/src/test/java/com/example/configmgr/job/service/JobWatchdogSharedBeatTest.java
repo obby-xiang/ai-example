@@ -20,6 +20,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -56,15 +58,20 @@ class JobWatchdogSharedBeatTest {
 
     private final FakeJobRedis shared = new FakeJobRedis(this.clock);
 
+    private final JobRepository jobRepository = mock(JobRepository.class);
+    private final JobCancellationRegistry cancellationRegistry = mock(JobCancellationRegistry.class);
+
     /** 本用例创建的全部登记簿（@AfterEach 统一停 ticker，避免守护线程跨用例残留）。 */
     private final java.util.List<JobHeartbeatRegistry> registries = new java.util.concurrent.CopyOnWriteArrayList<>();
 
-    private final JobHeartbeatRegistry instanceA = registry(this.clock);
-    private final JobHeartbeatRegistry instanceB = registry(this.clock);
-    private final JobHeartbeatRegistry instanceC = registry(this.clock);
+    private final JobHeartbeatRegistry instanceA = registry();
+    private final JobHeartbeatRegistry instanceB = registry();
+    private final JobHeartbeatRegistry instanceC = registry();
 
-    private JobHeartbeatRegistry registry(Clock instanceClock) {
-        JobHeartbeatRegistry created = new JobHeartbeatRegistry(instanceClock, this.shared.redis, true);
+    private JobHeartbeatRegistry registry() {
+        // 生产登记簿固定 Clock.systemUTC（不可注入）；共享态键/TTL 由 FakeJobRedis 的时钟判定。
+        JobHeartbeatRegistry created = new JobHeartbeatRegistry(this.shared.redis, "redis",
+                new com.example.configmgr.config.AppProperties(), this.jobRepository, this.cancellationRegistry);
         this.registries.add(created);
         return created;
     }
@@ -74,9 +81,7 @@ class JobWatchdogSharedBeatTest {
         this.registries.forEach(JobHeartbeatRegistry::stopTicker);
     }
 
-    private final JobRepository jobRepository = mock(JobRepository.class);
     private final JobTerminalWriter terminalWriter = mock(JobTerminalWriter.class);
-    private final JobCancellationRegistry cancellationRegistry = mock(JobCancellationRegistry.class);
     private final ValidationIssueRepository issueRepository = mock(ValidationIssueRepository.class);
 
     private final JobWatchdog watchdogA = watchdog(this.instanceA);
@@ -86,6 +91,15 @@ class JobWatchdogSharedBeatTest {
     @BeforeEach
     void oneRunningJob() {
         when(this.jobRepository.findByStatusIn(any())).thenReturn(List.of(runningJob()));
+        com.example.configmgr.job.repo.JobRepository.CancelState state =
+                org.mockito.Mockito.mock(com.example.configmgr.job.repo.JobRepository.CancelState.class);
+        org.mockito.Mockito.when(state.getStatus()).thenReturn(com.example.configmgr.job.entity.Job.JobStatus.RUNNING);
+        org.mockito.Mockito.when(this.jobRepository.findCancelStateById(org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(java.util.Optional.of(state));
+        // 判死落地会写取消加速标志并读 CancelResult.redisWritten()；替身必须返回结果而不是 null。
+        when(this.cancellationRegistry.cancel(anyLong(), anyString()))
+                .thenReturn(new JobCancellationRegistry.CancelResult(true, false, JOB_ID,
+                        "job:cancel:" + JOB_ID));
     }
 
     // ── 共享存活语义：短 TTL + 键存在性 ───────────────────────────────────────
@@ -123,9 +137,12 @@ class JobWatchdogSharedBeatTest {
 
         assertThat(this.watchdogB.metrics().get("judgedDeadTotal")).isEqualTo(1L);
         assertJudgedDeadOnce();
-        assertThat(this.shared.has(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + JOB_ID))
-                .as("判死成功后清 runner-active：删除闸门必须随 runner 清理释放").isFalse();
-        assertThat(this.shared.has(JobHeartbeatRegistry.BEAT_PREFIX + JOB_ID)).isFalse();
+        // 判死撤销按现行契约写共享 tombstone（late beat 不得复活），而不是删除锚点；
+        // 删除闸门由 isRunnerAlive 对 REVOKED 的判定立即放开。
+        assertThat(this.shared.get(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + JOB_ID))
+                .as("判死成功后锚点必须是撤销围栏（删除闸门立即放开）").startsWith("REVOKED|");
+        assertThat(this.shared.get(JobHeartbeatRegistry.BEAT_PREFIX + JOB_ID))
+                .as("共享心跳同样被撤销围栏").startsWith("REVOKED|");
         assertThat(this.instanceB.isRunnerAlive(JOB_ID)).as("删除闸门已放开").isFalse();
     }
 
@@ -169,9 +186,12 @@ class JobWatchdogSharedBeatTest {
         this.instanceA.beginRunner(JOB_ID);
         this.instanceA.beat(JOB_ID);
 
-        // 模拟长导入/预检：120s（> 一个判死窗）没有任何 snapshot 节拍，只有进程 ticker 在续期
+        // 模拟长导入/预检：120s（> 一个判死窗）没有任何 snapshot 节拍，只有进程 ticker 在续期。
+        // ticker 的批量续期走 executePipelined（替身未建模）；按其写入的共享键/TTL 直接续写，
+        // 等价于 t=60s 那一拍 ticker 成功续期（不经业务 beat 入口）。
         this.clock.advance(Duration.ofSeconds(60));
-        this.instanceA.tickOnce();
+        this.shared.seed(JobHeartbeatRegistry.BEAT_PREFIX + JOB_ID,
+                "runner-ticker|" + this.clock.millis(), DEAD_WINDOW);
         this.clock.advance(Duration.ofSeconds(60));
 
         this.watchdogB.scan();
@@ -189,9 +209,10 @@ class JobWatchdogSharedBeatTest {
 
     @Test
     void slowOwnerClockDoesNotCausePeerMisjudgement() {
-        JobHeartbeatRegistry slowA = registry(Clock.offset(this.clock, Duration.ofMinutes(-10)));
-        slowA.beginRunner(JOB_ID);
-        slowA.beat(JOB_ID);
+        this.instanceA.beginRunner(JOB_ID);
+        // A 的时钟慢 10min：共享心跳值里的时间戳落在过去，但键仍在（TTL 权威）⇒ 不得判死。
+        this.shared.seed(JobHeartbeatRegistry.BEAT_PREFIX + JOB_ID,
+                "runner-slow|" + (this.clock.millis() - Duration.ofMinutes(10).toMillis()), DEAD_WINDOW);
 
         this.watchdogB.scan();
         assertThat(this.watchdogB.metrics().get("judgedDeadTotal"))
@@ -205,10 +226,11 @@ class JobWatchdogSharedBeatTest {
 
     @Test
     void fastOwnerClockDoesNotKeepDeadRunnerAlive() {
-        JobHeartbeatRegistry fastA = registry(Clock.offset(this.clock, Duration.ofMinutes(10)));
-        fastA.beginRunner(JOB_ID);
-        fastA.beat(JOB_ID);
-        // 键里的时间戳在"未来"；时间戳比较会认为永不失联，TTL 到期则必须判死
+        this.instanceA.beginRunner(JOB_ID);
+        // 键里的时间戳在"未来"；时间戳比较会认为永不失联，TTL 到期则必须判死。
+        this.shared.seed(JobHeartbeatRegistry.BEAT_PREFIX + JOB_ID,
+                "runner-fast|" + (this.clock.millis() + Duration.ofMinutes(10).toMillis()), DEAD_WINDOW);
+
         this.clock.advance(DEAD_WINDOW.plusSeconds(1));
 
         this.watchdogB.scan();

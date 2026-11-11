@@ -17,6 +17,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,6 +41,8 @@ class RedisFrameWakeBusTenantIsolationTest {
 
 	private static final long USER = 202L;
 
+	private static final String CHANNEL = "ai:wake:2:202:" + RUN_ID;
+
 	private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
 
 	private final RedisFrameWakeBus bus = new RedisFrameWakeBus(this.redis);
@@ -51,21 +55,22 @@ class RedisFrameWakeBusTenantIsolationTest {
 		AtomicLong woken = new AtomicLong(-1L);
 		AtomicReference<TenantUser> identityInsideCallback = new AtomicReference<>();
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT, USER)) {
-			assertThat(RedisFrameWakeBus.channel(RUN_ID)).isEqualTo("ai:wake:2:202:" + RUN_ID);
+			assertThat(RedisFrameWakeBus.channel(new TenantUser(TENANT, USER), RUN_ID)).isEqualTo(CHANNEL);
 
-			this.bus.publish(RUN_ID, 7L);
-			verify(this.redis).convertAndSend("ai:wake:2:202:" + RUN_ID, "7");
+			this.bus.publish(RUN_ID, 7L, false);
+			verify(this.redis, timeout(3000)).convertAndSend(CHANNEL, "7");
 
-			assertThat(this.bus.subscribe(RUN_ID, seq -> {
+			FrameWakeBus.Subscription subscription = this.bus.subscribeHandle(RUN_ID, 0L, seq -> {
 				woken.set(seq);
 				identityInsideCallback.set(RequestContextUtils.currentOrNull());
-			})).isTrue();
+			});
+			assertThat(subscription).as("带身份订阅必须装上监听器").isNotNull();
 		}
 
 		ArgumentCaptor<MessageListener> listener = ArgumentCaptor.forClass(MessageListener.class);
 		ArgumentCaptor<ChannelTopic> topic = ArgumentCaptor.forClass(ChannelTopic.class);
 		verify(container).addMessageListener(listener.capture(), topic.capture());
-		assertThat(topic.getValue().getTopic()).as("订阅的频道同样带身份").isEqualTo("ai:wake:2:202:" + RUN_ID);
+		assertThat(topic.getValue().getTopic()).as("订阅的频道同样带身份").isEqualTo(CHANNEL);
 
 		assertThat(RequestContextUtils.currentOrNull()).as("前置：回调触发时用例线程本无身份").isNull();
 
@@ -80,20 +85,38 @@ class RedisFrameWakeBusTenantIsolationTest {
 	}
 
 	@Test
-	void unsubscribeTargetsTheIdentityScopedChannel() {
+	void closingTheSubscriptionRemovesTheIdentityScopedListenerExactlyOnce() {
 		RedisMessageListenerContainer container = mock(RedisMessageListenerContainer.class);
 		ReflectionTestUtils.setField(this.bus, "container", container);
 
+		FrameWakeBus.Subscription subscription;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT, USER)) {
-			assertThat(this.bus.subscribe(RUN_ID, seq -> {
-			})).isTrue();
-			this.bus.unsubscribe(RUN_ID);
+			subscription = this.bus.subscribeHandle(RUN_ID, 0L, seq -> {
+			});
+			assertThat(subscription).as("带身份订阅必须装上监听器").isNotNull();
+			subscription.close();
+			subscription.close();
 		}
 
 		ArgumentCaptor<MessageListener> removed = ArgumentCaptor.forClass(MessageListener.class);
-		verify(container).removeMessageListener(removed.capture());
+		verify(container, times(1)).removeMessageListener(removed.capture());
 		assertThat(removed.getValue()).isNotNull();
-		assertThat(this.bus.subscribedRuns()).isZero();
+	}
+
+	@Test
+	void withoutIdentityNeitherPublishNorSubscribeTouchesRedis() {
+		RedisMessageListenerContainer container = mock(RedisMessageListenerContainer.class);
+		ReflectionTestUtils.setField(this.bus, "container", container);
+
+		assertThat(RequestContextUtils.currentOrNull()).isNull();
+		this.bus.publish(RUN_ID, 7L, false);
+		assertThat(this.bus.subscribeHandle(RUN_ID, 0L, seq -> {
+		})).as("没有身份就不得订阅裸 runId 频道").isNull();
+
+		verify(this.redis, times(0)).convertAndSend(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.anyString());
+		verify(container, times(0)).addMessageListener(org.mockito.ArgumentMatchers.any(MessageListener.class),
+				org.mockito.ArgumentMatchers.any(ChannelTopic.class));
 	}
 
 }

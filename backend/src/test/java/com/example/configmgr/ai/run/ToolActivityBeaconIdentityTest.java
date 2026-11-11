@@ -54,12 +54,12 @@ class ToolActivityBeaconIdentityTest {
 		assertThat(as(A, () -> this.beacon.isActive(RUN_ID))).isFalse();
 		assertThat(as(B, () -> this.beacon.isActive(RUN_ID))).as("A 的工具退出不得清掉 B 的活跃").isTrue();
 
-		assertThat(as(B, () -> this.beacon.budgetArmed(RUN_ID))).as("A 的收尾武装不得让 B 也进入收尾")
+		assertThat(as(B, () -> this.beacon.isBudgetArmed(RUN_ID))).as("A 的收尾武装不得让 B 也进入收尾")
 			.isFalse();
-		assertThat(as(A, () -> this.beacon.budgetArmed(RUN_ID))).isTrue();
-		assertThat(as(B, () -> this.beacon.inGateWait(RUN_ID))).as("A 的挂起等待不得让 B 也暂停段预算")
+		assertThat(as(A, () -> this.beacon.isBudgetArmed(RUN_ID))).isTrue();
+		assertThat(as(B, () -> this.beacon.isInGateWait(RUN_ID))).as("A 的挂起等待不得让 B 也暂停段预算")
 			.isFalse();
-		assertThat(as(A, () -> this.beacon.inGateWait(RUN_ID))).isTrue();
+		assertThat(as(A, () -> this.beacon.isInGateWait(RUN_ID))).isTrue();
 		assertThat(as(B, () -> this.beacon.segmentStartedAtMs(RUN_ID, 7_777L)))
 			.as("B 从未播种段起点 ⇒ 用调用方兜底，而不是读 A 的段")
 			.isEqualTo(7_777L);

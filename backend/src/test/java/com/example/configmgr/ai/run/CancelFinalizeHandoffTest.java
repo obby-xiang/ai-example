@@ -145,7 +145,7 @@ class CancelFinalizeHandoffTest {
 
 	};
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -498,7 +498,7 @@ class CancelFinalizeHandoffTest {
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(true);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.CANCELLED);
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
@@ -512,13 +512,15 @@ class CancelFinalizeHandoffTest {
 
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		when(provider.getIfAvailable()).thenReturn(this.resumeService);
-		this.finalizer = new CancelledRunFinalizer(provider, handoffExecutor, this.properties, (task, delay) -> {
-			this.retries.add(task);
-			this.lastRetryDelay.set(delay);
-			this.retryScheduled.countDown();
-			return () -> {
-			};
-		});
+		ScheduledExecutorService retryExecutor = mock(ScheduledExecutorService.class);
+		when(retryExecutor.schedule(any(Runnable.class), org.mockito.ArgumentMatchers.anyLong(),
+				any(TimeUnit.class))).thenAnswer(invocation -> {
+					this.retries.add(invocation.getArgument(0));
+					this.lastRetryDelay.set(Duration.ofNanos(invocation.getArgument(1)));
+					this.retryScheduled.countDown();
+					return mock(java.util.concurrent.ScheduledFuture.class);
+				});
+		this.finalizer = new CancelledRunFinalizer(provider, handoffExecutor, this.properties, retryExecutor);
 		this.service.setCancelFinalizer(this.finalizer);
 	}
 

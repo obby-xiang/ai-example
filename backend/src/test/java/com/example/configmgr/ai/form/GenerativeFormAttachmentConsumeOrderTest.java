@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.gate.GateCalls;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -184,11 +185,11 @@ class GenerativeFormAttachmentConsumeOrderTest {
 		pending.setStatus(PendingToolCall.PENDING);
 		pending.setArguments(ONE_ATTACHMENT);
 		runStore.putPending("run-touch", pending);
-		com.example.configmgr.ai.run.RunRegistry registry = new com.example.configmgr.ai.run.RunRegistry(runStore,
+		com.example.configmgr.ai.run.RunRegistry registry = com.example.configmgr.ai.run.TestRunRegistryFactory.create(runStore,
 				new ObjectMapper(), null);
 		com.example.configmgr.ai.run.CancellationRegistry cancellations = org.mockito.Mockito
 			.mock(com.example.configmgr.ai.run.CancellationRegistry.class);
-		org.mockito.Mockito.when(cancellations.isCancelled("run-touch")).thenReturn(false);
+		org.mockito.Mockito.when(cancellations.cancelState("run-touch")).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		org.mockito.Mockito.when(cancellations.onCancel(org.mockito.ArgumentMatchers.anyString(),
 				org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 				});
@@ -206,7 +207,7 @@ class GenerativeFormAttachmentConsumeOrderTest {
 			Thread.sleep(2_600);
 			// 再过 2 小时 = 距登记 25 小时（原 TTL 24h 已过），但续期已把它拉回满额 ⇒ 仍可提交
 			expiring.advance(java.time.Duration.ofHours(2));
-			ConfirmGate.Submission submission = gate.submitFrontendResult("run-touch", "call-touch",
+			ConfirmGate.Submission submission = GateCalls.submit(gate, "run-touch", "call-touch",
 					"{\"evidence\":\"" + attachment.fileId() + "\"}", "http-post");
 			assertThat(submission.outcome()).as("续期后 25 小时仍可提交").isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 			waiting.get(5, java.util.concurrent.TimeUnit.SECONDS);
@@ -244,11 +245,11 @@ class GenerativeFormAttachmentConsumeOrderTest {
 		pending.setStatus(PendingToolCall.PENDING);
 		pending.setArguments(ONE_ATTACHMENT);
 		runStore.putPending("run-park", pending);
-		com.example.configmgr.ai.run.RunRegistry registry = new com.example.configmgr.ai.run.RunRegistry(runStore,
+		com.example.configmgr.ai.run.RunRegistry registry = com.example.configmgr.ai.run.TestRunRegistryFactory.create(runStore,
 				new ObjectMapper(), null);
 		com.example.configmgr.ai.run.CancellationRegistry cancellations = org.mockito.Mockito
 			.mock(com.example.configmgr.ai.run.CancellationRegistry.class);
-		org.mockito.Mockito.when(cancellations.isCancelled("run-park")).thenReturn(false);
+		org.mockito.Mockito.when(cancellations.cancelState("run-park")).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		org.mockito.Mockito.when(cancellations.onCancel(org.mockito.ArgumentMatchers.anyString(),
 				org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 				});
@@ -263,7 +264,7 @@ class GenerativeFormAttachmentConsumeOrderTest {
 		gate.touchSuspendedResources("run-park");
 		expiring.advance(java.time.Duration.ofHours(2));
 
-		ConfirmGate.Submission submission = gate.submitFrontendResult("run-park", "call-park",
+		ConfirmGate.Submission submission = GateCalls.submit(gate, "run-park", "call-park",
 				"{\"evidence\":\"" + attachment.fileId() + "\"}", "http-post");
 
 		assertThat(submission.outcome()).as("park= 真下读侧续期后 25 小时仍可提交")

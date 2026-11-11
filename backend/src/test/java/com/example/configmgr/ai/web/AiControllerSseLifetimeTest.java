@@ -5,6 +5,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.run.CancellationRegistry;
+import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
@@ -24,6 +25,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.Duration;
+import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -57,13 +59,15 @@ class AiControllerSseLifetimeTest {
 
 	private final SseChatEmitter out = mock(SseChatEmitter.class);
 
+	private final FrameStore frameStore = mock(FrameStore.class);
+
 	private final AiController controller = controller(properties);
 
 	@Test
 	void chatEmitterSurvivesPastTheMachineBudgetWhileTheTurnIsSuspended() throws Exception {
 		this.properties.getResilience().setTotalBudget(Duration.ofMillis(50));
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest("s-suspend", "等人确认", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest("s-suspend", "等人确认", null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
 		SseEmitter emitter = (SseEmitter) response.getBody();
@@ -89,6 +93,8 @@ class AiControllerSseLifetimeTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		when(this.runStore.get("r-reattach")).thenReturn(snapshot);
 		when(this.runRegistry.of("r-reattach")).thenReturn(this.out);
+		// 回放源是字段注入（构造器签名不变）：入口先探测已落档序号，未注入即 NPE。
+		when(this.frameStore.lastSeqIfKnown("r-reattach")).thenReturn(OptionalLong.of(0L));
 		// 控制器走回放+挂接的带状态出口（回放帧数/截断位由 ReplayResult 承载），替身也要给同一个出口。
 		when(this.out.replayAndAttachWithStatus(any(SseEmitter.class), any(), anyBoolean()))
 			.thenReturn(new SseChatEmitter.ReplayResult(0, false, false));
@@ -121,9 +127,7 @@ class AiControllerSseLifetimeTest {
 		// 批① 入口闸门是字段注入（构造器签名不变）：本类要过 chat() 的闸门，故灌入两个组件。
 		org.springframework.test.util.ReflectionTestUtils.setField(controller, "inputSanitizer",
 				new com.example.configmgr.ai.gate.InputSanitizer());
-		org.springframework.test.util.ReflectionTestUtils.setField(controller, "aiRateLimiter",
-				new com.example.configmgr.ai.gate.AiRateLimiter(
-						new com.example.configmgr.ai.gate.FakeRateRedis().redis, props));
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "frameStore", this.frameStore);
 		return controller;
 	}
 

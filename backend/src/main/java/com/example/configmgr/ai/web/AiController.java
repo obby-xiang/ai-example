@@ -8,6 +8,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.history.TranscriptEntries;
 import com.example.configmgr.ai.history.TranscriptEntry;
 import com.example.configmgr.ai.context.ContextStateStore;
@@ -2515,7 +2516,8 @@ public class AiController {
     }
 
     private void addAssistantStateFacts(Map<String, Object> item, TranscriptEntry entry) {
-        if (this.properties.getReasoning().isDisplayEnabled() && StringUtils.isNotBlank(entry.reasoning())) {
+        if (!SyntheticMessages.ORIGIN_COMPACTION_SUMMARY.equals(entry.origin())
+                && this.properties.getReasoning().isDisplayEnabled() && StringUtils.isNotBlank(entry.reasoning())) {
             item.put(ResilientChatService.REASONING_METADATA_KEY, entry.reasoning());
         }
         if (Boolean.TRUE.equals(entry.stopped())) {

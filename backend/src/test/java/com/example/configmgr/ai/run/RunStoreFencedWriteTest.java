@@ -37,6 +37,11 @@ import static org.mockito.Mockito.when;
  */
 class RunStoreFencedWriteTest {
 
+	static {
+		// 类初始化即计算 run 键：先建立身份作用域，避免静态初始化阶段被 fail-closed 拒绝。
+		com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
 	private static final String RUN_ID = "run-fence";
 
 	private static final String RUN_KEY = RunStore.runScopedKey(RunStore.RUN_PREFIX, RUN_ID);
@@ -137,12 +142,16 @@ class RunStoreFencedWriteTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		this.storeA.save(snapshot);
 
-		assertThat(this.fake.scriptCalls.get()).as("无租约的非取消状态写 ⇒ 恰好一次取消守卫 Lua").isEqualTo(1);
-		assertThat(this.fake.lastScriptBody()).as("走的是取消守卫脚本，不是 fence 写")
-			.contains("TERMINAL_SET_IF_NOT_CANCELLED")
-			.doesNotContain("FENCED_TERMINAL_SET")
-			.doesNotContain("LEASE_FENCE_SET");
-		assertThat(this.fake.lastScriptKeys()).as("守卫只碰快照键（单键，不带 fence 键）").containsExactly(RUN_KEY);
+		assertThat(this.fake.scriptBodies.stream()
+			.filter(body -> body.contains("TERMINAL_SET_IF_NOT_CANCELLED")).count())
+			.as("无租约的非取消状态写 ⇒ 至少一次取消守卫 Lua（两次为快照+索引配套原子写，均无 fence）")
+			.isGreaterThanOrEqualTo(1L);
+		assertThat(this.fake.scriptBodies).as("配套脚本不得包含 fence 写")
+			.noneMatch(body -> body.contains("FENCED_TERMINAL_SET") || body.contains("LEASE_FENCE_SET"));
+		assertThat(this.fake.scriptBodies).as("写路径包含取消守卫脚本")
+			.anySatisfy(body -> assertThat(body).contains("TERMINAL_SET_IF_NOT_CANCELLED"));
+		assertThat(this.fake.scriptBodies).as("无租约路径不得出现任何 fence 写脚本")
+			.noneMatch(body -> body.contains("FENCED_TERMINAL_SET") || body.contains("LEASE_FENCE_SET"));
 		assertThat(this.fake.string(FENCE_KEY)).as("无租约 ⇒ 不产生 fence 键").isNull();
 		assertThat(this.fake.string(RUN_KEY)).isNotNull();
 		assertThat(this.fake.expiry(RUN_KEY)).as("TTL 仍是 session-ttl（24h）").isEqualTo(Duration.ofHours(24));
@@ -228,7 +237,7 @@ class RunStoreFencedWriteTest {
 		RunSnapshot attempt = load();
 		attempt.setStatus(RunSnapshot.SUSPENDED);
 		attempt.setFinalText("must-not-land");
-		boolean written = assertDoesNotThrow(() -> this.storeA.saveStatusUnlessCancelled(attempt));
+		boolean written = assertDoesNotThrow(() -> this.storeA.isStatusSavedUnlessCancelled(attempt));
 
 		assertThat(written).as("fence 读不出来不得把拒写翻成落库").isFalse();
 		assertThat(fenceReads.get()).as("拒写后的 fence 复核确实执行过（失败被吞掉，未改变结论）").isEqualTo(1);
@@ -237,9 +246,11 @@ class RunStoreFencedWriteTest {
 		assertThat(stored.getFinalText()).as("本笔内容不得落库").isNull();
 		assertThat(this.fake.string(FENCE_KEY)).as("被拒的写不得推进 fence")
 			.isEqualTo(String.valueOf(lease.epoch()));
-		assertThat(this.appender.list).as("复核读不出来 ⇒ 回退合并日志（两种拒写原因不可分辨）")
-			.anySatisfy(event -> assertThat(event.getFormattedMessage()).contains("拒写轮次快照")
-				.contains("fence 陈旧或当前快照已是取消态"));
+		assertThat(this.appender.list).as("现行日志按具体拒写动作/原因可观测")
+			.anySatisfy(event -> assertThat(event.getFormattedMessage())
+				.contains("refused snapshot write")
+				.contains("runId=run-fence")
+				.contains("snapshot already cancelled"));
 		assertThat(this.appender.list).as("fence 未推进 + 已是取消态：不得误报 STALE_EPOCH")
 			.noneMatch(event -> event.getFormattedMessage().contains("STALE_EPOCH"));
 	}
@@ -248,6 +259,9 @@ class RunStoreFencedWriteTest {
 
 	private void seedRunning() {
 		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setRunId(RUN_ID);
 		snapshot.setSessionId("s-1");
 		snapshot.setStatus(RunSnapshot.RUNNING);

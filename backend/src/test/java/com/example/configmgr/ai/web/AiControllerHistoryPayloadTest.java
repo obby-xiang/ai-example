@@ -55,9 +55,31 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class AiControllerHistoryPayloadTest {
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
 	private final ChatMemoryRepository chatMemoryRepository = mock(ChatMemoryRepository.class);
+
+	private static final String TRANSCRIPT_RUN = "run-history-payload";
+
+	private static final long TRANSCRIPT_AT_MS = 1_700_000_000_000L;
+
+	/** 历史读源已切 transcript：把现有 ChatMemory 消息集按生产转录形状投影成分页结果。 */
+	private final com.example.configmgr.ai.history.ConversationTranscriptStore transcript =
+			mock(com.example.configmgr.ai.history.ConversationTranscriptStore.class);
 
 	private final SessionGate sessionGate = mock(SessionGate.class);
 
@@ -109,21 +131,29 @@ class AiControllerHistoryPayloadTest {
 	}
 
 	/**
-	 * 批次2 / AR-01 第 5 条：<b>synthetic 展示过滤（读侧）</b> —— 压缩摘要按"系统消息"呈现，
-	 * <b>不冒充用户原话</b>。判据复用 {@code SyntheticMessages}（与槽位解析同一份），载荷只加
-	 * additive 键 {@code synthetic=true}，正文/角色字段一律原样。
+	 * 批次2 / AR-01 第 5 条：压缩摘要按“系统/助手消息”呈现，<b>不冒充用户原话</b>。
+	 * 夹具直接给 controller 原始 assistant entry（摘要文本 + reasoning + 内部 metadata），
+	 * 由生产读侧决定是否暴露；ToC 载荷不得出现 technical synthetic/reasoningContent/compactedFrom。
 	 */
 	@Test
-	void syntheticSummaryIsFlaggedInsteadOfPretendingToBeAUserMessage() throws Exception {
-		UserMessage summary = new UserMessage(SyntheticMessages.SUMMARY_PLACEHOLDER);
+	void syntheticSummaryIsPresentedAsAssistantInsteadOfAUserMessage() throws Exception {
+		AssistantMessage summary = AssistantMessage.builder()
+			.content(SyntheticMessages.SUMMARY_PLACEHOLDER)
+			.properties(Map.of("origin", "COMPACTION_SUMMARY", SyntheticMessages.COMPACTED_FROM, 42,
+					ResilientChatService.REASONING_METADATA_KEY, "压缩过程的内部思考"))
+			.build();
 		UserMessage real = new UserMessage("真的问题");
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(summary, real));
 
 		this.mockMvc.perform(get("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.messages[0].synthetic").value(true))
+			.andExpect(jsonPath("$.data.messages[0].type").value("ASSISTANT"))
 			.andExpect(jsonPath("$.data.messages[0].text").value(SyntheticMessages.SUMMARY_PLACEHOLDER))
-			.andExpect(jsonPath("$.data.messages[1].synthetic").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].synthetic").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].origin").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].reasoningContent").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].compactedFrom").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[1].type").value("USER"))
 			.andExpect(jsonPath("$.data.messages[1].text").value("真的问题"));
 	}
 
@@ -148,23 +178,25 @@ class AiControllerHistoryPayloadTest {
 	}
 
 	/**
-	 * AR-12 synthetic 守卫（只写不跑）：压缩摘要/收尾提示是系统提示，不是助手答复 ——
-	 * 即使其 metadata 带 {@code reasoningContent}，也不得借本字段透出；其他内部 metadata
-	 * （如 {@code compactedFrom}）同样不进入载荷。
+	 * AR-12 synthetic 守卫（只写不跑）：压缩摘要/收尾提示按助手消息呈现，ToC 载荷不暴露
+	 * 技术 {@code synthetic} 字段；即使其 metadata 带 {@code reasoningContent}，也不得借本字段透出；
+	 * 其他内部 metadata（如 {@code compactedFrom}）同样不进入载荷。
 	 */
 	@Test
 	void syntheticEntryDoesNotExposeReasoningOrInternalMetadata() throws Exception {
 		AssistantMessage synthetic = AssistantMessage.builder()
 			.content(SyntheticMessages.SUMMARY_PLACEHOLDER)
-			.properties(Map.of(SyntheticMessages.COMPACTED_FROM, 42,
+			.properties(Map.of("origin", "COMPACTION_SUMMARY", SyntheticMessages.COMPACTED_FROM, 42,
 					ResilientChatService.REASONING_METADATA_KEY, "压缩过程的内部思考"))
 			.build();
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(synthetic));
 
 		this.mockMvc.perform(get("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.data.messages[0].synthetic").value(true))
+			.andExpect(jsonPath("$.data.messages[0].type").value("ASSISTANT"))
 			.andExpect(jsonPath("$.data.messages[0].text").value(SyntheticMessages.SUMMARY_PLACEHOLDER))
+			.andExpect(jsonPath("$.data.messages[0].synthetic").doesNotExist())
+			.andExpect(jsonPath("$.data.messages[0].origin").doesNotExist())
 			.andExpect(jsonPath("$.data.messages[0].reasoningContent").doesNotExist())
 			.andExpect(jsonPath("$.data.messages[0].compactedFrom").doesNotExist());
 	}
@@ -229,8 +261,8 @@ class AiControllerHistoryPayloadTest {
 		String code = com.example.configmgr.common.ErrorCodes.TOOL_STEP_LIMIT;
 		com.example.configmgr.ai.conformance.InMemoryRunStore frameStore =
 				new com.example.configmgr.ai.conformance.InMemoryRunStore();
-		com.example.configmgr.ai.run.SseChatEmitter out = new com.example.configmgr.ai.run.RunRegistry(
-				frameStore, new ObjectMapper(), new AiProperties()).of("run-user-text-code");
+		com.example.configmgr.ai.run.SseChatEmitter out = com.example.configmgr.ai.run.TestRunRegistryFactory
+				.create(frameStore, new ObjectMapper(), new AiProperties()).of("run-user-text-code");
 		com.example.configmgr.ai.run.PendingToolCall pending = new com.example.configmgr.ai.run.PendingToolCall();
 		pending.setToolCallId("tc-user-text");
 		pending.setName("list_tasks");
@@ -292,12 +324,12 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].type").value("ASSISTANT"))
 			.andExpect(jsonPath("$.data.messages[0].text").value(""))
 			.andExpect(jsonPath("$.data.messages[0].toolCalls[0].id").value("tc-1"))
-			.andExpect(jsonPath("$.data.messages[0].timestamp").value("ts-1"))
+			.andExpect(jsonPath("$.data.messages[0].timestamp").value(TRANSCRIPT_AT_MS))
 			.andExpect(jsonPath("$.data.messages[1].type").value("TOOL"))
 			.andExpect(jsonPath("$.data.messages[1].toolResponses[0].id").value("tc-1"))
 			.andExpect(jsonPath("$.data.messages[1].toolResponses[0].name").value("start_publish"))
 			.andExpect(jsonPath("$.data.messages[1].toolResponses[0].responseData").value("OK"))
-			.andExpect(jsonPath("$.data.messages[1].timestamp").value("ts-2"));
+			.andExpect(jsonPath("$.data.messages[1].timestamp").value(TRANSCRIPT_AT_MS + 1));
 	}
 
 	// ── R-154 #16 分页参数 ──
@@ -318,11 +350,12 @@ class AiControllerHistoryPayloadTest {
 	}
 
 	@Test
-	void paginationOffsetLimitSlicesWindowInOrder() throws Exception {
+	void paginationCursorSlicesWindowInOrder() throws Exception {
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1"),
 				new UserMessage("m2"), new UserMessage("m3"), new UserMessage("m4")));
 
-		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "1").param("limit", "2"))
+		// 游标口径（当前端点只认 before/latest）：before=4 表示"取第 4 条之前"，再取最近 2 条 ⇒ m1,m2。
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("before", "4").param("latest", "2"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.count").value(2))
 			.andExpect(jsonPath("$.data.total").value(5))
@@ -337,7 +370,7 @@ class AiControllerHistoryPayloadTest {
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1"),
 				new UserMessage("m2"), new UserMessage("m3"), new UserMessage("m4")));
 
-		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "3"))
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("latest", "2"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.count").value(2))
 			.andExpect(jsonPath("$.data.total").value(5))
@@ -350,7 +383,7 @@ class AiControllerHistoryPayloadTest {
 	void paginationLimitZeroReturnsEmptySliceWithTotal() throws Exception {
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1")));
 
-		this.mockMvc.perform(get("/api/ai/history/s-1").param("limit", "0"))
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("latest", "0"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.count").value(0))
 			.andExpect(jsonPath("$.data.total").value(2))
@@ -362,7 +395,7 @@ class AiControllerHistoryPayloadTest {
 	void paginationNegativeOffsetAndLimitClampToZero() throws Exception {
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1")));
 
-		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "-1").param("limit", "-1"))
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("latest", "-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.count").value(0))
 			.andExpect(jsonPath("$.data.total").value(2))
@@ -374,7 +407,7 @@ class AiControllerHistoryPayloadTest {
 	void paginationOffsetBeyondTotalReturnsEmptySliceWithTotal() throws Exception {
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("m0"), new UserMessage("m1")));
 
-		this.mockMvc.perform(get("/api/ai/history/s-1").param("offset", "5"))
+		this.mockMvc.perform(get("/api/ai/history/s-1").param("before", "1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.count").value(0))
 			.andExpect(jsonPath("$.data.total").value(2))
@@ -537,8 +570,8 @@ class AiControllerHistoryPayloadTest {
 			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].originalChars").value(25_000))
 			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].returnedChars").value(19_000))
 			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].strategy").value("head"))
-			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].truncatedReason")
-				.value("Result truncated for model view."));
+			// legacy 别名 truncatedReason 已退役（与 ToolResultDualChannelContractTest 同口径）
+			.andExpect(jsonPath("$.data.messages[0].toolResponses[0].truncatedReason").doesNotExist());
 	}
 
 	@Test
@@ -593,12 +626,93 @@ class AiControllerHistoryPayloadTest {
 	}
 
 	@SuppressWarnings("unchecked")
+	private com.example.configmgr.ai.history.ConversationTranscriptStore.ReadPage transcriptPage(String sessionId,
+			Long before, Integer latest) {
+		List<com.example.configmgr.ai.history.TranscriptEntry> entries = transcriptEntries(sessionId);
+		int total = entries.size();
+		int endExclusive = total;
+		if (before != null) {
+			endExclusive = (int) Math.max(0L, Math.min((long) total, before - 1L));
+		}
+		int limit = latest == null ? total : Math.max(0, latest);
+		int start = limit == 0 ? endExclusive : Math.max(0, endExclusive - limit);
+		List<com.example.configmgr.ai.history.TranscriptEntry> page =
+				start >= endExclusive ? List.of() : entries.subList(start, endExclusive);
+		boolean hasMore = limit > 0 && start > 0;
+		String nextCursor = hasMore ? String.valueOf(start + 1L) : null;
+		return new com.example.configmgr.ai.history.ConversationTranscriptStore.ReadPage(
+				List.copyOf(page), total, 1L, nextCursor, hasMore, false);
+	}
+
+	/**
+	 * 直接按 {@link com.example.configmgr.ai.history.TranscriptEntry} 的公开形状构造条目：
+	 * 每条 ChatMemory 消息 → 一条明确 entry，不经过会过滤 synthetic / 推导工具归属的
+	 * {@code TranscriptEntries#fromRunTerminal}。字段口径与 {@code AiController.transcriptItem}
+	 * 的读取位置逐项对齐（kind/text/atMs/toolCalls/toolCallStates/reasoning/truncated/result）。
+	 */
+	private List<com.example.configmgr.ai.history.TranscriptEntry> transcriptEntries(String sessionId) {
+		List<org.springframework.ai.chat.messages.Message> messages = this.chatMemory.get(sessionId);
+		if (messages == null || messages.isEmpty()) {
+			return List.of();
+		}
+		List<com.example.configmgr.ai.history.TranscriptEntry> out = new java.util.ArrayList<>(messages.size());
+		for (int i = 0; i < messages.size(); i++) {
+			org.springframework.ai.chat.messages.Message message = messages.get(i);
+			// transcriptItem 的 timestamp 读的是 entry.atMs()（不是 metadata.spikeTimestamp）。
+			long atMs = TRANSCRIPT_AT_MS + i;
+			if (message instanceof UserMessage user) {
+				out.add(com.example.configmgr.ai.history.TranscriptEntries.user(TRANSCRIPT_RUN, atMs, atMs,
+						user.getText()));
+			}
+			else if (message instanceof AssistantMessage assistant) {
+				out.add(assistantEntry(assistant, atMs));
+			}
+			else if (message instanceof ToolResponseMessage tool) {
+				for (ToolResponseMessage.ToolResponse response : tool.getResponses()) {
+					// 原样放 responseData（信封/模型外壳）：transcriptItem 会走 historyToolResponses
+					// 解包、code→用户文案、resultView 与截断五字段，与实时帧同源。
+					out.add(com.example.configmgr.ai.history.TranscriptEntries.tool(TRANSCRIPT_RUN, atMs, atMs,
+							response.id(), response.name(), null, null, response.responseData()));
+				}
+			}
+		}
+		return out;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static com.example.configmgr.ai.history.TranscriptEntry assistantEntry(AssistantMessage assistant,
+			long atMs) {
+		List<com.example.configmgr.ai.history.TranscriptEntry.ToolCallView> calls = assistant.getToolCalls().stream()
+			.map(call -> new com.example.configmgr.ai.history.TranscriptEntry.ToolCallView(call.id(), call.type(),
+					call.name(), call.arguments()))
+			.toList();
+		Map<String, Object> metadata = assistant.getMetadata() == null ? Map.of() : assistant.getMetadata();
+		Map<String, Object> states = metadata.get("toolCallStates") instanceof Map<?, ?> map
+				? (Map<String, Object>) map : Map.of();
+		String reasoning = metadata.get(ResilientChatService.REASONING_METADATA_KEY) instanceof String text ? text : null;
+		Boolean truncated = Boolean.TRUE.equals(metadata.get(ResilientChatService.TRUNCATED_KEY))
+				? Boolean.TRUE : null;
+		com.example.configmgr.ai.history.TranscriptEntry entry = new com.example.configmgr.ai.history.TranscriptEntry(
+				com.example.configmgr.ai.history.TranscriptEntries.assistantEntryId(TRANSCRIPT_RUN, calls),
+				"assistant", TRANSCRIPT_RUN, atMs, atMs, assistant.getText(), reasoning, null, truncated, calls,
+				states, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+				null);
+		String origin = metadata.get("origin") instanceof String value ? value : null;
+		return entry.withOrigin(origin);
+	}
+
 	private AiController controller(AiAvailability availability) {
-		return new AiController(availability, provider(), provider(), provider(), this.chatMemory,
+		AiController built = new AiController(availability, provider(), provider(), provider(), this.chatMemory,
 				this.chatMemoryRepository, this.sessionGate, mock(ConfirmGate.class), this.runStore,
 				mock(RunRegistry.class), mock(CancellationRegistry.class), this.redisAvailability,
 				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), displayProperties(), mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
+		when(this.transcript.readPage(org.mockito.ArgumentMatchers.anyString(),
+				org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+			.thenAnswer(invocation -> transcriptPage(invocation.getArgument(0), invocation.getArgument(1),
+					invocation.getArgument(2)));
+		ReflectionTestUtils.setField(built, "transcript", this.transcript);
+		return built;
 	}
 
 	/** AR-12 用例锁的是"历史透出思考"：展示开关显式打开（默认关闭）。 */

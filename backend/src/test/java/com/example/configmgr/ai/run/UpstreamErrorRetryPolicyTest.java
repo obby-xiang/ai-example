@@ -79,7 +79,7 @@ class UpstreamErrorRetryPolicyTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -119,7 +119,7 @@ class UpstreamErrorRetryPolicyTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService,
 				this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());

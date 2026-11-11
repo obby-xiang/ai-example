@@ -31,14 +31,15 @@ class RunSnapshotTenantIdentityTest {
 	void createFixesTheTenantAndUserOfTheTurnFromTheContext() {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
 			RunSnapshot created = this.store.create("run-tenant", "s-tenant", AiContext.empty(),
-					List.of(new UserMessage("你好")), this.codec);
+					List.of(new UserMessage("你好")), this.codec, 7L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "你好", 1000L);
 			RunSnapshot persisted = this.store.get("run-tenant");
 
 			assertThat(created.getTenantId()).isEqualTo(1L);
 			assertThat(created.getUserId()).isEqualTo(101L);
 			assertThat(persisted.getTenantId()).as("身份必须随快照持久化").isEqualTo(1L);
 			assertThat(persisted.getUserId()).isEqualTo(101L);
-			assertThat(created.asMap()).containsEntry("tenantId", 1L).containsEntry("userId", 101L);
+			assertThat(created.asMap()).containsEntry("tenantId", "1").containsEntry("userId", "101");
 		}
 	}
 
@@ -50,7 +51,8 @@ class RunSnapshotTenantIdentityTest {
 
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(2L, 202L)) {
 			realStore.create("run-real-tenant", "s-real-tenant", AiContext.empty(),
-					List.of(new UserMessage("你好")), new MessageJsonCodec(mapper));
+					List.of(new UserMessage("你好")), new MessageJsonCodec(mapper), 7L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "你好", 1000L);
 		}
 
 		// 读回同样必须带身份：键面按身份分开，无身份读只落到 legacy 命名空间（读不到新键）。

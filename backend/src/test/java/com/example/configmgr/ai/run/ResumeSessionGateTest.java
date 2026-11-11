@@ -88,11 +88,22 @@ class ResumeSessionGateTest {
 			this.toolCallingManager, this.executor, mock(StringRedisTemplate.class), this.properties,
 			this.cancellations, this.limiter);
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		ReflectionTestUtils.setField(this.service, "sessionGate", this.gate);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.chatService.systemPromptText(any(AiContext.class))).thenReturn("SYSTEM");
+		when(this.chatService.systemPromptText(any(AiContext.class),
+				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn("SYSTEM");
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	@Test
@@ -141,7 +152,10 @@ class ResumeSessionGateTest {
 
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
 		assertThat(dispatched.get()).isNotNull();
-		String lockKey = SessionGate.LOCK_PREFIX + SESSION_ID;
+		String lockKey = this.locks.keySet().stream()
+			.filter(key -> key.startsWith(SessionGate.LOCK_PREFIX) && key.contains(SESSION_ID))
+			.findFirst()
+			.orElseThrow(() -> new AssertionError("续跑未建立会话门锁（keys=" + this.locks.keySet() + "）"));
 		String resumedValue = this.locks.get(lockKey);
 		assertThat(resumedValue).as("续跑用自己的 token 接管同一轮的锁").contains("|");
 
@@ -182,6 +196,9 @@ class ResumeSessionGateTest {
 
 	private RunSnapshot seedSuspended(long updatedAtMs) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));

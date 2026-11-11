@@ -16,22 +16,26 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class SessionKeyRegistryTest {
 
+	static {
+		com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
 	private final AiProperties properties = new AiProperties();
 
 	@Test
 	void registryCoversRunAndSessionScopesWithoutGaps() {
-		assertThat(SessionKeyRegistry.entries()).hasSize(20);
+		assertThat(SessionKeyRegistry.entries()).hasSize(21);
 		assertThat(SessionKeyRegistry.entries()).filteredOn(e -> e.scope() == SessionKeyRegistry.Scope.RUN)
-			.as("run 级 14 条（含 per-run 取号计数器与业务活动锚点）")
-			.hasSize(14);
+			.as("run 级 16 条（含轻量状态键、claim、per-run 取号计数器与业务活动锚点）")
+			.hasSize(16);
 		assertThat(SessionKeyRegistry.entries()).filteredOn(e -> e.scope() == SessionKeyRegistry.Scope.SESSION)
-			.as("session 级 6 条（session:current + ctx 三件套 + safety + create_task 草案）")
-			.hasSize(6);
+			.as("session 级 5 条（session:current + ctx 两件套 + safety + create_task 草案）")
+			.hasSize(5);
 		assertThat(SessionKeyRegistry.entries()).extracting(SessionKeyRegistry.Entry::prefix)
-			.contains("ai:run:", "ai:pending:", "ai:events:", "ai:seq:", "ai:xevents:", "ai:req:", "ai:decided:",
+			.contains("ai:run:", "ai:runstate:", "ai:pending:", "ai:seq:", "ai:xevents:", "ai:req:", "ai:decided:",
 					"ai:fence:run:", "ai:lease:epoch:", "ai:cancel:", "ai:beat:", "ai:activity:", "ai:ledger:",
-					"ai:idem:", "ai:session:current:", "ai:ctx:", "ai:ctx:ledger:", "ai:ctx:archive:", "ai:safety:",
-					"ai:ctdraft:");
+					"ai:idem:", "ai:claim:", "ai:observed:", "ai:session:current:", "ai:ctx:", "ai:ctx:ledger:",
+					"ai:safety:", "ai:ctdraft:");
 	}
 
 	@Test
@@ -39,7 +43,7 @@ class SessionKeyRegistryTest {
 		// 红线：RunStoreSlidingTtlTest 断言 renewSuspensionTtl 的 5 个键都续到
 		// （L-139 后逐键 try，不再锁"恰好 5 次调用"的形态）
 		assertThat(SessionKeyRegistry.renewalPrefixes(SessionKeyRegistry.Renewal.HEARTBEAT)).containsExactly(
-				"ai:run:", "ai:pending:", "ai:events:", "ai:seq:", "ai:xevents:");
+				"ai:run:", "ai:runstate:", "ai:pending:", "ai:seq:", "ai:xevents:");
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.HEARTBEAT)).hasSize(5);
 	}
 
@@ -60,7 +64,7 @@ class SessionKeyRegistryTest {
 	void globalAndShortLivedKeysAreExplicitlyOutOfTheRegistry() {
 		assertThat(SessionKeyRegistry.entries()).extracting(SessionKeyRegistry.Entry::prefix)
 			.as("全局键/租约/锁不进会话级登记表")
-			.doesNotContain("ai:cfg:ver", "ai:rate:session:", "ai:rate:ip:", "ai:lease:run:", "ai:lock:", "ai:claim:");
+			.doesNotContain("ai:cfg:ver", "ai:rate:session:", "ai:rate:ip:", "ai:lease:run:", "ai:lock:");
 	}
 
 	@Test
@@ -73,7 +77,7 @@ class SessionKeyRegistryTest {
 					store.runLeaseEpochKey("r1"), CancellationRegistry.cancelKey("r1"));
 		assertThat(SessionKeyRegistry.renewalKeys(SessionKeyRegistry.Renewal.HEARTBEAT))
 			.extracting(builder -> builder.apply("r1"))
-			.containsExactly(store.runKey("r1"), store.pendingKey("r1"), store.eventsKey("r1"), store.seqKey("r1"),
+			.containsExactly(store.runKey("r1"), store.runStateKey("r1"), store.pendingKey("r1"), store.seqKey("r1"),
 					store.xeventsKey("r1"));
 	}
 
@@ -97,9 +101,9 @@ class SessionKeyRegistryTest {
 
 		registry.cancel("run-cancel", "inst-a");
 
-		assertThat(fake.string(CancellationRegistry.CANCEL_PREFIX + "run-cancel")).as("权威标志已写")
+		assertThat(fake.string(CancellationRegistry.cancelKey("run-cancel"))).as("权威标志已写")
 			.isEqualTo("inst-a");
-		assertThat(fake.expiry(CancellationRegistry.CANCEL_PREFIX + "run-cancel"))
+		assertThat(fake.expiry(CancellationRegistry.cancelKey("run-cancel")))
 			.as("取消信号随会话共亡（原 600s = total-budget×2）")
 			.isEqualTo(Duration.ofHours(24));
 	}
@@ -113,7 +117,7 @@ class SessionKeyRegistryTest {
 
 		registry.cancel("run-cancel-2", "inst-a");
 
-		assertThat(fake.expiry(CancellationRegistry.CANCEL_PREFIX + "run-cancel-2")).isEqualTo(Duration.ofHours(6));
+		assertThat(fake.expiry(CancellationRegistry.cancelKey("run-cancel-2"))).isEqualTo(Duration.ofHours(6));
 	}
 
 }

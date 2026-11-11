@@ -164,7 +164,6 @@ class QueryCondConditionFormParkTest {
 				Map.of("fieldCode", "monthlyFee", "operator", "GTE", "value", 100)));
 		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
 				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
-				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
 				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 
@@ -195,7 +194,6 @@ class QueryCondConditionFormParkTest {
 		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
 		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
 				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
-				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
 				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 
@@ -239,7 +237,6 @@ class QueryCondConditionFormParkTest {
 		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
 		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
 				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
-				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
 				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 
@@ -269,7 +266,6 @@ class QueryCondConditionFormParkTest {
 		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
 		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
 				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
-				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
 				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY", "RATE"),
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 
@@ -295,7 +291,6 @@ class QueryCondConditionFormParkTest {
 		conditions.put("fields", List.of(Map.of("fieldCode", "unknownField", "operator", "EQ", "value", "CNY")));
 		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
 				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID,
-				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
 				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 
@@ -315,7 +310,6 @@ class QueryCondConditionFormParkTest {
 		conditions.put("fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
 		AiContext otherTask = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of(
 				RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, 99L,
-				RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L,
 				RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"),
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 

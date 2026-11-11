@@ -104,16 +104,19 @@ class StartupResumeRunnerLeaseProbeFailureTest {
 
 	/** 超龄 RUNNING、无本进程订阅、无租约视图 —— 唯一能救它的是"租约也许还在别人手里"。 */
 	private void seedZombie() {
-		RunSnapshot snapshot = this.store.create(RUN_ZOMBIE, "s-" + RUN_ZOMBIE, AiContext.empty(), List.of(),
-				this.codec);
-		snapshot.setTenantId(TENANT_ID);
-		snapshot.setUserId(USER_ID);
-		snapshot.setStatus(RunSnapshot.RUNNING);
-		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
-		this.store.save(snapshot);
-		long atMs = System.currentTimeMillis() - STALE.toMillis();
-		snapshot.setUpdatedAtMs(atMs);
-		this.store.appendEvent(RUN_ZOMBIE, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
+			RunSnapshot snapshot = this.store.create(RUN_ZOMBIE, "s-" + RUN_ZOMBIE, AiContext.empty(), List.of(),
+					this.codec, null, null, new RunSnapshot.FrozenParams(null, null, 4096, false));
+			snapshot.setTenantId(TENANT_ID);
+			snapshot.setUserId(USER_ID);
+			snapshot.setStatus(RunSnapshot.RUNNING);
+			snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
+			this.store.save(snapshot);
+			long atMs = System.currentTimeMillis() - STALE.toMillis();
+			snapshot.setUpdatedAtMs(atMs);
+			this.store.appendEvent(RUN_ZOMBIE, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
+		}
 	}
 
 	@SuppressWarnings("unchecked")

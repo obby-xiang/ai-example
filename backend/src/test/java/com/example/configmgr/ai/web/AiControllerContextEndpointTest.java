@@ -60,8 +60,12 @@ class AiControllerContextEndpointTest {
 
 	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
 
-	private final ContextCompactor compactor = new ContextCompactor(this.properties,
-			new ContextLimitResolver(this.properties), this.contextStore);
+	/** 模型上限来源（生产 = ai_model.max_context）：本例固定 deepseek-flash 为 128k。 */
+	private final ContextLimitResolver resolver = new ContextLimitResolver((providerId, modelId) ->
+			providerId != null && providerId > 0L && "deepseek-flash".equals(modelId) ? 128_000 : null);
+
+	private final ContextCompactor compactor = new ContextCompactor(this.properties, this.resolver,
+			this.contextStore, null);
 
 	private final ContextBreakdownService breakdownService = new ContextBreakdownService(this.compactor,
 			this.contextStore);
@@ -83,7 +87,10 @@ class AiControllerContextEndpointTest {
 					.responses(List.of(new ToolResponseMessage.ToolResponse("c-1", "list_tasks", "任务".repeat(100))))
 					.build(),
 				new UserMessage("继续")));
-		this.compactor.recordTurn("s-1", "deepseek-flash", 84213, 900, 7, false, 3120, 5120, 93);
+		// turnNo 现由服务端按记账次数累加（不再由调用方传入）：记 7 次 ⇒ turnNo=7。
+		for (int turn = 1; turn <= 7; turn++) {
+			this.compactor.recordTurn("s-1", 1L, "deepseek-flash", 84213, 900, turn, false, 3120, 5120, 93);
+		}
 
 		this.mockMvc.perform(get("/api/ai/context/s-1"))
 			.andExpect(status().isOk())
@@ -108,7 +115,7 @@ class AiControllerContextEndpointTest {
 	void breakdownPartsSumToUsedTokens() throws Exception {
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("问题".repeat(100))));
-		this.compactor.recordTurn("s-1", "deepseek-flash", 5000, 100, 1, false, 1000, 2000, 50);
+		this.compactor.recordTurn("s-1", 1L, "deepseek-flash", 5000, 100, 1, false, 1000, 2000, 50);
 
 		String json = this.mockMvc.perform(get("/api/ai/context/s-1"))
 			.andExpect(status().isOk())
@@ -130,9 +137,9 @@ class AiControllerContextEndpointTest {
 	void unknownLimitReportsNullTokens() throws Exception {
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
 		when(this.chatMemory.get("s-1")).thenReturn(List.of(new UserMessage("问题")));
-		AiProperties degraded = new AiProperties();
-		degraded.getContext().setLimitTokens(0);
-		ContextCompactor noLimit = new ContextCompactor(degraded, new ContextLimitResolver(degraded), this.contextStore);
+		// 上限未知：模型行没有可判定的 max_context（resolver 返回 null），压缩器与端点都按降级态处理。
+		ContextLimitResolver unknownLimit = new ContextLimitResolver((providerId, modelId) -> null);
+		ContextCompactor noLimit = new ContextCompactor(this.properties, unknownLimit, this.contextStore, null);
 		MockMvc mvc = MockMvcBuilders
 			.standaloneSetup(controller(true, new ContextBreakdownService(noLimit, this.contextStore), noLimit))
 			.build();

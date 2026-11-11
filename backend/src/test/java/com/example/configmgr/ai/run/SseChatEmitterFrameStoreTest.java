@@ -3,8 +3,11 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -14,6 +17,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -36,6 +41,21 @@ class SseChatEmitterFrameStoreTest {
 	private final FakeWakeBus bus = new FakeWakeBus(this.journal);
 
 	private final ObjectMapper mapper = new ObjectMapper();
+
+	/** 投递身份作用域：写出器按身份解析后才能归档/取号。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	@Test
 	void emitAppendsThenFansOutThenPublishes() {
@@ -69,7 +89,8 @@ class SseChatEmitterFrameStoreTest {
 
 		assertThat(seqs(wire.frames())).containsExactly(1L, 2L, 3L, 4L);
 		assertThat(seqs(this.frames.readFrom(RUN_ID, 0L, 0))).as("日志与实时流同号同序").containsExactly(1L, 2L, 3L, 4L);
-		assertThat(this.bus.published).containsExactly(RUN_ID + "@1", RUN_ID + "@2", RUN_ID + "@3", RUN_ID + "@4");
+		assertThat(this.bus.published).containsExactly(RUN_ID + "@1", RUN_ID + "@2", RUN_ID + "@3",
+				RUN_ID + "@4:terminal");
 	}
 
 	/**
@@ -118,7 +139,7 @@ class SseChatEmitterFrameStoreTest {
 	void terminalDegradedReplaySendsTypedErrorThenCompletes() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		FrameStore frames = mock(FrameStore.class);
-		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(List.of(), true));
+		when(frames.readFromWithStatus(eq(RUN_ID), eq(0L), anyInt())).thenReturn(new FrameStore.ReadResult(List.of(), true));
 		SseChatEmitter out = emitter(store, frames);
 		FrameWire wire = new FrameWire();
 
@@ -139,7 +160,7 @@ class SseChatEmitterFrameStoreTest {
 	void nonTerminalDegradedReplayAlsoCompletesWithTypedError() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		FrameStore frames = mock(FrameStore.class);
-		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(List.of(), true));
+		when(frames.readFromWithStatus(eq(RUN_ID), eq(0L), anyInt())).thenReturn(new FrameStore.ReadResult(List.of(), true));
 		SseChatEmitter out = emitter(store, frames);
 		FrameWire wire = new FrameWire();
 
@@ -155,7 +176,7 @@ class SseChatEmitterFrameStoreTest {
 	void degradedReplayDoesNotDuplicateAnAlreadyReadDone() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		FrameStore frames = mock(FrameStore.class);
-		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(
+		when(frames.readFromWithStatus(eq(RUN_ID), eq(0L), anyInt())).thenReturn(new FrameStore.ReadResult(
 				List.of(Map.of("type", "done", "seq", 1L)), true));
 		SseChatEmitter out = emitter(store, frames);
 		FrameWire wire = new FrameWire();
@@ -174,7 +195,7 @@ class SseChatEmitterFrameStoreTest {
 	void degradedReplayDoesNotDuplicateAnAlreadyReadError() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		FrameStore frames = mock(FrameStore.class);
-		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenReturn(new FrameStore.ReadResult(
+		when(frames.readFromWithStatus(eq(RUN_ID), eq(0L), anyInt())).thenReturn(new FrameStore.ReadResult(
 				List.of(Map.of("type", "error", "code", "UPSTREAM_STREAM_ERROR", "seq", 1L)), true));
 		SseChatEmitter out = emitter(store, frames);
 		FrameWire wire = new FrameWire();
@@ -189,16 +210,19 @@ class SseChatEmitterFrameStoreTest {
 	}
 
 	@Test
-	void replayReadFailureDetachesTheSubscriptionAndRethrows() {
+	void replayReadFailureDegradesAndDoesNotLeakTheSubscription() {
 		InMemoryRunStore store = new InMemoryRunStore();
 		FrameStore frames = mock(FrameStore.class);
 		IllegalStateException boom = new IllegalStateException("read boom");
-		when(frames.readFromWithStatus(RUN_ID, 0L, 0)).thenThrow(boom);
+		when(frames.readFromWithStatus(eq(RUN_ID), eq(0L), anyInt())).thenThrow(boom);
 		SseChatEmitter out = emitter(store, frames);
 		FrameWire wire = new FrameWire();
 
-		assertThatThrownBy(() -> out.replayAndAttach(wire.emitter(), null, false)).as("异常必须原样上抛，不得吞掉")
-				.isSameAs(boom);
+		SseChatEmitter.ReplayResult plan = out.replayAndAttachWithStatus(wire.emitter(), null, false);
+
+		assertThat(plan.degraded()).as("读失败 ⇒ 明确降级（typed error + 收流），不冒充空回放").isTrue();
+		assertThat(FrameWire.normalize(wire.frames())).anySatisfy(frame ->
+				assertThat(frame).containsEntry("type", "error").containsEntry("code", "AI_REDIS_UNAVAILABLE"));
 		assertThat(out.subscriberCount()).as("回放读异常后不得留下已挂订阅（否则订阅表/唤醒订阅泄漏）").isZero();
 	}
 
@@ -207,13 +231,13 @@ class SseChatEmitterFrameStoreTest {
 	private SseChatEmitter emitter(RunStore store, FrameStore frames) {
 		return new SseChatEmitter(RUN_ID, store, frames, this.mapper, Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.direct(), this.bus, null);
+				SseWriteBudget.direct(), this.bus, null, null);
 	}
 
 	private SseChatEmitter emitter(RunStore store) {
 		return new SseChatEmitter(RUN_ID, store, this.frames, this.mapper, Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.direct(), this.bus, null);
+				SseWriteBudget.direct(), this.bus, null, null);
 	}
 
 	private static List<Long> seqs(List<Map<String, Object>> frames) {

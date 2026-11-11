@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.session;
 
+import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.HashOperations;
 import org.springframework.data.redis.core.ListOperations;
@@ -14,16 +16,22 @@ import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.RedisKeyCommands;
+import org.springframework.data.redis.connection.ReturnType;
+import io.lettuce.core.RedisFuture;
+import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -31,6 +39,8 @@ import java.nio.charset.StandardCharsets;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -56,6 +66,12 @@ final class PurgeFakeRedis {
 
 	final Map<String, Set<String>> sets = new ConcurrentHashMap<>();
 
+	/** ZSET 面（due 发现面 / run 索引 / recovery 索引）。member → score。 */
+	final Map<String, Map<String, Double>> zsets = new ConcurrentHashMap<>();
+
+	/** 模拟 due 到期分写入失败（{@code ZADD} 抛错）。 */
+	volatile boolean failDueSchedule;
+
 	final Map<String, Duration> ttls = new ConcurrentHashMap<>();
 
 	/** 被删除过的键（按调用顺序；用于断言"只删了该删的"）。 */
@@ -72,6 +88,9 @@ final class PurgeFakeRedis {
 	volatile String failDeleteContaining;
 
 	volatile boolean failScan;
+
+	/** 模拟判活读（{@code HASKEY}）失败：删后复核"读不出来"不得当成已删净。 */
+	volatile boolean failHasKey;
 
 	final StringRedisTemplate redis = mock(StringRedisTemplate.class);
 
@@ -112,11 +131,25 @@ final class PurgeFakeRedis {
 
 	private final ListOperations<String, String> listOps = mock(ListOperations.class);
 
+	private final ZSetOperations<String, String> zsetOps = mock(ZSetOperations.class);
+
+	private final ObjectMapper json = new ObjectMapper();
+
+	/** pipeline 内命令的回包（{@code executePipelined} 每次调用前清空）。 */
+	private final List<Object> pipelineResults = new ArrayList<>();
+
+	private final RedisConnection pipelineConnection = mock(RedisConnection.class);
+
+	private final RedisClusterAsyncCommands<byte[], byte[]> nativeAsync = mock(RedisClusterAsyncCommands.class);
+
 	PurgeFakeRedis() {
 		when(this.redis.opsForValue()).thenReturn(this.values);
 		when(this.redis.opsForHash()).thenReturn(this.hashOps);
 		when(this.redis.opsForSet()).thenReturn(this.setOps);
 		when(this.redis.opsForList()).thenReturn(this.listOps);
+		when(this.redis.opsForZSet()).thenReturn(this.zsetOps);
+		installZSetOps();
+		installPipelines();
 
 		when(this.values.get(anyString())).thenAnswer(invocation -> this.strings.get(invocation.getArgument(0)));
 		doAnswer(invocation -> {
@@ -286,9 +319,12 @@ final class PurgeFakeRedis {
 		}).when(this.setOps).remove(anyString(), any(Object[].class));
 
 		when(this.redis.hasKey(anyString())).thenAnswer(invocation -> {
+			if (this.failHasKey) {
+				throw new IllegalStateException("模拟 HASKEY 判活失败");
+			}
 			String key = invocation.getArgument(0);
 			return this.strings.containsKey(key) || this.hashes.containsKey(key) || this.lists.containsKey(key)
-					|| this.sets.containsKey(key);
+					|| this.sets.containsKey(key) || this.zsets.containsKey(key);
 		});
 		when(this.redis.type(anyString())).thenAnswer(invocation -> {
 			String key = invocation.getArgument(0);
@@ -304,7 +340,16 @@ final class PurgeFakeRedis {
 			if (this.sets.containsKey(key)) {
 				return DataType.SET;
 			}
+			if (this.zsets.containsKey(key)) {
+				return DataType.ZSET;
+			}
 			return DataType.NONE;
+		});
+		when(this.nativeAsync.del(any(byte[].class))).thenAnswer(invocation -> {
+			RedisFuture<Long> future = mock(RedisFuture.class);
+			long deleted = Boolean.TRUE.equals(remove(text(invocation.getArgument(0)))) ? 1L : 0L;
+			when(future.toCompletableFuture()).thenReturn(CompletableFuture.completedFuture(deleted));
+			return future;
 		});
 		when(this.redis.expire(anyString(), any(Duration.class))).thenAnswer(invocation -> {
 			this.ttls.put(invocation.getArgument(0), invocation.getArgument(1));
@@ -430,8 +475,354 @@ final class PurgeFakeRedis {
 				}
 				return 1L;
 			}
+			if (body.contains("ATTACHMENT_INDEX_ADD")) {
+				Set<String> members = this.sets.computeIfAbsent(key, ignored -> ConcurrentHashMap.newKeySet());
+				members.add(String.valueOf(args[0]));
+				this.ttls.put(key, Duration.ofMillis(Long.parseLong(String.valueOf(args[1]))));
+				return 1L;
+			}
+			if (body.contains("PURGE_RETRY_DUE_SCHEDULE")) {
+				if (this.failDueSchedule) {
+					throw new IllegalStateException("模拟 due 到期分写入失败");
+				}
+				long score = Long.parseLong(String.valueOf(args[0]));
+				zsetAdd(DUE_KEY, String.valueOf(args[1]), score);
+				this.ttls.put(DUE_KEY, Duration.ofMillis(Long.parseLong(String.valueOf(args[2]))));
+				return 1L;
+			}
+			if (body.contains("PURGE_PENDING_MANUAL_RESET")) {
+				String ledgerRaw = this.strings.get(key);
+				if (ledgerRaw == null) {
+					return "";
+				}
+				try {
+					Map<String, Object> rec = this.json.readValue(ledgerRaw, Map.class);
+					if (!String.valueOf(args[0]).equals(String.valueOf(rec.get("purgeId")))) {
+						return "";
+					}
+					int attempts = rec.get("attempts") instanceof Number number ? number.intValue() : 0;
+					if (attempts >= Integer.parseInt(String.valueOf(args[2]))) {
+						attempts = 0;
+					}
+					rec.put("attempts", attempts);
+					rec.put("nextAtMs", Long.parseLong(String.valueOf(args[1])));
+					rec.remove("verifyAtMs");
+					String encoded = this.json.writeValueAsString(rec);
+					this.strings.put(key, encoded);
+					return encoded;
+				}
+				catch (Exception ex) {
+					return "";
+				}
+			}
+			if (body.contains("PURGE_PENDING_REPLACE_IF_UNCHANGED")) {
+				if (!String.valueOf(args[0]).equals(this.strings.get(key))) {
+					return 0L;
+				}
+				this.strings.put(key, String.valueOf(args[1]));
+				return 1L;
+			}
+			if (body.contains("PURGE_EXECUTION_ACQUIRE")) {
+				return executionAcquire(key, String.valueOf(args[0]), String.valueOf(args[1]),
+						Long.parseLong(String.valueOf(args[2])), Long.parseLong(String.valueOf(args[3])));
+			}
+			if (body.contains("PURGE_EXECUTION_SET")) {
+				return executionWrite(key, String.valueOf(args[0]), Long.parseLong(String.valueOf(args[1])),
+						String.valueOf(args[4]), String.valueOf(args[5]),
+						Long.parseLong(String.valueOf(args[3])));
+			}
+			if (body.contains("PURGE_EXECUTION_RENEW")) {
+				return executionRenew(key, String.valueOf(args[0]), Long.parseLong(String.valueOf(args[1])),
+						Long.parseLong(String.valueOf(args[3])), Long.parseLong(String.valueOf(args[4])));
+			}
+			if (body.contains("PURGE_EXECUTION_DEL")) {
+				Long deleted = executionDelete(key, String.valueOf(args[0]), Long.parseLong(String.valueOf(args[1])),
+						Long.parseLong(String.valueOf(args[3])));
+				return deleted;
+			}
 			throw new IllegalStateException("未建模的脚本：" + body);
 		});
+	}
+
+	/** 到期 ZSET 键名（与生产同字面）。 */
+	static final String DUE_KEY = "ai:purge:retry:due";
+
+	private void installZSetOps() {
+		when(this.zsetOps.add(anyString(), anyString(), anyDouble())).thenAnswer(invocation -> zsetAdd(
+				invocation.getArgument(0), invocation.getArgument(1),
+				((Number) invocation.getArgument(2)).doubleValue()) > 0L);
+		when(this.zsetOps.remove(anyString(), any(Object[].class))).thenAnswer(invocation -> {
+			Map<String, Double> members = this.zsets.get(invocation.getArgument(0));
+			if (members == null) {
+				return 0L;
+			}
+			long removed = 0L;
+			for (Object value : tail(invocation.getArguments(), 1)) {
+				if (members.remove(String.valueOf(value)) != null) {
+					removed++;
+				}
+			}
+			if (members.isEmpty()) {
+				this.zsets.remove(invocation.getArgument(0));
+			}
+			return removed;
+		});
+		when(this.zsetOps.range(anyString(), anyLong(), anyLong())).thenAnswer(invocation -> {
+			List<String> ordered = orderedMembers(invocation.getArgument(0));
+			long start = invocation.getArgument(1);
+			long stop = invocation.getArgument(2);
+			int size = ordered.size();
+			int from = (int) (start < 0 ? Math.max(0, size + start) : Math.min(start, size));
+			int to = (int) (stop < 0 ? size + stop : Math.min(stop, size - 1));
+			if (from > to || from >= size) {
+				return Set.of();
+			}
+			return new LinkedHashSet<>(ordered.subList(from, to + 1));
+		});
+		when(this.zsetOps.rangeByScore(anyString(), anyDouble(), anyDouble())).thenAnswer(invocation ->
+				rangeByScore(invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2),
+						Long.MAX_VALUE));
+		when(this.zsetOps.rangeByScore(anyString(), anyDouble(), anyDouble(), anyLong(), anyLong()))
+			.thenAnswer(invocation -> rangeByScore(invocation.getArgument(0), invocation.getArgument(1),
+					invocation.getArgument(2), invocation.getArgument(4)));
+		when(this.zsetOps.zCard(anyString())).thenAnswer(invocation -> {
+			Map<String, Double> members = this.zsets.get(invocation.getArgument(0));
+			return members == null ? 0L : (long) members.size();
+		});
+		when(this.zsetOps.score(anyString(), any())).thenAnswer(invocation -> {
+			Map<String, Double> members = this.zsets.get(invocation.getArgument(0));
+			return members == null ? null : members.get(String.valueOf((Object) invocation.getArgument(1)));
+		});
+	}
+
+	private Set<String> rangeByScore(String key, double min, double max, long limit) {
+		Map<String, Double> members = this.zsets.get(key);
+		if (members == null) {
+			return Set.of();
+		}
+		Set<String> out = new LinkedHashSet<>();
+		for (Map.Entry<String, Double> entry : members.entrySet()) {
+			if (entry.getValue() >= min && entry.getValue() <= max && out.size() < limit) {
+				out.add(entry.getKey());
+			}
+		}
+		return out;
+	}
+
+	private List<String> orderedMembers(String key) {
+		Map<String, Double> members = this.zsets.get(key);
+		if (members == null) {
+			return List.of();
+		}
+		return members.entrySet().stream()
+			.sorted(Map.Entry.<String, Double>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
+			.map(Map.Entry::getKey)
+			.toList();
+	}
+
+	private long zsetAdd(String key, String member, double score) {
+		Map<String, Double> members = this.zsets.computeIfAbsent(key, ignored -> new ConcurrentHashMap<>());
+		Double previous = members.put(member, score);
+		return previous == null ? 1L : 0L;
+	}
+
+	private void installPipelines() {
+		when(this.pipelineConnection.eval(any(byte[].class), any(ReturnType.class), anyInt(),
+				any(byte[][].class))).thenAnswer(invocation -> {
+					byte[] script = invocation.getArgument(0);
+					Object[] raw = invocation.getArguments();
+					byte[][] keysAndArgs = new byte[Math.max(0, raw.length - 3)][];
+					for (int i = 3; i < raw.length; i++) {
+						keysAndArgs[i - 3] = (byte[]) raw[i];
+					}
+					long value = evalScript(script, keysAndArgs);
+					this.pipelineResults.add(value);
+					return value;
+				});
+		when(this.pipelineConnection.zRem(any(byte[].class), any(byte[][].class))).thenAnswer(invocation -> {
+			Map<String, Double> members = this.zsets.get(text(invocation.getArgument(0)));
+			long removed = 0L;
+			if (members != null) {
+				for (Object value : tail(invocation.getArguments(), 1)) {
+					if (members.remove(text(value)) != null) {
+						removed++;
+					}
+				}
+			}
+			this.pipelineResults.add(removed);
+			return removed;
+		});
+		when(this.pipelineConnection.sRem(any(byte[].class), any(byte[][].class))).thenAnswer(invocation -> {
+			Set<String> members = this.sets.get(text(invocation.getArgument(0)));
+			long removed = 0L;
+			if (members != null) {
+				for (Object value : tail(invocation.getArguments(), 1)) {
+					if (members.remove(text(value))) {
+						removed++;
+					}
+				}
+			}
+			this.pipelineResults.add(removed);
+			return removed;
+		});
+		when(this.redis.executePipelined(any(RedisCallback.class))).thenAnswer(invocation -> {
+			RedisCallback<?> callback = invocation.getArgument(0);
+			synchronized (this.pipelineResults) {
+				this.pipelineResults.clear();
+				callback.doInRedis(this.pipelineConnection);
+				return new ArrayList<>(this.pipelineResults);
+			}
+		});
+		when(this.redis.execute(any(RedisCallback.class))).thenAnswer(invocation -> {
+			RedisCallback<?> callback = invocation.getArgument(0);
+			return callback.doInRedis(this.standaloneConnection);
+		});
+		when(this.standaloneConnection.getNativeConnection()).thenReturn(this.nativeAsync);
+		when(this.clusterConnection.getNativeConnection()).thenReturn(this.nativeAsync);
+	}
+
+	/**
+	 * pipeline 内的 {@code eval}：只建模销毁/记忆面实际使用的脚本（TYPE+DEL、staging 丢弃）。
+	 */
+	private long evalScript(byte[] script, byte[][] keysAndArgs) {
+		String body = new String(script, StandardCharsets.UTF_8);
+		if (body.contains("PURGE_TYPE_DEL")) {
+			String key = text(keysAndArgs[0]);
+			String expected = text(keysAndArgs[1]).toLowerCase();
+			String actual = typeOf(key);
+			if (actual == null) {
+				return 0L;
+			}
+			if (!actual.equals(expected)) {
+				return -1L;
+			}
+			return Boolean.TRUE.equals(remove(key)) ? 1L : 0L;
+		}
+		if (body.contains("STAGING_DISCARD")) {
+			String key = text(keysAndArgs[0]);
+			String indexKey = text(keysAndArgs[1]);
+			String token = text(keysAndArgs[2]);
+			long deleted = Boolean.TRUE.equals(remove(key)) ? 1L : 0L;
+			Set<String> index = this.sets.get(indexKey);
+			if (index != null) {
+				index.remove(token);
+			}
+			return deleted;
+		}
+		throw new IllegalStateException("pipeline 未建模的脚本：" + body);
+	}
+
+	private String typeOf(String key) {
+		if (this.strings.containsKey(key)) {
+			return "string";
+		}
+		if (this.hashes.containsKey(key)) {
+			return "hash";
+		}
+		if (this.lists.containsKey(key)) {
+			return "list";
+		}
+		if (this.sets.containsKey(key)) {
+			return "set";
+		}
+		if (this.zsets.containsKey(key)) {
+			return "zset";
+		}
+		return null;
+	}
+
+	private static String text(Object value) {
+		if (value instanceof byte[] bytes) {
+			return new String(bytes, StandardCharsets.UTF_8);
+		}
+		return String.valueOf(value);
+	}
+
+	private List<Object> executionAcquire(String key, String owner, String purgeId, long nowMs, long leaseTtlMs) {
+		Map<String, Object> rec = readRecord(key);
+		if (rec == null) {
+			return List.of(0L, "MISSING", "");
+		}
+		if (!purgeId.equals(String.valueOf(rec.get("purgeId")))) {
+			return List.of(0L, "PURGE_MISMATCH", this.strings.get(key));
+		}
+		long expires = rec.get("leaseExpiresAtMs") instanceof Number number ? number.longValue() : 0L;
+		if (expires > nowMs) {
+			return List.of(0L, "BUSY", this.strings.get(key));
+		}
+		long epoch = (rec.get("executionEpoch") instanceof Number number ? number.longValue() : 0L) + 1L;
+		rec.put("executionOwner", owner);
+		rec.put("executionEpoch", epoch);
+		rec.put("leaseExpiresAtMs", nowMs + leaseTtlMs);
+		rec.put("phase", "ACQUIRED");
+		String encoded = writeRecord(key, rec);
+		return List.of(1L, Long.toString(epoch), encoded);
+	}
+
+	private Long executionWrite(String key, String owner, long epoch, String requireLive, String encoded,
+			long nowMs) {
+		Map<String, Object> rec = readRecord(key);
+		if (rec == null || !matchesOwner(rec, owner, epoch)) {
+			return 0L;
+		}
+		if ("1".equals(requireLive) && leaseExpiry(rec) <= nowMs) {
+			return 0L;
+		}
+		this.strings.put(key, encoded);
+		return 1L;
+	}
+
+	private Long executionRenew(String key, String owner, long epoch, long nowMs, long leaseTtlMs) {
+		Map<String, Object> rec = readRecord(key);
+		if (rec == null || !matchesOwner(rec, owner, epoch) || leaseExpiry(rec) <= nowMs) {
+			return 0L;
+		}
+		rec.put("leaseExpiresAtMs", nowMs + leaseTtlMs);
+		writeRecord(key, rec);
+		return 1L;
+	}
+
+	private Long executionDelete(String key, String owner, long epoch, long nowMs) {
+		Map<String, Object> rec = readRecord(key);
+		if (rec == null || !matchesOwner(rec, owner, epoch) || leaseExpiry(rec) <= nowMs) {
+			return 0L;
+		}
+		return Boolean.TRUE.equals(remove(key)) ? 1L : 0L;
+	}
+
+	private static boolean matchesOwner(Map<String, Object> rec, String owner, long epoch) {
+		if (!owner.equals(String.valueOf(rec.get("executionOwner")))) {
+			return false;
+		}
+		return rec.get("executionEpoch") instanceof Number value && value.longValue() == epoch;
+	}
+
+	private static long leaseExpiry(Map<String, Object> rec) {
+		return rec.get("leaseExpiresAtMs") instanceof Number value ? value.longValue() : 0L;
+	}
+
+	private Map<String, Object> readRecord(String key) {
+		String raw = this.strings.get(key);
+		if (raw == null) {
+			return null;
+		}
+		try {
+			return this.json.readValue(raw, Map.class);
+		}
+		catch (Exception ex) {
+			return null;
+		}
+	}
+
+	private String writeRecord(String key, Map<String, Object> rec) {
+		try {
+			String encoded = this.json.writeValueAsString(rec);
+			this.strings.put(key, encoded);
+			return encoded;
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException(ex);
+		}
 	}
 
 	private Boolean remove(String key) {
@@ -443,6 +834,7 @@ final class PurgeFakeRedis {
 		existed |= this.hashes.remove(key) != null;
 		existed |= this.lists.remove(key) != null;
 		existed |= this.sets.remove(key) != null;
+		existed |= this.zsets.remove(key) != null;
 		this.ttls.remove(key);
 		return existed;
 	}
@@ -493,6 +885,7 @@ final class PurgeFakeRedis {
 		keys.addAll(this.hashes.keySet());
 		keys.addAll(this.lists.keySet());
 		keys.addAll(this.sets.keySet());
+		keys.addAll(this.zsets.keySet());
 		return keys;
 	}
 

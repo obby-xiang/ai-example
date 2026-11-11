@@ -4121,6 +4121,9 @@ public class ResilientChatService {
         if (!"assistant".equals(entry.kind()) || CollectionUtils.isNotEmpty(entry.toolCalls())) {
             return;
         }
+        if (SyntheticMessages.ORIGIN_COMPACTION_SUMMARY.equals(entry.origin())) {
+            return;
+        }
         String reasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
         List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
                 entry.text(), reasoning);

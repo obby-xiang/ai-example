@@ -36,7 +36,7 @@ class ReattachLastSeqConformanceTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+	private final SseChatEmitter out = com.example.configmgr.ai.run.TestRunRegistryFactory.create(this.store, new ObjectMapper(), null).of(RUN_ID);
 
 	// ── ⑤ 差量补发的完整性：不重复、不丢失、保序 ─────────────────────────────
 
@@ -316,7 +316,7 @@ class ReattachLastSeqConformanceTest {
 			this.store.seedArchive(RUN_ID, FrameContract.fixture("delta", seq, "messageId", "m-1", "text", "x"));
 		}
 
-		SseChatEmitter resumed = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+		SseChatEmitter resumed = com.example.configmgr.ai.run.TestRunRegistryFactory.create(this.store, new ObjectMapper(), null).of(RUN_ID);
 		FrameWire live = FrameWire.attachTo(resumed);
 		resumed.suspended(List.of(pending("c-2")), this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
 				this.store.instanceId());

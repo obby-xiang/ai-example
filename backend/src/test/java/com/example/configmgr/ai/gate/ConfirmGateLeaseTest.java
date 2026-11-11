@@ -137,7 +137,7 @@ class ConfirmGateLeaseTest {
 	void stubCommon() {
 		when(this.provider.getIfAvailable()).thenReturn(this.resumeService);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(eq(RUN_ID), any())).thenReturn(() -> {
 		});
 		when(this.resumeService.resume(eq(RUN_ID), anyBoolean(), any())).thenReturn(new ResumeService.ResumeResult(

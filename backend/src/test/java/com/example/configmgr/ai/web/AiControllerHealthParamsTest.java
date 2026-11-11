@@ -42,7 +42,7 @@ class AiControllerHealthParamsTest {
 	@Test
 	void healthCarriesAllowedParamsAndDefaults() {
 		when(this.configService.defaults()).thenReturn(
-				new AiConfigService.Defaults("deepseek-flash", 0.3d, 0.8d, 1024, Boolean.FALSE, 12L));
+				new AiConfigService.Defaults("deepseek-flash", 0.3d, 0.8d, 1024, Boolean.FALSE, 12L, 1L));
 
 		Map<String, Object> body = health();
 
@@ -58,7 +58,7 @@ class AiControllerHealthParamsTest {
 	@Test
 	void allowedParamsDefaultsToTrueWhenUnset() {
 		when(this.configService.defaults()).thenReturn(
-				new AiConfigService.Defaults(null, null, null, null, null, 3L));
+				new AiConfigService.Defaults(null, null, null, null, null, 3L, null));
 
 		Map<String, Object> body = health();
 

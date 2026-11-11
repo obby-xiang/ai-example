@@ -76,7 +76,7 @@ class ExportJobRunnerJobLevelIssueTest {
             this.taskSseService, this.appProperties, this.objectMapper, this.cancellationRegistry,
             this.progressService, this.terminalWriter, this.issueRepository,
             mock(com.example.configmgr.data.service.ConfigDataService.class),
-            new JobHeartbeatRegistry());
+            new JobHeartbeatRegistry(org.mockito.Mockito.mock(org.springframework.data.redis.core.StringRedisTemplate.class), "memory", this.appProperties, org.mockito.Mockito.mock(com.example.configmgr.job.repo.JobRepository.class), this.cancellationRegistry));
 
     @Test
     void outerFailureWritesJobLevelIssueWithSentinelDefCode() {
@@ -106,7 +106,9 @@ class ExportJobRunnerJobLevelIssueTest {
         assertThat(issue.getJobId()).isEqualTo(77L);
         assertThat(issue.getDefCode()).as("作业级 issue 的 defCode = 哨兵 \"-\"").isEqualTo("-");
         assertThat(issue.getSeverity()).isEqualTo(ValidationIssue.Severity.ERROR);
-        assertThat(issue.getMessage()).contains("IllegalStateException");
+        assertThat(issue.getMessage()).as("用户面文案：通用导出失败提示").contains("导出失败");
+        assertThat(issue.getMessage()).as("不得把内部异常类名/原文带上屏")
+            .doesNotContain("IllegalStateException").doesNotContain("内部");
         assertThat(issue.getMessage()).contains("导出作业失败");
         assertThat(issue.getMessage().length()).isLessThanOrEqualTo(1024);
         assertThat(issue.getRowKey()).isNull();

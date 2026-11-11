@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
@@ -60,7 +61,7 @@ class ConfirmGateRequestEmittedTest {
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	/** 真实注册表 + 真实写出器（{@code properties == null} ⇒ 同步直执，帧序确定）。 */
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final SseChatEmitter out = this.registry.of(RUN_ID);
 
@@ -79,7 +80,7 @@ class ConfirmGateRequestEmittedTest {
 
 	@BeforeEach
 	void stubCommon() {
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
@@ -192,7 +193,7 @@ class ConfirmGateRequestEmittedTest {
 			assertThat(stored.getReqAtMs()).isPositive();
 		}
 		finally {
-			this.gate.submitFrontendResult(RUN_ID, "call-gf", "{}", "unit-test", true);
+			GateCalls.submit(this.gate, RUN_ID, "call-gf", "{}", "unit-test", true);
 			runner.join(5000);
 		}
 	}

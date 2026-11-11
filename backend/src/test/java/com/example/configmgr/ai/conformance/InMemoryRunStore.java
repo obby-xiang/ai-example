@@ -78,6 +78,11 @@ public class InMemoryRunStore extends RunStore {
 	 */
 	private final Set<String> cancelledMarks = ConcurrentHashMap.newKeySet();
 
+	/** 取消旗标（{@code ai:cancel:*}）的进程内播种口：仅测试使用，语义见 {@link #save} 的取消优先守卫。 */
+	void markCancelledForTest(String runId) {
+		this.cancelledMarks.add(runId);
+	}
+
 	/** B23L1 批②a：{@code ai:req:<runId>}（field=toolCallId, value=置位时刻）。 */
 	private final Map<String, Map<String, String>> reqMarks = new ConcurrentHashMap<>();
 
@@ -133,6 +138,9 @@ public class InMemoryRunStore extends RunStore {
 
 	private static final ObjectMapper JSON = new ObjectMapper();
 
+	/** 每 run 的临界区锁：多键写（pending + ledger/idem + decided）必须在同一把锁内完成。 */
+	private final Map<String, Object> runLocks = new ConcurrentHashMap<>();
+
 	public InMemoryRunStore() {
 		super(null, new ObjectMapper(), new AiProperties());
 	}
@@ -149,6 +157,15 @@ public class InMemoryRunStore extends RunStore {
 
 	public void setDeepCopyPending(boolean deepCopyPending) {
 		this.deepCopyPending = deepCopyPending;
+	}
+
+	private Object runLock(String runId) {
+		return this.runLocks.computeIfAbsent(runId, ignored -> new Object());
+	}
+
+	/** 临界区证据：测试可持有同一把 per-run 锁，验证多键写确实串行（仅测试替身）。 */
+	Object runLockForTest(String runId) {
+		return runLock(runId);
 	}
 
 	public boolean isDeepCopyPending() {
@@ -199,18 +216,25 @@ public class InMemoryRunStore extends RunStore {
 
 	// ── 快照 ────────────────────────────────────────────────────────────────
 
-	@Override
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId) {
 		return create(runId, sessionId, context, history, codec, providerId, modelId, null);
 	}
 
-	@Override
 	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
+		RunSnapshot snapshot = newInitialSnapshot(runId, sessionId, context, history, codec, providerId, modelId, frozen);
+		save(snapshot);
+		return snapshot;
+	}
+
+	private RunSnapshot newInitialSnapshot(String runId, String sessionId, AiContext context, List<Message> history,
 			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
+		// 与真实 RunStore#newInitialSnapshot 同口径：初始快照落本轮完整历史（续跑/收敛都读它）。
+		snapshot.setMessageJson(codec.serializeAll(history == null ? List.of() : history));
 		// 租户隔离：与真实 RunStore 同口径 —— 首轮创建时从上下文固定身份；缺失保持 0（不伪造）。
 		com.example.configmgr.ai.tenant.TenantUser identity =
 				com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull();
@@ -227,8 +251,56 @@ public class InMemoryRunStore extends RunStore {
 		snapshot.freezeParams(frozen);
 		snapshot.setCreatedBy(instanceId());
 		snapshot.setCreatedAtMs(System.currentTimeMillis());
-		save(snapshot);
 		return snapshot;
+	}
+
+	@Override
+	public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
+			MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+			String clientRequestId, String requestText, long turnStartedAtMs) {
+		return createWithRequestExtraBody(runId, sessionId, context, history, codec, providerId, modelId, frozen,
+				null, clientRequestId, requestText, turnStartedAtMs);
+	}
+
+	@Override
+	public RunSnapshot createWithRequestExtraBody(String runId, String sessionId, AiContext context,
+			List<Message> history, MessageJsonCodec codec, Long providerId, String modelId,
+			RunSnapshot.FrozenParams frozen, Map<String, Object> requestExtraBody, String clientRequestId,
+			String requestText, long turnStartedAtMs) {
+		validateInitialSnapshot(runId, sessionId, modelId, requestText, turnStartedAtMs, frozen);
+		com.example.configmgr.ai.tenant.TenantUser identity =
+				com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull();
+		// 一次性构造完整快照后单次 save：updatedAt 只刷一次（对齐真实 RunStore 的单笔创建）。
+		RunSnapshot snapshot = newInitialSnapshot(runId, sessionId, context, history, codec, providerId, modelId,
+				frozen);
+		snapshot.setClientRequestId(clientRequestId);
+		snapshot.setRequestText(requestText);
+		snapshot.setTurnStartedAtMs(turnStartedAtMs);
+		snapshot.freezeRequestExtraBody(requestExtraBody);
+		save(snapshot);
+		if (identity != null) {
+			this.sessionCurrent.put(sessionId, runId);
+		}
+		return snapshot;
+	}
+
+	private static void validateInitialSnapshot(String runId, String sessionId, String modelId, String requestText,
+			long turnStartedAtMs, RunSnapshot.FrozenParams frozen) {
+		if (runId == null || runId.isBlank() || sessionId == null || sessionId.isBlank()) {
+			throw new IllegalArgumentException("runId/sessionId must be non-blank");
+		}
+		if (modelId == null || modelId.isBlank()) {
+			throw new IllegalArgumentException("modelId must be non-blank");
+		}
+		if (requestText == null || requestText.isBlank()) {
+			throw new IllegalArgumentException("requestText must be non-blank");
+		}
+		if (turnStartedAtMs <= 0L) {
+			throw new IllegalArgumentException("turnStartedAtMs must be positive");
+		}
+		if (frozen == null) {
+			throw new IllegalArgumentException("frozen params must be present");
+		}
 	}
 
 	@Override
@@ -272,6 +344,57 @@ public class InMemoryRunStore extends RunStore {
 	}
 
 	/**
+	 * {@code COMPLETE_EXECUTION_WITH_LEDGER} 的进程内复刻（取消条件、完成态、台账/幂等索引同一原子步）。
+	 *
+	 * <p>判据与生产脚本一致：写权（只读视为不可确认）→ claim 值必须等于 {@code epoch|instance}
+	 * → pending 必须存在且为 APPROVED/PENDING/EXECUTED → 写台账+幂等索引 → 写完成态。
+	 * {@code respectCancel} 的取消键面本替身未建模（其它守卫同口径），Read 工具用例不应依赖它。
+	 */
+	@Override
+	public boolean isExecutionCompletedWithLedger(String runId, PendingToolCall pending, String resultText,
+			long claimedEpoch, String claimedBy, boolean respectCancel) {
+		if (runLeaseAuthority(runId).isReadOnly()) {
+			throw new com.example.configmgr.common.AiStateUnavailableException(
+					"Cannot confirm resume authority; refusing to settle execution result "
+							+ pending.getToolCallId());
+		}
+		long fence = this.fenceEpochs.getOrDefault(runId, 0L);
+		if (claimedEpoch > 0L && fence > claimedEpoch) {
+			throw new com.example.configmgr.common.AiStateUnavailableException(
+					"Atomic execution settlement condition mismatch " + pending.getToolCallId()
+							+ ": STALE_EPOCH");
+		}
+		// 同一把 per-run 锁包住 claim 复核 + ledger/idem + pending 完整多键写：
+		// 读者不得看到“台账已写、pending 未写”的中间态（与真实 Lua 的原子落账同口径）。
+		synchronized (runLock(runId)) {
+			String field = pending.getToolCallId();
+			String expectedClaim = claimedEpoch + "|" + claimedBy;
+			if (!expectedClaim.equals(claimTable(runId).get(field))) {
+				throw new com.example.configmgr.common.AiStateUnavailableException(
+						"Atomic execution settlement condition mismatch " + field + ": CONFLICT_CLAIMED");
+			}
+			if (respectCancel && this.cancelledMarks.contains(runId)) {
+				// 与脚本一致：取消键存在 ⇒ 只读工具的结果在落账前即被丢弃（不写 pending/ledger/idem）。
+				return false;
+			}
+			PendingToolCall stored = pendingTable(runId).get(field);
+			if (stored == null) {
+				throw new com.example.configmgr.common.AiStateUnavailableException(
+						"Atomic execution settlement condition mismatch " + field + ": MISSING");
+			}
+			String status = stored.getStatus();
+			if (!PendingToolCall.APPROVED.equals(status) && !PendingToolCall.PENDING.equals(status)
+					&& !PendingToolCall.EXECUTED.equals(status)) {
+				throw new com.example.configmgr.common.AiStateUnavailableException(
+						"Atomic execution settlement condition mismatch " + field + ": CONFLICT_STATUS");
+			}
+			appendLedger(runId, pending, resultText);
+			pendingTable(runId).put(field, pending);
+			return true;
+		}
+	}
+
+	/**
 	 * 取消优先终态守卫（进程内复刻；批次2 / AR-05）：写入过取消态的轮，其后任何 FAILED/DONE 写一律被拒。
 	 *
 	 * <p>与真实 {@link RunStore#saveTerminalUnlessCancelled} 同一可判定契约：被拒 ⇒ {@code false}，
@@ -288,10 +411,31 @@ public class InMemoryRunStore extends RunStore {
 	 * <p>与真实 {@link RunStore#saveStatusUnlessCancelled} 同一可判定契约：被拒 ⇒ {@code false}。
 	 * 重跑/续跑的状态转换靠它判断"取消已先到 ⇒ 不得驱动"。
 	 */
-	@Override
 	public boolean saveStatusUnlessCancelled(RunSnapshot snapshot) {
 		boolean incomingCancelled = RunSnapshot.CANCELLED.equals(snapshot.getStatus()) || snapshot.isCancelled();
 		if (!incomingCancelled && this.cancelledMarks.contains(snapshot.getRunId())) {
+			return false;
+		}
+		save(snapshot);
+		return true;
+	}
+
+	/**
+	 * 与真实 {@link RunStore#isStatusSavedUnlessCancelled} 同一可判定契约（续跑/重跑的状态转换靠它
+	 * 判断"取消已先到 / 无续跑权 ⇒ 不得驱动"）。不覆写会落到生产实现的 Lua 路径，
+	 * 替身的 {@code redis} 为 null ⇒ 被包装成"写快照失败"，掩盖真实语义。
+	 */
+	@Override
+	public boolean isStatusSavedUnlessCancelled(RunSnapshot snapshot) {
+		boolean incomingCancelled = RunSnapshot.CANCELLED.equals(snapshot.getStatus()) || snapshot.isCancelled();
+		if (!incomingCancelled && this.cancelledMarks.contains(snapshot.getRunId())) {
+			return false;
+		}
+		if (runLeaseAuthority(snapshot.getRunId()).readOnly()) {
+			return false;
+		}
+		long epoch = heldRunEpoch(snapshot.getRunId());
+		if (epoch > 0L && this.fenceEpochs.getOrDefault(snapshot.getRunId(), 0L) > epoch) {
 			return false;
 		}
 		save(snapshot);
@@ -345,8 +489,9 @@ public class InMemoryRunStore extends RunStore {
 	public java.util.Optional<com.example.configmgr.ai.run.LeaseService.Lease> tryAcquireRunLease(String runId) {
 		String key = runLeaseKey(runId);
 		if (this.leaseFacility != null) {
-			// 真实设施的 TTL 用它的配置（ttl=null ⇒ 走 app.ai.lease.ttl），与生产同口径
-			return this.leaseFacility.tryAcquire(key, null);
+			// 与生产同口径：带 hash tag 的 run 租约必须带 fence（三键同槽：租约/计数器/fence）。
+			return java.util.Optional.ofNullable(
+					this.leaseFacility.acquireFenced(key, fenceKey(runId), null).lease());
 		}
 		Long existing = this.heldEpochs.get(key);
 		long epoch = existing != null ? existing : this.epochSeq.incrementAndGet();
@@ -357,7 +502,8 @@ public class InMemoryRunStore extends RunStore {
 	@Override
 	public com.example.configmgr.ai.run.LeaseService.AcquireResult acquireRunLease(String runId) {
 		if (this.leaseFacility != null) {
-			return this.leaseFacility.acquire(runLeaseKey(runId), null);
+			// 与生产同口径：三键同槽（租约/计数器/fence）。
+			return this.leaseFacility.acquireFenced(runLeaseKey(runId), fenceKey(runId), null);
 		}
 		// 进程内替身 = 单实例：抢租永远成功（没有"别人持有"这回事）。
 		// created 与真实实现同口径：视图里本来就有 ⇒ 重入（没有释放权）。
@@ -418,6 +564,58 @@ public class InMemoryRunStore extends RunStore {
 		String value = status + "|" + System.currentTimeMillis() + "|" + instanceId();
 		String winner = decidedTable(runId).putIfAbsent(toolCallId, value);
 		return winner == null ? new DecisionClaim(true, value) : new DecisionClaim(false, winner);
+	}
+
+	/**
+	 * 决策 guard + 完整 pending 的原子写（{@code RunStore#DECIDE_PENDING_SCRIPT} 的进程内复刻）。
+	 *
+	 * <p>真实现走 Lua；替身没有 Redis，但判据相同：原条目必须仍为 {@code PENDING} 且无执行证据，
+	 * 已决 guard 与 claim 位都拒绝，{@code repair} 只允许补齐"guard 已在、pending 未改"的旧半状态。
+	 */
+	@Override
+	public DecisionClaim tryApplyDecision(String runId, PendingToolCall pending) {
+		return applyDecisionInMemory(runId, pending, null);
+	}
+
+	@Override
+	public DecisionClaim tryRepairDecision(String runId, PendingToolCall pending, String expectedGuard) {
+		if (expectedGuard == null || expectedGuard.isBlank()) {
+			return new DecisionClaim(false, null);
+		}
+		return applyDecisionInMemory(runId, pending, expectedGuard);
+	}
+
+	private DecisionClaim applyDecisionInMemory(String runId, PendingToolCall pending, String expectedGuard) {
+		synchronized (runLock(runId)) {
+			String field = pending.getToolCallId();
+			PendingToolCall current = pendingTable(runId).get(field);
+			if (current == null || !PendingToolCall.PENDING.equals(current.getStatus())) {
+				return new DecisionClaim(false, null);
+			}
+			String value = pending.getStatus() + "|" + System.currentTimeMillis() + "|" + instanceId();
+			String requested = value.substring(0, value.indexOf('|'));
+			Map<String, String> decided = decidedTable(runId);
+			String prev = decided.get(field);
+			boolean repair = expectedGuard != null && expectedGuard.equals(prev)
+					&& requested.equals(prev.substring(0, prev.indexOf('|')));
+			if (prev != null && !repair) {
+				return new DecisionClaim(false, prev);
+			}
+			if (prev == null && expectedGuard != null) {
+				return new DecisionClaim(false, null);
+			}
+			boolean evidence = current.isExecuted() || current.getClaimedAtMs() > 0L
+					|| current.getClaimedEpoch() > 0L || current.getExecutedAtMs() > 0L
+					|| current.getExecutedBy() != null;
+			if (evidence || claimTable(runId).containsKey(field)) {
+				return new DecisionClaim(false, prev);
+			}
+			pendingTable(runId).put(field, pending);
+			if (!repair) {
+				decided.put(field, value);
+			}
+			return new DecisionClaim(true, repair ? prev : value);
+		}
 	}
 
 	@Override
@@ -551,6 +749,62 @@ public class InMemoryRunStore extends RunStore {
 		}
 		Collections.sort(ids);
 		return ids;
+	}
+
+	/**
+	 * 恢复候选索引的进程内替身（{@code ai:recovery:due} 语义）：按快照 {@code updatedAtMs + zombie-age}
+	 * 计算到期，到期才可见；终态不复活。
+	 *
+	 * <p>真实现的候选来自 Redis ZSET，本替身没有 Redis —— 但扫描用例仍要跑同一条发现面。
+	 * 因此这里<b>按查询时刻的快照</b>计算 due（与真实现"due = updatedAt + zombie-age"同式），
+	 * 于是"绕过 {@code save()} 写回超龄时间戳"的现场与真实现看到的一致。
+	 */
+	@Override
+	public List<RecoveryCandidate> recoveryDueRecords(long nowMs, int limit) {
+		return recoveryDueRecordsAfter(nowMs, 0L, null, limit);
+	}
+
+	@Override
+	public List<RecoveryCandidate> recoveryDueRecordsAfter(long nowMs, long afterDueAtMs, String afterMember,
+			int limit) {
+		if (limit <= 0) {
+			return List.of();
+		}
+		com.example.configmgr.ai.tenant.TenantUser current =
+				com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull();
+		long zombieAgeMs = new AiProperties().getResume().getZombieAge().toMillis();
+		List<RecoveryCandidate> due = new ArrayList<>();
+		for (RunSnapshot snapshot : this.runs.values()) {
+			long tenantId = snapshot.getTenantId();
+			long userId = snapshot.getUserId();
+			if (!com.example.configmgr.ai.tenant.TenantKeyScope.hasIdentity(tenantId, userId)) {
+				continue;
+			}
+			if (current != null && (current.tenantId() != tenantId || current.userId() != userId)) {
+				continue;
+			}
+			if (RunSnapshot.isTerminal(snapshot.getStatus())) {
+				continue;
+			}
+			long dueAtMs = Math.max(0L, snapshot.getUpdatedAtMs()) + zombieAgeMs;
+			if (dueAtMs > nowMs) {
+				continue;
+			}
+			String member = com.example.configmgr.ai.tenant.RunKeyScope.indexMember(tenantId, userId,
+					snapshot.getRunId());
+			// 游标模式只续接“同 dueAt 且 member 更大”的下一条；不得顺带返回更高 score，
+			// 否则每页都会把后续 score 的候选提前带出（分页重复/跳页）。
+			if (afterMember != null && (dueAtMs != afterDueAtMs || member.compareTo(afterMember) <= 0)) {
+				continue;
+			}
+			due.add(new RecoveryCandidate(
+					new com.example.configmgr.ai.tenant.RunKeyScope.IndexRef(tenantId, userId, snapshot.getRunId()),
+					dueAtMs));
+		}
+		due.sort(java.util.Comparator.comparingLong(RecoveryCandidate::dueAtMs)
+			.thenComparing(candidate -> com.example.configmgr.ai.tenant.RunKeyScope.indexMember(
+					candidate.ref().tenantId(), candidate.ref().userId(), candidate.ref().runId())));
+		return due.size() > limit ? new ArrayList<>(due.subList(0, limit)) : due;
 	}
 
 	// ── 挂起 ────────────────────────────────────────────────────────────────
@@ -734,7 +988,7 @@ public class InMemoryRunStore extends RunStore {
 	public boolean claimExecution(String runId, String toolCallId, String executedBy) {
 		// B23L1 批③a：布尔口保持（既有用例零改动），三态走 tryClaimExecution；
 		// LOST 与 STALE_FENCE 在布尔面上同为 false（"不得执行"这一点相同）。
-		return tryClaimExecution(runId, toolCallId, executedBy).won();
+		return tryClaimExecution(runId, toolCallId, executedBy).isWon();
 	}
 
 	@Override
@@ -797,6 +1051,9 @@ public class InMemoryRunStore extends RunStore {
 		// B23L1 批③a：幂等索引 field（additive），与真实实现同形
 		record.put("idemKey", idemField);
 		record.put("resultText", resultText);
+		if (pending.getCreatedTaskId() != null) {
+			record.put(PendingToolCall.CREATED_TASK_ID, String.valueOf(pending.getCreatedTaskId()));
+		}
 		List<Map<String, Object>> records = ledgerList(runId);
 		synchronized (records) {
 			int index = records.size();
@@ -882,7 +1139,6 @@ public class InMemoryRunStore extends RunStore {
 
 	// ── 帧归档（心跳不落档 + 末帧取号 + 发放序号登记，与真实实现同语义） ──
 
-	@Override
 	public void appendEvent(String runId, Map<String, Object> frame) {
 		String type = String.valueOf(frame.get("type"));
 		if (HEARTBEAT_TYPE.equals(type)) {
@@ -945,7 +1201,6 @@ public class InMemoryRunStore extends RunStore {
 		return seq instanceof Number number ? number.longValue() : 0L;
 	}
 
-	@Override
 	public List<Map<String, Object>> events(String runId) {
 		return new ArrayList<>(eventList(runId));
 	}

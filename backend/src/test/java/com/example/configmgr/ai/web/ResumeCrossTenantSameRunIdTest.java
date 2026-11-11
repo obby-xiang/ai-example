@@ -132,7 +132,8 @@ class ResumeCrossTenantSameRunIdTest {
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), anyString(), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));
-		when(this.chatService.systemPromptText(any())).thenReturn(null);
+		when(this.chatService.systemPromptText(any(AiContext.class),
+				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn("SYSTEM");
 		// 续跑/重跑的交棒同步执行（断言的是"被驱动"，不是线程时序）
 		doAnswer(invocation -> {
 			invocation.getArgument(0, Runnable.class).run();
@@ -200,7 +201,8 @@ class ResumeCrossTenantSameRunIdTest {
 
 	private void seedSuspendedPending(long tenantId, long userId, String sessionId) {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(tenantId, userId)) {
-			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(new UserMessage("请执行导出")), this.codec);
+			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(new UserMessage("请执行导出")), this.codec,
+					7L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请执行导出", 1000L);
 			RunSnapshot snapshot = this.store.get(RUN_ID);
 			snapshot.setStatus(RunSnapshot.SUSPENDED);
 			this.store.save(snapshot);
@@ -217,7 +219,8 @@ class ResumeCrossTenantSameRunIdTest {
 
 	private void seedSuspended(long tenantId, long userId, String sessionId) {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(tenantId, userId)) {
-			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(new UserMessage("请执行导出")), this.codec);
+			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(new UserMessage("请执行导出")), this.codec,
+					7L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请执行导出", 1000L);
 			RunSnapshot snapshot = this.store.get(RUN_ID);
 			snapshot.setStatus(RunSnapshot.SUSPENDED);
 			this.store.save(snapshot);

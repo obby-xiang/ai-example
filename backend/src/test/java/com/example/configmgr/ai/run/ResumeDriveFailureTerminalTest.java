@@ -7,7 +7,9 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.Message;
@@ -49,6 +51,16 @@ class ResumeDriveFailureTerminalTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
+	/** run 级键/帧面按身份拼：种子快照与驱动失败终局都要处在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
@@ -77,6 +89,9 @@ class ResumeDriveFailureTerminalTest {
 
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+		when(this.chatService.systemPromptText(any(AiContext.class), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn("SYSTEM");
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		doAnswer(invocation -> {
 			invocation.getArgument(0, Runnable.class).run();
@@ -91,7 +106,7 @@ class ResumeDriveFailureTerminalTest {
 		org.mockito.Mockito.doThrow(new ProviderGoneException(RUN_ID, 7L, "model-x"))
 			.when(this.chatService)
 			.driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class),
-					org.mockito.ArgumentMatchers.<List<Message>>any(), eq(7L), eq("model-x"), eq(this.emitter));
+					org.mockito.ArgumentMatchers.<List<Message>>any(), eq(this.emitter));
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
@@ -110,7 +125,7 @@ class ResumeDriveFailureTerminalTest {
 		org.mockito.Mockito.doThrow(new IllegalStateException("boom"))
 			.when(this.chatService)
 			.driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class),
-					org.mockito.ArgumentMatchers.<List<Message>>any(), eq(7L), eq("model-x"), eq(this.emitter));
+					org.mockito.ArgumentMatchers.<List<Message>>any(), eq(this.emitter));
 
 		this.service.resume(RUN_ID);
 
@@ -127,6 +142,8 @@ class ResumeDriveFailureTerminalTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setProviderId(7L);
 		snapshot.setModelId("model-x");
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("问题"))));
 		this.store.save(snapshot);

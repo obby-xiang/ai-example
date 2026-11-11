@@ -114,7 +114,7 @@ class ResumeServiceLeaseTest {
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenReturn("已执行");
 		// 续跑驱动同步跑完（断言的是"续跑被驱动"，不是线程时序）

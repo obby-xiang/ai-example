@@ -8,6 +8,7 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.FakeLeaseRedis;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.SessionGate;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
@@ -114,7 +115,9 @@ class CancelCrossTenantSameRunIdTest {
 
 	private void seedRun(long tenantId, long userId, String sessionId) {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(tenantId, userId)) {
-			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(), this.codec);
+			this.store.create(RUN_ID, sessionId, AiContext.empty(), List.of(), this.codec, 1L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-cancel-shared", "取消请求",
+					System.currentTimeMillis());
 		}
 	}
 

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.memory;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +18,7 @@ import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.ContextTrigger;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.context.RollingSummarizer;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.ResumeService;
@@ -49,6 +51,9 @@ import reactor.core.publisher.Flux;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -105,7 +110,7 @@ class MemoryCompactionWriteBackTest {
 	 * 进程内替身只顾了身份/状态/上下文）。不补的话本轮 converge 拿不到历史，
 	 * "轮末写回仍按 run 合并"这一面就测不到。
 	 */
-	private final InMemoryRunStore store = new InMemoryRunStore() {
+	private final InMemoryRunStore store = new InMemoryRunStore(true) {
 		@Override
 		public RunSnapshot create(String runId, String sessionId, AiContext context, List<Message> history,
 				MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen) {
@@ -114,9 +119,15 @@ class MemoryCompactionWriteBackTest {
 			save(snapshot);
 			return snapshot;
 		}
+
+		@Override
+		public java.util.Set<String> sessionRunIds(String sessionId) {
+			// 会话→run 索引的进程内等价面：首轮探针不再因无 Redis 抛 AiStateUnavailableException。
+			return java.util.Set.of(RUN_ID);
+		}
 	};
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
 
@@ -142,8 +153,12 @@ class MemoryCompactionWriteBackTest {
 
 	private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
 
+	/** B2 展示历史写点：轻装配下 transcript 为 null 会把终态写成 AI_TRANSCRIPT_WRITE_FAILED。 */
+	private final ConversationTranscriptStore transcript = mock(ConversationTranscriptStore.class);
+
 	private final ProviderRuntime runtime = new ProviderRuntime(7L, "deepseek", "test-model",
-			"http://placeholder", "/chat/completions", "7|fp|u|p", null, null, this.chatModel, this.chatClient);
+			"http://placeholder", "/chat/completions", "7|fp|u|p",
+			org.springframework.ai.openai.OpenAiChatOptions.builder().build(), null, this.chatModel, this.chatClient);
 
 	private ScheduledExecutorService watchdogExecutor;
 
@@ -164,8 +179,14 @@ class MemoryCompactionWriteBackTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.repository, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
+		// 真实装配里 transcript 是 @Autowired 字段；轻装配必须显式补一个可用写点，否则终态被判
+		// AI_TRANSCRIPT_WRITE_FAILED 并提前退出轮末记忆收敛。
+		when(this.transcript.append(anyString(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
+		when(this.transcript.readPage(anyString(), anyLong(), anyLong(), any(), any()))
+			.thenReturn(ConversationTranscriptStore.ReadPage.EMPTY);
+		ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
 		this.repository.setActiveRunLookup(this.store::activeRunIds);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.contextBuilder.buildContextMessage(any())).thenReturn("workspace");
@@ -175,6 +196,9 @@ class MemoryCompactionWriteBackTest {
 		when(this.providerRegistry.allowUserParams()).thenReturn(false);
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		// 当前轮的 run 归属需要非零起点（MemoryTurn.of 对 createdAt<=0 返回 null，合并会拒绝“无主消息”）。
+		snapshot.setCreatedAtMs(System.currentTimeMillis());
+		snapshot.setUpdatedAtMs(System.currentTimeMillis());
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
 		stubFluentChain();
@@ -364,14 +388,26 @@ class MemoryCompactionWriteBackTest {
 		useRealAdvisor();
 		RedisChatMemoryRepository otherInstance = new RedisChatMemoryRepository(this.fake.redis, this.codec,
 				Duration.ofHours(24));
-		java.util.concurrent.atomic.AtomicBoolean injected = new java.util.concurrent.atomic.AtomicBoolean();
+		// 续跑压缩在 CAS 冲突时会“重读 → 重算 → 重试”（最多 3 次）；要让最终结局是 STATE_UNKNOWN，
+		// 必须让每一拍的 MERGE_CAS 都撞上真实并发写，而不是只撞第一次。注入本身会递归调用
+		// upsertRun（同样走 MERGE_CAS），用 reentrancy 标志隔离，避免注入自激。
+		java.util.concurrent.atomic.AtomicBoolean injecting = new java.util.concurrent.atomic.AtomicBoolean();
+		java.util.concurrent.atomic.AtomicInteger remaining = new java.util.concurrent.atomic.AtomicInteger(3);
 		this.fake.beforeScript = () -> {
-			if (!injected.compareAndSet(false, true)) {
+			if (injecting.get() || remaining.get() <= 0) {
 				return;
 			}
-			otherInstance.upsertRun(SESSION_ID, new MemoryTurn("run-concurrent", 99_000L),
-					List.of(new UserMessage("并发写者的问题"), AssistantMessage.builder().content("并发写者的回答").build()),
-					40, true);
+			remaining.decrementAndGet();
+			injecting.set(true);
+			try {
+				otherInstance.upsertRun(SESSION_ID, new MemoryTurn("run-concurrent", 99_000L),
+						List.of(new UserMessage("并发写者的问题"),
+								AssistantMessage.builder().content("并发写者的回答").build()),
+						40, true);
+			}
+			finally {
+				injecting.set(false);
+			}
 		};
 
 		ResumeService.ResumeResult result = runResume();
@@ -420,7 +456,8 @@ class MemoryCompactionWriteBackTest {
 	// ───────────────────────── harness ─────────────────────────
 
 	private void installCompactor(RollingSummarizer.Summarizer summarizer) {
-		this.compactor = new ContextCompactor(this.properties, new ContextLimitResolver(this.properties), this.contextStore,
+		this.compactor = new ContextCompactor(this.properties,
+				new ContextLimitResolver((providerId, modelId) -> 128000), this.contextStore,
 				summarizer);
 		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
 	}
@@ -533,7 +570,9 @@ class MemoryCompactionWriteBackTest {
 			.defaultAdvisors(new AiModelConfig().messageChatMemoryAdvisor(this.chatMemory))
 			.build();
 		ProviderRuntime realRuntime = new ProviderRuntime(7L, "deepseek", "test-model", "http://placeholder",
-				"/chat/completions", "7|fp|u|p", null, null, this.advisorModel, realClient);
+				"/chat/completions", "7|fp|u|p",
+				org.springframework.ai.openai.OpenAiChatOptions.builder().build(), null, this.advisorModel,
+				realClient);
 		when(this.providerRegistry.current()).thenReturn(realRuntime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(realRuntime));
 		when(this.providerRegistry.target(7L, "test-model")).thenReturn(java.util.Optional.of(
@@ -542,6 +581,8 @@ class MemoryCompactionWriteBackTest {
 								"http://placeholder", "/chat/completions", "test-model", "sk-test-0123456789", "fp", true),
 						"test-model", true)));
 		when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(realRuntime);
+		when(this.providerRegistry.forFrozenRequest(any(), anyString(), any(), any(),
+				anyBoolean())).thenReturn(realRuntime);
 	}
 
 	private void stubFluentChain() {

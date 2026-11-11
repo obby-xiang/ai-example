@@ -7,9 +7,7 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -53,7 +51,7 @@ import static org.mockito.Mockito.when;
  *
  * <table>
  * <caption>用例矩阵</caption>
- * <tr><td>D1</td><td>429 限流 ⇒ {@code turn_denied status=429 code=RATE_LIMITED}</td></tr>
+ * <tr><td>D1</td><td>429 限流（已移除）：当前不存在该拒绝分支，不再作为日志出口用例</td></tr>
  * <tr><td>D2</td><td>409 会话忙 ⇒ {@code turn_denied status=409 code=SESSION_BUSY}，runId = 占位轮的 runId</td></tr>
  * <tr><td>D3</td><td>400 模型不存在 ⇒ {@code turn_denied status=400 code=MODEL_NOT_FOUND}</td></tr>
  * <tr><td>D4</td><td>400 超长 ⇒ {@code turn_denied status=400 code=MESSAGE_TOO_LONG}（带 chars/limit）</td></tr>
@@ -72,8 +70,6 @@ class AiControllerDeniedLogTraceTest {
 	private final SseChatEmitter out = mock(SseChatEmitter.class);
 
 	private final RunRegistry runRegistry = mock(RunRegistry.class);
-
-	private final FakeRateRedis redis = new FakeRateRedis();
 
 	private final SessionGate sessionGate = mock(SessionGate.class);
 
@@ -111,26 +107,13 @@ class AiControllerDeniedLogTraceTest {
 		AiTrace.clear();
 	}
 
-	// ── D1：429 ──
-
-	@Test
-	void rateLimitedChatLeavesATurnDeniedLine() {
-		this.properties.getLimit().setSessionPerMinute(0);
-
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
-
-		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
-		String line = line("turn_denied");
-		assertThat(line).contains("status=429").contains("code=RATE_LIMITED").contains("sessionId=" + SESSION);
-	}
-
 	// ── D2：409 会话忙（runId = 占位轮的 runId，而不是本次请求） ──
 
 	@Test
 	void sessionBusyDenialNamesTheRunThatHoldsTheSession() {
 		when(this.sessionGate.acquire(any(), any())).thenReturn(new SessionGate.Busy("run-holder", false));
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
 		assertThat(line("turn_denied")).contains("status=409").contains("code=SESSION_BUSY")
@@ -143,8 +126,8 @@ class AiControllerDeniedLogTraceTest {
 	void unknownModelDenialIsTraced() {
 		when(this.aiConfigService.resolveChatTarget(anyString())).thenReturn(Optional.empty());
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null, "model-gone", null),
-				null);
+		ResponseEntity<?> response = this.controller.chat(
+				new AiChatRequest(SESSION, "你好", null, "model-gone", null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
 		assertThat(line("turn_denied")).contains("status=400").contains("code=MODEL_NOT_FOUND")
@@ -157,7 +140,7 @@ class AiControllerDeniedLogTraceTest {
 	void tooLongMessageDenialCarriesTheNumbers() {
 		String tooLong = "中".repeat(this.properties.getInput().getMaxChars() + 1);
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, tooLong, null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, tooLong, null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
 		String line = line("turn_denied");
@@ -171,7 +154,7 @@ class AiControllerDeniedLogTraceTest {
 	void unavailableDenialIsTracedWithoutAnyRunId() {
 		when(this.availability.isAvailable()).thenReturn(false);
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
 		String line = line("turn_denied");
@@ -185,7 +168,7 @@ class AiControllerDeniedLogTraceTest {
 		doThrow(new IllegalStateException("memory write blew up")).when(this.service)
 			.chat(anyString(), any(AiChatRequest.class), any(SseChatEmitter.class));
 
-		this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		String line = awaitLine("turn_exception");
 		assertThat(line).as("每轮必有终态行：环外异常也写一条").contains("code=UNCAUGHT")
@@ -205,7 +188,6 @@ class AiControllerDeniedLogTraceTest {
 				new ObjectMapper(), this.properties, mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
 		ReflectionTestUtils.setField(built, "contextFieldGate", new com.example.configmgr.ai.gate.ContextFieldGate());
 		ReflectionTestUtils.setField(built, "securityEvents", new com.example.configmgr.ai.run.SecurityEvents());
 		ReflectionTestUtils.setField(built, "aiConfigService", this.aiConfigService);

@@ -3,13 +3,13 @@ package com.example.configmgr.ai.web;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StartupResumeRunner;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.session.SessionGate;
@@ -29,6 +29,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -51,6 +52,10 @@ class AiControllerSessionPurgedTest {
 
 	private final RunStore runStore = mock(RunStore.class);
 
+	private final RunRegistry runRegistry = mock(RunRegistry.class);
+
+	private final SseChatEmitter out = mock(SseChatEmitter.class);
+
 	private final SessionGate sessionGate = mock(SessionGate.class);
 
 	private final RedisAvailability redisAvailability = mock(RedisAvailability.class);
@@ -71,7 +76,8 @@ class AiControllerSessionPurgedTest {
 			.andExpect(jsonPath("$.sessionId").value("s-1"));
 
 		verify(this.sessionGate, never()).acquire(anyString(), anyString());
-		verify(this.runStore, never()).create(any(), any(), any(), any(), any());
+		verify(this.runStore, never()).create(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+				org.mockito.ArgumentMatchers.anyLong());
 		verify(this.service, never()).chat(any(), any(), any());
 	}
 
@@ -95,16 +101,15 @@ class AiControllerSessionPurgedTest {
 		SessionPurgeGuard guard = mock(SessionPurgeGuard.class);
 		when(guard.isArmed("s-1")).thenReturn(false);
 		AiController controller = controller(guard);
-		// 让后续既有闸门拒绝（限流），证明守卫放行后确实继续走了原流程。
-		AiRateLimiter limiter = (AiRateLimiter) ReflectionTestUtils.getField(controller, "aiRateLimiter");
-		when(limiter.check(anyString(), any())).thenReturn(
-				new AiRateLimiter.Decision(false, "session", 21, 20, 1000L, false));
 
 		MockMvcBuilders.standaloneSetup(controller).build()
 			.perform(post("/api/ai/chat").contentType(MediaType.APPLICATION_JSON)
 				.content("{\"sessionId\":\"s-1\",\"message\":\"你好\"}"))
-			.andExpect(status().isTooManyRequests())
-			.andExpect(jsonPath("$.code").value("RATE_LIMITED"));
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.code").doesNotExist());
+
+		// 证明力：守卫放行后确实进入了会话门（不是从别处提前返回 200）
+		verify(this.sessionGate).acquire(eq("s-1"), anyString());
 	}
 
 	private AiController controller(SessionPurgeGuard guard) {
@@ -112,18 +117,15 @@ class AiControllerSessionPurgedTest {
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
 		when(this.redisAvailability.reason()).thenReturn("Redis 不可用");
 		when(this.redisAvailability.describeForResponse()).thenReturn(java.util.Map.of("available", false));
+		when(this.runRegistry.of(anyString())).thenReturn(this.out);
 		SessionGate gate = this.sessionGate;
-		AiRateLimiter limiter = mock(AiRateLimiter.class);
-		when(limiter.check(anyString(), any())).thenReturn(
-				new AiRateLimiter.Decision(true, "session", 1, 20, 0L, false));
 		AiController controller = new AiController(this.availability, providerOf(this.service),
 				providerOf((ResumeService) null), providerOf((StartupResumeRunner) null), mock(ChatMemory.class),
 				mock(ChatMemoryRepository.class), gate, mock(ConfirmGate.class), this.runStore,
-				mock(RunRegistry.class), mock(CancellationRegistry.class), this.redisAvailability,
+				this.runRegistry, mock(CancellationRegistry.class), this.redisAvailability,
 				mock(ThreadPoolTaskExecutor.class), new ObjectMapper(), this.properties, mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(controller, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(controller, "aiRateLimiter", limiter);
 		ReflectionTestUtils.setField(controller, "sessionPurgeGuard", guard);
 		return controller;
 	}

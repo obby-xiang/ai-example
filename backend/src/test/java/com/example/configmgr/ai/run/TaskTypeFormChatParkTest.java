@@ -117,7 +117,7 @@ class TaskTypeFormChatParkTest {
 		this.service.setTaskTypeForm(new TaskTypeForm(this.store, this.registry, this.gate, this.codec,
 				this.properties));
 		stubFluentChain();
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenReturn(() -> {
 		});
 		when(this.chatMemory.get(anyString())).thenReturn(List.of());

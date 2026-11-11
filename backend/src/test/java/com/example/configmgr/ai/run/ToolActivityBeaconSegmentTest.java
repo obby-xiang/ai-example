@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,19 +21,34 @@ class ToolActivityBeaconSegmentTest {
 
 	private final ToolActivityBeacon beacon = new ToolActivityBeacon();
 
+	/** 信标键 = 身份 + runId：段锚点读写都必须处在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
 	void segmentStartAdvancesAtEveryResume() throws Exception {
 		long seeded = 1_000L;
 		this.beacon.markSegmentStart(RUN_ID, seeded);
 		assertThat(this.beacon.segmentStartedAtMs(RUN_ID, 0L)).isEqualTo(seeded);
-		assertThat(this.beacon.inGateWait(RUN_ID)).isFalse();
+		assertThat(this.beacon.isInGateWait(RUN_ID)).isFalse();
 
 		this.beacon.beginGateWait(RUN_ID);
-		assertThat(this.beacon.inGateWait(RUN_ID)).as("挂起点：段已结束").isTrue();
+		assertThat(this.beacon.isInGateWait(RUN_ID)).as("挂起点：段已结束").isTrue();
 		Thread.sleep(60L);
 		this.beacon.endGateWait(RUN_ID);
 
-		assertThat(this.beacon.inGateWait(RUN_ID)).isFalse();
+		assertThat(this.beacon.isInGateWait(RUN_ID)).isFalse();
 		assertThat(this.beacon.segmentStartedAtMs(RUN_ID, 0L))
 			.as("恢复点：段起点前移（重置段预算时钟）")
 			.isGreaterThan(seeded);

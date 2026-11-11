@@ -170,7 +170,7 @@ class ConfirmGateFrontendTimeoutTextTest {
                     .as("生成式表单没有死线（裁决第 2 条）：1s 上限对它不生效")
                     .isFalse();
 
-            ConfirmGate.Submission submission = gate.submitFrontendResult(RUN_ID, TOOL_CALL_ID,
+            ConfirmGate.Submission submission = GateCalls.submit(gate, RUN_ID, TOOL_CALL_ID,
                     "{\"keyword\":\"CNY\"}", "test");
             assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 
@@ -198,7 +198,7 @@ class ConfirmGateFrontendTimeoutTextTest {
     /** 只 stub 等待循环真会读到的东西：闸门唤醒通道、取消通道、回执帧出口、状态读取。 */
     private void stubCommon(PendingToolCall entry) {
         when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.cancellations.onCancel(anyString(), any())).thenReturn(() -> {
         });
         // 等待循环每拍重读一次；返回同一实例 = 一直 PENDING（模拟"外部始终没给结论"）

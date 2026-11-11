@@ -167,10 +167,10 @@ class DefinitionFormResumeParkTest {
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenAnswer(invocation -> invocation.<PendingToolCall>getArgument(2).getResultText());
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
-		when(this.chatService.systemPromptText(any())).thenReturn(SYSTEM_TEXT);
+		when(this.chatService.systemPromptText(any(), org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(SYSTEM_TEXT);
 		when(this.chatService.workspaceStateText(any())).thenAnswer(invocation -> {
 			AiContext context = invocation.getArgument(0);
 			return "## 当前工作区状态\n<workspace_state>\n任务: #" + context.getTaskId()
@@ -218,8 +218,6 @@ class DefinitionFormResumeParkTest {
 		// 模型一次都没被问 ⇒ 不可能出现"请告诉我导出哪个配置"这类文字反问
 		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
 				any());
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
-				org.mockito.ArgumentMatchers.<Long>isNull(), any(), any());
 
 		// 挂起态是合法的恢复态：SUSPENDED + in-flight = 这张表 + req 已置位（刷新恢复可重挂）
 		RunSnapshot snapshot = this.store.get(RUN_ID);
@@ -418,8 +416,6 @@ class DefinitionFormResumeParkTest {
 		assertThat(result.body()).containsEntry("taskId", NEW_TASK_ID);
 		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
 				any());
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
-				org.mockito.ArgumentMatchers.<Long>isNull(), any(), any());
 
 		// ② 挂起面是既有前端通道上的确定性条目（不是第二张配置表，也不直接写业务库）
 		assertThat(this.store.pendingsLenient(RUN_ID))
@@ -485,8 +481,6 @@ class DefinitionFormResumeParkTest {
 			.as("confirm_step 成功进入 QUERY_COND 的首次交棒：未知条件先交模型结构化").isFalse();
 		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
 				any());
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(AiContext.class), any(),
-				org.mockito.ArgumentMatchers.<Long>isNull(), any(), any());
 	}
 
 	// ── ⑦′ 首次 confirm 交棒 false；下一拍（非 confirm）交棒 true ─────────────

@@ -40,6 +40,20 @@ class SseChatEmitterAtomicAppendConsistencyTest {
 
 	private final AiProperties properties = new AiProperties();
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	/**
 	 * 竞争前提：另一实例先归档了一帧（1），本写出器的帧随后归档 —— 它必须拿到<b>更高的号</b>（2），
 	 * 且实时投递、唤醒、归档、{@code lastSeq} 全部同号同字节。
@@ -130,7 +144,8 @@ class SseChatEmitterAtomicAppendConsistencyTest {
 
 	private SseChatEmitter emitter(FrameStore frames, FrameWakeBus bus, int maxFrameBytes) {
 		return new SseChatEmitter(RUN_ID, new InMemoryRunStore(), frames, MAPPER, Runnable::run,
-				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, maxFrameBytes, SseWriteBudget.direct(), bus, null);
+				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, maxFrameBytes, SseWriteBudget.direct(), bus, null,
+				null);
 	}
 
 	/** 已执行的后端条目（{@code tool_result} 的 {@code ok=true} 只能配这个结局）。 */
@@ -141,6 +156,7 @@ class SseChatEmitterAtomicAppendConsistencyTest {
 		pending.setKind(PendingToolCall.KIND_CONFIRM);
 		pending.setArguments("{\"taskId\":7}");
 		pending.setStatus(PendingToolCall.EXECUTED);
+		pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
 		return pending;
 	}
 

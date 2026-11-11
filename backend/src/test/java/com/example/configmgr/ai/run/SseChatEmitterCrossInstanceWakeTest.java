@@ -40,6 +40,25 @@ class SseChatEmitterCrossInstanceWakeTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
+	/** 唤醒桶/频道按显式身份分桶：写出器与监听器调用都必须在该作用域内。 */
+	private static final com.example.configmgr.ai.tenant.TenantUser IDENTITY =
+			new com.example.configmgr.ai.tenant.TenantUser(1L, 101L);
+
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identityScope;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identityScope = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(IDENTITY.tenantId(),
+				IDENTITY.userId());
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void unbindIdentity() {
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
+	}
+
 	@Test
 	void frameEmittedOnOneInstanceReachesTheOther() {
 		SseChatEmitter instanceB = emitter("b");
@@ -72,7 +91,7 @@ class SseChatEmitterCrossInstanceWakeTest {
 		assertThat(wireB.frames()).hasSize(2);
 		this.bus.inject(RUN_ID, 2);
 		this.bus.inject(RUN_ID, 1);
-		this.listener.dispatch(RUN_ID, 2);
+		this.listener.dispatch(FrameWakeListener.keyOf(IDENTITY, RUN_ID), RUN_ID, 2);
 
 		assertThat(FrameWire.normalize(wireB.frames())).as("重复唤醒不重复推帧").hasSize(2);
 	}
@@ -144,7 +163,7 @@ class SseChatEmitterCrossInstanceWakeTest {
 
 		assertThat(this.bus.unsubscribes).as("最后一个订阅者断开 ⇒ 退订（不泄漏频道订阅）").isEqualTo(1);
 		assertThat(this.bus.subscribed(RUN_ID)).isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).isZero();
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).isZero();
 	}
 
 	/**
@@ -233,13 +252,13 @@ class SseChatEmitterCrossInstanceWakeTest {
 		instanceB.attach(FrameWire.attachTo(instanceB).emitter());
 
 		assertThat(this.bus.subscribed(RUN_ID)).as("首次订阅降级").isFalse();
-		assertThat(this.listener.targetCount(RUN_ID)).as("失败的登记已回退（不留空目标）").isZero();
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).as("失败的登记已回退（不留空目标）").isZero();
 
 		this.bus.subscribeSucceeds = true;
 		instanceB.attach(FrameWire.attachTo(instanceB).emitter());
 
 		assertThat(this.bus.subscribed(RUN_ID)).as("下一个订阅者到达时重试成功").isTrue();
-		assertThat(this.listener.targetCount(RUN_ID)).isEqualTo(1);
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).isEqualTo(1);
 	}
 
 	/**
@@ -297,7 +316,7 @@ class SseChatEmitterCrossInstanceWakeTest {
 		}
 
 		assertThat(failures).isEmpty();
-		assertThat(this.listener.targetCount(RUN_ID)).as("无目标残留").isZero();
+		assertThat(this.listener.targetCount(IDENTITY, RUN_ID)).as("无目标残留").isZero();
 		assertThat(this.listener.subscribedRuns()).isZero();
 		assertThat(this.bus.subscribed(RUN_ID)).as("订阅已释放（不泄漏）").isFalse();
 	}
@@ -315,7 +334,7 @@ class SseChatEmitterCrossInstanceWakeTest {
 	private SseChatEmitter emitter(String instance) {
 		return new SseChatEmitter(RUN_ID, this.store, this.frames, new ObjectMapper(), Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.direct(), this.bus, this.listener);
+				SseWriteBudget.direct(), this.bus, this.listener, null);
 	}
 
 	private static List<Long> seqs(List<Map<String, Object>> frames) {

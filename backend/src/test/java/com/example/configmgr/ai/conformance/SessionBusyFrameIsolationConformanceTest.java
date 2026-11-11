@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.conformance;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
@@ -68,9 +69,23 @@ class SessionBusyFrameIsolationConformanceTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
+
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	private final ResilientChatService chatService = mock(ResilientChatService.class);
 
@@ -78,6 +93,43 @@ class SessionBusyFrameIsolationConformanceTest {
 
 	/** runId → 该轮的帧线（由替身服务在自己被调起时挂上）。 */
 	private final Map<String, FrameWire> wires = new ConcurrentHashMap<>();
+
+	/** 轻装配帧存储：reattach 入口只探测 lastSeq 存在性/回放；归档仍由 registry 的替身负责。 */
+	private final com.example.configmgr.ai.run.FrameStore frames = new com.example.configmgr.ai.run.FrameStore() {
+		private final java.util.concurrent.atomic.AtomicLong seq = new java.util.concurrent.atomic.AtomicLong();
+
+		@Override
+		public long nextSeq(String runId) {
+			return this.seq.incrementAndGet();
+		}
+
+		@Override
+		public void append(String runId, java.util.Map<String, Object> frame) {
+			SessionBusyFrameIsolationConformanceTest.this.store.appendEvent(runId, frame);
+		}
+
+		@Override
+		public long lastSeq(String runId) {
+			return readFrom(runId, 0L, 0).stream()
+				.mapToLong(frame -> frame.get("seq") instanceof Number number ? number.longValue() : 0L)
+				.max()
+				.orElse(0L);
+		}
+
+		@Override
+		public java.util.List<java.util.Map<String, Object>> readFrom(String runId, long afterSeq, int limit) {
+			java.util.List<java.util.Map<String, Object>> out = new java.util.ArrayList<>();
+			for (java.util.Map<String, Object> frame : SessionBusyFrameIsolationConformanceTest.this.store
+				.events(runId)) {
+				Object raw = frame.get("seq");
+				long seqNo = raw instanceof Number number ? number.longValue() : 0L;
+				if (seqNo > afterSeq && (limit <= 0 || out.size() < limit)) {
+					out.add(frame);
+				}
+			}
+			return out;
+		}
+	};
 
 	private final SessionGate sessionGate;
 
@@ -107,6 +159,7 @@ class SessionBusyFrameIsolationConformanceTest {
 				mock(CancellationRegistry.class), redisAvailability, this.aiRunExecutor, this.mapper, this.properties,
 				mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(this.controller, "inputSanitizer", new InputSanitizer());
+		ReflectionTestUtils.setField(this.controller, "frameStore", this.frames);
 	}
 
 	@AfterEach
@@ -228,7 +281,8 @@ class SessionBusyFrameIsolationConformanceTest {
 			AiChatRequest request = invocation.getArgument(1);
 			SseChatEmitter out = invocation.getArgument(2);
 			// 与真实 ResilientChatService#chat 的第一步同效（轮次进索引，"被拒的请求不产生轮次"才有判据）
-			this.store.create(runId, request.sessionId(), null, List.of(), null);
+			this.store.create(runId, request.sessionId(), null, List.of(), null, null, null,
+					new RunSnapshot.FrozenParams(null, null, 4096, false));
 			FrameWire wire = FrameWire.attachTo(out);
 			this.wires.put(runId, wire);
 			this.lastStartedRunId = runId;

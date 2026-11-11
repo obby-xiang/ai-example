@@ -1,9 +1,7 @@
 package com.example.configmgr.ai.config;
 
 import com.example.configmgr.ai.config.db.AiProvider;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -104,7 +102,7 @@ class AiAvailabilityDynamicTest {
 	 * {@code "unknown"} 桶，20 次/分对本用例的 3 次请求不构成瓶颈）。
 	 */
 	private static ResponseEntity<?> chat(AiController controller, AiChatRequest request) {
-		return controller.chat(request, null);
+		return controller.chat(request);
 	}
 
 	private AiController controller() {
@@ -125,7 +123,6 @@ class AiAvailabilityDynamicTest {
 		// 合流面：防护批① 的两道闸门是字段注入（构造器签名不动），此处按同一口径灌入实件 ——
 		// 不灌会 NPE，而灌成 mock 会让"限流器真的判了一次"这件事失去意义。
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(new FakeRateRedis().redis, properties));
 		return built;
 	}
 

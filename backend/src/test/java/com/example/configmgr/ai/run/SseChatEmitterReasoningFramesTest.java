@@ -1,6 +1,11 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -39,7 +44,27 @@ class SseChatEmitterReasoningFramesTest {
 
 	private final RunStore store = mock(RunStore.class);
 
-	private final SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+	/** 归档面：当前由 FrameStore 拥有（RunStore 不再持有 events）。 */
+	private final InMemoryFrameStore frames = new InMemoryFrameStore();
+
+	/** 投递身份作用域：写出器按身份解析后才能归档/取号。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	private SseChatEmitter emitter;
+
+	@BeforeEach
+	void setUpEmitter() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+		this.emitter = new SseChatEmitter(RUN_ID, this.store, this.frames, new ObjectMapper(), Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	@Test
 	void reasoningSegmentIsASeparateClosedSegmentAndTextDeltasKeepTheOldKeySet() {
@@ -119,13 +144,10 @@ class SseChatEmitterReasoningFramesTest {
 	}
 
 	/**
-	 * 归档帧（三参构造 = {@link RunStoreFrameStore} 兼容口径，与 {@code SseChatEmitterFramesTest} 同法）：
-	 * 归档面就是 {@link RunStore#appendEvent} 收到的帧 —— 与实时投递的是同一份（T3-10 截断后）。
+	 * 归档帧（当前由注入的 {@link FrameStore} 拥有）：与实时投递的是同一份出帧逻辑产物。
 	 */
 	private List<Map<String, Object>> archivedFrames() {
-		ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
-		verify(this.store, atLeast(0)).appendEvent(eq(RUN_ID), captor.capture());
-		return captor.getAllValues();
+		return this.frames.readFrom(RUN_ID, 0L, 0);
 	}
 
 }

@@ -118,7 +118,7 @@ class GenerativeFormGateTest {
 
 	@BeforeEach
 	void stubCommon() {
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.store.get(RUN_ID)).thenReturn(snapshot());
 		when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
@@ -198,8 +198,7 @@ class GenerativeFormGateTest {
 			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
 			String values = "{\"keyword\":\"CNY\"}";
 
-			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, values, "unit-test");
+			ConfirmGate.Submission submission = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, values, "unit-test");
 
 			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 			assertThat(pending.getStatus()).isEqualTo(PendingToolCall.FRONTEND_RESULT);
@@ -215,8 +214,7 @@ class GenerativeFormGateTest {
 			// 回灌内容本身合法（过得了结果复核）；outcome 是前端自报的"执行失败"
 			String values = "{\"keyword\":\"CNY\"}";
 
-			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, values, "frontend-download", false, "failed");
+			ConfirmGate.Submission submission = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, values, "frontend-download", false, "failed");
 
 			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 			// 回灌自报 failed ⇒ 结局帧 ok=false；result 原文不变（模型读的仍是原文）
@@ -232,8 +230,7 @@ class GenerativeFormGateTest {
 			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
 			String values = "{\"keyword\":\"CNY\"}";
 
-			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, values, "unit-test", false, null);
+			ConfirmGate.Submission submission = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, values, "unit-test", false, null);
 
 			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 			assertThat(pending.getOutcome()).isEqualTo(ToolOutcome.OK.wire());
@@ -245,8 +242,7 @@ class GenerativeFormGateTest {
 			PendingToolCall pending = formPending();
 			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
 
-			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, "{\"keyword\":7}", "unit-test");
+			ConfirmGate.Submission submission = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, "{\"keyword\":7}", "unit-test");
 
 			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.REJECTED);
 			assertThat(submission.verdict()).isNotNull();
@@ -265,8 +261,7 @@ class GenerativeFormGateTest {
 			PendingToolCall pending = formPending();
 			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
 
-			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, null, "frontend-form", true);
+			ConfirmGate.Submission submission = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, null, "frontend-form", true);
 
 			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 			assertThat(pending.getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
@@ -283,8 +278,7 @@ class GenerativeFormGateTest {
 			PendingToolCall pending = formPending();
 			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
 
-			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, "{不是 JSON", "frontend-form", true);
+			ConfirmGate.Submission submission = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, "{不是 JSON", "frontend-form", true);
 
 			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 			assertThat(pending.getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
@@ -297,10 +291,8 @@ class GenerativeFormGateTest {
 			pending.setResultText("{\"keyword\":\"CNY\"}");
 			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
 
-			ConfirmGate.Submission again = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, "{\"keyword\":\"HD\"}", "http-post");
-			ConfirmGate.Submission cancelled = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, null, "frontend-form", true);
+			ConfirmGate.Submission again = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, "{\"keyword\":\"HD\"}", "http-post");
+			ConfirmGate.Submission cancelled = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, null, "frontend-form", true);
 
 			assertThat(again.outcome()).isEqualTo(ConfirmGate.Outcome.DUPLICATE);
 			assertThat(cancelled.outcome()).isEqualTo(ConfirmGate.Outcome.DUPLICATE);
@@ -318,8 +310,7 @@ class GenerativeFormGateTest {
 			pending.setStatus(PendingToolCall.PENDING);
 			when(GenerativeFormGateTest.this.store.pending(RUN_ID, CALL_ID)).thenReturn(pending);
 
-			ConfirmGate.Submission submission = GenerativeFormGateTest.this.gate
-				.submitFrontendResult(RUN_ID, CALL_ID, "{\"ok\":true,\"handled\":\"e2e\"}", "e2e-script");
+			ConfirmGate.Submission submission = GateCalls.submit(GenerativeFormGateTest.this.gate, RUN_ID, CALL_ID, "{\"ok\":true,\"handled\":\"e2e\"}", "e2e-script");
 
 			assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 			assertThat(pending.getStatus()).isEqualTo(PendingToolCall.FRONTEND_RESULT);

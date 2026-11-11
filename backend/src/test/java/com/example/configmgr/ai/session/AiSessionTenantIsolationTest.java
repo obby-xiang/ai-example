@@ -120,7 +120,7 @@ class AiSessionTenantIsolationTest {
 		SessionPurgePendingStore pendingStore = new SessionPurgePendingStore(this.fake.redis, new ObjectMapper(),
 				new AiProperties());
 		try (RequestContextUtils.SafeCloseable scope = RequestContextUtils.useContext(TENANT_B, USER_B)) {
-			pendingStore.register(SESSION, "purge-b", "tester", 1_000L);
+			pendingStore.register(RequestContextUtils.currentOrNull(), SESSION, "purge-b", "tester", 1_000L);
 			assertThat(this.guard.isArmed(SESSION)).as("B 自己的未完成台账让其守卫有效").isTrue();
 		}
 		assertThat(this.fake.strings).containsKeys(SessionPurgeGuard.keyFor(SESSION, TENANT_A, USER_A),

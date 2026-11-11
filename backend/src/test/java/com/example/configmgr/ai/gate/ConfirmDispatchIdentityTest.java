@@ -60,11 +60,15 @@ class ConfirmDispatchIdentityTest {
 		when(registry.of(RUN_ID)).thenReturn(mock(SseChatEmitter.class));
 		Executor triggerPool = Runnable::run;
 		ConfirmGate gate = new ConfirmGate(store, registry, new AiProperties(), mock(CancellationRegistry.class),
-				mock(ToolActivityBeacon.class), List.of(), provider, triggerPool, null, null);
+				mock(ToolActivityBeacon.class), List.of(), provider, triggerPool, null, (ConfirmGate.RetryScheduler) null);
 
 		assertThat(RequestContextUtils.currentOrNull()).as("前置：派发线程模拟 HTTP/定时线程，无身份").isNull();
 
-		ConfirmGate.ResumeTrigger trigger = gate.triggerResumeForParked(RUN_ID);
+		ConfirmGate.ResumeTrigger trigger;
+		// 触发点在生产里是 HTTP 线程：必带身份；派发出去的续跑仍必须改用该轮记录身份。
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(9001L, 7L)) {
+			trigger = gate.triggerResumeForParked(RUN_ID);
+		}
 
 		assertThat(trigger.triggered()).isTrue();
 		assertThat(observed.get()).as("触发池里的续跑入口必须带本轮身份").isEqualTo(new TenantUser(9001L, 7L));

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -36,21 +37,25 @@ class FrameWakeListenerCompensationIsolationTest {
 
 	@Test
 	void theSuccessorSubscribesImmediatelyAndTheOldCompensationCannotUnsubscribeIt() throws Exception {
-		RecordingTarget leaving = new RecordingTarget();
-		assertThat(this.listener.register(RUN_ID, leaving)).as("旧连接先建立订阅（gen 1）").isTrue();
-		long oldGeneration = this.bus.generationOf(RUN_ID);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			RecordingTarget leaving = new RecordingTarget();
+			assertThat(this.listener.isRegistered(RUN_ID, leaving)).as("旧连接先建立订阅（gen 1）").isTrue();
+			long oldGeneration = this.bus.generationOf(RUN_ID);
 
-		// 旧连接断连：最后一个目标注销 ⇒ 立刻摘桶并发出补偿退订（这里让退订"晚到"）
-		this.bus.blockUnsubscribe = true;
-		Thread closing = new Thread(() -> this.listener.unregister(RUN_ID, leaving), "old-connection-close");
-		closing.start();
-		assertThat(this.bus.unsubscribeEntered.await(5, TimeUnit.SECONDS)).as("旧补偿退订必须已发出").isTrue();
+			// 旧连接断连：最后一个目标注销 ⇒ 立刻摘桶并发出补偿退订（这里让退订"晚到"）
+			this.bus.blockUnsubscribe = true;
+			Thread closing = new Thread(() -> this.listener.unregister(RUN_ID, leaving), "old-connection-close");
+			closing.start();
+			assertThat(this.bus.unsubscribeEntered.await(5, TimeUnit.SECONDS)).as("旧补偿退订必须已发出").isTrue();
 
-		// 继任连接：必须立刻订阅，不等待旧补偿
-		RecordingTarget successor = new RecordingTarget();
-		AtomicBoolean successorResult = new AtomicBoolean();
-		Thread rejoin = new Thread(() -> successorResult.set(this.listener.register(RUN_ID, successor)),
-				"subscribe-successor");
+			// 继任连接：必须立刻订阅，不等待旧补偿（新线程也要显式带入记录身份）
+			RecordingTarget successor = new RecordingTarget();
+			AtomicBoolean successorResult = new AtomicBoolean();
+			Thread rejoin = new Thread(() -> {
+				try (RequestContextUtils.SafeCloseable scoped = RequestContextUtils.useContext(1L, 101L)) {
+					successorResult.set(this.listener.isRegistered(RUN_ID, successor));
+				}
+			}, "subscribe-successor");
 		long startedAt = System.nanoTime();
 		rejoin.start();
 		rejoin.join(500L);
@@ -70,6 +75,7 @@ class FrameWakeListenerCompensationIsolationTest {
 		this.bus.inject(RUN_ID, 5L);
 		assertThat(successor.wakes).as("旧补偿不得误退继任订阅").containsExactly(5L);
 		assertThat(this.listener.subscribedRuns()).as("继任订阅仍在").isEqualTo(1);
+		}
 	}
 
 	private static final class RecordingTarget implements FrameWakeListener.WakeTarget {

@@ -38,6 +38,12 @@ public final class SyntheticMessages {
 	/** RollingSummarizer 写在摘要消息 metadata 上的键。 */
 	public static final String COMPACTED_FROM = "compactedFrom";
 
+	/** 消息/转录条目的内部来源键，不进入公开历史载荷。 */
+	public static final String ORIGIN = "origin";
+
+	/** 上下文压缩摘要的内部来源值。 */
+	public static final String ORIGIN_COMPACTION_SUMMARY = "COMPACTION_SUMMARY";
+
 	/** RollingSummarizer 的摘要占位正文。 */
 	public static final String SUMMARY_PLACEHOLDER = "[上下文压缩摘要]";
 
@@ -78,6 +84,12 @@ public final class SyntheticMessages {
 	}
 
 	private SyntheticMessages() {
+	}
+
+	/** 只按明确内部来源识别压缩摘要，不读取正文、标题或固定话术。 */
+	public static boolean isCompactionSummary(Message message) {
+		Map<String, Object> metadata = message == null ? null : message.getMetadata();
+		return metadata != null && ORIGIN_COMPACTION_SUMMARY.equals(metadata.get(ORIGIN));
 	}
 
 	/**

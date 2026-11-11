@@ -6,6 +6,8 @@ import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,12 +19,15 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -70,9 +75,51 @@ class StartupResumeRunnerRuntimeSweepTest {
 
 	private static final long USER_ID = 101L;
 
-	private final AiProperties properties = new AiProperties();
+	private final AiProperties properties = sweepProperties();
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	/**
+	 * 构造期按"启动扫描/运行期扫描任一开关"决定是否创建调度器；本类要测运行期开关的启停，
+	 * 先用启动扫描开关把调度器带起来，再在用例里逐项切换 runtime 开关。
+	 */
+	private static AiProperties sweepProperties() {
+		AiProperties props = new AiProperties();
+		props.getResume().setOnStartup(true);
+		return props;
+	}
+
+	/**
+	 * 运行期扫描的候选清单来自"到期索引"（{@link RunStore#recoveryDueRecordsAfter}）：真实现是
+	 * Redis ZSET，本替身没有 Redis，按同一口径（非终态 + due = updatedAt + zombie-age）从进程内
+	 * 快照生成一页。只替换发现面；判定、续跑、取消收尾仍走生产管线。
+	 */
+	private final InMemoryRunStore store = new InMemoryRunStore() {
+
+		@Override
+		public List<RunStore.RecoveryCandidate> recoveryDueRecordsAfter(long nowMs, long afterDueAtMs,
+				String afterMember, int limit) {
+			long zombieAgeMs = StartupResumeRunnerRuntimeSweepTest.this.properties.getResume().getZombieAge()
+				.toMillis();
+			List<RunStore.RecoveryCandidate> page = new ArrayList<>();
+			for (RunKeyScope.IndexRef ref : allRunRecords()) {
+				RunSnapshot snapshot = get(ref.runId(), ref.tenantId(), ref.userId());
+				if (snapshot == null || RunSnapshot.isTerminal(snapshot.getStatus())) {
+					continue;
+				}
+				long dueAtMs = Math.max(0L, snapshot.getUpdatedAtMs()) + zombieAgeMs;
+				if (dueAtMs > nowMs) {
+					continue;
+				}
+				if (afterMember != null
+						&& (dueAtMs != afterDueAtMs || ref.member().compareTo(afterMember) <= 0)) {
+					continue;
+				}
+				page.add(new RunStore.RecoveryCandidate(ref, dueAtMs));
+			}
+			page.sort(Comparator.comparingLong(RunStore.RecoveryCandidate::dueAtMs)
+				.thenComparing(candidate -> candidate.ref().member()));
+			return page.size() > limit ? page.subList(0, limit) : page;
+		}
+	};
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(new ObjectMapper());
 
@@ -97,12 +144,15 @@ class StartupResumeRunnerRuntimeSweepTest {
 	void setUp() {
 		when(this.availability.isAvailable()).thenReturn(true);
 		when(this.sessionGate.acquire(anyString(), anyString(), anyString())).thenReturn(null);
-		when(this.chatService.systemPromptText(any(AiContext.class))).thenReturn("SYSTEM");
+		when(this.chatService.systemPromptText(any(AiContext.class), anyBoolean())).thenReturn("SYSTEM");
 		ReflectionTestUtils.setField(this.service, "sessionGate", this.sessionGate);
 	}
 
 	/**
 	 * 聚焦用例：同一拍里放三种现场，只有"挂起已决 + 无驱动 + 超龄"那一轮被接管。
+	 *
+	 * <p>候选清单来自到期索引：窗口内的活轮与终态轮<b>根本不进候选</b>（比"进了再跳过"更强），
+	 * 因此这里断言它们不在 resumed/skipped 里，且状态与写入时刻一字节不动。
 	 */
 	@Test
 	void sweepTakesOverOnlyDeadParkedRunAndLeavesActiveAndTerminalAlone() {
@@ -115,11 +165,11 @@ class StartupResumeRunnerRuntimeSweepTest {
 		Map<String, Object> report = this.runner.sweep();
 
 		assertThat(report).containsEntry("swept", true);
+		assertThat(report).as("到期索引只收非终态且已过判死窗口的轮").containsEntry("candidates", 1);
 		assertThat(resumedRunIds(report)).containsExactly(RUN_PARKED);
 		assertThat(resumedOutcomes(report)).containsEntry(RUN_PARKED, "ACCEPTED");
 		assertThat(resumed(report).get(0)).containsEntry("zombieTakeover", false);
-		assertThat(skippedReasons(report)).containsEntry(RUN_ACTIVE, "ACTIVE")
-			.containsEntry(RUN_FAILED, "TERMINAL");
+		assertThat(skippedReasons(report)).doesNotContainKeys(RUN_ACTIVE, RUN_FAILED);
 		assertThat(active.getStatus()).as("活跃轮不得被接管/改写").isEqualTo(RunSnapshot.RUNNING);
 		assertThat(active.getUpdatedAtMs()).as("活跃轮不得被写").isEqualTo(activeUpdatedAt);
 		assertThat(failed.getStatus()).as("失败终态不复活").isEqualTo(RunSnapshot.FAILED);
@@ -140,15 +190,15 @@ class StartupResumeRunnerRuntimeSweepTest {
 			.containsEntry("zombieTakeover", true);
 	}
 
-	/** 窗口内（150s）的 RUNNING 仍是活轮：扫码不得借"低频"之名缩短 180s。 */
+	/** 窗口内（150s）的 RUNNING 仍是活轮：扫码不得借"低频"之名缩短 180s（到期时刻未到 ⇒ 不进候选）。 */
 	@Test
 	void sweepDoesNotShortenTheZombieWindow() {
 		seed(RUN_ACTIVE, RunSnapshot.RUNNING, INSIDE_WINDOW);
 
 		Map<String, Object> report = this.runner.sweep();
 
+		assertThat(report).containsEntry("candidates", 0);
 		assertThat(resumedRunIds(report)).isEmpty();
-		assertThat(skippedReasons(report)).containsEntry(RUN_ACTIVE, "ACTIVE");
 		assertThat(((Number) report.get("zombieAgeMs")).longValue())
 			.as("判死窗口必须仍是配置值（180s）")
 			.isEqualTo(Duration.ofSeconds(180).toMillis());
@@ -216,20 +266,28 @@ class StartupResumeRunnerRuntimeSweepTest {
 		assertThat(this.runner.isRuntimeSweepRunning()).as("应用停机/显式停止后不得留线程").isFalse();
 	}
 
-	/** 铺一轮：归属 + 状态 + 消息历史 + 业务活动锚点（活动年龄决定"活/死"）。 */
+	/**
+	 * 铺一轮：归属 + 状态 + 消息历史 + 业务活动锚点（活动年龄决定"活/死"）。
+	 *
+	 * <p>运行期键一律带身份（{@code RunStore#runLeaseKey} 等按当前上下文拼键），因此铺现场必须在
+	 * 本轮身份作用域内执行；扫描线程本身无身份，按记录身份逐条恢复。
+	 */
 	private RunSnapshot seed(String runId, String status, Duration businessAge) {
-		RunSnapshot snapshot = this.store.create(runId, "s-" + runId, AiContext.empty(), List.of(), this.codec);
-		// 归属显式铺：扫描只会推进带身份的轮次（0/0 是 legacy，见 LEGACY_NO_IDENTITY）
-		snapshot.setTenantId(TENANT_ID);
-		snapshot.setUserId(USER_ID);
-		snapshot.setStatus(status);
-		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
-		// save() 会把 updatedAtMs 刷成当下 —— 超龄现场必须在保存<b>之后</b>铺
-		this.store.save(snapshot);
-		long atMs = System.currentTimeMillis() - businessAge.toMillis();
-		snapshot.setUpdatedAtMs(atMs);
-		this.store.appendEvent(runId, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
-		return snapshot;
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
+			RunSnapshot snapshot = this.store.create(runId, "s-" + runId, AiContext.empty(), List.of(),
+					this.codec, null, "sweep-test-model", new RunSnapshot.FrozenParams(null, null, 4096, false));
+			// 归属显式铺：扫描只会推进带身份的轮次（0/0 是 legacy，见 LEGACY_NO_IDENTITY）
+			snapshot.setTenantId(TENANT_ID);
+			snapshot.setUserId(USER_ID);
+			snapshot.setStatus(status);
+			snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
+			// save() 会把 updatedAtMs 刷成当下 —— 超龄现场必须在保存<b>之后</b>铺
+			this.store.save(snapshot);
+			long atMs = System.currentTimeMillis() - businessAge.toMillis();
+			snapshot.setUpdatedAtMs(atMs);
+			this.store.appendEvent(runId, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
+			return snapshot;
+		}
 	}
 
 	@SuppressWarnings("unchecked")

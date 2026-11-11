@@ -50,6 +50,20 @@ class SseChatEmitterAuthorityFailureTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
 	void authorityFailureTurnsBusinessFramesReadOnlyButKeepsHeartbeats() {
 		RunStore store = mock(RunStore.class);
@@ -78,9 +92,14 @@ class SseChatEmitterAuthorityFailureTest {
 	}
 
 	private SseChatEmitter emitter(RunStore store) {
+		com.example.configmgr.ai.run.RunSnapshot snapshot = new com.example.configmgr.ai.run.RunSnapshot();
+		snapshot.setRunId(RUN_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		org.mockito.Mockito.when(store.get(RUN_ID, 1L, 101L)).thenReturn(snapshot);
 		return new SseChatEmitter(RUN_ID, store, this.frames, this.mapper, Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.direct(), this.bus, null);
+				SseWriteBudget.direct(), this.bus, null, null);
 	}
 
 }

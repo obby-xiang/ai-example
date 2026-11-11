@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.gate.GateCalls;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
@@ -82,7 +83,7 @@ class DefinitionSelectionFormSettlementTest {
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
@@ -138,7 +139,7 @@ class DefinitionSelectionFormSettlementTest {
 		assertThat(park()).isTrue();
 		String values = "{\"" + DefinitionSelectionForm.FIELD_KEY + "\":[\"CURRENCY\",\"ROLE_DICT\"]}";
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID,
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID,
 				DefinitionSelectionForm.toolCallId(TASK_ID), values, "unit-test");
 
 		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
@@ -156,7 +157,7 @@ class DefinitionSelectionFormSettlementTest {
 	void cancellingTheFormSettlesThroughTheExistingFrontendCancelPath() {
 		assertThat(park()).isTrue();
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID,
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID,
 				DefinitionSelectionForm.toolCallId(TASK_ID), "", "unit-test", true);
 
 		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
@@ -172,7 +173,7 @@ class DefinitionSelectionFormSettlementTest {
 	void outOfOptionsSubmissionIsRejectedAndTheFormKeepsWaiting() {
 		assertThat(park()).isTrue();
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID,
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID,
 				DefinitionSelectionForm.toolCallId(TASK_ID),
 				"{\"" + DefinitionSelectionForm.FIELD_KEY + "\":[\"NOT_A_DEFINITION\"]}", "unit-test");
 
@@ -186,7 +187,7 @@ class DefinitionSelectionFormSettlementTest {
 	void emptySubmissionIsRejectedAndTheFormKeepsWaiting() {
 		assertThat(park()).isTrue();
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID,
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID,
 				DefinitionSelectionForm.toolCallId(TASK_ID), "{}", "unit-test");
 
 		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.REJECTED);
@@ -198,7 +199,7 @@ class DefinitionSelectionFormSettlementTest {
 	@Test
 	void theSameTaskNeverGetsASecondFormEvenAfterTheFirstOneWasAnswered() {
 		assertThat(park()).isTrue();
-		this.gate.submitFrontendResult(RUN_ID, DefinitionSelectionForm.toolCallId(TASK_ID),
+		GateCalls.submit(this.gate, RUN_ID, DefinitionSelectionForm.toolCallId(TASK_ID),
 				"{\"" + DefinitionSelectionForm.FIELD_KEY + "\":[\"CURRENCY\"]}", "unit-test");
 
 		// 模型可能再次导航到同一任务：宿主不得再弹一张（同一缺口只问一次）

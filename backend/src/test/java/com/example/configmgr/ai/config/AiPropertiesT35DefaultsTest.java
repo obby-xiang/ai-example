@@ -1,6 +1,6 @@
 package com.example.configmgr.ai.config;
 
-import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.run.RedisFrameStore;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -34,7 +34,7 @@ class AiPropertiesT35DefaultsTest {
 				.isEqualTo(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY);
 		assertThat(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY)
 				.as("R1 不变量：实时队列容量 < 归档窗口")
-				.isLessThan(RunStore.EVENT_WINDOW);
+				.isLessThan(RedisFrameStore.STREAM_WINDOW);
 		assertThat(defaults.getSuspend().getPoolSize()).as("挂起专用池维持 20").isEqualTo(20);
 	}
 

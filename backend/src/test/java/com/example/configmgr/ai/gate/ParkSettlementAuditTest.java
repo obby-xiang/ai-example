@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -125,7 +126,7 @@ class ParkSettlementAuditTest {
 	@SuppressWarnings("unchecked")
 	private final ObjectProvider<ResumeService> resumeProvider = mock(ObjectProvider.class);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final FakeStartImportTool backendTool = new FakeStartImportTool();
 
@@ -150,7 +151,7 @@ class ParkSettlementAuditTest {
 		this.appender.start();
 		this.traceLogger.addAppender(this.appender);
 		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});

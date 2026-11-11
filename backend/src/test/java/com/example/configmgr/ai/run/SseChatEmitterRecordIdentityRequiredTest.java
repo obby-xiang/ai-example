@@ -1,42 +1,44 @@
 package com.example.configmgr.ai.run;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
-import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.assertj.core.api.SoftAssertions;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 写出器在<b>没有身份提示</b>（{@code requestIdentityHint == null}）时的处置：生产装配下不得
- * "永久缓存无身份"并照旧写 legacy 键族。
+ * 写出器的归档身份必须来自<b>记录/请求身份</b>；没有身份时<b>失败关闭</b>：
+ * 不写任何键族（含旧的 legacy 裸 runId 键）、不占业务号、不交付。
  *
- * <h2>被钉住的形态</h2>
- * 身份解析的唯一入口是 {@link SseChatEmitter#deliveryIdentityOutcome()}：它按"构造线程的提示身份"
- * 拼读记录键。提示为 {@code null} 时旧实现直接
- * {@code deliveryIdentity = null; identityResolved = true} —— 于是整条写出器被<b>永久</b>钉在
- * "无身份"上，此后每一帧都落进 legacy 键族（{@code ai:xevents:{run:<id>}}）。
- *
- * <p>而本轮真正的帧写在身份键族（{@code ai:xevents:{<t>:<u>:run:<id>}}）。两套键族是两个归档：
- * 重挂回放与跨实例唤醒读的是身份键族 ⇒ 这一轮的帧"发出去了但读不到"，正是本批要消灭的无身份分叉。
- *
- * <h2>本批口径（只作用于生产装配）</h2>
+ * <h2>当前契约</h2>
  * <ul>
- * <li><b>不可确认</b>：提示缺失 ⇒ {@code IdentityOutcome(null, readFailure=true)}，由
- *     {@code emit}/{@code drain}/{@code publishWake}/{@code ensureWakeSubscribed} 走既有的
- *     "身份不可确认 ⇒ 本拍明确失败、绝不按 legacy 键写"分支；</li>
- * <li><b>不缓存</b>：{@code identityResolved} 保持 {@code false}，下一拍仍会重新解析（不是"永久无身份"）；</li>
- * <li><b>兼容面不变</b>：非生产装配（轻装配/单测的三参、六参 {@code RunRegistry}）仍走 legacy 命名空间
- *     —— 那里的 legacy 是<b>唯一</b>命名空间，不存在两套归档分叉。</li>
+ * <li>身份解析唯一入口是 {@code SseChatEmitter#deliveryIdentity()}（不再暴露测试口
+ *     {@code deliveryIdentityOutcome()/IdentityOutcome}）：构造线程的请求身份只用于拼记录键；</li>
+ * <li><b>不可确认</b>（构造线程无身份提示）⇒ 返回 {@code null}，{@code emit}/{@code drain}/
+ *     {@code publishWake}/{@code ensureWakeSubscribed} 走"本拍明确失败、绝不按无身份键写"分支；</li>
+ * <li><b>不缓存失败</b>：每次出帧都重新解析（首帧 WARN、其后 DEBUG），不会退化成"确认无身份"；</li>
+ * <li><b>单一套归档</b>：帧只写"身份 + runId"键族，不存在第二条无身份 legacy 归档。</li>
  * </ul>
+ *
+ * <p>本类用按身份分桶的事件日志替身（{@link IdentityScopedFrameStore}）把"写进哪套键族"变成
+ * 可断言事实；RunStore 用真实实现（{@code FakeLeaseRedis}）只承担"记录身份读口"。
  */
 class SseChatEmitterRecordIdentityRequiredTest {
 
@@ -54,88 +56,142 @@ class SseChatEmitterRecordIdentityRequiredTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
+	private final IdentityScopedFrameStore frames = new IdentityScopedFrameStore();
+
 	/**
-	 * 生产装配（{@code RunRegistry} 的七参构造 = Spring 唯一入口）+ 构造线程没有身份 ⇒
-	 * 身份<b>不可确认</b>：不落 legacy、不缓存、不交付。
+	 * 构造线程没有任何身份上下文（生产装配下不该发生，但写出器必须失败关闭）：
+	 * 不落任何键族的档、不占号、不交付，也不把"失败"缓存成"确认无身份"。
 	 */
 	@Test
-	void productionAssemblyWithoutAnIdentityHintFailsClosedAndNeverWritesLegacyKeys() {
-		seedRun();
-		// 生产装配路径（@Autowired 七参构造），但本拍线程没有任何身份上下文
+	void withoutAnIdentityHintFramesAreNeitherArchivedNorDelivered() {
 		assertThat(RequestContextUtils.currentOrNull()).isNull();
-		SseChatEmitter out = productionRegistry().of(RUN_ID);
-
-		SoftAssertions softly = new SoftAssertions();
-		softly.assertThat(out.deliveryIdentityOutcome().readFailure())
-			.as("提示缺失必须报成'身份不可确认'（而不是'确认这一轮没有身份'）").isTrue();
-		softly.assertThat(out.deliveryIdentityOutcome().identity()).isNull();
+		SseChatEmitter out = emitter();
 
 		out.delta("身份不可确认的一帧");
 
-		softly.assertThat(readFrames(null)).as("身份不可确认时不得写 legacy 事件键（那是第二套归档）").isEmpty();
-		softly.assertThat(issuedSeq(null)).as("legacy 序号键不得被写").isZero();
-		softly.assertThat(out.lastIssuedSeq()).as("没有归档就没有交付：这一拍不得占用业务号").isZero();
-		softly.assertThat(readFrames(RECORD_IDENTITY)).as("身份不可确认时也不得猜着写进记录身份键族").isEmpty();
-		softly.assertAll();
+		assertThat(this.frames.archived(null, RUN_ID)).as("不得写无身份 legacy 事件键（那是第二套归档）").isEmpty();
+		assertThat(this.frames.archived(RECORD_IDENTITY, RUN_ID)).as("也不得猜着写进记录身份键族").isEmpty();
+		assertThat(out.lastIssuedSeq()).as("没有归档就没有交付：不得占用业务号").isZero();
 	}
 
-	/** 失败不得被缓存成"永久无身份"：下一拍仍是"不可确认"，不会退化成确认态。 */
+	/** 失败不得被缓存成"永久无身份"：下一拍仍会重新解析并再次走"不可确认"分支。 */
 	@Test
-	void theUnconfirmedOutcomeIsNotCachedAsAConfirmedAbsence() {
-		seedRun();
-		SseChatEmitter out = productionRegistry().of(RUN_ID);
+	void theUnconfirmedIdentityIsNotCachedAsAConfirmedAbsence() {
+		Logger logger = (Logger) LoggerFactory.getLogger(SseChatEmitter.class);
+		Level previous = logger.getLevel();
+		logger.setLevel(Level.DEBUG);
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		appender.start();
+		logger.addAppender(appender);
+		try {
+			SseChatEmitter out = emitter();
+			out.delta("第一拍");
+			out.delta("第二拍");
 
-		out.delta("第一拍");
-		SseChatEmitter.IdentityOutcome second = out.deliveryIdentityOutcome();
-
-		assertThat(second.readFailure())
-			.as("第一拍没有把 'null' 落定为已解析结果（identityResolved 不得置位）")
-			.isTrue();
-		assertThat(readFrames(null)).as("两拍都不得写 legacy 事件键").isEmpty();
+			long unconfirmed = appender.list.stream()
+				.filter(event -> event.getFormattedMessage().contains("SSE delivery identity unconfirmed"))
+				.count();
+			assertThat(unconfirmed).as("两拍都重新解析并命中'不可确认'分支（首帧 WARN、其后 DEBUG）")
+				.isGreaterThanOrEqualTo(2);
+			assertThat(this.frames.archived(null, RUN_ID)).as("两拍都不得写 legacy 事件键").isEmpty();
+			assertThat(this.frames.archived(RECORD_IDENTITY, RUN_ID)).isEmpty();
+			assertThat(out.lastIssuedSeq()).isZero();
+		}
+		finally {
+			logger.detachAppender(appender);
+			logger.setLevel(previous);
+		}
 	}
 
-	/** 兼容面零变化：非生产装配（六参）仍以 legacy 命名空间为唯一命名空间。 */
+	/** 有记录身份时，帧只进"记录身份 + runId"这一套归档；无身份 legacy 键族不再存在。 */
 	@Test
-	void lightweightAssemblyKeepsTheDocumentedLegacyNamespace() {
+	void framesArchiveUnderTheRecordIdentityAndNeverUnderLegacyKeys() {
 		seedRun();
-		SseChatEmitter out = new RunRegistry(this.store, this.mapper, null, RunStoreFrameStore.of(this.store), null,
-				null).of(RUN_ID);
 
-		out.delta("轻装配的一帧");
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(
+				RECORD_IDENTITY.tenantId(), RECORD_IDENTITY.userId())) {
+			SseChatEmitter out = emitter();
+			out.delta("记录身份的一帧");
+		}
 
-		SoftAssertions softly = new SoftAssertions();
-		softly.assertThat(out.deliveryIdentityOutcome().readFailure())
-			.as("轻装配不是'身份不可确认'：legacy 就是它唯一的命名空间").isFalse();
-		softly.assertThat(readFrames(null)).as("轻装配仍照既有口径写 legacy 事件键")
+		assertThat(this.frames.archived(RECORD_IDENTITY, RUN_ID))
+			.as("帧写进记录身份键族")
 			.extracting(frame -> String.valueOf(frame.get("type")))
 			.containsExactly("delta");
-		softly.assertAll();
+		assertThat(this.frames.archived(null, RUN_ID)).as("不存在第二套无身份 legacy 归档").isEmpty();
 	}
 
-	/** 生产装配注册表：Spring 里唯一的那条七参构造（{@code properties}/{@code frames} 皆为显式注入）。 */
-	private RunRegistry productionRegistry() {
-		return new RunRegistry(this.store, this.mapper, null, RunStoreFrameStore.of(this.store), null, null, null);
-	}
-
-	/** 按给定身份读事件日志（{@code null} = 显式无身份 ⇒ legacy 键）。 */
-	private List<Map<String, Object>> readFrames(TenantUser identity) {
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-			return RunStoreFrameStore.of(this.store).readFrom(RUN_ID, 0L, 0);
-		}
-	}
-
-	private long issuedSeq(TenantUser identity) {
-		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-			return this.store.lastIssuedSeq(RUN_ID);
-		}
+	private SseChatEmitter emitter() {
+		return new SseChatEmitter(RUN_ID, this.store, this.frames, this.mapper, Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 	}
 
 	private void seedRun() {
 		MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), codec);
+			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), codec, 1L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1000L);
 		}
+	}
+
+	/**
+	 * 按"当前线程身份 + runId"分桶的事件日志替身：{@code null} 身份 = 无身份 legacy 桶。
+	 *
+	 * <p>真实 RunStore 的事件日志本身不再暴露读口（归档由生产 {@code RedisFrameStore} 承担），
+	 * 因此这里只复刻断言需要的部分：取号、落档、按身份读。
+	 */
+	private static final class IdentityScopedFrameStore implements FrameStore {
+
+		private final Map<String, TreeMap<Long, Map<String, Object>>> logs = new ConcurrentHashMap<>();
+
+		private final Map<String, AtomicLong> seqs = new ConcurrentHashMap<>();
+
+		@Override
+		public long nextSeq(String runId) {
+			return this.seqs.computeIfAbsent(currentKey(runId), ignored -> new AtomicLong()).incrementAndGet();
+		}
+
+		@Override
+		public void append(String runId, Map<String, Object> frame) {
+			if (RunStore.HEARTBEAT_TYPE.equals(String.valueOf(frame.get("type")))) {
+				return;
+			}
+			Object seq = frame.get("seq");
+			if (!(seq instanceof Number number) || number.longValue() <= 0L) {
+				return;
+			}
+			this.logs.computeIfAbsent(currentKey(runId), ignored -> new TreeMap<>())
+				.put(number.longValue(), new java.util.LinkedHashMap<>(frame));
+		}
+
+		@Override
+		public List<Map<String, Object>> readFrom(String runId, long afterSeq, int limit) {
+			return archived(RequestContextUtils.currentOrNull(), runId).stream()
+				.filter(frame -> ((Number) frame.get("seq")).longValue() > afterSeq)
+				.limit(limit <= 0 ? Long.MAX_VALUE : limit)
+				.toList();
+		}
+
+		@Override
+		public long lastSeq(String runId) {
+			TreeMap<Long, Map<String, Object>> log = this.logs.get(currentKey(runId));
+			return log == null || log.isEmpty() ? 0L : log.lastKey();
+		}
+
+		List<Map<String, Object>> archived(TenantUser identity, String runId) {
+			TreeMap<Long, Map<String, Object>> log = this.logs.get(key(identity, runId));
+			return log == null ? List.of() : new ArrayList<>(log.values());
+		}
+
+		private static String currentKey(String runId) {
+			return key(RequestContextUtils.currentOrNull(), runId);
+		}
+
+		private static String key(TenantUser identity, String runId) {
+			return (identity == null ? "legacy" : identity.tenantId() + ":" + identity.userId()) + "|" + runId;
+		}
+
 	}
 
 }

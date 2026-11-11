@@ -2,11 +2,14 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -63,6 +66,18 @@ class ResumeZombieTakeoverRecheckTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
+	private final AiConfigService configService = mock(AiConfigService.class);
+
+	/** run 级键按身份拼：种子快照与接管复核都要处在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
 
 	private final FakeRenewScheduler renewScheduler = new FakeRenewScheduler();
@@ -91,8 +106,17 @@ class ResumeZombieTakeoverRecheckTest {
 
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
 		this.store.useLeaseFacility(this.leases);
-		when(this.cancellations.isCancelled(any())).thenReturn(false);
+		// 续跑按快照冻结的 provider/model 精确绑定。
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "aiConfigService", this.configService);
+		AiConfigService.ResolvedProvider resolved = new AiConfigService.ResolvedProvider(7L, "deepseek",
+				"http://placeholder", "/chat/completions", "model-x", "sk-test", "fp", false);
+		when(this.configService.resolveChatTarget(7L, "model-x"))
+			.thenReturn(java.util.Optional.of(new AiConfigService.ChatTarget(resolved, "model-x", true)));
+		when(this.chatService.systemPromptText(any(AiContext.class), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn("SYSTEM");
+		when(this.cancellations.cancelState(any())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.cancelState(any())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
@@ -112,8 +136,8 @@ class ResumeZombieTakeoverRecheckTest {
 	void zombieTakeoverIsRefusedWhileALeaseHoldingDriverIsStillDriving() {
 		seedStaleRunning();
 		when(this.chatService.isDriving(RUN_ID)).thenReturn(true);
-		long driverEpoch = this.leases.tryAcquire(this.store.runLeaseKey(RUN_ID),
-				this.properties.getLease().getTtl()).orElseThrow().epoch();
+		long driverEpoch = this.leases.tryAcquireFenced(this.store.runLeaseKey(RUN_ID),
+				this.store.fenceKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow().epoch();
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID, true);
 
@@ -122,7 +146,6 @@ class ResumeZombieTakeoverRecheckTest {
 		assertThat(result.body()).containsEntry("resumed", false)
 			.containsEntry("reason", "DRIVER_ALIVE_IN_PROCESS");
 		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
-		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any(), any(), any());
 		verify(this.executor, never()).execute(any(Runnable.class));
 		assertThat(this.store.get(RUN_ID).getStatus()).as("不接管 ⇒ 不得改状态").isEqualTo(RunSnapshot.RUNNING);
 		assertThat(this.store.heldRunEpoch(RUN_ID)).as("原驱动的租约必须原样留在他手上").isEqualTo(driverEpoch);
@@ -158,7 +181,6 @@ class ResumeZombieTakeoverRecheckTest {
 			.containsEntry("leaseRearmed", true);
 		verify(this.executor, never()).execute(any(Runnable.class));
 		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
-		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any(), any(), any());
 
 		long epoch = this.store.heldRunEpoch(RUN_ID);
 		assertThat(epoch).as("租约必须重挂到本进程（不得还租，否则既围栏旧驱动又无人驱动）").isPositive();
@@ -222,6 +244,10 @@ class ResumeZombieTakeoverRecheckTest {
 	private void seedStaleRunning() {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setStatus(RunSnapshot.RUNNING);
+		snapshot.setProviderId(7L);
+		snapshot.setModelId("model-x");
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("问题"))));
 		this.store.save(snapshot);
 		// save 会把 updatedAtMs 刷成"现在"：超龄现场只能在落库之后铺（本替身返回同一对象引用）

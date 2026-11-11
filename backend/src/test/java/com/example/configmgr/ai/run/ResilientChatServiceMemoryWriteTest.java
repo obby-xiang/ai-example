@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
@@ -17,6 +18,7 @@ import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
@@ -54,6 +56,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -90,13 +93,19 @@ class ResilientChatServiceMemoryWriteTest {
 
 	private static final String RUN_B_ID = "run-memory-write-b";
 
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
+	private RequestContextUtils.SafeCloseable identityScope;
+
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -128,8 +137,18 @@ class ResilientChatServiceMemoryWriteTest {
 
 	@BeforeEach
 	void setUp() {
+		// 运行期键/进程内注册表一律按身份拼键：整条用例在本轮身份作用域内跑（与生产驱动线程一致）。
+		this.identityScope = RequestContextUtils.useContext(TENANT_ID, USER_ID);
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(this.runtime));
+		// 续跑按快照冻结的 provider/model 精确绑定（不再走 current()）：target + forFrozenRequest 两条读口。
+		AiConfigService.ChatTarget target = new AiConfigService.ChatTarget(
+				new AiConfigService.ResolvedProvider(1L, "test-provider", "http://localhost",
+						"/chat/completions", "test-model", "k", "fp", false),
+				"test-model", true);
+		when(this.providerRegistry.target(any(), anyString())).thenReturn(java.util.Optional.of(target));
+		when(this.providerRegistry.forFrozenRequest(any(), anyString(), any(), any(),
+				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(this.runtime);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "memory-write-watchdog");
 			thread.setDaemon(true);
@@ -138,11 +157,24 @@ class ResilientChatServiceMemoryWriteTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.repository, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		// 终态 transcript 写点已进入生产路径：注入永远接受的替身，否则终帧会被 AI_TRANSCRIPT_WRITE_FAILED 拒绝，
+		// 连带跳过记忆收敛（本类要断言的是记忆写回，不是 transcript 的持久化实现）。
+		com.example.configmgr.ai.history.ConversationTranscriptStore transcript = mock(
+				com.example.configmgr.ai.history.ConversationTranscriptStore.class);
+		when(transcript.append(any(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
+		ReflectionTestUtils.setField(this.service, "transcript", transcript);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		// 归属显式铺：写出器/续跑/记忆写回一律按记录身份定键（0/0 记录会被判身份不可确认）。
+		snapshot.setTenantId(TENANT_ID);
+		snapshot.setUserId(USER_ID);
+		// 首笔快照必须冻结模型身份：续跑只按快照的 provider/model 精确绑定。
+		snapshot.setModelId("test-model");
+		// 按轮记忆写回要求本轮起点（MemoryTurn 的所有权字段）：0 会被当成"无归属"而跳过写回。
+		snapshot.setCreatedAtMs(1_000L);
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
 	}
@@ -150,6 +182,9 @@ class ResilientChatServiceMemoryWriteTest {
 	@AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		if (this.identityScope != null) {
+			this.identityScope.close();
+		}
 	}
 
 	@Test
@@ -207,7 +242,7 @@ class ResilientChatServiceMemoryWriteTest {
 		assertThat(RedisDegradation.count(RedisDegradation.W1_MEMORY_WRITE))
 			.as("一次失败的整窗写 = 一次降级计数（不重试、不重复计）").isEqualTo(before + 1);
 		assertThat(output.getAll()).as("WARN 必须保留（带 stage 与 sessionId）")
-			.contains("记忆收敛失败")
+			.contains("memory convergence failed")
 			.contains(SESSION_ID);
 	}
 
@@ -227,7 +262,7 @@ class ResilientChatServiceMemoryWriteTest {
 		List<Message> old = List.of(new UserMessage("旧历史"));
 		this.repository.seed(SESSION_ID, old);
 
-		this.service.persistMemory(SESSION_ID, null, "null-window");
+		this.service.persistMemory(RUN_ID, SESSION_ID, null, "null-window");
 
 		assertThat(this.repository.writes).as("null 不得被当作空窗写回").isZero();
 		assertThat(this.repository.ops).isEmpty();
@@ -287,6 +322,9 @@ class ResilientChatServiceMemoryWriteTest {
 		runA.setCreatedAtMs(1_000L);
 		this.store.save(runA);
 		RunSnapshot runB = this.store.seedRun(RUN_B_ID, SESSION_ID);
+		runB.setTenantId(TENANT_ID);
+		runB.setUserId(USER_ID);
+		runB.setModelId("test-model");
 		runB.setContext(AiContext.empty().toMap());
 		runB.setCreatedAtMs(2_000L);
 		this.store.save(runB);
@@ -335,7 +373,7 @@ class ResilientChatServiceMemoryWriteTest {
 		out.start(SESSION_ID);
 		InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
 		ReflectionTestUtils.setField(this.service, "contextCompactor", new ContextCompactor(this.properties,
-				new ContextLimitResolver(this.properties), contextStore));
+				new ContextLimitResolver((providerId, modelId) -> 128000), contextStore, null));
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
 		ResumeService resume = new ResumeService(this.store, this.registry, this.codec, this.service,
 				mock(SpToolCallingManager.class), mock(ThreadPoolTaskExecutor.class), mock(StringRedisTemplate.class),

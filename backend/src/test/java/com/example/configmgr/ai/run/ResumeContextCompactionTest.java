@@ -16,7 +16,9 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -98,18 +100,36 @@ class ResumeContextCompactionTest {
 	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
 
 	private final ContextCompactor compactor = new ContextCompactor(this.properties,
-			new ContextLimitResolver(this.properties), this.contextStore);
+			new ContextLimitResolver((providerId, modelId) ->
+					providerId != null && providerId > 0L && "test-model".equals(modelId) ? 128_000 : null),
+			this.contextStore, null);
+
+	/** 投递身份作用域：写出器按身份解析后才能归档/取号。 */
+	private RequestContextUtils.SafeCloseable identity;
 
 	private final ResumeService service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 			this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 
 	@BeforeEach
 	void setUpEmitter() {
-		this.emitter = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+		this.emitter = new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper,
+				Runnable::run, 256, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null);
 		this.wire = FrameWire.attachTo(this.emitter);
 		// start 由原轮发出（生产上已在归档里），此处模拟"客户端已看过 start"的视角
 		this.emitter.start(SESSION_ID);
 		when(this.chatService.replaceMemoryWindow(any(), any(), any(), any())).thenReturn(true);
+		// 续跑会重建权威 SYSTEM：轻装配替身必须给出非空文本（否则 fail-closed 成 503）。
+		when(this.chatService.systemPromptText(any(AiContext.class), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn("SYSTEM");
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	@Test
@@ -117,7 +137,7 @@ class ResumeContextCompactionTest {
 		seedSuspendedRun();
 		// 上一轮真值越线：81000 / (128000 - 13000) = 70.4% ≥ L1
 		this.contextStore.write(SESSION_ID, ContextState.EMPTY.withUsage(81000, 0, 1, false,
-				System.currentTimeMillis() - 10_000, "test-model", 3000, 4000, 20));
+				System.currentTimeMillis() - 10_000, "test-model", 7L, 3000, 4000, 20));
 		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));
@@ -169,8 +189,8 @@ class ResumeContextCompactionTest {
 		assertThat(toolData.get(0)).startsWith(ToolResultClearing.PLACEHOLDER_PREFIX);
 		// ② 压缩后的历史已写回快照（否则下一轮 converge 会把原文覆盖回来）
 		assertThat(toolData.stream().filter(ToolResultClearing::isAlreadyCleared).count()).isGreaterThanOrEqualTo(1);
-		// L1 不删消息：1 user + 6×(assistant+tool) + 挂起轮的 assistant + 重建的 tool = 15 条
-		assertThat(history).hasSize(15);
+		// L1 不删消息：重建的 SYSTEM + 1 user + 6×(assistant+tool) + 挂起轮的 assistant + 重建的 tool = 16 条
+		assertThat(history).hasSize(16);
 		// ③ 真值重置为压缩后的估算基线（等下一次真值回填）
 		assertThat(this.contextStore.read(SESSION_ID).est()).isTrue();
 		assertThat(this.contextStore.read(SESSION_ID).level()).isEqualTo("L1");
@@ -180,7 +200,7 @@ class ResumeContextCompactionTest {
 	void resumeWithoutCompactionReportsNone() {
 		seedSuspendedRun();
 		this.contextStore.write(SESSION_ID, ContextState.EMPTY.withUsage(1000, 0, 1, false,
-				System.currentTimeMillis() - 10_000, "test-model", 0, 0, 0));
+				System.currentTimeMillis() - 10_000, "test-model", 7L, 0, 0, 0));
 		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));
@@ -314,12 +334,15 @@ class ResumeContextCompactionTest {
 			.withCompaction(ContextTrigger.Level.L1, 0, 0, "seed", now));
 		java.util.concurrent.atomic.AtomicInteger summaries = new java.util.concurrent.atomic.AtomicInteger();
 		ReflectionTestUtils.setField(this.service, "contextCompactor",
-				new ContextCompactor(this.properties, new ContextLimitResolver(this.properties), this.contextStore,
+				new ContextCompactor(this.properties,
+						new ContextLimitResolver((providerId, modelId) ->
+								providerId != null && providerId > 0L && "test-model".equals(modelId) ? 128_000 : null),
+						this.contextStore,
 						(system, user, runtime) -> {
 							summaries.incrementAndGet();
 							return "摘要正文";
 						}));
-		when(this.chatService.runtimeForCompaction(eq(RUN_ID), any(), any()))
+		when(this.chatService.runtimeForCompaction(eq(RUN_ID)))
 			.thenReturn(TestProviderRuntime.runtime());
 
 		ScheduledExecutorService stageScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -347,7 +370,7 @@ class ResumeContextCompactionTest {
 	private void armCompactingResume() {
 		// 上一轮真值越线：81000 / (128000 - 13000) = 70.4% ≥ L1
 		this.contextStore.write(SESSION_ID, ContextState.EMPTY.withUsage(81000, 0, 1, false,
-				System.currentTimeMillis() - 10_000, "test-model", 3000, 4000, 20));
+				System.currentTimeMillis() - 10_000, "test-model", 7L, 3000, 4000, 20));
 		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));
@@ -429,6 +452,9 @@ class ResumeContextCompactionTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.of("export", "EXPORT", "EXPORT", 7L, null).toMap());
 		snapshot.setModelId("test-model");
+		snapshot.setProviderId(7L);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		List<Message> history = new ArrayList<>();
 		history.add(new UserMessage("请启动导出"));
 		for (int i = 1; i <= 6; i++) {

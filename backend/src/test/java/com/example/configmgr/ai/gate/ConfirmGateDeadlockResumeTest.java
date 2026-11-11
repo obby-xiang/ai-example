@@ -261,7 +261,7 @@ class ConfirmGateDeadlockResumeTest {
         when(this.store.pending(RUN_ID, TOOL_CALL_ID))
                 .thenReturn(pendingKind(PendingToolCall.KIND_FRONTEND, PendingToolCall.PENDING));
 
-        ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID, TOOL_CALL_ID, null, "http-post", true);
+        ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID, TOOL_CALL_ID, null, "http-post", true);
 
         assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
         assertThat(submission.pending().getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
@@ -389,7 +389,7 @@ class ConfirmGateDeadlockResumeTest {
         when(this.provider.getIfAvailable()).thenReturn(this.resumeService);
         when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
         when(this.store.instanceId()).thenReturn("test-instance");
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.resumeService.resume(RUN_ID)).thenReturn(
                 new ResumeService.ResumeResult(ResumeService.Outcome.NOT_FOUND, java.util.Map.of("runId", RUN_ID)));
     }

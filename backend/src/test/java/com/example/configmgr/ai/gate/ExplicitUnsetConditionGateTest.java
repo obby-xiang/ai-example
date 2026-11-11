@@ -92,6 +92,20 @@ import static org.mockito.Mockito.when;
  */
 class ExplicitUnsetConditionGateTest {
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private static final String RUN_ID = "run-explicit-unset";
 
 	private static final String SESSION_ID = "s-explicit-unset";
@@ -289,7 +303,7 @@ class ExplicitUnsetConditionGateTest {
 		this.taskState.set(task("QUERY_COND", null));
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID);
-		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L);
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_RUN_ID, RUN_ID);
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"));
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, Map.of());
 		seedSnapshot("QUERY_COND", extra);
@@ -414,6 +428,9 @@ class ExplicitUnsetConditionGateTest {
 		AiContext context = AiContext.of("export", "EXPORT", step, TASK_ID, "ACTIVE", extra);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setStatus(RunSnapshot.RUNNING);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setContext(context.toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(
 				List.of(new SystemMessage("PERSONA"), new UserMessage("导出货币字典，不设筛选"))));

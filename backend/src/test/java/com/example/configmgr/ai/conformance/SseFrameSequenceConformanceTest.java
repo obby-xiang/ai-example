@@ -38,7 +38,13 @@ class SseFrameSequenceConformanceTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+	/** 测试工厂装配：写出器与用例共享同一份归档（RunStoreFrameStore），唤醒为空总线。 */
+	private SseChatEmitter emitter() {
+		return com.example.configmgr.ai.run.TestRunRegistryFactory
+			.create(this.store, new ObjectMapper(), null).of(RUN_ID);
+	}
+
+	private final SseChatEmitter out = emitter();
 
 	// ── ① seq 连续 + ④ 终帧收尾 ─────────────────────────────────────────────
 
@@ -216,7 +222,7 @@ class SseFrameSequenceConformanceTest {
 	@Test
 	void heartbeatNeverBurnsABusinessSeqSoTheFirstResumedFrameSurvivesDeltaReplay() {
 		// 旧进程：跑完挂起前的状态帧（归档 seq 1..4），随后进入挂起等待并发三帧心跳
-		SseChatEmitter old = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+		SseChatEmitter old = emitter();
 		FrameWire oldWire = FrameWire.attachTo(old);
 		old.start("s-1");
 		old.suspended(List.of(pending("c-1")), this.store.runKey(RUN_ID), this.store.pendingKey(RUN_ID),
@@ -233,7 +239,7 @@ class SseFrameSequenceConformanceTest {
 		assertThat(this.store.lastEventSeq(RUN_ID)).as("续号锚点 = 归档末帧 = 已发放的最大业务号").isEqualTo(4L);
 
 		// 进程重启：续跑用的新写出器从归档末帧（4）续号
-		SseChatEmitter resumed = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+		SseChatEmitter resumed = emitter();
 		FrameWire live = FrameWire.attachTo(resumed);
 		resumed.start("s-1");
 
@@ -280,7 +286,7 @@ class SseFrameSequenceConformanceTest {
 	 */
 	@Test
 	void twoThreadsEmittingConcurrentlyArriveInSeqOrder() throws Exception {
-		SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, new ObjectMapper());
+		SseChatEmitter emitter = emitter();
 		CountDownLatch firstFrameInSend = new CountDownLatch(1);
 		CountDownLatch releaseFirstFrame = new CountDownLatch(1);
 		List<String> arrival = new CopyOnWriteArrayList<>();

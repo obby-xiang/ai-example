@@ -41,8 +41,11 @@ class RunStoreReadFailureFailClosedTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties, this.lease);
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void seedPending() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		PendingToolCall pending = new PendingToolCall();
 		pending.setToolCallId(CALL_ID);
 		pending.setName("start_import");
@@ -50,23 +53,32 @@ class RunStoreReadFailureFailClosedTest {
 		this.store.putPending(RUN_ID, pending);
 	}
 
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
 	void fenceReadFailureRejectsTheClaimInsteadOfAssumingEpochZero() {
-		this.lease.tryAcquire(this.store.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.lease.tryAcquireFenced(this.store.runLeaseKey(RUN_ID), this.store.fenceKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow();
 		assertThat(this.store.heldRunEpoch(RUN_ID)).as("本实例持租，才会走到 fence 读取").isPositive();
 
-		long before = RedisDegradation.count(RedisDegradation.A1_FENCE_READ);
-		when(this.fake.redis.opsForValue().get(this.store.fenceKey(RUN_ID)))
-			.thenThrow(new IllegalStateException("模拟 fence 读失败"));
+		// 现行认领把 fence 读放在 CLAIM_EXECUTION Lua 内（写之前）；旧 Java 读口与 A1 计数已不存在，
+		// 故障注入落在脚本执行内部，断言受控异常向上表达且没有任何认领/执行证据。
+		this.fake.failClaimFenceRead();
 
 		assertThatThrownBy(() -> this.store.tryClaimExecution(RUN_ID, CALL_ID, this.store.instanceId()))
-			.as("fence 读不出来 ⇒ 拒绝认领（不得按 epoch=0 放行）")
+			.as("脚本内 fence 读不出来 ⇒ 拒绝认领（不得按 epoch=0 放行）")
 			.isInstanceOf(IllegalStateException.class)
 			.hasMessageContaining("fence");
 		assertThat(this.fake.table(this.store.claimKey(RUN_ID)))
 			.as("拒绝认领不得留下 claim 记录")
 			.doesNotContainKey(CALL_ID);
-		assertThat(RedisDegradation.count(RedisDegradation.A1_FENCE_READ)).isGreaterThan(before);
+		assertThat(this.store.pendingRaw(RUN_ID, CALL_ID).isExecuted())
+			.as("脚本在写之前失败 ⇒ 不得留下执行证据").isFalse();
 	}
 
 	@Test
@@ -79,7 +91,7 @@ class RunStoreReadFailureFailClosedTest {
 		assertThatThrownBy(() -> this.store.pending(RUN_ID, CALL_ID))
 			.as("单条读侧 WAL 收敛：guard 读不出来 ⇒ 不得把卡当成待人工输入")
 			.isInstanceOf(IllegalStateException.class)
-			.hasMessageContaining("决策 guard");
+			.hasMessageContaining("decision guard");
 		assertThat(RedisDegradation.count(RedisDegradation.A6_DECISION_GUARD_READ)).isGreaterThan(before);
 	}
 
@@ -93,7 +105,7 @@ class RunStoreReadFailureFailClosedTest {
 		assertThatThrownBy(() -> this.store.pendings(RUN_ID))
 			.as("整批读侧 WAL 收敛：guard 读不出来 ⇒ 不得整批按未决返回")
 			.isInstanceOf(IllegalStateException.class)
-			.hasMessageContaining("决策 guard");
+			.hasMessageContaining("decision guard");
 		assertThat(RedisDegradation.count(RedisDegradation.A6_DECISION_GUARD_READ)).isGreaterThan(before);
 	}
 
@@ -106,7 +118,7 @@ class RunStoreReadFailureFailClosedTest {
 
 		assertThatThrownBy(() -> this.store.decisionOf(RUN_ID, CALL_ID))
 			.isInstanceOf(IllegalStateException.class)
-			.hasMessageContaining("决策 guard");
+			.hasMessageContaining("decision guard");
 		assertThat(RedisDegradation.count(RedisDegradation.A6_DECISION_GUARD_READ)).isGreaterThan(before);
 	}
 
@@ -160,6 +172,9 @@ class RunStoreReadFailureFailClosedTest {
 
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(RUN_ID);
+		// 与请求作用域一致的合法归属：否则会在 ownership 前置闸提前拒绝，测不到 save 的基础设施失败路径。
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		// 当前无租约的非取消状态写走取消守卫 Lua（TERMINAL_SET_IF_NOT_CANCELLED，redis.execute），
 		// 不再走 values.set —— 故障注入因此落在脚本执行入口，与产品代码当前的写路径一致。
@@ -193,60 +208,66 @@ class RunStoreReadFailureFailClosedTest {
 	}
 
 	@Test
-	void failedClaimRestoresExecutedFalseWhenPutSucceedsButExpireFails() {
-		when(this.fake.redis.expire(org.mockito.ArgumentMatchers.eq(this.store.pendingKey(RUN_ID)),
-				org.mockito.ArgumentMatchers.any(java.time.Duration.class)))
-			.thenThrow(new IllegalStateException("模拟 expire 失败"));
+	void claimScriptFailureAfterWritesIsNotReportedAsSuccessAndPartialStateIsObservable() {
+		// 真实 Redis 的 EVAL 报错不回滚已写内容：注入点在 claim/pending 两笔 HSET 之后、TTL 写之前，
+		// 脚本按写序已推进 claim 与 pending。调用方必须看到失败，且只能断言脚本写序可保证的状态。
+		this.fake.failClaimTtlWrite();
 
 		assertThatThrownBy(() -> this.store.tryClaimExecution(RUN_ID, CALL_ID, this.store.instanceId()))
-			.isInstanceOf(AiStateUnavailableException.class);
-		assertThat(this.fake.table(this.store.claimKey(RUN_ID))).doesNotContainKey(CALL_ID);
-		assertThat(this.store.pendingRaw(RUN_ID, CALL_ID).isExecuted())
-			.as("回滚后不得留下 executed=true 的假已执行").isFalse();
+			.as("脚本失败不得被包装成 ClaimResult.WON")
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("TTL");
+		assertThat(this.fake.table(this.store.claimKey(RUN_ID)))
+			.as("按真实写序：claim HSET 已生效且值属于本实例").containsEntry(CALL_ID,
+					this.store.heldRunEpoch(RUN_ID) + "|" + this.store.instanceId());
+		PendingToolCall raw = this.store.pendingRaw(RUN_ID, CALL_ID);
+		assertThat(raw.isExecuted()).as("pending 的 executed 标记同样已写入（Lua 不回滚）").isTrue();
+		assertThat(raw.getExecutedBy()).isEqualTo(this.store.instanceId());
 	}
 
 	@Test
-	void rollbackClaimDeletesOnlyWhenTheValueStillMatches() throws Exception {
+	void failedClaimNeverDeletesOrOverwritesAnExistingClaimOfAnotherInstance() {
+		// 旧 rollbackClaim 的私有方法已随原子脚本删除；等价负向覆盖 = 失败路径不得动他人 claim。
 		String claimKey = this.store.claimKey(RUN_ID);
 		this.fake.table(claimKey).put(CALL_ID, "9|inst-b");
-		java.lang.reflect.Method rollback = RunStore.class.getDeclaredMethod("rollbackClaim", String.class,
-				String.class, String.class);
-		rollback.setAccessible(true);
+		this.fake.failClaimPendingRead();
 
-		rollback.invoke(this.store, RUN_ID, CALL_ID, "0|inst-a");
-		assertThat(this.fake.table(claimKey)).as("值不匹配 ⇒ 不得误删他人认领").containsKey(CALL_ID);
-
-		this.fake.table(claimKey).put(CALL_ID, "0|inst-a");
-		rollback.invoke(this.store, RUN_ID, CALL_ID, "0|inst-a");
-		assertThat(this.fake.table(claimKey)).doesNotContainKey(CALL_ID);
+		assertThatThrownBy(() -> this.store.tryClaimExecution(RUN_ID, CALL_ID, this.store.instanceId()))
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("pending");
+		assertThat(this.fake.table(claimKey))
+			.as("失败路径不得删除或覆盖他人认领（旧值仍原样保留）").containsEntry(CALL_ID, "9|inst-b");
 	}
 
 	@Test
 	void claimUsesRawPendingSoGuardReadFailureDoesNotCreateAFalseClaim() {
-		this.lease.tryAcquire(this.store.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.lease.tryAcquireFenced(this.store.runLeaseKey(RUN_ID), this.store.fenceKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow();
 		HashOperations<String, Object, Object> hash = this.fake.redis.opsForHash();
 		when(hash.get(RunStore.runScopedKey(RunStore.DECIDED_PREFIX, RUN_ID), CALL_ID))
 			.thenThrow(new IllegalStateException("模拟 claim 期间的 guard 读失败"));
 
 		RunStore.ClaimResult claim = this.store.tryClaimExecution(RUN_ID, CALL_ID, this.store.instanceId());
 
-		assertThat(claim.won()).as("claim 路径不得走 guard 收敛读，guard 读失败不影响认领").isTrue();
+		assertThat(claim.isWon()).as("claim 路径不得走 guard 收敛读，guard 读失败不影响认领").isTrue();
 		PendingToolCall marked = this.store.pendingRaw(RUN_ID, CALL_ID);
 		assertThat(marked.isExecuted()).as("认领后条目已标记 executed（不是只写 claim 的假认领）").isTrue();
 		assertThat(marked.getExecutedBy()).isEqualTo(this.store.instanceId());
 	}
 
 	@Test
-	void claimIsRolledBackWhenRawPendingReadFails() {
-		HashOperations<String, Object, Object> hash = this.fake.redis.opsForHash();
-		when(hash.get(this.store.pendingKey(RUN_ID), CALL_ID))
-			.thenThrow(new IllegalStateException("模拟 pendingRaw 读失败"));
+	void rawPendingReadFailureRejectsTheClaimWithoutClaimOrExecutionEvidence() {
+		// 脚本内 raw pending 读失败（写之前）⇒ 拒绝认领，且不留下 claim/执行证据。
+		this.fake.failClaimPendingRead();
 
 		assertThatThrownBy(() -> this.store.tryClaimExecution(RUN_ID, CALL_ID, this.store.instanceId()))
-			.isInstanceOf(IllegalStateException.class);
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("pending");
 		assertThat(this.fake.table(this.store.claimKey(RUN_ID)))
-			.as("读原始条目失败必须回滚 claim，不能留下 24h 假认领")
-			.doesNotContainKey(CALL_ID);
+			.as("读原始条目失败不得留下 24h 假认领").doesNotContainKey(CALL_ID);
+		PendingToolCall raw = this.store.pendingRaw(RUN_ID, CALL_ID);
+		assertThat(raw.isExecuted()).as("不得留下 executed=true 的假已执行").isFalse();
+		assertThat(raw.getStatus()).isEqualTo(PendingToolCall.PENDING);
 	}
 
 }

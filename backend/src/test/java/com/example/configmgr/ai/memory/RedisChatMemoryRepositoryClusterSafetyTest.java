@@ -9,13 +9,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import ch.qos.logback.classic.Level;
-import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
 
@@ -28,27 +25,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 记忆面 R1-04 / R1-06 / R1-07 的根修契约（fix round 1）。
+ * 记忆面集群安全契约（身份键形 / staging / final / 当前脚本写序）。
  *
- * <p>本类锁定：
+ * <p>本类锁定（与当前 {@link RedisChatMemoryRepository} 对齐）：
  * <ol>
- * <li><b>任意非空 sessionId</b>：{@code %}/{@code {}/{@code }} 无碰撞转义后，
- * tagged final 与 staging 始终共享同一个非空 hash tag ⇒ 同槽；空白 id 直接拒绝；</li>
- * <li><b>旧键迁移</b>：读侧 tagged 优先、缺失回落 legacy {@code chat:mem:<cid>}；
- * 保存成功 RENAME 后删除 legacy；删除同时清 tagged + legacy，并单键 {@code SREM}；</li>
- * <li><b>失败安全</b>：staging 写入与 TTL 由单键脚本原子完成；push / TTL / RENAME 失败只清理
- * staging，旧历史可读；清理 DEL 再失败，staging 也带 TTL，不会永久孤儿；</li>
- * <li><b>索引</b>：SADD 失败只 WARN（含 cid + final key），不回退已提交历史，下次保存自愈；</li>
- * <li><b>并发</b>：两次保存使用不同 staging，读侧只可能看到旧窗或某个完整新窗，不会半窗。</li>
+ * <li><b>身份键形</b>：final = {@code chat:mem:<t>:<u>:{<cid>}}，staging 同 tag；
+ * 任意非空 sessionId 转义后 final/staging 同槽；空白 id 在任何 Redis 调用前拒绝；</li>
+ * <li><b>保存</b>：{@code STAGE_WRITE}（RPUSH + SADD token + 两键 PEXPIRE）→
+ * {@code STAGING_COMMIT}（RENAME + SREM + 索引 TTL）；旧的裸 legacy 键不再读取/迁移/删除；</li>
+ * <li><b>清空</b>：一条 {@code MEMORY_CLEAR} 同槽脚本删数据并推进代次/版本；不碰裸 legacy；</li>
+ * <li><b>失败安全</b>：push / TTL / RENAME 失败保留旧历史；finally 的 {@code STAGING_DISCARD}
+ * 清理 staging；清理 DEL 再失败时 staging 仍带 TTL，不会永久孤儿；</li>
+ * <li><b>并发</b>：两次保存使用不同 staging，读侧只看到旧窗或某个完整新窗，不会半窗。</li>
  * </ol>
  *
- * <p>全部用例跑 {@link FakeMemoryRedis}（进程内替身），<b>不需要真实 Redis / 任何真实密钥</b>。
+ * <p>全部用例跑 {@link FakeMemoryRedis}（进程内替身），不需要真实 Redis / 密钥。
  */
 class RedisChatMemoryRepositoryClusterSafetyTest {
 
 	private static final String CID = "s-1";
 
-	private static final String IDS = RedisChatMemoryRepository.CONVERSATION_IDS_KEY;
+	private static final String TENANT_SEGMENT = "1:101:";
 
 	private static final Duration TTL = Duration.ofHours(6);
 
@@ -57,28 +54,39 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 	private final RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis,
 			new MessageJsonCodec(new ObjectMapper()), TTL);
 
-	// ── 1. 清空：一条同槽脚本（删数据 + 推进代次/版本）+ legacy 单键 DEL + 单键 SREM ──────
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
+	// ── 1. 清空：一条同槽脚本（删数据 + 推进代次/版本）；裸 legacy 不受影响 ──────────
 
 	@Test
-	void deleteClearsTaggedLegacyAndIndexWithOneSameSlotScript() {
+	void deleteClearsIdentityKeyWithOneSameSlotScript() {
 		this.fake.enableClusterMode();
 		this.repository.saveAll(CID, List.of(new UserMessage("tagged")));
-		String legacyKey = legacyKey();
-		this.fake.lists.put(legacyKey, new java.util.concurrent.CopyOnWriteArrayList<>(List.of("legacy")));
-		assertTrue(this.fake.set(IDS).contains(CID), "前置：索引成员存在");
+		String bareLegacy = bareLegacyKey();
+		this.fake.lists.put(bareLegacy, new java.util.concurrent.CopyOnWriteArrayList<>(List.of("legacy")));
 		this.fake.resetCounters();
 
-		// 同槽脚本（数据/版本/代次三键同 tag）+ legacy 单键 DEL + 单键 SREM：任何一条都不得跨槽
 		assertDoesNotThrow(() -> this.repository.deleteByConversationId(CID), "清空不得跨槽");
 
-		assertFalse(this.fake.hasKey(finalKey()), "tagged 数据键应被删除");
-		assertFalse(this.fake.hasKey(legacyKey), "legacy 数据键应被删除");
-		assertTrue(this.fake.set(IDS).isEmpty(), "SREM 应清掉索引成员（防无界增长）");
+		assertFalse(this.fake.hasKey(finalKey()), "身份数据键应被删除");
+		assertTrue(this.fake.hasKey(bareLegacy), "裸 legacy 不是当前命名空间，清空不得删除它");
 		assertEquals(1, this.fake.scriptCalls.get(),
 				"清空用一条同槽脚本（拆成多条命令会留下『代次已推进、数据未删』的复活窗口）");
-		assertEquals(List.of(finalKey(), legacyKey), this.fake.deletedKeys,
-				"数据键（脚本内 DEL）+ legacy（单键 DEL）；计数器保留并推进");
-		assertEquals(1, this.fake.indexRemoves.get());
+		assertEquals(List.of(finalKey()), this.fake.deletedKeys,
+				"脚本内只 DEL 身份数据键；计数器保留并推进");
+		assertEquals(0, this.fake.indexRemoves.get(), "全局索引已退役，清空不再 SREM");
 	}
 
 	@Test
@@ -102,50 +110,56 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 			String staging = RedisChatMemoryRepository.stagingKey(id, "token");
 			assertEquals(FakeMemoryRedis.slot(tagged), FakeMemoryRedis.slot(staging), "同槽：" + id);
 			assertFalse(FakeMemoryRedis.hashTagOf(tagged).isBlank(), "tag 不得为空：" + id);
+			assertEquals(SessionKeyCodec.escapedId(id), FakeMemoryRedis.hashTagOf(tagged), "tag = 转义 id：" + id);
 		}
-		assertEquals("chat:mem:{%7Ba%7Db}", this.repository.keyFor("{a}b"));
-		assertEquals("chat:mem:{%7Dx}", this.repository.keyFor("}x"));
-		assertEquals("chat:mem:{x%7Dy}", this.repository.keyFor("x}y"));
-		assertEquals("chat:mem:{%25%7Bx%7D%25}", this.repository.keyFor("%{x}%"));
+		assertEquals("chat:mem:1:101:{%7Ba%7Db}", this.repository.keyFor("{a}b"));
+		assertEquals("chat:mem:1:101:{%7Dx}", this.repository.keyFor("}x"));
+		assertEquals("chat:mem:1:101:{x%7Dy}", this.repository.keyFor("x}y"));
+		assertEquals("chat:mem:1:101:{%25%7Bx%7D%25}", this.repository.keyFor("%{x}%"));
 		assertNotEquals(this.repository.keyFor("{a}b"), this.repository.keyFor("%7Ba%7Db"),
 				"转义必须无碰撞");
 	}
 
 	@Test
-	void dataKeyShapeCarriesOnlyTheSessionHashTag() {
-		assertEquals("chat:mem:{s-1}", this.repository.keyFor(CID), "final 键必须带 {<cid>} tag");
-		assertFalse(IDS.contains("{"), "全局索引键不得加 tag（否则所有会话被压进同一槽）");
-		assertNotEquals(IDS, this.repository.keyFor(CID));
+	void dataKeyCarriesIdentityAndOnlyTheSessionHashTag() {
+		assertEquals("chat:mem:1:101:{s-1}", this.repository.keyFor(CID),
+				"final 键必须带身份段与 {<cid>} tag");
+		assertTrue(FakeMemoryRedis.hashTagOf(this.repository.keyFor(CID)).equals("s-1"),
+				"hash tag 只能是 session id，不能混入身份段以外的内容");
+		assertTrue(this.repository.keyFor(CID).startsWith("chat:mem:" + TENANT_SEGMENT),
+				"身份段必须进键");
 	}
 
-	// ── 3. 非空保存：同槽 staging（脚本内 TTL）+ RENAME + legacy 清理 ───────
+	// ── 3. 非空保存：STAGE_WRITE + STAGING_COMMIT；裸 legacy 不动 ─────────────
 
 	@Test
-	void saveAllStagesWithTtlThenRenamesAndMigratesLegacy() {
+	void saveAllStagesWithTtlThenCommitsWithoutTouchingBareLegacy() {
 		this.fake.enableClusterMode();
-		String legacyKey = legacyKey();
-		this.fake.lists.put(legacyKey, new java.util.concurrent.CopyOnWriteArrayList<>(List.of("old-legacy")));
+		String bareLegacy = bareLegacyKey();
+		this.fake.lists.put(bareLegacy, new java.util.concurrent.CopyOnWriteArrayList<>(List.of("old-legacy")));
 
 		this.repository.saveAll(CID, List.of(new UserMessage("一")));
 
-		assertEquals(1, this.fake.scriptCalls.get(), "staging 写入应走单键脚本（RPUSH + PEXPIRE）");
+		assertEquals(2, this.fake.scriptCalls.get(), "保存 = STAGE_WRITE + STAGING_COMMIT 两条脚本");
 		assertEquals(1, this.fake.stageWrites.get());
-		assertEquals(1, this.fake.lastScriptKeys.size(), "脚本只带 staging 一个键");
+		assertTrue(this.fake.lastScriptBody.contains("STAGING_COMMIT"), "最后一条必须是提交脚本");
 		assertEquals(this.fake.lastRenameSource, this.fake.lastScriptKeys.get(0));
+		assertEquals(this.fake.lastStageKey, this.fake.lastRenameSource, "staging 写入与 RENAME 源必须是同一键");
 		assertEquals(1, this.fake.renames.get(), "非空保存必须走 RENAME 原子替换");
 		assertEquals(finalKey(), this.fake.lastRenameTarget);
-		assertNotNull(this.fake.lastRenameSource, "必须经由 staging 键");
 		assertNotEquals(finalKey(), this.fake.lastRenameSource);
-		assertEquals(CID, FakeMemoryRedis.hashTagOf(this.fake.lastRenameSource), "staging 与 final 的 tag 必须相同");
-		assertEquals(CID, FakeMemoryRedis.hashTagOf(finalKey()));
+		assertEquals("s-1", FakeMemoryRedis.hashTagOf(this.fake.lastRenameSource), "staging 与 final 的 tag 必须相同");
 		assertEquals(FakeMemoryRedis.slot(this.fake.lastRenameSource), FakeMemoryRedis.slot(finalKey()),
 				"staging 与 final 必须同槽");
-		assertFalse(this.fake.hasKey(this.fake.lastRenameSource), "RENAME 后 staging 应消失");
+		assertFalse(this.fake.hasKey(this.fake.lastRenameSource), "提交后 staging 应消失");
 		assertTrue(this.fake.hasKey(finalKey()));
-		assertEquals(TTL, this.fake.expiry(finalKey()), "RENAME 后 final TTL 必须等于配置值");
-		assertFalse(this.fake.hasKey(legacyKey), "RENAME 成功后应删除 legacy 完成自然迁移");
-		assertEquals(List.of(legacyKey), this.fake.deletedKeys, "迁移删除只允许 legacy 键");
-		assertTrue(this.fake.set(IDS).contains(CID));
+		assertEquals(TTL, this.fake.expiry(finalKey()), "提交后 final TTL 必须等于配置值");
+		assertTrue(this.fake.hasKey(bareLegacy), "裸 legacy 不在当前命名空间，保存不得删除它");
+		assertTrue(this.fake.deletedKeys.isEmpty(), "当前保存不迁移/删除裸 legacy");
+		assertEquals(1, this.fake.indexAdds.get(), "STAGE_WRITE 必须 SADD staging token");
+		assertEquals(1, this.fake.indexRemoves.get(), "STAGING_COMMIT 必须 SREM staging token");
+		assertFalse(this.fake.sets.containsKey(RedisChatMemoryRepository.stagingIndexKey(CID)),
+				"提交后 staging 索引为空必须删除");
 	}
 
 	@Test
@@ -156,11 +170,14 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 
 		assertEquals(List.of("二", "三"), texts(this.repository.findByConversationId(CID)), "整窗口覆盖写，不追加");
 		assertEquals(3, this.fake.renames.get(), "每次保存都是一次 RENAME");
-		assertEquals(3, this.fake.scriptCalls.get(), "每次保存都是一次 staging 脚本");
+		assertEquals(6, this.fake.scriptCalls.get(), "每次保存 = STAGE_WRITE + STAGING_COMMIT");
+		assertEquals(3, this.fake.indexAdds.get());
+		assertEquals(3, this.fake.indexRemoves.get());
 		assertEquals(1, this.fake.lists.size(), "不得留下 staging 键");
+		assertFalse(this.fake.sets.containsKey(RedisChatMemoryRepository.stagingIndexKey(CID)));
 	}
 
-	// ── 4. 写失败：旧历史必须原样可读，且 staging 不留无 TTL 孤儿 ────────────
+	// ── 4. 写失败：旧历史必须原样可读，staging 清理/残留 TTL 可观测 ──────────
 
 	@Test
 	void failedStageWriteKeepsPreviousHistory() {
@@ -173,6 +190,7 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 		assertEquals(List.of("旧"), texts(this.repository.findByConversationId(CID)), "写 staging 失败不得丢旧历史");
 		assertTrue(this.fake.hasKey(finalKey()));
 		assertFalse(this.fake.hasKey(this.fake.lastStageKey), "脚本失败不得留下 staging");
+		assertEquals(0, this.fake.indexAdds.get(), "RPUSH 失败发生在 SADD 之前");
 		assertFalse(this.fake.deletedKeys.contains(finalKey()), "失败路径不得删除已有 final");
 		assertTrue(this.fake.deletedKeys.stream().allMatch(key -> key.equals(this.fake.lastStageKey)),
 				"失败路径只允许清理 staging，实际：" + this.fake.deletedKeys);
@@ -186,13 +204,16 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 		this.repository.saveAll(CID, List.of(new UserMessage("旧")));
 		this.fake.resetCounters();
 		this.fake.failExpire = true;
-		this.fake.failDelete = true; // 即使 finally 的 DEL 也失败，也不允许留下无 TTL 的 staging
 
 		assertThrows(RuntimeException.class, () -> this.repository.saveAll(CID, List.of(new UserMessage("新"))));
 
 		assertEquals(List.of("旧"), texts(this.repository.findByConversationId(CID)), "TTL 失败不得丢旧历史");
 		assertTrue(this.fake.hasKey(finalKey()));
-		assertFalse(this.fake.hasKey(this.fake.lastStageKey), "staging 脚本失败即无键，不依赖 finally DEL");
+		assertEquals(1, this.fake.indexAdds.get(), "PEXPIRE 失败发生在 RPUSH/SADD 之后（真实 Lua 不回滚）");
+		assertFalse(this.fake.hasKey(this.fake.lastStageKey), "finally 的 STAGING_DISCARD 必须清掉 staging");
+		assertEquals(1, this.fake.indexRemoves.get(), "discard 必须 SREM staging token");
+		assertFalse(this.fake.sets.containsKey(RedisChatMemoryRepository.stagingIndexKey(CID)),
+				"失败路径不得留下 staging 索引");
 	}
 
 	@Test
@@ -206,6 +227,8 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 		assertEquals(List.of("旧"), texts(this.repository.findByConversationId(CID)), "RENAME 失败不得丢旧历史");
 		assertTrue(this.fake.hasKey(finalKey()));
 		assertFalse(this.fake.hasKey(this.fake.lastStageKey), "失败后应清理 staging");
+		assertEquals(1, this.fake.indexAdds.get());
+		assertEquals(1, this.fake.indexRemoves.get(), "失败提交后 discard 必须 SREM token");
 		this.fake.failRename = false;
 		this.repository.saveAll(CID, List.of(new UserMessage("新")));
 		assertEquals(List.of("新"), texts(this.repository.findByConversationId(CID)));
@@ -228,97 +251,52 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 		this.fake.redis.delete(this.fake.lastStageKey);
 	}
 
-	// ── 5. 索引失败：不回退已写新历史，WARN 含 cid + final key ───────────────
+	// ── 5. 裸 legacy：当前生产不再读取/迁移 ─────────────────────────────────
 
 	@Test
-	void indexFailureDoesNotRollBackCommittedHistoryAndIsObservable() {
-		this.repository.saveAll(CID, List.of(new UserMessage("旧")));
-		this.fake.sets.clear();
-		this.fake.failIndexAdd = true;
-
-		Logger logger = (Logger) LoggerFactory.getLogger(RedisChatMemoryRepository.class);
-		ListAppender<ILoggingEvent> appender = new ListAppender<>();
-		appender.start();
-		logger.addAppender(appender);
-		try {
-			assertDoesNotThrow(() -> this.repository.saveAll(CID, List.of(new UserMessage("新"))),
-					"索引是辅助面：失败不得让已提交的数据写回报错");
-		}
-		finally {
-			logger.detachAppender(appender);
-		}
-
-		assertEquals(List.of("新"), texts(this.repository.findByConversationId(CID)), "已写新历史不得回退");
-		assertTrue(this.fake.hasKey(finalKey()));
-		assertFalse(this.fake.set(IDS).contains(CID), "索引失败是事实，不得伪造成功");
-		assertTrue(appender.list.stream().anyMatch(event -> event.getLevel() == Level.WARN
-				&& event.getFormattedMessage().contains(CID) && event.getFormattedMessage().contains(finalKey())),
-				"索引失败 WARN 必须同时含 conversationId 与 final key（可对账）");
-
-		this.fake.failIndexAdd = false;
-		this.repository.saveAll(CID, List.of(new UserMessage("新")));
-		assertTrue(this.fake.set(IDS).contains(CID), "下一次成功保存应自愈全局索引");
-	}
-
-	// ── 6. 旧键迁移：读回落 + 保存迁移 ──────────────────────────────────────
-
-	@Test
-	void findByConversationIdFallsBackToLegacyKey() {
+	void bareLegacyKeyIsNotReadAsTheIdentityWindow() {
 		MessageJsonCodec codec = new MessageJsonCodec(new ObjectMapper());
-		this.fake.lists.put(legacyKey(),
+		this.fake.lists.put(bareLegacyKey(),
 				new java.util.concurrent.CopyOnWriteArrayList<>(List.of(codec.serialize(new UserMessage("legacy")))));
-		this.fake.sets.computeIfAbsent(IDS, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(CID);
-		assertTrue(this.fake.sets.getOrDefault(IDS, java.util.Set.of()).contains(CID), "前置：索引成员存在");
 
-		assertEquals(List.of("legacy"), texts(this.repository.findByConversationId(CID)), "tagged 缺失应回落 legacy");
-		assertTrue(this.repository.isConversationIndexed(CID), "legacy 存活也应判为在索引");
-		assertTrue(this.repository.findConversationIds().contains(CID), "legacy 存活应仍被列出");
-		assertTrue(this.fake.set(IDS).contains(CID), "legacy 存活时不得被当 stale 清掉");
+		assertEquals(List.of(), texts(this.repository.findByConversationId(CID)),
+				"裸 legacy 不属于身份命名空间，不得冒充当前身份窗口");
+		assertFalse(this.repository.hasLiveMemory(CID));
 	}
 
 	@Test
-	void findConversationIdsDropsBlankIndexMember() {
-		this.fake.sets.computeIfAbsent(IDS, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add("");
-
-		assertTrue(this.repository.findConversationIds().isEmpty(), "空白索引成员不得阻断枚举");
-		assertTrue(this.fake.set(IDS).isEmpty(), "空白成员应被惰性清掉");
-	}
-
-	@Test
-	void saveAllMigratesLegacyAfterRename() {
+	void saveAllWritesIdentityKeyAndLeavesBareLegacyUntouched() {
 		MessageJsonCodec codec = new MessageJsonCodec(new ObjectMapper());
-		this.fake.lists.put(legacyKey(),
+		this.fake.lists.put(bareLegacyKey(),
 				new java.util.concurrent.CopyOnWriteArrayList<>(List.of(codec.serialize(new UserMessage("legacy")))));
-		this.fake.sets.computeIfAbsent(IDS, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(CID);
 
 		this.repository.saveAll(CID, List.of(new UserMessage("新")));
 
 		assertTrue(this.fake.hasKey(finalKey()));
-		assertFalse(this.fake.hasKey(legacyKey()), "RENAME 成功后 legacy 应被删除");
+		assertTrue(this.fake.hasKey(bareLegacyKey()), "当前保存不迁移/删除裸 legacy");
 		assertEquals(List.of("新"), texts(this.repository.findByConversationId(CID)));
 	}
 
-	// ── 7. 空列表：仍按既有删除语义 ─────────────────────────────────────────
+	// ── 6. 空列表：仍按既有删除语义（一条同槽脚本，裸 legacy 不动） ───────────
 
 	@Test
-	void emptySaveAllClearsBothShapesAndIndex() {
+	void emptySaveAllClearsIdentityKeyOnly() {
 		this.repository.saveAll(CID, List.of(new UserMessage("旧")));
-		this.fake.lists.put(legacyKey(), new java.util.concurrent.CopyOnWriteArrayList<>(List.of("legacy")));
+		this.fake.lists.put(bareLegacyKey(), new java.util.concurrent.CopyOnWriteArrayList<>(List.of("legacy")));
 		this.fake.resetCounters();
 
 		assertDoesNotThrow(() -> this.repository.saveAll(CID, List.of()), "空列表删除不得跨槽");
 
 		assertFalse(this.fake.hasKey(finalKey()));
-		assertFalse(this.fake.hasKey(legacyKey()));
-		assertTrue(this.fake.set(IDS).isEmpty());
+		assertTrue(this.fake.hasKey(bareLegacyKey()), "空保存不得删除裸 legacy");
 		assertEquals(1, this.fake.scriptCalls.get(), "清空走一条同槽脚本（删数据 + 推进代次/版本）");
 		assertEquals(0, this.fake.renames.get(), "清空不做 RENAME");
 		assertTrue(this.fake.values.values().contains("1"), "清空推进了代次/版本（tombstone）");
-		assertEquals(List.of(finalKey(), legacyKey()), this.fake.deletedKeys);
-		assertEquals(1, this.fake.indexRemoves.get());
+		assertEquals(List.of(finalKey()), this.fake.deletedKeys);
+		assertEquals(0, this.fake.indexRemoves.get(), "全局索引已退役，清空不再 SREM");
 	}
 
-	// ── 8. 并发：不同 staging，读侧只见完整窗口 ─────────────────────────────
+	// ── 7. 并发：不同 staging，读侧只见完整窗口 ─────────────────────────────
 
 	@Test
 	void concurrentSavesUseDistinctStagingAndNeverExposeHalfWindow() throws Exception {
@@ -372,7 +350,7 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 		assertFalse(this.fake.hasKey(this.fake.renameSources.get(1)));
 	}
 
-	// ── 替身自身的非空断言 ──────────────────────────────────────────────────
+	// ── 8. 替身自身的非空断言 ──────────────────────────────────────────────
 
 	@Test
 	void slotAlgorithmMatchesRedis() {
@@ -387,14 +365,14 @@ class RedisChatMemoryRepositoryClusterSafetyTest {
 	void crossSlotRenameIsRejected() {
 		this.fake.enableClusterMode();
 		assertThrows(FakeMemoryRedis.CrossSlotException.class,
-				() -> this.fake.redis.rename("chat:mem:{a}", "chat:mem:{b}"));
+				() -> this.fake.redis.rename("chat:mem:1:101:{a}", "chat:mem:1:101:{b}"));
 	}
 
 	private String finalKey() {
 		return this.repository.keyFor(CID);
 	}
 
-	private static String legacyKey() {
+	private static String bareLegacyKey() {
 		return RedisChatMemoryRepository.KEY_PREFIX + CID;
 	}
 

@@ -104,7 +104,7 @@ class ResumeSkipCascadeTest {
         when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
                 .thenReturn(new Prompt(List.of()));
         when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
         // 续跑锁在"异步驱动任务结束"时才释放；让执行器同步跑完（driveResumed 是替身），
         // 后续 resume 才能看到锁已释放（"再次续跑"用例需要）。

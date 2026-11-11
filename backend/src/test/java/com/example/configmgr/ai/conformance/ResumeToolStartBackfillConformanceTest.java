@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.conformance;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.FakeStartImportTool;
@@ -11,6 +12,7 @@ import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.ResumeService;
 import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.FrameStore;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
@@ -93,7 +95,49 @@ class ResumeToolStartBackfillConformanceTest {
 
 	private final AiProperties properties = new AiProperties();
 
-	private final SseChatEmitter emitter = new SseChatEmitter(RUN_ID, this.store, this.mapper) {
+	private final FrameStore frames = new FrameStore() {
+		private final java.util.concurrent.atomic.AtomicLong seq = new java.util.concurrent.atomic.AtomicLong();
+
+		@Override
+		public long nextSeq(String runId) {
+			return this.seq.incrementAndGet();
+		}
+
+		@Override
+		public void append(String runId, java.util.Map<String, Object> frame) {
+			ResumeToolStartBackfillConformanceTest.this.store.appendEvent(runId, frame);
+		}
+
+		@Override
+		public long lastSeq(String runId) {
+			return readFrom(runId, 0L, 0).stream()
+				.mapToLong(frame -> frame.get("seq") instanceof Number number ? number.longValue() : 0L)
+				.max()
+				.orElse(0L);
+		}
+
+		@Override
+		public java.util.List<java.util.Map<String, Object>> readFrom(String runId, long afterSeq, int limit) {
+			java.util.List<java.util.Map<String, Object>> out = new java.util.ArrayList<>();
+			for (java.util.Map<String, Object> frame : ResumeToolStartBackfillConformanceTest.this.store
+				.events(runId)) {
+				Object raw = frame.get("seq");
+				long seqNo = raw instanceof Number number ? number.longValue() : 0L;
+				if (seqNo > afterSeq && (limit <= 0 || out.size() < limit)) {
+					out.add(frame);
+				}
+			}
+			return out;
+		}
+	};
+
+	private SseChatEmitter emitter;
+
+	private SseChatEmitter buildEmitter() {
+		return new SseChatEmitter(RUN_ID, this.store, this.frames, this.mapper,
+			Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+			AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+			com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null) {
 		@Override
 		public void toolStart(PendingToolCall pending) {
 			if (ResumeToolStartBackfillConformanceTest.this.suppressedStarts
@@ -104,14 +148,10 @@ class ResumeToolStartBackfillConformanceTest {
 			super.toolStart(pending);
 		}
 	};
+	}
 
 	/** 单写出器替身：把"同一轮的写出器"固定成上面那个可控实例（其余语义走真实现）。 */
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null) {
-		@Override
-		public SseChatEmitter of(String runId) {
-			return ResumeToolStartBackfillConformanceTest.this.emitter;
-		}
-	};
+	private RunRegistry registry;
 
 	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
 
@@ -131,19 +171,29 @@ class ResumeToolStartBackfillConformanceTest {
 
 	private ResumeService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(org.mockito.ArgumentMatchers.eq("start_import"),
+				any(AiContext.class))).thenReturn(true);
 		// 确认卡：后端可执行 + 高风险 ⇒ 首轮进确认门、放行后由后端委托执行
 		when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
+		this.emitter = buildEmitter();
+		this.registry = TestRunRegistryFactory.create(this.store, this.mapper, null, this.emitter);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
-		snapshot.setContext(AiContext.empty().toMap());
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
+		snapshot.setContext(AiContext.of("tasks", null, null, null, null).toMap());
 		this.store.save(snapshot);
 		this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
 				List.of());
@@ -156,8 +206,17 @@ class ResumeToolStartBackfillConformanceTest {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;
 		}).when(this.taskExecutor).execute(any(Runnable.class));
+		when(this.chatService.systemPromptText(any(AiContext.class),
+				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn("SYSTEM");
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(prompt());
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	/**

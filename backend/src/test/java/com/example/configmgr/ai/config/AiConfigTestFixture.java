@@ -184,6 +184,22 @@ final class AiConfigTestFixture {
 				setting.setValueJson(value);
 				return setting;
 			}));
+		when(this.settingRepository.findBySettingKeyForUpdate(anyString())).thenAnswer(invocation -> {
+			String key = invocation.getArgument(0);
+			String value = this.settings.get(key);
+			if (value == null) {
+				return Optional.empty();
+			}
+			AiSetting setting = new AiSetting();
+			setting.setSettingKey(key);
+			setting.setValueJson(value);
+			return Optional.of(setting);
+		});
+		when(this.settingRepository.saveAndFlush(any(AiSetting.class))).thenAnswer(invocation -> {
+			AiSetting setting = invocation.getArgument(0);
+			this.settings.put(setting.getSettingKey(), setting.getValueJson());
+			return setting;
+		});
 		when(this.settingRepository.save(any(AiSetting.class))).thenAnswer(invocation -> {
 			AiSetting setting = invocation.getArgument(0);
 			this.settings.put(setting.getSettingKey(), setting.getValueJson());
@@ -303,7 +319,7 @@ final class AiConfigTestFixture {
 			org.springframework.data.redis.core.StringRedisTemplate redis) {
 		return new AiConfigService(this.providerRepository, this.modelRepository, this.settingRepository,
 				mock(org.springframework.core.env.Environment.class), new AiKeyCipher(kekBase64), this.properties,
-				this.connectionProperties, this.chatProperties, redis);
+				this.connectionProperties, this.chatProperties);
 	}
 
 	/**

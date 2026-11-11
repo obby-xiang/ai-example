@@ -10,6 +10,7 @@ import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -56,6 +57,10 @@ class TaskTypeFormResumeTest {
 
 	private static final String CALL_TYPE_FORM = TaskTypeForm.toolCallId(RUN_ID);
 
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
 	private final ObjectMapper mapper = new ObjectMapper();
@@ -82,16 +87,21 @@ class TaskTypeFormResumeTest {
 
 	private ResumeService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		// 键空间按身份分段：本轮记录的身份作为用例的生命周期作用域。
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT_ID, USER_ID);
 		this.properties.getPark().setEnabled(true);
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenAnswer(invocation -> invocation.<PendingToolCall>getArgument(2).getResultText());
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
-		when(this.chatService.systemPromptText(any())).thenReturn(SYSTEM_TEXT);
+		when(this.chatService.systemPromptText(any(), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn(SYSTEM_TEXT);
 		when(this.chatService.workspaceStateText(any())).thenReturn("## 当前工作区状态\n<workspace_state>\n"
 				+ "页面：任务中心\n</workspace_state>\n");
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
@@ -104,6 +114,13 @@ class TaskTypeFormResumeTest {
 
 		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
+	}
+
+	@AfterEach
+	void tearDown() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	@Test
@@ -147,6 +164,9 @@ class TaskTypeFormResumeTest {
 	/** 首轮挂起现场：只有 SYSTEM + USER，助手轮由 in-flight 重建（正文为空）。 */
 	private void seedFirstTurnParkedWith(String resultText) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(TENANT_ID);
+		snapshot.setUserId(USER_ID);
+		snapshot.setModelId("test-model");
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.of("tasks", null, null, null, null).toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(

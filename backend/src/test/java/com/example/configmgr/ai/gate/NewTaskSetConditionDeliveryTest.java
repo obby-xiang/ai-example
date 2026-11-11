@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.form.ConditionsForm;
@@ -71,7 +72,7 @@ class NewTaskSetConditionDeliveryTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -89,7 +90,7 @@ class NewTaskSetConditionDeliveryTest {
 	@SuppressWarnings("unchecked")
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
@@ -128,7 +129,7 @@ class NewTaskSetConditionDeliveryTest {
 	private SpToolCallingManager manager() {
 		ObjectProvider<ResumeService> provider = mock(ObjectProvider.class);
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
-				List.of(), provider, Runnable::run, null, ConfirmGate.DEFAULT_RETRY_SCHEDULER);
+				List.of(), provider, Runnable::run, null, (ConfirmGate.RetryScheduler) null);
 		WizardActionGuard guard = new WizardActionGuard(this.definitionService);
 		SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry,
 				mock(MessageJsonCodec.class), this.beacon, this.cancellations,
@@ -144,7 +145,6 @@ class NewTaskSetConditionDeliveryTest {
 	private static AiContext context() {
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID);
-		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_REQUESTED_AT, 1L);
 		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"));
 		extra.put("pageId", "export");
 		extra.put("selectedDefs", List.of("CURRENCY"));

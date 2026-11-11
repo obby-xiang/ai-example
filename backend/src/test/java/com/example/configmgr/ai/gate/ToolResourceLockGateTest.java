@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
@@ -110,7 +111,7 @@ class ToolResourceLockGateTest {
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
-	private final RunRegistry registry = new RunRegistry(this.store, new ObjectMapper(), null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, new ObjectMapper(), null);
 
 	private final ToolRegistry toolRegistry = mock(ToolRegistry.class);
 
@@ -144,7 +145,7 @@ class ToolResourceLockGateTest {
 			thread.setDaemon(true);
 			return thread;
 		});
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf(anyString())).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf(anyString())).thenReturn(ToolMeta.RiskLevel.READ);

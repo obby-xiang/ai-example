@@ -8,6 +8,7 @@ import com.example.configmgr.job.repo.ValidationIssueRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -45,7 +46,15 @@ class JobWatchdogTest {
     private final JobTerminalWriter terminalWriter = mock(JobTerminalWriter.class);
     private final JobCancellationRegistry cancellationRegistry = mock(JobCancellationRegistry.class);
     private final ValidationIssueRepository issueRepository = mock(ValidationIssueRepository.class);
-    private final JobHeartbeatRegistry heartbeatRegistry = new JobHeartbeatRegistry(this.clock);
+    private final JobHeartbeatRegistry heartbeatRegistry = heartbeatRegistry();
+
+    /** 当前构造器固定 systemUTC；用例用反射注入可控时钟（memory 模式的判定同样走该时钟）。 */
+    private JobHeartbeatRegistry heartbeatRegistry() {
+        JobHeartbeatRegistry registry = new JobHeartbeatRegistry(null, "memory",
+                new AppProperties(), this.jobRepository, this.cancellationRegistry);
+        ReflectionTestUtils.setField(registry, "clock", this.clock);
+        return registry;
+    }
 
     private final JobWatchdog watchdog = new JobWatchdog(this.jobRepository, this.heartbeatRegistry,
             this.terminalWriter, this.cancellationRegistry, this.issueRepository,
@@ -54,6 +63,9 @@ class JobWatchdogTest {
     @BeforeEach
     void resetClock() {
         this.clock.reset(System.currentTimeMillis());
+        JobRepository.CancelState inFlight = mock(JobRepository.CancelState.class);
+        when(inFlight.getStatus()).thenReturn(Job.JobStatus.RUNNING);
+        when(this.jobRepository.findCancelStateById(anyLong())).thenReturn(java.util.Optional.of(inFlight));
     }
 
     // ── U6：心跳 ×3 判死 —— 边界内不判、越过即判，且落「issue → FAILED → cancel」全链路 ──

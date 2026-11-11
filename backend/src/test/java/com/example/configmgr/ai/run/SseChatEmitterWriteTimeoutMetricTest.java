@@ -58,7 +58,7 @@ class SseChatEmitterWriteTimeoutMetricTest {
 	void registryWiringFeedsTheBoundWriteTimeoutIntoTheMetric() {
 		AiProperties properties = new AiProperties();
 		properties.getSse().setWriteTimeout(Duration.ofSeconds(8));
-		new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), properties);
+		TestRunRegistryFactory.create(new InMemoryRunStore(), new ObjectMapper(), properties);
 
 		assertThat(SseChatEmitter.deliveryPoolMetrics().get("writeTimeoutMs"))
 			.as("RunRegistry 装配时把 app.ai.sse.write-timeout 的真实值登记进指标")

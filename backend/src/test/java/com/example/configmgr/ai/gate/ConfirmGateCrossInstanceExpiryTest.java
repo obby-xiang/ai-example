@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -66,7 +67,7 @@ class ConfirmGateCrossInstanceExpiryTest {
 
 	private volatile boolean guardDown;
 
-	private final InMemoryRunStore store = new InMemoryRunStore() {
+	private final InMemoryRunStore store = new InMemoryRunStore(true) {
 		@Override
 		public RunStore.DecisionClaim tryRecordDecision(String runId, String toolCallId, String status) {
 			if (ConfirmGateCrossInstanceExpiryTest.this.guardDown) {
@@ -78,9 +79,27 @@ class ConfirmGateCrossInstanceExpiryTest {
 			String previous = ConfirmGateCrossInstanceExpiryTest.this.decisions.putIfAbsent(key, value);
 			return new RunStore.DecisionClaim(previous == null, previous == null ? value : previous);
 		}
+
+
+		@Override
+		public RunStore.DecisionClaim tryApplyDecision(String runId, PendingToolCall pending) {
+			// 到期收敛走 DECIDE_PENDING 同义的原子口：与上面的 guard 替身共用同一份 decisions，
+			// guardDown 时同样 fail-closed（生产该口由 Lua 抛错 → 收敛方返回 0）。
+			if (ConfirmGateCrossInstanceExpiryTest.this.guardDown) {
+				throw new com.example.configmgr.common.AiStateUnavailableException(
+						"无法写入决策 guard " + pending.getToolCallId(), new IllegalStateException("redis down"));
+			}
+			String key = runId + "|" + pending.getToolCallId();
+			String value = pending.getStatus() + "|" + System.currentTimeMillis() + "|instance-test";
+			String previous = ConfirmGateCrossInstanceExpiryTest.this.decisions.putIfAbsent(key, value);
+			if (previous == null) {
+				putPending(runId, pending);
+			}
+			return new RunStore.DecisionClaim(previous == null, previous == null ? value : previous);
+		}
 	};
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -178,25 +197,30 @@ class ConfirmGateCrossInstanceExpiryTest {
 	}
 
 	/** SUSPENDED、一个已到期（{@code expiresAt} 在过去）的即时前端工具条目。 */
-	private void seedParkedExpiredFrontend() {		RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec);
-		snapshot.setTenantId(TENANT_ID);
-		snapshot.setUserId(USER_ID);
-		snapshot.setStatus(RunSnapshot.SUSPENDED);
-		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
-		this.store.save(snapshot);
-		long atMs = System.currentTimeMillis() - Duration.ofMinutes(10).toMillis();
-		snapshot.setUpdatedAtMs(atMs);
-		this.store.appendEvent(RUN_ID, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
+	private void seedParkedExpiredFrontend() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT_ID, USER_ID)) {
+			RunSnapshot snapshot = this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec,
+					null, null, new RunSnapshot.FrozenParams(null, null, 4096, false));
+			snapshot.setTenantId(TENANT_ID);
+			snapshot.setUserId(USER_ID);
+			snapshot.setStatus(RunSnapshot.SUSPENDED);
+			snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("继续"))));
+			this.store.save(snapshot);
+			long atMs = System.currentTimeMillis() - Duration.ofMinutes(10).toMillis();
+			snapshot.setUpdatedAtMs(atMs);
+			this.store.appendEvent(RUN_ID, Map.of("type", "tool_start", "seq", 1L, "atMs", atMs));
 
-		PendingToolCall pending = new PendingToolCall();
-		pending.setToolCallId(CALL_ID);
-		pending.setName("download_export_files");
-		pending.setKind(PendingToolCall.KIND_FRONTEND);
-		pending.setStatus(PendingToolCall.PENDING);
-		pending.setAtMs(atMs);
-		pending.setExpiresAt(atMs + 120_000L);
-		pending.setReq(Boolean.TRUE);
-		this.store.putPending(RUN_ID, pending);
+			PendingToolCall pending = new PendingToolCall();
+			pending.setToolCallId(CALL_ID);
+			pending.setName("download_export_files");
+			pending.setKind(PendingToolCall.KIND_FRONTEND);
+			pending.setStatus(PendingToolCall.PENDING);
+			pending.setAtMs(atMs);
+			pending.setExpiresAt(atMs + 120_000L);
+			pending.setReq(Boolean.TRUE);
+			this.store.putPending(RUN_ID, pending);
+		}
 	}
 
 }

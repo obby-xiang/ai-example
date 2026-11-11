@@ -47,8 +47,12 @@ class RunStoreClaimFenceTest {
 
 	private ListAppender<ILoggingEvent> appender;
 
+	/** run 级键按身份拼：认领/挂起台账写口都必须处在显式身份作用域。 */
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void attachLogAppender() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.appender = new ListAppender<>();
 		this.appender.start();
 		((Logger) LoggerFactory.getLogger(RunStore.class)).addAppender(this.appender);
@@ -58,17 +62,22 @@ class RunStoreClaimFenceTest {
 	@AfterEach
 	void detachLogAppender() {
 		((Logger) LoggerFactory.getLogger(RunStore.class)).detachAppender(this.appender);
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	@Test
 	void claimIsRejectedWhenTheFenceHasMovedPastOurEpoch() {
 		// A 持租并写一次快照（fence 推到 A 的 epoch）
-		this.leaseA.tryAcquire(this.storeA.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.leaseA.tryAcquireFenced(this.storeA.runLeaseKey(RUN_ID), this.storeA.fenceKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow();
 		long epochA = this.storeA.heldRunEpoch(RUN_ID);
 		this.storeA.save(snapshot(RunSnapshot.SUSPENDED));
 		// 换主：A 的租约过期，B 接管并写入（fence 推进到更大的 epoch）
 		this.fake.dropKey(this.storeA.runLeaseKey(RUN_ID));
-		this.leaseB.tryAcquire(this.storeB.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.leaseB.tryAcquireFenced(this.storeB.runLeaseKey(RUN_ID), this.storeB.fenceKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow();
 		this.storeB.save(snapshot(RunSnapshot.SUSPENDED));
 		assertThat(this.storeA.fenceEpoch(RUN_ID)).as("fence 已推进").isGreaterThan(epochA);
 
@@ -76,13 +85,14 @@ class RunStoreClaimFenceTest {
 
 		assertThat(claimed).as("fence > 本实例 epoch ⇒ 不得执行").isFalse();
 		assertThat(this.storeA.claimedBy(RUN_ID, "c-1")).as("拒绝认领不得留痕").isNull();
-		assertThat(logged("STALE_EPOCH 拒绝认领")).as("拒绝要留痕（否则现场只会看到'认领失败'）").isTrue();
+		assertThat(logged("STALE_EPOCH refused claim")).as("拒绝要留痕（否则现场只会看到'认领失败'）").isTrue();
 	}
 
 	@Test
 	void claimOutcomeDistinguishesWonLostAndStaleFence() {
 		// A 持租并写一次快照：fence = A 的 epoch（本实例既不陈旧、也不越权）
-		this.leaseA.tryAcquire(this.storeA.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.leaseA.tryAcquireFenced(this.storeA.runLeaseKey(RUN_ID), this.storeA.fenceKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow();
 		long epochA = this.storeA.heldRunEpoch(RUN_ID);
 		this.storeA.save(snapshot(RunSnapshot.SUSPENDED));
 
@@ -91,22 +101,23 @@ class RunStoreClaimFenceTest {
 
 		// 换主：A 的租约过期、B 接管并写入（fence 推进到更大的 epoch）
 		this.fake.dropKey(this.storeA.runLeaseKey(RUN_ID));
-		this.leaseB.tryAcquire(this.storeB.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.leaseB.tryAcquireFenced(this.storeB.runLeaseKey(RUN_ID), this.storeB.fenceKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow();
 		this.storeB.save(snapshot(RunSnapshot.SUSPENDED));
 		RunStore.ClaimResult stale = this.storeA.tryClaimExecution(RUN_ID, "c-2", this.storeA.instanceId());
 
 		assertThat(won.outcome()).as("第一个认领者 ⇒ WON").isEqualTo(RunStore.ClaimOutcome.WON);
-		assertThat(won.won()).isTrue();
+		assertThat(won.isWon()).isTrue();
 		assertThat(won.epoch()).as("认领记录的 epoch = 本实例持租的 epoch").isEqualTo(epochA);
 		assertThat(won.fence()).as("WON 时 fence ≤ epoch").isLessThanOrEqualTo(epochA);
 
 		assertThat(lost.outcome()).as("同一调用第二次 ⇒ LOST（被他人认领）")
 			.isEqualTo(RunStore.ClaimOutcome.LOST);
-		assertThat(lost.won()).isFalse();
+		assertThat(lost.isWon()).isFalse();
 
 		assertThat(stale.outcome()).as("换主后 ⇒ STALE_FENCE（不是'被他人认领'）")
 			.isEqualTo(RunStore.ClaimOutcome.STALE_FENCE);
-		assertThat(stale.won()).isFalse();
+		assertThat(stale.isWon()).isFalse();
 		assertThat(stale.fence()).as("STALE_FENCE 带上拒绝依据（fence > epoch）").isGreaterThan(stale.epoch());
 		assertThat(this.storeA.claimedBy(RUN_ID, "c-2")).as("stale 拒绝不得留痕").isNull();
 
@@ -142,7 +153,8 @@ class RunStoreClaimFenceTest {
 		entry.setName("start_import");
 		entry.setKind(PendingToolCall.KIND_BACKEND);
 		inMemory.seedPending(RUN_ID, entry);
-		this.leaseA.tryAcquire(inMemory.runLeaseKey(RUN_ID), this.properties.getLease().getTtl()).orElseThrow();
+		this.leaseA.tryAcquireFenced(inMemory.runLeaseKey(RUN_ID), inMemory.fenceKey(RUN_ID),
+				this.properties.getLease().getTtl()).orElseThrow();
 		long epoch = inMemory.heldRunEpoch(RUN_ID);
 		assertThat(inMemory.claimExecution(RUN_ID, "c-1", "inst-a")).isTrue();
 		PendingToolCall claimed = inMemory.pending(RUN_ID, "c-1");
@@ -169,6 +181,8 @@ class RunStoreClaimFenceTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(RUN_ID);
 		snapshot.setSessionId("s-claim-fence");
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(status);
 		return snapshot;
 	}

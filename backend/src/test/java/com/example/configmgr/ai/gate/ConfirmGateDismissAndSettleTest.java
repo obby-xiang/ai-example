@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
@@ -55,7 +56,7 @@ class ConfirmGateDismissAndSettleTest {
 	private final LateWriterStore store = new LateWriterStore();
 
 	/** 真实注册表 + 真实写出器（{@code properties == null} ⇒ 同步直执，帧序确定）。 */
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final SseChatEmitter out = this.registry.of(RUN_ID);
 
@@ -68,7 +69,7 @@ class ConfirmGateDismissAndSettleTest {
 
 	@BeforeEach
 	void seedPendingFrontendForm() {
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		this.store.seedRun(RUN_ID, "sess-1");
@@ -81,7 +82,7 @@ class ConfirmGateDismissAndSettleTest {
 		FrameWire wire = FrameWire.attachTo(this.out);
 		// LateWriterStore 在 tryRecordDecision 之前模拟"不带 guard 的写者"把条目写成 REJECTED（超时收敛）
 		this.store.injectGuardlessWriter = true;
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{}", "http-post", true);
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{}", "http-post", true);
 
 		assertThat(submission.outcome()).as("抢 guard 之后复读发现已决 ⇒ 幂等拒绝").isEqualTo(ConfirmGate.Outcome.DUPLICATE);
 		PendingToolCall stored = this.store.pendingRaw(RUN_ID, CALL_ID);
@@ -99,7 +100,7 @@ class ConfirmGateDismissAndSettleTest {
 	void dismissWinningTheGuardStillCancelsTheFormAndSettlesOnce() {
 		FrameWire wire = FrameWire.attachTo(this.out);
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{}", "http-post", true);
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{}", "http-post", true);
 
 		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 		PendingToolCall stored = this.store.pendingRaw(RUN_ID, CALL_ID);
@@ -113,7 +114,7 @@ class ConfirmGateDismissAndSettleTest {
 
 	@Test
 	void acceptedResultSettlesResourcesOnlyAfterTheDecisionIsPersisted() {
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{\"a\":1}", "http-post",
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{\"a\":1}", "http-post",
 				false, "ok");
 
 		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
@@ -127,7 +128,7 @@ class ConfirmGateDismissAndSettleTest {
 		FrameWire wire = FrameWire.attachTo(this.out);
 		this.guard.reject = true;
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{}", "http-post");
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{}", "http-post");
 
 		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.REJECTED);
 		assertThat(this.store.pendingRaw(RUN_ID, CALL_ID).getStatus()).isEqualTo(PendingToolCall.PENDING);
@@ -137,9 +138,9 @@ class ConfirmGateDismissAndSettleTest {
 
 	@Test
 	void duplicateSubmissionDoesNotSettleResourcesAgain() {
-		this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{\"a\":1}", "http-post", false, "ok");
+		GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{\"a\":1}", "http-post", false, "ok");
 
-		ConfirmGate.Submission duplicate = this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{\"a\":1}", "http-post",
+		ConfirmGate.Submission duplicate = GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{\"a\":1}", "http-post",
 				false, "ok");
 
 		assertThat(duplicate.outcome()).isEqualTo(ConfirmGate.Outcome.DUPLICATE);
@@ -150,7 +151,7 @@ class ConfirmGateDismissAndSettleTest {
 	void settleFailureDoesNotChangeTheAlreadyPersistedDecision() {
 		this.guard.throwOnSettle = true;
 
-		ConfirmGate.Submission submission = this.gate.submitFrontendResult(RUN_ID, CALL_ID, "{\"a\":1}", "http-post",
+		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{\"a\":1}", "http-post",
 				false, "ok");
 
 		assertThat(submission.outcome()).as("收口失败不得改写结论").isEqualTo(ConfirmGate.Outcome.ACCEPTED);

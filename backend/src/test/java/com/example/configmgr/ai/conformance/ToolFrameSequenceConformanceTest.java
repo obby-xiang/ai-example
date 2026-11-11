@@ -1,5 +1,7 @@
 package com.example.configmgr.ai.conformance;
 
+import com.example.configmgr.ai.gate.GateCalls;
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.FakeStartImportTool;
@@ -92,7 +94,7 @@ class ToolFrameSequenceConformanceTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -122,7 +124,7 @@ class ToolFrameSequenceConformanceTest {
 			thread.setDaemon(true);
 			return thread;
 		});
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
@@ -334,7 +336,7 @@ class ToolFrameSequenceConformanceTest {
 
 		Future<ConfirmGate.Submission> backfill = this.decisionThread.submit(() -> {
 			wire.awaitType("frontend_tool_request", 5000L);
-			return this.gate.submitFrontendResult(RUN_ID, CALL_ID, payload, "conformance-test");
+			return GateCalls.submit(this.gate, RUN_ID, CALL_ID, payload, "conformance-test");
 		});
 
 		ToolExecutionResult result = this.manager.executeToolCalls(prompt("navigate_to", "{\"page\":\"export\"}"),
@@ -371,7 +373,7 @@ class ToolFrameSequenceConformanceTest {
 		assertThat(envelope.message()).isEqualTo(payload);
 
 		// 幂等：同一 toolCallId 再次回灌 → DUPLICATE，且不再出帧（不重复执行、不重复渲染）
-		ConfirmGate.Submission duplicate = this.gate.submitFrontendResult(RUN_ID, CALL_ID, payload, "retry");
+		ConfirmGate.Submission duplicate = GateCalls.submit(this.gate, RUN_ID, CALL_ID, payload, "retry");
 		assertThat(duplicate.outcome()).isEqualTo(ConfirmGate.Outcome.DUPLICATE);
 		assertThat(this.store.events(RUN_ID)).as("重复回灌不再产生任何帧").hasSize(framesAfterTerminal);
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus()).isEqualTo(PendingToolCall.FRONTEND_RESULT);

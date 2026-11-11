@@ -56,7 +56,7 @@ class AiConfigWriterTest {
 		this.fixture.properties.getConfig().setAllowPrivateEndpoints(false);
 		return new AiConfigWriter(this.fixture.providerRepository, this.fixture.modelRepository,
 				this.fixture.settingRepository, this.fixture.auditRepository, new AiKeyCipher(kek),
-				new AiEndpointGuard(this.fixture.properties), this.redis, this.transactionManager, service,
+				new AiEndpointGuard(this.fixture.properties), this.transactionManager, service,
 				new ObjectMapper(), null);
 	}
 
@@ -67,7 +67,7 @@ class AiConfigWriterTest {
 		this.fixture.properties.getConfig().setAllowPrivateEndpoints(allowPrivate);
 		return new AiConfigWriter(this.fixture.providerRepository, this.fixture.modelRepository,
 				this.fixture.settingRepository, this.fixture.auditRepository, new AiKeyCipher(kek),
-				new AiEndpointGuard(this.fixture.properties), this.redis,
+				new AiEndpointGuard(this.fixture.properties),
 				this.transactionManager, this.fixture.service(kek),
 				new ObjectMapper(), null);
 	}
@@ -98,7 +98,6 @@ class AiConfigWriterTest {
 		assertThat(created.getModelsPath()).isEqualTo("/models");
 		// 版本号 = DB 真源 +1，并且 INCR 了跨实例失效信号
 		assertThat(this.fixture.version()).isEqualTo(2);
-		verify(this.redisOps).increment(AiConfigService.REDIS_VERSION_KEY);
 		// 单实例语义：写路径主动 reload ⇒ 读侧<b>下一个请求</b>就能拿到新配置
 		assertThat(this.fixture.service().current().providers()).extracting(AiProvider::getCode)
 			.contains("custom-1");
@@ -464,23 +463,23 @@ class AiConfigWriterTest {
 				null, null, null));
 
 		assertThatThrownBy(() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, 2.5d, null, null,
-				null)))
+				null, null)))
 			.isInstanceOf(AiConfigException.class)
 			.extracting(ex -> ((AiConfigException) ex).getCode())
 			.isEqualTo(AiConfigWriter.CODE_INVALID_PARAM);
 		assertThatThrownBy(() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, null, 1.2d, null,
-				null)))
+				null, null)))
 			.isInstanceOf(AiConfigException.class);
-		assertThatThrownBy(() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, null, null, 0, null)))
+		assertThatThrownBy(() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, null, null, 0, null, null)))
 			.isInstanceOf(AiConfigException.class);
 		assertThatThrownBy(() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand("nope", null, null, null,
-				null)))
+				null, null)))
 			.isInstanceOf(AiConfigException.class)
 			.extracting(ex -> ((AiConfigException) ex).getCode())
 			.isEqualTo(AiConfigWriter.CODE_MODEL_NOT_FOUND);
 
 		long before = this.fixture.version();
-		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("m-1", 0.3d, 0.9d, 1024, Boolean.FALSE));
+		writer.updateDefaults(new AiConfigWriter.DefaultsCommand("m-1", 0.3d, 0.9d, 1024, Boolean.FALSE, null));
 		assertThat(this.fixture.settings).containsEntry(AiSetting.DEFAULT_MODEL_ID, "m-1")
 			.containsEntry(AiSetting.DEFAULT_TEMPERATURE, "0.3")
 			.containsEntry(AiSetting.DEFAULT_TOP_P, "0.9")
@@ -497,7 +496,7 @@ class AiConfigWriterTest {
 				null, null, null));
 
 		assertThatThrownBy(
-				() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand("m-1", null, null, 4096, null)))
+				() -> writer.updateDefaults(new AiConfigWriter.DefaultsCommand("m-1", null, null, 4096, null, null)))
 			.isInstanceOf(AiConfigException.class)
 			.extracting(ex -> ((AiConfigException) ex).getCode())
 			.isEqualTo(AiConfigWriter.CODE_INVALID_PARAM);
@@ -513,7 +512,7 @@ class AiConfigWriterTest {
 		service.current();
 		long before = service.current().version();
 
-		writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, 0.7d, null, null, null));
+		writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, 0.7d, null, null, null, null));
 
 		assertThat(service.current().version()).isEqualTo(before + 1);
 		assertThat(service.current().settings()).containsEntry(AiSetting.DEFAULT_TEMPERATURE, "0.7");
@@ -554,7 +553,7 @@ class AiConfigWriterTest {
 		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com", null));
 		writer.addModel(created.getId(), new AiConfigWriter.ModelCommand("m-1", null, null, null, null, null, null,
 				null, null, null));
-		writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, 0.1d, null, null, null));
+		writer.updateDefaults(new AiConfigWriter.DefaultsCommand(null, 0.1d, null, null, null, null));
 		writer.deleteProvider(created.getId(), false);
 
 		assertThat(this.fixture.audits).extracting(AiConfigAudit::getAction).containsExactly(
@@ -564,7 +563,6 @@ class AiConfigWriterTest {
 			.containsExactly("provider", "model", "setting", "provider");
 		// M-3（复审）：每一次写入都必须 INCR 一次跨实例失效信号 —— 次数与变更次数逐一对齐
 		//（少 INCR = 别的实例要等 DB 版本比对才看得见；多 INCR = 无意义的重载信号）
-		verify(this.redisOps, org.mockito.Mockito.times(4)).increment(AiConfigService.REDIS_VERSION_KEY);
 	}
 
 	// ── I-1（复审必修）：用户一改即脱离种子 ─────────────────────────────────
@@ -619,7 +617,8 @@ class AiConfigWriterTest {
 	private AiConfigSeeder seeder(AiConfigService service) {
 		return new AiConfigSeeder(this.fixture.providerRepository, this.fixture.modelRepository, service,
 				this.fixture.properties, this.transactionManager,
-				new AiConfigVersionPublisher(this.fixture.settingRepository, this.redis, service, null));
+				new AiConfigVersionPublisher(this.fixture.settingRepository, service,
+						mock(com.example.configmgr.ai.config.AiProviderRegistry.class)));
 	}
 
 }

@@ -6,11 +6,13 @@ import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.context.ContextCompactor;
 import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
@@ -30,6 +32,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
 
@@ -44,6 +47,8 @@ import java.util.function.IntSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -107,7 +112,7 @@ class FirstTurnCompactionStageTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -121,8 +126,11 @@ class FirstTurnCompactionStageTest {
 
 	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
 
+	private final ConversationTranscriptStore transcript = mock(ConversationTranscriptStore.class);
+
 	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
-			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel, this.chatClient);
+			"http://localhost", "/chat/completions", "test|runtime",
+			OpenAiChatOptions.builder().model("test-model").build(), null, this.chatModel, this.chatClient);
 
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
@@ -139,14 +147,17 @@ class FirstTurnCompactionStageTest {
 	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
 
 	private final ContextCompactor compactor = new ContextCompactor(this.properties,
-			new ContextLimitResolver(this.properties), this.contextStore);
+			new ContextLimitResolver((providerId, modelId) -> 128000), this.contextStore, null);
 
 	private ScheduledExecutorService watchdogExecutor;
 
 	private ResilientChatService service;
 
+	private RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "first-turn-stage-watchdog");
 			thread.setDaemon(true);
@@ -156,6 +167,8 @@ class FirstTurnCompactionStageTest {
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
 		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
+		ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
+		when(this.transcript.append(anyString(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(this.runtime));
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
@@ -171,6 +184,7 @@ class FirstTurnCompactionStageTest {
 	@AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		this.identity.close();
 	}
 
 	/**
@@ -238,7 +252,11 @@ class FirstTurnCompactionStageTest {
 	@Test
 	void cancelDuringCompactionSkipsModelCallAndPersistsCancelledSnapshot() {
 		stubFluentChain();
-		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+		// 入口一拍尚未取消，压缩期间才翻成 CANCELLED（否则会走“首快照/压缩之前就取消”的另一条早退路径）
+		java.util.concurrent.atomic.AtomicInteger cancelReads = new java.util.concurrent.atomic.AtomicInteger();
+		when(this.cancellations.cancelState(anyString())).thenAnswer(invocation -> cancelReads.incrementAndGet() == 1
+				? CancellationRegistry.CancelState.NOT_CANCELLED
+				: CancellationRegistry.CancelState.CANCELLED);
 		SseChatEmitter out = this.registry.of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
 

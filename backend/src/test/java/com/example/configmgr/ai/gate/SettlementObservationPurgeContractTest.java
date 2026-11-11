@@ -38,25 +38,25 @@ class SettlementObservationPurgeContractTest {
 	void purgeDeletesTheRedisKeyAndTheInProcessFace() {
 		FakeObservationRedis fake = new FakeObservationRedis();
 		SettlementObservationStore store = new SettlementObservationStore(fake.template, this.properties);
-		store.claim(RUN_ID, CALL_ID);
-		store.claim(OTHER_RUN, CALL_ID);
+		store.claim(RUN_ID, CALL_ID).claimed();
+		store.claim(OTHER_RUN, CALL_ID).claimed();
 
 		assertThat(purgeAll(store, List.of(RUN_ID))).as("销毁成功不产生错误项").isEmpty();
 
 		assertThat(fake.hasKey(store.observedKey(RUN_ID))).as("Redis 键已删（不是等 TTL）").isFalse();
 		assertThat(fake.hasKey(store.observedKey(OTHER_RUN))).as("只删本 run，不误伤别的轮").isTrue();
-		assertThat(store.claim(RUN_ID, CALL_ID)).as("销毁后重新可抢").isTrue();
+		assertThat(store.claim(RUN_ID, CALL_ID).claimed()).as("销毁后重新可抢").isTrue();
 	}
 
 	/** 无 Redis（轻装配/单测）时，清的就是进程内那唯一一份面。 */
 	@Test
 	void purgeAlsoClearsTheInProcessFace() {
 		SettlementObservationStore memoryOnly = new SettlementObservationStore();
-		assertThat(memoryOnly.claim(RUN_ID, CALL_ID)).isTrue();
+		assertThat(memoryOnly.claim(RUN_ID, CALL_ID).claimed()).isTrue();
 
 		assertThat(purgeAll(memoryOnly, List.of(RUN_ID))).isEmpty();
 
-		assertThat(memoryOnly.claim(RUN_ID, CALL_ID)).as("进程内面已清").isTrue();
+		assertThat(memoryOnly.claim(RUN_ID, CALL_ID).claimed()).as("进程内面已清").isTrue();
 	}
 
 	/** DEL 失败必须如实上报（调用方记 errors 走既有重试），不能静默成功。 */
@@ -64,7 +64,7 @@ class SettlementObservationPurgeContractTest {
 	void purgeReportsRedisFailureSoTheCallerCanRetry() {
 		FakeObservationRedis fake = new FakeObservationRedis();
 		SettlementObservationStore store = new SettlementObservationStore(fake.template, this.properties);
-		store.claim(RUN_ID, CALL_ID);
+		store.claim(RUN_ID, CALL_ID).claimed();
 		fake.failDelete = true;
 
 		assertThat(purgeAll(store, List.of(RUN_ID))).as("失败必须进错误集").hasSize(1)
@@ -89,14 +89,14 @@ class SettlementObservationPurgeContractTest {
 	void destroySideLiteralDeleteTargetsTheKeyClaimWrote() {
 		FakeObservationRedis fake = new FakeObservationRedis();
 		SettlementObservationStore store = new SettlementObservationStore(fake.template, this.properties);
-		store.claim(RUN_ID, CALL_ID);
-		store.claim(OTHER_RUN, CALL_ID);
+		store.claim(RUN_ID, CALL_ID).claimed();
+		store.claim(OTHER_RUN, CALL_ID).claimed();
 
 		assertThat(Boolean.TRUE.equals(fake.template.delete("ai:observed:" + RUN_ID)))
 			.as("按销毁方字面量删到了 claim 写的那把键").isTrue();
 		assertThat(fake.hasKey("ai:observed:" + RUN_ID)).isFalse();
 		assertThat(fake.hasKey("ai:observed:" + OTHER_RUN)).as("只删本 run，不误伤别的轮").isTrue();
-		assertThat(store.claim(RUN_ID, CALL_ID)).as("删后重新可抢（键名一致 ⇒ 仲裁位真的没了）").isTrue();
+		assertThat(store.claim(RUN_ID, CALL_ID).claimed()).as("删后重新可抢（键名一致 ⇒ 仲裁位真的没了）").isTrue();
 	}
 
 	/**

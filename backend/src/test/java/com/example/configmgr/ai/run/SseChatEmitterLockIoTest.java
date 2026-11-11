@@ -3,14 +3,18 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongConsumer;
 
@@ -45,6 +49,21 @@ class SseChatEmitterLockIoTest {
 	private final RecordingWakeBus bus = new RecordingWakeBus();
 
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
+
+	/** 投递/唤醒身份作用域：缺身份时写出器按"本拍不发布/不订阅"降级，锁外 I/O 就无从观测。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	@Test
 	void wakeSubscriptionIsEstablishedOutsideTheEmitLock() {
@@ -105,7 +124,7 @@ class SseChatEmitterLockIoTest {
 	private SseChatEmitter emitter() {
 		SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.frames, MAPPER, Runnable::run,
 				AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
-				SseWriteBudget.direct(), this.bus, this.listener);
+				SseWriteBudget.direct(), this.bus, this.listener, null);
 		this.bus.emitter.set(out);
 		return out;
 	}
@@ -127,20 +146,21 @@ class SseChatEmitterLockIoTest {
 		private final Map<String, LongConsumer> subscribers = new ConcurrentHashMap<>();
 
 		@Override
-		public boolean subscribe(String runId, LongConsumer onWake) {
+		public Subscription subscribeHandle(String runId, long generation, LongConsumer onWake) {
 			record("subscribe");
 			this.subscribers.put(runId, onWake);
-			return true;
+			AtomicBoolean closed = new AtomicBoolean();
+			return () -> {
+				// 幂等关闭（与生产 Subscription 句柄同口径）：重复 close 不得重复记退订。
+				if (closed.compareAndSet(false, true)) {
+					record("unsubscribe");
+					this.subscribers.remove(runId);
+				}
+			};
 		}
 
 		@Override
-		public void unsubscribe(String runId) {
-			record("unsubscribe");
-			this.subscribers.remove(runId);
-		}
-
-		@Override
-		public void publish(String runId, long upperBoundSeq) {
+		public void publish(String runId, long upperBoundSeq, boolean terminal) {
 			record("publish");
 			this.published.add(upperBoundSeq);
 			LongConsumer target = this.subscribers.get(runId);

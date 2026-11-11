@@ -98,13 +98,14 @@ class AiResumeExactProviderBindingTest {
 
 		assertThat(result.outcome()).as("同名模型不是跨家理由：按快照 providerId 精确解析")
 			.isEqualTo(ResumeService.Outcome.ACCEPTED);
-		ArgumentCaptor<Long> providerId = ArgumentCaptor.forClass(Long.class);
-		ArgumentCaptor<String> modelId = ArgumentCaptor.forClass(String.class);
+		// 当前 driveResumed 不再暴露 provider/model 形参：绑定在 ResumeService 内部按快照解析。
+		// 精确绑定由三件事共同证明：ACCEPTED + 快照身份未被改写 + 下方“B 失模型即 GONE”的差分用例。
 		verify(this.chatService).driveResumed(anyString(), anyString(), any(AiContext.class),
-				org.mockito.ArgumentMatchers.<List<Message>>any(), providerId.capture(), modelId.capture(), any());
-		assertThat(providerId.getValue()).as("只到快照那一家（B），不是库序第一家（A）")
+				org.mockito.ArgumentMatchers.<List<Message>>any(), any());
+		var snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getProviderId()).as("快照 provider 仍是 B（不是全局默认 A）")
 			.isEqualTo(this.providerB.getId());
-		assertThat(modelId.getValue()).isEqualTo(SHARED_MODEL);
+		assertThat(snapshot.getModelId()).isEqualTo(SHARED_MODEL);
 	}
 
 	@Test
@@ -116,7 +117,7 @@ class AiResumeExactProviderBindingTest {
 
 		assertThat(result.outcome()).as("B 不再允许该模型 ⇒ GONE；不得去 A 借用同名模型")
 			.isEqualTo(ResumeService.Outcome.PROVIDER_GONE);
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any(), any(), any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
 	}
 
 	@Test
@@ -167,7 +168,7 @@ class AiResumeExactProviderBindingTest {
 		assertThat(this.store.get(RUN_ID).getStatus())
 			.as("刷新成功 + 行确实不在 ⇒ 这才是可以判死的'确定'（FAILED 终态）")
 			.isEqualTo(RunSnapshot.FAILED);
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any(), any(), any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
 	}
 
 	// ── 复核 Critical-1：读库失败 / key 解不开 都不是"端点被删" ──────────────────
@@ -197,7 +198,7 @@ class AiResumeExactProviderBindingTest {
 		assertThat(this.store.get(RUN_ID).getStatus()).as("不得判死：快照保持 SUSPENDED，抖动过去就能续")
 			.isEqualTo(RunSnapshot.SUSPENDED);
 		assertThat(this.store.events(RUN_ID)).as("不可知 ⇒ 不得写业务帧").isEmpty();
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any(), any(), any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
 
 		// 持续性：同一抖动窗口里再试一次也不得翻转成终态（旧码在这里是第二次判死机会）
 		ResumeService.ResumeResult retry = resumeService(reader).resume(RUN_ID);

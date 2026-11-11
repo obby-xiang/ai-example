@@ -34,7 +34,7 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 		@JsonProperty("segments") @JsonInclude(JsonInclude.Include.NON_EMPTY) List<SegmentView> segments,
 			@JsonProperty("toolCallsPresent") boolean toolCallsPresent,
 			@JsonProperty("toolCallStatesPresent") boolean toolCallStatesPresent,
-			@JsonProperty("segmentsPresent") boolean segmentsPresent) {
+			@JsonProperty("segmentsPresent") boolean segmentsPresent, @JsonProperty("origin") String origin) {
 
 	public TranscriptEntry {
 		toolCalls = toolCalls == null || toolCalls.isEmpty() ? List.of()
@@ -65,13 +65,13 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 			@JsonProperty("segments") List<SegmentView> segments,
 			@JsonProperty("toolCallsPresent") Boolean toolCallsPresent,
 			@JsonProperty("toolCallStatesPresent") Boolean toolCallStatesPresent,
-			@JsonProperty("segmentsPresent") Boolean segmentsPresent) {
+			@JsonProperty("segmentsPresent") Boolean segmentsPresent, @JsonProperty("origin") String origin) {
 		this(entryId, kind, runId, turnStartedAtMs, atMs, text, reasoning, stopped, truncated, toolCalls,
 				toolCallStates, toolCallId, name, kind2, status, result, code, toolTruncated, toolStrategy,
 				toolOriginalChars, toolReturnedChars, errorCode, errorMessage, outcome, errorCardKey, unconfirmed,
 				segments, isPresent(toolCallsPresent, toolCalls != null && !toolCalls.isEmpty()),
 				isPresent(toolCallStatesPresent, toolCallStates != null && !toolCallStates.isEmpty()),
-				isPresent(segmentsPresent, segments != null && !segments.isEmpty()));
+				isPresent(segmentsPresent, segments != null && !segments.isEmpty()), origin);
 	}
 
 	private static boolean isPresent(Boolean explicit, boolean nonEmpty) {
@@ -87,7 +87,7 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 		this(entryId, kind, runId, turnStartedAtMs, atMs, text, reasoning, stopped, truncated, toolCalls,
 				toolCallStates, toolCallId, name, kind2, status, result, code, toolTruncated, toolStrategy,
 				toolOriginalChars, toolReturnedChars, errorCode, errorMessage, outcome, errorCardKey, unconfirmed,
-				segments, toolCalls != null, toolCallStates != null, segments != null);
+				segments, toolCalls != null, toolCallStates != null, segments != null, null);
 	}
 
 	@Override
@@ -148,7 +148,7 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 				this.toolCallId, this.name, this.kind2, this.status, this.result, this.code,
 				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
 				this.errorCode, this.errorMessage, this.outcome, this.errorCardKey, this.unconfirmed, this.segments,
-				this.toolCallsPresent, toolCallStates != null, this.segmentsPresent);
+				this.toolCallsPresent, toolCallStates != null, this.segmentsPresent, this.origin);
 	}
 
 	public TranscriptEntry withContent(String text, String reasoning) {
@@ -157,7 +157,7 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 				this.toolCallId, this.name, this.kind2, this.status, this.result, this.code,
 				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
 				this.errorCode, this.errorMessage, this.outcome, this.errorCardKey, this.unconfirmed, this.segments,
-				this.toolCallsPresent, this.toolCallStatesPresent, this.segmentsPresent);
+				this.toolCallsPresent, this.toolCallStatesPresent, this.segmentsPresent, this.origin);
 	}
 
 	public TranscriptEntry withSegments(List<SegmentView> segments) {
@@ -166,7 +166,7 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 				this.toolCallId, this.name, this.kind2, this.status, this.result, this.code,
 				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
 				this.errorCode, this.errorMessage, this.outcome, this.errorCardKey, this.unconfirmed, segments,
-				this.toolCallsPresent, this.toolCallStatesPresent, segments != null);
+				this.toolCallsPresent, this.toolCallStatesPresent, segments != null, this.origin);
 	}
 
 	public TranscriptEntry withOutcome(String outcome, String errorCardKey, Boolean unconfirmed, String errorCode,
@@ -177,7 +177,16 @@ public record TranscriptEntry(@JsonProperty("entryId") String entryId, @JsonProp
 				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
 				errorCode == null ? this.errorCode : errorCode, errorMessage == null ? this.errorMessage : errorMessage,
 				outcome, errorCardKey, unconfirmed, this.segments,
-				this.toolCallsPresent, this.toolCallStatesPresent, this.segmentsPresent);
+				this.toolCallsPresent, this.toolCallStatesPresent, this.segmentsPresent, this.origin);
+	}
+
+	public TranscriptEntry withOrigin(String origin) {
+		return new TranscriptEntry(this.entryId, this.kind, this.runId, this.turnStartedAtMs, this.atMs,
+				this.text, this.reasoning, this.stopped, this.truncated, this.toolCalls, this.toolCallStates,
+				this.toolCallId, this.name, this.kind2, this.status, this.result, this.code,
+				this.toolTruncated, this.toolStrategy, this.toolOriginalChars, this.toolReturnedChars,
+				this.errorCode, this.errorMessage, this.outcome, this.errorCardKey, this.unconfirmed, this.segments,
+				this.toolCallsPresent, this.toolCallStatesPresent, this.segmentsPresent, origin);
 	}
 
 }

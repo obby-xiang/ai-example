@@ -120,7 +120,7 @@ class ModelDrivenConditionCollectionChatTest {
 				this.cancellations, this.beacon, this.watchdogExecutor);
 		this.service.setTaskSlotResolver(new TaskSlotResolver(this.catalog));
 		stubFluentChain();
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenReturn(() -> {
 		});
 		when(this.chatMemory.get(anyString())).thenReturn(List.of());

@@ -3,7 +3,6 @@ package com.example.configmgr.ai.web;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ContextFieldGate;
 import com.example.configmgr.ai.gate.InputSanitizer;
@@ -155,30 +154,6 @@ class AiControllerPreStreamLocaleTest {
 		this.mockMvc.perform(overlongRequest().header("Accept-Language", "zh-TW"))
 			.andExpect(status().isBadRequest())
 			.andExpect(jsonPath("$.message").value(containsString("消息长度")));
-	}
-
-	// ── 429 RATE_LIMITED ────────────────────────────────────────────────────
-
-	@Test
-	void rateLimitedIsEnglishWithHeader() throws Exception {
-		allowChat();
-		refuseRateLimit();
-
-		this.mockMvc.perform(chatRequest().header("Accept-Language", "en-US"))
-			.andExpect(status().isTooManyRequests())
-			.andExpect(jsonPath("$.code").value(ErrorCodes.RATE_LIMITED))
-			.andExpect(jsonPath("$.message").value("Too many requests, please retry later"))
-			.andExpect(jsonPath("$.retryAfterSeconds").value(30));
-	}
-
-	@Test
-	void rateLimitedStaysChineseWithoutHeader() throws Exception {
-		allowChat();
-		refuseRateLimit();
-
-		this.mockMvc.perform(chatRequest())
-			.andExpect(status().isTooManyRequests())
-			.andExpect(jsonPath("$.message").value(containsString("对话请求过于频繁")));
 	}
 
 	// ── 503 三出口 ──────────────────────────────────────────────────────────
@@ -360,7 +335,7 @@ class AiControllerPreStreamLocaleTest {
 		allowChat();
 		LocaleContextHolder.setLocale(Locale.US);
 		try {
-			this.controller.chat(new AiChatRequest(SESSION, "hello", null), null);
+			this.controller.chat(new AiChatRequest(SESSION, "hello", null));
 			verify(this.chatService, timeout(2000)).chat(anyString(), any(AiChatRequest.class),
 					any(SseChatEmitter.class));
 		}
@@ -410,7 +385,6 @@ class AiControllerPreStreamLocaleTest {
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "errorBodyFactory", factory());
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", mock(AiRateLimiter.class));
 		ReflectionTestUtils.setField(built, "contextFieldGate", new ContextFieldGate());
 		ReflectionTestUtils.setField(built, "securityEvents", new SecurityEvents());
 		when(this.runRegistry.of(any())).thenReturn(this.out);
@@ -426,15 +400,6 @@ class AiControllerPreStreamLocaleTest {
 	private void allowChat(AiController target) {
 		when(this.availability.isAvailable()).thenReturn(true);
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
-		AiRateLimiter limiter = (AiRateLimiter) ReflectionTestUtils.getField(target, "aiRateLimiter");
-		when(limiter.check(any(), any())).thenReturn(new AiRateLimiter.Decision(true, AiRateLimiter.SCOPE_NONE,
-				1, 20, 0L, false));
-	}
-
-	private void refuseRateLimit() {
-		AiRateLimiter limiter = (AiRateLimiter) ReflectionTestUtils.getField(this.controller, "aiRateLimiter");
-		when(limiter.check(any(), any())).thenReturn(new AiRateLimiter.Decision(false, AiRateLimiter.SCOPE_SESSION,
-				20, 20, 30_000L, false));
 	}
 
 	private static org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder overlongRequest() {

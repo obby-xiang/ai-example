@@ -11,6 +11,7 @@ import org.springframework.ai.chat.messages.UserMessage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -39,8 +40,6 @@ class RedisChatMemoryKeyNamespaceTest {
 
 	private static final String BRACED = "{x}";
 
-	private static final String IDS = RedisChatMemoryRepository.CONVERSATION_IDS_KEY;
-
 	private final FakeMemoryRedis fake = new FakeMemoryRedis();
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(new ObjectMapper());
@@ -54,8 +53,8 @@ class RedisChatMemoryKeyNamespaceTest {
 
 		assertEquals(List.of(), this.repository.findByConversationId(BRACED),
 				"sessionId=\"{x}\" 不得读到会话 x 的记忆（legacy 键撞了 x 的 tagged 键）");
-		assertEquals(this.repository.keyFor(BRACED), this.repository.readableKeyFor(BRACED),
-				"诊断/报告用的真实键不得指向另一个会话的数据键");
+		assertNotEquals(this.repository.keyFor(BRACED), this.repository.keyFor(VICTIM),
+				"带括号的 sessionId 不得与会话 x 共用同一 tagged 键");
 	}
 
 	@Test
@@ -65,7 +64,6 @@ class RedisChatMemoryKeyNamespaceTest {
 		this.repository.deleteByConversationId(BRACED);
 
 		assertTrue(this.fake.hasKey(tagged(VICTIM)), "会话 x 的记忆键必须保留");
-		assertTrue(this.fake.set(IDS).contains(VICTIM), "会话 x 的索引成员必须保留");
 		assertFalse(this.fake.deletedKeys.contains(tagged(VICTIM)), "不得对 x 的键发 DEL");
 	}
 
@@ -81,25 +79,24 @@ class RedisChatMemoryKeyNamespaceTest {
 	}
 
 	@Test
-	void reservedIndexNameIsNeverTreatedAsConversationMemory() {
+	void reservedIndexNameIsTreatedAsAPlainConversationKeyOnly() {
 		seedVictimMemory();
-		this.fake.sets.computeIfAbsent(IDS, ignored -> ConcurrentHashMap.newKeySet()).add(VICTIM);
+		this.fake.lists.put("chat:mem:__ids__",
+				new CopyOnWriteArrayList<>(this.codec.serializeAll(List.of(new UserMessage("legacy-index-name")))));
 
 		this.repository.deleteByConversationId("__ids__");
 
-		assertTrue(this.fake.hasKey(IDS), "sessionId=__ids__ 不得把全局索引键当 legacy 记忆键删掉");
-		assertTrue(this.fake.set(IDS).contains(VICTIM), "索引成员必须保留");
+		assertTrue(this.fake.hasKey(tagged(VICTIM)), "保留会话 x 的记忆（索引键已移除，不得牵连）");
+		assertFalse(this.fake.deletedKeys.contains(tagged(VICTIM)), "不得对 x 的键发 DEL");
 	}
 
 	@Test
-	void reservedIndexNameWriteNeverDeletesTheGlobalIndex() {
+	void reservedIndexNameWriteOnlyTouchesItsOwnConversation() {
 		seedVictimMemory();
-		this.fake.sets.computeIfAbsent(IDS, ignored -> ConcurrentHashMap.newKeySet()).add(VICTIM);
 
 		this.repository.saveAll("__ids__", List.of(new UserMessage("index-lookalike")));
 
-		assertTrue(this.fake.hasKey(IDS), "写回后的 legacy 清理不得删掉全局索引键");
-		assertTrue(this.fake.set(IDS).contains(VICTIM), "索引成员必须保留");
+		assertTrue(this.fake.hasKey(tagged(VICTIM)), "写回 __ids__ 不得动会话 x 的键");
 	}
 
 	@Test
@@ -108,7 +105,6 @@ class RedisChatMemoryKeyNamespaceTest {
 		this.fake.lists.put("chat:mem:s-1", new CopyOnWriteArrayList<>(this.codec.serializeAll(
 				List.of(new UserMessage("legacy")))));
 
-		assertEquals("chat:mem:s-1", this.repository.readableKeyFor("s-1"), "仅 legacy 时仍报 legacy");
 		assertEquals(1, this.repository.findByConversationId("s-1").size(), "legacy 历史仍可读");
 
 		this.repository.saveAll("s-1", List.of(new UserMessage("fresh")));
@@ -120,7 +116,6 @@ class RedisChatMemoryKeyNamespaceTest {
 	private List<String> seedVictimMemory() {
 		List<String> payload = this.codec.serializeAll(List.of(new UserMessage("victim")));
 		this.fake.lists.put(tagged(VICTIM), new CopyOnWriteArrayList<>(payload));
-		this.fake.sets.computeIfAbsent(IDS, ignored -> ConcurrentHashMap.newKeySet()).add(VICTIM);
 		return payload;
 	}
 

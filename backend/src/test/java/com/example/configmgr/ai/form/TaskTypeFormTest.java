@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.ai.gate.GateCalls;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
@@ -81,7 +82,7 @@ class TaskTypeFormTest {
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
@@ -169,7 +170,7 @@ class TaskTypeFormTest {
 	@Test
 	void answeringTheFormStopsTheSameRunFromAskingAgain() {
 		assertThat(structuredPark(context(Map.of()), "{\"title\":\"新建\"}", "创建一个任务")).isTrue();
-		this.gate.submitFrontendResult(RUN_ID, TaskTypeForm.toolCallId(RUN_ID), "{\"type\":\"IMPORT\"}",
+		GateCalls.submit(this.gate, RUN_ID, TaskTypeForm.toolCallId(RUN_ID), "{\"type\":\"IMPORT\"}",
 				"unit-test");
 
 		boolean parkedAgain = structuredPark(context(Map.of()), "{\"title\":\"新建\"}", "创建一个任务");

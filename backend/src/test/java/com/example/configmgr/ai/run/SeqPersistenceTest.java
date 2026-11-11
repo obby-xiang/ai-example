@@ -1,7 +1,12 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -27,6 +32,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SeqPersistenceTest {
 
 	private static final String RUN_ID = "run-seq";
+
+	/** 投递身份作用域：写出器按身份解析后才能归档/取号。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	/** 落档失败注入：按 seq 丢弃归档写入（{@code ai:seq} 登记不受影响 —— 正是 S2-4 的口径）。 */
 	private static final class FlakyArchiveStore extends InMemoryRunStore {
@@ -66,7 +86,8 @@ class SeqPersistenceTest {
 	void newInstanceContinuesSeqAfterPartialArchiveFailures() {
 		FlakyArchiveStore store = new FlakyArchiveStore(Set.of(2L, 3L));
 
-		SseChatEmitter first = new SseChatEmitter(RUN_ID, store, new ObjectMapper());
+		SseChatEmitter first = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), new ObjectMapper(), Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		first.start("s-1");
 		first.suspended(List.of(pending("c-1")), "k1", "k2", "i1");
 		first.done(Map.of(), "model-x", Map.of("cancelled", false));
@@ -76,7 +97,8 @@ class SeqPersistenceTest {
 		assertThat(store.lastIssuedSeq(RUN_ID)).as("发放即登记：ai:seq 已推进到 3").isEqualTo(3L);
 
 		// 进程重启：续跑的新写出器（同一外置状态）
-		SseChatEmitter resumed = new SseChatEmitter(RUN_ID, store, new ObjectMapper());
+		SseChatEmitter resumed = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), new ObjectMapper(), Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		CapturingEmitter wire = new CapturingEmitter();
 		resumed.attach(wire.emitter);
 		resumed.suspended(List.of(pending("c-2")), "k1", "k2", "i2");
@@ -93,7 +115,8 @@ class SeqPersistenceTest {
 	@Test
 	void deltaFramesAreArchivedWhileHeartbeatStaysOut() {
 		InMemoryRunStore store = new InMemoryRunStore();
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper());
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), new ObjectMapper(), Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 
 		out.start("s-1");
 		out.textStart();
@@ -116,7 +139,8 @@ class SeqPersistenceTest {
 	@Test
 	void replayIncludesDeltaWithSeqPersistenceIntact() {
 		InMemoryRunStore store = new InMemoryRunStore();
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper());
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, RunStoreFrameStore.of(store), new ObjectMapper(), Runnable::run, 256,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		out.start("s-1");
 		out.delta("正文");
 		out.suspended(List.of(pending("c-1")), "k1", "k2", "i1");

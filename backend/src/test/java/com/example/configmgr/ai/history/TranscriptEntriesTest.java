@@ -35,8 +35,7 @@ class TranscriptEntriesTest {
 					ToolResultClearing.placeholder("list_tasks", 1200, "c-1"))))
 			.build());
 
-		List<TranscriptEntry> entries = TranscriptEntries.fromMessages(history, Map.of("c-1", pending), false,
-				100L);
+		List<TranscriptEntry> entries = TranscriptEntries.fromRunTerminal(history, Map.of("c-1", pending), "run-a", 100L, false, null, null);
 
 		assertThat(entries).singleElement()
 			.extracting(TranscriptEntry::result).isEqualTo("工具原文");
@@ -49,19 +48,26 @@ class TranscriptEntriesTest {
 					ToolResultClearing.placeholder("list_tasks", 1200, "c-1"))))
 			.build());
 
-		assertThat(TranscriptEntries.fromMessages(history, Map.of(), false, 100L)).isEmpty();
+		assertThat(TranscriptEntries.fromRunTerminal(history, Map.of(), "run-a", 100L, false, null, null)).isEmpty();
 	}
 
 	@Test
-	void syntheticCompactionSummaryIsNotWritten() {
+	void compactionSummaryCarriesInternalOriginWithoutInternalReasoning() throws Exception {
 		UserMessage summary = UserMessage.builder()
 			.text(RollingSummarizer.SUMMARY_PREFIX + "\n<conversation_summary>旧事</conversation_summary>")
-			.metadata(Map.of(SyntheticMessages.COMPACTED_FROM, 3))
+			.metadata(Map.of("origin", "COMPACTION_SUMMARY", SyntheticMessages.COMPACTED_FROM, 3,
+					"reasoningContent", "压缩过程的内部思考"))
 			.build();
 
-		assertThat(TranscriptEntries.fromMessages(List.of(new UserMessage("原话"), summary), Map.of(), false, 1L))
-			.extracting(TranscriptEntry::text)
-			.containsExactly("原话");
+		List<TranscriptEntry> entries = TranscriptEntries.fromRunTerminal(
+				List.of(new UserMessage("原话"), summary), Map.of(), "run-a", 1L, false, null, null);
+
+		assertThat(entries).hasSize(1);
+		assertThat(entries.get(0).kind()).isEqualTo("assistant");
+		assertThat(entries.get(0).text()).isEqualTo(summary.getText());
+		assertThat(entries.get(0).reasoning()).isNull();
+		assertThat(new ObjectMapper().writeValueAsString(entries.get(0)))
+			.contains("\"origin\":\"COMPACTION_SUMMARY\"");
 	}
 
 	/**
@@ -88,15 +94,31 @@ class TranscriptEntriesTest {
 				finalAnswer);
 
 		List<TranscriptEntry> withFinal = TranscriptEntries.fromRunTerminal(history, Map.of("c-1", pending),
-				"run-a", 100L, true);
+				"run-a", 100L, true, null, null);
 		List<TranscriptEntry> withoutFinal = TranscriptEntries.fromRunTerminal(history, Map.of("c-1", pending),
-				"run-a", 100L, false);
+				"run-a", 100L, false, null, null);
 
 		assertThat(withFinal).extracting(TranscriptEntry::entryId)
-			.containsExactly("run-a:assistant:c-1", "run-a:tool:c-1", "run-a:assistant");
+			.containsExactly("run-a:assistant:c-1", "run-a:tool:c-1", "run-a:assistant:text-5");
 		assertThat(withoutFinal).extracting(TranscriptEntry::entryId)
-			.containsExactly("run-a:assistant:c-1", "run-a:tool:c-1");
+			.containsExactly("run-a:assistant:c-1", "run-a:tool:c-1", "run-a:assistant:text-5");
 		assertThat(withFinal).noneMatch(entry -> entry.text() != null && entry.text().contains("上一轮"));
+		assertThat(withFinal).noneMatch(entry -> "user".equals(entry.kind()),
+			"用户条目由轮首/终态补写点负责，终态投影不得隐式补 user");
+
+		// includeLastAssistant 的真实语义：只决定“无可见正文、仅失败事实的末条 assistant”是否补写。
+		List<Message> emptyFailure = List.of(new UserMessage("问"), AssistantMessage.builder()
+			.content("")
+			.properties(Map.of(TranscriptEntries.ERROR_CODE_KEY, "TOOL_FAILED",
+					TranscriptEntries.ERROR_MESSAGE_KEY, "失败事实"))
+			.build());
+		assertThat(TranscriptEntries.fromRunTerminal(emptyFailure, Map.of(), "run-a", 100L, false, null, null))
+			.as("无可视正文且不是终稿补写 ⇒ 不产条目").isEmpty();
+		assertThat(TranscriptEntries.fromRunTerminal(emptyFailure, Map.of(), "run-a", 100L, true, null, null))
+			.singleElement().satisfies(entry -> {
+				assertThat(entry.kind()).isEqualTo("assistant");
+				assertThat(entry.errorCode()).isEqualTo("TOOL_FAILED");
+			});
 	}
 
 	/** P2：transcript 只存原文，但信封里的 code 与模型侧截断事实必须一并落盘。 */
@@ -116,7 +138,7 @@ class TranscriptEntriesTest {
 			.build());
 
 		List<TranscriptEntry> entries = TranscriptEntries.fromRunTerminal(history, Map.of("c-1", pending), "run-a",
-				100L, false);
+				100L, false, null, null);
 
 		assertThat(entries).singleElement().satisfies(entry -> {
 			assertThat(entry.result()).isEqualTo("未执行：本轮工具调用步数已达上限");
@@ -130,6 +152,11 @@ class TranscriptEntriesTest {
 
 	@Test
 	void entryIdsAreStableAndScopedByRun() {
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("c-1");
+		pending.setName("list_tasks");
+		pending.setStatus(PendingToolCall.EXECUTED);
+		pending.setResultText("答");
 		AssistantMessage assistant = AssistantMessage.builder()
 			.content("")
 			.toolCalls(List.of(new AssistantMessage.ToolCall("c-1", "function", "list_tasks", "{}")))
@@ -139,7 +166,8 @@ class TranscriptEntriesTest {
 					.responses(List.of(new ToolResponseMessage.ToolResponse("c-1", "list_tasks", "答")))
 					.build());
 
-		List<TranscriptEntry> first = TranscriptEntries.fromMessages(history, Map.of(), false, 1L);
+		List<TranscriptEntry> first = TranscriptEntries.fromRunTerminal(history, Map.of("c-1", pending), "run-a", 1L,
+				false, null, null);
 		List<Message> attributed = List.of(
 				UserMessage.builder().text("问").metadata(Map.of("runId", "run-a")).build(),
 				AssistantMessage.builder()
@@ -151,57 +179,52 @@ class TranscriptEntriesTest {
 					.responses(List.of(new ToolResponseMessage.ToolResponse("c-1", "list_tasks", "答")))
 					.metadata(Map.of("runId", "run-a"))
 					.build());
-		List<TranscriptEntry> withRun = TranscriptEntries.fromMessages(attributed, Map.of(), false, 1L);
+		List<TranscriptEntry> withRun = TranscriptEntries.fromRunTerminal(attributed, Map.of("c-1", pending),
+				"run-a", 1L, false, null, null);
+		List<TranscriptEntry> otherRun = TranscriptEntries.fromRunTerminal(attributed, Map.of("c-1", pending),
+				"run-b", 1L, false, null, null);
 
 		assertThat(first).extracting(TranscriptEntry::entryId)
-			.containsExactly("baseline:1", "baseline:2", "baseline:3:0");
+			.containsExactly("run-a:assistant:c-1", "run-a:tool:c-1");
 		assertThat(withRun).extracting(TranscriptEntry::entryId)
-			.contains("run-a:user", "run-a:assistant:c-1", "run-a:tool:c-1");
+			.containsExactly("run-a:assistant:c-1", "run-a:tool:c-1");
+		assertThat(withRun).extracting(TranscriptEntry::entryId)
+			.containsExactlyElementsOf(first.stream().map(TranscriptEntry::entryId).toList());
+		assertThat(otherRun).extracting(TranscriptEntry::entryId)
+			.containsExactly("run-b:assistant:c-1", "run-b:tool:c-1");
 	}
 
 	@Test
-	void legacyBaselineAndRunEntriesConvergeByStructureWithoutMemoryIndexes() {
-		List<TranscriptEntry> legacy = TranscriptEntries.baseline(List.of(new UserMessage("问"), new AssistantMessage("答")));
+	void terminalProjectionDoesNotEmitLegacyBaselineEntries() {
 		List<Message> attributed = List.of(
 				UserMessage.builder().text("问").metadata(Map.of("runId", "run-a")).build(),
 				AssistantMessage.builder().content("答").properties(Map.of("runId", "run-a")).build());
-		List<TranscriptEntry> current = TranscriptEntries.fromMessages(attributed, Map.of(), false, 100L);
-		List<TranscriptEntry> duplicated = new java.util.ArrayList<>(legacy);
-		duplicated.addAll(current);
 
-		List<TranscriptEntry> reconciled = TranscriptEntries.reconcileWithMemory(duplicated, null);
+		List<TranscriptEntry> entries = TranscriptEntries.fromRunTerminal(attributed, Map.of(), "run-a", 100L,
+				true, null, null);
 
-		assertThat(reconciled).extracting(TranscriptEntry::entryId)
-			.containsExactly("run-a:user", "run-a:assistant");
+		// 当前契约：只投影本轮 assistant，不再产生 baseline:* / 隐式 user 条目，也不会跨 run 合并
+		assertThat(entries).extracting(TranscriptEntry::entryId)
+			.containsExactly("run-a:assistant:text-1");
+		assertThat(entries).noneMatch(entry -> "user".equals(entry.kind()));
 	}
 
+	/** 投影幂等：同一历史重复投影得到相同 entryId 集合（存储层按 entryId 去重的前提）。 */
 	@Test
-	void identicalTextInDifferentRunsSurvivesLegacyBaselineConvergence() {
-		List<TranscriptEntry> duplicated = new java.util.ArrayList<>(
-				TranscriptEntries.baseline(List.of(new UserMessage("同文"), new AssistantMessage("同答"))));
-		for (String runId : List.of("run-a", "run-b")) {
-			List<Message> attributed = List.of(
-					UserMessage.builder().text("同文").metadata(Map.of("runId", runId)).build(),
-					AssistantMessage.builder().content("同答").properties(Map.of("runId", runId)).build());
-			duplicated.addAll(TranscriptEntries.fromMessages(attributed, Map.of(), false, 100L));
-		}
+	void terminalProjectionIsStableForTheSameHistory() {
+		List<Message> attributed = List.of(
+				UserMessage.builder().text("同文").metadata(Map.of("runId", "run-a")).build(),
+				AssistantMessage.builder().content("同答").properties(Map.of("runId", "run-a")).build());
 
-		List<TranscriptEntry> reconciled = TranscriptEntries.reconcileWithMemory(duplicated, null);
+		List<TranscriptEntry> first = TranscriptEntries.fromRunTerminal(attributed, Map.of(), "run-a", 100L,
+				true, null, null);
+		List<TranscriptEntry> second = TranscriptEntries.fromRunTerminal(attributed, Map.of(), "run-a", 100L,
+				true, null, null);
 
-		assertThat(reconciled).extracting(TranscriptEntry::entryId)
-			.containsExactly("run-a:user", "run-a:assistant", "run-b:user", "run-b:assistant");
-	}
-
-	@Test
-	void legacySameTextEntriesAreConsumedOneForOne() {
-		List<TranscriptEntry> duplicated = new java.util.ArrayList<>(
-				TranscriptEntries.baseline(List.of(new UserMessage("同文"), new UserMessage("同文"))));
-		duplicated.add(TranscriptEntries.user("run-a", 100L, 100L, "同文"));
-
-		List<TranscriptEntry> reconciled = TranscriptEntries.reconcileWithMemory(duplicated, null);
-
-		assertThat(reconciled).extracting(TranscriptEntry::entryId)
-			.containsExactly("baseline:2", "run-a:user");
+		assertThat(first).extracting(TranscriptEntry::entryId)
+			.containsExactly("run-a:assistant:text-1");
+		assertThat(second).extracting(TranscriptEntry::entryId)
+			.containsExactlyElementsOf(first.stream().map(TranscriptEntry::entryId).toList());
 	}
 
 }

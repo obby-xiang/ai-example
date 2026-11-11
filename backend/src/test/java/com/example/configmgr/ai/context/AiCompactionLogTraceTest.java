@@ -37,7 +37,11 @@ class AiCompactionLogTraceTest {
 	private final InMemoryContextStateStore store = new InMemoryContextStateStore();
 
 	private final ContextCompactor compactor = new ContextCompactor(this.properties,
-			new ContextLimitResolver(this.properties), this.store);
+			new ContextLimitResolver((providerId, modelId) -> 128000), this.store, null);
+
+	private static ContextCompactor.Outcome run(ContextCompactor target, ContextCompactor.Request request) {
+		return target.commit(request, target.plan(request, null, null));
+	}
 
 	private final Logger traceLogger = (Logger) LoggerFactory.getLogger(AiTrace.class);
 
@@ -58,7 +62,7 @@ class AiCompactionLogTraceTest {
 
 	@Test
 	void compactionEmitsLevelReasonAndSavedTokens() {
-		this.compactor.compact(request(turns(6), 81000));
+		run(this.compactor, request(turns(6), 81000));
 
 		String line = eventLines().stream().filter(item -> item.startsWith("event=compaction "))
 			.findFirst()
@@ -70,7 +74,7 @@ class AiCompactionLogTraceTest {
 
 	@Test
 	void belowThresholdEmitsNothing() {
-		this.compactor.compact(request(turns(2), 1000));
+		run(this.compactor, request(turns(2), 1000));
 
 		assertThat(eventLines()).as("未压缩就不该有 compaction 行（「没发生」与「发生 0 次」必须可区分）").isEmpty();
 	}
@@ -91,7 +95,8 @@ class AiCompactionLogTraceTest {
 
 	private ContextCompactor.Request request(List<Message> messages, int usedTokens) {
 		return new ContextCompactor.Request(SESSION_ID, RUN_ID, "test-model", 1L, messages,
-				List.of("[{\"m\":1}]"), usedTokens, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime());
+				usedTokens, 0, 0, 0, 3000, 4000, Set.of(), TestProviderRuntime.runtime(), Set.of(),
+				4096, false, null, null);
 	}
 
 	private static List<Message> turns(int pairs) {

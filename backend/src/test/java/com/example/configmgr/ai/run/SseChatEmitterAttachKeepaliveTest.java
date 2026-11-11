@@ -63,8 +63,18 @@ class SseChatEmitterAttachKeepaliveTest {
 				return thread;
 			}));
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
 	@AfterEach
 	void shutdownScheduler() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 		this.scheduler.shutdownNow();
 	}
 
@@ -175,9 +185,15 @@ class SseChatEmitterAttachKeepaliveTest {
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private SseChatEmitter emitter() {
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), this.frames, this.mapper,
+		InMemoryRunStore store = new InMemoryRunStore();
+		RunSnapshot snapshot = store.seedRun(RUN_ID, "s-attach-keepalive");
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
+		store.save(snapshot);
+		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, this.frames, this.mapper,
 				Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
-				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), this.bus, null);
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(), this.bus, null, null);
 		out.enableAttachKeepalive(this.scheduler, BEAT_MS);
 		return out;
 	}

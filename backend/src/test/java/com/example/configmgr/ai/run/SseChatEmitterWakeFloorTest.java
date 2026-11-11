@@ -1,8 +1,13 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -36,15 +41,30 @@ class SseChatEmitterWakeFloorTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
+	/** 投递身份作用域：写出器按"记录身份优先、请求身份兜底"解析，缺身份则帧不归档不投递。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
 	void reattachAtTailDoesNotReplayAlreadySeenFramesOnTheNextCrossInstanceWake() {
-		SseChatEmitter writer = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter writer = newEmitter();
 		writer.start(SESSION_ID);
 		writer.delta("a");
 		assertThat(seqs(this.store.events(RUN_ID))).containsExactly(1L, 2L);
 
 		// 实例 C：客户端带着 lastSeq=2 重挂；归档此刻没有新帧 ⇒ 回放暂存 0，连接保留等实时/唤醒帧
-		SseChatEmitter reader = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter reader = newEmitter();
 		FrameWire wire = new FrameWire();
 		int staged = reader.replayAndAttach(wire.emitter(), 2L, false);
 		assertThat(staged).isZero();
@@ -62,11 +82,11 @@ class SseChatEmitterWakeFloorTest {
 
 	@Test
 	void aSecondFullReplaySubscriberIsNotStarvedByAnotherSubscribersCursor() {
-		SseChatEmitter writer = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter writer = newEmitter();
 		writer.start(SESSION_ID);
 		writer.delta("a");
 
-		SseChatEmitter reader = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter reader = newEmitter();
 		FrameWire incremental = new FrameWire();
 		assertThat(reader.replayAndAttach(incremental.emitter(), 2L, false)).isZero();
 		FrameWire full = new FrameWire();
@@ -94,14 +114,14 @@ class SseChatEmitterWakeFloorTest {
 	 */
 	@Test
 	void aLostWakeIsStillDeliveredToACursorlessSubscriberAfterAnotherReplayAdvancesTheSharedBound() {
-		SseChatEmitter writer = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter writer = newEmitter();
 		writer.start(SESSION_ID);
 		writer.delta("a");
 		writer.delta("b");
 		assertThat(seqs(this.store.events(RUN_ID))).containsExactly(1L, 2L, 3L);
 
 		// B：无游标订阅者，已回放 1..3（连接保持）
-		SseChatEmitter reader = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter reader = newEmitter();
 		FrameWire b = new FrameWire();
 		assertThat(reader.replayAndAttach(b.emitter(), null, false)).isEqualTo(3);
 		assertThat(seqs(b.frames())).containsExactly(1L, 2L, 3L);
@@ -120,6 +140,12 @@ class SseChatEmitterWakeFloorTest {
 		assertThat(seqs(b.frames())).as("B 不得因为别人的回放推进共享上界而永久缺 seq=4")
 			.containsExactly(1L, 2L, 3L, 4L);
 		assertThat(seqs(other.frames())).as("唤醒补帧不得给已见过的订阅者重发").containsExactly(4L);
+	}
+
+	private SseChatEmitter newEmitter() {
+		return new SseChatEmitter(RUN_ID, this.store, RunStoreFrameStore.of(this.store), this.mapper,
+				Runnable::run, 256, AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				SseWriteBudget.direct(), null, null, null);
 	}
 
 	private static Map<String, Object> frame(long seq, String text) {

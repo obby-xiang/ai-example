@@ -11,10 +11,12 @@ import com.example.configmgr.ai.context.ContextLimitResolver;
 import com.example.configmgr.ai.context.InMemoryContextStateStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
+import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -75,7 +77,9 @@ class EarlyCancelDuringCompactionSnapshotTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final FrameStore frames = RunStoreFrameStore.of(this.store);
+
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null, this.frames);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -103,7 +107,7 @@ class EarlyCancelDuringCompactionSnapshotTest {
 	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
 
 	private final ContextCompactor compactor = new ContextCompactor(this.properties,
-			new ContextLimitResolver(this.properties), this.contextStore);
+			new ContextLimitResolver((providerId, modelId) -> 128000), this.contextStore, null);
 
 	private ScheduledExecutorService watchdogExecutor;
 
@@ -122,7 +126,11 @@ class EarlyCancelDuringCompactionSnapshotTest {
 		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(this.runtime));
-		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+		// 入口一拍尚未取消，压缩期间才翻成 CANCELLED —— 否则会走“首快照之前就取消”的另一条早退路径
+		java.util.concurrent.atomic.AtomicInteger cancelReads = new java.util.concurrent.atomic.AtomicInteger();
+		when(this.cancellations.cancelState(anyString())).thenAnswer(invocation -> cancelReads.incrementAndGet() == 1
+				? CancellationRegistry.CancelState.NOT_CANCELLED
+				: CancellationRegistry.CancelState.CANCELLED);
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
 		when(this.sessionService.ensure(SESSION_ID)).thenReturn(true);
 		// 记忆非空：压缩阶段真实发生（空历史会让 compactBeforeRequest 提前返回）
@@ -140,10 +148,11 @@ class EarlyCancelDuringCompactionSnapshotTest {
 	 */
 	@Test
 	void cancelDuringCompactionSavesAMinimalCancelledSnapshotWithoutAnyModelCall() {
-		SseChatEmitter out = this.registry.of(RUN_ID);
-		FrameWire wire = FrameWire.attachTo(out);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			SseChatEmitter out = this.registry.of(RUN_ID);
+			FrameWire wire = FrameWire.attachTo(out);
 
-		this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
+			this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
 
 		RunSnapshot snapshot = this.store.get(RUN_ID);
 		assertThat(snapshot).as("取消也必须有持久面：runId 的权威状态不能只是'不存在'").isNotNull();
@@ -166,6 +175,7 @@ class EarlyCancelDuringCompactionSnapshotTest {
 			.doesNotContain("message_start", "delta", "error");
 		assertThat(FrameContract.oneOfType(frames, "done")).as("终帧恰好一条（oneOfType 自带唯一性断言），且是取消终帧")
 			.containsEntry("cancelled", true);
+		}
 	}
 
 	/**
@@ -173,12 +183,16 @@ class EarlyCancelDuringCompactionSnapshotTest {
 	 */
 	@Test
 	void reattachAfterAnEarlyCancelReplaysTheSingleCancellationTerminal() {
-		SseChatEmitter out = this.registry.of(RUN_ID);
-		this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			SseChatEmitter out = this.registry.of(RUN_ID);
+			this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
 
 		// 另一条连接（同一份外置状态）：这就是 GET /api/ai/events/{runId} 的回放路径
-		SseChatEmitter reattached = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter reattached = new SseChatEmitter(RUN_ID, this.store, this.frames, this.mapper,
+				Runnable::run, AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES, SseWriteBudget.direct(),
+				new NoopWakeBus(), null, null);
 		FrameWire wire = new FrameWire();
 		SseChatEmitter.ReplayResult plan = reattached.replayToWithStatus(wire.emitter(), null);
 
@@ -189,6 +203,7 @@ class EarlyCancelDuringCompactionSnapshotTest {
 			.containsEntry("cancelled", true);
 		assertThat(FrameContract.type(frames.get(frames.size() - 1))).as("终帧是回放末帧").isEqualTo("done");
 		assertThat(reattached.terminalFrameArchived()).isEqualTo(Boolean.TRUE);
+		}
 	}
 
 }

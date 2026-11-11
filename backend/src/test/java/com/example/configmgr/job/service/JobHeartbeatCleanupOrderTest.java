@@ -7,6 +7,7 @@ import com.example.configmgr.job.repo.ValidationIssueRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -47,13 +48,13 @@ class JobHeartbeatCleanupOrderTest {
 
     private final FakeJobRedis shared = new FakeJobRedis(this.clock);
 
-    private final JobHeartbeatRegistry runner = new JobHeartbeatRegistry(this.clock, this.shared.redis, true);
-    private final JobHeartbeatRegistry peer = new JobHeartbeatRegistry(this.clock, this.shared.redis, true);
-
     private final JobRepository jobRepository = mock(JobRepository.class);
     private final JobTerminalWriter terminalWriter = mock(JobTerminalWriter.class);
     private final JobCancellationRegistry cancellationRegistry = mock(JobCancellationRegistry.class);
     private final ValidationIssueRepository issueRepository = mock(ValidationIssueRepository.class);
+
+    private final JobHeartbeatRegistry runner = registry();
+    private final JobHeartbeatRegistry peer = registry();
 
     private final JobWatchdog peerWatchdog = new JobWatchdog(this.jobRepository, this.peer,
             this.terminalWriter, this.cancellationRegistry, this.issueRepository,
@@ -65,6 +66,9 @@ class JobHeartbeatCleanupOrderTest {
     @BeforeEach
     void oneRunningJob() {
         when(this.jobRepository.findByStatusIn(any())).thenReturn(List.of(runningJob()));
+        JobRepository.CancelState inFlight = mock(JobRepository.CancelState.class);
+        when(inFlight.getStatus()).thenReturn(Job.JobStatus.RUNNING);
+        when(this.jobRepository.findCancelStateById(JOB_ID)).thenReturn(java.util.Optional.of(inFlight));
     }
 
     @AfterEach
@@ -90,26 +94,28 @@ class JobHeartbeatCleanupOrderTest {
     }
 
     @Test
-    void revokeRunnerDeletesBeatBeforeAnchor() {
+    void revokeRunnerWritesMonotonicRevocationTombstones() {
         this.runner.beginRunner(JOB_ID);
         this.shared.deleteAttempts.clear();
 
         this.runner.revokeRunner(JOB_ID);
 
-        assertThat(this.shared.deleteAttempts).containsExactly(this.beatKey, this.anchorKey);
-        assertThat(this.shared.has(this.beatKey)).isFalse();
-        assertThat(this.shared.has(this.anchorKey)).isFalse();
+        // 当前口径：撤销写 REVOKED 墓碑（代次围栏），不再删除键；之后即使本代存活也不能重建 beat/anchor
+        assertThat(this.shared.get(this.beatKey)).startsWith("REVOKED|");
+        assertThat(this.shared.get(this.anchorKey)).startsWith("REVOKED|");
     }
 
     @Test
-    void anchorIsStillDeletedAfterBeat() {
+    void endRunnerDoesNotDeleteForeignRunnerKeys() {
         this.shared.seed(this.anchorKey, "runner-other-host-pid4242-abcdef", this.runner.runnerActiveTtl());
         this.shared.seed(this.beatKey, "runner-other-host-pid4242-abcdef", this.runner.beatTtl());
 
         this.runner.endRunner(JOB_ID);
 
-        assertThat(this.shared.deleteAttempts).containsExactly(this.beatKey, this.anchorKey);
-        assertThat(this.shared.has(this.anchorKey)).isFalse();
+        // 当前口径：删除按本进程 generation 围栏；没有本代登记不得误删其它实例的键
+        assertThat(this.shared.deleteAttempts).isEmpty();
+        assertThat(this.shared.has(this.beatKey)).isTrue();
+        assertThat(this.shared.has(this.anchorKey)).isTrue();
     }
 
     // ── 半失败 ①：beat 删除失败 ⇒ 保留 anchor（两键都在 = ALIVE）──────────────
@@ -163,6 +169,14 @@ class JobHeartbeatCleanupOrderTest {
     }
 
     // ───────────────────────── helpers ─────────────────────────
+
+    /** 当前构造器把时钟固定为 systemUTC；用例用反射注入可变时钟，让 TTL 边界可确定推进。 */
+    private JobHeartbeatRegistry registry() {
+        JobHeartbeatRegistry created = new JobHeartbeatRegistry(this.shared.redis, "redis",
+                new AppProperties(), this.jobRepository, this.cancellationRegistry);
+        ReflectionTestUtils.setField(created, "clock", this.clock);
+        return created;
+    }
 
     private Job runningJob() {
         Job job = new Job();

@@ -52,10 +52,19 @@ class JobProgressHeartbeatTest {
     private final JobItemRepository jobItemRepository = mock(JobItemRepository.class);
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
 
-    private final JobHeartbeatRegistry heartbeatRegistry = new JobHeartbeatRegistry(this.clock);
+    private final JobHeartbeatRegistry heartbeatRegistry = new JobHeartbeatRegistry(org.mockito.Mockito.mock(org.springframework.data.redis.core.StringRedisTemplate.class), "memory", new com.example.configmgr.config.AppProperties(), this.jobRepository, org.mockito.Mockito.mock(com.example.configmgr.job.service.JobCancellationRegistry.class));
 
     private final JobProgressService progressService = new JobProgressService(
             this.jobRepository, this.jobItemRepository, this.transactionManager, this.heartbeatRegistry);
+
+	@org.junit.jupiter.api.BeforeEach
+	void inFlightJobState() {
+		com.example.configmgr.job.repo.JobRepository.CancelState state =
+				org.mockito.Mockito.mock(com.example.configmgr.job.repo.JobRepository.CancelState.class);
+		org.mockito.Mockito.when(state.getStatus()).thenReturn(com.example.configmgr.job.entity.Job.JobStatus.RUNNING);
+		org.mockito.Mockito.when(this.jobRepository.findCancelStateById(org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(java.util.Optional.of(state));
+	}
 
     @Test
     void markRunningSnapshotAdvanceHeartbeatAndFinishClearsEntry() {
@@ -66,13 +75,16 @@ class JobProgressHeartbeatTest {
         assertThat(this.heartbeatRegistry.lastBeatAtMs(42L)).as("开工前无心跳").isNull();
 
         this.current.addAndGet(5);
+        long realBefore = System.currentTimeMillis();
         this.progressService.markRunning(42L, 100);
         Long t1 = this.heartbeatRegistry.lastBeatAtMs(42L);
-        assertThat(t1).isEqualTo(1_000_005L);
+        assertThat(t1).as("心跳使用当前真实时钟（注入时钟已移除）")
+                .isBetween(realBefore, System.currentTimeMillis());
 
         this.current.addAndGet(7);
         this.progressService.snapshot(42L, 3, 100);
-        assertThat(this.heartbeatRegistry.lastBeatAtMs(42L)).as("snapshot 心跳前进").isEqualTo(1_000_012L);
+        assertThat(this.heartbeatRegistry.lastBeatAtMs(42L)).as("snapshot 心跳前进")
+                .isGreaterThanOrEqualTo(t1);
 
         this.current.addAndGet(9);
         boolean wrote = this.progressService.finish(42L, Job.JobStatus.COMPLETED, 0, 0, 10, 100);

@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
@@ -97,22 +98,64 @@ class RunnerActiveMultiInstanceTest {
                 .thenAnswer(invocation -> redisStore.containsKey(invocation.getArgument(0)));
         when(redis.delete(anyString()))
                 .thenAnswer(invocation -> redisStore.remove(invocation.getArgument(0)) != null);
+        when(redis.execute(any(org.springframework.data.redis.core.script.RedisScript.class), anyList(),
+                any(Object[].class))).thenAnswer(invocation -> {
+                    org.springframework.data.redis.core.script.RedisScript<?> script = invocation.getArgument(0);
+                    java.util.List<?> keys = invocation.getArgument(1);
+                    Object[] raw = invocation.getArguments();
+                    java.util.List<Object> args = new java.util.ArrayList<>();
+                    for (int i = 2; i < raw.length; i++) {
+                        args.add(raw[i]);
+                    }
+                    String body = script.getScriptAsString();
+                    String key = String.valueOf(keys.get(0));
+                    if (body.contains("JOB_RUNNER_ACTIVE_DELETE_IF_VALUE")) {
+                        if (String.valueOf(args.get(0)).equals(redisStore.get(key))) {
+                            redisStore.remove(key);
+                            return 1L;
+                        }
+                        return 0L;
+                    }
+                    if (body.contains("string.sub(current, 1, string.len(ARGV[1]))")) {
+                        String current = redisStore.get(key);
+                        if (body.contains("redis.call('DEL'")) {
+                            if (current == null) {
+                                return 1L;
+                            }
+                            if (!current.startsWith(String.valueOf(args.get(0)))) {
+                                return 0L;
+                            }
+                            redisStore.remove(key);
+                            return 1L;
+                        }
+                        if (current != null && !current.startsWith(String.valueOf(args.get(0)))) {
+                            return 0L;
+                        }
+                        redisStore.put(key, String.valueOf(args.get(1)));
+                        return 1L;
+                    }
+                    if (body.contains("REVOKED|")) {
+                        redisStore.put(key, String.valueOf(args.get(1)));
+                        return 1L;
+                    }
+                    return 1L;
+                });
     }
 
     @Test
     void instanceARegistrationBlocksInstanceBDeleteUntilEndRunner() {
         long taskId = terminalTask();
-        long jobId = jobRepository.findByTaskId(taskId).get(0).getId();
-        JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
+        AliveRunner runner = aliveRunner(taskId);
+        long jobId = runner.jobId();
+        JobHeartbeatRegistry instanceA = runner.registry();
 
-        instanceA.beginRunner(jobId);
         assertThat(instanceB.isRunnerActive(jobId)).as("B 本地没有登记").isFalse();
         assertThatThrownBy(() -> taskService.delete(taskId))
                 .as("A 的 runner 未退出，B 删除必须 409")
                 .isInstanceOf(ConflictException.class)
                 .satisfies(e -> {
                     assertThat(((ConflictException) e).getCode()).isEqualTo("JOB_ALREADY_RUNNING");
-                    assertThat(e.getMessage()).contains("收尾");
+                    assertThat(e.getMessage()).contains("still finishing");
                 });
         assertThat(taskRepository.existsById(taskId)).isTrue();
 
@@ -125,7 +168,7 @@ class RunnerActiveMultiInstanceTest {
     @Test
     void redisFailureFailsClosedInsteadOfAllowingDelete() {
         long taskId = terminalTask();
-        when(redis.hasKey(anyString())).thenThrow(new RedisConnectionFailureException("down"));
+        when(valueOps.get(anyString())).thenThrow(new RedisConnectionFailureException("down"));
 
         assertThatThrownBy(() -> taskService.delete(taskId))
                 .as("Redis 不可读时不能把未知状态当成可删")
@@ -144,8 +187,8 @@ class RunnerActiveMultiInstanceTest {
     @Test
     void heartbeatRenewsSharedKey() {
         long taskId = terminalTask();
-        long jobId = jobRepository.findByTaskId(taskId).get(0).getId();
-        JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
+        long jobId = forceRunning(taskId);
+        JobHeartbeatRegistry instanceA = newRegistry();
         String key = JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + jobId;
 
         instanceA.beginRunner(jobId);
@@ -157,17 +200,24 @@ class RunnerActiveMultiInstanceTest {
     @Test
     void beginRunnerRedisFailureReturnsFalseAndDoesNotRegisterLocalRunner() {
         long taskId = terminalTask();
-        long jobId = jobRepository.findByTaskId(taskId).get(0).getId();
+        long jobId = forceRunning(taskId);
         doThrow(new RedisConnectionFailureException("down"))
                 .when(valueOps).set(anyString(), anyString(), any(Duration.class));
-        when(redis.hasKey(anyString())).thenThrow(new RedisConnectionFailureException("down"));
-        JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
+        when(valueOps.get(anyString())).thenThrow(new RedisConnectionFailureException("down"));
+        JobHeartbeatRegistry instanceA = newRegistry();
 
         assertThat(instanceA.beginRunner(jobId)).isFalse();
         assertThat(instanceA.isRunnerActive(jobId)).isFalse();
+
+        // 登记失败后作业收为终态，Redis 仍不可读：删除必须 fail-closed，不能把“查不到”当成“没 runner”
+        Job job = jobRepository.findById(jobId).orElseThrow();
+        job.setStatus(Job.JobStatus.CANCELLED);
+        jobRepository.saveAndFlush(job);
+
         assertThatThrownBy(() -> taskService.delete(taskId))
                 .isInstanceOf(ConflictException.class)
-                .satisfies(e -> assertThat(e.getMessage()).contains("Redis"));
+                .satisfies(e -> assertThat(e.getMessage()).contains("Redis is unavailable"));
+        assertThat(taskRepository.existsById(taskId)).as("fail-closed：任务仍在").isTrue();
     }
 
     @Test
@@ -178,7 +228,9 @@ class RunnerActiveMultiInstanceTest {
 
         assertThatThrownBy(() -> jobService.createAndStart(task.getId(), Job.JobType.EXPORT))
                 .isInstanceOf(ConflictException.class)
-                .satisfies(e -> assertThat(e.getMessage()).contains("runner 活跃登记失败"));
+                .satisfies(e -> assertThat(e.getMessage())
+                        .contains("Could not register an active runner")
+                        .contains("Redis is unavailable"));
 
         assertThat(jobRepository.findByTaskId(task.getId())).as("事务回滚，不留 PENDING 作业").isEmpty();
         assertThat(taskService.findById(task.getId()).getStatus()).isEqualTo(Task.TaskStatus.ACTIVE);
@@ -212,13 +264,13 @@ class RunnerActiveMultiInstanceTest {
         running.setJobType(Job.JobType.PRECHECK);
         running.setStatus(Job.JobStatus.RUNNING);
         Job seeded = jobRepository.saveAndFlush(running);
-        JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
+        JobHeartbeatRegistry instanceA = newRegistry();
         instanceA.beginRunner(seeded.getId());
 
         assertThatThrownBy(() -> jobService.createAndStart(taskId, Job.JobType.EXPORT))
                 .as("在途旧作业的 runner 未退出仍阻新建")
                 .isInstanceOf(ConflictException.class)
-                .satisfies(e -> assertThat(e.getMessage()).contains("收尾"));
+                .satisfies(e -> assertThat(e.getMessage()).contains("still finishing"));
 
         instanceA.endRunner(seeded.getId());
         Job created = jobService.createAndStart(taskId, Job.JobType.EXPORT);
@@ -229,20 +281,23 @@ class RunnerActiveMultiInstanceTest {
     @Test
     void failedJobWithLiveRunnerBlocksNewJob() {
         long taskId = taskService.create(Task.TaskType.EXPORT, "R113-FAILED-RUNNER-ALIVE").getId();
-        Job failed = new Job();
-        failed.setTaskId(taskId);
-        failed.setJobType(Job.JobType.PRECHECK);
-        failed.setStatus(Job.JobStatus.FAILED);
-        Job seeded = jobRepository.saveAndFlush(failed);
-        JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
+        Job seeded = new Job();
+        seeded.setTaskId(taskId);
+        seeded.setJobType(Job.JobType.PRECHECK);
+        seeded.setStatus(Job.JobStatus.RUNNING);
+        seeded = jobRepository.saveAndFlush(seeded);
+        JobHeartbeatRegistry instanceA = newRegistry();
         instanceA.beginRunner(seeded.getId());
+        // 看门狗随后把 DB 收为 FAILED（runner 线程仍活着）。
+        seeded.setStatus(Job.JobStatus.FAILED);
+        jobRepository.saveAndFlush(seeded);
 
         assertThatThrownBy(() -> jobService.createAndStart(taskId, Job.JobType.EXPORT))
                 .as("FAILED 只表示数据库终态，runner 仍存活时必须沿用收尾冲突")
                 .isInstanceOf(ConflictException.class)
                 .satisfies(e -> {
                     assertThat(((ConflictException) e).getCode()).isEqualTo("JOB_ALREADY_RUNNING");
-                    assertThat(e.getMessage()).contains("收尾");
+                    assertThat(e.getMessage()).contains("still finishing");
                 });
         assertThat(jobRepository.findByTaskId(taskId)).hasSize(1);
         verify(asyncJobExecutor, never()).execute(any());
@@ -257,11 +312,11 @@ class RunnerActiveMultiInstanceTest {
         running.setJobType(Job.JobType.PRECHECK);
         running.setStatus(Job.JobStatus.RUNNING);
         jobRepository.saveAndFlush(running);
-        when(redis.hasKey(anyString())).thenThrow(new RedisConnectionFailureException("down"));
+        when(valueOps.get(anyString())).thenThrow(new RedisConnectionFailureException("down"));
 
         assertThatThrownBy(() -> jobService.createAndStart(taskId, Job.JobType.EXPORT))
                 .isInstanceOf(ConflictException.class)
-                .satisfies(e -> assertThat(e.getMessage()).contains("无法确认"));
+                .satisfies(e -> assertThat(e.getMessage()).contains("Could not confirm whether the previous job"));
         assertThat(jobRepository.findByTaskId(taskId)).hasSize(1);
     }
 
@@ -299,10 +354,13 @@ class RunnerActiveMultiInstanceTest {
     @Test
     void watchdogRevokeClearsSharedKeysAndReleasesDeleteGateForAnotherInstance() {
         long taskId = terminalTask();
-        long jobId = jobRepository.findByTaskId(taskId).get(0).getId();
-        JobHeartbeatRegistry instanceA = new JobHeartbeatRegistry(Clock.systemUTC(), redis, true);
+        long jobId = forceRunning(taskId);
+        JobHeartbeatRegistry instanceA = newRegistry();
         instanceA.beginRunner(jobId);
         instanceA.beat(jobId);
+        Job job = jobRepository.findByTaskId(taskId).get(0);
+        job.setStatus(Job.JobStatus.CANCELLED);
+        jobRepository.saveAndFlush(job);
         assertThat(redisStore).containsKeys(
                 JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + jobId,
                 JobHeartbeatRegistry.BEAT_PREFIX + jobId);
@@ -315,12 +373,43 @@ class RunnerActiveMultiInstanceTest {
         // 看门狗判死成功后在 B 侧撤销 runner 登记（A 已失联，不会再有 endRunner）
         instanceB.revokeRunner(jobId);
 
-        assertThat(redisStore).as("判死清 runner-active + 共享心跳，删除闸门立即释放（不等 30m/65m TTL）")
-                .doesNotContainKeys(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + jobId,
-                        JobHeartbeatRegistry.BEAT_PREFIX + jobId);
+        // 当前契约：撤销写 REVOKED tombstone（键保留到 TTL 过期），不再删除共享键
+        assertThat(redisStore.get(JobHeartbeatRegistry.RUNNER_ACTIVE_PREFIX + jobId))
+                .as("runner-active 值变为 tombstone").startsWith("REVOKED|");
+        assertThat(redisStore.get(JobHeartbeatRegistry.BEAT_PREFIX + jobId))
+                .as("共享心跳值变为 tombstone").startsWith("REVOKED|");
+        assertThat(newRegistry().isRunnerAlive(jobId)).as("任意实例读共享态都判不活").isFalse();
         taskService.delete(taskId);
         assertThat(taskRepository.existsById(taskId)).isFalse();
         assertThat(jobRepository.findByTaskId(taskId)).isEmpty();
+    }
+
+    /** 进 redis 模式的手工实例（共享同一个 mock Redis，模拟另一实例）。 */
+    private JobHeartbeatRegistry newRegistry() {
+        return new JobHeartbeatRegistry(redis, "redis", new com.example.configmgr.config.AppProperties(),
+                jobRepository, cancellationRegistry);
+    }
+
+    /** 先把作业置为在途（beginRunner 的当前前置），登记 runner 后再置回终态 —— 模拟"终态 + runner 仍活着"。 */
+    private AliveRunner aliveRunner(long taskId) {
+        Job job = jobRepository.findByTaskId(taskId).get(0);
+        job.setStatus(Job.JobStatus.RUNNING);
+        jobRepository.saveAndFlush(job);
+        JobHeartbeatRegistry registry = newRegistry();
+        registry.beginRunner(job.getId());
+        job.setStatus(Job.JobStatus.CANCELLED);
+        jobRepository.saveAndFlush(job);
+        return new AliveRunner(registry, job.getId());
+    }
+
+    private long forceRunning(long taskId) {
+        Job job = jobRepository.findByTaskId(taskId).get(0);
+        job.setStatus(Job.JobStatus.RUNNING);
+        jobRepository.saveAndFlush(job);
+        return job.getId();
+    }
+
+    private record AliveRunner(JobHeartbeatRegistry registry, long jobId) {
     }
 
     private long terminalTask() {

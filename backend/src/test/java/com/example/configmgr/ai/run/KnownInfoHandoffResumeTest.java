@@ -135,8 +135,11 @@ class KnownInfoHandoffResumeTest {
 
 	private ResumeService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		this.registryContext = new AnnotationConfigApplicationContext();
 		this.registryContext.registerBean(WizardTools.class);
@@ -152,10 +155,11 @@ class KnownInfoHandoffResumeTest {
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenAnswer(invocation -> invocation.<PendingToolCall>getArgument(2).getResultText());
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
-		when(this.chatService.systemPromptText(any())).thenReturn(SYSTEM_TEXT);
+		when(this.chatService.systemPromptText(any(), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn(SYSTEM_TEXT);
 		when(this.chatService.workspaceStateText(any())).thenReturn("## 当前工作区状态\n<workspace_state>\n"
 				+ "当前步骤: SELECT_DEFS\n</workspace_state>\n");
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
@@ -181,6 +185,9 @@ class KnownInfoHandoffResumeTest {
 		if (this.registryContext != null) {
 			this.registryContext.close();
 		}
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	// ── ① 结构化已知配置与条件：导航到选择步不弹表，都在槽位里 ───────────────
@@ -197,16 +204,20 @@ class KnownInfoHandoffResumeTest {
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
-		assertThat(result.body()).as("用户本轮已明确配置与条件 ⇒ 不得弹配置选择表单")
+		// 已知配置 ⇒ 宿主不弹平铺选择表，改经既有 select_definitions 通道代选并挂起（本拍不得再驱动模型）
+		assertThat(result.body()).as("用户本轮已明确配置 ⇒ 宿主代选而非弹配置选择表单")
+			.containsEntry("resumed", false)
+			.containsEntry("reason", "DEFINITION_SELECT_PARKED")
 			.doesNotContainEntry("reason", "DEFINITION_FORM_PARKED");
-		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
-				eq(this.emitter));
-		assertThat(this.store.pendingsLenient(RUN_ID)).as("宿主一张表都不该挂")
-			.noneMatch(pending -> DEF_FORM.equals(pending.getToolCallId()));
+		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
+		assertHostDefinitionSelectParked("CURRENCY");
 
-		TaskSlots slots = TaskSlots.fromExtra(contextOfDriveResumed().getExtra());
-		assertThat(slots.defCodes()).as("本轮原话里点名的配置项必须原样进入下一跳").containsExactly("CURRENCY");
-		assertThat(slots.conditions()).as("同一句里的 code=CNY 也是已知条件")
+		// 代选挂起后，权威配置与条件必须仍留在持久化下一跳上下文里（不得因"改走代选"而丢事实）
+		AiContext persisted = AiContext.fromMap(this.store.get(RUN_ID).getContext());
+		TaskSlots persistedSlots = TaskSlots.fromExtra(persisted.getExtra());
+		assertThat(persistedSlots.defCodes()).as("持久化上下文保留本轮已知配置项")
+			.containsExactly("CURRENCY");
+		assertThat(persistedSlots.conditions()).as("同一句里的 code=CNY 也是已知条件")
 			.extracting(TaskSlots.ConditionSlot::defCode, TaskSlots.ConditionSlot::fieldCode,
 					TaskSlots.ConditionSlot::value)
 			.containsExactly(org.assertj.core.groups.Tuple.tuple("CURRENCY", "code", "CNY"));
@@ -226,11 +237,12 @@ class KnownInfoHandoffResumeTest {
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
-		assertThat(result.body()).as("页面已给出非空勾选 ⇒ 配置已知，不弹表单")
+		assertThat(result.body()).as("页面已给出非空勾选 ⇒ 配置已知，宿主代选而非弹表")
+			.containsEntry("resumed", false)
+			.containsEntry("reason", "DEFINITION_SELECT_PARKED")
 			.doesNotContainEntry("reason", "DEFINITION_FORM_PARKED");
-		TaskSlots slots = TaskSlots.fromExtra(contextOfDriveResumed().getExtra());
-		assertThat(slots.defCodes()).as("页面勾选赢过原始原话，不得被 CURRENCY 覆盖")
-			.containsExactly("FX_RATE");
+		verify(this.chatService, never()).driveResumed(any(), any(), any(), any(), any());
+		assertHostDefinitionSelectParked("FX_RATE");
 	}
 
 	@Test
@@ -284,6 +296,31 @@ class KnownInfoHandoffResumeTest {
 		return nextHop.getValue();
 	}
 
+	/**
+	 * 已知配置时的宿主代选：必须挂起 {@code host-def-select-42}
+	 * （{@code select_definitions}，codes 原样保留权威值，{@code mode=REPLACE}），且不得再弹平铺选择表。
+	 */
+	private void assertHostDefinitionSelectParked(String... expectedCodes) {
+		PendingToolCall select = this.store.pending(RUN_ID,
+				DefinitionSelectionForm.SELECT_TOOL_CALL_ID_PREFIX + TASK_ID);
+		assertThat(select).as("已知配置 ⇒ 必须挂起宿主的 select_definitions 代选").isNotNull();
+		assertThat(select.getToolCallId()).isEqualTo("host-def-select-" + TASK_ID);
+		assertThat(select.getName()).isEqualTo("select_definitions");
+		assertThat(select.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
+		try {
+			com.fasterxml.jackson.databind.JsonNode args = this.mapper.readTree(select.getArguments());
+			assertThat(args.path("mode").asText()).isEqualTo("REPLACE");
+			List<String> codes = new ArrayList<>();
+			args.path("codes").forEach(node -> codes.add(node.asText()));
+			assertThat(codes).as("代选 codes 必须原样保留权威配置（原话/页面值不丢失）")
+				.containsExactly(expectedCodes);
+		}
+		catch (java.io.IOException ex) {
+			throw new AssertionError("select_definitions 参数不是合法 JSON: " + select.getArguments(), ex);
+		}
+		assertThat(this.store.pending(RUN_ID, DEF_FORM)).as("已知配置不得再弹平铺选择表").isNull();
+	}
+
 	private void seedCreatedTask() {
 		PendingToolCall createTask = new PendingToolCall();
 		createTask.setToolCallId(CALL_CREATE);
@@ -292,12 +329,16 @@ class KnownInfoHandoffResumeTest {
 		createTask.setStatus(PendingToolCall.EXECUTED);
 		createTask.setOutcome(ToolOutcome.OK.wire());
 		createTask.setExecuted(true);
+		createTask.setCreatedTaskId(TASK_ID);
 		createTask.setResultText("已创建导出任务 #" + TASK_ID + "（当前步骤：SELECT_DEFS）");
 		this.store.appendLedger(RUN_ID, createTask, createTask.getResultText());
 	}
 
 	private void seedSuspendedRun(List<PendingToolCall> inFlight, List<String> userMessages, AiContext context) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(context.toMap());
 		List<Message> history = new ArrayList<>();

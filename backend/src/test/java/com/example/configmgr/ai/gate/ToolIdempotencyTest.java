@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
@@ -90,7 +91,7 @@ class ToolIdempotencyTest {
 
 	@BeforeEach
 	void setUp() {
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf(anyString())).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf(anyString())).thenReturn(ToolMeta.RiskLevel.READ);
@@ -99,7 +100,7 @@ class ToolIdempotencyTest {
 
 	private void wire(InMemoryRunStore runStore) {
 		this.store = runStore;
-		this.registry = new RunRegistry(runStore, new ObjectMapper(), null);
+		this.registry = TestRunRegistryFactory.create(runStore, new ObjectMapper(), null);
 		ConfirmGate gate = new ConfirmGate(runStore, this.registry, this.properties, this.cancellations, this.beacon,
 				List.of());
 		this.manager = new SpToolCallingManager(runStore, this.registry, gate, this.toolRegistry, this.codec,

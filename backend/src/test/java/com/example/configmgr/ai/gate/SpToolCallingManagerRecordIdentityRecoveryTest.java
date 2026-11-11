@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
@@ -89,7 +90,11 @@ class SpToolCallingManagerRecordIdentityRecoveryTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final com.example.configmgr.ai.run.FrameStore frames =
+			new com.example.configmgr.ai.run.RedisFrameStore(this.fake.redis, this.mapper, this.properties);
+
+	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, this.properties, this.frames,
+			null, null, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -106,7 +111,7 @@ class SpToolCallingManagerRecordIdentityRecoveryTest {
 		this.properties.getPark().setEnabled(true);
 		// 到期收敛排在 30s 后：本用例只关心“挂起是否成立”，条目必须仍是 PENDING。
 		this.properties.getHitl().setFrontendToolTimeout(Duration.ofSeconds(30));
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
@@ -264,7 +269,8 @@ class SpToolCallingManagerRecordIdentityRecoveryTest {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(identity.tenantId(),
 				identity.userId())) {
 			return this.store.create(RUN_ID, SESSION_ID, AiContext.empty(),
-					List.of(new UserMessage(USER_TEXT)), this.codec);
+					List.of(new UserMessage(USER_TEXT)), this.codec, 1L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", USER_TEXT, 1000L);
 		}
 	}
 
@@ -288,7 +294,7 @@ class SpToolCallingManagerRecordIdentityRecoveryTest {
 
 	private List<Map<String, Object>> framesAs(TenantUser identity) {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-			return FrameWire.normalize(this.store.events(RUN_ID));
+			return FrameWire.normalize(this.frames.readFrom(RUN_ID, 0L, 1000));
 		}
 	}
 

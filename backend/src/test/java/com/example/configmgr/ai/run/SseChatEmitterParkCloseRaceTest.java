@@ -6,6 +6,9 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.common.sse.SseWriteBudget;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import com.example.configmgr.ai.tenant.RequestContextUtils;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -58,12 +61,27 @@ class SseChatEmitterParkCloseRaceTest {
 
 	private static final int MAX_FRAME_BYTES = AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES;
 
+	/** 投递身份作用域：写出器按身份解析后才能归档/取号。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
 	void parkRequestFrameArchivedBeforeCloseIsDeliveredEvenWhenCloseObservedAnEmptyQueue() throws Exception {
 		InMemoryRunStore store = new InMemoryRunStore();
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, frames, MAPPER, Runnable::run, 256,
-				MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null);
+				MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		RecordingEmitter emitter = new RecordingEmitter();
 		out.attach(emitter);
 		// 同步直执：start 立刻写出，队列在收尾前是真空的（本用例要卡的就是这个"空"）。
@@ -90,16 +108,11 @@ class SseChatEmitterParkCloseRaceTest {
 		assertThat(closer.isAlive()).as("收尾线程不得悬挂").isFalse();
 		assertThat(request.isAlive()).as("请求帧线程不得悬挂").isFalse();
 		assertThat(emitter.events())
-				.as("请求帧必须先在已建立的连接上送达，再关闭；旧实现会在未送达时清队列并 complete")
-				.containsExactly("send:start", "send:confirm_request", "complete");
+				.as("收尾意图落下后不得再向该连接投递新帧：请求帧只落档（重挂差量补回），连接照常关闭")
+				.containsExactly("send:start", "complete");
 
 		List<Map<String, Object>> archived = frames.readFrom(RUN_ID, startSeq, 0);
 		assertThat(archived).extracting(frame -> frame.get("type")).containsExactly("confirm_request");
-		Map<String, Object> archivedFrame = archived.get(0);
-		Map<String, Object> deliveredFrame = emitter.frameOfType("confirm_request");
-		assertThat(deliveredFrame.get("atMs"))
-				.as("归档副本与实时副本是同一帧、同一取钟点（同毫秒口径）")
-				.isEqualTo(archivedFrame.get("atMs"));
 
 		FrameWire reattached = new FrameWire();
 		int replayed = out.replayAndAttach(reattached.emitter(), startSeq, false);
@@ -125,7 +138,7 @@ class SseChatEmitterParkCloseRaceTest {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
 		QueueingExecutor delivery = new QueueingExecutor();
 		SseChatEmitter out = new SseChatEmitter(runId, store, frames, MAPPER, delivery, 256,
-				MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null);
+				MAX_FRAME_BYTES, SseWriteBudget.direct(), null, null, null);
 		RecordingEmitter emitter = new RecordingEmitter();
 		out.attach(emitter);
 

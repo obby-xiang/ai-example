@@ -75,12 +75,12 @@ class TenantCancelAndFeedbackIsolationTest {
 		boolean claimedByA;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_A.tenantId(),
 				TENANT_A.userId())) {
-			claimedByA = store.claim(RUN_ID, "call-1");
+			claimedByA = store.claim(RUN_ID, "call-1").claimed();
 		}
 		boolean claimedByB;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT_B.tenantId(),
 				TENANT_B.userId())) {
-			claimedByB = store.claim(RUN_ID, "call-1");
+			claimedByB = store.claim(RUN_ID, "call-1").claimed();
 		}
 
 		softly.assertThat(claimedByA).isTrue();

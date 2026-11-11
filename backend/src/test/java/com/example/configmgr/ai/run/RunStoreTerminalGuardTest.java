@@ -39,6 +39,20 @@ class RunStoreTerminalGuardTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void releaseIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	private final AiProperties properties = new AiProperties();
 
 	private final FakeLeaseRedis fake = new FakeLeaseRedis();
@@ -76,7 +90,7 @@ class RunStoreTerminalGuardTest {
 	void statusTransitionReportsRefusalWhenCancelled() {
 		this.store.save(snapshot(PLAIN, RunSnapshot.CANCELLED, true, "AI_RUN_CANCELLED：本轮由用户取消"));
 
-		boolean written = this.store.saveStatusUnlessCancelled(snapshot(PLAIN, RunSnapshot.RUNNING, false, null));
+		boolean written = this.store.isStatusSavedUnlessCancelled(snapshot(PLAIN, RunSnapshot.RUNNING, false, null));
 
 		assertThat(written).as("取消态拒写 ⇒ false（调用方必须返回取消语义、不得驱动）").isFalse();
 		assertThat(this.store.get(PLAIN).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
@@ -155,7 +169,7 @@ class RunStoreTerminalGuardTest {
 		RunSnapshot armed = this.store.get(ORDINARY);
 		assertThat(armed.getBudgetArmedAtMs()).as("武装时刻落快照").isEqualTo(1_700_000_000_000L);
 		assertThat(armed.getBudgetSkippedBatches()).isEqualTo(1);
-		assertThat(armed.asMap()).containsEntry("budgetArmedAtMs", 1_700_000_000_000L);
+		assertThat(armed.asMap()).containsEntry("budgetArmedAtMs", "1700000000000");
 
 		// 迟到/并发的较小值不得把已武装改回未武装、也不得把已拦下的批次改小
 		this.store.markTurnBudget(ORDINARY, 0L, 0);
@@ -168,6 +182,9 @@ class RunStoreTerminalGuardTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId("session-" + runId);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setStatus(status);
 		snapshot.setCancelled(cancelled);
 		snapshot.setError(error);

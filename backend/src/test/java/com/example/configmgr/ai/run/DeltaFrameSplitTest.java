@@ -55,7 +55,12 @@ class DeltaFrameSplitTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	private final SseChatEmitter out = new SseChatEmitter(RUN_ID, this.store, this.mapper, Runnable::run, 256, LIMIT);
+	private SseChatEmitter emitter(InMemoryRunStore target) {
+		return new SseChatEmitter(RUN_ID, target, RunStoreFrameStore.of(target), this.mapper, Runnable::run, 256,
+				LIMIT, com.example.configmgr.common.sse.SseWriteBudget.direct(), null, null, null);
+	}
+
+	private final SseChatEmitter out = emitter(this.store);
 
 	// ── ① 大分片：拆成多条 delta，不丢字、不挂截断标记、每帧 ≤ 上限 ──
 
@@ -266,8 +271,7 @@ class DeltaFrameSplitTest {
 
 	@Test
 	void splitChunksAreContiguousEvenWhenOtherFramesAreEmittedConcurrently() throws Exception {
-		SseChatEmitter emitter = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), this.mapper, Runnable::run, 256,
-				LIMIT);
+		SseChatEmitter emitter = emitter(new InMemoryRunStore());
 		FrameWire wire = FrameWire.attachTo(emitter);
 		String original = "帧".repeat(10_000);   // 30k 字节 ⇒ 多片
 		CountDownLatch finished = new CountDownLatch(1);
@@ -314,8 +318,7 @@ class DeltaFrameSplitTest {
 	@Test
 	void concurrentReasoningDeltasKeepSegmentBoundariesAndChars() throws Exception {
 		for (int round = 0; round < 6; round++) {
-			SseChatEmitter emitter = new SseChatEmitter(RUN_ID, new InMemoryRunStore(), this.mapper, Runnable::run,
-					256, LIMIT);
+			SseChatEmitter emitter = emitter(new InMemoryRunStore());
 			FrameWire wire = FrameWire.attachTo(emitter);
 			AtomicLong expectedChars = new AtomicLong();
 			ExecutorService pool = Executors.newFixedThreadPool(4);

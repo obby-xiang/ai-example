@@ -5,10 +5,12 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.common.ErrorCodes;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -75,7 +77,7 @@ class ResumeProviderGoneTerminalTest {
 
 	private final InMemoryFrameStore frameStore = new InMemoryFrameStore();
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null, this.frameStore, null, null);
+	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null, this.frameStore, null, null, null);
 
 	private final ResilientChatService chatService = mock(ResilientChatService.class);
 
@@ -84,6 +86,21 @@ class ResumeProviderGoneTerminalTest {
 	private final AiProperties properties = new AiProperties();
 
 	private ResumeService service;
+
+	/** run 级键/帧面按身份拼：种子快照与写出器都必须处在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	@BeforeEach
 	void setUp() {
@@ -103,7 +120,8 @@ class ResumeProviderGoneTerminalTest {
 		// 硬否定：库里真的没有这一行（强制重载<b>成功</b>之后仍为空，且行级声明也没有）
 		when(this.configService.resolveChatTarget(any(Long.class), anyString())).thenReturn(Optional.empty());
 		when(this.configService.reloadWithOutcome())
-			.thenReturn(new AiConfigService.ReloadResult(AiConfigService.ConfigSnapshot.empty(), true));
+			.thenReturn(new AiConfigService.ReloadResult(
+					new AiConfigService.ConfigSnapshot(0L, List.of(), List.of(), Map.of()), true));
 		when(this.configService.bindingState(any(Long.class), anyString()))
 			.thenReturn(AiConfigService.BindingState.ABSENT);
 	}
@@ -129,7 +147,7 @@ class ResumeProviderGoneTerminalTest {
 		assertThat(last).as("必须写终帧：否则重挂只会等一条不会再有帧的连接").isNotNull();
 		assertThat(last.get("type")).as("终帧类型").isEqualTo("error");
 		assertThat(last.get("code")).as("机器可读终态码").isEqualTo(ErrorCodes.AI_PROVIDER_GONE);
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any(), any(), any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
 	}
 
 	@Test
@@ -197,7 +215,8 @@ class ResumeProviderGoneTerminalTest {
 	void reloadFailureCannotBecomeProviderGone() {
 		seedSuspendedSnapshot();
 		when(this.configService.reloadWithOutcome())
-			.thenReturn(new AiConfigService.ReloadResult(AiConfigService.ConfigSnapshot.empty(), false));
+			.thenReturn(new AiConfigService.ReloadResult(
+					new AiConfigService.ConfigSnapshot(0L, List.of(), List.of(), Map.of()), false));
 
 		assertStateUnknownWithoutConvergence();
 	}
@@ -233,7 +252,7 @@ class ResumeProviderGoneTerminalTest {
 		assertThat(this.store.get(RUN_ID).getStatus()).as("快照必须保持 SUSPENDED（可重试）")
 			.isEqualTo(RunSnapshot.SUSPENDED);
 		assertThat(frames()).as("不可知 ⇒ 不得写任何业务帧（终帧就是判死）").isEmpty();
-		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any(), any(), any());
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
 	}
 
 	@Test

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -160,7 +161,7 @@ class ParkSettlementOwnershipTest {
 		this.properties.getPark().setEnabled(true);
 		// 把前端回执超时推远：本类要测的是"park 之后谁结算"，不是"多久到期"
 		this.properties.getHitl().setFrontendToolTimeout(Duration.ofHours(1));
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
@@ -178,7 +179,7 @@ class ParkSettlementOwnershipTest {
 				ResumeService.Outcome.NOT_FOUND, Map.of("runId", RUN_ID)));
 		this.audit = new SheetAudit(new SheetSwitches(this.properties), this.store);
 		// 实例 A：一套 registry/gate/manager（首轮驱动方）
-		RunRegistry registryA = new RunRegistry(this.store, this.mapper, null);
+		RunRegistry registryA = TestRunRegistryFactory.create(this.store, this.mapper, null);
 		this.gateA = new ConfirmGate(this.store, registryA, this.properties, this.cancellations, this.beacon,
 				List.of(), this.resumeProvider, Runnable::run);
 		this.gateA.setSheetAudit(this.audit);
@@ -188,7 +189,7 @@ class ParkSettlementOwnershipTest {
 		this.managerA.setSheetAudit(this.audit);
 		this.managerA.setSettlementObservationStore(this.observations);
 		// 实例 B：共享同一份 store，但<b>没有</b> A 的进程内闸门 —— 与真实跨实例同形
-		RunRegistry registryB = new RunRegistry(this.store, this.mapper, null);
+		RunRegistry registryB = TestRunRegistryFactory.create(this.store, this.mapper, null);
 		this.gateB = new ConfirmGate(this.store, registryB, this.properties, this.cancellations, this.beacon, List.of(),
 				this.resumeProvider, Runnable::run);
 		this.gateB.setSheetAudit(this.audit);
@@ -288,11 +289,11 @@ class ParkSettlementOwnershipTest {
 	void observationClaimIsFirstWriterWinsAndScopedPerRun() {
 		SettlementObservationStore shared = new SettlementObservationStore();
 
-		assertThat(shared.claim(RUN_ID, FRONT_CALL_A)).as("首写者拿到发点").isTrue();
-		assertThat(shared.claim(RUN_ID, FRONT_CALL_A)).as("第二个执行体必须让位").isFalse();
-		assertThat(shared.claim(RUN_ID, FRONT_CALL_B)).as("不同 toolCallId 互不影响").isTrue();
-		assertThat(shared.claim("run-other", FRONT_CALL_A)).as("toolCallId 只在单轮内唯一").isTrue();
-		assertThat(shared.claim(RUN_ID, " ")).as("没有锚点就没有可仲裁的对象").isTrue();
+		assertThat(shared.claim(RUN_ID, FRONT_CALL_A).claimed()).as("首写者拿到发点").isTrue();
+		assertThat(shared.claim(RUN_ID, FRONT_CALL_A).claimed()).as("第二个执行体必须让位").isFalse();
+		assertThat(shared.claim(RUN_ID, FRONT_CALL_B).claimed()).as("不同 toolCallId 互不影响").isTrue();
+		assertThat(shared.claim("run-other", FRONT_CALL_A).claimed()).as("toolCallId 只在单轮内唯一").isTrue();
+		assertThat(shared.claim(RUN_ID, " ").claimed()).as("没有锚点就没有可仲裁的对象").isTrue();
 	}
 
 	/**
@@ -305,11 +306,11 @@ class ParkSettlementOwnershipTest {
 		SettlementObservationStore store = new SettlementObservationStore(fake.template, this.properties);
 		String key = store.observedKey(RUN_ID);
 
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).isTrue();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).isTrue();
 		assertThat(fake.hasKey(key)).isTrue();
 		assertThat(fake.hasTtl(key)).as("抢位与 EXPIRE 同脚本 ⇒ 有键必有 TTL").isTrue();
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).as("第二个执行体让位").isFalse();
-		assertThat(store.claim(RUN_ID, FRONT_CALL_B)).as("不同 toolCallId 互不影响").isTrue();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).as("第二个执行体让位").isFalse();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_B).claimed()).as("不同 toolCallId 互不影响").isTrue();
 	}
 
 	/**
@@ -323,7 +324,7 @@ class ParkSettlementOwnershipTest {
 		String key = store.observedKey(RUN_ID);
 		fake.seedTombstone(key, FRONT_CALL_A);
 
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).as("已被观测过（墓碑仍算观测）").isFalse();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).as("已被观测过（墓碑仍算观测）").isFalse();
 		assertThat(fake.hasTtl(key)).as("自愈：下一次 claim 把 TTL 补回来").isTrue();
 	}
 
@@ -336,7 +337,7 @@ class ParkSettlementOwnershipTest {
 		FakeObservationRedis fake = new FakeObservationRedis();
 		SettlementObservationStore store = new SettlementObservationStore(fake.template, this.properties);
 
-		store.claim(RUN_ID, FRONT_CALL_A);
+		store.claim(RUN_ID, FRONT_CALL_A).claimed();
 
 		@SuppressWarnings({ "unchecked", "rawtypes" })
 		ArgumentCaptor<RedisScript<Long>> script = ArgumentCaptor.forClass((Class) RedisScript.class);
@@ -355,11 +356,11 @@ class ParkSettlementOwnershipTest {
 		String key = store.observedKey(RUN_ID);
 		fake.failExpire = true;
 
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).as("自愈失败不影响首写结论").isTrue();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).as("自愈失败不影响首写结论").isTrue();
 
 		fake.failExpire = false;
 		fake.ttlMillis.remove(key);
-		store.claim(RUN_ID, FRONT_CALL_A);
+		store.claim(RUN_ID, FRONT_CALL_A).claimed();
 		assertThat(fake.hasTtl(key)).as("TTL 被下一次 claim 修好").isTrue();
 	}
 
@@ -372,7 +373,7 @@ class ParkSettlementOwnershipTest {
 			.thenThrow(new IllegalStateException("模拟 Redis 抖动"));
 		SettlementObservationStore store = new SettlementObservationStore(redis, this.properties);
 
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).isTrue();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).isTrue();
 	}
 
 	/** 发失败释放后，同一 toolCallId 必须能被重新抢到（否则就是永久 0 条）。 */
@@ -380,12 +381,13 @@ class ParkSettlementOwnershipTest {
 	void releaseLetsTheSameSettlementClaimAgain() {
 		FakeObservationRedis fake = new FakeObservationRedis();
 		SettlementObservationStore store = new SettlementObservationStore(fake.template, this.properties);
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).isTrue();
+		SettlementObservationStore.ClaimHandle handle = store.claim(RUN_ID, FRONT_CALL_A);
+		assertThat(handle.claimed()).isTrue();
 
-		store.release(RUN_ID, FRONT_CALL_A);
+		store.release(handle);
 
 		assertThat(fake.hashes.get(store.observedKey(RUN_ID))).doesNotContainKey(FRONT_CALL_A);
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).isTrue();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).isTrue();
 	}
 
 	/**
@@ -463,11 +465,11 @@ class ParkSettlementOwnershipTest {
 		template.afterPropertiesSet();
 		SettlementObservationStore store = new SettlementObservationStore(template, this.properties);
 
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).as("真实模板下首位必须拿到发点（不是 fail-open 假成功）")
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).as("真实模板下首位必须拿到发点（不是 fail-open 假成功）")
 			.isTrue();
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).as("同一 field 的第二个执行体必须让位（真仲裁，不是恒 true）")
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).as("同一 field 的第二个执行体必须让位（真仲裁，不是恒 true）")
 			.isFalse();
-		assertThat(store.claim(RUN_ID, FRONT_CALL_B)).as("不同 toolCallId 互不影响").isTrue();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_B).claimed()).as("不同 toolCallId 互不影响").isTrue();
 	}
 
 	/**
@@ -484,7 +486,7 @@ class ParkSettlementOwnershipTest {
 		SettlementObservationStore store = new SettlementObservationStore(redis, this.properties);
 		long before = RedisDegradation.count(RedisDegradation.O1_OBSERVATION_CLAIM);
 
-		assertThat(store.claim(RUN_ID, FRONT_CALL_A)).isTrue();
+		assertThat(store.claim(RUN_ID, FRONT_CALL_A).claimed()).isTrue();
 		assertThat(RedisDegradation.count(RedisDegradation.O1_OBSERVATION_CLAIM))
 			.as("降级必须可计数（/health.redis.degradations 可见）").isEqualTo(before + 1L);
 	}
@@ -581,7 +583,7 @@ class ParkSettlementOwnershipTest {
 		}
 
 		@Override
-		public boolean claim(String runId, String toolCallId) {
+		public SettlementObservationStore.ClaimHandle claim(String runId, String toolCallId) {
 			if (this.blockingCallId.equals(toolCallId)) {
 				this.entered.countDown();
 				try {

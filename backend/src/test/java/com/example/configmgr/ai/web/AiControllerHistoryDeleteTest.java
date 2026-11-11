@@ -1,7 +1,6 @@
 package com.example.configmgr.ai.web;
 
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.session.AiSessionPurgeService;
 import com.example.configmgr.ai.session.AiSessionPurgeService.AttachmentView;
 import com.example.configmgr.ai.session.AiSessionPurgeService.ClientCleanup;
@@ -11,6 +10,7 @@ import com.example.configmgr.ai.session.AiSessionPurgeService.MemoryView;
 import com.example.configmgr.ai.session.AiSessionPurgeService.PurgeResult;
 import com.example.configmgr.ai.session.AiSessionPurgeService.RunView;
 import com.example.configmgr.ai.session.AiSessionPurgeService.SessionView;
+import com.example.configmgr.ai.session.AiSessionPurgeService.TranscriptView;
 import com.example.configmgr.ai.session.SessionPurgeDatabase;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import org.junit.jupiter.api.Test;
@@ -24,6 +24,8 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -33,69 +35,68 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * 旧 {@code DELETE /api/ai/history/{sessionId}} 的<b>兼容契约</b>。
+ * 会话销毁端点（原 {@code DELETE /api/ai/history/{sessionId}} 的兼容路径已退场）。
  *
- * <p>用户 2026-10-25 的最终口径覆盖旧的"只删记忆窗口"语义：旧路径现在与
- * {@code DELETE /api/ai/session/{sessionId}} 一样委托 {@link AiSessionPurgeService}。
- * 本类只钉住旧响应字段/HHTTP 语义，防止"两套删除语义长期并存"。
+ * <p>现行契约只有 {@code DELETE /api/ai/session/{sessionId}}：统一委托
+ * {@link AiSessionPurgeService}，响应是 {@link PurgeResult#toBody()} 裸对象 + {@code identity}
+ * 身份快照。旧“只删记忆窗口”的响应字段（{@code deleted/existed/memoryKey/removedFromIndex/
+ * runActive/storedBy}）已不存在，本类按当前响应面钉住删除语义、幂等、活跃 run 延后、失败与身份。
  */
 class AiControllerHistoryDeleteTest {
 
 	private final AiSessionPurgeService service = mock(AiSessionPurgeService.class);
 
-	private final RunStore runStore = mock(RunStore.class);
-
 	private final RedisAvailability redisAvailability = mock(RedisAvailability.class);
 
-	private final AiSessionPurgeController controller = new AiSessionPurgeController(this.service, this.runStore,
+	private final AiSessionPurgeController controller = new AiSessionPurgeController(this.service,
 			this.redisAvailability);
 
 	private final MockMvc mockMvc = MockMvcBuilders.standaloneSetup(this.controller).build();
 
 	@Test
-	void existingMemoryIsDeletedAndLegacyFieldsAreKept() throws Exception {
+	void existingSessionIsPurgedAndResponseKeepsCurrentFields() throws Exception {
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
-		when(this.runStore.instanceId()).thenReturn("inst-1");
-		when(this.service.purge("s-1", "inst-1")).thenReturn(result(true, true, List.of()));
+		when(this.service.purge(eq("s-1"), anyString())).thenReturn(result(true, true, List.of()));
 
-		purgeWithIdentity(delete("/api/ai/history/s-1"))
+		purgeWithIdentity(delete("/api/ai/session/s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.sessionId").value("s-1"))
-			.andExpect(jsonPath("$.deleted").value(true))
-			.andExpect(jsonPath("$.existed").value(true))
-			.andExpect(jsonPath("$.memoryKey").value("chat:mem:{s-1}"))
-			.andExpect(jsonPath("$.removedFromIndex").value(true))
-			.andExpect(jsonPath("$.runActive").value(false))
-			.andExpect(jsonPath("$.storedBy").value("inst-1"));
+			.andExpect(jsonPath("$.complete").value(true))
+			.andExpect(jsonPath("$.found").value(true))
+			.andExpect(jsonPath("$.memory.existed").value(true))
+			.andExpect(jsonPath("$.memory.messages").value(1))
+			.andExpect(jsonPath("$.memory.deleted").value(true))
+			.andExpect(jsonPath("$.database.feedbackRows").value(1))
+			.andExpect(jsonPath("$.database.feedbackDeleted").value(1))
+			.andExpect(jsonPath("$.clientCleanup.mirrorKey").value("ai-mirror:1:101:s-1"))
+			.andExpect(jsonPath("$.identity.tenantId").value(1))
+			.andExpect(jsonPath("$.identity.userId").value(101));
 
-		verify(this.service).purge("s-1", "inst-1");
+		verify(this.service).purge(eq("s-1"), anyString());
 	}
 
 	@Test
-	void missingMemoryIsIdempotentOkNotNotFound() throws Exception {
+	void missingSessionIsIdempotentOkNotNotFound() throws Exception {
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
-		when(this.runStore.instanceId()).thenReturn("inst-1");
-		when(this.service.purge("s-1", "inst-1")).thenReturn(result(true, false, List.of()));
+		when(this.service.purge(eq("s-1"), anyString())).thenReturn(result(true, false, List.of()));
 
-		purgeWithIdentity(delete("/api/ai/history/s-1"))
+		purgeWithIdentity(delete("/api/ai/session/s-1"))
 			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.deleted").value(true))
-			.andExpect(jsonPath("$.existed").value(false));
+			.andExpect(jsonPath("$.complete").value(true))
+			.andExpect(jsonPath("$.found").value(false))
+			.andExpect(jsonPath("$.memory.existed").value(false));
 	}
 
 	@Test
 	void activeRunIsReportedAsDeferredAndNotRejected() throws Exception {
 		when(this.redisAvailability.isAvailable()).thenReturn(true);
-		when(this.runStore.instanceId()).thenReturn("inst-1");
-		when(this.service.purge("s-1", "inst-1")).thenReturn(result(false, true,
+		when(this.service.purge(eq("s-1"), anyString())).thenReturn(result(false, true,
 				List.of(new DeferredView("r-1", "RUNNING", "RUN_ACTIVE"))));
 
-		purgeWithIdentity(delete("/api/ai/history/s-1"))
+		purgeWithIdentity(delete("/api/ai/session/s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.complete").value(false))
-			.andExpect(jsonPath("$.deleted").value(false))
-			.andExpect(jsonPath("$.runActive").value(true))
-			.andExpect(jsonPath("$.activeRunId").value("r-1"))
+			.andExpect(jsonPath("$.deferred[0].runId").value("r-1"))
 			.andExpect(jsonPath("$.deferred[0].reason").value("RUN_ACTIVE"));
 	}
 
@@ -103,7 +104,7 @@ class AiControllerHistoryDeleteTest {
 	void redisUnavailableFailsFastWithoutCallingTheService() throws Exception {
 		when(this.redisAvailability.isAvailable()).thenReturn(false);
 
-		this.mockMvc.perform(delete("/api/ai/history/s-1"))
+		this.mockMvc.perform(delete("/api/ai/session/s-1"))
 			.andExpect(status().isServiceUnavailable())
 			.andExpect(jsonPath("$.code").value("AI_REDIS_UNAVAILABLE"));
 
@@ -129,13 +130,14 @@ class AiControllerHistoryDeleteTest {
 		}
 	}
 
-	private static PurgeResult result(boolean complete, boolean existed, List<DeferredView> deferred) {
-		return new PurgeResult("s-1", "purge-1", complete, true, null,
+	private static PurgeResult result(boolean complete, boolean found, List<DeferredView> deferred) {
+		return new PurgeResult("s-1", "purge-1", complete, found, null,
 				new SessionPurgeDatabase.Snapshot(1), new SessionPurgeDatabase.Deleted(1),
-				new MemoryView(existed, existed ? 1 : 0, true), "chat:mem:{s-1}",
+				new MemoryView(found, found ? 1 : 0, true),
+				new TranscriptView(found, found ? 1 : 0, true),
 				List.of(new RunView("r-0", "DONE", false, true, false)), deferred,
-				new ContextView(true, true, 1, true, 3), new AttachmentView(0, 0, 0, List.of()),
-				new SessionView(true, true), true, new ClientCleanup("ai-mirror:s-1", "cm.ai.form.draft.",
+				new ContextView(true, true, true, 3), new AttachmentView(0, 0, 0, List.of()),
+				new SessionView(true, true), new ClientCleanup("ai-mirror:1:101:s-1", "cm.ai.form.draft.1:101.",
 						List.of()),
 				List.of(), List.of());
 	}

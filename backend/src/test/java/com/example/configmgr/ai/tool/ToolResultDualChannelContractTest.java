@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.tool;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.run.PendingToolCall;
@@ -36,11 +37,28 @@ class ToolResultDualChannelContractTest {
 
     private final InMemoryRunStore store = new InMemoryRunStore();
 
-    private final RunRegistry registry = new RunRegistry(this.store, this.mapper, this.properties);
+    private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, this.properties);
 
-    private final SseChatEmitter out = this.registry.of(RUN_ID);
+    private SseChatEmitter out;
 
     private final ToolResultLimiter limiter = new ToolResultLimiter(this.properties);
+
+    private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+    @org.junit.jupiter.api.BeforeEach
+    void bindIdentity() {
+        this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+        this.out = this.registry.of(RUN_ID);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void releaseIdentity() {
+        if (this.identity != null) {
+            this.identity.close();
+        }
+    }
+
+
 
     @Test
     void modelSideTruncationIsReportedOnTheFrameToo() throws Exception {
@@ -55,8 +73,8 @@ class ToolResultDualChannelContractTest {
         assertThat((Integer) frame.get(TruncationContract.RETURNED_CHARS_FIELD)).isLessThanOrEqualTo(20_000);
         assertThat((String) frame.get("result")).as("前端帧仍是全文").hasSize(30_000);
         assertThat(String.valueOf(frame.get(TruncationContract.NOTICE_FIELD))).isNotBlank();
-        assertThat(frame.get(TruncationContract.LEGACY_REASON_FIELD))
-            .as("truncatedReason 是 notice 的兼容别名（前端角标仍可读）").isEqualTo(frame.get(TruncationContract.NOTICE_FIELD));
+        assertThat(frame.get(TruncationContract.NOTICE_CODE_FIELD))
+            .as("noticeCode 是稳定机器码（legacy truncatedReason 别名已退役）").isNotNull();
 
         Map<String, Object> model = modelEnvelope(big);
         assertThat(model).containsEntry(TruncationContract.TRUNCATED_FIELD, true)
@@ -122,6 +140,7 @@ class ToolResultDualChannelContractTest {
         pending.setName(TOOL);
         pending.setKind(PendingToolCall.KIND_BACKEND);
         pending.setStatus(PendingToolCall.EXECUTED);
+        pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
         return pending;
     }
 

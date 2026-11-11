@@ -15,20 +15,23 @@ import org.springframework.ai.chat.messages.UserMessage;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 会话级 CAS 计数器的 <b>TTL 必须跟着数据键滑动</b>（`:ver` / `:gen`）。
+ * 会话级 CAS 计数器的 <b>TTL 必须跟着数据键滑动</b>（`:ver` / `:gen`）——但只在有写/续期活动的路径上。
  *
  * <h2>被钉住的缺口</h2>
- * 清空与合并写会给两个计数器设 TTL，但 <b>{@code saveAll}</b>、<b>合并写的等值早退</b>、以及
- * <b>读快照</b>这几条路径不碰计数器 —— 计数器就可能先于数据键过期：`:gen` 归 0 后，一个"写回期间
- * 并没有被清空"的写者会拿到 {@code -2}，被<b>误判成清空</b>而放弃写回（历史静默不落盘）。
+ * 清空与合并写会给两个计数器设 TTL，但 <b>{@code saveAll}</b> 与 <b>合并写的等值早退</b>曾不碰计数器 ——
+ * 计数器就可能先于数据键过期：`:gen` 归 0 后，一个"写回期间并没有被清空"的写者会拿到 {@code -2}，
+ * 被<b>误判成清空</b>而放弃写回（历史静默不落盘）。
  *
  * <p>口径：<b>凡是数据键被续期/续写的地方，两个计数器同 TTL 一起续</b>（EXPIRE 不存在的键是空操作，
- * 不会凭空造键）。计数器允许在会话销毁后随 TTL 残留 —— 但不得影响"删净"判定（{@code hasLiveMemory}
- * / 索引复核只看数据键与索引）。
+ * 不会凭空造键）。<b>纯读不算用户活动</b>：{@link RedisChatMemoryRepository#readWindow} 是后台压缩的
+ * 读口，<b>不得</b>发 EXPIRE、<b>不得</b>刷新数据键或计数器的既有 TTL。计数器允许在会话销毁后随 TTL
+ * 残留 —— 但不得影响"删净"判定（{@code hasLiveMemory} / 索引复核只看数据键与索引）。
  */
 class RedisChatMemoryCounterTtlTest {
 
 	private static final String CID = "s-counter-ttl";
+
+	private static final String DATA_KEY = "chat:mem:1:101:{" + CID + "}";
 
 	private static final String VERSION_KEY = "chat:mem:1:101:{" + CID + "}:ver";
 
@@ -87,16 +90,25 @@ class RedisChatMemoryCounterTtlTest {
 		assertThat(this.fake.expiry(GENERATION_KEY)).isEqualTo(TTL);
 	}
 
-	/** 读快照（压缩写回的 CAS 基线）也要续：基线读出来之后计数器不能中途过期。 */
+	/**
+	 * 读快照是后台压缩的纯读口：不得发 EXPIRE 冒充用户活动，也不得刷新数据键/计数器的既有 TTL。
+	 */
 	@Test
-	void readingTheWindowSnapshotAlsoSlidesTheCounters() {
+	void readingTheWindowSnapshotDoesNotRenewAnyTtl() {
 		this.repository.upsertRun(CID, A, history("A问", "A答"), WINDOW, true);
-		this.fake.expiries.clear();
+		Duration existing = Duration.ofMinutes(7); // 与写路径的 TTL 不同，刷新会立刻显形
+		this.fake.expiries.put(DATA_KEY, existing);
+		this.fake.expiries.put(VERSION_KEY, existing);
+		this.fake.expiries.put(GENERATION_KEY, existing);
+		int expireCallsBefore = this.fake.expires.get();
 
-		this.repository.readWindow(CID);
+		MemoryWindowSnapshot snapshot = this.repository.readWindow(CID);
 
-		assertThat(this.fake.expiry(VERSION_KEY)).isEqualTo(TTL);
-		assertThat(this.fake.expiry(GENERATION_KEY)).isEqualTo(TTL);
+		assertThat(snapshot.messages()).as("前置：确实读到了窗口（不是空窗/早退）").hasSize(2);
+		assertThat(this.fake.expires.get()).as("后台纯读不得发 EXPIRE").isEqualTo(expireCallsBefore);
+		assertThat(this.fake.expiry(DATA_KEY)).as("数据键既有 TTL 不因纯读刷新").isEqualTo(existing);
+		assertThat(this.fake.expiry(VERSION_KEY)).as("版本键既有 TTL 不因纯读刷新").isEqualTo(existing);
+		assertThat(this.fake.expiry(GENERATION_KEY)).as("代次键既有 TTL 不因纯读刷新").isEqualTo(existing);
 	}
 
 	/**
@@ -133,7 +145,7 @@ class RedisChatMemoryCounterTtlTest {
 		assertThat(this.fake.expiry(GENERATION_KEY)).isEqualTo(TTL);
 		assertThat(this.repository.findByConversationId(CID)).as("历史已删净").isEmpty();
 		assertThat(this.repository.hasLiveMemory(CID)).isFalse();
-		assertThat(this.repository.isConversationIndexed(CID)).isFalse();
+		assertThat(this.fake.sets).as("全局会话索引已退役：删除后不写裸索引").doesNotContainKey("chat:mem:__ids__");
 	}
 
 	private static List<Message> history(String question, String answer) {

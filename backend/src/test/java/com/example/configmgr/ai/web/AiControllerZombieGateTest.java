@@ -4,9 +4,7 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.LeaseService;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -64,8 +62,6 @@ class AiControllerZombieGateTest {
 
 	private final LeaseService leases = mock(LeaseService.class);
 
-	private final FakeRateRedis redis = new FakeRateRedis();
-
 	private final AiController controller = controller();
 
 	@Test
@@ -85,7 +81,7 @@ class AiControllerZombieGateTest {
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(deadRun, false), null);
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "继续问", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "继续问", null));
 
 		assertThat(response.getStatusCode()).as("死轮不拦发送").isEqualTo(HttpStatus.OK);
 		verify(this.sessionGate).releaseDeadHeld(SESSION, deadRun);
@@ -104,7 +100,7 @@ class AiControllerZombieGateTest {
 		when(this.runStore.runLeaseKey(liveRun)).thenReturn("ai:lease:run:" + liveRun);
 		when(this.sessionGate.acquire(any(), any())).thenReturn(new SessionGate.Busy(liveRun, false));
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "再说一句", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "再说一句", null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
 		verify(this.sessionGate, never()).release(any(), any());
@@ -133,7 +129,7 @@ class AiControllerZombieGateTest {
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(stalledRun, false), null);
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "重新问", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "重新问", null));
 
 		assertThat(response.getStatusCode()).as("心跳不得掩盖 RUNNING 的业务卡死").isEqualTo(HttpStatus.OK);
 		verify(this.sessionGate).releaseDeadHeld(SESSION, stalledRun);
@@ -165,7 +161,7 @@ class AiControllerZombieGateTest {
 		when(this.sessionGate.acquire(eq(SESSION), anyString()))
 			.thenReturn(new SessionGate.Busy(waitingRun, false), null);
 
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "插队", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "插队", null));
 
 		assertThat(response.getStatusCode()).as("没有真实订阅/业务活动 ⇒ park 的挂起轮不得永久占着会话门")
 			.isEqualTo(HttpStatus.OK);
@@ -199,7 +195,6 @@ class AiControllerZombieGateTest {
 				this.runRegistry, mock(CancellationRegistry.class), redisAvailability, executor, new ObjectMapper(),
 				this.properties, mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
 		ReflectionTestUtils.setField(built, "contextFieldGate", new com.example.configmgr.ai.gate.ContextFieldGate());
 		return built;
 	}

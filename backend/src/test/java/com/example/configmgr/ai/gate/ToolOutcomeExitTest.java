@@ -84,7 +84,7 @@ class ToolOutcomeExitTest {
 
 	@BeforeEach
 	void stubRun() {
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.store.get(RUN_ID)).thenReturn(snapshot());
 		when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
 		when(this.store.pendingKey(RUN_ID)).thenReturn("ai:pending:" + RUN_ID);

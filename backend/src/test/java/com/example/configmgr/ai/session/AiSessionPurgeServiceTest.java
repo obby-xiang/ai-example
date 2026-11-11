@@ -3,6 +3,7 @@ package com.example.configmgr.ai.session;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.form.FormAttachmentStore;
 import com.example.configmgr.ai.form.RedisFormAttachmentStore;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
 import com.example.configmgr.ai.observe.SettlementObservationStore;
@@ -15,11 +16,13 @@ import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunKeyScope;
+import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.config.AppProperties;
 import com.example.configmgr.file.FileStorageService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -74,9 +77,20 @@ class AiSessionPurgeServiceTest {
 
 	private Fixture fixture;
 
+	/** 用例默认身份（与生产 HTTP 边界一致：所有键/台账都按当前身份拼）。 */
+	private RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(TENANT_A, USER_A);
 		this.fixture = new Fixture(this.tempDir);
+	}
+
+	@AfterEach
+	void tearDown() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	// ── A/B 与业务隔离 ───────────────────────────────────────────────────────
@@ -100,7 +114,8 @@ class AiSessionPurgeServiceTest {
 		assertThat(result.databaseDeleted().feedbackRows()).isEqualTo(1);
 		assertThat(result.attachments().registrationsDeleted()).isEqualTo(1);
 		assertThat(result.attachments().filesDeleted()).isEqualTo(1);
-		assertThat(result.clientCleanup().mirrorKey()).isEqualTo("ai-mirror:" + SESSION_A);
+		assertThat(result.clientCleanup().mirrorKey())
+			.as("镜像键形与身份段一致").isEqualTo("ai-mirror:" + TENANT_A + ":" + USER_A + ":" + SESSION_A);
 
 		// A 的 AI 数据全没了
 		for (String key : thirteenKeys("run-a")) {
@@ -112,15 +127,20 @@ class AiSessionPurgeServiceTest {
 			assertThat(this.fixture.fake.strings).as("观测/取消键也必须删除：%s", key).doesNotContainKey(key);
 		}
 		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-a"));
-		assertThat(this.fixture.fake.hashes).doesNotContainKey(RunStore.CONTEXT_PREFIX + SESSION_A);
-		assertThat(this.fixture.fake.lists).doesNotContainKey(RunStore.CONTEXT_LEDGER_PREFIX + SESSION_A);
-		assertThat(this.fixture.fake.strings)
-			.doesNotContainKey(RunStore.CONTEXT_ARCHIVE_PREFIX + SESSION_A + ":1");
-		assertThat(this.fixture.fake.lists).doesNotContainKey(RunStore.SAFETY_PREFIX + SESSION_A);
+		assertThat(this.fixture.fake.hashes).doesNotContainKey(this.fixture.store.contextKey(SESSION_A));
+		assertThat(this.fixture.fake.lists).doesNotContainKey(this.fixture.store.contextLedgerKey(SESSION_A));
+		assertThat(this.fixture.fake.hashes)
+			.doesNotContainKey(ConversationTranscriptStore.dataKey(SESSION_A));
+		assertThat(this.fixture.fake.zsets)
+			.doesNotContainKey(ConversationTranscriptStore.orderKey(SESSION_A));
+		assertThat(this.fixture.fake.lists)
+			.doesNotContainKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, SESSION_A));
 		assertThat(this.fixture.fake.lists).doesNotContainKey(this.fixture.memory.keyFor(SESSION_A));
-		assertThat(this.fixture.fake.strings).doesNotContainKey(AiSessionService.KEY_PREFIX + SESSION_A);
-		assertThat(this.fixture.fake.strings).doesNotContainKey(RunStore.SESSION_CURRENT_PREFIX + SESSION_A);
-		assertThat(this.fixture.fake.sets.getOrDefault(RunStore.RUN_INDEX, Set.of())).doesNotContain("run-a");
+		assertThat(this.fixture.fake.strings).doesNotContainKey(AiSessionService.keyFor(SESSION_A));
+		assertThat(this.fixture.fake.strings)
+			.doesNotContainKey(this.fixture.store.sessionCurrentKey(SESSION_A));
+		assertThat(this.fixture.fake.zsets.getOrDefault(runListIndexKey(), java.util.Map.of()))
+			.as("身份 run 索引里不得再有 run-a").doesNotContainKey("run-a");
 		assertThat(this.fixture.store.allRunIds()).as("重启扫描的发现面只剩 B（A 不会复活）")
 			.containsExactly("run-b");
 		assertThat(this.fixture.store.get("run-a")).isNull();
@@ -134,10 +154,11 @@ class AiSessionPurgeServiceTest {
 			assertThat(this.fixture.fake.strings).as("B 的 run 级键必须保留：%s", key).containsKey(key);
 		}
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-b"));
-		assertThat(this.fixture.fake.hashes).containsKey(RunStore.CONTEXT_PREFIX + SESSION_B);
+		assertThat(this.fixture.fake.hashes).containsKey(this.fixture.store.contextKey(SESSION_B));
 		assertThat(this.fixture.fake.lists).containsKey(this.fixture.memory.keyFor(SESSION_B));
-		assertThat(this.fixture.fake.strings).containsKey(AiSessionService.KEY_PREFIX + SESSION_B);
-		assertThat(this.fixture.fake.sets.getOrDefault(RunStore.RUN_INDEX, Set.of())).contains("run-b");
+		assertThat(this.fixture.fake.strings).containsKey(AiSessionService.keyFor(SESSION_B));
+		assertThat(this.fixture.fake.zsets.getOrDefault(runListIndexKey(), java.util.Map.of()))
+			.as("B 的 run 仍在身份索引里").containsKey("run-b");
 		assertThat(countFeedback(SESSION_B)).isEqualTo(1);
 		assertThat(this.fixture.attachments.find(this.fixture.attachmentB.fileId())).isNotNull();
 		assertThat(Files.exists(this.fixture.fileB)).isTrue();
@@ -152,72 +173,79 @@ class AiSessionPurgeServiceTest {
 
 	@Test
 	void prefixCollisionsDoNotDeleteNeighbourSessions() throws Exception {
-		// abc / abcd / abc:1 三类碰撞：精确键 + 归档后缀纯数字判据
+		// abc / abcd / abc:1 三类碰撞：所有删除都按精确键（transcript/ctx/memory），不做前缀匹配
 		seedContextAndMemory("abc", null);
 		seedContextAndMemory("abcd", null);
 		seedContextAndMemory("abc:1", null);
 		seedContextAndMemory("a*b", null);
 		seedContextAndMemory("axb", null);
-		this.fixture.fake.strings.put(RunStore.CONTEXT_ARCHIVE_PREFIX + "a*b:1", "[]");
-		this.fixture.fake.strings.put(RunStore.CONTEXT_ARCHIVE_PREFIX + "axb:1", "[]");
 
 		this.fixture.service.purge("abc", "test");
 		this.fixture.service.purge("a*b", "test");
 
-		assertThat(this.fixture.fake.hashes).doesNotContainKey(RunStore.CONTEXT_PREFIX + "abc");
-		assertThat(this.fixture.fake.lists).doesNotContainKey(RunStore.CONTEXT_LEDGER_PREFIX + "abc");
-		assertThat(this.fixture.fake.lists).doesNotContainKey(RunStore.SAFETY_PREFIX + "abc");
-		assertThat(this.fixture.fake.strings).doesNotContainKey(RunStore.CONTEXT_ARCHIVE_PREFIX + "abc:1");
+		assertThat(this.fixture.fake.hashes).doesNotContainKey(this.fixture.store.contextKey("abc"));
+		assertThat(this.fixture.fake.lists).doesNotContainKey(this.fixture.store.contextLedgerKey("abc"));
+		assertThat(this.fixture.fake.lists)
+			.doesNotContainKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, "abc"));
+		assertThat(this.fixture.fake.hashes).doesNotContainKey(ConversationTranscriptStore.dataKey("abc"));
 		assertThat(this.fixture.fake.lists).doesNotContainKey(this.fixture.memory.keyFor("abc"));
 
 		assertThat(this.fixture.fake.hashes).as("abcd 的上下文必须保留")
-			.containsKey(RunStore.CONTEXT_PREFIX + "abcd");
+			.containsKey(this.fixture.store.contextKey("abcd"));
 		assertThat(this.fixture.fake.lists).as("abcd 的台账必须保留")
-			.containsKey(RunStore.CONTEXT_LEDGER_PREFIX + "abcd");
+			.containsKey(this.fixture.store.contextLedgerKey("abcd"));
 		assertThat(this.fixture.fake.lists).as("abcd 的安全台账必须保留")
-			.containsKey(RunStore.SAFETY_PREFIX + "abcd");
-		assertThat(this.fixture.fake.strings).as("abcd 的归档必须保留")
-			.containsKey(RunStore.CONTEXT_ARCHIVE_PREFIX + "abcd:1");
+			.containsKey(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, "abcd"));
+		assertThat(this.fixture.fake.hashes).as("abcd 的 transcript 必须保留")
+			.containsKey(ConversationTranscriptStore.dataKey("abcd"));
 		assertThat(this.fixture.fake.lists).as("abcd 的记忆必须保留")
 			.containsKey(this.fixture.memory.keyFor("abcd"));
 
 		assertThat(this.fixture.fake.hashes).as("abc:1 的上下文必须保留")
-			.containsKey(RunStore.CONTEXT_PREFIX + "abc:1");
-		assertThat(this.fixture.fake.strings).as("abc 的扫描不得误删 abc:1 的 turn 2 归档")
-			.containsKey(RunStore.CONTEXT_ARCHIVE_PREFIX + "abc:1:2");
+			.containsKey(this.fixture.store.contextKey("abc:1"));
+		assertThat(this.fixture.fake.hashes).as("abc 的销毁不得误删 abc:1 的 transcript")
+			.containsKey(ConversationTranscriptStore.dataKey("abc:1"));
 		assertThat(this.fixture.fake.lists).as("abc:1 的记忆必须保留")
 			.containsKey(this.fixture.memory.keyFor("abc:1"));
 
 		// glob 元字符：a*b 的 sessionId 不得被当成通配符
 		assertThat(this.fixture.fake.hashes).as("a*b 自己的上下文已删")
-			.doesNotContainKey(RunStore.CONTEXT_PREFIX + "a*b");
-		assertThat(this.fixture.fake.strings).as("a*b 自己的归档已删")
-			.doesNotContainKey(RunStore.CONTEXT_ARCHIVE_PREFIX + "a*b:1");
+			.doesNotContainKey(this.fixture.store.contextKey("a*b"));
+		assertThat(this.fixture.fake.hashes).as("a*b 自己的 transcript 已删")
+			.doesNotContainKey(ConversationTranscriptStore.dataKey("a*b"));
 		assertThat(this.fixture.fake.hashes).as("axb 的上下文不得被 a*b 的通配误删")
-			.containsKey(RunStore.CONTEXT_PREFIX + "axb");
-		assertThat(this.fixture.fake.strings).as("axb 的归档不得被 a*b 的通配误删")
-			.containsKey(RunStore.CONTEXT_ARCHIVE_PREFIX + "axb:1");
+			.containsKey(this.fixture.store.contextKey("axb"));
+		assertThat(this.fixture.fake.hashes).as("axb 的 transcript 不得被 a*b 的通配误删")
+			.containsKey(ConversationTranscriptStore.dataKey("axb"));
 	}
 
 	@Test
 	void sessionKeysWithEmbeddedCurrentPrefixAreNotDeletedAcrossSessions() {
-		String foreignRecordKey = RunStore.SESSION_CURRENT_PREFIX + "s1"; // = ai:session:current:s1
-		this.fixture.fake.strings.put(foreignRecordKey,
+		// s1 的 current 索引里放着另一会话（id=current:s1）的会话记录 JSON：销毁 s1 时必须跳过它。
+		String foreignCurrentKey = this.fixture.store.sessionCurrentKey("s1");
+		this.fixture.fake.strings.put(foreignCurrentKey,
 				"{\"sessionId\":\"current:s1\",\"lastActivity\":\"2026-10-25T00:00:00Z\",\"rounds\":1}");
+		// "current:s1" 自己的会话记录（身份段在键里，与上面的 current 索引不同键）。
+		String ownRecordKey = AiSessionService.keyFor("current:s1");
+		this.fixture.fake.strings.put(ownRecordKey, "{\"sessionId\":\"current:s1\",\"rounds\":1}");
 
 		AiSessionPurgeService.PurgeResult first = this.fixture.service.purge("s1", "test");
 
 		assertThat(first.phase()).isNull();
 		assertThat(first.complete()).as("没有删到他会话的数据，本会话也没有残留").isTrue();
 		assertThat(first.runs()).as("JSON 值不是 runId，不得被当成活跃轮次").isEmpty();
-		assertThat(this.fixture.fake.strings).as("另一会话（current:s1）的会话记录不得被 s1 的销毁删掉")
-			.containsKey(foreignRecordKey);
+		assertThat(first.warnings()).as("前缀碰撞必须留痕").anyMatch(warning -> warning.contains("sessionCurrent"));
+		assertThat(this.fixture.fake.strings).as("他会话（current:s1）的会话记录不得被 s1 的销毁删掉")
+			.containsKey(foreignCurrentKey);
+		assertThat(this.fixture.fake.strings).as("同理会话记录也不得被 s1 删掉").containsKey(ownRecordKey);
 
 		AiSessionPurgeService.PurgeResult second = this.fixture.service.purge("current:s1", "test");
 
 		assertThat(second.complete()).isTrue();
-		assertThat(this.fixture.fake.strings).as("按自己的 sessionId 销毁时，该记录才应被删")
-			.doesNotContainKey(foreignRecordKey);
+		assertThat(this.fixture.fake.strings).as("按自己的 sessionId 销毁时，才删自己的会话记录")
+			.doesNotContainKey(ownRecordKey);
+		assertThat(this.fixture.fake.strings).as("s1 的 current 索引仍不是 current:s1 的所有物")
+			.containsKey(foreignCurrentKey);
 	}
 
 	// ── 会话级 create_task 候选草案（ai:ctdraft）：精确单键删除 + 失败可重试 ─────
@@ -278,20 +306,25 @@ class AiSessionPurgeServiceTest {
 	@Test
 	void enumerationFailureDeletesNothing() throws Exception {
 		seedFullSession(SESSION_A, "run-a", "call-a");
-		this.fixture.fake.failScan = true;
+		RunStore spyStore = org.mockito.Mockito.spy(this.fixture.store);
+		when(spyStore.sessionRunIds(SESSION_A))
+			.thenThrow(new com.example.configmgr.common.AiStateUnavailableException("模拟索引读失败", null));
+		AiSessionPurgeService service = serviceWithStore(spyStore);
 
-		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
+		AiSessionPurgeService.PurgeResult result = service.purge(SESSION_A, "test");
 
 		assertThat(result.complete()).isFalse();
 		assertThat(result.phase()).isEqualTo("enumerate");
-		assertThat(this.fixture.fake.deleted).as("枚举失败一个数据键都不许删")
-			.noneMatch(key -> !key.equals(SessionPurgeGuard.PENDING_PREFIX + SESSION_A));
-		assertThat(this.fixture.fake.strings).doesNotContainKey(SessionPurgeGuard.PENDING_PREFIX + SESSION_A);
+		assertThat(this.fixture.fake.deleted).as("枚举失败：除登记台账的写路径外一个数据键都不许删")
+			.noneMatch(key -> key.contains(":run:") || key.contains(":ctx:") || key.contains("chat:mem:")
+					|| key.contains("ai:session:") || key.contains("ai:purge:guard:"));
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-a"));
-		assertThat(this.fixture.fake.hashes).containsKey(RunStore.CONTEXT_PREFIX + SESSION_A);
+		assertThat(this.fixture.fake.hashes).containsKey(this.fixture.store.contextKey(SESSION_A));
 		assertThat(countFeedback(SESSION_A)).isEqualTo(1);
 		assertThat(Files.exists(this.fixture.fileA)).isTrue();
-		assertThat(this.fixture.fake.strings).doesNotContainKey(SessionPurgeGuard.KEY_PREFIX + SESSION_A);
+		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.guard.keyFor(SESSION_A));
+		assertThat(this.fixture.pendingStore.current(SESSION_A))
+			.as("枚举失败必须保留 durable 台账（可重试），但不得装守卫").isNotNull();
 	}
 
 	@Test
@@ -431,12 +464,12 @@ class AiSessionPurgeServiceTest {
 	}
 
 	@Test
-	void databaseFailureAbortsBeforeAnyRedisDeletionAndDisarmsGuard() throws Exception {
+	void databaseFailureAbortsBeforeAnyRedisDeletionAndKeepsDurableState() throws Exception {
 		seedFullSession(SESSION_A, "run-a", "call-a");
 		SessionPurgeDatabase failing = new SessionPurgeDatabase(this.fixture.jdbc,
 				new DataSourceTransactionManager(this.fixture.source)) {
 			@Override
-			public Deleted delete(String sessionId) {
+			public Deleted delete(String sessionId, long tenantId, long userId) {
 				throw new IllegalStateException("模拟 H2 删除失败");
 			}
 		};
@@ -449,17 +482,19 @@ class AiSessionPurgeServiceTest {
 		assertThat(result.complete()).isFalse();
 		assertThat(result.phase()).isEqualTo("database");
 		assertThat(this.fixture.fake.deleted).as("H2 失败时 Redis 数据面一个键都不许删")
-			.noneMatch(key -> !key.equals(SessionPurgeGuard.KEY_PREFIX + SESSION_A)
-					&& !key.equals(SessionPurgeGuard.PENDING_PREFIX + SESSION_A));
+			.noneMatch(key -> key.contains(":run:") || key.contains(":ctx:") || key.contains("chat:mem:")
+					|| key.contains("ai:session:"));
 		assertThat(this.fixture.fake.deleted).doesNotContain(this.fixture.store.runKey("run-a"),
-				RunStore.CONTEXT_PREFIX + SESSION_A);
+				this.fixture.store.contextKey(SESSION_A));
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-a"));
-		assertThat(this.fixture.fake.hashes).containsKey(RunStore.CONTEXT_PREFIX + SESSION_A);
+		assertThat(this.fixture.fake.hashes).containsKey(this.fixture.store.contextKey(SESSION_A));
 		assertThat(countFeedback(SESSION_A)).isEqualTo(1);
 		assertThat(Files.exists(this.fixture.fileA)).isTrue();
-		assertThat(this.fixture.fake.strings).as("未删任何数据时必须撤销守卫与 pending（否则会话记忆被误锁）")
-			.doesNotContainKey(SessionPurgeGuard.KEY_PREFIX + SESSION_A)
-			.doesNotContainKey(SessionPurgeGuard.PENDING_PREFIX + SESSION_A);
+		assertThat(this.fixture.pendingStore.current(SESSION_A))
+			.as("H2 失败是 durable 失败事实：台账必须保留（可重试），attempts 已记一次").isNotNull();
+		assertThat(this.fixture.pendingStore.current(SESSION_A).attempts()).isPositive();
+		assertThat(this.fixture.fake.strings).as("守卫在 H2 之前已装（本会话在销毁中），不得当作成功 disarm")
+			.containsKey(this.fixture.guard.keyFor(SESSION_A));
 	}
 
 	// ── 附件相对键：删前/删后必须同一条 resolve 后的真实路径 ─────────────────
@@ -524,93 +559,80 @@ class AiSessionPurgeServiceTest {
 				this.fixture.database, this.fixture.guard, this.fixture.pendingStore, this.fixture.properties, Duration.ZERO);
 	}
 
-	// ── 会话→runId 索引：有索引时不扫全量 run 快照 ───────────────────────────
+	// ── 会话→runId 索引：枚举只信本会话索引 ─────────────────────────────────
 
 	@Test
 	void sessionRunIndexLimitsEnumerationToThisSessionAndLeavesOthersUntouched() throws Exception {
 		seedRun("run-a", SESSION_A, RunSnapshot.DONE);
 		seedRun("run-b", SESSION_B, RunSnapshot.DONE);
-		this.fixture.fake.sets.put("ai:session:runs:" + SESSION_A, new java.util.LinkedHashSet<>(Set.of("run-a")));
-		// 模拟“已完成一次全局枚举并回填”的状态：有 run-a + 完整标记，才允许走快路径。
-		this.fixture.store.backfillSessionRuns(SESSION_A, Set.of("run-a"));
+		this.fixture.fake.sets.put(this.fixture.store.sessionRunsKey(SESSION_A),
+				new java.util.LinkedHashSet<>(Set.of("run-a")));
 		RunStore spyStore = org.mockito.Mockito.spy(this.fixture.store);
 		AiSessionPurgeService service = serviceWithStore(spyStore);
 
 		AiSessionPurgeService.PurgeResult result = service.purge(SESSION_A, "test");
 
 		assertThat(result.complete()).isTrue();
-		// RT-28：销毁<b>枚举</b>阶段仍只用本会话索引（不逐个反序列化他会话快照做候选发现）；
-		// 但删除尾部必须按全局索引做一次"本会话 run 残留"复核（哨兵在、成员缺时唯一的兜底）——
-		// 他会话的 run 因此至多被读一次快照，且**不会被当成候选**。
 		assertThat(result.runs()).extracting(AiSessionPurgeService.RunView::runId).containsExactly("run-a");
-		org.mockito.Mockito.verify(spyStore, org.mockito.Mockito.atMost(1)).get("run-b");
-		assertThat(this.fixture.fake.sets.getOrDefault(RunStore.RUN_INDEX, Set.of())).contains("run-b");
+		org.mockito.Mockito.verify(spyStore, org.mockito.Mockito.never()).get("run-b");
+		assertThat(this.fixture.fake.zsets.getOrDefault(runListIndexKey(), java.util.Map.of()))
+			.as("他会话的 run 仍在自己的身份索引里").containsKey("run-b");
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-b"));
-		assertThat(this.fixture.store.sessionRunIndex(SESSION_A).runIds()).isEmpty();
-		assertThat(this.fixture.fake.sets).as("会话销毁同时删除本会话索引及回填标记")
-			.doesNotContainKey(RunStore.SESSION_RUNS_PREFIX + SESSION_A);
-		assertThat(this.fixture.store.sessionRunIndex(SESSION_A).complete()).isFalse();
+		assertThat(this.fixture.store.sessionRunIds(SESSION_A)).as("会话销毁删除本会话索引")
+			.isEmpty();
+		assertThat(this.fixture.fake.sets).doesNotContainKey(this.fixture.store.sessionRunsKey(SESSION_A));
 
-		// 重复删除：索引已空 ⇒ 回退全局索引；仍不得误删 B、仍幂等。
+		// 重复删除：索引已空 ⇒ 无候选；仍不得误删 B、仍幂等。
 		AiSessionPurgeService.PurgeResult again = service.purge(SESSION_A, "test");
 		assertThat(again.complete()).isTrue();
+		assertThat(again.runs()).isEmpty();
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-b"));
 	}
 
-	// ── 老数据索引不完整：非空但未回填时必须回退全局 ───────────────────────
-
+	/**
+	 * 全局会话 run 索引已退役：本会话索引是<b>唯一</b>候选发现面。
+	 *
+	 * <p>因此"索引里没有"就是"本轮不删"（不再回退全局枚举）。这一条钉住当前口径：
+	 * 升级/补写由快照写入方回填索引，销毁不在枚举阶段做全量扫描。
+	 */
 	@Test
-	void legacyNonEmptyButUnbackfilledSessionIndexStillDeletesOldRuns() throws Exception {
+	void runsMissingFromTheSessionIndexAreNotDeleted() throws Exception {
 		seedRun("run-old", SESSION_A, RunSnapshot.DONE);
 		seedRun("run-new", SESSION_A, RunSnapshot.DONE);
-		// 升级后 create 只 SADD 了新 run；老 run 仍在全局 ai:runs，但不在 session 索引。
-		this.fixture.fake.sets.put("ai:session:runs:" + SESSION_A,
+		// 升级后 create 只登记了新 run；老 run 没进 session 索引。
+		this.fixture.fake.sets.put(this.fixture.store.sessionRunsKey(SESSION_A),
 				new java.util.LinkedHashSet<>(Set.of("run-new")));
 
 		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
 
 		assertThat(result.complete()).isTrue();
-		assertThat(result.runs()).extracting(AiSessionPurgeService.RunView::runId)
-			.containsExactlyInAnyOrder("run-old", "run-new");
-		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-old"));
+		assertThat(result.runs()).extracting(AiSessionPurgeService.RunView::runId).containsExactly("run-new");
 		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-new"));
+		assertThat(this.fixture.fake.strings).as("不在索引里的 run 不在候选面（无全局回退）")
+			.containsKey(this.fixture.store.runKey("run-old"));
 	}
 
 	@Test
-	void sessionIndexReadFailureFallsBackToGlobalAndStillDeletesOldRuns() throws Exception {
+	void sessionIndexReadFailureAbortsWithoutDeletingAnything() throws Exception {
 		seedRun("run-old", SESSION_A, RunSnapshot.DONE);
 		seedRun("run-new", SESSION_A, RunSnapshot.DONE);
 		RunStore spyStore = org.mockito.Mockito.spy(this.fixture.store);
-		when(spyStore.sessionRunIndex(SESSION_A))
-			.thenReturn(new RunStore.SessionRunIndex(Set.of("run-new"), true, false));
+		when(spyStore.sessionRunIds(SESSION_A))
+			.thenThrow(new com.example.configmgr.common.AiStateUnavailableException("模拟索引读失败", null));
 		AiSessionPurgeService service = serviceWithStore(spyStore);
 
 		AiSessionPurgeService.PurgeResult result = service.purge(SESSION_A, "test");
 
-		assertThat(result.complete()).isTrue();
-		assertThat(result.runs()).extracting(AiSessionPurgeService.RunView::runId)
-			.containsExactlyInAnyOrder("run-old", "run-new");
-		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-old"));
-	}
-
-	@Test
-	void archiveScanNodeFailureAbortsPurgeWithoutComplete() throws Exception {
-		seedFullSession(SESSION_A, "run-a", "call-a");
-		this.fixture.fake.clusterMode = true;
-		RedisClusterNode m1 = this.fixture.fake.addClusterMaster("10.0.0.1", 7001);
-		RedisClusterNode m2 = this.fixture.fake.addClusterMaster("10.0.0.2", 7001);
-		this.fixture.fake.assignToMaster(m1, RunStore.CONTEXT_ARCHIVE_PREFIX + SESSION_A + ":1");
-		this.fixture.fake.assignToMaster(m2, RunStore.CONTEXT_ARCHIVE_PREFIX + SESSION_A + ":2");
-		this.fixture.fake.failNode = m2;
-
-		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
-
-		assertThat(result.complete()).isFalse();
+		assertThat(result.complete()).as("索引读不出来 = 候选不可知，必须 fail-closed").isFalse();
 		assertThat(result.phase()).isEqualTo("enumerate");
-		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-a"));
-		assertThat(this.fixture.fake.strings)
-			.containsKey(RunStore.CONTEXT_ARCHIVE_PREFIX + SESSION_A + ":1");
-		assertThat(this.fixture.fake.clusterConnectionCloses).as("失败路径关闭 cluster 连接").hasValue(1);
+		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-old"));
+		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-new"));
+		// 两个 run 都进不了删除阶段
+		for (String runId : List.of("run-old", "run-new")) {
+			for (String key : thirteenKeys(runId)) {
+				assertThat(this.fixture.fake.strings).as("枚举失败不得删 13 键：%s", key).containsKey(key);
+			}
+		}
 	}
 
 	// ── durable pending + 自动重试闭环 ────────────────────────────────────────
@@ -638,16 +660,17 @@ class AiSessionPurgeServiceTest {
 		assertThat(this.fixture.pendingStore.current(SESSION_A))
 			.as("完成后保留一次性记忆复核台账（fix4）").isNotNull();
 		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.runKey("run-a"));
-		assertThat(this.fixture.fake.strings).doesNotContainKey(RunStore.CONTEXT_PREFIX + SESSION_A);
+		assertThat(this.fixture.fake.strings).doesNotContainKey(this.fixture.store.contextKey(SESSION_A));
 		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("完成后进入有限保留期").isTrue();
-		assertThat(this.fixture.fake.strings).containsKey(SessionPurgeGuard.KEY_PREFIX + SESSION_A);
+		assertThat(this.fixture.fake.strings).containsKey(this.fixture.guard.keyFor(SESSION_A));
 	}
 
 	@Test
 	void pendingKeepsGuardArmedAfterGuardTtlWouldHaveExpired() {
 		// 只有 pending、没有 guard key（模拟 guard TTL 已到）：仍必须 armed，且记忆写被拒绝。
-		this.fixture.pendingStore.register(SESSION_A, "purge-pending", "test", 1_000L);
-		this.fixture.fake.strings.remove(SessionPurgeGuard.KEY_PREFIX + SESSION_A);
+		this.fixture.pendingStore.register(new TenantUser(TENANT_A, USER_A), SESSION_A, "purge-pending", "test",
+				1_000L);
+		this.fixture.fake.strings.remove(this.fixture.guard.keyFor(SESSION_A));
 
 		assertThat(this.fixture.guard.isArmed(SESSION_A)).isTrue();
 		this.fixture.memory.saveAll(SESSION_A, List.of(new UserMessage("延迟写回")));
@@ -669,19 +692,31 @@ class AiSessionPurgeServiceTest {
 		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("失败不得 blind disarm").isTrue();
 	}
 
+	/**
+	 * 自动尝试耗尽的台账：runner 只退役（摘 due 成员、保留 durable 台账），不执行第 11 次；
+	 * 这替代了已删除的"LIST/SCAN 孤儿恢复"——到期 ZSET 是唯一发现面，耗尽项不再占用它。
+	 */
 	@Test
-	void runnerRecoversOrphanPendingWhenQueueEntryWasLost() {
-		this.fixture.pendingStore.register(SESSION_A, "purge-orphan", "test", 1_000L);
-		this.fixture.fake.lists.remove(SessionPurgePendingStore.QUEUE_KEY);
+	void runnerRetiresExhaustedPendingInsteadOfRetryingAgain() {
+		long now = System.currentTimeMillis();
+		this.fixture.pendingStore.register(new TenantUser(TENANT_A, USER_A), SESSION_A, "purge-exhausted",
+				"test", now);
+		for (int attempt = 0; attempt < SessionPurgeRetryRunner.MAX_ATTEMPTS; attempt++) {
+			assertThat(this.fixture.pendingStore.isFailureRecorded(SESSION_A, "purge-exhausted", "boom")).isTrue();
+		}
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
 				this.fixture.service, grantedLease());
 
-		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(System.currentTimeMillis() + 3_600_000L);
+		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(now + 3_600_000L);
 
-		assertThat(report.recovered()).isEqualTo(1);
-		assertThat(report.completed()).isEqualTo(1);
-		// fix4：完成的那一轮会把台账改排成一次性记忆复核，因此台账此刻仍在（到点复核成功才移除）。
-		assertThat(this.fixture.pendingStore.current(SESSION_A)).isNotNull();
+		assertThat(report.attempted()).as("耗尽后不得再执行第 11 次").isZero();
+		assertThat(report.completed()).isZero();
+		SessionPurgePendingStore.Pending pending = this.fixture.pendingStore.current(SESSION_A);
+		assertThat(pending).as("退役不删 durable 台账").isNotNull();
+		assertThat(pending.attempts()).isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);
+		assertThat(this.fixture.fake.zsets.getOrDefault(SessionPurgePendingStore.DUE_KEY, java.util.Map.of()))
+			.as("退役项不再占全局发现面")
+			.doesNotContainKey(SessionPurgePendingStore.pendingKey(SESSION_A, TENANT_A, USER_A));
 	}
 
 	@Test
@@ -721,7 +756,7 @@ class AiSessionPurgeServiceTest {
 		AiSessionPurgeService failing = serviceWithDatabase(new SessionPurgeDatabase(this.fixture.jdbc,
 				new DataSourceTransactionManager(this.fixture.source)) {
 			@Override
-			public Deleted delete(String sessionId) {
+			public Deleted delete(String sessionId, long tenantId, long userId) {
 				throw new IllegalStateException("模拟 H2 删除失败");
 			}
 		});
@@ -733,9 +768,10 @@ class AiSessionPurgeServiceTest {
 		SessionPurgePendingStore.Pending secondPending = this.fixture.pendingStore.current(SESSION_A);
 		assertThat(secondPending).as("中止回滚不得删除第一轮登记的 pending").isNotNull();
 		assertThat(secondPending.purgeId()).isEqualTo(firstPurgeId);
-		assertThat(secondPending.attempts()).as("复用 pending 不得重置 attempts").isEqualTo(firstPending.attempts());
+		assertThat(secondPending.attempts()).as("每轮失败都如实记一次 attempts（不重置、也不掩盖）")
+			.isEqualTo(firstPending.attempts() + 1);
 		assertThat(this.fixture.guard.isArmed(SESSION_A)).as("不得 disarm 第一轮装的守卫").isTrue();
-		assertThat(this.fixture.fake.strings.get(SessionPurgeGuard.KEY_PREFIX + SESSION_A))
+		assertThat(this.fixture.fake.strings.get(this.fixture.guard.keyFor(SESSION_A)))
 			.startsWith(firstPurgeId + "|");
 		assertThat(this.fixture.fake.strings).as("第一轮 deferred 的 run 13 键必须还在")
 			.containsKey(this.fixture.store.runKey("run-a"));
@@ -763,16 +799,18 @@ class AiSessionPurgeServiceTest {
 		String firstPurgeId = this.fixture.pendingStore.current(SESSION_A).purgeId();
 		int attempts = this.fixture.pendingStore.current(SESSION_A).attempts();
 
-		this.fixture.fake.failScan = true;
-		AiSessionPurgeService.PurgeResult second = this.fixture.service.purge(SESSION_A, "test");
-		this.fixture.fake.failScan = false;
+		RunStore spyStore = org.mockito.Mockito.spy(this.fixture.store);
+		when(spyStore.sessionRunIds(SESSION_A))
+			.thenThrow(new com.example.configmgr.common.AiStateUnavailableException("模拟索引读失败", null));
+		AiSessionPurgeService failing = serviceWithStore(spyStore);
+		AiSessionPurgeService.PurgeResult second = failing.purge(SESSION_A, "test");
 
 		assertThat(second.phase()).isEqualTo("enumerate");
 		assertThat(second.complete()).isFalse();
 		assertThat(second.purgeId()).isEqualTo(firstPurgeId);
 		SessionPurgePendingStore.Pending pending = this.fixture.pendingStore.current(SESSION_A);
 		assertThat(pending).as("枚举失败不得删掉第一轮的 pending").isNotNull();
-		assertThat(pending.attempts()).as("不得重置 attempts").isEqualTo(attempts);
+		assertThat(pending.attempts()).as("每轮失败如实记一次（不重置）").isEqualTo(attempts + 1);
 		assertThat(this.fixture.guard.isArmed(SESSION_A)).isTrue();
 		assertThat(this.fixture.fake.strings).containsKey(this.fixture.store.runKey("run-a"));
 	}
@@ -782,7 +820,7 @@ class AiSessionPurgeServiceTest {
 	@Test
 	void sessionRunsKeyHeldByAnotherSessionRecordIsNotDeleted() throws Exception {
 		seedFullSession(SESSION_A, "run-a", "call-a");
-		String collidingRecord = RunStore.SESSION_RUNS_PREFIX + SESSION_A;
+		String collidingRecord = this.fixture.store.sessionRunsKey(SESSION_A);
 		this.fixture.fake.strings.put(collidingRecord, "{\"sessionId\":\"runs:" + SESSION_A + "\",\"title\":\"t\"}");
 
 		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
@@ -934,9 +972,9 @@ class AiSessionPurgeServiceTest {
 	/** 一个身份下的一整套最小可删面（会话记录 + run + 台账 + 记忆 + 守卫）。 */
 	private void seedIdentitySession(String runId, String toolCallId) throws Exception {
 		TenantUser identity = RequestContextUtils.require();
-		this.fixture.fake.sets
-			.computeIfAbsent(RunStore.RUN_INDEX, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet())
-			.add(RunKeyScope.indexMember(identity.tenantId(), identity.userId(), runId));
+		this.fixture.fake.zsets
+			.computeIfAbsent(runListIndexKey(), ignored -> new java.util.concurrent.ConcurrentHashMap<>())
+			.put(runId, 0.0);
 		for (String key : thirteenKeys(runId)) {
 			this.fixture.fake.strings.put(key, "seed");
 		}
@@ -955,7 +993,8 @@ class AiSessionPurgeServiceTest {
 		this.fixture.fake.strings.put(this.fixture.store.sessionCurrentKey(SESSION_A), runId);
 		// 记忆面直接落"已是最终形态"的键（saveAll 走 staging 脚本，替身只建模销毁侧脚本）。
 		this.fixture.fake.lists.put(this.fixture.memory.keyFor(SESSION_A), new ArrayList<>(List.of("{}")));
-		this.fixture.pendingStore.register(SESSION_A, "purge-" + runId, "tester", System.currentTimeMillis());
+		this.fixture.pendingStore.register(identity, SESSION_A, "purge-" + runId, "tester",
+				System.currentTimeMillis());
 		this.fixture.guard.arm(SESSION_A, "purge-" + runId, Duration.ofHours(1));
 	}
 
@@ -965,10 +1004,12 @@ class AiSessionPurgeServiceTest {
 
 	private LeaseService grantedLease() {
 		LeaseService leases = mock(LeaseService.class);
-		when(leases.acquire(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(Duration.class)))
+		when(leases.acquire(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(Duration.class),
+				org.mockito.ArgumentMatchers.anyString()))
 			.thenReturn(new LeaseService.AcquireResult(LeaseService.AcquireOutcome.ACQUIRED,
 					new LeaseService.Lease("ai:purge:retry:lock", 1L, "test"), true));
 		when(leases.release(org.mockito.ArgumentMatchers.any())).thenReturn(true);
+		when(leases.instanceId()).thenReturn("test-instance");
 		return leases;
 	}
 
@@ -978,10 +1019,12 @@ class AiSessionPurgeServiceTest {
 		seedRun(runId, sessionId, RunSnapshot.DONE);
 		seedPending(runId, toolCallId);
 		seedContextAndMemory(sessionId, runId);
-		this.fixture.fake.strings.put(AiSessionService.KEY_PREFIX + sessionId, "{}");
-		this.fixture.fake.strings.put(RunStore.SESSION_CURRENT_PREFIX + sessionId, runId);
-		this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating) VALUES (?, ?, ?)",
-				"msg-" + sessionId, sessionId, 1);
+		this.fixture.fake.strings.put(AiSessionService.keyFor(sessionId), "{}");
+		this.fixture.fake.strings.put(this.fixture.store.sessionCurrentKey(sessionId), runId);
+		TenantUser identity = RequestContextUtils.require();
+		this.fixture.jdbc.update("INSERT INTO ai_feedback (message_id, session_id, rating, tenant_id, user_id) "
+				+ "VALUES (?, ?, ?, ?, ?)", "msg-" + sessionId, sessionId, 1, identity.tenantId(),
+				identity.userId());
 		String fileId = sessionId.equals(SESSION_A) ? "att-a" : "att-b";
 		Path file = writeFile(fileId + ".pdf", "attachment-" + fileId);
 		FormAttachmentStore.Attachment stored = this.fixture.attachments.register(runId, toolCallId, sessionId,
@@ -997,26 +1040,34 @@ class AiSessionPurgeServiceTest {
 	}
 
 	private void seedContextAndMemory(String sessionId, String runId) {
-		this.fixture.fake.hashes.put(RunStore.CONTEXT_PREFIX + sessionId,
+		this.fixture.fake.hashes.put(this.fixture.store.contextKey(sessionId),
 				new LinkedHashMap<>(Map.of("turnNo", "0")));
-		this.fixture.fake.lists.put(RunStore.CONTEXT_LEDGER_PREFIX + sessionId, new ArrayList<>());
-		this.fixture.fake.strings.put(RunStore.CONTEXT_ARCHIVE_PREFIX + sessionId + ":1", "[]");
-		this.fixture.fake.strings.put(RunStore.CONTEXT_ARCHIVE_PREFIX + sessionId + ":2", "[]");
-		this.fixture.fake.lists.put(RunStore.SAFETY_PREFIX + sessionId, new ArrayList<>());
+		this.fixture.fake.lists.put(this.fixture.store.contextLedgerKey(sessionId), new ArrayList<>());
+		this.fixture.fake.hashes.put(ConversationTranscriptStore.dataKey(sessionId),
+				new LinkedHashMap<>(Map.of("1", "{\"type\":\"USER\"}")));
+		this.fixture.fake.zsets.put(ConversationTranscriptStore.orderKey(sessionId),
+				new java.util.concurrent.ConcurrentHashMap<>(Map.of("1", 1.0)));
+		this.fixture.fake.hashes.put(ConversationTranscriptStore.metaKey(sessionId),
+				new LinkedHashMap<>(Map.of("entries", "1")));
+		this.fixture.fake.strings.put(ConversationTranscriptStore.truncatedKey(sessionId), "0");
+		this.fixture.fake.lists.put(TenantKeyScope.scoped(RunStore.SAFETY_PREFIX, sessionId), new ArrayList<>());
 		if (runId != null) {
-			this.fixture.fake.strings.put(RunStore.SESSION_CURRENT_PREFIX + sessionId, runId);
+			this.fixture.fake.strings.put(this.fixture.store.sessionCurrentKey(sessionId), runId);
 		}
 		seedMemory(sessionId);
 	}
 
 	private void seedMemory(String sessionId) {
 		this.fixture.fake.lists.put(this.fixture.memory.keyFor(sessionId), new ArrayList<>(List.of("{}")));
-		this.fixture.fake.sets.computeIfAbsent("chat:mem:__ids__", ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet())
-			.add(sessionId);
 	}
 
 	private void seedRun(String runId, String sessionId, String status) throws Exception {
-		this.fixture.fake.sets.computeIfAbsent(RunStore.RUN_INDEX, ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet())
+		this.fixture.fake.zsets
+			.computeIfAbsent(runListIndexKey(), ignored -> new java.util.concurrent.ConcurrentHashMap<>())
+			.put(runId, 0.0);
+		this.fixture.fake.sets
+			.computeIfAbsent(this.fixture.store.sessionRunsKey(sessionId),
+					ignored -> java.util.concurrent.ConcurrentHashMap.newKeySet())
 			.add(runId);
 		for (String key : thirteenKeys(runId)) {
 			this.fixture.fake.strings.put(key, "seed");
@@ -1032,8 +1083,16 @@ class AiSessionPurgeServiceTest {
 		snapshot.setRunId(runId);
 		snapshot.setSessionId(sessionId);
 		snapshot.setStatus(status);
+		TenantUser identity = RequestContextUtils.require();
+		snapshot.setTenantId(identity.tenantId());
+		snapshot.setUserId(identity.userId());
 		this.fixture.fake.strings.put(this.fixture.store.runKey(runId),
 				this.fixture.mapper.writeValueAsString(snapshot));
+	}
+
+	private static String runListIndexKey() {
+		TenantUser identity = RequestContextUtils.require();
+		return RunStore.RUN_LIST_INDEX_PREFIX + identity.tenantId() + ":" + identity.userId();
 	}
 
 	private void seedPending(String runId, String toolCallId) throws Exception {
@@ -1048,9 +1107,9 @@ class AiSessionPurgeServiceTest {
 	}
 
 	private List<String> thirteenKeys(String runId) {
-		return List.of(this.fixture.store.runKey(runId), this.fixture.store.pendingKey(runId),
-				this.fixture.store.claimKey(runId), this.fixture.store.ledgerKey(runId),
-				this.fixture.store.idemKey(runId), this.fixture.store.eventsKey(runId),
+		return List.of(this.fixture.store.runKey(runId), this.fixture.store.runStateKey(runId),
+				this.fixture.store.pendingKey(runId), this.fixture.store.claimKey(runId),
+				this.fixture.store.ledgerKey(runId), this.fixture.store.idemKey(runId),
 				this.fixture.store.seqKey(runId), this.fixture.store.xeventsKey(runId),
 				this.fixture.store.runLeaseKey(runId), this.fixture.store.fenceKey(runId),
 				this.fixture.store.reqKey(runId), this.fixture.store.decidedKey(runId),
@@ -1186,8 +1245,12 @@ class AiSessionPurgeServiceTest {
 	@Test
 	void legacyPendingJsonWithoutVerifyFieldIsTreatedAsANormalRetry() {
 		String legacyJson = "{\"sessionId\":\"" + SESSION_A + "\",\"purgeId\":\"purge-old\",\"requestedBy\":\"t\","
-				+ "\"attempts\":0,\"nextAtMs\":1000,\"createdAtMs\":1000,\"lastError\":null}";
-		this.fixture.fake.strings.put(SessionPurgeGuard.PENDING_PREFIX + SESSION_A, legacyJson);
+				+ "\"attempts\":0,\"nextAtMs\":1000,\"createdAtMs\":1000,\"lastError\":null,"
+				+ "\"tenantId\":" + TENANT_A + ",\"userId\":" + USER_A + "}";
+		String key = SessionPurgePendingStore.pendingKey(SESSION_A, TENANT_A, USER_A);
+		this.fixture.fake.strings.put(key, legacyJson);
+		this.fixture.fake.zsets.put(SessionPurgePendingStore.DUE_KEY,
+				new java.util.concurrent.ConcurrentHashMap<>(Map.of(key, 999.0)));
 
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
 				this.fixture.service, grantedLease());
@@ -1214,20 +1277,23 @@ class AiSessionPurgeServiceTest {
 	void verifyStillRunsAfterTheLedgerAlreadyBurnedItsRetryBudget() throws Exception {
 		seedFullSession(SESSION_A, "run-a", "call-a");
 		String purgeId = "purge-exhausted";
-		this.fixture.pendingStore.register(SESSION_A, purgeId, "test", 1_000L);
+		long now = System.currentTimeMillis();
+		this.fixture.pendingStore.register(new TenantUser(TENANT_A, USER_A), SESSION_A, purgeId, "test", now);
 		for (int attempt = 0; attempt < SessionPurgeRetryRunner.MAX_ATTEMPTS; attempt++) {
-			assertThat(this.fixture.pendingStore.recordFailure(SESSION_A, purgeId, "boom")).isTrue();
+			assertThat(this.fixture.pendingStore.isFailureRecorded(SESSION_A, purgeId, "boom")).isTrue();
 		}
 		assertThat(this.fixture.pendingStore.current(SESSION_A).attempts())
 			.as("前置：台账已耗尽历史自动尝试")
 			.isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);
+		this.fixture.guard.arm(SESSION_A, purgeId + "|test", Duration.ofHours(1));
+		long verifyAt = now + 60_000L;
 
-		// 耗尽之后重发 DELETE（复用同一台账），这次删除主体成功 ⇒ 排一次记忆复核。
-		AiSessionPurgeService.PurgeResult result = this.fixture.service.purge(SESSION_A, "test");
-		assertThat(result.complete()).as("API 语义不变：删除主体仍然完成").isTrue();
+		assertThat(this.fixture.pendingStore.isVerifyScheduled(SESSION_A, purgeId, verifyAt))
+			.as("复核排程必须成功（不然 runner 根本看不到）").isTrue();
 		SessionPurgePendingStore.Pending scheduled = this.fixture.pendingStore.current(SESSION_A);
 		assertThat(scheduled).as("complete 后仍留一条待复核台账").isNotNull();
 		assertThat(scheduled.verifyAtMs()).isNotNull();
+		assertThat(scheduled.attempts()).as("复核是新阶段：自带一次有界预算，不从耗尽的旧计数继续").isZero();
 		int feedbackAfterPurge = countFeedback(SESSION_A);
 
 		// 崩溃残留：RENAME 已生效、写者在复检完成前死掉 ⇒ 最终键上留着历史。
@@ -1235,13 +1301,11 @@ class AiSessionPurgeServiceTest {
 				new ArrayList<>(List.of("{\"type\":\"USER\",\"content\":\"崩溃前的写回\"}")));
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
 				this.fixture.service, grantedLease());
-		long completeAt = System.currentTimeMillis();
 
-		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(completeAt + 120_000L);
+		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(verifyAt + 1_000L);
 
 		assertThat(report.attempted()).as("复核必须真的被执行（修复前被 attempts 短路，恒为 0）").isEqualTo(1);
 		assertThat(report.completed()).isEqualTo(1);
-		assertThat(scheduled.attempts()).as("复核是新阶段：自带一次有界预算，不从耗尽的旧计数继续").isZero();
 		assertThat(this.fixture.fake.lists).as("到点后崩溃残留必须删净").doesNotContainKey(
 				this.fixture.memory.keyFor(SESSION_A));
 		assertThat(this.fixture.pendingStore.current(SESSION_A)).as("复核成功后台账才移除（不永久驻留）").isNull();
@@ -1249,23 +1313,24 @@ class AiSessionPurgeServiceTest {
 	}
 
 	/**
-	 * <b>反例锁（fix5）：普通待重试台账的上限与退避逐字不变</b>。
+	 * <b>反例锁（fix5）：普通待重试台账的上限与退避不变</b>。
 	 *
-	 * <p>复核的新预算只属于"删除主体已完成"这一新阶段；普通 pending（{@code verifyAtMs == null}）
-	 * 到 {@code MAX_ATTEMPTS} 后仍然只 defer —— 不执行 retry（一个业务数据都不动）、不重置 attempts、
+	 * <p>复核的新预算只属于"删除主体已完成"这一阶段；普通 pending（{@code verifyAtMs == null}）
+	 * 到 {@code MAX_ATTEMPTS} 后只退役（摘 due 成员、保留台账）—— 不执行 retry、不重置 attempts、
 	 * 下一轮也不会偷偷再试（没有无限重试）。
 	 */
 	@Test
-	void exhaustedNormalPendingStillOnlyDefersAndKeepsItsAttemptBudget() throws Exception {
+	void exhaustedNormalPendingIsRetiredWithoutExecutingRetry() throws Exception {
 		seedFullSession(SESSION_A, "run-a", "call-a");
 		String purgeId = "purge-normal";
-		this.fixture.pendingStore.register(SESSION_A, purgeId, "test", 1_000L);
+		long now = System.currentTimeMillis();
+		this.fixture.pendingStore.register(new TenantUser(TENANT_A, USER_A), SESSION_A, purgeId, "test", now);
 		for (int attempt = 0; attempt < SessionPurgeRetryRunner.MAX_ATTEMPTS; attempt++) {
-			assertThat(this.fixture.pendingStore.recordFailure(SESSION_A, purgeId, "boom")).isTrue();
+			assertThat(this.fixture.pendingStore.isFailureRecorded(SESSION_A, purgeId, "boom")).isTrue();
 		}
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(this.fixture.pendingStore,
 				this.fixture.service, grantedLease());
-		long later = System.currentTimeMillis() + 3_600_000L;
+		long later = now + 3_600_000L;
 
 		SessionPurgeRetryRunner.RetryReport report = runner.runOnce(later);
 
@@ -1273,9 +1338,12 @@ class AiSessionPurgeServiceTest {
 		assertThat(report.skipped()).isEqualTo(1);
 		SessionPurgePendingStore.Pending pending = this.fixture.pendingStore.current(SESSION_A);
 		assertThat(pending).as("耗尽项仍是有主的 durable 台账（手动 DELETE 可续）").isNotNull();
-		assertThat(pending.attempts()).as("defer 不得重置 attempts").isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);
+		assertThat(pending.attempts()).as("退役不得重置 attempts").isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);
 		assertThat(pending.verifyAtMs()).isNull();
 		assertThat(pending.nextAtMs()).as("nextAt 必须推到有界未来").isGreaterThan(later);
+		assertThat(this.fixture.fake.zsets.getOrDefault(SessionPurgePendingStore.DUE_KEY, java.util.Map.of()))
+			.as("退役项不再占全局发现面")
+			.doesNotContainKey(SessionPurgePendingStore.pendingKey(SESSION_A, TENANT_A, USER_A));
 		assertThat(this.fixture.fake.lists).as("不得执行 retry：记忆仍在")
 			.containsKey(this.fixture.memory.keyFor(SESSION_A));
 		assertThat(countFeedback(SESSION_A)).as("不得执行 retry：DB 行仍在").isEqualTo(1);
@@ -1283,7 +1351,7 @@ class AiSessionPurgeServiceTest {
 			.doesNotContainKey(this.fixture.guard.keyFor(SESSION_A));
 
 		SessionPurgeRetryRunner.RetryReport next = runner.runOnce(later + 1_000L);
-		assertThat(next.attempted()).as("推到有界未来后没到点 ⇒ 依然一次都不执行").isZero();
+		assertThat(next.attempted()).as("退役后没到点 ⇒ 依然一次都不执行").isZero();
 		assertThat(this.fixture.pendingStore.current(SESSION_A).attempts())
 			.as("跨轮也不得重置 attempts")
 			.isEqualTo(SessionPurgeRetryRunner.MAX_ATTEMPTS);

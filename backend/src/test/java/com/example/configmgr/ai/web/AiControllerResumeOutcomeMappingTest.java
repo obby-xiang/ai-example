@@ -3,10 +3,8 @@ package com.example.configmgr.ai.web;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ContextFieldGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -62,8 +60,6 @@ class AiControllerResumeOutcomeMappingTest {
 
 	private final ResumeService resumeService = mock(ResumeService.class);
 
-	private final FakeRateRedis redis = new FakeRateRedis();
-
 	private AiController controller;
 
 	@BeforeEach
@@ -116,7 +112,6 @@ class AiControllerResumeOutcomeMappingTest {
 				new ObjectMapper(), this.properties, mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
 		ReflectionTestUtils.setField(built, "contextFieldGate", new ContextFieldGate());
 		ReflectionTestUtils.setField(built, "securityEvents", new SecurityEvents());
 		return built;

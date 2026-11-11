@@ -66,7 +66,7 @@ class ContextFrameWiringTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -92,7 +92,7 @@ class ContextFrameWiringTest {
 	private final InMemoryContextStateStore contextStore = new InMemoryContextStateStore();
 
 	private final ContextCompactor compactor = new ContextCompactor(this.properties,
-			new ContextLimitResolver(this.properties), this.contextStore);
+			new ContextLimitResolver((providerId, modelId) -> 128000), this.contextStore, null);
 
 	private ScheduledExecutorService watchdogExecutor;
 
@@ -111,7 +111,7 @@ class ContextFrameWiringTest {
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
 		ReflectionTestUtils.setField(this.service, "contextCompactor", this.compactor);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
@@ -136,7 +136,7 @@ class ContextFrameWiringTest {
 	}
 
 	private SseChatEmitter emitter() {
-		return new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		return TestRunRegistryFactory.create(this.store, this.mapper, null).of(RUN_ID);
 	}
 
 	private List<Map<String, Object>> framesOf(com.example.configmgr.ai.conformance.FrameWire wire) {
@@ -262,7 +262,7 @@ class ContextFrameWiringTest {
 		this.service.noteCompaction(RUN_ID, "L1");
 		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("继续")), first);
 
-		SseChatEmitter second = new SseChatEmitter(RUN_ID, this.store, this.mapper);
+		SseChatEmitter second = TestRunRegistryFactory.create(this.store, this.mapper, null).of(RUN_ID);
 		FrameWire secondWire = FrameWire.attachTo(second);
 		second.start(SESSION_ID);
 		this.service.driveResumed(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("再问")), second);

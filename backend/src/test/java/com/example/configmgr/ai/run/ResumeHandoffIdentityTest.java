@@ -72,7 +72,7 @@ class ResumeHandoffIdentityTest {
 		seedSuspendedRun();
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		doAnswer(invocation -> {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;

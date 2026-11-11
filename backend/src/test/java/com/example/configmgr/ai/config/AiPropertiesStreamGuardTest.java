@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 都全表扫索引（{@code SMEMBERS} + 逐成员 {@code EXISTS}），热路径变成 O(索引大小)。</li>
  * </ul>
  *
- * <p>读的是<b>绑定后</b>的值；方法包级可见，测试直调（与 {@link AiPropertiesLimitGuardTest} 同形）。
+ * <p>读的是<b>绑定后</b>的值；方法包级可见，测试直调。
  */
 class AiPropertiesStreamGuardTest {
 

@@ -2,15 +2,22 @@ package com.example.configmgr.job.service;
 
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantUser;
+import com.example.configmgr.config.AppProperties;
+import com.example.configmgr.job.entity.Job;
+import com.example.configmgr.job.repo.JobRepository;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * 全局心跳 ticker（{@code job-heartbeat-ticker}）的身份契约。
@@ -35,8 +42,18 @@ class JobHeartbeatTickerIdentityTest {
 		AtomicReference<String> tickerThreadName = new AtomicReference<>();
 		CountDownLatch ticked = new CountDownLatch(1);
 
-		JobHeartbeatRegistry registry = new JobHeartbeatRegistry(clock, redis.redis, true,
-				Duration.ofMinutes(35), Duration.ofMillis(300)) {
+		// 心跳续期周期 = beatTtl/3（下限 1s）：300ms × 3 ⇒ 1s 一拍，10s 门限足够。
+		AppProperties properties = new AppProperties();
+		properties.getJob().setHeartbeatInterval(Duration.ofMillis(300));
+		properties.getJob().getWatchdog().setDeadMultiplier(3);
+		// beginRunner 先读 DB 权威态：RUNNING 才允许登记 runner。
+		JobRepository jobRepository = mock(JobRepository.class);
+		JobRepository.CancelState inFlight = mock(JobRepository.CancelState.class);
+		when(inFlight.getStatus()).thenReturn(Job.JobStatus.RUNNING);
+		when(jobRepository.findCancelStateById(anyLong())).thenReturn(Optional.of(inFlight));
+
+		JobHeartbeatRegistry registry = new JobHeartbeatRegistry(redis.redis, "redis", properties,
+				jobRepository, mock(JobCancellationRegistry.class)) {
 			@Override
 			void tickOnce() {
 				try {

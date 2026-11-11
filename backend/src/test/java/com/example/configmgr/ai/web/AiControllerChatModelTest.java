@@ -4,9 +4,7 @@ import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -68,18 +66,17 @@ class AiControllerChatModelTest {
 
 	private final SseChatEmitter out = mock(SseChatEmitter.class);
 
-	private final FakeRateRedis redis = new FakeRateRedis();
-
 	private final AiConfigService configService = mock(AiConfigService.class);
 
 	private final AiController controller = controller();
 
 	@Test
 	void unknownModelIsRejectedBeforeTheStreamOpens() {
-		when(this.configService.resolveChatTarget("ghost-model")).thenReturn(Optional.empty());
+		when(this.configService.resolveChatTarget(org.mockito.ArgumentMatchers.eq(7L),
+				org.mockito.ArgumentMatchers.eq("ghost-model"))).thenReturn(Optional.empty());
 
 		ResponseEntity<?> response = this.controller.chat(
-				new AiChatRequest(SESSION, "你好", null, "ghost-model", null), null);
+				new AiChatRequest(SESSION, "你好", null, "ghost-model", 7L, null, null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
 		assertThat(body(response)).containsEntry("code", "MODEL_NOT_FOUND");
@@ -88,10 +85,11 @@ class AiControllerChatModelTest {
 
 	@Test
 	void requestedModelIdReachesTheService() {
-		when(this.configService.resolveChatTarget("deepseek-pro")).thenReturn(Optional.of(target("deepseek-pro")));
+		when(this.configService.resolveChatTarget(org.mockito.ArgumentMatchers.eq(7L),
+				org.mockito.ArgumentMatchers.eq("deepseek-pro"))).thenReturn(Optional.of(target("deepseek-pro")));
 
 		ResponseEntity<?> response = this.controller.chat(
-				new AiChatRequest(SESSION, "你好", null, "deepseek-pro", null), null);
+				new AiChatRequest(SESSION, "你好", null, "deepseek-pro", 7L, null, null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
 		ArgumentCaptor<AiChatRequest> captor = ArgumentCaptor.forClass(AiChatRequest.class);
@@ -105,7 +103,7 @@ class AiControllerChatModelTest {
 				new AiChatRequest.Params(2.5d, null, null), new AiChatRequest.Params(null, 1.5d, null),
 				new AiChatRequest.Params(null, null, 0) }) {
 			ResponseEntity<?> response = this.controller.chat(
-					new AiChatRequest(SESSION, "你好", null, null, params), null);
+					new AiChatRequest(SESSION, "你好", null, null, params));
 
 			assertThat(response.getStatusCode()).as("越界参数：%s", params).isEqualTo(HttpStatus.BAD_REQUEST);
 			assertThat(body(response)).containsEntry("code", "INVALID_PARAM");
@@ -115,7 +113,7 @@ class AiControllerChatModelTest {
 	@Test
 	void legacyBodyWithoutModelFieldsStillOpensTheStream() {
 		// 旧前端（三键体）在新后端上零影响：不查模型、不看参数
-		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		ResponseEntity<?> response = this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
 	}
@@ -162,7 +160,6 @@ class AiControllerChatModelTest {
 				directExecutor(), new ObjectMapper(), this.properties, mock(Environment.class),
 				mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
 		ReflectionTestUtils.setField(built, "aiConfigService", this.configService);
 		return built;
 	}

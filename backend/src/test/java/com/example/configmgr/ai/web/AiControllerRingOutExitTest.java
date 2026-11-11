@@ -3,10 +3,8 @@ package com.example.configmgr.ai.web;
 import com.example.configmgr.ai.config.AiAvailability;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.RedisAvailability;
-import com.example.configmgr.ai.gate.AiRateLimiter;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.ContextFieldGate;
-import com.example.configmgr.ai.gate.FakeRateRedis;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.ResilientChatService;
@@ -66,8 +64,6 @@ class AiControllerRingOutExitTest {
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
-	private final FakeRateRedis redis = new FakeRateRedis();
-
 	private final AiController controller = controller();
 
 	@Test
@@ -77,7 +73,7 @@ class AiControllerRingOutExitTest {
 			.chat(anyString(), any(AiChatRequest.class), eq(this.out));
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 
-		var response = this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		var response = this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		assertThat(response.getStatusCode()).as("异步提交：HTTP 仍是 200，失败由 SSE 表达")
 			.isEqualTo(HttpStatus.OK);
@@ -92,7 +88,7 @@ class AiControllerRingOutExitTest {
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.out.terminalFrameArchivedSinceDriveStart()).thenReturn(Boolean.TRUE);
 
-		this.controller.chat(new AiChatRequest(SESSION, "你好", null), null);
+		this.controller.chat(new AiChatRequest(SESSION, "你好", null));
 
 		// 先等到"判据被问过"，再断言没有补第二条终帧
 		verify(this.out, timeout(5000)).terminalFrameArchivedSinceDriveStart();
@@ -130,7 +126,6 @@ class AiControllerRingOutExitTest {
 				this.runRegistry, this.cancellations, redisAvailability, executor, new ObjectMapper(), this.properties,
 				mock(Environment.class), mock(com.example.configmgr.job.service.JobWatchdog.class));
 		ReflectionTestUtils.setField(built, "inputSanitizer", new InputSanitizer());
-		ReflectionTestUtils.setField(built, "aiRateLimiter", new AiRateLimiter(this.redis.redis, this.properties));
 		ReflectionTestUtils.setField(built, "contextFieldGate", new ContextFieldGate());
 		ReflectionTestUtils.setField(built, "securityEvents", new SecurityEvents());
 		return built;

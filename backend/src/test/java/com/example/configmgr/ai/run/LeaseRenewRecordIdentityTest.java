@@ -55,7 +55,8 @@ class LeaseRenewRecordIdentityTest {
 	void renewalKeepsTheLeaseWhenThePredicateRunsOnAnIdentityLessRenewThread() {
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec);
+			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec, 1L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-renew", "请求文本", 1_000L);
 		}
 		LeaseService.Lease lease;
 		AtomicReference<TenantUser> predicateSaw = new AtomicReference<>();
@@ -87,7 +88,8 @@ class LeaseRenewRecordIdentityTest {
 		// 相邻对照：判据为假（轮已收尾）时仍必须停续租 + 还租 —— 修复不得把僵尸续租一起放过。
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec);
+			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(), this.codec, 1L, "test-model",
+					new RunSnapshot.FrozenParams(null, null, 4096, false), "client-renew", "请求文本", 1_000L);
 		}
 		LeaseService.Lease lease;
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),

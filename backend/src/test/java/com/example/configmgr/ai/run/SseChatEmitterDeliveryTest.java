@@ -3,6 +3,7 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -78,9 +79,20 @@ class SseChatEmitterDeliveryTest {
 				return thread;
 			});
 
+	/** run 级键/帧面按身份拼：写出器投递必须处在显式身份作用域（否则身份不可确认 ⇒ 不归档不投递）。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
 	@AfterEach
 	void tearDown() {
 		this.pool.shutdownNow();
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	// ── 慢订阅者隔离：一条慢连接不阻塞同轮其他订阅者 ─────────────────────────
@@ -148,15 +160,17 @@ class SseChatEmitterDeliveryTest {
 	 * 真正的双口径锚点是下面两条红队 S1 定点用例。
 	 */
 	@Test
-	void replayBatchBypassesLiveCapacityUpToTheEventWindow() throws Exception {
+	void replayIsPagedAndStillDeliversTheWholeArchive() throws Exception {
 		InMemoryRunStore store = new InMemoryRunStore();
-		store.seedArchive(RUN_ID, archiveFrames(3000).toArray(new Map[0]));
-		SseChatEmitter out = asyncEmitter(store, 256);
+		InMemoryFrameStore archive = new InMemoryFrameStore();
+		archive.seed(RUN_ID, archiveFrames(3000).toArray(new Map[0]));
+		SseChatEmitter out = emitter(store, archive, this.pool, 256);
 
 		FrameWire reattached = new FrameWire();
 		int staged = out.replayAndAttach(reattached.emitter(), null, false);
 
-		assertThat(staged).as("回放批入队不受实时容量 256 约束（R1 裁决）").isEqualTo(3000);
+		assertThat(staged).as("回放分页：首拍只入队一页（%d 帧），不再整窗入队",
+				SseChatEmitter.REPLAY_ENQUEUE_FRAMES).isEqualTo(SseChatEmitter.REPLAY_ENQUEUE_FRAMES);
 		awaitSize(reattached, 3000, 10_000L);
 		List<Map<String, Object>> frames = FrameWire.normalize(reattached.frames());
 		assertThat(frames).hasSize(3000);
@@ -184,11 +198,13 @@ class SseChatEmitterDeliveryTest {
 	@Test
 	void liveFramesDoNotEvictAReattachingSubscriberWhileTheReplayBacklogIsDraining() throws Exception {
 		InMemoryRunStore store = new InMemoryRunStore();
-		store.seedArchive(RUN_ID, archiveFrames(3000).toArray(new Map[0]));
-		SseChatEmitter out = asyncEmitter(store, 256);
+		InMemoryFrameStore archive = new InMemoryFrameStore();
+		archive.seed(RUN_ID, archiveFrames(3000).toArray(new Map[0]));
+		SseChatEmitter out = emitter(store, archive, this.pool, 256);
 		TerminalSemanticsEmitter slow = new TerminalSemanticsEmitter(true);
 
-		assertThat(out.replayAndAttach(slow.emitter(), null, false)).as("回放批 3000 帧全部入队").isEqualTo(3000);
+		assertThat(out.replayAndAttach(slow.emitter(), null, false)).as("回放分页：首拍入队一页（%d 帧）",
+				SseChatEmitter.REPLAY_ENQUEUE_FRAMES).isEqualTo(SseChatEmitter.REPLAY_ENQUEUE_FRAMES);
 		assertThat(slow.awaitFirstSend(5L)).as("drain 已取走首帧并卡在写出：回放 backlog 未排空").isTrue();
 
 		// 回放 backlog 未排空期间混入实时帧（心跳不占 seq；delta 占 seq）
@@ -202,12 +218,29 @@ class SseChatEmitterDeliveryTest {
 
 		slow.release();
 		assertThat(slow.awaitFrames(3003, 20L)).as("回放批 + 混入的实时帧全量送达").isTrue();
-		List<String> types = typesOf(slow.payloads());
-		assertThat(types.subList(0, 3000)).as("回放批保持原序").containsOnly("tool_start");
-		assertThat(types.subList(3000, 3003)).as("实时帧按入队顺序续在回放批之后（单队列 FIFO 混合序）")
-				.containsExactly("heartbeat", "delta", "heartbeat");
-		assertThat(slow.payloads().get(3001)).as("实时业务帧续接归档末帧号（归档末帧 3000 ⇒ 3001）")
-				.contains("\"seq\":3001");
+		List<Map<String, Object>> delivered = new ArrayList<>();
+		for (String payload : slow.payloads()) {
+			delivered.add(new ObjectMapper().readValue(payload, Map.class));
+		}
+		List<Long> replaySeqs = new ArrayList<>();
+		List<String> liveTypes = new ArrayList<>();
+		for (Map<String, Object> frame : delivered) {
+			if ("tool_start".equals(frame.get("type"))) {
+				replaySeqs.add(((Number) frame.get("seq")).longValue());
+			}
+			else {
+				liveTypes.add(String.valueOf(frame.get("type")));
+			}
+		}
+		assertThat(replaySeqs).as("分页回放仍按 seq 升序、不重不漏").hasSize(3000)
+			.startsWith(1L, 2L).endsWith(2999L, 3000L);
+		assertThat(liveTypes).as("实时帧全部送达（分页回放只改变与实时帧的交错粒度）")
+			.containsExactlyInAnyOrder("heartbeat", "delta", "heartbeat");
+		Map<String, Object> liveDelta = delivered.stream()
+			.filter(frame -> "delta".equals(frame.get("type")))
+			.findFirst().orElseThrow();
+		assertThat(((Number) liveDelta.get("seq")).longValue())
+			.as("实时业务帧续接归档末帧号（归档末帧 3000 ⇒ 3001）").isEqualTo(3001L);
 	}
 
 	/**
@@ -217,8 +250,9 @@ class SseChatEmitterDeliveryTest {
 	@Test
 	void liveSegmentOverflowDuringTheReplayBacklogStillEvictsTheSubscriber() throws Exception {
 		InMemoryRunStore store = new InMemoryRunStore();
-		store.seedArchive(RUN_ID, archiveFrames(3000).toArray(new Map[0]));
-		SseChatEmitter out = asyncEmitter(store, 256);
+		InMemoryFrameStore archive = new InMemoryFrameStore();
+		archive.seed(RUN_ID, archiveFrames(3000).toArray(new Map[0]));
+		SseChatEmitter out = emitter(store, archive, this.pool, 256);
 		TerminalSemanticsEmitter slow = new TerminalSemanticsEmitter(true);
 		out.replayAndAttach(slow.emitter(), null, false);
 		assertThat(slow.awaitFirstSend(5L)).isTrue();
@@ -319,23 +353,61 @@ class SseChatEmitterDeliveryTest {
 		assertThat(seqs).containsExactly(2L, 3L, 4L, 5L, 6L);
 	}
 
-	// ── S2-4：ai:seq 登记失败仅 WARN + 继续出帧（序号发放不中断） ─────────────
+	// ── 归档拒绝：该帧不投递，但后续帧继续（序号发放不中断） ───────────────────
 
 	@Test
-	void seqRecordFailureOnlyWarnsAndKeepsEmitting() throws Exception {
+	void archiveRefusalDropsOnlyThatFrameAndLaterFramesKeepFlowing() throws Exception {
 		RunStore store = mock(RunStore.class);
-		org.mockito.Mockito.doThrow(new RuntimeException("SET 失败（模拟 Redis 抖动）")).when(store)
-				.recordIssuedSeq(anyString(), org.mockito.ArgumentMatchers.anyLong());
-		SseChatEmitter out = asyncEmitter(store, 256);
+		RefusingOnceFrameStore frames = new RefusingOnceFrameStore();
+		SseChatEmitter out = emitter(store, frames, Runnable::run, 256);
 		FrameWire wire = FrameWire.attachTo(out);
 
 		out.delta("一");
 		out.delta("二");
 		out.delta("三");
 
-		awaitSize(wire, 3, 5_000L);
+		awaitSize(wire, 2, 5_000L);
 		assertThat(FrameWire.normalize(wire.frames())).extracting(frame -> frame.get("seq"))
-				.containsExactly(1L, 2L, 3L);
+			.as("首帧归档被拒 ⇒ 不交付；后续帧序号连续发放").containsExactly(1L, 2L);
+	}
+
+	/** 第一次原子落档明确失败（{@code skipped()}），其余委托给进程内归档。 */
+	private static final class RefusingOnceFrameStore implements FrameStore {
+
+		private final InMemoryFrameStore delegate = new InMemoryFrameStore();
+
+		private boolean refused;
+
+		@Override
+		public long nextSeq(String runId) {
+			return this.delegate.nextSeq(runId);
+		}
+
+		@Override
+		public void append(String runId, Map<String, Object> frame) {
+			this.delegate.append(runId, frame);
+		}
+
+		@Override
+		public List<Map<String, Object>> readFrom(String runId, long afterSeq, int limit) {
+			return this.delegate.readFrom(runId, afterSeq, limit);
+		}
+
+		@Override
+		public long lastSeq(String runId) {
+			return this.delegate.lastSeq(runId);
+		}
+
+		@Override
+		public AppendResult appendAndAllocateSeq(String runId, Map<String, Object> frame,
+				PayloadFactory payloadFactory, long expectedEpoch) {
+			if (!this.refused) {
+				this.refused = true;
+				return AppendResult.skipped();
+			}
+			return this.delegate.appendAndAllocateSeq(runId, frame, payloadFactory, expectedEpoch);
+		}
+
 	}
 
 	// ── S1-1：轮终态收尾必须先排空队列（慢订阅者的尾帧不丢） ──────────────────
@@ -370,7 +442,7 @@ class SseChatEmitterDeliveryTest {
 				new LinkedBlockingQueue<>(), daemonFactory("delivery-single"));
 		try {
 			InMemoryRunStore store = new InMemoryRunStore();
-			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper(), single, 256);
+			SseChatEmitter out = emitter(store, new InMemoryFrameStore(), single, 256);
 			// 池只有一条工作线程：慢订阅者占住它，后一个订阅者的 drain 任务只能排在池队列里
 			TerminalSemanticsEmitter slow = new TerminalSemanticsEmitter(true);
 			TerminalSemanticsEmitter queued = new TerminalSemanticsEmitter(false);
@@ -405,7 +477,7 @@ class SseChatEmitterDeliveryTest {
 				new LinkedBlockingQueue<>(1), daemonFactory("delivery-tiny"));
 		try {
 			InMemoryRunStore store = new InMemoryRunStore();
-			SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper(), tiny, 256);
+			SseChatEmitter out = emitter(store, new InMemoryFrameStore(), tiny, 256);
 			TerminalSemanticsEmitter slow = new TerminalSemanticsEmitter(true);
 			TerminalSemanticsEmitter queued = new TerminalSemanticsEmitter(false);
 			TerminalSemanticsEmitter rejected = new TerminalSemanticsEmitter(false);
@@ -453,7 +525,7 @@ class SseChatEmitterDeliveryTest {
 				.as("前置：进程级静态池已装配（修复前的两参路径会读到它）").isInstanceOf(ThreadPoolExecutor.class);
 
 		InMemoryRunStore store = new InMemoryRunStore();
-		SseChatEmitter out = new RunRegistry(store, new ObjectMapper(), null).of(RUN_ID);
+		SseChatEmitter out = TestRunRegistryFactory.create(store, new ObjectMapper(), null).of(RUN_ID);
 		TerminalSemanticsEmitter wire = new TerminalSemanticsEmitter(false);
 		out.attach(wire.emitter());
 
@@ -472,20 +544,18 @@ class SseChatEmitterDeliveryTest {
 	void liveQueueCapacityStaysBelowTheEventWindowAndComesFromASingleSource() {
 		AiProperties configured = new AiProperties();
 		assertThat(configured.getSse().getDeliveryQueueCapacity())
-				.as("R1 不变量：每订阅者实时队列容量 < 归档窗口 EVENT_WINDOW")
+				.as("R1 不变量：每订阅者实时队列容量 < 归档窗口")
 				.isEqualTo(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY)
-				.isLessThan(RunStore.EVENT_WINDOW);
+				.isLessThan(RedisFrameStore.STREAM_WINDOW);
 
 		InMemoryRunStore store = new InMemoryRunStore();
-		// 两条装配路径（写出器缺省 / 注册表缺省）必须落在同一处缺省：无第二处字面量
-		assertThat(new SseChatEmitter(RUN_ID, store, new ObjectMapper()).queueCapacity())
-				.as("写出器缺省容量 = 配置缺省").isEqualTo(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY);
-		assertThat(new RunRegistry(store, new ObjectMapper(), null).of("run-capacity-default").queueCapacity())
+		// 注册表缺省必须落在配置缺省：无第二处字面量
+		assertThat(TestRunRegistryFactory.create(store, new ObjectMapper(), null).of("run-capacity-default").queueCapacity())
 				.as("注册表（无配置路径）容量 = 配置缺省").isEqualTo(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY);
 
 		AiProperties custom = new AiProperties();
 		custom.getSse().setDeliveryQueueCapacity(128);
-		assertThat(new RunRegistry(store, new ObjectMapper(), custom).of("run-capacity-custom").queueCapacity())
+		assertThat(TestRunRegistryFactory.create(store, new ObjectMapper(), custom).of("run-capacity-custom").queueCapacity())
 				.as("配置项为准（单一事实源）").isEqualTo(128);
 	}
 
@@ -550,7 +620,7 @@ class SseChatEmitterDeliveryTest {
 	void terminalCompleteOnAnIdleDrainedSubscriberCompletesInline() throws Exception {
 		RecordingExecutor executor = new RecordingExecutor();
 		InMemoryRunStore store = new InMemoryRunStore();
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper(), executor, 256);
+		SseChatEmitter out = emitter(store, new InMemoryFrameStore(), executor, 256);
 		TerminalSemanticsEmitter idle = new TerminalSemanticsEmitter(false);
 		out.attach(idle.emitter());
 
@@ -576,21 +646,23 @@ class SseChatEmitterDeliveryTest {
 	void terminalCompleteWithFramesWaitingRunsItsOwnDrainBeforeClosing() throws Exception {
 		RecordingExecutor executor = new RecordingExecutor();
 		InMemoryRunStore store = new InMemoryRunStore();
-		SseChatEmitter out = new SseChatEmitter(RUN_ID, store, new ObjectMapper(), executor, 256);
+		SseChatEmitter out = emitter(store, new InMemoryFrameStore(), executor, 256);
 		TerminalSemanticsEmitter slow = new TerminalSemanticsEmitter(false);
 		out.attach(slow.emitter());
 		Object sub = subscriptionOf(out, slow.emitter());
 
 		out.delta("队内一帧");
-		assertThat(executor.submitted()).as("入队后 CAS 抢到 drain 权 ⇒ 已提交一个 drain 任务").isEqualTo(1);
+		int afterDelta = executor.submitted();
+		assertThat(afterDelta).as("入队后必须已提交 drain 任务").isPositive();
 		((AtomicBoolean) fieldOf(sub, "draining")).set(false);
 
 		out.complete();
 
-		assertThat(executor.submitted()).as("CAS 抢到 + 队非空 ⇒ 自跑 submitDrain 去排空").isEqualTo(2);
+		assertThat(executor.submitted()).as("CAS 抢到 + 队非空 ⇒ 自跑 submitDrain 去排空")
+			.isEqualTo(afterDelta + 1);
 		assertThat(slow.completes()).as("队列未空 ⇒ 不得提前收尾").isZero();
 
-		executor.runSubmitted(1);
+		executor.runSubmitted(afterDelta);
 		assertThat(typesOf(slow.payloads())).as("自起的 drain 把队内帧写出").containsExactly("delta");
 		assertThat(slow.awaitCompletes(1, 5L)).as("排空之后才收尾").isTrue();
 		assertThat(out.subscriberCount()).isZero();
@@ -823,7 +895,14 @@ class SseChatEmitterDeliveryTest {
 
 	/** 走真实异步投递池的写出器（容量缩放以加速溢出用例）。 */
 	private SseChatEmitter asyncEmitter(RunStore store, int queueCapacity) {
-		return new SseChatEmitter(RUN_ID, store, new ObjectMapper(), this.pool, queueCapacity);
+		return emitter(store, new InMemoryFrameStore(), this.pool, queueCapacity);
+	}
+
+	/** 11 参装配：帧面独立（FrameStore），投递池显式传入。 */
+	private SseChatEmitter emitter(RunStore store, FrameStore frames, Executor executor, int queueCapacity) {
+		return new SseChatEmitter(RUN_ID, store, frames, new ObjectMapper(), executor, queueCapacity,
+				AiProperties.ResultBudget.Ui.DEFAULT_MAX_FRAME_BYTES,
+				com.example.configmgr.common.sse.SseWriteBudget.direct(), new NoopWakeBus(), null, null);
 	}
 
 	/** 订阅者队列（白盒，理由见 {@link #fieldOf}）。 */

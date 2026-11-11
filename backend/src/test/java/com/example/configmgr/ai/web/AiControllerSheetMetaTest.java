@@ -61,7 +61,7 @@ class AiControllerSheetMetaTest {
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
 		when(this.gate.submitFrontendResult(eq("r-1"), eq("c-1"), anyString(), any(), eq(false), any(),
-				any())).thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
+				any(), any())).thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 
 		String body = this.objectMapper.writeValueAsString(Map.of(
 				"runId", "r-1",
@@ -80,10 +80,11 @@ class AiControllerSheetMetaTest {
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<Map<String, Object>> meta = ArgumentCaptor.forClass(Map.class);
 		verify(this.gate).submitFrontendResult(eq("r-1"), eq("c-1"), anyString(), any(), eq(false), any(),
-				meta.capture());
+				meta.capture(), any());
 		assertThat(meta.getValue()).containsEntry("dataClass", "D2")
-			.containsEntry("sampleRows", 5L)
-			.containsEntry("totalRows", 3120L)
+			// 数值在入口被规范成字符串（白名单 sanitize 的当前口径）
+			.containsEntry("sampleRows", "5")
+			.containsEntry("totalRows", "3120")
 			.containsEntry("defCode", "CURRENCY")
 			// 明令禁止的字段在入口就被丢掉（白名单而非黑名单）
 			.doesNotContainKey("cellValue");
@@ -98,7 +99,8 @@ class AiControllerSheetMetaTest {
 		pending.setName("read_sheet_summary");
 		pending.setStatus(PendingToolCall.FRONTEND_RESULT);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
-		when(this.gate.submitFrontendResult(eq("r-1"), eq("c-1"), anyString(), any(), eq(false), any()))
+		when(this.gate.submitFrontendResult(eq("r-1"), eq("c-1"), anyString(), any(), eq(false), any(),
+				org.mockito.ArgumentMatchers.eq(java.util.Map.of()), org.mockito.ArgumentMatchers.isNull()))
 			.thenReturn(new ConfirmGate.Submission(ConfirmGate.Outcome.ACCEPTED, pending, true, null));
 
 		String body = this.objectMapper.writeValueAsString(Map.of(
@@ -107,7 +109,8 @@ class AiControllerSheetMetaTest {
 		this.mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON).content(body))
 			.andExpect(status().isOk());
 
-		verify(this.gate).submitFrontendResult(eq("r-1"), eq("c-1"), anyString(), any(), eq(false), any());
+		verify(this.gate).submitFrontendResult(eq("r-1"), eq("c-1"), anyString(), any(), eq(false), any(),
+				org.mockito.ArgumentMatchers.eq(java.util.Map.of()), org.mockito.ArgumentMatchers.isNull());
 	}
 
 	@SuppressWarnings("unchecked")

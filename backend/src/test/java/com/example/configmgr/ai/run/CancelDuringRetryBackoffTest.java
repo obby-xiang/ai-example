@@ -87,7 +87,7 @@ class CancelDuringRetryBackoffTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -135,7 +135,7 @@ class CancelDuringRetryBackoffTest {
 			return thread;
 		});
 		this.service = buildService(this.registry);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.cancellations.cancelState(anyString()))
@@ -217,7 +217,7 @@ class CancelDuringRetryBackoffTest {
 	@Test
 	void cancelLandingInsideTheSuccessWindowStillYieldsExactlyOneDone() throws Exception {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
+		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
 		CountDownLatch inDoneSave = new CountDownLatch(1);
 		CountDownLatch releaseDoneSave = new CountDownLatch(1);
@@ -266,7 +266,7 @@ class CancelDuringRetryBackoffTest {
 	@Test
 	void cancelFinalisedBeforeTheTurnStillWinsUnderTheSharedMonitor() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
+		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
 		svc.setCancelFinalizer(newFinalizer());
 
@@ -307,7 +307,7 @@ class CancelDuringRetryBackoffTest {
 	@Test
 	void anotherInstanceCancelBeforeTheDoneWriteIsHonouredAfterSave() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
+		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
 		svc.setCancelFinalizer(newFinalizer());
 		((CopyStore) this.store).cancelJustBeforeDoneSave = true;
@@ -337,7 +337,7 @@ class CancelDuringRetryBackoffTest {
 	@Test
 	void rereadFailureAfterDoneWithLocalCancelStillEmitsOneTerminal() throws Exception {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
+		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
 		CountDownLatch inDoneSave = new CountDownLatch(1);
 		CountDownLatch releaseDoneSave = new CountDownLatch(1);
@@ -379,7 +379,7 @@ class CancelDuringRetryBackoffTest {
 	@Test
 	void casRefusedWithUnreadableSnapshotDoesNotEmitDoneWithoutCancel() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
+		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
 		svc.setCancelFinalizer(newFinalizer());
 		CopyStore raceStore = (CopyStore) this.store;
@@ -407,7 +407,7 @@ class CancelDuringRetryBackoffTest {
 	@Test
 	void rereadCancelledAfterSuccessDoesNotSynthesizeStoppedTextFromTheSuccessAccumulator() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
+		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
 		svc.setCancelFinalizer(newFinalizer());
 		List<List<Message>> memoryWrites = new CopyOnWriteArrayList<>();
@@ -446,7 +446,7 @@ class CancelDuringRetryBackoffTest {
 	@Test
 	void alreadyCancelledBeforeSuccessDoesNotSynthesizeSuccessText() {
 		InMemoryFrameStore frames = new InMemoryFrameStore();
-		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null);
+		RunRegistry frameRegistry = new RunRegistry(this.store, this.mapper, null, frames, null, null, null);
 		ResilientChatService svc = buildService(frameRegistry);
 		svc.setCancelFinalizer(newFinalizer());
 		List<List<Message>> memoryWrites = new CopyOnWriteArrayList<>();

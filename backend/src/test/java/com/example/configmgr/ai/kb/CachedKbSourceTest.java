@@ -128,10 +128,10 @@ class CachedKbSourceTest {
                 KbHashing.sha256Hex(producer.contents.get("doc-a")), "2026-10-02", "doc-a.md", List.of(), List.of()));
         producer.etag = "etag-v2";
         producer.version = "v2";
-        long versionBefore = this.cache.version();
+        long versionBefore = this.cache.generation();
 
         assertThat(producerCached.fetchManifest("etag-v1", true)).isNotNull();
-        assertThat(this.cache.version()).isGreaterThan(versionBefore);
+        assertThat(this.cache.generation()).isGreaterThan(versionBefore);
         int consumerRemoteCallsBefore = consumerSource.manifestCalls.get();
 
         assertThat(consumer.refreshNow()).isTrue();
@@ -165,7 +165,7 @@ class CachedKbSourceTest {
         CountDownLatch releaseStaleManifestWrite = new CountDownLatch(1);
         KbCache interleavingCache = new KbCache(this.store) {
             @Override
-            public boolean putManifest(ManifestEntry entry, long generation) {
+            public boolean publishManifest(ManifestEntry entry, long generation, String leaseToken) {
                 if (generation == 2L) {
                     staleManifestWrite.countDown();
                     try {
@@ -178,7 +178,7 @@ class CachedKbSourceTest {
                         throw new AssertionError(e);
                     }
                 }
-                return super.putManifest(entry, generation);
+                return super.publishManifest(entry, generation, leaseToken);
             }
         };
         CachedKbSource warm = new CachedKbSource(local(current), interleavingCache, KbTestSupport.mapper(),
@@ -219,7 +219,7 @@ class CachedKbSourceTest {
         KbCache.ManifestEntry manifest = interleavingCache.manifest().orElseThrow();
         assertThat(manifest.etag()).isEqualTo("etag-v1");
         assertThat(manifest.json()).contains("\"version\":\"v1\"");
-        assertThat(interleavingCache.version()).isEqualTo(1L);
+        assertThat(interleavingCache.generation()).isEqualTo(1L);
         assertThat(interleavingCache.doc("doc-a").orElseThrow().content()).contains("当前正文");
         String generation = String.valueOf(interleavingCache.generation());
         assertThat(this.store.hashGetAll(KbCache.MANIFEST_KEY).get(KbCache.F_GENERATION)).isEqualTo(generation);
@@ -258,6 +258,66 @@ class CachedKbSourceTest {
             public void hashPutAll(String key, Map<String, String> values) {
                 throw new KbCacheException("redis down");
             }
+
+			@Override
+			public boolean hashDeleteFieldIfValueAtMost(String key, String field, long generation) {
+				throw new KbCacheException("redis down");
+			}
+
+			@Override
+			public boolean deleteDocIfGenerationAtMost(String key, String field, long generation) {
+				throw new KbCacheException("redis down");
+			}
+			@Override
+			public void hashPutFields(String key, Map<String, String> values) {
+				throw new KbCacheException("redis down");
+			}
+
+			@Override
+			public boolean hashPutFieldIfPresent(String key, String field, String value) {
+				throw new KbCacheException("redis down");
+			}
+
+			@Override
+			public long hashDeleteFields(String key, java.util.Collection<String> fields) {
+				throw new KbCacheException("redis down");
+			}
+
+			@Override
+			public void touch(String key) {
+				throw new KbCacheException("redis down");
+			}
+
+
+
+
+			@Override
+			public boolean compareAndExpire(String key, String value, java.time.Duration ttl) {
+				throw new KbCacheException("redis down");
+			}
+
+			@Override
+			public boolean hashPutAllIfLeaseAndGenerationAtMost(String key, String lockKey, String token,
+					String generationField, long generation, Map<String, String> values) {
+				throw new KbCacheException("redis down");
+			}
+
+
+			@Override
+			public boolean hashPutAllIfGenerationAtMost(String key, String generationField, long generation,
+					Map<String, String> values) {
+				throw new KbCacheException("redis down");
+			}
+
+			@Override
+			public void hashPutFieldsIfValueAtMost(String key, Map<String, String> values) {
+				throw new KbCacheException("redis down");
+			}
+
+			@Override
+			public boolean hashPutFieldIfPresentAndValueAtMost(String key, String field, long generation) {
+				throw new KbCacheException("redis down");
+			}
 
             @Override
             public String get(String key) {

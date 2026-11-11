@@ -6,8 +6,10 @@ import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
+import com.example.configmgr.ai.history.ConversationTranscriptStore;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
@@ -39,14 +41,19 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -101,7 +108,7 @@ class EmptyReplyTerminalTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -109,6 +116,8 @@ class EmptyReplyTerminalTest {
 
 	/** 注册表桩：取用即返回同一个运行态（模型 = 下面那个 ChatModel 桩）。 */
 	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
+
+	private final ConversationTranscriptStore transcript = mock(ConversationTranscriptStore.class);
 
 	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
 			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel,
@@ -130,10 +139,20 @@ class EmptyReplyTerminalTest {
 
 	private ResilientChatService service;
 
+	private RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(this.runtime));
+		when(this.providerRegistry.target(any(), eq("test-model"))).thenReturn(java.util.Optional.of(
+				new com.example.configmgr.ai.config.AiConfigService.ChatTarget(
+						new com.example.configmgr.ai.config.AiConfigService.ResolvedProvider(null, "test-provider",
+								"http://localhost", "/chat/completions", "test-model", "", "fp", false),
+						"test-model", false)));
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean()))
+			.thenReturn(this.runtime);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "t3b-empty-reply-watchdog");
 			thread.setDaemon(true);
@@ -143,11 +162,19 @@ class EmptyReplyTerminalTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService,
 				this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
+		when(this.transcript.append(anyString(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of());
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setModelId("test-model");
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		long now = System.currentTimeMillis();
+		snapshot.setCreatedAtMs(now);
+		snapshot.setTurnStartedAtMs(now - 1L);
 		snapshot.setContext(AiContext.empty().toMap());
 		this.store.save(snapshot);
 	}
@@ -155,6 +182,7 @@ class EmptyReplyTerminalTest {
 	@org.junit.jupiter.api.AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		this.identity.close();
 	}
 
 	// ── ① 空串 → FAILED + EMPTY_REPLY ──
@@ -280,6 +308,9 @@ class EmptyReplyTerminalTest {
 	void concurrentCancelDuringFailureLeavesExactlyOneTerminalFrameUnderTheMonitor() throws Exception {
 		// 关掉空回复重试，让本轮直走 emptyReply 的失败出口
 		this.properties.getResilience().setMaxAttempts(1);
+		ScheduledExecutorService retryExecutor = mock(ScheduledExecutorService.class);
+		when(retryExecutor.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class)))
+			.thenReturn(mock(ScheduledFuture.class));
 		CancelledRunFinalizer finalizer = new CancelledRunFinalizer(
 				new org.springframework.beans.factory.ObjectProvider<ResumeService>() {
 					@Override
@@ -291,8 +322,7 @@ class EmptyReplyTerminalTest {
 					public ResumeService getObject(Object... args) {
 						return null;
 					}
-				}, Runnable::run, this.properties, (task, delay) -> () -> {
-				});
+				}, Runnable::run, this.properties, retryExecutor);
 		Object monitor = finalizer.finalizeMonitor(RUN_ID);
 		this.service.setCancelFinalizer(finalizer);
 
@@ -455,7 +485,7 @@ class EmptyReplyTerminalTest {
 			"DONE, true",
 			"FAILED, true",
 			"CANCELLED, true",
-			"REJECTED, true",
+			"REJECTED, false",
 			"done, false",
 			"UNKNOWN_STATUS, false"
 	})

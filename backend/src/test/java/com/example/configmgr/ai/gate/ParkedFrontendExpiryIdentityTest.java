@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -89,7 +90,7 @@ class ParkedFrontendExpiryIdentityTest {
 
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -118,7 +119,7 @@ class ParkedFrontendExpiryIdentityTest {
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
 		this.properties.getHitl().setFrontendToolTimeout(Duration.ofSeconds(1));
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
@@ -135,7 +136,7 @@ class ParkedFrontendExpiryIdentityTest {
 
 		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 				RECORD_IDENTITY.userId())) {
-			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("跳到编辑器")), this.codec);
+			this.store.create(RUN_ID, SESSION_ID, AiContext.empty(), List.of(new UserMessage("跳到编辑器")), this.codec, 1L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1000L);
 			RunSnapshot snapshot = this.store.get(RUN_ID);
 			snapshot.setContext(AiContext.empty().toMap());
 			this.store.save(snapshot);
@@ -213,7 +214,7 @@ class ParkedFrontendExpiryIdentityTest {
 			try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(RECORD_IDENTITY.tenantId(),
 					RECORD_IDENTITY.userId())) {
 				this.store.create(RESIDUAL_RUN_ID, RESIDUAL_SESSION_A, AiContext.empty(),
-						List.of(new UserMessage("跳到编辑器")), this.codec);
+						List.of(new UserMessage("跳到编辑器")), this.codec, 1L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1000L);
 				RunSnapshot snapshot = this.store.get(RESIDUAL_RUN_ID);
 				snapshot.setContext(AiContext.empty().toMap());
 				this.store.save(snapshot);
@@ -297,7 +298,7 @@ class ParkedFrontendExpiryIdentityTest {
 	private long seedForeignParkedRun() {
 		try (RunIdentityScope.Scope ignored = RunIdentityScope.open(RESIDUAL_IDENTITY)) {
 			RunSnapshot snapshot = this.store.create(RESIDUAL_RUN_ID, RESIDUAL_SESSION_B, AiContext.empty(),
-					List.of(new UserMessage("B 的轮")), this.codec);
+					List.of(new UserMessage("B 的轮")), this.codec, 1L, "test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-test", "请求文本", 1000L);
 			PendingToolCall bait = new PendingToolCall();
 			bait.setToolCallId(RESIDUAL_CALL_ID);
 			bait.setName("navigate_to");

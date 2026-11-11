@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.conformance;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
@@ -20,11 +21,11 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 三参装配路径的一致性锚定（源自 GLM S3-2 复核意见：{@code new RunRegistry(store, mapper, properties)}
+ * 三参装配路径的一致性锚定（源自 GLM S3-2 复核意见：{@code TestRunRegistryFactory.create(store, mapper, properties)}
  * 这条<b>生产</b>装配路径此前只有间接覆盖，无直接自动化用例）。
  *
  * <p>
- * 三参装配是 Spring 的唯一入口，它同时决定两件事：
+ * 本类锁的是测试装配工厂的三参便捷入口（生产 RunRegistry 为七参构造），它同时决定两件事：
  * <ol>
  * <li><b>投递执行器</b>：{@code properties != null} ⇒ 进程级共享有界投递池（异步，快慢订阅者隔离）；
  * 两参 ⇒ 固定 {@code Runnable::run}（同步直执，不读进程静态池，见
@@ -43,23 +44,29 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class ThreeArgAssemblyConformanceTest {
 
+	static {
+		com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
 	private static final String RUN_ID = "run-three-arg";
 
 	private ThreadPoolExecutor poolBeforeClass;
 
 	@BeforeEach
 	void resetStaticPool() throws Exception {
-		this.poolBeforeClass = (ThreadPoolExecutor) staticField("sharedDeliveryPool");
-		setStaticField("sharedDeliveryPool", null);
+		java.util.concurrent.Executor current = SseChatEmitter.sharedDeliveryExecutorOrDirect();
+		this.poolBeforeClass = current instanceof ThreadPoolExecutor pool ? pool : null;
+		setStaticField("sharedResources", null);
 	}
 
 	@AfterEach
 	void restoreStaticPool() throws Exception {
-		ThreadPoolExecutor pool = (ThreadPoolExecutor) staticField("sharedDeliveryPool");
+		java.util.concurrent.Executor current = SseChatEmitter.sharedDeliveryExecutorOrDirect();
+		ThreadPoolExecutor pool = current instanceof ThreadPoolExecutor executor ? executor : null;
 		if (pool != null && pool != this.poolBeforeClass) {
 			pool.shutdownNow();
 		}
-		setStaticField("sharedDeliveryPool", this.poolBeforeClass);
+		setStaticField("sharedResources", this.poolBeforeClass);
 	}
 
 	// ── 1. 三参装配生效路径 = 异步共享投递池，队列容量取配置 ─────────────────────
@@ -67,11 +74,11 @@ class ThreeArgAssemblyConformanceTest {
 	@Test
 	void threeArgAssemblyUsesTheSharedAsyncPoolAndTheConfiguredQueueCapacity() throws Exception {
 		AiProperties defaults = new AiProperties();
-		RunRegistry registry = new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), defaults);
+		RunRegistry registry = TestRunRegistryFactory.create(new InMemoryRunStore(), new ObjectMapper(), defaults);
 
 		SseChatEmitter out = registry.of(RUN_ID);
 		assertThat((Executor) fieldOf(out, "deliveryExecutor"))
-				.as("三参装配（properties != null）⇒ 已装配进程级共享投递池，而非 Runnable::run")
+				.as("工厂三参入口（properties != null）⇒ 已装配进程级共享投递池，而非 Runnable::run")
 				.isInstanceOf(ThreadPoolExecutor.class)
 				.isSameAs(SseChatEmitter.sharedDeliveryExecutorOrDirect());
 		assertThat(((ThreadPoolExecutor) SseChatEmitter.sharedDeliveryExecutorOrDirect()).getCorePoolSize())
@@ -79,7 +86,7 @@ class ThreeArgAssemblyConformanceTest {
 				.isEqualTo(defaults.getSse().getDeliveryPoolSize());
 		assertThat(queueCapacityOf(out)).as("队列容量取配置缺省（单一事实源）")
 				.isEqualTo(AiProperties.Sse.DEFAULT_DELIVERY_QUEUE_CAPACITY)
-				.isLessThan(RunStore.EVENT_WINDOW);
+				.isLessThan(com.example.configmgr.ai.run.RedisFrameStore.STREAM_WINDOW);
 	}
 
 	@Test
@@ -87,7 +94,7 @@ class ThreeArgAssemblyConformanceTest {
 		AiProperties custom = new AiProperties();
 		custom.getSse().setDeliveryPoolSize(3);
 		custom.getSse().setDeliveryQueueCapacity(128);
-		RunRegistry registry = new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), custom);
+		RunRegistry registry = TestRunRegistryFactory.create(new InMemoryRunStore(), new ObjectMapper(), custom);
 
 		SseChatEmitter out = registry.of(RUN_ID);
 		assertThat(((ThreadPoolExecutor) fieldOf(out, "deliveryExecutor")).getCorePoolSize())
@@ -106,7 +113,7 @@ class ThreeArgAssemblyConformanceTest {
 		assertThat(SseChatEmitter.sharedDeliveryExecutorOrDirect())
 				.as("前置：进程级静态池已装配").isInstanceOf(ThreadPoolExecutor.class);
 
-		SseChatEmitter out = new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), null).of(RUN_ID);
+		SseChatEmitter out = TestRunRegistryFactory.create(new InMemoryRunStore(), new ObjectMapper(), null).of(RUN_ID);
 		assertThat((Executor) fieldOf(out, "deliveryExecutor"))
 				.as("两参装配固定同步直执，不受静态池已装配影响").isNotInstanceOf(ThreadPoolExecutor.class);
 		assertThat(queueCapacityOf(out)).as("两参装配回落配置缺省容量")
@@ -117,7 +124,7 @@ class ThreeArgAssemblyConformanceTest {
 
 	@Test
 	void staticPoolIsNotConfiguredByTheTwoArgPathAndEvictedTotalIsOnlyMonotonic() throws Exception {
-		new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), null).of("run-two-arg-static");
+		TestRunRegistryFactory.create(new InMemoryRunStore(), new ObjectMapper(), null).of("run-two-arg-static");
 		assertThat(SseChatEmitter.sharedDeliveryExecutorOrDirect())
 				.as("两参装配绝不装配进程静态池（否则同 JVM 内后续用例被悄悄变异步）")
 				.isNotInstanceOf(ThreadPoolExecutor.class);
@@ -126,7 +133,7 @@ class ThreeArgAssemblyConformanceTest {
 		// 不断言绝对值 —— 绝对值随执行顺序漂移是它的既定语义，不是本用例的判据。
 		long before = ((Number) SseChatEmitter.deliveryPoolMetrics().get("evicted")).longValue();
 		AiProperties defaults = new AiProperties();
-		RunRegistry registry = new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), defaults);
+		RunRegistry registry = TestRunRegistryFactory.create(new InMemoryRunStore(), new ObjectMapper(), defaults);
 		SseChatEmitter out = registry.of("run-evicted-monotonic");
 		FrameWire wire = FrameWire.attachTo(out);
 		out.messageBoundary("start", "text", null);
@@ -137,13 +144,13 @@ class ThreeArgAssemblyConformanceTest {
 		assertThat(before).as("正常路径无摘除 ⇒ 计数器不动").isEqualTo(after);
 	}
 
-	// ── 4. 帧序语义不变：三参（异步池）路径下仍单订阅者 FIFO + seq 连续 ────────────
+	// ── 4. 帧序语义不变：工厂三参入口（异步池）路径下仍单订阅者 FIFO + seq 连续 ────────────
 
 	@Test
 	void threeArgAssemblyKeepsSingleSubscriberFifoAndContiguousSeq() throws Exception {
 		AiProperties props = new AiProperties();
 		props.getSse().setDeliveryPoolSize(4);
-		SseChatEmitter out = new RunRegistry(new InMemoryRunStore(), new ObjectMapper(), props).of(RUN_ID);
+		SseChatEmitter out = TestRunRegistryFactory.create(new InMemoryRunStore(), new ObjectMapper(), props).of(RUN_ID);
 		FrameWire wire = FrameWire.attachTo(out);
 
 		int frames = 200;
@@ -160,7 +167,7 @@ class ThreeArgAssemblyConformanceTest {
 			seqs.add(((Number) frame.get("seq")).longValue());
 			indexes.add(((Number) frame.get("index")).longValue());
 		}
-		assertThat(seqs).as("三参（异步池）路径下 seq 连续无洞无重").containsExactlyElementsOf(
+		assertThat(seqs).as("工厂三参入口（异步池）路径下 seq 连续无洞无重").containsExactlyElementsOf(
 				java.util.stream.LongStream.rangeClosed(1, frames).boxed().toList());
 		assertThat(indexes).as("单订阅者 FIFO：到达顺序 = 入队顺序（异步池不改变临界区内的入队序）")
 				.containsExactlyElementsOf(java.util.stream.LongStream.rangeClosed(1, frames).boxed().toList());

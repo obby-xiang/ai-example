@@ -54,7 +54,7 @@ class StreamWatchdogGateWaitBudgetTest {
 			thread.setDaemon(true);
 			return thread;
 		});
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenAnswer(
 				invocation -> (AutoCloseable) () -> {
 				});

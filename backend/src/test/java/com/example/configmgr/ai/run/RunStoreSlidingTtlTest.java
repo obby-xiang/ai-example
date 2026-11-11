@@ -2,7 +2,10 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.data.redis.RedisConnectionFailureException;
@@ -49,6 +52,21 @@ class RunStoreSlidingTtlTest {
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	private final RunStore store = new RunStore(this.redis, this.mapper, this.properties);
+
+	/** run 级键按身份拼：续期/写口都必须处在显式身份作用域。 */
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
 
 	RunStoreSlidingTtlTest() {
 		when(this.redis.opsForValue()).thenReturn(this.valueOps);
@@ -122,10 +140,11 @@ class RunStoreSlidingTtlTest {
 		// 断言口径 = "每个应续的键都续到了"，不锁调用次数形态（L-139：逐键 try 后，
 		// 单键失败不应改变其余键的续期；times(5) 会在"一个键失败"时变成假红）。
 		verify(this.redis).expire(this.store.runKey(runId), Duration.ofHours(24));
+		verify(this.redis).expire(this.store.runStateKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.pendingKey(runId), Duration.ofHours(24));
-		verify(this.redis).expire(this.store.eventsKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.seqKey(runId), Duration.ofHours(24));
 		// B23L1 批①：事件日志 Stream 与其余卡的后台数据同寿（挂起期无 append，靠心跳续期）
+		// （旧 LIST 事件键 ai:events 已退役，心跳面只剩 5 键：快照/状态/待决/seq/xevents）
 		verify(this.redis).expire(this.store.xeventsKey(runId), Duration.ofHours(24));
 	}
 
@@ -143,7 +162,7 @@ class RunStoreSlidingTtlTest {
 		this.store.renewSuspensionTtl(runId);
 
 		verify(this.redis).expire(this.store.runKey(runId), Duration.ofHours(24));
-		verify(this.redis).expire(this.store.eventsKey(runId), Duration.ofHours(24));
+		verify(this.redis).expire(this.store.runStateKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.seqKey(runId), Duration.ofHours(24));
 		verify(this.redis).expire(this.store.xeventsKey(runId), Duration.ofHours(24));
 		assertThat(RedisDegradation.count(RedisDegradation.L139_RENEW_KEY))
@@ -190,6 +209,8 @@ class RunStoreSlidingTtlTest {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setRunId(runId);
 		snapshot.setSessionId("s-" + runId);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setCreatedAtMs(createdAtMs);
 		try {

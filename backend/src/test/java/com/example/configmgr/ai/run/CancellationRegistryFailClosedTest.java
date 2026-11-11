@@ -20,7 +20,7 @@ import static org.mockito.Mockito.when;
  * <p>跨实例取消的权威态只在 Redis。读不出来时，"未取消"不是已知事实而是<b>未知</b>：
  * 继续按未取消跑到预算是"取消丢失"（S7 A5）。本用例锁三件事：
  * <ol>
- * <li>读失败 ⇒ {@link CancellationRegistry.CancelState#UNKNOWN}，且 {@code isCancelled} 拒绝作答；</li>
+ * <li>读失败 ⇒ {@link CancellationRegistry.CancelState#UNKNOWN}（不得折成 {@code NOT_CANCELLED}）；</li>
  * <li>本进程已收到取消（local flag）时，Redis 故障不影响 {@code true}（保留加速/降级通道）；</li>
  * <li>降级计数可观测。</li>
  * </ol>
@@ -39,9 +39,6 @@ class CancellationRegistryFailClosedTest {
 
 		assertThat(registry.cancelState(RUN_ID)).as("读不出来 = 未知，不是未取消")
 			.isEqualTo(CancellationRegistry.CancelState.UNKNOWN);
-		assertThatThrownBy(() -> registry.isCancelled(RUN_ID))
-			.as("布尔口不得把未知折算成 false")
-			.isInstanceOf(CancellationRegistry.CancellationUnknownException.class);
 		assertThat(RedisDegradation.count(RedisDegradation.A5_CANCEL_READ)).isGreaterThan(before);
 	}
 
@@ -57,8 +54,8 @@ class CancellationRegistryFailClosedTest {
 		registry.cancel(RUN_ID, "inst-a");
 		when(values.get(anyString())).thenThrow(new IllegalStateException("模拟 Redis 读失败"));
 
-		assertThat(registry.cancelState(RUN_ID)).isEqualTo(CancellationRegistry.CancelState.CANCELLED);
-		assertThat(registry.isCancelled(RUN_ID)).as("本地已取消是确定的，不依赖 Redis").isTrue();
+		assertThat(registry.cancelState(RUN_ID)).as("本地已取消是确定的，不依赖 Redis")
+			.isEqualTo(CancellationRegistry.CancelState.CANCELLED);
 	}
 
 	@Test
@@ -71,12 +68,11 @@ class CancellationRegistryFailClosedTest {
 		registry.register(RUN_ID);
 
 		assertThat(registry.cancelState(RUN_ID)).isEqualTo(CancellationRegistry.CancelState.NOT_CANCELLED);
-		assertThat(registry.isCancelled(RUN_ID)).isFalse();
 	}
 
 
 	@Test
-	void unknownKeepsTheOriginalCause() {
+	void unknownIsReportedWithoutForcingABooleanAnswer() {
 		IllegalStateException root = new IllegalStateException("连接超时（根因）");
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
 		ValueOperations<String, String> values = mock(ValueOperations.class);
@@ -85,8 +81,9 @@ class CancellationRegistryFailClosedTest {
 		CancellationRegistry registry = new CancellationRegistry(redis, this.properties);
 		registry.register(RUN_ID);
 
-		assertThatThrownBy(() -> registry.isCancelled(RUN_ID))
-			.satisfies(ex -> assertThat(ex.getCause()).as("不得丢根因").isSameAs(root));
+		// 当前契约为三态（CANCELLED/NOT_CANCELLED/UNKNOWN），不再提供会抛异常的布尔口；
+		// 读失败必须是 UNKNOWN（不得折成"未取消"），退避计数另行断言。
+		assertThat(registry.cancelState(RUN_ID)).isEqualTo(CancellationRegistry.CancelState.UNKNOWN);
 	}
 
 	@Test

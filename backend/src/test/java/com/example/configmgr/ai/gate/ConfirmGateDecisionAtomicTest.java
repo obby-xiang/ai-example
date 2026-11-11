@@ -212,7 +212,7 @@ class ConfirmGateDecisionAtomicTest {
 		this.store.seedPending(RUN_ID, pending);
 		when(this.provider.getIfAvailable()).thenReturn(this.resumeService);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.resumeService.resume(RUN_ID)).thenReturn(new ResumeService.ResumeResult(
 				ResumeService.Outcome.NOT_FOUND, Map.of("runId", RUN_ID)));
 	}
@@ -234,7 +234,7 @@ class ConfirmGateDecisionAtomicTest {
 			String result) {
 		return new Thread(() -> {
 			await(start);
-			sink.set(gate.submitFrontendResult(RUN_ID, TOOL_CALL_ID, result, "http-post"));
+			sink.set(GateCalls.submit(gate, RUN_ID, TOOL_CALL_ID, result, "http-post"));
 		}, "r4-frontend");
 	}
 

@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -95,12 +96,12 @@ class AiToolCallLogTraceTest {
 		AiTrace.clear();
 		this.appender.start();
 		this.traceLogger.addAppender(this.appender);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf(anyString())).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf(anyString())).thenReturn(ToolMeta.RiskLevel.READ);
 		this.store = new InMemoryRunStore();
-		this.registry = new RunRegistry(this.store, new ObjectMapper(), null);
+		this.registry = TestRunRegistryFactory.create(this.store, new ObjectMapper(), null);
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
 				List.of());
 		this.manager = new SpToolCallingManager(this.store, this.registry, gate, this.toolRegistry, this.codec,

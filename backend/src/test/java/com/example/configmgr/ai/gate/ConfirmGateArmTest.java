@@ -114,7 +114,7 @@ class ConfirmGateArmTest {
             return null;
         }).when(this.store).putPending(eq(RUN_ID), any(PendingToolCall.class));
         when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
         });
 
@@ -168,7 +168,7 @@ class ConfirmGateArmTest {
             return null;
         }).when(this.store).putPending(eq(RUN_ID), any(PendingToolCall.class));
         when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-        when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+        when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
         });
 

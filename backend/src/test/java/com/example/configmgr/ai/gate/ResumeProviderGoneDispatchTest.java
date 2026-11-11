@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.gate;
 
+import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
@@ -68,7 +69,7 @@ class ResumeProviderGoneDispatchTest {
 
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = new RunRegistry(this.store, this.mapper, null);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
 
 	private final AiProperties properties = new AiProperties();
 
@@ -82,14 +83,14 @@ class ResumeProviderGoneDispatchTest {
 	@SuppressWarnings("unchecked")
 	void setUp() {
 		this.properties.getPark().setEnabled(true);
-		when(this.cancellations.isCancelled(anyString())).thenReturn(false);
+		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
 
 		// 硬否定：库里真的没有这一行（刷新成功 + 行级声明也没有）
 		when(this.configService.resolveChatTarget(any(Long.class), anyString())).thenReturn(Optional.empty());
 		when(this.configService.reloadWithOutcome())
-			.thenReturn(new AiConfigService.ReloadResult(AiConfigService.ConfigSnapshot.empty(), true));
+			.thenReturn(new AiConfigService.ReloadResult(new AiConfigService.ConfigSnapshot(0L, List.of(), List.of(), java.util.Map.of()), true));
 		when(this.configService.bindingState(any(Long.class), anyString()))
 			.thenReturn(AiConfigService.BindingState.ABSENT);
 		ThreadPoolTaskExecutor executor = mock(ThreadPoolTaskExecutor.class);
@@ -144,7 +145,7 @@ class ResumeProviderGoneDispatchTest {
 	@Test
 	void reattachSelfHealOnUnknownConfigReleasesTheHungStream() {
 		when(this.configService.reloadWithOutcome())
-			.thenReturn(new AiConfigService.ReloadResult(AiConfigService.ConfigSnapshot.empty(), false));
+			.thenReturn(new AiConfigService.ReloadResult(new AiConfigService.ConfigSnapshot(0L, List.of(), List.of(), java.util.Map.of()), false));
 		seedSuspendedRun();
 		attachRealSubscriber();
 

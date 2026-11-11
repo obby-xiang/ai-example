@@ -33,21 +33,45 @@ class FrameWakeListenerPromotionTest {
 
 	private final GenerationWakeBus bus = new GenerationWakeBus();
 
+	private static final com.example.configmgr.ai.tenant.TenantUser TENANT =
+			new com.example.configmgr.ai.tenant.TenantUser(1L, 101L);
+
 	private final FrameWakeListener listener = new FrameWakeListener(this.bus);
+
+	private boolean register(String runId, FrameWakeListener.WakeTarget target) {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.isRegistered(runId, target);
+		}
+	}
+
+	private void unregister(String runId, FrameWakeListener.WakeTarget target) {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			this.listener.unregister(runId, target);
+		}
+	}
+
+	private int targetCount() {
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(TENANT.tenantId(), TENANT.userId())) {
+			return this.listener.targetCount(TENANT, RUN_ID);
+		}
+	}
 
 	@Test
 	void whenTheLastConfirmedTargetLeavesASurvivingGuestIsPromotedAndKeepsReceivingWakes() throws Exception {
 		this.bus.blockSubscribeCall = 1;
 		RecordingTarget owner = new RecordingTarget();
 		AtomicBoolean ownerResult = new AtomicBoolean();
-		Thread submitting = new Thread(() -> ownerResult.set(this.listener.register(RUN_ID, owner)),
+		Thread submitting = new Thread(() -> ownerResult.set(register(RUN_ID, owner)),
 				"promotion-owner");
 		submitting.start();
 		assertThat(this.bus.subscribeEntered.await(5, TimeUnit.SECONDS)).as("发起方订阅必须在途").isTrue();
 
 		RecordingTarget guest = new RecordingTarget();
 		AtomicBoolean guestResult = new AtomicBoolean();
-		Thread joining = new Thread(() -> guestResult.set(this.listener.register(RUN_ID, guest)),
+		Thread joining = new Thread(() -> guestResult.set(register(RUN_ID, guest)),
 				"promotion-guest");
 		joining.start();
 		joining.join(TimeUnit.SECONDS.toMillis(1));
@@ -58,18 +82,18 @@ class FrameWakeListenerPromotionTest {
 		assertThat(ownerResult.get()).as("发起方订阅成功").isTrue();
 		assertThat(this.bus.subscribeCalls.get()).as("只订阅了一次").isEqualTo(1);
 
-		this.listener.unregister(RUN_ID, owner);
+		unregister(RUN_ID, owner);
 
 		assertThat(this.bus.journal).as("确认者离开时不得退订（客人还在收流）")
 			.noneMatch(entry -> entry.startsWith("unsubscribe:"));
-		assertThat(this.listener.targetCount(RUN_ID)).as("客人仍在桶里（被提升为确认者）").isEqualTo(1);
+		assertThat(targetCount()).as("客人仍在桶里（被提升为确认者）").isEqualTo(1);
 
 		this.bus.inject(RUN_ID, 23L);
 		assertThat(guest.wakes).as("提升后客人继续收到跨实例唤醒（自愈，不必等下一次出帧/attach）")
 			.containsExactly(23L);
 
 		// 客人再次登记 ⇒ 已确认（幂等，不产生新订阅）
-		assertThat(this.listener.register(RUN_ID, guest)).as("提升后再登记返回已确认").isTrue();
+		assertThat(register(RUN_ID, guest)).as("提升后再登记返回已确认").isTrue();
 		assertThat(this.bus.subscribeCalls.get()).as("重复登记不新建订阅").isEqualTo(1);
 	}
 
@@ -83,21 +107,21 @@ class FrameWakeListenerPromotionTest {
 	@Test
 	void churnOfConfirmedTargetsDoesNotFlapTheSubscriptionWhileAGuestRemains() throws Exception {
 		RecordingTarget anchor = new RecordingTarget();
-		assertThat(this.listener.register(RUN_ID, anchor)).as("首个目标直接确认").isTrue();
+		assertThat(register(RUN_ID, anchor)).as("首个目标直接确认").isTrue();
 
 		// 造一个"未确认"客人：在订阅在途时登记。这里先把订阅退掉（anchor 离开会退订），
 		// 再用一次在途订阅把客人灌进桶里。
-		this.listener.unregister(RUN_ID, anchor);
+		unregister(RUN_ID, anchor);
 		assertThat(this.bus.journal).as("没有目标时正常退订").anyMatch(entry -> entry.startsWith("unsubscribe:"));
 
 		this.bus.blockSubscribeCall = this.bus.subscribeCalls.get() + 1;
 		RecordingTarget owner = new RecordingTarget();
 		AtomicBoolean ownerResult = new AtomicBoolean();
-		Thread submitting = new Thread(() -> ownerResult.set(this.listener.register(RUN_ID, owner)), "churn-owner");
+		Thread submitting = new Thread(() -> ownerResult.set(register(RUN_ID, owner)), "churn-owner");
 		submitting.start();
 		assertThat(this.bus.subscribeEntered.await(5, TimeUnit.SECONDS)).isTrue();
 		RecordingTarget guest = new RecordingTarget();
-		Thread joining = new Thread(() -> this.listener.register(RUN_ID, guest), "churn-guest");
+		Thread joining = new Thread(() -> register(RUN_ID, guest), "churn-guest");
 		joining.start();
 		joining.join(TimeUnit.SECONDS.toMillis(1));
 		this.bus.releaseSubscribe();
@@ -107,16 +131,16 @@ class FrameWakeListenerPromotionTest {
 		int subscribeCallsBefore = this.bus.subscribeCalls.get();
 		long unsubscribesBefore = countUnsubscribes();
 		for (int i = 0; i < 3; i++) {
-			this.listener.unregister(RUN_ID, owner);
-			this.listener.register(RUN_ID, owner);
+			unregister(RUN_ID, owner);
+			register(RUN_ID, owner);
 		}
 
 		assertThat(this.bus.subscribeCalls.get()).as("churn 期间不得新建订阅（客人还在）").isEqualTo(subscribeCallsBefore);
 		assertThat(countUnsubscribes()).as("churn 期间不得退订").isEqualTo(unsubscribesBefore);
 
-		this.listener.unregister(RUN_ID, owner);
-		this.listener.unregister(RUN_ID, guest);
-		assertThat(this.listener.targetCount(RUN_ID)).as("真正没有目标才收尾").isZero();
+		unregister(RUN_ID, owner);
+		unregister(RUN_ID, guest);
+		assertThat(targetCount()).as("真正没有目标才收尾").isZero();
 		assertThat(countUnsubscribes()).as("最后一对目标离开后只退订一次").isEqualTo(unsubscribesBefore + 1);
 	}
 

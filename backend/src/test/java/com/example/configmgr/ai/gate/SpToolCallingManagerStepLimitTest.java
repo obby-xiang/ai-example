@@ -94,7 +94,7 @@ class SpToolCallingManagerStepLimitTest {
 	@BeforeEach
 	void setUp() {
 		this.store.seedRun(RUN_ID, SESSION_ID);
-		when(this.cancellations.isCancelled(RUN_ID)).thenReturn(false);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf(TOOL)).thenReturn(ToolMeta.Channel.BACKEND);

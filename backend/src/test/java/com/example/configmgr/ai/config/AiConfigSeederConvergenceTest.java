@@ -66,7 +66,8 @@ class AiConfigSeederConvergenceTest {
 
 		assertThat(this.fixture.version()).as("种子写与 config.version +1 必须同一事务（DB 是真源）")
 			.isEqualTo(2);
-		assertThat(this.redisVersion.get()).as("提交后必须发布 ai:cfg:ver（跨实例失效信号）").isEqualTo("1");
+		assertThat(redisVersionReader.current().version())
+			.as("提交后另一实例必须按 DB 版本行收敛到新快照（ai:cfg:ver 已退役，版本行是真源）").isEqualTo(2L);
 
 		Long seededProviderId = this.fixture.providers.get(0).getId();
 		assertThat(seededProviderId).isNotNull();
@@ -79,7 +80,7 @@ class AiConfigSeederConvergenceTest {
 		assertThat(dbVersionReader.describeProviders())
 			.as("收敛后的诊断视图必须出现库行（synthetic=false），不能只剩 env 合成行")
 			.anySatisfy(row -> {
-				assertThat(row.get("id")).isEqualTo(seededProviderId);
+				assertThat(row.get("id")).isEqualTo(String.valueOf(seededProviderId));
 				assertThat(row.get("synthetic")).isEqualTo(false);
 			});
 	}
@@ -91,14 +92,12 @@ class AiConfigSeederConvergenceTest {
 		AiConfigSeeder seeder = seeder(seederSide, redis);
 		assertThat(seeder.seed()).isTrue();
 		int versionAfterSeed = this.fixture.version();
-		int incrementsAfterSeed = this.redisIncrements.get();
 
 		assertThat(seeder.seed()).as("表非空 ⇒ strict seed 不写").isFalse();
 		assertThat(seeder.seed()).isFalse();
 
 		assertThat(this.fixture.version()).as("no-op 不得让版本抖动（读侧会白重载一次全表）")
 			.isEqualTo(versionAfterSeed);
-		assertThat(this.redisIncrements.get()).as("no-op 不得发布失效信号").isEqualTo(incrementsAfterSeed);
 	}
 
 	@Test
@@ -113,7 +112,6 @@ class AiConfigSeederConvergenceTest {
 		// seed-force 每次都重灌 ENV_SEED 行 ⇒ 数据确实变了 ⇒ 版本必须跟着动（否则读侧看不到）
 		assertThat(seeder.seed()).isTrue();
 		assertThat(this.fixture.version()).isEqualTo(afterFirst + 1);
-		assertThat(this.redisIncrements.get()).isEqualTo(2);
 		assertThat(this.fixture.providers).as("重灌不得产生重复行").hasSize(1);
 	}
 
@@ -133,9 +131,7 @@ class AiConfigSeederConvergenceTest {
 		AiConfigSeeder seeder = seeder(seederSide, redis);
 		assertThat(seeder.seed()).as("A 先种好").isTrue();
 		int versionAfterA = this.fixture.version();
-		int incrementsAfterA = this.redisIncrements.get();
 		assertThat(versionAfterA).as("A 种完：迁移常量 1 → 2（恰好一次）").isEqualTo(2);
-		assertThat(incrementsAfterA).as("A 种完：失效信号恰好一次").isEqualTo(1);
 
 		// C 的事务外判据在 A 提交之前就读到了 0
 		when(this.fixture.providerRepository.count()).thenReturn(0L);
@@ -146,8 +142,6 @@ class AiConfigSeederConvergenceTest {
 		// 旧码在这里会直接打出 2 → 3、INCR 1 → 2（"重复 bump"被真正看见），而不是只看到 isFalse 短路。
 		assertThat(this.fixture.version()).as("同一份数据不得再 bump 一次（旧码实测 2→3）")
 			.isEqualTo(versionAfterA);
-		assertThat(this.redisIncrements.get()).as("不得再发布一次失效信号（旧码实测 1→2）")
-			.isEqualTo(incrementsAfterA);
 		assertThat(this.fixture.providers).as("不得产生重复行").hasSize(1);
 		assertThat(this.fixture.models).as("不得产生重复模型行").hasSize(1);
 		assertThat(secondSeedWrote).as("另一实例已种好且与 env 逐值一致 ⇒ 真 no-op").isFalse();
@@ -161,14 +155,12 @@ class AiConfigSeederConvergenceTest {
 		AiConfigSeeder seeder = seeder(seederSide, redis);
 		assertThat(seeder.seed()).isTrue();
 		int versionAfterA = this.fixture.version();
-		int incrementsAfterA = this.redisIncrements.get();
 		this.fixture.models.clear();
 		when(this.fixture.providerRepository.count()).thenReturn(0L);
 
 		assertThat(seeder.seed()).as("模型行缺失 ⇒ 仍要补（不得因为 provider 行在就整体跳过）").isTrue();
 		assertThat(this.fixture.models).as("模型行必须补回来").hasSize(1);
 		assertThat(this.fixture.version()).isEqualTo(versionAfterA + 1);
-		assertThat(this.redisIncrements.get()).isEqualTo(incrementsAfterA + 1);
 	}
 
 	/** 另一侧：env 真的变了（baseUrl 不同）⇒ 必须写进去并 bump 恰好一次。 */
@@ -179,7 +171,6 @@ class AiConfigSeederConvergenceTest {
 		AiConfigSeeder seeder = seeder(seederSide, redis);
 		assertThat(seeder.seed()).isTrue();
 		int versionAfterA = this.fixture.version();
-		int incrementsAfterA = this.redisIncrements.get();
 
 		this.fixture.connectionProperties.setBaseUrl("http://rotated-env:4321");
 		when(this.fixture.providerRepository.count()).thenReturn(0L);
@@ -187,7 +178,6 @@ class AiConfigSeederConvergenceTest {
 		assertThat(seeder.seed()).as("env 变了 ⇒ 不是 no-op").isTrue();
 		assertThat(this.fixture.providers.get(0).getBaseUrl()).isEqualTo("http://rotated-env:4321");
 		assertThat(this.fixture.version()).as("只 bump 一次").isEqualTo(versionAfterA + 1);
-		assertThat(this.redisIncrements.get()).isEqualTo(incrementsAfterA + 1);
 		assertThat(this.fixture.providers).hasSize(1);
 	}
 
@@ -195,8 +185,8 @@ class AiConfigSeederConvergenceTest {
 
 	private AiConfigSeeder seeder(AiConfigService service, StringRedisTemplate redis) {
 		when(this.transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
-		AiConfigVersionPublisher versions = new AiConfigVersionPublisher(this.fixture.settingRepository, redis,
-				service, null);
+		AiConfigVersionPublisher versions = new AiConfigVersionPublisher(this.fixture.settingRepository, service,
+				null);
 		return new AiConfigSeeder(this.fixture.providerRepository, this.fixture.modelRepository, service,
 				this.fixture.properties, this.transactionManager, versions);
 	}
