@@ -5892,6 +5892,38 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "正文按真实完整帧和消息边界聚合，不按相似前缀猜归属；正文与reasoning精确匹配，未知或截断保持失败。"},
         "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；新增回归和四个公开场景均独立验证；DeepSeek真实浏览器/模型C-130、C-09、C-10完成创建到作业闭环并记录C-130内部澄清尝试 caveat；主会话Maven编译358源BUILD SUCCESS；Cluster、多实例、全量普通测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f9eac950919a73d6ae7bafae75f171f09ef59ccf85f3de620e1c41e180db1687",
+      "status": "reviewed",
+      "reason": "逐hunk复核synthetic历史读侧两条真实RED及生产链登记，并纠正C-130已交付状态；仅文档变更，不形成新的生产施工授权。",
+      "reviewedAt": "2026-11-12T00:05:54+08:00",
+      "reviewer": "K3.1 Pro主会话、登记agent-1251",
+      "specChanges": [
+        {
+          "change": "历史读侧synthetic摘要内部推理暴露登记为高优先级、待用户明确指令后施工的生产问题。",
+          "reason": "原始assistant条目含摘要reasoning时history实际暴露reasoningContent，不能由测试helper预清洗掩盖，也不能写成全绿。",
+          "impact": "仅固化两条RED、生产锚点和普通assistant reasoning兼容边界；生产行为本批不变。"
+        },
+        {
+          "change": "C-130创建入口从旧待办更正为67789789已交付，并保留内部澄清尝试被守卫拒绝的caveat。",
+          "reason": "独立复审、生产编译和真实模型C-130/C-09/C-10业务闭环已完成，旧FAIL状态不应继续列为当前遗漏。",
+          "impact": "任务看板与盘点文档和main交付事实一致，不把内部尝试伪述为从未发生。"
+        }
+      ],
+      "files": [
+        {"path": "docs/research/盘点-近期遗漏与暂缓事项-2026-11-11.md", "status": "checked", "reason": "新增synthetic两条RED、生产写链和证据占位符，标记待用户指令；C-130交付状态与真实模型证据同步。"},
+        {"path": "docs/任务看板.md", "status": "checked", "reason": "新增synthetic高优待指令条目及C-130已交付条目，剩余恢复/转录待办保持，不新增低优扩散。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "仅两份既有Markdown登记，无依赖或代码能力变化。"},
+        "java-api-style": {"status": "not-affected", "reason": "未修改Java、TypeScript或其他生产源码。"},
+        "logging-exception-safety": {"status": "checked", "reason": "真实保留两条reasoningContent失败和证据路径占位符，不隐藏生产缺口或绝对本机路径。"},
+        "toc-interaction": {"status": "checked", "reason": "明确内部推理和技术metadata不应上屏，普通assistant reasoning兼容及C端零新增提示边界保留。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "未修改API、SSE、Redis、数据库或并发状态，仅登记生产候选。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文流、编码、reasoning生成或解析，仅记录读侧暴露事实。"},
+        "verification-review": {"status": "checked", "reason": "两条synthetic RED保持真实，测试树不写批量全绿；C-130以独立复审和真实模型结果更正状态；本批未运行产品测试，未改生产。"}
+      }
     }
   ]
 }
