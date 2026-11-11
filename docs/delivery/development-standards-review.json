@@ -5714,6 +5714,38 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "正文和历史完整性不因终态封口被伪造，不由DONE推导historyComplete。"},
         "verification-review": {"status": "checked", "reason": "agent-1234终审APPROVE；C-170~184按场景独立验证并绑定生产diff；后端358源BUILD SUCCESS，前端3281模块构建成功；DeepSeek复测NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:510c2a06c84c2dadd0513474e5ed55d40801a5cae8978b1226bfac726a9af6e9",
+      "status": "reviewed",
+      "reason": "逐hunk复核correction prefix模型输入与持久原文分离、预算双视图同步及提交前完整预校验；独立审查agent-1236多轮返修后最终可提交。",
+      "reviewedAt": "2026-11-11T13:50:38+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1236、施工agent-1227",
+      "specChanges": [
+        {
+          "change": "工具批持久历史从快照原文推进，模型输入继续执行correction prefix规范化，二者不再混用。",
+          "reason": "规范化模型输入被后续工具批写回快照会使expected正文缺少SSE中的一次真实前缀，终局精确对账失败。",
+          "impact": "快照和history保留真实前缀及工具消息，后续模型请求仍只保留一次前缀；不删除带工具assistant，不放宽转录比较。"
+        },
+        {
+          "change": "同一预算决策同步应用模型视图与持久原文视图，并在独立状态完成全部映射预校验后才提交预算状态。",
+          "reason": "分离视图不能重复计算前缀，也不能丢失L1/shrink/HardTrim/wrap-up持久清理或留下L1已记账而后续映射失败的部分状态。",
+          "impact": "映射失配在预算记账、标记和settle前失败关闭；正常清理、收尾、工具结果和快照语义保持一致。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "模型/持久双历史推进，复用既有预算Plan按ID和轮次结构同步，forValidation预校验失败时不写预算或快照状态；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "终局独立前缀清理改读快照真实correctionPrefix并在标记清除前执行，不删除带工具assistant；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用CorrectionPrefixes、ToolResultClearing/Shrink/HardTrim Plan、MessageJsonCodec及现有状态存储，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "两个生产Java文件已IDEA Reformat；控制块、集合复制、record双视图及私有预校验接口逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "映射失配继续抛出STATE_UNAVAILABLE并保留转录错误，不忽略、降级或包装为成功；验证阶段不写台账和事件。"},
+        "toc-interaction": {"status": "not-affected", "reason": "未修改前端、工具卡、HITL或用户交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "快照原文与模型输入分离，预算映射全部预校验后才允许Redis状态、标记和settle提交；未新增AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "真实单次correction prefix、49字后缀、392字终答、工具调用与segments精确对账，不按长度或话术做生产特判。"},
+        "verification-review": {"status": "checked", "reason": "agent-1236最终可提交；精确转录、普通late-reasoning及无usage/usage delta/L1/HardTrim-wrap-up/映射失配原子性均有独立进程RED/GREEN；主会话IDEA内置Maven编译BUILD SUCCESS；真实模型、浏览器、Cluster和其他场景NOT_RUN，待DeepSeek独立复测。"}
+      }
     }
   ]
 }

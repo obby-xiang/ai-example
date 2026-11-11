@@ -2463,7 +2463,7 @@ public class ResilientChatService {
         // 截断专项：length 同时写进 metadata（随 assistant 消息落快照与记忆窗口）—— 与 done.extra 同判据。
         // 纠正轮的前缀 assistant 可能已随工具批 settle 进快照：先移除旧前缀（它属于工具调用之前），
         // 再把尚未落库的余下正文与推理按真实时间顺序追加到末尾 —— 已由工具卡承载的内容不再重复。
-        removeAssistantWithText(history, correctionPrefix);
+        removeAssistantWithText(history, correctionPrefix(snapshot));
         // 全部正文都已作为工具卡持久化（工具调用后模型没再产出）时不再追加空气泡；
         // 工具卡本身已承载那段正文。
         if (!finalSegment.isEmpty()) {

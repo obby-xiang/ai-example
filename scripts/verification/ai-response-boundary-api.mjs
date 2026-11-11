@@ -9,11 +9,14 @@ import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
-const cases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'standard-no-reasoning', 'confirm-step-timeline'])
-const healthyCases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'standard-no-reasoning', 'confirm-step-timeline'])
+const cases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'cancel-before-complete', 'standard-no-reasoning', 'confirm-step-timeline', 'correction-prefix-transcript'])
+const healthyCases = new Set(['late-reasoning', 'second-tool-aggregate', 'multi-choice', 'standard-no-reasoning', 'confirm-step-timeline', 'correction-prefix-transcript'])
 const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const transcriptErrorCodes = new Set(['AI_TRANSCRIPT_INCOMPLETE', 'AI_TRANSCRIPT_WRITE_FAILED'])
 const toolFrameTypes = new Set(['tool_start', 'tool_result', 'confirm_request', 'confirm_decision', 'frontend_tool_request', 'frontend_tool_result'])
+const correctionPrefixBlueprint = '前'.repeat(149)
+const correctionSuffixBlueprint = '后'.repeat(49)
+const correctionFinalBlueprint = '终'.repeat(392)
 const lateReasoningPieces = [
   '迟到思考甲：工具 finish 已到达，但完整响应尚未结束；',
   '迟到思考乙：这两片与末尾 usage 必须先收齐，再释放工具聚合。'
@@ -537,6 +540,16 @@ class RunDriver {
       this.drivenToolCalls.add(frame.toolCallId)
       await driveConfirmStepFrontendTool(this.context, {...frame, runId: frame.runId ?? this.runId})
     }
+    if (this.context.config.caseName === 'correction-prefix-transcript') {
+      if (frame.type === 'confirm_request' && !this.drivenToolCalls.has(frame.toolCallId)) {
+        this.drivenToolCalls.add(frame.toolCallId)
+        await driveCorrectionConfirm(this.context, {...frame, runId: frame.runId ?? this.runId})
+      }
+      if (frame.type === 'tool_result' && frame.name === 'create_task') {
+        this.context.checks.require('correction.create-task-rejected', frame.executed === false && frame.status === 'REJECTED',
+          'one rejected create_task with no business task created', {executed: frame.executed === true, status: frame.status})
+      }
+    }
     if (this.terminal) {
       this.context.checks.add('sse.no-data-after-terminal', false,
         'no data frames after the first terminal frame', publicFrameEvidence(frame))
@@ -629,6 +642,20 @@ async function driveConfirmStepFrontendTool(context, frame) {
     expected: [200]
   })
   context.frontendResults.push({name: frame.name, toolCallId: frame.toolCallId, accepted: dataOf(response)?.accepted === true})
+}
+
+async function driveCorrectionConfirm(context, frame) {
+  if (frame.name !== 'create_task') {
+    throw new VerificationFailure(`correction.unsupported-confirm-${frame.name}`)
+  }
+  const response = await context.api.request('ai.confirm', '/api/ai/confirm', {
+    method: 'POST',
+    json: true,
+    body: JSON.stringify({runId: frame.runId, toolCallId: frame.toolCallId, approved: false, reason: 'single-scenario API rejection'}),
+    expected: [200]
+  })
+  const body = dataOf(response)
+  context.confirmResults.push({toolCallId: frame.toolCallId, accepted: body?.accepted === true, approved: body?.approved === true})
 }
 
 async function readJsonLines(file) {
@@ -1624,6 +1651,8 @@ function messageForCase(caseName) {
       return 'turn-text'
     case 'confirm-step-timeline':
       return 'tool=confirm_step&args={"step":"QUERY_COND"}'
+    case 'correction-prefix-transcript':
+      return `创建导出任务 correction=empty-suffix-tool verification=${randomUUID()}`
     default:
       throw new VerificationFailure(`unsupported CASE ${caseName}`)
   }
@@ -1704,6 +1733,81 @@ async function assertConfirmStepTimeline(context) {
     })
 }
 
+function assertCorrectionPrefixTimeline(context) {
+  const {checks, driver, upstream, history, runDetail} = context
+  const [first, second, third, fourth] = upstream.requests
+  checks.require('correction.upstream-shape', upstream.requestCount === 4
+    && first?.decision?.kind === 'text' && first.decision.text === correctionPrefixBlueprint
+    && second?.decision?.kind === 'tool_call' && second.decision.tool === 'create_task'
+    && second.decision.prefixText === `${correctionPrefixBlueprint}${correctionSuffixBlueprint}`
+    && third?.decision?.kind === 'tool_call' && third.decision.tool === 'list_config_defs'
+    && fourth?.decision?.kind === 'text' && fourth.decision.text === correctionFinalBlueprint,
+  '149 prefix, create_task with 49 suffix, a later tool batch, then 392 final text', {
+    first: first?.decision,
+    second: second?.decision,
+    third: third?.decision,
+    fourth: fourth?.decision
+  })
+  const assistants = historyAssistants(context)
+  const createAssistants = assistants.filter((message) => (message.toolCalls ?? [])
+    .some((call) => call.name === 'create_task'))
+  checks.require('correction.create-assistant-original', createAssistants.length === 1
+    && messageText(createAssistants[0]) === `${correctionPrefixBlueprint}${correctionSuffixBlueprint}`
+    && assistantSegmentFacts(createAssistants[0]).text === `${correctionPrefixBlueprint}${correctionSuffixBlueprint}`
+    && (createAssistants[0].toolCalls ?? []).length === 1,
+  'one create_task ASSISTANT preserving prefix+49-char suffix in body and segments', createAssistants.map((message) => ({
+    entryId: message.entryId,
+    text: textEvidence(messageText(message)),
+    actual: assistantSegmentFacts(message)
+  })))
+  const modelCreateTexts = fourth.body.messages.filter((message) => message?.role === 'assistant'
+    && (message.tool_calls ?? []).some((call) => call.function?.name === 'create_task'))
+  checks.require('correction.model-input-normalized', modelCreateTexts.length === 1
+    && modelCreateTexts[0].content === correctionSuffixBlueprint,
+  'the later model request contains exactly one create_task assistant with only the normalized 49-char suffix',
+  modelCreateTexts.map((message) => ({
+    content: textEvidence(message.content),
+    toolCallCount: message.tool_calls?.length ?? 0
+  })))
+  const modelPrefixCount = fourth.body.messages
+    .filter((message) => message?.role === 'assistant')
+    .reduce((total, message) => total + String(message.content ?? '').split(correctionPrefixBlueprint).length - 1, 0)
+  checks.require('correction.model-input-prefix-once', modelPrefixCount === 1,
+    'all assistant text in the later model request contains the 149-char prefix exactly once', {
+      prefixCount: modelPrefixCount,
+      createTaskCount: modelCreateTexts.length
+    })
+  checks.require('correction.every-entry-self-contained', assistants.every((message) => {
+    const actual = assistantSegmentFacts(message)
+    return actual.count > 0 && actual.text === messageText(message)
+      && canonicalJson(actual.toolCallIds) === canonicalJson((message.toolCalls ?? []).map((call) => call.id))
+  }), 'every ASSISTANT segment contains only its own text and tool anchors', assistants.map((message) => ({
+    entryId: message.entryId,
+    actual: assistantSegmentFacts(message)
+  })))
+  const publicBody = publicText(driver)
+  const finalText = runDetail?.snapshot?.finalText ?? ''
+  const historyBody = assistants.map(messageText).join('')
+  const count = (text, needle) => text.split(needle).length - 1
+  checks.require('correction.no-prefix-duplication', count(publicBody, correctionPrefixBlueprint) === 1
+    && count(finalText, correctionPrefixBlueprint) === 1 && count(historyBody, correctionPrefixBlueprint) === 1
+    && count(publicBody, correctionFinalBlueprint) === 1 && count(finalText, correctionFinalBlueprint) === 1
+    && count(historyBody, correctionFinalBlueprint) === 1,
+  'prefix and 392-char final text occur exactly once in public SSE, finalText and history', {
+    public: {prefix: count(publicBody, correctionPrefixBlueprint), final: count(publicBody, correctionFinalBlueprint)},
+    run: {prefix: count(finalText, correctionPrefixBlueprint), final: count(finalText, correctionFinalBlueprint)},
+    history: {prefix: count(historyBody, correctionPrefixBlueprint), final: count(historyBody, correctionFinalBlueprint)}
+  })
+  const entryIds = history.messages.map((message) => message.entryId)
+  checks.require('correction.no-duplicate-entries', new Set(entryIds).size === entryIds.length,
+    'no duplicate history entryId', entryIds)
+  checks.require('correction.confirm-accepted', context.confirmResults.length === 1
+    && context.confirmResults.every((result) => result.accepted && !result.approved),
+  'public create_task rejection accepted without execution', context.confirmResults)
+  checks.require('correction.business-no-side-effects', sameBusinessSnapshot(context.businessBefore, context.businessAfter),
+    'zero business tasks, jobs or other side effects', context.businessAfter)
+}
+
 async function runCase(context) {
   const created = await context.api.request('session.create', '/api/ai/session', {method: 'POST', json: true, expected: [200]})
   const sessionId = created.body?.sessionIdText ?? created.body?.data?.sessionIdText
@@ -1729,7 +1833,8 @@ async function runCase(context) {
   context.businessAfter = await taskBaseline(context.api)
   await context.evidence.json('business-after.json', context.businessAfter)
   await collectUpstreamEvidence(context)
-  const expectedRequests = context.config.caseName === 'confirm-step-timeline' ? 3
+  const expectedRequests = context.config.caseName === 'correction-prefix-transcript' ? 4
+    : context.config.caseName === 'confirm-step-timeline' ? 3
     : ['late-reasoning', 'second-tool-aggregate'].includes(context.config.caseName) ? 2 : 1
   assertCommon(context, expectedRequests)
   switch (context.config.caseName) {
@@ -1750,6 +1855,9 @@ async function runCase(context) {
       break
     case 'confirm-step-timeline':
       await assertConfirmStepTimeline(context)
+      break
+    case 'correction-prefix-transcript':
+      assertCorrectionPrefixTimeline(context)
       break
     default:
       throw new VerificationFailure(`unsupported CASE ${context.config.caseName}`)
@@ -1937,9 +2045,16 @@ async function expectedLogAssociations(logLines, context) {
     expected.backend = association.expectedBackend
     expected.stub = association.expectedStub
   }
+  if (context.config.caseName === 'correction-prefix-transcript') {
+    const message = `resume batch stops on first error runId=${context.runId} upstream tool=create_task outcome=rejected code=null; remaining entries become SKIPPED`
+    const indexes = logLines.backend.flatMap((line, index) => line.endsWith(message) ? [index] : [])
+    for (const index of indexes) expected.backend.add(index)
+    context.checks.add('correction.rejection-warning-observed', indexes.length === 1,
+      'one expected warning for the deliberate create_task rejection', {count: indexes.length, lines: indexes.map((index) => index + 1)})
+  }
   // 隔离单实例没有 lease 设施时，本 run 首次写状态会固定出现一条 RunStore lease-less WARN。
   // 只备案"本 runId + 完整固定文案 + WARN 级别"的这一条，其他 WARN/ERROR 一律仍是 UNEXPECTED。
-  const directDriveCases = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate']
+  const directDriveCases = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate', 'correction-prefix-transcript']
   const expectedMessage = `lease-less write runId=${context.runId}: fence advanced to epoch=1 (write allowed without lease; no resume-authority semantics; check lease view if this is a stale write after owner change)`
   const warnLevel = /^\d{4}-\d{2}-\d{2}T\S+\s+WARN\s+/
   const indexes = logLines.backend.flatMap((line, index) => warnLevel.test(line) && line.endsWith(expectedMessage) ? [index] : [])
@@ -1967,7 +2082,7 @@ async function collectLogEvidence(context) {
     logLines[name] = logs[name].text.split(/\r?\n/)
   }
   const expected = await expectedLogAssociations(logLines, context)
-  const expectedClassification = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate'].includes(context.config.caseName)
+  const expectedClassification = ['confirm-step-timeline', 'multi-choice', 'second-tool-aggregate', 'correction-prefix-transcript'].includes(context.config.caseName)
     ? 'EXPECTED_DIRECT_DRIVE'
     : 'EXPECTED_CANCELLATION'
   for (const name of ['backend', 'stub']) {
@@ -2066,7 +2181,8 @@ const context = {
   cancelEvidence: null,
   logOffsets: null,
   fixtureTaskId: null,
-  frontendResults: []
+  frontendResults: [],
+  confirmResults: []
 }
 const services = new ServiceManager(context)
 let fatal = null

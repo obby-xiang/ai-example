@@ -26,6 +26,7 @@ import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
+import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.SettlementObservationStore;
@@ -1401,18 +1402,23 @@ public class SpToolCallingManager implements ToolCallingManager {
     private ToolExecutionResult settleBatch(ToolBatchState state, ChatResponse chatResponse,
                                             List<PendingToolCall> pendings) {
         ToolResponseMessage toolMessage = ToolResponseMessage.builder().responses(state.responses).build();
-        List<Message> history = new ArrayList<>(state.prompt.getInstructions());
-        history.add(state.assistant);
-        history.add(toolMessage);
+        // prompt 可能已是删除重复 correction prefix 的模型输入；预算与持久历史必须分别推进。
+        List<Message> modelHistory = new ArrayList<>(state.prompt.getInstructions());
+        List<Message> persistedHistory = new ArrayList<>(CollectionUtils.isEmpty(state.snapshot.getMessageJson())
+                ? state.prompt.getInstructions() : this.codec.deserializeAll(state.snapshot.getMessageJson()));
+        modelHistory.add(state.assistant);
+        modelHistory.add(toolMessage);
+        persistedHistory.add(state.assistant);
+        persistedHistory.add(toolMessage);
         boolean stepWrapped = state.stepsUsed >= state.maxToolSteps;
         if (stepWrapped) {
-            history.add(new UserMessage(STEP_LIMIT_WRAP_UP));
+            modelHistory.add(new UserMessage(STEP_LIMIT_WRAP_UP));
+            persistedHistory.add(new UserMessage(STEP_LIMIT_WRAP_UP));
         }
         TurnBudgetOutcome budget = applyTurnBudget(state.runId, state.snapshot, state.prompt, chatResponse,
-                state.assistant, history, state.budgetArmed, stepWrapped);
-        history = budget.history();
+                state.assistant, modelHistory, persistedHistory, state.budgetArmed, stepWrapped);
         persistToolSteps(state.runId, state.stepsUsed);
-        boolean settled = isSettle(state.runId, history);
+        boolean settled = isSettle(state.runId, budget.persistedHistory());
         if (settled) {
             commitTurnText(state.prompt);
         }
@@ -1427,9 +1433,9 @@ public class SpToolCallingManager implements ToolCallingManager {
                             + budget.decision().nextEst() + " >= limit=" + budget.decision().limitTokens() + ", reason="
                             + budget.decision().reason() + "): executed records were settled before terminating the run");
         }
-        List<Message> modelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(history,
+        List<Message> nextModelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(budget.modelHistory(),
                 CorrectionPrefixes.correctionPrefix(state.snapshot));
-        return ToolExecutionResult.builder().conversationHistory(modelHistory).build();
+        return ToolExecutionResult.builder().conversationHistory(nextModelHistory).build();
     }
 
     private final class ToolBatchState {
@@ -1746,38 +1752,45 @@ public class SpToolCallingManager implements ToolCallingManager {
      * <p>至多两轮变更（清一次 + 收尾一次），构造上不会死循环。
      */
     private TurnBudgetOutcome applyTurnBudget(String runId, RunSnapshot snapshot, Prompt prompt,
-                                              ChatResponse chatResponse, AssistantMessage assistant, List<Message> history, boolean armed,
+                                              ChatResponse chatResponse, AssistantMessage assistant,
+                                              List<Message> modelHistory, List<Message> persistedHistory, boolean armed,
                                               boolean stepWrapped) {
         int limit = turnBudgetLimit(snapshot);
         if (limit <= 0) {
-            return new TurnBudgetOutcome(history, false, null);
+            return new TurnBudgetOutcome(modelHistory, persistedHistory, false, null);
         }
         AiProperties.Context config = this.properties.getContext();
         ContextMeter meter = new ContextMeter();
         meter.accept(chatResponse);
-        int before = estimateRequestTokens(prompt, history);
-        int delta = Math.max(0, ContextEstimator.estimateMessages(history)
+        int before = estimateRequestTokens(prompt, modelHistory);
+        int delta = Math.max(0, ContextEstimator.estimateMessages(modelHistory)
                 - ContextEstimator.estimateMessages(prompt.getInstructions())
                 - ContextEstimator.estimateMessage(assistant));
         Set<String> protectedIds = pendingToolCallIds(runId).orElse(null);
         Set<String> activeRunIds = activeRunIds(runId, snapshot);
         Set<String> otherActiveRuns = new HashSet<>(activeRunIds);
         otherActiveRuns.remove(runId);
-        TurnBudgetState state = new TurnBudgetState(snapshot, config, history, protectedIds, activeRunIds,
-                otherActiveRuns, systemTokensOf(prompt), toolsTokensOf(prompt), armed);
-        state.decision = TurnBudgetPlan.plan(turnBudgetRequest(limit, config, meter, prompt, history, delta,
+        TurnBudgetState state = new TurnBudgetState(snapshot, config, modelHistory, persistedHistory, protectedIds,
+                activeRunIds, otherActiveRuns, systemTokensOf(prompt), toolsTokensOf(prompt), armed);
+        state.decision = TurnBudgetPlan.plan(turnBudgetRequest(limit, config, meter, prompt, modelHistory, delta,
                 state.armedNow, runId, state.maxOutput));
         state.nextEst = state.decision.nextEst();
-        applyTurnBudgetPasses(runId, limit, stepWrapped, state);
+        TurnBudgetState validation = state.forValidation();
+        applyTurnBudgetPasses(runId, limit, stepWrapped, validation, false);
+        if (validation.needRejudge) {
+            rejudgeTurnBudget(runId, limit, validation);
+        }
+        applyTurnBudgetPasses(runId, limit, stepWrapped, state, true);
         if (state.needRejudge) {
             rejudgeTurnBudget(runId, limit, state);
         }
         traceTurnBudget(runId, snapshot, prompt, limit, meter, before, state);
-        return new TurnBudgetOutcome(state.current, state.decision.action() == TurnBudgetPlan.Action.OVERFLOW,
-                state.decision);
+        return new TurnBudgetOutcome(state.current, state.persistedCurrent,
+                state.decision.action() == TurnBudgetPlan.Action.OVERFLOW, state.decision);
     }
 
-    private void applyTurnBudgetPasses(String runId, int limit, boolean stepWrapped, TurnBudgetState state) {
+    private void applyTurnBudgetPasses(String runId, int limit, boolean stepWrapped, TurnBudgetState state,
+                                       boolean commit) {
         for (int pass = 0; pass < 6; pass++) {
             if (pass > 0) {
                 rejudgeTurnBudget(runId, limit, state);
@@ -1787,7 +1800,7 @@ public class SpToolCallingManager implements ToolCallingManager {
                     && TurnBudgetPlan.REASON_OVERFLOW.equals(state.decision.reason());
             if ((state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS || overflow)
                     && state.cleared == 0 && !state.clearAttempted && state.protectedIds != null
-                    && applyTurnClear(runId, state)) {
+                    && applyTurnClear(runId, state, commit)) {
                 continue;
             }
             if (state.decision.action() == TurnBudgetPlan.Action.CLEAR_TOOL_RESULTS) {
@@ -1797,31 +1810,35 @@ public class SpToolCallingManager implements ToolCallingManager {
                 if (state.shrinkRounds < 2 && state.protectedIds != null && applyTurnShrink(limit, state)) {
                     continue;
                 }
-                if (state.trimmedTurns == 0 && applyTurnTrim(runId, limit, state)) {
+                if (state.trimmedTurns == 0 && applyTurnTrim(runId, limit, state, commit)) {
                     continue;
                 }
                 break;
             }
             if (state.decision.action() == TurnBudgetPlan.Action.WRAP_UP && !state.armedNow && !stepWrapped) {
-                applyTurnWrapUp(runId, state);
+                applyTurnWrapUp(runId, state, commit);
                 continue;
             }
             break;
         }
     }
 
-    private boolean applyTurnClear(String runId, TurnBudgetState state) {
+    private boolean applyTurnClear(String runId, TurnBudgetState state, boolean commit) {
         List<Message> beforeClear = state.current;
         ToolResultClearing.Plan plan = ToolResultClearing.plan(state.current, state.config.getKeepToolPairs(),
                 state.protectedIds, state.otherActiveRuns);
+        ToolResultClearing.Plan persistedPlan = ToolResultClearing.plan(state.persistedCurrent,
+                state.config.getKeepToolPairs(), state.protectedIds, state.otherActiveRuns);
+        requireMatchingBudgetIds(plan.clearedIds(), persistedPlan.clearedIds(), "L1 clearing");
         if (plan.changed()) {
             state.clearAttempted = true;
         }
-        if (!plan.changed() || !isRecordTurnClear(runId, state.snapshot, beforeClear, plan, state.systemTokens,
+        if (!plan.changed() || commit && !isRecordTurnClear(runId, state.snapshot, beforeClear, plan, state.systemTokens,
                 state.toolsTokens)) {
             return false;
         }
         state.current = plan.messages();
+        state.persistedCurrent = persistedPlan.messages();
         state.cleared += plan.cleared().size();
         state.nextEst = Math.max(0, state.nextEst - plan.savedTokens());
         state.needRejudge = true;
@@ -1831,10 +1848,14 @@ public class SpToolCallingManager implements ToolCallingManager {
     private boolean applyTurnShrink(int limit, TurnBudgetState state) {
         ToolResultShrink.Plan shrink = ToolResultShrink.plan(state.current, state.nextEst, limit, state.protectedIds,
                 this.limiter);
+        ToolResultShrink.Plan persistedShrink = ToolResultShrink.plan(state.persistedCurrent, state.nextEst, limit,
+                state.protectedIds, this.limiter);
+        requireMatchingBudgetIds(shrink.shrunkIds(), persistedShrink.shrunkIds(), "overflow shrink");
         if (!shrink.changed()) {
             return false;
         }
         state.current = shrink.messages();
+        state.persistedCurrent = persistedShrink.messages();
         state.shrunkResults += shrink.shrunk().size();
         state.shrinkRounds++;
         state.nextEst = Math.max(0, state.nextEst - shrink.savedTokens());
@@ -1842,30 +1863,79 @@ public class SpToolCallingManager implements ToolCallingManager {
         return true;
     }
 
-    private boolean applyTurnTrim(String runId, int limit, TurnBudgetState state) {
+    private boolean applyTurnTrim(String runId, int limit, TurnBudgetState state, boolean commit) {
         HardTrim.Plan trim = HardTrim.plan(state.current, state.config.getKeepRecentTurns(), state.protectedIds,
                 state.activeRunIds);
+        HardTrim.Plan persistedTrim = HardTrim.plan(state.persistedCurrent, state.config.getKeepRecentTurns(),
+                state.protectedIds, state.activeRunIds);
+        requireMatchingTrim(trim, persistedTrim);
         if (trim.changed() && state.nextEst - trim.lostTokens()
                 + ContextTrigger.effectiveReserve(limit, state.config.getReserveTokens(), state.maxOutput) > limit) {
             return false;
         }
-        if (!trim.changed() || !isRecordTurnTrim(runId, state.snapshot, state.current, trim, state.systemTokens,
+        if (!trim.changed() || commit && !isRecordTurnTrim(runId, state.snapshot, state.current, trim, state.systemTokens,
                 state.toolsTokens)) {
             return false;
         }
         state.current = trim.messages();
+        state.persistedCurrent = persistedTrim.messages();
         state.trimmedTurns = trim.droppedTurns();
         state.nextEst = Math.max(0, state.nextEst - trim.lostTokens());
         state.needRejudge = true;
         return true;
     }
 
-    private void applyTurnWrapUp(String runId, TurnBudgetState state) {
+    private static void requireMatchingBudgetIds(List<String> modelIds, List<String> persistedIds, String action) {
+        if (!modelIds.equals(persistedIds)) {
+            throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+                    "In-turn budget " + action + " could not be mapped to the persisted history");
+        }
+    }
+
+    private static void requireMatchingTrim(HardTrim.Plan modelTrim, HardTrim.Plan persistedTrim) {
+        if (modelTrim.changed() != persistedTrim.changed()) {
+            throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+                    "In-turn budget hard trim could not be mapped to the persisted history");
+        }
+        if (modelTrim.changed() && (modelTrim.droppedTurns() != persistedTrim.droppedTurns()
+                || !budgetTurnStructure(modelTrim.messages()).equals(budgetTurnStructure(persistedTrim.messages())))) {
+            throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
+                    "In-turn budget hard trim could not be mapped to the persisted history");
+        }
+    }
+
+    private static List<String> budgetTurnStructure(List<Message> messages) {
+        List<String> structure = new ArrayList<>();
+        for (Message message : messages) {
+            String runId = String.valueOf(RunMemoryMerge.runIdOf(message));
+            if (message instanceof UserMessage && SyntheticMessages.kindOf(message) != SyntheticMessages.Kind.CORRECTION) {
+                structure.add("user:" + runId + ":" + message.getText());
+            }
+            if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
+                for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
+                    structure.add("call:" + runId + ":" + call.id());
+                }
+            }
+            if (message instanceof ToolResponseMessage toolResponse) {
+                for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
+                    structure.add("tool:" + runId + ":" + response.id());
+                }
+            }
+        }
+        return structure;
+    }
+
+    private void applyTurnWrapUp(String runId, TurnBudgetState state, boolean commit) {
         List<Message> wrapped = new ArrayList<>(state.current);
         wrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
         state.current = wrapped;
-        this.beacon.armBudget(runId);
-        this.store.markTurnBudget(runId, System.currentTimeMillis(), this.beacon.budgetSkippedBatches(runId));
+        List<Message> persistedWrapped = new ArrayList<>(state.persistedCurrent);
+        persistedWrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
+        state.persistedCurrent = persistedWrapped;
+        if (commit) {
+            this.beacon.armBudget(runId);
+            this.store.markTurnBudget(runId, System.currentTimeMillis(), this.beacon.budgetSkippedBatches(runId));
+        }
         state.armedNow = true;
         state.nextEst += ContextEstimator.estimate(TURN_BUDGET_WRAP_UP);
         state.needRejudge = true;
@@ -1906,6 +1976,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         private final int toolsTokens;
         private final int maxOutput;
         private List<Message> current;
+        private List<Message> persistedCurrent;
         private int cleared;
         private boolean armedNow;
         private TurnBudgetPlan.Decision decision;
@@ -1917,11 +1988,13 @@ public class SpToolCallingManager implements ToolCallingManager {
         private int trimmedTurns;
 
         private TurnBudgetState(RunSnapshot snapshot, AiProperties.Context config,
-                                List<Message> current, Set<String> protectedIds, Set<String> activeRunIds,
-                                Set<String> otherActiveRuns, int systemTokens, int toolsTokens, boolean armed) {
+                                List<Message> current, List<Message> persistedCurrent, Set<String> protectedIds,
+                                Set<String> activeRunIds, Set<String> otherActiveRuns, int systemTokens, int toolsTokens,
+                                boolean armed) {
             this.snapshot = snapshot;
             this.config = config;
             this.current = current;
+            this.persistedCurrent = persistedCurrent;
             this.protectedIds = protectedIds;
             this.activeRunIds = activeRunIds;
             this.otherActiveRuns = otherActiveRuns;
@@ -1930,6 +2003,15 @@ public class SpToolCallingManager implements ToolCallingManager {
             this.armedNow = armed;
             this.maxOutput = snapshot == null || snapshot.getMaxTokens() == null ? 0
                     : Math.max(0, snapshot.getMaxTokens());
+        }
+
+        private TurnBudgetState forValidation() {
+            TurnBudgetState validation = new TurnBudgetState(this.snapshot, this.config, this.current,
+                    this.persistedCurrent, this.protectedIds, this.activeRunIds, this.otherActiveRuns,
+                    this.systemTokens, this.toolsTokens, this.armedNow);
+            validation.decision = this.decision;
+            validation.nextEst = this.nextEst;
+            return validation;
         }
 
     }
@@ -2333,9 +2415,10 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     /**
-     * 一次轮内预算的结局（历史 + 是否越窗 + 判定）。
+     * 一次轮内预算的结局（模型/持久双视图 + 是否越窗 + 判定）。
      */
-    private record TurnBudgetOutcome(List<Message> history, boolean overflow, TurnBudgetPlan.Decision decision) {
+    private record TurnBudgetOutcome(List<Message> modelHistory, List<Message> persistedHistory, boolean overflow,
+                                     TurnBudgetPlan.Decision decision) {
     }
 
     /**
