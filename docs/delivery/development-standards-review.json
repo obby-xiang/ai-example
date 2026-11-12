@@ -6178,6 +6178,38 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "UTF-16下标与UTF-8帧预算分离，覆盖组合字符、ZWJ、国旗、keycap、tag、CRLF、孤立代理和超长组合字素，不二次转码。"},
         "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；GraphemeBoundaryIntegrationTest 10类及KbText负数/溢出单点通过，ASCII、8000字符和分页相邻回归通过，359源编译BUILD SUCCESS；前端运行时和全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:929cf473382580c930bce20e18f35aaf4f3f0019d8314eaf683d1a8e162eec91",
+      "status": "reviewed",
+      "reason": "逐hunk复核通用有界SCAN的结果/游标/工作时间预算、去重与失败关闭；独立审查agent-1248确认重复键和全部超时返回路径均闭合。",
+      "reviewedAt": "2026-11-12T13:01:22+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1248、施工agent-1240",
+      "specChanges": [
+        {
+          "change": "findConversationIds及通用RedisClusterScanSupport改为结果键数、游标推进和总工作时间三重有界扫描，超限或失败不返回部分结果。",
+          "reason": "COUNT只是单页提示，异常返回部分ID会把不完整集合误当完整会话列表，零匹配大keyspace也需限制工作量。",
+          "impact": "standalone和Cluster逐master均失败关闭，连接游标关闭，结果先去重再判断唯一键数>maxKeys，活跃SPI和过滤/反转义/排序保持。"
+        },
+        {
+          "change": "所有阻塞边界和成功返回路径都必须经过deadline校验。",
+          "reason": "getConnection/scan/clusterGetNodes/null cursor或空游标可能绕过原drain内检查，导致超时后仍成功返回。",
+          "impact": "null cursor、空游标、所有master null及最终返回前均校验，超时不得成功或交出部分ID；不宣称可中断Redis阻塞调用。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/memory/RedisChatMemoryRepository.java", "status": "checked", "reason": "findConversationIds改调统一有界helper，只做键形过滤/反转义/排序，类注释同步失败关闭；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/session/RedisClusterScanSupport.java", "status": "checked", "reason": "公共有界扫描覆盖三重预算、先去重再超限判断、全阻塞边界deadline和关闭路径，未新增索引或第二套扫描体系；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用并扩展既有RedisClusterScanSupport，无新增依赖、会话索引或第二套Cluster扫描helper。"},
+        "java-api-style": {"status": "checked", "reason": "两个生产Java均经IDEA Reformat；预算record、非正缺省、集合去重和异常路径逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "超限、超时和master失败均抛AiStateUnavailableException，不以WARN或部分ID伪装完整结果。"},
+        "toc-interaction": {"status": "not-affected", "reason": "仅后台存储扫描语义变化，无新增用户提示或交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "standalone和Cluster逐master均有界、同槽无新增多键写入、失败关闭，连接与游标在所有路径关闭。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；同节点/跨master重复键、连接/扫描/拓扑/null cursor超时、结果与游标超限、零匹配工作量均独立单点通过，ClusterSupport 8/8及生产编译成功；真实Cluster、MOVED/ASK和大keyspace实测NOT_RUN。"}
+      }
     }
   ]
 }

@@ -20,12 +20,7 @@ import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.data.redis.connection.RedisClusterConnection;
-import org.springframework.data.redis.connection.RedisClusterNode;
-import org.springframework.data.redis.connection.RedisConnection;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.ReturnType;
-import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -33,6 +28,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.session.RedisClusterScanSupport;
 import com.example.configmgr.ai.session.SessionPurgeGuard;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 
@@ -250,6 +246,9 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	/** {@link #findConversationIds()} 的 SCAN 批量（每次往返探测的键数；诊断面不需要更激进）。 */
 	static final int SCAN_COUNT = 256;
 
+	private static final RedisClusterScanSupport.ScanBudget CONVERSATION_SCAN_BUDGET = RedisClusterScanSupport.ScanBudget
+			.of(4096, 4096, Duration.ofSeconds(2));
+
 	private final StringRedisTemplate redis;
 
 	private final MessageJsonCodec codec;
@@ -396,17 +395,16 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	 * 列出<b>当前归属</b>仍存活的会话 id（SPI 契约面，见类注释"会话枚举"）。
 	 *
 	 * <p><b>不再读全局索引</b>（{@code chat:mem:__ids__} 已退役：无生产读者、写入是热路径负担）。
-	 * 改为按<b>当前身份</b>的数据键命名空间做有界 SCAN：
+	 * 改为按<b>当前身份</b>的数据键命名空间调用统一的 {@link RedisClusterScanSupport} 有界原语：
 	 * <ul>
 	 * <li>pattern = 数据键前缀（{@code chat:mem:<tenantId>:<userId>:}，无身份上下文为 {@code chat:mem:}）
 	 *     加一个通配的 hash tag（以左花括号开头）；</li>
 	 * <li>只接受以右花括号结尾的键 —— 数据键的 tag 就是这个 id；{@code :ver} / {@code :gen} /
 	 *     {@code staging:} 三类键因此不会混进来；</li>
 	 * <li>反转义 hash tag 内的 id，去重、排序后返回（真实 id，不是"假空"）；</li>
-	 * <li>Cluster 下逐 <b>master 节点</b>扫描（{@link RedisClusterConnection#scan}）—— 单节点
-	 *     {@code SCAN} 看不到别的槽，直接调 {@code template.scan} 在集群上会抛不支持；</li>
-	 * <li>扫描失败只 WARN 并返回本次已扫描到的结果：这是诊断/低频面，不能因一次 MOVED/超时
-	 *     伪装成"没有会话"，也不该把调用链打断。</li>
+	 * <li>standalone/Cluster 逐 master 均由 helper 关闭连接和游标并全局去重；结果键数、游标推进和
+	 *     总工作时间均有上限，零匹配的大 keyspace 也受工作量预算约束；</li>
+	 * <li>超限或任一 master 失败都抛出 {@code AiStateUnavailableException}，不返回部分集合。</li>
 	 * </ul>
 	 *
 	 * <p><b>成本与口径</b>：SCAN 是 O(keyspace) 的遍历，本方法因此<b>只服务 SPI/诊断</b>（生产主链路
@@ -416,57 +414,15 @@ public class RedisChatMemoryRepository implements RunUpsertChatMemoryRepository 
 	public List<String> findConversationIds() {
 		String prefix = KEY_PREFIX + TenantKeyScope.currentSegment();
 		ScanOptions options = ScanOptions.scanOptions().match(prefix + "{*").count(SCAN_COUNT).build();
+		List<String> keys = RedisClusterScanSupport.scan(this.redis, options, CONVERSATION_SCAN_BUDGET);
 		Set<String> ids = new TreeSet<>();
-		try {
-			RedisConnectionFactory factory = this.redis.getConnectionFactory();
-			boolean clustered = false;
-			if (factory != null) {
-				try (RedisConnection connection = factory.getConnection()) {
-					if (connection instanceof RedisClusterConnection cluster) {
-						clustered = true;
-						for (RedisClusterNode node : cluster.clusterGetNodes()) {
-							if (!node.isMaster()) {
-								continue;
-							}
-							try (Cursor<byte[]> cursor = cluster.scan(node, options)) {
-								collectConversationIds(cursor, prefix, ids);
-							}
-						}
-					}
-				}
+		for (String key : keys) {
+			String id = conversationIdOfKey(key, prefix);
+			if (id != null) {
+				ids.add(id);
 			}
-			if (!clustered) {
-				try (Cursor<String> cursor = this.redis.scan(options)) {
-					if (cursor != null) {
-						while (cursor.hasNext()) {
-							String id = conversationIdOfKey(cursor.next(), prefix);
-							if (id != null) {
-								ids.add(id);
-							}
-						}
-					}
-				}
-			}
-		}
-		catch (RuntimeException ex) {
-			log.warn("conversation memory enumeration (SCAN) failed pattern={} (returning {} ids scanned so far, not pretending empty)", prefix + "{*",
-					ids.size(), ex);
 		}
 		return List.copyOf(ids);
-	}
-
-	/** 把集群节点游标里的键翻成会话 id（见 {@link #conversationIdOfKey(String, String)}）。 */
-	private static void collectConversationIds(Cursor<byte[]> cursor, String prefix, Set<String> out) {
-		if (cursor == null) {
-			return;
-		}
-		while (cursor.hasNext()) {
-			byte[] raw = cursor.next();
-			String id = raw == null ? null : conversationIdOfKey(new String(raw, StandardCharsets.UTF_8), prefix);
-			if (id != null) {
-				out.add(id);
-			}
-		}
 	}
 
 	/**

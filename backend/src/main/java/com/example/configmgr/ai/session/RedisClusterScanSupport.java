@@ -10,55 +10,53 @@ import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
+import java.time.Duration;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
- * <b>Cluster 安全的 SCAN</b>（会话销毁专用；不依赖 {@code StringRedisTemplate#scan}）。
+ * Cluster 安全的通用有界 SCAN：standalone 单连接，Cluster 逐 master；任何失败都不返回部分结果。
  *
- * <h2>为什么必须逐 master</h2>
- * {@code RedisTemplate#scan} 只作用于当前连接所在节点；Redis Cluster 的键分布在多个 master，
- * 用它扫 {@code ai:ctx:archive:*} / {@code chat:mem:*} 的 staging 键会<b>静默漏键</b>。
- * 本类改用 Spring Data Redis 3.5.11 的实际 API：
- * <ul>
- * <li>standalone：{@link RedisConnection#scan(ScanOptions)}；</li>
- * <li>cluster：{@link RedisClusterConnection#clusterGetNodes()} 取拓扑，只遍历
- * {@link RedisClusterNode#isMaster()} 的节点，逐节点调用
- * {@link RedisClusterConnection#scan(RedisClusterNode, ScanOptions)}；</li>
- * <li>每节点 cursor 必须 close；cluster 连接 try-with-resources close；key 全局去重。</li>
- * </ul>
- *
- * <p><b>API 事实（3.5.11 javap 实测）</b>：{@code RedisClusterConnection} 没有
- * {@code getConnection(RedisNode)}，{@code RedisClusterNode} 也没有 {@code getRedisNode()}；
- * 逐节点扫描的官方入口就是 {@code scan(RedisClusterNode, ScanOptions)}。不要为了“按节点取连接”
- * 去 cast 某个实现类（Lettuce/Jedis 不同），那会把实现细节变成生产依赖。
- *
- * <h2>失败姿态</h2>
- * 任一步（取连接、取拓扑、某 master 的 scan、cursor close）失败都抛
- * {@link AiStateUnavailableException}。调用方不得把部分结果当完整：
- * archive 扫描失败会让销毁枚举中止（complete=false）；pending 恢复失败会上抛，runner 不猜状态。
+ * <p>每次调用同时受三项固定预算约束：全局唯一结果键数、{@code hasNext()} 游标推进次数、
+ * 包含空页遍历在内的总工作时间。{@code ScanOptions.count()} 只是 Redis 单页提示，不能代替这些上限。
  */
-final class RedisClusterScanSupport {
+public final class RedisClusterScanSupport {
+
+	private static final int DEFAULT_MAX_KEYS = 1024;
+
+	private static final int DEFAULT_MAX_CURSOR_ADVANCES = 4096;
+
+	private static final Duration DEFAULT_MAX_WORK = Duration.ofSeconds(2);
 
 	private RedisClusterScanSupport() {
 	}
 
 	/**
-	 * 扫描匹配 {@code options.pattern()} 的键（跨 cluster master；standalone 单连接）。
-	 *
-	 * @param maxKeys 全局最多返回键数；{@code <=0} = 不按结果数截断（仍使用 options 的 count）
-	 * @return 去重后的键，顺序为节点遍历顺序
-	 * @throws AiStateUnavailableException 任一节点/连接失败（fail-closed）
+	 * 兼容原 {@code maxKeys} 调用形：非正值不再表示无界，而是使用有界缺省。
 	 */
-	static List<String> scan(StringRedisTemplate template, ScanOptions options, int maxKeys) {
+	public static List<String> scan(StringRedisTemplate template, ScanOptions options, int maxKeys) {
+		return scan(template, options, ScanBudget.of(maxKeys > 0 ? maxKeys : DEFAULT_MAX_KEYS,
+				DEFAULT_MAX_CURSOR_ADVANCES, DEFAULT_MAX_WORK));
+	}
+
+	/**
+	 * 扫描匹配 {@code options.pattern()} 的键并全局去重。
+	 *
+	 * @throws AiStateUnavailableException 连接、拓扑、任一 master、游标关闭失败，或任一预算超限
+	 */
+	public static List<String> scan(StringRedisTemplate template, ScanOptions options, ScanBudget budget) {
+		Objects.requireNonNull(budget, "budget");
 		if (template == null) {
 			throw new AiStateUnavailableException("SCAN failed: StringRedisTemplate is not configured", null);
 		}
+		ScanWork work = new ScanWork(budget);
 		RedisConnectionFactory factory;
 		try {
 			factory = template.getConnectionFactory();
+			work.checkDeadline();
 		}
 		catch (RuntimeException ex) {
 			throw new AiStateUnavailableException("SCAN failed: unable to obtain Redis connection factory", ex);
@@ -67,10 +65,11 @@ final class RedisClusterScanSupport {
 			throw new AiStateUnavailableException("SCAN failed: Redis connection factory is not configured", null);
 		}
 		try (RedisConnection connection = factory.getConnection()) {
+			work.checkDeadline();
 			if (connection instanceof RedisClusterConnection cluster) {
-				return scanCluster(cluster, options, maxKeys);
+				return scanCluster(cluster, options, budget, work);
 			}
-			return scanSingle(connection, options, maxKeys);
+			return scanSingle(connection, options, budget, work);
 		}
 		catch (AiStateUnavailableException ex) {
 			throw ex;
@@ -80,25 +79,29 @@ final class RedisClusterScanSupport {
 		}
 	}
 
-	private static List<String> scanSingle(RedisConnection connection, ScanOptions options, int maxKeys) {
+	private static List<String> scanSingle(RedisConnection connection, ScanOptions options, ScanBudget budget,
+			ScanWork work) {
 		Set<String> keys = new LinkedHashSet<>();
-		// keyCommands() 仍是同一条 standalone 连接；不使用 RedisTemplate.scan（单连接语义）。
 		try (Cursor<byte[]> cursor = connection.keyCommands().scan(options)) {
 			if (cursor == null) {
+				work.checkDeadline();
 				return List.of();
 			}
-			drain(cursor, keys, maxKeys);
+			drain(cursor, keys, budget, work);
 		}
 		catch (RuntimeException ex) {
 			throw new AiStateUnavailableException("SCAN failed (standalone)", ex);
 		}
+		work.checkDeadline();
 		return List.copyOf(keys);
 	}
 
-	private static List<String> scanCluster(RedisClusterConnection cluster, ScanOptions options, int maxKeys) {
+	private static List<String> scanCluster(RedisClusterConnection cluster, ScanOptions options, ScanBudget budget,
+			ScanWork work) {
 		Iterable<RedisClusterNode> nodes;
 		try {
 			nodes = cluster.clusterGetNodes();
+			work.checkDeadline();
 		}
 		catch (RuntimeException ex) {
 			throw new AiStateUnavailableException("SCAN failed: unable to read cluster topology", ex);
@@ -117,34 +120,89 @@ final class RedisClusterScanSupport {
 			anyMaster = true;
 			try (Cursor<byte[]> cursor = cluster.scan(node, options)) {
 				if (cursor != null) {
-					drain(cursor, keys, maxKeys);
+					drain(cursor, keys, budget, work);
 				}
+				work.checkDeadline();
 			}
 			catch (RuntimeException ex) {
-				// 某 master 失败 = 本次扫描不完整：上抛，调用方不得用部分结果冒充完整。
 				throw new AiStateUnavailableException("SCAN failed: cluster master " + node.getHost() + ":"
 						+ node.getPort(), ex);
 			}
-			if (maxKeys > 0 && keys.size() >= maxKeys) {
-				break;
-			}
+			work.checkDeadline();
 		}
 		if (!anyMaster) {
 			throw new AiStateUnavailableException("SCAN failed: no available cluster master", null);
 		}
+		work.checkDeadline();
 		return List.copyOf(keys);
 	}
 
-	private static void drain(Cursor<byte[]> cursor, Set<String> keys, int maxKeys) {
-		while (cursor.hasNext()) {
-			if (maxKeys > 0 && keys.size() >= maxKeys) {
+	private static void drain(Cursor<byte[]> cursor, Set<String> keys, ScanBudget budget, ScanWork work) {
+		while (true) {
+			work.checkDeadline();
+			boolean hasNext = cursor.hasNext();
+			work.noteCursorAdvance();
+			if (!hasNext) {
 				return;
 			}
 			byte[] raw = cursor.next();
 			if (raw != null) {
 				keys.add(StringUtils.newStringUtf8(raw));
 			}
+			if (keys.size() > budget.maxKeys()) {
+				throw new AiStateUnavailableException("SCAN result limit exceeded: " + budget.maxKeys(), null);
+			}
 		}
+	}
+
+	/** 单次扫描的三重硬预算；所有维度都必须为正，不提供无界形态。 */
+	public record ScanBudget(int maxKeys, int maxCursorAdvances, long maxWorkNanos) {
+
+		public ScanBudget {
+			if (maxKeys <= 0 || maxCursorAdvances <= 0 || maxWorkNanos <= 0L) {
+				throw new IllegalArgumentException("SCAN budgets must be positive");
+			}
+		}
+
+		public static ScanBudget of(int maxKeys, int maxCursorAdvances, Duration maxWork) {
+			Objects.requireNonNull(maxWork, "maxWork");
+			if (maxWork.isZero() || maxWork.isNegative()) {
+				throw new IllegalArgumentException("maxWork must be positive");
+			}
+			return new ScanBudget(maxKeys, maxCursorAdvances, maxWork.toNanos());
+		}
+
+	}
+
+	private static final class ScanWork {
+
+		private final ScanBudget budget;
+
+		private final long startedAtNanos;
+
+		private int cursorAdvances;
+
+		private ScanWork(ScanBudget budget) {
+			this.budget = budget;
+			this.startedAtNanos = System.nanoTime();
+		}
+
+		private void noteCursorAdvance() {
+			this.cursorAdvances++;
+			if (this.cursorAdvances > this.budget.maxCursorAdvances()) {
+				throw new AiStateUnavailableException("SCAN cursor advance limit exceeded: "
+						+ this.budget.maxCursorAdvances(), null);
+			}
+			checkDeadline();
+		}
+
+		private void checkDeadline() {
+			if (System.nanoTime() - this.startedAtNanos > this.budget.maxWorkNanos()) {
+				throw new AiStateUnavailableException("SCAN work budget exceeded: " + this.budget.maxWorkNanos()
+						+ "ns", null);
+			}
+		}
+
 	}
 
 }

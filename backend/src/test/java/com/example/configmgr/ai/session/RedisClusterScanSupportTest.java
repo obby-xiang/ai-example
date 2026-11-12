@@ -1,10 +1,15 @@
 package com.example.configmgr.ai.session;
 
+import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.memory.RedisChatMemoryRepository;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.common.AiStateUnavailableException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.connection.RedisClusterNode;
 import org.springframework.data.redis.core.ScanOptions;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -13,16 +18,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-/**
- * Cluster 安全扫描：多 master 必须全覆盖、逐节点 cursor 关闭、任一节点失败 fail-closed。
- *
- * <p>证红：恢复 {@code StringRedisTemplate#scan}（单连接语义）时：
- * <ul>
- * <li>2 master 用例只能看到当前连接所在节点的 key（静默漏键）；</li>
- * <li>节点失败用例不会上抛；</li>
- * <li>{@code verify(redis, never()).scan(...)} 红。</li>
- * </ul>
- */
 class RedisClusterScanSupportTest {
 
 	private final PurgeFakeRedis fake = new PurgeFakeRedis();
@@ -59,7 +54,6 @@ class RedisClusterScanSupportTest {
 		assertThat(this.fake.closedNodeCursors).as("每个 master 的 cursor 都要关闭").containsExactlyInAnyOrder(m1, m2);
 		assertThat(this.fake.clusterConnectionCloses).as("cluster 连接关闭一次").hasValue(1);
 		assertThat(this.fake.standaloneConnectionCloses).hasValue(0);
-		// 生产不能再走 template.scan（替身也不应替它自证）。
 		verify(this.fake.redis, never()).scan(any(ScanOptions.class));
 	}
 
@@ -99,7 +93,7 @@ class RedisClusterScanSupportTest {
 	}
 
 	@Test
-	void maxKeysBoundaryStopsBeforeRemainingMasters() {
+	void resultOverflowFailsInsteadOfReturningPartialResult() {
 		this.fake.clusterMode = true;
 		RedisClusterNode m1 = this.fake.addClusterMaster("10.0.0.1", 7001);
 		RedisClusterNode m2 = this.fake.addClusterMaster("10.0.0.2", 7001);
@@ -108,10 +102,8 @@ class RedisClusterScanSupportTest {
 		this.fake.assignToMaster(m1, SessionPurgePendingStore.PENDING_PREFIX + "s-1");
 		this.fake.assignToMaster(m2, SessionPurgePendingStore.PENDING_PREFIX + "s-2");
 
-		List<String> scanned = scanPending(1);
-
-		assertThat(scanned).as("maxKeys 截断全局结果").containsExactly(SessionPurgePendingStore.PENDING_PREFIX + "s-1");
-		assertThat(this.fake.closedNodeCursors).as("到界后不再扫后续 master").containsExactly(m1);
+		assertThatThrownBy(() -> scanPending(1)).isInstanceOf(AiStateUnavailableException.class);
+		assertThat(this.fake.closedNodeCursors).containsExactly(m1, m2);
 		assertThat(this.fake.clusterConnectionCloses).hasValue(1);
 	}
 
@@ -147,6 +139,43 @@ class RedisClusterScanSupportTest {
 
 		assertThat(scanned).containsExactly("ai:ctx:archive:a*b:1");
 		assertThat(this.fake.closedNodeCursors).containsExactlyInAnyOrder(m1, m2);
+	}
+
+	@Test
+	void conversationEnumerationKeepsFilteringUnescapeAndOrdering() {
+		this.fake.clusterMode = true;
+		RedisClusterNode m1 = this.fake.addClusterMaster("10.0.0.1", 7001);
+		RedisClusterNode m2 = this.fake.addClusterMaster("10.0.0.2", 7001);
+		this.fake.assignToMaster(m1, "chat:mem:1:101:{z}");
+		this.fake.assignToMaster(m2, "chat:mem:1:101:{%7Ba%7Db}", "chat:mem:staging:1:101:{ignored}:token",
+				"chat:mem:2:202:{other}");
+
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis,
+					new MessageJsonCodec(new ObjectMapper()), Duration.ofHours(1));
+
+			assertThat(repository.findConversationIds()).containsExactly("z", "{a}b");
+		}
+		assertThat(this.fake.closedNodeCursors).containsExactlyInAnyOrder(m1, m2);
+	}
+
+	@Test
+	void conversationEnumerationDoesNotReturnIdsFromFailedMaster() {
+		this.fake.clusterMode = true;
+		RedisClusterNode m1 = this.fake.addClusterMaster("10.0.0.1", 7001);
+		RedisClusterNode m2 = this.fake.addClusterMaster("10.0.0.2", 7001);
+		this.fake.assignToMaster(m1, "chat:mem:1:101:{first}");
+		this.fake.assignToMaster(m2, "chat:mem:1:101:{second}");
+		this.fake.failNode = m2;
+
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			RedisChatMemoryRepository repository = new RedisChatMemoryRepository(this.fake.redis,
+					new MessageJsonCodec(new ObjectMapper()), Duration.ofHours(1));
+
+			assertThatThrownBy(repository::findConversationIds).isInstanceOf(AiStateUnavailableException.class);
+		}
+		assertThat(this.fake.closedNodeCursors).containsExactly(m1);
+		assertThat(this.fake.clusterConnectionCloses).hasValue(1);
 	}
 
 }

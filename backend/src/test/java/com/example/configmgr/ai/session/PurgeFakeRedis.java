@@ -98,7 +98,7 @@ final class PurgeFakeRedis {
 
 	final RedisConnection standaloneConnection = mock(RedisConnection.class);
 
-	private final RedisKeyCommands keyCommands = mock(RedisKeyCommands.class);
+	final RedisKeyCommands keyCommands = mock(RedisKeyCommands.class);
 
 	final RedisClusterConnection clusterConnection = mock(RedisClusterConnection.class);
 
@@ -119,6 +119,12 @@ final class PurgeFakeRedis {
 	final List<RedisClusterNode> closedNodeCursors = new CopyOnWriteArrayList<>();
 
 	volatile int standaloneCursorCloses;
+
+	volatile Runnable beforeHasNext;
+
+	final AtomicInteger hasNextCalls = new AtomicInteger();
+
+	final List<String> standaloneScanDuplicates = new CopyOnWriteArrayList<>();
 
 	/** 指定该 master 扫描抛错（模拟单节点失败）。 */
 	volatile RedisClusterNode failNode;
@@ -392,7 +398,9 @@ final class PurgeFakeRedis {
 				throw new IllegalStateException("模拟 SCAN 失败");
 			}
 			ScanOptions options = invocation.getArgument(0);
-			return cursorMatching(options == null ? null : options.getPattern(), allKeys(), () -> {
+			List<String> source = new ArrayList<>(allKeys());
+			source.addAll(this.standaloneScanDuplicates);
+			return cursorMatching(options == null ? null : options.getPattern(), source, () -> {
 				this.standaloneCursorCloses++;
 			});
 		});
@@ -859,7 +867,7 @@ final class PurgeFakeRedis {
 				keys.add(key.getBytes(StandardCharsets.UTF_8));
 			}
 		}
-		return new BytesCursor(keys, onClose);
+		return new BytesCursor(keys, onClose, this.beforeHasNext, this.hasNextCalls);
 	}
 
 	/** 增加一个 cluster master（默认无键；测试显式分配）。 */
@@ -1011,15 +1019,25 @@ final class PurgeFakeRedis {
 
 		private final Runnable onClose;
 
+		private final Runnable beforeHasNext;
+
+		private final AtomicInteger hasNextCalls;
+
 		private boolean closed;
 
-		BytesCursor(List<byte[]> keys, Runnable onClose) {
+		BytesCursor(List<byte[]> keys, Runnable onClose, Runnable beforeHasNext, AtomicInteger hasNextCalls) {
 			this.iterator = keys.iterator();
 			this.onClose = onClose;
+			this.beforeHasNext = beforeHasNext;
+			this.hasNextCalls = hasNextCalls;
 		}
 
 		@Override
 		public boolean hasNext() {
+			this.hasNextCalls.incrementAndGet();
+			if (this.beforeHasNext != null) {
+				this.beforeHasNext.run();
+			}
 			return !this.closed && this.iterator.hasNext();
 		}
 
