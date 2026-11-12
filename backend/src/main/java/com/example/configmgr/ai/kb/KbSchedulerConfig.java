@@ -14,6 +14,7 @@ public class KbSchedulerConfig {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(1);
         scheduler.setThreadNamePrefix("kb-refresh-");
+        scheduler.setDaemon(true);
         scheduler.setTaskDecorator(taskDecorator);
         scheduler.setRemoveOnCancelPolicy(true);
         scheduler.setWaitForTasksToCompleteOnShutdown(false);

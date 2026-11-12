@@ -2,12 +2,15 @@ package com.example.configmgr.ai.kb;
 
 import com.example.configmgr.ai.config.AiProperties;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -31,6 +34,25 @@ class CachedKbSourceTest {
         Path index = KbTestSupport.tempDir("kb-cache-idx-");
         AiProperties properties = KbTestSupport.props(KbTestSupport.samples(), index);
         return new KbService(properties, KbTestSupport.mapper(), source);
+    }
+
+    @Test
+    void leaseSchedulerUsesDedicatedDaemonThreadAndKeepsLifecyclePolicies() throws Exception {
+        CachedKbSource source = cached(new FakeKbSource());
+        ScheduledExecutorService scheduler = (ScheduledExecutorService) ReflectionTestUtils.getField(
+                source, "leaseScheduler");
+        try {
+            ScheduledThreadPoolExecutor raw = (ScheduledThreadPoolExecutor) scheduler;
+            assertThat(raw.getKeepAliveTime(TimeUnit.SECONDS)).isEqualTo(60L);
+            assertThat(raw.allowsCoreThreadTimeOut()).isTrue();
+            assertThat(raw.getRemoveOnCancelPolicy()).isTrue();
+            Thread thread = scheduler.submit(Thread::currentThread).get(1L, TimeUnit.SECONDS);
+            assertThat(thread.getName()).startsWith("kb-cache-lease-");
+            assertThat(thread.isDaemon()).isTrue();
+        } finally {
+            source.close();
+        }
+        assertThat(scheduler.isShutdown()).isTrue();
     }
 
     @Test

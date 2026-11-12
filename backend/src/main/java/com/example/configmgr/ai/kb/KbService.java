@@ -190,7 +190,14 @@ public class KbService {
 
     private volatile ScheduledFuture<?> versionPollTask;
 
+    private volatile RefreshSubmission submittedRefresh;
+
+    private final Object refreshMonitor = new Object();
+
     private final ThreadLocal<Boolean> refreshWorker = ThreadLocal.withInitial(() -> false);
+
+    private record RefreshSubmission(Future<Boolean> task, AtomicBoolean started, AtomicBoolean cancelled) {
+    }
 
     public KbService(AiProperties properties, ObjectMapper mapper, KbSource source) {
         this.properties = properties;
@@ -199,6 +206,7 @@ public class KbService {
         this.scheduler = new ThreadPoolTaskScheduler();
         this.scheduler.setPoolSize(1);
         this.scheduler.setThreadNamePrefix("kb-refresh-");
+        this.scheduler.setDaemon(true);
         this.scheduler.setRemoveOnCancelPolicy(true);
         this.scheduler.initialize();
         this.ownsScheduler = true;
@@ -246,10 +254,16 @@ public class KbService {
 
     @PreDestroy
     public void stop() {
-        this.stopped = true;
+        RefreshSubmission submission;
+        synchronized (this.refreshMonitor) {
+            this.stopped = true;
+            submission = this.submittedRefresh;
+        }
         cancelTask(this.initialRefreshTask);
         cancelTask(this.refreshTask);
         cancelTask(this.versionPollTask);
+        cancelSubmittedRefresh(submission);
+        awaitRefreshCompletion();
         if (this.ownsScheduler) {
             this.scheduler.shutdown();
         }
@@ -270,6 +284,42 @@ public class KbService {
         }
     }
 
+    private void awaitRefreshCompletion() {
+        Duration waitBudget = this.properties.getKb().getRefreshWaitBudget();
+        long deadline = System.nanoTime() + Math.max(1L, waitBudget.toNanos());
+        try {
+            synchronized (this.refreshMonitor) {
+                while (this.reloadRunning.get()) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0L) {
+                        this.lastError = "KB stop wait exceeded budget " + waitBudget.toMillis()
+                                + "ms; closing resources while refresh remains running";
+                        log.warn("KB stop wait exceeded budget {}ms; refresh remains running", waitBudget.toMillis());
+                        return;
+                    }
+                    TimeUnit.NANOSECONDS.timedWait(this.refreshMonitor, remaining);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            this.lastError = "KB stop wait was interrupted; closing resources while refresh remains running";
+            log.warn("KB stop wait interrupted; refresh remains running", e);
+        }
+    }
+
+    private void cancelSubmittedRefresh(RefreshSubmission submission) {
+        if (submission != null) {
+            cancelAwaitedRefresh(submission);
+        }
+    }
+
+    private void clearReloadRunning() {
+        synchronized (this.refreshMonitor) {
+            this.reloadRunning.set(false);
+            this.refreshMonitor.notifyAll();
+        }
+    }
+
     private static Runnable withClearedIdentity(Runnable task) {
         return () -> {
             try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
@@ -285,11 +335,14 @@ public class KbService {
     }
 
     private void refreshQuietly() {
+        this.refreshWorker.set(true);
         try {
             refreshNow();
         } catch (Throwable e) {
             // doRefresh 已兜住业务失败；这里只兜"兜底逻辑自身"（绝不让定时线程死亡）
             log.warn("KB scheduled refresh threw unexpectedly (old index kept)", e);
+        } finally {
+            this.refreshWorker.remove();
         }
     }
 
@@ -360,54 +413,100 @@ public class KbService {
     }
 
     public boolean isRefreshNowPerformed(boolean force) {
-        if (!enabled() || this.stopped || !this.reloadRunning.compareAndSet(false, true)) {
-            return false;
-        }
         Duration refreshWaitBudget = this.properties.getKb().getRefreshWaitBudget();
         KbSource.RefreshBudget budget = KbSource.RefreshBudget.within(refreshWaitBudget);
         if (this.scheduler == null || Boolean.TRUE.equals(this.refreshWorker.get())) {
+            synchronized (this.refreshMonitor) {
+                if (!isRefreshAdmissionAllowed()) {
+                    return false;
+                }
+            }
             return isRefreshPerformed(force, budget);
         }
 
-        final Future<Boolean> task;
-        try {
-            task = this.scheduler.submit(() -> isRefreshPerformed(force, budget));
-        } catch (RejectedExecutionException e) {
-            this.reloadRunning.set(false);
-            this.lastError = "KB refresh executor is stopped";
+        RefreshSubmission submission;
+        synchronized (this.refreshMonitor) {
+            if (!isRefreshAdmissionAllowed()) {
+                return false;
+            }
+            submission = submitRefresh(force, budget);
+        }
+        if (submission == null) {
             return false;
         }
-        return isRefreshAwaited(task, refreshWaitBudget, budget);
+        return isRefreshAwaited(submission, refreshWaitBudget, budget);
     }
 
-    private boolean isRefreshAwaited(Future<Boolean> task, Duration refreshWaitBudget,
+    private boolean isRefreshAdmissionAllowed() {
+        return enabled() && !this.stopped && this.reloadRunning.compareAndSet(false, true);
+    }
+
+    private RefreshSubmission submitRefresh(boolean force, KbSource.RefreshBudget budget) {
+        AtomicBoolean started = new AtomicBoolean();
+        AtomicBoolean cancelled = new AtomicBoolean();
+        try {
+            Future<Boolean> task = this.scheduler.submit(() -> {
+                synchronized (this.refreshMonitor) {
+                    if (cancelled.get()) {
+                        return false;
+                    }
+                    started.set(true);
+                }
+                return isRefreshPerformed(force, budget);
+            });
+            RefreshSubmission submission = new RefreshSubmission(task, started, cancelled);
+            this.submittedRefresh = submission;
+            return submission;
+        } catch (RejectedExecutionException e) {
+            clearReloadRunning();
+            this.lastError = "KB refresh executor is stopped";
+            return null;
+        }
+    }
+
+    private boolean isRefreshAwaited(RefreshSubmission submission, Duration refreshWaitBudget,
                                      KbSource.RefreshBudget budget) {
         try {
-            return task.get(budget.remaining().toNanos(), TimeUnit.NANOSECONDS);
+            return submission.task.get(budget.remaining().toNanos(), TimeUnit.NANOSECONDS);
         } catch (TimeoutException e) {
-            if (task.cancel(false)) {
-                this.reloadRunning.set(false);
-            }
+            boolean cancelledBeforeExecution = cancelAwaitedRefresh(submission);
             this.lastError = "KB reload wait exceeded budget " + refreshWaitBudget.toMillis()
                     + "ms; running I/O was not forcibly interrupted";
+            if (cancelledBeforeExecution) {
+                log.warn("KB refresh wait exceeded budget {}ms; queued refresh was cancelled before execution",
+                        refreshWaitBudget.toMillis(), e);
+            } else {
+                log.warn("KB refresh wait exceeded budget {}ms; running refresh was not forcibly interrupted",
+                        refreshWaitBudget.toMillis(), e);
+            }
             return false;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            if (task.cancel(false)) {
-                this.reloadRunning.set(false);
-            }
+            cancelAwaitedRefresh(submission);
             this.lastError = "KB reload wait was interrupted";
             return false;
         } catch (ExecutionException | CancellationException e) {
+            if (e instanceof CancellationException && !submission.started.get()) {
+                clearReloadRunning();
+            }
             this.lastError = "KB refresh failed; retry later";
             log.warn("KB refresh execution failed", ObjectUtils.defaultIfNull(e.getCause(), e));
             return false;
         } catch (KbSourceException e) {
-            if (task.cancel(false)) {
-                this.reloadRunning.set(false);
-            }
+            cancelAwaitedRefresh(submission);
             this.lastError = "KB refresh failed; retry later";
             log.warn("KB refresh failed", e);
+            return false;
+        }
+    }
+
+    private boolean cancelAwaitedRefresh(RefreshSubmission submission) {
+        synchronized (this.refreshMonitor) {
+            submission.cancelled.set(true);
+            if (submission.task.cancel(false) && !submission.started.get()) {
+                clearReloadRunning();
+                return true;
+            }
             return false;
         }
     }
@@ -451,7 +550,7 @@ public class KbService {
             return false;
         } finally {
             this.refreshWorker.remove();
-            this.reloadRunning.set(false);
+            clearReloadRunning();
         }
     }
 

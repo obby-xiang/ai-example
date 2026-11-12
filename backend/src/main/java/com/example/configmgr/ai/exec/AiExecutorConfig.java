@@ -8,9 +8,9 @@ import com.example.configmgr.ai.tenant.RequestContextTaskDecorator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskDecorator;
+import org.springframework.scheduling.concurrent.CustomizableThreadFactory;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -130,7 +130,7 @@ public class AiExecutorConfig {
 	 */
 	@Bean(name = "aiStreamWatchdog", destroyMethod = "shutdownNow")
 	public ScheduledExecutorService aiStreamWatchdog() {
-		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(2, Executors.defaultThreadFactory());
+		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(2, daemonThreadFactory("ai-stream-watchdog-"));
 		configureScheduler(raw);
 		// TtlExecutors 包装：调度器本身不做 MDC/身份传播，统一装饰补齐
 		return TtlExecutors.getTtlScheduledExecutorService(raw);
@@ -163,16 +163,23 @@ public class AiExecutorConfig {
 	 */
 	@Bean(name = "aiCancelPoll", destroyMethod = "shutdownNow")
 	public ScheduledExecutorService aiCancelPoll() {
-		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(2, Executors.defaultThreadFactory());
+		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(2, daemonThreadFactory("ai-cancel-poll-"));
 		configureScheduler(raw);
 		return TtlExecutors.getTtlScheduledExecutorService(raw);
 	}
 
 	@Bean(name = "aiSessionPurgeRetryScheduler", destroyMethod = "shutdownNow")
 	public ScheduledExecutorService aiSessionPurgeRetryScheduler() {
-		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(1,
+				daemonThreadFactory("ai-session-purge-retry-"));
 		configureScheduler(raw);
 		return raw;
+	}
+
+	private static CustomizableThreadFactory daemonThreadFactory(String threadNamePrefix) {
+		CustomizableThreadFactory factory = new CustomizableThreadFactory(threadNamePrefix);
+		factory.setDaemon(true);
+		return factory;
 	}
 
 	private static void configureScheduler(ScheduledThreadPoolExecutor scheduler) {

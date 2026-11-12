@@ -14,16 +14,14 @@ class AiExecutorConfigTest {
     private final AiExecutorConfig config = new AiExecutorConfig();
 
     @Test
-    void watchdogPoolsUseDefaultThreadsAndCancellationPolicies() throws Exception {
+    void watchdogPoolsUseDedicatedDaemonThreadsAndCancellationPolicies() throws Exception {
         ScheduledExecutorService watchdog = this.config.aiStreamWatchdog();
         ScheduledExecutorService cancelPoll = this.config.aiCancelPoll();
         try {
             assertWatchdogPool(watchdog);
             assertWatchdogPool(cancelPoll);
-            assertThat(watchdog.submit(() -> Thread.currentThread().getName()).get())
-                    .startsWith("pool-");
-            assertThat(cancelPoll.submit(() -> Thread.currentThread().getName()).get())
-                    .startsWith("pool-");
+            assertDedicatedDaemonThread(watchdog, "ai-stream-watchdog-");
+            assertDedicatedDaemonThread(cancelPoll, "ai-cancel-poll-");
         } finally {
             watchdog.shutdownNow();
             cancelPoll.shutdownNow();
@@ -31,7 +29,7 @@ class AiExecutorConfigTest {
     }
 
     @Test
-    void purgeSchedulerUsesOneThreadWithCancellationPolicies() {
+    void purgeSchedulerUsesDedicatedDaemonThreadWithCancellationPolicies() throws Exception {
         ScheduledExecutorService scheduler = this.config.aiSessionPurgeRetryScheduler();
         try {
             ScheduledThreadPoolExecutor raw = raw(scheduler);
@@ -41,6 +39,7 @@ class AiExecutorConfigTest {
             assertThat(raw.getRemoveOnCancelPolicy()).isTrue();
             assertThat(raw.getExecuteExistingDelayedTasksAfterShutdownPolicy()).isFalse();
             assertThat(raw.getContinueExistingPeriodicTasksAfterShutdownPolicy()).isFalse();
+            assertDedicatedDaemonThread(scheduler, "ai-session-purge-retry-");
         } finally {
             scheduler.shutdownNow();
         }
@@ -54,6 +53,13 @@ class AiExecutorConfigTest {
         assertThat(raw.getRemoveOnCancelPolicy()).isTrue();
         assertThat(raw.getExecuteExistingDelayedTasksAfterShutdownPolicy()).isFalse();
         assertThat(raw.getContinueExistingPeriodicTasksAfterShutdownPolicy()).isFalse();
+    }
+
+    private static void assertDedicatedDaemonThread(ScheduledExecutorService scheduler, String namePrefix)
+            throws Exception {
+        Thread thread = scheduler.submit(Thread::currentThread).get(1L, TimeUnit.SECONDS);
+        assertThat(thread.getName()).startsWith(namePrefix);
+        assertThat(thread.isDaemon()).isTrue();
     }
 
     @SuppressWarnings("unchecked")

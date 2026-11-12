@@ -6591,6 +6591,40 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "winner返回归档原文而非重新序列化，实时与归档字节一致，末帧JSON type严格校验。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1256确认生产问题闭合；施工报告双终帧/显式seq旁路/winner丢失等有效RED→GREEN，standalone Memurai真实Lua、七键同槽、初次不足后续wake补齐、读取失败、坏快照/末帧及旧exact兼容单点通过，生产编译BUILD SUCCESS；两个测试身份夹具修正后FrameCompatReadTest 6/6、RunStoreActivityAnchorTest 7/7独立通过。真实Cluster、多实例随机路由、kill/failover、Redis5及全量普通测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:74f0de9548ec9c09e721873b7a5d6127cdd141fe7eed05ec0948730d8c982841",
+      "status": "reviewed",
+      "reason": "逐hunk复核KB调度自等待修复、在飞刷新与停止协调、超时/中断可观测性和命名守护线程；独立复审APPROVED。",
+      "reviewedAt": "2026-11-12T20:01:22+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1259、施工agent-1261",
+      "specChanges": [
+        {
+          "change": "KB首刷、周期刷新和版本轮询在调度线程内直接执行刷新主体，只有管理端等外部调用使用submit+有界等待。",
+          "reason": "调度线程向同一单线程scheduler二次submit并get会形成自等待，自动建索引和刷新持续失败。",
+          "impact": "refreshWorker在最外层调度入口置位/清理，reloadRunning单飞和refreshWaitBudget保持，不再发生scheduler内二次submit/get。"
+        },
+        {
+          "change": "KB停止先禁止新刷新、取消本服务全部任务并有界等待在飞刷新，再关闭CachedKbSource/snapshot/analyzer；恢复专用命名守护线程。",
+          "reason": "cancel(false)后立即关资源会与在飞刷新竞态，默认ThreadFactory又退化为非守护通用pool名称。",
+          "impact": "动态started/cancelled与stop在同一监视器协调，等待超时/中断有WARN和lastError，共享scheduler不关闭；AiExecutorConfig/CachedKbSource/KbSchedulerConfig恢复命名daemon且原Spring destroy策略不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/exec/AiExecutorConfig.java", "status": "checked", "reason": "三个调度池恢复各自的命名daemon工厂，池大小、空闲回收、removeOnCancel、TTL包装和destroyMethod保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/kb/CachedKbSource.java", "status": "checked", "reason": "缓存租约恢复kb-cache-lease命名daemon，close仍shutdownNow，租约生命周期不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSchedulerConfig.java", "status": "checked", "reason": "KB生产scheduler恢复kb-refresh命名daemon，Spring管理、取消和关闭策略保持。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/kb/KbService.java", "status": "checked", "reason": "调度线程直接刷新、管理端有界等待、动态提交与stop同监视器协调、超时/中断安全WARN、资源最后关闭；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Spring CustomizableThreadFactory、ThreadPoolTaskScheduler及既有刷新单飞/停止设施，无新增依赖或第二调度体系。"},
+        "java-api-style": {"status": "checked", "reason": "四个生产Java均经IDEA Reformat；worker标记、监视器锁顺序、timedWait和命名线程工厂逐hunk复核。"},
+        "logging-exception-safety": {"status": "checked", "reason": "排队取消、运行中超时、停止超时/中断均写WARN和lastError，不打印正文/路径，不把降级伪装成安全收尾。"},
+        "toc-interaction": {"status": "not-affected", "reason": "仅后台KB调度与生命周期变化，无用户提示、卡片或交互修改。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "reloadRunning单飞、动态任务登记/取消和共享scheduler生命周期保持，停止不关闭共享池，真实在飞任务结束后才关依赖资源。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1259 APPROVED；施工报告首刷/周期/版本自等待RED→GREEN、真实Lucene首篇文档构建、管理端有界提交、超时WARN、停止事件顺序refresh-finished→source-closed、取消竞态和命名daemon单点通过，生产clean compile 359源BUILD SUCCESS；主控未重跑测试，完整Spring停机、真实HTTP KB源、Redis/Cluster/多实例及全量测试NOT_RUN。"}
+      }
     }
   ]
 }

@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.scheduling.concurrent.CustomizableThreadFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -15,7 +16,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -53,7 +53,9 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         this.cache = cache;
         this.mapper = mapper;
         this.kb = kb;
-        ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+        CustomizableThreadFactory threadFactory = new CustomizableThreadFactory("kb-cache-lease-");
+        threadFactory.setDaemon(true);
+        ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, threadFactory);
         scheduler.setKeepAliveTime(60L, TimeUnit.SECONDS);
         scheduler.allowCoreThreadTimeOut(true);
         scheduler.setRemoveOnCancelPolicy(true);

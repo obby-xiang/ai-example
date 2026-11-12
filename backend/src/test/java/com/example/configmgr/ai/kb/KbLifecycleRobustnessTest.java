@@ -101,10 +101,10 @@ class KbLifecycleRobustnessTest {
             assertThat(service.ready()).isFalse();
 
             int afterFirstFailure = source.attempts();
+            source.fail(false);
             // 失败后同一版本号必须还能再触发一次重建（RED：版本已被记为"已见"，轮询直接 return）
             awaitAtLeast(() -> source.attempts(), afterFirstFailure + 1, 3000);
 
-            source.fail(false);
             await(() -> service.ready(), 5000);
             assertThat(service.status().lastError()).isEmpty();
             assertThat(service.status().docCount()).isEqualTo(20);
