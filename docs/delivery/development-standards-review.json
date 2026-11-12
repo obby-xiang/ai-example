@@ -6360,6 +6360,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "完整覆盖组合acute、ZWJ、肤色、区域指示符、keycap、tag、CRLF和超长组合字素，offset继续保持UTF-16码元单位。"},
         "verification-review": {"status": "checked", "reason": "施工agent-1244报告14个独立Vitest进程单点GREEN，npm run typecheck及node scripts/build.mjs成功；主控仅静态复审未重跑测试，旧浏览器实机和前端全量套件NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:ea095f78f8d41ee70479902e2e372b0d6d767fd2f9412c70ea724b948fbdbb06",
+      "status": "reviewed",
+      "reason": "逐hunk复核七个生产文件的控制块改动，确认全部仅为既有if/for补充大括号，条件表达式、return/break/continue、异常和业务数据流均未改变。",
+      "reviewedAt": "2026-11-12T13:42:43+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查任务agent-dkcgwpwn",
+      "specChanges": [],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "配置与任务列表、说明和工作区空值分支仅补{}，工具参数、返回文案与列表限制不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/definition/service/DependencyResolver.java", "status": "checked", "reason": "拓扑排序初始化和continue分支仅补{}，依赖图、入度和排序语义不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/excel/ExcelReader.java", "status": "checked", "reason": "Excel行列空值与meta读取分支仅补{}，单元格读取和映射校验不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/excel/ExcelTemplateBuilder.java", "status": "checked", "reason": "字典行创建、校验和注释分支仅补{}，模板内容与选项映射不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/job/service/ImportJobRunner.java", "status": "checked", "reason": "行主键分隔符控制块仅补{}，键字段顺序和值编码不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/job/service/PrecheckJobRunner.java", "status": "checked", "reason": "DEBUG日志及行主键控制块仅补{}，日志级别、终态写和预检语义不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/task/controller/FileController.java", "status": "checked", "reason": "ZIP目录项continue仅补{}，文件内容读取和关闭路径不变；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "仅既有控制块补充大括号，无新增依赖、框架或实现替换。"},
+        "java-api-style": {"status": "checked", "reason": "七个生产Java均有施工IDEA Reformat记录，改动严格限于控制块显式{}，未混入布尔或API重写。"},
+        "logging-exception-safety": {"status": "checked", "reason": "DEBUG开关、日志参数、异常抛出和资源关闭路径逐hunk保持，未借格式调整吞没错误。"},
+        "toc-interaction": {"status": "not-affected", "reason": "未修改用户界面、提示、卡片或操作。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "未修改API、Redis、数据库或并发状态，只调整源码控制块形态。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本编码、流解析或字符串内容。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1236最终APPROVED；施工报告七个生产文件及新增控制流用例完成独立单点和生产编译，主控仅静态复核未重跑测试，全量普通测试与真实业务文件NOT_RUN。"}
+      }
     }
   ]
 }

@@ -92,11 +92,15 @@ public class ExcelTemplateBuilder {
                 @SuppressWarnings("unchecked")
                 List<Map<String, String>> opts = objectMapper.readValue(f.getOptionsJson(), List.class);
                 XSSFRow labelRow = dict.getRow(0);
-                if (labelRow == null) labelRow = dict.createRow(0);
+                if (labelRow == null) {
+                    labelRow = dict.createRow(0);
+                }
                 labelRow.createCell(col).setCellValue(f.getCode());
                 for (int i = 0; i < opts.size(); i++) {
                     XSSFRow row = dict.getRow(i + 1);
-                    if (row == null) row = dict.createRow(i + 1);
+                    if (row == null) {
+                        row = dict.createRow(i + 1);
+                    }
                     Map<String, String> option = opts.get(i);
                     Object val = ObjectUtils.getIfNull(
                             option.get("label"), () -> option.get("value"));
@@ -109,7 +113,9 @@ public class ExcelTemplateBuilder {
 
     private void addDataValidations(XSSFWorkbook wb, XSSFSheet dataSheet, List<ConfigField> fields) throws Exception {
         XSSFSheet dict = wb.getSheet("_dict");
-        if (dict == null) return;
+        if (dict == null) {
+            return;
+        }
         XSSFDataValidationHelper dvHelper = new XSSFDataValidationHelper(dataSheet);
 
         int dictCol = 0;
@@ -162,10 +168,15 @@ public class ExcelTemplateBuilder {
     private String buildComment(ConfigField f) {
         StringBuilder sb = new StringBuilder();
         sb.append("类型: ").append(f.getFieldType().name());
-        if (f.isRequired()) sb.append("\n必填: 是");
-        if (f.isKey()) sb.append("\n主键: 是");
-        if (f.getRefDefCode() != null)
+        if (f.isRequired()) {
+            sb.append("\n必填: 是");
+        }
+        if (f.isKey()) {
+            sb.append("\n主键: 是");
+        }
+        if (f.getRefDefCode() != null) {
             sb.append("\n引用: ").append(f.getRefDefCode()).append(".").append(f.getRefFieldCode());
+        }
         return sb.toString();
     }
 

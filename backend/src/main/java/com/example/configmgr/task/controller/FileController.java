@@ -205,7 +205,9 @@ public class FileController {
         try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes), charset)) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
-                if (entry.isDirectory()) continue;
+                if (entry.isDirectory()) {
+                    continue;
+                }
                 result.add(new ZipFileEntry(entry.getName(), zis.readAllBytes()));
                 zis.closeEntry();
             }

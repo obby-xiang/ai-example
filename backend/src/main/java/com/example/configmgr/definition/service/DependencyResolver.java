@@ -33,7 +33,9 @@ public class DependencyResolver {
      * 循环依赖时抛出 IllegalStateException。
      */
     public List<String> sort(List<String> defCodes) {
-        if (CollectionUtils.isEmpty(defCodes)) return Collections.emptyList();
+        if (CollectionUtils.isEmpty(defCodes)) {
+            return Collections.emptyList();
+        }
         return topologicalSort(defCodes, buildDependencies(defCodes));
     }
 
@@ -51,7 +53,9 @@ public class DependencyResolver {
 
         for (String code : defCodes) {
             ConfigDefinition def = defMap.get(code);
-            if (def == null || def.getFields() == null) continue;
+            if (def == null || def.getFields() == null) {
+                continue;
+            }
             def.getFields().forEach(f -> {
                 if (f.getRefDefCode() != null && defCodes.contains(f.getRefDefCode())) {
                     deps.get(code).add(f.getRefDefCode());
@@ -63,18 +67,24 @@ public class DependencyResolver {
 
     private List<String> topologicalSort(List<String> defCodes, Map<String, Set<String>> deps) {
         Map<String, Set<String>> revDeps = new HashMap<>();
-        for (String code : defCodes) revDeps.put(code, new HashSet<>());
+        for (String code : defCodes) {
+            revDeps.put(code, new HashSet<>());
+        }
         for (Map.Entry<String, Set<String>> e : deps.entrySet()) {
             for (String dep : e.getValue()) {
                 revDeps.computeIfAbsent(dep, k -> new HashSet<>()).add(e.getKey());
             }
         }
         Map<String, Integer> degree = new HashMap<>();
-        for (String code : defCodes) degree.put(code, deps.get(code).size());
+        for (String code : defCodes) {
+            degree.put(code, deps.get(code).size());
+        }
 
         Queue<String> queue = new LinkedList<>();
         for (String code : defCodes) {
-            if (degree.get(code) == 0) queue.add(code);
+            if (degree.get(code) == 0) {
+                queue.add(code);
+            }
         }
 
         List<String> sorted = new ArrayList<>();
@@ -84,7 +94,9 @@ public class DependencyResolver {
             Set<String> successors = revDeps.getOrDefault(current, Collections.emptySet());
             for (String s : successors) {
                 int d = degree.merge(s, -1, Integer::sum);
-                if (d == 0) queue.add(s);
+                if (d == 0) {
+                    queue.add(s);
+                }
             }
         }
 

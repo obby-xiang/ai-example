@@ -284,7 +284,9 @@ public class ImportJobRunner {
     private String buildRowKey(Map<String, Object> row, List<ConfigField> keyFields) {
         StringBuilder sb = new StringBuilder();
         for (ConfigField f : keyFields) {
-            if (sb.length() > 0) sb.append("|");
+            if (sb.length() > 0) {
+                sb.append("|");
+            }
             Object v = row.get(f.getCode());
             sb.append(v != null ? v.toString() : "");
         }

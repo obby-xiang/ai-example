@@ -196,13 +196,17 @@ public class AiTools {
         List<ConfigDefinition> defs = parsedLevel != null
                 ? definitionService.findByLevel(parsedLevel)
                 : definitionService.findAll();
-        if (defs.isEmpty()) return LIST_CONFIG_DEFS_EMPTY_TEXT;
+        if (defs.isEmpty()) {
+            return LIST_CONFIG_DEFS_EMPTY_TEXT;
+        }
         String rows = defs.stream().limit(LIST_CONFIG_DEFS_MAX_ROWS).map(d ->
                 String.format("%s%s（%s）层级:%s 字段数:%d",
                         LIST_CONFIG_DEFS_ROW_PREFIX, d.getCode(), d.getName(), d.getLevel().name(),
                         CollectionUtils.size(d.getFields())))
                 .collect(Collectors.joining("\n"));
-        if (defs.size() <= LIST_CONFIG_DEFS_MAX_ROWS) return rows;
+        if (defs.size() <= LIST_CONFIG_DEFS_MAX_ROWS) {
+            return rows;
+        }
         return rows + "\n" + LIST_CONFIG_DEFS_TOTAL_PREFIX + defs.size() + LIST_CONFIG_DEFS_TOTAL_SUFFIX;
     }
 
@@ -236,7 +240,9 @@ public class AiTools {
         StringBuilder sb = new StringBuilder();
         sb.append("配置定义: ").append(def.getCode()).append("（").append(def.getName()).append("）\n");
         sb.append("层级: ").append(def.getLevel()).append("\n");
-        if (def.getDescription() != null) sb.append("说明: ").append(def.getDescription()).append("\n");
+        if (def.getDescription() != null) {
+            sb.append("说明: ").append(def.getDescription()).append("\n");
+        }
         sb.append("字段:\n");
         if (def.getFields() != null) {
             def.getFields().forEach(f -> {
@@ -304,14 +310,18 @@ public class AiTools {
     @ToolCategory(ToolMeta.Category.R)
     public String listTasks() {
         List<Task> tasks = taskService.findAll();
-        if (tasks.isEmpty()) return LIST_TASKS_EMPTY_TEXT;
+        if (tasks.isEmpty()) {
+            return LIST_TASKS_EMPTY_TEXT;
+        }
         String rows = tasks.stream().limit(LIST_TASKS_MAX_ROWS).map(t ->
                 String.format("%s%d [%s] %s%s%s%s%s",
                         LIST_TASKS_ROW_PREFIX, t.getId(), t.getType(), t.getTitle(),
                         LIST_TASKS_STEP_TOKEN, t.getCurrentStep(),
                         LIST_TASKS_STATUS_TOKEN, t.getStatus()))
                 .collect(Collectors.joining("\n"));
-        if (tasks.size() <= LIST_TASKS_MAX_ROWS) return rows;
+        if (tasks.size() <= LIST_TASKS_MAX_ROWS) {
+            return rows;
+        }
         return rows + "\n" + LIST_TASKS_TOTAL_PREFIX + tasks.size() + LIST_TASKS_TOTAL_SUFFIX;
     }
 
@@ -337,7 +347,9 @@ public class AiTools {
     }
 
     private String workspaceState(Long taskId) {
-        if (taskId == null) return "当前未打开任何任务，请先创建或选择一个任务";
+        if (taskId == null) {
+            return "当前未打开任何任务，请先创建或选择一个任务";
+        }
         Task task = taskService.findById(taskId);
         StringBuilder sb = new StringBuilder();
         sb.append("任务 #").append(task.getId()).append(": ").append(task.getTitle()).append("\n");

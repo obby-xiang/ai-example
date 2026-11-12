@@ -67,12 +67,16 @@ public class ExcelReader {
             // Start from row 1 (skip header row 0)
             for (int r = 1; r <= dataSheet.getLastRowNum(); r++) {
                 Row row = dataSheet.getRow(r);
-                if (row == null || isRowEmpty(row, formatter)) continue;
+                if (row == null || isRowEmpty(row, formatter)) {
+                    continue;
+                }
 
                 Map<String, Object> rowData = new LinkedHashMap<>();
                 for (int c = 0; c < fieldCodes.size(); c++) {
                     String code = fieldCodes.get(c);
-                    if (StringUtils.isBlank(code) || code.startsWith("_")) continue;
+                    if (StringUtils.isBlank(code) || code.startsWith("_")) {
+                        continue;
+                    }
                     Cell cell = row.getCell(c);
                     Object value = getCellValue(cell, formatter, evaluator);
                     if (value != null) {
@@ -95,9 +99,13 @@ public class ExcelReader {
      */
     private MetaSheet readMetaSheet(XSSFWorkbook wb) {
         Sheet meta = wb.getSheet("_meta");
-        if (meta == null) return null;
+        if (meta == null) {
+            return null;
+        }
         Row row = meta.getRow(1); // row 0 = headers, row 1 = values
-        if (row == null) return null;
+        if (row == null) {
+            return null;
+        }
         DataFormatter fmt = new DataFormatter();
         // 模板第 0 列是 def_code 元信息列（row0 标签为 "def_code"），跳过以保证与数据列对齐
         Row labelRow = meta.getRow(0);
@@ -106,7 +114,9 @@ public class ExcelReader {
         String defCode = firstIsDefCode ? fmt.formatCellValue(row.getCell(0)).trim() : null;
         List<String> codes = new ArrayList<>();
         for (int c = 0; c < row.getLastCellNum(); c++) {
-            if (c == 0 && firstIsDefCode) continue;
+            if (c == 0 && firstIsDefCode) {
+                continue;
+            }
             codes.add(fmt.formatCellValue(row.getCell(c)).trim());
         }
         return new MetaSheet(codes, defCode);
@@ -118,7 +128,9 @@ public class ExcelReader {
      * 没有 {@code _meta} 或旧文件未写 def_code 时不做比对（沿用既有表头映射回退）。
      */
     private void requireMetaDefCode(ConfigDefinition def, String metaDefCode) {
-        if (StringUtils.isBlank(metaDefCode)) return;
+        if (StringUtils.isBlank(metaDefCode)) {
+            return;
+        }
         if (!metaDefCode.equals(def.getCode())) {
             throw new CodedIllegalArgumentException(ErrorCodes.EXCEL_COLUMN_MAPPING_INVALID,
                     "Configuration definition mismatch: file = " + metaDefCode + ", target = " + def.getCode()
@@ -134,9 +146,13 @@ public class ExcelReader {
 
     private List<String> readHeaderRow(XSSFWorkbook wb, ConfigDefinition def) {
         Sheet dataSheet = findDataSheet(wb);
-        if (dataSheet == null) return List.of();
+        if (dataSheet == null) {
+            return List.of();
+        }
         Row header = dataSheet.getRow(0);
-        if (header == null) return List.of();
+        if (header == null) {
+            return List.of();
+        }
 
         // Build label -> code map
         Map<String, String> labelToCode = new HashMap<>();
@@ -165,13 +181,17 @@ public class ExcelReader {
     }
 
     private Object getCellValue(Cell cell, DataFormatter fmt, FormulaEvaluator evaluator) {
-        if (cell == null) return null;
+        if (cell == null) {
+            return null;
+        }
         return StringUtils.trimToNull(fmt.formatCellValue(cell, evaluator));
     }
 
     private boolean isRowEmpty(Row row, DataFormatter fmt) {
         for (int c = row.getFirstCellNum(); c < row.getLastCellNum(); c++) {
-            if (StringUtils.isNotBlank(fmt.formatCellValue(row.getCell(c)))) return false;
+            if (StringUtils.isNotBlank(fmt.formatCellValue(row.getCell(c)))) {
+                return false;
+            }
         }
         return true;
     }

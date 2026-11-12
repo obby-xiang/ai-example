@@ -355,8 +355,9 @@ public class PrecheckJobRunner {
         }
         int updated = jobRepository.writeResultJsonIfInFlight(jobId, json, IN_FLIGHT);
         if (updated == 0) {
-            if (log.isDebugEnabled())
+            if (log.isDebugEnabled()) {
                 log.debug("Job already terminal, fingerprint summary not written jobId={}", jobId);
+            }
         }
     }
 
@@ -406,7 +407,9 @@ public class PrecheckJobRunner {
     private String buildRowKey(Map<String, Object> row, List<ConfigField> keyFields) {
         StringBuilder sb = new StringBuilder();
         for (ConfigField f : keyFields) {
-            if (sb.length() > 0) sb.append("|");
+            if (sb.length() > 0) {
+                sb.append("|");
+            }
             Object v = row.get(f.getCode());
             sb.append(v != null ? v.toString() : "");
         }
