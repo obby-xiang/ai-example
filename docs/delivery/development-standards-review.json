@@ -7050,6 +7050,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "分组按原始JSON结构，截断复用字素边界并覆盖组合字符、代理对和ZWJ，不按人读文本猜同义。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1278最终Spec/Task quality通过；施工报告全量/相同不同JSON/混合/大组数/长短预算/240与241/字素/中英文hash/提示词等独立RED→GREEN，360源编译及定向Checkstyle成功；主控未重跑测试，PMD因插件依赖错误NOT_RUN，全量Checkstyle余37个未触及既有违规，真实模型/浏览器/Cluster及全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:159728b8de065b70cdcddae8b3e66f9eba0b8f782ddcfd6a43f236c4578c6a89",
+      "status": "reviewed",
+      "reason": "逐hunk复核set_conditions幂等只认可每个defCode的最新成功批次，A→B→A真实重新下发；独立限定复核可合入。",
+      "reviewedAt": "2026-11-13T05:09:10+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1279、施工agent-1264",
+      "specChanges": [
+        {
+          "change": "set_conditions仅在本次每个defCode的最新相关批次均指向同一toolCallId、绑定当前run/task、FRONTEND_RESULT+OK且完整有序items一致时复用回执。",
+          "reason": "原实现会在A→B→A时复用最早A，页面仍为B却按A已生效放行confirm_step，回执与最终业务条件不一致。",
+          "impact": "后续不同条件、PENDING、失败或取消批次均使旧回执失效并真实重新下发；无关defCode不影响，同时间戳不同ID不复用。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java", "status": "checked", "reason": "findSettledReplay按各def最新批次、同一ID、真实成功、任务绑定和完整JSON判定，不依赖列表顺序或文本匹配；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用latestDraftForDef现有时间戳与歧义判据及原始Pending，无新增存储、依赖或场景分支。"},
+        "java-api-style": {"status": "checked", "reason": "生产Java已IDEA Reformat，findSettledReplay与成功判定方法低于50行和复杂度20。"},
+        "logging-exception-safety": {"status": "checked", "reason": "任何后续修改都使旧成功回执失效，不把executed=false的旧回放伪装成当前页面事实。"},
+        "toc-interaction": {"status": "checked", "reason": "A→B→A会真实下发第三次A，用户看到的过程卡与最终条件一致，不新增提示或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "按requestedAtMs与各def最新批次判定，同时间戳歧义失败关闭，迟到旧回执不覆盖新修改，无关def隔离。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "完整有序items按JSON结构比较，不按文本contains或固定条件值识别。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1279确认Critical-1全部ADDRESSED且无新问题；施工报告A→B→A三次真实请求、A→A幂等、无关批次、同时间戳、后续失败、多项修改、迟到回执和15项单卡单回执共8个独立单点通过，360源clean compile成功；主控未重跑测试，真实Redis/模型/浏览器/多实例NOT_RUN。"}
+      }
     }
   ]
 }

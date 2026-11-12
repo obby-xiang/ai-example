@@ -430,6 +430,47 @@ class ConditionsFormTest {
     }
 
     @Test
+    void unrelatedDefinitionBatchDoesNotInvalidateReplay() {
+        String arguments = batchArgs(1);
+        settledBatch("currency-settled", arguments, 100L, "currency settled");
+        settledBatch("region-settled", "{\"items\":[{\"defCode\":\"REGION\",\"conditions\":{}}]}",
+                200L, "region settled");
+
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), arguments)).isEqualTo("currency settled");
+    }
+
+    @Test
+    void sameTimestampDifferentCallIdsDoNotReplay() {
+        String arguments = batchArgs(1);
+        settledBatch("tied-first", arguments, 100L, "first settled");
+        settledBatch("tied-second", arguments, 100L, "second settled");
+
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), arguments)).isNull();
+    }
+
+    @Test
+    void laterFailureOfSameBatchDoesNotReplayEarlierSuccess() {
+        String arguments = batchArgs(1);
+        settledBatch("successful-first", arguments, 100L, "old success");
+        PendingToolCall failed = settledBatch("failed-later", arguments, 200L, "later failure");
+        failed.setOutcome(ToolOutcome.FAILED.wire());
+        this.store.putPending(RUN_ID, failed);
+
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), arguments)).isNull();
+    }
+
+    @Test
+    void laterChangeToAnyItemInvalidatesWholeOrderedBatchReplay() {
+        String arguments = batchArgs(2);
+        settledBatch("original-batch", arguments, 100L, "original settled");
+        String changed = "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{}},"
+                + "{\"defCode\":\"REGION\",\"conditions\":{\"scopeKeys\":[\"NEW\"]}}]}";
+        settledBatch("changed-region", changed, 200L, "changed settled");
+
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), arguments)).isNull();
+    }
+
+    @Test
     void failedBatchAttemptRejectsWithoutAnotherConditionForm() {
         PendingToolCall batch = frontendCall("batch-failed", "set_conditions", batchArgs(2));
         ConditionsForm.bindDraft(batch, RUN_ID, context());
@@ -447,15 +488,16 @@ class ConditionsFormTest {
 
     @Test
     void lateOldReceiptCannotCoverANewerPendingBatch() {
-        PendingToolCall older = frontendCall("batch-old", "set_conditions", batchArgs(2));
+        String oldArguments = batchArgs(2);
+        PendingToolCall older = frontendCall("batch-old", "set_conditions", oldArguments);
         ConditionsForm.bindDraft(older, RUN_ID, context());
         older.setRequestedAtMs(100L);
         answer(older, "old settled");
         older.setResolvedAtMs(100L);
         this.store.putPending(RUN_ID, older);
-        PendingToolCall newer = frontendCall("batch-new", "set_conditions",
-                "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"NEW\"]}},"
-                        + "{\"defCode\":\"REGION\",\"conditions\":{}}]}");
+        String newArguments = "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"NEW\"]}},"
+                + "{\"defCode\":\"REGION\",\"conditions\":{}}]}";
+        PendingToolCall newer = frontendCall("batch-new", "set_conditions", newArguments);
         ConditionsForm.bindDraft(newer, RUN_ID, context());
         newer.setRequestedAtMs(200L);
         this.store.putPending(RUN_ID, newer);
@@ -466,10 +508,12 @@ class ConditionsFormTest {
                 frontendCall("call-confirm", "confirm_step", "{}"), history());
 
         assertThat(pendingDecision.outcome()).isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.REJECTED);
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), oldArguments)).isNull();
         answer(newer, "new settled");
         assertThat(this.form.inspectConfirmStep(RUN_ID, context(),
                 frontendCall("call-confirm-2", "confirm_step", "{}"), history()).outcome())
                 .isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.ALLOW);
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), newArguments)).isEqualTo("new settled");
     }
 
     @Test
@@ -572,6 +616,14 @@ class ConditionsFormTest {
 
     private List<String> currentDefCodes() {
         return this.task.getItems().stream().map(TaskItem::getDefCode).toList();
+    }
+
+    private PendingToolCall settledBatch(String callId, String arguments, long requestedAtMs, String resultText) {
+        PendingToolCall pending = frontendCall(callId, "set_conditions", arguments);
+        ConditionsForm.bindDraft(pending, RUN_ID, context());
+        pending.setRequestedAtMs(requestedAtMs);
+        answer(pending, resultText);
+        return pending;
     }
 
     private void answer(PendingToolCall pending, String resultText) {

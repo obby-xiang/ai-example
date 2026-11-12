@@ -209,6 +209,53 @@ class NewTaskSetConditionDeliveryTest {
 			.isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.ALLOW);
 	}
 
+	@Test
+	void changedThenRestoredBatchIsDispatchedAgainBeforeConfirm() throws Exception {
+		SpToolCallingManager manager = manager();
+		String[] pageCondition = { null };
+		parkAndSettle(manager, "call-a-first", conditionArgs("A"), "A first", () -> pageCondition[0] = "A");
+		parkAndSettle(manager, "call-b-second", conditionArgs("B"), "B second", () -> pageCondition[0] = "B");
+		assertThat(this.store.archivedTypes(RUN_ID).stream()
+			.filter("frontend_tool_request"::equals)).hasSize(2);
+		assertThat(pageCondition[0]).isEqualTo("B");
+
+		parkAndSettle(manager, "call-a-third", conditionArgs("A"), "A third", () -> pageCondition[0] = "A");
+
+		assertThat(this.store.archivedTypes(RUN_ID).stream()
+			.filter("frontend_tool_request"::equals)).hasSize(3);
+		assertThat(pageCondition[0]).as("第三次 A 必须真实下发，confirm 前页面不得停留在 B").isEqualTo("A");
+		PendingToolCall confirm = new PendingToolCall();
+		confirm.setToolCallId("call-confirm-restored-a");
+		confirm.setName("confirm_step");
+		confirm.setKind(PendingToolCall.KIND_FRONTEND);
+		confirm.setArguments("{}");
+		assertThat(this.conditionsForm.inspectConfirmStep(RUN_ID, context(), confirm,
+				List.of(new UserMessage("恢复 A 后推进"))).outcome())
+			.isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.ALLOW);
+	}
+
+	private String conditionArgs(String scope) throws Exception {
+		var root = this.mapper.createObjectNode();
+		var item = root.putArray("items").addObject();
+		item.put("defCode", "CURRENCY");
+		item.putObject("conditions").putArray("scopeKeys").add(scope);
+		return this.mapper.writeValueAsString(root);
+	}
+
+	private void parkAndSettle(SpToolCallingManager manager, String callId, String arguments, String receipt,
+			Runnable pageUpdate) {
+		assertThatThrownBy(() -> manager.executeToolCalls(prompt(), response(callId, arguments)))
+			.isInstanceOf(RunParkedException.class);
+		PendingToolCall delivered = this.store.pending(RUN_ID, callId);
+		assertThat(delivered.getStatus()).isEqualTo(PendingToolCall.PENDING);
+		ConfirmGate.Submission submission = this.confirmGate.submitFrontendResult(RUN_ID, callId,
+				receipt, "test", false, ToolOutcome.OK.wire(), Map.of(), null);
+		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+		PendingToolCall settled = this.store.pending(RUN_ID, callId);
+		assertThat(manager.resolvePending(RUN_ID, prompt(), settled)).isEqualTo(receipt);
+		pageUpdate.run();
+	}
+
 	private String batchArgs(List<String> defCodes) throws Exception {
 		var root = this.mapper.createObjectNode();
 		var items = root.putArray("items");
@@ -226,8 +273,12 @@ class NewTaskSetConditionDeliveryTest {
 	}
 
 	private static ChatResponse response(String arguments) {
+		return response(CALL_ID, arguments);
+	}
+
+	private static ChatResponse response(String callId, String arguments) {
 		AssistantMessage assistant = AssistantMessage.builder()
-			.toolCalls(List.of(new AssistantMessage.ToolCall(CALL_ID, "function", "set_conditions", arguments)))
+			.toolCalls(List.of(new AssistantMessage.ToolCall(callId, "function", "set_conditions", arguments)))
 			.build();
 		return new ChatResponse(List.of(new Generation(assistant)));
 	}

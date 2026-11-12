@@ -1017,7 +1017,7 @@ public class ConditionsForm extends HostForm {
         return items != null && items.stream().anyMatch(item -> defCode.equals(item.defCode()));
     }
 
-    /** 只有同一 run/task 且完整有序 items 相同的成功批量才复用原回执。 */
+    /** 只有同一 run/task、每个目标 def 的最新修改都是同一成功批量且完整有序 items 相同时才复用。 */
     public String settledSetConditionReplay(String runId, AiContext context, String argumentsJson) {
         if (runId == null || context == null || context.getTaskId() == null || argumentsJson == null) {
             return null;
@@ -1037,28 +1037,36 @@ public class ConditionsForm extends HostForm {
             return null;
         }
         try {
-            return findSettledReplay(runId, ObjectUtils.defaultIfNull(task.getId(), 0L), parseJson(argumentsJson),
-                    this.store.pendingsLenient(runId));
+            return findSettledReplay(runId, ObjectUtils.defaultIfNull(task.getId(), 0L), requestedDefCodes,
+                    parseJson(argumentsJson), this.store.pendingsLenient(runId));
         } catch (RuntimeException ex) {
             return null;
         }
     }
 
-    private static String findSettledReplay(String runId, long taskId, JsonNode arguments,
+    private static String findSettledReplay(String runId, long taskId, List<String> defCodes, JsonNode arguments,
                                             List<PendingToolCall> pendings) {
-        for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
-            if (pending == null || !AiToolNames.SET_CONDITIONS.equals(pending.getName())
-                    || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
-                    || !PendingToolCall.FRONTEND_RESULT.equals(pending.getStatus())
-                    || pending.effectiveOutcome() != ToolOutcome.OK
-                    || !isBoundDraft(pending, runId, taskId)) {
-                continue;
+        PendingToolCall replay = null;
+        for (String defCode : defCodes) {
+            DraftSelection selection = latestDraftForDef(pendings, runId, taskId, defCode);
+            PendingToolCall candidate = selection.pending();
+            if (selection.ambiguous() || !isSuccessfulReplay(candidate, runId, taskId, arguments)
+                    || replay != null && !StringUtils.equals(replay.getToolCallId(), candidate.getToolCallId())) {
+                return null;
             }
-            if (arguments.equals(parseJson(pending.getArguments()))) {
-                return StringUtils.defaultString(pending.getResultText());
-            }
+            replay = candidate;
         }
-        return null;
+        return replay == null ? null : StringUtils.defaultString(replay.getResultText());
+    }
+
+    private static boolean isSuccessfulReplay(PendingToolCall candidate, String runId, long taskId,
+                                              JsonNode arguments) {
+        return candidate != null && AiToolNames.SET_CONDITIONS.equals(candidate.getName())
+                && PendingToolCall.KIND_FRONTEND.equals(candidate.getKind())
+                && PendingToolCall.FRONTEND_RESULT.equals(candidate.getStatus())
+                && candidate.effectiveOutcome() == ToolOutcome.OK
+                && isBoundDraft(candidate, runId, taskId)
+                && arguments.equals(parseJson(candidate.getArguments()));
     }
 
     /** 完整批量参数签名：对象键规范排序，items 数组顺序保持不变。 */
