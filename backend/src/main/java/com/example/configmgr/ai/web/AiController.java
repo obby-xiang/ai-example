@@ -51,6 +51,7 @@ import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.SheetSwitches;
+import com.example.configmgr.ai.tool.SheetWriteGuard;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultUserText;
 import com.example.configmgr.ai.tool.TruncationContract;
@@ -1029,7 +1030,8 @@ public class AiController {
         int callbackMaxChars = this.properties.getResultBudget().getCallback().getMaxChars();
         String result = request.result();
         int originalChars = result == null ? 0 : result.length();
-        if (!cancelled && result != null && originalChars > callbackMaxChars && isStructuredOversize(entry, result)) {
+        if (result != null && originalChars > callbackMaxChars && isStructuredOversize(entry, result)
+                && (!cancelled || SheetWriteGuard.SUPPORTED.contains(entry.getName()))) {
             deny(HttpStatus.BAD_REQUEST, ErrorCodes.FRONTEND_RESULT_TOO_LARGE, null, request.runId(),
                     "chars", originalChars, "limit", callbackMaxChars, "name", entry.getName(), "kind", entry.getKind());
             log.info("structured frontend result oversized; rejected without persisting runId={} toolCallId={} tool={} chars={} limit={}",
@@ -3122,7 +3124,7 @@ public class AiController {
         body.put("code", ErrorCodes.FRONTEND_RESULT_TOO_LARGE);
         body.put("message", localize(ErrorCodes.FRONTEND_RESULT_TOO_LARGE,
                 "结构化结果 " + originalChars + " 字符，超过回灌上限 " + limit
-                        + " 字符；后端不做截断（截断会切坏 JSON / 表格尾行），请在客户端缩小结果后重试"));
+                        + " 字符；后端不做截断（完整 JSON 不可截断），请在客户端缩小结果后重试"));
         body.put("runId", runId);
         body.put("toolCallId", toolCallId);
         body.put("name", pending.getName());

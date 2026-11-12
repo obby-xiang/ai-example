@@ -33,6 +33,16 @@ class SheetWriteGuardTest {
     }
 
     @Test
+    void rejectsArgumentsWhenToolNameIsMissingInsteadOfGuessingReplaceValues() {
+        String args = """
+                {"defCode":"CURRENCY","scope":"sheet","columnCodes":["status"],"search":"停用","replace":"禁用"}
+                """;
+        SheetWriteGuard.Verdict verdict = guard.inspectArguments(args);
+        assertThat(verdict.accepted()).isFalse();
+        assertThat(verdict.code()).isEqualTo("FRONTEND_TOOL_NAME_REQUIRED");
+    }
+
+    @Test
     void rejectsUnknownPredicateOperator() {
         String args = """
                 {"defCode":"CURRENCY","scope":"sheet","columnCodes":["status"],"search":"a","replace":"b",
@@ -118,12 +128,250 @@ class SheetWriteGuardTest {
     }
 
     @Test
-    void inspectResultRequiresTheCountTailOnSuccess() {
-        assertThat(guard.inspectResult("{}", "已应用（用户已确认）：改动 2 格").accepted()).isFalse();
-        assertThat(guard.inspectResult("{}", "已应用（用户已确认）：改动 2 格\n共 2 格").accepted()).isTrue();
-        assertThat(guard.inspectResult("{}", "用户取消了本次修改，未改动任何单元格。").accepted()).isTrue();
-        assertThat(guard.inspectResult("{}", "表格在预览期间已变动，本次未应用任何改动。").accepted()).isTrue();
+    void inspectResultRejectsAppliedCellCountMismatch() {
+        String result = """
+                {"kind":"applied","text":"已应用（用户已确认）：改动 1 格\\n共 1 格",
+                 "cells":1,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        SheetWriteGuard.Verdict verdict = inspectOk(result);
+        assertThat(verdict.accepted()).isFalse();
+        assertThat(String.join("\n", verdict.reasons())).contains("cells").contains("计划数量");
+    }
+
+    @Test
+    void inspectResultRejectsAppliedRowCountMismatch() {
+        String result = """
+                {"kind":"applied","text":"已应用（用户已确认）：改动 2 格\\n共 2 格",
+                 "cells":2,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        SheetWriteGuard.Verdict verdict = inspectOk(result);
+        assertThat(verdict.accepted()).isFalse();
+        assertThat(String.join("\n", verdict.reasons())).contains("rows").contains("计划数量");
+    }
+
+    @Test
+    void inspectResultRejectsMissingCells() {
+        String result = """
+                {"kind":"applied","text":"已完成","rows":2,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsMissingRows() {
+        String result = """
+                {"kind":"applied","text":"已完成","cells":2,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsNonNumericCells() {
+        String result = """
+                {"kind":"applied","text":"已完成","cells":"2","rows":2,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsNegativeRows() {
+        String result = """
+                {"kind":"applied","text":"已完成","cells":2,"rows":-1,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsFractionalPlanCells() {
+        String result = """
+                {"kind":"applied","text":"已完成","cells":2,"rows":2,"plan":{"cells":2.5,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsMissingKind() {
+        String result = """
+                {"text":"已完成","cells":2,"rows":2,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsUnknownKind() {
+        String result = """
+                {"kind":"success","text":"已完成","cells":2,"rows":2,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsMissingPlanCounts() {
+        String result = """
+                {"kind":"applied","text":"已完成","cells":2,"rows":2,"plan":{}}
+                """;
+        assertThat(inspectOk(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsLegacySuccessTextEvenWithCountTail() {
+        assertThat(guard.inspectResult("{}", "写入完成：改动 2 格\\n共 2 格").accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultAcceptsAppliedReceiptWithoutDependingOnItsText() {
+        String result = """
+                {"kind":"applied","text":"Completed with wording independent of business logic",
+                 "cells":2,"rows":2,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectOk(result).accepted()).isTrue();
+    }
+
+    @Test
+    void inspectResultAcceptsNormalReplaceValuesReceipt() {
+        String args = """
+                {"defCode":"CURRENCY","scope":"sheet","columnCodes":["status"],"search":"停用","replace":"禁用"}
+                """;
+        assertThat(inspectOk(args, appliedReceipt()).accepted()).isTrue();
+    }
+
+    @Test
+    void inspectResultAcceptsNormalUpdateRowsReceipt() {
+        String args = """
+                {"defCode":"CURRENCY","scope":"sheet","set":[{"columnCode":"status","mode":"literal","value":"禁用"}]}
+                """;
+        assertThat(inspectOk(args, appliedReceipt()).accepted()).isTrue();
+    }
+
+    @Test
+    void inspectResultAcceptsNormalNormalizeColumnReceipt() {
+        String args = """
+                {"defCode":"CURRENCY","scope":"sheet","columnCodes":["code"],"rules":["trim"],"commit":true}
+                """;
+        assertThat(inspectOk(args, appliedReceipt()).accepted()).isTrue();
+    }
+
+    @Test
+    void inspectResultAcceptsNormalUndoReceipt() {
+        String args = "{\"defCode\":\"CURRENCY\"}";
+        assertThat(inspectOk(args, appliedReceipt()).accepted()).isTrue();
+    }
+
+    @Test
+    void inspectResultAcceptsFailedReceiptWithActualCounts() {
+        String result = """
+                {"kind":"failed","text":"写入中途失败","cells":1,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isTrue();
+    }
+
+    @Test
+    void inspectResultAcceptsNormalizeSuggestionText() {
+        String args = """
+                {"defCode":"CURRENCY","scope":"sheet","columnCodes":["code"],"rules":["trim"],"commit":false}
+                """;
+        assertThat(guard.inspectResult(args, "归一化建议（未做任何修改）\n共 1 格").accepted()).isTrue();
+    }
+
+    @Test
+    void inspectResultRejectsPlainTextWhenArgumentsAlsoContainReplaceFields() {
+        String args = """
+                {"defCode":"CURRENCY","scope":"sheet","columnCodes":["code"],"search":"a","replace":"b",
+                 "rules":["trim"],"commit":false}
+                """;
+        assertThat(guard.inspectResult(args, "已应用：改动 1 格\n共 1 格").accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsFailedCountsAbovePlan() {
+        String result = """
+                {"kind":"failed","text":"部分写入","cells":3,"rows":2,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsCancelledWithNonzeroActualCounts() {
+        String result = """
+                {"kind":"cancelled","text":"用户取消","cells":1,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectCancelled(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsActualRowsAboveActualCells() {
+        String result = """
+                {"kind":"failed","text":"部分写入","cells":1,"rows":2,"plan":{"cells":3,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsZeroCellsWithNonzeroRows() {
+        String result = """
+                {"kind":"failed","text":"部分写入","cells":0,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsPlanRowsAbovePlanCells() {
+        String result = """
+                {"kind":"failed","text":"部分写入","cells":1,"rows":1,"plan":{"cells":1,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsMissingText() {
+        String result = """
+                {"kind":"failed","cells":1,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsNonStringText() {
+        String result = """
+                {"kind":"failed","text":3,"cells":1,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsBlankText() {
+        String result = """
+                {"kind":"failed","text":"  ","cells":1,"rows":1,"plan":{"cells":2,"rows":2}}
+                """;
+        assertThat(inspectFailed(result).accepted()).isFalse();
+    }
+
+    @Test
+    void inspectResultRejectsEmptyResult() {
         assertThat(guard.inspectResult("{}", "").accepted()).isFalse();
+    }
+
+    private SheetWriteGuard.Verdict inspectOk(String result) {
+        return inspectOk("{}", result);
+    }
+
+    private SheetWriteGuard.Verdict inspectOk(String arguments, String result) {
+        return this.guard.inspectResult("run", "call", arguments, result, "ok", false);
+    }
+
+    private SheetWriteGuard.Verdict inspectFailed(String result) {
+        return this.guard.inspectResult("run", "call", "{}", result, "failed", false);
+    }
+
+    private SheetWriteGuard.Verdict inspectCancelled(String result) {
+        return this.guard.inspectResult("run", "call", "{}", result, null, true);
+    }
+
+    private static String appliedReceipt() {
+        return """
+                {"kind":"applied","text":"已应用（用户已确认）：改动 2 格\\n共 2 格",
+                 "cells":2,"rows":2,"plan":{"cells":2,"rows":2}}
+                """;
     }
 
 }

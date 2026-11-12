@@ -114,7 +114,7 @@ import {
   type ToolOutcome,
   type TruncationNoticeCode
 } from '@/types/sse'
-import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryCompactionEvent, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type AuthoritativeTerminalFacts, type ChatMessage, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
+import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryCompactionEvent, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type AuthoritativeTerminalFacts, type ChatMessage, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type SheetWriteResult, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
 import { FORM_DRAFT_PREFIX, clearFormDraft, flushFormDraft, loadFormDraft, pruneFormDrafts, scheduleFormDraft } from '@/utils/form-draft'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
@@ -385,6 +385,11 @@ function endPreviewDecision(plan: SheetWritePlan): void {
 
 const SHEET_WRITE_PHASE_CANCELLED = '表格操作已停止或已超时，本次未返回部分计算结果。'
 const sheetWriteLifetimes = new Set<SheetToolLifetime>()
+
+function sheetWriteFailureText(text: string): string {
+  const receipt: SheetWriteResult = { kind: 'failed', text, cells: 0, rows: 0, plan: { cells: 0, rows: 0 } }
+  return JSON.stringify(receipt)
+}
 
 type SheetWritePhaseResult<T> = { settled: true; value: T } | { settled: false }
 
@@ -10229,7 +10234,8 @@ export const useAiStore = defineStore('ai', {
       runId?: string,
       outcome?: ToolOutcome,
       sheetMeta?: SheetToolMeta,
-      code?: string
+      code?: string,
+      preserveResultOnCancel = false
     ): Promise<{
       ok: boolean
       duplicate?: boolean
@@ -10279,7 +10285,13 @@ export const useAiStore = defineStore('ai', {
       try {
         await aiApi.frontendToolResult(
           cancelled
-            ? { runId: targetRunId, toolCallId, cancelled: true, source }
+            ? {
+                runId: targetRunId,
+                toolCallId,
+                cancelled: true,
+                source,
+                ...(preserveResultOnCancel ? { result } : {})
+              }
             // 治理 P0-1：仅执行器路径带 outcome（旧形态逐字保留，不产 undefined 键）
             : {
                 runId: targetRunId,
@@ -10725,7 +10737,9 @@ export const useAiStore = defineStore('ai', {
         // C1（R1 返修）：**先提交后收口** —— 成功路径靠 `parkedAtDecision = this.suspended` 走既有
         // 「决策后带 lastSeq 重连」；先清 suspended 会把续流判据打成 false（后续帧永远到不了）。
         // 只有回灌失败（决策没送达）才收口这张卡的挂起语义。
-        const outcome = await this.submitFrontendToolResult(toolCallId, reason, 'frontend-executor', false, runId, 'failed')
+        const outcome = await this.submitFrontendToolResult(
+          toolCallId, sheetWriteFailureText(reason), 'frontend-executor', false, runId, 'failed'
+        )
         if (!outcome.ok) {
           this.clearSuspendedIfNoOtherConfirms(toolCallId)
         }
@@ -11275,6 +11289,8 @@ export const useAiStore = defineStore('ai', {
       status: ToolRunStatus
       result: string
       cancelled?: boolean
+      /** 实际写入数与执行计划；规划前失败没有 plan，计数按 0 如实上报。 */
+      sheetWrite?: { plan?: SheetWritePlan; cells?: number; rows?: number }
       /** 采样元数据（治理批 §4.2）：写侧只报 planId / 预览档 / 样例对数，不报任何单元格值 */
       sheetMeta?: SheetToolMeta
     }): Promise<void> {
@@ -11299,14 +11315,26 @@ export const useAiStore = defineStore('ai', {
       const outcome: ToolOutcome | undefined = input.cancelled === true
         ? undefined
         : input.status === 'succeeded' ? 'ok' : 'failed'
+      const receipt: SheetWriteResult = {
+        kind: input.cancelled === true ? 'cancelled' : input.status === 'succeeded' ? 'applied' : 'failed',
+        text: input.result,
+        cells: input.sheetWrite?.cells ?? 0,
+        rows: input.sheetWrite?.rows ?? 0,
+        plan: {
+          cells: input.sheetWrite?.plan?.cellsCount ?? 0,
+          rows: input.sheetWrite?.plan?.rowsCount ?? 0
+        }
+      }
       await this.submitFrontendToolResult(
         input.toolCallId,
-        input.result,
+        JSON.stringify(receipt),
         'frontend-executor',
         input.cancelled === true,
         input.runId,
         outcome,
-        input.sheetMeta
+        input.sheetMeta,
+        undefined,
+        true
       )
     },
 
@@ -11355,7 +11383,8 @@ export const useAiStore = defineStore('ai', {
             name: plan.tool,
             runId: plan.runId,
             status: 'failed',
-            result: resolved.reason
+            result: resolved.reason,
+            sheetWrite: { plan }
           })
           return
         }
@@ -11381,7 +11410,8 @@ export const useAiStore = defineStore('ai', {
               name: plan.tool,
               runId: plan.runId,
               status: 'failed',
-              result: materialized.reason
+              result: materialized.reason,
+              sheetWrite: { plan }
             })
             return
           }
@@ -11415,7 +11445,8 @@ export const useAiStore = defineStore('ai', {
             name: applied.tool,
             runId: applied.runId,
             status: 'failed',
-            result: SHEET_WRITE_PHASE_CANCELLED
+            result: SHEET_WRITE_PHASE_CANCELLED,
+            sheetWrite: { plan: applied }
           })
           return
         }
@@ -11426,7 +11457,12 @@ export const useAiStore = defineStore('ai', {
             name: applied.tool,
             runId: applied.runId,
             status: 'failed',
-            result: outcome.reason
+            result: outcome.reason,
+            sheetWrite: {
+              plan: applied,
+              cells: outcome.appliedCells ?? 0,
+              rows: outcome.appliedRows ?? 0
+            }
           })
           return
         }
@@ -11436,6 +11472,7 @@ export const useAiStore = defineStore('ai', {
           runId: applied.runId,
           status: 'succeeded',
           result: outcome.text,
+          sheetWrite: { plan: applied, cells: outcome.cells, rows: outcome.rows },
           // 写侧元数据（§4.2 planId / previewLevel）：样例对数是"回灌了几处业务值"的度量，
           // >0 即 D2 —— 写路径本来就是 D2 通道（§0 结论 2）
           sheetMeta: {
@@ -11485,7 +11522,8 @@ export const useAiStore = defineStore('ai', {
           runId: plan.runId,
           status: 'cancelled',
           result: planCancelledText(),
-          cancelled: true
+          cancelled: true,
+          sheetWrite: { plan }
         })
       } finally {
         endPreviewDecision(plan)
@@ -11601,6 +11639,7 @@ export const useAiStore = defineStore('ai', {
       if (!id) {
         return
       }
+      const abandonedPlan = this.activePreview?.toolCallId === id ? this.activePreview : undefined
       if (this.stalePreviewToolCallId === id) {
         this.stalePreviewToolCallId = null
       }
@@ -11621,7 +11660,8 @@ export const useAiStore = defineStore('ai', {
         runId: this.activeRunId ?? undefined,
         status: 'cancelled',
         result: '预览已失效（页面刷新或已被新的表格操作取代），已放弃本次调用，未改动任何单元格。请让 AI 重新发起。',
-        cancelled: true
+        cancelled: true,
+        sheetWrite: { plan: abandonedPlan }
       })
     },
 
@@ -14737,9 +14777,12 @@ export const useAiStore = defineStore('ai', {
       frame: Extract<SseFrame, { type: 'frontend_tool_request' }>,
       round: RoundGuard
     ): Promise<boolean> {
+      const result = needsSheetPreview(frame.name, parseToolArgs(frame.args))
+        ? sheetWriteFailureText(UNCERTAIN_RECOVERY_TEXT)
+        : UNCERTAIN_RECOVERY_TEXT
       const submitted = await this.submitFrontendToolResult(
         frame.toolCallId,
-        UNCERTAIN_RECOVERY_TEXT,
+        result,
         'frontend-executor',
         false,
         frame.runId ?? this.activeRunId ?? undefined,

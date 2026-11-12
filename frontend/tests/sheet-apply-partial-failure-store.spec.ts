@@ -137,4 +137,46 @@ describe('R1 应用中途异常的回执', () => {
     // 只回灌一次（不是"失败+成功"两条）
     expect(api.frontendToolResult).toHaveBeenCalledTimes(1)
   })
+
+  it('适配器静默少写：store 必须提交 failed + 实际/计划计数，不得 applied + ok', async () => {
+    const original = sheet.ctx.adapter.writeCells.bind(sheet.ctx.adapter)
+    let dropped = false
+    sheet.ctx.adapter.writeCells = (updates) => {
+      if (dropped) return { applied: [...updates] }
+      dropped = true
+      const head = updates.slice(1)
+      original(head)
+      return { applied: [...head] }
+    }
+
+    const store = useAiStore()
+    store.handleFrame({ type: 'start', runId: 'run-1', sessionId: store.sessionId, seq: 1 })
+    const message: ChatMessage = store.appendAssistantMessage()
+    const frame: Extract<SseFrame, { type: 'frontend_tool_request' }> = {
+      type: 'frontend_tool_request',
+      toolCallId: 't1',
+      name: 'replace_values',
+      args: JSON.stringify(args),
+      runId: 'run-1',
+      seq: 2
+    }
+    applyFrameToParts(message, frame)
+    await store.openWritePreview(message, frame)
+    await store.confirmWritePreview(true)
+
+    const call = api.frontendToolResult.mock.calls.at(-1)?.[0] as { result: string; outcome: string }
+    const receipt = JSON.parse(call.result) as {
+      kind: string
+      cells: number
+      rows: number
+      plan: { cells: number; rows: number }
+    }
+    expect(call.outcome).toBe('failed')
+    expect(receipt).toMatchObject({
+      kind: 'failed',
+      cells: SHEET_WRITE_CHUNK_ROWS + 49,
+      rows: SHEET_WRITE_CHUNK_ROWS + 49,
+      plan: { cells: SHEET_WRITE_CHUNK_ROWS + 50, rows: SHEET_WRITE_CHUNK_ROWS + 50 }
+    })
+  })
 })

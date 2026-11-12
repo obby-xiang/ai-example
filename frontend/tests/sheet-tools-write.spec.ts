@@ -134,11 +134,18 @@ describe('T-12/T-13 应用与取消', () => {
     await store.confirmWritePreview()
     expect(sheet.ctx.adapter.getCell(1, 2)).toBe('禁用')
     expect(sheet.writes.length).toBeGreaterThan(0)
-    const result = lastSubmittedResult()
-    expect(result).toContain('已应用')
-    expect(result).toContain('用户已确认')
-    expect(result).toContain('未保存')
-    expect(result).toContain('共 2 格')
+    const receipt = JSON.parse(lastSubmittedResult()) as {
+      kind: string
+      text: string
+      cells: number
+      rows: number
+      plan: { cells: number; rows: number }
+    }
+    expect(receipt).toMatchObject({ kind: 'applied', cells: 2, rows: 2, plan: { cells: 2, rows: 2 } })
+    expect(receipt.text).toContain('已应用')
+    expect(receipt.text).toContain('用户已确认')
+    expect(receipt.text).toContain('未保存')
+    expect(receipt.text).toContain('共 2 格')
   })
 
   it('T-13：点“取消”⇒ 零写 + cancelled=true + “未改动任何单元格”', async () => {
@@ -154,10 +161,17 @@ describe('T-12/T-13 应用与取消', () => {
     await store.cancelWritePreview()
     expect(sheet.writes).toHaveLength(0)
     expect(api.frontendToolResult).toHaveBeenCalledWith(
-      expect.objectContaining({ cancelled: true }),
+      expect.objectContaining({ cancelled: true, result: expect.any(String) }),
       expect.objectContaining({ headers: expect.any(Object) })
     )
-    // 取消路径沿用既有 `cancelled=true`（回灌体不新增 result 字段）—— “未改动”落在工具段上供卡面展示。
+    const call = api.frontendToolResult.mock.calls.at(-1)?.[0] as { result: string }
+    const receipt = JSON.parse(call.result) as {
+      kind: string
+      cells: number
+      rows: number
+      plan: { cells: number; rows: number }
+    }
+    expect(receipt).toMatchObject({ kind: 'cancelled', cells: 0, rows: 0, plan: { cells: 2, rows: 2 } })
     const part = store.messages
       .flatMap((item) => item.parts)
       .find((item) => item.kind === 'tool' && item.toolCallId === 't1')
@@ -265,8 +279,15 @@ describe('T-15/T-24/T-25/T-26/T-29/T-31/T-32 参数与守卫', () => {
     })
     await store.openWritePreview(message, frame)
     expect(store.activePreview).toBeNull()
-    expect(lastSubmittedResult()).toContain('正则')
-    expect(lastSubmittedResult()).not.toContain('{')
+    const receipt = JSON.parse(lastSubmittedResult()) as {
+      kind: string
+      text: string
+      cells: number
+      rows: number
+      plan: { cells: number; rows: number }
+    }
+    expect(receipt).toMatchObject({ kind: 'failed', cells: 0, rows: 0, plan: { cells: 0, rows: 0 } })
+    expect(receipt.text).toContain('正则')
   })
 
   it('T-29：fillDown ⇒ 卡面补值警示', async () => {
@@ -346,5 +367,74 @@ describe('T-16 撤销：反向补丁逐层回退（必须经预览卡确认）',
     await store.openWritePreview(again.message, again.frame)
     expect(store.activePreview).toBeNull()
     expect(lastSubmittedResult()).toContain('没有可撤销的 AI 修改')
+  })
+})
+
+describe('已知计划的失败与取消必须保留计划计数', () => {
+  it('应用前上下文解析失败 ⇒ failed 回执仍携带原 plan', async () => {
+    const store = useAiStore()
+    const { message, frame } = armWrite(store, 'replace_values', {
+      defCode: 'DEMO',
+      scope: 'sheet',
+      columnCodes: ['status'],
+      search: '停用',
+      replace: '禁用'
+    })
+    await store.openWritePreview(message, frame)
+    registerPageHandler('sheet.current', () => ({ ok: false, reason: '表格上下文不可用' }))
+    await store.confirmWritePreview()
+
+    const receipt = JSON.parse(lastSubmittedResult()) as {
+      kind: string
+      plan: { cells: number; rows: number }
+    }
+    expect(receipt).toMatchObject({ kind: 'failed', plan: { cells: 2, rows: 2 } })
+  })
+
+  it('计数档明细物化失败 ⇒ failed 回执仍携带原 plan', async () => {
+    const store = useAiStore()
+    const { message, frame } = armWrite(store, 'replace_values', {
+      defCode: 'DEMO',
+      scope: 'sheet',
+      columnCodes: ['status'],
+      search: '停用',
+      replace: '禁用',
+      preview: 'count'
+    })
+    await store.openWritePreview(message, frame)
+    sheet.ctx.adapter.getArray = () => {
+      throw new Error('读取明细失败')
+    }
+    await store.confirmWritePreview()
+
+    const receipt = JSON.parse(lastSubmittedResult()) as {
+      kind: string
+      plan: { cells: number; rows: number }
+    }
+    expect(receipt).toMatchObject({ kind: 'failed', plan: { cells: 2, rows: 2 } })
+  })
+
+  it('活动计划执行 abandonStalePreview ⇒ cancelled 回执仍携带原 plan', async () => {
+    const store = useAiStore()
+    const { message, frame } = armWrite(store, 'replace_values', {
+      defCode: 'DEMO',
+      scope: 'sheet',
+      columnCodes: ['status'],
+      search: '停用',
+      replace: '禁用'
+    })
+    await store.openWritePreview(message, frame)
+    await store.abandonStalePreview('t1')
+
+    const call = api.frontendToolResult.mock.calls.at(-1)?.[0] as { result: string; cancelled: boolean }
+    const receipt = JSON.parse(call.result) as {
+      kind: string
+      cells: number
+      rows: number
+      plan: { cells: number; rows: number }
+    }
+    expect(call.cancelled).toBe(true)
+    expect(receipt).toMatchObject({ kind: 'cancelled', cells: 0, rows: 0, plan: { cells: 2, rows: 2 } })
+    expect(store.activePreview).toBeNull()
   })
 })

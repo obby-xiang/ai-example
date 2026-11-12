@@ -868,6 +868,15 @@ export interface SheetWritePlan {
   runId?: string
 }
 
+/** 表格写回执：业务语义只取 kind 与计数，text 仅供卡片和模型阅读。 */
+export interface SheetWriteResult {
+  kind: 'applied' | 'failed' | 'cancelled'
+  text: string
+  cells: number
+  rows: number
+  plan: { cells: number; rows: number }
+}
+
 /**
  * 压缩事件段（B3）：消息 parts 时序里的全宽流程分隔行 `已压缩上下文`。
  *

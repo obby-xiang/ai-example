@@ -54,7 +54,10 @@ public interface FrontendToolGuard {
 	 *                      尚未反序列化 —— 校验必须看原文，否则"被静默忽略的未知属性"无从发现）
 	 * @return 判定结果；{@code accepted=false} 时调用方不挂起、不回灌，只把结论回填模型
 	 */
-	Verdict inspectArguments(String argumentsJson);
+	default Verdict inspectArguments(String argumentsJson) {
+		return Verdict.reject("FRONTEND_TOOL_NAME_REQUIRED", "缺少工具名，拒绝按入参形状推断工具。",
+				List.of("必须显式传入工具名。"));
+	}
 
 	/**
 	 * 下发前的入参复核（带<b>工具名</b>，工具安全边界批）。
@@ -110,6 +113,17 @@ public interface FrontendToolGuard {
 	}
 
 	/**
+	 * 带结局与取消事实的结果复核。其他工具的既有取消路径默认放行；需要结构化取消的工具自行覆写。
+	 */
+	default Verdict inspectResult(String runId, String toolCallId, String argumentsJson, String resultJson,
+			String outcome, boolean cancelled) {
+		if (cancelled) {
+			return Verdict.accept();
+		}
+		return inspectResult(runId, toolCallId, argumentsJson, resultJson);
+	}
+
+	/**
 	 * 决策<b>已落库</b>之后的副作用口（校验与消费分离批）。
 	 *
 	 * <p>为什么必须有这个口：{@link #inspectResult} 发生在"抢决策 guard / 落库"<b>之前</b>，
@@ -162,8 +176,8 @@ public interface FrontendToolGuard {
 	 * "截断 + 标记"还是"400 拒绝"。两类判据任一为真即结构化：
 	 * <ol>
 	 * <li><b>结果契约就是结构化文本的工具</b>（{@link SheetWriteGuard#SUPPORTED 表格写四件}）：
-	 * 它们的回灌是"已应用…\n共 N 格"这种<b>带尾行的文本</b>，头部截断会切掉尾行；
-	 * 随后的结果复核只会报"缺共 N 尾行"，把"结果太大"误诊成"格式不对"；</li>
+	 * 它们的写回执是带 kind、实际计数与计划计数的 JSON，字符级截断会破坏完整结构；
+	 * 随后的结果复核只能报"格式不对"，把"结果太大"误诊成协议错误；</li>
 	 * <li><b>明确的 JSON 形状</b>（能解析成对象/数组）：生成式表单的填写值以及任何以 JSON 回灌的
 	 * 前端工具都在此列 —— 字符级截断必然产生坏 JSON。</li>
 	 * </ol>

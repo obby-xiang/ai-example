@@ -243,10 +243,12 @@ describe('R3 成功路径：被适配器忽略（越界/不可写）的更新不
 
     const outcome = applySheetPlan(sheet.ctx, plan.plan)
 
-    expect(outcome.ok).toBe(true)
-    if (!outcome.ok) return
-    expect(outcome.cells).toBe(2)
-    expect(outcome.text).toContain('改动 2 格')
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.appliedCells).toBe(2)
+    expect(outcome.appliedRows).toBe(2)
+    expect(outcome.reason).toContain('已写入 2 格 / 共 3 格')
+    expect(plan.plan.status).toBe('failed')
     expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(1)
     // 已应用色**真的**只画实际落笔的两格（不是同义反复的"计划里有几行"）
     expect(marks).toEqual([[
@@ -275,7 +277,7 @@ describe('R5 零落笔与部分落笔的行数口径（复审 I-A / M3）', () =
     expect(sheetUndoDepth(sheet.ctx.adapter)).toBe(0)
   })
 
-  it('部分落笔的成功回执按**实际行数**（不出现"2 格 / 3 行"）', () => {
+  it('部分落笔且无 error ⇒ failed，实际格/行数如实保留', () => {
     const sheet = bigSheet(3)
     const plan = planReplace(sheet.ctx, args, 't-partial-rows')
     if (!plan.ok) throw new Error(plan.reason)
@@ -288,10 +290,11 @@ describe('R5 零落笔与部分落笔的行数口径（复审 I-A / M3）', () =
 
     const outcome = applySheetPlan(sheet.ctx, plan.plan)
 
-    expect(outcome.ok).toBe(true)
-    if (!outcome.ok) return
-    expect(outcome.text).toContain('改动 2 格 / 2 行')
-    expect(outcome.text).not.toContain('2 格 / 3 行')
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.appliedCells).toBe(2)
+    expect(outcome.appliedRows).toBe(2)
+    expect(outcome.reason).toContain('已写入 2 格 / 共 3 格')
   })
 })
 

@@ -14,7 +14,8 @@ import {
   normalizeSuggestAsync as normalizeSuggest,
   planNormalize,
   readSheetSummaryAsync as readSheetSummary,
-  reviewCellsAsync as reviewCells
+  reviewCellsAsync as reviewCells,
+  reviewIssueFamily
 } from '@/utils/sheet-tools'
 import { field, makeFakeSheet } from './sheet-fixtures'
 
@@ -135,6 +136,23 @@ describe('T-08 本地校验摘要：按字段聚合 + 共 N 处', async () => {
     expect(result.text).toContain('按字段聚合')
     expect(result.text).toContain('共 7 处')
     expect(result.text).toContain('前 5 条')
+  })
+
+  it('主键重复按结构化 kind 聚合，重复文案变化不影响分类', async () => {
+    const sheet = makeFakeSheet({
+      fields: baseFields,
+      rows: [
+        { code: 'DUP', name: '甲' },
+        { code: 'DUP', name: '乙' },
+        { code: 'OTHER', name: '' }
+      ]
+    })
+    const result = await reviewCells(sheet.ctx, { defCode: 'DEMO', scope: 'sheet', limit: 20 })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.issues?.filter((issue) => issue.kind === 'duplicateKey')).toHaveLength(1)
+    expect(result.text).toContain('编码 主键重复 1 处')
+    expect(reviewIssueFamily({ kind: 'duplicateKey', reason: 'duplicate primary key' })).toBe('主键重复')
   })
 })
 

@@ -132,7 +132,7 @@ public final class ErrorCodes {
      *
      * <p>与 {@link #MESSAGE_TOO_LONG} 同一姿态（拒绝不截断），但拒绝面不同：普通文本回灌超限
      * 仍是<b>截断 + 标记</b>（拒绝回灌会让这一轮永久挂起），只有结构化结果（JSON 对象/数组、
-     * 表格写工具的结果文本）超限才走本码 —— 字符级截断会切坏 JSON 结构、切掉表格「共 N 格」尾行，
+     * 表格写工具的结果文本）超限才走本码 —— 字符级截断会破坏完整 JSON 结构，
      * 半截结果落库比"让客户端改小重试"危险得多。挂起保持 {@code PENDING}、不落任何条目。
      */
     public static final String FRONTEND_RESULT_TOO_LARGE = "FRONTEND_RESULT_TOO_LARGE";

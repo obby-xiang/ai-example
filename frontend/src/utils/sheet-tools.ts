@@ -186,7 +186,12 @@ export interface SheetContext {
   loadGeneration?: number
 }
 
-export type SheetToolOutcome = { ok: true; text: string; meta?: SheetToolMeta } | { ok: false; reason: string }
+export type SheetToolOutcome = {
+  ok: true
+  text: string
+  meta?: SheetToolMeta
+  issues?: ReturnType<typeof validateRows>
+} | { ok: false; reason: string }
 export type SheetPlanOutcome = { ok: true; plan: SheetWritePlan } | { ok: false; reason: string }
 
 /**
@@ -1705,6 +1710,10 @@ export function inspectColumns(ctx: SheetContext, args: SheetArgs): SheetToolOut
 
 // ── 读侧：本地校验摘要 ───────────────────────────────────────────────────────
 
+export function reviewIssueFamily(issue: Pick<ReturnType<typeof validateRows>[number], 'kind' | 'reason'>): string {
+  return issue.kind === 'duplicateKey' ? '主键重复' : issue.reason
+}
+
 function* reviewCellsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<SheetToolOutcome> {
   const defError = validateDefCode(ctx, args)
   if (defError) return { ok: false, reason: defError }
@@ -1739,6 +1748,7 @@ function* reviewCellsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<S
       const reason = validateCell(field, record[field.code])
       if (reason) {
         filtered.push({
+          kind: 'validation',
           rowIndex,
           fieldCode: field.code,
           fieldLabel: field.label,
@@ -1752,6 +1762,7 @@ function* reviewCellsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<S
       const first = firstKeyRows.get(keyText)
       if (keyText.replace(/\|/g, '').trim() !== '' && first !== undefined && first !== rowIndex) {
         filtered.push({
+          kind: 'duplicateKey',
           rowIndex,
           fieldCode: keyFields.map((field) => field.code).join('+'),
           fieldLabel: keyFields.map((field) => field.label).join('+'),
@@ -1766,7 +1777,7 @@ function* reviewCellsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<S
   const byField = new Map<string, number>()
   for (const issue of filtered) {
     const label = issue.fieldLabel || issue.fieldCode
-    const family = issue.reason.startsWith('主键重复') ? '主键重复' : issue.reason
+    const family = reviewIssueFamily(issue)
     const key = `${label} ${family}`
     byField.set(key, (byField.get(key) ?? 0) + 1)
   }
@@ -1786,6 +1797,7 @@ function* reviewCellsProgram(ctx: SheetContext, args: SheetArgs): SheetProgram<S
   return {
     ok: true,
     text: capped.text,
+    issues: filtered,
     meta: {
       ...readMeta(ctx, detail.length > 0 ? 'D2' : 'D1'),
       sampleRows: detail.length,
@@ -3190,12 +3202,12 @@ export function sheetAppliedSummary(ctx: SheetContext): SheetAppliedSummary | nu
 }
 
 export type ApplySheetPlanOutcome =
-  | { ok: true; text: string; cells: number }
+  | { ok: true; text: string; cells: number; rows: number }
   /**
-   * 失败。`appliedCells` / `undoable` 只在中途异常（已写入一部分）时出现：
-   * 实际写入格数 + 这部分是否已登记为可撤销（用户可回滚，不必猜"到底改了多少"）。
+   * 失败。`appliedCells` / `appliedRows` / `undoable` 只在中途异常（已写入一部分）时出现：
+   * 实际写入格/行数 + 这部分是否已登记为可撤销（用户可回滚，不必猜"到底改了多少"）。
    */
-  | { ok: false; reason: string; appliedCells?: number; undoable?: boolean }
+  | { ok: false; reason: string; appliedCells?: number; appliedRows?: number; undoable?: boolean }
 
 /**
  * 应用计划：先逐行复核指纹（任一不符 ⇒ 整批拒绝），再分块 `writeCells`，最后登记反向补丁。
@@ -3266,8 +3278,9 @@ function* applySheetPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetP
   // 复审 I-A：计划有格但**一格都没落**（适配器静默过滤）≠ 成功 —— 与计数档同口径，
   // 否则卡面 tag 成功、正文写"改动 0 格"，且计划被消费（同一张卡无法重试）。
   const nothingApplied = failure === null && plan.changes.length > 0 && appliedCells === 0
+  const incomplete = failure === null && appliedCells !== plan.changes.length
   // I-2：计划状态**先**落定，再做强收尾（撤销登记 / 上色是 best-effort，失败不得让回执消失）
-  plan.status = (failure !== null || nothingApplied) ? 'failed' : 'applied'
+  plan.status = (failure !== null || nothingApplied || incomplete) ? 'failed' : 'applied'
   const undoable = canRegisterUndoEntrySafe(ctx, plan, written)
   markAppliedCellsSafe(ctx, written)
   if (nothingApplied) {
@@ -3276,11 +3289,14 @@ function* applySheetPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetP
       reason: `本次没有任何一格写入表格：${plan.changes.length} 格全部被适配器判为越界/不可写（表格未产生改动）。`
         + '请核对表格列映射与行范围后重新发起。',
       appliedCells: 0,
+      appliedRows: 0,
       undoable: false
     }
   }
-  if (failure !== null) {
-    const reason = failure.error instanceof Error ? failure.error.message : String(failure.error)
+  if (failure !== null || incomplete) {
+    const reason = failure === null
+      ? '适配器未写入全部格'
+      : failure.error instanceof Error ? failure.error.message : String(failure.error)
     const total = plan.changes.length
     const remaining = total - appliedCells
     const undoNote = appliedCells > 0
@@ -3293,6 +3309,7 @@ function* applySheetPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetP
       reason: `写入中途失败：已写入 ${appliedCells} 格 / 共 ${total} 格，未写入的 ${remaining} 格保持原样（原因：${reason}）。`
         + `${undoNote}。请核对表格实际内容后再决定是否重新发起。`,
       appliedCells,
+      appliedRows: writtenRows,
       undoable
     }
   }
@@ -3301,7 +3318,8 @@ function* applySheetPlanProgram(ctx: SheetContext, plan: SheetWritePlan): SheetP
   return {
     ok: true,
     text: planAppliedText(plan, ctx, { cells: appliedCells, rows: writtenRows }),
-    cells: appliedCells
+    cells: appliedCells,
+    rows: writtenRows
   }
 }
 
@@ -3485,13 +3503,14 @@ function* undoLastSheetEditProgram(ctx: SheetContext): SheetProgram<ApplySheetPl
   if (readOnly) return { ok: false, reason: readOnly }
   const top = yield* undoTopProgram(ctx)
   if (!top.ok) {
-    return { ok: true, text: `${top.reason}\n共 0 格`, cells: 0 }
+    return { ok: true, text: `${top.reason}\n共 0 格`, cells: 0, rows: 0 }
   }
   if (top.conflicts > 0) {
     return {
       ok: true,
       text: `未撤销：这批改动之后有 ${top.conflicts} 格被你手动改过（撤掉会覆盖你的修改）。如需继续，请先手动改回或让 AI 重新发起。\n共 0 格`,
-      cells: 0
+      cells: 0,
+      rows: 0
     }
   }
   return yield* applyUndoEntryProgram(ctx, top.stack, top.entry)
@@ -3521,6 +3540,7 @@ function remainingUndoOutcome(
   entry: SheetUndoEntry,
   remaining: SheetChange[],
   totalCells: number,
+  appliedRows: number,
   failure: unknown
 ): ApplySheetPlanOutcome {
   const keyOf = (change: { row: number; col: number }): string => `${change.row}:${change.col}`
@@ -3539,6 +3559,7 @@ function remainingUndoOutcome(
     reason: `撤销未完成：已回写 ${revertedCells} 格 / 共 ${totalCells} 格，剩余 ${remaining.length} 格仍在撤销记录里`
       + `（plan #${entry.planId}，可再次撤销这 ${remaining.length} 格）${reasonNote}。`,
     appliedCells: revertedCells,
+    appliedRows,
     undoable: true
   }
 }
@@ -3576,7 +3597,10 @@ function* applyUndoEntryProgram(
   const appliedKeys = new Set(appliedUpdates.map(keyOf))
   const remaining = entry.changes.filter((change) => !appliedKeys.has(keyOf(change)))
   if (remaining.length > 0) {
-    return remainingUndoOutcome(entry, remaining, totalCells, failure)
+    const revertedRows = new Set(entry.changes
+      .filter((change) => appliedKeys.has(keyOf(change)))
+      .map((change) => change.row)).size
+    return remainingUndoOutcome(entry, remaining, totalCells, revertedRows, failure)
   }
   stack.pop()
   if (stack.length === 0) {
@@ -3588,7 +3612,8 @@ function* applyUndoEntryProgram(
   return {
     ok: true,
     text: `已撤销 ${entry.cellsCount} 格（plan #${entry.planId}，回到修改前值）。剩余可撤销 ${stack.length} 层。\n共 ${entry.cellsCount} 格`,
-    cells: entry.cellsCount
+    cells: entry.cellsCount,
+    rows: entry.rowsCount
   }
 }
 

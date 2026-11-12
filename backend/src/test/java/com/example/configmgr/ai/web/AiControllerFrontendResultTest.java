@@ -140,7 +140,7 @@ class AiControllerFrontendResultTest {
 	 * <p>理由：前端工具结果是机器数据（表格摘要本来就长），拒绝回灌会让这一轮永久挂起；
 	 * 而用户输入超限仍是 400（截断会让模型基于半句话下结论）—— 两个方向刻意不同。
 	 *
-	 * <p>结构化结果（JSON 对象/数组、表格写结果）是例外：截断会切坏 JSON 与表格尾行，
+	 * <p>结构化结果（JSON 对象/数组、表格写结果）是例外：完整 JSON 不可截断，
 	 * 故超限走 400 {@code FRONTEND_RESULT_TOO_LARGE}（见 {@code FrontendResultTooLargeTest}）。
 	 */
 	@Test

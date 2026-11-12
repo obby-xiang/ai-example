@@ -25,6 +25,7 @@ import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
+import com.example.configmgr.ai.tool.SheetWriteGuard;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorBodyFactory;
@@ -2174,16 +2175,22 @@ public class ConfirmGate {
         // 位置刻意在"幂等判定之后、取消分支之前"—— 取消分支也要它（写侧取消计数按 planId 走台账），
         // 而重复提交在上一行就已返回，故不会覆盖已落的值。
         applySheetMeta(pending, sheetMeta);
-        if (cancelled) {
-            return dismiss(runId, pending, source, sheetMeta);
-        }
-        FrontendToolGuard.Verdict verdict = inspectResult(runId, pending, result);
+        FrontendToolGuard.Verdict verdict = inspectResult(runId, pending, result, outcome, cancelled);
         if (verdict != null && !verdict.accepted()) {
             // 复核不过<b>不落 guard</b>：状态不变、挂起继续等待，用户修正后还能重试
             // （占了 guard 就再也没有"第二次机会"了 —— 一次不合法的提交不该把卡消费掉）。
             log.warn("frontend tool submission rejected by safety gate [contract=frontend tool submission rejected by safety gate] (state unchanged; park keeps waiting) runId={} toolCallId={} name={} code={} issueCodes={}", runId, toolCallId, pending.getName(), verdict.code(), verdict.issues().stream().map(i -> i.code()).toList());
             return new Submission(Outcome.REJECTED, pending, false, verdict);
         }
+        if (cancelled) {
+            return dismiss(runId, pending, source, sheetMeta, result);
+        }
+        return submitAcceptedFrontendResult(runId, toolCallId, pending, result, source, outcome, code, verdict);
+    }
+
+    private Submission submitAcceptedFrontendResult(String runId, String toolCallId, PendingToolCall pending,
+                                                     String result, String source, String outcome, String code,
+                                                     FrontendToolGuard.Verdict verdict) {
         pending.setStatus(PendingToolCall.FRONTEND_RESULT);
         ToolOutcome declared = ToolOutcome.fromWire(outcome);
         // 表单已经通过结构化复核并被本入口受理；空对象与留空提交同样是确定结果。
@@ -2208,12 +2215,11 @@ public class ConfirmGate {
         }
         pending.setResultText(resultText);
         pending.setResolvedAtMs(System.currentTimeMillis());
-        boolean woke;
         RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
         if (claim != null && !claim.won()) {
             return convergeOnDecided(runId, toolCallId, claim.recorded());
         }
-        woke = emitFrontendDecision(runId, toolCallId, pending, claim, ok, resultText);
+        boolean woke = emitFrontendDecision(runId, toolCallId, pending, claim, ok, resultText);
         // ===== park 结算：决策写胜者也是候选发点（在提交锁之外）=====
         // ① 不判 woke（那是实例内事实，见 settleParkedToolCall 的方法注）：park 开启时本行与源实例
         //    批循环可能先后都到，由 ai:observed 的首写者仲裁；非 park 时结算权始终在等待线程手上。
@@ -2237,12 +2243,11 @@ public class ConfirmGate {
     /**
      * 第一个认领该工具名的复核器的回灌判定；没有复核器返回 null（= 该工具不受闸门约束）。
      */
-    private FrontendToolGuard.Verdict inspectResult(String runId, PendingToolCall pending, String result) {
+    private FrontendToolGuard.Verdict inspectResult(String runId, PendingToolCall pending, String result,
+                                                     String outcome, boolean cancelled) {
         for (FrontendToolGuard guard : this.frontendGuards) {
             if (guard.isSupported(pending.getName())) {
-                // GF 优化批 G-E：带上归属上下文（附件"属本表单 + 一次性"校验需要 runId/toolCallId）；
-                // 未覆写四参版本的复核器走默认实现，退回两参口径，行为不变。
-                return guard.inspectResult(runId, pending.getToolCallId(), pending.getArguments(), result);
+                return guard.inspectResult(runId, pending.getToolCallId(), pending.getArguments(), result, outcome, cancelled);
             }
         }
         return null;
@@ -2344,15 +2349,15 @@ public class ConfirmGate {
      * 取消终态把"用户不打算填了"变成一次明确的、立刻的收敛
      * （且与"没人响应"的超时语义分开，排障时看得清）。
      */
-    private Submission dismiss(String runId, PendingToolCall pending, String source, Map<String, Object> sheetMeta) {
+    private Submission dismiss(String runId, PendingToolCall pending, String source, Map<String, Object> sheetMeta,
+                               String result) {
         pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
         pending.setOutcome(ToolOutcome.CANCELLED.wire());
         pending.setCode(ToolOutcome.CODE_FRONTEND_CANCELLED);
         pending.setReason("FRONTEND_DISMISSED" + (StringUtils.isBlank(source) ? "" : " source=" + source));
         pending.setExecuted(false);
         pending.setResolvedAtMs(System.currentTimeMillis());
-        String text = "FRONTEND_CANCELLED：用户取消了该前端操作（关闭表单/放弃填写），"
-                + "本次调用未获得任何数据；如需继续，请改为向用户询问或换用其它方式。";
+        String text = cancellationText(pending, result);
         pending.setResultText(text);
         RunStore.DecisionClaim claim = this.store.tryApplyDecision(runId, pending);
         if (claim != null && !claim.won()) {
@@ -2375,6 +2380,14 @@ public class ConfirmGate {
         settleDiscarded(runId, pending);
         log.info("frontend tool cancelled by user [contract=frontend tool cancelled by user] runId={} toolCallId={} name={}", runId, pending.getToolCallId(), pending.getName());
         return new Submission(Outcome.ACCEPTED, pending, woke, null, maybeTriggerResume(runId, woke));
+    }
+
+    private String cancellationText(PendingToolCall pending, String result) {
+        if (guardFor(pending.getName()) instanceof SheetWriteGuard) {
+            return StringUtils.defaultString(result);
+        }
+        return "FRONTEND_CANCELLED：用户取消了该前端操作（关闭表单/放弃填写），"
+                + "本次调用未获得任何数据；如需继续，请改为向用户询问或换用其它方式。";
     }
 
     /**

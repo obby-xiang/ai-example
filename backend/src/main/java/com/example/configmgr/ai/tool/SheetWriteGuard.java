@@ -32,14 +32,15 @@ import java.util.regex.PatternSyntaxException;
  * </ol>
  *
  * <h2>回灌复核</h2>
- * 成功文本必须带“共 N”尾行（设计稿 §4.2 可断言约定）；取消 / 预览失效 / 硬上限拒绝三类终态
- * 原样放行 —— 它们本身就是如实结局，不能被当成“结果不合法”而无限重试。
+ * 写回执是带 kind、text、实际 cells/rows 与计划 cells/rows 的 JSON；applied 的实际数量必须与计划一致，
+ * failed 可携带真实的部分写入数，cancelled 实际计数必须为 0。kind 与 outcome 必须一致，
+ * text 必填但只供阅读，不参与业务判定；commit=false 的归一化建议不是写回执。
  */
 @Component
 public class SheetWriteGuard implements FrontendToolGuard {
 
     /** 本复核器认领的写工具（撤销只有 defCode，仍按同一闸门走一遍；名字见 {@link AiToolNames}）。 */
-    static final Set<String> SUPPORTED = Set.of(AiToolNames.REPLACE_VALUES, AiToolNames.UPDATE_ROWS,
+    public static final Set<String> SUPPORTED = Set.of(AiToolNames.REPLACE_VALUES, AiToolNames.UPDATE_ROWS,
             AiToolNames.NORMALIZE_COLUMN, AiToolNames.UNDO_LAST_SHEET_EDIT);
 
     private static final Set<String> SCOPES = Set.of("selection", "sheet", "columns", "rows", "predicate");
@@ -83,37 +84,6 @@ public class SheetWriteGuard implements FrontendToolGuard {
             return reject("入参必须是对象。");
         }
         return inspectFor(toolName, root);
-    }
-
-    /**
-     * 兼容入口（无工具名的旧调用方）：按入参形状推断细分工具后统一校验。
-     *
-     * <p>`search` ⇒ replace_values、`set` ⇒ update_rows、`rules` ⇒ normalize_column、其余 ⇒ 撤销
-     * （只有 defCode）。形状推断是安全的：三者的必填字段互斥，且真正的事实源是后续的逐项校验。
-     * <b>框架路径不走这里</b>（{@code SpToolCallingManager} 调带工具名的重载）。
-     */
-    @Override
-    public Verdict inspectArguments(String argumentsJson) {
-        JsonNode root;
-        try {
-            root = mapper.readTree(StringUtils.defaultString(argumentsJson));
-        }
-        catch (Exception error) {
-            return reject("入参不是合法 JSON。");
-        }
-        if (root == null || !root.isObject()) {
-            return reject("入参必须是对象。");
-        }
-        String toolName = root.has("search") ? "replace_values"
-                : root.has("set") ? "update_rows"
-                : root.has("rules") ? "normalize_column"
-                : "undo_last_sheet_edit";
-        return inspectFor(toolName, root);
-    }
-
-    /** 按工具名细分校验（测试与显式调用方使用；不接受未知工具名）。 */
-    public Verdict inspectArgumentsFor(String toolName, String argumentsJson) {
-        return inspectArguments(toolName, argumentsJson);
     }
 
     private Verdict inspectFor(String toolName, JsonNode root) {
@@ -171,18 +141,135 @@ public class SheetWriteGuard implements FrontendToolGuard {
                 : Verdict.reject("SHEET_ARGUMENTS_REJECTED", "表格写工具入参不合法，未下发前端、未挂起。", reasons);
     }
 
+    private static final Set<String> RESULT_KINDS = Set.of("applied", "failed", "cancelled");
+
     @Override
     public Verdict inspectResult(String argumentsJson, String resultJson) {
-        String result = StringUtils.defaultString(resultJson);
-        if (StringUtils.isBlank(result)) {
-            return Verdict.reject("SHEET_RESULT_REJECTED", "回灌结果为空，拒绝消费挂起。",
-                    List.of("result 不能为空。"));
+        return inspectResult(null, null, argumentsJson, resultJson, null, false);
+    }
+
+    @Override
+    public Verdict inspectResult(String runId, String toolCallId, String argumentsJson, String resultJson,
+                                 String outcome, boolean cancelled) {
+        if (isNormalizeSuggestion(argumentsJson)) {
+            return Verdict.accept();
         }
-        if (result.startsWith("已应用") && !result.contains("共 ")) {
-            return Verdict.reject("SHEET_RESULT_REJECTED", "成功回灌缺少“共 N”尾行（尺寸口径不可核对）。",
-                    List.of("已应用的回灌文本必须含“共 N 格”。"));
+        JsonNode root;
+        try {
+            root = mapper.readTree(StringUtils.defaultString(resultJson));
         }
-        return Verdict.accept();
+        catch (Exception error) {
+            return rejectResult(List.of("result 必须是合法 JSON 对象。"));
+        }
+        if (root == null || !root.isObject()) {
+            return rejectResult(List.of("result 必须是合法 JSON 对象。"));
+        }
+        List<String> reasons = new ArrayList<>();
+        String kind = text(root.get("kind"));
+        if (kind == null || !RESULT_KINDS.contains(kind)) {
+            reasons.add("kind 只能是 applied/failed/cancelled。");
+        }
+        checkText(root.get("text"), reasons);
+        checkOutcome(kind, outcome, cancelled, reasons);
+        checkCounts(root, kind, reasons);
+        return reasons.isEmpty() ? Verdict.accept() : rejectResult(reasons);
+    }
+
+    private static void checkText(JsonNode text, List<String> reasons) {
+        if (text == null || !text.isTextual() || StringUtils.isBlank(text.textValue())) {
+            reasons.add("text 必填且必须是非空字符串。");
+        }
+    }
+
+    private static void checkOutcome(String kind, String outcome, boolean cancelled, List<String> reasons) {
+        if ("cancelled".equals(kind)) {
+            if (!cancelled) {
+                reasons.add("kind=cancelled 必须走 cancelled=true 的真实取消语义。");
+            }
+            return;
+        }
+        if (cancelled) {
+            reasons.add("cancelled=true 时 kind 必须为 cancelled。");
+            return;
+        }
+        if ("applied".equals(kind) && !ToolOutcome.OK.wire().equals(outcome)) {
+            reasons.add("kind=applied 时 outcome 必须为 ok。");
+        }
+        if ("failed".equals(kind) && !ToolOutcome.FAILED.wire().equals(outcome)
+                && !ToolOutcome.UNKNOWN.wire().equals(outcome)) {
+            reasons.add("kind=failed 时 outcome 必须为 failed；恢复不确定只允许明确 unknown。");
+        }
+    }
+
+    private static void checkCounts(JsonNode root, String kind, List<String> reasons) {
+        Integer cells = resultCount(root.get("cells"), "cells", reasons);
+        Integer rows = resultCount(root.get("rows"), "rows", reasons);
+        JsonNode plan = root.get("plan");
+        if (plan == null || !plan.isObject()) {
+            reasons.add("plan 必须是包含 cells/rows 的对象。");
+            return;
+        }
+        Integer planCells = resultCount(plan.get("cells"), "plan.cells", reasons);
+        Integer planRows = resultCount(plan.get("rows"), "plan.rows", reasons);
+        if (!reasons.isEmpty()) {
+            return;
+        }
+        checkCountPair(cells, rows, "cells/rows", reasons);
+        checkCountPair(planCells, planRows, "plan.cells/plan.rows", reasons);
+        checkNotAbovePlan(cells, planCells, "cells", reasons);
+        checkNotAbovePlan(rows, planRows, "rows", reasons);
+        if ("cancelled".equals(kind) && (cells > 0 || rows > 0)) {
+            reasons.add("cancelled 的实际 cells/rows 必须为 0。");
+        }
+        if ("applied".equals(kind)) {
+            checkAppliedCount(cells, planCells, "cells", reasons);
+            checkAppliedCount(rows, planRows, "rows", reasons);
+        }
+    }
+
+    private static void checkCountPair(int cells, int rows, String field, List<String> reasons) {
+        if (cells < rows) {
+            reasons.add(field + " 不可能满足 cells < rows（每个命中行至少一格）。");
+        }
+        if ((cells == 0) != (rows == 0)) {
+            reasons.add(field + " 的 0 格与非 0 行（或非 0 格与 0 行）不可能同时成立。");
+        }
+    }
+
+    private static void checkNotAbovePlan(int actual, int planned, String field, List<String> reasons) {
+        if (actual > planned) {
+            reasons.add("实际 " + field + " 不得超过计划（实际 " + actual + "，计划 " + planned + "）。");
+        }
+    }
+
+    private boolean isNormalizeSuggestion(String argumentsJson) {
+        try {
+            JsonNode arguments = mapper.readTree(StringUtils.defaultString(argumentsJson));
+            return arguments != null && arguments.isObject() && arguments.has("rules")
+                    && !arguments.has("search") && !arguments.has("set")
+                    && !arguments.path("commit").asBoolean(false);
+        }
+        catch (Exception error) {
+            return false;
+        }
+    }
+
+    private static Integer resultCount(JsonNode node, String field, List<String> reasons) {
+        if (node == null || !node.isIntegralNumber() || !node.canConvertToInt() || node.asInt() < 0) {
+            reasons.add(field + " 必须是非负整数。");
+            return null;
+        }
+        return node.asInt();
+    }
+
+    private static void checkAppliedCount(Integer actual, Integer planned, String field, List<String> reasons) {
+        if (actual.intValue() != planned.intValue()) {
+            reasons.add("applied 的 " + field + " 必须等于计划数量（实际 " + actual + "，计划 " + planned + "）。");
+        }
+    }
+
+    private static Verdict rejectResult(List<String> reasons) {
+        return Verdict.reject("SHEET_RESULT_REJECTED", "表格写回执结构或计数不合法，拒绝消费挂起。", reasons);
     }
 
     private void checkPredicate(JsonNode predicate, List<String> reasons) {

@@ -55,6 +55,7 @@ export function safeSheetName(name: string | null | undefined): string {
 
 /** 单条行级校验问题（与后端 ValidationIssue 同口径，供前端本地预检展示）。 */
 export interface ExcelRowIssue {
+  kind: 'validation' | 'duplicateKey'
   /** Excel 行号（1 基，含表头行） */
   rowIndex: number
   fieldCode: string
@@ -180,6 +181,7 @@ export function validateRows(fields: readonly ConfigField[], rows: readonly Reco
       const reason = validateCell(field, row[field.code])
       if (reason) {
         issues.push({
+          kind: 'validation',
           rowIndex,
           fieldCode: field.code,
           fieldLabel: field.label,
@@ -194,6 +196,7 @@ export function validateRows(fields: readonly ConfigField[], rows: readonly Reco
         const first = seenKeys.get(keyText)
         if (first !== undefined) {
           issues.push({
+            kind: 'duplicateKey',
             rowIndex,
             fieldCode: keyFields.map((field) => field.code).join('+'),
             fieldLabel: keyFields.map((field) => field.label).join('+'),

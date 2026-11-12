@@ -6826,6 +6826,50 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "删除正则和contains任务事实反解，摘要根据结构化字段生成，不依赖中文文本或编号格式。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1273确认两项Important均ADDRESSED且无新Critical/Important，功能通过；施工报告真实ResumeService正常/provider-gone、SpToolCallingManager单轮上限、前端create-only/target合并、创建/复用、作业权威独立RED→GREEN，后端编译和前端typecheck/build成功；主控未重跑测试，真实模型、Redis/Cluster、多实例、浏览器及全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:0d741dc5f0df2c06cb30b102d3a3ef97d9266d0382f33ae347e7512cd9626204",
+      "status": "reviewed",
+      "reason": "逐hunk复核表格写结构化回执、取消传输与守卫顺序、真实部分失败、计划/结局/计数一致性及显式工具名；多轮独立复审阻塞项全部关闭。",
+      "reviewedAt": "2026-11-12T23:31:57+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1276、施工agent-1266",
+      "specChanges": [
+        {
+          "change": "表格写回执统一为{kind,text,cells,rows,plan:{cells,rows}}，取消请求也携带结构化result，ConfirmGate先过同一SheetWriteGuard再dismiss并保留JSON。",
+          "reason": "原取消请求丢result且后端生成固定中文文本，导致实时、模型与恢复协议不一致。",
+          "impact": "表格写applied/failed/cancelled及unknown均有明确结构，完整JSON不可截断；其他表单和工具固定取消文本保持不变。"
+        },
+        {
+          "change": "applied只接受outcome=ok且实际格/行等于计划，failed接受failed/unknown，cancelled只走取消且实际为零；所有实际计数不得超过计划。",
+          "reason": "静默少写曾被误报applied，kind/outcome矛盾和失真计划会造成部分落笔却挂起未消费或假成功。",
+          "impact": "少写生成failed与真实部分计数，cells/rows零值和大小关系校验，过期预览及所有已知失败/取消路径保留真实plan。"
+        },
+        {
+          "change": "删除SheetWriteGuard按参数形状猜工具名的单参入口，生产调用必须显式传真实工具名；主键问题使用结构化分类。",
+          "reason": "项目未上线，旧形状推断会让缺字段或错误工具绕过对应校验，中文reason前缀不是稳定业务事实。",
+          "impact": "无工具名以FRONTEND_TOOL_NAME_REQUIRED失败关闭，normalize建议路径和显式写工具检查不变，不再按中文文案判断结果。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "结果守卫先于取消dismiss，表格写保留结构化取消JSON，拆出submitAcceptedFrontendResult使方法低于50行且顺序不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/FrontendToolGuard.java", "status": "checked", "reason": "无工具名单参默认FRONTEND_TOOL_NAME_REQUIRED，取消默认守卫放行以保留非表格工具行为；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/SheetWriteGuard.java", "status": "checked", "reason": "严格校验kind/text/outcome/实际与计划计数，删除形状猜工具名，保留normalize建议路径；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "表格写取消的超限JSON同样拒绝而不截断，普通文本尺寸行为不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/ErrorCodes.java", "status": "checked", "reason": "结果超限说明改为完整JSON不可破坏，不再描述旧尾行协议；已IDEA Reformat。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "取消携带结构化result，所有结局生成kind与真实plan，abandonStalePreview清理前保留活动计划。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "表格写计划与回执使用结构化类型，主键问题类型明确。"},
+        {"path": "frontend/src/utils/excel.ts", "status": "checked", "reason": "主键问题输出validation/duplicateKey结构分类，不依赖中文reason前缀。"},
+        {"path": "frontend/src/utils/sheet-tools.ts", "status": "checked", "reason": "实际少写即failed并保留真实部分计数，预览/执行/取消共用计划事实，无文案结果识别。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用FrontendToolGuard、ConfirmGate、现有SheetWritePlan和i18n，无新增帧类型、依赖或结果DSL。"},
+        "java-api-style": {"status": "checked", "reason": "五个生产Java均IDEA Reformat；ConfirmGate入口约23行、接受结算约36行，复杂度均低于20，计数使用严格整数。"},
+        "logging-exception-safety": {"status": "checked", "reason": "部分写入、取消、unknown及超限均真实呈现，不伪装applied或截断JSON，其他工具异常语义不变。"},
+        "toc-interaction": {"status": "checked", "reason": "预览和取消操作不变，模型获得真实结构化结局，不新增技术提示或额外用户操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "消费前统一校验kind/outcome和计划计数，取消JSON在RunStore与后续投影保持同一原文，重复/迟到语义不被扩大修改。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "结果判断不依赖中文文案、尾行或reason前缀，完整JSON不可按文本截断，主键分类来自结构字段。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1276最终Spec通过且无新Critical/Important，方法名Minor已改RunStore；施工报告真实Controller+ConfirmGate流程9/9、守卫39/39、取消/少写/计划保留前端单点、后端编译及前端typecheck/build成功；主控未重跑测试，sheet-undo-confirm既有14/15与ConfirmGateDismissAndSettleTest构造期6 errors如实保留，真实History/SSE/模型/Redis/多实例/SpreadJS浏览器NOT_RUN。"}
+      }
     }
   ]
 }

@@ -44,7 +44,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <h2>为什么要这条判据</h2>
  * 回灌端点的旧口径是<b>一律</b> substring 截断 + 标记（防护批③ B2-7）。对普通文本这是对的
  * （拒绝会让悬起永久挂着），但对<b>结构化结果</b>是错的：字符级截断会切坏 JSON 结构、
- * 切掉表格结果的「共 N 格」尾行 —— 落库的是半截数据，比重试更危险。
+ * 破坏完整 JSON 结构 —— 落库的是半截数据，比重试更危险。
  *
  * <h2>本批口径</h2>
  * <ul>
@@ -100,7 +100,7 @@ class FrontendResultTooLargeTest {
 	}
 
 	@Test
-	void overlongSheetWriteResultIsRejectedInsteadOfLosingItsTailLine() throws Exception {
+	void overlongSheetWriteResultIsRejectedInsteadOfTruncatingJson() throws Exception {
 		PendingToolCall pending = pending("update_rows", PendingToolCall.KIND_FRONTEND, PendingToolCall.PENDING);
 		when(this.runStore.pendingLenient("r-1", "c-1")).thenReturn(pending);
 		when(this.runStore.instanceId()).thenReturn("test-instance");
@@ -109,7 +109,13 @@ class FrontendResultTooLargeTest {
 			summary.append("行内改动明细：A 列 → B 列\n");
 		}
 		summary.append("共 1200 格");
-		String sheetResult = summary.toString();
+		var receipt = this.objectMapper.createObjectNode();
+		receipt.put("kind", "applied");
+		receipt.put("text", summary.toString());
+		receipt.put("cells", 1200);
+		receipt.put("rows", 1200);
+		receipt.putObject("plan").put("cells", 1200).put("rows", 1200);
+		String sheetResult = this.objectMapper.writeValueAsString(receipt);
 		assertThat(sheetResult).hasSizeGreaterThan(this.limit);
 
 		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
@@ -120,7 +126,7 @@ class FrontendResultTooLargeTest {
 
 		verify(this.gate, never()).submitFrontendResult(anyString(), anyString(), any(), any(), anyBoolean(),
 				any(), org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.isNull());
-		// 尾行没有被"切一半"落库：条目从未被写过
+		// JSON 没有被"切一半"落库：条目从未被写过
 		verify(this.runStore, never()).putPending(anyString(), any());
 	}
 
@@ -277,8 +283,7 @@ class FrontendResultTooLargeTest {
 	}
 
 	/**
-	 * 用户放弃（{@code cancelled=true}）优先级最高：结果本来就会被丢弃，
-	 * 不该因为"太大"被挡在门外 —— 否则用户关不掉一张填错的表单。
+	 * 非表格写工具的取消行为不变：结果仍按既有取消语义处理，不新增尺寸闸。
 	 */
 	@Test
 	void cancelledSubmissionBypassesTheSizeGate() throws Exception {
