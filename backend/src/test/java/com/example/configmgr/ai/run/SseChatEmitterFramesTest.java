@@ -421,6 +421,29 @@ class SseChatEmitterFramesTest {
         }
     }
 
+    @Test
+    void toolResultTargetCarriesPersistedJobIdWithoutReadingReceiptText() {
+        PendingToolCall pending = executed("call-structured-job");
+        assertThat(PendingToolCall.class.getDeclaredFields())
+                .as("实时帧只能来自持久化 createdJobId")
+                .anyMatch(field -> "createdJobId".equals(field.getName()));
+        try {
+            java.lang.reflect.Field field = PendingToolCall.class.getDeclaredField("createdJobId");
+            field.setAccessible(true);
+            field.set(pending, 4242L);
+        } catch (ReflectiveOperationException ex) {
+            throw new AssertionError(ex);
+        }
+
+        this.emitter.toolResult(pending, true, false, "导入作业已启动（作业 #999）");
+
+        Map<String, Object> frame = archivedFrames().get(0);
+        assertThat(frame.get("target")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .containsEntry("taskId", "7")
+                .containsEntry("jobId", "4242");
+        assertThat(frame.get("result")).isEqualTo("导入作业已启动（作业 #999）");
+    }
+
     // ── 辅助 ────────────────────────────────────────────────────────────────
 
     private static PendingToolCall pending(String toolCallId) {

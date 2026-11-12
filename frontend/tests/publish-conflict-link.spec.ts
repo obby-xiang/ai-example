@@ -2,7 +2,7 @@
  * R-155：发布冲突明细接线工具卡 reason —— jobId→toolCallId 注册表 + attachPublishConflict 落段锁。
  *
  * 锁的契约：
- * - start_publish 工具结果帧取号 jobId（结果文本「作业 #N」）⇒ 注册 {jobId, toolCallId, sessionId}
+ * - start_publish 工具结果帧取号 jobId（结构化 `target.jobId`）⇒ 注册 {jobId, toolCallId, sessionId}
  *   并武装 watchPublishOutcome（task store 调桩验证入参）；
  * - attachPublishConflict：注册表命中 ⇒ 明细摘要落工具段 reason（段唯一写口 + 投影同步），
  *   注册项注销；查无关联 / 会话已切换 / 段不存在 ⇒ false 静默（调用方走原回执条通道）；
@@ -87,7 +87,7 @@ describe('R-155：注册表 + 冲突明细落工具段 reason', () => {
     store.handleFrame({
       type: 'tool_result', toolCallId: 'tc-1', name: 'start_publish', kind: 'BACKEND',
       ok: true, executed: true, result: '发布作业已启动（作业 #42），正在将数据写入正式库…',
-      messageId: 'tool-tc-1', runId: 'run-1', seq: 2
+      target: { taskId: '3', jobId: '42' }, messageId: 'tool-tc-1', runId: 'run-1', seq: 2
     })
 
     expect(findPublishTool(42)).toEqual({ toolCallId: 'tc-1', sessionId: store.sessionId })

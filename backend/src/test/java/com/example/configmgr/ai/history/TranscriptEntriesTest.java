@@ -211,6 +211,38 @@ class TranscriptEntriesTest {
 
 	/** 投影幂等：同一历史重复投影得到相同 entryId 集合（存储层按 entryId 去重的前提）。 */
 	@Test
+	void toolCallStateCarriesStructuredJobTargetAndLegacyStateStaysUnknown() {
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("c-job");
+		pending.setName("start_publish");
+		pending.setKind(PendingToolCall.KIND_CONFIRM);
+		pending.setArguments("{\"taskId\":7}");
+		pending.setStatus(PendingToolCall.EXECUTED);
+		pending.setOutcome("ok");
+		assertThat(PendingToolCall.class.getDeclaredFields())
+			.as("历史投影只能来自持久化 createdJobId")
+			.anyMatch(field -> "createdJobId".equals(field.getName()));
+		try {
+			java.lang.reflect.Field field = PendingToolCall.class.getDeclaredField("createdJobId");
+			field.setAccessible(true);
+			field.set(pending, 4242L);
+		} catch (ReflectiveOperationException ex) {
+			throw new AssertionError(ex);
+		}
+
+		assertThat(TranscriptEntries.toolCallState(pending, PendingToolCall.EXECUTED))
+			.containsEntry("target", Map.of("taskId", "7", "jobId", "4242"));
+
+		PendingToolCall legacy = new PendingToolCall();
+		legacy.setToolCallId("c-legacy");
+		legacy.setArguments("{\"taskId\":7}");
+		legacy.setStatus(PendingToolCall.EXECUTED);
+		legacy.setResultText("发布作业已启动（作业 #999）");
+		assertThat(TranscriptEntries.toolCallState(legacy, PendingToolCall.EXECUTED))
+			.containsEntry("target", Map.of("taskId", "7"));
+	}
+
+	@Test
 	void terminalProjectionIsStableForTheSameHistory() {
 		List<Message> attributed = List.of(
 				UserMessage.builder().text("同文").metadata(Map.of("runId", "run-a")).build(),

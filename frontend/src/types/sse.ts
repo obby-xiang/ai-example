@@ -152,6 +152,8 @@ export interface PendingToolCallSnapshot {
   status: PendingStatus | string
   reason?: string | null
   resultText?: string | null
+  /** 已创建作业的结构化事实（Long 字符串）；旧条目缺省时不反解 resultText。 */
+  createdJobId?: string | number | null
   executed: boolean
   executedBy?: string | null
   claimedAtMs?: number

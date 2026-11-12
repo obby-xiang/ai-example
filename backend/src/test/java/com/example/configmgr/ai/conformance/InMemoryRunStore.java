@@ -1054,6 +1054,9 @@ public class InMemoryRunStore extends RunStore {
 		if (pending.getCreatedTaskId() != null) {
 			record.put(PendingToolCall.CREATED_TASK_ID, String.valueOf(pending.getCreatedTaskId()));
 		}
+		if (pending.getCreatedJobId() != null) {
+			record.put(PendingToolCall.CREATED_JOB_ID, String.valueOf(pending.getCreatedJobId()));
+		}
 		List<Map<String, Object>> records = ledgerList(runId);
 		synchronized (records) {
 			int index = records.size();

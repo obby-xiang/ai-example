@@ -3088,11 +3088,13 @@ public class SpToolCallingManager implements ToolCallingManager {
         RunStore.ClaimResult claim = step.claim();
         long claimedEpoch = claim.epoch();
         String claimedBy = this.store.instanceId();
-        ToolExecution execution = executeClaimedTool(runId, prompt, pending);
+        JobExecutionScope jobScope = jobExecutionScope(prompt, pending);
+        ToolExecution execution = executeClaimedTool(runId, jobScope.prompt(), pending);
         if (execution.settleAsUnexecuted()) {
+            jobScope.takeCreatedJobId();
             return settleToolTimeout(runId, pending, execution.text(), settleObservation, claimedEpoch, claimedBy);
         }
-        PendingToolCall fresh = freshForSettlement(runId, prompt, pending, execution);
+        PendingToolCall fresh = freshForSettlement(runId, jobScope.prompt(), pending, execution, jobScope);
         boolean respectCancel = this.toolRegistry.riskOf(pending.getName()) == ToolMeta.RiskLevel.READ;
         if (!this.store.isExecutionCompletedWithLedger(runId, fresh, execution.text(), claimedEpoch, claimedBy,
                 respectCancel)) {
@@ -3201,7 +3203,7 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private PendingToolCall freshForSettlement(String runId, Prompt prompt, PendingToolCall pending,
-                                               ToolExecution execution) {
+                                               ToolExecution execution, JobExecutionScope jobScope) {
         PendingToolCall fresh;
         try {
             fresh = this.store.pendingLenient(runId, pending.getToolCallId());
@@ -3220,6 +3222,10 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (execution.ok() && TOOL_CREATE_TASK.equals(pending.getName())) {
             fresh.setCreatedTaskId(createdTaskIdOf(((ToolCallingChatOptions) prompt.getOptions()).getToolContext()
                     .get(PendingToolCall.CREATED_TASK_ID)));
+        }
+        Long createdJobId = jobScope.takeCreatedJobId();
+        if (execution.ok() && createdJobId != null) {
+            fresh.setCreatedJobId(createdJobId);
         }
         fresh.setResultText(execution.text());
         fresh.setExecuted(true);
@@ -3245,6 +3251,30 @@ public class SpToolCallingManager implements ToolCallingManager {
             ToolCallEndTrace.emitForSettledEntry(this.settlementObservations, runId, sessionIdOf(runId), fresh,
                     execution.text(), this.sheetAudit);
         }
+    }
+
+    private record JobExecutionScope(Prompt prompt, java.util.concurrent.atomic.AtomicReference<Long> createdJobId) {
+
+        private Long takeCreatedJobId() {
+            return this.createdJobId == null ? null : this.createdJobId.getAndSet(null);
+        }
+
+    }
+
+    private JobExecutionScope jobExecutionScope(Prompt prompt, PendingToolCall pending) {
+        if (AiToolNames.ConfirmTool.of(pending.getName()).isEmpty()
+                || !(prompt.getOptions() instanceof ToolCallingChatOptions options)) {
+            return new JobExecutionScope(prompt, null);
+        }
+        ToolCallingChatOptions copy = options.copy();
+        if (copy == null) {
+            return new JobExecutionScope(prompt, null);
+        }
+        Map<String, Object> context = new LinkedHashMap<>(options.getToolContext());
+        java.util.concurrent.atomic.AtomicReference<Long> holder = new java.util.concurrent.atomic.AtomicReference<>();
+        context.put(PendingToolCall.CREATED_JOB_ID, holder);
+        copy.setToolContext(context);
+        return new JobExecutionScope(new Prompt(prompt.getInstructions(), copy), holder);
     }
 
     private record ClaimStep(boolean finished, String result, RunStore.ClaimResult claim) {
@@ -3461,6 +3491,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         Object executedBy = ledger.get("executedBy");
         pending.setExecutedBy(ObjectUtils.toString(ObjectUtils.getIfNull(executedBy, this.store::instanceId), (String) null));
         pending.setCreatedTaskId(createdTaskIdOf(ledger.get(PendingToolCall.CREATED_TASK_ID)));
+        pending.setCreatedJobId(createdTaskIdOf(ledger.get(PendingToolCall.CREATED_JOB_ID)));
         pending.setResultText(reusedText);
         this.store.putPending(runId, pending);
         // 帧的 ok 必须是 outcome 的派生值（旧实现恒传 true，会把台账里的失败/未知结局写成成功帧）
@@ -3585,7 +3616,8 @@ public class SpToolCallingManager implements ToolCallingManager {
      */
     private String modelData(PendingToolCall pending, String text, ModelWriteBudget budget) {
         String modelJson = ToolResultEnvelope
-                .of(pending.effectiveOutcome(), pending.effectiveCode(), text, pending.getArguments())
+                .of(pending.effectiveOutcome(), pending.effectiveCode(), text, pending.getArguments(),
+                        pending.getCreatedJobId())
                 .toModelJson(this.limiter, pending.getName(), budget.nextCapChars());
         budget.consume(modelJson);
         return modelJson;
@@ -3672,7 +3704,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private String modelData(PendingToolCall pending, String text) {
         return ToolResultEnvelope.of(pending.effectiveOutcome(), pending.effectiveCode(), text,
-                pending.getArguments()).toModelJson(this.limiter, pending.getName());
+                pending.getArguments(), pending.getCreatedJobId()).toModelJson(this.limiter, pending.getName());
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────

@@ -6458,6 +6458,54 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "删除中文正则和固定话术补参，用户原文不再被宿主截取改写；末真实UserMessage仍按SyntheticMessages标记过滤。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-6lkbghvc APPROVED；施工报告CreateTaskCorrectionRemovalTest先RED后2/2 GREEN，TaskTypeForm、C-130、预检、CorrectionPrefixResume、导出纠正、TerminalTranscriptRecovery及TaskSlotResolver相关独立单点通过，生产编译BUILD SUCCESS；主控未重跑测试，真实模型、Redis、多实例和全量普通测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:cb03474d566625a126d47094c47dd1963f08f4d941732d89e8de01258cdecafd",
+      "status": "reviewed",
+      "reason": "逐hunk复核四种作业真实ID的结构化传递、单次调用holder、history/Resume投影及发布watcher生命周期；两轮独立返修后终审APPROVED。",
+      "reviewedAt": "2026-11-12T18:21:24+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1257、施工agent-1252",
+      "specChanges": [
+        {
+          "change": "start_export/start_precheck/start_import/start_publish以PendingToolCall.createdJobId和tool_result.target.jobId传递真实作业ID，生产代码不再从中文回执反解。",
+          "reason": "展示文案可能变化或重复，不能作为跨实例、历史和前端关联作业的控制事实。",
+          "impact": "Job.id经单次options/toolContext holder写入pending、台账、模型信封、SSE/history与Resume；旧数据无字段时不关联、不猜测，Long以字符串传输。"
+        },
+        {
+          "change": "作业holder按单次工具调用隔离并在成功、失败、超时结算原子取走。",
+          "reason": "run级共享AtomicReference会把前一作业ID写入后续普通工具，迟到线程还可能污染下一次执行。",
+          "impact": "仅四种start_*使用独立options.copy/toolContext，执行与结算共享该次holder；其他工具不创建不消费，迟到写只影响废弃holder。"
+        },
+        {
+          "change": "发布watcher按sessionId+taskId+jobId一次性武装，恢复先核对job终态，异步预检按代次占闸位并支持失败重试。",
+          "reason": "重复history会重复回执，慢预检可抢回新作业闸位，失败预检会留下无SSE无墙钟的死注册，切会话还可能收到旧回执。",
+          "impact": "终态不建SSE不拉issues，活动作业才去重跟踪；旧预检不得覆盖新watcher，失败清注册允许history重试，切会话dispose并阻断旧回执。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "单次start_*执行上下文和holder与结算一致，成功/失败/超时均取走，台账重放保持原jobId且其他工具不继承；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntries.java", "status": "checked", "reason": "history toolCallState只从参数和createdJobId构造target，旧条目无事实不补造；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java", "status": "checked", "reason": "createdJobId以Long字符串持久化并进入pending快照，与createdTaskId并列但不从resultText反解；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "两处模型ToolResponse重建使用同一来源的createdJobId，不新增恢复路径；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "执行台账仅在真实createdJobId存在时记录字符串字段，重放来源唯一；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "实时tool_result.target合入持久createdJobId，展示result文本保持独立；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultEnvelope.java", "status": "checked", "reason": "target合成后非空即PRESENT，非法/空arguments不掩盖原状态，模型信封与SSE map共用合并逻辑；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "四种start_*创建作业后只向当次ToolContext记录真实Job.id，旧单参数直调重载保留；已IDEA Reformat。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "history透传target，AI watcher按session+task+job去重，预检失败删key重试，切会话dispose且回执只应用一次。"},
+        {"path": "frontend/src/stores/task.ts", "status": "checked", "reason": "恢复先GET job，终态不建SSE不拉issues；预检代次防止旧请求抢闸，失败dispose清注册并允许重试。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "history工具状态增加可选target结构，旧载荷缺省保持兼容。"},
+        {"path": "frontend/src/types/sse.ts", "status": "checked", "reason": "pending快照增加可选createdJobId字符串/数字类型，未改变其他帧字段。"},
+        {"path": "frontend/src/utils/parts.ts", "status": "checked", "reason": "jobId只读结构化target.jobId并要求正安全整数，中文result不再参与关联。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用ToolContext、PendingToolCall、ToolResultEnvelope、现有jobs/watch/dispose与history投影，无新增帧类型、依赖或存储体系。"},
+        "java-api-style": {"status": "checked", "reason": "八个生产Java均经IDEA Reformat；单次holder、target合成和四种start_*重载逐hunk复核。"},
+        "logging-exception-safety": {"status": "checked", "reason": "预检失败清理并通知真实中断，终态和非法ID不伪造关联；迟到写、旧预检及旧回执不覆盖新事实。"},
+        "toc-interaction": {"status": "checked", "reason": "不新增用户操作卡；恢复避免重复冲突提示和无效跟踪，展示文案与结构化控制事实分离。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "createdJobId经Redis pending/台账和Resume一致传递，单次holder隔离，watcher代次与session/key去重防止竞态。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "Long按字符串跨JSON/JS安全整数边界传递，前端拒绝非安全整数，不再正则解析中文作业回执。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1257最终APPROVED；施工报告四种作业、holder三场景、targetStatus、台账/实时/history/Resume、watcher交错/失败重试等独立单点通过，后端生产编译和前端typecheck/build成功；主控未重跑测试，ResumeEnvelopeShapeTest基线identity失败及ai-start-job-sync两项既有失败保留，真实模型、浏览器、Cluster与多实例NOT_RUN。"}
+      }
     }
   ]
 }

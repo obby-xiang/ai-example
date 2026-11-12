@@ -1350,9 +1350,9 @@ public class RunStore {
     }
 
     public RunSnapshot createWithRequestExtraBody(String runId, String sessionId, AiContext context, List<Message> history,
-                              MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
-                              Map<String, Object> requestExtraBody, String clientRequestId, String requestText,
-                              long turnStartedAtMs) {
+                                                  MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+                                                  Map<String, Object> requestExtraBody, String clientRequestId, String requestText,
+                                                  long turnStartedAtMs) {
         validateInitialSnapshot(runId, modelId, requestText, turnStartedAtMs, frozen);
         TenantUser identity = RequestContextUtils.require();
         RunSnapshot snapshot = newInitialSnapshot(runId, sessionId, context, history, codec, providerId, modelId,
@@ -4399,6 +4399,9 @@ public class RunStore {
         record.put("resultText", resultText);
         if (pending.getCreatedTaskId() != null) {
             record.put(PendingToolCall.CREATED_TASK_ID, String.valueOf(pending.getCreatedTaskId()));
+        }
+        if (pending.getCreatedJobId() != null) {
+            record.put(PendingToolCall.CREATED_JOB_ID, String.valueOf(pending.getCreatedJobId()));
         }
         try {
             String json = this.mapper.writeValueAsString(record);

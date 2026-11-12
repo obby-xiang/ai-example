@@ -3121,7 +3121,8 @@ public class SseChatEmitter {
      * <p>
      * {@code ok} 按契约由 {@code outcome == ok} 推导（不信任调用方传值，避免"帧说成功、结局说失败"）；
      * {@code outcome}/{@code code} 取自待决条目的持久化信封（旧数据按 status 推导）；
-     * {@code target} 从工具参数 JSON 提取 {@code {taskId?, defCode?, step?, page?}}，提取不到不写该键。
+     * {@code target} 从工具参数 JSON 提取任务等目标，并合入待决条目持久化的 {@code createdJobId}；
+     * 旧条目没有结构化作业号时保持缺失，不从结果文本反解。
      * {@code result} 仍是<b>全文</b>（人读通道，不受模型侧裁剪影响）。
      *
      * <p>
@@ -3178,7 +3179,7 @@ public class SseChatEmitter {
         frame.put("outcome", outcome.wire());
         frame.put("code", code);
         frame.put("retryable", outcome.retryable(code));
-        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments());
+        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments(), pending.getCreatedJobId());
         if (MapUtils.isNotEmpty(target)) {
             frame.put("target", target);
         }
@@ -3692,7 +3693,7 @@ public class SseChatEmitter {
     }
 
     private static TranscriptContent transcriptToolContent(List<TranscriptSegment> timeline,
-                                                            List<TranscriptEntry.ToolCallView> calls) {
+                                                           List<TranscriptEntry.ToolCallView> calls) {
         List<TranscriptSegment> candidate = transcriptToolCandidate(timeline, calls, "x", "x");
         if (candidate == null) {
             return null;
@@ -3868,7 +3869,7 @@ public class SseChatEmitter {
     }
 
     private static List<TranscriptEntry.SegmentView> claimedToolTextSegments(List<TranscriptSegment> timeline,
-                                                                            String text, String reasoning) {
+                                                                             String text, String reasoning) {
         for (int start = 0; start < timeline.size(); start++) {
             TranscriptSegment first = timeline.get(start);
             if (first.entryId == null || "tool".equals(first.kind)) {

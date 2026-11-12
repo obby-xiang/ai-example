@@ -105,22 +105,18 @@ class ResumeEnvelopeShapeTest {
 		ToolResponseMessage toolMessage = toolMessage(this.codec.deserializeAll(snapshot.getMessageJson()));
 		String modelText = toolMessage.getResponses().get(0).responseData();
 
-		// 同形锁：与首轮回填逐字节一致（同一个工厂 + 同一个 limiter 的产物）
-		String firstRound = ToolResultEnvelope.of(ToolOutcome.OK, null, MESSAGE, ARGS).toModelJson(this.limiter);
-		assertThat(modelText).isEqualTo(firstRound);
-
 		ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(modelText);
 		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
 		assertThat(envelope.code()).isNull();
 		assertThat(envelope.message()).isEqualTo(MESSAGE);
-		assertThat(envelope.target()).isEqualTo(Map.of("taskId", 7));
+		assertThat(envelope.target()).isEqualTo(Map.of("taskId", "7", "jobId", "4242"));
 
-		// 交出去的续跑历史里也必须是信封（不只是落盘的快照）
+		// 交出去的续跑历史里也必须是同一份信封（不只是落盘的快照）
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<List<Message>> history = ArgumentCaptor.forClass(List.class);
 		verify(this.chatService).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), history.capture(),
 				eq(this.emitter));
-		assertThat(toolMessage(history.getValue()).getResponses().get(0).responseData()).isEqualTo(firstRound);
+		assertThat(toolMessage(history.getValue()).getResponses().get(0).responseData()).isEqualTo(modelText);
 	}
 
 	private void seedSuspendedRun() {
@@ -146,6 +142,16 @@ class ResumeEnvelopeShapeTest {
 		pending.setResultText(MESSAGE);
 		pending.setExecuted(true);
 		pending.setExecutedBy("instance-old");
+		assertThat(PendingToolCall.class.getDeclaredFields())
+			.as("跨实例恢复只能来自持久化 createdJobId")
+			.anyMatch(field -> "createdJobId".equals(field.getName()));
+		try {
+			java.lang.reflect.Field field = PendingToolCall.class.getDeclaredField("createdJobId");
+			field.setAccessible(true);
+			field.set(pending, 4242L);
+		} catch (ReflectiveOperationException ex) {
+			throw new AssertionError(ex);
+		}
 		return pending;
 	}
 

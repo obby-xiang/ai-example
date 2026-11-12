@@ -288,6 +288,88 @@ describe('stores/task.ts · watchPublishOutcome 复用 watchJob（M4：无裸轮
     current()
   })
 
+  it('requireActive-terminal-skip：恢复前先读终态，终态 job 不重新激活也不重复拉 issues', async () => {
+    http.get.mockImplementation((url: string) => {
+      if (url.includes('/issues')) {
+        return Promise.resolve({ content: [{ severity: 'ERROR', defCode: 'DEF_A', rowKey: 'R1', message: '冲突' }] })
+      }
+      return Promise.resolve(makeJob('FAILED'))
+    })
+    const store = useTaskStore()
+    const onConflict = vi.fn()
+    const onDisposed = vi.fn()
+
+    store.watchPublishOutcome(3, 9, { requireActive: true, onConflict, onDisposed })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(onConflict).not.toHaveBeenCalled()
+    expect(onDisposed).toHaveBeenCalledTimes(1)
+    expect(http.get.mock.calls.filter(([url]) => String(url).includes('/issues'))).toHaveLength(0)
+    expect(EventSourceStub.instances).toHaveLength(0)
+  })
+
+  it('requireActive-slow-preflight-generation：A 慢预检不得抢回 B 的闸位，B 冲突仍只应用一次', async () => {
+    let resolvePreflightA: (() => void) | undefined
+    const preflightA = new Promise<Job>((resolve) => {
+      resolvePreflightA = () => resolve(makeJob('RUNNING', 9))
+    })
+    let jobBCalls = 0
+    http.get.mockImplementation((url: string) => {
+      if (url.includes('/issues')) {
+        return Promise.resolve({ content: [{ severity: 'ERROR', defCode: 'DEF_B', rowKey: 'R2', message: 'B 冲突' }] })
+      }
+      if (String(url).startsWith('/jobs/9')) {
+        return preflightA
+      }
+      jobBCalls += 1
+      return Promise.resolve(makeJob(jobBCalls >= 2 ? 'FAILED' : 'RUNNING', 10))
+    })
+    const store = useTaskStore()
+    const staleConflict = vi.fn()
+    const currentConflict = vi.fn()
+    const stale = store.watchPublishOutcome(3, 9, { requireActive: true, onConflict: staleConflict })
+    const current = store.watchPublishOutcome(3, 10, { onConflict: currentConflict })
+
+    resolvePreflightA?.()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    expect(currentConflict).toHaveBeenCalledTimes(1)
+    expect(currentConflict.mock.calls[0][0]).toContain('DEF_B')
+    expect(staleConflict).not.toHaveBeenCalled()
+    stale()
+    current()
+  })
+
+  it('requireActive-error-retry：失败清注册，再次武装可恢复且无重复冲突', async () => {
+    let rejectPreflight = true
+    http.get.mockImplementation((url: string) => {
+      if (url.includes('/issues')) {
+        return Promise.resolve({ content: [], totalElements: 0 })
+      }
+      if (String(url).startsWith('/jobs/9') && rejectPreflight) {
+        rejectPreflight = false
+        return Promise.reject(new Error('preflight unavailable'))
+      }
+      return Promise.resolve(makeJob('RUNNING', 9))
+    })
+    const store = useTaskStore()
+    const onPreflightError = vi.fn()
+    const onConflict = vi.fn()
+
+    store.watchPublishOutcome(3, 9, { requireActive: true, onPreflightError, onConflict })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onPreflightError).toHaveBeenCalledTimes(1)
+
+    const recovered = store.watchPublishOutcome(3, 9, { requireActive: true, onConflict })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(EventSourceStub.instances).toHaveLength(1)
+    expect(onConflict).not.toHaveBeenCalled()
+    recovered()
+  })
+
   it('single-registry-no-double-open（F4）：同 taskId+jobId 不得双开 —— 第二次调用返回同一 dispose，不起第二个 watcher', async () => {
     http.get.mockResolvedValue(makeJob('RUNNING'))
     const store = useTaskStore()

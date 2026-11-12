@@ -318,6 +318,10 @@ public final class TranscriptEntries {
         if (PendingToolCall.KIND_FRONTEND.equals(kind) && StringUtils.isNotBlank(pending.getResultText())) {
             state.put("submittedValues", pending.getResultText());
         }
+        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments(), pending.getCreatedJobId());
+        if (MapUtils.isNotEmpty(target)) {
+            state.put("target", target);
+        }
         Map<String, Object> preflight = displayPreflight(pending.getPreflight());
         if (preflight != null) {
             state.put("preflight", preflight);

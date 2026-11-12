@@ -155,6 +155,15 @@ function isDocumentVisible(): boolean {
 const publishWatchers = new Map<string, () => void>()
 const taskDeleteFlights = new Map<number, Promise<boolean>>()
 
+interface PublishWatchHandlers {
+  onConflict?: (summary: string, issues?: ValidationIssue[]) => void
+  onDisposed?: () => void
+  /** 预检失败：注册已清理，调用方可在后续 history 重试。 */
+  onPreflightError?: () => void
+  /** 恢复入口：先读权威快照，只有非终态作业才建立监听。 */
+  requireActive?: boolean
+}
+
 /**
  * 作业跟踪的提示出口。
  *
@@ -191,6 +200,8 @@ function formatPublishConflictSummary(jobId: number, issues: ValidationIssue[]):
  * 生效。并发两条跟踪时后发起者占据闸位 —— 旧作业晚到的结局不得覆盖/清空新作业已落位的冲突态。
  */
 let watchingJobId: number | null = null
+let publishWatchGeneration = 0
+let startedPublishWatchGeneration = 0
 
 /**
  * `ensureTaskType` 的读取失败分类：只有**瞬时**失败值得退避重试。
@@ -516,7 +527,7 @@ export const useTaskStore = defineStore('task', {
     watchPublishOutcome(
       taskId: number,
       jobId: number,
-      handlers: { onConflict?: (summary: string, issues?: ValidationIssue[]) => void } = {}
+      handlers: PublishWatchHandlers = {}
     ): () => void {
       if (!jobId) {
         return () => {}
@@ -526,8 +537,7 @@ export const useTaskStore = defineStore('task', {
       if (existing) {
         return existing // F4 注册表归属单一：同 taskId+jobId 不得双开
       }
-      watchingJobId = jobId // F4：占据闸位 —— 只认最后发起的跟踪
-
+      const generation = ++publishWatchGeneration
       let wallClockTimer: ReturnType<typeof setTimeout> | null = null
       const clearWallClock = (): void => {
         if (wallClockTimer !== null) {
@@ -536,27 +546,66 @@ export const useTaskStore = defineStore('task', {
         }
       }
       let disposeWatched: (() => void) | null = null
+      let disposed = false
       const dispose = (): void => {
+        if (disposed) {
+          return
+        }
+        disposed = true
         clearWallClock()
-        publishWatchers.delete(key)
+        if (publishWatchers.get(key) === dispose) {
+          publishWatchers.delete(key)
+        }
         disposeWatched?.()
         disposeWatched = null
+        handlers.onDisposed?.()
       }
-
-      disposeWatched = watchJob({
-        taskId,
-        jobId,
-        ...publishWatchCallbacks(jobId, clearWallClock, dispose, (job) => {
-          void this.applyPublishOutcome(jobId, job, handlers)
+      const start = (): void => {
+        if (disposed) {
+          return
+        }
+        if (generation < startedPublishWatchGeneration) {
+          dispose()
+          return
+        }
+        startedPublishWatchGeneration = generation
+        watchingJobId = jobId // F4：占据闸位 —— 只认最后发起的跟踪
+        disposeWatched = watchJob({
+          taskId,
+          jobId,
+          ...publishWatchCallbacks(jobId, clearWallClock, dispose, (job) => {
+            void this.applyPublishOutcome(jobId, job, handlers)
+          })
         })
-      })
+        // 360s 墙钟：与 watchJob 内部定时器独立；非终态到达 ⇒ 单次提示 + 收摊
+        wallClockTimer = setTimeout(() => {
+          wallClockTimer = null
+          notifyJobWatch(translate('views.tasks.msg.watchTimeout', { jobId }))
+          dispose()
+        }, PUBLISH_WATCH_WALL_CLOCK_MS)
+      }
       publishWatchers.set(key, dispose)
-      // 360s 墙钟：与 watchJob 内部定时器独立；非终态到达 ⇒ 单次提示 + 收摊
-      wallClockTimer = setTimeout(() => {
-        wallClockTimer = null
-        notifyJobWatch(translate('views.tasks.msg.watchTimeout', { jobId }))
-        dispose()
-      }, PUBLISH_WATCH_WALL_CLOCK_MS)
+      if (handlers.requireActive === true) {
+        void jobsApi.getJob(jobId).then((job) => {
+          if (isJobFinal(job.status)) {
+            dispose()
+            return
+          }
+          start()
+        }).catch((error: unknown) => {
+          if (disposed) {
+            return
+          }
+          dispose()
+          handlers.onPreflightError?.()
+          notifyJobWatch(translate('views.tasks.msg.watchInterrupted', {
+            jobId,
+            message: userFacingErrorText(error, translate('views.tasks.msg.unknownError'))
+          }))
+        })
+      } else {
+        start()
+      }
       return dispose
     },
 
@@ -569,7 +618,7 @@ export const useTaskStore = defineStore('task', {
     async applyPublishOutcome(
       jobId: number,
       job: Job,
-      handlers: { onConflict?: (summary: string, issues?: ValidationIssue[]) => void } = {}
+      handlers: PublishWatchHandlers = {}
     ): Promise<void> {
       if (watchingJobId !== jobId) {
         // F4：旧作业晚到终态 —— 闸位已被更新的跟踪占据，不覆盖/清空新冲突

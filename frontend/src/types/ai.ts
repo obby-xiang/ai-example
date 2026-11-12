@@ -323,6 +323,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     outcome?: string
     /** 治理 P0-1：错误码（可选，null = 无码）；一期不展示 */
     code?: string | null
+    /** 已执行工具的结构化目标；旧 history 缺省时不推断或反解。 */
+    target?: Record<string, unknown>
     /**
      * 已结算工具仍保留的预检**展示摘要**（后端在挂起写点与终态写点同源落进 toolCallStates，
      * `/history` 原样透出）。只含 target / impact / conditionSummary / publishMode；

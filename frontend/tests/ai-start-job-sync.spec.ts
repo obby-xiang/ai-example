@@ -7,7 +7,7 @@
  * 工具结果只回到对话侧，页面侧没有任何人把"作业号 + 任务号"绑进自己的跟踪面。
  *
  * <h2>口径（仿 R-155 发布冲突跟踪 `armPublishConflictWatch`）</h2>
- * store 在 `tool_result` 里取号（结果文本「作业 #N」）+ 工具段 args 的 taskId，
+ * store 在 `tool_result.target` 里取结构化 jobId + 工具段 args 的 taskId，
  * 调页面自己注册的能力 `export.syncJob` / `import.syncJob`（AI 侧不 import 任何视图）；
  * 页面 handler 在 taskId 匹配时走既有 `resumeJobs()`，终态时再刷一次结果面。
  */
@@ -99,7 +99,7 @@ function streamingMessage(): ChatMessage {
   }
 }
 
-/** 走真实帧路径：tool_start（带 args）→ tool_result（带结果文本）。 */
+/** 走真实帧路径：tool_start（带 args）→ tool_result（带结构化 target 与展示文本）。 */
 function feedJobFrames(
   store: ReturnType<typeof useAiStore>,
   name: 'start_export' | 'start_precheck' | 'start_import' | 'start_publish',
@@ -108,11 +108,13 @@ function feedJobFrames(
   args = '{"taskId":7}',
   seq = 1
 ): void {
+  const jobId = /作业 #(\d+)/.exec(result)?.[1] ?? null
   store.handleFrame({
     type: 'tool_start', toolCallId: `c-${seq}`, name, kind: 'CONFIRM', args, runId: 'run-1', seq
   })
   store.handleFrame({
-    type: 'tool_result', toolCallId: `c-${seq}`, name, kind: 'CONFIRM', executed: true, ok, result, runId: 'run-1', seq: seq + 1
+    type: 'tool_result', toolCallId: `c-${seq}`, name, kind: 'CONFIRM', executed: true, ok, result,
+    target: jobId === null ? { taskId: '7' } : { taskId: '7', jobId }, runId: 'run-1', seq: seq + 1
   })
 }
 

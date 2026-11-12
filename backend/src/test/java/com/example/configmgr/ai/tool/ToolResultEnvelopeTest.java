@@ -126,4 +126,28 @@ class ToolResultEnvelopeTest {
 		assertThat(String.valueOf(parsed.get("message"))).contains(ToolResultLimiter.TRUNCATION_MARKER);
 	}
 
+	@Test
+	void createdJobIdMakesTargetPresentForBlankArguments() {
+		ToolResultEnvelope withJob = ToolResultEnvelope.of(ToolOutcome.OK, null, "作业 #42", "", 42L);
+		ToolResultEnvelope withoutJob = ToolResultEnvelope.of(ToolOutcome.OK, null, "作业 #42", "");
+
+		assertThat(withJob.target()).containsEntry("jobId", "42");
+		assertThat(withJob.targetStatus()).isEqualTo(ToolResultEnvelope.TargetStatus.PRESENT);
+		assertThat(withJob.isTargetPresent()).isTrue();
+		assertThat(withoutJob.targetStatus()).isEqualTo(ToolResultEnvelope.TargetStatus.MISSING);
+		assertThat(withoutJob.isTargetPresent()).isFalse();
+	}
+
+	@Test
+	void createdJobIdMakesTargetPresentForInvalidArgumentsButDoesNotHideInvalidInputOtherwise() {
+		ToolResultEnvelope withJob = ToolResultEnvelope.of(ToolOutcome.OK, null, "作业 #42", "not-json", 42L);
+		ToolResultEnvelope withoutJob = ToolResultEnvelope.of(ToolOutcome.OK, null, "作业 #42", "not-json");
+
+		assertThat(withJob.target()).containsEntry("jobId", "42");
+		assertThat(withJob.targetStatus()).isEqualTo(ToolResultEnvelope.TargetStatus.PRESENT);
+		assertThat(withJob.isTargetPresent()).isTrue();
+		assertThat(withoutJob.targetStatus()).isEqualTo(ToolResultEnvelope.TargetStatus.INVALID);
+		assertThat(withoutJob.isTargetPresent()).isFalse();
+	}
+
 }

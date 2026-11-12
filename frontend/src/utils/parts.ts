@@ -283,31 +283,15 @@ export function numericArgOf(args: Record<string, unknown> | null, key: string):
   }
   const raw = args[key]
   const parsed = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
 }
 
-/**
- * 作业号的**兼容适配点**（唯一一处）：`tool_result` 帧目前只在人读文本里带「作业 #N」，
- * 后端尚未给结构化 `jobId`。这里集中反解，调用方一律走本函数（不要再各写一份正则）。
- *
- * <p>优先级：结构化 `target.jobId` / `userTextArgs.jobId`（后端补上即自动生效）→ 旧文本反解。
- * 后端补齐结构化字段后，删除末尾的 legacy 分支即可（本函数签名不变）。
- */
+/** 作业号只读结构化 `target.jobId`；展示文本与旧 history 均不参与关联。 */
 export function jobIdOfToolResult(
-  result: unknown,
+  _result: unknown,
   structured?: Record<string, unknown> | null
 ): number | null {
-  const fromStructured = numericArgOf(structured ?? null, 'jobId')
-  if (fromStructured !== null) {
-    return fromStructured
-  }
-  if (typeof result !== 'string') {
-    return null
-  }
-  // legacy：中文回执「作业 #N」——过渡期唯一反解处，勿扩散。
-  const matched = /作业 #(\d+)/.exec(result)
-  const jobId = matched ? Number(matched[1]) : Number.NaN
-  return Number.isInteger(jobId) && jobId > 0 ? jobId : null
+  return numericArgOf(structured ?? null, 'jobId')
 }
 
 /**

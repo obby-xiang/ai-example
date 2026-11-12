@@ -300,6 +300,33 @@ let sessionGateFingerprint: string | null = null
 let sessionGateToken = 0
 /** 会话现场代次：复制清理/主动换会话后，旧代次的异步回包与回调一律失效。 */
 let sessionEpoch = 0
+
+interface AiPublishWatch {
+  sessionId: string
+  taskId: number
+  jobId: number
+  dispose: () => void
+  settled: boolean
+  receiptApplied: boolean
+}
+
+const aiPublishWatchers = new Map<string, AiPublishWatch>()
+
+function aiPublishWatchKey(sessionId: string, taskId: number, jobId: number): string {
+  return `${sessionId}\0${taskId}\0${jobId}`
+}
+
+function disposeAiPublishWatchers(sessionId: string): void {
+  for (const [key, watcher] of [...aiPublishWatchers]) {
+    if (watcher.sessionId !== sessionId) {
+      continue
+    }
+    watcher.settled = true
+    watcher.dispose()
+    aiPublishWatchers.delete(key)
+  }
+}
+
 /** 所有权探活只在同一会话、同一现场代次内单飞。 */
 let ownershipProbe: { sessionId: string; epoch: number; task: Promise<void> } | null = null
 interface HealthProbeResult {
@@ -5970,6 +5997,9 @@ export const useAiStore = defineStore('ai', {
         }
         this.historyLoaded = true
       }
+      if (committed) {
+        this.restorePublishConflictWatches()
+      }
       this.reconcileMirrorSheetPreview()
       this.restoreManualRecovery()
       this.restoreFollowupFromHistory(mirrorProvesCompleted, mirror?.lastRunId ?? null, mirrorMessages)
@@ -6206,10 +6236,8 @@ export const useAiStore = defineStore('ai', {
               status: partStatus,
               args: call.arguments,
               result: null,
-              // ① 历史摘要：`/history.toolCallStates.preflight` 是后端在挂起写点与终态写点**同源**
-              // 落下的展示摘要（target / impact / conditionSummary / publishMode）—— 卡头与必要
-              // 后果说明据此渲染，与实时帧（confirm_request / suspended）同形。缺省（旧载荷 / 无预检的
-              // 工具）**不产生该键**，卡面回落原有形态（一字不动）。
+              // 结构化作业目标与预检展示摘要分别透传；旧 history 缺省时不从响应文本补造。
+              ...(state?.target ? { target: state.target } : {}),
               ...(state?.preflight ? { preflight: state.preflight } : {}),
               // A10 R-15：持久化的模型侧截断元数据随历史响应回到段上（刷新后角标/本地化 hover）。
               ...historyTruncationFields(matched),
@@ -13127,6 +13155,7 @@ export const useAiStore = defineStore('ai', {
       sessionGateToken += 1
       sessionGate = null
       sessionGateFingerprint = null
+      disposeAiPublishWatchers(oldSessionId)
       this.sessionId = nextId
       this.sessionIdentity = scopeIdentity
       // 换会话/换身份 ⇒ 上一次发号失败的结论不带走（新窗口重新判定）。
@@ -14446,39 +14475,77 @@ export const useAiStore = defineStore('ai', {
       }
     },
 
-    /**
-     * R-155：start_publish 工具结果帧取号 jobId（结构化优先，见 `jobIdOfToolResult` 的兼容适配点），
-     * 登记 jobId→toolCallId 并武装发布冲突跟踪（复用 task store watchPublishOutcome，终态冲突经 onConflict 回此）。
-     * 任一环取不到号（非 start_publish / 未执行 / 无 jobId / 无 taskId）静默跳过。
-     */
+    /** start_publish 实时结局帧只按结构化 target.jobId 武装发布冲突跟踪。 */
     armPublishConflictWatch(message: ChatMessage, frame: Extract<SseFrame, { type: 'tool_result' }>): void {
       if (frame.name !== 'start_publish' || !frame.ok) {
         return
       }
-      const jobId = jobIdOfToolResult(frame.result, frame.target ?? null)
+      const part = findToolPart(message, frame.toolCallId)
+      if (part) {
+        this.armPublishConflictWatchForPart(part)
+      }
+    },
+
+    /** history 恢复只复用段上的结构化事实；旧 history 无 target.jobId 时不产生跟踪。 */
+    restorePublishConflictWatches(): void {
+      for (const message of this.messages) {
+        for (const part of message.parts) {
+          if (part.kind === 'tool' && part.name === 'start_publish' && part.status === 'succeeded') {
+            this.armPublishConflictWatchForPart(part, true)
+          }
+        }
+      }
+    },
+
+    armPublishConflictWatchForPart(part: ToolPart, restoring = false): void {
+      const jobId = jobIdOfToolResult(part.result, part.target ?? null)
       if (jobId === null) {
         return
       }
-      const part = findToolPart(message, frame.toolCallId)
-      const args = part ? parseToolArgs(part.args) : null
+      const args = parseToolArgs(part.args)
       const taskId = args ? Number(args.taskId) : Number.NaN
-      if (!Number.isInteger(taskId)) {
+      if (!Number.isSafeInteger(taskId) || taskId <= 0) {
         return
       }
-      linkPublishTool(jobId, { toolCallId: frame.toolCallId, sessionId: this.sessionId })
-      useTaskStore().watchPublishOutcome(taskId, jobId, {
+      const sessionId = this.sessionId
+      const key = aiPublishWatchKey(sessionId, taskId, jobId)
+      if (aiPublishWatchers.has(key)) {
+        return
+      }
+      const watcher: AiPublishWatch = {
+        sessionId,
+        taskId,
+        jobId,
+        dispose: () => {},
+        settled: false,
+        receiptApplied: false
+      }
+      aiPublishWatchers.set(key, watcher)
+      watcher.dispose = useTaskStore().watchPublishOutcome(taskId, jobId, {
+        requireActive: restoring,
+        onDisposed: () => {
+          watcher.settled = true
+        },
+        onPreflightError: () => {
+          aiPublishWatchers.delete(key)
+        },
         onConflict: (summary, issues) => {
+          if (this.sessionId !== sessionId || watcher.receiptApplied) {
+            return
+          }
+          watcher.receiptApplied = true
           this.attachPublishConflict(jobId, summary, issues)
           reportUiEventResult('start_publish', summary)
         }
       })
+      linkPublishTool(jobId, { toolCallId: part.toolCallId, sessionId })
     },
 
     /**
      * 批 D · D3（问题 6）：AI 触发作业后把"任务号 + 作业号"同步给工作区页面。
      *
-     * 仿 {@link armPublishConflictWatch} 体例：作业号走 `jobIdOfToolResult`（结构化优先，唯一的
-     * 旧文本兼容点）、任务号取工具段 args 的 `taskId`，再调页面自己注册的能力
+     * 仿 {@link armPublishConflictWatch} 体例：作业号只读 `target.jobId`，任务号取工具段 args 的
+     * `taskId`，再调页面自己注册的能力
      * （{@link START_JOB_SYNC}：`export.syncJob` / `import.syncJob`）。
      * 页面 handler 负责"绑定 + 进跟踪"（既有 `resumeJobs()`），AI 侧不 import 任何视图。
      *
@@ -14504,7 +14571,7 @@ export const useAiStore = defineStore('ai', {
       const part = findToolPart(message, frame.toolCallId)
       const args = part ? parseToolArgs(part.args) : null
       const taskId = args ? Number(args.taskId) : Number.NaN
-      if (!Number.isInteger(taskId)) {
+      if (!Number.isSafeInteger(taskId) || taskId <= 0) {
         return
       }
       // AR-08：作业真的起来了（事件后）—— 任务中心那边按"在途 + 可见"决定是否拉一次列表。
