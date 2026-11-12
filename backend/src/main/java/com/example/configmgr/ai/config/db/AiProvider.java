@@ -5,15 +5,17 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
+import org.springframework.data.domain.Persistable;
 
 import java.time.LocalDateTime;
 
@@ -21,7 +23,7 @@ import java.time.LocalDateTime;
  * provider 主档（{@code ai_provider}，一行 = 一个 OpenAI 兼容端点）。
  *
  * <p>
- * 范式照 {@code ai.feedback.AiFeedback}（{@code @Data @Entity @Table} + IDENTITY + 时间戳）；
+ * 主键由配置域 Redis 发号器在持久化前赋值，不使用数据库 IDENTITY。
  * 本表随其余业务表一起建在 {@code db/migration/V1__schema.sql}（当前唯一的空库基线；
  * {@code ddl-auto=validate} ⇒ 实体不许建表），PostgreSQL 方言见 {@code db/postgresql/V1__schema.sql}。
  *
@@ -36,7 +38,7 @@ import java.time.LocalDateTime;
 @ToString
 @Entity
 @Table(name = "ai_provider")
-public class AiProvider {
+public class AiProvider implements Persistable<Long> {
 
     /** key 存放位置：密文在库。 */
     public static final String KEY_REF_DB = "DB";
@@ -54,10 +56,14 @@ public class AiProvider {
     public static final String SOURCE_DB = "DB";
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
     @JsonProperty("id")
     @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long id;
+
+    @JsonIgnore
+    @ToString.Exclude
+    @Transient
+    private boolean newEntity = true;
 
     /** 稳定机读名（{@code deepseek} / {@code custom-<n>}）；唯一约束的落点。 */
     @Column(name = "code", nullable = false, length = 64)
@@ -140,5 +146,21 @@ public class AiProvider {
     @JsonIgnore
     public boolean isKeyDeclared() {
         return !KEY_REF_NONE.equals(this.keyRef) && this.keyRef != null;
+    }
+
+    @JsonIgnore
+    @Override
+    public boolean isNew() {
+        return this.newEntity;
+    }
+
+    @PostLoad
+    void markLoaded() {
+        this.newEntity = false;
+    }
+
+    @PostPersist
+    void markPersisted() {
+        this.newEntity = false;
     }
 }

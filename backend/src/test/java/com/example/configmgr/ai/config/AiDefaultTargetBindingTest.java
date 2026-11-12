@@ -479,7 +479,7 @@ class AiDefaultTargetBindingTest {
 				this.fixture.settingRepository, this.fixture.auditRepository,
 				new AiKeyCipher(AiConfigTestFixture.KEK_A), new AiEndpointGuard(this.fixture.properties),
 				transactionManager, service, new com.fasterxml.jackson.databind.ObjectMapper(),
-				registry);
+				registry, AiConfigTestFixture.idGenerator());
 	}
 
 	private String chat(ProviderRuntime runtime) {

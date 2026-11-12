@@ -6107,6 +6107,44 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "只有正文完全相等才允许回填身份，不按前缀相似猜归属，同seq不同正文冲突保留。"},
         "verification-review": {"status": "checked", "reason": "agent-1246最终APPROVED；C-161四场景、C-167两场景、C-163两场景及合法缺口清理均独立Vitest通过，typecheck和3281模块build成功；真实浏览器、Cluster和全量套件NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c63c5f68fce018cc0b52426f76292ebb506bff8f8ae9e01938b6cfc3ed244e42",
+      "status": "reviewed",
+      "reason": "逐hunk复核配置实体Redis原子发号、assigned-id JPA新建语义及双方言V3迁移；独立审查agent-1248 APPROVED，AiFeedback未纳入。",
+      "reviewedAt": "2026-11-12T12:39:43+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1248、施工agent-1239",
+      "specChanges": [
+        {
+          "change": "AiProvider/AiProviderModel/AiConfigAudit主键改由配置域Redis时间下界原子发号，新增双方言V3去除identity生成属性。",
+          "reason": "项目禁止数据库序列、自增列或IDENTITY发号，配置写入需要跨实例唯一且可持久关联的Long ID。",
+          "impact": "每实体独立单键INCR+Redis TIME下界+24h PEXPIRE，Redis失败不写配置且不回退；BIGINT主键、既有值、providerId关联和Long JSON字符串保持。"
+        },
+        {
+          "change": "三实体实现Persistable<Long>以区分assigned-id新建与已有行。",
+          "reason": "删除GeneratedValue后，非空assigned id可能被JPA误判为已有行走merge并覆盖配置。",
+          "impact": "新行走persist，意外主键冲突失败而不覆盖旧行；newEntity不进入JSON或toString，更新路径不取号。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigIdGenerator.java", "status": "checked", "reason": "配置域三实体独立单键原子发号，Redis TIME下界与24h TTL，异常直接传播；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigSeeder.java", "status": "checked", "reason": "仅在种子provider/model不存在时取号，已有行更新和no-op不取号；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigWriter.java", "status": "checked", "reason": "仅provider/model/audit真实新建赋号，更新删除不取号，审计倒序和关联保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiConfigAudit.java", "status": "checked", "reason": "删除GeneratedValue并实现Persistable，newEntity不进入JSON/toString，冲突不覆盖；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiProvider.java", "status": "checked", "reason": "assigned id与JPA新旧行语义，密钥、URL和敏感字段排除规则不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiProviderModel.java", "status": "checked", "reason": "assigned id与providerId字符串映射保持，新增/更新分流明确；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/db/migration/V3__config_assigned_ids.sql", "status": "checked", "reason": "H2仅DROP IDENTITY，保留BIGINT主键和现有值，未修改V1。"},
+        {"path": "backend/src/main/resources/db/postgresql/V3__config_assigned_ids.sql", "status": "checked", "reason": "PG使用DROP IDENTITY IF EXISTS，保留主键、关联和显式assigned-id插入能力，未修改V1。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Redis Lua、TIME、Persistable和Flyway，无新增依赖、数据库序列或全局ID框架。"},
+        "java-api-style": {"status": "checked", "reason": "六个生产Java均经IDEA Reformat；Persistable、JSON Long字符串、transient与敏感字段排除逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "Redis失败直接传播，主键冲突真实失败，不以数据库/内存回退或覆盖旧配置掩盖。"},
+        "toc-interaction": {"status": "not-affected", "reason": "仅配置主键和持久化实现变化，无新增用户提示或交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "每脚本单key满足Cluster同槽，24h TTL、Redis TIME下界和原子INCR支持多实例唯一；数据库仍作最终防重边界。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1248 APPROVED；真实standalone Redis并发100/100唯一、独立TTL/删除重建/异常传播、assigned-id插入与冲突、writer/seeder关联及H2 V1→V3均通过；真实PG、Cluster和多实例NOT_RUN。"}
+      }
     }
   ]
 }

@@ -60,15 +60,18 @@ public class AiConfigSeeder implements ApplicationRunner {
     /** 版本发布（写路径与种子共用的唯一实现）：种子写了数据就必须让别的实例看得见。 */
     private final AiConfigVersionPublisher versions;
 
+    private final AiConfigIdGenerator idGenerator;
+
     public AiConfigSeeder(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
             AiConfigService configService, AiProperties properties, PlatformTransactionManager transactionManager,
-            AiConfigVersionPublisher versions) {
+            AiConfigVersionPublisher versions, AiConfigIdGenerator idGenerator) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
         this.configService = configService;
         this.properties = properties;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.versions = versions;
+        this.idGenerator = idGenerator;
     }
 
     @Override
@@ -169,6 +172,7 @@ public class AiConfigSeeder implements ApplicationRunner {
         AiProviderModel model = this.modelRepository.findByProviderIdAndModelId(providerId, modelId)
             .orElseGet(() -> {
                 AiProviderModel fresh = this.configService.envSeedModel();
+                fresh.setId(this.idGenerator.nextModelId());
                 fresh.setProviderId(providerId);
                 return fresh;
             });
@@ -190,7 +194,9 @@ public class AiConfigSeeder implements ApplicationRunner {
     private AiProvider saveSeedProvider(boolean force) {
         Optional<AiProvider> existing = this.providerRepository.findByCode(AiConfigService.ENV_PROVIDER_CODE);
         if (existing.isEmpty()) {
-            return this.providerRepository.saveAndFlush(this.configService.envSeedProvider());
+            AiProvider provider = this.configService.envSeedProvider();
+            provider.setId(this.idGenerator.nextProviderId());
+            return this.providerRepository.saveAndFlush(provider);
         }
         AiProvider provider = existing.get();
         if (!AiProvider.SOURCE_ENV_SEED.equals(provider.getSource())) {

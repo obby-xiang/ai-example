@@ -52,7 +52,7 @@ class AiConfigWriterGuardTest {
 		return new AiConfigWriter(this.fixture.providerRepository, this.fixture.modelRepository,
 				this.fixture.settingRepository, this.fixture.auditRepository, new AiKeyCipher(AiConfigTestFixture.KEK_A),
 				new AiEndpointGuard(this.fixture.properties), this.transactionManager,
-				this.fixture.service(), new ObjectMapper(), null);
+				this.fixture.service(), new ObjectMapper(), null, AiConfigTestFixture.idGenerator());
 	}
 
 	@Test

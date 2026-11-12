@@ -188,7 +188,7 @@ class AiConfigSeederConvergenceTest {
 		AiConfigVersionPublisher versions = new AiConfigVersionPublisher(this.fixture.settingRepository, service,
 				null);
 		return new AiConfigSeeder(this.fixture.providerRepository, this.fixture.modelRepository, service,
-				this.fixture.properties, this.transactionManager, versions);
+				this.fixture.properties, this.transactionManager, versions, AiConfigTestFixture.idGenerator());
 	}
 
 	@SuppressWarnings({ "unchecked", "rawtypes" })

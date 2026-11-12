@@ -1,19 +1,22 @@
 package com.example.configmgr.ai.config.db;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import jakarta.persistence.UniqueConstraint;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
+import org.springframework.data.domain.Persistable;
 
 import java.time.LocalDateTime;
 
@@ -32,13 +35,17 @@ import java.time.LocalDateTime;
 @Table(name = "ai_model",
         uniqueConstraints = @UniqueConstraint(name = "uq_ai_model_provider_model",
                 columnNames = { "provider_id", "model_id" }))
-public class AiProviderModel {
+public class AiProviderModel implements Persistable<Long> {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
     @JsonProperty("id")
     @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long id;
+
+    @JsonIgnore
+    @ToString.Exclude
+    @Transient
+    private boolean newEntity = true;
 
     /** 逻辑外键（不加 FK 约束：provider 删除走软删，避免级联阻塞）。 */
     @Column(name = "provider_id", nullable = false)
@@ -106,4 +113,20 @@ public class AiProviderModel {
     @Column(name = "updated_at")
     @JsonProperty("updatedAt")
     private LocalDateTime updatedAt;
+
+    @JsonIgnore
+    @Override
+    public boolean isNew() {
+        return this.newEntity;
+    }
+
+    @PostLoad
+    void markLoaded() {
+        this.newEntity = false;
+    }
+
+    @PostPersist
+    void markPersisted() {
+        this.newEntity = false;
+    }
 }

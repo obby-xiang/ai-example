@@ -57,7 +57,7 @@ class AiConfigWriterTest {
 		return new AiConfigWriter(this.fixture.providerRepository, this.fixture.modelRepository,
 				this.fixture.settingRepository, this.fixture.auditRepository, new AiKeyCipher(kek),
 				new AiEndpointGuard(this.fixture.properties), this.transactionManager, service,
-				new ObjectMapper(), null);
+				new ObjectMapper(), null, AiConfigTestFixture.idGenerator());
 	}
 
 	private AiConfigWriter writer(String kek, boolean allowPrivate) {
@@ -69,7 +69,7 @@ class AiConfigWriterTest {
 				this.fixture.settingRepository, this.fixture.auditRepository, new AiKeyCipher(kek),
 				new AiEndpointGuard(this.fixture.properties),
 				this.transactionManager, this.fixture.service(kek),
-				new ObjectMapper(), null);
+				new ObjectMapper(), null, AiConfigTestFixture.idGenerator());
 	}
 
 	private static AiConfigWriter.ProviderCommand provider(String code, String baseUrl, String apiKey) {
@@ -618,7 +618,7 @@ class AiConfigWriterTest {
 		return new AiConfigSeeder(this.fixture.providerRepository, this.fixture.modelRepository, service,
 				this.fixture.properties, this.transactionManager,
 				new AiConfigVersionPublisher(this.fixture.settingRepository, service,
-						mock(com.example.configmgr.ai.config.AiProviderRegistry.class)));
+						mock(com.example.configmgr.ai.config.AiProviderRegistry.class)), AiConfigTestFixture.idGenerator());
 	}
 
 }

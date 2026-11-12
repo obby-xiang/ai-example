@@ -1,17 +1,20 @@
 package com.example.configmgr.ai.config.db;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
+import org.springframework.data.domain.Persistable;
 
 import java.time.LocalDateTime;
 
@@ -34,13 +37,17 @@ import java.time.LocalDateTime;
 @ToString
 @Entity
 @Table(name = "ai_config_audit")
-public class AiConfigAudit {
+public class AiConfigAudit implements Persistable<Long> {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
     @JsonProperty("id")
     @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long id;
+
+    @JsonIgnore
+    @ToString.Exclude
+    @Transient
+    private boolean newEntity = true;
 
     /** 单用户本地应用暂无登录体系，预留操作者位（同 {@code AiFeedback#createdBy} 先例）。 */
     @ToString.Exclude
@@ -69,4 +76,20 @@ public class AiConfigAudit {
     @Column(name = "at", updatable = false)
     @JsonProperty("at")
     private LocalDateTime at;
+
+    @JsonIgnore
+    @Override
+    public boolean isNew() {
+        return this.newEntity;
+    }
+
+    @PostLoad
+    void markLoaded() {
+        this.newEntity = false;
+    }
+
+    @PostPersist
+    void markPersisted() {
+        this.newEntity = false;
+    }
 }

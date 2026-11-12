@@ -220,7 +220,9 @@ final class AiConfigTestFixture {
 		}).when(this.providerRepository).deleteById(any());
 		when(this.auditRepository.save(any(AiConfigAudit.class))).thenAnswer(invocation -> {
 			AiConfigAudit audit = invocation.getArgument(0);
-			audit.setId((long) (this.audits.size() + 1));
+			if (audit.getId() == null) {
+				audit.setId((long) (this.audits.size() + 1));
+			}
 			this.audits.add(audit);
 			return audit;
 		});
@@ -301,6 +303,15 @@ final class AiConfigTestFixture {
 	}
 
 	// ── 服务/注册表 ──────────────────────────────────────────────────────────
+
+	static AiConfigIdGenerator idGenerator() {
+		AiConfigIdGenerator generator = mock(AiConfigIdGenerator.class);
+		AtomicLong ids = new AtomicLong(1_000L);
+		when(generator.nextProviderId()).thenAnswer(invocation -> ids.incrementAndGet());
+		when(generator.nextModelId()).thenAnswer(invocation -> ids.incrementAndGet());
+		when(generator.nextAuditId()).thenAnswer(invocation -> ids.incrementAndGet());
+		return generator;
+	}
 
 	AiConfigService service() {
 		return service(KEK_A);

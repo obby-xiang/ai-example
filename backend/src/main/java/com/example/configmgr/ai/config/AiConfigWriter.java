@@ -177,6 +177,8 @@ public class AiConfigWriter {
 
     private final ObjectMapper objectMapper;
 
+    private final AiConfigIdGenerator idGenerator;
+
     /**
      * 数据行与 {@code config.version} 同一事务，提交后 reload 并淘汰运行态缓存。
      */
@@ -185,7 +187,8 @@ public class AiConfigWriter {
     public AiConfigWriter(AiProviderRepository providerRepository, AiProviderModelRepository modelRepository,
                           AiSettingRepository settingRepository, AiConfigAuditRepository auditRepository, AiKeyCipher cipher,
                           AiEndpointGuard guard, PlatformTransactionManager transactionManager,
-                          AiConfigService configService, ObjectMapper objectMapper, AiProviderRegistry runtimeRegistry) {
+                          AiConfigService configService, ObjectMapper objectMapper, AiProviderRegistry runtimeRegistry,
+                          AiConfigIdGenerator idGenerator) {
         this.providerRepository = providerRepository;
         this.modelRepository = modelRepository;
         this.settingRepository = settingRepository;
@@ -198,6 +201,7 @@ public class AiConfigWriter {
                         + "data rows, the config version, and audit rows must share one commit point"));
         this.configService = configService;
         this.objectMapper = objectMapper;
+        this.idGenerator = idGenerator;
         this.versions = new AiConfigVersionPublisher(settingRepository, configService, runtimeRegistry);
     }
 
@@ -293,6 +297,7 @@ public class AiConfigWriter {
                 throw new AiConfigException(CODE_PROVIDER_EXISTS, "Provider code already exists: " + code);
             }
             AiProvider provider = new AiProvider();
+            provider.setId(this.idGenerator.nextProviderId());
             provider.setCode(code);
             provider.setDisplayName(displayName);
             provider.setProtocol(protocol);
@@ -449,6 +454,7 @@ public class AiConfigWriter {
                 throw new AiConfigException(CODE_MODEL_EXISTS, "Model already exists in the allowlist: " + modelId);
             }
             AiProviderModel model = new AiProviderModel();
+            model.setId(this.idGenerator.nextModelId());
             model.setProviderId(provider.getId());
             model.setModelId(modelId);
             model.setDisplayName(StringUtils.isNotBlank(command.displayName()) ? command.displayName().trim() : modelId);
@@ -688,6 +694,7 @@ public class AiConfigWriter {
 
     private void audit(String action, String targetType, String targetId, Map<String, Object> diff) {
         AiConfigAudit audit = new AiConfigAudit();
+        audit.setId(this.idGenerator.nextAuditId());
         audit.setActor("local-user");
         audit.setAction(action);
         audit.setTargetType(targetType);
