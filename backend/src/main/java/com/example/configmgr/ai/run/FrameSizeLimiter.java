@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.tool.TruncationContract;
+import com.example.configmgr.common.GraphemeText;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
@@ -36,8 +37,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * 超限时由 {@link #splitStringValue} 按"整帧 JSON ≤ 上限"切成若干片段，写出器把它们发成
  * <b>同一 {@code messageId} 的多条既有 {@code delta}</b>（不新增帧型）——
  * 于是实时拼接、归档回放、完成后历史三处都不丢字，也无需任何截断标记。
- * 判据是本类既有的转义后字节口径（{@link #escapedLength}），CJK / emoji / 代理对不会被切半。
- * 上限小到无法安全分片（骨架/单码点放不下）时<b>抛 {@link IllegalStateException}</b>，
+ * 判据是本类既有的转义后字节口径（{@link #escapedLength}），不在 Unicode 字素簇中间切分。
+ * 上限小到无法安全分片（骨架/首个完整字素放不下）时<b>抛 {@link IllegalStateException}</b>，
  * 由轮次的既有失败面收尾 —— 绝不回落字段截断或空串（那等于静默丢字）。
  *
  * <h2>结构化结果不做字符截断</h2>
@@ -75,7 +76,7 @@ public final class FrameSizeLimiter {
 	 * 单帧上限的<b>运行期下限</b>（字节）。
 	 *
 	 * <p>
-	 * 低于该值时，一个 {@code delta} 帧的骨架（type/atMs/messageId/runId/seq）加上一个最坏码点
+	 * 低于该值时，一个 {@code delta} 帧的骨架（type/atMs/messageId/runId/seq）加上一个最坏字素
 	 * （emoji 在 JSON 里转义为 12 字节）就放不下，<b>无法安全分片</b>；若允许这样的配置，
 	 * 唯一出路只能是字段截断（正文永久少字）或空串，两者都被本专项明确禁止。
 	 * 因此：装配期（{@link SseChatEmitter} 构造器）直接失败，配置面（{@code AiProperties}）
@@ -163,7 +164,7 @@ public final class FrameSizeLimiter {
 
 	/**
 	 * 把帧里的一个字符串字段切成若干片段，使<b>每一次</b>"该帧换成这一片"的整帧 JSON 都不超过
-	 * {@code maxBytes}；片段按序拼接 === 原值（保原文、保顺序、不切代理对）。
+	 * {@code maxBytes}；片段按序拼接 === 原值（保原文、保顺序、不切字素簇）。
 	 *
 	 * <p>
 	 * 只给<b>可跨帧续接</b>的流式字段用（{@code delta.text}）：调用方把每个片段发成一条同
@@ -177,19 +178,19 @@ public final class FrameSizeLimiter {
 	 * {@code runId} 用真值）—— 实际帧只会更短，不会更长。
 	 *
 	 * <p>
-	 * <b>失败语义（复审 C1/I1）</b>：上限小到放不下帧骨架、放不下一个码点、或复测收缩仍超限时，
+	 * <b>失败语义（复审 C1/I1）</b>：上限小到放不下帧骨架、放不下一个字素、或复测收缩仍超限时，
 	 * <b>抛 {@link IllegalStateException}</b>（消息含 {@code type/key/limit/originalChars}）——
 	 * 绝不回落字段截断、绝不返回空串或超限片。理由是流式正文一旦被截断就<b>永久少字</b>
 	 * （实时、归档、完成后历史三处同时缺失，重挂差量也补不回来）；宁可让本轮走既有失败面
 	 * （error 帧 + 可重试/可观测），也不能静默交出一份"看起来成功但内容缺半"的回答。
-	 * 生产默认 64KB 与运行期下限 {@value #MIN_FRAME_BYTES} 字节保证这条分支不可达。
+	 * 生产默认 64KB 与运行期下限 {@value #MIN_FRAME_BYTES} 字节覆盖常规字素；异常超长字素仍失败关闭。
 	 *
 	 * @param frame    帧骨架（含该字段的完整值；方法内部会用空值重算骨架开销）
 	 * @param field    字段名（流式正文 = {@code text}）
 	 * @param mapper   与出帧同一个序列化器
 	 * @param maxBytes 单帧上限（UTF-8 字节；必须 {@code > 0}）
 	 * @return 非空片段列表（原值为空串时返回单元素列表）
-	 * @throws IllegalStateException    骨架/单码点放不下，或复测收缩仍超限
+	 * @throws IllegalStateException    骨架/单字素放不下，或复测收缩仍超限
 	 * @throws IllegalArgumentException {@code maxBytes <= 0} 或字段不是 String
 	 */
 	static List<String> splitStringValue(Map<String, Object> frame, String field, ObjectMapper mapper, int maxBytes) {
@@ -245,11 +246,11 @@ public final class FrameSizeLimiter {
 		String chunk = takeChars(rest, budget, mapper);
 		for (int i = 0; i <= 4; i++) {
 			if (chunk.isEmpty()) {
-				int firstCodePoint = rest.codePointAt(0);
-				int needed = escapedLength(new String(Character.toChars(firstCodePoint)), mapper);
+				int firstGraphemeEnd = GraphemeText.followingBoundary(rest, 0);
+				String firstGrapheme = rest.substring(0, firstGraphemeEnd);
+				int needed = escapedLength(firstGrapheme, mapper);
 				throw tooSmall(frame, field, maxBytes, skeletonBytes, originalChars, needed,
-						"Budget cannot hold one code point (codePoint=U+" + Integer.toHexString(firstCodePoint).toUpperCase()
-								+ ")");
+						"Budget cannot hold one grapheme (firstGraphemeChars=" + firstGrapheme.length() + ")");
 			}
 			Map<String, Object> candidate = new LinkedHashMap<>(probe);
 			candidate.put(field, chunk);
@@ -409,14 +410,13 @@ public final class FrameSizeLimiter {
 		}
 	}
 
-	/** 按<b>字符</b>截断到不超过 byteBudget 的转义字节数（二分 + 代理对保护）。 */
 	/**
-	 * 按<b>字符</b>截断到不超过 byteBudget 的转义字节数（二分 + 代理对保护）。
+	 * 按<b>字素</b>截断到不超过 byteBudget 的转义字节数（二分 + 完整字素回退）。
 	 *
 	 * <p>
 	 * 上界直接收到 {@code min(value.length(), byteBudget)}：JSON 里每个 code unit 至少占 1 字节，
 	 * 因此任何超过 {@code byteBudget} 个 code unit 的前缀必然超预算。长文本（大输入）里这避免了
-	 * 每片都对<b>整段余串</b>做二分探测（旧上界 = 余串长度）；结果与旧实现逐字相同。
+	 * 每片都对<b>整段余串</b>做二分探测（旧上界 = 余串长度）；ASCII 仍精确占满预算。
 	 */
 	static String takeChars(String value, int byteBudget, ObjectMapper mapper) {
 		if (StringUtils.isEmpty(value) || byteBudget <= 0) {
@@ -433,10 +433,7 @@ public final class FrameSizeLimiter {
 				hi = mid - 1;
 			}
 		}
-		if (lo > 0 && lo < value.length() && Character.isHighSurrogate(value.charAt(lo - 1))) {
-			lo--;   // 不切断代理对（半个代理项会被编码成替换字符）
-		}
-		return value.substring(0, lo);
+		return value.substring(0, GraphemeText.precedingBoundary(value, lo));
 	}
 
 	private static byte[] serialize(Map<String, Object> frame, ObjectMapper mapper) {

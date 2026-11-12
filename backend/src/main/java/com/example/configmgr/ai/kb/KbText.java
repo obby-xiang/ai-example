@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.kb;
 
 import com.example.configmgr.ai.tool.PromptDelimiters;
+import com.example.configmgr.common.GraphemeText;
 import org.apache.commons.lang3.StringUtils;
 
 import java.text.Normalizer;
@@ -98,6 +99,9 @@ public final class KbText {
 
     /** 正文摘要（KB 结果里的 snippet 兜底：没有可定位的词时取前 N 字）。 */
     public static String snippet(String body, List<String> terms, int maxChars) {
+        if (maxChars < 0) {
+            throw new StringIndexOutOfBoundsException("maxChars must be >= 0: " + maxChars);
+        }
         String text = sanitize(body);
         if (text.isEmpty()) {
             return "";
@@ -114,11 +118,17 @@ public final class KbText {
             }
         }
         int start = hit < 0 ? 0 : Math.max(0, hit - maxChars / 3);
-        int end = Math.min(text.length(), start + maxChars);
+        int end = windowEnd(start, maxChars, text.length());
+        start = GraphemeText.precedingBoundary(text, start);
+        end = Math.max(start, GraphemeText.precedingBoundary(text, end));
         String window = text.substring(start, end).strip();
         String prefix = start > 0 ? "…" : "";
         String suffix = end < text.length() ? "…" : "";
         return prefix + window + suffix;
+    }
+
+    static int windowEnd(int start, int maxChars, int textLength) {
+        return (int) Math.min((long) textLength, (long) start + maxChars);
     }
 
     /**
@@ -133,8 +143,10 @@ public final class KbText {
         String tail = "\n" + CLOSE;
         int budget = bodyBudget();
         if (cleaned.length() > budget) {
-            String marker = TRUNCATION_MARKER + "原 " + cleaned.length() + " 字符，仅前 " + budget + " 字符]";
-            cleaned = cleaned.substring(0, budget) + marker;
+            String original = cleaned;
+            int end = GraphemeText.precedingBoundary(original, budget);
+            String marker = TRUNCATION_MARKER + "原 " + original.length() + " 字符，仅前 " + end + " 字符]";
+            cleaned = original.substring(0, end) + marker;
         }
         return head + cleaned + tail;
     }
@@ -164,8 +176,10 @@ public final class KbText {
     public static String plain(String body) {
         String cleaned = sanitize(body);
         if (cleaned.length() > MAX_RESULT_CHARS) {
-            cleaned = cleaned.substring(0, MAX_RESULT_CHARS - 48)
-                    + "\n…[知识结果已截断：原 " + cleaned.length() + " 字符]";
+            String original = cleaned;
+            int end = GraphemeText.precedingBoundary(original, MAX_RESULT_CHARS - 48);
+            cleaned = original.substring(0, end)
+                    + "\n…[知识结果已截断：原 " + original.length() + " 字符]";
         }
         return cleaned;
     }

@@ -6145,6 +6145,39 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1248 APPROVED；真实standalone Redis并发100/100唯一、独立TTL/删除重建/异常传播、assigned-id插入与冲突、writer/seeder关联及H2 V1→V3均通过；真实PG、Cluster和多实例NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a1d197e3dc874a77b046ead823156f8a9e62ba2618d3dfd191ceed9d72a50730",
+      "status": "reviewed",
+      "reason": "逐hunk复核UTF-16下标上的Unicode字素边界、UTF-8帧预算和KbText非法窗口处理；独立审查agent-1248确认组合字符与溢出边界均闭合。",
+      "reviewedAt": "2026-11-12T12:46:26+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1248、施工agent-1241",
+      "specChanges": [
+        {
+          "change": "FrameSizeLimiter与KbText的可见文本切割统一回退到Unicode字素边界，长度和下标仍使用UTF-16 code unit。",
+          "reason": "仅保护代理对会切断组合字符、ZWJ emoji、国旗、keycap和CRLF，产生不可读文本。",
+          "impact": "帧预算仍为Jackson转义后UTF-8字节，分页offset/marker口径不变，拼接等于原文且首字素超预算失败关闭。"
+        },
+        {
+          "change": "KbText.snippet显式拒绝负maxChars并以long计算窗口终点。",
+          "reason": "负下标被字素clamp为0会静默返回错误摘要，start+maxChars整数溢出也会产生同类问题。",
+          "impact": "负值抛StringIndexOutOfBoundsException，0的既有省略号行为及Integer.MAX_VALUE溢出场景保持正确。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/kb/KbText.java", "status": "checked", "reason": "snippet/wrap/plain按完整字素处理，负值拒绝、long窗口和marker长度正确，sanitize及FORMAT/ZWJ/CRLF策略不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/FrameSizeLimiter.java", "status": "checked", "reason": "保留二分及UTF-8字节预算，末点回退完整字素，ASCII精确预算、无空片和首字素失败关闭；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/GraphemeText.java", "status": "checked", "reason": "Java21 BreakIterator每次独立实例，只提供前后字素边界，不新增依赖或NFC/NFKC归一化；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "直接复用Java21 BreakIterator，无新增ICU依赖、共享可变实例或第二套文本框架。"},
+        "java-api-style": {"status": "checked", "reason": "三个生产Java均经IDEA Reformat；静态工具、边界返回、异常类型和整数溢出处理逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "首字素超预算和负窗口明确失败，不返回空片、错误摘要或伪造完整结果。"},
+        "toc-interaction": {"status": "checked", "reason": "用户可见组合字符和emoji不被切断，输入长度、分页和既有省略提示不变。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "仅文本切割实现变化，未修改API、Redis或并发状态。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "UTF-16下标与UTF-8帧预算分离，覆盖组合字符、ZWJ、国旗、keycap、tag、CRLF、孤立代理和超长组合字素，不二次转码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；GraphemeBoundaryIntegrationTest 10类及KbText负数/溢出单点通过，ASCII、8000字符和分页相邻回归通过，359源编译BUILD SUCCESS；前端运行时和全量测试NOT_RUN。"}
+      }
     }
   ]
 }
