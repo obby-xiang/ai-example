@@ -5962,6 +5962,33 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "摘要不按文本识别、不伪造公开帧，真实正文与reasoning分离，普通流式及correction失败语义保持。"},
         "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；DeepSeek逐类复测AiControllerHistoryPayload 24、HistoryTranscript 7、TranscriptEntries 8、ConversationTranscriptStore 14、TranscriptWritePoints 11、MemoryCompaction 10、ReasoningConvergence 7、SystemRejected 9，共90项全绿；726测试源javac零错误，后端编译BUILD SUCCESS；真实模型、Cluster和全量批量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:798f8af5c38b947408fb8ae28a2a27fb345f05381f556fdeee1a652ba6a35885",
+      "status": "reviewed",
+      "reason": "逐hunk复核拟合与同类根治、开发规范独立审查登记，五项恢复之外的问题统一高优先级待用户指令，未夹带生产施工。",
+      "reviewedAt": "2026-11-12T08:44:36+08:00",
+      "reviewer": "K3.1 Pro主会话、登记agent-1251",
+      "specChanges": [
+        {
+          "change": "新增G区集中登记文本拟合、供应商默认及开发规范CHANGES_REQUESTED事项，统一待用户明确指令后施工。",
+          "reason": "独立审查发现的问题需要保留证据和通用整改方向，但不能混入C-161/C-163/C-167及转录补写批次。",
+          "impact": "仅形成问题登记，生产、测试、脚本和配置行为均不变化，不形成施工授权。"
+        }
+      ],
+      "files": [
+        {"path": "docs/research/盘点-近期遗漏与暂缓事项-2026-11-11.md", "status": "checked", "reason": "G-A登记五类文本拟合与模型协议问题，G-B登记并发、幂等、存储、日志、API、数据库、执行器、Unicode及代码规范问题，均含通用方向和NOT_RUN边界。"},
+        {"path": "docs/任务看板.md", "status": "checked", "reason": "新增拟合根治与开发规范两条高优先级待指令条目，明确非四项恢复且不冒充实测。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "仅既有Markdown登记，无依赖或代码能力变化。"},
+        "java-api-style": {"status": "not-affected", "reason": "未修改Java或其他生产源码，仅记录静态审查发现。"},
+        "logging-exception-safety": {"status": "checked", "reason": "真实登记上游原文、异常与诊断泄露候选，证据路径使用占位符，不隐藏问题或本机信息。"},
+        "toc-interaction": {"status": "checked", "reason": "通用整改要求结构化协议和白名单输出，避免文本拟合、技术字段及不必要用户提示，本批不新增交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "共享模型并发、跨实例幂等、失败关闭、SCAN/TTL和数据库发号均只登记待指令，未改变现有协议或存储行为。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "登记字素簇和非法SSE问题，明确不得静默丢弃或伪造完整，本批未修改文本流。"},
+        "verification-review": {"status": "checked", "reason": "静态审查与动态验证边界分开，Checkstyle/PMD、真实Cluster、多实例和真实模型均NOT_RUN；未跑产品测试，未修改生产。"}
+      }
     }
   ]
 }
