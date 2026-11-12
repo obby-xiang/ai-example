@@ -6699,4 +6699,18 @@ describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，�
     expect(plain.findAll('[data-testid^="reasoning-toggle-"]')).toHaveLength(0)
     plain.unmount()
   })
+
+  it('反馈摘要按完整字素截取前 200 个 UTF-16 码元', async () => {
+    const family = '👨‍👩‍👧‍👦'
+    const content = `${'a'.repeat(199)}${family}`
+    const wrapper = await mountPanel([buildMessage([{ kind: 'text', seg: 0, text: content, streaming: false }])])
+
+    await wrapper.find('[data-testid="feedback-up-a-1"]').trigger('click')
+    await flushPromises()
+
+    expect(api.feedbackSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      excerpt: 'a'.repeat(199)
+    }))
+    wrapper.unmount()
+  })
 })

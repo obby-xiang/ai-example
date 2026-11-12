@@ -6332,6 +6332,34 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1240 APPROVED；五个DEBUG开关及相关业务单点均独立通过，生产编译BUILD SUCCESS；全量测试、真实Redis和共享文件其他控制块NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:815b2b22350a5f9a9d193eae36259b439f6bf89d3a4d2a215a6b8ea7be5e912e",
+      "status": "reviewed",
+      "reason": "逐hunk复核前端五个真实字符串切割点及共享字素工具，确认只改变截断边界，不改变UTF-16长度单位、分页游标、数组切片或输入maxlength。",
+      "reviewedAt": "2026-11-12T13:41:02+08:00",
+      "reviewer": "K3.1 Pro主会话静态复审、施工agent-1244",
+      "specChanges": [
+        {
+          "change": "反馈摘要、UI快照文本与控件行、区域文本及上传文件名的截断改为完整Unicode字素边界。",
+          "reason": "原UTF-16 slice可能切断组合字符、ZWJ、国旗、keycap或tag序列，产生不可读文本。",
+          "impact": "长度预算和nextOffset仍按UTF-16 code unit；首个超长字素显式省略并继续后续块，不伪造回退、不空循环，其他数组分页与接口契约不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "反馈摘要仅将前200码元slice替换为字素安全前缀，提交评分和异常恢复逻辑不变。"},
+        {"path": "frontend/src/utils/ai-dom-tools.ts", "status": "checked", "reason": "四处真实文本截断复用共享字素工具，DOM角色、状态、region去重、扫描计数和文件名扩展名规则保持。"},
+        {"path": "frontend/src/utils/graphemes.ts", "status": "checked", "reason": "懒复用原生Intl.Segmenter，预算校验、完整前缀、下一offset及超长字素推进语义明确，无新增依赖或码点近似。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用运行环境原生Intl.Segmenter并集中为一个工具模块，未新增polyfill、依赖或第二套截断算法。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批只有TypeScript/Vue生产代码；施工记录确认三个生产文件均已执行IDEA Reformat。"},
+        "logging-exception-safety": {"status": "checked", "reason": "非法预算明确抛RangeError，不支持Intl.Segmenter的环境不静默退回切断字素，超长字素以omitted标记而不吞没进度。"},
+        "toc-interaction": {"status": "checked", "reason": "只避免可见摘要、UI文本和文件名出现破碎字符，不新增提示、按钮、状态或用户操作。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "未修改API、Redis、数据库、任务状态或并发协议。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "完整覆盖组合acute、ZWJ、肤色、区域指示符、keycap、tag、CRLF和超长组合字素，offset继续保持UTF-16码元单位。"},
+        "verification-review": {"status": "checked", "reason": "施工agent-1244报告14个独立Vitest进程单点GREEN，npm run typecheck及node scripts/build.mjs成功；主控仅静态复审未重跑测试，旧浏览器实机和前端全量套件NOT_RUN。"}
+      }
     }
   ]
 }

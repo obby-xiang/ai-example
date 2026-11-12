@@ -32,6 +32,7 @@ import type { FrontendToolOutcome } from '@/types/tools'
 import { translate } from '@/composables/useCopy'
 import { formatUiReceipt } from './ui-receipt'
 import { logCaughtError } from '@/utils/log-caught-error'
+import { chunkGraphemes, takeGraphemePrefix } from './graphemes'
 import type { AiRisk } from './ai-regions'
 import {
   currentAiEpoch,
@@ -236,7 +237,8 @@ function normalizeSpace(text: string): string {
 }
 
 function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text
+  const prefix = takeGraphemePrefix(text, max)
+  return prefix.omitted ? `${prefix.text}…` : prefix.text
 }
 
 function delay(ms: number): Promise<void> {
@@ -845,7 +847,7 @@ function formatRow(ref: string, role: UiRole, el: HTMLElement): string {
     return line
   }
   const budget = UI_SNAPSHOT_LINE_MAX_CHARS - (`[${ref}] ${role} "${''}" state=${state}${fill}${valuePart}`.length)
-  const trimmed = budget > 1 ? `${label.slice(0, budget - 1)}…` : ''
+  const trimmed = budget > 1 ? `${takeGraphemePrefix(label, budget - 1).text}…` : ''
   return `[${ref}] ${role} "${trimmed}" state=${state}${fill}${valuePart}`
 }
 
@@ -895,8 +897,12 @@ export function collectRegionText(regionList: readonly AiRegion[]): UiTextSectio
     seen.add(text)
     scanned += text.length
     originalChars += text.length
-    for (let offset = 0; offset < text.length; offset += UI_SNAPSHOT_LINE_MAX_CHARS) {
-      lines.push(text.slice(offset, offset + UI_SNAPSHOT_LINE_MAX_CHARS))
+    for (const chunk of chunkGraphemes(text, UI_SNAPSHOT_LINE_MAX_CHARS)) {
+      if (chunk.text !== '') {
+        lines.push(chunk.text)
+      } else if (chunk.omitted) {
+        lines.push('…')
+      }
     }
   }
 
@@ -2127,7 +2133,7 @@ export function uploadFileNameOf(file: File): string {
   const dot = base.lastIndexOf('.')
   const ext = dot > 0 ? base.slice(dot) : ''
   const keep = Math.max(1, UI_UPLOAD_NAME_MAX_CHARS - ext.length - 1)
-  return `${base.slice(0, keep)}…${ext}`
+  return `${takeGraphemePrefix(base, keep).text}…${ext}`
 }
 
 /** 浏览器是否支持 `showOpenFilePicker`（供 store 提前分流 available/degraded）。 */

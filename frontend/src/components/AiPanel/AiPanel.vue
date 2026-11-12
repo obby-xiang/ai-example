@@ -1290,6 +1290,7 @@ import type { SheetAppliedSummary } from '@/utils/sheet-tools'
 import type { FormSpec } from '@/types/form-schema'
 import type { ErrorCardVariant } from '@/utils/error-card'
 import { logCaughtError } from '@/utils/log-caught-error'
+import { takeGraphemePrefix } from '@/utils/graphemes'
 
 
 const { t, locale } = useI18n()
@@ -4587,7 +4588,7 @@ async function rateMessage(m: ChatMessage, rating: 1 | -1): Promise<void> {
   }
   feedbackState.value = next
   // R-163 收口修 F2：上报携被评价消息正文前 200 字符快照（人工复盘可读摘要）
-  const saved = await ai.submitFeedback(m.id, finalRating, m.content.slice(0, 200))
+  const saved = await ai.submitFeedback(m.id, finalRating, takeGraphemePrefix(m.content, 200).text)
   if (!saved) {
     // 服务端没记上 ⇒ 本地态不得停在"已选中"
     feedbackState.value = before
