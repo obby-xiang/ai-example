@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  * <caption>表单级属性（{@code form}）</caption>
  * <tr><th>属性</th><th>必填</th><th>约束</th></tr>
  * <tr><td>{@code scenario}</td><td>是</td><td>{@code FILTER}（收集筛选条件）/ {@code CLARIFY}（询问澄清）</td></tr>
- * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件，显式给出时固定为<b>单个非必填 text 框</b>，可带 {@code variant=longText}）/ {@code TASK_TYPE}（收集任务类型，固定为<b>单个 enum 单选 {@code EXPORT/IMPORT}</b>）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省时按结构推断（definitions 数据源 → 选择，FILTER → 条件），<b>形状约束只对显式 purpose 生效</b></td></tr>
+ * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件，只接受必填 {@code conditionMode} 枚举与 CUSTOM 可见的非必填文本框组成的双字段表单）/ {@code TASK_TYPE}（收集任务类型，固定为<b>单个 enum 单选 {@code EXPORT/IMPORT}</b>）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省时按结构推断（definitions 数据源 → 选择，FILTER → 条件），<b>形状约束只对显式 purpose 生效</b></td></tr>
  * <tr><td>{@code title}</td><td>否</td><td>文本 ≤ {@value #MAX_TITLE_CHARS} 字符</td></tr>
  * <tr><td>{@code fields}</td><td>是</td><td>1..{@value #MAX_FIELDS} 个字段</td></tr>
  * </table>
@@ -118,6 +118,14 @@ public final class GenerativeFormRules {
 	public static final String PURPOSE_SELECT_DEFINITIONS = FormPurposes.SELECT_DEFINITIONS;
 
 	public static final String PURPOSE_SET_CONDITIONS = FormPurposes.SET_CONDITIONS;
+
+	public static final String CONDITION_MODE_KEY = "conditionMode";
+
+	public static final String CONDITION_MODE_CUSTOM = "CUSTOM";
+
+	public static final String CONDITION_MODE_ALL = "ALL";
+
+	public static final String CONDITION_TEXT_KEY = "conditions";
 
 	/**
 	 * 收集<b>任务类型</b>的用途（2026-10-29 闭环批）：只在类型未知时下发，
@@ -447,7 +455,7 @@ public final class GenerativeFormRules {
 	 *
 	 * <ul>
 	 * <li>{@code TASK_TYPE}：恰好 1 个 {@code enum} 字段，选项正好 {@code EXPORT/IMPORT}；</li>
-	 * <li>{@code SET_CONDITIONS}：恰好 1 个非必填 {@code text} 字段（可带 {@code variant=longText}）。</li>
+	 * <li>{@code SET_CONDITIONS}：只接受 {@code conditionMode + conditions} 双字段。</li>
 	 * </ul>
 	 *
 	 * <p>形状不合规 = <b>schema 级拒绝</b>（零副作用：表单不下发、不挂起），模型改一版即可用。
@@ -494,26 +502,88 @@ public final class GenerativeFormRules {
 	}
 
 	private static List<FormIssue> conditionShapeIssues(JsonNode fields) {
+		if (fields.size() != 2) {
+			return List.of(FormIssue.form(FormIssueCodes.FORM_FIELDS_TOO_MANY,
+					"purpose=SET_CONDITIONS 只接受 conditionMode + conditions 双字段，实际 " + fields.size() + " 个"));
+		}
+		return conditionModeShapeIssues(fields);
+	}
+
+	private static List<FormIssue> conditionModeShapeIssues(JsonNode fields) {
+		JsonNode mode = null;
+		JsonNode conditions = null;
+		for (JsonNode field : fields) {
+			String key = field == null ? null : textOrNull(field.get("key"));
+			if (CONDITION_MODE_KEY.equals(key)) {
+				mode = field;
+			}
+			else if (CONDITION_TEXT_KEY.equals(key)) {
+				conditions = field;
+			}
+		}
+		if (mode == null || conditions == null) {
+			return List.of(FormIssue.form(FormIssueCodes.FIELD_KEY_MISSING,
+					"conditionMode + conditions 双字段必须同时使用这两个固定 key"));
+		}
 		List<FormIssue> issues = new ArrayList<>();
-		if (fields.size() != 1) {
-			issues.add(FormIssue.form(FormIssueCodes.FORM_FIELDS_TOO_MANY,
-					"purpose=SET_CONDITIONS 的表单只允许 1 个自由文本框（条件由模型从这段文本解析），实际 " + fields.size()
-							+ " 个"));
-			return issues;
+		issues.addAll(conditionModeFieldIssues(mode));
+		issues.addAll(conditionTextFieldIssues(conditions));
+		return issues;
+	}
+
+	private static List<FormIssue> conditionModeFieldIssues(JsonNode mode) {
+		List<FormIssue> issues = new ArrayList<>();
+		String at = fieldKeyOrIndex(mode, 0);
+		if (!"enum".equals(textOrNull(mode.get("type")))) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_TYPE_UNSUPPORTED, "conditionMode 必须是 enum"));
 		}
-		JsonNode field = fields.get(0);
-		String at = fieldKeyOrIndex(field, 0);
-		String type = textOrNull(field.get("type"));
-		if (!"text".equals(type)) {
-			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_TYPE_UNSUPPORTED,
-					"purpose=SET_CONDITIONS 的字段类型必须是 text（自由文本，可带 variant=longText），实际 type=" + type));
+		JsonNode required = mode.get("required");
+		if (required == null || !required.isBoolean() || !required.asBoolean()) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_REQUIRED_INVALID, "conditionMode 必须 required=true"));
 		}
-		JsonNode required = field.get("required");
-		if (required != null && required.isBoolean() && required.asBoolean()) {
-			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_REQUIRED_INVALID,
-					"条件收集框必须非必填：留空 = 不设筛选（直接 confirm_step 全量推进），写成 required=true 会把留空卡死"));
+		if (!CONDITION_MODE_CUSTOM.equals(textOrNull(mode.get("defaultValue")))) {
+			issues.add(FormIssue.field(at, FormIssueCodes.DEFAULT_TYPE_MISMATCH, "conditionMode 的 defaultValue 必须是 CUSTOM"));
+		}
+		List<String> options = optionValues(mode);
+		if (options.size() != 2 || !options.contains(CONDITION_MODE_CUSTOM)
+				|| !options.contains(CONDITION_MODE_ALL)) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_ATTRIBUTE_INVALID, "conditionMode 的选项必须正好是 CUSTOM/ALL"));
+		}
+		if (mode.get("visibleWhen") != null) {
+			issues.add(FormIssue.field(at, FormIssueCodes.LINKAGE_CONDITION_INVALID, "conditionMode 不得配置 visibleWhen"));
 		}
 		return issues;
+	}
+
+	private static List<FormIssue> conditionTextFieldIssues(JsonNode conditions) {
+		List<FormIssue> issues = new ArrayList<>();
+		String at = fieldKeyOrIndex(conditions, 1);
+		if (!"text".equals(textOrNull(conditions.get("type")))) {
+			issues.add(FormIssue.field(at, FormIssueCodes.FIELD_TYPE_UNSUPPORTED, "conditions 必须是 text"));
+		}
+		issues.addAll(optionalConditionTextIssues(conditions, at));
+		JsonNode visible = conditions.get("visibleWhen");
+		if (!isCustomVisibility(visible)) {
+			issues.add(FormIssue.field(at, FormIssueCodes.LINKAGE_CONDITION_INVALID,
+					"conditions 的 visibleWhen 必须正好是 conditionMode eq CUSTOM"));
+		}
+		return issues;
+	}
+
+	private static List<FormIssue> optionalConditionTextIssues(JsonNode field, String at) {
+		JsonNode required = field.get("required");
+		if (required != null && required.isBoolean() && required.asBoolean()) {
+			return List.of(FormIssue.field(at, FormIssueCodes.FIELD_REQUIRED_INVALID,
+					"条件收集框必须非必填：留空 = 不设筛选（直接 confirm_step 全量推进），写成 required=true 会把留空卡死"));
+		}
+		return List.of();
+	}
+
+	private static boolean isCustomVisibility(JsonNode visible) {
+		return visible != null && visible.isObject() && visible.size() == 3
+				&& CONDITION_MODE_KEY.equals(textOrNull(visible.get("key")))
+				&& "eq".equals(textOrNull(visible.get("op")))
+				&& CONDITION_MODE_CUSTOM.equals(textOrNull(visible.get("value")));
 	}
 
 	/** 问题归属：有 key 用 key，否则用 {@code fields[i]}（与字段级校验同一口径）。 */

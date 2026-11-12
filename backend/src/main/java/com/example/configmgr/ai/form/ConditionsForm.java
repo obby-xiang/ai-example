@@ -31,7 +31,9 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -47,18 +49,18 @@ import java.util.Set;
  * <h2>三条路径</h2>
  * <ol>
  * <li>{@code create_task(conditions=…)} 的候选：进入 {@code QUERY_COND} 后，按 {@code defCodes}
- * 逐项用与 {@code set_condition} 同一份 {@link WizardActionGuard} 校验；合法项复用既有前端
- * {@code set_condition} 通道生成<b>页面草案</b>（确定性 {@code toolCallId} + 幂等），不弹
+ * 逐项用与条件结构化工具同一份 {@link WizardActionGuard} 校验；合法项复用既有前端
+ * 条件结构化通道生成<b>页面草案</b>（确定性 {@code toolCallId} + 幂等），不弹
  * {@code SET_CONDITIONS} 表单；绑定错误/校验失败/下发失败只记 WARN，走内部失败口径，不转化为再次询问用户。
  * <b>候选来源</b>：{@code extra} 优先，缺失或绑定信息丢失时回落本轮已结算 {@code create_task}
  * 原始入参/会话级 Redis 草案（{@link CreateTaskDraftStore}：runId 解析会话号、字段 = taskId，
  * 跨轮存活）；读取异常按内部失败处理；</li>
  * <li>真正的未知条件：刚进入 {@code QUERY_COND} 的首次交棒先置
- * {@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}，交给模型用既有 {@code set_condition} 通道
- * 结构化用户已给出的筛选值（本轮不弹表）；仍未知时宿主只挂<b>一次</b>非必填自由文本框
+ * {@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}，交给模型用既有条件结构化通道
+ * 结构化用户已给出的筛选值（本轮不弹表）；仍未知时宿主只挂<b>一次</b>条件模式与文本表单
  * （{@code purpose=SET_CONDITIONS}）；已知候选、已有草案、已明确留空都不弹；</li>
  * <li>{@code confirm_step} 推进到 {@code EXPORT} 前复核：任务条目已落库条件、本轮已成功结算的
- * {@code set_condition} 草案（按 {@code defCode} 与任务绑定核对）、表单明确留空，三者都认可；
+ * 条件结构化草案（按 {@code defCode} 与任务绑定核对）、表单明确留空，三者都认可；
  * 非空表单回灌必须先由模型解析成草案才能确认；后端不代写 {@code "{}"}。</li>
  * </ol>
  *
@@ -68,7 +70,7 @@ import java.util.Set;
  * <li>任务真实 {@code currentStep} 是 {@code QUERY_COND}（不看模型自报的步骤）；
  *     {@code SELECT_DEFS → EXPORT} 的直接跳步<b>零副作用拒绝</b>；</li>
  * <li>条件未知/无法解析时才收集；模型已知但未落库、或条件表回灌了非空文本却未落库 ⇒
- *     <b>零副作用拒绝 confirm_step 并指回 set_condition</b>，不弹表单；</li>
+ *     <b>零副作用拒绝 confirm_step 并指回条件结构化通道</b>，不弹表单；</li>
  * <li>同一 run 的条件表单只问一次（含取消/留空）：不换卡重问。</li>
  * </ol>
  */
@@ -77,9 +79,27 @@ import java.util.Set;
 public class ConditionsForm extends HostForm {
 
     /**
-     * 表单唯一字段的 key（回灌值形如 {@code {"conditions":"code = CONFIG_VALUE"}}；空串 = 不设条件）。
+     * 条件文本字段的 key（CUSTOM 回灌值形如 {@code {"conditions":"code = CONFIG_VALUE"}}；空串 = 不设条件）。
      */
-    public static final String FIELD_KEY = "conditions";
+    public static final String FIELD_KEY = GenerativeFormRules.CONDITION_TEXT_KEY;
+
+    public static final String MODE_KEY = GenerativeFormRules.CONDITION_MODE_KEY;
+
+    public static final String MODE_CUSTOM = GenerativeFormRules.CONDITION_MODE_CUSTOM;
+
+    public static final String MODE_ALL = GenerativeFormRules.CONDITION_MODE_ALL;
+
+    private static final String MODE_LABEL = "筛选方式";
+
+    private static final String MODE_LABEL_EN = "Filter mode";
+
+    private static final String MODE_CUSTOM_LABEL = "自定义筛选";
+
+    private static final String MODE_CUSTOM_LABEL_EN = "Custom filters";
+
+    private static final String MODE_ALL_LABEL = "全部数据（不筛选）";
+
+    private static final String MODE_ALL_LABEL_EN = "All data (no filters)";
 
     /**
      * 表单标题（与提示词同一语言）。
@@ -117,7 +137,7 @@ public class ConditionsForm extends HostForm {
     public static final String TOOL_CALL_ID_PREFIX = "host-cond-form-";
 
     /**
-     * 宿主下发 {@code set_condition} 页面草案的 {@code toolCallId} 前缀（run/task/defCode 全部编码在内）。
+     * 宿主下发 条件结构化工具 页面草案的 {@code toolCallId} 前缀（run/task/defCode 全部编码在内）。
      */
     public static final String DRAFT_TOOL_CALL_ID_PREFIX = "host-cond-draft-";
 
@@ -137,7 +157,7 @@ public class ConditionsForm extends HostForm {
 
     /**
      * 条件候选下发前的复核器（可选依赖）：{@code create_task(conditions=…)} 的候选必须过与
-     * {@code set_condition} 同一份校验（定义存在、字段属于该定义、算子/取值合法）。未注入 =
+     * 条件结构化工具 同一份校验（定义存在、字段属于该定义、算子/取值合法）。未注入 =
      * 不生成草案（fail-safe：绝不把未校验的条件写成页面事实），走内部失败口径而不是再问用户。
      */
     private WizardActionGuard wizardActionGuard;
@@ -189,7 +209,7 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * 宿主为某个任务的某个配置项下发的 {@code set_condition} 草案 id（确定性 = 幂等去重）。
+     * 宿主为某个任务的某个配置项下发的 条件结构化工具 草案 id（确定性 = 幂等去重）。
      */
     static String draftToolCallId(String runId, long taskId, String defCode) {
         return DRAFT_TOOL_CALL_ID_PREFIX + (runId == null ? "" : runId + "-") + taskId + "-" + defCode;
@@ -215,17 +235,16 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * 按<b>当前缺口</b>生成的条件表单 {@code toolCallId}：全部配置项都未决定时沿用旧号（兼容既有卡），
-     * 只剩部分项时追加缺口集合 —— 同一缺口只问一次，剩余项不会被"已问过"永久挡住。
+     * 每次下发都把当次完整缺口冻结进 {@code toolCallId}。单项使用 Base64URL 编码，
+     * 多项以 {@code .} 分隔，defCode 中的连字符不会造成解析歧义。
      */
     static String toolCallId(String runId, long taskId, List<String> undecidedDefCodes, List<String> allDefCodes) {
-        String base = toolCallId(runId, taskId);
-        if (CollectionUtils.isEmpty(undecidedDefCodes) || allDefCodes == null
-                || undecidedDefCodes.size() >= allDefCodes.size()) {
-            // 全部配置项都未决定 = 首张条件表：沿用旧号（既有卡与去重口径不变）
-            return base;
-        }
-        return base + "-" + String.join("-", undecidedDefCodes);
+        List<String> encoded = undecidedDefCodes.stream().map(ConditionsForm::encodeDefCode).toList();
+        return toolCallId(runId, taskId) + "-" + String.join(".", encoded);
+    }
+
+    private static String encodeDefCode(String defCode) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(defCode.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -249,7 +268,7 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * 判据成立时挂起非必填文本框。
+     * 判据成立时挂起条件模式与可选文本表单。
      *
      * @param runId    本轮 id
      * @param context  本轮<b>权威上下文</b>（taskId 来自这里；步骤仍以任务真实值为准）
@@ -298,14 +317,14 @@ public class ConditionsForm extends HostForm {
      * 行为：
      * <ul>
      * <li>{@code create_task(conditions=…)} 候选合法且绑定当前任务/配置项：复用前端
-     *     {@code set_condition} 通道下发页面草案（逐 defCode、确定性 id、幂等），不弹条件表；</li>
+     *     条件结构化工具 通道下发页面草案（逐 defCode、确定性 id、幂等），不弹条件表；</li>
      * <li>候选绑定错误/校验失败/下发失败：只记 WARN，内部失败口径（不弹表、不写库、不再问用户）；</li>
      * <li>任务已有条件或本轮已有成功草案：直接推进；</li>
      * <li>表单覆盖当前全部 UNDECIDED 的明确留空、取消或非空回灌：不自动重问，也不代写 {@code "{}"}；
      * 新增配置项未被旧留空覆盖时必须单独收集；</li>
      * <li>仍 {@code UNDECIDED}：{@code allowUnknownForm=false}（刚成功推进到 {@code QUERY_COND}
      *     的首次交棒）时只置 {@link AiContext#EXTRA_CONDITION_STRUCTURE_HANDOFF}，把"用户已给出的
-     *     筛选值"交给既有 {@code set_condition} 结构化通道，不抢着弹表；其余交棒挂一次非必填
+     *     筛选值"交给既有 条件结构化工具 结构化通道，不抢着弹表；其余交棒挂一次非必填
      *     {@code SET_CONDITIONS} 表单；</li>
      * <li>坏 JSON/残缺结构：不弹表（交给向导修正/模型结构化路径），零副作用。</li>
      * </ul>
@@ -333,7 +352,7 @@ public class ConditionsForm extends HostForm {
 
     /**
      * @param allowUnknownForm {@code false} = 刚进入 {@code QUERY_COND} 的首次交棒：条件仍未知时
-     *                         不弹表，只置条件结构化交棒标记（模型下一跳用既有 {@code set_condition}
+     *                         不弹表，只置条件结构化交棒标记（模型下一跳用既有 条件结构化工具
      *                         通道结构化用户已给出的值）；{@code true} = 条件仍未知时挂一次条件表。
      *                         已知候选/已落库条件在两种口径下都不受影响。
      *                         快照 {@code unavailable=true} 时在任务读取前失败关闭，不生成任何新动作；
@@ -387,10 +406,10 @@ public class ConditionsForm extends HostForm {
         DraftFacts drafts = draftFacts(runId, task);
         ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
         if (plan.malformed()) {
-            // 坏结构不弹表：由向导修正或模型走 set_condition 结构化路径
+            // 坏结构不弹表：由向导修正或模型走条件结构化路径
             return new QueryCondEvaluation(drafts, plan, null, false, true);
         }
-        ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
+        ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided(), task);
         if (feedback.blank()) {
             return new QueryCondEvaluation(drafts, plan, feedback, true, false);
         }
@@ -403,7 +422,8 @@ public class ConditionsForm extends HostForm {
 
     private boolean shouldParkUnknownConditionForm(String runId, long taskId, Task task, AiContext context,
                                                    QueryCondEvaluation evaluation, List<Message> history, boolean allowUnknownForm) {
-        List<String> remaining = subtract(evaluation.plan().undecided(), evaluation.drafts().settled());
+        List<String> remaining = subtract(subtract(evaluation.plan().undecided(), evaluation.drafts().settled()),
+                evaluation.feedback().covered());
         if (remaining.isEmpty()) {
             // 任务已有条件（已落库）/ 本轮已有成功草案：直接推进，不弹表
             return false;
@@ -418,7 +438,7 @@ public class ConditionsForm extends HostForm {
             return false;
         }
         if (!allowUnknownForm) {
-            // 刚进入条件步骤：先把"用户原话里已给出的筛选值"交给模型用既有 set_condition 通道结构化
+            // 刚进入条件步骤：先把"用户原话里已给出的筛选值"交给模型用既有条件结构化通道
             // （披露面与执行面据此只留查定义/设置条件/推进）。未知条件仍由后续交棒或正文收尾收集一次。
             Map<String, Object> extra = new LinkedHashMap<>(context.getExtra());
             extra.put(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF, Boolean.TRUE);
@@ -446,12 +466,12 @@ public class ConditionsForm extends HostForm {
      * 统一复核 {@code confirm_step}：
      * <ol>
      * <li><b>禁止跳步</b>：{@code SELECT_DEFS} 不能直接点名 {@code EXPORT}（会跳过 QUERY_COND 与条件收集）；</li>
-     * <li><b>合法候选</b>：{@code create_task(conditions=…)} 的候选先下发成前端 {@code set_condition}
+     * <li><b>合法候选</b>：{@code create_task(conditions=…)} 的候选先下发成前端 条件结构化工具
      * 页面草案（不写库、不弹表）；绑定/校验失败走内部失败口径，不转化成再次询问用户；</li>
-     * <li><b>草案事实</b>：本轮已成功结算的 {@code set_condition} 草案（按 defCode 与任务绑定核对）
+     * <li><b>草案事实</b>：本轮已成功结算的 条件结构化工具 草案（按 defCode 与任务绑定核对）
      * 与任务条目已落库条件一样认可；不要求 {@code conditionJson} 提前存在；</li>
      * <li><b>表单回灌</b>：当前 UNDECIDED 均被覆盖的明确留空才允许推进（前端 {@code persistStepData} 提交 {@code {}}）；
-     * 非空文本必须已按表单覆盖的 defCode 解析成草案，否则零副作用拒绝并指回 {@code set_condition}；</li>
+     * 非空文本必须已按表单覆盖的 defCode 解析成草案，否则零副作用拒绝并指回 条件结构化工具；</li>
      * <li><b>逐项核对</b>：真正未知的配置项才挂一次可选条件表单；取消过的表单不换卡重问。</li>
      * <li><b>收集失败不得 allow（F3）</b>：{@code park} 未启用、挂起写失败、读任务异常、同一缺口的
      * 条件表已存在且未结算 —— 条件仍 {@code UNDECIDED} 时一律 {@code TOOL_EXECUTION_FAILED}
@@ -615,7 +635,7 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * 把本轮结构化 {@code create_task(conditions=…)} 的候选<b>下发成前端 {@code set_condition} 页面草案</b>
+     * 把本轮结构化 {@code create_task(conditions=…)} 的候选<b>下发成前端 条件结构化工具 页面草案</b>
      * （<b>不写业务库</b>；真正的提交由前端 {@code persistStepData} 在下一步完成）。
      *
      * <p><b>候选来源</b>（见 {@link #resolveCandidateSource}）：运行上下文 {@code extra} 优先；
@@ -628,7 +648,7 @@ public class ConditionsForm extends HostForm {
      * {@code extra.createTaskTaskId} 一致、条目 {@code defCode} 必须在候选 {@code defCodes} 里；
      * 切到别的任务、或后续新增的配置项都不会被下发。
      *
-     * <p>校验与 {@code set_condition} 同一份（{@link WizardActionGuard}）：定义存在、字段属于该定义、
+     * <p>校验与 条件结构化工具 同一份（{@link WizardActionGuard}）：定义存在、字段属于该定义、
      * 算子/取值合法、非空条件；不通过 ⇒ <b>不下发</b>（绝不把未校验条件写成页面事实），
      * 并标记内部失败（不弹条件表、不再问用户）。
      *
@@ -918,7 +938,7 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * {@code set_condition} 的入参原文（与模型调用同形）；序列化失败 = {@code null}。
+     * 条件结构化工具 的入参原文（与模型调用同形）；序列化失败 = {@code null}。
      */
     private static String conditionArguments(String defCode, Map<?, ?> conditions) {
         Map<String, Object> args = new LinkedHashMap<>();
@@ -969,7 +989,7 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * {@code set_condition} 入参里的 defCode（坏 JSON/缺键 = null）。
+     * 条件结构化工具 入参里的 defCode（坏 JSON/缺键 = null）。
      */
     private static String defCodeOf(String argumentsJson) {
         JsonNode arguments = parseJson(argumentsJson);
@@ -982,7 +1002,7 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * <b>同一 run + 当前任务 + 同 {@code defCode} + 完全相同入参</b>的 {@code set_condition} 已成功结算
+     * <b>同一 run + 当前任务 + 同 {@code defCode} + 完全相同入参</b>的 条件结构化工具 已成功结算
      * ⇒ 返回原回执（幂等重放，F11）。
      *
      * <p>为什么要这一层：模型常在同一轮里把同一个条件再发一次（换个措辞、或重试），
@@ -1048,7 +1068,7 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * {@code set_condition} 入参的内容签名（{@code defCode + conditions 结构}；坏 JSON/缺键 = {@code null}）。
+     * 条件结构化工具 入参的内容签名（{@code defCode + conditions 结构}；坏 JSON/缺键 = {@code null}）。
      * 供同一批次内的重复调用去重（F11）：一次批次里出现两条完全相同的调用时，第二条不再挂起。
      */
     public static String setConditionSignature(String argumentsJson) {
@@ -1139,7 +1159,7 @@ public class ConditionsForm extends HostForm {
     }
 
     private ConditionGateFacts evaluateConditionGate(String runId, long taskId, Task task) {
-        // ① 草案事实只来自 Redis 待决条目：任务 conditionJson 已落库条件 + 本轮成功的 set_condition 草案，
+        // ① 草案事实只来自 Redis 待决条目：任务 conditionJson 已落库条件 + 本轮成功的条件结构化草案，
         // 以及表单明确留空。坏 JSON/残缺结构明确拒绝，不按全量放行。
         DraftFacts drafts = draftFacts(runId, task);
         ExportConditionWorkflow.Plan plan = this.conditionWorkflow.plan(task);
@@ -1154,16 +1174,16 @@ public class ConditionsForm extends HostForm {
             // 任务条目已有条件事实（已设置/明确不设）：历史回灌不再挡路
             return new ConditionGateFacts(ConfirmStepDecision.allow());
         }
-        ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided());
-        List<String> remaining = subtract(plan.undecided(), drafts.settled());
-        // ② 旧表单明确留空只在其 defCode 覆盖当前全部 UNDECIDED 时允许推进；
+        ConditionFeedback feedback = feedbackOf(runId, taskId, plan.undecided(), task);
+        List<String> remaining = subtract(subtract(plan.undecided(), drafts.settled()), feedback.covered());
+        // ② 表单明确留空只在其 defCode 覆盖当前全部 UNDECIDED 时允许推进；
         // 后端<b>不写</b> "{}"，由前端在离开 QUERY_COND 时经 persistStepData 提交。新增项必须重新收集。
         // 留空也压过 create_task 候选：用户的最新明确回答优先。
         if (feedback.blank()) {
             return new ConditionGateFacts(ConfirmStepDecision.allow());
         }
-        // ③ 非空回灌必须先由模型解析成 set_condition 草案；在此之前不得下发候选或换卡重问。
-        // 拒绝清单只点名**还没有草案**的剩余项：已按 set_condition(defCode, {}) 结算的配置项不算缺口。
+        // ③ 非空回灌必须先由模型解析成条件结构化草案；在此之前不得下发候选或换卡重问。
+        // 拒绝清单只点名**还没有草案**的剩余项：已按空对象明确不设并结算的配置项不算缺口。
         if (feedback.nonEmpty() && !feedback.handled()) {
             log.info("confirm_step saw non-empty condition text without a matching draft; rejected with no side effects runId={} taskId={}", runId, taskId);
             return new ConditionGateFacts(unparsedFeedbackDecision(remaining));
@@ -1174,7 +1194,7 @@ public class ConditionsForm extends HostForm {
     private ConditionGateCandidates dispatchGateCandidates(String runId, long taskId, AiContext context, Task task,
                                                            ConditionGateFacts facts, List<Message> history, String assistantContent,
                                                            Map<String, Object> assistantMetadata, boolean allowPark) {
-        // ④ 合法 create_task 候选：复用前端 set_condition 通道生成页面草案（不弹条件表、不写库）
+        // ④ 合法 create_task 候选：复用前端条件结构化通道生成页面草案（不弹条件表、不写库）
         CandidateDispatch candidates = isParkEnabled()
                 ? dispatchCreateTaskCandidates(runId, taskId, context, task, facts.drafts())
                 : CandidateDispatch.none();
@@ -1318,11 +1338,10 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * 非空表单回灌尚未被模型解析成 set_condition 草案：零副作用拒绝，不换卡重问。
+     * 非空 CUSTOM 回灌尚未被模型解析成条件结构化草案：零副作用拒绝，不换卡重问。
      *
-     * <p>{@code remaining} = 还没有成功草案的配置项（已结算的不再点名）。用户可能用"无"/"不筛选"
-     * 回答条件表 —— 那是<b>逐项明确不设</b>，对表单覆盖的每个 {@code defCode} 各调用一次
-     * {@code set_condition(defCode, {})}（恰好空对象 = EXPLICIT_UNSET），不要重发条件表。
+     * <p>{@code remaining} = 还没有成功草案的配置项（已结算的不再点名）。明确全量由
+     * {@code conditionMode=ALL} 或 CUSTOM 留空表达，不从自由文本猜测。
      */
     private static ConfirmStepDecision unparsedFeedbackDecision(List<String> remaining) {
         return ConfirmStepDecision.reject(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
@@ -1335,7 +1354,20 @@ public class ConditionsForm extends HostForm {
                         "不得改用第二张条件表单重复收集"));
     }
 
-    record ConditionFeedback(boolean cancelled, boolean blank, boolean nonEmpty, boolean handled) {
+    record ConditionFeedback(boolean cancelled, boolean blank, boolean nonEmpty, boolean handled, Set<String> covered,
+                             long submittedAtMs) {
+
+        ConditionFeedback(boolean cancelled, boolean blank, boolean nonEmpty, boolean handled) {
+            this(cancelled, blank, nonEmpty, handled, Set.of(), 0);
+        }
+
+        ConditionFeedback(boolean cancelled, boolean blank, boolean nonEmpty, boolean handled, Set<String> covered) {
+            this(cancelled, blank, nonEmpty, handled, covered, 0);
+        }
+
+        ConditionFeedback {
+            covered = Set.copyOf(ObjectUtils.defaultIfNull(covered, Set.of()));
+        }
 
         static ConditionFeedback none() {
             return new ConditionFeedback(false, false, false, false);
@@ -1361,19 +1393,8 @@ public class ConditionsForm extends HostForm {
     private long successfulBlankConditionFormResolvedAt(String runId, long taskId, Task task,
                                                         List<String> undecidedDefCodes) {
         try {
-            PendingToolCall latest = latestConditionForm(runId, taskId);
-            if (latest == null || !PendingToolCall.FRONTEND_RESULT.equals(latest.getStatus())
-                    || latest.effectiveOutcome() != ToolOutcome.OK || task.getUpdatedAt() == null) {
-                return -1;
-            }
-            String text = conditionTextOf(latest.getArguments(), latest.getResultText());
-            Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
-            if (text == null || !BlankText.isBlank(text) || asked.isEmpty() || undecidedDefCodes == null
-                    || !asked.containsAll(undecidedDefCodes)) {
-                return -1;
-            }
-            long taskUpdatedAtMs = task.getUpdatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
-            return latest.getResolvedAtMs() > taskUpdatedAtMs ? latest.getResolvedAtMs() : -1;
+            ConditionFeedback feedback = feedbackOf(runId, taskId, undecidedDefCodes, task);
+            return feedback.blank() ? feedback.submittedAtMs() : -1;
         } catch (RuntimeException ex) {
             log.warn("could not prove a current successful blank condition form; host skips advance runId={} taskId={}",
                     runId, taskId, ex);
@@ -1381,22 +1402,44 @@ public class ConditionsForm extends HostForm {
         }
     }
 
-    private PendingToolCall latestConditionForm(String runId, long taskId) {
+    private ConditionFormLookup latestConditionFormForDef(List<PendingToolCall> pendings, String runId, long taskId,
+                                                          List<String> allDefCodes, String defCode) {
         PendingToolCall latest = null;
-        long latestRequestedAtMs = -1;
-        for (PendingToolCall form : this.store.pendingsLenient(runId)) {
-            if (form == null || !GenerativeFormRules.TOOL_NAME.equals(form.getName())
+        boolean ambiguous = false;
+        for (PendingToolCall form : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
+            if (form == null || !form.resolved() || !GenerativeFormRules.TOOL_NAME.equals(form.getName())
                     || !isConditionForm(form.getArguments()) || !isBoundToTask(form.getToolCallId(), runId, taskId)) {
                 continue;
             }
-            long requestedAtMs = form.getRequestedAtMs() > 0 ? form.getRequestedAtMs() : form.getResolvedAtMs();
-            if (latest == null || requestedAtMs > latestRequestedAtMs
-                    || requestedAtMs == latestRequestedAtMs && form.getResolvedAtMs() >= latest.getResolvedAtMs()) {
+            Set<String> asked = askedDefCodesOf(form, runId, taskId, allDefCodes);
+            if (!asked.contains(defCode)) {
+                continue;
+            }
+            if (latest == null || isLaterConditionForm(form, latest)) {
                 latest = form;
-                latestRequestedAtMs = requestedAtMs;
+                ambiguous = false;
+            }
+            else if (isSameConditionFormTime(form, latest)
+                    && !latest.getToolCallId().equals(form.getToolCallId())) {
+                ambiguous = true;
             }
         }
-        return latest;
+        return new ConditionFormLookup(latest, ambiguous);
+    }
+
+    private static boolean isLaterConditionForm(PendingToolCall candidate, PendingToolCall current) {
+        if (candidate.getResolvedAtMs() != current.getResolvedAtMs()) {
+            return candidate.getResolvedAtMs() > current.getResolvedAtMs();
+        }
+        return candidate.getRequestedAtMs() > current.getRequestedAtMs();
+    }
+
+    private static boolean isSameConditionFormTime(PendingToolCall candidate, PendingToolCall current) {
+        return candidate.getResolvedAtMs() == current.getResolvedAtMs()
+                && candidate.getRequestedAtMs() == current.getRequestedAtMs();
+    }
+
+    private record ConditionFormLookup(PendingToolCall form, boolean ambiguous) {
     }
 
     private boolean isConditionAdvanceHandled(String runId, long submittedAtMs) {
@@ -1414,7 +1457,7 @@ public class ConditionsForm extends HostForm {
         }
     }
 
-    ConditionFeedback feedbackOf(String runId, long taskId, List<String> undecidedDefCodes) {
+    ConditionFeedback feedbackOf(String runId, long taskId, List<String> undecidedDefCodes, Task task) {
         List<PendingToolCall> pendings;
         try {
             pendings = this.store.pendingsLenient(runId);
@@ -1422,61 +1465,95 @@ public class ConditionsForm extends HostForm {
             log.warn("could not read condition form submission (treated as not collected) runId={}", runId, ex);
             return ConditionFeedback.none();
         }
-        PendingToolCall latest = null;
-        for (PendingToolCall form : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
-            if (form == null || !GenerativeFormRules.TOOL_NAME.equals(form.getName())
-                    || !isConditionForm(form.getArguments()) || !isBoundToTask(form.getToolCallId(), runId, taskId)) {
-                continue;
+        Set<String> covered = new LinkedHashSet<>();
+        Set<String> cancelled = new LinkedHashSet<>();
+        Set<String> nonEmpty = new LinkedHashSet<>();
+        Set<String> handled = new LinkedHashSet<>();
+        long submittedAtMs = 0;
+        List<String> allDefCodes = taskDefCodesFor(task);
+        for (String defCode : allDefCodes) {
+            DefFeedback current = latestDefFeedback(pendings, runId, taskId, allDefCodes, defCode);
+            if (current.covered()) {
+                covered.add(defCode);
+                submittedAtMs = Math.max(submittedAtMs, current.submittedAtMs());
             }
-            if (latest == null || form.getResolvedAtMs() >= latest.getResolvedAtMs()) {
-                latest = form;
+            if (current.cancelled()) {
+                cancelled.add(defCode);
+            }
+            if (current.nonEmpty()) {
+                nonEmpty.add(defCode);
+                if (current.handled()) {
+                    handled.add(defCode);
+                }
             }
         }
-        if (latest == null) {
-            return ConditionFeedback.none();
+        boolean blank = !covered.isEmpty() && undecidedDefCodes != null && covered.containsAll(undecidedDefCodes);
+        boolean hasNonEmpty = !nonEmpty.isEmpty();
+        return new ConditionFeedback(!cancelled.isEmpty(), blank, hasNonEmpty,
+                hasNonEmpty && handled.containsAll(nonEmpty), covered, submittedAtMs);
+    }
+
+    private DefFeedback latestDefFeedback(List<PendingToolCall> pendings, String runId, long taskId,
+                                          List<String> allDefCodes, String defCode) {
+        ConditionFormLookup lookup = latestConditionFormForDef(pendings, runId, taskId, allDefCodes, defCode);
+        if (lookup.ambiguous() || lookup.form() == null) {
+            return DefFeedback.none();
         }
+        PendingToolCall latest = lookup.form();
         if (PendingToolCall.FRONTEND_CANCELLED.equals(latest.getStatus())) {
-            return new ConditionFeedback(true, false, false, false);
+            return new DefFeedback(false, true, false, false, 0);
         }
-        if (!PendingToolCall.FRONTEND_RESULT.equals(latest.getStatus())) {
-            return ConditionFeedback.none();
+        if (!PendingToolCall.FRONTEND_RESULT.equals(latest.getStatus()) || latest.effectiveOutcome() != ToolOutcome.OK) {
+            return DefFeedback.none();
         }
-        String text = conditionTextOf(latest.getArguments(), latest.getResultText());
+        String text = conditionTextOf(latest.getResultText());
         if (text == null) {
-            return ConditionFeedback.none();
+            return DefFeedback.none();
         }
         if (BlankText.isBlank(text)) {
-            Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
-            boolean coversCurrentUndecided = !asked.isEmpty()
-                    && undecidedDefCodes != null && asked.containsAll(undecidedDefCodes);
-            return new ConditionFeedback(false, coversCurrentUndecided, false, false);
+            return new DefFeedback(true, false, false, false, latest.getResolvedAtMs());
         }
-        Set<String> asked = askedDefCodesOf(latest, runId, taskId, undecidedDefCodes);
-        return new ConditionFeedback(false, false, true,
-                isConditionDraftSettled(runId, taskId, asked, latest.getResolvedAtMs()));
+        return new DefFeedback(false, false, true,
+                isConditionDraftSettled(runId, taskId, Set.of(defCode), latest.getResolvedAtMs()), 0);
+    }
+
+    private record DefFeedback(boolean covered, boolean cancelled, boolean nonEmpty, boolean handled,
+                               long submittedAtMs) {
+
+        static DefFeedback none() {
+            return new DefFeedback(false, false, false, false, 0);
+        }
     }
 
     /**
-     * 表单实际覆盖的 defCode：宿主缺口卡 id 后缀优先；整卡 = 当前全部未决定项。
+     * 从表单 ID 解码冻结覆盖集合。每个 defCode 必须属于任务当前全部配置项，
+     * 无后缀、非法编码、重复项或未知项均无法证明覆盖，绝不回退到当前 undecided。
      */
     private static Set<String> askedDefCodesOf(PendingToolCall form, String runId, long taskId,
-                                               List<String> undecidedDefCodes) {
-        Set<String> fallback = new LinkedHashSet<>(ObjectUtils.defaultIfNull(undecidedDefCodes, List.of()));
+                                               List<String> allDefCodes) {
         String toolCallId = form.getToolCallId();
-        String base = toolCallId(runId, taskId);
-        if (toolCallId != null && toolCallId.startsWith(base + "-")) {
-            Set<String> covered = new LinkedHashSet<>(List.of(toolCallId.substring(base.length() + 1).split("-")));
-            Set<String> matched = new LinkedHashSet<>();
-            for (String defCode : fallback) {
-                if (covered.contains(defCode)) {
-                    matched.add(defCode);
-                }
-            }
-            if (!matched.isEmpty()) {
-                return matched;
+        String prefix = toolCallId(runId, taskId) + "-";
+        if (allDefCodes == null || toolCallId == null || !toolCallId.startsWith(prefix)) {
+            return Set.of();
+        }
+        String suffix = toolCallId.substring(prefix.length());
+        Set<String> decoded = new LinkedHashSet<>();
+        for (String encoded : suffix.split("\\.", -1)) {
+            String defCode = decodeDefCode(encoded);
+            if (defCode == null || !allDefCodes.contains(defCode) || !decoded.add(defCode)) {
+                return Set.of();
             }
         }
-        return fallback;
+        return decoded.isEmpty() ? Set.of() : decoded;
+    }
+
+    private static String decodeDefCode(String encoded) {
+        try {
+            return new String(Base64.getUrlDecoder().decode(encoded), StandardCharsets.UTF_8);
+        }
+        catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     private boolean isConditionDraftSettled(String runId, long taskId, Set<String> defCodes, long submittedAtMs) {
@@ -1524,59 +1601,28 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * 条件表回灌的<b>文本值</b>：从该表单 {@code arguments.form.fields} 里定位实际文本字段 key
-     * （{@code type=text}，不硬编码字段名 —— 模型可能用 {@code conditionText}/{@code filter_text} 等），
-     * 再从 {@code resultText} 的同一个 key 读值。
+     * 条件表回灌的结构化三态：{@code ALL} 直接表示全量；{@code CUSTOM} 只读取文本值，
+     * 缺失 mode、非法 mode 或值形状均按未收集。CUSTOM 文本缺失/JSON null/空白表示全量，
+     * 非空文本才交给模型结构化。
      *
-     * <p>取值口径（不猜）：文本 ⇒ 原样（空串 = 留空）；JSON {@code null} ⇒ 空串（留空）；
-     * 其它形状（对象/数组/数字/布尔）⇒ {@code null}（按未收集）。没有可用文本字段时兼容宿主/
-     * 旧快照的 {@link #FIELD_KEY}（{@code conditions}）。
-     *
-     * @return {@code null} = 不是可识别的文本回灌（按未收集）；{@code ""} = 留空
+     * @return {@code null} = 未收集；{@code ""} = 明确全量；其它文本 = 待模型结构化
      */
-    private static String conditionTextOf(String argumentsJson, String resultText) {
+    private static String conditionTextOf(String resultText) {
         JsonNode values = parseJson(resultText);
         if (values == null || !values.isObject()) {
             return null;
         }
-        if (values.isEmpty()) {
-            return "";
-        }
-        List<String> declaredKeys = textFieldKeys(argumentsJson);
-        if (!declaredKeys.isEmpty()) {
-            for (String key : declaredKeys) {
-                if (values.has(key)) {
-                    return textValueOf(values.get(key));
-                }
-            }
-            // 声明了文本字段但回灌里没有对应键：按未收集（不猜宿主字段）
+        JsonNode mode = values.get(MODE_KEY);
+        if (mode == null || !mode.isTextual()) {
             return null;
         }
-        JsonNode legacy = values.get(FIELD_KEY);
-        return legacy == null ? null : textValueOf(legacy);
-    }
-
-    /**
-     * 表单 schema 里的文本字段 key（{@code form.fields[].type=text}，按声明顺序）；没有返回空列表。
-     */
-    private static List<String> textFieldKeys(String argumentsJson) {
-        JsonNode arguments = parseJson(argumentsJson);
-        JsonNode form = arguments == null ? null : arguments.get("form");
-        JsonNode fields = form == null ? null : form.get("fields");
-        if (fields == null || !fields.isArray()) {
-            return List.of();
+        if (MODE_ALL.equals(mode.asText())) {
+            return "";
         }
-        List<String> keys = new ArrayList<>();
-        for (JsonNode field : fields) {
-            if (field == null || !field.isObject() || !"text".equals(field.path("type").asText(""))) {
-                continue;
-            }
-            String key = field.path("key").asText("");
-            if (!key.isBlank() && !keys.contains(key)) {
-                keys.add(key);
-            }
+        if (!MODE_CUSTOM.equals(mode.asText())) {
+            return null;
         }
-        return keys;
+        return textValueOf(values.get(FIELD_KEY));
     }
 
     /**
@@ -1626,23 +1672,34 @@ public class ConditionsForm extends HostForm {
     }
 
     /**
-     * 单个非必填 text 框（形状与 {@link FormPurposes#SET_CONDITIONS} 一致）。
+     * 必填模式枚举 + CUSTOM 可见的非必填文本框，只生成显式双字段协议。
      */
     private static Map<String, Object> buildForm(ReplyLanguage language) {
         boolean english = language != null && language.english();
-        Map<String, Object> field = new LinkedHashMap<>();
-        field.put("key", FIELD_KEY);
-        field.put("label", english ? FIELD_LABEL_EN : FIELD_LABEL);
-        field.put("type", "text");
-        field.put("required", false);
-        field.put("variant", GenerativeFormRules.VARIANT_LONG_TEXT);
-        field.put("placeholder", english ? PLACEHOLDER_EN : PLACEHOLDER);
+        Map<String, Object> mode = new LinkedHashMap<>();
+        mode.put("key", MODE_KEY);
+        mode.put("label", english ? MODE_LABEL_EN : MODE_LABEL);
+        mode.put("type", "enum");
+        mode.put("required", true);
+        mode.put("defaultValue", MODE_CUSTOM);
+        mode.put("options", List.of(
+                Map.of("value", MODE_CUSTOM, "label", english ? MODE_CUSTOM_LABEL_EN : MODE_CUSTOM_LABEL),
+                Map.of("value", MODE_ALL, "label", english ? MODE_ALL_LABEL_EN : MODE_ALL_LABEL)));
+
+        Map<String, Object> conditions = new LinkedHashMap<>();
+        conditions.put("key", FIELD_KEY);
+        conditions.put("label", english ? FIELD_LABEL_EN : FIELD_LABEL);
+        conditions.put("type", "text");
+        conditions.put("required", false);
+        conditions.put("variant", GenerativeFormRules.VARIANT_LONG_TEXT);
+        conditions.put("placeholder", english ? PLACEHOLDER_EN : PLACEHOLDER);
+        conditions.put("visibleWhen", Map.of("key", MODE_KEY, "op", "eq", "value", MODE_CUSTOM));
 
         Map<String, Object> form = new LinkedHashMap<>();
         form.put("scenario", "FILTER");
         form.put("purpose", FormPurposes.SET_CONDITIONS);
         form.put("title", english ? TITLE_EN : TITLE);
-        form.put("fields", List.of(field));
+        form.put("fields", List.of(mode, conditions));
         return form;
     }
 

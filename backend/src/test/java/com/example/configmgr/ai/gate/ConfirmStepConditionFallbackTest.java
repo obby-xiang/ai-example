@@ -97,11 +97,16 @@ class ConfirmStepConditionFallbackTest {
 
 	private static final long TASK_ID = 42L;
 
-	private static final String HOST_FORM_ID = "host-cond-form-" + RUN_ID + "-" + TASK_ID;
+	private static final String HOST_FORM_ID = hostFormId("CURRENCY");
 
 	private static final String CONDITION_FORM_JSON = "{\"form\":{\"scenario\":\"FILTER\","
-			+ "\"purpose\":\"SET_CONDITIONS\",\"fields\":[{\"key\":\"conditions\",\"label\":\"筛选条件\","
-			+ "\"type\":\"text\",\"required\":false,\"variant\":\"longText\"}]}}";
+			+ "\"purpose\":\"SET_CONDITIONS\",\"fields\":["
+			+ "{\"key\":\"conditionMode\",\"label\":\"筛选方式\",\"type\":\"enum\",\"required\":true,"
+			+ "\"defaultValue\":\"CUSTOM\",\"options\":[{\"value\":\"CUSTOM\",\"label\":\"自定义筛选\"},"
+			+ "{\"value\":\"ALL\",\"label\":\"全部数据（不筛选）\"}]},"
+			+ "{\"key\":\"conditions\",\"label\":\"筛选条件\",\"type\":\"text\",\"required\":false,"
+			+ "\"variant\":\"longText\",\"visibleWhen\":{\"key\":\"conditionMode\",\"op\":\"eq\","
+			+ "\"value\":\"CUSTOM\"}}]}}";
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
@@ -135,8 +140,11 @@ class ConfirmStepConditionFallbackTest {
 
 	private SpToolCallingManager manager;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		this.registryContext = new AnnotationConfigApplicationContext();
 		this.registryContext.registerBean(WizardTools.class);
@@ -173,6 +181,9 @@ class ConfirmStepConditionFallbackTest {
 	void tearDown() {
 		if (this.registryContext != null) {
 			this.registryContext.close();
+		}
+		if (this.identity != null) {
+			this.identity.close();
 		}
 	}
 
@@ -239,7 +250,7 @@ class ConfirmStepConditionFallbackTest {
 	void nonEmptyConditionFeedbackThatWasNotPersistedRejectsConfirmStep() {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshot("QUERY_COND");
-		seedCollectedForm("{\"conditions\":\"code = CNY\"}");
+		seedCollectedForm("{\"conditionMode\":\"CUSTOM\",\"conditions\":\"code = CNY\"}");
 
 		ToolExecutionResult result = runConfirmStep("{}");
 
@@ -372,12 +383,12 @@ class ConfirmStepConditionFallbackTest {
 		}
 	}
 
-	/** 模型自己发的条件表与宿主条件表共享同一份回灌结果（Task 1 第 2 项）。 */
+	/** 宿主条件表的非空 CUSTOM 回灌共享同一覆盖事实并拒绝未结构化推进。 */
 	@Test
-	void modelIssuedConditionFormFeedbackIsSharedAndRejectsConfirmStep() {
+	void hostConditionFormFeedbackIsSharedAndRejectsConfirmStep() {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshot("QUERY_COND");
-		seedModelForm("code = CNY");
+		seedHostConditionForm("code = CNY");
 
 		ToolExecutionResult result = runConfirmStep("{}");
 
@@ -399,7 +410,7 @@ class ConfirmStepConditionFallbackTest {
 		seedSnapshot("QUERY_COND");
 
 		assertThatThrownBy(() -> runConfirmStep("{}")).isInstanceOf(RunParkedException.class);
-		assertThat(this.store.pending(RUN_ID, HOST_FORM_ID + "-ORDER")).as("按剩余缺口生成新的卡号").isNotNull();
+		assertThat(this.store.pending(RUN_ID, hostFormId("ORDER"))).as("按剩余缺口生成新的卡号").isNotNull();
 	}
 
 	/** Task 1 第 6/7 项：locale 由本轮执行信封显式传播到工具线程，而不是靠 ThreadLocal 残留。 */
@@ -458,7 +469,7 @@ class ConfirmStepConditionFallbackTest {
 		task.getItems().add(remaining);
 		this.taskState.set(task);
 		seedSnapshot("QUERY_COND");
-		seedForm(HOST_FORM_ID + "-ORDER", PendingToolCall.FRONTEND_RESULT, "{\"conditions\":\"code = USD\"}");
+		seedForm(hostFormId("ORDER"), PendingToolCall.FRONTEND_RESULT, "{\"conditionMode\":\"CUSTOM\",\"conditions\":\"code = USD\"}");
 
 		ToolExecutionResult result = runConfirmStep("{}");
 
@@ -478,7 +489,7 @@ class ConfirmStepConditionFallbackTest {
 		task.getItems().add(remaining);
 		this.taskState.set(task);
 		seedSnapshot("QUERY_COND");
-		seedForm(HOST_FORM_ID + "-ORDER", PendingToolCall.FRONTEND_RESULT, "{\"conditions\":\"\"}");
+		seedForm(hostFormId("ORDER"), PendingToolCall.FRONTEND_RESULT, "{\"conditionMode\":\"ALL\"}");
 
 		ToolExecutionResult result = runConfirmStep("{}");
 
@@ -500,7 +511,8 @@ class ConfirmStepConditionFallbackTest {
 		task.getItems().add(remaining);
 		this.taskState.set(task);
 		seedSnapshot("QUERY_COND");
-		PendingToolCall form = seedFormWithStatus(PendingToolCall.FRONTEND_RESULT, "{\"conditions\":\"code = CNY\"}");
+		PendingToolCall form = seedForm(hostFormId("CURRENCY", "ORDER"), PendingToolCall.FRONTEND_RESULT,
+				"{\"conditionMode\":\"CUSTOM\",\"conditions\":\"code = CNY\"}");
 		form.setResolvedAtMs(System.currentTimeMillis() - 1000L);
 		this.store.putPending(RUN_ID, form);
 		seedSetConditionFeedback();
@@ -518,7 +530,7 @@ class ConfirmStepConditionFallbackTest {
 	void blankSubmittedFormAllowsTheAdvance() {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshot("QUERY_COND");
-		seedCollectedForm("{\"conditions\":\"\"}");
+		seedCollectedForm("{\"conditionMode\":\"ALL\"}");
 
 		ToolExecutionResult result = runConfirmStep("{\"step\":\"EXPORT\"}");
 
@@ -609,7 +621,7 @@ class ConfirmStepConditionFallbackTest {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshotWithExtra("QUERY_COND", candidateExtra(Map.of(
 				"fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")))));
-		seedFormWithStatus(PendingToolCall.FRONTEND_RESULT, "{\"conditions\":\"code = USD\"}");
+		seedFormWithStatus(PendingToolCall.FRONTEND_RESULT, "{\"conditionMode\":\"CUSTOM\",\"conditions\":\"code = USD\"}");
 
 		ToolExecutionResult result = runConfirmStep("{}");
 
@@ -626,7 +638,7 @@ class ConfirmStepConditionFallbackTest {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshotWithExtra("QUERY_COND", candidateExtra(Map.of(
 				"fields", List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")))));
-		seedCollectedForm("{\"conditions\":\"\"}");
+		seedCollectedForm("{\"conditionMode\":\"ALL\"}");
 
 		ToolExecutionResult result = runConfirmStep("{}");
 
@@ -642,7 +654,7 @@ class ConfirmStepConditionFallbackTest {
 	void secondConfirmStepAfterCollectionDoesNotParkAgain() {
 		this.taskState.set(task("QUERY_COND", null));
 		seedSnapshot("QUERY_COND");
-		seedCollectedForm("{\"conditions\":\"\"}");
+		seedCollectedForm("{\"conditionMode\":\"ALL\"}");
 
 		runConfirmStep("{}");
 		runConfirmStep("{}");
@@ -685,6 +697,8 @@ class ConfirmStepConditionFallbackTest {
 	private void seedSnapshotWithExtra(String step, Map<String, Object> extra) {
 		AiContext context = AiContext.of("export", "EXPORT", step, TASK_ID, "ACTIVE", extra);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setContext(context.toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(
@@ -720,10 +734,17 @@ class ConfirmStepConditionFallbackTest {
 		return seedForm(HOST_FORM_ID, status, resultText);
 	}
 
-	/** 模型自己下发的条件表（toolCallId 不带宿主前缀）：同一 run 里与宿主表共享回灌结果。 */
-	private void seedModelForm(String text) {
-		seedForm("call-model-cond", PendingToolCall.FRONTEND_RESULT,
-				"{\"conditions\":\"" + text + "\"}");
+	private void seedHostConditionForm(String text) {
+		seedForm(HOST_FORM_ID, PendingToolCall.FRONTEND_RESULT,
+				"{\"conditionMode\":\"CUSTOM\",\"conditions\":\"" + text + "\"}");
+	}
+
+	private static String hostFormId(String... defCodes) {
+		String encoded = java.util.Arrays.stream(defCodes)
+				.map(defCode -> java.util.Base64.getUrlEncoder().withoutPadding()
+						.encodeToString(defCode.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+				.collect(java.util.stream.Collectors.joining("."));
+		return "host-cond-form-" + RUN_ID + "-" + TASK_ID + "-" + encoded;
 	}
 
 	private PendingToolCall seedForm(String toolCallId, String status, String resultText) {

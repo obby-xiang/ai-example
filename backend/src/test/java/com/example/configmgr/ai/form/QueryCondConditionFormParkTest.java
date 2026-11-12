@@ -102,7 +102,9 @@ class QueryCondConditionFormParkTest {
 
 	@org.junit.jupiter.api.AfterEach
 	void tearDown() {
-		this.identity.close();
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	/**
@@ -115,12 +117,18 @@ class QueryCondConditionFormParkTest {
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
 			.as("前置：条件未决定 ⇒ 宿主挂一张").isTrue();
 
-		PendingToolCall answered = this.store.pending(RUN_ID, ConditionsForm.toolCallId(RUN_ID, TASK_ID));
+		PendingToolCall answered = this.store.pending(RUN_ID,
+				ConditionsForm.toolCallId(RUN_ID, TASK_ID, List.of("CURRENCY"), List.of("CURRENCY")));
 		answered.setStatus(PendingToolCall.FRONTEND_RESULT);
-		answered.setResultText("{}");
+		answered.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		answered.setResultText("{\"conditionMode\":\"ALL\"}");
+		answered.setResolvedAtMs(System.currentTimeMillis());
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
-			.as("留空 = 明确不设筛选：不再弹第二张").isFalse();
+			.as("留空 = 明确不设筛选：只推进既有 confirm_step，不弹第二张条件表").isTrue();
+		PendingToolCall advance = this.store.pending(RUN_ID, "host-cond-next-" + TASK_ID);
+		assertThat(advance).isNotNull();
+		assertThat(advance.getName()).isEqualTo("confirm_step");
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 	}
 
@@ -132,17 +140,20 @@ class QueryCondConditionFormParkTest {
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
 			.as("QUERY_COND 条件未决定 ⇒ 宿主正文收尾时挂一次条件表").isTrue();
 
-		PendingToolCall pending = this.store.pending(RUN_ID, ConditionsForm.toolCallId(RUN_ID, TASK_ID));
+		PendingToolCall pending = this.store.pending(RUN_ID,
+				ConditionsForm.toolCallId(RUN_ID, TASK_ID, List.of("CURRENCY"), List.of("CURRENCY")));
 		assertThat(pending).as("确定性 toolCallId：同一缺口同一张卡").isNotNull();
 		assertThat(pending.getName()).isEqualTo(GenerativeFormRules.TOOL_NAME);
 		assertThat(pending.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
 		assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PENDING);
 		JsonNode formNode = parse(pending.getArguments()).path("form");
 		assertThat(formNode.path("purpose").asText()).isEqualTo(FormPurposes.SET_CONDITIONS);
-		assertThat(formNode.path("fields")).hasSize(1);
-		assertThat(formNode.path("fields").get(0).path("type").asText()).as("非必填自由文本，不是多选/枚举")
+		assertThat(formNode.path("fields")).hasSize(2);
+		assertThat(formNode.path("fields").get(0).path("type").asText()).isEqualTo("enum");
+		assertThat(formNode.path("fields").get(0).path("required").asBoolean()).isTrue();
+		assertThat(formNode.path("fields").get(1).path("type").asText()).as("CUSTOM 可见的非必填自由文本")
 			.isEqualTo("text");
-		assertThat(formNode.path("fields").get(0).path("required").asBoolean()).isFalse();
+		assertThat(formNode.path("fields").get(1).path("required").asBoolean()).isFalse();
 		verify(this.emitter).suspended(org.mockito.ArgumentMatchers.eq(List.of(pending)), anyString(), anyString(),
 				anyString());
 

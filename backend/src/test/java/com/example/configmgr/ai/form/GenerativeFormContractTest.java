@@ -159,6 +159,70 @@ class GenerativeFormContractTest {
 		assertRejected(this.guard.inspectResult(args, "{\"other\":1}"), GenerativeFormRules.RESULT_REJECTED);
 	}
 
+	@Test
+	void conditionModeFormAcceptsOnlyDualFieldShape() {
+		JsonNode legacy = json("""
+				{"form":{"purpose":"SET_CONDITIONS","scenario":"FILTER","fields":[
+				  {"key":"conditions","label":"筛选条件","type":"text","required":false}
+				]}}
+				""");
+		JsonNode dual = json(conditionModeForm());
+
+		assertThat(GenerativeFormRules.argumentIssues(legacy))
+				.as("历史单文本框 Schema 不再接受")
+				.isNotEmpty();
+		assertThat(GenerativeFormRules.argumentIssues(dual)).isEmpty();
+		JsonNode form = dual.path("form");
+		assertThat(GenerativeFormRules.resultIssues(form, json("{\"conditionMode\":\"ALL\"}")))
+				.as("ALL 隐藏并省略 conditions 仍可提交")
+				.isEmpty();
+		assertThat(GenerativeFormRules.resultIssues(form, json("{\"conditionMode\":\"CUSTOM\"}")))
+				.as("CUSTOM 文本缺失表示明确全量")
+				.isEmpty();
+		assertThat(GenerativeFormRules.resultIssues(form,
+				json("{\"conditionMode\":\"CUSTOM\",\"conditions\":null}"))).isEmpty();
+	}
+
+	@Test
+	void conditionModeFormRejectsInvalidModeLinkageAndRequiredText() {
+		assertThat(GenerativeFormRules.argumentIssues(json(conditionModeForm()
+				.replace("{\"value\":\"ALL\",\"label\":\"全部数据（不筛选）\"}",
+						"{\"value\":\"SOMETIMES\",\"label\":\"有时\"}"))))
+				.as("mode 选项闭集必须是 CUSTOM/ALL")
+				.isNotEmpty();
+		assertThat(GenerativeFormRules.argumentIssues(json(conditionModeForm()
+				.replace("\"value\":\"CUSTOM\"}", "\"value\":\"ALL\"}"))))
+				.as("conditions 必须只在 CUSTOM 可见")
+				.isNotEmpty();
+		assertThat(GenerativeFormRules.argumentIssues(json(conditionModeForm()
+				.replace("\"key\":\"conditions\",\"label\":\"筛选条件\",\"type\":\"text\",\"required\":false",
+						"\"key\":\"conditions\",\"label\":\"筛选条件\",\"type\":\"text\",\"required\":true"))))
+				.as("条件文本仍非必填")
+				.isNotEmpty();
+		assertThat(GenerativeFormRules.resultIssues(json(conditionModeForm()).path("form"),
+				json("{\"conditionMode\":\"SOMETIMES\"}"))).isNotEmpty();
+	}
+
+	private JsonNode json(String text) {
+		try {
+			return this.mapper.readTree(text);
+		}
+		catch (Exception ex) {
+			throw new IllegalStateException(ex);
+		}
+	}
+
+	private static String conditionModeForm() {
+		return """
+				{"form":{"purpose":"SET_CONDITIONS","scenario":"FILTER","fields":[
+				  {"key":"conditionMode","label":"筛选方式","type":"enum","required":true,"defaultValue":"CUSTOM",
+				    "options":[{"value":"CUSTOM","label":"自定义筛选"},{"value":"ALL","label":"全部数据（不筛选）"}]},
+				  {"key":"conditions","label":"筛选条件","type":"text","required":false,
+				    "visibleWhen":{"key":"conditionMode","op":"eq","value":"CUSTOM"}}
+				]}}
+				""";
+	}
+
 	// ── 夹具 ────────────────────────────────────────────────────────────────
 
 	/** 读跨端副本里的常量声明（工作目录 = {@code backend}，路径为仓库相对）；取不到即断言失败。 */

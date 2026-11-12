@@ -6870,6 +6870,38 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "结果判断不依赖中文文案、尾行或reason前缀，完整JSON不可按文本截断，主键分类来自结构字段。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1276最终Spec通过且无新Critical/Important，方法名Minor已改RunStore；施工报告真实Controller+ConfirmGate流程9/9、守卫39/39、取消/少写/计划保留前端单点、后端编译及前端typecheck/build成功；主控未重跑测试，sheet-undo-confirm既有14/15与ConfirmGateDismissAndSettleTest构造期6 errors如实保留，真实History/SSE/模型/Redis/多实例/SpreadJS浏览器NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:2fa1e537de8da5721ea74885c8b972fea8ce80c4b06c38faa99d19207f8364ba",
+      "status": "reviewed",
+      "reason": "逐hunk复核条件模式双字段、冻结覆盖身份、逐项反馈聚合及同时间戳失败关闭；独立复审与最新main合并复核均通过，任务unavailable闸完整保留。",
+      "reviewedAt": "2026-11-12T23:55:05+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1271、施工agent-1264",
+      "specChanges": [
+        {
+          "change": "条件表单仅接受必填conditionMode=CUSTOM/ALL与可选conditions双字段，ALL或CUSTOM空白直接走confirm_step，CUSTOM非空才交模型结构化；历史单文本框不再接受。",
+          "reason": "项目未上线，不需要旧表单兼容；明确的模式与文本三态可避免自由文本被误猜为全量。",
+          "impact": "缺mode、非法mode/形状均未收集，表单仍使用通用enum/visibleWhen/草稿能力，不新增条件专用前端分支或模型调用。"
+        },
+        {
+          "change": "每次条件表单toolCallId冻结完整defCode集合，按defCode聚合最新OK答案；完全同双时间戳的不同表单答案按不确定未收集。",
+          "reason": "旧表晚提交不能替新增配置项决定全量，多张部分表必须可完成，Redis无序遍历也不能决定答案代次。",
+          "impact": "Base64URL单项加`.`分隔避免连字符歧义；较新取消/非空遮蔽旧blank，非OK不采信，自动推进与直接复核共用同一覆盖事实。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java", "status": "checked", "reason": "生成双字段表单，冻结defCode身份，逐项OK反馈聚合及同时间戳ambiguity失败关闭；main的TaskSlots.unavailable readTask前闸保留；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java", "status": "checked", "reason": "只接受固定conditionMode+conditions双字段，严格校验必填enum、默认值、选项闭集和CUSTOM显隐，删除历史单框回退；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有confirm_step、通用表单enum/visibleWhen/草稿和Base64URL，无新增依赖、前端专用分支或Pending存储字段。"},
+        "java-api-style": {"status": "checked", "reason": "两个生产Java均IDEA Reformat，反馈查询/聚合方法低于50行及复杂度20，集合采用不可变副本。"},
+        "logging-exception-safety": {"status": "checked", "reason": "非OK、非法身份、未收集和同时间戳歧义均失败关闭，不把取消、失败或未知伪装为全量成功。"},
+        "toc-interaction": {"status": "checked", "reason": "用户只选择全部数据或自定义筛选，空白直接推进，不增加技术提示、重复表单或第二次聊天输入。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "表单身份冻结，逐项最新OK反馈聚合，同时间戳不同ID不按Redis遍历或ID排序定代次，unavailable快照继续阻止所有新动作。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "defCode使用Base64URL无填充编码并以`.`分隔，不按连字符或用户文案猜身份，非空文本仍需模型结构化。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1271原差异与最新main合并结果Spec/Task quality均通过；施工报告危险时序、A/B聚合、非OK、同时间戳双顺序、CUSTOM/ALL、取消、连字符、旧协议拒绝及unavailable独立RED→GREEN，合并后生产编译成功；主控未重跑测试，真实Redis/ResumeService/模型/多实例/浏览器及全量测试NOT_RUN。"}
+      }
     }
   ]
 }
