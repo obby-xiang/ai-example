@@ -38,6 +38,17 @@ class ContextBuilderTaskSlotsTest {
 	}
 
 	@Test
+	void unavailableTaskSlotsAreDisclosedWithoutCollectingMissingSlots() {
+		AiContext context = AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L,
+				Map.of(TaskSlots.EXTRA_KEY, Map.of("taskType", "EXPORT", "unavailable", true)));
+
+		String text = this.builder.buildContextMessage(context);
+
+		assertThat(text).contains("任务槽位").contains("暂不可用");
+		assertThat(text).doesNotContain("缺失（需要时").doesNotContain("未设筛选");
+	}
+
+	@Test
 	void emptyTaskSlotsDoNotAddNoise() {
 		AiContext context = AiContext.of("tasks", null, null, null,
 				Map.of(TaskSlots.EXTRA_KEY, TaskSlots.empty().toMap()));

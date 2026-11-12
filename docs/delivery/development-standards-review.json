@@ -6659,6 +6659,44 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文流、编码或Unicode处理。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1270首轮发现未知定义误映射，返修后限定复审两项均ADDRESSED；施工报告相关后端和前端独立RED→GREEN、后端编译及前端typecheck/build成功；主控未重跑测试，全量普通测试、真实服务、浏览器和Redis/Cluster均为NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a33bb376ed2959f009d7615c206bd37e75192e771297c39b93f84324d38eaee3",
+      "status": "reviewed",
+      "reason": "逐hunk复核任务读取不可用、上下文披露、模型/宿主表单失败关闭及退役字段删除；独立审查发现任务不存在误分类和条件链绕闸后已返修复审通过。",
+      "reviewedAt": "2026-11-12T22:55:53+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1274、施工agent-1268",
+      "specChanges": [
+        {
+          "change": "任务读取异常形成显式unavailable快照，不再回落页面选择或create_task候选；ResourceNotFoundException仍按任务不存在走正常候选路径。",
+          "reason": "基础设施读取失败不能伪装成缺失配置或全量，同时不存在与不可用必须按真实TaskService异常契约区分。",
+          "impact": "ContextBuilder披露暂不可用，选择/条件模型表单和宿主选择/条件动作失败关闭，不输出空undecided事实。"
+        },
+        {
+          "change": "删除TaskSlots.verifiedConditionDefCodes及其构造、序列化、恢复和披露投影，不做旧快照兼容。",
+          "reason": "项目未上线且该文本可信链字段已退役，继续保留会形成无消费者的旧协议面。",
+          "impact": "当前undecidedDefCodes presence、轻装配构造器和CreateTaskDraftStore不变，旧字段不再产生或恢复槽位事实。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java", "status": "checked", "reason": "parkIfDueAtQueryCond在readTask前检查unavailable，阻止候选草案、结构化交棒和新条件表，取消结算保持独立；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/DefinitionSelectionForm.java", "status": "checked", "reason": "不可用快照不生成新选择表、不代选或推进；Boolean经BooleanUtils读取；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java", "status": "checked", "reason": "选择/条件收集在既有通用判断前以AI_CONTEXT_UNAVAILABLE零副作用拒绝；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/RunContextRefresher.java", "status": "checked", "reason": "使用删除退役字段后的六参TaskSlots并保留当前候选及undecided事实；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlotResolver.java", "status": "checked", "reason": "ResourceNotFoundException走正常task=null路径，其他读取异常直接unavailable且不回落候选；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlots.java", "status": "checked", "reason": "新增unavailable投影，删除verifiedConditionDefCodes全链，保留undecided未声明/明确空数组三态与安全Boolean转换；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ContextBuilder.java", "status": "checked", "reason": "不可用提前披露暂不可用，不输出缺失配置、全量或空undecided误导事实；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/ErrorCodes.java", "status": "checked", "reason": "仅更新AI_CONTEXT_UNAVAILABLE覆盖读取失败和表单收集的注释，无新增错误码；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用AiContext.taskSlots、ResourceNotFoundException、BooleanUtils和既有表单闸，无新增依赖、Redis键或数据库状态。"},
+        "java-api-style": {"status": "checked", "reason": "八个生产Java均IDEA Reformat；record组件显式JSON映射，内部presence忽略序列化，集合不可变且Boolean不直接拆箱。"},
+        "logging-exception-safety": {"status": "checked", "reason": "读取失败保持异常链和真实不可用，不把故障吞成空候选；任务不存在不制造基础设施告警。"},
+        "toc-interaction": {"status": "checked", "reason": "仅展示真实暂不可用，不新增技术提示、重复表单或伪造缺失/全量文案。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "不可用沿既有Redis上下文快照传播并在模型、宿主和交棒路径统一失败关闭，无新增共享写入。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文流、文本解析或编码。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1274两项阻塞发现返修后均ADDRESSED，限定复审无新Critical/Important；施工报告覆盖三类宿主动作、取消对照、真实不存在异常、候选优先级、presence与退役字段的独立RED→GREEN，生产clean compile成功；主控未重跑测试，全量测试、真实Redis/DB/多实例NOT_RUN。"}
+      }
     }
   ]
 }

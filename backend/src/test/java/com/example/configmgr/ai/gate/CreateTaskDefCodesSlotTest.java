@@ -86,6 +86,7 @@ class CreateTaskDefCodesSlotTest {
 		pending.setToolCallId("call-create-1");
 		pending.setName(RunContextRefresher.TOOL_CREATE_TASK);
 		pending.setArguments(arguments);
+		pending.setCreatedTaskId(TASK_ID);
 		pending.setStatus(PendingToolCall.EXECUTED);
 		pending.setOutcome(ToolOutcome.OK.wire());
 		pending.setResultText("已创建导出任务 #" + TASK_ID + "（标题：导出任务，当前步骤：SELECT_DEFS）");

@@ -210,7 +210,7 @@ class GenerativeFormTaskTypeAndConditionTest {
 	/** 有真实条件缺口的槽位上下文：配置项已知、条件逐项未决定（收集表单的合法时机）。 */
 	private static AiContext gapContext(String step) {
 		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY"), List.of(), List.of(),
-				List.of("CURRENCY"), List.of(), List.of());
+				List.of("CURRENCY"), List.of());
 		Map<String, Object> extra = new LinkedHashMap<>();
 		extra.put(TaskSlots.EXTRA_KEY, slots.toMap());
 		return AiContext.of("tasks", null, step, null, extra);

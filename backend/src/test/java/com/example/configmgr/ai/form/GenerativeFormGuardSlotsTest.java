@@ -59,6 +59,16 @@ class GenerativeFormGuardSlotsTest {
 	}
 
 	@Test
+	void unavailableSlotsFailSelectionCollectionClosed() {
+		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
+				form("SELECT_DEFINITIONS", "defs"),
+				context(Map.of("taskType", "EXPORT", "unavailable", true)));
+
+		assertThat(verdict.accepted()).as("读取不可用不是配置缺失，不得重新收集").isFalse();
+		assertThat(verdict.render()).contains("暂不可用");
+	}
+
+	@Test
 	void unknownSlotsLetTheFormThrough() {
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				form("SELECT_DEFINITIONS", "defs"), AiContext.empty());

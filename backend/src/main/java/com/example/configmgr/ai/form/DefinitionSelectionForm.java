@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
@@ -56,7 +57,8 @@ import java.util.Set;
  * <li><b>停在选择步骤</b>：上下文页是导出向导、任务号就是本轮新建的那个、权威步骤 {@code SELECT_DEFS}；</li>
  * <li><b>配置未知</b>：任务槽位里没有 {@code defCodes}（与 {@link GenerativeFormGuard} 的放行判据
  * 同一份 {@link TaskSlots}）—— 已知配置时宿主不弹表，改由
- * {@link #parkSelectDefinitionsIfDue} 经既有 {@code select_definitions} 通道直接代选；</li>
+ * {@link #parkSelectDefinitionsIfDue} 经既有 {@code select_definitions} 通道直接代选；
+ * {@code unavailable=true} 是读取失败而非配置未知，同样不得生成新表；</li>
  * <li><b>目录可枚举</b>：目录非空、可读，且条数不超过平铺上限
  * （{@link GenerativeFormRules#MAX_OPTIONS}）。空目录/读取失败/超上限一律<b>不生成残缺表单</b> ——
  * 交回既有失败恢复与模型侧路径，绝不下发一张"选了也没用"的空表；</li>
@@ -413,7 +415,8 @@ public class DefinitionSelectionForm extends HostForm {
 		}
 		Object pageId = context.getExtra().get("pageId");
 		return context.getPage().equals(String.valueOf(pageId))
-				&& Boolean.TRUE.equals(context.getExtra().get(ContextBuilder.SELECTION_SYNCED_KEY));
+				&& context.getExtra().get(ContextBuilder.SELECTION_SYNCED_KEY) instanceof Boolean synced
+				&& BooleanUtils.isTrue(synced);
 	}
 
 	/**
@@ -615,7 +618,12 @@ public class DefinitionSelectionForm extends HostForm {
 		if (!EXPORT_PAGE.equals(context.getPage()) || !SELECT_DEFS_STEP.equals(context.getStep())) {
 			return Optional.empty();
 		}
-		if (TaskSlots.fromExtra(context.getExtra()).hasDefCodes()) {
+		TaskSlots slots = TaskSlots.fromExtra(context.getExtra());
+		if (slots.isUnavailable()) {
+			// 读取不可用 ≠ 配置缺失：不得据此生成新的收集动作
+			return Optional.empty();
+		}
+		if (slots.hasDefCodes()) {
 			// 配置已知 ⇒ 直接走 select_definitions，不弹表单（与槽位放行同一判据）
 			return Optional.empty();
 		}

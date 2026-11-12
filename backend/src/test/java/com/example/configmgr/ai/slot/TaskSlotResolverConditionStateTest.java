@@ -75,7 +75,7 @@ class TaskSlotResolverConditionStateTest {
 
 	/** 任务条目里的枚举等值条件（结构化）即"已设置"，且落成模型可读的 EQ 槽位。 */
 	@Test
-	void taskConditionJsonEqBecomesSetAndVerifiedSlot() {
+	void taskConditionJsonEqBecomesSetConditionSlot() {
 		when(this.taskService.findById(any())).thenReturn(task("{\"fields\":[{\"fieldCode\":\"code\","
 				+ "\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
 		AiContext ctx = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of());
@@ -85,8 +85,6 @@ class TaskSlotResolverConditionStateTest {
 		assertThat(slots.conditions()).containsExactly(new TaskSlots.ConditionSlot("CURRENCY", "code", "CNY"));
 		assertThat(slots.conditionDefCodes()).containsExactly("CURRENCY");
 		assertThat(slots.undecidedDefCodes()).isEmpty();
-		// verifiedConditionDefCodes 是退役兼容字段（文本可信链删除后生产恒为空）
-		assertThat(slots.verifiedConditionDefCodes()).isEmpty();
 	}
 
 	/** Critical：同一配置项的多个等值字段必须全部无损落库。 */

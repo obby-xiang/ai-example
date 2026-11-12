@@ -1,8 +1,11 @@
 package com.example.configmgr.ai.slot;
 
+import com.example.configmgr.ai.form.GenerativeFormGuard;
+import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
@@ -69,6 +72,42 @@ class TaskSlotResolverTest {
 			.as("多项明确配置是合法的多选导出，不是歧义")
 			.containsExactly("CURRENCY", "ROLE_DICT");
 		assertThat(slots.taskType()).as("任务类型来自上下文结构化值，不来自措辞").isEqualTo("EXPORT");
+	}
+
+	@Test
+	void taskReadFailureCannotBeTreatedAsMissingDefinitions() {
+		when(this.taskService.findById(any())).thenThrow(new IllegalStateException("read failed"));
+		AiContext context = AiContext.of("export", "EXPORT", "SELECT_DEFS", TASK_ID, Map.of());
+
+		AiContext enriched = this.withTasks.enrich(context, null, List.of());
+		boolean accepted = new GenerativeFormGuard(new com.fasterxml.jackson.databind.ObjectMapper())
+			.inspectArguments(GenerativeFormRules.TOOL_NAME,
+					"{\"form\":{\"purpose\":\"SELECT_DEFINITIONS\",\"scenario\":\"CLARIFY\",\"fields\":["
+							+ "{\"key\":\"defs\",\"label\":\"配置项\",\"type\":\"text\"}]}}", enriched)
+			.accepted();
+
+		assertThat(accepted).as("读取异常不得被当成没有配置项而重新收集").isFalse();
+	}
+
+	@Test
+	void taskReadFailureDoesNotFallBackToCreateTaskCandidates() {
+		when(this.taskService.findById(any())).thenThrow(new IllegalStateException("read failed"));
+
+		AiContext enriched = this.withTasks.enrich(createTaskContext(TASK_ID, "CURRENCY"), null, List.of());
+		TaskSlots slots = TaskSlots.fromExtra(enriched.getExtra());
+
+		assertThat(slots.toMap()).containsEntry("unavailable", true).doesNotContainKey("undecidedDefCodes");
+		assertThat(slots.defCodes()).as("读取失败时不能把候选当成任务权威事实").isEmpty();
+	}
+
+	@Test
+	void missingTaskStillUsesCreateTaskCandidates() {
+		when(this.taskService.findById(any())).thenThrow(ResourceNotFoundException.of("Task", TASK_ID));
+
+		TaskSlots slots = this.withTasks.resolve(createTaskContext(TASK_ID, "CURRENCY"), null, List.of());
+
+		assertThat(slots.defCodes()).containsExactly("CURRENCY");
+		assertThat(slots.toMap()).doesNotContainKey("unavailable");
 	}
 
 	/** 候选与创建它的任务号绑定：切到别的任务后旧候选不得压掉新任务的选择表。 */
@@ -186,6 +225,26 @@ class TaskSlotResolverTest {
 		// 快照读写同一形态（RunSnapshot 落 Redis 后再重建上下文）
 		assertThat(TaskSlots.fromExtra(AiContext.fromMap(enriched.toMap()).getExtra()).defCodes())
 			.containsExactly("CURRENCY");
+	}
+
+	@Test
+	void verifiedConditionDefCodesIsNotEmitted() {
+		TaskSlots slots = new TaskSlots("EXPORT", List.of("CURRENCY"),
+				List.of(new ConditionSlot("CURRENCY", "code", "CNY")));
+
+		assertThat(slots.toMap()).doesNotContainKey("verifiedConditionDefCodes");
+	}
+
+	@Test
+	void verifiedConditionDefCodesIsNotAcceptedFromSnapshots() {
+		Map<String, Object> raw = new LinkedHashMap<>();
+		raw.put("taskType", "EXPORT");
+		raw.put("verifiedConditionDefCodes", List.of("CURRENCY"));
+
+		TaskSlots restored = TaskSlots.fromValue(raw);
+
+		assertThat(restored.conditionDefCodes()).isEmpty();
+		assertThat(restored.toMap()).doesNotContainKey("verifiedConditionDefCodes");
 	}
 
 	/**

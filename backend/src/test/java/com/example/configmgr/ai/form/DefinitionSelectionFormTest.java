@@ -174,6 +174,28 @@ class DefinitionSelectionFormTest {
 	}
 
 	@Test
+	void unavailableSlotsNeverPopANewSelectionForm() {
+		Map<String, Object> created = createTaskRecord(TASK_ID);
+		created.put(PendingToolCall.CREATED_TASK_ID, TASK_ID);
+		when(this.store.ledger(RUN_ID)).thenReturn(List.of(created));
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put(TaskSlots.EXTRA_KEY, Map.of("taskType", "EXPORT", "unavailable", true));
+		extra.put("pageId", "export");
+		extra.put("selectionSynced", true);
+		Map<String, Object> available = new LinkedHashMap<>(extra);
+		available.put(TaskSlots.EXTRA_KEY, Map.of("taskType", "EXPORT"));
+
+		assertThat(this.form.argumentsIfDue(RUN_ID, selectionStepContext(available),
+				List.of(navigateTo(TASK_ID, ToolOutcome.OK))))
+			.as("对照：正常缺失配置会生成选择表参数")
+			.isPresent();
+		assertThat(this.form.argumentsIfDue(RUN_ID, selectionStepContext(extra),
+				List.of(navigateTo(TASK_ID, ToolOutcome.OK))))
+			.as("读取不可用不是配置缺失，宿主不得据此生成新表")
+			.isEmpty();
+	}
+
+	@Test
 	void noFormWhenTheBatchAlreadyHandledTheSelectionItself() {
 		PendingToolCall ownForm = entry("call-own-form", GenerativeFormRules.TOOL_NAME,
 				"{\"form\":{\"scenario\":\"CLARIFY\",\"fields\":[]}}", PendingToolCall.KIND_FRONTEND,

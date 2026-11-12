@@ -9,8 +9,10 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.WizardActionGuard;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
@@ -85,14 +87,22 @@ class QueryCondConditionFormParkTest {
 
 	private ConditionsForm form;
 
+	private RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		when(this.registry.of(anyString())).thenReturn(this.emitter);
 		when(this.taskService.findById(TASK_ID)).thenAnswer(invocation -> this.taskState.get());
 		this.form = new ConditionsForm(this.store, this.registry, this.gate, this.codec, this.properties,
 				this.taskService);
 		seedRun();
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void tearDown() {
+		this.identity.close();
 	}
 
 	/**
@@ -318,6 +328,75 @@ class QueryCondConditionFormParkTest {
 		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
 	}
 
+	@Test
+	void unavailableSlotsBlockConditionFormWhenUnknownFormIsAllowed() {
+		this.taskState.set(task(null));
+		AiContext context = unavailableContext();
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context, history(), true))
+			.as("快照读取不可用，即使二次读取会成功也不得发新条件表")
+			.isFalse();
+		assertNoNewConditionAction(context);
+	}
+
+	@Test
+	void unavailableSlotsBlockStructureHandoffWhenUnknownFormIsDisallowed() {
+		this.taskState.set(task(null));
+		AiContext context = unavailableContext();
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context, history(), false))
+			.as("快照读取不可用，不得生成首次结构化交棒")
+			.isFalse();
+		assertNoNewConditionAction(context);
+	}
+
+	@Test
+	void unavailableSlotsBlockCreateTaskCandidateDrafts() {
+		this.taskState.set(task(null));
+		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
+		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+		Map<String, Object> conditions = Map.of("fields",
+				List.of(Map.of("fieldCode", "code", "operator", "EQ", "value", "CNY")));
+		Map<String, Object> extra = new LinkedHashMap<>();
+		extra.put(TaskSlots.EXTRA_KEY, TaskSlots.unavailable("EXPORT").toMap());
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_TASK_ID, TASK_ID);
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_DEF_CODES, List.of("CURRENCY"));
+		extra.put(RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions);
+		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", extra);
+
+		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history(), false))
+			.as("快照读取不可用，即使候选有效也不得发 set_condition 草案")
+			.isFalse();
+		assertNoNewConditionAction(candidate);
+	}
+
+	@Test
+	void unavailableSlotsDoNotBlockConditionFormCancellationSettlement() {
+		this.taskState.set(task(null));
+		PendingToolCall cancelled = new PendingToolCall();
+		cancelled.setToolCallId(ConditionsForm.toolCallId(RUN_ID, TASK_ID));
+		cancelled.setName(GenerativeFormRules.TOOL_NAME);
+		cancelled.setArguments("{\"form\":{\"purpose\":\"SET_CONDITIONS\",\"scenario\":\"FILTER\",\"fields\":[]}}");
+		cancelled.setStatus(PendingToolCall.FRONTEND_CANCELLED);
+
+		assertThat(this.form.conditionFormCancelledInBatch(List.of(cancelled), RUN_ID, unavailableContext()))
+			.as("快照闸只阻止新动作，不得吞掉既有表单取消结算")
+			.isTrue();
+		verify(this.taskService, never()).findById(any());
+	}
+
+	private static AiContext unavailableContext() {
+		return AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE",
+				Map.of(TaskSlots.EXTRA_KEY, TaskSlots.unavailable("EXPORT").toMap()));
+	}
+
+	private void assertNoNewConditionAction(AiContext context) {
+		assertThat(this.store.pendingsLenient(RUN_ID)).as("不得留下新条件表或草案").isEmpty();
+		assertThat(context.getExtra()).doesNotContainKey(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);
+		verify(this.emitter, never()).suspended(any(), anyString(), anyString(), anyString());
+		verify(this.taskService, never()).findById(any());
+	}
+
 	private static ConfigDefinition definition(String code, String... fieldCodes) {
 		ConfigDefinition definition = new ConfigDefinition();
 		definition.setCode(code);
@@ -335,6 +414,8 @@ class QueryCondConditionFormParkTest {
 
 	private void seedRun() {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(context().toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(history()));
 		this.store.save(snapshot);

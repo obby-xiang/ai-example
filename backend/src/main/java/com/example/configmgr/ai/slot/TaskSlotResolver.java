@@ -5,10 +5,12 @@ import com.example.configmgr.ai.slot.TaskSlots.ConditionSlot;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.common.BlankText;
+import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -88,7 +90,18 @@ public class TaskSlotResolver {
      */
     public TaskSlots resolve(AiContext context, String currentMessage, List<String> historyUserMessages) {
         AiContext ctx = context == null ? AiContext.empty() : context;
-        Task task = task(ctx);
+        String taskType = StringUtils.defaultIfBlank(ctx.getTaskType(), null);
+        Task task;
+        try {
+            task = task(ctx);
+        } catch (ResourceNotFoundException ex) {
+            task = null;
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("task-slot-read")) {
+                log.warn("could not read task #{}; task slots unavailable", ctx.getTaskId(), ex);
+            }
+            return TaskSlots.unavailable(taskType);
+        }
         // 自然语言不经这里：不解析 currentMessage/historyUserMessages（保留签名兼容）。
         // 可信事实只有任务条目/工作区页面结构化选择；条件事实来自任务 conditionJson。
         PageSelection pageSelection = pageSelection(ctx);
@@ -116,7 +129,6 @@ public class TaskSlotResolver {
         } else {
             conditions = conditions.stream().filter(c -> defCodes.contains(c.defCode())).distinct().toList();
         }
-        String taskType = StringUtils.defaultIfBlank(ctx.getTaskType(), null);
         boolean atExport = task != null && "EXPORT".equalsIgnoreCase(trimStep(task.getCurrentStep()));
         return withConditionState(taskType, defCodes, conditions, conditionAssessment, task, atExport);
     }
@@ -147,7 +159,7 @@ public class TaskSlotResolver {
                                                 List<ConditionSlot> conditions, ConditionAssessment.Assessment assessment, Task task,
                                                 boolean atExport) {
         if (defCodes.isEmpty()) {
-            return new TaskSlots(taskType, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+            return new TaskSlots(taskType, List.of(), List.of(), List.of(), List.of(), List.of());
         }
         List<String> conditionDefCodes = new ArrayList<>();
         List<String> undecidedDefCodes = new ArrayList<>();
@@ -178,9 +190,7 @@ public class TaskSlotResolver {
                 conditionTexts.add(rendered);
             }
         }
-        // 文本可信链已删除：verifiedConditionDefCodes 仅为兼容字段，恒为空（不参与生产判断）。
-        return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts,
-                List.of());
+        return new TaskSlots(taskType, defCodes, conditions, conditionDefCodes, undecidedDefCodes, conditionTexts);
     }
 
     /**
@@ -235,7 +245,8 @@ public class TaskSlotResolver {
                 codes.add(String.valueOf(element));
             }
         }
-        if (codes.isEmpty() && !Boolean.TRUE.equals(extra.get(ContextBuilder.SELECTION_SYNCED_KEY))) {
+        if (codes.isEmpty() && !(extra.get(ContextBuilder.SELECTION_SYNCED_KEY) instanceof Boolean synced
+                && BooleanUtils.isTrue(synced))) {
             // 未水合 / 旧客户端：[] 不代表"用户清空"，按未同步处理（允许回落任务条目/历史）
             return PageSelection.absent();
         }
@@ -320,13 +331,6 @@ public class TaskSlotResolver {
         if (this.taskService == null || context.getTaskId() == null) {
             return null;
         }
-        try {
-            return this.taskService.findById(context.getTaskId());
-        } catch (RuntimeException ex) {
-            if (LogSampling.canAcquire("task-slot-read")) {
-                log.warn("could not read task #{}; authoritative slots treated as missing", context.getTaskId(), ex);
-            }
-            return null;
-        }
+        return this.taskService.findById(context.getTaskId());
     }
 }

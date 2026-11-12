@@ -137,7 +137,7 @@ public final class ErrorCodes {
      */
     public static final String FRONTEND_RESULT_TOO_LARGE = "FRONTEND_RESULT_TOO_LARGE";
     /**
-     * 503：上下文计量不可用。
+     * 503：上下文构建所需信息不可用（含上下文计量与任务槽位读取）。
      */
     public static final String AI_CONTEXT_UNAVAILABLE = "AI_CONTEXT_UNAVAILABLE";
     /**

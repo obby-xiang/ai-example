@@ -269,7 +269,7 @@ public class RunContextRefresher {
 		if (!sameTask || !defCodes.equals(existing.defCodes())) {
 			// undecidedDefCodes = 候选本身：条件仍需在 QUERY_COND 收集，配置项已无需再问
 			extra.put(TaskSlots.EXTRA_KEY, new TaskSlots(base.getTaskType(), defCodes, List.of(), List.of(), defCodes,
-					List.of(), List.of()).toMap());
+					List.of()).toMap());
 		}
 		base.setExtra(extra);
 	}

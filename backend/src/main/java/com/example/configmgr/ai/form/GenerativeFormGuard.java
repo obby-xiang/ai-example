@@ -158,6 +158,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 	 *
 	 * <p>拒绝是<b>零副作用</b>的（调用方不挂起、不下发、不认领、不记台账），模型收到可读码与
 	 * 下一步指引后可按规则 29 做一次不同的纠正；创建入口的配置收集例外见 {@link #preCreateVerdict}。
+	 * 槽位 {@code unavailable=true} 时选择与条件收集同样失败关闭：读取不可用不是新缺口。
 	 *
 	 * <p>本批（2026-10-29 闭环批）新增两条：
 	 * <ul>
@@ -172,6 +173,14 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 		Verdict preCreate = preCreateVerdict(purpose, form, taskId, page);
 		if (preCreate != null) {
 			return preCreate;
+		}
+		if (slots.isUnavailable() && Set.of(GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS,
+				GenerativeFormRules.PURPOSE_SET_CONDITIONS).contains(purpose)) {
+			log.warn("generative_form collection rejected because task slots are unavailable (not parked, not sent) purpose={}", purpose);
+			return new Verdict(false, ErrorCodes.AI_CONTEXT_UNAVAILABLE,
+					"任务信息暂不可用，选择或条件收集未下发（零副作用）",
+					List.of("任务信息暂不可用，配置项与筛选条件均为未知，不是缺失", "请稍后重试，不要据此生成新的选择或条件收集动作"),
+					List.of(), null);
 		}
 		if (GenerativeFormRules.PURPOSE_SET_CONDITIONS.equals(purpose)) {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,

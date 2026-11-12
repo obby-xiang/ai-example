@@ -9,6 +9,7 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
@@ -335,6 +336,8 @@ public class ConditionsForm extends HostForm {
      *                         不弹表，只置条件结构化交棒标记（模型下一跳用既有 {@code set_condition}
      *                         通道结构化用户已给出的值）；{@code true} = 条件仍未知时挂一次条件表。
      *                         已知候选/已落库条件在两种口径下都不受影响。
+     *                         快照 {@code unavailable=true} 时在任务读取前失败关闭，不生成任何新动作；
+     *                         既有表单取消结算仍由 {@link #conditionFormCancelledInBatch} 处理。
      */
     public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
                                         boolean allowUnknownForm) {
@@ -344,6 +347,9 @@ public class ConditionsForm extends HostForm {
         try {
             Long taskId = context.getTaskId();
             if (taskId == null) {
+                return false;
+            }
+            if (TaskSlots.fromExtra(context.getExtra()).isUnavailable()) {
                 return false;
             }
             Task task = readTask(taskId);

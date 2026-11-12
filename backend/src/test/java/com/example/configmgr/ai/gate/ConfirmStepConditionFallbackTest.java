@@ -261,21 +261,28 @@ class ConfirmStepConditionFallbackTest {
 	 */
 	@Test
 	void undecidedConditionAtConfirmStepParksTheHostConditionForm() {
-		this.taskState.set(task("QUERY_COND", null));
-		seedSnapshotWithSlots("QUERY_COND", "{\"taskType\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
-				+ "\"conditions\":[{\"defCode\":\"CURRENCY\",\"fieldCode\":\"code\",\"value\":\"CNY\"}],"
-				+ "\"conditionDefCodes\":[\"CURRENCY\"],\"undecidedDefCodes\":[\"CURRENCY\"],"
-				+ "\"conditionTexts\":[\"code = CNY\"],\"verifiedConditionDefCodes\":[\"CURRENCY\"]}");
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+			this.taskState.set(task("QUERY_COND", null));
+			seedSnapshotWithSlots("QUERY_COND", "{\"taskType\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+					+ "\"conditions\":[{\"defCode\":\"CURRENCY\",\"fieldCode\":\"code\",\"value\":\"CNY\"}],"
+					+ "\"conditionDefCodes\":[\"CURRENCY\"],\"undecidedDefCodes\":[\"CURRENCY\"],"
+					+ "\"conditionTexts\":[\"code = CNY\"]}");
+			RunSnapshot snapshot = this.store.get(RUN_ID);
+			snapshot.setTenantId(1L);
+			snapshot.setUserId(101L);
+			this.store.save(snapshot);
 
-		org.assertj.core.api.Assertions.assertThatThrownBy(() -> runConfirmStep("{}"))
-			.as("条件未决定 ⇒ 交还线程（park），不经过模型、也不自行写库")
-			.isInstanceOf(RunParkedException.class);
+			org.assertj.core.api.Assertions.assertThatThrownBy(() -> runConfirmStep("{}"))
+				.as("条件未决定 ⇒ 交还线程（park），不经过模型、也不自行写库")
+				.isInstanceOf(RunParkedException.class);
 
-		verify(this.taskService, never()).setCondition(any(), anyString(), anyString());
-		assertThat(this.store.pendingsLenient(RUN_ID))
-			.as("宿主挂的是那张条件表（单通道）")
-			.anyMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName())
-					&& PendingToolCall.PENDING.equals(pending.getStatus()));
+			verify(this.taskService, never()).setCondition(any(), anyString(), anyString());
+			assertThat(this.store.pendingsLenient(RUN_ID))
+				.as("宿主挂的是那张条件表（单通道）")
+				.anyMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName())
+						&& PendingToolCall.PENDING.equals(pending.getStatus()));
+		}
 	}
 
 	// ── ②e 禁止 SELECT_DEFS 直接跳 EXPORT ───────────────────────────────────
