@@ -48,10 +48,10 @@ import java.util.Set;
  * <h2>槽位放行（2026-10-28，任务槽位批）</h2>
  * 下发前在<b>原 schema 校验之后</b>再看 {@code purpose} 与 {@code AiContext.extra[taskSlots]}：
  * 槽位已确定的收集表单没有真实缺口 ⇒ 拒绝下发（{@code FORM_SLOTS_ALREADY_KNOWN}，零副作用），
- * 把模型引回 {@code select_definitions} / {@code set_condition}。缺槽位、歧义与真实
+ * 把模型引回 {@code select_definitions} / {@code set_conditions}。缺槽位、歧义与真实
  * {@code GENERAL_CLARIFY} 放行 —— 但未绑定任务的创建入口不先收集配置项/条件。
- * <p><b>缺省 purpose 只在结构明确时推断</b>（{@code optionsFrom.sourceId=definitions} → 选择，
- * {@code scenario=FILTER} → 条件），显式 {@code GENERAL_CLARIFY} 不被形状覆盖；标题/label 不参与判断。
+ * <p><b>缺省 purpose 固定为 GENERAL_CLARIFY</b>；选择和条件表单必须显式声明，标题、label、
+ * scenario 与 definitions 数据源都不参与缺省推断。
  * 创建入口例外只认 purpose、defCodes/conditions 字段键与 definitions 数据源。
  * 上下文由
  * {@link FrontendToolGuard#inspectArguments(String, String, AiContext)} 传入；没有上下文时
@@ -186,7 +186,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"条件表单由宿主统一发放，本次模型表单未下发（零副作用）",
 					List.of("模型只负责传递结构化条件，不得自行下发 SET_CONDITIONS 表单",
-							"已知条件直接调用 set_condition；条件未决定时由宿主在 QUERY_COND 统一收集一次"),
+							"已知条件直接调用 set_conditions；条件未决定时由宿主在 QUERY_COND 统一收集一次"),
 					List.of(), null);
 		}
 		if (GenerativeFormRules.PURPOSE_SELECT_DEFINITIONS.equals(purpose) && slots.hasDefCodes()) {
@@ -260,7 +260,7 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			List<String> reasons = List.of(
 					"创建任务时已给出结构化筛选条件（随 create_task 参数进入运行上下文，不是猜测）",
 					"下一步：直接 confirm_step；到 QUERY_COND 时宿主会按同一份校验落库。若用户本轮要求改条件，"
-							+ "直接调用 set_condition，不要再用表单重复收集");
+							+ "直接调用 set_conditions，不要再用表单重复收集");
 			log.warn("generative_form condition form rejected by create_task structured conditions (not parked, not sent)");
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"筛选条件已给出，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);
@@ -271,8 +271,8 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 					"已确定条件：" + known + "（来源：任务/工作区或用户明确值）"));
 			List<String> reasons = List.of(
 					"已确定条件：" + known + "（系统逐项核对：已设置或已明确不设，不是猜测）",
-					"下一步：按既有步骤链调用 set_condition；若当前是 SELECT_DEFS，先 confirm_step（不传 step）"
-							+ "推进到 QUERY_COND，下一批再 set_condition");
+					"下一步：按既有步骤链调用 set_conditions；若当前是 SELECT_DEFS，先 confirm_step（不传 step）"
+							+ "推进到 QUERY_COND，下一批再 set_conditions");
 			log.warn("generative_form condition form rejected by slot gate (conditions already decided; not parked, not sent) known={}", known);
 			return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
 					"筛选条件已确定，条件表单未下发（工具未执行、未向前端下发表单）", reasons, issues, null);

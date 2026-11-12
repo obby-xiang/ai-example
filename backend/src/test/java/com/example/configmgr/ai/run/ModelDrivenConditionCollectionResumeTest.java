@@ -70,7 +70,7 @@ import static org.mockito.Mockito.when;
  * <h2>本批口径</h2>
  * <ol>
  * <li>宿主<b>不再</b>在 {@code QUERY_COND} 代替模型下发条件表单（首轮与续跑交棒两处入口都撤掉）；
- * 用户原话原样交棒模型，由模型决定"直接 set_condition"还是"条件确实缺失才发一次表单"；</li>
+ * 用户原话原样交棒模型，由模型决定"直接 set_conditions"还是"条件确实缺失才发一次表单"；</li>
  * <li>小写/大写已给条件都不弹宿主表单；未知条件时模型自己的 {@code SET_CONDITIONS} 表单仍被放行；</li>
  * <li>模型发起的条件表单回灌空文本后照常交棒（留空 = 不设筛选，全量推进），不再补第二张；</li>
  * <li>创建导出任务且配置未知时，既有的定义选择表单不受影响（该弹的仍弹）。</li>
@@ -93,10 +93,15 @@ class ModelDrivenConditionCollectionResumeTest {
 
 	private static final String DEF_FORM = DefinitionSelectionForm.toolCallId(TASK_ID);
 
-	/** 模型自己下发的条件表单（与 {@code GenerativeFormRules} 的单框形状一致）。 */
+	/** 条件表单使用 conditionMode + CUSTOM 文本的当前协议。 */
 	private static final String CONDITION_FORM_JSON = "{\"form\":{\"scenario\":\"FILTER\","
-			+ "\"purpose\":\"SET_CONDITIONS\",\"fields\":[{\"key\":\"conditions\",\"label\":\"筛选条件\","
-			+ "\"type\":\"text\",\"required\":false,\"variant\":\"longText\"}]}}";
+			+ "\"purpose\":\"SET_CONDITIONS\",\"fields\":["
+			+ "{\"key\":\"conditionMode\",\"label\":\"筛选方式\",\"type\":\"enum\",\"required\":true,"
+			+ "\"defaultValue\":\"CUSTOM\",\"options\":[{\"value\":\"CUSTOM\",\"label\":\"自定义筛选\"},"
+			+ "{\"value\":\"ALL\",\"label\":\"全部数据（不筛选）\"}]},"
+			+ "{\"key\":\"conditions\",\"label\":\"筛选条件\",\"type\":\"text\",\"required\":false,"
+			+ "\"variant\":\"longText\",\"visibleWhen\":{\"key\":\"conditionMode\",\"op\":\"eq\","
+			+ "\"value\":\"CUSTOM\"}}]}}";
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
@@ -279,7 +284,7 @@ class ModelDrivenConditionCollectionResumeTest {
 	void blankConditionFormSubmissionContinuesWithFullExport() {
 		this.taskState.set(task(TASK_ID, "QUERY_COND"));
 		seedCreatedTask();
-		seedSuspendedRun(List.of(modelConditionForm("{\"conditions\":\"\"}")),
+		seedSuspendedRun(List.of(modelConditionForm("{\"conditionMode\":\"CUSTOM\",\"conditions\":\"\"}")),
 				List.of("导出 CURRENCY 币种", "继续这个导出任务"),
 				AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", Map.of()));
 
@@ -458,13 +463,12 @@ class ModelDrivenConditionCollectionResumeTest {
 			return "不应被执行";
 		}
 
-		@Tool(name = "set_condition", description = "设置查询条件")
+		@Tool(name = "set_conditions", description = "设置查询条件")
 		@ToolScope({ "task:EXPORT/QUERY_COND" })
 		@ToolRisk(ToolMeta.RiskLevel.WRITE)
 		@ToolCategory(ToolMeta.Category.U)
 		@ToolChannel(ToolMeta.Channel.FRONTEND)
-		public String setCondition(@ToolParam(description = "配置定义编码") String defCode,
-				@ToolParam(description = "字段") String field, @ToolParam(description = "值") String value) {
+		public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
 			return "前端哨兵桩（永不执行）";
 		}
 

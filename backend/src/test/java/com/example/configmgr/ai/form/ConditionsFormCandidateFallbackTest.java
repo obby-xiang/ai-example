@@ -48,7 +48,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>锁三件事（两条来源同一口径）：
  * <ol>
- * <li>合法候选复用前端 {@code set_condition} 通道生成<b>页面草案</b>（确定性 toolCallId）；</li>
+ * <li>合法候选复用前端 {@code set_conditions} 通道生成<b>页面草案</b>（确定性 toolCallId）；</li>
  * <li><b>不弹</b> {@code SET_CONDITIONS} 表单 —— 用户已经说过条件，不该被再问一次；</li>
  * <li><b>不写业务库</b> —— 真正的条件提交只属于前端 {@code persistStepData}。</li>
  * </ol>
@@ -61,7 +61,7 @@ class ConditionsFormCandidateFallbackTest {
 
 	private static final long TASK_ID = 42L;
 
-	private static final String DRAFT_ID = ConditionsForm.draftToolCallId(RUN_ID, TASK_ID, "CURRENCY");
+	private static final String DRAFT_ID = ConditionsForm.draftToolCallId(RUN_ID, TASK_ID, List.of("CURRENCY"));
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
@@ -87,8 +87,11 @@ class ConditionsFormCandidateFallbackTest {
 
 	private ConditionsForm form;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		when(this.registry.of(anyString())).thenReturn(this.emitter);
 		when(this.taskService.findById(TASK_ID)).thenAnswer(invocation -> this.taskState.get());
@@ -97,6 +100,13 @@ class ConditionsFormCandidateFallbackTest {
 				this.taskService);
 		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
 		seedRun();
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void tearDown() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	@Test
@@ -108,6 +118,7 @@ class ConditionsFormCandidateFallbackTest {
 		created.setKind(PendingToolCall.KIND_BACKEND);
 		created.setStatus(PendingToolCall.FRONTEND_RESULT);
 		created.setOutcome(ToolOutcome.OK.wire());
+		created.setCreatedTaskId(TASK_ID);
 		created.setResultText("已创建导出任务 #" + TASK_ID + "（当前步骤：QUERY_COND）");
 		created.setArguments("{\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"fields\":[{\"fieldCode\":\"code\","
 				+ "\"operator\":\"EQ\",\"value\":\"CNY\"}]}}");
@@ -143,8 +154,8 @@ class ConditionsFormCandidateFallbackTest {
 					pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
 
 		PendingToolCall draft = this.store.pending(RUN_ID, DRAFT_ID);
-		assertThat(draft).as("确定性 toolCallId 的 set_condition 页面草案").isNotNull();
-		assertThat(draft.getName()).isEqualTo(AiToolNames.SET_CONDITION);
+		assertThat(draft).as("确定性 toolCallId 的 set_conditions 页面草案").isNotNull();
+		assertThat(draft.getName()).isEqualTo(AiToolNames.SET_CONDITIONS);
 		assertThat(draft.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
 		assertThat(draft.getStatus()).isEqualTo(PendingToolCall.PENDING);
 		assertThat(draft.getArguments()).contains("\"defCode\":\"CURRENCY\"")

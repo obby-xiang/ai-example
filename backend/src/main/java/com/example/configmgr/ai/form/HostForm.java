@@ -161,7 +161,7 @@ abstract class HostForm {
      * 先外置、再 {@code suspended}、再逐条请求帧、最后收流；失败时全部收敛成终态，绝不留
      * "看不见的 PENDING"挡住续跑。
      *
-     * <p>用于宿主一次性下发的多条结构化草案（例如多个 {@code defCodes} 的 {@code set_condition}）：
+     * <p>用于宿主一次性下发的多条结构化草案（例如多个 {@code defCodes} 的 {@code set_conditions}）：
      * 逐条 {@code saveSuspended} 会互相覆盖 {@code inFlightToolCalls}，只留最后一条。
      */
     protected boolean shouldParkAll(String runId, List<Message> history, List<PendingToolCall> pendings) {
@@ -297,7 +297,7 @@ abstract class HostForm {
     }
 
     /**
-     * 任意前端工具的确定性待决条目（宿主代替模型下发时用，例如结构化 {@code set_condition} 草案）。
+     * 任意前端工具的确定性待决条目（宿主代替模型下发时用，例如结构化 {@code set_conditions} 草案）。
      * 形状与模型自己的调用一致：前端通道、可逆、非确认门。
      */
     protected static PendingToolCall frontendTool(String toolCallId, String name, String arguments) {

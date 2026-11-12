@@ -1691,7 +1691,7 @@ public class ResumeService {
         }
         state.conditionInstruction = state.enteredQueryCond && handoff
                 ? SyntheticMessages.internalUser(SyntheticMessages.EXPORT_CORRECTION_PREFIX
-                + "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
+                + "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_conditions；"
                 + "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。",
                 SyntheticMessages.Kind.CORRECTION, "condition-handoff") : null;
         return null;
@@ -1996,7 +1996,7 @@ public class ResumeService {
      * 首轮的刷新点在 {@code SpToolCallingManager} 执行循环的尾部。生产 {@code app.ai.park.enabled=true}
      * 时 {@code create_task} / {@code navigate_to} / {@code confirm_step} 都在<b>那个点之前</b>就挂起
      * （{@code RunParkedException} 直接结束这一轮），刷新一次都跑不到 —— 续跑随后拿请求边界的旧
-     * {@link AiContext} 构造下一跳，于是步骤工具（{@code select_definitions} / {@code set_condition} /
+     * {@link AiContext} 构造下一跳，于是步骤工具（{@code select_definitions} / {@code set_conditions} /
      * {@code start_export}）永远不披露。
      *
      * <h2>三条口径</h2>
@@ -2146,7 +2146,7 @@ public class ResumeService {
     }
 
     /**
-     * 条件交棒的既有原因码：候选草案（{@code set_condition}）单独标识；条件表及其明确留空后的
+     * 条件交棒的既有原因码：候选草案（{@code set_conditions}）单独标识；条件表及其明确留空后的
      * 确定推进沿用 {@code CONDITIONS_FORM_PARKED}，不新增协议值。
      *
      * <p>事实源是刚挂起的待决条目（{@code park} 已写盘）；读失败按条件表返回（既有文案，不新增失败路径）。
@@ -2155,7 +2155,7 @@ public class ResumeService {
         try {
             for (PendingToolCall pending : this.store.pendingsLenient(runId)) {
                 if (pending != null && PendingToolCall.PENDING.equals(pending.getStatus())
-                        && AiToolNames.SET_CONDITION.equals(pending.getName())) {
+                        && AiToolNames.SET_CONDITIONS.equals(pending.getName())) {
                     return "CONDITION_DRAFTS_PARKED";
                 }
             }

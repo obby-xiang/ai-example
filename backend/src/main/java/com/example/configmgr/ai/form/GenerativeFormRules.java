@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  * <caption>表单级属性（{@code form}）</caption>
  * <tr><th>属性</th><th>必填</th><th>约束</th></tr>
  * <tr><td>{@code scenario}</td><td>是</td><td>{@code FILTER}（收集筛选条件）/ {@code CLARIFY}（询问澄清）</td></tr>
- * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件，只接受必填 {@code conditionMode} 枚举与 CUSTOM 可见的非必填文本框组成的双字段表单）/ {@code TASK_TYPE}（收集任务类型，固定为<b>单个 enum 单选 {@code EXPORT/IMPORT}</b>）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省时按结构推断（definitions 数据源 → 选择，FILTER → 条件），<b>形状约束只对显式 purpose 生效</b></td></tr>
+ * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件，只接受必填 {@code conditionMode} 枚举与 CUSTOM 可见的非必填文本框组成的双字段表单）/ {@code TASK_TYPE}（收集任务类型，固定为<b>单个 enum 单选 {@code EXPORT/IMPORT}</b>）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省固定为 GENERAL_CLARIFY，<b>形状约束只对显式 purpose 生效</b></td></tr>
  * <tr><td>{@code title}</td><td>否</td><td>文本 ≤ {@value #MAX_TITLE_CHARS} 字符</td></tr>
  * <tr><td>{@code fields}</td><td>是</td><td>1..{@value #MAX_FIELDS} 个字段</td></tr>
  * </table>
@@ -110,7 +110,7 @@ public final class GenerativeFormRules {
 
 	/**
 	 * 表单<b>用途</b>（槽位放行的判据，不是渲染属性）：宿主只按这个字段判断"这张表是来补哪个缺口的"，
-	 * 绝不按标题猜。缺省时按结构推断（见 {@link #purposeOf}），推断不出才是 {@link #DEFAULT_PURPOSE}。
+	 * 绝不按标题猜。缺省时固定为 GENERAL_CLARIFY（见 {@link #purposeOf}），推断不出才是 {@link #DEFAULT_PURPOSE}。
 	 *
 	 * <p><b>唯一注册定义在 {@link FormPurposes}</b>：这里的常量只是既有调用点的兼容别名，
 	 * 不再各自维护取值；解析也只走 {@link FormPurposes#resolve}。
@@ -347,7 +347,7 @@ public final class GenerativeFormRules {
 
 	private static List<FormIssue> purposeIssues(JsonNode form) {
 		List<FormIssue> issues = new ArrayList<>();
-		// 用途校验走唯一解析入口：显式值非法才报 FORM_PURPOSE_INVALID（缺省/空白交给 resolve 的结构推断）
+		// 用途校验走唯一解析入口：显式值非法才报 FORM_PURPOSE_INVALID（缺省/空白由 resolve 固定为 GENERAL_CLARIFY）
 		String explicitPurpose = FormPurposes.explicit(form);
 		if (explicitPurpose != null && !FormPurposes.isRegistered(explicitPurpose)) {
 			issues.add(FormIssue.form(FormIssueCodes.FORM_PURPOSE_INVALID,
@@ -451,7 +451,7 @@ public final class GenerativeFormRules {
 
 	/**
 	 * 显式 {@code purpose} 决定的表单形状：<b>只对显式给出的 purpose</b>生效
-	 * （缺省 purpose 仍按结构推断，既有 {@code scenario=FILTER} 老表单不受新形状约束）。
+	 * （缺省 purpose 仍固定为 GENERAL_CLARIFY，既有 {@code scenario=FILTER} 老表单不受新形状约束）。
 	 *
 	 * <ul>
 	 * <li>{@code TASK_TYPE}：恰好 1 个 {@code enum} 字段，选项正好 {@code EXPORT/IMPORT}；</li>
@@ -1733,7 +1733,7 @@ public final class GenerativeFormRules {
 	// ── 小工具 ───────────────────────────────────────────────────────────────
 
 	/**
-	 * 表单用途：显式值优先；<b>只有缺省时</b>才按结构推断 —— 判据与解析全部在
+	 * 表单用途：显式值优先；<b>只有缺省时</b>才固定为 GENERAL_CLARIFY —— 判据与解析全部在
 	 * {@link FormPurposes#resolve}（唯一入口，本方法只是既有调用点的别名）。
 	 *
 	 * @param form 表单 schema 节点（可为 null）

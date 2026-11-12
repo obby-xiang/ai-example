@@ -135,7 +135,7 @@ class ConditionsFormTest {
         assertThat(advance.getName()).isEqualTo("confirm_step");
         assertThat(advance.getArguments()).isEqualTo("{\"step\":\"EXPORT\"}");
         assertThat(this.store.pendingsLenient(RUN_ID))
-                .noneMatch(pending -> "set_condition".equals(pending.getName())
+                .noneMatch(pending -> "set_conditions".equals(pending.getName())
                         || "set_conditions".equals(pending.getName()))
                 .noneMatch(pending -> !answered.getToolCallId().equals(pending.getToolCallId())
                         && GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
@@ -173,7 +173,7 @@ class ConditionsFormTest {
         assertThat(advance).isNotNull();
         assertThat(advance.getName()).isEqualTo("confirm_step");
         assertThat(this.store.pendingsLenient(RUN_ID))
-                .noneMatch(pending -> "set_condition".equals(pending.getName())
+                .noneMatch(pending -> "set_conditions".equals(pending.getName())
                         || "set_conditions".equals(pending.getName()));
     }
 
@@ -185,10 +185,10 @@ class ConditionsFormTest {
         ConditionsForm.ConfirmStepDecision decision = this.form.inspectConfirmStep(RUN_ID, context(), confirm, history());
 
         assertThat(decision.outcome()).isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.REJECTED);
-        assertThat(decision.reasons()).anyMatch(reason -> reason.contains("set_condition"));
+        assertThat(decision.reasons()).anyMatch(reason -> reason.contains("set_conditions"));
         assertThat(this.store.pending(RUN_ID, "host-cond-next-" + TASK_ID)).isNull();
         assertThat(this.store.pendingsLenient(RUN_ID))
-                .noneMatch(pending -> "set_condition".equals(pending.getName())
+                .noneMatch(pending -> "set_conditions".equals(pending.getName())
                         || "set_conditions".equals(pending.getName()));
     }
 
@@ -213,7 +213,7 @@ class ConditionsFormTest {
 
         assertThat(this.store.pending(RUN_ID, "host-cond-next-" + TASK_ID)).isNull();
         assertThat(this.store.pendingsLenient(RUN_ID))
-                .noneMatch(pending -> "set_condition".equals(pending.getName())
+                .noneMatch(pending -> "set_conditions".equals(pending.getName())
                         || "set_conditions".equals(pending.getName()));
     }
 
@@ -395,6 +395,122 @@ class ConditionsFormTest {
 
         assertThat(first).isEqualTo(second);
         assertThat(first.blank()).isTrue();
+    }
+
+    @Test
+    void fifteenDefinitionsShareOneBatchPendingAndRecoverEveryItem() {
+        PendingToolCall batch = frontendCall("batch-15", "set_conditions", batchArgs(15));
+        ConditionsForm.bindDraft(batch, RUN_ID, context());
+        answer(batch, "batch-15 settled");
+
+        ConditionsForm.ConfirmStepDecision decision = this.form.inspectConfirmStep(RUN_ID, context(),
+                frontendCall("call-confirm", "confirm_step", "{}"), history());
+
+        assertThat(decision.outcome()).isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.ALLOW);
+        assertThat(this.store.pendingsLenient(RUN_ID))
+                .filteredOn(pending -> "set_conditions".equals(pending.getName()))
+                .hasSize(1);
+        assertThat(this.store.pendingsLenient(RUN_ID).getFirst().getToolCallId()).isEqualTo("batch-15");
+    }
+
+    @Test
+    void identicalOrderedBatchReplaysButAnyItemChangeDoesNot() {
+        String arguments = batchArgs(2);
+        PendingToolCall batch = frontendCall("batch-replay", "set_conditions", arguments);
+        ConditionsForm.bindDraft(batch, RUN_ID, context());
+        answer(batch, "batch settled");
+
+        String replay = this.form.settledSetConditionReplay(RUN_ID, context(), arguments);
+
+        assertThat(replay).isEqualTo("batch settled");
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), batchArgs(1))).isNull();
+        String reordered = "{\"items\":[{\"defCode\":\"REGION\",\"conditions\":{}},"
+                + "{\"defCode\":\"CURRENCY\",\"conditions\":{}}]}";
+        assertThat(this.form.settledSetConditionReplay(RUN_ID, context(), reordered)).isNull();
+    }
+
+    @Test
+    void failedBatchAttemptRejectsWithoutAnotherConditionForm() {
+        PendingToolCall batch = frontendCall("batch-failed", "set_conditions", batchArgs(2));
+        ConditionsForm.bindDraft(batch, RUN_ID, context());
+        answer(batch, "second item failed");
+        batch.setOutcome(ToolOutcome.FAILED.wire());
+        this.store.putPending(RUN_ID, batch);
+
+        ConditionsForm.ConfirmStepDecision decision = this.form.inspectConfirmStep(RUN_ID, context(),
+                frontendCall("call-confirm", "confirm_step", "{}"), history());
+
+        assertThat(decision.outcome()).isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.REJECTED);
+        assertThat(this.store.pendingsLenient(RUN_ID))
+                .noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
+    }
+
+    @Test
+    void lateOldReceiptCannotCoverANewerPendingBatch() {
+        PendingToolCall older = frontendCall("batch-old", "set_conditions", batchArgs(2));
+        ConditionsForm.bindDraft(older, RUN_ID, context());
+        older.setRequestedAtMs(100L);
+        answer(older, "old settled");
+        older.setResolvedAtMs(100L);
+        this.store.putPending(RUN_ID, older);
+        PendingToolCall newer = frontendCall("batch-new", "set_conditions",
+                "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"NEW\"]}},"
+                        + "{\"defCode\":\"REGION\",\"conditions\":{}}]}");
+        ConditionsForm.bindDraft(newer, RUN_ID, context());
+        newer.setRequestedAtMs(200L);
+        this.store.putPending(RUN_ID, newer);
+        older.setResolvedAtMs(300L);
+        this.store.putPending(RUN_ID, older);
+
+        ConditionsForm.ConfirmStepDecision pendingDecision = this.form.inspectConfirmStep(RUN_ID, context(),
+                frontendCall("call-confirm", "confirm_step", "{}"), history());
+
+        assertThat(pendingDecision.outcome()).isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.REJECTED);
+        answer(newer, "new settled");
+        assertThat(this.form.inspectConfirmStep(RUN_ID, context(),
+                frontendCall("call-confirm-2", "confirm_step", "{}"), history()).outcome())
+                .isEqualTo(ConditionsForm.ConfirmStepDecision.Outcome.ALLOW);
+    }
+
+    @Test
+    void batchSignatureUsesTheWholeOrderedItems() {
+        String arguments = batchArgs(2);
+
+        String signature = ConditionsForm.setConditionSignature(arguments);
+
+        assertThat(signature).isNotNull();
+        assertThat(ConditionsForm.setConditionSignature(batchArgs(1))).isNotEqualTo(signature);
+        assertThat(ConditionsForm.setConditionSignature(batchArgs(2))).isEqualTo(signature);
+        assertThat(ConditionsForm.setConditionSignature("{\"defCode\":\"CURRENCY\",\"conditions\":{}}"))
+                .isNull();
+    }
+
+    private String batchArgs(int count) {
+        try {
+            var root = this.mapper.createObjectNode();
+            var items = root.putArray("items");
+            for (int index = 1; index <= count; index++) {
+                String defCode = batchDefCode(index);
+                ensureTaskItem(defCode);
+                var item = items.addObject();
+                item.put("defCode", defCode);
+                item.set("conditions", this.mapper.createObjectNode());
+            }
+            return this.mapper.writeValueAsString(root);
+        }
+        catch (Exception ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    private static String batchDefCode(int index) {
+        return index == 1 ? "CURRENCY" : index == 2 ? "REGION" : "DEF_" + index;
+    }
+
+    private void ensureTaskItem(String defCode) {
+        if (this.task.getItems().stream().noneMatch(item -> defCode.equals(item.getDefCode()))) {
+            this.task.getItems().add(item(defCode));
+        }
     }
 
     private void seedTiedAnswers(String secondResultText, String secondStatus, boolean reverseOrder) {

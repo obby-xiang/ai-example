@@ -455,13 +455,12 @@ class KnownInfoHandoffResumeTest {
 			return "前端哨兵桩（永不执行）";
 		}
 
-		@Tool(name = "set_condition", description = "设置查询条件")
+		@Tool(name = "set_conditions", description = "设置查询条件")
 		@ToolScope({ "task:EXPORT/QUERY_COND" })
 		@ToolRisk(ToolMeta.RiskLevel.WRITE)
 		@ToolCategory(ToolMeta.Category.U)
 		@ToolChannel(ToolMeta.Channel.FRONTEND)
-		public String setCondition(@ToolParam(description = "配置定义编码") String defCode,
-				@ToolParam(description = "字段") String field, @ToolParam(description = "值") String value) {
+		public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
 			return "前端哨兵桩（永不执行）";
 		}
 

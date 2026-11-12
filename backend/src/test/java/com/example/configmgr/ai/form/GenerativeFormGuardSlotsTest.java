@@ -53,9 +53,9 @@ class GenerativeFormGuardSlotsTest {
 		assertThat(verdict.accepted()).isFalse();
 		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 		assertThat(verdict.render())
-			.as("条件已明确同样走宿主单通道，并指回 set_condition")
+			.as("条件已明确同样走宿主单通道，并指回 set_conditions")
 			.contains("宿主")
-			.contains("set_condition");
+			.contains("set_conditions");
 	}
 
 	@Test
@@ -156,14 +156,11 @@ class GenerativeFormGuardSlotsTest {
 	}
 
 	@Test
-	void missingPurposeWithDefinitionsSourceIsStillReleasedAsSelection() {
+	void missingPurposeIsGeneralClarifyEvenWithDefinitionsSource() {
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				definitionSelectionForm(null), context(List.of("CURRENCY"), List.of()));
 
-		assertThat(verdict.accepted())
-			.as("旧选择表单没写 purpose：definitions 数据源是明确的配置选择结构，不能绕闸")
-			.isFalse();
-		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+		assertThat(verdict.accepted()).as("缺省 purpose 只表示 GENERAL_CLARIFY，不按数据源猜选择表单").isTrue();
 	}
 
 	@Test
@@ -171,7 +168,7 @@ class GenerativeFormGuardSlotsTest {
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				definitionSelectionForm(null), AiContext.empty());
 
-		assertThat(verdict.accepted()).as("未知配置时老表单照常可用").isTrue();
+		assertThat(verdict.accepted()).as("缺省 purpose 的通用澄清不因配置未知而拦截").isTrue();
 	}
 
 	@Test
@@ -186,13 +183,12 @@ class GenerativeFormGuardSlotsTest {
 	}
 
 	@Test
-	void filterScenarioWithoutPurposeInfersConditionCollection() {
+	void filterScenarioWithoutPurposeIsGeneralClarify() {
 		FrontendToolGuard.Verdict verdict = this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME,
 				filterForm(), context(List.of("CURRENCY"),
 						List.of(new ConditionSlot("CURRENCY", "code", "CNY"))));
 
-		assertThat(verdict.accepted()).as("缺省 purpose + FILTER 场景 = 条件表单").isFalse();
-		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+		assertThat(verdict.accepted()).as("缺省 purpose 不得按 FILTER 场景猜成条件表单").isTrue();
 	}
 
 	@Test

@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
  *
  * <p><b>自然语言信任边界（2026-10-30 确定性工作流）</b>：{@link TaskSlotResolver} 不再解析用户原话，
  * 可信事实只有两类 —— 任务条目（{@code conditionJson} 由前端结构化
- * {@code set_condition} / 确认门落库）与本轮结构化 {@code create_task(defCodes=…)} 候选
+ * {@code set_conditions} / 确认门落库）与本轮结构化 {@code create_task(defCodes=…)} 候选
  * （服务端写入 {@link TaskSlotResolver#CREATE_TASK_DEF_CODES_KEY}，且绑定创建它的任务号）。
  * 因此本类断言的是"结构化事实 → 槽位"的口径；"自由文本不再被解析"由一条反向锁钉住。
  *

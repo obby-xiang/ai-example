@@ -42,7 +42,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * {@link HostForm#parkAll} 的<b>多条目挂起</b>单点：同一批条件草案（多个 {@code set_condition}）必须
+ * {@link HostForm#parkAll} 的<b>多条目挂起</b>单点：同一批条件草案（多个 {@code set_conditions}）必须
  * 外置成一张完整的挂起面，续跑只有在<b>全部</b>回灌后才驱动一次模型；挂起写失败必须把条目收敛成
  * 终态，绝不能留下"看不见的 PENDING"挡住后续续跑。
  */
@@ -207,9 +207,9 @@ class HostFormParkAllTest {
 		}
 
 		private static PendingToolCall call(String toolCallId, String defCode) {
-			String arguments = "{\"defCode\":\"" + defCode + "\",\"conditions\":{\"fields\":["
-					+ "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
-			return frontendTool(toolCallId, AiToolNames.SET_CONDITION, arguments);
+			String arguments = "{\"items\":[{\"defCode\":\"" + defCode + "\",\"conditions\":{\"fields\":["
+					+ "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}]}";
+			return frontendTool(toolCallId, AiToolNames.SET_CONDITIONS, arguments);
 		}
 	}
 

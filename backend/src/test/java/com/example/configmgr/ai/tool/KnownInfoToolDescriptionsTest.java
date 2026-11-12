@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 不一样；本用例把两份描述锁在同一组关键句上，防漂移。
  *
  * <p><b>证红</b>：把 {@code select_definitions} 的「用户已明确配置定义时直接调用」删掉 ⇒ 第 1 条红；
- * {@code generative_form} 的「只用于真实信息缺口」删掉 ⇒ 第 2 条红；{@code set_condition} 的
+ * {@code generative_form} 的「只用于真实信息缺口」删掉 ⇒ 第 2 条红；{@code set_conditions} 的
  * 「已知条件直接使用」删掉 ⇒ 第 3 条红；版本不升 ⇒ 第 4 条红。
  */
 class KnownInfoToolDescriptionsTest {
@@ -80,13 +80,13 @@ class KnownInfoToolDescriptionsTest {
 
     @Test
     void setConditionDescriptionReusesKnownConditionWithinStepChain() throws Exception {
-        String annotation = annotationDescription("setCondition", String.class, AiTools.FieldQueryCondition.class);
+        String annotation = annotationDescription("setConditions", java.util.List.class);
         assertTrue(annotation.contains("已知条件直接使用"), annotation);
         assertTrue(annotation.contains("confirm_step"), annotation);
 
-        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("set_condition");
+        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("set_conditions");
         assertNotNull(yaml);
-        assertTrue(yaml.hasDescription(), "set_condition 必须保留 YAML 描述覆盖");
+        assertTrue(yaml.hasDescription(), "set_conditions 必须保留 YAML 描述覆盖");
         assertTrue(yaml.description().contains("已知条件直接使用"), yaml.description());
         assertTrue(yaml.description().contains("QUERY_COND"), yaml.description());
         assertTrue(yaml.description().contains("confirm_step"), yaml.description());
@@ -110,23 +110,20 @@ class KnownInfoToolDescriptionsTest {
         assertTrue(form.description().contains("中文名称/别名"), form.description());
     }
 
-    /**
-     * 2026-10-31 明确不设筛选：{@code set_condition} 的"恰好空对象"是写入口，必须逐项下发；
-     * 注解与 YAML 两面同批（YAML 是可选覆盖，写反了模型看到两套口径）。
-     */
+    /** 明确不筛选必须在一次批量 items 中逐项给出空对象，不再逐项调用旧协议。 */
     @Test
     void setConditionDescriptionDeclaresPerDefinitionExplicitUnset() throws Exception {
-        String annotation = annotationDescription("setCondition", String.class, AiTools.FieldQueryCondition.class);
-        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("set_condition");
+        String annotation = annotationDescription("setConditions", java.util.List.class);
+        ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("set_conditions");
         assertNotNull(yaml);
-        assertTrue(yaml.hasDescription(), "set_condition 必须保留 YAML 描述覆盖");
+        assertTrue(yaml.hasDescription(), "set_conditions 必须保留 YAML 描述覆盖");
 
         for (String description : java.util.List.of(annotation, yaml.description())) {
-            assertTrue(description.contains("每个 defCode 各调用一次"), description);
-            assertTrue(description.contains("set_condition(defCode, {})"), description);
+            assertTrue(description.contains("一次 set_conditions"), description);
+            assertTrue(description.contains("items 覆盖每个 defCode"), description);
+            assertTrue(description.contains("各项 conditions 都传恰好空对象"), description);
             assertTrue(description.contains("不要重发 SET_CONDITIONS"), description);
             assertTrue(description.contains("fields:[]"), "空数组仍拒绝的口径必须写明：" + description);
-            // 2026-10-27.20：未勾选不得假成功；相同入参幂等、不同值才是修改
             assertTrue(description.contains("未勾选"), description);
             assertTrue(description.contains("幂等复用"), description);
         }
@@ -153,6 +150,6 @@ class KnownInfoToolDescriptionsTest {
     @Test
     void toolsVersionBumpedForKnownInfoDescriptions() {
         YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
-        assertEquals("2026-10-27.23", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
+        assertEquals("2026-10-27.38", shipped.version(), "改描述必须发新 version（破 prompt 缓存）");
     }
 }

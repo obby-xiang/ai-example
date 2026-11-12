@@ -44,13 +44,13 @@ import static org.mockito.Mockito.when;
 
 /**
  * {@code QUERY_COND} 的条件收集是<b>宿主确定性</b>的：条件未决定时，模型正文收尾后宿主只挂
- * <b>一张</b>非必填条件表；条件已由结构化 {@code set_condition} 落库时一张都不挂。
+ * <b>一张</b>非必填条件表；条件已由结构化 {@code set_conditions} 落库时一张都不挂。
  *
  * <p>锁两半（同一用例）：
  * <ol>
  * <li>任务条目 {@code conditionJson=null}（未决定）⇒ 第一次挂起一张 {@code SET_CONDITIONS} 表，
  *     第二次（同一缺口）不再挂 —— 用户只被问一次；</li>
- * <li>模型已 {@code set_condition}（条目里有合法条件 JSON）⇒ 不挂，直接可推进。</li>
+ * <li>模型已 {@code set_conditions}（条目里有合法条件 JSON）⇒ 不挂，直接可推进。</li>
  * </ol>
  *
  * <p><b>证红</b>：让 {@link ConditionsForm#parkIfDueAtQueryCond} 在入口直接返回 {@code false}
@@ -160,7 +160,7 @@ class QueryCondConditionFormParkTest {
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
 			.as("同一缺口已挂过 ⇒ 不得再弹第二张").isFalse();
 
-		// ── 下半：模型已 set_condition（条目里有条件）⇒ 一张都不挂 ──
+		// ── 下半：模型已 set_conditions（条目里有条件）⇒ 一张都不挂 ──
 		this.taskState.set(task("{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}"));
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, context(), history()))
@@ -169,7 +169,7 @@ class QueryCondConditionFormParkTest {
 
 	/**
 	 * {@code create_task(conditions=…)} 的候选是<b>结构化事实</b>：复杂条件（范围键 + IN 多值 + 数值比较）
-	 * 通过同一份 {@code WizardActionGuard} 校验后，复用前端 {@code set_condition} 通道生成<b>页面草案</b>：
+	 * 通过同一份 {@code WizardActionGuard} 校验后，复用前端 {@code set_conditions} 通道生成<b>页面草案</b>：
 	 * 不弹条件表、不写业务库（真正的提交由前端 {@code persistStepData} 在下一步完成）。
 	 */
 	@Test
@@ -189,22 +189,22 @@ class QueryCondConditionFormParkTest {
 				RunContextRefresher.EXTRA_CREATE_TASK_CONDITIONS, conditions));
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history()))
-			.as("候选合法 ⇒ 挂起 set_condition 草案（不是条件表）").isTrue();
+			.as("候选合法 ⇒ 挂起 set_conditions 草案（不是条件表）").isTrue();
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.as("不得弹 SET_CONDITIONS 表单").noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
 
-		String draftId = "host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY";
+		String draftId = ConditionsForm.draftToolCallId(RUN_ID, TASK_ID, List.of("CURRENCY"));
 		PendingToolCall draft = this.store.pending(RUN_ID, draftId);
 		assertThat(draft).as("确定性 toolCallId = 幂等").isNotNull();
-		assertThat(draft.getName()).isEqualTo("set_condition");
+		assertThat(draft.getName()).isEqualTo("set_conditions");
 		assertThat(draft.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
 		assertThat(draft.getStatus()).isEqualTo(PendingToolCall.PENDING);
 		assertThat(draft.getArguments()).contains("\"defCode\":\"CURRENCY\"").contains("\"operator\":\"IN\"");
 		verify(this.emitter).suspended(eq(List.of(draft)), anyString(), anyString(), anyString());
 	}
 
-	/** 已知 CNY 候选：零条件表、零 TaskService.setCondition，只下发一张 set_condition 草案。 */
+	/** 已知 CNY 候选：零条件表、零 TaskService.setCondition，只下发一张 set_conditions 草案。 */
 	@Test
 	void knownCnyCandidateNeverAsksAndNeverWritesTheBusinessDatabase() {
 		this.taskState.set(task(null));
@@ -222,8 +222,8 @@ class QueryCondConditionFormParkTest {
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.as("已知 CNY 候选不弹条件表").noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
-		assertThat(this.store.pending(RUN_ID, "host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY"))
-			.as("复用前端 set_condition 通道生成页面草案").isNotNull();
+		assertThat(this.store.pending(RUN_ID, ConditionsForm.draftToolCallId(RUN_ID, TASK_ID, List.of("CURRENCY"))))
+			.as("复用前端 set_conditions 通道生成页面草案").isNotNull();
 	}
 
 	/**
@@ -246,7 +246,7 @@ class QueryCondConditionFormParkTest {
 
 	/**
 	 * {@code allowUnknownForm=false} 只暂缓<b>未知条件</b>的宿主收集：已知 {@code create_task} 候选
-	 * 仍照旧下发 {@code set_condition} 草案（不弹表、不写库）。
+	 * 仍照旧下发 {@code set_conditions} 草案（不弹表、不写库）。
 	 */
 	@Test
 	void knownCnyCandidateStillDispatchesTheDraftWhenUnknownFormIsDisallowed() {
@@ -266,13 +266,13 @@ class QueryCondConditionFormParkTest {
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.as("已知候选不弹条件表").noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
-		assertThat(this.store.pending(RUN_ID, "host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY"))
-			.as("复用前端 set_condition 通道生成页面草案").isNotNull();
+		assertThat(this.store.pending(RUN_ID, ConditionsForm.draftToolCallId(RUN_ID, TASK_ID, List.of("CURRENCY"))))
+			.as("复用前端 set_conditions 通道生成页面草案").isNotNull();
 	}
 
-	/** 多 defCodes 候选：每个配置项各一张草案，仍不弹条件表、不写库。 */
+	/** 多 defCodes 共享非空条件不是合法的 create_task 候选，整批零草案。 */
 	@Test
-	void multiDefCodeCandidateDispatchesOneDraftPerItem() {
+	void multiDefCodeCandidateWithSharedConditionsFailsWithoutDrafts() {
 		Task task = task(null);
 		TaskItem second = new TaskItem();
 		second.setTaskId(TASK_ID);
@@ -292,11 +292,7 @@ class QueryCondConditionFormParkTest {
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history())).isTrue();
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
-		assertThat(this.store.pendingsLenient(RUN_ID)).filteredOn(pending -> "set_condition".equals(pending.getName()))
-			.extracting(PendingToolCall::getToolCallId)
-			.containsExactlyInAnyOrder(
-					"host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-CURRENCY",
-					"host-cond-draft-" + RUN_ID + "-" + TASK_ID + "-RATE");
+		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
 	}
 
 	/**
@@ -376,7 +372,7 @@ class QueryCondConditionFormParkTest {
 		AiContext candidate = AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE", extra);
 
 		assertThat(this.form.parkIfDueAtQueryCond(RUN_ID, candidate, history(), false))
-			.as("快照读取不可用，即使候选有效也不得发 set_condition 草案")
+			.as("快照读取不可用，即使候选有效也不得发 set_conditions 草案")
 			.isFalse();
 		assertNoNewConditionAction(candidate);
 	}

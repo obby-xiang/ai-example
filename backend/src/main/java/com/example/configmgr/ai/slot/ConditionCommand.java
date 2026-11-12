@@ -7,7 +7,7 @@ import org.apache.commons.lang3.StringUtils;
  *
  * <p>保留任务 {@code conditionJson} 原文（EQ/IN/GT/scopeKeys 都不丢），供工作流复用
  * {@code TaskService#setCondition} 的既有领域路径。<b>不接受自由文本推断</b>：
- * 事实只能来自任务已落库条件或前端结构化 {@code set_condition} 回灌。
+ * 事实只能来自任务已落库条件或前端结构化 {@code set_conditions} 回灌。
  *
  * <p>三态与 {@link ConditionAssessment} 同源：{@code SET} 有结构化条件、
  * {@code EXPLICIT_UNSET} 是用户明确留空（{@code "{}"} 或 EXPORT 步的 null）、

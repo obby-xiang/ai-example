@@ -212,10 +212,33 @@ public record ToolResultEnvelope(@JsonProperty("ok") boolean ok, @JsonProperty("
                             : JSON.convertValue(value, Object.class));
                 }
             }
+            List<String> batchDefCodes = batchDefCodes(node);
+            if (!batchDefCodes.isEmpty()) {
+                target.put("defCodes", batchDefCodes);
+            }
             return new TargetRead(TargetStatus.PRESENT, target);
         } catch (Exception ex) {
             return new TargetRead(TargetStatus.INVALID, Map.of());
         }
+    }
+
+    private static List<String> batchDefCodes(JsonNode root) {
+        if (root.size() != 1 || !root.path("items").isArray() || root.path("items").isEmpty()) {
+            return List.of();
+        }
+        List<String> defCodes = new ArrayList<>();
+        for (JsonNode item : root.path("items")) {
+            if (!item.isObject() || item.size() != 2 || !item.path("defCode").isTextual()
+                    || !item.path("conditions").isObject()) {
+                return List.of();
+            }
+            String defCode = item.path("defCode").asText().trim();
+            if (defCode.isEmpty() || defCodes.contains(defCode)) {
+                return List.of();
+            }
+            defCodes.add(defCode);
+        }
+        return List.copyOf(defCodes);
     }
 
     private record TargetRead(TargetStatus status, Map<String, Object> value) {

@@ -50,10 +50,10 @@ import static org.mockito.Mockito.when;
 /**
  * <b>首轮入口</b>：停在 {@code QUERY_COND} 且用户在继续既有任务时，宿主<b>不再</b>抢在模型之前
  * 挂起筛选条件文本框 —— 这一拍模型必须被驱动，条件由模型理解用户原话后决定
- * （已给就 {@code set_condition}，确实缺失才发一次表单）。
+ * （已给就 {@code set_conditions}，确实缺失才发一次表单）。
  *
  * <p>旧入口会让这一轮在 {@code chat()} 里就停在"筛选条件（可选）"表单上，模型一次都没被问；
- * 同一句"导出cny货币字典"因此永远走不到 {@code set_condition}。
+ * 同一句"导出cny货币字典"因此永远走不到 {@code set_conditions}。
  *
  * <p><b>证红</b>：首轮仍接宿主条件表单 ⇒ 模型不被调用（{@code chatClient.prompt()} 零次），
  * 待决条目里多出 {@code generative_form}。
@@ -367,11 +367,11 @@ class ModelDrivenConditionCollectionChatTest {
 	private void writePrefixThenToolHistory() {
 		RunSnapshot snapshot = this.store.get(RUN_ID);
 		AssistantMessage toolCall = AssistantMessage.builder().content("").toolCalls(List.of(
-				new AssistantMessage.ToolCall("call-tool", "function", "set_condition", "{}"))).build();
+				new AssistantMessage.ToolCall("call-tool", "function", "set_conditions", "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{}}]}"))).build();
 		org.springframework.ai.chat.messages.ToolResponseMessage toolResult = org.springframework.ai.chat.messages.ToolResponseMessage
 			.builder()
 			.responses(List.of(new org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse("call-tool",
-					"set_condition", "{}")))
+					"set_conditions", "{}")))
 			.build();
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new org.springframework.ai.chat.messages.SystemMessage("PERSONA"),
 				new UserMessage("创建并导出"), new AssistantMessage("好"), toolCall, toolResult)));

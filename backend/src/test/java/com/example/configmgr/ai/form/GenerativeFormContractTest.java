@@ -59,7 +59,7 @@ class GenerativeFormContractTest {
 	void guardClaimsOnlyItsOwnTool() {
 		assertThat(this.guard.supports(GenerativeFormRules.TOOL_NAME)).isTrue();
 		assertThat(this.guard.supports("navigate_to")).isFalse();
-		assertThat(this.guard.supports("set_condition")).isFalse();
+		assertThat(this.guard.supports("set_conditions")).isFalse();
 		assertThat(this.guard.supports(null)).isFalse();
 	}
 

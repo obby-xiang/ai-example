@@ -244,7 +244,7 @@ class ConfirmStepConditionFallbackTest {
 			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
 	}
 
-	// ── ②c 非空回灌未落库：零副作用拒绝 confirm_step，指回 set_condition ─────
+	// ── ②c 非空回灌未落库：零副作用拒绝 confirm_step，指回 set_conditions ─────
 
 	@Test
 	void nonEmptyConditionFeedbackThatWasNotPersistedRejectsConfirmStep() {
@@ -256,7 +256,7 @@ class ConfirmStepConditionFallbackTest {
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
 		assertThat(envelopeOf(result, "call-confirm").message())
-			.contains("set_condition")
+			.contains("set_conditions")
 			.contains("尚未生成草案");
 		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
 		assertThat(this.store.pendingsLenient(RUN_ID)).as("已知未落库不得再弹表单")
@@ -393,7 +393,7 @@ class ConfirmStepConditionFallbackTest {
 		ToolExecutionResult result = runConfirmStep("{}");
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
-		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition");
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_conditions");
 		verify(this.gate, never()).awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class));
 	}
 
@@ -437,7 +437,7 @@ class ConfirmStepConditionFallbackTest {
 
 	/** 取消不换卡重问：用户关掉条件表就是明确"不回答"，后续 confirm_step 不得再挂第二张。 */	/**
 	 * 取消不自动重问，但也<b>不得放行</b>：条件仍未决定，confirm_step 必须零副作用拒绝并说明
-	 * "先 set_condition 或由用户明确全量"，否则后续 start_export 会被同源预检卡死。
+	 * "先 set_conditions 或由用户明确全量"，否则后续 start_export 会被同源预检卡死。
 	 */
 	@Test
 	void cancelledConditionFormIsRejectedWithoutReAsking() {
@@ -475,7 +475,7 @@ class ConfirmStepConditionFallbackTest {
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).as("不能误认其他 task 而直接 ALLOW")
 			.isEqualTo(ToolOutcome.REJECTED.wire());
-		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition");
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_conditions");
 	}
 
 	/** Critical-A：部分缺口卡的留空回灌必须放行，但<b>后端零业务写</b>（由前端离开 QUERY_COND 时提交 {}）。 */
@@ -499,7 +499,7 @@ class ConfirmStepConditionFallbackTest {
 
 	/**
 	 * 非空表单回灌必须按表单覆盖的 defCode 逐项生成草案：只处理了已设置的 CURRENCY、没有处理
-	 * 尚未决定的 ORDER ⇒ 零副作用拒绝并指回 set_condition（不换卡重问，也不误放行）。
+	 * 尚未决定的 ORDER ⇒ 零副作用拒绝并指回 set_conditions（不换卡重问，也不误放行）。
 	 */
 	@Test
 	void unhandledRemainingItemInNonEmptyFeedbackRejectsWithoutAnotherForm() {
@@ -520,7 +520,7 @@ class ConfirmStepConditionFallbackTest {
 		ToolExecutionResult result = runConfirmStep("{}");
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
-		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition").contains("ORDER");
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_conditions").contains("ORDER");
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.filteredOn(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()))
 			.as("未处理的是非空回灌，不得换卡再问用户").hasSize(1);
@@ -542,7 +542,7 @@ class ConfirmStepConditionFallbackTest {
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 	}
 
-	// ── ③b 已成功结算的 set_condition 草案：confirm 认可，不要求 conditionJson 已存在 ──
+	// ── ③b 已成功结算的 set_conditions 草案：confirm 认可，不要求 conditionJson 已存在 ──
 
 	@Test
 	void settledSetConditionDraftAllowsTheAdvanceWithoutTaskConditionJson() {
@@ -626,9 +626,9 @@ class ConfirmStepConditionFallbackTest {
 		ToolExecutionResult result = runConfirmStep("{}");
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
-		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_condition");
+		assertThat(envelopeOf(result, "call-confirm").message()).contains("set_conditions");
 		assertThat(this.store.pendingsLenient(RUN_ID))
-			.as("非空回灌未解析前不得下发候选草案").noneMatch(pending -> "set_condition".equals(pending.getName()));
+			.as("非空回灌未解析前不得下发候选草案").noneMatch(pending -> "set_conditions".equals(pending.getName()));
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 	}
 
@@ -644,7 +644,7 @@ class ConfirmStepConditionFallbackTest {
 
 		assertThat(envelopeOf(result, "call-confirm").outcome()).isEqualTo(ToolOutcome.OK.wire());
 		assertThat(this.store.pendingsLenient(RUN_ID))
-			.as("留空 = 全量：不得再下发候选草案").noneMatch(pending -> "set_condition".equals(pending.getName()));
+			.as("留空 = 全量：不得再下发候选草案").noneMatch(pending -> "set_conditions".equals(pending.getName()));
 		verify(this.taskService, never()).setCondition(anyLong(), anyString(), anyString());
 	}
 
@@ -762,7 +762,7 @@ class ConfirmStepConditionFallbackTest {
 		return form;
 	}
 
-	/** N-1：FRONTEND set_condition 的回灌事实在待决条目里（不依赖 ai:ledger）。 */
+	/** N-1：FRONTEND set_conditions 的回灌事实在待决条目里（不依赖 ai:ledger）。 */
 	private void seedSetConditionFeedback() {
 		seedSetConditionDraft("CURRENCY",
 				"{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}");
@@ -772,18 +772,17 @@ class ConfirmStepConditionFallbackTest {
 		seedSetConditionDraft(defCode, conditionsJson, ToolOutcome.OK.wire());
 	}
 
-	/** 成功结算的 set_condition 草案（前端只改页面草案，业务库仍为空）；outcome 可铺失败语料。 */
+	/** 成功结算的 set_conditions 草案（前端只改页面草案，业务库仍为空）；outcome 可铺失败语料。 */
 	private void seedSetConditionDraft(String defCode, String conditionsJson, String outcome) {
 		PendingToolCall set = new PendingToolCall();
 		set.setToolCallId("call-set-draft-" + defCode);
-		set.setName("set_condition");
+		set.setName("set_conditions");
 		set.setKind(PendingToolCall.KIND_FRONTEND);
 		set.setStatus(PendingToolCall.FRONTEND_RESULT);
 		set.setOutcome(outcome);
-		set.setArguments("{\"defCode\":\"" + defCode + "\",\"conditions\":" + conditionsJson + "}");
+		set.setArguments("{\"items\":[{\"defCode\":\"" + defCode + "\",\"conditions\":" + conditionsJson + "}]}");
 		set.setDraftRunId(RUN_ID);
 		set.setDraftTaskId(TASK_ID);
-		set.setDraftDefCode(defCode);
 		set.setResolvedAtMs(System.currentTimeMillis());
 		set.setResultText(ToolOutcome.OK.wire().equals(outcome) ? "已设置 " + defCode + " 的条件" : "设置条件失败");
 		this.store.putPending(RUN_ID, set);
@@ -886,12 +885,12 @@ class ConfirmStepConditionFallbackTest {
 			return "前端哨兵桩（永不执行）";
 		}
 
-		@Tool(name = "set_condition", description = "设置查询条件")
+		@Tool(name = "set_conditions", description = "设置查询条件")
 		@ToolScope({ "task:EXPORT/QUERY_COND" })
 		@ToolRisk(ToolMeta.RiskLevel.WRITE)
 		@ToolCategory(ToolMeta.Category.U)
 		@ToolChannel(ToolMeta.Channel.FRONTEND)
-		public String setCondition(@ToolParam(description = "配置定义编码") String defCode) {
+		public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
 			return "前端哨兵桩（永不执行）";
 		}
 

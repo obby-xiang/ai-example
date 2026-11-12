@@ -6902,6 +6902,70 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "defCode使用Base64URL无填充编码并以`.`分隔，不按连字符或用户文案猜身份，非空文本仍需模型结构化。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1271原差异与最新main合并结果Spec/Task quality均通过；施工报告危险时序、A/B聚合、非OK、同时间戳双顺序、CUSTOM/ALL、取消、连字符、旧协议拒绝及unavailable独立RED→GREEN，合并后生产编译成功；主控未重跑测试，真实Redis/ResumeService/模型/多实例/浏览器及全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:efc93febff3a63704cfb12596593db18a91e1874881dfee51eba98d1f3c1c94f",
+      "status": "reviewed",
+      "reason": "逐hunk复核set_conditions(items)批量签名、逐项校验与恢复、真实任务归属、单卡单回执及旧协议删除；多轮独立审查的Critical/Important/Minor全部关闭。",
+      "reviewedAt": "2026-11-13T03:05:01+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1271、施工agent-1264",
+      "specChanges": [
+        {
+          "change": "旧set_condition全部替换为set_conditions(items)，items非空、defCode不重复，每项仅defCode/conditions并显式携带conditions，字段按各自定义校验。",
+          "reason": "多配置项条件不同，不能共享一个conditions或逐项产生15张卡；旧单条协议和形状猜测会形成错误归属。",
+          "impact": "全部item校验通过才整批下发，一个Pending/卡/回执，target只投影defCodes，不复制条件值。"
+        },
+        {
+          "change": "批量草案按原始items恢复逐项settled/attempted/issued，完整有序items才幂等；按requestedAtMs选择批次，同时间戳不同ID失败关闭。",
+          "reason": "任一项变化都是新修改，迟到旧回执不能覆盖新批次，Redis遍历顺序不能决定归属。",
+          "impact": "仅复用draftRunId/draftTaskId，删除draftDefCode及旧JSON读取；对象键规范排序但items顺序保留。"
+        },
+        {
+          "change": "set_conditions真实写和披露均要求taskId及当前任务已选条目；缺taskService、任务不存在、空条目或读取异常整批拒绝。",
+          "reason": "无法证明任务归属和选中状态时，纯形状校验不能成为生产可写旁路。",
+          "impact": "两参仅用于create_task候选probe和创建前校验，生产前端写统一三参上下文复核，其他工具scope不变。"
+        },
+        {
+          "change": "create_task非空conditions仅允许一个defCode，多项未决定仍可conditions={}；WizardActionGuard无工具名形状推断及FormPurposes非通用用途猜测全部删除。",
+          "reason": "项目未上线，不需要旧多配置共享条件、旧Pending或按JSON形状猜用途的兼容。",
+          "impact": "CreateTaskDraftStore结构不变，不同条件后续走set_conditions(items)，只有GENERAL_CLARIFY允许省略purpose。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java", "status": "checked", "reason": "仅同步批量条件工具名注释，无配置语义变化；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java", "status": "checked", "reason": "批量草案逐项恢复、完整有序签名、批次归属和create_task单项候选；Task1与unavailable保留；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ExportConditionWorkflow.java", "status": "checked", "reason": "仅同步批量工具说明，任务条件计划语义不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/FormPurposes.java", "status": "checked", "reason": "缺省只按GENERAL_CLARIFY处理，不再根据数据源或FILTER猜表单用途；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java", "status": "checked", "reason": "同步显式purpose和批量条件校验说明，既有失败关闭保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java", "status": "checked", "reason": "同步缺省GENERAL_CLARIFY说明，Task1双字段校验不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java", "status": "checked", "reason": "仅更新批量items示例注释；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/RunContextRefresher.java", "status": "checked", "reason": "仅同步批量条件工具名注释，真实候选读取不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "新批量工具绑定、去重、三参写复核和回执路径统一；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolPreflightService.java", "status": "checked", "reason": "create_task非空条件限单项，多项空对象与批量probe共用当前Schema；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/CreateTaskDraftStore.java", "status": "checked", "reason": "仅更新工具说明，当前草案存储结构及TTL不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java", "status": "checked", "reason": "删除draftDefCode JSON属性及访问器，旧形状反序列化拒绝；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java", "status": "checked", "reason": "提示词改为一次set_conditions(items)批量覆盖，删除逐项调用旧规则；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "首轮Pending只认新批量工具名，无旧别名；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "续跑Pending和提示统一新批量协议；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/ConditionCommand.java", "status": "checked", "reason": "仅同步批量工具说明；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/AiContext.java", "status": "checked", "reason": "仅同步批量条件工具说明，上下文字段不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/AiToolNames.java", "status": "checked", "reason": "删除SET_CONDITION，新增SET_CONDITIONS进入唯一工具闭集；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java", "status": "checked", "reason": "披露切换set_conditions，forContext/isContextMatched统一要求taskId，其他scope不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultEnvelope.java", "status": "checked", "reason": "批量target只投影逐项defCodes，不复制conditions值；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolSchemaNormalizer.java", "status": "checked", "reason": "生产Schema补齐items.minItems=1约束；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/WizardActionGuard.java", "status": "checked", "reason": "逐项定义/字段/算子/取值/选中校验整批零写，真实写要求任务归属，删除无工具名猜测；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "唯一setConditions(List<ConditionItem>)签名及批量说明，旧方法删除；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "批量items Schema和提示与Java同步，版本2026-10-27.38，无旧工具协议。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用FieldQueryCondition、PendingToolCall、WizardActionGuard和现有CreateTaskDraftStore，无新增依赖、Redis字段或存储结构。"},
+        "java-api-style": {"status": "checked", "reason": "全部生产Java已IDEA Reformat，触及方法低于50行和复杂度20，JSON字段显式且集合/空值语义明确。"},
+        "logging-exception-safety": {"status": "checked", "reason": "任务读取异常保留日志因果链，对外只给安全业务码和通用原因，不把未知归属伪装为已选中。"},
+        "toc-interaction": {"status": "checked", "reason": "15项只形成一张过程卡和一份汇总回执，不增加重复询问或技术提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "批量原始items在Redis Pending恢复逐项事实，请求时间定归属，同时间戳歧义及迟到回执失败关闭，taskId贯穿披露和写入口。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "参数按JSON结构逐项校验，对象键规范排序且items顺序保留，不按正则或文案识别条件。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1271最终Spec/Task quality均通过；施工报告15项真实管理器单request/result、不同条件、整批零写、幂等/迟到、任务归属、旧字段拒绝及创建约束等独立RED→GREEN，360个生产源编译成功；主控未重跑测试，真实Redis/模型/浏览器/多实例及全量测试NOT_RUN。"}
+      }
     }
   ]
 }

@@ -29,8 +29,8 @@ public class AiContext {
 	 * {@code ConditionsForm#parkIfDueAtQueryCond(..., allowUnknownForm=false)} 置位。
 	 *
 	 * <p>标记在场时，宿主只披露/放行条件结构化需要的四个工具
-	 * （{@code get_config_def/list_config_defs/set_condition/confirm_step}），并随交棒注入一条
-	 * 合成内部指令，让模型把用户已给出的筛选值经既有 {@code set_condition} 通道形成草案，
+	 * （{@code get_config_def/list_config_defs/set_conditions/confirm_step}），并随交棒注入一条
+	 * 合成内部指令，让模型把用户已给出的筛选值经既有 {@code set_conditions} 通道形成草案，
 	 * 而不是立刻弹条件表。标记必须随快照持久化（执行面的第三道防线读快照上下文）；
 	 * 离开 {@code QUERY_COND} 时清除并恢复完整工具面。
 	 */

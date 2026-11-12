@@ -29,7 +29,7 @@ import java.util.Map;
  * <li><b>同名冲突即启动失败</b>：不同内容无法安全合并（{@code #/$defs/X} 只有一种解析结果，
  * 改名需要连带重写 ref，属另一件事），故抛 {@link IllegalStateException} 让问题在启动期暴露，
  * 而不是留给上游 400；</li>
- * <li><b>无嵌套即原样返回</b>：未命中任何参数级 {@code $defs} 时返回<b>输入原串</b>，
+ * <li><b>无嵌套通常原样返回</b>：未命中参数级 {@code $defs} 且无需补约束时返回<b>输入原串</b>，
  * 不重排/不重格式化 —— 保住其余工具 schema 的字节稳定（{@code tools → system → messages}
  * 前缀缓存不该被这次修复击穿）；</li>
  * <li><b>搬完自检</b>：提升后仍解析不了的 {@code #/...} ref 直接抛错（归一化不应制造新的悬空 ref）。</li>
@@ -44,11 +44,11 @@ public final class ToolSchemaNormalizer {
     }
 
     /**
-     * 把参数级 {@code $defs} 合并提升到文档根。
+     * 把参数级 {@code $defs} 合并提升到文档根，并补充 set_conditions 的非空批量约束。
      *
-     * @param toolName    工具名（只用于报错定位）
+     * @param toolName    工具名（用于报错定位和协议约束）
      * @param inputSchema 工具入参 schema 原文
-     * @return 归一化后的 schema；无嵌套 {@code $defs} 时返回入参原串（同一引用）
+     * @return 归一化后的 schema；无变更时返回入参原串（同一引用）
      */
     public static String normalize(String toolName, String inputSchema) {
         if (StringUtils.isBlank(inputSchema)) {
@@ -64,10 +64,11 @@ public final class ToolSchemaNormalizer {
             return inputSchema;
         }
 
+        boolean batchConstrained = constrainBatchItems(toolName, document);
         List<DefsSite> sites = new ArrayList<>();
         collectSites(document, "", true, sites);
         if (sites.isEmpty()) {
-            return inputSchema;
+            return batchConstrained ? write(toolName, document) : inputSchema;
         }
 
         ObjectNode rootDefs = rootDefs(toolName, document);
@@ -79,6 +80,21 @@ public final class ToolSchemaNormalizer {
         }
         assertRefsResolvable(toolName, document);
         return write(toolName, document);
+    }
+
+    private static boolean constrainBatchItems(String toolName, ObjectNode document) {
+        if (!AiToolNames.SET_CONDITIONS.equals(toolName)) {
+            return false;
+        }
+        JsonNode items = document.path("properties").path("items");
+        if (!items.isObject() || !"array".equals(items.path("type").asText())) {
+            throw new IllegalStateException("set_conditions inputSchema items must be an array");
+        }
+        if (items.path("minItems").asInt() == 1) {
+            return false;
+        }
+        ((ObjectNode) items).put("minItems", 1);
+        return true;
     }
 
     private static void collectSites(JsonNode node, String path, boolean root, List<DefsSite> sites) {

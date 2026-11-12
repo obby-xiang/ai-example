@@ -189,7 +189,7 @@ class SystemPromptHitlConfirmTest {
 
 	/**
 	 * 用户 2026-10-27 裁决（多步工作流）：新建任务获批准后，导航<b>不是</b>本轮终点 ——
-	 * 页面级动作可在后续批次按 {@code navigate_to → select_definitions → confirm_step → set_condition}
+	 * 页面级动作可在后续批次按 {@code navigate_to → select_definitions → confirm_step → set_conditions}
 	 * 串行接续，进入新页面/步骤后使用最新披露的工具列表；HITL 不变
 	 * （{@code create_task} 与 {@code start_*} 仍走各自确认卡，披露不等于授权）。
 	 *
@@ -215,7 +215,7 @@ class SystemPromptHitlConfirmTest {
 			.doesNotContain("导航成功后即结束本轮")
 			.contains("导航成功后不要结束本轮");
 		assertThat(systemText).as("页面级动作按批串行接续，进入新页面/步骤后用最新披露的工具列表")
-			.contains("navigate_to → select_definitions → confirm_step → set_condition")
+			.contains("navigate_to → select_definitions → confirm_step → set_conditions")
 			.contains("一批只做一步")
 			.contains("下一批按最新披露")
 			.doesNotContain("推进只对下一轮生效");
@@ -227,7 +227,7 @@ class SystemPromptHitlConfirmTest {
 
 	/**
 	 * 用户 2026-10-27 裁决：select_definitions 后默认不传 step 前进下一步，不主动追问筛选，
-	 * 只有用户主动提出才 set_condition；未提条件 = 全量导出，且查询条件始终可选。
+	 * 只有用户主动提出才 set_conditions；未提条件 = 全量导出，且查询条件始终可选。
 	 */
 	@Test
 	void systemPromptDefaultsToPlainNextStepWithoutProactiveFilterAsk() {
@@ -237,8 +237,8 @@ class SystemPromptHitlConfirmTest {
 			.contains("不要主动追问\"要筛选还是跳过\"")
 			.contains("默认直接调用 confirm_step")
 			.contains("不传 step，只前进一步");
-		assertThat(systemText).as("筛选只在用户主动提出时才 set_condition；但 QUERY_COND 的那一次条件框不是追问")
-			.contains("只有用户主动提出筛选需求时才用 set_condition 设置条件")
+		assertThat(systemText).as("筛选只在用户主动提出时才 set_conditions；但 QUERY_COND 的那一次条件框不是追问")
+			.contains("只有用户主动提出筛选需求时才用 set_conditions 设置条件")
 			.contains("它不是\"追问是否筛选\"")
 			.doesNotContain("不要展开询问条件");
 		assertThat(systemText).as("不设条件即全量导出并如实说明")
@@ -249,11 +249,11 @@ class SystemPromptHitlConfirmTest {
 	}
 
 	/**
-	 * 2026-10-28 步骤披露收口：前端 {@code set_condition} 的 {@code allowSteps} 只有
+	 * 2026-10-28 步骤披露收口：前端 {@code set_conditions} 的 {@code allowSteps} 只有
 	 * {@code QUERY_COND}，而后端披露面同源收窄一样。提示词必须堵住两条"抢跑"：
 	 * <ul>
 	 * <li><b>用户已提出筛选条件也要先推进</b>：只要当前是 SELECT_DEFS，{@code select_definitions}
-	 * 后仍必须先 {@code confirm_step}（不传 step）到 QUERY_COND，<b>下一批</b>才 {@code set_condition}；</li>
+	 * 后仍必须先 {@code confirm_step}（不传 step）到 QUERY_COND，<b>下一批</b>才 {@code set_conditions}；</li>
 	 * <li><b>生成式表单不推进步骤</b>：表单只收集值，"用户无需手动跳步"不等于 AI 可以跳过
 	 * {@code confirm_step}。</li>
 	 * </ul>
@@ -262,10 +262,10 @@ class SystemPromptHitlConfirmTest {
 	void systemPromptForbidsSetConditionAtSelectDefsEvenWhenFilterAlreadyKnown() {
 		String systemText = runTurnAndCaptureSystemText();
 
-		assertThat(systemText).as("SELECT_DEFS 下即使已有筛选条件也先 confirm_step，下一批才 set_condition")
+		assertThat(systemText).as("SELECT_DEFS 下即使已有筛选条件也先 confirm_step，下一批才 set_conditions")
 			.contains("即使已经提出筛选条件")
 			.contains("只要当前还在 SELECT_DEFS")
-			.contains("下一批再调用 set_condition")
+			.contains("下一批再调用 set_conditions")
 			.contains("前端只允许在 QUERY_COND 调");
 		assertThat(systemText).as("generative_form 只收集值、不推进步骤，提交后仍需 confirm_step")
 			.contains("generative_form 只收集值、不推进步骤")

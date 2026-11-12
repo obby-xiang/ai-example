@@ -1987,7 +1987,7 @@ public class ResilientChatService {
             long latestTaskBindingAtMs = latestTaskBindingAtMs(pendings);
             for (PendingToolCall pending : pendings) {
                 boolean workflowAction = AiToolNames.CONFIRM_STEP.equals(pending.getName())
-                        || AiToolNames.SET_CONDITION.equals(pending.getName());
+                        || AiToolNames.SET_CONDITIONS.equals(pending.getName());
                 if (workflowAction && pending.resolved() && pending.effectiveOutcome() == ToolOutcome.OK
                         && isConditionEvidenceBelongsToTask(pending, currentTaskId)
                         && (latestTaskBindingAtMs == 0L || conditionEvidenceAtMs(pending) > latestTaskBindingAtMs)) {
@@ -2101,7 +2101,7 @@ public class ResilientChatService {
 
     /**
      * 本 run 是否已经有<b>当前任务完整续接</b>的结构化事实：成功 create_task 的真实 createdTaskId
-     * 与当前任务一致，且原始 openWizard 允许续接。仅凭 confirm_step/select_definitions/set_condition
+     * 与当前任务一致，且原始 openWizard 允许续接。仅凭 confirm_step/select_definitions/set_conditions
      * 不能推导启动意图；openWizard=false 也不由收尾纠正自动启动。
      */
     boolean exportProgressionObserved(String runId) {

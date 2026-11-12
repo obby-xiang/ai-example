@@ -426,7 +426,7 @@ public class ToolRegistry implements SmartInitializingSingleton {
     /**
      * Returns the list of ToolCallbacks visible in the given context.
      *
-     * <p>披露与执行前的 {@link #matchesContext} 共用 scope、表格开关、条件交棒和 KB 开关判据；
+     * <p>披露与执行前的 {@link #matchesContext} 共用 scope、任务绑定、表格开关、条件交棒和 KB 开关判据；
      * 任务状态不在这里特判，能否启动作业由既有预检与作业事实裁决。KB 关闭时三个 KB 工具不披露，
      * 直接伪造调用也会被拒绝。
      *
@@ -437,9 +437,14 @@ public class ToolRegistry implements SmartInitializingSingleton {
         Set<String> tags = buildTags(ctx);
         List<ToolCallback> disclosed = callbackMap.entrySet().stream()
                 .filter(e -> {
-                    if (!isConditionStructuringAllowed(e.getKey(), ctx) || !isKbAllowed(e.getKey())) return false;
+                    if (!hasTaskBinding(e.getKey(), ctx) || !isConditionStructuringAllowed(e.getKey(), ctx)
+                            || !isKbAllowed(e.getKey())) {
+                        return false;
+                    }
                     ToolMeta meta = metaMap.get(e.getKey());
-                    if (meta == null) return true; // unscoped: always include
+                    if (meta == null) {
+                        return true; // unscoped: always include
+                    }
                     return isScopeAllowed(meta, tags) && this.sheetSwitches.isAllowed(e.getKey());
                 })
                 .map(Map.Entry::getValue)
@@ -452,7 +457,7 @@ public class ToolRegistry implements SmartInitializingSingleton {
      */
     private static final Set<String> CONDITION_STRUCTURING_TOOLS = Set.of(
             AiToolNames.GET_CONFIG_DEF, AiToolNames.LIST_CONFIG_DEFS,
-            AiToolNames.SET_CONDITION, AiToolNames.CONFIRM_STEP,
+            AiToolNames.SET_CONDITIONS, AiToolNames.CONFIRM_STEP,
             "kb_search", "kb_read_doc", "kb_lookup_term", "read_tool_result");
 
     /**
@@ -464,6 +469,10 @@ public class ToolRegistry implements SmartInitializingSingleton {
             return true;
         }
         return CONDITION_STRUCTURING_TOOLS.contains(name);
+    }
+
+    private static boolean hasTaskBinding(String name, AiContext ctx) {
+        return !AiToolNames.SET_CONDITIONS.equals(name) || ctx != null && ctx.getTaskId() != null;
     }
 
     private boolean isKbAllowed(String name) {
@@ -518,8 +527,8 @@ public class ToolRegistry implements SmartInitializingSingleton {
         AiContext effective = ctx == null ? AiContext.empty() : ctx;
         ToolMeta meta = metaMap.get(name);
         boolean scopeOk = meta == null || isScopeAllowed(meta, buildTags(effective));
-        return scopeOk && !isSheetDisabled(name) && isConditionStructuringAllowed(name, effective)
-                && isKbAllowed(name);
+        return scopeOk && hasTaskBinding(name, effective) && !isSheetDisabled(name)
+                && isConditionStructuringAllowed(name, effective) && isKbAllowed(name);
     }
 
     public boolean matchesContext(String name, AiContext ctx) {

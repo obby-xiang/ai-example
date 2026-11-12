@@ -540,8 +540,6 @@ public class ToolPreflightService {
 
     private PreflightReport.Check checkCreateConditions(ConditionsRequest requestedConditions, DefCodes requested,
                                                         List<String> defCodes, String type, boolean english) {
-        // 结构化 conditions：与 set_condition 同一份校验（定义存在/字段属于该定义/算子与取值合法/非空），
-        // 非法结构一律不得进入（预检失败 ⇒ 不挂确认卡、不创建）。
         JsonNode conditionsNode = requestedConditions.node();
         if (!requestedConditions.present() && "EXPORT".equalsIgnoreCase(type)) {
             return PreflightReport.check(CheckCode.CREATE_CONDITIONS, false,
@@ -553,8 +551,7 @@ public class ToolPreflightService {
         if (!requestedConditions.present()) {
             return null;
         }
-        List<String> conditionIssues = new ArrayList<>();
-        List<String> conditionDetails = new ArrayList<>();
+        List<String> conditionIssues = new ArrayList<>(), conditionDetails = new ArrayList<>();
         boolean conditionsValid = true;
         if (!"EXPORT".equalsIgnoreCase(type)) {
             conditionsValid = false;
@@ -569,13 +566,14 @@ public class ToolPreflightService {
                     "conditions must be an object; use {} when undecided", "conditions 必须是对象；条件未决定时传 {}",
                     "The filter condition format is invalid; provide an empty condition set when undecided",
                     "筛选条件格式不正确；暂不确定时请给出空条件"));
-        } else if (!conditionsNode.isEmpty() && (!requested.present() || requested.invalid() || defCodes.isEmpty())) {
+        } else if (!conditionsNode.isEmpty()
+                && (!requested.present() || requested.invalid() || defCodes.size() != 1)) {
             conditionsValid = false;
             appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
-                    "conditions need a valid defCodes array: conditions target specific definitions",
-                    "conditions 必须与合法的 defCodes 同时给出（条件属于具体配置项）",
-                    "Filter conditions must be provided together with valid configuration items",
-                    "筛选条件必须与有效的配置项同时给出"));
+                    "non-empty conditions require exactly one valid defCode",
+                    "非空 conditions 只允许一个合法的 defCode",
+                    "Provide exactly one configuration item, then use set_conditions for per-item conditions",
+                    "非空条件只允许一个配置项；不同配置项的条件请在创建后通过 set_conditions 逐项给出"));
         } else if (!conditionsNode.isEmpty() && this.definitionService == null) {
             conditionsValid = false;
             appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
@@ -608,36 +606,34 @@ public class ToolPreflightService {
     private boolean validateConditionDefinitions(List<String> defCodes, JsonNode conditionsNode,
                                                  List<String> conditionIssues, List<String> conditionDetails,
                                                  boolean english) {
-        boolean conditionsValid = true;
-        WizardActionGuard guard = new WizardActionGuard(this.definitionService);
-        for (String defCode : defCodes) {
-            String probe;
-            try {
-                Map<String, Object> args = new LinkedHashMap<>();
-                args.put("defCode", defCode);
-                args.put("conditions", conditionsNode);
-                probe = JSON.writeValueAsString(args);
-            } catch (Exception ex) {
-                conditionsValid = false;
-                conditionIssues.add(english ? "conditions could not be serialized or validated" : "conditions 无法序列化或校验");
-                conditionDetails.add(english ? "Filter conditions cannot be validated" : "筛选条件无法校验");
-                if (LogSampling.canAcquire("preflight-condition-serialization")) {
-                    log.warn("conditions could not be serialized or validated", ex);
-                }
-                continue;
+        String probe;
+        try {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("defCode", defCodes.getFirst());
+            item.put("conditions", conditionsNode);
+            Map<String, Object> args = new LinkedHashMap<>();
+            args.put("items", List.of(item));
+            probe = JSON.writeValueAsString(args);
+        } catch (Exception ex) {
+            conditionIssues.add(english ? "conditions could not be serialized or validated" : "conditions 无法序列化或校验");
+            conditionDetails.add(english ? "Filter conditions cannot be validated" : "筛选条件无法校验");
+            if (LogSampling.canAcquire("preflight-condition-serialization")) {
+                log.warn("conditions could not be serialized or validated", ex);
             }
-            var verdict = guard.inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
-            if (!verdict.accepted()) {
-                conditionsValid = false;
-                for (String reason : verdict.reasons()) {
-                    if (conditionIssues.size() < 5) {
-                        conditionIssues.add(reason);
-                        conditionDetails.add(reason);
-                    }
-                }
+            return false;
+        }
+        var verdict = new WizardActionGuard(this.definitionService)
+                .inspectArgumentsFor(AiToolNames.SET_CONDITIONS, probe);
+        if (verdict.accepted()) {
+            return true;
+        }
+        for (String reason : verdict.reasons()) {
+            if (conditionIssues.size() < 5) {
+                conditionIssues.add(reason);
+                conditionDetails.add(reason);
             }
         }
-        return conditionsValid;
+        return false;
     }
 
     private record CreateImpact(String text, String fact, String conditionText, String conditionFact) {

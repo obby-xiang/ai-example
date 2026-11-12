@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.tools;
 
 import com.example.configmgr.common.BlankText;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.example.configmgr.common.CodedIllegalStateException;
 import com.example.configmgr.common.ErrorCodes;
 
@@ -62,7 +63,7 @@ import java.util.stream.Collectors;
  * 机制见 {@code gate/ConfirmGate}，无需工具名清单）；确认门自 2026-10-20 起<b>不再超时</b>
  * ——一直等到用户批准/拒绝/取消；</li>
  * <li><b>前端指令</b>：{@code open_export_file_editor} / {@code download_export_files} /
- * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step} /
+ * {@code navigate_to} / {@code select_definitions} / {@code set_conditions} / {@code confirm_step} /
  * {@code generative_form}
  * （{@code @ToolChannel(FRONTEND)}）—— 副作用在浏览器里，后端方法体是哨兵桩，
  * 由 {@code SpToolCallingManager} 挂起并由 {@code POST /api/ai/frontend-tool-result} 回灌结果。
@@ -71,30 +72,25 @@ import java.util.stream.Collectors;
  * </ul>
  *
  * <h2>工作区动作（S4.4d：AI 一句话驱动向导；S4.4e：条件参数镜像前端契约）</h2>
- * {@code navigate_to} / {@code select_definitions} / {@code set_condition} / {@code confirm_step}
+ * {@code navigate_to} / {@code select_definitions} / {@code set_conditions} / {@code confirm_step}
  * 是"任务向导的驱动动作"：按 S4.4c 已实测生效的前端动作表（{@code utils/frontend-tools.ts} 的
  * {@code WORKSPACE_ACTIONS}）登记，<b>参数名与前端契约逐字一致</b>（{@code page/taskId}、
- * {@code codes/mode}、{@code defCode/conditions}、{@code step}）—— 后端只负责披露，
- * 下发与执行沿用既有 {@code frontend_tool_request} 通道，前端零改动。
+ * {@code codes/mode}、{@code items}、{@code step}）—— 后端只负责披露，
+ * 下发与执行沿用既有 {@code frontend_tool_request} 通道。
  *
  * <p>披露口径（三重防线之一，见 {@code ToolScope}）：{@code definitions/data} 等非向导页面不披露
  * 向导动作；<b>同一批</b>模型发起的多次调用共享同一份披露集（scope 判据在批首冻结，
  * 一批工具不允许自我扩权）。<b>2026-10-28 步骤披露收口</b>：三个步骤级向导动作按<b>它能成功的步骤</b>
  * 披露（与前端动作表的 {@code allowSteps} 同源）—— {@code select_definitions} 只在
- * {@code task:EXPORT/SELECT_DEFS} 与 {@code task:IMPORT/UPLOAD}，{@code set_condition} 只在
+ * {@code task:EXPORT/SELECT_DEFS} 与 {@code task:IMPORT/UPLOAD}，{@code set_conditions} 只在
  * {@code task:EXPORT/QUERY_COND}，{@code confirm_step} 在 {@code task:EXPORT}/{@code task:IMPORT}
  * 全任务内（它本身就是推进步骤的手段）。旧口径"按任务类型宽披露"会让模型在 {@code SELECT_DEFS}
- * 直接调 {@code set_condition}，被前端 {@code allowSteps} 守卫拒绝。批与批之间按真实结果刷新：
+ * 直接调 {@code set_conditions}，被前端 {@code allowSteps} 守卫拒绝。批与批之间按真实结果刷新：
  * {@code navigate_to}/{@code create_task}/{@code confirm_step} 成功结算后运行上下文
  * （页面/任务/权威步骤）写入本轮快照，下一跳由 {@code ToolRegistry#forContext} 重算披露面。
  *
- * <p><b>S4.4e 裁决③</b>：{@code set_condition} 的 {@code conditions} 入参改为与前端契约
- * （{@code frontend/src/types/condition.ts} 的 {@code FieldQueryCondition}）逐字段一致的
- * <b>嵌套对象</b>（{@link FieldQueryCondition} / {@link FieldCondition}）—— 前端只读
- * {@code args.conditions} 这一个键（{@code utils/frontend-tools.ts#normalizeActionArgs}），
- * 扁平参数（{@code fieldCode/operator/value} 平铺在顶层）会被静默丢弃，产生"看似成功、实为空条件"
- * 的错误；类型化入参同时让官方 JSON Schema 生成出 {@code fields[].fieldCode/operator/value}
- * 的完整结构，模型不必猜内层形状。见 {@link #setCondition}。
+ * <p>{@code set_conditions} 仅接受非空 {@code items}，每项包含 defCode 与该配置项自己的
+ * {@link FieldQueryCondition}；完整有序 items 决定幂等身份。见 {@link #setConditions}。
  *
  * <p>创建任务的缺口已在 S4.4e 补齐（{@link #createTask}）：{@code create_task} 走 BACKEND 通道，
  * 与任务中心/REST 同一服务层，P1 N7 到此收口。
@@ -423,7 +419,7 @@ public class AiTools {
      * <p><b>为什么需要它</b>：S44d 的 V2/V3 实测里 AI 只能 {@code list_tasks} 选已有任务，
      * 空任务中心的"帮我新建一个导出任务并导出 CONFIG_CODE"走不通（当年登记为【待裁决】2）。
      * 补齐后的链路：{@code create_task} → {@code navigate_to(page, taskId)}
-     * → {@code select_definitions} →（{@code set_condition}）→ {@code confirm_step}
+     * → {@code select_definitions} →（{@code set_conditions}）→ {@code confirm_step}
      * → {@code start_export}（确认门）。
      *
      * <p><b>披露范围（{@code *}）</b>：任务中心、任意业务页面以及没有显式工作区上下文的场景都可创建任务；
@@ -449,9 +445,9 @@ public class AiTools {
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
     @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。"
-            + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：已知条件传与 set_condition 相同的结构并同时给 defCodes，未决定传 {}（这里的 {} 只表示条件未决定，不是 set_condition 的“明确不设”），不得省略。"
+            + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：非空已知条件只允许一个 defCode，未决定传 {} 且可保留多个 defCodes（这里的 {} 只表示未决定，不是 set_conditions 的“明确不设”），不得省略。"
             + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。"
-            + "条件已知（对话里已给）时由前端 set_condition 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
+            + "条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
             + "标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。"
             + "“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。"
             + "只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false；宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后明确打开/配置仍可继续。"
@@ -464,7 +460,7 @@ public class AiTools {
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
             @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
-            @ToolParam(description = "导出任务必传：已知筛选条件传与 set_condition 相同的 FieldQueryCondition 结构（同时给 defCodes），未决定传 {}（表示条件未决定，不是“明确不设”）；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
+            @ToolParam(description = "导出任务必传：非空条件只允许一个 defCode；未决定传 {}（可保留多个 defCodes，表示未决定而非明确不设）；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
             @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
             @ToolParam(description = "是否让宿主创建后自动打开向导并续接配置。“创建任务”只是流程入口，不等于“只创建”；默认完整续接，省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false（宿主不得自动导航、代选或发配置表单，以后用户明确打开/配置仍可继续）", required = false) Boolean openWizard,
             ToolContext toolContext) {
@@ -515,7 +511,7 @@ public class AiTools {
                         + "defCodes/conditions 只是候选，任务尚未勾选配置项、条件也未提交业务库。"
                         + "用户明确限定创建后停止时可返回任务号收尾。" + nextAction
                         + "勾选与条件都只形成前端草案，业务库由前端在下一步/启动作业前提交，"
-                        + "不要重复调用 set_condition，也不要声称已设置/已勾选。",
+                        + "不要重复调用 set_conditions，也不要声称已设置/已勾选。",
                 export ? "导出" : "导入", task.getId(), task.getTitle(), task.getCurrentStep());
     }
 
@@ -773,100 +769,43 @@ public class AiTools {
     }
 
     /**
-     * 查询条件（S4.4e 裁决③：入参形态 = 前端契约，逐字段对齐）。
-     *
-     * <p><b>为什么不能用扁平四参</b>：前端动作表只读 {@code args.defCode} 与 {@code args.conditions}
-     * 两个键（{@code frontend/src/utils/frontend-tools.ts#normalizeActionArgs}），
-     * 若把 {@code fieldCode/operator/value} 平铺成顶层参数，它们会被静默丢弃 —— 表现为
-     * "工具调用成功、条件却是空的"（{@link FieldQueryCondition} 的形态才是
-     * {@code types/condition.ts#parseConditionJson} 认得的）。
-     *
-     * <p><b>类型化入参的第二个收益</b>：官方 JSON Schema 由方法签名生成，嵌套 record 让
-     * Schema 里直接出现 {@code conditions.fields[].fieldCode/operator/value} 与
-     * {@code conditions.scopeKeys}（{@code Map<String,Object>} 只能生成一个无内层结构的 object），
-     * 模型不必从描述文字里猜内层形状。
-     *
-     * <p>顺序约束（前端/后端的既有事实，不是本工具的约束）：{@code set_condition} 只对<b>已勾选</b>
-     * 的配置项有效 —— 未选中时表单里没有该卡片（页面 handler 只写表单模型），
-     * 业务库落库（{@code conditionJson}）只发生在向导推进步骤时（前端 {@code persistStepData}）。
-     *
-     * <p><b>草案口径（2026-10-30 条件草案与提交边界裁决）</b>：本工具<b>只形成前端草案</b>
-     * （AI 对话里仅存 Redis 会话候选），不写业务条目、不改 {@code conditionJson}；
-     * 业务数据库只在下一步（{@code confirm_step}）或启动作业前由前端 {@code persistStepData} 提交。
-     * 因此回执与正文都不得声称"已落库/已生效"；{@code start_export} 预检校验的仍是业务库里的最终条件。
-     * 已知条件由前端 {@code set_condition} 形成草案、宿主不弹条件表；未知条件才由宿主给一次非必填表单，
-     * 留空 = 明确不设（下一步提交 {@code {}}）。
-     *
-     * <p><b>步骤约束（2026-10-28 步骤披露收口）</b>：本工具的披露面只有
-     * {@code task:EXPORT/QUERY_COND}，前端动作表同样只允许 {@code allowSteps: ['QUERY_COND']}。
-     * 因此在 {@code SELECT_DEFS} 步直接调用会被前端<b>拒绝</b>（步骤不符）—— 正确链路是
-     * {@code select_definitions} → {@code confirm_step}（不传 step）到 {@code QUERY_COND} →
-     * <b>下一批</b>再 {@code set_condition}。"一批只做一步"照旧成立；本工具不自动跨步、也不自动
-     * {@code confirm_step}（守卫与披露同源，缺一不可）。
-     *
-     * <p><b>风险档 {@code WRITE}（工具安全边界批，用户 2026-10-25 裁决）</b>：本工具改变的是"后续动作的
-     * 工作选择"，{@code conditionJson}（提交后）是导出作业的唯一条件来源，不能再用 {@code READ}
-     * （"no side effects"）的语义；但草案可逆、可在条件表单里看见，且真正的数据出口仍有
-     * {@code start_export} 的 DANGER 确认门，故按实际后果分级为 {@code WRITE}、不进确认门。
-     * （旧口径"{@code export.setConditions} handler 会立即 {@code PUT} 落库"已由 2026-10-30 裁决废止：
-     * 设置只形成草案，业务库由前端在下一步提交。）
-     *
-     * <p><b>空条件口径（{@code ai/tool/WizardActionGuard}，2026-10-31）</b>：前端
-     * {@code normalizeActionArgs} 会把<b>缺失</b>的 {@code conditions} 补成 {@code {}}，所以缺失/null
-     * 一律拒绝；有键但无有效条件（{@code fields:[]}、{@code scopeKeys:[]}）压平后等于导出全部，同样拒绝；
-     * <b>恰好</b>空对象 {@code {}} 是<b>明确不设筛选</b>（前端 {@code condition-payload} 落成 {@code "{}"}、
-     * {@code ConditionAssessment} 判 {@code EXPLICIT_UNSET}）—— 表单留空时直接 {@code confirm_step}；
-     * 只有非空文本明确"不筛选"或需要清空已有条件时，才由模型调用 {@code set_condition(defCode, {})}。
-     * 未知 {@code defCode}/字段编码、未知键、非法算子同样 fail-closed。
+     * 批量查询条件草案。类型化 record 让 Schema 显式包含 items、每项 defCode/conditions 及字段条件结构；
+     * 运行前由 WizardActionGuard 整批校验。工具只形成前端草案，业务库仍由后续步骤提交。
      */
-    @Tool(name = AiToolNames.SET_CONDITION, description = "设置导出查询条件的草案（前端执行：只写前端草案/会话内候选，不写业务库条件）。"
-            + "前置：EXPORT 任务且当前在 QUERY_COND 步骤；条件必须是结构化对象"
-            + "（fields[].fieldCode/operator/value + 可选 scopeKeys），不要传扁平参数；真实条件至少给 scopeKeys 或 fields 之一。"
-            + "用户给出条件（含 generative_form(purpose=SET_CONDITIONS) 自由文本框回填后解析出的条件）时才调用；"
-            + "用户没给条件就不设筛选（不设条件即全量），不要为凑条件而调用；条件表单留空时直接 confirm_step，不调用本工具。"
-            + "已知条件直接使用，但仍遵守 QUERY_COND 与 confirm_step 链。设置后不要说\"已落库/已生效\"："
-            + "业务库由前端在下一步（confirm_step）或启动作业前 persistStepData 提交。"
-            + "非空文本明确“不筛选”或需要清空已有条件时，对表单覆盖的每个 defCode 各调用一次 set_condition(defCode, {})"
-            + "（恰好空对象 = 明确不设 = 清空该配置项条件），不要重发 SET_CONDITIONS；"
-            + "conditions 缺失、null、fields:[]、scopeKeys:[] 仍会被拒绝。"
-            + "只能对任务已勾选的配置项调用（未勾选/未绑定会被零副作用拒绝：先 select_definitions 或让用户勾选）；"
-            + "同一 defCode + 完全相同入参的重复调用幂等复用（不再下发前端；不同值 = 修改，照常执行）。"
-            + "本工具只能在 QUERY_COND 步骤调用：若当前是 SELECT_DEFS，先 confirm_step（不传 step）推进到 QUERY_COND，"
-            + "下一批再调用本工具，不要在 SELECT_DEFS 这一批抢跑（前端会以步骤不符拒绝）。")
+    @Tool(name = AiToolNames.SET_CONDITIONS, description = "批量设置导出查询条件草案（前端执行，不写业务库）。"
+            + "items 必须是非空数组，每项只含 defCode 和显式 conditions，defCode 不得重复；不同配置项可给不同条件。"
+            + "已知条件直接使用；所有项均通过定义、字段、算子、取值和任务选中校验后才整批下发，任一项失败则整批零写入。"
+            + "未勾选/未绑定任一项也整批拒绝。明确不设时用一次 set_conditions 的 items 覆盖每个 defCode，"
+            + "各项 conditions 都传恰好空对象 {}，不要重发 SET_CONDITIONS；缺失、null、fields:[]、scopeKeys:[] 均被拒绝。"
+            + "只有完整有序 items 完全相同的调用才幂等复用；任一项、条件或顺序变化都是新修改。"
+            + "只能在 EXPORT/QUERY_COND 使用；设置后由 confirm_step 或启动作业前的前端 persistStepData 提交业务库。")
     @ToolScope({AiToolNames.SCOPE_EXPORT_QUERY_COND})
     @ToolRisk(ToolMeta.RiskLevel.WRITE)
     @ToolCategory(ToolMeta.Category.U)
     @ToolChannel(ToolMeta.Channel.FRONTEND)
-    public String setCondition(
-            @ToolParam(description = "配置定义编码") String defCode,
-            @ToolParam(description = "查询条件对象，形如 {\"scopeKeys\":[\"<范围键>\"],\"fields\":[{\"fieldCode\":\"<字段>\",\"operator\":\"EQ\",\"value\":\"<值>\"}]}") FieldQueryCondition conditions) {
+    public String setConditions(
+            @ToolParam(description = "非空批量项；每项只含 defCode/conditions，defCode 不得重复") List<ConditionItem> items) {
         return FRONTEND_STUB;
     }
 
-    /**
-     * 查询条件对象 —— 前端契约 {@code frontend/src/types/condition.ts#FieldQueryCondition} 的逐字段镜像
-     * （也是后端 {@code data/service/QueryCondition} 的同一形态；字段名一个字都不能改，
-     * 前端按这些键名读取，改名即静默失配）。
-     *
-     * @param scopeKeys 范围过滤：地区/项目编码列表（GLOBAL 级配置忽略）；省略表示全部范围
-     * @param fields    字段级过滤条件（多条之间 AND）；省略表示不按字段过滤
-     */
-    public record FieldQueryCondition(
-            @ToolParam(description = "范围过滤：地区/项目编码列表，例如 [\"REGION_CODE\"]（GLOBAL 级配置忽略）；省略表示全部范围", required = false) List<String> scopeKeys,
-            @ToolParam(description = "字段级过滤条件（多条之间 AND），省略表示不按字段过滤", required = false) List<FieldCondition> fields) {
+    public record ConditionItem(
+            @JsonProperty("defCode") @ToolParam(description = "配置定义编码") String defCode,
+            @JsonProperty("conditions") @ToolParam(description = "该项查询条件；明确不设筛选传 {}") FieldQueryCondition conditions) {
     }
 
     /**
-     * 单字段条件 —— 前端契约 {@code types/condition.ts#FieldCondition} 的逐字段镜像。
-     *
-     * @param fieldCode 字段编码（必须是该配置定义的字段）
-     * @param operator  操作符（前端 {@code ConditionOperator} + 后端 {@code ConditionEvaluator} 的交集）
-     * @param value     条件值；EMPTY/NOT_EMPTY 不带值，IN 传字符串数组
+     * 查询条件对象 —— 前端契约 {@code frontend/src/types/condition.ts#FieldQueryCondition} 的逐字段镜像。
      */
+    public record FieldQueryCondition(
+            @JsonProperty("scopeKeys") @ToolParam(description = "范围过滤：地区/项目编码列表，例如 [\"REGION_CODE\"]（GLOBAL 级配置忽略）；省略表示全部范围", required = false) List<String> scopeKeys,
+            @JsonProperty("fields") @ToolParam(description = "字段级过滤条件（多条之间 AND），省略表示不按字段过滤", required = false) List<FieldCondition> fields) {
+    }
+
+    /** 单字段条件。 */
     public record FieldCondition(
-            @ToolParam(description = "字段编码，例如 code") String fieldCode,
-            @ToolParam(description = "操作符（闭集，见 ConditionOperators）：" + ConditionOperators.JOINED_NAMES) String operator,
-            @ToolParam(description = "条件值（文本/数字）；EMPTY/NOT_EMPTY 不传，IN 传字符串数组", required = false) Object value) {
+            @JsonProperty("fieldCode") @ToolParam(description = "字段编码，例如 code") String fieldCode,
+            @JsonProperty("operator") @ToolParam(description = "操作符（闭集，见 ConditionOperators）：" + ConditionOperators.JOINED_NAMES) String operator,
+            @JsonProperty("value") @ToolParam(description = "条件值（文本/数字）；EMPTY/NOT_EMPTY 不传，IN 传字符串数组", required = false) Object value) {
     }
 
     /**
@@ -884,13 +823,13 @@ public class AiTools {
             + "前置：当前步骤校验通过。只推进到目标步骤时，目标达成即可收尾；完整执行时下一批按最新披露继续（不要在同一批里连续推进）；"
             + "推进失败即停，如实说明原因与当前步骤，不要重试推进或跳步（回执给出明确纠正指引且本次零副作用时，"
             + "允许一次不同的纠正动作；同参数/同目标仍在禁止之列）。step 的合法枚举：导出向导 SELECT_DEFS/QUERY_COND/EXPORT；"
-            + "导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_condition。"
+            + "导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_conditions。"
             + "禁止从 SELECT_DEFS 直接跳到 EXPORT（那条路会跳过 QUERY_COND 与条件收集，会被宿主零副作用拒绝）；即使传 step，也必须先完成 QUERY_COND 才能推进到 EXPORT。"
             + "未设筛选是正常状态（= 全量导出）：进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单；"
             + "条件未决定时由宿主统一给一次非必填自由文本框（只此一次，留空即明确不设筛选并照常推进），不要重复收集或用文字追问。"
-            + "条件已知但还没有草案、或条件表回灌了非空文本却还没 set_condition 时，confirm_step 会被零副作用拒绝并指回 set_condition："
+            + "条件已知但还没有草案、或条件表回灌了非空文本却还没 set_conditions 时，confirm_step 会被零副作用拒绝并指回 set_conditions："
             + "先形成草案，下一批再推进（业务库由前端在本步提交，模型不写库）。"
-            + "本步认可本轮已结算的结构化草案（含逐项 set_condition(defCode, {}) 的明确不设）与\"留空=明确不设\"的决定；"
+            + "本步认可本轮已结算的结构化草案（含逐项 set_conditions(items=[{defCode, conditions: {}}]) 的明确不设）与\"留空=明确不设\"的决定；"
             + "本工具必须单独成批：同一批里还有其它工具时会被零副作用拒绝并要求先单独调用 confirm_step"
             + "（条件表需要单独一张卡；混批挂起会先外置整批历史、吞掉同批其它调用的卡与回执）；start_export 预检仍校验业务库里的最终条件。")
     @ToolScope({AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT})
@@ -913,7 +852,7 @@ public class AiTools {
      * 「查询条件」步，在对话里就能填。<b>表单只收集值、不推进步骤</b>（提交后向导仍在原步骤，
      * 权威步骤只由前端「下一步」/ {@code confirm_step} 改变）——"用户无需手动跳步"不等于
      * AI 可以跳过 {@code confirm_step}：拿到值后仍按当前披露面继续，例如当前是 {@code SELECT_DEFS}
-     * 时，下一批要先 {@code confirm_step} 到 {@code QUERY_COND} 才能 {@code set_condition}；</li>
+     * 时，下一批要先 {@code confirm_step} 到 {@code QUERY_COND} 才能 {@code set_conditions}；</li>
      * <li>{@code scenario=CLARIFY} —— <b>询问澄清</b>：信息不足时给用户一张结构化选择/表单，
      * 避免自由文本往返（对应 DC-15 的"模型向用户提问时给出结构化选择/表单"）。</li>
      * </ul>
@@ -928,9 +867,9 @@ public class AiTools {
      * （有明确步骤时只有 {@code QUERY_COND} 允许下发，留空=不设筛选；{@code SELECT_DEFS}/{@code EXPORT} 及之后
      * 等其它步骤零副作用拒绝）。
      *
-     * <p>2026-10-30（条件草案与提交边界）：条件表回灌后的结构化条件只经 {@code set_condition} 形成<b>草案</b>，
+     * <p>2026-10-30（条件草案与提交边界）：条件表回灌后的结构化条件只经 {@code set_conditions} 形成<b>草案</b>，
      * 本工具与草案都不写业务库；业务数据库由前端在下一步（{@code confirm_step}）/启动作业前
-     * {@code persistStepData} 提交。已知条件走 {@code set_condition} 草案时不弹表，留空=明确不设（提交 {@code {}}）。
+     * {@code persistStepData} 提交。已知条件走 {@code set_conditions} 草案时不弹表，留空=明确不设（提交 {@code {}}）。
      *
      * <h2>披露范围（{@code *}）</h2>
      * 本工具是通用信息收集能力：两个场景都可用于任务中心、任意业务页面以及没有显式工作区上下文的场景。
@@ -944,7 +883,7 @@ public class AiTools {
      * {@code FORM_SCHEMA_REJECTED} 且<b>不挂起、不下发</b>（前端永远看不到非法表单）；</li>
      * <li><b>槽位放行</b>（下发前，2026-10-28）：{@code purpose=SELECT_DEFINITIONS} 且配置项已确定、
      * 或 {@code purpose=SET_CONDITIONS} 且条件已覆盖全部配置项 ⇒ {@code FORM_SLOTS_ALREADY_KNOWN}
-     * 且<b>不挂起、不下发</b>（零副作用），把模型引回 select_definitions / set_condition；缺槽位、
+     * 且<b>不挂起、不下发</b>（零副作用），把模型引回 select_definitions / set_conditions；缺槽位、
      * 歧义与真实 {@code GENERAL_CLARIFY} 放行，但未绑定任务的创建入口不先收集配置项/条件
      * （2026-10-29 追加：{@code TASK_TYPE} 且任务类型已确定、
      * {@code SET_CONDITIONS} 且当前步骤已在 {@code EXPORT}/之后，同样零副作用拒绝）；</li>

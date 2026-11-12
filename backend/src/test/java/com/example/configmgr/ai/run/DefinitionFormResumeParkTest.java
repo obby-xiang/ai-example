@@ -505,7 +505,7 @@ class DefinitionFormResumeParkTest {
 				eq(this.emitter));
 
 		// 下一拍：本批没有 confirm_step（条件草案结算回灌），仍未知时宿主才收集
-		repark(List.of(entry("call-set-condition", "set_condition", "{}", PendingToolCall.KIND_FRONTEND,
+		repark(List.of(entry("call-set-condition", "set_conditions", "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{}}]}", PendingToolCall.KIND_FRONTEND,
 				PendingToolCall.FRONTEND_RESULT, ToolOutcome.OK.wire())));
 		this.service.resume(RUN_ID);
 
@@ -551,7 +551,7 @@ class DefinitionFormResumeParkTest {
 		assertThat(last).as("合成指令是本跳最后一条（模型紧接着做结构化）").isInstanceOf(UserMessage.class);
 		assertThat(last.getText())
 			.startsWith(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX)
-			.contains("get_config_def", "set_condition", "confirm_step")
+			.contains("get_config_def", "set_conditions", "confirm_step")
 			.contains("反问");
 		// 真实用户原话不被替换/重排
 		assertThat(handed).filteredOn(message -> "帮我新建一个导出任务".equals(message.getText())).hasSize(1);
@@ -807,12 +807,12 @@ class DefinitionFormResumeParkTest {
 			return "前端哨兵桩（永不执行）";
 		}
 
-		@Tool(name = "set_condition", description = "设置查询条件")
+		@Tool(name = "set_conditions", description = "设置查询条件")
 		@ToolScope({ "task:EXPORT/QUERY_COND" })
 		@ToolRisk(ToolMeta.RiskLevel.WRITE)
 		@ToolCategory(ToolMeta.Category.U)
 		@ToolChannel(ToolMeta.Channel.FRONTEND)
-		public String setCondition(@ToolParam(description = "配置定义编码") String defCode) {
+		public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
 			return "前端哨兵桩（永不执行）";
 		}
 

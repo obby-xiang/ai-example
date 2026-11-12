@@ -44,7 +44,7 @@ import static org.mockito.Mockito.when;
  * {@code allowUnknownForm=false} <b>且条件确实未决定</b>时给运行上下文
  * {@code extra[EXTRA_CONDITION_STRUCTURE_HANDOFF]=true}。
  *
- * <p>已知候选（{@code create_task(conditions=…)} 已下发成 {@code set_condition} 页面草案）、
+ * <p>已知候选（{@code create_task(conditions=…)} 已下发成 {@code set_conditions} 页面草案）、
  * 已落库条件都不置标记 —— 否则下一跳会无谓地收窄工具面，把模型锁在"只能调四个工具"的现场。
  */
 class ConditionsFormStructureHandoffTest {
@@ -55,7 +55,7 @@ class ConditionsFormStructureHandoffTest {
 
 	private static final long TASK_ID = 42L;
 
-	private static final String DRAFT_ID = ConditionsForm.draftToolCallId(RUN_ID, TASK_ID, "CURRENCY");
+	private static final String DRAFT_ID = ConditionsForm.draftToolCallId(RUN_ID, TASK_ID, List.of("CURRENCY"));
 
 	private final InMemoryRunStore store = new InMemoryRunStore();
 
@@ -79,8 +79,11 @@ class ConditionsFormStructureHandoffTest {
 
 	private ConditionsForm form;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		when(this.registry.of(anyString())).thenReturn(this.emitter);
 		when(this.taskService.findById(TASK_ID)).thenAnswer(invocation -> this.taskState.get());
@@ -89,6 +92,13 @@ class ConditionsFormStructureHandoffTest {
 				this.taskService);
 		this.form.setWizardActionGuard(new WizardActionGuard(this.definitionService));
 		seedRun();
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void tearDown() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	// ── ① 真正 UNDECIDED + allowUnknownForm=false：置标记，不弹表 ────────────
@@ -117,6 +127,7 @@ class ConditionsFormStructureHandoffTest {
 		created.setKind(PendingToolCall.KIND_BACKEND);
 		created.setStatus(PendingToolCall.FRONTEND_RESULT);
 		created.setOutcome(ToolOutcome.OK.wire());
+		created.setCreatedTaskId(TASK_ID);
 		created.setResultText("已创建导出任务 #" + TASK_ID + "（当前步骤：QUERY_COND）");
 		created.setArguments("{\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"fields\":[{\"fieldCode\":\"code\","
 				+ "\"operator\":\"EQ\",\"value\":\"CNY\"}]}}");
@@ -126,7 +137,7 @@ class ConditionsFormStructureHandoffTest {
 		boolean parked = this.form.parkIfDueAtQueryCond(RUN_ID, context, history(), false);
 
 		assertThat(parked).as("已知候选挂页面草案").isTrue();
-		assertThat(this.store.pending(RUN_ID, DRAFT_ID)).as("草案走既有 set_condition 通道").isNotNull();
+		assertThat(this.store.pending(RUN_ID, DRAFT_ID)).as("草案走既有 set_conditions 通道").isNotNull();
 		assertThat(context.getExtra())
 			.as("条件已知 ⇒ 不得收窄下一跳工具面")
 			.doesNotContainKey(AiContext.EXTRA_CONDITION_STRUCTURE_HANDOFF);

@@ -276,8 +276,8 @@ public class RunContextRefresher {
 
 	/**
 	 * 结构化 {@code create_task(conditions=…)} 的候选筛选条件：只写进运行上下文（{@code extra}），
-	 * 由 {@code ConditionsForm} 在 QUERY_COND 用与 {@code set_condition} 同一份
-	 * {@code WizardActionGuard} 复核后由宿主通过前端 {@code set_condition} 形成草案，
+	 * 由 {@code ConditionsForm} 在 QUERY_COND 用与 {@code set_conditions} 同一份
+	 * {@code WizardActionGuard} 复核后由宿主通过前端 {@code set_conditions} 形成草案，
 	 * 前端下一步时提交业务库。
 	 *
 	 * <p><b>创建时不落库</b>：任务条目尚无该配置项（条目由 {@code select_definitions} 建立），

@@ -25,12 +25,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ol>
  * <li><b>通道与风险（S4.4d；R3-02 + 工具安全边界批修订）</b>：4 个向导动作必须是 {@code FRONTEND} 通道
  * （后端只挂起、不执行副作用）；{@code confirm_step}（导入第 1 步 flush 写回服务端文件）、
- * {@code select_definitions}（勾选即落任务项）、{@code set_condition}（条件 PUT 落库）三个动作
+ * {@code select_definitions}（勾选即落任务项）、{@code set_conditions}（条件 PUT 落库）三个动作
  * 按事实标 {@code WRITE}，{@code navigate_to} 保持 {@code READ}（只改路由/任务绑定，可逆且无持久写）；
  * <b>不得</b>升级成 DANGER —— FRONTEND 通道优先，且这些动作的后果由下游 {@code start_*} 确认门兜底，
  * 多一道确认卡只会变成无意义弹窗（用户 2026-10-25 裁决）；</li>
  * <li><b>披露边界</b>：向导动作按<b>能成功的步骤</b>披露（2026-10-28 步骤披露收口：任务中心只披露
- * 入口动作，{@code select_definitions}/{@code set_condition}/{@code confirm_step} 按步骤收窄到
+ * 入口动作，{@code select_definitions}/{@code set_conditions}/{@code confirm_step} 按步骤收窄到
  * SELECT_DEFS-UPLOAD / QUERY_COND / 整个任务），非向导页面（配置定义/数据浏览）
  * 与空上下文不披露；同时锁住既有 BACKEND 工具的披露范围不回退（{@code start_import}/
  * {@code start_publish} 仍只在导入任务的对应步骤披露），并显式登记 S4.4d 放宽的两档
@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <li><b>S4.4e + AR-03 三项</b>：{@code create_task} 的披露范围（任务中心 + 两类向导页，其余页面不披露）
  * 与风险（{@code DANGER}，进确认门）；启动类四个工具一律 {@code DANGER}（确认门，FR-5.3）；
  * 任务 COMPLETED 不再单独收窄 {@code start_export}（是否已有成功作业由预检/域层裁决）；
- * {@code set_condition} 的入参 Schema 里必须出现前端契约的内层结构
+ * {@code set_conditions} 的入参 Schema 里必须出现前端契约的内层结构
  * （{@code conditions.fields[].fieldCode/operator/value} + {@code conditions.scopeKeys}），
  * 且<b>不得</b>再出现扁平参数键（前端只读 {@code defCode/conditions}，扁平键会被静默丢弃）。</li>
  * </ol>
@@ -53,12 +53,12 @@ class ToolRegistryDisclosureTest {
      * 受页面/任务类型约束的 3 个向导动作（{@code navigate_to} 是任意页面的导航入口，
      * 披露范围为 {@code *}，不参与"非向导页面不披露"的断言）。
      */
-    private static final List<String> SCOPED_WIZARD_TOOLS = List.of("select_definitions", "set_condition",
+    private static final List<String> SCOPED_WIZARD_TOOLS = List.of("select_definitions", "set_conditions",
             "confirm_step");
 
     /** 前端通道工具（2 个既有 + 4 个工作区动作 + DC-15 的 generative_form；仅 confirm_step = WRITE）。 */
     private static final List<String> FRONTEND_TOOLS = List.of("open_export_file_editor", "download_export_files",
-            "navigate_to", "select_definitions", "set_condition", "confirm_step",
+            "navigate_to", "select_definitions", "set_conditions", "confirm_step",
             com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME);
 
     /** AI 表格操作专项的 9 个工具（读侧 5 / 写侧 3 + 撤销；normalize 双档同名）。 */
@@ -95,7 +95,7 @@ class ToolRegistryDisclosureTest {
     private List<FrontendToolGuard> frontendGuards;
 
     /** 会落服务端的向导动作（工具安全边界批 2026-10-25 裁决：WRITE，不是 READ）。 */
-    private static final List<String> WIZARD_WRITE_TOOLS = List.of("select_definitions", "set_condition",
+    private static final List<String> WIZARD_WRITE_TOOLS = List.of("select_definitions", "set_conditions",
             "confirm_step");
 
     @Test
@@ -138,7 +138,7 @@ class ToolRegistryDisclosureTest {
     void wizardActionGuardIsWiredAndClaimsEachToolExactlyOnce() {
         assertThat(this.frontendGuards).as("生产装配里的前端复核器")
                 .anyMatch(com.example.configmgr.ai.tool.WizardActionGuard.class::isInstance);
-        for (String name : List.of("set_condition", "select_definitions", "undo_last_sheet_edit")) {
+        for (String name : List.of("set_conditions", "select_definitions", "undo_last_sheet_edit")) {
             long claims = this.frontendGuards.stream().filter(guard -> guard.supports(name)).count();
             assertThat(claims).as("%s 的复核器数量", name).isEqualTo(1);
         }
@@ -268,7 +268,7 @@ class ToolRegistryDisclosureTest {
      * {@code create_task}（没有任务时建任务）。
      *
      * <p>【2026-10-28 步骤披露收口】三个步骤级向导动作在任务中心<b>不再</b>披露：任务中心没有
-     * 「当前步骤」这个事实，按任务类型宽披露正是「模型在 SELECT_DEFS 直接调 {@code set_condition}
+     * 「当前步骤」这个事实，按任务类型宽披露正是「模型在 SELECT_DEFS 直接调 {@code set_conditions}
      * 被前端拒绝」的入口（模型看得见就敢调）。改按步骤披露后，模型必须先
      * {@code navigate_to} 进向导、再按披露面逐步走（见 {@link #wizardToolDisclosureIsStepScoped}）。
      */
@@ -276,7 +276,7 @@ class ToolRegistryDisclosureTest {
     void taskCenterDisclosesEntryActionsButNotStepScopedWizardActions() {
         List<String> names = namesFor(AiContext.of("tasks", null, null, null, null));
         assertThat(names).contains("navigate_to", "create_task");
-        assertThat(names).doesNotContain("select_definitions", "set_condition", "confirm_step");
+        assertThat(names).doesNotContain("select_definitions", "set_conditions", "confirm_step");
     }
 
     @Test
@@ -306,38 +306,54 @@ class ToolRegistryDisclosureTest {
      * <ul>
      * <li>{@code select_definitions}：EXPORT/{@code SELECT_DEFS} 与 IMPORT/{@code UPLOAD}
      * （前端 {@code allowSteps: ['SELECT_DEFS','UPLOAD']}）；</li>
-     * <li>{@code set_condition}：只 EXPORT/{@code QUERY_COND}（前端 {@code allowSteps: ['QUERY_COND']}）；</li>
+     * <li>{@code set_conditions}：只 EXPORT/{@code QUERY_COND}（前端 {@code allowSteps: ['QUERY_COND']}）；</li>
      * <li>{@code confirm_step}：整个任务内（{@code task:EXPORT} / {@code task:IMPORT}），它本身就是推进步骤的手段。</li>
      * </ul>
-     * 旧口径「按任务类型宽披露」（EXPORT 三步都披露 set_condition）==> 模型在 {@code SELECT_DEFS}
-     * 直接调 {@code set_condition}，前端 {@code allowSteps} 守卫拒绝并回填「步骤不符」。
+     * 旧口径「按任务类型宽披露」（EXPORT 三步都披露 set_conditions）==> 模型在 {@code SELECT_DEFS}
+     * 直接调 {@code set_conditions}，前端 {@code allowSteps} 守卫拒绝并回填「步骤不符」。
      */
     @Test
     void wizardToolDisclosureIsStepScoped() {
         List<String> atSelectDefs = namesFor(AiContext.of("export", "EXPORT", "SELECT_DEFS", 1L, Map.of()));
         assertThat(atSelectDefs).as("EXPORT/SELECT_DEFS：选配置与推进可见，条件工具不可见")
                 .contains("navigate_to", "select_definitions", "confirm_step")
-                .doesNotContain("set_condition");
+                .doesNotContain("set_conditions");
 
         List<String> atQueryCond = namesFor(AiContext.of("export", "EXPORT", "QUERY_COND", 1L, Map.of()));
         assertThat(atQueryCond).as("EXPORT/QUERY_COND：条件工具正向披露（选配置已过步）")
-                .contains("navigate_to", "set_condition", "confirm_step")
+                .contains("navigate_to", "set_conditions", "confirm_step")
                 .doesNotContain("select_definitions");
 
         List<String> atExport = namesFor(AiContext.of("export", "EXPORT", "EXPORT", 1L, Map.of()));
         assertThat(atExport).as("EXPORT/EXPORT：只剩推进与作业入口")
                 .contains("navigate_to", "confirm_step", "start_export")
-                .doesNotContain("select_definitions", "set_condition");
+                .doesNotContain("select_definitions", "set_conditions");
 
         // 导入：第 1 步（UPLOAD）选配置；条件步骤不适用（前端动作表也不允许）
         List<String> atUpload = namesFor(AiContext.of("import", "IMPORT", "UPLOAD", 1L, Map.of()));
         assertThat(atUpload).contains("navigate_to", "select_definitions", "confirm_step")
-                .doesNotContain("set_condition");
+                .doesNotContain("set_conditions");
         for (String step : List.of("PRECHECK", "IMPORT", "PUBLISH")) {
             assertThat(namesFor(AiContext.of("import", "IMPORT", step, 1L, Map.of()))).as("IMPORT/%s", step)
                     .contains("navigate_to", "confirm_step")
-                    .doesNotContain("select_definitions", "set_condition");
+                    .doesNotContain("select_definitions", "set_conditions");
         }
+    }
+
+    @Test
+    void setConditionsIsNotDisclosedOrMatchedWithoutTaskId() {
+        AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", null, "ACTIVE", Map.of());
+
+        assertThat(namesFor(context)).doesNotContain("set_conditions");
+        assertThat(toolRegistry.isContextMatched("set_conditions", context)).isFalse();
+    }
+
+    @Test
+    void setConditionsIsDisclosedAndMatchedWithTaskId() {
+        AiContext context = AiContext.of("export", "EXPORT", "QUERY_COND", 1L, "ACTIVE", Map.of());
+
+        assertThat(namesFor(context)).contains("set_conditions");
+        assertThat(toolRegistry.isContextMatched("set_conditions", context)).isTrue();
     }
 
     @Test
@@ -367,8 +383,10 @@ class ToolRegistryDisclosureTest {
         assertThat(aiTools.navigateTo("export", 1L)).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.downloadExportFiles(1L, new String[] { "CURRENCY" })).isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.selectDefinitions(new String[] { "CURRENCY" }, "REPLACE")).isEqualTo(AiTools.FRONTEND_STUB);
-        assertThat(aiTools.setCondition("CURRENCY", new AiTools.FieldQueryCondition(List.of("XN"),
-                List.of(new AiTools.FieldCondition("code", "EQ", "CNY"))))).isEqualTo(AiTools.FRONTEND_STUB);
+        assertThat(aiTools.setConditions(List.of(new AiTools.ConditionItem("CURRENCY",
+                new AiTools.FieldQueryCondition(List.of("XN"),
+                        List.of(new AiTools.FieldCondition("code", "EQ", "CNY")))))))
+                .isEqualTo(AiTools.FRONTEND_STUB);
         assertThat(aiTools.confirmStep(null)).isEqualTo(AiTools.FRONTEND_STUB);
     }
 
@@ -427,33 +445,33 @@ class ToolRegistryDisclosureTest {
         // 风险元数据 → 挂起种类 → 确认门 的整条链路由 ConfirmGateWiringTest 锁（无 Redis 的行为用例）
     }
 
-    // ── S4.4e 裁决③：set_condition 入参 = 前端契约（conditions 对象 + 内层结构） ──
+    // ── S4.4e 裁决③：set_conditions 入参 = 前端契约（conditions 对象 + 内层结构） ──
 
     @Test
     void setConditionSchemaMirrorsFrontendContract() throws Exception {
-        ToolCallback callback = toolRegistry.getCallback("set_condition");
+        ToolCallback callback = toolRegistry.getCallback("set_conditions");
         assertThat(callback).isNotNull();
         String schema = callback.getToolDefinition().inputSchema();
         JsonNode root = new ObjectMapper().readTree(schema);
 
-        // 顶层只有 defCode + conditions —— 前端 normalizeActionArgs 只读这两个键
-        assertThat(fieldNames(root.path("properties"))).containsExactlyInAnyOrder("defCode", "conditions");
-        assertThat(textValues(root.path("required"))).containsExactlyInAnyOrder("defCode", "conditions");
+        assertThat(fieldNames(root.path("properties"))).containsExactly("items");
+        assertThat(textValues(root.path("required"))).containsExactly("items");
+        JsonNode items = root.path("properties").path("items");
+        assertThat(items.path("minItems").asInt()).isEqualTo(1);
+        JsonNode batchItem = items.path("items");
+        assertThat(fieldNames(batchItem.path("properties"))).containsExactlyInAnyOrder("defCode", "conditions");
+        assertThat(textValues(batchItem.path("required"))).containsExactlyInAnyOrder("defCode", "conditions");
 
-        // conditions 的内层结构显式出现在 Schema 里（模型不必猜形状）
-        JsonNode conditions = root.path("properties").path("conditions");
+        JsonNode conditions = batchItem.path("properties").path("conditions");
         assertThat(conditions.path("type").asText()).isEqualTo("object");
         assertThat(fieldNames(conditions.path("properties"))).containsExactlyInAnyOrder("scopeKeys", "fields");
         JsonNode item = conditions.path("properties").path("fields").path("items");
         assertThat(item.path("type").asText()).isEqualTo("object");
         assertThat(fieldNames(item.path("properties"))).containsExactlyInAnyOrder("fieldCode", "operator", "value");
-        // value 是可选的（EMPTY/NOT_EMPTY 不带值），fieldCode/operator 是必填
         assertThat(textValues(item.path("required"))).containsExactlyInAnyOrder("fieldCode", "operator");
 
-        // 运行期接受前端契约形态的实参：模型按契约传参时入参能正常绑定（不会因参数类型不符抛错），
-        // 且后端仍只返回哨兵（副作用留给前端）。注：回调结果经 JSON 序列化，故用 contains 而非 isEqualTo。
-        String args = "{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"XN\"],"
-                + "\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+        String args = "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"XN\"],"
+                + "\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}]}";
         assertThat(callback.call(args)).contains(AiTools.FRONTEND_STUB);
     }
 
@@ -481,7 +499,7 @@ class ToolRegistryDisclosureTest {
         List<String> allTools = List.of("list_config_defs", "get_config_def", "list_tasks", "get_workspace_state",
                 "check_job_status", "create_task", "start_export", "start_precheck", "start_import",
                 "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
-                "select_definitions", "set_condition", "confirm_step",
+                "select_definitions", "set_conditions", "confirm_step",
                 com.example.configmgr.ai.form.GenerativeFormRules.TOOL_NAME,
                 "read_sheet_summary", "aggregate_sheet", "inspect_columns", "review_cells", "find_rows",
                 "normalize_column", "replace_values", "update_rows", "undo_last_sheet_edit",

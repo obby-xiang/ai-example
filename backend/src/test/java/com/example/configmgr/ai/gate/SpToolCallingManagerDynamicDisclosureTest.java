@@ -186,7 +186,7 @@ class SpToolCallingManagerDynamicDisclosureTest {
         // 但当前是 SELECT_DEFS：条件工具（前端只允许 QUERY_COND 用）与 start_export 仍不出现
         List<String> nextHop = definitionNames(this.manager.resolveToolDefinitions(boundary));
         assertThat(nextHop).contains("navigate_to", "select_definitions", "confirm_step", "check_job_status");
-        assertThat(nextHop).doesNotContain("set_condition", "start_export");
+        assertThat(nextHop).doesNotContain("set_conditions", "start_export");
 
         // 下一批（新一批）选择配置：判据换成刷新后的上下文 ⇒ 放行
         ToolExecutionResult selectBatch = run(boundary,
@@ -303,10 +303,10 @@ class SpToolCallingManagerDynamicDisclosureTest {
         frontendSucceeds();
         ToolCallingChatOptions boundary = optionsFor(wizard);
         List<String> atSelectDefs = definitionNames(this.manager.resolveToolDefinitions(boundary));
-        // SELECT_DEFS：选配置与推进可见；set_condition 不在披露面（前端 allowSteps 只允许 QUERY_COND，
+        // SELECT_DEFS：选配置与推进可见；set_conditions 不在披露面（前端 allowSteps 只允许 QUERY_COND，
         // 披露了模型就会在错步调用 —— 2026-10-28 步骤披露收口）
         assertThat(atSelectDefs).contains("select_definitions", "confirm_step")
-            .doesNotContain("set_condition", "start_export");
+            .doesNotContain("set_conditions", "start_export");
 
         // ① 推进到 QUERY_COND：步骤只认 TaskService（前端已把步骤落库），不从入参猜
         this.taskState.set(task(7L, Task.TaskType.EXPORT, "QUERY_COND", Task.TaskStatus.ACTIVE));
@@ -320,7 +320,7 @@ class SpToolCallingManagerDynamicDisclosureTest {
         assertThat(afterQueryCond.getTaskType()).isEqualTo("EXPORT");
         // 条件工具已披露（QUERY_COND 正向披露），但还没到 EXPORT ⇒ start_export 仍不出现
         List<String> atQueryCond = definitionNames(this.manager.resolveToolDefinitions(boundary));
-        assertThat(atQueryCond).contains("set_condition", "confirm_step");
+        assertThat(atQueryCond).contains("set_conditions", "confirm_step");
         assertThat(atQueryCond).doesNotContain("start_export");
 
         // ② 模型自报 step=EXPORT，但权威步骤仍是 QUERY_COND ⇒ 不得据此猜成 EXPORT
@@ -375,12 +375,12 @@ class SpToolCallingManagerDynamicDisclosureTest {
             return "前端哨兵桩（永不执行）";
         }
 
-        @Tool(name = "set_condition", description = "设置查询条件")
+        @Tool(name = "set_conditions", description = "设置查询条件")
         @ToolScope({ "task:EXPORT/QUERY_COND" })
         @ToolRisk(ToolMeta.RiskLevel.WRITE)
         @ToolCategory(ToolMeta.Category.U)
         @ToolChannel(ToolMeta.Channel.FRONTEND)
-        public String setCondition(@ToolParam(description = "配置定义编码") String defCode) {
+        public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
             return "前端哨兵桩（永不执行）";
         }
 

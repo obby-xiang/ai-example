@@ -267,7 +267,7 @@ class ToolPreflightServiceTest {
 		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
 
 		assertThat(report.pass()).isFalse();
-		assertThat(failure(report, "条件已决定")).contains("条件未决定").contains("set_condition");
+		assertThat(failure(report, "条件已决定")).contains("条件未决定").contains("set_conditions");
 	}
 
 	/** I-1：手工已推进到 EXPORT 的空白条件代表用户留空，start_export 可启动。 */
@@ -439,6 +439,30 @@ class ToolPreflightServiceTest {
 		assertThat(malformedConditions.pass()).isFalse();
 		assertThat(failure(malformedConditions, ToolPreflightService.CheckCode.CREATE_CONDITIONS.label(false)))
 				.contains("筛选条件格式不正确");
+	}
+
+	@Test
+	void createTaskNonEmptyConditionsRequireExactlyOneDefinition() {
+		DefinitionService definitions = mock(DefinitionService.class);
+		when(definitions.findByCode("CURRENCY")).thenReturn(new ConfigDefinition());
+		when(definitions.findByCode("REGION")).thenReturn(new ConfigDefinition());
+		ToolPreflightService validated = new ToolPreflightService(this.jobService, this.taskFileRepository,
+				this.stagingRowRepository, definitions);
+		String multiple = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\",\"REGION\"],";
+
+		ToolPreflightService.PreflightReport rejected = validated.inspect("create_task",
+				multiple + "\"conditions\":{\"scopeKeys\":[\"XN\"]}}", AiContext.empty());
+		ToolPreflightService.PreflightReport undecided = validated.inspect("create_task",
+				multiple + "\"conditions\":{}}", AiContext.empty());
+		ToolPreflightService.PreflightReport single = validated.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+						+ "\"conditions\":{\"scopeKeys\":[\"XN\"]}}", AiContext.empty());
+
+		assertThat(rejected.pass()).isFalse();
+		assertThat(failure(rejected, ToolPreflightService.CheckCode.CREATE_CONDITIONS.label(false)))
+				.contains("一个");
+		assertThat(undecided.pass()).isTrue();
+		assertThat(single.pass()).isTrue();
 	}
 
 	@Test

@@ -102,10 +102,10 @@ class GenerativeFormTaskTypeAndConditionTest {
 			assertThat(verdict.accepted()).as("步骤 %s：模型不得下发条件表单", step).isFalse();
 			assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 			assertThat(verdict.render())
-				.as("指引指向宿主单通道 + set_condition")
+				.as("指引指向宿主单通道 + set_conditions")
 				.contains("宿主")
 				.contains("零副作用")
-				.contains("set_condition");
+				.contains("set_conditions");
 		}
 	}
 
@@ -121,7 +121,7 @@ class GenerativeFormTaskTypeAndConditionTest {
 			.isEmpty();
 		assertThat(GenerativeFormRules.resultIssues(form,
 				json("{\"condition\":\"CURRENCY 的 code = CNY，且 NAME 包含 人民币\"}")))
-			.as("自由文本原样通过复核，由模型解析成 set_condition 结构")
+			.as("自由文本原样通过复核，由模型解析成 set_conditions 结构")
 			.isEmpty();
 	}
 
@@ -133,9 +133,9 @@ class GenerativeFormTaskTypeAndConditionTest {
 		assertThat(verdict.accepted()).as("条件已明确：不重复收集").isFalse();
 		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 		assertThat(verdict.render())
-			.as("已知条件同样走宿主单通道，并指回 set_condition")
+			.as("已知条件同样走宿主单通道，并指回 set_conditions")
 			.contains("宿主")
-			.contains("set_condition");
+			.contains("set_conditions");
 	}
 
 	@Test

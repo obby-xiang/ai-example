@@ -1046,7 +1046,7 @@ public class SpToolCallingManager implements ToolCallingManager {
             state.frontendRejected.add(pending.getToolCallId());
             return true;
         }
-        if (this.conditionsForm == null || !AiToolNames.SET_CONDITION.equals(pending.getName())) {
+        if (this.conditionsForm == null || !AiToolNames.SET_CONDITIONS.equals(pending.getName())) {
             return false;
         }
         String replay = this.conditionsForm.settledSetConditionReplay(state.runId, state.context,
@@ -1273,8 +1273,8 @@ public class SpToolCallingManager implements ToolCallingManager {
             return;
         }
         String code = first == null ? ToolOutcome.CODE_TOOL_EXECUTION_FAILED : first.effectiveCode();
-        settleFrontendRejected(state.runId, pending, code, "同批重复的 set_condition 未重复执行（首次未成功）",
-                List.of("同一批里出现了两条完全相同的 set_condition：只执行第一条，本条未下发前端",
+        settleFrontendRejected(state.runId, pending, code, "同批重复的 set_conditions 未重复执行（首次未成功）",
+                List.of("同一批里出现了两条完全相同的 set_conditions：只执行第一条，本条未下发前端",
                         "首次调用的结局：" + (first == null ? "未结算" : first.effectiveOutcome().wire())));
         String text = frameText(pending.getResultText());
         state.out.frontendToolResult(pending, false, text);
@@ -2768,7 +2768,7 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     /**
-     * F11：完全相同入参的 {@code set_condition} 幂等重放的结算 —— 条目落成 {@code FRONTEND_RESULT/OK}
+     * F11：完全相同入参的 {@code set_conditions} 幂等重放的结算 —— 条目落成 {@code FRONTEND_RESULT/OK}
      * （模型看到与首次一致的成功回执），但<b>本次没有下发前端、没有重复写</b>：
      * {@code executed=false}（副作用属于首次调用），也不发会触发前端动作的请求帧。
      */
@@ -2783,7 +2783,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         pending.setResultText(resultText);
         this.store.putPending(runId, pending);
         if (log.isDebugEnabled())
-            log.debug("set_condition called again with identical arguments; idempotent replay (not re-sent to frontend) runId={} toolCallId={}", runId, pending.getToolCallId());
+            log.debug("set_conditions called again with identical arguments; idempotent replay (not re-sent to frontend) runId={} toolCallId={}", runId, pending.getToolCallId());
         return resultText;
     }
 

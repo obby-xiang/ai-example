@@ -71,8 +71,8 @@ import static org.mockito.Mockito.when;
  * <b>明确不设筛选（用户答"无"/"不筛选"/"全部"）的闸门与逐项放行</b>（2026-10-31）。
  *
  * <h2>现场</h2>
- * 条件表输入"无"：模型对 CURRENCY / TAX_RATE 各调用一次
- * {@code set_condition(defCode, {})}，{@link WizardActionGuard} 以"空条件"拒绝；
+ * 条件表输入"无"：模型用一次 {@code set_conditions(items)} 覆盖 CURRENCY / TAX_RATE，
+ * 两项 conditions 均为 {}；旧实现却以"空条件"拒绝；
  * 随后 {@code confirm_step} 又因"非空回灌无草案"拒绝 —— 两条链路互相锁死，任务无法推进。
  *
  * <h2>口径（与用户裁决一致）</h2>
@@ -112,11 +112,14 @@ class ExplicitUnsetConditionGateTest {
 
 	private static final long TASK_ID = 42L;
 
-	private static final String HOST_FORM_ID = "host-cond-form-" + RUN_ID + "-" + TASK_ID;
-
 	private static final String CONDITION_FORM_JSON = "{\"form\":{\"scenario\":\"FILTER\","
-			+ "\"purpose\":\"SET_CONDITIONS\",\"fields\":[{\"key\":\"conditions\",\"label\":\"筛选条件\","
-			+ "\"type\":\"text\",\"required\":false,\"variant\":\"longText\"}]}}";
+			+ "\"purpose\":\"SET_CONDITIONS\",\"fields\":["
+			+ "{\"key\":\"conditionMode\",\"label\":\"筛选方式\",\"type\":\"enum\",\"required\":true,"
+			+ "\"defaultValue\":\"CUSTOM\",\"options\":[{\"value\":\"CUSTOM\",\"label\":\"自定义筛选\"},"
+			+ "{\"value\":\"ALL\",\"label\":\"全部数据（不筛选）\"}]},"
+			+ "{\"key\":\"conditions\",\"label\":\"筛选条件\",\"type\":\"text\",\"required\":false,"
+			+ "\"variant\":\"longText\",\"visibleWhen\":{\"key\":\"conditionMode\",\"op\":\"eq\","
+			+ "\"value\":\"CUSTOM\"}}]}}";
 
 	private static final String CNY_CONDITION_JSON = "{\"fields\":[{\"fieldCode\":\"code\","
 			+ "\"operator\":\"EQ\",\"value\":\"CNY\"}]}";
@@ -184,12 +187,13 @@ class ExplicitUnsetConditionGateTest {
 		when(this.definitionService.findByCode("CURRENCY")).thenReturn(definition("CURRENCY", "code"));
 		when(this.definitionService.findByCode("ORDER")).thenReturn(definition("ORDER", "code"));
 
+		WizardActionGuard guard = new WizardActionGuard(this.definitionService);
+		guard.setTaskService(this.taskService);
 		this.manager = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
-				this.beacon, this.cancellations, this.limiter,
-				List.of(new WizardActionGuard(this.definitionService)));
+				this.beacon, this.cancellations, this.limiter, List.of(guard));
 		ConditionsForm conditionsForm = new ConditionsForm(this.store, this.registry, this.gate, this.codec,
 				this.properties, this.taskService);
-		conditionsForm.setWizardActionGuard(new WizardActionGuard(this.definitionService));
+		conditionsForm.setWizardActionGuard(guard);
 		this.manager.setConditionsForm(conditionsForm);
 	}
 
@@ -230,7 +234,7 @@ class ExplicitUnsetConditionGateTest {
 	void clearingEveryConfigCoveredByTheFormAllowsConfirmStep() {
 		this.taskState.set(task("QUERY_COND", null, "ORDER"));
 		seedSnapshot("QUERY_COND", Map.of());
-		seedCollectedForm("{\"conditions\":\"无\"}");
+		seedCollectedForm("{\"conditionMode\":\"CUSTOM\",\"conditions\":\"无\"}");
 
 		assertThat(setCondition("call-set-currency", "CURRENCY", "{}").ok()).isTrue();
 		assertThat(setCondition("call-set-order", "ORDER", "{}").ok()).isTrue();
@@ -251,7 +255,7 @@ class ExplicitUnsetConditionGateTest {
 	void clearingOnlyOneConfigRejectsAndNamesTheRemainingOne() {
 		this.taskState.set(task("QUERY_COND", null, "ORDER"));
 		seedSnapshot("QUERY_COND", Map.of());
-		seedCollectedForm("{\"conditions\":\"无\"}");
+		seedCollectedForm("{\"conditionMode\":\"CUSTOM\",\"conditions\":\"无\"}");
 
 		assertThat(setCondition("call-set-currency", "CURRENCY", "{}").ok()).isTrue();
 
@@ -262,7 +266,8 @@ class ExplicitUnsetConditionGateTest {
 			.as("拒绝理由必须点名剩余项，且不得把已清空的 CURRENCY 重新算作缺口")
 			.contains("ORDER")
 			.doesNotContain("CURRENCY");
-		assertThat(confirm.message()).contains("set_condition(defCode, {})");
+		assertThat(confirm.message()).contains("一次 set_conditions 的 items 覆盖表单每个 defCode")
+			.contains("各项 conditions 都传恰好空对象");
 		assertThat(this.store.pendingsLenient(RUN_ID))
 			.filteredOn(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()))
 			.as("未处理的是非空回灌，不得换卡再问用户").hasSize(1);
@@ -277,7 +282,7 @@ class ExplicitUnsetConditionGateTest {
 		seedSnapshot("QUERY_COND", Map.of());
 
 		assertThat(setCondition("call-set-currency", "CURRENCY", "{}").ok())
-			.as("已有条件时清空同样走 set_condition(defCode, {})").isTrue();
+			.as("已有条件时清空同样把该项放进一次 set_conditions(items)，并令 conditions={}").isTrue();
 
 		// 模拟前端离开 QUERY_COND 时的 persistStepData：草案（空）提交成 "{}"
 		this.taskState.get().getItems().get(0).setConditionJson("{}");
@@ -313,8 +318,8 @@ class ExplicitUnsetConditionGateTest {
 			.isInstanceOf(RunParkedException.class);
 
 		assertThat(this.store.pendingsLenient(RUN_ID))
-			.as("空候选不得下发 set_condition 草案").noneMatch(pending -> "set_condition".equals(pending.getName()));
-		assertThat(this.store.pending(RUN_ID, HOST_FORM_ID)).as("条件未决定 ⇒ 挂一次可选条件表").isNotNull();
+			.as("空候选不得下发 set_conditions 草案").noneMatch(pending -> "set_conditions".equals(pending.getName()));
+		assertThat(this.store.pending(RUN_ID, hostConditionFormId())).as("条件未决定 ⇒ 挂一次可选条件表").isNotNull();
 	}
 
 	// ── ⑥ 空数组仍拒绝（不可写成"明确不设"）────────────────────────────────
@@ -372,8 +377,8 @@ class ExplicitUnsetConditionGateTest {
 		String arguments = conditionArguments("CURRENCY", CNY_CONDITION_JSON);
 
 		ToolExecutionResult result = runBatch(
-				new AssistantMessage.ToolCall("call-set-a", "function", "set_condition", arguments),
-				new AssistantMessage.ToolCall("call-set-b", "function", "set_condition", arguments));
+				new AssistantMessage.ToolCall("call-set-a", "function", "set_conditions", arguments),
+				new AssistantMessage.ToolCall("call-set-b", "function", "set_conditions", arguments));
 
 		assertThat(envelopeOf(result, "call-set-a").ok()).isTrue();
 		assertThat(envelopeOf(result, "call-set-b").ok()).as("同批重复项幂等成功").isTrue();
@@ -384,12 +389,12 @@ class ExplicitUnsetConditionGateTest {
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
 
 	private ToolResultEnvelope setCondition(String toolCallId, String defCode, String conditionsJson) {
-		return envelopeOf(runBatch(new AssistantMessage.ToolCall(toolCallId, "function", "set_condition",
+		return envelopeOf(runBatch(new AssistantMessage.ToolCall(toolCallId, "function", "set_conditions",
 				conditionArguments(defCode, conditionsJson))), toolCallId);
 	}
 
 	private static String conditionArguments(String defCode, String conditionsJson) {
-		return "{\"defCode\":\"" + defCode + "\",\"conditions\":" + conditionsJson + "}";
+		return "{\"items\":[{\"defCode\":\"" + defCode + "\",\"conditions\":" + conditionsJson + "}]}";
 	}
 
 	private ToolResultEnvelope confirmStep() {
@@ -441,7 +446,7 @@ class ExplicitUnsetConditionGateTest {
 	/** 宿主条件表的非空回灌（用户答"无"）：同一 run 的待决条目，resolvedAtMs 早于后续草案。 */
 	private void seedCollectedForm(String resultText) {
 		PendingToolCall form = new PendingToolCall();
-		form.setToolCallId(HOST_FORM_ID);
+		form.setToolCallId(hostConditionFormId());
 		form.setName(GenerativeFormRules.TOOL_NAME);
 		form.setType("function");
 		form.setArguments(CONDITION_FORM_JSON);
@@ -451,6 +456,14 @@ class ExplicitUnsetConditionGateTest {
 		form.setResultText(resultText);
 		form.setResolvedAtMs(System.currentTimeMillis() - 1000L);
 		this.store.putPending(RUN_ID, form);
+	}
+
+	private String hostConditionFormId() {
+		String suffix = this.taskState.get().getItems().stream().map(TaskItem::getDefCode)
+			.map(code -> java.util.Base64.getUrlEncoder().withoutPadding()
+				.encodeToString(code.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+			.collect(java.util.stream.Collectors.joining("."));
+		return ConditionsForm.toolCallId(RUN_ID, TASK_ID) + "-" + suffix;
 	}
 
 	/** 任务：首个条目 CURRENCY；{@code conditionJson} 为 {@code null} = 未决定。 */
@@ -503,12 +516,12 @@ class ExplicitUnsetConditionGateTest {
 			return "前端哨兵桩（永不执行）";
 		}
 
-		@Tool(name = "set_condition", description = "设置查询条件")
+		@Tool(name = "set_conditions", description = "设置查询条件")
 		@ToolScope({ "task:EXPORT/QUERY_COND" })
 		@ToolRisk(ToolMeta.RiskLevel.WRITE)
 		@ToolCategory(ToolMeta.Category.U)
 		@ToolChannel(ToolMeta.Channel.FRONTEND)
-		public String setCondition(@ToolParam(description = "配置定义编码") String defCode) {
+		public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
 			return "前端哨兵桩（永不执行）";
 		}
 

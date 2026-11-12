@@ -94,9 +94,9 @@ class ExportWrapUpCorrectionTest {
 		MessageJsonCodec codec = new MessageJsonCodec(mapper);
 		RunSnapshot snapshot = store.seedRun("run-correction-history", "s-correction-history");
 		AssistantMessage toolCall = AssistantMessage.builder().content("").toolCalls(List.of(
-				new AssistantMessage.ToolCall("call-1", "function", "set_condition", "{}"))).build();
+				new AssistantMessage.ToolCall("call-1", "function", "set_conditions", "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{}}]}"))).build();
 		ToolResponseMessage toolResult = ToolResponseMessage.builder()
-			.responses(List.of(new ToolResponseMessage.ToolResponse("call-1", "set_condition", "{\"ok\":true}")))
+			.responses(List.of(new ToolResponseMessage.ToolResponse("call-1", "set_conditions", "{\"ok\":true}")))
 			.build();
 		snapshot.setMessageJson(codec.serializeAll(List.of(new SystemMessage("SYS"), new UserMessage("导出"),
 				toolCall, toolResult)));
@@ -129,7 +129,7 @@ class ExportWrapUpCorrectionTest {
 	void exportProgressionInThisRunTriggersCorrectionEvenWithoutExportWords() {
 		assertThat(ResilientChatService.needsExportWrapUpCorrection(EXPORT_STEP, true, List.of(),
 				"继续这个任务", false, true))
-			.as("本 run 已有 create_task/select_definitions/confirm_step/set_condition 证据").isTrue();
+			.as("本 run 已有 create_task/select_definitions/confirm_step/set_conditions 证据").isTrue();
 	}
 
 	/** 本 run 成功的 create_task(type=EXPORT) 即新建导出事实（不读 ai:ledger）。 */
@@ -177,7 +177,7 @@ class ExportWrapUpCorrectionTest {
 					ResilientChatService.exportWrapUpCorrection(42L),
 					com.example.configmgr.ai.history.SyntheticMessages.Kind.CORRECTION, "export-wrap-up");
 		ToolResponseMessage tool = ToolResponseMessage.builder()
-			.responses(List.of(new ToolResponseMessage.ToolResponse("call-1", "set_condition", "{}")))
+			.responses(List.of(new ToolResponseMessage.ToolResponse("call-1", "set_conditions", "{}")))
 			.build();
 
 		List<Message> filtered = com.example.configmgr.ai.history.SyntheticMessages

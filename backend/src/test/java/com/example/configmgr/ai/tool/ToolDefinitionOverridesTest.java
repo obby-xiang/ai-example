@@ -263,7 +263,7 @@ class ToolDefinitionOverridesTest {
         List<String> declared = List.of("list_config_defs", "get_config_def", "list_tasks", "get_workspace_state",
                 "check_job_status", "create_task", "start_export", "start_precheck", "start_import",
                 "start_publish", "open_export_file_editor", "download_export_files", "navigate_to",
-                "select_definitions", "set_condition", "confirm_step", "generative_form", "read_sheet_summary",
+                "select_definitions", "set_conditions", "confirm_step", "generative_form", "read_sheet_summary",
                 "aggregate_sheet", "inspect_columns", "review_cells", "find_rows", "normalize_column", "replace_values",
                 "update_rows", "undo_last_sheet_edit");
         for (String tool : declared) {
@@ -293,7 +293,7 @@ class ToolDefinitionOverridesTest {
     }
 
     /**
-     * 2026-10-28 步骤披露收口：{@code set_condition} 的模型侧描述必须点明它只能在
+     * 2026-10-28 步骤披露收口：{@code set_conditions} 的模型侧描述必须点明它只能在
      * {@code QUERY_COND} 步骤调用，并且当前在 SELECT_DEFS 时要先 {@code confirm_step}
      * （不传 step）推进 —— 旧描述只写"前置：EXPORT 任务且当前在 QUERY_COND 步骤"，
      * 模型在 SELECT_DEFS 被前端拒绝后无从知道下一步该做什么。
@@ -304,9 +304,9 @@ class ToolDefinitionOverridesTest {
     @Test
     void shippedSetConditionOverridePinsQueryCondStepAndConfirmStepGuidance() {
         YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
-        ToolDefinitionOverride setCondition = shipped.load().find("set_condition");
+        ToolDefinitionOverride setCondition = shipped.load().find("set_conditions");
         assertNotNull(setCondition);
-        assertTrue(setCondition.hasDescription(), "set_condition 必须保留描述覆盖（否则回落注解）");
+        assertTrue(setCondition.hasDescription(), "set_conditions 必须保留描述覆盖（否则回落注解）");
         String description = setCondition.description();
         assertTrue(description.contains("QUERY_COND"), description);
         assertTrue(description.contains("先 confirm_step"), description);
@@ -384,7 +384,7 @@ class ToolDefinitionOverridesTest {
             // 2026-10-27.16（条件收集单通道）引入，本条断言随当前 pin 同步：导出创建必须显式给 conditions，未决定传 {}
             assertTrue(description.contains("必须显式传 conditions"), description);
             assertTrue(description.contains("未决定传 {}"), description);
-            // 2026-10-27.23：create_task 的 {} 仍只表示条件未决定，不得与 set_condition 的"明确不设"混用
+            // 2026-10-27.23：create_task 的 {} 仍只表示条件未决定，不得与 set_conditions 的"明确不设"混用
             assertTrue(description.contains("只表示条件未决定"), description);
             assertTrue(description.contains("navigate_to"), description);
         }

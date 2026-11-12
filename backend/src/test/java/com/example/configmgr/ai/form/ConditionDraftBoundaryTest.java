@@ -46,7 +46,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * <b>真实业务库上的条件边界</b>：AI 的 {@code create_task(conditions=…)} 候选只能变成宿主
- * {@code set_condition} 页面草案（{@code TaskItem.conditionJson} 仍为 null、零
+ * {@code set_conditions} 页面草案（{@code TaskItem.conditionJson} 仍为 null、零
  * {@code TaskService#setCondition} 写入）；只有模拟前端 {@code persistStepData} 真正提交同形 JSON 后，
  * 条件工作流与 {@code start_export} 预检才读到 {@code SET}。
  *
@@ -231,10 +231,10 @@ class ConditionDraftBoundaryTest {
 
 	private PendingDraft onlyDraft() {
 		return this.store.pendingsLenient(RUN_ID).stream()
-			.filter(pending -> AiToolNames.SET_CONDITION.equals(pending.getName()))
+			.filter(pending -> AiToolNames.SET_CONDITIONS.equals(pending.getName()))
 			.findFirst()
 			.map(pending -> new PendingDraft(pending.getToolCallId(), pending.getArguments()))
-			.orElseThrow(() -> new AssertionError("宿主没有下发 set_condition 草案：" + this.store.pendingsLenient(RUN_ID)));
+			.orElseThrow(() -> new AssertionError("宿主没有下发 set_conditions 草案：" + this.store.pendingsLenient(RUN_ID)));
 	}
 
 	private TaskItem taskItemFromDatabase() {

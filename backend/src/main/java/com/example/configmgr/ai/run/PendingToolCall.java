@@ -169,9 +169,6 @@ public class PendingToolCall {
     @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long draftTaskId;
 
-    @JsonProperty("draftDefCode")
-    private String draftDefCode;
-
     @JsonProperty("status")
     @ToString.Include
     private String status = PENDING;

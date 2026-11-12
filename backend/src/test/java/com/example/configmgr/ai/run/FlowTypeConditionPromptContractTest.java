@@ -49,8 +49,8 @@ class FlowTypeConditionPromptContractTest {
 
 		assertThat(prompt).as("条件表单：一个非必填自由文本框")
 			.contains("表单是单个非必填自由文本框");
-		assertThat(prompt).as("文本由模型解析成 set_condition 结构")
-			.contains("非空回灌由模型解析成 set_condition");
+		assertThat(prompt).as("文本由模型解析成 set_conditions 结构")
+			.contains("非空回灌由模型解析成 set_conditions");
 		assertThat(prompt).as("留空（含 {}）= 不设筛选，直接推进（全量导出）")
 			.contains("留空（包括 {} 与空文本）即明确不设筛选")
 			.contains("confirm_step");
@@ -107,10 +107,10 @@ class FlowTypeConditionPromptContractTest {
 			.contains("留空即照常推进")
 			.doesNotContain("进入 QUERY_COND 时按 generative_form(purpose=SET_CONDITIONS) 给一次");
 
-		ToolDefinitionOverride setCondition = new YamlToolDefinitionSource().load().find("set_condition");
+		ToolDefinitionOverride setCondition = new YamlToolDefinitionSource().load().find("set_conditions");
 		assertThat(setCondition).isNotNull();
 		assertThat(setCondition.description())
-			.as("YAML set_condition 必须认可条件表单回填解析出的条件")
+			.as("YAML set_conditions 必须认可条件表单回填解析出的条件")
 			.contains("自由文本框回填后解析出的条件");
 
 		Method confirmStepMethod = AiTools.class.getMethod("confirmStep", String.class);
@@ -152,21 +152,17 @@ class FlowTypeConditionPromptContractTest {
 
 		assertThat(shipped.version())
 			.as("改描述必须发新 version（破 prompt 缓存）")
-			.isEqualTo("2026-10-27.23");
+			.isEqualTo("2026-10-27.38");
 	}
 
-	/**
-	 * 2026-10-31 明确不设筛选：用户答"无/不筛选/全部"时，模型必须<b>逐项</b>下发
-	 * {@code set_condition(defCode, {})}，而不是重发条件表 —— 否则闸门以空条件拒绝、
-	 * {@code confirm_step} 又以"非空回灌无草案"拒绝，两边互锁。
-	 */
+	/** 明确不设筛选必须在一次批量 items 中逐项给出空对象，不能重发条件表或只清一部分。 */
 	@Test
-	void promptDeclaresPerDefinitionExplicitUnsetViaEmptyObject() {
-		String prompt = ResilientChatService.SYSTEM_PROMPT;
+	void promptDeclaresBatchExplicitUnsetViaEmptyObject() {
+		String prompt = PromptRulePacks.render(java.util.Set.of("create_task", "set_conditions"));
 
-		assertThat(prompt).as("明确不设 = 逐项 set_condition(defCode, {})")
-			.contains("对表单覆盖的每个 defCode 各调用一次")
-			.contains("set_condition(defCode, {})");
+		assertThat(prompt).as("明确不设 = 一次 set_conditions(items) 批量覆盖")
+			.contains("一次 set_conditions 的 items 覆盖每个 defCode")
+			.contains("各项 conditions 都传恰好空对象");
 		assertThat(prompt).as("不得重发条件表，也不得只清一部分就推进")
 			.contains("不要重发 SET_CONDITIONS")
 			.contains("也不要只清一部分就推进");
@@ -175,7 +171,7 @@ class FlowTypeConditionPromptContractTest {
 	}
 
 	/**
-	 * 2026-10-31 条件链 fail-closed（F4/F8/F11）：confirm_step 必须单独成批；set_condition 只对
+	 * 2026-10-31 条件链 fail-closed（F4/F8/F11）：confirm_step 必须单独成批；set_conditions 只对
 	 * 已勾选配置项调用、相同入参幂等复用（不同值才是修改）。
 	 */
 	@Test
@@ -185,7 +181,7 @@ class FlowTypeConditionPromptContractTest {
 		assertThat(prompt).as("confirm_step 单独成批（混批会吞掉同批调用）")
 			.contains("confirm_step 必须单独成批")
 			.contains("先单独调用");
-		assertThat(prompt).as("set_condition 只对已勾选配置项调用")
+		assertThat(prompt).as("set_conditions 只对已勾选配置项调用")
 			.contains("只能对任务已勾选的配置项调用");
 		assertThat(prompt).as("相同入参幂等复用、不同值才是修改")
 			.contains("幂等复用")

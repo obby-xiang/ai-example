@@ -25,37 +25,14 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 向导动作（{@code set_condition} / {@code select_definitions}）的下发前复核。
+ * 向导动作（{@code set_conditions} / {@code select_definitions}）的下发前复核。
  *
- * <h2>为什么这两个工具需要后端闸（工具安全边界批，用户 2026-10-25 裁决）</h2>
- * 两者都是 {@link ToolMeta.Channel#FRONTEND}：后端方法体是哨兵桩，模型给的参数<b>一路直达浏览器</b>。
- * 与表格写工具不同的是，它们的后果不是"改错几格"，而是<b>改变后续动作的工作选择</b>：
- * <ul>
- * <li>{@code set_condition} → 前端 {@code export.setConditions} 直接 {@code PUT} 落库
- *     （{@code conditionJson} 是导出作业的唯一条件来源）；</li>
- * <li>{@code select_definitions} → 改任务项勾选态（handler 缺失时回落 {@code select_defs} 直接落库）。</li>
- * </ul>
- * 两者都<b>可逆、可见、且下游 {@code start_export}/{@code start_import}/{@code start_publish} 仍有确认门</b>，
- * 故风险档标 {@code WRITE} 而<b>不</b>进确认门（多一道卡只会变成无意义弹窗，用户裁决明确否掉）。
- * 但这不等于"参数可以随便"：凡是"畸形 = 静默落到全量/落错目标"的形态，必须在下发前拒掉。
+ * <p>两个动作都通过前端形成可见、可逆的草案，业务库由后续步骤提交。后端必须在挂起前复核，
+ * 防止畸形参数静默放大成全量或落到错误目标。
  *
- * <h2>三条 fail-closed 口径</h2>
- * <ol>
- * <li><b>参数畸形</b>：非 JSON 对象、未知顶层键、空 {@code codes}、小写 {@code mode}
- *     （前端 {@code args.mode === 'ADD' ? 'ADD' : 'REPLACE'} 会把 {@code "add"} 静默降级成
- *     整表替换）、非数组字段条件、非无限定算子的空串/纯空白取值、{@code IN []}、重复
- *     {@code fieldCode} —— 一律拒绝（后三类经前端压平即"丢弃该字段"，正是静默放大成全量的入口；
- *     {@code EMPTY}/{@code NOT_EMPTY} 不需要取值，不受此限）；</li>
- * <li><b>未知目标</b>：{@code defCode} / 任一 code 不在定义注册表里 ⇒ 拒绝并点名（不做"静默成功"
- *     —— 那会让条件/勾选落在不存在的配置项上，用户看到的是"设置成功"）；</li>
- * <li><b>空条件不许静默降级成"导出全部"，但"恰好空对象"是明确的"不设筛选"</b>：{@code conditions}
- *     缺失或 {@code null} ⇒ 拒绝（前端 {@code normalizeActionArgs} 会把缺失补成 {@code {}}，
- *     来路不明的空条件不得当成全量）；有键但无有效条件（{@code fields:[]}、{@code scopeKeys:[]}）
- *     ⇒ 拒绝（压平后同样放大成全量）；<b>恰好</b> {@code {}} ⇒ 放行 = 该配置项明确不设筛选
- *     （前端 {@code condition-payload} 落成 {@code "{}"}、{@code ConditionAssessment} 判
- *     {@code EXPLICIT_UNSET}，三处同口径）。用户明确不筛选时，模型对表单覆盖的每个
- *     {@code defCode} 各调用一次 {@code set_condition(defCode, {})}，不要重发 {@code SET_CONDITIONS}。</li>
- * </ol>
+ * <p>{@code set_conditions} 只接受非空 {@code items} 数组，每项恰好包含 {@code defCode/conditions}，
+ * defCode 不得重复。所有项的定义、字段、算子、取值和任务选中关系全部通过才整批下发；任一项失败，
+ * 整批零写入。每项显式 {@code conditions={}} 表示该项明确不设筛选；缺失、null 或只有空数组结构均拒绝。
  *
  * <p>遵守 {@link FrontendToolGuard} 的挂起机制契约：拒绝 ⇒ 不挂起、不发 {@code frontend_tool_request}，
  * 只把<b>逐条原因清单</b>回填模型（模型据此改一版再试，而不是白等前端超时）。
@@ -66,14 +43,16 @@ import java.util.Set;
 public class WizardActionGuard implements FrontendToolGuard {
 
     /** 本复核器认领的两个向导动作（按模型给出的工具名原文判定，不做形状推断）。 */
-    static final Set<String> SUPPORTED = Set.of(AiToolNames.SET_CONDITION, AiToolNames.SELECT_DEFINITIONS);
+    static final Set<String> SUPPORTED = Set.of(AiToolNames.SET_CONDITIONS, AiToolNames.SELECT_DEFINITIONS);
 
     /** 拒绝码（与 {@code SHEET_ARGUMENTS_REJECTED} / {@code UI_PRIMITIVE_ARGUMENTS_REJECTED} 同族）。 */
     public static final String REJECTED_CODE = "WIZARD_ARGUMENTS_REJECTED";
 
     private static final Set<String> SELECT_KEYS = Set.of("codes", "defCodes", "mode");
 
-    private static final Set<String> CONDITION_KEYS = Set.of("defCode", "conditions");
+    private static final Set<String> CONDITION_KEYS = Set.of("items");
+
+    private static final Set<String> CONDITION_ITEM_KEYS = Set.of("defCode", "conditions");
 
     private static final Set<String> CONDITION_BODY_KEYS = Set.of("scopeKeys", "fields");
 
@@ -89,15 +68,11 @@ public class WizardActionGuard implements FrontendToolGuard {
 
     private final DefinitionService definitionService;
 
-    /**
-     * 任务读口（可选依赖）：{@code set_condition} 的"该配置项是否已勾选/已绑定"判据。
-     * 未注入 = 只做形状/定义校验（单测与无任务上下文的老调用方行为不变）。
-     */
+    /** 可选任务读口：批量条件必须全部落在本任务已勾选的条目上。 */
     private TaskService taskService;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /** 可选注入（生产装配）：{@code set_condition} 必须落在任务已勾选的条目上。 */
     @Autowired(required = false)
     public void setTaskService(TaskService taskService) {
         this.taskService = taskService;
@@ -108,25 +83,6 @@ public class WizardActionGuard implements FrontendToolGuard {
         return toolName != null && SUPPORTED.contains(toolName);
     }
 
-    /**
-     * 无工具名入口（兼容直接调用方）：按形状分流 —— 两支的必填键互斥，形状只决定"报哪一条"。
-     *
-     * <p>框架路径走带工具名的重载（{@link #inspectArguments(String, String)}），不做形状推断。
-     */
-    @Override
-    public Verdict inspectArguments(String argumentsJson) {
-        JsonNode root = parse(argumentsJson);
-        if (root == null) {
-            return reject("入参必须是合法 JSON 对象（形如 {\"defCode\":\"CONFIG_CODE\",\"conditions\":{...}}）。");
-        }
-        String tool = root.has("defCode") || root.has("conditions") ? AiToolNames.SET_CONDITION : AiToolNames.SELECT_DEFINITIONS;
-        return decide(tool, root);
-    }
-
-    /**
-     * 带工具名的复核（框架唯一入口）：按<b>真名</b>选校验分支，不做形状推断
-     * （形状推断正是 {@code SheetWriteGuard} 旧实现的窄缝：少一个必填键就会被"错校验"放行）。
-     */
     @Override
     public Verdict inspectArguments(String toolName, String argumentsJson) {
         if (!supports(toolName)) {
@@ -134,11 +90,11 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
         if (StringUtils.isBlank(argumentsJson)) {
             return reject("入参不能为空：至少要有 "
-                    + (AiToolNames.SELECT_DEFINITIONS.equals(toolName) ? "codes" : "defCode/conditions") + "。");
+                    + (AiToolNames.SELECT_DEFINITIONS.equals(toolName) ? "codes" : "items") + "。");
         }
         JsonNode root = parse(argumentsJson);
         if (root == null) {
-            return reject("入参必须是合法 JSON 对象（形如 {\"defCode\":\"CONFIG_CODE\",\"conditions\":{...}}）。");
+            return reject("入参必须是合法 JSON 对象（set_conditions 形如 {\"items\":[...]}）。");
         }
         return decide(toolName, root);
     }
@@ -148,56 +104,73 @@ public class WizardActionGuard implements FrontendToolGuard {
         return inspectArguments(toolName, argumentsJson);
     }
 
-    /**
-     * 带上下文复核：在形状/定义校验之外，再核对 {@code set_condition} 的目标是否是<b>本任务已勾选</b>
-     * 的配置项（F8）。未勾选/未绑定 ⇒ 前端只会在页面上写一份看不见的草案（提交点只遍历选中集），
-     * 回执却是成功 —— 因此后端有任务条目时按同一判据零副作用拒绝。
-     *
-     * <p>任务读不到 / 没有条目 / 无任务上下文时不额外拒绝（不新增误拒；前端仍有同一道）。
-     */
     @Override
     public Verdict inspectArguments(String toolName, String argumentsJson, AiContext context) {
         Verdict verdict = inspectArguments(toolName, argumentsJson);
-        if (!verdict.accepted() || !AiToolNames.SET_CONDITION.equals(toolName)) {
+        if (!verdict.accepted() || !AiToolNames.SET_CONDITIONS.equals(toolName)) {
             return verdict;
         }
         return inspectTaskSelection(argumentsJson, context, verdict);
     }
 
-    /** 任务条目判据：{@code defCode} 必须是本任务已有条目的配置项（有条目时才生效）。 */
     private Verdict inspectTaskSelection(String argumentsJson, AiContext context, Verdict accepted) {
-        if (this.taskService == null || context == null || context.getTaskId() == null) {
-            return accepted;
+        if (context == null || context.getTaskId() == null) {
+            return taskSelectionFailure(null, "缺少任务上下文或任务绑定，无法证明批量配置项均已选中");
         }
         Long taskId = context.getTaskId();
+        if (this.taskService == null) {
+            return taskSelectionFailure(taskId, "任务服务不可用，无法证明批量配置项均已选中");
+        }
         Task task;
         try {
             task = this.taskService.findById(taskId);
         }
+        catch (ResourceNotFoundException ex) {
+            return taskSelectionFailure(taskId, "任务不存在，无法证明批量配置项均已选中");
+        }
         catch (RuntimeException ex) {
-            // 读失败不等于"参数不合法"：前端仍是最终判据（不能把一次合法调用误判成拒绝）
             if (LogSampling.canAcquire("wizard-task-selection-read")) {
-                log.warn("could not read task entry; set_condition did not append the task predicate taskId={}", taskId, ex);
+                log.warn("could not verify selected task entries; set_conditions rejected the whole batch taskId={}", taskId, ex);
             }
-            return accepted;
+            return taskSelectionFailure(taskId, "任务读取失败，无法证明批量配置项均已选中");
         }
         if (task == null || CollectionUtils.isEmpty(task.getItems())) {
-            return accepted;
+            return taskSelectionFailure(taskId, "任务不存在或没有已选条目，无法证明批量配置项均已选中");
         }
-        JsonNode root = parse(argumentsJson);
-        String defCode = root == null ? null : text(root.get("defCode"));
-        if (StringUtils.isBlank(defCode)) {
-            return accepted;
-        }
+        Set<String> selected = new LinkedHashSet<>();
         for (TaskItem item : task.getItems()) {
-            if (item != null && item.getDefCode() != null
-                    && StringUtils.equals(StringUtils.trim(defCode), StringUtils.trim(item.getDefCode()))) {
-                return accepted;
+            if (item != null && StringUtils.isNotBlank(item.getDefCode())) {
+                selected.add(item.getDefCode().trim());
             }
         }
-        return Verdict.reject(REJECTED_CODE, "向导动作入参不合法，未下发前端、未产生任何持久化写入。",
-                List.of("配置项 " + defCode.trim() + " 不在任务 #" + taskId + " 的已选条目里（未勾选/未绑定）："
-                        + "先 select_definitions 或在向导里勾选该配置项后再调用 set_condition；本次未下发、未写入。"));
+        List<String> missing = missingSelections(parse(argumentsJson), selected);
+        if (missing.isEmpty()) {
+            return accepted;
+        }
+        List<String> reasons = missing.stream()
+                .map(code -> "配置项 " + code + " 不在任务 #" + taskId + " 的已选条目里（未勾选/未绑定）："
+                        + "先 select_definitions 或在向导里勾选后再调用 set_conditions；整批未下发、未写入。")
+                .toList();
+        return Verdict.reject(REJECTED_CODE, "向导动作入参不合法，未下发前端、未产生任何持久化写入。", reasons);
+    }
+
+    private static Verdict taskSelectionFailure(Long taskId, String reason) {
+        return Verdict.reject(REJECTED_CODE, "无法证明批量配置项已选中，未下发前端、未产生任何持久化写入。",
+                List.of(reason + "（任务 #" + taskId + "）；整批未下发、未写入。"));
+    }
+
+    private static List<String> missingSelections(JsonNode root, Set<String> selected) {
+        if (root == null || !root.path("items").isArray()) {
+            return List.of();
+        }
+        List<String> missing = new ArrayList<>();
+        for (JsonNode item : root.path("items")) {
+            String defCode = text(item.path("defCode"));
+            if (defCode != null && !selected.contains(defCode.trim())) {
+                missing.add(defCode.trim());
+            }
+        }
+        return missing;
     }
 
     @Override
@@ -294,42 +267,69 @@ public class WizardActionGuard implements FrontendToolGuard {
         }
     }
 
-    // ── set_condition ───────────────────────────────────────────────────────
+    // ── set_conditions ──────────────────────────────────────────────────────
 
     private List<String> validateCondition(JsonNode root) {
         List<String> reasons = new ArrayList<>();
         for (String key : fieldNames(root)) {
             if (!CONDITION_KEYS.contains(key)) {
-                reasons.add("不认识的参数 `" + key + "`：set_condition 只接受 defCode / conditions。");
+                reasons.add("不认识的参数 `" + key + "`：set_conditions 只接受 items。");
             }
         }
-        String defCode = text(root.get("defCode"));
+        JsonNode items = root.get("items");
+        if (items == null || !items.isArray()) {
+            reasons.add("items 必填且必须是非空数组，每项只含 defCode / conditions。");
+            return reasons;
+        }
+        if (items.isEmpty()) {
+            reasons.add("items 不能为空数组；整批未下发、未写入。");
+            return reasons;
+        }
+        Set<String> seenDefCodes = new LinkedHashSet<>();
+        for (JsonNode item : items) {
+            validateConditionItem(item, seenDefCodes, reasons);
+        }
+        return reasons;
+    }
+
+    private void validateConditionItem(JsonNode item, Set<String> seenDefCodes, List<String> reasons) {
+        if (item == null || !item.isObject()) {
+            reasons.add("items 的每一项都必须是对象，且只含 defCode / conditions。");
+            return;
+        }
+        for (String key : fieldNames(item)) {
+            if (!CONDITION_ITEM_KEYS.contains(key)) {
+                reasons.add("items 项不认识的键 `" + key + "`：只接受 defCode / conditions。");
+            }
+        }
+        String defCode = text(item.get("defCode"));
         ConfigDefinition definition = null;
         if (StringUtils.isBlank(defCode)) {
             reasons.add("defCode 必填（要给哪个配置定义设条件）。");
         }
         else {
+            if (!seenDefCodes.add(defCode.trim())) {
+                reasons.add("defCode 重复：" + defCode.trim() + "；整批未下发、未写入。");
+            }
             definition = findDefinition(defCode.trim());
             if (definition == null) {
-                reasons.add("配置定义不存在：" + defCode + "（未下发；可用 list_config_defs 查编码）。");
+                reasons.add("配置定义不存在：" + defCode + "（整批未下发；可用 list_config_defs 查编码）。");
             }
         }
-        JsonNode conditions = root.get("conditions");
+        validateConditionBody(item.get("conditions"), definition, reasons);
+    }
+
+    private void validateConditionBody(JsonNode conditions, ConfigDefinition definition, List<String> reasons) {
         if (conditions == null || conditions.isNull()) {
-            reasons.add("conditions 必填（缺失或显式 null 不是“明确不设”：前端会把缺失补成 {}，"
-                    + "来路不明的空条件不得当成全量；未下发）。明确不设筛选请显式传空对象 {}。");
-            return reasons;
+            reasons.add("conditions 必填（缺失或显式 null 不是“明确不设”；整批未下发）。明确不设请显式传 {}。");
+            return;
         }
         if (!conditions.isObject()) {
-            reasons.add("conditions 必须是对象（形如 {\"scopeKeys\":[...],\"fields\":[...]}，"
-                    + "明确不设筛选传 {}）。");
-            return reasons;
+            reasons.add("conditions 必须是对象（形如 {\"scopeKeys\":[...],\"fields\":[...]}，明确不设传 {}）。");
+            return;
         }
         if (conditions.isEmpty()) {
-            // 恰好空对象 = 该配置项明确不设筛选（用户答"无"/"不筛选"/"全部"）：
-            // 前端 condition-payload 落成 "{}"、ConditionAssessment 判 EXPLICIT_UNSET，同一口径放行。
-            // 有键但内容为空的形态（fields:[] / scopeKeys:[]）不走这里，仍在下面被拒。
-            return reasons;
+            return;
         }
         for (String key : fieldNames(conditions)) {
             if (!CONDITION_BODY_KEYS.contains(key)) {
@@ -342,7 +342,6 @@ public class WizardActionGuard implements FrontendToolGuard {
             reasons.add("条件为空：fields:[] / scopeKeys:[] 有结构但没有可提交的条件（压平后等于导出全部数据），"
                     + "不能当作“设置成功”；要表达明确不设筛选请恰好传空对象 {}。");
         }
-        return reasons;
     }
 
     private List<String> validateScopeKeys(JsonNode scopeKeys, List<String> reasons) {
@@ -455,6 +454,9 @@ public class WizardActionGuard implements FrontendToolGuard {
                     return false;
                 }
             }
+            return true;
+        }
+        if (value.isNumber() || value.isBoolean()) {
             return true;
         }
         String expect = text(value);

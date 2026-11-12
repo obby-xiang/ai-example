@@ -48,9 +48,9 @@ import java.util.Set;
  *
  * <h2>三条路径</h2>
  * <ol>
- * <li>{@code create_task(conditions=…)} 的候选：进入 {@code QUERY_COND} 后，按 {@code defCodes}
- * 逐项用与条件结构化工具同一份 {@link WizardActionGuard} 校验；合法项复用既有前端
- * 条件结构化通道生成<b>页面草案</b>（确定性 {@code toolCallId} + 幂等），不弹
+ * <li>{@code create_task(conditions=…)} 的候选：非空条件只允许一个 defCode，进入 {@code QUERY_COND} 后
+ * 用与条件结构化工具同一份 {@link WizardActionGuard} 校验；合法项复用既有前端
+ * 条件结构化通道生成<b>单项批量页面草案</b>（确定性 {@code toolCallId} + 幂等），不弹
  * {@code SET_CONDITIONS} 表单；绑定错误/校验失败/下发失败只记 WARN，走内部失败口径，不转化为再次询问用户。
  * <b>候选来源</b>：{@code extra} 优先，缺失或绑定信息丢失时回落本轮已结算 {@code create_task}
  * 原始入参/会话级 Redis 草案（{@link CreateTaskDraftStore}：runId 解析会话号、字段 = taskId，
@@ -208,30 +208,28 @@ public class ConditionsForm extends HostForm {
         return TOOL_CALL_ID_PREFIX + (runId == null ? "" : runId + "-") + taskId;
     }
 
-    /**
-     * 宿主为某个任务的某个配置项下发的 条件结构化工具 草案 id（确定性 = 幂等去重）。
-     */
-    static String draftToolCallId(String runId, long taskId, String defCode) {
-        return DRAFT_TOOL_CALL_ID_PREFIX + (runId == null ? "" : runId + "-") + taskId + "-" + defCode;
+    /** 批量草案 ID 冻结 run/task 与实际配置项集合；每项 Base64URL 编码后以点号连接。 */
+    static String draftToolCallId(String runId, long taskId, List<String> defCodes) {
+        List<String> encoded = defCodes.stream().map(ConditionsForm::encodeDefCode).toList();
+        return DRAFT_TOOL_CALL_ID_PREFIX + (runId == null ? "" : runId + "-") + taskId + "-"
+                + String.join(".", encoded);
     }
 
     public static void bindDraft(PendingToolCall pending, String runId, AiContext context) {
-        if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName()) || context == null) {
+        if (pending == null || !AiToolNames.SET_CONDITIONS.equals(pending.getName()) || context == null) {
             return;
         }
-        bindDraft(pending, runId, context.getTaskId(), defCodeOf(pending.getArguments()));
+        bindDraft(pending, runId, context.getTaskId());
     }
 
-    private static void bindDraft(PendingToolCall pending, String runId, Long taskId, String defCode) {
+    private static void bindDraft(PendingToolCall pending, String runId, Long taskId) {
         pending.setDraftRunId(runId);
         pending.setDraftTaskId(taskId);
-        pending.setDraftDefCode(defCode);
     }
 
-    private static boolean isBoundDraft(PendingToolCall pending, String runId, long taskId, String defCode) {
+    private static boolean isBoundDraft(PendingToolCall pending, String runId, long taskId) {
         return pending != null && runId != null && runId.equals(pending.getDraftRunId())
-                && Long.valueOf(taskId).equals(pending.getDraftTaskId())
-                && defCode != null && defCode.equals(pending.getDraftDefCode());
+                && Long.valueOf(taskId).equals(pending.getDraftTaskId());
     }
 
     /**
@@ -317,7 +315,7 @@ public class ConditionsForm extends HostForm {
      * 行为：
      * <ul>
      * <li>{@code create_task(conditions=…)} 候选合法且绑定当前任务/配置项：复用前端
-     *     条件结构化工具 通道下发页面草案（逐 defCode、确定性 id、幂等），不弹条件表；</li>
+     *     条件结构化工具 通道下发单项批量页面草案（确定性 id、幂等），不弹条件表；</li>
      * <li>候选绑定错误/校验失败/下发失败：只记 WARN，内部失败口径（不弹表、不写库、不再问用户）；</li>
      * <li>任务已有条件或本轮已有成功草案：直接推进；</li>
      * <li>表单覆盖当前全部 UNDECIDED 的明确留空、取消或非空回灌：不自动重问，也不代写 {@code "{}"}；
@@ -653,13 +651,12 @@ public class ConditionsForm extends HostForm {
      * 并标记内部失败（不弹条件表、不再问用户）。
      *
      * <p>已有 {@code conditionJson} 的条目、或已有草案（成功/失败/待回灌）的配置项跳过；
-     * 确定性 {@code toolCallId} 使重复调用天然幂等。多 defCodes 逐项下发，一次挂起整批。
+     * 非空 conditions 只允许一个 defCode；多项不同条件由模型后续用 set_conditions(items) 批量给出。
      */
     private CandidateDispatch dispatchCreateTaskCandidates(String runId, long taskId, AiContext context, Task task,
                                                            DraftFacts drafts) {
         CandidateSource source = resolveCandidateSource(runId, taskId, context);
         if (source.isFailure()) {
-            // 绑定错误/读取基础设施故障：内部失败口径（不弹表、不写库）；WARN 已在解析处留痕
             return new CandidateDispatch(true, List.of());
         }
         Map<?, ?> conditions = source.conditions();
@@ -667,59 +664,36 @@ public class ConditionsForm extends HostForm {
             return CandidateDispatch.none();
         }
         if (this.wizardActionGuard == null) {
-            log.warn("create_task structured conditions lack a set_condition inspector; no draft created runId={} taskId={}", runId,
+            log.warn("create_task structured conditions lack a set_conditions inspector; no draft created runId={} taskId={}", runId,
                     taskId);
             return new CandidateDispatch(true, List.of());
         }
-        // 只认 create_task 明确给出的配置项：后续新增的条目不在候选范围
         List<String> candidateDefCodes = source.defCodes();
-        if (candidateDefCodes.isEmpty()) {
-            log.warn("create_task structured conditions lack defCodes candidates; no draft created runId={} taskId={}", runId, taskId);
+        if (candidateDefCodes.size() != 1) {
+            log.warn("create_task non-empty conditions require exactly one defCode; no draft created runId={} taskId={} count={}",
+                    runId, taskId, candidateDefCodes.size());
             return new CandidateDispatch(true, List.of());
         }
-        Map<String, TaskItem> itemsByDefCode = new LinkedHashMap<>();
-        if (task != null && task.getItems() != null) {
-            for (TaskItem item : task.getItems()) {
-                if (item != null && StringUtils.isNotBlank(item.getDefCode())) {
-                    itemsByDefCode.put(item.getDefCode(), item);
-                }
-            }
-        }
-        boolean failure = false;
-        List<PendingToolCall> draftsToPark = new ArrayList<>();
-        Set<String> issued = new LinkedHashSet<>(drafts.issued());
-        for (String defCode : candidateDefCodes) {
-            DraftOutcome outcome = buildCandidateDraft(runId, taskId, defCode, conditions, itemsByDefCode, issued);
-            if (outcome.isFailure()) {
-                failure = true;
-            }
-            if (outcome.draft() != null) {
-                draftsToPark.add(outcome.draft());
-                issued.add(defCode);
-            }
-        }
-        return new CandidateDispatch(failure, List.copyOf(draftsToPark));
+        String defCode = candidateDefCodes.getFirst();
+        TaskItem selected = task == null || task.getItems() == null ? null : task.getItems().stream()
+                .filter(item -> item != null && defCode.equals(item.getDefCode())).findFirst().orElse(null);
+        DraftOutcome outcome = buildCandidateDraft(runId, taskId, defCode, conditions, selected, drafts.issued());
+        return new CandidateDispatch(outcome.isFailure(),
+                outcome.draft() == null ? List.of() : List.of(outcome.draft()));
     }
 
     private DraftOutcome buildCandidateDraft(String runId, long taskId, String defCode, Map<?, ?> conditions,
-                                             Map<String, TaskItem> itemsByDefCode, Set<String> issued) {
-        TaskItem item = itemsByDefCode.get(defCode);
+                                             TaskItem item, Set<String> issued) {
         if (item == null) {
             log.warn("create_task condition candidate defCode={} is not in the current task entries (binding error; no draft) runId={} taskId={}",
                     defCode, runId, taskId);
             return new DraftOutcome(null, true);
         }
-        if (!BlankText.isBlank(item.getConditionJson())) {
-            // 任务条目已有条件事实（含明确的 "{}"）：不覆盖用户/前端的答案
+        if (!BlankText.isBlank(item.getConditionJson()) || issued.contains(defCode)) {
             return new DraftOutcome(null, false);
         }
-        if (issued.contains(defCode)) {
-            // 已有草案（成功/失败/待回灌）：确定性 id 幂等，不重复下发
-            return new DraftOutcome(null, false);
-        }
-        String draftId = draftToolCallId(runId, taskId, defCode);
+        String draftId = draftToolCallId(runId, taskId, List.of(defCode));
         if (hasIssued(runId, draftId)) {
-            // 确定性 toolCallId 已在待决条目里：重复调用不得再下发一次
             return new DraftOutcome(null, false);
         }
         String probe = conditionArguments(defCode, conditions);
@@ -729,13 +703,14 @@ public class ConditionsForm extends HostForm {
             return new DraftOutcome(null, true);
         }
         FrontendToolGuard.Verdict verdict = this.wizardActionGuard
-                .inspectArgumentsFor(AiToolNames.SET_CONDITION, probe);
+                .inspectArgumentsFor(AiToolNames.SET_CONDITIONS, probe);
         if (!verdict.accepted()) {
-            log.warn("create_task structured conditions failed the same set_condition validation; no draft created runId={} taskId={} defCode={} codes={}", runId, taskId, defCode, verdict.issues().stream().map(i -> i.code()).toList());
+            log.warn("create_task structured conditions failed set_conditions validation; no draft created runId={} taskId={} defCode={} reasons={}",
+                    runId, taskId, defCode, verdict.reasons());
             return new DraftOutcome(null, true);
         }
-        PendingToolCall draft = frontendTool(draftId, AiToolNames.SET_CONDITION, probe);
-        bindDraft(draft, runId, taskId, defCode);
+        PendingToolCall draft = frontendTool(draftId, AiToolNames.SET_CONDITIONS, probe);
+        bindDraft(draft, runId, taskId);
         applyToolTimeout(draft);
         return new DraftOutcome(draft, false);
     }
@@ -941,9 +916,11 @@ public class ConditionsForm extends HostForm {
      * 条件结构化工具 的入参原文（与模型调用同形）；序列化失败 = {@code null}。
      */
     private static String conditionArguments(String defCode, Map<?, ?> conditions) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("defCode", defCode);
+        item.put("conditions", conditions);
         Map<String, Object> args = new LinkedHashMap<>();
-        args.put("defCode", defCode);
-        args.put("conditions", conditions);
+        args.put("items", List.of(item));
         try {
             return JSON.writeValueAsString(args);
         } catch (Exception ex) {
@@ -951,11 +928,32 @@ public class ConditionsForm extends HostForm {
         }
     }
 
+    private record BatchItem(String defCode) {
+    }
+
+    private static List<BatchItem> batchItemsOf(String argumentsJson) {
+        JsonNode root = parseJson(argumentsJson);
+        if (root == null || !root.isObject() || root.size() != 1 || !root.path("items").isArray()
+                || root.path("items").isEmpty()) {
+            return null;
+        }
+        List<BatchItem> items = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (JsonNode item : root.path("items")) {
+            if (!item.isObject() || item.size() != 2 || !item.path("defCode").isTextual()
+                    || !item.path("conditions").isObject()) {
+                return null;
+            }
+            String defCode = item.path("defCode").asText().trim();
+            if (defCode.isEmpty() || !seen.add(defCode)) {
+                return null;
+            }
+            items.add(new BatchItem(defCode));
+        }
+        return List.copyOf(items);
+    }
+
     private DraftFacts draftFacts(String runId, Task task) {
-        Set<String> taskDefCodes = new LinkedHashSet<>(taskDefCodesFor(task));
-        Set<String> settled = new LinkedHashSet<>();
-        Set<String> attempted = new LinkedHashSet<>();
-        Set<String> issued = new LinkedHashSet<>();
         if (task == null || runId == null) {
             return DraftFacts.none();
         }
@@ -967,19 +965,18 @@ public class ConditionsForm extends HostForm {
             return DraftFacts.none();
         }
         long taskId = ObjectUtils.defaultIfNull(task.getId(), 0L);
-        for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
-            if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
-                    || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())) {
-                continue;
-            }
-            String defCode = defCodeOf(pending.getArguments());
-            if (defCode == null || !taskDefCodes.contains(defCode)
-                    || !isBoundDraft(pending, runId, taskId, defCode)) {
+        Set<String> settled = new LinkedHashSet<>();
+        Set<String> attempted = new LinkedHashSet<>();
+        Set<String> issued = new LinkedHashSet<>();
+        for (String defCode : taskDefCodesFor(task)) {
+            DraftSelection selection = latestDraftForDef(pendings, runId, taskId, defCode);
+            if (selection.pending() == null) {
                 continue;
             }
             issued.add(defCode);
-            boolean resolved = !PendingToolCall.PENDING.equals(pending.getStatus());
-            if (resolved && pending.effectiveOutcome() == ToolOutcome.OK) {
+            boolean successful = !PendingToolCall.PENDING.equals(selection.pending().getStatus())
+                    && selection.pending().effectiveOutcome() == ToolOutcome.OK;
+            if (successful && !selection.ambiguous()) {
                 settled.add(defCode);
             } else {
                 attempted.add(defCode);
@@ -988,97 +985,109 @@ public class ConditionsForm extends HostForm {
         return new DraftFacts(Set.copyOf(settled), Set.copyOf(attempted), Set.copyOf(issued));
     }
 
-    /**
-     * 条件结构化工具 入参里的 defCode（坏 JSON/缺键 = null）。
-     */
-    private static String defCodeOf(String argumentsJson) {
-        JsonNode arguments = parseJson(argumentsJson);
-        JsonNode defCode = arguments == null ? null : arguments.get("defCode");
-        if (defCode == null || !defCode.isTextual()) {
-            return null;
-        }
-        String value = defCode.asText("").trim();
-        return value.isEmpty() ? null : value;
+    private record DraftSelection(PendingToolCall pending, boolean ambiguous) {
     }
 
-    /**
-     * <b>同一 run + 当前任务 + 同 {@code defCode} + 完全相同入参</b>的 条件结构化工具 已成功结算
-     * ⇒ 返回原回执（幂等重放，F11）。
-     *
-     * <p>为什么要这一层：模型常在同一轮里把同一个条件再发一次（换个措辞、或重试），
-     * 前端会再写一遍同一份草案（重复写）。完全相同 = 结果必然相同，直接复用已结算回执即可；
-     * <b>不同值必须视为修改照常执行</b> —— 因此判据是"defCode + conditions 结构相同"，
-     * 不是"同 defCode 就跳过"。
-     *
-     * @return 可复用的回执文本；{@code null} = 没有可复用的成功调用（照常下发）
-     */
+    private static DraftSelection latestDraftForDef(List<PendingToolCall> pendings, String runId, long taskId,
+                                                    String defCode) {
+        PendingToolCall latest = null;
+        boolean ambiguous = false;
+        for (PendingToolCall candidate : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
+            if (!isDraftForDef(candidate, runId, taskId, defCode)) {
+                continue;
+            }
+            if (latest == null || candidate.getRequestedAtMs() > latest.getRequestedAtMs()) {
+                latest = candidate;
+                ambiguous = false;
+            } else if (candidate.getRequestedAtMs() == latest.getRequestedAtMs()
+                    && !StringUtils.equals(candidate.getToolCallId(), latest.getToolCallId())) {
+                ambiguous = true;
+            }
+        }
+        return new DraftSelection(latest, ambiguous);
+    }
+
+    private static boolean isDraftForDef(PendingToolCall pending, String runId, long taskId, String defCode) {
+        if (pending == null || !AiToolNames.SET_CONDITIONS.equals(pending.getName())
+                || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
+                || !isBoundDraft(pending, runId, taskId)) {
+            return false;
+        }
+        List<BatchItem> items = batchItemsOf(pending.getArguments());
+        return items != null && items.stream().anyMatch(item -> defCode.equals(item.defCode()));
+    }
+
+    /** 只有同一 run/task 且完整有序 items 相同的成功批量才复用原回执。 */
     public String settledSetConditionReplay(String runId, AiContext context, String argumentsJson) {
         if (runId == null || context == null || context.getTaskId() == null || argumentsJson == null) {
             return null;
         }
-        JsonNode arguments = parseJson(argumentsJson);
-        JsonNode conditions = arguments == null ? null : arguments.get("conditions");
-        String defCode = defCodeOf(argumentsJson);
-        if (defCode == null || conditions == null || !conditions.isObject()) {
+        List<BatchItem> items = batchItemsOf(argumentsJson);
+        if (items == null) {
             return null;
         }
         Task task;
         try {
             task = readTask(context.getTaskId());
         } catch (RuntimeException ex) {
-            // 读不到当前任务就不做幂等（宁可多一次下发，也不把结果复用到别的任务上）
             return null;
         }
-        if (task == null || !taskDefCodesFor(task).contains(defCode)) {
+        List<String> requestedDefCodes = items.stream().map(BatchItem::defCode).toList();
+        if (task == null || !taskDefCodesFor(task).containsAll(requestedDefCodes)) {
             return null;
         }
-        long taskId = ObjectUtils.defaultIfNull(task.getId(), 0L);
-        List<PendingToolCall> pendings;
         try {
-            pendings = this.store.pendingsLenient(runId);
+            return findSettledReplay(runId, ObjectUtils.defaultIfNull(task.getId(), 0L), parseJson(argumentsJson),
+                    this.store.pendingsLenient(runId));
         } catch (RuntimeException ex) {
             return null;
         }
-        return findSettledReplay(runId, taskId, defCode, conditions, pendings);
     }
 
-    private static String findSettledReplay(String runId, long taskId, String defCode, JsonNode conditions,
+    private static String findSettledReplay(String runId, long taskId, JsonNode arguments,
                                             List<PendingToolCall> pendings) {
         for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
-            if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
+            if (pending == null || !AiToolNames.SET_CONDITIONS.equals(pending.getName())
                     || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
                     || !PendingToolCall.FRONTEND_RESULT.equals(pending.getStatus())
-                    || pending.effectiveOutcome() != ToolOutcome.OK) {
+                    || pending.effectiveOutcome() != ToolOutcome.OK
+                    || !isBoundDraft(pending, runId, taskId)) {
                 continue;
             }
-            if (!defCode.equals(defCodeOf(pending.getArguments()))
-                    || !isSameConditions(pending.getArguments(), conditions)
-                    || !isBoundDraft(pending, runId, taskId, defCode)) {
-                continue;
+            if (arguments.equals(parseJson(pending.getArguments()))) {
+                return StringUtils.defaultString(pending.getResultText());
             }
-            return StringUtils.defaultString(pending.getResultText());
         }
         return null;
     }
 
-    private static boolean isSameConditions(String argumentsJson, JsonNode conditions) {
-        JsonNode arguments = parseJson(argumentsJson);
-        JsonNode other = arguments == null ? null : arguments.get("conditions");
-        return other != null && other.equals(conditions);
-    }
-
-    /**
-     * 条件结构化工具 入参的内容签名（{@code defCode + conditions 结构}；坏 JSON/缺键 = {@code null}）。
-     * 供同一批次内的重复调用去重（F11）：一次批次里出现两条完全相同的调用时，第二条不再挂起。
-     */
+    /** 完整批量参数签名：对象键规范排序，items 数组顺序保持不变。 */
     public static String setConditionSignature(String argumentsJson) {
-        String defCode = defCodeOf(argumentsJson);
-        JsonNode arguments = parseJson(argumentsJson);
-        JsonNode conditions = arguments == null ? null : arguments.get("conditions");
-        if (defCode == null || conditions == null || !conditions.isObject()) {
+        if (batchItemsOf(argumentsJson) == null) {
             return null;
         }
-        return defCode + '\u0001' + conditions;
+        return canonicalJson(parseJson(argumentsJson)).toString();
+    }
+
+    private static JsonNode canonicalJson(JsonNode node) {
+        if (node.isObject()) {
+            var result = JSON.createObjectNode();
+            List<String> names = new ArrayList<>();
+            node.fieldNames().forEachRemaining(names::add);
+            names.sort(null);
+            for (String name : names) {
+                result.set(name, canonicalJson(node.get(name)));
+            }
+            return result;
+        }
+        if (node.isArray()) {
+            var result = JSON.createArrayNode();
+            for (JsonNode item : node) {
+                result.add(canonicalJson(item));
+            }
+            return result;
+        }
+        return node;
     }
 
     /**
@@ -1235,7 +1244,7 @@ public class ConditionsForm extends HostForm {
             log.warn("condition draft execution failed; rejected with no side effects (no further user prompt) runId={} taskId={} defs={}", runId,
                     taskId, facts.remaining());
             return internalConditionFailure("条件草案执行失败，confirm_step 未执行（未向前端推进）",
-                    List.of("本轮已下发的 set_condition 草案没有成功结算（内部执行失败）",
+                    List.of("本轮已下发的 set_conditions 草案没有成功结算（内部执行失败）",
                             "不会改用条件表再次询问用户；请由用户或向导修正条件后再 confirm_step"));
         }
         // ⑥ 取消不自动重问，但也不能放行：条件仍未决定，confirm_step 零副作用拒绝并给出两条明确出口
@@ -1244,7 +1253,7 @@ public class ConditionsForm extends HostForm {
             return ConfirmStepDecision.reject(ErrorCodes.FORM_RESULT_REJECTED,
                     "条件仍未决定（条件表已取消），confirm_step 未执行（未向前端推进）",
                     List.of("取消不自动重问；但条件仍未决定，不能按全量误推进",
-                            "恢复通道：由用户下一轮明确选择——给出筛选条件（模型先 set_condition）"
+                            "恢复通道：由用户下一轮明确选择——给出筛选条件（模型先 set_conditions）"
                                     + "或明确按全量导出；本 run 不再自动弹条件表"));
         }
         if (!isParkEnabled()) {
@@ -1269,7 +1278,7 @@ public class ConditionsForm extends HostForm {
         return internalConditionFailure("条件未决定且宿主表单挂起未启用（app.ai.park.enabled=false），"
                         + "confirm_step 未执行（未向前端推进）",
                 List.of("条件仍未决定，不能按全量推进",
-                        "下一步：先 set_condition 给出结构化条件（明确不设请对每个 defCode 传 {}），"
+                        "下一步：先 set_conditions 给出结构化条件（明确不设请对每个 defCode 传 {}），"
                                 + "或让用户明确按全量导出后再 confirm_step",
                         "宿主不会在未挂起状态下等待用户填表"));
     }
@@ -1283,7 +1292,7 @@ public class ConditionsForm extends HostForm {
             return internalConditionFailure("同一缺口的条件表已下发但未结算（或已作废），条件仍未决定，"
                             + "confirm_step 未执行（未向前端推进）",
                     List.of("条件表 " + toolCallId + " 的状态不是成功回灌：不能重复下发第二张，也不能按全量推进",
-                            "恢复通道：由用户明确给出条件（模型先 set_condition；不设请对每个 defCode 传 {}）"
+                            "恢复通道：由用户明确给出条件（模型先 set_conditions；不设请对每个 defCode 传 {}）"
                                     + "或明确按全量导出后再 confirm_step"));
         }
         Optional<String> arguments = formArguments(buildForm(ReplyLanguage.current()));
@@ -1292,7 +1301,7 @@ public class ConditionsForm extends HostForm {
             return internalConditionFailure("条件表无法生成（未通过表单白名单或超长），条件仍未决定，"
                             + "confirm_step 未执行（未向前端推进）",
                     List.of("宿主无法下发一张自己都过不了闸门的表",
-                            "下一步：先 set_condition 给出结构化条件（明确不设请对每个 defCode 传 {}），"
+                            "下一步：先 set_conditions 给出结构化条件（明确不设请对每个 defCode 传 {}），"
                                     + "或让用户明确按全量导出后再 confirm_step"));
         }
         log.info("conditions undecided before confirm_step; collecting optional conditions once instead runId={} taskId={} defs={}", runId, taskId,
@@ -1346,11 +1355,11 @@ public class ConditionsForm extends HostForm {
     private static ConfirmStepDecision unparsedFeedbackDecision(List<String> remaining) {
         return ConfirmStepDecision.reject(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
                 "条件表已填写但尚未生成草案，confirm_step 未执行（未向前端推进）",
-                List.of("条件表回灌了非空文本，但对应配置项还没有成功的 set_condition 草案",
+                List.of("条件表回灌了非空文本，但对应配置项还没有成功的 set_conditions 草案",
                         "尚未生成草案的配置项：" + String.join("、", remaining),
-                        "下一步：先把该文本解析成结构化条件并调用 set_condition（草案，不写库），下一批再 confirm_step",
-                        "若用户已明确不设筛选（如回答“无”“不筛选”“全部”），对表单覆盖的每个 defCode 各调用一次 "
-                                + "set_condition(defCode, {})（恰好空对象 = 明确不设），不要重发 SET_CONDITIONS",
+                        "下一步：先把该文本解析成结构化条件并调用 set_conditions（草案，不写库），下一批再 confirm_step",
+                        "若用户已明确不设筛选（如回答“无”“不筛选”“全部”），用一次 set_conditions 的 items 覆盖表单每个 defCode，"
+                                + "各项 conditions 都传恰好空对象 {}（明确不设），不要重发 SET_CONDITIONS",
                         "不得改用第二张条件表单重复收集"));
     }
 
@@ -1568,15 +1577,12 @@ public class ConditionsForm extends HostForm {
             return false;
         }
         Set<String> settled = new LinkedHashSet<>();
-        for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
-            if (pending == null || !AiToolNames.SET_CONDITION.equals(pending.getName())
-                    || !PendingToolCall.KIND_FRONTEND.equals(pending.getKind())
-                    || !PendingToolCall.FRONTEND_RESULT.equals(pending.getStatus())
-                    || pending.effectiveOutcome() != ToolOutcome.OK || pending.getResolvedAtMs() < submittedAtMs) {
-                continue;
-            }
-            String defCode = defCodeOf(pending.getArguments());
-            if (defCode != null && defCodes.contains(defCode) && isBoundDraft(pending, runId, taskId, defCode)) {
+        for (String defCode : defCodes) {
+            DraftSelection selection = latestDraftForDef(pendings, runId, taskId, defCode);
+            PendingToolCall latest = selection.pending();
+            if (!selection.ambiguous() && latest != null
+                    && PendingToolCall.FRONTEND_RESULT.equals(latest.getStatus())
+                    && latest.effectiveOutcome() == ToolOutcome.OK && latest.getResolvedAtMs() >= submittedAtMs) {
                 settled.add(defCode);
             }
         }

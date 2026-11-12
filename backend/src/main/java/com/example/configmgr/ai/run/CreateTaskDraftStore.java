@@ -58,7 +58,7 @@ import java.util.Map;
  *
  * <h2>信任边界</h2>
  * 这只是<b>候选事实</b>，绝不是任务事实：<b>绝不</b>写业务库（{@code tasks.settingsJson} / 任务条目）。
- * 条目条件的唯一写入者仍是前端的 {@code persistStepData}；读取方必须继续用与 {@code set_condition}
+ * 条目条件的唯一写入者仍是前端的 {@code persistStepData}；读取方必须继续用与 {@code set_conditions}
  * 同一份 {@code WizardActionGuard} 复核后才生成页面草案。
  *
  * <p><b>空值语义</b>：空的 {@code conditions={}} 不表示"已知条件"——写侧遇到空的 defCodes/conditions

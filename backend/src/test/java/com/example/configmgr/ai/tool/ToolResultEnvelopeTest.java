@@ -48,6 +48,16 @@ class ToolResultEnvelopeTest {
 	}
 
 	@Test
+	void batchTargetProjectsOnlyDefCodesWithoutConditionValues() {
+		String args = "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":["
+				+ "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}},"
+				+ "{\"defCode\":\"REGION\",\"conditions\":{}}]}";
+
+		assertThat(ToolResultEnvelope.targetOf(args)).containsExactly(
+				Map.entry("defCodes", java.util.List.of("CURRENCY", "REGION")));
+	}
+
+	@Test
 	void retryableFollowsTheFailureCodeTable() {
 		assertThat(ToolResultEnvelope.of(ToolOutcome.OK, null, "", "{}").retryable()).isFalse();
 		assertThat(ToolResultEnvelope.of(ToolOutcome.UNKNOWN, null, "", "{}").retryable()).isFalse();

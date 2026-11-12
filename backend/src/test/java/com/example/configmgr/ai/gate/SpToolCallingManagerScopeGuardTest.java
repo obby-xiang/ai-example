@@ -97,7 +97,7 @@ class SpToolCallingManagerScopeGuardTest {
      */
     @org.junit.jupiter.api.BeforeEach
     void defaultScopeGuardAllows() {
-        when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+        when(this.toolRegistry.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
     }
 
     // ── T1 ──────────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ class SpToolCallingManagerScopeGuardTest {
         // 防线③判据：DANGER 的 start_import 只在 task:IMPORT/IMPORT 下披露 ⇒ 本轮不匹配
         when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
-        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(false);
+        when(this.toolRegistry.isContextMatched(eq("start_import"), any(AiContext.class))).thenReturn(false);
 
         ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
                 response("start_import", "{\"taskId\":7}"));
@@ -145,7 +145,7 @@ class SpToolCallingManagerScopeGuardTest {
         when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("import", "IMPORT", "IMPORT", 7L, null)));
         when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
-        when(this.toolRegistry.matchesContext(eq("start_import"), any(AiContext.class))).thenReturn(true);
+        when(this.toolRegistry.isContextMatched(eq("start_import"), any(AiContext.class))).thenReturn(true);
         when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
             PendingToolCall pending = invocation.getArgument(1);
             pending.setStatus(PendingToolCall.REJECTED);
@@ -168,7 +168,7 @@ class SpToolCallingManagerScopeGuardTest {
         stubRun();
         when(this.toolRegistry.channelOf("list_tasks")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("list_tasks")).thenReturn(ToolMeta.RiskLevel.READ);
-        when(this.toolRegistry.matchesContext(eq("list_tasks"), any(AiContext.class))).thenReturn(true);
+        when(this.toolRegistry.isContextMatched(eq("list_tasks"), any(AiContext.class))).thenReturn(true);
         // 走"台账复用"路径：结果文本直接来自台账（无需真的委托官方执行）
         String big = IntStream.rangeClosed(1, 250)
             .mapToObj(i -> "- 第 " + i + " 行：字段值 " + i)
@@ -212,7 +212,7 @@ class SpToolCallingManagerScopeGuardTest {
         when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("tasks", null, null, null, null)));
         when(this.toolRegistry.channelOf("find_rows")).thenReturn(ToolMeta.Channel.FRONTEND);
         when(this.toolRegistry.riskOf("find_rows")).thenReturn(ToolMeta.RiskLevel.READ);
-        when(this.toolRegistry.matchesContext(eq("find_rows"), any(AiContext.class))).thenReturn(false);
+        when(this.toolRegistry.isContextMatched(eq("find_rows"), any(AiContext.class))).thenReturn(false);
         String args = "{\"defCode\":\"CURRENCY\",\"search\":\"CNY\"}";
 
         ToolExecutionResult result = this.manager.executeToolCalls(prompt("find_rows", args),
@@ -232,26 +232,28 @@ class SpToolCallingManagerScopeGuardTest {
     /**
      * 向导写（WRITE / FRONTEND）在范围内：走前端挂起等回执，<b>不会</b>变成后端确认卡。
      *
-     * <p>这条锁住"风险档只用于如实披露"的口径：把 {@code set_condition} 标成 WRITE 后，
+     * <p>这条锁住"风险档只用于如实披露"的口径：把 {@code set_conditions} 标成 WRITE 后，
      * 若哪天有人顺手把通道优先级改成"风险优先"，确认门就会拦住一次表单状态写 —— 那是无意义弹窗。
      */
     @Test
     void inScopeWizardWriteSuspendsAsFrontendWithoutConfirmCard() {
         stubRun();
         when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("export", "EXPORT", "QUERY_COND", 7L, null)));
-        when(this.toolRegistry.channelOf("set_condition")).thenReturn(ToolMeta.Channel.FRONTEND);
-        when(this.toolRegistry.riskOf("set_condition")).thenReturn(ToolMeta.RiskLevel.WRITE);
-        when(this.toolRegistry.matchesContext(eq("set_condition"), any(AiContext.class))).thenReturn(true);
+        when(this.toolRegistry.channelOf("set_conditions")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.toolRegistry.riskOf("set_conditions")).thenReturn(ToolMeta.RiskLevel.WRITE);
+        when(this.toolRegistry.isContextMatched(eq("set_conditions"), any(AiContext.class))).thenReturn(true);
         when(this.gate.awaitFrontendResult(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
             PendingToolCall pending = invocation.getArgument(1);
             pending.setStatus(PendingToolCall.FRONTEND_RESULT);
-            pending.setResultText("已设置查询条件（CURRENCY）");
+            pending.setResultText("已批量设置查询条件（CURRENCY、REGION）");
             return pending;
         });
-        String args = "{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":"
-                + "[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+        String args = "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":"
+                + "[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}},"
+                + "{\"defCode\":\"REGION\",\"conditions\":{\"fields\":"
+                + "[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"XN\"}]}}]}";
 
-        this.manager.executeToolCalls(prompt("set_condition", args), response("set_condition", args));
+        this.manager.executeToolCalls(prompt("set_conditions", args), response("set_conditions", args));
 
         // 请求帧由 ConfirmGate 发（此处 gate 是替身），本类能断言的是"确实进入了前端等待、
         // 而不是确认门等待"—— 这正是"WRITE 档不新增无意义确认卡"的接线证据。
@@ -268,18 +270,26 @@ class SpToolCallingManagerScopeGuardTest {
     void rejectedWizardArgumentsNeverSuspendOrReachTheFrontend() {
         stubRun();
         when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("export", "EXPORT", "QUERY_COND", 7L, null)));
-        when(this.toolRegistry.channelOf("set_condition")).thenReturn(ToolMeta.Channel.FRONTEND);
-        when(this.toolRegistry.riskOf("set_condition")).thenReturn(ToolMeta.RiskLevel.WRITE);
-        when(this.toolRegistry.matchesContext(eq("set_condition"), any(AiContext.class))).thenReturn(true);
+        when(this.toolRegistry.channelOf("set_conditions")).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.toolRegistry.riskOf("set_conditions")).thenReturn(ToolMeta.RiskLevel.WRITE);
+        when(this.toolRegistry.isContextMatched(eq("set_conditions"), any(AiContext.class))).thenReturn(true);
         var definitions = mock(com.example.configmgr.definition.service.DefinitionService.class);
+        var definition = new com.example.configmgr.definition.entity.ConfigDefinition();
+        definition.setCode("CURRENCY");
+        var field = new com.example.configmgr.definition.entity.ConfigField();
+        field.setCode("code");
+        definition.setFields(List.of(field));
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition);
         var guarded = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
                 this.beacon, this.cancellations, this.limiter,
                 List.of(new WizardActionGuard(definitions)));
-        // conditions 缺失 ⇒ 前端会补成 {}（空条件 = 导出全部），必须在挂起前拒
-        String args = "{\"defCode\":\"CURRENCY\"}";
+        // 第一项合法、第二项缺 conditions：整批拒绝，第一项也不得形成草案
+        String args = "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"fields\":["
+                + "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}},"
+                + "{\"defCode\":\"REGION\"}]}";
 
-        ToolExecutionResult result = guarded.executeToolCalls(prompt("set_condition", args),
-                response("set_condition", args));
+        ToolExecutionResult result = guarded.executeToolCalls(prompt("set_conditions", args),
+                response("set_conditions", args));
 
         ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
         assertThat(envelope.ok()).isFalse();
@@ -304,7 +314,7 @@ class SpToolCallingManagerScopeGuardTest {
         when(this.store.get(RUN_ID)).thenReturn(snapshot(AiContext.of("export", "EXPORT", "EXPORT", 7L, null)));
         when(this.toolRegistry.channelOf("update_rows")).thenReturn(ToolMeta.Channel.FRONTEND);
         when(this.toolRegistry.riskOf("update_rows")).thenReturn(ToolMeta.RiskLevel.WRITE);
-        when(this.toolRegistry.matchesContext(eq("update_rows"), any(AiContext.class))).thenReturn(true);
+        when(this.toolRegistry.isContextMatched(eq("update_rows"), any(AiContext.class))).thenReturn(true);
         var guarded = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
                 this.beacon, this.cancellations, this.limiter,
                 List.of(new com.example.configmgr.ai.tool.SheetWriteGuard()));

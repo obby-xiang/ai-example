@@ -59,7 +59,7 @@ import static org.mockito.Mockito.when;
  * 都在<b>唯一上下文刷新点</b>（{@code SpToolCallingManager} 执行循环尾部的
  * {@code refreshRunContext}）之前就挂起：执行循环被 {@code RunParkedException} 打断，刷新一次都
  * 跑不到。于是续跑一直用<b>请求边界</b>的旧 {@code context} 构造下一跳 —— 模型永远看不到
- * {@code select_definitions} / {@code set_condition} / {@code start_export} 这些步骤工具。
+ * {@code select_definitions} / {@code set_conditions} / {@code start_export} 这些步骤工具。
  *
  * <h2>本用例钉住的三条口径</h2>
  * <ol>
@@ -221,7 +221,7 @@ class ResumeContextRefreshTest {
 		// ② 披露面：下一跳的工具集里出现步骤工具，且终止步骤的工具仍不出现
 		List<String> nextHopTools = toolNames(driveContext);
 		assertThat(nextHopTools).contains("select_definitions", "confirm_step");
-		assertThat(nextHopTools).doesNotContain("set_condition", "start_export");
+		assertThat(nextHopTools).doesNotContain("set_conditions", "start_export");
 
 		// ③ 同一批不扩权：结算用的 Prompt 仍是按<b>批首</b>旧上下文披露的那一份
 		ArgumentCaptor<Prompt> settlementPrompt = ArgumentCaptor.forClass(Prompt.class);
@@ -233,7 +233,7 @@ class ResumeContextRefreshTest {
 				.as("刷新只对下一跳生效：本批结算的披露面逐字等于批首（任务中心）那一份")
 				.containsExactlyInAnyOrderElementsOf(boundaryTools);
 			assertThat(callbacksOf(prompt))
-				.doesNotContain("select_definitions", "confirm_step", "set_condition");
+				.doesNotContain("select_definitions", "confirm_step", "set_conditions");
 		}
 	}
 
@@ -256,7 +256,7 @@ class ResumeContextRefreshTest {
 		AiContext afterFirst = contextOfDriveResumed();
 		assertThat(afterFirst.getStep()).isEqualTo("QUERY_COND");
 		List<String> atQueryCond = toolNames(afterFirst);
-		assertThat(atQueryCond).contains("set_condition");
+		assertThat(atQueryCond).contains("set_conditions");
 		assertThat(atQueryCond).doesNotContain("start_export");
 
 		// 第二次 park → 续跑：步骤再推到 EXPORT，下一跳才披露 start_export
@@ -342,7 +342,7 @@ class ResumeContextRefreshTest {
 	 * <p>本用例锁五条：
 	 * <ol>
 	 * <li>交棒前按 {@code taskId} 读 {@code TaskService} 的权威 {@code type/currentStep/status}；</li>
-	 * <li>披露面按新步骤重算（QUERY_COND 才给 {@code set_condition}）；</li>
+	 * <li>披露面按新步骤重算（QUERY_COND 才给 {@code set_conditions}）；</li>
 	 * <li>交棒历史的工作区段换成新步骤（模型看到 QUERY_COND）；</li>
 	 * <li>结果写回快照（下一次续跑/读侧同一份事实）；</li>
 	 * <li>批内结算仍用<b>批首</b>上下文（不扩权）。</li>
@@ -366,7 +366,7 @@ class ResumeContextRefreshTest {
 		assertThat(drive.getTaskType()).isEqualTo("EXPORT");
 		assertThat(drive.getTaskStatus()).isEqualTo("ACTIVE");
 		// ② 披露面按新步骤重算
-		assertThat(toolNames(drive)).contains("set_condition").doesNotContain("select_definitions");
+		assertThat(toolNames(drive)).contains("set_conditions").doesNotContain("select_definitions");
 		// ③ 工作区状态跟着换（交棒历史里的 SYSTEM 段）
 		assertThat(systemTextOfDriveResumed()).contains("当前步骤: QUERY_COND");
 		// ④ 写回快照
@@ -377,7 +377,7 @@ class ResumeContextRefreshTest {
 		verify(this.toolCallingManager).resolvePending(eq(RUN_ID), settlementPrompt.capture(),
 				any(PendingToolCall.class));
 		assertThat(callbacksOf(settlementPrompt.getValue()))
-			.contains("select_definitions").doesNotContain("set_condition");
+			.contains("select_definitions").doesNotContain("set_conditions");
 	}
 
 	/**
@@ -398,7 +398,7 @@ class ResumeContextRefreshTest {
 
 		AiContext drive = contextOfDriveResumed();
 		assertThat(drive.getStep()).as("读失败保留旧步骤").isEqualTo("SELECT_DEFS");
-		assertThat(toolNames(drive)).contains("select_definitions").doesNotContain("set_condition");
+		assertThat(toolNames(drive)).contains("select_definitions").doesNotContain("set_conditions");
 	}
 
 	/**
@@ -650,12 +650,12 @@ class ResumeContextRefreshTest {
 			return "前端哨兵桩（永不执行）";
 		}
 
-		@Tool(name = "set_condition", description = "设置查询条件")
+		@Tool(name = "set_conditions", description = "设置查询条件")
 		@ToolScope({ "task:EXPORT/QUERY_COND" })
 		@ToolRisk(ToolMeta.RiskLevel.WRITE)
 		@ToolCategory(ToolMeta.Category.U)
 		@ToolChannel(ToolMeta.Channel.FRONTEND)
-		public String setCondition(@ToolParam(description = "配置定义编码") String defCode) {
+		public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
 			return "前端哨兵桩（永不执行）";
 		}
 

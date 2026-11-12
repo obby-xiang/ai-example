@@ -61,12 +61,12 @@ class SystemPromptKnownInfoReuseTest {
 
 		assertThat(prompt).as("已知配置定义编码直接调 select_definitions")
 			.contains("已知配置定义编码（如 CURRENCY）时，直接调用 select_definitions");
-		assertThat(prompt).as("已知筛选字段与值直接按既有步骤链执行 set_condition")
-			.contains("已知筛选字段与值（如 CURRENCY 的 code = CNY）时，直接按既有步骤链执行 set_condition");
+		assertThat(prompt).as("已知筛选字段与值直接按既有步骤链执行 set_conditions")
+			.contains("已知筛选字段与值（如 CURRENCY 的 code = CNY）时，直接按既有步骤链执行 set_conditions");
 		assertThat(prompt).as("步骤链没有被放松：仍只在 QUERY_COND 调、仍先 confirm_step")
 			.contains("仍在 QUERY_COND 调用，仍先 confirm_step")
 			.contains("只要当前还在 SELECT_DEFS")
-			.contains("下一批再调用 set_condition");
+			.contains("下一批再调用 set_conditions");
 	}
 
 	@Test

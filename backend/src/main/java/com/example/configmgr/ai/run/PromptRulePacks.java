@@ -74,10 +74,13 @@ final class PromptRulePacks {
 	}
 
 	private static void appendConditionRules(Set<String> tools, StringBuilder sb) {
-		if (tools.contains(AiToolNames.SET_CONDITION)) {
+		if (tools.contains(AiToolNames.SET_CONDITIONS)) {
 			sb.append("""
 
-					set_condition 只在 QUERY_COND 使用；条件已明确时直接使用，不重复收集。
+					set_conditions 只在 QUERY_COND 使用；items 必须非空且 defCode 不重复，每项显式携带自己的 conditions。
+					所有项必须一次批量给出并整批校验，只有完整有序 items 相同才幂等。条件已明确时直接使用，不重复收集。
+					明确不筛选时，用一次 set_conditions 的 items 覆盖每个 defCode，各项 conditions 都传恰好空对象 {}，
+					不要重发 SET_CONDITIONS，也不要只清一部分就推进。create_task 的 {} 只表示条件未决定，不是明确不设。
 					条件未决定时由宿主提供一次非必填文本框，留空即不设筛选并继续，不重复收集。
 					草案不是业务库提交事实。
 					""");

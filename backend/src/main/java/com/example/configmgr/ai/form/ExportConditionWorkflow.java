@@ -24,7 +24,7 @@ import java.util.Set;
  * <h2>三态动作</h2>
  * <ul>
  * <li>{@code SET}：任务条件 JSON 是权威事实（由前端离开 {@code QUERY_COND} 时经
- *     {@code persistStepData} 提交；AI 的 {@code set_condition} 只产生页面草案，不直接写库）；
+ *     {@code persistStepData} 提交；AI 的 {@code set_conditions} 只产生页面草案，不直接写库）；
  *     非 EQ/范围键原样保留，不重新向模型收集；</li>
  * <li>{@code EXPLICIT_UNSET}：用户明确留空（{@code "{}"}），或权威步骤已是 {@code EXPORT} 的
  *     null/空白 ⇒ 直接推进（全量）；</li>
@@ -35,7 +35,7 @@ import java.util.Set;
  * 不按全量放行。<b>不写配置编码特判</b>；自定义配置项与内置项走同一路径。
  *
  * <p><b>自然语言信任边界</b>：本类不解析自由文本或中文正则。自然语言只经既有模型工具调用变成结构化意图
- * （{@code create_task/select_definitions/set_condition}），由前端页面草案与
+ * （{@code create_task/select_definitions/set_conditions}），由前端页面草案与
  * {@code persistStepData} 落到任务条目；任务 {@code conditionJson} 才是可信事实。
  */
 @Slf4j

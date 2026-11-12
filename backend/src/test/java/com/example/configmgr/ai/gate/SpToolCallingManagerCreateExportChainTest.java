@@ -49,6 +49,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
@@ -67,16 +69,16 @@ import static org.mockito.Mockito.when;
  * <li>{@code navigate_to(page=export, taskId=...)} —— 进入导出向导；</li>
  * <li>{@code select_definitions(codes=[...])} —— 勾选配置项（前端落库）；</li>
  * <li>{@code confirm_step} —— 步骤推进，<b>只认 TaskService 权威 currentStep</b>；</li>
- * <li>{@code set_condition(conditions=...)} —— 查询条件（前端 {@code setConditions} 落库）。</li>
+ * <li>{@code set_conditions(conditions=...)} —— 查询条件（前端 {@code setConditions} 落库）。</li>
  * </ol>
  *
  * <p>断言口径：
  * <ul>
  * <li><b>最终上下文 = QUERY_COND</b>：链路走完后快照里的 page/taskId/type/step/status 与任务权威值一致；</li>
- * <li><b>配置与条件真的下发</b>：{@code select_definitions}/{@code set_condition} 到达前端的入参
+ * <li><b>配置与条件真的下发</b>：{@code select_definitions}/{@code set_conditions} 到达前端的入参
  * 与模型给出的 JSON 逐字一致（codes / defCode / conditions 原样，没有被改写或丢键）；</li>
  * <li><b>按批串行</b>：五步分属五个不同的批，每批恰好一条工具结果；四条前端回执的顺序 =
- * navigate → select → confirm → set_condition，批与批之间没有并发重叠；</li>
+ * navigate → select → confirm → set_conditions，批与批之间没有并发重叠；</li>
  * <li><b>create/start 的 HITL 不变</b>：{@code create_task} 与 {@code start_export} 仍是
  * DANGER + BACKEND ⇒ 走确认门；拒绝即未执行（{@code executed=false}），放行才执行。</li>
  * </ul>
@@ -159,6 +161,14 @@ class SpToolCallingManagerCreateExportChainTest {
         when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
         when(this.store.tryClaimExecution(eq(RUN_ID), anyString(), anyString()))
             .thenReturn(new RunStore.ClaimResult(RunStore.ClaimOutcome.WON, 0L, 0L));
+        when(this.store.isExecutionCompletedWithLedger(eq(RUN_ID), any(PendingToolCall.class), anyString(), anyLong(),
+            anyString(), anyBoolean())).thenAnswer(invocation -> {
+            PendingToolCall settled = invocation.getArgument(1);
+            if ("create_task".equals(settled.getName())) {
+                settled.setCreatedTaskId(TASK_ID);
+            }
+            return true;
+        });
         when(this.taskService.findByIdRaw(any())).thenAnswer(invocation -> Optional.ofNullable(this.taskState.get())
             .filter(task -> task.getId() != null && task.getId().equals(invocation.getArgument(0))));
 
@@ -201,7 +211,7 @@ class SpToolCallingManagerCreateExportChainTest {
     }
 
     /**
-     * 完整链路：create_task 批准 → navigate_to → select_definitions → confirm_step → set_condition。
+     * 完整链路：create_task 批准 → navigate_to → select_definitions → confirm_step → set_conditions。
      *
      * <p>先单独确认一次 {@code start_export} 的 HITL（拒绝即未执行），再以全新快照跑链路，
      * 于是链路末尾的"最终步骤 = QUERY_COND"不被后置动作污染。
@@ -287,13 +297,13 @@ class SpToolCallingManagerCreateExportChainTest {
         assertThat(afterStep.getStep()).isEqualTo("QUERY_COND");
         // 下一批按新步骤重算披露面：条件工具可见，尚未到 EXPORT ⇒ start_export 仍不出现
         assertThat(definitionNames(this.manager.resolveToolDefinitions(boundary)))
-            .contains("set_condition")
+            .contains("set_conditions")
             .doesNotContain("start_export");
 
-        // ── 5. set_condition：查询条件下发（defCode + conditions 原样） ───────────
-        String conditionArgs = "{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"XN\"],"
-                + "\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
-        ToolExecutionResult conditioned = run(boundary, call("c5", "set_condition", conditionArgs));
+        // ── 5. set_conditions：查询条件下发（defCode + conditions 原样） ───────────
+        String conditionArgs = "{\"items\":[{\"defCode\":\"CURRENCY\",\"conditions\":{\"scopeKeys\":[\"XN\"],"
+                + "\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}]}";
+        ToolExecutionResult conditioned = run(boundary, call("c5", "set_conditions", conditionArgs));
 
         singleResponseOf(conditioned, "c5");
         assertThat(envelopeOf(conditioned, "c5").outcome()).isEqualTo(ToolOutcome.OK.wire());
@@ -302,7 +312,7 @@ class SpToolCallingManagerCreateExportChainTest {
         // ── 串行与最终态 ───────────────────────────────────────────────────────
         // 四条前端回执各属一批（批 3..6；批 1 = start_export 的确认门、批 2 = create_task），顺序 = 链路顺序
         assertThat(this.frontendNames)
-            .containsExactly("navigate_to", "select_definitions", "confirm_step", "set_condition");
+            .containsExactly("navigate_to", "select_definitions", "confirm_step", "set_conditions");
         assertThat(this.frontendBatches).containsExactly(3, 4, 5, 6);
 
         AiContext finalContext = persistedContext();
@@ -311,7 +321,7 @@ class SpToolCallingManagerCreateExportChainTest {
         assertThat(finalContext.getTaskType()).isEqualTo("EXPORT");
         assertThat(finalContext.getStep()).isEqualTo("QUERY_COND");
         assertThat(finalContext.getTaskStatus()).isEqualTo("ACTIVE");
-        // 任务权威值同样停在 QUERY_COND（set_condition 不推进步骤）
+        // 任务权威值同样停在 QUERY_COND（set_conditions 不推进步骤）
         assertThat(this.taskState.get().getCurrentStep()).isEqualTo("QUERY_COND");
         // 上下文写回过沙盒快照：create / navigate / confirm_step 各读一次任务权威值
         verify(this.store, atLeastOnce()).save(any(RunSnapshot.class));
@@ -367,13 +377,12 @@ class SpToolCallingManagerCreateExportChainTest {
             return "前端哨兵桩（永不执行）";
         }
 
-        @Tool(name = "set_condition", description = "设置查询条件")
+        @Tool(name = "set_conditions", description = "设置查询条件")
         @ToolScope({ "task:EXPORT/QUERY_COND" })
         @ToolRisk(ToolMeta.RiskLevel.WRITE)
         @ToolCategory(ToolMeta.Category.U)
         @ToolChannel(ToolMeta.Channel.FRONTEND)
-        public String setCondition(@ToolParam(description = "配置定义编码") String defCode,
-                @ToolParam(description = "查询条件对象") String conditions) {
+        public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
             return "前端哨兵桩（永不执行）";
         }
 

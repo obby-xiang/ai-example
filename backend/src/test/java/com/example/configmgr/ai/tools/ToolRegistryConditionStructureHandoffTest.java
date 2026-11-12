@@ -25,9 +25,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>口径</h2>
  * <ol>
- * <li>{@code QUERY_COND} + 标记：只披露 {@code get_config_def / list_config_defs / set_condition /
+ * <li>{@code QUERY_COND} + 标记：只披露 {@code get_config_def / list_config_defs / set_conditions /
  *     confirm_step} 四个工具；{@code create_task / start_export / generative_form} 等其余工具
- *     <b>披露与执行都拒绝</b>（Chrome 验证里模型因此只能调 {@code set_condition} 而不是再弹条件表）；</li>
+ *     <b>披露与执行都拒绝</b>（Chrome 验证里模型因此只能调 {@code set_conditions} 而不是再弹条件表）；</li>
  * <li>披露面 {@code forContext} 与执行兜底 {@code matchesContext} <b>同一判据</b>（逐工具对账）；</li>
  * <li>无标记、或已离开 {@code QUERY_COND} ⇒ 不限制，完整工具面恢复。</li>
  * </ol>
@@ -61,8 +61,8 @@ class ToolRegistryConditionStructureHandoffTest {
 		AiContext handoff = handoffContext();
 
 		assertThat(namesFor(handoff)).containsExactlyInAnyOrder("list_config_defs", "get_config_def",
-				"set_condition", "confirm_step");
-		for (String allowed : List.of("list_config_defs", "get_config_def", "set_condition", "confirm_step")) {
+				"set_conditions", "confirm_step");
+		for (String allowed : List.of("list_config_defs", "get_config_def", "set_conditions", "confirm_step")) {
 			assertThat(this.registry.matchesContext(allowed, handoff)).as("%s 应放行", allowed).isTrue();
 		}
 		for (String blocked : List.of("create_task", "start_export", "generative_form")) {
@@ -88,7 +88,7 @@ class ToolRegistryConditionStructureHandoffTest {
 
 		for (AiContext context : contexts) {
 			List<String> disclosed = namesFor(context);
-			for (String tool : List.of("list_config_defs", "get_config_def", "set_condition", "confirm_step",
+			for (String tool : List.of("list_config_defs", "get_config_def", "set_conditions", "confirm_step",
 					"create_task", "start_export", "generative_form")) {
 				assertThat(this.registry.matchesContext(tool, context))
 					.as("上下文 %s 下 %s 的执行判定必须与披露集一致", context.getContextKey(), tool)
@@ -104,7 +104,7 @@ class ToolRegistryConditionStructureHandoffTest {
 		AiContext sameStepWithoutMarker = AiContext.of("export", "EXPORT", "QUERY_COND", 1L, "ACTIVE", Map.of());
 		assertThat(namesFor(sameStepWithoutMarker))
 			.as("QUERY_COND 无标记 ⇒ 不受条件结构化收窄")
-			.contains("set_condition", "confirm_step", "create_task", "generative_form")
+			.contains("set_conditions", "confirm_step", "create_task", "generative_form")
 			.doesNotContain("start_export");
 		assertThat(this.registry.matchesContext("create_task", sameStepWithoutMarker)).isTrue();
 
@@ -113,7 +113,7 @@ class ToolRegistryConditionStructureHandoffTest {
 		assertThat(namesFor(leftStepWithMarker))
 			.as("已离开 QUERY_COND ⇒ 标记不再收窄工具面")
 			.contains("confirm_step", "start_export", "create_task", "generative_form")
-			.doesNotContain("set_condition");
+			.doesNotContain("set_conditions");
 		assertThat(this.registry.matchesContext("start_export", leftStepWithMarker)).isTrue();
 		assertThat(this.registry.matchesContext("create_task", leftStepWithMarker)).isTrue();
 	}
@@ -149,12 +149,12 @@ class ToolRegistryConditionStructureHandoffTest {
 			return "桩";
 		}
 
-		@Tool(name = "set_condition", description = "设置筛选条件草案")
+		@Tool(name = "set_conditions", description = "设置筛选条件草案")
 		@ToolScope({ "task:EXPORT/QUERY_COND" })
 		@ToolRisk(ToolMeta.RiskLevel.WRITE)
 		@ToolCategory(ToolMeta.Category.U)
 		@ToolChannel(ToolMeta.Channel.FRONTEND)
-		public String setCondition(@ToolParam(description = "配置定义编码") String defCode) {
+		public String setConditions(@ToolParam(description = "批量项") java.util.List<com.example.configmgr.ai.tools.AiTools.ConditionItem> items) {
 			return "桩";
 		}
 

@@ -783,7 +783,7 @@ public class AiProperties {
 		 * <ul>
 		 * <li>{@code navigate_to}（页面导航）</li>
 		 * <li>{@code select_definitions}（选择配置项）</li>
-		 * <li>{@code set_condition}（设置查询条件）</li>
+		 * <li>{@code set_conditions}（设置查询条件）</li>
 		 * <li>{@code confirm_step}（推进向导步骤）</li>
 		 * <li>{@code open_export_file_editor}（打开在线编辑器）</li>
 		 * <li>{@code download_export_files}（触发浏览器下载）</li>
