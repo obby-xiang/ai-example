@@ -56,8 +56,8 @@ import static org.mockito.Mockito.when;
  * <p><b>不用 AtomicBoolean</b>：进程内布尔只挡自己，也不解决"多次驱动"的代次问题；
  * 判据必须落在共享归档上（下界是本驱动入口的归档末号）。
  *
- * <p><b>边界（如实）</b>：这是"读 → 判 → 发"的顺序判据，**不**提供跨实例并发下的"恰好一条终帧"
- * （那需要原子终帧位，本批未做）。
+ * <p><b>分工</b>：这是"读 → 判 → 发"的顺序优化；生产 Redis 写路径另由同一条 APPEND_BODY Lua
+ * 在 fence 校验后原子判定归档末帧，保证同终帧幂等、异终帧冲突与终后拒写。
  */
 class FailureTerminalFrameIdempotencyTest {
 

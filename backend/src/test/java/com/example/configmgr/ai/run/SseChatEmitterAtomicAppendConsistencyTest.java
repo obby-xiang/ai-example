@@ -61,6 +61,7 @@ class SseChatEmitterAtomicAppendConsistencyTest {
 	@Test
 	void deliveredWakeAndLastSeqAllCarryTheArchivedSeq() {
 		FakeFrameRedis redis = new FakeFrameRedis();
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		RedisFrameStore frames = new RedisFrameStore(redis.redis, MAPPER, this.properties, 6000);
 		RedisFrameStore other = new RedisFrameStore(redis.redis, MAPPER, this.properties, 6000);
 		FrameStore.AppendResult competing = other.appendAndAllocateSeq(RUN_ID, frame("tool_result"), payloadFactory());
@@ -105,6 +106,7 @@ class SseChatEmitterAtomicAppendConsistencyTest {
 	void frameAtTheSizeCapIsTruncatedForTheWidestSeqSoTheFinalBytesNeverOverflow() {
 		int maxFrameBytes = FrameSizeLimiter.MIN_FRAME_BYTES;
 		FakeFrameRedis redis = new FakeFrameRedis();
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		RedisFrameStore frames = new RedisFrameStore(redis.redis, MAPPER, this.properties, 6000);
 		FrameStore.AppendResult seeded = frames.appendAndGetSeq(RUN_ID, frame("delta", 999_999_999_999L),
 				payloadFactory());

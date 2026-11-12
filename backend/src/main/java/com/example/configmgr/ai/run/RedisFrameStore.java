@@ -240,29 +240,28 @@ public class RedisFrameStore implements FrameStore {
 	static final long ACK_TTL_SECONDS = 120L;
 
 	/**
-	 * <b>原子落档脚本</b>（{@code EVAL}；{@code KEYS} <b>五键</b>同槽 —— seq / xevents / ack / xtrim / fence，
-	 * 全部带同一 {@code {run:<runId>}} hash tag，Cluster 合法）。
+	 * <b>原子落档脚本</b>（{@code EVAL}；{@code KEYS} <b>七键</b>同槽 —— seq / xevents / ack / xtrim /
+	 * fence / runstate / run，全部带同一 {@code {run:<runId>}} hash tag，Cluster 合法）。
 	 *
-	 * <p>{@code KEYS}（<b>五键</b>，全部带同一 {@code {run:<runId>}} hash tag ⇒ 同槽，Cluster 合法）：
-	 * {@code [ai:seq, ai:xevents, ai:xack:, ai:xtrim, ai:fence:run]}。
-	 * {@code ARGV}：{@code [session-ttl, 本进程降级号, 末号探测条数, 窗口, forceRepair, 幂等标记 TTL,
-	 * token, 负载前半段, 负载后半段, expectedEpoch]}。返回 {@code {seq, degraded, idempotent}}：
-	 * {@code seq < 0} = fence 已越过 expectedEpoch；{@code seq == 0} = 拒绝交出低号，
-	 * {@code idempotent == 1} = 这一帧<b>已经</b>归档。
+	 * <p>{@code ARGV}：{@code [session-ttl, 本进程降级号, 末号探测条数, 窗口, forceRepair, 幂等标记 TTL,
+	 * token, 负载前半段, 负载后半段, expectedEpoch, terminalIdentity, exactSeq]}。返回
+	 * {@code {seq, degraded, idempotent, outcome, archivedBody}}。同逻辑终帧返回已胜出的序号与原文；
+	 * 异终帧与终后普通帧也携带 winner 序号和原文，但不写新记录。{@code exactSeq=0} 为分配序号写口，
+	 * 大于 0 为显式 seq 写口；两种写口共用同一终局门和 fence。
 	 *
-	 * <p><b>一次脚本里完成五件事</b>（顺序不可拆）：
+	 * <p><b>一次脚本里完成六件事</b>（顺序不可拆）：
 	 * <ol>
-	 * <li><b>fence</b>：在取号、归档与调用方扇出之前拒绝旧 epoch；</li>
-	 * <li><b>幂等判定</b>：同 token 已记过号 ⇒ 按<b>精确 ID</b>（{@code <seq>-0}）读出那条记录，
-	 *     并把它与<b>本次出帧的帧体</b>逐字节比对；一致才算"已归档"。<b>不看表尾</b>
-	 *     —— 表尾这时可能已经是别的实例的帧，按它判会把"我的帧已成功"误判成"没成功"，
-	 *     于是重复归档同一个逻辑帧（前端按号去重也救不回：两个号两帧）；</li>
-	 * <li><b>定最终号</b>：{@code INCR}（跨实例唯一）+ 单调保险（表尾已被越过 ⇒ {@code INCRBY} 抬到表尾之后）；
-	 *     计数器刚重建/上一拍降级时按归档末号重锚（只抬不压）；</li>
-	 * <li><b>归档</b>：把号替换进负载（{@code head .. seq .. tail}）后
-	 *     {@code XADD MAXLEN ~ 窗口 <seq>-0 seq <n> frame <body>}，并落幂等标记、续期两族键；</li>
-	 * <li><b>拒绝不可证的号</b>：末号读不出且计数器刚重建时返回 0（调用方带 forceRepair 重试），
-	 *     绝不把一个"可能与归档同号"的号发出去。</li>
+	 * <li><b>fence</b>：在取号、归档与调用方扇出之前拒绝旧 epoch；显式 seq 写口通过带 expectedEpoch 的
+	 *     overload 传入调用方实际持有的写权限，不从快照借取权限。旧 API 只接受 runEpoch=0 且 fence=0
+	 *     的 lease-less 快照；无快照、坏快照、缺 status/runEpoch 或 fence 已越过均失败关闭；</li>
+	 * <li><b>幂等判定</b>：同 token 按精确 ID 与帧体验证未知回包，不靠表尾猜测；显式 seq 同号同原文
+	 *     也在此一步幂等返回；</li>
+	 * <li><b>终局门</b>：读取并解析归档末帧。同一 run 已有终帧时，同逻辑终帧幂等回执、异终帧冲突、
+	 *     普通帧拒绝；RUNNING/SUSPENDED 或更大 epoch 均不得越过。末帧损坏或读取失败均失败关闭。
+	 *     快照终态本身不封写，以保留先写快照再发段末/终帧的既有顺序；</li>
+	 * <li><b>定最终号</b>：{@code INCR}（跨实例唯一）+ 单调保险与归档末号重锚（只抬不压）；</li>
+	 * <li><b>归档</b>：把号替换进负载后 {@code XADD MAXLEN ~ 窗口 <seq>-0}，并落幂等标记、续期；</li>
+	 * <li><b>拒绝不可证的号</b>：末号读不出且计数器刚重建时返回 0（调用方带 forceRepair 重试）。</li>
 	 * </ol>
 	 *
 	 * <p><b>为什么必须在脚本里</b>：Redis 串行执行脚本 ⇒ "定号"与"归档"之间没有别的实例能插入，
@@ -270,7 +269,7 @@ public class RedisFrameStore implements FrameStore {
 	 * 被所有已越过它的游标永久跳过"。XADD 自身还会兜底拒绝"ID ≤ 表尾"，所以即便降级也不会乱序。
 	 */
 	private static final String APPEND_BODY = """
-			-- AI_FRAME_APPEND v2: 幂等判定 -> 定最终号 -> XADD(<seq>-0) -> 幂等标记 -> 续期，一次脚本一次往返
+			-- AI_FRAME_APPEND v5: caller fence/token -> 精确号/末帧门 -> allocate-or-exact XADD+ack+TTL，同一原子段
 			local ttl = tonumber(ARGV[1]) or 1
 			local fallbackLast = tonumber(ARGV[2]) or 0
 			local probe = tonumber(ARGV[3]) or 16
@@ -281,12 +280,36 @@ public class RedisFrameStore implements FrameStore {
 			local head = ARGV[8]
 			local tail = ARGV[9]
 			local expectedEpoch = tonumber(ARGV[10]) or 0
+			local incomingTerminal = ARGV[11]
+			local exactSeq = tonumber(ARGV[12]) or 0
 			local fence = tonumber(redis.call('GET', KEYS[5]) or '0') or 0
-			if expectedEpoch > 0 and fence > expectedEpoch then
-			  return {-1, 0, 0}
+			if exactSeq > 0 then
+			  local snapshotJson = redis.call('GET', KEYS[7])
+			  if not snapshotJson then
+			    return {0, 1, 0, 'STATE_UNAVAILABLE', ''}
+			  end
+			  local okSnapshot, snapshot = pcall(cjson.decode, snapshotJson)
+			  if not okSnapshot or type(snapshot) ~= 'table' or type(snapshot.status) ~= 'string'
+			      or tonumber(snapshot.runEpoch) == nil then
+			    return {0, 1, 0, 'STATE_CORRUPT', ''}
+			  end
+			  local snapshotEpoch = tonumber(snapshot.runEpoch)
+			  if expectedEpoch < 0 then
+			    if snapshotEpoch ~= 0 or fence ~= 0 then
+			      return {-1, 0, 0, 'STALE_FENCE', ''}
+			    end
+			    expectedEpoch = 0
+			  end
+			  if expectedEpoch == 0 and (snapshotEpoch ~= 0 or fence ~= 0) then
+			    return {-1, 0, 0, 'STALE_FENCE', ''}
+			  end
+			  if expectedEpoch > 0 and (fence > expectedEpoch or snapshotEpoch > expectedEpoch) then
+			    return {-1, 0, 0, 'STALE_FENCE', ''}
+			  end
 			end
-			-- 归档裁剪低水位（KEYS[4]）：只有"XADD 前后幸存首条被推高"（MAXLEN 真的丢了条目）才写。
-			-- 幸存首条的<b>业务 seq</b>（读者按业务号比较；升级期遗留记录也有 seq 字段）。
+			if expectedEpoch > 0 and fence > expectedEpoch then
+			  return {-1, 0, 0, 'STALE_FENCE', ''}
+			end
 			local function headSeq()
 			  local ok, entries = pcall(redis.call, 'XRANGE', KEYS[2], '-', '+', 'COUNT', 1)
 			  if not ok or type(entries) ~= 'table' or not entries[1] then return nil end
@@ -299,12 +322,18 @@ public class RedisFrameStore implements FrameStore {
 			      end
 			    end
 			  end
-			  -- 没有业务 seq 字段 ⇒ <b>无法确认</b>：不得拿 ID 毫秒段顶替（那会把墙钟量级写进水位、
-			  -- 让所有读者都被判成"被裁过"）。返回 nil ⇒ 本次不记水位（读侧也就不报截断）。
 			  return nil
 			end
+			local function terminalIdentity(frame)
+			  if frame.type == 'done' then
+			    return frame.cancelled == true and 'done:1' or 'done:0'
+			  end
+			  if frame.type == 'error' then
+			    return 'error:' .. tostring(frame.code or '') .. (frame.unconfirmed == true and ':u1' or ':u0')
+			  end
+			  return ''
+			end
 			local headBefore = headSeq()
-			-- 每 run 固定 HASH，token 为 field；旧动态 token 键不读取、不扫描，按原短 TTL 退出。
 			local ackKey = KEYS[3]
 			local prev = redis.call('HGET', ackKey, token)
 			if prev then
@@ -323,31 +352,89 @@ public class RedisFrameStore implements FrameStore {
 			        end
 			      end
 			      if same then
-			        -- 幂等命中：这一拍没有写新记录，但"这一帧仍在窗口里"必须由续期维持
-			        -- （否则重试期间 stream/seq 的滑动 TTL 会倒退，归档可能先于会话过期）。
 			        redis.call('EXPIRE', ackKey, ackTtl)
 			        redis.call('EXPIRE', KEYS[1], ttl)
 			        redis.call('EXPIRE', KEYS[2], ttl)
-			        -- 裁剪低水位与归档同寿：幂等命中/无新裁剪也要续期，避免水位先过期后读侧误判"未截断"。
 			        redis.call('EXPIRE', KEYS[4], ttl)
-			        return {prevSeq, 0, 1}
+			        return {prevSeq, 0, 1, 'IDEMPOTENT', body}
 			      end
 			    end
 			  end
 			end
-			local cur = redis.call('INCR', KEYS[1])
-			local degraded = 0
 			local tailMs = 0
+			local tailTerminal = ''
+			local tailBody = ''
 			local okTail, lastEntries = pcall(redis.call, 'XREVRANGE', KEYS[2], '+', '-', 'COUNT', 1)
-			if not okTail then
-			  degraded = 1
-			elseif type(lastEntries) == 'table' and lastEntries[1] then
+			if not okTail or type(lastEntries) ~= 'table' then
+			  return {0, 1, 0, 'ARCHIVE_UNAVAILABLE', ''}
+			end
+			if lastEntries[1] then
 			  local idText = tostring(lastEntries[1][1])
 			  tailMs = tonumber(string.match(idText, '^(%d+)') or '0') or 0
+			  local fields = lastEntries[1][2]
+			  if type(fields) == 'table' then
+			    for j = 1, #fields, 2 do
+			      if fields[j] == 'frame' then tailBody = fields[j + 1] end
+			    end
+			  end
+			  if tailMs <= 0 or tailBody == '' then
+			    return {0, 1, 0, 'ARCHIVE_CORRUPT', ''}
+			  end
+			  local okFrame, tailFrame = pcall(cjson.decode, tailBody)
+			  if not okFrame or type(tailFrame) ~= 'table' or type(tailFrame.type) ~= 'string' then
+			    return {0, 1, 0, 'ARCHIVE_CORRUPT', ''}
+			  end
+			  tailTerminal = terminalIdentity(tailFrame)
 			end
-			if cur == 1 or forceRepair == 1 then
-			  local anchor = math.max(fallbackLast, tailMs)
-			  if degraded == 0 then
+			if exactSeq > 0 then
+			  local exactText = string.format('%.0f', exactSeq)
+			  local okExact, exactEntries = pcall(redis.call, 'XRANGE', KEYS[2], exactText .. '-0', exactText .. '-0', 'COUNT', 1)
+			  if not okExact or type(exactEntries) ~= 'table' then
+			    return {0, 1, 0, 'ARCHIVE_UNAVAILABLE', ''}
+			  end
+			  if exactEntries[1] then
+			    local exactBody = ''
+			    local fields = exactEntries[1][2]
+			    if type(fields) == 'table' then
+			      for j = 1, #fields, 2 do
+			        if fields[j] == 'frame' then exactBody = fields[j + 1] end
+			      end
+			    end
+			    local candidate = head .. exactText .. tail
+			    if exactBody == candidate then
+			      redis.call('HSET', ackKey, token, exactText)
+			      redis.call('EXPIRE', ackKey, ackTtl)
+			      redis.call('EXPIRE', KEYS[1], ttl)
+			      redis.call('EXPIRE', KEYS[2], ttl)
+			      redis.call('EXPIRE', KEYS[4], ttl)
+			      return {exactSeq, 0, 1, 'IDEMPOTENT', candidate}
+			    end
+			    return {0, 0, 0, 'EXPLICIT_SEQ_TAKEN', ''}
+			  end
+			  if exactSeq <= tailMs then
+			    return {0, 0, 0, 'EXPLICIT_SEQ_BEHIND', ''}
+			  end
+			end
+			if tailTerminal ~= '' then
+			  if incomingTerminal == tailTerminal then
+			    redis.call('HSET', ackKey, token, string.format('%.0f', tailMs))
+			    redis.call('EXPIRE', ackKey, ackTtl)
+			    redis.call('EXPIRE', KEYS[1], ttl)
+			    redis.call('EXPIRE', KEYS[2], ttl)
+			    redis.call('EXPIRE', KEYS[4], ttl)
+			    return {tailMs, 0, 1, 'TERMINAL_IDEMPOTENT', tailBody}
+			  end
+			  if incomingTerminal ~= '' then
+			    return {tailMs, 0, 0, 'TERMINAL_CONFLICT', tailBody}
+			  end
+			  return {tailMs, 0, 0, 'TERMINAL_AFTER', tailBody}
+			end
+			local cur = exactSeq
+			local degraded = 0
+			if exactSeq == 0 then
+			  cur = redis.call('INCR', KEYS[1])
+			  if cur == 1 or forceRepair == 1 then
+			    local anchor = math.max(fallbackLast, tailMs)
 			    local okProbe, entries = pcall(redis.call, 'XREVRANGE', KEYS[2], '+', '-', 'COUNT', probe)
 			    if okProbe and type(entries) == 'table' then
 			      for i = 1, #entries do
@@ -361,25 +448,19 @@ public class RedisFrameStore implements FrameStore {
 			          end
 			        end
 			      end
-			    elseif not okProbe then
+			    else
 			      degraded = 1
 			    end
+			    if anchor >= cur then
+			      cur = redis.call('INCRBY', KEYS[1], string.format('%.0f', anchor + 1 - cur))
+			    end
+			  elseif tailMs >= cur then
+			    cur = redis.call('INCRBY', KEYS[1], string.format('%.0f', tailMs + 1 - cur))
 			  end
-			  if anchor >= cur then
-			    -- INCRBY 的增量必须显式格式化成整数：Lua 的 number→string 在 ≥1e14 时是科学计数法
-			    -- （"1e+12"），Redis 会直接拒（value is not an integer or out of range）——
-			    -- 而遗留墙钟 ID ≈9e12 恰恰把号推到那个量级。
-			    cur = redis.call('INCRBY', KEYS[1], string.format('%.0f', anchor + 1 - cur))
+			  if degraded == 1 and cur == 1 then
+			    redis.call('EXPIRE', KEYS[1], ttl)
+			    return {0, 1, 0, 'SEQUENCE_UNCONFIRMED', ''}
 			  end
-			elseif tailMs >= cur then
-			  -- 单调保险：表尾已被越过（遗留墙钟自动 ID / 降级号回退）⇒ 原子抬到表尾之后，绝不压号
-			  cur = redis.call('INCRBY', KEYS[1], string.format('%.0f', tailMs + 1 - cur))
-			end
-			if degraded == 1 and cur == 1 then
-			  -- 刚重建的计数器 + 末号读不出：这个 1 无法证明未被用过（归档里可能已有 1..N），不交出去。
-			  -- 但 INCR 已经建了这个键 —— 拒绝返回前必须补上 TTL，否则它会永久驻留（泄漏）。
-			  redis.call('EXPIRE', KEYS[1], ttl)
-			  return {0, 1, 0}
 			end
 			local seqText = string.format('%.0f', cur)
 			local body = head .. seqText .. tail
@@ -388,11 +469,7 @@ public class RedisFrameStore implements FrameStore {
 			redis.call('EXPIRE', ackKey, ackTtl)
 			redis.call('EXPIRE', KEYS[1], ttl)
 			redis.call('EXPIRE', KEYS[2], ttl)
-			-- 裁剪低水位与归档同寿：本次没有触发裁剪也续期（避免水位先过期，读侧把"截断过"
-			-- 误判成"未截断"；EXPIRE 对不存在的键是 no-op）。
 			redis.call('EXPIRE', KEYS[4], ttl)
-			-- 真实裁剪检测：首条从 nil/旧值被推到更大的号 ⇒ 更早的条目已经被 MAXLEN 丢掉。
-			-- 记下新的首条号作为低水位（只升不降），读侧只按它判截断（不按"号是否连续"猜）。
 			local headAfter = headSeq()
 			if headBefore and headAfter and headAfter > headBefore then
 			  local known = tonumber(redis.call('GET', KEYS[4]) or '0') or 0
@@ -402,7 +479,7 @@ public class RedisFrameStore implements FrameStore {
 			    redis.call('EXPIRE', KEYS[4], ttl)
 			  end
 			end
-			return {cur, degraded, 0}
+			return {cur, degraded, 0, 'APPENDED', body}
 			""";
 
 	/** 裁剪低水位标记脚本的标记（替身按它分派）。 */
@@ -438,7 +515,7 @@ public class RedisFrameStore implements FrameStore {
 		return script;
 	}
 
-	/** 原子落档脚本（结果 = 三元素数组）。 */
+	/** 原子落档脚本（结果 = 序号、降级位、幂等位、结局、已归档原文）。 */
 	private static final RedisScript<List> APPEND_SCRIPT = appendScript();
 
 	private static RedisScript<List> appendScript() {
@@ -744,9 +821,16 @@ public class RedisFrameStore implements FrameStore {
 	private record SeqAllocation(long seq, boolean degraded) {
 	}
 
+	private static final long UNSPECIFIED_EPOCH = -1L;
+
 	@Override
 	public void append(String runId, Map<String, Object> frame) {
-		appendAndGetSeq(runId, frame);
+		append(runId, frame, UNSPECIFIED_EPOCH);
+	}
+
+	@Override
+	public void append(String runId, Map<String, Object> frame, long expectedEpoch) {
+		appendAndGetSeq(runId, frame, null, expectedEpoch);
 	}
 
 	/**
@@ -758,30 +842,29 @@ public class RedisFrameStore implements FrameStore {
 	 */
 	@Override
 	public AppendResult appendAndGetSeq(String runId, Map<String, Object> frame) {
-		return appendAndGetSeq(runId, frame, null);
+		return appendAndGetSeq(runId, frame, null, UNSPECIFIED_EPOCH);
+	}
+
+	@Override
+	public AppendResult appendAndGetSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory) {
+		return appendAndGetSeq(runId, frame, payloadFactory, UNSPECIFIED_EPOCH);
 	}
 
 	/**
 	 * 按<b>帧体里的号</b>精确落档（显式 ID {@code <seq>-0}），带工厂时负载在落档前生成。
 	 *
-	 * <p>这条口<b>不分配号</b>也不改号：{@code <seq>-0} 已被表尾越过 ⇒ 不落档（WARN）。
-	 * 出帧路径用 {@link #appendAndAllocateSeq}（定号与归档同一拍）；本口服务兼容写口/单测与
-	 * "号已经确定"的调用方。
-	 *
-	 * <p><b>幂等按精确 ID + 帧体内容判</b>（不看表尾）：{@code XADD} 抛错后只读 {@code <seq>-0}
-	 * 那一条记录，帧体逐字节相同 ⇒ 视为已落档（只续期）。这条口径同时覆盖
-	 * "XADD 成功但回包丢失"的重试：同一号 + 同一份字节不会再写第二条。
+	 * <p>expectedEpoch 是调用方实际持有的写权限事实，直接进入 {@link #APPEND_BODY}；
+	 * 未显式给出时，仅允许既有 runEpoch=0 且 fence=0 的 lease-less 快照，绝不从快照借取新 epoch。
 	 */
 	@Override
-	public AppendResult appendAndGetSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory) {
+	public AppendResult appendAndGetSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory,
+			long expectedEpoch) {
 		String type = String.valueOf(frame.get("type"));
 		if (RunStore.HEARTBEAT_TYPE.equals(type)) {
-			// T7 原样：心跳不入事件日志（活动戳由调用方 touchActivity 留痕）。
 			return AppendResult.skipped();
 		}
 		long seq = seqOf(frame);
 		if (seq <= 0L) {
-			// N-4：无 seq 的帧不进 Stream（否则会写入一条 seq=0 记录，被 streamTailSeq 当成末号）。
 			if (log.isDebugEnabled()) log.debug("event log skipping frame without seq runId={} type={}", runId, type);
 			return AppendResult.skipped();
 		}
@@ -789,12 +872,10 @@ public class RedisFrameStore implements FrameStore {
 		if (payload == null) {
 			return AppendResult.skipped();
 		}
-		// 容量治理（Redis 容量专项 A）：先落"本轮见过的最大载荷"，再据它算本条落档用的窗口 ——
-		// 于是本条自身也落在裁剪后的窗口内，不会留下"先写大帧、下一帧才收窄"的超预算窗口。
 		RunState state = state(runId);
 		int window = windowForPayload(state.observedPayloadBytes.accumulateAndGet(payload.length, Math::max));
 		noteByteGovernance(runId, state, window);
-		return appendExact(runId, type, seq, payload, Math.max(1L, ttl().toSeconds()), window);
+		return appendExact(runId, frame, type, seq, payload, Math.max(1L, ttl().toSeconds()), window, expectedEpoch);
 	}
 
 	/**
@@ -860,52 +941,88 @@ public class RedisFrameStore implements FrameStore {
 		// （INCR + XADD），回包持续丢失时多试只会把锁占住更久；而同 token 的幂等判定是确定性的
 		// —— 第二次认不出，第三次也不会认出。
 		return appendWithRetries(runId, frame, type, split, state, token, ttlSeconds, window, forceRepair,
-				expectedEpoch);
+				expectedEpoch, 0L);
 	}
 
-	/** 执行一次原子落档脚本，并把回包解码成 {@code {seq, degraded, idempotent}}。 */
+	private static String terminalIdentity(Map<String, Object> frame) {
+		String type = String.valueOf(frame.get("type"));
+		if ("done".equals(type)) {
+			return Boolean.TRUE.equals(frame.get("cancelled")) ? "done:1" : "done:0";
+		}
+		if ("error".equals(type)) {
+			Object code = frame.get("code");
+			return "error:" + (code == null ? "" : String.valueOf(code))
+					+ (Boolean.TRUE.equals(frame.get("unconfirmed")) ? ":u1" : ":u0");
+		}
+		return "";
+	}
+
+	/** 执行一次原子落档脚本，并解码序号、降级位、结局与已归档原文。 */
 	private AppendAllocation allocateAndAppend(String runId, RunState state, String token, SeqSplit split,
-			long ttlSeconds, int window, boolean forceRepair, long expectedEpoch) {
+			long ttlSeconds, int window, boolean forceRepair, long expectedEpoch, String terminalIdentity, long exactSeq) {
 		List<?> result = this.redis.execute(APPEND_SCRIPT,
 				List.of(seqKey(runId), streamKey(runId), ackKey(runId), trimKey(runId),
-						RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, runId)),
+						RunStore.runScopedKey(RunStore.FENCE_RUN_PREFIX, runId),
+						RunStore.runScopedKey(RunStore.RUN_STATE_PREFIX, runId),
+						RunStore.runScopedKey(RunStore.RUN_PREFIX, runId)),
 				String.valueOf(ttlSeconds), String.valueOf(Math.max(0L, state.fallbackSeq.get())),
 				String.valueOf(TAIL_PROBE), String.valueOf(window), forceRepair ? "1" : "0",
 				String.valueOf(ACK_TTL_SECONDS), token, split.headText(), split.tailText(),
-				String.valueOf(expectedEpoch));
+				String.valueOf(expectedEpoch), terminalIdentity, String.valueOf(exactSeq));
 		if (CollectionUtils.isEmpty(result)) {
 			throw new IllegalStateException("Atomic archive script returned null");
 		}
 		long seq = scriptSeq(result.getFirst());
 		boolean degraded = scriptSeq(result.get(1)) != 0L;
 		boolean idempotent = result.size() > 2 && scriptSeq(result.get(2)) != 0L;
+		String replyOutcome = result.size() > 3 ? scriptText(result.get(3)) : "";
+		FrameStore.AppendOutcome outcome = switch (replyOutcome) {
+			case "IDEMPOTENT" -> FrameStore.AppendOutcome.IDEMPOTENT;
+			case "TERMINAL_IDEMPOTENT" -> FrameStore.AppendOutcome.TERMINAL_IDEMPOTENT;
+			case "TERMINAL_CONFLICT" -> FrameStore.AppendOutcome.TERMINAL_CONFLICT;
+			case "TERMINAL_AFTER" -> FrameStore.AppendOutcome.TERMINAL_AFTER;
+			default -> idempotent ? FrameStore.AppendOutcome.IDEMPOTENT : FrameStore.AppendOutcome.APPENDED;
+		};
+		byte[] archivedPayload = result.size() > 4 ? scriptPayload(result.get(4)) : null;
 		if (degraded) {
 			state.repairDegraded.set(true);
-			// I-4：降级必须进统一计数（/api/ai/health 的 redis.degradations）—— 脚本里读不出的是
-			// 归档末号，与 A4 的语义一致；日志每轮一次。
 			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ);
 			if (state.repairDegradedWarned.compareAndSet(false, true)) {
-				log.warn("archive degraded runId={} (archive tail unreadable; using counter seq; next append re-anchors with forceRepair)", runId);
+				log.warn("archive degraded runId={} (tail/probe unreadable or corrupt; append degraded or refused; next append re-anchors)", runId);
 			}
 		}
 		else if (seq > 0L) {
 			state.repairDegraded.set(false);
 		}
-		return new AppendAllocation(seq, degraded, idempotent);
+		return new AppendAllocation(seq, degraded, outcome, archivedPayload);
+	}
+
+	private static String scriptText(Object value) {
+		if (value == null) {
+			return "";
+		}
+		if (value instanceof byte[] bytes) {
+			return org.apache.commons.codec.binary.StringUtils.newStringUtf8(bytes);
+		}
+		return String.valueOf(value);
+	}
+
+	private static byte[] scriptPayload(Object value) {
+		String text = scriptText(value);
+		return text.isEmpty() ? null : text.getBytes(StandardCharsets.UTF_8);
 	}
 
 	private AppendResult appendWithRetries(String runId, Map<String, Object> frame, String type, SeqSplit split,
-			RunState state, String token, long ttlSeconds, int window, boolean forceRepair, long expectedEpoch) {
+			RunState state, String token, long ttlSeconds, int window, boolean forceRepair, long expectedEpoch,
+			long exactSeq) {
 		int unknownReplyRetries = 0;
 		for (int attempt = 1; attempt <= APPEND_ATTEMPTS; attempt++) {
 			AppendAllocation allocation;
 			try {
 				allocation = allocateAndAppend(runId, state, token, split, ttlSeconds, window, forceRepair,
-						expectedEpoch);
+						expectedEpoch, terminalIdentity(frame), exactSeq);
 			}
 			catch (Exception ex) {
-				// 回包未知：本拍可能已经归档（XADD 成功、回包丢了）。下一拍用<b>同一个 token</b> 重试，
-				// 脚本据此按精确 ID + 本次帧体判幂等 —— 不会写出第二条。
 				unknownReplyRetries++;
 				if (unknownReplyRetries > 1) {
 					log.warn("event log archive result unknown after retry runId={} type={} (retried once, no further lock retry)",
@@ -917,16 +1034,20 @@ public class RedisFrameStore implements FrameStore {
 				forceRepair = true;
 				continue;
 			}
-			if (allocation.seq() > 0L) {
-				byte[] body = split.render(allocation.seq());
-				frame.put(FIELD_SEQ, allocation.seq());
-				return new AppendResult(allocation.seq(), body);
+			if (allocation.outcome() == FrameStore.AppendOutcome.TERMINAL_CONFLICT
+					|| allocation.outcome() == FrameStore.AppendOutcome.TERMINAL_AFTER) {
+				restoreRejectedSeq(frame, exactSeq);
+				return new AppendResult(allocation.seq(), allocation.archivedPayload(), allocation.outcome());
 			}
-			// seq == 0：脚本拒绝交出"刚重建且无法证明未被用过"的低号 ⇒ 带 forceRepair 再试一次。
+			if (allocation.seq() > 0L) {
+				byte[] body = allocation.archivedPayload() == null ? split.render(allocation.seq())
+						: allocation.archivedPayload();
+				frame.put(FIELD_SEQ, allocation.seq());
+				return new AppendResult(allocation.seq(), body, allocation.outcome());
+			}
 			forceRepair = true;
 		}
-		frame.remove(FIELD_SEQ);
-		// I-4：一帧没进事件日志 = 谁也不会再看到它（重挂回放也补不回来）⇒ 必须可聚合观测。
+		restoreRejectedSeq(frame, exactSeq);
 		RedisDegradation.record(RedisDegradation.A7_FRAME_APPEND);
 		if (state.appendFailureWarned.compareAndSet(false, true)) {
 			log.warn("event log archive failed runId={} type={} (frame not archived/delivered, "
@@ -938,13 +1059,23 @@ public class RedisFrameStore implements FrameStore {
 		return AppendResult.skipped();
 	}
 
+	private static void restoreRejectedSeq(Map<String, Object> frame, long exactSeq) {
+		if (exactSeq > 0L) {
+			frame.put(FIELD_SEQ, exactSeq);
+		}
+		else {
+			frame.remove(FIELD_SEQ);
+		}
+	}
+
 	/** 固定 run 幂等 HASH：{@code ai:xack:{...run:<runId>}}，token 为 field。 */
 	private static String ackKey(String runId) {
 		return RunStore.runScopedKey(ACK_PREFIX, runId);
 	}
 
-	/** 一次原子落档的结果：{@code seq <= 0} = 没有归档；{@code idempotent} = 命中"已归档"（重试）。 */
-	private record AppendAllocation(long seq, boolean degraded, boolean idempotent) {
+	/** 一次原子落档的回包；已归档原文用于同终帧幂等回执。 */
+	private record AppendAllocation(long seq, boolean degraded, FrameStore.AppendOutcome outcome,
+			byte[] archivedPayload) {
 	}
 
 	/**
@@ -971,139 +1102,25 @@ public class RedisFrameStore implements FrameStore {
 	}
 
 	/**
-	 * 以<b>显式 ID {@code <seq>-0}</b> 落档；<b>不改号、不重分配</b>（Task 2）。
+	 * 以<b>显式 ID {@code <seq>-0}</b> 落档；<b>不改号、不重分配</b>。
 	 *
-	 * <p>被拒只有两种可能，收口各不相同：
-	 * <ol>
-	 * <li><b>同一帧的重试</b>（上一拍其实已成功 / 回包丢失）：<b>精确 ID</b> {@code <seq>-0} 那条记录
-	 *     存在且帧体逐字节相同 ⇒ 幂等，只续期、不写第二条；</li>
-	 * <li><b>号被更高的帧越过</b>（另一实例已用更高号归档 / 遗留墙钟自动 ID）：{@code <seq>-0} 物理上
-	 *     写不进去，本帧<b>不落档</b>（WARN）—— 改号会让交付号 ≠ 归档号，挤到表尾会让归档序与分配序分叉，
-	 *     两者都违反"不允许未来出现更低号的新归档帧"。</li>
-	 * </ol>
-	 *
-	 * <p><b>绝不使用自动 ID（{@code XADD *}）</b>：自动 ID 的毫秒段是写入时刻的墙钟，一条落下就会让
-	 * 此后每条显式 ID 都被拒，物理序与 seq 序永久分叉（见类注）。
+	 * <p>与分配序号写口共用 {@link #APPEND_BODY}：fence、同号同原文幂等、归档末帧终局门、
+	 * XADD、ack、TTL 与裁剪低水位均在同一 Lua 原子段内完成，不做 Java 预读后直写。
+	 * 同号不同原文、号被表尾越过、过期 fence、异终帧与终后普通帧均不新增归档。
 	 *
 	 * @return 落档号 + 归档字节；{@link AppendResult#skipped()} = 本次未落档
 	 */
-	private AppendResult appendExact(String runId, String type, long seq, byte[] payload, long ttlSeconds, int window) {
-		byte[] key = bytes(streamKey(runId));
-		// 裁剪低水位同样适用于这条写口（它也是真实生产路径）：先记下幸存首条，写后再比一次。
-		Long headBefore = survivingHeadSeq(runId);
-		try {
-			xadd(key, seq, payload, ttlSeconds, window);
-			refreshTrimTtl(runId, ttlSeconds);
-			markTrimIfHeadAdvanced(runId, headBefore, ttlSeconds);
-			return new AppendResult(seq, payload);
-		}
-		catch (Exception ex) {
-			ArchivedEntry exact = entryAt(runId, seq);
-			if (exact.exists() && Arrays.equals(exact.frame(), payload)) {
-				if (!isArchiveTtlValid(key, ttlSeconds)) {
-					refreshTtl(key, ttlSeconds);
-				}
-				if (isArchiveTtlValid(key, ttlSeconds)) {
-					refreshTrimTtl(runId, ttlSeconds);
-					return new AppendResult(seq, payload);
-				}
-				log.warn("event log exact frame TTL unverified runId={} type={} seq={} (not reported as archived)", runId,
-						type, seq, ex);
-				return AppendResult.skipped();
-			}
-			if (exact.exists()) {
-				log.warn("event log explicit seq already taken runId={} type={} seq={} (no overwrite, no renumber; frame not archived)", runId,
-						type, seq, ex);
-			}
-			else {
-				log.warn("event log explicit seq behind tail runId={} type={} seq={} (no reassign, no auto ID; frame not archived)",
-						runId, type, seq, ex);
-			}
+	private AppendResult appendExact(String runId, Map<String, Object> frame, String type, long seq, byte[] payload,
+			long ttlSeconds, int window, long expectedEpoch) {
+		SeqSplit split = SeqSplit.of(payload, seq);
+		if (split == null) {
+			log.error("event log cannot locate explicit seq uniquely runId={} type={} seq={} (frame not archived)",
+					runId, type, seq);
 			return AppendResult.skipped();
 		}
-	}
-
-	/**
-	 * 写后比对：幸存首条被推高 = 这次 XADD 的 {@code MAXLEN} 真的丢了条目 ⇒ 记录低水位。
-	 *
-	 * <p>读不出（抖动）就不记：<b>不要</b>把"读不到"写成"被裁过"。
-	 */
-	private void markTrimIfHeadAdvanced(String runId, Long headBefore, long ttlSeconds) {
-		if (headBefore == null) {
-			return;
-		}
-		Long headAfter = survivingHeadSeq(runId);
-		if (headAfter == null || headAfter <= headBefore) {
-			return;
-		}
-		try {
-			this.redis.execute(XTRIM_SCRIPT, List.of(trimKey(runId)), String.valueOf(headAfter),
-					String.valueOf(ttlSeconds));
-		}
-		catch (Exception ex) {
-			if (LogSampling.canAcquire("frame-archive-trim-record")) {
-				log.warn("archive trim low-watermark record failed runId={} head={} (no truncation reported this read)", runId,
-						headAfter, ex);
-			}
-		}
-	}
-
-	/** 幸存首条的业务 {@code seq}（空流/读不出 = {@code null}）。 */
-	private Long survivingHeadSeq(String runId) {
-		try {
-			byte[] key = bytes(streamKey(runId));
-			return this.redis.execute((RedisCallback<Long>) connection -> {
-				List<ByteRecord> records = connection.xRange(key, Range.unbounded(),
-						org.springframework.data.redis.connection.Limit.limit().count(1));
-				if (CollectionUtils.isEmpty(records)) {
-					return null;
-				}
-				long seq = seqFieldOf(records.getFirst());
-				return seq > 0L ? seq : null;
-			});
-		}
-		catch (Exception ex) {
-			if (LogSampling.canAcquire("frame-archive-head-read")) {
-				log.warn("event log surviving first entry read failed runId={} (low watermark not recorded this time)", runId,
-						ex);
-			}
-			return null;
-		}
-	}
-
-	/** 精确 ID 上那一条记录的存在性与 {@code frame} 字段原文（幂等判定的唯一输入）。 */
-	private record ArchivedEntry(boolean exists, byte[] frame) {
-	}
-
-	/**
-	 * 读<b>精确 ID {@code <seq>-0}</b> 那一条记录（{@code XRANGE key <seq>-0 <seq>-0 COUNT 1}）。
-	 *
-	 * <p>为什么不是"查表尾"（Task 2 要求）：表尾是"最后一条"，而幂等要回答的是
-	 * "我这一帧（这个号、这份字节）是否已经落档" —— 并发出帧时表尾很可能已经是别人的帧，
-	 * 按表尾判定会把"我的帧已成功"误判成失败（于是重复归档）或反过来。
-	 *
-	 * <p>读不出来（连接抖动 / 键类型错）返回 {@code exists=false} 并 WARN + 计入 A4：
-	 * 调用方据此<b>不</b>把该帧当成功（宁可这一帧不交付，也不重复归档）。
-	 */
-	private ArchivedEntry entryAt(String runId, long seq) {
-		try {
-			byte[] key = bytes(streamKey(runId));
-			ArchivedEntry entry = this.redis.execute((RedisCallback<ArchivedEntry>) connection -> {
-				List<ByteRecord> records = connection.xRange(key,
-						Range.closed(seq + "-0", seq + "-0"),
-						org.springframework.data.redis.connection.Limit.limit().count(1));
-				if (CollectionUtils.isEmpty(records)) {
-					return new ArchivedEntry(false, null);
-				}
-				return new ArchivedEntry(true, frameFieldOf(records.getFirst()));
-			});
-			return ObjectUtils.getIfNull(entry, () -> new ArchivedEntry(false, null));
-		}
-		catch (Exception ex) {
-			RedisDegradation.record(RedisDegradation.A4_FRAME_TAIL_READ, ex);
-			log.warn("event log exact-ID read failed runId={} seq={} (idempotency unknown, treating as not archived)", runId, seq, ex);
-			return new ArchivedEntry(false, null);
-		}
+		RunState state = state(runId);
+		String token = UUID.randomUUID().toString();
+		return appendWithRetries(runId, frame, type, split, state, token, ttlSeconds, window, false, expectedEpoch, seq);
 	}
 
 	/** 号占位处的切分：{@code head} 到 {@code "seq":} 之后，{@code tail} 从占位数字之后开始。 */
@@ -1169,43 +1186,6 @@ public class RedisFrameStore implements FrameStore {
 		return -1;
 	}
 
-	/** 幂等命中时补一次续期（该拍没有 {@code XADD}，滑动 TTL 仍要前进）。 */
-	private void refreshTtl(byte[] key, long ttlSeconds) {
-		try {
-			this.redis.execute((RedisCallback<Object>) connection -> {
-				connection.expire(key, ttlSeconds);
-				return null;
-			});
-		}
-		catch (Exception ex) {
-			if (LogSampling.canAcquire("frame-archive-renew")) {
-				log.warn("event log renew failed (idempotent hit, proceeding with existing record)", ex);
-			}
-		}
-	}
-
-	private boolean isArchiveTtlValid(byte[] key, long ttlSeconds) {
-		try {
-			Long pttl = this.redis.execute((RedisCallback<Long>) connection -> connection.pTtl(key));
-			long maxTtlMs = Math.min(Math.max(1L, ttlSeconds) * 1000L, Duration.ofDays(7).toMillis());
-			return pttl != null && pttl > 0L && pttl <= maxTtlMs;
-		}
-		catch (Exception ex) {
-			if (LogSampling.canAcquire("frame-archive-ttl-probe")) {
-				log.warn("event log TTL probe failed (archive success not confirmed)", ex);
-			}
-			return false;
-		}
-	}
-
-	/**
-	 * 裁剪低水位随归档续期：{@code ai:xtrim} 若比 {@code ai:xevents} 先过期，读侧会把
-	 * "确实被裁过"误判成"未截断"（archive-trimmed 头失真）。续期对不存在的键是 no-op。
-	 */
-	private void refreshTrimTtl(String runId, long ttlSeconds) {
-		refreshTtl(bytes(trimKey(runId)), ttlSeconds);
-	}
-
 	/** 只取一条 Stream 记录的 {@code frame} 字段原文（幂等比对用；不反序列化帧体）。 */
 	private static byte[] frameFieldOf(MapRecord<byte[], byte[], byte[]> record) {
 		for (Map.Entry<byte[], byte[]> entry : record.getValue().entrySet()) {
@@ -1214,42 +1194,6 @@ public class RedisFrameStore implements FrameStore {
 			}
 		}
 		return null;
-	}
-
-	/**
-	 * 追加一条 Stream 记录：{@code XADD + EXPIRE} 在同一单键 Lua 脚本内原子完成，成功后必有 TTL。
-	 *
-	 * <p>
-	 * <b>为什么用原始命令而不是 {@code StreamOperations} / {@code RedisConnection#xAdd(record, options)}</b>：
-	 * 后者无法指定 entry ID（一律自动），而本批的正确性依赖 <b>ID = {@code seq}-0</b>：
-	 * 物理序恒等于 seq 序，于是"按 {@code XRANGE <afterSeq+1>-0 +} 读差量"既完整又只要 O(差量) ——
-	 * 这是 I-2（物理序 ≠ seq 序时低号帧永久不可读）的根治口径。{@code MAXLEN ~} 仍走近似裁剪。
-	 *
-	 * <p><b>entry ID 只由本方法构造</b>（不接收调用方传入的 ID 串）：自动 ID（{@code *}）在类型上就被排除，
-	 * 想退回"自动 ID 兜底"必须先改签名 —— 见 {@link #appendExact} 的"不改号"口径。
-	 * <b>Task 2 起这条原始命令只服务"号已确定"的写口</b>（{@link #append} / 幂等退化路径）；
-	 * 出帧路径走 {@link #APPEND_BODY}（定号与 XADD 同一次脚本，绝无"先取低号"的窗口）。
-	 *
-	 * <p><b>MAXLEN 的窗口</b>由 {@link #windowForPayload(long)} 给出（Redis 容量专项 A）：条数窗口
-	 * {@link #STREAM_WINDOW} 与字节预算推导出的等效窗口取小；命令行仍是 {@code MAXLEN ~ n}（近似裁剪），
-	 * 语义与 5.0 / Cluster 完全兼容 —— 没有引入新命令，也没有按字节裁剪（那需要 {@code MEMORY USAGE}
-	 * 之类的额外协议）。
-	 *
-	 * @param window 本条落档用的 MAXLEN 窗口（&gt; 0）
-	 */
-	private static final String EXACT_APPEND_BODY = """
-			redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], ARGV[2], 'seq', ARGV[3], 'frame', ARGV[4])
-			redis.call('EXPIRE', KEYS[1], ARGV[5])
-			return 1
-			""";
-
-	private void xadd(byte[] key, long seq, byte[] payload, long ttlSeconds, int window) {
-		this.redis.execute((RedisCallback<Object>) connection -> {
-			connection.eval(bytes(EXACT_APPEND_BODY), org.springframework.data.redis.connection.ReturnType.INTEGER, 1,
-					key, bytes(String.valueOf(window)), bytes(seq + "-0"), bytes(String.valueOf(seq)), payload,
-					bytes(String.valueOf(ttlSeconds)));
-			return null;
-		});
 	}
 
 	/**

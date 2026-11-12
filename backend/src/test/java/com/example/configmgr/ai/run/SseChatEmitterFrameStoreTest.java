@@ -226,6 +226,141 @@ class SseChatEmitterFrameStoreTest {
 		assertThat(out.subscriberCount()).as("回放读异常后不得留下已挂订阅（否则订阅表/唤醒订阅泄漏）").isZero();
 	}
 
+	@Test
+	void terminalConflictDeliversTheWinningArchiveOnceAndCompletesWithoutSyntheticFailure() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		store.seedRun(RUN_ID, "s-emit");
+		FrameStore frames = mock(FrameStore.class);
+		byte[] winner = "{\"type\":\"done\",\"seq\":1,\"cancelled\":false}".getBytes();
+		when(frames.appendAndAllocateSeq(eq(RUN_ID), org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(new FrameStore.AppendResult(1L, winner, FrameStore.AppendOutcome.TERMINAL_CONFLICT));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		out.error("AI_UPSTREAM_ERROR", "failed");
+		out.error("AI_UPSTREAM_ERROR", "failed");
+
+		assertThat(FrameWire.normalize(wire.frames())).as("本地未收 winner 时只补投胜出原文一次")
+				.hasSize(1)
+				.first()
+				.satisfies(frame -> {
+					assertThat(frame).containsEntry("type", "done").containsEntry("seq", 1L);
+				});
+		verify(wire.emitter()).complete();
+	}
+
+	@Test
+	void terminalAfterDeliversTheWinningArchiveAndCompletes() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		store.seedRun(RUN_ID, "s-emit");
+		FrameStore frames = mock(FrameStore.class);
+		byte[] winner = "{\"type\":\"done\",\"seq\":1,\"cancelled\":false}".getBytes();
+		when(frames.appendAndAllocateSeq(eq(RUN_ID), org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(new FrameStore.AppendResult(1L, winner, FrameStore.AppendOutcome.TERMINAL_AFTER));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		out.delta("late");
+
+		assertThat(FrameWire.normalize(wire.frames())).hasSize(1)
+				.first().satisfies(frame -> assertThat(frame).containsEntry("type", "done"));
+		verify(wire.emitter()).complete();
+	}
+
+	@Test
+	void terminalWinnerAboveOneCompletesOnlyAfterContinuousCatchUp() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		store.seedRun(RUN_ID, "s-emit");
+		FrameStore frames = mock(FrameStore.class);
+		byte[] winner = "{\"type\":\"done\",\"seq\":3,\"cancelled\":false}".getBytes();
+		when(frames.appendAndAllocateSeq(eq(RUN_ID), org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(new FrameStore.AppendResult(3L, winner, FrameStore.AppendOutcome.TERMINAL_AFTER));
+		when(frames.readRawFrom(eq(RUN_ID), eq(0L), anyInt())).thenReturn(List.of(
+				new FrameStore.RawFrame(1L, "{\"type\":\"delta\",\"seq\":1}"),
+				new FrameStore.RawFrame(2L, "{\"type\":\"delta\",\"seq\":2}"),
+				new FrameStore.RawFrame(3L, new String(winner))));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		out.delta("late");
+
+		assertThat(seqs(FrameWire.normalize(wire.frames()))).containsExactly(1L, 2L, 3L);
+		assertThat(FrameWire.normalize(wire.frames()).getLast().get("type")).isEqualTo("done");
+		verify(wire.emitter()).complete();
+	}
+
+	@Test
+	void terminalWinnerAboveOneDoesNotCompleteWhenCatchUpPageIsInsufficient() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		store.seedRun(RUN_ID, "s-emit");
+		FrameStore frames = mock(FrameStore.class);
+		byte[] winner = "{\"type\":\"done\",\"seq\":3,\"cancelled\":false}".getBytes();
+		when(frames.appendAndAllocateSeq(eq(RUN_ID), org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(new FrameStore.AppendResult(3L, winner, FrameStore.AppendOutcome.TERMINAL_AFTER));
+		when(frames.readRawFrom(eq(RUN_ID), eq(0L), anyInt()))
+			.thenReturn(List.of(new FrameStore.RawFrame(1L, "{\"type\":\"delta\",\"seq\":1}")));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		out.delta("late");
+
+		assertThat(FrameWire.normalize(wire.frames())).noneMatch(frame -> "done".equals(frame.get("type")));
+		verify(wire.emitter(), org.mockito.Mockito.never()).complete();
+		assertThat(this.bus.published).contains(RUN_ID + "@3:terminal");
+	}
+
+	@Test
+	void terminalWinnerAboveOneDoesNotCompleteWhenCatchUpReadFails() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		store.seedRun(RUN_ID, "s-emit");
+		FrameStore frames = mock(FrameStore.class);
+		byte[] winner = "{\"type\":\"done\",\"seq\":3,\"cancelled\":false}".getBytes();
+		when(frames.appendAndAllocateSeq(eq(RUN_ID), org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(new FrameStore.AppendResult(3L, winner, FrameStore.AppendOutcome.TERMINAL_AFTER));
+		when(frames.readRawFrom(eq(RUN_ID), eq(0L), anyInt())).thenReturn(List.of());
+		when(frames.readFrom(eq(RUN_ID), eq(0L), anyInt())).thenReturn(List.of());
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		out.delta("late");
+
+		assertThat(FrameWire.normalize(wire.frames())).noneMatch(frame -> "done".equals(frame.get("type")));
+		verify(wire.emitter(), org.mockito.Mockito.never()).complete();
+		assertThat(this.bus.published).contains(RUN_ID + "@3:terminal");
+	}
+
+	@Test
+	void initialInsufficientCatchUpCompletesExactlyOnceAfterWakePaintsTheWinner() {
+		InMemoryRunStore store = new InMemoryRunStore();
+		store.seedRun(RUN_ID, "s-emit");
+		FrameStore frames = mock(FrameStore.class);
+		byte[] winner = "{\"type\":\"done\",\"seq\":3,\"cancelled\":false}".getBytes();
+		when(frames.appendAndAllocateSeq(eq(RUN_ID), org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(new FrameStore.AppendResult(3L, winner, FrameStore.AppendOutcome.TERMINAL_AFTER));
+		when(frames.readRawFrom(eq(RUN_ID), eq(0L), anyInt()))
+			.thenReturn(List.of(new FrameStore.RawFrame(1L, "{\"type\":\"delta\",\"seq\":1}")));
+		SseChatEmitter out = emitter(store, frames);
+		FrameWire wire = FrameWire.attachTo(out);
+		out.delta("late");
+		verify(wire.emitter(), org.mockito.Mockito.never()).complete();
+		when(frames.readRawFrom(eq(RUN_ID), org.mockito.ArgumentMatchers.anyLong(), anyInt())).thenReturn(List.of(
+				new FrameStore.RawFrame(1L, "{\"type\":\"delta\",\"seq\":1}"),
+				new FrameStore.RawFrame(2L, "{\"type\":\"delta\",\"seq\":2}"),
+				new FrameStore.RawFrame(3L, new String(winner))));
+
+		out.onWake(RUN_ID, 3L);
+
+		assertThat(seqs(FrameWire.normalize(wire.frames()))).containsExactly(1L, 2L, 3L);
+		assertThat(FrameWire.normalize(wire.frames()).getLast().get("type")).isEqualTo("done");
+		verify(wire.emitter()).complete();
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private SseChatEmitter emitter(RunStore store, FrameStore frames) {

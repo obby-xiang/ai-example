@@ -74,6 +74,11 @@ public interface FrameStore {
 	 */
 	void append(String runId, Map<String, Object> frame);
 
+	/** 带调用方实际持有 epoch 的显式 seq 写口；0 仅表示经快照证明的 lease-less 写入。 */
+	default void append(String runId, Map<String, Object> frame, long expectedEpoch) {
+		appendAndGetSeq(runId, frame, null, expectedEpoch);
+	}
+
 	/**
 	 * 落档一帧并返回<b>实际落档的序号</b>（默认实现 = {@link #append} + 帧体里的 {@code seq}）。
 	 *
@@ -120,6 +125,12 @@ public interface FrameStore {
 		return new AppendResult(archived.seq(), payload);
 	}
 
+	/** 带调用方实际持有 epoch 的显式 seq 写口；生产实现将同一事实传入原子 Lua。 */
+	default AppendResult appendAndGetSeq(String runId, Map<String, Object> frame, PayloadFactory payloadFactory,
+			long expectedEpoch) {
+		return appendAndGetSeq(runId, frame, payloadFactory);
+	}
+
 	/**
 	 * 落档负载工厂：为一帧产出<b>最终负载字节</b>（{@link #appendAndGetSeq(String, Map, PayloadFactory)}
 	 * 的回调，在最终落档号确定之后调用）。
@@ -135,12 +146,26 @@ public interface FrameStore {
 		byte[] payload(Map<String, Object> frame);
 	}
 
+	/** 原子落档结局；冲突与终后拒写不是 Redis 故障，也不是新帧成功。 */
+	enum AppendOutcome {
+		APPENDED,
+		IDEMPOTENT,
+		TERMINAL_IDEMPOTENT,
+		TERMINAL_CONFLICT,
+		TERMINAL_AFTER,
+		SKIPPED
+	}
+
 	/** 一次落档的结果：实际落档号 + 落档的帧体原文（实时投递据此与归档同一份字节）。 */
-	record AppendResult(long seq, byte[] payload) {
+	record AppendResult(long seq, byte[] payload, AppendOutcome outcome) {
+
+		public AppendResult(long seq, byte[] payload) {
+			this(seq, payload, AppendOutcome.APPENDED);
+		}
 
 		/** 未落档（心跳 / 无号 / 写失败）。 */
 		public static AppendResult skipped() {
-			return new AppendResult(0L, null);
+			return new AppendResult(0L, null, AppendOutcome.SKIPPED);
 		}
 	}
 

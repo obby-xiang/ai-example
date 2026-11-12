@@ -1,7 +1,10 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -32,6 +35,18 @@ class RedisFrameStoreSeqRepairTest {
 	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private final AiProperties properties = new AiProperties();
+
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		this.identity.close();
+	}
 
 	/**
 	 * <b>并发修复</b>：{@code ai:seq} 键丢失后<b>多线程同时</b>取号，任何线程都不得拿到
@@ -325,6 +340,7 @@ class RedisFrameStoreSeqRepairTest {
 	}
 
 	private RedisFrameStore store(FakeFrameRedis redis) {
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		return new RedisFrameStore(redis.redis, MAPPER, this.properties, 6000);
 	}
 

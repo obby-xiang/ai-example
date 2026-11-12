@@ -2,7 +2,10 @@ package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.observe.RedisDegradation;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -40,6 +43,18 @@ class RedisFrameStoreTest {
 	private static final ObjectMapper MAPPER = new ObjectMapper();
 
 	private final AiProperties properties = new AiProperties();
+
+	private RequestContextUtils.SafeCloseable identity;
+
+	@BeforeEach
+	void bindIdentity() {
+		this.identity = RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		this.identity.close();
+	}
 
 	// ── M1 取号：单调、不重、并发安全 ────────────────────────────────────────
 
@@ -552,6 +567,7 @@ class RedisFrameStoreTest {
 	}
 
 	private RedisFrameStore store(FakeFrameRedis redis, int window) {
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		return new RedisFrameStore(redis.redis, MAPPER, this.properties, window);
 	}
 

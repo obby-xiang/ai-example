@@ -194,6 +194,7 @@ class SseChatEmitterDeliveryInvariantTest {
 	@Test
 	void reattachDeltaReturnsTheArchivedFramesAboveLastSeqEvenWithSkippedSeqs() throws Exception {
 		FakeFrameRedis redis = new FakeFrameRedis();
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		RedisFrameStore frames = new RedisFrameStore(redis.redis, MAPPER, this.properties, 6000);
 		appendAt(frames, 1L, "第一帧");
 		appendAt(frames, 2L, "第二帧");
@@ -224,6 +225,7 @@ class SseChatEmitterDeliveryInvariantTest {
 	@Test
 	void replayBeforeTheSurvivingWindowReportsTheExplicitTruncationFlag() throws Exception {
 		FakeFrameRedis redis = new FakeFrameRedis();
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		RedisFrameStore frames = new RedisFrameStore(redis.redis, MAPPER, this.properties, 4);
 		for (int i = 1; i <= 8; i++) {
 			appendAt(frames, i, "第" + i + "帧");

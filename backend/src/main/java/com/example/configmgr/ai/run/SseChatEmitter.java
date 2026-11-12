@@ -1254,10 +1254,10 @@ public class SseChatEmitter {
     private void deliverReconciledPage(long from, WakePage page) {
         try {
             synchronized (this.emitLock) {
-                // 读取期间最小游标若已前进，直接投旧页可能把低号排到高号之后；下个对账窗口重读。
                 if (!isAttachKeepaliveNeeded() || minDeliveredSeq() != from) {
                     return;
                 }
+                long terminalSeq = -1L;
                 for (WakeFrame next : page.frames()) {
                     long seq = next.seq();
                     if (seq <= from) {
@@ -1265,6 +1265,7 @@ public class SseChatEmitter {
                     }
                     if ("done".equals(next.type()) || "error".equals(next.type())) {
                         this.terminalFrameSeen.set(true);
+                        terminalSeq = seq;
                     }
                     for (Subscription sub : this.subscribers) {
                         if (sub.closed || sub.terminating) {
@@ -1286,6 +1287,7 @@ public class SseChatEmitter {
                     }
                     this.lastFanoutSeq.accumulateAndGet(seq, Math::max);
                 }
+                completeSubscribersDeliveredThrough(terminalSeq);
             }
         } finally {
             flushWakeSyncIfUnlocked();
@@ -1758,8 +1760,9 @@ public class SseChatEmitter {
      * 下界读不出来（读降级 / 未装配帧存储）记 {@code -1} ⇒ 判据返回 {@code null}（不可知）⇒ 调用方照发，
      * 绝不把"读不到"当成"已收尾"。
      *
-     * <p><b>不是分布式协议</b>：本下界只解决"同一驱动/同一实例的顺序重复"与"多次驱动的跨代次误判"；
-     * 跨实例并发下"终帧恰好一条"仍需要原子终帧位（与 fence 同事务的条件写），本批<b>未做</b>。
+     * <p><b>分工</b>：本下界只是发射前的顺序优化；跨实例唯一性由
+     * {@link RedisFrameStore#appendAndAllocateSeq} 的同一条 Lua 在 fence 校验后原子判定归档末帧，
+     * 同终帧幂等回执、异终帧冲突、终后普通帧拒写；RUNNING/SUSPENDED 或更大 epoch 均不得越过。
      */
     public void beginDrive() {
         // F1：本实例成为这一轮的驱动方 ⇒ 真实心跳由 TurnKeepalive 发；停掉（并禁止再起）本地保活。
@@ -4247,17 +4250,17 @@ public class SseChatEmitter {
     private record ArchiveOutcome(byte[] payloadBytes, long liveSeq, boolean archivedOk,
                                   boolean terminalUnarchived, boolean touchHeartbeatActivity,
                                   boolean touchBusinessActivity,
-                                  long businessActivityStamp) {
+                                  long businessActivityStamp, boolean terminalSettled) {
     }
 
     private ArchiveOutcome archiveHeartbeat(Map<String, Object> frame) {
         frame.put("heartbeatSeq", this.heartbeatSeq.incrementAndGet());
         boolean touch = isHeartbeatActivityDue();
         try {
-            return new ArchiveOutcome(this.objectMapper.writeValueAsBytes(frame), 0L, true, false, touch, false, 0L);
+            return new ArchiveOutcome(this.objectMapper.writeValueAsBytes(frame), 0L, true, false, touch, false, 0L, false);
         } catch (Exception ex) {
             log.error("SSE frame serialization failed runId={} type={}", this.runId, frame.get("type"), ex);
-            return new ArchiveOutcome(null, 0L, false, false, false, false, 0L);
+            return new ArchiveOutcome(null, 0L, false, false, false, false, 0L, false);
         }
     }
 
@@ -4266,6 +4269,16 @@ public class SseChatEmitter {
                 FrameSizeLimiter.apply(f, this.objectMapper, this.maxFrameBytes);
         FrameStore.AppendResult archived = this.frames.appendAndAllocateSeq(this.runId, frame,
                 payloadFactory, this.store.heldRunEpoch(this.runId));
+        if (archived.outcome() == FrameStore.AppendOutcome.TERMINAL_CONFLICT
+                || archived.outcome() == FrameStore.AppendOutcome.TERMINAL_AFTER) {
+            this.terminalFrameSeen.set(true);
+            if (archived.outcome() == FrameStore.AppendOutcome.TERMINAL_CONFLICT) {
+                log.warn("terminal frame conflict, winning terminal preserved runId={} type={} (conflicting frame not archived/delivered)",
+                        this.runId, frameType);
+            }
+            this.lastFanoutSeq.accumulateAndGet(archived.seq(), Math::max);
+            return new ArchiveOutcome(archived.payload(), archived.seq(), false, false, false, false, 0L, true);
+        }
         if (archived.seq() <= 0L || archived.payload() == null) {
             if (this.archiveFailureWarned.compareAndSet(false, true)) {
                 log.warn("event frame not archived, not delivered runId={} type={} "
@@ -4275,7 +4288,7 @@ public class SseChatEmitter {
                     log.debug("event frame not archived, not delivered runId={} type={}", this.runId, frame.get("type"));
             }
             boolean terminal = "done".equals(frameType) || "error".equals(frameType);
-            return new ArchiveOutcome(null, 0L, false, terminal, false, false, 0L);
+            return new ArchiveOutcome(null, 0L, false, terminal, false, false, 0L, false);
         }
         long frameSeq = archived.seq();
         frame.put("seq", frameSeq);
@@ -4286,7 +4299,7 @@ public class SseChatEmitter {
         if ("done".equals(frameType) || "error".equals(frameType)) {
             this.terminalFrameSeen.set(true);
         }
-        return new ArchiveOutcome(archived.payload(), frameSeq, true, false, false, touch, stamp);
+        return new ArchiveOutcome(archived.payload(), frameSeq, true, false, false, touch, stamp, false);
     }
 
     private ArchiveOutcome archiveFrame(Map<String, Object> frame, String frameType) {
@@ -4298,21 +4311,37 @@ public class SseChatEmitter {
 
     private record EmissionOutcome(long wakeSeq, boolean archivedOk, boolean terminalUnarchived,
                                    boolean touchHeartbeatActivity, boolean touchBusinessActivity,
-                                   long businessActivityStamp) {
+                                   long businessActivityStamp, boolean terminalSettled) {
     }
 
     private EmissionOutcome archiveAndFanOut(Map<String, Object> frame, String frameType) {
         ArchiveOutcome archived = archiveFrame(frame, frameType);
         long wakeSeq;
-        if (!archived.archivedOk()) {
+        if (!archived.archivedOk() && !archived.terminalSettled()) {
             wakeSeq = 0L;
         } else if (this.subscribers.isEmpty() || this.terminating.get()) {
             wakeSeq = archived.liveSeq();
         } else {
             wakeSeq = fanOutToSubscribers(archived.payloadBytes(), archived.liveSeq());
         }
+        if (archived.terminalSettled()) {
+            completeSubscribersDeliveredThrough(archived.liveSeq());
+        }
         return new EmissionOutcome(wakeSeq, archived.archivedOk(), archived.terminalUnarchived(),
-                archived.touchHeartbeatActivity(), archived.touchBusinessActivity(), archived.businessActivityStamp());
+                archived.touchHeartbeatActivity(), archived.touchBusinessActivity(), archived.businessActivityStamp(),
+                archived.terminalSettled());
+    }
+
+    private void completeSubscribersDeliveredThrough(long terminalSeq) {
+        if (terminalSeq <= 0L) {
+            return;
+        }
+        for (Subscription sub : this.subscribers) {
+            if (sub.wakeFloor >= terminalSeq) {
+                sub.terminating = true;
+                completeWhenDrained(sub);
+            }
+        }
     }
 
     private boolean isFrameArchivedInternal(Map<String, Object> frame) {
@@ -4342,10 +4371,10 @@ public class SseChatEmitter {
             closeSubscribersAfterUnarchivedTerminal();
         }
         boolean terminal = "done".equals(frameType) || "error".equals(frameType);
-        if (terminal) {
+        if (terminal || outcome.terminalSettled()) {
             stopAttachKeepalive();
         }
-        requestWakePublish(outcome.wakeSeq(), terminal);
+        requestWakePublish(outcome.wakeSeq(), terminal || outcome.terminalSettled());
         return outcome.archivedOk();
     }
 
@@ -4846,30 +4875,25 @@ public class SseChatEmitter {
         List<WakeFrame> frames = page.frames();
         final long readFloor = from;
         long processedUpTo = from;
+        long terminalSeq = -1L;
         for (WakeFrame next : frames) {
             long seq = next.seq();
             if (seq <= from) {
-                // 没有 seq 的老帧只走回放（唤醒是新帧语义）；不大于上界的帧是重复帧，跳过
                 continue;
             }
             if ("done".equals(next.type()) || "error".equals(next.type())) {
-                // F1：终帧经唤醒补到本实例 ⇒ 本地保活此后不得再入队（心跳不许排在终帧之后）。
-                // 非驱动方实例没有 complete() 调用点，终帧只能从这里得知。
                 this.terminalFrameSeen.set(true);
+                terminalSeq = seq;
             }
             for (Subscription sub : this.subscribers) {
                 if (sub.closed || sub.terminating) {
-                    // 已置收尾意图：终帧之后不得再由唤醒补入新帧。
                     continue;
                 }
                 if (sub.replayActive) {
-                    // P1-06：该订阅者由分页回放按归档顺序补齐；这里只保证回放继续推进，
-                    // 不把更大的号插到尚未入队的回放帧之前。
                     kickDrain(sub);
                     continue;
                 }
                 if (seq <= sub.wakeFloor) {
-                    // 该订阅者已经见过这一帧（?lastSeq 重挂的客户端）：补帧不得变成重发。
                     continue;
                 }
                 if (!isEnqueueLive(sub, next.payload())) {
@@ -4883,11 +4907,11 @@ public class SseChatEmitter {
             from = Math.max(from, seq);
             processedUpTo = from;
         }
+        completeSubscribersDeliveredThrough(terminalSeq);
         boolean maybeMore = upperBoundSeq <= 0L
                 ? page.readCount() >= wakeBatchLimit()
                 : upperBoundSeq > processedUpTo;
         if (maybeMore && processedUpTo > readFloor) {
-            // I2：本地续读（不用 PUBLISH 制造 N×B 广播）。游标 = 已处理上界，下一拍从断点继续。
             scheduleWakeContinuation(upperBoundSeq, processedUpTo);
         }
     }
@@ -5707,8 +5731,8 @@ public class SseChatEmitter {
      * 完成后的 write 在真实 {@code SseEmitter} 上还会失败（"已完成的响应"）。新实现把"收尾"
      * 复用到 drain 的队空分支上（与终态回放路径同一口径）：
      * <ol>
-     * <li>置 {@code terminating}：此后 {@link #emit} 不再向订阅者收新帧（帧照旧取号落档，
-     * 重挂回放仍可见），于是"排空"不会被新帧无限推迟；</li>
+     * <li>置 {@code terminating}：此后 {@link #emit} 不再向订阅者收新帧；共享归档末帧已是终帧时，
+     * 后续普通帧也被原子拒写，于是"排空"不会被新帧无限推迟；</li>
      * <li>逐个订阅者 {@link #completeWhenDrained}：有 drain 在跑就交给它（它排空后在队空分支
      * 收尾），没有就跑一个，队列已空则立即收尾；</li>
      * <li><b>不同步等待</b>：生产调用点是轮终态线程的 {@code finally}（{@code AiController} /

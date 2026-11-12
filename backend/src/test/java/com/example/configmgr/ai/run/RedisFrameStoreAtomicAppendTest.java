@@ -654,6 +654,7 @@ class RedisFrameStoreAtomicAppendTest {
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 	private RedisFrameStore store(FakeFrameRedis redis) {
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		return new RedisFrameStore(redis.redis, MAPPER, this.properties, 6000);
 	}
 

@@ -49,6 +49,7 @@ class RunStoreActivityAnchorTest {
 	@BeforeEach
 	void bindIdentity() {
 		this.identity = RequestContextUtils.useContext(1L, 101L);
+		this.fake.seedLeaseLessSnapshot(RUN_ID);
 	}
 
 	@AfterEach
@@ -79,6 +80,7 @@ class RunStoreActivityAnchorTest {
 			.isEqualTo(5_000L);
 
 		String otherRun = "run-anchor-legacy-newer";
+		this.fake.seedLeaseLessSnapshot(otherRun);
 		this.store.touchBusinessActivity(otherRun, 9_000L);
 		appendToStream(otherRun, "delta", 4L, 5_000L);
 

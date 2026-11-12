@@ -81,6 +81,9 @@ final class FakeFrameRedis {
 	/** 键 → 计数器（{@code INCR}/{@code SET}）。 */
 	final Map<String, Long> counters = new ConcurrentHashMap<>();
 
+	/** 键 → 非数值字符串（run 快照 JSON 等）。 */
+	final Map<String, String> rawValues = new ConcurrentHashMap<>();
+
 	/** 键 → Stream 记录（按 ID 升序）。 */
 	final Map<String, List<Entry>> streams = new ConcurrentHashMap<>();
 
@@ -107,7 +110,7 @@ final class FakeFrameRedis {
 	 */
 	volatile int failAppendReplyTimes;
 
-	/** 幂等标记（{@code ai:xack:<token>:<tag>} → seq 文本）：{@code 原子落档脚本} 的幂等面。 */
+	/** 幂等标记（run 幂等键 + token 字段 → seq 文本）：镜像脚本的 {@code HGET/HSET ackKey token}。 */
 	final Map<String, String> acks = new ConcurrentHashMap<>();
 
 	/** 最近一次原子落档脚本收到的 {@code KEYS}（键形 / 同槽断言用）。 */
@@ -191,7 +194,11 @@ final class FakeFrameRedis {
 			return null;
 		}).when(this.values).set(anyString(), anyString(), any(Duration.class));
 		when(this.values.get(anyString())).thenAnswer(invocation -> {
-			Long value = this.counters.get(invocation.getArgument(0));
+			String key = invocation.getArgument(0);
+			if (this.rawValues.containsKey(key)) {
+				return this.rawValues.get(key);
+			}
+			Long value = this.counters.get(key);
 			return value == null ? null : String.valueOf(value);
 		});
 		when(this.listOps.range(anyString(), anyLong(), anyLong()))
@@ -450,6 +457,11 @@ final class FakeFrameRedis {
 		}
 	}
 
+	void seedLeaseLessSnapshot(String runId) {
+		this.rawValues.put(RunStore.runScopedKey(RunStore.RUN_PREFIX, runId),
+				"{\"status\":\"RUNNING\",\"runEpoch\":\"0\"}");
+	}
+
 	/** 模拟键过期/被删（M-1：{@code ai:seq} 消失后取号不许从 1 重来）。 */
 	void dropCounter(String key) {
 		this.counters.remove(key);
@@ -538,7 +550,7 @@ final class FakeFrameRedis {
 		}
 		String seqKey = String.valueOf(keys.get(0));
 		String streamKey = String.valueOf(keys.get(1));
-		String legacyKey = String.valueOf(keys.get(2));
+		String legacyKey = keys.size() > 2 ? String.valueOf(keys.get(2)) : "";
 		long ttlSeconds = Long.parseLong(String.valueOf(args.get(0)));
 		long fallbackLast = Long.parseLong(String.valueOf(args.get(1)));
 		int probe = Integer.parseInt(String.valueOf(args.get(2)));
@@ -603,11 +615,10 @@ final class FakeFrameRedis {
 	}
 
 	/**
-	 * 原子落档脚本（{@code RedisFrameStore} 的 {@code AI_FRAME_APPEND}）：返回 {@code [seq, degraded, idempotent]}。
+	 * 原子落档脚本：返回 {@code [seq, degraded, idempotent, outcome, archivedBody]}。
 	 *
-	 * <p>逐条镜像脚本语义（{@code synchronized} 由 {@link #handleScript} 提供 = Redis 串行执行脚本）：
-	 * 幂等标记（token → seq，按<b>精确 ID</b> 读出并<b>逐字节</b>比对本次帧体）→ {@code INCR} →
-	 * 表尾单调保险 / 计数器重建重锚 → {@code XADD <seq>-0} → 落标记 → 续期。
+	 * <p>镜像调用方 epoch、lease-less 快照、显式 seq 同号幂等/冲突/低号、末帧终局门、
+	 * 分配或显式 XADD、ack、TTL 与裁剪低水位；{@code synchronized} 由 {@link #handleScript} 提供。
 	 *
 	 * <p>关节行：{@code failAppendReplyTimes} = "已写入、回包丢失"（服务端成功、客户端只看到异常）；
 	 * 表尾 ID 的比较按 Redis 语义（显式 ID 必须严格大于表尾）。
@@ -618,11 +629,12 @@ final class FakeFrameRedis {
 		}
 		String seqKey = String.valueOf(keys.get(0));
 		String streamKey = String.valueOf(keys.get(1));
-		String legacyKey = String.valueOf(keys.get(2));
+		String ackKey = String.valueOf(keys.get(3));
+		String trimKey = String.valueOf(keys.get(4));
+		String fenceKey = String.valueOf(keys.get(5));
+		String snapshotKey = String.valueOf(keys.get(6));
 		this.atomicAppendCalls++;
-		String ackKeyFromScript = String.valueOf(keys.get(3));
-		String trimKey = keys.size() > 4 ? String.valueOf(keys.get(4)) : String.valueOf(keys.get(3));
-		this.lastAppendScriptKeys = List.of(seqKey, streamKey, legacyKey, ackKeyFromScript);
+		this.lastAppendScriptKeys = List.of(seqKey, streamKey, String.valueOf(keys.get(2)), ackKey);
 		long ttlSeconds = Long.parseLong(String.valueOf(args.get(0)));
 		long fallbackLast = Long.parseLong(String.valueOf(args.get(1)));
 		int probe = Integer.parseInt(String.valueOf(args.get(2)));
@@ -632,40 +644,111 @@ final class FakeFrameRedis {
 		String token = String.valueOf(args.get(6));
 		String head = String.valueOf(args.get(7));
 		String tail = String.valueOf(args.get(8));
-		// 与生产脚本逐字一致：KEYS[4] 已是完整键（含 token），脚本不再拼一次。
-		String ackKey = ackKeyFromScript;
+		long expectedEpoch = Long.parseLong(String.valueOf(args.get(9)));
+		String incomingTerminal = String.valueOf(args.get(10));
+		long exactSeq = Long.parseLong(String.valueOf(args.get(11)));
+		long fence = this.counters.getOrDefault(fenceKey, 0L);
+		if (exactSeq > 0L) {
+			String snapshotJson = this.rawValues.get(snapshotKey);
+			if (snapshotJson == null) {
+				return scriptResult(0L, 1L, "STATE_UNAVAILABLE", "");
+			}
+			Map<String, Object> snapshot = readJsonObject(snapshotJson);
+			if (snapshot == null || !(snapshot.get("status") instanceof String)
+					|| snapshot.get("runEpoch") == null) {
+				return scriptResult(0L, 1L, "STATE_CORRUPT", "");
+			}
+			long snapshotEpoch;
+			try {
+				snapshotEpoch = Long.parseLong(String.valueOf(snapshot.get("runEpoch")));
+			}
+			catch (NumberFormatException ex) {
+				return scriptResult(0L, 1L, "STATE_CORRUPT", "");
+			}
+			if (expectedEpoch < 0L) {
+				if (snapshotEpoch != 0L || fence != 0L) {
+					return scriptResult(-1L, 0L, "STALE_FENCE", "");
+				}
+				expectedEpoch = 0L;
+			}
+			if (expectedEpoch == 0L && (snapshotEpoch != 0L || fence != 0L)) {
+				return scriptResult(-1L, 0L, "STALE_FENCE", "");
+			}
+			if (expectedEpoch > 0L && (fence > expectedEpoch || snapshotEpoch > expectedEpoch)) {
+				return scriptResult(-1L, 0L, "STALE_FENCE", "");
+			}
+		}
+		if (expectedEpoch > 0L && fence > expectedEpoch) {
+			return scriptResult(-1L, 0L, "STALE_FENCE", "");
+		}
 
-		String prev = this.acks.get(ackKey);
+		String prev = this.acks.get(ackKey + token);
 		if (prev != null) {
 			String expected = head + prev + tail;
 			Entry exact = exactEntry(streamKey, prev + "-0");
 			if (exact != null && expected.equals(str(field(exact, RedisFrameStore.FIELD_FRAME)))) {
-				// 与生产脚本一致：幂等命中也要续 ack/seq/stream 三处 TTL。
-				this.expiries.put(ackKey, Duration.ofSeconds(ackTtl));
-				this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
-				this.expiries.put(streamKey, Duration.ofSeconds(ttlSeconds));
-				return List.of(Long.parseLong(prev), 0L, 1L);
+				renewTtls(seqKey, streamKey, ackKey, trimKey, ttlSeconds, ackTtl);
+				return scriptResult(Long.parseLong(prev), 0L, "IDEMPOTENT", expected);
 			}
 		}
 
-		// 真实裁剪检测（与生产脚本逐字一致）：XADD 前后各看一次幸存首条。
 		List<Entry> entries = entries(streamKey);
 		long headBefore = entries.isEmpty() ? -1L : seqFieldOfEntry(entries.get(0));
-		long cur = this.counters.merge(seqKey, 1L, Long::sum);
-		long degraded = 0L;
 		long tailMs = 0L;
+		String tailBody = "";
+		String tailTerminal = "";
 		if (this.failTailRead || this.failTailReadTimes > 0) {
 			if (this.failTailReadTimes > 0) {
 				this.failTailReadTimes--;
 			}
-			degraded = 1L;
+			return scriptResult(0L, 1L, "ARCHIVE_UNAVAILABLE", "");
 		}
-		else if (!entries.isEmpty()) {
-			tailMs = parseId(entries.get(entries.size() - 1).id())[0];
+		if (!entries.isEmpty()) {
+			Entry last = entries.get(entries.size() - 1);
+			tailMs = parseId(last.id())[0];
+			byte[] tailBytes = field(last, RedisFrameStore.FIELD_FRAME);
+			tailBody = tailBytes == null ? "" : str(tailBytes);
+			if (tailMs <= 0L || tailBody.isEmpty()) {
+				return scriptResult(0L, 1L, "ARCHIVE_CORRUPT", "");
+			}
+			tailTerminal = terminalIdentity(tailBody);
+			if (tailTerminal == null) {
+				return scriptResult(0L, 1L, "ARCHIVE_CORRUPT", "");
+			}
 		}
-		if (cur == 1L || forceRepair) {
-			long anchor = Math.max(fallbackLast, tailMs);
-			if (degraded == 0L) {
+		if (exactSeq > 0L) {
+			Entry exact = exactEntry(streamKey, exactSeq + "-0");
+			if (exact != null) {
+				String candidate = head + exactSeq + tail;
+				if (candidate.equals(str(field(exact, RedisFrameStore.FIELD_FRAME)))) {
+					this.acks.put(ackKey + token, String.valueOf(exactSeq));
+					renewTtls(seqKey, streamKey, ackKey, trimKey, ttlSeconds, ackTtl);
+					return scriptResult(exactSeq, 0L, "IDEMPOTENT", candidate);
+				}
+				return scriptResult(0L, 0L, "EXPLICIT_SEQ_TAKEN", "");
+			}
+			if (exactSeq <= tailMs) {
+				return scriptResult(0L, 0L, "EXPLICIT_SEQ_BEHIND", "");
+			}
+		}
+		if (!tailTerminal.isEmpty()) {
+			if (incomingTerminal.equals(tailTerminal)) {
+				this.acks.put(ackKey + token, String.valueOf(tailMs));
+				renewTtls(seqKey, streamKey, ackKey, trimKey, ttlSeconds, ackTtl);
+				return scriptResult(tailMs, 0L, "TERMINAL_IDEMPOTENT", tailBody);
+			}
+			if (!incomingTerminal.isEmpty()) {
+				return scriptResult(tailMs, 0L, "TERMINAL_CONFLICT", tailBody);
+			}
+			return scriptResult(tailMs, 0L, "TERMINAL_AFTER", tailBody);
+		}
+
+		long cur = exactSeq;
+		long degraded = 0L;
+		if (exactSeq == 0L) {
+			cur = this.counters.merge(seqKey, 1L, Long::sum);
+			if (cur == 1L || forceRepair) {
+				long anchor = Math.max(fallbackLast, tailMs);
 				synchronized (entries) {
 					for (int i = entries.size() - 1; i >= 0 && i >= entries.size() - probe; i--) {
 						for (Map.Entry<byte[], byte[]> field : entries.get(i).fields.entrySet()) {
@@ -675,32 +758,19 @@ final class FakeFrameRedis {
 						}
 					}
 				}
-				if (this.failListTailProbe) {
-					degraded = 1L;
-				}
-				else {
-					List<String> legacy = this.lists.getOrDefault(legacyKey, List.of());
-					if (!legacy.isEmpty()) {
-						java.util.regex.Matcher matcher = SEQ_FIELD.matcher(legacy.get(legacy.size() - 1));
-						if (matcher.find()) {
-							anchor = Math.max(anchor, Long.parseLong(matcher.group(1)));
-						}
-					}
+				if (anchor >= cur) {
+					cur = anchor + 1L;
+					this.counters.put(seqKey, cur);
 				}
 			}
-			if (anchor >= cur) {
-				cur = anchor + 1L;
+			else if (tailMs >= cur) {
+				cur = tailMs + 1L;
 				this.counters.put(seqKey, cur);
 			}
-		}
-		else if (tailMs >= cur) {
-			cur = tailMs + 1L;
-			this.counters.put(seqKey, cur);
-		}
-		this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
-		if (degraded != 0L && cur == 1L) {
-			// 与生产脚本一致：拒绝返回前已经给刚 INCR 出来的键补了 TTL（见上面的 put）。
-			return List.of(0L, 1L, 0L);
+			this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
+			if (degraded != 0L && cur == 1L) {
+				return scriptResult(0L, 1L, "SEQUENCE_UNCONFIRMED", "");
+			}
 		}
 		if (this.failXadd) {
 			throw new IllegalStateException("XADD 失败（模拟 Redis 抖动）");
@@ -710,8 +780,7 @@ final class FakeFrameRedis {
 		Map<byte[], byte[]> fields = new LinkedHashMap<>();
 		fields.put(RedisFrameStore.FIELD_SEQ.getBytes(StandardCharsets.UTF_8),
 				String.valueOf(cur).getBytes(StandardCharsets.UTF_8));
-		fields.put(RedisFrameStore.FIELD_FRAME.getBytes(StandardCharsets.UTF_8),
-				body.getBytes(StandardCharsets.UTF_8));
+		fields.put(RedisFrameStore.FIELD_FRAME.getBytes(StandardCharsets.UTF_8), body.getBytes(StandardCharsets.UTF_8));
 		synchronized (entries) {
 			if (!entries.isEmpty() && compareIds(idToken, entries.get(entries.size() - 1).id()) <= 0) {
 				throw new IllegalStateException(
@@ -733,7 +802,7 @@ final class FakeFrameRedis {
 			}
 			this.expiries.put(trimKey, Duration.ofSeconds(ttlSeconds));
 		}
-		this.acks.put(ackKey, String.valueOf(cur));
+		this.acks.put(ackKey + token, String.valueOf(cur));
 		this.expiries.put(ackKey, Duration.ofSeconds(ackTtl));
 		this.expiries.put(streamKey, Duration.ofSeconds(ttlSeconds));
 		if (this.failAppendReplyTimes > 0) {
@@ -743,7 +812,44 @@ final class FakeFrameRedis {
 			}
 			throw new IllegalStateException("原子落档回包丢失（模拟连接在回包前断开，XADD 已生效）");
 		}
-		return List.of(cur, degraded, 0L);
+		return scriptResult(cur, degraded, "APPENDED", body);
+	}
+
+	private void renewTtls(String seqKey, String streamKey, String ackKey, String trimKey, long ttlSeconds,
+			long ackTtl) {
+		this.expiries.put(seqKey, Duration.ofSeconds(ttlSeconds));
+		this.expiries.put(streamKey, Duration.ofSeconds(ttlSeconds));
+		this.expiries.put(trimKey, Duration.ofSeconds(ttlSeconds));
+		this.expiries.put(ackKey, Duration.ofSeconds(ackTtl));
+	}
+
+	private static List<Object> scriptResult(long seq, long degraded, String outcome, String body) {
+		return List.of(seq, degraded, "IDEMPOTENT".equals(outcome) || "TERMINAL_IDEMPOTENT".equals(outcome) ? 1L : 0L,
+				outcome, body);
+	}
+
+	private static String terminalIdentity(String body) {
+		Map<String, Object> frame = readJsonObject(body);
+		if (frame == null || !(frame.get("type") instanceof String)) {
+			return null;
+		}
+		if ("done".equals(frame.get("type"))) {
+			return Boolean.TRUE.equals(frame.get("cancelled")) ? "done:1" : "done:0";
+		}
+		if ("error".equals(frame.get("type"))) {
+			return "error:" + String.valueOf(frame.getOrDefault("code", ""))
+					+ (Boolean.TRUE.equals(frame.get("unconfirmed")) ? ":u1" : ":u0");
+		}
+		return "";
+	}
+
+	private static Map<String, Object> readJsonObject(String json) {
+		try {
+			return new ObjectMapper().readValue(json, Map.class);
+		}
+		catch (Exception ex) {
+			return null;
+		}
 	}
 
 	/** 一条记录的业务 {@code seq} 字段（缺失/坏值回落 ID 毫秒段）。 */

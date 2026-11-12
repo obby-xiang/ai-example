@@ -6551,6 +6551,46 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1258最终APPROVED；施工报告资源锁、SessionGate、首轮/L2、确认请求/派发、取消、扫描、空lease全路径及legacy对照独立RED→GREEN，生产clean compile 361源BUILD SUCCESS；主控未重跑测试，真实Cluster、多实例随机路由、kill/failover、真实模型和浏览器NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c5da1597a6da3d1feeb862c2932bf08a1aadd32151ea48386c914097748e65f5",
+      "status": "reviewed",
+      "reason": "逐hunk复核APPEND_BODY原子终局门、全部显式写口的调用方fence、winner归档回包与连续交付收尾；独立审查仅余测试身份顺序问题，修正后两类独立测试通过。",
+      "reviewedAt": "2026-11-12T19:56:29+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1256、施工agent-1253",
+      "specChanges": [
+        {
+          "change": "done/error终局判定与序号分配/显式序号归档统一在RedisFrameStore.APPEND_BODY同一Lua原子段完成，同一run只允许一个逻辑终帧且终后普通帧拒写。",
+          "reason": "跨实例先查后写、RUNNING或更大epoch例外及显式seq旁路都可能产生双终帧和终后帧。",
+          "impact": "同逻辑终帧返回winner序号与原文，不新增归档；异终帧冲突/终后拒写可观测，普通帧序号、TTL和token幂等保持，生产XADD只剩该脚本一处。"
+        },
+        {
+          "change": "显式seq写口新增expectedEpoch overload，旧API仅接受有效runEpoch=0且fence=0的lease-less快照；无有效run快照不得建流。",
+          "reason": "当前快照runEpoch属于最近写方，不能证明本次调用方仍持有写权限，匿名/错身份建流也必须禁止。",
+          "impact": "调用方heldRunEpoch原样进入Lua，快照或fence高于调用方epoch均拒绝；无快照/坏快照/缺字段失败关闭且WARN可观测，合法lease-less和显式epoch保留。"
+        },
+        {
+          "change": "冲突和终后回包携带winner归档原文，初次fanout、wake续读和对账仅在订阅者按序入队到winner后进入terminating/drain。",
+          "reason": "简单丢弃冲突帧会让本地订阅者缺终帧；低号未补齐就收尾又会缺中间帧，补齐后不收尾则连接悬挂。",
+          "impact": "初次不足/读取失败保留winner上界续读，连续补齐后winner只投一次并complete一次，不投冲突帧、不合成AI_REDIS_UNAVAILABLE。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/FrameStore.java", "status": "checked", "reason": "AppendOutcome表达追加/幂等/终帧幂等/冲突/终后，新增expectedEpoch overload且默认委托保持非Redis实现兼容；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RedisFrameStore.java", "status": "checked", "reason": "APPEND_BODY统一fence、token/exact幂等、末帧终局、分配/显式seq和winner回包，损坏末帧失败关闭，七键同槽；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "仅同步终帧原子性注释，无create correction或业务控制流变化；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "仅更新恢复侧终帧原子保证注释，未新增锁或第二套终态；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "heldRunEpoch进入原子写，初次/续读/对账共用winner连续交付收尾，补齐失败保留唤醒且不提前complete；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Redis Stream、RunStore fence/runstate/run、SseChatEmitter wakeFloor和既有drain，无新增锁、终态键或依赖。"},
+        "java-api-style": {"status": "checked", "reason": "五个生产Java均经IDEA Reformat；AppendResult/overload、Lua回包和订阅收尾逐hunk复核。"},
+        "logging-exception-safety": {"status": "checked", "reason": "末帧损坏、快照缺失、过期fence、冲突和归档失败均失败关闭并记录，不伪装新帧成功或AI_REDIS_UNAVAILABLE。"},
+        "toc-interaction": {"status": "not-affected", "reason": "未修改用户界面、提示、卡片或操作，只保证帧和订阅收尾正确。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "同一原子脚本串行化竞争写，调用方epoch、七键同槽、winner幂等和低号连续交付形成完整闭环。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "winner返回归档原文而非重新序列化，实时与归档字节一致，末帧JSON type严格校验。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1256确认生产问题闭合；施工报告双终帧/显式seq旁路/winner丢失等有效RED→GREEN，standalone Memurai真实Lua、七键同槽、初次不足后续wake补齐、读取失败、坏快照/末帧及旧exact兼容单点通过，生产编译BUILD SUCCESS；两个测试身份夹具修正后FrameCompatReadTest 6/6、RunStoreActivityAnchorTest 7/7独立通过。真实Cluster、多实例随机路由、kill/failover、Redis5及全量普通测试NOT_RUN。"}
+      }
     }
   ]
 }

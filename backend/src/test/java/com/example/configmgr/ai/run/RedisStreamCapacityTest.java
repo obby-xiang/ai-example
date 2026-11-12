@@ -182,6 +182,7 @@ class RedisStreamCapacityTest {
 		String text = "w".repeat(400);
 		long payload = payloadBytes(1500L, text);
 		this.properties.getStream().setByteBudget(1000L * (payload + OVERHEAD));
+		redis.seedLeaseLessSnapshot(RUN_ID);
 		RedisFrameStore store = new RedisFrameStore(redis.redis, MAPPER, this.properties, 2000);
 		int window = store.windowForPayload(payload);
 		for (int i = 1; i <= 1500; i++) {
@@ -201,6 +202,7 @@ class RedisStreamCapacityTest {
 
 	private RedisFrameStore store(int countWindow) {
 		this.fake = new FakeFrameRedis();
+		this.fake.seedLeaseLessSnapshot(RUN_ID);
 		return new RedisFrameStore(this.fake.redis, MAPPER, this.properties, countWindow);
 	}
 

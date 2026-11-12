@@ -51,11 +51,14 @@ class FrameCompatReadTest {
 	@BeforeEach
 	void openIdentity() {
 		this.identity = RequestContextUtils.useContext(1L, 101L);
+		this.redis.seedLeaseLessSnapshot(RUN_ID);
 	}
 
 	@AfterEach
 	void closeIdentity() {
-		this.identity.close();
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	/** 仅实现 readFrom/lastSeq 的兼容替身：原文读口默认不可用，调用方必须能回落。 */
