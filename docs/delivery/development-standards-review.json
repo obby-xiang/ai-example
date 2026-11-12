@@ -5989,6 +5989,32 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "登记字素簇和非法SSE问题，明确不得静默丢弃或伪造完整，本批未修改文本流。"},
         "verification-review": {"status": "checked", "reason": "静态审查与动态验证边界分开，Checkstyle/PMD、真实Cluster、多实例和真实模型均NOT_RUN；未跑产品测试，未修改生产。"}
       }
+    },
+    {
+      "fingerprint": "sha256:53203ceaaf211c04c485f580dff57069575e37738a619ad48fdccd3f51a15430",
+      "status": "reviewed",
+      "reason": "复核用户反馈功能排除口径，仅将AiFeedback从数据库发号待评范围移除，其余配置实体继续保留待指令分析。",
+      "reviewedAt": "2026-11-12T08:50:30+08:00",
+      "reviewer": "K3.1 Pro主会话",
+      "specChanges": [
+        {
+          "change": "用户反馈功能及其AiFeedback问题不再纳入规范分析和整改范围。",
+          "reason": "用户明确该功能问题不管，避免无关分析和施工扩散。",
+          "impact": "仅文档排除，AiConfigAudit/AiProvider/AiProviderModel仍按原边界评估，生产行为不变。"
+        }
+      ],
+      "files": [
+        {"path": "docs/research/盘点-近期遗漏与暂缓事项-2026-11-11.md", "status": "checked", "reason": "数据库IDENTITY登记仅保留三个配置实体，并明确AiFeedback按用户指令排除。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "仅Markdown范围说明，无依赖变化。"},
+        "java-api-style": {"status": "not-affected", "reason": "未修改任何生产源码。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "未修改日志、异常或对外错误处理。"},
+        "toc-interaction": {"status": "checked", "reason": "按用户明确范围排除反馈功能，不增加新提示或交互。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "未修改数据库、Redis、API或并发行为。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "仅文档范围复核，未运行测试或施工，AiConfigAudit等三项仍保留真实待分析状态。"}
+      }
     }
   ]
 }
