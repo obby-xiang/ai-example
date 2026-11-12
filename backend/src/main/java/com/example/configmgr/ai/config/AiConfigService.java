@@ -76,11 +76,6 @@ public class AiConfigService {
     public static final String ENV_PROVIDER_DISPLAY_NAME = "DeepSeek";
 
     /**
-     * 种子行的上下文窗口占位值（UI 可改；上下文统计专项的分母初值）。
-     */
-    public static final int ENV_SEED_MAX_CONTEXT = 128000;
-
-    /**
      * 无 provider 时的 503 码。
      */
     public static final String CODE_UNAVAILABLE = ErrorCodes.AI_UNAVAILABLE;
@@ -120,8 +115,6 @@ public class AiConfigService {
      */
     public static final String BOUND_PROVIDER_MISSING_REASON =
             "AI 默认供应商不存在：请在「设置 → AI」重新选择默认模型";
-
-    private static final String DEFAULT_MODEL_FALLBACK = "deepseek-flash";
 
     private static final ObjectMapper REQUEST_EXTRA_BODY_MAPPER = new ObjectMapper()
             .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -541,19 +534,14 @@ public class AiConfigService {
     }
 
     /**
-     * 种子模型（与合成行配套；{@code is_default=true}、{@code max_context} 取占位值）。
+     * 种子模型（与合成行配套；能力缺省关闭，上下文窗口未知时不写占位值）。
      */
     public AiProviderModel envSeedModel() {
         AiProviderModel model = new AiProviderModel();
         model.setModelId(resolveEnvModelId());
         model.setDisplayName(resolveEnvModelId());
-        model.setMaxContext(ENV_SEED_MAX_CONTEXT);
-        model.setSupportsToolCalling(true);
-        // L-91：env 种子模型按"思考模型"登记 —— 该列此前没人写（DB 缺省 FALSE），
-        // 于是设置页/模型选择器恒显示"不支持推理"，与本机实跑事实相反（deepseek-flash
-        // 直打 /chat/completions 确实返回 reasoning_content）。它是能力描述位，不参与运行闸门：
-        // 后端是否发思考帧只看上游本片有没有 reasoning_content（有则发，无则不发明）。
-        model.setSupportsReasoning(true);
+        model.setSupportsToolCalling(false);
+        model.setSupportsReasoning(false);
         model.setRequestExtraBody(this.properties.getConfig().getSeedRequestExtraBody());
         model.setEnabled(true);
         model.setDefault(true);
@@ -832,8 +820,7 @@ public class AiConfigService {
      * 模型的能力位（{@code supports_tool_calling}）。
      *
      * <p>
-     * 找不到模型行（{@code ai_setting} / env 回落的模型名，库里没登记）时判 <b>true</b>：批③ 之前
-     * 的行为就是"所有模型都下发工具"，无行可查时保持等价；只有显式登记为 {@code false} 的行才降级。
+     * 未显式声明能力的模型一律不下发 tools；找不到模型行或模型名时按普通文本处理。
      */
     public boolean supportsToolCalling(Long providerId, String modelId) {
         return isToolCallingSupported(providerId, modelId);
@@ -844,20 +831,31 @@ public class AiConfigService {
     }
 
     public boolean isToolCallingSupported(Long providerId, String modelId) {
-        if (modelId == null) {
-            return true;
+        if (modelId == null || providerId == null) {
+            return false;
         }
         ConfigSnapshot snap = current();
-        if (providerId == null) {
-            return true;
-        }
         return snap.models()
                 .stream()
                 .filter(model -> providerId.equals(model.getProviderId()))
                 .filter(model -> modelId.equals(model.getModelId()))
                 .map(AiProviderModel::isSupportsToolCalling)
                 .findFirst()
-                .orElse(true);
+                .orElse(false);
+    }
+
+    /** reasoning_content 回放能力：只有当前 provider + model 显式声明时才为 true。 */
+    public boolean supportsReasoning(Long providerId, String modelId) {
+        if (!StringUtils.hasText(modelId)) {
+            return false;
+        }
+        if (providerId == null) {
+            AiProviderModel seed = envSeedModel();
+            return modelId.equals(seed.getModelId()) && Boolean.TRUE.equals(seed.getSupportsReasoning());
+        }
+        return model(providerId, modelId)
+                .map(model -> Boolean.TRUE.equals(model.getSupportsReasoning()))
+                .orElse(false);
     }
 
     /**
@@ -1165,9 +1163,9 @@ public class AiConfigService {
     public String resolveEnvModelId() {
         if (this.chatProperties.getOptions() != null
                 && StringUtils.hasText(this.chatProperties.getOptions().getModel())) {
-            return this.chatProperties.getOptions().getModel();
+            return this.chatProperties.getOptions().getModel().trim();
         }
-        return DEFAULT_MODEL_FALLBACK;
+        return null;
     }
 
     /**

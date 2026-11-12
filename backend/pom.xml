@@ -196,7 +196,7 @@
     <build>
         <finalName>config-mgr</finalName>
         <plugins>
-            <!-- 补丁类 ReasoningAwareOpenAiChatModel 冻结了 spring-ai 1.1.7 的 createRequest 语义；
+            <!-- ReasoningAwareOpenAiChatModel 依赖 spring-ai 1.1.7 的 createRequest 组装与 record merge 契约；
                  ResponseBoundOpenAiApi 同时冻结 OpenAiApi 的 WebClient 构造/default headers、
                  additional headers 后的 Bearer 认证、[DONE] takeUntil/filter、ChatCompletionChunk
                  原始 JSON 解析，以及 OpenAiStreamFunctionCallingHelper 的单 choice 参数合并边界。

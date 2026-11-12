@@ -121,8 +121,9 @@ class AiConfigSeederTest {
 		assertThat(model.getModelId()).isEqualTo("seed-model");
 		assertThat(model.isDefault()).isTrue();
 		assertThat(model.isEnabled()).isTrue();
-		assertThat(model.isSupportsToolCalling()).isTrue();
-		assertThat(model.getMaxContext()).isEqualTo(AiConfigService.ENV_SEED_MAX_CONTEXT);
+		assertThat(model.isSupportsToolCalling()).isFalse();
+		assertThat(model.getSupportsReasoning()).isFalse();
+		assertThat(model.getMaxContext()).isNull();
 
 		// 种子写路径必须发布版本（run 40182796512 的根因 A）：迁移常量是 1，种完必须是 2。
 		// 停在 1 ⇒ 别的实例的版本比对永远相等 ⇒ 它们的 provider 快照永久为空（env 合成行）。

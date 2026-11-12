@@ -460,7 +460,7 @@ public class AiConfigWriter {
             model.setDisplayName(StringUtils.isNotBlank(command.displayName()) ? command.displayName().trim() : modelId);
             model.setMaxContext(command.maxContext() == null ? null : maxContext);
             model.setMaxOutput(command.maxOutput() == null ? null : maxOutput);
-            model.setSupportsToolCalling(BooleanUtils.isNotFalse(command.supportsToolCalling()));
+            model.setSupportsToolCalling(Boolean.TRUE.equals(command.supportsToolCalling()));
             model.setSupportsVision(Boolean.TRUE.equals(command.supportsVision()));
             model.setSupportsReasoning(Boolean.TRUE.equals(command.supportsReasoning()));
             model.setRequestExtraBody(requestExtraBodyJson(command.requestExtraBody()));

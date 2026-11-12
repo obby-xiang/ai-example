@@ -192,6 +192,28 @@ class AiProviderRegistryParamsTest {
 			.as("续跑派生实例同样带供应方身份（否则续跑轮的隔离失效）").isEqualTo(provider.getId());
 	}
 
+	@Test
+	void cachedRequestAndFrozenRuntimesCarryDeclaredReasoningCapability() {
+		AiProvider provider = this.fixture.addEnvProvider("deepseek", "http://placeholder");
+		this.fixture.addModel(provider.getId(), "deepseek-flash", true)
+			.setSupportsReasoning(true);
+		this.fixture.addModel(provider.getId(), "deepseek-pro", false);
+		AiConfigService service = this.fixture.service();
+		AiProviderRegistry registry = this.fixture.registry(service);
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "deepseek-flash")
+			.orElseThrow()
+			.provider();
+
+		ProviderRuntime cached = registry.current();
+		ProviderRuntime requested = registry.forRequest(resolved, "deepseek-pro", AiProviderRegistry.Overrides.NONE);
+		ProviderRuntime frozen = registry.forFrozenRequest(resolved, "deepseek-flash",
+				AiProviderRegistry.Overrides.NONE);
+
+		assertThat(((ReasoningAwareOpenAiChatModel) cached.chatModel()).isReasoningReplayEnabled()).isTrue();
+		assertThat(((ReasoningAwareOpenAiChatModel) requested.chatModel()).isReasoningReplayEnabled()).isFalse();
+		assertThat(((ReasoningAwareOpenAiChatModel) frozen.chatModel()).isReasoningReplayEnabled()).isTrue();
+	}
+
 	/** 冻结派生是<b>一次性</b>运行态：不写缓存、不污染默认路径的模型名。 */
 	@Test
 	void frozenRequestDoesNotPolluteTheCachedRuntime() {

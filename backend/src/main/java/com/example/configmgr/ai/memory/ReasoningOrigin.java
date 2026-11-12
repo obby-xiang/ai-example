@@ -23,20 +23,18 @@ import java.util.Map;
  * <li><b>只标不洗</b>：来源以两个 additive、无密钥的 metadata 键随消息走
  * （{@value #KEY_PROVIDER_ID} / {@value #KEY_MODEL_ID}）。<b>存储历史一个字都不删</b> ——
  * 隔离只发生在请求构造层（{@code ReasoningAwareOpenAiChatModel#createRequest}）；</li>
- * <li><b>供应方级判定</b>：只比 {@code providerId}（DB 供应方主键；env 合成行为 {@code null}）。
- * {@code modelId} 只作取证，不参与判定 —— 协议层回放的只是<b>纯文本</b> reasoningContent
- * （不是加密/签名字段，那些从不进请求体），它是供应方的约定而非某个模型的密钥；
- * 把 model 纳入判定会把"同供应方换模型"的历史误判成跨供应方，反而触发上游 400；</li>
+ * <li><b>供应方与模型双重判定</b>：同时比较 {@code providerId} 与 {@code modelId}。
+ * 同一 provider 切换 model 也属于不同来源，不把旧模型的 reasoningContent 回放到新模型；</li>
  * <li><b>不假装知道来源</b>：没有标记的消息就是"未知" —— {@link #replayAllowed} 对未知来源
  * <b>不回放</b>（fail-closed），并且 {@link #stamp} 在身份未知时<b>不写任何键</b>；</li>
  * <li><b>只加不改</b>：已有来源的消息不会被后来者覆盖（provenance 是事实，不是当前值）。</li>
  * </ul>
  *
- * <p><b>范围</b>：本类不判断 {@code supportsReasoning} 之类的展示开关 —— 那是界面能力位，
- * 不是"这段元数据由谁产出"的事实，用它做隔离会在未知供应商上静默失效。
+ * <p><b>范围</b>：本类只判断消息来源；请求层还必须独立确认当前 provider + model 显式声明
+ * {@code supportsReasoning=true}，两个条件缺一不可。
  *
  * @param providerId 产出该消息的供应方主键（{@code null} = env 合成行，部署内唯一）
- * @param modelId 产出该消息的模型名（取证用；同供应方换模型仍回放）
+ * @param modelId 产出该消息的模型名（回放时必须与当前生效模型一致）
  */
 public record ReasoningOrigin(
         @JsonProperty("providerId") @JsonFormat(shape = JsonFormat.Shape.STRING) Long providerId,
@@ -45,32 +43,24 @@ public record ReasoningOrigin(
     /** metadata 键：产出该消息的供应方主键（中性、无密钥）。 */
     public static final String KEY_PROVIDER_ID = "aiOriginProviderId";
 
-    /** metadata 键：产出该消息的模型名（取证用，不参与回放判定）。 */
+    /** metadata 键：产出该消息的模型名；回放时必须与当前生效模型一致。 */
     public static final String KEY_MODEL_ID = "aiOriginModelId";
 
     /**
-     * 请求层判定：该 assistant 消息的推理元数据能否回放到<b>当前</b>供应方的请求里。
+     * 请求层判定：该 assistant 消息的推理元数据能否回放到当前 provider + model 的请求里。
+     * 来源任一字段缺失、provider 不同或 model 不同都失败关闭。
      *
-     * <h2>判定规则</h2>
-     * <ol>
-     * <li><b>无来源标记</b> ⇒ <b>不回放</b>（fail-closed）：来源未知时无法判定"是否跨供应方"，
-     * 不把可能属于别家的推理元数据发出去；</li>
-     * <li>有标记 ⇒ {@code Objects.equals(当前供应方, origin.providerId)}：
-     * 两侧都是 {@code null}（env 合成行 ↔ env 合成行，部署内唯一）算同源；
-     * 一侧 {@code null}（env ↔ DB 供应方）或两侧不等 ⇒ <b>不回放</b>。
-     * <b>当前供应方未知</b>（未接线的装配/单测）落在这一支 ⇒ 对"有标记"的消息<b>不回放</b>
-     * （fail-closed：不知道现在是谁，就不要把别人的推理发出去）。</li>
-     * </ol>
-     *
-     * @param metadata        assistant 消息的 metadata（可 null）
+     * @param metadata assistant 消息的 metadata（可 null）
      * @param currentProviderId 当前目标的供应方主键（null = 未知/未接线）
+     * @param currentModelId 当前请求的生效模型名（null = 未接线）
      */
-    public static boolean replayAllowed(Map<String, Object> metadata, Long currentProviderId) {
+    public static boolean replayAllowed(Map<String, Object> metadata, Long currentProviderId, String currentModelId) {
         ReasoningOrigin origin = fromMetadata(metadata);
-        if (origin == null) {
+        if (origin == null || currentModelId == null) {
             return false;
         }
-        return java.util.Objects.equals(currentProviderId, origin.providerId());
+        return java.util.Objects.equals(currentProviderId, origin.providerId())
+                && currentModelId.equals(origin.modelId());
     }
 
     /** 从 metadata 读来源；两个键都不存在 = 来源未知（返回 {@code null}，调用方不得回放）。 */

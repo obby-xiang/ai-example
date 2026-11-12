@@ -451,8 +451,8 @@ public class AiProviderRegistry {
     /**
      * 模型实例的唯一构造点。
      *
-     * <p>{@code providerId} 传给补丁模型，用于<b>跨供应方推理元数据隔离</b>（请求层只回放与当前
-     * 供应方同源的 {@code reasoningContent}）；它不是密钥、也不进请求体。
+     * <p>{@code providerId} 与当前生效模型的显式能力共同约束 reasoningContent 回放；
+     * provider/model 身份不是密钥，也不进请求体。
      */
     private ChatModel newModel(OpenAiApi api, OpenAiChatOptions options, Long providerId) {
         return new ReasoningAwareOpenAiChatModel(api, options, this.toolCallingManager,
@@ -461,7 +461,7 @@ public class AiProviderRegistry {
                 // 这里的回落只为"非 Spring 装配/单测"与 bean 缺失两种场景兜底）
                 this.retryTemplate.getIfAvailable(AiRetryDefaults::retryTemplate),
                 this.observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP),
-                providerId);
+                providerId, this.configService.supportsReasoning(providerId, options.getModel()));
     }
 
 

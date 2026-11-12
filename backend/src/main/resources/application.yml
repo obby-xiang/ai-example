@@ -117,7 +117,7 @@ spring:
         # 必须覆盖默认的 /v1/chat/completions，否则请求 404。
         completions-path: /chat/completions
         options:
-          model: ${AI_MODEL:deepseek-flash}
+          model: ${AI_MODEL:}
           temperature: 0.2
           max-tokens: 4096
           # 让流式最后一块回传 token 用量（done 终帧 usage 的来源；换 provider 也不许丢）

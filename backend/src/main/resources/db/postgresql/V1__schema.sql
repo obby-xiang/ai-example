@@ -218,7 +218,7 @@ CREATE TABLE ai_model (
     display_name          VARCHAR(128),
     max_context           INT,
     max_output            INT,
-    supports_tool_calling BOOLEAN      NOT NULL DEFAULT TRUE,
+    supports_tool_calling BOOLEAN      NOT NULL DEFAULT FALSE,
     supports_vision       BOOLEAN      DEFAULT FALSE,
     supports_reasoning    BOOLEAN      DEFAULT FALSE,
     enabled               BOOLEAN      NOT NULL DEFAULT TRUE,

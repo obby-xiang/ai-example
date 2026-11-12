@@ -72,7 +72,7 @@ final class AiModelCatalogScenario implements ProductionScenario {
 
             if (support.faultEnabled("set")) {
                 support.stage(dataset, "model_catalog_write_failure_keeps_old_cache", () -> {
-                    List<String> old = catalog.peekCache(providerId).orElseThrow();
+                    List<String> old = cachedModels(support, key);
                     support.faults.failNext("set", key);
                     AiModelCatalog.CatalogResult refreshed;
                     try {
@@ -84,7 +84,7 @@ final class AiModelCatalogScenario implements ProductionScenario {
                     support.require(dataset, "refresh_result_survives_cache_write_failure", refreshed.ok() && !refreshed.cached(),
                             "upstream result is returned even when Redis SET fails");
                     support.require(dataset, "old_cache_retained_after_write_failure",
-                            catalog.peekCache(providerId).orElseThrow().equals(old),
+                            cachedModels(support, key).equals(old),
                             "failed refresh does not erase the previous cached model list");
                 });
             }
@@ -117,7 +117,7 @@ final class AiModelCatalogScenario implements ProductionScenario {
                 support.aiProperties.getConfig().setModelsCacheTtl(Duration.ofMillis(40));
                 fetch(catalog, providerId, true, fetches);
                 sleep(90L);
-                support.require(dataset, "ttl_expired", catalog.peekCache(providerId).isEmpty(),
+                support.require(dataset, "ttl_expired", support.redis.opsForValue().get(key) == null,
                         "expired model cache is not served as fresh");
                 AiModelCatalog.CatalogResult refreshed = fetch(catalog, providerId, false, fetches);
                 support.require(dataset, "expired_cache_refreshed", refreshed.ok() && !refreshed.cached(),
@@ -156,6 +156,18 @@ final class AiModelCatalogScenario implements ProductionScenario {
         catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted during model cache TTL check", ex);
+        }
+    }
+
+    private static List<String> cachedModels(ProductionSupport support, String key) {
+        try {
+            String raw = support.redis.opsForValue().get(key);
+            return raw == null ? List.of() : support.mapper.readValue(raw,
+                    new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
+                    });
+        }
+        catch (Exception ex) {
+            throw new IllegalStateException("cannot read cached model list", ex);
         }
     }
 

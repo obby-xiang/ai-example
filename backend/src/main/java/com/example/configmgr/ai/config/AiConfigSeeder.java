@@ -114,6 +114,10 @@ public class AiConfigSeeder implements ApplicationRunner {
             }
             return false;
         }
+        if (!StringUtils.hasText(this.configService.resolveEnvModelId())) {
+            log.info("AI config seeding skipped: env model is not configured (/health degrades to NO_MODEL_CONFIGURED)");
+            return false;
+        }
         try {
             this.configService.requestExtraBody(null, this.configService.resolveEnvModelId());
             boolean extraOnlyAttempt = existing > 0 && !force;

@@ -11,8 +11,12 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.content.Media;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.tool.definition.ToolDefinition;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.util.MimeTypeUtils;
 import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionChunk;
 import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionMessage;
 import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionRequest;
@@ -58,17 +62,18 @@ class ReasoningReplayRequestTest {
 				new UserMessage("1+1 为什么等于 2？"),
 				AssistantMessage.builder()
 					.content("答案是 2")
-					.properties(Map.of("reasoningContent", REASONING))
+					.properties(Map.of("reasoningContent", REASONING,
+						ReasoningOrigin.KEY_PROVIDER_ID, "7", ReasoningOrigin.KEY_MODEL_ID, "model-a"))
 					.build())));
 
 		OpenAiApi api = mock(OpenAiApi.class);
 		ArgumentCaptor<ChatCompletionRequest> captor = ArgumentCaptor.forClass(ChatCompletionRequest.class);
 		when(api.chatCompletionStream(captor.capture(), any())).thenReturn(Flux.just(doneChunk()));
 		ReasoningAwareOpenAiChatModel model = new ReasoningAwareOpenAiChatModel(api,
-				OpenAiChatOptions.builder().model("deepseek-flash").build(), mock(ToolCallingManager.class),
-				RetryTemplate.defaultInstance(), ObservationRegistry.NOOP);
+				OpenAiChatOptions.builder().model("model-a").build(), mock(ToolCallingManager.class),
+				RetryTemplate.defaultInstance(), ObservationRegistry.NOOP, 7L, true);
 
-		model.stream(new Prompt(history, OpenAiChatOptions.builder().model("deepseek-flash").build()))
+		model.stream(new Prompt(history, OpenAiChatOptions.builder().model("model-a").build()))
 			.collectList()
 			.block();
 
@@ -121,7 +126,7 @@ class ReasoningReplayRequestTest {
 		OpenAiApi api = mock(OpenAiApi.class);
 		ArgumentCaptor<ChatCompletionRequest> captor = ArgumentCaptor.forClass(ChatCompletionRequest.class);
 		when(api.chatCompletionStream(captor.capture(), any())).thenReturn(Flux.just(doneChunk()));
-		ReasoningAwareOpenAiChatModel model = modelWithCurrentProvider(api, 7L);
+		ReasoningAwareOpenAiChatModel model = modelWithDeclaredReasoning(api, 7L);
 
 		model.stream(new Prompt(List.of(new UserMessage("继续"), stored),
 				OpenAiChatOptions.builder().model("model-a").build()))
@@ -141,6 +146,23 @@ class ReasoningReplayRequestTest {
 			.containsEntry("encryptedContent", "gAAA-opaque==")
 			.containsEntry("signature", "sig-1");
 		assertThat(providerIdOf(stored.getMetadata())).isEqualTo(7L);
+	}
+
+	@Test
+	void sameProviderWithoutDeclaredCapabilityDoesNotReplay() {
+		AssistantMessage stored = storedAssistantWithRichMetadata(7L, "model-a");
+		OpenAiApi api = mock(OpenAiApi.class);
+		ArgumentCaptor<ChatCompletionRequest> captor = ArgumentCaptor.forClass(ChatCompletionRequest.class);
+		when(api.chatCompletionStream(captor.capture(), any())).thenReturn(Flux.just(doneChunk()));
+		ReasoningAwareOpenAiChatModel model = modelWithCurrentProvider(api, 7L);
+
+		model.stream(new Prompt(List.of(new UserMessage("继续"), stored),
+				OpenAiChatOptions.builder().model("model-a").build()))
+			.collectList()
+			.block();
+
+		verify(api).chatCompletionStream(captor.capture(), any());
+		assertThat(onlyAssistant(captor.getValue()).reasoningContent()).isNull();
 	}
 
 	/**
@@ -194,15 +216,9 @@ class ReasoningReplayRequestTest {
 		assertThat(providerIdOf(reloaded.getMetadata())).isEqualTo(7L);
 	}
 
-	/**
-	 * 旧数据（无 origin）：<b>声明的兼容策略 = 保持本批之前的透传</b>（fail-open）。
-	 *
-	 * <p>理由：来源未知时无法判定"是否跨供应方"，而 fail-closed 会让本批之前写入的 DeepSeek
-	 * 工具轮历史在下一轮直接 400（存量会话 TTL 24h，兼容窗口有界）。本策略不假装知道来源：
-	 * 只是"未知 ⇒ 沿用旧行为"，且新写入的消息一定带 origin，窗口随旧数据过期收敛。
-	 */
+	/** 无 origin 的旧数据同样失败关闭，不能借显式能力声明绕过同源要求。 */
 	@Test
-	void legacyMessageWithoutOriginKeepsThePreBatchReplay() {
+	void legacyMessageWithoutOriginDoesNotReplay() {
 		OpenAiApi api = mock(OpenAiApi.class);
 		ArgumentCaptor<ChatCompletionRequest> captor = ArgumentCaptor.forClass(ChatCompletionRequest.class);
 		when(api.chatCompletionStream(captor.capture(), any())).thenReturn(Flux.just(doneChunk()));
@@ -217,23 +233,16 @@ class ReasoningReplayRequestTest {
 			.block();
 
 		verify(api).chatCompletionStream(captor.capture(), any());
-		assertThat(onlyAssistant(captor.getValue()).reasoningContent())
-			.as("无 origin = 来源未知：按声明的兼容策略沿用旧透传").isEqualTo(REASONING);
+		assertThat(onlyAssistant(captor.getValue()).reasoningContent()).isNull();
 	}
 
-	/**
-	 * 同供应商、不同 model：<b>可回放</b>（声明口径 = 供应方级判定）。
-	 *
-	 * <p>理由：协议层回放的只是<b>纯文本</b> reasoningContent（不是加密/签名字段），它是供应方的
-	 * 协议约定而不是某个模型的密钥；把 model 纳入判定会让"同供应商切换模型"的历史被误判成跨供应方，
-	 * 反而触发上游 400。加密/签名/未知字段本就不进请求体，跨模型不构成泄漏面。
-	 */
+	/** 同一 provider 也不能跨 model 回放；显式开启只针对当前 model。 */
 	@Test
-	void sameProviderDifferentModelStillReplays() {
+	void sameProviderDifferentModelDoesNotReplay() {
 		OpenAiApi api = mock(OpenAiApi.class);
 		ArgumentCaptor<ChatCompletionRequest> captor = ArgumentCaptor.forClass(ChatCompletionRequest.class);
 		when(api.chatCompletionStream(captor.capture(), any())).thenReturn(Flux.just(doneChunk()));
-		ReasoningAwareOpenAiChatModel model = modelWithCurrentProvider(api, 7L);
+		ReasoningAwareOpenAiChatModel model = modelWithDeclaredReasoning(api, 7L);
 
 		model.stream(new Prompt(List.of(new UserMessage("继续"),
 				AssistantMessage.builder().content("旧答案").properties(richMetadata(7L, "model-a")).build()),
@@ -242,7 +251,7 @@ class ReasoningReplayRequestTest {
 			.block();
 
 		verify(api).chatCompletionStream(captor.capture(), any());
-		assertThat(onlyAssistant(captor.getValue()).reasoningContent()).isEqualTo(REASONING);
+		assertThat(onlyAssistant(captor.getValue()).reasoningContent()).isNull();
 	}
 
 	/** env 合成行（无 providerId）→ DB 供应方：视为切换（null vs 非 null），不回放。 */
@@ -291,12 +300,58 @@ class ReasoningReplayRequestTest {
 			.as("有来源标记但当前供应方未知 ⇒ fail-closed").isNull();
 	}
 
+	@Test
+	void standardRequestMatchesParentForMediaToolsAndExtraBody() throws Exception {
+		assertRequestParity(false);
+	}
+
+	@Test
+	void streamingRequestMatchesParentForMediaToolsAndExtraBody() throws Exception {
+		assertRequestParity(true);
+	}
+
+	private static void assertRequestParity(boolean stream) throws Exception {
+		OpenAiApi api = mock(OpenAiApi.class);
+		ToolCallingManager manager = mock(ToolCallingManager.class);
+		when(manager.resolveToolDefinitions(any())).thenReturn(List.of(ToolDefinition.builder()
+			.name("sample_tool")
+			.description("sample")
+			.inputSchema("{\"type\":\"object\"}")
+			.build()));
+		OpenAiChatOptions options = OpenAiChatOptions.builder()
+			.model("model-a")
+			.streamUsage(true)
+			.extraBody(Map.of("vendor", Map.of("enabled", true)))
+			.build();
+		Media image = new Media(MimeTypeUtils.IMAGE_PNG, new ByteArrayResource(new byte[] { 1, 2, 3 }));
+		Media audio = new Media(MimeTypeUtils.parseMimeType("audio/mp3"), new ByteArrayResource(new byte[] { 4, 5 }));
+		Prompt prompt = new Prompt(List.of(
+				UserMessage.builder().text("inspect").media(image).build(),
+				AssistantMessage.builder().content("answer").media(List.of(audio)).build()), options);
+		OpenAiChatModel parent = new OpenAiChatModel(api, options, manager,
+				RetryTemplate.defaultInstance(), ObservationRegistry.NOOP);
+		ReasoningAwareOpenAiChatModel customized = new ReasoningAwareOpenAiChatModel(api, options, manager,
+				RetryTemplate.defaultInstance(), ObservationRegistry.NOOP);
+
+		ChatCompletionRequest expected = parent.createRequest(prompt, stream);
+		ChatCompletionRequest actual = customized.createRequest(prompt, stream);
+
+		assertThat(new ObjectMapper().writeValueAsString(actual))
+			.isEqualTo(new ObjectMapper().writeValueAsString(expected));
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private static ReasoningAwareOpenAiChatModel modelWithCurrentProvider(OpenAiApi api, Long providerId) {
 		return new ReasoningAwareOpenAiChatModel(api,
 				OpenAiChatOptions.builder().model("model-a").build(), mock(ToolCallingManager.class),
 				RetryTemplate.defaultInstance(), ObservationRegistry.NOOP, providerId);
+	}
+
+	private static ReasoningAwareOpenAiChatModel modelWithDeclaredReasoning(OpenAiApi api, Long providerId) {
+		return new ReasoningAwareOpenAiChatModel(api,
+				OpenAiChatOptions.builder().model("model-a").build(), mock(ToolCallingManager.class),
+				RetryTemplate.defaultInstance(), ObservationRegistry.NOOP, providerId, true);
 	}
 
 	private static ChatCompletionMessage onlyAssistant(ChatCompletionRequest request) {

@@ -58,6 +58,13 @@ public class AiProperties {
 		return effectiveSessionTtl(this.sessionTtl);
 	}
 
+	public static Duration effectiveModelsCacheTtl(Duration configured) {
+		if (configured == null || configured.isZero() || configured.isNegative()) {
+			throw new IllegalStateException("app.ai.config.models-cache-ttl must be > 0 (current = " + configured + ")");
+		}
+		return configured;
+	}
+
 	public Duration getAbsoluteSessionTtl() {
 		return MAX_SESSION_TTL;
 	}
@@ -298,6 +305,11 @@ public class AiProperties {
 			throw new IllegalStateException("app.ai.session-ttl must be > 0 (current = " + this.sessionTtl
 					+ "); transcript uses it as the display-history TTL, and an invalid value rejects writes and silently stops persistence");
 		}
+	}
+
+	@PostConstruct
+	void verifyModelsCacheTtl() {
+		effectiveModelsCacheTtl(this.config.getModelsCacheTtl());
 	}
 
 	/**

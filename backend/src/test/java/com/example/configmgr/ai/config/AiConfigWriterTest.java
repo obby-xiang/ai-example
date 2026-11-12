@@ -163,6 +163,18 @@ class AiConfigWriterTest {
 			.isEqualTo(AiConfigWriter.CODE_PROVIDER_EXISTS);
 	}
 
+	@Test
+	void modelAddDefaultsCapabilitiesOff() {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com", null));
+
+		AiProviderModel model = writer.addModel(created.getId(), new AiConfigWriter.ModelCommand(
+				"plain-model", null, null, null, null, null, null, null, null, null));
+
+		assertThat(model.isSupportsToolCalling()).isFalse();
+		assertThat(model.getSupportsReasoning()).isFalse();
+	}
+
 	// ── 写时拒脏值（URL 闸 / 参数范围） ───────────────────────────────────────
 
 	@Test

@@ -88,8 +88,13 @@ public class AiModelCatalog {
             return Optional.empty();
         }
         try {
-            String raw = this.redis.opsForValue().get(CACHE_KEY_PREFIX + providerId);
+            String key = CACHE_KEY_PREFIX + providerId;
+            String raw = this.redis.opsForValue().get(key);
             if (!StringUtils.hasText(raw)) {
+                return Optional.empty();
+            }
+            if (Long.valueOf(-1L).equals(this.redis.getExpire(key))) {
+                this.redis.delete(key);
                 return Optional.empty();
             }
             return Optional.of(this.objectMapper.readValue(raw, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
@@ -106,13 +111,9 @@ public class AiModelCatalog {
         if (this.redis == null) {
             return;
         }
-        Duration ttl = this.properties.getConfig().getModelsCacheTtl();
+        Duration ttl = AiProperties.effectiveModelsCacheTtl(this.properties.getConfig().getModelsCacheTtl());
         try {
-            if (ttl == null || ttl.isZero() || ttl.isNegative()) {
-                this.redis.opsForValue().set(CACHE_KEY_PREFIX + providerId, toJson(models));
-            } else {
-                this.redis.opsForValue().set(CACHE_KEY_PREFIX + providerId, toJson(models), ttl);
-            }
+            this.redis.opsForValue().set(CACHE_KEY_PREFIX + providerId, toJson(models), ttl);
         } catch (Exception ex) {
             if (LogSampling.canAcquire("model-catalog-cache-write")) {
                 log.warn("model catalog cache write failed providerId={} (response is unaffected)", providerId, ex);
@@ -149,10 +150,4 @@ public class AiModelCatalog {
         }
     }
 
-    /**
-     * 诊断：某 provider 是否有缓存（设置页不展示，排障用）。
-     */
-    public Optional<List<String>> peekCache(Long providerId) {
-        return readCache(providerId);
-    }
 }

@@ -75,7 +75,7 @@ public class AiProviderModel implements Persistable<Long> {
 
     @Column(name = "supports_tool_calling", nullable = false)
     @JsonProperty("supportsToolCalling")
-    private boolean supportsToolCalling = true;
+    private boolean supportsToolCalling;
 
     @Column(name = "supports_vision")
     @JsonProperty("supportsVision")

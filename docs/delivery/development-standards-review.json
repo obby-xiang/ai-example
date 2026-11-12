@@ -6253,6 +6253,61 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "finalText与真实SSE全文精确对账，正文/reasoning/工具段按entryId+seq恢复，不从finalText猜段或从镜像反写。"},
         "verification-review": {"status": "checked", "reason": "agent-1247最终APPROVED；TerminalTranscriptRecoveryTest 15项含旧降级清理、纯文本、late-reasoning、correction、重复/顺序跨实例、失败关闭全部通过，前端store/AiPanel定向通过，后端编译和前端typecheck/build成功；真实Redis merge、真实模型和Cluster NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:6a4b1d02d4efcb12886b5c26ba14d74453007ddf592855fecdc5e1386fcc6084",
+      "status": "reviewed",
+      "reason": "逐hunk复核模型能力缺省、缓存TTL、reasoning能力回放及Spring AI父类合并；独立审查agent-1248确认显式配置、协议完整性和失败关闭均成立。",
+      "reviewedAt": "2026-11-12T13:10:41+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1248、施工agent-1244",
+      "specChanges": [
+        {
+          "change": "env未显式配置模型时显式NO_MODEL_CONFIGURED且不写seed或调用上游；tools/reasoning/maxContext缺省不再虚构为true/128K。",
+          "reason": "特定供应商默认值会错误放行其他OpenAI兼容服务，未声明能力不应伪造可用状态。",
+          "impact": "缺模型显式失败，缺tools能力走普通文本，maxContext未知沿用无比例压缩降级；显式人工配置仍生效，env seed不覆盖人工修改。"
+        },
+        {
+          "change": "模型清单缓存启动及写入强制正TTL，历史永久键读取时删除并回源。",
+          "reason": "无TTL SET会永久缓存模型清单，违反Redis数据失效约束。",
+          "impact": "null/零/负TTL启动失败，写路径仅SET with TTL，旧PTTL=-1缓存按污染清理，peekCache无消费者删除。"
+        },
+        {
+          "change": "reasoning_content仅在当前provider+model显式supportsReasoning=true、同源且文本非空时回放，默认关闭。",
+          "reason": "非标准扩展字段不能因供应商相同或曾返回reasoning就自动发送给未声明模型。",
+          "impact": "cached/forRequest/forFrozenRequest统一传能力，旧构造器默认false；标准消息、工具配对和存储/展示reasoning不受影响。"
+        },
+        {
+          "change": "ReasoningAwareOpenAiChatModel改为super.createRequest后仅合并符合条件的assistant增量，不再复制完整消息映射。",
+          "reason": "复制框架实现会漂移并丢失user media、assistant audio和options能力。",
+          "impact": "父类负责标准消息/tools/options/extraBody/streamOptions，media/audio/annotations保留，Spring AI版本闸仍固定1.1.7。"
+        }
+      ],
+      "files": [
+        {"path": "backend/pom.xml", "status": "checked", "reason": "版本闸注释调整为依赖父类组装及record merge契约，Spring AI版本仍固定1.1.7，未升级依赖。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigSeeder.java", "status": "checked", "reason": "模型名为空直接跳过seed和版本推进，strict判空及人工配置覆盖语义不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigService.java", "status": "checked", "reason": "env模型不再回退deepseek-flash，tools/reasoning缺省false/maxContext未知，能力按provider+model显式解析；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigWriter.java", "status": "checked", "reason": "addModel省略能力时默认关闭，显式true才启用，既有行更新不被默认值覆盖；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiModelCatalog.java", "status": "checked", "reason": "写缓存强制正TTL，历史永久键删除回源，peekCache删除，上游失败不伪装命中；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java", "status": "checked", "reason": "新增modelsCacheTtl启动校验，null/零/负失败，默认10分钟保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java", "status": "checked", "reason": "cached/forRequest/forFrozenRequest统一传递providerId和当前生效模型能力；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiProviderModel.java", "status": "checked", "reason": "实体tools默认false，与双方言和writer一致，assigned-id及其他映射不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/memory/ReasoningOrigin.java", "status": "checked", "reason": "同源来源隔离保留，无origin或不明来源不回放，正文和工具配对不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/org/springframework/ai/openai/ReasoningAwareOpenAiChatModel.java", "status": "checked", "reason": "super.createRequest后仅合并assistant reasoning增量，保留父类消息/options/media/audio，删除复制映射；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/application.yml", "status": "checked", "reason": "env模型缺省为空，不再默认deepseek-flash，其他模型配置保持。"},
+        {"path": "backend/src/main/resources/db/migration/V1__schema.sql", "status": "checked", "reason": "H2 supports_tool_calling默认FALSE，与实体和env能力缺省一致。"},
+        {"path": "backend/src/main/resources/db/postgresql/V1__schema.sql", "status": "checked", "reason": "PG supports_tool_calling默认FALSE，与H2和实体一致。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "设置提示改为窗口未知不预设128K、工具与推理显式启用，不暗示虚构默认值。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "中文设置提示同步未知窗口和能力显式启用，不增加技术心智负担。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Spring AI super.createRequest、ModelOptionsUtils.merge和既有配置/Redis能力，无新增依赖或第二套协议实现。"},
+        "java-api-style": {"status": "checked", "reason": "九个生产Java均经IDEA Reformat；能力缺省、record merge、缓存和registry构造路径逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "缺模型/缺能力/非法TTL/Redis失败保持真实，不伪造模型可用、缓存命中或上游成功。"},
+        "toc-interaction": {"status": "checked", "reason": "设置提示如实表达未知窗口和能力显式启用，无新增技术提示或默认心智负担。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "缓存正TTL、历史永久键清理、能力按模型判定和registry全路径传递，未声明reasoning不进入请求体。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文流或编码，仅调整配置与请求能力。"},
+        "verification-review": {"status": "checked", "reason": "agent-1248 APPROVED；缺模型/能力缺省/TTL/reasoning/registry/父类parity均独立单点通过，后端358源编译、前端typecheck和3281模块build成功；真实上游、真实Redis/PG迁移和全量测试NOT_RUN。"}
+      }
     }
   ]
 }

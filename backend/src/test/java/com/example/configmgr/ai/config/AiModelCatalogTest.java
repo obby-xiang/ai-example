@@ -172,9 +172,32 @@ class AiModelCatalogTest {
 	}
 
 	@Test
-	void peekCacheExposesTheStoredListForDiagnostics() {
-		this.redisStore.put(AiModelCatalog.CACHE_KEY_PREFIX + PROVIDER_ID, "[\"m-1\"]");
-		assertThat(this.catalog.peekCache(PROVIDER_ID)).contains(List.of("m-1"));
+	void invalidTtlNeverFallsBackToPermanentKey() {
+		this.properties.getConfig().setModelsCacheTtl(null);
+		when(this.probe.fetchModels(any(), any(), any(), anyBoolean()))
+			.thenReturn(AiConnectionProbe.ProbeResult.ok(200, 3L, List.of("fresh-1")));
+
+		assertThatThrownBy(() -> this.catalog.fetch(PROVIDER_ID, true))
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("models-cache-ttl");
+		verify(this.ops, never()).set(anyString(), anyString());
 	}
+
+	@Test
+	void permanentLegacyCacheIsDeletedAndReloadedFromUpstream() {
+		String key = AiModelCatalog.CACHE_KEY_PREFIX + PROVIDER_ID;
+		this.redisStore.put(key, "[\"legacy\"]");
+		when(this.redis.getExpire(key)).thenReturn(-1L);
+		when(this.probe.fetchModels(any(), any(), any(), anyBoolean()))
+			.thenReturn(AiConnectionProbe.ProbeResult.ok(200, 3L, List.of("fresh-1")));
+
+		AiModelCatalog.CatalogResult result = this.catalog.fetch(PROVIDER_ID, false);
+
+		assertThat(result.cached()).isFalse();
+		assertThat(result.models()).containsExactly("fresh-1");
+		verify(this.redis).delete(key);
+		assertThat(this.redisStore.get(key)).contains("fresh-1");
+	}
+
 
 }
