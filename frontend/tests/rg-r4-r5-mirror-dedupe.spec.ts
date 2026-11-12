@@ -292,3 +292,138 @@ describe('批G · R5/R2：判重按"同口径归一化"（后端 InputSanitizer 
     expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(2)
   })
 })
+
+
+describe('C-161 · history 缺 segments 时的唯一精确 seq 回填', () => {
+  const RUN_ID = 'run-c161'
+  const ENTRY_ID = `${RUN_ID}:assistant:final`
+
+  function seqText(text: string, seq: number, entryId = ENTRY_ID): MessagePart {
+    return { ...textPart(text), seq, entryId }
+  }
+
+  function seqTool(toolCallId: string, name: string, seq: number): MessagePart {
+    return { ...toolPart(toolCallId, name, 'succeeded', false, 0), seq, entryId: ENTRY_ID }
+  }
+
+  function mirrorRound(): ChatMessage {
+    return {
+      ...assistantMessage('a-c161', [
+        seqText('甲', 3),
+        seqTool('tool-c161', 'list_tasks', 4),
+        seqText('乙', 7),
+        seqTool('gf-c161', 'generative_form', 8)
+      ], '甲乙'),
+      runId: RUN_ID
+    }
+  }
+
+  function historyRound(secondText = '乙'): Array<Record<string, unknown>> {
+    return [
+      {
+        type: 'ASSISTANT', entryId: `${RUN_ID}:assistant:create`, runId: RUN_ID, text: '甲',
+        toolCalls: [{ id: 'tool-c161', name: 'list_tasks', arguments: '{}' }],
+        toolCallStates: { 'tool-c161': { status: 'EXECUTED' } },
+        segments: [
+          { kind: 'text', text: '甲', seq: 3 },
+          { kind: 'tool', toolCallId: 'tool-c161', seq: 4 }
+        ]
+      },
+      {
+        type: 'ASSISTANT', entryId: ENTRY_ID, runId: RUN_ID, text: secondText,
+        toolCalls: [{ id: 'gf-c161', name: 'generative_form', arguments: '{}' }],
+        toolCallStates: { 'gf-c161': { status: 'FRONTEND_RESULT' } }
+      }
+    ]
+  }
+
+  async function loadWithMirror(secondText = '乙') {
+    const store = await freshStore()
+    store.sessionId = 's-c161'
+    store.historyLoaded = true
+    store.activeRunId = RUN_ID
+    store.suspended = true
+    store.messages = [mirrorRound()]
+    store.writeMirrorNow()
+    store.suspended = false
+    api.history.mockResolvedValue({
+      sessionId: 's-c161', total: 2, revision: 9,
+      messages: historyRound(secondText)
+    })
+    await store.loadHistory()
+    return store
+  }
+
+  it('text3→tool4→text7→GF8：第二条 assistant 缺 segments 也回填唯一精确 entryId+seq', async () => {
+    const store = await loadWithMirror()
+    const assistant = store.messages.find((message) => message.role === 'assistant' && message.runId === RUN_ID)
+    expect(assistant).toBeDefined()
+    expect(assistant?.parts.map((part) => [part.kind,
+      part.kind === 'tool' ? part.toolCallId : part.kind === 'text' || part.kind === 'reasoning' ? part.text : part.kind,
+      part.seq]))
+      .toEqual([
+        ['text', '甲', 3],
+        ['tool', 'tool-c161', 4],
+        ['text', '乙', 7],
+        ['tool', 'gf-c161', 8]
+      ])
+    expect(assistant?.parts[2]?.entryId).toBe(ENTRY_ID)
+  })
+
+  it('重复同文候选不唯一：不得回填或折叠 recoveryGap', async () => {
+    const store = await freshStore()
+    const mirror = mirrorRound()
+    mirror.parts.splice(2, 0, seqText('乙', 7))
+    store.sessionId = 's-c161-dupe'
+    store.historyLoaded = true
+    store.activeRunId = RUN_ID
+    store.suspended = true
+    store.messages = [mirror]
+    store.writeMirrorNow()
+    store.suspended = false
+    api.history.mockResolvedValue({ sessionId: 's-c161-dupe', total: 2, revision: 9, messages: historyRound() })
+
+    await store.loadHistory()
+
+    const assistant = store.messages.find((message) => message.role === 'assistant' && message.runId === RUN_ID)
+    expect(assistant?.recoveryGap).toBe(true)
+  })
+
+  it('前缀不同不是完全相等：不得回填 seq', async () => {
+    const store = await loadWithMirror('乙延伸')
+
+    const assistant = store.messages.find((message) => message.role === 'assistant' && message.runId === RUN_ID)
+    const changed = assistant?.parts.find((part) => part.kind === 'text' && part.text === '乙延伸')
+    expect(changed?.seq).toBeUndefined()
+    expect(assistant?.recoveryGap).toBe(true)
+  })
+
+  it('同 seq 不同正文：组合冲突不得回填或接受前缀扩展', async () => {
+    const store = await freshStore()
+    const mirror = mirrorRound()
+    mirror.parts.splice(3, 0, seqText('乙延伸', 7))
+    store.sessionId = 's-c161-same-seq-conflict'
+    store.historyLoaded = true
+    store.activeRunId = RUN_ID
+    store.suspended = true
+    store.messages = [mirror]
+    store.writeMirrorNow()
+    store.suspended = false
+    api.history.mockResolvedValue({
+      sessionId: 's-c161-same-seq-conflict', total: 2, revision: 9, messages: historyRound()
+    })
+
+    await store.loadHistory()
+
+    const assistant = store.messages.find((message) => message.role === 'assistant' && message.runId === RUN_ID)
+    expect(assistant?.recoveryGap).toBe(true)
+    expect(assistant?.parts.filter((part) => part.kind === 'text').map((part) => ({
+      text: part.kind === 'text' ? part.text : '',
+      seq: part.seq
+    }))).toEqual([
+      { text: '甲', seq: 3 },
+      { text: '乙', seq: undefined }
+    ])
+    expect(assistant?.parts.some((part) => part.kind === 'text' && part.text === '乙延伸' && part.seq === 7)).toBe(false)
+  })
+})

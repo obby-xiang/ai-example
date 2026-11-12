@@ -2532,6 +2532,7 @@ function clearFrontendToolChains(): void {
 
 /** 同一页签内同一 toolCallId 的执行/回灌单飞占位。 */
 const frontendToolsInFlight = new Set<string>()
+const completedSnapshotRestores = new Map<string, string>()
 
 const EXECUTOR_CRASH_TEXT = '前端工具执行异常，本次未完成。请提示用户手动重试'
 const UNCERTAIN_RECOVERY_TEXT = '恢复时无法确认此前是否已执行；本页签没有再次执行，请人工核对后再继续。'
@@ -3796,6 +3797,14 @@ function isCompatiblePersistentEntry(left: MessagePart, right: MessagePart): boo
   return leftEntryId === null || rightEntryId === null || leftEntryId === rightEntryId
 }
 
+function mirrorLegacyTextCandidates(pool: MirrorTextPart[], source: MirrorTextPart): MirrorTextPart[] {
+  if (partSeq(source) === null) {
+    return []
+  }
+  return pool.filter((part) => part.kind === source.kind && partSeq(part) === null
+    && part.text === source.text && isCompatiblePersistentEntry(part, source))
+}
+
 function mirrorTextFrameCandidates(pool: MirrorTextPart[], source: MirrorTextPart): MirrorTextPart[] {
   const seq = partSeq(source)
   return seq === null ? [] : pool.filter((part) => part.kind === source.kind && partSeq(part) === seq)
@@ -3941,6 +3950,21 @@ function canMergeMirrorRoundParts(target: ChatMessage, source: ChatMessage, hist
         target.recoveryGap = true
       }
       continue
+    }
+    const legacyCandidates = mirrorLegacyTextCandidates(textPool, sourcePart)
+    const duplicateMirrorCandidates = source.parts.filter((part) => part.kind === sourcePart.kind
+      && partSeq(part) === seq && isCompatiblePersistentEntry(part, sourcePart)).length
+    if (legacyCandidates.length === 1 && duplicateMirrorCandidates === 1) {
+      const existing = legacyCandidates[0] as MirrorTextPart
+      if (mergeMirrorTextPart(existing, sourcePart)) {
+        existing.seq = seq
+        previousAnchor = existing
+        latestTargetSeq = Math.max(latestTargetSeq, seq)
+        continue
+      }
+    }
+    if (legacyCandidates.length > 0) {
+      target.recoveryGap = true
     }
     const sameFrame = mirrorTextFrameCandidates(textPool, sourcePart)
     const candidates = mirrorTextCandidates(textPool, sourcePart)
@@ -5653,6 +5677,30 @@ export const useAiStore = defineStore('ai', {
       const historyHost = activeRoundHostId === null ? null : this.messages.find((item) => item.id === activeRoundHostId)
       const historyRunIdAtEntry = historyHost?.runId ?? ''
       const historyHostIdAtEntry = activeRoundHostId ?? ''
+      let committed = false
+      const historyProjectionAtEntry = {
+        total: this.historyTotal,
+        offset: this.historyOffset,
+        hasMore: this.historyHasMore,
+        nextCursor: this.historyNextCursor,
+        revision: this.historyRevision,
+        events: this.historyEvents,
+        windowEntries: this.historyWindowEntries,
+        loaded: this.historyLoaded,
+        error: this.historyError,
+        recoveryGap: this.recoveryGap
+      }
+      const isHistoryProjectionCurrent = (): boolean => committed || (this.historyTotal === historyProjectionAtEntry.total
+        && this.historyOffset === historyProjectionAtEntry.offset
+        && this.historyHasMore === historyProjectionAtEntry.hasMore
+        && this.historyNextCursor === historyProjectionAtEntry.nextCursor
+        && this.historyRevision === historyProjectionAtEntry.revision
+        && this.historyEvents === historyProjectionAtEntry.events
+        && this.historyWindowEntries === historyProjectionAtEntry.windowEntries
+        && this.historyLoaded === historyProjectionAtEntry.loaded
+        && this.historyError === historyProjectionAtEntry.error
+        && (this.recoveryGap === null
+          || this.recoveryGap.reason === historyProjectionAtEntry.recoveryGap?.reason))
       // M-17（2026-10-29）：取历史期间用户可能已发出新一轮。历史回来时会整体替换 `messages`
       // —— 在途轮的宿主与半截正文被顶掉，后续帧只能新建第二条助手气泡（同一轮两条气泡）。
       // 判据见下方"真轮是否占场"（R04 起不再用轮次纪元，理由在那里）。
@@ -5826,7 +5874,8 @@ export const useAiStore = defineStore('ai', {
         this.historyWindowEntries = markRaw(pageEntries)
       }
       const completeHistoryWithoutMessageCommit = (): void => {
-        if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
+        if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration
+          || !isHistoryProjectionCurrent()) {
           return
         }
         commitHistoryProjection()
@@ -5849,7 +5898,8 @@ export const useAiStore = defineStore('ai', {
       let settledAbort = currentAbort
       const historyGuard: HistoryCommitGuard = {
         isValid: (): boolean => {
-          if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
+          if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration
+            || !isHistoryProjectionCurrent()) {
             return false
           }
           if (settled) {
@@ -5874,7 +5924,6 @@ export const useAiStore = defineStore('ai', {
       if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
         noteHistoryDoneEvidence(sid, requestGeneration, pageEntries)
       }
-      let committed = false
       const commitHistory = (): void => {
         if (committed || !historyGuard.isValid()) {
           return
@@ -6940,6 +6989,16 @@ export const useAiStore = defineStore('ai', {
       if (!isOwner()) {
         return
       }
+      const restoreKey = JSON.stringify([this.sessionId, current.runId, resumeAnchor])
+      const pendingSignature = JSON.stringify(pendingEntries.map((entry) => [
+        entry.toolCallId, entry.entryStatus, entry.req, entry.kind, entry.name, entry.arguments
+      ]))
+      if (completedSnapshotRestores.get(restoreKey) === pendingSignature) {
+        return
+      }
+      const noteRestored = (): void => {
+        completedSnapshotRestores.set(restoreKey, pendingSignature)
+      }
       const host = first ? this.rebuildPendingCard(first, current.runId) : null
       this.restoredPendingQueue = restorable.filter((entry) => entry !== first)
       this.backfillRestoredGenerativeForms(current.runId)
@@ -6947,13 +7006,13 @@ export const useAiStore = defineStore('ai', {
         this.drivePendingFrontendTools(current.runId, pendingEntries, host?.id ?? inFlightHost?.id)
       }
       if (host) {
-        void this.resumeSnapshotStream(current.runId, resumeAnchor, host.id, awaitingInput)
+        void this.resumeSnapshotStream(current.runId, resumeAnchor, host.id, awaitingInput, noteRestored)
         return
       }
       if (pendingEntries.length === 0) {
         return
       }
-      void this.resumeSnapshotStream(current.runId, resumeAnchor, inFlightHost?.id, awaitingInput)
+      void this.resumeSnapshotStream(current.runId, resumeAnchor, inFlightHost?.id, awaitingInput, noteRestored)
       } finally {
         if (!historyGuardRejected) {
           historyGuard?.settle()
@@ -8102,10 +8161,17 @@ export const useAiStore = defineStore('ai', {
     /** M08-R2：释放该 run 的驱动所有权（终态 / 停止 / 换会话）。缺省 runId = 全部释放。 */
     forgetRunStreamDrive(runId?: string): void {
       if (runId === undefined) {
+        completedSnapshotRestores.clear()
         if (Object.keys(this.streamDrives).length > 0) {
           this.streamDrives = {}
         }
         return
+      }
+      for (const key of completedSnapshotRestores.keys()) {
+        const parsed = JSON.parse(key) as [string, string, number]
+        if (parsed[1] === runId) {
+          completedSnapshotRestores.delete(key)
+        }
       }
       if (this.streamDrives[runId] === undefined) {
         return
@@ -8577,6 +8643,9 @@ export const useAiStore = defineStore('ai', {
           activeRoundHostId = null
           this.activeStreamRunId = null
           this.activeStreamParked = false
+        }
+        if (closeTrace.info?.suspended === true) {
+          _onReplaySettled?.()
         }
         // M08-R2：驱动收尾 —— 连接结束不等于放弃这一轮。只有"中断"（真断流）才消耗预算；
         // 终态 / 挂起收尾 / 准备中 / 用户停止 / 被新驱动接管都不消耗。
