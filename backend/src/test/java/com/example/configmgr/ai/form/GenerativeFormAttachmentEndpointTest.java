@@ -157,10 +157,43 @@ class GenerativeFormAttachmentEndpointTest {
 		assertThat((List<?>) ok.getData().get("options")).hasSize(1);
 
 		assertThatThrownBy(() -> this.controller.options("https://evil.example/x", "CURRENCY"))
-			.isInstanceOf(IllegalArgumentException.class)
-			.hasMessageContaining("未注册的选项数据源");
+			.isInstanceOf(com.example.configmgr.common.CodedIllegalArgumentException.class)
+			.hasFieldOrPropertyWithValue("code", com.example.configmgr.common.ErrorCodes.BAD_REQUEST)
+			.hasMessageContaining("Unregistered option source");
 		assertThatThrownBy(() -> this.controller.options("definition_fields_v2", "CURRENCY"))
-			.isInstanceOf(IllegalArgumentException.class);
+			.isInstanceOf(com.example.configmgr.common.CodedIllegalArgumentException.class)
+			.hasFieldOrPropertyWithValue("code", com.example.configmgr.common.ErrorCodes.BAD_REQUEST);
+	}
+
+	@Test
+	void optionSourceReadFailureReturns503WithStableCodeAndSafeMessage() throws Exception {
+		com.example.configmgr.definition.service.DefinitionService definitions = mock(
+				com.example.configmgr.definition.service.DefinitionService.class);
+		when(definitions.findByLevel(com.example.configmgr.definition.entity.ConfigDefinition.ConfigLevel.GLOBAL))
+			.thenThrow(new IllegalStateException("database secret"));
+		FormOptionSourceRegistry failingRegistry = new FormOptionSourceRegistry(
+				List.of(new FormOptionSource.DefinitionOptionSource(definitions)));
+		GenerativeFormAttachmentController failingController = new GenerativeFormAttachmentController(this.storage,
+				this.attachments, this.runStore, failingRegistry);
+		var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+		com.example.configmgr.common.GlobalExceptionHandler advice = new com.example.configmgr.common.GlobalExceptionHandler(
+				new com.example.configmgr.common.ErrorBodyFactory(beans.getBeanProvider(
+						org.springframework.context.MessageSource.class)));
+		org.springframework.test.web.servlet.MockMvc mvc = org.springframework.test.web.servlet.setup.MockMvcBuilders
+			.standaloneSetup(failingController)
+			.setControllerAdvice(advice)
+			.build();
+
+		mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+				.get("/api/ai/form/option-sources/definitions").param("value", "GLOBAL"))
+			.andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isServiceUnavailable())
+			.andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.success").value(false))
+			.andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code")
+				.value(com.example.configmgr.common.ErrorCodes.FORM_OPTION_SOURCE_UNAVAILABLE))
+			.andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message")
+				.value("选项暂不可用，请稍后重试。"))
+			.andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
+				.string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("database secret"))));
 	}
 
 	@Test

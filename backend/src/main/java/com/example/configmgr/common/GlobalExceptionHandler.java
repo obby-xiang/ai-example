@@ -1,5 +1,6 @@
 package com.example.configmgr.common;
 
+import com.example.configmgr.ai.form.FormOptionSourceUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.ConstraintViolationException;
@@ -90,6 +91,13 @@ public class GlobalExceptionHandler {
                 request == null ? null : request.getRequestURI(), e);
         return respond(HttpStatus.SERVICE_UNAVAILABLE, ErrorCodes.AI_REDIS_UNAVAILABLE,
                 "AI 服务暂不可用，请稍后重试。", null, request);
+    }
+
+    /** 选项源已在读取边界记录安全日志；这里只映射稳定的 503 响应，不透出技术异常。 */
+    @ExceptionHandler(FormOptionSourceUnavailableException.class)
+    public ResponseEntity<?> handleFormOptionSourceUnavailable(FormOptionSourceUnavailableException e,
+                                                               HttpServletRequest request) {
+        return respond(HttpStatus.SERVICE_UNAVAILABLE, e.getCode(), "选项暂不可用，请稍后重试。", null, request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

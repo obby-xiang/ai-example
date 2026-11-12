@@ -6625,6 +6625,40 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1259 APPROVED；施工报告首刷/周期/版本自等待RED→GREEN、真实Lucene首篇文档构建、管理端有界提交、超时WARN、停止事件顺序refresh-finished→source-closed、取消竞态和命名daemon单点通过，生产clean compile 359源BUILD SUCCESS；主控未重跑测试，完整Spring停机、真实HTTP KB源、Redis/Cluster/多实例及全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:7708156c6abfcdc12a685618bb82985d5f56769f317ea2a9f4e9eeed99bf6143",
+      "status": "reviewed",
+      "reason": "逐hunk复核两个注册选项源的读取异常与真实空值边界、503安全映射及前端失败重试；独立审查发现未知定义回归后已返修并复审通过。",
+      "reviewedAt": "2026-11-12T21:27:07+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1270、施工agent-1267",
+      "specChanges": [
+        {
+          "change": "已注册表单选项源读取异常不再吞成空列表，返回FORM_OPTION_SOURCE_UNAVAILABLE与HTTP 503；ResourceNotFoundException和真实空集合仍返回空选项。",
+          "reason": "基础设施失败不能伪装成无选项，同时必须保持真实DefinitionService对未知定义的业务契约。",
+          "impact": "definition_fields与definitions共用一个带码异常及安全映射；前端保留失败态和重试，不展示原始异常。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/FormOptionSource.java", "status": "checked", "reason": "两个读取边界记录安全元数据并失败关闭；未知定义单列ResourceNotFoundException返回空列表；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/FormOptionSourceUnavailableException.java", "status": "checked", "reason": "新增稳定带码异常并保留cause，技术消息只含闭集sourceId；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/ErrorCodes.java", "status": "checked", "reason": "登记FORM_OPTION_SOURCE_UNAVAILABLE及503/空选项边界；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/GlobalExceptionHandler.java", "status": "checked", "reason": "专用异常映射503和安全文案，不回显异常消息；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/messages_en.properties", "status": "checked", "reason": "新增选项源不可用英文安全文案。"},
+        {"path": "backend/src/main/resources/messages_zh.properties", "status": "checked", "reason": "新增选项源不可用中文安全文案。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "失败态使用简洁英文暂不可用文案。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "失败态使用简洁中文暂不可用文案。"},
+        {"path": "frontend/src/types/api.ts", "status": "checked", "reason": "镜像新增FORM_OPTION_SOURCE_UNAVAILABLE稳定业务码。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用LogThrottler、CodedIllegalStateException、统一异常响应和现有FormRenderer重试，无新增依赖。"},
+        "java-api-style": {"status": "checked", "reason": "四个生产Java已IDEA Reformat，读取方法低于50行和复杂度20；ResourceNotFoundException按类型分流而非文案。"},
+        "logging-exception-safety": {"status": "checked", "reason": "WARN只含闭集sourceId、父值长度与异常链，响应不透出原始异常；未知定义不制造故障告警。"},
+        "toc-interaction": {"status": "checked", "reason": "保留既有失败态与重试按钮，仅收敛中英文暂不可用文案，不新增技术提示或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "读取故障与真实空结果严格区分，未新增共享状态、Redis或数据库写入。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文流、编码或Unicode处理。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1270首轮发现未知定义误映射，返修后限定复审两项均ADDRESSED；施工报告相关后端和前端独立RED→GREEN、后端编译及前端typecheck/build成功；主控未重跑测试，全量普通测试、真实服务、浏览器和Redis/Cluster均为NOT_RUN。"}
+      }
     }
   ]
 }

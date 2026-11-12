@@ -406,7 +406,7 @@
       },
       "options": {
         "loading": "Loading options…",
-        "loadFailed": "Options could not be loaded",
+        "loadFailed": "Options are temporarily unavailable",
         "empty": "No options available",
         "retry": "Retry"
       },

@@ -406,7 +406,7 @@
       },
       "options": {
         "loading": "选项加载中…",
-        "loadFailed": "选项加载失败",
+        "loadFailed": "选项暂不可用",
         "empty": "暂无可选项",
         "retry": "重试"
       },

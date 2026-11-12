@@ -498,4 +498,26 @@ describe('E：数据源级联 last-wins', () => {
     await flushPromises()
     expect(wrapper.text()).not.toContain('币种编码')
   })
+
+  it('数据源读取失败显示选项暂不可用，点击重试后恢复选项', async () => {
+    api.formOptionSource
+      .mockRejectedValueOnce(new Error('database secret'))
+      .mockResolvedValueOnce({ options: [{ value: 'currency_code', label: '币种编码' }] })
+    const wrapper = mountForm(SOURCE_SCHEMA, { initialValues: { def: 'CURRENCY' } })
+    await flushPromises()
+
+    const status = wrapper.find('[data-testid$="-options-failed"]')
+    expect(status.exists()).toBe(true)
+    expect(status.text()).toBe('选项暂不可用')
+    expect(wrapper.text()).not.toContain('暂无可选项')
+    expect(wrapper.text()).not.toContain('database secret')
+
+    await wrapper.find('[data-testid$="-options-retry"]').trigger('click')
+    await flushPromises()
+
+    expect(api.formOptionSource).toHaveBeenCalledTimes(2)
+    expect(api.formOptionSource).toHaveBeenNthCalledWith(2, 'definition_fields', 'CURRENCY')
+    expect(wrapper.find('[data-testid$="-options-failed"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('币种编码')
+  })
 })

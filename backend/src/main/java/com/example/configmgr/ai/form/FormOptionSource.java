@@ -1,7 +1,10 @@
 package com.example.configmgr.ai.form;
 
+import com.example.configmgr.common.LogThrottler;
+import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.definition.entity.ConfigDefinition;
 import com.example.configmgr.definition.service.DefinitionService;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 
@@ -29,8 +32,9 @@ public interface FormOptionSource {
 	/**
 	 * 按父值解析选项。
 	 *
-	 * @param parentValue 父字段的当前值（本数据源里是<b>配置定义编码</b>）
+	 * @param parentValue 父字段的当前值（具体含义由闭集实现定义）
 	 * @return 选项列表（{@code value/label}）；父值不可解析时返回空列表
+	 * @throws FormOptionSourceUnavailableException 已注册数据源读取失败，不转换为空列表
 	 */
 	List<Map<String, String>> options(String parentValue);
 
@@ -41,6 +45,7 @@ public interface FormOptionSource {
 	 * <p>用途示例：模型先让用户选"哪个配置定义"，再让用户从"该定义的字段"里多选。
 	 * 数据来自既有 {@link DefinitionService}，不新增任何外部访问面。
 	 */
+	@Slf4j
 	@Component
 	class DefinitionFieldOptionSource implements FormOptionSource {
 
@@ -67,8 +72,14 @@ public interface FormOptionSource {
 			try {
 				definition = this.definitionService.findByCode(parentValue);
 			}
+			catch (ResourceNotFoundException ex) {
+				return List.of();
+			}
 			catch (RuntimeException ex) {
-				return out.isEmpty() ? List.of() : out;
+				LogThrottler.warn(log, "form-option-source:definition_fields",
+						"form option source read failed sourceId={} parentValueLength={}", ID,
+						StringUtils.length(parentValue), ex);
+				throw new FormOptionSourceUnavailableException(ID, ex);
 			}
 			if (definition == null || definition.getFields() == null) {
 				return out.isEmpty() ? List.of() : out;
@@ -99,6 +110,7 @@ public interface FormOptionSource {
 	 * <p>上限 = {@link GenerativeFormRules#MAX_OPTIONS}（与表单内联选项同一口径），
 	 * 顺序按 {@code sortOrder, code} 稳定输出，避免下拉项每次刷新换序。
 	 */
+	@Slf4j
 	@Component
 	class DefinitionOptionSource implements FormOptionSource {
 
@@ -127,7 +139,10 @@ public interface FormOptionSource {
 				definitions = this.definitionService.findByLevel(level);
 			}
 			catch (RuntimeException ex) {
-				return out.isEmpty() ? List.of() : out;
+				LogThrottler.warn(log, "form-option-source:definitions",
+						"form option source read failed sourceId={} parentValueLength={}", ID,
+						StringUtils.length(parentValue), ex);
+				throw new FormOptionSourceUnavailableException(ID, ex);
 			}
 			if (definitions == null) {
 				return out.isEmpty() ? List.of() : out;

@@ -124,6 +124,15 @@ class ErrorCodesContractTest {
     }
 
     @Test
+    void formOptionSourceUnavailableCodeIsMirroredInFrontendAndMessages() throws IOException {
+        Set<String> expected = Set.of("FORM_OPTION_SOURCE_UNAVAILABLE");
+        assertEquals(Set.of(), difference(expected, ErrorCodes.ALL), "后端缺少表单选项不可用码");
+        assertEquals(Set.of(), difference(expected, parseFrontendErrorCodes()), "前端镜像缺少表单选项不可用码");
+        assertEquals(Set.of(), difference(expected, parseMessageKeys("messages_zh.properties")), "中文文案缺少表单选项不可用码");
+        assertEquals(Set.of(), difference(expected, parseMessageKeys("messages_en.properties")), "英文文案缺少表单选项不可用码");
+    }
+
+    @Test
     void codeValuesAreUpperSnakeAndUnique() {
         Set<String> seen = new LinkedHashSet<>();
         for (String code : ErrorCodes.ALL) {

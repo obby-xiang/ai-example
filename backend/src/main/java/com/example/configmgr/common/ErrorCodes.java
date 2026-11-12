@@ -279,6 +279,10 @@ public final class ErrorCodes {
      */
     public static final String FORM_SLOTS_ALREADY_KNOWN = "FORM_SLOTS_ALREADY_KNOWN";
     /**
+     * 503：生成式表单的注册选项源读取失败；真实空选项仍返回 200 和空列表。
+     */
+    public static final String FORM_OPTION_SOURCE_UNAVAILABLE = "FORM_OPTION_SOURCE_UNAVAILABLE";
+    /**
      * 400：预检查未通过。
      */
     public static final String PRECHECK_NOT_PASSED = "PRECHECK_NOT_PASSED";
