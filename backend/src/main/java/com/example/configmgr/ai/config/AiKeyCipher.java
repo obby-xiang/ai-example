@@ -172,8 +172,8 @@ public class AiKeyCipher {
                     + encoder.encodeToString(sealed);
         }
         catch (Exception ex) {
-            // 不回显任何密文/明文片段：异常消息只描述失败类别
-            throw new KeyCipherException(CODE_KEY_UNREADABLE, "Encryption failed because AES/GCM is unavailable: " + ex.getClass().getSimpleName());
+            // 不回显任何密文/明文片段：异常消息只描述失败类别，原始异常仅作为 cause 供内部日志使用。
+            throw new KeyCipherException(CODE_KEY_UNREADABLE, "Encryption failed because AES/GCM is unavailable", ex);
         }
     }
 
@@ -204,7 +204,7 @@ public class AiKeyCipher {
         }
         catch (Exception ex) {
             throw new KeyCipherException(CODE_KEY_UNREADABLE,
-                    "Ciphertext cannot be decrypted because the KEK or kid changed, or the ciphertext belongs to another provider row: " + ex.getClass().getSimpleName());
+                    "Ciphertext cannot be decrypted because the KEK or kid changed, or the ciphertext belongs to another provider row", ex);
         }
     }
 
@@ -224,7 +224,7 @@ public class AiKeyCipher {
             return hex.substring(0, FINGERPRINT_HEX_CHARS);
         }
         catch (Exception ex) {
-            throw new KeyCipherException(CODE_KEK_MISSING, "Failed to compute the key fingerprint: " + ex.getClass().getSimpleName());
+            throw new KeyCipherException(CODE_KEK_MISSING, "Failed to compute the key fingerprint", ex);
         }
     }
 
@@ -271,6 +271,11 @@ public class AiKeyCipher {
 
         public KeyCipherException(String code, String message) {
             super(message);
+            this.code = code;
+        }
+
+        public KeyCipherException(String code, String message, Throwable cause) {
+            super(message, cause);
             this.code = code;
         }
 

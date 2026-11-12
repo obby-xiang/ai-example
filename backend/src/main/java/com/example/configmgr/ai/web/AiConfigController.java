@@ -16,8 +16,10 @@ import com.example.configmgr.ai.web.dto.ModelView;
 import com.example.configmgr.ai.web.dto.ProbeView;
 import com.example.configmgr.ai.web.dto.ProviderView;
 import com.example.configmgr.common.ApiResponse;
+import com.example.configmgr.common.ErrorBodyFactory;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -62,6 +64,9 @@ public class AiConfigController {
     private final AiConnectionProbe probe;
 
     private final AiModelCatalog catalog;
+
+    @Autowired(required = false)
+    private ErrorBodyFactory errorBodyFactory;
 
     public AiConfigController(AiConfigService configService, AiConfigWriter writer, AiConnectionProbe probe,
             AiModelCatalog catalog) {
@@ -148,14 +153,14 @@ public class AiConfigController {
             // 用户去改 key 也修不好（真正要修的是 KEK），排障方向被带偏。
             if (key.status() == AiConfigService.KeyStatus.UNREADABLE) {
                 return new ProbeView(false, null, 0L, AiConfigService.CODE_KEY_UNREADABLE,
-                        "库里的密钥无法解密：请到「设置 → AI」重新录入密钥，或让管理员恢复加密配置", 0);
+                        localizedMessage(AiConfigService.CODE_KEY_UNREADABLE), 0);
             }
             // 种子行（source=ENV_SEED）是受信来源：私网闸对它例外（CI 的 127.0.0.1 桩）
             boolean trusted = AiProvider.SOURCE_ENV_SEED.equals(provider.getSource());
             AiConnectionProbe.ProbeResult result = this.probe.fetchModels(provider.getBaseUrl(),
                     provider.getModelsPath(), key.apiKey(), trusted);
-            return new ProbeView(result.ok(), result.status(), result.latencyMs(), result.code(), result.message(),
-                    result.modelCount());
+            return new ProbeView(result.ok(), result.status(), result.latencyMs(), result.code(),
+                    localizedMessage(result.code()), result.modelCount());
         });
     }
 
@@ -166,7 +171,7 @@ public class AiConfigController {
         return guarded(() -> {
             AiModelCatalog.CatalogResult result = this.catalog.fetch(id, refresh);
             return new FetchModelsView(result.ok(), result.models(), result.cached(), result.code(),
-                    result.message());
+                    localizedMessage(result.code()));
         });
     }
 
@@ -225,23 +230,45 @@ public class AiConfigController {
             return ResponseEntity.ok(ApiResponse.ok(action.get()));
         }
         catch (AiConfigException ex) {
-            return fail(ex.getStatus(), ex.getCode(), ex.getMessage());
+            return fail(ex.getStatus(), ex.getCode());
         }
         catch (AiEndpointGuard.GuardException ex) {
             // 闸的异常若从写路径以外的口溢出（如直接校验 baseUrl），同样按 400 落
-            return fail(HttpStatus.BAD_REQUEST, ex.getCode(), ex.getMessage());
+            return fail(HttpStatus.BAD_REQUEST, ex.getCode());
         }
         catch (AiKeyCipher.KeyCipherException ex) {
-            return fail(HttpStatus.BAD_REQUEST, ex.getCode(), ex.getMessage());
+            return fail(HttpStatus.BAD_REQUEST, ex.getCode());
         }
     }
 
-    private static <T> ResponseEntity<ApiResponse<T>> fail(HttpStatus status, String code, String message) {
-        // 只记稳定 code + 状态码：message 是前端按稳定 code 本地化前的安全回退文案（可能包含 provider/model 标识），日志不复述
+    private <T> ResponseEntity<ApiResponse<T>> fail(HttpStatus status, String code) {
+        // 只记稳定 code + 状态码：异常 message 只留在内部异常对象，不进公开响应或日志。
         if (log.isDebugEnabled()) {
             log.debug("config write rejected code={} status={}", code, status.value());
         }
-        return ResponseEntity.status(status).body(ApiResponse.error(code, message));
+        return ResponseEntity.status(status).body(ApiResponse.error(code, localizedMessage(code)));
+    }
+
+    private String localizedMessage(String code) {
+        if (code == null) {
+            return null;
+        }
+        String fallback = switch (code) {
+            case AiEndpointGuard.CODE_INVALID_BASE_URL -> "接口地址不合法";
+            case AiEndpointGuard.CODE_BLOCKED_PRIVATE_ENDPOINT -> "目标地址指向内网/本机，已拦截";
+            case AiKeyCipher.CODE_KEK_MISSING -> "尚未配置加密密钥，无法保存 API Key";
+            case AiKeyCipher.CODE_KEY_UNREADABLE -> "API Key 无法解密";
+            case AiConfigWriter.CODE_PROVIDER_NOT_FOUND -> "供应商不存在";
+            case AiConnectionProbe.CODE_AUTH_FAILED -> "上游鉴权失败";
+            case AiConnectionProbe.CODE_MODELS_INVALID -> "模型列表格式不合法";
+            case AiConnectionProbe.CODE_MODELS_UNSUPPORTED -> "上游不支持模型列表接口";
+            case AiConnectionProbe.CODE_UNREACHABLE -> "上游不可达";
+            default -> "配置操作未完成";
+        };
+        if (this.errorBodyFactory == null) {
+            return fallback;
+        }
+        return this.errorBodyFactory.message(code, fallback, null, ErrorBodyFactory.requestLocale());
     }
 
     private ProviderView toView(AiProvider provider, List<AiProviderModel> models) {

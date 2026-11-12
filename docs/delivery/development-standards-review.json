@@ -6043,6 +6043,34 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "本批删除文本反解而非修改流式解析，不涉及UTF-8或字素切割。"},
         "verification-review": {"status": "checked", "reason": "agent-1247 APPROVED；新增参数契约单点及TaskSlotResolver 11、条件状态9、ResumeContextRefresh 7均通过，后端编译BUILD SUCCESS；真实模型、Cluster和全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:d78378a31ae7593425f1d02056b2a0a45e486a085cdec7d2b0e53c28c101a5ec",
+      "status": "reviewed",
+      "reason": "逐hunk复核配置异常和接口输出白名单，独立审查agent-1240确认HTTP语义、业务码和内部cause链保持，未新增异常文本或供应商映射。",
+      "reviewedAt": "2026-11-12T09:52:31+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1240、施工agent-1236",
+      "specChanges": [
+        {
+          "change": "配置异常与探针结果不再向公开响应输出异常getMessage、类名、主机/IP、配置值或密钥材料。",
+          "reason": "原始异常和内部实现信息违反输出脱敏与白名单边界。",
+          "impact": "对外仅保留稳定业务码、i18n文案、安全fallback及既有业务字段；/test和/models/fetch的200+ok=false及HTTP状态映射不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiEndpointGuard.java", "status": "checked", "reason": "拒绝消息去除类名、主机、IP和配置值，scheme/凭据/私网校验顺序及稳定码不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiKeyCipher.java", "status": "checked", "reason": "删除异常类名拼接，cause仅作内部因果链，不进入公开消息；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiConfigController.java", "status": "checked", "reason": "异常与探针结果按稳定code和i18n/fallback输出，不再读取getMessage或result.message，HTTP与ok=false语义不变；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有ErrorBodyFactory、i18n与异常类型，无新增映射、依赖或平行错误协议。"},
+        "java-api-style": {"status": "checked", "reason": "三个生产Java均经IDEA Reformat，新构造器、固定消息及校验顺序逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "公开输出不含异常类名、原始消息、主机/IP、配置值或密钥，cause仅内部保留，符合白名单边界。"},
+        "toc-interaction": {"status": "checked", "reason": "用户使用稳定业务文案，不接触内部异常、地址或配置细节，HTTP失败语义不变。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "仅收敛配置接口输出，未修改Redis、数据库、SSE或并发状态。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1240 APPROVED；四类泄露反例均RED→GREEN，中英文及200+ok=false/HTTP映射保持，后端358源编译BUILD SUCCESS；真实服务与全量测试NOT_RUN。"}
+      }
     }
   ]
 }

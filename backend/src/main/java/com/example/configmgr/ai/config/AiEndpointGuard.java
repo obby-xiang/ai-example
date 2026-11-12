@@ -78,34 +78,33 @@ public class AiEndpointGuard {
         URI uri = parse(url);
         String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
         if (!"http".equals(scheme) && !"https".equals(scheme)) {
-            throw invalid("baseUrl must be an absolute http/https URL (current scheme = " + uri.getScheme() + ")");
+            throw invalid();
         }
         if (uri.getRawUserInfo() != null) {
-            throw invalid("baseUrl must not contain embedded credentials (user:pass@); use the key field instead");
+            throw invalid();
         }
         String host = uri.getHost();
         if (!StringUtils.hasText(host)) {
-            throw invalid("baseUrl must include a hostname");
+            throw invalid();
         }
         if (uri.getPort() != -1 && (uri.getPort() < 1 || uri.getPort() > 65535)) {
-            throw invalid("baseUrl port is out of range (" + uri.getPort() + ")");
+            throw invalid();
         }
         boolean metadataHost = isMetadataHost(host);
         if (this.properties.getConfig().isAllowPrivateEndpoints() || trusted) {
             if (metadataHost) {
                 // 元数据主机名连"放行私网"都不该放：它不是用户的网关，只可能是 SSRF 的靶子
-                throw blocked("baseUrl points to a cloud metadata host (" + host + ") and is always blocked");
+                throw blocked();
             }
             return url;
         }
         if (metadataHost) {
-            throw blocked("baseUrl points to a cloud metadata host (" + host + ") and is always blocked");
+            throw blocked();
         }
         InetAddress[] addresses = resolve(host);
         for (InetAddress address : addresses) {
             if (isPrivate(address)) {
-                throw blocked("baseUrl resolves to a private/loopback/reserved address (" + host + " -> " + address.getHostAddress()
-                        + ") and is blocked by default; set app.ai.config.allow-private-endpoints=true for an internal gateway");
+                throw blocked();
             }
         }
         return url;
@@ -120,14 +119,14 @@ public class AiEndpointGuard {
      */
     private static String normalise(String baseUrl) {
         if (!StringUtils.hasText(baseUrl)) {
-            throw invalid("baseUrl is required");
+            throw invalid();
         }
         String url = baseUrl.trim();
         while (url.endsWith("/")) {
             url = url.substring(0, url.length() - 1);
         }
         if (url.length() > MAX_URL_LENGTH) {
-            throw invalid("baseUrl exceeds the maximum length of " + MAX_URL_LENGTH + " characters");
+            throw invalid();
         }
         return url;
     }
@@ -138,10 +137,10 @@ public class AiEndpointGuard {
             uri = new URI(url);
         }
         catch (Exception ex) {
-            throw invalid("baseUrl is not a valid URL: " + ex.getClass().getSimpleName());
+            throw invalid();
         }
         if (uri.getScheme() == null) {
-            throw invalid("baseUrl requires an http:// or https:// scheme");
+            throw invalid();
         }
         return uri;
     }
@@ -190,12 +189,13 @@ public class AiEndpointGuard {
         return false;
     }
 
-    private static GuardException invalid(String message) {
-        return new GuardException(CODE_INVALID_BASE_URL, message);
+    private static GuardException invalid() {
+        return new GuardException(CODE_INVALID_BASE_URL, "baseUrl is invalid");
     }
 
-    private static GuardException blocked(String message) {
-        return new GuardException(CODE_BLOCKED_PRIVATE_ENDPOINT, message);
+    private static GuardException blocked() {
+        return new GuardException(CODE_BLOCKED_PRIVATE_ENDPOINT,
+                "baseUrl points to a private, loopback, reserved or metadata endpoint");
     }
 
     /** 闸的拒绝面：只带稳定 code（控制器按它映射 HTTP 状态与前端文案）。 */

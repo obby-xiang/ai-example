@@ -184,6 +184,18 @@ class AiKeyCipherTest {
 		assertCipherException(() -> noKek.encrypt(SECRET, PROVIDER_CODE, KEY_REF), AiKeyCipher.CODE_KEK_MISSING);
 	}
 
+	@Test
+	void decryptionFailureKeepsCauseWithoutLeakingClassNameOrSecret() {
+		String envelope = this.cipher.encrypt(SECRET, PROVIDER_CODE, KEY_REF);
+
+		assertThatThrownBy(() -> this.cipher.decrypt(envelope, "another-provider", KEY_REF))
+			.isInstanceOfSatisfying(AiKeyCipher.KeyCipherException.class, ex -> {
+				assertThat(ex.getCode()).isEqualTo(AiKeyCipher.CODE_KEY_UNREADABLE);
+				assertThat(ex.getMessage()).doesNotContain("AEADBadTagException", SECRET);
+				assertThat(ex.getCause()).isNotNull();
+			});
+	}
+
 	private static void assertCipherException(Runnable action, String expectedCode) {
 		assertThatThrownBy(action::run).isInstanceOfSatisfying(AiKeyCipher.KeyCipherException.class,
 				ex -> assertThat(ex.getCode()).isEqualTo(expectedCode));

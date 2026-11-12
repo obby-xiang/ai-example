@@ -100,6 +100,21 @@ class AiEndpointGuardTest {
 	}
 
 	@Test
+	void rejectionMessagesOmitExceptionClassHostIpAndConfigurationValues() {
+		assertThatThrownBy(() -> guard(true).checkForWrite("https://sk-output-guard@127.0.0.1:notaport"))
+			.isInstanceOfSatisfying(AiEndpointGuard.GuardException.class, ex -> {
+				assertThat(ex.getCode()).isEqualTo(AiEndpointGuard.CODE_INVALID_BASE_URL);
+				assertThat(ex.getMessage()).doesNotContain("URISyntaxException", "127.0.0.1", "notaport",
+						"sk-output-guard");
+			});
+		assertThatThrownBy(() -> guard(false).checkForWrite("http://127.0.0.1:18399"))
+			.isInstanceOfSatisfying(AiEndpointGuard.GuardException.class, ex -> {
+				assertThat(ex.getCode()).isEqualTo(AiEndpointGuard.CODE_BLOCKED_PRIVATE_ENDPOINT);
+				assertThat(ex.getMessage()).doesNotContain("127.0.0.1", "app.ai.config.allow-private-endpoints");
+			});
+	}
+
+	@Test
 	void urlLongerThanTheColumnIsRejected() {
 		String longUrl = "https://api.example.com/" + "a".repeat(600);
 		assertThatThrownBy(() -> guard(false).checkForWrite(longUrl))
