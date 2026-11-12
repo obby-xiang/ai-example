@@ -16,7 +16,7 @@
  *   navigate_to / open_export_file_editor / generative_form / 9 个表格工具
  * - 前端工具（utils/frontend-tools.ts 执行器）：navigate_to（别名 open_page / restore_task /
  *   goto_step）、open_export_file_editor、download_export_files、generative_form、
- *   select_definitions（别名 select_defs）、set_condition（别名 set_conditions）、
+ *   select_definitions（别名 select_defs）、set_conditions、
  *   confirm_step、set_import_mode、run_job、cancel_job、download、
  *   refresh_defs / refresh_data / refresh_tasks
  */
@@ -155,7 +155,6 @@ function summaryFor(name: string, args: ToolArgs): string | null {
       const count = Array.isArray(codes) ? codes.length : 0
       return count > 0 ? optional(`tool.${name}.withCount`, { count }) : optional(`tool.${name}.summary`)
     }
-    case 'set_condition':
     case 'set_conditions':
       return optional(`tool.${name}.summary`)
     case 'set_import_mode': {

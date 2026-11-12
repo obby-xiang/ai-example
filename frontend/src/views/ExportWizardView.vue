@@ -162,7 +162,7 @@ import { useI18n } from 'vue-i18n'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { head, uniq } from 'lodash'
+import { head, isEqual, uniq } from 'lodash'
 import DefSelector from '@/components/wizard/DefSelector.vue'
 import ConditionForm from '@/components/wizard/ConditionForm.vue'
 import JobProgress from '@/components/JobProgress.vue'
@@ -172,6 +172,7 @@ import { definitionsApi } from '@/api/definitions'
 import { dataApi } from '@/api/data'
 import { jobsApi } from '@/api/jobs'
 import { tasksApi } from '@/api/tasks'
+import { aiApi } from '@/api/ai'
 import { useTaskStore } from '@/stores/task'
 import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
 import { noteAiPage, registerAiRegion, unregisterAiRegion } from '@/utils/ai-regions'
@@ -217,6 +218,7 @@ import { watchJob, type JobChannelState } from '@/utils/job-watch'
 import { userFacingErrorText } from '@/utils/ui-error'
 import { logCaughtError } from '@/utils/log-caught-error'
 import { confirmIrreversible } from '@/utils/confirm-irreversible'
+import type { ConditionDraftProjection } from '@/types/ai'
 import { uiAbandonGuard, isUiAbandoned, uiAbandonedReply, uiStepAbandonedReply } from '@/utils/ui-lifetime'
 
 const { t, locale } = useI18n()
@@ -392,6 +394,7 @@ const loadedGrids = new Set<string>()
  * 换任务发生在这些窗口里时，A 的选中集/条件/表格字节会落到 B（"A 写进 B"的同族）。
  */
 let taskGeneration = 0
+let recoveredConditionDraft: ConditionDraftProjection | null = null
 /**
  * 在途下载的配置编码（批 A 补：同码并发防重）。
  *
@@ -725,6 +728,84 @@ function restoreExportTaskState(loaded: Task): void {
   })
 }
 
+async function recoverConditionDrafts(generation: number, forTask: number): Promise<boolean> {
+  recoveredConditionDraft = null
+  const ai = useAiStore()
+  const sessionId = ai.sessionId
+  if (sessionId.trim() === '') {
+    return true
+  }
+  try {
+    const projection = await aiApi.conditionDrafts(sessionId, forTask)
+    if (generation !== taskGeneration || taskId.value !== forTask || ai.sessionId !== sessionId
+      || projection.complete !== true || typeof projection.fingerprint !== 'string' || projection.fingerprint === '') {
+      return false
+    }
+    if (projection.items.length > 0) {
+      const prepared = prepareConditionBatch({ items: [...projection.items] })
+      if (!prepared.ok) {
+        return false
+      }
+      applyConditionBatch(prepared.items.filter((item) => !isEqual(serverConditionOf(item.defCode), item.condition)))
+    }
+    recoveredConditionDraft = projection
+    return true
+  } catch (error) {
+    logCaughtError(error, 'export-wizard:condition-draft-recovery')
+    return false
+  }
+}
+
+function isCurrentConditionBatch(items: ConditionDraftProjection['items']): boolean {
+  const latest = new Map<string, FieldQueryCondition | null>()
+  if (items.length > 0) {
+    const prepared = prepareConditionBatch({ items: [...items] })
+    if (!prepared.ok) {
+      return false
+    }
+    for (const item of prepared.items) {
+      latest.set(item.defCode, item.condition)
+    }
+  }
+  for (const code of selectedDefs.value) {
+    const actual = assertConditionBuildable(draftModels[code] ?? emptyDraftModel())
+    if (!isEqual(latest.get(code) ?? null, actual)) {
+      return false
+    }
+  }
+  return true
+}
+
+async function verifyRecoveredConditionDraft(generation: number, forTask: number): Promise<boolean> {
+  const expected = recoveredConditionDraft
+  if (expected === null) {
+    return true
+  }
+  const ai = useAiStore()
+  const sessionId = ai.sessionId
+  if (sessionId.trim() === '') {
+    return false
+  }
+  try {
+    const latest = await aiApi.conditionDrafts(sessionId, forTask)
+    if (generation !== taskGeneration || taskId.value !== forTask || ai.sessionId !== sessionId
+      || latest.complete !== true || typeof latest.fingerprint !== 'string' || latest.fingerprint === '') {
+      return false
+    }
+    if (latest.fingerprint === expected.fingerprint) {
+      return isEqual(latest.items, expected.items)
+    }
+    if (!isCurrentConditionBatch(latest.items)) {
+      return false
+    }
+    recoveredConditionDraft = latest
+    return true
+  } catch (error) {
+    logCaughtError(error, 'export-wizard:condition-draft-recovery-check')
+    return false
+  }
+}
+
 async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
   if (taskId.value === null) {
     taskDetailReady.value = false
@@ -757,8 +838,10 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     return { taskOk: false, filesOk: false }
   }
   restoreExportTaskState(loaded)
-  // 详情已应用：选中集 / 条件草案 / 步骤 / 状态都已按服务端事实恢复并声明进工作区
-  //（**不等**下面的作业恢复与结果文件列表 —— 它们不影响后续动作的正确性）
+  if (!await recoverConditionDrafts(generation, loaded.id ?? taskId.value ?? 0)) {
+    return { taskOk: false, filesOk: false }
+  }
+  // 详情与未提交条件草案均已按权威事实应用；恢复证据不足时保持未就绪并禁止默认空条件提交。
   taskDetailReady.value = true
   await resumeJobs()
   if (generation !== taskGeneration) {
@@ -941,6 +1024,7 @@ function resetTaskScopedState(): void {
     delete condErrors[code]
   }
   touchedConditions.clear()
+  recoveredConditionDraft = null
   clearExactRowCounts()
   exportResults.value = []
   checkedDefs.value = []
@@ -1197,6 +1281,20 @@ async function persistStepData(
 ): Promise<{ ok: boolean; reason?: string; displayReason?: string }> {
   if (forTask === null) {
     return { ok: true }
+  }
+  if (!taskDetailReady.value) {
+    return {
+      ok: false,
+      reason: '任务详情与查询条件尚未恢复，本次未保存或推进，请重新载入后重试',
+      displayReason: t('views.export.msg.taskLoadFailed')
+    }
+  }
+  if (!await verifyRecoveredConditionDraft(generation, forTask)) {
+    return {
+      ok: false,
+      reason: '查询条件草案已变化或无法核对，本次未保存或推进，请重新载入后重试',
+      displayReason: t('views.export.msg.taskLoadFailed')
+    }
   }
   persisting.value = true
   try {

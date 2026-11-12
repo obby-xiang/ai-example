@@ -973,10 +973,6 @@
       "summary": "Select definitions",
       "withCount": "Select definitions ({count})"
     },
-    "set_condition": {
-      "title": "Set query conditions",
-      "summary": "Set query conditions"
-    },
     "confirm_step": {
       "title": "Confirm step",
       "summary": "Confirm current step",

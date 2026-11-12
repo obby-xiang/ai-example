@@ -928,10 +928,10 @@ public class ConditionsForm extends HostForm {
         }
     }
 
-    private record BatchItem(String defCode) {
+    record BatchItem(String defCode, JsonNode conditions) {
     }
 
-    private static List<BatchItem> batchItemsOf(String argumentsJson) {
+    static List<BatchItem> batchItemsOf(String argumentsJson) {
         JsonNode root = parseJson(argumentsJson);
         if (root == null || !root.isObject() || root.size() != 1 || !root.path("items").isArray()
                 || root.path("items").isEmpty()) {
@@ -948,7 +948,7 @@ public class ConditionsForm extends HostForm {
             if (defCode.isEmpty() || !seen.add(defCode)) {
                 return null;
             }
-            items.add(new BatchItem(defCode));
+            items.add(new BatchItem(defCode, item.path("conditions")));
         }
         return List.copyOf(items);
     }

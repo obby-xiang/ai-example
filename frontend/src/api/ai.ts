@@ -23,6 +23,7 @@ import type {
   AiHistory,
   SessionPurgeResponse,
   AiRunCurrent,
+  ConditionDraftProjection,
   ConfirmRequest,
   ConfirmResult,
   FrontendToolResultAck,
@@ -329,6 +330,12 @@ export function runsCurrent(sessionId: string): Promise<AiRunCurrent> {
   return get<AiRunCurrent>(`/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
 }
 
+/** GET /api/ai/condition-drafts（当前会话、当前任务的服务端权威草案投影）。 */
+export function conditionDrafts(sessionId: string, taskId: number): Promise<ConditionDraftProjection> {
+  const query = `sessionId=${encodeURIComponent(sessionId)}&taskId=${encodeURIComponent(String(taskId))}`
+  return get<ConditionDraftProjection>(`/ai/condition-drafts?${query}`)
+}
+
 export function resumeRun(runId: string): Promise<{
   resumed: boolean
   historyComplete?: boolean
@@ -351,6 +358,7 @@ export const aiApi = {
   deleteHistory,
   health,
   runsCurrent,
+  conditionDrafts,
   resumeRun,
   feedbackSubmit,
   feedbackList

@@ -34,7 +34,9 @@ import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.Limit;
 import org.springframework.data.redis.connection.stream.ByteRecord;
+import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -47,6 +49,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -2484,6 +2487,37 @@ public class RunStore {
             RedisDegradation.record(RedisDegradation.C1_RUN_INDEX_PRUNE, ex);
             throw new AiStateUnavailableException("Failed to read session->run index sessionId=" + sessionId, ex);
         }
+    }
+
+    /** 有界读取会话 run 索引；超过上限或读取失败均由调用方失败关闭。 */
+    public Set<String> sessionRunIds(String sessionId, int maxRuns) {
+        if (StringUtils.isBlank(sessionId)) {
+            return Set.of();
+        }
+        if (maxRuns < 1) {
+            throw new IllegalArgumentException("maxRuns must be positive");
+        }
+        Set<String> members = new LinkedHashSet<>();
+        ScanOptions options = ScanOptions.scanOptions().count(Math.min(maxRuns, 100)).build();
+        try (Cursor<String> cursor = this.redis.opsForSet().scan(sessionRunsKey(sessionId), options)) {
+            if (cursor == null) {
+                throw new AiStateUnavailableException("Failed to scan session->run index " + sessionId);
+            }
+            while (cursor.hasNext()) {
+                String runId = cursor.next();
+                if (StringUtils.isNotBlank(runId)) {
+                    members.add(runId);
+                }
+                if (members.size() > maxRuns) {
+                    throw new AiStateUnavailableException("Session run index exceeds read limit " + sessionId);
+                }
+            }
+        } catch (AiStateUnavailableException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            throw new AiStateUnavailableException("Failed to scan session->run index " + sessionId, ex);
+        }
+        return Set.copyOf(members);
     }
 
     /**

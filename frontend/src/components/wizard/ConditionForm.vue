@@ -195,7 +195,7 @@ import { useI18n } from 'vue-i18n'
  *
  * AI 标注（visop 批 B）：传入 `aiRefPrefix`（区域 id，如 `export.cond.CURRENCY`）时，
  * 每行的字段 / 操作符 / 取值 / 删除与「添加条件」带 `data-ai-*`。选择类控件的**选择语义**
- * 仍由注册动作 `set_condition` 承担（见设计稿 §2.2 批 B 的 O-2 口径：原语只补「看得见」），
+ * 仍由注册动作 `set_conditions` 承担（见设计稿 §2.2 批 B 的 O-2 口径：原语只补「看得见」），
  * 因此它们的动词集收紧到 `highlight,scroll`；文本取值框才是 `fill` 写入口。
  */
 import { computed, ref, watch } from 'vue'

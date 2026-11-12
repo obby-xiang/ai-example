@@ -973,10 +973,6 @@
       "summary": "选择配置项",
       "withCount": "选择配置项（{count} 项）"
     },
-    "set_condition": {
-      "title": "设置查询条件",
-      "summary": "设置查询条件"
-    },
     "confirm_step": {
       "title": "确认步骤",
       "summary": "确认当前步骤",

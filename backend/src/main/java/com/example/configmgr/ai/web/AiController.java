@@ -24,6 +24,7 @@ import com.example.configmgr.ai.gate.ContextFieldGate;
 import com.example.configmgr.ai.gate.InputSanitizer;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.feedback.AiFeedback;
+import com.example.configmgr.ai.form.ConditionDraftProjectionService;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.feedback.AiFeedbackRepository;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
@@ -177,6 +178,9 @@ public class AiController {
     private final ConfirmGate confirmGate;
 
     private final RunStore runStore;
+
+    @Autowired(required = false)
+    private ConditionDraftProjectionService conditionDraftProjection;
 
     @Autowired(required = false)
     private ContextStateStore contextStateStore;
@@ -2013,6 +2017,26 @@ public class AiController {
         body.put("archiveTrimmed", gap);
         body.put("archiveGap", gap);
         body.put("recoverable", readable && !gap ? "complete" : "partial");
+    }
+
+    /** 当前会话、当前任务的条件草案只读投影；不读取展示历史或推断活动 run。 */
+    @GetMapping("/condition-drafts")
+    public ResponseEntity<?> conditionDrafts(@RequestParam(required = false) String sessionId,
+                                             @RequestParam(required = false) Long taskId) {
+        if (!StringUtils.isNotBlank(sessionId) || taskId == null || taskId <= 0L) {
+            return json(HttpStatus.BAD_REQUEST, errorBody(ErrorCodes.BAD_REQUEST, "sessionId 与 taskId 均为必填"));
+        }
+        if (this.conditionDraftProjection == null) {
+            return json(HttpStatus.SERVICE_UNAVAILABLE,
+                    errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE, "筛选条件草案暂不可用，请稍后重试"));
+        }
+        try {
+            return ResponseEntity.ok(ApiResponse.ok(this.conditionDraftProjection.project(sessionId, taskId).toMap()));
+        } catch (RuntimeException ex) {
+            log.warn("condition draft projection read failed sessionId={} taskId={}", sessionId, taskId, ex);
+            return json(HttpStatus.SERVICE_UNAVAILABLE,
+                    errorBody(ErrorCodes.AI_REDIS_UNAVAILABLE, "筛选条件草案暂不可用，请稍后重试"));
+        }
     }
 
     /**

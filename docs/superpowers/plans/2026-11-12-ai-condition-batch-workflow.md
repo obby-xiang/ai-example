@@ -15,6 +15,7 @@
 - `create_task.conditions={}` 表示未决定；`set_conditions(item.conditions={})` 表示该项明确不筛选，二者不得混淆。
 - 不新增数据库字段、Redis 键族、SSE 帧类型或新执行器；草案不写业务库，只有 `confirm_step`/启动前由前端 `persistStepData` 提交。
 - 一次批量调用只有一个 toolCallId、一张过程卡和一个汇总回执，但每个配置项的草案、校验、settled 和恢复事实独立可证。
+- 未提交草案刷新恢复只读 `GET /api/ai/condition-drafts` 的 session+task 权威投影：逐项 Pending 归属、跨 run 最新批次、双读指纹及 persist 前同指纹/页面条件复核；无法证明一致时零写，不新增第二套存储。
 - 任意 item 非法或任一项执行失败，整批不得写入或伪装成功。
 - 模型工具协议只披露 `set_conditions(items)`，不披露单项条件工具或别名；前端条件动作只接受 `{items:[{defCode,conditions}]}`。
 - 未经 `start_export` 批准不得创建作业；普通导出不增加高危复选框。

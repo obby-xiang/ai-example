@@ -504,13 +504,17 @@ export function normalizeConditionBatch(payload: Record<string, unknown>): reado
       return null
     }
     const item = candidate as Record<string, unknown>
-    if (Object.keys(item).length !== 2 || typeof item.defCode !== 'string' || item.defCode.trim() === ''
-      || !Object.prototype.hasOwnProperty.call(item, 'conditions') || item.conditions === undefined
-      || item.conditions === null || defCodes.has(item.defCode)) {
+    if (Object.keys(item).length !== 2 || typeof item.defCode !== 'string') {
       return null
     }
-    defCodes.add(item.defCode)
-    items.push({ defCode: item.defCode, conditions: item.conditions })
+    const defCode = item.defCode.trim()
+    if (defCode === '' || !Object.prototype.hasOwnProperty.call(item, 'conditions')
+      || item.conditions === null || typeof item.conditions !== 'object' || Array.isArray(item.conditions)
+      || defCodes.has(defCode)) {
+      return null
+    }
+    defCodes.add(defCode)
+    items.push({ defCode, conditions: item.conditions })
   }
   return items
 }

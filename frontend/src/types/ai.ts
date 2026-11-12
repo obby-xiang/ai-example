@@ -1256,6 +1256,13 @@ export interface AiRunCurrentEntry {
   irreversible?: boolean
 }
 
+/** GET /api/ai/condition-drafts 的服务端权威草案投影。 */
+export interface ConditionDraftProjection {
+  complete: boolean
+  items: Array<{ defCode: string; conditions: unknown }>
+  fingerprint: string
+}
+
 /** GET /api/ai/runs/current?sessionId= 的 data：当前会话进行中的 run 挂起快照（T2b-D#3）。 */
 export interface AiRunCurrent {
   /** 空态（索引缺失/进程已死/快照已清）：仅 found=false，其余为默认值 */

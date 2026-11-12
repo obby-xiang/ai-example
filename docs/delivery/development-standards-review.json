@@ -7076,6 +7076,60 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "完整有序items按JSON结构比较，不按文本contains或固定条件值识别。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1279确认Critical-1全部ADDRESSED且无新问题；施工报告A→B→A三次真实请求、A→A幂等、无关批次、同时间戳、后续失败、多项修改、迟到回执和15项单卡单回执共8个独立单点通过，360源clean compile成功；主控未重跑测试，真实Redis/模型/浏览器/多实例NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:8a4fec5fbe933a0ebf6df794dc626706a61bc1c47e3cea8cbd4499074854444f",
+      "status": "reviewed",
+      "reason": "逐hunk复核session+task权威草案投影、跨run逐项归属、双读指纹、刷新恢复和persist前页面条件复核；多轮独立复核最终可合入。",
+      "reviewedAt": "2026-11-13T06:22:43+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1279、施工agent-1280",
+      "specChanges": [
+        {
+          "change": "新增GET /api/ai/condition-drafts，按session+task投影未提交set_conditions草案，不再由前端拼接history/current/runDetail选择。",
+          "reason": "初版前端多接口选择存在跨任务、跨run遗漏和同run新批次绕过，且不能证明Pending自身归属。",
+          "impact": "仅接纳draftRunId/draftTaskId精确匹配的Pending，跨run按def选择requestedAtMs最新OK批次，其他任务隔离，无候选才返回空items。"
+        },
+        {
+          "change": "投影包含complete/items/fingerprint，服务端完整双读候选并比较指纹；session runs使用最多256的有界SSCAN，超限或读取失败关闭。",
+          "reason": "同run新批次和Redis Hash无序返回不能造成旧草案被误当最新事实。",
+          "impact": "指纹稳定排序并覆盖归属、状态、结局、requestedAtMs、合法性和规范参数签名，变化即complete=false；历史非法不覆盖后续合法，最新非法仍拒绝。"
+        },
+        {
+          "change": "前端恢复和persistStepData写入前都请求权威投影；空投影同样保存证据，指纹不同时比较最新items与当前页面规范条件。",
+          "reason": "刷新丢草案及其他页签/实例新增草案都可能让页面空模型被误提交为全量。",
+          "impact": "一致才恢复或更新证据继续，不一致在任何selectDefs/setCondition前零写；本页合法新增可推进，手工无候选与显式{}保持真实语义。"
+        },
+        {
+          "change": "normalizeConditionBatch要求conditions为对象且defCode trim后判重/选中，清理旧set_condition展示、locale和字符串兼容分支。",
+          "reason": "前后端批量协议必须同形，旧单数工具不做兼容残留。",
+          "impact": "字符串conditions与空白/重复defCode拒绝，生产摘要只保留set_conditions。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionDraftProjectionService.java", "status": "checked", "reason": "按任务归属跨run计算最新草案、稳定双读指纹、最新合法性与完整响应，方法经IDEA Reformat和定向Checkstyle。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java", "status": "checked", "reason": "向权威投影开放同一批量结构解析与规范签名，不改变现有幂等和确认门；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "新增最多256的有界sessionRunIds SSCAN，超限/异常失败关闭，不使用无界SMEMBERS；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "新增只读condition-drafts入口并使用安全响应，不透出内部异常或路径；已IDEA Reformat。"},
+        {"path": "frontend/src/api/ai.ts", "status": "checked", "reason": "新增权威草案投影只读客户端，复用既有请求与身份边界。"},
+        {"path": "frontend/src/components/wizard/ConditionForm.vue", "status": "checked", "reason": "仅清理旧单数工具名注释，无表单交互变化。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "删除旧set_condition英文死展示词条。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "删除旧set_condition中文死展示词条。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "声明condition-drafts的complete/items/fingerprint响应类型。"},
+        {"path": "frontend/src/types/tools.ts", "status": "checked", "reason": "conditions必须为对象，defCode trim后判空判重并用于选中，保持显式{}。"},
+        {"path": "frontend/src/utils/condition-payload.ts", "status": "checked", "reason": "删除无入口的字符串条件兼容，当前只接受结构对象。"},
+        {"path": "frontend/src/utils/tool-summaries.ts", "status": "checked", "reason": "摘要只保留set_conditions当前工具分支。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "仅使用权威投影恢复，所有投影保存证据，persist前复核指纹与页面规范条件，不一致零写。"},
+        {"path": "docs/superpowers/plans/2026-11-12-ai-condition-batch-workflow.md", "status": "checked", "reason": "登记权威只读投影、双读指纹和persist前复核的最终恢复规格。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用PendingToolCall、RunStore索引、ConditionsForm签名、prepare/apply和现有API边界，无新增存储、依赖或第二套草案。"},
+        "java-api-style": {"status": "checked", "reason": "生产Java均IDEA Reformat，新服务定向Checkstyle 0 violations，方法<=50行和复杂度<=20，JSON形状显式。"},
+        "logging-exception-safety": {"status": "checked", "reason": "扫描、读取、歧义、非法、最新非OK及指纹变化均失败关闭，不向用户透出内部异常，不伪装空草案或成功。"},
+        "toc-interaction": {"status": "checked", "reason": "刷新静默恢复真实草案，只有无法证明一致时阻止推进，不增加技术提示、重复表单或额外操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "逐项draftRunId/draftTaskId隔离，跨run时间戳与歧义处理，双读及persist前复核识别同run/其他实例新批次，扫描有界且失败关闭。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "规范签名保留items顺序和对象结构，页面条件由assertConditionBuildable比较，不按文案或字符串识别条件。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1279最终可合入，跨任务/跨run/同run新批次/空投影/历史非法全部ADDRESSED；施工报告后端8/8、前端34/34、361源编译、定向Checkstyle、typecheck/build通过；主控未重跑测试，真实Redis游标/HTTP/浏览器/Cluster/多实例NOT_RUN，两个旧断言失败保留且未宣称同基线同红。"}
+      }
     }
   ]
 }

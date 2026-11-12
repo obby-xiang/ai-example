@@ -3,7 +3,7 @@
  *
  * 写类兜底已移除：`dispatchUiEvent` 只认页面能力 handler（`export.setConditions`），页面未就绪
  * 即返回确定性失败，契约层不再替页面 `PUT` 或写工作区；校验由页面 handler 负责。handler 拿到的
- * `conditions` 是**模型给的原始载荷**（对象或 JSON 字符串）：放行坏载荷会让 `IN []` /
+ * `conditions` 是**模型给的原始载荷**（对象）：放行坏载荷会让 `IN []` /
  * 值算子空串写成"0 行/空值"条件，坏 JSON 甚至会被当成字符串或空条件（= 无条件 = 导出全部）。
  *
  * 收口口径：`parseConditionJson` → `draftModelFromCondition` → `buildConditionOutcome`
@@ -83,29 +83,17 @@ function structuralProblem(value: unknown): string | null {
 /**
  * 校验并规范化一份 `set_conditions` 载荷。
  *
- * @param payload 模型给的原始载荷：对象或 JSON 字符串
+ * @param payload 模型给的原始载荷：对象
  * @returns 失败原因（可直接回灌）或 `{condition, serialized}`
  */
 export function validateConditionPayload(payload: unknown): ConditionPayloadVerdict {
   let parsed: unknown
-  if (typeof payload === 'string') {
-    if (payload.trim() === '') {
-      return reject('缺少 conditions（查询条件载荷为空）')
-    }
-    try {
-      parsed = JSON.parse(payload)
-    } catch (error) {
-        logCaughtError(error, 'utils/condition-payload.ts:95')
-      return reject('查询条件无法解析为 JSON（载荷损坏）')
-    }
-  } else {
-    try {
-      // 深拷贝一次：避免调用方对象与后续判读共享引用（也顺带吃掉 undefined / 函数值）
-      parsed = JSON.parse(JSON.stringify(payload))
-    } catch (error) {
-        logCaughtError(error, 'utils/condition-payload.ts:102')
-      return reject('查询条件载荷无法序列化')
-    }
+  try {
+    // 深拷贝一次：避免调用方对象与后续判读共享引用（也顺带吃掉 undefined / 函数值）
+    parsed = JSON.parse(JSON.stringify(payload))
+  } catch (error) {
+      logCaughtError(error, 'utils/condition-payload.ts:102')
+    return reject('查询条件载荷无法序列化')
   }
   const problem = structuralProblem(parsed)
   if (problem !== null) {
@@ -122,7 +110,7 @@ export function validateConditionPayload(payload: unknown): ConditionPayloadVerd
   }
   if (outcome.status === 'cleared') {
     // 只有**显式 `{}`** 才是"清空"：`{"fields":[]}` / `{"scopeKeys":[]}` 这类"有结构但没内容"
-    // 的载荷语义含糊（后端 set_condition 也会拒），按坏载荷处理，避免把一次含糊调用
+    // 的载荷语义含糊（后端 set_conditions 也会拒），按坏载荷处理，避免把一次含糊调用
     // 静默解释成"无条件 = 全量"。
     if (Object.keys(parsed as Record<string, unknown>).length > 0) {
       return reject('查询条件里没有任何可提交的字段或范围（如需清空条件请显式传 {}）')
