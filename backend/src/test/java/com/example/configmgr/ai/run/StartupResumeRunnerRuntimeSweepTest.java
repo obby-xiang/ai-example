@@ -219,6 +219,72 @@ class StartupResumeRunnerRuntimeSweepTest {
 		assertThat(skippedReasons(report)).containsEntry(RUN_ZOMBIE, "ACTIVE");
 	}
 
+	@Test
+	void unavailableScanLeaseDefersWithoutSideEffectsAndRecoversNextTick() {
+		FakeLeaseRedis fake = new FakeLeaseRedis();
+		LeaseService leases = new LeaseService(fake.redis, this.properties, new FakeRenewScheduler(), "inst-scan") {
+			private boolean first = true;
+
+			@Override
+			public AcquireResult acquire(String key, Duration ttl, String owner) {
+				if (this.first) {
+					this.first = false;
+					return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
+				}
+				return super.acquire(key, ttl, owner);
+			}
+		};
+		this.store.useLeaseFacility(leases);
+		seed(RUN_ZOMBIE, RunSnapshot.RUNNING, STALE);
+
+		Map<String, Object> unavailable = this.runner.sweep();
+
+		assertThat(unavailable).containsEntry("deferred", true)
+			.containsEntry("reason", com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE)
+			.containsEntry("candidates", 0);
+		assertThat(resumedRunIds(unavailable)).isEmpty();
+		org.mockito.Mockito.verify(this.executor, org.mockito.Mockito.never()).execute(any(Runnable.class));
+
+		Map<String, Object> recovered = this.runner.sweep();
+
+		assertThat(recovered).doesNotContainKey("deferred");
+		assertThat(resumedRunIds(recovered)).containsExactly(RUN_ZOMBIE);
+		assertThat(resumedOutcomes(recovered)).containsEntry(RUN_ZOMBIE, "ACCEPTED");
+	}
+
+	@Test
+	void acquiredNullScanLeaseDefersAndReleasesTheScanGateForRecovery() {
+		FakeLeaseRedis fake = new FakeLeaseRedis();
+		LeaseService leases = new LeaseService(fake.redis, this.properties, new FakeRenewScheduler(), "inst-scan") {
+			private boolean first = true;
+
+			@Override
+			public AcquireResult acquire(String key, Duration ttl, String owner) {
+				if (this.first) {
+					this.first = false;
+					return new AcquireResult(AcquireOutcome.ACQUIRED, null, true);
+				}
+				return super.acquire(key, ttl, owner);
+			}
+		};
+		this.store.useLeaseFacility(leases);
+		seed(RUN_ZOMBIE, RunSnapshot.RUNNING, STALE);
+
+		Map<String, Object> unavailable = this.runner.sweep();
+
+		assertThat(unavailable).containsEntry("deferred", true)
+			.containsEntry("reason", com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE)
+			.containsEntry("candidates", 0);
+		assertThat(resumedRunIds(unavailable)).isEmpty();
+		org.mockito.Mockito.verify(this.executor, org.mockito.Mockito.never()).execute(any(Runnable.class));
+
+		Map<String, Object> recovered = this.runner.sweep();
+
+		assertThat(recovered).doesNotContainKey("deferred");
+		assertThat(resumedRunIds(recovered)).containsExactly(RUN_ZOMBIE);
+		assertThat(resumedOutcomes(recovered)).containsEntry(RUN_ZOMBIE, "ACCEPTED");
+	}
+
 	/**
 	 * 取消旗标与未决外部输入都优先于"超龄"：一个不复活、一个不绕开人审。
 	 *

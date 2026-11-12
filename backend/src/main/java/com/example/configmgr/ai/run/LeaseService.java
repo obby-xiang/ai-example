@@ -50,10 +50,9 @@ import java.util.function.BooleanSupplier;
  * {@code <epoch>|<owner>} 后再 {@code PEXPIRE} / {@code DEL}。这正是
  * {@code ResumeService#releaseResumeLock}（GET → Java 比对 → DEL）缺陷的根治点：
  * 比对与删除之间租约可能已过期并被别的实例重抢，非原子实现会<b>删掉别人的租约</b>；</li>
- * <li><b>降级</b>（用户裁决 2026-10-21 第 4 条）：Redis 不可用时 {@code tryAcquire} 返回
- * {@link AcquireOutcome#UNAVAILABLE} 并让 {@code leaseOk=false} —— <b>显式降级</b>而非让 NPE 落进
- * 某个 catch；调用方的契约是"拿不到租约 ⇒ 走进程内互斥"（单实例仍然正确）。
- * 不抛异常，是因为租约设施不可用不该把业务动作一起拖垮；</li>
+ * <li><b>不可确认</b>：Redis 不可用时 {@code tryAcquire} 返回 {@link AcquireOutcome#UNAVAILABLE}
+ * 并让 {@code leaseOk=false}，保留与 HELD_ELSEWHERE 的可区分语义；消费者必须失败关闭，
+ * 只有显式无 Redis 的 legacy 装配才可使用进程内互斥；</li>
  * <li><b>续租调度</b>（{@link #markDriving}）：内置<b>小型有界调度池</b>（固定 2~4 条线程，
  * {@link java.util.concurrent.ScheduledThreadPoolExecutor}，随 Bean 销毁关闭）按 {@code app.ai.lease.renew-interval}（默认 10s）续租，
  * 直到 {@link #release}；单条慢命令只占一条线程，不会让其它轮次的续租跟着过期。
@@ -256,8 +255,7 @@ public class LeaseService {
 	 * {@code UNAVAILABLE} 设施不可用（Redis 宕机/超时）。
 	 *
 	 * <p>为什么必须区分后两者：{@code HELD_ELSEWHERE} 的语义是"这一轮已经有主，我什么都不该做"；
-	 * {@code UNAVAILABLE} 的语义是"我不知道有没有主，按进程内互斥继续"。把后者报成前者，
-	 * 一次 Redis 抖动就会让启动续跑/运维续跑/死卡兜底全线停摆。
+	 * {@code UNAVAILABLE} 只表示"共享状态不可确认"，不授权本地互斥继续；消费者在各自业务边界失败关闭。
 	 */
 	public enum AcquireOutcome {
 
@@ -651,7 +649,7 @@ public class LeaseService {
 				return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 			}
 			markFacilityUnhealthy(ex);
-			log.warn("lease acquire degraded key={} owner={} (Redis unavailable; caller falls back to in-process mutex)", key, holder, ex);
+			log.warn("lease acquire degraded key={} owner={} (Redis unavailable; consumer must fail closed)", key, holder, ex);
 			return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
 		}
 	}
@@ -710,7 +708,7 @@ public class LeaseService {
 	 * 用在"入口处决定要不要驱动这一轮"这种一次性的判定上（续跑准入），不放在热路径。
 	 *
 	 * <p>校验失败即作废进程内视图（别再拿它当 fencing 依据）；设施不可用返回
-	 * {@link Hold#UNAVAILABLE}，由调用方按"无租约降级"处理。
+	 * {@link Hold#UNAVAILABLE}，消费者必须在写/危险操作前失败关闭。
 	 */
 	public Hold verifyHeld(String key, long epoch) {
 		return verifyHeld(key, epoch, this.instanceId);

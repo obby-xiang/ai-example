@@ -106,23 +106,4 @@ class SessionGateExpiredHolderTest {
 		assertThat(gate.degradedSessions()).as("前置：泄漏 holder 的 watchdog 必须已因丢锁自停").isPositive();
 	}
 
-	@Test
-	void degradedHolderThatNeverConfirmedALockIsSweptAfterTheConservativeGrace() {
-		this.fake.failScripts = true;
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT, USER)) {
-			assertThat(this.gate.acquire(SESSION, "run-degraded", "token-degraded"))
-				.as("Redis 不可用 ⇒ 降级为进程内门（没有可核对的锁值）")
-				.isNull();
-		}
-		this.fake.failScripts = false;
-		this.now.addAndGet(2 * this.ttlMs + 1L);
-
-		SessionGate.Busy busy;
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(TENANT, USER)) {
-			busy = this.gate.acquire(SESSION, "run-next", "token-next");
-		}
-
-		assertThat(busy).as("降级残留超过保守窗口后不得永久 409").isNull();
-	}
-
 }

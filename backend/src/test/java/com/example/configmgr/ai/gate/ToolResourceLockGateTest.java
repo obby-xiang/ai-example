@@ -1,10 +1,6 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.run.TestRunRegistryFactory;
-import ch.qos.logback.classic.Level;
-import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.conformance.FrameContract;
 import com.example.configmgr.ai.conformance.FrameWire;
@@ -30,7 +26,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -138,8 +133,11 @@ class ToolResourceLockGateTest {
 
 	private ExecutorService workers;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.workers = Executors.newFixedThreadPool(2, runnable -> {
 			Thread thread = new Thread(runnable, "lock-gate-worker");
 			thread.setDaemon(true);
@@ -147,6 +145,7 @@ class ToolResourceLockGateTest {
 		});
 		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf(anyString())).thenReturn(ToolMeta.Channel.BACKEND);
 		when(this.toolRegistry.riskOf(anyString())).thenReturn(ToolMeta.RiskLevel.READ);
 		seedRun(RUN_A);
@@ -157,6 +156,7 @@ class ToolResourceLockGateTest {
 	void tearDown() {
 		this.workers.shutdownNow();
 		this.fake.heal();
+		this.identity.close();
 	}
 
 	// ── S1：同 taskId 并发，恰一个执行 ──────────────────────────────────────
@@ -328,29 +328,89 @@ class ToolResourceLockGateTest {
 		assertThat(this.fake.string(LeaseKeys.task(TASK_ID))).isNull();
 	}
 
-	// ── S6：设施不可用 ⇒ 放行 + WARN ───────────────────────────────────────
+	// ── S6：设施不可用 ⇒ 失败关闭、可恢复、零业务副作用 ─────────────────────
 
 	@Test
-	void unavailableLeaseFacilityDegradesToExecutionWithWarn() {
-		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+	void unavailableLeaseFacilityBlocksExecutionAndRecoversWithoutSideEffects() {
+		this.fake.goDown();
+		FrameWire unavailableWire = attach(RUN_A);
+		this.identity.close();
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+
+		this.manager.executeToolCalls(prompt(RUN_A), response("start_import", taskArgs()));
+		finish(RUN_A);
+
+		assertThat(this.startTool.invocations.get()).as("共享锁不可确认时危险工具不得执行").isZero();
+		assertThat(FrameContract.oneOfType(unavailableWire.frames(), "tool_result"))
+			.containsEntry("outcome", ToolOutcome.BLOCKED.wire())
+			.containsEntry("code", ToolOutcome.CODE_PRECHECK_UNAVAILABLE)
+			.containsEntry("executed", false);
+		assertThat(this.store.claimedBy(RUN_A, CALL_ID)).as("未执行不得消耗认领").isNull();
+		assertThat(this.store.ledger(RUN_A)).as("未执行不得写业务台账").isEmpty();
+
+		this.fake.heal();
+		FrameWire recoveredWire = attach(RUN_B);
+		this.identity.close();
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+		this.manager.executeToolCalls(prompt(RUN_B), response("start_import", taskArgs()));
+		finish(RUN_B);
+
+		assertThat(this.startTool.invocations.get()).as("Redis 恢复后同一业务动作可以重新执行").isEqualTo(1);
+		assertThat(FrameContract.oneOfType(recoveredWire.frames(), "tool_result"))
+			.containsEntry("outcome", ToolOutcome.OK.wire())
+			.containsEntry("executed", true);
+	}
+
+	@Test
+	void acquiredNullJobLockFailsClosedAndReleasesTheTaskLock() {
+		LeaseService emptyJobLease = new LeaseService(this.fake.redis, this.properties, this.renew, "instance-lock") {
+			@Override
+			public AcquireResult acquire(String key, Duration ttl, String owner) {
+				if (LeaseKeys.job(TASK_ID, "IMPORT").equals(key)) {
+					return new AcquireResult(AcquireOutcome.ACQUIRED, null, false);
+				}
+				return super.acquire(key, ttl, owner);
+			}
+		};
+		ToolResourceLocks locks = new ToolResourceLocks(emptyJobLease, this.properties);
+
+		ToolResourceLocks.LockHandle handle = locks.acquire(TASK_ID, "IMPORT", "test-owner");
+
+		assertThat(handle.outcome()).isEqualTo(ToolResourceLocks.LockOutcome.UNAVAILABLE);
+		assertThat(handle.created()).isEmpty();
+		assertThat(this.fake.string(LeaseKeys.task(TASK_ID))).as("空作业锁不得留下已创建的任务锁").isNull();
+		assertThat(this.fake.scriptDeletes.get()).as("只归还本次创建的真实任务锁").isEqualTo(1);
+	}
+
+	@Test
+	void unavailableLockLogStatesThatExecutionIsRefused() {
+		ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+			.getLogger(ToolResourceLocks.class);
+		ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+				new ch.qos.logback.core.read.ListAppender<>();
 		appender.start();
-		Logger logger = (Logger) LoggerFactory.getLogger(ToolResourceLocks.class);
 		logger.addAppender(appender);
+		LeaseService throwingLease = new LeaseService(this.fake.redis, this.properties, this.renew, "instance-lock") {
+			@Override
+			public AcquireResult acquire(String key, Duration ttl, String owner) {
+				throw new IllegalStateException("unavailable");
+			}
+		};
+		ToolResourceLocks throwingLocks = new ToolResourceLocks(throwingLease, this.properties);
 		try {
 			this.fake.goDown();
-			FrameWire wire = attach(RUN_A);
+			ToolResourceLocks.LockHandle handle = throwingLocks.acquire(TASK_ID, "IMPORT", "test-owner");
 
-			this.manager.executeToolCalls(prompt(RUN_A), response("start_import", taskArgs()));
-			finish(RUN_A);
-
-			assertThat(this.startTool.invocations.get()).as("锁设施不可用不得把工具一起挡掉").isEqualTo(1);
-			assertThat(FrameContract.oneOfType(wire.frames(), "tool_result")).containsEntry("outcome",
-					ToolOutcome.OK.wire());
-			assertThat(appender.list).anyMatch(event -> event.getLevel() == Level.WARN
-					&& event.getFormattedMessage().contains("资源锁设施不可用"));
+			assertThat(handle.outcome()).isEqualTo(ToolResourceLocks.LockOutcome.UNAVAILABLE);
+			String expected = "resource lock acquisition failed; refusing execution key="
+					+ LeaseKeys.task(TASK_ID) + " owner=test-owner";
+			assertThat(appender.list)
+				.as("日志不得再把拒绝执行写成 allow")
+				.anyMatch(event -> expected.equals(event.getFormattedMessage()));
 		}
 		finally {
 			logger.detachAppender(appender);
+			this.fake.heal();
 		}
 	}
 
@@ -369,6 +429,27 @@ class ToolResourceLockGateTest {
 		assertThat(FrameContract.oneOfType(wire.frames(), "tool_result")).containsEntry("outcome",
 				ToolOutcome.OK.wire());
 		assertThat(this.fake.scriptCalls.get()).as("关掉开关即零锁往返").isEqualTo(before);
+	}
+
+	@Test
+	void explicitLegacyWithoutLockFacilityKeepsLocalOnlyExecution() {
+		ToolResourceLocks legacyLocks = new ToolResourceLocks(null, this.properties);
+		SpToolCallingManager legacyManager = new SpToolCallingManager(this.store, this.registry, this.gate,
+				this.toolRegistry, this.codec, this.beacon, this.cancellations, new ToolResultLimiter(this.properties),
+				List.of(), null, legacyLocks, null, null);
+		FrameWire wire = attach(RUN_A);
+		this.identity.close();
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+
+		legacyManager.executeToolCalls(prompt(RUN_A), response("start_import", taskArgs()));
+		finish(RUN_A);
+
+		assertThat(legacyLocks.acquire(TASK_ID, "IMPORT", "legacy-owner").outcome())
+			.isEqualTo(ToolResourceLocks.LockOutcome.DISABLED);
+		assertThat(this.startTool.invocations.get()).as("明确无锁设施的 legacy 与共享 Redis 故障不同").isEqualTo(1);
+		assertThat(FrameContract.oneOfType(wire.frames(), "tool_result"))
+			.containsEntry("outcome", ToolOutcome.OK.wire())
+			.containsEntry("executed", true);
 	}
 
 	// ── M-3（批③b 复审）：只占作业级锁 ⇒ 阻断，且先拿到的任务级锁必须归还 ────
@@ -490,6 +571,8 @@ class ToolResourceLockGateTest {
 
 	private void seedRun(String runId) {
 		RunSnapshot snapshot = this.store.seedRun(runId, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(AiContext.of("import", "IMPORT", "IMPORT", TASK_ID, null).toMap());
 		this.store.save(snapshot);
 	}

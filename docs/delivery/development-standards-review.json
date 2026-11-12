@@ -6506,6 +6506,51 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "Long按字符串跨JSON/JS安全整数边界传递，前端拒绝非安全整数，不再正则解析中文作业回执。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1257最终APPROVED；施工报告四种作业、holder三场景、targetStatus、台账/实时/history/Resume、watcher交错/失败重试等独立单点通过，后端生产编译和前端typecheck/build成功；主控未重跑测试，ResumeEnvelopeShapeTest基线identity失败及ai-start-job-sync两项既有失败保留，真实模型、浏览器、Cluster与多实例NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:0acac672a6a682952b375b54aaddb33f4cd7ab89acb8baf05c215232cbb0ba84",
+      "status": "reviewed",
+      "reason": "逐hunk复核会话门、资源锁、首轮/续跑/确认/扫描/取消的UNAVAILABLE及空lease边界；多轮独立返修后终审APPROVED。",
+      "reviewedAt": "2026-11-12T19:27:20+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1258、施工agent-1254",
+      "specChanges": [
+        {
+          "change": "已配置共享租约设施时，UNAVAILABLE、空AcquireResult及ACQUIRED+null lease统一在模型、工具、扫描、确认和取消副作用前失败关闭。",
+          "reason": "共享互斥状态不可确认时，本地锁不能证明跨实例唯一所有权，继续执行会造成双驱动和危险操作。",
+          "impact": "SessionGate/ToolResourceLocks/ResilientChatService/ResumeService/ConfirmGate/StartupResumeRunner均按既有错误码拒绝或deferred，恢复后重试；HELD_ELSEWHERE与显式无设施legacy不变。"
+        },
+        {
+          "change": "首轮取租提前到L2压缩、快照创建和任何ChatModel.call/stream之前，续租存活只认驱动token；legacy仍保留本地驱动登记。",
+          "reason": "摘要也是模型调用，晚取租会先生成副作用；无设施时删除本地token又会让僵尸复核误判原驱动已死。",
+          "impact": "UNAVAILABLE不会先产生摘要或正文，快照前续租不因缺快照判死，legacy僵尸不双驱动，收尾按token条件摘除。"
+        },
+        {
+          "change": "确认请求req/reqAtMs只在租约确认后写入，STATE_UNKNOWN仅在reason=LEASE_UNAVAILABLE时进入既有有界重试。",
+          "reason": "先写req再取租会形成未发帧却宣称已公布，其他STATE_UNKNOWN又可能包含永久数据错误，不能一律重试。",
+          "impact": "Redis与调用方pending均不出现假req；已决短路保留，异常按created归还租约，指定原因恢复后恰好派发一次。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java", "status": "checked", "reason": "await租约先于req/latch，空lease拒绝；指定LEASE_UNAVAILABLE重试，异常按created归还，triggerResume不再无租或错报他主；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "资源锁UNAVAILABLE映射为blocked/PRECHECK_UNAVAILABLE，不认领不写台账不执行，既有目标校验保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolResourceLocks.java", "status": "checked", "reason": "故障和空lease均归还真实半组锁并失败关闭，显式无设施映射DISABLED，旧allow日志改真实拒绝；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/LeaseService.java", "status": "checked", "reason": "三态原语与脚本未改，仅同步消费者失败关闭注释和日志；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "取租提前到压缩/快照/模型前，UNAVAILABLE和空lease失败关闭，legacy保留本地token，续租只认驱动token；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "自抢与取消空lease失败关闭，legacy僵尸接受活跃本地驱动，仅指定reason供ConfirmGate重试；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "只更新租约消费者边界注释，无存储结构或写路径变化；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/StartupResumeRunner.java", "status": "checked", "reason": "不可确认和空lease均deferred且不枚举候选，扫描门释放后下一拍恢复，legacy本地单飞保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/session/SessionGate.java", "status": "checked", "reason": "首次取门失败条件移除候选，重入保留旧token/lockValue，释放不可知返回false并计数，未误删successor；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "AiStateUnavailableException保留AI_REDIS_UNAVAILABLE，普通异常仍为AI_RUN_FAILED，不掩盖基础设施错误；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用LeaseService三态、AiStateUnavailableException、既有重试/deferred和锁释放设施，无新增锁、依赖或错误体系。"},
+        "java-api-style": {"status": "checked", "reason": "十个生产Java均经IDEA Reformat；获取/重入/空lease/释放和legacy分支逐hunk复核。"},
+        "logging-exception-safety": {"status": "checked", "reason": "不可确认与空lease均真实报错或deferred，不伪装成功，不把未知改为他主或普通AI_RUN_FAILED，拒写可观测。"},
+        "toc-interaction": {"status": "not-affected", "reason": "仅后台锁与恢复语义变化，无新增用户提示、卡片或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "共享状态不可确认即停止危险副作用，本地token和created归属释放防双驱动/误删，恢复走既有有界路径。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1258最终APPROVED；施工报告资源锁、SessionGate、首轮/L2、确认请求/派发、取消、扫描、空lease全路径及legacy对照独立RED→GREEN，生产clean compile 361源BUILD SUCCESS；主控未重跑测试，真实Cluster、多实例随机路由、kill/failover、真实模型和浏览器NOT_RUN。"}
+      }
     }
   ]
 }

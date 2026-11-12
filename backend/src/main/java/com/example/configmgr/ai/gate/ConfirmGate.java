@@ -709,15 +709,24 @@ public class ConfirmGate {
 
     private PendingToolCall await(String runId, PendingToolCall pending, boolean confirm) {
         boolean prePublished = this.properties.getPark().isEnabled() && Boolean.TRUE.equals(pending.getReq());
-        PendingToolCall decided = reserveRequestSlot(runId, pending);
+        PendingToolCall decided = decidedRequestSlot(runId, pending);
         if (decided != null) {
             return decided;
         }
         AwaitPreparation preparation = prepareAwait(runId, pending, confirm, prePublished);
-        preparation.out().completeSubscriptions();
-        long startedAt = System.currentTimeMillis();
-        String sessionId = snapshotSessionId(runId);
-        AwaitState state = new AwaitState(runId, pending, confirm, preparation, startedAt, sessionId);
+        if (preparation.decided() != null) {
+            return preparation.decided();
+        }
+        AwaitState state;
+        try {
+            preparation.out().completeSubscriptions();
+            long startedAt = System.currentTimeMillis();
+            String sessionId = snapshotSessionId(runId);
+            state = new AwaitState(runId, pending, confirm, preparation, startedAt, sessionId);
+        } catch (RuntimeException ex) {
+            abortAwait(runId, pending, preparation);
+            throw ex;
+        }
         if (this.properties.getPark().isEnabled()) {
             return parkAwait(state);
         }
@@ -728,21 +737,72 @@ public class ConfirmGate {
                                           boolean prePublished) {
         Integer timeoutSeconds = this.suspendWaitSeconds(pending);
         LeaseService leases = leases();
-        LeaseService.Lease lease = leases == null ? null
-                : leases.tryAcquireFenced(this.store.runLeaseKey(runId), this.store.fenceKey(runId),
-                this.properties.getLease().getTtl(), null).orElse(null);
-        String key = key(runId, pending.getToolCallId());
-        Latch latch = this.latches.computeIfAbsent(key, ignored -> new Latch());
-        AutoCloseable cancelHandle = this.cancellations.onCancel(runId, latch::signal);
-        SseChatEmitter out = this.registry.of(runId);
-        if (!prePublished) {
-            if (confirm) {
-                out.confirmRequest(pending);
-            } else {
-                out.frontendToolRequest(pending, timeoutSeconds);
+        LeaseService.Lease lease = null;
+        boolean leaseCreated = false;
+        if (leases != null) {
+            LeaseService.AcquireResult acquired = leases.acquireFenced(this.store.runLeaseKey(runId), this.store.fenceKey(runId),
+                    this.properties.getLease().getTtl(), null);
+            if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE
+                    || acquired.outcome() == LeaseService.AcquireOutcome.ACQUIRED && acquired.lease() == null) {
+                throw new AiStateUnavailableException("Cannot confirm resume lease before await runId=" + runId);
             }
+            lease = acquired.lease();
+            leaseCreated = acquired.created();
         }
-        return new AwaitPreparation(timeoutSeconds, lease, latch, cancelHandle, out);
+        Latch latch = null;
+        AutoCloseable cancelHandle = null;
+        try {
+            PendingToolCall decided = reserveRequestSlot(runId, pending);
+            if (decided != null) {
+                AwaitPreparation preparation = new AwaitPreparation(timeoutSeconds, lease, leaseCreated, null, null, null,
+                        decided);
+                abortAwait(runId, pending, preparation);
+                return preparation;
+            }
+            String key = key(runId, pending.getToolCallId());
+            Latch awaitLatch = this.latches.computeIfAbsent(key, ignored -> new Latch());
+            latch = awaitLatch;
+            cancelHandle = this.cancellations.onCancel(runId, awaitLatch::signal);
+            SseChatEmitter out = this.registry.of(runId);
+            if (!prePublished) {
+                if (confirm) {
+                    out.confirmRequest(pending);
+                } else {
+                    out.frontendToolRequest(pending, timeoutSeconds);
+                }
+            }
+            return new AwaitPreparation(timeoutSeconds, lease, leaseCreated, latch, cancelHandle, out, null);
+        } catch (RuntimeException ex) {
+            abortAwait(runId, pending, lease, leaseCreated, latch, cancelHandle);
+            throw ex;
+        }
+    }
+
+    private PendingToolCall decidedRequestSlot(String runId, PendingToolCall pending) {
+        synchronized (submitLockFor(runId)) {
+            PendingToolCall fresh = this.store.pendingLenient(runId, pending.getToolCallId());
+            return fresh != null && fresh.resolved() ? consumeDecided(runId, pending.getToolCallId(), fresh) : null;
+        }
+    }
+
+    private void abortAwait(String runId, PendingToolCall pending, AwaitPreparation preparation) {
+        abortAwait(runId, pending, preparation.lease(), preparation.leaseCreated(), preparation.latch(),
+                preparation.cancelHandle());
+    }
+
+    private void abortAwait(String runId, PendingToolCall pending, LeaseService.Lease lease, boolean leaseCreated,
+                            Latch latch, AutoCloseable cancelHandle) {
+        if (latch != null) {
+            String key = key(runId, pending.getToolCallId());
+            this.latches.remove(key, latch);
+            this.armedKeys.remove(key);
+        }
+        if (cancelHandle != null) {
+            closeCancelHandle(cancelHandle, runId);
+        }
+        if (leaseCreated && lease != null) {
+            releaseWaitingLease(lease, runId);
+        }
     }
 
     private PendingToolCall parkAwait(AwaitState state) {
@@ -888,8 +948,8 @@ public class ConfirmGate {
         closeCancelHandle(state.cancelHandle, state.runId);
     }
 
-    private record AwaitPreparation(Integer timeoutSeconds, LeaseService.Lease lease, Latch latch,
-                                    AutoCloseable cancelHandle, SseChatEmitter out) {
+    private record AwaitPreparation(Integer timeoutSeconds, LeaseService.Lease lease, boolean leaseCreated, Latch latch,
+                                    AutoCloseable cancelHandle, SseChatEmitter out, PendingToolCall decided) {
     }
 
     private record WaitStep(boolean finished, PendingToolCall result, boolean retry, long sliceMs) {
@@ -2519,11 +2579,11 @@ public class ConfirmGate {
         // 两边都会读到"未持租"（与 ResumeService 同型的缺陷，见该处的注释）。
         LeaseService.AcquireResult acquired = leases.acquireFenced(leaseKey, this.store.fenceKey(runId),
                 this.properties.getLease().getTtl(), null);
-        if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
-            // I4：设施不可用 ⇒ 无租约降级（与"没有租约设施"同口径）：派发不带租约，
-            // 由 ResumeService 的进程内互斥兜底。把"不知道"当成"别人持有"会让 Redis 抖一下就停止续跑。
-            log.warn("resume lease unavailable; dispatching without a lease runId={}", runId);
-            return dispatchResume(runId, snapshot, null, false);
+        if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE
+                || acquired.outcome() == LeaseService.AcquireOutcome.ACQUIRED && acquired.lease() == null) {
+            log.warn("resume lease unavailable; resume dispatch deferred runId={}", runId);
+            retryDispatch(runId);
+            return ResumeTrigger.skipped("LEASE_UNAVAILABLE", "续跑权暂不可确认，将在有界重试中恢复");
         }
         LeaseService.Lease lease = acquired.lease();
         if (lease == null) {
@@ -2856,15 +2916,17 @@ public class ConfirmGate {
                                      ResumeService.ResumeResult result) {
         // park 批：池饱和 / 会话被占 = "决策已落库但这一拍没有驱动者" ⇒ 有界重派发。
         // W-21：取消状态"此刻不可确认"同属这一类（不是终态、也不是有人接管）——
-        // 一次失败就永久搁置会让已结算的前端工具没有物化路径（STATE_UNKNOWN 不在其列：可能是
-        // 永久性条目损坏，见 isRetriableDispatchOutcome）。
+        // 一次失败就永久搁置会让已结算的前端工具没有物化路径。其他 STATE_UNKNOWN 可能是永久性条目损坏，
+        // 仍不重试；只有 reason=LEASE_UNAVAILABLE 明确代表本拍写权不可确认，进入同一有界预算。
         // 已确认取消的 IN_PROGRESS 也只表示这一拍互斥未抢到，进入同一份有界预算；普通批准不变。
         // 该标记随重试链传递，耗尽时选择取消收尾未获驱动出口，而非 CANCEL_STATE_UNKNOWN。
         // 注意：这里<b>不清零</b>计数（成功/终态也不清）—— 清零点只有外部触发入口，
         // 否则耗尽的链会被"某个结局"悄悄续命（见 dispatchRetries 字段注释）。
         boolean cancelledInProgress = result != null && result.outcome() == ResumeService.Outcome.IN_PROGRESS
                 && isCancelConfirmed(runId);
-        if (result != null && (isRetriableDispatchOutcome(result.outcome()) || cancelledInProgress)) {
+        boolean leaseUnavailable = result != null && result.outcome() == ResumeService.Outcome.STATE_UNKNOWN
+                && result.body() != null && "LEASE_UNAVAILABLE".equals(result.body().get("reason"));
+        if (result != null && (isRetriableDispatchOutcome(result.outcome()) || cancelledInProgress || leaseUnavailable)) {
             retryDispatch(runId, cancelledInProgress);
         }
         if (lease == null) {

@@ -927,9 +927,12 @@ public class ResumeService {
                     return new ResumeResult(Outcome.LEASE_HELD_ELSEWHERE, Map.of("runId", runId, "resumed", false,
                             "reason", "LEASE_HELD_ELSEWHERE", "instanceId", this.store.instanceId()));
                 }
-                // I4：设施不可用（{@code UNAVAILABLE}）⇒ 走"无租约降级"这条既有路径（进程内互斥放行），
-                // 与 leaseService == null 完全同义。把"我不知道有没有主"报成"别人持有"会让一次 Redis 抖动
-                // 把启动续跑/运维续跑全部 409 掉。
+                if (acquired.outcome() == LeaseService.AcquireOutcome.ACQUIRED && acquired.lease() == null) {
+                    return new ResumeResult(Outcome.STATE_UNKNOWN, Map.of("runId", runId, "resumed", false,
+                            "reason", "LEASE_UNAVAILABLE", "code", ErrorCodes.AI_REDIS_UNAVAILABLE));
+                }
+                // UNAVAILABLE 与 leaseService == null 必须分开：显式无设施才走 legacy；已配置设施不可确认时
+                // 后续 authorityResumeResult 在工具重建/驱动前返回 STATE_UNKNOWN/LEASE_UNAVAILABLE。
                 // 所有权口径：<b>谁创建谁释放</b>。只有真正建出这一任的调用方才允许交调度器/还租；
                 // 命中现值（同主重入）时 created=false —— 用"抢占前 epoch"推断是错的：并发同主双抢时
                 // 两边读到同一个前置状态，于是败方（撞 resuming 互斥 → IN_PROGRESS）会去还胜方的租约，
@@ -1022,7 +1025,8 @@ public class ResumeService {
      * <p>返回 {@code null} = 通过初检（继续抢租，按 fresh 决定后续）；不通过 = {@code ALREADY_RUNNING}。
      */
     private ResumeResult takeoverPreCheck(String runId) {
-        if (this.chatService != null && this.chatService.isDriving(runId) && this.store.heldRunEpoch(runId) > 0L) {
+        if (this.chatService != null && this.chatService.isDriving(runId)
+                && (this.store.leaseService() == null || this.store.heldRunEpoch(runId) > 0L)) {
             return refuseTakeover(runId, "DRIVER_ALIVE_IN_PROCESS", null, null);
         }
         // 租约此刻已被某方持有（别人 / 或本进程别的驱动方）：不再做活动初检，把结论交给抢租与抢租后的复核 ——
@@ -1096,7 +1100,7 @@ public class ResumeService {
      * 为什么也不只比对 {@code heldRunEpoch}（进程内视图）：TTL 到期被别人接管后，视图要等下一次
      * 续租失败才会清，这个窗口里视图会说谎，而本方法正是"要不要驱动这一轮"的入口。
      * 对真值校验才能让"租约已被别的实例接管"在入口处变成 {@link Outcome#LEASE_HELD_ELSEWHERE}；
-     * 设施不可用（{@code Hold.UNAVAILABLE}）按无租约降级放行（I4 同口径）。
+     * 设施不可用则继续到 authorityResumeResult，在任何工具重建/驱动前失败关闭。
      *
      * <p>租约的收尾职责在<b>调用方</b>：本方法不 {@code markDriving}、不 {@code release}
      * （确认门在 {@code runResume} 里做；旧签名在自己那一层做）。
@@ -2544,6 +2548,9 @@ public class ResumeService {
                 return new CancelAdmission(snapshot, null, false, null, gateHeld, gateSessionId);
             }
             LeaseService.AcquireResult acquired = this.store.acquireRunLease(runId);
+            if (acquired.outcome() == LeaseService.AcquireOutcome.ACQUIRED && acquired.lease() == null) {
+                return new CancelAdmission(snapshot, null, false, CancelFinalize.UNAVAILABLE, gateHeld, gateSessionId);
+            }
             lease = acquired.lease();
             fresh = acquired.created();
             if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
@@ -2552,10 +2559,13 @@ public class ResumeService {
             if (acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
                 return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.UNAVAILABLE, gateHeld, gateSessionId);
             }
-            if (lease != null && leases.verifyHeld(lease.key(), lease.epoch(), lease.owner()) == LeaseService.Hold.LOST) {
+            LeaseService.Hold hold = lease == null ? null : leases.verifyHeld(lease.key(), lease.epoch(), lease.owner());
+            if (hold == LeaseService.Hold.LOST) {
                 return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.LEASE_HELD_ELSEWHERE, gateHeld, gateSessionId);
             }
-            // hold == UNAVAILABLE：这一拍证明不了"我仍是主人"；继续也只是让写门再拒一次。
+            if (hold == LeaseService.Hold.UNAVAILABLE) {
+                return new CancelAdmission(snapshot, lease, fresh, CancelFinalize.UNAVAILABLE, gateHeld, gateSessionId);
+            }
             return new CancelAdmission(snapshot, lease, fresh, null, gateHeld, gateSessionId);
         } catch (RuntimeException ex) {
             releaseCancelResources(runId, gateToken, gateHeld, gateSessionId, leases, lease, fresh);

@@ -37,9 +37,8 @@ import java.util.List;
  * <li>{@link LockOutcome#HELD_ELSEWHERE}：任一把被别人持有 ⇒ 调用方按 {@code blocked/RESOURCE_LOCKED}
  * 结算，<b>不抛异常不断流</b>，也不占 {@code ai:claim:}；已拿到的那把（任务级）会就地归还 ——
  * 否则一次被拒的调用会白占任务级锁一个 TTL；</li>
- * <li>{@link LockOutcome#UNAVAILABLE}：租约设施不可用（Redis 抖动）⇒ <b>放行</b> + WARN。与
- * {@link LeaseService} 的降级口径一致：把"不知道有没有人持有"报成"有人持有"会让一次抖动
- * 变成全线拒绝执行；</li>
+ * <li>{@link LockOutcome#UNAVAILABLE}：租约设施不可用（Redis 抖动）⇒ <b>失败关闭</b> + WARN。
+ * 调用方映射为既有 {@code PRECHECK_UNAVAILABLE}，不得拿本地锁冒充跨实例互斥执行危险工具；</li>
  * <li>{@link LockOutcome#DISABLED}：{@code app.ai.lock.enabled=false} 或调用方没给可锁的目标
  * （无 taskId / 非作业发起工具）⇒ 整段跳过（零 Redis 往返）。</li>
  * </ul>
@@ -64,7 +63,7 @@ public class ToolResourceLocks {
 		/** 被别人持有：调用方按 blocked/RESOURCE_LOCKED 结算，不执行。 */
 		HELD_ELSEWHERE,
 
-		/** 设施不可用：放行（按进程内互斥继续），留 WARN。 */
+		/** 设施不可用：调用方必须失败关闭，留 WARN。 */
 		UNAVAILABLE,
 
 		/** 未启用 / 无可锁目标：整段跳过。 */
@@ -147,8 +146,8 @@ public class ToolResourceLocks {
 			return LockHandle.none(LockOutcome.DISABLED);
 		}
 		if (this.leaseService == null) {
-			if (log.isDebugEnabled()) log.debug("resource lock facility not wired; allowing as unavailable taskId={} job={} owner={}", taskId, jobType, owner);
-			return LockHandle.none(LockOutcome.UNAVAILABLE);
+			if (log.isDebugEnabled()) log.debug("resource lock facility not wired; using explicit local-only legacy mode taskId={} job={} owner={}", taskId, jobType, owner);
+			return LockHandle.none(LockOutcome.DISABLED);
 		}
 		Duration ttl = this.properties.getLease().getResourceTtl();
 		List<Lease> created = new ArrayList<>(2);
@@ -158,7 +157,8 @@ public class ToolResourceLocks {
 		if (taskLock != null && taskLock.outcome() == AcquireOutcome.HELD_ELSEWHERE) {
 			return LockHandle.none(LockOutcome.HELD_ELSEWHERE);
 		}
-		if (taskLock == null || taskLock.outcome() == AcquireOutcome.UNAVAILABLE) {
+		if (taskLock == null || taskLock.outcome() == AcquireOutcome.UNAVAILABLE
+				|| taskLock.outcome() == AcquireOutcome.ACQUIRED && taskLock.lease() == null) {
 			degraded = true;
 		}
 		else if (taskLock.created()) {
@@ -172,7 +172,8 @@ public class ToolResourceLocks {
 				release(created);
 				return LockHandle.none(LockOutcome.HELD_ELSEWHERE);
 			}
-			if (jobLock == null || jobLock.outcome() == AcquireOutcome.UNAVAILABLE) {
+			if (jobLock == null || jobLock.outcome() == AcquireOutcome.UNAVAILABLE
+					|| jobLock.outcome() == AcquireOutcome.ACQUIRED && jobLock.lease() == null) {
 				degraded = true;
 			}
 			else if (jobLock.created()) {
@@ -180,10 +181,9 @@ public class ToolResourceLocks {
 			}
 		}
 		if (degraded) {
-			// 显式 WARN：把"锁设施坏了"与"锁没生效"在日志里分开（关掉开关走的是 DISABLED，不打这条）
-			log.warn("resource lock facility unavailable; allowing (Redis jitter must not block business actions) taskId={} job={} owner={}", taskId,
-					jobType, owner);
-			return new LockHandle(LockOutcome.UNAVAILABLE, List.copyOf(created), this);
+			release(created);
+			log.warn("resource lock facility unavailable; refusing execution taskId={} job={} owner={}", taskId, jobType, owner);
+			return LockHandle.none(LockOutcome.UNAVAILABLE);
 		}
 		return new LockHandle(LockOutcome.ACQUIRED, List.copyOf(created), this);
 	}
@@ -231,13 +231,13 @@ public class ToolResourceLocks {
 		}
 	}
 
-	/** 抢一把；设施异常一律折算成 {@code UNAVAILABLE}（调用方按降级放行）。 */
+	/** 抢一把；设施异常一律折算成 {@code UNAVAILABLE}（调用方失败关闭）。 */
 	private AcquireResult acquireQuietly(String key, Duration ttl, String owner) {
 		try {
 			return this.leaseService.acquire(key, ttl, owner);
 		}
 		catch (RuntimeException ex) {
-			log.warn("resource lock acquisition degraded (Redis unavailable => allow) key={} owner={}", key, owner, ex);
+			log.warn("resource lock acquisition failed; refusing execution key={} owner={}", key, owner, ex);
 			return null;
 		}
 	}

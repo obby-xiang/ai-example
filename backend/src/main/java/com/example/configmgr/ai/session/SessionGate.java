@@ -4,6 +4,7 @@ import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.TenantKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
+import com.example.configmgr.common.AiStateUnavailableException;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -67,9 +68,9 @@ import java.util.function.LongSupplier;
  * "已取门/已接管/已续期"（续期异常直接抛给 watchdog 按降级处理）。</li>
  * </ul>
  *
- * <h2>§13.1 降级</h2>
- * 锁服务不可用（Redis 异常）时降级为进程内单值门：M1 单实例下等价，冲突照样 409 提示重试，
- * 只是失去了跨实例互斥；降级事实写进返回体（{@code degraded=true}）与 WARN 日志，不静默。
+ * <h2>共享锁不可确认时失败关闭</h2>
+ * 已配置 Redis 的取门/接管结果不可知时抛出 {@code AiStateUnavailableException}，由消费者映射为
+ * 503/{@code AI_REDIS_UNAVAILABLE}；不得以进程内单值门冒充跨实例互斥继续。确定被他主占用仍返回 409。
  *
  * <h2>降级必须"事后也可见"（RT-34 / RT-35）</h2>
  * 两条曾经只在日志里说一句的路子现在已经收口：
@@ -208,12 +209,11 @@ public class SessionGate {
 	private final AtomicLong renewals = new AtomicLong();
 
 	/**
-	 * 续期失败（脚本返回 0 或异常）累计次数 —— RT-34 的可观测面。
+	 * 取门、续期或释放不可确认的累计次数 —— 共享锁故障的可观测面。
 	 *
-	 * <p>为什么必须有计数而不只是日志：续期失败把"跨实例互斥"降级成进程内互斥，属于必须能聚合
-	 * 告警的降级，而日志会被轮询节拍刷掉。对外接线在 {@code AiController} 的 {@code /api/ai/health}
+	 * <p>对外接线在 {@code AiController} 的 {@code /api/ai/health}
 	 * （{@code sessionLockLost} / {@code sessionLockDegraded} 两个 additive 键；后者 =
-	 * 本计数 &gt; 0 <b>或</b> {@link #degradedSessions()} &gt; 0，因为取门降级只置 holder 不累加本计数）。
+	 * 本计数 &gt; 0 <b>或</b> {@link #degradedSessions()} &gt; 0）。
 	 */
 	private final AtomicLong lockLost = new AtomicLong();
 
@@ -275,7 +275,7 @@ public class SessionGate {
 	 * 并<b>清掉此前的 {@code degraded}</b>（锁已由脚本确认 ⇒ 跨实例互斥已恢复，不得继续对外声称降级）；</li>
 	 * <li>脚本返回 0 ⇒ <b>另一轮持有</b>：按对方 runId 返回 {@link Busy}，
 	 * <b>不改</b>自己的 holder token、也不宣称接管成功（重入路径下 holder 仍是本轮的）；</li>
-	 * <li>异常 / 结果不可知 ⇒ 只保留进程内门（{@code degraded}），不写兜底、不宣称取到 Redis 锁。</li>
+	 * <li>异常 / 结果不可知 ⇒ 抛 {@code AiStateUnavailableException}，不写兜底、不允许本地门放行。</li>
 	 * </ul>
 	 *
 	 * <p><b>防永久 409</b>：进程内门已被一轮占着且 runId 不同时，先按 {@link #sweepExpiredHolders(long)}
@@ -317,13 +317,11 @@ public class SessionGate {
 				// holder 保持原 token（本轮进程内仍是它的门），对外如实报"另一轮在跑"
 				return busyHeldByAnother(gateKey, sessionId);
 			}
-			// 结果不可知：<b>不宣称 Redis 接管成功</b> —— 不重启 watchdog、不更新 lockValue，
-			// 已有 watchdog 仍按上一次确认的值续期（续不上就自停）。
-			// 但本地 token 必须跟上：进程内门是本体，调用方随后会用新 token 释放；
-			// token 停在旧值会让那次释放摘不掉本地门（会话被永久占住）。
-			previous.token = token;
+			// 结果不可知：保留上一次确认的 token/lockValue，由既有持有者收尾；本次接管不得继续。
 			previous.degraded = true;
-			return null;
+			this.lockLost.incrementAndGet();
+			throw new AiStateUnavailableException("Session gate takeover could not be confirmed sessionId=" + sessionId
+					+ " runId=" + runId);
 		}
 
 		Boolean taken = takeLock(gateKey, runId, token);
@@ -338,11 +336,11 @@ public class SessionGate {
 			this.inProcess.remove(gateKey, candidate);
 			return busyHeldByAnother(gateKey, sessionId);
 		}
-		// §13.1：锁服务不可用/结果不可知 → 降级为进程内单值门（M1 单实例下等价）。
-		// 刻意不写兜底 SET：若脚本其实已执行而回包丢失，锁按 TTL 自行过期（fencing 由续跑租约兜底）；
-		// lockValue 保持 null ⇒ 释放只按协议值 {runId|token} 走脚本验证（不猜、不裸删）。
-		candidate.degraded = true;
-		return null;
+		// 已配置共享锁但结局不可知：移除本地候选，调用方映射为 503/AI_REDIS_UNAVAILABLE。
+		this.inProcess.remove(gateKey, candidate);
+		this.lockLost.incrementAndGet();
+		throw new AiStateUnavailableException("Session gate acquisition could not be confirmed sessionId=" + sessionId
+				+ " runId=" + runId);
 	}
 
 	/**
@@ -379,7 +377,7 @@ public class SessionGate {
 	 * 之后同会话永远 409）。现在直接桶没命中就一律按<b>完整持有记录</b>（sessionId + runId + token
 	 * + 记录里的身份，见 {@link #findHolder}）唯一定位，并落在<b>持有者自己的</b>锁键上释放。
 	 *
-	 * @return 是否真的释放了（进程内门或 Redis 锁任一）；Redis 异常/结果不可知时只报进程内事实
+	 * @return 是否得到可确认的释放结局；Redis 异常/结果不可知返回 {@code false}，本地 holder 仍收尾
 	 */
 	public boolean release(String sessionId, String runId, String token) {
 		boolean released = false;
@@ -406,8 +404,10 @@ public class SessionGate {
 			released = true;
 		}
 		else if (deleted == null) {
+			this.lockLost.incrementAndGet();
 			log.warn("Session lock release outcome unknown sessionId={} runId={} (no bare DEL; lock expires by TTL)",
 					sessionId, runId);
+			return false;
 		}
 		return released;
 	}
@@ -518,7 +518,7 @@ public class SessionGate {
 		return this.renewals.get();
 	}
 
-	/** 续期失败（0/异常）累计次数：会话锁降级的观测面（RT-34）。 */
+	/** 取门、续期或释放不可确认的累计次数：共享锁故障的观测面。 */
 	public long lockLost() {
 		return this.lockLost.get();
 	}
@@ -526,10 +526,8 @@ public class SessionGate {
 	/**
 	 * 当前仍标记为降级的持有者数 —— {@link #lockLost()} 的<b>必要补充</b>。
 	 *
-	 * <p>取门时 Redis 不可用/结果不可知只把 holder 置 {@code degraded}（见
-	 * {@code acquire} 的降级分支），<b>不</b>累加 {@code lockLost}（那条路径没走到续期）。
-	 * 只按丢锁计数报降级会把这种最常见的降级形态漏报 —— 而它同样是"跨实例互斥已失效"。
-	 * 反之，脚本成功确认取锁/重入后 {@code degraded} 会被清掉（降级事实不是终身的）。
+	 * <p>重入接管不可知时保留既有 holder 并标 {@code degraded}；脚本成功确认取锁/重入后清掉，
+	 * 降级事实不是终身的。续期失败同样置位并累计 {@code lockLost}。
 	 */
 	public int degradedSessions() {
 		int degraded = 0;

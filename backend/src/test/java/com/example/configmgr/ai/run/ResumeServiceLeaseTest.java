@@ -43,7 +43,7 @@ import static org.mockito.Mockito.when;
  * <li><b>带租约重载</b>（{@code resume(runId, forceTakeover, lease)}，确认门死卡兜底用）：
  * <b>不再自抢</b>（租约已在调用方手里），只校验归属 —— {@code LeaseService#verifyHeld(key, epoch)}
  * 对着 <b>Redis 真值</b>做（R5；进程内 {@code heldRunEpoch} 在"TTL 已到、续租未失败"的窗口里
- * 会说谎），不符即 {@link ResumeService.Outcome#LEASE_HELD_ELSEWHERE}；设施不可用按无租约降级放行。</li>
+ * 会说谎），不符即 {@link ResumeService.Outcome#LEASE_HELD_ELSEWHERE}；设施不可用在工具重建前失败关闭。</li>
  * </ul>
  *
  * <p>{@code ai:resume:lock:} 已摘除：GET-比对-DEL 的非原子实现会删掉别人的锁，
@@ -103,6 +103,13 @@ class ResumeServiceLeaseTest {
 
 	private final ResumeService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.AfterEach
+	void closeIdentity() {
+		this.identity.close();
+	}
+
 	ResumeServiceLeaseTest() {
 		this.store.useLeaseFacility(this.leases);
 		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
@@ -111,6 +118,7 @@ class ResumeServiceLeaseTest {
 
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
 			.thenReturn(new Prompt(List.of()));
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
@@ -267,6 +275,55 @@ class ResumeServiceLeaseTest {
 			.isEqualTo(RunSnapshot.SUSPENDED);
 		verify(this.executor, never()).execute(any(Runnable.class));
 		assertThat(brokenLeases.leaseOk()).as("降级必须可观测").isFalse();
+	}
+
+	@Test
+	void legacySignatureFailsClosedWhenAcquireReturnsNullLease() {
+		LeaseService emptyLease = new LeaseService(this.fake.redis, this.properties, this.renewScheduler, "inst-a") {
+			@Override
+			public AcquireResult acquireFenced(String key, String fenceKey, java.time.Duration ttl, String owner) {
+				return new AcquireResult(AcquireOutcome.ACQUIRED, null, true);
+			}
+		};
+		this.store.useLeaseFacility(emptyLease);
+		seedResumableRun();
+		when(this.chatService.systemPromptText(any(AiContext.class), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn("SYSTEM");
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.STATE_UNKNOWN);
+		assertThat(result.body()).containsEntry("reason", "LEASE_UNAVAILABLE");
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+		assertThat(this.renewScheduler.activeCount()).isZero();
+		verify(this.executor, never()).execute(any(Runnable.class));
+	}
+
+	@Test
+	void cancelAdmissionFailsClosedWhenAcquireReturnsNullLease() {
+		LeaseService emptyLease = new LeaseService(this.fake.redis, this.properties, this.renewScheduler, "inst-a") {
+			@Override
+			public AcquireResult acquireFenced(String key, String fenceKey, java.time.Duration ttl, String owner) {
+				return new AcquireResult(AcquireOutcome.ACQUIRED, null, true);
+			}
+		};
+		this.store.useLeaseFacility(emptyLease);
+		seedResumableRun();
+		com.example.configmgr.ai.session.SessionGate sessionGate =
+				mock(com.example.configmgr.ai.session.SessionGate.class);
+		when(sessionGate.acquire(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString())).thenReturn(null);
+		when(sessionGate.release(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString())).thenReturn(true);
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "sessionGate", sessionGate);
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+
+		ResumeService.CancelFinalize result = this.service.cancelConfirmed(RUN_ID);
+
+		assertThat(result).isEqualTo(ResumeService.CancelFinalize.UNAVAILABLE);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+		verify(this.chatService, never()).cancelParked(RUN_ID);
+		verify(sessionGate).release(eq(SESSION_ID), eq(RUN_ID), org.mockito.ArgumentMatchers.anyString());
+		assertThat(this.service.cancelConfirmed(RUN_ID)).as("互斥令牌不得残留为 IN_PROGRESS")
+			.isEqualTo(ResumeService.CancelFinalize.UNAVAILABLE);
 	}
 
 	// ── 并发同主双抢：谁创建谁释放（harness lease-scripts 实锤缺陷） ──────────
@@ -482,6 +539,9 @@ class ResumeServiceLeaseTest {
 
 	private void seedResumableRun(com.example.configmgr.ai.conformance.InMemoryRunStore target) {
 		RunSnapshot snapshot = target.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("test-model");
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.of("export", "EXPORT", "EXPORT", 7L, null).toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("请启动导出"))));

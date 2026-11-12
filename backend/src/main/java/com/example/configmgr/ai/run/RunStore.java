@@ -3311,8 +3311,8 @@ public class RunStore {
     }
 
     /**
-     * 抢本轮的续跑权租约（<b>三态</b>，I4）：无租约设施时按 {@code UNAVAILABLE} 报
-     * （"没有设施"与"设施坏了"对调用方同义：走进程内互斥，而不是判成"别人持有"）。
+     * 抢本轮的续跑权租约（<b>三态</b>，I4）：无租约设施时也按 {@code UNAVAILABLE} 报；
+     * 调用方必须先区分显式 legacy 无设施装配与已配置设施故障，后者失败关闭。
      */
     public LeaseService.AcquireResult acquireRunLease(String runId) {
         // 走访问器而不是字段：子类/替身可以覆写 leaseService()（如 InMemoryRunStore）

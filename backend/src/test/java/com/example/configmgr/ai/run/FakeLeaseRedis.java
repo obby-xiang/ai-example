@@ -253,6 +253,9 @@ public final class FakeLeaseRedis {
 	 */
 	volatile boolean renewUnavailable;
 
+	/** 置 true = 只有归属校验脚本抛异常，用于覆盖 verifyHeld=UNAVAILABLE 的消费者边界。 */
+	volatile boolean verifyUnavailable;
+
 	/**
 	 * 置 true = 按<b>原生 Cluster</b> 口径判槽：多键脚本与多键 {@code DEL} 的键必须同槽，
 	 * 否则抛 {@link CrossSlotException}（真 Redis 回 {@code CROSSSLOT}）。
@@ -754,6 +757,9 @@ public final class FakeLeaseRedis {
 			return renew(str(keys.get(0)), str(args.get(0)), Duration.ofMillis(Long.parseLong(str(args.get(1)))));
 		}
 		if (body.contains(VERIFY_MARK)) {
+			if (this.verifyUnavailable) {
+				throw new IllegalStateException("Redis 归属校验不可用（模拟）");
+			}
 			return verify(str(keys.get(0)), str(args.get(0)));
 		}
 		if (body.contains(RELEASE_MARK)) {
@@ -955,6 +961,17 @@ public final class FakeLeaseRedis {
 			touchTtl(claimKey, ttl);
 			touchTtl(pendingKey, ttl);
 			return List.of(1L, "WON", fence);
+		}
+		if (body.contains("local now = redis.call('TIME')")) {
+			String key = str(keys.get(0));
+			long epoch = Long.parseLong(this.strings.getOrDefault(key, "0")) + 1L;
+			long floor = nowMs();
+			if (epoch < floor) {
+				epoch = floor;
+			}
+			this.strings.put(key, Long.toString(epoch));
+			touchTtl(key, Duration.ofMillis(Long.parseLong(str(args.get(0)))));
+			return epoch;
 		}
 		if (body.contains("RAISE_SEQ")) {
 			String key = str(keys.get(0));
@@ -1506,8 +1523,8 @@ public final class FakeLeaseRedis {
 	}
 
 	/**
-	 * 让此后所有 Redis 命令都抛出（模拟宕机）。B23L1 批③b S6：资源锁设施不可用时工具必须
-	 * <b>放行</b>而非被误判成"有人持有"。
+	 * 让此后所有 Redis 命令都抛出（模拟宕机）。资源锁设施不可用时消费者必须失败关闭，
+	 * 不得把 UNAVAILABLE 误判成"有人持有"或"可以执行"。
 	 */
 	public void goDown() {
 		this.down = true;

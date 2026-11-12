@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>I4 三态抢租</h2>
  * <b>被占用</b>与<b>设施不可用</b>必须分开：前者是"这一轮已经有主，我什么都不该做"，
- * 后者是"我不知道有没有主，按进程内互斥继续"。合并成一种，一次 Redis 抖动就会让
+ * 后者是"我不知道有没有主，消费者必须失败关闭"。合并成一种，一次 Redis 抖动就会让
  * 启动续跑/运维续跑/死卡兜底全线停摆。
  *
  * <h2>I7 僵尸续租</h2>
@@ -57,19 +57,19 @@ class LeaseServiceTriStateTest {
 
 	@Test
 	void acquireDistinguishesOccupiedFromUnavailable() {
-		this.other.tryAcquire(KEY, this.ttl).orElseThrow();
+		this.other.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 
 		LeaseService.AcquireResult occupied = this.service.acquireFenced(KEY, FENCE_KEY, this.ttl);
 
 		assertThat(occupied.outcome()).as("别人持有 ⇒ HELD_ELSEWHERE（语义：这一轮已有主）")
 			.isEqualTo(LeaseService.AcquireOutcome.HELD_ELSEWHERE);
 		assertThat(occupied.lease()).isNull();
-		assertThat(this.service.tryAcquire(KEY, this.ttl)).as("薄包装：仍然只回答拿到没有").isEmpty();
+		assertThat(this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl)).as("薄包装：仍然只回答拿到没有").isEmpty();
 
 		this.fake.down = true;
 		LeaseService.AcquireResult unavailable = this.service.acquire("ai:lease:run:other", this.ttl);
 
-		assertThat(unavailable.outcome()).as("设施不可用 ⇒ UNAVAILABLE（语义：按进程内互斥继续）")
+		assertThat(unavailable.outcome()).as("设施不可用 ⇒ UNAVAILABLE（语义：消费者必须失败关闭）")
 			.isEqualTo(LeaseService.AcquireOutcome.UNAVAILABLE);
 		assertThat(unavailable.acquired()).isFalse();
 		assertThat(this.service.leaseOk()).as("降级可观测").isFalse();
@@ -109,7 +109,7 @@ class LeaseServiceTriStateTest {
 
 	@Test
 	void verifyHeldAnswersAgainstRedisTruthInOneRoundTrip() {
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		int scriptCallsBefore = this.fake.scriptCalls.get();
 
 		assertThat(this.service.verifyHeld(KEY, lease.epoch())).isEqualTo(LeaseService.Hold.HELD);
@@ -120,13 +120,13 @@ class LeaseServiceTriStateTest {
 
 		// 租约过期后被别人接管：进程内视图还没被续租失败清掉，但真值已经换主
 		this.fake.dropKey(KEY);
-		this.other.tryAcquire(KEY, this.ttl).orElseThrow();
+		this.other.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		assertThat(this.service.verifyHeld(KEY, lease.epoch())).as("真值已换主 ⇒ LOST")
 			.isEqualTo(LeaseService.Hold.LOST);
 		assertThat(this.service.heldEpoch(KEY)).as("校验失败即作废进程内视图").isZero();
 
 		this.fake.down = true;
-		assertThat(this.service.verifyHeld(KEY, lease.epoch())).as("设施不可用 ⇒ UNAVAILABLE（调用方按无租约处理）")
+		assertThat(this.service.verifyHeld(KEY, lease.epoch())).as("设施不可用 ⇒ UNAVAILABLE（消费者失败关闭）")
 			.isEqualTo(LeaseService.Hold.UNAVAILABLE);
 	}
 
@@ -134,7 +134,7 @@ class LeaseServiceTriStateTest {
 
 	@Test
 	void markDrivingStopsAndReleasesOnceTheLivenessPredicateTurnsFalse() {
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		AtomicBoolean alive = new AtomicBoolean(true);
 		this.service.markDriving(lease, alive::get);
 
@@ -162,13 +162,13 @@ class LeaseServiceTriStateTest {
 	 */
 	@Test
 	void staleReleaseOrVerifyDoesNotDropTheCurrentHold() {
-		LeaseService.Lease first = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease first = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		this.service.markDriving(first);
 		this.fake.dropKey(KEY);
 		this.scheduler.tick(); // 续租失败 ⇒ 视图作废、任务停（这一任确实没了）
 		assertThat(this.service.heldEpoch(KEY)).isZero();
 
-		LeaseService.Lease second = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease second = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		assertThat(second.epoch()).isGreaterThan(first.epoch());
 		this.service.markDriving(second);
 		this.fake.resetCounters();
@@ -186,7 +186,7 @@ class LeaseServiceTriStateTest {
 
 	@Test
 	void markDrivingWithoutAPredicateKeepsTheLegacyBehaviour() {
-		LeaseService.Lease lease = this.service.tryAcquire(KEY, this.ttl).orElseThrow();
+		LeaseService.Lease lease = this.service.tryAcquireFenced(KEY, FENCE_KEY, this.ttl).orElseThrow();
 		this.service.markDriving(lease);
 
 		this.scheduler.tick();

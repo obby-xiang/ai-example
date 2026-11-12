@@ -58,7 +58,7 @@ class SessionGateLeaseTokenTest {
 
 	private static final String SESSION = "s-token";
 
-	private static final String LOCK_KEY = SessionGate.LOCK_PREFIX + SESSION;
+	private static final String LOCK_KEY = SessionGate.gateKey(SESSION, 1L, 101L);
 
 	private static final String RUN_ID = "run-token";
 
@@ -71,6 +71,18 @@ class SessionGateLeaseTokenTest {
 	private final AiProperties properties = new AiProperties();
 
 	private final SessionGate gate = new SessionGate(this.fake.template, this.properties);
+
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void openIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void closeIdentity() {
+		this.identity.close();
+	}
 
 	// ── 基本语义（token 精确匹配） ───────────────────────────────────────────
 
@@ -253,46 +265,58 @@ class SessionGateLeaseTokenTest {
 
 	// ── 失败/不可知：不得 plain SET 兜底，不得宣称成功 ────────────────────────
 
-	/** Redis 异常 ⇒ 只保留进程内互斥（degraded），不写裸 SET、不宣称续期/释放成功。 */
+	/** Redis 异常 ⇒ 获取失败关闭；恢复后可获取，续期/释放不可确认不得报成功。 */
 	@Test
 	void redisFailureNeverFallsBackToPlainWritesOrClaimsOwnership() {
 		this.fake.failScripts = true;
 
-		assertThat(this.gate.acquire(SESSION, RUN_ID, "token-a")).isNull();
+		assertThatThrownBy(() -> this.gate.acquire(SESSION, RUN_ID, "token-a"))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+		assertThat(this.gate.heldSessions()).as("共享门不可确认时不得用本地 holder 放行").isZero();
 		assertThat(this.fake.value(LOCK_KEY)).as("异常时不得 plain SET 兜底").isNull();
 		assertThat(this.fake.plainWrites()).isZero();
-		SessionGate.Busy busy = this.gate.acquire(SESSION, OTHER_RUN, "token-b");
-		assertThat(busy).isNotNull();
-		assertThat(busy.runId()).isEqualTo(RUN_ID);
-		assertThat(busy.degraded()).as("Redis 侧未取得锁 ⇒ 降级事实必须如实上报").isTrue();
 
-		assertThat(this.gate.release(SESSION, RUN_ID, "token-a")).isTrue();
-		assertThat(this.fake.plainWrites()).as("释放失败也不得裸 DEL").isZero();
+		this.fake.failScripts = false;
+		assertThat(this.gate.acquire(SESSION, RUN_ID, "token-a")).as("恢复后可重新获取").isNull();
+		this.fake.failScripts = true;
 		assertThatThrownBy(() -> this.gate.renewLockOnce(SESSION, RUN_ID + "|token-a"))
 			.as("续期不可知 ⇒ 抛给 watchdog，由它按降级处理（不得返回成功）")
 			.isInstanceOf(IllegalStateException.class);
+		long lockLostBeforeRelease = this.gate.lockLost();
+		assertThat(this.gate.release(SESSION, RUN_ID, "token-a"))
+			.as("共享释放结局不可知不得报成功").isFalse();
+		assertThat(this.fake.value(LOCK_KEY)).as("释放失败不得裸 DEL，键按 TTL 收敛").isNotNull();
+		assertThat(this.gate.lockLost()).as("释放不可知必须进入既有降级计数").isEqualTo(lockLostBeforeRelease + 1L);
+
+		this.fake.failScripts = false;
+		assertThat(this.gate.release(SESSION, RUN_ID, "token-a")).as("恢复后可按 token 释放").isTrue();
+		assertThat(this.fake.value(LOCK_KEY)).isNull();
+		assertThat(this.fake.plainWrites()).isZero();
 	}
 
-	/** 脚本结果不可知（null）⇒ 与异常同口径：不宣称取门/续期/释放成功。 */
+	/** 脚本结果不可知（null）⇒ 与异常同口径：获取失败关闭，续期/释放不得报成功。 */
 	@Test
 	void unknownScriptResultIsNotTreatedAsAcquiredOrRenewed() {
 		this.fake.nullScripts = true;
 
-		assertThat(this.gate.acquire(SESSION, RUN_ID, "token-a")).isNull();
+		assertThatThrownBy(() -> this.gate.acquire(SESSION, RUN_ID, "token-a"))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+		assertThat(this.gate.heldSessions()).isZero();
 		assertThat(this.fake.value(LOCK_KEY)).isNull();
-		assertThat(this.gate.acquire(SESSION, OTHER_RUN, "token-b").degraded()).isTrue();
 
+		this.fake.nullScripts = false;
+		assertThat(this.gate.acquire(SESSION, RUN_ID, "token-a")).isNull();
+		this.fake.nullScripts = true;
 		assertThat(this.gate.renewLockOnce(SESSION, RUN_ID + "|token-a")).isFalse();
-		assertThat(this.gate.release(SESSION, RUN_ID, "token-a")).isTrue();
+		assertThat(this.gate.release(SESSION, RUN_ID, "token-a")).isFalse();
 		this.gate.releaseDeadHeld(SESSION, RUN_ID);
 		assertThat(this.fake.plainWrites()).isZero();
+
+		this.fake.nullScripts = false;
+		assertThat(this.gate.release(SESSION, RUN_ID, "token-a")).isTrue();
 	}
 
-	/**
-	 * 接管结果不可知：<b>不</b>宣称 Redis 接管成功（不写兜底、不重启 watchdog），
-	 * 但本地 token 必须跟上 —— 否则调用方持新 token 释放时摘不掉本地门（会话被永久占住）；
-	 * 释放则按<b>已确认</b>的锁值走脚本，不能把锁白留到 TTL。
-	 */
+	/** 接管不可知必须失败关闭，并保留旧 token/锁值供原持有者收尾。 */
 	@Test
 	void unknownTakeoverKeepsLocalReleaseWorkingWithoutPretendingTheRedisWriteHappened() {
 		assertThat(this.gate.acquire(SESSION, RUN_ID, "token-first")).isNull();
@@ -300,12 +324,13 @@ class SessionGateLeaseTokenTest {
 		assertThat(confirmed).isEqualTo(RUN_ID + "|token-first");
 
 		this.fake.nullScripts = true;
-		assertThat(this.gate.acquire(SESSION, RUN_ID, "token-resume"))
-			.as("结果不可知 ⇒ 按已持有处理（进程内门），但不宣称 Redis 接管成功").isNull();
+		assertThatThrownBy(() -> this.gate.acquire(SESSION, RUN_ID, "token-resume"))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
 		this.fake.nullScripts = false;
 		assertThat(this.fake.value(LOCK_KEY)).as("不得写兜底 SET").isEqualTo(confirmed);
+		assertThat(this.gate.currentRunId(SESSION)).as("旧持有者仍负责本地收尾").isEqualTo(RUN_ID);
 
-		assertThat(this.gate.release(SESSION, RUN_ID, "token-resume")).isTrue();
+		assertThat(this.gate.release(SESSION, RUN_ID, "token-first")).isTrue();
 		assertThat(this.fake.value(LOCK_KEY)).as("按已确认的锁值释放（脚本验证），不把锁白留到 TTL").isNull();
 		assertThat(this.fake.plainWrites()).isZero();
 	}

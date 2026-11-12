@@ -639,13 +639,14 @@ public class AiController {
         }
         AiTrace.eventOn(runId, sessionId, "turn_exception", "code", "UNCAUGHT",
                 "type", ex.getClass().getSimpleName(), "msg", "Uncaught exception in AI turn");
-        writeOutsideTurnFailure(runId, ErrorCodes.AI_RUN_FAILED, () -> {
+        String errorCode = ex instanceof AiStateUnavailableException ? ErrorCodes.AI_REDIS_UNAVAILABLE : ErrorCodes.AI_RUN_FAILED;
+        writeOutsideTurnFailure(runId, errorCode, () -> {
             service.clearTerminalRunState(runId);
             if (Boolean.TRUE.equals(out.terminalFrameArchivedSinceDriveStart())) {
                 log.info("failure terminal frame already archived for this drive; skipping outside-turn error runId={}", runId);
                 return;
             }
-            out.error(ErrorCodes.AI_RUN_FAILED, localize(ErrorCodes.AI_RUN_FAILED, "AI 服务暂时不可用，请稍后重试。"));
+            out.error(errorCode, localize(errorCode, "AI 服务暂时不可用，请稍后重试。"));
         });
     }
 

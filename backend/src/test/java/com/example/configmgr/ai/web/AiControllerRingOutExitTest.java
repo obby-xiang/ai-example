@@ -82,6 +82,20 @@ class AiControllerRingOutExitTest {
 	}
 
 	@Test
+	void ringOutStateUnavailableKeepsTheStableRedisErrorCode() {
+		doThrow(new com.example.configmgr.common.AiStateUnavailableException("lease unavailable"))
+			.when(this.service)
+			.chat(anyString(), any(AiChatRequest.class), eq(this.out));
+		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
+
+		var response = this.controller.chat(new AiChatRequest(SESSION, "你好", null));
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+		verify(this.out, timeout(5000)).error(eq(ErrorCodes.AI_REDIS_UNAVAILABLE), anyString());
+		verify(this.out, never()).error(eq(ErrorCodes.AI_RUN_FAILED), anyString());
+	}
+
+	@Test
 	void ringOutFailureIsSkippedWhenThisDriveAlreadyArchivedATerminal() {
 		doThrow(new IllegalStateException("环外异常（模拟）")).when(this.service)
 			.chat(anyString(), any(AiChatRequest.class), eq(this.out));

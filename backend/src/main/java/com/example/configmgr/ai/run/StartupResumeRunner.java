@@ -9,6 +9,7 @@ import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.RunKeyScope;
 import com.example.configmgr.ai.tenant.TenantUser;
+import com.example.configmgr.common.ErrorCodes;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
@@ -390,6 +391,13 @@ public class StartupResumeRunner {
             log.info("startup scan deferred: single-flight seat busy (trigger=startup/manual)");
             return deferred;
         }
+        if (isUnavailableFlight(flight)) {
+            try {
+                return deferredScanReport(ErrorCodes.AI_REDIS_UNAVAILABLE);
+            } finally {
+                flight.close();
+            }
+        }
         try {
             return scanCandidates(flight);
         } finally {
@@ -600,6 +608,13 @@ public class StartupResumeRunner {
             Map<String, Object> deferred = deferredSweepReport();
             log.info("runtime dead-run sweep deferred: single-flight seat busy (next tick as usual)");
             return deferred;
+        }
+        if (isUnavailableFlight(flight)) {
+            try {
+                return deferredSweepReport(ErrorCodes.AI_REDIS_UNAVAILABLE);
+            } finally {
+                flight.close();
+            }
         }
         try {
             return sweepCandidates(flight);
@@ -1084,9 +1099,8 @@ public class StartupResumeRunner {
      * <li><b>别人持有</b>（{@code HELD_ELSEWHERE}）：等有界预算（{@link #SCAN_LEASE_WAIT_MS}），
      *     仍拿不到 ⇒ 返回 {@code null}（本拍让位）。系统面扫描本来就是全租户口径、手工扫描按身份单飞，
      *     所以让位不会漏掉哪一轮；</li>
-     * <li><b>设施不可确认</b>（{@code UNAVAILABLE} / 无租约设施）：按
-     *     {@link LeaseService} 的契约退到<b>进程内单飞</b>继续扫 —— 一次 Redis 抖动不能把启动续跑
-     *     整体停摆（单实例仍然正确）。</li>
+     * <li><b>设施不可确认</b>（{@code UNAVAILABLE}）：本拍 deferred，不枚举候选、不接管；
+     *     明确无租约设施的 legacy 装配才按进程内单飞继续。</li>
      * </ul>
      *
      * @param trigger 日志口径（{@code startup/manual} / {@code runtime-sweep}）
@@ -1114,11 +1128,13 @@ public class StartupResumeRunner {
     }
 
     private ScanFlight inconclusiveScanFlight(String trigger) {
-        // 设施返回了"没有结论"（非生产形态：真实现恒返回三态之一；替身/桩可能给 null）：
-        // 同样按"不可确认"降级，绝不让一次 null 把整拍扫描打崩。
-        log.warn("scan single-flight lease inconclusive (falling back to in-process single-flight) trigger={}", trigger);
-        this.scanInFlight.set(true);
+        log.warn("scan single-flight lease inconclusive; deferring candidate scan trigger={}", trigger);
+        unlockScanGate();
         return new ScanFlight(null, null, "UNAVAILABLE");
+    }
+
+    private static boolean isUnavailableFlight(ScanFlight flight) {
+        return "UNAVAILABLE".equals(flight.outcome());
     }
 
     private ScanFlight tryStartScan(String trigger, long waitMs) {
@@ -1142,23 +1158,19 @@ public class StartupResumeRunner {
             try {
                 result = leases.acquire(key, scanLeaseTtl(), owner);
             } catch (RuntimeException ex) {
-                // 租约设施异常：按进程内单飞继续（LeaseService 的降级契约），别把扫描整体停摆。
-                log.warn("scan single-flight lease unavailable (falling "
-                        + "back to in-process single-flight) trigger={}", trigger, ex);
-                this.scanInFlight.set(true);
-                return new ScanFlight(null, null, "UNAVAILABLE");
+                log.warn("scan single-flight lease unavailable; deferring candidate scan trigger={}", trigger, ex);
+                return inconclusiveScanFlight(trigger);
             }
             if (result == null) {
                 return inconclusiveScanFlight(trigger);
             }
-            if (result.isAcquired()) {
+            if (result.isAcquired() && result.lease() != null) {
                 return acquiredScanFlight(leases, result, scanIdentity, trigger);
             }
             if (result.outcome() != LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
-                log.warn("scan single-flight lease facility unconfirmed (falling back to in-process single-flight) trigger={} outcome={}", trigger,
+                log.warn("scan single-flight lease facility unconfirmed; deferring candidate scan trigger={} outcome={}", trigger,
                         result.outcome());
-                this.scanInFlight.set(true);
-                return new ScanFlight(null, null, "UNAVAILABLE");
+                return inconclusiveScanFlight(trigger);
             }
             if (System.currentTimeMillis() >= deadlineMs) {
                 unlockScanGate();
@@ -1301,6 +1313,10 @@ public class StartupResumeRunner {
      * resumed/expired/skipped/onStartup/zombieAge}），只额外标 {@code deferred=true} 与原因，绝不伪装成"扫了 0 轮"。
      */
     private Map<String, Object> deferredScanReport() {
+        return deferredScanReport(SCAN_IN_FLIGHT);
+    }
+
+    private Map<String, Object> deferredScanReport(String reason) {
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("scanned", true);
         report.put("at", Instant.now().toString());
@@ -1312,7 +1328,7 @@ public class StartupResumeRunner {
         report.put("onStartup", this.properties.getResume().isOnStartup());
         report.put("zombieAge", String.valueOf(this.properties.getResume().getZombieAge()));
         report.put("deferred", true);
-        report.put("reason", SCAN_IN_FLIGHT);
+        report.put("reason", reason);
         return report;
     }
 
@@ -1320,6 +1336,10 @@ public class StartupResumeRunner {
      * 让位时的运行期报告（契约同上：{@code swept/.../finalized/expired/skipped/zombieAgeMs}）。
      */
     private Map<String, Object> deferredSweepReport() {
+        return deferredSweepReport(SCAN_IN_FLIGHT);
+    }
+
+    private Map<String, Object> deferredSweepReport(String reason) {
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("swept", true);
         report.put("at", Instant.now().toString());
@@ -1331,7 +1351,7 @@ public class StartupResumeRunner {
         report.put("skipped", List.of());
         report.put("zombieAgeMs", this.properties.getResume().getZombieAge().toMillis());
         report.put("deferred", true);
-        report.put("reason", SCAN_IN_FLIGHT);
+        report.put("reason", reason);
         return report;
     }
 

@@ -46,6 +46,7 @@ import com.example.configmgr.task.service.TaskSteps;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
+import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorCodes;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
@@ -564,14 +565,14 @@ public class ResilientChatService {
             keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, true);
             this.cancellations.register(runId);
             registered = true;
-            FirstTurnExecution execution = prepareFirstTurnExecution(runId, out, setup, keepalive);
-            if (execution.isCancelled()) {
-                return;
-            }
             ownership = takeDriveOwnership(runId);
             if (!ownership.owned()) {
                 log.warn("first-turn drive rejected runId={}: resume authority already held by "
                         + "another instance (avoid double drive; terminal state/frame owned by holder)", runId);
+                return;
+            }
+            FirstTurnExecution execution = prepareFirstTurnExecution(runId, out, setup, keepalive);
+            if (execution.isCancelled()) {
                 return;
             }
             driveFirstTurn(runId, out, setup, execution, keepalive);
@@ -975,50 +976,50 @@ public class ResilientChatService {
      * <li>抢到 / 同主重入 ⇒ 记入进程内驱动登记 + 起续租心跳；</li>
      * <li>{@link LeaseService.AcquireOutcome#HELD_ELSEWHERE} ⇒ <b>不驱动</b>
      *     （终态与终帧归持有方）；</li>
-     * <li>设施缺失 / 不可确认 ⇒ 继续驱动，但<b>写权限的结论由写口自己给</b>：
-     *     <b>没有租约设施</b>时 {@code runLeaseAuthority} 是 {@code NEVER_HELD} ⇒ 写口<b>放行</b>
-     *     （没有租约语义，fencing 不参与）；<b>设施不可确认</b>时是 {@code UNAVAILABLE} ⇒ 写口
-     *     <b>只读</b>（这一轮的快照/帧会被拒）。两者都不是"本方法兜住"的，这里只决定要不要驱动。</li>
+     * <li>设施缺失 ⇒ 按明确 legacy 装配继续驱动；设施不可确认 ⇒ 在模型/工具调用前抛出
+     *     {@link com.example.configmgr.common.AiStateUnavailableException}，不得靠写口只读掩盖上游副作用。</li>
      * </ul>
      *
      * <p><b>身份随租约显式携带</b>：续租回调跑在 {@link LeaseService} 自建的裸线程上，那里没有请求身份，
-     * 而快照键由身份拼出。因此登记时把<b>请求身份</b>（本方法所在线程的身份 —— 就是建出这条记录的那一对）
-     * 一并交给续租任务，判据用 {@link RunStore#get(String, long, long)} 显式读快照，
-     * 不按"续租线程这一拍碰巧是谁"算键。
+     * 因此登记时把<b>请求身份</b>一并交给续租任务。存活只认本线程的驱动令牌：取租先于压缩与快照创建，
+     * 不能在首轮快照尚未建立的窗口里把活跃驱动误判为死亡。
      */
     private DriveOwnership takeDriveOwnership(String runId) {
+        LeaseService leases = this.store.leaseService();
         // 先登记：续租的存活判据立刻为真（顺序反了会让第一拍就当"驱动已死"而自行还租）
         // 键 = 身份 + runId：另一身份的同名轮次不得被本条登记判成"本进程还有驱动方"。
         // 值 = 本次登记的令牌：摘除必须条件化（同一键可能已被下一个驱动方重新登记）。
         String drivingKey = LocalRunKey.of(runId);
         Object drivingToken = new Object();
         this.drivingRuns.put(drivingKey, drivingToken);
+        if (leases == null) {
+            return new DriveOwnership(null, true, false, drivingToken);
+        }
         LeaseService.AcquireResult acquired;
         try {
             acquired = this.store.acquireRunLease(runId);
         } catch (RuntimeException ex) {
-            // M-1：取租失败 ⇒ 这一拍没有"驱动方 + 租约"的合取证据，登记必须撤销 ——
-            // 否则本进程的僵尸接管复核会一直看到"还有驱动方"，而续租心跳根本不存在。
-            // 条件删除：同键若已被下一个驱动方登记，不得把它的登记一起删掉。
             this.drivingRuns.remove(drivingKey, drivingToken);
-            log.warn("first-turn resume authority acquire failed runId={} (continuing lease-less; without facility "
-                    + "the write port NEVER_HELD passes; unconfirmed facility => write port UNAVAILABLE read-only)", runId, ex);
-            return DriveOwnership.none();
+            throw new AiStateUnavailableException("First-turn lease acquisition failed runId=" + runId, ex);
         }
-        if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
+        if (acquired == null || acquired.outcome() == LeaseService.AcquireOutcome.UNAVAILABLE) {
+            this.drivingRuns.remove(drivingKey, drivingToken);
+            throw new AiStateUnavailableException("First-turn lease is unavailable runId=" + runId);
+        }
+        if (acquired.outcome() == LeaseService.AcquireOutcome.HELD_ELSEWHERE) {
             this.drivingRuns.remove(drivingKey, drivingToken);
             return DriveOwnership.foreign();
         }
+        if (acquired.outcome() == LeaseService.AcquireOutcome.ACQUIRED && acquired.lease() == null) {
+            this.drivingRuns.remove(drivingKey, drivingToken);
+            throw new AiStateUnavailableException("First-turn lease acquisition returned no lease runId=" + runId);
+        }
         LeaseService.Lease lease = acquired.lease();
-        LeaseService leases = this.store.leaseService();
-        if (lease != null && leases != null) {
+        if (lease != null) {
             // 捕获请求身份：续租线程没有它（也不能靠池线程 TTL 残留）。
             TenantUser requestIdentity = RequestContextUtils.currentOrNull();
             try {
-                leases.markDriving(lease,
-                        () -> this.isStillDriving(drivingKey, drivingToken)
-                                && isSnapshotNotTerminal(runId, requestIdentity),
-                        requestIdentity);
+                leases.markDriving(lease, () -> this.isStillDriving(drivingKey, drivingToken), requestIdentity);
             } catch (RuntimeException ex) {
                 // 续租没起来 ⇒ 登记不能留；且<b>本次创建</b>的租约必须按所有权归还后再抛：
                 // 续租任务不存在时它只会等 TTL，期间别的实例既接不了管、运维也看不出"无人驱动"。
@@ -1087,22 +1088,6 @@ public class ResilientChatService {
      */
     public boolean isDriving(String runId) {
         return runId != null && this.drivingRuns.containsKey(LocalRunKey.of(runId));
-    }
-
-    /**
-     * 续租的存活判据：快照仍非终态（与 {@code ResumeService} 的同名判据同口径）。
-     *
-     * <p><b>按记录身份显式读，且走轻量状态键</b>（性能专项）：本判据跑在 {@link LeaseService} 的
-     * 续租线程上（每 {@code renew-interval} 一拍），旧实现
-     * {@link RunStore#get(String, long, long)} 会把整份快照（含整窗 {@code messageJson}）反序列化成
-     * 对象图，只为回答"是不是终态"。{@link RunStore#isSnapshotNotTerminal(String, TenantUser)} 先读
-     * 轻量状态键 {@code ai:runstate}，缺失才流式读快照顶层 {@code status} —— 判据逐字不变
-     * （读失败 ⇒ 仍活着；快照不存在 ⇒ 终态）。
-     *
-     * @param identity 本轮记录身份（{@code null} = 记录无身份：按 legacy 口径读）
-     */
-    private boolean isSnapshotNotTerminal(String runId, TenantUser identity) {
-        return this.store.isSnapshotNotTerminal(runId, identity);
     }
 
     /**

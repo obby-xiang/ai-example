@@ -101,7 +101,7 @@ class ConfirmGateLeaseTest {
 			new FakeRenewScheduler(), "inst-b");
 
 	/** 外置状态：租约薄口委托给上面的真实设施（fence 写 / heldRunEpoch 与之同源）。 */
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	private final InMemoryRunStore store = new InMemoryRunStore(true);
 
 	private final RunRegistry registry = mock(RunRegistry.class);
 
@@ -127,6 +127,13 @@ class ConfirmGateLeaseTest {
 
 	private final ConfirmGate gate;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.AfterEach
+	void closeIdentity() {
+		this.identity.close();
+	}
+
 	ConfirmGateLeaseTest() {
 		this.store.useLeaseFacility(this.leases);
 		this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
@@ -135,6 +142,7 @@ class ConfirmGateLeaseTest {
 
 	@BeforeEach
 	void stubCommon() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		when(this.provider.getIfAvailable()).thenReturn(this.resumeService);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
@@ -229,6 +237,230 @@ class ConfirmGateLeaseTest {
 		assertThat(this.store.heldRunEpoch(RUN_ID)).as("别人的租约不据为己有").isZero();
 		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID)))
 			.isEqualTo(heldByOther + "|inst-b");
+	}
+
+	@Test
+	void unavailableLeaseDoesNotEmitAnAwaitRequest() {
+		this.properties.getPark().setEnabled(true);
+		seedSuspended(PendingToolCall.PENDING);
+		PendingToolCall entry = pendingEntry(PendingToolCall.PENDING);
+		this.fake.goDown();
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> this.gate.awaitDecision(RUN_ID, entry))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class)
+			.extracting("code")
+			.isEqualTo(com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE);
+
+		verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+		assertThat(entry.getReq()).isNotEqualTo(true);
+		assertThat(entry.getReqAtMs()).isZero();
+		assertThat(this.store.pending(RUN_ID, TOOL_CALL_ID).getReq()).isNotEqualTo(true);
+		assertThat(this.store.pending(RUN_ID, TOOL_CALL_ID).getReqAtMs()).isZero();
+		assertThat(this.renewScheduler.activeCount()).isZero();
+	}
+
+	@Test
+	void acquiredNullLeaseDoesNotEmitAnAwaitRequest() {
+		LeaseService emptyLease = new LeaseService(this.fake.redis, this.properties, this.renewScheduler, "inst-a") {
+			@Override
+			public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
+				return new AcquireResult(AcquireOutcome.ACQUIRED, null, true);
+			}
+		};
+		this.store.useLeaseFacility(emptyLease);
+		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
+				this.beacon, List.of(), this.provider, this.dispatched::add, emptyLease, this.retry);
+		this.properties.getPark().setEnabled(true);
+		seedSuspended(PendingToolCall.PENDING);
+		PendingToolCall entry = pendingEntry(PendingToolCall.PENDING);
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> gate.awaitDecision(RUN_ID, entry))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+
+		verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+		assertThat(entry.getReq()).isNotEqualTo(true);
+		assertThat(entry.getReqAtMs()).isZero();
+		assertThat(this.store.pending(RUN_ID, TOOL_CALL_ID).getReq()).isNotEqualTo(true);
+		assertThat(this.store.pending(RUN_ID, TOOL_CALL_ID).getReqAtMs()).isZero();
+		assertThat(gate.hasActiveLatch(RUN_ID)).isFalse();
+	}
+
+	@Test
+	void awaitRequestMarkFailureReleasesTheLeaseCreatedHere() {
+		InMemoryRunStore failingStore = new InMemoryRunStore(true) {
+			@Override
+			public PendingToolCall markRequestEmitted(String runId, String toolCallId, long atMs) {
+				throw new IllegalStateException("mark failed");
+			}
+		};
+		failingStore.useLeaseFacility(this.leases);
+		ConfirmGate gate = new ConfirmGate(failingStore, this.registry, this.properties, this.cancellations,
+				this.beacon, List.of(), this.provider, this.dispatched::add, this.leases, this.retry);
+		seedSuspended(failingStore);
+		PendingToolCall entry = pendingEntry(PendingToolCall.PENDING);
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> gate.awaitDecision(RUN_ID, entry))
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessage("mark failed");
+
+		assertThat(this.fake.scriptDeletes.get()).as("本次创建的租约必须归还").isEqualTo(1);
+		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).isNull();
+		assertThat(entry.getReq()).isNotEqualTo(true);
+		assertThat(entry.getReqAtMs()).isZero();
+		assertThat(failingStore.pending(RUN_ID, TOOL_CALL_ID).getReq()).isNotEqualTo(true);
+		assertThat(failingStore.pending(RUN_ID, TOOL_CALL_ID).getReqAtMs()).isZero();
+		verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+	}
+
+	@Test
+	void awaitRequestMarkFailureDoesNotReleaseAReentrantLease() {
+		InMemoryRunStore failingStore = new InMemoryRunStore(true) {
+			@Override
+			public PendingToolCall markRequestEmitted(String runId, String toolCallId, long atMs) {
+				throw new IllegalStateException("mark failed");
+			}
+		};
+		java.util.concurrent.atomic.AtomicInteger acquisitions = new java.util.concurrent.atomic.AtomicInteger();
+		LeaseService countingLeases = new LeaseService(this.fake.redis, this.properties, this.renewScheduler, "inst-a") {
+			@Override
+			public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
+				acquisitions.incrementAndGet();
+				return super.acquireFenced(key, fenceKey, ttl, owner);
+			}
+		};
+		failingStore.useLeaseFacility(countingLeases);
+		ConfirmGate gate = new ConfirmGate(failingStore, this.registry, this.properties, this.cancellations,
+				this.beacon, List.of(), this.provider, this.dispatched::add, countingLeases, this.retry);
+		seedSuspended(failingStore);
+		failingStore.tryAcquireRunLease(RUN_ID).orElseThrow();
+		PendingToolCall entry = pendingEntry(PendingToolCall.PENDING);
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(() -> gate.awaitDecision(RUN_ID, entry))
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessage("mark failed");
+
+		assertThat(acquisitions.get()).as("标记请求前必须先完成重入取租").isEqualTo(2);
+		assertThat(this.fake.scriptDeletes.get()).as("重入租约不属于本次调用，不得归还").isZero();
+		assertThat(this.fake.string(this.store.runLeaseKey(RUN_ID))).isNotNull();
+		assertThat(entry.getReq()).isNotEqualTo(true);
+		assertThat(entry.getReqAtMs()).isZero();
+		assertThat(failingStore.pending(RUN_ID, TOOL_CALL_ID).getReq()).isNotEqualTo(true);
+		assertThat(failingStore.pending(RUN_ID, TOOL_CALL_ID).getReqAtMs()).isZero();
+		verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+	}
+
+	@Test
+	void unavailableLeaseSkipsResumeAndRecoversThroughBoundedRetry() {
+		LeaseService onceUnavailable = new LeaseService(this.fake.redis, this.properties, this.renewScheduler, "inst-a") {
+			private boolean first = true;
+
+			@Override
+			public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
+				if (this.first) {
+					this.first = false;
+					return new AcquireResult(AcquireOutcome.UNAVAILABLE, null);
+				}
+				return super.acquireFenced(key, fenceKey, ttl, owner);
+			}
+		};
+		this.store.useLeaseFacility(onceUnavailable);
+		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
+				List.of(), this.provider, this.dispatched::add, onceUnavailable, this.retry);
+		seedSuspended(PendingToolCall.PENDING);
+
+		ConfirmGate.Submission submission = gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
+
+		assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+		assertThat(submission.resumeTrigger().triggered()).isFalse();
+		assertThat(submission.resumeTrigger().outcome()).isEqualTo("LEASE_UNAVAILABLE");
+		assertThat(this.dispatched).isEmpty();
+		assertThat(this.retry.scheduled).as("设施恢复前留在既有有界重试链").isEqualTo(1);
+		verify(this.resumeService, never()).resume(anyString(), anyBoolean(), any());
+
+		this.retry.runAll();
+		assertThat(this.dispatched).hasSize(1);
+		drainDispatch();
+		verify(this.resumeService).resume(eq(RUN_ID), eq(false), any());
+	}
+
+	@Test
+	void acquiredNullLeaseDefersResumeWithoutReportingHeldElsewhere() {
+		LeaseService emptyLease = new LeaseService(this.fake.redis, this.properties, this.renewScheduler, "inst-a") {
+			@Override
+			public AcquireResult acquireFenced(String key, String fenceKey, Duration ttl, String owner) {
+				return new AcquireResult(AcquireOutcome.ACQUIRED, null, true);
+			}
+		};
+		this.store.useLeaseFacility(emptyLease);
+		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
+				this.beacon, List.of(), this.provider, this.dispatched::add, emptyLease, this.retry);
+		seedSuspended(PendingToolCall.PENDING);
+
+		ConfirmGate.Submission submission = gate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
+
+		assertThat(submission.resumeTrigger().triggered()).isFalse();
+		assertThat(submission.resumeTrigger().outcome()).isEqualTo("LEASE_UNAVAILABLE");
+		assertThat(this.dispatched).isEmpty();
+		assertThat(this.retry.scheduled).isEqualTo(1);
+		verify(this.resumeService, never()).resume(anyString(), anyBoolean(), any());
+	}
+
+	@Test
+	void stateUnknownLeaseUnavailableRetriesAndDispatchesOnceAfterRecovery() {
+		seedSuspended(PendingToolCall.PENDING);
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setModelId("test-model");
+		com.example.configmgr.ai.memory.MessageJsonCodec codec =
+				new com.example.configmgr.ai.memory.MessageJsonCodec(new com.fasterxml.jackson.databind.ObjectMapper());
+		snapshot.setMessageJson(codec.serializeAll(List.of(new org.springframework.ai.chat.messages.SystemMessage("system"),
+				new org.springframework.ai.chat.messages.UserMessage("request"))));
+		this.store.save(snapshot);
+		com.example.configmgr.ai.run.ResilientChatService chatService =
+				mock(com.example.configmgr.ai.run.ResilientChatService.class);
+		when(chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(), any()))
+			.thenReturn(new org.springframework.ai.chat.prompt.Prompt(
+					List.of(new org.springframework.ai.chat.messages.SystemMessage("system"))));
+		when(chatService.systemPromptText(any(), anyBoolean())).thenReturn("system");
+		org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor executor =
+				mock(org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor.class);
+		org.mockito.Mockito.doAnswer(invocation -> {
+			invocation.getArgument(0, Runnable.class).run();
+			return null;
+		}).when(executor).execute(any(Runnable.class));
+		AtomicReference<ResumeService.ResumeResult> observed = new AtomicReference<>();
+		ResumeService realResume = new ResumeService(this.store, this.registry, codec,
+				chatService, mock(SpToolCallingManager.class), executor, this.fake.redis, this.properties,
+				this.cancellations, mock(com.example.configmgr.ai.tool.ToolResultLimiter.class)) {
+			@Override
+			public ResumeResult resume(String runId, boolean forceTakeover, LeaseService.Lease lease) {
+				ResumeResult result = super.resume(runId, forceTakeover, lease);
+				observed.set(result);
+				return result;
+			}
+		};
+		@SuppressWarnings("unchecked")
+		ObjectProvider<ResumeService> realProvider = mock(ObjectProvider.class);
+		when(realProvider.getIfAvailable()).thenReturn(realResume);
+		ConfirmGate realGate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
+				this.beacon, List.of(), realProvider, this.dispatched::add, this.leases, this.retry);
+		org.springframework.test.util.ReflectionTestUtils.setField(this.fake, "verifyUnavailable", true);
+
+		realGate.submitDecision(RUN_ID, TOOL_CALL_ID, true, "同意");
+		drainDispatch();
+
+		assertThat(observed.get().outcome()).isEqualTo(ResumeService.Outcome.STATE_UNKNOWN);
+		assertThat(observed.get().body()).containsEntry("reason", "LEASE_UNAVAILABLE");
+		assertThat(this.dispatched).isEmpty();
+		assertThat(this.retry.scheduled).as("LEASE_UNAVAILABLE 必须留在既有有界重试链").isEqualTo(1);
+		verify(chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
+
+		org.springframework.test.util.ReflectionTestUtils.setField(this.fake, "verifyUnavailable", false);
+		this.retry.runAll();
+		assertThat(this.dispatched).hasSize(1);
+		drainDispatch();
+
+		assertThat(observed.get().outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		verify(chatService, times(1)).driveResumed(anyString(), anyString(), any(), any(), any());
 	}
 
 	// ── G4 延迟重试后接管 ──────────────────────────────────────────────────
@@ -554,12 +786,23 @@ class ConfirmGateLeaseTest {
 
 	private void seedSuspended(String status, String kind, String name) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		this.store.save(snapshot);
 		PendingToolCall entry = pendingEntry(status);
 		entry.setKind(kind);
 		entry.setName(name);
 		this.store.seedPending(RUN_ID, entry);
+	}
+
+	private void seedSuspended(InMemoryRunStore target) {
+		RunSnapshot snapshot = target.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setStatus(RunSnapshot.SUSPENDED);
+		target.save(snapshot);
+		target.seedPending(RUN_ID, pendingEntry(PendingToolCall.PENDING));
 	}
 
 	private void seedPending(String toolCallId, String status) {

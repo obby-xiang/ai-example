@@ -185,6 +185,19 @@ class CancelFinalizeHandoffTest {
 
 	private CancelledRunFinalizer finalizer;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void openIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void closeIdentity() {
+		this.identity.close();
+		this.watchdogExecutor.shutdownNow();
+	}
+
 	// ── 用例 ────────────────────────────────────────────────────────────────
 
 	/**
@@ -384,6 +397,29 @@ class CancelFinalizeHandoffTest {
 		assertThat(resuming).doesNotContainKey(RUN_ID);
 	}
 
+	/** 归属校验不可知不是 LOST，也不是可执行准入：取消收尾必须等待恢复。 */
+	@Test
+	void unavailableOwnershipCheckDefersCancelFinalizationWithoutSideEffects() {
+		setUpService(this.tasks::add);
+		seedSuspendedRunWithPending();
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+		this.fake.verifyUnavailable = true;
+
+		assertThat(this.resumeService.cancelConfirmed(RUN_ID))
+			.isEqualTo(ResumeService.CancelFinalize.UNAVAILABLE);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+		assertThat(archivedTypes()).as("不可确认时不得写取消终帧").isEmpty();
+		assertThat(this.store.pending(RUN_ID, CALL_ID).isExecuted()).isFalse();
+		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
+
+		this.fake.verifyUnavailable = false;
+		assertThat(this.resumeService.cancelConfirmed(RUN_ID))
+			.as("归属恢复可确认后允许完成取消收尾")
+			.isEqualTo(ResumeService.CancelFinalize.FINALIZED);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+		assertThat(archivedTypes()).containsOnlyOnce("done");
+	}
+
 	/**
 	 * <b>M-3：提交被拒（池饱和）也必须受重试上限约束</b> —— 不得绕过 {@code maxDispatchRetries}。
 	 */
@@ -542,6 +578,8 @@ class CancelFinalizeHandoffTest {
 	private RunSnapshot seedRunWithStatus(String runId, String status) {
 		String sessionId = RUN_ID.equals(runId) ? SESSION_ID : SESSION_ID + "-" + runId;
 		RunSnapshot snapshot = this.store.seedRun(runId, sessionId);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(AiContext.of("definitions", null, null, null, null).toMap());
 		snapshot.setStatus(status);
 		this.store.save(snapshot);

@@ -67,7 +67,7 @@ import static org.mockito.Mockito.when;
  * </ul>
  *
  * <h2>本批口径</h2>
- * 快照建好之后、模型调用之前取得租约，并按 {@code lease.renew-interval} <b>续租</b>
+ * 任何压缩、快照创建或模型调用之前取得租约，并按 {@code lease.renew-interval} <b>续租</b>
  * （与续跑同一条心跳）；终态写（{@code RunStore#persist}）释放，进程内驱动标记兜底停续租。
  */
 class FirstTurnDriveOwnershipTest {
@@ -107,8 +107,9 @@ class FirstTurnDriveOwnershipTest {
 
 	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
 
-	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
-			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel, this.chatClient);
+	private final ProviderRuntime runtime = new ProviderRuntime(1L, "test-provider", "test-model",
+			"http://localhost", "/chat/completions", "test|runtime",
+			org.springframework.ai.openai.OpenAiChatOptions.builder().build(), null, this.chatModel, this.chatClient);
 
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
@@ -126,8 +127,14 @@ class FirstTurnDriveOwnershipTest {
 
 	private ResilientChatService service;
 
+	private final java.util.concurrent.atomic.AtomicReference<com.example.configmgr.ai.context.ContextCompactor.Plan> compactionPlan =
+			new java.util.concurrent.atomic.AtomicReference<>();
+
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.store.useLeaseFacility(this.leases);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "first-turn-owner-watchdog");
@@ -137,6 +144,13 @@ class FirstTurnDriveOwnershipTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
+		com.example.configmgr.ai.history.ConversationTranscriptStore transcript = mock(
+				com.example.configmgr.ai.history.ConversationTranscriptStore.class);
+		when(transcript.readPage(anyString(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(),
+				any(), org.mockito.ArgumentMatchers.anyInt())).thenReturn(com.example.configmgr.ai.history.ConversationTranscriptStore.ReadPage.EMPTY);
+		when(transcript.append(anyString(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(),
+				org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(true);
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "transcript", transcript);
 		when(this.providerRegistry.current()).thenReturn(this.runtime);
 		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(this.runtime));
 		when(this.cancellations.cancelState(anyString())).thenReturn(CancellationRegistry.CancelState.NOT_CANCELLED);
@@ -152,6 +166,7 @@ class FirstTurnDriveOwnershipTest {
 	@AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		this.identity.close();
 	}
 
 	/**
@@ -167,7 +182,7 @@ class FirstTurnDriveOwnershipTest {
 			epochAtModelCall.set(this.store.heldRunEpoch(RUN_ID));
 			// 另一实例此刻去抢同一轮的续跑权：能抢到就说明"僵尸扫描可以接管"，首轮会被双驱动
 			otherInstanceTookOver.set(this.otherInstance
-				.tryAcquire(this.store.runLeaseKey(RUN_ID), this.properties.getLease().getTtl())
+				.tryAcquireFenced(this.store.runLeaseKey(RUN_ID), this.store.fenceKey(RUN_ID), this.properties.getLease().getTtl())
 				.isPresent());
 			renewActiveAtModelCall.set(this.renewScheduler.activeCount());
 			return Flux.just(chunk("好了"), terminal());
@@ -190,6 +205,106 @@ class FirstTurnDriveOwnershipTest {
 		assertThat(FrameContract.oneOfType(frames, "done")).as("正常轮次恰好一条 done（oneOfType 自带唯一性）")
 			.isNotNull();
 		assertThat(FrameContract.types(frames)).as("不得出现失败帧").doesNotContain("error");
+	}
+
+	@Test
+	void unavailableLeaseStopsTheFirstTurnBeforeAnyModelOrToolCall() {
+		this.fake.goDown();
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire.attachTo(out);
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(
+				() -> this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class)
+			.extracting("code")
+			.isEqualTo(com.example.configmgr.common.ErrorCodes.AI_REDIS_UNAVAILABLE);
+
+		verify(this.chatClient, never()).prompt();
+		verify(this.chatModel, never()).stream(any(org.springframework.ai.chat.prompt.Prompt.class));
+		assertThat(this.store.get(RUN_ID)).as("取租失败不得创建快照").isNull();
+		assertThat(this.renewScheduler.activeCount()).as("未持租不得登记续租").isZero();
+	}
+
+	@Test
+	void acquiredOutcomeWithANullLeaseFailsClosedAndClearsTheDrivingToken() {
+		LeaseService emptyLease = new LeaseService(this.fake.redis, this.properties, this.renewScheduler, "inst-a") {
+			@Override
+			public AcquireResult acquireFenced(String key, String fenceKey, java.time.Duration ttl, String owner) {
+				return new AcquireResult(AcquireOutcome.ACQUIRED, null, true);
+			}
+		};
+		this.store.useLeaseFacility(emptyLease);
+		SseChatEmitter out = this.registry.of(RUN_ID);
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(
+				() -> this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+
+		verify(this.chatClient, never()).prompt();
+		assertThat(this.service.isDriving(RUN_ID)).isFalse();
+	}
+
+	@Test
+	void unavailableLeaseFailsBeforeTheL2SummaryModelCall() {
+		installL2Compactor();
+		this.fake.goDown();
+		SseChatEmitter out = this.registry.of(RUN_ID);
+
+		org.assertj.core.api.Assertions.assertThatThrownBy(
+				() -> this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out))
+			.isInstanceOf(com.example.configmgr.common.AiStateUnavailableException.class);
+
+		verify(this.chatModel, never()).call(any(org.springframework.ai.chat.prompt.Prompt.class));
+		verify(this.chatModel, never()).stream(any(org.springframework.ai.chat.prompt.Prompt.class));
+	}
+
+	@Test
+	void l2SummaryBeforeSnapshotCreationDoesNotReleaseTheNewLease() {
+		com.example.configmgr.ai.context.InMemoryContextStateStore contextStore = installL2Compactor();
+		AtomicInteger renewalsAtSummary = new AtomicInteger(-1);
+		when(this.chatModel.call(any(org.springframework.ai.chat.prompt.Prompt.class))).thenAnswer(invocation -> {
+			this.renewScheduler.tick();
+			renewalsAtSummary.set((int) this.renewScheduler.activeCount());
+			return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+					.content("<conversation_summary>旧对话摘要</conversation_summary>").build())));
+		});
+		SseChatEmitter out = this.registry.of(RUN_ID);
+
+		this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
+
+		assertThat(this.compactionPlan.get().action())
+			.as("reason=%s nextEst=%s limit=%s prefixDominated=%s", this.compactionPlan.get().reason(),
+					this.compactionPlan.get().decision().nextEst(), this.compactionPlan.get().decision().limitTokens(),
+					this.compactionPlan.get().prefixDominated())
+			.isEqualTo(com.example.configmgr.ai.context.ContextTrigger.Level.L2);
+		assertThat(renewalsAtSummary.get()).as("快照未建立时不得因存活判据误还新租约").isEqualTo(1);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+	}
+
+	private com.example.configmgr.ai.context.InMemoryContextStateStore installL2Compactor() {
+		com.example.configmgr.ai.context.InMemoryContextStateStore contextStore =
+				new com.example.configmgr.ai.context.InMemoryContextStateStore();
+		contextStore.write(SESSION_ID, com.example.configmgr.ai.context.ContextState.EMPTY
+				.withCompaction(com.example.configmgr.ai.context.ContextTrigger.Level.L1, 1, 0, "fixture", 1L));
+		com.example.configmgr.ai.context.ContextCompactor compactor = org.mockito.Mockito.spy(
+				new com.example.configmgr.ai.context.ContextCompactor(this.properties,
+						new com.example.configmgr.ai.context.ContextLimitResolver((providerId, modelId) -> 65536),
+						contextStore, com.example.configmgr.ai.context.ContextSummaryClient.production(this.properties)));
+		org.mockito.Mockito.doAnswer(invocation -> {
+			com.example.configmgr.ai.context.ContextCompactor.Plan plan =
+					(com.example.configmgr.ai.context.ContextCompactor.Plan) invocation.callRealMethod();
+			this.compactionPlan.set(plan);
+			return plan;
+		}).when(compactor).plan(any(com.example.configmgr.ai.context.ContextCompactor.Request.class), any(), any());
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "contextCompactor", compactor);
+		String longTurn = "旧对话内容".repeat(1500);
+		List<org.springframework.ai.chat.messages.Message> history = new ArrayList<>();
+		for (int index = 0; index < 8; index++) {
+			history.add(new UserMessage(longTurn));
+			history.add(new AssistantMessage(longTurn));
+		}
+		when(this.chatMemory.get(SESSION_ID)).thenReturn(history);
+		return contextStore;
 	}
 
 	// ───────────────────────── 辅助 ─────────────────────────
@@ -223,7 +338,7 @@ class FirstTurnDriveOwnershipTest {
 			assertThat(preflightEntered.await(10, TimeUnit.SECONDS)).as("首轮必须走到预检那一笔").isTrue();
 
 			assertThat(this.store.heldRunEpoch(RUN_ID)).as("预检期本实例持租").isPositive();
-			assertThat(this.otherInstance.tryAcquire(this.store.runLeaseKey(RUN_ID),
+			assertThat(this.otherInstance.tryAcquireFenced(this.store.runLeaseKey(RUN_ID), this.store.fenceKey(RUN_ID),
 					this.properties.getLease().getTtl())).as("预检期另一实例抢不到（僵尸扫描无从接管）").isEmpty();
 
 			ResumeService takeover = new ResumeService(this.store, this.registry, this.codec, this.service,
@@ -247,6 +362,44 @@ class FirstTurnDriveOwnershipTest {
 		assertThat(FrameContract.oneOfType(wire.frames(), "done")).as("恰好一条终帧（oneOfType 自带唯一性）")
 			.isNotNull();
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+	}
+
+	@Test
+	void legacyModeKeepsLocalDriverRegisteredUntilTheTurnEndsAndBlocksZombieTakeover() throws Exception {
+		this.properties.getResume().setZombieAge(java.time.Duration.ZERO);
+		this.store.useLeaseFacility(null);
+		CountDownLatch modelEntered = new CountDownLatch(1);
+		CountDownLatch releaseModel = new CountDownLatch(1);
+		when(this.streamSpec.chatResponse()).thenAnswer(invocation -> {
+			modelEntered.countDown();
+			releaseModel.await(10, TimeUnit.SECONDS);
+			return Flux.just(chunk("好了"), terminal());
+		});
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		ExecutorService worker = Executors.newSingleThreadExecutor();
+		try {
+			Future<?> turn = worker.submit(
+					() -> this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out));
+			assertThat(modelEntered.await(10, TimeUnit.SECONDS)).isTrue();
+			assertThat(this.service.isDriving(RUN_ID)).as("legacy 模型期间必须保留本地驱动登记").isTrue();
+
+			ResumeService takeover = new ResumeService(this.store, this.registry, this.codec, this.service,
+					mock(SpToolCallingManager.class), mock(ThreadPoolTaskExecutor.class),
+					mock(StringRedisTemplate.class), this.properties, this.cancellations,
+					mock(ToolResultLimiter.class));
+			ResumeService.ResumeResult result = takeover.resume(RUN_ID, true);
+			assertThat(result.outcome()).as("legacy 活跃首轮不得被僵尸复核重复驱动")
+				.isEqualTo(ResumeService.Outcome.ALREADY_RUNNING);
+			assertThat(result.body()).containsEntry("reason", "DRIVER_ALIVE_IN_PROCESS");
+
+			releaseModel.countDown();
+			turn.get(15, TimeUnit.SECONDS);
+		}
+		finally {
+			releaseModel.countDown();
+			worker.shutdownNow();
+		}
+		assertThat(this.service.isDriving(RUN_ID)).as("收尾必须按原 token 条件摘除").isFalse();
 	}
 
 	/**

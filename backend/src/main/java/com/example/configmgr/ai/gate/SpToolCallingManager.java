@@ -2837,6 +2837,11 @@ public class SpToolCallingManager implements ToolCallingManager {
             + ToolOutcome.CODE_RESOURCE_LOCKED + "）：该任务已有作业在执行，本次未执行。"
             + "请等待该作业收尾后重新发起（资源锁会随对方收尾释放）。";
 
+    /** 共享互斥状态不可确认时的失败关闭口径：不执行、不认领，恢复后可重新发起。 */
+    public static final String RESOURCE_LOCK_UNAVAILABLE_TEXT = ToolPreflightService.APPROVED_NOT_EXECUTED + "（"
+            + ToolOutcome.CODE_PRECHECK_UNAVAILABLE + "）：执行前无法确认资源互斥状态，本次未执行。"
+            + "请稍后重新发起该操作并重新确认。";
+
     /**
      * 错入口批准（{@code APPROVED + FRONTEND}）的固定口径：显式 blocked、未执行。
      *
@@ -2913,7 +2918,7 @@ public class SpToolCallingManager implements ToolCallingManager {
      * 命中的结局是 {@code unknown} 就<b>保持 unknown</b>（B23L1 批③b U4：旧实现把它当成功重放）；</li>
      * <li><b>目标资源硬校验</b>（F2）：不成立 → {@code blocked/TARGET_INVALID}，<b>不占认领</b>；</li>
      * <li><b>资源互斥</b>（L1）：任务级 → 作业级；被别人持有 → {@code blocked/RESOURCE_LOCKED}
-     * （不占认领、不抛、不断流）；设施不可用 → 放行 + WARN；</li>
+     * （不占认领、不抛、不断流）；设施不可用 → {@code blocked/PRECHECK_UNAVAILABLE}，同样不执行；</li>
      * <li><b>原子认领</b>三态：{@code WON} 执行；{@code LOST} 二次对账（命中按重放回原结果，未命中按既有
      * "已认领"文案）；{@code STALE_FENCE} 独立结论（"写回权已转移"，不再写"由实例 null 认领"）；</li>
      * <li><b>执行 → appendLedger（带 idemKey）</b>，资源锁在 {@code finally} 归还（只还本次创建的那一任）。</li>
@@ -2976,6 +2981,9 @@ public class SpToolCallingManager implements ToolCallingManager {
         ToolResourceLocks.LockHandle locks = acquireResourceLocks(runId, pending);
         if (locks.isHeldElsewhere()) {
             return settleBlocked(runId, pending, ToolOutcome.CODE_RESOURCE_LOCKED, RESOURCE_LOCKED_TEXT);
+        }
+        if (locks.outcome() == ToolResourceLocks.LockOutcome.UNAVAILABLE) {
+            return settleBlocked(runId, pending, ToolOutcome.CODE_PRECHECK_UNAVAILABLE, RESOURCE_LOCK_UNAVAILABLE_TEXT);
         }
         try {
             return claimAndExecute(runId, prompt, pending, settleObservation);
