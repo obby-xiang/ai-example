@@ -6697,6 +6697,37 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文流、文本解析或编码。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1274两项阻塞发现返修后均ADDRESSED，限定复审无新Critical/Important；施工报告覆盖三类宿主动作、取消对照、真实不存在异常、候选优先级、presence与退役字段的独立RED→GREEN，生产clean compile成功；主控未重跑测试，全量测试、真实Redis/DB/多实例NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:05a37663d5e3b0ad040e4a14d28270749577350d39a799af3da1c12600860ee8",
+      "status": "reviewed",
+      "reason": "逐hunk复核摘要客户端2秒有界停机、排队Future取消、稳定异常映射和中断恢复；独立复审两项Important均关闭，余一项并发测试时序Minor登记后续跟进。",
+      "reviewedAt": "2026-11-12T23:03:22+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1275、施工agent-1269",
+      "specChanges": [
+        {
+          "change": "摘要客户端停机超时或中断时，除shutdownNow中断活动任务外，显式取消被移出队列的Future；等待方以AI_SUMMARY_UNAVAILABLE及时结束。",
+          "reason": "shutdownNow只移除排队FutureTask而不会自动取消，原实现可能让调用方继续阻塞到摘要超时。",
+          "impact": "4线程8队列及2秒优雅等待不变，排队模型体不启动；CancellationException保留cause，真实terminated写日志。"
+        },
+        {
+          "change": "close中断分支通过try/finally恢复调用线程中断标记，清理或日志异常继续传播。",
+          "reason": "资源释放失败不得跳过中断恢复，也不得被包装成成功。",
+          "impact": "取消、日志异常和中断状态均可观测，未新增执行器或改变模型调用协议。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/context/ContextSummaryClient.java", "status": "checked", "reason": "排队Future逐项cancel(true)，取消映射稳定业务码，close以finally恢复中断并记录真实queued/active/terminated；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用ThreadPoolExecutor、Future和既有AI_SUMMARY_UNAVAILABLE，无新增执行器、依赖或模型调用路径。"},
+        "java-api-style": {"status": "checked", "reason": "生产Java已IDEA Reformat，方法规模和异常类型检查符合现有结构，未改变4线程8队列固定容量。"},
+        "logging-exception-safety": {"status": "checked", "reason": "WARN记录真实有界计数与terminated，清理和日志异常不吞掉，CancellationException保留cause。"},
+        "toc-interaction": {"status": "not-affected", "reason": "仅后台摘要生命周期变化，无用户界面或交互修改。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "停止接新任务后仅等待2秒，活动与排队任务分别取消，close同步互斥且中断可靠恢复，不改变模型并发边界。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改摘要文本协议、正文流或编码。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1275确认两项Important均ADDRESSED且无新Critical/Important；施工报告4活动+1排队、日志异常中断、预算/日志和重复关闭独立RED→GREEN，生产clean compile成功；主控未重跑测试，真实模型和Spring停机NOT_RUN。Minor deferred：并发close测试仍需更严格证明两个调用重叠，交DeepSeek仅测试资产跟进。"}
+      }
     }
   ]
 }

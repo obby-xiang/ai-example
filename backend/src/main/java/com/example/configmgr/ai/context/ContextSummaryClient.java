@@ -10,6 +10,8 @@ import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -20,6 +22,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -88,15 +91,20 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 
 	private final ModelCall call;
 
-	/** 有界平台线程池（不是虚拟线程：见类注。守护线程 + 空闲回收，容器关闭时 shutdownNow）。 */
+	private static final Logger log = LoggerFactory.getLogger(ContextSummaryClient.class);
+
+	/** 有界平台线程池（不是虚拟线程：见类注。守护线程 + 空闲回收）。 */
 	private static final int POOL_THREADS = 4;
 
 	/** 待执行摘要的排队上限；队满即拒绝（宁可判"摘要不可用"，也不无限排队等一个挂住的请求）。 */
 	private static final int QUEUE_CAPACITY = 8;
 
+	/** 停机先停止接收新任务并等待在飞摘要收尾，超过此固定预算才取消。 */
+	private static final long SHUTDOWN_WAIT_SECONDS = 2L;
+
 	private static final AtomicInteger THREAD_NO = new AtomicInteger();
 
-	private final ExecutorService executor;
+	private final ThreadPoolExecutor executor;
 
 	public ContextSummaryClient(AiProperties properties, ModelCall call) {
 		this.properties = properties;
@@ -174,6 +182,9 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE,
 					"summary request timed out (summary-timeout=" + timeout + ")", ex);
 		}
+		catch (CancellationException ex) {
+			throw new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, "summary request cancelled", ex);
+		}
 		catch (ExecutionException ex) {
 			Throwable cause = ex.getCause();
 			if (cause instanceof Exception failure) {
@@ -220,9 +231,40 @@ public final class ContextSummaryClient implements RollingSummarizer.Summarizer 
 		return new CodedIllegalStateException(ErrorCodes.AI_SUMMARY_UNAVAILABLE, message);
 	}
 
-	/** 由 Spring 在容器关闭时调用（{@code @Bean} 的推断销毁方法）。 */
-	public void close() {
-		this.executor.shutdownNow();
+	/**
+	 * 由 Spring 在容器关闭时调用（{@code @Bean} 的推断销毁方法）。先停止接收新任务并等待
+	 * {@value #SHUTDOWN_WAIT_SECONDS} 秒；超时或关闭线程被中断时取消未竟摘要，不把取消伪装成成功。
+	 */
+	public synchronized void close() {
+		if (this.executor.isShutdown()) {
+			return;
+		}
+		this.executor.shutdown();
+		try {
+			if (!this.executor.awaitTermination(SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS)) {
+				cancelUnfinished("timeout");
+			}
+		}
+		catch (InterruptedException ex) {
+			try {
+				cancelUnfinished("interrupted");
+			}
+			finally {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	private void cancelUnfinished(String reason) {
+		int active = this.executor.getActiveCount();
+		List<Runnable> queued = this.executor.shutdownNow();
+		for (Runnable task : queued) {
+			if (task instanceof Future<?> future) {
+				future.cancel(true);
+			}
+		}
+		log.warn("summary executor cancelled unfinished tasks (reason={} queued={} active={} terminated={})", reason,
+				queued.size(), active, this.executor.isTerminated());
 	}
 
 	/** 本客户端实际使用的执行池（诊断/用例断言"不是虚拟线程 + 有界"）。 */
