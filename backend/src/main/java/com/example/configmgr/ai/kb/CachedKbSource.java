@@ -15,8 +15,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,8 +53,11 @@ public class CachedKbSource implements KbSource, AutoCloseable {
         this.cache = cache;
         this.mapper = mapper;
         this.kb = kb;
-        this.leaseScheduler = new KbService.BoundedScheduledExecutor(8,
-                runnable -> Thread.ofPlatform().daemon(true).name("kb-cache-lease").unstarted(runnable));
+        ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+        scheduler.setKeepAliveTime(60L, TimeUnit.SECONDS);
+        scheduler.allowCoreThreadTimeOut(true);
+        scheduler.setRemoveOnCancelPolicy(true);
+        this.leaseScheduler = scheduler;
     }
 
     @Override

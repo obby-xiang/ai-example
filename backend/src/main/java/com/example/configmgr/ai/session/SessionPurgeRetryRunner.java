@@ -7,14 +7,15 @@ import com.example.configmgr.ai.tenant.TenantUser;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -128,7 +129,9 @@ public class SessionPurgeRetryRunner {
 	 */
 	private final AtomicLong runSeq = new AtomicLong();
 
-	private volatile ScheduledExecutorService scheduler;
+	private final ScheduledExecutorService scheduler;
+
+	private volatile ScheduledFuture<?> retryTask;
 
 	/**
 	 * 直接构造（单测）：周期开关取生产缺省，用例一律走 {@link #runOnce()} 同步驱动，不等调度。
@@ -138,13 +141,20 @@ public class SessionPurgeRetryRunner {
 		this(pendingStore, purgeService, leases, new AiProperties());
 	}
 
-	@Autowired
 	public SessionPurgeRetryRunner(SessionPurgePendingStore pendingStore, AiSessionPurgeService purgeService,
 			LeaseService leases, AiProperties properties) {
+		this(pendingStore, purgeService, leases, properties, null);
+	}
+
+	@Autowired
+	public SessionPurgeRetryRunner(SessionPurgePendingStore pendingStore, AiSessionPurgeService purgeService,
+			LeaseService leases, AiProperties properties,
+			@Qualifier("aiSessionPurgeRetryScheduler") ScheduledExecutorService scheduler) {
 		this.pendingStore = pendingStore;
 		this.purgeService = purgeService;
 		this.leases = leases;
 		this.properties = properties;
+		this.scheduler = scheduler;
 	}
 
 	/** 一轮有界清理的结果（测试/观测；不改变业务语义）。 */
@@ -163,23 +173,19 @@ public class SessionPurgeRetryRunner {
 					+ "(app.ai.session.purge-retry.periodic-enabled=false); runOnce stays callable");
 			return;
 		}
-		ScheduledExecutorService svc = Executors.newSingleThreadScheduledExecutor(runnable -> {
-			Thread thread = new Thread(runnable, "ai-session-purge-retry");
-			thread.setDaemon(true);
-			return thread;
-		});
-		this.scheduler = svc;
-		svc.scheduleWithFixedDelay(this::runOnceSafely, INITIAL_DELAY.toMillis(), PERIOD.toMillis(),
-				TimeUnit.MILLISECONDS);
+		if (this.scheduler != null) {
+			this.retryTask = this.scheduler.scheduleWithFixedDelay(this::runOnceSafely, INITIAL_DELAY.toMillis(),
+					PERIOD.toMillis(), TimeUnit.MILLISECONDS);
+		}
 		log.info("Session purge retry scheduler started: period={} maxCandidates={} maxAttempts={}", PERIOD, MAX_CANDIDATES,
 				MAX_ATTEMPTS);
 	}
 
 	@PreDestroy
 	public void shutdown() {
-		ScheduledExecutorService current = this.scheduler;
+		ScheduledFuture<?> current = this.retryTask;
 		if (current != null) {
-			current.shutdownNow();
+			current.cancel(false);
 		}
 	}
 

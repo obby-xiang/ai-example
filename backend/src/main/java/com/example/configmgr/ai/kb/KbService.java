@@ -1,11 +1,11 @@
 package com.example.configmgr.ai.kb;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenStream;
@@ -34,6 +34,9 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -52,15 +55,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.Callable;
-import java.util.concurrent.Delayed;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -87,7 +85,6 @@ import java.util.stream.Stream;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class KbService {
 
     private static final String F_DOC_ID = "doc_id";
@@ -183,13 +180,39 @@ public class KbService {
      */
     private volatile int consecutiveFailures;
 
-    private final ScheduledExecutorService scheduler = new BoundedScheduledExecutor(8, runnable -> {
-        Thread thread = Thread.ofPlatform().daemon(true).name("kb-refresh").unstarted(runnable);
-        this.refreshThread = thread;
-        return thread;
-    });
+    private final ThreadPoolTaskScheduler scheduler;
 
-    private volatile Thread refreshThread;
+    private final boolean ownsScheduler;
+
+    private volatile Future<?> initialRefreshTask;
+
+    private volatile ScheduledFuture<?> refreshTask;
+
+    private volatile ScheduledFuture<?> versionPollTask;
+
+    private final ThreadLocal<Boolean> refreshWorker = ThreadLocal.withInitial(() -> false);
+
+    public KbService(AiProperties properties, ObjectMapper mapper, KbSource source) {
+        this.properties = properties;
+        this.mapper = mapper;
+        this.source = source;
+        this.scheduler = new ThreadPoolTaskScheduler();
+        this.scheduler.setPoolSize(1);
+        this.scheduler.setThreadNamePrefix("kb-refresh-");
+        this.scheduler.setRemoveOnCancelPolicy(true);
+        this.scheduler.initialize();
+        this.ownsScheduler = true;
+    }
+
+    @Autowired
+    public KbService(AiProperties properties, ObjectMapper mapper, KbSource source,
+            @Qualifier("kbRefreshScheduler") ThreadPoolTaskScheduler scheduler) {
+        this.properties = properties;
+        this.mapper = mapper;
+        this.source = source;
+        this.scheduler = scheduler;
+        this.ownsScheduler = false;
+    }
 
     private final AtomicBoolean reloadRunning = new AtomicBoolean();
 
@@ -207,12 +230,14 @@ public class KbService {
         // 首启自播种（local 源且目录为空时复制随包样例；http 源无操作）必须在第一次回源前完成
         this.source.prepare();
         // 首版索引由 refreshNow 的成功路径自己记 lastObservedVersion；失败时**不**记（下一拍重试同一版本）
-        this.scheduler.submit(this::refreshQuietly);
+        this.initialRefreshTask = this.scheduler.submit(this::refreshQuietly);
         long interval = Math.max(1, this.properties.getKb().getRefreshInterval().toMillis());
-        this.scheduler.scheduleWithFixedDelay(this::refreshQuietly, interval, interval, TimeUnit.MILLISECONDS);
+        this.refreshTask = this.scheduler.scheduleWithFixedDelay(withClearedIdentity(this::refreshQuietly),
+                Duration.ofMillis(interval));
         if (this.source instanceof CachedKbSource) {
             long poll = Math.max(1, this.properties.getKb().getCache().getVersionPollInterval().toMillis());
-            this.scheduler.scheduleWithFixedDelay(this::pollVersionQuietly, poll, poll, TimeUnit.MILLISECONDS);
+            this.versionPollTask = this.scheduler.scheduleWithFixedDelay(withClearedIdentity(this::pollVersionQuietly),
+                    Duration.ofMillis(poll));
         }
         log.info("Business KB started: source={} dir={} index={} refresh={}", source.kind(),
                 this.properties.getKb().getDir(), this.properties.getKb().getIndexDir(),
@@ -222,8 +247,11 @@ public class KbService {
     @PreDestroy
     public void stop() {
         this.stopped = true;
-        if (this.scheduler != null) {
-            this.scheduler.shutdownNow();
+        cancelTask(this.initialRefreshTask);
+        cancelTask(this.refreshTask);
+        cancelTask(this.versionPollTask);
+        if (this.ownsScheduler) {
+            this.scheduler.shutdown();
         }
         if (this.source instanceof CachedKbSource cached) {
             cached.close();
@@ -239,6 +267,20 @@ public class KbService {
             this.analyzer.close();
         } catch (Exception e) {
             // 停机阶段继续释放其余资源。
+        }
+    }
+
+    private static Runnable withClearedIdentity(Runnable task) {
+        return () -> {
+            try (RunIdentityScope.Scope ignored = RunIdentityScope.denied()) {
+                task.run();
+            }
+        };
+    }
+
+    private static void cancelTask(Future<?> task) {
+        if (task != null) {
+            task.cancel(false);
         }
     }
 
@@ -323,7 +365,7 @@ public class KbService {
         }
         Duration refreshWaitBudget = this.properties.getKb().getRefreshWaitBudget();
         KbSource.RefreshBudget budget = KbSource.RefreshBudget.within(refreshWaitBudget);
-        if (this.scheduler == null || Thread.currentThread() == this.refreshThread) {
+        if (this.scheduler == null || Boolean.TRUE.equals(this.refreshWorker.get())) {
             return isRefreshPerformed(force, budget);
         }
 
@@ -371,6 +413,7 @@ public class KbService {
     }
 
     private boolean isRefreshPerformed(boolean force, KbSource.RefreshBudget budget) {
+        this.refreshWorker.set(true);
         this.lastRefreshAt = Instant.now();
         Path buildDir = null;
         try {
@@ -407,6 +450,7 @@ public class KbService {
             handleRefreshFailure(e, buildDir, budget);
             return false;
         } finally {
+            this.refreshWorker.remove();
             this.reloadRunning.set(false);
         }
     }
@@ -1187,307 +1231,16 @@ public class KbService {
         }
     }
 
-    static final class BoundedScheduledExecutor implements ScheduledExecutorService {
 
-        private final int maxPending;
 
-        private final Set<Reservation> pending = new HashSet<>();
 
-        private final ScheduledExecutorService delegate;
 
-        BoundedScheduledExecutor(int maxPending, ThreadFactory threadFactory) {
-            this.maxPending = maxPending;
-            this.delegate = Executors.newSingleThreadScheduledExecutor(threadFactory);
-        }
 
-        @Override
-        public <T> Future<T> submit(Callable<T> task) {
-            return track(reservation -> this.delegate.schedule(() -> {
-                try {
-                    return task.call();
-                } finally {
-                    reservation.release();
-                }
-            }, 0L, TimeUnit.NANOSECONDS));
-        }
 
-        @Override
-        public Future<?> submit(Runnable task) {
-            return track(reservation -> this.delegate.schedule(() -> {
-                try {
-                    task.run();
-                } finally {
-                    reservation.release();
-                }
-            }, 0L, TimeUnit.NANOSECONDS));
-        }
 
-        @Override
-        public void execute(Runnable command) {
-            submit(command);
-        }
 
-        @Override
-        public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
-            return track(reservation -> this.delegate.schedule(() -> {
-                try {
-                    command.run();
-                } finally {
-                    reservation.release();
-                }
-            }, delay, unit));
-        }
 
-        @Override
-        public <V> ScheduledFuture<V> schedule(Callable<V> callable, long delay, TimeUnit unit) {
-            return track(reservation -> this.delegate.schedule(() -> {
-                try {
-                    return callable.call();
-                } finally {
-                    reservation.release();
-                }
-            }, delay, unit));
-        }
 
-        @Override
-        public ScheduledFuture<?> scheduleAtFixedRate(Runnable command, long initialDelay, long period,
-                                                      TimeUnit unit) {
-            return track(reservation -> this.delegate.scheduleAtFixedRate(() -> {
-                try {
-                    command.run();
-                } catch (RuntimeException | Error ex) {
-                    reservation.release();
-                    throw ex;
-                }
-            }, initialDelay, period, unit));
-        }
 
-        @Override
-        public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay, long delay,
-                                                         TimeUnit unit) {
-            return track(reservation -> this.delegate.scheduleWithFixedDelay(() -> {
-                try {
-                    command.run();
-                } catch (RuntimeException | Error ex) {
-                    reservation.release();
-                    throw ex;
-                }
-            }, initialDelay, delay, unit));
-        }
 
-        @Override
-        public <T> Future<T> submit(Runnable task, T result) {
-            return submit(Executors.callable(task, result));
-        }
-
-        @Override
-        public <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks) throws InterruptedException {
-            List<Reservation> reservations = new ArrayList<>();
-            try {
-                return this.delegate.invokeAll(bindTasks(tasks, reservations));
-            } finally {
-                releaseAll(reservations);
-            }
-        }
-
-        @Override
-        public <T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks, long timeout, TimeUnit unit)
-                throws InterruptedException {
-            Objects.requireNonNull(unit);
-            List<Reservation> reservations = new ArrayList<>();
-            try {
-                return this.delegate.invokeAll(bindTasks(tasks, reservations), timeout, unit);
-            } finally {
-                releaseAll(reservations);
-            }
-        }
-
-        @Override
-        public <T> T invokeAny(Collection<? extends Callable<T>> tasks)
-                throws InterruptedException, ExecutionException {
-            List<Reservation> reservations = new ArrayList<>();
-            try {
-                return this.delegate.invokeAny(bindTasks(tasks, reservations));
-            } finally {
-                releaseAll(reservations);
-            }
-        }
-
-        @Override
-        public <T> T invokeAny(Collection<? extends Callable<T>> tasks, long timeout, TimeUnit unit)
-                throws InterruptedException, ExecutionException, TimeoutException {
-            Objects.requireNonNull(unit);
-            List<Reservation> reservations = new ArrayList<>();
-            try {
-                return this.delegate.invokeAny(bindTasks(tasks, reservations), timeout, unit);
-            } finally {
-                releaseAll(reservations);
-            }
-        }
-
-        private <T> List<Callable<T>> bindTasks(Collection<? extends Callable<T>> tasks,
-                                                List<Reservation> reservations) {
-            Objects.requireNonNull(tasks);
-            List<Callable<T>> copy = new ArrayList<>(tasks.size());
-            for (Callable<T> task : tasks) {
-                copy.add(Objects.requireNonNull(task));
-            }
-            synchronized (this.pending) {
-                if (copy.size() > this.maxPending - this.pending.size()) {
-                    throw new RejectedExecutionException("KB scheduled task limit exceeded: " + this.maxPending);
-                }
-                try {
-                    List<Callable<T>> bound = new ArrayList<>(copy.size());
-                    for (Callable<T> task : copy) {
-                        Reservation reservation = new Reservation();
-                        this.pending.add(reservation);
-                        reservations.add(reservation);
-                        bound.add(() -> {
-                            try {
-                                return task.call();
-                            } finally {
-                                reservation.release();
-                            }
-                        });
-                    }
-                    return bound;
-                } catch (RuntimeException | Error ex) {
-                    releaseAll(reservations);
-                    throw ex;
-                }
-            }
-        }
-
-        private void releaseAll(List<Reservation> reservations) {
-            for (Reservation reservation : reservations) {
-                reservation.release();
-            }
-        }
-
-        private <T> ScheduledFuture<T> track(ScheduledTaskFactory<T> factory) {
-            synchronized (this.pending) {
-                if (this.pending.size() >= this.maxPending) {
-                    throw new RejectedExecutionException("KB scheduled task limit exceeded: " + this.maxPending);
-                }
-                Reservation reservation = new Reservation();
-                this.pending.add(reservation);
-                ScheduledFuture<T> future = null;
-                try {
-                    future = factory.schedule(reservation);
-                    return new BoundedScheduledFuture<>(future, reservation::release);
-                } catch (RuntimeException | Error ex) {
-                    if (future != null) {
-                        future.cancel(false);
-                    }
-                    reservation.release();
-                    throw ex;
-                }
-            }
-        }
-
-        @Override
-        public void shutdown() {
-            this.delegate.shutdown();
-            releaseAll();
-        }
-
-        @Override
-        public List<Runnable> shutdownNow() {
-            List<Runnable> dropped = this.delegate.shutdownNow();
-            releaseAll();
-            return dropped;
-        }
-
-        private void releaseAll() {
-            synchronized (this.pending) {
-                for (Reservation reservation : new HashSet<>(this.pending)) {
-                    reservation.release();
-                }
-                this.pending.clear();
-            }
-        }
-
-        @Override
-        public boolean isShutdown() {
-            return this.delegate.isShutdown();
-        }
-
-        @Override
-        public boolean isTerminated() {
-            return this.delegate.isTerminated();
-        }
-
-        @Override
-        public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
-            return this.delegate.awaitTermination(timeout, unit);
-        }
-
-        private final class Reservation {
-            private final AtomicBoolean released = new AtomicBoolean();
-
-            private void release() {
-                if (this.released.compareAndSet(false, true)) {
-                    synchronized (BoundedScheduledExecutor.this.pending) {
-                        BoundedScheduledExecutor.this.pending.remove(this);
-                    }
-                }
-            }
-        }
-    }
-
-    @FunctionalInterface
-    private interface ScheduledTaskFactory<T> {
-        ScheduledFuture<T> schedule(BoundedScheduledExecutor.Reservation reservation);
-    }
-
-    private static final class BoundedScheduledFuture<T> implements ScheduledFuture<T> {
-
-        private final ScheduledFuture<T> delegate;
-
-        private final Runnable onDone;
-
-        private BoundedScheduledFuture(ScheduledFuture<T> delegate, Runnable onDone) {
-            this.delegate = delegate;
-            this.onDone = onDone;
-        }
-
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            boolean cancelled = this.delegate.cancel(mayInterruptIfRunning);
-            if (cancelled || this.delegate.isDone()) {
-                this.onDone.run();
-            }
-            return cancelled;
-        }
-
-        @Override
-        public boolean isCancelled() {
-            return this.delegate.isCancelled();
-        }
-
-        @Override
-        public boolean isDone() {
-            return this.delegate.isDone();
-        }
-
-        @Override
-        public T get() throws InterruptedException, ExecutionException {
-            return this.delegate.get();
-        }
-
-        @Override
-        public T get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
-            return this.delegate.get(timeout, unit);
-        }
-
-        @Override
-        public long getDelay(TimeUnit unit) {
-            return this.delegate.getDelay(unit);
-        }
-
-        @Override
-        public int compareTo(Delayed other) {
-            return this.delegate.compareTo(other);
-        }
-    }
 }

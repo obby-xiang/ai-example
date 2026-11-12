@@ -12,8 +12,8 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * AI 运行线程模型（S4.2 §2 exec/AiExecutorConfig + DC-12：禁用虚拟线程）。
@@ -130,12 +130,8 @@ public class AiExecutorConfig {
 	 */
 	@Bean(name = "aiStreamWatchdog", destroyMethod = "shutdownNow")
 	public ScheduledExecutorService aiStreamWatchdog() {
-		AtomicInteger counter = new AtomicInteger();
-		ScheduledExecutorService raw = Executors.newScheduledThreadPool(2, runnable -> {
-			Thread thread = new Thread(runnable, "ai-stream-watchdog-" + counter.incrementAndGet());
-			thread.setDaemon(true);
-			return thread;
-		});
+		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(2, Executors.defaultThreadFactory());
+		configureScheduler(raw);
 		// TtlExecutors 包装：调度器本身不做 MDC/身份传播，统一装饰补齐
 		return TtlExecutors.getTtlScheduledExecutorService(raw);
 	}
@@ -167,13 +163,24 @@ public class AiExecutorConfig {
 	 */
 	@Bean(name = "aiCancelPoll", destroyMethod = "shutdownNow")
 	public ScheduledExecutorService aiCancelPoll() {
-		AtomicInteger counter = new AtomicInteger();
-		ScheduledExecutorService raw = Executors.newScheduledThreadPool(2, runnable -> {
-			Thread thread = new Thread(runnable, "ai-cancel-poll-" + counter.incrementAndGet());
-			thread.setDaemon(true);
-			return thread;
-		});
+		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(2, Executors.defaultThreadFactory());
+		configureScheduler(raw);
 		return TtlExecutors.getTtlScheduledExecutorService(raw);
+	}
+
+	@Bean(name = "aiSessionPurgeRetryScheduler", destroyMethod = "shutdownNow")
+	public ScheduledExecutorService aiSessionPurgeRetryScheduler() {
+		ScheduledThreadPoolExecutor raw = new ScheduledThreadPoolExecutor(1, Executors.defaultThreadFactory());
+		configureScheduler(raw);
+		return raw;
+	}
+
+	private static void configureScheduler(ScheduledThreadPoolExecutor scheduler) {
+		scheduler.setKeepAliveTime(IDLE_KEEP_ALIVE_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+		scheduler.allowCoreThreadTimeOut(true);
+		scheduler.setRemoveOnCancelPolicy(true);
+		scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+		scheduler.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
 	}
 
 	/**
@@ -212,7 +219,8 @@ public class AiExecutorConfig {
 	 * <p>顺序无关：两者各自捕获、各自恢复；MDC 只用于日志行首，TTL 才决定执行体看到的
 	 * {@code tenantId/userId}。
 	 */
-	private static TaskDecorator aiTaskDecorator() {
+	@Bean(name = "aiTaskDecorator")
+	public static TaskDecorator aiTaskDecorator() {
 		TaskDecorator mdc = new AiMdcTaskDecorator();
 		TaskDecorator identity = new RequestContextTaskDecorator();
 		return runnable -> identity.decorate(mdc.decorate(runnable));

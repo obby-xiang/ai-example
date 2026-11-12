@@ -169,16 +169,18 @@ class SessionPurgeRetryRunnerTest {
 	@Test
 	void periodicRegistrationOnRegistersTheScheduler() {
 		SessionPurgePendingStore pending = mock(SessionPurgePendingStore.class);
+		ScheduledExecutorService scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
 		SessionPurgeRetryRunner runner = new SessionPurgeRetryRunner(pending,
-				mock(AiSessionPurgeService.class), null, new AiProperties());
+				mock(AiSessionPurgeService.class), null, new AiProperties(), scheduler);
 
 		runner.onReady();
 
-		Object scheduler = schedulerOf(runner);
-		assertThat(scheduler).as("缺省（开）必须真的注册调度器").isInstanceOf(ScheduledExecutorService.class);
-		assertThat(((ScheduledExecutorService) scheduler).isShutdown())
+		Object registered = schedulerOf(runner);
+		assertThat(registered).as("缺省（开）必须真的注册调度器").isInstanceOf(ScheduledExecutorService.class);
+		assertThat(((ScheduledExecutorService) registered).isShutdown())
 			.as("缺省（开）：调度器已创建且仍在跑（周期确实注册了）").isFalse();
 		runner.shutdown();
+		scheduler.shutdownNow();
 	}
 
 	private static Object schedulerOf(SessionPurgeRetryRunner runner) {

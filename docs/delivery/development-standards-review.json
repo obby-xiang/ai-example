@@ -6386,6 +6386,42 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本编码、流解析或字符串内容。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1236最终APPROVED；施工报告七个生产文件及新增控制流用例完成独立单点和生产编译，主控仅静态复核未重跑测试，全量普通测试与真实业务文件NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:e8ac7fc1bc7b08e092d49b931f8b8b443830583010b272cf8d2d5ea77a47a6b5",
+      "status": "reviewed",
+      "reason": "逐hunk复核AI调度器、KB刷新与purge重试生命周期；主控发现并退回未限定ScheduledExecutorService导致的注入歧义，返修后已显式绑定专用Bean。",
+      "reviewedAt": "2026-11-12T13:46:32+08:00",
+      "reviewer": "K3.1 Pro主会话静态复审与返修验收、施工agent-1239",
+      "specChanges": [
+        {
+          "change": "AI watchdog/cancel/purge调度器改由Spring管理，KB删除自定义ScheduledExecutorService并复用ThreadPoolTaskScheduler。",
+          "reason": "直接创建执行器和自定义框架实现使线程命名、任务关闭及队列生命周期难以统一，Spring同类型候选又要求显式限定注入。",
+          "impact": "调度池大小与固定周期保持；组件销毁只取消自身任务，共享池由Spring关闭，KB/purge分别使用kbRefreshScheduler和aiSessionPurgeRetryScheduler。"
+        },
+        {
+          "change": "KB周期任务显式清除提交者身份，StreamWatchdog节拍使用AiTrace.wrap恢复日志链路。",
+          "reason": "定时任务不得继承随机请求身份，日志链路也不能依赖调度线程遗留MDC。",
+          "impact": "KB首轮提交与周期执行边界保持，pending purge身份恢复逻辑不变；不改变业务锁、Redis键或刷新成功判定。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/exec/AiExecutorConfig.java", "status": "checked", "reason": "三个调度Bean统一空闲回收、removeOnCancel和关闭策略，aiTaskDecorator显式注册供KB复用；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/kb/CachedKbSource.java", "status": "checked", "reason": "缓存租约仍由自身单线程调度器续期并在close取消/关闭，只移除对已删除自定义执行器的引用；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/kb/KbSchedulerConfig.java", "status": "checked", "reason": "KB专用单线程Spring scheduler复用aiTaskDecorator并配置取消和关闭策略，无第二身份体系。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/kb/KbService.java", "status": "checked", "reason": "生产构造器显式Qualifier，固定周期与refreshNow预算/单飞保持，worker标记防止自等待，停止只取消本服务任务；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/StreamWatchdog.java", "status": "checked", "reason": "两个调度点仅增加AiTrace.wrap，取消判定、tick频率和终态逻辑不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/session/SessionPurgeRetryRunner.java", "status": "checked", "reason": "注入专用purge调度器，保存并取消自身future而不关闭共享池，pending身份恢复和runOnce语义不变；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用Spring ThreadPoolTaskScheduler、JDK ScheduledThreadPoolExecutor及既有decorator/AiTrace，无新增依赖或自定义执行器框架。"},
+        "java-api-style": {"status": "checked", "reason": "六个生产Java均有施工IDEA Reformat记录；构造器注入、Future生命周期与KB自等待分支逐hunk复核。"},
+        "logging-exception-safety": {"status": "checked", "reason": "调度异常与refreshNow失败口径保持，关闭只取消本组件任务，不把取消或超时包装成刷新成功；MDC恢复范围明确。"},
+        "toc-interaction": {"status": "not-affected", "reason": "仅后台调度基础设施变化，无用户提示、卡片或交互修改。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "KB单飞、缓存租约、purge身份恢复与watchdog取消语义保持，专用调度器Qualifier避免错误共享池注入。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "施工报告AiExecutorConfig/SessionPurgeRetryRunner/StreamWatchdog/KbService相关独立单点通过；主控退回后新增真实AnnotationConfigApplicationContext单点RED复现NoUniqueBeanDefinition并在Qualifier返修后GREEN，生产编译BUILD SUCCESS；主控未重跑测试，完整应用启动、真实Redis与多实例NOT_RUN。"}
+      }
     }
   ]
 }

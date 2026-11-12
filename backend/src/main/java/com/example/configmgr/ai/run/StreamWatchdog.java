@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
@@ -154,9 +155,10 @@ public class StreamWatchdog implements AutoCloseable {
 		// 同进程取消的加速通道：监听者只做"当场判定"，权威态仍在 Redis
 		this.cancelListener = cancellations.onCancel(runId, () -> fire(StreamViolationException.CANCELLED,
 				"turn cancelled (cancel flag set); upstream connection closed immediately"));
-		this.future = scheduler.scheduleAtFixedRate(this::tick, TICK_MILLIS, TICK_MILLIS, TimeUnit.MILLISECONDS);
+		this.future = scheduler.scheduleAtFixedRate(AiTrace.wrap(this::tick), TICK_MILLIS, TICK_MILLIS,
+				TimeUnit.MILLISECONDS);
 		this.cancelPollFuture = this.cancelPollScheduler == null ? null
-				: this.cancelPollScheduler.scheduleAtFixedRate(this::cancelTick, TICK_MILLIS, TICK_MILLIS,
+				: this.cancelPollScheduler.scheduleAtFixedRate(AiTrace.wrap(this::cancelTick), TICK_MILLIS, TICK_MILLIS,
 						TimeUnit.MILLISECONDS);
 	}
 
