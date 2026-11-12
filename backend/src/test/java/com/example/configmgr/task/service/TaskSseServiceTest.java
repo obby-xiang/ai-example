@@ -1,8 +1,13 @@
 package com.example.configmgr.task.service;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -171,6 +176,35 @@ class TaskSseServiceTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> data = (Map<String, Object>) parsed.get("data");
         assertThat(data).containsEntry("taskId", 7).containsEntry("status", "ACTIVE");
+    }
+
+    @Test
+    void failedFrameHonorsDebugSwitchAndStillRemovesEmitter() throws Exception {
+        Logger logger = (Logger) LoggerFactory.getLogger(TaskSseService.class);
+        Level previous = logger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            TaskSseService service = new TaskSseService(MAPPER, propertiesWithWriteTimeout(2_000L));
+            FailingEmitter unreachable = new FailingEmitter();
+            subscribersOf(service, TASK_ID).add(unreachable);
+            logger.setLevel(Level.DEBUG);
+            service.sendEvent(TASK_ID, unreachable, "HEARTBEAT", Map.of());
+            assertThat(appender.list).hasSize(1).allMatch(event -> event.getLevel() == Level.DEBUG);
+            assertThat(subscribersOf(service, TASK_ID)).isEmpty();
+
+            FailingEmitter second = new FailingEmitter();
+            subscribersOf(service, TASK_ID).add(second);
+            appender.list.clear();
+            logger.setLevel(Level.INFO);
+            service.sendEvent(TASK_ID, second, "HEARTBEAT", Map.of());
+            assertThat(appender.list).isEmpty();
+            assertThat(subscribersOf(service, TASK_ID)).isEmpty();
+        } finally {
+            logger.setLevel(previous);
+            logger.detachAppender(appender);
+        }
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────

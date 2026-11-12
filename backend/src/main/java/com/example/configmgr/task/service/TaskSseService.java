@@ -552,7 +552,9 @@ public class TaskSseService {
         return switch (result.outcome()) {
             case SENT -> true;
             case FAILED -> {
-                if (log.isDebugEnabled()) log.debug("Failed to send SSE context={}", context, result.failure());
+                if (log.isDebugEnabled()) {
+                    log.debug("Failed to send SSE context={}", context, result.failure());
+                }
                 yield false;
             }
             case TIMED_OUT -> {

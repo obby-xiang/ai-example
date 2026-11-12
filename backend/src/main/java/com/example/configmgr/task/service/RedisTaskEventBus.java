@@ -181,7 +181,9 @@ public class RedisTaskEventBus implements TaskEventBus {
         if (isRedisKnownDown()) {
             // 已知不可用：不碰 Redis 命令，作业事务线程不再按帧等命令超时
             this.publishFailures.incrementAndGet();
-            if (log.isDebugEnabled()) log.debug("Task SSE cross-instance publish skipped, Redis known down taskId={}", taskId);
+            if (log.isDebugEnabled()) {
+                log.debug("Task SSE cross-instance publish skipped, Redis known down taskId={}", taskId);
+            }
             return false;
         }
         try {
@@ -404,7 +406,9 @@ public class RedisTaskEventBus implements TaskEventBus {
     private RedisMessageListenerContainer startContainer() {
         RedisConnectionFactory factory = this.redis == null ? null : this.redis.getConnectionFactory();
         if (factory == null) {
-            if (log.isDebugEnabled()) log.debug("No Redis connection factory, cross-instance task SSE subscribe disabled");
+            if (log.isDebugEnabled()) {
+                log.debug("No Redis connection factory, cross-instance task SSE subscribe disabled");
+            }
             return null;
         }
         try {
@@ -509,7 +513,9 @@ public class RedisTaskEventBus implements TaskEventBus {
                     log.warn("Task SSE dispatch pool saturated, frame dropped and remote replays by snapshot polling "
                             + "dispatchRejections={}", total, e);
                 } else {
-                    if (log.isDebugEnabled()) log.debug("Task SSE dispatch pool saturated, frame dropped dispatchRejections={}", total, e);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Task SSE dispatch pool saturated, frame dropped dispatchRejections={}", total, e);
+                    }
                 }
             }
         }
@@ -542,7 +548,9 @@ public class RedisTaskEventBus implements TaskEventBus {
                     log.warn("Task SSE subscription pool saturated, running subscribe/unsubscribe inline on caller "
                             + "subscriptionRejections={}", total, e);
                 } else {
-                    if (log.isDebugEnabled()) log.debug("Task SSE subscription pool saturated, running inline subscriptionRejections={}", total, e);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Task SSE subscription pool saturated, running inline subscriptionRejections={}", total, e);
+                    }
                 }
                 task.run();
             }

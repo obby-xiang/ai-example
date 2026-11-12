@@ -1,9 +1,14 @@
 package com.example.configmgr.task.service;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.config.RedisAvailability;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -174,6 +179,32 @@ class RedisTaskEventBusTest {
 
         verify(this.redis).convertAndSend(eq("task:events:" + TASK_ID), anyString());
         assertThat(bus.metrics()).containsEntry("publishedFrames", 1L);
+    }
+
+    @Test
+    void knownDownPublishHonorsDebugSwitchWithoutChangingControlFlow() {
+        Logger logger = (Logger) LoggerFactory.getLogger(RedisTaskEventBus.class);
+        Level previous = logger.getLevel();
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            RedisAvailability availability = knownDown();
+            RedisTaskEventBus bus = new RedisTaskEventBus(this.redis, MAPPER, "redis", availability);
+            logger.setLevel(Level.DEBUG);
+            assertThat(bus.publish(TASK_ID, "{}")).isFalse();
+            assertThat(appender.list).hasSize(1).allMatch(event -> event.getLevel() == Level.DEBUG);
+
+            appender.list.clear();
+            logger.setLevel(Level.INFO);
+            assertThat(bus.publish(TASK_ID, "{}")).isFalse();
+            assertThat(appender.list).isEmpty();
+            assertThat(bus.metrics()).containsEntry("publishFailures", 2L)
+                    .containsEntry("publishedFrames", 0L);
+        } finally {
+            logger.setLevel(previous);
+            logger.detachAppender(appender);
+        }
     }
 
     private RedisAvailability knownDown() {

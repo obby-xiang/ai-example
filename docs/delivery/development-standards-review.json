@@ -6308,6 +6308,30 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改模型正文流或编码，仅调整配置与请求能力。"},
         "verification-review": {"status": "checked", "reason": "agent-1248 APPROVED；缺模型/能力缺省/TTL/reasoning/registry/父类parity均独立单点通过，后端358源编译、前端typecheck和3281模块build成功；真实上游、真实Redis/PG迁移和全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:299421e8cfa94d52f99cf3b3ae08c5f348da2c7d175b8f2fad6b8b0fdc6d4005",
+      "status": "reviewed",
+      "reason": "逐hunk复核五个生产文件的DEBUG控制块仅补大括号，独立审查agent-1240确认级别、文案、参数求值和业务控制流均未改变。",
+      "reviewedAt": "2026-11-12T13:14:37+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1240、施工agent-1236",
+      "specChanges": [],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/job/service/JobHeartbeatRegistry.java", "status": "checked", "reason": "三处已有isDebugEnabled的单行控制块仅补{}，撤销幂等和日志参数不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/job/service/JobProgressService.java", "status": "checked", "reason": "六处DEBUG控制块仅补{}，终态写忽略与heartbeat清理语义不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/job/service/StaleJobRecoveryRunner.java", "status": "checked", "reason": "三处DEBUG控制块仅补{}，空恢复扫描和零副作用保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/task/service/RedisTaskEventBus.java", "status": "checked", "reason": "四处DEBUG控制块仅补{}，发布计数与异常路径不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/task/service/TaskSseService.java", "status": "checked", "reason": "一处DEBUG控制块仅补{}，失败emitter摘除和日志开关不变；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "not-affected", "reason": "仅既有控制块结构补大括号，无依赖或新框架。"},
+        "java-api-style": {"status": "checked", "reason": "五个生产Java均经IDEA Reformat，所有改动仅为显式{}，无布尔、API或集合语义变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "DEBUG级别、文案、参数及Throwable位置不变，昂贵参数仍只在开关内求值，未误加日志。"},
+        "toc-interaction": {"status": "not-affected", "reason": "未修改用户提示、卡片或交互。"},
+        "protocol-redis-concurrency": {"status": "not-affected", "reason": "未修改API、Redis、数据库或并发状态。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1240 APPROVED；五个DEBUG开关及相关业务单点均独立通过，生产编译BUILD SUCCESS；全量测试、真实Redis和共享文件其他控制块NOT_RUN。"}
+      }
     }
   ]
 }

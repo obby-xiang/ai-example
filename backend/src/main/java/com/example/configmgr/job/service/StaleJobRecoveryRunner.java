@@ -122,7 +122,9 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
             }
         }
         if (scanned == 0) {
-            if (log.isDebugEnabled()) log.debug("Stale job recovery: nothing to do");
+            if (log.isDebugEnabled()) {
+                log.debug("Stale job recovery: nothing to do");
+            }
             return;
         }
         log.warn("Stale job recovery finished, jobs marked FAILED count={}", recovered);
@@ -151,7 +153,9 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
             // 活跃 → 跳过；读失败 → fail-closed 跳过（不用错误终态掩盖"无法确认"）。
             try {
                 if (heartbeatRegistry.isRunnerAlive(jobId)) {
-                    if (log.isDebugEnabled()) log.debug("Stale job recovery skipped, runner still active jobId={}", jobId);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Stale job recovery skipped, runner still active jobId={}", jobId);
+                    }
                     return false;
                 }
             } catch (JobHeartbeatRegistry.RunnerActiveStateUnavailableException e) {
@@ -164,7 +168,9 @@ public class StaleJobRecoveryRunner implements ApplicationRunner {
             boolean wrote = jobRepository.finishInterruptedIfInFlight(jobId, Job.JobStatus.FAILED,
                     LocalDateTime.now(), IN_FLIGHT) > 0;
             if (!wrote) {
-                if (log.isDebugEnabled()) log.debug("Stale job recovery skipped, job already left in-flight state jobId={}", jobId);
+                if (log.isDebugEnabled()) {
+                    log.debug("Stale job recovery skipped, job already left in-flight state jobId={}", jobId);
+                }
                 return false;
             }
             // 实现细节补充：FAILED 作业下不得残留 RUNNING/PENDING 的作业条目（状态机不自相矛盾）；

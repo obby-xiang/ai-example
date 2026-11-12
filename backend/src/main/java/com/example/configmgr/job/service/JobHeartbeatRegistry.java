@@ -307,7 +307,9 @@ public class JobHeartbeatRegistry {
     /** 分片边界续期：DB 仍在途才允许本代 token 写共享加速态。 */
     public void beat(Long jobId) {
         if (revokedJobIds.contains(jobId) || !isDatabaseInFlight(jobId)) {
-            if (log.isDebugEnabled()) log.debug("Late beat ignored, job terminal or runner revoked jobId={}", jobId);
+            if (log.isDebugEnabled()) {
+                log.debug("Late beat ignored, job terminal or runner revoked jobId={}", jobId);
+            }
             return;
         }
         this.lastBeatAtMs.put(jobId, this.clock.millis());
@@ -381,7 +383,9 @@ public class JobHeartbeatRegistry {
     /** 判死撤销写入共享 tombstone；本代之后即使仍存活也不能重建 beat/anchor。 */
     public void revokeRunner(Long jobId) {
         if (!this.activeRunners.remove(jobId) && !this.revokedJobIds.contains(jobId)) {
-            if (log.isDebugEnabled()) log.debug("No local runner registration, shared runner state revoked anyway jobId={}", jobId);
+            if (log.isDebugEnabled()) {
+                log.debug("No local runner registration, shared runner state revoked anyway jobId={}", jobId);
+            }
         }
         this.lastBeatAtMs.remove(jobId);
         this.heldJobIds.remove(jobId);
@@ -506,7 +510,9 @@ public class JobHeartbeatRegistry {
             });
             svc.scheduleWithFixedDelay(this::tickSafely, periodMs, periodMs, TimeUnit.MILLISECONDS);
             this.ticker = svc;
-            if (log.isDebugEnabled()) log.debug("Shared heartbeat ticker started periodMs={} beatTtl={}", periodMs, this.beatTtl);
+            if (log.isDebugEnabled()) {
+                log.debug("Shared heartbeat ticker started periodMs={} beatTtl={}", periodMs, this.beatTtl);
+            }
         }
     }
 
