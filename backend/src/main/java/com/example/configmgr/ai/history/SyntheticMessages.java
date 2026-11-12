@@ -21,14 +21,13 @@ import java.util.Map;
  * <li>轮内上下文预算的收尾提示（{@link SpToolCallingManager#TURN_BUDGET_WRAP_UP}）。</li>
  * </ul>
  *
- * <h2>判据只保留一份（读侧标记 + 槽位解析必须同源）</h2>
+ * <h2>判据只保留一份（读侧标记 + 真实用户定位同源）</h2>
  * 本判据有两个消费面，二者<b>必须同源</b>，否则会出现"一处当合成、另一处当用户原话"的分叉：
  * <ol>
  * <li><b>写侧过滤</b> {@code TranscriptEntries#fromRunTerminal}：合成提示<b>不写进 transcript</b>
  *     （不画用户气泡、也不画摘要/灰条；真实压缩节点只由已提交压缩事件恢复）；</li>
- * <li><b>槽位解析（写侧输入面）</b> {@code TaskIntent#lastRealUserText} 与
- *     {@code TaskSlotResolver#enrich}：以"最后一个<b>真实</b> user"取用户原话，合成提示不得当成
- *     用户输入 —— 否则压缩摘要/步数收尾会把"最后一句话变成了系统提示"，让旧选择凭空复活。</li>
+ * <li><b>收尾与恢复</b> {@code ResilientChatService}：只把最后一个<b>真实</b> user 当用户原话，
+ *     合成提示不得当成用户输入。</li>
  * </ol>
  * 标记本身不改变模型记忆里的既有结构（AR-01 明确保留这条边界）：消息照旧在窗口里，
  * 只是回显时打标、解析时跳过。
@@ -52,7 +51,7 @@ public final class SyntheticMessages {
 
 	/**
 	 * 导出收尾一轮纠正的内部指令前缀（Task 1）。它是系统级提示：不是用户原话、不是模型答复，
-	 * 不得写进快照/记忆/历史气泡，也不得被 {@code TaskIntent.lastRealUserText} 采用。
+	 * 不得写进快照/记忆/历史气泡，也不得被 {@code ResilientChatService} 采用。
 	 */
 	public static final String EXPORT_CORRECTION_PREFIX = "（内部纠正，不要向用户复述本段）";
 
@@ -68,7 +67,7 @@ public final class SyntheticMessages {
 		/** 轮内上下文预算收尾提示。 */
 		TURN_BUDGET("turn_budget"),
 
-		/** 导出/创建收尾的内部纠正指令。 */
+		/** 导出收尾的内部纠正指令。 */
 		CORRECTION("correction");
 
 		private final String wire;

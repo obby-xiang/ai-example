@@ -20,30 +20,17 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * <b>宿主确定性的任务类型表单</b>：用户只说"创建/新建任务"、类型又说不出时，由宿主先挂起一张
- * 单选 {@code EXPORT/IMPORT}（{@code purpose=TASK_TYPE}），<b>不再把这一问留给模型</b>。
+ * <b>宿主确定性的任务类型表单</b>：模型发起 {@code create_task} 但缺少或给出非法
+ * {@code type} 时，挂起一张单选 {@code EXPORT/IMPORT}（{@code purpose=TASK_TYPE}）。
  *
- * <h2>被替换掉的自由裁量</h2>
- * 同一句话下模型可能直接写成文字反问（"请问要创建导出还是导入任务？"）。那是把结构化缺口退回
- * 开放式文本：用户得打字、模型还得再解析一次，且两边都可能跑偏。用户口径是确定性的：
- * <b>新建意图 + 类型未知 ⇒ 宿主直接发单选</b>。
- *
- * <h2>触发判据（当前不再由宿主从文本推断）</h2>
- * <p>自然语言意图只由<b>既有模型工具调用</b>输出：类型未知时模型用
- * {@code generative_form(purpose=TASK_TYPE)} 收集，或直接 {@code create_task(type=...)}。
- * 宿主不再用 {@link com.example.configmgr.ai.slot.TaskIntent} 的中文正则判断"新建意图/是否说了类型"，
- * 因此 {@link #parkIfDue} 在生产链路上恒为 {@code false}（保留类与挂起面作兼容）。
+ * <p>触发依据只是结构化工具参数，不解析用户原文，也不从旧任务页面推断新任务类型。
+ * 类型已给出时仍由 {@code create_task} 走正常预检与确认门；宿主只处理明确的类型缺口。
  *
  * <p><b>与放行闸门的分工</b>：{@link GenerativeFormGuard} 仍按槽位拒绝<b>模型自发</b>的类型表单
- * （槽位已定 = 模型不该再问）；宿主只负责"这一次由谁来问"，所以它的判据是"本轮原话"而不是旧任务
- * 的权威值。两边判断对象不同，不存在两套互相矛盾的口径。
+ * （槽位已定 = 模型不该再问）；宿主表单也经过同一份白名单闸门。
  *
- * <h2>接入点与"不新增交互形态"</h2>
- * 挂在首轮 {@code store.create} 之后、驱动模型之前：类型未知时这一轮本来就<b>没有</b>可执行的动作
- * （{@code create_task} 缺必填的 type），先问一句是这一轮最短的路径。挂起面完全复用
- * {@link HostForm}（{@code saveSuspended} → {@code suspended} 帧 → 请求帧 → 收流），
- * 用户的选择经既有 {@code /api/ai/frontend-tool-result} 回灌，下一拍模型拿到的就是一条
- * {@code {"type":"EXPORT"}} 的工具结果 —— 确认卡（{@code create_task}）与 HITL 一个字都没改。
+ * <p>挂起面复用 {@link HostForm}（{@code saveSuspended} → {@code suspended} 帧 → 请求帧 → 收流），
+ * 用户选择经既有 {@code /api/ai/frontend-tool-result} 回灌，{@code create_task} 的预检与 HITL 不变。
  */
 @Slf4j
 @Component
@@ -76,20 +63,6 @@ public class TaskTypeForm extends HostForm {
 	/** 宿主为某一轮生成的类型表单 {@code toolCallId}（确定性 = 天然去重）。 */
 	public static String toolCallId(String runId) {
 		return TOOL_CALL_ID_PREFIX + runId;
-	}
-
-	/**
-	 * 判据成立时挂起类型单选。
-	 *
-	 * @param runId       本轮 id
-	 * @param context     本轮上下文（含槽位 {@code extra[taskSlots]}）
-	 * @param userMessage 本轮用户原文
-	 * @param history     交棒历史（已含本轮用户消息）
-	 * @return {@code true} = 已挂起：调用方本拍<b>不得</b>再驱动模型
-	 */
-	public boolean parkIfDue(String runId, AiContext context, String userMessage, List<Message> history) {
-		// 宿主不再从用户原话推断任务类型：类型未知由模型经 generative_form(TASK_TYPE) / create_task 处理。
-		return false;
 	}
 
 	/**

@@ -34,8 +34,7 @@ import java.util.Set;
  * <p>坏 JSON / 未知键 / 残缺字段（{@link ConditionAssessment#hasUnparseable()}）一律拒绝，
  * 不按全量放行。<b>不写配置编码特判</b>；自定义配置项与内置项走同一路径。
  *
- * <p><b>自然语言信任边界</b>：本类不解析自由文本，也不使用 {@code TaskSlotParser} /
- * {@code TaskIntent} 的中文正则。自然语言只经既有模型工具调用变成结构化意图
+ * <p><b>自然语言信任边界</b>：本类不解析自由文本或中文正则。自然语言只经既有模型工具调用变成结构化意图
  * （{@code create_task/select_definitions/set_condition}），由前端页面草案与
  * {@code persistStepData} 落到任务条目；任务 {@code conditionJson} 才是可信事实。
  */

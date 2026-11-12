@@ -2,7 +2,10 @@ package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.repo.ConfigStagingRowRepository;
+import com.example.configmgr.definition.entity.ConfigDefinition;
+import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
@@ -405,6 +408,37 @@ class ToolPreflightServiceTest {
 
 		ToolPreflightService.PreflightReport bad = this.service.inspect("create_task", "{\"type\":\"NOPE\"}");
 		assertThat(bad.pass()).isFalse();
+	}
+
+	@Test
+	void directCreateTaskUsesNormalPreflight() {
+		ToolPreflightService.PreflightReport report = this.service.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"title\":\"季度导出\",\"conditions\":{}}", AiContext.empty());
+
+		assertThat(report.pass()).isTrue();
+		assertThat(report.checks()).allMatch(ToolPreflightService.PreflightReport.Check::pass);
+		assertThat(report.target()).containsEntry("type", "EXPORT").containsEntry("title", "季度导出");
+	}
+
+	@Test
+	void createTaskPreflightRejectsUnknownDefCodesAndMalformedConditions() {
+		DefinitionService definitions = mock(DefinitionService.class);
+		when(definitions.findByCode("CURRENCY")).thenReturn(new ConfigDefinition());
+		when(definitions.findByCode("NOT_REAL"))
+				.thenThrow(ResourceNotFoundException.of("Configuration definition", "NOT_REAL"));
+		ToolPreflightService validated = new ToolPreflightService(this.jobService, this.taskFileRepository,
+				this.stagingRowRepository, definitions);
+
+		ToolPreflightService.PreflightReport unknownDef = validated.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"defCodes\":[\"NOT_REAL\"],\"conditions\":{}}", AiContext.empty());
+		assertThat(unknownDef.pass()).isFalse();
+		assertThat(failure(unknownDef, ToolPreflightService.CHECK_CREATE_DEF_CODES)).contains("NOT_REAL");
+
+		ToolPreflightService.PreflightReport malformedConditions = validated.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":[]}", AiContext.empty());
+		assertThat(malformedConditions.pass()).isFalse();
+		assertThat(failure(malformedConditions, ToolPreflightService.CheckCode.CREATE_CONDITIONS.label(false)))
+				.contains("筛选条件格式不正确");
 	}
 
 	@Test

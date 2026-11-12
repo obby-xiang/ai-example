@@ -11,7 +11,6 @@ import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.SlotDefinition;
-import com.example.configmgr.ai.slot.TaskIntent;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.ai.tool.AiContext;
@@ -215,8 +214,8 @@ class ModelDrivenConditionCollectionResumeTest {
 			.noneMatch(pending -> GenerativeFormRules.TOOL_NAME.equals(pending.getName()));
 
 		List<Message> handed = historyOfDriveResumed();
-		assertThat(TaskIntent.lastRealUserText(handed)).as("模型看到的是用户原话（大小写原样）")
-			.isEqualTo("导出cny货币字典");
+		assertThat(handed).as("模型看到的是用户原话（大小写原样）")
+			.anyMatch(message -> message instanceof UserMessage user && "导出cny货币字典".equals(user.getText()));
 		TaskSlots slots = TaskSlots.fromExtra(contextOfDriveResumed().getExtra());
 		assertThat(slots.defCodes()).as("配置项已知：币种 = CURRENCY").containsExactly("CURRENCY");
 		assertThat(slots.conditions()).as("小写 cny 不靠宿主写死解析，留给模型理解").isEmpty();

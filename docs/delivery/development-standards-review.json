@@ -6422,6 +6422,42 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "施工报告AiExecutorConfig/SessionPurgeRetryRunner/StreamWatchdog/KbService相关独立单点通过；主控退回后新增真实AnnotationConfigApplicationContext单点RED复现NoUniqueBeanDefinition并在Qualifier返修后GREEN，生产编译BUILD SUCCESS；主控未重跑测试，完整应用启动、真实Redis与多实例NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a9fdb2b2adb33fbcc76acab8af2937a5214ec3969e3976f8751c891d0eacf1ba",
+      "status": "reviewed",
+      "reason": "逐hunk复核create专用话术纠正及中文解析器删除，确认start_export纠正、结构守卫、缺类型表单与旧run恢复标记保留；独立复审最终APPROVED。",
+      "reviewedAt": "2026-11-12T14:20:30+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查任务agent-6lkbghvc、施工agent-1240",
+      "specChanges": [
+        {
+          "change": "删除create_task专用文本收尾纠正、TaskIntent、TaskSlotParser及无意义TaskTypeForm.parkIfDue。",
+          "reason": "中文正则和额外纠正请求会改变业务意图与工具参数，并引入重复正文、恢复分叉和多次模型驱动。",
+          "impact": "创建意图只由模型结构化工具调用表达；普通创建文本收尾不再追加模型请求，start_export既有单次纠正保持不变。"
+        },
+        {
+          "change": "创建类型缺口只由结构化create_task缺/非法type触发TASK_TYPE表单，旧create correction标记不再用于新触发。",
+          "reason": "宿主不应从用户措辞猜测新任务类型，但已发工具参数中的明确缺口仍需确定性收集；线上旧run仍需完成恢复。",
+          "impact": "parkIfCreateTaskMissingType及GenerativeFormGuard保持，C-130不先弹GENERAL_CLARIFY；旧createTaskCorrectionUsed/prefix仅参与历史重建与清理。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/ExportConditionWorkflow.java", "status": "checked", "reason": "仅同步自然语言信任边界注释，不解析自由文本的既有行为不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/TaskTypeForm.java", "status": "checked", "reason": "删除始终false的parkIfDue，保留结构化缺/非法type的parkIfCreateTaskMissingType与既有表单协议；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/SyntheticMessages.java", "status": "checked", "reason": "合成消息标记与真实用户过滤机制保持，只更新失效引用和导出纠正说明；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "create触发/状态/话术及首轮空挂起删除，correction工厂只保留start_export；旧标记恢复、末真实用户过滤和导出闭环保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskIntent.java", "status": "checked", "reason": "删除中文创建意图正则类，生产源码已无引用。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlotParser.java", "status": "checked", "reason": "删除中文槽位反解器，权威TaskSlots、结构化工具参数和页面事实路径不变。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有模型工具调用、结构守卫和start_export correction，不新增服务、依赖或替代解析器。"},
+        "java-api-style": {"status": "checked", "reason": "四个修改的生产Java均经IDEA Reformat；函数签名收窄仅删除create专用参数，公开结构化缺口入口保持。"},
+        "logging-exception-safety": {"status": "checked", "reason": "不再为创建文本追加无依据模型请求；start_export日志与异常路径不变，旧恢复读取失败口径未放宽。"},
+        "toc-interaction": {"status": "checked", "reason": "不新增卡片或提示；创建缺类型仍用既有单选，C-130仍拒绝先弹GENERAL_CLARIFY，普通问答无额外交互。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "旧marker/prefix的Redis快照读取与清理保持，新的create纠正不再写标记，导出marker跨续跑语义不变。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "删除中文正则和固定话术补参，用户原文不再被宿主截取改写；末真实UserMessage仍按SyntheticMessages标记过滤。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-6lkbghvc APPROVED；施工报告CreateTaskCorrectionRemovalTest先RED后2/2 GREEN，TaskTypeForm、C-130、预检、CorrectionPrefixResume、导出纠正、TerminalTranscriptRecovery及TaskSlotResolver相关独立单点通过，生产编译BUILD SUCCESS；主控未重跑测试，真实模型、Redis、多实例和全量普通测试NOT_RUN。"}
+      }
     }
   ]
 }

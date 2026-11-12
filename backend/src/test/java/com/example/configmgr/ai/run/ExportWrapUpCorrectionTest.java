@@ -165,8 +165,6 @@ class ExportWrapUpCorrectionTest {
 
 		assertThat(com.example.configmgr.ai.history.SyntheticMessages.isSynthetic(correction)).isTrue();
 		assertThat(com.example.configmgr.ai.history.SyntheticMessages.isSynthetic(real)).isFalse();
-		assertThat(com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(List.of(real, correction)))
-			.as("最后一个真实用户是原话，不是纠正指令").isEqualTo("创建并导出");
 	}
 
 	/** Critical-B：写历史前的过滤链保留真实用户/工具链，只去掉纠正指令。 */

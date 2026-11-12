@@ -107,8 +107,11 @@ class ModelDrivenConditionCollectionChatTest {
 
 	private ResilientChatService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "model-cond-chat-watchdog");
@@ -118,6 +121,16 @@ class ModelDrivenConditionCollectionChatTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
+		com.example.configmgr.ai.history.ConversationTranscriptStore transcript =
+				mock(com.example.configmgr.ai.history.ConversationTranscriptStore.class);
+		when(transcript.append(anyString(), org.mockito.ArgumentMatchers.anyLong(),
+				org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.anyLong()))
+			.thenReturn(true);
+		when(transcript.readPage(anyString(), org.mockito.ArgumentMatchers.anyLong(),
+				org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.anyInt())).thenReturn(
+				new com.example.configmgr.ai.history.ConversationTranscriptStore.ReadPage(List.of(), 0L, 1L, null,
+						false, false));
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "transcript", transcript);
 		this.service.setTaskSlotResolver(new TaskSlotResolver());
 		stubFluentChain();
 		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
@@ -134,6 +147,9 @@ class ModelDrivenConditionCollectionChatTest {
 							"/chat/completions", "deepseek-flash", "sk-test-0123456789", "fp", false),
 					"deepseek-flash", true)));
 		when(this.providerRegistry.allowUserParams()).thenReturn(true);
+		when(this.providerRegistry.supportsToolCalling(any(), any())).thenReturn(true);
+		when(this.providerRegistry.current()).thenReturn(runtime());
+		when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(runtime()));
 		when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(runtime());
 		when(this.streamSpec.chatResponse()).thenAnswer(invocation -> Flux.just(
 				new ChatResponse(List.of(new Generation(AssistantMessage.builder().content("好").build(),
@@ -154,12 +170,15 @@ class ModelDrivenConditionCollectionChatTest {
 		createTask.setArguments("{\"type\":\"EXPORT\",\"conditions\":{}}");
 		createTask.setStatus(PendingToolCall.EXECUTED);
 		createTask.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		createTask.setCreatedTaskId(42L);
+		createTask.setResultText("已创建导出任务 #42（标题：季度导出，当前步骤：EXPORT）");
 		this.store.putPending(RUN_ID, createTask);
 	}
 
 	@AfterEach
 	void tearDown() {
 		this.watchdogExecutor.shutdownNow();
+		this.identity.close();
 	}
 
 	@Test
@@ -182,6 +201,7 @@ class ModelDrivenConditionCollectionChatTest {
 	 */
 	@Test
 	void exportWrapUpGetsOneInternalCorrectionAskingForTheConfirmCard() {
+		this.properties.getPark().setEnabled(false);
 		stubStartExportDisclosed();
 		when(this.chatModel.stream(any(Prompt.class)))
 			.thenReturn(Flux.just(response("第二段", "stop")));
@@ -203,7 +223,7 @@ class ModelDrivenConditionCollectionChatTest {
 		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
 		assertThat(snapshot.getFinalText()).as("两段正文都保留（不是只算第二次）").isEqualTo("好第二段");
 		assertThat(lastAssistantText(snapshot)).isEqualTo("好第二段");
-		verify(this.emitter).textEnd("好第二段".length());
+		verify(this.emitter).isTextEnded("好第二段".length());
 		assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
 			.containsEntry(ResilientChatService.EXPORT_CORRECTION_MARKER, Boolean.TRUE);
 		assertThat(this.store.pendingsLenient(RUN_ID))
@@ -468,7 +488,8 @@ class ModelDrivenConditionCollectionChatTest {
 
 	private ProviderRuntime runtime() {
 		return new ProviderRuntime(7L, "deepseek", "deepseek-flash", "http://placeholder", "/chat/completions",
-				"7|fp|u|p", null, null, this.chatModel, this.chatClient);
+				"7|fp|u|p", org.springframework.ai.openai.OpenAiChatOptions.builder().model("deepseek-flash").build(),
+				null, this.chatModel, this.chatClient);
 	}
 
 }

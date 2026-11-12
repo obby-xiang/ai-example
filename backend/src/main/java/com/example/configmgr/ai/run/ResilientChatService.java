@@ -35,7 +35,6 @@ import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
-import com.example.configmgr.ai.slot.TaskIntent;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
@@ -715,11 +714,6 @@ public class ResilientChatService {
         if (isCancelledBeforeHandoff(runId, out, setup, turn)) {
             return;
         }
-        if (setup.isToolsAllowed() && this.taskTypeForm != null && this.taskTypeForm.parkIfDue(runId, setup.context(),
-                setup.request().message(), execution.fullHistory())) {
-            log.info("first turn parked awaiting task type (no model drive this tick) runId={}", runId);
-            return;
-        }
         startFirstTurnAttempts(runId, out, setup, execution, keepalive, turn);
     }
 
@@ -767,8 +761,8 @@ public class ResilientChatService {
                         var withTools = setup.tools().isEmpty() ? spec : spec.toolCallbacks(setup.tools());
                         return withTools.stream().chatResponse();
                     });
-                }, (prefix, reasoning, createTaskCorrection) -> correctionStream(setup.runtime(), runId, setup.sessionId(),
-                        setup.context(), List.of(), out, prefix, reasoning, turnTextBody, createTaskCorrection));
+                }, (prefix, reasoning) -> correctionStream(setup.runtime(), runId, setup.sessionId(),
+                        setup.context(), List.of(), out, prefix, reasoning, turnTextBody));
     }
 
     private record FirstTurnMemory(AiContext context, boolean isExistingSession, long turnStartedAtMs,
@@ -864,7 +858,11 @@ public class ResilientChatService {
             keepalive = startKeepalive(runId, out, TurnKeepalive.PHASE_STREAMING, false);
             this.cancellations.register(runId);
             registered = true;
-            String lastUserText = TaskIntent.lastRealUserText(history);
+            String lastUserText = history.stream()
+                    .filter(message -> message instanceof UserMessage && !SyntheticMessages.isSynthetic(message))
+                    .reduce((first, second) -> second)
+                    .map(Message::getText)
+                    .orElse(null);
             CorrectionResume correctionResume = correctionResume(snapshot, history);
             String archivedFullText = out == null ? "" : out.transcriptFullText();
             String resumeFullText = StringUtils.defaultIfEmpty(correctionResume.fullText(), archivedFullText);
@@ -878,8 +876,8 @@ public class ResilientChatService {
                         Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, modelHistory, snapshot,
                                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
                         return runtime.chatModel().stream(prompt);
-                    }, (prefix, reasoning, createTaskCorrection) -> correctionStream(runtime, runId, sessionId,
-                            context, modelHistory, out, prefix, reasoning, turnTextBody, createTaskCorrection));
+                    }, (prefix, reasoning) -> correctionStream(runtime, runId, sessionId,
+                            context, modelHistory, out, prefix, reasoning, turnTextBody));
         } finally {
             finishTurn(runId, keepalive, null, registered);
         }
@@ -1288,18 +1286,11 @@ public class ResilientChatService {
 
     // ── 尝试循环（双超时 + 三条件重试 + 完成帧校验 + 取消） ────────────────────
 
-    /**
-     * 纠正请求工厂：除前缀/思考外，显式带上"本次是 create_task 纠正还是 export 纠正"。
-     *
-     * <p>不能再用 prefix key 是否存在来判断类型：正文全部由工具卡承载时 prefix 为空，
-     * 前缀 key 本就不写。持久化的 {@code CREATE_TASK_CORRECTION_MARKER} 是"是否已触发过
-     * create_task 纠正"的事实，但不能单独区分"本轮 active 的纠正类型"（同一 run 跨续跑后
-     * 仍可能再触发 export 纠正）——因此 active 类型由触发分支显式传入，再与 marker 事实取交集。
-     */
+    /** 唯一剩余的导出收尾纠正请求工厂。 */
     @FunctionalInterface
     private interface CorrectionStreamFactory {
 
-        Flux<ChatResponse> apply(String prefixText, String prefixReasoning, boolean createTaskCorrection);
+        Flux<ChatResponse> apply(String prefixText, String prefixReasoning);
 
     }
 
@@ -1394,8 +1385,7 @@ public class ResilientChatService {
 
     private void subscribeAndAwait(AttemptLoopState state, AttemptRound round) {
         Flux<ChatResponse> stream = state.correcting
-                ? state.correctionStream.apply(state.correctionHistoryPrefix, state.prefixReasoning,
-                state.createTaskCorrecting)
+                ? state.correctionStream.apply(state.correctionHistoryPrefix, state.prefixReasoning)
                 : state.attemptStream.apply(state.attempt);
         round.subscription = stream
                 .subscribe(response -> {
@@ -1434,33 +1424,15 @@ public class ResilientChatService {
     private boolean isCorrectionDue(AttemptLoopState state, AttemptRound round) {
         UpstreamErrorClassifier.Finish finish = round.accumulator.isFinish();
         String correctionText = round.accumulator.unpersistedText();
-        if (isCreateTaskCorrectionDue(state, round, finish)) {
-            startCorrection(state, round, correctionText, true);
-            log.info("create-task action missing, sending one generic tool correction runId={} chars={}", state.runId,
-                    state.prefixText.length());
-            rearmKeepalive(state.keepalive);
-            return true;
+        if (!isExportCorrectionDue(state, round, finish, correctionText)) {
+            return false;
         }
-        if (isExportCorrectionDue(state, round, finish, correctionText)) {
-            startCorrection(state, round, correctionText, false);
-            log.info("before export close, sending one internal correction: require "
-                            + "start_export confirmation card (not auto-executed) runId={} chars={}", state.runId,
-                    state.prefixText.length());
-            rearmKeepalive(state.keepalive);
-            return true;
-        }
-        return false;
-    }
-
-    private boolean isCreateTaskCorrectionDue(AttemptLoopState state, AttemptRound round,
-                                              UpstreamErrorClassifier.Finish finish) {
-        boolean correctable = finish != UpstreamErrorClassifier.Finish.LENGTH
-                && finish != UpstreamErrorClassifier.Finish.CONTENT_FILTER
-                && (finish == UpstreamErrorClassifier.Finish.TOOL_CALLS || StringUtils.isNotBlank(round.accumulator.text()));
-        return !state.createTaskCorrectionUsed && !state.correcting && correctable
-                && isCreateTaskWrapUpCorrectionDue(state.runId, state.context, state.lastUserText)
-                && isMarkCorrectionUsed(state.runId, round.accumulator.text(), CREATE_TASK_CORRECTION_MARKER,
-                CREATE_TASK_CORRECTION_PREFIX_KEY);
+        startCorrection(state, round, correctionText);
+        log.info("before export close, sending one internal correction: require "
+                        + "start_export confirmation card (not auto-executed) runId={} chars={}", state.runId,
+                state.prefixText.length());
+        rearmKeepalive(state.keepalive);
+        return true;
     }
 
     private boolean isExportCorrectionDue(AttemptLoopState state, AttemptRound round,
@@ -1474,15 +1446,9 @@ public class ResilientChatService {
                 && isMarkExportCorrectionUsed(state.runId, correctionText);
     }
 
-    private void startCorrection(AttemptLoopState state, AttemptRound round, String correctionText,
-                                 boolean createTask) {
-        if (createTask) {
-            state.createTaskCorrectionUsed = true;
-        } else {
-            state.exportCorrectionUsed = true;
-        }
+    private void startCorrection(AttemptLoopState state, AttemptRound round, String correctionText) {
+        state.exportCorrectionUsed = true;
         state.correcting = true;
-        state.createTaskCorrecting = createTask;
         state.prefixText = round.accumulator.text();
         state.prefixSegment = correctionText;
         state.correctionHistoryPrefix = correctionText;
@@ -1501,7 +1467,6 @@ public class ResilientChatService {
         rearmKeepalive(state.keepalive);
         state.emptyReplyRetried = true;
         state.correcting = false;
-        state.createTaskCorrecting = false;
         state.prefixText = "";
         state.prefixSegment = "";
         state.prefixReasoning = "";
@@ -1691,14 +1656,12 @@ public class ResilientChatService {
         private Long retryAfterMs;
         private boolean emptyReplyRetried;
         private boolean exportCorrectionUsed;
-        private boolean createTaskCorrectionUsed;
         private String prefixText;
         private String prefixSegment;
         private String correctionHistoryPrefix;
         private String prefixReasoning = "";
         private String prefixReasoningSegment = "";
         private boolean correcting;
-        private boolean createTaskCorrecting;
         private int attempt;
         private int budgetedAttempts;
 
@@ -1721,7 +1684,6 @@ public class ResilientChatService {
             this.prefixSegment = StringUtils.defaultString(resumePendingSegment);
             this.correctionHistoryPrefix = this.prefixText;
             this.exportCorrectionUsed = exportCorrectionAlreadyUsed(runId);
-            this.createTaskCorrectionUsed = correctionAlreadyUsed(runId, CREATE_TASK_CORRECTION_MARKER);
         }
 
     }
@@ -1744,67 +1706,6 @@ public class ResilientChatService {
     static final String CREATE_TASK_CORRECTION_MARKER = "createTaskCorrectionUsed";
 
     static final String CREATE_TASK_CORRECTION_PREFIX_KEY = CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY;
-
-    private boolean isCreateTaskWrapUpCorrectionDue(String runId, AiContext fallback, String lastUserText) {
-        AiContext context = latestContext(runId, fallback);
-        if (!TaskIntent.isNewTaskIntent(lastUserText)
-                || context == null || context.getTaskId() != null || !disclosedTool(context, AiToolNames.CREATE_TASK)) {
-            return false;
-        }
-        try {
-            for (PendingToolCall pending : this.store.pendings(runId)) {
-                if (pending != null && AiToolNames.CREATE_TASK.equals(pending.getName())) {
-                    return false;
-                }
-            }
-            for (Map<String, Object> record : this.store.ledger(runId)) {
-                if (record != null && AiToolNames.CREATE_TASK.equals(String.valueOf(record.get("name")))) {
-                    return false;
-                }
-            }
-            return true;
-        } catch (RuntimeException ex) {
-            log.warn("read create-tool close facts failed, skipping correction runId={}", runId, ex);
-            return false;
-        }
-    }
-
-    private static String creationTaskType(AiContext context) {
-        return context == null ? null : creationTaskType(context.getTaskType());
-    }
-
-    private static String creationTaskType(String taskType) {
-        if (taskType == null) {
-            return null;
-        }
-        String normalized = taskType.trim().toUpperCase(java.util.Locale.ROOT);
-        return "EXPORT".equals(normalized) || "IMPORT".equals(normalized) ? normalized : null;
-    }
-
-    static String createTaskWrapUpCorrection() {
-        return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
-                + "如果用户本轮是在要求新建任务，请调用一次 create_task；不要只列配置或用文字反问。"
-                + "按当前结构化创建上下文传 type=EXPORT 或 IMPORT；类型无法证明时不要猜测。"
-                + "EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；"
-                + "IMPORT 不得附加导出条件。defCodes 未知时省略，不得先查目录或追问。"
-                + "如果用户只是查询、普通问答或闲聊而不要求新建，直接回答，不得重复已经执行的工具，也不得自动批准创建。";
-    }
-
-    private static String createTaskWrapUpCorrection(String taskType) {
-        if ("EXPORT".equals(creationTaskType(taskType))) {
-            return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
-                    + "当前结构化创建类型为 EXPORT，请调用一次 create_task，传 type=EXPORT，并显式传 conditions："
-                    + "用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；"
-                    + "defCodes 未知时省略，不得先查目录或追问，也不得重复已经执行的工具或自动批准创建。";
-        }
-        if ("IMPORT".equals(creationTaskType(taskType))) {
-            return com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
-                    + "当前结构化创建类型为 IMPORT，请调用一次 create_task，传 type=IMPORT；"
-                    + "不得附加 EXPORT 的 conditions，defCodes 未知时省略，不得先查目录或追问，"
-                    + "也不得重复已经执行的工具或自动批准创建。";
-        }
-        return createTaskWrapUpCorrection();
-    }
 
     /**
      * 导出收尾的一轮内部纠正判据（Task 1 第 5 项）。
@@ -1947,9 +1848,7 @@ public class ResilientChatService {
         return correctionAlreadyUsed(runId, EXPORT_CORRECTION_MARKER);
     }
 
-    /**
-     * create_task 纠正已登记的持久化事实（不看 prefix key —— 空正文时它不会写）。
-     */
+    /** 旧 create_task 纠正标记仍参与既有 run 的 transcript 恢复，不再触发新的 create 纠正。 */
     private static boolean isCreateTaskCorrectionMarked(RunSnapshot snapshot) {
         return isCorrectionMarked(snapshot, CREATE_TASK_CORRECTION_MARKER);
     }
@@ -2166,21 +2065,17 @@ public class ResilientChatService {
      * 请求不写回快照/记忆（finish 时按"前缀 + 增量"统一落库）。
      */
     private Flux<ChatResponse> correctionStream(ProviderRuntime runtime, String runId, String sessionId,
-                                                AiContext fallbackContext, List<Message> fallbackHistory, SseChatEmitter out, String prefixText,
-                                                String prefixReasoning, SpToolCallingManager.TurnTextCapture turnTextBody,
-                                                boolean createTaskCorrectionActive) {
+                                                AiContext fallbackContext, List<Message> fallbackHistory, SseChatEmitter out,
+                                                String prefixText, String prefixReasoning,
+                                                SpToolCallingManager.TurnTextCapture turnTextBody) {
         RunSnapshot snapshot = this.store.get(runId);
         AiContext latest = latestContext(runId, fallbackContext);
         List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
-        // 类型由触发分支显式传入；再用持久化 marker 确认 create_task 纠正确实已登记。
-        // 不能看 prefix key：正文全部由工具卡承载时 prefix 为空、prefix key 本就不写。
-        boolean createTaskCorrection = createTaskCorrectionActive && isCreateTaskCorrectionMarked(snapshot);
-        history.add(new UserMessage(createTaskCorrection ? createTaskWrapUpCorrection(latest.getTaskType())
-                : exportWrapUpCorrection(latest.getTaskId())));
+        history.add(new UserMessage(exportWrapUpCorrection(latest.getTaskId())));
         Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
-        log.info("close correction request: history {} entries (incl. tool messages), type={} runId={}", history.size(),
-                createTaskCorrection ? "create_task" : "start_export", runId);
+        log.info("close correction request: history {} entries (incl. tool messages), type=start_export runId={}",
+                history.size(), runId);
         return runtime.chatModel().stream(prompt);
     }
 

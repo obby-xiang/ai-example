@@ -45,6 +45,13 @@ class GenerativeFormCreateEntryGuardTest {
 	}
 
 	@Test
+	void c130FirstCreateTaskEntryRejectsGeneralClarify() {
+		FrontendToolGuard.Verdict verdict = inspect(generalClarify("defCodes"), entry("tasks", null));
+
+		assertCreateTaskRequired(verdict);
+	}
+
+	@Test
 	void exportEntryRejectsGeneralClarifyWithDefinitionsSource() {
 		String arguments = "{\"form\":{\"purpose\":\"GENERAL_CLARIFY\",\"scenario\":\"CLARIFY\",\"fields\":["
 				+ "{\"key\":\"level\",\"label\":\"层级\",\"type\":\"enum\",\"options\":["

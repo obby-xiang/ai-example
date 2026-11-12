@@ -46,15 +46,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * <b>首轮接入点</b>：宿主不再从话术推断"新建任务 + 类型未知"（{@link TaskTypeForm#parkIfDue} 已恒 false）；
- * 类型缺口的确定性挂起来自模型的结构化 {@code create_task}（缺/非法 {@code type}），
- * 接线在 {@code SpToolCallingManager#parkIfCreateTaskMissingType}。
+ * <b>首轮接入点</b>：宿主不从话术推断"新建任务 + 类型未知"。类型缺口的确定性挂起只来自模型的
+ * 结构化 {@code create_task}（缺/非法 {@code type}），接线在
+ * {@code SpToolCallingManager#parkIfCreateTaskMissingType}。
  *
- * <h2>本类现在锁什么</h2>
- * 普通轮（措辞里提到新建/导出、或只是浏览既有任务）必须<b>照常驱动模型</b>，且不弹任何宿主表单 ——
- * 即"首轮不被文本判据截断"。结构化缺口的表单形态与去重由 {@code TaskTypeFormTest} 锁。
- *
- * <p><b>证红</b>：把 {@code parkIfDue} 改回文本判据 ⇒ 第 2/3 条红（模型不再被驱动）。
+ * <p>普通轮（措辞里提到新建/导出、或只是浏览既有任务）必须<b>照常驱动模型</b>，且不弹任何宿主表单。
+ * 结构化缺口的表单形态与去重由 {@code TaskTypeFormTest} 锁。
  */
 class TaskTypeFormChatParkTest {
 

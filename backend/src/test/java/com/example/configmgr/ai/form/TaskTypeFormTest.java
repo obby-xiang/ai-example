@@ -46,7 +46,7 @@ import static org.mockito.Mockito.when;
  * 直接走近 {@code create_task} 的确认卡。
  *
  * <h2>自然语言信任边界（2026-10-30）</h2>
- * 宿主<b>不再从用户措辞推断</b>"新建意图"或类型（原 {@code parkIfDue} 判据已恒 false）。
+ * 宿主<b>不从用户措辞推断</b>"新建意图"或类型。
  * 因此本类锁的是：结构化缺口会弹、type 已给不弹、旧任务页面的类型不得压掉新任务的缺口、
  * 同一轮只问一次，以及宿主表单与模型自发表单过<b>同一份</b>白名单闸门。
  */
@@ -78,8 +78,11 @@ class TaskTypeFormTest {
 
 	private TaskTypeForm form;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.properties.getPark().setEnabled(true);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
@@ -91,18 +94,12 @@ class TaskTypeFormTest {
 		seedRun();
 	}
 
-	// ── ① 措辞不再触发（信任边界）：缺口只由结构化 create_task 触发 ───────────
-
-	@Test
-	void freeTextNewTaskIntentNoLongerParks() {
-		assertThat(park("帮我创建一个任务"))
-			.as("宿主不再从措辞推断新建意图 ⇒ 不弹（缺口改由结构化 create_task 触发）")
-			.isFalse();
-		assertThat(this.store.pendingsLenient(RUN_ID)).isEmpty();
-		verify(this.emitter, never()).suspended(any(), anyString(), anyString(), anyString());
+	@org.junit.jupiter.api.AfterEach
+	void tearDown() {
+		this.identity.close();
 	}
 
-	// ── ② 结构化 create_task 缺 type：宿主直接给单选 ─────────────────────────
+	// ── ① 结构化 create_task 缺 type：宿主直接给单选 ─────────────────────────
 
 	@Test
 	void parksSingleEnumTypeFormWhenStructuredCreateTaskMissesType() {
@@ -217,10 +214,6 @@ class TaskTypeFormTest {
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
-
-	private boolean park(String message) {
-		return this.form.parkIfDue(RUN_ID, context(Map.of()), message, history(message));
-	}
 
 	private boolean structuredPark(AiContext context, String argumentsJson, String message) {
 		return this.form.parkIfCreateTaskMissingType(RUN_ID, context, argumentsJson, history(message));

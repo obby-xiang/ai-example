@@ -159,7 +159,7 @@ class CorrectionPrefixResumeTest {
 				mock(CancellationRegistry.class), mock(ToolActivityBeacon.class), null);
 
 		ReflectionTestUtils.invokeMethod(service, "isMarkCorrectionUsed", "run-new-correction", "新前缀",
-				ResilientChatService.CREATE_TASK_CORRECTION_MARKER, ResilientChatService.CREATE_TASK_CORRECTION_PREFIX_KEY);
+				ResilientChatService.EXPORT_CORRECTION_MARKER, ResilientChatService.EXPORT_CORRECTION_PREFIX_KEY);
 
 		assertThat(CorrectionPrefixes.parkedFullText(snapshot)).isEmpty();
 	}
