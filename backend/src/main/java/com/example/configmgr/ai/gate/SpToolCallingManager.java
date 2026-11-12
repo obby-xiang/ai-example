@@ -40,7 +40,6 @@ import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
-import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.resultview.ResultView;
 import com.example.configmgr.ai.resultview.ToolResultViewProvider;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
@@ -430,13 +429,6 @@ public class SpToolCallingManager implements ToolCallingManager {
     @Autowired(required = false)
     public void setContextRefresher(RunContextRefresher refresher) {
         this.contextRefresher = refresher;
-    }
-
-    private TaskSlotResolver taskSlotResolver;
-
-    @Autowired(required = false)
-    public void setTaskSlotResolver(TaskSlotResolver resolver) {
-        this.taskSlotResolver = resolver;
     }
 
     /**
@@ -935,11 +927,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void bindPendingArguments(String runId, AiContext context, Prompt prompt, AssistantMessage assistant,
                                       List<PendingToolCall> pendings) {
-        String userText = com.example.configmgr.ai.slot.TaskIntent.lastRealUserText(prompt.getInstructions());
         for (PendingToolCall pending : pendings) {
-            if (this.taskSlotResolver != null && TOOL_CREATE_TASK.equals(pending.getName())) {
-                pending.setArguments(this.taskSlotResolver.completeCreateTaskArguments(pending.getArguments(), userText));
-            }
             com.example.configmgr.ai.form.ConditionsForm.bindDraft(pending, runId, context);
         }
     }

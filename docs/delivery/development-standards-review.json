@@ -6015,6 +6015,34 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "仅文档范围复核，未运行测试或施工，AiConfigAudit等三项仍保留真实待分析状态。"}
       }
+    },
+    {
+      "fingerprint": "sha256:4bc4b6605c9a205ea1d967ef2fd5330f6e76ddde56d1d9f3d9d2f91b96bfeeff",
+      "status": "reviewed",
+      "reason": "逐hunk复核create_task参数脱离用户原文、权威taskSlots保留及无用表单入口清理；独立审查agent-1247 APPROVED，TaskSlotParser仅因TaskIntent后续批次引用而保留。",
+      "reviewedAt": "2026-11-12T09:50:12+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1247、施工agent-1240",
+      "specChanges": [
+        {
+          "change": "create_task的pending参数不再根据中文或英文用户原文补写type/defCodes/conditions/openWizard。",
+          "reason": "文本反解会覆盖模型结构化参数且无法通用处理否定、多语言和同名内容。",
+          "impact": "模型JSON原样进入既有预检；缺type走TASK_TYPE，defCodes缺失创建后收集，EXPORT缺conditions仍拒绝、{}表示未决定，openWizard缺省true且显式false保留。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/form/TaskTypeForm.java", "status": "checked", "reason": "仅删除无调用且恒empty的argumentsIfDue，保留parkIfCreateTaskMissingType及仍被调用的parkIfDue；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "bindPendingArguments仅保留ConditionsForm.bindDraft，删除文本补参及resolver注入，结构化预检不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/slot/TaskSlotResolver.java", "status": "checked", "reason": "删除completeCreateTaskArguments/normalizeOpenWizard及专用helper，保留enrich/resolve/pageSelection和权威taskSlots；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用既有预检、ConditionsForm、DefinitionSelectionForm和RunContextRefresher，无新增依赖或替代框架。"},
+        "java-api-style": {"status": "checked", "reason": "三个生产Java均经IDEA Reformat，删除方法、字段和import逐hunk核对，保留集合与JSON语义。"},
+        "logging-exception-safety": {"status": "checked", "reason": "非法defCodes/conditions继续按原预检失败，不因删除文本补参而默认放行或伪造创建成功。"},
+        "toc-interaction": {"status": "checked", "reason": "缺失信息继续由既有结构化表单收集，不根据话术改变向导开关或增加用户提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "pending工具参数与权威taskSlots保持，创建候选、条件草案和恢复链不变，未修改数据库或Redis。"},
+        "unicode-stream-parsing": {"status": "not-affected", "reason": "本批删除文本反解而非修改流式解析，不涉及UTF-8或字素切割。"},
+        "verification-review": {"status": "checked", "reason": "agent-1247 APPROVED；新增参数契约单点及TaskSlotResolver 11、条件状态9、ResumeContextRefresh 7均通过，后端编译BUILD SUCCESS；真实模型、Cluster和全量测试NOT_RUN。"}
+      }
     }
   ]
 }

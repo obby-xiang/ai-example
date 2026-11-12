@@ -6,7 +6,6 @@ import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -37,9 +36,9 @@ class TaskSlotResolverTest {
 
 	private final TaskService taskService = mock(TaskService.class);
 
-	private final TaskSlotResolver resolver = new TaskSlotResolver(catalog());
+	private final TaskSlotResolver resolver = new TaskSlotResolver();
 
-	private final TaskSlotResolver withTasks = new TaskSlotResolver(catalog(), this.taskService, new ObjectMapper());
+	private final TaskSlotResolver withTasks = new TaskSlotResolver(this.taskService);
 
 	// ── 信任边界：自由文本不再是事实来源 ───────────────────────────────────
 
@@ -246,21 +245,5 @@ class TaskSlotResolverTest {
 		item.setConditionJson(conditionJson);
 		task.getItems().add(item);
 		return task;
-	}
-
-	private static DefinitionCatalog catalog() {
-		return () -> List.of(
-				new SlotDefinition("CURRENCY", "货币", List.of(
-						new SlotDefinition.SlotField("code", "货币代码", true, List.of("CNY", "USD", "JPY")),
-						new SlotDefinition.SlotField("name", "货币名称", false, List.of()))),
-				new SlotDefinition("ROLE_DICT", "角色字典", List.of(
-						new SlotDefinition.SlotField("code", "角色代码", true, List.of("ADMIN", "USER")))),
-				new SlotDefinition("SYS_PARAM", "系统参数", List.of(
-						new SlotDefinition.SlotField("paramKey", "参数键", true, List.of()),
-						new SlotDefinition.SlotField("paramValue", "参数值", false, List.of()))),
-				new SlotDefinition("DUP_A", "重复字典", List.of(
-						new SlotDefinition.SlotField("code", "代码", true, List.of()))),
-				new SlotDefinition("DUP_B", "重复字典", List.of(
-						new SlotDefinition.SlotField("code", "代码", true, List.of()))));
 	}
 }

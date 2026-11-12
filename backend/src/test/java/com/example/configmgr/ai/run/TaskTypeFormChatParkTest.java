@@ -113,7 +113,7 @@ class TaskTypeFormChatParkTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
-		this.service.setTaskSlotResolver(new TaskSlotResolver(this.catalog));
+		this.service.setTaskSlotResolver(new TaskSlotResolver());
 		this.service.setTaskTypeForm(new TaskTypeForm(this.store, this.registry, this.gate, this.codec,
 				this.properties));
 		stubFluentChain();

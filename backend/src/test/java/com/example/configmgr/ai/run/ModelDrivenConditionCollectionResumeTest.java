@@ -179,7 +179,7 @@ class ModelDrivenConditionCollectionResumeTest {
 		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 		this.service.setContextRefresher(new RunContextRefresher(this.taskService));
-		this.service.setTaskSlotResolver(new TaskSlotResolver(this.catalog, this.taskService, this.mapper));
+		this.service.setTaskSlotResolver(new TaskSlotResolver(this.taskService));
 		ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations, this.beacon,
 				List.of(new GenerativeFormGuard(this.mapper)));
 		this.service.setDefinitionSelectionForm(new DefinitionSelectionForm(this.store, this.registry, gate,

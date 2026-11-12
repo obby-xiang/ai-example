@@ -8,16 +8,9 @@ import com.example.configmgr.common.BlankText;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.entity.TaskItem;
 import com.example.configmgr.task.service.TaskService;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -30,9 +23,7 @@ import java.util.Map;
  * 槽位解析器（小型、可测试，不引入新框架）。
  *
  * <p><b>自然语言信任边界（2026-10-30 确定性工作流）</b>：任务推进与条件放行不解析用户原话，
- * 只认任务条目、工作区选择和结构化回灌。唯一例外是
- * {@link #completeCreateTaskArguments}：模型已发起创建后，才用 {@link TaskSlotParser}
- * 补齐留空且能完整验证的创建槽位；它不会自行创建任务，也不绕过预检、确认或条件草案链。
+ * 只认任务条目、工作区选择和结构化回灌。
  *
  * <p><b>与 {@code ContextBuilder} 同一套两态</b>：页面上报的 {@code selectedDefs} 非空时它是权威值；
  * 显式空列表（任务条目也为空、例如刚建好尚未落条目的新任务）时以本轮结构化
@@ -74,24 +65,18 @@ public class TaskSlotResolver {
         }
     }
 
-    private final DefinitionCatalog catalog;
-
     /**
      * 权威任务条目来源（可为 null：纯解析用例不读库）。
      */
     private final TaskService taskService;
 
-    private final ObjectMapper objectMapper;
-
-    public TaskSlotResolver(DefinitionCatalog catalog) {
-        this(catalog, null, new ObjectMapper());
+    public TaskSlotResolver() {
+        this(null);
     }
 
     @Autowired
-    public TaskSlotResolver(DefinitionCatalog catalog, TaskService taskService, ObjectMapper objectMapper) {
-        this.catalog = catalog;
+    public TaskSlotResolver(TaskService taskService) {
         this.taskService = taskService;
-        this.objectMapper = ObjectUtils.getIfNull(objectMapper, ObjectMapper::new);
     }
 
     /**
@@ -152,108 +137,6 @@ public class TaskSlotResolver {
         }
         return AiContext.of(source.getPage(), source.getTaskType(), source.getStep(), source.getTaskId(),
                 source.getTaskStatus(), extra);
-    }
-
-    /**
-     * 模型已经发起 create_task 后，只补它留空且用户原话能完整验证的创建槽位。
-     * 非空模型参数优先，openWizard=false 仅保留给用户明确限定创建后停止的场景；
-     * 候选仍须经过创建预检，不能替代确认或业务库条件写入。
-     */
-    public String completeCreateTaskArguments(String argumentsJson, String currentMessage) {
-        if (StringUtils.isBlank(argumentsJson)) {
-            return argumentsJson;
-        }
-        try {
-            if (!(this.objectMapper.readTree(argumentsJson) instanceof ObjectNode arguments)) {
-                return argumentsJson;
-            }
-            normalizeOpenWizard(arguments, currentMessage);
-            if (StringUtils.isNotBlank(currentMessage)) {
-                List<String> targetCodes = targetCodes(arguments);
-                TaskSlotParser.Intent intent = TaskSlotParser.parse(currentMessage, definitions(), targetCodes);
-                applyTaskTypeAndSelection(arguments, intent, targetCodes);
-                applyVerifiedConditions(arguments, intent, targetCodes);
-            }
-            return this.objectMapper.writeValueAsString(arguments);
-        } catch (Exception ex) {
-            if (LogSampling.canAcquire("create-task-slot-completion")) {
-                log.warn("could not complete create_task slots; original arguments kept", ex);
-            }
-            return argumentsJson;
-        }
-    }
-
-    private static void normalizeOpenWizard(ObjectNode arguments, String currentMessage) {
-        JsonNode openWizard = arguments.get("openWizard");
-        if (openWizard != null && openWizard.isBoolean() && !openWizard.booleanValue()
-                && !isCreateOnly(currentMessage)) {
-            arguments.remove("openWizard");
-        }
-    }
-
-    private static boolean isCreateOnly(String currentMessage) {
-        return StringUtils.containsAny(currentMessage, "只创建", "仅创建", "不打开向导", "不继续配置", "不启动后续流程");
-    }
-
-    private static List<String> targetCodes(ObjectNode arguments) {
-        List<String> targetCodes = new ArrayList<>();
-        if (arguments.get("defCodes") instanceof ArrayNode codes) {
-            for (JsonNode code : codes) {
-                if (code.isTextual() && StringUtils.isNotBlank(code.asText())) {
-                    targetCodes.add(code.asText());
-                }
-            }
-        }
-        return targetCodes;
-    }
-
-    private static void applyTaskTypeAndSelection(ObjectNode arguments, TaskSlotParser.Intent intent,
-                                                  List<String> targetCodes) {
-        if (!arguments.hasNonNull("type") && intent.taskType() != null) {
-            arguments.put("type", intent.taskType());
-        }
-        if (targetCodes.isEmpty() && intent.selection() == TaskSlotParser.SlotState.DETERMINED) {
-            ArrayNode codes = arguments.putArray("defCodes");
-            intent.defCodes().forEach(codes::add);
-            targetCodes.addAll(intent.defCodes());
-        }
-    }
-
-    private void applyVerifiedConditions(ObjectNode arguments, TaskSlotParser.Intent intent,
-                                         List<String> targetCodes) {
-        JsonNode existingConditions = arguments.get("conditions");
-        boolean conditionsEmpty = existingConditions == null || existingConditions.isNull()
-                || existingConditions.isObject() && existingConditions.isEmpty();
-        if (!conditionsEmpty || !"EXPORT".equalsIgnoreCase(arguments.path("type").asText())
-                || intent.condition() != TaskSlotParser.SlotState.DETERMINED || targetCodes.size() != 1) {
-            return;
-        }
-        List<ConditionSlot> slots = intent.conditions().stream().filter(ConditionSlot::isComplete).distinct().toList();
-        if (!isVerified(slots, intent, targetCodes)) {
-            return;
-        }
-        ObjectNode conditions = this.objectMapper.createObjectNode();
-        ArrayNode fields = conditions.putArray("fields");
-        for (ConditionSlot slot : slots) {
-            ObjectNode field = fields.addObject();
-            field.put("fieldCode", slot.fieldCode());
-            field.put("operator", "EQ");
-            field.put("value", slot.value());
-        }
-        arguments.set("conditions", conditions);
-    }
-
-    private static boolean isVerified(List<ConditionSlot> slots, TaskSlotParser.Intent intent,
-                                      List<String> targetCodes) {
-        if (slots.isEmpty()) {
-            return false;
-        }
-        for (ConditionSlot slot : slots) {
-            if (!intent.verifiedConditionDefCodes().contains(slot.defCode()) || !targetCodes.contains(slot.defCode())) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**
@@ -321,19 +204,6 @@ public class TaskSlotResolver {
 
     // ── 权威值（任务/工作区） ────────────────────────────────────────────────
 
-    private List<SlotDefinition> definitions() {
-        try {
-            List<SlotDefinition> definitions = this.catalog == null ? List.of() : this.catalog.list();
-            return definitions == null ? List.of() : definitions;
-        } catch (RuntimeException ex) {
-            // 目录读失败 = 没有可识别项：槽位保持缺失（表单照常可用），不影响本轮
-            if (LogSampling.canAcquire("task-slot-definition-catalog")) {
-                log.warn("could not read definition catalog; slots treated as missing this turn", ex);
-            }
-            return List.of();
-        }
-    }
-
     /**
      * 页面实时勾选（三态，与 {@code ContextBuilder#pageSelectedDefs} 同一口径）。
      *
@@ -370,13 +240,6 @@ public class TaskSlotResolver {
             return PageSelection.absent();
         }
         return PageSelection.present(codes);
-    }
-
-    /**
-     * 旧列表投影不承载 presence；需要区分未同步与权威空的调用方必须使用 {@link #pageSelection}。
-     */
-    public List<String> pageSelectedDefCodes(AiContext context) {
-        return pageSelection(context).defCodes();
     }
 
     /**

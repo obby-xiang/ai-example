@@ -14,8 +14,6 @@ import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.ai.tool.ToolRisk;
 import com.example.configmgr.ai.tool.ToolScope;
-import com.example.configmgr.ai.slot.DefinitionCatalog;
-import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.slot.TaskSlots;
 import com.example.configmgr.task.entity.Task;
@@ -409,13 +407,7 @@ class ResumeContextRefreshTest {
 	 */
 	@Test
 	void resumedSlotsFollowLatestPageFactsAndDropStaleTaskSlots() {
-		this.service.setTaskSlotResolver(new TaskSlotResolver(new DefinitionCatalog() {
-			@Override
-			public List<SlotDefinition> list() {
-				return List.of(new SlotDefinition("CURRENCY", "货币", List.of(
-						new SlotDefinition.SlotField("code", "货币代码", true, List.of("CNY")))));
-			}
-		}, this.taskService, this.mapper));
+		this.service.setTaskSlotResolver(new TaskSlotResolver(this.taskService));
 		Task task = task(42L, Task.TaskType.EXPORT, "QUERY_COND", Task.TaskStatus.ACTIVE,
 				"CURRENCY");
 		this.taskState.set(task);

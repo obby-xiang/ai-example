@@ -172,7 +172,7 @@ class ConditionHandoffPersistenceTest {
 		this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 				this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 		this.service.setContextRefresher(new RunContextRefresher(this.taskService));
-		this.service.setTaskSlotResolver(new TaskSlotResolver(this.catalog, this.taskService, this.mapper));
+		this.service.setTaskSlotResolver(new TaskSlotResolver(this.taskService));
 		// 条件表在真实链路上是同一次交棒前的最后一个宿主动作：这里只复刻"判据成立时写入标记并返回 false"。
 		ReflectionTestUtils.setField(this.service, "conditionsForm", this.conditionsForm);
 		markHandoffWhenUnknown();

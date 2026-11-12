@@ -26,10 +26,7 @@ class TaskSlotResolverConditionStateTest {
 
 	private final TaskService taskService = mock(TaskService.class);
 
-	private final TaskSlotResolver resolver = new TaskSlotResolver(
-			() -> List.of(new SlotDefinition("CURRENCY", "货币字典",
-					List.of(new SlotDefinition.SlotField("code", "代码", true, List.of("CNY", "USD"))))),
-			this.taskService, new com.fasterxml.jackson.databind.ObjectMapper());
+	private final TaskSlotResolver resolver = new TaskSlotResolver(this.taskService);
 
 	@Test
 	void nonEqTaskConditionIsSetInsteadOfUndecided() {
@@ -95,11 +92,7 @@ class TaskSlotResolverConditionStateTest {
 	/** Critical：同一配置项的多个等值字段必须全部无损落库。 */
 	@Test
 	void multipleFieldsOnOneDefinitionAreAllKeptAndPersisted() {
-		TaskSlotResolver multi = new TaskSlotResolver(
-				() -> List.of(new SlotDefinition("CURRENCY", "货币字典",
-						List.of(new SlotDefinition.SlotField("code", "代码", true, List.of("CNY", "USD")),
-								new SlotDefinition.SlotField("region", "区域", false, List.of("XN", "US"))))),
-				this.taskService, new com.fasterxml.jackson.databind.ObjectMapper());
+		TaskSlotResolver multi = new TaskSlotResolver(this.taskService);
 		Task structured = task("{\"fields\":["
 				+ "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"},"
 				+ "{\"fieldCode\":\"region\",\"operator\":\"EQ\",\"value\":\"XN\"}]}");
@@ -131,10 +124,7 @@ class TaskSlotResolverConditionStateTest {
 	/** 无枚举值的自定义配置项：任务条目里的结构化 EQ 同样成事实（不再需要"枚举自证"）。 */
 	@Test
 	void noEnumCustomDefinitionConditionIsAccepted() {
-		TaskSlotResolver custom = new TaskSlotResolver(
-				() -> List.of(new SlotDefinition("CUSTOM", "自定义字典",
-						List.of(new SlotDefinition.SlotField("code", "代码", true, List.of())))),
-				this.taskService, new com.fasterxml.jackson.databind.ObjectMapper());
+		TaskSlotResolver custom = new TaskSlotResolver(this.taskService);
 		Task customTask = task("CUSTOM", "{\"fields\":[{\"fieldCode\":\"code\","
 				+ "\"operator\":\"EQ\",\"value\":\"VIP\"}]}");
 		when(this.taskService.findById(any())).thenReturn(customTask);

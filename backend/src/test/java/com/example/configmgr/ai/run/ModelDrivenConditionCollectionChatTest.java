@@ -118,7 +118,7 @@ class ModelDrivenConditionCollectionChatTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
 				this.registry, this.toolRegistry, this.contextBuilder, this.sessionService, this.properties,
 				this.cancellations, this.beacon, this.watchdogExecutor);
-		this.service.setTaskSlotResolver(new TaskSlotResolver(this.catalog));
+		this.service.setTaskSlotResolver(new TaskSlotResolver());
 		stubFluentChain();
 		when(this.cancellations.cancelState(anyString())).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenReturn(() -> {

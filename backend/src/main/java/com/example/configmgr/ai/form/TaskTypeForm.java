@@ -93,18 +93,6 @@ public class TaskTypeForm extends HostForm {
 	}
 
 	/**
-	 * 判据 + 表单正文（不含任何外置写）。
-	 *
-	 * <p>{@code context} 刻意<b>不</b>参与类型判定：它带着的是"当前打开的那条旧任务"的权威值
-	 * （{@code taskType} 与 {@code extra[taskSlots]}），拿它判<b>新任务</b>的类型就是让旧任务参数
-	 * 决定新任务。保留这个参数只为与另外两张宿主表单同形（调用点一处、判据一处）。
-	 */
-	Optional<String> argumentsIfDue(String runId, AiContext context, String userMessage) {
-		// 兼容入口：宿主不再从文本推断类型（生产判断不经过中文正则）。
-		return Optional.empty();
-	}
-
-	/**
 	 * <b>结构化类型缺口</b>：模型发起了 {@code create_task} 但缺少/非法 {@code type}。
 	 *
 	 * <p>这是模型工具调用（结构化事实），不是用户中文措辞。宿主据此挂一次
