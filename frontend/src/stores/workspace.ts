@@ -323,6 +323,22 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.touch(`清空 ${defCode} 的查询条件`, 'UI')
     },
 
+    /** 整批替换 AI 条件草案；动作时间线由调用入口统一记一次，避免逐项产生卡片。 */
+    applyQueryConditionDrafts(items: readonly { defCode: string; condition: unknown | null }[]): void {
+      if (items.length === 0) {
+        return
+      }
+      const next = { ...this.queryConditions }
+      for (const item of items) {
+        if (item.condition === null) {
+          delete next[item.defCode]
+        } else {
+          next[item.defCode] = item.condition
+        }
+      }
+      this.queryConditions = next
+    },
+
     setImportMode(mode: ImportMode | null): void {
       this.importMode = mode
       this.touch(`导入模式设为 ${mode === null ? '未设置' : mode === 'MERGE' ? '增量合并' : '整体替换'}`, 'UI')
@@ -536,7 +552,7 @@ type DraftWizard = 'export' | 'import'
 /** 草案写动作 → 页面能力名（`registerPageHandler` 的名字即 handler 名）。 */
 const DRAFT_WRITE_HANDLERS: Record<DraftWriteEvent, Record<DraftWizard, string | null>> = {
   select_defs: { export: 'export.selectDefs', import: 'import.selectDefs' },
-  // 导入向导没有「编辑查询条件」这一能力（与后端 `set_condition` 的 allowPages 一致）
+  // 导入向导没有「编辑查询条件」这一能力（与后端 `set_conditions` 的 allowPages 一致）
   set_conditions: { export: 'export.setConditions', import: null },
   goto_step: { export: 'export.nextStep', import: 'import.nextStep' }
 }
@@ -828,7 +844,7 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
         }
         return await runDraftHandler(
           handler,
-          { defCode: event.defCode, conditions: event.conditions },
+          { items: event.items },
           'set_conditions',
           lifetime
         )

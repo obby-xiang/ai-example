@@ -1,17 +1,4 @@
-/**
- * R5 返修 · 契约层路由：漏传 `conditions` 不得被补成 `{}`（= 显式清空）。
- *
- * 现场（reviewer Important）：`frontend-tools.ts` 里 `set_condition` 的 `toUiEvent` 与
- * ui_event 同名动作 `set_conditions` 的归一化都写了 `conditions: args.conditions ?? {}` ——
- * 页面未挂载（契约层兜底）时，漏参会被当成"显式清空"：PUT `{}` 并回成功。
- *
- * 收口口径：`conditions` 必填；漏传（undefined / null）⇒ 参数不完整失败，零 PUT、零工作区写。
- *
- * <p><b>兜底直写已移除</b>（写类 ui_event 收口）：契约层不再替页面 PUT 条件 —— 页面能力 handler
- * 未注册时一律「页面未就绪」确定性失败（零 PUT、零工作区写），显式 `{}` 的"清空"语义只在页面
- * handler 里成立（`frontend-tools-set-condition-args-page.spec.ts` 覆盖正常 handler 路径）。
- */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 const api = vi.hoisted(() => ({
@@ -27,7 +14,9 @@ vi.mock('@/api/jobs', () => ({ jobsApi: { listJobs: api.listJobs, getIssues: api
 vi.mock('@/api/definitions', () => ({ definitionsApi: { listDefinitions: api.listDefinitions } }))
 
 import { executeFrontendTool } from '@/utils/frontend-tools'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { registerPageHandler, unregisterPageHandler, useWorkspaceStore } from '@/stores/workspace'
+
+const CONDITION = { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] }
 
 function bindExportContext(): ReturnType<typeof useWorkspaceStore> {
   const workspace = useWorkspaceStore()
@@ -38,7 +27,7 @@ function bindExportContext(): ReturnType<typeof useWorkspaceStore> {
     step: 'QUERY_COND',
     taskId: 7,
     taskStatus: 'ACTIVE',
-    selectedDefs: ['CURRENCY']
+    selectedDefs: ['CURRENCY', 'REGION']
   })
   return workspace
 }
@@ -50,86 +39,91 @@ beforeEach(() => {
   api.selectDefs.mockResolvedValue({})
   api.listJobs.mockResolvedValue([])
   api.getIssues.mockResolvedValue({ content: [] })
-  api.listDefinitions.mockResolvedValue([{ code: 'CURRENCY' }])
+  api.listDefinitions.mockResolvedValue([{ code: 'CURRENCY' }, { code: 'REGION' }])
 })
 
-describe('契约层路由：漏传 conditions 不得当清空（R5）', () => {
-  it('set_condition 漏传 conditions ⇒ 参数不完整失败、零 PUT、零工作区写', async () => {
-    const workspace = bindExportContext()
-
-    const execution = await executeFrontendTool({
-      name: 'set_condition',
-      args: { defCode: 'CURRENCY' },
-      budgetMs: 5_000
-    })
-
-    // 修复前（RED）：toUiEvent 补 {} ⇒ 契约层当"显式清空" ⇒ PUT "{}" 且回成功
-    expect(execution.outcome).not.toBe('ok')
-    expect(String(execution.result)).toContain('conditions')
-    expect(api.setCondition).not.toHaveBeenCalled()
-    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
-  })
-
-  it('ui_event 同名动作 set_conditions 漏传 conditions ⇒ 失败、零 PUT、零工作区写', async () => {
-    const workspace = bindExportContext()
-
-    const execution = await executeFrontendTool({
-      name: 'set_conditions',
-      args: { defCode: 'CURRENCY' },
-      budgetMs: 5_000
-    })
-
-    expect(execution.outcome).not.toBe('ok')
-    expect(String(execution.result)).toContain('conditions')
-    expect(api.setCondition).not.toHaveBeenCalled()
-    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
-  })
-
-  it('conditions: null ⇒ 失败、零 PUT（只认显式 {}）', async () => {
-    const workspace = bindExportContext()
-
-    const execution = await executeFrontendTool({
-      name: 'set_condition',
-      args: { defCode: 'CURRENCY', conditions: null },
-      budgetMs: 5_000
-    })
-
-    expect(execution.outcome).not.toBe('ok')
-    expect(api.setCondition).not.toHaveBeenCalled()
-    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
-  })
+afterEach(() => {
+  unregisterPageHandler('export.setConditions')
 })
 
-describe('契约层兜底不再直写：页面 handler 未注册 ⇒ 确定性失败（零 PUT、零工作区写）', () => {
-  it('set_condition 显式 {} ⇒ 「页面未就绪」，零 PUT、工作区不留占位', async () => {
+describe('set_conditions 唯一批量协议', () => {
+  it('items 原样进入页面并只产生一个动作和一份批量回执', async () => {
     const workspace = bindExportContext()
-
-    const execution = await executeFrontendTool({
-      name: 'set_condition',
-      args: { defCode: 'CURRENCY', conditions: {} },
-      budgetMs: 5_000
+    const seen: Array<Record<string, unknown>> = []
+    registerPageHandler('export.setConditions', (payload) => {
+      seen.push(payload)
+      return { ok: true, result: '已设置 2 个配置项的查询条件草案' }
     })
+    const items = [
+      { defCode: 'CURRENCY', conditions: CONDITION },
+      { defCode: 'REGION', conditions: {} }
+    ]
+    const actionCount = workspace.recentActions.length
 
-    // 修复前（RED）：落到 dispatchUiEvent 的兜底分支 ⇒ PUT "{}" 并回成功（假同步）
-    expect(execution.outcome).not.toBe('ok')
-    expect(String(execution.result)).toContain('页面未就绪')
+    const execution = await executeFrontendTool({ name: 'set_conditions', args: { items }, budgetMs: 5_000 })
+
+    expect(execution.outcome).toBe('ok')
+    expect(execution.result).toBe('已设置 2 个配置项的查询条件草案')
+    expect(seen).toEqual([{ items }])
+    expect(workspace.recentActions).toHaveLength(actionCount + 1)
+    expect(workspace.recentActions.at(-1)?.summary).toBe('已设置 2 个配置项的查询条件草案')
     expect(api.setCondition).not.toHaveBeenCalled()
-    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
   })
 
-  it('别名 set_conditions 合法条件 ⇒ 「页面未就绪」，零 PUT、零工作区写', async () => {
-    const workspace = bindExportContext()
-    const condition = { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] }
+  it('旧 set_condition action、旧别名和单条 ui_event 全部拒绝且不进入页面', async () => {
+    bindExportContext()
+    const handler = vi.fn(() => ({ ok: true, result: '不应成功' }))
+    registerPageHandler('export.setConditions', handler)
 
-    const execution = await executeFrontendTool({
+    const oldAction = await executeFrontendTool({
+      name: 'set_condition',
+      args: { defCode: 'CURRENCY', conditions: CONDITION },
+      budgetMs: 5_000
+    })
+    const oldAlias = await executeFrontendTool({
+      name: 'set_query_conditions',
+      args: { defCode: 'CURRENCY', conditions: CONDITION },
+      budgetMs: 5_000
+    })
+    const oldUiEvent = await executeFrontendTool({
       name: 'set_conditions',
-      args: { defCode: 'CURRENCY', conditions: condition },
+      args: { defCode: 'CURRENCY', conditions: CONDITION },
       budgetMs: 5_000
     })
 
-    expect(execution.outcome).not.toBe('ok')
-    expect(String(execution.result)).toContain('页面未就绪')
+    expect(oldAction.outcome).toBe('failed')
+    expect(oldAlias.outcome).toBe('failed')
+    expect(oldUiEvent.outcome).toBe('failed')
+    expect(oldUiEvent.result).toContain('items')
+    expect(handler).not.toHaveBeenCalled()
     expect(api.setCondition).not.toHaveBeenCalled()
-    expect(workspace.queryConditions).not.toHaveProperty('CURRENCY')
+  })
+
+  it('空批次、缺 conditions 和重复 defCode 都在进入页面前拒绝', async () => {
+    bindExportContext()
+    const handler = vi.fn(() => ({ ok: true, result: '不应成功' }))
+    registerPageHandler('export.setConditions', handler)
+    const invalidBatches: unknown[] = [
+      {},
+      { items: [] },
+      { items: [{ defCode: 'CURRENCY' }] },
+      { items: [{ defCode: 'CURRENCY', conditions: null }] },
+      { items: [
+        { defCode: 'CURRENCY', conditions: CONDITION },
+        { defCode: 'CURRENCY', conditions: {} }
+      ] }
+    ]
+
+    for (const args of invalidBatches) {
+      const execution = await executeFrontendTool({
+        name: 'set_conditions',
+        args: args as Record<string, unknown>,
+        budgetMs: 5_000
+      })
+      expect(execution.outcome).toBe('failed')
+      expect(execution.result).toContain('items')
+    }
+    expect(handler).not.toHaveBeenCalled()
+    expect(api.setCondition).not.toHaveBeenCalled()
   })
 })

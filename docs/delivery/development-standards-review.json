@@ -6966,6 +6966,45 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "参数按JSON结构逐项校验，对象键规范排序且items顺序保留，不按正则或文案识别条件。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1271最终Spec/Task quality均通过；施工报告15项真实管理器单request/result、不同条件、整批零写、幂等/迟到、任务归属、旧字段拒绝及创建约束等独立RED→GREEN，360个生产源编译成功；主控未重跑测试，真实Redis/模型/浏览器/多实例及全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:2fa12963fc48917089c454c5be1a4ef13e9ae63f99f13c97cb2d8a24894616d6",
+      "status": "reviewed",
+      "reason": "逐hunk复核前端批量归一化、预检与统一应用、工作区合并、单动作回执和迟到安全；独立静态审查无Critical/Important/Minor。",
+      "reviewedAt": "2026-11-13T03:49:06+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1271、施工agent-1264",
+      "specChanges": [
+        {
+          "change": "前端只接受set_conditions(items)，删除旧set_condition工作区action、set_query_conditions别名和单项ui_event/history形状。",
+          "reason": "项目未上线，旧协议兼容会形成第二套执行路径和错误归属。",
+          "impact": "空批次、缺conditions、重复defCode和额外字段均在进入页面前拒绝，页面handler只转交一次items。"
+        },
+        {
+          "change": "批量执行分为prepareConditionBatch与applyConditionBatch，全部项目通过选中/条件校验和草案预计算后才统一写入。",
+          "reason": "旧逐项handler会让第二项失败时第一项已经落草案，且产生多张卡和重复动作。",
+          "impact": "第二项非法、未选中、只读、停止均零写；合法批次逐项更新draftModels/touched/计数缓存并一次性合并workspace，15项只有一个AI动作和一份汇总回执。"
+        },
+        {
+          "change": "persistStepData继续逐项setCondition，批量草案不包装成跨请求业务事务。",
+          "reason": "前端原子应用不等于服务端跨请求事务，必须保留真实持久化边界。",
+          "impact": "逐项行数请求身份失效防止迟到计数覆盖，未修改的其他服务端草案保留，显式{}只清对应项。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/workspace.ts", "status": "checked", "reason": "applyQueryConditionDrafts浅拷贝现有queryConditions，仅覆盖本批项目并一次赋值，保留其他草案；已IDEA Reformat。"},
+        {"path": "frontend/src/types/tools.ts", "status": "checked", "reason": "SetConditionItem与normalizeConditionBatch只接受非空items并拒绝重复/缺字段/额外字段，旧UiEvent形状删除；已IDEA Reformat。"},
+        {"path": "frontend/src/utils/frontend-tools.ts", "status": "checked", "reason": "唯一set_conditions动作、旧别名删除、批量归一化、单动作touch和真实失败回执；已IDEA Reformat。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "预检/应用两阶段，全部合法后统一草案/计数/workspace，persistStepData仍逐项，停止只读先于写入；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用validateConditionPayload、selectedDefs、现有草案和verbatim提交及工作区store，无新增依赖或表单框架。"},
+        "java-api-style": {"status": "not-affected", "reason": "本批仅前端TypeScript/Vue，无Java方法、JSON实体或Lombok变化。"},
+        "logging-exception-safety": {"status": "checked", "reason": "失败返回ok:false且不折成成功，只读/停止/非法批次零写，不伪造草案或事务成功。"},
+        "toc-interaction": {"status": "checked", "reason": "15项一次执行只产生一个动作和一份简洁汇总回执，未新增DOM表单、技术提示或额外用户操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "逐项请求身份失效与任务代次防止迟到计数覆盖，工作区合并不丢其他草案，持久化不虚构跨请求原子性。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "沿用既有condition结构和verbatim无损提交，多值IN/同字段多条件不按逗号或文案压平。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1271 Spec/Task quality均通过且无分级问题；施工报告18个相关前端单点独立RED→GREEN、npm typecheck及node scripts/build.mjs成功；主控未重跑测试，全量Vitest、真实浏览器/Redis/多实例NOT_RUN。Modern Web Guidance检索forms，无DOM表单模式变更，未额外套用指南。"}
+      }
     }
   ]
 }

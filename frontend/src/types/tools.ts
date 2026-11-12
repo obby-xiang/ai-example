@@ -22,7 +22,7 @@
  * | download_export_files | `task:EXPORT/EXPORT` | READ | FRONTEND |
  * | navigate_to | `*` | READ | FRONTEND |
  * | select_definitions | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（勾选即改任务项；不进确认门） | FRONTEND |
- * | set_condition | `page:tasks`, `task:EXPORT` | **WRITE**（条件只形成前端草案，后续步骤或启动前提交；不进确认门） | FRONTEND |
+ * | set_conditions | `page:tasks`, `task:EXPORT` | **WRITE**（条件只形成前端草案，后续步骤或启动前提交；不进确认门） | FRONTEND |
  * | confirm_step | `page:tasks`, `task:EXPORT`, `task:IMPORT` | **WRITE**（自动执行，不进确认门） | FRONTEND |
  * | generative_form | `page:tasks`, `task:*` | READ | FRONTEND |
  * | read_sheet_summary / aggregate_sheet / inspect_columns / review_cells / find_rows | `task:EXPORT/EXPORT`, `task:IMPORT/UPLOAD` | READ | FRONTEND |
@@ -31,11 +31,11 @@
  * 两处**已过期的旧口径**（勿再沿用）：① 四个 `start_*` 曾标 WRITE/BACKEND 且不进确认门，
  * S4.4e 裁决⑥ 已全部升为 `DANGER`（执行前挂起、前端渲染确认卡片，FR-5.3）；
  * ② `open_export_file_editor`/`download_export_files` 曾被写成"唯一两个 FRONTEND 工具"，
- * S4.4d 起 `navigate_to`/`select_definitions`/`set_condition`/`confirm_step` 也是 FRONTEND，
+ * S4.4d 起 `navigate_to`/`select_definitions`/`set_conditions`/`confirm_step` 也是 FRONTEND，
  * DC-15 起 `generative_form` 亦然（前端接入已落地：GF-B 在 `stores/ai.ts` 对 `frontend_tool_request`
  * 特判 + AiPanel 的 `FormRenderer` 渲染）。
  * ③ `confirm_step` 曾标 READ；R3-02 起按事实标 **WRITE**（导入向导离开第 1 步会整表写回服务端文件）。
- * `select_definitions` / `set_condition` 同理（工具安全边界批，2026-10-25 用户裁决）：前者改任务项勾选、
+ * `select_definitions` / `set_conditions` 同理（工具安全边界批，2026-10-25 用户裁决）：前者改任务项勾选、
  * 后者把条件只形成前端草案，后续步骤或启动前提交 —— 都是"改变后续动作的工作选择"的写，不能再自称 READ。
  * 三者仍是 FRONTEND 通道，通道判定优先于风险等级 ⇒ 不会因此新增确认门；
  * 它们的人围栏就是下游 `start_*` 的 DANGER 确认卡（撤销例外：撤销走前端预览卡确认，
@@ -486,13 +486,42 @@ export const WORKSPACE_CONTRACT_VERSION = 1
 /** 可被 AI 驱动的页面标识（与 ToolScope 的 page:* 标签一致）。 */
 export type WorkspacePageId = 'tasks' | 'export' | 'import' | 'definitions' | 'data'
 
+export interface SetConditionItem {
+  defCode: string
+  conditions: unknown
+}
+
+/** `set_conditions` 的唯一入参形状；旧单项、缺字段、重复项和额外字段一律拒绝。 */
+export function normalizeConditionBatch(payload: Record<string, unknown>): readonly SetConditionItem[] | null {
+  if (Object.keys(payload).length !== 1 || !Object.prototype.hasOwnProperty.call(payload, 'items')
+    || !Array.isArray(payload.items) || payload.items.length === 0) {
+    return null
+  }
+  const items: SetConditionItem[] = []
+  const defCodes = new Set<string>()
+  for (const candidate of payload.items) {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return null
+    }
+    const item = candidate as Record<string, unknown>
+    if (Object.keys(item).length !== 2 || typeof item.defCode !== 'string' || item.defCode.trim() === ''
+      || !Object.prototype.hasOwnProperty.call(item, 'conditions') || item.conditions === undefined
+      || item.conditions === null || defCodes.has(item.defCode)) {
+      return null
+    }
+    defCodes.add(item.defCode)
+    items.push({ defCode: item.defCode, conditions: item.conditions })
+  }
+  return items
+}
+
 /** 一键恢复向导的目标（任务中心 → 向导）。 */
 export type UiEvent =
   | { type: 'open_page'; page: WorkspacePageId }
   | { type: 'restore_task'; taskId: number; taskType?: TaskType }
   | { type: 'goto_step'; step: string }
   | { type: 'select_defs'; task: 'export' | 'import'; defCodes: readonly string[] }
-  | { type: 'set_conditions'; defCode: string; conditions: unknown }
+  | { type: 'set_conditions'; items: readonly SetConditionItem[] }
   | { type: 'set_import_mode'; mode: 'MERGE' | 'REPLACE' }
   | { type: 'run_job'; jobType: JobType; taskId: number }
   | { type: 'cancel_job'; jobId: number }

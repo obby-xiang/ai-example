@@ -154,7 +154,7 @@ import { useI18n } from 'vue-i18n'
  * 与蓝本的关键差别（功能差异，理由见证据文档 V6）：
  * 1. 条件表单与选中集**落库**（`POST /tasks/{id}/select-defs`、`PUT /tasks/{id}/items/{code}/condition`），
  *    刷新页面/换机恢复不丢；蓝本是前端 stepData 单存。**写入点只有一个**：`persistStepData`
- *    （推进步骤 `confirm_step` / 开始导出），AI 的 `set_condition` 只改页面草案，不写业务后台；
+ *    （推进步骤 `confirm_step` / 开始导出），AI 的 `set_conditions` 只改页面草案，不写业务后台；
  * 2. 导出结果来自后端已落盘的 EXPORT 文件（`GET /tasks/{id}/files/{code}`）而不是内存行数组，
  *    与后端 ExportJobRunner/发布链路同源；
  * 3. 进度通道为 SSE（`JOB_PROGRESS`/`JOB_DONE`）+ 轮询兜底，蓝本是纯轮询。
@@ -183,7 +183,6 @@ import {
   emptyDraftModel,
   InvalidConditionInputError,
   isConditionEmpty,
-  conditionSummary,
   parseConditionJson,
   stringifyCondition,
   type ConditionDraftModel,
@@ -194,7 +193,7 @@ import type { DataQuery } from '@/types/data'
 import type { ConfigDefinition, ConfigField } from '@/types/definition'
 import type { Job, ValidationIssue } from '@/types/job'
 import { TaskSteps, type Task, type TaskFile } from '@/types/task'
-import type { WorkspaceActionSource } from '@/types/tools'
+import { normalizeConditionBatch, type WorkspaceActionSource } from '@/types/tools'
 import {
   downloadBlob,
   xlsxFileName,
@@ -1220,7 +1219,7 @@ async function persistStepData(
       // 恢复），按字段合并出来的结果与之等价；再 PUT 一次只是重复网络写，且在"服务端已被
       // 别处（另一次 AI / 用户操作）更新"时会把旧值写回去。
       // 真正改动过（`touchedConditions`）才按合并结果落库 —— 那才是"界面上的新条件"。
-      // （AI `set_condition` 只写草案并登记 touched，因此它设置的条件仍然会在本提交点落库。）
+      // （AI `set_conditions` 只写草案并登记 touched，因此它设置的条件仍然会在本提交点落库。）
       if (!touchedConditions.has(code) && model.verbatim !== undefined) {
         continue
       }
@@ -2575,6 +2574,57 @@ async function preflightWithDeadline(args: Record<string, unknown>): Promise<Gat
   }
 }
 
+interface PreparedConditionItem {
+  defCode: string
+  condition: FieldQueryCondition | null
+  model: ConditionDraftModel
+}
+
+type ConditionBatchPreparation =
+  | { ok: true; items: PreparedConditionItem[]; result: string }
+  | { ok: false; reason: string }
+
+function prepareConditionBatch(payload: Record<string, unknown>): ConditionBatchPreparation {
+  const items = normalizeConditionBatch(payload)
+  if (items === null) {
+    return { ok: false, reason: 'set_conditions 只接受 items：每项必须包含 defCode 和 conditions，且 defCode 不得重复' }
+  }
+  const prepared: PreparedConditionItem[] = []
+  for (const item of items) {
+    if (!selectedDefs.value.includes(item.defCode)) {
+      return {
+        ok: false,
+        reason: `配置项 ${item.defCode} 未勾选（不在当前任务的选中集）：本次整批未设置查询条件（未改动页面条件）。`
+          + '请先调用 select_definitions，或让用户在「选择配置」步勾选该配置项后再重试。'
+      }
+    }
+    const verdict = validateConditionPayload(item.conditions)
+    if (!verdict.ok) {
+      const reason = verdict.issues !== undefined && verdict.issues.length > 0
+        ? `${describeConditionInputIssues(verdict.issues)} 配置项 ${item.defCode} 非法，本次整批未设置查询条件`
+          + '（未改动页面条件）。请修正后重试：值算子必须填值；IN 至少一个值；'
+          + '要表达"空值判断"请用 EMPTY / NOT_EMPTY。'
+        : `配置项 ${item.defCode}：${verdict.reason}`
+      return { ok: false, reason }
+    }
+    prepared.push({
+      defCode: item.defCode,
+      condition: verdict.condition,
+      model: draftModelFromCondition(verdict.condition)
+    })
+  }
+  return { ok: true, items: prepared, result: `已设置 ${prepared.length} 个配置项的查询条件草案` }
+}
+
+function applyConditionBatch(items: readonly PreparedConditionItem[]): void {
+  for (const item of items) {
+    invalidateExactRowCount(item.defCode)
+    draftModels[item.defCode] = item.model
+    touchedConditions.add(item.defCode)
+  }
+  workspace.applyQueryConditionDrafts(items)
+}
+
 function registerHandlers(): void {
   // 任务详情就绪探针（只读，返回布尔）：契约层在导航/幂等早退处等它变 true 才放行后续动作。
   // 与 `PAGE_READY_PROBES` 在同一处注册 —— 页面挂载即存在，不会出现"页面就绪但探针缺席"。
@@ -2682,77 +2732,18 @@ function registerHandlers(): void {
   })
 
   registerPageHandler('export.setConditions', (payload, lifetime) => {
-    // 施工卡 §S3e（§2.4 零写清单）：只读态拦在写草案之前
     if (isReadOnly.value) {
       return { ok: false, reason: '任务已结束，仅供查看，未设置查询条件' }
     }
-    // 预算到点 / 本轮已停止 ⇒ 零写：页面草案、touched 登记与工作区都不动，先给确定性失败
     if (isUiAbandoned(lifetime)) {
       return uiAbandonedReply('设置查询条件')
     }
-    const defCode = String(payload.defCode ?? '')
-    if (!defCode) {
-      // R6：**必须结构化失败**。字符串返回会被 `interpretHandlerOutcome` 当成功（兼容解读），
-      // 缺参就变成"假成功"（AI 以为条件已设置，实际什么都没写）。
-      return { ok: false, reason: '缺少 defCode，未设置条件（未改动页面条件）' }
+    const prepared = prepareConditionBatch(payload)
+    if (!prepared.ok) {
+      return prepared
     }
-    // R5：`conditions` 必填 —— 漏参（缺键 / undefined / null）必须明确失败，不能走
-    // `validateConditionPayload(undefined)` 的"无法序列化"模糊文案，更不能补 `{}` 当清空。
-    if (!Object.prototype.hasOwnProperty.call(payload, 'conditions')
-      || payload.conditions === undefined
-      || payload.conditions === null) {
-      return {
-        ok: false,
-        reason: '缺少 conditions（查询条件对象；清空条件请显式传空对象）：本次未设置查询条件（未改动页面条件）'
-      }
-    }
-    // 先校验、后写（R4 返修）：统一复用契约层同一个载荷校验 —— `validateConditionPayload`
-    // 内含 `parseConditionJson → draftModelFromCondition → buildConditionOutcome`，并**先做**
-    // 结构完整性检查。旧实现只靠 `parseConditionJson` 的 null：空串 / 坏 JSON / 非对象 /
-    // 结构坏全被当成 "cleared"，于是当"显式清空"并回成功（把坏载荷静默变成全量导出）。
-    const verdict = validateConditionPayload(payload.conditions)
-    if (!verdict.ok) {
-      const reason = verdict.issues !== undefined && verdict.issues.length > 0
-        ? `${describeConditionInputIssues(verdict.issues)} 本次未设置 ${defCode} 的查询条件`
-          + '（未改动页面条件）。请修正后重试：值算子必须填值；IN 至少一个值；'
-          + '要表达"空值判断"请用 EMPTY / NOT_EMPTY。'
-        : verdict.reason
-      return { ok: false, reason }
-    }
-    const condition = verdict.condition
-    // F8（2026-10-31）：提交点只遍历 `selectedDefs` —— 未勾选/未绑定的配置项即使写了草案也永远不会
-    // 提交，而回执却是"成功"（AI 以为条件已设置、页面上却看不见）。因此必须在**任何写入之前**
-    // 结构化失败：零草案、零工作区写、零提交。
-    if (!selectedDefs.value.includes(defCode)) {
-      return {
-        ok: false,
-        reason: `配置项 ${defCode} 未勾选（不在当前任务的选中集）：本次未设置查询条件（未改动页面条件）。`
-          + '请先调用 select_definitions，或让用户在「选择配置」步勾选该配置项后再重试。'
-      }
-    }
-    // 校验通过：只写**页面草案**（草案 / 已改登记）。
-    //
-    // 2026-10-30 提交点收口：这里**不**写业务后台。任务条目的 `conditionJson` 只在
-    // `goStep → persistStepData`（`confirm_step`）与 `startExport` 两个提交点统一落库 ——
-    // 设置条件就 PUT 会让"仅仅表达查询意图"变成一次业务写，并在 confirm_step 时重复写一遍。
-    invalidateExactRowCount(defCode)
-    draftModels[defCode] = draftModelFromCondition(condition)
-    // 条件被 AI 改过：登记为"已改"，后续 `persistStepData` 必须照此提交（含故意清空为无条件）
-    touchedConditions.add(defCode)
-    const summary = conditionSummary(condition)
-    // 工作区是**页面态**（AI 上下文里的"查询意图"），立刻同步让模型看到自己刚设的条件；
-    // 但这不是落库 —— 提交发生在推进步骤 / 开始导出时。
-    if (condition === null) {
-      // 显式清空：工作区**删键**（不留 `{defCode: null}` 占位，与契约层同形）
-      workspace.clearQueryConditions(defCode)
-    } else {
-      workspace.setQueryConditions(defCode, condition)
-    }
-    if (taskId.value === null) {
-      return `已设置 ${defCode} 的查询条件草案：${summary}（当前未绑定任务，条件只存在于本页表单；`
-        + '推进步骤或开始导出时一并提交）'
-    }
-    return `已设置 ${defCode} 的查询条件草案：${summary}（推进步骤或开始导出时一并提交给任务 #${taskId.value}）`
+    applyConditionBatch(prepared.items)
+    return { ok: true, result: prepared.result }
   })
 
   registerPageHandler('export.start', async (_payload, lifetime) => {
@@ -2989,7 +2980,7 @@ onMounted(async () => {
  * visop 批 B / O-2：导出向导的两个区域。
  *
  * - `export.selectDefs`（`mutate-local`）：勾选/筛选只改本页与工作区的选中集，落库在推进步骤时；
- * - `export.cond`（`read`）：条件表单是**查询意图的可视面**，选择语义由注册动作 `set_condition`
+ * - `export.cond`（`read`）：条件表单是**查询意图的可视面**，选择语义由注册动作 `set_conditions`
  *   承担（O-2 原文「原语只补看得见/点得着」）；只有文本取值框在元素级升为 `mutate-local`
  *   （`data-ai-risk` 显式授权）以获得 `fill` 写入口，其余控件动词收紧到 highlight/scroll。
  */

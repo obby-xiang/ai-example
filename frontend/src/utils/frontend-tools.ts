@@ -3,13 +3,13 @@
  *
  * **后端口径核对（批B 表格读侧补齐后复核，勿凭蓝本臆造）**：后端 `AiTools` 共 34 个 `@Tool`，
  * 其中带 `@ToolChannel(FRONTEND)` 的**有 23 个**：`open_export_file_editor`、`download_export_files`、
- * `navigate_to`、`select_definitions`、`set_condition`、`confirm_step`、`generative_form`，
+ * `navigate_to`、`select_definitions`、`set_conditions`、`confirm_step`、`generative_form`，
  * 加上 AI 表格操作专项的 9 个表格工具（读 5 / 写 3 + 撤销 1；`normalize_column` 双档同名）。
  * 所以：
  * - 路由 1 覆盖 `FRONTEND_TOOLS` 登记的前端工具（18 个：2 个既有 + 9 个表格工具 + 7 个界面原语），
  *   完整实现（表格读工具与撤销经 `sheet.current` 页面能力取适配器；写工具由 store 预览特判）；
  * - 路由 2（兜底直调 `dispatchUiEvent`，与路由 3 是**同一落点**，并非"落回路由 3"）是**补丁②**：把蓝本形态的工作区动作（`navigate_to` /
- *   `select_definitions` / `set_condition` / `confirm_step` 及蓝本别名）做成可执行能力表 ——
+ *   `select_definitions` / `set_conditions` / `confirm_step` 及蓝本别名）做成可执行能力表 ——
  *   这 4 个后端已标为 FRONTEND 并披露，故今天经任何 `frontend_tool_request` 帧或契约层驱动
  *   即可生效，前端零改动（见 `WORKSPACE_ACTIONS`）；
  * - `generative_form` 前端执行接入已落地（GF-B）：`stores/ai.ts` 对 `frontend_tool_request` 特判 +
@@ -35,9 +35,9 @@
  * 四条路由（AI 经 frontend_tool 帧驱动工作区的统一入口；编号与 `dispatchFrontendTool`
  * 内的分支注释一致，实读该方法确认共 4 条）：
  * 1. **后端披露的前端工具**（`FRONTEND_TOOLS`）：参数校验 + @ToolScope 校验 + 执行器/默认执行器；
- * 2. **工作区动作表**（`WORKSPACE_ACTIONS`：navigate_to / select_definitions / set_condition /
+ * 2. **工作区动作表**（`WORKSPACE_ACTIONS`：navigate_to / select_definitions / set_conditions /
  *    confirm_step；别名经 `WORKSPACE_ACTION_ALIASES` 归一：select_config_defs /
- *    set_query_conditions / goto_step / advance_step / restore_task / open_page）：
+ *    goto_step / advance_step / restore_task / open_page）：
  *    先找页面能力 handler，再落契约层 `dispatchUiEvent`（与用户点击**同一套** action）；
  *    其中 navigate_to 走 {@link runNavigateTo}，`restore_task` 更早一步被前置特判接走；
  * 3. **ui_event 同名动作**（`select_defs` / `set_conditions` / `goto_step` / `open_page` /
@@ -67,6 +67,7 @@ import {
   UI_EVENT_TYPES,
   UI_TOOL_NAMES,
   findFrontendTool,
+  normalizeConditionBatch,
   type FrontendToolDescriptor,
   type FrontendToolExecution,
   type FrontendToolName,
@@ -604,7 +605,7 @@ async function runWithBudget(
  *
  * R-156 换名（`download_export_file` → `download_export_files`，1 码 xlsx / ≥2 码 zip 单工具）
  * 后，**旧名已从本名单移除**：它不再登记于 `FRONTEND_TOOLS`，也不在 `WORKSPACE_ACTION_ALIASES`
- * （该表只归一 select_config_defs / set_query_conditions / goto_step / advance_step /
+ * （该表只归一 select_config_defs / goto_step / advance_step /
  * restore_task / open_page），送进来会立刻落到"未知前端工具"的 unavailable 结局、预算不介入，
  * **达不成超时文案** —— 保留旧名只会让"工具面唯一"的硬保证在文案层留一条不可能命中的分支。
  */
@@ -1352,11 +1353,8 @@ async function runNavigateTo(args: Record<string, unknown>, lifetime: UiEventLif
 /**
  * 工作区动作表。
  *
- * 名字来源（**核对过后端口径**）：
- * - 裁决②点名的 4 个：`navigate_to` / `select_definitions` / `set_condition` / `confirm_step`；
- * - 蓝本 `frontend-tools.js:5-15` 的等价名（`select_config_defs` / `set_query_conditions`）
- *   与 main 既有的 ui_event 名（`select_defs` / `set_conditions` / `goto_step` / `open_page`）
- *   作为**别名**一并登记，避免因命名差异漏路由。
+ * 名字来源（**核对过后端口径**）：`navigate_to` / `select_definitions` / `set_conditions` /
+ * `confirm_step`；`set_conditions` 只接受批量 items，不再登记旧单条动作或别名。
  * 后端已披露 7 个 FRONTEND 工具，上述 4 个均在其中，故这些动作今天经「前端工具帧」或
  * 「契约层」触发；执行器与页面能力已就绪，后续工具接入时前端零改动。
  *
@@ -1389,19 +1387,15 @@ export const WORKSPACE_ACTIONS: readonly WorkspaceAction[] = [
     }
   },
   {
-    name: 'set_condition',
+    name: 'set_conditions',
     displayName: '设置查询条件',
     allowPages: ['export'],
     allowSteps: ['QUERY_COND'],
     needsTask: true,
     handlerNames: ['export.setConditions'],
     toUiEvent: (args) => {
-      const defCode = typeof args.defCode === 'string' ? args.defCode : ''
-      // R5：`conditions` 必填 —— 漏参**不得**补成 `{}`（那会被契约层当成「显式清空」）。
-      // 缺参在此返回 null，走「参数不完整」失败文案（零写）。
-      return defCode === '' || !hasExplicitConditionPayload(args)
-        ? null
-        : { type: 'set_conditions', defCode, conditions: args.conditions }
+      const items = normalizeConditionBatch(args)
+      return items === null ? null : { type: 'set_conditions', items }
     }
   },
   {
@@ -1438,10 +1432,9 @@ function resolveNavigateIntent(args: Record<string, unknown>): { page: Workspace
   return { page, taskId: page === 'export' || page === 'import' ? taskId : null }
 }
 
-/** 蓝本名 / ui_event 名 → 动作名（别名表）。 */
+/** 蓝本名 / ui_event 名 → 动作名（别名表）；旧条件单条动作与别名不再登记。 */
 const WORKSPACE_ACTION_ALIASES: Readonly<Record<string, string>> = {
   select_config_defs: 'select_definitions',
-  set_query_conditions: 'set_condition',
   goto_step: 'confirm_step',
   advance_step: 'confirm_step',
   restore_task: 'navigate_to',
@@ -1453,34 +1446,22 @@ function findWorkspaceAction(name: string): WorkspaceAction | null {
   return WORKSPACE_ACTIONS.find((action) => action.name === target) ?? null
 }
 
-/**
- * RC-3：工作区动作的**参数要求**（缺参文案单点）。
- *
- * 用户口径（2026-10-16 裁决②/③）：前端工具的**参数错误文案不得内嵌 `JSON.stringify(args)`**
- * ——只把"缺什么"写成自然语言；表外动作回落一句不指名字段但可行动的话（仍不含任何 JSON 特征）。
- *
- * 页面 handler 同样受这条约束：**参数错误必须返回结构化 `{ ok:false, reason }`** —— 字符串返回
- * 会被 `interpretHandlerOutcome` 当"成功 + 该文本"（兼容解读），缺参会变成假成功
- * （R6 的 `export.setConditions` 缺 defCode 曾回字符串，已修为结构化失败）。
- */
+/** 工作区动作的参数错误提示，不回显原始参数。 */
 const WORKSPACE_ACTION_REQUIRED_ARGS: Readonly<Record<string, string>> = {
   navigate_to: '缺少 page（页面标识：tasks / export / import / definitions / data）',
   restore_task: '缺少 taskId 或它不是数字',
   select_definitions: '缺少 codes（配置项编码列表，不能为空）',
-  set_condition: '缺少 defCode 或 conditions（查询条件对象；清空条件请显式传空对象）',
+  set_conditions: '缺少 items（每项必须包含 defCode 和 conditions，且 defCode 不得重复）',
   confirm_step: '缺少 step（目标步骤标识）'
 }
 
-/**
- * RC-3：ui_event 动作的**参数要求**（同上表口径，覆盖 `toUiEvent` 的必填分支）。
- * `refresh_*` 三个动作 `toUiEvent` 恒有值，只会因类型不符走到这里。
- */
+/** ui_event 动作的参数错误提示。 */
 const UI_EVENT_REQUIRED_ARGS: Readonly<Record<string, string>> = {
   open_page: '缺少 page（页面标识：tasks / export / import / definitions / data）',
   restore_task: '缺少 taskId 或它不是数字',
   goto_step: '缺少 step 或它是空串',
   select_defs: '缺少 defCodes 或它不是数组',
-  set_conditions: '缺少 defCode / conditions（查询条件对象；清空条件请显式传空对象），或 defCode 是空串',
+  set_conditions: '缺少 items（每项必须包含 defCode 和 conditions，且 defCode 不得重复）',
   set_import_mode: '缺少 mode 或它不是 MERGE / REPLACE',
   run_job: '缺少 taskId 或 jobType（EXPORT / PRECHECK / IMPORT / PUBLISH）',
   cancel_job: '缺少 jobId 或它不是数字',
@@ -1495,19 +1476,9 @@ function missingArgsHint(name: string, table: Readonly<Record<string, string>>):
   return table[name] ?? '缺少必要字段，请核对工具参数后重试'
 }
 
-/**
- * 步骤不符时的**动作专属**下一步指引（2026-10-28 步骤披露与筛选链路收口）。
- *
- * 通用文案只写「请先推进到可用步骤」—— 模型拿到它不知道"推进"用哪个工具、推到哪一步，
- * 往往重试同一调用或猜 `confirm_step(step=...)`。`set_condition` 的步骤面只有 `QUERY_COND`
- * （与后端 `@ToolScope("task:EXPORT/QUERY_COND")` 同源），错步多发生在 `SELECT_DEFS` 批里抢跑，
- * 故只给这一个动作点名工具与目标步骤。**其它动作沿用通用文案，一字不动**（不泛化）。
- *
- * 注意：这条指引只解释"该先做什么"，**不是**自动跨步 —— 守卫命中时仍直接拒绝，
- * `set_condition` 绝不自己调 `confirm_step`，也不自己改工作区步骤。
- */
+/** 错步时只指出下一动作，不替调用方自动推进。 */
 const WORKSPACE_ACTION_STEP_HINT: Readonly<Record<string, string>> = {
-  set_condition: '请先调用 confirm_step 推进到 QUERY_COND（不传 step，只前进一步），下一批再调用 set_condition。'
+  set_conditions: '请先调用 confirm_step 推进到 QUERY_COND（不传 step，只前进一步），下一批再调用 set_conditions。'
 }
 
 /** 步骤不符提示：登记过的动作给专属指引，其余保持既有通用文案。 */
@@ -1556,11 +1527,28 @@ async function runWorkspaceAction(
   if (gate) {
     return gate
   }
+  if (action.name === 'set_conditions' && normalizeConditionBatch(args) === null) {
+    return makeExecution({
+      outcome: 'failed',
+      availability: 'unavailable',
+      result: `${action.displayName}的参数不完整：${missingArgsHint(action.name, WORKSPACE_ACTION_REQUIRED_ARGS)}`
+    })
+  }
 
   for (const handlerName of action.handlerNames) {
     const handler = getPageHandler(handlerName)
     if (handler) {
-      return await runPageHandler(handlerName, handler, normalizeActionArgs(action, args), action.displayName, lifetime)
+      const execution = await runPageHandler(
+        handlerName,
+        handler,
+        normalizeActionArgs(action, args),
+        action.displayName,
+        lifetime
+      )
+      if (action.name === 'set_conditions' && execution.outcome === 'ok' && lifetime.abandoned !== true) {
+        workspace.touch(execution.result, 'AI')
+      }
+      return execution
     }
   }
 
@@ -1589,9 +1577,8 @@ function normalizeActionArgs(action: WorkspaceAction, args: Record<string, unkno
   switch (action.name) {
     case 'select_definitions':
       return { defCodes: toStringList(args.codes ?? args.defCodes), mode: args.mode === 'ADD' ? 'ADD' : 'REPLACE' }
-    case 'set_condition':
-      // R5：原样透传（不补 {}）—— 漏参由页面 handler 显式拒绝，绝不替调用方清空
-      return { defCode: args.defCode ?? '', conditions: args.conditions }
+    case 'set_conditions':
+      return { items: args.items }
     case 'confirm_step':
       return { step: args.step ?? '' }
     default:
@@ -1611,18 +1598,6 @@ function toNumber(value: unknown): number | null {
   }
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) ? parsed : null
-}
-
-/**
- * `conditions` 是否**显式提供**（`{}` 算提供；缺键 / `undefined` / `null` 都不算）。
- *
- * 为什么必须区分：`conditions` 是设置条件的**必填载荷**，只有显式 `{}` 才表示清空条件。
- * 用 `args.conditions ?? {}` 兜底会把一次漏参静默变成清空（= 导出全量）。
- */
-function hasExplicitConditionPayload(args: Record<string, unknown>): boolean {
-  return Object.prototype.hasOwnProperty.call(args, 'conditions')
-    && args.conditions !== undefined
-    && args.conditions !== null
 }
 
 const EMPTY_STRING_LIST: readonly string[] = Object.freeze([])
@@ -2068,11 +2043,8 @@ function toUiEvent(name: UiEvent['type'], args: Record<string, unknown>): UiEven
         : null
     }
     case 'set_conditions': {
-      const defCode = args.defCode
-      // R5：`conditions` 必填（缺参 → null → 参数不完整失败，不补 {} 当清空）
-      return typeof defCode === 'string' && defCode !== '' && hasExplicitConditionPayload(args)
-        ? { type: 'set_conditions', defCode, conditions: args.conditions }
-        : null
+      const items = normalizeConditionBatch(args)
+      return items === null ? null : { type: 'set_conditions', items }
     }
     case 'set_import_mode': {
       const mode = args.mode

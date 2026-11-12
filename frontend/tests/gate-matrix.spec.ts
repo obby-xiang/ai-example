@@ -167,7 +167,7 @@ describe('C7-02 只读任务：五条写事件 + 跳步骤一律拒执、零 API
 
     const cases: Array<{ event: UiEvent; expect: string }> = [
       { event: { type: 'select_defs', task: 'export', defCodes: ['A', 'B'] }, expect: '未变更所选配置项' },
-      { event: { type: 'set_conditions', defCode: 'A', conditions: {} }, expect: '未设置查询条件' },
+      { event: { type: 'set_conditions', items: [{ defCode: 'A', conditions: {} }] }, expect: '未设置查询条件' },
       { event: { type: 'set_import_mode', mode: 'MERGE' }, expect: '未变更导入模式' },
       { event: { type: 'run_job', jobType: 'EXPORT', taskId: 7 }, expect: '未启动作业' },
       { event: { type: 'cancel_job', jobId: 11 }, expect: '未取消作业' }
