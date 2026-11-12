@@ -138,7 +138,7 @@ class AiControllerHistoryPayloadTest {
 	@Test
 	void syntheticSummaryIsPresentedAsAssistantInsteadOfAUserMessage() throws Exception {
 		AssistantMessage summary = AssistantMessage.builder()
-			.content(SyntheticMessages.SUMMARY_PLACEHOLDER)
+			.content(com.example.configmgr.ai.context.RollingSummarizer.SUMMARY_PREFIX)
 			.properties(Map.of("origin", "COMPACTION_SUMMARY", SyntheticMessages.COMPACTED_FROM, 42,
 					ResilientChatService.REASONING_METADATA_KEY, "压缩过程的内部思考"))
 			.build();
@@ -148,7 +148,7 @@ class AiControllerHistoryPayloadTest {
 		this.mockMvc.perform(get("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.messages[0].type").value("ASSISTANT"))
-			.andExpect(jsonPath("$.data.messages[0].text").value(SyntheticMessages.SUMMARY_PLACEHOLDER))
+			.andExpect(jsonPath("$.data.messages[0].text").value(com.example.configmgr.ai.context.RollingSummarizer.SUMMARY_PREFIX))
 			.andExpect(jsonPath("$.data.messages[0].synthetic").doesNotExist())
 			.andExpect(jsonPath("$.data.messages[0].origin").doesNotExist())
 			.andExpect(jsonPath("$.data.messages[0].reasoningContent").doesNotExist())
@@ -185,7 +185,7 @@ class AiControllerHistoryPayloadTest {
 	@Test
 	void syntheticEntryDoesNotExposeReasoningOrInternalMetadata() throws Exception {
 		AssistantMessage synthetic = AssistantMessage.builder()
-			.content(SyntheticMessages.SUMMARY_PLACEHOLDER)
+			.content(com.example.configmgr.ai.context.RollingSummarizer.SUMMARY_PREFIX)
 			.properties(Map.of("origin", "COMPACTION_SUMMARY", SyntheticMessages.COMPACTED_FROM, 42,
 					ResilientChatService.REASONING_METADATA_KEY, "压缩过程的内部思考"))
 			.build();
@@ -194,7 +194,7 @@ class AiControllerHistoryPayloadTest {
 		this.mockMvc.perform(get("/api/ai/history/s-1"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data.messages[0].type").value("ASSISTANT"))
-			.andExpect(jsonPath("$.data.messages[0].text").value(SyntheticMessages.SUMMARY_PLACEHOLDER))
+			.andExpect(jsonPath("$.data.messages[0].text").value(com.example.configmgr.ai.context.RollingSummarizer.SUMMARY_PREFIX))
 			.andExpect(jsonPath("$.data.messages[0].synthetic").doesNotExist())
 			.andExpect(jsonPath("$.data.messages[0].origin").doesNotExist())
 			.andExpect(jsonPath("$.data.messages[0].reasoningContent").doesNotExist())

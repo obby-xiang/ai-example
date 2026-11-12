@@ -14,6 +14,7 @@ import com.example.configmgr.ai.context.ContextState;
 import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.context.SystemMessages;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.observe.AiTrace;
@@ -43,7 +44,6 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -1690,10 +1690,10 @@ public class ResumeService {
             return resumeStatusWriteRefused(state.runId, state.body);
         }
         state.conditionInstruction = state.enteredQueryCond && handoff
-                ? new UserMessage(com.example.configmgr.ai.history.SyntheticMessages.EXPORT_CORRECTION_PREFIX
+                ? SyntheticMessages.internalUser(SyntheticMessages.EXPORT_CORRECTION_PREFIX
                 + "当前只处理筛选条件：需要字段信息时调用 get_config_def；用户已给条件时调用 set_condition；"
-                + "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。")
-                : null;
+                + "用户未给条件时调用 confirm_step，由宿主收集一次。不要用正文解释或反问代替这些动作。",
+                SyntheticMessages.Kind.CORRECTION, "condition-handoff") : null;
         return null;
     }
 

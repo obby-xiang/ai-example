@@ -1,5 +1,8 @@
 package com.example.configmgr.ai.run;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
@@ -56,8 +59,17 @@ class TerminalTranscriptRecoveryTest {
 
     private int removeCalls;
 
+    private final Logger recoveryLogger = (Logger) org.slf4j.LoggerFactory.getLogger(ResilientChatService.class);
+
+    private final Logger emitterLogger = (Logger) org.slf4j.LoggerFactory.getLogger(SseChatEmitter.class);
+
+    private final ListAppender<ILoggingEvent> recoveryLogs = new ListAppender<>();
+
     @BeforeEach
     void setUp() {
+        this.recoveryLogs.start();
+        this.recoveryLogger.addAppender(this.recoveryLogs);
+        this.emitterLogger.addAppender(this.recoveryLogs);
         this.store = mock(RunStore.class);
         this.registry = mock(RunRegistry.class);
         this.transcript = mock(ConversationTranscriptStore.class);
@@ -86,6 +98,12 @@ class TerminalTranscriptRecoveryTest {
                 new ConversationTranscriptStore.ReadPage(List.copyOf(this.persisted), this.persisted.size(), 1L,
                         null, false, false));
         this.chatService = service(this.store, this.registry);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() {
+        this.recoveryLogger.detachAppender(this.recoveryLogs);
+        this.emitterLogger.detachAppender(this.recoveryLogs);
     }
 
     @Test
@@ -182,6 +200,32 @@ class TerminalTranscriptRecoveryTest {
     }
 
     @Test
+    void hiddenReasoningDoesNotBlockToolRecoveryAndStaysPersisted() {
+        PendingToolCall pending = pending("tool-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(pending));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(pending));
+        AssistantMessage tools = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("tool-1")))
+                .properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "隐藏推理"))
+                .build();
+        SseChatEmitter out = emitter();
+        out.toolStart(pending);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        AiProperties hidden = new AiProperties();
+        hidden.getReasoning().setDisplayEnabled(false);
+        ReflectionTestUtils.setField(this.chatService, "properties", hidden);
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), tools, response("tool-1")), ""));
+
+        assertThat(historyComplete(result)).isTrue();
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recovered.reasoning()).isEqualTo("隐藏推理");
+        assertThat(recovered.segments()).noneMatch(segment -> "reasoning".equals(segment.kind()));
+    }
+
+    @Test
     void lateReasoningAndMultipleToolsRecoverPairingAndSegmentOrder() {
         PendingToolCall first = pending("tool-1");
         PendingToolCall second = pending("tool-2");
@@ -226,13 +270,94 @@ class TerminalTranscriptRecoveryTest {
         RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), first, second, third),
                 "前".repeat(149) + "中".repeat(49) + "独".repeat(392));
         snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-                Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "前")).toMap());
+                Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前")).toMap());
 
         Object result = recover(snapshot);
 
         assertThat(this.persisted).extracting(TranscriptEntry::text)
                 .contains("前".repeat(149), "中".repeat(49), "独".repeat(392));
         assertThat(historyComplete(result)).isTrue();
+    }
+
+    @Test
+    void toolCandidateDoesNotClaimFollowingPlainAssistant() {
+        PendingToolCall pending = pending("tool-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(pending));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(pending));
+        AssistantMessage tools = AssistantMessage.builder().content("工具正文")
+                .toolCalls(List.of(toolCall("tool-1"))).build();
+        AssistantMessage plain = assistant("后续正文", "following-plain");
+        SseChatEmitter out = emitter();
+        emitText(out, "工具正文");
+        out.toolStart(pending);
+        emitText(out, "后续正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), tools, response("tool-1"), plain),
+                "工具正文后续正文"));
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()))
+                .extracting(TranscriptEntry::text).contains("工具正文", "后续正文");
+        TranscriptEntry recoveredTool = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recoveredTool.segments()).allMatch(segment -> segment.text() == null
+                || !"后续正文".equals(segment.text()));
+        assertThat(this.persisted).filteredOn(entry -> "tool".equals(entry.kind())).hasSize(1);
+    }
+
+    @Test
+    void followingReasoningOnlyIsNotClaimedByToolWithoutCorrection() {
+        Object result = recoverFollowingAssistant("", "后续思考", false);
+
+        assertFollowingAssistantIsIndependent(result, "", "后续思考");
+    }
+
+    @Test
+    void followingReasoningOnlyIsNotClaimedByToolWithCorrection() {
+        Object result = recoverFollowingAssistant("", "后续思考", true);
+
+        assertFollowingAssistantIsIndependent(result, "", "后续思考");
+    }
+
+    @Test
+    void followingReasoningAndTextAreNotClaimedByToolWithoutCorrection() {
+        Object result = recoverFollowingAssistant("后续正文", "后续思考", false);
+
+        assertFollowingAssistantIsIndependent(result, "后续正文", "后续思考");
+    }
+
+    @Test
+    void followingReasoningAndTextAreNotClaimedByToolWithCorrection() {
+        Object result = recoverFollowingAssistant("后续正文", "后续思考", true);
+
+        assertFollowingAssistantIsIndependent(result, "后续正文", "后续思考");
+    }
+
+    @Test
+    void toolAssistantRecoversWhenSseContainsCorrectionPrefixMissingFromMessageJson() {
+        PendingToolCall pending = pending("tool-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(pending));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(pending));
+        AssistantMessage tools = AssistantMessage.builder().content("后缀")
+                .toolCalls(List.of(toolCall("tool-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前缀后缀");
+        out.toolStart(pending);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), tools, response("tool-1")), "前缀后缀");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀")).toMap());
+
+        Object result = recover(snapshot);
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.text()).isEqualTo("前缀后缀");
+                    assertThat(entry.toolCalls()).hasSize(1);
+                });
     }
 
     @Test
@@ -270,6 +395,25 @@ class TerminalTranscriptRecoveryTest {
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.appendCalls).isZero();
         assertThat(this.removeCalls).isZero();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=final_text_mismatch"))
+                .noneMatch(line -> line.contains("不一致") || line.contains("正文"));
+    }
+
+    @Test
+    void unresolvedEntryLogsStageAndEntryIdWithoutContent() {
+        SseChatEmitter out = emitter();
+        emitText(out, "SSE正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), assistant("模型正文", "plain")), "SSE正文"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=entry_unresolved")
+                        && line.contains("entryId=" + RUN_ID + ":assistant:text-plain"))
+                .noneMatch(line -> line.contains("SSE正文") || line.contains("模型正文")
+                        || line.contains("incomplete"));
     }
 
     @Test
@@ -281,6 +425,26 @@ class TerminalTranscriptRecoveryTest {
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.appendCalls).isZero();
         assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
+    void archiveReadExceptionLogsOnlySafeScalars() {
+        SseChatEmitter out = emitter();
+        emitText(out, "正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        FrameStore unreadable = mock(FrameStore.class);
+        when(unreadable.readFromWithStatus(anyString(), any(Long.class), any(Integer.class)))
+                .thenThrow(new IllegalStateException("敏感异常原文"));
+        ReflectionTestUtils.setField(out, "frames", unreadable);
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), assistant("正文", "plain")), "正文"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=archive_unreadable"))
+                .noneMatch(line -> line.contains("敏感异常原文") || line.contains("正文"));
+        assertThat(this.recoveryLogs.list).anyMatch(event -> event.getThrowableProxy() != null
+                && "java.lang.IllegalStateException".equals(event.getThrowableProxy().getClassName()));
     }
 
     @Test
@@ -298,6 +462,8 @@ class TerminalTranscriptRecoveryTest {
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.appendCalls).isZero();
         assertThat(this.removeCalls).isZero();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=archive_unreadable"));
     }
 
     @Test
@@ -316,6 +482,8 @@ class TerminalTranscriptRecoveryTest {
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.appendCalls).isZero();
         assertThat(this.removeCalls).isZero();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=tool_pairs_incomplete"));
     }
 
     @Test
@@ -341,6 +509,8 @@ class TerminalTranscriptRecoveryTest {
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.removeCalls).isEqualTo(1);
         assertThat(this.appendCalls).isZero();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=append_failed"));
     }
 
     @Test
@@ -357,6 +527,39 @@ class TerminalTranscriptRecoveryTest {
 
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.appendCalls).isEqualTo(1);
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=append_failed"));
+    }
+
+    @Test
+    void reconcileReadFailureLogsDistinctStage() {
+        SseChatEmitter out = emitter();
+        emitText(out, "正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        when(this.transcript.readPage(anyString(), anyLong(), anyLong(), any(), any())).thenReturn(null);
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), assistant("正文", "plain")), "正文"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=reconcile_failed"));
+    }
+
+    @Test
+    void rereadFailureLogsDistinctStage() {
+        SseChatEmitter out = emitter();
+        emitText(out, "正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        when(this.transcript.readPage(anyString(), anyLong(), anyLong(), any(), any())).thenAnswer(invocation ->
+                reads.getAndIncrement() == 0
+                        ? new ConversationTranscriptStore.ReadPage(List.of(), 0, 1L, null, false, false) : null);
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), assistant("正文", "plain")), "正文"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.recoveryLogs.list).map(ILoggingEvent::getFormattedMessage)
+                .anyMatch(line -> line.contains("stage=reread_failed"));
     }
 
     @Test
@@ -398,6 +601,48 @@ class TerminalTranscriptRecoveryTest {
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.appendCalls).isZero();
         assertThat(this.removeCalls).isZero();
+    }
+
+    private Object recoverFollowingAssistant(String text, String reasoning, boolean correctionActive) {
+        PendingToolCall pending = pending("tool-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(pending));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(pending));
+        AssistantMessage tools = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("tool-1"))).build();
+        AssistantMessage plain = AssistantMessage.builder().content(text)
+                .properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, reasoning,
+                        TranscriptEntries.TRANSCRIPT_TEXT_ID_KEY, "following-plain"))
+                .build();
+        SseChatEmitter out = emitter();
+        out.toolStart(pending);
+        out.reasoningDelta(reasoning);
+        out.reasoningEnd();
+        if (!text.isEmpty()) {
+            emitText(out, text);
+        }
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), tools, response("tool-1"), plain), text);
+        if (correctionActive) {
+            snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                    Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀")).toMap());
+        }
+        return recover(snapshot);
+    }
+
+    private void assertFollowingAssistantIsIndependent(Object result, String text, String reasoning) {
+        assertThat(historyComplete(result)).isTrue();
+        List<TranscriptEntry> assistants = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind())).toList();
+        assertThat(assistants).hasSize(2);
+        TranscriptEntry tool = assistants.stream().filter(entry -> !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(tool.text()).isEmpty();
+        assertThat(tool.reasoning()).isEmpty();
+        TranscriptEntry plain = assistants.stream().filter(entry -> entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(plain.text()).isEqualTo(text);
+        assertThat(plain.reasoning()).isEqualTo(reasoning);
+        assertThat(plain.entryId()).endsWith("following-plain");
     }
 
     private Object recover(RunSnapshot snapshot) {

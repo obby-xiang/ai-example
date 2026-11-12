@@ -36,7 +36,7 @@ class HostFormFullTextTest {
 		RunStore store = mock(RunStore.class);
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of("createTaskCorrectionPrefix", "P")).toMap());
+				Map.of("exportCorrectionPrefix", "P")).toMap());
 		when(store.get(RUN_ID)).thenReturn(snapshot);
 		SseChatEmitter emitter = mock(SseChatEmitter.class);
 		when(emitter.transcriptFullText()).thenReturn("P+A", "P+A+B");

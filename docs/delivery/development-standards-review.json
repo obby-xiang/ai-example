@@ -6728,6 +6728,48 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改摘要文本协议、正文流或编码。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1275确认两项Important均ADDRESSED且无新Critical/Important；施工报告4活动+1排队、日志异常中断、预算/日志和重复关闭独立RED→GREEN，生产clean compile成功；主控未重跑测试，真实模型和Spring停机NOT_RUN。Minor deferred：并发close测试仍需更严格证明两个调用重叠，交DeepSeek仅测试资产跟进。"}
       }
+    },
+    {
+      "fingerprint": "sha256:0581dfe128a87b2ed42dd60a23f7d7b2fef6b257c590d8cb8a7946c7caf3229c",
+      "status": "reviewed",
+      "reason": "逐hunk复核create correction清退、内部消息metadata、原始/模型双视图、转录候选精确归属及展示归一；多轮独立审查发现的问题均已返修并最终通过。",
+      "reviewedAt": "2026-11-12T23:09:46+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1272、施工agent-1262",
+      "specChanges": [
+        {
+          "change": "删除createTaskCorrectionUsed/createTaskCorrectionPrefix及固定正文、旧摘要前缀识别，不做旧run或旧prefix兼容；保留当前exportCorrection。",
+          "reason": "项目未上线，旧create correction与当前统一export correction并存会造成重复正文和错误归属，文本也不应作为内部消息身份。",
+          "impact": "内部指令按origin/kind/messageId识别，真实用户同文保留；RollingSummarizer旧SUMMARY_PLACEHOLDER别名同步删除。"
+        },
+        {
+          "change": "挂起持久历史继续取原始messageJson，规范化前缀只进入模型请求；工具候选按消息边界和预期text/reasoning精确归属。",
+          "reason": "旧实现会把correction片段或后续独立assistant的text/reasoning吞进前一工具，导致AI_TRANSCRIPT_INCOMPLETE或错误恢复成功。",
+          "impact": "correction重复段、后续reasoning-only、reasoning→text及多工具配对均失败可辨，不再用contains或任意占位对账。"
+        },
+        {
+          "change": "工具公开SSE对账与plain assistant统一按displayEnabled归一reasoning，持久化保留原始reasoning；恢复WARN保留Throwable。",
+          "reason": "默认隐藏思考时公开帧没有reasoning，不能据此拒绝正常恢复；脱敏也不能丢失异常因果链。",
+          "impact": "默认隐藏无公开帧可恢复且原始思考不丢，显示开启仍精确对账，日志只含安全标量并保留异常堆栈。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/context/RollingSummarizer.java", "status": "checked", "reason": "删除无生产消费者的SUMMARY_PLACEHOLDER旧名别名，当前SUMMARY_PREFIX保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "内部交棒使用当前metadata化SyntheticMessages，原始持久视图不被规范化前缀污染；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/SyntheticMessages.java", "status": "checked", "reason": "删除固定正文识别和旧摘要占位，内部消息统一origin/kind/messageId，真实用户同文不误删；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/CorrectionPrefixes.java", "status": "checked", "reason": "删除旧create prefix读取/记录/清理分支，当前export prefix及规范化去重保持；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "原始/模型双视图、旧create correction清理、展示归一工具reasoning及恢复异常链完整；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "续跑只保留当前export correction与metadata化内部指令，不恢复旧create键；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "工具候选按边界及预期text/reasoning精确归属，不吞后续独立assistant，恢复日志保留Throwable；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有SyntheticMessages、CorrectionPrefixes、消息metadata和转录对账，无新增依赖、存储或识别框架。"},
+        "java-api-style": {"status": "checked", "reason": "七个生产Java均IDEA Reformat，触及方法规模复核未越界，集合与空值语义保持明确。"},
+        "logging-exception-safety": {"status": "checked", "reason": "恢复日志保留runId/stage/entryId/count等安全标量，ex作为最后Throwable参数，不记录敏感正文。"},
+        "toc-interaction": {"status": "checked", "reason": "修复历史正文与思考归属，避免转录降级提示由可恢复的算法误归属触发，不新增用户提示或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "挂起与续跑保持原始持久视图、精确条目归属和失败关闭，不新增Redis写入或旧协议恢复分支。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "正文和reasoning按消息边界及精确值对账，不按contains或固定文案识别，displayEnabled只影响公开对账不影响原始保存。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1272最终Spec与Task quality均通过，所有Critical/Important/Minor关闭；施工报告create correction删除、双视图、correction开关reasoning矩阵、默认隐藏、合法迟到、多工具、异常链及旧别名独立RED→GREEN，生产编译成功；主控未重跑测试，真实模型、Redis/Cluster、多实例、浏览器及全量测试NOT_RUN。"}
+      }
     }
   ]
 }

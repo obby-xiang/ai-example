@@ -16,8 +16,6 @@ import java.util.Map;
 
 public final class CorrectionPrefixes {
 
-    static final String CREATE_TASK_CORRECTION_PREFIX_KEY = "createTaskCorrectionPrefix";
-
     static final String EXPORT_CORRECTION_PREFIX_KEY = "exportCorrectionPrefix";
 
     private CorrectionPrefixes() {
@@ -44,10 +42,7 @@ public final class CorrectionPrefixes {
                 return "";
             }
             Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
-            Object value = extra == null ? null : extra.get(CREATE_TASK_CORRECTION_PREFIX_KEY);
-            if (value == null && extra != null) {
-                value = extra.get(EXPORT_CORRECTION_PREFIX_KEY);
-            }
+            Object value = extra == null ? null : extra.get(EXPORT_CORRECTION_PREFIX_KEY);
             return ObjectUtils.toString(value, "");
         } catch (RuntimeException ex) {
             throw normalizationFailure(ex);
@@ -65,8 +60,7 @@ public final class CorrectionPrefixes {
             }
             AiContext current = AiContext.fromMap(snapshot.getContext());
             Map<String, Object> extra = current.getExtra() == null ? Map.of() : current.getExtra();
-            if (!extra.containsKey(CREATE_TASK_CORRECTION_PREFIX_KEY)
-                    && !extra.containsKey(EXPORT_CORRECTION_PREFIX_KEY)) {
+            if (!extra.containsKey(EXPORT_CORRECTION_PREFIX_KEY)) {
                 return;
             }
             Map<String, Object> updated = new LinkedHashMap<>(extra);
@@ -130,14 +124,18 @@ public final class CorrectionPrefixes {
         if (StringUtils.isEmpty(text) || StringUtils.isEmpty(prefix) || !text.startsWith(prefix + prefix)) {
             return text;
         }
-        return text.substring(prefix.length());
+        return prefix + stripLeadingCorrectionPrefix(text, prefix);
     }
 
     static String stripLeadingCorrectionPrefix(String text, String prefix) {
-        if (StringUtils.isEmpty(text) || StringUtils.isEmpty(prefix) || !text.startsWith(prefix)) {
+        if (StringUtils.isEmpty(text) || StringUtils.isEmpty(prefix)) {
             return text;
         }
-        return text.substring(prefix.length());
+        int suffixStart = 0;
+        while (text.startsWith(prefix, suffixStart)) {
+            suffixStart += prefix.length();
+        }
+        return text.substring(suffixStart);
     }
 
     static final class StreamState {

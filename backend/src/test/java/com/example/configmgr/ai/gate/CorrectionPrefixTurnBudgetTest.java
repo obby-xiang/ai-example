@@ -98,7 +98,7 @@ class CorrectionPrefixTurnBudgetTest {
         this.snapshot.setModelId("test-model");
         this.snapshot.setMessageJson(this.codec.serializeAll(correctionHistory()));
         this.snapshot.setContext(AiContext.of("tasks", null, null, null, null,
-                Map.of("createTaskCorrectionPrefix", PREFIX)).toMap());
+                Map.of("exportCorrectionPrefix", PREFIX)).toMap());
         this.properties.getContext().setReserveTokens(0);
         this.properties.getContext().setL1Percent(70);
         this.properties.getContext().setL3Percent(95);
@@ -126,6 +126,42 @@ class CorrectionPrefixTurnBudgetTest {
     @AfterEach
     void tearDown() {
         this.manager.shutdown();
+    }
+
+    @Test
+    void consecutiveSuspensionsPersistOriginalHistoryInsteadOfNormalizedPrompt() {
+        List<Message> model = CorrectionPrefixes.historyWithSingleCorrectionPrefix(correctionHistory(), PREFIX);
+        when(this.toolRegistry.channelOf(TOOL)).thenReturn(ToolMeta.Channel.FRONTEND);
+        when(this.gate.awaitFrontendResult(anyString(), any(PendingToolCall.class))).thenAnswer(invocation -> {
+            PendingToolCall pending = invocation.getArgument(1);
+            pending.setStatus(PendingToolCall.FRONTEND_RESULT);
+            pending.setOutcome(ToolOutcome.OK.wire());
+            pending.setResultText("前端已执行");
+            return pending;
+        });
+        List<List<Message>> suspendedHistories = new ArrayList<>();
+        doAnswer(invocation -> {
+            suspendedHistories.add(new ArrayList<>(invocation.getArgument(4)));
+            return null;
+        }).when(this.store).saveSuspended(anyString(), any(), any(), anyList(), anyList(), any(), any());
+
+        ToolExecutionResult first = this.manager.executeToolCalls(prompt(model), responseWithoutUsage());
+        ToolExecutionResult second = this.manager.executeToolCalls(prompt(model), responseWithoutUsage());
+        this.snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of("exportCorrectionPrefix", PREFIX)).toMap());
+        ToolExecutionResult export = this.manager.executeToolCalls(prompt(model), responseWithoutUsage());
+
+        assertThat(suspendedHistories).hasSize(3);
+        for (List<Message> suspended : suspendedHistories) {
+            assertThat(textOfToolCall(suspended, "create-1")).isEqualTo(PREFIX + SUFFIX);
+            assertThat(suspended).anyMatch(message -> message instanceof ToolResponseMessage tool
+                    && tool.getResponses().stream().anyMatch(response -> "create-1".equals(response.id())));
+            assertThat(suspended).anyMatch(message -> message instanceof ToolResponseMessage tool
+                    && tool.getResponses().stream().anyMatch(response -> "old-1".equals(response.id())));
+        }
+        assertThat(textOfToolCall(first.conversationHistory(), "create-1")).isEqualTo(SUFFIX);
+        assertThat(textOfToolCall(second.conversationHistory(), "create-1")).isEqualTo(SUFFIX);
+        assertThat(textOfToolCall(export.conversationHistory(), "create-1")).isEqualTo(SUFFIX);
     }
 
     @Test

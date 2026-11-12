@@ -57,9 +57,6 @@ public final class RollingSummarizer {
 	/** 摘要消息的固定前缀（前端/E2E 以它识别压缩摘要；本批不改变这个前缀）。 */
 	public static final String SUMMARY_PREFIX = "[上下文压缩摘要]";
 
-	/** 旧名保留（既有调用点/用例引用）。 */
-	public static final String SUMMARY_PLACEHOLDER = SUMMARY_PREFIX;
-
 	/** 摘要正文的定界开标签。 */
 	public static final String SUMMARY_OPEN = "<conversation_summary>";
 

@@ -1688,10 +1688,6 @@ public class ResilientChatService {
      *
      * @return {@code true} = 退避期读到取消（调用方必须走取消收尾）；{@code false} = 可以继续下一次尝试
      */
-    static final String CREATE_TASK_CORRECTION_MARKER = "createTaskCorrectionUsed";
-
-    static final String CREATE_TASK_CORRECTION_PREFIX_KEY = CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY;
-
     /**
      * 导出收尾的一轮内部纠正判据（Task 1 第 5 项）。
      *
@@ -1787,7 +1783,6 @@ public class ResilientChatService {
         }
         Map<String, Object> extra = new LinkedHashMap<>(current.getExtra());
         extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
-        extra.remove(CREATE_TASK_CORRECTION_PREFIX_KEY);
         extra.remove(CorrectionPrefixes.PARKED_FULL_TEXT_KEY);
         extra.remove(CorrectionPrefixes.PENDING_SEGMENT_KEY);
         snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
@@ -1831,11 +1826,6 @@ public class ResilientChatService {
      */
     boolean exportCorrectionAlreadyUsed(String runId) {
         return correctionAlreadyUsed(runId, EXPORT_CORRECTION_MARKER);
-    }
-
-    /** 旧 create_task 纠正标记仍参与既有 run 的 transcript 恢复，不再触发新的 create 纠正。 */
-    private static boolean isCreateTaskCorrectionMarked(RunSnapshot snapshot) {
-        return isCorrectionMarked(snapshot, CREATE_TASK_CORRECTION_MARKER);
     }
 
     private static boolean isCorrectionMarked(RunSnapshot snapshot, String marker) {
@@ -1916,7 +1906,6 @@ public class ResilientChatService {
             extra.remove(CorrectionPrefixes.PENDING_SEGMENT_KEY);
             extra.remove(CorrectionPrefixes.PARKED_FULL_TEXT_KEY);
             extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
-            extra.remove(CREATE_TASK_CORRECTION_PREFIX_KEY);
             if (StringUtils.isNotBlank(prefixText)) {
                 extra.put(prefixKey, prefixText);
             }
@@ -2056,7 +2045,8 @@ public class ResilientChatService {
         RunSnapshot snapshot = this.store.get(runId);
         AiContext latest = latestContext(runId, fallbackContext);
         List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
-        history.add(new UserMessage(exportWrapUpCorrection(latest.getTaskId())));
+        history.add(SyntheticMessages.internalUser(exportWrapUpCorrection(latest.getTaskId()),
+                SyntheticMessages.Kind.CORRECTION, "export-wrap-up"));
         Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
         log.info("close correction request: history {} entries (incl. tool messages), type=start_export runId={}",
@@ -3934,14 +3924,26 @@ public class ResilientChatService {
             }
         }
         if (out == null) {
+            if (forceEmitter) {
+                logTerminalRecoveryFailure(runId, "entry_unresolved",
+                        entries.isEmpty() ? null : entries.getFirst().entryId(), entries.size());
+            }
             return forceEmitter ? null : entries;
         }
-        boolean correctionActive = isCreateTaskCorrectionMarked(snapshot)
-                || isCorrectionMarked(snapshot, EXPORT_CORRECTION_MARKER)
+        boolean correctionActive = isCorrectionMarked(snapshot, EXPORT_CORRECTION_MARKER)
                 || StringUtils.isNotEmpty(correctionPrefix(snapshot))
                 || StringUtils.isNotEmpty(CorrectionPrefixes.parkedFullText(snapshot));
-        Map<String, TranscriptEntry.SegmentView> toolSegments = populateAssistantSegments(out, entries, correctionActive);
-        if (toolSegments == null || !isLinkToolSegments(entries, toolSegments)) {
+        Map<String, TranscriptEntry.SegmentView> toolSegments = populateAssistantSegments(out, entries, correctionActive,
+                forceEmitter);
+        if (toolSegments == null) {
+            return null;
+        }
+        if (!isLinkToolSegments(entries, toolSegments)) {
+            if (forceEmitter) {
+                String entryId = entries.stream().filter(entry -> "tool".equals(entry.kind()))
+                        .map(TranscriptEntry::entryId).findFirst().orElse(null);
+                logTerminalRecoveryFailure(runId, "entry_unresolved", entryId, 1);
+            }
             return null;
         }
         return entries;
@@ -3949,12 +3951,16 @@ public class ResilientChatService {
 
     private Map<String, TranscriptEntry.SegmentView> populateAssistantSegments(SseChatEmitter out,
                                                                                List<TranscriptEntry> entries,
-                                                                               boolean correctionActive) {
+                                                                               boolean correctionActive,
+                                                                               boolean recoveryAttempt) {
         Map<String, TranscriptEntry.SegmentView> toolSegments = new LinkedHashMap<>();
         for (int i = 0; i < entries.size(); i++) {
             TranscriptEntry entry = entries.get(i);
             if ("assistant".equals(entry.kind()) && CollectionUtils.isNotEmpty(entry.toolCalls())
                     && !isToolAssistantPopulated(out, entries, i, toolSegments)) {
+                if (recoveryAttempt) {
+                    logTerminalRecoveryFailure(entry.runId(), "entry_unresolved", entry.entryId(), 1);
+                }
                 return null;
             }
         }
@@ -3972,6 +3978,11 @@ public class ResilientChatService {
             }
         }
         if (!unresolvedPlainEntries.isEmpty()) {
+            if (recoveryAttempt) {
+                TranscriptEntry entry = entries.get(unresolvedPlainEntries.getFirst());
+                logTerminalRecoveryFailure(entry.runId(), "entry_unresolved", entry.entryId(),
+                        unresolvedPlainEntries.size());
+            }
             return null;
         }
         for (int i = claimedPlainEntries.size() - 1; i >= 0; i--) {
@@ -3983,15 +3994,18 @@ public class ResilientChatService {
     private boolean isToolAssistantPopulated(SseChatEmitter out, List<TranscriptEntry> entries, int index,
                                              Map<String, TranscriptEntry.SegmentView> toolSegments) {
         TranscriptEntry entry = entries.get(index);
-        SseChatEmitter.TranscriptContent actual = out.transcriptToolContent(entry.toolCalls());
+        String displayReasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
+        SseChatEmitter.TranscriptContent actual = out.transcriptToolContent(entry.toolCalls(), entry.text(),
+                displayReasoning);
         String text = actual == null ? entry.text() : actual.text();
-        String reasoning = actual == null ? entry.reasoning() : actual.reasoning();
+        String reasoning = actual == null ? displayReasoning : actual.reasoning();
         List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
                 text, reasoning);
         if (CollectionUtils.isEmpty(segments)) {
             return false;
         }
-        entries.set(index, entry.withContent(text, reasoning).withSegments(segments));
+        entries.set(index, entry.withContent(text, entry.reasoning() == null ? reasoning : entry.reasoning())
+                .withSegments(segments));
         for (TranscriptEntry.SegmentView segment : segments) {
             if ("tool".equals(segment.kind()) && segment.toolCallId() != null) {
                 toolSegments.put(segment.toolCallId(), segment);
@@ -4100,29 +4114,60 @@ public class ResilientChatService {
             SseChatEmitter out = terminalRecoveryEmitter(snapshot);
             SseChatEmitter.ArchivedTranscriptTerminal terminal = out.archivedTranscriptTerminal();
             if (!terminal.isReadable()) {
-                return failed;
+                return terminalRecoveryFailure(snapshot, "archive_unreadable", null, 0);
             }
             if (!ErrorCodes.AI_TRANSCRIPT_INCOMPLETE.equals(terminal.errorCode())) {
                 return new TerminalTranscriptRecovery(false, false);
             }
             String archivedText = out.archivedTranscriptFullText();
+            if (archivedText == null) {
+                return terminalRecoveryFailure(snapshot, "archive_unreadable", null, 0);
+            }
             List<Message> history = this.codec.deserializeAll(snapshot.getMessageJson());
-            if (archivedText == null || !StringUtils.equals(snapshot.getFinalText(), archivedText)
-                    || CollectionUtils.isEmpty(history) || !ResumeService.toolPairsComplete(history)
-                    || this.transcript == null || !isPersistAllowed(snapshot.getRunId(), "transcript recovery")) {
-                return failed;
+            TerminalTranscriptRecovery prerequisite = terminalRecoveryPrerequisite(snapshot, archivedText, history);
+            if (prerequisite != null) {
+                return prerequisite;
             }
             this.store.pendings(snapshot.getRunId());
             this.store.ledger(snapshot.getRunId());
             if (!isPurgeAllowed.getAsBoolean()) {
-                return failed;
+                return terminalRecoveryFailure(snapshot, "purge_not_allowed", null, history.size());
             }
             return recoverTerminalEntries(snapshot, history);
         } catch (RuntimeException ex) {
-            log.warn("terminal transcript recovery failed runId={} sessionId={}", snapshot.getRunId(),
-                    snapshot.getSessionId(), ex);
-            return failed;
+            log.warn("terminal transcript recovery stage failed runId={} stage=recovery_exception entryId=- count=0",
+                    snapshot.getRunId(), ex);
+            return new TerminalTranscriptRecovery(true, false);
         }
+    }
+
+    private TerminalTranscriptRecovery terminalRecoveryPrerequisite(RunSnapshot snapshot, String archivedText,
+                                                                     List<Message> history) {
+        if (!StringUtils.equals(snapshot.getFinalText(), archivedText)) {
+            return terminalRecoveryFailure(snapshot, "final_text_mismatch", null,
+                    history == null ? 0 : history.size());
+        }
+        if (CollectionUtils.isEmpty(history)) {
+            return terminalRecoveryFailure(snapshot, "history_empty", null, 0);
+        }
+        if (!ResumeService.toolPairsComplete(history)) {
+            return terminalRecoveryFailure(snapshot, "tool_pairs_incomplete", null, history.size());
+        }
+        if (this.transcript == null || !isPersistAllowed(snapshot.getRunId(), "transcript recovery")) {
+            return terminalRecoveryFailure(snapshot, "write_not_permitted", null, history.size());
+        }
+        return null;
+    }
+
+    private TerminalTranscriptRecovery terminalRecoveryFailure(RunSnapshot snapshot, String stage, String entryId,
+                                                                int count) {
+        logTerminalRecoveryFailure(snapshot.getRunId(), stage, entryId, count);
+        return new TerminalTranscriptRecovery(true, false);
+    }
+
+    private static void logTerminalRecoveryFailure(String runId, String stage, String entryId, int count) {
+        log.warn("terminal transcript recovery stage failed runId={} stage={} entryId={} count={}", runId, stage,
+                StringUtils.defaultIfBlank(entryId, "-"), count);
     }
 
     private boolean hasTerminalRecoveryIdentity(RunSnapshot snapshot) {
@@ -4146,20 +4191,22 @@ public class ResilientChatService {
         }
         EntryReconciliation reconciliation = reconcileTerminalEntries(snapshot.getSessionId(), snapshot, entries);
         if (reconciliation == null) {
-            return new TerminalTranscriptRecovery(true, false);
+            return terminalRecoveryFailure(snapshot, "reconcile_failed", null, entries.size());
         }
         List<TranscriptEntry> expected = terminalEntriesForPersistence(runId, snapshot, reconciliation.entries(), null, false);
         List<TranscriptEntry> persisted = readPersistedEntries(snapshot.getSessionId(), snapshot);
         if (persisted == null) {
-            return new TerminalTranscriptRecovery(true, false);
+            return terminalRecoveryFailure(snapshot, "reread_failed", null, expected.size());
         }
         if (!isRecoveredTranscriptCurrent(expected, persisted)
                 && !appendTerminalEntries(runId, snapshot.getSessionId(), snapshot, entries, null, false, false, true)) {
-            return new TerminalTranscriptRecovery(true, false);
+            return terminalRecoveryFailure(snapshot, "append_failed", null, entries.size());
         }
         persisted = readPersistedEntries(snapshot.getSessionId(), snapshot);
-        return new TerminalTranscriptRecovery(true,
-                persisted != null && isRecoveredTranscriptCurrent(expected, persisted));
+        if (persisted == null || !isRecoveredTranscriptCurrent(expected, persisted)) {
+            return terminalRecoveryFailure(snapshot, "reread_failed", null, expected.size());
+        }
+        return new TerminalTranscriptRecovery(true, true);
     }
 
     private static boolean isRecoveredTranscriptCurrent(List<TranscriptEntry> expected, List<TranscriptEntry> persisted) {

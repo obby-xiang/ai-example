@@ -1152,7 +1152,9 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void persistSuspendedBatch(ToolBatchState state, List<PendingToolCall> pendings) {
         persistToolSteps(state.runId, state.stepsUsed);
-        List<Message> suspendedHistory = SyntheticMessages.withoutCorrectionInstruction(state.prompt.getInstructions());
+        List<Message> suspendedHistory = SyntheticMessages.withoutCorrectionInstruction(
+                CollectionUtils.isEmpty(state.snapshot.getMessageJson()) ? state.prompt.getInstructions()
+                        : this.codec.deserializeAll(state.snapshot.getMessageJson()));
         this.store.saveSuspended(state.runId, state.assistant.getText(), state.out.transcriptFullText(), pendings,
                 suspendedHistory, this.codec, state.assistant.getMetadata());
         if (isSuspendedHopPersisted(state.runId, state.assistant)) {
@@ -1400,8 +1402,8 @@ public class SpToolCallingManager implements ToolCallingManager {
         persistedHistory.add(toolMessage);
         boolean stepWrapped = state.stepsUsed >= state.maxToolSteps;
         if (stepWrapped) {
-            modelHistory.add(new UserMessage(STEP_LIMIT_WRAP_UP));
-            persistedHistory.add(new UserMessage(STEP_LIMIT_WRAP_UP));
+            modelHistory.add(SyntheticMessages.internalUser(STEP_LIMIT_WRAP_UP, SyntheticMessages.Kind.STEP_LIMIT, "step-limit"));
+            persistedHistory.add(SyntheticMessages.internalUser(STEP_LIMIT_WRAP_UP, SyntheticMessages.Kind.STEP_LIMIT, "step-limit"));
         }
         TurnBudgetOutcome budget = applyTurnBudget(state.runId, state.snapshot, state.prompt, chatResponse,
                 state.assistant, modelHistory, persistedHistory, state.budgetArmed, stepWrapped);
@@ -1915,10 +1917,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void applyTurnWrapUp(String runId, TurnBudgetState state, boolean commit) {
         List<Message> wrapped = new ArrayList<>(state.current);
-        wrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
+        wrapped.add(SyntheticMessages.internalUser(TURN_BUDGET_WRAP_UP, SyntheticMessages.Kind.TURN_BUDGET, "turn-budget"));
         state.current = wrapped;
         List<Message> persistedWrapped = new ArrayList<>(state.persistedCurrent);
-        persistedWrapped.add(new UserMessage(TURN_BUDGET_WRAP_UP));
+        persistedWrapped.add(SyntheticMessages.internalUser(TURN_BUDGET_WRAP_UP, SyntheticMessages.Kind.TURN_BUDGET, "turn-budget"));
         state.persistedCurrent = persistedWrapped;
         if (commit) {
             this.beacon.armBudget(runId);

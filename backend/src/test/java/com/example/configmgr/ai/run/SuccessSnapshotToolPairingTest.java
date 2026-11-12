@@ -52,7 +52,7 @@ class SuccessSnapshotToolPairingTest {
 		snapshot.setCreatedAtMs(1L);
 		snapshot.setMessageJson(this.codec.serializeAll(original));
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "前缀后缀")).toMap());
+				Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀后缀")).toMap());
 		RunStore store = mock(RunStore.class);
 		when(store.get(RUN_ID)).thenReturn(snapshot);
 		when(store.isWritePermitted(RUN_ID, "terminal snapshot/memory")).thenReturn(true);

@@ -161,7 +161,9 @@ class ExportWrapUpCorrectionTest {
 	@Test
 	void correctionInstructionIsSyntheticAndNeverTreatedAsRealUserText() {
 		UserMessage real = new UserMessage("创建并导出");
-		UserMessage correction = new UserMessage(ResilientChatService.exportWrapUpCorrection(42L));
+		UserMessage correction = com.example.configmgr.ai.history.SyntheticMessages.internalUser(
+					ResilientChatService.exportWrapUpCorrection(42L),
+					com.example.configmgr.ai.history.SyntheticMessages.Kind.CORRECTION, "export-wrap-up");
 
 		assertThat(com.example.configmgr.ai.history.SyntheticMessages.isSynthetic(correction)).isTrue();
 		assertThat(com.example.configmgr.ai.history.SyntheticMessages.isSynthetic(real)).isFalse();
@@ -171,7 +173,9 @@ class ExportWrapUpCorrectionTest {
 	@Test
 	void withoutCorrectionInstructionKeepsRealUserAndToolChainOnly() {
 		UserMessage real = new UserMessage("创建并导出");
-		UserMessage correction = new UserMessage(ResilientChatService.exportWrapUpCorrection(42L));
+		UserMessage correction = com.example.configmgr.ai.history.SyntheticMessages.internalUser(
+					ResilientChatService.exportWrapUpCorrection(42L),
+					com.example.configmgr.ai.history.SyntheticMessages.Kind.CORRECTION, "export-wrap-up");
 		ToolResponseMessage tool = ToolResponseMessage.builder()
 			.responses(List.of(new ToolResponseMessage.ToolResponse("call-1", "set_condition", "{}")))
 			.build();

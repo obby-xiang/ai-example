@@ -3543,19 +3543,20 @@ public class SseChatEmitter {
         return archived == null ? null : claimedToolTextSegments(archived, text, reasoning);
     }
 
-    public TranscriptContent transcriptToolContent(List<TranscriptEntry.ToolCallView> calls) {
+    public TranscriptContent transcriptToolContent(List<TranscriptEntry.ToolCallView> calls, String text,
+                                                   String reasoning) {
         if (calls == null || calls.isEmpty()) {
             return null;
         }
         List<TranscriptSegment> archived = archivedTranscriptTimeline();
         if (archived != null) {
-            TranscriptContent content = transcriptToolContent(archived, calls);
+            TranscriptContent content = transcriptToolContent(archived, calls, text, reasoning);
             if (content != null) {
                 return content;
             }
         }
         synchronized (this.emitLock) {
-            return transcriptToolContent(this.transcriptTimeline, calls);
+            return transcriptToolContent(this.transcriptTimeline, calls, text, reasoning);
         }
     }
 
@@ -3578,7 +3579,8 @@ public class SseChatEmitter {
             archived = this.frames.readFromWithStatus(this.runId, 0L, 0);
         } catch (RuntimeException ex) {
             if (LogSampling.canAcquire("sse-chat-runtime-catch")) {
-                log.warn("transcript terminal archive read failed runId={}", this.runId, ex);
+                log.warn("transcript terminal archive read failed runId={} stage=archive_read entryId=- count=0",
+                        this.runId, ex);
             }
             return new ArchivedTranscriptTerminal(false, null);
         }
@@ -3696,21 +3698,25 @@ public class SseChatEmitter {
     }
 
     private static TranscriptContent transcriptToolContent(List<TranscriptSegment> timeline,
-                                                           List<TranscriptEntry.ToolCallView> calls) {
-        List<TranscriptSegment> candidate = transcriptToolCandidate(timeline, calls, "x", "x");
+                                                           List<TranscriptEntry.ToolCallView> calls, String text,
+                                                           String reasoning) {
+        List<TranscriptSegment> candidate = transcriptToolCandidate(timeline, calls, text, reasoning);
         if (candidate == null) {
             return null;
         }
-        StringBuilder text = new StringBuilder();
-        StringBuilder reasoning = new StringBuilder();
+        StringBuilder actualText = new StringBuilder();
+        StringBuilder actualReasoning = new StringBuilder();
         for (TranscriptSegment segment : candidate) {
             if ("text".equals(segment.kind)) {
-                text.append(segment.text);
+                actualText.append(segment.text);
             } else if ("reasoning".equals(segment.kind)) {
-                reasoning.append(segment.text);
+                actualReasoning.append(segment.text);
             }
         }
-        return new TranscriptContent(text.toString(), reasoning.toString());
+        if (!StringUtils.equals(actualReasoning.toString(), StringUtils.defaultString(reasoning))) {
+            return null;
+        }
+        return new TranscriptContent(actualText.toString(), actualReasoning.toString());
     }
 
     private List<TranscriptSegment> archivedTranscriptTimeline() {
@@ -3726,8 +3732,10 @@ public class SseChatEmitter {
             try {
                 archived = this.frames.readFromWithStatus(this.runId, 0L, 0);
             } catch (RuntimeException ex) {
-                if (LogSampling.canAcquire("sse-chat-runtime-catch"))
-                    log.warn("transcript timeline archive read failed runId={}", this.runId, ex);
+                if (LogSampling.canAcquire("sse-chat-runtime-catch")) {
+                    log.warn("transcript timeline archive read failed runId={} stage=timeline_read entryId=- count=0",
+                            this.runId, ex);
+                }
                 return null;
             }
             if (archived == null || archived.degraded() || archived.truncated() || archived.frames() == null) {
@@ -3798,7 +3806,9 @@ public class SseChatEmitter {
                     if (isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
                         return candidate;
                     }
-                    candidate.clear();
+                    if (candidate.getLast().kind.equals(segment.kind)) {
+                        candidate.clear();
+                    }
                 }
                 candidate.add(segment);
             }
@@ -3831,12 +3841,22 @@ public class SseChatEmitter {
         int end = last + 1;
         while (end < timeline.size()) {
             TranscriptSegment segment = timeline.get(end);
-            if (segment.entryId != null || "tool".equals(segment.kind)) {
+            if (segment.entryId != null || "tool".equals(segment.kind)
+                    || "text".equals(segment.kind) && timeline.get(end - 1).messageBoundary
+                    || isOtherAssistantReasoning(timeline, end, reasoning)) {
                 break;
             }
             end++;
         }
         return new ArrayList<>(timeline.subList(start, end));
+    }
+
+    private static boolean isOtherAssistantReasoning(List<TranscriptSegment> timeline, int index, String expected) {
+        TranscriptSegment segment = timeline.get(index);
+        if (!"reasoning".equals(segment.kind) || !timeline.get(index - 1).messageBoundary) {
+            return false;
+        }
+        return !StringUtils.defaultString(expected).contentEquals(segment.text);
     }
 
     private static boolean isCompleteTranscriptSegments(List<TranscriptSegment> candidate,

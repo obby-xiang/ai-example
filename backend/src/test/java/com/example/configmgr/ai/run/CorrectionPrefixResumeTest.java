@@ -24,10 +24,34 @@ import static org.mockito.Mockito.when;
 class CorrectionPrefixResumeTest {
 
 	@Test
+	void arbitraryRepeatedPrefixesCollapseToOneWithoutChangingToolOwnership() {
+		String prefix = "前缀";
+		AssistantMessage first = AssistantMessage.builder().content(prefix + prefix + prefix + "一")
+				.toolCalls(List.of(new AssistantMessage.ToolCall("tool-1", "function", "create_task", "{}")))
+				.properties(Map.of("owner", "first")).build();
+		AssistantMessage second = AssistantMessage.builder().content(prefix + prefix + "二")
+				.toolCalls(List.of(new AssistantMessage.ToolCall("tool-2", "function", "start_export", "{}")))
+				.properties(Map.of("owner", "second")).build();
+
+		var normalized = CorrectionPrefixes.historyWithSingleCorrectionPrefix(
+				List.of(new org.springframework.ai.chat.messages.UserMessage("导出"), first, second), prefix);
+
+		assertThat(normalized).hasSize(3);
+		AssistantMessage normalizedFirst = (AssistantMessage) normalized.get(1);
+		AssistantMessage normalizedSecond = (AssistantMessage) normalized.get(2);
+		assertThat(normalizedFirst.getText()).isEqualTo(prefix + "一");
+		assertThat(normalizedSecond.getText()).isEqualTo("二");
+		assertThat(normalizedFirst.getToolCalls()).containsExactlyElementsOf(first.getToolCalls());
+		assertThat(normalizedSecond.getToolCalls()).containsExactlyElementsOf(second.getToolCalls());
+		assertThat(normalizedFirst.getMetadata()).containsEntry("owner", "first");
+		assertThat(normalizedSecond.getMetadata()).containsEntry("owner", "second");
+	}
+
+	@Test
 	void parkedCorrectionRestoresPrefixBeforeNonEmptyToolSuffix() {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "前缀后缀")).toMap());
+				Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀后缀")).toMap());
 		PendingToolCall create = new PendingToolCall();
 		create.setToolCallId("create-1");
 		create.setName(AiToolNames.CREATE_TASK);
@@ -48,7 +72,7 @@ class CorrectionPrefixResumeTest {
 	void parkedCorrectionUsesPersistedFullText() {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "前缀",
+				Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀",
 						"correctionParkedFullText", "前缀后缀")).toMap());
 		PendingToolCall create = new PendingToolCall();
 		create.setToolCallId("create-1");
@@ -70,7 +94,7 @@ class CorrectionPrefixResumeTest {
 	void settledCorrectionUsesParkedFullTextWithoutChangingPrefix() {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "前缀",
+				Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀",
 						"correctionParkedFullText", "前缀后缀")).toMap());
 		ResilientChatService service = new ResilientChatService(mock(AiProviderRegistry.class), mock(ChatMemory.class),
 				new MessageJsonCodec(new ObjectMapper()), mock(RunStore.class), mock(RunRegistry.class),
@@ -91,7 +115,7 @@ class CorrectionPrefixResumeTest {
 	void settledCorrectionFragmentsAreNotSeededAsUnpersistedText() {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "前缀后缀")).toMap());
+				Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀后缀")).toMap());
 		ResilientChatService service = new ResilientChatService(mock(AiProviderRegistry.class), mock(ChatMemory.class),
 				new MessageJsonCodec(new ObjectMapper()), mock(RunStore.class), mock(RunRegistry.class),
 				mock(ToolRegistry.class), mock(ContextBuilder.class), mock(AiSessionService.class), new AiProperties(),
@@ -129,7 +153,7 @@ class CorrectionPrefixResumeTest {
 	void multipleParkedSegmentsDoNotUseTriggerPendingSegment() {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "触",
+				Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "触",
 						CorrectionPrefixes.PENDING_SEGMENT_KEY, "触")).toMap());
 
 		CorrectionPrefixes.recordParkedFullText(snapshot, "第一段");
@@ -144,10 +168,38 @@ class CorrectionPrefixResumeTest {
 	}
 
 	@Test
+	void legacyCreateCorrectionKeysAreIgnoredWithoutCleanupWhileExportRemainsActive() {
+		java.util.Map<String, Object> mixedExtra = new java.util.LinkedHashMap<>();
+		mixedExtra.put("createTaskCorrectionUsed", true);
+		mixedExtra.put("createTaskCorrectionPrefix", "旧create前缀");
+		mixedExtra.put(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "export前缀");
+		RunSnapshot mixed = new RunSnapshot();
+		mixed.setContext(AiContext.of("export", "EXPORT", null, null, mixedExtra).toMap());
+
+		assertThat(CorrectionPrefixes.correctionPrefix(mixed)).isEqualTo("export前缀");
+		ReflectionTestUtils.invokeMethod(ResilientChatService.class, "clearExportCorrectionPrefix", mixed);
+		java.util.Map<String, Object> cleared = AiContext.fromMap(mixed.getContext()).getExtra();
+		assertThat(cleared).containsEntry("createTaskCorrectionUsed", true)
+				.containsEntry("createTaskCorrectionPrefix", "旧create前缀")
+				.doesNotContainKey(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY);
+
+		RunSnapshot legacyOnly = new RunSnapshot();
+		legacyOnly.setContext(AiContext.of("export", "EXPORT", null, null,
+				Map.of("createTaskCorrectionUsed", true, "createTaskCorrectionPrefix", "旧create前缀")).toMap());
+		assertThat(CorrectionPrefixes.correctionPrefix(legacyOnly)).isEmpty();
+		CorrectionPrefixes.recordParkedFullText(legacyOnly, "不得持久化");
+		assertThat(CorrectionPrefixes.parkedFullText(legacyOnly)).isEmpty();
+		assertThat(AiContext.fromMap(legacyOnly.getContext()).getExtra())
+				.containsEntry("createTaskCorrectionUsed", true)
+				.containsEntry("createTaskCorrectionPrefix", "旧create前缀")
+				.doesNotContainKey(CorrectionPrefixes.PARKED_FULL_TEXT_KEY);
+	}
+
+	@Test
 	void newCorrectionDoesNotInheritPreviousParkedFullText() {
 		RunSnapshot snapshot = new RunSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
-				Map.of(CorrectionPrefixes.CREATE_TASK_CORRECTION_PREFIX_KEY, "旧前缀",
+				Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "旧前缀",
 						CorrectionPrefixes.PENDING_SEGMENT_KEY, "旧段",
 						CorrectionPrefixes.PARKED_FULL_TEXT_KEY, "旧完整正文")).toMap());
 		RunStore store = mock(RunStore.class);
