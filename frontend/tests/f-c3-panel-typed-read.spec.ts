@@ -172,6 +172,17 @@ describe('F-C3 · 恢复错误只认 historyError / currentError', () => {
     wrapper.unmount()
   })
 
+  it('历史保存降级使用独立中性文案且不提供人工重试', async () => {
+    const wrapper = await mountPanel([textMessage()], {
+      manualRecovery: { scope: 'history', reason: 'transcript-degraded', error: null }
+    })
+    const bar = wrapper.find('[data-testid="alert-history-error"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('已保留当前内容，部分历史记录未能自动恢复。')
+    expect(bar.find('[data-testid="retry-history"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('currentError 直读：重试走真实 retryRestoreSnapshot', async () => {
     const store = useAiStore()
     const restore = vi.spyOn(store, 'retryRestoreSnapshot').mockResolvedValue(undefined)

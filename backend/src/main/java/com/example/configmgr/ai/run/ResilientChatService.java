@@ -81,11 +81,13 @@ import reactor.core.publisher.Flux;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -4035,11 +4037,16 @@ public class ResilientChatService {
 
     private List<TranscriptEntry> completeTimeline(String runId, RunSnapshot snapshot, List<TranscriptEntry> entries,
                                                    boolean terminalAttempt) {
+        return completeTimeline(runId, snapshot, entries, terminalAttempt, false);
+    }
+
+    private List<TranscriptEntry> completeTimeline(String runId, RunSnapshot snapshot, List<TranscriptEntry> entries,
+                                                   boolean terminalAttempt, boolean forceEmitter) {
         SseChatEmitter out;
         try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
             out = this.registry.find(runId);
         }
-        boolean requiresTimeline = entries.stream()
+        boolean requiresTimeline = forceEmitter || entries.stream()
                 .anyMatch(entry -> "tool".equals(entry.kind()) || ("assistant".equals(entry.kind())
                         && CollectionUtils.isNotEmpty(entry.toolCalls())));
         if (requiresTimeline && out == null) {
@@ -4048,7 +4055,7 @@ public class ResilientChatService {
             }
         }
         if (out == null) {
-            return entries;
+            return forceEmitter ? null : entries;
         }
         boolean correctionActive = isCreateTaskCorrectionMarked(snapshot)
                 || isCorrectionMarked(snapshot, EXPORT_CORRECTION_MARKER)
@@ -4197,29 +4204,131 @@ public class ResilientChatService {
         return true;
     }
 
+    TerminalTranscriptRecovery recoverTerminalTranscript(RunSnapshot snapshot) {
+        return recoverTerminalTranscript(snapshot, () -> true);
+    }
+
+    TerminalTranscriptRecovery recoverTerminalTranscript(RunSnapshot snapshot,
+                                                         java.util.function.BooleanSupplier isPurgeAllowed) {
+        TerminalTranscriptRecovery failed = new TerminalTranscriptRecovery(true, false);
+        if (snapshot == null || !RunSnapshot.DONE.equals(snapshot.getStatus())) {
+            return new TerminalTranscriptRecovery(false, false);
+        }
+        if (!hasTerminalRecoveryIdentity(snapshot)) {
+            return failed;
+        }
+        try {
+            SseChatEmitter out = terminalRecoveryEmitter(snapshot);
+            SseChatEmitter.ArchivedTranscriptTerminal terminal = out.archivedTranscriptTerminal();
+            if (!terminal.isReadable()) {
+                return failed;
+            }
+            if (!ErrorCodes.AI_TRANSCRIPT_INCOMPLETE.equals(terminal.errorCode())) {
+                return new TerminalTranscriptRecovery(false, false);
+            }
+            String archivedText = out.archivedTranscriptFullText();
+            List<Message> history = this.codec.deserializeAll(snapshot.getMessageJson());
+            if (archivedText == null || !StringUtils.equals(snapshot.getFinalText(), archivedText)
+                    || CollectionUtils.isEmpty(history) || !ResumeService.toolPairsComplete(history)
+                    || this.transcript == null || !isPersistAllowed(snapshot.getRunId(), "transcript recovery")) {
+                return failed;
+            }
+            this.store.pendings(snapshot.getRunId());
+            this.store.ledger(snapshot.getRunId());
+            if (!isPurgeAllowed.getAsBoolean()) {
+                return failed;
+            }
+            return recoverTerminalEntries(snapshot, history);
+        } catch (RuntimeException ex) {
+            log.warn("terminal transcript recovery failed runId={} sessionId={}", snapshot.getRunId(),
+                    snapshot.getSessionId(), ex);
+            return failed;
+        }
+    }
+
+    private boolean hasTerminalRecoveryIdentity(RunSnapshot snapshot) {
+        TenantUser identity = RequestContextUtils.currentOrNull();
+        return identity != null && identity.tenantId() == snapshot.getTenantId() && identity.userId() == snapshot.getUserId();
+    }
+
+    private SseChatEmitter terminalRecoveryEmitter(RunSnapshot snapshot) {
+        try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
+            SseChatEmitter out = this.registry.find(snapshot.getRunId());
+            return out == null ? this.registry.of(snapshot.getRunId()) : out;
+        }
+    }
+
+    private TerminalTranscriptRecovery recoverTerminalEntries(RunSnapshot snapshot, List<Message> history) {
+        String runId = snapshot.getRunId();
+        List<TranscriptEntry> entries = buildTerminalEntries(runId, snapshot, history, true);
+        entries = completeTimeline(runId, snapshot, entries, false, true);
+        if (entries == null) {
+            return new TerminalTranscriptRecovery(true, false);
+        }
+        EntryReconciliation reconciliation = reconcileTerminalEntries(snapshot.getSessionId(), snapshot, entries);
+        if (reconciliation == null) {
+            return new TerminalTranscriptRecovery(true, false);
+        }
+        List<TranscriptEntry> expected = terminalEntriesForPersistence(runId, snapshot, reconciliation.entries(), null, false);
+        List<TranscriptEntry> persisted = readPersistedEntries(snapshot.getSessionId(), snapshot);
+        if (persisted == null) {
+            return new TerminalTranscriptRecovery(true, false);
+        }
+        if (!isRecoveredTranscriptCurrent(expected, persisted)
+                && !appendTerminalEntries(runId, snapshot.getSessionId(), snapshot, entries, null, false, false, true)) {
+            return new TerminalTranscriptRecovery(true, false);
+        }
+        persisted = readPersistedEntries(snapshot.getSessionId(), snapshot);
+        return new TerminalTranscriptRecovery(true,
+                persisted != null && isRecoveredTranscriptCurrent(expected, persisted));
+    }
+
+    private static boolean isRecoveredTranscriptCurrent(List<TranscriptEntry> expected, List<TranscriptEntry> persisted) {
+        int persistedIndex = 0;
+        for (TranscriptEntry wanted : expected) {
+            while (persistedIndex < persisted.size()
+                    && !Objects.equals(wanted.entryId(), persisted.get(persistedIndex).entryId())) {
+                persistedIndex++;
+            }
+            if (persistedIndex == persisted.size()
+                    || !isSameRecoveredEntry(wanted, persisted.get(persistedIndex))) {
+                return false;
+            }
+            persistedIndex++;
+        }
+        return !expected.isEmpty();
+    }
+
+    private static boolean isSameRecoveredEntry(TranscriptEntry expected, TranscriptEntry actual) {
+        return recoveredEntryFields(expected).equals(recoveredEntryFields(actual));
+    }
+
+    private static List<Object> recoveredEntryFields(TranscriptEntry entry) {
+        return Arrays.asList(entry.entryId(), entry.kind(), entry.runId(), entry.turnStartedAtMs(), entry.text(),
+                entry.reasoning(), entry.stopped(), entry.truncated(), entry.toolCalls(), entry.toolCallStates(),
+                entry.toolCallId(), entry.name(), entry.kind2(), entry.status(), entry.result(), entry.code(),
+                entry.toolTruncated(), entry.toolStrategy(), entry.toolOriginalChars(), entry.toolReturnedChars(),
+                entry.errorCode(), entry.errorMessage(), entry.outcome(), entry.errorCardKey(), entry.unconfirmed(),
+                entry.segments(), entry.toolCallsPresent(), entry.toolCallStatesPresent(), entry.segmentsPresent(),
+                entry.origin());
+    }
+
+    record TerminalTranscriptRecovery(boolean attempted, boolean historyComplete) {
+    }
+
     private boolean appendTerminalEntries(String runId, String sessionId, RunSnapshot snapshot,
                                           List<TranscriptEntry> entries, String outcomeOverride, boolean unconfirmed, boolean terminalAttempt) {
-        EntryReconciliation reconciliation = reconcileTerminalEntries(sessionId, snapshot, entries);
+        return appendTerminalEntries(runId, sessionId, snapshot, entries, outcomeOverride, unconfirmed, terminalAttempt, false);
+    }
+
+    private boolean appendTerminalEntries(String runId, String sessionId, RunSnapshot snapshot,
+                                          List<TranscriptEntry> entries, String outcomeOverride, boolean unconfirmed,
+                                          boolean terminalAttempt, boolean clearRecoveredErrors) {
+        EntryReconciliation reconciliation = reconcileTerminalEntries(sessionId, snapshot, entries, clearRecoveredErrors);
         if (reconciliation == null) {
             return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_INCOMPLETE);
         }
-        entries = new ArrayList<>(reconciliation.entries());
-        String outcome = ObjectUtils.getIfNull(outcomeOverride, snapshot::getStatus);
-        for (int i = 0; i < entries.size(); i++) {
-            TranscriptEntry entry = entries.get(i);
-            if (!"assistant".equals(entry.kind())) {
-                continue;
-            }
-            String errorCode = unconfirmed ? ErrorCodes.AI_REDIS_UNAVAILABLE : entry.errorCode();
-            String errorMessage = unconfirmed ? messageFor(errorCode) : entry.errorMessage();
-            String errorCardKey = unconfirmed || errorCode != null ? runId : null;
-            entries.set(i, entry.withOutcome(outcome, errorCardKey, unconfirmed, errorCode, errorMessage));
-        }
-        String userText = snapshot.getRequestText();
-        if (StringUtils.isNotBlank(userText)) {
-            entries.add(0, TranscriptEntries.user(runId, snapshot.transcriptUserTurnStartedAtMs(),
-                    snapshot.getTurnStartedAtMs(), userText));
-        }
+        entries = terminalEntriesForPersistence(runId, snapshot, reconciliation.entries(), outcomeOverride, unconfirmed);
         if (entries.isEmpty()) {
             return isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
         }
@@ -4232,8 +4341,36 @@ public class ResilientChatService {
                 snapshot.getRunEpoch()) || isNonRetryableTranscriptFailure(terminalAttempt, ErrorCodes.AI_TRANSCRIPT_WRITE_FAILED);
     }
 
+    private List<TranscriptEntry> terminalEntriesForPersistence(String runId, RunSnapshot snapshot,
+                                                                List<TranscriptEntry> entries, String outcomeOverride,
+                                                                boolean unconfirmed) {
+        List<TranscriptEntry> prepared = new ArrayList<>(entries);
+        String outcome = ObjectUtils.getIfNull(outcomeOverride, snapshot::getStatus);
+        for (int i = 0; i < prepared.size(); i++) {
+            TranscriptEntry entry = prepared.get(i);
+            if (!"assistant".equals(entry.kind())) {
+                continue;
+            }
+            String errorCode = unconfirmed ? ErrorCodes.AI_REDIS_UNAVAILABLE : entry.errorCode();
+            String errorMessage = unconfirmed ? messageFor(errorCode) : entry.errorMessage();
+            String errorCardKey = unconfirmed || errorCode != null ? runId : null;
+            prepared.set(i, entry.withOutcome(outcome, errorCardKey, unconfirmed, errorCode, errorMessage));
+        }
+        String userText = snapshot.getRequestText();
+        if (StringUtils.isNotBlank(userText)) {
+            prepared.add(0, TranscriptEntries.user(runId, snapshot.transcriptUserTurnStartedAtMs(),
+                    snapshot.getTurnStartedAtMs(), userText));
+        }
+        return prepared;
+    }
+
     private EntryReconciliation reconcileTerminalEntries(String sessionId, RunSnapshot snapshot,
                                                          List<TranscriptEntry> entries) {
+        return reconcileTerminalEntries(sessionId, snapshot, entries, false);
+    }
+
+    private EntryReconciliation reconcileTerminalEntries(String sessionId, RunSnapshot snapshot,
+                                                         List<TranscriptEntry> entries, boolean clearRecoveredErrors) {
         List<TranscriptEntry> persistedEntries = readPersistedEntries(sessionId, snapshot);
         if (persistedEntries == null) {
             return null;
@@ -4255,11 +4392,20 @@ public class ResilientChatService {
         Set<String> supersededEntryIds = new LinkedHashSet<>();
         for (TranscriptEntry entry : persistedEntries) {
             if (isPlainAssistant(entry) && !toolEntryIds.contains(entry.entryId())
-                    && isPlainFullyOwnedByTool(entry, toolContentSegments)) {
+                    && isPlainFullyOwnedByTool(entry, toolContentSegments)
+                    || clearRecoveredErrors && isRecoveryErrorEntry(entries, entry)) {
                 supersededEntryIds.add(entry.entryId());
             }
         }
         return new EntryReconciliation(List.copyOf(kept), Set.copyOf(supersededEntryIds));
+    }
+
+    private static boolean isRecoveryErrorEntry(List<TranscriptEntry> recoveredEntries, TranscriptEntry persisted) {
+        if (!"assistant".equals(persisted.kind()) || persisted.errorCode() == null && persisted.errorMessage() == null
+                && persisted.errorCardKey() == null) {
+            return false;
+        }
+        return recoveredEntries.stream().anyMatch(entry -> entry.entryId().equals(persisted.entryId()));
     }
 
     private List<TranscriptEntry> readPersistedEntries(String sessionId, RunSnapshot snapshot) {

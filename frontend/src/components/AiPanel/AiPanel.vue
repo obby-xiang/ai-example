@@ -97,6 +97,7 @@
         <span class="block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ recoveryErrorText() }}</span>
       </div>
       <button
+        v-if="ai.manualRecovery?.reason !== 'transcript-degraded'"
         type="button"
         data-testid="retry-history"
         class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
@@ -1497,7 +1498,7 @@ function recoveryLoadError(): RecoveryLoadError | null {
     return { scope: 'history', label: t('ai.panel.turnUnconfirmed'), detail: t('ai.panel.turnUnconfirmedHint') }
   }
   if (recovery.reason === 'transcript-degraded') {
-    return { scope: 'history', label: t('ai.notice.transcriptDegraded'), detail: t('ai.panel.recoveryGapHint') }
+    return { scope: 'history', label: t('ai.notice.transcriptDegraded'), detail: t('ai.panel.transcriptDegradedHint') }
   }
   if (recovery.reason === 'first-frame') {
     return { scope: 'current', label: t('ai.panel.recoveryFailed'), detail: t('ai.notice.firstFrameTimeout') }

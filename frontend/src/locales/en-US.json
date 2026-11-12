@@ -580,6 +580,7 @@
       "turnUnconfirmedHint": "Your current content is preserved. Please retry.",
       "recoveryGap": "Some content could not be fully restored",
       "recoveryGapHint": "Your current content is preserved. Please retry.",
+      "transcriptDegradedHint": "Your current content is preserved, but some history could not be recovered automatically.",
       "compactionEvent": "Context compacted",
       "compactionEventAria": "Context was compacted here; earlier content is kept as a summary",
       "loadEarlierHistory": "Load earlier conversation",

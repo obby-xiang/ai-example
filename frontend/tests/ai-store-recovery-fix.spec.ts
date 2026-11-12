@@ -18,7 +18,8 @@ const api = vi.hoisted(() => ({
   deleteHistory: vi.fn(),
   frontendToolResult: vi.fn(),
   confirm: vi.fn(),
-  getContext: vi.fn()
+  getContext: vi.fn(),
+  resumeRun: vi.fn()
 }))
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -169,5 +170,108 @@ describe('AI store 恢复与重试收口', () => {
     expect(store.recoveryGap).toMatchObject({ reason: 'snapshot-unavailable' })
     expect(api.cancel).not.toHaveBeenCalled()
     expect(api.frontendToolResult).not.toHaveBeenCalled()
+  })
+
+  it('历史保存降级先补写再对账，只有健康 DONE 清除提示', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-transcript-recovery'
+    store.historyLoaded = true
+    const host = historicalHost()
+    host.code = 'AI_TRANSCRIPT_INCOMPLETE'
+    host.errorCard = buildErrorCard('AI_TRANSCRIPT_INCOMPLETE', 'incomplete')
+    store.lastRoundOutcome = 'error'
+    store.messages = [host]
+    const calls: string[] = []
+    let finishResume: (() => void) | undefined
+    api.resumeRun.mockImplementation(() => {
+      calls.push('resume')
+      return new Promise((resolve) => {
+        finishResume = () => resolve({ resumed: true, historyComplete: true, reason: 'TRANSCRIPT_RECOVERED' })
+      })
+    })
+    api.history.mockImplementation(async () => {
+      calls.push('history')
+      return {
+        sessionId: store.sessionId,
+        count: 1,
+        messages: [{
+          type: 'ASSISTANT',
+          text: '已有正文',
+          runId: 'run-recovery',
+          outcome: 'DONE',
+          segments: [{ kind: 'text', text: '已有正文', seq: 1 }]
+        }]
+      }
+    })
+
+    store.publishTranscriptDegradedRecovery()
+    store.recoverTranscriptDegradedTerminal(host)
+    store.recoverTranscriptDegradedTerminal(host)
+    expect(store.manualRecovery).toMatchObject({ reason: 'transcript-degraded' })
+    expect(host.transcriptDegraded).toBe(true)
+    expect(host.code).toBe('AI_TRANSCRIPT_INCOMPLETE')
+    expect(host.errorCard).not.toBeNull()
+    expect(store.lastRoundOutcome).toBe('error')
+    await vi.waitFor(() => {
+      expect(calls).toEqual(['resume'])
+    })
+    expect(store.manualRecovery).toMatchObject({ reason: 'transcript-degraded' })
+    expect(host.transcriptDegraded).toBe(true)
+    expect(api.resumeRun).toHaveBeenCalledTimes(1)
+    finishResume?.()
+    await vi.waitFor(() => {
+      expect(calls).toEqual(['resume', 'history'])
+    })
+    await vi.waitFor(() => {
+      expect(store.manualRecovery).toBeNull()
+    })
+
+    expect(calls).toEqual(['resume', 'history'])
+    expect(api.resumeRun).toHaveBeenCalledWith('run-recovery')
+    expect(store.messages.find((item) => item.runId === 'run-recovery')?.transcriptDegraded).toBeUndefined()
+  })
+
+  it('历史补写后复读仍降级时保留提示和错误现场', async () => {
+    const store = useAiStore()
+    store.sessionId = 'sess-transcript-recovery-failed'
+    store.historyLoaded = true
+    const host = historicalHost()
+    store.messages = [host]
+    let finishResume: (() => void) | undefined
+    api.resumeRun.mockImplementation(() => new Promise((resolve) => {
+      finishResume = () => resolve({ resumed: false, historyComplete: false, reason: 'ALREADY_DONE' })
+    }))
+    api.history.mockResolvedValue({
+      sessionId: store.sessionId,
+      count: 1,
+      messages: [{
+        type: 'ASSISTANT',
+        text: '已有正文',
+        runId: 'run-recovery',
+        outcome: 'DONE',
+        transcriptDegraded: true,
+        errorCode: 'AI_RUN_FAILED',
+        errorMessage: 'failed',
+        segments: [{ kind: 'text', text: '已有正文', seq: 1 }]
+      }]
+    })
+
+    store.publishTranscriptDegradedRecovery()
+    store.recoverTranscriptDegradedTerminal(host)
+    await vi.waitFor(() => {
+      expect(api.resumeRun).toHaveBeenCalledTimes(1)
+    })
+    expect(store.manualRecovery).toMatchObject({ reason: 'transcript-degraded' })
+    expect(host.transcriptDegraded).toBe(true)
+    finishResume?.()
+    await vi.waitFor(() => {
+      expect(api.resumeRun).toHaveBeenCalledTimes(2)
+      expect(store.manualRecovery).toMatchObject({ reason: 'transcript-degraded' })
+    }, { timeout: 3000 })
+
+    const degraded = store.messages.find((item) => item.runId === 'run-recovery')
+    expect(degraded?.transcriptDegraded).toBe(true)
+    expect(degraded?.code).toBe('AI_RUN_FAILED')
+    expect(degraded?.errorCard).not.toBeNull()
   })
 })

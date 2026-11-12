@@ -580,6 +580,7 @@
       "turnUnconfirmedHint": "已保留当前内容，请重试。",
       "recoveryGap": "部分内容未能完整恢复",
       "recoveryGapHint": "已保留当前内容，请重试。",
+      "transcriptDegradedHint": "已保留当前内容，部分历史记录未能自动恢复。",
       "compactionEvent": "已压缩上下文",
       "compactionEventAria": "此处上下文已压缩，更早的内容以摘要保留",
       "loadEarlierHistory": "加载更早的对话",

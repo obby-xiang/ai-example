@@ -3568,6 +3568,39 @@ public class SseChatEmitter {
         }
     }
 
+    public ArchivedTranscriptTerminal archivedTranscriptTerminal() {
+        FrameStore.ReadResult archived;
+        try {
+            archived = this.frames.readFromWithStatus(this.runId, 0L, 0);
+        } catch (RuntimeException ex) {
+            if (LogSampling.canAcquire("sse-chat-runtime-catch")) {
+                log.warn("transcript terminal archive read failed runId={}", this.runId, ex);
+            }
+            return new ArchivedTranscriptTerminal(false, null);
+        }
+        if (archived == null || archived.degraded() || archived.truncated()
+                || CollectionUtils.isEmpty(archived.frames())) {
+            return new ArchivedTranscriptTerminal(false, null);
+        }
+        Map<String, Object> terminal = archived.frames().getLast();
+        if (terminal == null) {
+            return new ArchivedTranscriptTerminal(false, null);
+        }
+        if (!"error".equals(terminal.get("type"))) {
+            return new ArchivedTranscriptTerminal(true, null);
+        }
+        Object code = terminal.get("code");
+        return new ArchivedTranscriptTerminal(true, code instanceof String value ? value : null);
+    }
+
+    public String archivedTranscriptFullText() {
+        List<TranscriptSegment> archived = archivedTranscriptTimeline();
+        return archived == null ? null : transcriptFullText(archived);
+    }
+
+    public record ArchivedTranscriptTerminal(boolean isReadable, String errorCode) {
+    }
+
     private static String transcriptFullText(List<TranscriptSegment> timeline) {
         StringBuilder text = new StringBuilder();
         for (TranscriptSegment segment : timeline) {
@@ -3757,6 +3790,12 @@ public class SseChatEmitter {
                 }
                 candidate.clear();
             } else {
+                if (!candidate.isEmpty() && candidate.getLast().messageBoundary) {
+                    if (isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
+                        return candidate;
+                    }
+                    candidate.clear();
+                }
                 candidate.add(segment);
             }
         }
@@ -3785,7 +3824,15 @@ public class SseChatEmitter {
                 start = i + 1;
             }
         }
-        return new ArrayList<>(timeline.subList(start, last + 1));
+        int end = last + 1;
+        while (end < timeline.size()) {
+            TranscriptSegment segment = timeline.get(end);
+            if (segment.entryId != null || "tool".equals(segment.kind)) {
+                break;
+            }
+            end++;
+        }
+        return new ArrayList<>(timeline.subList(start, end));
     }
 
     private static boolean isCompleteTranscriptSegments(List<TranscriptSegment> candidate,

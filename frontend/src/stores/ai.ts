@@ -5037,7 +5037,7 @@ export const useAiStore = defineStore('ai', {
       }
       return state.notice
     },
-    /** 恢复在途或持久恢复失败时禁写；已确认终态的 transcript 降级只保留人工重读，不锁新轮。 */
+    /** 恢复在途或持久恢复失败时禁写；已确认终态的 transcript 降级自动补写与对账，不锁新轮。 */
     businessWriteBlocked(state): boolean {
       return state.restoringRecovery || state.manualRecovery !== null
         && state.manualRecovery.reason !== 'transcript-degraded'
@@ -7546,6 +7546,12 @@ export const useAiStore = defineStore('ai', {
       if (pendingAtStart) {
         recordUnconfirmedHistoryFloor(sessionId, pendingAtStart.runId ?? '')
       }
+      if (transcriptDegraded?.runId) {
+        await aiApi.resumeRun(transcriptDegraded.runId)
+      }
+      if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
+        return
+      }
       await this.loadHistory()
       if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
         return
@@ -7570,7 +7576,7 @@ export const useAiStore = defineStore('ai', {
         }
         if (resolved.kind === 'pending') {
           if (pending.transcriptDegraded === true) {
-            this.keepTranscriptDegradedRecovery(true)
+            this.reconcileTranscriptDegradedTerminal(pending, true, unconfirmedHistoryFloor(sessionId, followup.runId))
           } else {
             this.keepUnconfirmedRecovery(true)
           }
@@ -7658,6 +7664,16 @@ export const useAiStore = defineStore('ai', {
       return false
     },
 
+    reconcilePendingTranscriptDegradedTerminal(followup: TerminalHistoryFollowup, publish: boolean): boolean {
+      const message = this.messages.find((item) => item.id === followup.messageId)
+        ?? [...this.messages].reverse().find((item) => item.runId === followup.runId)
+      if (!message) {
+        return this.keepTranscriptDegradedRecovery(publish)
+      }
+      const floor = unconfirmedHistoryFloor(followup.sessionId, followup.runId)
+      return this.reconcileTranscriptDegradedTerminal(message, publish, floor)
+    },
+
     reconcileTranscriptDegradedTerminal(message: ChatMessage, publish: boolean, afterGeneration: number): boolean {
       const runId = message.runId
       const current = this.messages.find((item) => item.id === message.id)
@@ -7666,8 +7682,6 @@ export const useAiStore = defineStore('ai', {
       if (!this.hasRunDone(this.sessionId, runId, afterGeneration)) {
         current.transcriptDegraded = true
         current.unconfirmed = false
-        clearTranscriptErrorPresentation(current)
-        this.lastRoundOutcome = hasOtherFailurePresentation(current) ? 'error' : 'ok'
         if (hasOtherFailurePresentation(current)) {
           this.followupReady = false
         }
@@ -7874,6 +7888,16 @@ export const useAiStore = defineStore('ai', {
       }
       let finalFailurePublished = false
       const scheduled = this.canStartAutoRecovery('history', async () => {
+        if (chain) {
+          const pending = this.resolveTerminalHistoryFollowup(chain)
+          if (pending.kind === 'ready' && pending.message.transcriptDegraded === true
+            && pending.followup.runId !== '') {
+            await aiApi.resumeRun(pending.followup.runId)
+          }
+          if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
+            return true
+          }
+        }
         await this.loadHistory()
         if (!this.isHistoryRecoveryIdentityCurrent(sessionId, targetRunId, targetMessageId)) {
           return true
@@ -7884,10 +7908,10 @@ export const useAiStore = defineStore('ai', {
             return true
           }
           if (resolved.kind === 'pending') {
-            const pending = this.messages.find((item) => item.id === chain.messageId)
-            return pending?.transcriptDegraded === true
-              ? this.keepTranscriptDegradedRecovery(false)
-              : this.keepUnconfirmedRecovery(false)
+            if (this.manualRecovery?.reason === 'transcript-degraded') {
+              return this.reconcilePendingTranscriptDegradedTerminal(chain, false)
+            }
+            return this.keepUnconfirmedRecovery(false)
           }
           const floor = unconfirmedHistoryFloor(sessionId, resolved.followup.runId)
           return resolved.message.transcriptDegraded === true
@@ -7905,9 +7929,8 @@ export const useAiStore = defineStore('ai', {
             return
           }
           if (resolved.kind === 'pending') {
-            const pending = this.messages.find((item) => item.id === chain.messageId)
-            if (pending?.transcriptDegraded === true) {
-              this.keepTranscriptDegradedRecovery(true)
+            if (this.manualRecovery?.reason === 'transcript-degraded') {
+              this.reconcilePendingTranscriptDegradedTerminal(chain, true)
             } else {
               this.keepUnconfirmedRecovery(true)
             }
@@ -7958,11 +7981,17 @@ export const useAiStore = defineStore('ai', {
     recoverTranscriptDegradedTerminal(message: ChatMessage): void {
       message.transcriptDegraded = true
       message.unconfirmed = false
-      clearTranscriptErrorPresentation(message)
-      this.lastRoundOutcome = hasOtherFailurePresentation(message) ? 'error' : 'ok'
       this.followupReady = !hasOtherFailurePresentation(message) && message.recoveryGap !== true
-      // 运行已终态但历史不完整不是可自动收敛的在途故障；保留专用警告和人工重读出口。
       this.publishTranscriptDegradedRecovery()
+      const followup: TerminalHistoryFollowup = {
+        sessionId: this.sessionId,
+        runId: message.runId ?? '',
+        messageId: message.id
+      }
+      recordUnconfirmedHistoryFloor(followup.sessionId, followup.runId)
+      if (!hasTerminalFollowupRecovery(this, followup.runId)) {
+        this.requestTerminalHistoryRecovery(followup)
+      }
     },
 
     hasRunTerminal(runId: string | null | undefined): boolean {

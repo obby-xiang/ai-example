@@ -329,6 +329,14 @@ export function runsCurrent(sessionId: string): Promise<AiRunCurrent> {
   return get<AiRunCurrent>(`/ai/runs/current?sessionId=${encodeURIComponent(sessionId)}`)
 }
 
+export function resumeRun(runId: string): Promise<{
+  resumed: boolean
+  historyComplete?: boolean
+  reason?: string
+}> {
+  return post(`/ai/runs/${encodeURIComponent(runId)}/resume`, undefined)
+}
+
 export const aiApi = {
   createSession,
   tenantUsers,
@@ -343,6 +351,7 @@ export const aiApi = {
   deleteHistory,
   health,
   runsCurrent,
+  resumeRun,
   feedbackSubmit,
   feedbackList
 }

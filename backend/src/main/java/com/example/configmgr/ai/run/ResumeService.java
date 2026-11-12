@@ -23,6 +23,7 @@ import com.example.configmgr.ai.memory.MemoryWindowSnapshot;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.session.SessionGate;
+import com.example.configmgr.ai.session.SessionPurgeGuard;
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
@@ -214,6 +215,9 @@ public class ResumeService {
      */
     @Autowired(required = false)
     private ConversationTranscriptStore transcript;
+
+    @Autowired(required = false)
+    private SessionPurgeGuard sessionPurgeGuard;
 
     /**
      * 模型配置快照（批③ 的 {@code PROVIDER_GONE} 判据）。
@@ -1221,8 +1225,18 @@ public class ResumeService {
             return new ResumeResult(Outcome.NOT_FOUND, Map.of("runId", state.runId, "resumed", false,
                     "reason", "UNKNOWN_RUN", "instanceId", this.store.instanceId()));
         }
-        state.identityScope = RunIdentityScope.open(state.snapshot.getTenantId(), state.snapshot.getUserId());
         state.sessionId = state.snapshot.getSessionId();
+        if (isCrossIdentityTerminalRecovery(state.snapshot)) {
+            state.body.put("runId", state.runId);
+            state.body.put("sessionId", state.sessionId);
+            state.body.put("statusBeforeResume", state.snapshot.getStatus());
+            state.body.put("instanceId", this.store.instanceId());
+            state.body.put("resumed", false);
+            state.body.put("historyComplete", false);
+            state.body.put("reason", "ALREADY_DONE");
+            return new ResumeResult(Outcome.ALREADY_DONE, state.body);
+        }
+        state.identityScope = RunIdentityScope.open(state.snapshot.getTenantId(), state.snapshot.getUserId());
         AiTrace.bind(state.runId, state.sessionId);
         AiTrace.markResumeReason(state.resumeReason);
         try {
@@ -1260,6 +1274,12 @@ public class ResumeService {
         return authorityResumeResult(state);
     }
 
+    private boolean isCrossIdentityTerminalRecovery(RunSnapshot snapshot) {
+        TenantUser identity = RequestContextUtils.currentOrNull();
+        return RunSnapshot.DONE.equals(snapshot.getStatus()) && identity != null
+                && (identity.tenantId() != snapshot.getTenantId() || identity.userId() != snapshot.getUserId());
+    }
+
     private ResumeResult terminalResumeResult(ResumeState state) {
         if (!RunSnapshot.isTerminal(state.snapshot.getStatus())) {
             return null;
@@ -1268,7 +1288,30 @@ public class ResumeService {
         boolean done = RunSnapshot.DONE.equals(state.snapshot.getStatus());
         state.body.put("resumed", false);
         state.body.put("reason", cancelled ? "ALREADY_CANCELLED" : done ? "ALREADY_DONE" : "ALREADY_FAILED");
+        if (done && this.chatService != null) {
+            ResilientChatService.TerminalTranscriptRecovery recovery = this.chatService.recoverTerminalTranscript(
+                    state.snapshot, () -> isTerminalRecoveryPurgeAllowed(state.sessionId));
+            if (recovery.attempted()) {
+                state.body.put("historyComplete", recovery.historyComplete());
+                if (recovery.historyComplete()) {
+                    state.body.put("resumed", true);
+                    state.body.put("reason", "TRANSCRIPT_RECOVERED");
+                }
+            }
+        }
         return new ResumeResult(cancelled ? Outcome.ALREADY_CANCELLED : Outcome.ALREADY_DONE, state.body);
+    }
+
+    private boolean isTerminalRecoveryPurgeAllowed(String sessionId) {
+        if (this.sessionPurgeGuard == null) {
+            return true;
+        }
+        try {
+            return !this.sessionPurgeGuard.isArmed(sessionId);
+        } catch (RuntimeException ex) {
+            log.warn("terminal transcript recovery purge guard unreadable sessionId={} (fail-closed)", sessionId, ex);
+            return false;
+        }
     }
 
     private ResumeResult liveDriverResumeResult(ResumeState state) {

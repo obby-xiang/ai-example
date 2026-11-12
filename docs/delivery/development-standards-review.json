@@ -6210,6 +6210,49 @@
         "unicode-stream-parsing": {"status": "not-affected", "reason": "未修改正文、文本流或编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1248最终APPROVED；同节点/跨master重复键、连接/扫描/拓扑/null cursor超时、结果与游标超限、零匹配工作量均独立单点通过，ClusterSupport 8/8及生产编译成功；真实Cluster、MOVED/ASK和大keyspace实测NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:842e0ef673db65ac1f90d38690ae6c91049f029b421453daed18a2f4084a8fc1",
+      "status": "reviewed",
+      "reason": "逐hunk复核DONE+AI_TRANSCRIPT_INCOMPLETE的确定性转录补写、旧降级元数据清理及健康确认前提示保留；独立审查agent-1247最终APPROVED。",
+      "reviewedAt": "2026-11-12T13:06:55+08:00",
+      "reviewer": "K3.1 Pro主会话、独立审查agent-1247、施工agent-1238",
+      "specChanges": [
+        {
+          "change": "既有resume终态入口仅对DONE且归档末帧为AI_TRANSCRIPT_INCOMPLETE的run执行确定性转录补写，写后必须全页复读确认。",
+          "reason": "既有重读不会创造缺失条目，需要复用权威快照、归档和既有终态投影实现可恢复闭环，而非新造恢复系统。",
+          "impact": "buildTerminalEntries→强制emitter completeTimeline→appendTerminalEntries→全页复读；证据缺失、配对失败、truncated、purge、跨租户、非目标错误码均零预检写且不报成功。"
+        },
+        {
+          "change": "恢复专用append允许对同entryId且带错误元数据的assistant先remove再append，以清除旧AI_TRANSCRIPT_INCOMPLETE标记。",
+          "reason": "普通merge会继承旧errorCode/errorMessage/errorCardKey，导致健康补写仍被判降级。",
+          "impact": "仅恢复路径clearRecoveredErrors=true，普通merge/工具终态吸收不变；remove失败阻断append，append失败不宣称回滚或成功。"
+        },
+        {
+          "change": "transcript-degraded提示与错误现场保留到健康DONE对账完成，并使用独立中性文案且不提供无效重试按钮。",
+          "reason": "原实现会在resume前清除提示，失败时用户无法得知历史未恢复，且共享的请重试提示和按钮无法补写。",
+          "impact": "resume→loadHistory→reconcile→hasRunDone=true后才清除；恢复中、失败及重试耗尽保留提示，其他恢复原因和共享recoveryGapHint不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "预检、强制归档对账、恢复专用remove→append及全页复读均复用既有终态写点，普通merge和工具终态吸收不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "DONE早退接入窄恢复并保留AI availability、身份、租约和purgeGuard，结果明确resumed/historyComplete/reason；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "增加只读归档终态/完整性辅助，correction消息边界和工具后迟到reasoning对账保持；已IDEA Reformat。"},
+        {"path": "frontend/src/api/ai.ts", "status": "checked", "reason": "仅封装既有POST /runs/{runId}/resume，不新增恢复端点或第二套协议。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "transcript-degraded使用独立提示并仅在该原因隐藏无效重试按钮，其他恢复动作不变。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "英文中性说明仅表达部分历史未自动恢复，不包含技术标识或无效重试指引。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "中文提示为已保留当前内容、部分历史未能自动恢复，不伪装成功或引导无效重试。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "复用single-flight/followup和身份代次守卫，恢复前不再清提示，健康DONE才清除，旧终帧不覆盖新健康history；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用resume、终态投影、FrameStore、ConversationTranscriptStore和既有恢复队列，无新增恢复系统、Redis键或依赖。"},
+        "java-api-style": {"status": "checked", "reason": "三个生产Java及ai.ts均按范围格式化；恢复record、结果字段、集合对账和普通merge兼容逐hunk审查。"},
+        "logging-exception-safety": {"status": "checked", "reason": "证据缺失、remove/append失败、purge和跨租户均真实失败，不伪造成功、回滚或健康终帧。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复中不清提示，成功才静默收口，失败仅一条中性说明且无无效按钮，不增加C端技术心智负担。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "runEpoch fencing、purgeGuard、身份作用域、single-flight和代次守卫保持，重复/顺序跨实例恢复幂等，不重跑模型或工具。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "finalText与真实SSE全文精确对账，正文/reasoning/工具段按entryId+seq恢复，不从finalText猜段或从镜像反写。"},
+        "verification-review": {"status": "checked", "reason": "agent-1247最终APPROVED；TerminalTranscriptRecoveryTest 15项含旧降级清理、纯文本、late-reasoning、correction、重复/顺序跨实例、失败关闭全部通过，前端store/AiPanel定向通过，后端编译和前端typecheck/build成功；真实Redis merge、真实模型和Cluster NOT_RUN。"}
+      }
     }
   ]
 }
