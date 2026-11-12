@@ -1,10 +1,9 @@
 /**
- * 批次4 集成返修 / 契约：`buildContext()` 必须**顶楼上报 `taskStatus`**。
+ * 契约：`buildContext()` 必须**顶层上报 `taskStatus`**。
  *
- * 背景：后端 `AiChatRequest.Context` 六组件为 page/taskType/step/taskId/`taskStatus`/extra，
- * 且 `ToolRegistry#forContext` 用 `taskStatus` 做终态收窄（COMPLETED 任务不再披露 `start_export`）。
- * 前端此前把它只放进 `snapshot()`，`buildContext()` 里没有 ⇒ 后端永远拿不到终态，
- * 模型会看到"还能导出"的假入口。本文件锁住"顶层、每轮都带、随服务端快照更新"三条。
+ * 后端 `AiChatRequest.Context` 六组件为 page/taskType/step/taskId/`taskStatus`/extra。
+ * 任务状态是预检与域层使用的真实业务事实，披露面不单独按 COMPLETED 收窄；
+ * 本文件只锁"顶层、每轮都带、随服务端快照更新"三条，不把状态字段当成披露开关。
  *
  * 只驱动真实 store，不挂载页面。
  */
@@ -28,11 +27,11 @@ describe('工作区上下文：taskStatus 顶层上报（与后端 Context 六�
     expect(Object.keys(context).sort()).toEqual(['extra', 'page', 'step', 'taskId', 'taskStatus', 'taskType'])
     // ② 值逐字等于工作区状态
     expect(context.taskStatus).toBe('COMPLETED')
-    // ③ 不得把状态藏进 extra —— 那里没有任何披露/收窄消费点（后端会当未知键丢弃）
+    // ③ 不得把状态藏进 extra —— 后端只认顶层任务状态字段
     expect((context.extra as Record<string, unknown>).taskStatus).toBeUndefined()
   })
 
-  it('任务页的 setTaskStatus 驱动下一轮上下文（COMPLETED 收窄可生效）', () => {
+  it('任务页的 setTaskStatus 更新下一轮上下文中的任务状态', () => {
     const workspace = useWorkspaceStore()
     workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
     expect(workspace.buildContext().taskStatus).toBeNull()
@@ -45,7 +44,7 @@ describe('工作区上下文：taskStatus 顶层上报（与后端 Context 六�
     expect(workspace.recentActions).toHaveLength(actionsBefore)
     expect(workspace.buildContext().taskStatus).toBe('CANCELLED')
 
-    // 解绑任务后回到"无状态"（不做收窄）
+    // 解绑任务后回到状态未知（不单独驱动披露收窄）
     workspace.setTaskStatus(null)
     expect(workspace.buildContext().taskStatus).toBeNull()
   })

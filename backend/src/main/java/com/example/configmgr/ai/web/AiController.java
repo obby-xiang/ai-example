@@ -2544,9 +2544,11 @@ public class AiController {
         // P2：transcript 只存用户面原文，信封里的 code 与截断事实在写入时另存；
         // 读取时按它们还原 userTextCode / 截断五字段 —— 与 chat:mem 的信封路径同形。
         if (StringUtils.isNotBlank(entry.code())) {
-            item.put("responseData", ToolResultUserText.forUser(entry.code(),
-                    item.get("responseData") == null ? null : String.valueOf(item.get("responseData"))));
-            item.put("userTextCode", ToolResultUserText.userTextCode(entry.code()));
+            Map<String, Object> target = item.get("target") instanceof Map<?, ?>
+                    ? this.objectMapper.convertValue(item.get("target"), Map.class) : Map.of();
+            item.put("responseData", ToolResultUserText.forUser(entry.name(), entry.code(),
+                    item.get("responseData") == null ? null : String.valueOf(item.get("responseData")), target));
+            item.put("userTextCode", ToolResultUserText.userTextCode(entry.name(), entry.code(), target));
         }
         if (Boolean.TRUE.equals(entry.toolTruncated())) {
             item.put(TruncationContract.TRUNCATED_FIELD, true);
@@ -2582,10 +2584,13 @@ public class AiController {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id", response.id());
             item.put("name", response.name());
-            String code = envelopeCode(response.responseData());
-            item.put("responseData", ToolResultUserText.forUser(code,
-                    historyMessageText(response.responseData())));
-            item.put("userTextCode", ToolResultUserText.userTextCode(code));
+            EnvelopeDisplayFacts facts = envelopeDisplayFacts(response.responseData());
+            item.put("responseData", ToolResultUserText.forUser(response.name(), facts.code(),
+                    historyMessageText(response.responseData()), facts.target()));
+            item.put("userTextCode", ToolResultUserText.userTextCode(response.name(), facts.code(), facts.target()));
+            if (MapUtils.isNotEmpty(facts.target())) {
+                item.put("target", facts.target());
+            }
             // A10 R-15：模型侧视图截断是**持久事实**（信封五字段），历史通道必须原样透出，
             // 否则刷新后截断角标与 locale hover 消失（帧只活在实时流里）。
             Map<String, Object> truncation = historyTruncation(response.responseData());
@@ -2601,28 +2606,32 @@ public class AiController {
         return out.isEmpty() ? List.of() : out;
     }
 
-    /**
-     * 信封里的机器可读码（非信封/无码为 null）；只用于选择用户摘要，不改写原文。
-     */
-    private String envelopeCode(String responseData) {
+    /** 历史摘要只读信封里的机器码与结构化目标；非信封保持空事实。 */
+    private EnvelopeDisplayFacts envelopeDisplayFacts(String responseData) {
         String json = ToolResultEnvelope.unwrapModelJson(responseData);
         if (!StringUtils.startsWith(StringUtils.trim(json), "{")) {
-            return null;
+            return EnvelopeDisplayFacts.EMPTY;
         }
         try {
             JsonNode node = this.objectMapper.readTree(json);
             if (node == null || !node.isObject() || !isToolResultEnvelope(node)) {
-                return null;
+                return EnvelopeDisplayFacts.EMPTY;
             }
             JsonNode code = node.get("code");
-            return code == null || code.isNull() ? null : code.asText();
+            Map<String, Object> target = node.path("target").isObject()
+                    ? this.objectMapper.convertValue(node.get("target"), Map.class) : Map.of();
+            return new EnvelopeDisplayFacts(code == null || code.isNull() ? null : code.asText(), target);
         } catch (Exception ex) {
             // 展示增强不得让 /history 500：解析失败按"无码"处理，原文照旧
             if (LogSampling.canAcquire("history-envelope-code-parse")) {
                 log.warn("history tool result envelope code parse failed; passing through without code", ex);
             }
-            return null;
+            return EnvelopeDisplayFacts.EMPTY;
         }
+    }
+
+    private record EnvelopeDisplayFacts(String code, Map<String, Object> target) {
+        private static final EnvelopeDisplayFacts EMPTY = new EnvelopeDisplayFacts(null, Map.of());
     }
 
     /**

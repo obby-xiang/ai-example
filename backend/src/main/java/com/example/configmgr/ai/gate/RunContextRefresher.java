@@ -46,8 +46,8 @@ import java.util.Optional;
  * 绝不照抄入参里的 {@code step}（模型可能自报"已跳到 EXPORT"，而域层根本没前进：
  * 步骤决定 {@code start_export} 等工具的披露面，猜错就是把假入口给模型）；</li>
  * <li>以上动作一旦拿到有效 {@code taskId}（{@code confirm_step} 入参没有则沿用当前上下文的），就按
- * {@link TaskService} 的<b>权威值</b>读 {@code type/currentStep/status}（任务状态是披露面"终态收窄"
- * 的判据之一，不能靠猜）；</li>
+ * {@link TaskService} 的<b>权威值</b>读 {@code type/currentStep/status}（任务状态是上下文与域层事实，披露面不单独按 COMPLETED 收窄
+ * 不能靠猜）；</li>
  * <li><b>无 taskId 的导航</b>清掉旧的 {@code taskType/step/taskStatus}（否则新页面仍带着旧任务的
  * 披露面）；<b>换页</b>删掉 {@code extra.uiRegionCount}（旧页的区域数不代表新页）；</li>
  * <li>无变化返回 {@link Optional#empty()} —— 调用方据此跳过写回。</li>

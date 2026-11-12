@@ -37,7 +37,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * （{@code start_export}/{@code start_precheck} 增加 {@code page:tasks}）；</li>
  * <li><b>S4.4e + AR-03 三项</b>：{@code create_task} 的披露范围（任务中心 + 两类向导页，其余页面不披露）
  * 与风险（{@code DANGER}，进确认门）；启动类四个工具一律 {@code DANGER}（确认门，FR-5.3）；
- * 已完成 EXPORT 任务不再披露 {@code start_export}（终态收窄，引导改走下载）；
+ * 任务 COMPLETED 不再单独收窄 {@code start_export}（是否已有成功作业由预检/域层裁决）；
  * {@code set_condition} 的入参 Schema 里必须出现前端契约的内层结构
  * （{@code conditions.fields[].fieldCode/operator/value} + {@code conditions.scopeKeys}），
  * 且<b>不得</b>再出现扁平参数键（前端只读 {@code defCode/conditions}，扁平键会被静默丢弃）。</li>
@@ -389,13 +389,14 @@ class ToolRegistryDisclosureTest {
     }
 
     @Test
-    void completedExportTaskHidesStartExportButKeepsDownload() {
+    void completedExportTaskKeepsStartExportAvailableForJobFactChecks() {
         AiContext completed = AiContext.of("export", "EXPORT", "EXPORT", 1L, "COMPLETED", Map.of());
         AiContext active = AiContext.of("export", "EXPORT", "EXPORT", 1L, "ACTIVE", Map.of());
 
-        assertThat(namesFor(completed)).as("已完成导出任务不再披露再导出入口").doesNotContain("start_export");
+        assertThat(namesFor(completed)).as("任务 COMPLETED 不等于已有成功 EXPORT 作业，披露面不做状态特判")
+                .contains("start_export");
         assertThat(toolRegistry.matchesContext("start_export", completed))
-            .as("披露面与执行面同判据").isFalse();
+            .as("披露面与执行面同判据；是否有成功作业由预检和 JobService 裁决").isTrue();
         assertThat(namesFor(completed)).as("下载/查看已有结果的入口必须保留").contains("download_export_files");
         assertThat(namesFor(active)).as("ACTIVE 任务照旧披露").contains("start_export");
         assertThat(toolRegistry.matchesContext("start_export", active)).isTrue();

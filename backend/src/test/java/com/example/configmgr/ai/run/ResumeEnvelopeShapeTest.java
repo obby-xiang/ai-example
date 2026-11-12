@@ -50,7 +50,7 @@ class ResumeEnvelopeShapeTest {
 
 	private static final String CALL_ID = "call-resume-1";
 
-	private static final String ARGS = "{\"taskId\":7}";
+	private static final String ARGS = "{\"type\":\"EXPORT\",\"openWizard\":false}";
 
 	private static final String MESSAGE = "导入作业已启动（作业 #4242）";
 
@@ -81,6 +81,20 @@ class ResumeEnvelopeShapeTest {
 	private final ResumeService service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 			this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
+	@org.junit.jupiter.api.BeforeEach
+	void bindIdentity() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
+	}
+
+	@org.junit.jupiter.api.AfterEach
+	void closeIdentity() {
+		if (this.identity != null) {
+			this.identity.close();
+		}
+	}
+
 	@Test
 	void resumedToolMessageUsesSameEnvelopeShapeAsFirstRound() {
 		seedSuspendedRun();
@@ -89,6 +103,8 @@ class ResumeEnvelopeShapeTest {
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenReturn(MESSAGE);
 		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
+		when(this.chatService.systemPromptText(any(AiContext.class), org.mockito.ArgumentMatchers.anyBoolean()))
+			.thenReturn("SYSTEM");
 		// 执行器就地执行：让 driveResumed 的入参可被断言（生产上它是异步的，内容不变）
 		doAnswer(invocation -> {
 			invocation.getArgument(0, Runnable.class).run();
@@ -99,7 +115,7 @@ class ResumeEnvelopeShapeTest {
 
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
 		assertThat(result.body()).containsEntry("resumed", true)
-			.containsEntry("promptRoles", List.of("USER", "ASSISTANT", "TOOL"));
+			.containsEntry("promptRoles", List.of("SYSTEM", "USER", "ASSISTANT", "TOOL"));
 
 		RunSnapshot snapshot = this.store.get(RUN_ID);
 		ToolResponseMessage toolMessage = toolMessage(this.codec.deserializeAll(snapshot.getMessageJson()));
@@ -109,7 +125,7 @@ class ResumeEnvelopeShapeTest {
 		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
 		assertThat(envelope.code()).isNull();
 		assertThat(envelope.message()).isEqualTo(MESSAGE);
-		assertThat(envelope.target()).isEqualTo(Map.of("taskId", "7", "jobId", "4242"));
+		assertThat(envelope.target()).isEqualTo(Map.of("taskId", "7", "jobId", "4242", "openWizard", false));
 
 		// 交出去的续跑历史里也必须是同一份信封（不只是落盘的快照）
 		@SuppressWarnings("unchecked")
@@ -121,9 +137,13 @@ class ResumeEnvelopeShapeTest {
 
 	private void seedSuspendedRun() {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		snapshot.setModelId("deepseek-flash");
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.of("export", "EXPORT", "EXPORT", 7L, null).toMap());
-		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("请启动导出"))));
+		snapshot.setMessageJson(this.codec.serializeAll(List.of(
+				new org.springframework.ai.chat.messages.SystemMessage("system"), new UserMessage("请启动导出"))));
 		PendingToolCall inFlight = entry();
 		snapshot.setInFlightToolCalls(new ArrayList<>(List.of(inFlight)));
 		this.store.save(snapshot);
@@ -133,7 +153,7 @@ class ResumeEnvelopeShapeTest {
 	private static PendingToolCall entry() {
 		PendingToolCall pending = new PendingToolCall();
 		pending.setToolCallId(CALL_ID);
-		pending.setName("start_import");
+		pending.setName("create_task");
 		pending.setType("function");
 		pending.setArguments(ARGS);
 		pending.setKind(PendingToolCall.KIND_BACKEND);
@@ -142,16 +162,8 @@ class ResumeEnvelopeShapeTest {
 		pending.setResultText(MESSAGE);
 		pending.setExecuted(true);
 		pending.setExecutedBy("instance-old");
-		assertThat(PendingToolCall.class.getDeclaredFields())
-			.as("跨实例恢复只能来自持久化 createdJobId")
-			.anyMatch(field -> "createdJobId".equals(field.getName()));
-		try {
-			java.lang.reflect.Field field = PendingToolCall.class.getDeclaredField("createdJobId");
-			field.setAccessible(true);
-			field.set(pending, 4242L);
-		} catch (ReflectiveOperationException ex) {
-			throw new AssertionError(ex);
-		}
+		pending.setCreatedTaskId(7L);
+		pending.setCreatedJobId(4242L);
 		return pending;
 	}
 

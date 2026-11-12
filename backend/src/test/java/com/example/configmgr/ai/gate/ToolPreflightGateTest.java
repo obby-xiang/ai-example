@@ -112,8 +112,11 @@ class ToolPreflightGateTest {
 
 	private ExecutorService decisionThread;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.decisionThread = Executors.newSingleThreadExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "preflight-decision");
 			thread.setDaemon(true);
@@ -129,6 +132,8 @@ class ToolPreflightGateTest {
 		when(this.toolRegistry.categoryOf("start_import")).thenReturn(ToolMeta.Category.J);
 		when(this.toolRegistry.categoryOf("check_job_status")).thenReturn(ToolMeta.Category.R);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(AiContext.of("import", "IMPORT", "IMPORT", 7L, null).toMap());
 		this.store.save(snapshot);
 	}
@@ -136,6 +141,9 @@ class ToolPreflightGateTest {
 	@AfterEach
 	void tearDown() {
 		this.decisionThread.shutdownNow();
+		if (this.identity != null) {
+			this.identity.close();
+		}
 	}
 
 	// ── ① 预检不通过：不进确认门 ────────────────────────────────────────────
@@ -358,6 +366,20 @@ class ToolPreflightGateTest {
 			.containsEntry("status", PendingToolCall.SKIPPED)
 			.containsEntry("executed", false);
 		assertThat(String.valueOf(frame.get("result"))).contains("任务 #99").contains("同一轮只允许创建一次任务");
+		assertThat(frame).containsEntry("userTextCode", ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT);
+		assertThat(frame.get("userTextArgs")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+			.containsEntry("taskId", "99");
+		assertThat(frame.get("target")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+			.containsEntry("taskId", "99")
+			.doesNotContainKey("jobId");
+		ToolResultEnvelope envelope = envelope(result);
+		assertThat(envelope.target()).containsEntry("taskId", "99").doesNotContainKey("jobId");
+		assertThat(com.example.configmgr.ai.history.TranscriptEntries.toolCallState(
+				this.store.pending(RUN_ID, CALL_ID), PendingToolCall.SKIPPED))
+			.containsEntry("userTextCode", ToolOutcome.CODE_CREATE_TASK_TURN_LIMIT)
+			.extracting("target").asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+			.containsEntry("taskId", "99")
+			.doesNotContainKey("jobId");
 		assertThat(createTool.invocations.get()).as("被上限挡下的调用绝不执行").isZero();
 		assertThat(this.gate.pendingGates()).isZero();
 	}
@@ -372,6 +394,7 @@ class ToolPreflightGateTest {
 		executed.setStatus(PendingToolCall.EXECUTED);
 		executed.setOutcome(ToolOutcome.OK.wire());
 		executed.setExecuted(true);
+		executed.setCreatedTaskId(99L);
 		this.store.appendLedger(RUN_ID, executed, resultText);
 	}
 

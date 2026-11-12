@@ -26,7 +26,7 @@ import java.util.Map;
  * <li>{@code taskType} 只认 {@code EXPORT}/{@code IMPORT}（{@code Task.TaskType} 全集）；</li>
  * <li>{@code taskId} ≤ 0 视为未提供；</li>
  * <li>{@code taskStatus} 只认 {@code ACTIVE/COMPLETED/CANCELLED/FAILED}（未知值降级为 null =
- *     不做终态收窄）；</li>
+ *     状态未知，不单独按 COMPLETED 收窄披露）；</li>
  * <li>{@code extra} 只留 {@link ContextBuilder#ALLOWED_EXTRA_KEYS}（非白名单键丢弃并计数）
  *     <b>加上</b>两张旁路表：{@link ContextBuilder#TAG_ONLY_EXTRA_KEYS}（只进披露判定、不进模型载荷）
  *     与 {@link ContextBuilder#JUDGE_ONLY_EXTRA_KEYS}（只进槽位判定、值只认布尔）。</li>
@@ -51,7 +51,7 @@ public class ContextFieldGate {
 
 	private static final List<String> TASK_TYPES = List.of("EXPORT", "IMPORT");
 
-	/** 任务状态闭集（与 {@code Task.TaskStatus} 同构）；未知值降级为 null（= 不做终态收窄）。 */
+	/** 任务状态闭集（与 {@code Task.TaskStatus} 同构）；未知值降级为 null（状态未知，不单独按 COMPLETED 收窄披露）。 */
 	private static final List<String> TASK_STATUSES = List.of("ACTIVE", "COMPLETED", "CANCELLED", "FAILED");
 
 	/** 闸后结果：{@code downgraded} > 0 表示有字段被降级（日志/计数用，不含原文）。 */

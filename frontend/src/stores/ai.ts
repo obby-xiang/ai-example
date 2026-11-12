@@ -6270,9 +6270,13 @@ export const useAiStore = defineStore('ai', {
               && state?.code === undefined && part.decidedAt !== undefined && part.submittedValues !== undefined) {
               partStatus = 'succeeded'
             }
+            part.userTextCode = matched?.userTextCode === undefined ? state?.userTextCode : matched.userTextCode
             if (matched) {
               part.result = matched.responseData ?? null
-              part.userTextCode = matched.userTextCode
+              if (matched.target || state?.target) {
+                // 响应与条目按字段互补；条目中的持久化任务事实在同名冲突时保持权威。
+                part.target = { ...(matched.target ?? {}), ...(state?.target ?? {}) }
+              }
               // L-78：历史面的视图（后端按工具名重新派生）随段落位 —— 刷新后卡面仍是表格形态，
               // 而不是回落到旧文本。缺键 = 该工具没有视图投影（与帧内 `resultView` 同一契约）。
               if (matched.resultView) {

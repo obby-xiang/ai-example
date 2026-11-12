@@ -1632,6 +1632,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         pending.setExecutedBy(null);
         pending.setResolvedAtMs(System.currentTimeMillis());
         pending.setResultText(message);
+        pending.setCreatedTaskId(prior.taskId());
         this.store.putPending(runId, pending);
         log.warn("per-turn create_task limit reached; creation refused runId={} toolCallId={} priorTaskId={} idUnknown={}", runId,
                 pending.getToolCallId(), prior.taskId(), prior.idUnknown());
@@ -1641,7 +1642,7 @@ public class SpToolCallingManager implements ToolCallingManager {
     /**
      * 本轮是否已经创建过任务（跨批 / 续跑口径 = 执行台账）。
      *
-     * <p><b>不编造任务号</b>：台账读不到 / 回执里解析不出 {@code #id} 时返回
+     * <p><b>不编造任务号</b>：台账读不到或结构化 {@code createdTaskId} 缺失时返回
      * {@link CreateTaskInRun#unknown()}，文案只说"无法确认本轮是否已创建任务"，绝不输出
      * {@code #-1} 这类伪 ID 让用户去导航，也不断言"一定已创建"。
      */
@@ -3627,7 +3628,7 @@ public class SpToolCallingManager implements ToolCallingManager {
     private String modelData(PendingToolCall pending, String text, ModelWriteBudget budget) {
         String modelJson = ToolResultEnvelope
                 .of(pending.effectiveOutcome(), pending.effectiveCode(), text, pending.getArguments(),
-                        pending.getCreatedJobId())
+                        pending.getCreatedTaskId(), pending.getCreatedJobId())
                 .toModelJson(this.limiter, pending.getName(), budget.nextCapChars());
         budget.consume(modelJson);
         return modelJson;
@@ -3714,7 +3715,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private String modelData(PendingToolCall pending, String text) {
         return ToolResultEnvelope.of(pending.effectiveOutcome(), pending.effectiveCode(), text,
-                pending.getArguments(), pending.getCreatedJobId()).toModelJson(this.limiter, pending.getName());
+                pending.getArguments(), pending.getCreatedTaskId(), pending.getCreatedJobId())
+                .toModelJson(this.limiter, pending.getName());
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────

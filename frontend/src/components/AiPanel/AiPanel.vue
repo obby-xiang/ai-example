@@ -4176,8 +4176,10 @@ function toolResultText(part: ToolPart): string {
     return displayToolResult(part.result)
   }
   const args = userTextArgsOf(part) ?? {}
-  const createdTaskId = code === 'CREATE_TASK_TURN_LIMIT' ? numericArgOf(args, 'taskId') : null
-  const key = createdTaskId !== null
+  const createdTaskId = ['CREATE_TASK_TURN_LIMIT', 'CREATE_TASK_SUCCESS', 'CREATE_TASK_CREATE_ONLY'].includes(code)
+    ? numericArgOf(args, 'taskId')
+    : null
+  const key = code === 'CREATE_TASK_TURN_LIMIT' && createdTaskId !== null
     ? 'ai.panel.toolResult.CREATE_TASK_TURN_LIMIT_WITH_ID'
     : code.startsWith('ai.') ? code : `ai.panel.toolResult.${code}`
   const translated = t(key, { ...args, id: createdTaskId ?? '' })

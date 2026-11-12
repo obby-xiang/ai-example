@@ -3124,8 +3124,8 @@ public class SseChatEmitter {
      * <p>
      * {@code ok} 按契约由 {@code outcome == ok} 推导（不信任调用方传值，避免"帧说成功、结局说失败"）；
      * {@code outcome}/{@code code} 取自待决条目的持久化信封（旧数据按 status 推导）；
-     * {@code target} 从工具参数 JSON 提取任务等目标，并合入待决条目持久化的 {@code createdJobId}；
-     * 旧条目没有结构化作业号时保持缺失，不从结果文本反解。
+     * {@code target} 从工具参数 JSON 提取任务等目标，并合入待决条目持久化的 {@code createdTaskId}/
+     * {@code createdJobId}；旧条目没有结构化任务号/作业号时保持缺失，不从结果文本反解。
      * {@code result} 仍是<b>全文</b>（人读通道，不受模型侧裁剪影响）。
      *
      * <p>
@@ -3182,16 +3182,20 @@ public class SseChatEmitter {
         frame.put("outcome", outcome.wire());
         frame.put("code", code);
         frame.put("retryable", outcome.retryable(code));
-        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments(), pending.getCreatedJobId());
+        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments(), pending.getCreatedTaskId(),
+                pending.getCreatedJobId());
         if (MapUtils.isNotEmpty(target)) {
             frame.put("target", target);
         }
         frame.put("messageId", toolMessageId(pending));
-        // N9/S9：{@code result} 保留中文用户摘要回退，{@code userTextCode} 供前端按原码本地化；
-        // {@code outcome}/{@code code}/{@code retryable} 不动，模型侧信封与台账原文也不动。
-        // markModelView 仍用<b>原文</b>判定模型视图是否被截断，显示摘要不改变机器可读事实。
-        frame.put("result", ToolResultUserText.forUser(code, result));
-        frame.put("userTextCode", ToolResultUserText.userTextCode(code));
+        Map<String, Object> displayArgs = new LinkedHashMap<>(target);
+        if (MapUtils.isNotEmpty(userTextArgs)) {
+            displayArgs.putAll(userTextArgs);
+        }
+        // N9/S9：{@code result} 保留中文用户摘要回退，{@code userTextCode} 供前端本地化；
+        // 创建任务只读结构化任务号与 openWizard，不反解模型原文。
+        frame.put("result", ToolResultUserText.forUser(pending.getName(), code, result, displayArgs));
+        frame.put("userTextCode", ToolResultUserText.userTextCode(pending.getName(), code, displayArgs));
         if (MapUtils.isNotEmpty(userTextArgs)) {
             frame.put("userTextArgs", userTextArgs);
         }
@@ -3279,14 +3283,15 @@ public class SseChatEmitter {
         frame.put("outcome", outcome.wire());
         frame.put("code", code);
         frame.put("retryable", outcome.retryable(code));
-        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments());
+        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments(), pending.getCreatedTaskId(),
+                pending.getCreatedJobId());
         if (MapUtils.isNotEmpty(target)) {
             frame.put("target", target);
         }
         frame.put("messageId", toolMessageId(pending));
         // 与 tool_result 同口径：内部码换用户摘要（回灌成功/取消的原文不受影响）。
-        frame.put("result", ToolResultUserText.forUser(code, result));
-        frame.put("userTextCode", ToolResultUserText.userTextCode(code));
+        frame.put("result", ToolResultUserText.forUser(pending.getName(), code, result, target));
+        frame.put("userTextCode", ToolResultUserText.userTextCode(pending.getName(), code, target));
         markModelView(frame, pending.getName(), result);
         emit(frame);
     }

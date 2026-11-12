@@ -76,16 +76,6 @@ public class ToolRegistry implements SmartInitializingSingleton {
      */
     private String snapshotVersion = "annotations";
 
-    /**
-     * 任务终态：披露面据此收窄"已完成导出任务"的再导出入口。
-     */
-    public static final String TASK_STATUS_COMPLETED = "COMPLETED";
-
-    /**
-     * 被终态收窄的工具（只收这一支：COMPLETED 不改变导入/发布链的披露）。
-     */
-    private static final String TOOL_START_EXPORT = AiToolNames.START_EXPORT;
-
     @Override
     public void afterSingletonsInstantiated() {
         init();
@@ -436,8 +426,9 @@ public class ToolRegistry implements SmartInitializingSingleton {
     /**
      * Returns the list of ToolCallbacks visible in the given context.
      *
-     * <p>披露与执行前的 {@link #matchesContext} 共用 scope、任务状态、表格开关、条件交棒和
-     * KB 开关判据。KB 关闭时三个 KB 工具不披露，直接伪造调用也会被拒绝。
+     * <p>披露与执行前的 {@link #matchesContext} 共用 scope、表格开关、条件交棒和 KB 开关判据；
+     * 任务状态不在这里特判，能否启动作业由既有预检与作业事实裁决。KB 关闭时三个 KB 工具不披露，
+     * 直接伪造调用也会被拒绝。
      *
      * <p>工具级按需披露只过滤回调，不改写其 Schema；generative_form 实际披露时保留
      * visibleWhen、requiredWhen、disabledWhen、optionsFrom、defaultFrom 及其关联定义。
@@ -449,8 +440,7 @@ public class ToolRegistry implements SmartInitializingSingleton {
                     if (!isConditionStructuringAllowed(e.getKey(), ctx) || !isKbAllowed(e.getKey())) return false;
                     ToolMeta meta = metaMap.get(e.getKey());
                     if (meta == null) return true; // unscoped: always include
-                    return isScopeAllowed(meta, tags) && isStateAllowed(e.getKey(), ctx)
-                            && this.sheetSwitches.isAllowed(e.getKey());
+                    return isScopeAllowed(meta, tags) && this.sheetSwitches.isAllowed(e.getKey());
                 })
                 .map(Map.Entry::getValue)
                 .collect(Collectors.toList());
@@ -528,8 +518,8 @@ public class ToolRegistry implements SmartInitializingSingleton {
         AiContext effective = ctx == null ? AiContext.empty() : ctx;
         ToolMeta meta = metaMap.get(name);
         boolean scopeOk = meta == null || isScopeAllowed(meta, buildTags(effective));
-        return scopeOk && isStateAllowed(name, effective) && !isSheetDisabled(name)
-                && isConditionStructuringAllowed(name, effective) && isKbAllowed(name);
+        return scopeOk && !isSheetDisabled(name) && isConditionStructuringAllowed(name, effective)
+                && isKbAllowed(name);
     }
 
     public boolean matchesContext(String name, AiContext ctx) {
@@ -546,21 +536,6 @@ public class ToolRegistry implements SmartInitializingSingleton {
     private static boolean isScopeAllowed(ToolMeta meta, Set<String> tags) {
         String[] patterns = meta.getScopePatterns();
         return ArrayUtils.isNotEmpty(patterns) && containsAnyPattern(patterns, tags);
-    }
-
-    /**
-     * 任务终态收窄（q4 的"COMPLETED 仍披露 start_export"）：已完成任务不再披露/放行再导出，
-     * 引导改走 {@code download_export_files} / {@code open_export_file_editor}。
-     *
-     * <p>只收窄 {@code start_export} 一支：导入任务的 COMPLETED 可能只是"预检查通过"，
-     * 后续导入/发布仍应可用 —— 把整组 {@code start_*} 一起收窄会误杀主流程。
-     * 该判据只是"让模型看不见假入口"，执行面仍有预检与域层终态守卫兜底。
-     */
-    private static boolean isStateAllowed(String name, AiContext ctx) {
-        if (ctx == null || !TOOL_START_EXPORT.equals(name)) {
-            return true;
-        }
-        return !TASK_STATUS_COMPLETED.equalsIgnoreCase(ctx.getTaskStatus());
     }
 
     /**

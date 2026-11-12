@@ -6770,6 +6770,62 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "正文和reasoning按消息边界及精确值对账，不按contains或固定文案识别，displayEnabled只影响公开对账不影响原始保存。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1272最终Spec与Task quality均通过，所有Critical/Important/Minor关闭；施工报告create correction删除、双视图、correction开关reasoning矩阵、默认隐藏、合法迟到、多工具、异常链及旧别名独立RED→GREEN，生产编译成功；主控未重跑测试，真实模型、Redis/Cluster、多实例、浏览器及全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:0fc89f31e49d0fc6a7a55ac82bd63a7e1d75ad6fa5bac154a8a67268b940d404",
+      "status": "reviewed",
+      "reason": "逐hunk复核create_task结构化事实的实时/续跑/模型/history链路、前端target合并和start_export真实作业权威；独立复审功能通过，过期说明已清理。",
+      "reviewedAt": "2026-11-12T23:11:38+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1273、施工agent-1265",
+      "specChanges": [
+        {
+          "change": "create_task成功、幂等复用、create-only及单轮上限引用统一使用结构化target.taskId，createdJobId只进入target.jobId，openWizard来自结构化参数。",
+          "reason": "中文正则和contains反解回执会让实时、模型与history事实分叉，并混淆任务和作业身份。",
+          "impact": "ToolResultUserText改用稳定摘要码，前端按target和中英文i18n渲染，不再从回执文本提取编号。"
+        },
+        {
+          "change": "ResumeService正常及provider-gone重建同时传createdTaskId/createdJobId，前端按字段合并matched/state.target；单轮第二次create_task保存第一次任务引用供三通道投影。",
+          "reason": "续跑只传jobId及target整体覆盖会丢任务号，单轮上限只补实时文案会导致刷新和模型历史退化。",
+          "impact": "拒绝条目仍SKIPPED/executed=false且不写执行台账，不伪造创建成功，taskId/jobId/openWizard按各自事实合并。"
+        },
+        {
+          "change": "删除ToolRegistry对COMPLETED任务隐藏start_export的披露特判，披露与执行统一由真实成功EXPORT作业和TASK_FINALIZED裁决。",
+          "reason": "COMPLETED但无成功EXPORT作业仍允许创建，披露侧特判会与域层真实权威冲突。",
+          "impact": "相关上下文、类型、向导和测试说明同步更新，任务状态仍如实上报，不再宣称按COMPLETED终态收窄。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ContextFieldGate.java", "status": "checked", "reason": "仅更新任务状态为业务事实、披露不按COMPLETED单独特判的说明；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/RunContextRefresher.java", "status": "checked", "reason": "仅同步真实任务状态与作业权威的注释，既有OK候选事实读取不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "单轮第二次create_task保存第一次真实taskId供统一投影，拒绝状态和执行台账语义不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntries.java", "status": "checked", "reason": "history工具状态透传结构化target与摘要码，不从文本反解任务号；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java", "status": "checked", "reason": "正常续跑和provider-gone重建同时传createdTaskId/createdJobId；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "实时tool_result投影结构化target和稳定摘要码，与history同源；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/AiContext.java", "status": "checked", "reason": "仅清理COMPLETED披露特判的过期说明；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/AiToolNames.java", "status": "checked", "reason": "移除已删除ToolRegistry.TOOL_START_EXPORT的失效Javadoc引用；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolRegistry.java", "status": "checked", "reason": "删除COMPLETED隐藏start_export的披露与匹配特判，保留scope、表格、条件交棒和KB判据；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultEnvelope.java", "status": "checked", "reason": "createdTaskId/createdJobId分别进入target.taskId/jobId并支持openWizard结构化投影；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultUserText.java", "status": "checked", "reason": "删除中文正则和contains反解，按稳定摘要码及结构化target生成用户摘要；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "history载荷携带相同target和userTextCode，实时与恢复共用事实；已IDEA Reformat。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "创建摘要按稳定码和target.taskId插值，create-only及单轮上限使用对应中英文词条。"},
+        {"path": "frontend/src/locales/en-US.json", "status": "checked", "reason": "新增创建成功、create-only及带任务号单轮上限英文摘要。"},
+        {"path": "frontend/src/locales/zh-CN.json", "status": "checked", "reason": "新增创建成功、create-only及带任务号单轮上限中文摘要。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "history按字段合并matched/state.target，持久化state同名事实优先，保留显式null语义。"},
+        {"path": "frontend/src/stores/workspace.ts", "status": "checked", "reason": "仅清理COMPLETED终态收窄的过期说明，任务状态同步行为不变。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "工具状态增加结构化target类型及新摘要码，说明与作业权威一致。"},
+        {"path": "frontend/src/types/workspace.ts", "status": "checked", "reason": "仅更新任务状态为业务事实的注释，不改变上报类型。"},
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "仅清理导出向导中COMPLETED披露收窄的过期注释。"},
+        {"path": "frontend/src/views/ImportWizardView.vue", "status": "checked", "reason": "仅同步任务状态与真实作业权威的注释，无交互变化。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用PendingToolCall、ToolResultEnvelope、TranscriptEntries和既有i18n/target类型，无新增依赖或文本解析器。"},
+        "java-api-style": {"status": "checked", "reason": "本批生产Java均IDEA Reformat，触及方法规模未越界，任务/作业ID沿既有字符串安全边界传递。"},
+        "logging-exception-safety": {"status": "checked", "reason": "拒绝和provider-gone保持真实状态，不把第二次创建伪造成成功，不向用户透出原始回执或异常。"},
+        "toc-interaction": {"status": "checked", "reason": "创建摘要在实时与刷新后一致，只展示业务任务号和稳定中英文短句，不新增提示或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "同一createdTaskId经pending、Redis快照、Resume和history传递，第二次拒绝不写台账且jobId不混用。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "删除正则和contains任务事实反解，摘要根据结构化字段生成，不依赖中文文本或编号格式。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1273确认两项Important均ADDRESSED且无新Critical/Important，功能通过；施工报告真实ResumeService正常/provider-gone、SpToolCallingManager单轮上限、前端create-only/target合并、创建/复用、作业权威独立RED→GREEN，后端编译和前端typecheck/build成功；主控未重跑测试，真实模型、Redis/Cluster、多实例、浏览器及全量测试NOT_RUN。"}
+      }
     }
   ]
 }

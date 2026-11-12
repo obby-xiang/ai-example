@@ -34,7 +34,7 @@ import java.util.regex.Pattern;
  * <li>{@code code}：机器可读错误码（成功为 null）；</li>
  * <li>{@code outcome}：{@link ToolOutcome} 的线上字面量；</li>
  * <li>{@code retryable}：由 outcome + code 推导（见 {@link ToolOutcome#retryable(String)}）；</li>
- * <li>{@code target}：工具参数目标与真实执行产生的可选 {@code jobId}；不从 message 反解标识符；</li>
+ * <li>{@code target}：工具参数目标与真实执行产生的可选 {@code taskId}/{@code jobId}；不从 message 反解标识符；</li>
  * <li>{@code evidence}：一期恒为 null（证据面后续单独施工）；</li>
  * <li>{@code message}：原有的人读文本（越 scope/拒绝/超时文案一字不改）；</li>
  * <li>{@code truncated/strategy/originalChars/returnedChars/notice}：<b>统一截断字段契约</b>
@@ -88,7 +88,7 @@ public record ToolResultEnvelope(@JsonProperty("ok") boolean ok, @JsonProperty("
      * <p>{@code code} 是<b>配置定义编码</b>（{@code get_config_def} 的入参名）：失败信封因此带上
      * "出错的参数值"，模型/前端拿到的是 {@code code + 参数} 而不是只能靠中文关键词猜的文案。
      */
-    private static final List<String> TARGET_KEYS = List.of("taskId", "defCode", "code", "step", "page");
+    private static final List<String> TARGET_KEYS = List.of("taskId", "defCode", "code", "step", "page", "openWizard");
 
     /**
      * 模型侧工具结果的定界符（防护批② B2-3；spotlighting delimiting 的最小形态）。
@@ -143,14 +143,19 @@ public record ToolResultEnvelope(@JsonProperty("ok") boolean ok, @JsonProperty("
     }
 
     /**
-     * 统一工厂：真实执行产生的作业号只从持久化事实合入 target，不从 arguments 或 message 反解。
+     * 统一工厂：真实执行产生的任务号/作业号只从持久化事实合入 target，不从 message 反解。
      */
     public static ToolResultEnvelope of(ToolOutcome outcome, String code, String message, String argumentsJson,
                                         Long createdJobId) {
+        return of(outcome, code, message, argumentsJson, null, createdJobId);
+    }
+
+    public static ToolResultEnvelope of(ToolOutcome outcome, String code, String message, String argumentsJson,
+                                        Long createdTaskId, Long createdJobId) {
         ToolOutcome effective = ObjectUtils.defaultIfNull(outcome, ToolOutcome.UNKNOWN);
         String text = StringUtils.defaultString(message);
         TargetRead target = readTarget(argumentsJson);
-        Map<String, Object> effectiveTarget = withCreatedJobId(target.value(), createdJobId);
+        Map<String, Object> effectiveTarget = withCreatedIds(target.value(), createdTaskId, createdJobId);
         ToolResultEnvelope.TargetStatus effectiveStatus = MapUtils.isNotEmpty(effectiveTarget)
                 ? ToolResultEnvelope.TargetStatus.PRESENT : target.status();
         return new ToolResultEnvelope(effective.ok(), code, effective.wire(), effective.retryable(code),
@@ -161,25 +166,32 @@ public record ToolResultEnvelope(@JsonProperty("ok") boolean ok, @JsonProperty("
      * 从参数 JSON 提取目标资源；读取不到目标时返回不可变空 Map。
      */
     public static Map<String, Object> targetOf(String argumentsJson) {
-        return targetOf(argumentsJson, null);
+        return targetOf(argumentsJson, null, null);
     }
 
-    /**
-     * 从参数目标与执行事实组成投影；缺失或非法作业号保持缺失。
-     */
     public static Map<String, Object> targetOf(String argumentsJson, Long createdJobId) {
-        return withCreatedJobId(readTarget(argumentsJson).value(), createdJobId);
+        return targetOf(argumentsJson, null, createdJobId);
     }
 
-    private static Map<String, Object> withCreatedJobId(Map<String, Object> target, Long createdJobId) {
-        if (createdJobId == null || createdJobId <= 0L) {
+    /** 从参数目标与执行事实组成投影；缺失或非法任务号/作业号保持缺失。 */
+    public static Map<String, Object> targetOf(String argumentsJson, Long createdTaskId, Long createdJobId) {
+        return withCreatedIds(readTarget(argumentsJson).value(), createdTaskId, createdJobId);
+    }
+
+    private static Map<String, Object> withCreatedIds(Map<String, Object> target, Long createdTaskId, Long createdJobId) {
+        if ((createdTaskId == null || createdTaskId <= 0L) && (createdJobId == null || createdJobId <= 0L)) {
             return target;
         }
         Map<String, Object> copy = new LinkedHashMap<>();
         if (target != null) {
             copy.putAll(target);
         }
-        copy.put("jobId", String.valueOf(createdJobId));
+        if (createdTaskId != null && createdTaskId > 0L) {
+            copy.put("taskId", String.valueOf(createdTaskId));
+        }
+        if (createdJobId != null && createdJobId > 0L) {
+            copy.put("jobId", String.valueOf(createdJobId));
+        }
         return Collections.unmodifiableMap(copy);
     }
 

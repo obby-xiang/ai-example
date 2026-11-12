@@ -11,7 +11,7 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAiStore } from '@/stores/ai'
 import { installIdentityFixture } from './ai-identity-fixture'
-import type { ChatMessage } from '@/types/ai'
+import type { ChatMessage, ToolPart } from '@/types/ai'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -136,5 +136,38 @@ describe('2026-10-30 复审 I-①：结构化 taskId 驱动 WITH_ID 文案', { t
     // ② `target.taskId` 生效（帧目标落段后的兜底通道），回执里的 #98 不得冒充
     expect(outputs[1]?.text()).toContain('#13')
     expect(outputs[1]?.text()).not.toContain('#98')
+  })
+
+  it('英文创建成功与 create-only 按稳定摘要码和 target.taskId 渲染，不信回执编号', async () => {
+    const { applyLocale } = await import('@/locales')
+    applyLocale('en-US')
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, { global: { stubs } })
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+    const store = useAiStore()
+
+    store.messages = [
+      createTaskLimitMessage('m-created', '已创建导出任务 #999', {
+        target: { taskId: '41', openWizard: true }
+      }),
+      createTaskLimitMessage('m-create-only', 'Task #998 was created without opening the wizard', {
+        target: { taskId: '43', openWizard: false }
+      })
+    ]
+    ;(store.messages[0]!.parts[0]! as ToolPart).userTextCode = 'CREATE_TASK_SUCCESS'
+    ;(store.messages[0]!.parts[0]! as ToolPart).status = 'succeeded'
+    ;(store.messages[1]!.parts[0]! as ToolPart).userTextCode = 'CREATE_TASK_CREATE_ONLY'
+    ;(store.messages[1]!.parts[0]! as ToolPart).status = 'succeeded'
+    store.historyLoaded = true
+    await wrapper.vm.$nextTick()
+    await flushPromises()
+
+    const outputs = wrapper.findAll('[data-testid="tool-output-text"]')
+    expect(outputs).toHaveLength(2)
+    expect(outputs[0]?.text()).toBe('Task #41 was created. No job has been started; you decide whether to configure it next.')
+    expect(outputs[1]?.text()).toBe(
+      'Task #43 was created without opening the wizard or starting a job. You can configure it later.'
+    )
   })
 })

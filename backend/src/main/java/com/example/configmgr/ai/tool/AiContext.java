@@ -50,9 +50,8 @@ public class AiContext {
 	/**
 	 * 任务状态（{@code ACTIVE}/{@code COMPLETED}/{@code CANCELLED}/{@code FAILED}）。
 	 *
-	 * <p>披露面用它做"终态收窄"（{@code ToolRegistry#forContext}/{@code matchesContext} 同一判据）：
-	 * 已完成任务不再披露 {@code start_export}，避免模型看到"可导出"的假入口；
-	 * 执行面仍由预检与域层终态守卫兜底，本字段不构成授权。
+	 * <p>这是业务状态事实，不在披露面单独特判 {@code start_export}；能否启动作业由预检与域层
+	 * 真实作业事实决定，本字段不构成授权。
 	 */
 	@JsonProperty("taskStatus")
 	private String taskStatus;

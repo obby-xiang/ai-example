@@ -2148,9 +2148,9 @@ async function refreshTaskSnapshot(
     }
     task.value = snapshot
     workspace.setTaskId(forTask, 'IMPORT')
-    // 批次4 集成返修：状态单独写回（`buildContext` 顶层上报 ⇒ 后端披露面终态收窄）。
+    // 状态单独写回（`buildContext` 顶层上报 ⇒ 后端获得最新任务状态）。
     // 与导出页同一口径：终态后刷新到的 COMPLETED/CANCELLED/FAILED 必须进工作区，
-    // 否则下一轮请求仍带旧状态，模型看到"还能预检查/导入"的假入口。
+    // 否则下一轮预检与业务展示会使用过期事实。
     workspace.setTaskStatus(snapshot.status)
   } catch (error) {
     logCaughtError(error, 'import-wizard:request')

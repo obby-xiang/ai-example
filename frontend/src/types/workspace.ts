@@ -92,7 +92,7 @@ export interface WorkspaceSnapshot {
   step: TaskStep | null
   /** 当前任务 id */
   taskId: number | null
-  /** 当前任务状态（**每轮顶层上报**：后端披露面据此做终态收窄） */
+  /** 当前任务状态（**每轮顶层上报**的上下文/域层事实；披露不单独按 COMPLETED 收窄） */
   taskStatus: TaskStatus | null
   /** 任务已选配置项编码 */
   selectedDefs: string[]
@@ -126,8 +126,8 @@ export interface WorkspaceContract {
    */
   enterPage(init: Partial<WorkspaceSnapshot>): void
   /**
-   * 服务端任务状态同步（作业终态后由页面刷新快照写回）：驱动后端披露面的终态收窄。
-   * 不记 `recentActions` —— 这是事实同步，不是用户/AI 的动作。
+   * 服务端任务状态同步（作业终态后由页面刷新快照写回）：更新上下文与域层事实，
+   * 不单独驱动披露收窄。不记 `recentActions` —— 这是事实同步，不是用户/AI 的动作。
    */
   setTaskStatus(status: TaskStatus | null): void
   /** ui_event 统一分发（与用户点击调用同一 store action） */

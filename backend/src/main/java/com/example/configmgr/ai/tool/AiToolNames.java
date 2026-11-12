@@ -14,8 +14,8 @@ import java.util.Optional;
  * <h2>为什么要有它</h2>
  * 同一个工具名此前至少抄在四处：{@code @Tool(name=…)}、{@code resources/ai/tools.yaml} 的
  * {@code toolKey}、闸门/预检里的常量（{@code ToolPreflightService.TOOL_* }、
- * {@code ToolTargetResolver.TOOL_* }、{@code ToolRegistry.TOOL_START_EXPORT}、
- * {@code RunContextRefresher.TOOL_*}）、{@code GenerativeFormRules.TOOL_NAME} 与各前端工具守卫的
+ * {@code ToolTargetResolver.TOOL_* }、{@code RunContextRefresher.TOOL_*}）、
+ * {@code GenerativeFormRules.TOOL_NAME} 与各前端工具守卫的
  * {@code SUPPORTED} 集合。副本漂移时，守卫按旧名放行/拦截一个已改名的工具 —— 不报错，
  * 只表现为"某些调用静默不生效"。
  *

@@ -5,6 +5,7 @@ import com.example.configmgr.ai.memory.RunMemoryMerge;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
+import com.example.configmgr.ai.tool.ToolResultUserText;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.math.NumberUtils;
@@ -318,9 +319,14 @@ public final class TranscriptEntries {
         if (PendingToolCall.KIND_FRONTEND.equals(kind) && StringUtils.isNotBlank(pending.getResultText())) {
             state.put("submittedValues", pending.getResultText());
         }
-        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments(), pending.getCreatedJobId());
+        Map<String, Object> target = ToolResultEnvelope.targetOf(pending.getArguments(), pending.getCreatedTaskId(),
+                pending.getCreatedJobId());
         if (MapUtils.isNotEmpty(target)) {
             state.put("target", target);
+        }
+        String userTextCode = ToolResultUserText.userTextCode(pending.getName(), pending.effectiveCode(), target);
+        if (userTextCode != null) {
+            state.put("userTextCode", userTextCode);
         }
         Map<String, Object> preflight = displayPreflight(pending.getPreflight());
         if (preflight != null) {

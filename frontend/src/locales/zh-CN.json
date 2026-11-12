@@ -537,6 +537,8 @@
         "UPSTREAM_FAILED": "上一个步骤没有成功，这一步没有执行；AI 会用已有信息继续回答。",
         "CREATE_TASK_TURN_LIMIT": "同一轮只允许创建一次任务，这一次没有再创建；需要新任务请在下一轮提出。",
         "CREATE_TASK_TURN_LIMIT_WITH_ID": "本轮已创建任务 #{id}；同一轮只允许创建一次任务，这一次没有再创建。",
+        "CREATE_TASK_SUCCESS": "任务 #{id} 已创建，尚未启动作业；后续由你决定是否配置",
+        "CREATE_TASK_CREATE_ONLY": "任务 #{id} 已创建，未自动打开向导，也未启动作业；以后可继续配置",
         "RESOURCE_LOCKED": "该任务已有作业在执行，本次未执行；请等待作业结束后再试。",
         "TOOL_KIND_MISMATCH": "这一步没有执行；该操作需要由当前页面完成。",
         "SHEET_DISABLED": "表格功能已被管理员关闭，这一步没有执行。",

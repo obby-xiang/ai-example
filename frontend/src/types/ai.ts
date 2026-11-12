@@ -49,12 +49,11 @@ declare module './sse' {
  * **键集 = 后端 `AiChatRequest.Context` 的 6 个顶层字段**：page / taskType / step / taskId /
  * taskStatus / extra。后端 `Context` 带 `@JsonIgnoreProperties(ignoreUnknown = true)`（由
  * `ContextFieldGate` 白名单化 + 计数降级），但**多写的键仍会被闸门丢弃**，等于静默失效 ——
- * 所以 `taskStatus` 这类有后端消费面的字段必须**顶层**上报，不能塞进 `extra`（`extra` 里没有
- * 任何工具披露/终态收窄的消费点）；工作区其余自由信息才进 `extra`。
+ * 所以 `taskStatus` 这类有后端消费面的字段必须**顶层**上报，不能塞进 `extra`；
+ * 工作区其余自由信息才进 `extra`。
  *
  * page/taskType/step 三个标签决定本轮披露给模型的工具子集（见 types/tools.ts 的 ToolScope）；
- * taskStatus 在披露面做**终态收窄**（例如 COMPLETED 任务不再披露 `start_export`，
- * 见后端 `ToolRegistry#forContext` / `AiContext#taskStatus`）。
+ * taskStatus 作为真实业务状态供预检与域层使用，不单独决定 `start_export` 的披露或授权。
  */
 export interface AiChatContext {
   /** 页面标签：任务中心 / 导出向导 / 导入向导 / 配置定义 / 数据浏览（ToolScope 的 page:* 口径：tasks/definitions/data） */
@@ -66,7 +65,7 @@ export interface AiChatContext {
   taskId?: number | null
   /**
    * 当前任务状态（`Task.TaskStatus` 全集）：只认 ACTIVE / COMPLETED / CANCELLED / FAILED；
-   * 未知值后端降级为 null（= 不做终态收窄）。前端只如实上报，不自行推断。
+   * 未知值后端降级为 null。前端只如实上报，不自行推断，也不据此单独决定工具披露或授权。
    */
   taskStatus?: TaskStatus | null
   /** 额外上下文（工作区摘要、数据版本号等自由信息） */
@@ -296,6 +295,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     responseData?: string
     /** 与 tool_result 帧一致的用户文案稳定代码。 */
     userTextCode?: string | null
+    /** 历史信封中的结构化任务/作业目标；不从响应文本反解。 */
+    target?: Record<string, unknown>
     /**
      * L-78：历史面的**结果视图**（后端按工具名从注册表重新派生，只对成功结局出）。
      * 缺省 = 该工具没有声明视图投影 / 旧载荷 ⇒ 卡面走旧形态（与帧内 `resultView` 同契约）。
@@ -323,6 +324,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     outcome?: string
     /** 治理 P0-1：错误码（可选，null = 无码）；一期不展示 */
     code?: string | null
+    /** 用户文案稳定摘要码；与 toolResponses 同码，供 transcript 历史恢复。 */
+    userTextCode?: string | null
     /** 已执行工具的结构化目标；旧 history 缺省时不推断或反解。 */
     target?: Record<string, unknown>
     /**

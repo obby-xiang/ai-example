@@ -1642,9 +1642,9 @@ function beginWatchJob(jobId: number, generation: number = taskGeneration): void
           if (generation === taskGeneration) {
             task.value = snapshot
             workspace.setTaskId(forTask, 'EXPORT')
-            // 批次4 集成返修：状态单独写回（`buildContext` 顶层上报 ⇒ 后端披露面终态收窄）。
+            // 状态单独写回（`buildContext` 顶层上报 ⇒ 后端获得最新任务状态）。
             // 不能只靠 setTaskId 的第三参：那条路径只在"绑定任务时"带一次状态，终态后刷新到的
-            // COMPLETED/FAILED 就丢在这里，模型下一轮仍看到"可导出"的假入口。
+            // COMPLETED/FAILED 就丢在这里，下一轮预检与业务展示会使用过期事实。
             workspace.setTaskStatus(snapshot.status)
           }
         } catch (error) {

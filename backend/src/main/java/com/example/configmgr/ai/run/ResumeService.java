@@ -1552,7 +1552,7 @@ public class ResumeService {
         PendingToolCall source = ObjectUtils.defaultIfNull(settled, effective);
         ToolResponseMessage.ToolResponse response = new ToolResponseMessage.ToolResponse(effective.getToolCallId(),
                 effective.getName(), ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(), text,
-                effective.getArguments(), source.getCreatedJobId()).toModelJson(this.limiter, effective.getName()));
+                effective.getArguments(), source.getCreatedTaskId(), source.getCreatedJobId()).toModelJson(this.limiter, effective.getName()));
         return new RebuildItem(null, response, settlementLabel(source), source);
     }
 
@@ -2995,7 +2995,8 @@ public class ResumeService {
                 PendingToolCall source = ObjectUtils.defaultIfNull(persisted, item);
                 responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
                         ToolResultEnvelope.of(source.effectiveOutcome(), source.effectiveCode(),
-                                        source.getResultText(), item.getArguments(), source.getCreatedJobId())
+                                        source.getResultText(), item.getArguments(), source.getCreatedTaskId(),
+                                        source.getCreatedJobId())
                                 .toModelJson(this.limiter, item.getName())));
             }
             history.add(ToolResponseMessage.builder().responses(responses).build());

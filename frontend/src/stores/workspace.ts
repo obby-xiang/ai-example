@@ -15,8 +15,8 @@
  *   `ContextFieldGate` 丢弃 ⇒ 静默失效，所以有消费面的字段一律顶层）；
  * - taskType 与 step **必须成对出现**，否则后端退回 page:* 口径，披露的工具子集就错了；
  * - step 取值必须与 @ToolScope 的标签一致（见 types/task.ts 的 TaskSteps）；
- * - taskStatus 有**披露面消费点**（后端终态收窄：COMPLETED/CANCELLED 任务不再披露
- *   `start_export`），故它必须随每轮上报 —— 放在 extra 里等于没上报。
+ * - taskStatus 是预检与域层使用的真实业务状态，必须随每轮上报；它不单独决定
+ *   `start_export` 的披露或授权 —— 放在 extra 里等于没上报。
  */
 
 import { defineStore } from 'pinia'
@@ -262,10 +262,9 @@ export const useWorkspaceStore = defineStore('workspace', {
     /**
      * 任务状态写入（**后端快照驱动的唯一状态入口**）。
      *
-     * <p>为什么要有它：`taskStatus` 是后端披露面的终态收窄依据（`ToolRegistry#stateAllows`：
-     * COMPLETED 任务不再披露 `start_export`，只收这一支），而任务状态的变化几乎都来自**服务端**
+     * <p>为什么要有它：`taskStatus` 是预检与域层使用的真实业务状态，而状态变化几乎都来自**服务端**
      * （作业终态联动 ⇒ `GET /tasks/{id}` 快照）。向导页在作业终态后刷新快照，必须把新状态写回
-     * 工作区，否则下一轮请求仍带着旧状态 ⇒ 收窄不生效（模型看到"还能导出"的假入口）。
+     * 工作区，否则下一轮请求仍携带旧状态，预检与业务展示会使用过期事实。
      *
      * <p>不记 `recentActions`：这是**服务端事实的同步**，不是用户/AI 的动作（记进去会让
      * `extra.recentActions` 被状态刷新刷爆，模型误以为有人在操作）。
@@ -379,7 +378,7 @@ export const useWorkspaceStore = defineStore('workspace', {
      *
      * 键集 = 后端 `AiChatRequest.Context` 的六个顶层字段（page/taskType/step/taskId/taskStatus/extra），
      * 多余信息一律进 extra（`ContextFieldGate` 只把白名单键交给消费方）。`taskStatus` **必须顶层**：
-     * 后端 `ToolRegistry#forContext` 用它做终态收窄（COMPLETED 任务不再披露 `start_export`）。
+     * 后端预检与域层使用这份真实业务状态，披露面不对 COMPLETED 单独特判 `start_export`。
      */
     buildContext(): AiChatContext {
       return {

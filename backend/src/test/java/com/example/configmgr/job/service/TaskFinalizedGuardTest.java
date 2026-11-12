@@ -145,6 +145,16 @@ class TaskFinalizedGuardTest {
         assertThat(job.getStatus()).isEqualTo(Job.JobStatus.PENDING);
     }
 
+    /** COMPLETED 只是任务状态；没有任何 EXPORT 作业时仍可首次启动。 */
+    @Test
+    void completedExportWithoutExportJobIsNotFinal() {
+        long taskId = task(Task.TaskType.EXPORT, "R137-状态完成但无成功作业", Task.TaskStatus.COMPLETED);
+
+        Job job = jobService.createAndStart(taskId, Job.JobType.EXPORT);
+
+        assertThat(job.getStatus()).isEqualTo(Job.JobStatus.PENDING);
+    }
+
     /** COMPLETED 的 EXPORT 任务但 EXPORT 作业未成功（FAILED）——不算终态，可重试。 */
     @Test
     void completedExportWithFailedExportJobIsNotFinal() {

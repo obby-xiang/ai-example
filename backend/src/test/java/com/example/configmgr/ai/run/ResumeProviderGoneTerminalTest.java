@@ -195,6 +195,41 @@ class ResumeProviderGoneTerminalTest {
 					.allSatisfy(response -> assertThat(response.responseData()).isNotBlank()));
 	}
 
+	@Test
+	void providerGoneFailureHistoryKeepsCreatedTaskAndJobIds() {
+		seedSuspendedSnapshot();
+		PendingToolCall settled = tool("c-create-task", PendingToolCall.EXECUTED);
+		settled.setName("create_task");
+		settled.setArguments("{\"type\":\"EXPORT\",\"openWizard\":false}");
+		settled.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		settled.setResultText("已创建导出任务 #73，未自动打开向导");
+		settled.setCreatedTaskId(73L);
+		settled.setCreatedJobId(4242L);
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		snapshot.setInFlightToolCalls(new java.util.ArrayList<>(List.of(settled)));
+		this.store.save(snapshot);
+		this.store.putPending(RUN_ID, settled);
+		when(this.chatService.failureHistory(any(RunSnapshot.class), any(), any(), anyString(), anyString()))
+			.thenAnswer(invocation -> this.codec.deserializeAll(
+					invocation.getArgument(0, RunSnapshot.class).getMessageJson()));
+
+		this.service.resume(RUN_ID);
+
+		List<org.springframework.ai.chat.messages.Message> history = this.codec.deserializeAll(
+				this.store.get(RUN_ID).getMessageJson());
+		assertThat(history).filteredOn(org.springframework.ai.chat.messages.ToolResponseMessage.class::isInstance)
+			.singleElement()
+			.satisfies(message -> {
+				org.springframework.ai.chat.messages.ToolResponseMessage.ToolResponse response =
+						((org.springframework.ai.chat.messages.ToolResponseMessage) message).getResponses().getFirst();
+				com.example.configmgr.ai.tool.ToolResultEnvelope envelope =
+						com.example.configmgr.ai.tool.ToolResultEnvelope.fromJson(response.responseData());
+				assertThat(envelope.target()).containsEntry("taskId", "73")
+					.containsEntry("jobId", "4242")
+					.containsEntry("openWizard", false);
+			});
+	}
+
 	private static PendingToolCall tool(String toolCallId, String status) {
 		PendingToolCall pending = new PendingToolCall();
 		pending.setToolCallId(toolCallId);

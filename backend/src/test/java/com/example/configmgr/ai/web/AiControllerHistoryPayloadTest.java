@@ -307,6 +307,63 @@ class AiControllerHistoryPayloadTest {
 	}
 
 	@Test
+	void createTaskUserTextUsesStructuredFactsAcrossLiveAndHistory() throws Exception {
+		com.example.configmgr.ai.conformance.InMemoryRunStore frameStore =
+				new com.example.configmgr.ai.conformance.InMemoryRunStore();
+		com.example.configmgr.ai.run.SseChatEmitter out = com.example.configmgr.ai.run.TestRunRegistryFactory
+				.create(frameStore, new ObjectMapper(), new AiProperties()).of("run-create-task-user-text");
+
+		assertCreateTaskLiveFrame(frameStore, out, "created", 41L, "已创建导出任务 #999", true,
+				"CREATE_TASK_SUCCESS", "任务 #41 已创建，尚未启动作业；后续由你决定是否配置");
+		assertCreateTaskLiveFrame(frameStore, out, "reused", 42L, "本次复用任务 #998", true,
+				"CREATE_TASK_SUCCESS", "任务 #42 已创建，尚未启动作业；后续由你决定是否配置");
+		assertCreateTaskLiveFrame(frameStore, out, "create-only", 43L, "Task #997 created without opening the wizard", false,
+				"CREATE_TASK_CREATE_ONLY", "任务 #43 已创建，未自动打开向导，也未启动作业；以后可继续配置");
+
+		String modelText = "Task #996 was created without opening the wizard";
+		com.example.configmgr.ai.tool.ToolResultEnvelope envelope = new com.example.configmgr.ai.tool.ToolResultEnvelope(
+				true, null, "ok", false, Map.of("taskId", "43", "openWizard", false), null, modelText,
+				false, null, modelText.length(), modelText.length(), null);
+		ToolResponseMessage toolResponse = ToolResponseMessage.builder()
+				.responses(List.of(new ToolResponseMessage.ToolResponse("tc-create-only", "create_task", envelope.toJson())))
+				.build();
+		when(this.chatMemory.get("s-1")).thenReturn(List.of(toolResponse));
+
+		this.mockMvc.perform(get("/api/ai/history/s-1"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.data.messages[0].toolResponses[0].userTextCode")
+						.value("CREATE_TASK_CREATE_ONLY"))
+				.andExpect(jsonPath("$.data.messages[0].toolResponses[0].responseData")
+						.value("任务 #43 已创建，未自动打开向导，也未启动作业；以后可继续配置"))
+				.andExpect(jsonPath("$.data.messages[0].toolResponses[0].target.taskId").value("43"))
+				.andExpect(jsonPath("$.data.messages[0].toolResponses[0].target.jobId").doesNotExist());
+	}
+
+	private static void assertCreateTaskLiveFrame(
+			com.example.configmgr.ai.conformance.InMemoryRunStore frameStore,
+			com.example.configmgr.ai.run.SseChatEmitter out, String callId, long taskId, String modelText,
+			boolean openWizard, String expectedCode, String expectedText) {
+		com.example.configmgr.ai.run.PendingToolCall pending = new com.example.configmgr.ai.run.PendingToolCall();
+		pending.setToolCallId(callId);
+		pending.setName("create_task");
+		pending.setKind(com.example.configmgr.ai.run.PendingToolCall.KIND_BACKEND);
+		pending.setStatus(com.example.configmgr.ai.run.PendingToolCall.EXECUTED);
+		pending.setOutcome(com.example.configmgr.ai.tool.ToolOutcome.OK.wire());
+		pending.setArguments("{\"type\":\"EXPORT\",\"openWizard\":" + openWizard + "}");
+		pending.setCreatedTaskId(taskId);
+
+		out.toolResult(pending, true, false, modelText);
+
+		Map<String, Object> frame = frameStore.events("run-create-task-user-text").getLast();
+		org.assertj.core.api.Assertions.assertThat(frame).containsEntry("userTextCode", expectedCode);
+		org.assertj.core.api.Assertions.assertThat(frame.get("result")).isEqualTo(expectedText);
+		org.assertj.core.api.Assertions.assertThat(frame.get("target"))
+				.asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+				.containsEntry("taskId", String.valueOf(taskId))
+				.doesNotContainKey("jobId");
+	}
+
+	@Test
 	void existingFiveFieldsAreUnchanged() throws Exception {
 		AssistantMessage assistant = AssistantMessage.builder()
 			.content("")
