@@ -282,7 +282,7 @@ class ToolPreflightServiceTest {
 		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
 
 		assertThat(report.pass()).isTrue();
-		assertThat(report.conditionSummary()).contains("未设筛选（全量）");
+		assertThat(report.conditionSummary()).isEqualTo("2 个配置项均不筛选（全部数据）");
 	}
 
 	/** I-1：坏 JSON 即使已到 EXPORT 也继续拒绝。 */
@@ -326,7 +326,7 @@ class ToolPreflightServiceTest {
 		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
 
 		assertThat(report.pass()).isTrue();
-		assertThat(report.conditionSummary()).contains("未设筛选");
+		assertThat(report.conditionSummary()).isEqualTo("2 个配置项均不筛选（全部数据）");
 	}
 
 	@Test
@@ -505,6 +505,286 @@ class ToolPreflightServiceTest {
 		assertThat(after.target()).doesNotContainKey("taskId");
 		assertThat(after.impact()).contains("创建").doesNotContain("复用");
 		assertThat(after.reportHash()).as("资格变化必须让执行前复核判旧报告过期").isNotEqualTo(before.reportHash());
+	}
+
+	@Test
+	void allExplicitUnsetConditionsUseOneCountSummary() {
+		Task task = exportTaskWithConditions("{}", "{}", "{}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.conditionSummary()).isEqualTo("3 个配置项均不筛选（全部数据）");
+	}
+
+	@Test
+	void equalRawConditionJsonGroupsDefinitionsDespitePropertyOrder() {
+		String first = "{\"scopeKeys\":[\"XN\"],\"fields\":["
+				+ "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}";
+		String reordered = "{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}],"
+				+ "\"scopeKeys\":[\"XN\"]}";
+		Task task = exportTaskWithConditions(first, reordered, "{}");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.conditionSummary()).isEqualTo(
+				"DEF_1、DEF_2：范围 = XN；code 等于 CNY；DEF_3：不筛选（全部数据）");
+	}
+
+	@Test
+	void differentRawConditionJsonKeepsGroupsEvenWhenRenderedFactsMatch() {
+		String numeric = "{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":1}]}";
+		String textual = "{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"1\"}]}";
+		Task task = exportTaskWithConditions(numeric, textual, numeric);
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.conditionSummary())
+				.isEqualTo("DEF_1、DEF_3：code 等于 1；DEF_2：code 等于 1");
+	}
+
+	@Test
+	void undecidedAndInvalidJsonAreNotAggregated() {
+		String condition = conditionValue("CNY");
+		Task task = exportTaskWithConditions(condition, condition, null, null, "{bad json", "{}");
+		task.setCurrentStep("QUERY_COND");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.conditionSummary()).isEqualTo("DEF_1、DEF_2：code 等于 CNY；"
+				+ "DEF_3：尚未设置筛选条件；DEF_4：尚未设置筛选条件；"
+				+ "DEF_5：筛选条件无效，请重新设置；DEF_6：不筛选（全部数据）");
+	}
+
+	@Test
+	void longSummaryTruncatesWithinGroupsWithoutDroppingTrailingGroups() {
+		Task task = exportTaskWithConditions(conditionValue("A".repeat(180)),
+				conditionValue("B".repeat(180)), conditionValue("C".repeat(180)));
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.conditionSummary()).hasSizeLessThanOrEqualTo(240)
+				.contains("DEF_1").contains("DEF_2").contains("DEF_3").contains("…");
+	}
+
+	@Test
+	void chineseGroupIdentifierOverflowUsesCountFallback() {
+		Task task = exportTaskWithConditions(distinctConditions(121));
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertNeutralChineseFallback(report.conditionSummary(), 121);
+	}
+
+	@Test
+	void englishGroupIdentifierOverflowUsesCountFallback() {
+		java.util.Locale previous = org.springframework.context.i18n.LocaleContextHolder.getLocale();
+		try {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(java.util.Locale.ENGLISH);
+			Task task = exportTaskWithConditions(distinctConditions(81));
+			stubTask(task);
+
+			ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+			assertNeutralEnglishFallback(report.conditionSummary(), 81);
+		}
+		finally {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(previous);
+		}
+	}
+
+	@Test
+	void identicalJsonSingleGroupUsesNeutralFallbackWhenIdentifiersOverflow() {
+		String shared = conditionValue("SAME");
+		Task task = exportTaskWithConditions(repeatedConditions(121, shared));
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertNeutralChineseFallback(report.conditionSummary(), 121);
+	}
+
+	@Test
+	void undecidedItemsUseNeutralFallbackWhenIdentifiersOverflow() {
+		Task task = exportTaskWithConditions(new String[121]);
+		task.setCurrentStep("QUERY_COND");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertNeutralChineseFallback(report.conditionSummary(), 121);
+	}
+
+	@Test
+	void invalidJsonItemsUseNeutralFallbackWhenIdentifiersOverflow() {
+		String[] conditions = repeatedConditions(121, "{bad json");
+		Task task = exportTaskWithConditions(conditions);
+		task.setCurrentStep("QUERY_COND");
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertNeutralChineseFallback(report.conditionSummary(), 121);
+	}
+
+	@Test
+	void mixedStatesUseNeutralEnglishFallbackWhenIdentifiersOverflow() {
+		String[] conditions = new String[81];
+		java.util.Arrays.fill(conditions, 0, 40, conditionValue("SAME"));
+		java.util.Arrays.fill(conditions, 40, 60, "{}");
+		java.util.Arrays.fill(conditions, 70, 81, "{bad json");
+		Task task = exportTaskWithConditions(conditions);
+		task.setCurrentStep("QUERY_COND");
+		stubTask(task);
+		java.util.Locale previous = org.springframework.context.i18n.LocaleContextHolder.getLocale();
+		try {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(java.util.Locale.ENGLISH);
+
+			ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+			assertNeutralEnglishFallback(report.conditionSummary(), 81);
+		}
+		finally {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(previous);
+		}
+	}
+
+	private static String[] repeatedConditions(int count, String condition) {
+		String[] conditions = new String[count];
+		java.util.Arrays.fill(conditions, condition);
+		return conditions;
+	}
+
+	private static void assertNeutralChineseFallback(String summary, int count) {
+		assertThat(summary).hasSizeLessThanOrEqualTo(240)
+				.isEqualTo(count + " 个配置项的筛选条件详见任务")
+				.doesNotContain("不同筛选条件", "different filter conditions");
+	}
+
+	private static void assertNeutralEnglishFallback(String summary, int count) {
+		assertThat(summary).hasSizeLessThanOrEqualTo(240)
+				.isEqualTo("See the task for filter conditions of " + count + " configuration items")
+				.doesNotContain("不同筛选条件", "different filter conditions");
+	}
+
+	@Test
+	void shortGroupBudgetFlowsToLongGroupsWithoutTruncatingIdentifiers() {
+		String shared = conditionValue("S");
+		String[] conditions = new String[22];
+		java.util.Arrays.fill(conditions, 0, 20, shared);
+		conditions[20] = conditionValue("B".repeat(180));
+		conditions[21] = conditionValue("C".repeat(180));
+		Task task = exportTaskWithConditions(conditions);
+		stubTask(task);
+
+		ToolPreflightService.PreflightReport report = this.service.inspect("start_export", "{\"taskId\":5}");
+
+		assertThat(report.conditionSummary()).hasSize(240).endsWith("DEF_20：code 等于 S；"
+				+ "DEF_21：code 等于 " + "B".repeat(33) + "…；"
+				+ "DEF_22：code 等于 " + "C".repeat(33) + "…");
+	}
+
+	@Test
+	void summaryHandlesExact240And241CharacterBoundaries() {
+		Task exact = exportTaskWithConditions(conditionValue("X".repeat(226)));
+		stubTask(exact);
+		String exactSummary = this.service.inspect("start_export", "{\"taskId\":5}").conditionSummary();
+
+		Task overflow = exportTaskWithConditions(conditionValue("X".repeat(227)));
+		stubTask(overflow);
+		String overflowSummary = this.service.inspect("start_export", "{\"taskId\":5}").conditionSummary();
+
+		assertThat(exactSummary).hasSize(240).isEqualTo("DEF_1：code 等于 " + "X".repeat(226));
+		assertThat(overflowSummary).hasSize(240).isEqualTo("DEF_1：code 等于 " + "X".repeat(225) + "…");
+	}
+
+	@Test
+	void unicodeClustersStayWholeWhenConditionTextIsTruncated() {
+		for (String cluster : new String[] {"é", "😀", "👨‍👩‍👧‍👦"}) {
+			Task task = exportTaskWithConditions(conditionValue("X".repeat(224) + cluster + "Y"));
+			stubTask(task);
+
+			String summary = this.service.inspect("start_export", "{\"taskId\":5}").conditionSummary();
+
+			assertThat(summary).isEqualTo("DEF_1：code 等于 " + "X".repeat(224) + "…");
+		}
+	}
+
+	@Test
+	void reportHashIsIdenticalAcrossLanguagesForTheSameTask() {
+		Task task = exportTaskWithConditions(conditionValue("CNY"), conditionValue("USD"));
+		stubTask(task);
+		ToolPreflightService.PreflightReport chinese = this.service.inspect("start_export", "{\"taskId\":5}");
+		java.util.Locale previous = org.springframework.context.i18n.LocaleContextHolder.getLocale();
+		try {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(java.util.Locale.ENGLISH);
+			ToolPreflightService.PreflightReport english = this.service.inspect("start_export", "{\"taskId\":5}");
+
+			assertThat(english.conditionSummary()).isNotEqualTo(chinese.conditionSummary());
+			assertThat(english.reportHash()).isEqualTo(chinese.reportHash());
+		}
+		finally {
+			org.springframework.context.i18n.LocaleContextHolder.setLocale(previous);
+		}
+	}
+
+	private static String[] distinctConditions(int count) {
+		String[] conditions = new String[count];
+		for (int index = 0; index < count; index++) {
+			conditions[index] = conditionValue("V" + (index + 1));
+		}
+		return conditions;
+	}
+
+	@Test
+	void reportHashRetainsPerItemConditionFactsWhenDisplayIsGrouped() {
+		Task firstTask = exportTaskWithConditions(conditionValue("CNY"), conditionValue("CNY"));
+		stubTask(firstTask);
+		String firstHash = this.service.inspect("start_export", "{\"taskId\":5}").reportHash();
+
+		Task secondTask = exportTaskWithConditions(conditionValue("CNY"), conditionValue("USD"));
+		stubTask(secondTask);
+		String secondHash = this.service.inspect("start_export", "{\"taskId\":5}").reportHash();
+
+		assertThat(secondHash).isNotEqualTo(firstHash);
+	}
+
+	@Test
+	void createTaskRejectsMultipleNonEmptyConditionsWithBatchFollowUpDirection() {
+		DefinitionService definitions = mock(DefinitionService.class);
+		when(definitions.findByCode("CURRENCY")).thenReturn(new ConfigDefinition());
+		when(definitions.findByCode("REGION")).thenReturn(new ConfigDefinition());
+		ToolPreflightService validated = new ToolPreflightService(this.jobService, this.taskFileRepository,
+				this.stagingRowRepository, definitions);
+
+		ToolPreflightService.PreflightReport rejected = validated.inspect("create_task",
+				"{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\",\"REGION\"],"
+						+ "\"conditions\":{\"scopeKeys\":[\"XN\"]}}", AiContext.empty());
+
+		assertThat(rejected.pass()).isFalse();
+		assertThat(failure(rejected, ToolPreflightService.CheckCode.CREATE_CONDITIONS.label(false)))
+				.contains("set_conditions(items)").doesNotContain("逐项给出");
+	}
+
+	private static Task exportTaskWithConditions(String... conditionJsons) {
+		Task task = task(Task.TaskType.EXPORT, Task.TaskStatus.ACTIVE);
+		List<TaskItem> items = new java.util.ArrayList<>();
+		for (int index = 0; index < conditionJsons.length; index++) {
+			TaskItem item = item("DEF_" + (index + 1), index);
+			item.setConditionJson(conditionJsons[index]);
+			items.add(item);
+		}
+		task.setItems(items);
+		return task;
+	}
+
+	private static String conditionValue(String value) {
+		return "{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"" + value + "\"}]}";
 	}
 
 	// ── helpers ────────────────────────────────────────────────────────────

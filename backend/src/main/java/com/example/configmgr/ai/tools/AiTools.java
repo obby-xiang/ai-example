@@ -25,7 +25,6 @@ import com.example.configmgr.job.entity.Job;
 import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.entity.Task;
 import com.example.configmgr.task.service.TaskService;
-import com.example.configmgr.task.service.TaskSteps;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -447,7 +446,9 @@ public class AiTools {
     @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。"
             + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：非空已知条件只允许一个 defCode，未决定传 {} 且可保留多个 defCodes（这里的 {} 只表示未决定，不是 set_conditions 的“明确不设”），不得省略。"
             + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。"
-            + "条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主只给一次非必填自由文本框，留空即明确不设筛选，下一步提交 {}。条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
+            + "条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主提供 conditionMode=ALL/CUSTOM 表单。"
+            + "ALL 或 CUSTOM 留空均由宿主直接 confirm_step，不调用模型或 set_conditions；CUSTOM 非空文本才由模型解析并通过一次 set_conditions(items) 形成草案。"
+            + "条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
             + "标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。"
             + "“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。"
             + "只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false；宿主不得自动导航、代选或发配置表单，返回任务 id 后即可收尾；以后明确打开/配置仍可继续。"
@@ -775,8 +776,9 @@ public class AiTools {
     @Tool(name = AiToolNames.SET_CONDITIONS, description = "批量设置导出查询条件草案（前端执行，不写业务库）。"
             + "items 必须是非空数组，每项只含 defCode 和显式 conditions，defCode 不得重复；不同配置项可给不同条件。"
             + "已知条件直接使用；所有项均通过定义、字段、算子、取值和任务选中校验后才整批下发，任一项失败则整批零写入。"
-            + "未勾选/未绑定任一项也整批拒绝。明确不设时用一次 set_conditions 的 items 覆盖每个 defCode，"
-            + "各项 conditions 都传恰好空对象 {}，不要重发 SET_CONDITIONS；缺失、null、fields:[]、scopeKeys:[] 均被拒绝。"
+            + "未勾选/未绑定任一项也整批拒绝。批量项中某项明确不设时 conditions 传恰好空对象 {}；"
+            + "若全部配置项均不筛选，宿主在 conditionMode=ALL 或 CUSTOM 留空后直接 confirm_step，不调用本工具。"
+            + "缺失、null、fields:[]、scopeKeys:[] 均被拒绝。"
             + "只有完整有序 items 完全相同的调用才幂等复用；任一项、条件或顺序变化都是新修改。"
             + "只能在 EXPORT/QUERY_COND 使用；设置后由 confirm_step 或启动作业前的前端 persistStepData 提交业务库。")
     @ToolScope({AiToolNames.SCOPE_EXPORT_QUERY_COND})
@@ -826,10 +828,10 @@ public class AiTools {
             + "导入向导 UPLOAD/PRECHECK/IMPORT/PUBLISH（导入没有 SELECT_DEFS 步）。用户已提出筛选条件时也照此推进：先到 QUERY_COND，下一批再 set_conditions。"
             + "禁止从 SELECT_DEFS 直接跳到 EXPORT（那条路会跳过 QUERY_COND 与条件收集，会被宿主零副作用拒绝）；即使传 step，也必须先完成 QUERY_COND 才能推进到 EXPORT。"
             + "未设筛选是正常状态（= 全量导出）：进入 QUERY_COND 后不要自行下发 SET_CONDITIONS 表单；"
-            + "条件未决定时由宿主统一给一次非必填自由文本框（只此一次，留空即明确不设筛选并照常推进），不要重复收集或用文字追问。"
-            + "条件已知但还没有草案、或条件表回灌了非空文本却还没 set_conditions 时，confirm_step 会被零副作用拒绝并指回 set_conditions："
-            + "先形成草案，下一批再推进（业务库由前端在本步提交，模型不写库）。"
-            + "本步认可本轮已结算的结构化草案（含逐项 set_conditions(items=[{defCode, conditions: {}}]) 的明确不设）与\"留空=明确不设\"的决定；"
+            + "条件表单使用 conditionMode=ALL/CUSTOM；ALL 或 CUSTOM 留空均由宿主直接 confirm_step，不调用模型或 set_conditions，不要重复收集或用文字追问。"
+            + "CUSTOM 非空文本才由模型解析；条件已知但还没有草案、或 CUSTOM 非空回灌还没 set_conditions 时，confirm_step 会被零副作用拒绝并指回 set_conditions："
+            + "先通过一次 set_conditions(items) 形成批量草案，下一批再推进（业务库由前端在本步提交，模型不写库）。"
+            + "本步认可本轮已结算的批量结构化草案与 conditionMode=ALL/CUSTOM 空条件决定；"
             + "本工具必须单独成批：同一批里还有其它工具时会被零副作用拒绝并要求先单独调用 confirm_step"
             + "（条件表需要单独一张卡；混批挂起会先外置整批历史、吞掉同批其它调用的卡与回执）；start_export 预检仍校验业务库里的最终条件。")
     @ToolScope({AiToolNames.SCOPE_TASK_EXPORT, AiToolNames.SCOPE_TASK_IMPORT})
@@ -862,14 +864,13 @@ public class AiTools {
      * {@code GENERAL_CLARIFY}，缺省后者），
      * 宿主按 purpose + 任务槽位判断"这张表还有没有真实缺口"，不按标题猜用途。
      *
-     * <p>2026-10-29（闭环批）：{@code TASK_TYPE} 固定为单个 enum 单选 {@code EXPORT/IMPORT}（类型未知才用，
-     * 已确定时零副作用拒绝并指回 {@code create_task}）；{@code SET_CONDITIONS} 固定为单个非必填自由文本框
-     * （有明确步骤时只有 {@code QUERY_COND} 允许下发，留空=不设筛选；{@code SELECT_DEFS}/{@code EXPORT} 及之后
-     * 等其它步骤零副作用拒绝）。
+     * <p>{@code TASK_TYPE} 固定为单个 enum 单选 {@code EXPORT/IMPORT}（类型未知才用，
+     * 已确定时零副作用拒绝并指回 {@code create_task}）；{@code SET_CONDITIONS} 使用
+     * {@code conditionMode=ALL/CUSTOM} 与 CUSTOM 可见的非必填文本框。ALL 或 CUSTOM 留空由宿主直接
+     * {@code confirm_step}；CUSTOM 非空文本才由模型结构化并经一次 {@code set_conditions(items)} 形成批量草案。
      *
-     * <p>2026-10-30（条件草案与提交边界）：条件表回灌后的结构化条件只经 {@code set_conditions} 形成<b>草案</b>，
-     * 本工具与草案都不写业务库；业务数据库由前端在下一步（{@code confirm_step}）/启动作业前
-     * {@code persistStepData} 提交。已知条件走 {@code set_conditions} 草案时不弹表，留空=明确不设（提交 {@code {}}）。
+     * <p>条件草案不写业务库；业务数据库由前端在下一步（{@code confirm_step}）/启动作业前
+     * {@code persistStepData} 提交。已知条件走批量草案时不弹表。
      *
      * <h2>披露范围（{@code *}）</h2>
      * 本工具是通用信息收集能力：两个场景都可用于任务中心、任意业务页面以及没有显式工作区上下文的场景。
@@ -907,6 +908,7 @@ public class AiTools {
      */
     @Tool(name = AiToolNames.GENERATIVE_FORM, description = "在对话内渲染结构化表单并等待用户填写，只用于真实信息缺口，不用于已知信息、预填确认或取消后自动重问。"
             + "purpose 必须对应实际用途。TASK_TYPE 只在类型未知时使用单个 EXPORT/IMPORT 单选；SET_CONDITIONS 由宿主统一发放，模型不得自行调用。"
+            + "条件表单使用 conditionMode=ALL/CUSTOM；ALL 或 CUSTOM 留空均由宿主直接 confirm_step，CUSTOM 非空文本才交模型结构化。"
             + "配置项已明确时直接使用 select_definitions。字段类型统一为 text/number/boolean/date/enum/multi_select/attachment，"
             + "禁止 HTML、脚本和自定义属性；attachment 只能由用户上传，不得预填。"
             + "披露时保留完整当前 Schema 和联动能力，高级联动仍受后端白名单与闭集数据源校验。表单只收集值，不推进向导步骤；"
@@ -938,7 +940,7 @@ public class AiTools {
     public record FormSpec(
             @ToolParam(description = "场景：FILTER（收集筛选/查询条件）或 CLARIFY（信息不足时向用户澄清）") String scenario,
             @ToolParam(description = "用途（选择/条件/类型表单必须显式给）：SELECT_DEFINITIONS（收集配置项选择）/ "
-                    + "SET_CONDITIONS（收集筛选条件：只在 QUERY_COND，单个非必填自由文本框，留空=不设筛选）/ "
+                    + "SET_CONDITIONS（收集筛选条件：只在 QUERY_COND，conditionMode=ALL/CUSTOM 加 CUSTOM 可选文本；ALL 或 CUSTOM 留空=全量）/ "
                     + "TASK_TYPE（收集任务类型：只在类型未知时，单个 enum 单选 EXPORT/IMPORT）/ "
                     + "GENERAL_CLARIFY（通用澄清，缺省）。宿主按用途判断槽位是否已齐，"
                     + "禁止靠标题猜用途", required = false) String purpose,

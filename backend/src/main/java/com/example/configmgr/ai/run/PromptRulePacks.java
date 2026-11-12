@@ -33,6 +33,7 @@ final class PromptRulePacks {
 				创建任务：用户明确新建时直接 create_task，不先用列表摸底，也不复用旧任务参数。
 				按当前结构化创建上下文传 type=EXPORT 或 IMPORT，类型无法证明时不要猜测。
 				EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；
+				非空 conditions 只允许一个 defCode；多个配置项的不同条件必须在创建后通过一次 set_conditions(items) 给出。
 				IMPORT 不得附加导出条件。defCodes 未知时省略，保持宿主后续配置选择。
 				不得改为目录查询或文字追问。创建仍走确认卡且每轮最多一次；已创建的任务不得重建或重复批准。
 				“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。
@@ -78,10 +79,10 @@ final class PromptRulePacks {
 			sb.append("""
 
 					set_conditions 只在 QUERY_COND 使用；items 必须非空且 defCode 不重复，每项显式携带自己的 conditions。
-					所有项必须一次批量给出并整批校验，只有完整有序 items 相同才幂等。条件已明确时直接使用，不重复收集。
-					明确不筛选时，用一次 set_conditions 的 items 覆盖每个 defCode，各项 conditions 都传恰好空对象 {}，
-					不要重发 SET_CONDITIONS，也不要只清一部分就推进。create_task 的 {} 只表示条件未决定，不是明确不设。
-					条件未决定时由宿主提供一次非必填文本框，留空即不设筛选并继续，不重复收集。
+					所有项必须一次 set_conditions(items) 批量给出并整批校验，不得拆成多次调用；只有完整有序 items 相同才幂等。
+					条件已明确时直接使用，不重复收集。create_task 的 {} 只表示条件未决定，不是明确不设。
+					条件表单使用 conditionMode=ALL/CUSTOM；ALL 或 CUSTOM 留空均由宿主直接 confirm_step，不调用模型或 set_conditions。
+					CUSTOM 非空文本才由模型结构化；批量项中的明确不设传恰好空对象 {}，缺失、null、fields:[]、scopeKeys:[] 均被拒绝。
 					草案不是业务库提交事实。
 					""");
 		}
@@ -91,7 +92,7 @@ final class PromptRulePacks {
 					generative_form 只收集真实缺口，不用于已知值、二次确认或取消后自动重问；用途必须可判定。
 					选择/条件/类型表单按各自要求显式给出 purpose，通用澄清允许缺省。
 					TASK_TYPE 仅在类型未知时使用单个 EXPORT/IMPORT 单选。表单提交不推进步骤，下一批仍按当前披露继续。
-					不得用 generative_form 代替宿主在 QUERY_COND 提供的条件文本框，两类表单不得混用。
+					不得用 generative_form 代替宿主在 QUERY_COND 提供的 conditionMode=ALL/CUSTOM 条件表单，两类表单不得混用。
 					""");
 		}
 	}

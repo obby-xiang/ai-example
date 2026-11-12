@@ -1,5 +1,6 @@
 package com.example.configmgr.ai.run;
 
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ToolDefinitionOverride;
 import com.example.configmgr.ai.tool.YamlToolDefinitionSource;
 import com.example.configmgr.ai.tools.AiTools;
@@ -7,184 +8,78 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.annotation.Tool;
 
 import java.lang.reflect.Method;
+import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * 任务类型与筛选条件收集口径（2026-10-29 闭环批）的<b>提示词/工具描述/版本契约</b>。
- *
- * <p>锁三面：
- * <ol>
- * <li>系统提示词：类型未知必须用表单（{@code purpose=TASK_TYPE}，单个 enum 单选）而不是文字反问；
- * 条件表单只有 {@code QUERY_COND} 允许（一个非必填自由文本框，进入该步给一次，留空即全量推进），
- * {@code SELECT_DEFS} 先 {@code confirm_step}，其它步骤由宿主零副作用拒绝。</li>
- * <li>工具描述：注解与 YAML 同批改（YAML 是可选覆盖，写反了模型看到两套口径）。</li>
- * <li>版本：改描述必须发新 version（破 prompt 缓存）。</li>
- * </ol>
- *
- * <p><b>证红</b>：提示词删掉 TASK_TYPE 段 ⇒ 第 1 条红；删掉条件单框/留空/「只在 QUERY_COND」的步骤门 ⇒
- * 条件契约两条红；注解或 YAML 漏改 ⇒ 第 3 条红；version 不升 ⇒ 第 4 条红。
- */
+/** 当前任务类型、条件模式与批量条件工具的文字契约；不断言真实模型行为。 */
 class FlowTypeConditionPromptContractTest {
 
 	@Test
 	void promptDeclaresTaskTypeFormInsteadOfTextQuestion() {
 		String prompt = ResilientChatService.SYSTEM_PROMPT;
 
-		assertThat(prompt).as("purpose 白名单里必须有 TASK_TYPE")
-			.contains("TASK_TYPE");
-		assertThat(prompt).as("类型未知必须用表单，且是单个 enum 单选")
-			.contains("单个 enum 单选")
-			.contains("EXPORT/IMPORT");
-		assertThat(prompt).as("禁止用文字反问类型")
-			.contains("不要用文字反问类型");
-		assertThat(prompt).as("类型已确定时不再下发类型表单，直接 create_task")
-			.contains("类型已确定")
-			.contains("直接调用 create_task");
+		assertThat(prompt).contains("TASK_TYPE")
+				.contains("单个 enum 单选")
+				.contains("EXPORT/IMPORT")
+				.contains("不要用文字反问类型")
+				.contains("类型已确定")
+				.contains("直接调用 create_task");
 	}
 
 	@Test
-	void promptDeclaresSingleFreeTextConditionFormWithNoFilterOnBlank() {
-		String prompt = ResilientChatService.SYSTEM_PROMPT;
+	void capabilityRulesDeclareHostConditionModesAndDirectAdvance() {
+		String rules = PromptRulePacks.render(Set.of(AiToolNames.SET_CONDITIONS, AiToolNames.CONFIRM_STEP));
 
-		assertThat(prompt).as("条件表单：一个非必填自由文本框")
-			.contains("表单是单个非必填自由文本框");
-		assertThat(prompt).as("文本由模型解析成 set_conditions 结构")
-			.contains("非空回灌由模型解析成 set_conditions");
-		assertThat(prompt).as("留空（含 {}）= 不设筛选，直接推进（全量导出）")
-			.contains("留空（包括 {} 与空文本）即明确不设筛选")
-			.contains("confirm_step");
-		assertThat(prompt).as("单通道：只由宿主在 QUERY_COND 且条件未决定时发放一次，模型不得自行下发")
-			.contains("只由宿主在 QUERY_COND 且条件未决定时统一发放一次")
-			.contains("模型不得自行下发");
+		assertThat(rules).contains("conditionMode=ALL/CUSTOM")
+				.contains("ALL 或 CUSTOM 留空均由宿主直接 confirm_step")
+				.contains("CUSTOM 非空文本才由模型结构化")
+				.contains("一次 set_conditions(items)")
+				.doesNotContain("单个非必填自由文本框")
+				.doesNotContain("逐项各调用一次");
 	}
 
 	@Test
-	void toolDescriptionDeclaresTaskTypeAndConditionContract() throws Exception {
-		Method target = AiTools.class.getMethod("generativeForm", AiTools.FormSpec.class);
-		Tool tool = target.getAnnotation(Tool.class);
-		assertThat(tool).isNotNull();
-		String annotation = tool.description();
-		assertThat(annotation).as("注解描述必须给出 TASK_TYPE 用途").contains("TASK_TYPE");
-		assertThat(annotation).as("注解描述必须给出条件表单的单通道口径")
-			.contains("SET_CONDITIONS 不由模型调用")
-			.contains("只由宿主在 QUERY_COND");
+	void toolDescriptionsAgreeOnConditionModesAndBatchDrafts() throws NoSuchMethodException {
+		YamlToolDefinitionSource source = new YamlToolDefinitionSource();
+		List<ToolDefinitionOverride> overrides = List.of(source.load().find(AiToolNames.CREATE_TASK),
+				source.load().find(AiToolNames.CONFIRM_STEP), source.load().find(AiToolNames.GENERATIVE_FORM));
+		for (ToolDefinitionOverride override : overrides) {
+			assertThat(override.description()).contains("conditionMode=ALL/CUSTOM")
+					.contains("ALL 或 CUSTOM 留空均由宿主直接 confirm_step")
+					.doesNotContain("单个非必填自由文本框");
+		}
 
-		ToolDefinitionOverride yaml = new YamlToolDefinitionSource().load().find("generative_form");
-		assertThat(yaml).isNotNull();
-		assertThat(yaml.hasDescription()).isTrue();
-		assertThat(yaml.description()).as("YAML 描述必须与注解同口径")
-			.contains("TASK_TYPE")
-			.contains("QUERY_COND")
-			.contains("只由宿主在 QUERY_COND");
+		Method create = AiTools.class.getMethod("createTask", String.class, String.class, String[].class,
+				AiTools.FieldQueryCondition.class, Boolean.class, Boolean.class,
+				org.springframework.ai.chat.model.ToolContext.class);
+		Method confirm = AiTools.class.getMethod("confirmStep", String.class);
+		Method form = AiTools.class.getMethod("generativeForm", AiTools.FormSpec.class);
+		for (Method method : List.of(create, confirm, form)) {
+			Tool annotation = method.getAnnotation(Tool.class);
+			assertThat(annotation.description()).contains("conditionMode=ALL/CUSTOM")
+					.contains("ALL 或 CUSTOM 留空均由宿主直接 confirm_step")
+					.doesNotContain("单个非必填自由文本框");
+		}
+
+		ToolDefinitionOverride batch = source.load().find(AiToolNames.SET_CONDITIONS);
+		assertThat(batch.description()).contains("items 是 1..N 非空数组")
+				.contains("conditionMode=ALL 或 CUSTOM 留空后直接 confirm_step");
 	}
 
 	@Test
-	void promptDeclaresOneShotConditionBoxAfterEnteringQueryCond() {
-		String prompt = ResilientChatService.SYSTEM_PROMPT;
+	void promptDeclaresConditionChainBatchAndIdempotencyRules() {
+		String rules = PromptRulePacks.render(Set.of(AiToolNames.CONFIRM_STEP, AiToolNames.SET_CONDITIONS));
 
-		assertThat(prompt).as("条件表只由宿主在 QUERY_COND 且条件未决定时发放一次")
-			.contains("条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次");
-		assertThat(prompt).as("已有条件直接用于工具，不弹表单")
-			.contains("条件已明确（槽位或用户已给）时直接用于工具");
-		assertThat(prompt).as("框内留空（含 {}）就直接 confirm_step 全量推进")
-			.contains("留空就直接 confirm_step");
-		assertThat(prompt).as("条件只收集一次，不重复收集")
-			.contains("不得再下发第二张");
-		assertThat(prompt).as("模型代发条件表的旧口径必须删除")
-			.doesNotContain("由你（模型）")
-			.doesNotContain("不要为条件弹表单或追问");
-	}
-
-	@Test
-	void toolDescriptionsAgreeOnTheOneShotConditionBox() throws Exception {
-		ToolDefinitionOverride confirmStep = new YamlToolDefinitionSource().load().find("confirm_step");
-		assertThat(confirmStep).isNotNull();
-		assertThat(confirmStep.description())
-			.as("YAML confirm_step 必须说明条件表由宿主发放（模型不下发），留空即照常推进")
-			.contains("不要自行下发 SET_CONDITIONS 表单")
-			.contains("由宿主统一给一次非必填自由文本框")
-			.contains("留空即照常推进")
-			.doesNotContain("进入 QUERY_COND 时按 generative_form(purpose=SET_CONDITIONS) 给一次");
-
-		ToolDefinitionOverride setCondition = new YamlToolDefinitionSource().load().find("set_conditions");
-		assertThat(setCondition).isNotNull();
-		assertThat(setCondition.description())
-			.as("YAML set_conditions 必须认可条件表单回填解析出的条件")
-			.contains("自由文本框回填后解析出的条件");
-
-		Method confirmStepMethod = AiTools.class.getMethod("confirmStep", String.class);
-		String confirmStepAnnotation = confirmStepMethod.getAnnotation(Tool.class).description();
-		assertThat(confirmStepAnnotation).as("注解回落也要有这条单通道说明")
-			.contains("QUERY_COND")
-			.contains("宿主统一给一次非必填自由文本框");
-
-		Method setConditionMethod = AiTools.class.getMethod("setCondition", String.class,
-				AiTools.FieldQueryCondition.class);
-		String setConditionAnnotation = setConditionMethod.getAnnotation(Tool.class).description();
-		assertThat(setConditionAnnotation).as("注解回落不得再把「只有用户明确提出」写成唯一入口")
-			.contains("条件表单回填")
-			.doesNotContain("只有用户明确提出筛选/查询条件时才调用");
-	}
-
-	@Test
-	void promptDeclaresBothFormsHostIssued() {
-		String prompt = ResilientChatService.SYSTEM_PROMPT;
-
-		assertThat(prompt).as("类型表单仍由宿主先行下发：收到回灌就直接 create_task")
-			.contains("类型未知时宿主会先行下发那张类型表单")
-			.contains("收到它的回灌")
-			.contains("就直接按该值 create_task");
-		assertThat(prompt).as("条件表也由宿主统一发放一次（单通道）")
-			.contains("条件表单只由宿主在 QUERY_COND 且条件未决定时统一发放一次");
-		assertThat(prompt).as("模型代发条件表的旧口径必须删除")
-			.doesNotContain("由你（模型）")
-			.doesNotContain("不要等宿主代发");
-		assertThat(prompt).as("留空（含 {}）是明确不设筛选")
-			.contains("包括 {} 与空文本");
-		assertThat(prompt).as("已经发过的那一张不得再发第二张（否则同一缺口弹两次）")
-			.contains("不得再下发第二张");
+		assertThat(rules).contains("confirm_step 必须单独成批")
+				.contains("一次 set_conditions(items)")
+				.contains("不得拆成多次调用")
+				.contains("只有完整有序 items 相同才幂等");
 	}
 
 	@Test
 	void toolsVersionIsBumpedForTheNewDescriptions() {
-		YamlToolDefinitionSource shipped = new YamlToolDefinitionSource();
-
-		assertThat(shipped.version())
-			.as("改描述必须发新 version（破 prompt 缓存）")
-			.isEqualTo("2026-10-27.38");
-	}
-
-	/** 明确不设筛选必须在一次批量 items 中逐项给出空对象，不能重发条件表或只清一部分。 */
-	@Test
-	void promptDeclaresBatchExplicitUnsetViaEmptyObject() {
-		String prompt = PromptRulePacks.render(java.util.Set.of("create_task", "set_conditions"));
-
-		assertThat(prompt).as("明确不设 = 一次 set_conditions(items) 批量覆盖")
-			.contains("一次 set_conditions 的 items 覆盖每个 defCode")
-			.contains("各项 conditions 都传恰好空对象");
-		assertThat(prompt).as("不得重发条件表，也不得只清一部分就推进")
-			.contains("不要重发 SET_CONDITIONS")
-			.contains("也不要只清一部分就推进");
-		assertThat(prompt).as("create_task 的 {} 仍只表示条件未决定（不等于明确不设）")
-			.contains("create_task 的 {} 只表示条件未决定");
-	}
-
-	/**
-	 * 2026-10-31 条件链 fail-closed（F4/F8/F11）：confirm_step 必须单独成批；set_conditions 只对
-	 * 已勾选配置项调用、相同入参幂等复用（不同值才是修改）。
-	 */
-	@Test
-	void promptDeclaresConditionChainBatchAndIdempotencyRules() {
-		String prompt = ResilientChatService.SYSTEM_PROMPT;
-
-		assertThat(prompt).as("confirm_step 单独成批（混批会吞掉同批调用）")
-			.contains("confirm_step 必须单独成批")
-			.contains("先单独调用");
-		assertThat(prompt).as("set_conditions 只对已勾选配置项调用")
-			.contains("只能对任务已勾选的配置项调用");
-		assertThat(prompt).as("相同入参幂等复用、不同值才是修改")
-			.contains("幂等复用")
-			.contains("不同值才是修改");
+		assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.39");
 	}
 }

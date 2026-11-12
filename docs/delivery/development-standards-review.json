@@ -7005,6 +7005,51 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "沿用既有condition结构和verbatim无损提交，多值IN/同字段多条件不按逗号或文案压平。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1271 Spec/Task quality均通过且无分级问题；施工报告18个相关前端单点独立RED→GREEN、npm typecheck及node scripts/build.mjs成功；主控未重跑测试，全量Vitest、真实浏览器/Redis/多实例NOT_RUN。Modern Web Guidance检索forms，无DOM表单模式变更，未额外套用指南。"}
       }
+    },
+    {
+      "fingerprint": "sha256:5419a2492223d18bae8934e52cbdf5af28410ab8127100205403f903d82cd36c",
+      "status": "reviewed",
+      "reason": "逐hunk复核启动条件摘要的原始JSON聚合、组感知截断、逐项指纹及规则/文档同步；多轮独立复审的截断与文案问题全部关闭。",
+      "reviewedAt": "2026-11-13T04:27:32+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1278、施工agent-1277",
+      "specChanges": [
+        {
+          "change": "全部EXPLICIT_UNSET汇总为N项不筛选；原始conditionJson仅按JsonNode.equals聚合，UNDECIDED和坏JSON保持逐项。",
+          "reason": "人读文案相同不代表条件结构相同，数值/字符串、数组顺序和无效状态不得被猜成同义。",
+          "impact": "展示分组与reportHash材料分离，指纹仍逐项语言中立，不随展示合并或locale改变。"
+        },
+        {
+          "change": "240字组感知截断分离完整defCodes标识与conditionText，短组余额向后续长组再分配，复用GraphemeText按字素截断。",
+          "reason": "整串末尾截断会丢后续条件组，小预算还可能截没组标识或切断组合字符。",
+          "impact": "标识可放下时绝不截断且最终<=240；精确240/241、长短混合、组合字符/代理对/ZWJ均有边界约束。"
+        },
+        {
+          "change": "完整组标识和分隔符超过240时，统一降级为N个配置项的筛选条件详见任务的中性中英文摘要。",
+          "reason": "极端组数无法同时保留全部ID和240字上限，不能删组、截ID、超限或错误宣称各项使用不同条件。",
+          "impact": "相同JSON、UNDECIDED、坏JSON和混合状态均不推断差异或状态，全EXPLICIT_UNSET仍走提前汇总。"
+        },
+        {
+          "change": "AiTools、PromptRulePacks、tools.yaml及复测文档统一conditionMode=ALL/CUSTOM、空条件宿主confirm_step和一次set_conditions(items)。",
+          "reason": "模型披露、执行协议与当前复测预期必须一致，旧逐项调用不再保留。",
+          "impact": "tools.yaml版本2026-10-27.39；历史PASS/FAIL/NOT_RUN和C-137 PARTIAL证据不改写，最终方案无旧兼容。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolPreflightService.java", "status": "checked", "reason": "原始JSON分组、逐项指纹、完整ID预算再分配、GraphemeText截断和中性数量降级；已IDEA Reformat及定向Checkstyle。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java", "status": "checked", "reason": "规则同步ALL/CUSTOM、空条件宿主推进和一次批量条件设置；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "工具注解同步批量协议和创建单项约束，清理未使用import；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "Schema/描述/标题与Java一致，版本2026-10-27.39，无旧逐项协议。"},
+        {"path": "docs/superpowers/plans/2026-11-12-ai-condition-batch-workflow.md", "status": "checked", "reason": "记录最终无旧兼容方案、四阶段接口、组截断与中性降级及真实复测边界。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用JsonNode.equals、GraphemeText、现有ToolPreflightService与提示词/YAML体系，无新增依赖或第二套字素工具。"},
+        "java-api-style": {"status": "checked", "reason": "三份生产Java均IDEA Reformat，定向Checkstyle 0 violations，方法<=50行和复杂度<=20。"},
+        "logging-exception-safety": {"status": "checked", "reason": "坏JSON和未决不伪装合法条件，超限不伪造逐组或不同条件事实，reportHash不受展示降级影响。"},
+        "toc-interaction": {"status": "checked", "reason": "启动确认摘要去重且可辨认，极端情况只给中性任务指引，不新增技术提示或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "仅读取任务真实conditionJson生成确认摘要，未新增共享状态、数据库/Redis写入或执行器。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "分组按原始JSON结构，截断复用字素边界并覆盖组合字符、代理对和ZWJ，不按人读文本猜同义。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1278最终Spec/Task quality通过；施工报告全量/相同不同JSON/混合/大组数/长短预算/240与241/字素/中英文hash/提示词等独立RED→GREEN，360源编译及定向Checkstyle成功；主控未重跑测试，PMD因插件依赖错误NOT_RUN，全量Checkstyle余37个未触及既有违规，真实模型/浏览器/Cluster及全量测试NOT_RUN。"}
+      }
     }
   ]
 }

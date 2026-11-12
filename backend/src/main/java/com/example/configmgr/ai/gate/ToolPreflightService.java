@@ -12,6 +12,7 @@ import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.WizardActionGuard;
 import com.example.configmgr.common.BlankText;
 import com.example.configmgr.common.ConflictException;
+import com.example.configmgr.common.GraphemeText;
 import com.example.configmgr.common.ResourceNotFoundException;
 import com.example.configmgr.data.entity.ConfigDataRow;
 import com.example.configmgr.data.entity.ConfigStagingRow;
@@ -572,8 +573,8 @@ public class ToolPreflightService {
             appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
                     "non-empty conditions require exactly one valid defCode",
                     "非空 conditions 只允许一个合法的 defCode",
-                    "Provide exactly one configuration item, then use set_conditions for per-item conditions",
-                    "非空条件只允许一个配置项；不同配置项的条件请在创建后通过 set_conditions 逐项给出"));
+                    "Provide exactly one configuration item, then use one set_conditions(items) call for the others",
+                    "非空条件只允许一个配置项；不同配置项的条件请在创建后通过一次 set_conditions(items) 批量给出"));
         } else if (!conditionsNode.isEmpty() && this.definitionService == null) {
             conditionsValid = false;
             appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
@@ -1008,38 +1009,144 @@ public class ToolPreflightService {
         boolean export = task.getType() == Task.TaskType.EXPORT;
         boolean manualExport = manualExportBlankAsExplicit && export
                 && TaskSteps.isExportExecutionStep(task.getCurrentStep());
-        List<String> parts = new ArrayList<>();
+        Map<String, JsonNode> rawConditions = rawConditionsOf(task);
+        List<ConditionDisplayGroup> groups = new ArrayList<>();
         StringBuilder fact = new StringBuilder();
+        int displayedItems = 0;
+        int explicitUnsetItems = 0;
         for (ConditionAssessment.ItemCondition item : assessment.items()) {
-            appendConditionView(task, item, export, manualExport, english, parts, fact);
+            ConditionAssessment.State state = effectiveConditionState(task, item, manualExport);
+            if (!export && state == ConditionAssessment.State.UNDECIDED) {
+                continue;
+            }
+            appendConditionFact(item, state, fact);
+            displayedItems++;
+            explicitUnsetItems += state == ConditionAssessment.State.EXPLICIT_UNSET ? 1 : 0;
+            addConditionGroup(groups, item, state, rawConditions.get(item.defCode()), english);
         }
-        if (parts.isEmpty()) {
+        if (groups.isEmpty()) {
             return new ConditionView("", "none");
         }
-        String summary = String.join(english ? "; " : "；", parts);
-        if (summary.length() > 240) {
-            summary = summary.substring(0, 239) + "…";
+        if (displayedItems == explicitUnsetItems) {
+            return new ConditionView(english
+                    ? "All " + displayedItems + " configuration items have no filters (all data)"
+                    : displayedItems + " 个配置项均不筛选（全部数据）", fact.toString());
         }
-        return new ConditionView(summary, fact.toString());
+        return new ConditionView(renderConditionGroups(groups, english), fact.toString());
     }
 
-    private static void appendConditionView(Task task, ConditionAssessment.ItemCondition item, boolean export,
-                                            boolean manualExport, boolean english, List<String> parts, StringBuilder fact) {
-        if (!export && item.state() == ConditionAssessment.State.UNDECIDED) {
-            return;
-        }
-        String prefix = item.defCode() == null ? "" : item.defCode() + (english ? ": " : "：");
-        ConditionAssessment.State state = item.state();
-        if (state == ConditionAssessment.State.UNDECIDED && manualExport && !item.unparseable()
+    private static ConditionAssessment.State effectiveConditionState(Task task, ConditionAssessment.ItemCondition item,
+                                                                     boolean manualExport) {
+        if (item.state() == ConditionAssessment.State.UNDECIDED && manualExport && !item.unparseable()
                 && isBlankCondition(task, item.defCode())) {
-            state = ConditionAssessment.State.EXPLICIT_UNSET;
+            return ConditionAssessment.State.EXPLICIT_UNSET;
         }
-        appendConditionFact(item, state, fact);
-        switch (state) {
-            case SET -> parts.add(prefix + renderFacts(item.facts(), english));
-            case EXPLICIT_UNSET -> parts.add(prefix + (english ? "no filter (all data)" : "不筛选（全部数据）"));
-            case UNDECIDED -> parts.add(prefix + undecidedConditionText(item, english));
+        return item.state();
+    }
+
+    private static Map<String, JsonNode> rawConditionsOf(Task task) {
+        Map<String, JsonNode> rawConditions = new LinkedHashMap<>();
+        for (TaskItem item : task.getItems()) {
+            if (item == null || StringUtils.isBlank(item.getDefCode()) || BlankText.isBlank(item.getConditionJson())) {
+                continue;
+            }
+            try {
+                rawConditions.putIfAbsent(item.getDefCode(), JSON.readTree(item.getConditionJson()));
+            } catch (Exception ex) {
+                // ConditionAssessment owns the invalid state; it simply cannot join a valid JSON group.
+            }
         }
+        return rawConditions;
+    }
+
+    private record ConditionDisplayGroup(JsonNode rawCondition, List<String> defCodes, String conditionText) {
+    }
+
+    private static void addConditionGroup(List<ConditionDisplayGroup> groups, ConditionAssessment.ItemCondition item,
+                                          ConditionAssessment.State state, JsonNode rawCondition, boolean english) {
+        if (state != ConditionAssessment.State.UNDECIDED && rawCondition != null) {
+            for (ConditionDisplayGroup group : groups) {
+                if (rawCondition.equals(group.rawCondition())) {
+                    group.defCodes().add(item.defCode());
+                    return;
+                }
+            }
+        }
+        List<String> defCodes = new ArrayList<>();
+        defCodes.add(item.defCode());
+        String conditionText = switch (state) {
+            case SET -> renderFacts(item.facts(), english);
+            case EXPLICIT_UNSET -> english ? "no filter (all data)" : "不筛选（全部数据）";
+            case UNDECIDED -> undecidedConditionText(item, english);
+        };
+        groups.add(new ConditionDisplayGroup(rawCondition, defCodes, conditionText));
+    }
+
+    private static String renderConditionGroups(List<ConditionDisplayGroup> groups, boolean english) {
+        String separator = english ? "; " : "；";
+        List<String> prefixes = new ArrayList<>(groups.size());
+        List<String> fullParts = new ArrayList<>(groups.size());
+        for (ConditionDisplayGroup group : groups) {
+            String prefix = conditionGroupPrefix(group, english);
+            prefixes.add(prefix);
+            fullParts.add(prefix + group.conditionText());
+        }
+        String fullSummary = String.join(separator, fullParts);
+        if (fullSummary.length() <= 240) {
+            return fullSummary;
+        }
+        int identifiersLength = conditionGroupIdentifiersLength(prefixes, separator);
+        if (identifiersLength > 240) {
+            return taskConditionsSummary(groups, english);
+        }
+        return truncateConditionGroups(groups, prefixes, separator, identifiersLength);
+    }
+
+    private static String conditionGroupPrefix(ConditionDisplayGroup group, boolean english) {
+        String codes = String.join(english ? ", " : "、", group.defCodes());
+        return codes + (english ? ": " : "：");
+    }
+
+    private static int conditionGroupIdentifiersLength(List<String> prefixes, String separator) {
+        int length = separator.length() * (prefixes.size() - 1);
+        for (String prefix : prefixes) {
+            length += prefix.length();
+        }
+        return length;
+    }
+
+    private static String taskConditionsSummary(List<ConditionDisplayGroup> groups, boolean english) {
+        int itemCount = 0;
+        for (ConditionDisplayGroup group : groups) {
+            itemCount += group.defCodes().size();
+        }
+        return english ? "See the task for filter conditions of " + itemCount + " configuration items"
+                : itemCount + " 个配置项的筛选条件详见任务";
+    }
+
+    private static String truncateConditionGroups(List<ConditionDisplayGroup> groups, List<String> prefixes,
+                                                  String separator, int identifiersLength) {
+        List<String> parts = new ArrayList<>(groups.size());
+        int remainingChars = 240 - identifiersLength;
+        for (int index = 0; index < groups.size(); index++) {
+            int remainingGroups = groups.size() - index;
+            int budget = remainingChars / remainingGroups;
+            String conditionText = truncateConditionText(groups.get(index).conditionText(), budget);
+            parts.add(prefixes.get(index) + conditionText);
+            remainingChars -= conditionText.length();
+        }
+        return String.join(separator, parts);
+    }
+
+    private static String truncateConditionText(String text, int maxChars) {
+        if (text.length() <= maxChars) {
+            return text;
+        }
+        if (maxChars <= 0) {
+            return "";
+        }
+        int end = GraphemeText.precedingBoundary(text, maxChars - 1);
+        return text.substring(0, end) + "…";
     }
 
     private static void appendConditionFact(ConditionAssessment.ItemCondition item, ConditionAssessment.State state,
