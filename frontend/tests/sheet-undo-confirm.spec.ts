@@ -193,6 +193,13 @@ describe('边界 2：未经确认不执行', () => {
       runId: 'run-frame',
       seq: 2
     } as Extract<SseFrame, { type: 'frontend_tool_request' }>)
+
+    // handleFrame 对预览卡是 fire-and-forget：openWritePreview 内部要等表格上下文解析与
+    // 协作式写阶段的 yield（setTimeout/scheduler.yield）。等 store 的可观察状态建好再断言，
+    // 不用固定 sleep 猜测耗时。
+    await vi.waitFor(() => {
+      expect(store.activePreview?.tool).toBe('undo_last_sheet_edit')
+    }, { timeout: 5_000 })
     await flushPromises()
 
     // 帧路由命中"人围栏"分支（needsSheetPreview）：建卡而不是直接执行

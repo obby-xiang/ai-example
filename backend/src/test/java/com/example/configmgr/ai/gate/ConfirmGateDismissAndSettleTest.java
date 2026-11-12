@@ -8,11 +8,14 @@ import com.example.configmgr.ai.form.FormIssue;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -49,6 +52,13 @@ class ConfirmGateDismissAndSettleTest {
 
 	private static final String CALL_ID = "call-form";
 
+	private static final long TENANT_ID = 1L;
+
+	private static final long USER_ID = 101L;
+
+	/** 注册表/写出器的本地键按身份拼出：字段初始化前必须先建立本轮身份作用域。 */
+	private final RequestContextUtils.SafeCloseable identityScope = RequestContextUtils.useContext(TENANT_ID, USER_ID);
+
 	private final ObjectMapper mapper = new ObjectMapper();
 
 	private final RecordingGuard guard = new RecordingGuard();
@@ -69,18 +79,29 @@ class ConfirmGateDismissAndSettleTest {
 
 	@BeforeEach
 	void seedPendingFrontendForm() {
+		// 真实 RunStore 每次 pending 读都是 Redis 反序列化出的新副本；替身默认返回同一引用，
+		// 会让 ConfirmGate 先改副本状态再 tryApplyDecision 时被替身误判为“已决”。
+		this.store.setDeepCopyPending(true);
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
-		this.store.seedRun(RUN_ID, "sess-1");
+		RunSnapshot snapshot = this.store.seedRun(RUN_ID, "sess-1");
+		snapshot.setTenantId(TENANT_ID);
+		snapshot.setUserId(USER_ID);
+		this.store.save(snapshot);
 		this.store.putPending(RUN_ID, pendingForm());
 		this.guard.store = this.store;
+	}
+
+	@AfterEach
+	void closeIdentityScope() {
+		this.identityScope.close();
 	}
 
 	@Test
 	void dismissAfterLosingToAGuardlessWriterKeepsTheWrittenOutcomeAndEmitsNoFrame() {
 		FrameWire wire = FrameWire.attachTo(this.out);
-		// LateWriterStore 在 tryRecordDecision 之前模拟"不带 guard 的写者"把条目写成 REJECTED（超时收敛）
+		// LateWriterStore 在原子决策写入前模拟"不带 guard 的写者"把条目写成 REJECTED（超时收敛）
 		this.store.injectGuardlessWriter = true;
 		ConfirmGate.Submission submission = GateCalls.submit(this.gate, RUN_ID, CALL_ID, "{}", "http-post", true);
 
@@ -238,16 +259,27 @@ class ConfirmGateDismissAndSettleTest {
 
 		@Override
 		public DecisionClaim tryRecordDecision(String runId, String toolCallId, String status) {
-			if (this.injectGuardlessWriter && this.injected.add(toolCallId)) {
-				PendingToolCall concurrent = pendingRaw(runId, toolCallId);
-				if (concurrent != null && PendingToolCall.PENDING.equals(concurrent.getStatus())) {
-					concurrent.setStatus(PendingToolCall.REJECTED);
-					concurrent.setResolvedAtMs(System.currentTimeMillis());
-					concurrent.setResultText("另一写者写下的结局：超时收敛");
-					putPending(runId, concurrent);
-				}
-			}
+			injectGuardlessWriter(runId, toolCallId);
 			return super.tryRecordDecision(runId, toolCallId, status);
+		}
+
+		@Override
+		public DecisionClaim tryApplyDecision(String runId, PendingToolCall pending) {
+			injectGuardlessWriter(runId, pending.getToolCallId());
+			return super.tryApplyDecision(runId, pending);
+		}
+
+		private void injectGuardlessWriter(String runId, String toolCallId) {
+			if (!this.injectGuardlessWriter || !this.injected.add(toolCallId)) {
+				return;
+			}
+			PendingToolCall concurrent = pendingRaw(runId, toolCallId);
+			if (concurrent != null && PendingToolCall.PENDING.equals(concurrent.getStatus())) {
+				concurrent.setStatus(PendingToolCall.REJECTED);
+				concurrent.setResolvedAtMs(System.currentTimeMillis());
+				concurrent.setResultText("另一写者写下的结局：超时收敛");
+				putPending(runId, concurrent);
+			}
 		}
 
 	}
