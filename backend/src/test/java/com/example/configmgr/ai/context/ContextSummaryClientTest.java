@@ -22,6 +22,10 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import reactor.core.publisher.Flux;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.MonitorInfo;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -330,24 +334,41 @@ class ContextSummaryClientTest {
 			}
 		});
 		ExecutorService closers = Executors.newFixedThreadPool(2);
-		CountDownLatch closeInvoked = new CountDownLatch(2);
-		Runnable close = () -> {
-			closeInvoked.countDown();
-			client.close();
-		};
+		AtomicReference<Thread> firstThread = new AtomicReference<>();
+		AtomicReference<Thread> secondThread = new AtomicReference<>();
+		AtomicBoolean firstReturned = new AtomicBoolean();
+		AtomicBoolean secondReturned = new AtomicBoolean();
 		Future<?> firstClose = null;
 		Future<?> secondClose = null;
 		try {
 			assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
-			firstClose = closers.submit(close);
-			secondClose = closers.submit(close);
-			assertThat(closeInvoked.await(5, TimeUnit.SECONDS)).isTrue();
-			assertThat(firstClose.isDone() && secondClose.isDone()).as("两次 close 必须真实重叠").isFalse();
+			firstClose = closers.submit(() -> {
+				firstThread.set(Thread.currentThread());
+				client.close();
+				firstReturned.set(true);
+			});
+			// 只有先看到第一次 close 真实停在 awaitTermination（且持有客户端监视器）才放第二次 close 进来，
+			// 顺序不靠线程调度碰运气。
+			Thread first = awaitInsideAwaitTermination(client, firstThread);
+			secondClose = closers.submit(() -> {
+				secondThread.set(Thread.currentThread());
+				client.close();
+				secondReturned.set(true);
+			});
+			awaitBlockedOnClientMonitor(client, secondThread, first);
+
+			// 同一时刻的三条证据：第一次 close 仍在 awaitTermination、第二次 close 阻塞在它持有的同一
+			// monitor 上、两次调用都还没返回；摘要未释放，2 秒预算内不得提前取消。
+			assertThat(isInsideAwaitTermination(first)).as("第二次 close 被挡住时第一次仍在 awaitTermination").isTrue();
+			assertThat(firstReturned).as("第一次 close 尚未返回").isFalse();
+			assertThat(secondReturned).as("第二次 close 尚未返回").isFalse();
 			assertThat(interrupted.getCount()).as("重叠关闭期间不得提前取消").isEqualTo(1);
 			release.countDown();
 
 			firstClose.get(2, TimeUnit.SECONDS);
 			secondClose.get(2, TimeUnit.SECONDS);
+			assertThat(firstReturned).as("第一次 close 正常返回").isTrue();
+			assertThat(secondReturned).as("第二次 close 正常返回").isTrue();
 			assertThat(summary).succeedsWithin(Duration.ofSeconds(2)).isEqualTo("幂等摘要");
 			assertThat(client.executor().isShutdown()).isTrue();
 		}
@@ -636,6 +657,93 @@ class ContextSummaryClientTest {
 		finally {
 			client.close();
 		}
+	}
+
+	private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
+
+	/**
+	 * 轮询到第一次 close 真实停在 {@code ThreadPoolExecutor.awaitTermination}，且当时仍持有客户端实例的
+	 * 对象监视器；超时则带着实际线程状态/锁 owner 失败，不把"线程已启动"当作重叠证据。
+	 */
+	private static Thread awaitInsideAwaitTermination(ContextSummaryClient client, AtomicReference<Thread> ref)
+			throws InterruptedException {
+		if (!THREADS.isObjectMonitorUsageSupported()) {
+			throw new AssertionError("JVM 不支持对象监视器监控，无法证明第一次 close 持有客户端监视器");
+		}
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+		String observed = "close 线程尚未启动";
+		do {
+			Thread thread = ref.get();
+			if (thread != null) {
+				ThreadInfo info = THREADS.getThreadInfo(new long[] { thread.getId() }, true, false)[0];
+				observed = "state=" + thread.getState() + ", lockOwnerId="
+						+ (info == null ? "n/a" : info.getLockOwnerId()) + ", holdsClientMonitor="
+						+ holdsClientMonitor(info, client) + ", inAwaitTermination=" + isInsideAwaitTermination(thread);
+				if (isInsideAwaitTermination(thread) && holdsClientMonitor(info, client)) {
+					return thread;
+				}
+			}
+			Thread.sleep(5);
+		}
+		while (System.nanoTime() < deadline);
+		throw new AssertionError("第一次 close 未停在 awaitTermination 并持有客户端监视器 (" + observed + ")");
+	}
+
+	/**
+	 * 轮询到第二次 close 处于 {@link Thread.State#BLOCKED}，且它等待的 monitor owner 正是第一次 close
+	 * 线程 —— 同一次观测里 owner 锁列表还必须包含客户端实例本身。
+	 */
+	private static void awaitBlockedOnClientMonitor(ContextSummaryClient client, AtomicReference<Thread> ref,
+			Thread owner) throws InterruptedException {
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+		String observed = "第二次 close 线程尚未启动";
+		do {
+			Thread thread = ref.get();
+			if (thread != null) {
+				ThreadInfo info = THREADS.getThreadInfo(new long[] { thread.getId() }, true, false)[0];
+				ThreadInfo ownerInfo = THREADS.getThreadInfo(new long[] { owner.getId() }, true, false)[0];
+				long ownerId = info == null ? -1L : info.getLockOwnerId();
+				boolean ownerHoldsClientMonitor = holdsClientMonitor(ownerInfo, client);
+				observed = "state=" + thread.getState() + ", lockOwnerId=" + ownerId + " (first=" + owner.getId()
+						+ "), lockName=" + (info == null ? "n/a" : info.getLockName()) + ", ownerHoldsClientMonitor="
+						+ ownerHoldsClientMonitor;
+				if (thread.getState() == Thread.State.BLOCKED && ownerId == owner.getId() && ownerHoldsClientMonitor) {
+					return;
+				}
+			}
+			Thread.sleep(5);
+		}
+		while (System.nanoTime() < deadline);
+		throw new AssertionError("第二次 close 未阻塞在第一次 close 持有的客户端监视器上 (" + observed + ")");
+	}
+
+	private static boolean isInsideAwaitTermination(Thread thread) {
+		boolean inClose = false;
+		boolean inAwaitTermination = false;
+		for (StackTraceElement frame : thread.getStackTrace()) {
+			if (ContextSummaryClient.class.getName().equals(frame.getClassName())
+					&& "close".equals(frame.getMethodName())) {
+				inClose = true;
+			}
+			if ("java.util.concurrent.ThreadPoolExecutor".equals(frame.getClassName())
+					&& "awaitTermination".equals(frame.getMethodName())) {
+				inAwaitTermination = true;
+			}
+		}
+		return inClose && inAwaitTermination;
+	}
+
+	private static boolean holdsClientMonitor(ThreadInfo info, Object client) {
+		if (info == null) {
+			return false;
+		}
+		int identityHashCode = System.identityHashCode(client);
+		for (MonitorInfo monitor : info.getLockedMonitors()) {
+			if (monitor.getIdentityHashCode() == identityHashCode) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** 一次模型补全（测试用）：记录收到的 Prompt 并回放固定的正文/finishReason。 */
