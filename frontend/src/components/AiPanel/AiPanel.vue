@@ -2211,7 +2211,9 @@ function isTerminalMessage(message: ChatMessage): boolean {
 }
 
 function isRecoveryLoading(message: ChatMessage): boolean {
-  return message.role === 'assistant' && ai.restoringRecovery && !isTerminalMessage(message)
+  const recoveryPending = ai.restoringRecovery || recoveryErrorVisible.value
+    || ai.currentError !== null || ai.historyError !== null
+  return message.role === 'assistant' && recoveryPending && !isTerminalMessage(message)
 }
 
 /**

@@ -7212,6 +7212,43 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "只按finishReason和正文空态分类，不解析或记录推理正文，terminalSignal与turn_end同源。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1284最终Spec/Task quality通过；施工报告LENGTH空正文单次失败、STOP→LENGTH锁存、空STOP重试、非空LENGTH、8192默认/覆盖/冻结、可选reasoningTokens及正文脱敏独立RED→GREEN，361源编译成功；主控未重跑测试，真实模型/Redis/浏览器和全量测试NOT_RUN，37个既有Checkstyle违规未扩散处理。"}
       }
+    },
+    {
+      "fingerprint": "sha256:f69c7b762261b3b54c73d2439280d6dc9fd0bf522a1f1ade7577cacfb6342d1b",
+      "status": "reviewed",
+      "reason": "逐hunk复核history/current/probe读取失败与权威终态的组合、双来源恢复缺口、退避写门禁和AiPanel终态操作区；多轮独立静态复核最终可合入。",
+      "reviewedAt": "2026-11-13T10:17:18+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1283、施工agent-1285",
+      "specChanges": [
+        {
+          "change": "history、current或reattach probe读取失败及status=0不再驱动业务终局清理；保留未终态正文、HITL、表单、预览、镜像在途和有界恢复。",
+          "reason": "读取失败只表示结果未知，不能把未批准操作伪造成过期、把部分正文伪造成完成或清掉用户现场。",
+          "impact": "404确认无活动、真实DONE/TIMEOUT及用户取消仍走原终局路径；current与history的一成一败按runId采用权威终态，旧DONE不得清理当前未决。"
+        },
+        {
+          "change": "恢复缺口按消息分别记录history与snapshot来源并取并集，成功读取只清理对应来源，archive-window保持独立。",
+          "reason": "单一全局缺口会在双通道一成一败、克隆或镜像合并时被另一来源误清。",
+          "impact": "内部使用WeakMap来源集合，不新增公开消息字段或持久化协议；最后一个普通来源清理后才移除消息标记。"
+        },
+        {
+          "change": "权威DONE后若history仍失败，保留history有界重读、退避期间恢复写门禁和耗尽后的manualRecovery；未终态助手只显示恢复三点。",
+          "reason": "业务DONE不等于历史已经可读，退避期短暂放开写入会允许用户在恢复状态未明时发起新操作；部分正文也不能显示完成时间和反馈操作。",
+          "impact": "history重读成功释放门禁，持续失败保留人工恢复入口；真实终态后恢复时间、复制和赞踩，既有样式与文案不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "读取失败保留last-good，组合current/history/probe权威事实，按runId终局，WeakMap管理双来源并保持恢复operation生命周期；已IDEA Reformat。"},
+        {"path": "frontend/src/components/AiPanel/AiPanel.vue", "status": "checked", "reason": "恢复错误和手动重试中的未终态助手复用既有recovery-loading三点，真实终态操作区不变；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有恢复operation、probe、权威终态、镜像和AiPanel三点组件，仅以WeakMap补充内部来源关系，无新增依赖或并行存储。"},
+        "java-api-style": {"status": "checked", "reason": "两份TypeScript/Vue生产文件的控制分支均保留显式大括号，RecoveryProbe复用现有返回类型，公开JSON与消息类型未改变。"},
+        "logging-exception-safety": {"status": "checked", "reason": "history/current/probe失败继续保留真实错误台账与人工出口，不把503、status=0或空history包装成无活动、过期或成功。"},
+        "toc-interaction": {"status": "checked", "reason": "静默保留用户正文、确认、表单和预览，只有有界恢复耗尽后保留人工入口；未终态不显示完成时间或反馈，无新增提示和样式。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "读取未知与业务终态严格分离，终态按当前恢复runId提交，双来源清理防止误覆盖，history退避token和businessWriteBlocked完整闭合；未新增Redis或数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "不修改字节解码、SSE帧解析或文本截断，只保留已解码的部分正文与恢复缺口事实。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1283多轮发现均已返修，最终WeakMap双来源与DONE退避门禁ADDRESSED且无Critical/Important；施工报告相关独立单点RED→GREEN、npm run typecheck及node scripts/build.mjs（3282模块）通过；主控未重跑测试，真实浏览器/Redis/Cluster/多实例及全量测试NOT_RUN。"}
+      }
     }
   ]
 }

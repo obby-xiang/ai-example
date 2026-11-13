@@ -138,16 +138,14 @@ describe('AI store 恢复与重试收口', () => {
     expect(store.suspended).toBe(false)
   })
 
-  it('恢复失败清掉本地待决锁并保留失败现场', async () => {
+  it('恢复读取失败保留本地待决锁和部分正文现场', async () => {
     const store = useAiStore()
     store.sessionId = 'sess-recovery-fail'
     store.historyLoaded = true
     const host = store.appendAssistantMessage('失败前的正文')
     host.runId = 'run-fail'
-    host.done = true
-    host.streaming = false
-    host.errorCard = buildErrorCard('EMPTY_REPLY', '保留失败现场')
-    store.lastRoundOutcome = 'error'
+    host.done = false
+    host.streaming = true
 
     store.upsertToolPart(host, {
       toolCallId: 'confirm-recovery',
@@ -160,14 +158,15 @@ describe('AI store 恢复与重试收口', () => {
     store.suspended = true
     store.sealRecovery('current', new ApiError('snapshot down', 503, 'AI_REDIS_UNAVAILABLE', null))
 
-    expect(store.suspended).toBe(false)
-    expect(store.pendingToolCall).toBeNull()
+    expect(store.suspended).toBe(true)
+    expect(host).toMatchObject({ done: false, streaming: true })
     expect(host.parts.find((part) => part.kind === 'tool')).toMatchObject({
-      status: 'expired',
-      requiresAction: false
+      status: 'pending',
+      requiresAction: true
     })
     expect(store.currentError).toMatchObject({ scope: 'current', status: 503 })
     expect(store.recoveryGap).toMatchObject({ reason: 'snapshot-unavailable' })
+    expect(host.recoveryGap).toBe(true)
     expect(api.cancel).not.toHaveBeenCalled()
     expect(api.frontendToolResult).not.toHaveBeenCalled()
   })

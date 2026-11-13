@@ -193,6 +193,8 @@ type TerminalHistoryResolution =
   | { kind: 'pending' }
   | { kind: 'ready'; followup: TerminalHistoryFollowup; message: ChatMessage }
 
+type RecoveryProbe = Awaited<ReturnType<typeof probeReattach>>
+
 interface SnapshotRecoveryPreload {
   current: AiRunCurrent | null
   error: unknown | null
@@ -3312,15 +3314,50 @@ function projectMirrorAssistantsPerRun(messages: ChatMessage[]): ChatMessage[] {
   return projected
 }
 
+const recoveryGapSources = new WeakMap<ChatMessage, Set<AiRecoveryGapReason>>()
+
+function noteRecoveryGapSource(message: ChatMessage, reason: AiRecoveryGapReason): void {
+  const sources = recoveryGapSources.get(message) ?? new Set<AiRecoveryGapReason>()
+  sources.add(reason)
+  recoveryGapSources.set(message, sources)
+}
+
+function copyRecoveryGapSources(source: ChatMessage, target: ChatMessage): void {
+  const sources = recoveryGapSources.get(source)
+  if (sources) {
+    const merged = new Set(recoveryGapSources.get(target) ?? [])
+    for (const reason of sources) {
+      merged.add(reason)
+    }
+    recoveryGapSources.set(target, merged)
+  }
+}
+
+function clearRecoveryGapSource(message: ChatMessage, reason: AiRecoveryGapReason): boolean {
+  const sources = recoveryGapSources.get(message)
+  if (!sources?.delete(reason)) {
+    return false
+  }
+  if (sources.size === 0) {
+    recoveryGapSources.delete(message)
+    if (message.recoveryGapReason !== 'archive-window') {
+      delete message.recoveryGap
+    }
+  }
+  return true
+}
+
 /** 批G：跨镜像/历史搬运消息时的浅拷贝（段与投影各复制一层，避免两处共写同一对象）。 */
 function cloneMessage(message: ChatMessage): ChatMessage {
-  return {
+  const cloned = {
     ...message,
     parts: message.parts.map((part) => ({ ...part })) as ChatMessage['parts'],
     toolRuns: message.toolRuns.map((run) => ({ ...run })),
     pendingCall: message.pendingCall ? { ...message.pendingCall } : null,
     appliedSeqs: []
   }
+  copyRecoveryGapSources(message, cloned)
+  return cloned
 }
 
 /**
@@ -5218,7 +5255,7 @@ export const useAiStore = defineStore('ai', {
           new ApiError('preparing: auto recovery exhausted', 202, 'PREPARING_TIMEOUT', null)
         )
       }
-      this.sealRecordedRecovery('current')
+      this.sealRecordedRecovery()
       this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
     },
 
@@ -5472,6 +5509,8 @@ export const useAiStore = defineStore('ai', {
           : hasTerminalRecoveryMarker && mirror?.inFlight === true
             && authoritativeTerminalSealedRunId !== this.activeRunId ? true
           : (this.loading || this.suspended || isLastAssistantInterrupted(this.messages)
+            || ((this.currentError !== null || this.historyError !== null)
+              && this.messages.some((message) => message.role === 'assistant' && !message.done))
             || (this.activeForm !== null && this.activeForm.status !== 'cancelled')
             || pendingAttachRunId !== null) && !this.stopped,
         runSeq: preserved === null ? this.runSeq : preserved.runSeq,
@@ -5854,7 +5893,7 @@ export const useAiStore = defineStore('ai', {
       try {
         history = await aiApi.history(this.sessionId, { latest: HISTORY_PAGE_SIZE })
       } catch (error) {
-        await currentPreload
+        const preloaded = await currentPreload
           logCaughtError(error, 'stores/ai.ts:4741')
         if (this.sessionId !== sid || historyRequestGenerations.get(sid) !== requestGeneration) {
           return // 会话已换或已有更新请求：过期失败不落任何状态
@@ -5865,7 +5904,8 @@ export const useAiStore = defineStore('ai', {
           return
         }
         this.sealRecovery('history', error, true)
-        // 历史是纯 GET：自动重读期间保留内部台账和非终态现场，耗尽后才封口并发布手动恢复入口。
+        // current 权威终态优先收口，但 history 自身的有界重读与最终手动出口仍须保留。
+        await this.restoreSnapshotGuarded(preloaded)
         this.scheduleHistoryRecovery()
         return
       }
@@ -5916,9 +5956,7 @@ export const useAiStore = defineStore('ai', {
         }
         this.historyLoaded = true
         this.historyError = null
-        if (this.recoveryGap?.reason !== 'archive-window') {
-          this.recoveryGap = null
-        }
+        this.clearHistoryRecoveryGap()
       }
       if (inFlightAtEntry || newRoundOccupies()) {
         completeHistoryWithoutMessageCommit()
@@ -5956,22 +5994,23 @@ export const useAiStore = defineStore('ai', {
       if (this.isHistoryRecoveryIdentityCurrent(sid, historyRunIdAtEntry, historyHostIdAtEntry)) {
         noteHistoryDoneEvidence(sid, requestGeneration, pageEntries)
       }
-      const commitHistory = (): void => {
+      const commitHistory = (probe: RecoveryProbe | null = null): void => {
         if (committed || !historyGuard.isValid()) {
           return
         }
         committed = true
         this.historyError = null
-        if (this.recoveryGap?.reason !== 'archive-window') {
-          this.recoveryGap = null
-        }
+        this.clearHistoryRecoveryGap()
         commitHistoryProjection()
         this.historyLoaded = true
         if (!history.messages || history.messages.length === 0) {
           const current = preloaded.current
-          const hasActiveSnapshot = current?.found === true && current.runId !== null
-            && !isTerminalRunStatus(current.snapshotStatus)
-          if (!hasActiveSnapshot) {
+          const hasActiveSnapshot = (current?.found === true && current.runId !== null
+            && !isTerminalRunStatus(current.snapshotStatus))
+            || probe?.preparing != null
+            || (probe?.status === 200 && !isTerminalRunStatus(probe.runStatus ?? probe.snapshotStatus))
+          const hasReadFailure = preloaded.error !== null || probe?.status === 0 || (probe?.status ?? 0) >= 500
+          if (!hasActiveSnapshot && !hasReadFailure) {
             for (const message of this.messages) {
               if (!message.parts.some((part) => part.kind === 'tool' && part.requiresAction)) {
                 continue
@@ -5986,7 +6025,8 @@ export const useAiStore = defineStore('ai', {
         this.messages = this.mergeMirrorInFlightRound(mergedMessages, mirrorMessages, mirrorInFlight,
           this.shouldPreserveStoppedRound(pageEntries, mirrorMessages)
             || this.shouldPreserveUnconfirmedRound(pageEntries, mirrorMessages)
-            || this.shouldPreserveTranscriptRound(pageEntries, mirrorMessages))
+            || this.shouldPreserveTranscriptRound(pageEntries, mirrorMessages),
+          preloaded.error !== null)
         this.carryMirrorOutcomeMarkers(this.messages, mirrorMessages)
         this.applyHistoryCompactionEvents(history.events)
       }
@@ -5997,9 +6037,7 @@ export const useAiStore = defineStore('ai', {
       }
       if (!committed) {
         this.historyError = null
-        if (this.recoveryGap?.reason !== 'archive-window') {
-          this.recoveryGap = null
-        }
+        this.clearHistoryRecoveryGap()
         this.historyLoaded = true
       }
       if (committed) {
@@ -6535,15 +6573,15 @@ export const useAiStore = defineStore('ai', {
     },
 
     /**
-     * 批次2：快照重建的**兜底出口** —— 未预期异常同样落 `currentError` + 统一封口。
+     * 批次2：快照重建的**兜底出口** —— 未预期异常同样落 `currentError` 并保留现场。
      *
      * <p>`restoreSuspendedSnapshot` 只把 `runs/current` 的失败当错误处理；重建路径里若还有
-     * 未预期异常（例如载荷形态异常），不接住就会以 rejected promise 结束 —— 既没有可见错误、
-     * 也没有封口。这里把这两类失败合成同一个出口（不重复处理已登记的 `currentError`）。
+     * 未预期异常（例如载荷形态异常），不接住就会以 rejected promise 结束且没有可见错误。
+     * 这里把这两类失败合成同一个出口（不重复处理已登记的 `currentError`）。
      */
     async restoreSnapshotGuarded(
       preloaded?: SnapshotRecoveryPreload,
-      commitHistory?: () => void,
+      commitHistory?: (probe?: RecoveryProbe | null) => void,
       historyGuard?: HistoryCommitGuard
     ): Promise<void> {
       const sessionId = this.sessionId
@@ -6569,7 +6607,7 @@ export const useAiStore = defineStore('ai', {
         if (this.currentError !== null && this.preparingRun === null && !autoRecovering
           && (historyGuard?.isValid() ?? true)
           && this.manualRecovery?.reason !== 'interrupted' && this.manualRecovery?.reason !== 'first-frame') {
-          this.sealRecordedRecovery('current')
+          this.sealRecordedRecovery()
           this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
         }
       }
@@ -6619,7 +6657,8 @@ export const useAiStore = defineStore('ai', {
       historical: ChatMessage[],
       mirrorMessages: ChatMessage[],
       inFlight: boolean,
-      preserveStoppedRound = false
+      preserveStoppedRound = false,
+      preserveUncertainMirror = false
     ): ChatMessage[] {
       if ((!inFlight && !preserveStoppedRound) || mirrorMessages.length === 0) {
         return historical
@@ -6687,9 +6726,10 @@ export const useAiStore = defineStore('ai', {
       if (target.timestamp === undefined && source.timestamp !== undefined) {
         target.timestamp = source.timestamp
       }
+      copyRecoveryGapSources(source, target)
       const completedByHistory = hasHistoryCoveredMirrorRound(target, source)
       if (!completedByHistory) {
-        canMergeMirrorRoundParts(target, source)
+        canMergeMirrorRoundParts(target, source, !preserveUncertainMirror)
       }
       if (preserveStoppedRound) {
         target.stopped = true
@@ -6764,7 +6804,7 @@ export const useAiStore = defineStore('ai', {
     async restoreSuspendedSnapshot(
       isOwner: () => boolean,
       preloaded?: SnapshotRecoveryPreload,
-      commitHistory?: () => void,
+      commitHistory?: (probe?: RecoveryProbe | null) => void,
       historyGuard?: HistoryCommitGuard
     ): Promise<void> {
       let historyGuardRejected = false
@@ -6826,7 +6866,23 @@ export const useAiStore = defineStore('ai', {
           this.currentError = toLoadErrorView('current', error)
           return
         }
-        // 非准备中的快照失败统一封口；直接失败立即发布，自动链失败由耗尽回调发布。
+        // current 失败不挡住同事务 history 的权威终态；只收口当前恢复 run，避免旧终态误清新未决。
+        if (commitHistory) {
+          const recoveryRunId = this.activeRunId
+          commitHistory()
+          const terminal = this.historyWindowEntries.find((item) => item.type.toUpperCase() === 'ASSISTANT'
+            && item.runId === recoveryRunId && typeof item.outcome === 'string' && item.outcome.trim() !== ''
+            && item.outcome !== 'UNCONFIRMED' && (!isTranscriptDegraded(item) || item.outcome === 'DONE'))
+          if (terminal?.runId && terminal.outcome) {
+            this.sealAuthoritativeTerminal(terminal.runId, {
+              snapshotStatus: terminal.outcome,
+              code: terminal.errorCode ?? null,
+              message: terminal.errorMessage ?? null,
+              cancelled: terminal.outcome === 'CANCELLED',
+              transcriptDegraded: isTranscriptDegraded(terminal)
+            })
+          }
+        }
         this.sealRecovery('current', error)
         return
       }
@@ -6886,7 +6942,7 @@ export const useAiStore = defineStore('ai', {
       if (preloaded === undefined && !applySnapshotFacts()) {
         return
       }
-      let probe: Awaited<ReturnType<typeof probeReattach>> | null = null
+      let probe: RecoveryProbe | null = null
       const preloadedInFlightHost = !current.found || !current.runId
         ? [...this.messages].reverse().find((item) => item.role === 'assistant'
           && !item.done
@@ -6915,7 +6971,7 @@ export const useAiStore = defineStore('ai', {
         }
       }
       if (canCommitHistory()) {
-        commitHistory?.()
+        commitHistory?.(probe)
       }
       if (preloaded !== undefined && !applySnapshotFacts()) {
         return
@@ -6944,7 +7000,7 @@ export const useAiStore = defineStore('ai', {
           })
           return
         }
-        if (probe !== null && probe.status >= 500) {
+        if (probe !== null && (probe.status === 0 || probe.status >= 500)) {
           this.sealRecovery('current', new ApiError('Reattach probe failed', probe.status, String(probe.status), null))
           return
         }
@@ -7162,8 +7218,17 @@ export const useAiStore = defineStore('ai', {
       if (!unconfirmedRecoveryRegistered && !transcriptRecoveryRegistered) {
         this.clearManualRecovery()
         if (!hasUnconfirmed && !hasTranscriptDegraded) {
-          cancelAutoRecovery()
-          clearRecoveryOperations(this)
+          if (this.historyError === null) {
+            cancelAutoRecovery()
+            clearRecoveryOperations(this)
+          } else {
+            cancelAutoRecovery('preparing')
+            cancelAutoRecovery('first-frame')
+            cancelAutoRecovery('purged')
+            if (currentAutoRecoveryOperation(this, 'history') === undefined) {
+              clearRecoveryOperations(this)
+            }
+          }
           clearTerminalHistoryFollowups(this.sessionId)
         }
       }
@@ -7403,29 +7468,39 @@ export const useAiStore = defineStore('ai', {
       this.writeMirrorNow()
     },
 
-    /**
-     * 2026-10-29 ToC 收口批：**权威快照读到在途轮** ⇒ 上一轮的"快照不可用"缺口作废。
-     *
-     * <p>2026-10-29 复审返修（I-1，收窄）：只清**读快照能证明已解决**的那一类
-     * （`snapshot-unavailable`），且**只在该类缺口存在时**才动逐消息标记：
-     * <ul>
-     * <li>`archive-window`：被归档窗口裁掉的中间帧读 `/runs/current` **补不回来** ——
-     *   续收锚点已是 `runSeq` 最大值，重连也不会再检出；清掉等于把缺帧的正文洗成完整回答；</li>
-     * <li>`history-unavailable`：历史不可用只能由**历史读成功**作废（`loadHistoryInner` 成功路径）；</li>
-     * <li>全局缺口为 null 时**不碰**消息级标记 —— 那些标记可能正来自 `archive-window`
-     *   （全局先被历史成功路径清空、消息标记仍在的时间窗）。</li>
-     * </ul>
-     * 调用方还必须保证"快照确实读到在途轮"（`current.found && current.runId`）：`found=false`
-     * 只意味着这一轮消失了，不意味着屏上那条半截回答变完整了。
-     */
+    /** 权威快照只解决 snapshot 来源；history 与 archive 缺口由各自成功路径处理。 */
     clearRecoveryGap(): void {
-      if (this.recoveryGap === null || this.recoveryGap.reason !== 'snapshot-unavailable') {
-        return
+      const clearGlobal = this.recoveryGap?.reason === 'snapshot-unavailable'
+      if (clearGlobal) {
+        this.recoveryGap = null
       }
-      this.recoveryGap = null
       let changed = false
       for (const message of this.messages) {
-        if (message.recoveryGap === true && message.recoveryGapReason !== 'archive-window') {
+        if (clearRecoveryGapSource(message, 'snapshot-unavailable')) {
+          changed = true
+        } else if (clearGlobal && !recoveryGapSources.has(message)
+          && message.recoveryGap === true && message.recoveryGapReason !== 'archive-window') {
+          delete message.recoveryGap
+          changed = true
+        }
+      }
+      if (changed) {
+        this.writeMirrorNow()
+      }
+    },
+
+    /** history 成功只清 history 来源，未解决 snapshot 与 archive-window 继续保留。 */
+    clearHistoryRecoveryGap(): void {
+      const clearGlobal = this.recoveryGap?.reason === 'history-unavailable'
+      if (clearGlobal) {
+        this.recoveryGap = null
+      }
+      let changed = false
+      for (const message of this.messages) {
+        if (clearRecoveryGapSource(message, 'history-unavailable')) {
+          changed = true
+        } else if (clearGlobal && !recoveryGapSources.has(message)
+          && message.recoveryGap === true && message.recoveryGapReason !== 'archive-window') {
           delete message.recoveryGap
           changed = true
         }
@@ -7478,12 +7553,12 @@ export const useAiStore = defineStore('ai', {
       this.publishManualRecovery({ scope: 'current', reason, error })
     },
 
-    /** 自动重试只记录错误；最终失败才执行既有终态封口与交互清理。 */
+    /** 恢复读取失败只记录错误并保留 last-good 现场；业务终局仍由真实终帧或权威终态驱动。 */
     sealRecovery(
       this: ReturnType<typeof useAiStore>,
       scope: Exclude<AiLoadErrorScope, 'context'>,
       error: unknown,
-      deferCleanup = hasActiveAutoRecovery(this)
+      deferMirror = hasActiveAutoRecovery(this)
     ): void {
       const view = toLoadErrorView(scope, error)
       if (scope === 'history') {
@@ -7491,27 +7566,21 @@ export const useAiStore = defineStore('ai', {
       } else {
         this.currentError = view
       }
-      if (deferCleanup) {
+      const reason = scope === 'history' ? 'history-unavailable' : 'snapshot-unavailable'
+      this.markRecoveryGap(reason)
+      for (const message of this.messages) {
+        if (message.role === 'assistant' && !message.done) {
+          message.recoveryGap = true
+          noteRecoveryGapSource(message, reason)
+        }
+      }
+      if (deferMirror) {
         return
       }
-      this.sealRecordedRecovery(scope)
+      this.sealRecordedRecovery()
     },
 
-    sealRecordedRecovery(scope: Exclude<AiLoadErrorScope, 'context'>): void {
-      this.sealLeftoverInFlight()
-      // pendingToolCall 是段投影：先清段的待决事实，再派生，不能直接给 computed 赋值。
-      // history 只是读取失败，sheet preview 段与 plan 留作只读复核；其他待决段照旧收口。
-      for (const message of this.messages) {
-        expireResidueToolParts(message, scope === 'history')
-        deriveProjections(message)
-      }
-      // history 可重试：表单先 flush 并保留同 toolCallId 草稿，预览 plan 也只读保留。
-      this.cleanupTerminalInteractionState(scope === 'history', scope === 'history')
-      this.suspended = false
-      // 没有连接在跑才复位 loading（别的轮正在收流时不得把它标成空闲）
-      if (currentAbort === null) {
-        this.loading = false
-      }
+    sealRecordedRecovery(): void {
       if (this.messages.length > 0) {
         this.writeMirrorNow()
       }
@@ -7526,6 +7595,11 @@ export const useAiStore = defineStore('ai', {
         return
       }
       this.recoveryGap = { reason, fromSeq: span.fromSeq, toSeq: span.toSeq, at: Date.now() }
+      for (const message of this.messages) {
+        if (message.recoveryGap === true) {
+          noteRecoveryGapSource(message, reason)
+        }
+      }
     },
 
     /**
@@ -7574,9 +7648,6 @@ export const useAiStore = defineStore('ai', {
       const targetRunId = pendingAtStart ? pendingAtStart.runId ?? '' : this.activeRunId ?? ''
       const targetMessageId = pendingAtStart?.id ?? activeRoundHostId ?? ''
       this.historyError = null
-      if (this.recoveryGap?.reason !== 'archive-window') {
-        this.recoveryGap = null
-      }
       this.forgetRunStreamDrive()
       clearTerminalHistoryFollowups(sessionId)
       this.resetAutoRecovery('history')
@@ -7638,7 +7709,7 @@ export const useAiStore = defineStore('ai', {
       const error = this.historyError ?? this.currentError
       if (error !== null) {
         if (!hasActiveAutoRecovery(this)) {
-          this.sealRecordedRecovery(error.scope)
+          this.sealRecordedRecovery()
           this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
         }
         return
@@ -7984,14 +8055,14 @@ export const useAiStore = defineStore('ai', {
         const error = this.historyError ?? this.currentError
         if (error !== null) {
           finalFailurePublished = true
-          this.sealRecordedRecovery(error.scope)
+          this.sealRecordedRecovery()
           this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
         }
       }, chain?.runId ?? null)
       if (!scheduled && !finalFailurePublished && !hasActiveAutoRecovery(this)) {
         const error = this.historyError ?? this.currentError
         if (error !== null) {
-          this.sealRecordedRecovery(error.scope)
+          this.sealRecordedRecovery()
           this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
         }
       }
@@ -8083,7 +8154,7 @@ export const useAiStore = defineStore('ai', {
           this.publishManualRecovery({ scope: 'history', reason: 'archive-window', error: null })
         } else if (this.currentError !== null) {
           if (!hasActiveAutoRecovery(this)) {
-            this.sealRecordedRecovery('current')
+            this.sealRecordedRecovery()
             this.publishManualRecovery({ scope: 'current', reason: 'load', error: this.currentError })
           }
         } else {
@@ -9148,7 +9219,7 @@ export const useAiStore = defineStore('ai', {
             }, () => {
               const error = this.historyError ?? this.currentError
               if (error !== null) {
-                this.sealRecordedRecovery(error.scope)
+                this.sealRecordedRecovery()
                 this.publishManualRecovery({ scope: error.scope, reason: 'load', error })
               }
             })

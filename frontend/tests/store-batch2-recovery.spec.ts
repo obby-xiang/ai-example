@@ -54,7 +54,7 @@ function runningSnapshot(runId = 'run-live', archiveMaxSeq = 3): AiRunCurrent {
   }
 }
 
-/** 镜像里"写盘时仍在途"的助手消息（刷新后应可续收；恢复失败时必须统一封口）。 */
+/** 镜像里"写盘时仍在途"的助手消息（刷新及读取失败后都应保留续收现场）。 */
 function seedInFlightMirror(sessionId: string, text = '半截回答'): void {
   sessionStorage.setItem(mirrorStorageKey(sessionId), JSON.stringify({
     v: 2,
@@ -115,11 +115,12 @@ afterEach(() => {
 })
 
 describe('批次2 · 恢复失败出口（history/current）', () => {
-  it('history 读取失败：置 historyError、统一封口（不永久 loading/不伪装完整答案）、重试可恢复', async () => {
+  it('history 读取失败：置 historyError 并保留未终态现场，重试后恢复原续收路径', async () => {
     const store = freshStore()
     store.sessionId = 'sess-hist'
     seedInFlightMirror('sess-hist')
     api.history.mockRejectedValue(new ApiError('service unavailable', 503, 'AI_REDIS_UNAVAILABLE', null))
+    api.runsCurrent.mockResolvedValue(runningSnapshot('run-mirror'))
 
     await store.loadHistory()
 
@@ -129,27 +130,26 @@ describe('批次2 · 恢复失败出口（history/current）', () => {
       status: 503
     })
     expect(store.historyLoaded).toBe(true)
-    expect(store.loading).toBe(false)
+    expect(store.loading).toBe(true)
 
-    // 统一封口：镜像留下的在途消息不得停在流式假态
     const host = assistantHosts(store.messages)[0]
-    expect(host?.done).toBe(true)
-    expect(host?.streaming).toBe(false)
-    // 不可完整恢复 = 中性缺口标记，不是轮失败、也不是"答案是完整的"
+    expect(host?.done).toBe(false)
+    expect(host?.streaming).toBe(true)
     expect(store.recoveryGap).toMatchObject({ reason: 'history-unavailable' })
     expect(host?.recoveryGap).toBe(true)
     expect(host?.unconfirmed ?? false).toBe(false)
     expect(host?.errorCard ?? null).toBeNull()
 
-    // 重试动作：清错后按同一会话重跑（一次性，不是轮询）
     api.history.mockResolvedValue({ sessionId: 'sess-hist', count: 0, messages: [] })
+    api.runsCurrent.mockResolvedValue(runningSnapshot('run-mirror'))
+    vi.spyOn(store, 'reattachActive').mockResolvedValue(undefined)
     await store.retryLoadHistory()
     expect(store.historyError).toBeNull()
     expect(store.recoveryGap).toBeNull()
-    expect(store.loading).toBe(false)
+    expect(store.loading).toBe(true)
   }, 15000)
 
-  it('runs/current 读取失败：置 currentError + 统一封口，不伪造轮失败；重试可恢复', async () => {
+  it('runs/current 读取失败：置 currentError 并保留未终态现场，不伪造轮失败；重试可恢复', async () => {
     const store = freshStore()
     store.sessionId = 'sess-cur'
     seedInFlightMirror('sess-cur')
@@ -162,15 +162,18 @@ describe('批次2 · 恢复失败出口（history/current）', () => {
     expect(store.historyError).toBeNull()
     expect(store.loading).toBe(false)
     expect(store.recoveryGap).toMatchObject({ reason: 'snapshot-unavailable' })
+    expect(store.messages.every((message) => message.recoveryGap === true)).toBe(true)
     for (const message of store.messages) {
       expect(message.errorCard ?? null).toBeNull()
       expect(message.unconfirmed ?? false).toBe(false)
-      expect(message.done).toBe(true)
+      expect(message.done).toBe(false)
     }
 
-    api.runsCurrent.mockResolvedValue(noSuspension())
+    api.runsCurrent.mockResolvedValue(runningSnapshot('run-mirror'))
+    vi.spyOn(store, 'reattachActive').mockResolvedValue(undefined)
     await store.retryRestoreSnapshot()
     expect(store.currentError).toBeNull()
+    expect(store.loading).toBe(true)
   }, 15000)
 })
 
