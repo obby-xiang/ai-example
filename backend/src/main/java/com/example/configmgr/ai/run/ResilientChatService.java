@@ -172,8 +172,9 @@ public class ResilientChatService {
      * 二者语义不同，不得互串 —— 取消/正常 stop 绝不打这个键。
      *
      * <p>
-     * 两个消费面：① {@code done.extra.truncated}（实时流，见 {@link #finish}）；
-     * ② 最终 assistant 消息 metadata（记忆窗口：{@code /history} 以 additive 键透出）。
+     * 三个消费面：① 非空正文 LENGTH 的 {@code done.extra.truncated}；② 空正文 LENGTH 的
+     * {@code error.truncated}（{@code terminalSignal} 与首个锁存终态同帧）；③ 非空正文的最终
+     * assistant 消息 metadata（记忆窗口：{@code /history} 以 additive 键透出）。
      */
     public static final String TRUNCATED_KEY = "truncated";
 
@@ -1313,7 +1314,7 @@ public class ResilientChatService {
         }
         stopKeepalive(state.keepalive);
         emptyReply(state.runId, state.sessionId, new Accumulator(state.runId), Math.max(1, state.budgetedAttempts),
-                state.out, state.turn);
+                state.out, state.turn, false);
         return true;
     }
 
@@ -2285,7 +2286,8 @@ public class ResilientChatService {
      * + 零副作用"才允许再试一次（见 {@link #emptyReplyRetryable}）。已上屏的思考、工具副作用、
      * 已挂起工具轮、已到尝试上界或预算耗尽时一律<b>不</b>重试，直接落 {@code EMPTY_REPLY} 失败
      * （否则重试会把已出过的思考段再吐一遍，或把"这一轮已做过事"抹成没做过）。隐藏思考（展示关闭）
-     * 没上屏，不阻断这条重试。
+     * 没上屏，不阻断这条重试。{@code finish_reason=length} 已是明确的输出截断事实，即使正文为空也
+     * 直接以 FAILED + 截断标记收尾，不进入普通空回复的同参重试。
      *
      * @return {@code true} = 已终态收尾（调用方 return）；{@code false} = 空回复可再试一次
      * （调用方继续尝试循环，本方法已发 {@code retry} 帧）
@@ -2303,12 +2305,13 @@ public class ResilientChatService {
         // message_end.chars、finalText、快照/记忆与前端 delta 拼接完全一致，不再只算第二段。
         String text = accumulator.text();
         if (!StringUtils.isNotBlank(text)) {
-            if (isEmptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(), attemptStartedAtMs,
+            boolean lengthTruncated = finish == UpstreamErrorClassifier.Finish.LENGTH;
+            if (!lengthTruncated && isEmptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(), attemptStartedAtMs,
                     beaconBefore, emptyReplyRetried)) {
                 emitEmptyReplyRetry(runId, sessionId, attempts, out, turn);
                 return false;
             }
-            emptyReply(runId, sessionId, accumulator, attempts, out, turn);
+            emptyReply(runId, sessionId, accumulator, attempts, out, turn, lengthTruncated);
             return true;
         }
         // 截断语义的唯一判据（实时帧与持久面同源）：只有 finish_reason=length 算截断。
@@ -2882,7 +2885,7 @@ public class ResilientChatService {
      * <p>终态出口（done / failed / empty_reply / cancelled / unconfirmed）全都经过这里 ——
      * "按 runId grep 一定有收尾行"是排查手册的第一条，缺一个出口就等于缺一条线索。
      * {@code unconfirmed} = 成功终局落库后无法确认权威快照（不写快照、不发 done，用 error 帧收尾）。
-     * 只记元数据：耗时、审批等待、工具次数、三维 token 与估算标记；<b>不含任何正文</b>。
+     * 只记元数据：耗时、审批等待、工具次数、token、输出上限与终止信号；<b>不含任何正文</b>。
      */
     private void emitTurnEnd(String runId, String sessionId, String status, String code, int attempts,
                              Accumulator accumulator, TurnContext turn, StreamWatchdog watchdog) {
@@ -2895,7 +2898,8 @@ public class ResilientChatService {
         long totalMs = Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs());
         long gateWaitMs = Math.max(0L, this.beacon.gateWaitMs(runId));
         Map<String, Object> usage = accumulator == null ? Map.of() : accumulator.usage(turn.promptEstimate());
-        AiTrace.event("turn_end", "status", status, "code", ObjectUtils.defaultIfNull(code, "none"), "attempts", attempts,
+        List<Object> event = new ArrayList<>(Arrays.asList("status", status, "code", ObjectUtils.defaultIfNull(code, "none"),
+                "attempts", attempts,
                 // 终态所在尝试序号（与 turn_start/turn_retry 的 attempt 同一口径）
                 "attempt", attempts,
                 "totalMs", totalMs, "activeMs", Math.max(0L, totalMs - gateWaitMs), "gateWaitMs", gateWaitMs,
@@ -2907,8 +2911,15 @@ public class ResilientChatService {
                 "totalTokens", usage.getOrDefault("totalTokens", 0), "est", usage.getOrDefault("est", true),
                 // usage 可信度：采到的非空 usage 帧数 / 被判脏回退的帧数（est=true 时这两个数是唯一佐证）
                 "frames", usage.getOrDefault("frames", 0), "dirty", usage.getOrDefault("dirty", 0),
+                "maxOutputTokens", turn.maxOutputTokens(),
+                "terminalSignal", accumulator == null ? null : accumulator.terminalSignal(),
                 "model", doneModel(accumulator, turn), "provider", turn.provider(),
-                "upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
+                "upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents()));
+        if (usage.containsKey(UsageDetails.REASONING_TOKENS)) {
+            event.add(UsageDetails.REASONING_TOKENS);
+            event.add(usage.get(UsageDetails.REASONING_TOKENS));
+        }
+        AiTrace.event("turn_end", event.toArray());
     }
 
     /**
@@ -3072,22 +3083,24 @@ public class ResilientChatService {
      * 写口走 {@link #writeFailureUnlessCancelled}（与 {@link #fail} 共用同一守卫）。
      */
     private void emptyReply(String runId, String sessionId, Accumulator accumulator, int attempts, SseChatEmitter out,
-                            TurnContext turn) {
+                            TurnContext turn, boolean lengthTruncated) {
         // N2（返修）：与 {@link #fail} 同口径 —— "判取消 → 写终态 → 发 error"整段在 per-run 监视器内。
         Object monitor = finalizeMonitor(runId);
         if (monitor == null) {
-            emptyReplyLocked(runId, sessionId, accumulator, attempts, out, turn);
+            emptyReplyLocked(runId, sessionId, accumulator, attempts, out, turn, lengthTruncated);
             return;
         }
         synchronized (monitor) {
-            emptyReplyLocked(runId, sessionId, accumulator, attempts, out, turn);
+            emptyReplyLocked(runId, sessionId, accumulator, attempts, out, turn, lengthTruncated);
         }
     }
 
     private void emptyReplyLocked(String runId, String sessionId, Accumulator accumulator, int attempts,
-                                  SseChatEmitter out, TurnContext turn) {
+                                  SseChatEmitter out, TurnContext turn, boolean lengthTruncated) {
         String text = accumulator.text();
-        String detail = "模型本轮未产出任何正文（去空白后为空），按失败收尾。"
+        String detail = lengthTruncated
+                ? "上游明确以 finishReason=length 结束且正文为空，按输出截断失败收尾。"
+                : "模型本轮未产出任何正文（去空白后为空），按失败收尾。"
                 + "常见成因：上游静默截断产出 0 字符的\"成功\"响应，或模型返回空回复；请重试或换一种问法。";
         String message = messageFor(ErrorCodes.EMPTY_REPLY, detail);
         log.error("AI turn empty reply runId={} sessionId={} attempts={} rawChars={} lastFrames=[{}]", runId, sessionId, attempts,
@@ -3122,7 +3135,9 @@ public class ResilientChatService {
         }
         // 本批：失败出口统一走 emitFailureTerminal（发帧前判归档终帧）——
         // 另一驱动方已落 done/error 时，这里不得把一轮翻成两条终帧。
-        isEmitFailureTerminal(runId, out, EMPTY_REPLY_CODE, message, null, text.length());
+        Map<String, Object> extra = lengthTruncated
+                ? Map.of(TRUNCATED_KEY, true, "terminalSignal", accumulator.terminalSignal()) : null;
+        isEmitFailureTerminal(runId, out, EMPTY_REPLY_CODE, message, extra, text.length());
         emitTurnEnd(runId, sessionId, "failed", EMPTY_REPLY_CODE, attempts, accumulator, turn, null);
         // F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。直接交出手里的快照。
         clearTerminalRunState(runId, snapshot);

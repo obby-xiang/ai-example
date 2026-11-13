@@ -63,7 +63,7 @@ class AiProviderRegistryParamsTest {
 		this.fixture.settings.put("default.maxTokens", "2048");
 		AiConfigService service = this.fixture.service();
 		AiProviderRegistry registry = this.fixture.registry(service);
-		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget("deepseek-flash")
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "deepseek-flash")
 			.orElseThrow()
 			.provider();
 
@@ -83,7 +83,7 @@ class AiProviderRegistryParamsTest {
 		this.fixture.settings.put("default.temperature", "0.7");
 		AiConfigService service = this.fixture.service();
 		AiProviderRegistry registry = this.fixture.registry(service);
-		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget("deepseek-flash")
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "deepseek-flash")
 			.orElseThrow()
 			.provider();
 
@@ -92,7 +92,7 @@ class AiProviderRegistryParamsTest {
 
 		assertThat(runtime.options().getTemperature()).as("越界项被忽略 ⇒ 回到全局默认").isEqualTo(0.7d);
 		assertThat(runtime.options().getTopP()).as("全局未设置 ⇒ 沿用 spring.ai 缺省").isNull();
-		assertThat(runtime.options().getMaxTokens()).isEqualTo(4096);
+		assertThat(runtime.options().getMaxTokens()).isEqualTo(8192);
 	}
 
 	@Test
@@ -122,7 +122,7 @@ class AiProviderRegistryParamsTest {
 		this.fixture.settings.put("default.maxTokens", "4096");
 		AiConfigService service = this.fixture.service();
 		AiProviderRegistry registry = this.fixture.registry(service);
-		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget("deepseek-flash")
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "deepseek-flash")
 			.orElseThrow()
 			.provider();
 

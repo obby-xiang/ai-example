@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </ul>
  *
  * <p><b>100 档为什么钉"硬上限"而不是 {@code limit − reserve}</b>：{@code reserve} 的语义是
- * 给<b>输出</b>留的空间（13000 &gt; max-tokens 4096），{@code nextEst} 只是 prompt 估算 ——
+ * 给<b>输出</b>留的空间（13000 &gt; max-tokens 8192），{@code nextEst} 只是 prompt 估算 ——
  * prompt 到 {@code limit − reserve} 并不注定 400。提前判死会白白丢掉一次本可成功的回答，
  * 所以 OVERFLOW 只在 {@code nextEst >= limitTokens}（prompt 已吃掉整窗）时成立；
  * {@code limit − reserve} 只参与 70/95 两档的比例（与 {@code ContextTrigger} 同口径）。

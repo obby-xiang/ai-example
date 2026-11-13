@@ -47,7 +47,7 @@
 | ID | 分类 | 文件:行 | 配置键 | 现值+单位 | 作用与消费点 | 可调性 | 依据 | 审视建议 | 旧 NUMSPEC ID |
 |---|---|---|---|---|---|---|---|---|---|
 | N-AI-001 | 模型 | `application.yml:119` | `spring.ai.openai.chat.options.temperature` | `0.2` | 采样温度；`AiProviderRegistry#buildOptions` 以本段 options 为基底（env 合成行与 DB 空表时逐值等价），DB `ai_setting.default.temperature` 可覆盖 | 配置键 | 裸数字（yml 与类注均无数值论证；旧账同判） | 保留；若要论证，按「工具型 Agent 低温」给依据 | B1-05 |
-| N-AI-002 | 模型 | `application.yml:120` | `spring.ai.openai.chat.options.max-tokens` | `4096`（token/次） | 单轮输出上限；同 `buildOptions` 基底，DB `default.maxTokens` 覆盖；与 `context.reserve-tokens 13000` 自洽（128K 下 L3 余额 5.75K > 4096） | 配置键 | 部分依据（自洽性有算式，4096 本身无模型对照） | 保留；若换小窗口模型须重算 reserve 与 L3 余额不等式 | B1-06 |
+| N-AI-002 | 模型 | `application.yml:120` | `spring.ai.openai.chat.options.max-tokens` | `8192`（token/次；2026-11-13 起，此前为 4096） | 单轮输出上限；同 `buildOptions` 基底，DB `default.maxTokens` 覆盖；与 `context.reserve-tokens 13000` 自洽（预留覆盖默认输出空间，128K 下 L3 在预留之外另余 5.75K） | 配置键 | 部分依据（自洽性有算式，8192 本身无模型对照） | 保留；若换小窗口模型须重算 reserve 与 L3 余额不等式 | B1-06 |
 | N-AI-003 | 轮询 | `application.yml:142` | `app.ai.config.reload-interval` | `1s` | 读路径版本比对最小间隔（`AiConfigService`，Redis `ai:cfg:ver` 一 GET；不可用时一次 DB 主键查询）；单测置 0 | 配置键 | 部分依据（「稳态至多 1 次/秒/实例」是设计目标，非实测） | 保留 | — |
 | N-AI-004 | 超时 | `application.yml:148` | `app.ai.config.probe-timeout` | `5s` | `/test` 与 `/models/fetch` 单次上游超时（`AiConnectionProbe`）；不按聊天预算取值 | 配置键 | 部分依据（注释给「跨公网握手 + /models 常见耗时」，无实测） | 保留；建议补一次实测（见 P-7） | — |
 | N-AI-005 | TTL | `application.yml:150` | `app.ai.config.models-cache-ttl` | `10m` | 远端模型清单缓存 TTL（`ai:cfg:models:<providerId>`，不落库） | 配置键 | 裸数字（只引设计稿 §3.1，无数值论证） | 保留；可配 5–30m 区间，无风险 | — |
@@ -59,7 +59,7 @@
 | N-AI-011 | 缓冲 | `application.yml:178` | `app.ai.context.reserve-tokens` | `13000`（token） | 输出+工具回环预留；比例阈值分母 = limit − 有效预留；`ContextTrigger#effectiveReserve` 再收口为 `min(本值, limit/2)` | 配置键 | 有依据（调研 §① Claude Code 13K + 自洽算式） | 保留 | B1-42 |
 | N-AI-012 | 百分比 | `application.yml:181` | `app.ai.context.l1-percent` | `70`（%） | L1 工具结果清除触发线（`ContextTrigger#decide`） | 配置键 | 有依据（调研 Q2 70–75 取中值） | 保留 | B1-43 |
 | N-AI-013 | 百分比 | `application.yml:182` | `app.ai.context.l2-percent` | `80`（%） | L2 滑窗+递归摘要触发线；也是 `ContextCompactor` 前缀主导判据 | 配置键 | 有依据（80–85 取中值） | 保留 | B1-44 |
-| N-AI-014 | 百分比 | `application.yml:183` | `app.ai.context.l3-percent` | `95`（%） | L3 硬截断触发线 | 配置键 | 有依据（95 + 自洽：剩 5.75K > 4096） | 保留 | B1-45 |
+| N-AI-014 | 百分比 | `application.yml:183` | `app.ai.context.l3-percent` | `95`（%） | L3 硬截断触发线 | 配置键 | 有依据（95 + 自洽：13K 预留覆盖当前 `max-tokens 8192`，预留之外另余 5.75K） | 保留 | B1-45 |
 | N-AI-015 | 百分比 | `application.yml:185` | `app.ai.context.hysteresis-percent` | `60`（%） | 压缩后滞回解锁线（`ContextTrigger#hysteresisUnlocked`）；启动期校验 ≤ l1 | 配置键 | 有依据（调研 Q4） | 保留 | B1-46 |
 | N-AI-016 | 缓冲 | `application.yml:187` | `app.ai.context.keep-tool-pairs` | `5`（对） | L1 不清理的最近工具结果数（按 response 条数计）；`MemoryWindow` 同源 | 配置键 | 有依据（调研 3–5 取上限） | 保留 | B1-47 |
 | N-AI-017 | 缓冲 | `application.yml:189` | `app.ai.context.keep-recent-turns` | `6`（轮） | L2 逐字保留轮数（`RollingSummarizer` / `HardTrim`） | 配置键 | 有依据（调研 6–8 取下限） | 保留 | B1-48 |

@@ -48,7 +48,7 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | B1-03 | 超时 | `application.yml:74` `spring.data.redis.connect-timeout` | `2s` | Redis 建连超时 | 配置键 | 部分依据（同上注释覆盖，未单独论证） |
 | B1-04 | 超时 | `application.yml:76` `spring.data.redis.lettuce.shutdown-timeout` | `200ms` | Lettuce 关停等待 | 配置键 | **裸数字** |
 | B1-05 | 其他 | `application.yml:111` `spring.ai.openai.chat.options.temperature` | `0.2` | 模型采样温度 | 配置键 | **裸数字** |
-| B1-06 | 缓冲 | `application.yml:112` `spring.ai.openai.chat.options.max-tokens` | `4096` | 单轮输出 token 上限 | 配置键 | **裸数字**（无注释；与 DeepSeek 模型上下文无对照说明） |
+| B1-06 | 缓冲 | `application.yml:112` `spring.ai.openai.chat.options.max-tokens` | `8192`（2026-11-13 起；此前为 4096） | 单轮输出 token 上限 | 配置键 | **裸数字**（无模型对照说明；本次仅提升当前默认值，不改写此前 4096 的历史记录） |
 | B1-07 | TTL | `application.yml:138` `app.ai.session-ttl` | `24h` | **会话级键族的统一滑动 TTL**（记忆 + run 快照/待决/帧归档/序号/事件日志/req/decided/fence/session:current/ctx 三件套/safety/ledger/idem + **`ai:cancel`**）：每次写/心跳/读侧 touch 整额续期，无绝对上限 | 配置键 | 有依据（2026-10-20 用户裁决第 4 条 6h→24h + 2026-10-21「取消信号随会话共亡」；类注 `AiProperties.java:28-33`、键族登记 `ai/run/SessionKeyRegistry`）【实测：`RunStoreSlidingTtlTest` / `SessionKeyRegistryTest`】 |
 | B1-08 | 缓冲 | `application.yml:140` `app.ai.memory.max-messages` | `40` | `MessageWindowChatMemory` 窗口条数 | 配置键 | **裸数字**（`AiProperties.java` 的 `Memory` 注只说「官方实现负责裁剪」，没论证 40） |
 | B1-09 | 超时 | `application.yml:181` `app.ai.hitl.frontend-tool-timeout` | `120s` | **只**管 6 个即时执行类前端工具（navigate_to / select_definitions / set_condition / confirm_step / open_export_file_editor / download_export_files）的**机器回执**兜底；确认门与 6 个等人工具（generative_form / replace_values / update_rows / normalize_column / undo_last_sheet_edit / ui_request_upload）**无上限** | 配置键 | 有依据（yml:172-180 注释 + 业界依据 §6；`confirm-timeout` 键**已退役**）。见 wait-audit §3.1 与 §3.3 第 1 项（拆分已闭环，退役面见本批 §1.1c） |
@@ -496,10 +496,10 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | 编号 | 分类 | 键名 | 现值 | 作用场景 | 可调性 | 依据现状 |
 |---|---|---|---|---|---|---|
 | B1-41 | 容量 | `app.ai.context.limit-tokens` | `128000` | 上下文上限（占用条的分母）的**过渡键**；模型配置专项的 `ai_model.max_context` 落地后由它覆盖（唯一消费点 = `ContextLimitResolver`）。`0` = 主动声明未知（降级态） | 配置键 | 有依据（本仓默认模型 128K 窗口；设计稿 §3.2「波次 1 分母」）。**待模型配置批②③ 接线后复核**：届时本键只是回落值 |
-| B1-42 | 缓冲 | `app.ai.context.reserve-tokens` | `13000` | 预留输出缓冲；比例阈值对 `limit − reserve` 取比 | 配置键 | 有依据（调研 §① Claude Code 的 13K；覆盖 `max-tokens 4096` + 一轮工具回环余量） |
+| B1-42 | 缓冲 | `app.ai.context.reserve-tokens` | `13000` | 预留输出缓冲；比例阈值对 `limit − reserve` 取比 | 配置键 | 有依据（调研 §① Claude Code 的 13K；覆盖当前 `max-tokens 8192` + 一轮工具回环余量） |
 | B1-43 | 阈值 | `app.ai.context.l1-percent` | `70` | L1（工具结果清除）触发线 | 配置键 | 有依据（调研 Q2 谱系 70–75 取中值） |
 | B1-44 | 阈值 | `app.ai.context.l2-percent` | `80` | L2（滑窗 + 递归摘要）触发线（批③ 已消费：`ContextCompactor` 逐级升格，每次最多一级） | 配置键 | 有依据（同上 80–85 取中值） |
-| B1-45 | 阈值 | `app.ai.context.l3-percent` | `95` | L3（硬截断兜底）触发线（批③ 已消费：`HardTrim` 兜底） | 配置键 | 有依据（同上 95）；自洽性 = 128K 下 `0.05 × 115K = 5.75K > max-tokens 4096` |
+| B1-45 | 阈值 | `app.ai.context.l3-percent` | `95` | L3（硬截断兜底）触发线（批③ 已消费：`HardTrim` 兜底） | 配置键 | 有依据（同上 95）；自洽性 = 128K 下 13K 预留覆盖 `max-tokens 8192`，预留之外另余 `0.05 × 115K = 5.75K` |
 | B1-46 | 阈值 | `app.ai.context.hysteresis-percent` | `60` | 滞回：压缩后 `used / limit < 60%` 才允许再次触发 | 配置键 | 有依据（调研 Q4「压缩到 60% 以下才允许再次触发」）；启动期校验要求 ≤ `l1-percent`（否则抖动链） |
 | B1-47 | pin | `app.ai.context.keep-tool-pairs` | `5` | L1 不清理的最近工具结果对（**按 `ToolResponseMessage` 里的 response 条数计**，不是按消息条数：一条 tool 消息可含多份响应，按消息计会把 pin 窗口放大成 N 倍） | 配置键 | 有依据（调研「保留最近 3–5 对」**取上限** = 保守） |
 | B1-48 | pin | `app.ai.context.keep-recent-turns` | `6` | L2 逐字保留的最近轮数（批③ 已消费：`RollingSummarizer`） | 配置键 | 有依据（调研「保留最近 6–8 轮」**取下限** = 省 token 优先） |
@@ -517,9 +517,9 @@ wait-audit §3 已列：后端 18 组超时/预算键 + 前端 13 组 + 7 项「
 | B1-55 | 估算 | 同上 `OTHER_CHARS_PER_TOKEN` | `4.0` | 其余字符折算 token 的除数 | 有依据（GPT 系分词器 4 字符/token 的通行经验值） |
 | B1-56 | 容量 | `ai/run/RunStore.java` `CONTEXT_LEDGER_MAX` | `20` | 压缩台账保留条数 | 有依据（设计稿 §3.6「最近 20 条」） |
 
-**自洽性复核（与既有数字的关系）**：`reserve-tokens 13000` 覆盖 `spring.ai.openai.chat.options.max-tokens 4096`
-（B1-06）；L3 触发线在 128K 下剩余 `5.75K`，仍大于 4096 ⇒ **触发线不会把输出空间吃掉**。
-换更小窗口模型（如 32K）时必须重算这两条不等式 —— 已写进 `AiProperties.Context` 的类注与 `application.yml` 同段注释。
+**自洽性复核（与既有数字的关系）**：`reserve-tokens 13000` 覆盖当前 `spring.ai.openai.chat.options.max-tokens 8192`
+（B1-06，2026-11-13 起；此前为 4096）；L3 触发线在 128K 下于 13K 预留之外另余 `5.75K`。
+换更小窗口模型（如 32K）时必须重算预留与阈值余额 —— 已写进 `AiProperties.Context` 的类注与 `application.yml` 同段注释。
 
 ## 超时面治理批② 追加（2026-10-21；决策看板 `:14` / `:16`）
 

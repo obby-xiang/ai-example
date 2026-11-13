@@ -124,7 +124,7 @@ class ProviderRegistryHotReloadTest {
 
 		assertThat(runtime.options().getModel()).isEqualTo("deepseek-flash");
 		assertThat(runtime.options().getTemperature()).isEqualTo(0.2d);
-		assertThat(runtime.options().getMaxTokens()).isEqualTo(4096);
+		assertThat(runtime.options().getMaxTokens()).isEqualTo(8192);
 		assertThat(runtime.options().getStreamUsage()).as("done 终帧 usage 的来源，换 provider 不许丢")
 			.isTrue();
 	}
@@ -170,7 +170,7 @@ class ProviderRegistryHotReloadTest {
 			// 三项都被忽略 ⇒ 值与 spring.ai.openai.chat.options 的缺省逐值相同
 			assertThat(runtime.options().getTemperature()).isEqualTo(0.2d);
 			assertThat(runtime.options().getTopP()).isNull();
-			assertThat(runtime.options().getMaxTokens()).isEqualTo(4096);
+			assertThat(runtime.options().getMaxTokens()).isEqualTo(8192);
 			assertThat(runtime.options().getStreamUsage()).isTrue();
 			assertThat(appender.list).filteredOn(event -> event.getLevel() == ch.qos.logback.classic.Level.WARN)
 				.hasSize(3);

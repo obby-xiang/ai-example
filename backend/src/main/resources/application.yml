@@ -119,7 +119,7 @@ spring:
         options:
           model: ${AI_MODEL:}
           temperature: 0.2
-          max-tokens: 4096
+          max-tokens: 8192
           # 让流式最后一块回传 token 用量（done 终帧 usage 的来源；换 provider 也不许丢）
           stream-usage: true
 
@@ -177,8 +177,8 @@ app:
     context:
       # 分母唯一来源 = ai_model.max_context（按显式 providerId + modelId 精确取行）；
       # 未声明/无身份 = 未知（降级态：不显示百分比、不做比例压缩），本段没有分母配置键。
-      # 预留缓冲（调研 §① Claude Code 的 13K）：覆盖 max-tokens 4096 的输出空间 + 一轮工具回环余量。
-      # 比例阈值对 (limit - reserve) 取比 ⇒ 128K 下 L3@95% 仍剩 5.75K > 4096。
+      # 预留缓冲（调研 §① Claude Code 的 13K）：覆盖 max-tokens 8192 的输出空间 + 一轮工具回环余量。
+      # 比例阈值对 (limit - reserve) 取比 ⇒ 128K 下 L3@95% 在 13K 预留之外仍余 5.75K。
       reserve-tokens: 13000
       # 压缩谱系的三条触发线（对 limit - reserve 的百分比；调研 Q2 区间 70–75 / 80–85 / 95 取中值）。
       # 逐级触发：L1 → L2 → L3，每次最多升一级（批③ 已实现 L2/L3）。

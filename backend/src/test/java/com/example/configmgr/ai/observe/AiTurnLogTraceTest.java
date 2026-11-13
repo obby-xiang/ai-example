@@ -99,7 +99,9 @@ class AiTurnLogTraceTest {
 	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
 
 	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
-			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel, this.chatClient);
+			"http://localhost", "/chat/completions", "test|runtime",
+			org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).build(), null,
+			this.chatModel, this.chatClient);
 
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
@@ -108,6 +110,9 @@ class AiTurnLogTraceTest {
 	private final ContextBuilder contextBuilder = mock(ContextBuilder.class);
 
 	private final AiSessionService sessionService = mock(AiSessionService.class);
+
+	private final com.example.configmgr.ai.history.ConversationTranscriptStore transcript =
+			mock(com.example.configmgr.ai.history.ConversationTranscriptStore.class);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
@@ -121,8 +126,11 @@ class AiTurnLogTraceTest {
 
 	private ResilientChatService service;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		AiTrace.clear();
 		this.appender.start();
 		this.traceLogger.addAppender(this.appender);
@@ -146,6 +154,13 @@ class AiTurnLogTraceTest {
 		this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec,
 				this.store, this.registry, this.toolRegistry, this.contextBuilder, this.sessionService,
 				this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
+		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
+		when(this.transcript.append(anyString(), org.mockito.ArgumentMatchers.anyLong(),
+				org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyList(),
+				org.mockito.ArgumentMatchers.anyLong())).thenReturn(true);
+		when(this.transcript.readPage(anyString(), org.mockito.ArgumentMatchers.anyLong(),
+				org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.eq(500)))
+			.thenReturn(com.example.configmgr.ai.history.ConversationTranscriptStore.ReadPage.EMPTY);
 	}
 
 	@AfterEach
@@ -153,6 +168,7 @@ class AiTurnLogTraceTest {
 		this.watchdogExecutor.shutdownNow();
 		this.traceLogger.detachAppender(this.appender);
 		AiTrace.clear();
+		this.identity.close();
 	}
 
 	// ── L1 / L2 / L5 / L6：成功轮的完整链路 ──
@@ -180,7 +196,34 @@ class AiTurnLogTraceTest {
 		String end = line("turn_end");
 		assertThat(end).contains("status=done").contains("attempts=1").contains("gateWaitMs=").contains("activeMs=")
 			.contains("totalMs=").contains("toolCalls=0").contains("inputTokens=").contains("outputTokens=")
-			.contains("totalTokens=").contains("est=").contains("chars=");
+			.contains("totalTokens=").contains("est=").contains("chars=")
+			.contains("maxOutputTokens=8192").contains("terminalSignal=finishReason=stop")
+			.doesNotContain("reasoningTokens=");
+	}
+
+	@Test
+	void turnEndIncludesUpstreamReasoningTokensButNeverReasoningContent() {
+		String reasoningText = "推理正文-不得写入日志";
+		org.springframework.ai.chat.metadata.Usage usage = mock(org.springframework.ai.chat.metadata.Usage.class);
+		when(usage.getPromptTokens()).thenReturn(100);
+		when(usage.getCompletionTokens()).thenReturn(20);
+		when(usage.getTotalTokens()).thenReturn(120);
+		when(usage.getNativeUsage()).thenReturn(java.util.Map.of(
+				"completionTokenDetails", java.util.Map.of("reasoningTokens", 128)));
+		ChatResponse usageTerminal = new ChatResponse(List.of(new Generation(
+				AssistantMessage.builder().content("").build(),
+				ChatGenerationMetadata.builder().finishReason("stop").build())),
+				org.springframework.ai.chat.metadata.ChatResponseMetadata.builder().usage(usage).build());
+		ChatResponse reasoning = new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+			.content("")
+			.properties(java.util.Map.of(ResilientChatService.REASONING_METADATA_KEY, reasoningText))
+			.build())));
+		this.upstream.set(Flux.just(chunk(REPLY_TEXT), reasoning, usageTerminal));
+
+		runTurn();
+
+		assertThat(line("turn_end")).contains("reasoningTokens=128");
+		assertThat(eventLines()).allSatisfy(line -> assertThat(line).doesNotContain(reasoningText));
 	}
 
 	// ── L7：turn_end 的跨段/排队/可信度字段（日志最小补齐批） ──

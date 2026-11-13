@@ -470,7 +470,7 @@ public class AiProviderRegistry {
      *
      * <p>
      * 基底刻意取 {@link OpenAiChatProperties#getOptions()}（而不是自己写一套默认值）：
-     * "空表 + env" 下与今天<b>逐值等价</b>（temperature 0.2 / max-tokens 4096 / stream-usage true）
+     * "空表 + env" 下与今天<b>逐值等价</b>（temperature 0.2 / max-tokens 8192 / stream-usage true）
      * 就是批① 的验收基线。{@code ai_setting} 里的全局默认（批② 写入）在这里覆盖。
      *
      * <p>

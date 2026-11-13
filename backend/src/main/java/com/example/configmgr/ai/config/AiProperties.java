@@ -1496,9 +1496,9 @@ public class AiProperties {
 		/**
 		 * 预留缓冲（默认 13000 token）。
 		 *
-		 * <p>依据 = 调研 §① Claude Code 的 13K 预留缓冲；覆盖 {@code max-tokens 4096} 输出空间
-		 * + 一轮工具回环余量。比例阈值对 {@code limit − reserve} 取比 ⇒ 触发线不会把输出空间吃掉
-		 * （128K 下 L3@95% 仍剩 5.75K &gt; 4096）。
+		 * <p>依据 = 调研 §① Claude Code 的 13K 预留缓冲；覆盖 {@code max-tokens 8192} 输出空间
+		 * + 一轮工具回环余量。比例阈值对 {@code limit − reserve} 取比；128K 下 L3@95% 在 13K
+		 * 预留之外仍余 5.75K，预留本身覆盖默认输出空间。
 		 *
 		 * <p><b>C13：实际生效值是"按窗口收口后"的值</b> —— 判定侧一律经
 		 * {@code ContextTrigger#effectiveReserve(limit, reserve)} 取 {@code min(本值, 窗口/2)}。

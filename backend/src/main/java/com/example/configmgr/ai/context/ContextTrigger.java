@@ -17,8 +17,8 @@ import org.apache.commons.lang3.ObjectUtils;
  *
  * <h2>阈值</h2>
  * 对 {@code limit − reserve} 取比（先扣预留缓冲再取比）：L1 ≥70% / L2 ≥80% / L3 ≥95%。
- * 自洽性检查（写进 NUMSPEC 依据列）：128K 下 {@code limit − reserve = 115K}，L3@95% 剩
- * {@code 0.05 × 115K = 5.75K > max-tokens 4096} ⇒ 触发线不会把输出空间吃掉。
+ * 自洽性检查（写进 NUMSPEC 依据列）：128K 下 {@code limit − reserve = 115K}，L3@95% 在
+ * 13K 预留之外仍余 {@code 0.05 × 115K = 5.75K}；预留本身覆盖 {@code max-tokens 8192}。
  *
  * <p><b>预留按实际窗口收口（C13）</b>：上面的自洽性只在"预留远小于窗口"时成立。小窗口模型
  * （如 15000）上 13000 的绝对预留会把分母压成 2000 —— 任何请求都判成三倍越线，比例阈值失效。

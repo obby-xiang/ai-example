@@ -312,7 +312,7 @@ R5 全轮无有效候选 ⇒ 回退 `ContextEstimator` 估算并置 `est=true`�
 **两套口径分开**：展示用真值 `usedNow`（上次请求的 `usage.promptTokens`），触发用预估
 `nextEst = usedNow + lastCompletion + estimate(本轮输入) + Σ(上次真值之后新增的工具结果)`；
 比例对 `limit − reserve`（reserve = 13000）取，L1/L2/L3 = 70/80/95%，滞回 60%（只看真值）。
-触发线自洽性：128K 下 `limit − reserve = 115K`，L3@95% 仍剩 5.75K > `max-tokens 4096`。
+触发线自洽性：128K 下 `limit − reserve = 115K`，L3@95% 在 13K 预留之外仍余 5.75K；预留本身覆盖 `max-tokens 8192`。
 
 **六项拆分 + free**：`history / toolResults / summary / system / tools / input` 六项按比例归一到
 `usedTokens`（`ContextBreakdown.normalizeTo`：`floor(v_i × used / Σv)` + 差额补给 argmax ⇒

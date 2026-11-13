@@ -94,7 +94,7 @@ final class AiConfigTestFixture {
 		this.chatProperties.setCompletionsPath("/chat/completions");
 		this.chatProperties.getOptions().setModel("deepseek-flash");
 		this.chatProperties.getOptions().setTemperature(0.2d);
-		this.chatProperties.getOptions().setMaxTokens(4096);
+		this.chatProperties.getOptions().setMaxTokens(8192);
 		this.chatProperties.getOptions().setStreamUsage(Boolean.TRUE);
 		// 版本比对每次都做（确定性，不靠 sleep）
 		this.properties.getConfig().setReloadInterval(Duration.ZERO);

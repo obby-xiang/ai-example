@@ -164,6 +164,8 @@ class EmptyReplyTerminalTest {
 				this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
 		org.springframework.test.util.ReflectionTestUtils.setField(this.service, "transcript", this.transcript);
 		when(this.transcript.append(anyString(), anyLong(), anyLong(), anyList(), anyLong())).thenReturn(true);
+		when(this.transcript.readPage(anyString(), anyLong(), anyLong(), any(), eq(500)))
+			.thenReturn(ConversationTranscriptStore.ReadPage.EMPTY);
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
@@ -200,7 +202,8 @@ class EmptyReplyTerminalTest {
 				.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE)
 				.containsEntry("emptyReply", true);
 		assertThat(FrameContract.oneOfType(frames, "error"))
-				.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE);
+				.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE)
+				.doesNotContainKey("truncated");
 		FrameContract.assertConformant(frames);
 
 		RunSnapshot snapshot = this.store.get(RUN_ID);
@@ -208,6 +211,64 @@ class EmptyReplyTerminalTest {
 		assertThat(snapshot.getError()).contains(ResilientChatService.EMPTY_REPLY_CODE);
 		assertThat(snapshot.getFinalText()).isEqualTo("");
 		assertThat(snapshot.getInFlightToolCalls()).isEmpty();
+	}
+
+	@Test
+	void emptyLengthReplyFailsAsTruncatedWithoutSameRequestRetry() {
+		this.properties.getResilience().setMaxAttempts(3);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).containsExactly("start", "error");
+		assertThat(FrameContract.oneOfType(frames, "error"))
+			.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE)
+			.containsEntry("truncated", true)
+			.containsEntry("terminalSignal", "finishReason=length");
+		verify(this.chatModel).stream(any(Prompt.class));
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.FAILED);
+		assertThat(snapshot.getError()).contains(ResilientChatService.EMPTY_REPLY_CODE);
+		assertThat(snapshot.getFinalText()).isEmpty();
+	}
+
+	@Test
+	void emptyStopFollowedByLengthKeepsLatchedStopSignalAndMarksTruncated() {
+		this.properties.getResilience().setMaxAttempts(3);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(terminal("stop"), terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).containsExactly("start", "error");
+		assertThat(FrameContract.oneOfType(frames, "error"))
+			.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE)
+			.containsEntry("truncated", true)
+			.containsEntry("terminalSignal", "finishReason=stop");
+		verify(this.chatModel).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	@Test
+	void nonEmptyLengthStillEndsWithDoneAndTruncated() {
+		this.properties.getResilience().setMaxAttempts(3);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("半截正文"), terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames))
+			.containsExactly("start", "message_start", "delta", "message_end", "done");
+		assertThat(FrameContract.oneOfType(frames, "done"))
+			.containsEntry("truncated", true)
+			.containsEntry("terminalSignal", "finishReason=length");
+		verify(this.chatModel).stream(any(Prompt.class));
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(snapshot.getFinalText()).isEqualTo("半截正文");
 	}
 
 	// ── ② 纯空白 → FAILED + EMPTY_REPLY（且已开的正文段先收尾） ──

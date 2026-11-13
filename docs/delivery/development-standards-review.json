@@ -7169,6 +7169,49 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "配置与条件按语义和唯一映射判断，不按正则、contains或固定话术补参。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1281两轮后确认多配置无解和紧凑修饰歧义均ADDRESSED；施工报告新增分支/边界及最终23个相关单点通过，宿主参数透传13/13保持，361源clean compile成功；主控未重跑测试，真实模型C-09/C-10/C-112 3/3仍为NOT_RUN，既有测试和Checkstyle问题未宣称解决。"}
       }
+    },
+    {
+      "fingerprint": "sha256:637bed4d217d6a6d7ae1027a39ea10392fb20adc3296a99f496a1f6f9aad1a9a",
+      "status": "reviewed",
+      "reason": "逐hunk复核空正文LENGTH截断、锁存terminalSignal、8192默认预算及覆盖/冻结参数；独立复核最终通过。",
+      "reviewedAt": "2026-11-13T10:02:41+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1284、施工agent-1287",
+      "specChanges": [
+        {
+          "change": "空正文finishReason=LENGTH不再按普通EMPTY_REPLY同参重试，首次即FAILED；终帧additive写truncated=true与锁存terminalSignal。",
+          "reason": "三次所谓空回复实际是4096输出截断，同参重试只会再次截断，不能伪造成普通空响应。",
+          "impact": "空STOP仍保留一次重试，非空LENGTH仍DONE+truncated；STOP→LENGTH时truncated=true但terminalSignal=stop，与turn_end一致。"
+        },
+        {
+          "change": "默认max-tokens从4096提至8192，数据库/请求覆盖和续跑冻结参数语义不变。",
+          "reason": "当前思考模式需要更大的输出预算，8192是仓内NUMSPEC已论证的保守候选，仍需真实模型验证。",
+          "impact": "application.yml、代码注释和现行技术/NUMSPEC文档同步，历史研究及旧证据不改写。"
+        },
+        {
+          "change": "turn_end增加maxOutputTokens、terminalSignal及可选reasoningTokens安全标量。",
+          "reason": "需要区分输出截断、推理消耗和真空回复，但不能记录推理正文或原始响应。",
+          "impact": "复用UsageDetails，仅上游提供reasoningTokens时输出，其他终态与错误码不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "空LENGTH跳过同参重试并写截断事实，terminalSignal使用锁存访问器，turn_end补安全标量；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/application.yml", "status": "checked", "reason": "默认max-tokens改为8192，其他模型调用配置不变。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProperties.java", "status": "checked", "reason": "同步8192现行注释，配置结构不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java", "status": "checked", "reason": "同步默认输出预算注释，DB/请求覆盖和冻结路径不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/context/ContextTrigger.java", "status": "checked", "reason": "同步8192预算预留算式注释，触发逻辑不变；已IDEA Reformat。"},
+        {"path": "docs/technical-design.md", "status": "checked", "reason": "当前输出预算及算式改8192，不夹带其他设计变化。"},
+        {"path": "docs/evidence/补档-NUMSPEC-清单总账.md", "status": "checked", "reason": "NUMSPEC当前值改8192并注明此前4096，旧证据不改写。"},
+        {"path": "docs/research/numspec-2026-10-31/backend-ai.md", "status": "checked", "reason": "同步当前8192及此前4096说明，历史研究保留。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有Accumulator终止锁存、UsageDetails和配置覆盖体系，无新增依赖、错误码或供应商分支。"},
+        "java-api-style": {"status": "checked", "reason": "四个生产Java均IDEA Reformat，触及isFinish/turnEnd/emptyReply方法低于50行和复杂度20，usage可空处理明确。"},
+        "logging-exception-safety": {"status": "checked", "reason": "截断如实FAILED且锁存信号一致，不记推理正文；空STOP重试、非空LENGTH成功与取消优先不变。"},
+        "toc-interaction": {"status": "checked", "reason": "不新增提示或前端类型要求，additive截断字段通过既有帧通道透传，避免同参重试造成二次空等待。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "续跑快照maxTokens继续冻结，DB/请求覆盖不变，不新增Redis写入或供应商状态。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "只按finishReason和正文空态分类，不解析或记录推理正文，terminalSignal与turn_end同源。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1284最终Spec/Task quality通过；施工报告LENGTH空正文单次失败、STOP→LENGTH锁存、空STOP重试、非空LENGTH、8192默认/覆盖/冻结、可选reasoningTokens及正文脱敏独立RED→GREEN，361源编译成功；主控未重跑测试，真实模型/Redis/浏览器和全量测试NOT_RUN，37个既有Checkstyle违规未扩散处理。"}
+      }
     }
   ]
 }
