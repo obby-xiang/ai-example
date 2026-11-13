@@ -137,6 +137,8 @@ class CreateEntryCorrectionHitlTest {
 
     private ResumeService resumeService;
 
+    private ReasoningAwareOpenAiChatModel model;
+
     @BeforeEach
     void setUp() {
         this.properties.getPark().setEnabled(true);
@@ -166,7 +168,7 @@ class CreateEntryCorrectionHitlTest {
                 preflight, null, null, null, this.properties);
         manager.setContextRefresher(new RunContextRefresher(this.taskService));
         ReflectionTestUtils.setField(manager, "transcript", this.transcript);
-        ReasoningAwareOpenAiChatModel model = new ReasoningAwareOpenAiChatModel(this.api,
+        this.model = new ReasoningAwareOpenAiChatModel(this.api,
                 OpenAiChatOptions.builder().model("test-model").build(), manager, RetryTemplate.defaultInstance(),
                 ObservationRegistry.NOOP, 7L, true);
         this.service = new ResilientChatService(this.providerRegistry, this.chatMemory, this.codec, this.store,
@@ -237,6 +239,10 @@ class CreateEntryCorrectionHitlTest {
 
         RunSnapshot snapshot = this.store.get(RUN_ID);
         assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
+                .containsEntry("createEntryCorrectionUsed", true)
+                .containsEntry("createEntryCorrectionPrefix", "请先告诉我要导出的配置")
+                .doesNotContainKey(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY);
         PendingToolCall pending = this.store.pending(RUN_ID, CALL_ID);
         assertThat(pending).isNotNull();
         assertThat(pending.getName()).isEqualTo(AiToolNames.CREATE_TASK);
@@ -300,12 +306,59 @@ class CreateEntryCorrectionHitlTest {
         }
 
         assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
-        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+        RunSnapshot done = this.store.get(RUN_ID);
+        assertThat(done.getStatus()).isEqualTo(RunSnapshot.DONE);
+        assertThat(AiContext.fromMap(done.getContext()).getExtra())
+                .containsEntry("createEntryCorrectionUsed", true)
+                .doesNotContainKeys("createEntryCorrectionPrefix", CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY,
+                        CorrectionPrefixes.PARKED_FULL_TEXT_KEY, CorrectionPrefixes.PENDING_SEGMENT_KEY);
         org.mockito.Mockito.verify(this.taskService).createIdempotent(Task.TaskType.EXPORT, "raw title", RUN_ID);
         verifyNoInteractions(this.jobService);
         org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
                 .chatCompletionStream(any(ChatCompletionRequest.class), any());
         assertThat(this.store.pendingsLenient(RUN_ID)).noneMatch(entry -> AiToolNames.START_EXPORT.equals(entry.getName()));
+    }
+
+    @Test
+    void importCreateTaskOmitsConditionsAndPassesPreflightIntoHitl() {
+        String arguments = "{\"type\":\"IMPORT\",\"title\":\"raw import title\"}";
+        when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
+                .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, arguments)),
+                        Flux.just(textChunk("已创建导入任务")));
+
+        chat();
+
+        RunSnapshot suspended = this.store.get(RUN_ID);
+        assertThat(suspended.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        PendingToolCall pending = this.store.pending(RUN_ID, CALL_ID);
+        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PENDING);
+        assertThat(pending.getKind()).isEqualTo(PendingToolCall.KIND_CONFIRM);
+        assertThat(pending.getArguments()).isEqualTo(arguments);
+        assertThat(pending.getArguments()).doesNotContain("conditions");
+        assertThat(pending.getPreflight()).containsKey("reportHash");
+        verifyNoInteractions(this.taskService);
+        verifyNoInteractions(this.jobService);
+
+        Task created = new Task();
+        created.setId(42L);
+        created.setType(Task.TaskType.IMPORT);
+        created.setTitle("raw import title");
+        created.setCurrentStep("SELECT_DEFS");
+        created.setStatus(Task.TaskStatus.ACTIVE);
+        created.setItems(List.of());
+        when(this.taskService.createIdempotent(Task.TaskType.IMPORT, "raw import title", RUN_ID))
+                .thenReturn(new TaskService.CreateOutcome(created, false));
+        when(this.taskService.findById(42L)).thenReturn(created);
+        when(this.taskService.findByIdRaw(42L)).thenReturn(Optional.of(created));
+
+        ConfirmGate.Submission submission = submitDecision(true);
+
+        assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+        org.mockito.Mockito.verify(this.taskService).createIdempotent(Task.TaskType.IMPORT, "raw import title", RUN_ID);
+        verifyNoInteractions(this.jobService);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
     }
 
     @Test
@@ -548,23 +601,114 @@ class CreateEntryCorrectionHitlTest {
         assertThat(entries).noneMatch(entry -> SyntheticMessages.ORIGIN_SYNTHETIC.equals(entry.origin()));
     }
 
+    @Test
+    void predecessorDoneDoesNotPolluteDirectCreateTaskInNewRun() {
+        useRealChatClient();
+        String predecessorRun = "run-predecessor-done";
+        String currentRun = "run-current-direct-create";
+        when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
+                .thenReturn(Flux.just(textChunk("前驱正文")), Flux.just(textChunk("第二跳忽略正文")),
+                        Flux.just(toolCallChunkWithText(CALL_ID, AiToolNames.CREATE_TASK, ARGUMENTS, "当前正文")),
+                        Flux.just(textChunk("已创建任务")));
+        chat(predecessorRun, Map.of());
+        RunSnapshot predecessor = this.store.get(predecessorRun);
+        assertThat(predecessor.getStatus()).isEqualTo(RunSnapshot.DONE);
+        Map<String, Object> reused = new java.util.LinkedHashMap<>(
+                AiContext.fromMap(predecessor.getContext()).getExtra());
+        reused.put("createEntryCorrectionPrefix", "前驱正文");
+        reused.put(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前驱正文");
+        reused.put(CorrectionPrefixes.PARKED_FULL_TEXT_KEY, "前驱正文");
+        reused.put(CorrectionPrefixes.PENDING_SEGMENT_KEY, "前驱正文");
+
+        chat(currentRun, reused);
+
+        RunSnapshot suspended = this.store.get(currentRun);
+        assertThat(suspended.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        assertThat(suspended.getAssistantContent()).isEqualTo("当前正文");
+        assertThat(suspended.getInFlightToolCalls()).singleElement().satisfies(call ->
+                assertThat(call.getArguments()).isEqualTo(ARGUMENTS));
+        stubCreatedTask(currentRun);
+        ConfirmGate.Submission submission = submitDecision(currentRun, true);
+
+        assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+        RunSnapshot done = this.store.get(currentRun);
+        assertThat(done.getStatus()).isEqualTo(RunSnapshot.DONE);
+        assertThat(done.getFinalText()).isEqualTo("已创建任务");
+        List<AssistantMessage> toolAssistants = this.codec.deserializeAll(done.getMessageJson()).stream()
+                .filter(AssistantMessage.class::isInstance).map(AssistantMessage.class::cast)
+                .filter(AssistantMessage::hasToolCalls).toList();
+        assertThat(AiContext.fromMap(done.getContext()).getExtra())
+                .doesNotContainKeys("createEntryCorrectionUsed", "exportCorrectionUsed", "createEntryCorrectionPrefix",
+                        CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, CorrectionPrefixes.PARKED_FULL_TEXT_KEY,
+                        CorrectionPrefixes.PENDING_SEGMENT_KEY);
+        assertThat(toolAssistants).singleElement().satisfies(assistant -> {
+            assertThat(assistant.getText()).isEqualTo("当前正文");
+            assertThat(assistant.getToolCalls()).singleElement().satisfies(call ->
+                    assertThat(call.arguments()).isEqualTo(ARGUMENTS));
+        });
+        org.mockito.Mockito.verify(this.taskService).createIdempotent(Task.TaskType.EXPORT, "raw title", currentRun);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(4))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
+        @SuppressWarnings({ "unchecked", "rawtypes" })
+        ArgumentCaptor<List<TranscriptEntry>> appended = ArgumentCaptor.forClass((Class) List.class);
+        org.mockito.Mockito.verify(this.transcript, org.mockito.Mockito.atLeastOnce()).append(anyString(),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), appended.capture(),
+                org.mockito.ArgumentMatchers.anyLong());
+        for (List<TranscriptEntry> batch : appended.getAllValues()) {
+            assertThat(batch).extracting(TranscriptEntry::entryId).doesNotHaveDuplicates();
+        }
+        List<TranscriptEntry> currentEntries = appended.getAllValues().stream().flatMap(List::stream)
+                .filter(entry -> currentRun.equals(entry.runId())).toList();
+        List<TranscriptEntry> finalEntries = appended.getAllValues().getLast().stream()
+                .filter(entry -> currentRun.equals(entry.runId())).toList();
+        assertThat(currentEntries).anyMatch(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty()
+                && "当前正文".equals(entry.text()));
+        assertThat(finalEntries).filteredOn(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .singleElement().satisfies(entry -> assertThat(entry.toolCalls()).singleElement().satisfies(call ->
+                        assertThat(call.arguments()).isEqualTo(ARGUMENTS)));
+        assertThat(currentEntries).allSatisfy(entry -> assertThat(String.valueOf(entry.text())).doesNotContain("前驱正文"));
+    }
+
+    private void useRealChatClient() {
+        ProviderRuntime runtime = new ProviderRuntime(7L, "openai", "test-model", "http://placeholder",
+                "/chat/completions", "7|fp|u|p", OpenAiChatOptions.builder().model("test-model").build(), this.api,
+                this.model, ChatClient.builder(this.model).build());
+        when(this.providerRegistry.current()).thenReturn(runtime);
+        when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(runtime));
+        when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(runtime);
+        when(this.providerRegistry.forFrozenRequest(any(), any(), any(), any(),
+                org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(runtime);
+    }
+
     private void chat() {
+        chat(RUN_ID, Map.of());
+    }
+
+    private void chat(String runId, Map<String, Object> extra) {
         AiChatRequest request = new AiChatRequest(SESSION_ID, "Create an export task",
-                new AiChatRequest.Context("tasks", null, null, null, Map.of()), null, null);
+                new AiChatRequest.Context("tasks", null, null, null, extra), null, null);
         try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
                 com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
-            this.service.chat(RUN_ID, request, this.registry.of(RUN_ID));
+            this.service.chat(runId, request, this.registry.of(runId));
         }
     }
 
     private ConfirmGate.Submission submitDecision(boolean approved) {
+        return submitDecision(RUN_ID, approved);
+    }
+
+    private ConfirmGate.Submission submitDecision(String runId, boolean approved) {
         try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
                 com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
-            return this.gate.submitDecision(RUN_ID, CALL_ID, approved, approved ? "approved" : "rejected");
+            return this.gate.submitDecision(runId, CALL_ID, approved, approved ? "approved" : "rejected");
         }
     }
 
     private void stubCreatedTask() {
+        stubCreatedTask(RUN_ID);
+    }
+
+    private void stubCreatedTask(String runId) {
         Task created = new Task();
         created.setId(42L);
         created.setType(Task.TaskType.EXPORT);
@@ -572,7 +716,7 @@ class CreateEntryCorrectionHitlTest {
         created.setCurrentStep("SELECT_DEFS");
         created.setStatus(Task.TaskStatus.ACTIVE);
         created.setItems(List.of());
-        when(this.taskService.createIdempotent(Task.TaskType.EXPORT, "raw title", RUN_ID))
+        when(this.taskService.createIdempotent(Task.TaskType.EXPORT, "raw title", runId))
                 .thenReturn(new TaskService.CreateOutcome(created, false));
         when(this.taskService.findById(42L)).thenReturn(created);
         when(this.taskService.findByIdRaw(42L)).thenReturn(Optional.of(created));
@@ -623,14 +767,18 @@ class CreateEntryCorrectionHitlTest {
                 null, null, "chat.completion.chunk", null);
     }
 
-    private static ChatCompletionChunk toolCallChunk(String callId, String name, String arguments) {
+    private static ChatCompletionChunk toolCallChunkWithText(String callId, String name, String arguments, String text) {
         ChatCompletionMessage.ToolCall toolCall = new ChatCompletionMessage.ToolCall(callId, "function",
                 new ChatCompletionMessage.ChatCompletionFunction(name, arguments));
-        ChatCompletionMessage delta = new ChatCompletionMessage("", ChatCompletionMessage.Role.ASSISTANT, null,
+        ChatCompletionMessage delta = new ChatCompletionMessage(text, ChatCompletionMessage.Role.ASSISTANT, null,
                 null, List.of(toolCall), null, null, null, null);
         ChatCompletionChunk.ChunkChoice choice = new ChatCompletionChunk.ChunkChoice(
                 ChatCompletionFinishReason.TOOL_CALLS, 0, delta, null);
         return new ChatCompletionChunk("cmpl-create-entry", List.of(choice), 1750000000L, "test-model", null,
                 null, "chat.completion.chunk", null);
+    }
+
+    private static ChatCompletionChunk toolCallChunk(String callId, String name, String arguments) {
+        return toolCallChunkWithText(callId, name, arguments, "");
     }
 }

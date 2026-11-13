@@ -78,6 +78,37 @@ class RunStoreFirstSnapshotWriteTest {
 	private final RunStore store = new RunStore(this.fake.redis, this.mapper, this.properties);
 
 	@Test
+	void createDropsCurrentRunCorrectionStateFromDirectlyReusedContext() {
+		Map<String, Object> extra = new java.util.LinkedHashMap<>();
+		extra.put("createEntryCorrectionUsed", true);
+		extra.put("exportCorrectionUsed", true);
+		extra.put("createEntryCorrectionPrefix", "前驱create正文");
+		extra.put(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前驱export正文");
+		extra.put(CorrectionPrefixes.PARKED_FULL_TEXT_KEY, "前驱parked正文");
+		extra.put(CorrectionPrefixes.PENDING_SEGMENT_KEY, "前驱pending正文");
+		extra.put("createTaskCorrectionUsed", true);
+		extra.put("createTaskCorrectionPrefix", "legacy正文");
+		extra.put("businessValue", "保留");
+		AiContext reused = AiContext.of("tasks", "EXPORT", null, null, null, extra);
+		List<Message> history = List.of(new UserMessage("新轮原话"),
+				AssistantMessage.builder().content("历史正文").build());
+
+		RunSnapshot snapshot = this.store.create("run-reused-context", SESSION_ID, reused, history, this.codec, 7L,
+				"test-model", new RunSnapshot.FrozenParams(null, null, 4096, false), "client-reused", "新轮原话",
+				1000L);
+
+		assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
+				.doesNotContainKeys("createEntryCorrectionUsed", "exportCorrectionUsed", "createEntryCorrectionPrefix",
+						CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, CorrectionPrefixes.PARKED_FULL_TEXT_KEY,
+						CorrectionPrefixes.PENDING_SEGMENT_KEY)
+				.containsEntry("createTaskCorrectionUsed", true)
+				.containsEntry("createTaskCorrectionPrefix", "legacy正文")
+				.containsEntry("businessValue", "保留");
+		assertThat(this.codec.deserializeAll(snapshot.getMessageJson())).hasSize(2);
+		assertThat(this.codec.deserializeAll(snapshot.getMessageJson()).get(1).getText()).isEqualTo("历史正文");
+	}
+
+	@Test
 	void createThrowsWhenTheFirstSnapshotWriteIsRefused() {
 		// 同一 runId 已有一条取消态（幂等重放/迟到创建）：取消优先守卫会拒写 RUNNING 首笔快照
 		// 记录的归属必须与写者身份一致（生产快照恒带身份；0/0 记录严禁写进某个身份命名空间）

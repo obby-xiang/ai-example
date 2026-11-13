@@ -7325,6 +7325,44 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "第二次正文和reasoning按响应结构抑制，不做字符串截断或文案识别，工具调用、usage和finish继续由原Accumulator处理。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1290多轮发现lenient误空、取消窗口、第二次文本/工具reasoning及证据缺口均返修，最终Critical/Important为零；施工报告相关独立单点逐个通过、361个生产源文件clean compile成功；主控未重跑测试，真实Flash历史A/B/真实模型/Redis/Cluster/多实例/浏览器及全量套件NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:d66aae1d4a17d58ef7522abbc50521d3de83e8e00ab260d6727f15349c10926e",
+      "status": "reviewed",
+      "reason": "逐hunk复核第二跳零已知参数与IMPORT条件边界、create/export专用prefix、新run状态净化及终态清理；创建与转录两路独立静态复审最终可合入。",
+      "reviewedAt": "2026-11-13T22:56:04+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1290与agent-1291、施工agent-1292",
+      "specChanges": [
+        {
+          "change": "第二跳创建纠正明确EXPORT条件未决定传conditions={}、IMPORT不得附加conditions，未提及或无法唯一映射时省略defCodes，配置和条件不是创建前置。",
+          "reason": "周初可直接执行的参数语义被削弱，且必须调用创建与不得自动创建的表述存在歧义；IMPORT携带空条件会被预检拒绝。",
+          "impact": "create_task只发起确认卡，不得代批准或绕过确认直接创建/执行；纯问答不创建、不重复首次正文、不增加第三跳，Schema和tools.yaml .41不变。"
+        },
+        {
+          "change": "创建纠正使用独立createEntryCorrectionPrefix，CorrectionPrefixes支持create/export两种当前prefix，新登记互清瞬态，成功/取消/失败统一清理两种prefix及parked/pending。",
+          "reason": "复用export prefix会让首次正文在后续恢复中与工具assistant合并，并造成转录expected/actual不一致。",
+          "impact": "当前run marker保留用于重入幂等，export纠正在原key和合并逻辑上不变，不修改SseChatEmitter候选算法。"
+        },
+        {
+          "change": "RunStore.newInitialSnapshot在保存context前剔除两种marker、两种prefix及parked/pending。",
+          "reason": "直接复用旧context时，前驱内部状态会抑制新run纠正或污染其正文，HTTP与直接service都需要统一结构边界。",
+          "impact": "历史消息、业务extra和既有legacy键不被重写；新run不再继承前驱纠正事实，续跑同一run的恢复状态不受该首轮净化影响。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/CorrectionPrefixes.java", "status": "checked", "reason": "支持create/export当前prefix和parked记录，提供新run内部状态净化的防御性副本；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "修正EXPORT/IMPORT第二跳参数指引，创建使用专用prefix，新登记互清并在失败终态同步清理瞬态；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "所有首轮初始快照在保存context前统一剔除当前run内部纠正状态，不改历史消息或业务extra；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有CorrectionPrefixes、RunStore快照边界和恢复/去重链，无新增依赖、状态存储或话术解析。"},
+        "java-api-style": {"status": "checked", "reason": "三个生产Java方法保持显式大括号与既有规模门槛，context extra使用防御性副本，可空值安全处理，无新增JSON实体或数据库访问。"},
+        "logging-exception-safety": {"status": "checked", "reason": "新run净化和终态清理不删除历史消息或伪造执行结果，失败仍写真实FAILED，取消优先和既有异常日志不变。"},
+        "toc-interaction": {"status": "checked", "reason": "第二跳明确只发起确认卡，IMPORT不因空条件被预检拒绝，纯问答无卡片或重复正文，无新增技术提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "create/export状态分离，新run剔除marker/prefix，当前run marker保留，成功/取消/失败清理闭合；HTTP和直接service共用边界，不新增AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "前驱正文不再经初始context混入新run SSE或工具assistant，不修改帧解析、文本截断或transcript严格对账。"},
+        "verification-review": {"status": "checked", "reason": "agent-1291跨run复核无分级问题，agent-1290发现IMPORT条件冲突后返修并最终可合入；施工报告相关独立单点逐个通过、361个生产源文件clean compile成功；主控未重跑测试，真实Flash/真实模型/HTTP/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。"}
+      }
     }
   ]
 }

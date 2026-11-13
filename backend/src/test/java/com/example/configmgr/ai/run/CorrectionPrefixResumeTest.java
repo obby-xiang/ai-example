@@ -168,6 +168,22 @@ class CorrectionPrefixResumeTest {
 	}
 
 	@Test
+	void createCorrectionPrefixDrivesParkingWithoutReadingLegacyKeys() {
+		RunSnapshot snapshot = new RunSnapshot();
+		snapshot.setContext(AiContext.of("tasks", "EXPORT", null, null, Map.of(
+				"createEntryCorrectionPrefix", "创建前缀",
+				"createTaskCorrectionPrefix", "legacy前缀")).toMap());
+
+		assertThat(CorrectionPrefixes.correctionPrefix(snapshot)).isEqualTo("创建前缀");
+		CorrectionPrefixes.recordParkedFullText(snapshot, "创建前缀后续");
+
+		assertThat(CorrectionPrefixes.parkedFullText(snapshot)).isEqualTo("创建前缀后续");
+		assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
+				.containsEntry("createEntryCorrectionPrefix", "创建前缀")
+				.containsEntry("createTaskCorrectionPrefix", "legacy前缀");
+	}
+
+	@Test
 	void legacyCreateCorrectionKeysAreIgnoredWithoutCleanupWhileExportRemainsActive() {
 		java.util.Map<String, Object> mixedExtra = new java.util.LinkedHashMap<>();
 		mixedExtra.put("createTaskCorrectionUsed", true);

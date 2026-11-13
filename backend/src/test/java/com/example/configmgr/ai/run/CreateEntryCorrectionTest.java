@@ -191,9 +191,18 @@ class CreateEntryCorrectionTest {
                 .contains("EXPORT")
                 .contains("IMPORT")
                 .contains("明确创建")
+                .contains("EXPORT 条件未决定时传 conditions={}")
+                .contains("IMPORT 不得附加 conditions")
+                .doesNotContain("EXPORT 或 IMPORT；条件未决定时传 conditions={}")
+                .contains("未提及或无法唯一映射时省略 defCodes")
+                .contains("配置定义和条件不是 create_task 的前置")
+                .contains("不得先查询配置目录")
+                .contains("不得只用文字追问")
+                .contains("调用 create_task 只是发起确认卡")
+                .contains("不得代替用户批准或绕过确认卡直接创建/执行")
                 .contains("纯问答")
                 .contains("保持原回答")
-                .contains("不得自动批准")
+                .doesNotContain("不得自动创建")
                 .doesNotContain("start_export");
     }
 
@@ -390,11 +399,15 @@ class CreateEntryCorrectionTest {
     void clientCancelAfterMarkerBeforeStreamPreventsSecondUpstream() {
         String clientRequestId = "req-after-marker";
         AtomicBoolean cancelled = new AtomicBoolean();
+        AtomicBoolean transientStateInjected = new AtomicBoolean();
         when(this.clientRequests.isCancelled(SESSION_ID, clientRequestId)).thenAnswer(invocation -> cancelled.get());
         doAnswer(invocation -> {
             invocation.callRealMethod();
             RunSnapshot saved = invocation.getArgument(0);
-            if (Boolean.TRUE.equals(AiContext.fromMap(saved.getContext()).getExtra().get("createEntryCorrectionUsed"))) {
+            if (Boolean.TRUE.equals(AiContext.fromMap(saved.getContext()).getExtra().get("createEntryCorrectionUsed"))
+                    && transientStateInjected.compareAndSet(false, true)) {
+                seedBothPrefixes(saved);
+                invocation.callRealMethod();
                 cancelled.set(true);
             }
             return null;
@@ -403,8 +416,76 @@ class CreateEntryCorrectionTest {
         chat("run-create-cancel-after-marker", "Create an export task", clientRequestId);
 
         verify(this.chatModel, never()).stream(any(Prompt.class));
-        assertThat(this.store.get("run-create-cancel-after-marker").getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+        RunSnapshot cancelledSnapshot = this.store.get("run-create-cancel-after-marker");
+        assertThat(cancelledSnapshot.getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+        assertThat(AiContext.fromMap(cancelledSnapshot.getContext()).getExtra())
+                .containsEntry("createEntryCorrectionUsed", true)
+                .doesNotContainKeys("createEntryCorrectionPrefix", CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY,
+                        CorrectionPrefixes.PARKED_FULL_TEXT_KEY, CorrectionPrefixes.PENDING_SEGMENT_KEY);
         assertThat(this.store.pendingsLenient("run-create-cancel-after-marker")).isEmpty();
+    }
+
+    @Test
+    void failedCorrectionClearsBothPrefixesAndKeepsCurrentRunMarker() {
+        AtomicBoolean transientStateInjected = new AtomicBoolean();
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            RunSnapshot saved = invocation.getArgument(0);
+            if ("run-create-failed-correction".equals(saved.getRunId()) && RunSnapshot.RUNNING.equals(saved.getStatus())
+                    && transientStateInjected.compareAndSet(false, true)) {
+                AiContext current = AiContext.fromMap(saved.getContext());
+                Map<String, Object> extra = new java.util.LinkedHashMap<>(current.getExtra());
+                extra.put("createEntryCorrectionUsed", true);
+                saved.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
+                        current.getTaskId(), current.getTaskStatus(), extra).toMap());
+                seedBothPrefixes(saved);
+                invocation.callRealMethod();
+            }
+            return null;
+        }).when(this.store).save(any(RunSnapshot.class));
+        when(this.streamSpec.chatResponse()).thenAnswer(invocation -> Flux.just(response("", "stop")));
+
+        chat("run-create-failed-correction", "Create an export task");
+
+        RunSnapshot failed = this.store.get("run-create-failed-correction");
+        assertThat(failed.getStatus()).isEqualTo(RunSnapshot.FAILED);
+        assertThat(AiContext.fromMap(failed.getContext()).getExtra())
+                .containsEntry("createEntryCorrectionUsed", true)
+                .doesNotContainKeys("createEntryCorrectionPrefix", CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY,
+                        CorrectionPrefixes.PARKED_FULL_TEXT_KEY, CorrectionPrefixes.PENDING_SEGMENT_KEY);
+    }
+
+    @Test
+    void predecessorCorrectionStateDoesNotSuppressNewRunCorrection() {
+        answers("前驱正文", "忽略正文");
+        chat("run-create-predecessor", "Create an export task");
+        RunSnapshot predecessor = this.store.get("run-create-predecessor");
+        assertThat(predecessor.getStatus()).isEqualTo(RunSnapshot.DONE);
+        seedBothPrefixes(predecessor);
+        Map<String, Object> reusedExtra = AiContext.fromMap(predecessor.getContext()).getExtra();
+        answers("当前正文", "第二跳忽略正文");
+
+        chat("run-create-current", "Create another export task", null, reusedExtra);
+
+        verify(this.chatModel, times(2)).stream(any(Prompt.class));
+        RunSnapshot current = this.store.get("run-create-current");
+        assertThat(current.getStatus()).isEqualTo(RunSnapshot.DONE);
+        assertThat(current.getFinalText()).isEqualTo("当前正文");
+        assertThat(AiContext.fromMap(current.getContext()).getExtra())
+                .containsEntry("createEntryCorrectionUsed", true)
+                .doesNotContainKeys("createEntryCorrectionPrefix", CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY,
+                        CorrectionPrefixes.PARKED_FULL_TEXT_KEY, CorrectionPrefixes.PENDING_SEGMENT_KEY);
+    }
+
+    private static void seedBothPrefixes(RunSnapshot snapshot) {
+        AiContext current = AiContext.fromMap(snapshot.getContext());
+        Map<String, Object> extra = new java.util.LinkedHashMap<>(current.getExtra());
+        extra.put("createEntryCorrectionPrefix", "前驱create正文");
+        extra.put(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前驱export正文");
+        extra.put(CorrectionPrefixes.PARKED_FULL_TEXT_KEY, "前驱parked正文");
+        extra.put(CorrectionPrefixes.PENDING_SEGMENT_KEY, "前驱pending正文");
+        snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(), current.getTaskId(),
+                current.getTaskStatus(), extra).toMap());
     }
 
     private void answers(String first, String second) {
@@ -417,8 +498,12 @@ class CreateEntryCorrectionTest {
     }
 
     private void chat(String runId, String message, String clientRequestId) {
+        chat(runId, message, clientRequestId, Map.of());
+    }
+
+    private void chat(String runId, String message, String clientRequestId, Map<String, Object> extra) {
         AiChatRequest request = new AiChatRequest(SESSION_ID, message,
-                new AiChatRequest.Context("tasks", null, null, null, Map.of()), null, null, null, clientRequestId);
+                new AiChatRequest.Context("tasks", null, null, null, extra), null, null, null, clientRequestId);
         try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
                 com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
             this.service.chat(runId, request, this.emitter);

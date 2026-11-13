@@ -1741,7 +1741,7 @@ public class ResilientChatService {
     }
 
     private boolean isMarkCreateEntryCorrectionUsed(String runId, String prefixText) {
-        return isMarkCorrectionUsed(runId, prefixText, CREATE_ENTRY_CORRECTION_MARKER, EXPORT_CORRECTION_PREFIX_KEY);
+        return isMarkCorrectionUsed(runId, prefixText, CREATE_ENTRY_CORRECTION_MARKER, CREATE_ENTRY_CORRECTION_PREFIX_KEY);
     }
 
     static boolean needsCreateEntryCorrection(boolean originalFirstTurn, AiContext context,
@@ -1767,9 +1767,12 @@ public class ResilientChatService {
     static String createEntryCorrection() {
         return SyntheticMessages.EXPORT_CORRECTION_PREFIX
                 + "请依据原始对话和本次披露的 create_task Schema 复核：原始用户消息有明确创建意图时，"
-                + "必须调用一次 create_task，type 按原始意图传 EXPORT 或 IMPORT，不得只用文字追问或列步骤。"
-                + "原始用户消息只是纯问答时不要创建，保持原回答。此次回复不要重复已经展示的正文。"
-                + "不得自动批准、自动创建或自动执行后续作业。";
+                + "必须调用一次 create_task，type 按原始意图传 EXPORT 或 IMPORT；"
+                + "EXPORT 条件未决定时传 conditions={}；IMPORT 不得附加 conditions。"
+                + "未提及或无法唯一映射时省略 defCodes。配置定义和条件不是 create_task 的前置，"
+                + "不得先查询配置目录，不得只用文字追问或列步骤。"
+                + "调用 create_task 只是发起确认卡，不得代替用户批准或绕过确认卡直接创建/执行。"
+                + "原始用户消息只是纯问答时不要创建，保持原回答。此次回复不要重复已经展示的正文。";
     }
 
     /**
@@ -1854,8 +1857,10 @@ public class ResilientChatService {
      */
     static final String EXPORT_CORRECTION_PREFIX_KEY = CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY;
 
+    static final String CREATE_ENTRY_CORRECTION_PREFIX_KEY = CorrectionPrefixes.CREATE_ENTRY_CORRECTION_PREFIX_KEY;
+
     /**
-     * 终态后清掉"待合并前缀"：run 级"已纠正"标记保留（含续跑只纠正一次），前缀不再 seed。
+     * 终态后清掉两类"待合并前缀"：run 级"已纠正"标记保留（含续跑只纠正一次），前缀不再 seed。
      */
     private static void clearExportCorrectionPrefix(RunSnapshot snapshot) {
         if (snapshot == null || snapshot.getContext() == null) {
@@ -1867,6 +1872,7 @@ public class ResilientChatService {
         }
         Map<String, Object> extra = new LinkedHashMap<>(current.getExtra());
         extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
+        extra.remove(CREATE_ENTRY_CORRECTION_PREFIX_KEY);
         extra.remove(CorrectionPrefixes.PARKED_FULL_TEXT_KEY);
         extra.remove(CorrectionPrefixes.PENDING_SEGMENT_KEY);
         snapshot.setContext(AiContext.of(current.getPage(), current.getTaskType(), current.getStep(),
@@ -1990,6 +1996,7 @@ public class ResilientChatService {
             extra.remove(CorrectionPrefixes.PENDING_SEGMENT_KEY);
             extra.remove(CorrectionPrefixes.PARKED_FULL_TEXT_KEY);
             extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
+            extra.remove(CREATE_ENTRY_CORRECTION_PREFIX_KEY);
             if (StringUtils.isNotBlank(prefixText)) {
                 extra.put(prefixKey, prefixText);
             }
@@ -3171,6 +3178,7 @@ public class ResilientChatService {
         snapshot.setStatus(RunSnapshot.FAILED);
         snapshot.setAttempts(attempts);
         snapshot.setError(code + "：" + message);
+        clearExportCorrectionPrefix(snapshot);
         if (!this.store.saveTerminalUnlessCancelled(snapshot)) {
             log.info("failure terminal write refused by cancel-priority guard "
                     + "runId={} code={} (no CANCELLED overwrite, no error frame)", runId, code);

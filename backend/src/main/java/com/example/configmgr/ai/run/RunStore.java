@@ -1399,7 +1399,7 @@ public class RunStore {
         snapshot.setTenantId(identity.tenantId());
         snapshot.setUserId(identity.userId());
         snapshot.setStatus(RunSnapshot.RUNNING);
-        snapshot.setContext(ObjectUtils.getIfNull(context, AiContext::empty).toMap());
+        snapshot.setContext(CorrectionPrefixes.withoutRunInternalState(context).toMap());
         snapshot.setMessageJson(codec.serializeAll(history));
         snapshot.setProviderId(providerId);
         snapshot.setModelId(modelId);

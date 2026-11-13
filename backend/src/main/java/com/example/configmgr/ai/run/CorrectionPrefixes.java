@@ -18,6 +18,12 @@ public final class CorrectionPrefixes {
 
     static final String EXPORT_CORRECTION_PREFIX_KEY = "exportCorrectionPrefix";
 
+    static final String CREATE_ENTRY_CORRECTION_PREFIX_KEY = "createEntryCorrectionPrefix";
+
+    static final String PARKED_FULL_TEXT_KEY = "correctionParkedFullText";
+
+    static final String PENDING_SEGMENT_KEY = "correctionPendingSegment";
+
     private CorrectionPrefixes() {
     }
 
@@ -42,16 +48,31 @@ public final class CorrectionPrefixes {
                 return "";
             }
             Map<String, Object> extra = AiContext.fromMap(snapshot.getContext()).getExtra();
-            Object value = extra == null ? null : extra.get(EXPORT_CORRECTION_PREFIX_KEY);
-            return ObjectUtils.toString(value, "");
+            if (extra == null) {
+                return "";
+            }
+            String createEntry = ObjectUtils.toString(extra.get(CREATE_ENTRY_CORRECTION_PREFIX_KEY), "");
+            return StringUtils.isNotEmpty(createEntry) ? createEntry
+                    : ObjectUtils.toString(extra.get(EXPORT_CORRECTION_PREFIX_KEY), "");
         } catch (RuntimeException ex) {
             throw normalizationFailure(ex);
         }
     }
 
-    static final String PARKED_FULL_TEXT_KEY = "correctionParkedFullText";
-
-    static final String PENDING_SEGMENT_KEY = "correctionPendingSegment";
+    /** 新 run 不继承上一 run 的纠正事实和待合并文本；历史消息与 legacy 兼容键保持原样。 */
+    public static AiContext withoutRunInternalState(AiContext context) {
+        AiContext current = ObjectUtils.getIfNull(context, AiContext::empty);
+        Map<String, Object> extra = current.getExtra() == null ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(current.getExtra());
+        extra.remove("createEntryCorrectionUsed");
+        extra.remove("exportCorrectionUsed");
+        extra.remove(CREATE_ENTRY_CORRECTION_PREFIX_KEY);
+        extra.remove(EXPORT_CORRECTION_PREFIX_KEY);
+        extra.remove(PARKED_FULL_TEXT_KEY);
+        extra.remove(PENDING_SEGMENT_KEY);
+        return AiContext.of(current.getPage(), current.getTaskType(), current.getStep(), current.getTaskId(),
+                current.getTaskStatus(), extra);
+    }
 
     public static void recordParkedFullText(RunSnapshot snapshot, String fullText) {
         try {
@@ -60,7 +81,7 @@ public final class CorrectionPrefixes {
             }
             AiContext current = AiContext.fromMap(snapshot.getContext());
             Map<String, Object> extra = current.getExtra() == null ? Map.of() : current.getExtra();
-            if (!extra.containsKey(EXPORT_CORRECTION_PREFIX_KEY)) {
+            if (!extra.containsKey(EXPORT_CORRECTION_PREFIX_KEY) && !extra.containsKey(CREATE_ENTRY_CORRECTION_PREFIX_KEY)) {
                 return;
             }
             Map<String, Object> updated = new LinkedHashMap<>(extra);

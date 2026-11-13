@@ -243,7 +243,7 @@ public class InMemoryRunStore extends RunStore {
 			snapshot.setUserId(identity.userId());
 		}
 		snapshot.setStatus(RunSnapshot.RUNNING);
-		snapshot.setContext(context == null ? AiContext.empty().toMap() : context.toMap());
+		snapshot.setContext(com.example.configmgr.ai.run.CorrectionPrefixes.withoutRunInternalState(context).toMap());
 		// 模型配置专项批①：与真实实现同口径固化模型身份（additive 字段）
 		snapshot.setProviderId(providerId);
 		snapshot.setModelId(modelId);
