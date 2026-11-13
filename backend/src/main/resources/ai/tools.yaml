@@ -97,7 +97,11 @@
 # 2026-10-27.38 → 2026-10-27.39（2026-11-13 条件模式与批量摘要）：条件表单统一为
 # conditionMode=ALL/CUSTOM；ALL 或 CUSTOM 留空由宿主直接 confirm_step，CUSTOM 非空文本才由模型结构化，
 # 多配置项真实条件只通过一次 set_conditions(items) 批量设置；启动确认按原始 JSON 聚合并保留逐项指纹。
-version: 2026-10-27.39
+# 2026-10-27.39 → 2026-10-27.40（2026-11-13 创建槽位提示契约）：defCodes 与 conditions 独立判断，
+# 唯一映射的编码/名称/别名必须传入，紧凑修饰也可构成条件；已知槽位不推迟到后续表单，后续工具只物化草案。
+# 同版未合入返修：单配置已知条件使用非空 conditions；多配置已知条件保留全部 defCodes、创建载荷传 {}，
+# 随后一次 set_conditions(items) 物化相同或不同的逐项条件；紧凑修饰须唯一确定配置、字段、算子和值/范围。
+version: 2026-10-27.40
 lang: zh
 tools:
   - toolKey: list_config_defs
@@ -140,10 +144,14 @@ tools:
       不得以任何只读工具作为创建前置，包括 list_config_defs 和 get_config_def；
       即使需要确认配置编码也先创建任务，由宿主继续选择/补充。
       需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：
-      非空已知条件只允许一个 defCode；未决定传 {} 且可保留多个 defCodes（这里的 {} 只表示条件未决定，
-      不是 set_conditions 的“明确不设”），不得省略。不同配置项的不同条件在创建后用 set_conditions(items) 给出。
+      defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；条件未决定时传 {}，不得省略。
+      单配置且条件已知时 defCodes=[该项] 并传非空 conditions；非空 conditions 只允许一个 defCode。
+      多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。
+      此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设。
       defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。
-      只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。
+      用户提及的配置编码、名称或别名能唯一映射到配置定义时必须传入对应 defCode；只有未提及或无法唯一映射时才省略，无法唯一映射时保留宿主配置选择卡。
+      紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；无法唯一确定仍按未决定，不得猜测。
+      已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。
       条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主提供
       conditionMode=ALL/CUSTOM 表单；ALL 或 CUSTOM 留空均由宿主直接 confirm_step，不调用模型或 set_conditions；
       CUSTOM 非空文本才由模型解析并通过一次 set_conditions(items) 形成草案。条件表单由宿主统一发放，

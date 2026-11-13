@@ -7130,6 +7130,45 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "规范签名保留items顺序和对象结构，页面条件由assertConditionBuildable比较，不按文案或字符串识别条件。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1279最终可合入，跨任务/跨run/同run新批次/空投影/历史非法全部ADDRESSED；施工报告后端8/8、前端34/34、361源编译、定向Checkstyle、typecheck/build通过；主控未重跑测试，真实Redis游标/HTTP/浏览器/Cluster/多实例NOT_RUN，两个旧断言失败保留且未宣称同基线同红。"}
       }
+    },
+    {
+      "fingerprint": "sha256:76afbe23660c3a1f637f22417d4b4683fbcf11cc9d85f00f2705ca485dc3a023",
+      "status": "reviewed",
+      "reason": "逐hunk复核创建槽位提示契约，单配置、多配置、紧凑修饰唯一确定边界和YAML/注解/版本同步；两轮独立静态复核最终可合入。",
+      "reviewedAt": "2026-11-13T08:55:21+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1281、施工agent-1286",
+      "specChanges": [
+        {
+          "change": "defCodes与conditions独立判断，唯一提及的配置编码/名称/别名必须映射；只有未提及或无法唯一映射时才省略并保留选择卡。",
+          "reason": "空条件合法导致C-09/C-10没有预检纠错机会，模型会把已知配置和紧凑条件都推迟到后续表单。",
+          "impact": "系统提示、规则包、@Tool/@ToolParam和tools.yaml统一，未修改宿主槽位链或恢复原话补参。"
+        },
+        {
+          "change": "单配置已知条件使用单defCode+非空conditions；多配置相同或不同条件使用全部已知defCodes+创建conditions={}，随后一次set_conditions(items)物化逐项条件。",
+          "reason": "唯一映射必须传入与非空仅一defCode之间需要合法的多配置分支。",
+          "impact": "多配置创建{}只表示载荷不承载逐项条件，不表示条件未知或明确不设；现有预检和批量草案链不变。"
+        },
+        {
+          "change": "紧凑修饰只有所属配置、字段、算子和值/范围均能唯一确定时才视为已知条件，否则按未决定且不得猜测。",
+          "reason": "仅要求紧凑形式会鼓励从任意修饰词猜条件，与既有缺失才补充规则冲突。",
+          "impact": "覆盖cny shorthand，同时保留无法确定时的宿主补充路径，不作跨模型确定性承诺。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java", "status": "checked", "reason": "同步单/多配置、唯一映射和紧凑修饰规则及多配置{}语义；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "系统提示补通用创建槽位边界，无文本解析或生产分支；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "@Tool/@ToolParam同步合法载荷和后续批量物化规则；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "有效描述与Java一致，版本2026-10-27.40，无旧单条条件协议。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有提示包、工具描述和结构化槽位链，无新增依赖、文本解析器或宿主补参路径。"},
+        "java-api-style": {"status": "checked", "reason": "三份生产Java仅提示文字并IDEA Reformat，无新增方法或复杂度变化。"},
+        "logging-exception-safety": {"status": "not-affected", "reason": "未修改异常、日志或对外错误处理。"},
+        "toc-interaction": {"status": "checked", "reason": "已知槽位不再推迟到选择/条件卡，未知或歧义仍保留必要表单，不新增技术提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "仅调整模型可见契约，多配置{}仍不是已知条件候选，真实批量草案和确认链不变。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "配置与条件按语义和唯一映射判断，不按正则、contains或固定话术补参。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1281两轮后确认多配置无解和紧凑修饰歧义均ADDRESSED；施工报告新增分支/边界及最终23个相关单点通过，宿主参数透传13/13保持，361源clean compile成功；主控未重跑测试，真实模型C-09/C-10/C-112 3/3仍为NOT_RUN，既有测试和Checkstyle问题未宣称解决。"}
+      }
     }
   ]
 }

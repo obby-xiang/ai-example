@@ -64,6 +64,6 @@ class CreateTaskOpenWizardPromptContractTest {
 		assertThat(param.description()).contains(CREATION_IS_NOT_CREATE_ONLY);
 		assertThat(param.description()).contains("默认完整续接，省略或传 true");
 		assertThat(param.description()).contains(EXPLICIT_CREATE_ONLY);
-		assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.28");
+		assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.40");
 	}
 }

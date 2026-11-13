@@ -444,9 +444,10 @@ public class AiTools {
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
     @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。"
-            + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：非空已知条件只允许一个 defCode，未决定传 {} 且可保留多个 defCodes（这里的 {} 只表示未决定，不是 set_conditions 的“明确不设”），不得省略。"
-            + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。只有用户已明确配置定义（编码/中文名/别名）时才传 defCodes；未提就省略，宿主随后只弹一次配置项选择表单。"
-            + "条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主提供 conditionMode=ALL/CUSTOM 表单。"
+            + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；条件未决定时传 {}，不得省略。"
+            + "单配置且条件已知时 defCodes=[该项] 并传非空 conditions；非空 conditions 只允许一个 defCode。多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设。"
+            + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。用户提及的配置编码、名称或别名能唯一映射到配置定义时必须传入对应 defCode；只有未提及或无法唯一映射时才省略，无法唯一映射时保留宿主配置选择卡。"
+            + "紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；无法唯一确定仍按未决定，不得猜测。已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主提供 conditionMode=ALL/CUSTOM 表单。"
             + "ALL 或 CUSTOM 留空均由宿主直接 confirm_step，不调用模型或 set_conditions；CUSTOM 非空文本才由模型解析并通过一次 set_conditions(items) 形成草案。"
             + "条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
             + "标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。"
@@ -460,8 +461,8 @@ public class AiTools {
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
-            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；未明确就不传，宿主只会弹一次配置项选择表单。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
-            @ToolParam(description = "导出任务必传：非空条件只允许一个 defCode；未决定传 {}（可保留多个 defCodes，表示未决定而非明确不设）；不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
+            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；用户提及的配置编码、名称或别名能唯一映射到配置定义时必须传入对应 defCode；只有未提及或无法唯一映射时才省略，无法唯一映射时保留宿主配置选择卡。单配置且条件已知时 defCodes=[该项] 并传非空 conditions；多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件。已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
+            @ToolParam(description = "导出任务必传：defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；单配置且条件已知时 defCodes=[该项] 并传非空 conditions；非空 conditions 只允许一个 defCode。多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设；条件未决定时也传 {}，不得省略。紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；无法唯一确定仍按未决定，不得猜测。已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。导入任务不传", required = false) FieldQueryCondition conditions,
             @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
             @ToolParam(description = "是否让宿主创建后自动打开向导并续接配置。“创建任务”只是流程入口，不等于“只创建”；默认完整续接，省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false（宿主不得自动导航、代选或发配置表单，以后用户明确打开/配置仍可继续）", required = false) Boolean openWizard,
             ToolContext toolContext) {

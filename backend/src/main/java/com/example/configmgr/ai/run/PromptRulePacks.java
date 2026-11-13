@@ -32,9 +32,14 @@ final class PromptRulePacks {
 
 				创建任务：用户明确新建时直接 create_task，不先用列表摸底，也不复用旧任务参数。
 				按当前结构化创建上下文传 type=EXPORT 或 IMPORT，类型无法证明时不要猜测。
-				EXPORT 必须显式传 conditions：用户已给筛选条件时保留完整 FieldQueryCondition，未决定才传 {}；
-				非空 conditions 只允许一个 defCode；多个配置项的不同条件必须在创建后通过一次 set_conditions(items) 给出。
-				IMPORT 不得附加导出条件。defCodes 未知时省略，保持宿主后续配置选择。
+				EXPORT 必须显式传 conditions，条件未决定时传 {}。
+				defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由。
+				单配置且条件已知时 defCodes=[该项] 并传非空 conditions，保留完整 FieldQueryCondition；非空 conditions 只允许一个 defCode。
+				多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。
+				此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设。
+				用户提及的配置编码、名称或别名能唯一映射到配置定义时必须传入对应 defCode；只有未提及或无法唯一映射时才省略，无法唯一映射时保留宿主配置选择卡。
+				紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；无法唯一确定仍按未决定，不得猜测。
+				IMPORT 不得附加导出条件。已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。
 				不得改为目录查询或文字追问。创建仍走确认卡且每轮最多一次；已创建的任务不得重建或重复批准。
 				“创建任务”只是流程入口，不等于“只创建”；未明确要求限制后续配置、打开或启动时，默认完整续接，openWizard 省略或传 true。
 				只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false，
@@ -80,7 +85,7 @@ final class PromptRulePacks {
 
 					set_conditions 只在 QUERY_COND 使用；items 必须非空且 defCode 不重复，每项显式携带自己的 conditions。
 					所有项必须一次 set_conditions(items) 批量给出并整批校验，不得拆成多次调用；只有完整有序 items 相同才幂等。
-					条件已明确时直接使用，不重复收集。create_task 的 {} 只表示条件未决定，不是明确不设。
+					条件已明确时直接使用，不重复收集。create_task 的 {} 不是明确不设；条件未决定或多配置创建载荷不承载逐项条件时使用。
 					条件表单使用 conditionMode=ALL/CUSTOM；ALL 或 CUSTOM 留空均由宿主直接 confirm_step，不调用模型或 set_conditions。
 					CUSTOM 非空文本才由模型结构化；批量项中的明确不设传恰好空对象 {}，缺失、null、fields:[]、scopeKeys:[] 均被拒绝。
 					草案不是业务库提交事实。
