@@ -312,8 +312,31 @@ class AiConfigWriteEndpointTest {
 		MvcResult result = this.mockMvc.perform(get("/api/ai/providers/7/models"))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.data[0].modelId").value("deepseek-flash"))
+			.andExpect(jsonPath("$.data[0].emptyLengthReasoningRecovery.reasoningEffort").value("low"))
+			.andExpect(jsonPath("$.data[0].emptyLengthReasoningRecovery.requestExtraBodyKeys",
+					org.hamcrest.Matchers.contains("thinking")))
 			.andReturn();
 		assertExactModelKeySet(this.mapper.readTree(result.getResponse().getContentAsString()).path("data").get(0));
+	}
+
+	@Test
+	void modelReadRecoveryProjectionDoesNotExposeExtensionValues() throws Exception {
+		AiProviderModel model = model();
+		model.setEmptyLengthReasoningRecovery("{\"reasoningEffort\":\"low\",\"requestExtraBody\":{"
+				+ "\"x-api-key\":\"secret-key-value\",\"authorization\":\"Bearer secret-token\","
+				+ "\"thinking\":{\"type\":\"disabled\"}}}");
+		when(this.configService.provider(7L)).thenReturn(java.util.Optional.of(provider(null)));
+		when(this.configService.modelsOf(7L)).thenReturn(List.of(model));
+
+		MvcResult result = this.mockMvc.perform(get("/api/ai/providers/7/models"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.data[0].emptyLengthReasoningRecovery.reasoningEffort").value("low"))
+			.andExpect(jsonPath("$.data[0].emptyLengthReasoningRecovery.requestExtraBodyKeys",
+					org.hamcrest.Matchers.containsInAnyOrder("x-api-key", "authorization", "thinking")))
+			.andReturn();
+
+		assertThat(result.getResponse().getContentAsString())
+			.doesNotContain("secret-key-value", "Bearer secret-token", "disabled");
 	}
 
 	@Test
@@ -410,7 +433,7 @@ class AiConfigWriteEndpointTest {
 	private static void assertExactModelKeySet(JsonNode model) {
 		assertThat(fieldNames(model)).containsExactlyInAnyOrder("id", "modelId", "displayName",
 				"supportsToolCalling", "supportsVision", "supportsReasoning", "maxContext", "maxOutput", "enabled",
-				"isDefault", "sortOrder");
+				"isDefault", "sortOrder", "emptyLengthReasoningRecovery");
 	}
 
 	private static Set<String> fieldNames(JsonNode node) {
@@ -459,6 +482,8 @@ class AiConfigWriteEndpointTest {
 		model.setProviderId(7L);
 		model.setModelId("deepseek-flash");
 		model.setDisplayName("deepseek-flash");
+		model.setEmptyLengthReasoningRecovery("{\"reasoningEffort\":\"low\","
+				+ "\"requestExtraBody\":{\"thinking\":{\"type\":\"disabled\"}}}");
 		model.setMaxContext(128000);
 		model.setMaxOutput(4096);
 		model.setSupportsToolCalling(true);

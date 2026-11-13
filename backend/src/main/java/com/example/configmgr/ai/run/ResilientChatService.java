@@ -3,6 +3,7 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
+import com.example.configmgr.ai.config.EmptyLengthReasoningRecovery;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.context.ContextBreakdownService;
 import com.example.configmgr.ai.context.ContextCompactor;
@@ -97,7 +98,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.IntFunction;
 import java.util.function.Predicate;
 
 /**
@@ -667,14 +667,18 @@ public class ResilientChatService {
         full.addAll(memory);
         full.add(setup.instructions().get(1));
         if (isCancelledDuringCompaction(runId, out, setup, compaction, memory, full)) {
-            return new FirstTurnExecution(true, null, null, null);
+            return new FirstTurnExecution(true, null, null, null, null);
         }
-        RunSnapshot snapshot = this.store.createWithRequestExtraBody(runId, setup.sessionId(), setup.context(), full, this.codec,
+        EmptyLengthReasoningRecovery recovery = this.providerRegistry.emptyLengthReasoningRecovery(
+                setup.runtime().providerId(), setup.runtime().modelId());
+        RunSnapshot snapshot = this.store.createWithReasoningPolicy(runId, setup.sessionId(), setup.context(), full, this.codec,
                 setup.runtime().providerId(), setup.runtime().modelId(), frozenParams(setup.runtime(), setup.isParamsLocked()),
                 setup.runtime().options().getExtraBody(), setup.request().clientRequestId(), setup.transcriptText(),
-                setup.turnStartedAtMs());
+                setup.turnStartedAtMs(), setup.runtime().options().getReasoningEffort(), recovery,
+                setup.runtime().chatModel() instanceof org.springframework.ai.openai.ReasoningAwareOpenAiChatModel reasoningModel
+                        && reasoningModel.isReasoningReplayEnabled());
         recordTranscriptUser(runId, setup.sessionId(), setup.transcriptText(), setup.turnStartedAtMs());
-        return new FirstTurnExecution(false, compaction, snapshot, full);
+        return new FirstTurnExecution(false, compaction, snapshot, full, recovery);
     }
 
     private boolean isCancelledDuringCompaction(String runId, SseChatEmitter out, FirstTurnSetup setup,
@@ -748,12 +752,19 @@ public class ResilientChatService {
     private void startFirstTurnAttempts(String runId, SseChatEmitter out, FirstTurnSetup setup,
                                         FirstTurnExecution execution, TurnKeepalive keepalive, TurnContext turn) {
         SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
+        ProviderRuntime recoveryRuntime = this.providerRegistry.forReasoningRecovery(setup.runtime(), execution.recovery());
         runAttempts(runId, setup.sessionId(), setup.turnStartedAtMs(), out, turn, keepalive, setup.context(),
-                setup.request().message(), "", "", turnTextBody, attempt -> {
+                setup.request().message(), "", "", turnTextBody, setup.runtime(), recoveryRuntime, (attempt, recovering) -> {
+                    ProviderRuntime selected = recovering ? recoveryRuntime : setup.runtime();
                     if (log.isDebugEnabled())
                         log.debug("assembling request for attempt {} runId={} sessionId={} (request rebuilt each turn)", attempt, runId, setup.sessionId());
                     return Flux.defer(() -> {
-                        var spec = setup.runtime().chatClient().prompt()
+                        if (recovering) {
+                            Prompt prompt = buildResumedPrompt(selected, runId, setup.sessionId(), setup.context(),
+                                    execution.fullHistory(), execution.snapshot(), out.lastIssuedSeq(), turnTextBody);
+                            return selected.chatModel().stream(prompt);
+                        }
+                        var spec = selected.chatClient().prompt()
                                 .system(setup.systemText())
                                 .user(setup.request().message())
                                 .advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, setup.sessionId()))
@@ -762,7 +773,8 @@ public class ResilientChatService {
                         var withTools = setup.tools().isEmpty() ? spec : spec.toolCallbacks(setup.tools());
                         return withTools.stream().chatResponse();
                     });
-                }, (prefix, reasoning, createEntry) -> correctionStream(setup.runtime(), runId, setup.sessionId(),
+                }, (prefix, reasoning, createEntry, recovering) -> correctionStream(
+                        recovering ? recoveryRuntime : setup.runtime(), runId, setup.sessionId(),
                         setup.context(), List.of(), out, prefix, reasoning, turnTextBody, createEntry), true);
     }
 
@@ -788,7 +800,7 @@ public class ResilientChatService {
     }
 
     private record FirstTurnExecution(boolean isCancelled, Compaction compaction, RunSnapshot snapshot,
-                                      List<Message> fullHistory) {
+                                      List<Message> fullHistory, EmptyLengthReasoningRecovery recovery) {
     }
 
     // ── 续跑：重建的完整历史 + 官方 ChatModel 路径（由 ResumeService 驱动） ──
@@ -869,15 +881,20 @@ public class ResilientChatService {
             String resumeFullText = StringUtils.defaultIfEmpty(correctionResume.fullText(), archivedFullText);
             List<Message> modelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(history, correctionPrefix(snapshot));
             SpToolCallingManager.TurnTextCapture turnTextBody = new SpToolCallingManager.TurnTextCapture();
+            ProviderRuntime recoveryRuntime = this.providerRegistry.forReasoningRecovery(runtime,
+                    snapshot.getEmptyLengthReasoningRecovery());
             runAttempts(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context, lastUserText,
-                    resumeFullText, correctionResume.pendingSegment(), turnTextBody, attempt -> {
+                    resumeFullText, correctionResume.pendingSegment(), turnTextBody, runtime, recoveryRuntime,
+                    (attempt, recovering) -> {
+                        ProviderRuntime selected = recovering ? recoveryRuntime : runtime;
                         if (log.isDebugEnabled())
                             log.debug("rebuilding full history for attempt {} runId={} sessionId={} historyEntries={}", attempt, runId,
                                     sessionId, modelHistory.size());
-                        Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, modelHistory, snapshot,
+                        Prompt prompt = buildResumedPrompt(selected, runId, sessionId, context, modelHistory, snapshot,
                                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
-                        return runtime.chatModel().stream(prompt);
-                    }, (prefix, reasoning, createEntry) -> correctionStream(runtime, runId, sessionId,
+                        return selected.chatModel().stream(prompt);
+                    }, (prefix, reasoning, createEntry, recovering) -> correctionStream(
+                            recovering ? recoveryRuntime : runtime, runId, sessionId,
                             context, modelHistory, out, prefix, reasoning, turnTextBody, createEntry), false);
         } finally {
             finishTurn(runId, keepalive, null, registered);
@@ -1177,10 +1194,11 @@ public class ResilientChatService {
             throw new ProviderGoneException(runId, providerId, modelId,
                     "Resolved provider=" + target.provider().providerId() + " does not match the snapshot provider");
         }
-        return this.providerRegistry.forFrozenRequest(target.provider(), modelId,
-                new AiProviderRegistry.Overrides(snapshot.getTemperature(), snapshot.getTopP(),
-                        snapshot.getMaxTokens()),
-                snapshot.getRequestExtraBody(), snapshot.isRequestExtraBodyPresent());
+        AiProviderRegistry.Overrides frozen = new AiProviderRegistry.Overrides(snapshot.getTemperature(),
+                snapshot.getTopP(), snapshot.getMaxTokens());
+        return this.providerRegistry.forFrozenRequest(target.provider(), modelId, frozen,
+                snapshot.getRequestExtraBody(), snapshot.isRequestExtraBodyPresent(), snapshot.getReasoningEffort(),
+                snapshot.isReasoningReplayEnabled());
     }
 
     /**
@@ -1272,20 +1290,29 @@ public class ResilientChatService {
     // ── 尝试循环（双超时 + 三条件重试 + 完成帧校验 + 取消） ────────────────────
 
     @FunctionalInterface
+    private interface AttemptStreamFactory {
+
+        Flux<ChatResponse> apply(int attempt, boolean reasoningRecovery);
+
+    }
+
+    @FunctionalInterface
     private interface CorrectionStreamFactory {
 
-        Flux<ChatResponse> apply(String prefixText, String prefixReasoning, boolean createEntry);
+        Flux<ChatResponse> apply(String prefixText, String prefixReasoning, boolean createEntry,
+                                 boolean reasoningRecovery);
 
     }
 
     private void runAttempts(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
                              TurnContext turn, TurnKeepalive keepalive, AiContext context, String lastUserText,
                              String resumePrefix, String resumePendingSegment, SpToolCallingManager.TurnTextCapture turnTextBody,
-                             IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream,
+                             ProviderRuntime initialRuntime, ProviderRuntime recoveryRuntime,
+                             AttemptStreamFactory attemptStream, CorrectionStreamFactory correctionStream,
                              boolean originalFirstTurn) {
         AttemptLoopState state = new AttemptLoopState(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context,
-                lastUserText, resumePrefix, resumePendingSegment, turnTextBody, attemptStream, correctionStream,
-                originalFirstTurn);
+                lastUserText, resumePrefix, resumePendingSegment, turnTextBody, initialRuntime, recoveryRuntime,
+                attemptStream, correctionStream, originalFirstTurn);
         while (true) {
             if (isAttemptBudgetExhausted(state)) {
                 return;
@@ -1338,6 +1365,7 @@ public class ResilientChatService {
         long startedAt = System.currentTimeMillis();
         long beaconBefore = this.beacon.startedCount(state.runId);
         Accumulator accumulator = new Accumulator(state.runId, state.turnTextBody);
+        accumulator.reasoningRecovery = state.reasoningRecovery;
         state.turnTextBody.reset(state.prefixSegment);
         if (state.turn != null && state.turn.compactionLevel() != null && !"none".equals(state.turn.compactionLevel())) {
             accumulator.meter().allowPromptDecline();
@@ -1372,8 +1400,8 @@ public class ResilientChatService {
     private void subscribeAndAwait(AttemptLoopState state, AttemptRound round) {
         Flux<ChatResponse> stream = state.correcting
                 ? state.correctionStream.apply(state.correctionHistoryPrefix, state.prefixReasoning,
-                state.createEntryCorrecting)
-                : state.attemptStream.apply(state.attempt);
+                state.createEntryCorrecting, state.reasoningRecovery)
+                : state.attemptStream.apply(state.attempt, state.reasoningRecovery);
         round.subscription = stream
                 .subscribe(response -> {
                     try (RunIdentityScope.Scope ignored = RunIdentityScope.open(state.upstreamIdentity)) {
@@ -1469,11 +1497,13 @@ public class ResilientChatService {
         stopKeepalive(state.keepalive);
         boolean handled = isFinish(state.runId, state.sessionId, round.accumulator, state.budgetedAttempts,
                 round.watchdog, state.out, state.turn, round.startedAtMs, round.beaconBefore, state.emptyReplyRetried,
-                state.correctionHistoryPrefix);
+                state.correctionHistoryPrefix, state.reasoningRecoveryAvailable);
         if (handled) {
             return AttemptStep.RETURN;
         }
         rearmKeepalive(state.keepalive);
+        state.reasoningRecovery = round.accumulator.isFinish() == UpstreamErrorClassifier.Finish.LENGTH
+                && state.reasoningRecoveryAvailable;
         state.emptyReplyRetried = true;
         state.correcting = false;
         state.createEntryCorrecting = false;
@@ -1658,9 +1688,10 @@ public class ResilientChatService {
         private final AiContext context;
         private final String lastUserText;
         private final SpToolCallingManager.TurnTextCapture turnTextBody;
-        private final IntFunction<Flux<ChatResponse>> attemptStream;
+        private final AttemptStreamFactory attemptStream;
         private final CorrectionStreamFactory correctionStream;
         private final boolean originalFirstTurn;
+        private final boolean reasoningRecoveryAvailable;
         private final AiProperties.Resilience config = ResilientChatService.this.properties.getResilience();
         private final TenantUser upstreamIdentity = RequestContextUtils.currentOrNull();
         private final int maxAttempts = Math.max(1, this.config.getMaxAttempts());
@@ -1675,13 +1706,15 @@ public class ResilientChatService {
         private String prefixReasoningSegment = "";
         private boolean correcting;
         private boolean createEntryCorrecting;
+        private boolean reasoningRecovery;
         private int attempt;
         private int budgetedAttempts;
 
         private AttemptLoopState(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
                                  TurnContext turn, TurnKeepalive keepalive, AiContext context, String lastUserText, String resumePrefix,
                                  String resumePendingSegment, SpToolCallingManager.TurnTextCapture turnTextBody,
-                                 IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream,
+                                 ProviderRuntime initialRuntime, ProviderRuntime recoveryRuntime,
+                                 AttemptStreamFactory attemptStream, CorrectionStreamFactory correctionStream,
                                  boolean originalFirstTurn) {
             this.runId = runId;
             this.sessionId = sessionId;
@@ -1695,6 +1728,8 @@ public class ResilientChatService {
             this.attemptStream = attemptStream;
             this.correctionStream = correctionStream;
             this.originalFirstTurn = originalFirstTurn;
+            this.reasoningRecoveryAvailable = AiProviderRegistry.hasDifferentReasoningPolicy(initialRuntime,
+                    recoveryRuntime);
             this.prefixText = StringUtils.defaultString(resumePrefix);
             this.prefixSegment = StringUtils.defaultString(resumePendingSegment);
             this.correctionHistoryPrefix = this.prefixText;
@@ -2402,15 +2437,16 @@ public class ResilientChatService {
      * + 零副作用"才允许再试一次（见 {@link #emptyReplyRetryable}）。已上屏的思考、工具副作用、
      * 已挂起工具轮、已到尝试上界或预算耗尽时一律<b>不</b>重试，直接落 {@code EMPTY_REPLY} 失败
      * （否则重试会把已出过的思考段再吐一遍，或把"这一轮已做过事"抹成没做过）。隐藏思考（展示关闭）
-     * 没上屏，不阻断这条重试。{@code finish_reason=length} 已是明确的输出截断事实，即使正文为空也
-     * 直接以 FAILED + 截断标记收尾，不进入普通空回复的同参重试。
+     * 没上屏，不阻断这条重试。{@code finish_reason=length} 不进入普通空回复的同参重试；仅在目标显式配置
+     * 不同的空 LENGTH 推理恢复策略时，才可在同一组零产出/零副作用/次数/总预算守卫下恢复一次。
      *
      * @return {@code true} = 已终态收尾（调用方 return）；{@code false} = 空回复可再试一次
      * （调用方继续尝试循环，本方法已发 {@code retry} 帧）
      */
     private boolean isFinish(String runId, String sessionId, Accumulator accumulator, int attempts,
                              StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, long attemptStartedAtMs,
-                             long beaconBefore, boolean emptyReplyRetried, String correctionPrefix) {
+                             long beaconBefore, boolean emptyReplyRetried, String correctionPrefix,
+                             boolean reasoningRecoveryAvailable) {
         UpstreamErrorClassifier.Finish finish = accumulator.isFinish();
         // content_filter = 明确失败（即使已有半截正文也不当作完成）
         if (finish == UpstreamErrorClassifier.Finish.CONTENT_FILTER) {
@@ -2422,9 +2458,14 @@ public class ResilientChatService {
         String text = accumulator.text();
         if (!StringUtils.isNotBlank(text)) {
             boolean lengthTruncated = finish == UpstreamErrorClassifier.Finish.LENGTH;
-            if (!lengthTruncated && isEmptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(), attemptStartedAtMs,
-                    beaconBefore, emptyReplyRetried)) {
-                emitEmptyReplyRetry(runId, sessionId, attempts, out, turn);
+            boolean retryable = isEmptyReplyRetryable(runId, accumulator, attempts, turn.turnStartedAtMs(),
+                    attemptStartedAtMs, beaconBefore, emptyReplyRetried);
+            if (!lengthTruncated && retryable) {
+                emitEmptyReplyRetry(runId, sessionId, attempts, out, turn, accumulator, false);
+                return false;
+            }
+            if (lengthTruncated && reasoningRecoveryAvailable && retryable && !accumulator.hasToolCalls()) {
+                emitEmptyReplyRetry(runId, sessionId, attempts, out, turn, accumulator, true);
                 return false;
             }
             emptyReply(runId, sessionId, accumulator, attempts, out, turn, lengthTruncated);
@@ -2597,6 +2638,9 @@ public class ResilientChatService {
         // 缺键 = 未截断（旧后端），"没说"与"没截断"因此可区分。与 assistant metadata 同一判据。
         if (lengthTruncated) {
             extra.put(TRUNCATED_KEY, true);
+        }
+        if (accumulator.reasoningRecovery) {
+            extra.put("emptyLengthReasoningRecovery", true);
         }
         putParamsLocked(extra, turn);
         // T5：正文段收尾（未开过段则不发 —— 纯工具轮没有正文）
@@ -3028,6 +3072,7 @@ public class ResilientChatService {
                 // usage 可信度：采到的非空 usage 帧数 / 被判脏回退的帧数（est=true 时这两个数是唯一佐证）
                 "frames", usage.getOrDefault("frames", 0), "dirty", usage.getOrDefault("dirty", 0),
                 "maxOutputTokens", turn.maxOutputTokens(),
+                "emptyLengthReasoningRecovery", accumulator != null && accumulator.reasoningRecovery,
                 "terminalSignal", accumulator == null ? null : accumulator.terminalSignal(),
                 "model", doneModel(accumulator, turn), "provider", turn.provider(),
                 "upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents()));
@@ -3102,18 +3147,50 @@ public class ResilientChatService {
      * 这一轮的第一条非终态帧 —— 帧序契约（{@code FrameContract}）因此不需要新分支。
      */
     private void emitEmptyReplyRetry(String runId, String sessionId, int attempts, SseChatEmitter out,
-                                     TurnContext turn) {
+                                     TurnContext turn, Accumulator accumulator, boolean reasoningRecovery) {
         Map<String, Object> retryFrame = new LinkedHashMap<>();
         retryFrame.put("nextAttempt", attempts + 1);
         retryFrame.put("code", EMPTY_REPLY_CODE);
         retryFrame.put("reason", "模型本轮未产出任何内容，仅重跑模型步（不重执行工具、不追加用户消息）");
-        retryFrame.put("emptyReply", true);
         retryFrame.put("elapsedMs", Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs()));
+        retryFrame.put("usage", accumulator.usage(turn.promptEstimate()));
+        if (reasoningRecovery) {
+            retryFrame.put("emptyLengthReasoningRecovery", true);
+            addReasoningPolicies(runId, retryFrame);
+        } else {
+            retryFrame.put("emptyReply", true);
+        }
         out.retry(retryFrame);
+        Map<String, Object> usage = accumulator.usage(turn.promptEstimate());
         AiTrace.event("turn_empty_retry", "attempt", attempts, "nextAttempt", attempts + 1, "code", EMPTY_REPLY_CODE,
+                "emptyLengthReasoningRecovery", reasoningRecovery,
+                "inputTokens", usage.getOrDefault("promptTokens", 0),
+                "outputTokens", usage.getOrDefault("completionTokens", 0),
+                "reasoningTokens", usage.getOrDefault(UsageDetails.REASONING_TOKENS, 0),
                 "elapsedMs", Math.max(0L, System.currentTimeMillis() - turn.turnStartedAtMs()));
-        log.warn("empty reply retried once as model-only step runId={} sessionId={} attempt={}/{}", runId, sessionId, attempts,
-                this.properties.getResilience().getMaxAttempts());
+        log.warn("empty reply retried once as model-only step runId={} sessionId={} attempt={}/{} reasoningRecovery={}",
+                runId, sessionId, attempts, this.properties.getResilience().getMaxAttempts(), reasoningRecovery);
+    }
+
+    private void addReasoningPolicies(String runId, Map<String, Object> retryFrame) {
+        RunSnapshot snapshot = this.store.get(runId);
+        if (snapshot == null) {
+            return;
+        }
+        retryFrame.put("initialReasoningPolicy", reasoningPolicySummary(snapshot.getReasoningEffort(),
+                snapshot.getRequestExtraBody()));
+        EmptyLengthReasoningRecovery recovery = snapshot.getEmptyLengthReasoningRecovery();
+        if (recovery != null) {
+            retryFrame.put("recoveryReasoningPolicy", reasoningPolicySummary(recovery.reasoningEffort(),
+                    recovery.requestExtraBody()));
+        }
+    }
+
+    private static Map<String, Object> reasoningPolicySummary(String effort, Map<String, Object> extraBody) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("reasoningEffort", effort);
+        summary.put("requestExtraBodyKeys", extraBody == null ? List.of() : List.copyOf(extraBody.keySet()));
+        return summary;
     }
 
     /**
@@ -3252,8 +3329,14 @@ public class ResilientChatService {
         }
         // 本批：失败出口统一走 emitFailureTerminal（发帧前判归档终帧）——
         // 另一驱动方已落 done/error 时，这里不得把一轮翻成两条终帧。
-        Map<String, Object> extra = lengthTruncated
-                ? Map.of(TRUNCATED_KEY, true, "terminalSignal", accumulator.terminalSignal()) : null;
+        Map<String, Object> extra = new LinkedHashMap<>();
+        if (lengthTruncated) {
+            extra.put(TRUNCATED_KEY, true);
+            extra.put("terminalSignal", accumulator.terminalSignal());
+        }
+        if (accumulator.reasoningRecovery) {
+            extra.put("emptyLengthReasoningRecovery", true);
+        }
         isEmitFailureTerminal(runId, out, EMPTY_REPLY_CODE, message, extra, text.length());
         emitTurnEnd(runId, sessionId, "failed", EMPTY_REPLY_CODE, attempts, accumulator, turn, null);
         // F：统一终态出口的进程内清理（终帧之后；幂等，失败只 WARN）。直接交出手里的快照。
@@ -5120,6 +5203,10 @@ public class ResilientChatService {
 
         private final AtomicReference<ChatResponse> lastResponse = new AtomicReference<>();
 
+        private boolean reasoningRecovery;
+
+        private boolean sawToolCalls;
+
         /**
          * 计量器（上下文专项批①）：R1–R6 的规则本体在 {@link ContextMeter}，本类只负责喂它。
          * 每次 attempt 新建 ⇒ 重试天然不串值（R6）。
@@ -5207,8 +5294,11 @@ public class ResilientChatService {
             this.lastResponse.set(response);
             this.meter.accept(response);
             Generation generation = response.getResult();
-            boolean hasToolCalls = generation != null && generation.getOutput() != null
-                    && generation.getOutput().hasToolCalls();
+            boolean hasToolCalls = response.getResults() != null && response.getResults().stream()
+                    .anyMatch(item -> item != null && item.getOutput() != null && item.getOutput().hasToolCalls());
+            if (hasToolCalls) {
+                this.sawToolCalls = true;
+            }
             if (generation != null) {
                 // "本片之前终态是否已锁存"：真实工具守卫只看<b>后续</b>分片（本片自己锁存的终态不算）
                 boolean terminalLatchedBefore = this.terminalFinish.get() != null;
@@ -5377,6 +5467,10 @@ public class ResilientChatService {
             // seed 前缀只用于计数/最终记忆：本段没有新正文、思考也没上屏时仍是"零可见产出"，
             // 不能因为前缀恒真而抑制正常重试。
             return this.text.length() > this.seededBodyChars || this.reasoningShown;
+        }
+
+        boolean hasToolCalls() {
+            return this.sawToolCalls;
         }
 
         String text() {

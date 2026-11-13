@@ -250,13 +250,21 @@ public class AiConfigWriter {
                                @JsonProperty("enabled") Boolean enabled,
                                @JsonProperty("isDefault") Boolean isDefault,
                                @JsonProperty("sortOrder") Integer sortOrder,
-                               @JsonProperty("requestExtraBody") Map<String, Object> requestExtraBody) {
+                               @JsonProperty("requestExtraBody") Map<String, Object> requestExtraBody,
+                               @JsonProperty("emptyLengthReasoningRecovery") Map<String, Object> emptyLengthReasoningRecovery) {
 
         public ModelCommand(String modelId, String displayName, Integer maxContext, Integer maxOutput,
                             Boolean supportsToolCalling, Boolean supportsVision, Boolean supportsReasoning,
                             Boolean enabled, Boolean isDefault, Integer sortOrder) {
             this(modelId, displayName, maxContext, maxOutput, supportsToolCalling, supportsVision, supportsReasoning,
-                    enabled, isDefault, sortOrder, null);
+                    enabled, isDefault, sortOrder, null, null);
+        }
+
+        public ModelCommand(String modelId, String displayName, Integer maxContext, Integer maxOutput,
+                            Boolean supportsToolCalling, Boolean supportsVision, Boolean supportsReasoning,
+                            Boolean enabled, Boolean isDefault, Integer sortOrder, Map<String, Object> requestExtraBody) {
+            this(modelId, displayName, maxContext, maxOutput, supportsToolCalling, supportsVision, supportsReasoning,
+                    enabled, isDefault, sortOrder, requestExtraBody, null);
         }
     }
 
@@ -447,6 +455,7 @@ public class AiConfigWriter {
         String modelId = requireModelId(command.modelId());
         int maxContext = validateMaxContext(command.maxContext());
         int maxOutput = validateMaxOutput(command.maxOutput(), command.maxContext());
+        String recoveryJson = emptyLengthReasoningRecoveryJson(command.emptyLengthReasoningRecovery());
 
         AiProviderModel created = executeInTransaction(() -> {
             AiProvider provider = requireProvider(providerId);
@@ -464,6 +473,7 @@ public class AiConfigWriter {
             model.setSupportsVision(Boolean.TRUE.equals(command.supportsVision()));
             model.setSupportsReasoning(Boolean.TRUE.equals(command.supportsReasoning()));
             model.setRequestExtraBody(requestExtraBodyJson(command.requestExtraBody()));
+            model.setEmptyLengthReasoningRecovery(recoveryJson);
             model.setEnabled(BooleanUtils.isNotFalse(command.enabled()));
             model.setDefault(Boolean.TRUE.equals(command.isDefault()));
             model.setSortOrder(ObjectUtils.defaultIfNull(command.sortOrder(), 0));
@@ -514,6 +524,23 @@ public class AiConfigWriter {
         }
     }
 
+    private String emptyLengthReasoningRecoveryJson(Map<String, Object> recovery) {
+        if (recovery == null || recovery.isEmpty()) {
+            return null;
+        }
+        try {
+            EmptyLengthReasoningRecovery validated = EmptyLengthReasoningRecovery.parse(
+                    this.objectMapper.writeValueAsString(recovery));
+            return this.objectMapper.writeValueAsString(validated);
+        }
+        catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+            throw invalidParam("emptyLengthReasoningRecovery must be serializable as a JSON object");
+        }
+        catch (IllegalArgumentException ex) {
+            throw invalidParam(ex.getMessage());
+        }
+    }
+
     private AiProviderModel applyModelUpdate(AiProviderModel existing, ModelCommand command, Long providerId) {
         if (command.displayName() != null) {
             existing.setDisplayName(StringUtils.isNotBlank(command.displayName()) ? command.displayName().trim()
@@ -536,6 +563,10 @@ public class AiConfigWriter {
         }
         if (command.requestExtraBody() != null) {
             existing.setRequestExtraBody(requestExtraBodyJson(command.requestExtraBody()));
+        }
+        if (command.emptyLengthReasoningRecovery() != null) {
+            existing.setEmptyLengthReasoningRecovery(
+                    emptyLengthReasoningRecoveryJson(command.emptyLengthReasoningRecovery()));
         }
         if (command.enabled() != null) {
             existing.setEnabled(command.enabled());

@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.EmptyLengthReasoningRecovery;
 import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.tool.AiContext;
@@ -1356,10 +1357,19 @@ public class RunStore {
                                                   MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
                                                   Map<String, Object> requestExtraBody, String clientRequestId, String requestText,
                                                   long turnStartedAtMs) {
+        return createWithReasoningPolicy(runId, sessionId, context, history, codec, providerId, modelId, frozen,
+                requestExtraBody, clientRequestId, requestText, turnStartedAtMs, null, null, false);
+    }
+
+    public RunSnapshot createWithReasoningPolicy(String runId, String sessionId, AiContext context, List<Message> history,
+            MessageJsonCodec codec, Long providerId, String modelId, RunSnapshot.FrozenParams frozen,
+            Map<String, Object> requestExtraBody, String clientRequestId, String requestText, long turnStartedAtMs,
+            String reasoningEffort, EmptyLengthReasoningRecovery recovery, boolean reasoningReplayEnabled) {
         validateInitialSnapshot(runId, modelId, requestText, turnStartedAtMs, frozen);
         TenantUser identity = RequestContextUtils.require();
         RunSnapshot snapshot = newInitialSnapshot(runId, sessionId, context, history, codec, providerId, modelId,
                 frozen, requestExtraBody, clientRequestId, requestText, turnStartedAtMs, identity);
+        snapshot.freezeReasoningPolicies(reasoningEffort, recovery, reasoningReplayEnabled);
         registerSessionRun(runId, sessionId, identity);
         primeRunIndexRepair(snapshot, runId);
         if (!isPersist(snapshot)) {

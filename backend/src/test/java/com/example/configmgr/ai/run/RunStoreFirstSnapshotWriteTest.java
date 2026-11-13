@@ -167,12 +167,13 @@ class RunStoreFirstSnapshotWriteTest {
 			throw new AiStateUnavailableException("模拟首笔快照写失败 runId=" + runId);
 		}
 
-		/** 首轮实际走的是带请求扩展体的写口（extraBody 来自 runtime.options()）。 */
+		/** 首轮实际走的是带请求扩展体与冻结推理策略的写口。 */
 		@Override
-		public RunSnapshot createWithRequestExtraBody(String runId, String sessionId, AiContext context,
+		public RunSnapshot createWithReasoningPolicy(String runId, String sessionId, AiContext context,
 				List<Message> history, MessageJsonCodec codec, Long providerId, String modelId,
 				RunSnapshot.FrozenParams frozen, Map<String, Object> requestExtraBody, String clientRequestId,
-				String requestText, long turnStartedAtMs) {
+				String requestText, long turnStartedAtMs, String reasoningEffort,
+				com.example.configmgr.ai.config.EmptyLengthReasoningRecovery recovery, boolean reasoningReplayEnabled) {
 			throw new AiStateUnavailableException("模拟首笔快照写失败 runId=" + runId);
 		}
 

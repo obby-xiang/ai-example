@@ -1,8 +1,11 @@
 package com.example.configmgr.ai.config;
 
 import com.example.configmgr.ai.config.db.AiProvider;
+import com.example.configmgr.ai.config.db.AiProviderModel;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.openai.ReasoningAwareOpenAiChatModel;
+
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -234,6 +237,129 @@ class AiProviderRegistryParamsTest {
 		assertThat(registry.current().options().getTemperature()).as("默认路径的参数不被续跑轮覆盖")
 			.isNotEqualTo(0.1d);
 		assertThat(registry.runtimeCount()).isEqualTo(1);
+	}
+
+	@Test
+	void reasoningRecoveryChangesOnlyTheReasoningPolicy() {
+		AiProvider provider = this.fixture.addEnvProvider("custom", "http://custom");
+		this.fixture.addModel(provider.getId(), "model-a", true)
+			.setRequestExtraBody("{\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"high\"}");
+		this.fixture.chatProperties.getOptions().setReasoningEffort("high");
+		AiConfigService service = this.fixture.service();
+		AiProviderRegistry registry = this.fixture.registry(service);
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "model-a")
+			.orElseThrow().provider();
+		ProviderRuntime initial = registry.forRequest(resolved, "model-a", AiProviderRegistry.Overrides.NONE);
+		EmptyLengthReasoningRecovery policy = new EmptyLengthReasoningRecovery("low",
+				java.util.Map.of("thinking", java.util.Map.of("type", "disabled")));
+		java.util.concurrent.atomic.AtomicReference<ProviderRuntime> recovered = new java.util.concurrent.atomic.AtomicReference<>();
+
+		org.assertj.core.api.Assertions.assertThatCode(() -> recovered.set(
+				org.springframework.test.util.ReflectionTestUtils.invokeMethod(registry, "forReasoningRecovery",
+						initial, policy))).doesNotThrowAnyException();
+
+		assertThat(recovered.get().options().getReasoningEffort()).isEqualTo("low");
+		assertThat(recovered.get().options().getExtraBody().get("thinking"))
+			.isEqualTo(java.util.Map.of("type", "disabled"));
+		assertThat(recovered.get().options().getExtraBody()).doesNotContainKey("reasoning_effort");
+		assertThat(initial.options().getExtraBody().get("thinking"))
+			.isEqualTo(java.util.Map.of("type", "enabled"));
+		assertThat(recovered.get().options().getMaxTokens()).isEqualTo(initial.options().getMaxTokens());
+		assertThat(recovered.get().api()).isSameAs(initial.api());
+		assertThat(initial.options().getReasoningEffort()).isEqualTo("high");
+	}
+
+	@Test
+	void equivalentEffortInInitialExtraBodyIsNotADifferentRecoveryPolicy() {
+		AiProvider provider = this.fixture.addEnvProvider("custom", "http://custom");
+		this.fixture.addModel(provider.getId(), "model-a", true)
+			.setRequestExtraBody("{\"reasoning_effort\":\"high\"}");
+		AiConfigService service = this.fixture.service();
+		AiProviderRegistry registry = this.fixture.registry(service);
+		ProviderRuntime initial = registry.forRequest(service.resolveChatTarget(provider.getId(), "model-a")
+			.orElseThrow().provider(), "model-a", AiProviderRegistry.Overrides.NONE);
+
+		ProviderRuntime recovery = registry.forReasoningRecovery(initial,
+				new EmptyLengthReasoningRecovery("high", Map.of()));
+
+		assertThat(AiProviderRegistry.hasDifferentReasoningPolicy(initial, recovery)).isFalse();
+	}
+
+	@Test
+	void fiveArgumentFrozenRequestKeepsInheritedReasoningEffort() {
+		AiProvider provider = this.fixture.addEnvProvider("custom", "http://custom");
+		this.fixture.addModel(provider.getId(), "model-a", true);
+		this.fixture.chatProperties.getOptions().setReasoningEffort("high");
+		AiConfigService service = this.fixture.service();
+		AiProviderRegistry registry = this.fixture.registry(service);
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "model-a")
+			.orElseThrow().provider();
+
+		ProviderRuntime runtime = registry.forFrozenRequest(resolved, "model-a", AiProviderRegistry.Overrides.NONE,
+				Map.of(), true);
+
+		assertThat(runtime.options().getReasoningEffort()).isEqualTo("high");
+	}
+
+	@Test
+	void sixArgumentFrozenRequestTreatsNullEffortAsExplicitlyFrozen() {
+		AiProvider provider = this.fixture.addEnvProvider("custom", "http://custom");
+		this.fixture.addModel(provider.getId(), "model-a", true);
+		this.fixture.chatProperties.getOptions().setReasoningEffort("high");
+		AiConfigService service = this.fixture.service();
+		AiProviderRegistry registry = this.fixture.registry(service);
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "model-a")
+			.orElseThrow().provider();
+
+		ProviderRuntime runtime = registry.forFrozenRequest(resolved, "model-a", AiProviderRegistry.Overrides.NONE,
+				Map.of(), true, null);
+
+		assertThat(runtime.options().getReasoningEffort()).isNull();
+	}
+
+	@Test
+	void frozenPoliciesIgnoreLaterDatabaseChangesOnResume() throws Exception {
+		AiProvider provider = this.fixture.addEnvProvider("custom", "http://custom");
+		AiProviderModel model = this.fixture.addModel(provider.getId(), "model-a", true);
+		model.setRequestExtraBody("{\"thinking\":{\"type\":\"enabled\"}}");
+		model.setEmptyLengthReasoningRecovery("{\"reasoningEffort\":\"low\","
+				+ "\"requestExtraBody\":{\"thinking\":{\"type\":\"disabled\"}}}");
+		model.setSupportsReasoning(true);
+		AiConfigService service = this.fixture.service();
+		AiProviderRegistry registry = this.fixture.registry(service);
+		AiConfigService.ResolvedProvider resolved = service.resolveChatTarget(provider.getId(), "model-a")
+			.orElseThrow().provider();
+		ProviderRuntime first = registry.forRequest(resolved, "model-a", AiProviderRegistry.Overrides.NONE);
+		com.example.configmgr.ai.run.RunSnapshot snapshot = new com.example.configmgr.ai.run.RunSnapshot();
+		snapshot.setRunId("run-frozen");
+		snapshot.setProviderId(provider.getId());
+		snapshot.setModelId("model-a");
+		snapshot.freezeParams(new com.example.configmgr.ai.run.RunSnapshot.FrozenParams(null, null, 8192, false));
+		snapshot.freezeRequestExtraBody(Map.of("thinking", Map.of("type", "enabled")));
+		snapshot.freezeReasoningPolicies(first.options().getReasoningEffort(),
+				service.emptyLengthReasoningRecovery(provider.getId(), "model-a"),
+				((ReasoningAwareOpenAiChatModel) first.chatModel()).isReasoningReplayEnabled());
+
+		model.setEmptyLengthReasoningRecovery("{\"reasoningEffort\":\"high\"}");
+		model.setRequestExtraBody("{\"thinking\":{\"type\":\"enabled\"}}");
+		model.setSupportsReasoning(false);
+		this.fixture.chatProperties.getOptions().setReasoningEffort("high");
+		this.fixture.bumpVersion();
+		com.example.configmgr.ai.run.ResilientChatService resumed = new com.example.configmgr.ai.run.ResilientChatService(
+				registry, null, null, null, null, null, null, null, new AiProperties(), null, null, null);
+		ProviderRuntime initial = org.springframework.test.util.ReflectionTestUtils.invokeMethod(resumed,
+				"runtimeForSnapshot", "run-frozen", snapshot);
+		ProviderRuntime recovery = registry.forReasoningRecovery(initial, snapshot.getEmptyLengthReasoningRecovery());
+
+		assertThat(initial.options().getReasoningEffort()).as("首发 null 也是冻结值").isNull();
+		assertThat(initial.options().getExtraBody().get("thinking")).isEqualTo(Map.of("type", "enabled"));
+		assertThat(recovery.options().getReasoningEffort()).isEqualTo("low");
+		assertThat(recovery.options().getExtraBody().get("thinking")).isEqualTo(Map.of("type", "disabled"));
+		assertThat(recovery.options().getMaxTokens()).isEqualTo(8192);
+		assertThat(((ReasoningAwareOpenAiChatModel) initial.chatModel()).isReasoningReplayEnabled()).isTrue();
+		assertThat(((ReasoningAwareOpenAiChatModel) recovery.chatModel()).isReasoningReplayEnabled())
+			.as("续跑 initial 与 recovery 都使用首发冻结的回放位")
+			.isTrue();
 	}
 
 }

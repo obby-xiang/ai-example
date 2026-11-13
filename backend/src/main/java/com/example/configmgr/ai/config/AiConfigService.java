@@ -569,6 +569,12 @@ public class AiConfigService {
         }
     }
 
+    public EmptyLengthReasoningRecovery emptyLengthReasoningRecovery(Long providerId, String modelId) {
+        String raw = providerId == null ? envSeedModel().getEmptyLengthReasoningRecovery()
+                : model(providerId, modelId).map(AiProviderModel::getEmptyLengthReasoningRecovery).orElse(null);
+        return EmptyLengthReasoningRecovery.parse(raw);
+    }
+
     // ── 解析：默认 provider / 模型 ────────────────────────────────────────────
 
     /**

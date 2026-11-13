@@ -7363,6 +7363,60 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "前驱正文不再经初始context混入新run SSE或工具assistant，不修改帧解析、文本截断或transcript严格对账。"},
         "verification-review": {"status": "checked", "reason": "agent-1291跨run复核无分级问题，agent-1290发现IMPORT条件冲突后返修并最终可合入；施工报告相关独立单点逐个通过、361个生产源文件clean compile成功；主控未重跑测试，真实Flash/真实模型/HTTP/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:3e86c2989d40a4cc0d0d3d004a3956028cd4c2b5863af1ae32360a43f05914fd",
+      "status": "reviewed",
+      "reason": "逐hunk复核目标级空LENGTH降推理恢复、配置校验与脱敏、显式首发历史、次数/取消/副作用守卫和首发策略冻结；多轮独立静态复审最终可合入。",
+      "reviewedAt": "2026-11-13T23:20:54+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1293、施工agent-1295",
+      "specChanges": [
+        {
+          "change": "每个providerId+modelId可显式配置emptyLengthReasoningRecovery，支持reasoningEffort与requestExtraBody两种策略键，缺省不启用，H2/PostgreSQL新增V4字段。",
+          "reason": "推理与可见输出共享maxTokens，需要目标级降推理能力而不是全局关闭思考或按模型名分支。",
+          "impact": "未知字段、错误类型、重复effort和第二套token预算均拒绝；公开读取仅返回effort与扩展键名，不返回任何扩展秘密值。"
+        },
+        {
+          "change": "首次空LENGTH且无正文、可见reasoning、工具调用/待决项、该次副作用且次数和总预算充足时，允许一次降推理恢复，maxTokens不变。",
+          "reason": "同参重试无法消除推理耗尽，继续加预算仍会被推理独占。",
+          "impact": "第二次仅改变推理策略并占用现有maxAttempts、取消和看门狗；无策略、同策略或第二次失败继续FAILED+EMPTY_REPLY+truncated，非空LENGTH仍DONE+truncated。"
+        },
+        {
+          "change": "首轮恢复使用execution.fullHistory并直接调用恢复chatModel，恢复ChatClient不挂memoryAdvisor，续跑使用同一modelHistory。",
+          "reason": "生产PerRunChatMemory拒绝整窗add，原恢复记忆调用无效且可能留下aborted assistant和重复user。",
+          "impact": "第二实际上游不包含aborted空响应或重复user，不整窗覆盖、不删除并发run，历史reasoning metadata与assistant/tool配对保持。"
+        },
+        {
+          "change": "首发effort（含显式null）、恢复策略和实际reasoning回放位随RunSnapshot冻结；五参forFrozenRequest未提供effort时保持原继承行为。",
+          "reason": "续跑不能受后续数据库配置变化影响，同时本批不能静默改变现有五参调用方。",
+          "impact": "新快照显式null不继承后续DB，恢复模型继承首发回放位；按用户未上线裁决不增加旧快照presence、迁移或legacy分支。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigService.java", "status": "checked", "reason": "按providerId+modelId读取目标恢复策略并复用统一解析，缺省不启用；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiConfigWriter.java", "status": "checked", "reason": "模型新增/更新接受恢复策略并在写入前校验序列化、未知字段和冲突；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java", "status": "checked", "reason": "派生只改推理策略的恢复runtime，保留回放位与effort presence，恢复ChatClient不挂memoryAdvisor；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/EmptyLengthReasoningRecovery.java", "status": "checked", "reason": "定义两种策略键及严格类型、未知字段、重复effort和token预算校验，序列化不含敏感日志；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/config/db/AiProviderModel.java", "status": "checked", "reason": "模型配置实体增加可选恢复策略文本列，toString排除该值，仅用于允许的模型配置边界；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "实现一次空LENGTH恢复、严格触发/取消/副作用守卫、显式首发历史和真实usage/终态观测；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunSnapshot.java", "status": "checked", "reason": "冻结effort、恢复策略和reasoning回放位，公开asMap只含策略键名摘要；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/RunStore.java", "status": "checked", "reason": "首笔快照写入前冻结首发与恢复推理策略，保持首写失败不上游语义；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiConfigController.java", "status": "checked", "reason": "provider模型视图仅暴露恢复策略安全投影，不返回扩展值；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/dto/ModelView.java", "status": "checked", "reason": "模型列表读取只含effort与requestExtraBodyKeys，避免秘密值和掩码回写；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/db/migration/V4__ai_model_empty_length_reasoning_recovery.sql", "status": "checked", "reason": "H2新增可空模型恢复策略列，无会话或运行数据落库。"},
+        {"path": "backend/src/main/resources/db/postgresql/V4__ai_model_empty_length_reasoning_recovery.sql", "status": "checked", "reason": "PostgreSQL新增同义可空模型配置列，不包含历史数据迁移。"},
+        {"path": "docs/03-技术方案文档-v2.1.md", "status": "checked", "reason": "同步目标级配置形状、单次恢复、冻结和公开脱敏的现行设计。"},
+        {"path": "docs/technical-design.md", "status": "checked", "reason": "同步空LENGTH降推理恢复与输出预算不变的当前口径。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有ProviderRuntime、ChatModel、RunSnapshot、模型配置和AttemptLoop，无新增依赖、模型客户端或第二套工具循环。"},
+        "java-api-style": {"status": "checked", "reason": "生产Java均IDEA Reformat，触及方法保持50行/复杂度20，配置record显式JSON字段，集合与可空值处理明确，无Lombok equals/hashCode。"},
+        "logging-exception-safety": {"status": "checked", "reason": "无效配置失败关闭，第二次失败不包装成功；日志和帧仅含策略effort/扩展键名及usage，不记录扩展值、推理正文或密钥。"},
+        "toc-interaction": {"status": "checked", "reason": "恢复只重跑模型步，不追加用户消息或自动执行工具，第二次仍失败保持既有通用错误，无新增技术提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "恢复占用现有maxAttempts/总预算/取消/看门狗，工具与副作用禁止恢复，首笔策略冻结；模型配置是唯一新增DB边界，运行数据继续走既有Redis快照。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "恢复按ChatResponse结构识别空LENGTH与工具调用，不按文本前缀或错误文案判断，aborted响应不进入恢复历史，非空截断保持原样。"},
+        "verification-review": {"status": "checked", "reason": "agent-1293多轮发现生产记忆无效、冻结缺项、配置类型/脱敏和五参语义问题均返修，最终Critical/Important为零；施工报告相关独立单点逐个通过，362生产源与767测试源编译成功，H2 Flyway V1–V4实际应用成功；主控未重跑测试，真实模型/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN，相关基线同红与既有IDEA缺失引用如实登记。"}
+      }
     }
   ]
 }

@@ -91,6 +91,12 @@ public class AiProviderModel implements Persistable<Long> {
     @JsonProperty("requestExtraBody")
     private String requestExtraBody;
 
+    /** Optional reasoning-only policy for one empty-LENGTH recovery attempt. */
+    @ToString.Exclude
+    @Column(name = "empty_length_reasoning_recovery", columnDefinition = "TEXT")
+    @JsonProperty("emptyLengthReasoningRecovery")
+    private String emptyLengthReasoningRecovery;
+
     @Column(name = "enabled", nullable = false)
     @JsonProperty("enabled")
     private boolean enabled = true;

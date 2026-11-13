@@ -7,6 +7,7 @@ import com.example.configmgr.ai.config.AiConnectionProbe;
 import com.example.configmgr.ai.config.AiEndpointGuard;
 import com.example.configmgr.ai.config.AiKeyCipher;
 import com.example.configmgr.ai.config.AiModelCatalog;
+import com.example.configmgr.ai.config.EmptyLengthReasoningRecovery;
 import com.example.configmgr.ai.config.db.AiProvider;
 import com.example.configmgr.ai.config.db.AiProviderModel;
 import com.example.configmgr.ai.web.dto.AvailableModelView;
@@ -285,7 +286,8 @@ public class AiConfigController {
                 ObjectUtils.getIfNull(model.getDisplayName(), model::getModelId),
                 model.isSupportsToolCalling(), Boolean.TRUE.equals(model.getSupportsVision()),
                 Boolean.TRUE.equals(model.getSupportsReasoning()), model.getMaxContext(), model.getMaxOutput(),
-                model.isEnabled(), model.isDefault(), model.getSortOrder());
+                model.isEnabled(), model.isDefault(), model.getSortOrder(),
+                ModelView.RecoveryView.from(EmptyLengthReasoningRecovery.parse(model.getEmptyLengthReasoningRecovery())));
     }
 
     private static DefaultsView toView(AiConfigService.Defaults defaults) {

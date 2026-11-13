@@ -421,6 +421,8 @@ final class AiConfigTestFixture {
 		copy.setSupportsToolCalling(source.isSupportsToolCalling());
 		copy.setSupportsVision(source.getSupportsVision());
 		copy.setSupportsReasoning(source.getSupportsReasoning());
+		copy.setRequestExtraBody(source.getRequestExtraBody());
+		copy.setEmptyLengthReasoningRecovery(source.getEmptyLengthReasoningRecovery());
 		copy.setEnabled(source.isEnabled());
 		copy.setDefault(source.isDefault());
 		copy.setSortOrder(source.getSortOrder());

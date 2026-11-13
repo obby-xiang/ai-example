@@ -267,6 +267,16 @@ public class InMemoryRunStore extends RunStore {
 			List<Message> history, MessageJsonCodec codec, Long providerId, String modelId,
 			RunSnapshot.FrozenParams frozen, Map<String, Object> requestExtraBody, String clientRequestId,
 			String requestText, long turnStartedAtMs) {
+		return createWithReasoningPolicy(runId, sessionId, context, history, codec, providerId, modelId, frozen,
+				requestExtraBody, clientRequestId, requestText, turnStartedAtMs, null, null, false);
+	}
+
+	@Override
+	public RunSnapshot createWithReasoningPolicy(String runId, String sessionId, AiContext context,
+			List<Message> history, MessageJsonCodec codec, Long providerId, String modelId,
+			RunSnapshot.FrozenParams frozen, Map<String, Object> requestExtraBody, String clientRequestId,
+			String requestText, long turnStartedAtMs, String reasoningEffort,
+			com.example.configmgr.ai.config.EmptyLengthReasoningRecovery recovery, boolean reasoningReplayEnabled) {
 		validateInitialSnapshot(runId, sessionId, modelId, requestText, turnStartedAtMs, frozen);
 		com.example.configmgr.ai.tenant.TenantUser identity =
 				com.example.configmgr.ai.tenant.RequestContextUtils.currentOrNull();
@@ -277,6 +287,7 @@ public class InMemoryRunStore extends RunStore {
 		snapshot.setRequestText(requestText);
 		snapshot.setTurnStartedAtMs(turnStartedAtMs);
 		snapshot.freezeRequestExtraBody(requestExtraBody);
+		snapshot.freezeReasoningPolicies(reasoningEffort, recovery, reasoningReplayEnabled);
 		save(snapshot);
 		if (identity != null) {
 			this.sessionCurrent.put(sessionId, runId);

@@ -344,6 +344,26 @@ public class AiProviderRegistry {
 
     public ProviderRuntime forFrozenRequest(AiConfigService.ResolvedProvider resolved, String modelId,
             Overrides frozen, Map<String, Object> requestExtraBody, boolean requestExtraBodyPresent) {
+        return forFrozenRequest(resolved, modelId, frozen, requestExtraBody, requestExtraBodyPresent, null, null, false);
+    }
+
+    public ProviderRuntime forFrozenRequest(AiConfigService.ResolvedProvider resolved, String modelId,
+            Overrides frozen, Map<String, Object> requestExtraBody, boolean requestExtraBodyPresent,
+            String reasoningEffort) {
+        return forFrozenRequest(resolved, modelId, frozen, requestExtraBody, requestExtraBodyPresent, reasoningEffort,
+                null, true);
+    }
+
+    public ProviderRuntime forFrozenRequest(AiConfigService.ResolvedProvider resolved, String modelId,
+            Overrides frozen, Map<String, Object> requestExtraBody, boolean requestExtraBodyPresent,
+            String reasoningEffort, Boolean reasoningReplayEnabled) {
+        return forFrozenRequest(resolved, modelId, frozen, requestExtraBody, requestExtraBodyPresent, reasoningEffort,
+                reasoningReplayEnabled, true);
+    }
+
+    private ProviderRuntime forFrozenRequest(AiConfigService.ResolvedProvider resolved, String modelId,
+            Overrides frozen, Map<String, Object> requestExtraBody, boolean requestExtraBodyPresent,
+            String reasoningEffort, Boolean reasoningReplayEnabled, boolean reasoningEffortPresent) {
         ensureConfigVersion();
         OpenAiApi api = apiForFrozenRequest(resolved);
         String effectiveModel = StringUtils.isNotBlank(modelId) ? modelId.trim() : resolved.modelId();
@@ -355,12 +375,61 @@ public class AiProviderRegistry {
         options.setTemperature(frozen == null ? null : frozen.temperature());
         options.setTopP(frozen == null ? null : frozen.topP());
         options.setMaxTokens(frozen == null ? null : frozen.maxTokens());
-        ChatModel model = newModel(api, options, resolved.providerId());
+        if (reasoningEffortPresent) {
+            options.setReasoningEffort(reasoningEffort);
+        }
+        ChatModel model = newModel(api, options, resolved.providerId(), reasoningReplayEnabled);
         ChatClient client = ChatClient.builder(model).defaultAdvisors(this.memoryAdvisor).build();
         return new ProviderRuntime(resolved.providerId(), resolved.providerCode(), effectiveModel, resolved.baseUrl(),
                 resolved.completionsPath(), resolved.runtimeKey(), options, api, model, client);
     }
 
+
+    public ProviderRuntime forReasoningRecovery(ProviderRuntime initial, EmptyLengthReasoningRecovery recovery) {
+        if (recovery == null) {
+            return initial;
+        }
+        OpenAiChatOptions options = initial.options() == null ? OpenAiChatOptions.builder().build()
+                : OpenAiChatOptions.fromOptions(initial.options());
+        if (StringUtils.isNotBlank(recovery.reasoningEffort())) {
+            options.setReasoningEffort(recovery.reasoningEffort().trim());
+            Map<String, Object> extraBody = new LinkedHashMap<>(ObjectUtils.defaultIfNull(options.getExtraBody(), Map.of()));
+            extraBody.remove("reasoning_effort");
+            options.setExtraBody(extraBody);
+        }
+        mergeRequestExtraBody(options, recovery.requestExtraBody());
+        Boolean reasoningReplay = initial.chatModel() instanceof ReasoningAwareOpenAiChatModel reasoningModel
+                ? reasoningModel.isReasoningReplayEnabled() : null;
+        ChatModel model = newModel(initial.api(), options, initial.providerId(), reasoningReplay);
+        ChatClient client = ChatClient.builder(model).build();
+        return new ProviderRuntime(initial.providerId(), initial.providerCode(), initial.modelId(), initial.baseUrl(),
+                initial.completionsPath(), initial.runtimeKey(), options, initial.api(), model, client);
+    }
+
+    public EmptyLengthReasoningRecovery emptyLengthReasoningRecovery(Long providerId, String modelId) {
+        return this.configService.emptyLengthReasoningRecovery(providerId, modelId);
+    }
+
+    public static boolean hasDifferentReasoningPolicy(ProviderRuntime initial, ProviderRuntime recovery) {
+        if (initial == recovery || initial == null || recovery == null) {
+            return false;
+        }
+        return !reasoningPolicySignature(initial.options()).equals(reasoningPolicySignature(recovery.options()));
+    }
+
+    private static ReasoningPolicySignature reasoningPolicySignature(OpenAiChatOptions options) {
+        if (options == null) {
+            return new ReasoningPolicySignature(null, Map.of());
+        }
+        Map<String, Object> extraBody = new LinkedHashMap<>(ObjectUtils.defaultIfNull(options.getExtraBody(), Map.of()));
+        Object extensionEffort = extraBody.remove("reasoning_effort");
+        String effort = StringUtils.isNotBlank(options.getReasoningEffort()) ? options.getReasoningEffort().trim()
+                : extensionEffort instanceof String text && StringUtils.isNotBlank(text) ? text.trim() : null;
+        return new ReasoningPolicySignature(effort, extraBody);
+    }
+
+    private record ReasoningPolicySignature(String effort, Map<String, Object> extraBody) {
+    }
 
     /** 缓存条目数（取证/热生效用例：换 base-url 后仍是 1 条；条目身份变了才说明真的重建）。 */
     public int runtimeCount() {
@@ -455,13 +524,19 @@ public class AiProviderRegistry {
      * provider/model 身份不是密钥，也不进请求体。
      */
     private ChatModel newModel(OpenAiApi api, OpenAiChatOptions options, Long providerId) {
+        return newModel(api, options, providerId, null);
+    }
+
+    private ChatModel newModel(OpenAiApi api, OpenAiChatOptions options, Long providerId, Boolean reasoningReplay) {
+        boolean replayEnabled = reasoningReplay == null
+                ? this.configService.supportsReasoning(providerId, options.getModel()) : reasoningReplay;
         return new ReasoningAwareOpenAiChatModel(api, options, this.toolCallingManager,
                 // 超时面治理批① 第 2 项：默认策略显式化为「仅瞬时故障 + 0.5s×2 上限 5s + 抖动」
                 //（见 AiRetryDefaults；自有的 retryTemplate bean 由 AiRetryConfig 提供，
                 // 这里的回落只为"非 Spring 装配/单测"与 bean 缺失两种场景兜底）
                 this.retryTemplate.getIfAvailable(AiRetryDefaults::retryTemplate),
                 this.observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP),
-                providerId, this.configService.supportsReasoning(providerId, options.getModel()));
+                providerId, replayEnabled);
     }
 
 

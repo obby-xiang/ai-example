@@ -100,6 +100,11 @@ class EmptyReplyTerminalTest {
 			return written;
 		}
 
+		@Override
+		public java.util.Set<String> sessionRunIds(String sessionId) {
+			return java.util.Set.of("existing-run");
+		}
+
 	}
 
 	private final FailureSignalingStore store = new FailureSignalingStore();
@@ -152,6 +157,8 @@ class EmptyReplyTerminalTest {
 								"http://localhost", "/chat/completions", "test-model", "", "fp", false),
 						"test-model", false)));
 		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean()))
+			.thenReturn(this.runtime);
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean(), any(), any()))
 			.thenReturn(this.runtime);
 		this.watchdogExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "t3b-empty-reply-watchdog");
@@ -234,6 +241,366 @@ class EmptyReplyTerminalTest {
 	}
 
 	@Test
+	void firstTurnEmptyLengthUsesConfiguredRecovery() {
+		org.springframework.ai.openai.OpenAiChatOptions initialOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("high")
+					.extraBody(Map.of("thinking", Map.of("type", "enabled"))).build();
+		org.springframework.ai.openai.OpenAiChatOptions recoveryOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("low")
+					.extraBody(Map.of("thinking", Map.of("type", "disabled"))).build();
+		ChatClient initialClient = chatClient(Flux.just(terminal("length")));
+		ChatClient recoveryClient = chatClient(Flux.just(chunk("首轮恢复正文"), terminal("stop")));
+		ProviderRuntime initialRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", initialOptions, null, this.chatModel, initialClient);
+		ChatModel recoveryModel = mock(ChatModel.class);
+		when(recoveryModel.getDefaultOptions()).thenReturn(recoveryOptions);
+		when(recoveryModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("首轮恢复正文"), terminal("stop")));
+		ProviderRuntime recoveryRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", recoveryOptions, null, recoveryModel, recoveryClient);
+		when(this.providerRegistry.current()).thenReturn(initialRuntime);
+		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(initialRuntime));
+		com.example.configmgr.ai.config.EmptyLengthReasoningRecovery policy =
+				new com.example.configmgr.ai.config.EmptyLengthReasoningRecovery("low",
+						Map.of("thinking", Map.of("type", "disabled")));
+		when(this.providerRegistry.emptyLengthReasoningRecovery(null, "test-model")).thenReturn(policy);
+		when(this.providerRegistry.forReasoningRecovery(initialRuntime, policy)).thenReturn(recoveryRuntime);
+		List<Message> beforeAttempt = List.of(new UserMessage("历史问题"), AssistantMessage.builder().content("历史回答")
+			.properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "保留的历史推理")).build());
+		when(this.chatMemory.get(SESSION_ID)).thenReturn(beforeAttempt);
+		SseChatEmitter out = this.registry.of(RUN_ID);
+		FrameWire wire = FrameWire.attachTo(out);
+
+		this.service.chat(RUN_ID, new com.example.configmgr.ai.web.AiChatRequest(SESSION_ID, "你好", null, null, null), out);
+
+		assertThat(FrameContract.types(clientView(wire))).containsExactly("start", "retry", "message_start", "delta",
+				"message_end", "done");
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(snapshot.getReasoningEffort()).isEqualTo("high");
+		assertThat(snapshot.getEmptyLengthReasoningRecovery()).isEqualTo(policy);
+		assertThat(snapshot.getMaxTokens()).isEqualTo(8192);
+		verify(this.chatMemory, never()).add(SESSION_ID, beforeAttempt);
+	}
+
+	@Test
+	void productionMemoryAndChatClientRecoveryUsesOnlyFrozenHistoryAndPreservesOtherRuns() {
+		RunBlocksRepository repository = new RunBlocksRepository();
+		UserMessage otherRunUser = new UserMessage("其他run的问题");
+		AssistantMessage otherRunAssistant = AssistantMessage.builder().content("其他run的回答")
+			.properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "其他run的推理")).build();
+		repository.window.add(otherRunUser);
+		repository.window.add(otherRunAssistant);
+		com.example.configmgr.ai.memory.PerRunChatMemory productionMemory = new com.example.configmgr.ai.memory.PerRunChatMemory(
+				org.springframework.ai.chat.memory.MessageWindowChatMemory.builder()
+					.chatMemoryRepository(repository).maxMessages(100).build(), repository, 100);
+		org.springframework.ai.openai.OpenAiChatOptions initialOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("high").build();
+		org.springframework.ai.openai.OpenAiChatOptions recoveryOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("low").build();
+		RecordingChatModel initialModel = new RecordingChatModel(initialOptions, Flux.just(terminal("length")));
+		RecordingChatModel recoveryModel = new RecordingChatModel(recoveryOptions,
+				Flux.just(chunk("恢复正文"), terminal("stop")));
+		ChatClient initialClient = ChatClient.builder(initialModel)
+			.defaultAdvisors(new com.example.configmgr.ai.memory.IdentityBoundChatMemoryAdvisor(productionMemory)).build();
+		ChatClient recoveryClient = ChatClient.builder(recoveryModel)
+			.defaultAdvisors(new com.example.configmgr.ai.memory.IdentityBoundChatMemoryAdvisor(productionMemory)).build();
+		ProviderRuntime initialRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", initialOptions, null, initialModel, initialClient);
+		ProviderRuntime recoveryRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", recoveryOptions, null, recoveryModel, recoveryClient);
+		com.example.configmgr.ai.config.EmptyLengthReasoningRecovery policy =
+				new com.example.configmgr.ai.config.EmptyLengthReasoningRecovery("low", Map.of());
+		when(this.providerRegistry.current()).thenReturn(initialRuntime);
+		when(this.providerRegistry.tryCurrent()).thenReturn(java.util.Optional.of(initialRuntime));
+		when(this.providerRegistry.emptyLengthReasoningRecovery(null, "test-model")).thenReturn(policy);
+		when(this.providerRegistry.forReasoningRecovery(initialRuntime, policy)).thenReturn(recoveryRuntime);
+		ResilientChatService productionService = new ResilientChatService(this.providerRegistry, productionMemory,
+				repository, this.codec, this.store, this.registry, this.toolRegistry, this.contextBuilder,
+				this.sessionService, this.properties, this.cancellations, this.beacon, this.watchdogExecutor);
+		org.springframework.test.util.ReflectionTestUtils.setField(productionService, "transcript", this.transcript);
+		SseChatEmitter out = this.registry.of(RUN_ID);
+
+		productionService.chat(RUN_ID, new com.example.configmgr.ai.web.AiChatRequest(SESSION_ID, "本轮问题", null, null,
+				null), out);
+
+		assertThat(initialModel.prompts).hasSize(1);
+		assertThat(recoveryModel.prompts).hasSize(1);
+		List<Message> secondUpstream = recoveryModel.prompts.getFirst().getInstructions();
+		assertThat(secondUpstream).hasSize(4);
+		assertThat(secondUpstream.getFirst()).isInstanceOf(org.springframework.ai.chat.messages.SystemMessage.class);
+		assertThat(secondUpstream.subList(1, 4)).extracting(Message::getText)
+			.containsExactly("其他run的问题", "其他run的回答", "本轮问题");
+		assertThat(secondUpstream).filteredOn(AssistantMessage.class::isInstance)
+			.noneMatch(message -> ((AssistantMessage) message).getText().isEmpty());
+		assertThat(secondUpstream).filteredOn(UserMessage.class::isInstance)
+			.filteredOn(message -> "本轮问题".equals(message.getText())).hasSize(1);
+		assertThat(repository.window).filteredOn(message -> message == otherRunUser || message == otherRunAssistant)
+			.hasSize(2);
+		assertThat(repository.deleteCalls).isZero();
+	}
+
+	@Test
+	void emptyLengthUsesTheFrozenReasoningRecoveryWithoutChangingMaxTokens() throws Exception {
+		this.properties.getResilience().setMaxAttempts(3);
+		org.springframework.ai.openai.OpenAiChatOptions initialOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("high")
+					.extraBody(Map.of("thinking", Map.of("type", "enabled"))).build();
+		org.springframework.ai.openai.OpenAiChatOptions recoveryOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("low")
+					.extraBody(Map.of("thinking", Map.of("type", "disabled"))).build();
+		when(this.chatModel.getDefaultOptions()).thenReturn(initialOptions);
+		ChatModel recoveryModel = mock(ChatModel.class);
+		when(recoveryModel.getDefaultOptions()).thenReturn(recoveryOptions);
+		ProviderRuntime initialRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", initialOptions, null, this.chatModel, mock(ChatClient.class));
+		ProviderRuntime recoveryRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", recoveryOptions, null, recoveryModel, mock(ChatClient.class));
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean()))
+			.thenReturn(initialRuntime);
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean(), any()))
+			.thenReturn(initialRuntime);
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean(), any(), any()))
+			.thenReturn(initialRuntime);
+		when(this.providerRegistry.forReasoningRecovery(any(), any())).thenReturn(recoveryRuntime);
+		RunSnapshot seeded = this.store.get(RUN_ID);
+		seeded.freezeParams(new RunSnapshot.FrozenParams(null, null, 8192, false));
+		seeded.freezeRequestExtraBody(initialOptions.getExtraBody());
+		this.mapper.readerForUpdating(seeded).readValue("{\"reasoningEffort\":\"high\",\"emptyLengthReasoningRecovery\":{"
+				+ "\"reasoningEffort\":\"low\",\"requestExtraBody\":{\"thinking\":{\"type\":\"disabled\"}}}}");
+		this.store.save(seeded);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+		when(recoveryModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("恢复后的正文"), terminal("stop")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).containsExactly("start", "retry", "message_start", "delta",
+				"message_end", "done");
+		assertThat(FrameContract.oneOfType(frames, "retry")).containsEntry("emptyLengthReasoningRecovery", true);
+		org.mockito.ArgumentCaptor<Prompt> initialPrompt = org.mockito.ArgumentCaptor.forClass(Prompt.class);
+		org.mockito.ArgumentCaptor<Prompt> recoveryPrompt = org.mockito.ArgumentCaptor.forClass(Prompt.class);
+		verify(this.chatModel).stream(initialPrompt.capture());
+		verify(recoveryModel).stream(recoveryPrompt.capture());
+		org.springframework.ai.openai.OpenAiChatOptions initialWire =
+				(org.springframework.ai.openai.OpenAiChatOptions) initialPrompt.getValue().getOptions();
+		org.springframework.ai.openai.OpenAiChatOptions recoveryWire =
+				(org.springframework.ai.openai.OpenAiChatOptions) recoveryPrompt.getValue().getOptions();
+		assertThat(initialWire.getReasoningEffort()).isEqualTo("high");
+		assertThat(recoveryWire.getReasoningEffort()).isEqualTo("low");
+		assertThat(recoveryWire.getMaxTokens()).isEqualTo(initialWire.getMaxTokens()).isEqualTo(8192);
+		assertThat(recoveryPrompt.getValue().getInstructions()).isEqualTo(initialPrompt.getValue().getInstructions());
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(this.store.get(RUN_ID).getFinalText()).isEqualTo("恢复后的正文");
+		assertThat(this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson()))
+			.filteredOn(AssistantMessage.class::isInstance)
+			.singleElement()
+			.satisfies(message -> assertThat(((AssistantMessage) message).getText()).isEqualTo("恢复后的正文"));
+	}
+
+	@Test
+	void recoveryFramesExposeBothUsagesAndFrozenPolicies() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(terminal("length", 11, 8192, 8192)));
+		when(recoveryModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("正文"), terminal("stop", 13, 21, 5)));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		Map<String, Object> retry = FrameContract.oneOfType(frames, "retry");
+		assertThat(retry).containsEntry("emptyLengthReasoningRecovery", true);
+		assertThat((Map<String, Object>) retry.get("usage"))
+			.containsEntry("completionTokens", 8192)
+			.containsEntry("reasoningTokens", 8192);
+		assertThat((Map<String, Object>) retry.get("initialReasoningPolicy"))
+			.containsEntry("reasoningEffort", "high");
+		assertThat((Map<String, Object>) retry.get("recoveryReasoningPolicy"))
+			.containsEntry("reasoningEffort", "low");
+		Map<String, Object> done = FrameContract.oneOfType(frames, "done");
+		assertThat(done).containsEntry("emptyLengthReasoningRecovery", true);
+		assertThat((Map<String, Object>) done.get("usage"))
+			.containsEntry("completionTokens", 21)
+			.containsEntry("reasoningTokens", 5);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+		assertThat(this.store.get(RUN_ID).getAttempts()).isEqualTo(2);
+	}
+
+	@Test
+	void nonEmptyLengthAfterRecoveryStillEndsDoneAndTruncated() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+		when(recoveryModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("恢复后半截"), terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		Map<String, Object> done = FrameContract.oneOfType(clientView(wire), "done");
+		assertThat(done).containsEntry("truncated", true).containsEntry("emptyLengthReasoningRecovery", true);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
+	}
+
+	@Test
+	void emptyLengthRecoveryFailureStillEndsAsTruncatedEmptyReply() throws Exception {
+		this.properties.getResilience().setMaxAttempts(4);
+		ChatModel recoveryModel = configureRecovery();
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+		when(recoveryModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).containsExactly("start", "retry", "error");
+		assertThat(FrameContract.oneOfType(frames, "error"))
+			.containsEntry("code", ResilientChatService.EMPTY_REPLY_CODE)
+			.containsEntry("truncated", true)
+			.containsEntry("emptyLengthReasoningRecovery", true);
+		verify(this.chatModel).stream(any(Prompt.class));
+		verify(recoveryModel).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	@Test
+	void visibleReasoningBeforeEmptyLengthBlocksRecovery() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		this.properties.getReasoning().setDisplayEnabled(true);
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(reasoning("可见思考"), terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.types(clientView(wire))).doesNotContain("retry").contains("error");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	@Test
+	void toolCallBeforeEmptyLengthBlocksRecovery() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(toolCallTerminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.types(clientView(wire))).doesNotContain("retry").contains("error");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	@Test
+	void sideEffectBeforeEmptyLengthBlocksRecovery() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.beacon.startedCount(RUN_ID)).thenReturn(0L, 1L);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.types(clientView(wire))).doesNotContain("retry").contains("error");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+	}
+
+	@Test
+	void pendingToolRoundBeforeEmptyLengthBlocksRecovery() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		RunSnapshot pending = this.store.get(RUN_ID);
+		pending.setStatus(RunSnapshot.SUSPENDED);
+		PendingToolCall call = new PendingToolCall();
+		call.setToolCallId("call-pending");
+		call.setName("list_config_defs");
+		call.setArguments("{}");
+		pending.setInFlightToolCalls(List.of(call));
+		this.store.save(pending);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.types(clientView(wire))).doesNotContain("retry").contains("error");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+	}
+
+	@Test
+	void exhaustedTotalBudgetBlocksRecovery() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		this.properties.getResilience().setTotalBudget(java.time.Duration.ZERO);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.types(clientView(wire))).doesNotContain("retry").contains("error");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+	}
+
+	@Test
+	void exhaustedAttemptBudgetBlocksRecovery() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		this.properties.getResilience().setMaxAttempts(1);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.types(clientView(wire))).doesNotContain("retry").contains("error");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+	}
+
+	@Test
+	void identicalRecoveryPolicyKeepsSingleCallFailure() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.providerRegistry.forReasoningRecovery(any(), any()))
+			.thenAnswer(invocation -> invocation.getArgument(0));
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.types(clientView(wire))).containsExactly("start", "error");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+		verify(this.chatModel).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	@Test
+	void cancelDuringRecoveryBackoffPreventsSecondUpstream() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.cancellations.cancelState(RUN_ID)).thenReturn(CancellationRegistry.CancelState.CANCELLED);
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.oneOfType(clientView(wire), "done")).containsEntry("cancelled", true);
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+	}
+
+	@Test
+	void cancelDuringRecoveryExecutionKeepsCancelledTerminal() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(terminal("length")));
+		when(recoveryModel.stream(any(Prompt.class))).thenReturn(Flux.error(
+				new StreamViolationException(StreamViolationException.CANCELLED, "cancel during recovery")));
+
+		FrameWire wire = runTurn();
+
+		assertThat(FrameContract.oneOfType(clientView(wire), "done")).containsEntry("cancelled", true);
+		verify(recoveryModel).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+	}
+
+	@Test
+	void whitespaceOnlyLengthDoesNotRecover() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk(" \n"), terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).doesNotContain("retry").contains("error");
+		assertThat(FrameContract.oneOfType(frames, "error")).containsEntry("truncated", true);
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.FAILED);
+	}
+
+	@Test
 	void emptyStopFollowedByLengthKeepsLatchedStopSignalAndMarksTruncated() {
 		this.properties.getResilience().setMaxAttempts(3);
 		when(this.chatModel.stream(any(Prompt.class)))
@@ -269,6 +636,23 @@ class EmptyReplyTerminalTest {
 		RunSnapshot snapshot = this.store.get(RUN_ID);
 		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
 		assertThat(snapshot.getFinalText()).isEqualTo("半截正文");
+	}
+
+	@Test
+	void nonEmptyLengthWithRecoveryPolicyStillEndsDoneWithoutRecovery() throws Exception {
+		ChatModel recoveryModel = configureRecovery();
+		when(this.chatModel.stream(any(Prompt.class)))
+			.thenReturn(Flux.just(chunk("半截正文"), terminal("length")));
+
+		FrameWire wire = runTurn();
+
+		List<Map<String, Object>> frames = clientView(wire);
+		assertThat(FrameContract.types(frames)).containsExactly("start", "message_start", "delta", "message_end",
+				"done");
+		assertThat(FrameContract.oneOfType(frames, "done")).containsEntry("truncated", true)
+			.doesNotContainKey("emptyLengthReasoningRecovery");
+		verify(recoveryModel, never()).stream(any(Prompt.class));
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.DONE);
 	}
 
 	// ── ② 纯空白 → FAILED + EMPTY_REPLY（且已开的正文段先收尾） ──
@@ -594,12 +978,150 @@ class EmptyReplyTerminalTest {
 		return all;
 	}
 
+	private static final class RecordingChatModel implements ChatModel {
+
+		private final org.springframework.ai.openai.OpenAiChatOptions options;
+		private final Flux<ChatResponse> responses;
+		private final List<Prompt> prompts = new ArrayList<>();
+
+		private RecordingChatModel(org.springframework.ai.openai.OpenAiChatOptions options, Flux<ChatResponse> responses) {
+			this.options = options;
+			this.responses = responses;
+		}
+
+		@Override
+		public Flux<ChatResponse> stream(Prompt prompt) {
+			this.prompts.add(prompt);
+			return this.responses;
+		}
+
+		@Override
+		public ChatResponse call(Prompt prompt) {
+			this.prompts.add(prompt);
+			return this.responses.blockFirst();
+		}
+
+		@Override
+		public org.springframework.ai.chat.prompt.ChatOptions getDefaultOptions() {
+			return this.options;
+		}
+	}
+
+	private static final class RunBlocksRepository implements com.example.configmgr.ai.memory.RunUpsertChatMemoryRepository {
+
+		private final List<Message> window = new ArrayList<>();
+		private int deleteCalls;
+
+		@Override
+		public List<Message> findByConversationId(String conversationId) {
+			return List.copyOf(this.window);
+		}
+
+		@Override
+		public List<String> findConversationIds() {
+			return List.of(SESSION_ID);
+		}
+
+		@Override
+		public void saveAll(String conversationId, List<Message> messages) {
+			this.window.clear();
+			this.window.addAll(messages);
+		}
+
+		@Override
+		public void deleteByConversationId(String conversationId) {
+			this.deleteCalls++;
+			this.window.clear();
+		}
+
+		@Override
+		public boolean upsertRun(String conversationId, com.example.configmgr.ai.memory.MemoryTurn turn,
+				List<Message> messages, int maxMessages, boolean replaceRunBlock) {
+			this.window.addAll(messages);
+			return true;
+		}
+
+		@Override
+		public com.example.configmgr.ai.memory.MemoryWindowSnapshot readWindow(String conversationId) {
+			return null;
+		}
+
+		@Override
+		public boolean replaceWindow(String conversationId,
+				com.example.configmgr.ai.memory.MemoryWindowSnapshot baseline, List<Message> messages) {
+			this.window.clear();
+			this.window.addAll(messages);
+			return true;
+		}
+	}
+
+	private static ChatClient chatClient(Flux<ChatResponse> responses) {
+		ChatClient client = mock(ChatClient.class);
+		ChatClient.ChatClientRequestSpec spec = mock(ChatClient.ChatClientRequestSpec.class);
+		ChatClient.StreamResponseSpec stream = mock(ChatClient.StreamResponseSpec.class);
+		when(client.prompt()).thenReturn(spec);
+		when(spec.system(anyString())).thenReturn(spec);
+		when(spec.user(anyString())).thenReturn(spec);
+		when(spec.advisors(any(java.util.function.Consumer.class))).thenReturn(spec);
+		when(spec.toolContext(anyMap())).thenReturn(spec);
+		when(spec.toolCallbacks(anyList())).thenReturn(spec);
+		when(spec.stream()).thenReturn(stream);
+		when(stream.chatResponse()).thenReturn(responses);
+		return client;
+	}
+
+	private ChatModel configureRecovery() throws Exception {
+		org.springframework.ai.openai.OpenAiChatOptions initialOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("high")
+					.extraBody(Map.of("thinking", Map.of("type", "enabled"))).build();
+		org.springframework.ai.openai.OpenAiChatOptions recoveryOptions =
+				org.springframework.ai.openai.OpenAiChatOptions.builder().maxTokens(8192).reasoningEffort("low")
+					.extraBody(Map.of("thinking", Map.of("type", "disabled"))).build();
+		when(this.chatModel.getDefaultOptions()).thenReturn(initialOptions);
+		ChatModel recoveryModel = mock(ChatModel.class);
+		when(recoveryModel.getDefaultOptions()).thenReturn(recoveryOptions);
+		ProviderRuntime initialRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", initialOptions, null, this.chatModel, mock(ChatClient.class));
+		ProviderRuntime recoveryRuntime = new ProviderRuntime(null, "test-provider", "test-model", "http://localhost",
+				"/chat/completions", "test|runtime", recoveryOptions, null, recoveryModel, mock(ChatClient.class));
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean()))
+			.thenReturn(initialRuntime);
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean(), any()))
+			.thenReturn(initialRuntime);
+		when(this.providerRegistry.forFrozenRequest(any(), eq("test-model"), any(), any(), anyBoolean(), any(), any()))
+			.thenReturn(initialRuntime);
+		when(this.providerRegistry.forReasoningRecovery(any(), any())).thenReturn(recoveryRuntime);
+		RunSnapshot seeded = this.store.get(RUN_ID);
+		seeded.freezeParams(new RunSnapshot.FrozenParams(null, null, 8192, false));
+		seeded.freezeRequestExtraBody(initialOptions.getExtraBody());
+		this.mapper.readerForUpdating(seeded).readValue("{\"reasoningEffort\":\"high\",\"emptyLengthReasoningRecovery\":{"
+				+ "\"reasoningEffort\":\"low\",\"requestExtraBody\":{\"thinking\":{\"type\":\"disabled\"}}}}");
+		this.store.save(seeded);
+		return recoveryModel;
+	}
+
 	private static ChatResponse chunk(String text) {
 		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content(text).build())));
 	}
 
 	private static ChatResponse terminal(String finishReason) {
 		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content("").build(),
+				ChatGenerationMetadata.builder().finishReason(finishReason).build())));
+	}
+
+	private static ChatResponse terminal(String finishReason, int promptTokens, int completionTokens, int reasoningTokens) {
+		org.springframework.ai.chat.metadata.DefaultUsage usage = new org.springframework.ai.chat.metadata.DefaultUsage(
+				promptTokens, completionTokens, promptTokens + completionTokens, Map.of("reasoningTokens", reasoningTokens));
+		return new ChatResponse(List.of(new Generation(AssistantMessage.builder().content("").build(),
+				ChatGenerationMetadata.builder().finishReason(finishReason).build())),
+				org.springframework.ai.chat.metadata.ChatResponseMetadata.builder().usage(usage).build());
+	}
+
+	private static ChatResponse toolCallTerminal(String finishReason) {
+		AssistantMessage assistant = AssistantMessage.builder().content("")
+			.toolCalls(List.of(new AssistantMessage.ToolCall("call-length", "function", "list_config_defs", "{}")))
+			.build();
+		return new ChatResponse(List.of(new Generation(assistant,
 				ChatGenerationMetadata.builder().finishReason(finishReason).build())));
 	}
 

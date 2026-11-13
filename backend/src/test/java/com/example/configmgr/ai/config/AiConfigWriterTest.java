@@ -626,6 +626,65 @@ class AiConfigWriterTest {
 		assertThat(afterForce.getSource()).isEqualTo(AiProvider.SOURCE_DB);
 	}
 
+	@Test
+	void emptyLengthRecoveryPolicyUsesThePublicModelWriteShape() throws Exception {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com", null));
+		AiConfigWriter.ModelCommand command = new ObjectMapper().disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+			.readValue("{\"modelId\":\"m-1\","
+				+ "\"emptyLengthReasoningRecovery\":{\"reasoningEffort\":\"low\","
+				+ "\"requestExtraBody\":{\"thinking\":{\"type\":\"disabled\"}}}}",
+				AiConfigWriter.ModelCommand.class);
+
+		AiProviderModel model = writer.addModel(created.getId(), command);
+
+		assertThat(model.getEmptyLengthReasoningRecovery()).contains("reasoningEffort").contains("disabled");
+		EmptyLengthReasoningRecovery policy = this.fixture.service()
+			.emptyLengthReasoningRecovery(created.getId(), "m-1");
+		assertThat(policy.reasoningEffort()).isEqualTo("low");
+		assertThat(policy.requestExtraBody()).containsKey("thinking");
+	}
+
+	@Test
+	void emptyLengthRecoveryPolicyIsValidatedOnPublicWrite() throws Exception {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com", null));
+		AiConfigWriter.ModelCommand command = new ObjectMapper().disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+			.readValue("{\"modelId\":\"m-1\","
+				+ "\"emptyLengthReasoningRecovery\":{\"unknown\":true}}", AiConfigWriter.ModelCommand.class);
+
+		assertThatThrownBy(() -> writer.addModel(created.getId(), command))
+			.isInstanceOf(AiConfigException.class)
+			.hasMessageContaining("unknown");
+		assertThat(this.fixture.models).isEmpty();
+	}
+
+	@Test
+	void nonTextRecoveryEffortIsRejectedOnPublicWrite() {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com", null));
+		AiConfigWriter.ModelCommand command = new AiConfigWriter.ModelCommand("m-1", null, null, null, null,
+				null, null, null, null, null, null, java.util.Map.of("reasoningEffort", 1));
+
+		assertThatThrownBy(() -> writer.addModel(created.getId(), command))
+			.isInstanceOf(AiConfigException.class)
+			.extracting(ex -> ((AiConfigException) ex).getCode())
+			.isEqualTo(AiConfigWriter.CODE_INVALID_PARAM);
+	}
+
+	@Test
+	void nonObjectRecoveryExtraBodyIsRejectedOnPublicWrite() {
+		AiConfigWriter writer = writer(AiConfigTestFixture.KEK_A);
+		AiProvider created = writer.createProvider(provider("custom-1", "https://api.deepseek.com", null));
+		AiConfigWriter.ModelCommand command = new AiConfigWriter.ModelCommand("m-1", null, null, null, null,
+				null, null, null, null, null, null, java.util.Map.of("requestExtraBody", "disabled"));
+
+		assertThatThrownBy(() -> writer.addModel(created.getId(), command))
+			.isInstanceOf(AiConfigException.class)
+			.extracting(ex -> ((AiConfigException) ex).getCode())
+			.isEqualTo(AiConfigWriter.CODE_INVALID_PARAM);
+	}
+
 	private AiConfigSeeder seeder(AiConfigService service) {
 		return new AiConfigSeeder(this.fixture.providerRepository, this.fixture.modelRepository, service,
 				this.fixture.properties, this.transactionManager,
