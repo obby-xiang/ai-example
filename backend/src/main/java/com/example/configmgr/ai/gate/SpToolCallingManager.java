@@ -715,6 +715,11 @@ public class SpToolCallingManager implements ToolCallingManager {
     public static final String TOOL_CONTEXT_TURN_TEXT = "turnText";
 
     /**
+     * 单次请求的工具响应不保留原始推理元数据；已有首轮推理仍由 {@link TurnTextCapture} 合并回来。
+     */
+    public static final String TOOL_CONTEXT_SUPPRESS_REASONING = "suppressReasoningContent";
+
+    /**
      * 本轮正文、推理与人工等待 park 的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
      *
      * <p>每个工具跳只取走当前正文与推理段，并在该跳聚合消息持久化后同时清空。终态、取消与失败的
@@ -858,8 +863,10 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (turnText != null) {
             turnText.flushPendingSegment();
         }
+        Map<String, Object> toolContext = toolContextOf(prompt);
+        boolean suppressReasoning = toolContext != null && Boolean.TRUE.equals(toolContext.get(TOOL_CONTEXT_SUPPRESS_REASONING));
         assistant = assistantWithTurnContent(assistant, turnText == null ? "" : turnText.segmentText(),
-                turnText == null ? "" : turnText.reasoningText());
+                turnText == null ? "" : turnText.reasoningText(), suppressReasoning);
 
         String runId = runIdOf(prompt);
         // 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
@@ -4361,19 +4368,23 @@ public class SpToolCallingManager implements ToolCallingManager {
      *
      * <p><b>单一来源</b>：当前正文段非空时只使用它，<b>不再拼接</b>当前分片自带的 {@code direct}
      * （两种来源拼接会让同一跳的正文越过明确段边界）；聚合正文为空时保留 direct。
-     * 推理段非空时覆盖工具分片可能携带的空串，即使正文为空也会重建。
-     * tool_calls / media / 其它 metadata 原样保留。
+     * 推理段非空时覆盖工具分片可能携带的空串，即使正文为空也会重建；显式抑制时先移除原始推理，
+     * 再合并已有推理段。tool_calls / media / 其它 metadata 原样保留。
      */
     private static AssistantMessage assistantWithTurnContent(AssistantMessage assistant, String turnText,
-                                                             String turnReasoning) {
+                                                             String turnReasoning, boolean suppressReasoning) {
         boolean replaceText = StringUtils.isNotEmpty(turnText) && !turnText.equals(assistant.getText());
         Object currentReasoning = assistant.getMetadata().get("reasoningContent");
         boolean replaceReasoning = StringUtils.isNotEmpty(turnReasoning) && !turnReasoning.equals(currentReasoning);
-        if (!replaceText && !replaceReasoning) {
+        boolean removeReasoning = suppressReasoning && assistant.getMetadata().containsKey("reasoningContent");
+        if (!replaceText && !replaceReasoning && !removeReasoning) {
             return assistant;
         }
         Map<String, Object> metadata = new LinkedHashMap<>(
                 ObjectUtils.defaultIfNull(assistant.getMetadata(), Map.of()));
+        if (removeReasoning) {
+            metadata.remove("reasoningContent");
+        }
         if (replaceReasoning) {
             metadata.put("reasoningContent", turnReasoning);
         }

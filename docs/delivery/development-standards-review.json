@@ -7285,6 +7285,46 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "文本和推理按原SSE段顺序拼接，不按字节/UTF-16位置切割，不解析文案或二次转码，后续messageBoundary与reasoning隔离保留。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1291三轮发现的所有权、空正文和correction重入问题均返修，最终Critical/Important为零且可合入；施工报告19个相关独立单点分别通过、361个生产源文件实际编译成功；主控未重跑测试，全量套件/真实模型/Redis/Cluster/多实例NOT_RUN，旧方法2519既有Checkstyle复杂度24和PMD离线依赖阻塞如实保留。"}
       }
+    },
+    {
+      "fingerprint": "sha256:749a62eefffe73755515e5cfb8d231dd547979112b5aca59cb90e78fecd9d96a",
+      "status": "reviewed",
+      "reason": "逐hunk复核创建遗漏的一次结构化纠正、严格事实/取消/fence、HITL与转录、第二次reasoning隔离及提示减负；多轮独立静态复审最终可合入。",
+      "reviewedAt": "2026-11-13T18:03:39+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1290、施工agent-1292",
+      "specChanges": [
+        {
+          "change": "原始首轮在create_task已披露、无任务绑定和创建记录、非空普通文本STOP且无工具时，允许恰好一次内部模型复核；第二次仍无工具按首次原文DONE。",
+          "reason": "删除旧创建纠正后，模型偶发只追问会直接结束，同模型过去可由第二次纠正进入创建HITL；新实现不恢复话术正则。",
+          "impact": "触发只使用结构化事实，pending/context/ledger/marker异常失败关闭；第二次create_task仍走原预检和HITL，续跑、拒绝、取消、停止和已有创建记录不触发。"
+        },
+        {
+          "change": "创建纠正前保存不含内部指令的首次历史，第二次正文/推理不上屏；第二次工具响应通过显式ToolContext标记移除reasoningContent后再合并首次reasoning。",
+          "reason": "需要同时保证首次正文和第二次工具卡完整恢复，且第二次文本或reasoning不得污染最终回答与后续回放。",
+          "impact": "内部纠正指令不持久化，普通首轮、批准恢复和start_export纠正在未设置标记时保持原行为；工具参数、usage、finish和HITL不变。"
+        },
+        {
+          "change": "SYSTEM_PROMPT与PromptRulePacks仅保留行动优先和已知信息复用，详细创建槽位规则集中在create_task有效描述，参数注解只描述形状与局部约束，tools.yaml升至2026-10-27.41。",
+          "reason": "多处重复的单/多配置和紧凑条件规则增加模型判断负担，行动优先语义需要保持突出。",
+          "impact": "唯一映射、单配置非空条件、多配置创建{}后一次set_conditions(items)、紧凑修饰和openWizard契约保留，Schema与预检不变。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "仅在显式ToolContext抑制标记下移除第二次assistant的reasoningContent，再合并首次reasoning，其他metadata和tool calls不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "实现一次结构化创建复核、严格事实/双时点取消/fence、历史保存和第二次输出隔离，复用冻结模型运行与恢复链；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java", "status": "checked", "reason": "移除重复槽位与openWizard细则，保留行动优先、真实缺失补充和批量条件现行语义；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java", "status": "checked", "reason": "参数注解收敛为形状和局部约束，有效工具描述保留完整创建契约；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/ai/tools.yaml", "status": "checked", "reason": "版本升至2026-10-27.41并记录提示减负，Schema、批量能力和危险确认边界未改。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有AttemptLoop、ProviderRuntime、SyntheticMessages、CorrectionPrefixes、ToolContext和HITL/恢复组件，无新增依赖、模型客户端或话术解析器。"},
+        "java-api-style": {"status": "checked", "reason": "触及方法保持显式大括号与50行/复杂度20边界，可空context/metadata显式处理，Boolean不直接拆箱，无新增JSON实体或数据库仓储。"},
+        "logging-exception-safety": {"status": "checked", "reason": "事实读取异常有界WARN并失败关闭，取消使用既有真实取消结局；日志仅runId/类型/数量等安全标量，不记录原始提示或密钥。"},
+        "toc-interaction": {"status": "checked", "reason": "第二次无工具不重复用户正文，第二次工具仍由用户确认，纯问答不新增卡片；不展示内部纠正指令、模型名或技术提示。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "run级marker写入回读与fence防重复，严格pending/ledger/context避免把故障当空事实，两个取消时点复核；复用共享模型限流和冻结参数，无新增AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "第二次正文和reasoning按响应结构抑制，不做字符串截断或文案识别，工具调用、usage和finish继续由原Accumulator处理。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1290多轮发现lenient误空、取消窗口、第二次文本/工具reasoning及证据缺口均返修，最终Critical/Important为零；施工报告相关独立单点逐个通过、361个生产源文件clean compile成功；主控未重跑测试，真实Flash历史A/B/真实模型/Redis/Cluster/多实例/浏览器及全量套件NOT_RUN。"}
+      }
     }
   ]
 }

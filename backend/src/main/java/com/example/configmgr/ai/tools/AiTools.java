@@ -461,10 +461,10 @@ public class AiTools {
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
-            @ToolParam(description = "可选：用户本轮已明确的配置定义编码（结构化数组，例如 [\"CONFIG_CODE\"]）；defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；用户提及的配置编码、名称或别名能唯一映射到配置定义时必须传入对应 defCode；只有未提及或无法唯一映射时才省略，无法唯一映射时保留宿主配置选择卡。单配置且条件已知时 defCodes=[该项] 并传非空 conditions；多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件。已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
-            @ToolParam(description = "导出任务必传：defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；单配置且条件已知时 defCodes=[该项] 并传非空 conditions；非空 conditions 只允许一个 defCode。多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设；条件未决定时也传 {}，不得省略。紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；无法唯一确定仍按未决定，不得猜测。已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。导入任务不传", required = false) FieldQueryCondition conditions,
-            @ToolParam(description = "在已有任务页明确要求另建独立任务时传 true；跨轮继续当前创建意图时省略或传 false", required = false) Boolean independent,
-            @ToolParam(description = "是否让宿主创建后自动打开向导并续接配置。“创建任务”只是流程入口，不等于“只创建”；默认完整续接，省略或传 true。只有用户明确把本次意图限定为创建后停止（不继续配置、不打开向导、不启动后续流程）时，才传 openWizard=false（宿主不得自动导航、代选或发配置表单，以后用户明确打开/配置仍可继续）", required = false) Boolean openWizard,
+            @ToolParam(description = "可选：配置定义编码的结构化数组，例如 [\"CONFIG_CODE\"]；仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
+            @ToolParam(description = "导出任务必传的条件对象；条件未决定时也传 {}，不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
+            @ToolParam(description = "是否另建独立任务；省略或 false 表示可续接当前任务", required = false) Boolean independent,
+            @ToolParam(description = "是否打开向导；省略或 true 表示打开，用户明确限定创建后停止时传 false", required = false) Boolean openWizard,
             ToolContext toolContext) {
         Task.TaskType taskType = parseTaskType(type);
         boolean export = taskType == Task.TaskType.EXPORT;

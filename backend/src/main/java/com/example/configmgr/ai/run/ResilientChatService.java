@@ -206,14 +206,6 @@ public class ResilientChatService {
             只有真实缺失或存在歧义时才做结构化补充。当前任务事实优先于历史候选，旧任务参数不自动带入新任务。
             用户明确要求创建任务时直接调用 create_task，已知配置名和条件直接复用；不得以任何只读工具作为创建前置，
             包括 list_config_defs 和 get_config_def；即使需要确认配置编码也先创建任务，由宿主继续选择/补充。
-            defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由。
-            单配置且条件已知时 defCodes=[该项] 并传非空 conditions；非空 conditions 只允许一个 defCode。
-            多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。
-            此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设；条件未决定时也传 {}。
-            用户提及的配置编码、名称或别名能唯一映射到配置定义时必须传入对应 defCode；只有未提及或无法唯一映射时才省略，无法唯一映射时保留宿主配置选择卡。
-            紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；无法唯一确定仍按未决定，不得猜测。
-            已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案。
-            打开向导默认完整续接，仅用户明确限定创建后停止时传 openWizard=false；创建不等于绕过启动确认。
             用户本轮要求创建、配置或执行时，所有能同轮完成的步骤必须连续推进；创建或完成配置/条件后，
             继续按披露发起相应启动确认，不得要求用户另发一轮；本 run 已有 start_export 条目时不得重复调用。
             旧任务、openWizard=false 后明确启动、park 未启用或宿主未生成条目时，模型仍按披露调用 start_export。
@@ -770,8 +762,8 @@ public class ResilientChatService {
                         var withTools = setup.tools().isEmpty() ? spec : spec.toolCallbacks(setup.tools());
                         return withTools.stream().chatResponse();
                     });
-                }, (prefix, reasoning) -> correctionStream(setup.runtime(), runId, setup.sessionId(),
-                        setup.context(), List.of(), out, prefix, reasoning, turnTextBody));
+                }, (prefix, reasoning, createEntry) -> correctionStream(setup.runtime(), runId, setup.sessionId(),
+                        setup.context(), List.of(), out, prefix, reasoning, turnTextBody, createEntry), true);
     }
 
     private record FirstTurnMemory(AiContext context, boolean isExistingSession, long turnStartedAtMs,
@@ -885,8 +877,8 @@ public class ResilientChatService {
                         Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, context, modelHistory, snapshot,
                                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
                         return runtime.chatModel().stream(prompt);
-                    }, (prefix, reasoning) -> correctionStream(runtime, runId, sessionId,
-                            context, modelHistory, out, prefix, reasoning, turnTextBody));
+                    }, (prefix, reasoning, createEntry) -> correctionStream(runtime, runId, sessionId,
+                            context, modelHistory, out, prefix, reasoning, turnTextBody, createEntry), false);
         } finally {
             finishTurn(runId, keepalive, null, registered);
         }
@@ -1279,20 +1271,21 @@ public class ResilientChatService {
 
     // ── 尝试循环（双超时 + 三条件重试 + 完成帧校验 + 取消） ────────────────────
 
-    /** 唯一剩余的导出收尾纠正请求工厂。 */
     @FunctionalInterface
     private interface CorrectionStreamFactory {
 
-        Flux<ChatResponse> apply(String prefixText, String prefixReasoning);
+        Flux<ChatResponse> apply(String prefixText, String prefixReasoning, boolean createEntry);
 
     }
 
     private void runAttempts(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
                              TurnContext turn, TurnKeepalive keepalive, AiContext context, String lastUserText,
                              String resumePrefix, String resumePendingSegment, SpToolCallingManager.TurnTextCapture turnTextBody,
-                             IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream) {
+                             IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream,
+                             boolean originalFirstTurn) {
         AttemptLoopState state = new AttemptLoopState(runId, sessionId, turnStartedAtMs, out, turn, keepalive, context,
-                lastUserText, resumePrefix, resumePendingSegment, turnTextBody, attemptStream, correctionStream);
+                lastUserText, resumePrefix, resumePendingSegment, turnTextBody, attemptStream, correctionStream,
+                originalFirstTurn);
         while (true) {
             if (isAttemptBudgetExhausted(state)) {
                 return;
@@ -1378,13 +1371,14 @@ public class ResilientChatService {
 
     private void subscribeAndAwait(AttemptLoopState state, AttemptRound round) {
         Flux<ChatResponse> stream = state.correcting
-                ? state.correctionStream.apply(state.correctionHistoryPrefix, state.prefixReasoning)
+                ? state.correctionStream.apply(state.correctionHistoryPrefix, state.prefixReasoning,
+                state.createEntryCorrecting)
                 : state.attemptStream.apply(state.attempt);
         round.subscription = stream
                 .subscribe(response -> {
                     try (RunIdentityScope.Scope ignored = RunIdentityScope.open(state.upstreamIdentity)) {
                         round.watchdog.onUpstreamEvent();
-                        consume(response, state.out, round.accumulator, state.turnTextBody);
+                        consume(response, state.out, round.accumulator, state.turnTextBody, state.createEntryCorrecting);
                     }
                 }, round.settled::completeExceptionally, () -> round.settled.complete(null));
         round.watchdog.bind(round.subscription);
@@ -1417,15 +1411,31 @@ public class ResilientChatService {
     private boolean isCorrectionDue(AttemptLoopState state, AttemptRound round) {
         UpstreamErrorClassifier.Finish finish = round.accumulator.isFinish();
         String correctionText = round.accumulator.unpersistedText();
+        if (isCreateEntryCorrectionDue(state, round, finish)) {
+            startCorrection(state, round, correctionText, true);
+            log.info("create action missing, sending one internal correction runId={} chars={}", state.runId,
+                    state.prefixText.length());
+            rearmKeepalive(state.keepalive);
+            return true;
+        }
         if (!isExportCorrectionDue(state, round, finish, correctionText)) {
             return false;
         }
-        startCorrection(state, round, correctionText);
+        startCorrection(state, round, correctionText, false);
         log.info("before export close, sending one internal correction: require "
                         + "start_export confirmation card (not auto-executed) runId={} chars={}", state.runId,
                 state.prefixText.length());
         rearmKeepalive(state.keepalive);
         return true;
+    }
+
+    private boolean isCreateEntryCorrectionDue(AttemptLoopState state, AttemptRound round,
+                                               UpstreamErrorClassifier.Finish finish) {
+        boolean plainTextStop = finish == UpstreamErrorClassifier.Finish.STOP
+                && StringUtils.isNotBlank(round.accumulator.text());
+        return !state.createEntryCorrectionUsed && !state.correcting && plainTextStop
+                && createEntryCorrectionDue(state.runId, state.context, state.originalFirstTurn)
+                && isMarkCreateEntryCorrectionUsed(state.runId, round.accumulator.unpersistedText());
     }
 
     private boolean isExportCorrectionDue(AttemptLoopState state, AttemptRound round,
@@ -1439,9 +1449,15 @@ public class ResilientChatService {
                 && isMarkExportCorrectionUsed(state.runId, correctionText);
     }
 
-    private void startCorrection(AttemptLoopState state, AttemptRound round, String correctionText) {
-        state.exportCorrectionUsed = true;
+    private void startCorrection(AttemptLoopState state, AttemptRound round, String correctionText,
+                                 boolean createEntry) {
+        if (createEntry) {
+            state.createEntryCorrectionUsed = true;
+        } else {
+            state.exportCorrectionUsed = true;
+        }
         state.correcting = true;
+        state.createEntryCorrecting = createEntry;
         state.prefixText = round.accumulator.text();
         state.prefixSegment = correctionText;
         state.correctionHistoryPrefix = correctionText;
@@ -1460,6 +1476,7 @@ public class ResilientChatService {
         rearmKeepalive(state.keepalive);
         state.emptyReplyRetried = true;
         state.correcting = false;
+        state.createEntryCorrecting = false;
         state.prefixText = "";
         state.prefixSegment = "";
         state.prefixReasoning = "";
@@ -1643,25 +1660,29 @@ public class ResilientChatService {
         private final SpToolCallingManager.TurnTextCapture turnTextBody;
         private final IntFunction<Flux<ChatResponse>> attemptStream;
         private final CorrectionStreamFactory correctionStream;
+        private final boolean originalFirstTurn;
         private final AiProperties.Resilience config = ResilientChatService.this.properties.getResilience();
         private final TenantUser upstreamIdentity = RequestContextUtils.currentOrNull();
         private final int maxAttempts = Math.max(1, this.config.getMaxAttempts());
         private Long retryAfterMs;
         private boolean emptyReplyRetried;
         private boolean exportCorrectionUsed;
+        private boolean createEntryCorrectionUsed;
         private String prefixText;
         private String prefixSegment;
         private String correctionHistoryPrefix;
         private String prefixReasoning = "";
         private String prefixReasoningSegment = "";
         private boolean correcting;
+        private boolean createEntryCorrecting;
         private int attempt;
         private int budgetedAttempts;
 
         private AttemptLoopState(String runId, String sessionId, long turnStartedAtMs, SseChatEmitter out,
                                  TurnContext turn, TurnKeepalive keepalive, AiContext context, String lastUserText, String resumePrefix,
                                  String resumePendingSegment, SpToolCallingManager.TurnTextCapture turnTextBody,
-                                 IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream) {
+                                 IntFunction<Flux<ChatResponse>> attemptStream, CorrectionStreamFactory correctionStream,
+                                 boolean originalFirstTurn) {
             this.runId = runId;
             this.sessionId = sessionId;
             this.turnStartedAtMs = turnStartedAtMs;
@@ -1673,29 +1694,84 @@ public class ResilientChatService {
             this.turnTextBody = turnTextBody;
             this.attemptStream = attemptStream;
             this.correctionStream = correctionStream;
+            this.originalFirstTurn = originalFirstTurn;
             this.prefixText = StringUtils.defaultString(resumePrefix);
             this.prefixSegment = StringUtils.defaultString(resumePendingSegment);
             this.correctionHistoryPrefix = this.prefixText;
             this.exportCorrectionUsed = exportCorrectionAlreadyUsed(runId);
+            this.createEntryCorrectionUsed = originalFirstTurn
+                    && correctionAlreadyUsed(runId, CREATE_ENTRY_CORRECTION_MARKER);
         }
 
     }
 
-    /**
-     * 两次尝试之间的退避（超时面治理批① 第 1 项；算式见 {@link RetryBackoff}）。
-     *
-     * <p>三条口径：
-     * <ul>
-     * <li><b>只从剩余预算里出</b>：剩余 = 段预算 − 本段已用，并留 1s 给下一次
-     * 尝试本身 —— 退避把预算花完 = 下一次尝试刚发出去就撞 {@code TOTAL_BUDGET}，不如不睡；</li>
-     * <li><b>取消优先</b>：切片轮询取消标志（250ms 一片），命中即停止退避并<b>返回 {@code true}</b> ——
-     * 调用方必须立刻走取消收尾，<b>不得再发一次尝试</b>：退避之后的尝试可能在上游一拍内跑完
-     * （W-30 的桩文本轮 3ms），新看门狗还没来得及打第一拍，工具事件边界也不存在，取消就被吞了；</li>
-     * <li><b>中断即返回</b>：线程被中断时不吞标志，交给上层路径收尾。</li>
-     * </ul>
-     *
-     * @return {@code true} = 退避期读到取消（调用方必须走取消收尾）；{@code false} = 可以继续下一次尝试
-     */
+    /** 首轮创建遗漏纠正的 run 级事实；旧 createTaskCorrection* 兼容键不参与判定。 */
+    static final String CREATE_ENTRY_CORRECTION_MARKER = "createEntryCorrectionUsed";
+
+    private boolean createEntryCorrectionDue(String runId, AiContext fallback, boolean originalFirstTurn) {
+        RunSnapshot snapshot = requireCreateEntryCorrectionAllowed(runId);
+        try {
+            AiContext latest = AiContext.fromMap(snapshot.getContext());
+            List<PendingToolCall> pendings = this.store.pendings(runId);
+            List<Map<String, Object>> ledger = this.store.ledger(runId);
+            Map<String, Object> extra = latest.getExtra();
+            boolean alreadyCorrected = extra != null && Boolean.TRUE.equals(extra.get(CREATE_ENTRY_CORRECTION_MARKER));
+            return needsCreateEntryCorrection(originalFirstTurn, latest, disclosedTool(latest, AiToolNames.CREATE_TASK),
+                    pendings, ledger, alreadyCorrected);
+        } catch (RuntimeException ex) {
+            log.warn("read create-entry close facts failed, skipping correction runId={}", runId, ex);
+            return false;
+        }
+    }
+
+    private RunSnapshot requireCreateEntryCorrectionAllowed(String runId) {
+        RunSnapshot snapshot = this.store.get(runId);
+        if (snapshot == null) {
+            throw new AiStateUnavailableException("Create-entry correction requires a run snapshot " + runId);
+        }
+        if (cancellationRequested(runId)
+                || isClientRequestCancelled(snapshot.getSessionId(), snapshot.getClientRequestId())) {
+            throw new StreamViolationException(StreamViolationException.CANCELLED,
+                    "Create-entry correction cancelled before the second model request");
+        }
+        if (!isPersistAllowed(runId, "create-entry correction request")) {
+            throw new AiStateUnavailableException("Cannot confirm resume authority; refusing correction request " + runId);
+        }
+        return snapshot;
+    }
+
+    private boolean isMarkCreateEntryCorrectionUsed(String runId, String prefixText) {
+        return isMarkCorrectionUsed(runId, prefixText, CREATE_ENTRY_CORRECTION_MARKER, EXPORT_CORRECTION_PREFIX_KEY);
+    }
+
+    static boolean needsCreateEntryCorrection(boolean originalFirstTurn, AiContext context,
+                                              boolean createTaskDisclosed, List<PendingToolCall> pendings,
+                                              List<Map<String, Object>> ledger, boolean alreadyCorrected) {
+        if (!originalFirstTurn || alreadyCorrected || context == null || context.getTaskId() != null
+                || !createTaskDisclosed) {
+            return false;
+        }
+        for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
+            if (pending != null && AiToolNames.CREATE_TASK.equals(pending.getName())) {
+                return false;
+            }
+        }
+        for (Map<String, Object> record : ObjectUtils.defaultIfNull(ledger, List.<Map<String, Object>>of())) {
+            if (record != null && AiToolNames.CREATE_TASK.equals(record.get("name"))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static String createEntryCorrection() {
+        return SyntheticMessages.EXPORT_CORRECTION_PREFIX
+                + "请依据原始对话和本次披露的 create_task Schema 复核：原始用户消息有明确创建意图时，"
+                + "必须调用一次 create_task，type 按原始意图传 EXPORT 或 IMPORT，不得只用文字追问或列步骤。"
+                + "原始用户消息只是纯问答时不要创建，保持原回答。此次回复不要重复已经展示的正文。"
+                + "不得自动批准、自动创建或自动执行后续作业。";
+    }
+
     /**
      * 导出收尾的一轮内部纠正判据（Task 1 第 5 项）。
      *
@@ -2043,23 +2119,41 @@ public class ResilientChatService {
      * 写进 {@code messageJson}），再补上第一次已上屏、但<b>尚未作为工具卡落库</b>的 assistant 正文与
      * 内部纠正指令（已落库的正文不重复补）。
      *
-     * <p>这样纠正请求看得到本轮全部工具消息（不会重复副作用），最终 assistant 正文也包含两段内容；
-     * 请求不写回快照/记忆（finish 时按"前缀 + 增量"统一落库）。
+     * <p>这样纠正请求看得到本轮全部工具消息（不会重复副作用）；内部指令不写回快照/记忆，
+     * 首次正文与后续真实工具消息仍由既有终态和挂起路径统一落库。
      */
     private Flux<ChatResponse> correctionStream(ProviderRuntime runtime, String runId, String sessionId,
                                                 AiContext fallbackContext, List<Message> fallbackHistory, SseChatEmitter out,
                                                 String prefixText, String prefixReasoning,
-                                                SpToolCallingManager.TurnTextCapture turnTextBody) {
-        RunSnapshot snapshot = this.store.get(runId);
-        AiContext latest = latestContext(runId, fallbackContext);
+                                                SpToolCallingManager.TurnTextCapture turnTextBody, boolean createEntry) {
+        RunSnapshot snapshot = createEntry ? requireCreateEntryCorrectionAllowed(runId) : this.store.get(runId);
+        AiContext latest = createEntry ? AiContext.fromMap(snapshot.getContext()) : latestContext(runId, fallbackContext);
         List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
-        history.add(SyntheticMessages.internalUser(exportWrapUpCorrection(latest.getTaskId()),
-                SyntheticMessages.Kind.CORRECTION, "export-wrap-up"));
+        persistCorrectionHistory(runId, snapshot, history);
+        String instruction = createEntry ? createEntryCorrection() : exportWrapUpCorrection(latest.getTaskId());
+        history.add(SyntheticMessages.internalUser(instruction, SyntheticMessages.Kind.CORRECTION,
+                createEntry ? "create-entry" : "export-wrap-up"));
         Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
-        log.info("close correction request: history {} entries (incl. tool messages), type=start_export runId={}",
-                history.size(), runId);
+        if (createEntry && prompt.getOptions() instanceof ToolCallingChatOptions options) {
+            Map<String, Object> toolContext = new LinkedHashMap<>(options.getToolContext());
+            toolContext.put(SpToolCallingManager.TOOL_CONTEXT_SUPPRESS_REASONING, true);
+            options.setToolContext(toolContext);
+        }
+        log.info("close correction request: history {} entries (incl. tool messages), type={} runId={}",
+                history.size(), createEntry ? "create_task" : "start_export", runId);
         return runtime.chatModel().stream(prompt);
+    }
+
+    private void persistCorrectionHistory(String runId, RunSnapshot snapshot, List<Message> history) {
+        if (snapshot == null) {
+            return;
+        }
+        if (!isPersistAllowed(runId, "close correction history")) {
+            throw new AiStateUnavailableException("Cannot confirm resume authority; refusing correction history " + runId);
+        }
+        snapshot.setMessageJson(this.codec.serializeAll(SyntheticMessages.withoutCorrectionInstruction(history)));
+        this.store.save(snapshot);
     }
 
     /**
@@ -2125,6 +2219,21 @@ public class ResilientChatService {
         return latest != null && ExportStartForm.hasContinuationIntent(pendings, latest.getTaskId());
     }
 
+    /**
+     * 两次尝试之间的退避（超时面治理批① 第 1 项；算式见 {@link RetryBackoff}）。
+     *
+     * <p>三条口径：
+     * <ul>
+     * <li><b>只从剩余预算里出</b>：剩余 = 段预算 − 本段已用，并留 1s 给下一次
+     * 尝试本身 —— 退避把预算花完 = 下一次尝试刚发出去就撞 {@code TOTAL_BUDGET}，不如不睡；</li>
+     * <li><b>取消优先</b>：切片轮询取消标志（250ms 一片），命中即停止退避并<b>返回 {@code true}</b> ——
+     * 调用方必须立刻走取消收尾，<b>不得再发一次尝试</b>：退避之后的尝试可能在上游一拍内跑完
+     * （W-30 的桩文本轮 3ms），新看门狗还没来得及打第一拍，工具事件边界也不存在，取消就被吞了；</li>
+     * <li><b>中断即返回</b>：线程被中断时不吞标志，交给上层路径收尾。</li>
+     * </ul>
+     *
+     * @return {@code true} = 退避期读到取消（调用方必须走取消收尾）；{@code false} = 可以继续下一次尝试
+     */
     private boolean isAwaitRetryBackoff(String runId, int retryNo, long turnStartedAtMs,
                                         AiProperties.Resilience config, Long retryAfterMillis) {
         long remaining = config.getTotalBudget().toMillis() - segmentElapsedMs(runId, turnStartedAtMs);
@@ -4804,19 +4913,21 @@ public class ResilientChatService {
     /**
      * 消费一个上游分片：思考段先发帧（并累全文），随后正文进累计器并发 delta。
      * correction 新输出起点重复已 seed 的前导 prefix 时，三个消费面共用去掉重复副本后的文本。
+     * 创建遗漏纠正只保留首次正文，第二段模型文本和推理不上屏、不并入最终回答；工具与终态照常处理。
      *
      * <p><b>L-99</b>：输出侧 DLP 已删除 —— 除上述 correction 重复前缀外，正文<b>原样</b>发帧与落记忆，
      * 不再有脱敏、尾部保留窗口或"阻断终态"。{@code message_end.chars == Σ delta 长度} 的同源判据因此更直接：
      * 累计器与 delta 吃的是同一份文本。
      */
-    private void consume(ChatResponse response, SseChatEmitter out, Accumulator accumulator, SpToolCallingManager.TurnTextCapture turnTextBody) {
+    private void consume(ChatResponse response, SseChatEmitter out, Accumulator accumulator,
+                         SpToolCallingManager.TurnTextCapture turnTextBody, boolean suppressVisibleOutput) {
         // L-91：先发思考段（模型"先想再答"；同一分片也可能同带 reasoning 与正文）。
         // L-98：reasoning 不进正文（不参与 message_end(text).chars、不进 finalText），
         // 但**全文**由累加器保留，随落定/取消写进 assistant 消息 metadata（下一轮回填）。
         String reasoning = chunkReasoning(response);
-        if (StringUtils.isNotEmpty(reasoning)) {
+        if (!suppressVisibleOutput && StringUtils.isNotEmpty(reasoning)) {
             // D：展示开关默认关闭 —— 不发思考帧；思考仍原样累计，供落定/取消时写进记忆回填。
-            boolean shown = this.properties.getReasoning().isDisplayEnabled();
+            boolean shown = !suppressVisibleOutput && this.properties.getReasoning().isDisplayEnabled();
             if (shown) {
                 out.reasoningDelta(reasoning);
             }
@@ -4824,7 +4935,8 @@ public class ResilientChatService {
             // 也不会让 retry 帧落在思考 delta 之后（展示关闭时根本没有思考 delta）。
             accumulator.reasoning(reasoning, shown);
         }
-        emitText(accumulator.accept(response, chunkText(response)), out, turnTextBody);
+        String chunk = suppressVisibleOutput ? null : chunkText(response);
+        emitText(accumulator.accept(response, chunk), out, turnTextBody);
     }
 
     private void flushCorrectionPrefix(SseChatEmitter out, Accumulator accumulator,
