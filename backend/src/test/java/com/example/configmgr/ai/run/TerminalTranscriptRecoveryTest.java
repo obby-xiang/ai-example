@@ -361,6 +361,423 @@ class TerminalTranscriptRecoveryTest {
     }
 
     @Test
+    void toolCandidateBridgesTextAcrossOrdinaryToolWithoutClaimingIt() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("前段后段")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前段");
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "后段");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1")), "前段后段"));
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.text()).isEqualTo("前段后段");
+                    assertThat(entry.toolCalls()).extracting(TranscriptEntry.ToolCallView::id)
+                            .containsExactly("host-1");
+                    assertThat(entry.segments()).filteredOn(segment -> "text".equals(segment.kind()))
+                            .extracting(TranscriptEntry.SegmentView::text).containsExactly("前段", "后段");
+                    assertThat(entry.segments()).filteredOn(segment -> "tool".equals(segment.kind()))
+                            .extracting(TranscriptEntry.SegmentView::toolCallId).containsExactly("host-1");
+                });
+        assertThat(this.persisted).filteredOn(entry -> "tool".equals(entry.kind()))
+                .extracting(TranscriptEntry::toolCallId).containsExactly("host-1");
+    }
+
+    @Test
+    void toolCandidateBridgesOrderedTextAcrossMultipleOrdinaryTools() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage first = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage second = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-2"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("甲乙丙")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "甲");
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "乙");
+        out.toolStart(pending("ordinary-2"));
+        emitText(out, "丙");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), first, response("ordinary-1"),
+                second, response("ordinary-2"), tools, response("host-1")), "甲乙丙"));
+
+        assertThat(historyComplete(result)).isTrue();
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind())).findFirst().orElseThrow();
+        assertThat(recovered.text()).isEqualTo("甲乙丙");
+        assertThat(recovered.segments()).filteredOn(segment -> "text".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::text).containsExactly("甲", "乙", "丙");
+        assertThat(recovered.segments()).filteredOn(segment -> "tool".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::toolCallId).containsExactly("host-1");
+    }
+
+    @Test
+    void bridgedToolCandidateDoesNotClaimFollowingPlainAssistant() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("宿主正文")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        AssistantMessage plain = assistant("后续正文", "following-plain");
+        SseChatEmitter out = emitter();
+        emitText(out, "宿主");
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "正文");
+        out.toolStart(host);
+        emitText(out, "后续正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1"), plain), "宿主正文后续正文"));
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()))
+                .extracting(TranscriptEntry::text).containsExactly("宿主正文", "后续正文");
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recovered.segments()).filteredOn(segment -> "text".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::text).containsExactly("宿主", "正文");
+    }
+
+    @Test
+    void toolCandidateDoesNotBridgeIntoClaimedAdjacentEntry() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage previous = assistant("已认领", "previous");
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("已认领未归属当前")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "已认领");
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:text-previous", List.of(), "已认领", ""))
+                .isNotEmpty();
+        emitText(out, "未归属");
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "当前");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), previous, ordinary, response("ordinary-1"),
+                tools, response("host-1")), "已认领未归属当前"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.appendCalls).isZero();
+        assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
+    void archivedClaimSurvivesLocalOwnershipProjection() {
+        SseChatEmitter out = emitter();
+        emitText(out, "正文");
+        out.toolStart(pending("host-1"));
+        List<TranscriptEntry.ToolCallView> calls = List.of(
+                new TranscriptEntry.ToolCallView("host-1", "function", AiToolNames.CREATE_TASK, "{}"));
+        Object localTimeline = ReflectionTestUtils.getField(out, "transcriptTimeline");
+        ReflectionTestUtils.setField(out, "transcriptTimeline", new ArrayList<>());
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:first", calls, "正文", "")).isNotEmpty();
+
+        ReflectionTestUtils.setField(out, "transcriptTimeline", localTimeline);
+        assertThat(out.transcriptToolContent(calls, "正文", "")).isNotNull();
+        ReflectionTestUtils.setField(out, "transcriptTimeline", new ArrayList<>());
+
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:second", calls, "正文", "")).isNull();
+    }
+
+    @Test
+    void toolCandidateStartsAfterClaimedEntryAndBridgesOrdinaryTool() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage previous = assistant("前一轮", "previous");
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("甲乙")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前一轮");
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:text-previous", List.of(), "前一轮", ""))
+                .isNotEmpty();
+        emitText(out, "甲");
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "乙");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), previous, ordinary, response("ordinary-1"),
+                tools, response("host-1")), "前一轮甲乙"));
+
+        assertThat(historyComplete(result)).isTrue();
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recovered.text()).isEqualTo("甲乙");
+        assertThat(recovered.segments()).filteredOn(segment -> "text".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::text).containsExactly("甲", "乙");
+        assertThat(recovered.segments()).filteredOn(segment -> "tool".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::toolCallId).containsExactly("host-1");
+    }
+
+    @Test
+    void toolCandidateRejectsClaimedOrdinaryToolBetweenHostCalls() {
+        PendingToolCall first = pending("host-1");
+        PendingToolCall second = pending("host-2");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(first, second));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(first, second));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("甲乙")
+                .toolCalls(List.of(toolCall("host-1"), toolCall("host-2"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "甲");
+        out.toolStart(first);
+        out.toolStart(pending("ordinary-1"));
+        List<TranscriptEntry.ToolCallView> ordinaryCall = List.of(
+                new TranscriptEntry.ToolCallView("ordinary-1", "function", AiToolNames.CREATE_TASK, "{}"));
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:previous", ordinaryCall, "", ""))
+                .isNotEmpty();
+        emitText(out, "乙");
+        out.toolStart(second);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1"), response("host-2")), "甲乙"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.appendCalls).isZero();
+        assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
+    void toolCandidateFiltersUnclaimedOrdinaryToolBetweenHostCalls() {
+        PendingToolCall first = pending("host-1");
+        PendingToolCall second = pending("host-2");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(first, second));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(first, second));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("甲乙")
+                .toolCalls(List.of(toolCall("host-1"), toolCall("host-2"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "甲");
+        out.toolStart(first);
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "乙");
+        out.toolStart(second);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1"), response("host-2")), "甲乙"));
+
+        assertThat(historyComplete(result)).isTrue();
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recovered.text()).isEqualTo("甲乙");
+        assertThat(recovered.segments()).filteredOn(segment -> "tool".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::toolCallId).containsExactly("host-1", "host-2");
+    }
+
+    @Test
+    void archivedClaimIsNotOverwrittenByConflictingLocalEntry() {
+        SseChatEmitter out = emitter();
+        emitText(out, "正文");
+        out.toolStart(pending("host-1"));
+        List<TranscriptEntry.ToolCallView> calls = List.of(
+                new TranscriptEntry.ToolCallView("host-1", "function", AiToolNames.CREATE_TASK, "{}"));
+        String archivedEntry = RUN_ID + ":assistant:archived";
+        String localEntry = RUN_ID + ":assistant:local";
+        Object localTimeline = ReflectionTestUtils.getField(out, "transcriptTimeline");
+        ReflectionTestUtils.setField(out, "transcriptTimeline", new ArrayList<>());
+        assertThat(out.transcriptSegments(archivedEntry, calls, "正文", "")).isNotEmpty();
+
+        ReflectionTestUtils.setField(out, "transcriptTimeline", localTimeline);
+        assertThat(out.transcriptSegments(localEntry, calls, "正文", "")).isNotEmpty();
+        assertThat(out.transcriptToolContent(calls, "正文", "")).isNull();
+        ReflectionTestUtils.setField(out, "transcriptTimeline", new ArrayList<>());
+
+        assertThat(out.transcriptSegments(archivedEntry, calls, "正文", "")).isNotEmpty();
+        assertThat(out.transcriptSegments(localEntry, calls, "正文", "")).isNull();
+    }
+
+    @Test
+    void archivedClaimAcceptsMatchingLocalOwnershipProjection() {
+        SseChatEmitter out = emitter();
+        emitText(out, "正文");
+        out.toolStart(pending("host-1"));
+        List<TranscriptEntry.ToolCallView> calls = List.of(
+                new TranscriptEntry.ToolCallView("host-1", "function", AiToolNames.CREATE_TASK, "{}"));
+        String entryId = RUN_ID + ":assistant:owner";
+        assertThat(out.transcriptToolContent(calls, "正文", "")).isNotNull();
+        assertThat(out.transcriptSegments(entryId, calls, "正文", "")).isNotEmpty();
+        ReflectionTestUtils.setField(out, "transcriptTimeline", new ArrayList<>());
+
+        assertThat(out.transcriptSegments(entryId, calls, "正文", "")).isNotEmpty();
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:other", calls, "正文", "")).isNull();
+    }
+
+    @Test
+    void emptyToolCandidateDoesNotAbsorbFollowingPlainDelta() {
+        PendingToolCall first = pending("host-1");
+        PendingToolCall second = pending("host-2");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(first, second));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(first, second));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("host-1"), toolCall("host-2"))).build();
+        AssistantMessage plain = assistant("后续正文", "following-plain");
+        SseChatEmitter out = emitter();
+        out.toolStart(first);
+        out.toolStart(pending("ordinary-1"));
+        out.toolStart(second);
+        out.delta("后续正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1"), response("host-2"), plain), "后续正文"));
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()))
+                .extracting(TranscriptEntry::text).containsExactly("", "后续正文");
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recovered.segments()).filteredOn(segment -> "tool".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::toolCallId).containsExactly("host-1", "host-2");
+    }
+
+    @Test
+    void reasoningBridgesAcrossOrdinaryToolWithoutClaimingFollowingReasoning() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("正文")
+                .toolCalls(List.of(toolCall("host-1")))
+                .properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "思考一思考二"))
+                .build();
+        AssistantMessage plain = AssistantMessage.builder().content("")
+                .properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "后续思考",
+                        TranscriptEntries.TRANSCRIPT_TEXT_ID_KEY, "following-plain"))
+                .build();
+        SseChatEmitter out = emitter();
+        out.reasoningDelta("思考一");
+        out.reasoningEnd();
+        out.toolStart(pending("ordinary-1"));
+        out.reasoningDelta("思考二");
+        out.reasoningEnd();
+        emitText(out, "正文");
+        out.toolStart(host);
+        out.reasoningDelta("后续思考");
+        out.reasoningEnd();
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1"), plain), "正文"));
+
+        assertThat(historyComplete(result)).isTrue();
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recovered.reasoning()).isEqualTo("思考一思考二");
+        assertThat(recovered.segments()).filteredOn(segment -> "reasoning".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::text).containsExactly("思考一", "思考二");
+        assertThat(this.persisted).filteredOn(entry -> entry.entryId().endsWith("following-plain"))
+                .singleElement().satisfies(entry -> assertThat(entry.reasoning()).isEqualTo("后续思考"));
+    }
+
+    @Test
+    void correctionPrefixBridgesAcrossOrdinaryToolExactlyOnce() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("后缀")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前缀");
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "后缀");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1")), "前缀后缀");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀")).toMap());
+
+        Object result = recover(snapshot);
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.text()).isEqualTo("前缀后缀");
+                    assertThat(entry.segments()).filteredOn(segment -> "text".equals(segment.kind()))
+                            .extracting(TranscriptEntry.SegmentView::text).containsExactly("前缀", "后缀");
+                    assertThat(entry.segments()).filteredOn(segment -> "tool".equals(segment.kind()))
+                            .extracting(TranscriptEntry.SegmentView::toolCallId).containsExactly("host-1");
+                });
+    }
+
+    @Test
+    void correctionPrefixRecoveryIsIdempotentAcrossArchiveReread() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("后缀")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前缀");
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "后缀");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1")), "前缀后缀");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀")).toMap());
+
+        Object first = recover(snapshot);
+        assertThat(historyComplete(first)).isTrue();
+        int appends = this.appendCalls;
+        int removes = this.removeCalls;
+        assertThat(out.transcriptFullText()).isEqualTo("前缀后缀");
+        ReflectionTestUtils.setField(out, "transcriptTimeline", new ArrayList<>());
+
+        Object second = recover(snapshot);
+
+        assertThat(historyComplete(second)).isTrue();
+        assertThat(this.appendCalls).isEqualTo(appends);
+        assertThat(this.removeCalls).isEqualTo(removes);
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()))
+                .singleElement().satisfies(entry -> assertThat(entry.text()).isEqualTo("前缀后缀"));
+    }
+
+    @Test
     void duplicateAndCrossInstanceRecoveryDoesNotWriteAgain() {
         SseChatEmitter out = emitter();
         emitText(out, "正文");

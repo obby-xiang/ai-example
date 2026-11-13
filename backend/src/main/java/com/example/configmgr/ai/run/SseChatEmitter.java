@@ -3554,14 +3554,12 @@ public class SseChatEmitter {
             return null;
         }
         List<TranscriptSegment> archived = archivedTranscriptTimeline();
-        if (archived != null) {
-            TranscriptContent content = transcriptToolContent(archived, calls, text, reasoning);
-            if (content != null) {
-                return content;
-            }
-        }
+        TranscriptContent content = archived == null ? null : transcriptToolContent(archived, calls, text, reasoning);
         synchronized (this.emitLock) {
-            return transcriptToolContent(this.transcriptTimeline, calls, text, reasoning);
+            if (content != null && hasConflictingTranscriptToolOwners(archived, this.transcriptTimeline, calls)) {
+                return null;
+            }
+            return content != null ? content : transcriptToolContent(this.transcriptTimeline, calls, text, reasoning);
         }
     }
 
@@ -3705,23 +3703,73 @@ public class SseChatEmitter {
     private static TranscriptContent transcriptToolContent(List<TranscriptSegment> timeline,
                                                            List<TranscriptEntry.ToolCallView> calls, String text,
                                                            String reasoning) {
+        List<String> owners = transcriptToolOwners(timeline, calls);
+        if (owners.size() > 1) {
+            return null;
+        }
+        if (owners.size() == 1 && owners.getFirst() != null) {
+            return transcriptOwnedToolContent(timeline, calls, reasoning, owners.getFirst());
+        }
         List<TranscriptSegment> candidate = transcriptToolCandidate(timeline, calls, text, reasoning);
         if (candidate == null) {
             return null;
         }
-        StringBuilder actualText = new StringBuilder();
-        StringBuilder actualReasoning = new StringBuilder();
-        for (TranscriptSegment segment : candidate) {
-            if ("text".equals(segment.kind)) {
-                actualText.append(segment.text);
-            } else if ("reasoning".equals(segment.kind)) {
-                actualReasoning.append(segment.text);
-            }
-        }
-        if (!StringUtils.equals(actualReasoning.toString(), StringUtils.defaultString(reasoning))) {
+        TranscriptContent actual = transcriptContent(candidate);
+        return StringUtils.equals(actual.reasoning(), StringUtils.defaultString(reasoning)) ? actual : null;
+    }
+
+    private static TranscriptContent transcriptOwnedToolContent(List<TranscriptSegment> timeline,
+                                                                List<TranscriptEntry.ToolCallView> calls,
+                                                                String reasoning, String owner) {
+        List<TranscriptSegment> owned = timeline.stream().filter(segment -> owner.equals(segment.entryId)).toList();
+        TranscriptContent actual = transcriptContent(owned);
+        if (!StringUtils.equals(actual.reasoning(), StringUtils.defaultString(reasoning))
+                || !isCompleteTranscriptSegments(owned, calls, actual.text(), actual.reasoning(), owner)) {
             return null;
         }
-        return new TranscriptContent(actualText.toString(), actualReasoning.toString());
+        return actual;
+    }
+
+    private static TranscriptContent transcriptContent(List<TranscriptSegment> segments) {
+        StringBuilder text = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
+        for (TranscriptSegment segment : segments) {
+            if ("text".equals(segment.kind)) {
+                text.append(segment.text);
+            } else if ("reasoning".equals(segment.kind)) {
+                reasoning.append(segment.text);
+            }
+        }
+        return new TranscriptContent(text.toString(), reasoning.toString());
+    }
+
+    private static List<String> transcriptToolOwners(List<TranscriptSegment> timeline,
+                                                     List<TranscriptEntry.ToolCallView> calls) {
+        List<String> owners = new ArrayList<>();
+        for (TranscriptEntry.ToolCallView call : calls) {
+            int found = transcriptToolSegment(timeline, call == null ? null : call.id());
+            if (found >= 0 && !owners.contains(timeline.get(found).entryId)) {
+                owners.add(timeline.get(found).entryId);
+            }
+        }
+        return owners;
+    }
+
+    private static boolean hasConflictingTranscriptToolOwners(List<TranscriptSegment> first,
+                                                              List<TranscriptSegment> second,
+                                                              List<TranscriptEntry.ToolCallView> calls) {
+        String owner = null;
+        for (List<TranscriptSegment> timeline : List.of(first, second)) {
+            for (String candidate : transcriptToolOwners(timeline, calls)) {
+                if (candidate != null && owner != null && !owner.equals(candidate)) {
+                    return true;
+                }
+                if (candidate != null) {
+                    owner = candidate;
+                }
+            }
+        }
+        return false;
     }
 
     private List<TranscriptSegment> archivedTranscriptTimeline() {
@@ -3730,7 +3778,7 @@ public class SseChatEmitter {
             synchronized (this.emitLock) {
                 generation = this.transcriptFrameGeneration;
                 if (this.archivedTranscriptTimeline != null && this.archivedTranscriptGeneration == generation) {
-                    return this.archivedTranscriptTimeline;
+                    return withTranscriptEntryIds(this.archivedTranscriptTimeline);
                 }
             }
             FrameStore.ReadResult archived;
@@ -3760,15 +3808,36 @@ public class SseChatEmitter {
                 if (generation == this.transcriptFrameGeneration) {
                     this.archivedTranscriptTimeline = timeline;
                     this.archivedTranscriptGeneration = generation;
-                    return timeline;
+                    return withTranscriptEntryIds(timeline);
                 }
                 if (this.archivedTranscriptTimeline != null
                         && this.archivedTranscriptGeneration == this.transcriptFrameGeneration) {
-                    return this.archivedTranscriptTimeline;
+                    return withTranscriptEntryIds(this.archivedTranscriptTimeline);
                 }
             }
         }
         return null;
+    }
+
+    private List<TranscriptSegment> withTranscriptEntryIds(List<TranscriptSegment> archived) {
+        int localIndex = 0;
+        for (TranscriptSegment segment : archived) {
+            while (localIndex < this.transcriptTimeline.size()
+                    && this.transcriptTimeline.get(localIndex).seq < segment.seq) {
+                localIndex++;
+            }
+            for (int i = localIndex; i < this.transcriptTimeline.size()
+                    && this.transcriptTimeline.get(i).seq == segment.seq; i++) {
+                TranscriptSegment local = this.transcriptTimeline.get(i);
+                if (local.kind.equals(segment.kind) && StringUtils.equals(local.toolCallId, segment.toolCallId)) {
+                    if (segment.entryId == null && local.entryId != null) {
+                        segment.entryId = local.entryId;
+                    }
+                    break;
+                }
+            }
+        }
+        return archived;
     }
 
     private List<TranscriptEntry.SegmentView> archivedTranscriptSegments(String entryId,
@@ -3825,35 +3894,53 @@ public class SseChatEmitter {
                                                                    List<TranscriptEntry.ToolCallView> calls, String text, String reasoning) {
         int first = -1;
         int last = -1;
+        List<Integer> expectedToolSegments = new ArrayList<>(calls.size());
         for (TranscriptEntry.ToolCallView call : calls) {
             int found = transcriptToolSegment(timeline, call == null ? null : call.id());
             if (found < 0) {
                 return null;
             }
+            expectedToolSegments.add(found);
             first = first < 0 ? found : Math.min(first, found);
             last = Math.max(last, found);
         }
-        if (StringUtils.isEmpty(text) && StringUtils.isEmpty(reasoning)) {
-            return new ArrayList<>(timeline.subList(first, last + 1));
-        }
-        int start = 0;
-        for (int i = 0; i < first; i++) {
-            TranscriptSegment segment = timeline.get(i);
-            if (segment.entryId != null || "tool".equals(segment.kind)) {
-                start = i + 1;
-            }
-        }
+        boolean emptyContent = StringUtils.isEmpty(text) && StringUtils.isEmpty(reasoning);
+        int start = emptyContent ? first : transcriptToolStart(timeline, first);
         int end = last + 1;
-        while (end < timeline.size()) {
-            TranscriptSegment segment = timeline.get(end);
-            if (segment.entryId != null || "tool".equals(segment.kind)
-                    || "text".equals(segment.kind) && timeline.get(end - 1).messageBoundary
-                    || isOtherAssistantReasoning(timeline, end, reasoning)) {
-                break;
+        if (!emptyContent) {
+            while (end < timeline.size()) {
+                TranscriptSegment segment = timeline.get(end);
+                if (segment.entryId != null || "tool".equals(segment.kind)
+                        || "text".equals(segment.kind) && timeline.get(end - 1).messageBoundary
+                        || isOtherAssistantReasoning(timeline, end, reasoning)) {
+                    break;
+                }
+                end++;
             }
-            end++;
         }
-        return new ArrayList<>(timeline.subList(start, end));
+        List<TranscriptSegment> candidate = new ArrayList<>();
+        for (int i = start; i < end; i++) {
+            TranscriptSegment segment = timeline.get(i);
+            if (segment.entryId != null) {
+                return null;
+            }
+            if (!"tool".equals(segment.kind) || expectedToolSegments.contains(i)) {
+                candidate.add(segment);
+            }
+        }
+        if (start > 0 && !isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
+            return null;
+        }
+        return candidate;
+    }
+
+    private static int transcriptToolStart(List<TranscriptSegment> timeline, int first) {
+        for (int i = first - 1; i >= 0; i--) {
+            if (timeline.get(i).entryId != null) {
+                return i + 1;
+            }
+        }
+        return 0;
     }
 
     private static boolean isOtherAssistantReasoning(List<TranscriptSegment> timeline, int index, String expected) {

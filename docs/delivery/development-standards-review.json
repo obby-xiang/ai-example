@@ -7249,6 +7249,42 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "不修改字节解码、SSE帧解析或文本截断，只保留已解码的部分正文与恢复缺口事实。"},
         "verification-review": {"status": "checked", "reason": "独立审查agent-1283多轮发现均已返修，最终WeakMap双来源与DONE退避门禁ADDRESSED且无Critical/Important；施工报告相关独立单点RED→GREEN、npm run typecheck及node scripts/build.mjs（3282模块）通过；主控未重跑测试，真实浏览器/Redis/Cluster/多实例及全量测试NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:99f2569f4545db7eac2381264c8d7205aab8596ed28268744b707a451bded48a",
+      "status": "reviewed",
+      "reason": "逐hunk复核转录普通工具桥接、候选所有权、归档投影、空正文与reasoning边界及correction-prefix重入幂等；多轮独立静态复审最终可合入。",
+      "reviewedAt": "2026-11-13T13:03:04+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1291、施工agent-1289",
+      "specChanges": [
+        {
+          "change": "同一assistant turn内，文本和推理可跨未认领普通模型工具分段桥接；当前host entry只认领自身文本、推理和expected calls，普通工具不进入其工具序列。",
+          "reason": "旧候选区遇任意工具就截断，文本→普通工具→文本→host工具会遗漏前段正文并触发AI_TRANSCRIPT_INCOMPLETE。",
+          "impact": "正文、推理和expected calls仍严格逐字逐序对账；不跨他人已认领段、后续plain assistant或归档缺口，无法完整归属时失败关闭。"
+        },
+        {
+          "change": "本地与归档转录时间线按seq/kind/toolCallId填补一致的空归属，归档已有非空entryId不被本地冲突归属覆盖。",
+          "reason": "归档回退需要保留实时认领事实，但无条件投影会拆散已经成功的归档entry并破坏幂等。",
+          "impact": "本地null不清除归档，冲突owner不互相覆盖；只读公开恢复语义不变，不新增存储或协议字段。"
+        },
+        {
+          "change": "correction-prefix重读可从expected host calls唯一一致owner的已认领段取得完整正文，严格校验owner内actualCalls；空正文工具条目不向后吸收plain assistant。",
+          "reason": "首次恢复成功后的第二次恢复仍需得到同一完整事实，不能用原始suffix重拼候选，也不能以空正文吞并下一条assistant。",
+          "impact": "首次与归档重入恢复均保持historyComplete和无重复写，多owner、混入普通工具或host calls缺失/增加继续失败关闭。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "新增普通工具桥接候选、所有权冲突守卫、归档归属投影和一致owner完整正文读取；保持精确对账与原有边界，已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有TranscriptSegment、StringUtils、候选对账和归档时间线，无新增依赖、工具名判断或并行转录存储。"},
+        "java-api-style": {"status": "checked", "reason": "触及方法均显式大括号并控制在50行/复杂度20内，集合返回实际列表，entryId可空与owner冲突显式处理，无新增JSON实体或Lombok相等性。"},
+        "logging-exception-safety": {"status": "checked", "reason": "归属不明、冲突、归档不完整和正文/calls不匹配继续返回不完整，不伪造完整历史，不新增异常吞没或敏感日志。"},
+        "toc-interaction": {"status": "checked", "reason": "只修复后台转录持久化与重入恢复，不新增用户提示、技术话术或交互步骤，现有transcript-degraded出口保持真实。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "新认领拒绝他人entryId，归档冲突不覆盖，一致owner重读严格核对actualCalls并保持无重复append/remove；未新增Redis或数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "文本和推理按原SSE段顺序拼接，不按字节/UTF-16位置切割，不解析文案或二次转码，后续messageBoundary与reasoning隔离保留。"},
+        "verification-review": {"status": "checked", "reason": "独立审查agent-1291三轮发现的所有权、空正文和correction重入问题均返修，最终Critical/Important为零且可合入；施工报告19个相关独立单点分别通过、361个生产源文件实际编译成功；主控未重跑测试，全量套件/真实模型/Redis/Cluster/多实例NOT_RUN，旧方法2519既有Checkstyle复杂度24和PMD离线依赖阻塞如实保留。"}
+      }
     }
   ]
 }
