@@ -361,6 +361,89 @@ class TerminalTranscriptRecoveryTest {
     }
 
     @Test
+    void completeFirstToolDoesNotExpandIntoSecondHopAndReplayIsIdempotent() {
+        String firstText = "前".repeat(62);
+        String secondText = "后".repeat(138);
+        PendingToolCall list = pending("list-1");
+        list.setName(AiToolNames.LIST_TASKS);
+        PendingToolCall create = pending("create-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(list, create));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(list, create));
+        AssistantMessage first = AssistantMessage.builder().content(firstText)
+                .toolCalls(List.of(new AssistantMessage.ToolCall("list-1", "function", AiToolNames.LIST_TASKS, "{}")))
+                .build();
+        AssistantMessage second = AssistantMessage.builder().content(secondText)
+                .toolCalls(List.of(toolCall("create-1"))).build();
+        SseChatEmitter out = emitter();
+        out.delta(firstText);
+        out.toolStart(list);
+        out.delta(secondText);
+        out.toolStart(create);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), first, response("list-1", AiToolNames.LIST_TASKS),
+                second, response("create-1")), firstText + secondText);
+
+        Object firstRecovery = recover(snapshot);
+        assertThat(historyComplete(firstRecovery)).isTrue();
+        assertToolEntryContent("list-1", firstText);
+        assertToolEntryContent("create-1", secondText);
+        int appends = this.appendCalls;
+        int removes = this.removeCalls;
+        List<TranscriptEntry> persisted = List.copyOf(this.persisted);
+        assertThat(out.transcriptFullText()).isEqualTo(firstText + secondText);
+        ReflectionTestUtils.setField(out, "transcriptTimeline", new ArrayList<>());
+
+        Object replay = recover(snapshot);
+
+        assertThat(historyComplete(replay)).isTrue();
+        assertThat(this.persisted).isEqualTo(persisted);
+        assertThat(this.appendCalls).isEqualTo(appends);
+        assertThat(this.removeCalls).isEqualTo(removes);
+    }
+
+    @Test
+    void mixedHostsAllowLateReasoningButNotFollowingReasoning() {
+        PendingToolCall first = pending("host-1");
+        PendingToolCall second = pending("host-2");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(first, second));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(first, second));
+        AssistantMessage ordinary = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        AssistantMessage tools = AssistantMessage.builder().content("甲乙")
+                .toolCalls(List.of(toolCall("host-1"), toolCall("host-2")))
+                .properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "当前推理"))
+                .build();
+        AssistantMessage following = AssistantMessage.builder().content("")
+                .properties(Map.of(ResilientChatService.REASONING_METADATA_KEY, "后续推理",
+                        TranscriptEntries.TRANSCRIPT_TEXT_ID_KEY, "following-reasoning"))
+                .build();
+        SseChatEmitter out = emitter();
+        emitText(out, "甲");
+        out.toolStart(first);
+        out.toolStart(pending("ordinary-1"));
+        emitText(out, "乙");
+        out.toolStart(second);
+        out.reasoningDelta("当前推理");
+        out.reasoningEnd();
+        out.reasoningDelta("后续推理");
+        out.reasoningEnd();
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), ordinary, response("ordinary-1"),
+                tools, response("host-1"), response("host-2"), following), "甲乙"));
+
+        assertThat(historyComplete(result)).isTrue();
+        TranscriptEntry recovered = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .findFirst().orElseThrow();
+        assertThat(recovered.reasoning()).isEqualTo("当前推理");
+        assertThat(recovered.segments()).filteredOn(segment -> "reasoning".equals(segment.kind()))
+                .extracting(TranscriptEntry.SegmentView::text).containsExactly("当前推理");
+        assertThat(this.persisted).filteredOn(entry -> entry.entryId().endsWith("following-reasoning"))
+                .singleElement().satisfies(entry -> assertThat(entry.reasoning()).isEqualTo("后续推理"));
+    }
+
+    @Test
     void toolCandidateBridgesTextAcrossOrdinaryToolWithoutClaimingIt() {
         PendingToolCall host = pending("host-1");
         when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
@@ -1134,6 +1217,18 @@ class TerminalTranscriptRecoveryTest {
                 });
     }
 
+    private void assertToolEntryContent(String toolCallId, String expectedText) {
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind())
+                        && entry.entryId().equals(RUN_ID + ":assistant:" + toolCallId))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.text()).isEqualTo(expectedText);
+                    assertThat(entry.toolCalls()).extracting(TranscriptEntry.ToolCallView::id)
+                            .containsExactly(toolCallId);
+                    assertThat(entry.segments()).filteredOn(segment -> "tool".equals(segment.kind()))
+                            .extracting(TranscriptEntry.SegmentView::toolCallId).containsExactly(toolCallId);
+                });
+    }
+
     private static PendingToolCall rejectedWithVisibleSegment(String id, String name, String code) {
         PendingToolCall pending = new PendingToolCall();
         pending.setToolCallId(id);
@@ -1251,6 +1346,11 @@ class TerminalTranscriptRecoveryTest {
     private static ToolResponseMessage response(String id) {
         return ToolResponseMessage.builder()
                 .responses(List.of(new ToolResponseMessage.ToolResponse(id, AiToolNames.CREATE_TASK, "ok"))).build();
+    }
+
+    private static ToolResponseMessage response(String id, String name) {
+        return ToolResponseMessage.builder()
+                .responses(List.of(new ToolResponseMessage.ToolResponse(id, name, "ok"))).build();
     }
 
     private static PendingToolCall pending(String id) {

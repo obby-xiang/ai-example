@@ -3906,32 +3906,57 @@ public class SseChatEmitter {
         }
         boolean emptyContent = StringUtils.isEmpty(text) && StringUtils.isEmpty(reasoning);
         int start = emptyContent ? first : transcriptToolStart(timeline, first);
-        int end = last + 1;
-        if (!emptyContent) {
-            while (end < timeline.size()) {
-                TranscriptSegment segment = timeline.get(end);
-                if (segment.entryId != null || "tool".equals(segment.kind)
-                        || "text".equals(segment.kind) && timeline.get(end - 1).messageBoundary
-                        || isOtherAssistantReasoning(timeline, end, reasoning)) {
-                    break;
-                }
-                end++;
-            }
-        }
         List<TranscriptSegment> candidate = new ArrayList<>();
-        for (int i = start; i < end; i++) {
-            TranscriptSegment segment = timeline.get(i);
-            if (segment.entryId != null) {
+        for (int i = start; i <= last; i++) {
+            if (!addTranscriptCandidateSegment(candidate, timeline.get(i), i, expectedToolSegments)) {
                 return null;
             }
-            if (!"tool".equals(segment.kind) || expectedToolSegments.contains(i)) {
-                candidate.add(segment);
-            }
         }
-        if (start > 0 && !isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
+        if (isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
+            return candidate;
+        }
+        if (!emptyContent) {
+            candidate = expandTranscriptToolCandidate(timeline, candidate, calls, text, reasoning,
+                    expectedToolSegments, last + 1);
+        }
+        if (candidate == null || start > 0 && !isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
             return null;
         }
         return candidate;
+    }
+
+    private static List<TranscriptSegment> expandTranscriptToolCandidate(List<TranscriptSegment> timeline,
+                                                                         List<TranscriptSegment> candidate,
+                                                                         List<TranscriptEntry.ToolCallView> calls,
+                                                                         String text, String reasoning,
+                                                                         List<Integer> expectedToolSegments, int end) {
+        while (end < timeline.size()) {
+            TranscriptSegment segment = timeline.get(end);
+            if (segment.entryId != null || "tool".equals(segment.kind)
+                    || "text".equals(segment.kind) && timeline.get(end - 1).messageBoundary
+                    || isOtherAssistantReasoning(timeline, end, reasoning)) {
+                break;
+            }
+            if (!addTranscriptCandidateSegment(candidate, segment, end, expectedToolSegments)) {
+                return null;
+            }
+            if (isCompleteTranscriptSegments(candidate, calls, text, reasoning, null)) {
+                return candidate;
+            }
+            end++;
+        }
+        return candidate;
+    }
+
+    private static boolean addTranscriptCandidateSegment(List<TranscriptSegment> candidate, TranscriptSegment segment,
+                                                         int index, List<Integer> expectedToolSegments) {
+        if (segment.entryId != null) {
+            return false;
+        }
+        if (!"tool".equals(segment.kind) || expectedToolSegments.contains(index)) {
+            candidate.add(segment);
+        }
+        return true;
     }
 
     private static int transcriptToolStart(List<TranscriptSegment> timeline, int first) {

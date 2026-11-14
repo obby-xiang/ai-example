@@ -7457,6 +7457,37 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "只按结构化call状态决定是否需要段，不解析工具参数或错误文案，正文/reasoning/actualCalls仍严格逐字逐序对账。"},
         "verification-review": {"status": "checked", "reason": "agent-1291独立复核Critical/Important为零；施工报告16个相关独立单点逐个通过、362生产源编译成功；主控未重跑测试，真实模型/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。Minor deferred：FORM_SCHEMA_REJECTED真实结算和confirm_step+FORM_SLOTS_ALREADY_KNOWN两组合缺直接证据，保留既有静态路径不宣称四种组合全部实测。"}
       }
+    },
+    {
+      "fingerprint": "sha256:0d1a17c2e4e1693fc15dad5b05edd308487ea2f1c7d90a76f909bb406f6de89e",
+      "status": "reviewed",
+      "reason": "逐hunk复核工具候选初始完整即停、逐段右扩完整即停及既有边界/所有权守卫；R5按真实正文归属验证，独立静态复审无分级问题。",
+      "reviewedAt": "2026-11-15T00:56:53+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1291、施工agent-1289",
+      "specChanges": [
+        {
+          "change": "transcriptToolCandidate在初始候选或逐段右扩后，正文、reasoning与required calls精确满足expected即停止，不再读取后续段。",
+          "reason": "R5中list_tasks候选62字符已完整，继续右扩把correction第二跳138字符并入，actual 200与expected 62不一致。",
+          "impact": "list_tasks独占62、create_task独占138；不完整候选仍按现有边界处理当前entry必需的迟到reasoning，其他消息正文不再被完整候选吸收。"
+        },
+        {
+          "change": "候选构造抽出统一追加入口，已认领段仍失败关闭，普通未认领工具只过滤，空正文/空推理不右扩。",
+          "reason": "需要把完整即停嵌入现有所有权和边界语义，不能修改messageBoundary或复制/清除owner来伪造成功。",
+          "impact": "transcriptSegments最终严格校验不变，correction第二跳、归档重放和内部拒绝optional段协议不变，重复恢复无重复append/remove。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "新增右扩与候选追加helper，初始/逐段精确完整即停，保留工具、边界、owner和reasoning守卫；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有isCompleteTranscriptSegments和候选段结构，无新增依赖、边界字段或并行转录状态。"},
+        "java-api-style": {"status": "checked", "reason": "触及方法拆分为真实右扩与追加职责，显式大括号且未超过50行/复杂度20，可空与集合语义不变；已IDEA Reformat。"},
+        "logging-exception-safety": {"status": "checked", "reason": "不完整候选继续真实失败，不隐藏后续文本或伪造完整历史，不新增日志和异常吞没。"},
+        "toc-interaction": {"status": "checked", "reason": "修复后台历史持久化，避免工具卡片因跨消息正文误合并而丢失，不新增用户提示或卡片。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "已认领段拒绝和普通工具过滤保持，R5不同entry不复用文本，归档重读entries稳定且无重复append/remove，无新增数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按完整段和结构化calls对账，不按字节、文案或工具名截断，当前迟到reasoning与其他reasoning隔离规则保留。"},
+        "verification-review": {"status": "checked", "reason": "agent-1291最终复核Critical/Important/Minor均为零；施工报告R5及10个相关边界/协议对照独立通过、362生产源编译成功；主控未重跑测试，真实模型/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。"}
+      }
     }
   ]
 }
