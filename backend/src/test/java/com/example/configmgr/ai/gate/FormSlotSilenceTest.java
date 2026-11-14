@@ -29,6 +29,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -128,6 +129,7 @@ class FormSlotSilenceTest {
 		assertThat(settled.getStatus()).isEqualTo(PendingToolCall.REJECTED_ARGUMENTS);
 		assertThat(settled.getCode()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
 		assertThat(settled.getOutcome()).isEqualTo("rejected");
+		assertThat(settled.asMap()).containsEntry("transcriptSegmentRequired", false);
 		// ③ 模型仍收到纠正回执（含码与人话指引）：静默的是用户帧，不是给模型的事实
 		String modelReceipt = toolResponseData(result);
 		assertThat(modelReceipt).contains(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
@@ -145,6 +147,7 @@ class FormSlotSilenceTest {
 			.as("未知配置仍要能用表单收集")
 			.contains("suspended", "frontend_tool_request", "tool_start");
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus()).isEqualTo(PendingToolCall.PENDING);
+		assertThat(this.store.pending(RUN_ID, CALL_ID).asMap()).containsEntry("transcriptSegmentRequired", true);
 	}
 
 	@Test
@@ -155,6 +158,21 @@ class FormSlotSilenceTest {
 		// 系统拒绝之外的入参拒绝照旧给用户一张"这次没执行"的卡
 		assertThat(this.store.archivedTypes(RUN_ID)).contains("tool_start", "frontend_tool_result");
 		assertThat(this.store.pending(RUN_ID, CALL_ID).getCode()).isEqualTo("SOME_OTHER_ARGUMENT_REJECTION");
+		assertThat(this.store.pending(RUN_ID, CALL_ID).asMap()).containsEntry("transcriptSegmentRequired", true);
+	}
+
+	@Test
+	void conditionOperatorUnknownSettlementAlsoMarksNoSegmentRequired() {
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("confirm-1");
+		pending.setName("confirm_step");
+		pending.setKind(PendingToolCall.KIND_FRONTEND);
+
+		ReflectionTestUtils.invokeMethod(this.manager(accepting()), "settleFrontendRejected", RUN_ID, pending,
+				ErrorCodes.CONDITION_OPERATOR_UNKNOWN, "条件结构需要纠正", java.util.List.of("operator"));
+
+		assertThat(this.store.pending(RUN_ID, "confirm-1").asMap())
+				.containsEntry("transcriptSegmentRequired", false);
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

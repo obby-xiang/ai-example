@@ -778,6 +778,71 @@ class TerminalTranscriptRecoveryTest {
     }
 
     @Test
+    void formSchemaRejectedPairNeedsNoSseSegmentAndRecoveryIsIdempotent() {
+        Object first = recoverInternalRejection(AiToolNames.GENERATIVE_FORM, ErrorCodes.FORM_SCHEMA_REJECTED);
+        assertThat(historyComplete(first)).isTrue();
+        int appends = this.appendCalls;
+        int removes = this.removeCalls;
+
+        Object second = recover(internalRejectionSnapshot(AiToolNames.GENERATIVE_FORM, ErrorCodes.FORM_SCHEMA_REJECTED));
+
+        assertThat(historyComplete(second)).isTrue();
+        assertThat(this.appendCalls).isEqualTo(appends);
+        assertThat(this.removeCalls).isEqualTo(removes);
+        assertInternalRejectionEntries(AiToolNames.GENERATIVE_FORM);
+    }
+
+    @Test
+    void formSlotsAlreadyKnownPairNeedsNoSseSegment() {
+        Object result = recoverInternalRejection(AiToolNames.GENERATIVE_FORM, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+
+        assertThat(historyComplete(result)).isTrue();
+        assertInternalRejectionEntries(AiToolNames.GENERATIVE_FORM);
+    }
+
+    @Test
+    void conditionOperatorUnknownPairNeedsNoSseSegment() {
+        Object result = recoverInternalRejection(AiToolNames.CONFIRM_STEP, ErrorCodes.CONDITION_OPERATOR_UNKNOWN);
+
+        assertThat(historyComplete(result)).isTrue();
+        assertInternalRejectionEntries(AiToolNames.CONFIRM_STEP);
+    }
+
+    @Test
+    void userVisibleRejectionStillRequiresSseSegment() {
+        PendingToolCall rejected = rejectedWithVisibleSegment("internal-1", AiToolNames.GENERATIVE_FORM,
+                "USER_VISIBLE_REJECTION");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(rejected));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(rejected));
+        SseChatEmitter out = emitter();
+        emitText(out, "最终正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(internalRejectionSnapshot(AiToolNames.GENERATIVE_FORM, "USER_VISIBLE_REJECTION"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.appendCalls).isZero();
+        assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
+    void unmarkedToolWithoutSseSegmentIsRejected() {
+        PendingToolCall ordinary = pending("ordinary-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(ordinary));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(ordinary));
+        AssistantMessage tools = AssistantMessage.builder().content("")
+                .toolCalls(List.of(toolCall("ordinary-1"))).build();
+        SseChatEmitter out = emitter();
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), tools, response("ordinary-1")), ""));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.appendCalls).isZero();
+        assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
     void duplicateAndCrossInstanceRecoveryDoesNotWriteAgain() {
         SseChatEmitter out = emitter();
         emitText(out, "正文");
@@ -1018,6 +1083,67 @@ class TerminalTranscriptRecoveryTest {
         assertThat(historyComplete(result)).isFalse();
         assertThat(this.appendCalls).isZero();
         assertThat(this.removeCalls).isZero();
+    }
+
+    private Object recoverInternalRejection(String name, String code) {
+        PendingToolCall rejected = new PendingToolCall() {
+            public boolean isTranscriptSegmentRequired() {
+                return false;
+            }
+        };
+        rejected.setToolCallId("internal-1");
+        rejected.setName(name);
+        rejected.setKind(PendingToolCall.KIND_FRONTEND);
+        rejected.setCode(code);
+        rejected.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
+        rejected.setOutcome("rejected");
+        rejected.setResultText("internal rejection");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(rejected));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(rejected));
+        SseChatEmitter out = emitter();
+        emitText(out, "最终正文");
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        return recover(internalRejectionSnapshot(name, code));
+    }
+
+    private RunSnapshot internalRejectionSnapshot(String name, String code) {
+        AssistantMessage tools = AssistantMessage.builder().content("最终正文")
+                .toolCalls(List.of(new AssistantMessage.ToolCall("internal-1", "function", name, "{}"))).build();
+        ToolResponseMessage response = ToolResponseMessage.builder()
+                .responses(List.of(new ToolResponseMessage.ToolResponse("internal-1", name, code))).build();
+        return snapshot(List.of(new UserMessage("问"), tools, response), "最终正文");
+    }
+
+    private void assertInternalRejectionEntries(String name) {
+        List<TranscriptEntry> assistants = this.persisted.stream()
+                .filter(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty()).toList();
+        assertThat(assistants).hasSize(1);
+        TranscriptEntry assistant = assistants.getFirst();
+        assertThat(assistant.text()).isEqualTo("最终正文");
+        assertThat(assistant.toolCalls()).extracting(TranscriptEntry.ToolCallView::id).containsExactly("internal-1");
+        assertThat(assistant.toolCalls()).extracting(TranscriptEntry.ToolCallView::name).containsExactly(name);
+        assertThat(assistant.segments()).isEmpty();
+        assertThat(assistant.toolCallStates()).containsKey("internal-1");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> state = (Map<String, Object>) assistant.toolCallStates().get("internal-1");
+        assertThat(state).containsEntry("transcriptSegmentRequired", false);
+        assertThat(this.persisted).filteredOn(entry -> "tool".equals(entry.kind()))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.toolCallId()).isEqualTo("internal-1");
+                    assertThat(entry.segments()).isEmpty();
+                });
+    }
+
+    private static PendingToolCall rejectedWithVisibleSegment(String id, String name, String code) {
+        PendingToolCall pending = new PendingToolCall();
+        pending.setToolCallId(id);
+        pending.setName(name);
+        pending.setKind(PendingToolCall.KIND_FRONTEND);
+        pending.setCode(code);
+        pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
+        pending.setOutcome("rejected");
+        pending.setResultText("visible rejection");
+        return pending;
     }
 
     private Object recoverFollowingAssistant(String text, String reasoning, boolean correctionActive) {

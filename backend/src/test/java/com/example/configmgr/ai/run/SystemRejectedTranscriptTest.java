@@ -34,6 +34,7 @@ class SystemRejectedTranscriptTest {
 	@Test
 	void terminalProjectionUsesRealSegmentsWithoutDuplicatingCorrectionFragments() {
 		PendingToolCall rejected = pending("gf-1", AiToolNames.GENERATIVE_FORM, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
+		rejected.setTranscriptSegmentRequired(false);
 		PendingToolCall create = pending("create-1", AiToolNames.CREATE_TASK, null);
 		List<Message> history = List.of(
 				assistant("前缀", "", "form-entry", toolCall("gf-1", AiToolNames.GENERATIVE_FORM)),
@@ -61,16 +62,18 @@ class SystemRejectedTranscriptTest {
 		ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, true, false);
 
 		assertThat(entries.stream().filter(entry -> "assistant".equals(entry.kind())))
-				.extracting(TranscriptEntry::text).containsExactly("前缀后缀", "独立正文");
-		TranscriptEntry projected = entries.stream().filter(entry -> "assistant".equals(entry.kind())
-				&& !entry.toolCalls().isEmpty()).findFirst().orElseThrow();
+				.extracting(TranscriptEntry::text).containsExactly("前缀", "后缀", "前缀后缀", "独立正文");
+		TranscriptEntry projected = entries.stream().filter(entry -> createEntryId.equals(entry.entryId()))
+				.findFirst().orElseThrow();
 		assertThat(projected.entryId()).isEqualTo(createEntryId);
 		assertThat(projected.reasoning()).isEmpty();
 		assertThat(projected.toolCalls()).extracting(TranscriptEntry.ToolCallView::id).containsExactly("create-1");
 		assertThat(projected.segments()).extracting(TranscriptEntry.SegmentView::kind)
 				.containsExactly("text", "tool");
 		assertThat(entries.stream().filter(entry -> "tool".equals(entry.kind())))
-				.extracting(TranscriptEntry::toolCallId).containsExactly("create-1");
+				.extracting(TranscriptEntry::toolCallId).containsExactly("gf-1", "create-1");
+		assertThat(entries.stream().filter(entry -> "gf-1".equals(entry.toolCallId())
+				|| "gf-1".equals(entry.entryId()))).allMatch(entry -> entry.segments().isEmpty());
 		TranscriptEntry independent = entries.getLast();
 		assertThat(independent.entryId()).endsWith("independent-entry");
 		assertThat(independent.reasoning()).isEqualTo("独立推理");

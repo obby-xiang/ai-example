@@ -174,6 +174,13 @@ public class PendingToolCall {
     private String status = PENDING;
 
     /**
+     * 终态转录是否必须存在对应的公开 SSE 工具段。仅系统内部拒绝且无需用户帧的结算写 false；
+     * 缺省、未知和其他工具一律为 true，缺帧继续失败关闭。
+     */
+    @JsonProperty("transcriptSegmentRequired")
+    private boolean transcriptSegmentRequired = true;
+
+    /**
      * 结果信封的结局（终态写点必填；缺失不得推断成成功）。
      */
     @JsonProperty("outcome")
@@ -435,6 +442,7 @@ public class PendingToolCall {
         out.put("kind", this.kind);
         out.put("arguments", this.arguments);
         out.put("status", this.status);
+        out.put("transcriptSegmentRequired", this.transcriptSegmentRequired);
         out.put("outcome", effectiveOutcome().wire());
         out.put("code", effectiveCode());
         out.put("reason", this.reason);

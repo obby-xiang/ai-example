@@ -4045,11 +4045,10 @@ public class ResilientChatService {
     private List<TranscriptEntry> buildTerminalEntries(String runId, RunSnapshot snapshot, List<Message> history,
                                                        boolean includeLastAssistant) {
         Map<String, PendingToolCall> pendings = transcriptPendings(runId);
-        List<Message> effectiveHistory = withoutSystemRejectedForms(pendings, history);
-        List<Message> withStates = new ArrayList<>(effectiveHistory.size());
+        List<Message> withStates = new ArrayList<>(history.size());
         Map<String, String> resolvedStatuses = new LinkedHashMap<>();
         Predicate<String> executedInLedger = toolCallId -> MapUtils.isNotEmpty(ledgerEntry(runId, toolCallId));
-        for (Message message : effectiveHistory) {
+        for (Message message : history) {
             if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
                 ResolvedToolStates resolved = resolveToolStates(runId, assistant, pendings, snapshot.getStatus(),
                         executedInLedger);
@@ -4063,69 +4062,6 @@ public class ResilientChatService {
                 snapshot.transcriptToolTurnStartedAtMs(), includeLastAssistant, resolvedStatuses, executedInLedger);
     }
 
-    /**
-     * 生成式表单的系统拒绝没有用户帧，终态时间线也不能保留对应的工具段。模型历史与 pending 仍保留
-     * 拒绝事实；这里只投影公开 transcript，正文和其它工具调用不变。
-     */
-    private static List<Message> withoutSystemRejectedForms(Map<String, PendingToolCall> pendings, List<Message> history) {
-        Set<String> rejectedIds = new LinkedHashSet<>();
-        for (PendingToolCall pending : pendings.values()) {
-            if (pending != null && AiToolNames.GENERATIVE_FORM.equals(pending.getName())
-                    && (ErrorCodes.FORM_SCHEMA_REJECTED.equals(pending.effectiveCode())
-                    || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(pending.effectiveCode()))) {
-                rejectedIds.add(pending.getToolCallId());
-            }
-        }
-        if (rejectedIds.isEmpty()) {
-            return history;
-        }
-        List<Message> out = new ArrayList<>(history.size());
-        for (Message message : history) {
-            if (message instanceof AssistantMessage assistant && assistant.hasToolCalls()) {
-                out.add(withoutRejectedToolCalls(assistant, rejectedIds));
-            } else if (message instanceof ToolResponseMessage tool) {
-                ToolResponseMessage kept = withoutRejectedToolResponses(tool, rejectedIds);
-                if (kept != null) {
-                    out.add(kept);
-                }
-            } else {
-                out.add(message);
-            }
-        }
-        return out;
-    }
-
-    private static AssistantMessage withoutRejectedToolCalls(AssistantMessage assistant, Set<String> rejectedIds) {
-        List<AssistantMessage.ToolCall> kept = new ArrayList<>();
-        for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
-            if (!rejectedIds.contains(call.id())) {
-                kept.add(call);
-            }
-        }
-        if (kept.size() == assistant.getToolCalls().size()) {
-            return assistant;
-        }
-        AssistantMessage.Builder builder = AssistantMessage.builder().content(assistant.getText())
-                .properties(assistant.getMetadata() == null ? Map.of() : assistant.getMetadata()).toolCalls(kept);
-        if (CollectionUtils.isNotEmpty(assistant.getMedia())) {
-            builder.media(new ArrayList<>(assistant.getMedia()));
-        }
-        return builder.build();
-    }
-
-    private static ToolResponseMessage withoutRejectedToolResponses(ToolResponseMessage tool, Set<String> rejectedIds) {
-        List<ToolResponseMessage.ToolResponse> kept = new ArrayList<>();
-        for (ToolResponseMessage.ToolResponse response : tool.getResponses()) {
-            if (!rejectedIds.contains(response.id())) {
-                kept.add(response);
-            }
-        }
-        if (kept.size() == tool.getResponses().size()) {
-            return tool;
-        }
-        return kept.isEmpty() ? null : ToolResponseMessage.builder().responses(kept).build();
-    }
-
     private List<TranscriptEntry> completeTimeline(String runId, RunSnapshot snapshot, List<TranscriptEntry> entries,
                                                    boolean terminalAttempt) {
         return completeTimeline(runId, snapshot, entries, terminalAttempt, false);
@@ -4137,9 +4073,9 @@ public class ResilientChatService {
         try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
             out = this.registry.find(runId);
         }
+        Set<String> optionalCallIds = transcriptSegmentOptionalCallIds(entries);
         boolean requiresTimeline = forceEmitter || entries.stream()
-                .anyMatch(entry -> "tool".equals(entry.kind()) || ("assistant".equals(entry.kind())
-                        && CollectionUtils.isNotEmpty(entry.toolCalls())));
+                .anyMatch(entry -> isTranscriptTimelineRequired(entry, optionalCallIds));
         if (requiresTimeline && out == null) {
             try (RunIdentityScope.Scope ignored = RunIdentityScope.open(snapshot.getTenantId(), snapshot.getUserId())) {
                 out = this.registry.of(runId);
@@ -4169,6 +4105,36 @@ public class ResilientChatService {
             return null;
         }
         return entries;
+    }
+
+    private static boolean isTranscriptTimelineRequired(TranscriptEntry entry, Set<String> optionalCallIds) {
+        if ("tool".equals(entry.kind())) {
+            return !optionalCallIds.contains(entry.toolCallId());
+        }
+        return "assistant".equals(entry.kind()) && !requiredTranscriptCalls(entry).isEmpty();
+    }
+
+    private static List<TranscriptEntry.ToolCallView> requiredTranscriptCalls(TranscriptEntry entry) {
+        return entry.toolCalls().stream()
+                .filter(call -> isTranscriptSegmentRequired(entry, call.id())).toList();
+    }
+
+    private static Set<String> transcriptSegmentOptionalCallIds(List<TranscriptEntry> entries) {
+        Set<String> optional = new LinkedHashSet<>();
+        for (TranscriptEntry entry : entries) {
+            for (TranscriptEntry.ToolCallView call : entry.toolCalls()) {
+                if (!isTranscriptSegmentRequired(entry, call.id())) {
+                    optional.add(call.id());
+                }
+            }
+        }
+        return optional;
+    }
+
+    private static boolean isTranscriptSegmentRequired(TranscriptEntry entry, String toolCallId) {
+        Object state = entry.toolCallStates().get(toolCallId);
+        return !(state instanceof Map<?, ?> values)
+                || !Boolean.FALSE.equals(values.get("transcriptSegmentRequired"));
     }
 
     private Map<String, TranscriptEntry.SegmentView> populateAssistantSegments(SseChatEmitter out,
@@ -4216,12 +4182,17 @@ public class ResilientChatService {
     private boolean isToolAssistantPopulated(SseChatEmitter out, List<TranscriptEntry> entries, int index,
                                              Map<String, TranscriptEntry.SegmentView> toolSegments) {
         TranscriptEntry entry = entries.get(index);
+        List<TranscriptEntry.ToolCallView> requiredCalls = requiredTranscriptCalls(entry);
+        if (requiredCalls.isEmpty()) {
+            entries.set(index, entry.withSegments(List.of()));
+            return true;
+        }
         String displayReasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
-        SseChatEmitter.TranscriptContent actual = out.transcriptToolContent(entry.toolCalls(), entry.text(),
+        SseChatEmitter.TranscriptContent actual = out.transcriptToolContent(requiredCalls, entry.text(),
                 displayReasoning);
         String text = actual == null ? entry.text() : actual.text();
         String reasoning = actual == null ? displayReasoning : actual.reasoning();
-        List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), entry.toolCalls(),
+        List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), requiredCalls,
                 text, reasoning);
         if (CollectionUtils.isEmpty(segments)) {
             return false;
@@ -4304,9 +4275,10 @@ public class ResilientChatService {
 
     private boolean isLinkToolSegments(List<TranscriptEntry> entries,
                                        Map<String, TranscriptEntry.SegmentView> toolSegments) {
+        Set<String> optionalCallIds = transcriptSegmentOptionalCallIds(entries);
         for (int i = 0; i < entries.size(); i++) {
             TranscriptEntry entry = entries.get(i);
-            if (!"tool".equals(entry.kind())) {
+            if (!"tool".equals(entry.kind()) || optionalCallIds.contains(entry.toolCallId())) {
                 continue;
             }
             TranscriptEntry.SegmentView anchor = toolSegments.get(entry.toolCallId());

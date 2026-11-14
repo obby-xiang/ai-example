@@ -243,6 +243,36 @@ class TranscriptEntriesTest {
 	}
 
 	@Test
+	void transcriptSegmentRequiredRoundTripsAndDefaultsToTrue() throws Exception {
+		ObjectMapper mapper = new ObjectMapper();
+		PendingToolCall pending = new PendingToolCall() {
+			public boolean isTranscriptSegmentRequired() {
+				return false;
+			}
+		};
+		pending.setToolCallId("internal-1");
+		pending.setStatus(PendingToolCall.REJECTED_ARGUMENTS);
+
+		Map<String, Object> state = TranscriptEntries.toolCallState(pending, PendingToolCall.REJECTED_ARGUMENTS);
+		assertThat(state).containsEntry("transcriptSegmentRequired", false);
+		@SuppressWarnings("unchecked")
+		Map<String, Object> projected = mapper.convertValue(pending, Map.class);
+		assertThat(projected).containsEntry("transcriptSegmentRequired", false);
+		PendingToolCall restored = mapper.convertValue(projected, PendingToolCall.class);
+		assertThat(restored.asMap()).containsEntry("transcriptSegmentRequired", false);
+		assertThat(TranscriptEntries.toolCallState(restored, PendingToolCall.REJECTED_ARGUMENTS))
+				.containsEntry("transcriptSegmentRequired", false);
+		@SuppressWarnings("unchecked")
+		Map<String, Object> restoredState = mapper.readValue(mapper.writeValueAsString(state), Map.class);
+		assertThat(restoredState).containsEntry("transcriptSegmentRequired", false);
+
+		PendingToolCall unknown = new PendingToolCall();
+		assertThat(unknown.asMap()).containsEntry("transcriptSegmentRequired", true);
+		assertThat(TranscriptEntries.toolCallState(unknown, PendingToolCall.PENDING))
+				.containsEntry("transcriptSegmentRequired", true);
+	}
+
+	@Test
 	void terminalProjectionIsStableForTheSameHistory() {
 		List<Message> attributed = List.of(
 				UserMessage.builder().text("同文").metadata(Map.of("runId", "run-a")).build(),

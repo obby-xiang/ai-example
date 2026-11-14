@@ -1246,7 +1246,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void addFrontendRejectedResponse(ToolBatchState state, PendingToolCall pending) {
         String text = frameText(pending.getResultText());
-        if (!isSystemRejectedWithoutUserFrames(pending)) {
+        if (pending.isTranscriptSegmentRequired()) {
             emitToolStartOnce(state.runId, state.toolStarted, pending);
             state.out.frontendToolResult(pending, false, text);
         }
@@ -2817,6 +2817,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         pending.setExecutedBy(null);
         pending.setResolvedAtMs(System.currentTimeMillis());
         pending.setResultText(text);
+        pending.setTranscriptSegmentRequired(!isSystemRejectedWithoutUserFrames(pending));
         this.store.putPending(runId, pending);
         log.warn("frontend tool arguments rejected by the condition loop [contract=frontend tool arguments rejected by condition loop] runId={} tool={} code={} reasonCount={} (not parked, not sent, not executed)", runId, pending.getName(), code, reasons.size());
         return text;
@@ -4147,7 +4148,7 @@ public class SpToolCallingManager implements ToolCallingManager {
                 return;
             }
             List<PendingToolCall> settledBatch = read.entries().stream()
-                    .filter(pending -> !isSystemRejectedWithoutUserFrames(pending)).toList();
+                    .filter(PendingToolCall::isTranscriptSegmentRequired).toList();
             if (settledBatch.isEmpty()) {
                 return;
             }

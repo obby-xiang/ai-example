@@ -7417,6 +7417,46 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "恢复按ChatResponse结构识别空LENGTH与工具调用，不按文本前缀或错误文案判断，aborted响应不进入恢复历史，非空截断保持原样。"},
         "verification-review": {"status": "checked", "reason": "agent-1293多轮发现生产记忆无效、冻结缺项、配置类型/脱敏和五参语义问题均返修，最终Critical/Important为零；施工报告相关独立单点逐个通过，362生产源与767测试源编译成功，H2 Flyway V1–V4实际应用成功；主控未重跑测试，真实模型/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN，相关基线同红与既有IDEA缺失引用如实登记。"}
       }
+    },
+    {
+      "fingerprint": "sha256:90b483c8a0b3a3ca4e9e225dfa49668897a939b5efb9331873ef3f3e98f6017a",
+      "status": "reviewed",
+      "reason": "逐hunk复核内部工具拒绝的结构化transcriptSegmentRequired、结算/批次/恢复投影和终态段豁免，普通与用户可见工具仍严格失败关闭；独立静态复审可合入。",
+      "reviewedAt": "2026-11-14T18:09:50+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1291、施工agent-1289",
+      "specChanges": [
+        {
+          "change": "PendingToolCall新增transcriptSegmentRequired，缺省和未知均为true，仅统一内部拒绝结算按现有isSystemRejectedWithoutUserFrames写false。",
+          "reason": "内部拒绝在messageJson中保留assistant/tool对但按设计没有用户帧，终态需要结构化事实而不是再次按工具名或错误码推断。",
+          "impact": "pending、asMap与toolCallStates使用同一字段；普通、用户可见和未标记工具缺段继续AI_TRANSCRIPT_INCOMPLETE，不新增数据库字段或旧数据推断。"
+        },
+        {
+          "change": "addFrontendRejectedResponse、批次transcript过滤和终态completeTimeline统一读取transcriptSegmentRequired。",
+          "reason": "此前各消费面独立分类导致终态仍强制寻找按设计不存在的SSE工具段。",
+          "impact": "内部assistant/tool对保留且segments为空，最终assistant正文和工具结果保留；混合调用只有required calls继续正文/reasoning/actualCalls严格对账。"
+        },
+        {
+          "change": "终态不再按generative_form工具名和错误码删除assistant/tool response，改为按每个call的结构化字段免除对应段链接。",
+          "reason": "用户可见历史不能靠工具特例删除，且混合工具调用需要逐项判断。",
+          "impact": "模型历史和最终正文不丢，重复恢复无重复append/remove；未明确Boolean.FALSE的条目仍必须提供完整SSE段。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java", "status": "checked", "reason": "结算时统一设置段要求，响应和批次过滤改读结构化字段，既有内部分类不扩大；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntries.java", "status": "checked", "reason": "toolCallStates始终投影transcriptSegmentRequired，恢复读取同一事实；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java", "status": "checked", "reason": "新增缺省true的primitive boolean及显式JSON/asMap投影，未标记缺段仍失败关闭；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "删除按工具名/错误码过滤历史，改为逐项段要求、required calls严格对账和optional段链接豁免；已IDEA Reformat。"},
+        {"path": "docs/technical-design.md", "status": "checked", "reason": "同步内部拒绝的结构化段协议、缺省失败关闭和恢复幂等口径。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有PendingToolCall、toolCallStates、内部分类和终态对账，无新增依赖、数据库字段或第二套拒绝分类。"},
+        "java-api-style": {"status": "checked", "reason": "四个生产Java均IDEA Reformat，字段使用primitive boolean和显式JsonProperty，集合返回实际列表，未修改方法保持50行/复杂度20门槛。"},
+        "logging-exception-safety": {"status": "checked", "reason": "内部拒绝仍保留状态码、结果和模型回执，普通缺段不吞错或伪装完整历史，不新增敏感日志。"},
+        "toc-interaction": {"status": "checked", "reason": "内部自我纠正拒绝不生成无意义用户卡片，最终正文正常保存，其他用户可见拒绝仍按原路径呈现。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "false随Redis pending和toolCallStates恢复，required calls严格校验，optional空段投影幂等，未新增AI数据库访问或永久状态。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "只按结构化call状态决定是否需要段，不解析工具参数或错误文案，正文/reasoning/actualCalls仍严格逐字逐序对账。"},
+        "verification-review": {"status": "checked", "reason": "agent-1291独立复核Critical/Important为零；施工报告16个相关独立单点逐个通过、362生产源编译成功；主控未重跑测试，真实模型/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。Minor deferred：FORM_SCHEMA_REJECTED真实结算和confirm_step+FORM_SLOTS_ALREADY_KNOWN两组合缺直接证据，保留既有静态路径不宣称四种组合全部实测。"}
+      }
     }
   ]
 }

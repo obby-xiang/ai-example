@@ -485,6 +485,7 @@ io.save(spread.toJSON(), (blob) => uploadBlob(blob), {fileType: GC.Spread.Excel.
 | 空 LENGTH 推理恢复 | 仅目标显式配置 `emptyLengthReasoningRecovery` 时启用；一次恢复只改 `reasoningEffort` / `requestExtraBody`，不改变冻结的 `maxTokens` 和 reasoning 回放位；首轮恢复直接用首笔历史且不挂 memoryAdvisor | 推理与可见输出共享预算，单纯增加 token 无效；无正文、无可见 reasoning、无工具/待决/副作用且仍有次数和总预算时才允许恢复，第二次仍空则 `FAILED + EMPTY_REPLY + truncated` |
 | 会话存储 | Caffeine 内存（TTL 30min） | 无需持久化；前端 sessionStorage 页签唯一 |
 | 历史裁剪 | 保持 tool_calls/tool message 配对完整 | OpenAI 协议要求配对，断对会 400 |
+| 内部工具拒绝与转录段 | `PendingToolCall.transcriptSegmentRequired` 缺省/未知一律 `true`；仅 `settleFrontendRejected` 按统一内部分类为无需用户帧的拒绝写 `false`（生成式表单 schema/槽位拒绝、`confirm_step` 条件结构纠正），pending、`asMap` 与 `toolCallStates` 使用同一字段 | messageJson 保留内部 assistant/tool 对，最终 assistant 正文和恢复幂等不丢；`addFrontendRejectedResponse`、批次过滤和终态对账不再各自按工具名/状态/错误码判断。`false` 只免除对应 SSE 工具段，普通/用户可见/未标记工具缺段仍 `AI_TRANSCRIPT_INCOMPLETE`，不新增用户可见拒绝卡 |
 | 进度推送 | SSE（任务级别 + AI run 级别两条流） | 简单、无状态；与 fetch 兼容 |
 | Excel 读写 | Apache POI 5.4（SXSSFWorkbook + SAX 读） | 大文件流式处理；无需外部服务 |
 | 数据库迁移 | Flyway（非 ddl-auto:update） | 显式 schema 控制；生产友好 |

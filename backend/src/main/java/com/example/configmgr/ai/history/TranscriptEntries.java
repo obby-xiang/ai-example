@@ -297,6 +297,7 @@ public final class TranscriptEntries {
     public static Map<String, Object> toolCallState(PendingToolCall pending, String status) {
         Map<String, Object> state = new LinkedHashMap<>();
         state.put("status", status);
+        state.put("transcriptSegmentRequired", pending.isTranscriptSegmentRequired());
         if (!PendingToolCall.PENDING.equals(status) && !PendingToolCall.APPROVED.equals(status)) {
             ToolOutcome persisted = ToolOutcome.fromWire(pending.getOutcome());
             state.put("outcome", (persisted == null ? ToolOutcome.UNKNOWN : persisted).wire());
