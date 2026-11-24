@@ -4091,8 +4091,11 @@ public class ResilientChatService {
         boolean correctionActive = isCorrectionMarked(snapshot, EXPORT_CORRECTION_MARKER)
                 || StringUtils.isNotEmpty(correctionPrefix(snapshot))
                 || StringUtils.isNotEmpty(CorrectionPrefixes.parkedFullText(snapshot));
+        SseChatEmitter.CorrectionEvidence correctionEvidence = correctionActive
+                ? new SseChatEmitter.CorrectionEvidence(correctionPrefix(snapshot), CorrectionPrefixes.parkedFullText(snapshot))
+                : null;
         Map<String, TranscriptEntry.SegmentView> toolSegments = populateAssistantSegments(out, entries, correctionActive,
-                forceEmitter);
+                correctionEvidence, forceEmitter);
         if (toolSegments == null) {
             return null;
         }
@@ -4140,12 +4143,13 @@ public class ResilientChatService {
     private Map<String, TranscriptEntry.SegmentView> populateAssistantSegments(SseChatEmitter out,
                                                                                List<TranscriptEntry> entries,
                                                                                boolean correctionActive,
+                                                                               SseChatEmitter.CorrectionEvidence correctionEvidence,
                                                                                boolean recoveryAttempt) {
         Map<String, TranscriptEntry.SegmentView> toolSegments = new LinkedHashMap<>();
         for (int i = 0; i < entries.size(); i++) {
             TranscriptEntry entry = entries.get(i);
             if ("assistant".equals(entry.kind()) && CollectionUtils.isNotEmpty(entry.toolCalls())
-                    && !isToolAssistantPopulated(out, entries, i, toolSegments)) {
+                    && !isToolAssistantPopulated(out, entries, i, toolSegments, correctionEvidence)) {
                 if (recoveryAttempt) {
                     logTerminalRecoveryFailure(entry.runId(), "entry_unresolved", entry.entryId(), 1);
                 }
@@ -4180,7 +4184,8 @@ public class ResilientChatService {
     }
 
     private boolean isToolAssistantPopulated(SseChatEmitter out, List<TranscriptEntry> entries, int index,
-                                             Map<String, TranscriptEntry.SegmentView> toolSegments) {
+                                             Map<String, TranscriptEntry.SegmentView> toolSegments,
+                                             SseChatEmitter.CorrectionEvidence correctionEvidence) {
         TranscriptEntry entry = entries.get(index);
         List<TranscriptEntry.ToolCallView> requiredCalls = requiredTranscriptCalls(entry);
         if (requiredCalls.isEmpty()) {
@@ -4189,11 +4194,11 @@ public class ResilientChatService {
         }
         String displayReasoning = this.properties.getReasoning().isDisplayEnabled() ? entry.reasoning() : "";
         SseChatEmitter.TranscriptContent actual = out.transcriptToolContent(requiredCalls, entry.text(),
-                displayReasoning);
+                displayReasoning, correctionEvidence);
         String text = actual == null ? entry.text() : actual.text();
         String reasoning = actual == null ? displayReasoning : actual.reasoning();
         List<TranscriptEntry.SegmentView> segments = out.transcriptSegments(entry.entryId(), requiredCalls,
-                text, reasoning);
+                text, reasoning, correctionEvidence);
         if (CollectionUtils.isEmpty(segments)) {
             return false;
         }

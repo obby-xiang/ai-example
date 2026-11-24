@@ -7559,6 +7559,43 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按结构化taskId和事件类型隔离，不按动作文案或摘要内容判断，不改变文本编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1296最终复核Critical/Important/Minor均为零；施工报告同步/延迟/watcher/全部事件用例独立通过，typecheck和3282模块build成功；主控未重跑测试，真实浏览器/Redis/Cluster/多实例和全量套件NOT_RUN，5个恢复超时均有同基线同红证据。"}
       }
+    },
+    {
+      "fingerprint": "sha256:a3ef471f7ef1b9de08707457530ca181173da80a6ca00f710fc8057be2e01e95",
+      "status": "reviewed",
+      "reason": "逐hunk复核首次工具候选正文归属、结构化CorrectionEvidence及所有start统一校验；合法prefix/parked恢复与失配失败均有对照，独立静态复审无分级问题。",
+      "reviewedAt": "2026-11-24T20:52:34+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1291、施工agent-1289",
+      "specChanges": [
+        {
+          "change": "首次未认领工具候选在所有start统一校验text/reasoning/required calls，普通路径不匹配即失败关闭，不再采用其他assistant正文覆盖当前entry。",
+          "reason": "原start==0可返回不完整候选，plain prev会被当成当前工具entry的cur，造成正文归属错误。",
+          "impact": "prev/cur失配不再写入或吞并当前正文，普通工具桥接、右扩完整即停和最终严格对账不变。"
+        },
+        {
+          "change": "引入CorrectionEvidence(prefix, fullText)，correction仅额外接受当前快照prefix+expected或parked完整正文，并贯穿transcriptToolContent/transcriptSegments及actual=null回退。",
+          "reason": "correctionActive布尔值不能证明actual属于当前entry，marker-only和错误prefix会产生通用豁免。",
+          "impact": "合法prefix恢复、前序已认领段和parked全文可恢复，失配和marker-only失败关闭，不使用endsWith或工具名/文案特判。"
+        },
+        {
+          "change": "前序已认领entry仍作为左边界，一致owner重入继续读取已认领完整正文。",
+          "reason": "合法correction需要允许prefix+expected但不能复用前序entry文本或改变owner。",
+          "impact": "当前entry仅含自身完整正文，前序entry独立保留，归档重放和重复恢复无重复append/remove。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java", "status": "checked", "reason": "把当前快照CorrectionEvidence贯穿工具正文获取、回退和段对账，不再传无正文信息的布尔豁免；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java", "status": "checked", "reason": "所有start统一候选完整性校验，仅接受普通精确一致或快照证明的prefix+expected/parked全文；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有CorrectionPrefixes、候选对账和一致owner恢复，无新增依赖、并行转录状态或协议字段。"},
+        "java-api-style": {"status": "checked", "reason": "两个生产Java均IDEA Reformat，方法保持50行/复杂度20门槛，结构化record证据和集合语义明确。"},
+        "logging-exception-safety": {"status": "checked", "reason": "失配与marker-only真实失败，不隐藏正文不一致或伪造完整历史，无新增敏感日志。"},
+        "toc-interaction": {"status": "checked", "reason": "避免工具卡和历史正文被其他assistant正文覆盖，不新增用户提示或操作。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "前序已认领边界和一致owner重入保持，快照证据贯穿回退与归档重放，重复恢复无重复写，无新增数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按完整段和结构化prefix/parked证据对账，不按文本后缀、工具名或字节位置拟合，reasoning和calls严格匹配。"},
+        "verification-review": {"status": "checked", "reason": "agent-1291最终复核Critical/Important/Minor均为零；施工报告17个相关独立单点逐个通过、362生产源clean compile成功；主控未重跑测试，真实模型/Redis/Cluster/多实例和全量套件NOT_RUN，Checkstyle仅保留三个既有问题。"}
+      }
     }
   ]
 }

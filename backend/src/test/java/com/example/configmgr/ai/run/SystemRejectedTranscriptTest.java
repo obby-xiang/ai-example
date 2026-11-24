@@ -59,7 +59,8 @@ class SystemRejectedTranscriptTest {
 		String createEntryId = TranscriptEntries.assistantEntryId(RUN_ID,
 				List.of(new TranscriptEntry.ToolCallView("create-1", "function", AiToolNames.CREATE_TASK, "{}")));
 
-		ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, true, false);
+		ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, true,
+				new SseChatEmitter.CorrectionEvidence("前缀", ""), false);
 
 		assertThat(entries.stream().filter(entry -> "assistant".equals(entry.kind())))
 				.extracting(TranscriptEntry::text).containsExactly("前缀", "后缀", "前缀后缀", "独立正文");
@@ -100,7 +101,7 @@ class SystemRejectedTranscriptTest {
 		out.reasoningEnd();
 		List<TranscriptEntry> entries = buildEntries(history, List.of(create));
 
-		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, false);
+		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, null, false);
 
 		assertThat(populated).isNotNull();
 		TranscriptEntry projected = entries.stream()
@@ -130,7 +131,7 @@ class SystemRejectedTranscriptTest {
 		emitText(out, "终");
 		List<TranscriptEntry> entries = buildEntries(history, List.of(create));
 
-		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, false);
+		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, null, false);
 
 		assertThat(populated).isNull();
 	}
@@ -151,7 +152,8 @@ class SystemRejectedTranscriptTest {
 		out.reasoningEnd();
 		List<TranscriptEntry> entries = buildEntries(history, List.of(create));
 
-		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, true, false);
+		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, true,
+				new SseChatEmitter.CorrectionEvidence("", ""), false);
 
 		assertThat(populated).isNull();
 	}
@@ -169,7 +171,7 @@ class SystemRejectedTranscriptTest {
 		out.toolStart(create);
 		List<TranscriptEntry> entries = buildEntries(history, List.of(create));
 
-		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, false);
+		Object populated = ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, null, false);
 
 		assertThat(populated).isNotNull();
 		assertThat(entries.stream().filter(entry -> "assistant".equals(entry.kind()) && entry.toolCalls().isEmpty()))
@@ -232,7 +234,7 @@ class SystemRejectedTranscriptTest {
 		List<TranscriptEntry> entries = buildEntries(history, pendings);
 		List<String> entryIds = entries.stream().map(TranscriptEntry::entryId).toList();
 
-		ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, false);
+		ReflectionTestUtils.invokeMethod(service(), "populateAssistantSegments", out, entries, false, null, false);
 
 		assertThat(entries.stream().filter(entry -> "assistant".equals(entry.kind())))
 				.extracting(TranscriptEntry::text).containsExactlyElementsOf(assistantCount == 0

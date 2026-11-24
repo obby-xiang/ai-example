@@ -336,6 +336,93 @@ class TerminalTranscriptRecoveryTest {
     }
 
     @Test
+    void firstToolCandidateRejectsPreviousPlainTextWithoutCorrectionProof() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage previous = assistant("prev", "previous");
+        AssistantMessage current = AssistantMessage.builder().content("cur")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "prev");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+
+        Object result = recover(snapshot(List.of(new UserMessage("问"), previous, current, response("host-1")), "prev"));
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.appendCalls).isZero();
+        assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
+    void correctionPrefixRejectsActualThatDoesNotMatchDeclaredPrefixAndExpected() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage current = AssistantMessage.builder().content("cur")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "prev");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), current, response("host-1")), "prev");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀")).toMap());
+
+        Object result = recover(snapshot);
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.appendCalls).isZero();
+        assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
+    void markerOnlyWithoutPrefixRejectsMismatchedPreviousText() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage previous = assistant("prev", "previous");
+        AssistantMessage current = AssistantMessage.builder().content("cur")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "prev");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), previous, current, response("host-1")), "prev");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of("exportCorrectionUsed", true)).toMap());
+
+        Object result = recover(snapshot);
+
+        assertThat(historyComplete(result)).isFalse();
+        assertThat(this.appendCalls).isZero();
+        assertThat(this.removeCalls).isZero();
+    }
+
+    @Test
+    void parkedFullTextIsAcceptedAsCorrectionEvidence() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage current = AssistantMessage.builder().content("后缀")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前缀后缀");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), current, response("host-1")), "前缀后缀");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of("exportCorrectionUsed", true, CorrectionPrefixes.PARKED_FULL_TEXT_KEY, "前缀后缀")).toMap());
+
+        Object result = recover(snapshot);
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .singleElement().satisfies(entry -> assertThat(entry.text()).isEqualTo("前缀后缀"));
+    }
+
+    @Test
     void toolAssistantRecoversWhenSseContainsCorrectionPrefixMissingFromMessageJson() {
         PendingToolCall pending = pending("tool-1");
         when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(pending));
@@ -358,6 +445,86 @@ class TerminalTranscriptRecoveryTest {
                     assertThat(entry.text()).isEqualTo("前缀后缀");
                     assertThat(entry.toolCalls()).hasSize(1);
                 });
+    }
+
+    @Test
+    void claimedPreviousEntryAllowsCorrectionPrefixWithoutClaimingPreviousSegment() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage previous = assistant("前序", "previous");
+        AssistantMessage current = AssistantMessage.builder().content("后缀")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前序");
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:text-previous", List.of(), "前序", ""))
+                .isNotNull();
+        emitText(out, "前缀后缀");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), previous, current, response("host-1")),
+                "前序前缀后缀");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of(CorrectionPrefixes.EXPORT_CORRECTION_PREFIX_KEY, "前缀")).toMap());
+
+        Object result = recover(snapshot);
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.text()).isEqualTo("前缀后缀");
+                    assertThat(entry.segments()).filteredOn(segment -> "text".equals(segment.kind()))
+                            .extracting(TranscriptEntry.SegmentView::text).containsExactly("前缀后缀");
+                });
+        assertThat(this.persisted).filteredOn(entry -> entry.entryId().endsWith("text-previous"))
+                .singleElement().satisfies(entry -> assertThat(entry.segments())
+                        .extracting(TranscriptEntry.SegmentView::text).containsExactly("前序"));
+    }
+
+    @Test
+    void claimedPreviousEntryAcceptsParkedFullTextAndRejectsMismatch() {
+        PendingToolCall host = pending("host-1");
+        when(this.store.pendingsLenient(RUN_ID)).thenReturn(List.of(host));
+        when(this.store.pendings(RUN_ID)).thenReturn(List.of(host));
+        AssistantMessage previous = assistant("前序", "previous");
+        AssistantMessage current = AssistantMessage.builder().content("后缀")
+                .toolCalls(List.of(toolCall("host-1"))).build();
+        SseChatEmitter out = emitter();
+        emitText(out, "前序");
+        assertThat(out.transcriptSegments(RUN_ID + ":assistant:text-previous", List.of(), "前序", ""))
+                .isNotNull();
+        emitText(out, "前缀后缀");
+        out.toolStart(host);
+        out.error(ErrorCodes.AI_TRANSCRIPT_INCOMPLETE, "incomplete");
+        RunSnapshot snapshot = snapshot(List.of(new UserMessage("问"), previous, current, response("host-1")),
+                "前序前缀后缀");
+        snapshot.setContext(AiContext.of("export", "EXPORT", null, null,
+                Map.of("exportCorrectionUsed", true, CorrectionPrefixes.PARKED_FULL_TEXT_KEY, "前缀后缀")).toMap());
+
+        Object result = recover(snapshot);
+
+        assertThat(historyComplete(result)).isTrue();
+        assertThat(this.persisted).filteredOn(entry -> "assistant".equals(entry.kind()) && !entry.toolCalls().isEmpty())
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.text()).isEqualTo("前缀后缀");
+                    assertThat(entry.segments()).filteredOn(segment -> "text".equals(segment.kind()))
+                            .extracting(TranscriptEntry.SegmentView::text).containsExactly("前缀后缀");
+                });
+
+        PendingToolCall mismatchedHost = pending("host-2");
+        SseChatEmitter mismatched = emitter();
+        emitText(mismatched, "前序");
+        assertThat(mismatched.transcriptSegments(RUN_ID + ":assistant:text-previous", List.of(), "前序", ""))
+                .isNotNull();
+        emitText(mismatched, "前缀错误");
+        mismatched.toolStart(mismatchedHost);
+        List<TranscriptEntry.ToolCallView> calls = List.of(new TranscriptEntry.ToolCallView("host-2", "function",
+                AiToolNames.CREATE_TASK, "{}"));
+        SseChatEmitter.CorrectionEvidence evidence = new SseChatEmitter.CorrectionEvidence("", "前缀后缀");
+
+        assertThat(mismatched.transcriptToolContent(calls, "后缀", "", evidence)).isNull();
+        assertThat(mismatched.transcriptSegments(RUN_ID + ":assistant:host-2", calls, "后缀", "", evidence))
+                .isNull();
     }
 
     @Test
