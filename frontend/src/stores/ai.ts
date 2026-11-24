@@ -14650,7 +14650,7 @@ export const useAiStore = defineStore('ai', {
           }
           watcher.receiptApplied = true
           this.attachPublishConflict(jobId, summary, issues)
-          reportUiEventResult('start_publish', summary)
+          reportUiEventResult('start_publish', summary, taskId)
         }
       })
       linkPublishTool(jobId, { toolCallId: part.toolCallId, sessionId })

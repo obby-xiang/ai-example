@@ -42,8 +42,8 @@ async function load(): Promise<void> {
  * 两侧须同改），未知 id 会被降级成 `unknown`（每轮一条降级日志、提示词变「未知页面」）。
  * 故设置类页面（AI 设置 / AI 反馈）统一复位到默认页，避免虚增页面 id。
  *
- * <p>边界：只复位页面级事实；`dataVersion` / `recentActions` 时间线与契约版本由 store 保留
- * （见 `stores/workspace.ts#enterPage`）。
+ * <p>边界：只复位页面级事实；任务身份实际变化时由 store 作废旧任务 `recentActions`，
+ * 身份不变时保留；`dataVersion` 与契约版本始终保留（见 `stores/workspace.ts#enterPage`）。
  */
 function declareWorkspaceContext(): void {
   workspace.enterPage({

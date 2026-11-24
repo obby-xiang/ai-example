@@ -20,7 +20,9 @@ const api = vi.hoisted(() => ({
   frontendToolResult: vi.fn(),
   reattachRun: vi.fn()
 }))
-const watchPublishOutcome = vi.hoisted(() => vi.fn(() => (): void => {}))
+const watchPublishOutcome = vi.hoisted(() => vi.fn(
+  (_taskId: number, _jobId: number, _handlers: { onConflict: (summary: string) => void }) => (): void => {}
+))
 const notifyJobEvent = vi.hoisted(() => vi.fn())
 
 vi.mock('@/api/ai', () => ({ aiApi: api }))
@@ -29,6 +31,7 @@ vi.mock('@/stores/task', () => ({
 }))
 
 import { useAiStore } from '@/stores/ai'
+import { useWorkspaceStore } from '@/stores/workspace'
 import { installIdentityFixture } from './ai-identity-fixture'
 
 const SUMMARY = '发布作业 #42 校验冲突明细：\n1. DEF_A#R1：版本冲突\n（共 1 处）'
@@ -140,6 +143,35 @@ describe('R-155：注册表 + 冲突明细落工具段 reason', () => {
 
     linkPublishTool(43, { toolCallId: 'tc-missing', sessionId: store.sessionId })
     expect(store.attachPublishConflict(43, SUMMARY)).toBe(false) // 段不存在
+  })
+
+  it('start_publish 任务 A 切到 B 后，晚到回调不得写入 B 的 recentActions', () => {
+    let onConflict: ((summary: string) => void) | undefined
+    watchPublishOutcome.mockImplementation((_taskId, _jobId, handlers) => {
+      onConflict = handlers.onConflict
+      return () => {}
+    })
+    const store = useAiStore()
+    const workspace = useWorkspaceStore()
+    workspace.taskId = 3
+    store.messages = [{
+      id: 'a-0', role: 'assistant', content: '', parts: [],
+      reasoning: '', toolRuns: [], pendingCall: null, streaming: false, done: true
+    }]
+    store.handleFrame({
+      type: 'tool_start', toolCallId: 'tc-1', name: 'start_publish', kind: 'BACKEND',
+      args: '{"taskId":3}', runId: 'run-1', seq: 1
+    })
+    store.handleFrame({
+      type: 'tool_result', toolCallId: 'tc-1', name: 'start_publish', kind: 'BACKEND',
+      ok: true, executed: true, result: '发布作业已启动（作业 #42）',
+      target: { taskId: '3', jobId: '42' }, messageId: 'tool-tc-1', runId: 'run-1', seq: 2
+    })
+
+    workspace.setTaskId(4)
+    onConflict?.(SUMMARY)
+
+    expect(workspace.recentActions.map((action) => action.summary)).toEqual(['绑定任务 #4'])
   })
 
   it('resetSession ⇒ 注册表清空（会话内内存态）', async () => {

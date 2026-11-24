@@ -121,8 +121,9 @@ export interface WorkspaceContract {
    * 选中集与查询条件都不得跨页残留（会让下一轮上下文报错页、让只读守卫误拒其它页的写事件）。
    * 不带页面身份的调用是**增量更新**（只写显式给出的字段）。
    *
-   * <p>**不扩大清空**：`dataVersion` / `recentActions`（时间线）与 `contractVersion` 一律保留；
-   * 本页显式声明的值（例：数据浏览页正在浏览的 `selectedDefs`）原样保留。
+   * <p>**不扩大清空**：任务身份实际变化时作废旧任务 `recentActions`，身份不变时保留；
+   * `dataVersion` 与 `contractVersion` 一律保留。本页显式声明的值（例：数据浏览页正在浏览的
+   * `selectedDefs`）原样保留。
    */
   enterPage(init: Partial<WorkspaceSnapshot>): void
   /**

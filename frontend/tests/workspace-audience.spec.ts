@@ -39,7 +39,7 @@ describe('双受众红线（C5）', () => {
     const enSummaries = enWorkspace.recentActions.map((record) => record.summary)
 
     expect(enSummaries).toEqual(zhSummaries)
-    expect(enSummaries).toEqual(['进入任务中心', '绑定任务 #12', '已选择配置项：CURRENCY、TAX_RATE'])
+    expect(enSummaries).toEqual(['绑定任务 #12', '已选择配置项：CURRENCY、TAX_RATE'])
   })
 
   it('切 en 后 buildContext 的 extra.recentActions 仍带中文摘要，来源用数据码 UI', () => {

@@ -31,7 +31,7 @@ vi.mock('@/api/jobs', () => ({ jobsApi: api }))
 vi.mock('@/api/definitions', () => ({ definitionsApi: { listDefinitions: vi.fn(async () => [{ code: 'A' }, { code: 'B' }, { code: 'C' }]) } }))
 
 import { useTaskStore } from '@/stores/task'
-import { dispatchUiEvent, useWorkspaceStore } from '@/stores/workspace'
+import { dispatchUiEvent, onWorkspaceEvent, useWorkspaceStore } from '@/stores/workspace'
 import { executeFrontendTool } from '@/utils/frontend-tools'
 import type { TaskSummary } from '@/types/task'
 
@@ -137,6 +137,10 @@ describe('stores/workspace.ts · 旧任务结果不写新任务', () => {
     const pending = deferred<unknown>()
     api.setImportMode.mockReturnValue(pending.promise)
 
+    const receipts: Array<Record<string, unknown>> = []
+    const offReceipt = onWorkspaceEvent('ui_event_result', (payload) => {
+      receipts.push(payload as Record<string, unknown>)
+    })
     const done = dispatchUiEvent({ type: 'set_import_mode', mode: 'MERGE' })
     await flush()
     expect(api.setImportMode).toHaveBeenCalledWith(1, 'MERGE')
@@ -144,15 +148,150 @@ describe('stores/workspace.ts · 旧任务结果不写新任务', () => {
     // PUT 在途：用户/AI 换到了任务 2（新任务自己的模式是 REPLACE）
     workspace.setTaskId(2)
     workspace.setImportMode('REPLACE')
+    const actionsBeforeLateResult = workspace.recentActions.map((action) => action.summary)
+
+    pending.resolve({})
+    const result = await done
+    offReceipt()
+
+    expect(result.handled).toBe(false)
+    expect(result.message).toContain('任务已切换')
+    // 关键断言：任务 1 的模式变更没有落到任务 2 的工作区状态或动作时间线上
+    expect(workspace.taskId).toBe(2)
+    expect(workspace.importMode).toBe('REPLACE')
+    expect(workspace.recentActions.map((action) => action.summary)).toEqual(actionsBeforeLateResult)
+    // 跳过工作区动作不等于抹掉真实业务结局：原失败结果与广播保持
+    expect(receipts).toHaveLength(1)
+    expect(receipts[0]).toMatchObject({ event: 'set_import_mode', handled: false })
+  })
+
+  it('set_import_mode 同任务晚到：外层动作仍正常记录', async () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({
+      pageId: 'export',
+      page: 'export',
+      taskType: 'EXPORT',
+      step: 'SELECT_DEFS',
+      taskId: 1,
+      taskStatus: 'ACTIVE'
+    })
+    const pending = deferred<unknown>()
+    api.setImportMode.mockReturnValue(pending.promise)
+
+    const done = dispatchUiEvent({ type: 'set_import_mode', mode: 'MERGE' })
+    await flush()
+    pending.resolve({})
+    const result = await done
+
+    expect(result.handled).toBe(true)
+    expect(workspace.recentActions.at(-1)).toMatchObject({
+      summary: '导入模式已设为 增量合并',
+      source: 'AI'
+    })
+  })
+
+  it('run_job createJob 在途换任务：真实结果保留但不写新任务动作', async () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({
+      pageId: 'export',
+      page: 'export',
+      taskType: 'EXPORT',
+      step: 'SELECT_DEFS',
+      taskId: 1,
+      taskStatus: 'ACTIVE'
+    })
+    const pending = deferred<unknown>()
+    api.createJob.mockReturnValue(pending.promise)
+
+    const done = dispatchUiEvent({ type: 'run_job', jobType: 'EXPORT', taskId: 1 })
+    await flush()
+    expect(api.createJob).toHaveBeenCalledWith(1, 'EXPORT')
+    workspace.setTaskId(2)
+    const actionsBeforeLateResult = workspace.recentActions.map((action) => action.summary)
+
+    pending.resolve({ id: 99 })
+    const result = await done
+
+    expect(result.handled).toBe(true)
+    expect(result.message).toBe('作业已启动：EXPORT（作业 #99）')
+    expect(workspace.recentActions.map((action) => action.summary)).toEqual(actionsBeforeLateResult)
+  })
+
+  it('run_job createJob 同任务晚到：外层动作仍正常记录', async () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({
+      pageId: 'export',
+      page: 'export',
+      taskType: 'EXPORT',
+      step: 'SELECT_DEFS',
+      taskId: 1,
+      taskStatus: 'ACTIVE'
+    })
+    const pending = deferred<unknown>()
+    api.createJob.mockReturnValue(pending.promise)
+
+    const done = dispatchUiEvent({ type: 'run_job', jobType: 'EXPORT', taskId: 1 })
+    await flush()
+    pending.resolve({ id: 99 })
+    const result = await done
+
+    expect(result.handled).toBe(true)
+    expect(workspace.recentActions.at(-1)).toMatchObject({
+      summary: '作业已启动：EXPORT（作业 #99）',
+      source: 'AI'
+    })
+  })
+
+  it('cancel_job 在途换任务：真实结果保留但不写新任务动作', async () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({
+      pageId: 'export',
+      page: 'export',
+      taskType: 'EXPORT',
+      step: 'SELECT_DEFS',
+      taskId: 1,
+      taskStatus: 'ACTIVE'
+    })
+    const pending = deferred<unknown>()
+    api.cancelJob.mockReturnValue(pending.promise)
+
+    const done = dispatchUiEvent({ type: 'cancel_job', jobId: 11 })
+    await flush()
+    expect(api.cancelJob).toHaveBeenCalledWith(11)
+    workspace.setTaskId(2)
+    const actionsBeforeLateResult = workspace.recentActions.map((action) => action.summary)
 
     pending.resolve({})
     const result = await done
 
-    expect(result.handled).toBe(false)
-    expect(result.message).toContain('任务已切换')
-    // 关键断言：任务 1 的模式变更没有落到任务 2 的工作区状态上
-    expect(workspace.taskId).toBe(2)
-    expect(workspace.importMode).toBe('REPLACE')
+    expect(result.handled).toBe(true)
+    expect(result.message).toBe('已请求取消作业 #11')
+    expect(workspace.recentActions.map((action) => action.summary)).toEqual(actionsBeforeLateResult)
+  })
+
+  it('cancel_job 同任务晚到：外层动作仍正常记录', async () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({
+      pageId: 'export',
+      page: 'export',
+      taskType: 'EXPORT',
+      step: 'SELECT_DEFS',
+      taskId: 1,
+      taskStatus: 'ACTIVE'
+    })
+    const pending = deferred<unknown>()
+    api.cancelJob.mockReturnValue(pending.promise)
+
+    const done = dispatchUiEvent({ type: 'cancel_job', jobId: 11 })
+    await flush()
+    pending.resolve({})
+    const result = await done
+
+    expect(result.handled).toBe(true)
+    expect(workspace.recentActions.at(-1)).toMatchObject({
+      summary: '已请求取消作业 #11',
+      source: 'AI'
+    })
   })
 })
 

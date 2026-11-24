@@ -386,8 +386,8 @@ async function load(): Promise<void> {
  * （AI 设置 / AI 反馈）统一复位到默认页 —— **不虚增页面 id**；要真加 `settings`，须后端白名单、
  * `PAGE_LABELS` 与 ToolScope 同批改，并同步 `types/workspace.ts#WorkspaceSnapshot.page` 的登记。
  *
- * <p>边界：只复位页面级事实；`dataVersion` / `recentActions` 时间线与契约版本由 store 保留
- * （见 `stores/workspace.ts#enterPage`）。
+ * <p>边界：只复位页面级事实；任务身份实际变化时由 store 作废旧任务 `recentActions`，
+ * 身份不变时保留；`dataVersion` 与契约版本始终保留（见 `stores/workspace.ts#enterPage`）。
  */
 function declareWorkspaceContext(): void {
   workspace.enterPage({

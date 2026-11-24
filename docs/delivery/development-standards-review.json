@@ -7519,6 +7519,46 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "不涉及文本解码或流解析，未改变草案内容或错误文案编码。"},
         "verification-review": {"status": "checked", "reason": "agent-1296最终复核Critical/Important/Minor均为零；施工报告恢复/乱序/代次及既有串行用例独立通过，typecheck和3282模块build成功；主控未重跑测试，真实浏览器/Redis/Cluster/多实例和全量套件NOT_RUN，两个旧断言已逐条证明同基线同红。"}
       }
+    },
+    {
+      "fingerprint": "sha256:03a4289d197e47efdb60e97df634dda4c03a82a6b65b00a99090761f84fa070b",
+      "status": "reviewed",
+      "reason": "逐hunk复核同步任务切换、dispatch异步返回和两个watcher的动作归属，覆盖全部UiEvent分类与延迟反例；独立静态复审无分级问题。",
+      "reviewedAt": "2026-11-24T20:08:45+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1296、施工agent-1298",
+      "specChanges": [
+        {
+          "change": "任务身份实际变化时清空旧recentActions，enterPage与setTaskId使用同一身份边界；同ID和null→null不误清。",
+          "reason": "旧任务动作会在切换后继续作为当前工作区事实注入模型。",
+          "impact": "同步切换不再把A动作注入B，buildContext一次注入后clear语义保持不变。"
+        },
+        {
+          "change": "dispatchUiEvent按事件捕获任务作用域，异步返回仅在身份一致时写recentActions/recordAction；全部15个UiEvent完成分类。",
+          "reason": "等待期间切换任务会把A的同步返回结果写入B，单纯切换时清空不足。",
+          "impact": "任务写事件统一隔离，导航/刷新/下载保持undefined语义，原业务结果和ui_event_result广播不隐藏。"
+        },
+        {
+          "change": "start_publish与run_job watcher在reportUiEventResult写入前复核发起taskId。",
+          "reason": "作业终态 watcher 可在切换后晚到并重新追加A动作。",
+          "impact": "同任务晚到结果正常注入，A切B后的晚到结果不进入B，未新增并行动作存储。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "start_publish watcher把发起时捕获taskId传给共同出口，保持冲突链接和回执语义；已IDEA Reformat。"},
+        {"path": "frontend/src/stores/workspace.ts", "status": "checked", "reason": "同步清空、dispatch全事件身份守卫和watcher共同出口统一隔离，保留导航、广播和业务结果；已IDEA Reformat。"},
+        {"path": "frontend/src/types/workspace.ts", "status": "checked", "reason": "同步更新任务身份变化时recentActions清理的公开契约注释；已IDEA Reformat。"},
+        {"path": "frontend/src/views/AiFeedbackView.vue", "status": "checked", "reason": "同步更新enterPage在任务变化时动作清理的注释，页面声明行为不变；已IDEA Reformat。"},
+        {"path": "frontend/src/views/AiSettingsView.vue", "status": "checked", "reason": "同步更新enterPage在任务变化时动作清理的注释，页面声明行为不变；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有taskId、UiEvent、recentActions与两个watcher，无新增依赖、并行动作存储或任务归属副本。"},
+        "java-api-style": {"status": "checked", "reason": "TypeScript分支显式大括号，undefined与null分别表示非任务事件和空任务身份，未新增可变共享Map；已IDEA Reformat。"},
+        "logging-exception-safety": {"status": "checked", "reason": "跨任务只跳过工作区动作，真实业务结果和ui_event_result广播保留，不吞错或伪造执行结局。"},
+        "toc-interaction": {"status": "checked", "reason": "避免模型收到其他任务的动作摘要，用户无新增提示、操作或任务切换负担。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "入口捕获与异步返回双重身份核对覆盖setImportMode/createJob/cancelJob及watcher，同任务和空身份语义保留，无新增数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "按结构化taskId和事件类型隔离，不按动作文案或摘要内容判断，不改变文本编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1296最终复核Critical/Important/Minor均为零；施工报告同步/延迟/watcher/全部事件用例独立通过，typecheck和3282模块build成功；主控未重跑测试，真实浏览器/Redis/Cluster/多实例和全量套件NOT_RUN，5个恢复超时均有同基线同红证据。"}
+      }
     }
   ]
 }

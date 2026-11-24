@@ -172,3 +172,43 @@ describe('R-09 run_job PUBLISH：模式不可知 ⇒ fail-closed', () => {
     expect(result.message).toContain('未启动')
   })
 })
+
+describe('run_job 晚到发布冲突：按发起 taskId 回灌工作区动作', () => {
+  it('任务 A 切到 B 后，A 的晚到回调不得写入 B 的 recentActions', async () => {
+    let onConflict: ((summary: string) => void) | undefined
+    taskStore.watchPublishOutcome.mockImplementation((
+      _taskId: number,
+      _jobId: number,
+      handlers: { onConflict: (summary: string) => void }
+    ) => {
+      onConflict = handlers.onConflict
+      return vi.fn()
+    })
+    const workspace = useWorkspaceStore()
+    await dispatchUiEvent({ type: 'run_job', jobType: 'PUBLISH', taskId: 7 })
+
+    workspace.setTaskId(8, 'IMPORT')
+    onConflict?.('任务 A 晚到冲突')
+
+    expect(workspace.recentActions.map((action) => action.summary)).toEqual(['绑定任务 #8'])
+  })
+
+  it('同任务晚到回调仍注入 recentActions', async () => {
+    let onConflict: ((summary: string) => void) | undefined
+    taskStore.watchPublishOutcome.mockImplementation((
+      _taskId: number,
+      _jobId: number,
+      handlers: { onConflict: (summary: string) => void }
+    ) => {
+      onConflict = handlers.onConflict
+      return vi.fn()
+    })
+    const workspace = useWorkspaceStore()
+    await dispatchUiEvent({ type: 'run_job', jobType: 'PUBLISH', taskId: 7 })
+    workspace.clearRecentActions()
+
+    onConflict?.('同任务晚到冲突')
+
+    expect(workspace.recentActions.map((action) => action.summary)).toEqual(['同任务晚到冲突'])
+  })
+})

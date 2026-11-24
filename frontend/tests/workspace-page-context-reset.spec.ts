@@ -8,8 +8,8 @@
  *    把**其它页**的写事件当「任务已结束」误拒。
  *
  * 复位边界（「不扩大清空」）：只复位页面级事实（taskType/step/taskId/taskStatus/selectedDefs/
- * queryConditions/importMode）；时间线（`recentActions` / `dataVersion`）与契约版本原样保留；
- * 本页显式声明的值（数据页正在浏览的 selectedDefs）必须保留。
+ * queryConditions/importMode）；任务身份实际变化时作废旧任务待同步动作，身份不变时保留；
+ * `dataVersion` 与契约版本始终保留。本页显式声明的值（数据页正在浏览的 selectedDefs）必须保留。
  *
  * 批次4 口径不回退：`taskStatus` 仍随 `buildContext()` 顶层上报（复位后为 null）。
  */
@@ -22,7 +22,7 @@ describe('批次5A 工作区：进入页面即复位未声明的页面级上下�
     setActivePinia(createPinia())
   })
 
-  it('进入新页只复位页面级事实：未声明字段回中性值，时间线与本页声明保留', () => {
+  it('进入新页复位页面级事实：换任务作废旧动作，版本号与本页声明保留', () => {
     const workspace = useWorkspaceStore()
     workspace.enterPage({
       pageId: 'export',
@@ -36,7 +36,6 @@ describe('批次5A 工作区：进入页面即复位未声明的页面级上下�
       importMode: 'MERGE'
     })
     const versionBefore = workspace.dataVersion
-    const actionsBefore = workspace.recentActions.length
 
     // ① 任务中心只声明「当前没有任务」（与页面既有调用同形）：未声明的一律复位
     workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
@@ -45,9 +44,8 @@ describe('批次5A 工作区：进入页面即复位未声明的页面级上下�
     expect(workspace.queryConditions).toEqual({})
     expect(workspace.importMode).toBeNull()
 
-    // ② 复位不是清空：时间线照常追加一条，版本号单调 +1
-    expect(workspace.recentActions).toHaveLength(actionsBefore + 1)
-    expect(workspace.recentActions.at(-1)?.summary).toBe('进入任务中心')
+    // ② taskId 7 → null 是实际身份变化：旧任务动作作废，只留本次进页；版本号单调 +1
+    expect(workspace.recentActions.map((action) => action.summary)).toEqual(['进入任务中心'])
     expect(workspace.dataVersion).toBe(versionBefore + 1)
 
     // ③ 数据浏览页：任务态复位，但本页声明的「正在浏览的定义」保留（不扩大清空）
@@ -73,5 +71,73 @@ describe('批次5A 工作区：进入页面即复位未声明的页面级上下�
     expect(Object.keys(context).sort()).toEqual(['extra', 'page', 'step', 'taskId', 'taskStatus', 'taskType'])
     expect(context.taskStatus).toBeNull()
     expect((context.extra as Record<string, unknown>).taskStatus).toBeUndefined()
+  })
+})
+
+describe('工作区：待同步动作按 taskId 隔离', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('任务 A 的待同步动作不会进入任务 B 的 buildContext', () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 1 })
+    workspace.touch('任务 A 待同步动作')
+
+    workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 2 })
+
+    const extra = workspace.buildContext().extra as { recentActions: string[] }
+    expect(extra.recentActions).toEqual(['进入导出向导（来源：UI）'])
+  })
+
+  it('setTaskId 实际改绑时立即作废旧任务待同步动作', () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 1 })
+    workspace.touch('任务 A 待同步动作')
+
+    workspace.setTaskId(2, 'EXPORT')
+
+    const extra = workspace.buildContext().extra as { recentActions: string[] }
+    expect(extra.recentActions).toEqual(['绑定任务 #2（来源：UI）'])
+  })
+
+  it('同任务重复 enterPage 不误清待同步动作', () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 1 })
+    workspace.touch('同任务待同步动作')
+
+    workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 1 })
+
+    const extra = workspace.buildContext().extra as { recentActions: string[] }
+    expect(extra.recentActions).toEqual([
+      '进入导出向导（来源：UI）',
+      '同任务待同步动作（来源：UI）',
+      '进入导出向导（来源：UI）'
+    ])
+  })
+
+  it('空任务跨页仍属同一任务身份，不误清待同步动作', () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({ pageId: 'tasks', page: 'tasks', taskType: null, step: null, taskId: null })
+    workspace.touch('空任务待同步动作')
+    const actionCount = workspace.recentActions.length
+
+    workspace.enterPage({ pageId: 'data', page: 'data', taskType: null, step: null, taskId: null })
+
+    expect(workspace.recentActions).toHaveLength(actionCount + 1)
+    expect(workspace.recentActions.some((action) => action.summary === '空任务待同步动作')).toBe(true)
+  })
+
+  it('同任务上下文构造后 clear，下一轮不重复注入', () => {
+    const workspace = useWorkspaceStore()
+    workspace.enterPage({ pageId: 'export', page: 'export', taskType: 'EXPORT', step: 'EXPORT', taskId: 1 })
+    workspace.touch('只注入一轮的动作')
+
+    const firstExtra = workspace.buildContext().extra as { recentActions: string[] }
+    expect(firstExtra.recentActions).toContain('只注入一轮的动作（来源：UI）')
+    workspace.clearRecentActions()
+
+    const secondExtra = workspace.buildContext().extra as { recentActions: string[] }
+    expect(secondExtra.recentActions).toEqual([])
   })
 })

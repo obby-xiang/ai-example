@@ -191,11 +191,12 @@ export const useWorkspaceStore = defineStore('workspace', {
      * </ul>
      * 不带页面身份的调用仍是**增量更新**（只写显式给出的字段），供同一页内补声明使用。
      *
-     * <p><b>复位边界（不扩大清空）</b>：只复位页面级事实。`dataVersion` / `recentActions`
-     * （面板与模型据此判断「刚才发生了什么」）与 `contractVersion` 一律不动；本页显式声明的值
+     * <p><b>复位边界（不扩大清空）</b>：只复位页面级事实。任务身份实际变化时作废旧任务的
+     * `recentActions`，身份不变时保留；`dataVersion` 与 `contractVersion` 一律不动。本页显式声明的值
      * （例：数据浏览页正在浏览的 `selectedDefs`）原样保留。
      */
     enterPage(init: Partial<WorkspaceSnapshot>): void {
+      const previousTaskId = this.taskId
       if (init.pageId !== undefined) {
         this.pageId = init.pageId
       }
@@ -208,6 +209,9 @@ export const useWorkspaceStore = defineStore('workspace', {
         resetWorkspacePage(this, init)
       } else {
         patchWorkspacePage(this, init)
+      }
+      if (previousTaskId !== this.taskId) {
+        this.recentActions = []
       }
       this.touch(`进入${PAGE_LABELS[this.pageId] ?? this.page}`, 'UI')
     },
@@ -274,6 +278,9 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
 
     setTaskId(taskId: number | null, taskType?: TaskType | null, status?: TaskStatus | null): void {
+      if (this.taskId !== taskId) {
+        this.recentActions = []
+      }
       this.taskId = taskId
       this.taskType = taskType === undefined ? this.taskType : taskType
       this.taskStatus = status === undefined ? this.taskStatus : status
@@ -662,10 +669,13 @@ function fail(message: string): UiEventResult {
  *
  * 为什么不在 run_job 的同步返回里等明细：发布作业分钟级才出终态，而 dispatch 链上有界等待
  * 是既有红线（R-11 / download 分支同族），故冲突检出时（终态后）经本出口异步回灌。
+ * 晚到结果只在发起任务仍是当前任务时写入工作区动作，避免切换后污染新任务上下文。
  */
-export function reportUiEventResult(event: string, message: string): void {
+export function reportUiEventResult(event: string, message: string, taskId: number): void {
   const workspace = useWorkspaceStore()
-  workspace.touch(message, 'AI')
+  if (workspace.taskId === taskId) {
+    workspace.touch(message, 'AI')
+  }
   emitWorkspaceEvent('ui_event_result', { event, handled: true, message })
 }
 
@@ -708,6 +718,22 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
   return latest?.status === 'COMPLETED'
 }
 
+/** `undefined` 表示非任务作用域事件；`null` 是有效的空任务身份，二者不能合并。 */
+function taskIdentityOfUiEvent(event: UiEvent, currentTaskId: number | null): number | null | undefined {
+  switch (event.type) {
+    case 'run_job':
+      return event.taskId
+    case 'goto_step':
+    case 'select_defs':
+    case 'set_conditions':
+    case 'set_import_mode':
+    case 'cancel_job':
+      return currentTaskId
+    default:
+      return undefined
+  }
+}
+
 /**
  * 分发 AI 侧发来的 ui_event。
  *
@@ -721,22 +747,27 @@ async function isCurrentTaskReadOnly(workspace: ReturnType<typeof useWorkspaceSt
  * 与刷新类不受影响。
  *
  * 契约联动：
- * - **成功/失败都记入工作区时间线**（`source=AI`，随下一轮请求回到模型）；
- * - 失败回执另经 `ui_event_result` 送面板回执位（`handled=false` + 原因文案）。
+ * - **成功/失败都记入工作区时间线**（`source=AI`，随下一轮请求回到模型）；任务作用域事件
+ *   在等待后身份已切换时除外，避免旧任务结果写入新任务；
+ * - 失败回执另经 `ui_event_result` 送面板回执位（`handled=false` + 原因文案）。身份切换只跳过
+ *   工作区动作，业务结果与广播照常保留。
  *
  * @param lifetime 前端工具执行的存活标记（见 {@link UiEventLifetime}）。到点作废 ⇒ **不记动作、
  *   不回执**（时间线不得替一次已经回灌"超时"的动作背书）；缺省不传 = 行为不变。
  */
 export async function dispatchUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<UiEventResult> {
+  const workspace = useWorkspaceStore()
+  const taskIdentity = taskIdentityOfUiEvent(event, workspace.taskId)
   const result = await runUiEvent(event, lifetime)
   if (lifetime?.abandoned === true) {
     return result
   }
-  const workspace = useWorkspaceStore()
-  if (result.handled) {
-    workspace.touch(result.message, 'AI')
-  } else {
-    workspace.recordAction(result.message, 'AI')
+  if (taskIdentity === undefined || workspace.taskId === taskIdentity) {
+    if (result.handled) {
+      workspace.touch(result.message, 'AI')
+    } else {
+      workspace.recordAction(result.message, 'AI')
+    }
   }
   emitWorkspaceEvent('ui_event_result', { event: event.type, ...result })
   return result
@@ -911,7 +942,7 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
                   useAiStore().attachPublishConflict(job.id ?? 0, summary, issues)
                 })
               }
-              reportUiEventResult('run_job', summary)
+              reportUiEventResult('run_job', summary, event.taskId)
             }
           })
           return ok(`发布作业已启动（作业 #${job.id}），冲突会在完成后以作业失败 + 问题清单呈现`)
