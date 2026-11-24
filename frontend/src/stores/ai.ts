@@ -117,6 +117,7 @@ import {
 import { GENERATIVE_FORM_TOOL, MIRROR_VERSION, type ActiveGenerativeForm, type AiBusyRunRef, type AiHealth, type AiHistory, type AiHistoryCompactionEvent, type AiHistoryMessage, type AiLoadErrorScope, type AiLoadErrorView, type AiPreparingRun, type AiRecoveryGap, type AiRecoveryGapReason, type AiRunCurrent, type AiRunCurrentEntry, type AiSessionMirror, type AuthoritativeTerminalFacts, type ChatMessage, type ContextUsage, type GateStaleCode, type GateSubmission, type MessagePart, type MessageTruncationFields, type PendingToolCall, type SessionPurgeResponse, type SheetPreviewLevel, type SheetWritePlan, type SheetWriteResult, type ToolPart, type ToolPartPatch, type ToolRunStatus } from '@/types/ai'
 import type { FormSpec, FormValueIssue } from '@/types/form-schema'
 import { FORM_DRAFT_PREFIX, clearFormDraft, flushFormDraft, loadFormDraft, pruneFormDrafts, scheduleFormDraft } from '@/utils/form-draft'
+import { workspaceOwnerEvidence } from '@/utils/workspace-owner'
 import { parseFormSchema, checkFormValues } from '@/types/form-schema'
 import type { ValidationIssue } from '@/types/job'
 import { clearPublishToolLinks, findPublishTool, linkPublishTool, unlinkPublishTool } from '@/utils/publish-links'
@@ -2673,15 +2674,17 @@ interface RecoveryEntries {
   trusted: boolean
   byToolCallId: Map<string, AiRunCurrentEntry>
   advancedDecisions: Set<string>
+  context?: AiRunCurrent['context']
 }
 
 const recoveryEntriesByRun = new Map<string, RecoveryEntries>()
 
-function rememberRecoveryEntries(runId: string, entries: AiRunCurrentEntry[] | undefined): void {
+function rememberRecoveryEntries(runId: string, current: AiRunCurrent): void {
   recoveryEntriesByRun.set(runId, {
-    trusted: Array.isArray(entries),
-    byToolCallId: new Map((entries ?? []).map((entry) => [entry.toolCallId, entry])),
-    advancedDecisions: recoveryEntriesByRun.get(runId)?.advancedDecisions ?? new Set<string>()
+    trusted: Array.isArray(current.pendingEntries),
+    byToolCallId: new Map((current.pendingEntries ?? []).map((entry) => [entry.toolCallId, entry])),
+    advancedDecisions: recoveryEntriesByRun.get(runId)?.advancedDecisions ?? new Set<string>(),
+    context: current.context
   })
 }
 
@@ -7065,7 +7068,7 @@ export const useAiStore = defineStore('ai', {
       }
       // 只有真实可重建的待人卡才锁输入；自动工具/BACKEND/req=false 不制造假挂起。
       this.suspended = first !== null
-      rememberRecoveryEntries(current.runId, current.pendingEntries)
+      rememberRecoveryEntries(current.runId, current)
       const appliedSeq = appliedSeqOfRun(this.runSeq, this.messages, current.runId)
       // 宿主只认本轮；绝不把新一轮帧写进上一轮已经完成的回答。
       const sameRunHost = [...this.messages].reverse().find(
@@ -7338,7 +7341,7 @@ export const useAiStore = defineStore('ai', {
       host.done = false
       delete host.interrupted
       delete host.interruptedReason
-      rememberRecoveryEntries(runId, current.pendingEntries)
+      rememberRecoveryEntries(runId, current)
       const appliedSeq = appliedSeqOfRun(this.runSeq, this.messages, runId)
       const lastSeq = appliedSeq > 0 ? appliedSeq : current.archiveMaxSeq
       if (appliedSeq === 0 && current.archiveMaxSeq > 0 && hasProgressMessage(host)) {
@@ -10199,11 +10202,13 @@ export const useAiStore = defineStore('ai', {
       const isStillLive = (): boolean =>
         isStillSameRound(roundAtDecision, this.sessionId, runId)
         && isSameIdentity(identityAtDecision, this.sessionIdentity)
+      const recovery = recoveryEntriesByRun.get(runId)
+      const ownerEvidence = workspaceOwnerEvidence(recovery?.context, recovery?.byToolCallId.get(toolCallId), targetPart)
       try {
         await aiApi.confirm(
           { runId, toolCallId, approved, reason: reason ?? null },
           // R7：身份头显式随请求发出（拦截器在微任务里跑，点击后立刻切身份时它读到的是新身份）。
-          { headers: identityHeaders(identityAtDecision) }
+          { headers: identityHeaders(identityAtDecision), workspaceOwnerEvidence: ownerEvidence }
         )
         if (!isStillLive()) {
           return
@@ -10340,7 +10345,10 @@ export const useAiStore = defineStore('ai', {
         return { ok: false }
       }
       // 自动工具-only 恢复不置 suspended，但快照与 parked 连接同样证明本轮在等这次回灌。
-      const recoveryEntry = recoveryEntriesByRun.get(targetRunId)?.byToolCallId.get(toolCallId)
+      const recovery = recoveryEntriesByRun.get(targetRunId)
+      const recoveryEntry = recovery?.byToolCallId.get(toolCallId)
+      const hostPart = this.messages.map((message) => findToolPart(message, toolCallId)).find((part) => part !== null)
+      const ownerEvidence = workspaceOwnerEvidence(recovery?.context, recoveryEntry, hostPart)
       const parkedAtDecision = this.suspended
         || (this.activeStreamRunId === targetRunId && this.activeStreamParked)
         || (recoveryEntry !== undefined && isAwaitingClientEntry(recoveryEntry))
@@ -10376,7 +10384,7 @@ export const useAiStore = defineStore('ai', {
                 ...(code !== undefined ? { code } : {})
               },
           // R7：身份头显式随请求发出（拦截器在微任务里跑，提交后立刻切身份时它读到的是新身份）。
-          { headers: identityHeaders(identityAtSubmit) }
+          { headers: identityHeaders(identityAtSubmit), workspaceOwnerEvidence: ownerEvidence }
         )
         if (!isStillLive()) {
           // 请求本身已被后端受理；只是本地轮次已不在场（停止 / 换轮）⇒ 不做续跑/补卡，
@@ -14987,7 +14995,7 @@ export const useAiStore = defineStore('ai', {
               return false
             }
             if (current.runId === runId) {
-              rememberRecoveryEntries(runId, current.pendingEntries)
+              rememberRecoveryEntries(runId, current)
               recovery = recoveryEntriesByRun.get(runId)
               entry = recovery?.byToolCallId.get(frame.toolCallId)
             } else if (entry !== undefined) {

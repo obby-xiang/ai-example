@@ -90,6 +90,8 @@ class AiControllerRunsCurrentTest {
 	void suspendedWithPendingFrontendEntryIsAwaitingExternal() throws Exception {
 		seedIndex("s-1", "r-1", RunSnapshot.SUSPENDED, List.of(pending("c-1", PendingToolCall.PENDING,
 				PendingToolCall.KIND_FRONTEND)));
+		this.runStore.get("r-1").setContext(com.example.configmgr.ai.tool.AiContext.of(
+				"export", "EXPORT", "QUERY_COND", 42L, "ACTIVE", Map.of()).toMap());
 		when(this.frameStore.lastSeqIfKnown("r-1")).thenReturn(java.util.OptionalLong.of(42L));
 
 		mockMvc.perform(get("/api/ai/runs/current").param("sessionId", "s-1"))
@@ -97,6 +99,8 @@ class AiControllerRunsCurrentTest {
 			.andExpect(jsonPath("$.data.found").value(true))
 			.andExpect(jsonPath("$.data.runId").value("r-1"))
 			.andExpect(jsonPath("$.data.snapshotStatus").value(RunSnapshot.SUSPENDED))
+			.andExpect(jsonPath("$.data.context.taskId").value("42"))
+			.andExpect(jsonPath("$.data.context.step").value("QUERY_COND"))
 			.andExpect(jsonPath("$.data.pendingEntries[0].toolCallId").value("c-1"))
 			.andExpect(jsonPath("$.data.pendingEntries[0].entryStatus").value(PendingToolCall.PENDING))
 			.andExpect(jsonPath("$.data.pendingEntries[0].kind").value(PendingToolCall.KIND_FRONTEND))

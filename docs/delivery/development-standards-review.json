@@ -7596,6 +7596,50 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按完整段和结构化prefix/parked证据对账，不按文本后缀、工具名或字节位置拟合，reasoning和calls严格匹配。"},
         "verification-review": {"status": "checked", "reason": "agent-1291最终复核Critical/Important/Minor均为零；施工报告17个相关独立单点逐个通过、362生产源clean compile成功；主控未重跑测试，真实模型/Redis/Cluster/多实例和全量套件NOT_RUN，Checkstyle仅保留三个既有问题。"}
       }
+    },
+    {
+      "fingerprint": "sha256:c831952ecd9742219ed8cc94e25413f5030cb8144532585c21cb673aa378920f",
+      "status": "reviewed",
+      "reason": "逐hunk复核挂起任务归属证据、前后端跨任务拒绝、创建前null、证据冲突与读取异常边界；独立静态复审无Critical/Important。",
+      "reviewedAt": "2026-11-24T20:57:25+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1290、施工agent-1292",
+      "specChanges": [
+        {
+          "change": "confirm/frontend-tool-result在合并工作区前校验原任务，原任务非空且与请求不同、非create无证据或证据读取异常均返回409 TASK_CONTEXT_MISMATCH。",
+          "reason": "A的挂起卡在切到B后会将B的任务事实写入A快照并继续决策，造成跨任务上下文污染。",
+          "impact": "拒绝时不写快照、不提交决策；同任务与旧客户端无context保持，合并/保存失败仍按原WARN回退语义处理。"
+        },
+        {
+          "change": "entry仅在快照taskId为空时补证；快照与entry均非空但不同即冲突，只有create_task可证明创建前null。",
+          "reason": "快照缺失/null会屏蔽pending已有任务证据，entry覆盖非空快照也会让冲突请求错误通过。",
+          "impact": "快照缺失但entry有A时拒绝B/null，快照与entry同值允许，非create无法证明为空失败关闭。"
+        },
+        {
+          "change": "runs/current additive返回run快照context；前端仅以run/pending/preflight/arguments推导归属，证据明确且同任务才附带当前workspace。",
+          "reason": "前端需要核对挂起归属，不能无条件把当前工作区附到旧卡请求。",
+          "impact": "跨任务或无法证明归属时不附带，后端仍做最终权威拒绝，不新增第二套任务状态或文案匹配。"
+        }
+      ],
+      "files": [
+        {"path": "backend/src/main/java/com/example/configmgr/ai/web/AiController.java", "status": "checked", "reason": "实现证据优先级/冲突校验、证据异常拒绝、创建null边界及runs/current context投影，保存失败语义独立；已IDEA Reformat。"},
+        {"path": "backend/src/main/java/com/example/configmgr/common/ErrorCodes.java", "status": "checked", "reason": "新增TASK_CONTEXT_MISMATCH稳定409业务码，保持既有错误码不变；已IDEA Reformat。"},
+        {"path": "backend/src/main/resources/messages_en.properties", "status": "checked", "reason": "新增任务切换通用英文提示，不含内部异常或技术路径。"},
+        {"path": "backend/src/main/resources/messages_zh.properties", "status": "checked", "reason": "新增返回原任务再处理的通用中文提示，不包含内部异常。"},
+        {"path": "frontend/src/api/ai.ts", "status": "checked", "reason": "confirm/frontendToolResult按挂起归属证据决定是否附带当前workspace，证据不足不附带；已IDEA Reformat。"},
+        {"path": "frontend/src/stores/ai.ts", "status": "checked", "reason": "恢复条目保留context并在确认/前端结果时生成归属证据，不改变原HITL和恢复语义；已IDEA Reformat。"},
+        {"path": "frontend/src/types/ai.ts", "status": "checked", "reason": "补充runs/current context类型以承接后端additive投影；已IDEA Reformat。"},
+        {"path": "frontend/src/types/api.ts", "status": "checked", "reason": "同步运行快照公开类型，不改变其他API字段；已IDEA Reformat。"},
+        {"path": "frontend/src/utils/workspace-owner.ts", "status": "checked", "reason": "统一区分有效正整数任务证据、未知/null与真正create_task，快照空时继续检查pending证据；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用run快照、pending/preflight/arguments、AiContext和现有错误码，无新增依赖、第二套任务状态或存储。"},
+        "java-api-style": {"status": "checked", "reason": "后端及前端生产文件均IDEA Reformat，任务证据正整数校验和可空处理明确，控制分支显式大括号，未新增数据库访问。"},
+        "logging-exception-safety": {"status": "checked", "reason": "证据异常和冲突使用稳定业务码，合并/保存失败保留原WARN回退，不把未知归属包装成功或继续合并。"},
+        "toc-interaction": {"status": "checked", "reason": "跨任务请求以通用返回原任务提示拒绝，无技术话术、额外卡片或静默失败，同任务操作不变。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "快照与entry同值才合并，创建null单列，证据读取异常零保存零决策；前端不附带未知归属，后端权威拒绝防绕过，未新增AI数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "任务证据按JSON结构解析，不按文案/contains识别，不改变SSE、正文或编码语义。"},
+        "verification-review": {"status": "checked", "reason": "agent-1290最终复审无Critical/Important；施工报告A/B/null/冲突/畸形证据/读取失败/保存失败等独立单点通过，362生产源编译和3283模块build成功；主控未重跑测试，真实HTTP/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。"}
+      }
     }
   ]
 }

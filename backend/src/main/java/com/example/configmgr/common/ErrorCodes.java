@@ -345,6 +345,11 @@ public final class ErrorCodes {
      * 409：任务已终态（不可再改）。
      */
     public static final String TASK_FINALIZED = "TASK_FINALIZED";
+
+    /**
+     * 409：挂起请求携带的工作区任务与 run 原任务不一致。
+     */
+    public static final String TASK_CONTEXT_MISMATCH = "TASK_CONTEXT_MISMATCH";
     /**
      * 409：条件删除声明的作业集合已与当前任务不一致。
      */

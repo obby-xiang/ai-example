@@ -130,48 +130,131 @@ class AiControllerWorkspaceContextTest {
 		verify(this.runStore, never()).save(any(RunSnapshot.class));
 	}
 
-	// ── 页面切换必须解除旧任务绑定 ─────────────────────────────────────────────
+	// ── 原任务非空时，其它任务的挂起上下文不得合并或提交 ─────────────────────
 
-	/**
-	 * 现行 {@code mergeWorkspaceFacts} 契约：{@code page=tasks / taskId=null} 表示用户已离开旧任务，
-	 * 换任务必须覆盖旧 run 快照并清 {@code taskSlots}/{@code importMode}，避免续跑继续操作旧任务；
-	 * 当前页面事实（pageId/selectedDefs/selectionSynced）按客户端更新。
-	 */
 	@Test
-	void pageSwitchToTasksClearsTaskBindingAndTaskScopedFacts() throws Exception {
+	void confirmRejectsOtherTaskContextWithoutMergingOrDecision() throws Exception {
 		RunSnapshot snapshot = suspendedSnapshot();
 		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
 				serverExtra()).toMap());
 		when(this.runStore.get(RUN)).thenReturn(snapshot);
 		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
 		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
-		when(this.runStore.instanceId()).thenReturn("inst-a");
 		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
 
-		Map<String, Object> extra = new LinkedHashMap<>();
-		extra.put("pageId", "tasks");
-		extra.put("selectedDefs", List.of());
-		extra.put("selectionSynced", false);
-		AiChatRequest.Context switched = new AiChatRequest.Context("tasks", null, null, null, null, extra);
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, otherTaskContext()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"))
+			.andExpect(jsonPath("$.message").value("The task has changed. Return to the original task and try again."));
+
+		assertThat(AiContext.fromMap(snapshot.getContext()).getTaskId()).isEqualTo(42L);
+		assertThat(AiContext.fromMap(snapshot.getContext()).getExtra().get("selectedDefs"))
+			.isEqualTo(List.of("CURRENCY"));
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
+	}
+
+	@Test
+	void frontendToolResultRejectsOtherTaskContextWithoutMergingOrDecision() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE",
+				serverExtra()).toMap());
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_FRONTEND);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any(), any(), any()))
+			.thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/frontend-tool-result").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new FrontendToolResultRequest(RUN, CALL, "ok", null,
+					false, null, null, null, otherTaskContext()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitFrontendResult(eq(RUN), eq(CALL), eq("ok"), any(), eq(false), any(), any(), any());
+	}
+
+	@Test
+	void taskListContextIsAlsoRejectedWhenOriginalTaskExists() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+		AiChatRequest.Context switched = new AiChatRequest.Context("tasks", null, null, null, null,
+				Map.of("pageId", "tasks", "selectedDefs", List.of(), "selectionSynced", false));
 
 		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
 			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, switched))))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.accepted").value(true));
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
 
-		AiContext stored = AiContext.fromMap(snapshot.getContext());
-		assertThat(stored.getPage()).isEqualTo("tasks");
-		assertThat(stored.getStep()).as("page=tasks 没有导出步骤").isNull();
-		assertThat(stored.getTaskId()).as("解除绑定：旧 taskId 不得保留").isNull();
-		assertThat(stored.getTaskType()).as("旧任务类型随绑定一起作废").isNull();
-		assertThat(stored.getTaskStatus()).as("旧任务状态随绑定一起作废").isNull();
-		assertThat(stored.getExtra()).as("旧任务槽位必须清空").doesNotContainKey(TaskSlots.EXTRA_KEY);
-		assertThat(stored.getExtra()).as("旧 importMode 是旧任务预检输入，必须清空")
-			.doesNotContainKey("importMode");
-		assertThat(stored.getExtra().get("pageId")).isEqualTo("tasks");
-		assertThat(stored.getExtra().get("selectedDefs")).isEqualTo(List.of());
-		assertThat(stored.getExtra().get("selectionSynced")).isEqualTo(false);
+		assertThat(AiContext.fromMap(snapshot.getContext()).getTaskId()).isEqualTo(42L);
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
+	}
+
+	@Test
+	void nullSnapshotDoesNotHidePendingTaskEvidenceWhenRequestTargetsAnotherTask() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", null, null,
+				Map.of("pageId", "export", "selectedDefs", List.of("CURRENCY"))).toMap());
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		pending.setArguments("{\"taskId\":42}");
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, otherTaskContext()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
+
+		assertThat(AiContext.fromMap(snapshot.getContext()).getTaskId()).isNull();
+		assertThat(AiContext.fromMap(snapshot.getContext()).getExtra().get("selectedDefs"))
+			.isEqualTo(List.of("CURRENCY"));
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
+	}
+
+	@Test
+	void nullSnapshotWithPendingSameTaskEvidenceAllowsWorkspaceMerge() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", null, null,
+				Map.of("pageId", "export")).toMap());
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		pending.setArguments("{\"taskId\":42}");
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isOk());
+
+		assertThat(AiContext.fromMap(snapshot.getContext()).getTaskId()).isEqualTo(42L);
 		verify(this.runStore).save(snapshot);
+	}
+
+	@Test
+	void nullSnapshotWithoutTaskOrCreateEvidenceFailsClosed() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		snapshot.setContext(AiContext.of("export", "EXPORT", "SELECT_DEFS", null, null,
+				Map.of("pageId", "export")).toMap());
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, otherTaskContext()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
 	}
 
 	/** 相邻：快照原本没有任务绑定 ⇒ 允许采纳客户端任务绑定（新建任务后的首个确认）。 */
@@ -182,6 +265,7 @@ class AiControllerWorkspaceContextTest {
 				Map.of("pageId", "export")).toMap());
 		when(this.runStore.get(RUN)).thenReturn(snapshot);
 		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		pending.setName("create_task");
 		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
 		when(this.runStore.instanceId()).thenReturn("inst-a");
 		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
@@ -277,6 +361,113 @@ class AiControllerWorkspaceContextTest {
 		verify(this.runStore, never()).save(any(RunSnapshot.class));
 	}
 
+	@Test
+	void snapshotAndPendingTaskConflictRejectsEvenWhenRequestMatchesPending() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		pending.setArguments("{\"taskId\":7}");
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, otherTaskContext()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
+	}
+
+	@Test
+	void malformedPendingArgumentsRejectInsteadOfFallingBackToSnapshot() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		pending.setArguments("{bad");
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
+	}
+
+	@Test
+	void malformedSnapshotTaskIdRejectsWithoutDecision() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		Map<String, Object> malformed = new LinkedHashMap<>(snapshot.getContext());
+		malformed.put("taskId", "not-a-number");
+		snapshot.setContext(malformed);
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
+	}
+
+	@Test
+	void snapshotReadFailureRejectsWithoutDecision() throws Exception {
+		when(this.runStore.get(RUN)).thenThrow(new IllegalStateException("snapshot read failed"));
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.code").value("TASK_CONTEXT_MISMATCH"));
+
+		verify(this.runStore, never()).save(any(RunSnapshot.class));
+		verify(this.gate, never()).submitDecision(eq(RUN), eq(CALL), eq(true), any());
+	}
+
+	@Test
+	void snapshotAndPendingSameTaskEvidenceAllowsWorkspaceMerge() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		pending.setArguments("{\"taskId\":42}");
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.accepted").value(true));
+
+		verify(this.runStore).save(snapshot);
+		verify(this.gate).submitDecision(RUN, CALL, true, null);
+	}
+
+	@Test
+	void snapshotSaveFailureStillAllowsDecision() throws Exception {
+		RunSnapshot snapshot = suspendedSnapshot();
+		when(this.runStore.get(RUN)).thenReturn(snapshot);
+		PendingToolCall pending = pending(PendingToolCall.KIND_CONFIRM);
+		when(this.runStore.pendingLenient(RUN, CALL)).thenReturn(pending);
+		when(this.gate.submitDecision(RUN, CALL, true, null)).thenReturn(accepted(pending));
+		org.mockito.Mockito.doThrow(new IllegalStateException("snapshot save failed")).when(this.runStore).save(snapshot);
+
+		mockMvc.perform(post("/api/ai/confirm").contentType(MediaType.APPLICATION_JSON)
+			.content(this.mapper.writeValueAsString(new ConfirmRequest(RUN, CALL, true, null, context()))))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.accepted").value(true));
+
+		verify(this.gate).submitDecision(RUN, CALL, true, null);
+	}
+
 	// ── 夹具 ────────────────────────────────────────────────────────────────
 
 	private static AiChatRequest.Context context() {
@@ -287,6 +478,11 @@ class AiControllerWorkspaceContextTest {
 		// 客户端不可能伪造服务端槽位：闸门按白名单丢弃，页面事实不得被它压掉
 		extra.put("taskSlots", Map.of("defCodes", List.of("STALE")));
 		return new AiChatRequest.Context("export", "EXPORT", "QUERY_COND", 42L, "ACTIVE", extra);
+	}
+
+	private static AiChatRequest.Context otherTaskContext() {
+		return new AiChatRequest.Context("import", "IMPORT", "PRECHECK", 7L, "ACTIVE",
+				Map.of("pageId", "import", "selectedDefs", List.of("OTHER"), "selectionSynced", false));
 	}
 
 	private static Map<String, Object> serverExtra() {

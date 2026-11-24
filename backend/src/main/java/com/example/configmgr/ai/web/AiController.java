@@ -49,6 +49,7 @@ import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.FrontendToolGuard;
 import com.example.configmgr.ai.tool.SheetAudit;
 import com.example.configmgr.ai.tool.SheetSwitches;
@@ -826,27 +827,50 @@ public class AiController {
      *     {@code status=PENDING}、kind 完全匹配（缺失即 409，不放行）、
      *     且快照状态为 {@code SUSPENDED}。未知/错 kind/DUPLICATE/RUNNING/终态一律<b>不写</b>
      *     —— 入口拒绝必须保持零副作用，也不能给在跑轮换上下文（整对象写、后写者赢）。</li>
-     * <li><b>失败只 WARN</b>：页面事实是"让续跑更准"的增强，不是决策/授权面 —— 写失败不得让
+     * <li><b>任务不一致先拒绝</b>：快照与 entry 证据必须同值，且原任务与请求任务必须一致，否则返回
+     *     {@code TASK_CONTEXT_MISMATCH}；只有 create_task 可在两者都为空时按创建前处理，其它无证据场景失败关闭。</li>
+     * <li><b>证据读取失败关闭</b>：快照读取、上下文或 entry 证据解析异常同样返回
+     *     {@code TASK_CONTEXT_MISMATCH}，不得带着未知任务绑定继续决策。</li>
+     * <li><b>写回失败只 WARN</b>：页面事实是"让续跑更准"的增强，不是决策/授权面 —— 合并或保存失败不得让
      *     用户的确认走不通（续跑会退回旧上下文，与改造前同形）；不新增 HITL、不自动重发。</li>
      * </ul>
      */
-    private void applyWorkspaceContext(String runId, AiChatRequest.Context raw, PendingToolCall entry,
-                                       String expectedKind) {
+    private ResponseEntity<?> applyWorkspaceContext(String runId, AiChatRequest.Context raw, PendingToolCall entry,
+                                                    String expectedKind) {
         if (raw == null || entry == null || expectedKind == null
                 || (entry.getKind() != null && !expectedKind.equals(entry.getKind()))
                 || !PendingToolCall.PENDING.equals(entry.getStatus())) {
-            return;
+            return null;
         }
-        AiChatRequest.Context effective = sanitizedWorkspaceContext(raw);
-        if (effective == null || !StringUtils.isNotBlank(effective.page())) {
-            return;
+        AiChatRequest.Context effective;
+        RunSnapshot snapshot;
+        AiContext server;
+        try {
+            effective = sanitizedWorkspaceContext(raw);
+            if (effective == null || !StringUtils.isNotBlank(effective.page())) {
+                return null;
+            }
+            snapshot = this.runStore.get(runId);
+            if (snapshot == null || !RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
+                return null;
+            }
+            server = AiContext.fromMap(snapshot.getContext());
+            Long originalTaskId = originalTaskId(server, entry);
+            if (originalTaskId == null && !AiToolNames.CREATE_TASK.equals(entry.getName())
+                    || originalTaskId != null && !originalTaskId.equals(effective.taskId())) {
+                deny(HttpStatus.CONFLICT, ErrorCodes.TASK_CONTEXT_MISMATCH, null, runId,
+                        "reason", "workspace_task_mismatch");
+                return json(HttpStatus.CONFLICT, errorBody(ErrorCodes.TASK_CONTEXT_MISMATCH,
+                        "当前任务已切换，请返回原任务后再处理"));
+            }
+        } catch (RuntimeException ex) {
+            deny(HttpStatus.CONFLICT, ErrorCodes.TASK_CONTEXT_MISMATCH, null, runId,
+                    "reason", "workspace_context_validation_failed");
+            return json(HttpStatus.CONFLICT, errorBody(ErrorCodes.TASK_CONTEXT_MISMATCH,
+                    "当前任务已切换，请返回原任务后再处理"));
         }
         try {
-            RunSnapshot snapshot = this.runStore.get(runId);
-            if (snapshot == null || !RunSnapshot.SUSPENDED.equals(snapshot.getStatus())) {
-                return;
-            }
-            AiContext merged = mergeWorkspaceFacts(AiContext.fromMap(snapshot.getContext()), effective);
+            AiContext merged = mergeWorkspaceFacts(server, effective);
             snapshot.setContext(merged.toMap());
             this.runStore.save(snapshot);
             log.info("workspace context written back to snapshot during suspension runId={} page={} taskId={} step={}", runId,
@@ -857,6 +881,68 @@ public class AiController {
                         runId, ex);
             }
         }
+        return null;
+    }
+
+    private Long originalTaskId(AiContext server, PendingToolCall entry) {
+        Long snapshotTaskId = server.getTaskId();
+        Long entryTaskId = pendingTaskId(entry);
+        if (snapshotTaskId != null && entryTaskId != null && !snapshotTaskId.equals(entryTaskId)) {
+            throw new IllegalStateException("snapshot and pending tool task evidence differ");
+        }
+        return snapshotTaskId != null ? snapshotTaskId : entryTaskId;
+    }
+
+    private Long pendingTaskId(PendingToolCall entry) {
+        if (entry.getDraftTaskId() != null) {
+            return entry.getDraftTaskId();
+        }
+        Long preflightTaskId = preflightTaskId(entry.getPreflight());
+        if (preflightTaskId != null) {
+            return preflightTaskId;
+        }
+        JsonNode arguments;
+        try {
+            arguments = this.objectMapper.readTree(entry.getArguments());
+        } catch (Exception ex) {
+            throw new IllegalStateException("pending tool arguments are not valid JSON", ex);
+        }
+        if (arguments == null || !arguments.isObject()) {
+            throw new IllegalStateException("pending tool arguments are not a JSON object");
+        }
+        Long taskId = argumentTaskId(arguments, "taskId");
+        return taskId != null ? taskId : argumentTaskId(arguments, "draftTaskId");
+    }
+
+    private static Long argumentTaskId(JsonNode arguments, String field) {
+        JsonNode value = arguments.get(field);
+        if (value == null) {
+            return null;
+        }
+        long taskId = NumberUtils.toLong(value.asText(), -1L);
+        if ((!value.isNumber() && !value.isTextual()) || taskId <= 0L) {
+            throw new IllegalStateException("pending tool " + field + " is not a positive integer");
+        }
+        return taskId;
+    }
+
+    private static Long preflightTaskId(Map<String, Object> preflight) {
+        Object targetValue = preflight.get("target");
+        if (targetValue == null) {
+            return null;
+        }
+        if (!(targetValue instanceof Map<?, ?> target)) {
+            throw new IllegalStateException("pending tool preflight target is not an object");
+        }
+        Object raw = target.get("taskId");
+        if (raw == null) {
+            return null;
+        }
+        long taskId = NumberUtils.toLong(String.valueOf(raw), -1L);
+        if (taskId <= 0L) {
+            throw new IllegalStateException("pending tool preflight taskId is not a positive integer");
+        }
+        return taskId;
     }
 
     /**
@@ -928,7 +1014,11 @@ public class AiController {
             return json(HttpStatus.CONFLICT, toolKindMismatch(request.runId(), request.toolCallId(), wrongKind,
                     PendingToolCall.KIND_CONFIRM));
         }
-        applyWorkspaceContext(request.runId(), request.context(), entry, PendingToolCall.KIND_CONFIRM);
+        ResponseEntity<?> contextRejection = applyWorkspaceContext(request.runId(), request.context(), entry,
+                PendingToolCall.KIND_CONFIRM);
+        if (contextRejection != null) {
+            return contextRejection;
+        }
         boolean approved = Boolean.TRUE.equals(request.approved());
         ConfirmGate.Submission submission = submitConfirmation(request, approved, confirmationReason.reason());
         ResponseEntity<?> rejection = confirmationRejection(request, submission);
@@ -1020,7 +1110,11 @@ public class AiController {
         if (payload.rejection() != null) {
             return payload.rejection();
         }
-        applyWorkspaceContext(request.runId(), request.context(), entry, PendingToolCall.KIND_FRONTEND);
+        ResponseEntity<?> contextRejection = applyWorkspaceContext(request.runId(), request.context(), entry,
+                PendingToolCall.KIND_FRONTEND);
+        if (contextRejection != null) {
+            return contextRejection;
+        }
         ConfirmGate.Submission submission = submitFrontendResult(request, payload.result(), cancelled);
         ResponseEntity<?> rejection = frontendResultRejection(request, submission);
         return rejection != null ? rejection : frontendResultResponse(request, submission, payload, cancelled);
@@ -2019,7 +2113,9 @@ public class AiController {
         body.put("recoverable", readable && !gap ? "complete" : "partial");
     }
 
-    /** 当前会话、当前任务的条件草案只读投影；不读取展示历史或推断活动 run。 */
+    /**
+     * 当前会话、当前任务的条件草案只读投影；不读取展示历史或推断活动 run。
+     */
     @GetMapping("/condition-drafts")
     public ResponseEntity<?> conditionDrafts(@RequestParam(required = false) String sessionId,
                                              @RequestParam(required = false) Long taskId) {
@@ -2082,6 +2178,7 @@ public class AiController {
         body.put("found", true);
         body.put("runId", runId);
         body.put("snapshotStatus", snapshot.getStatus());
+        body.put("context", snapshot.getContext());
         this.runStore.touchActiveRun(snapshot);
         this.confirmGate.touchSuspendedResources(runId);
         Long snapshotRemainingMs = this.runStore.runKeyTtlRemainingMs(runId);
@@ -2632,7 +2729,9 @@ public class AiController {
         return out.isEmpty() ? List.of() : out;
     }
 
-    /** 历史摘要只读信封里的机器码与结构化目标；非信封保持空事实。 */
+    /**
+     * 历史摘要只读信封里的机器码与结构化目标；非信封保持空事实。
+     */
     private EnvelopeDisplayFacts envelopeDisplayFacts(String responseData) {
         String json = ToolResultEnvelope.unwrapModelJson(responseData);
         if (!StringUtils.startsWith(StringUtils.trim(json), "{")) {

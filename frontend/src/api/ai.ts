@@ -14,6 +14,7 @@ import { getActivePinia } from 'pinia'
 import { useWorkspaceStore } from '@/stores/workspace'
 import type { TenantUsersEntry } from '@/utils/ai-identity'
 import { normalizeSessionId } from '@/utils/ai-identity'
+import type { WorkspaceOwnerEvidence } from '@/utils/workspace-owner'
 import type {
   AiCancelResult,
   AiChatContext,
@@ -52,11 +53,14 @@ export function reattachRun(
 /**
  * POST /api/ai/confirm（HITL 放行/拒绝；重复 toolCallId → 409 DUPLICATE_TOOL_CALL_ID）。
  *
- * <p>`config` 只用于**显式身份头**：axios 拦截器在微任务里才跑，点击后立刻切身份时它读到的已是
- * 新身份 —— 调用方须把点击时捕获的身份放进 `headers`（与 `cancel` 同口径；拦截器只补缺省、不覆盖）。
+ * <p>`config` 用于显式身份头与挂起归属证据：身份头避免切身份后误发；归属证据决定能否附带当前工作区。
  */
-export function confirm(request: ConfirmRequest, config?: AxiosRequestConfig): Promise<ConfirmResult> {
-  return post<ConfirmResult>('/ai/confirm', withWorkspaceContext(request), config)
+interface WorkspaceRequestConfig extends AxiosRequestConfig {
+  workspaceOwnerEvidence?: WorkspaceOwnerEvidence
+}
+
+export function confirm(request: ConfirmRequest, config?: WorkspaceRequestConfig): Promise<ConfirmResult> {
+  return post<ConfirmResult>('/ai/confirm', withWorkspaceContext(request, config?.workspaceOwnerEvidence), config)
 }
 
 /**
@@ -66,28 +70,21 @@ export function confirm(request: ConfirmRequest, config?: AxiosRequestConfig): P
  */
 export function frontendToolResult(
   request: FrontendToolResultRequest,
-  config?: AxiosRequestConfig
+  config?: WorkspaceRequestConfig
 ): Promise<FrontendToolResultAck> {
-  return post<FrontendToolResultAck>('/ai/frontend-tool-result', withWorkspaceContext(request), config)
+  return post<FrontendToolResultAck>('/ai/frontend-tool-result',
+    withWorkspaceContext(request, config?.workspaceOwnerEvidence), config)
 }
 
 /**
- * HITL 写入口附带<b>最新工作区上下文</b>（可选字段）。
- *
- * 为什么在 api 层拼而不是让每个调用方传：挂起期间用户可能已在向导里改了步骤/勾选/任务详情，
- * 而续跑只读快照 —— 后端 `/confirm`、`/frontend-tool-result` 是决策落地前唯一能拿到"用户此刻
- * 看到的页面"的写入口。没有活动 store（单测/非应用环境）时不带，行为与改造前一致。
- *
- * <b>部署顺序：后端先上。</b>后端 MVC 的 {@code ObjectMapper} 是 `JacksonConfig` 里的裸
- * `new ObjectMapper()`（`FAIL_ON_UNKNOWN_PROPERTIES=true`），旧后端收到未知的 `context` 会 400；
- * 反向（新后端 + 旧前端）安全 —— 字段可选，缺省即不写快照。
- *
- * 返回值刻意用 {@code object} 拓宽：请求类型不新增字段（旧调用方零影响），只多一个 additive 键
- * {@code context}。
+ * 只有挂起归属可证明时才附带当前工作区；明确跨任务或证据缺失均不附带，由后端做最终校验。
  */
-function withWorkspaceContext<T extends object>(request: T): T {
+function withWorkspaceContext<T extends object>(request: T, evidence?: WorkspaceOwnerEvidence): T {
+  if (evidence?.known !== true) {
+    return request
+  }
   const context = currentWorkspaceContext()
-  if (!context) {
+  if (!context || evidence.taskId !== null && evidence.taskId !== context.taskId) {
     return request
   }
   return { ...request, context } as T
