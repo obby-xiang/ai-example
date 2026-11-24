@@ -702,6 +702,8 @@ interface TaskLoadOutcome {
   filesOk: boolean
 }
 
+let inFlightTaskLoad: { generation: number; taskId: number; promise: Promise<TaskLoadOutcome> } | null = null
+
 function restoreExportTaskState(loaded: Task): void {
   clearExactRowCounts()
   task.value = loaded
@@ -806,7 +808,7 @@ async function verifyRecoveredConditionDraft(generation: number, forTask: number
   }
 }
 
-async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
+async function runLoadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
   if (taskId.value === null) {
     taskDetailReady.value = false
     return { taskOk: false, filesOk: false }
@@ -848,6 +850,27 @@ async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
     return { taskOk: false, filesOk: false }
   }
   return { taskOk: true, filesOk: await canLoadExistingResults() }
+}
+
+async function loadTask(preloaded?: Task): Promise<TaskLoadOutcome> {
+  const generation = taskGeneration
+  const forTask = taskId.value
+  if (forTask === null) {
+    return await runLoadTask(preloaded)
+  }
+  const inFlight = inFlightTaskLoad
+  if (inFlight?.generation === generation && inFlight.taskId === forTask) {
+    return await inFlight.promise
+  }
+  const promise = runLoadTask(preloaded)
+  inFlightTaskLoad = { generation, taskId: forTask, promise }
+  try {
+    return await promise
+  } finally {
+    if (inFlightTaskLoad?.promise === promise) {
+      inFlightTaskLoad = null
+    }
+  }
 }
 
 /**
@@ -1124,6 +1147,8 @@ interface StepAdvanceOutcome {
   ok: boolean
   /** persistStepData 失败 ⇒ 阻断推进的原因 */
   reason?: string
+  /** persistStepData 失败 ⇒ 阻断推进的用户界面文案 */
+  displayReason?: string
   /** syncStepToBackend 失败 ⇒ 不阻断，调用方须把该中文警告带进模型回灌 */
   syncWarning?: string
 }
@@ -1147,7 +1172,11 @@ async function goStep(next: number, guard?: () => boolean): Promise<StepAdvanceO
     return { ok: false, reason: '任务已切换，本次未推进步骤' }
   }
   if (!persisted.ok) {
-    return { ok: false, reason: persisted.reason ?? '保存选择与条件失败' }
+    return {
+      ok: false,
+      reason: persisted.reason ?? '保存选择与条件失败',
+      displayReason: persisted.displayReason
+    }
   }
   if (guard?.() === true) {
     return { ok: false, reason: '前端工具预算已到点或本轮已停止：步骤未推进（工作区与页面步骤均未改动）' }
@@ -1223,13 +1252,27 @@ async function syncStepToBackend(
   }
 }
 
-function nextStep(): void {
+async function nextStep(): Promise<void> {
+  if (!taskDetailReady.value && taskId.value !== null) {
+    const generation = taskGeneration
+    const loaded = await loadTask()
+    if (generation !== taskGeneration) {
+      ElMessage.warning(t('views.export.msg.saveAborted'))
+      return
+    }
+    if (!loaded.taskOk || !taskDetailReady.value) {
+      ElMessage.warning(t('views.export.msg.taskLoadFailed'))
+      return
+    }
+  }
   if (stepIndex.value === 0 && selectedDefs.value.length === 0) {
     ElMessage.warning(t('views.export.msg.pickAtLeastOne'))
     return
   }
-  // 批3③a D7：goStep 永不 reject，结局由回灌/界面消费
-  void goStep(stepIndex.value + 1)
+  const outcome = await goStep(stepIndex.value + 1)
+  if (!outcome.ok) {
+    ElMessage.warning(outcome.displayReason ?? outcome.reason ?? t('api.error.safeUnknown'))
+  }
 }
 
 /**

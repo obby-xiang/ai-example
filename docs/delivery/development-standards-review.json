@@ -7488,6 +7488,37 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "按完整段和结构化calls对账，不按字节、文案或工具名截断，当前迟到reasoning与其他reasoning隔离规则保留。"},
         "verification-review": {"status": "checked", "reason": "agent-1291最终复核Critical/Important/Minor均为零；施工报告R5及10个相关边界/协议对照独立通过、362生产源编译成功；主控未重跑测试，真实模型/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:dc1ae57f3375a110bee020e7fd43074971dcd256f5b01105da893b0a28869d9f",
+      "status": "reviewed",
+      "reason": "逐hunk复核下一步失败可见、失败状态真实恢复、同代次单飞恢复和条件一致性；独立静态复审无分级问题。",
+      "reviewedAt": "2026-11-24T20:05:58+08:00",
+      "reviewer": "K3.1 Pro主会话静态复核、独立审查agent-1296、施工agent-1297",
+      "specChanges": [
+        {
+          "change": "nextStep等待并消费goStep失败，使用已有displayReason/reason安全提示；taskDetailReady=false时先复用loadTask恢复，成功后再推进。",
+          "reason": "原void调用使早期恢复/复核失败只表现为无反应，连续点击也只重复提示而没有真实重试。",
+          "impact": "失败可见且可重试，代次变化或恢复失败保持零未知写，提交前独立条件复核不放宽。"
+        },
+        {
+          "change": "loadTask按taskGeneration+taskId共享同一在途Promise，挂载、绑定和下一步重试均复用，finally按Promise身份清理。",
+          "reason": "初次加载与手动重试可并行完成，旧响应可能覆盖新恢复的详情和条件草案。",
+          "impact": "同代次不再并行恢复，旧响应不能覆盖新草案；恢复返回结构和提交前独立verifyRecoveredConditionDraft不变。"
+        }
+      ],
+      "files": [
+        {"path": "frontend/src/views/ExportWizardView.vue", "status": "checked", "reason": "增加StepAdvanceOutcome.displayReason、失败恢复与单飞loadTask包装，保留既有校验、提示和步骤语义；已IDEA Reformat。"}
+      ],
+      "domains": {
+        "dependency-reuse": {"status": "checked", "reason": "复用现有loadTask/goStep/ElMessage和条件复核，无新增依赖、提示组件或第二套恢复状态。"},
+        "java-api-style": {"status": "checked", "reason": "TypeScript控制分支显式大括号，Promise按身份清理，TaskLoadOutcome结构不变；已IDEA Reformat。"},
+        "logging-exception-safety": {"status": "checked", "reason": "失败继续使用现有安全displayReason/reason，不返回内部异常，恢复失败和代次变化不包装成功。"},
+        "toc-interaction": {"status": "checked", "reason": "失败可见且可重试，成功路径不新增提示，AJAX结果通过现有ElMessage可感知，不改变用户步骤心智。"},
+        "protocol-redis-concurrency": {"status": "checked", "reason": "同代次单飞消除旧响应覆盖，任务代次隔离保持，条件一致性和零未知写不变，未新增数据库访问。"},
+        "unicode-stream-parsing": {"status": "checked", "reason": "不涉及文本解码或流解析，未改变草案内容或错误文案编码。"},
+        "verification-review": {"status": "checked", "reason": "agent-1296最终复核Critical/Important/Minor均为零；施工报告恢复/乱序/代次及既有串行用例独立通过，typecheck和3282模块build成功；主控未重跑测试，真实浏览器/Redis/Cluster/多实例和全量套件NOT_RUN，两个旧断言已逐条证明同基线同红。"}
+      }
     }
   ]
 }

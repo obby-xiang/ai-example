@@ -12,12 +12,16 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
+import type { VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ElMessage } from 'element-plus'
 import ExportWizardView from '@/views/ExportWizardView.vue'
 import { executeFrontendTool } from '@/utils/frontend-tools'
 import { PAGE_HANDLER_OPEN_EXPORT_EDITOR } from '@/utils/frontend-tools'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { getPageHandler, useWorkspaceStore } from '@/stores/workspace'
+import { useAiStore } from '@/stores/ai'
+
+const routeHolder = vi.hoisted(() => ({ route: null as unknown as { query: { taskId: string } } }))
 
 const api = vi.hoisted(() => ({
   getTask: vi.fn(),
@@ -29,15 +33,18 @@ const api = vi.hoisted(() => ({
   listJobs: vi.fn(),
   getIssues: vi.fn(),
   listDefinitions: vi.fn(),
+  conditionDrafts: vi.fn(),
   saveBlob: vi.fn(),
   downloadBlob: vi.fn()
 }))
 
 vi.mock('vue-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('vue-router')>()
+  const { reactive } = await import('vue')
+  routeHolder.route = reactive({ query: { taskId: '7' } })
   return {
     ...actual,
-    useRoute: () => ({ query: { taskId: '7' } }),
+    useRoute: () => routeHolder.route,
     useRouter: () => ({ push: vi.fn(), replace: vi.fn() })
   }
 })
@@ -64,6 +71,7 @@ vi.mock('@/components/TaskWizard.vue', async () => {
 vi.mock('@/api/tasks', () => ({ tasksApi: api }))
 vi.mock('@/api/jobs', () => ({ jobsApi: { listJobs: api.listJobs, getIssues: api.getIssues } }))
 vi.mock('@/api/definitions', () => ({ definitionsApi: { listDefinitions: api.listDefinitions } }))
+vi.mock('@/api/ai', () => ({ aiApi: { conditionDrafts: api.conditionDrafts } }))
 vi.mock('@/api/http', async (importOriginal) => ({
   ...(await importOriginal<object>()) as object,
   saveBlob: api.saveBlob
@@ -94,14 +102,54 @@ const DEFS = [
   }
 ]
 
-async function mountWizard(): Promise<void> {
-  shallowMount(ExportWizardView, { global: { plugins: [createPinia()] } })
+function selectedTask() {
+  return { ...TASK_7, items: [{ defCode: 'DEMO', conditionJson: null }] }
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+function draft(conditions: unknown, fingerprint: string) {
+  return { complete: true, fingerprint, items: [{ defCode: 'DEMO', conditions }] }
+}
+
+function conditionWrites(): unknown[] {
+  return api.setCondition.mock.calls.map((call) => {
+    const raw = call[2]
+    return typeof raw === 'string' ? JSON.parse(raw) : raw
+  })
+}
+
+const mounted: ReturnType<typeof shallowMount>[] = []
+
+async function mountWizard(sessionId = ''): Promise<VueWrapper> {
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  useAiStore().sessionId = sessionId
+  const wrapper = shallowMount(ExportWizardView, { global: { plugins: [pinia] } })
+  mounted.push(wrapper)
   await flushPromises()
+  return wrapper
+}
+
+async function clickNext(wrapper: VueWrapper): Promise<void> {
+  wrapper.findComponent({ name: 'TaskWizard' }).vm.$emit('next')
+  await flushPromises()
+}
+
+async function selectDemo(): Promise<void> {
+  await getPageHandler('export.selectDefs')?.({ defCodes: ['DEMO'] })
 }
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  vi.clearAllMocks()
+  routeHolder.route.query.taskId = '7'
+  vi.resetAllMocks()
   api.getTask.mockResolvedValue(TASK_7)
   api.getFiles.mockResolvedValue([])
   api.selectDefs.mockResolvedValue({})
@@ -111,10 +159,173 @@ beforeEach(() => {
   api.listJobs.mockResolvedValue([])
   api.getIssues.mockResolvedValue({ content: [] })
   api.listDefinitions.mockResolvedValue(DEFS)
+  api.conditionDrafts.mockResolvedValue({ complete: true, items: [], fingerprint: 'fp-initial' })
 })
 
 afterEach(() => {
-  // 组件 onBeforeUnmount 会自注销 handler；卸载保险由下个用例重新挂载覆盖
+  for (const wrapper of mounted.splice(0)) {
+    wrapper.unmount()
+  }
+})
+
+describe('用户点击下一步：恢复与复核失败必须可见且可重试', () => {
+  const retryMessage = '任务未能加载，当前页面内容保留。请重试。'
+
+  it('挂载恢复在途时点击共享同一恢复，迟到旧恢复不得覆盖并保存旧草案', async () => {
+    const oldCondition = { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'OLD' }] }
+    const newCondition = { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'NEW' }] }
+    const initial = deferred<ReturnType<typeof selectedTask>>()
+    api.getTask.mockReturnValueOnce(initial.promise).mockResolvedValue(selectedTask())
+    api.conditionDrafts
+      .mockResolvedValueOnce(draft(newCondition, 'fp-new'))
+      .mockResolvedValueOnce(draft(newCondition, 'fp-new'))
+      .mockResolvedValueOnce(draft(oldCondition, 'fp-old'))
+      .mockResolvedValue(draft(oldCondition, 'fp-old'))
+    const wrapper = await mountWizard('session-test')
+    await selectDemo()
+
+    await clickNext(wrapper)
+    initial.resolve(selectedTask())
+    await flushPromises()
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+
+    await clickNext(wrapper)
+
+    expect(conditionWrites()).toEqual([newCondition])
+    expect(api.conditionDrafts).toHaveBeenCalledTimes(3)
+    expect(api.getTask).toHaveBeenCalledTimes(2)
+  })
+
+  it('迟到的上一代恢复不得覆盖或写入新任务', async () => {
+    const initial = deferred<ReturnType<typeof selectedTask>>()
+    api.getTask.mockImplementation((id: number) => id === 7
+      ? initial.promise
+      : Promise.resolve({ ...selectedTask(), id }))
+    api.conditionDrafts.mockImplementation(() => Promise.resolve(draft(
+      { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'TASK-8' }] },
+      'fp-task-8'
+    )))
+    const wrapper = await mountWizard('session-test')
+    await selectDemo()
+    routeHolder.route.query.taskId = '8'
+    await flushPromises()
+
+    await clickNext(wrapper)
+    initial.resolve({ ...selectedTask(), id: 7 })
+    await flushPromises()
+
+    expect(api.selectDefs.mock.calls.every((call) => call[0] === 8)).toBe(true)
+    expect(api.setCondition.mock.calls.every((call) => call[0] === 8)).toBe(true)
+    expect(api.conditionDrafts.mock.calls.every((call) => call[1] === 8)).toBe(true)
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+  })
+
+  it('任务读取失败后点击下一步会重新载入，恢复后正常推进', async () => {
+    api.getTask.mockRejectedValueOnce(new Error('GET /tasks/7 failed')).mockResolvedValue(selectedTask())
+    const wrapper = await mountWizard()
+    await selectDemo()
+
+    await clickNext(wrapper)
+
+    expect(api.getTask).toHaveBeenCalledTimes(3)
+    expect(api.selectDefs).toHaveBeenCalledTimes(1)
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+    expect(api.setCondition).not.toHaveBeenCalled()
+  })
+
+  it('草案读取失败后点击下一步会重新恢复，并在提交前再次复核后推进', async () => {
+    api.getTask.mockResolvedValue(selectedTask())
+    api.conditionDrafts.mockRejectedValueOnce(new Error('draft read failed')).mockResolvedValue({
+      complete: true,
+      items: [],
+      fingerprint: 'fp-recovered'
+    })
+    const wrapper = await mountWizard('session-test')
+
+    await clickNext(wrapper)
+
+    expect(api.conditionDrafts).toHaveBeenCalledTimes(3)
+    expect(api.getTask).toHaveBeenCalledTimes(3)
+    expect(api.selectDefs).toHaveBeenCalledTimes(1)
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+    expect(api.setCondition).not.toHaveBeenCalled()
+  })
+
+  it('草案投影不完整后点击下一步会重新恢复，完整后复核并推进', async () => {
+    api.getTask.mockResolvedValue(selectedTask())
+    api.conditionDrafts.mockResolvedValueOnce({ complete: false, items: [], fingerprint: 'fp-incomplete' }).mockResolvedValue({
+      complete: true,
+      items: [],
+      fingerprint: 'fp-complete'
+    })
+    const wrapper = await mountWizard('session-test')
+
+    await clickNext(wrapper)
+
+    expect(api.conditionDrafts).toHaveBeenCalledTimes(3)
+    expect(api.getTask).toHaveBeenCalledTimes(3)
+    expect(api.selectDefs).toHaveBeenCalledTimes(1)
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+    expect(api.setCondition).not.toHaveBeenCalled()
+  })
+
+  it('taskDetailReady=false 时每次点击都重新载入，第二次恢复成功', async () => {
+    api.getTask.mockRejectedValueOnce(new Error('initial load failed'))
+    const wrapper = await mountWizard()
+    await selectDemo()
+    api.getTask.mockRejectedValueOnce(new Error('first retry failed')).mockResolvedValue(selectedTask())
+
+    await clickNext(wrapper)
+    expect(ElMessage.warning).toHaveBeenCalledWith(retryMessage)
+    expect(api.getTask).toHaveBeenCalledTimes(2)
+    expect(api.selectDefs).not.toHaveBeenCalled()
+
+    await clickNext(wrapper)
+
+    expect(api.getTask).toHaveBeenCalledTimes(4)
+    expect(api.selectDefs).toHaveBeenCalledTimes(1)
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+  })
+
+  it('提交前草案复核失败显示原因且零写，复核恢复后重试成功', async () => {
+    api.getTask.mockResolvedValue(selectedTask())
+    const wrapper = await mountWizard('session-test')
+    api.conditionDrafts.mockResolvedValueOnce({
+      complete: true,
+      fingerprint: 'fp-remote',
+      items: [{ defCode: 'DEMO', conditions: { fields: [{ fieldCode: 'code', operator: 'EQ', value: 'CNY' }] } }]
+    })
+
+    await clickNext(wrapper)
+    expect(ElMessage.warning).toHaveBeenCalledWith(retryMessage)
+    expect(api.selectDefs).not.toHaveBeenCalled()
+    expect(api.setCondition).not.toHaveBeenCalled()
+
+    await clickNext(wrapper)
+    expect(api.conditionDrafts).toHaveBeenCalledTimes(3)
+    expect(api.getTask).toHaveBeenCalledTimes(2)
+    expect(api.selectDefs).toHaveBeenCalledTimes(1)
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+  })
+
+  it('成功路径仍推进', async () => {
+    api.getTask.mockResolvedValue(selectedTask())
+    const wrapper = await mountWizard()
+    await clickNext(wrapper)
+
+    expect(api.selectDefs).toHaveBeenCalledTimes(1)
+    expect(api.goToStep).toHaveBeenCalledTimes(1)
+    expect(ElMessage.warning).not.toHaveBeenCalled()
+  })
+
+  it('空选中原校验仍优先提示', async () => {
+    const wrapper = await mountWizard()
+    await clickNext(wrapper)
+
+    expect(ElMessage.warning).toHaveBeenCalledWith('请先选择至少一个配置项')
+    expect(api.selectDefs).not.toHaveBeenCalled()
+    expect(api.goToStep).not.toHaveBeenCalled()
+  })
 })
 
 describe('批3③a T7①：export.nextStep + persistStepData 失败注入 ⇒ 回灌如实"未推进"（D7 撒谎点本体）', () => {
