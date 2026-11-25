@@ -177,3 +177,15 @@
 
 - 最终复核发现 defaults 与提交值的 `LinkedHashSet` 并集会复活用户取消的默认项并改写顺序。现删除并集，defaults 只初始化控件，合并仅复制已验证的非空字符串提交数组，允许默认 `USD` 被 `[CNY]` 替换且保留 `[CNY,USD]` 的提交顺序。
 - 唯一受影响的 resume 方法按新契约取得 RED→GREEN；GREEN 编译 364 个生产源，生产文件再次 IDEA Reformat。未扩大到取消或其他测试，启动日志和真实模型仍 `NOT_RUN`。
+
+## 当前真实验收结果（2026-11-25，HEAD `b107f8f6`）
+
+本节是当前验收状态，supersede 前文实施期间的启动门禁、真实模型 `NOT_RUN` 和真实对照 `NOT_REPRODUCED` 注记；前文保留为当时历史事实。本节只登记控制器实际证据，不代表修复或验收完成。
+
+- 验收代码点为 `b107f8f618a04bf0ceb7c5088413fc1653eeeac6`。启动门禁已通过：工具定义版本 `2026-10-27.42`，真实模型配置 `deepseek-v4-pro`；后端启动日志无 WARN/ERROR 命中。仓外日志为 `_main-condition-services/backend-structured-refs-b107f8f6.log`。
+- 仓外完整报告为 `_deepseek-export-cny-3rounds-b107f8f6/report.md`。三个独立新会话均逐字输入“导出cny货币字典”，实际结果为 **3/3 FAIL**，不是通过证据。
+- r1：session `1795608587361`，run `4486ffd3-9025-4ea2-9760-287ae8aa6655`；原始 `defCodes=["cny货币字典"]`、`conditions={}`，无创建 HITL，`CREATE_TASK_DETAILS` 挂起。
+- r2：session `1795608663959`，run `0c84df45-0ef3-4be7-95bb-753c4604a4a0`；原始参数、无创建 HITL 和 `CREATE_TASK_DETAILS` 挂起结果与 r1 相同。
+- r3：session `1795608703465`，run `0f5af32e-ab73-44ab-8cb1-1c050062c0f8`；创建 HITL 已出现，pending 为 `defCodes=["CURRENCY"]`、`fieldCode="code"`、`operator="EQ"`，但 `value="cny"` 为小写，未达到 `CNY`，因此仍 FAIL；未批准创建。
+- 三个 run 均为 `SUSPENDED`，三轮均无任务、作业或导出文件；后续 items、启动作业和 XLSX 内容未获得通过证据。history 与工具卡刷新前后一致，未发现 transcript 降级、空回复、卡片丢失或错误“已停止”，但这些观察不改变三轮失败结论。
+- 按首败保留现场，未提交详情卡或创建确认，未继续到 `start_export`。本批仅同步证据，不新增根因推测或修复结论。

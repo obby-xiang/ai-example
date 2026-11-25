@@ -8325,6 +8325,56 @@
           "reason": "唯一受影响方法先RED（[CNY,USD]实际为[USD,CNY]）后GREEN（1 test、0 failures、0 errors），GREEN实际编译364源且最终compile BUILD SUCCESS；取消未变未复跑，套件、服务、真实模型、前端构建均NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:b502f4a32f233996b095d40bac0437af0eccace63890e14e45f259131ac8e311",
+      "status": "reviewed",
+      "reason": "仅追加并核对b107f8f6控制器的真实验收文档证据：启动门禁通过，但三个独立会话均FAIL；逐hunk确认session/run、原始或pending实参、SUSPENDED、无任务/作业/文件和刷新观察与仓外报告一致，历史NOT_RUN保留并由当前节显式supersede。",
+      "reviewedAt": "2026-11-25T20:23:01+08:00",
+      "reviewer": "Kimi Code真实验收证据文档同步上下文静态逐hunk自审（未派遣reviewer）",
+      "specChanges": [],
+      "files": [
+        {
+          "path": "docs/superpowers/plans/2026-11-25-create-task-structured-references.md",
+          "status": "checked",
+          "reason": "Step 2b按控制器日志证据勾选通过，Step 3仅因已执行而勾选并明确3/3 FAIL和验收未通过；追加当前证据节supersede实施期NOT_RUN，未宣称修复。"
+        },
+        {
+          "path": "docs/superpowers/specs/2026-11-25-create-task-structured-references-design.md",
+          "status": "checked",
+          "reason": "追加b107f8f6完整代码点、.42/deepseek-v4-pro启动门禁、三轮首败及无task/job/file和transcript观察，明确失败证据不改变为通过或完成结论。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批只编辑两份既有Markdown验收记录，没有生产源码、构建清单或依赖变化。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "未修改Java、注解、JSON或集合代码，文档中的参数仅作控制器证据引述。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "未修改日志或异常实现；仅记录指定后端启动日志无WARN/ERROR命中，不扩展到未检查时段。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "未修改前端、用户文案或卡片；history和工具卡一致性仅为仓外验收报告的事实摘要。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "未修改pending、HITL、Redis、数据库或状态机；SUSPENDED与pending描述来自已执行验收，不是新的协议行为。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "仅编辑完整Markdown文本，不涉及字节流、SSE解析、代理对或截断逻辑。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "证据来源为控制器b107f8f6报告，启动门禁通过、真实模型3/3 FAIL分别记录；本批未改代码、未运行测试或模型、未启动服务，未新增根因推测，真实失败未包装成PASS。"
+        }
+      }
     }
   ]
 }

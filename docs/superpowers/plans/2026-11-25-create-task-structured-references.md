@@ -158,13 +158,13 @@ mvn -Dtest=CreateTaskDetailsResumeTest#stillAmbiguousSubmissionStopsBeforeCreate
 
 分别执行相关方法级单点；不得批量运行测试类。嵌套 `FieldCondition.fieldCode` 描述必须限定只有 `create_task` 接受精确字段标签或 `null`，其他工具保持字段编码语义。
 
-- [ ] **Step 2b: 启动版本与日志门禁**
+- [x] **Step 2b: 启动版本与日志门禁**
 
-启动后核对实际 `definitionsVersion=2026-10-27.42` 和日志，无 WARN/异常才能进入真实复测。当前为 `NOT_RUN`；Step 2a 的提示同步和方法级 GREEN 不代表本门禁完成。
+启动后核对实际 `definitionsVersion=2026-10-27.42` 和日志，无 WARN/异常才能进入真实复测。控制器已在 `b107f8f6` 完成：版本 `.42`、模型 `deepseek-v4-pro`，后端启动日志无 WARN/ERROR 命中。Step 2a 的提示同步和方法级 GREEN 不是本门禁的替代证据。
 
-- [ ] **Step 3: 真实模型独立复测**
+- [x] **Step 3: 真实模型独立复测（已执行，3/3 FAIL，验收未通过）**
 
-由 DeepSeek 使用内置浏览器，禁止 CU，在三个独立新会话逐字输入“导出cny货币字典”。每轮核对 canonical 创建实参、仅必要 HITL、无配置/条件补卡、任务 items、作业数和实际 XLSX 仅 CNY；刷新后 history/工具卡一致，无 transcript 降级或错误“已停止”。三轮是相互独立场景，不是批量普通测试。
+由 DeepSeek 使用内置浏览器，禁止 CU，在三个独立新会话逐字输入“导出cny货币字典”。每轮核对 canonical 创建实参、仅必要 HITL、无配置/条件补卡、任务 items、作业数和实际 XLSX 仅 CNY；刷新后 history/工具卡一致，无 transcript 降级或错误“已停止”。三轮是相互独立场景，不是批量普通测试。实际结果和证据见下文“真实验收结果”，失败不标记为修复或验收完成。
 
 - [ ] **Step 4: 主控代码复核、规范记录并提交推送**
 
@@ -195,3 +195,14 @@ mvn -Dtest=CreateTaskDetailsResumeTest#stillAmbiguousSubmissionStopsBeforeCreate
 - 纠正 `mergeEnumArray` 将 defaults 置于提交值之前的错误并集：defaults 仍仅作初始 UI 选择，回灌的非空字符串数组是唯一权威完整值，保留提交顺序并允许取消默认项。
 - `CreateTaskDetailsResumeTest#inArraySubmissionResumesWithResolvedElementsIntact` 改为锁定 `[CNY,USD]` 提交顺序及默认 `USD` 被 `[CNY]` 取消；同一方法先 RED（实际 `[USD,CNY]`）后 GREEN（1 test、0 failures、0 errors），GREEN 实际编译 364 个生产源。取消路径未变，未额外运行取消方法。
 - `CreateTaskDetailsForm.java` 已再次 IDEA Reformat 并返回 `ok`。精确输出与后续门禁见 `final-fix-report.md` 的 correction 记录；运行时与真实模型状态不变。
+
+## 真实验收结果（2026-11-25，HEAD `b107f8f6`）
+
+本节 supersede 前文所有实施期 Step 2b/Step 3 `NOT_RUN` 与真实对照 `NOT_REPRODUCED` 注记；历史记录不删改，当前状态以本节为准。勾选 Step 3 仅表示复测已执行，**3/3 FAIL，验收未通过**。
+
+- Step 2b 已通过：代码点 `b107f8f618a04bf0ceb7c5088413fc1653eeeac6`，实际 `definitionsVersion=2026-10-27.42`，模型 `deepseek-v4-pro`；后端启动日志无 WARN/ERROR 命中。日志位于仓外 `_main-condition-services/backend-structured-refs-b107f8f6.log`。
+- 完整证据报告位于仓外 `_deepseek-export-cny-3rounds-b107f8f6/report.md`；三个独立 session 均使用逐字输入“导出cny货币字典”。
+- r1（session `1795608587361` / run `4486ffd3-9025-4ea2-9760-287ae8aa6655`）与 r2（session `1795608663959` / run `0c84df45-0ef3-4be7-95bb-753c4604a4a0`）均为 FAIL：原始 `defCodes=["cny货币字典"]`、`conditions={}`，没有创建 HITL，挂起 `CREATE_TASK_DETAILS`。
+- r3（session `1795608703465` / run `0f5af32e-ab73-44ab-8cb1-1c050062c0f8`）为 FAIL：创建 HITL 已出现，`defCodes=["CURRENCY"]` 且字段为 `code EQ`，但 `value="cny"` 不是要求的 `CNY`；未批准创建。
+- 三个 run 均为 `SUSPENDED`，均无 task/job/file；items、启动和 XLSX 不得记为通过。三轮 history/工具卡刷新一致，无 transcript 降级或错误“已停止”，但不改变失败结论。
+- 本次只记录失败验收证据，未修复、未新增根因推测；后续工作不由该记录宣称完成。
